@@ -46,6 +46,9 @@ endfunction()
 # rvk_core: everything except the DLL entry points (linked into the DLL and the tests)
 # ---------------------------------------------------------------------------------------------
 add_library(rvk_core STATIC
+    include/rvk_api.h
+    src/api/capture.cpp
+    src/api/capture.h
     src/core/config.cpp
     src/core/config.h
     src/core/exports.cpp
@@ -67,6 +70,8 @@ add_library(rvk_core STATIC
     src/d3d9/resources.cpp
     src/engine/symbols.cpp
     src/engine/symbols.h
+    src/engine/vfs.cpp
+    src/engine/vfs.h
     src/fx/effect_binary.cpp
     src/fx/effect_binary.h
     src/hal/api_generated.h
@@ -120,7 +125,7 @@ add_library(rvk_core STATIC
     src/vk/vma_impl.cpp
     src/vk/volk_impl.c
 )
-target_include_directories(rvk_core PUBLIC src)
+target_include_directories(rvk_core PUBLIC src include)
 target_include_directories(rvk_core PRIVATE ${STB_INCLUDE_DIR})
 # volk is compiled here (not vcpkg's volk.lib): it needs VK_USE_PLATFORM_WIN32_KHR for the Win32 surface entry points
 target_compile_definitions(rvk_core PUBLIC VK_NO_PROTOTYPES VK_USE_PLATFORM_WIN32_KHR VMA_STATIC_VULKAN_FUNCTIONS=0 VMA_DYNAMIC_VULKAN_FUNCTIONS=0)
@@ -188,7 +193,7 @@ rvk_warnings(rvk_d3d9test)
 # tests
 # ---------------------------------------------------------------------------------------------
 if(RVK_BUILD_TESTS)
-    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp)
+    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp tests/api_tests.cpp)
     target_link_libraries(rvk_tests PRIVATE rvk_core SPIRV-Tools-static)
     rvk_warnings(rvk_tests)
     add_test(NAME rvk_tests COMMAND rvk_tests)

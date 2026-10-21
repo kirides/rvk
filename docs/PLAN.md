@@ -79,6 +79,12 @@ Early adapter query (docs/research/early-d3d9.md 9): `eCApplication::CreateEngin
 d3d12 and the AMD D3D drivers into a Vulkan run. In Vulkan mode a detour now answers it from the (cached) Vulkan adapter
 query; no system d3d9.dll is loaded in a Vulkan run any more (unless spass's screenshot hook runs), and `InitializeAdmin`
 starts ~5-7 s earlier. No usable Vulkan device there -> the session falls back to passthrough before any D3D9 work.
+Screenshot channel (renderer side of the D3D9 reference comparison, docs/research/reference-compare.md 4.1): exports
+`rvk_capabilities`, `rvk_screenshot` (queued, captured in `SwapScreen` before the present, PNG/BMP written on a writer
+thread, paths inside `<game>\data` refused), `rvk_screenshot_status`, `rvk_frame_index`, `rvk_stats`; public C header
+`include/rvk_api.h` for risen-spass. HAL device slot 159 `SaveBackbufferToFile` (the engine snapshot) writes the same
+32-bit BMP as D3DX through the engine's VFS. Verified in game (`run.ps1 -Snapshots`, `[debug] snapshot_frames`): engine
+BMP and `rvk_screenshot` PNG of the same frame are pixel-identical; the BMP header equals the D3D9 run's byte for byte.
 Progress (2026-10-21): Vulkan core in `src/vk/` (context with the 1.3 floor + optional EDS3 / vertex-input-dynamic / robustness2,
 swapchain, frames on a timeline semaphore with deferred deletion and a BDA upload ring, bindless set + pipeline layout, images
 with sync2 layout tracking, pipeline cache for dynamic rendering). `rvk_vktest` renders a translated D3D9 shader pair off-screen
@@ -107,8 +113,8 @@ with validation on and checks every pixel against D3D9's rasterisation rules (ha
 
 ## 3. Test tooling
 
-* `risen.debug.screenshot` in spass grabs the D3D9 back buffer: with our renderer it needs a Vulkan path. Our DLL exports
-  `rvk_screenshot(path)` (and a config hotkey); spass can call it (small spass change, or `ffi` with `-Unsafe`).
+* `risen.debug.screenshot` in spass grabs the D3D9 back buffer: with our renderer it needs a Vulkan path. Done on our side:
+  `rvk_screenshot` and friends (`include/rvk_api.h`, reference-compare.md 4.1); spass selects the backend (3.1 there).
 * Missing in spass for deterministic renderer tests (research spass.md section 5): fixed camera pose, fixed frame time/time scale,
   pinned time of day + weather, HUD toggle, "streaming done" signal. The engine exports what is needed
   (`gCCameraAdmin::SetFixCamera`, `eCTimer::SetFixedFrameTime`, `eCWeatherAdmin::SetCurrentDayTime`, ...).

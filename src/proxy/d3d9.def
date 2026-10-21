@@ -11,3 +11,8 @@ EXPORTS
     D3DPERF_SetRegion=rvk_D3DPERF_SetRegion
     ; our own API for tools (risen-spass, scripts)
     rvk_version
+    rvk_capabilities
+    rvk_screenshot
+    rvk_screenshot_status
+    rvk_frame_index
+    rvk_stats

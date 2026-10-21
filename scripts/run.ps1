@@ -21,6 +21,9 @@ param(
     [double]$MaxFps = 0,
     # frame numbers whose back buffer the Vulkan renderer saves to bin/rvk/screenshots/frame_<n>.png, e.g. 300,900
     [string]$Screenshots = '',
+    # eCApplication::Draw calls at which the engine's own snapshot is taken (BMP in <copy>\localappdata\...\Risen\ScreenShots)
+    # together with a self-test of the rvk_screenshot API on the same frame (bin/rvk/screenshots/api_draw<n>.*); any mode
+    [string]$Snapshots = '',
     # log the first N draws of the Vulkan renderer in detail
     [int]$LogDraws = 0,
     # log the HAL calls of this frame of the Vulkan renderer
@@ -44,7 +47,7 @@ param(
     [switch]$AllowFocus,
     [string]$Filter = '\[error\]|\[warn\]|\[test\] (FAIL|finished|deadline)',
     # regex of rvk.log lines to print after the run ('' = none, '.' = all)
-    [string]$RvkFilter = '\[(warning|error|critical)\]|probe|  \[|missing|InitializeAdmin|ms_pAPI|Direct3DCreate9|hooks|mode ='
+    [string]$RvkFilter = '\[(warning|error|critical)\]|probe|  \[|missing|InitializeAdmin|ms_pAPI|Direct3DCreate9|hooks|mode =|selftest|snapshot'
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -72,7 +75,7 @@ if ($NoRenderer) {
         '[renderer]', "mode = `"$Mode`"",
         '[log]', "level = `"$RvkLogLevel`"",
         '[vulkan]', "validation = $($Validation.IsPresent.ToString().ToLower())", "max_fps = $([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.0##}', $MaxFps))",
-        '[debug]', "screenshot_frames = [$Screenshots]", "log_draws = $LogDraws", "log_frame = $LogFrame"
+        '[debug]', "screenshot_frames = [$Screenshots]", "log_draws = $LogDraws", "log_frame = $LogFrame", "snapshot_frames = [$Snapshots]"
     )
     Remove-Item (Join-Path $rvkDir 'screenshots') -Recurse -Force -ErrorAction SilentlyContinue
     [IO.File]::WriteAllLines((Join-Path $rvkDir 'config.toml'), $cfg)

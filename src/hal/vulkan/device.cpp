@@ -6,8 +6,9 @@
 
 #include <spdlog/spdlog.h>
 
+#include "api/capture.h"
 #include "core/exports.h"
-#include "core/png.h"
+#include "engine/vfs.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "res/dds.h"
 #include "vk/formats.h"
@@ -449,18 +450,61 @@ bEResult HalDevice::ClearViewport(eCGfxShared::eEViewportClear a0, unsigned long
 
 bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
     const std::uint64_t frame = dev_.stats().frames + 1;
+    auto& captures = api::captures();
+    // [debug] screenshot_frames: a request of the tool API's queue, due at this present
     if (std::ranges::find(options_.screenshotFrames, static_cast<std::uint32_t>(frame)) != options_.screenshotFrames.end()) {
-        std::vector<std::uint8_t> bgra;
-        std::uint32_t w = 0, h = 0;
-        const auto file = options_.screenshotDir / std::format("frame_{}.png", frame);
-        if (dev_.readBackBuffer(bgra, w, h) && writePngBgra(file, bgra, w, h)) {
-            spdlog::info("hal: screenshot {}", file.string());
-        }
+        captures.request(options_.screenshotDir / std::format("frame_{}.png", frame), api::ImageFormat::Png, 0, nullptr);
     }
+    // rvk_screenshot: the finished back buffer (scene + post + GUI) before it is shown, as D3D9's Present hook / DoSnapshot see it
+    captures.onPresent(frame, [this](std::vector<std::uint8_t>& bgra, std::uint32_t& w, std::uint32_t& h) {
+        return dev_.readBackBuffer(bgra, w, h);
+    });
     HAL_LOG("hal> SwapScreen");
     dev_.present();
+    const auto& s = dev_.stats();
+    api::publishPresent(s.frames, api::FrameNumbers{
+                                      .drawsLastFrame = s.lastFrameDraws,
+                                      .unimplementedSlots = static_cast<std::uint32_t>(unimplementedCount()),
+                                      .drawsTotal = s.totalDraws,
+                                      .drawsSkippedTotal = s.skippedNoShader + s.skippedNoTarget + s.skippedVertexInput +
+                                                           s.skippedPipeline,
+                                      .textureCpuBytes = d3d9::Texture::cpuBytesTotal(),
+                                  });
     updateLogFrame();
     logFrameStats();
+    return bEResult_Ok;
+}
+
+// The engine's snapshot (eCApplication::Snapshot / SnapshotEx -> Draw -> DoSnapshot, after the GUI and before SwapScreen).
+// eCDX9Device: GetRenderTarget(0) -> D3DXSaveSurfaceToFileInMemory(D3DXIFF_BMP) -> eCArchiveManager file, whatever the
+// extension (missing-slots.md 3). Here: read the back buffer, resolve the virtual path through the engine's VFS, refuse
+// anything inside <game>\data (junctions into the game install), write the BMP D3DX writes (32 bpp, byte for byte).
+bEResult HalDevice::SaveBackbufferToFile(char* const a0) {
+    std::string error;
+    const auto file = engine::physicalPath(a0, &error);
+    if (!file) {
+        spdlog::warn("hal: SaveBackbufferToFile('{}'): {}", a0 != nullptr ? a0 : "", error);
+        return bEResult_False;
+    }
+    if (const auto refused = api::refuseDataPath(*file, api::gameDir())) {
+        spdlog::warn("hal: SaveBackbufferToFile('{}'): refused, {}", a0, *refused);
+        return bEResult_False;
+    }
+    if (dev_.renderTarget(0) != dev_.backBuffer()) {
+        spdlog::warn("hal: SaveBackbufferToFile: render target 0 is not the back buffer; saving the back buffer");
+    }
+    std::vector<std::uint8_t> bgra;
+    std::uint32_t w = 0, h = 0;
+    if (!dev_.readBackBuffer(bgra, w, h)) {
+        spdlog::warn("hal: SaveBackbufferToFile: back-buffer read-back failed");
+        return bEResult_False;
+    }
+    const std::vector<std::uint8_t> bmp = api::encodeBmpLikeD3DX(bgra, w, h);
+    if (bmp.empty() || !api::writeFileReplace(*file, bmp, &error)) {
+        spdlog::warn("hal: SaveBackbufferToFile({}): {}", api::utf8(*file), error.empty() ? "encoding failed" : error);
+        return bEResult_False;
+    }
+    spdlog::info("hal: snapshot '{}' -> {} ({}x{}, frame {})", a0, api::utf8(*file), w, h, dev_.stats().frames + 1);
     return bEResult_Ok;
 }
 

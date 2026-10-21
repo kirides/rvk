@@ -258,6 +258,7 @@ public:
     bEResult GetViewport(eCGfxShared::eSGfxViewport& a0) override;
     bEResult ClearViewport(eCGfxShared::eEViewportClear a0, unsigned long a1, float a2, unsigned long a3) override;
     bEResult SwapScreen(HWND__* a0, bCRect const* a1, bCRect const* a2) override;
+    bEResult SaveBackbufferToFile(char* const a0) override;
     bEResult BeginScene() override;
     bEResult EndScene() override;
     bEResult SetMasterRenderMode(eCGfxShared::eEMasterRenderMode a0) override;

@@ -4,9 +4,13 @@
 
 #include "proxy/d3d9_exports.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <cwchar>
+#include <filesystem>
+#include <format>
 #include <intrin.h>
 #include <mutex>
 #include <string>
@@ -14,6 +18,9 @@
 #include <windows.h>
 
 #include <spdlog/spdlog.h>
+
+#include "api/capture.h"
+#include "rvk_api.h"
 
 namespace rvk::proxy {
 
@@ -124,7 +131,80 @@ void WINAPI rvk_D3DPERF_SetRegion(DWORD color, LPCWSTR name) {
     }
 }
 
+// ---- tool API (include/rvk_api.h, docs/research/reference-compare.md 4.1) ----------------------------------------------
+
 // "0.1.0": lets tools detect that the renderer is loaded (GetProcAddress(GetModuleHandle("d3d9"), "rvk_version")).
 const char* rvk_version() { return "0.1.0"; }
+
+uint32_t rvk_capabilities() {
+    return rvk::api::mode() == rvk::Mode::Vulkan ? (RVK_CAP_SCREENSHOT | RVK_CAP_STATS) : 0u;
+}
+
+uint32_t rvk_screenshot(const wchar_t* path, uint32_t wait_frames, uint32_t flags) {
+    namespace api = rvk::api;
+    std::string reason;
+    std::uint32_t ticket = 0;
+    std::filesystem::path file;
+    if (path != nullptr && wcsnlen(path, 32768) < 32768) {
+        file = std::filesystem::path(path);
+    }
+    if (api::mode() != rvk::Mode::Vulkan) {
+        reason = "not in Vulkan mode";
+    } else if (flags != 0) {
+        reason = std::format("unknown flags 0x{:x}", flags);
+    } else if (file.empty()) {
+        reason = "no path";
+    } else {
+        if (auto refused = api::refuseOutputPath(file, api::gameDir())) {
+            reason = std::move(*refused);
+        } else {
+            ticket = api::captures().request(file, *api::formatFromExtension(file), wait_frames, &reason);
+        }
+    }
+    if (ticket == 0) {
+        spdlog::warn("rvk_screenshot({}, wait {}, flags 0x{:x}) refused: {}", api::utf8(file), wait_frames, flags, reason);
+    } else {
+        spdlog::debug("rvk_screenshot #{}: {} after {} presents (frame index {})", ticket, api::utf8(file), wait_frames,
+                      api::frameIndex());
+    }
+    return ticket;
+}
+
+int32_t rvk_screenshot_status(uint32_t ticket, char* msg, uint32_t msg_size) {
+    std::string text;
+    const int state = rvk::api::captures().status(ticket, &text);
+    if (msg != nullptr && msg_size > 0) {
+        const std::size_t n = std::min<std::size_t>(text.size(), msg_size - 1);
+        std::memcpy(msg, text.data(), n);
+        msg[n] = '\0';
+    }
+    return state;
+}
+
+uint64_t rvk_frame_index() { return rvk::api::frameIndex(); }
+
+int32_t rvk_stats(struct rvk_stats* out, uint32_t size) {
+    static_assert(sizeof(struct rvk_stats) == 56, "rvk_stats v1 is 56 bytes; only append fields");
+    if (out == nullptr || size < 8) {
+        return 0;
+    }
+    namespace api = rvk::api;
+    struct rvk_stats s{};
+    const api::Snapshot snap = api::snapshot();
+    const rvk::Mode mode = api::mode();
+    s.mode = mode == rvk::Mode::Vulkan ? RVK_MODE_VULKAN : (mode == rvk::Mode::Trace ? RVK_MODE_TRACE : RVK_MODE_PASSTHROUGH);
+    s.frame_index = snap.frame;
+    s.draws_last_frame = snap.numbers.drawsLastFrame;
+    s.unimplemented_slots = snap.numbers.unimplementedSlots;
+    s.draws_total = snap.numbers.drawsTotal;
+    s.draws_skipped_total = snap.numbers.drawsSkippedTotal;
+    s.screenshots_pending = api::captures().pending();
+    s.fps = snap.fps;
+    s.texture_cpu_bytes = snap.numbers.textureCpuBytes;
+    const std::uint32_t n = std::min<std::uint32_t>(size, sizeof(s));
+    s.size = n;
+    std::memcpy(out, &s, n);
+    return static_cast<int32_t>(n);
+}
 
 }  // extern "C"

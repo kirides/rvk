@@ -1,6 +1,6 @@
 # Design: D3D9 reference comparison at fixed spots
 
-Status: design (2026-10-21), nothing of this is built yet. Goal (user decision): run the **same deterministic scenario** once
+Status: design (2026-10-21); built so far: the renderer side, section 4.1 (exports, `include/rvk_api.h`) and 4.3 (slot 159). Goal (user decision): run the **same deterministic scenario** once
 with the game's own D3D9 renderer (`scripts\run.ps1 -NoRenderer`) and once with ours (`-Mode vulkan`), capture the back
 buffer at fixed spots (camera pose, time of day, weather, HUD state), and diff the pictures automatically with a report.
 This is the verification criterion of PLAN.md M4 ("screenshot-diff suite at N poses within thresholds").
@@ -60,7 +60,8 @@ Three pieces of work: **spass extensions** (camera, weather, time freeze, HUD, s
 | back-buffer read-back (`readRenderTarget` into a SYSTEMMEM A8R8G8B8 texture) | `src/d3d9/device.cpp:819` (`Device::readBackBuffer`) |
 | PNG writer (BGRA -> RGB) | `src/core/png.h` |
 | capture at fixed frame numbers in `HalDevice::SwapScreen` (`[debug] screenshot_frames`, `-Screenshots`) | `src/hal/vulkan/device.cpp:430`, `src/core/config.h` |
-| HAL slot 159 `SaveBackbufferToFile(char*)` (the engine's own snapshot path) | `src/hal/api_generated.h:494` (not implemented in Vulkan mode) |
+| HAL slot 159 `SaveBackbufferToFile(char*)` (the engine's own snapshot path) | `src/hal/api_generated.h:494`; implemented since 2026-10-21 (4.3) |
+| tool API: `rvk_screenshot`, `rvk_screenshot_status`, `rvk_capabilities`, `rvk_frame_index`, `rvk_stats` | `include/rvk_api.h`, `src/api/capture.*`, `src/proxy/d3d9_exports.cpp` (4.1, since 2026-10-21) |
 | `-NoRenderer` reference runs, `-GameDir`, `-Instance`, `-Param` passthrough to spass | `scripts/run.ps1` |
 | `/out/` is git-ignored (screenshots are game-derived: never commit them) | `.gitignore` |
 
@@ -171,7 +172,8 @@ name `+0x148`); `eCApplication::Draw` -> `DoSnapshot` (`0x4c0c50`) after the GUI
 `GetBackBuffer` -> `D3DXSaveSurfaceToFileInMemory(BMP)` -> `eCArchiveManager::CreateFile`. The test copy mounts
 `snapshots=$(localappdata)/Risen/ScreenShots` (`bin\mountlist_packed.ini`), i.e. `<test copy>\localappdata\Local\Risen\ScreenShots`
 with spass's `[debug] app_data` (safe: not a junction). The exact file name built by `SnapshotEx` is [I] (decompiler output
-garbled). `Snapshot()` names files `<prefix>_<date>_<nnnn>.bmp`.
+garbled). `Snapshot()` names files `<prefix>_<date>_<nnnn>.bmp`: seen in game `#G3:/snapshots/Snapshot__21.10.2026_0000.bmp`,
+the counter continuing over existing files [C, 2026-10-21]. D3DX writes a 32-bit BMP there (missing-slots.md 3).
 
 ### 2.7 Other bits [C]
 
@@ -327,28 +329,65 @@ rendering difference, not a capture difference: format, row order, BGRA swizzle,
 
 ### 4.1 Exports (`src/proxy/d3d9.def`, `src/proxy/d3d9_exports.cpp`)
 
+**Implemented (2026-10-21), final ABI.** The public header is `include/rvk_api.h` (self-contained C, copy it into spass);
+it is the normative version, this is a summary.
+
 ```c
 // all optional for callers: detect with GetProcAddress(GetModuleHandleW(L"d3d9.dll"), "...")
-const char* rvk_version(void);                                   // exists
-uint32_t    rvk_capabilities(void);                              // bit 0 screenshot, bit 1 stable capture, bit 2 stats
-// queue a capture of the back buffer at the SwapScreen `wait_frames` presents from now; returns a ticket (> 0) or 0 when
-// refused (not in vulkan mode, bad path, queue full). path: absolute, UTF-16, .png (or .bmp).
-uint32_t    rvk_screenshot(const wchar_t* path, uint32_t wait_frames, uint32_t flags);
-// 0 pending, 1 done, -1 failed; msg receives a reason / "frames waited N"
-int32_t     rvk_screenshot_status(uint32_t ticket, char* msg, uint32_t msg_size);
-uint64_t    rvk_frame_index(void);                               // presents so far
-int32_t     rvk_stats(struct rvk_stats* out, uint32_t size);     // draws, skipped draws, unimplemented slots, pending uploads
+const char* rvk_version(void);                                   // "0.1.0"
+uint32_t    rvk_capabilities(void);                              // RVK_CAP_SCREENSHOT 0x1 | RVK_CAP_STABLE_CAPTURE 0x2 (never
+                                                                 // set yet) | RVK_CAP_STATS 0x4; 0 outside Vulkan mode
+uint32_t    rvk_screenshot(const wchar_t* path, uint32_t wait_frames, uint32_t flags);   // ticket > 0, or 0 = refused
+int32_t     rvk_screenshot_status(uint32_t ticket, char* msg, uint32_t msg_size);         // 0 pending, 1 done, -1 failed
+uint64_t    rvk_frame_index(void);                               // presents so far (0 outside Vulkan mode)
+int32_t     rvk_stats(struct rvk_stats* out, uint32_t size);     // bytes written (versioned by size), 0 if out null / size < 8
+
+struct rvk_stats {             // v1 = 56 bytes, fields only ever appended
+    uint32_t size;             // bytes written
+    uint32_t mode;             // RVK_MODE_PASSTHROUGH 0, RVK_MODE_TRACE 1, RVK_MODE_VULKAN 2
+    uint64_t frame_index;      // = rvk_frame_index
+    uint32_t draws_last_frame;
+    uint32_t unimplemented_slots;   // distinct HAL slots called that the Vulkan HAL lacks
+    uint64_t draws_total;
+    uint64_t draws_skipped_total;   // no shader + no target + vertex input + pipeline
+    uint32_t screenshots_pending;   // waiting, capturing or encoding
+    float    fps;                   // presents/s over the last second
+    uint64_t texture_cpu_bytes;     // CPU copies of textures
+};
 ```
 
-* In `passthrough`/`trace` mode `rvk_screenshot` returns 0, so spass falls back to its own D3D9 path: one rule, no mode
-  coupling on the spass side.
-* Requests go into a mutex-protected queue (Lua calls from the main thread; the HAL's present runs on the render thread).
-  `HalDevice::SwapScreen` decrements the waits and, when due, calls `dev_.readBackBuffer` **before** `dev_.present()` (the
-  same point as the D3D9 Present hook and `DoSnapshot`), then hands the pixels to a writer thread (PNG encoding of 1600x900 must
-  not stall the frame; a frame hitch would change what the next frames simulate while time runs).
-* Read the raw back-buffer bytes as the game wrote them (UNORM BGRA, no sRGB re-encode, alpha dropped), top-down, exactly
-  what `GetRenderTargetData` gives in D3D9.
-* `[debug] screenshot_frames` stays for quick debugging; it is a special case of the queue.
+Semantics as implemented:
+
+* **Mode rule**: in `passthrough`/`trace` mode (and after a Vulkan session fell back to passthrough at startup)
+  `rvk_capabilities()` is 0 and `rvk_screenshot` returns 0, so spass falls back to its own D3D9 path: one rule, no mode
+  coupling on the spass side. Requests already queued when the fallback happens fail.
+* **`wait_frames`**: 0 = the next present (from the game thread between two presents: the frame being built), n = n presents
+  after that. The done message says which: `"frame <n>, waited <k> presents, <w>x<h>"`, where `<n>` is the present's
+  1-based index (= `rvk_frame_index()` right after it). Pending messages: `"waiting <k> presents"` / `"writing"`; failed:
+  the reason (read-back failed, write error, renderer gone, `"unknown ticket"`). The last 1024 finished tickets are kept.
+* **Path**: absolute UTF-16, `.png` (opaque RGB) or `.bmp` (24-bit `BI_RGB` bottom-up) by extension (case-insensitive).
+  Refused (ticket 0, a warning in rvk.log): null/empty/relative path, other extensions, a path in `<game>\data` as written
+  **or after resolving links/junctions** (`weakly_canonical`), or in the target of any junction inside `<game>\data`
+  (`data\common`, `data\compiled` -> the real install). Missing directories are created; the file is written as
+  `<path>.tmp` and renamed over an existing file.
+* **Flags**: none defined; any set bit is refused (lets a caller probe for a future flag). Reserved: 0x1 `RVK_SHOT_STABLE`,
+  0x2 `RVK_SHOT_DUMP_RTS` (4.2).
+* **Queue**: at most 64 requests pending (waiting + being written), then refused. Requests come from any thread (a mutex);
+  `HalDevice::SwapScreen` counts the waits down and, when due, calls `dev_.readBackBuffer` **before** `dev_.present()` (the
+  same point as the D3D9 Present hook and `DoSnapshot`); several requests due on the same present share one read-back. The
+  read-back waits for the GPU (like `GetRenderTargetData`); PNG/BMP encoding and the file write run on a writer thread
+  (`rvk screenshot writer`), so the present does not wait for them.
+* **Pixels**: the raw back-buffer bytes as the game wrote them (UNORM BGRA, no sRGB re-encode, alpha dropped), top-down,
+  exactly what `GetRenderTargetData` gives in D3D9. Verified: identical to the engine snapshot (slot 159) of the same frame.
+* **Stats**: `pending uploads` of the draft is not provided: uploads are recorded lazily when a texture is first used, there is
+  no upload queue to count; `texture_cpu_bytes` and `screenshots_pending` are there instead.
+* `[debug] screenshot_frames` stays for quick debugging; it is now a request of the same queue (async, `frame_<n>.png`).
+* `[debug] snapshot_frames = [n, ...]` (`run.ps1 -Snapshots`, any mode): at those `eCApplication::Draw` calls (hooked) the
+  engine's `eCApplication::Snapshot()` plus a self-test of these exports through `GetProcAddress` (requests for the same
+  present, a wait of 3, and the refusal cases; results as `api selftest:` lines in rvk.log, files `bin\rvk\screenshots\api_draw<n>.*`).
+  Verified 2026-10-21 in Vulkan mode (also with validation: clean) and passthrough (everything refused, as specified).
+* Caveat for spass: in passthrough mode the system `d3d9.dll` is loaded as well (full path), so `GetModuleHandleW(L"d3d9.dll")`
+  could in principle return either module [I]; both outcomes lead to the D3D9 fallback there.
 
 ### 4.2 Flags (later, Vulkan-only diagnostics; not part of the comparison itself)
 
@@ -360,10 +399,12 @@ int32_t     rvk_stats(struct rvk_stats* out, uint32_t size);     // draws, skipp
 
 ### 4.3 HAL slot 159 `SaveBackbufferToFile(char* path)`
 
-Implement it (it is on the unimplemented list anyway): VFS path -> physical path via the engine's archive manager (as
-`eCDX9Device` does: `eCArchiveManager::CreateFile`) or our own resolution of `#G3:/snapshots/`; write BMP (D3DX default) or
-by extension. Makes the engine's own snapshot (`SnapshotEx`, `CON_CameraDump`, the debug key) work in Vulkan mode and enables
-3.9. `SaveBackbufferToMemory` (slot 160) the same into a `bCMemoryStream` (DDS in D3D9 [I]).
+**Implemented (2026-10-21)**, details in missing-slots.md 3: the virtual path (`#G3:/snapshots/Snapshot__<dd.mm.yyyy>_<NNNN>.bmp`)
+goes through `eCVirtualFileSystem::MakeAbsPhysicalPath`; refused inside `<game>\data`; the file is the BMP D3DX writes for
+the X8R8G8B8 back buffer (**32 bpp** with the stored 4th byte, not 24-bit; header identical byte for byte to a D3D9 run's).
+The engine's own snapshot (`Snapshot`, `SnapshotEx`, `CON_CameraDump`, the debug key) now works in Vulkan mode, so 3.9 can
+use it; in Vulkan mode its pixels equal `rvk_screenshot`'s for the same present (verified). `SaveBackbufferToMemory`
+(slot 160) has no game caller and stays a stub.
 
 ### 4.4 Timing: "capture after N stable frames"
 

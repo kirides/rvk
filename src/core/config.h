@@ -29,10 +29,13 @@ struct Config {
     int traceLogFirst = 3;     // calls per HAL slot logged with their arguments
     bool traceCapture = true;  // write shader bytecode / effect sources to <bin>/rvk/corpus
 
-    // [debug] (mode = "vulkan")
-    std::vector<std::uint32_t> screenshotFrames;
-    std::uint32_t logDraws = 0;  // log the first N draws in detail
-    std::uint32_t logFrame = 0;  // log the HAL calls of this frame  // back buffer -> <bin>/rvk/screenshots/frame_<n>.png at these frames
+    // [debug]
+    std::vector<std::uint32_t> screenshotFrames;  // (vulkan) back buffer -> <bin>/rvk/screenshots/frame_<n>.png at these frames
+    std::uint32_t logDraws = 0;  // (vulkan) log the first N draws in detail
+    std::uint32_t logFrame = 0;  // (vulkan) log the HAL calls of this frame
+    // (any mode) at these eCApplication::Draw calls: the engine's snapshot (eCApplication::Snapshot -> HAL slot 159) plus a
+    // self-test of the rvk_screenshot API on the same frame (<bin>/rvk/screenshots/api_draw<n>.*)
+    std::vector<std::uint32_t> snapshotFrames;
 };
 
 // Parses config.toml text. Unknown keys are ignored, bad values keep the default; `error` gets a parse error message.

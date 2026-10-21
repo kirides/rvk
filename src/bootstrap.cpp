@@ -4,21 +4,27 @@
 #include <atomic>
 #include <cstdint>
 #include <cwctype>
+#include <filesystem>
+#include <ranges>
 #include <string>
+#include <vector>
 
 #include <windows.h>
 #include <psapi.h>
 
 #include <spdlog/spdlog.h>
 
+#include "api/capture.h"
 #include "core/config.h"
 #include "core/hooks.h"
 #include "core/log.h"
 #include "core/paths.h"
 #include "engine/symbols.h"
+#include "engine/vfs.h"
 #include "hal/trace.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "hal/types_base.h"
+#include "rvk_api.h"
 #include "vk/probe.h"
 
 namespace rvk::bootstrap {
@@ -117,6 +123,7 @@ int detourEnumAdapterDesc(unsigned long adapter, void* desc) {
         spdlog::error("eCGfxAdmin::sEnumAdapterDesc: no usable Vulkan device: the game's D3D9 renderer runs this session "
                       "(mode = passthrough)");
         g_config.mode = Mode::Passthrough;
+        api::setMode(Mode::Passthrough);
     }
     return g_enumAdapterDesc.original(adapter, desc);
 }
@@ -167,6 +174,105 @@ void detourInitializeAdmin(void* self, int apiType) {
     }
 }
 
+// ---- [debug] snapshot_frames: the engine's snapshot + a self-test of the tool API (docs/research/reference-compare.md 4) ----
+
+// virtual void eCApplication::Draw(HWND): GUI, then DoSnapshot when eCApplication::Snapshot asked for one, then SwapScreen
+using AppDrawFn = void (*)(void* self, HWND hwnd);
+Hook<AppDrawFn> g_appDraw;
+std::uint32_t g_drawCalls = 0;
+
+struct SelfTest {
+    std::string name;
+    std::uint32_t ticket = 0;
+    bool reported = false;
+};
+std::vector<SelfTest> g_selfTests;
+
+template <class Fn>
+Fn apiExport(const char* name) {
+    return reinterpret_cast<Fn>(GetProcAddress(static_cast<HMODULE>(paths::selfModule()), name));
+}
+
+// Called on the game's thread before Draw: requests through the exports (GetProcAddress, as risen-spass does). In Vulkan mode
+// the "ok" requests must get a ticket and the others must be refused; in the other modes everything is refused.
+void apiSelfTestRequest(std::uint32_t drawCall) {
+    const auto shot = apiExport<decltype(&rvk_screenshot)>("rvk_screenshot");
+    const auto caps = apiExport<decltype(&rvk_capabilities)>("rvk_capabilities");
+    const auto frameIndex = apiExport<decltype(&rvk_frame_index)>("rvk_frame_index");
+    const auto stats = apiExport<decltype(&rvk_stats)>("rvk_stats");
+    if (shot == nullptr || caps == nullptr || frameIndex == nullptr || stats == nullptr) {
+        spdlog::error("api selftest: exports missing");
+        return;
+    }
+    struct rvk_stats st{};
+    const int32_t statsBytes = stats(&st, sizeof(st));
+    spdlog::info("api selftest at Draw {}: caps 0x{:x}, frame index {}, rvk_stats {} bytes: mode {}, frame {}, draws {} (total "
+                 "{}, skipped {}), unimplemented slots {}, pending shots {}, fps {:.1f}, texture CPU {:.1f} MiB",
+                 drawCall, caps(), frameIndex(), statsBytes, st.mode, st.frame_index, st.draws_last_frame, st.draws_total,
+                 st.draws_skipped_total, st.unimplemented_slots, st.screenshots_pending, st.fps,
+                 static_cast<double>(st.texture_cpu_bytes) / (1024.0 * 1024.0));
+    const bool vulkan = (caps() & RVK_CAP_SCREENSHOT) != 0;
+    const std::filesystem::path dir = paths::dataDir() / L"screenshots";
+    const std::filesystem::path game = paths::binDir().parent_path();
+    const std::wstring stem = L"api_draw" + std::to_wstring(drawCall);
+    struct Case {
+        const char* name;
+        std::filesystem::path path;
+        std::uint32_t wait, flags;
+        bool ok;
+    };
+    const Case cases[] = {
+        {"png now", dir / (stem + L".png"), 0, 0, true},
+        {"bmp now", dir / (stem + L".bmp"), 0, 0, true},
+        {"png after 3 presents", dir / (stem + L"_w3.png"), 3, 0, true},
+        {"relative path", std::filesystem::path(L"api_relative.png"), 0, 0, false},
+        {"game data dir", game / L"data" / L"api_refused.png", 0, 0, false},
+        {"junction into the install", game / L"data" / L"common" / L"api_refused.png", 0, 0, false},
+        {"dot-dot into data", dir / L".." / L".." / L".." / L"data" / L"api_refused.png", 0, 0, false},
+        {"jpg extension", dir / (stem + L".jpg"), 0, 0, false},
+        {"unknown flag", dir / (stem + L"_flag.png"), 0, 1, false},
+    };
+    for (const auto& c : cases) {
+        const std::uint32_t ticket = shot(c.path.c_str(), c.wait, c.flags);
+        const bool expectTicket = vulkan && c.ok;
+        spdlog::info("api selftest: {} -> ticket {} ({})", c.name, ticket,
+                     (ticket != 0) == expectTicket ? "PASS" : "FAIL: expected " + std::string(expectTicket ? "a ticket" : "refusal"));
+        if (ticket != 0) {
+            g_selfTests.push_back(SelfTest{c.name, ticket, false});
+        }
+    }
+}
+
+void apiSelfTestPoll() {
+    if (g_selfTests.empty()) return;
+    const auto status = apiExport<decltype(&rvk_screenshot_status)>("rvk_screenshot_status");
+    for (auto& t : g_selfTests) {
+        if (t.reported) continue;
+        char msg[256];
+        const int32_t s = status(t.ticket, msg, sizeof(msg));
+        if (s != RVK_SHOT_PENDING) {
+            spdlog::info("api selftest: ticket {} ({}): {}: {}", t.ticket, t.name, s == RVK_SHOT_DONE ? "done" : "FAILED", msg);
+            t.reported = true;
+        }
+    }
+}
+
+void detourAppDraw(void* self, HWND hwnd) {
+    const std::uint32_t n = ++g_drawCalls;
+    apiSelfTestPoll();
+    const bool snap = std::ranges::find(g_config.snapshotFrames, n) != g_config.snapshotFrames.end();
+    if (snap) {
+        const bool requested = engine::requestEngineSnapshot();
+        spdlog::info("debug: eCApplication::Snapshot at Draw {} (frame index {}): {}", n, api::frameIndex(),
+                     requested ? "requested" : "symbols missing");
+        apiSelfTestRequest(n);
+    }
+    g_appDraw.original(self, hwnd);
+    if (snap) {
+        spdlog::info("debug: engine snapshot name '{}'", engine::lastEngineSnapshotName());
+    }
+}
+
 }  // namespace
 
 void onProcessAttach(void* module) {
@@ -179,6 +285,8 @@ void onProcessAttach(void* module) {
     if (!cfgError.empty()) {
         spdlog::warn("config.toml: {}", cfgError);
     }
+
+    api::setGameDir(paths::binDir().parent_path());
 
     if (GetModuleHandleW(L"Engine.dll") == nullptr) {
         // loaded by something other than Risen (a tool, a test): stay a plain forwarder
@@ -206,10 +314,17 @@ void onProcessAttach(void* module) {
                                    reinterpret_cast<EnumAdapterDescFn>(s.gfxAdminEnumAdapterDesc), &detourEnumAdapterDesc)) {
         spdlog::warn("eCGfxAdmin::sEnumAdapterDesc not hooked: the early adapter query uses D3D9 + DxDiag");
     }
+    // debug: the engine's snapshot + tool-API self-test at fixed Draw calls (any mode)
+    if (ok && !g_config.snapshotFrames.empty() &&
+        !g_appDraw.install("eCApplication::Draw", reinterpret_cast<AppDrawFn>(s.appDraw), &detourAppDraw)) {
+        spdlog::warn("eCApplication::Draw not hooked: [debug] snapshot_frames ignored");
+    }
     if (ok) {
         ok = hooks::enableAll();
     }
     spdlog::info("hooks {}", ok ? "enabled" : "FAILED");
+    // the tool API (rvk_screenshot, ...) serves requests only while our Vulkan HAL renders
+    api::setMode(ok ? g_config.mode : Mode::Passthrough);
 }
 
 void onProcessDetach(bool processTerminating) {

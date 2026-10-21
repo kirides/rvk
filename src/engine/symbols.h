@@ -13,7 +13,23 @@
     /* eCAPIInstance* eCGfxAdmin::ms_pAPIInstance (0xc62ad8) */                                                                 \
     X(gfxAdminApiInstance, L"Engine.dll", "?ms_pAPIInstance@eCGfxAdmin@@1PEAVeCAPIInstance@@EA", true)                          \
     /* eCAPIDevice* eCGfxContextAdmin::ms_pAPIDevice (0xc62750): the single global device pointer */                           \
-    X(gfxContextAdminApiDevice, L"Engine.dll", "?ms_pAPIDevice@eCGfxContextAdmin@@1PEAVeCAPIDevice@@EA", true)
+    X(gfxContextAdminApiDevice, L"Engine.dll", "?ms_pAPIDevice@eCGfxContextAdmin@@1PEAVeCAPIDevice@@EA", true)              \
+    /* snapshots (missing-slots.md 3, engine/vfs.h). eCVirtualFileSystem& eCVirtualFileSystem::GetInstance() (0x736450) */    \
+    X(vfsGetInstance, L"Engine.dll", "?GetInstance@eCVirtualFileSystem@@SAAEAV1@XZ", false)                                     \
+    /* bool eCVirtualFileSystem::MakeAbsPhysicalPath(bCString&) (0x733990) */                                                  \
+    X(vfsMakeAbsPhysicalPath, L"Engine.dll", "?MakeAbsPhysicalPath@eCVirtualFileSystem@@QEAA_NAEAVbCString@@@Z", false)         \
+    /* eCApplication& eCApplication::GetInstance() (0x4c64e0) */                                                               \
+    X(appGetInstance, L"Engine.dll", "?GetInstance@eCApplication@@SAAEAV1@XZ", false)                                           \
+    /* void eCApplication::Snapshot() (0x4bfc90): the debug snapshot key's action */                                           \
+    X(appSnapshot, L"Engine.dll", "?Snapshot@eCApplication@@QEAAXXZ", false)                                                    \
+    /* bCString const& eCApplication::GetLastSnapshotName() const (0x4c4040) */                                                \
+    X(appGetLastSnapshotName, L"Engine.dll", "?GetLastSnapshotName@eCApplication@@QEBAAEBVbCString@@XZ", false)                 \
+    /* virtual void eCApplication::Draw(HWND) (0x4c13b0): GUI, DoSnapshot, SwapScreen; hooked for [debug] snapshot_frames */  \
+    X(appDraw, L"Engine.dll", "?Draw@eCApplication@@UEAAXPEAUHWND__@@@Z", false)                                                \
+    /* SharedBase.dll bCString(char const*), ~bCString(), char const* GetText() const */                                       \
+    X(stringCtor, L"SharedBase.dll", "??0bCString@@QEAA@PEBD@Z", false)                                                         \
+    X(stringDtor, L"SharedBase.dll", "??1bCString@@QEAA@XZ", false)                                                             \
+    X(stringGetText, L"SharedBase.dll", "?GetText@bCString@@QEBAPEBDXZ", false)
 
 namespace rvk::engine {
 

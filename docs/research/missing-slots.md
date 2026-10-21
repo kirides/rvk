@@ -24,7 +24,7 @@ What is still a stub (generated stub classes in `src/hal/stub_generated.h` that 
 | Volume | 3 GenerateVolumeMipMaps | no |
 | HLSLShader | 9-18 SetConstant* | **no**: the wrappers have no callers and no importers; the devirtualised sites call other slots (section 6) [C] |
 | Sprite (10), Font (9) | all | unreachable: their only creators, device slots 14/15, have no callers. GUI text uses `eCFont` + `eCSprite` (fonts.md) [C] |
-| Device (60) | 7-10 Create*FromFile/Memory, 14/15 CreateFont/Sprite, 16 GetImageInfoFromFile, 48/49/76 ZBias, 86/88/92-95 lights + material, 100-102/107-112/117-121 programs + assembler, 129/131-135 fixed-function texture stages, 143 GetFVFSize, 150-158 assistant + D3DX meshes, **159 SaveBackbufferToFile**, 160 SaveBackbufferToMemory, 161 DrawTextA, 171-180 sprite lists, 207 CreateUVAtlas | **159**: snapshot key (section 3). 9/10: reachable only through `eCGfxImageData::CreateImageFromMemory` (section 5). The rest: editor / legacy, section 7 |
+| Device (60) | 7-10 Create*FromFile/Memory, 14/15 CreateFont/Sprite, 16 GetImageInfoFromFile, 48/49/76 ZBias, 86/88/92-95 lights + material, 100-102/107-112/117-121 programs + assembler, 129/131-135 fixed-function texture stages, 143 GetFVFSize, 150-158 assistant + D3DX meshes, 160 SaveBackbufferToMemory, 161 DrawTextA, 171-180 sprite lists, 207 CreateUVAtlas | 159 SaveBackbufferToFile (snapshot key) is **implemented** (section 3). 9/10: reachable only through `eCGfxImageData::CreateImageFromMemory` (section 5). The rest: editor / legacy, section 7 |
 
 Separate from the stubs: **FVF vertex buffers** (section 4). `CreateVertexData` takes the stride from the wrong field, and
 `HalPrimitive::SetFVF` drops the vertex layout.
@@ -101,10 +101,24 @@ back buffer at this point), `D3DXSaveSurfaceToFileInMemory(&buf, D3DXIFF_BMP, su
 `eCArchiveManager::CreateFileA` + `Open(2)` + write as above. The format is always BMP, whatever the extension.
 `SaveBackbufferToMemory` (slot 160) puts the same data into a `bCMemoryStream`; it has no game caller.
 
-**Impact**: the in-game snapshot key does nothing in Vulkan mode (the engine logs a failure). Whether the debug action has a
-default key binding in Risen Enhanced is not verified [I]. Priority P2: a user-visible feature, small work.
+**Done (2026-10-21)**: `HalDevice::SaveBackbufferToFile` (`src/hal/vulkan/device.cpp`). Verified in game with
+`[debug] snapshot_frames` (`run.ps1 -Snapshots 500,700`: a detour of `eCApplication::Draw` calls `eCApplication::Snapshot()`
+before the original, so `DoSnapshot` runs in the same Draw) [C]:
+* The engine passes the **virtual** path `#G3:/snapshots/Snapshot__21.10.2026_0000.bmp` (prefix `Snapshot_`, an empty name
+  part, `dd.mm.yyyy`, a 4-digit counter that continues over the files already present). `eCVirtualFileSystem::MakeAbsPhysicalPath`
+  resolves it to `<test copy>\localappdata\Local\Risen\ScreenShots\...` (spass's `%LOCALAPPDATA%` redirect).
+* **D3DX's BMP, measured in a D3D9 (passthrough) run**: 32 bpp `BI_RGB`, bottom-up, the 4th byte as stored in the
+  X8R8G8B8 back buffer (mostly 255, some 204/254: the game writes alpha), `biSizeImage` 0, 2834 px/m, plus 2 zero bytes after
+  the pixels counted in `bfSize` (1600x900 -> 5 760 056 bytes). Not the 24-bit file assumed above. Our writer
+  (`api::encodeBmpLikeD3DX`) produces the same header byte for byte; the alpha distribution of a Vulkan snapshot matches too.
+* The snapshot of a frame is pixel-identical (RGB) to `rvk_screenshot`'s PNG/BMP of the same present (reference-compare.md 3.9).
+* Differences to `eCDX9Device`: it reads the back buffer (RT0 is the back buffer at `DoSnapshot`; a warning is logged
+  otherwise), refuses physical paths inside `<game>\data` (`api::refuseDataPath`, junction-aware), writes through
+  `<file>.tmp` + rename, and returns `False` when the file cannot be written (D3D9 returns `Ok` once the surface was read).
+* `eCApplication::Draw` calls and presents differ (Draw 500 = present 793 in `testdemo`): loading screens present
+  without `eCApplication::Draw` [I].
 
-**Sketch**:
+**Sketch** (as planned; implemented like this except the BMP format):
 1. `dev_.readBackBuffer(bgra, w, h)` (`src/d3d9/device.cpp:819`) at call time. We are still inside the frame before
    `SwapScreen`, so this is the image with the GUI, as with D3D9.
 2. Encode a 24-bit bottom-up BMP (54-byte header). A PNG would be smaller, but the engine named the file `.bmp`.
