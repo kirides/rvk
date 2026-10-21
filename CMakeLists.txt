@@ -56,6 +56,13 @@ add_library(rvk_core STATIC
     src/core/log.h
     src/core/paths.cpp
     src/core/paths.h
+    src/d3d9/convert.cpp
+    src/d3d9/convert.h
+    src/d3d9/defs.h
+    src/d3d9/device.cpp
+    src/d3d9/device.h
+    src/d3d9/draw.cpp
+    src/d3d9/resources.cpp
     src/engine/symbols.cpp
     src/engine/symbols.h
     src/fx/effect_binary.cpp
@@ -155,6 +162,12 @@ target_include_directories(rvk_vktest PRIVATE tools ${STB_INCLUDE_DIR})
 target_link_libraries(rvk_vktest PRIVATE rvk_core)
 rvk_warnings(rvk_vktest)
 
+# rvk_d3d9test: the D3D9 device model against D3D9 semantics (off-screen, validation on)
+add_executable(rvk_d3d9test tools/d3d9test/main.cpp tools/common/d3dx.h)
+target_include_directories(rvk_d3d9test PRIVATE tools ${STB_INCLUDE_DIR})
+target_link_libraries(rvk_d3d9test PRIVATE rvk_core)
+rvk_warnings(rvk_d3d9test)
+
 # ---------------------------------------------------------------------------------------------
 # tests
 # ---------------------------------------------------------------------------------------------
@@ -166,4 +179,6 @@ if(RVK_BUILD_TESTS)
     # needs a Vulkan 1.3 GPU (and d3dx9_39.dll): ctest -L gpu
     add_test(NAME rvk_vktest COMMAND rvk_vktest ${CMAKE_BINARY_DIR}/vktest.png)
     set_tests_properties(rvk_vktest PROPERTIES LABELS gpu)
+    add_test(NAME rvk_d3d9test COMMAND rvk_d3d9test)
+    set_tests_properties(rvk_d3d9test PROPERTIES LABELS gpu)
 endif()
