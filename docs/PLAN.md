@@ -14,6 +14,8 @@ acceleration structures when RT is enabled, and a player-facing settings system 
 to SPIR-V at build time (glslang / `glslc` + `spirv-val`), sharing one GLSL header with the D3D9 translator's ABI
 (`src/shader/abi.h`: bindless set 0, push constants with buffer device addresses). GD3D11's HLSL (`Shaders/D3D12/*`: water,
 RT, GTAO) is ported by hand to GLSL (`GL_EXT_ray_query`, `GL_EXT_buffer_reference`, `GL_EXT_nonuniform_qualifier`).
+Why: GLSL is native to Vulkan, so the many GLSL examples on the web (water, ocean, RT) carry over directly; HLSL needs
+SPIR-V patching (as GD3D11's `VulkanSpirvPatch.h` does), which can introduce bugs.
 **Settings UI (user decision, 2026-10-21): an in-game ImGui overlay** + `bin\rvk\settings.toml` (never under `data\`); instant
 per-feature A/B toggling is a first-class overlay feature (it lets players compare enhanced vs parity themselves).
 
