@@ -1,0 +1,6 @@
+id          = "rvk_shadows"
+name        = "Renderer shadow shots"
+version     = "1.0.0"
+author      = "risen-spass"
+description = "Fixed noon view of the opening beach for renderer comparisons (risen-enhanced-graphics): scenario rvk_shadows."
+main        = "main.lua"

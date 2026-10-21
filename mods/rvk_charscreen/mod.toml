@@ -1,0 +1,6 @@
+id          = "rvk_charscreen"
+name        = "Renderer character screen shots"
+version     = "1.0.0"
+author      = "risen-spass"
+description = "Opens, hovers and reopens the character screen for renderer comparisons (risen-enhanced-graphics): scenario rvk_charscreen."
+main        = "main.lua"
