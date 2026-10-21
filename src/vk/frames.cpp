@@ -1,6 +1,7 @@
 #include "vk/frames.h"
 
 #include <algorithm>
+#include <chrono>
 
 #include <spdlog/spdlog.h>
 
@@ -77,15 +78,18 @@ void Frames::waitFor(std::uint64_t value) const {
 }
 
 void Frames::waitIdle() {
-    if (ctx_ != nullptr && ctx_->device() != VK_NULL_HANDLE) {
-        vkDeviceWaitIdle(ctx_->device());
+    if (ctx_ != nullptr) {
+        ctx_->waitIdle();
     }
 }
 
 void Frames::begin() {
     Slot& s = slots_[slot()];
-    if (frameValue_ > kInFlight) {
+    lastSlotWaitMs_ = 0.0;
+    if (frameValue_ > kInFlight && completedValue() < frameValue_ - kInFlight) {
+        const auto t0 = std::chrono::steady_clock::now();
         waitFor(frameValue_ - kInFlight);
+        lastSlotWaitMs_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     }
     runRetired(completedValue());
     for (std::size_t c : s.chunks) {
@@ -140,7 +144,7 @@ bool Frames::submit(VkSemaphore waitAcquire, VkSemaphore signalRendered) {
     si.pCommandBufferInfos = cbs;
     si.signalSemaphoreInfoCount = nsignal;
     si.pSignalSemaphoreInfos = signal;
-    const VkResult r = vkQueueSubmit2(ctx_->queue(), 1, &si, VK_NULL_HANDLE);
+    const VkResult r = ctx_->queueSubmit(si);
     recording_ = false;
     ++frameValue_;
     if (r != VK_SUCCESS) {
@@ -212,6 +216,7 @@ bool Frames::newChunk(VkDeviceSize minSize) {
 }
 
 RingAlloc Frames::allocate(VkDeviceSize size, VkDeviceSize alignment) {
+    ringBytes_ += size;
     if (currentChunk_ != SIZE_MAX) {
         Chunk& c = chunks_[currentChunk_];
         const VkDeviceSize offset = (c.used + alignment - 1) & ~(alignment - 1);

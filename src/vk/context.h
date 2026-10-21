@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <string>
 
 #include "vk/vk.h"
@@ -25,6 +26,8 @@ struct DeviceFeatures {
     bool deviceFault = false;
     bool samplerAnisotropy = false;
     float maxAnisotropy = 1.0f;
+    bool hostQueryReset = false;  // vkResetQueryPool from the host (GPU timestamps of [debug] perf)
+    float timestampPeriod = 0.0f; // ns per timestamp tick; 0 = the queue cannot write timestamps
 };
 
 class Context {
@@ -42,6 +45,11 @@ public:
     VkPhysicalDevice physicalDevice() const { return physical_; }
     VkDevice device() const { return device_; }
     VkQueue queue() const { return queue_; }
+    // The queue is used by the render thread (submits) and the present thread (vkQueuePresentKHR): every queue operation,
+    // and vkDeviceWaitIdle (it accesses all queues), goes through these, which hold the queue lock.
+    VkResult queueSubmit(const VkSubmitInfo2& submit, VkFence fence = VK_NULL_HANDLE);
+    VkResult queuePresent(const VkPresentInfoKHR& present);
+    void waitIdle();
     std::uint32_t queueFamily() const { return queueFamily_; }
     VmaAllocator allocator() const { return allocator_; }
     const VkPhysicalDeviceProperties& properties() const { return props_; }
@@ -76,6 +84,7 @@ private:
     DeviceFeatures features_;
     std::string deviceName_;
     bool debugUtils_ = false;
+    std::mutex queueMutex_;
     std::atomic<std::uint32_t> validationErrors_{0};
 };
 

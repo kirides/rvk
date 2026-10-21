@@ -46,11 +46,18 @@ Config parseConfig(std::string_view text, std::string* error) {
     cfg.probe = tbl["vulkan"]["probe"].value_or(cfg.probe);
     cfg.adapter = tbl["vulkan"]["adapter"].value_or(cfg.adapter);
     cfg.maxFps = tbl["vulkan"]["max_fps"].value_or(cfg.maxFps);
+    if (const auto v = tbl["vulkan"]["vsync"].value<bool>()) {
+        cfg.vsync = *v ? 1 : 0;
+    } else if (const auto str = tbl["vulkan"]["vsync"].value<std::string>(); str && *str != "engine" && error != nullptr) {
+        *error = "vulkan.vsync: true, false or \"engine\"";
+    }
     cfg.traceLogFirst = tbl["trace"]["log_first"].value_or(cfg.traceLogFirst);
     cfg.traceCapture = tbl["trace"]["capture"].value_or(cfg.traceCapture);
     cfg.logDraws = static_cast<std::uint32_t>(tbl["debug"]["log_draws"].value_or(0));
     cfg.logFrame = static_cast<std::uint32_t>(tbl["debug"]["log_frame"].value_or(0));
     cfg.dumpSavedTextures = tbl["debug"]["dump_saved_textures"].value_or(cfg.dumpSavedTextures);
+    cfg.perf = tbl["debug"]["perf"].value_or(cfg.perf);
+    cfg.perfFrame = static_cast<std::uint32_t>(tbl["debug"]["perf_frame"].value_or(0));
     const auto frameList = [&](const char* key, std::vector<std::uint32_t>& out) {
         if (const auto* frames = tbl["debug"][key].as_array()) {
             for (const auto& f : *frames) {

@@ -64,6 +64,13 @@ bool Device::create(const DeviceOptions& options) {
     if (!options.offscreen && !swapchain_.create(ctx_, options.window, options.width, options.height, options.vsync)) {
         return false;
     }
+    if (swapchain_.valid()) {
+        presenter_.start(swapchain_);
+    }
+    if (options.perf && gpuTimer_.create(ctx_, vk::Frames::kInFlight)) {
+        spdlog::info("d3d9: [debug] perf: GPU timestamps on{}",
+                     options.perfFrame != 0 ? std::format(", pass timings of frame {}", options.perfFrame) : std::string());
+    }
     for (auto& s : acquireSemaphores_) {
         VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         vkCreateSemaphore(ctx_.device(), &sci, nullptr, &s);
@@ -151,6 +158,7 @@ bool Device::resize(std::uint32_t width, std::uint32_t height) {
     options_.width = width;
     options_.height = height;
     if (swapchain_.valid() && (swapchain_.extent().width != width || swapchain_.extent().height != height)) {
+        presenter_.waitIdle();
         swapchain_.recreate(width, height);
     }
     return true;
@@ -162,6 +170,7 @@ void Device::setVsync(bool vsync) {
     }
     options_.vsync = vsync;
     pacerChecked_ = {};
+    presenter_.waitIdle();
     swapchain_.setVsync(vsync);
     if (swapchain_.valid()) {
         swapchain_.recreate(swapchain_.extent().width, swapchain_.extent().height);
@@ -203,7 +212,9 @@ void Device::destroy() {
             s = VK_NULL_HANDLE;
         }
     }
+    presenter_.stop();
     swapchain_.destroy();
+    gpuTimer_.destroy();
     pipelines_.destroy();
     // frames_ runs the retired destructors (images, bindless slot releases): before the bindless heap goes away
     frames_.destroy();
@@ -216,16 +227,59 @@ void Device::destroy() {
 
 void Device::beginFrame() {
     frames_.begin();
+    perf_.slotWaitMs += frames_.lastSlotWaitMs();
+    if (gpuTimer_.enabled()) {
+        const std::uint32_t slot = frames_.currentSlot();
+        const vk::GpuTimer::Result r = gpuTimer_.collect(slot);
+        if (r.valid) {
+            ++perf_.gpuSubmits;
+            perf_.gpuMs += r.mainMs;
+            perf_.gpuUploadMs += r.uploadMs;
+            if (!r.segments.empty()) {
+                spdlog::info("perf: GPU passes of frame {} (one submission: {:.3f} ms main, {:.3f} ms uploads)", gpuDetailFrame_[slot],
+                             r.mainMs, r.uploadMs);
+                for (const auto& seg : r.segments) {
+                    spdlog::info("perf:   {:8.3f} ms  {}", seg.ms, seg.label);
+                }
+            }
+        }
+        // a frame's submissions: the present's and any mid-frame flush (read-backs)
+        const bool details = options_.perfFrame != 0 && stats_.frames + 1 == options_.perfFrame;
+        gpuDetailFrame_[slot] = details ? options_.perfFrame : 0;
+        gpuTimer_.start(slot, details);
+        gpuTimer_.mark(frames_.cmd(), slot, vk::GpuTimer::Stream::Main, "begin");
+    }
     processReleases();
     uploadUsed_ = false;
     rendering_ = false;
     boundPipeline_ = VK_NULL_HANDLE;
     vsConstDirty_ = psConstDirty_ = true;
+    passIndex_ = 0;
     const VkDescriptorSet set = bindless_.set();
     vkCmdBindDescriptorSets(frames_.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS, bindless_.pipelineLayout(), 0, 1, &set, 0, nullptr);
-    stats_.draws = 0;
-    stats_.renderPasses = 0;
-    stats_.drawsSkipped = 0;
+}
+
+void Device::gpuMark(const char* what) {
+    if (gpuTimer_.enabled()) {
+        gpuTimer_.mark(frames_.cmd(), frames_.currentSlot(), vk::GpuTimer::Stream::Main, what);
+    }
+}
+
+PerfStats Device::takePerf() {
+    PerfStats p = std::move(perf_);
+    perf_ = PerfStats{};
+    p.pipelinesBuilt = pipelines_.built() - perfPipelinesBase_;
+    p.pipelineMs = pipelines_.buildMs() - perfPipelineMsBase_;
+    perfPipelinesBase_ = pipelines_.built();
+    perfPipelineMsBase_ = pipelines_.buildMs();
+    const std::uint64_t built = shadersBuilt_.load(), compiled = shadersCompiled_.load(), ns = shaderNs_.load();
+    p.shadersBuilt = built - perfShadersBase_;
+    p.shadersCompiled = compiled - perfShadersCompiledBase_;
+    p.shaderMs = static_cast<double>(ns - perfShaderNsBase_) * 1e-6;
+    perfShadersBase_ = built;
+    perfShadersCompiledBase_ = compiled;
+    perfShaderNsBase_ = ns;
+    return p;
 }
 
 VkCommandBuffer Device::uploadCommands() {
@@ -242,6 +296,9 @@ VkCommandBuffer Device::uploadCommands() {
         di.pMemoryBarriers = &b;
         vkCmdPipelineBarrier2(cmd, &di);
         uploadUsed_ = true;
+        if (gpuTimer_.enabled()) {
+            gpuTimer_.mark(cmd, frames_.currentSlot(), vk::GpuTimer::Stream::Upload, "upload begin");
+        }
     }
     return cmd;
 }
@@ -258,8 +315,17 @@ void Device::submitFrame(VkSemaphore waitAcquire, VkSemaphore signalRendered) {
         di.memoryBarrierCount = 1;
         di.pMemoryBarriers = &b;
         vkCmdPipelineBarrier2(frames_.uploadCmd(), &di);
+        if (gpuTimer_.enabled()) {
+            gpuTimer_.mark(frames_.uploadCmd(), frames_.currentSlot(), vk::GpuTimer::Stream::Upload, "uploads");
+        }
     }
+    gpuMark(signalRendered != VK_NULL_HANDLE ? "present blit + barriers since the last pass"
+                                             : "copies + barriers since the last pass (flush)");
+    const auto t0 = std::chrono::steady_clock::now();
     frames_.submit(waitAcquire, signalRendered);
+    perf_.submitMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    perf_.ringBytes += frames_.ringBytes() - ringBytesBase_;
+    ringBytesBase_ = frames_.ringBytes();
 }
 
 // the pacer's rate follows the window's monitor. EnumDisplaySettings is slow (it stalled the frames while the world loaded
@@ -289,9 +355,32 @@ void Device::updatePacer() {
 }
 
 void Device::present() {
+    presentStart_ = std::chrono::steady_clock::now();
+    if (stats_.frames > 0) {
+        ++perf_.frames;
+        perf_.cpuFrameMs += std::chrono::duration<double, std::milli>(presentStart_ - presentEnd_).count();
+    }
+    struct PresentEnd {
+        Device& d;
+        ~PresentEnd() {
+            const auto now = std::chrono::steady_clock::now();
+            if (d.stats_.frames > 1) {
+                d.perf_.presentMs += std::chrono::duration<double, std::milli>(now - d.presentStart_).count();
+                d.perf_.frameIntervalsMs.push_back(std::chrono::duration<float, std::milli>(d.presentStart_ - d.lastPresentStart_).count());
+            }
+            d.lastPresentStart_ = d.presentStart_;
+            d.presentEnd_ = now;
+        }
+    } presentEnd{*this};
     endRendering();
     ++stats_.frames;
+    // per-frame counters span every submission of the frame (read-backs flush mid-frame)
     stats_.lastFrameDraws = stats_.draws;
+    perf_.draws += stats_.draws;
+    perf_.renderPasses += stats_.renderPasses;
+    stats_.draws = 0;
+    stats_.renderPasses = 0;
+    stats_.drawsSkipped = 0;
     if (options_.offscreen || !swapchain_.valid()) {
         submitFrame(VK_NULL_HANDLE, VK_NULL_HANDLE);
         beginFrame();
@@ -303,19 +392,27 @@ void Device::present() {
     updatePacer();
     const auto tw = std::chrono::steady_clock::now();
     pacer_.wait();
-    stats_.pacerMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tw).count();
+    const auto tq = std::chrono::steady_clock::now();
+    stats_.pacerMs += std::chrono::duration<double, std::milli>(tq - tw).count();
+    // the swapchain is the present thread's until its present returned
+    const VkResult previous = presenter_.waitIdle();
+    stats_.presentMs += presenter_.takePresentMs();
+    if (previous == VK_ERROR_OUT_OF_DATE_KHR || previous == VK_SUBOPTIMAL_KHR) {
+        ++stats_.presentSuboptimal;
+        ++stats_.swapchainRecreates;
+        recreateSwapchain();
+    } else if (previous != VK_SUCCESS) {
+        spdlog::error("vulkan: present: {}", vk::resultString(previous));
+    }
     const auto ta = std::chrono::steady_clock::now();
+    stats_.presentWaitMs += std::chrono::duration<double, std::milli>(ta - tq).count();
     const bool acquiredOk = swapchain_.acquire(acquired, imageIndex);
     stats_.acquireMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - ta).count();
     if (!acquiredOk) {
         // minimised or out of date: drop the frame's presentation, keep its work
         ++stats_.acquireFailures;
         submitFrame(VK_NULL_HANDLE, VK_NULL_HANDLE);
-        RECT rc{};
-        GetClientRect(options_.window, &rc);
-        if (rc.right > 0 && rc.bottom > 0) {
-            swapchain_.recreate(static_cast<std::uint32_t>(rc.right), static_cast<std::uint32_t>(rc.bottom));
-        }
+        recreateSwapchain();
         beginFrame();
         return;
     }
@@ -357,22 +454,18 @@ void Device::present() {
     b.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     vkCmdPipelineBarrier2(cmd, &di);
     submitFrame(acquired, swapchain_.renderedSemaphore(imageIndex));
-    const auto tp = std::chrono::steady_clock::now();
-    const VkResult r = swapchain_.present(imageIndex);
-    stats_.presentMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tp).count();
+    presenter_.present(imageIndex);
     ++stats_.presentsQueued;
-    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) {
-        ++stats_.presentSuboptimal;
-        ++stats_.swapchainRecreates;
-        RECT rc{};
-        GetClientRect(options_.window, &rc);
-        if (rc.right > 0 && rc.bottom > 0) {
-            swapchain_.recreate(static_cast<std::uint32_t>(rc.right), static_cast<std::uint32_t>(rc.bottom));
-        }
-    } else if (r != VK_SUCCESS) {
-        spdlog::error("vulkan: present: {}", vk::resultString(r));
-    }
     beginFrame();
+}
+
+// render thread, the present thread idle
+void Device::recreateSwapchain() {
+    RECT rc{};
+    GetClientRect(options_.window, &rc);
+    if (rc.right > 0 && rc.bottom > 0) {
+        swapchain_.recreate(static_cast<std::uint32_t>(rc.right), static_cast<std::uint32_t>(rc.bottom));
+    }
 }
 
 // ---- resources ------------------------------------------------------------------------------------------------------
@@ -407,6 +500,15 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
             return it->second;
         }
     }
+    struct Timed {
+        std::atomic<std::uint64_t>& ns;
+        std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+        ~Timed() {
+            ns += static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+        }
+    } timed{shaderNs_};
+    ++shadersBuilt_;
     const auto dec = shader::decode(tokens);
     if (!dec.ok()) {
         spdlog::warn("d3d9: shader {:016x}: {}", hash, dec.error);
@@ -430,6 +532,7 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
         }
     }
     if (spirv.empty()) {
+        ++shadersCompiled_;
         auto compiled = shader::compileGlsl(dec.program.version.stage, glsl.glsl);
         if (!compiled.ok()) {
             spdlog::error("d3d9: shader {:016x} does not compile:\n{}", hash, compiled.log);
@@ -881,6 +984,7 @@ bool Device::readImageLevel(vk::Image& img, std::uint32_t level, std::uint32_t l
     if (!img.valid() || size == 0) {
         return false;
     }
+    const auto t0 = std::chrono::steady_clock::now();
     endRendering();
     VkBuffer rb = VK_NULL_HANDLE;
     VmaAllocation ra = VK_NULL_HANDLE;
@@ -901,12 +1005,14 @@ bool Device::readImageLevel(vk::Image& img, std::uint32_t level, std::uint32_t l
     vkCmdCopyImageToBuffer(frames_.cmd(), img.image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rb, 1, &region);
     // the copy must finish before the CPU reads: end the frame's work here and start a new command buffer
     submitFrame(VK_NULL_HANDLE, VK_NULL_HANDLE);
-    frames_.waitIdle();
+    frames_.waitFor(frames_.currentValue() - 1);
     beginFrame();
     vmaInvalidateAllocation(ctx_.allocator(), ra, 0, VK_WHOLE_SIZE);
     const auto* p = static_cast<const std::uint8_t*>(info.pMappedData);
     out.assign(p, p + size);
     vmaDestroyBuffer(ctx_.allocator(), rb, ra);
+    ++perf_.readbacks;
+    perf_.readbackMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     return true;
 }
 

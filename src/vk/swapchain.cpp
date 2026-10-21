@@ -114,7 +114,7 @@ bool Swapchain::build(std::uint32_t width, std::uint32_t height) {
 }
 
 bool Swapchain::recreate(std::uint32_t width, std::uint32_t height) {
-    vkDeviceWaitIdle(ctx_->device());
+    ctx_->waitIdle();
     return build(width, height);
 }
 
@@ -137,7 +137,7 @@ void Swapchain::destroy() {
     if (ctx_ == nullptr) {
         return;
     }
-    vkDeviceWaitIdle(ctx_->device());
+    ctx_->waitIdle();
     destroySwapchain();
     if (surface_ != VK_NULL_HANDLE) {
         vkDestroySurfaceKHR(ctx_->instance(), surface_, nullptr);
@@ -166,7 +166,7 @@ VkResult Swapchain::present(std::uint32_t imageIndex) {
     pi.swapchainCount = 1;
     pi.pSwapchains = &swapchain_;
     pi.pImageIndices = &imageIndex;
-    return vkQueuePresentKHR(ctx_->queue(), &pi);
+    return ctx_->queuePresent(pi);
 }
 
 }  // namespace rvk::vk

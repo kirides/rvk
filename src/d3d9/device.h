@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -26,9 +27,11 @@
 #include "vk/context.h"
 #include "vk/formats.h"
 #include "vk/frames.h"
+#include "vk/gputimer.h"
 #include "vk/image.h"
 #include "vk/pacer.h"
 #include "vk/pipeline.h"
+#include "vk/presenter.h"
 #include "vk/swapchain.h"
 
 struct HWND__;
@@ -222,6 +225,8 @@ struct DeviceOptions {
     std::filesystem::path cacheDir;  // pipeline + shader caches; empty = no disk cache
     bool offscreen = false;          // no swapchain (tests)
     std::uint32_t logDraws = 0;      // log the first N draws in detail
+    bool perf = false;               // [debug] perf: GPU timestamps + CPU timings (Device::takePerf)
+    std::uint32_t perfFrame = 0;     // [debug] perf_frame: log the GPU time of every pass of this frame
 };
 
 struct Viewport {
@@ -241,7 +246,8 @@ struct FrameStats {
     std::uint64_t presentSuboptimal = 0;
     std::uint64_t swapchainRecreates = 0;
     double acquireMs = 0.0;  // summed time in vkAcquireNextImageKHR / vkQueuePresentKHR (per stats interval)
-    double presentMs = 0.0;
+    double presentMs = 0.0;  // on the present thread
+    double presentWaitMs = 0.0;  // the render thread waiting for the present thread before it acquires
     double pacerMs = 0.0;  // summed time the frame pacer slept
     // cumulative since creation
     std::uint64_t totalDraws = 0;
@@ -251,6 +257,34 @@ struct FrameStats {
     std::uint64_t skippedPipeline = 0;
     std::uint64_t totalClears = 0;
     std::uint64_t totalRenderPasses = 0;
+};
+
+// [debug] perf: timings and volumes summed over a stats interval (Device::takePerf). CPU times are wall-clock ms on the render
+// thread; GPU times come from timestamps (per submission, read back two submissions later).
+struct PerfStats {
+    std::uint64_t frames = 0;
+    double cpuFrameMs = 0.0;    // from the end of one present() to the start of the next: the engine's frame incl. our HAL
+    double drawMs = 0.0;        // inside Device draw calls (state translation, uploads, pipeline lookup, command recording)
+    double presentMs = 0.0;     // inside present() (blit recording, submit, pacer, acquire, vkQueuePresentKHR, next frame begin)
+    double submitMs = 0.0;      // ending the command buffers + vkQueueSubmit2
+    double slotWaitMs = 0.0;    // waiting for a free frame slot (the GPU is a full slot behind)
+    std::uint32_t readbacks = 0;  // GPU -> CPU copies that flush and wait for the GPU mid-frame
+    double readbackMs = 0.0;
+    std::uint64_t gpuSubmits = 0;  // submissions with valid timestamps
+    double gpuMs = 0.0;            // main command buffers
+    double gpuUploadMs = 0.0;      // upload command buffers
+    std::uint64_t draws = 0;
+    std::uint64_t renderPasses = 0;
+    std::uint64_t pipelineBinds = 0;
+    std::uint64_t ringBytes = 0;           // transient ring memory handed out (constants, dynamic buffers, staging)
+    std::uint64_t textureUploadBytes = 0;  // texel bytes copied to images
+    std::uint64_t bufferUploadBytes = 0;   // bytes copied into dynamic-buffer ring copies / static buffers
+    std::uint64_t pipelinesBuilt = 0;      // vkCreateGraphicsPipelines calls
+    double pipelineMs = 0.0;
+    std::uint64_t shadersBuilt = 0;        // translated shaders (decode + GLSL + module; glslang only on SPIR-V cache misses)
+    std::uint64_t shadersCompiled = 0;     // of those, compiled by glslang (SPIR-V disk cache miss)
+    double shaderMs = 0.0;
+    std::vector<float> frameIntervalsMs;   // present-to-present
 };
 
 class Device {
@@ -329,9 +363,17 @@ public:
     Surface* backBuffer() { return backBufferSurface_; }
     Surface* autoDepthStencil() { return depthSurface_; }
     const FrameStats& stats() const { return stats_; }
+    // [debug] perf: the numbers since the last call (zeroed afterwards)
+    PerfStats takePerf();
+    bool perfEnabled() const { return options_.perf; }
+    // resources report what they copy to the GPU (render thread)
+    void countUpload(bool texture, std::uint64_t bytes) {
+        (texture ? perf_.textureUploadBytes : perf_.bufferUploadBytes) += bytes;
+    }
     void resetTimings() {
         stats_.acquireMs = 0.0;
         stats_.presentMs = 0.0;
+        stats_.presentWaitMs = 0.0;
         stats_.pacerMs = 0.0;
     }
 
@@ -381,6 +423,8 @@ private:
     vk::Bindless bindless_;
     vk::PipelineCache pipelines_;
     vk::Swapchain swapchain_;
+    vk::Presenter presenter_;
+    void recreateSwapchain();
     vk::FramePacer pacer_;
     std::chrono::steady_clock::time_point pacerChecked_{};
     void* pacerMonitor_ = nullptr;
@@ -459,6 +503,25 @@ private:
     VkPipeline boundPipeline_ = VK_NULL_HANDLE;
     std::uint32_t instanceCount_ = 1;
     FrameStats stats_;
+
+    // [debug] perf
+    struct DrawTimer;
+    void gpuMark(const char* what);
+    vk::GpuTimer gpuTimer_;
+    PerfStats perf_;
+    std::uint64_t perfPipelinesBase_ = 0;
+    double perfPipelineMsBase_ = 0.0;
+    std::atomic<std::uint64_t> shadersBuilt_{0};
+    std::atomic<std::uint64_t> shadersCompiled_{0};
+    std::atomic<std::uint64_t> shaderNs_{0};
+    std::uint64_t perfShadersBase_ = 0, perfShadersCompiledBase_ = 0, perfShaderNsBase_ = 0;
+    std::chrono::steady_clock::time_point presentEnd_{};
+    std::chrono::steady_clock::time_point presentStart_{};
+    std::chrono::steady_clock::time_point lastPresentStart_{};
+    std::uint64_t ringBytesBase_ = 0;
+    std::uint32_t passIndex_ = 0;   // render passes of the current submission (GPU detail labels)
+    std::uint32_t passDraws_ = 0;   // draws in the open render pass
+    std::uint64_t gpuDetailFrame_[vk::Frames::kInFlight]{};  // frame number whose details a slot records (0 = none)
 };
 
 }  // namespace rvk::d3d9

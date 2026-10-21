@@ -113,12 +113,16 @@ add_library(rvk_core STATIC
     src/vk/formats.h
     src/vk/frames.cpp
     src/vk/frames.h
+    src/vk/gputimer.cpp
+    src/vk/gputimer.h
     src/vk/image.cpp
     src/vk/image.h
     src/vk/pipeline.cpp
     src/vk/pipeline.h
     src/vk/pacer.cpp
     src/vk/pacer.h
+    src/vk/presenter.cpp
+    src/vk/presenter.h
     src/vk/probe.cpp
     src/vk/probe.h
     src/vk/swapchain.cpp

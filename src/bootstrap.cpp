@@ -148,6 +148,9 @@ void detourInitializeAdmin(void* self, int apiType) {
         vo.validation = g_config.validation;
         vo.adapter = g_config.adapter;
         vo.maxFps = g_config.maxFps;
+        vo.vsync = g_config.vsync;
+        vo.perf = g_config.perf || g_config.perfFrame != 0;
+        vo.perfFrame = g_config.perfFrame;
         vo.cacheDir = paths::dataDir() / L"cache";
         vo.screenshotFrames = g_config.screenshotFrames;
         vo.logDraws = g_config.logDraws;

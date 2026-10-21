@@ -24,6 +24,7 @@ struct Config {
     bool probe = true;         // log the Vulkan devices and their features at startup
     int adapter = -1;          // physical device index, -1 = best discrete GPU
     double maxFps = 0.0;       // present-rate cap; 0 = the monitor's refresh rate with vsync, none without
+    int vsync = -1;            // -1 = the engine's option, 0 = off, 1 = on ("engine" / false / true)
 
     // [trace] (mode = "trace")
     int traceLogFirst = 3;     // calls per HAL slot logged with their arguments
@@ -38,6 +39,8 @@ struct Config {
     std::vector<std::uint32_t> snapshotFrames;
     // (vulkan) eCAPITexture::SaveTextureToFile (always refused) also dumps the image to <bin>/rvk/dumps/<name>.png
     bool dumpSavedTextures = false;
+    bool perf = false;            // (vulkan) GPU timestamps + CPU timings, a "perf:" line in rvk.log every 5 s
+    std::uint32_t perfFrame = 0;  // (vulkan) log the GPU time of every render pass of this frame (needs perf)
 };
 
 // Parses config.toml text. Unknown keys are ignored, bad values keep the default; `error` gets a parse error message.

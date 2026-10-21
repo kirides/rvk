@@ -21,7 +21,8 @@ public:
 
     // acquire: signals `acquired`; returns false when the swapchain must be recreated (out of date / minimised)
     bool acquire(VkSemaphore acquired, std::uint32_t& imageIndex);
-    // present: waits on the per-image "rendered" semaphore (renderedSemaphore(imageIndex))
+    // present: waits on the per-image "rendered" semaphore (renderedSemaphore(imageIndex)). Thread-safe against submits, but
+    // not against the other swapchain functions (Presenter::waitIdle before those)
     VkResult present(std::uint32_t imageIndex);
 
     VkSemaphore renderedSemaphore(std::uint32_t imageIndex) const { return rendered_[imageIndex]; }

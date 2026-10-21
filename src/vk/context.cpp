@@ -196,6 +196,7 @@ bool Context::pickPhysicalDevice(const ContextOptions& options) {
     for (std::uint32_t i = 0; i < qn; ++i) {
         if ((qf[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0 && vkGetPhysicalDeviceWin32PresentationSupportKHR(physical_, i)) {
             queueFamily_ = i;
+            features_.timestampPeriod = qf[i].timestampValidBits != 0 ? props_.limits.timestampPeriod : 0.0f;
             return true;
         }
     }
@@ -215,7 +216,8 @@ bool Context::createDevice() {
     }
 
     // supported core features
-    VkPhysicalDeviceFeatures2 sup2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    VkPhysicalDeviceVulkan12Features sup12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+    VkPhysicalDeviceFeatures2 sup2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &sup12};
     vkGetPhysicalDeviceFeatures2(physical_, &sup2);
 
     VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
@@ -241,6 +243,8 @@ bool Context::createDevice() {
     f12.timelineSemaphore = VK_TRUE;
     f12.bufferDeviceAddress = VK_TRUE;
     f12.scalarBlockLayout = VK_TRUE;
+    f12.hostQueryReset = sup12.hostQueryReset;
+    features_.hostQueryReset = sup12.hostQueryReset == VK_TRUE;
     VkPhysicalDeviceVulkan13Features f13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
     f13.dynamicRendering = VK_TRUE;
     f13.synchronization2 = VK_TRUE;
@@ -344,10 +348,25 @@ bool Context::createAllocator() {
     return true;
 }
 
-void Context::destroy() {
+VkResult Context::queueSubmit(const VkSubmitInfo2& submit, VkFence fence) {
+    const std::lock_guard lock(queueMutex_);
+    return vkQueueSubmit2(queue_, 1, &submit, fence);
+}
+
+VkResult Context::queuePresent(const VkPresentInfoKHR& present) {
+    const std::lock_guard lock(queueMutex_);
+    return vkQueuePresentKHR(queue_, &present);
+}
+
+void Context::waitIdle() {
     if (device_ != VK_NULL_HANDLE) {
+        const std::lock_guard lock(queueMutex_);
         vkDeviceWaitIdle(device_);
     }
+}
+
+void Context::destroy() {
+    waitIdle();
     if (allocator_ != VK_NULL_HANDLE) {
         vmaDestroyAllocator(allocator_);
         allocator_ = VK_NULL_HANDLE;

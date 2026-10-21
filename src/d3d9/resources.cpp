@@ -293,6 +293,7 @@ void Texture::upload(VkCommandBuffer cmd) {
             region.imageOffset = {static_cast<std::int32_t>(x0), static_cast<std::int32_t>(y0), static_cast<std::int32_t>(z0)};
             region.imageExtent = {w, h, d};
             vkCmdCopyBufferToImage(cmd, staging.buffer, image_.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+            dev_.countUpload(true, sliceBytes * d);
             l.dirty = false;
             // File textures (never locked) are not read back by the engine: drop the CPU copy. A texture that was locked keeps
             // it like D3D9's managed pool: partial locks (the engine's glyph atlases) must see the earlier contents.
@@ -386,12 +387,14 @@ Buffer::Binding Buffer::gpu() {
             const std::uint32_t hi = discarded_ ? dirtyHi_ : size_;
             if (hi > lo) {
                 std::memcpy(static_cast<std::uint8_t*>(a.ptr) + lo, cpu_.data() + lo, hi - lo);
+                dev_.countUpload(false, hi - lo);
             }
             binding_ = {a.buffer, a.offset};
             boundPtr_ = static_cast<std::uint8_t*>(a.ptr);
             gpuFrame_ = frame;
         } else if (dirty_ && dirtyHi_ > dirtyLo_) {
             std::memcpy(boundPtr_ + dirtyLo_, cpu_.data() + dirtyLo_, dirtyHi_ - dirtyLo_);
+            dev_.countUpload(false, dirtyHi_ - dirtyLo_);
         }
         dirty_ = false;
         discarded_ = false;
@@ -416,6 +419,7 @@ Buffer::Binding Buffer::gpu() {
             return {};
         }
         std::memcpy(staging.ptr, cpu_.data(), size_);
+        dev_.countUpload(false, size_);
         VkCommandBuffer cmd = dev_.uploadCommands();
         const VkBufferCopy copy{staging.offset, 0, size_};
         vkCmdCopyBuffer(cmd, staging.buffer, nb, 1, &copy);

@@ -1,6 +1,9 @@
 // d3d9::Device draws: rendering scopes, texture preparation, pipeline state, vertex input, dynamic state, constants.
 
+#include <chrono>
 #include <cstring>
+#include <format>
+#include <string>
 
 #include <spdlog/spdlog.h>
 
@@ -10,10 +13,32 @@
 
 namespace rvk::d3d9 {
 
+// [debug] perf: CPU time inside a draw call
+struct Device::DrawTimer {
+    Device& d;
+    std::chrono::steady_clock::time_point t0;
+    explicit DrawTimer(Device& device) : d(device), t0(device.options_.perf ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
+    ~DrawTimer() {
+        if (d.options_.perf) {
+            d.perf_.drawMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        }
+    }
+};
+
 void Device::endRendering() {
     if (rendering_) {
         vkCmdEndRendering(frames_.cmd());
         rendering_ = false;
+        if (gpuTimer_.enabled()) {
+            const std::uint32_t slot = frames_.currentSlot();
+            std::string label;
+            if (gpuTimer_.details(slot)) {
+                label = std::format("pass {}: {}x{}, {} colour ({}), depth {}, {} draws", passIndex_, targetWidth_, targetHeight_,
+                                    colorCount_, colorCount_ > 0 ? static_cast<int>(colorFormats_[0]) : 0,
+                                    static_cast<int>(depthFormat_), passDraws_);
+            }
+            gpuTimer_.mark(frames_.cmd(), slot, vk::GpuTimer::Stream::Main, std::move(label));
+        }
     }
 }
 
@@ -71,6 +96,14 @@ bool Device::beginRendering() {
         targetWidth_ = targetHeight_ = 0;
         return false;
     }
+    if (gpuTimer_.enabled()) {
+        const std::uint32_t slot = frames_.currentSlot();
+        gpuTimer_.mark(cmd, slot, vk::GpuTimer::Stream::Main,
+                       gpuTimer_.details(slot) ? std::format("barriers / copies / inline uploads before pass {}", passIndex_ + 1)
+                                               : std::string());
+    }
+    ++passIndex_;
+    passDraws_ = 0;
     VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
     ri.renderArea = {{0, 0}, {targetWidth_, targetHeight_}};
     ri.layerCount = 1;
@@ -381,6 +414,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType) {
     if (pipeline != boundPipeline_) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
         boundPipeline_ = pipeline;
+        ++perf_.pipelineBinds;
     }
     setDynamicState(primitiveType);
     uploadConstants();
@@ -429,10 +463,12 @@ bool Device::prepareDraw(std::uint32_t primitiveType) {
     vkCmdPushConstants(cmd, bindless_.pipelineLayout(), VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
     ++stats_.draws;
     ++stats_.totalDraws;
+    ++passDraws_;
     return true;
 }
 
 void Device::drawPrimitive(std::uint32_t type, std::uint32_t startVertex, std::uint32_t primitiveCount) {
+    const DrawTimer timer(*this);
     if (primitiveCount == 0 || !prepareDraw(type)) {
         return;
     }
@@ -441,6 +477,7 @@ void Device::drawPrimitive(std::uint32_t type, std::uint32_t startVertex, std::u
 
 void Device::drawIndexedPrimitive(std::uint32_t type, std::int32_t baseVertex, std::uint32_t, std::uint32_t, std::uint32_t startIndex,
                                   std::uint32_t primitiveCount) {
+    const DrawTimer timer(*this);
     if (primitiveCount == 0 || indices_ == nullptr || !prepareDraw(type)) {
         return;
     }
@@ -453,6 +490,7 @@ void Device::drawIndexedPrimitive(std::uint32_t type, std::int32_t baseVertex, s
 }
 
 void Device::drawPrimitiveUP(std::uint32_t type, std::uint32_t primitiveCount, const void* data, std::uint32_t stride) {
+    const DrawTimer timer(*this);
     if (primitiveCount == 0 || data == nullptr) {
         return;
     }
@@ -471,6 +509,7 @@ void Device::drawPrimitiveUP(std::uint32_t type, std::uint32_t primitiveCount, c
 
 void Device::drawIndexedPrimitiveUP(std::uint32_t type, std::uint32_t minIndex, std::uint32_t numVertices, std::uint32_t primitiveCount,
                                     const void* indices, bool index32, const void* vertices, std::uint32_t stride) {
+    const DrawTimer timer(*this);
     if (primitiveCount == 0 || indices == nullptr || vertices == nullptr) {
         return;
     }

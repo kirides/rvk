@@ -1,5 +1,6 @@
 #include "vk/pipeline.h"
 
+#include <chrono>
 #include <cstring>
 #include <fstream>
 
@@ -122,7 +123,11 @@ VkPipeline PipelineCache::get(const PipelineDesc& desc) {
     if (auto it = pipelines_.find(desc); it != pipelines_.end()) {
         return it->second;
     }
+    const auto t0 = std::chrono::steady_clock::now();
     VkPipeline p = build(desc);
+    built_.fetch_add(1, std::memory_order_relaxed);
+    buildNs_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()),
+                       std::memory_order_relaxed);
     pipelines_.emplace(desc, p);  // also caches failures (VK_NULL_HANDLE) so they are logged once
     return p;
 }

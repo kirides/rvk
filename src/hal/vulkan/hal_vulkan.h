@@ -25,6 +25,9 @@ struct Options {
     bool validation = false;
     int adapter = -1;
     double maxFps = 0.0;
+    int vsync = -1;  // -1 = the engine's option, 0 = off, 1 = on
+    bool perf = false;
+    std::uint32_t perfFrame = 0;
     std::filesystem::path cacheDir;  // <bin>/rvk/cache
     std::vector<std::uint32_t> screenshotFrames;  // frames whose back buffer is saved as PNG
     std::filesystem::path screenshotDir;           // <bin>/rvk/screenshots
@@ -419,6 +422,7 @@ private:
                                                   eCGfxShared::eSGfxLayersDesc& out);
     void applyAlphaTest(bool enable, const eCGfxShared::eSGfxAlphaTestData& d);
     void logFrameStats();
+    void logPerf(d3d9::PerfStats p);
 
     d3d9::Device dev_;
     std::array<bool, M_COUNT> master_{};

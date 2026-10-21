@@ -46,6 +46,11 @@ public:
     bool recording() const { return recording_; }
 
     std::uint64_t currentValue() const { return frameValue_; }  // value the frame being recorded will signal
+    std::uint32_t currentSlot() const { return slot(); }
+    bool uploadBegun() const { return slots_[slot()].uploadBegun; }
+    // statistics: ms the last begin() waited for its slot (the CPU ran a full slot ahead of the GPU); ring bytes handed out
+    double lastSlotWaitMs() const { return lastSlotWaitMs_; }
+    std::uint64_t ringBytes() const { return ringBytes_; }
     std::uint64_t completedValue() const;
     void waitFor(std::uint64_t value) const;
     void waitIdle();
@@ -81,6 +86,8 @@ private:
     Slot slots_[kInFlight];
     std::uint64_t frameValue_ = 1;  // value of the frame being recorded / next to record
     bool recording_ = false;
+    double lastSlotWaitMs_ = 0.0;
+    std::uint64_t ringBytes_ = 0;
 
     std::vector<Chunk> chunks_;
     std::vector<std::size_t> freeChunks_;

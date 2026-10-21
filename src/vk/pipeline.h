@@ -5,6 +5,7 @@
 // (viewport, scissor, cull mode, front face, topology, depth/stencil state, depth bias, blend constants) is dynamic state the
 // renderer sets per draw. Pipelines are cached by the byte image of the description.
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <mutex>
@@ -72,6 +73,9 @@ public:
     // writes the VkPipelineCache blob (called at shutdown and periodically)
     void save();
     std::size_t size() const;
+    // statistics: pipelines built (vkCreateGraphicsPipelines calls) and the time spent in them, cumulative
+    std::uint64_t built() const { return built_.load(std::memory_order_relaxed); }
+    double buildMs() const { return static_cast<double>(buildNs_.load(std::memory_order_relaxed)) * 1e-6; }
 
     static std::vector<VkDynamicState> dynamicStates(const Context& ctx);
 
@@ -91,6 +95,8 @@ private:
     std::filesystem::path file_;
     mutable std::mutex mutex_;
     std::unordered_map<PipelineDesc, VkPipeline, Hash, Eq> pipelines_;
+    std::atomic<std::uint64_t> built_{0};
+    std::atomic<std::uint64_t> buildNs_{0};
 };
 
 VkShaderModule createShaderModule(Context& ctx, std::span<const std::uint32_t> spirv);

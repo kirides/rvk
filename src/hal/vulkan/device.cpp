@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -71,7 +72,9 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     o.window = p.window;
     o.width = p.backBufferWidth;
     o.height = p.backBufferHeight;
-    o.vsync = p.vsync;
+    o.vsync = options.vsync < 0 ? p.vsync : options.vsync != 0;
+    o.perf = options.perf;
+    o.perfFrame = options.perfFrame;
     o.depthFormat = static_cast<std::uint32_t>(p.depthFormat);
     o.validation = options.validation;
     o.adapter = options.adapter;
@@ -526,7 +529,7 @@ bEResult HalDevice::DestroyDepthBuffer(void* a0) {
 
 bEResult HalDevice::ToggleNewMode(eCAPIDevice::eSAPIModeParameters const& a0) {
     spdlog::info("hal: ToggleNewMode {}x{} (windowed {}, vsync {})", a0.backBufferWidth, a0.backBufferHeight, a0.windowed, a0.vsync);
-    dev_.setVsync(a0.vsync);
+    dev_.setVsync(options_.vsync < 0 ? a0.vsync : options_.vsync != 0);
     return dev_.resize(a0.backBufferWidth, a0.backBufferHeight) ? bEResult_Ok : bEResult_False;
 }
 
@@ -644,10 +647,13 @@ void HalDevice::logFrameStats() {
         const double secs = std::chrono::duration<double>(now - lastStatsTime_).count();
         const double frames = std::max(1.0, static_cast<double>(s.frames - lastStatsFrame_));
         spdlog::info("hal: {:.1f} fps, {} draws in the last frame; presents {}, acquire failures {}, suboptimal {}; avg acquire "
-                     "{:.2f} ms, present {:.2f} ms, pacing {:.2f} ms",
+                     "{:.2f} ms, present {:.2f} ms (present thread; render thread waited {:.2f} ms), pacing {:.2f} ms",
                      static_cast<double>(s.frames - lastStatsFrame_) / secs, s.lastFrameDraws, s.presentsQueued, s.acquireFailures,
-                     s.presentSuboptimal, s.acquireMs / frames, s.presentMs / frames, s.pacerMs / frames);
+                     s.presentSuboptimal, s.acquireMs / frames, s.presentMs / frames, s.presentWaitMs / frames, s.pacerMs / frames);
         dev_.resetTimings();
+        if (dev_.perfEnabled()) {
+            logPerf(dev_.takePerf());
+        }
         lastStatsTime_ = now;
         lastStatsFrame_ = s.frames;
         spdlog::info("hal: frame {}: {} draws total, {} clears, {} render passes; skipped: {} no shader, {} no target, {} vertex "
@@ -656,6 +662,30 @@ void HalDevice::logFrameStats() {
                      s.skippedVertexInput, s.skippedPipeline, halDraws_, unimplementedCount(),
                      static_cast<double>(d3d9::Texture::cpuBytesTotal()) / (1024.0 * 1024.0));
     }
+}
+
+// [debug] perf: one line per stats interval (docs/research/performance.md explains the fields)
+void HalDevice::logPerf(d3d9::PerfStats p) {
+    if (p.frames == 0) {
+        return;
+    }
+    const double n = static_cast<double>(p.frames);
+    auto& iv = p.frameIntervalsMs;
+    std::ranges::sort(iv);
+    const auto pct = [&](double q) { return iv.empty() ? 0.0 : static_cast<double>(iv[std::min(iv.size() - 1, static_cast<std::size_t>(q * static_cast<double>(iv.size())))]); };
+    const double other = p.cpuFrameMs - p.drawMs - p.readbackMs;
+    spdlog::info("perf: {} frames, interval p50 {:.2f} / p95 {:.2f} / max {:.2f} ms; CPU per frame: engine+HAL {:.2f} ms (draw calls {:.2f}, "
+                 "read-backs {:.2f} = {} per frame, engine+HAL rest {:.2f}), present {:.2f} ms (submit {:.2f}, slot wait {:.2f}); "
+                 "GPU per frame {:.2f} ms (+ uploads {:.3f}) over {:.2f} submissions",
+                 p.frames, pct(0.5), pct(0.95), iv.empty() ? 0.0 : static_cast<double>(iv.back()), p.cpuFrameMs / n, p.drawMs / n,
+                 p.readbackMs / n, static_cast<double>(p.readbacks) / n, other / n, p.presentMs / n, p.submitMs / n, p.slotWaitMs / n,
+                 p.gpuSubmits > 0 ? p.gpuMs / n : 0.0, p.gpuSubmits > 0 ? p.gpuUploadMs / n : 0.0, static_cast<double>(p.gpuSubmits) / n);
+    spdlog::info("perf: per frame {:.0f} draws, {:.1f} render passes, {:.0f} pipeline binds; ring {:.0f} KiB, texture uploads {:.0f} KiB, "
+                 "buffer uploads {:.0f} KiB; in the interval: {} pipelines built ({:.1f} ms), {} shaders translated ({} compiled, {:.1f} ms)",
+                 static_cast<double>(p.draws) / n, static_cast<double>(p.renderPasses) / n, static_cast<double>(p.pipelineBinds) / n,
+                 static_cast<double>(p.ringBytes) / n / 1024.0, static_cast<double>(p.textureUploadBytes) / n / 1024.0,
+                 static_cast<double>(p.bufferUploadBytes) / n / 1024.0, p.pipelinesBuilt, p.pipelineMs, p.shadersBuilt, p.shadersCompiled,
+                 p.shaderMs);
 }
 
 bEResult HalDevice::BeginScene() {

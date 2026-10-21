@@ -19,6 +19,12 @@ param(
     [switch]$Validation,
     # [vulkan] max_fps: present-rate cap, 0 = the monitor's refresh rate with vsync
     [double]$MaxFps = 0,
+    # [vulkan] vsync: 'engine' (the game's option), 'on', 'off'
+    [ValidateSet('engine', 'on', 'off')][string]$Vsync = 'engine',
+    # [debug] perf: GPU timestamps + CPU timings ("perf:" lines in rvk.log every 5 s)
+    [switch]$Perf,
+    # [debug] perf_frame: log the GPU time of every render pass of this frame (implies -Perf)
+    [int]$PerfFrame = 0,
     # frame numbers whose back buffer the Vulkan renderer saves to bin/rvk/screenshots/frame_<n>.png, e.g. 300,900
     [string]$Screenshots = '',
     # eCApplication::Draw calls at which the engine's own snapshot is taken (BMP in <copy>\localappdata\...\Risen\ScreenShots)
@@ -79,8 +85,10 @@ if ($NoRenderer) {
         '[renderer]', "mode = `"$Mode`"",
         '[log]', "level = `"$RvkLogLevel`"",
         '[vulkan]', "validation = $($Validation.IsPresent.ToString().ToLower())", "max_fps = $([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.0##}', $MaxFps))",
+        "vsync = $(@{ engine = '"engine"'; on = 'true'; off = 'false' }[$Vsync])",
         '[debug]', "screenshot_frames = [$Screenshots]", "log_draws = $LogDraws", "log_frame = $LogFrame", "snapshot_frames = [$Snapshots]",
-        "dump_saved_textures = $($DumpSavedTextures.IsPresent.ToString().ToLower())"
+        "dump_saved_textures = $($DumpSavedTextures.IsPresent.ToString().ToLower())",
+        "perf = $($Perf.IsPresent.ToString().ToLower())", "perf_frame = $PerfFrame"
     )
     Remove-Item (Join-Path $rvkDir 'screenshots') -Recurse -Force -ErrorAction SilentlyContinue
     [IO.File]::WriteAllLines((Join-Path $rvkDir 'config.toml'), $cfg)
