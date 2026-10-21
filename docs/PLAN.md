@@ -179,8 +179,23 @@ efcompare.ps1` + `mods/rvkcompare` (13 spots: beach rain/sun,
   `camera.get` at fixed poses (scenario `rvk_camera`). Verified: refcompare 13 / 13 PASS against the stored D3D9 reference
   (run `out\refcompare\20261021-204240`), validation clean, `scene_*` unit tests.
   Open: the camera moves in only ~half of the rendered frames during a flight (why), Preview / point-light views unseen.
-* remaining do-now items 2-6, 8 of the roadmap (draw tags, resource identity, CTAB semantics, ABI slots, injection points,
-  RT capability).
+* **Draw tags + records, resource identity, CTAB semantics, tint view (do-now items 2, 3, 4): done (2026-10-21,
+  docs/research/draw-tags.md).** Every draw carries a kind from the engine object that issued it: patched render-context
+  vtable slots (mesh, animation, SpeedTree, SpeedTree billboard, vegetation, debug; the precipitation and sky contexts through
+  their `CreateRenderContext`) and detours (`eCSubMesh::Render`, sky dome, particles, strips, decals, billboards) set a tag on
+  `d3d9::Device`; kinds StaticMesh / InstancedMesh / Refracted (water) / Skinned / SpeedTree / SpeedTreeBillboard /
+  Vegetation / Sky / Particle / Strip / Decal / Billboard / Precipitation / Debug / ShadowMask / Post / Gui, **0 Unknown** at
+  beach_sun, beach_rain, jungle. Per-frame records (view, pass, kind, context / entity / sub-mesh / material, vertex / index
+  buffer id + generation, ranges, shader hashes + semantics flags, VS / PS constant and draw-block addresses, textures; cap 8192)
+  and a kind x view histogram (rvk.log every 5 s, overlay "Frame structure"). `Buffer` / `Texture` ids + generations
+  (`BufferCopyState`, unit-tested rules). `Shader::semantics`: registers of `g_vViewProjection`, `g_vInstanceData`,
+  `g_DirLight`, `g_AmbientLight`, `smpRefract`, `smpDepthmap`, `g_SamplerData`, ... (corpus survey) + skinned / instanced /
+  SpeedTree flags. Debug view `debug.tint_draws` (kind / pass): a tint variant of each pixel shader built on demand, the
+  normal path untouched. Verified: tint at beach_sun shows water = Refracted, palms = SpeedTree, hero = Skinned; validation
+  clean; corpus + tint variants 2483 / 2483, compare_disasm 100 %; CPU 0.04-0.09 ms per frame (~1430 draws); refcompare
+  against the stored reference 12 PASS + 1 WARN (beach_sun, temporal sea noise; PASS on rerun), run `20261021-212745`.
+  Open: material names (water list), light-streak / dynamic-light contexts unseen.
+* remaining do-now items 5, 6, 8 of the roadmap (ABI slots, injection points, RT capability).
 
 ### M7+ Enhanced graphics
 * candidates: anisotropic filtering + MSAA/TAA/SMAA, higher-resolution and better-filtered shadows, modern tonemapping/HDR10,

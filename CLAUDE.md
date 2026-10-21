@@ -48,7 +48,10 @@ of frame N), `-Snapshots N,M` (at those `eCApplication::Draw` calls: the engine 
 `localappdata\Local\Risen\ScreenShots`) + a self-test of the `rvk_screenshot` exports), `-Validation`, `-DumpSavedTextures` (the engine's refused `SaveTextureToFile` writes -> `bin/rvk/dumps/*.png`), `-AllowFocus` (test runs
 stay in the background by default). rvk.log prints fps / draw counts every 5 s and every unimplemented HAL slot once, plus the
 last frame's phase structure (`Post{Shadow{..} Main{DepthPrepass(n) ShadowMask(n) Solid(n) Refracted(n) Alpha(n)} ..}`), its
-main camera and a camera cross-check (docs/research/frame-phases.md); `-LogFrame` lines carry a `[View/Pass]` prefix.
+main camera and a camera cross-check (docs/research/frame-phases.md); `-LogFrame` lines carry a `[View/Pass]` prefix. Also the
+draw-kind histogram ("draw kinds": kind x view; "untagged draw" lines name draws no hook tagged; docs/research/draw-tags.md).
+Debug view: `-Setting 'debug.tint_draws=kind'` (or `pass`; overlay category Debug) tints draws by kind (water blue, SpeedTree
+green, skinned red, instanced cyan, unknown magenta, ...); `rvkcompare` `-Param show_actors=1` keeps the player / NPCs visible.
 Scenario `rvk_camera` (this repo's mods) holds fixed camera poses to compare the camera block with `risen.camera.get`.
 Performance (docs/research/performance.md): `-Perf` (GPU timestamps, CPU split, uploads, pipeline builds, pacer: `perf:`
 lines every 5 s), `-PerfFrame N` (GPU time of every render pass of frame N), `-Vsync on|off|engine`, `-MaxFps N`; the
@@ -102,7 +105,7 @@ whole corpus (must stay 100 %). The contract between translated shaders and the 
 | `engine/symbols.h` | X-macro table of the Engine.dll symbols we bind by decorated name |
 | `engine/scene_hooks.*` | frame phase markers (Vulkan mode only): detours on Execute / z pass / shadow / solid / alpha / sky / post / GUI, the RenderRefracted vtable slot, image-role tags, the main camera read (docs/research/frame-phases.md) |
 | `vk/` | Vulkan core: context (floor), swapchain, frames + upload ring, bindless set, images, pipeline cache, formats |
-| `d3d9/` | D3D9 device model on Vulkan (states, resources, draws, present): what the HAL and effects drive; `rvk_d3d9test`; `scene.*` = frame semantics (phase tracker, image roles, camera block) |
+| `d3d9/` | D3D9 device model on Vulkan (states, resources, draws, present): what the HAL and effects drive; `rvk_d3d9test`; `scene.*` = frame semantics (phase tracker, image roles, camera block); `draws.*` draw tags, records, tint palette; `identity.*` resource ids + generations; `semantics.*` CTAB shader semantics (draw-tags.md) |
 | `hal/vulkan/` | the engine HAL on `d3d9::Device` (mode = "vulkan"): instance, device, resources, HLSL shaders, effects |
 | `fx/` | fx_2_0 effect binaries: parser, constant tables, preshaders (`rvk_fxtool`) |
 | `res/` | DDS parsing |

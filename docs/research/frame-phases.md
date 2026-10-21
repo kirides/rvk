@@ -141,4 +141,5 @@ logged as "was the ..."); dying textures leave the table (`~Texture` -> `forgetI
 * Point-light shadow cubes, `Preview` (`RenderEntity`) and `Other` views: not seen in any refcompare spot; who uses them
   (editor, item previews?) is open.
 * Why the camera moves only in about every second rendered frame (section 5).
-* Draw tags per draw (roadmap item 2) and injection points (item 6) build on these phases.
+* Draw tags per draw (roadmap item 2): done, docs/research/draw-tags.md (the RenderRefracted slot patch is now one entry of
+  its render-context slot table). Injection points (item 6) build on these phases.
