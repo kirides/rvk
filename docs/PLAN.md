@@ -211,7 +211,23 @@ efcompare.ps1` + `mods/rvkcompare` (13 spots: beach rain/sun,
   frame for ~1450 draws with everything off (fps unchanged), refcompare 13 / 13 PASS against the stored D3D9
   reference (run `out\refcompare\20261021-222140`).
   Deferred: motion / normal outputs, the previous-constants map, TAA jitter, CTAB-name overrides in Device.
-* remaining do-now item 8 of the roadmap (RT capability).
+* **Optional ray tracing tier + capability resolution (do-now item 8): done (2026-10-21, docs/research/raytracing.md).**
+  The probe reads `VK_KHR_acceleration_structure` / `ray_query` / `deferred_host_operations`, position fetch, opacity
+  micromaps, maintenance1, the RT pipeline (information only), their feature bits and the AS limits; `Context` enables the
+  tier when present and allowed (`rt.allow`, restart setting, default on; a failing `vkCreateDevice` is retried without
+  it). This GPU (RX 7900 XTX, AMD 26.9.2): tier + position fetch + maintenance1 yes, **opacity micromaps no**, scratch
+  alignment 256. Capability report (`core/caps.*`: GPU, driver, Vulkan version, every optional feature available /
+  enabled + reason) in rvk.log (`caps:`) and the overlay's "Capabilities"; **capability resolution** in the settings
+  registry: `Spec::requirements` (+ `unmetValue`), features read the effective value (`asX()`), unmet settings are
+  greyed with the reason and fall back to parity while the player's choice is kept; API `RVK_CAP_RAY_QUERY`,
+  `RVK_SETTING_UNAVAILABLE`. With the tier on, static VB / IB get `SHADER_DEVICE_ADDRESS | STORAGE |
+  AS_BUILD_INPUT_READ_ONLY` and the upload ring the build-input bit: no measurable CPU / GPU / memory cost. Proof:
+  `rt::selfTest` (BLAS -> TLAS by address -> `GL_EXT_ray_query` compute with an opaque and an alpha-tested instance, every
+  pixel checked) passes in `rvk_vktest --rt` (sync validation) and in the game (`[debug] rt_selftest`). Verified:
+  refcompare 13 / 13 PASS with the tier on (run `20261021-225418`), 12 PASS + beach_sun WARN (sea noise) with
+  `rt.allow=false` (`20261021-225041`), validation clean, rvk_tests 78 / 78.
+  Deferred to M9: a BLAS of real meshes from the draw records (RT instance registry + BLAS cache, TLAS address in the
+  FrameBlock).
 
 ### M7+ Enhanced graphics
 * candidates: anisotropic filtering + MSAA/TAA/SMAA, higher-resolution and better-filtered shadows, modern tonemapping/HDR10,

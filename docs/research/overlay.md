@@ -57,6 +57,7 @@ Enum, default, range or options, flags) plus its value. Values are doubles inter
 | `overlay.ab_key` | same | `f11` | live | NoAB |
 | `overlay.fps_counter` | bool | false | live | small fps readout while the overlay is closed; NoAB |
 | `overlay.ab_badge` | bool | true | live | flip badge (1.5 s) and a "B" tag while side B is active; NoAB |
+| `rt.allow` | bool | true | restart | enable the ray tracing tier at device creation; requires `RayTracingHardware` (greyed + off without it); docs/research/raytracing.md |
 
 ### 2.3 Files and precedence (decision)
 
@@ -195,8 +196,8 @@ overlay open in the swapchain path, A/B flips (swapchain recreated) and the badg
 ## 7. Open
 
 * Spass Lua binding for `rvk_setting_*` / `rvk_ab` / `rvk_overlay` (section 4).
-* Presets (Off / Low / Medium / High / Ultra / Custom) and capability resolution ("requested -> effective + reason") come with
-  the first enhancement that needs them (roadmap 4).
+* Presets (Off / Low / Medium / High / Ultra / Custom) come with the first enhancement that needs them (roadmap 4).
+  Capability resolution ("requested -> effective + reason", `Spec::requirements`) is done: docs/research/raytracing.md 3.
 * GPU time without `[debug] perf`: a begin/end-only timestamp mode would be cheap enough to keep on.
 * The gamepad is not blocked while the overlay is open.
 * A flip of `vulkan.vsync` recreates the swapchain (a short hitch); feature toggles of later enhancements should flip

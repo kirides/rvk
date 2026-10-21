@@ -416,7 +416,8 @@ RVAs are Engine.dll unless marked `Game.dll` or `Script.dll`. Dumps: `B:\DevDriv
 * **Capabilities**:
   * the probe produces `caps` (RT tier, ray query, position fetch, OMM, EDS3, memory budget)
   * each setting resolves to *requested → effective + reason* ("ray tracing: off, the GPU has no
-    `VK_KHR_ray_query`"), logged at startup and shown greyed out in the UI
+    `VK_KHR_ray_query`"), logged at startup and shown greyed out in the UI [done: `Spec::requirements`, `caps::Report`,
+    the overlay's "Capabilities"; docs/research/raytracing.md 3]
   * GD3D11 does the same with `GraphicsDeviceCapabilities` / `ApplyDeviceCapabilities`
 * **Runtime switching**: features apply at a frame boundary (`d3d9::Device::beginFrame`): create or destroy their
   resources, flip the shader variant (specialisation constant). With the RT extensions enabled at startup (section 3.1),
@@ -448,8 +449,8 @@ pixel-identical to the current renderer.
 | 5 | **Done** (docs/research/injection.md 3; motion / normal outputs, `prevVsConsts` tracking, jitter deferred to their first consumer). **ABI extension slots**. Push constants: add `drawId`, `flags`, `prevVsConsts` (u64), `frame` (u64 → FrameBlock: camera, previous camera, jitter, time, feature params), within 128 bytes. GLSL generator: specialisation-constant hooks for extra MRT outputs (motion, normal), a VS capture variant, and named-constant overrides (GI ambient) | avoids re-translating and re-validating the 2483-shader corpus contract later | `src/shader/abi.h:48-63`, `src/shader/glsl.cpp:768-770, 800-830, 900`, `src/vk/bindless.cpp:59-61`, `src/d3d9/draw.cpp:428` | M |
 | 6 | **Done** (injection.md 4: points AfterDepthPrepass / AfterOpaque / AfterRefractionCopy / AfterMainView / BeforeGui, `Device::addPass`, `vk/passes.h`; proof `debug.inject_view`). **Injection points** (pass hooks): `Device::onPhase(Phase, callback(cmd))` executed after `endRendering()`; tiny transient-texture helper with sync2 barriers (no full render graph yet) | water / ocean / RT passes plug in without touching the HAL | `src/d3d9/device.h/.cpp`, `src/d3d9/draw.cpp:13` | S-M |
 | 7 | **Done** (frame-phases.md 4). **Role tagging of engine images**: scene HDR RT (first RT of the image-filter scene), refraction copy (`CopyCurrentRTToImage` destination in the main view), depth map (`BeginZPass` target), sky env cube | inputs of water / SSR / RT without guessing | `src/hal/vulkan/resources.cpp:80`, phase hooks | S |
-| 8 | **Optional RT capability**: probe AS / ray-query / position-fetch / OMM; enable when present (`rt.allow`); conditional buffer usage flags | buffers allocated once, ready for BLAS; RT toggles at runtime | `src/vk/probe.h/.cpp`, `src/vk/context.h:19-27`, `src/vk/context.cpp:206-320`, `src/d3d9/resources.cpp:405`, `src/vk/frames.cpp:189` | S |
-| 9 | **Settings registry + `settings.toml` + capability resolution** (no UI yet) | every feature is born configurable | `src/core/config.h/.cpp` (new `settings.*`) | S |
+| 8 | **Done** (docs/research/raytracing.md; a BLAS of a real mesh from the draw records is M9's first item). **Optional RT capability**: probe AS / ray-query / position-fetch / OMM; enable when present (`rt.allow`); conditional buffer usage flags | buffers allocated once, ready for BLAS; RT toggles at runtime | `src/vk/probe.h/.cpp`, `src/vk/context.h:19-27`, `src/vk/context.cpp:206-320`, `src/d3d9/resources.cpp:405`, `src/vk/frames.cpp:189` | S |
+| 9 | **Done** (overlay.md 2; capability resolution: raytracing.md 3; presets come with the first enhancement). **Settings registry + `settings.toml` + capability resolution** (no UI yet) | every feature is born configurable | `src/core/config.h/.cpp` (new `settings.*`) | S |
 | 10 | **Done** (frame-phases.md 5; no GPU buffer yet). **Camera / frame block**: current + previous view-projection, inverse, position, far, frame index, time (harvested c0 / c4 / c8 / c11 + `ms_pActiveCamera`) | motion vectors, TAA, temporal RT | `src/d3d9/device.*`, `src/hal/vulkan/device.cpp` | S |
 
 Not now: a full render graph with aliasing (GD3D11 lost devices with aliasing on NVIDIA), GPU-driven rendering, DGC.

@@ -27,6 +27,7 @@ $env:VCPKG_ROOT = 'E:\git\github\vcpkg'
 cmake --preset default                                  # only after CMakeLists.txt changed (new files!)
 cmake --build build --config RelWithDebInfo             # -> build\RelWithDebInfo\d3d9.dll, rvk_tests.exe
 build\RelWithDebInfo\rvk_tests.exe                      # unit tests (pure logic, no game)
+build\RelWithDebInfo\rvk_vktest.exe --rt                 # GPU: optional RT tier (BLAS/TLAS/ray query self-test; also --passes)
 ```
 C++23, MSVC (VS 18 2026), CMake + vcpkg manifest (`vcpkg.json`, `builtin-baseline` = the user's vcpkg checkout; when they pull,
 take `git -C E:\git\github\vcpkg log -1 --format=%H`). Triplet `x64-windows-static-md`. New source files go into `CMakeLists.txt`.
@@ -64,6 +65,11 @@ Player settings + overlay (docs/research/overlay.md): every run deletes `bin/rvk
 never in captures unless `-OverlayInScreenshots`; `-Commands '1500: overlay open','1600: key c','1700: ab flip'` runs
 overlay / settings commands at presents (`key`/`click` post real window messages: input tests in the background);
 `-NoOverlay`. config.toml's non-default `[vulkan] vsync / max_fps / adapter` lock the matching player setting.
+Ray tracing tier (docs/research/raytracing.md): optional, enabled at device creation when the GPU has it and `rt.allow`
+(restart setting, default on; `-Setting 'rt.allow=false'` = floor only); rvk.log `vulkan: ray tracing ...` + `caps:` lines
+(the capability report, also the overlay's "Capabilities"). `-RtSelfTest` (`[debug] rt_selftest`) builds a BLAS/TLAS and
+traces it with ray query at device creation ("rt selftest: PASS"). Settings needing a capability declare
+`Spec::requirements` (greyed + parity fallback when unmet; features read `asX()` = the effective value).
 
 `run.ps1` creates the test copy on first use (`scripts/new-test-copy.ps1`, from risen-spass's `B:\DevDrive\risen-test`), deploys
 `d3d9.dll` + `bin\rvk\config.toml`, and drives the game with **risen-spass's `scripts/test-run.ps1 -GameDir`** (windowed, muted,
@@ -78,7 +84,8 @@ from two runs of one renderer (+ known-noise masks). Tests: `python -m unittest 
 **Reference comparison end to end**: `.\scripts\refcompare.ps1` (13 fixed spots of `mods/rvkcompare`: game D3D9 run + Vulkan
 run in the dedicated copy `B:\DevDrive\risen-test-vk-cmp`, instance 3, pinned ConfigUser.xml; report
 `out\refcompare\<stamp>\report\report.html`). `-Calibrate` = two D3D9 runs -> a reusable reference (thresholds + known-noise
-masks); `-ReferenceDir out\refcompare\<stamp>` = only the Vulkan run against it; `-Spots a,b`. Renderer scenario mods live in
+masks); `-ReferenceDir out\refcompare\<stamp>` = only the Vulkan run against it; `-Spots a,b`; `-Setting k=v` (Vulkan run's
+player settings, e.g. `rt.allow=false`). Renderer scenario mods live in
 this repo's `mods/` (never in risen-spass). Details, spot list, noise handling: docs/research/reference-compare.md 5, 7, 8, 11.
 
 Startup facts (measured, docs/research/early-d3d9.md): `eCApplication::CreateEngine` calls `eCGfxAdmin::sEnumAdapterDesc`
@@ -118,11 +125,11 @@ shaders `#define RVK_PASS_SHADER` first and start their push block with `RVK_PAS
 | `proxy/` | `DllMain`, the `d3d9.dll` exports (`d3d9.def`: renamed `rvk_*` functions; forward to the system d3d9 loaded lazily) |
 | `api/` + `include/rvk_api.h` | exports for tools (risen-spass): `rvk_screenshot` queue + writer thread, `rvk_stats`, path guard (never into `data`), `rvk_setting_*` / `rvk_ab` / `rvk_overlay` |
 | `bootstrap.cpp` | config, log, engine symbols, hooks (in DllMain: Engine.dll is mapped but not initialised, never call into it there) |
-| `core/` | config (`bin\rvk\config.toml`), log (`bin\rvk\rvk.log`), paths, MinHook wrapper (`Hook<Fn>`), export resolution; `settings.*`: the player settings registry (`bin\rvk\settings.toml`, A/B; new features register their settings here) |
+| `core/` | config (`bin\rvk\config.toml`), log (`bin\rvk\rvk.log`), paths, MinHook wrapper (`Hook<Fn>`), export resolution; `settings.*`: the player settings registry (`bin\rvk\settings.toml`, A/B; new features register their settings here, with capability requirements); `caps.*`: the capability report |
 | `overlay/` | in-game Dear ImGui overlay (settings, A/B, perf panel), window-procedure input filter, `[debug] commands`; ImGui's Vulkan backend is vendored in `third_party/imgui_vulkan` (compiled against volk) |
 | `engine/symbols.h` | X-macro table of the Engine.dll symbols we bind by decorated name |
 | `engine/scene_hooks.*` | frame phase markers (Vulkan mode only): detours on Execute / z pass / shadow / solid / alpha / sky / post / GUI, the RenderRefracted vtable slot, image-role tags, the main camera read (docs/research/frame-phases.md) |
-| `vk/` | Vulkan core: context (floor), swapchain, frames + upload ring, bindless set, images, pipeline cache, formats; `passes.*` = pass pipeline layout, compute / fullscreen pipelines, transient images |
+| `vk/` | Vulkan core: context (floor), swapchain, frames + upload ring, bindless set, images, pipeline cache, formats; `passes.*` = pass pipeline layout, compute / fullscreen pipelines, transient images; `raytracing.*` = optional RT tier: AS builds, ray query self-test |
 | `d3d9/` | D3D9 device model on Vulkan (states, resources, draws, present): what the HAL and effects drive; `rvk_d3d9test`; `scene.*` = frame semantics (phase tracker, image roles, camera block); `draws.*` draw tags, records, tint palette; `identity.*` resource ids + generations; `semantics.*` CTAB shader semantics (draw-tags.md); `inject.*` injection points (injection.md) |
 | `hal/vulkan/` | the engine HAL on `d3d9::Device` (mode = "vulkan"): instance, device, resources, HLSL shaders, effects |
 | `fx/` | fx_2_0 effect binaries: parser, constant tables, preshaders (`rvk_fxtool`) |
