@@ -17,6 +17,8 @@ param(
     [ValidateSet('passthrough', 'trace', 'vulkan')][string]$Mode = 'passthrough',
     [switch]$NoRenderer,
     [switch]$Validation,
+    # frame numbers whose back buffer the Vulkan renderer saves to bin/rvk/screenshots/frame_<n>.png, e.g. 300,900
+    [string]$Screenshots = '',
     [ValidateSet('trace', 'debug', 'info', 'warn', 'error')][string]$RvkLogLevel = 'info',
     [string]$Config = 'RelWithDebInfo',
     [string]$GameDir = 'B:\DevDrive\risen-test-vk',
@@ -59,8 +61,10 @@ if ($NoRenderer) {
         '# written by scripts/run.ps1',
         '[renderer]', "mode = `"$Mode`"",
         '[log]', "level = `"$RvkLogLevel`"",
-        '[vulkan]', "validation = $($Validation.IsPresent.ToString().ToLower())"
+        '[vulkan]', "validation = $($Validation.IsPresent.ToString().ToLower())",
+        '[debug]', "screenshot_frames = [$Screenshots]"
     )
+    Remove-Item (Join-Path $rvkDir 'screenshots') -Recurse -Force -ErrorAction SilentlyContinue
     [IO.File]::WriteAllLines((Join-Path $rvkDir 'config.toml'), $cfg)
     Remove-Item $rvkLog -Force -ErrorAction SilentlyContinue
     Write-Host "deployed $dll (mode $Mode) to $bin"

@@ -1,8 +1,10 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace rvk {
 
@@ -25,6 +27,9 @@ struct Config {
     // [trace] (mode = "trace")
     int traceLogFirst = 3;     // calls per HAL slot logged with their arguments
     bool traceCapture = true;  // write shader bytecode / effect sources to <bin>/rvk/corpus
+
+    // [debug] (mode = "vulkan")
+    std::vector<std::uint32_t> screenshotFrames;  // back buffer -> <bin>/rvk/screenshots/frame_<n>.png at these frames
 };
 
 // Parses config.toml text. Unknown keys are ignored, bad values keep the default; `error` gets a parse error message.

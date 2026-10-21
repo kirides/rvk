@@ -13,6 +13,7 @@
 #include "core/paths.h"
 #include "engine/symbols.h"
 #include "hal/trace.h"
+#include "hal/vulkan/hal_vulkan.h"
 #include "hal/types_base.h"
 #include "vk/probe.h"
 
@@ -32,8 +33,24 @@ void detourInitializeAdmin(void* self, int apiType) {
     if (g_config.probe && !g_probed.exchange(true)) {
         vk::probe();
     }
-    g_initializeAdmin.original(self, apiType);
     const auto& s = engine::sym();
+    if (g_config.mode == Mode::Vulkan) {
+        // InitializeAdmin creates an eCDX9Instance only for API type 3; for any other type it drives the instance already in
+        // ms_pAPIInstance through its virtual slots (Init, adapters, modes). Ours goes there; the type is restored to 3 for
+        // code that checks it afterwards (docs/research/hal-structs.md 1).
+        hal::vulkan::Options vo;
+        vo.validation = g_config.validation;
+        vo.adapter = g_config.adapter;
+        vo.cacheDir = paths::dataDir() / L"cache";
+        vo.screenshotFrames = g_config.screenshotFrames;
+        vo.screenshotDir = paths::dataDir() / L"screenshots";
+        *static_cast<void**>(s.gfxAdminApiInstance) = static_cast<hal::eCAPIInstance*>(new hal::vulkan::HalInstance(vo));
+        g_initializeAdmin.original(self, 4);
+        *reinterpret_cast<int*>(static_cast<char*>(self) + 0x648) = apiType;
+        spdlog::info("  -> Vulkan HAL instance installed");
+        return;
+    }
+    g_initializeAdmin.original(self, apiType);
     spdlog::info("  -> ms_pAPIInstance = {}", *static_cast<void**>(s.gfxAdminApiInstance));
     if (g_config.mode == Mode::Trace) {
         hal::trace::Options opt;
@@ -66,10 +83,6 @@ void onProcessAttach(void* module) {
     if (!cfgError.empty()) {
         spdlog::warn("config.toml: {}", cfgError);
     }
-    if (g_config.mode == Mode::Vulkan) {
-        spdlog::warn("mode '{}' is not implemented yet: running the game's D3D9 renderer", toString(g_config.mode));
-        g_config.mode = Mode::Passthrough;
-    }
 
     if (GetModuleHandleW(L"Engine.dll") == nullptr) {
         // loaded by something other than Risen (a tool, a test): stay a plain forwarder
@@ -80,8 +93,8 @@ void onProcessAttach(void* module) {
         spdlog::error("required engine symbols missing (unknown Risen build?): plain d3d9 forwarder");
         return;
     }
-    if (g_config.mode == Mode::Trace && !hal::initEngineAllocator()) {
-        spdlog::error("bCMemoryAdmin (SharedBase.dll) not found: trace mode off");
+    if (g_config.mode != Mode::Passthrough && !hal::initEngineAllocator()) {
+        spdlog::error("bCMemoryAdmin (SharedBase.dll) not found: the game's D3D9 renderer stays");
         g_config.mode = Mode::Passthrough;
     }
     if (!hooks::initialize()) {

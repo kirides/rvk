@@ -54,6 +54,8 @@ add_library(rvk_core STATIC
     src/core/hooks.h
     src/core/log.cpp
     src/core/log.h
+    src/core/png.cpp
+    src/core/png.h
     src/core/paths.cpp
     src/core/paths.h
     src/d3d9/convert.cpp
@@ -79,6 +81,10 @@ add_library(rvk_core STATIC
     src/hal/trace_support.h
     src/hal/types.h
     src/hal/types_base.h
+    src/hal/vulkan/device.cpp
+    src/hal/vulkan/hal_vulkan.h
+    src/hal/vulkan/instance.cpp
+    src/hal/vulkan/resources.cpp
     src/res/dds.cpp
     src/res/dds.h
     src/shader/abi.h
@@ -112,6 +118,7 @@ add_library(rvk_core STATIC
     src/vk/volk_impl.c
 )
 target_include_directories(rvk_core PUBLIC src)
+target_include_directories(rvk_core PRIVATE ${STB_INCLUDE_DIR})
 # volk is compiled here (not vcpkg's volk.lib): it needs VK_USE_PLATFORM_WIN32_KHR for the Win32 surface entry points
 target_compile_definitions(rvk_core PUBLIC VK_NO_PROTOTYPES VK_USE_PLATFORM_WIN32_KHR VMA_STATIC_VULKAN_FUNCTIONS=0 VMA_DYNAMIC_VULKAN_FUNCTIONS=0)
 target_link_libraries(rvk_core PUBLIC
@@ -161,6 +168,12 @@ add_executable(rvk_vktest tools/vktest/main.cpp tools/common/d3dx.h)
 target_include_directories(rvk_vktest PRIVATE tools ${STB_INCLUDE_DIR})
 target_link_libraries(rvk_vktest PRIVATE rvk_core)
 rvk_warnings(rvk_vktest)
+
+# rvk_fxtool: fx_2_0 effect binaries (dump, corpus check against D3DX, compile)
+add_executable(rvk_fxtool tools/fxtool/main.cpp tools/common/d3dx.h)
+target_include_directories(rvk_fxtool PRIVATE tools)
+target_link_libraries(rvk_fxtool PRIVATE rvk_core)
+rvk_warnings(rvk_fxtool)
 
 # rvk_d3d9test: the D3D9 device model against D3D9 semantics (off-screen, validation on)
 add_executable(rvk_d3d9test tools/d3d9test/main.cpp tools/common/d3dx.h)
