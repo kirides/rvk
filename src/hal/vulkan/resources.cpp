@@ -1,9 +1,11 @@
 // HAL resource objects on d3d9::Device: textures, cube maps, volumes, vertex/index data, primitives, HLSL shaders.
 
+#include <atomic>
 #include <cstring>
 
 #include <spdlog/spdlog.h>
 
+#include "api/capture.h"
 #include "core/exports.h"
 #include "fx/effect_binary.h"
 #include "hal/vulkan/hal_vulkan.h"
@@ -114,6 +116,75 @@ bEResult HalTexture::GenerateTextureMipMaps(unsigned int a0, eCGfxShared::eECopy
     return bEResult_Ok;
 }
 
+bEResult HalTexture::SaveTextureToFile(char* const a0) {
+    // eCDX9Texture::SaveTextureToFile 0x74cf80 writes through the engine VFS. Its game caller is the sky absorption image
+    // (eCSkydome_PS::CreateAbsorbationImage, "#G3:/Data/Raw/Images/Sky/<sky>_Absorption.tga"): a path in the game's data tree,
+    // which in the test copies is a junction into the real install. D3D9 failed to write it as well (no Data/Raw), the engine
+    // then reloads the shipped image: refuse (docs/research/missing-slots.md 2).
+    const std::string path = a0 != nullptr ? a0 : "";
+    static std::atomic<int> logged{0};
+    if (logged.fetch_add(1) < 4) {
+        spdlog::info("hal: SaveTextureToFile('{}') refused (never written into the data tree)", path);
+    }
+    const auto& dir = dev_.options().dumpDir;
+    const auto& d = tex_->desc();
+    if (!dir.empty() && (d.format == vk::d3dfmt::A8R8G8B8 || d.format == vk::d3dfmt::X8R8G8B8)) {
+        d3d9::Texture::Locked lk;
+        if (tex_->lock(0, 0, nullptr, d3d9::LOCK_READONLY, lk)) {
+            const std::uint32_t w = tex_->levelWidth(0), h = tex_->levelHeight(0);
+            std::vector<std::uint8_t> bgra(static_cast<std::size_t>(w) * h * 4);
+            for (std::uint32_t y = 0; y < h; ++y) {
+                std::memcpy(bgra.data() + static_cast<std::size_t>(y) * w * 4,
+                            static_cast<const std::uint8_t*>(lk.bits) + static_cast<std::size_t>(y) * lk.rowPitch, w * 4);
+            }
+            tex_->unlock(0, 0);
+            const std::size_t slash = path.find_last_of("/\\:");
+            std::string name = path.substr(slash == std::string::npos ? 0 : slash + 1);
+            if (const auto dot = name.find_last_of('.'); dot != std::string::npos) name.resize(dot);
+            if (name.empty()) name = "texture";
+            const auto file = dir / std::filesystem::path(name + ".png");
+            std::string error;
+            if (api::writeImage(file, api::ImageFormat::Png, bgra, w, h, &error)) {
+                spdlog::info("hal: SaveTextureToFile: dumped {}x{} to {}", w, h, api::utf8(file));
+            } else {
+                spdlog::warn("hal: SaveTextureToFile: dump to {} failed: {}", api::utf8(file), error);
+            }
+        }
+    }
+    return bEResult_False;
+}
+
+bEResult HalTexture::LoadSurfaceFromSurface(unsigned int a0, void const*, bCRect const* a2, eCAPITexture* a3, unsigned int a4,
+                                            void const*, bCRect const* a6, unsigned long a7, unsigned long a8) {
+    // eCDX9Texture::LoadSurfaceFromSurface 0x74d920: D3DXLoadSurfaceFromSurface(this level a0, palette, rect a2, src a3 level
+    // a4, palette, rect a6, filter a7, colour key a8). Palettes are unused (no P8 textures); D3DX_FILTER_NONE / POINT
+    // (1 / 2) -> nearest, the others linear.
+    HalTexture* src = asTexture(a3);
+    if (src == nullptr) return bEResult_False;
+    if (a8 != 0) {
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true)) spdlog::warn("hal: LoadSurfaceFromSurface: colour key 0x{:x} ignored", a8);
+    }
+    const bool linear = (a7 & 0xff) >= 3;
+    std::string why;
+    if (!dev_.dev().loadSurfaceFromSurface(tex_.get(), a0, reinterpret_cast<const std::int32_t*>(a2), src->tex(), a4,
+                                           reinterpret_cast<const std::int32_t*>(a6), linear, &why)) {
+        static std::atomic<int> logged{0};
+        if (logged.fetch_add(1) < 4) {
+            spdlog::warn("hal: LoadSurfaceFromSurface {} -> {}: {}", vk::d3dFormatName(src->tex()->desc().format),
+                         vk::d3dFormatName(tex_->desc().format), why);
+        }
+        return bEResult_False;
+    }
+    static std::atomic<int> done{0};
+    if (done.fetch_add(1) < 4) {
+        spdlog::info("hal: LoadSurfaceFromSurface {}x{} {} level {} -> {}x{} {} level {} (filter 0x{:x})",
+                     src->tex()->levelWidth(a4), src->tex()->levelHeight(a4), vk::d3dFormatName(src->tex()->desc().format), a4,
+                     tex_->levelWidth(a0), tex_->levelHeight(a0), vk::d3dFormatName(tex_->desc().format), a0, a7);
+    }
+    return bEResult_Ok;
+}
+
 HalCubeMap::HalCubeMap(HalDevice& dev, std::unique_ptr<d3d9::Texture> tex) : dev_(dev), tex_(std::move(tex)) {}
 HalCubeMap::~HalCubeMap() { dev_.dev().release(std::move(tex_)); }
 
@@ -127,6 +198,19 @@ bEResult HalCubeMap::UnlockRect(eCGfxShared::eECubeMapFace a0, unsigned int a1) 
     tex_->unlock(a1, static_cast<std::uint32_t>(a0));
     return bEResult_Ok;
 }
+
+bEResult HalCubeMap::LockCubeMapLayer(unsigned int a0, eCGfxShared::eECubeMapFace a1, unsigned long a2, int* a3, void** a4) {
+    // eCDX9CubeMap::LockCubeMapLayer 0x73c8a0: LockRect(face, level, whole level, flags)
+    eCGfxShared::eSGfxLockedRect lr{};
+    if (!lockLevel(tex_.get(), a0, static_cast<std::uint32_t>(a1), nullptr, a2, &lr)) {
+        return bEResult_False;
+    }
+    if (a3 != nullptr) *a3 = lr.pitch;
+    if (a4 != nullptr) *a4 = lr.bits;
+    return bEResult_Ok;
+}
+
+bEResult HalCubeMap::UnlockCubeMapLayer(eCGfxShared::eECubeMapFace a0, unsigned int a1) { return UnlockRect(a0, a1); }
 
 bEResult HalCubeMap::GetRenderTargetHandle(eCGfxShared::eECubeMapFace a0, void** a1) {
     if (a1 == nullptr) return bEResult_False;
@@ -163,8 +247,9 @@ bEResult HalVolume::SetVolume(unsigned long a0) {
 
 // ---- buffers ---------------------------------------------------------------------------------------------------------
 
-HalVertexData::HalVertexData(HalDevice& dev, const eCGfxShared::eSGfxVertexBufDesc& desc, std::unique_ptr<d3d9::Buffer> buffer)
-    : dev_(dev), desc_(desc), buffer_(std::move(buffer)), stride_(desc.stride) {}
+HalVertexData::HalVertexData(HalDevice& dev, const eCGfxShared::eSGfxVertexBufDesc& desc, std::uint32_t stride,
+                             std::unique_ptr<d3d9::Buffer> buffer)
+    : dev_(dev), desc_(desc), buffer_(std::move(buffer)), stride_(stride) {}
 HalVertexData::~HalVertexData() { dev_.dev().release(std::move(buffer_)); }
 
 bEResult HalVertexData::LockBuffer(unsigned int a0, unsigned int a1, unsigned long a2, unsigned char** a3) {
@@ -236,12 +321,13 @@ bool HalPrimitive::SetVertexDecl(void* a0) {
 }
 
 bool HalPrimitive::SetFVF(unsigned long a0) {
-    static bool logged = false;
-    if (!logged) {
-        logged = true;
-        spdlog::warn("hal: FVF draws (0x{:x}) are not supported", a0);
+    // eCDX9Primitive::SetFVF 0x74b480 + Execute: IDirect3DDevice9::SetFVF instead of a declaration; D3D9 builds the
+    // equivalent declaration internally, which is what the (programmable) pipeline consumes
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true)) {
+        spdlog::info("hal: first FVF draw record (0x{:x})", a0);
     }
-    decl_ = nullptr;
+    decl_ = dev_.fvfDecl(static_cast<std::uint32_t>(a0));
     return true;
 }
 
@@ -298,6 +384,15 @@ bool HalPrimitive::Execute() {
     }
     d.setIndices(indices_ != nullptr ? indices_->buffer() : nullptr);
     d.setVertexDecl(decl_);
+    if (streams_[0].data != nullptr && streams_[0].data->fvf() != 0) {
+        // diagnostics: the FVF buffers of eCStrip_PS (stride 0 in the description, 32 from the FVF)
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true)) {
+            spdlog::info("hal: first draw of an FVF vertex buffer (0x{:x}, stride {}, declaration {}, primitive type {}, {} primitives)",
+                         streams_[0].data->fvf(), streams_[0].stride, static_cast<void*>(decl_), static_cast<std::uint32_t>(draw_.type),
+                         draw_.primitiveCount);
+        }
+    }
     return dev_.Draw(draw_) == bEResult_Ok;
 }
 

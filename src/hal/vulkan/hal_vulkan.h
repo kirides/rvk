@@ -30,6 +30,7 @@ struct Options {
     std::filesystem::path screenshotDir;           // <bin>/rvk/screenshots
     std::uint32_t logDraws = 0;
     std::uint32_t logFrame = 0;  // log the HAL calls of this frame
+    std::filesystem::path dumpDir;  // [debug] dump_saved_textures: SaveTextureToFile writes <dumpDir>/<name>.png; empty = off
 };
 
 // true while the frame selected by Options::logFrame is being recorded
@@ -76,6 +77,10 @@ public:
     bEResult CopySurface(eCAPITexture* a0) override;
     bEResult GetRenderTargetData(eCAPITexture* a0, int a1) override;
     bEResult GenerateTextureMipMaps(unsigned int a0, eCGfxShared::eECopyFilter a1) override;
+    // never writes the engine's path (the data tree); optionally a PNG dump (Options::dumpDir)
+    bEResult SaveTextureToFile(char* const a0) override;
+    bEResult LoadSurfaceFromSurface(unsigned int a0, void const* a1, bCRect const* a2, eCAPITexture* a3, unsigned int a4,
+                                    void const* a5, bCRect const* a6, unsigned long a7, unsigned long a8) override;
 
 private:
     HalDevice& dev_;
@@ -91,6 +96,8 @@ public:
     bEResult LockRect(eCGfxShared::eECubeMapFace a0, unsigned int a1, eCGfxShared::eSGfxLockedRect* a2, tagRECT const* a3,
                       unsigned long a4) override;
     bEResult UnlockRect(eCGfxShared::eECubeMapFace a0, unsigned int a1) override;
+    bEResult LockCubeMapLayer(unsigned int a0, eCGfxShared::eECubeMapFace a1, unsigned long a2, int* a3, void** a4) override;
+    bEResult UnlockCubeMapLayer(eCGfxShared::eECubeMapFace a0, unsigned int a1) override;
     bEResult GetRenderTargetHandle(eCGfxShared::eECubeMapFace a0, void** a1) override;
     bEResult SetCubeMap(unsigned long a0) override;
 
@@ -116,10 +123,13 @@ private:
 
 class HalVertexData final : public StubVertexData {
 public:
-    HalVertexData(HalDevice& dev, const eCGfxShared::eSGfxVertexBufDesc& desc, std::unique_ptr<d3d9::Buffer> buffer);
+    // stride: fvfVertexSize(desc.fvf) for FVF buffers, else desc.stride (eCDX9VertexData)
+    HalVertexData(HalDevice& dev, const eCGfxShared::eSGfxVertexBufDesc& desc, std::uint32_t stride,
+                  std::unique_ptr<d3d9::Buffer> buffer);
     ~HalVertexData() override;
     d3d9::Buffer* buffer() const { return buffer_.get(); }
     std::uint32_t stride() const { return stride_; }
+    std::uint32_t fvf() const { return desc_.fvf; }
 
     bEResult LockBuffer(unsigned int a0, unsigned int a1, unsigned long a2, unsigned char** a3) override;
     bEResult UnlockBuffer() override;
@@ -222,12 +232,15 @@ public:
     ~HalDevice() override;
     bool create(const Options& options, const eCAPIDevice::eSAPIStartParameters& params);
     d3d9::Device& dev() { return dev_; }
+    const Options& options() const { return options_; }
 
     // render-state writes: `normal` setters respect the master flags; effects call setRenderState directly
     void setRenderState(std::uint32_t rs, std::uint32_t value);
     // 16-stage unbind done on every render-target change (eCDX9Device::SetRenderTarget)
     void unbindTextures();
     d3d9::VertexDecl* declFromHandle(void* handle);
+    // the declaration equivalent to an FVF (cached per FVF; nullptr for an invalid FVF)
+    d3d9::VertexDecl* fvfDecl(std::uint32_t fvf);
 
     // ---- slots ----
     bEResult CreatePrimititve(eCAPIPrimitive** a0) override;
@@ -240,6 +253,10 @@ public:
     bEResult CreateImageFromMemory(eCGfxShared::eEPoolType a0, int a1, unsigned char a2, void const* a3, unsigned int a4,
                                    eCGfxShared::eSGfxLayersDesc& a5, void*& a6) override;
     bEResult CreateCubeMap(eCGfxShared::eSGfxLayersDesc const& a0, eCAPICubeMap** a1) override;
+    bEResult CreateTextureFromMemory(eCGfxShared::eSGfxLayersDesc& a0, unsigned char a1, void* a2, unsigned int a3,
+                                     eCAPITexture** a4) override;
+    bEResult CreateCubeMapFromMemory(eCGfxShared::eSGfxLayersDesc& a0, unsigned char a1, void* a2, unsigned int a3,
+                                     eCAPICubeMap** a4) override;
     bEResult CreateVolume(eCGfxShared::eSGfxLayersDesc const& a0, eCAPIVolume** a1) override;
     bEResult GetImageInfoFromMemory(void const* a0, unsigned int a1, eCGfxShared::eSGfxImageInfo& a2) override;
     bEResult CheckDeviceFormat(eCGfxShared::eSGfxLayersDesc const& a0, bool a1) override;
@@ -317,6 +334,7 @@ public:
     bEResult DestroyVertexDeclaration(void* a0) override;
     bEResult GetVertexDeclarationData(void* a0, eCGfxShared::eSGfxDclElement* a1, unsigned int* a2) override;
     bEResult SetVertexDeclaration(void* a0) override;
+    bEResult GetFVFSize(unsigned long a0, unsigned long* a1) override;
     bEResult SetVertexProgramRegisterF(unsigned long a0, float const* a1, unsigned long a2) override;
     bEResult SetVertexProgramRegisterI(unsigned long a0, int const* a1, unsigned long a2) override;
     bEResult SetVertexProgramRegisterB(unsigned long a0, int const* a1, unsigned long a2) override;
@@ -394,6 +412,11 @@ private:
     void normal(std::uint32_t rs, std::uint32_t value) { setRenderState(rs, value); }
     void applyStencil(bool enable, const eCGfxShared::eSGfxStencilData& d);
     bEResult checkFormat(eCGfxShared::eSGfxLayersDesc const& desc, bool blend);
+    // a texture from a DDS file in memory (skip top levels, levels <= 0 = all); wantCube -1 any, 0 2D only, 1 cube only.
+    // Writes width, height, levels, format, cubeMap of `out`.
+    std::unique_ptr<d3d9::Texture> textureFromDds(const char* what, const void* data, std::uint32_t size, std::uint32_t skip,
+                                                  int levelsWanted, std::uint32_t pool, std::uint32_t usage, int wantCube,
+                                                  eCGfxShared::eSGfxLayersDesc& out);
     void applyAlphaTest(bool enable, const eCGfxShared::eSGfxAlphaTestData& d);
     void logFrameStats();
 
@@ -412,6 +435,7 @@ private:
     // handles
     std::mutex handleMutex_;
     std::unordered_map<void*, std::unique_ptr<d3d9::VertexDecl>> decls_;
+    std::unordered_map<std::uint32_t, std::unique_ptr<d3d9::VertexDecl>> fvfDecls_;
     std::unordered_map<void*, std::unique_ptr<d3d9::Texture>> depthBuffers_;
     std::uint32_t nextQuery_ = 1;
     // stand-in "this" for the engine's own CPU-only DX9 functions (PreprocessShader, CompileEffect*, aux buffers)

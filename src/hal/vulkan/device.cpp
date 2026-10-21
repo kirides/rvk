@@ -1,13 +1,17 @@
 // eCAPIDevice on d3d9::Device (docs/research/hal-structs.md sections 2.x).
 
+#include <windows.h>
+
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <string>
 
 #include <spdlog/spdlog.h>
 
 #include "api/capture.h"
 #include "core/exports.h"
+#include "d3d9/fvf.h"
 #include "engine/vfs.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "res/dds.h"
@@ -52,8 +56,10 @@ HalDevice::~HalDevice() {
     {
         const std::lock_guard lock(handleMutex_);
         for (auto& [h, d] : decls_) dev_.release(std::move(d));
+        for (auto& [f, d] : fvfDecls_) dev_.release(std::move(d));
         for (auto& [h, t] : depthBuffers_) dev_.release(std::move(t));
         decls_.clear();
+        fvfDecls_.clear();
         depthBuffers_.clear();
     }
     dev_.destroy();
@@ -115,13 +121,64 @@ bEResult HalDevice::CreateIndexData(eCGfxShared::eSGfxIndexBufDesc const& a0, eC
     return bEResult_Ok;
 }
 
+namespace {
+
+// "Engine.dll+0x1234 < Engine.dll+0x5678 < ..." for the callers of the current function (diagnostics)
+std::string callerChain(int skip, int frames) {
+    void* stack[16]{};
+    const USHORT n = RtlCaptureStackBackTrace(static_cast<DWORD>(skip + 1), static_cast<DWORD>(std::min(frames, 16)), stack, nullptr);
+    std::string s;
+    for (USHORT i = 0; i < n; ++i) {
+        HMODULE mod = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           static_cast<LPCWSTR>(stack[i]), &mod);
+        char name[MAX_PATH]{};
+        if (mod != nullptr) GetModuleFileNameA(mod, name, MAX_PATH);
+        const char* base = std::strrchr(name, '\\') != nullptr ? std::strrchr(name, '\\') + 1 : name;
+        s += fmt::format("{}{}+0x{:x}", i ? " < " : "", mod != nullptr ? base : "?",
+                         reinterpret_cast<std::uintptr_t>(stack[i]) - reinterpret_cast<std::uintptr_t>(mod));
+    }
+    return s;
+}
+
+}  // namespace
+
 bEResult HalDevice::CreateVertexData(eCGfxShared::eSGfxVertexBufDesc const& a0, eCAPIVertexData** a1) {
     if (a1 == nullptr) return bEResult_False;
+    // eCDX9VertexData 0x74dcf0: the stride is D3DXGetFVFVertexSize(fvf) for FVF buffers, desc.stride only when fvf == 0
+    std::uint32_t stride = a0.stride;
     if (a0.fvf != 0) {
-        spdlog::warn("hal: FVF vertex buffer (0x{:x}): stride from the description", a0.fvf);
+        stride = fvfVertexSize(a0.fvf);
+        static std::atomic<int> logged{0};
+        if (logged.fetch_add(1) < 2) {
+            spdlog::info("hal: FVF vertex buffer 0x{:x} ({} bytes, stride {}, desc.stride {}) from {}", a0.fvf, a0.length, stride,
+                         a0.stride, callerChain(1, 6));
+        }
     }
     auto b = dev_.createBuffer(a0.length, a0.usage, a0.pool, false, false);
-    *a1 = new HalVertexData(*this, a0, std::move(b));
+    *a1 = new HalVertexData(*this, a0, stride, std::move(b));
+    return bEResult_Ok;
+}
+
+d3d9::VertexDecl* HalDevice::fvfDecl(std::uint32_t fvf) {
+    const std::lock_guard lock(handleMutex_);
+    if (auto it = fvfDecls_.find(fvf); it != fvfDecls_.end()) {
+        return it->second.get();
+    }
+    const auto elements = fvfDeclaration(fvf);
+    if (elements.empty()) {
+        spdlog::warn("hal: invalid FVF 0x{:x}", fvf);
+        return nullptr;
+    }
+    auto decl = dev_.createVertexDecl(elements);
+    d3d9::VertexDecl* p = decl.get();
+    fvfDecls_.emplace(fvf, std::move(decl));
+    return p;
+}
+
+bEResult HalDevice::GetFVFSize(unsigned long a0, unsigned long* a1) {
+    if (a1 == nullptr) return bEResult_False;
+    *a1 = fvfVertexSize(static_cast<std::uint32_t>(a0));
     return bEResult_Ok;
 }
 
@@ -217,35 +274,35 @@ bEResult HalDevice::CreateVolume(eCGfxShared::eSGfxLayersDesc const& a0, eCAPIVo
     return bEResult_Ok;
 }
 
-bEResult HalDevice::CreateImageFromMemory(eCGfxShared::eEPoolType a0, int a1, unsigned char a2, void const* a3, unsigned int a4,
-                                          eCGfxShared::eSGfxLayersDesc& a5, void*& a6) {
-    a6 = nullptr;
+std::unique_ptr<d3d9::Texture> HalDevice::textureFromDds(const char* what, const void* data, std::uint32_t size, std::uint32_t skip,
+                                                        int levelsWanted, std::uint32_t pool, std::uint32_t usage, int wantCube,
+                                                        eCGfxShared::eSGfxLayersDesc& out) {
     std::string err;
-    const auto dds = res::parseDds({static_cast<const std::uint8_t*>(a3), a4}, &err);
+    const auto dds = res::parseDds({static_cast<const std::uint8_t*>(data), size}, &err);
     if (!dds) {
-        static int logged = 0;
-        if (logged++ < 10) spdlog::warn("hal: CreateImageFromMemory: {} ({} bytes)", err, a4);
-        return bEResult_False;
+        static std::atomic<int> logged{0};
+        if (logged.fetch_add(1) < 10) spdlog::warn("hal: {}: {} ({} bytes)", what, err, size);
+        return nullptr;
     }
-    if (dds->volume) {
-        spdlog::warn("hal: volume DDS files are not supported");
-        return bEResult_False;
+    if (dds->volume || (wantCube >= 0 && dds->cube != (wantCube != 0))) {
+        spdlog::warn("hal: {}: a {} DDS file is not supported here", what, dds->volume ? "volume" : dds->cube ? "cube" : "2D");
+        return nullptr;
     }
-    // levels -1 / -2: from the file for DDS (eCDX9Device::CreateImageFromMemory 0x73f030); skip a2 top levels
-    std::uint32_t skip = a2;
+    // skip `skip` top levels; levels <= 0: all of the file's
     if (skip >= dds->mips) skip = dds->mips - 1;
     std::uint32_t levels = dds->mips - skip;
-    if (a1 > 0) levels = std::min(levels, static_cast<std::uint32_t>(a1));
+    if (levelsWanted > 0) levels = std::min(levels, static_cast<std::uint32_t>(levelsWanted));
     TextureDesc td;
     td.type = dds->cube ? TextureType::Cube : TextureType::Tex2D;
     td.width = std::max(1u, dds->width >> skip);
     td.height = std::max(1u, dds->height >> skip);
     td.levels = levels;
     td.format = dds->d3dFormat;
-    td.pool = static_cast<std::uint32_t>(a0);
+    td.usage = usage;
+    td.pool = pool;
     auto t = dev_.createTexture(td);
     if (!t) {
-        return bEResult_False;
+        return nullptr;
     }
     for (std::uint32_t face = 0; face < dds->faces; ++face) {
         for (std::uint32_t l = 0; l < levels; ++l) {
@@ -254,17 +311,89 @@ bEResult HalDevice::CreateImageFromMemory(eCGfxShared::eEPoolType a0, int a1, un
             }
         }
     }
-    a5.width = td.width;
-    a5.height = td.height;
-    a5.levels = levels;
-    a5.format = td.format;
-    a5.pool = td.pool;
-    a5.cubeMap = dds->cube;
-    if (dds->cube) {
+    out.width = td.width;
+    out.height = td.height;
+    out.levels = levels;
+    out.format = td.format;
+    out.cubeMap = dds->cube;
+    return t;
+}
+
+bEResult HalDevice::CreateImageFromMemory(eCGfxShared::eEPoolType a0, int a1, unsigned char a2, void const* a3, unsigned int a4,
+                                          eCGfxShared::eSGfxLayersDesc& a5, void*& a6) {
+    // levels -1 / -2: from the file for DDS (eCDX9Device::CreateImageFromMemory 0x73f030); skip a2 top levels
+    a6 = nullptr;
+    auto t = textureFromDds("CreateImageFromMemory", a3, a4, a2, a1, static_cast<std::uint32_t>(a0), 0, -1, a5);
+    if (!t) {
+        return bEResult_False;
+    }
+    a5.pool = static_cast<std::uint32_t>(a0);
+    if (a5.cubeMap) {
         a6 = static_cast<eCAPICubeMap*>(new HalCubeMap(*this, std::move(t)));
     } else {
         a6 = static_cast<eCAPITexture*>(new HalTexture(*this, std::move(t)));
     }
+    return bEResult_Ok;
+}
+
+namespace {
+
+// eCDX9Texture / eCDX9CubeMap "from memory" ctors (0x74c650 / 0x73caa0): D3DXCreate(Cube)TextureFromFileInMemoryEx with the
+// descriptor's size, levels, usage, format, pool, filter BOX | (skip << 26). We load DDS files as stored: a size or format
+// that would need D3DX's resampling / conversion is refused. Returns the skip count, or -1 when refused.
+int fromMemoryRequest(const char* what, const eCGfxShared::eSGfxLayersDesc& d, unsigned char skipLevels, const void* data,
+                      unsigned int size) {
+    constexpr std::uint32_t kDefault = 0xffffffffu, kDefaultNonPow2 = 0xfffffffeu, kFromFile = 0xfffffffdu;
+    // D3D9: levels in (0, skip] clamp the skip to levels - 1
+    std::uint32_t skip = skipLevels;
+    if (d.levels != 0 && d.levels != kFromFile && d.levels <= skip) skip = d.levels - 1;
+    const auto dds = res::parseDds({static_cast<const std::uint8_t*>(data), size});
+    if (!dds) return static_cast<int>(skip);  // textureFromDds logs the reason
+    const std::uint32_t s = std::min(skip, dds->mips - 1);
+    const auto sizeOk = [](std::uint32_t want, std::uint32_t file) {
+        return want == 0 || want == kDefault || want == kDefaultNonPow2 || want == kFromFile || want == file;
+    };
+    const bool formatOk = d.format == 0 || d.format == kFromFile || d.format == dds->d3dFormat;
+    if (!sizeOk(d.width, std::max(1u, dds->width >> s)) || !sizeOk(d.height, std::max(1u, dds->height >> s)) || !formatOk ||
+        (d.usage & (USAGE_RENDERTARGET | USAGE_DEPTHSTENCIL)) != 0) {
+        spdlog::warn("hal: {}: {}x{} {} usage 0x{:x} from a {}x{} {} file needs D3DX resampling / conversion: not supported", what,
+                     d.width, d.height, vk::d3dFormatName(d.format), d.usage, dds->width, dds->height,
+                     vk::d3dFormatName(dds->d3dFormat));
+        return -1;
+    }
+    return static_cast<int>(skip);
+}
+
+int levelsRequest(std::uint32_t levels) {
+    // 0 / D3DX_DEFAULT / D3DX_FROM_FILE: the file's chain
+    return levels == 0 || levels >= 0xfffffffdu ? 0 : static_cast<int>(levels);
+}
+
+}  // namespace
+
+bEResult HalDevice::CreateTextureFromMemory(eCGfxShared::eSGfxLayersDesc& a0, unsigned char a1, void* a2, unsigned int a3,
+                                            eCAPITexture** a4) {
+    if (a4 == nullptr) return bEResult_False;
+    *a4 = nullptr;
+    const int skip = fromMemoryRequest("CreateTextureFromMemory", a0, a1, a2, a3);
+    if (skip < 0) return bEResult_False;
+    auto t = textureFromDds("CreateTextureFromMemory", a2, a3, static_cast<std::uint32_t>(skip), levelsRequest(a0.levels), a0.pool,
+                            a0.usage & USAGE_DYNAMIC, 0, a0);
+    if (!t) return bEResult_False;
+    *a4 = new HalTexture(*this, std::move(t));
+    return bEResult_Ok;
+}
+
+bEResult HalDevice::CreateCubeMapFromMemory(eCGfxShared::eSGfxLayersDesc& a0, unsigned char a1, void* a2, unsigned int a3,
+                                            eCAPICubeMap** a4) {
+    if (a4 == nullptr) return bEResult_False;
+    *a4 = nullptr;
+    const int skip = fromMemoryRequest("CreateCubeMapFromMemory", a0, a1, a2, a3);
+    if (skip < 0) return bEResult_False;
+    auto t = textureFromDds("CreateCubeMapFromMemory", a2, a3, static_cast<std::uint32_t>(skip), levelsRequest(a0.levels), a0.pool,
+                            a0.usage & USAGE_DYNAMIC, 1, a0);
+    if (!t) return bEResult_False;
+    *a4 = new HalCubeMap(*this, std::move(t));
     return bEResult_Ok;
 }
 

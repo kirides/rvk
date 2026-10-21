@@ -59,7 +59,7 @@ with rain, water, vegetation, post chain and GUI) render through Vulkan, no D3D9
 `mode = "vulkan"`; ~65 fps unoptimised with ~1450 draws per frame. Layers: `hal/vulkan` (engine HAL) -> `d3d9::Device`
 (D3D9 state model, `rvk_d3d9test`) -> `vk/` (Vulkan core, `rvk_vktest`); effects through `src/fx` + `hal/vulkan/effect.cpp`.
 Open (next): D3D9 reference comparison at fixed poses; unimplemented slots seen in game (LoadSurfaceFromSurface,
-SaveTextureToFile, FVF buffers); performance pass (in game ~79.5 fps on a 120 Hz display with ~5 ms
+SaveTextureToFile, FVF buffers: done, see below); performance pass (in game ~79.5 fps on a 120 Hz display with ~5 ms
 inside vkQueuePresentKHR).
 Done after M3: vsync. FIFO presents returned at once in the game window (menu ~1500 fps; a plain window is throttled), so
 `d3d9::Device` paces presents to the refresh rate of the window's monitor (`vk::FramePacer`, `[vulkan] max_fps`). HLSL
@@ -85,6 +85,14 @@ thread, paths inside `<game>\data` refused), `rvk_screenshot_status`, `rvk_frame
 `include/rvk_api.h` for risen-spass. HAL device slot 159 `SaveBackbufferToFile` (the engine snapshot) writes the same
 32-bit BMP as D3DX through the engine's VFS. Verified in game (`run.ps1 -Snapshots`, `[debug] snapshot_frames`): engine
 BMP and `rvk_screenshot` PNG of the same frame are pixel-identical; the BMP header equals the D3D9 run's byte for byte.
+Remaining reachable HAL slots (docs/research/missing-slots.md): FVF vertex buffers take their stride from the FVF
+(`d3d9/fvf.*`, checked against d3dx9_39's `D3DXGetFVFVertexSize` / `D3DXDeclaratorFromFVF`); the one creator,
+`eCStrip_PS::CreateVertices`, passes stride 0, so its strips had stride 0 before. `Primitive::SetFVF` binds a cached
+declaration from the FVF, device `GetFVFSize` answers. Cube `Lock/UnlockCubeMapLayer`, device `CreateTexture/CubeMapFromMemory`
+(DDS as stored), `LoadSurfaceFromSurface` (GPU blit + read-back; the sky absorption image now gets real data) and
+`SaveTextureToFile` (refused and logged; `[debug] dump_saved_textures` / `run.ps1 -DumpSavedTextures` writes a PNG to
+`bin/rvk/dumps`). `testdemo` in Vulkan mode: 0 unimplemented slots, validation clean. `rvk_d3d9test` cases "fvf vertex buffer",
+"cube map face lock", "load surface from surface".
 Progress (2026-10-21): Vulkan core in `src/vk/` (context with the 1.3 floor + optional EDS3 / vertex-input-dynamic / robustness2,
 swapchain, frames on a timeline semaphore with deferred deletion and a BDA upload ring, bindless set + pipeline layout, images
 with sync2 layout tracking, pipeline cache for dynamic rendering). `rvk_vktest` renders a translated D3D9 shader pair off-screen

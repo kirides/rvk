@@ -12,6 +12,19 @@ DLLs import a wrapper (pefile scan of `bin\*.dll`, `bin\scripts\*.dll`), and sca
 `eCGfxContextAdmin::ms_pAPIDevice` (`0xc62750`). Trace mode wraps every object in our own vtables, so the speculative
 devirtualisations go through the virtual path and the trace counts are complete for the run.
 
+## Status (2026-10-21, after the slot completion commit)
+
+| slot | status |
+|---|---|
+| FVF vertex buffers (`CreateVertexData` stride), Primitive `SetFVF`, Device 143 `GetFVFSize` | **done** (section 4) |
+| CubeMap 2/3 `Lock/UnlockCubeMapLayer` | **done** (section 5) |
+| Device 9/10 `CreateTexture/CubeMapFromMemory` | **done** for DDS as stored (section 5) |
+| Texture 14 `LoadSurfaceFromSurface` | **done**, GPU blit + read-back (section 2) |
+| Texture 9 `SaveTextureToFile` | **refused on purpose** (log + optional PNG dump, section 2) |
+| everything in sections 6 and 7 | stubs kept (not called in the game) |
+
+`testdemo` in Vulkan mode with validation: PASS, 0 unimplemented slots seen (was 2), no warnings from these paths.
+
 ## 1. Overview
 
 What is still a stub (generated stub classes in `src/hal/stub_generated.h` that `src/hal/vulkan/hal_vulkan.h` and
@@ -82,6 +95,22 @@ log warnings.**
 
   Ignore palettes and the colour key: always NULL/0 here. With the fixed False from `SaveTextureToFile` the result is unused
   anyway, so this only silences the warning. Not worth more than ~40 lines.
+
+**Done (2026-10-21)** [C, testdemo run]:
+* `HalTexture::SaveTextureToFile` returns `bEResult_False` and logs the engine path
+  (`#G3:/Data/Raw/Images/Sky/Sky_Clouds_01_Absorption.tga`, `..._02_...`). It never writes the engine path. With
+  `[debug] dump_saved_textures = true` (`run.ps1 -DumpSavedTextures`) an A8R8G8B8/X8R8G8B8 image is also written as an
+  opaque PNG to `bin/rvk/dumps/<name>.png`. The dumps show the expected blurred cloud image.
+* `HalTexture::LoadSurfaceFromSurface` → `d3d9::Device::loadSurfaceFromSurface` (`src/d3d9/device.cpp`). It uploads the
+  source's pending data, then blits (`vkCmdBlitImage2`, BC decompression, nearest for D3DX_FILTER_NONE/POINT, linear
+  otherwise) into the destination. For a render target the blit goes straight into the level. Otherwise it goes into a
+  temporary render target of the destination format and is read back into the destination's CPU copy (dst rect honoured).
+  The game's calls: `1024x1024 DXT1 level 0 -> 1024x1024 A8R8G8B8 level 0 (filter 0x1)`, twice, on the render thread, about 0.25 s
+  each including the engine's blur. It refuses sources with a view swizzle (L8, A8L8, ...), depth sources, cube or volume
+  textures, compressed or converted destinations, formats without `BLIT_SRC`, and calls off the render thread. Colour key:
+  ignored, with a warning.
+* Visual result: unchanged by construction. The image is still only used through the refused file write and
+  `ReloadResource`, as with D3D9.
 
 ## 3. Snapshots: `SaveBackbufferToFile` (Device 159)
 
@@ -161,6 +190,30 @@ identified. The warning prints the FVF: take it from a log and set a breakpoint,
    order: POSITION/POSITIONT, BLENDWEIGHT, BLENDINDICES, NORMAL, PSIZE, COLOR0, COLOR1, TEXCOORD0..7, all on stream 0.
    `GetDesc` already returns the FVF.
 
+**Done (2026-10-21)**:
+* `src/d3d9/fvf.{h,cpp}`: `fvfVertexSize` and `fvfDeclaration`. `tests/fvf_tests.cpp` compares both with d3dx9_39's
+  `D3DXGetFVFVertexSize` / `D3DXDeclaratorFromFVF` for over 1300 FVFs: every position type, the LASTBETA flags, all
+  component combinations, and 0-8 texture sets with mixed TEXCOORDSIZE. They are identical. Deviations: d3dx9_39 rejects
+  `D3DFVF_XYZW` (it predates it), we accept it as FLOAT4 POSITION like the D3D9 runtime. XYZB5 without LASTBETA (5 weights)
+  and the reserved bit 0 are rejected like D3DX does.
+* `HalDevice::CreateVertexData` uses `fvfVertexSize(fvf)` when `fvf != 0`. `HalPrimitive::SetFVF` binds
+  `HalDevice::fvfDecl(fvf)`, cached per FVF. Device 143 `GetFVFSize` is implemented.
+* **The creator** [C, logged stack in game + decompiled, `B:\DevDrive\risen-ghidra\rvk_strip_fvf_dump.txt`]:
+  `eCStrip_PS::CreateVertices` `0x6fde70`, called from `UpdateVertices` `0x6fd960`, `OnDeviceReset` `0x7010d0`,
+  `eCFrustumDatabase::Execute` and `eCImageFilterScene::OnUpdateOutput`. These are strip particle systems (ribbons /
+  trails). Desc = `{length = maxSegments * 64, usage 0x208 WRITEONLY|DYNAMIC, fvf 0x242 (XYZ | DIFFUSE | TEX2), pool 0,
+  stride 0}`. testdemo creates two (6400 bytes each). The strip does **not** use `SetFVF`: it attaches an explicit
+  declaration equal to the FVF (POSITION f3 @0, COLOR d3dcolor @12, TEXCOORD0 f2 @16, TEXCOORD1 f2 @24) and draws a
+  triangle strip with 2 vertices per segment (`2n - 2` primitives). With D3D9 the stream stride was 32. **Ours was 0**: every
+  vertex read vertex 0, so the strips were degenerate and invisible. Now the stride is 32.
+* No strip was drawn in the `testdemo` run (a one-time log in `Primitive::Execute` for stream-0 FVF buffers did not fire),
+  so the strip rendering itself is not yet seen in game. The `rvk_d3d9test` case "fvf vertex buffer" draws an 0x242 buffer
+  with the FVF's declaration and stride.
+* **XYZRHW (pre-transformed, POSITIONT)**: no fixed-function emulation exists. `d3d9::Device::prepareDraw` skips draws
+  without a vertex and pixel shader (`skippedNoShader`). With a shader bound, the POSITIONT element reaches the shader like
+  any other usage (`dcl_positiont`), which is what D3D9 does with a programmable vertex shader. No game path seen uses
+  XYZRHW: SetFVF has 0 calls, and the only FVF is 0x242.
+
 ## 5. Cheap completions that are reachable but not seen
 
 * **CubeMap `LockCubeMapLayer` / `UnlockCubeMapLayer` (2/3)** [C reachability, not in trace]. Callers:
@@ -181,6 +234,18 @@ identified. The warning prints the FVF: take it from a log and set a breakpoint,
     descriptor and fill it in.
   * Ours: share the DDS path of `HalDevice::CreateImageFromMemory` (`device.cpp:219`) and wrap the result in
     `HalTexture` / `HalCubeMap`. Low priority.
+
+**Done (2026-10-21)**:
+* `HalCubeMap::LockCubeMapLayer` / `UnlockCubeMapLayer` go through the same `d3d9::Texture::lock(level, face)` as `LockRect`.
+  A cube face that was locked keeps its CPU copy, and only dirty regions are uploaded. A dropped face is read back from its
+  layer. `rvk_d3d9test` "cube map face lock" covers sampling, a read-only lock of another face after the upload (read
+  back), then writing a face and sampling it.
+* `HalDevice::CreateTextureFromMemory` / `CreateCubeMapFromMemory` share `HalDevice::textureFromDds` with
+  `CreateImageFromMemory`. They follow the eCDX9 ctors (`0x74c650` / `0x73caa0`): the skip count is clamped to `levels - 1`
+  when `0 < levels <= skip`. Levels 0 / D3DX_DEFAULT / D3DX_FROM_FILE mean the file's chain. They write back width, height,
+  levels and format. A request that needs D3DX resampling or conversion is refused with a warning: an explicit size or
+  format different from the file, or RENDERTARGET / DEPTHSTENCIL usage. A cube file passed to the texture slot, or a 2D file
+  passed to the cube slot, is refused too. Still not called in the game.
 
 ## 6. `eCAPIHLSLShader::SetConstant*` (9-18): dead in the game
 

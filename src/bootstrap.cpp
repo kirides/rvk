@@ -153,6 +153,7 @@ void detourInitializeAdmin(void* self, int apiType) {
         vo.logDraws = g_config.logDraws;
         vo.logFrame = g_config.logFrame;
         vo.screenshotDir = paths::dataDir() / L"screenshots";
+        if (g_config.dumpSavedTextures) vo.dumpDir = paths::dataDir() / L"dumps";
         *static_cast<void**>(s.gfxAdminApiInstance) = static_cast<hal::eCAPIInstance*>(new hal::vulkan::HalInstance(vo));
         g_initializeAdmin.original(self, 4);
         *reinterpret_cast<int*>(static_cast<char*>(self) + 0x648) = apiType;

@@ -36,6 +36,8 @@ struct Config {
     // (any mode) at these eCApplication::Draw calls: the engine's snapshot (eCApplication::Snapshot -> HAL slot 159) plus a
     // self-test of the rvk_screenshot API on the same frame (<bin>/rvk/screenshots/api_draw<n>.*)
     std::vector<std::uint32_t> snapshotFrames;
+    // (vulkan) eCAPITexture::SaveTextureToFile (always refused) also dumps the image to <bin>/rvk/dumps/<name>.png
+    bool dumpSavedTextures = false;
 };
 
 // Parses config.toml text. Unknown keys are ignored, bad values keep the default; `error` gets a parse error message.

@@ -794,6 +794,88 @@ bool Device::readRenderTarget(Surface* src, Texture* dst, std::uint32_t dstLevel
     return ok;
 }
 
+bool Device::loadSurfaceFromSurface(Texture* dst, std::uint32_t dstLevel, const std::int32_t* dstRect, Texture* src,
+                                    std::uint32_t srcLevel, const std::int32_t* srcRect, bool linear, std::string* why) {
+    const auto fail = [&](const char* reason) {
+        if (why != nullptr) *why = reason;
+        return false;
+    };
+    if (dst == nullptr || src == nullptr || !dst->valid() || !src->valid() || dst->isNull() || src->isNull() ||
+        dstLevel >= dst->levels() || srcLevel >= src->levels() || dst->desc().type != TextureType::Tex2D ||
+        src->desc().type != TextureType::Tex2D) {
+        return fail("invalid textures / levels");
+    }
+    if (!recordingThread()) {
+        return fail("not on the render thread");
+    }
+    const auto identity = [](VkComponentSwizzle s, VkComponentSwizzle own) {
+        return s == VK_COMPONENT_SWIZZLE_IDENTITY || s == own;
+    };
+    const VkComponentMapping& sw = src->format().swizzle;
+    if (!identity(sw.r, VK_COMPONENT_SWIZZLE_R) || !identity(sw.g, VK_COMPONENT_SWIZZLE_G) ||
+        !identity(sw.b, VK_COMPONENT_SWIZZLE_B) || !identity(sw.a, VK_COMPONENT_SWIZZLE_A) || src->isDepth()) {
+        return fail("source format needs a swizzle / is depth");
+    }
+    VkFormatProperties fp{};
+    vkGetPhysicalDeviceFormatProperties(ctx_.physicalDevice(), src->format().format, &fp);
+    if ((fp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) == 0) {
+        return fail("the source format cannot be blitted");
+    }
+    const std::uint32_t lw = dst->levelWidth(dstLevel), lh = dst->levelHeight(dstLevel);
+    std::int32_t r[4] = {0, 0, static_cast<std::int32_t>(lw), static_cast<std::int32_t>(lh)};
+    if (dstRect != nullptr) {
+        r[0] = std::clamp<std::int32_t>(dstRect[0], 0, static_cast<std::int32_t>(lw));
+        r[1] = std::clamp<std::int32_t>(dstRect[1], 0, static_cast<std::int32_t>(lh));
+        r[2] = std::clamp<std::int32_t>(dstRect[2], 0, static_cast<std::int32_t>(lw));
+        r[3] = std::clamp<std::int32_t>(dstRect[3], 0, static_cast<std::int32_t>(lh));
+        if (r[0] >= r[2] || r[1] >= r[3]) {
+            return fail("empty destination rect");
+        }
+    }
+    endRendering();
+    src->prepareForSampling(frames_.cmd());  // pending file data first
+    Surface* srcSurface = src->surface(srcLevel, 0);
+    if (dst->isRenderTarget()) {
+        stretchRect(srcSurface, srcRect, dst->surface(dstLevel, 0), r, linear);
+        return true;
+    }
+    if (dst->format().compressed || dst->format().convert != vk::Convert::None) {
+        return fail("compressed / converted destination format");
+    }
+    // a CPU-side destination: blit into a temporary render target of the destination's format, read it back into the rect
+    const std::uint32_t w = static_cast<std::uint32_t>(r[2] - r[0]), h = static_cast<std::uint32_t>(r[3] - r[1]);
+    TextureDesc td;
+    td.width = w;
+    td.height = h;
+    td.levels = 1;
+    td.format = dst->desc().format;
+    td.usage = USAGE_RENDERTARGET;
+    td.pool = POOL_DEFAULT;
+    auto tmp = createTexture(td);
+    if (!tmp) {
+        return fail("temporary render target");
+    }
+    stretchRect(srcSurface, srcRect, tmp->surface(0, 0), nullptr, linear);
+    std::vector<std::uint8_t> pixels;
+    const VkDeviceSize size = vk::storageSize(tmp->format(), w, h);
+    const bool read = readImageLevel(tmp->image(), 0, 0, {w, h, 1}, size, pixels);
+    release(std::move(tmp));
+    if (!read) {
+        return fail("read-back failed");
+    }
+    Texture::Locked lk;
+    if (!dst->lock(dstLevel, 0, r, dstRect == nullptr ? LOCK_DISCARD : 0, lk)) {
+        return fail("destination lock failed");
+    }
+    const std::size_t rowBytes = static_cast<std::size_t>(size / h);
+    for (std::uint32_t y = 0; y < h; ++y) {
+        std::memcpy(static_cast<std::uint8_t*>(lk.bits) + static_cast<std::size_t>(y) * lk.rowPitch, pixels.data() + y * rowBytes,
+                    rowBytes);
+    }
+    dst->unlock(dstLevel, 0);
+    return true;
+}
+
 bool Device::readImageLevel(vk::Image& img, std::uint32_t level, std::uint32_t layer, VkExtent3D extent, VkDeviceSize size,
                             std::vector<std::uint8_t>& out) {
     if (!img.valid() || size == 0) {

@@ -16,6 +16,7 @@
 #include <memory>
 #include <mutex>
 #include <span>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -310,6 +311,11 @@ public:
     void stretchRect(Surface* src, const std::int32_t* srcRect, Surface* dst, const std::int32_t* dstRect, bool linear);
     // GetRenderTargetData: copy a render target into a CPU-side texture level (waits for the GPU)
     bool readRenderTarget(Surface* src, Texture* dst, std::uint32_t dstLevel);
+    // D3DXLoadSurfaceFromSurface between 2D texture levels on the GPU (blit: format conversion incl. BC decompression, scaling;
+    // linear = a filtering D3DX_FILTER). A CPU-side destination gets the result through a temporary render target read back
+    // into its CPU copy (waits for the GPU). Rects {left, top, right, bottom} or null; render thread only. `why` on failure.
+    bool loadSurfaceFromSurface(Texture* dst, std::uint32_t dstLevel, const std::int32_t* dstRect, Texture* src,
+                                std::uint32_t srcLevel, const std::int32_t* srcRect, bool linear, std::string* why = nullptr);
     // copy one level / layer of an image into `out` (storage layout, tightly packed; waits for the GPU)
     bool readImageLevel(vk::Image& img, std::uint32_t level, std::uint32_t layer, VkExtent3D extent, VkDeviceSize size,
                         std::vector<std::uint8_t>& out);

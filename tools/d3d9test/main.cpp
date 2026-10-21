@@ -23,6 +23,7 @@
 #include "common/d3dx.h"
 #include "d3d9/convert.h"
 #include "d3d9/device.h"
+#include "d3d9/fvf.h"
 #include "vk/formats.h"
 
 using namespace rvk;
@@ -529,6 +530,171 @@ void testLockAfterUpload(Fixture& f) {
     f.dev.release(std::move(tex));
 }
 
+void testFvf(Fixture& f) {
+    // an FVF vertex buffer (XYZ | DIFFUSE | TEX2, the engine's 0x242): stride and declaration from the FVF, like
+    // IDirect3DDevice9::SetFVF with a vertex shader bound
+    constexpr std::uint32_t kFvf = FVF_XYZ | FVF_DIFFUSE | (2u << FVF_TEXCOUNT_SHIFT);
+    struct FvfVertex {
+        float x, y, z;
+        std::uint32_t color;
+        float u0, v0, u1, v1;
+    };
+    static_assert(sizeof(FvfVertex) == 32);
+    const std::uint32_t stride = fvfVertexSize(kFvf);
+    if (stride != sizeof(FvfVertex)) {
+        std::printf("  FAIL fvf: stride %u, expected %zu\n", stride, sizeof(FvfVertex));
+        ++g_failures;
+        return;
+    }
+    auto decl = f.dev.createVertexDecl(fvfDeclaration(kFvf));
+    auto vb = f.dev.createBuffer(6 * stride, USAGE_WRITEONLY, POOL_MANAGED, false, false);
+    const FvfVertex v[6] = {{-1, 1, 0.5f, 0xFFFF0000, 0, 0, 9, 9}, {0, 1, 0.5f, 0xFFFF0000, 1, 0, 9, 9},
+                            {-1, -1, 0.5f, 0xFFFF0000, 0, 1, 9, 9}, {0, 1, 0.5f, 0xFFFF0000, 1, 0, 9, 9},
+                            {0, -1, 0.5f, 0xFFFF0000, 1, 1, 9, 9}, {-1, -1, 0.5f, 0xFFFF0000, 0, 1, 9, 9}};
+    std::memcpy(vb->lock(0, 0, 0), v, sizeof v);
+    vb->unlock();
+    f.reset();
+    f.dev.setVertexDecl(decl.get());
+    f.dev.setStreamSource(0, vb.get(), 0, stride);
+    f.dev.drawPrimitive(PT_TRIANGLELIST, 0, 2);
+    const Pixels p = capture(f.dev, "fvf");
+    expect("fvf: left half drawn", p, 10, 30, 0xFF0000);
+    expect("fvf: right half untouched", p, 50, 30, 0x000000);
+    f.dev.setStreamSource(0, nullptr, 0, 0);
+    f.dev.setVertexDecl(nullptr);
+    f.dev.release(std::move(vb));
+    f.dev.release(std::move(decl));
+}
+
+const char* kPsCube = R"(
+ps_3_0
+def c0, 1, 0, 0, 0
+dcl_texcoord v0.xy
+dcl_cube s0
+mov r0.xy, v0
+mov r0.z, c0.x
+texld oC0, r0, s0
+)";
+
+void testCubeLock(Fixture& f) {
+    // eCAPICubeMap::LockCubeMapLayer: lock one face of a file cube map whose CPU copy was dropped after the upload (read back
+    // from that face's layer), then write a face and sample it
+    const auto ps = shaderFrom(f.dev, kPsCube);
+    if (!ps) {
+        ++g_failures;
+        return;
+    }
+    TextureDesc d;
+    d.type = TextureType::Cube;
+    d.width = d.height = 8;
+    d.format = vk::d3dfmt::A8R8G8B8;
+    d.pool = POOL_MANAGED;
+    auto cube = f.dev.createTexture(d);
+    const std::uint32_t faceColors[6] = {0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFFFFFF00, 0xFF00FFFF, 0xFFFF00FF};
+    for (std::uint32_t face = 0; face < 6; ++face) {
+        std::vector<std::uint32_t> px(64, faceColors[face]);
+        cube->setLevelData(0, face, {reinterpret_cast<const std::uint8_t*>(px.data()), px.size() * 4}, 8 * 4);
+    }
+    auto drawCube = [&](const char* name) {
+        f.reset();
+        f.dev.setPixelShader(ps);
+        f.dev.setTexture(0, cube.get());
+        f.draw(quad(-1, -1, 1, 1, 0.5f, 0xFFFFFFFF));
+        Pixels p = capture(f.dev, name);
+        f.dev.setTexture(0, nullptr);
+        return p;
+    };
+    Pixels p = drawCube("cube_lock_1");
+    expect("cube: +Z face sampled", p, 32, 32, faceColors[4]);
+    Texture::Locked lk;
+    if (!cube->lock(0, 2, nullptr, LOCK_READONLY, lk)) {
+        std::printf("  FAIL cube lock: face 2 could not be locked\n");
+        ++g_failures;
+    } else {
+        const std::uint32_t got = static_cast<const std::uint32_t*>(lk.bits)[9];
+        cube->unlock(0, 2);
+        if (got != faceColors[2]) {
+            std::printf("  FAIL cube lock: read-only lock of face 2 sees %08X, expected %08X\n", got, faceColors[2]);
+            ++g_failures;
+        }
+    }
+    if (cube->lock(0, 4, nullptr, 0, lk)) {
+        fillLocked(lk, 0, 0, 0, 0, 8, 8, 0xFF808080);
+        cube->unlock(0, 4);
+    }
+    p = drawCube("cube_lock_2");
+    expect("cube: written face sampled", p, 32, 32, 0x808080);
+    if (cube->lock(0, 0, nullptr, LOCK_READONLY, lk)) {
+        const std::uint32_t got = static_cast<const std::uint32_t*>(lk.bits)[0];
+        cube->unlock(0, 0);
+        if (got != faceColors[0]) {
+            std::printf("  FAIL cube lock: face 0 after writing face 4 is %08X\n", got);
+            ++g_failures;
+        }
+    }
+    f.dev.release(std::move(cube));
+}
+
+void testLoadSurfaceFromSurface(Fixture& f) {
+    // D3DXLoadSurfaceFromSurface(filter NONE) of a DXT1 file texture into an A8R8G8B8 system-memory texture (the sky absorption
+    // image): blocks 0-2 red, block 3 blue, decoded into the CPU copy
+    TextureDesc d;
+    d.width = d.height = 8;
+    d.format = vk::d3dfmt::DXT1;
+    auto src = f.dev.createTexture(d);
+    std::vector<std::uint8_t> blocks(4 * 8);
+    for (int b = 0; b < 4; ++b) {
+        const std::uint16_t c0 = b == 3 ? 0x001F : 0xF800, c1 = 0;
+        std::memcpy(blocks.data() + b * 8, &c0, 2);
+        std::memcpy(blocks.data() + b * 8 + 2, &c1, 2);
+    }
+    src->setLevelData(0, 0, blocks, 16);
+    TextureDesc dd;
+    dd.width = dd.height = 8;
+    dd.format = vk::d3dfmt::A8R8G8B8;
+    dd.pool = POOL_SYSTEMMEM;
+    auto dst = f.dev.createTexture(dd);
+    std::string why;
+    if (!f.dev.loadSurfaceFromSurface(dst.get(), 0, nullptr, src.get(), 0, nullptr, false, &why)) {
+        std::printf("  FAIL load surface: %s\n", why.c_str());
+        ++g_failures;
+    } else {
+        Texture::Locked lk;
+        dst->lock(0, 0, nullptr, LOCK_READONLY, lk);
+        const auto at = [&](int x, int y) {
+            return reinterpret_cast<const std::uint32_t*>(static_cast<const std::uint8_t*>(lk.bits) + y * lk.rowPitch)[x];
+        };
+        const std::uint32_t a = at(1, 1), b = at(6, 6);
+        dst->unlock(0, 0);
+        if (!similar(a, 0xFF0000, 8) || !similar(b, 0x0000FF, 8) || (a >> 24) != 0xFF) {
+            std::printf("  FAIL load surface: texels %08X / %08X, expected FFFF0000 / FF0000FF\n", a, b);
+            ++g_failures;
+        }
+    }
+    // a sub-rectangle: the blue block alone, scaled into the top-left 2x2 of a cleared destination
+    Texture::Locked lk;
+    dst->lock(0, 0, nullptr, LOCK_DISCARD, lk);
+    for (int y = 0; y < 8; ++y) std::memset(static_cast<std::uint8_t*>(lk.bits) + y * lk.rowPitch, 0, 32);
+    dst->unlock(0, 0);
+    const std::int32_t sr[4] = {4, 4, 8, 8}, dr[4] = {0, 0, 2, 2};
+    if (!f.dev.loadSurfaceFromSurface(dst.get(), 0, dr, src.get(), 0, sr, false, &why)) {
+        std::printf("  FAIL load surface (rects): %s\n", why.c_str());
+        ++g_failures;
+    } else {
+        dst->lock(0, 0, nullptr, LOCK_READONLY, lk);
+        const auto* row0 = static_cast<const std::uint32_t*>(lk.bits);
+        const auto* row1 = reinterpret_cast<const std::uint32_t*>(static_cast<const std::uint8_t*>(lk.bits) + lk.rowPitch);
+        const std::uint32_t in = row1[1], out = row0[2];
+        dst->unlock(0, 0);
+        if (!similar(in, 0x0000FF, 8) || out != 0) {
+            std::printf("  FAIL load surface (rects): inside %08X, outside %08X\n", in, out);
+            ++g_failures;
+        }
+    }
+    f.dev.release(std::move(dst));
+    f.dev.release(std::move(src));
+}
+
 }  // namespace
 
 // --present-test [vsync 0/1]: a real window, clears + presents 300 frames, prints the frame rate (vsync pacing check)
@@ -605,6 +771,7 @@ int main(int argc, char** argv) {
         {"instancing", testInstancing}, {"UP + scissor", testUpAndScissor}, {"stretch rect", testStretchRect},
         {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
+        {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
     };
     for (const auto& [name, fn] : cases) {
         const int before = g_failures;

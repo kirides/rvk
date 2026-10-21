@@ -50,6 +50,7 @@ Config parseConfig(std::string_view text, std::string* error) {
     cfg.traceCapture = tbl["trace"]["capture"].value_or(cfg.traceCapture);
     cfg.logDraws = static_cast<std::uint32_t>(tbl["debug"]["log_draws"].value_or(0));
     cfg.logFrame = static_cast<std::uint32_t>(tbl["debug"]["log_frame"].value_or(0));
+    cfg.dumpSavedTextures = tbl["debug"]["dump_saved_textures"].value_or(cfg.dumpSavedTextures);
     const auto frameList = [&](const char* key, std::vector<std::uint32_t>& out) {
         if (const auto* frames = tbl["debug"][key].as_array()) {
             for (const auto& f : *frames) {
