@@ -1,0 +1,8 @@
+{
+  "$schema": "https://raw.githubusercontent.com/LuaLS/vscode-lua/master/setting/schema.json",
+  "runtime.version": "LuaJIT",
+  "workspace.library": ["B:/DevDrive/git/github/risen-spass/types"],
+  "workspace.checkThirdParty": false,
+  "diagnostics.globals": ["risen", "mod"],
+  "diagnostics.disable": ["lowercase-global"]
+}
