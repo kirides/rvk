@@ -6,6 +6,10 @@
 #define RVK_ENGINE_SYMBOLS(X)                                                                                                   \
     /* void eCGfxAdmin::InitializeAdmin(eCGfxShared::eEAPIType) (0x74e510): creates eCDX9Instance, Direct3DCreate9 */           \
     X(gfxAdminInitializeAdmin, L"Engine.dll", "?InitializeAdmin@eCGfxAdmin@@IEAAXW4eEAPIType@eCGfxShared@@@Z", true)            \
+    /* static bEResult eCGfxAdmin::sEnumAdapterDesc(unsigned long, eSGfxAdapterDesc&) (0x74eb80): the pixel shader 3.0 check  \
+       of eCApplication::CreateEngine, before the window; Direct3DCreate9 + DxDiag while ms_pAPIInstance is null */             \
+    X(gfxAdminEnumAdapterDesc, L"Engine.dll",                                                                                   \
+      "?sEnumAdapterDesc@eCGfxAdmin@@SA?AW4bEResult@@KAEAUeSGfxAdapterDesc@eCGfxShared@@@Z", false)                             \
     /* eCAPIInstance* eCGfxAdmin::ms_pAPIInstance (0xc62ad8) */                                                                 \
     X(gfxAdminApiInstance, L"Engine.dll", "?ms_pAPIInstance@eCGfxAdmin@@1PEAVeCAPIInstance@@EA", true)                          \
     /* eCAPIDevice* eCGfxContextAdmin::ms_pAPIDevice (0xc62750): the single global device pointer */                           \

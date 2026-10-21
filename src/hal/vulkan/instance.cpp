@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cfloat>
 #include <cstring>
+#include <mutex>
+#include <optional>
 
 #include <spdlog/spdlog.h>
 
@@ -19,6 +21,7 @@ struct AdapterInfo {
     std::string name = "Vulkan device";
     std::uint32_t vendorId = 0, deviceId = 0, driverVersion = 0;
     std::uint64_t vramMB = 0;
+    bool usable = false;  // a device meeting the renderer's floor was found
 };
 
 AdapterInfo queryAdapter(int preferred) {
@@ -46,6 +49,7 @@ AdapterInfo queryAdapter(int preferred) {
         if (pick < 0 || (r.discrete && !vk::inspectDevice(pds[static_cast<std::size_t>(pick)]).discrete)) pick = i;
     }
     if (pick >= 0) {
+        info.usable = true;
         VkPhysicalDeviceProperties p{};
         vkGetPhysicalDeviceProperties(pds[static_cast<std::size_t>(pick)], &p);
         info.name = std::string(p.deviceName) + " (Vulkan)";
@@ -62,6 +66,20 @@ AdapterInfo queryAdapter(int preferred) {
     }
     vkDestroyInstance(instance, nullptr);
     return info;
+}
+
+// The query creates a Vulkan instance (~0.1 s): done once per process, the first time by the early
+// eCGfxAdmin::sEnumAdapterDesc detour (bootstrap), then reused by HalInstance::GetAdapterDesc.
+const AdapterInfo& cachedAdapter(int preferred) {
+    static std::mutex mutex;
+    static std::optional<AdapterInfo> cache;
+    static int cachedFor = 0;
+    std::scoped_lock lock(mutex);
+    if (!cache || cachedFor != preferred) {
+        cache = queryAdapter(preferred);
+        cachedFor = preferred;
+    }
+    return *cache;
 }
 
 // what an SM3 D3D9 driver reports (D3DCAPS9 without DeviceType/AdapterOrdinal)
@@ -165,18 +183,23 @@ bEResult HalInstance::GetModeCount(unsigned long, unsigned long* a1) {
     return bEResult_Ok;
 }
 
+bool fillAdapterDesc(int preferredAdapter, eCGfxShared::eSGfxAdapterDesc* desc) {
+    const AdapterInfo& info = cachedAdapter(preferredAdapter);
+    std::memset(desc, 0, sizeof(*desc));
+    std::snprintf(desc->driver, sizeof(desc->driver), "risen-enhanced-graphics");
+    std::snprintf(desc->description, sizeof(desc->description), "%s", info.name.c_str());
+    desc->driverVersion = info.driverVersion;
+    desc->vendorId = info.vendorId;
+    desc->deviceId = info.deviceId;
+    desc->caps = sm3Caps();
+    desc->dedicatedVideoMemoryMB = static_cast<std::int32_t>(std::min<std::uint64_t>(info.vramMB, 0x7FFFFFFF));
+    spdlog::info("hal: adapter '{}' ({} MiB){}", info.name, info.vramMB, info.usable ? "" : ": NOT usable");
+    return info.usable;
+}
+
 bEResult HalInstance::GetAdapterDesc(unsigned long, eCGfxShared::eSGfxAdapterDesc* a1) {
     if (a1 == nullptr) return bEResult_False;
-    const AdapterInfo info = queryAdapter(options_.adapter);
-    std::memset(a1, 0, sizeof(*a1));
-    std::snprintf(a1->driver, sizeof(a1->driver), "risen-enhanced-graphics");
-    std::snprintf(a1->description, sizeof(a1->description), "%s", info.name.c_str());
-    a1->driverVersion = info.driverVersion;
-    a1->vendorId = info.vendorId;
-    a1->deviceId = info.deviceId;
-    a1->caps = sm3Caps();
-    a1->dedicatedVideoMemoryMB = static_cast<std::int32_t>(std::min<std::uint64_t>(info.vramMB, 0x7FFFFFFF));
-    spdlog::info("hal: adapter '{}' ({} MiB)", info.name, info.vramMB);
+    fillAdapterDesc(options_.adapter, a1);
     return bEResult_Ok;
 }
 

@@ -24,6 +24,8 @@ Evidence: headless Ghidra (Engine, Game projects; dumps `B:\DevDrive\risen-ghidr
 * Recommendation: **detour `eCGfxAdmin::sEnumAdapterDesc`** in Vulkan mode and fill the desc from our Vulkan adapter
   info. This skips both `Direct3DCreate9` and DxDiag. Separately, change spass so its screenshot uses our renderer when
   `rvk` is in Vulkan mode (section 6).
+* **Done (section 9):** the detour is in place. A Vulkan run loads no system `d3d9.dll`, `dxdiagn.dll` or `d3d11.dll`, and
+  `InitializeAdmin` starts 5-7 s earlier. The hidden `temp_d3d_window_*` window is OBS Studio's Vulkan layer, not D3D.
 
 ## 2. Startup chain [C]
 
@@ -51,7 +53,8 @@ at `+0x418`. The desc (`local_6b8`) is not read anywhere else in `CreateEngine`.
 
 Timing in `rvk.log` (Vulkan mode): call #1 at 15:44:04.712, system d3d9 loaded 15:44:04.715, `InitializeAdmin` at
 15:44:11.082. The 6.4 s in between include DxDiag, the Game Explorer check, the window creation and the config work.
-**[I]** DxDiag (section 3) is the likely bulk; to measure it, log around the original in a detour in passthrough mode.
+Measured (section 9): the original `sEnumAdapterDesc` alone takes **5.7-7.4 s** (passthrough, timed around the original);
+the Game Explorer check, window creation and config work after it take ~0.02 s. **[C]**
 
 ## 3. What `eCGfxAdmin::sEnumAdapterDesc` (0x74eb80) does [C]
 
@@ -152,7 +155,7 @@ Proposed spass change (not done here, spass is another repo):
    d3d9, so the D3D9 path stays correct.
 4. With this change no D3D9 runtime is loaded in a Vulkan run, and spass screenshots work.
 
-## 7. The hidden `temp_d3d_window_*` window (open)
+## 7. The hidden `temp_d3d_window_*` window (resolved in section 9: OBS Studio's Vulkan layer)
 
 The string `temp_d3d` (ASCII or UTF-16, any case) is **not present** in Engine.dll, spass's `sentry.dll`, the other
 binaries in `bin`, any `System32\*.dll` (incl. `d3d9`, `d3d9on12`, `d3d11`, `d3d12`, `dxgi`, `dxdiagn`), the AMD driver
@@ -180,3 +183,56 @@ not established statically. **[C]** for the search.
   Vulkan adapter, `config.toml adapter` chooses). That is harmless because only the caps are checked.
 * **Resolution list**: unaffected (it comes from `InitializeAdmin` -> `HalInstance` modes, section 4).
 * **Timing**: a Vulkan instance creation (~0.1 s) moves earlier, before the game window. Cache it for `InitializeAdmin`.
+
+## 9. Implementation and measurements (2026-10-21)
+
+Implementation (option (b)): `src/bootstrap.cpp` `detourEnumAdapterDesc`, symbol `gfxAdminEnumAdapterDesc` in
+`src/engine/symbols.h` (optional). The hook is created in DllMain with the `InitializeAdmin` one (MinHook only, no engine
+call); it runs on the main thread from `CreateEngine`, long after every DllMain. It is installed **only in Vulkan mode**;
+passthrough and trace keep the original path untouched.
+* Vulkan mode, `ms_pAPIInstance == null`: `hal::vulkan::fillAdapterDesc` zeroes the 0x548 bytes and fills them as
+  `HalInstance::GetAdapterDesc` does (driver "risen-enhanced-graphics", description/vendor/device/driver version from the
+  Vulkan device, `sm3Caps()` with `PixelShaderVersion 0xFFFF0300`, VRAM from the device-local heap). Returns 1, the original
+  is skipped. The Vulkan adapter query (one throw-away `VkInstance`, ~0.15 s) is cached per process, so
+  `HalInstance::GetAdapterDesc` in `InitializeAdmin` reuses it. (`vk::probe()` still makes its own instance for the report.)
+* No usable Vulkan device (no loader, no instance, or no device meeting the floor): logged as an error, the session switches to
+  `mode = passthrough` and the original runs. Nothing Vulkan-specific has happened yet, so the D3D9 path is untouched.
+  Not exercised in game (this machine has a usable device). **[I]** by code
+* `ms_pAPIInstance != null` (never at startup): the original runs.
+
+New diagnostic: rvk.log `startup state at InitializeAdmin: <s> after process start; D3D/overlay modules: [...]; windows: [...]`
+(modules of interest: the system `d3d9.dll`, `dxdiagn`, `d3d11`, `d3d12`, `dxgi`, `d3d9on12`, `vulkan-1`, `atidx*`, `amdx*`,
+`gameoverlayrenderer*`, `graphics-hook*`; top-level and message-only windows of the process).
+
+Measurements (`testdemo`, AMD RX 7900 XTX, test copy, windowed; times since process start). **[C]**
+
+| run | early call | `InitializeAdmin` | modules at `InitializeAdmin` |
+|---|---|---|---|
+| Vulkan, before (16:33) | `Direct3DCreate9` from Engine.dll+0x74ec0b at 6.08 s | **11.75 s** | gameoverlayrenderer64, d3d9 (system), amdxn64, dxgi, dxdiagn, d3d11, d3d12 |
+| Vulkan, after (16:36) | detour answered at 6.50 s (no `Direct3DCreate9`) | **6.51 s** | gameoverlayrenderer64, dxgi (vulkan-1 / graphics-hook64 not yet in the filter) |
+| Vulkan, after (16:42, final build) | detour answered at 7.72 s | **7.74 s** | gameoverlayrenderer64, vulkan-1, dxgi, graphics-hook64 |
+| passthrough, timed original (16:40) | original `sEnumAdapterDesc` took **7.36 s** | 15.37 s | as "before" |
+| passthrough, final build (16:43) | `Direct3DCreate9` call #1 at 7.52 s | 14.41 s | as "before" (unchanged path) |
+
+* Gain: the span "early adapter query -> `InitializeAdmin`" drops from 5.7-7.4 s to ~0.02 s plus ~0.15 s for the Vulkan
+  query, i.e. **~5-7 s less startup** in Vulkan mode. The time before `CreateEngine` (6.1-7.7 s here: Risen.exe, spass's
+  mod layer, config) varies between runs and is not ours.
+* In the whole final Vulkan run **`Direct3DCreate9` was never called and the system `d3d9.dll`, `dxdiagn.dll`, `d3d11.dll`,
+  `atidx9loader64.dll`, `amdxn64.dll`, `amdxx64.dll` were never loaded** (external poll of the process modules during the whole run, plus the in-process line).
+  Still loaded in Vulkan mode: `vulkan-1`, `dxgi` ([I] the Vulkan loader's adapter sorting), `amdvlk64`,
+  `SteamOverlayVulkanLayer64`, `graphics-hook64` (implicit layers) and, ~0.5 s after `InitializeAdmin`, `d3d12.dll` +
+  `amdxc64.dll` (owner not determined; [I] a Vulkan layer or the driver).
+* `testdemo` PASS in Vulkan mode (screenshot frame 450 renders the beach + GUI) and in passthrough mode; unit tests pass.
+* The run without spass's `risen.debug.screenshot` creates no D3D9 device at all; the remaining D3D9 user in Vulkan mode
+  is only that screenshot hook (section 6).
+
+The hidden window. A temporary in-context `SetWinEventHook(EVENT_OBJECT_CREATE)` with stack capture showed it is created on
+its own thread whose start is **`graphics-hook64.dll+0x76f1`**: OBS Studio's game-capture hook (class
+`temp_d3d_window_4039785`, title `Temp Window`, a constant name: OBS's dummy-window thread). It is loaded as the implicit
+Vulkan layer **`VK_LAYER_OBS_HOOK`** (`C:\ProgramData\obs-studio-hook\obs-vulkan64.json`, registered in the
+`Khronos\Vulkan\ImplicitLayers` registry key) by the **first `vkCreateInstance` of the process**: in the "after" runs right
+after the detour's adapter query, in the "before" Vulkan run and in passthrough by `vk::probe()` in `InitializeAdmin`.
+It is neither the Steam overlay, the AMD overlay, D3D9 nor DxDiag. **[C]** The name is assembled at runtime (not found
+statically, section 7). It is harmless (hidden, own thread). The layer honours `DISABLE_VULKAN_OBS_CAPTURE=1` if it is
+ever unwanted (that also disables OBS's Vulkan game capture of Risen). Side note: spass's `sentry.dll+0x6fec6` sits in every
+window-creation stack (spass hooks window creation). **[C]**

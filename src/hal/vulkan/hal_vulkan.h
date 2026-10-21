@@ -35,6 +35,11 @@ struct Options {
 // true while the frame selected by Options::logFrame is being recorded
 bool logThisFrame();
 
+// Fills an eSGfxAdapterDesc (zeroed first) for the Vulkan device the renderer will use, with the caps of an SM3 D3D9 driver
+// (PixelShaderVersion 3.0: eCApplication::CreateEngine quits below it). The Vulkan query is cached per process. Returns false
+// when no device meets the renderer's floor (the desc is filled anyway). preferredAdapter: Options::adapter.
+bool fillAdapterDesc(int preferredAdapter, eCGfxShared::eSGfxAdapterDesc* desc);
+
 class HalInstance final : public StubInstance {
 public:
     explicit HalInstance(const Options& options);

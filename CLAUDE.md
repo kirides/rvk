@@ -52,8 +52,13 @@ watchdog, scenario result; mods come from the spass repo `B:\DevDrive\git\github
 `B:\DevDrive\risen-test-vk\bin\rvk\rvk.log`. Check free RAM first; kill a `steamwebhelper.exe` above 5 GiB (user instruction).
 risen-spass's own `risen.debug.screenshot` grabs the D3D9 back buffer (hooks `Present`): it does not work in Vulkan mode.
 
-Startup facts (measured): `Direct3DCreate9` is called once ~6 s **before** `eCGfxAdmin::InitializeAdmin` (another caller, to be
-found) and again inside it; device creation in the AMD D3D9 driver takes ~10 s.
+Startup facts (measured, docs/research/early-d3d9.md): `eCApplication::CreateEngine` calls `eCGfxAdmin::sEnumAdapterDesc`
+(pixel shader 3.0 check) before the window: in passthrough/trace it runs `Direct3DCreate9` + DxDiag (5.7-7.4 s, loads
+d3d9/dxdiagn/d3d11/d3d12), then `InitializeAdmin` calls `Direct3DCreate9` again; device creation in the AMD D3D9 driver takes
+~10 s. In Vulkan mode our detour answers it from Vulkan (~0.15 s) and no system d3d9.dll is loaded. rvk.log's "startup state
+at InitializeAdmin" line lists uptime, D3D/Vulkan/overlay modules and the process's windows. The hidden
+`temp_d3d_window_4039785` window is OBS Studio's `graphics-hook64.dll`, loaded as the implicit Vulkan layer
+`VK_LAYER_OBS_HOOK` by our first `vkCreateInstance` (`DISABLE_VULKAN_OBS_CAPTURE=1` disables the layer).
 
 ## Shader translator
 
