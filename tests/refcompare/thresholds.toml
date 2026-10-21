@@ -1,0 +1,12 @@
+# Base thresholds of the D3D9 reference comparison (tools/refcompare.py, docs/research/reference-compare.md 6.4).
+# scripts/refcompare.ps1 passes this file to `refcompare.py calibrate` (the calibrated thresholds.json of a reference set
+# contains it) and to `compare` when no stored reference is used. Built-in defaults apply to everything not set here.
+
+[spot.lava_cave]
+# the fixed camera stands 250 units from its target in a narrow dungeon: the camera's collision moves the eye by ~1-3 units
+# between runs (measured 1.05 and 2.61)
+pose = { eye = 4.0 }
+# the full-screen heat distortion of the volcano dungeon keeps moving under the time freeze (in both renderers): ~60-65 %
+# of the pixels shimmer by 1-2 px within a burst. Only the stable rest is compared.
+invalid = { noise_max = 80.0 }
+known = "heat distortion animates under the freeze (both renderers): ~65 % of the pixels masked as burst noise"

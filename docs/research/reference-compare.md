@@ -1,6 +1,8 @@
 # Design: D3D9 reference comparison at fixed spots
 
-Status: design (2026-10-21); built so far: the renderer side, section 4.1 (exports, `include/rvk_api.h`) and 4.3 (slot 159), and the diff tool (section 6, `tools/refcompare.py`). Goal (user decision): run the **same deterministic scenario** once
+Status: **built and run end to end (2026-10-21)**: renderer exports (4.1, 4.3), spass controls (3, risen-spass RE.md 58-60), the
+scenario `mods/rvkcompare` (5), the diff tool (6), the orchestration `scripts\refcompare.ps1` (7); determinism (8.1); results (11).
+The design text below is kept; the as-built parts say so. Goal (user decision): run the **same deterministic scenario** once
 with the game's own D3D9 renderer (`scripts\run.ps1 -NoRenderer`) and once with ours (`-Mode vulkan`), capture the back
 buffer at fixed spots (camera pose, time of day, weather, HUD state), and diff the pictures automatically with a report.
 This is the verification criterion of PLAN.md M4 ("screenshot-diff suite at N poses within thresholds").
@@ -141,16 +143,19 @@ show the engine calls to make directly:
   * 3 = debug/reset path (weights zeroed).
 * `CON_Weather <name>` = mode 2, weight 1.0 for the named state, 0 for the others; an unknown name = mode 0 ("reset to
   *PlayerPos* mode"). State names: `eCWeatherStates + 0x78` (`bCString`); `GetWeatherStatesCount/At/ByName` exported.
-* States in the shipped `library.pak/WeatherStates.g3ws` [C, offline read]: `Game_Start`, `Stormy`, `Stormy_Rain`, `Foggy`,
-  `Foggy_Rain`, `Sunny_Full`, `Sunny_Half`, `Sunny_Half_02`, `Swamp`, `Swamp_Don_Sunny`, `Gyrger*`, `Dungeon_Default`,
-  `Dungeon_Blue..6`, `Dungeon_Green*`, `Dungeon_Grey*`, `Dungeon_Lava`, `Dungeon_Red_Big`, `Dungeon_Swamp`,
-  `Dungeon_MiniDungeons1`, `_DefaultEdit_Setting`. They carry `ThunderProbability`, `EffectProbability`/`RandomEffect`
-  (`eff_env_thunder`), `WindPower`, precipitation parameters.
+* States of the shipped game (26, read in the running game by `risen.world.weather_states()`, spass RE.md 59 [C]):
+  `Sunny_Full`, `Sunny_Half`, `Sunny_Half_02`, `Stormy`, `Stormy_Rain`, `Foggy`, `Foggy_Rain`, `Swamp_Don_Sunny`,
+  `Gyrger_Sunny_Temp`, `Gyrger_Sunny_Green`, `Dungeon_Blue`, `Dungeon_Blue2..5`, `Dungeon_Blue5_library`, `Dungeon_Blue6_Big`,
+  `Dungeon_Green`, `Dungeon_Green2`, `Dungeon_Green_Big`, `Dungeon_Grey`, `Dungeon_Grey2`, `Dungeon_Red_Big`, `Dungeon_Swamp`,
+  `Dungeon_MiniDungeons1`, `_DefaultEdit_Setting`. There is **no** `Game_Start`, `Swamp` or `Dungeon_Lava` (an earlier offline
+  read of `WeatherStates.g3ws` listed them wrongly): the new-game beach in zone mode is `Stormy_Rain` ~0.98 + `Gyrger_Sunny_Green`
+  ~0.02 (the blend drifts with the zones' random transitions), the volcano dungeon's zone gives `Dungeon_Blue6_Big` 1.0. They
+  carry `ThunderProbability`, `EffectProbability`/`RandomEffect` (`eff_env_thunder`), `WindPower`, precipitation parameters.
 * The daytime fed to the states comes from an `fmod` of a clock value (`FUN_1804ad148` = `fmodf`) [C]; that it is the world
   clock that `risen.world.set_time` sets is [I] (spass screenshots at noon support it). `SetCurrentDayTime` (`0x713ef0`) only
   writes `+0x48`, which goes to `eCWeatherEnvironment::Process`, **not** to the sky: do not use it.
 * Important for interiors: mode 2 skips the zones, so a forced outdoor state also lights a dungeon. Interiors must force their
-  zone's own state (`Dungeon_Lava`, ...), see 5.2.
+  zone's own weights (`Dungeon_Blue6_Big` in the volcano dungeon, ...), read in a calibration run, see 5.5.
 
 ### 2.5 Time: `eCTimer`, app state, session pause [C]
 
@@ -415,85 +420,89 @@ camera settled -> weather/clock set -> wait for post-processing adaptation (fixe
 
 ---------------------------------------------------------------------------------------------------------------------
 
-## 5. Scenario: `mods/rvkcompare` (in the risen-spass repo, beside `rvk_shadows`)
+## 5. Scenario: `mods/rvkcompare` (this repo)
 
-It lives in spass because it uses spass APIs and must pass spass's LuaLS check; thresholds and known-difference notes live
-here (`tests/refcompare/thresholds.toml`, 6.4).
+**Built (2026-10-21).** Renderer scenario mods live in this repo (`mods/`, user rule); `scripts\run.ps1` hands
+`-ModPath <repo>\mods` to spass's `test-run.ps1`. Type-checked with `cd mods; lua-language-server --check . --configpath
+.luarc.json --checklevel Warning` against spass's `types/`.
 
 ### 5.1 Layout and parameters
 
 ```
 mods/rvkcompare/
   mod.toml          id = "rvkcompare"
-  main.lua          the scenario (risen.test), reads spots.lua
-  spots.lua         the spot table (5.2), data only
+  main.lua          the scenario (risen.test), reads spots.lua (require "spots")
+  spots.lua         the spot table (5.3), data only
 ```
-`-Param tag=d3d9|vk` (file prefix), `spots=all|a,b,c`, `burst=3`, `interval=10`, `freeze=1`, `settle=240` (frames),
-`mode=run|calibrate`. `run.ps1 -Param` already passes these through.
+`-Param` keys: `tag` (file prefix, `d3d9` / `vk`), `spots` (`all` or ids separated by `;`), `mode` (`run` | `calibrate`),
+`burst` (3), `interval` (10 frames), `settle` (default 600 frames; per spot `settle`), `freeze_wait` (60 frames),
+`start_wait` (30 s after the new game: the intro camera), `wind` (`0` default: `SetVegWindParams 0 0 0 0`, grass and leaves
+rest; `1` keeps the wind), `repeat` (n: every spot n times in a row as `<id>_r<k>`: the noise of one session), `pin_time`
+(`1` default: `risen.debug.set_game_time` before each freeze, 8.1).
 
-### 5.2 Spot schema
+### 5.2 Spot schema (as built)
 
 ```lua
-return {
-  { id = "beach_rain",
-    player = { x = -38559, y = 15, z = -5770, yaw = 58 } | { entity = "<guid>" } | "start",  -- where the player stands
-    camera = { eye = {x,y,z}, target = {x,y,z}, fov = 60 } | { follow = true, zoom = 0 },     -- fixed or follow camera
-    hide_player = false, hide_npcs = 0,          -- radius in engine units
-    time = { 10, 0 }, weather = "Game_Start",    -- a state name, a weights table, or "auto"
-    hud = false, gui = nil,                      -- nil | { page = 2 } | { page = 3 } | { key = 0x1b } ; cursor = {x, y}
-    post = "default",                            -- informational: the post effect comes from ConfigUser.xml (7.2)
-    settle = 240, burst = 3,                     -- per-spot overrides
-    notes = "rain, sea, refraction, palms",
-  },
-}
+{ id = "beach_rain",
+  player = { x = -38559, y = 15, z = -5770, yaw = 58 },   -- anchor, snapped to risen.world.nav_point (snap = false: as is)
+  camera = { target = { 0, 120, 0 }, yaw = 238, pitch = -6, distance = 700, fov = nil },  -- target relative to the snapped
+                                                           -- player (abs = true: absolute); yaw/pitch = view direction
+  hide_player = true, hide_npcs = 2500,                    -- radius: NPCs/monsters not rendered
+  time = { 10, 0 }, weather = "Stormy_Rain",               -- a state name or { State = weight }; always thunder = false
+  hud = false, gui = nil,                                  -- { page = 2 } | { page = 3 } | { key = 0x1B, page = 13 }
+  settle = 900, notes = "..." }
 ```
 
-### 5.3 The spots (anchors from the layer files [I]; final numbers from calibration, 5.5)
+### 5.3 The spots (calibrated: every anchor was teleported to and looked at, mode=calibrate)
 
-| id | where (anchor) | time / weather | camera, extras | exercises | noise risk |
-|---|---|---|---|---|---|
-| `beach_rain` | the new-game beach, no teleport (`_Intern.lrent` `PC_Hero` -38559, 15, -5770; `WeatherZone_Gamestart`) | 10:00, `Game_Start` (storm + rain) | fixed, along the shore to the sea, HUD off | **rain particles + splashes, sea water (refraction copy), wet look, palms (SpeedTree), fog** (the user's "rain on the beach") | high: rain, thunder flashes (`ThunderProbability`), waves |
-| `beach_sun` | same pose | 13:00, `Sunny_Full` | same | sun shadows (cascades), water specular/sun glint, sky dome, bloom | low/medium |
-| `waterfall_jungle` | Wild_Outdoor waterfall (`VFX_EMT_Waterfall_Water_Splash_01` 8475, 2440, 9403) | 15:00, `Sunny_Half` | fixed, waterfall + foliage | dense alpha-tested foliage, grass instancing, flowing water, spray particles, wind | medium (wind, spray) |
-| `harbour_docks` | Harbour outdoor ships (`Obj_Dec_Ship_01` 13402, -51, -25742) | 18:30, `Sunny_Half_02` | fixed, docks + sea + town | low sun: long shadows, sunset colours, large water, distant LOD, fog | low |
-| `harbour_night` | Harbour Town street with ground torches (`Harbour_Town_Dyn_Light`, `Obj_LS_Torch_Ground_01`) | 23:30, `Sunny_Full` (clear night) | fixed, HUD off | **night**: many point lights, light falloff, moon/stars, dark tonemapping, fire particles | medium (flicker, fire) |
-| `pub_interior` | Harbour pub (`Obj_LS_Sconce_Harbour_01` -1084, 872, -19114; candles at -930, 682, -19479; floor y ~682) | 20:00, weather `"auto"` captured at calibration (interior zone) | fixed, `hide_npcs = 800` | **interior with lights**: candles, sconces, indoor ambient, normal maps | medium (flicker) |
-| `monastery_hall` | Monastery (`Hlp_Story_Initiation_PlayerStart` 12966, 13350, 28251; candelabras, wall torches) | 12:00, zone state from calibration | fixed, `hide_npcs` | stone interiors, light shafts/windows, shadows of point lights | medium |
-| `lava_dungeon` | Vulcan dungeon (`VFX_EMT_Lava_Smoke_02_Red` -11, 10527, 59753) | any, `Dungeon_Lava` | fixed | emissive lava, heat distortion (post `distort`), smoke, red point lights | high (smoke) |
-| `hero_closeup` | `beach_sun` area, player at a fixed pose | 13:00, `Sunny_Full` | follow camera, `ZoomIn` 1 s (RE.md 46) or fixed orbit `target = player head, distance = 150`; **HUD on** | skinned mesh, armour/skin/hair, specular, self-shadowing + the HUD over the world (bars, compass) | low (idle animation: freeze) |
-| `gui_inventory` | after `hero_closeup` | - | `risen.gui.open(2)`, cursor parked at (10, 10) | 2D: panels, item icons (DXT), **text** (fonts), the paused world behind | low |
-| `gui_character` | same | - | `risen.gui.open(3)` (the C screen) | text-heavy page: attribute/skill lists, numbers | low |
-| `menu_main` | in-game ESC menu (page 13 + background 27, via `risen.gui.key(0x1b)`); optional title screen in a separate short `-NoAutostart` run | - | cursor parked | menu bar, tab images, title font | low |
+| id | where (anchor x, y, z) | clock, weather | camera | exercises |
+|---|---|---|---|---|
+| `beach_rain` | new-game beach, `PC_Hero` (-38559, 15, -5770) | 10:00, `Stormy_Rain` | yaw 238 (to the sea), 700 | rain streaks, sea (refraction copy), wet ground, fog, splash particles |
+| `beach_sun` | same | 13:00, `Sunny_Full` | same | sun shadows, water specular, sky dome + clouds, bloom |
+| `jungle` | Wild_Outdoor forest path (`Nav_Path_High` 8130, 5541, -1188) | 15:00, `Sunny_Half_02` | yaw 0, pitch -12, 1200 | dense foliage (alpha test), SpeedTree, grass, dappled shadows |
+| `harbour_docks` | Harbour quay, `SP_Harbour` (-5588, 245, -22007) | 18:30, `Sunny_Half_02` | yaw 180 (pier, ship, harbour basin), 900 | large water, ship and rigging, stone, low sun |
+| `harbour_night` | Harbour Town square (`Obj_LS_Torch_Ground_01` -4361, 486, -19659) | 23:30, `Sunny_Full` | yaw 90, 800 | night: point lights (lamps, torches), dark tonemapping, stars |
+| `pub_interior` | Harbour pub (-1100, 600, -19300; candles at y 682) | 20:00, zone weights `Sunny_Half_02` 0.87 + `Sunny_Full` 0.13 | yaw 90, 400 | candles, sconce, indoor ambient, wood/plaster normal maps |
+| `monastery_hall` | monastery hall with candelabras (7100, 12549, 22040) | 12:00, `Sunny_Full` (zone) | yaw 90, 600 | many candle lights, banners, stone interior |
+| `lava_cave` | volcano dungeon, `SP_BD_VulcanLeft` (-3009, 10397, 60283) | 12:00, `Dungeon_Blue6_Big` (zone) | yaw 150, pitch -10, 250 | emissive lava, red lighting, dungeon fog, heat distortion (moves under the freeze: 80 % burst noise allowed) |
+| `crystal_cave` | Dungeon_Caves crystal cave (`Nav_Zone_Pos` -343, 5361, 11529) | 12:00, zone weights `Sunny_Full` 0.67 + `Sunny_Half_02` 0.33 | yaw 270, pitch -8, 500 | glowing crystals (coloured point lights), wet rock, water, cave fog |
+| `hero_closeup` | beach, player visible (yaw 58) | 13:00, `Sunny_Full` | yaw 238 at the player's face, 220; **HUD on** | skinned mesh, cloth, self-shadowing, HUD bars and compass |
+| `gui_inventory` | as `hero_closeup` | same | same, `risen.gui.open(2)` | panels, icons, text over the world |
+| `gui_character` | as `hero_closeup` | same | same, `risen.gui.open(3)` | the C screen: attribute/skill lists, numbers, text |
+| `menu_esc` | as `hero_closeup` | same | same, ESC (`gui.key(0x1B)`, page 13) | menu bar, title artwork, font |
 
-The first nine cover: beach + rain + water, vegetation, interiors with lights, night, shadows (sun cascades and point lights),
-post effects (bloom/DoF/distort), and characters; the last three cover the GUI with text. Order the run so that far teleports
-are few (beach -> harbour -> pub -> monastery -> waterfall -> lava), and do the GUI spots last.
+13 spots. Order: beach (no teleport) -> forest -> harbour -> pub -> monastery -> volcano -> cave -> beach again for the character and GUI
+spots. The fixed camera (`cam_cinema`) draws the 2.37:1 letterbox bars (rows 113..787 of 900, spass RE.md 59) in both
+renderers; the GUI spots draw over them.
 
-### 5.4 Per-spot flow
+### 5.4 Per-spot flow (as built)
 
 ```
-T.section(id)
- 1. weather + clock      set_weather(spot.weather); set_time(h, m)        (before travelling: rain builds up while loading)
- 2. player               set_pose / teleport (y from risen.world.trace down); console("invisible"); hide_player?
- 3. camera               risen.camera.set{...} (or follow: ResetCamera / ZoomIn); wait until camera.settled() (timeout 10 s)
- 4. world                hide_npcs; hud.set_visible(spot.hud); gui page if any; gui.mouse("move", cursor)
- 5. settle               wait settle frames (default 240 ~ 4 s at 60 fps): streaming, LOD fades, eye adaptation, DoF focus
- 6. re-pin               set_time(h, m) again (the clock ran while settling)
- 7. freeze               debug.time_freeze(true); wait 30 frames
- 8. capture              debug.screenshot(tag.."_"..id, { burst = 3, interval = 10 }); wait until not pending
- 9. log                  risen.log.info("RVKCMP " .. json{ id, tag, backend, frame, camera = camera.get(), weather = world.weather(),
-                                                         time = {world.time()}, app_state, player pose, files })
-10. unfreeze             time_freeze(false); close GUI pages; release camera; restore NPC rendering
+ 1. clock held: set_time(h, m) on every tick (ticks stop under the freeze); set_weather(spot.weather, { thunder = false })
+ 2. player: set_pose at the anchor (+50 up), 90 frames (the world part streams in), nav_point snap, set_pose again
+ 3. hide the player / NPCs in hide_npcs; camera.set{target, yaw, pitch, distance, instant}; HUD on/off
+ 4. settle frames (600, the beach spots 900: rain, wetness, sea need hundreds of frames after a weather switch)
+ 5. re-pin: hiding, HUD and camera again, retried until camera.get().type == "cam_cinema" and settled
+    (a far teleport streams a new world part in, which brings back cam_normal, the HUD and the player's rendering)
+ 6. set_time again; set_game_time(20000000 + 1000000 * spot position), 2 frames; time_freeze(true); freeze_wait frames (60)
+ 7. GUI spots: open the page / press ESC, park the cursor at the bottom right, 60 frames
+ 8. debug.screenshot(<tag>_<id>, { burst = 3, interval = 10, wait_frames = 1 }); wait until written
+ 9. log  RVKCMP {"id","tag","backend","status","files","frame","camera":{x,y,z,dx,dy,dz,fov,yaw,pitch,type},
+                 "weather":{mode,weights,dominant,thunder},"time":[h,m],"player","anchor","hud","gui","game_ms","playing_s",...}
+10. close the GUI, unfreeze, HUD on, restore rendering
 ```
-Each step is a `T.expect` (missing APIs or a failed teleport fail the spot, not the run). The JSON line is the metadata
-channel (no file I/O in the sandbox is needed): the orchestrator extracts `RVKCMP {...}` lines from `spass.log`.
+Each spot is one check (`spot <id>`): an error or a failed capture fails the spot, not the run. Before the first spot:
+`console("invisible")`, `console("god")`, `console("SetVegWindParams", 0, 0, 0, 0)`.
 
-### 5.5 Calibration (once per spot, by hand or by an agent with screenshots)
+### 5.5 Calibration
 
-`-Param mode=calibrate,spots=pub_interior`: teleports to the anchor, applies `auto` weather, logs `risen.world.weather()`
-(the zone's weights at that place: copy them into `spots.lua`, so both renderers get the same forced weights), the player pose
-after `nav_point`, and takes one screenshot per candidate camera (eye offsets around the anchor). Pick the best, write the
-numbers into `spots.lua`. Spots are data, so tuning never touches code.
+`run.ps1 ... -Mods rvkcompare -Scenario rvkcompare -Param mode=calibrate[,spots=...]`: per spot weather `"auto"` (zones) at
+the anchor for 240 frames, then `cal_<id>_spot.png` (the spot's camera) and `cal_<id>_y000/090/180/270.png` (around the
+player), and one `RVKCAL {json}` line with the snapped pose and the zone weights (`zone_weather`). The weights of interiors
+and dungeons go into `spots.lua` (forced weather ignores zones). Measured zone weights: beach `Stormy_Rain`/`Gyrger_Sunny_Green`
+(drifting: 0.999/0.001 at 10:00, 0.436/0.564 at 13:00 in the same run), forest `Sunny_Half_02` 0.79 + `Sunny_Full` 0.21,
+harbour `Sunny_Half_02` 1.0, Harbour Town and pub `Sunny_Half_02`/`Sunny_Full`, monastery `Sunny_Full` 1.0, volcano dungeon
+`Dungeon_Blue6_Big` 1.0.
 
 ---------------------------------------------------------------------------------------------------------------------
 
@@ -524,6 +533,12 @@ INVALID, threshold files, calibrate, CLI exit codes). As built, where it differs
 * Calibrate / `--baseline`: per spot and rule, error limits `max(default, margin x floor)`, `ssim_min = min(default,
   1 - margin x (1 - ssim))`, PSNR limits `min(default, psnr - 20 log10 margin)`; never stricter than the defaults; the floor
   metrics are stored as `spot.<id>.baseline`.
+* Known-noise masks (added with the scenario, 8.1): `calibrate A A2` also writes `<out stem>_masks/<spot>_known.png` (pixels
+  where the two reference runs differ by > `noise.known_tol` = 8, or that are unstable in either burst, dilated by
+  `noise.known_dilate` = 4 px) and stores the relative path as `spot.<id>.known_mask`; `compare --thresholds` loads it,
+  `compare --baseline A2` computes it on the fly (`--no-known-mask`: thresholds only). The mask is excluded from the metrics
+  like the burst mask; `noise_burst` / `noise_known` are reported separately, `invalid.noise_max` applies to the burst noise,
+  `invalid.known_max` (75 %) to the mask. A reference spot whose pose differs between A and A' gets neither floor nor mask.
 * Outputs per spot: `_diff.png` (heat map as specified), `_ssim.png` (1 - SSIM, x4), `_blink.gif` (A/B at 1 Hz, labelled),
   `_side.jpg` (A | B | diff at half size), `_tiles.png` (worst three tiles, x4 nearest, A | B | diff), `_a.png`/`_b.png`
   (the burst medians); `report.html` (self-contained: embedded thumbnails, links to the files), `report.json`, `summary.md`.
@@ -597,29 +612,37 @@ differ by a pixel): judged by `psnr_q` and `bad32`.
 
 ## 7. Orchestration: `scripts\refcompare.ps1` (this repo, wraps `run.ps1`)
 
-### 7.1 Steps
+### 7.1 How to run (as built, 2026-10-21)
 
 ```powershell
-.\scripts\refcompare.ps1 [-Spots all|a,b] [-Baseline] [-SkipReference <dir>] [-GameDir B:\DevDrive\risen-test-vk-cmp] [-Seconds 900]
+.\scripts\refcompare.ps1                                   # game D3D9 run + Vulkan run, all spots, report
+.\scripts\refcompare.ps1 -Calibrate                        # two D3D9 runs -> out\refcompare\<stamp>\thresholds.json + masks
+.\scripts\refcompare.ps1 -ReferenceDir out\refcompare\<stamp>   # Vulkan run only, against a stored reference
+.\scripts\refcompare.ps1 -Spots beach_rain,pub_interior -Baseline   # + a second D3D9 run used as --baseline
 ```
-1. Free RAM check; kill a `steamwebhelper.exe` above 5 GiB (user instruction). Refuse `B:\SteamLibrary*`.
-2. **Dedicated test copy** `B:\DevDrive\risen-test-vk-cmp` (created by `new-test-copy.ps1` through `run.ps1 -GameDir`): `-NoRenderer`
-   deletes `d3d9.dll` from `bin`, which would silently change the renderer of another agent's run in the shared
-   `risen-test-vk`. Use `-Instance n` when another Risen runs.
-3. Pin the game configuration (7.2) before **each** run (the game rewrites `ConfigUser.xml`).
-4. Run A (reference): `run.ps1 -NoRenderer -Mods rvkcompare -Scenario rvkcompare -WaitForResult -Param tag=d3d9,spots=...`.
-   Move `bin\spass\screenshots\*.png` and the `RVKCMP` lines of `bin\spass\spass.log` (-> `meta.json`) to `out\refcompare\<stamp>\d3d9\`;
-   keep `test-result.json` and the log.
-5. Run B: `run.ps1 -Mode vulkan ...tag=vk` -> `...\vk\` (+ `bin\rvk\rvk.log`: unimplemented slots, validation messages).
-6. Optional `-Baseline`: run A a second time -> `...\d3d9_b\`.
-7. `python tools\refcompare.py out\refcompare\<stamp>\d3d9 out\refcompare\<stamp>\vk [--baseline ...\d3d9_b]` -> report;
-   print the summary table and the report path; exit with its code (or 2 when a run produced no result).
-8. `-SkipReference <dir>` reuses a stored reference set (the D3D9 side does not change between renderer commits): one game
-   run per comparison (~5-8 minutes for 12 spots instead of twice that). Invalidate it when spass, the spots or the config change
-   (store their hashes in `meta.json`).
+Other switches: `-GameDir` (default `B:\DevDrive\risen-test-vk-cmp`; `risen-test-vk` is refused because `-NoRenderer` deletes
+its `d3d9.dll`), `-Instance` (3), `-Seconds` (1500), `-Param 'settle=900','burst=5'` (scenario parameters, 5.1),
+`-PostEffect DoF|None|...`, `-Quality`, `-WindowSize`, `-Validation`, `-NoImages`, `-Config`.
+1. Free RAM is printed; a `steamwebhelper.exe` above 5 GiB is killed (user instruction). The real install is refused.
+2. The dedicated copy is created on first use (`new-test-copy.ps1`). The renderer is **snapshotted** at the start
+   (`build\<Config>\d3d9.dll` -> `build\refcompare-snapshot\`, deployed with `run.ps1 -Config refcompare-snapshot`): another
+   session rebuilding `build\RelWithDebInfo` cannot swap the DLL under a run.
+3. Before every run the copy's `localappdata\Local\Risen\ConfigUser.xml` is pinned (7.2).
+4. Each run: `run.ps1 [-NoRenderer | -Mode vulkan] -GameDir <copy> -Instance 3 -Mods rvkcompare -Scenario rvkcompare
+   -WaitForResult -Param tag=<tag>,spots=...`; then `bin\spass\screenshots\<tag>_*.png` are moved to
+   `out\refcompare\<stamp>\<dir>\`, the `RVKCMP` lines of `spass.log` become `meta.json` (a JSON list), and `spass.log`,
+   `test-result.json`, `rvk.log` (Vulkan) and `run.json` (exit code, picture count, seconds, pinned config, hashes of
+   spots.lua/main.lua/spass, renderer DLL hash + time, git HEAD, whether `src/` was dirty) are kept beside them.
+5. `python tools\refcompare.py compare d3d9 vk -o report --tag-a d3d9 --tag-b vk` plus `--thresholds <ref>\thresholds.json`
+   (a stored reference) or `--baseline d3d9_b` (second D3D9 run). The summary table and the report path are printed; the exit
+   code is refcompare.py's (0 PASS/WARN, 1 FAIL, 2 INVALID), 3 when a game run produced no pictures.
+6. `-Calibrate` stops after the two D3D9 runs with `refcompare.py calibrate d3d9 d3d9_b -o thresholds.json`: per spot
+   thresholds (noise floor x 1.5, never stricter than the defaults) and a known-noise mask `thresholds_masks\<spot>_known.png`.
+   The stamp directory is then a reference set for `-ReferenceDir` (`reference.json` stores the hashes of spots.lua, main.lua,
+   the spass DLL and the pinned options; a mismatch is warned about: re-calibrate after changing them).
 
-Sequential by default. Running A and B in parallel (two instances) halves the wall time but shares the GPU and changes
-loading order; allowed once time freeze is proven to make the captures independent of timing.
+Runs are sequential (one game at a time in the copy). Wall time measured: a D3D9 run of the 12 spots ~6-7 min (the game's
+D3D9 runs at ~30 fps in the background), a Vulkan run ~5 min.
 
 ### 7.2 Pinned configuration
 
@@ -629,6 +652,13 @@ DefaultEffect` (two report variants: `DoF` as shipped and `None` to separate pos
 `EnableTutorialSystem="false"`, `UserPageMode` fixed. `test-run.ps1` already rewrites window size, audio and languages; the
 graphics block can be a new `-ConfigUserXml <file>` switch there or done by `refcompare.ps1` before calling `run.ps1`.
 
+As built: `refcompare.ps1` (`Set-PinnedConfig`) writes before every run `Engine/Render ViewDistance=3`, `Shadows
+Quality=<-Quality, High>`, `PostProcessing DefaultEffect=<-PostEffect, DoF>`, `Graphics TextureFilterMode=4`,
+`Vegetation/Effect Quality=<-Quality>`, `Cache Preset=High`, `Window Left=0 Top=0 Right/Bottom=<-WindowSize, 1600x900>
+FOV=60 Vsync=true AdapterNumber=0`, `Game EnableTutorialSystem=false UserPageMode=7 ShowFocusHighlights=true
+ShowSubtitles=true` into the copy's `localappdata\Local\Risen\ConfigUser.xml` (never a path under `data\` or the real
+install). The pinned values are part of the reference identity (`reference.json`, `run.json`).
+
 ---------------------------------------------------------------------------------------------------------------------
 
 ## 8. Determinism problems and mitigations
@@ -637,9 +667,9 @@ graphics block can be a new `-ConfigUserXml <file>` switch there or done by `ref
 |---|---|---|
 | 1 | new-game intro camera fly-in (~25 s), "Press START" page 26 | wait for `session.start` + intro (as `rvk_shadows`), `risen.gui.close(26)`; spots start after it |
 | 2 | weather: random state transitions of `eCWeatherEnvironment` in zone mode 0 | force mode 2 with explicit weights per spot (3.4); interiors get their zone state from calibration (5.5) |
-| 3 | thunder/lightning flashes (`ThunderProbability`, `eff_env_thunder`) | prefer `Game_Start`/`Foggy_Rain` for rain spots if they flash less; burst + luma-outlier drop (6.2) |
+| 3 | thunder/lightning flashes (`ThunderProbability`, `eff_env_thunder`) | `set_weather(..., { thunder = false })` zeroes thunder and random effects of every state (done for every spot); burst + luma-outlier drop (6.2) as a safety net |
 | 4 | the clock runs (sky, sun direction, shadow direction) | `set_time` right before freezing; time freeze |
-| 5 | animation, wind (vegetation, SpeedTree), water waves, clouds, particles, light flicker | time freeze (app state 8) [I]; else intra-run noise mask + burst median (6.2); `SetVegWindParams 0 0 0 0` |
+| 5 | animation, wind (vegetation, SpeedTree), water waves, clouds, particles, light flicker | time freeze (app state 8: stable bursts); `set_game_time` before the freeze pins sea surface and clouds; `SetVegWindParams 0 0 0 0`; player hidden; the rest by the known-noise mask of two reference runs (8.1) |
 | 6 | post-processing history: eye adaptation (HDR), bloom, DoF auto-focus | settle frames before freezing; second report variant with `DefaultEffect="None"` |
 | 7 | streaming / LOD fade-in after a teleport (worker threads, timing-dependent) | fixed settle frames, burst consistency check (big unstable areas -> retry the spot once later), order spots to minimise far jumps; Vulkan-only `rvk_stats` pending uploads as a diagnostic |
 | 8 | camera smoothing/collision of the follow camera | fixed camera (`SetFixCamera`, instant); pose logged and compared (6.1) |
@@ -652,6 +682,48 @@ graphics block can be a new `-ConfigUserXml <file>` switch there or done by `ref
 | 15 | driver-level differences that are not bugs (D3D9 driver vs Vulkan: anisotropic filtering, mip selection, precision, glyph rasterisation) | `psnr_q`/SSIM thresholds; D3D9-vs-D3D9 baseline separates game noise from renderer differences |
 | 16 | known open renderer features (occlusion queries "visible" -> sun flares, colour-only shadow maps, ...) | `known` notes per spot in `thresholds.toml`; they turn into hard thresholds when implemented |
 | 17 | capture path differences (format, swizzle, alpha) | both capture the presented back buffer, raw bytes; parity self-test 3.9 |
+
+### 8.1 The animation phase under the freeze: found and partly pinned (2026-10-21)
+
+Under the time freeze (app state 8) a burst is stable (three captures 10 frames apart: 0.0 % unstable pixels at 11 of 12
+spots), but two runs freeze the world at different phases of the sea, the clouds, the player's idle pose and foliage.
+Measured between two D3D9 runs of the spots (same pose, weather, clock to the minute): beach_sun mean luma -5.9, SSIM 0.85,
+12.8 % of the pixels off by more than 32; hero_closeup SSIM 0.84; jungle 0.89; the GUI pages and the pub 0.997-1.0.
+
+Where the engine's animation time comes from [C, Engine.dll; dumps `B:\DevDrive\risen-ghidra\rvk_cmp_time_dump*.txt`;
+risen-spass RE.md section 60 has the details]:
+* `eCTimer` (static at RVA `0xc6fcf0`): `+0x08` real ms stamp, `+0x0c` its float copy, `+0x10` game time (sum of scaled frame
+  times, `GetGameTime`), `+0x28/+0x2c` frame time. `eCTimer::Update` (`0x4cf0e0`) does not advance anything under the freeze.
+  The getters are inlined everywhere in Engine.dll (found with a capstone scan of the `GetInstance` call sites).
+* `eCShaderMaterialAdmin::Process` (`0x6bb250`) feeds every timed shader element (texture scrollers, oscillators, rotators,
+  animated colours and samplers) with `GameTime / 1000`; the scroller's offset is `frac(t * speed)`: **a pure function of the
+  game time**. This drives the sea surface and the clouds.
+* Accumulators of the frame time / game-time deltas (not pinnable by a timer value): SpeedTree wind
+  (`eCSpeedTreeAdmin::UpdateWindMatrices`), the sky's env-cubemap cadence, skeletal animation, particles, the shore foam /
+  waves, the weather.
+* Experiments: pinning `+0x10`/`+0x0c` only *during* the freeze changes nothing (the constants were written before it);
+  setting the game time two frames *before* the freeze (an external `WriteProcessMemory`, then the new spass binding) puts
+  clouds and sea surface at the same phase: D3D9 vs Vulkan at the beach without any mask SSIM 0.986 and 0.66 % of the pixels
+  > 32 (two unpinned D3D9 runs: 0.85 / 12.8 %).
+
+**spass capability added** (risen-spass, generic): `risen.debug.set_game_time(ms)` writes `eCTimer +0x10` after checking that
+`GetGameTime` reads that field (RE.md section 60, scenario `scene` checks it). `mods/rvkcompare` sets `20000000 + 1000000 *
+<position of the spot in spots.lua>` two frames before every freeze (`pin_time=1`, default), the value is logged as
+`pinned_game_ms`.
+
+What stays nondeterministic and how the comparison handles it:
+* **Removed**: the player is hidden in the world spots (no idle pose, no shadow), NPCs in a radius are hidden, vegetation
+  wind is off (`SetVegWindParams 0 0 0 0`), thunder and random weather effects are off, the clock is held every tick, the
+  weather is forced.
+* **Masked**: `refcompare.py calibrate d3d9 d3d9_b` (or `compare --baseline`) turns the pixels where two D3D9 runs differ
+  (> 8, max channel, burst medians, dilated 4 px) into a per-spot **known-noise mask** (`thresholds_masks\<spot>_known.png`,
+  hatched in the heat maps), excluded from the D3D9-vs-Vulkan metrics like the burst mask; the per-spot thresholds come from
+  the floor A vs A' outside the mask (x 1.5, never stricter than the defaults). A spot is INVALID when the burst noise exceeds
+  30 % or the known mask 75 % (`tests/refcompare/thresholds.toml` overrides per spot). The cost: a renderer difference inside
+  a masked area is not measured (the side-by-side and blink GIF still show it).
+* The volcano dungeon's full-screen heat distortion keeps moving under the freeze in both renderers (~65 % of the pixels
+  shimmer 1-2 px within a burst; time source not found: it is not the eCTimer fields above, which stand): `lava_cave` allows
+  80 % burst noise and compares the rest.
 
 ---------------------------------------------------------------------------------------------------------------------
 
@@ -690,3 +762,48 @@ spots and the D3D9 baseline, (5) renderer diagnostics. Steps 1-2 already give M4
 * `set_time` drives the sky/sun daytime of the weather admin (2.4).
 * The layer-file anchors of 5.3 are world positions (teleport to each and read `risen.world.camera()`).
 * Two D3D9 runs of the full spot list: baseline metrics, run time, peak RAM.
+
+---------------------------------------------------------------------------------------------------------------------
+
+## 11. Results (2026-10-21, first end-to-end run)
+
+Reference `out\refcompare\20261021-190139` (`-Calibrate`: two game-D3D9 runs, 221 s each), Vulkan run
+`out\refcompare\20261021-190928` (`-ReferenceDir`, 193 s; renderer snapshot of `build\RelWithDebInfo\d3d9.dll` from
+19:08 with another session's uncommitted perf work in `src/`, HEAD 4fa8a57), 1600x900, DoF, High. Both renderers ran at
+~80 fps. Report: `out\refcompare\20261021-190928\report\report.html` (git-ignored, game-derived).
+
+| spot | verdict | ssim | psnr_q | bad32 % | dluma | masked % (burst+known) | without the known mask |
+|---|---|---|---|---|---|---|---|
+| gui_inventory | WARN | 0.9860 | 35.1 | 0.77 | +0.65 | 0.1+19.4 | FAIL (ssim 0.968, bad32 2.4) |
+| beach_sun | WARN | 0.9929 | 35.0 | 0.42 | +0.35 | 0.0+26.2 | FAIL (0.979, 2.1) |
+| jungle | PASS | 0.9868 | 45.4 | 0.01 | +0.24 | 0.0+33.1 | FAIL (0.914, 0.56) |
+| beach_rain | PASS | 0.9881 | 44.1 | 0.00 | -0.14 | 0.0+19.7 | WARN |
+| hero_closeup | PASS | 0.9954 | 40.9 | 0.01 | -0.24 | 0.0+19.0 | FAIL (0.981, 1.8) |
+| harbour_night | PASS | 0.9959 | 49.8 | 0.00 | -0.03 | 0.0+5.4 | PASS |
+| monastery_hall | PASS | 0.9963 | 44.9 | 0.04 | +0.04 | 0.0+11.5 | PASS |
+| pub_interior | PASS | 0.9972 | 46.0 | 0.00 | -0.16 | 0.0+5.8 | PASS |
+| crystal_cave | PASS | 0.9976 | 47.9 | 0.07 | +0.05 | 0.0+3.0 | WARN |
+| harbour_docks | PASS | 0.9978 | 51.5 | 0.00 | +0.37 | 0.0+1.7 | PASS |
+| lava_cave | PASS | 0.9985 | 65.5 | 0.00 | +0.03 | 65.8+70.0 | PASS (burst mask only) |
+| gui_character | PASS | 1.0000 | 63.7 | 0.00 | +0.00 | 0.1+0.3 | PASS |
+| menu_esc | PASS | 1.0000 | 100.0 | 0.00 | +0.00 | 0.1+0.3 | PASS |
+
+What differs, and why it is not counted as a renderer bug:
+* `gui_inventory`: a wave-spray particle burst at the rocks on the horizon is present in the Vulkan picture and absent in
+  both D3D9 pictures (worst tiles x 640-900, y 384: `gui_inventory_tiles.png`); particles step with the frame time and are
+  not pinned. Remaining sky offsets (+6 luma in the band above the horizon) lie inside the D3D9 run-to-run spread (below).
+* `beach_sun`: sea near the horizon (shore waves/foam, frame-time driven) and the sky haze: the mean sky luma is A 176.0,
+  A' 168.9, Vulkan 171.2: Vulkan lies between the two D3D9 runs.
+* Without the known mask the FAILs are foliage (`jungle`: SpeedTree wind accumulates even with `SetVegWindParams 0`), the
+  hero's idle pose, sea foam, rain streaks and candle flames: the same areas differ between the two D3D9 runs.
+* GUI: `gui_character` and `menu_esc` are pixel-identical apart from 0.3 % (text and panels exact); the inventory page itself
+  is identical, only the world behind it differs.
+
+**Brightness question** (an earlier uncontrolled comparison suggested +6..+13 luma in jungle views after the shadow
+change): not reproduced. With pinned weather, clock and game time the mean luma differences Vulkan - D3D9 (`dluma`) are
+-0.24..+0.65 on the compared pixels and -1.16..+0.72 without the known mask, over all spots (jungle +0.24 masked, +0.34 unmasked; mean frame luma A 42.22, A' 42.37, Vulkan 42.56), within or next to the
+spread between two D3D9 runs (up to 4.7 at beach_sun). The earlier difference came from the uncontrolled weather.
+
+No renderer bug was found at these 13 spots at the default thresholds (SSIM >= 0.98, bad32 <= 0.2 %, |dluma| <= 1, psnr_q
+>= 38 dB). Limits: the masked areas (sea, foliage, flames, particles: 0.3-33 %, the volcano 70 %) are not judged; the
+spots do not cover shadows of point lights up close, decals, combat effects or the title screen (candidates for more spots).

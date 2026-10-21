@@ -1,0 +1,6 @@
+id          = "rvkcompare"
+name        = "Renderer reference comparison"
+version     = "1.0.0"
+author      = "risen-enhanced-graphics"
+description = "Fixed spots (camera, weather, clock, HUD, frozen time) captured as screenshot bursts for the D3D9-vs-Vulkan comparison of risen-enhanced-graphics (scenario rvkcompare, scripts/refcompare.ps1)."
+main        = "main.lua"

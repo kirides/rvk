@@ -50,14 +50,19 @@ stay in the background by default). rvk.log prints fps / draw counts every 5 s a
 
 `run.ps1` creates the test copy on first use (`scripts/new-test-copy.ps1`, from risen-spass's `B:\DevDrive\risen-test`), deploys
 `d3d9.dll` + `bin\rvk\config.toml`, and drives the game with **risen-spass's `scripts/test-run.ps1 -GameDir`** (windowed, muted,
-watchdog, scenario result; mods come from the spass repo `B:\DevDrive\git\github\risen-spass\mods`). Our log:
+watchdog, scenario result; mods come from this repo's `mods/` (`-ModPath`), then the spass repo `B:\DevDrive\git\github\risen-spass\mods`). Our log:
 `B:\DevDrive\risen-test-vk\bin\rvk\rvk.log`. Check free RAM first; kill a `steamwebhelper.exe` above 5 GiB (user instruction).
 risen-spass's own `risen.debug.screenshot` grabs the D3D9 back buffer (hooks `Present`): it does not work in Vulkan mode.
 
 Screenshot diff (docs/research/reference-compare.md 6): `python tools/refcompare.py compare <d3d9 dir> <vk dir> -o <out>`
 (pairs by spot name, bursts `<spot>_b<k>.png` -> median + noise mask, `--meta-a/--meta-b` RVKCMP pose check; metrics, heat
 maps, blink GIFs, `report.html`/`report.json`; exit 1 on FAIL, 2 on INVALID); `calibrate A A2 -o thr.json` derives thresholds
-from two runs of one renderer. Tests: `python -m unittest discover -s tools/tests`. Keep its output outside the repo or in `/out/`.
+from two runs of one renderer (+ known-noise masks). Tests: `python -m unittest discover -s tools/tests`. Keep its output outside the repo or in `/out/`.
+**Reference comparison end to end**: `.\scripts\refcompare.ps1` (13 fixed spots of `mods/rvkcompare`: game D3D9 run + Vulkan
+run in the dedicated copy `B:\DevDrive\risen-test-vk-cmp`, instance 3, pinned ConfigUser.xml; report
+`out\refcompare\<stamp>\report\report.html`). `-Calibrate` = two D3D9 runs -> a reusable reference (thresholds + known-noise
+masks); `-ReferenceDir out\refcompare\<stamp>` = only the Vulkan run against it; `-Spots a,b`. Renderer scenario mods live in
+this repo's `mods/` (never in risen-spass). Details, spot list, noise handling: docs/research/reference-compare.md 5, 7, 8, 11.
 
 Startup facts (measured, docs/research/early-d3d9.md): `eCApplication::CreateEngine` calls `eCGfxAdmin::sEnumAdapterDesc`
 (pixel shader 3.0 check) before the window: in passthrough/trace it runs `Direct3DCreate9` + DxDiag (5.7-7.4 s, loads

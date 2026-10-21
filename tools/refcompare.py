@@ -12,6 +12,9 @@ names do not match otherwise.
 
 Per side a burst becomes its per-pixel median (frames whose mean luma deviates > 10 % from the burst are dropped first:
 lightning); pixels that change within a burst on either side (> 6/255, dilated 2 px) are masked out of the metrics.
+With a second reference run A' (`--baseline A2`, or `calibrate A A2` which stores `<spot>_known.png` masks referenced by
+the thresholds file) the pixels that differ between A and A' (> 8/255, dilated 4 px: sea, clouds, idle animations that
+the time freeze stops at a different phase in every run) are a known-noise mask, excluded the same way.
 Metadata (the RVKCMP JSON lines of spass.log, a JSON list/object, or JSONL; default `<dir>/meta.json`) validates that both
 runs looked at the same thing: camera eye/direction/fov, weather mode and weights, clock. A mismatch is INVALID.
 
@@ -49,8 +52,11 @@ DEFAULT_THRESHOLDS = {
     # every rule of a tier must hold; PASS if all "pass" rules hold, else WARN if all "warn" rules hold, else FAIL
     "pass": {"ssim_min": 0.98, "bad32_max": 0.2, "dluma_abs_max": 1.0, "psnr_q_min": 38.0, "shift_max": 0},
     "warn": {"ssim_min": 0.95, "bad32_max": 1.0, "dluma_abs_max": 3.0},
-    "invalid": {"noise_max": 30.0},  # % of masked (unstable) pixels above which the spot is INVALID
-    "noise": {"burst_tol": 6, "dilate": 2, "flash_rel": 0.10},
+    # % of pixels unstable within a burst / covered by the known-noise mask above which the spot is INVALID
+    "invalid": {"noise_max": 30.0, "known_max": 75.0},
+    # burst mask: > burst_tol within a burst, dilated; known-noise mask (baseline A vs A'): > known_tol between the two
+    # reference runs (or unstable in either burst), dilated by known_dilate
+    "noise": {"burst_tol": 6, "dilate": 2, "flash_rel": 0.10, "known_tol": 8, "known_dilate": 4},
     "pose": {"eye": 1.0, "dir_deg": 0.1, "fov": 0.01, "weather": 0.01, "clock_min": 1.0},
 }
 
@@ -83,11 +89,12 @@ def deep_merge(base: dict, over: dict) -> dict:
 class Thresholds:
     """`{default: {...}, spot: {<id>: {..., known: "..."}}}`; top-level tier keys count as `default`."""
 
-    def __init__(self, data: dict | None = None):
+    def __init__(self, data: dict | None = None, base_dir: Path | None = None):
         data = data or {}
         top = {k: v for k, v in data.items() if k in DEFAULT_THRESHOLDS}
         self.default = deep_merge(deep_merge(DEFAULT_THRESHOLDS, top), data.get("default", {}))
         self.spots = dict(data.get("spot", {}))
+        self.base_dir = base_dir  # relative `known_mask` paths are relative to the thresholds file
 
     @staticmethod
     def load(path: str | Path | None) -> "Thresholds":
@@ -95,14 +102,18 @@ class Thresholds:
             return Thresholds()
         p = Path(path)
         if p.suffix.lower() == ".toml":
-            return Thresholds(tomllib.loads(p.read_text(encoding="utf-8")))
-        return Thresholds(json.loads(p.read_text(encoding="utf-8")))
+            return Thresholds(tomllib.loads(p.read_text(encoding="utf-8")), p.parent)
+        return Thresholds(json.loads(p.read_text(encoding="utf-8")), p.parent)
 
     def for_spot(self, spot: str) -> dict:
-        return deep_merge(self.default, self.spots.get(spot, {}))
+        thr = deep_merge(self.default, self.spots.get(spot, {}))
+        km = thr.get("known_mask")
+        if isinstance(km, str) and self.base_dir is not None and not Path(km).is_absolute():
+            thr["known_mask"] = str(self.base_dir / km)
+        return thr
 
     def with_spot_overrides(self, overrides: dict) -> "Thresholds":
-        t = Thresholds()
+        t = Thresholds(base_dir=self.base_dir)
         t.default = copy.deepcopy(self.default)
         t.spots = copy.deepcopy(self.spots)
         for spot, o in overrides.items():
@@ -130,8 +141,12 @@ def fmt(v) -> str:
 
 
 def verdict_for(metrics: dict, thr: dict) -> tuple[str, list[str]]:
-    if metrics["noise"] > thr["invalid"]["noise_max"]:
-        return "INVALID", [f"noise {metrics['noise']:.1f} % > {thr['invalid']['noise_max']} % (unstable pixels)"]
+    burst = metrics.get("noise_burst", metrics["noise"])
+    if burst > thr["invalid"]["noise_max"]:
+        return "INVALID", [f"noise {burst:.1f} % > {thr['invalid']['noise_max']} % (pixels unstable within a burst)"]
+    known = metrics.get("noise_known", 0.0)
+    if known > thr["invalid"].get("known_max", 100.0):
+        return "INVALID", [f"known noise {known:.1f} % > {thr['invalid']['known_max']} % (pixels that differ between two reference runs)"]
     failed_pass = check_rules(metrics, thr["pass"], "pass")
     if not failed_pass:
         return "PASS", []
@@ -461,10 +476,36 @@ def check_pose(ma: dict | None, mb: dict | None, tol: dict) -> dict:
 # comparison of one spot
 
 
+def known_noise_mask(frames_a: list[np.ndarray], frames_a2: list[np.ndarray], noise_cfg: dict) -> np.ndarray:
+    """Pixels that differ between two reference runs of the same spot (> known_tol, max channel, burst medians) or are
+    unstable within either burst, dilated by known_dilate: what the game itself does not reproduce from run to run
+    (sea, clouds, idle animation phases that the time freeze stops at a different point in every run)."""
+    rep_a, un_a, _ = prepare_burst(frames_a, noise_cfg)
+    rep_b, un_b, _ = prepare_burst(frames_a2, noise_cfg)
+    if rep_a.shape != rep_b.shape:
+        raise ValueError(f"size mismatch {rep_a.shape} vs {rep_b.shape}")
+    mask = (np.abs(rep_b - rep_a).max(axis=2) > noise_cfg.get("known_tol", 8)) | un_a | un_b
+    r = int(noise_cfg.get("known_dilate", 4))
+    if mask.any() and r > 0:
+        mask = ndimage.binary_dilation(mask, structure=np.ones((2 * r + 1, 2 * r + 1), bool))
+    return mask
+
+
+def load_mask(path: str | Path) -> np.ndarray:
+    with Image.open(path) as im:
+        return np.asarray(im.convert("L")) >= 128
+
+
+def save_mask(path: Path, mask: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray((mask.astype(np.uint8) * 255)).save(path)
+
+
 def compare_spot(spot: str, files_a: list[Path] | None, files_b: list[Path] | None, thr: dict,
                  meta_a: dict | None = None, meta_b: dict | None = None, out_dir: Path | None = None,
-                 tile: int = 32, ntiles: int = 10, frames_a=None, frames_b=None) -> dict:
-    """Files or preloaded frames (lists of float32 HxWx3 arrays) per side. -> result dict."""
+                 tile: int = 32, ntiles: int = 10, frames_a=None, frames_b=None, known: np.ndarray | None = None) -> dict:
+    """Files or preloaded frames (lists of float32 HxWx3 arrays) per side. `known`: a known-noise mask (HxW bool, from a
+    baseline run) excluded from the metrics like the burst mask; default: the thresholds' `known_mask` file. -> result dict."""
     res: dict = {"spot": spot, "verdict": "INVALID", "reasons": [], "known": thr.get("known"),
                  "files_a": [p.name for p in files_a or []], "files_b": [p.name for p in files_b or []],
                  "images": {}}
@@ -488,11 +529,23 @@ def compare_spot(spot: str, files_a: list[Path] | None, files_b: list[Path] | No
     rep_a, un_a, info_a = prepare_burst(frames_a, thr["noise"])
     rep_b, un_b, info_b = prepare_burst(frames_b, thr["noise"])
     res["burst"] = {"a": info_a, "b": info_b}
-    mask = un_a | un_b
-    if mask.any() and thr["noise"]["dilate"] > 0:
+    bmask = un_a | un_b
+    if bmask.any() and thr["noise"]["dilate"] > 0:
         r = int(thr["noise"]["dilate"])
-        mask = ndimage.binary_dilation(mask, structure=np.ones((2 * r + 1, 2 * r + 1), bool))
+        bmask = ndimage.binary_dilation(bmask, structure=np.ones((2 * r + 1, 2 * r + 1), bool))
+    if known is None and thr.get("known_mask"):
+        try:
+            known = load_mask(thr["known_mask"])
+        except OSError as ex:
+            res["reasons"].append(f"known mask unreadable: {ex}")
+            return res
+    if known is not None and known.shape != bmask.shape:
+        res["reasons"].append(f"known mask size {known.shape[1]}x{known.shape[0]} differs from the pictures")
+        return res
+    mask = bmask | known if known is not None else bmask
     metrics, maps = compute_metrics(rep_a, rep_b, ~mask, tile=tile, ntiles=ntiles)
+    metrics["noise_burst"] = round(100.0 * float(bmask.mean()), 3)
+    metrics["noise_known"] = round(100.0 * float(known.mean()), 3) if known is not None else 0.0
     res["metrics"] = metrics
     verdict, reasons = verdict_for(metrics, thr)
     if not pose["ok"]:
@@ -622,13 +675,13 @@ def write_reports(out: Path, results: list[dict], header: dict) -> None:
     (out / "report.json").write_text(json.dumps(js, indent=1), encoding="utf-8")
     (out / "report.html").write_text(render_html(results, header, counts), encoding="utf-8")
     lines = [f"refcompare {header['generated']}: " + ", ".join(f"{v} {k}" for k, v in counts.items() if v), "",
-             "| spot | verdict | ssim | psnr_q | bad32 % | dluma | shift | noise % | reasons |", "|---|---|---|---|---|---|---|---|---|"]
+             "| spot | verdict | ssim | psnr_q | bad32 % | dluma | shift | masked % (burst+known) | reasons |", "|---|---|---|---|---|---|---|---|---|"]
     for r in results:
         m = r.get("metrics")
         if m:
             sh = f"{m['shift'][0]},{m['shift'][1]}" + ("" if m["shift_significant"] else "?" if m["shift"] != [0, 0] else "")
             lines.append(f"| {r['spot']} | {r['verdict']} | {m['ssim']:.4f} | {m['psnr_q']:.1f} | {m['bad32']:.2f} | "
-                         f"{m['dluma']:+.2f} | {sh} | {m['noise']:.1f} | {'; '.join(r['reasons'])} |")
+                         f"{m['dluma']:+.2f} | {sh} | {m['noise']:.1f} ({m.get('noise_burst', m['noise']):.1f}+{m.get('noise_known', 0):.1f}) | {'; '.join(r['reasons'])} |")
         else:
             lines.append(f"| {r['spot']} | {r['verdict']} | | | | | | | {'; '.join(r['reasons'])} |")
     (out / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -652,7 +705,7 @@ def render_html(results, header, counts) -> str:
                   f"bad8 {m['bad8']:.2f} % bad32 {m['bad32']:.3f} %<br>dluma {m['dluma']:+.2f} "
                   f"rgb {', '.join(f'{x:+.2f}' for x in m['bias_rgb'])}<br>"
                   f"shift {m['shift']} {'<b>significant</b>' if m['shift_significant'] else ''} (sub {m['shift_sub']})<br>"
-                  f"noise {m['noise']:.2f} %")
+                  f"noise {m['noise']:.2f} % (burst {m.get('noise_burst', m['noise']):.2f}, known {m.get('noise_known', 0):.2f})")
             tiles = "<br>".join(f"({t['x']},{t['y']}) mae {t['mae']} ssim {t['ssim']}" for t in m.get("tiles", [])[:5])
         else:
             mt, tiles = "", ""
@@ -684,7 +737,7 @@ img {{ display: block; }}
 <p>A (reference) <code>{e(str(header['a']))}</code><br>B (test) <code>{e(str(header['b']))}</code><br>
 thresholds <code>{e(str(header.get('thresholds') or 'built-in defaults'))}</code>{' + baseline <code>' + e(str(header['baseline'])) + '</code>' if header.get('baseline') else ''}
 <br>generated {e(header['generated'])}. Heat map: max channel difference, black-blue-yellow-red clamped at 64, over the
-reference at 50 %; hatched = masked (unstable within a burst). B - A for biases; shift = B's content offset relative to A.</p>
+reference at 50 %; hatched = masked (unstable within a burst, or known noise: differs between two reference runs). B - A for biases; shift = B's content offset relative to A.</p>
 <table><tr><th>verdict</th><th>spot</th><th>reasons</th><th>metrics</th><th>worst tiles</th><th>pose deltas</th>
 <th>A</th><th>B</th><th>diff</th></tr>
 {chr(10).join(rows)}
@@ -714,15 +767,17 @@ def gather(a: Path, b: Path, args) -> tuple[dict, dict, dict, dict]:
     return ga, gb, meta_a, meta_b
 
 
-def run_pairs(ga, gb, meta_a, meta_b, thresholds: Thresholds, out: Path | None, args) -> list[dict]:
+def run_pairs(ga, gb, meta_a, meta_b, thresholds: Thresholds, out: Path | None, args,
+              known_masks: dict | None = None) -> list[dict]:
     results = []
     for spot in sorted(set(ga) | set(gb)):
         r = compare_spot(spot, ga.get(spot), gb.get(spot), thresholds.for_spot(spot), meta_a.get(spot), meta_b.get(spot),
-                         out, tile=args.tile, ntiles=args.ntiles)
+                         out, tile=args.tile, ntiles=args.ntiles, known=(known_masks or {}).get(spot))
         results.append(r)
         m = r.get("metrics")
         extra = (f"ssim {m['ssim']:.4f} psnr_q {m['psnr_q']:.1f} bad32 {m['bad32']:.2f}% dluma {m['dluma']:+.2f} "
-                 f"shift {m['shift']}{'!' if m['shift_significant'] else ''} noise {m['noise']:.1f}%") if m else ""
+                 f"shift {m['shift']}{'!' if m['shift_significant'] else ''} noise {m['noise_burst']:.1f}%"
+                 f"+known {m['noise_known']:.1f}%") if m else ""
         print(f"{r['verdict']:7} {spot:32} {extra}  {'; '.join(r['reasons'])}", flush=True)
     return results
 
@@ -747,38 +802,52 @@ def derive_thresholds(base: dict, m: dict, margin: float) -> dict:
     return o
 
 
-def calibrate_overrides(ga, gb, meta_a, meta_b, thresholds: Thresholds, margin: float, args) -> tuple[dict, list]:
-    overrides, results = {}, []
+def calibrate_overrides(ga, gb, meta_a, meta_b, thresholds: Thresholds, margin: float, args,
+                        use_known: bool = True) -> tuple[dict, list, dict]:
+    """A vs A' (two reference runs) per spot -> (threshold overrides, results, known-noise masks). With `use_known` the
+    pixels that differ between the runs become the spot's known-noise mask and the floor metrics are taken outside it."""
+    overrides, results, masks = {}, [], {}
     for spot in sorted(set(ga) & set(gb)):
         thr = thresholds.for_spot(spot)
+        thr.pop("known_mask", None)  # the mask is being made here
+        fa, fb = [load_rgb(p) for p in ga[spot]], [load_rgb(p) for p in gb[spot]]
+        known = None
+        if use_known and fa and fb and len({f.shape for f in fa + fb}) == 1:
+            known = known_noise_mask(fa, fb, thr["noise"])
+            masks[spot] = known
         r = compare_spot(spot, ga[spot], gb[spot], thr, meta_a.get(spot), meta_b.get(spot), None,
-                         tile=args.tile, ntiles=0)
+                         tile=args.tile, ntiles=0, frames_a=fa, frames_b=fb, known=known)
         results.append(r)
-        if "metrics" not in r:
+        if "metrics" not in r or not r.get("pose", {}).get("ok", True):
+            # a pose/state mismatch between the reference runs is a scenario problem: no floor, no mask from it
+            masks.pop(spot, None)
             print(f"skip    {spot:32} {'; '.join(r['reasons'])}")
             continue
         m = r["metrics"]
         o = derive_thresholds(thr, m, margin)
         o["baseline"] = {k: m[k] for k in ("ssim", "psnr", "psnr_q", "mae", "bad8", "bad32", "dluma", "chroma", "shift",
-                                           "shift_significant", "noise")}
+                                           "shift_significant", "noise", "noise_burst", "noise_known")}
         overrides[spot] = o
         print(f"floor   {spot:32} ssim {m['ssim']:.4f} psnr_q {m['psnr_q']:.1f} bad32 {m['bad32']:.2f}% "
-              f"dluma {m['dluma']:+.2f} noise {m['noise']:.1f}% -> {({k: v for k, v in o.items() if k != 'baseline'}) or 'defaults'}")
-    return overrides, results
+              f"dluma {m['dluma']:+.2f} noise {m['noise_burst']:.1f}% known {m['noise_known']:.1f}% "
+              f"-> {({k: v for k, v in o.items() if k != 'baseline'}) or 'defaults'}")
+    return overrides, results, masks
 
 
 def cmd_compare(args) -> int:
     a, b, out = Path(args.a), Path(args.b), Path(args.out)
     thresholds = Thresholds.load(args.thresholds)
     ga, gb, meta_a, meta_b = gather(a, b, args)
+    masks = None
     if args.baseline:
         ga2, gb2, _, meta_a2 = gather(a, Path(args.baseline),
                                       argparse.Namespace(**{**vars(args), "meta_b": args.meta_baseline, "tag_b": None}))
         print("baseline (A vs A'):")
-        overrides, _ = calibrate_overrides(ga2, gb2, meta_a, meta_a2, thresholds, args.margin, args)
+        overrides, _, masks = calibrate_overrides(ga2, gb2, meta_a, meta_a2, thresholds, args.margin, args,
+                                                  use_known=not args.no_known_mask)
         thresholds = thresholds.with_spot_overrides(overrides)
         print("comparison (A vs B):")
-    results = run_pairs(ga, gb, meta_a, meta_b, thresholds, None if args.no_images else out, args)
+    results = run_pairs(ga, gb, meta_a, meta_b, thresholds, None if args.no_images else out, args, known_masks=masks)
     header = {"generated": datetime.datetime.now().isoformat(timespec="seconds"), "a": str(a), "b": str(b),
               "thresholds": args.thresholds, "baseline": args.baseline, "meta_a": bool(meta_a), "meta_b": bool(meta_b)}
     write_reports(out, results, header)
@@ -791,7 +860,18 @@ def cmd_calibrate(args) -> int:
     a, a2 = Path(args.a), Path(args.a2)
     thresholds = Thresholds.load(args.thresholds)
     ga, gb, meta_a, meta_b = gather(a, a2, args)
-    overrides, results = calibrate_overrides(ga, gb, meta_a, meta_b, thresholds, args.margin, args)
+    overrides, results, masks = calibrate_overrides(ga, gb, meta_a, meta_b, thresholds, args.margin, args,
+                                                    use_known=not args.no_known_mask)
+    out = Path(args.out)
+    mask_dir = Path(args.mask_dir) if args.mask_dir else out.with_name(out.stem + "_masks")
+    for spot, mk in masks.items():
+        p = mask_dir / f"{spot}_known.png"
+        save_mask(p, mk)
+        try:
+            rel = p.resolve().relative_to(out.resolve().parent).as_posix()
+        except ValueError:
+            rel = str(p.resolve())
+        overrides.setdefault(spot, {})["known_mask"] = rel
     spots = {**thresholds.spots}
     for spot, o in overrides.items():
         spots[spot] = deep_merge(spots.get(spot, {}), o)
@@ -872,12 +952,15 @@ def main(argv=None) -> int:
         p.add_argument("--margin", type=float, default=1.5, help="noise floor multiplier for calibration (1.5)")
         p.add_argument("--tile", type=int, default=32, help="tile size for the worst-tile list (32)")
         p.add_argument("--ntiles", type=int, default=10, help="worst tiles to list (10)")
+        p.add_argument("--no-known-mask", action="store_true",
+                       help="baseline/calibrate: thresholds only, no known-noise mask from A vs A'")
 
     p = sub.add_parser("compare", help="compare A (reference) with B (test)")
     p.add_argument("a")
     p.add_argument("b")
     p.add_argument("-o", "--out", required=True, help="report directory")
-    p.add_argument("--baseline", help="a second reference run A': per-spot thresholds from A vs A' (x margin)")
+    p.add_argument("--baseline", help="a second reference run A': per-spot known-noise masks (pixels that differ "
+                   "between A and A') and thresholds from A vs A' (x margin)")
     p.add_argument("--meta-baseline", help="metadata of the baseline run (default <baseline>/meta.json)")
     p.add_argument("--no-images", action="store_true", help="metrics and reports only")
     common(p)
@@ -887,6 +970,7 @@ def main(argv=None) -> int:
     p.add_argument("a")
     p.add_argument("a2")
     p.add_argument("-o", "--out", required=True, help="thresholds JSON to write")
+    p.add_argument("--mask-dir", help="where the known-noise masks go (default <out stem>_masks next to the JSON)")
     common(p)
     p.set_defaults(fn=cmd_calibrate)
 

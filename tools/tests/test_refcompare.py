@@ -300,13 +300,58 @@ class Cli(unittest.TestCase):
         code, out = run_main(["compare", self.d / "a", self.d / "b", "-o", self.d / "o", "--no-images"])
         self.assertNotEqual(code, 0, out)  # run-to-run noise fails the default thresholds
         tf = self.d / "thr.json"
-        self.assertEqual(run_main(["calibrate", self.d / "a", self.d / "a2", "-o", tf])[0], 0)
+        # whole-picture noise: thresholds only (a known-noise mask would cover everything)
+        self.assertEqual(run_main(["calibrate", self.d / "a", self.d / "a2", "-o", tf, "--no-known-mask"])[0], 0)
         t = json.loads(tf.read_text(encoding="utf-8"))
         self.assertIn("baseline", t["spot"]["s"])
+        self.assertNotIn("known_mask", t["spot"]["s"])
         self.assertEqual(run_main(["compare", self.d / "a", self.d / "b", "-o", self.d / "o", "--no-images",
                                    "--thresholds", tf])[0], 0)
         self.assertEqual(run_main(["compare", self.d / "a", self.d / "b", "-o", self.d / "o", "--no-images",
-                                   "--baseline", self.d / "a2"])[0], 0)
+                                   "--baseline", self.d / "a2", "--no-known-mask"])[0], 0)
+
+    def sea(self, seed):
+        """a frozen picture whose 'sea' (rows 100..143) has a different phase in every run"""
+        f = self.a.copy()
+        f[100:, :] = np.random.default_rng(seed).integers(0, 256, f[100:, :].shape)
+        return f
+
+    def test_known_noise_mask(self):
+        for name, seed in (("a", 1), ("a2", 2), ("b", 3)):
+            for k in range(3):  # frozen: the burst frames are identical
+                save(self.d / name / f"s_b{k}.png", self.sea(seed))
+        bug = self.sea(3)
+        bug[20:40, 20:60] = 0  # a real difference outside the sea
+        for k in range(3):
+            save(self.d / "bug" / f"s_b{k}.png", bug)
+        # without a baseline the sea fails the spot
+        self.assertEqual(run_main(["compare", self.d / "a", self.d / "b", "-o", self.d / "o", "--no-images"])[0], 1)
+        # the baseline's known-noise mask hides it ...
+        code, out = run_main(["compare", self.d / "a", self.d / "b", "-o", self.d / "o", "--no-images",
+                              "--baseline", self.d / "a2"])
+        self.assertEqual(code, 0, out)
+        rep = json.loads((self.d / "o" / "report.json").read_text(encoding="utf-8"))
+        m = rep["spots"][0]["metrics"]
+        self.assertAlmostEqual(m["noise_known"], 100 * (44 + 4) / 144, delta=1.0)  # rows 96..143 after 4 px dilation
+        self.assertEqual(m["noise_burst"], 0)
+        # ... but not a real difference elsewhere
+        self.assertEqual(run_main(["compare", self.d / "a", self.d / "bug", "-o", self.d / "o", "--no-images",
+                                   "--baseline", self.d / "a2"])[0], 1)
+        # calibrate stores the mask as a PNG next to the thresholds; compare reads it back
+        tf = self.d / "ref" / "thresholds.json"
+        tf.parent.mkdir()
+        self.assertEqual(run_main(["calibrate", self.d / "a", self.d / "a2", "-o", tf])[0], 0)
+        t = json.loads(tf.read_text(encoding="utf-8"))
+        self.assertEqual(t["spot"]["s"]["known_mask"], "thresholds_masks/s_known.png")
+        self.assertTrue((self.d / "ref" / "thresholds_masks" / "s_known.png").is_file())
+        self.assertEqual(run_main(["compare", self.d / "a", self.d / "b", "-o", self.d / "o", "--no-images",
+                                   "--thresholds", tf])[0], 0)
+        self.assertEqual(run_main(["compare", self.d / "a", self.d / "bug", "-o", self.d / "o", "--no-images",
+                                   "--thresholds", tf])[0], 1)
+        # a mask covering most of the picture makes the spot INVALID
+        r = cmp([self.a], [self.a], known=np.ones(self.a.shape[:2], bool))
+        self.assertEqual(r["verdict"], "INVALID")
+        self.assertIn("known noise", r["reasons"][0])
 
     def test_selftest(self):
         self.assertEqual(run_main(["selftest"])[0], 0)

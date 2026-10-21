@@ -126,6 +126,11 @@ with validation on and checks every pixel against D3D9's rasterisation rules (ha
   (post chain), fonts (the engine's own `eCFont` glyph atlases, not `eCAPIFont`: docs/research/fonts.md; atlas updates fixed),
   sprites, fixed-function remnants (generated shaders).
 * **Verify**: screenshot-diff suite at N poses (D3D9 reference vs Vulkan) within thresholds; a play session without validation errors.
+* Progress (2026-10-21): the suite exists and ran end to end: `scriptsefcompare.ps1` + `mods/rvkcompare` (13 spots: beach rain/sun,
+  forest, harbour docks/night, pub, monastery, volcano, crystal cave, hero close-up with HUD, inventory, character screen, ESC
+  menu), game time pinned before the freeze (risen-spass `set_game_time`), known-noise masks from two D3D9 runs. First result:
+  11 PASS, 2 WARN (particles/sea phase), no renderer difference found; Vulkan is not brighter than D3D9 (dluma -0.2..+0.7).
+  docs/research/reference-compare.md 11.
 
 ### M5 Robustness and performance
 * pipeline cache on disk, async/background pipeline compilation, frame pacing, alt-tab/resize, device-lost diagnostics
