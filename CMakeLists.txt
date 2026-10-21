@@ -63,6 +63,7 @@ add_library(rvk_core STATIC
     src/hal/trace.h
     src/hal/trace_generated.h
     src/hal/trace_support.h
+    src/hal/types.h
     src/hal/types_base.h
     src/shader/abi.h
     src/shader/glsl.cpp
@@ -125,7 +126,7 @@ rvk_warnings(rvk_shadertool)
 # tests
 # ---------------------------------------------------------------------------------------------
 if(RVK_BUILD_TESTS)
-    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp)
+    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp)
     target_link_libraries(rvk_tests PRIVATE rvk_core SPIRV-Tools-static)
     rvk_warnings(rvk_tests)
     add_test(NAME rvk_tests COMMAND rvk_tests)
