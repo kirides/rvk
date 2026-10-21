@@ -60,7 +60,7 @@ with rain, water, vegetation, post chain and GUI) render through Vulkan, no D3D9
 (D3D9 state model, `rvk_d3d9test`) -> `vk/` (Vulkan core, `rvk_vktest`); effects through `src/fx` + `hal/vulkan/effect.cpp`.
 Open (next): D3D9 reference comparison at fixed poses; unimplemented slots seen in game (LoadSurfaceFromSurface,
 SaveTextureToFile, FVF buffers); the early `Direct3DCreate9` (Engine.dll+0x74ec0b, adapter enumeration) still loads the
-system d3d9.dll; occlusion queries report "visible"; performance pass (in game ~79.5 fps on a 120 Hz display with ~5 ms
+system d3d9.dll (`eCGfxAdmin::sEnumAdapterDesc`, docs/research/early-d3d9.md); performance pass (in game ~79.5 fps on a 120 Hz display with ~5 ms
 inside vkQueuePresentKHR).
 Done after M3: vsync. FIFO presents returned at once in the game window (menu ~1500 fps; a plain window is throttled), so
 `d3d9::Device` paces presents to the refresh rate of the window's monitor (`vk::FramePacer`, `[vulkan] max_fps`). HLSL
@@ -82,7 +82,8 @@ with validation on and checks every pixel against D3D9's rasterisation rules (ha
 * materials, lightmaps, instancing (`SetStreamSourceFreq`), skinned meshes, SpeedTree, vegetation, particles, decals, sky, water
   (refraction copy), shadow maps (DF24 sun cascades done; point lights use R16F cube maps as on D3D9/AMD; D16/D24 depth
   compare only if a reference machine needs it; depth bias on D32F is not exact yet: unused by the shadow pass), occlusion
-  queries, D3DX effects (post chain), fonts (`eCAPIFont` glyph data), sprites, fixed-function remnants (generated shaders).
+  queries (unused by the game: only the editor's lightmap baker, "visible" stays; docs/research/occlusion.md), D3DX effects
+  (post chain), fonts (the engine's own `eCFont` glyph atlases, not `eCAPIFont`: docs/research/fonts.md), sprites, fixed-function remnants (generated shaders).
 * **Verify**: screenshot-diff suite at N poses (D3D9 reference vs Vulkan) within thresholds; a play session without validation errors.
 
 ### M5 Robustness and performance
