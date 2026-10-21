@@ -229,13 +229,17 @@ pre-passes `+0x14d0`, alpha `+0x14e8`, solid `+0x1500`, z-pass `+0x1518`, `+0x15
 2. Optional caller render target (`eSRenderTargetDesc`), `ClearViewport` (color `0xff000000`, depth, stencil).
 3. **Z pre-pass / depth map** (if enabled, `this+0x1590`): set the depth-map RT, clear to white, `eCShaderMaterialAdmin::BeginZPass`,
    z-pass ops sorted (`qsort`) and `RenderZPass` (vtbl `+0x18`), `EndZPass`, restore RT.
-4. `eCIlluminationAdmin::UpdateShadowMask` - shadow maps (`eCCascadeShadowMap::RenderShadowMaps` `0x59f200` ->
-   `eCRenderSystemAdmin::RenderShadowMap` `0x66ce00` -> `eCFrustumDatabase::ExtractShadowMap/RequestShadowMap/ExecuteShadowMap`;
-   2-3 cascades of 512/1024, point/spot `eCShadowMapPointLight/SpotLight`) and the **screen-space shadow mask + SSAO** (`post_SSM.fx`).
+4. `eCIlluminationAdmin::UpdateShadowMask` - the **screen-space shadow mask + SSAO** (`post_SSM.fx`). The shadow maps themselves
+   (`eCCascadeShadowMap::RenderShadowMaps` `0x59f200` -> `eCRenderSystemAdmin::RenderShadowMap` `0x66ce00` ->
+   `eCFrustumDatabase::ExtractShadowMap/RequestShadowMap/ExecuteShadowMap`; 2-3 cascades of 512/1024, point/spot
+   `eCShadowMapPointLight/SpotLight`) are **rendered before the main view**, by the scene image effect's jobs [C: phase markers,
+   docs/research/frame-phases.md 3; was assumed to be inside UpdateShadowMask].
 5. `BeginMaterial`, `eCModuleAdmin::DoBeginRenderSolid`, **solid** ops sorted by sort id, `Render` (vtbl `+0`).
 6. Debug list (bounding boxes, `eCRenderSystemAdmin` debug), `eCDecalAdmin::RenderDecals`, `eCBillboardAdmin::RenderBillboards`, list `+0x1530`.
 7. `DoBeginRenderAlpha`; **refracted** ops (`+0x1578`, water, using the refraction copy `smpRefract`); **alpha** ops depth-sorted (`RenderAlpha`, vtbl `+8`);
    `DoEndRenderAlpha`; list `+0x1548`; `EndMaterial`.
+
+Measured order of a whole frame (views, passes, draws per pass, image roles, the camera block): docs/research/frame-phases.md.
 
 Sky (`eCSkydome_PS` / `eCSkyObject` / `eCShaderSkyDome`), particles (`eCParticle_PS` / `eCShaderParticle`), light streaks, strips, SpeedTree
 (`eCRenderContextSpeedTree`, `...BB`), vegetation (`eCRenderContextVegetation`, instanced) and skinned actors (`eCRenderContextAnimation2`,
@@ -272,7 +276,9 @@ Post-processing (bloom, HDR/eye adaptation, DoF, radial blur, wobble, distort, d
   + sort id/fade; `eCRenderOp2::Create(mat, ctx, ...)` `0x67f680`). Contexts: `eCRenderContextMesh` (`eCMesh_PS` -> `eCMeshResource2` ->
   `eCSubMesh` with D3D9 vertex decl, VB/IB, material name), `eCRenderContextAnimation2` (skinned), SpeedTree, vegetation.
 * Camera: `eCGfxCamera::ms_pActiveCamera` (`0xc62580`) / `ms_pMasterCamera` (`0xc62590`) (view, projection, view-projection, inverse view
-  matrices), `eCShaderMaterialAdmin::SetCamera` (`0x6ba1d0`), `eCApplication::GetCurrentCamera`.
+  matrices), `eCShaderMaterialAdmin::SetCamera` (`0x6ba1d0`), `eCApplication::GetCurrentCamera`. **[C]** `eCGfxCamera` layout: view `+0x20`,
+  projection `+0x60`, depth-bias projection `+0xa0`, view-projection `+0xe0`, inverse view `+0x120`, position `+0x150`; a frustum
+  database's camera = `db+0x14c0` (`eCCameraBase`) `+0x1738`; c0..c3 = the transposed view-projection (frame-phases.md 5).
 * Lights/shadows: `eCIlluminationAdmin`, `eCDirectionalLight_PS`, `eCPointLight_PS`, `eCStaticLight_PS`, `eCCascadeShadowMap` (split
   distances, light direction), lightmaps per mesh (`LightmapName`). Fog: `eCGfxFog`, `eCWeatherAdmin`.
 * Textures: `eCImageResource2` / `eCGfxImageData` (`OnRead` `0x753fb0`).

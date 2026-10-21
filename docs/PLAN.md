@@ -164,8 +164,23 @@ efcompare.ps1` + `mods/rvkcompare` (13 spots: beach rain/sun,
   tool API `rvk_setting_*` / `rvk_ab` / `rvk_overlay`, `run.ps1 -Setting / -Commands / -OverlayInScreenshots`. Registered:
   `vulkan.vsync`, `vulkan.max_fps`, `vulkan.adapter`, overlay hotkeys / fps counter / A/B badge.
   Open: spass Lua binding for the settings exports; presets + capability resolution with the first enhancement.
-* remaining do-now items 1-8, 10 of the roadmap (phase markers, draw tags, resource identity, CTAB semantics, ABI slots,
-  injection points, image roles, RT capability, camera block).
+* **Phase markers, image roles, camera block (do-now items 1, 7, 10): done (2026-10-21, docs/research/frame-phases.md).**
+  Detours (Vulkan mode only) on `eCFrustumDatabase::Execute` / `ExecuteShadowMap`, `Begin/EndZPass`, `UpdateShadowMask`,
+  `DoBeginRenderSolid/Alpha`, `DoEndRenderAlpha`, `UpdateSkydomeEnvCubemap`, `eCImageFilterScene::OnUpdateOutput`,
+  `eCImageEffect::Execute`, `eCCameraBase::Render`, `RenderEntity`, `eCApplication::Draw`, plus the patched
+  `eCRenderContextMesh::RenderRefracted` vtable slot, drive a view / pass state machine on `d3d9::Device` (`d3d9/scene.*`):
+  views Main / Shadow / SkyCube / Preview / Post / Gui, passes DepthPrepass / ShadowMask / ShadowDepth / Solid / Refracted /
+  Alpha / AlphaLate; draws counted per segment; `-LogFrame` lines prefixed `[View/Pass]`, the frame's summary every 5 s in
+  rvk.log and in the overlay ("Frame structure"). Found: the sun cascades render **before** the main view (image-effect
+  jobs), not inside UpdateShadowMask. Image roles tagged and queryable (`Device::imageWithRole`): scene HDR target (FP16),
+  refraction copy (FP16), depth map (R32F), sky cube (128² A8R8G8B8), shadow maps (3 x DF24 + the G32R32F VSM). Camera
+  block (current + previous view-projection, inverses, position, near / far, frame, time; no GPU buffer yet) read from the
+  main view's `eCGfxCamera`: c0..c3 = its transposed view-projection exactly, c11 = position + far; equal to risen-spass
+  `camera.get` at fixed poses (scenario `rvk_camera`). Verified: refcompare 13 / 13 PASS against the stored D3D9 reference
+  (run `out\refcompare\20261021-204240`), validation clean, `scene_*` unit tests.
+  Open: the camera moves in only ~half of the rendered frames during a flight (why), Preview / point-light views unseen.
+* remaining do-now items 2-6, 8 of the roadmap (draw tags, resource identity, CTAB semantics, ABI slots, injection points,
+  RT capability).
 
 ### M7+ Enhanced graphics
 * candidates: anisotropic filtering + MSAA/TAA/SMAA, higher-resolution and better-filtered shadows, modern tonemapping/HDR10,

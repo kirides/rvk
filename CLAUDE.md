@@ -46,7 +46,10 @@ Vulkan-mode debugging (`run.ps1` switches -> `bin/rvk/config.toml` `[debug]`): `
 at ~0.1 fps), `-LogDraws N` (first N draws in detail: shaders, textures, targets, states), `-LogFrame N` (every key HAL call
 of frame N), `-Snapshots N,M` (at those `eCApplication::Draw` calls: the engine snapshot (slot 159 -> BMP in the copy's
 `localappdata\Local\Risen\ScreenShots`) + a self-test of the `rvk_screenshot` exports), `-Validation`, `-DumpSavedTextures` (the engine's refused `SaveTextureToFile` writes -> `bin/rvk/dumps/*.png`), `-AllowFocus` (test runs
-stay in the background by default). rvk.log prints fps / draw counts every 5 s and every unimplemented HAL slot once.
+stay in the background by default). rvk.log prints fps / draw counts every 5 s and every unimplemented HAL slot once, plus the
+last frame's phase structure (`Post{Shadow{..} Main{DepthPrepass(n) ShadowMask(n) Solid(n) Refracted(n) Alpha(n)} ..}`), its
+main camera and a camera cross-check (docs/research/frame-phases.md); `-LogFrame` lines carry a `[View/Pass]` prefix.
+Scenario `rvk_camera` (this repo's mods) holds fixed camera poses to compare the camera block with `risen.camera.get`.
 Performance (docs/research/performance.md): `-Perf` (GPU timestamps, CPU split, uploads, pipeline builds, pacer: `perf:`
 lines every 5 s), `-PerfFrame N` (GPU time of every render pass of frame N), `-Vsync on|off|engine`, `-MaxFps N`; the
 `rvk_shadows` scenario logs the fps for either renderer (also `-NoRenderer`). Other games on the GPU skew GPU times.
@@ -97,8 +100,9 @@ whole corpus (must stay 100 %). The contract between translated shaders and the 
 | `core/` | config (`bin\rvk\config.toml`), log (`bin\rvk\rvk.log`), paths, MinHook wrapper (`Hook<Fn>`), export resolution; `settings.*`: the player settings registry (`bin\rvk\settings.toml`, A/B; new features register their settings here) |
 | `overlay/` | in-game Dear ImGui overlay (settings, A/B, perf panel), window-procedure input filter, `[debug] commands`; ImGui's Vulkan backend is vendored in `third_party/imgui_vulkan` (compiled against volk) |
 | `engine/symbols.h` | X-macro table of the Engine.dll symbols we bind by decorated name |
+| `engine/scene_hooks.*` | frame phase markers (Vulkan mode only): detours on Execute / z pass / shadow / solid / alpha / sky / post / GUI, the RenderRefracted vtable slot, image-role tags, the main camera read (docs/research/frame-phases.md) |
 | `vk/` | Vulkan core: context (floor), swapchain, frames + upload ring, bindless set, images, pipeline cache, formats |
-| `d3d9/` | D3D9 device model on Vulkan (states, resources, draws, present): what the HAL and effects drive; `rvk_d3d9test` |
+| `d3d9/` | D3D9 device model on Vulkan (states, resources, draws, present): what the HAL and effects drive; `rvk_d3d9test`; `scene.*` = frame semantics (phase tracker, image roles, camera block) |
 | `hal/vulkan/` | the engine HAL on `d3d9::Device` (mode = "vulkan"): instance, device, resources, HLSL shaders, effects |
 | `fx/` | fx_2_0 effect binaries: parser, constant tables, preshaders (`rvk_fxtool`) |
 | `res/` | DDS parsing |
