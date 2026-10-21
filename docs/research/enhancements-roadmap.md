@@ -366,7 +366,7 @@ RVAs are Engine.dll unless marked `Game.dll` or `Script.dll`. Dumps: `B:\DevDriv
   * hit shading: albedo × (sun with a shadow ray + harvested ambient + lightmap at the hit UV2 if present), plus fog
   * miss: the env cube
 * **Denoise**: temporal accumulation with motion vectors + a spatial bilateral filter. Candidates: AMD FidelityFX SSSR /
-  Denoiser (MIT, HLSL → SPIR-V via DXC offline) or own SVGF-lite. NVIDIA NRD: check its licence before use.
+  Denoiser (MIT, HLSL: would have to be ported to GLSL — no HLSL in this project, PLAN.md) or own SVGF-lite. NVIDIA NRD: check its licence before use.
 * Composite in linear HDR before the engine's post chain, at the end of the main view's `Execute`.
 
 ### 3.6 Global illumination (M10)

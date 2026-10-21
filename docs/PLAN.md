@@ -10,11 +10,10 @@ fallback when the hardware lacks a feature (RT stays optional on top of the 1.3 
 available. Architecture work must keep that path open: scene and material semantics beyond the D3D9 draw stream (which
 draw is water, terrain, a static mesh, a skinned character), points to inject or replace passes, buffers that can feed
 acceleration structures when RT is enabled, and a player-facing settings system (docs/research/enhancements-roadmap.md).
-**Shaders (user decision, 2026-10-21, as in GD3D11):** hand-written / enhancement shaders are **HLSL compiled by DXC to
-SPIR-V** at build time (Vulkan SDK `dxc` + `spirv-val`), written Vulkan-native (`[[vk::binding]]`, `[[vk::push_constant]]`,
-typed bindless arrays; no SM6.6 `ResourceDescriptorHeap`, which would need mutable descriptors), with a shared HLSL header
-mirroring `src/shader/abi.h`. GD3D11's `Shaders/D3D12/*` port with mostly declaration changes. The D3D9 bytecode
-translator keeps generating GLSL (generated code; both end as SPIR-V on the same layout).
+**Shaders (user decision, 2026-10-21): GLSL only, no HLSL/DXC.** Hand-written / enhancement shaders are GLSL 4.60 compiled
+to SPIR-V at build time (glslang / `glslc` + `spirv-val`), sharing one GLSL header with the D3D9 translator's ABI
+(`src/shader/abi.h`: bindless set 0, push constants with buffer device addresses). GD3D11's HLSL (`Shaders/D3D12/*`: water,
+RT, GTAO) is ported by hand to GLSL (`GL_EXT_ray_query`, `GL_EXT_buffer_reference`, `GL_EXT_nonuniform_qualifier`).
 **Settings UI (user decision, 2026-10-21): an in-game ImGui overlay** + `bin\rvk\settings.toml` (never under `data\`); instant
 per-feature A/B toggling is a first-class overlay feature (it lets players compare enhanced vs parity themselves).
 
