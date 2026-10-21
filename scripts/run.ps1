@@ -40,6 +40,8 @@ param(
     [string]$WindowSize = '1600x900',
     [switch]$KeepRunning,
     [switch]$NoAutostart,
+    # let the game take the foreground / move the cursor (default: risen-spass background mode)
+    [switch]$AllowFocus,
     [string]$Filter = '\[error\]|\[warn\]|\[test\] (FAIL|finished|deadline)',
     # regex of rvk.log lines to print after the run ('' = none, '.' = all)
     [string]$RvkFilter = '\[(warning|error|critical)\]|probe|  \[|missing|InitializeAdmin|ms_pAPI|Direct3DCreate9|hooks|mode ='
@@ -85,6 +87,7 @@ if ($Scenario) { $spassArgs.Scenario = $Scenario }
 if ($WaitForResult) { $spassArgs.WaitForResult = $true }
 if ($KeepRunning) { $spassArgs.KeepRunning = $true }
 if ($NoAutostart) { $spassArgs.NoAutostart = $true }
+if ($AllowFocus) { $spassArgs.AllowFocus = $true }
 
 & (Join-Path $SpassRepo 'scripts\test-run.ps1') @spassArgs
 $code = $LASTEXITCODE
