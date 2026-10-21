@@ -19,6 +19,10 @@ param(
     [switch]$Validation,
     # frame numbers whose back buffer the Vulkan renderer saves to bin/rvk/screenshots/frame_<n>.png, e.g. 300,900
     [string]$Screenshots = '',
+    # log the first N draws of the Vulkan renderer in detail
+    [int]$LogDraws = 0,
+    # log the HAL calls of this frame of the Vulkan renderer
+    [int]$LogFrame = 0,
     [ValidateSet('trace', 'debug', 'info', 'warn', 'error')][string]$RvkLogLevel = 'info',
     [string]$Config = 'RelWithDebInfo',
     [string]$GameDir = 'B:\DevDrive\risen-test-vk',
@@ -62,7 +66,7 @@ if ($NoRenderer) {
         '[renderer]', "mode = `"$Mode`"",
         '[log]', "level = `"$RvkLogLevel`"",
         '[vulkan]', "validation = $($Validation.IsPresent.ToString().ToLower())",
-        '[debug]', "screenshot_frames = [$Screenshots]"
+        '[debug]', "screenshot_frames = [$Screenshots]", "log_draws = $LogDraws", "log_frame = $LogFrame"
     )
     Remove-Item (Join-Path $rvkDir 'screenshots') -Recurse -Force -ErrorAction SilentlyContinue
     [IO.File]::WriteAllLines((Join-Path $rvkDir 'config.toml'), $cfg)

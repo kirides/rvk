@@ -200,6 +200,7 @@ struct DeviceOptions {
     int adapter = -1;
     std::filesystem::path cacheDir;  // pipeline + shader caches; empty = no disk cache
     bool offscreen = false;          // no swapchain (tests)
+    std::uint32_t logDraws = 0;      // log the first N draws in detail
 };
 
 struct Viewport {
@@ -213,6 +214,14 @@ struct FrameStats {
     std::uint32_t renderPasses = 0;
     std::uint32_t pipelines = 0;
     std::uint32_t drawsSkipped = 0;  // draws without a usable shader / target
+    // cumulative since creation
+    std::uint64_t totalDraws = 0;
+    std::uint64_t skippedNoShader = 0;
+    std::uint64_t skippedNoTarget = 0;
+    std::uint64_t skippedVertexInput = 0;
+    std::uint64_t skippedPipeline = 0;
+    std::uint64_t totalClears = 0;
+    std::uint64_t totalRenderPasses = 0;
 };
 
 class Device {

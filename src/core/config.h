@@ -29,7 +29,9 @@ struct Config {
     bool traceCapture = true;  // write shader bytecode / effect sources to <bin>/rvk/corpus
 
     // [debug] (mode = "vulkan")
-    std::vector<std::uint32_t> screenshotFrames;  // back buffer -> <bin>/rvk/screenshots/frame_<n>.png at these frames
+    std::vector<std::uint32_t> screenshotFrames;
+    std::uint32_t logDraws = 0;  // log the first N draws in detail
+    std::uint32_t logFrame = 0;  // log the HAL calls of this frame  // back buffer -> <bin>/rvk/screenshots/frame_<n>.png at these frames
 };
 
 // Parses config.toml text. Unknown keys are ignored, bad values keep the default; `error` gets a parse error message.

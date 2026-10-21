@@ -82,6 +82,7 @@ add_library(rvk_core STATIC
     src/hal/types.h
     src/hal/types_base.h
     src/hal/vulkan/device.cpp
+    src/hal/vulkan/effect.cpp
     src/hal/vulkan/hal_vulkan.h
     src/hal/vulkan/instance.cpp
     src/hal/vulkan/resources.cpp

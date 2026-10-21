@@ -6,6 +6,7 @@
 
 #include "core/exports.h"
 #include "hal/vulkan/hal_vulkan.h"
+#include "vk/formats.h"
 
 namespace rvk::hal::vulkan {
 
@@ -67,6 +68,8 @@ bEResult HalTexture::GetRenderTargetHandle(void** a0) {
 }
 
 bEResult HalTexture::SetTexture(unsigned long a0) {
+    if (logThisFrame()) spdlog::info("hal> Texture::SetTexture stage {} ({}x{} {})", a0, tex_->desc().width, tex_->desc().height,
+                                     vk::d3dFormatName(tex_->desc().format));
     dev_.dev().setTexture(static_cast<std::uint32_t>(a0), tex_.get());
     return bEResult_Ok;
 }
@@ -280,6 +283,8 @@ void HalPrimitive::EnableStream(unsigned long a0, bool a1) {
 bool HalPrimitive::IsStreamEnabled(unsigned long a0) const { return a0 < 4 && streams_[a0].enabled; }
 
 bool HalPrimitive::Execute() {
+    if (logThisFrame()) spdlog::info("hal> Primitive::Execute decl {} stream0 {} stride {}", static_cast<void*>(decl_),
+                                     static_cast<void*>(streams_[0].data), streams_[0].stride);
     d3d9::Device& d = dev_.dev();
     for (std::uint32_t i = 0; i < 4; ++i) {
         const Stream& s = streams_[i];
@@ -435,6 +440,7 @@ bEResult HalHLSLShader::GetShaderType(eCGfxShared::eEGfxHLSLShaderType& a0) cons
 }
 
 bEResult HalHLSLShader::Execute() {
+    if (logThisFrame()) spdlog::info("hal> HLSLShader::Execute {} {:016x}", (type_ & 1) ? "ps" : "vs", shader_ ? shader_->hash : 0);
     if ((type_ & 1) != 0) {
         dev_.dev().setPixelShader(shader_);
     } else {

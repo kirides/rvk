@@ -43,6 +43,8 @@ void detourInitializeAdmin(void* self, int apiType) {
         vo.adapter = g_config.adapter;
         vo.cacheDir = paths::dataDir() / L"cache";
         vo.screenshotFrames = g_config.screenshotFrames;
+        vo.logDraws = g_config.logDraws;
+        vo.logFrame = g_config.logFrame;
         vo.screenshotDir = paths::dataDir() / L"screenshots";
         *static_cast<void**>(s.gfxAdminApiInstance) = static_cast<hal::eCAPIInstance*>(new hal::vulkan::HalInstance(vo));
         g_initializeAdmin.original(self, 4);

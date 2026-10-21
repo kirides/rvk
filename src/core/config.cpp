@@ -47,6 +47,8 @@ Config parseConfig(std::string_view text, std::string* error) {
     cfg.adapter = tbl["vulkan"]["adapter"].value_or(cfg.adapter);
     cfg.traceLogFirst = tbl["trace"]["log_first"].value_or(cfg.traceLogFirst);
     cfg.traceCapture = tbl["trace"]["capture"].value_or(cfg.traceCapture);
+    cfg.logDraws = static_cast<std::uint32_t>(tbl["debug"]["log_draws"].value_or(0));
+    cfg.logFrame = static_cast<std::uint32_t>(tbl["debug"]["log_frame"].value_or(0));
     if (const auto* frames = tbl["debug"]["screenshot_frames"].as_array()) {
         for (const auto& f : *frames) {
             if (const auto v = f.value<std::int64_t>(); v && *v > 0) {

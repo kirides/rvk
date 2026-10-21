@@ -81,6 +81,7 @@ bool Device::beginRendering() {
     vkCmdBeginRendering(cmd, &ri);
     rendering_ = true;
     ++stats_.renderPasses;
+    ++stats_.totalRenderPasses;
     return true;
 }
 
@@ -335,11 +336,13 @@ void Device::uploadConstants() {
 bool Device::prepareDraw(std::uint32_t primitiveType) {
     if (!vs_ || !ps_ || vs_->module == VK_NULL_HANDLE || ps_->module == VK_NULL_HANDLE) {
         ++stats_.drawsSkipped;  // fixed-function draws are not emulated
+        ++stats_.skippedNoShader;
         return false;
     }
     prepareTextures();
     if (!beginRendering()) {
         ++stats_.drawsSkipped;
+        ++stats_.skippedNoTarget;
         return false;
     }
     VkCommandBuffer cmd = frames_.cmd();
@@ -366,11 +369,13 @@ bool Device::prepareDraw(std::uint32_t primitiveType) {
     pd.stencilFormat = stencilFormat_;
     if (!bindVertexInput(pd)) {
         ++stats_.drawsSkipped;
+        ++stats_.skippedVertexInput;
         return false;
     }
     VkPipeline pipeline = pipelines_.get(pd);
     if (pipeline == VK_NULL_HANDLE) {
         ++stats_.drawsSkipped;
+        ++stats_.skippedPipeline;
         return false;
     }
     if (pipeline != boundPipeline_) {
@@ -403,9 +408,27 @@ bool Device::prepareDraw(std::uint32_t primitiveType) {
     vk::RingAlloc db = frames_.allocate(sizeof(block), 16);
     std::memcpy(db.ptr, &block, sizeof(block));
 
+    if (stats_.totalDraws < options_.logDraws) {
+        std::string tex;
+        for (std::uint32_t slot = 0; slot < kSamplerCount; ++slot) {
+            if (block.tex[slot] != 0 || tex_[slot] != nullptr) {
+                Texture* t = tex_[slot];
+                tex += std::format(" s{}=slot{}({}x{} {} {} levels, pending {})", slot, block.tex[slot], t ? t->desc().width : 0,
+                                   t ? t->desc().height : 0, t ? vk::d3dFormatName(t->desc().format) : "-", t ? t->levels() : 0,
+                                   t ? t->pending_.load() : false);
+            }
+        }
+        spdlog::info("d3d9: draw #{} vs {:016x} ps {:016x} target {}x{} ({} colour) viewport {},{} {}x{} blend {} {}/{} alphatest {} "
+                     "{}/{} zenable {} cull {} writemask {:x};{}",
+                     stats_.totalDraws, vs_->hash, ps_->hash, targetWidth_, targetHeight_, colorCount_, viewport_.x, viewport_.y,
+                     viewport_.width, viewport_.height, rs_[RS_ALPHABLENDENABLE], rs_[RS_SRCBLEND], rs_[RS_DESTBLEND],
+                     rs_[RS_ALPHATESTENABLE], rs_[RS_ALPHAFUNC], rs_[RS_ALPHAREF], rs_[RS_ZENABLE], rs_[RS_CULLMODE],
+                     rs_[RS_COLORWRITEENABLE], tex);
+    }
     const shader::abi::PushConstants push{vsConstAddr_, psConstAddr_, db.address};
     vkCmdPushConstants(cmd, bindless_.pipelineLayout(), VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
     ++stats_.draws;
+    ++stats_.totalDraws;
     return true;
 }
 

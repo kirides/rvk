@@ -26,7 +26,12 @@ struct Options {
     std::filesystem::path cacheDir;  // <bin>/rvk/cache
     std::vector<std::uint32_t> screenshotFrames;  // frames whose back buffer is saved as PNG
     std::filesystem::path screenshotDir;           // <bin>/rvk/screenshots
+    std::uint32_t logDraws = 0;
+    std::uint32_t logFrame = 0;  // log the HAL calls of this frame
 };
+
+// true while the frame selected by Options::logFrame is being recorded
+bool logThisFrame();
 
 class HalInstance final : public StubInstance {
 public:
@@ -213,6 +218,7 @@ public:
     bEResult CreatePrimititve(eCAPIPrimitive** a0) override;
     bEResult CreateIndexData(eCGfxShared::eSGfxIndexBufDesc const& a0, eCAPIIndexData** a1) override;
     bEResult CreateVertexData(eCGfxShared::eSGfxVertexBufDesc const& a0, eCAPIVertexData** a1) override;
+    bEResult CreateEffect(void const* a0, unsigned int a1, eCAPIEffect** a2) override;
     bEResult PreprocessShader(eCGfxShared::eSGfxHLSLShaderSrc const& a0, bCString& a1) override;
     bEResult CreateHLSLShader(eCAPIHLSLShader** a0) override;
     bEResult CreateTexture(eCGfxShared::eSGfxLayersDesc const& a0, eCAPITexture** a1) override;
@@ -394,6 +400,8 @@ private:
     // stand-in "this" for the engine's own CPU-only DX9 functions (PreprocessShader, CompileEffect*, aux buffers)
     std::uint64_t dx9Standin_[8]{};
     std::uint64_t lastStatsFrame_ = 0;
+    std::uint64_t halDraws_ = 0;
+    void updateLogFrame();
     Options options_;
 };
 

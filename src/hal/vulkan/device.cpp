@@ -1,5 +1,6 @@
 // eCAPIDevice on d3d9::Device (docs/research/hal-structs.md sections 2.x).
 
+#include <atomic>
 #include <cstring>
 
 #include <spdlog/spdlog.h>
@@ -13,6 +14,18 @@
 namespace rvk::hal::vulkan {
 
 using namespace rvk::d3d9;
+
+namespace {
+std::atomic<bool> g_logFrame{false};
+}  // namespace
+
+bool logThisFrame() { return g_logFrame.load(std::memory_order_relaxed); }
+
+#define HAL_LOG(...)                                       do {                                                       if (logThisFrame()) spdlog::info(__VA_ARGS__);     } while (0)
+
+void HalDevice::updateLogFrame() {
+    g_logFrame = options_.logFrame != 0 && dev_.stats().frames + 1 == options_.logFrame;
+}
 
 namespace {
 
@@ -55,6 +68,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     o.validation = options.validation;
     o.adapter = options.adapter;
     o.cacheDir = options.cacheDir;
+    o.logDraws = options.logDraws;
     if (!p.windowed) {
         spdlog::warn("hal: fullscreen requested, running windowed (exclusive fullscreen is not supported yet)");
     }
@@ -324,6 +338,7 @@ bEResult HalDevice::GetVertexDeclarationData(void* a0, eCGfxShared::eSGfxDclElem
 }
 
 bEResult HalDevice::SetVertexDeclaration(void* a0) {
+    HAL_LOG("hal> SetVertexDeclaration {}", a0);
     dev_.setVertexDecl(declFromHandle(a0));
     return bEResult_Ok;
 }
@@ -403,6 +418,7 @@ bEResult HalDevice::GetViewport(eCGfxShared::eSGfxViewport& a0) {
 }
 
 bEResult HalDevice::ClearViewport(eCGfxShared::eEViewportClear a0, unsigned long a1, float a2, unsigned long a3) {
+    HAL_LOG("hal> Clear flags {} color {:08x} z {}", static_cast<int>(a0), a1, a2);
     dev_.clear(static_cast<std::uint32_t>(a0), static_cast<std::uint32_t>(a1), a2, static_cast<std::uint32_t>(a3));
     return bEResult_Ok;
 }
@@ -417,7 +433,9 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
             spdlog::info("hal: screenshot {}", file.string());
         }
     }
+    HAL_LOG("hal> SwapScreen");
     dev_.present();
+    updateLogFrame();
     logFrameStats();
     return bEResult_Ok;
 }
@@ -426,12 +444,15 @@ void HalDevice::logFrameStats() {
     const auto& s = dev_.stats();
     if (s.frames == 1 || s.frames - lastStatsFrame_ >= 600) {
         lastStatsFrame_ = s.frames;
-        spdlog::info("hal: frame {}: {} draws ({} skipped), {} render passes, {} unimplemented slots seen", s.frames, s.draws,
-                     s.drawsSkipped, s.renderPasses, unimplementedCount());
+        spdlog::info("hal: frame {}: {} draws total, {} clears, {} render passes; skipped: {} no shader, {} no target, {} vertex "
+                     "input, {} pipeline; HAL Draw calls {}; {} unimplemented slots seen",
+                     s.frames, s.totalDraws, s.totalClears, s.totalRenderPasses, s.skippedNoShader, s.skippedNoTarget,
+                     s.skippedVertexInput, s.skippedPipeline, halDraws_, unimplementedCount());
     }
 }
 
 bEResult HalDevice::BeginScene() {
+    HAL_LOG("hal> BeginScene");
     ++sceneDepth_;
     return bEResult_Ok;
 }
@@ -770,6 +791,9 @@ bEResult HalDevice::GetViewMatrix(bCMatrix* a0) {
 // ---- draws ----------------------------------------------------------------------------------------------------------
 
 bEResult HalDevice::Draw(eCGfxShared::eSGfxDrawCallDesc const& a0) {
+    ++halDraws_;
+    HAL_LOG("hal> Draw indexed {} type {} prims {} start {}/{} base {}", a0.indexed, static_cast<int>(a0.type), a0.primitiveCount,
+            a0.startVertex, a0.startIndex, a0.baseVertexIndex);
     const auto type = static_cast<std::uint32_t>(a0.type);
     if (a0.indexed) {
         dev_.drawIndexedPrimitive(type, a0.baseVertexIndex, a0.minVertexIndex, a0.numVertices, a0.startIndex, a0.primitiveCount);
@@ -780,6 +804,7 @@ bEResult HalDevice::Draw(eCGfxShared::eSGfxDrawCallDesc const& a0) {
 }
 
 bEResult HalDevice::DrawUP(eCGfxShared::eEPrimitiveType a0, unsigned int a1, void* const a2, unsigned int a3) {
+    HAL_LOG("hal> DrawUP type {} prims {} stride {}", static_cast<int>(a0), a1, a3);
     dev_.drawPrimitiveUP(static_cast<std::uint32_t>(a0), a1, a2, a3);
     return bEResult_Ok;
 }
@@ -867,6 +892,7 @@ bEResult HalDevice::SetVertexDataNULL(unsigned long a0) {
 // ---- render targets (hal-structs.md 2.2) -----------------------------------------------------------------------------
 
 bEResult HalDevice::SetRenderTarget(void* a0, void* a1) {
+    HAL_LOG("hal> SetRenderTarget {} {} (back buffer {})", a0, a1, static_cast<void*>(dev_.backBuffer()));
     unbindTextures();
     dev_.setRenderTarget(0, static_cast<d3d9::Surface*>(a0));
     dev_.setDepthStencil(static_cast<d3d9::Surface*>(a1));

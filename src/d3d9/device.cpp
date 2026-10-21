@@ -620,6 +620,7 @@ void Device::setScissorRect(std::int32_t left, std::int32_t top, std::int32_t ri
 // ---- commands -------------------------------------------------------------------------------------------------------
 
 void Device::clear(std::uint32_t flags, std::uint32_t color, float z, std::uint32_t stencil) {
+    ++stats_.totalClears;
     if (!beginRendering()) {
         return;
     }
@@ -668,8 +669,13 @@ void Device::clear(std::uint32_t flags, std::uint32_t color, float z, std::uint3
 void Device::blit(vk::Image& src, std::uint32_t srcLevel, std::uint32_t srcLayer, const VkOffset3D srcBox[2], vk::Image& dst,
                   std::uint32_t dstLevel, std::uint32_t dstLayer, const VkOffset3D dstBox[2], VkFilter filter) {
     VkCommandBuffer cmd = frames_.cmd();
-    src.transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    dst.transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    const bool same = &src == &dst;
+    if (same) {
+        src.transition(cmd, VK_IMAGE_LAYOUT_GENERAL, true);  // forced: orders this blit after the previous mip's
+    } else {
+        src.transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        dst.transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    }
     VkImageBlit2 region{VK_STRUCTURE_TYPE_IMAGE_BLIT_2};
     region.srcSubresource = {src.aspect(), srcLevel, srcLayer, 1};
     region.srcOffsets[0] = srcBox[0];
@@ -679,9 +685,9 @@ void Device::blit(vk::Image& src, std::uint32_t srcLevel, std::uint32_t srcLayer
     region.dstOffsets[1] = dstBox[1];
     VkBlitImageInfo2 bi{VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2};
     bi.srcImage = src.image();
-    bi.srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    bi.srcImageLayout = same ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     bi.dstImage = dst.image();
-    bi.dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    bi.dstImageLayout = same ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     bi.regionCount = 1;
     bi.pRegions = &region;
     bi.filter = vk::isDepthFormat(src.format()) ? VK_FILTER_NEAREST : filter;
