@@ -43,6 +43,44 @@ std::uint32_t Device::slotOf(std::uint32_t d3dSampler) {
 
 bool Device::recordingThread() const { return GetCurrentThreadId() == renderThread_; }
 
+// ---- frame semantics (d3d9/scene.h) -----------------------------------------------------------------------------------------
+
+double Device::secondsSinceCreate() const {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - createdAt_).count();
+}
+
+bool Device::setMainCamera(const scene::CameraInput& in) {
+    if (camera_.valid) return false;
+    camera_.set(in, stats_.frames + 1, secondsSinceCreate());
+    return true;
+}
+
+void Device::tagImage(Texture* texture, scene::ImageRole role) {
+    if (texture == nullptr || role == scene::ImageRole::None) return;
+    roles_[static_cast<std::size_t>(role)] = texture;
+    if (texture->role_ == role) return;
+    const scene::ImageRole old = texture->role_;
+    if (old != scene::ImageRole::None && roles_[static_cast<std::size_t>(old)] == texture) {
+        roles_[static_cast<std::size_t>(old)] = nullptr;
+    }
+    texture->role_ = role;
+    // logged when found; a pooled target that keeps changing roles would flood the log: the first 64 changes only
+    if (roleLogs_ < 64) {
+        ++roleLogs_;
+        const TextureDesc& d = texture->desc();
+        spdlog::info("scene: {} = texture {} ({}x{} {}{}{}) at frame {}{}", scene::name(role), static_cast<void*>(texture), d.width,
+                     d.height, vk::d3dFormatName(d.format), d.type == TextureType::Cube ? " cube" : "",
+                     texture->isDepth() ? " depth" : "", stats_.frames + 1,
+                     old != scene::ImageRole::None ? std::format(" (was the {})", scene::name(old)) : std::string());
+    }
+}
+
+void Device::forgetImage(Texture* texture) {
+    for (auto& r : roles_) {
+        if (r == texture) r = nullptr;
+    }
+}
+
 bool Device::create(const DeviceOptions& options) {
     options_ = options;
     renderThread_ = GetCurrentThreadId();
@@ -486,6 +524,9 @@ void Device::present() {
     } presentEnd{*this};
     endRendering();
     ++stats_.frames;
+    phases_.endFrame();
+    lastCamera_ = camera_;
+    camera_.advance();
     // per-frame counters span every submission of the frame (read-backs flush mid-frame)
     stats_.lastFrameDraws = stats_.draws;
     perf_.draws += stats_.draws;

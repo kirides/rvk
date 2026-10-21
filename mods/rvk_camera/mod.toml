@@ -1,0 +1,6 @@
+id          = "rvk_camera"
+name        = "Renderer camera check"
+version     = "1.0.0"
+author      = "risen-enhanced-graphics"
+description = "Fixed camera poses (risen.camera.set) logged with risen.camera.get, to check the Vulkan renderer's camera block against the game (scenario rvk_camera, docs/research/frame-phases.md)."
+main        = "main.lua"

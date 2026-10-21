@@ -5,7 +5,9 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstring>
+#include <format>
 #include <string>
 
 #include <spdlog/spdlog.h>
@@ -14,6 +16,7 @@
 #include "core/exports.h"
 #include "core/settings.h"
 #include "d3d9/fvf.h"
+#include "engine/scene_hooks.h"
 #include "engine/vfs.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "res/dds.h"
@@ -29,7 +32,11 @@ std::atomic<bool> g_logFrame{false};
 
 bool logThisFrame() { return g_logFrame.load(std::memory_order_relaxed); }
 
-#define HAL_LOG(...)                                       do {                                                       if (logThisFrame()) spdlog::info(__VA_ARGS__);     } while (0)
+// -LogFrame: every key HAL call of the frame, prefixed with the frame phase (view/pass, engine/scene_hooks.h)
+#define HAL_LOG(fmt, ...)                                                                                     \
+    do {                                                                                                      \
+        if (logThisFrame()) spdlog::info("[{}] " fmt, engine::scene::currentLabel() __VA_OPT__(, ) __VA_ARGS__); \
+    } while (0)
 
 void HalDevice::updateLogFrame() {
     g_logFrame = options_.logFrame != 0 && dev_.stats().frames + 1 == options_.logFrame;
@@ -55,6 +62,7 @@ HalDevice::HalDevice() {
 }
 
 HalDevice::~HalDevice() {
+    engine::scene::detach(&dev_);
     settings::registry().removeCallbacks(this);
     if (overlay_) {
         dev_.setOverlay(nullptr, false);
@@ -109,6 +117,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     }
     spdlog::info("hal: Vulkan device for window {} ({}x{}, vsync {}, depth {})", static_cast<void*>(p.window), o.width, o.height,
                  o.vsync, vk::d3dFormatName(o.depthFormat));
+    engine::scene::attach(&dev_);  // the frame phase markers (no-ops when they are not installed)
     auto& reg = settings::registry();
     if (rs.vsync != nullptr) reg.onChange(*rs.vsync, [this](const settings::Setting&) { applyVsync(); }, this);
     if (rs.maxFps != nullptr) {
@@ -684,9 +693,47 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
                                                            s.skippedPipeline,
                                       .textureCpuBytes = d3d9::Texture::cpuBytesTotal(),
                                   });
+    if (const auto& cam = dev_.lastCamera(); cam.valid) {
+        ++cameraFrames_;
+        if (cam.prevValid && cam.position != cam.prevPosition) ++cameraMovedFrames_;
+    }
+    if (logThisFrame()) logFrameStructure();  // the -LogFrame frame, now complete
     updateLogFrame();
     logFrameStats();
     return bEResult_Ok;
+}
+
+// The last presented frame's phase sequence and main camera (docs/research/frame-phases.md), every 5 s and for -LogFrame
+void HalDevice::logFrameStructure() {
+    const auto& ph = dev_.phases();
+    spdlog::info("hal: frame {} structure ({} draws{}): {}", dev_.stats().frames, ph.lastDraws(),
+                 ph.unbalanced() != 0 ? std::format(", {} unbalanced markers", ph.unbalanced()) : std::string(),
+                 d3d9::scene::PhaseTracker::summary(ph.lastFrame()));
+    const auto& c = dev_.lastCamera();
+    if (!c.valid) {
+        spdlog::info("hal: frame {}: no main view", dev_.stats().frames);
+        return;
+    }
+    const float moved = c.prevValid ? std::hypot(c.position[0] - c.prevPosition[0], c.position[1] - c.prevPosition[1],
+                                                 c.position[2] - c.prevPosition[2])
+                                    : 0.0f;
+    // the view direction: the inverse view's third row (bCMatrix rows = axes, D3D row-vector convention)
+    spdlog::info("hal: camera of frame {}: position ({:.2f}, {:.2f}, {:.2f}), forward ({:.3f}, {:.3f}, {:.3f}), near {:.2f}, far {:.1f} "
+                 "(engine {:.1f}), t {:.3f} s, moved {:.3f} since the previous frame{}; the camera moved in {} of {} frames with a "
+                 "main view since the last report",
+                 c.frame, c.position[0], c.position[1], c.position[2], c.inverseView.at(2, 0), c.inverseView.at(2, 1),
+                 c.inverseView.at(2, 2), c.nearZ, c.farZ, c.engineFar, c.time, moved, c.prevValid ? "" : " (no previous camera)",
+                 cameraMovedFrames_, cameraFrames_);
+    cameraMovedFrames_ = 0;
+    cameraFrames_ = 0;
+    const d3d9::scene::CameraCheck k = d3d9::scene::checkCamera(c);
+    if (k.available) {
+        spdlog::info("hal: camera check against the first solid draw's VS constants: c0-c3 = view-projection {} max |d| {:.2g} "
+                     "(matrix scale {:.3g}), c4-c7 inverse projection {:.2g}, c8-c10 inverse view {:.2g}, c11.xyz position {:.2g}, "
+                     "c11.w {:.1f} (engine far {:.1f}, |d| {:.2g})",
+                     k.transposed ? "(transposed)" : "(rows)", k.viewProjection, k.scale, k.inverseProjection, k.inverseView,
+                     k.position, c.vsConstants[11][3], c.engineFar, k.farPlane);
+    }
 }
 
 // The engine's snapshot (eCApplication::Snapshot / SnapshotEx -> Draw -> DoSnapshot, after the GUI and before SwapScreen).
@@ -738,6 +785,7 @@ void HalDevice::logFrameStats() {
         }
         lastStatsTime_ = now;
         lastStatsFrame_ = s.frames;
+        logFrameStructure();
         spdlog::info("hal: frame {}: {} draws total, {} clears, {} render passes; skipped: {} no shader, {} no target, {} vertex "
                      "input, {} pipeline; HAL Draw calls {}; {} unimplemented slots seen; texture CPU copies {:.1f} MiB",
                      s.frames, s.totalDraws, s.totalClears, s.totalRenderPasses, s.skippedNoShader, s.skippedNoTarget,
@@ -1230,8 +1278,14 @@ bEResult HalDevice::SetVertexDataNULL(unsigned long a0) {
 bEResult HalDevice::SetRenderTarget(void* a0, void* a1) {
     HAL_LOG("hal> SetRenderTarget {} {} (back buffer {})", a0, a1, static_cast<void*>(dev_.backBuffer()));
     unbindTextures();
-    dev_.setRenderTarget(0, static_cast<d3d9::Surface*>(a0));
+    auto* rt = static_cast<d3d9::Surface*>(a0);
+    dev_.setRenderTarget(0, rt);
     dev_.setDepthStencil(static_cast<d3d9::Surface*>(a1));
+    // eCSkydome_PS::UpdateSkydomeEnvCubemap binds a face of the sky cube (frame-phases.md 4)
+    if (rt != nullptr && rt->texture() != nullptr && rt->texture()->desc().type == d3d9::TextureType::Cube &&
+        dev_.phases().view() == d3d9::scene::View::SkyCube) {
+        dev_.tagImage(rt->texture(), d3d9::scene::ImageRole::SkyEnvCube);
+    }
     return bEResult_Ok;
 }
 

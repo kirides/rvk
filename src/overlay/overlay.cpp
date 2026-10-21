@@ -705,6 +705,22 @@ void Overlay::buildSettingsWindow() {
                     device_->maxFps() > 0.0 ? std::format("{:.0f} fps", device_->maxFps()).c_str() : "none");
     }
 
+    // ---- the last frame's phases and camera (d3d9/scene.h, docs/research/frame-phases.md) ----
+    if (ImGui::CollapsingHeader("Frame structure")) {
+        const auto& ph = device_->phases();
+        const std::string seq = d3d9::scene::PhaseTracker::summary(ph.lastFrame());
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextUnformatted(seq.empty() ? "(no phase markers)" : seq.c_str());
+        ImGui::PopTextWrapPos();
+        const auto& c = device_->lastCamera();
+        if (c.valid) {
+            ImGui::Text("camera (%.1f, %.1f, %.1f), near %.1f, far %.0f", c.position[0], c.position[1], c.position[2], c.nearZ,
+                        c.engineFar);
+        } else {
+            ImGui::TextDisabled("no main view in the last frame");
+        }
+    }
+
     ImGui::Separator();
     ImGui::TextDisabled("%s  |  %s: close  |  %s: A/B", reg.dirty() ? "saving..." : "saved in bin\\rvk\\settings.toml",
                         keyLabel(r.toggleKey).c_str(), keyLabel(r.abKey).c_str());

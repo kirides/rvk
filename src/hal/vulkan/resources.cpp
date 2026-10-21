@@ -78,6 +78,16 @@ bEResult HalTexture::SetTexture(unsigned long a0) {
 }
 
 bEResult HalTexture::CopyCurrentRTToImage(eCGfxShared::eETexFilter a0, bCRect* a1, bCRect* a2) {
+    // eCFrustumDatabase::Execute copies the main view's solid pass into the refraction map (smpRefract) before the
+    // refracted list (engine-gfx.md 4.2, frame-phases.md 4)
+    auto& d = dev_.dev();
+    const auto phase = d.phases().current();
+    if (logThisFrame()) spdlog::info("hal> CopyCurrentRTToImage -> {}x{} {} in {}/{}", tex_->desc().width, tex_->desc().height,
+                                     vk::d3dFormatName(tex_->desc().format), d3d9::scene::name(phase.view),
+                                     d3d9::scene::name(phase.pass));
+    if (phase.view == d3d9::scene::View::Main && phase.pass == d3d9::scene::Pass::Solid) {
+        d.tagImage(tex_.get(), d3d9::scene::ImageRole::Refraction);
+    }
     dev_.dev().stretchRect(dev_.dev().renderTarget(0), reinterpret_cast<const std::int32_t*>(a1), tex_->surface(0, 0),
                            reinterpret_cast<const std::int32_t*>(a2), linearFilter(a0));
     return bEResult_Ok;

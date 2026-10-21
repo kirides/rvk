@@ -568,6 +568,14 @@ bool Device::prepareDraw(std::uint32_t primitiveType) {
     ++stats_.draws;
     ++stats_.totalDraws;
     ++passDraws_;
+    phases_.countDraw();
+    // the camera cross-check: the main view's camera constants as the first solid material draw sees them
+    if (camera_.valid && !camera_.constantsCaptured && phases_.view() == scene::View::Main && phases_.pass() == scene::Pass::Solid) {
+        camera_.constantsCaptured = true;
+        for (std::size_t i = 0; i < camera_.vsConstants.size(); ++i) {
+            std::memcpy(camera_.vsConstants[i].data(), vsF_[i], sizeof(float) * 4);
+        }
+    }
     return true;
 }
 

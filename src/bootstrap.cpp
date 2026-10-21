@@ -21,6 +21,7 @@
 #include "core/log.h"
 #include "core/paths.h"
 #include "core/settings.h"
+#include "engine/scene_hooks.h"
 #include "engine/symbols.h"
 #include "engine/vfs.h"
 #include "hal/trace.h"
@@ -269,6 +270,7 @@ void apiSelfTestPoll() {
 }
 
 void detourAppDraw(void* self, HWND hwnd) {
+    engine::scene::appDrawEnter();  // the Gui phase (Vulkan mode; a no-op otherwise)
     const std::uint32_t n = ++g_drawCalls;
     apiSelfTestPoll();
     const bool snap = std::ranges::find(g_config.snapshotFrames, n) != g_config.snapshotFrames.end();
@@ -282,6 +284,7 @@ void detourAppDraw(void* self, HWND hwnd) {
     if (snap) {
         spdlog::info("debug: engine snapshot name '{}'", engine::lastEngineSnapshotName());
     }
+    engine::scene::appDrawLeave();
 }
 
 // Player settings (core/settings.h, docs/research/overlay.md 2): the renderer's settings, the player's settings.toml, then the
@@ -351,10 +354,14 @@ void onProcessAttach(void* module) {
                                    reinterpret_cast<EnumAdapterDescFn>(s.gfxAdminEnumAdapterDesc), &detourEnumAdapterDesc)) {
         spdlog::warn("eCGfxAdmin::sEnumAdapterDesc not hooked: the early adapter query uses D3D9 + DxDiag");
     }
-    // debug: the engine's snapshot + tool-API self-test at fixed Draw calls (any mode)
-    if (ok && !g_config.snapshotFrames.empty() &&
+    // frame phase markers (docs/research/frame-phases.md): Vulkan mode only, passthrough / trace stay untouched
+    if (ok && g_config.mode == Mode::Vulkan) {
+        engine::scene::install();
+    }
+    // eCApplication::Draw: the Gui phase (Vulkan mode) and the debug snapshot + tool-API self-test at fixed Draw calls (any mode)
+    if (ok && (g_config.mode == Mode::Vulkan || !g_config.snapshotFrames.empty()) &&
         !g_appDraw.install("eCApplication::Draw", reinterpret_cast<AppDrawFn>(s.appDraw), &detourAppDraw)) {
-        spdlog::warn("eCApplication::Draw not hooked: [debug] snapshot_frames ignored");
+        spdlog::warn("eCApplication::Draw not hooked: no Gui phase, [debug] snapshot_frames ignored");
     }
     if (ok) {
         ok = hooks::enableAll();

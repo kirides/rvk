@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "d3d9/defs.h"
+#include "d3d9/scene.h"
 #include "shader/glsl.h"
 #include "vk/bindless.h"
 #include "vk/context.h"
@@ -98,6 +99,8 @@ public:
     std::uint32_t bindlessSlot() const { return slot_; }
     vk::TextureKind kind() const { return kind_; }
     bool prepareForSampling(VkCommandBuffer cmd);  // uploads pending data, transitions to shader-read; false if nothing to sample
+    // what the engine uses the image for (Device::tagImage; render thread)
+    scene::ImageRole role() const { return role_; }
 
     // bytes held in CPU copies of all textures (diagnostics)
     static std::uint64_t cpuBytesTotal();
@@ -134,6 +137,7 @@ private:
     bool restoreWarned_ = false;
     std::uint64_t lastUseFrame_ = 0;
     std::vector<std::unique_ptr<Surface>> surfaces_;
+    scene::ImageRole role_ = scene::ImageRole::None;
 };
 
 // A render target / depth stencil: one level/face of a texture, or a standalone depth buffer (CreateDepthBuffer).
@@ -420,6 +424,21 @@ public:
         stats_.pacerMs = 0.0;
     }
 
+    // ---- frame semantics (d3d9/scene.h, docs/research/frame-phases.md; render thread) ----
+    // the frame / view / pass state, driven by the engine phase hooks (src/engine/scene_hooks.*)
+    scene::PhaseTracker& phases() { return phases_; }
+    const scene::PhaseTracker& phases() const { return phases_; }
+    // the main camera of the frame being recorded (valid once its main view began) and of the last presented frame
+    const scene::CameraBlock& camera() const { return camera_; }
+    const scene::CameraBlock& lastCamera() const { return lastCamera_; }
+    // the first main view of a frame sets the camera; later ones are ignored (returns whether it was taken)
+    bool setMainCamera(const scene::CameraInput& in);
+    // give an engine image a role (logged when a texture gets a new role); the latest texture per role is queryable
+    void tagImage(Texture* texture, scene::ImageRole role);
+    Texture* imageWithRole(scene::ImageRole role) const { return roles_[static_cast<std::size_t>(role)]; }
+    void forgetImage(Texture* texture);  // a tagged texture dies
+    double secondsSinceCreate() const;
+
     // internals used by resources
     vk::Context& ctx() { return ctx_; }
     vk::Frames& frames() { return frames_; }
@@ -632,6 +651,14 @@ private:
     std::uint32_t passIndex_ = 0;   // render passes of the current submission (GPU detail labels)
     std::uint32_t passDraws_ = 0;   // draws in the open render pass
     std::uint64_t gpuDetailFrame_[vk::Frames::kInFlight]{};  // frame number whose details a slot records (0 = none)
+
+    // frame semantics
+    scene::PhaseTracker phases_;
+    scene::CameraBlock camera_;
+    scene::CameraBlock lastCamera_;
+    std::array<Texture*, static_cast<std::size_t>(scene::ImageRole::Count)> roles_{};
+    std::uint32_t roleLogs_ = 0;
+    std::chrono::steady_clock::time_point createdAt_ = std::chrono::steady_clock::now();
 
     // overlay
     PresentOverlay* overlay_ = nullptr;

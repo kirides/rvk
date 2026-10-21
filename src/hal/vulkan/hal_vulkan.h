@@ -430,6 +430,7 @@ private:
                                                   eCGfxShared::eSGfxLayersDesc& out);
     void applyAlphaTest(bool enable, const eCGfxShared::eSGfxAlphaTestData& d);
     void logFrameStats();
+    void logFrameStructure();
     void logPerf(d3d9::PerfStats p);
     // player settings (core/settings.h): applied at create and on change (render thread); saved 1 s after the last change
     void applyVsync();
@@ -458,6 +459,8 @@ private:
     std::uint64_t lastStatsFrame_ = 0;
     std::chrono::steady_clock::time_point lastStatsTime_ = std::chrono::steady_clock::now();
     std::uint64_t halDraws_ = 0;
+    std::uint32_t cameraFrames_ = 0;       // frames with a main-view camera since the last camera report
+    std::uint32_t cameraMovedFrames_ = 0;  // of those, frames whose camera position differs from the previous frame's
     void updateLogFrame();
     Options options_;
     bool engineVsync_ = true;  // the game's own vsync option (start parameters / ToggleNewMode)

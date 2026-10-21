@@ -58,6 +58,9 @@ Texture::Texture(Device& device, const TextureDesc& desc) : dev_(device), desc_(
 }
 
 Texture::~Texture() {
+    if (role_ != scene::ImageRole::None) {
+        dev_.forgetImage(this);
+    }
     surfaces_.clear();
     for (Level& l : cpu_) {
         freeLevel(l);
