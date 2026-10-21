@@ -58,6 +58,59 @@
     X(renderContextMeshVftable, L"Engine.dll", "??_7eCRenderContextMesh@@6B@", false)                                           \
     X(renderContextMeshRefracted, L"Engine.dll",                                                                                \
       "?RenderRefracted@eCRenderContextMesh@@UEAAXAEBVeCRenderOp2@@AEAVeCFrustumDatabase@@@Z", false)                           \
+    /* ---- draw tags (engine/scene_hooks.*, docs/research/draw-tags.md; all optional) ---- */                                \
+    /* render-context vtables: slot 0 Render(op, db), 1 RenderAlpha, 2 RenderRefracted, 3 RenderZPass; a slot is patched    \
+       only when it holds the class's own exported function (the base eCRenderContext slots are one empty function) */      \
+    X(rcMeshRender, L"Engine.dll", "?Render@eCRenderContextMesh@@UEAAXAEBVeCRenderOp2@@AEAVeCFrustumDatabase@@@Z", false)      \
+    X(rcMeshRenderAlpha, L"Engine.dll",                                                                                         \
+      "?RenderAlpha@eCRenderContextMesh@@UEAAXAEBVeCRenderOp2@@AEAVeCFrustumDatabase@@@Z", false)                               \
+    X(rcMeshRenderZPass, L"Engine.dll",                                                                                         \
+      "?RenderZPass@eCRenderContextMesh@@UEAAXAEBVeCRenderOp2@@AEAVeCFrustumDatabase@@@Z", false)                               \
+    X(rcAnimVftable, L"Engine.dll", "??_7eCRenderContextAnimation2@@6B@", false)                                                \
+    X(rcAnimRender, L"Engine.dll",                                                                                              \
+      "?Render@eCRenderContextAnimation2@@UEAAXAEBVeCRenderOp2@@AEAVeCFrustumDatabase@@@Z", false)                              \
+    X(rcAnimRenderAlpha, L"Engine.dll",                                                                                         \
+      "?RenderAlpha@eCRenderContextAnimation2@@UEAAXAEBVeCRenderOp2@@AEAVeCFrustumDatabase@@@Z", false)                         \
+    X(rcAnimRenderZPass, L"Engine.dll",                                                                                         \
+      "?RenderZPass@eCRenderContextAnimation2@@UEAAXAEBVeCRenderOp2@@AEAVeCFrustumDatabase@@@Z", false)                         \
+    X(rcTreeVftable, L"Engine.dll", "??_7eCRenderContextSpeedTree@@6B@", false)                                                 \
+    X(rcTreeRender, L"Engine.dll",                                                                                              \
+      "?Render@eCRenderContextSpeedTree@@UEAAXAEBVeCRenderOp2@@AEAVeCFrustumDatabase@@@Z", false)                               \
+    X(rcTreeRenderZPass, L"Engine.dll",                                                                                         \
+      "?RenderZPass@eCRenderContextSpeedTree@@UEAAXAEBVeCRenderOp2@@AEAVeCFrustumDatabase@@@Z", false)                          \
+    X(rcTreeBBVftable, L"Engine.dll", "??_7eCRenderContextSpeedTreeBB@@6B@", false)                                             \
+    X(rcTreeBBRender, L"Engine.dll",                                                                                            \
+      "?Render@eCRenderContextSpeedTreeBB@@UEAAXAEBVeCRenderOp2@@AEAVeCFrustumDatabase@@@Z", false)                             \
+    X(rcTreeBBRenderZPass, L"Engine.dll",                                                                                       \
+      "?RenderZPass@eCRenderContextSpeedTreeBB@@UEAAXAEBVeCRenderOp2@@AEAVeCFrustumDatabase@@@Z", false)                        \
+    X(rcVegVftable, L"Engine.dll", "??_7eCRenderContextVegetation@@6B@", false)                                                 \
+    X(rcVegRender, L"Engine.dll",                                                                                               \
+      "?Render@eCRenderContextVegetation@@UEAAXAEBVeCRenderOp2@@AEAVeCFrustumDatabase@@@Z", false)                              \
+    X(rcVegRenderZPass, L"Engine.dll",                                                                                          \
+      "?RenderZPass@eCRenderContextVegetation@@UEAAXAEBVeCRenderOp2@@AEAVeCFrustumDatabase@@@Z", false)                         \
+    X(rcDebugVftable, L"Engine.dll", "??_7eCRenderContextDebug@@6B@", false)                                                    \
+    X(rcDebugRender, L"Engine.dll",                                                                                             \
+      "?Render@eCRenderContextDebug@@UEAAXAEBVeCRenderOp2@@AEAVeCFrustumDatabase@@@Z", false)                                   \
+    /* contexts of classes without an exported vtable (eCPrecipitationRenderContext, the sky dome's): their vtable is taken    \
+       from the first context the property set's CreateRenderContext returns; eCRenderContext::Render (0x7faa0) = the empty   \
+       base slot (one COMDAT function for all four slots) */                                                                   \
+    X(rcBaseRender, L"Engine.dll", "?Render@eCRenderContext@@UEAAXAEBVeCRenderOp2@@AEAVeCFrustumDatabase@@@Z", false)          \
+    X(precipCreateContext, L"Engine.dll", "?CreateRenderContext@eCPrecipitation_PS@@UEAAPEAVeCRenderContext@@XZ", false)       \
+    X(skydomeCreateContext, L"Engine.dll", "?CreateRenderContext@eCSkydome_PS@@UEAAPEAVeCRenderContext@@XZ", false)            \
+    /* detoured render functions (normal prologues, unique RVAs, capstone-checked): bool eCSubMesh::Render(eCMeshResource2    \
+       const*, ulong, int, eEShaderMaterialLightmapCombi, eSShaderMaterialIllumination*, float const*, bCMatrix const*, bool, \
+       uchar) (0x5c7eb0) */                                                                                                    \
+    X(subMeshRender, L"Engine.dll",                                                                                             \
+      "?Render@eCSubMesh@@QEAA_NPEBVeCMeshResource2@@KHW4eEShaderMaterialLightmapCombi@@PEAUeSShaderMaterialIllumination@@"     \
+      "PEBMPEBVbCMatrix@@_NE@Z", false)                                                                                        \
+    /* void eCSkydome_PS::Render() (0x6e4730), void eCParticle_PS::Render(float) (0x5e0080), void eCStrip_PS::Render(float)   \
+       (0x6feae0), bool eCDecalAdmin::RenderDecals(eCFrustumDatabase*) (0x4fc220), bool eCBillboardAdmin::RenderBillboards() \
+       (0x4f0530) */                                                                                                           \
+    X(skydomeRender, L"Engine.dll", "?Render@eCSkydome_PS@@QEAAXXZ", false)                                                     \
+    X(particleRender, L"Engine.dll", "?Render@eCParticle_PS@@QEAAXM@Z", false)                                                  \
+    X(stripRender, L"Engine.dll", "?Render@eCStrip_PS@@QEAAXM@Z", false)                                                        \
+    X(decalsRender, L"Engine.dll", "?RenderDecals@eCDecalAdmin@@QEAA_NPEAVeCFrustumDatabase@@@Z", false)                        \
+    X(billboardsRender, L"Engine.dll", "?RenderBillboards@eCBillboardAdmin@@QEAA_NXZ", false)                                   \
     /* eCGfxCamera* eCGfxCamera::ms_pMasterCamera (0xc62590): eCGfxCamera::Execute renders through it when set */              \
     X(gfxCameraMaster, L"Engine.dll", "?ms_pMasterCamera@eCGfxCamera@@1PEAV1@EA", false)                                        \
     /* SharedBase.dll bCString(char const*), ~bCString(), char const* GetText() const */                                       \

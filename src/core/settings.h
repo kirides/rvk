@@ -203,6 +203,8 @@ struct RendererSettings {
     Setting* abKey = nullptr;        // overlay.ab_key
     Setting* fpsCounter = nullptr;   // overlay.fps_counter: small fps readout while the overlay is closed
     Setting* abBadge = nullptr;      // overlay.ab_badge: "B" tag while side B is active and the overlay is closed
+    Setting* tintDraws = nullptr;    // debug.tint_draws: "off", "kind", "pass" (d3d9/draws.h TintMode)
+    Setting* drawRecords = nullptr;  // debug.draw_records: per-frame draw records (hidden; the histogram is always on)
 };
 // hotkey names of overlay.toggle_key / overlay.ab_key ("none" disables)
 const std::vector<std::string>& hotkeyNames();

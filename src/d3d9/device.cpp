@@ -20,6 +20,8 @@ namespace {
 
 // bump when the translator's output changes: invalidates the SPIR-V disk cache
 constexpr std::uint32_t kTranslatorVersion = 1;
+// bump when the tint epilogue (GlslOptions::tintEpilogue) changes: the tint variants' cache files
+constexpr std::uint32_t kTintVersion = 2;
 
 std::uint64_t fnv1a(const void* data, std::size_t size, std::uint64_t h = 0xcbf29ce484222325ull) {
     const auto* p = static_cast<const unsigned char*>(data);
@@ -292,6 +294,10 @@ void Device::destroy() {
                 vkDestroyShaderModule(ctx_.device(), s->module, nullptr);
                 s->module = VK_NULL_HANDLE;
             }
+            if (s->tintModule != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(ctx_.device(), s->tintModule, nullptr);
+                s->tintModule = VK_NULL_HANDLE;
+            }
         }
         shaders_.clear();
     }
@@ -525,6 +531,8 @@ void Device::present() {
     endRendering();
     ++stats_.frames;
     phases_.endFrame();
+    draws_.endFrame();
+    lastRecord_ = nullptr;
     lastCamera_ = camera_;
     camera_.advance();
     // per-frame counters span every submission of the frame (read-backs flush mid-frame)
@@ -735,6 +743,7 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
     s->reflection = glsl.reflection;
     s->bytecode.assign(tokens.begin(), tokens.end());
     s->hash = hash;
+    s->semantics = shaderSemantics(tokens, s->reflection);
     if (s->module == VK_NULL_HANDLE) {
         return nullptr;
     }
@@ -751,6 +760,53 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
     // with pipeline libraries the shader's compilation happens here (often a loader thread), not at its first draw
     pipelines_.prepareShader(s->module, s->stage == shader::Stage::Vertex ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT);
     return s;
+}
+
+// The tint debug view's variant of a pixel shader (GlslOptions::tintEpilogue): translated and compiled on its first tinted
+// draw (render thread; a short hitch when the view is switched on), cached on the shader and in the SPIR-V disk cache. The
+// normal module is never touched, so with the view off every draw renders exactly as before.
+VkShaderModule Device::tintModule(Shader& ps) {
+    if (ps.tintModule != VK_NULL_HANDLE || ps.tintFailed) {
+        return ps.tintModule;
+    }
+    ps.tintFailed = true;  // until it succeeds: one attempt per shader
+    const auto dec = shader::decode(ps.bytecode);
+    if (!dec.ok()) {
+        return VK_NULL_HANDLE;
+    }
+    const auto glsl = shader::toGlsl(dec.program, shader::GlslOptions{.tintEpilogue = true});
+    if (!glsl.ok()) {
+        spdlog::warn("d3d9: tint variant of shader {:016x}: {}", ps.hash, glsl.error);
+        return VK_NULL_HANDLE;
+    }
+    std::vector<std::uint32_t> spirv;
+    const auto cacheFile = options_.cacheDir.empty() ? std::filesystem::path()
+                                                     : options_.cacheDir / "spirv" / std::format("{:016x}_tint{}.spv", ps.hash, kTintVersion);
+    if (!cacheFile.empty()) {
+        std::ifstream in(cacheFile, std::ios::binary | std::ios::ate);
+        if (in) {
+            spirv.resize(static_cast<std::size_t>(in.tellg()) / 4);
+            in.seekg(0);
+            in.read(reinterpret_cast<char*>(spirv.data()), static_cast<std::streamsize>(spirv.size() * 4));
+        }
+    }
+    if (spirv.empty()) {
+        auto compiled = shader::compileGlsl(dec.program.version.stage, glsl.glsl);
+        if (!compiled.ok()) {
+            spdlog::error("d3d9: tint variant of shader {:016x} does not compile:\n{}", ps.hash, compiled.log);
+            return VK_NULL_HANDLE;
+        }
+        spirv = std::move(compiled.words);
+        if (!cacheFile.empty()) {
+            std::error_code ec;
+            std::filesystem::create_directories(cacheFile.parent_path(), ec);
+            std::ofstream out(cacheFile, std::ios::binary);
+            out.write(reinterpret_cast<const char*>(spirv.data()), static_cast<std::streamsize>(spirv.size() * 4));
+        }
+    }
+    ps.tintModule = vk::createShaderModule(ctx_, spirv);
+    ps.tintFailed = ps.tintModule == VK_NULL_HANDLE;
+    return ps.tintModule;
 }
 
 void Device::release(std::unique_ptr<Texture> texture) {

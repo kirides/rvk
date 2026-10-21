@@ -126,6 +126,23 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
             spdlog::info("hal: settings: frame rate limit {}", s.value() > 0.0 ? std::format("{} fps", s.value()) : std::string("none"));
         }, this);
     }
+    // debug views and draw records (d3d9/draws.h, docs/research/draw-tags.md)
+    if (rs.tintDraws != nullptr) {
+        const auto applyTint = [this](const settings::Setting& s) {
+            const std::string_view v = s.asEnum();
+            dev_.setTintMode(v == "kind" ? draws::TintMode::Kind : v == "pass" ? draws::TintMode::Pass : draws::TintMode::Off);
+            spdlog::info("hal: settings: tint draws {}", v);
+        };
+        if (!rs.tintDraws->isDefault()) applyTint(*rs.tintDraws);
+        reg.onChange(*rs.tintDraws, applyTint, this);
+    }
+    if (rs.drawRecords != nullptr) {
+        dev_.setDrawRecords(rs.drawRecords->asBool());
+        reg.onChange(*rs.drawRecords, [this](const settings::Setting& s) {
+            dev_.setDrawRecords(s.asBool());
+            spdlog::info("hal: settings: draw records {}", s.asBool() ? "on" : "off");
+        }, this);
+    }
     if (options.overlay && dev_.swapchain().valid()) {
         overlay_ = std::make_unique<overlay::Overlay>();
         overlay::Options oo;
@@ -709,6 +726,20 @@ void HalDevice::logFrameStructure() {
     spdlog::info("hal: frame {} structure ({} draws{}): {}", dev_.stats().frames, ph.lastDraws(),
                  ph.unbalanced() != 0 ? std::format(", {} unbalanced markers", ph.unbalanced()) : std::string(),
                  d3d9::scene::PhaseTracker::summary(ph.lastFrame()));
+    const auto& dr = dev_.drawRecords();
+    spdlog::info("hal: frame {} draw kinds ({} records{}{}): {}", dev_.stats().frames, dr.last().size(),
+                 dr.lastDropped() != 0 ? std::format(", {} dropped", dr.lastDropped()) : std::string(),
+                 dr.lastHistogram().tinted != 0 ? std::format(", {} tinted", dr.lastHistogram().tinted) : std::string(),
+                 dr.lastHistogram().summary());
+    // untagged draws of camera views: a draw path without a hook (first three of the frame)
+    int unknown = 0;
+    for (const auto& r : dr.last()) {
+        if (r.kind != draws::Kind::Unknown || unknown++ >= 3) continue;
+        spdlog::info("hal:   untagged draw #{} in {}/{}: vs {:016x} ({}) ps {:016x} ({}), {} primitives, type {}, flags 0x{:x}, "
+                     "vertex buffer {}#{}", r.index, d3d9::scene::name(r.view), d3d9::scene::name(r.pass), r.vsHash,
+                     flagNames(r.vsFlags), r.psHash, flagNames(r.psFlags), r.primitives, r.primitiveType, r.flags,
+                     r.vertexBuffer.id, r.vertexBuffer.generation);
+    }
     const auto& c = dev_.lastCamera();
     if (!c.valid) {
         spdlog::info("hal: frame {}: no main view", dev_.stats().frames);
@@ -810,6 +841,8 @@ void HalDevice::logPerf(d3d9::PerfStats p) {
                  p.frames, pct(0.5), pct(0.95), iv.empty() ? 0.0 : static_cast<double>(iv.back()), p.cpuFrameMs / n, p.drawMs / n,
                  p.readbackMs / n, static_cast<double>(p.readbacks) / n, other / n, p.presentMs / n, p.submitMs / n, p.slotWaitMs / n,
                  p.gpuSubmits > 0 ? p.gpuMs / n : 0.0, p.gpuSubmits > 0 ? p.gpuUploadMs / n : 0.0, static_cast<double>(p.gpuSubmits) / n);
+    spdlog::info("perf: draw tags + records {:.3f} ms per frame ({:.0f} ns per draw)", p.drawRecordMs / n,
+                 p.draws > 0 ? p.drawRecordMs * 1e6 / static_cast<double>(p.draws) : 0.0);
     spdlog::info("perf: per frame {:.0f} draws, {:.1f} render passes, {:.0f} pipeline binds; ring {:.0f} KiB, texture uploads {:.0f} KiB, "
                  "buffer uploads {:.0f} KiB; in the interval: {} pipelines built ({:.1f} ms), {} shaders translated ({} compiled, {:.1f} ms)",
                  static_cast<double>(p.draws) / n, static_cast<double>(p.renderPasses) / n, static_cast<double>(p.pipelineBinds) / n,

@@ -6,7 +6,9 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <string>
+#include <utility>
 
 #include <spdlog/spdlog.h>
 
@@ -19,6 +21,7 @@
 namespace rvk::engine::scene {
 namespace {
 
+namespace draws = d3d9::draws;
 using d3d9::scene::ImageRole;
 using d3d9::scene::Pass;
 using d3d9::scene::View;
@@ -252,41 +255,257 @@ void detourRenderEntity(void* admin, void* db, void* entity) {
     --g_inRenderEntity;
 }
 
-// eCRenderContextMesh::RenderRefracted(eCRenderOp2 const&, eCFrustumDatabase&): vtable slot 2
+// ---- draw tags (docs/research/draw-tags.md) ---------------------------------------------------------------------------------
+
+using draws::Source;
+
+// the draw tag around an original call: the previous tag (an enclosing scope) comes back afterwards
+struct TagScope {
+    d3d9::Device* d;
+    draws::Tag saved;
+    // a new source (render context / property set / admin). entityAt: offset of the entity pointer in `object` (render
+    // contexts and property sets keep it at +0x10), 0 = none. The engine passes live objects and reads the same fields itself.
+    TagScope(Source source, const void* object, const void* op, std::size_t entityAt) : d(device()) {
+        if (d == nullptr) return;
+        draws::Tag& t = d->drawTag();
+        saved = t;
+        t = {};
+        t.source = source;
+        t.context = object;
+        if (op != nullptr) t.opDesc = *reinterpret_cast<const std::uint32_t*>(static_cast<const std::uint8_t*>(op) + 8);
+        if (entityAt != 0 && object != nullptr) {
+            t.entity = *reinterpret_cast<const void* const*>(static_cast<const std::uint8_t*>(object) + entityAt);
+        }
+    }
+    // a sub-mesh inside the current source (keeps source, context, entity); sub-mesh +0x38 = its eCMaterialResource2
+    TagScope(const void* subMesh, const void* meshResource) : d(device()) {
+        if (d == nullptr) return;
+        draws::Tag& t = d->drawTag();
+        saved = t;
+        t.subMesh = subMesh;
+        t.meshResource = meshResource;
+        t.material = subMesh != nullptr ? *reinterpret_cast<const void* const*>(static_cast<const std::uint8_t*>(subMesh) + 0x38)
+                                        : nullptr;
+    }
+    ~TagScope() {
+        if (d != nullptr) d->drawTag() = saved;
+    }
+    TagScope(const TagScope&) = delete;
+    TagScope& operator=(const TagScope&) = delete;
+};
+
+// Render-context vtable slots (eCRenderContext: 0 Render(op, db), 1 RenderAlpha, 2 RenderRefracted, 3 RenderZPass). The
+// frustum database's loops call them indirectly; several are 16-byte tail-jump thunks (never detoured), so the slots of the
+// classes' own vtables are patched (the "own vtables" rule of CLAUDE.md concerns the eCDX9* classes only). A slot is patched
+// only when it holds the class's exported function.
 using RenderOpFn = void (*)(void* context, const void* op, void* db);
-RenderOpFn g_refractedOriginal = nullptr;
-bool g_refractedPatched = false;
-void refractedSlot(void* context, const void* op, void* db) {
-    PassScope scope(Pass::Refracted, "RenderRefracted");
-    g_refractedOriginal(context, op, db);
+
+struct ContextSlot {
+    void* Symbols::*vtable;
+    int slot;
+    void* Symbols::*function;
+    Source source;
+    Pass pass;  // Pass::None = keep the current pass; Refracted: the Refracted pass around the call (its phase marker)
+    const char* name;
+};
+
+constexpr ContextSlot kContextSlots[] = {
+    {&Symbols::renderContextMeshVftable, 0, &Symbols::rcMeshRender, Source::Mesh, Pass::None, "eCRenderContextMesh::Render"},
+    {&Symbols::renderContextMeshVftable, 1, &Symbols::rcMeshRenderAlpha, Source::Mesh, Pass::None,
+     "eCRenderContextMesh::RenderAlpha"},
+    {&Symbols::renderContextMeshVftable, 2, &Symbols::renderContextMeshRefracted, Source::Mesh, Pass::Refracted,
+     "eCRenderContextMesh::RenderRefracted"},
+    {&Symbols::renderContextMeshVftable, 3, &Symbols::rcMeshRenderZPass, Source::Mesh, Pass::None,
+     "eCRenderContextMesh::RenderZPass"},
+    {&Symbols::rcAnimVftable, 0, &Symbols::rcAnimRender, Source::Skinned, Pass::None, "eCRenderContextAnimation2::Render"},
+    {&Symbols::rcAnimVftable, 1, &Symbols::rcAnimRenderAlpha, Source::Skinned, Pass::None,
+     "eCRenderContextAnimation2::RenderAlpha"},
+    {&Symbols::rcAnimVftable, 3, &Symbols::rcAnimRenderZPass, Source::Skinned, Pass::None,
+     "eCRenderContextAnimation2::RenderZPass"},
+    {&Symbols::rcTreeVftable, 0, &Symbols::rcTreeRender, Source::SpeedTree, Pass::None, "eCRenderContextSpeedTree::Render"},
+    {&Symbols::rcTreeVftable, 3, &Symbols::rcTreeRenderZPass, Source::SpeedTree, Pass::None,
+     "eCRenderContextSpeedTree::RenderZPass"},
+    {&Symbols::rcTreeBBVftable, 0, &Symbols::rcTreeBBRender, Source::SpeedTreeBillboard, Pass::None,
+     "eCRenderContextSpeedTreeBB::Render"},
+    {&Symbols::rcTreeBBVftable, 3, &Symbols::rcTreeBBRenderZPass, Source::SpeedTreeBillboard, Pass::None,
+     "eCRenderContextSpeedTreeBB::RenderZPass"},
+    {&Symbols::rcVegVftable, 0, &Symbols::rcVegRender, Source::Vegetation, Pass::None, "eCRenderContextVegetation::Render"},
+    {&Symbols::rcVegVftable, 3, &Symbols::rcVegRenderZPass, Source::Vegetation, Pass::None,
+     "eCRenderContextVegetation::RenderZPass"},
+    {&Symbols::rcDebugVftable, 0, &Symbols::rcDebugRender, Source::Debug, Pass::None, "eCRenderContextDebug::Render"},
+};
+constexpr std::size_t kSlotCount = std::size(kContextSlots);
+std::array<RenderOpFn, kSlotCount> g_slotOriginal{};
+bool g_slotsPatched = false;
+
+template <std::size_t I>
+void contextSlot(void* context, const void* op, void* db) {
+    constexpr const ContextSlot& e = kContextSlots[I];
+    TagScope tag(e.source, context, op, 0x10);
+    if constexpr (e.pass != Pass::None) {
+        PassScope pass(e.pass, e.name);
+        g_slotOriginal[I](context, op, db);
+    } else {
+        g_slotOriginal[I](context, op, db);
+    }
 }
 
-void patchRefractedSlot() {
-    if (g_refractedPatched) return;
-    g_refractedPatched = true;  // one attempt
+template <std::size_t... I>
+constexpr std::array<RenderOpFn, sizeof...(I)> makeSlotThunks(std::index_sequence<I...>) {
+    return {&contextSlot<I>...};
+}
+constexpr std::array<RenderOpFn, kSlotCount> kSlotThunks = makeSlotThunks(std::make_index_sequence<kSlotCount>{});
+
+void patchContextSlots() {
+    if (g_slotsPatched) return;
+    g_slotsPatched = true;  // one attempt (the vtables are process-wide)
     const auto& s = sym();
-    if (s.renderContextMeshVftable == nullptr || s.renderContextMeshRefracted == nullptr) {
-        spdlog::warn("scene: eCRenderContextMesh vtable not found: no Refracted pass (water draws count as Alpha)");
-        return;
+    int patched = 0;
+    for (std::size_t i = 0; i < kSlotCount; ++i) {
+        const ContextSlot& e = kContextSlots[i];
+        void* vtable = s.*e.vtable;
+        void* expected = s.*e.function;
+        if (vtable == nullptr || expected == nullptr) {
+            spdlog::warn("scene: {} not found: its draws stay untagged", e.name);
+            continue;
+        }
+        void** slot = static_cast<void**>(vtable) + e.slot;
+        void* current = nullptr;
+        if (!safeRead(slot, &current, sizeof(current)) || current != expected) {
+            spdlog::warn("scene: vtable slot {} of {} is {} (expected {}): not patched", e.slot, e.name, current, expected);
+            continue;
+        }
+        DWORD old = 0;
+        if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) {
+            spdlog::warn("scene: VirtualProtect on the vtable of {} failed ({})", e.name, GetLastError());
+            continue;
+        }
+        g_slotOriginal[i] = reinterpret_cast<RenderOpFn>(current);
+        *slot = reinterpret_cast<void*>(kSlotThunks[i]);
+        DWORD ignored = 0;
+        VirtualProtect(slot, sizeof(void*), old, &ignored);
+        FlushInstructionCache(GetCurrentProcess(), slot, sizeof(void*));
+        ++patched;
     }
-    void** slot = static_cast<void**>(s.renderContextMeshVftable) + 2;
-    void* current = nullptr;
-    if (!safeRead(slot, &current, sizeof(current)) || current != s.renderContextMeshRefracted) {
-        spdlog::warn("scene: eCRenderContextMesh vtable slot 2 is {} (expected RenderRefracted {}): not patched", current,
-                     s.renderContextMeshRefracted);
-        return;
+    spdlog::info("scene: {} of {} render-context vtable slots patched (draw tags; eCRenderContextMesh::RenderRefracted marks the "
+                 "Refracted pass)",
+                 patched, kSlotCount);
+}
+
+// Contexts whose class exports no vtable (eCPrecipitationRenderContext, the sky dome's context): the property set's exported
+// CreateRenderContext is detoured, and the vtable of the first context it returns gets its non-empty slots 0..3 patched (once
+// per vtable; contexts are created while the world loads, on any thread).
+struct DynamicSlot {
+    std::atomic<RenderOpFn> original{nullptr};
+    Source source = Source::None;
+};
+constexpr std::size_t kDynamicSlots = 8;
+std::array<DynamicSlot, kDynamicSlots> g_dynamic;
+std::mutex g_dynamicMutex;
+std::size_t g_dynamicUsed = 0;
+std::array<const void*, 4> g_dynamicVtables{};  // patched vtables
+std::size_t g_dynamicVtableCount = 0;
+
+template <std::size_t I>
+void dynamicSlot(void* context, const void* op, void* db) {
+    const DynamicSlot& e = g_dynamic[I];
+    TagScope tag(e.source, context, op, 0x10);
+    e.original.load(std::memory_order_acquire)(context, op, db);
+}
+
+template <std::size_t... I>
+constexpr std::array<RenderOpFn, sizeof...(I)> makeDynamicThunks(std::index_sequence<I...>) {
+    return {&dynamicSlot<I>...};
+}
+constexpr std::array<RenderOpFn, kDynamicSlots> kDynamicThunks = makeDynamicThunks(std::make_index_sequence<kDynamicSlots>{});
+
+void patchContextVtable(const void* context, Source source, const char* what) {
+    void* vtable = nullptr;
+    if (context == nullptr || !safeRead(context, &vtable, sizeof(vtable)) || vtable == nullptr) return;
+    const std::lock_guard lock(g_dynamicMutex);
+    for (std::size_t i = 0; i < g_dynamicVtableCount; ++i) {
+        if (g_dynamicVtables[i] == vtable) return;
     }
-    DWORD old = 0;
-    if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) {
-        spdlog::warn("scene: VirtualProtect on the eCRenderContextMesh vtable failed ({})", GetLastError());
-        return;
+    if (g_dynamicVtableCount >= g_dynamicVtables.size()) return;
+    g_dynamicVtables[g_dynamicVtableCount++] = vtable;
+    void* const empty = sym().rcBaseRender;
+    int patched = 0;
+    for (int s = 0; s < 4; ++s) {
+        void** slot = static_cast<void**>(vtable) + s;
+        void* current = nullptr;
+        if (!safeRead(slot, &current, sizeof(current)) || current == nullptr || current == empty) continue;
+        if (g_dynamicUsed >= kDynamicSlots) break;
+        DWORD old = 0;
+        if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) continue;
+        const std::size_t i = g_dynamicUsed++;
+        g_dynamic[i].source = source;
+        g_dynamic[i].original.store(reinterpret_cast<RenderOpFn>(current), std::memory_order_release);
+        *slot = reinterpret_cast<void*>(kDynamicThunks[i]);
+        DWORD ignored = 0;
+        VirtualProtect(slot, sizeof(void*), old, &ignored);
+        FlushInstructionCache(GetCurrentProcess(), slot, sizeof(void*));
+        ++patched;
     }
-    g_refractedOriginal = reinterpret_cast<RenderOpFn>(current);
-    *slot = reinterpret_cast<void*>(&refractedSlot);
-    DWORD ignored = 0;
-    VirtualProtect(slot, sizeof(void*), old, &ignored);
-    FlushInstructionCache(GetCurrentProcess(), slot, sizeof(void*));
-    spdlog::info("scene: eCRenderContextMesh::RenderRefracted vtable slot patched (Refracted pass)");
+    spdlog::info("scene: {} context vtable {}: {} render slots patched (draw tags: {})", what, vtable, patched, draws::name(source));
+}
+
+using CreateContextFn = void* (*)(void* propertySet);
+Hook<CreateContextFn> g_precipCreateContext;
+void* detourPrecipCreateContext(void* ps) {
+    void* context = g_precipCreateContext.original(ps);
+    if (sym().rcBaseRender != nullptr) patchContextVtable(context, Source::Precipitation, "eCPrecipitationRenderContext");
+    return context;
+}
+
+Hook<CreateContextFn> g_skydomeCreateContext;
+void* detourSkydomeCreateContext(void* ps) {
+    void* context = g_skydomeCreateContext.original(ps);
+    if (sym().rcBaseRender != nullptr) patchContextVtable(context, Source::Sky, "eCSkydome_PS");
+    return context;
+}
+
+// bool eCSubMesh::Render(eCMeshResource2 const*, ulong node, int, eEShaderMaterialLightmapCombi, eSShaderMaterialIllumination*,
+// float const* alpha, bCMatrix const* world, bool, uchar)
+using SubMeshRenderFn = bool (*)(void* self, const void* mesh, std::uint32_t node, int lod, int lightmapCombi, void* illumination,
+                                 const float* alpha, const void* world, bool flag, std::uint8_t flags);
+Hook<SubMeshRenderFn> g_subMeshRender;
+bool detourSubMeshRender(void* self, const void* mesh, std::uint32_t node, int lod, int lightmapCombi, void* illumination,
+                         const float* alpha, const void* world, bool flag, std::uint8_t flags) {
+    TagScope tag(self, mesh);
+    return g_subMeshRender.original(self, mesh, node, lod, lightmapCombi, illumination, alpha, world, flag, flags);
+}
+
+Hook<VoidThisFn> g_skydomeRender;
+void detourSkydomeRender(void* self) {
+    TagScope tag(Source::Sky, self, nullptr, 0x10);
+    g_skydomeRender.original(self);
+}
+
+using RenderFloatFn = void (*)(void* self, float t);
+Hook<RenderFloatFn> g_particleRender;
+void detourParticleRender(void* self, float t) {
+    TagScope tag(Source::Particle, self, nullptr, 0x10);
+    g_particleRender.original(self, t);
+}
+
+Hook<RenderFloatFn> g_stripRender;
+void detourStripRender(void* self, float t) {
+    TagScope tag(Source::Strip, self, nullptr, 0x10);
+    g_stripRender.original(self, t);
+}
+
+using DecalsFn = bool (*)(void* admin, void* db);
+Hook<DecalsFn> g_decalsRender;
+bool detourDecalsRender(void* admin, void* db) {
+    TagScope tag(Source::Decal, admin, nullptr, 0);
+    return g_decalsRender.original(admin, db);
+}
+
+using BillboardsFn = bool (*)(void* admin);
+Hook<BillboardsFn> g_billboardsRender;
+bool detourBillboardsRender(void* admin) {
+    TagScope tag(Source::Billboard, admin, nullptr, 0);
+    return g_billboardsRender.original(admin);
 }
 
 }  // namespace
@@ -315,13 +534,22 @@ int install() {
     add(g_effectExecute, "eCImageEffect::Execute", s.imageEffectExecute, &detourEffectExecute);
     add(g_cameraRender, "eCCameraBase::Render", s.cameraBaseRender, &detourCameraRender);
     add(g_renderEntity, "eCRenderSystemAdmin::RenderEntity", s.renderSystemRenderEntity, &detourRenderEntity);
-    spdlog::info("scene: {} phase-marker detours created", n);
+    // draw tags
+    add(g_subMeshRender, "eCSubMesh::Render", s.subMeshRender, &detourSubMeshRender);
+    add(g_skydomeRender, "eCSkydome_PS::Render", s.skydomeRender, &detourSkydomeRender);
+    add(g_particleRender, "eCParticle_PS::Render", s.particleRender, &detourParticleRender);
+    add(g_stripRender, "eCStrip_PS::Render", s.stripRender, &detourStripRender);
+    add(g_decalsRender, "eCDecalAdmin::RenderDecals", s.decalsRender, &detourDecalsRender);
+    add(g_billboardsRender, "eCBillboardAdmin::RenderBillboards", s.billboardsRender, &detourBillboardsRender);
+    add(g_precipCreateContext, "eCPrecipitation_PS::CreateRenderContext", s.precipCreateContext, &detourPrecipCreateContext);
+    add(g_skydomeCreateContext, "eCSkydome_PS::CreateRenderContext", s.skydomeCreateContext, &detourSkydomeCreateContext);
+    spdlog::info("scene: {} phase-marker / draw-tag detours created", n);
     return n;
 }
 
 void attach(d3d9::Device* device) {
     g_device.store(device, std::memory_order_release);
-    if (device != nullptr && g_execute.installed()) patchRefractedSlot();
+    if (device != nullptr && g_execute.installed()) patchContextSlots();
 }
 
 void detach(d3d9::Device* device) {

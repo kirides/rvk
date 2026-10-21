@@ -78,8 +78,8 @@ const char* cmpFunc(Cmp c) {
 
 class Generator {
 public:
-    explicit Generator(const Program& p)
-        : p_(p), vs_(p.version.stage == Stage::Vertex), major_(p.version.major), consts_(vs_ ? "pc.vs" : "pc.ps") {}
+    Generator(const Program& p, const GlslOptions& o)
+        : p_(p), opt_(o), vs_(p.version.stage == Stage::Vertex), major_(p.version.major), consts_(vs_ ? "pc.vs" : "pc.ps") {}
 
     GlslResult run() {
         GlslResult res;
@@ -901,6 +901,16 @@ private:
         } else {
             if ((reflection_.colorOutputs & 1u) != 0) {
                 m += "    if (!rvk_alphaTest(oC0.a)) discard;\n";
+                if (opt_.tintEpilogue) {
+                    // debug view "tint draws" (abi.h DrawBlock pad[0], 0 = off): oC0 towards the tint, keeping its brightness
+                    // (a floor lifts dark surfaces; black stays black, so additive / premultiplied draws keep their shape)
+                    m += "    if (pc.draw.pad0 != 0u) {\n"
+                         "        vec4 rvk_tint = unpackUnorm4x8(pc.draw.pad0);\n"
+                         "        float rvk_l = dot(max(oC0.rgb, vec3(0.0)), vec3(0.299, 0.587, 0.114));\n"
+                         "        float rvk_k = 0.25 * clamp(rvk_l * 16.0, 0.0, 1.0) + 0.75 * clamp(rvk_l * 1.5, 0.0, 1.0);\n"
+                         "        oC0.rgb = mix(oC0.rgb, rvk_tint.rgb * rvk_k, rvk_tint.a);\n"
+                         "    }\n";
+                }
             }
             for (std::uint32_t i = 0; i < 4; ++i) {
                 if ((reflection_.colorOutputs & (1u << i)) != 0) {
@@ -916,6 +926,7 @@ private:
     }
 
     const Program& p_;
+    const GlslOptions opt_;
     const bool vs_;
     const int major_;
     const std::string consts_;
@@ -937,6 +948,6 @@ private:
 
 }  // namespace
 
-GlslResult toGlsl(const Program& program) { return Generator(program).run(); }
+GlslResult toGlsl(const Program& program, const GlslOptions& options) { return Generator(program, options).run(); }
 
 }  // namespace rvk::shader

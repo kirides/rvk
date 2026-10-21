@@ -37,6 +37,12 @@ struct GlslResult {
     bool ok() const { return error.empty(); }
 };
 
-GlslResult toGlsl(const Program& program);
+struct GlslOptions {
+    // pixel shaders: blend oC0 towards the debug tint of the DrawBlock (abi.h pad[0], 0 = off) after the alpha test. A
+    // separate variant: the default output is unchanged (the tint debug view, docs/research/draw-tags.md 5)
+    bool tintEpilogue = false;
+};
+
+GlslResult toGlsl(const Program& program, const GlslOptions& options = {});
 
 }  // namespace rvk::shader

@@ -457,7 +457,8 @@ void Device::uploadConstants() {
     }
 }
 
-bool Device::prepareDraw(std::uint32_t primitiveType) {
+bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
+    lastRecord_ = nullptr;
     if (!vs_ || !ps_ || vs_->module == VK_NULL_HANDLE || ps_->module == VK_NULL_HANDLE) {
         ++stats_.drawsSkipped;  // fixed-function draws are not emulated
         ++stats_.skippedNoShader;
@@ -471,9 +472,23 @@ bool Device::prepareDraw(std::uint32_t primitiveType) {
     }
     VkCommandBuffer cmd = frames_.cmd();
 
+    // what the draw is (the engine hooks' tag + the phase); the tint debug view swaps in the pixel shader's tint variant
+    const scene::Phase phase = phases_.current();
+    const draws::Kind kind = draws::classify(tag_.source, tag_.opDesc, phase.view, phase.pass);
+    std::uint32_t tint = 0;
+    VkShaderModule fs = ps_->module;
+    if (tint_ != draws::TintMode::Off && (ps_->reflection.colorOutputs & 1u) != 0) {
+        tint = draws::tintColor(tint_, kind, phase.view, phase.pass);
+        if (tint != 0) {
+            const VkShaderModule t = tintModule(*ps_);
+            fs = t != VK_NULL_HANDLE ? t : fs;
+            tint = t != VK_NULL_HANDLE ? tint : 0;
+        }
+    }
+
     vk::PipelineDesc pd{};
     pd.vs = vs_->module;
-    pd.fs = ps_->module;
+    pd.fs = fs;
     pd.topology = topology(primitiveType);
     // only the topology class matters (dynamic topology): normalise strips/fans to their list type for a smaller cache
     if (pd.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP || pd.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN) {
@@ -543,6 +558,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType) {
     block.posFix[1] = -1.0f / static_cast<float>(std::max(1u, viewport_.height));
     block.alphaFunc = rs_[RS_ALPHATESTENABLE] != 0 ? rs_[RS_ALPHAFUNC] : static_cast<std::uint32_t>(CMP_ALWAYS);
     block.alphaRef = static_cast<float>(rs_[RS_ALPHAREF] & 0xFF);
+    block.pad[0] = tint;
     vk::RingAlloc db = frames_.allocate(sizeof(block), 16);
     std::memcpy(db.ptr, &block, sizeof(block));
 
@@ -569,6 +585,56 @@ bool Device::prepareDraw(std::uint32_t primitiveType) {
     ++stats_.totalDraws;
     ++passDraws_;
     phases_.countDraw();
+    const auto recordStart = options_.perf ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    draws_.count(kind, phase.view);
+    if (tint != 0) draws_.countTinted();
+    if (draws::Record* r = draws_.add()) {
+        lastRecord_ = r;
+        r->index = stats_.draws - 1;
+        r->view = phase.view;
+        r->pass = phase.pass;
+        r->kind = kind;
+        r->source = tag_.source;
+        r->opDesc = tag_.opDesc;
+        r->context = tag_.context;
+        r->entity = tag_.entity;
+        r->subMesh = tag_.subMesh;
+        r->material = tag_.material;
+        r->meshResource = tag_.meshResource;
+        std::uint16_t f = 0;
+        f |= geom.indexed ? draws::Record::Indexed : 0;
+        f |= geom.userPointer ? draws::Record::UserPointer : 0;
+        f |= (streams_[0].freq & STREAMSOURCE_INDEXEDDATA) != 0 ? draws::Record::Instanced : 0;
+        f |= decl_ != nullptr && decl_->hasBlendIndices() ? draws::Record::DeclBlendIndices : 0;
+        f |= decl_ != nullptr && decl_->hasTexcoord4() ? draws::Record::DeclTexcoord4 : 0;
+        f |= tint != 0 ? draws::Record::Tinted : 0;
+        r->flags = f;
+        r->primitiveType = static_cast<std::uint8_t>(primitiveType);
+        if (!geom.userPointer && streams_[0].buffer != nullptr) {
+            r->vertexBuffer = streams_[0].buffer->ref();
+            r->vertexOffset = streams_[0].offset;
+            r->vertexStride = streams_[0].stride;
+        }
+        r->first = geom.first;
+        r->primitives = geom.primitives;
+        r->baseVertex = geom.baseVertex;
+        r->instances = instanceCount_;
+        r->vsHash = vs_->hash;
+        r->psHash = ps_->hash;
+        r->vsFlags = vs_->semantics.flags;
+        r->psFlags = ps_->semantics.flags;
+        r->vsConsts = vsConstAddr_;
+        r->psConsts = psConstAddr_;
+        r->drawBlock = db.address;
+        for (std::uint32_t slot = 0; slot < 16; ++slot) {
+            if (ps_->reflection.samplers[slot] != shader::TextureType::Unknown && tex_[slot] != nullptr) {
+                r->textures[slot] = tex_[slot]->ref().id;
+            }
+        }
+    }
+    if (options_.perf) {
+        perf_.drawRecordMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - recordStart).count();
+    }
     // the camera cross-check: the main view's camera constants as the first solid material draw sees them
     if (camera_.valid && !camera_.constantsCaptured && phases_.view() == scene::View::Main && phases_.pass() == scene::Pass::Solid) {
         camera_.constantsCaptured = true;
@@ -581,7 +647,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType) {
 
 void Device::drawPrimitive(std::uint32_t type, std::uint32_t startVertex, std::uint32_t primitiveCount) {
     const DrawTimer timer(*this);
-    if (primitiveCount == 0 || !prepareDraw(type)) {
+    if (primitiveCount == 0 || !prepareDraw(type, DrawGeom{.first = startVertex, .primitives = primitiveCount})) {
         return;
     }
     vkCmdDraw(frames_.cmd(), vertexCount(type, primitiveCount), instanceCount_, startVertex, 0);
@@ -590,10 +656,14 @@ void Device::drawPrimitive(std::uint32_t type, std::uint32_t startVertex, std::u
 void Device::drawIndexedPrimitive(std::uint32_t type, std::int32_t baseVertex, std::uint32_t, std::uint32_t, std::uint32_t startIndex,
                                   std::uint32_t primitiveCount) {
     const DrawTimer timer(*this);
-    if (primitiveCount == 0 || indices_ == nullptr || !prepareDraw(type)) {
+    if (primitiveCount == 0 || indices_ == nullptr ||
+        !prepareDraw(type, DrawGeom{.indexed = true, .first = startIndex, .primitives = primitiveCount, .baseVertex = baseVertex})) {
         return;
     }
     const Buffer::Binding ib = indices_->gpu();
+    if (lastRecord_ != nullptr) {
+        lastRecord_->indexBuffer = indices_->ref();
+    }
     if (ib.buffer == VK_NULL_HANDLE) {
         return;
     }
@@ -610,7 +680,7 @@ void Device::drawPrimitiveUP(std::uint32_t type, std::uint32_t primitiveCount, c
     vk::RingAlloc a = frames_.allocate(static_cast<VkDeviceSize>(vertices) * stride, 16);
     std::memcpy(a.ptr, data, static_cast<std::size_t>(vertices) * stride);
     up_ = {true, a.buffer, a.offset, stride};
-    if (prepareDraw(type)) {
+    if (prepareDraw(type, DrawGeom{.userPointer = true, .primitives = primitiveCount})) {
         vkCmdDraw(frames_.cmd(), vertices, 1, 0, 0);
     }
     up_.active = false;
@@ -633,7 +703,7 @@ void Device::drawIndexedPrimitiveUP(std::uint32_t type, std::uint32_t minIndex, 
     vk::RingAlloc va = frames_.allocate(static_cast<VkDeviceSize>(vcount) * stride, 16);
     std::memcpy(va.ptr, vertices, static_cast<std::size_t>(vcount) * stride);
     up_ = {true, va.buffer, va.offset, stride};
-    if (prepareDraw(type)) {
+    if (prepareDraw(type, DrawGeom{.indexed = true, .userPointer = true, .primitives = primitiveCount})) {
         vkCmdBindIndexBuffer(frames_.cmd(), ia.buffer, ia.offset, index32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
         vkCmdDrawIndexed(frames_.cmd(), count, 1, 0, 0, 0);
     }

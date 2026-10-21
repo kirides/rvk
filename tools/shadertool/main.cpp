@@ -1,6 +1,8 @@
 // rvk_shadertool: offline driver of the D3D9 -> SPIR-V shader translator.
 //
-//   rvk_shadertool corpus <dir> [--out <dir>] [--max-errors N]   translate + validate every vs*/ps* file of a capture corpus
+//   rvk_shadertool corpus <dir> [--out <dir>] [--max-errors N] [--tint]
+//                                                                translate + validate every vs*/ps* file of a capture corpus
+//                                                                (--tint: the pixel shaders' tint debug-view variant)
 //   rvk_shadertool show <file>                                   disassembly, GLSL, compiler log of one shader
 //   rvk_shadertool refdisasm <file>                              D3DXDisassembleShader (d3dx9_39.dll) as the reference listing
 //
@@ -44,7 +46,7 @@ struct Outcome {
     std::string glsl;
 };
 
-Outcome translate(const std::vector<std::uint32_t>& tokens, spvtools::SpirvTools& tools) {
+Outcome translate(const std::vector<std::uint32_t>& tokens, spvtools::SpirvTools& tools, const GlslOptions& options = {}) {
     Outcome o;
     const DecodeResult dec = decode(tokens);
     if (!dec.ok()) {
@@ -53,7 +55,7 @@ Outcome translate(const std::vector<std::uint32_t>& tokens, spvtools::SpirvTools
         return o;
     }
     o.disasm = disassemble(dec.program);
-    const GlslResult g = toGlsl(dec.program);
+    const GlslResult g = toGlsl(dec.program, options);
     if (!g.ok()) {
         o.stage = "glsl";
         o.message = g.error;
@@ -75,7 +77,7 @@ Outcome translate(const std::vector<std::uint32_t>& tokens, spvtools::SpirvTools
     return o;
 }
 
-int cmdCorpus(const fs::path& dir, const fs::path& out, int maxErrors) {
+int cmdCorpus(const fs::path& dir, const fs::path& out, int maxErrors, const GlslOptions& options) {
     spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
     std::map<std::string, int> ok, failed;
     std::map<std::string, int> failuresByMessage;
@@ -91,7 +93,7 @@ int cmdCorpus(const fs::path& dir, const fs::path& out, int maxErrors) {
     std::ranges::sort(files);
     for (const auto& f : files) {
         const std::string kind = f.filename().string().substr(0, f.filename().string().find('_'));
-        const Outcome o = translate(readTokens(f), tools);
+        const Outcome o = translate(readTokens(f), tools, options);
         if (o.stage.empty()) {
             ++ok[kind];
             continue;
@@ -170,18 +172,25 @@ int cmdRefDisasm(const fs::path& file) {
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::printf("usage: rvk_shadertool corpus <dir> [--out <dir>] [--max-errors N] | show <file> | refdisasm <file>\n");
+        std::printf("usage: rvk_shadertool corpus <dir> [--out <dir>] [--max-errors N] [--tint] | show <file> | refdisasm <file>\n");
         return 2;
     }
     const std::string cmd = argv[1];
     if (cmd == "corpus") {
         fs::path out;
         int maxErrors = 20;
-        for (int i = 3; i + 1 < argc; i += 2) {
-            if (std::string(argv[i]) == "--out") out = argv[i + 1];
-            if (std::string(argv[i]) == "--max-errors") maxErrors = std::atoi(argv[i + 1]);
+        GlslOptions options;
+        for (int i = 3; i < argc; ++i) {
+            const std::string a = argv[i];
+            if (a == "--tint") {
+                options.tintEpilogue = true;
+            } else if (i + 1 < argc && a == "--out") {
+                out = argv[++i];
+            } else if (i + 1 < argc && a == "--max-errors") {
+                maxErrors = std::atoi(argv[++i]);
+            }
         }
-        return cmdCorpus(argv[2], out, maxErrors);
+        return cmdCorpus(argv[2], out, maxErrors, options);
     }
     if (cmd == "show") return cmdShow(argv[2]);
     if (cmd == "refdisasm") return cmdRefDisasm(argv[2]);

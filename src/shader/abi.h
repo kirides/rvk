@@ -14,6 +14,8 @@
 //                       +0.5; moving the geometry half a pixel right/down makes Vulkan sample where D3D9 did:
 //                       (+1/width, -1/height) with the y-flipped viewport (rvk_vktest checks this)
 //                       alphaFunc: D3DCMPFUNC (1 never .. 8 always), alphaRef: 0..1
+//                       pad[0]: debug tint, RGBA8 (unpackUnorm4x8; 0 = none), read only by the tint variant of a pixel
+//                       shader (GlslOptions::tintEpilogue, the "tint draws" debug view); pad[1] unused
 //
 // Descriptor set 0 (bindless, update-after-bind, partially bound):
 //   binding 0: texture2D t2D[]   binding 1: textureCube tCube[]   binding 2: texture3D t3D[]   binding 3: sampler samp[]

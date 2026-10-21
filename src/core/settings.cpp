@@ -610,6 +610,29 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 1,
         .flags = Flag::NoAB,
     });
+    r.tintDraws = &reg.add({
+        .key = "debug.tint_draws",
+        .label = "Tint draws",
+        .category = "Debug",
+        .description = "Developer view: colours the scene's draws by what they are (kind: water blue, SpeedTree green, "
+                       "skinned red, static meshes grey, instanced cyan, particles orange, unknown magenta, ...) or by their "
+                       "pass (solid grey, refracted blue, alpha orange). Off renders exactly as without it.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "kind", "pass"},
+        .optionLabels = {"Off", "By kind", "By pass"},
+        .flags = Flag::NoAB,
+    });
+    r.drawRecords = &reg.add({
+        .key = "debug.draw_records",
+        .label = "Draw records",
+        .category = "Debug",
+        .description = "Keep a record of every draw of the frame (tags, geometry identity, constants, textures) for later "
+                       "features and tools. Off only to measure their cost.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::NoAB | Flag::Hidden,
+    });
     if (&reg == &registry()) g_renderer = r;
     return r;
 }

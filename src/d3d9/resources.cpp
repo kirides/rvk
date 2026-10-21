@@ -255,6 +255,7 @@ void Texture::upload(VkCommandBuffer cmd) {
     const std::lock_guard lock(mutex_);
     pending_ = false;
     bool any = false;
+    bool copied = false;
     lastUseFrame_ = dev_.frameValue();
     for (std::uint32_t face = 0; face < faces() && !cpu_.empty(); ++face) {
         for (std::uint32_t level = 0; level < desc_.levels; ++level) {
@@ -298,6 +299,7 @@ void Texture::upload(VkCommandBuffer cmd) {
             vkCmdCopyBufferToImage(cmd, staging.buffer, image_.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
             dev_.countUpload(true, sliceBytes * d);
             l.dirty = false;
+            copied = true;
             // File textures (never locked) are not read back by the engine: drop the CPU copy. A texture that was locked keeps
             // it like D3D9's managed pool: partial locks (the engine's glyph atlases) must see the earlier contents.
             if (!lockedOnce_ && desc_.pool != POOL_SYSTEMMEM && (desc_.usage & USAGE_DYNAMIC) == 0) {
@@ -305,6 +307,9 @@ void Texture::upload(VkCommandBuffer cmd) {
                 l.dropped = true;
             }
         }
+    }
+    if (copied) {
+        generation_.fetch_add(1, std::memory_order_relaxed);  // identity.h: new CPU data on the GPU
     }
 }
 
@@ -349,26 +354,7 @@ void* Buffer::lock(std::uint32_t offset, std::uint32_t size, std::uint32_t flags
         return nullptr;
     }
     const std::lock_guard lock(mutex_);
-    if ((flags & LOCK_READONLY) == 0) {
-        // the written range (size 0 = up to the end)
-        const std::uint32_t lo = std::min(offset, size_);
-        const std::uint32_t hi = size == 0 ? size_ : static_cast<std::uint32_t>(std::min<std::uint64_t>(std::uint64_t{offset} + size, size_));
-        if ((flags & LOCK_DISCARD) != 0) {
-            // the old contents are undefined from here on: a fresh GPU copy needs only what is written after the DISCARD
-            gpuFrame_ = 0;  // draws recorded before keep the old GPU copy
-            discarded_ = true;
-            dirtyLo_ = lo;
-            dirtyHi_ = hi;
-        } else {
-            if ((flags & LOCK_NOOVERWRITE) == 0) {
-                gpuFrame_ = 0;  // a plain lock: new GPU copy (of the whole buffer), draws recorded before keep the old one
-                discarded_ = false;
-            }
-            dirtyLo_ = dirty_ ? std::min(dirtyLo_, lo) : lo;
-            dirtyHi_ = dirty_ ? std::max(dirtyHi_, hi) : hi;
-        }
-        dirty_ = true;
-    }
+    copies_.lock(offset, size, flags, size_);
     return cpu_.data() + offset;
 }
 
@@ -377,34 +363,30 @@ void Buffer::unlock() {}
 Buffer::Binding Buffer::gpu() {
     const std::lock_guard lock(mutex_);
     const std::uint64_t frame = dev_.frameValue();
-    if (dynamic() || pool_ == POOL_SYSTEMMEM) {
-        // ring copy per frame; NOOVERWRITE appends go into the same copy (the CPU writes land before the GPU runs). Only the
-        // bytes written since the last copy are copied (the sprite batcher locks one quad of a 448 KiB buffer per Lock).
-        if (gpuFrame_ != frame) {
+    const bool ring = dynamic() || pool_ == POOL_SYSTEMMEM;
+    const BufferCopyState::Plan plan = copies_.plan(ring, frame, size_, static_ != VK_NULL_HANDLE);
+    using Op = BufferCopyState::Plan::Op;
+    if (ring) {
+        // ring copy per frame (identity.h: BufferCopyState::plan)
+        if (plan.op == Op::NewCopy) {
             vk::RingAlloc a = dev_.frames().allocate(size_, 16);
             if (a.ptr == nullptr) {
                 return {};
             }
-            // after a DISCARD only the range written since is defined; otherwise the copy needs everything (a new frame)
-            const std::uint32_t lo = discarded_ ? dirtyLo_ : 0;
-            const std::uint32_t hi = discarded_ ? dirtyHi_ : size_;
-            if (hi > lo) {
-                std::memcpy(static_cast<std::uint8_t*>(a.ptr) + lo, cpu_.data() + lo, hi - lo);
-                dev_.countUpload(false, hi - lo);
+            if (plan.hi > plan.lo) {
+                std::memcpy(static_cast<std::uint8_t*>(a.ptr) + plan.lo, cpu_.data() + plan.lo, plan.hi - plan.lo);
+                dev_.countUpload(false, plan.hi - plan.lo);
             }
             binding_ = {a.buffer, a.offset};
             boundPtr_ = static_cast<std::uint8_t*>(a.ptr);
-            gpuFrame_ = frame;
-        } else if (dirty_ && dirtyHi_ > dirtyLo_) {
-            std::memcpy(boundPtr_ + dirtyLo_, cpu_.data() + dirtyLo_, dirtyHi_ - dirtyLo_);
-            dev_.countUpload(false, dirtyHi_ - dirtyLo_);
+        } else if (plan.op == Op::Patch) {
+            std::memcpy(boundPtr_ + plan.lo, cpu_.data() + plan.lo, plan.hi - plan.lo);
+            dev_.countUpload(false, plan.hi - plan.lo);
         }
-        dirty_ = false;
-        discarded_ = false;
-        dirtyLo_ = dirtyHi_ = 0;
+        copies_.committed(plan, true, frame);
         return binding_;
     }
-    if (dirty_ || static_ == VK_NULL_HANDLE) {
+    if (plan.op == Op::NewCopy) {
         // static buffer: a fresh GPU buffer per update, so draws recorded earlier keep the old contents
         VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
         bci.size = std::max<std::uint32_t>(size_, 4);
@@ -435,7 +417,7 @@ Buffer::Binding Buffer::gpu() {
         static_ = nb;
         staticAlloc_ = na;
         binding_ = {nb, 0};
-        dirty_ = false;
+        copies_.committed(plan, false, frame);
     }
     return binding_;
 }
@@ -448,6 +430,8 @@ VertexDecl::VertexDecl(std::span<const VertexElement> elements) {
             break;
         }
         elements_.push_back(e);
+        blendIndices_ |= e.usage == static_cast<std::uint8_t>(shader::Usage::BlendIndices);
+        texcoord4_ |= e.usage == static_cast<std::uint8_t>(shader::Usage::TexCoord) && e.usageIndex == 4;
     }
 }
 

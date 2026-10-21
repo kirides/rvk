@@ -712,6 +712,11 @@ void Overlay::buildSettingsWindow() {
         ImGui::PushTextWrapPos(0.0f);
         ImGui::TextUnformatted(seq.empty() ? "(no phase markers)" : seq.c_str());
         ImGui::PopTextWrapPos();
+        const auto& dr = device_->drawRecords();
+        const std::string kinds = dr.lastHistogram().summary();
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::Text("draw kinds (%zu records): %s", dr.last().size(), kinds.c_str());
+        ImGui::PopTextWrapPos();
         const auto& c = device_->lastCamera();
         if (c.valid) {
             ImGui::Text("camera (%.1f, %.1f, %.1f), near %.1f, far %.0f", c.position[0], c.position[1], c.position[2], c.nearZ,

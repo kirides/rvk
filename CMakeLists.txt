@@ -72,11 +72,17 @@ add_library(rvk_core STATIC
     src/d3d9/device.cpp
     src/d3d9/device.h
     src/d3d9/draw.cpp
+    src/d3d9/draws.cpp
+    src/d3d9/draws.h
     src/d3d9/fvf.cpp
     src/d3d9/fvf.h
+    src/d3d9/identity.cpp
+    src/d3d9/identity.h
     src/d3d9/resources.cpp
     src/d3d9/scene.cpp
     src/d3d9/scene.h
+    src/d3d9/semantics.cpp
+    src/d3d9/semantics.h
     src/engine/scene_hooks.cpp
     src/engine/scene_hooks.h
     src/engine/symbols.cpp
@@ -215,7 +221,7 @@ rvk_warnings(rvk_d3d9test)
 # tests
 # ---------------------------------------------------------------------------------------------
 if(RVK_BUILD_TESTS)
-    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp tests/api_tests.cpp tests/fvf_tests.cpp tests/settings_tests.cpp tests/settings_api_tests.cpp tests/scene_tests.cpp)
+    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp tests/api_tests.cpp tests/fvf_tests.cpp tests/settings_tests.cpp tests/settings_api_tests.cpp tests/scene_tests.cpp tests/draws_tests.cpp)
     target_link_libraries(rvk_tests PRIVATE rvk_core SPIRV-Tools-static)
     rvk_warnings(rvk_tests)
     add_test(NAME rvk_tests COMMAND rvk_tests)

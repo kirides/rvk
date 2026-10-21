@@ -24,7 +24,10 @@
 #include <vector>
 
 #include "d3d9/defs.h"
+#include "d3d9/draws.h"
+#include "d3d9/identity.h"
 #include "d3d9/scene.h"
+#include "d3d9/semantics.h"
 #include "shader/glsl.h"
 #include "vk/bindless.h"
 #include "vk/context.h"
@@ -101,6 +104,8 @@ public:
     bool prepareForSampling(VkCommandBuffer cmd);  // uploads pending data, transitions to shader-read; false if nothing to sample
     // what the engine uses the image for (Device::tagImage; render thread)
     scene::ImageRole role() const { return role_; }
+    // persistent identity (d3d9/identity.h): the generation counts uploads of CPU data
+    ResourceRef ref() const { return {id_, generation_.load(std::memory_order_relaxed)}; }
 
     // bytes held in CPU copies of all textures (diagnostics)
     static std::uint64_t cpuBytesTotal();
@@ -138,6 +143,8 @@ private:
     std::uint64_t lastUseFrame_ = 0;
     std::vector<std::unique_ptr<Surface>> surfaces_;
     scene::ImageRole role_ = scene::ImageRole::None;
+    std::uint64_t id_ = newResourceId();
+    std::atomic<std::uint32_t> generation_{0};
 };
 
 // A render target / depth stencil: one level/face of a texture, or a standalone depth buffer (CreateDepthBuffer).
@@ -166,6 +173,8 @@ public:
     bool isIndex() const { return index_; }
     bool index32() const { return index32_; }
     bool dynamic() const { return (usage_ & USAGE_DYNAMIC) != 0; }
+    // persistent identity (d3d9/identity.h): the generation counts the GPU copies (render thread)
+    ResourceRef ref() const { return {id_, copies_.generation()}; }
 
     // D3D9 Lock: pointer into the CPU copy (offset/size 0 = whole buffer); flags LOCK_*
     void* lock(std::uint32_t offset, std::uint32_t size, std::uint32_t flags);
@@ -187,12 +196,8 @@ private:
     bool index32_;
     std::vector<std::uint8_t> cpu_;
     std::mutex mutex_;
-    bool dirty_ = true;
-    // dynamic buffers: bytes written since the last copy to the GPU, [dirtyLo_, dirtyHi_)
-    std::uint32_t dirtyLo_ = 0;
-    std::uint32_t dirtyHi_ = 0;
-    bool discarded_ = false;      // a DISCARD since the last copy: a fresh ring copy needs only the dirty range
-    std::uint64_t gpuFrame_ = 0;  // frame of the ring copy (dynamic buffers)
+    BufferCopyState copies_;  // writes since the last GPU copy, what the next use copies, the generation
+    std::uint64_t id_ = newResourceId();
     Binding binding_;
     std::uint8_t* boundPtr_ = nullptr;  // CPU address of the frame's ring copy (dynamic buffers)
     VkBuffer static_ = VK_NULL_HANDLE;
@@ -203,9 +208,13 @@ class VertexDecl {
 public:
     explicit VertexDecl(std::span<const VertexElement> elements);
     const std::vector<VertexElement>& elements() const { return elements_; }
+    bool hasBlendIndices() const { return blendIndices_; }  // skinning (or SpeedTree wind) data
+    bool hasTexcoord4() const { return texcoord4_; }        // the engine's instance index
 
 private:
     std::vector<VertexElement> elements_;
+    bool blendIndices_ = false;
+    bool texcoord4_ = false;
 };
 
 class Shader {
@@ -215,6 +224,10 @@ public:
     shader::Reflection reflection;
     std::vector<std::uint32_t> bytecode;  // the D3D9 tokens (kept for GetFunctionData)
     std::uint64_t hash = 0;
+    ShaderSemantics semantics;  // named constants / samplers from the CTAB (d3d9/semantics.h)
+    // pixel shaders: the tint debug view's variant (GlslOptions::tintEpilogue), built on first use (render thread)
+    VkShaderModule tintModule = VK_NULL_HANDLE;
+    bool tintFailed = false;
 };
 
 // ---- device -------------------------------------------------------------------------------------------------------
@@ -285,6 +298,7 @@ struct PerfStats {
     std::uint64_t frames = 0;
     double cpuFrameMs = 0.0;    // from the end of one present() to the start of the next: the engine's frame incl. our HAL
     double drawMs = 0.0;        // inside Device draw calls (state translation, uploads, pipeline lookup, command recording)
+    double drawRecordMs = 0.0;  // of that: the draw's histogram entry + record (d3d9/draws.h)
     double presentMs = 0.0;     // inside present() (blit recording, submit, pacer, acquire, vkQueuePresentKHR, next frame begin)
     double submitMs = 0.0;      // ending the command buffers + vkQueueSubmit2
     double slotWaitMs = 0.0;    // waiting for a free frame slot (the GPU is a full slot behind)
@@ -438,6 +452,14 @@ public:
     Texture* imageWithRole(scene::ImageRole role) const { return roles_[static_cast<std::size_t>(role)]; }
     void forgetImage(Texture* texture);  // a tagged texture dies
     double secondsSinceCreate() const;
+    // draw tags (d3d9/draws.h, docs/research/draw-tags.md): the engine hooks keep the current tag; every draw copies it into
+    // the frame's records (when recording) and counts its kind in the frame's histogram
+    draws::Tag& drawTag() { return tag_; }
+    const draws::FrameDraws& drawRecords() const { return draws_; }
+    void setDrawRecords(bool on) { draws_.setRecording(on); }
+    // debug view: tint colour draws by kind / pass (draws::tintColor; the pixel shaders' tint variants are built on demand)
+    void setTintMode(draws::TintMode mode) { tint_ = mode; }
+    draws::TintMode tintMode() const { return tint_; }
 
     // internals used by resources
     vk::Context& ctx() { return ctx_; }
@@ -470,7 +492,16 @@ private:
     bool prepareTextures();
     void endRendering();
     bool beginRendering();
-    bool prepareDraw(std::uint32_t primitiveType);
+    // the geometry of a draw (for its record)
+    struct DrawGeom {
+        bool indexed = false;
+        bool userPointer = false;
+        std::uint32_t first = 0;
+        std::uint32_t primitives = 0;
+        std::int32_t baseVertex = 0;
+    };
+    bool prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom);
+    VkShaderModule tintModule(Shader& ps);  // the tint variant of a pixel shader (null when it fails to build)
     bool bindVertexInput(vk::PipelineDesc& pd);
     void setDynamicState(std::uint32_t primitiveType);
     std::uint32_t samplerIndex(std::uint32_t slot);
@@ -659,6 +690,10 @@ private:
     std::array<Texture*, static_cast<std::size_t>(scene::ImageRole::Count)> roles_{};
     std::uint32_t roleLogs_ = 0;
     std::chrono::steady_clock::time_point createdAt_ = std::chrono::steady_clock::now();
+    draws::Tag tag_;
+    draws::FrameDraws draws_;
+    draws::Record* lastRecord_ = nullptr;  // the record of the draw being issued (its index buffer is bound after prepareDraw)
+    draws::TintMode tint_ = draws::TintMode::Off;
 
     // overlay
     PresentOverlay* overlay_ = nullptr;

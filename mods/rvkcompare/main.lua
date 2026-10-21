@@ -8,7 +8,8 @@
 -- Parameters (-Param key=value,...): tag (file prefix, default "x"), spots (all | id,id,...), mode (run | calibrate), burst (3), interval (10 frames),
 -- settle (default frames before the freeze, 600), freeze_wait (frames between freeze and capture, 60), start_wait (seconds after the new game, 30),
 -- wind (1 = keep the vegetation wind, default 0: SetVegWindParams 0 0 0 0 so grass and leaves rest), repeat (n: every spot n times in a row,
--- ids <id>_r<k>), pin_time (default 1: risen.debug.set_game_time to a fixed value per spot two frames before the freeze).
+-- ids <id>_r<k>), pin_time (default 1: risen.debug.set_game_time to a fixed value per spot two frames before the freeze), show_actors
+-- (1: hide neither the player nor NPCs, e.g. for the draw-tag tint view: docs/research/draw-tags.md 6).
 --
 -- Per spot (spots.lua): weather (forced, thunder off) + clock held each tick -> player placed at the anchor (snapped to the navigation mesh), hidden on request,
 -- NPCs around hidden -> fixed camera (risen.camera.set, instant) -> HUD off/on -> settle frames -> time freeze -> GUI page if any -> burst capture with the
@@ -31,6 +32,7 @@ local start_wait = tonumber(T.param("start_wait", "30")) or 30
 local keep_wind = T.param("wind", "0") == "1"
 local repeats = tonumber(T.param("repeat", "1")) or 1
 local pin_time = T.param("pin_time", "1") == "1"
+local show_actors = T.param("show_actors", "0") == "1"
 -- the game time each spot is frozen at (by its position in spots.lua, so a subset of spots gets the same values)
 local spot_index = {}
 for i, s in ipairs(SPOTS) do spot_index[s.id] = i end
@@ -174,6 +176,7 @@ end
 
 local function apply_hiding(spot)
     restore_hidden()
+    if show_actors then return end
     local player = risen.entity.player()
     if spot.hide_player and player then
         player:enable_rendering(false)
