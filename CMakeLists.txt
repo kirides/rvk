@@ -62,6 +62,10 @@ add_library(rvk_core STATIC
     src/fx/effect_binary.h
     src/hal/api_generated.h
     src/hal/engine_alloc.cpp
+    src/hal/slots_generated.h
+    src/hal/stub_generated.h
+    src/hal/stub_support.cpp
+    src/hal/stub_support.h
     src/hal/trace.cpp
     src/hal/trace.h
     src/hal/trace_generated.h
@@ -155,7 +159,7 @@ rvk_warnings(rvk_vktest)
 # tests
 # ---------------------------------------------------------------------------------------------
 if(RVK_BUILD_TESTS)
-    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp)
+    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp)
     target_link_libraries(rvk_tests PRIVATE rvk_core SPIRV-Tools-static)
     rvk_warnings(rvk_tests)
     add_test(NAME rvk_tests COMMAND rvk_tests)

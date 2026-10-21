@@ -301,10 +301,8 @@ def is_iface_out(ctype: str, iface_names: set[str]) -> str | None:
     return m.group(1) if m and m.group(1) in iface_names else None
 
 
-def gen_trace(ifaces: list[Interface]) -> str:
-    iface_names = {i.name for i in ifaces}
-    lines = [HEADER, "#pragma once", "", '#include "hal/api_generated.h"', '#include "hal/trace_support.h"', "",
-             "namespace rvk::hal::trace {", ""]
+def gen_slots(ifaces: list[Interface]) -> str:
+    lines = [HEADER, "#pragma once", "", "namespace rvk::hal {", ""]
     for n, i in enumerate(ifaces):
         lines.append(f"inline constexpr int k{i.name}Id = {n};")
     lines.append(f"inline constexpr int kInterfaceCount = {len(ifaces)};")
@@ -320,6 +318,71 @@ def gen_trace(ifaces: list[Interface]) -> str:
             lines.append(f'    "{s.name if not s.is_dtor else "~" + i.name[1:]}",')
         lines.append("};")
     lines.append("")
+    lines.append("}  // namespace rvk::hal")
+    lines.append("")
+    return "\n".join(lines)
+
+
+FAILING_PREFIXES = ("Create", "Get", "Lock", "Compile", "Assemble", "Read", "Preprocess", "Load", "Save", "Copy", "Convert",
+                    "Compute", "Generate")
+
+
+def default_return(s: Slot) -> str | None:
+    """The value a not-yet-implemented slot returns (None for void)."""
+    r = s.ret
+    if r == "void":
+        return None
+    if r == "bEResult":
+        return "bEResult_False" if s.name.startswith(FAILING_PREFIXES) else "bEResult_Ok"
+    if r == "bool":
+        return "false"
+    if r.endswith("&"):
+        base = r[:-1].strip()
+        return f"*static_cast<{base}*>(stubStorage())"
+    if r.endswith("*"):
+        return "nullptr"
+    return "0"
+
+
+def gen_stub(ifaces: list[Interface]) -> str:
+    lines = [HEADER, "#pragma once", "", '#include "hal/api_generated.h"', '#include "hal/slots_generated.h"',
+             '#include "hal/stub_support.h"', "", "namespace rvk::hal {", "",
+             "// Every slot: log once that it is not implemented, null object out-parameters, return a neutral value",
+             "// (getters / creators / locks fail, setters succeed). Implementations derive from these and override.", ""]
+    for i in ifaces:
+        sn = "Stub" + i.name[len("eCAPI"):]
+        lines.append(f"class {sn} : public {i.name} {{")
+        lines.append("public:")
+        for s in i.slots:
+            if s.is_dtor:
+                continue
+            c = " const" if s.const else ""
+            lines.append(f"    {s.ret} {s.name}({decl_params(s)}){c} override {{")
+            lines.append(f"        noteUnimplemented(k{i.name}Id, {s.index});")
+            for k, p in enumerate(s.params):
+                if p.ctype.endswith("**"):
+                    lines.append(f"        if (a{k} != nullptr) *a{k} = nullptr;")
+                elif p.ctype.endswith("*&"):
+                    lines.append(f"        a{k} = nullptr;")
+            unused = [f"a{k}" for k, p in enumerate(s.params) if not p.ctype.endswith(("**", "*&")) and "(*a" not in p.ctype]
+            fnptr = [re.search(r"\(\*(a\d+)\)", p.ctype).group(1) for p in s.params if "(*a" in p.ctype]
+            for u in unused + fnptr:
+                lines.append(f"        (void){u};")
+            r = default_return(s)
+            if r is not None:
+                lines.append(f"        return {r};")
+            lines.append("    }")
+        lines.append("};")
+        lines.append("")
+    lines.append("}  // namespace rvk::hal")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def gen_trace(ifaces: list[Interface]) -> str:
+    iface_names = {i.name for i in ifaces}
+    lines = [HEADER, "#pragma once", "", '#include "hal/api_generated.h"', '#include "hal/slots_generated.h"',
+             '#include "hal/trace_support.h"', "", "namespace rvk::hal::trace {", ""]
     lines.append("// Creates (or finds) the wrapper of an engine object (defined in hal/trace.cpp).")
     for i in ifaces:
         lines.append(f"{i.name}* wrap({i.name}* inner);")
@@ -395,7 +458,9 @@ def main() -> int:
     args = ap.parse_args()
     ifaces, types = build(args.engine, args.demangled)
     os.makedirs(args.out, exist_ok=True)
-    for fname, text in (("api_generated.h", gen_api(ifaces, types)), ("trace_generated.h", gen_trace(ifaces))):
+    outputs = (("api_generated.h", gen_api(ifaces, types)), ("slots_generated.h", gen_slots(ifaces)),
+               ("trace_generated.h", gen_trace(ifaces)), ("stub_generated.h", gen_stub(ifaces)))
+    for fname, text in outputs:
         with open(os.path.join(args.out, fname), "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
     for i in ifaces:
