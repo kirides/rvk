@@ -47,6 +47,9 @@ at ~0.1 fps), `-LogDraws N` (first N draws in detail: shaders, textures, targets
 of frame N), `-Snapshots N,M` (at those `eCApplication::Draw` calls: the engine snapshot (slot 159 -> BMP in the copy's
 `localappdata\Local\Risen\ScreenShots`) + a self-test of the `rvk_screenshot` exports), `-Validation`, `-DumpSavedTextures` (the engine's refused `SaveTextureToFile` writes -> `bin/rvk/dumps/*.png`), `-AllowFocus` (test runs
 stay in the background by default). rvk.log prints fps / draw counts every 5 s and every unimplemented HAL slot once.
+Performance (docs/research/performance.md): `-Perf` (GPU timestamps, CPU split, uploads, pipeline builds, pacer: `perf:`
+lines every 5 s), `-PerfFrame N` (GPU time of every render pass of frame N), `-Vsync on|off|engine`, `-MaxFps N`; the
+`rvk_shadows` scenario logs the fps for either renderer (also `-NoRenderer`). Other games on the GPU skew GPU times.
 
 `run.ps1` creates the test copy on first use (`scripts/new-test-copy.ps1`, from risen-spass's `B:\DevDrive\risen-test`), deploys
 `d3d9.dll` + `bin\rvk\config.toml`, and drives the game with **risen-spass's `scripts/test-run.ps1 -GameDir`** (windowed, muted,

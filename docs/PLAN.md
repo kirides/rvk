@@ -76,7 +76,7 @@ with rain, water, vegetation, post chain and GUI) render through Vulkan, no D3D9
 (D3D9 state model, `rvk_d3d9test`) -> `vk/` (Vulkan core, `rvk_vktest`); effects through `src/fx` + `hal/vulkan/effect.cpp`.
 Open (next): D3D9 reference comparison at fixed poses; unimplemented slots seen in game (LoadSurfaceFromSurface,
 SaveTextureToFile, FVF buffers: done, see below); performance pass (in game ~79.5 fps on a 120 Hz display with ~5 ms
-inside vkQueuePresentKHR).
+inside vkQueuePresentKHR: done in M5, an external ~80 Hz present cadence, docs/research/performance.md).
 Done after M3: vsync. FIFO presents returned at once in the game window (menu ~1500 fps; a plain window is throttled), so
 `d3d9::Device` paces presents to the refresh rate of the window's monitor (`vk::FramePacer`, `[vulkan] max_fps`). HLSL
 constant tables (CTAB via `src/fx`): the engine walks them for sampler masks (Engine.dll 0x6bb440); the unimplemented
@@ -126,7 +126,8 @@ with validation on and checks every pixel against D3D9's rasterisation rules (ha
   (post chain), fonts (the engine's own `eCFont` glyph atlases, not `eCAPIFont`: docs/research/fonts.md; atlas updates fixed),
   sprites, fixed-function remnants (generated shaders).
 * **Verify**: screenshot-diff suite at N poses (D3D9 reference vs Vulkan) within thresholds; a play session without validation errors.
-* Progress (2026-10-21): the suite exists and ran end to end: `scriptsefcompare.ps1` + `mods/rvkcompare` (13 spots: beach rain/sun,
+* Progress (2026-10-21): the suite exists and ran end to end: `scripts
+efcompare.ps1` + `mods/rvkcompare` (13 spots: beach rain/sun,
   forest, harbour docks/night, pub, monastery, volcano, crystal cave, hero close-up with HUD, inventory, character screen, ESC
   menu), game time pinned before the freeze (risen-spass `set_game_time`), known-noise masks from two D3D9 runs. First result:
   11 PASS, 2 WARN (particles/sea phase), no renderer difference found; Vulkan is not brighter than D3D9 (dluma -0.2..+0.7).
@@ -135,6 +136,20 @@ with validation on and checks every pixel against D3D9's rasterisation rules (ha
 ### M5 Robustness and performance
 * pipeline cache on disk, async/background pipeline compilation, frame pacing, alt-tab/resize, device-lost diagnostics
   (`VK_EXT_device_fault`, breadcrumbs), GPU timings, memory budget.
+* **Performance pass: done (2026-10-21, docs/research/performance.md).** Measured with `[debug] perf` / `perf_frame`
+  (`run.ps1 -Perf`, `-PerfFrame`): GPU timestamps per submission and per pass, CPU split per frame, upload volume, pipeline
+  and shader build counts; `[vulkan] vsync` override (`-Vsync`). The world's ~80 fps is an **external present cadence**:
+  `vkQueuePresentKHR` returns every ~12.5 ms in the world (FIFO and IMMEDIATE alike), the game's own D3D9 renderer with
+  vsync off also runs at 79.9 fps; CPU 6-7.5 ms and GPU ~1 ms per frame are far below it (open: AMD per-game settings for
+  Risen, see performance.md 2). Done: presents on their own thread (`vk::Presenter`, queue lock in `Context`); frame
+  pacer with a QPC cadence, DWM-vblank lock (also integer fractions) and an adaptive spin margin, adapted from GD3D11's
+  `fpslimiter.h` (`max_fps` 60: 43-47 -> 60.0 fps); the draw path records only changed dynamic state / vertex input and
+  skips redundant pipeline and sampler lookups (3.6 -> 2.8 ms per frame for ~1440 draws); pipelines of earlier runs are
+  rebuilt in the background while the game loads (`pipelines.keys`: world entry 166 pipelines / 2.1 s -> 8 / 64 ms);
+  the `VkPipelineCache` is saved while running. `VK_EXT_graphics_pipeline_library` support is in but **off**
+  (`[vulkan] pipeline_libraries`): the AMD driver crashes on 2 of 2561 shaders as fragment libraries
+  (`rvk_vktest --gpl-corpus` reproduces it). Open: intermittent overexposed frames in the beach intro (pre-existing, also
+  before this pass; probably the intro's own effect, needs a frame-indexed D3D9 sequence).
 
 ### M6+ Enhanced graphics
 * candidates: anisotropic filtering + MSAA/TAA/SMAA, higher-resolution and better-filtered shadows, modern tonemapping/HDR10,
