@@ -28,6 +28,8 @@ param(
     [int]$LogDraws = 0,
     # log the HAL calls of this frame of the Vulkan renderer
     [int]$LogFrame = 0,
+    # the Vulkan renderer refuses eCAPITexture::SaveTextureToFile; with this switch it dumps the image to bin/rvk/dumps/*.png
+    [switch]$DumpSavedTextures,
     [ValidateSet('trace', 'debug', 'info', 'warn', 'error')][string]$RvkLogLevel = 'info',
     [string]$Config = 'RelWithDebInfo',
     [string]$GameDir = 'B:\DevDrive\risen-test-vk',
@@ -36,6 +38,8 @@ param(
     [string]$SpassRepo ='B:\DevDrive\git\github\risen-spass',
     # passed to risen-spass's test-run.ps1
     [string[]]$Mods = @('testdemo'),
+    # directories searched for -Mods before risen-spass's own mods (default: this repo's mods)
+    [string[]]$ModPath = @(),
     [int]$Seconds = 240,
     [string]$Scenario = '',
     [switch]$WaitForResult,
@@ -75,7 +79,8 @@ if ($NoRenderer) {
         '[renderer]', "mode = `"$Mode`"",
         '[log]', "level = `"$RvkLogLevel`"",
         '[vulkan]', "validation = $($Validation.IsPresent.ToString().ToLower())", "max_fps = $([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.0##}', $MaxFps))",
-        '[debug]', "screenshot_frames = [$Screenshots]", "log_draws = $LogDraws", "log_frame = $LogFrame", "snapshot_frames = [$Snapshots]"
+        '[debug]', "screenshot_frames = [$Screenshots]", "log_draws = $LogDraws", "log_frame = $LogFrame", "snapshot_frames = [$Snapshots]",
+        "dump_saved_textures = $($DumpSavedTextures.IsPresent.ToString().ToLower())"
     )
     Remove-Item (Join-Path $rvkDir 'screenshots') -Recurse -Force -ErrorAction SilentlyContinue
     [IO.File]::WriteAllLines((Join-Path $rvkDir 'config.toml'), $cfg)
@@ -83,7 +88,9 @@ if ($NoRenderer) {
     Write-Host "deployed $dll (mode $Mode) to $bin"
 }
 
+if (-not $ModPath) { $ModPath = @(Join-Path $repo 'mods') }
 $spassArgs = @{
+    ModPath = $ModPath
     GameDir = $GameDir; Instance = $Instance; Mods = $Mods; Seconds = $Seconds; Param = $Param; WindowSize = $WindowSize; Filter = $Filter
 }
 if ($Scenario) { $spassArgs.Scenario = $Scenario }
