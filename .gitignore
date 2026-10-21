@@ -1,6 +1,7 @@
 # build output
 /build/
 /build-ninja/
+/build-*/
 /out/
 CMakeUserPresets.json
 
