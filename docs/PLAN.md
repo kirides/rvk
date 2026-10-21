@@ -152,9 +152,25 @@ efcompare.ps1` + `mods/rvkcompare` (13 spots: beach rain/sun,
   (`rvk_vktest --gpl-corpus` reproduces it). Open: intermittent overexposed frames in the beach intro (pre-existing, also
   before this pass; probably the intro's own effect, needs a frame-indexed D3D9 sequence).
 
-### M6+ Enhanced graphics
+### M6 Platform (docs/research/enhancements-roadmap.md 6)
+* **Player settings + overlay: done (2026-10-21, docs/research/overlay.md).** Settings registry (`src/core/settings.*`:
+  typed settings with key, label, category, range / options, restart / no-A/B flags; change callbacks on the render thread
+  at the next frame boundary; a feature registers its settings in a few lines), the player's `bin\rvk\settings.toml` (only
+  non-default values; config.toml's non-default `vsync` / `max_fps` / `adapter` lock the setting for the session), A/B
+  comparison (side B starts as the defaults = the plain renderer; F11 flips, badge shows the side), Dear ImGui overlay
+  (F10; vcpkg imgui + vendored Vulkan backend on volk, dynamic rendering, drawn into the swapchain image after the
+  back-buffer copy so no capture contains it), input filter on the game's window procedure (the engine reads keys / buttons
+  from window messages and mouse motion from WM_INPUT, no DirectInput: blocked while open, verified with posted messages),
+  tool API `rvk_setting_*` / `rvk_ab` / `rvk_overlay`, `run.ps1 -Setting / -Commands / -OverlayInScreenshots`. Registered:
+  `vulkan.vsync`, `vulkan.max_fps`, `vulkan.adapter`, overlay hotkeys / fps counter / A/B badge.
+  Open: spass Lua binding for the settings exports; presets + capability resolution with the first enhancement.
+* remaining do-now items 1-8, 10 of the roadmap (phase markers, draw tags, resource identity, CTAB semantics, ABI slots,
+  injection points, image roles, RT capability, camera block).
+
+### M7+ Enhanced graphics
 * candidates: anisotropic filtering + MSAA/TAA/SMAA, higher-resolution and better-filtered shadows, modern tonemapping/HDR10,
-  SSAO/GTAO, upscaling (FSR), improved water/sky/fog, ImGui settings overlay, per-feature toggles. Each measured and screenshotted.
+  SSAO/GTAO, upscaling (FSR), improved water/sky/fog, per-feature toggles (in the settings registry). Each measured and
+  screenshotted.
 
 ## 3. Test tooling
 

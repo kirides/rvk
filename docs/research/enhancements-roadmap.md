@@ -427,7 +427,7 @@ RVAs are Engine.dll unless marked `Game.dll` or `Script.dll`. Dumps: `B:\DevDriv
   * Input: subclass the game window's WndProc.
   * Hotkey: configurable, default `F10` [I: check the game's key bindings; GD3D11 uses F11].
   * While open, swallow keyboard and mouse messages. Engine.dll imports USER32 and XINPUT only (no DINPUT), so a WndProc
-    filter should suffice [I: verify raw input].
+    filter should suffice [C: verified, raw input = WM_INPUT through the same procedure; docs/research/overlay.md 3].
   * ImGui draws its own cursor.
 
   Integration into the game's own options menu is optional and later, via spass + the C API.
@@ -476,6 +476,7 @@ the RT infrastructure with a contained consumer (water first). M10 reuses it.
 * Whether gfx admin `+0x5b8` (the refraction-copy gate) is a quality option; refraction quality vs the depth-map z
   pre-pass (`this[0x1590]`).
 * The underwater effect path (overlay image effect?) and its trigger.
-* Input API of the game (WM_INPUT?) for the overlay; a free hotkey.
+* ~~Input API of the game (WM_INPUT?) for the overlay; a free hotkey.~~ Answered: window messages for keys / buttons,
+  WM_INPUT raw mouse motion, XInput polled; F10 / F11 are free (docs/research/overlay.md 3).
 * Size of `eCRenderContextMesh::Create` / `Invalidate` and of the `Destroy` vtable slot before detouring (ICF / thunk check).
 * Water draws per frame at the beach (expected: few, large meshes); whether lakes use different materials than the sea.
