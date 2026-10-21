@@ -10,7 +10,9 @@
 // StageConsts (std430): vec4 c[256]; ivec4 i[16]; uint b[16]          -> c at 0, i at 4096, b at 4352, 4416 bytes
 // DrawBlock (std430):   uint tex[20]; uint smp[20]; vec4 posFix; uint alphaFunc; float alphaRef; uint pad[2]
 //                       tex/smp: bindless texture / sampler indices of D3D9 samplers s0..s15 (pixel) and 16..19 (vertex s0..s3)
-//                       posFix.xy: added to gl_Position.xy * w (D3D9 half-pixel offset: (-1/width, 1/height))
+//                       posFix.xy: added to gl_Position.xy * w. D3D9 puts pixel centres on integer coordinates, Vulkan on
+//                       +0.5; moving the geometry half a pixel right/down makes Vulkan sample where D3D9 did:
+//                       (+1/width, -1/height) with the y-flipped viewport (rvk_vktest checks this)
 //                       alphaFunc: D3DCMPFUNC (1 never .. 8 always), alphaRef: 0..1
 //
 // Descriptor set 0 (bindless, update-after-bind, partially bound):

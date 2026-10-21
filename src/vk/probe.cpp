@@ -18,7 +18,7 @@ bool hasExtension(const std::vector<VkExtensionProperties>& exts, const char* na
     return false;
 }
 
-DeviceReport inspect(VkPhysicalDevice pd) {
+DeviceReport inspectImpl(VkPhysicalDevice pd) {
     DeviceReport r;
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(pd, &props);
@@ -77,6 +77,8 @@ DeviceReport inspect(VkPhysicalDevice pd) {
 
 }  // namespace
 
+DeviceReport inspectDevice(::VkPhysicalDevice_T* pd) { return inspectImpl(pd); }
+
 std::string versionString(std::uint32_t v) {
     return std::format("{}.{}.{}", VK_API_VERSION_MAJOR(v), VK_API_VERSION_MINOR(v), VK_API_VERSION_PATCH(v));
 }
@@ -110,7 +112,7 @@ ProbeResult probe() {
 
     spdlog::info("vulkan probe: loader {}, {} physical device(s)", versionString(result.instanceVersion), n);
     for (std::uint32_t i = 0; i < n; ++i) {
-        DeviceReport r = inspect(pds[i]);
+        DeviceReport r = inspectDevice(pds[i]);
         spdlog::info("  [{}] {} (api {}, vendor 0x{:04x}, {}): {}", i, r.name, versionString(r.apiVersion), r.vendorId,
                      r.discrete ? "discrete" : "integrated/other", r.usable() ? "usable" : "NOT usable");
         for (const auto& m : r.missing) {

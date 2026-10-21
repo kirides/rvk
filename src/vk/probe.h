@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+struct VkPhysicalDevice_T;  // = VkPhysicalDevice (global, as in vulkan_core.h)
+
 namespace rvk::vk {
 
 // What a physical device offers, measured against the renderer's floor (docs/PLAN.md "Vulkan floor").
@@ -43,6 +45,9 @@ struct ProbeResult {
     std::vector<DeviceReport> devices;
     int best = -1;  // index into devices of the preferred usable device, -1 = none
 };
+
+// Inspects one physical device of an instance whose functions volk has loaded.
+DeviceReport inspectDevice(::VkPhysicalDevice_T* physicalDevice);
 
 // Loads the Vulkan loader (volk), creates a throw-away instance, inspects every physical device, logs the report.
 // Must not run under the loader lock (LoadLibrary).

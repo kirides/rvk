@@ -36,6 +36,7 @@ find_package(VulkanHeaders CONFIG REQUIRED)
 find_package(VulkanMemoryAllocator CONFIG REQUIRED)
 find_package(glslang CONFIG REQUIRED)
 find_package(SPIRV-Tools CONFIG REQUIRED)
+find_path(STB_INCLUDE_DIR stb_image_write.h REQUIRED)
 
 function(rvk_warnings target)
     target_compile_options(${target} PRIVATE /W4 /permissive- /utf-8 /Zc:__cplusplus /Zc:preprocessor /EHsc)
@@ -75,13 +76,27 @@ add_library(rvk_core STATIC
     src/shader/sm_tokens.h
     src/shader/spirv.cpp
     src/shader/spirv.h
+    src/vk/bindless.cpp
+    src/vk/bindless.h
+    src/vk/context.cpp
+    src/vk/context.h
+    src/vk/frames.cpp
+    src/vk/frames.h
+    src/vk/image.cpp
+    src/vk/image.h
+    src/vk/pipeline.cpp
+    src/vk/pipeline.h
     src/vk/probe.cpp
     src/vk/probe.h
+    src/vk/swapchain.cpp
+    src/vk/swapchain.h
+    src/vk/vk.h
+    src/vk/vma_impl.cpp
     src/vk/volk_impl.c
 )
 target_include_directories(rvk_core PUBLIC src)
 # volk is compiled here (not vcpkg's volk.lib): it needs VK_USE_PLATFORM_WIN32_KHR for the Win32 surface entry points
-target_compile_definitions(rvk_core PUBLIC VK_NO_PROTOTYPES VK_USE_PLATFORM_WIN32_KHR)
+target_compile_definitions(rvk_core PUBLIC VK_NO_PROTOTYPES VK_USE_PLATFORM_WIN32_KHR VMA_STATIC_VULKAN_FUNCTIONS=0 VMA_DYNAMIC_VULKAN_FUNCTIONS=0)
 target_link_libraries(rvk_core PUBLIC
     spdlog::spdlog
     minhook::minhook
@@ -123,6 +138,14 @@ target_link_libraries(rvk_shadertool PRIVATE rvk_core SPIRV-Tools-static)
 rvk_warnings(rvk_shadertool)
 
 # ---------------------------------------------------------------------------------------------
+# rvk_vktest: GPU smoke test of the Vulkan core + shader contract (off-screen, validation on)
+# ---------------------------------------------------------------------------------------------
+add_executable(rvk_vktest tools/vktest/main.cpp tools/common/d3dx.h)
+target_include_directories(rvk_vktest PRIVATE tools ${STB_INCLUDE_DIR})
+target_link_libraries(rvk_vktest PRIVATE rvk_core)
+rvk_warnings(rvk_vktest)
+
+# ---------------------------------------------------------------------------------------------
 # tests
 # ---------------------------------------------------------------------------------------------
 if(RVK_BUILD_TESTS)
@@ -130,4 +153,7 @@ if(RVK_BUILD_TESTS)
     target_link_libraries(rvk_tests PRIVATE rvk_core SPIRV-Tools-static)
     rvk_warnings(rvk_tests)
     add_test(NAME rvk_tests COMMAND rvk_tests)
+    # needs a Vulkan 1.3 GPU (and d3dx9_39.dll): ctest -L gpu
+    add_test(NAME rvk_vktest COMMAND rvk_vktest ${CMAKE_BINARY_DIR}/vktest.png)
+    set_tests_properties(rvk_vktest PROPERTIES LABELS gpu)
 endif()

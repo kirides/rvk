@@ -54,6 +54,10 @@ Original scope:
 * Tests: the whole corpus translates, `spirv-val` passes, a disassembly-diff for a few hand-checked shaders.
 
 ### M3 Vulkan device, first light
+Progress (2026-10-21): Vulkan core in `src/vk/` (context with the 1.3 floor + optional EDS3 / vertex-input-dynamic / robustness2,
+swapchain, frames on a timeline semaphore with deferred deletion and a BDA upload ring, bindless set + pipeline layout, images
+with sync2 layout tracking, pipeline cache for dynamic rendering). `rvk_vktest` renders a translated D3D9 shader pair off-screen
+with validation on and checks every pixel against D3D9's rasterisation rules (half-pixel fix-up = +0.5 px): PASS.
 * device/queues/VMA/swapchain on the game window; frames in flight, upload rings, deferred deletion; validation + debug utils.
 * HAL: textures (DDS), buffers (static + dynamic DISCARD/NOOVERWRITE), vertex declarations, programs, constants, render states ->
   pipeline key + dynamic state, draw/DrawUP, render targets, clear, present, reset/resize.

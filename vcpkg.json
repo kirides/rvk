@@ -9,6 +9,7 @@
     "minhook",
     "spdlog",
     "spirv-tools",
+    "stb",
     "tomlplusplus",
     "volk",
     "vulkan-headers",
