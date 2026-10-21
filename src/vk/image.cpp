@@ -124,7 +124,14 @@ void Image::destroy(Context& ctx) {
 }
 
 VkImageView Image::attachmentView(Context& ctx, std::uint32_t mip, std::uint32_t layer) {
-    if (desc_.mips == 1 && desc_.layers == 1 && desc_.type == VK_IMAGE_TYPE_2D && !desc_.cube && aspect_ == VK_IMAGE_ASPECT_COLOR_BIT) {
+    const VkComponentMapping& s = desc_.swizzle;
+    const bool identity = (s.r == VK_COMPONENT_SWIZZLE_IDENTITY || s.r == VK_COMPONENT_SWIZZLE_R) &&
+                          (s.g == VK_COMPONENT_SWIZZLE_IDENTITY || s.g == VK_COMPONENT_SWIZZLE_G) &&
+                          (s.b == VK_COMPONENT_SWIZZLE_IDENTITY || s.b == VK_COMPONENT_SWIZZLE_B) &&
+                          (s.a == VK_COMPONENT_SWIZZLE_IDENTITY || s.a == VK_COMPONENT_SWIZZLE_A);
+    // attachment views must not swizzle (the sampled view of X8R8G8B8 forces alpha to 1)
+    if (identity && desc_.mips == 1 && desc_.layers == 1 && desc_.type == VK_IMAGE_TYPE_2D && !desc_.cube &&
+        aspect_ == VK_IMAGE_ASPECT_COLOR_BIT) {
         return view_;
     }
     const std::uint32_t idx = mip * 6 + layer;
