@@ -68,6 +68,8 @@ add_library(rvk_core STATIC
     src/hal/trace_support.h
     src/hal/types.h
     src/hal/types_base.h
+    src/res/dds.cpp
+    src/res/dds.h
     src/shader/abi.h
     src/shader/glsl.cpp
     src/shader/glsl.h
@@ -82,6 +84,8 @@ add_library(rvk_core STATIC
     src/vk/bindless.h
     src/vk/context.cpp
     src/vk/context.h
+    src/vk/formats.cpp
+    src/vk/formats.h
     src/vk/frames.cpp
     src/vk/frames.h
     src/vk/image.cpp
@@ -151,7 +155,7 @@ rvk_warnings(rvk_vktest)
 # tests
 # ---------------------------------------------------------------------------------------------
 if(RVK_BUILD_TESTS)
-    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp)
+    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp)
     target_link_libraries(rvk_tests PRIVATE rvk_core SPIRV-Tools-static)
     rvk_warnings(rvk_tests)
     add_test(NAME rvk_tests COMMAND rvk_tests)
