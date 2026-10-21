@@ -1,0 +1,13 @@
+LIBRARY d3d9
+EXPORTS
+    Direct3DCreate9=rvk_Direct3DCreate9
+    Direct3DCreate9Ex=rvk_Direct3DCreate9Ex
+    D3DPERF_BeginEvent=rvk_D3DPERF_BeginEvent
+    D3DPERF_EndEvent=rvk_D3DPERF_EndEvent
+    D3DPERF_GetStatus=rvk_D3DPERF_GetStatus
+    D3DPERF_QueryRepeatFrame=rvk_D3DPERF_QueryRepeatFrame
+    D3DPERF_SetMarker=rvk_D3DPERF_SetMarker
+    D3DPERF_SetOptions=rvk_D3DPERF_SetOptions
+    D3DPERF_SetRegion=rvk_D3DPERF_SetRegion
+    ; our own API for tools (risen-spass, scripts)
+    rvk_version

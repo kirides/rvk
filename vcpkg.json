@@ -1,0 +1,15 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "risen-enhanced-graphics",
+  "version-string": "0.1.0",
+  "description": "Pure Vulkan renderer for Risen (Enhanced, x64)",
+  "builtin-baseline": "6f6324d69cc4d5229804bee9f72737fe2ef08087",
+  "dependencies": [
+    "minhook",
+    "spdlog",
+    "tomlplusplus",
+    "volk",
+    "vulkan-headers",
+    "vulkan-memory-allocator"
+  ]
+}

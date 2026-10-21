@@ -1,0 +1,19 @@
+# build output
+/build/
+/build-ninja/
+/out/
+CMakeUserPresets.json
+
+# IDE
+.vs/
+.idea/
+.vscode/
+*.user
+
+# Python
+__pycache__/
+*.pyc
+
+# captured game data (shader corpus, screenshots): derived from the game, never commit
+/corpus/
+/captures/
