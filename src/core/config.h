@@ -21,6 +21,10 @@ struct Config {
     bool validation = false;   // VK_LAYER_KHRONOS_validation (needs the Vulkan SDK)
     bool probe = true;         // log the Vulkan devices and their features at startup
     int adapter = -1;          // physical device index, -1 = best discrete GPU
+
+    // [trace] (mode = "trace")
+    int traceLogFirst = 3;     // calls per HAL slot logged with their arguments
+    bool traceCapture = true;  // write shader bytecode / effect sources to <bin>/rvk/corpus
 };
 
 // Parses config.toml text. Unknown keys are ignored, bad values keep the default; `error` gets a parse error message.

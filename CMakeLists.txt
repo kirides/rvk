@@ -55,6 +55,15 @@ add_library(rvk_core STATIC
     src/core/paths.h
     src/engine/symbols.cpp
     src/engine/symbols.h
+    src/hal/api_generated.h
+    src/hal/engine_alloc.cpp
+    src/hal/trace.cpp
+    src/hal/trace.h
+    src/hal/trace_generated.h
+    src/hal/trace_support.h
+    src/hal/types_base.h
+    src/shader/sm_tokens.cpp
+    src/shader/sm_tokens.h
     src/vk/probe.cpp
     src/vk/probe.h
     src/vk/volk_impl.c

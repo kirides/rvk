@@ -12,6 +12,8 @@
 #include "core/log.h"
 #include "core/paths.h"
 #include "engine/symbols.h"
+#include "hal/trace.h"
+#include "hal/types_base.h"
 #include "vk/probe.h"
 
 namespace rvk::bootstrap {
@@ -33,6 +35,17 @@ void detourInitializeAdmin(void* self, int apiType) {
     g_initializeAdmin.original(self, apiType);
     const auto& s = engine::sym();
     spdlog::info("  -> ms_pAPIInstance = {}", *static_cast<void**>(s.gfxAdminApiInstance));
+    if (g_config.mode == Mode::Trace) {
+        hal::trace::Options opt;
+        opt.logFirst = g_config.traceLogFirst;
+        opt.capture = g_config.traceCapture;
+        opt.captureDir = paths::dataDir() / L"corpus";
+        opt.statsFile = paths::dataDir() / L"trace-stats.txt";
+        hal::trace::configure(opt);
+        if (!hal::trace::install(static_cast<void**>(s.gfxAdminApiInstance))) {
+            spdlog::error("trace: install failed, running untraced");
+        }
+    }
 }
 
 std::string modulePathOf(HMODULE mod) {
@@ -53,7 +66,7 @@ void onProcessAttach(void* module) {
     if (!cfgError.empty()) {
         spdlog::warn("config.toml: {}", cfgError);
     }
-    if (g_config.mode != Mode::Passthrough) {
+    if (g_config.mode == Mode::Vulkan) {
         spdlog::warn("mode '{}' is not implemented yet: running the game's D3D9 renderer", toString(g_config.mode));
         g_config.mode = Mode::Passthrough;
     }
@@ -66,6 +79,10 @@ void onProcessAttach(void* module) {
     if (!engine::resolveSymbols()) {
         spdlog::error("required engine symbols missing (unknown Risen build?): plain d3d9 forwarder");
         return;
+    }
+    if (g_config.mode == Mode::Trace && !hal::initEngineAllocator()) {
+        spdlog::error("bCMemoryAdmin (SharedBase.dll) not found: trace mode off");
+        g_config.mode = Mode::Passthrough;
     }
     if (!hooks::initialize()) {
         return;
@@ -82,6 +99,9 @@ void onProcessAttach(void* module) {
 
 void onProcessDetach(bool processTerminating) {
     spdlog::info("process detach (terminating = {})", processTerminating);
+    if (g_config.mode == Mode::Trace) {
+        hal::trace::writeStats();
+    }
     if (!processTerminating) {
         hooks::shutdown();
     }

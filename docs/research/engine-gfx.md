@@ -288,8 +288,8 @@ Post-processing (bloom, HDR/eye adaptation, DoF, radial blur, wobble, distort, d
 * **Depth / shadow maps** [C] (`eCDepthMap::SetupImageDesc`, `0x59fb20`; `eEDepthMapFormat` 0..8): `A8R8G8B8`, `R16F`, `R32F`,
   **`D16` and `D24S8` as depth-stencil textures (NVIDIA hardware PCF)**, **FOURCC `DF16` / `DF24` (ATI fetch4 depth)**, `G16R16F` / `G32R32F`
   (variance shadow maps). Color-format shadow maps get an extra `CreateDepthBuffer` (`D24S8`, fallback `D24X8`). Format support probed with
-  `CheckDeviceFormat` (`eCDepthMap::IsFormatSupported`, `0x59f810`). **No `INTZ`/`RAWZ`/`RESZ`/`ATOC`/`NULL`-RT hacks** in the code
-  (`NULL`/`DF24`/`DF16` appear only as names in `eCGfxGaugeAdmin::GetNameFromUsage`). Scene depth for SSM/DoF comes from the z pre-pass
+  `CheckDeviceFormat` (`eCDepthMap::IsFormatSupported`, `0x59f810`). No `INTZ`/`RAWZ`/`RESZ`/`ATOC`; **correction (M1 trace): a `NULL`
+  FOURCC colour target and a `DF24` depth texture are created at 1024x1024** (docs/research/hal.md 5). Scene depth for SSM/DoF comes from the z pre-pass
   into an `R32F`-style depth map (`eEIFTextureMode_DepthBuffer`) **[I]**.
 * Back buffer: `X8R8G8B8` modes, auto depth-stencil (format from `eEDepthFormat`), optional MSAA 2..16 in fullscreen (ConfigDefault `MSAA="0"`).
 * **Vertex formats** [C]: meshes carry a D3D9 `D3DVERTEXELEMENT9` declaration (static 52-byte vertex: position, normal, tangent, 2 colors, UV;

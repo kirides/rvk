@@ -45,6 +45,8 @@ Config parseConfig(std::string_view text, std::string* error) {
     cfg.validation = tbl["vulkan"]["validation"].value_or(cfg.validation);
     cfg.probe = tbl["vulkan"]["probe"].value_or(cfg.probe);
     cfg.adapter = tbl["vulkan"]["adapter"].value_or(cfg.adapter);
+    cfg.traceLogFirst = tbl["trace"]["log_first"].value_or(cfg.traceLogFirst);
+    cfg.traceCapture = tbl["trace"]["capture"].value_or(cfg.traceCapture);
     return cfg;
 }
 
