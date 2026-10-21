@@ -10,6 +10,8 @@ fallback when the hardware lacks a feature (RT stays optional on top of the 1.3 
 available. Architecture work must keep that path open: scene and material semantics beyond the D3D9 draw stream (which
 draw is water, terrain, a static mesh, a skinned character), points to inject or replace passes, buffers that can feed
 acceleration structures when RT is enabled, and a player-facing settings system (docs/research/enhancements-roadmap.md).
+**Settings UI (user decision, 2026-10-21): an in-game ImGui overlay** + `bin\rvk\settings.toml` (never under `data\`); instant
+per-feature A/B toggling is a first-class overlay feature (it lets players compare enhanced vs parity themselves).
 
 Research that this plan rests on (read these before changing the architecture):
 * `docs/research/engine-gfx.md`: the engine's graphics HAL, frame structure, shaders, formats (RVAs).
