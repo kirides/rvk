@@ -6,6 +6,7 @@
 // 16 texture stages. Slots without an override are the generated stubs (log once, neutral result).
 
 #include <array>
+#include <chrono>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -400,6 +401,7 @@ private:
     // stand-in "this" for the engine's own CPU-only DX9 functions (PreprocessShader, CompileEffect*, aux buffers)
     std::uint64_t dx9Standin_[8]{};
     std::uint64_t lastStatsFrame_ = 0;
+    std::chrono::steady_clock::time_point lastStatsTime_ = std::chrono::steady_clock::now();
     std::uint64_t halDraws_ = 0;
     void updateLogFrame();
     Options options_;

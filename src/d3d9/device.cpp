@@ -252,6 +252,7 @@ void Device::submitFrame(VkSemaphore waitAcquire, VkSemaphore signalRendered) {
 void Device::present() {
     endRendering();
     ++stats_.frames;
+    stats_.lastFrameDraws = stats_.draws;
     if (options_.offscreen || !swapchain_.valid()) {
         submitFrame(VK_NULL_HANDLE, VK_NULL_HANDLE);
         beginFrame();

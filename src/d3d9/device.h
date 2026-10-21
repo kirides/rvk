@@ -214,6 +214,7 @@ struct FrameStats {
     std::uint32_t renderPasses = 0;
     std::uint32_t pipelines = 0;
     std::uint32_t drawsSkipped = 0;  // draws without a usable shader / target
+    std::uint32_t lastFrameDraws = 0;
     // cumulative since creation
     std::uint64_t totalDraws = 0;
     std::uint64_t skippedNoShader = 0;

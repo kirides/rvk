@@ -1,6 +1,7 @@
 // eCAPIDevice on d3d9::Device (docs/research/hal-structs.md sections 2.x).
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
 
 #include <spdlog/spdlog.h>
@@ -442,7 +443,11 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
 
 void HalDevice::logFrameStats() {
     const auto& s = dev_.stats();
-    if (s.frames == 1 || s.frames - lastStatsFrame_ >= 600) {
+    const auto now = std::chrono::steady_clock::now();
+    if (s.frames == 1 || now - lastStatsTime_ >= std::chrono::seconds(5)) {
+        const double secs = std::chrono::duration<double>(now - lastStatsTime_).count();
+        spdlog::info("hal: {:.1f} fps, {} draws in the last frame", static_cast<double>(s.frames - lastStatsFrame_) / secs, s.lastFrameDraws);
+        lastStatsTime_ = now;
         lastStatsFrame_ = s.frames;
         spdlog::info("hal: frame {}: {} draws total, {} clears, {} render passes; skipped: {} no shader, {} no target, {} vertex "
                      "input, {} pipeline; HAL Draw calls {}; {} unimplemented slots seen",
