@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <format>
+
+#include "shader/abi.h"
 
 namespace rvk::d3d9::scene {
 
@@ -328,6 +331,63 @@ CameraCheck checkCamera(const CameraBlock& cam) {
     c.farPlane = std::abs(cam.vsConstants[11][3] - cam.engineFar);
     for (const float v : cam.viewProjection.m) c.scale = std::max(c.scale, std::abs(v));
     return c;
+}
+
+// ---- frame block ---------------------------------------------------------------------------------------------------------
+
+void fillFrameBlock(shader::abi::FrameBlock& out, const CameraBlock& cur, const CameraBlock& last, const FrameExtras& x) {
+    namespace abi = shader::abi;
+    out = abi::FrameBlock{};
+    const auto put = [](float (&dst)[16], const Mat4& m) { std::memcpy(dst, m.m.data(), sizeof(dst)); };
+    const CameraBlock* cam = cur.valid ? &cur : last.valid ? &last : nullptr;
+    std::uint32_t flags = cur.valid ? abi::kFrameCameraValid : last.valid ? abi::kFrameCameraPredicted : 0u;
+    if (cam != nullptr) {
+        put(out.viewProj, cam->viewProjection);
+        put(out.invViewProj, cam->inverseViewProjection);
+        put(out.view, cam->view);
+        put(out.proj, cam->projection);
+        put(out.invView, cam->inverseView);
+        put(out.invProj, cam->inverseProjection);
+        out.cameraPos[0] = cam->position[0];
+        out.cameraPos[1] = cam->position[1];
+        out.cameraPos[2] = cam->position[2];
+        out.cameraPos[3] = cam->engineFar;
+        out.depthParams[0] = cam->nearZ;
+        out.depthParams[1] = cam->farZ;
+        out.depthParams[2] = cam->engineFar;
+        out.depthParams[3] = cam->engineFar > 0.0f ? 1.0f / cam->engineFar : 0.0f;
+        if (cam->prevValid) {
+            flags |= abi::kFramePrevValid;
+            put(out.prevViewProj, cam->prevViewProjection);
+            put(out.prevInvViewProj, cam->prevInverseViewProjection);
+            out.prevCameraPos[0] = cam->prevPosition[0];
+            out.prevCameraPos[1] = cam->prevPosition[1];
+            out.prevCameraPos[2] = cam->prevPosition[2];
+        } else {
+            std::memcpy(out.prevViewProj, out.viewProj, sizeof(out.viewProj));
+            std::memcpy(out.prevInvViewProj, out.invViewProj, sizeof(out.invViewProj));
+            std::memcpy(out.prevCameraPos, out.cameraPos, sizeof(float) * 3);
+        }
+    } else {
+        const Mat4 id = Mat4::identity();
+        for (float (*m)[16] : {&out.viewProj, &out.invViewProj, &out.view, &out.proj, &out.invView, &out.invProj, &out.prevViewProj,
+                               &out.prevInvViewProj}) {
+            put(*m, id);
+        }
+    }
+    out.viewport[0] = x.width;
+    out.viewport[1] = x.height;
+    out.viewport[2] = x.width > 0.0f ? 1.0f / x.width : 0.0f;
+    out.viewport[3] = x.height > 0.0f ? 1.0f / x.height : 0.0f;
+    out.time[0] = static_cast<float>(cur.valid ? cur.time : x.now);
+    out.time[1] = cur.valid && last.valid ? static_cast<float>(cur.time - last.time) : 0.0f;
+    out.frameInfo[0] = static_cast<std::uint32_t>(x.frameIndex);
+    out.frameInfo[1] = flags;
+    out.frameInfo[2] = x.mainViews;
+    for (std::size_t i = 0; i < 4; ++i) out.images[i] = x.images[i];
+    if (x.params != nullptr) {
+        for (std::size_t i = 0; i < abi::kFrameParams; ++i) std::memcpy(out.params[i], (*x.params)[i].data(), sizeof(out.params[i]));
+    }
 }
 
 }  // namespace rvk::d3d9::scene

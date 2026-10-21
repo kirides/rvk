@@ -17,6 +17,8 @@ param(
     [ValidateSet('passthrough', 'trace', 'vulkan')][string]$Mode = 'passthrough',
     [switch]$NoRenderer,
     [switch]$Validation,
+    # [vulkan] sync_validation: the validation layer's synchronization validation too (implies -Validation; slow)
+    [switch]$SyncValidation,
     # [vulkan] max_fps: present-rate cap, 0 = the monitor's refresh rate with vsync
     [double]$MaxFps = 0,
     # [vulkan] vsync: 'engine' (the game's option), 'on', 'off'
@@ -93,7 +95,7 @@ if ($NoRenderer) {
         '# written by scripts/run.ps1',
         '[renderer]', "mode = `"$Mode`"",
         '[log]', "level = `"$RvkLogLevel`"",
-        '[vulkan]', "validation = $($Validation.IsPresent.ToString().ToLower())", "max_fps = $([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.0##}', $MaxFps))",
+        '[vulkan]', "validation = $($Validation.IsPresent.ToString().ToLower())", "sync_validation = $($SyncValidation.IsPresent.ToString().ToLower())", "max_fps = $([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.0##}', $MaxFps))",
         "vsync = $(@{ engine = '"engine"'; on = 'true'; off = 'false' }[$Vsync])",
         '[debug]', "screenshot_frames = [$Screenshots]", "log_draws = $LogDraws", "log_frame = $LogFrame", "snapshot_frames = [$Snapshots]",
         "dump_saved_textures = $($DumpSavedTextures.IsPresent.ToString().ToLower())",

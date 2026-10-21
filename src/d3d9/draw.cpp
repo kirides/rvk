@@ -579,7 +579,11 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
                      rs_[RS_ALPHATESTENABLE], rs_[RS_ALPHAFUNC], rs_[RS_ALPHAREF], rs_[RS_ZENABLE], rs_[RS_CULLMODE],
                      rs_[RS_COLORWRITEENABLE], tex);
     }
-    const shader::abi::PushConstants push{vsConstAddr_, psConstAddr_, db.address};
+    // drawId = the draw's record index; prevVsConsts stays 0 until motion vectors track geometry (injection.md 4)
+    const std::uint32_t flags =
+        shader::abi::drawFlags(static_cast<std::uint32_t>(kind), static_cast<std::uint32_t>(phase.pass), static_cast<std::uint32_t>(phase.view)) |
+        (tint != 0 ? shader::abi::kDrawFlagTinted : 0u);
+    const shader::abi::PushConstants push{vsConstAddr_, psConstAddr_, db.address, frameBlockAddress(), 0, stats_.draws, flags};
     vkCmdPushConstants(cmd, bindless_.pipelineLayout(), VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
     ++stats_.draws;
     ++stats_.totalDraws;

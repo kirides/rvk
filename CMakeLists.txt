@@ -44,6 +44,55 @@ function(rvk_warnings target)
 endfunction()
 
 # ---------------------------------------------------------------------------------------------
+# Hand-written GLSL shaders (shaders/**, docs/research/injection.md 2): GLSL 4.60 -> SPIR-V 1.6 at build time by rvk_glslc
+# (vcpkg glslang + SPIRV-Tools' validator: nothing beyond vcpkg needed), embedded into rvk_core as generated headers. Each
+# command writes a depfile of the files it included, so editing shaders/include/*.glsl rebuilds what uses it.
+# ---------------------------------------------------------------------------------------------
+add_executable(rvk_glslc tools/glslc/main.cpp)
+target_link_libraries(rvk_glslc PRIVATE glslang::glslang glslang::SPIRV glslang::glslang-default-resource-limits SPIRV-Tools-static)
+rvk_warnings(rvk_glslc)
+set_target_properties(rvk_glslc PROPERTIES FOLDER tools)
+
+set(RVK_SHADER_DIR ${CMAKE_SOURCE_DIR}/shaders)
+set(RVK_GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)
+# new shaders go here (path below shaders/ = the name shader::embedded::spirv() finds them by)
+set(RVK_SHADERS
+    debug/fullscreen.vert
+    debug/inject_view.comp
+    debug/inject_view.frag
+    test/abi_layout.comp
+    test/abi_pass_layout.comp
+)
+set(RVK_SHADER_OUTPUTS)
+set(RVK_SHADER_INCLUDES "")
+set(RVK_SHADER_TABLE "")
+foreach(shader ${RVK_SHADERS})
+    string(MAKE_C_IDENTIFIER ${shader} ident)
+    set(out ${RVK_GENERATED_DIR}/shaders/${shader}.h)
+    add_custom_command(
+        OUTPUT ${out}
+        COMMAND rvk_glslc compile ${RVK_SHADER_DIR}/${shader} -o ${out} --name ${ident} -I ${RVK_SHADER_DIR}/include --depfile ${out}.d
+        DEPENDS rvk_glslc ${RVK_SHADER_DIR}/${shader}
+        DEPFILE ${out}.d
+        COMMENT "GLSL shaders/${shader}"
+        VERBATIM)
+    list(APPEND RVK_SHADER_OUTPUTS ${out})
+    string(APPEND RVK_SHADER_INCLUDES "#include \"shaders/${shader}.h\"\n")
+    string(APPEND RVK_SHADER_TABLE "    {\"${shader}\", data::${ident}},\n")
+endforeach()
+# the ABI header as text: the D3D9 translator puts it into every translated shader
+add_custom_command(
+    OUTPUT ${RVK_GENERATED_DIR}/shaders/rvk_abi_glsl.h
+    COMMAND rvk_glslc text ${RVK_SHADER_DIR}/include/rvk_abi.glsl -o ${RVK_GENERATED_DIR}/shaders/rvk_abi_glsl.h --name rvk_abi_glsl
+    DEPENDS rvk_glslc ${RVK_SHADER_DIR}/include/rvk_abi.glsl
+    COMMENT "GLSL ABI text shaders/include/rvk_abi.glsl"
+    VERBATIM)
+list(APPEND RVK_SHADER_OUTPUTS ${RVK_GENERATED_DIR}/shaders/rvk_abi_glsl.h)
+configure_file(src/shader/embedded.cpp.in ${RVK_GENERATED_DIR}/embedded_shaders.cpp @ONLY)
+file(GLOB RVK_SHADER_SOURCES CONFIGURE_DEPENDS ${RVK_SHADER_DIR}/*/*.glsl ${RVK_SHADER_DIR}/*/*.vert ${RVK_SHADER_DIR}/*/*.frag ${RVK_SHADER_DIR}/*/*.comp)
+source_group(TREE ${RVK_SHADER_DIR} PREFIX shaders FILES ${RVK_SHADER_SOURCES})
+
+# ---------------------------------------------------------------------------------------------
 # rvk_core: everything except the DLL entry points (linked into the DLL and the tests)
 # ---------------------------------------------------------------------------------------------
 add_library(rvk_core STATIC
@@ -78,11 +127,15 @@ add_library(rvk_core STATIC
     src/d3d9/fvf.h
     src/d3d9/identity.cpp
     src/d3d9/identity.h
+    src/d3d9/inject.cpp
+    src/d3d9/inject.h
     src/d3d9/resources.cpp
     src/d3d9/scene.cpp
     src/d3d9/scene.h
     src/d3d9/semantics.cpp
     src/d3d9/semantics.h
+    src/enh/debug_view.cpp
+    src/enh/debug_view.h
     src/engine/scene_hooks.cpp
     src/engine/scene_hooks.h
     src/engine/symbols.cpp
@@ -114,6 +167,8 @@ add_library(rvk_core STATIC
     src/res/dds.cpp
     src/res/dds.h
     src/shader/abi.h
+    src/shader/embedded.cpp.in
+    src/shader/embedded.h
     src/shader/glsl.cpp
     src/shader/glsl.h
     src/shader/sm_decode.cpp
@@ -140,6 +195,8 @@ add_library(rvk_core STATIC
     src/vk/pipeline.h
     src/vk/pacer.cpp
     src/vk/pacer.h
+    src/vk/passes.cpp
+    src/vk/passes.h
     src/vk/presenter.cpp
     src/vk/presenter.h
     src/vk/probe.cpp
@@ -149,8 +206,12 @@ add_library(rvk_core STATIC
     src/vk/vk.h
     src/vk/vma_impl.cpp
     src/vk/volk_impl.c
+    ${RVK_GENERATED_DIR}/embedded_shaders.cpp
+    ${RVK_SHADER_OUTPUTS}
+    ${RVK_SHADER_SOURCES}
 )
 target_include_directories(rvk_core PUBLIC src include)
+target_include_directories(rvk_core PRIVATE ${RVK_GENERATED_DIR})
 target_include_directories(rvk_core PRIVATE ${STB_INCLUDE_DIR} third_party/imgui_vulkan)
 # volk is compiled here (not vcpkg's volk.lib): it needs VK_USE_PLATFORM_WIN32_KHR for the Win32 surface entry points
 target_compile_definitions(rvk_core PUBLIC VK_NO_PROTOTYPES VK_USE_PLATFORM_WIN32_KHR VMA_STATIC_VULKAN_FUNCTIONS=0 VMA_DYNAMIC_VULKAN_FUNCTIONS=0)
@@ -221,13 +282,15 @@ rvk_warnings(rvk_d3d9test)
 # tests
 # ---------------------------------------------------------------------------------------------
 if(RVK_BUILD_TESTS)
-    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp tests/api_tests.cpp tests/fvf_tests.cpp tests/settings_tests.cpp tests/settings_api_tests.cpp tests/scene_tests.cpp tests/draws_tests.cpp)
+    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp tests/api_tests.cpp tests/fvf_tests.cpp tests/settings_tests.cpp tests/settings_api_tests.cpp tests/scene_tests.cpp tests/draws_tests.cpp tests/inject_tests.cpp)
     target_link_libraries(rvk_tests PRIVATE rvk_core SPIRV-Tools-static)
     rvk_warnings(rvk_tests)
     add_test(NAME rvk_tests COMMAND rvk_tests)
     # needs a Vulkan 1.3 GPU (and d3dx9_39.dll): ctest -L gpu
     add_test(NAME rvk_vktest COMMAND rvk_vktest ${CMAKE_BINARY_DIR}/vktest.png)
     set_tests_properties(rvk_vktest PROPERTIES LABELS gpu)
+    add_test(NAME rvk_vktest_passes COMMAND rvk_vktest --passes)
+    set_tests_properties(rvk_vktest_passes PROPERTIES LABELS gpu)
     add_test(NAME rvk_d3d9test COMMAND rvk_d3d9test)
     set_tests_properties(rvk_d3d9test PROPERTIES LABELS gpu)
 endif()

@@ -1,0 +1,14 @@
+#version 460
+// Not used by the renderer: rvk_tests reads the offsets of RVK_PASS_PUSH_HEADER and of the debug view's push block
+// (shaders/debug/inject_view.glsl) from this module's SPIR-V.
+
+#include "../debug/inject_view.glsl"
+
+layout(local_size_x = 1) in;
+
+layout(set = 1, binding = 0, r32ui) uniform writeonly uimage2D sink;
+
+void main() {
+    uint v = pc.passId + pc.passFlags + pc.depthTex + pc.width + pc.height + pc.srcTex + pc.srcSampler + pc.frame.frameInfo.x;
+    imageStore(sink, ivec2(0), uvec4(v));
+}

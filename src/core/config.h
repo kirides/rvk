@@ -21,6 +21,7 @@ struct Config {
 
     // [vulkan]
     bool validation = false;   // VK_LAYER_KHRONOS_validation (needs the Vulkan SDK)
+    bool syncValidation = false;  // + its synchronization validation (implies validation; slow)
     bool probe = true;         // log the Vulkan devices and their features at startup
     int adapter = -1;          // physical device index, -1 = best discrete GPU
     // vsync, max_fps and adapter are also player settings (settings.toml, core/settings.h); a non-default value here

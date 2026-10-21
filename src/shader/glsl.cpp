@@ -14,6 +14,8 @@
 #include <map>
 #include <set>
 
+#include "shader/embedded.h"
+
 namespace rvk::shader {
 namespace {
 
@@ -94,7 +96,8 @@ public:
             res.error = error_;
             return res;
         }
-        res.glsl = header() + globals() + functions_ + mainFunction();
+        res.glsl = header() + globals() + (opt_.extraGlobals.empty() ? std::string() : opt_.extraGlobals + "\n") + functions_ +
+                   mainFunction();
         res.reflection = reflection_;
         res.reflection.version = p_.version;
         return res;
@@ -268,6 +271,9 @@ private:
             if (defF_.contains(n)) {
                 return std::format("c{}_def", n);
             }
+            if (auto it = opt_.constOverrides.find(n); it != opt_.constOverrides.end()) {
+                return overrideExpr(it->second, std::format("{}.c[{}]", consts_, n));
+            }
             return std::format("{}.c[{}]", consts_, n);
         case RegType::Addr: return vs_ ? "vec4(a0)" : std::format("t{}", n);
         case RegType::RastOut: return n == 0 ? "oPos" : n == 1 ? "oFog" : "oPts";
@@ -285,6 +291,20 @@ private:
             error_ = std::format("unsupported source register type {}", static_cast<int>(r.type));
             return "vec4(0.0)";
         }
+    }
+
+    // GlslOptions::constOverrides: the expression with `$c` replaced by the original read
+    static std::string overrideExpr(const std::string& expr, const std::string& original) {
+        std::string out = "(";
+        for (std::size_t i = 0; i < expr.size(); ++i) {
+            if (expr[i] == '$' && i + 1 < expr.size() && expr[i + 1] == 'c') {
+                out += original;
+                ++i;
+            } else {
+                out += expr[i];
+            }
+        }
+        return out + ")";
     }
 
     std::string intExpr(std::uint32_t n) const {
@@ -757,21 +777,13 @@ private:
     // ---- assembly -----------------------------------------------------------------------------------------------------
 
     std::string header() const {
-        std::string h =
-            "#version 460\n#extension GL_EXT_buffer_reference : require\n#extension GL_EXT_nonuniform_qualifier : require\n";
+        std::string h = "#version 460\n";
         h += "// translated from ";
         h += vs_ ? "vs" : "ps";
         h += std::format("_{}_{} by risen-enhanced-graphics\n\n", major_, p_.version.minor);
-        h += "layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer RvkStage {\n"
-             "    vec4 c[256];\n    ivec4 i[16];\n    uint b[16];\n};\n"
-             "layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer RvkDraw {\n"
-             "    uint tex[20];\n    uint smp[20];\n    vec4 posFix;\n    uint alphaFunc;\n    float alphaRef;\n"
-             "    uint pad0;\n    uint pad1;\n};\n"
-             "layout(push_constant, std430) uniform RvkPush {\n    RvkStage vs;\n    RvkStage ps;\n    RvkDraw draw;\n} pc;\n\n";
-        h += "layout(set = 0, binding = 0) uniform texture2D t2D[];\n"
-             "layout(set = 0, binding = 1) uniform textureCube tCube[];\n"
-             "layout(set = 0, binding = 2) uniform texture3D t3D[];\n"
-             "layout(set = 0, binding = 3) uniform sampler samp[];\n\n";
+        // the ABI declarations (push constants, buffer references, the bindless set): shaders/include/rvk_abi.glsl
+        h += embedded::abiGlsl();
+        h += "\n";
         return h;
     }
 
@@ -844,7 +856,17 @@ private:
             g += std::format("{}vec4 c{}_def = {};\n", isConstant ? "const " : "", n, v);
         }
         // helpers
-        g += std::format("\nvec4 rvk_cRel(int i) {{ return uint(i) < 256u ? {}.c[i] : vec4(0.0); }}\n", consts_);
+        if (opt_.constOverrides.empty()) {
+            g += std::format("\nvec4 rvk_cRel(int i) {{ return uint(i) < 256u ? {}.c[i] : vec4(0.0); }}\n", consts_);
+        } else {
+            g += "\nvec4 rvk_cRel(int i) {\n    switch (i) {\n";
+            for (const auto& [n, expr] : opt_.constOverrides) {
+                if (n < abi::kFloatConsts) {
+                    g += std::format("    case {}: return {};\n", n, overrideExpr(expr, std::format("{}.c[{}]", consts_, n)));
+                }
+            }
+            g += std::format("    default: return uint(i) < 256u ? {}.c[i] : vec4(0.0);\n    }}\n}}\n", consts_);
+        }
         g += "vec4 rvk_lit(vec4 s) {\n"
              "    float y = max(s.x, 0.0);\n"
              "    float z = (s.x > 0.0 && s.y > 0.0) ? pow(s.y, clamp(s.w, -128.0, 128.0)) : 0.0;\n"
@@ -897,6 +919,10 @@ private:
                 }
             }
             m += std::format("    vec4 rvk_pos = {};\n", pos);
+            if (!opt_.epilogue.empty()) {
+                m += opt_.epilogue;
+                m += "\n";
+            }
             m += "    rvk_pos.xy += pc.draw.posFix.xy * rvk_pos.w;\n    gl_Position = rvk_pos;\n";
         } else {
             if ((reflection_.colorOutputs & 1u) != 0) {
@@ -911,6 +937,10 @@ private:
                          "        oC0.rgb = mix(oC0.rgb, rvk_tint.rgb * rvk_k, rvk_tint.a);\n"
                          "    }\n";
                 }
+            }
+            if (!opt_.epilogue.empty()) {
+                m += opt_.epilogue;
+                m += "\n";
             }
             for (std::uint32_t i = 0; i < 4; ++i) {
                 if ((reflection_.colorOutputs & (1u << i)) != 0) {

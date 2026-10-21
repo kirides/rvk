@@ -43,6 +43,8 @@ Config parseConfig(std::string_view text, std::string* error) {
     }
     cfg.logLevel = tbl["log"]["level"].value_or(cfg.logLevel);
     cfg.validation = tbl["vulkan"]["validation"].value_or(cfg.validation);
+    cfg.syncValidation = tbl["vulkan"]["sync_validation"].value_or(cfg.syncValidation);
+    cfg.validation = cfg.validation || cfg.syncValidation;
     cfg.probe = tbl["vulkan"]["probe"].value_or(cfg.probe);
     cfg.adapter = tbl["vulkan"]["adapter"].value_or(cfg.adapter);
     cfg.maxFps = tbl["vulkan"]["max_fps"].value_or(cfg.maxFps);

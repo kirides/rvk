@@ -85,11 +85,14 @@ bEResult HalTexture::CopyCurrentRTToImage(eCGfxShared::eETexFilter a0, bCRect* a
     if (logThisFrame()) spdlog::info("hal> CopyCurrentRTToImage -> {}x{} {} in {}/{}", tex_->desc().width, tex_->desc().height,
                                      vk::d3dFormatName(tex_->desc().format), d3d9::scene::name(phase.view),
                                      d3d9::scene::name(phase.pass));
-    if (phase.view == d3d9::scene::View::Main && phase.pass == d3d9::scene::Pass::Solid) {
+    const bool refraction = phase.view == d3d9::scene::View::Main && phase.pass == d3d9::scene::Pass::Solid;
+    if (refraction) {
         d.tagImage(tex_.get(), d3d9::scene::ImageRole::Refraction);
+        d.inject(d3d9::inject::Point::AfterOpaque);  // injection points (d3d9/inject.h) around the copy
     }
     dev_.dev().stretchRect(dev_.dev().renderTarget(0), reinterpret_cast<const std::int32_t*>(a1), tex_->surface(0, 0),
                            reinterpret_cast<const std::int32_t*>(a2), linearFilter(a0));
+    if (refraction) d.inject(d3d9::inject::Point::AfterRefractionCopy);
     return bEResult_Ok;
 }
 

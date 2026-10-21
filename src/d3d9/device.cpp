@@ -19,7 +19,8 @@ namespace rvk::d3d9 {
 namespace {
 
 // bump when the translator's output changes: invalidates the SPIR-V disk cache
-constexpr std::uint32_t kTranslatorVersion = 1;
+// 2: the ABI declarations come from shaders/include/rvk_abi.glsl (48-byte push block, FrameBlock)
+constexpr std::uint32_t kTranslatorVersion = 2;
 // bump when the tint epilogue (GlslOptions::tintEpilogue) changes: the tint variants' cache files
 constexpr std::uint32_t kTintVersion = 2;
 
@@ -54,11 +55,13 @@ double Device::secondsSinceCreate() const {
 bool Device::setMainCamera(const scene::CameraInput& in) {
     if (camera_.valid) return false;
     camera_.set(in, stats_.frames + 1, secondsSinceCreate());
+    frameAddr_ = 0;  // the frame block gets the camera
     return true;
 }
 
 void Device::tagImage(Texture* texture, scene::ImageRole role) {
     if (texture == nullptr || role == scene::ImageRole::None) return;
+    if (roles_[static_cast<std::size_t>(role)] != texture) frameAddr_ = 0;  // the frame block lists the role images
     roles_[static_cast<std::size_t>(role)] = texture;
     if (texture->role_ == role) return;
     const scene::ImageRole old = texture->role_;
@@ -79,14 +82,116 @@ void Device::tagImage(Texture* texture, scene::ImageRole role) {
 
 void Device::forgetImage(Texture* texture) {
     for (auto& r : roles_) {
-        if (r == texture) r = nullptr;
+        if (r == texture) {
+            r = nullptr;
+            frameAddr_ = 0;
+        }
     }
+}
+
+// ---- enhancements (d3d9/inject.h, docs/research/injection.md) ----------------------------------------------------------------
+
+VkDeviceAddress Device::frameBlockAddress() {
+    if (frameAddr_ != 0) return frameAddr_;
+    scene::FrameExtras x;
+    x.frameIndex = stats_.frames + 1;
+    x.now = secondsSinceCreate();
+    x.mainViews = firings_.mainViews();
+    if (const Texture* hdr = imageWithRole(scene::ImageRole::SceneHdr)) {
+        x.width = static_cast<float>(hdr->desc().width);
+        x.height = static_cast<float>(hdr->desc().height);
+    } else {
+        x.width = static_cast<float>(options_.width);
+        x.height = static_cast<float>(options_.height);
+    }
+    const auto slot = [&](scene::ImageRole r) {
+        const Texture* t = imageWithRole(r);
+        return t != nullptr ? t->bindlessSlot() : 0u;
+    };
+    x.images = {slot(scene::ImageRole::SceneHdr), slot(scene::ImageRole::Refraction), slot(scene::ImageRole::DepthMap),
+                slot(scene::ImageRole::SkyEnvCube)};
+    x.params = &frameParams_;
+    const vk::RingAlloc a = frames_.allocate(sizeof(shader::abi::FrameBlock), 16);
+    scene::fillFrameBlock(*static_cast<shader::abi::FrameBlock*>(a.ptr), camera_, lastCamera_, x);
+    frameAddr_ = a.address;
+    ++perf_.frameBlocks;
+    return frameAddr_;
+}
+
+void Device::setFrameParam(std::uint32_t index, const std::array<float, 4>& value) {
+    if (index >= frameParams_.size() || frameParams_[index] == value) return;
+    frameParams_[index] = value;
+    frameAddr_ = 0;
+}
+
+std::uint32_t Device::addPass(inject::Point point, std::string name, inject::PassFn fn, const void* owner, int order) {
+    if (injecting_) {
+        spdlog::error("d3d9: addPass({}) inside an injected pass ignored", name);
+        return 0;
+    }
+    const std::string label = name;
+    const std::uint32_t id = passes_.add(point, std::move(name), std::move(fn), owner, order);
+    spdlog::info("d3d9: pass '{}' at {} (id {}, {} passes)", label, inject::name(point), id, passes_.size());
+    return id;
+}
+
+void Device::removePass(std::uint32_t id) {
+    if (injecting_) {
+        spdlog::error("d3d9: removePass({}) inside an injected pass ignored", id);
+        return;
+    }
+    if (passes_.remove(id)) spdlog::info("d3d9: pass {} removed ({} passes)", id, passes_.size());
+}
+
+void Device::removePasses(const void* owner) {
+    if (!injecting_) passes_.removeOwner(owner);
+}
+
+void Device::beginMainView() { firings_.beginMainView(); }
+
+void Device::inject(inject::Point point) {
+    if (!passes_.any(point) || injecting_ || !created_) return;  // the common case: nothing registered
+    const bool inMain = phases_.view() == scene::View::Main;
+    if (!firings_.take(point, inMain)) return;
+    const auto t0 = std::chrono::steady_clock::now();
+    endRendering();
+    VkCommandBuffer cmd = frames_.cmd();
+    gpuMark("before injection");
+    Surface* rt0 = rt_[0];
+    PassContext ctx{*this, cmd, point};
+    ctx.mainView = inject::inMainView(point) ? firings_.mainViews() : 0;
+    ctx.frameBlock = frameBlockAddress();
+    ctx.sceneHdr = imageWithRole(scene::ImageRole::SceneHdr);
+    ctx.depthMap = imageWithRole(scene::ImageRole::DepthMap);
+    ctx.refraction = imageWithRole(scene::ImageRole::Refraction);
+    ctx.target = rt0 != nullptr && !rt0->texture()->isNull() ? rt0->texture() : nullptr;
+    injecting_ = true;
+    const auto& list = passes_.passes(point);
+    for (std::size_t i = 0; i < list.size(); ++i) {
+        list[i].fn(ctx);
+        if (gpuTimer_.enabled()) {
+            const std::uint32_t slot = frames_.currentSlot();
+            gpuTimer_.mark(cmd, slot, vk::GpuTimer::Stream::Main,
+                           gpuTimer_.details(slot) ? std::format("pass {} at {}", list[i].name, inject::name(point)) : std::string());
+        }
+    }
+    injecting_ = false;
+    invalidateRecordingState();
+    ++perf_.injections;
+    perf_.injectMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+}
+
+bool Device::readable(Texture* texture, VkCommandBuffer cmd) {
+    if (texture == nullptr || texture->isNull()) return false;
+    texture->prepareForSampling(cmd);
+    texture->lastUseFrame_ = frameValue();
+    return texture->image().layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
 
 bool Device::create(const DeviceOptions& options) {
     options_ = options;
     renderThread_ = GetCurrentThreadId();
-    if (!ctx_.create({options.validation, options.adapter, "Risen"})) {
+    if (!ctx_.create({options.validation || options.syncValidation, options.adapter, "Risen", options.syncValidation})) {
         return false;
     }
     // D24S8 depth is optional in Vulkan (AMD has none): fall back to D32S8
@@ -98,6 +203,7 @@ bool Device::create(const DeviceOptions& options) {
     if (!frames_.create(ctx_) || !bindless_.create(ctx_, frames_)) {
         return false;
     }
+    transients_.init(ctx_, frames_, bindless_);
     const auto pipelineFile = options.cacheDir.empty() ? std::filesystem::path() : options.cacheDir / "pipelines.bin";
     if (!pipelines_.create(ctx_, bindless_.pipelineLayout(), pipelineFile, options.pipelineLibraries)) {
         return false;
@@ -329,6 +435,8 @@ void Device::destroy() {
     swapchain_.destroy();
     gpuTimer_.destroy();
     pipelines_.destroy();
+    passes_ = inject::Registry{};
+    transients_.destroy();  // retired: frames_ destroys them
     // frames_ runs the retired destructors (images, bindless slot releases): before the bindless heap goes away
     frames_.destroy();
     bindless_.destroy();
@@ -371,6 +479,7 @@ void Device::beginFrame() {
     viCache_.buffersValid = viCache_.layoutValid = false;
     dyn_.valid = false;
     vsConstDirty_ = psConstDirty_ = true;
+    frameAddr_ = 0;  // ring memory of the frame block belongs to a submission
     passIndex_ = 0;
     const VkDescriptorSet set = bindless_.set();
     vkCmdBindDescriptorSets(frames_.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS, bindless_.pipelineLayout(), 0, 1, &set, 0, nullptr);
@@ -531,6 +640,7 @@ void Device::present() {
     endRendering();
     ++stats_.frames;
     phases_.endFrame();
+    firings_.endFrame();
     draws_.endFrame();
     lastRecord_ = nullptr;
     lastCamera_ = camera_;

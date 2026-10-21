@@ -17,7 +17,8 @@ bool Bindless::create(Context& ctx, Frames& frames) {
     arrays_[1] = {shader::abi::kBindingTexCube, kMaxCube};
     arrays_[2] = {shader::abi::kBindingTex3D, kMax3D};
 
-    const VkShaderStageFlags stages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    // compute too: injected passes (vk/passes.h) bind this set in their own layouts
+    const VkShaderStageFlags stages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
     VkDescriptorSetLayoutBinding b[4]{};
     b[0] = {shader::abi::kBindingTex2D, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMax2D, stages, nullptr};
     b[1] = {shader::abi::kBindingTexCube, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxCube, stages, nullptr};
@@ -54,7 +55,7 @@ bool Bindless::create(Context& ctx, Frames& frames) {
     if (vkAllocateDescriptorSets(ctx.device(), &ai, &set_) != VK_SUCCESS) {
         return false;
     }
-    VkPushConstantRange pcr{stages, 0, sizeof(shader::abi::PushConstants)};
+    VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(shader::abi::PushConstants)};
     VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     plci.setLayoutCount = 1;
     plci.pSetLayouts = &layout_;

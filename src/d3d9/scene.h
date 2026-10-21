@@ -10,6 +10,10 @@
 #include <string>
 #include <vector>
 
+namespace rvk::shader::abi {
+struct FrameBlock;
+}
+
 namespace rvk::d3d9::scene {
 
 // what the engine renders into: a camera view of the world, a shadow map, the sky's environment cube, an entity preview,
@@ -161,5 +165,23 @@ struct CameraCheck {
     float scale = 1.0f;              // largest |element| of the view-projection (to judge the absolute differences)
 };
 CameraCheck checkCamera(const CameraBlock& cam);
+
+// ---- the GPU frame block (shader/abi.h FrameBlock, roadmap do-now item 5) ------------------------------------------------
+
+// what the frame block holds besides the camera
+struct FrameExtras {
+    std::uint64_t frameIndex = 0;  // the frame being recorded (CameraBlock::frame numbering)
+    double now = 0.0;              // seconds since the device was created (used when there is no camera yet)
+    std::uint32_t mainViews = 0;   // main views begun so far this frame
+    float width = 0.0f;            // scene target size (0 = unknown)
+    float height = 0.0f;
+    std::array<std::uint32_t, 4> images{};  // bindless slots: scene HDR, refraction copy, depth map (t2D), sky cube (tCube)
+    const std::array<std::array<float, 4>, 16>* params = nullptr;  // feature parameters (null = zeros)
+};
+
+// The frame block from the current frame's camera `cur` (valid from its main view on) and the last presented frame's `last`.
+// Before this frame's main view the camera fields hold `last`'s (flag kFrameCameraPredicted): shadow maps and the sky cube
+// render before the main view (frame-phases.md 3). Without either camera the matrices are identities and the flags 0.
+void fillFrameBlock(shader::abi::FrameBlock& out, const CameraBlock& cur, const CameraBlock& last, const FrameExtras& extras);
 
 }  // namespace rvk::d3d9::scene

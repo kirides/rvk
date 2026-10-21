@@ -149,6 +149,7 @@ void detourInitializeAdmin(void* self, int apiType) {
         // code that checks it afterwards (docs/research/hal-structs.md 1).
         hal::vulkan::Options vo;
         vo.validation = g_config.validation;
+        vo.syncValidation = g_config.syncValidation;
         vo.adapter = g_config.adapter;
         vo.maxFps = g_config.maxFps;
         vo.vsync = g_config.vsync;

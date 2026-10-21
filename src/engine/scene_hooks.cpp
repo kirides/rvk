@@ -139,6 +139,7 @@ void detourExecute(void* db, void* desc) {
     const View v = g_inRenderEntity > 0 ? View::Preview : (g_inSceneFilter > 0 || g_inCameraRender > 0) ? View::Main : View::Other;
     ViewScope scope(v, Pass::Setup, "eCFrustumDatabase::Execute");
     if (scope.d != nullptr && v == View::Main) {
+        scope.d->beginMainView();
         readMainCamera(*scope.d, db);
         // the image effect's scene target is bound when its eCImageFilterScene calls Execute
         if (g_inSceneFilter > 0) {
@@ -146,6 +147,10 @@ void detourExecute(void* db, void* desc) {
         }
     }
     g_execute.original(db, desc);
+    // injection point (d3d9/inject.h): the scene is complete, the post chain has not run
+    if (scope.d != nullptr && v == View::Main) {
+        scope.d->inject(d3d9::inject::Point::AfterMainView);
+    }
 }
 
 using ExecuteShadowMapFn = void (*)(void* db, void* shadowMap);
@@ -187,6 +192,7 @@ bool detourEndZPass(void* admin) {
     if (d3d9::Device* d = device(); d != nullptr && d->phases().pass() == Pass::DepthPrepass) {
         d->phases().setPass(Pass::Setup);
         logPhase(*d, "EndZPass");
+        d->inject(d3d9::inject::Point::AfterDepthPrepass);
     }
     return r;
 }
@@ -206,6 +212,10 @@ void detourBeginRenderSolid(void* self) {
 
 Hook<VoidThisFn> g_beginRenderAlpha;
 void detourBeginRenderAlpha(void* self) {
+    // the end of the solid pass when no refraction copy marked it (d3d9/inject.h AfterOpaque: once per main view)
+    if (d3d9::Device* d = device(); d != nullptr && d->phases().view() == View::Main) {
+        d->inject(d3d9::inject::Point::AfterOpaque);
+    }
     setPass(Pass::Alpha, "DoBeginRenderAlpha");
     g_beginRenderAlpha.original(self);
 }
@@ -561,6 +571,7 @@ void appDrawEnter() {
     if (d3d9::Device* d = device()) {
         d->phases().push(View::Gui, Pass::Gui);
         logPhase(*d, "eCApplication::Draw");
+        d->inject(d3d9::inject::Point::BeforeGui);
     }
 }
 

@@ -126,6 +126,21 @@ bool Context::createInstance(const ContextOptions& options) {
     ici.ppEnabledExtensionNames = enabled.data();
     ici.enabledLayerCount = static_cast<std::uint32_t>(layers.size());
     ici.ppEnabledLayerNames = layers.data();
+    // [vulkan] sync_validation: hazards between commands (also those of injected passes, docs/research/injection.md)
+    const VkValidationFeatureEnableEXT syncFeature = VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT;
+    // the layer-settings way (VK_EXT_layer_settings, read by current layers) and the older validation-features struct
+    const VkBool32 on = VK_TRUE;
+    const VkLayerSettingEXT setting{"VK_LAYER_KHRONOS_validation", "validate_sync", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &on};
+    VkLayerSettingsCreateInfoEXT settings{VK_STRUCTURE_TYPE_LAYER_SETTINGS_CREATE_INFO_EXT};
+    settings.settingCount = 1;
+    settings.pSettings = &setting;
+    VkValidationFeaturesEXT features{VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT, &settings};
+    features.enabledValidationFeatureCount = 1;
+    features.pEnabledValidationFeatures = &syncFeature;
+    if (options.syncValidation && !layers.empty()) {
+        ici.pNext = &features;
+        spdlog::info("vulkan: synchronization validation requested");
+    }
     if (const VkResult r = vkCreateInstance(&ici, nullptr, &instance_); r != VK_SUCCESS) {
         spdlog::error("vulkan: vkCreateInstance: {}", resultString(r));
         return false;

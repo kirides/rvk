@@ -1,0 +1,16 @@
+#version 460
+// Not used by the renderer: rvk_tests (abi_glsl_layout_matches_cpp) reads the member offsets of the ABI blocks from this
+// module's SPIR-V and compares them with src/shader/abi.h. Touches every block so their types are emitted.
+
+#include "rvk_abi.glsl"
+
+layout(local_size_x = 1) in;
+
+layout(set = 1, binding = 0, r32ui) uniform writeonly uimage2D sink;
+
+void main() {
+    RvkFrame f = pc.frame;
+    uint v = floatBitsToUint(pc.vs.c[0].x) + uint(pc.ps.i[0].x) + pc.prevVs.b[0] + pc.draw.tex[0] + pc.draw.pad1 + pc.drawId +
+             pc.flags + floatBitsToUint(f.params[0].x) + f.images.x + f.frameInfo.x;
+    imageStore(sink, ivec2(0), uvec4(v));
+}

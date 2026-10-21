@@ -73,6 +73,7 @@ HalDevice::~HalDevice() {
     if (settings::registry().dirty() && !options_.settingsFile.empty()) {
         settings::registry().save(options_.settingsFile);
     }
+    debugView_.reset();  // removes its pass, retires its pipelines
     {
         const std::lock_guard lock(handleMutex_);
         for (auto& [h, d] : decls_) dev_.release(std::move(d));
@@ -105,6 +106,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     o.perfFrame = options.perfFrame;
     o.depthFormat = static_cast<std::uint32_t>(p.depthFormat);
     o.validation = options.validation;
+    o.syncValidation = options.syncValidation;
     o.adapter = options.adapter;
     o.maxFps = rs.maxFps != nullptr ? rs.maxFps->value() : options.maxFps;
     o.cacheDir = options.cacheDir;
@@ -142,6 +144,16 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
             dev_.setDrawRecords(s.asBool());
             spdlog::info("hal: settings: draw records {}", s.asBool() ? "on" : "off");
         }, this);
+    }
+    // enhancements (docs/research/injection.md): the debug injection view
+    debugView_ = std::make_unique<enh::DebugView>(dev_);
+    if (rs.injectView != nullptr) {
+        const auto applyInject = [this](const settings::Setting& s) {
+            debugView_->setMode(enh::DebugView::parse(s.asEnum()));
+            spdlog::info("hal: settings: injection test view {}", s.asEnum());
+        };
+        if (!rs.injectView->isDefault()) applyInject(*rs.injectView);
+        reg.onChange(*rs.injectView, applyInject, this);
     }
     if (options.overlay && dev_.swapchain().valid()) {
         overlay_ = std::make_unique<overlay::Overlay>();
@@ -843,6 +855,9 @@ void HalDevice::logPerf(d3d9::PerfStats p) {
                  p.gpuSubmits > 0 ? p.gpuMs / n : 0.0, p.gpuSubmits > 0 ? p.gpuUploadMs / n : 0.0, static_cast<double>(p.gpuSubmits) / n);
     spdlog::info("perf: draw tags + records {:.3f} ms per frame ({:.0f} ns per draw)", p.drawRecordMs / n,
                  p.draws > 0 ? p.drawRecordMs * 1e6 / static_cast<double>(p.draws) : 0.0);
+    // enhancement plumbing (docs/research/injection.md): FrameBlock uploads, injection points that ran passes, their CPU time
+    spdlog::info("perf: frame blocks {:.2f} per frame; injected passes: {:.2f} points per frame, {:.3f} ms per frame (CPU recording)",
+                 static_cast<double>(p.frameBlocks) / n, static_cast<double>(p.injections) / n, p.injectMs / n);
     spdlog::info("perf: per frame {:.0f} draws, {:.1f} render passes, {:.0f} pipeline binds; ring {:.0f} KiB, texture uploads {:.0f} KiB, "
                  "buffer uploads {:.0f} KiB; in the interval: {} pipelines built ({:.1f} ms), {} shaders translated ({} compiled, {:.1f} ms)",
                  static_cast<double>(p.draws) / n, static_cast<double>(p.renderPasses) / n, static_cast<double>(p.pipelineBinds) / n,

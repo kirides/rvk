@@ -1,11 +1,18 @@
 #pragma once
 
-// The contract between translated D3D9 shaders (shader/glsl.cpp) and the Vulkan renderer. Change both sides together.
+// The contract between translated D3D9 shaders (shader/glsl.cpp), hand-written shaders (shaders/**) and the Vulkan renderer.
+// Its GLSL side is shaders/include/rvk_abi.glsl (embedded into every translated shader, #included by hand-written ones);
+// change both together. rvk_tests (abi_glsl_layout_matches_cpp) compares the offsets of every block below with that file's
+// SPIR-V. Design: docs/research/injection.md.
 //
-// Push constants (24 bytes, all stages):
-//   uint64 vsConsts   device address of the vertex shader's StageConsts
-//   uint64 psConsts   device address of the pixel shader's StageConsts
-//   uint64 draw       device address of the DrawBlock
+// Push constants of draws (48 bytes of the 128 every device has, vertex + fragment):
+//   uint64 vsConsts      device address of the vertex shader's StageConsts
+//   uint64 psConsts      device address of the pixel shader's StageConsts
+//   uint64 draw          device address of the DrawBlock
+//   uint64 frame         device address of the FrameBlock (one per frame and submission; 0 never: always uploaded)
+//   uint64 prevVsConsts  last frame's StageConsts of the same geometry (motion vectors, VS capture); 0 = not tracked (yet)
+//   uint32 drawId        the draw's index in the frame (= its draws::Record index)
+//   uint32 flags         bits 0-7 draws::Kind, 8-11 scene::Pass, 12-15 scene::View, 16.. feature bits (kDrawFlag*)
 //
 // StageConsts (std430): vec4 c[256]; ivec4 i[16]; uint b[16]          -> c at 0, i at 4096, b at 4352, 4416 bytes
 // DrawBlock (std430):   uint tex[20]; uint smp[20]; vec4 posFix; uint alphaFunc; float alphaRef; uint pad[2]
@@ -16,8 +23,13 @@
 //                       alphaFunc: D3DCMPFUNC (1 never .. 8 always), alphaRef: 0..1
 //                       pad[0]: debug tint, RGBA8 (unpackUnorm4x8; 0 = none), read only by the tint variant of a pixel
 //                       shader (GlslOptions::tintEpilogue, the "tint draws" debug view); pad[1] unused
+// FrameBlock (std430, 896 bytes): the main camera (current + previous), depth conventions, target size, jitter, time, frame
+//                       index + flags, bindless slots of the tagged engine images, 16 vec4 feature parameters (below)
 //
-// Descriptor set 0 (bindless, update-after-bind, partially bound):
+// Pass shaders (injected passes, d3d9/inject.h) use their own pipeline layout: set 0 = this bindless set, set 1 = a push
+// descriptor set of the pass, 128 bytes of push constants starting with PassPushHeader (GLSL RVK_PASS_PUSH_HEADER).
+//
+// Descriptor set 0 (bindless, update-after-bind, partially bound; vertex, fragment and compute stages):
 //   binding 0: texture2D t2D[]   binding 1: textureCube tCube[]   binding 2: texture3D t3D[]   binding 3: sampler samp[]
 //   index 0 of every texture array is a 1x1 (0,0,0,1) texture (D3D9's value of an unbound sampler).
 //
@@ -61,8 +73,65 @@ struct PushConstants {
     std::uint64_t vsConsts;
     std::uint64_t psConsts;
     std::uint64_t draw;
+    std::uint64_t frame;
+    std::uint64_t prevVsConsts;
+    std::uint32_t drawId;
+    std::uint32_t flags;
 };
-static_assert(sizeof(PushConstants) == 24);
+static_assert(sizeof(PushConstants) == 48);
+// every Vulkan device has at least 128 bytes of push constants: the rest is reserved for later fields
+inline constexpr std::uint32_t kPushConstantBudget = 128;
+static_assert(sizeof(PushConstants) <= kPushConstantBudget);
+
+// PushConstants::flags
+inline constexpr std::uint32_t kDrawKindMask = 0xffu;
+inline constexpr std::uint32_t kDrawPassShift = 8;
+inline constexpr std::uint32_t kDrawViewShift = 12;
+inline constexpr std::uint32_t kDrawFlagTinted = 0x10000u;  // the tint debug view's variant draws it
+constexpr std::uint32_t drawFlags(std::uint32_t kind, std::uint32_t pass, std::uint32_t view) {
+    return (kind & kDrawKindMask) | ((pass & 0xfu) << kDrawPassShift) | ((view & 0xfu) << kDrawViewShift);
+}
+
+// The per-frame block. Matrices: the engine's row-major, row-vector (v' = v * M) matrices stored as they are; GLSL's
+// column-major mat4 reads them as the transpose, so `clip = viewProj * vec4(world, 1)` there.
+struct FrameBlock {
+    float viewProj[16];
+    float invViewProj[16];
+    float view[16];
+    float proj[16];
+    float invView[16];
+    float invProj[16];
+    float prevViewProj[16];     // = viewProj when kFramePrevValid is clear
+    float prevInvViewProj[16];
+    float cameraPos[4];         // xyz, w = engine far (c11.w: the depth map stores view depth / w)
+    float prevCameraPos[4];
+    float depthParams[4];       // projection near, projection far, engine far, 1 / engine far
+    float viewport[4];          // scene target width, height, 1 / width, 1 / height (0 before it is known)
+    float jitter[4];            // xy this frame's sub-pixel jitter in pixels, zw the previous frame's (0: no TAA yet)
+    float time[4];              // seconds since the device was created, seconds since the previous frame, 0, 0
+    std::uint32_t frameInfo[4]; // frame index (low 32 bits), kFrame* flags, main views so far this frame, 0
+    std::uint32_t images[4];    // bindless t2D slots: scene HDR, refraction copy, depth map; tCube slot of the sky cube
+    float params[16][4];        // feature parameters: kFrameParam* (an enhancement owns its indices)
+};
+static_assert(sizeof(FrameBlock) == 896);
+inline constexpr std::uint32_t kFrameCameraValid = 1u;      // this frame's main camera
+inline constexpr std::uint32_t kFrameCameraPredicted = 2u;  // the previous frame's (no main view yet this frame)
+inline constexpr std::uint32_t kFramePrevValid = 4u;        // the prev* fields hold the frame before
+inline constexpr std::uint32_t kFrameParams = 16;
+inline constexpr std::uint32_t kFrameParamDebugView = 0;   // debug.inject_view: x mode, y strength, z grid spacing
+
+// Specialisation-constant ids reserved for variant hooks (GlslOptions::extraGlobals: one SPIR-V module, the variant chosen
+// per pipeline). The default translation declares none; the first enhancement that adds an extra output takes these.
+inline constexpr std::uint32_t kSpecMotionOutput = 0;  // bool: write screen-space motion to an extra colour output
+inline constexpr std::uint32_t kSpecNormalOutput = 1;  // bool: write the interpolated world normal to an extra output
+
+// The first 16 bytes of every pass shader's push block (GLSL RVK_PASS_PUSH_HEADER)
+struct PassPushHeader {
+    std::uint64_t frame;  // FrameBlock address
+    std::uint32_t passId;
+    std::uint32_t passFlags;
+};
+static_assert(sizeof(PassPushHeader) == 16);
 
 inline constexpr std::uint32_t kMaxVaryings = 32;
 inline constexpr std::uint32_t kInvalidLocation = 0xFFFFFFFFu;

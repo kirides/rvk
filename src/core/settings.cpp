@@ -633,6 +633,18 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Hidden,
     });
+    r.injectView = &reg.add({
+        .key = "debug.inject_view",
+        .label = "Injection test view",
+        .category = "Debug",
+        .description = "Developer view that tests the enhancement plumbing (a GLSL compute pass injected after the opaque "
+                       "scene): \"Depth\" colours the scene by distance from the engine's depth map and draws a 5 m grid "
+                       "fixed in the world, \"Tint\" cycles the scene's colour over time. Off renders exactly as without it.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "depth", "tint"},
+        .optionLabels = {"Off", "Depth + world grid", "Tint"},
+    });
     if (&reg == &registry()) g_renderer = r;
     return r;
 }

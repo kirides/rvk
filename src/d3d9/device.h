@@ -26,8 +26,10 @@
 #include "d3d9/defs.h"
 #include "d3d9/draws.h"
 #include "d3d9/identity.h"
+#include "d3d9/inject.h"
 #include "d3d9/scene.h"
 #include "d3d9/semantics.h"
+#include "shader/abi.h"
 #include "shader/glsl.h"
 #include "vk/bindless.h"
 #include "vk/context.h"
@@ -36,6 +38,7 @@
 #include "vk/gputimer.h"
 #include "vk/image.h"
 #include "vk/pacer.h"
+#include "vk/passes.h"
 #include "vk/pipeline.h"
 #include "vk/presenter.h"
 #include "vk/swapchain.h"
@@ -245,6 +248,21 @@ public:
     virtual void record(VkCommandBuffer cmd, VkExtent2D extent) = 0;
 };
 
+// What an injected pass gets (Device::inject, d3d9/inject.h; render thread). `cmd` is the frame's command buffer outside any
+// rendering scope; the pass records its own barriers (vk::Image::transition, Device::readable), binds its own pipeline,
+// descriptor sets and push constants, and may begin / end its own rendering scopes. It must not change the D3D9 state.
+struct PassContext {
+    Device& device;
+    VkCommandBuffer cmd;
+    inject::Point point;
+    std::uint32_t mainView = 0;      // 1 = the frame's first main view, 2 = the second, ...; 0 for BeforeGui
+    VkDeviceAddress frameBlock = 0;  // shader::abi::FrameBlock of this frame (RVK_PASS_PUSH_HEADER's frame)
+    Texture* sceneHdr = nullptr;     // tagged images (scene::ImageRole), null when the engine has not revealed them
+    Texture* depthMap = nullptr;
+    Texture* refraction = nullptr;
+    Texture* target = nullptr;       // render target 0's texture (null when none is bound; may be the back buffer)
+};
+
 struct DeviceOptions {
     HWND__* window = nullptr;
     std::uint32_t width = 0;
@@ -253,6 +271,7 @@ struct DeviceOptions {
     double maxFps = 0.0;  // present-rate cap; 0 = the window monitor's refresh rate with vsync, none without
     std::uint32_t depthFormat = 0;  // D3DFORMAT of the auto depth stencil, 0 = none
     bool validation = false;
+    bool syncValidation = false;  // + synchronization validation ([vulkan] sync_validation)
     int adapter = -1;
     std::filesystem::path cacheDir;  // pipeline + shader caches; empty = no disk cache
     bool offscreen = false;          // no swapchain (tests)
@@ -324,6 +343,9 @@ struct PerfStats {
     std::uint64_t shadersBuilt = 0;        // translated shaders (decode + GLSL + module; glslang only on SPIR-V cache misses)
     std::uint64_t shadersCompiled = 0;     // of those, compiled by glslang (SPIR-V disk cache miss)
     double shaderMs = 0.0;
+    std::uint64_t injections = 0;          // injection points that ran passes (d3d9/inject.h)
+    double injectMs = 0.0;                 // CPU time recording them
+    std::uint64_t frameBlocks = 0;         // FrameBlock uploads
     std::vector<float> frameIntervalsMs;   // present-to-present
     vk::FramePacer::Stats pacer;
     double pacerRate = 0.0;
@@ -460,6 +482,24 @@ public:
     // debug view: tint colour draws by kind / pass (draws::tintColor; the pixel shaders' tint variants are built on demand)
     void setTintMode(draws::TintMode mode) { tint_ = mode; }
     draws::TintMode tintMode() const { return tint_; }
+
+    // ---- enhancements: frame block, injection points, transient images (docs/research/injection.md; render thread) ----
+    // the FrameBlock of the frame being recorded (shader/abi.h): uploaded into the frame's ring on first use and again after
+    // the camera, an image role or a feature parameter changed; every draw's push constants carry it
+    VkDeviceAddress frameBlockAddress();
+    // FrameBlock params[index] (abi::kFrameParam*); applies from the next upload
+    void setFrameParam(std::uint32_t index, const std::array<float, 4>& value);
+    // passes at injection points (d3d9/inject.h): add returns the pass id; add / remove not from inside a pass
+    std::uint32_t addPass(inject::Point point, std::string name, inject::PassFn fn, const void* owner = nullptr, int order = 0);
+    void removePass(std::uint32_t id);
+    void removePasses(const void* owner);
+    const inject::Registry& passes() const { return passes_; }
+    // the scene hooks: a main view begins (the once-per-view guard of its points); an injection point is reached
+    void beginMainView();
+    void inject(inject::Point point);
+    vk::Transients& transients() { return transients_; }
+    // a texture ready for sampling (vertex / fragment / compute) in a pass: pending uploads + layout; false if not sampleable
+    bool readable(Texture* texture, VkCommandBuffer cmd);
 
     // internals used by resources
     vk::Context& ctx() { return ctx_; }
@@ -694,6 +734,14 @@ private:
     draws::FrameDraws draws_;
     draws::Record* lastRecord_ = nullptr;  // the record of the draw being issued (its index buffer is bound after prepareDraw)
     draws::TintMode tint_ = draws::TintMode::Off;
+
+    // enhancements
+    VkDeviceAddress frameAddr_ = 0;  // 0 = upload before the next use
+    std::array<std::array<float, 4>, shader::abi::kFrameParams> frameParams_{};
+    inject::Registry passes_;
+    inject::Firings firings_;
+    bool injecting_ = false;
+    vk::Transients transients_;
 
     // overlay
     PresentOverlay* overlay_ = nullptr;

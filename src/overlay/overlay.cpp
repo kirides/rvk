@@ -724,6 +724,22 @@ void Overlay::buildSettingsWindow() {
         } else {
             ImGui::TextDisabled("no main view in the last frame");
         }
+        // injected passes (d3d9/inject.h, docs/research/injection.md)
+        const auto& passes = device_->passes();
+        if (passes.empty()) {
+            ImGui::TextDisabled("injected passes: none");
+        } else {
+            std::string list;
+            for (std::size_t i = 0; i < d3d9::inject::kPointCount; ++i) {
+                const auto point = static_cast<d3d9::inject::Point>(i);
+                for (const auto& e : passes.passes(point)) {
+                    list += std::format("{}{} at {}", list.empty() ? "" : ", ", e.name, d3d9::inject::name(point));
+                }
+            }
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::Text("injected passes: %s", list.c_str());
+            ImGui::PopTextWrapPos();
+        }
     }
 
     ImGui::Separator();

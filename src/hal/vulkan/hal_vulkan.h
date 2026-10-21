@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "d3d9/device.h"
+#include "enh/debug_view.h"
 #include "overlay/overlay.h"
 #include "hal/stub_generated.h"
 #include "hal/types.h"
@@ -25,6 +26,7 @@ class HalDevice;
 
 struct Options {
     bool validation = false;
+    bool syncValidation = false;
     int adapter = -1;
     double maxFps = 0.0;
     int vsync = -1;  // -1 = the engine's option, 0 = off, 1 = on
@@ -465,6 +467,7 @@ private:
     Options options_;
     bool engineVsync_ = true;  // the game's own vsync option (start parameters / ToggleNewMode)
     std::unique_ptr<overlay::Overlay> overlay_;
+    std::unique_ptr<enh::DebugView> debugView_;  // debug.inject_view (an injected pass)
     std::chrono::steady_clock::time_point settingsDirtySince_{};
 };
 

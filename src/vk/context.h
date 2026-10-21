@@ -15,6 +15,7 @@ struct ContextOptions {
     bool validation = false;  // VK_LAYER_KHRONOS_validation + debug messenger
     int adapter = -1;         // physical device index, -1 = best discrete GPU
     const char* appName = "Risen";
+    bool syncValidation = false;  // the validation layer's synchronization validation (VkValidationFeaturesEXT)
 };
 
 // Optional device features that were found and enabled.

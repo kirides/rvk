@@ -2,8 +2,8 @@
 
 // The one descriptor set of the renderer (shader/abi.h): bindless arrays of 2D / cube / 3D textures and samplers, updated
 // after bind, partially bound. Slot 0 of each texture array is a 1x1 (0,0,0,1) texture (the value of an unbound D3D9
-// sampler); sampler 0 is point/clamp. Also owns the pipeline layout shared by every pipeline (set 0 + 24 bytes of push
-// constants).
+// sampler); sampler 0 is point/clamp. Also owns the pipeline layout shared by every draw pipeline (set 0 + the 48 bytes of
+// abi::PushConstants); injected passes use their own layouts with this set as set 0 (vk/passes.h).
 
 #include <cstdint>
 #include <mutex>
