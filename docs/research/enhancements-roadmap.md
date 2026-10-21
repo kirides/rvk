@@ -248,8 +248,13 @@ RVAs are Engine.dll unless marked `Game.dll` or `Script.dll`. Dumps: `B:\DevDriv
   * all in linear HDR (the scene target is FP16, so there is no gamma-space hack like GD3D11's `WaterShading.hlsl`)
 * **Underwater**: camera position against the water-zone polygons and the surface height. Apply an own fog and
   absorption post (toggle). Leave the engine's overlay effect alone.
-* **Licence**: our project is MIT. GD3D11's water shaders are GPL with mixed authorship (gd3d11.md 1): **re-implement,
-  do not copy**.
+* **Licence**: our project is MIT. GD3D11's *D3D11-era* water shaders are GPL with mixed authorship (gd3d11.md 1):
+  re-implement those. **GD3D11's new D3D12 and Vulkan code is the user's own and may be reused** (user, 2026-10-21; `git log`
+  shows a single author): `D3D11Engine/D3D12Engine/*` (`D3D12Water`, `D3D12Ssr`, `D3D12RayTracing` inline ray queries,
+  `D3D12RenderGraph`, `D3D12GpuScene`/`D3D12MeshArena`, `D3D12Motion`, `D3D12GTAO`, `D3D12Fsr`, `D3D12PointShadows`),
+  `D3D11Engine/VulkanEngine/*` (RHI, `VulkanImGui`) and `Shaders/D3D12/*` (`WaterRT`, `RtShadows`, `RtScene`, `XeGTAO`). Port
+  from HLSL/D3D12 to our GLSL/Vulkan where it fits; credit the origin in a comment. Check `git log` authorship before reusing
+  any older D3D11-era file.
 
 ### 2.3 Ocean simulation (M8)
 
