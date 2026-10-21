@@ -470,9 +470,13 @@ rest; `1` keeps the wind), `repeat` (n: every spot n times in a row as `<id>_r<k
 | `gui_inventory` | as `hero_closeup` | same | same, `risen.gui.open(2)` | panels, icons, text over the world |
 | `gui_character` | as `hero_closeup` | same | same, `risen.gui.open(3)` | the C screen: attribute/skill lists, numbers, text |
 | `menu_esc` | as `hero_closeup` | same | same, ESC (`gui.key(0x1B)`, page 13) | menu bar, title artwork, font |
+| `swamp_camp` | Don's bandit camp, `SP_Don` (-30621, 8649, 27292) | 14:00, `Sunny_Half_02` | yaw 90, pitch -25, 3000 | fog over wet ground (`Levelmesh_Lakemesh_07` is ground fog, no water): the enhanced water must leave it unchanged |
+| `swamp_pond` | the swamp water `Levelmesh_Lakemesh_06` (anchor -17305, 6700, 15200; target abs -17305, 6700, 17000) | 14:00, `Sunny_Half_02` | yaw 90, pitch -18, 1800 | `Special_Water_Swamp_01`: murky olive water, reeds |
+| `lake_jungle` | the lake `Levelmesh_Lakemesh_05` (anchor -6649, 5320, 8600; target abs -6649, 5300, 11000) | 12:00, `Sunny_Full` | yaw 0, pitch -15, 2200 | `Special_Water_Island_01`: a clear lake with grass, a boardwalk |
+| `waterfall_jungle` | `Levelmesh_Waterfall_0001` (anchor 9299, 2700, 6800; target abs 9299, 3600, 9196) | 12:00, `Sunny_Full` | yaw 270, pitch -8, 2600 | a waterfall under a rope bridge into the river `Levelmesh_Rivermesh_01` |
 
-13 spots. Order: beach (no teleport) -> forest -> harbour -> pub -> monastery -> volcano -> cave -> beach again for the character and GUI
-spots. The fixed camera (`cam_cinema`) draws the 2.37:1 letterbox bars (rows 113..787 of 900, spass RE.md 59) in both
+17 spots (the last four added for the water work, docs/research/water.md 8; poses checked with mode=calibrate). Order: beach (no teleport) -> forest -> harbour -> pub -> monastery -> volcano -> cave -> beach again for the character and GUI
+spots -> the four water spots. The fixed camera (`cam_cinema`) draws the 2.37:1 letterbox bars (rows 113..787 of 900, spass RE.md 59) in both
 renderers; the GUI spots draw over them.
 
 ### 5.4 Per-spot flow (as built)
@@ -807,3 +811,11 @@ spread between two D3D9 runs (up to 4.7 at beach_sun). The earlier difference ca
 No renderer bug was found at these 13 spots at the default thresholds (SSIM >= 0.98, bad32 <= 0.2 %, |dluma| <= 1, psnr_q
 >= 38 dB). Limits: the masked areas (sea, foliage, flames, particles: 0.3-33 %, the volcano 70 %) are not judged; the
 spots do not cover shadows of point lights up close, decals, combat effects or the title screen (candidates for more spots).
+
+### 11.1 The current stored reference (2026-10-22)
+
+**`out\refcompare\20261022-002054`** (`-Calibrate` with the 17 spots incl. the four water spots, two game-D3D9 runs of 261 /
+309 s; the old reference `20261021-190139` predates the spots.lua / main.lua changes and is superseded). `lava_cave` was
+skipped by the calibration (eye 4.93 apart between the two D3D9 runs > 4.0): it keeps the default thresholds. First
+Vulkan run against it (water off, HEAD with the water work): **16 PASS + 1 WARN** (beach_rain: bad32 0.53 %, psnr_q 35.2:
+rain and sea noise, as before), run `out\refcompare\20261022-003113`. Use `-ReferenceDir out\refcompare\20261022-002054`.

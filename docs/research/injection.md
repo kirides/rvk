@@ -238,6 +238,7 @@ delta: compare the CPU / GPU times.
 * Motion / normal outputs, the previous-constants map (`prevVsConsts` = 0), TAA jitter, CTAB-name overrides in `Device`
   (3.4).
 * A pass that needs the D3D9 draw state of the moment (e.g. replacing water draws) is not an injection point but a draw
-  hook (draw tags + a skip / replace decision in `prepareDraw`): M7.
+  hook (draw tags + a skip / replace decision in `prepareDraw`): done in M7 as `d3d9::DrawReplacer` (docs/research/water.md
+  4.1).
 * Transients are not aliased and not size-budgeted; a render graph waits for a real need (GD3D11 lost devices with aliasing).
 * Injection points inside views other than Main (shadow maps, sky cube) and around the post chain's individual filters.

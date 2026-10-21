@@ -229,7 +229,25 @@ efcompare.ps1` + `mods/rvkcompare` (13 spots: beach rain/sun,
   Deferred to M9: a BLAS of real meshes from the draw records (RT instance registry + BLAS cache, TLAS address in the
   FrameBlock).
 
-### M7+ Enhanced graphics
+### M7 Enhanced water (docs/research/water.md; roadmap 2.2, 6)
+* **First piece: done (2026-10-22).** Classification: material / mesh names (`eCResource2 +0x40`) on the draw tags
+  (`draws::Water`: Ocean / Lake / River / Swamp / Waterfall / Shore / Other), the water list of the whole world (survey
+  scenario `mods/rvk_water`); **the open sea = Risen's world-spanning sea plane** (a water body wider than 200,000 units),
+  **its coast = Risen's fake-shore overlay meshes** (`Special_Water_Shore_*`, only along sea beaches); names only for the
+  inland kinds and as override. Don's camp has no water (ground fog). Draw replacement on `d3d9::Device`
+  (`DrawReplacer`: engine / skip / other shaders / procedural, at the draw's own place after the refraction copy). Settings
+  `water.enabled` (default off), `water.quality`, `water.reflections`, `water.ocean_waves`, `water.wave_height`,
+  `water.murkiness`, `water.reflection_strength`, `water.debug`. GLSL shading in linear HDR: refraction with Snell-path
+  Beer-Lambert absorption and in-scattering of the material's own colour (per-body profiles: the swamp stays murky
+  olive), SSR (GD3D11 D3D12 port) + the engine's sky cube, GGX sun glint with the engine's shadow mask, the engine's fog;
+  the sea as a camera-centred clipmap grid with Gerstner waves damped at the coast and near the camera, a waterline 16 units
+  below the engine's with swash, surf / contact / crest foam, the fake shore off; shore field baked from the overlay
+  (GD3D11 ShoreField port); whitewater below waterfalls. Pipelines built in the background (no toggle hitch). Verified:
+  side by side at 7 spots (`scripts\water-compare.ps1`), +0.027 ms GPU at 1080p (beach), sync validation clean, live
+  toggles without hitch, refcompare with the feature off (water.md 8.1).
+  Rest of M7: underwater post, river flow, area profiles; M8: FFT, signed shore field with the sea floor (water.md 10).
+
+### M8+ Enhanced graphics
 * candidates: anisotropic filtering + MSAA/TAA/SMAA, higher-resolution and better-filtered shadows, modern tonemapping/HDR10,
   SSAO/GTAO, upscaling (FSR), improved water/sky/fog, per-feature toggles (in the settings registry). Each measured and
   screenshotted.

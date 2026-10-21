@@ -230,6 +230,14 @@ RVAs are Engine.dll unless marked `Game.dll` or `Script.dll`. Dumps: `B:\DevDriv
 
 ### 2.2 Custom water (M7): replace the shading, keep the engine's geometry and gameplay
 
+**Status (2026-10-22): first piece done, docs/research/water.md.** Built as a *draw replacer* (the water draws are drawn
+with our shaders at their own place right after the refraction copy, not collected and replayed); the sea is detected by
+Risen's own world-spanning sea plane, its coast by Risen's own fake-shore overlay meshes; the sea gets a wave grid with a
+lower, swashing waterline, lakes / rivers / swamp keep their meshes and their material's colour. User requirements recorded
+in water.md 0: waves and a real shore for the open sea only (never puddles, lakes, rivers, waterfalls), the water fits its
+environment (swamp murky, not shiny), the engine's signals first, names only as override. The text below is the original
+plan; where it differs, water.md is the reference.
+
 * **Hook point**: in `HalDevice::Draw`, a draw tagged *water* (refracted mesh, material on the water list) while the
   `water.enabled` setting is on is **not executed**. Its packet goes into a per-frame water list instead: VB/IB, ranges,
   world matrix, and harvested constants (camera, `g_DirLight`, ambient, fog, time). At the end of the refracted phase
@@ -462,8 +470,8 @@ Not now: a full render graph with aliasing (GD3D11 lost devices with aliasing on
 | milestone | content | verify (measurable) | effort |
 |---|---|---|---|
 | **M6 Platform** | do-now items 1-10; ImGui overlay with presets, capability report, live toggles; debug view "tint draws by kind / view"; per-frame tag histogram in `rvk.log` | all features off: the reference-compare suite is pixel-identical to the pre-M6 build; tint view at `beach_sun` shows water = refracted, palms = SpeedTree, hero = skinned; overlay opens and closes without input leaking into the game; fps cost < 2 % | 3-4 weeks |
-| **M7 Enhanced water** | skip engine water draws; own water pass (SSR + env cube, absorption, depth foam, sun glint, underwater fog); lake / ocean classification by material name + water zones | `beach_sun`, `beach_rain`, `harbour_docks`, `waterfall_jungle` screenshots, engine vs enhanced side by side; runtime toggle with no hitch > 1 frame; GPU time < 1.5 ms at 1080p (GPU timestamps); validation clean | 3-4 weeks |
-| **M8 Ocean** | FFT cascades, clipmap ocean bound to ocean zones, shore distance-field bake + cache, Jacobian foam; displacement cap near the player | no seams at the shore and the horizon at the 4 water poses; swim line within the cap while swimming (spass scenario); bake < 2 s per zone and cached; ocean GPU time < 2 ms (High) | 3-5 weeks |
+| **M7 Enhanced water** | skip engine water draws; own water pass (SSR + env cube, absorption, depth foam, sun glint, underwater fog); lake / ocean classification by material name + water zones. **First piece done (water.md)**: classification (sea = Risen's world-spanning sea plane, coast = its fake-shore overlay, names for inland kinds), draw replacement, shading with per-body profiles from the material, the sea's Gerstner wave grid with a lower swashing shoreline and the fake shore off, shore field baked from the overlay, whitewater below falls, background pipelines. **Rest**: underwater post, river flow, area profiles | `beach_sun`, `beach_rain`, `harbour_docks`, `waterfall_jungle` (+ `lake_jungle`, `swamp_pond`, `swamp_camp`) screenshots, engine vs enhanced side by side; runtime toggle with no hitch > 1 frame; GPU time < 1.5 ms at 1080p (GPU timestamps); validation clean. Measured: +0.027 ms GPU at 1080p (beach), no toggle hitch, sync validation clean | 3-4 weeks |
+| **M8 Ocean** | FFT cascades on the M7 wave grid (bound to the sea plane, not zones: water.md 3), signed shore field with the sea floor (a top-down height field from the depth map or the static meshes of the draw records) for shoaling / run-up / breaking waves, Jacobian foam; displacement cap tied to the swim state. User requirement (2026-10-22): waves in the distance and a real, lower shoreline for the open sea only | no seams at the shore and the horizon at the water poses; swim line within the cap while swimming (spass scenario); bake < 2 s per zone and cached; ocean GPU time < 2 ms (High) | 3-5 weeks |
 | **M9 RT reflections** | RT tier; RT instance registry + lifetime hooks; BLAS cache (static), VS capture (dynamic), TLAS per frame; ray-query reflections for water, then glossy surfaces; motion vectors + temporal / spatial denoise | reflections of off-screen geometry in `harbour_docks` (ships, piers); no BLAS leaks over a 30-minute session (memory stats); toggle on/off at runtime; graceful "unsupported" on a non-RT GPU (log + greyed UI); GPU time budget per preset | 6-8 weeks |
 | **M10 RT GI** | DDGI volumes (ray query), hit shading, ambient / lightmap replacement in the material PS, GTAO fallback for non-RT | interiors (`pub`, monastery poses) and night scenes against baseline: no light leaks at probe-visibility test spots; temporal stability (frame-to-frame luma noise metric of reference-compare.md 6.2 under a frozen time); fps per preset; parity path unchanged | 8-12 weeks |
 
@@ -472,12 +480,15 @@ the RT infrastructure with a contained consumer (water first). M10 reuses it.
 
 ## 7. Open questions (to verify in game, CLAUDE.md rule 4)
 
-* Material name / resource name getter on `eCMaterialResource2` for the water list; which sampler of `g_SamplerData` is
-  the albedo map (`eCShaderBase::GetDeclarations` `0x6d29b0`).
+* ~~Material name / resource name getter on `eCMaterialResource2` for the water list~~ Answered: `eCResource2 +0x40` (file
+  title, a `bCString`), the water list and the sea / coast signals in docs/research/water.md 2-3. Open: which sampler of
+  `g_SamplerData` is the albedo map (`eCShaderBase::GetDeclarations` `0x6d29b0`).
 * Whether gfx admin `+0x5b8` (the refraction-copy gate) is a quality option; refraction quality vs the depth-map z
   pre-pass (`this[0x1590]`).
 * The underwater effect path (overlay image effect?) and its trigger.
 * ~~Input API of the game (WM_INPUT?) for the overlay; a free hotkey.~~ Answered: window messages for keys / buttons,
   WM_INPUT raw mouse motion, XInput polled; F10 / F11 are free (docs/research/overlay.md 3).
 * Size of `eCRenderContextMesh::Create` / `Invalidate` and of the `Destroy` vtable slot before detouring (ICF / thunk check).
-* Water draws per frame at the beach (expected: few, large meshes); whether lakes use different materials than the sea.
+* ~~Water draws per frame at the beach (expected: few, large meshes); whether lakes use different materials than the sea.~~
+  Answered (water.md 2.2): 6 at the beach (the sea plane's sub-meshes); lakes (`Special_Water_Island_01`), rivers, the swamp
+  pond and the sea each have their own material; waterfalls and the fake shore are alpha-pass meshes.

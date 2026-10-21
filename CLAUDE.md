@@ -65,6 +65,14 @@ Player settings + overlay (docs/research/overlay.md): every run deletes `bin/rvk
 never in captures unless `-OverlayInScreenshots`; `-Commands '1500: overlay open','1600: key c','1700: ab flip'` runs
 overlay / settings commands at presents (`key`/`click` post real window messages: input tests in the background);
 `-NoOverlay`. config.toml's non-default `[vulkan] vsync / max_fps / adapter` lock the matching player setting.
+Enhanced water (docs/research/water.md; settings category Water, default off): `-Setting 'water.enabled=true'` (+
+`water.quality=low|medium|high`, `water.reflections=sky|ssr`, `water.ocean_waves`, `water.wave_height`, `water.murkiness`,
+`water.reflection_strength`; debug view `water.debug=shore_field|depth|normals|reflection`). rvk.log: `water: material
+...` (each water material's name / mesh / kind once), `water: draw of material ...` (its engine shaders, declaration,
+states, constants; bytecode in `bin/rvk/cache/water/`), `enh: water: body ...` (sea or inland, from its world box),
+`coast overlay` / `shore field` lines. Side by side engine vs enhanced: `.\scripts\water-compare.ps1 [-Spots a,b]
+[-Setting k=v] [-EngineDir out\water\<stamp>]` -> `out\water\<stamp>\sbs_<spot>.png`. Survey scenario `rvk_water`
+(water level-mesh entities' boxes + a look at each; `-Param 'only=Levelmesh_Lakemesh_06','find=SP_Don'`).
 Ray tracing tier (docs/research/raytracing.md): optional, enabled at device creation when the GPU has it and `rt.allow`
 (restart setting, default on; `-Setting 'rt.allow=false'` = floor only); rvk.log `vulkan: ray tracing ...` + `caps:` lines
 (the capability report, also the overlay's "Capabilities"). `-RtSelfTest` (`[debug] rt_selftest`) builds a BLAS/TLAS and
@@ -81,10 +89,11 @@ Screenshot diff (docs/research/reference-compare.md 6): `python tools/refcompare
 (pairs by spot name, bursts `<spot>_b<k>.png` -> median + noise mask, `--meta-a/--meta-b` RVKCMP pose check; metrics, heat
 maps, blink GIFs, `report.html`/`report.json`; exit 1 on FAIL, 2 on INVALID); `calibrate A A2 -o thr.json` derives thresholds
 from two runs of one renderer (+ known-noise masks). Tests: `python -m unittest discover -s tools/tests`. Keep its output outside the repo or in `/out/`.
-**Reference comparison end to end**: `.\scripts\refcompare.ps1` (13 fixed spots of `mods/rvkcompare`: game D3D9 run + Vulkan
+**Reference comparison end to end**: `.\scripts\refcompare.ps1` (17 fixed spots of `mods/rvkcompare`: game D3D9 run + Vulkan
 run in the dedicated copy `B:\DevDrive\risen-test-vk-cmp`, instance 3, pinned ConfigUser.xml; report
 `out\refcompare\<stamp>\report\report.html`). `-Calibrate` = two D3D9 runs -> a reusable reference (thresholds + known-noise
-masks); `-ReferenceDir out\refcompare\<stamp>` = only the Vulkan run against it; `-Spots a,b`; `-Setting k=v` (Vulkan run's
+masks); `-ReferenceDir out\refcompare\<stamp>` = only the Vulkan run against it (current stored reference:
+`out\refcompare\20261022-002054`, 17 spots); `-Spots a,b`; `-Setting k=v` (Vulkan run's
 player settings, e.g. `rt.allow=false`). Renderer scenario mods live in
 this repo's `mods/` (never in risen-spass). Details, spot list, noise handling: docs/research/reference-compare.md 5, 7, 8, 11.
 
@@ -115,7 +124,10 @@ vcpkg glslang + SPIRV-Tools: no Vulkan SDK needed) compiles each to SPIR-V 1.6 a
 `cmake --preset default`). `#include "rvk_abi.glsl"` (push constants, buffer references, FrameBlock, bindless set; pass
 shaders `#define RVK_PASS_SHADER` first and start their push block with `RVK_PASS_PUSH_HEADER`) and `rvk_common.glsl`
 (sampling, depth -> world helpers). Passes plug in at injection points (`Device::addPass(inject::Point::AfterOpaque, ...)`,
-`vk/passes.h`: pass layout, compute / fullscreen pipelines, transient images): docs/research/injection.md.
+`vk/passes.h`: pass layout, compute / fullscreen pipelines, transient images): docs/research/injection.md. A feature that
+takes over engine draws registers a `d3d9::DrawReplacer` (`Device::setDrawReplacer`: skip / other shaders on the engine's
+geometry / procedural geometry, at the draw's own place; `registerReplacement` builds its pipelines in the background):
+docs/research/water.md 4.1.
 `rvk_vktest --passes` checks the pass building blocks on the GPU with synchronization validation (`--hazard`: proves it is live).
 
 ## Architecture (src/)
@@ -136,7 +148,7 @@ shaders `#define RVK_PASS_SHADER` first and start their push block with `RVK_PAS
 | `res/` | DDS parsing |
 | `hal/` | generated HAL interfaces (`tools/gen_hal.py` -> `api_generated.h`, `trace_generated.h`), engine allocator, trace mode |
 | `shader/` | D3D9 bytecode decoder, listing, GLSL generator (`abi.h` = shader/renderer contract; variant hooks `GlslOptions`), glslang wrapper, `embedded.h` (build-time shaders) |
-| `enh/` | enhancements (injected passes): `debug_view.*` = `debug.inject_view` (docs/research/injection.md 5) |
+| `enh/` | enhancements: `debug_view.*` = `debug.inject_view` (an injected pass, docs/research/injection.md 5); `water.*` = the enhanced water (a `d3d9::DrawReplacer`: engine water draws drawn with `shaders/water/*`, the sea's wave grid), `shore_field.*` (coast distance field bake), `water_profile.*` (look per body of water): docs/research/water.md |
 
 ## Tooling gotchas
 

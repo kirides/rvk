@@ -182,6 +182,8 @@ rules moved into `BufferCopyState` without changing a decision.
 * Render contexts of `eCLightStreaks_PS`, `eCDynamicLight_PS`, `eCPointLight_PS`, `eCBillboard_PS` (their own
   `CreateRenderContext` exports; same mechanism as precipitation) were not seen drawing at the tested spots; they would show
   as Unknown with an "untagged draw" line.
-* The material's name (water list of the roadmap, 1.2 item 6) is not read yet; the record has the `eCMaterialResource2*`.
+* ~~The material's name is not read yet~~ Done (docs/research/water.md 2): in the Refracted / Alpha passes the sub-mesh hook
+  reads the material's name (`eCResource2 +0x40`) and sets `Tag::water` / `Tag::materialName`; records carry `water` (the
+  body of water) and `replaced` (drawn by an enhancement's draw replacer, or skipped by it).
 * Records hold engine pointers of the frame: valid during the frame only (the engine may free them later).
 * No GPU copy of the records yet (the ABI extension slots, do-now item 5, add `drawId`).
