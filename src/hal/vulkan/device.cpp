@@ -478,9 +478,10 @@ void HalDevice::logFrameStats() {
         lastStatsTime_ = now;
         lastStatsFrame_ = s.frames;
         spdlog::info("hal: frame {}: {} draws total, {} clears, {} render passes; skipped: {} no shader, {} no target, {} vertex "
-                     "input, {} pipeline; HAL Draw calls {}; {} unimplemented slots seen",
+                     "input, {} pipeline; HAL Draw calls {}; {} unimplemented slots seen; texture CPU copies {:.1f} MiB",
                      s.frames, s.totalDraws, s.totalClears, s.totalRenderPasses, s.skippedNoShader, s.skippedNoTarget,
-                     s.skippedVertexInput, s.skippedPipeline, halDraws_, unimplementedCount());
+                     s.skippedVertexInput, s.skippedPipeline, halDraws_, unimplementedCount(),
+                     static_cast<double>(d3d9::Texture::cpuBytesTotal()) / (1024.0 * 1024.0));
     }
 }
 

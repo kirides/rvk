@@ -778,6 +778,27 @@ bool Device::readRenderTarget(Surface* src, Texture* dst, std::uint32_t dstLevel
     const std::uint32_t w = src->width(), h = src->height();
     const vk::FormatInfo& f = src->texture()->format();
     const VkDeviceSize size = vk::storageSize(f, w, h);
+    if (!readImageLevel(src->texture()->image(), src->level(), src->face(), {w, h, 1}, size, pixels)) {
+        return false;
+    }
+    Texture::Locked lk;
+    const bool ok = dst->lock(dstLevel, 0, nullptr, LOCK_DISCARD, lk);  // overwritten whole: no read-back of the old contents
+    if (ok) {
+        const std::uint32_t rowBytes = static_cast<std::uint32_t>(size / h);
+        for (std::uint32_t y = 0; y < h; ++y) {
+            std::memcpy(static_cast<std::uint8_t*>(lk.bits) + static_cast<std::size_t>(y) * lk.rowPitch,
+                        pixels.data() + static_cast<std::size_t>(y) * rowBytes, std::min(rowBytes, lk.rowPitch));
+        }
+        dst->unlock(dstLevel, 0);
+    }
+    return ok;
+}
+
+bool Device::readImageLevel(vk::Image& img, std::uint32_t level, std::uint32_t layer, VkExtent3D extent, VkDeviceSize size,
+                            std::vector<std::uint8_t>& out) {
+    if (!img.valid() || size == 0) {
+        return false;
+    }
     endRendering();
     VkBuffer rb = VK_NULL_HANDLE;
     VmaAllocation ra = VK_NULL_HANDLE;
@@ -791,29 +812,20 @@ bool Device::readRenderTarget(Surface* src, Texture* dst, std::uint32_t dstLevel
     if (vmaCreateBuffer(ctx_.allocator(), &bci, &aci, &rb, &ra, &info) != VK_SUCCESS) {
         return false;
     }
-    vk::Image& img = src->texture()->image();
     img.transition(frames_.cmd(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     VkBufferImageCopy region{};
-    region.imageSubresource = {img.aspect() & ~VkImageAspectFlags(VK_IMAGE_ASPECT_STENCIL_BIT), src->level(), src->face(), 1};
-    region.imageExtent = {w, h, 1};
+    region.imageSubresource = {img.aspect() & ~VkImageAspectFlags(VK_IMAGE_ASPECT_STENCIL_BIT), level, layer, 1};
+    region.imageExtent = extent;
     vkCmdCopyImageToBuffer(frames_.cmd(), img.image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rb, 1, &region);
     // the copy must finish before the CPU reads: end the frame's work here and start a new command buffer
     submitFrame(VK_NULL_HANDLE, VK_NULL_HANDLE);
     frames_.waitIdle();
     beginFrame();
-    Texture::Locked lk;
-    const bool ok = dst->lock(dstLevel, 0, nullptr, 0, lk);
-    if (ok) {
-        const std::uint32_t rowBytes = static_cast<std::uint32_t>(size / h);
-        for (std::uint32_t y = 0; y < h; ++y) {
-            std::memcpy(static_cast<std::uint8_t*>(lk.bits) + static_cast<std::size_t>(y) * lk.rowPitch,
-                        static_cast<const std::uint8_t*>(info.pMappedData) + static_cast<std::size_t>(y) * rowBytes,
-                        std::min(rowBytes, lk.rowPitch));
-        }
-        dst->unlock(dstLevel, 0);
-    }
+    vmaInvalidateAllocation(ctx_.allocator(), ra, 0, VK_WHOLE_SIZE);
+    const auto* p = static_cast<const std::uint8_t*>(info.pMappedData);
+    out.assign(p, p + size);
     vmaDestroyBuffer(ctx_.allocator(), rb, ra);
-    return ok;
+    return true;
 }
 
 bool Device::readBackBuffer(std::vector<std::uint8_t>& bgra, std::uint32_t& width, std::uint32_t& height) {

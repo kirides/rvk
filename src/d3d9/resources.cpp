@@ -1,6 +1,7 @@
 // Textures, surfaces, buffers and vertex declarations of the D3D9 device model (d3d9/device.h).
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cstring>
 
@@ -58,6 +59,9 @@ Texture::Texture(Device& device, const TextureDesc& desc) : dev_(device), desc_(
 
 Texture::~Texture() {
     surfaces_.clear();
+    for (Level& l : cpu_) {
+        freeLevel(l);
+    }
     if (slot_ != 0) {
         dev_.bindless().releaseTexture(kind_, slot_);
     }
@@ -69,6 +73,12 @@ Texture::~Texture() {
     }
 }
 
+namespace {
+std::atomic<std::uint64_t> g_textureCpuBytes{0};
+}
+
+std::uint64_t Texture::cpuBytesTotal() { return g_textureCpuBytes.load(std::memory_order_relaxed); }
+
 Texture::Level& Texture::cpuLevel(std::uint32_t level, std::uint32_t face) {
     Level& l = cpu_[face * desc_.levels + level];
     if (l.data.empty()) {
@@ -76,8 +86,84 @@ Texture::Level& Texture::cpuLevel(std::uint32_t level, std::uint32_t face) {
         l.rowPitch = p.rowBytes;
         l.slicePitch = p.rowBytes * p.rows;
         l.data.assign(static_cast<std::size_t>(l.slicePitch) * levelDepth(level), 0);
+        g_textureCpuBytes.fetch_add(l.data.size(), std::memory_order_relaxed);
     }
     return l;
+}
+
+void Texture::freeLevel(Level& l) {
+    g_textureCpuBytes.fetch_sub(l.data.size(), std::memory_order_relaxed);
+    std::vector<std::uint8_t>().swap(l.data);
+}
+
+void Texture::markDirty(Level& l, std::uint32_t level, const std::int32_t* rect) {
+    const std::uint32_t w = levelWidth(level), h = levelHeight(level), d = levelDepth(level);
+    std::uint32_t x0 = 0, y0 = 0, x1 = w, y1 = h;
+    if (rect != nullptr) {
+        const auto clampTo = [](std::int32_t v, std::uint32_t hi) {
+            return static_cast<std::uint32_t>(std::clamp<std::int64_t>(v, 0, static_cast<std::int64_t>(hi)));
+        };
+        const std::uint32_t rl = clampTo(rect[0], w), rt = clampTo(rect[1], h), rr = clampTo(rect[2], w), rb = clampTo(rect[3], h);
+        if (rl < rr && rt < rb) {  // an empty / inverted rect counts as the whole level
+            x0 = rl;
+            y0 = rt;
+            x1 = rr;
+            y1 = rb;
+            if (fmt_.compressed) {  // whole 4x4 blocks (the copy extent may end at the level edge)
+                x0 &= ~3u;
+                y0 &= ~3u;
+                x1 = std::min((x1 + 3) & ~3u, w);
+                y1 = std::min((y1 + 3) & ~3u, h);
+            }
+        }
+    }
+    if (!l.dirty) {
+        l.box[0] = x0;
+        l.box[1] = y0;
+        l.box[3] = x1;
+        l.box[4] = y1;
+    } else {
+        l.box[0] = std::min(l.box[0], x0);
+        l.box[1] = std::min(l.box[1], y0);
+        l.box[3] = std::max(l.box[3], x1);
+        l.box[4] = std::max(l.box[4], y1);
+    }
+    l.box[2] = 0;  // LockBox has no box: always all slices
+    l.box[5] = d;
+    l.dirty = true;  // uploaded on the next use after unlock
+}
+
+bool Texture::restoreLevel(std::uint32_t level, std::uint32_t face) {
+    const std::uint32_t w = levelWidth(level), h = levelHeight(level), d = levelDepth(level);
+    const char* why = nullptr;
+    if (!dev_.recordingThread()) {
+        why = "not on the render thread";
+    } else if (fmt_.convert != vk::Convert::None) {
+        why = "converted format";
+    }
+    std::vector<std::uint8_t> bytes;
+    if (why == nullptr) {
+        const VkDeviceSize size = vk::storageSize(fmt_, w, h) * d;
+        if (!dev_.readImageLevel(image_, level, desc_.type == TextureType::Cube ? face : 0u, {w, h, d}, size, bytes)) {
+            why = "read-back failed";
+        }
+    }
+    const std::lock_guard lock(mutex_);
+    if (why != nullptr) {
+        if (!restoreWarned_) {
+            restoreWarned_ = true;
+            spdlog::warn("d3d9: lock of a {}x{} {} texture (pool {}) whose CPU copy was dropped: {}; its texels read as 0 (only the "
+                         "locked region is uploaded)",
+                         desc_.width, desc_.height, vk::d3dFormatName(desc_.format), desc_.pool, why);
+        }
+        return false;
+    }
+    Level& l = cpuLevel(level, face);
+    std::memcpy(l.data.data(), bytes.data(), std::min(l.data.size(), bytes.size()));  // Convert::None: storage = D3D9 layout
+    l.dropped = false;
+    spdlog::debug("d3d9: restored level {} face {} of a {}x{} {} texture from the GPU", level, face, desc_.width, desc_.height,
+                  vk::d3dFormatName(desc_.format));
+    return true;
 }
 
 bool Texture::lock(std::uint32_t level, std::uint32_t face, const std::int32_t* rect, std::uint32_t flags, Locked& out) {
@@ -88,11 +174,18 @@ bool Texture::lock(std::uint32_t level, std::uint32_t face, const std::int32_t* 
         spdlog::warn("d3d9: LockRect on a render target / depth texture is not supported");
         return false;
     }
-    const std::lock_guard lock(mutex_);
+    std::unique_lock lock(mutex_);
     if (cpu_.empty()) {
         cpu_.resize(static_cast<std::size_t>(faces()) * desc_.levels);
     }
+    lockedOnce_ = true;
+    if (cpu_[face * desc_.levels + level].dropped && (flags & LOCK_DISCARD) == 0) {
+        lock.unlock();
+        restoreLevel(level, face);
+        lock.lock();
+    }
     Level& l = cpuLevel(level, face);
+    l.dropped = false;
     std::size_t offset = 0;
     if (rect != nullptr) {
         const std::uint32_t left = static_cast<std::uint32_t>(std::max(0, rect[0]));
@@ -107,7 +200,7 @@ bool Texture::lock(std::uint32_t level, std::uint32_t face, const std::int32_t* 
     out.rowPitch = l.rowPitch;
     out.slicePitch = l.slicePitch;
     if ((flags & LOCK_READONLY) == 0) {
-        l.dirty = true;  // uploaded on the next use after unlock
+        markDirty(l, level, rect);
     }
     return true;
 }
@@ -136,7 +229,8 @@ void Texture::setLevelData(std::uint32_t level, std::uint32_t face, std::span<co
         }
         std::memcpy(l.data.data() + static_cast<std::size_t>(r) * l.rowPitch, data.data() + src, p.rowBytes);
     }
-    l.dirty = true;
+    l.dropped = false;
+    markDirty(l, level, nullptr);
     pending_ = true;
 }
 
@@ -169,26 +263,42 @@ void Texture::upload(VkCommandBuffer cmd) {
                 image_.transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
                 any = true;
             }
-            const std::uint32_t w = levelWidth(level), h = levelHeight(level), d = levelDepth(level);
+            // only the dirty region: the rest of the image keeps what earlier uploads put there (the first upload is whole:
+            // the image starts undefined, the CPU copy zeroed)
+            if (!l.uploaded) {
+                l.box[0] = l.box[1] = l.box[2] = 0;
+                l.box[3] = levelWidth(level);
+                l.box[4] = levelHeight(level);
+                l.box[5] = levelDepth(level);
+                l.uploaded = true;
+            }
+            const std::uint32_t x0 = l.box[0], y0 = l.box[1], z0 = l.box[2];
+            const std::uint32_t w = l.box[3] - x0, h = l.box[4] - y0, d = l.box[5] - z0;
             const std::uint64_t sliceBytes = vk::storageSize(fmt_, w, h);
             vk::RingAlloc staging = dev_.frames().allocate(sliceBytes * d, 16);
             if (staging.ptr == nullptr) {
                 continue;
             }
+            const std::size_t srcOffset =
+                fmt_.compressed ? static_cast<std::size_t>(y0 / 4) * l.rowPitch + static_cast<std::size_t>(x0 / 4) * fmt_.blockBytes
+                                : static_cast<std::size_t>(y0) * l.rowPitch + static_cast<std::size_t>(x0) * fmt_.srcBlockBytes;
             for (std::uint32_t z = 0; z < d; ++z) {
-                vk::convertLevel(fmt_, l.data.data() + static_cast<std::size_t>(z) * l.slicePitch, l.rowPitch,
+                vk::convertLevel(fmt_, l.data.data() + static_cast<std::size_t>(z0 + z) * l.slicePitch + srcOffset, l.rowPitch,
                                  static_cast<std::uint8_t*>(staging.ptr) + z * sliceBytes, w, h);
             }
             VkBufferImageCopy region{};
             region.bufferOffset = staging.offset;
             region.imageSubresource = {image_.aspect() & ~VkImageAspectFlags(VK_IMAGE_ASPECT_STENCIL_BIT), level,
                                        desc_.type == TextureType::Cube ? face : 0u, 1};
+            region.imageOffset = {static_cast<std::int32_t>(x0), static_cast<std::int32_t>(y0), static_cast<std::int32_t>(z0)};
             region.imageExtent = {w, h, d};
             vkCmdCopyBufferToImage(cmd, staging.buffer, image_.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
             l.dirty = false;
-            // file textures are never read back by the engine: drop the CPU copy (D3D9's managed pool would keep it)
-            if (desc_.pool != POOL_SYSTEMMEM && (desc_.usage & USAGE_DYNAMIC) == 0) {
-                std::vector<std::uint8_t>().swap(l.data);
+            // File textures (never locked) are not read back by the engine: drop the CPU copy. A texture that was locked keeps
+            // it like D3D9's managed pool: partial locks (the engine's glyph atlases) must see the earlier contents.
+            if (!lockedOnce_ && desc_.pool != POOL_SYSTEMMEM && (desc_.usage & USAGE_DYNAMIC) == 0) {
+                freeLevel(l);
+                l.dropped = true;
             }
         }
     }
@@ -236,12 +346,25 @@ void* Buffer::lock(std::uint32_t offset, std::uint32_t size, std::uint32_t flags
     }
     const std::lock_guard lock(mutex_);
     if ((flags & LOCK_READONLY) == 0) {
-        dirty_ = true;
-        if ((flags & LOCK_NOOVERWRITE) == 0) {
-            gpuFrame_ = 0;  // DISCARD (or a plain lock): draws recorded before keep the old GPU copy
+        // the written range (size 0 = up to the end)
+        const std::uint32_t lo = std::min(offset, size_);
+        const std::uint32_t hi = size == 0 ? size_ : static_cast<std::uint32_t>(std::min<std::uint64_t>(std::uint64_t{offset} + size, size_));
+        if ((flags & LOCK_DISCARD) != 0) {
+            // the old contents are undefined from here on: a fresh GPU copy needs only what is written after the DISCARD
+            gpuFrame_ = 0;  // draws recorded before keep the old GPU copy
+            discarded_ = true;
+            dirtyLo_ = lo;
+            dirtyHi_ = hi;
+        } else {
+            if ((flags & LOCK_NOOVERWRITE) == 0) {
+                gpuFrame_ = 0;  // a plain lock: new GPU copy (of the whole buffer), draws recorded before keep the old one
+                discarded_ = false;
+            }
+            dirtyLo_ = dirty_ ? std::min(dirtyLo_, lo) : lo;
+            dirtyHi_ = dirty_ ? std::max(dirtyHi_, hi) : hi;
         }
+        dirty_ = true;
     }
-    (void)size;
     return cpu_.data() + offset;
 }
 
@@ -251,21 +374,28 @@ Buffer::Binding Buffer::gpu() {
     const std::lock_guard lock(mutex_);
     const std::uint64_t frame = dev_.frameValue();
     if (dynamic() || pool_ == POOL_SYSTEMMEM) {
-        // ring copy per frame; NOOVERWRITE appends go into the same copy (the CPU writes land before the GPU runs)
+        // ring copy per frame; NOOVERWRITE appends go into the same copy (the CPU writes land before the GPU runs). Only the
+        // bytes written since the last copy are copied (the sprite batcher locks one quad of a 448 KiB buffer per Lock).
         if (gpuFrame_ != frame) {
             vk::RingAlloc a = dev_.frames().allocate(size_, 16);
             if (a.ptr == nullptr) {
                 return {};
             }
-            std::memcpy(a.ptr, cpu_.data(), size_);
+            // after a DISCARD only the range written since is defined; otherwise the copy needs everything (a new frame)
+            const std::uint32_t lo = discarded_ ? dirtyLo_ : 0;
+            const std::uint32_t hi = discarded_ ? dirtyHi_ : size_;
+            if (hi > lo) {
+                std::memcpy(static_cast<std::uint8_t*>(a.ptr) + lo, cpu_.data() + lo, hi - lo);
+            }
             binding_ = {a.buffer, a.offset};
             boundPtr_ = static_cast<std::uint8_t*>(a.ptr);
             gpuFrame_ = frame;
-            dirty_ = false;
-        } else if (dirty_) {
-            std::memcpy(boundPtr_, cpu_.data(), size_);
-            dirty_ = false;
+        } else if (dirty_ && dirtyHi_ > dirtyLo_) {
+            std::memcpy(boundPtr_ + dirtyLo_, cpu_.data() + dirtyLo_, dirtyHi_ - dirtyLo_);
         }
+        dirty_ = false;
+        discarded_ = false;
+        dirtyLo_ = dirtyHi_ = 0;
         return binding_;
     }
     if (dirty_ || static_ == VK_NULL_HANDLE) {

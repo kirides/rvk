@@ -4,10 +4,11 @@ User report: in Vulkan mode the text in the character screen (key C) "breaks aft
 All addresses are Engine.dll RVAs. **[C]** confirmed (decompiled / our code read), **[I]** inferred.
 Dumps: `B:\DevDrive\risen-ghidra\rvk_fonts_dump.txt`, `rvk_fonts_dump2.txt`, `rvk_fonts_dump3.txt`.
 
-**Answer**: the most likely cause is H1. Our `d3d9::Texture` throws away its CPU copy after the first upload. The engine's
-font glyph atlas is a managed texture that keeps getting partial `LockRect` updates as new characters show up. The first new
-glyph after the atlas was drawn once therefore goes into a zero-filled copy, and the whole level is uploaded: every glyph
-rasterised before is erased. Text in that font turns invisible, except for the glyphs added since.
+**Answer (confirmed in game, fixed 2026-10-21)**: H1. Our `d3d9::Texture` threw away its CPU copy after the first upload.
+The engine's font glyph atlas is a managed texture that keeps getting partial `LockRect` updates as new characters show up.
+The first new glyph after the atlas was drawn once therefore went into a zero-filled copy, and the whole level was uploaded:
+every glyph rasterised before was erased. Text in that font turned invisible, except for the glyphs added since. See
+section 4 for the evidence and the fix.
 
 ## 1. How the engine draws GUI text [C]
 
@@ -58,7 +59,9 @@ the sheet was created and first drawn: when a tooltip, the hover text or a value
 
 ## 2. Hypotheses, ranked
 
-### H1 (very likely): partial `LockRect` on a managed texture after its first upload erases the atlas [C code, I in game]
+### H1 (confirmed, fixed): partial `LockRect` on a managed texture after its first upload erases the atlas [C code, C in game]
+
+(Line numbers below refer to the code before the fix.)
 
 * `Texture::upload` (`src/d3d9/resources.cpp:189-192`) frees the level's CPU copy after uploading it. This happens whenever
   `pool != SYSTEMMEM && !(usage & DYNAMIC)`. The glyph sheet (pool 1, usage 0) qualifies.
@@ -95,7 +98,7 @@ the sheet was created and first drawn: when a tooltip, the hover text or a value
 * Optional: remember the union of locked rects per level and upload only that region (`VkBufferImageCopy` offset/extent)
   instead of the whole level. For a 256x256 sheet this saves 256 KiB per new glyph.
 
-### H2 (likely contributor, performance): whole-buffer copy per sprite batch [C code, I impact]
+### H2 (performance, fixed; no fps effect measured): whole-buffer copy per sprite batch [C code, C impact]
 
 * `Buffer::gpu` (`src/d3d9/resources.cpp:255-268`) copies the **whole** CPU buffer into the frame's ring copy whenever the
   buffer is dirty. The sprite VB is 0x1000 * 0x70 = 448 KiB and is locked once per quad. Every batch (a texture or blend
@@ -152,3 +155,42 @@ imported by other DLLs. The calls come from somewhere else (virtual / inlined).
   still sample it. Texture images are retired the same way (`src/d3d9/resources.cpp:59-70`).
 * `eSGfxDrawCallDesc` for sprites uses base vertex 0 and `minVertexIndex = start*4`; `HalDevice::Draw` maps it correctly.
 * The ring grows by 32 MiB chunks and never runs dry in a frame (`src/vk/frames.cpp:174-229`).
+
+## 4. Confirmation and fix (2026-10-21)
+
+**Reproduction** [C]: risen-spass scenario `rvk_charscreen` (new game, `risen.gui.open(3)` = the character screen, mouse
+hovers over a grid of points, close, reopen, then the main menu; every step logs its `ui.frame` count; `shots=1` takes D3D9
+reference screenshots). No action name contains "character" in `risen.input.actions()`, so the scenario opens page 3 directly.
+Rendered frame = `ui.frame` + ~285..300 (the `ui.frame` counter starts when the mod is loaded).
+* A diagnostic log in `Texture::lock` (a lock that hits a level whose CPU copy had been dropped) fired once, at the moment
+  the hover produced the first new glyph: `256x256 A8R8G8B8 pool 1 usage 0x0 level 0 rect 62,54,67,70 flags 0x0`: the
+  glyph sheet, one glyph cell, no flags, exactly as decompiled.
+* Screenshot just before (frame 800) shows every label; just after (frame 850) the skill names (Sword fighting, Alchemy ...)
+  and the hotbar digits are gone, the attribute texts in another font stay. Only that font's atlas was hit.
+* A/B: with the fix the same frames, the tooltip (with glyphs like `"` added lazily), the reopened screen (frame 1850) and the
+  main menu match the D3D9 reference shots.
+
+**Fix** (`src/d3d9/resources.cpp`, `device.h`, `device.cpp`):
+* `Texture::lock` sets `lockedOnce_`; `upload` drops a level's CPU copy only for never-locked textures (file DDS through
+  `setLevelData`, non-dynamic, not SYSTEMMEM). The glyph sheets are locked before their first upload (preload set), so they
+  keep the copy. Cost in game: CPU copies of all textures together 34-38 MiB (the 5 s stats line now prints it).
+* Every level tracks the union of its locked rects (`markDirty`; compressed formats round to 4x4 blocks; LockBox and
+  rect-less locks = whole level) and `upload` copies only that box (`VkBufferImageCopy::imageOffset`). The first upload of a
+  level is always whole (the image starts undefined, the CPU copy zeroed). A new glyph now uploads ~1 KiB instead of 256 KiB.
+* A lock without `LOCK_DISCARD` of a dropped level reads the level back first (`Device::readImageLevel`, the old
+  `readRenderTarget` code: copy to a host buffer, submit, wait, start a new command buffer). Only on the render thread and
+  for unconverted formats; otherwise a warning (once per texture) and the texels read 0, but the partial upload still keeps
+  the rest of the image intact. Not seen in game (no warning in testdemo / rvk_charscreen).
+* `readRenderTarget` locks its destination with `LOCK_DISCARD` (it overwrites the whole level: no read-back).
+* `Buffer` (dynamic / SYSTEMMEM): `lock` records the written byte range; `gpu()` copies only that range into the frame's
+  ring copy. A fresh ring copy (new frame, or after a lock) copies the whole buffer, except right after a DISCARD, where
+  only the range written since is defined. NOOVERWRITE appends keep landing in the same copy; DISCARD / plain locks still
+  rename (draws recorded earlier keep their copy).
+* Tests: `rvk_d3d9test` "partial texture lock" (lock A, draw, lock B, draw: A survives; read-only lock sees both),
+  "lock after upload" (file texture, whole-level lock writing one corner: the rest is read back), "dynamic buffer across
+  frames" (data written in an earlier frame is still drawn without a new lock). The first two fail against the old code.
+
+**Performance** [C]: character screen open, ~1560 draws per frame, vsync pacing at 120 Hz: 79.5 fps both before and after
+the H2 fix. The screen is not bound by the memcpy: the time saved moves into `vkQueuePresentKHR` (avg 2.5 ms before, 5.2 ms
+after). With `max_fps = 60` the game ran at only 43-47 fps with 7-11 ms average pacer sleep per frame, before and after the
+fix: the pacer seems to overshoot when frames are close to the target (not investigated).

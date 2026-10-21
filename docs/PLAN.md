@@ -69,6 +69,12 @@ GetConstantCount left its loop count uninitialised and froze the game for up to 
 HAL refused every depth texture, so the engine's format probe (last supported of R32F, R16F, D16, D24X8, DF16, DF24) picked
 **R16F** colour shadow maps (acne stripes, gaps); `DF24` is now a sampled `D32_SFLOAT` depth texture, the D3D9 reference
 path on AMD (engine-gfx.md 5, docs/images/shadows-r16f-vs-df24.png; scenario `rvk_shadows` in risen-spass for the beach view).
+GUI text (user report "character screen text breaks after a while", docs/research/fonts.md, confirmed and fixed): the
+engine's glyph atlases get partial `LockRect`s for every new glyph, and `d3d9::Texture` had dropped its CPU copy after the
+first upload, so each new glyph erased the atlas. Locked textures now keep their CPU copy (D3D9 managed semantics), only the
+locked region is uploaded, and a dropped file texture locked again is read back from the GPU. Dynamic buffers copy only the
+bytes written since the last draw instead of the whole buffer (the sprite VB is 448 KiB). Scenario `rvk_charscreen` in
+risen-spass; `rvk_d3d9test` cases "partial texture lock", "lock after upload", "dynamic buffer across frames".
 Progress (2026-10-21): Vulkan core in `src/vk/` (context with the 1.3 floor + optional EDS3 / vertex-input-dynamic / robustness2,
 swapchain, frames on a timeline semaphore with deferred deletion and a BDA upload ring, bindless set + pipeline layout, images
 with sync2 layout tracking, pipeline cache for dynamic rendering). `rvk_vktest` renders a translated D3D9 shader pair off-screen
@@ -83,7 +89,8 @@ with validation on and checks every pixel against D3D9's rasterisation rules (ha
   (refraction copy), shadow maps (DF24 sun cascades done; point lights use R16F cube maps as on D3D9/AMD; D16/D24 depth
   compare only if a reference machine needs it; depth bias on D32F is not exact yet: unused by the shadow pass), occlusion
   queries (unused by the game: only the editor's lightmap baker, "visible" stays; docs/research/occlusion.md), D3DX effects
-  (post chain), fonts (the engine's own `eCFont` glyph atlases, not `eCAPIFont`: docs/research/fonts.md), sprites, fixed-function remnants (generated shaders).
+  (post chain), fonts (the engine's own `eCFont` glyph atlases, not `eCAPIFont`: docs/research/fonts.md; atlas updates fixed),
+  sprites, fixed-function remnants (generated shaders).
 * **Verify**: screenshot-diff suite at N poses (D3D9 reference vs Vulkan) within thresholds; a play session without validation errors.
 
 ### M5 Robustness and performance

@@ -70,7 +70,10 @@ public:
     bool isDepth() const { return fmt_.depth; }
     bool isNull() const { return isNull_; }  // the NULL FOURCC render target: no memory
 
-    // D3D9 LockRect / LockBox: a pointer into the CPU copy of the level (D3D9 pitch); rect = {left, top, right, bottom}
+    // D3D9 LockRect / LockBox: a pointer into the CPU copy of the level (D3D9 pitch); rect = {left, top, right, bottom}.
+    // Like D3D9's managed pool, a texture that was ever locked keeps its CPU copy (partial locks, e.g. the engine's glyph
+    // atlases, must see the earlier contents); only the locked region is uploaded. File textures (setLevelData only) drop
+    // theirs after the upload; a later lock without DISCARD reads the level back from the GPU first.
     struct Locked {
         void* bits = nullptr;
         std::uint32_t rowPitch = 0;
@@ -90,6 +93,9 @@ public:
     vk::TextureKind kind() const { return kind_; }
     bool prepareForSampling(VkCommandBuffer cmd);  // uploads pending data, transitions to shader-read; false if nothing to sample
 
+    // bytes held in CPU copies of all textures (diagnostics)
+    static std::uint64_t cpuBytesTotal();
+
 private:
     friend class Device;
     struct Level {
@@ -97,8 +103,14 @@ private:
         std::uint32_t rowPitch = 0;
         std::uint32_t slicePitch = 0;
         bool dirty = false;
+        bool dropped = false;            // the CPU copy was freed after an upload: the image holds the only copy
+        bool uploaded = false;           // the image level was written once (the first upload is always whole)
+        std::uint32_t box[6]{};          // dirty region x0, y0, z0, x1, y1, z1 in texels (valid while dirty)
     };
     Level& cpuLevel(std::uint32_t level, std::uint32_t face);
+    void markDirty(Level& l, std::uint32_t level, const std::int32_t* rect);
+    void freeLevel(Level& l);
+    bool restoreLevel(std::uint32_t level, std::uint32_t face);  // read a dropped level back from the image; mutex_ not held
     void upload(VkCommandBuffer cmd);
 
     Device& dev_;
@@ -112,6 +124,8 @@ private:
     std::mutex mutex_;
     std::vector<Level> cpu_;            // [face * levels + level], allocated on demand
     std::atomic<bool> pending_{false};  // some level is dirty
+    bool lockedOnce_ = false;           // ever locked: keep the CPU copies (D3D9 managed semantics)
+    bool restoreWarned_ = false;
     std::uint64_t lastUseFrame_ = 0;
     std::vector<std::unique_ptr<Surface>> surfaces_;
 };
@@ -164,6 +178,10 @@ private:
     std::vector<std::uint8_t> cpu_;
     std::mutex mutex_;
     bool dirty_ = true;
+    // dynamic buffers: bytes written since the last copy to the GPU, [dirtyLo_, dirtyHi_)
+    std::uint32_t dirtyLo_ = 0;
+    std::uint32_t dirtyHi_ = 0;
+    bool discarded_ = false;      // a DISCARD since the last copy: a fresh ring copy needs only the dirty range
     std::uint64_t gpuFrame_ = 0;  // frame of the ring copy (dynamic buffers)
     Binding binding_;
     std::uint8_t* boundPtr_ = nullptr;  // CPU address of the frame's ring copy (dynamic buffers)
@@ -292,6 +310,9 @@ public:
     void stretchRect(Surface* src, const std::int32_t* srcRect, Surface* dst, const std::int32_t* dstRect, bool linear);
     // GetRenderTargetData: copy a render target into a CPU-side texture level (waits for the GPU)
     bool readRenderTarget(Surface* src, Texture* dst, std::uint32_t dstLevel);
+    // copy one level / layer of an image into `out` (storage layout, tightly packed; waits for the GPU)
+    bool readImageLevel(vk::Image& img, std::uint32_t level, std::uint32_t layer, VkExtent3D extent, VkDeviceSize size,
+                        std::vector<std::uint8_t>& out);
     // read the back buffer as tightly packed BGRA8 (waits for the GPU)
     bool readBackBuffer(std::vector<std::uint8_t>& bgra, std::uint32_t& width, std::uint32_t& height);
 

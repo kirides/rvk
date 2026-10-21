@@ -421,6 +421,114 @@ void testDynamicBuffer(Fixture& f) {
     f.dev.release(std::move(dyn));
 }
 
+void testDynamicBufferAcrossFrames(Fixture& f) {
+    // data written in an earlier frame (DISCARD + NOOVERWRITE) is still drawn in a later frame without a new lock
+    f.reset();
+    const auto a = quad(-1, -1, 0, 1, 0.5f, 0xFFFF0000);
+    const auto b = quad(0, -1, 1, 1, 0.5f, 0xFF0000FF);
+    auto dyn = f.dev.createBuffer(static_cast<std::uint32_t>(64 * sizeof(Vertex)), USAGE_DYNAMIC | USAGE_WRITEONLY, POOL_DEFAULT,
+                                  false, false);
+    std::memcpy(dyn->lock(0, static_cast<std::uint32_t>(6 * sizeof(Vertex)), LOCK_DISCARD), a.data(), 6 * sizeof(Vertex));
+    dyn->unlock();
+    f.dev.setStreamSource(0, dyn.get(), 0, sizeof(Vertex));
+    f.dev.drawPrimitive(PT_TRIANGLELIST, 0, 2);
+    std::memcpy(dyn->lock(40 * sizeof(Vertex), 6 * sizeof(Vertex), LOCK_NOOVERWRITE), b.data(), 6 * sizeof(Vertex));
+    dyn->unlock();
+    f.dev.drawPrimitive(PT_TRIANGLELIST, 40, 2);
+    capture(f.dev, "dynamic_frames_1");  // ends the frame
+    f.reset();
+    f.dev.setStreamSource(0, dyn.get(), 0, sizeof(Vertex));
+    f.dev.drawPrimitive(PT_TRIANGLELIST, 0, 2);
+    f.dev.drawPrimitive(PT_TRIANGLELIST, 40, 2);
+    const Pixels p = capture(f.dev, "dynamic_frames_2");
+    expect("dynamic data of an earlier frame (discard range)", p, 10, 10, 0xFF0000);
+    expect("dynamic data of an earlier frame (nooverwrite range)", p, 50, 10, 0x0000FF);
+    f.dev.setStreamSource(0, nullptr, 0, 0);
+    f.dev.release(std::move(dyn));
+}
+
+// fills rows [y0, y1) x columns [x0, x1) of a locked A8R8G8B8 level with `color`; `bits` points at (rx, ry)
+void fillLocked(const Texture::Locked& lk, std::uint32_t rx, std::uint32_t ry, std::uint32_t x0, std::uint32_t y0, std::uint32_t x1,
+                std::uint32_t y1, std::uint32_t color) {
+    for (std::uint32_t y = y0; y < y1; ++y) {
+        auto* row = reinterpret_cast<std::uint32_t*>(static_cast<std::uint8_t*>(lk.bits) + static_cast<std::size_t>(y - ry) * lk.rowPitch);
+        for (std::uint32_t x = x0; x < x1; ++x) {
+            row[x - rx] = color;
+        }
+    }
+}
+
+void drawTexture(Fixture& f, Texture* tex, const char* name, Pixels& out) {
+    f.reset();
+    f.dev.setPixelShader(f.psTexture);
+    f.dev.setTexture(0, tex);
+    f.dev.setSamplerState(0, SAMP_MAGFILTER, TEXF_POINT);
+    f.dev.setSamplerState(0, SAMP_MINFILTER, TEXF_POINT);
+    f.dev.setSamplerState(0, SAMP_ADDRESSU, TADDRESS_CLAMP);
+    f.dev.setSamplerState(0, SAMP_ADDRESSV, TADDRESS_CLAMP);
+    f.draw(quad(-1, -1, 1, 1, 0.5f, 0xFFFFFFFF));
+    out = capture(f.dev, name);
+    f.dev.setTexture(0, nullptr);
+}
+
+void testPartialLock(Fixture& f) {
+    // a managed texture updated by partial LockRect after it was sampled (the engine's glyph atlases): earlier contents survive
+    TextureDesc d;
+    d.width = d.height = 64;
+    d.format = vk::d3dfmt::A8R8G8B8;
+    d.pool = POOL_MANAGED;
+    auto tex = f.dev.createTexture(d);
+    Texture::Locked lk;
+    const std::int32_t a[4] = {0, 0, 32, 32};  // top-left: red
+    tex->lock(0, 0, a, 0, lk);
+    fillLocked(lk, 0, 0, 0, 0, 32, 32, 0xFFFF0000);
+    tex->unlock(0, 0);
+    Pixels p;
+    drawTexture(f, tex.get(), "partial_lock_1", p);
+    expect("partial lock A", p, 10, 10, 0xFF0000);
+    expect("partial lock A: rest zero", p, 50, 50, 0x000000);
+    const std::int32_t b[4] = {32, 32, 64, 64};  // bottom-right: blue, in a later frame
+    tex->lock(0, 0, b, 0, lk);
+    fillLocked(lk, 32, 32, 32, 32, 64, 64, 0xFF0000FF);
+    tex->unlock(0, 0);
+    drawTexture(f, tex.get(), "partial_lock_2", p);
+    expect("partial lock B", p, 50, 50, 0x0000FF);
+    expect("partial lock: A survives B", p, 10, 10, 0xFF0000);
+    expect("partial lock: untouched", p, 50, 10, 0x000000);
+    // the CPU copy is kept: a read-only lock sees both regions
+    tex->lock(0, 0, nullptr, LOCK_READONLY, lk);
+    const auto* px = static_cast<const std::uint32_t*>(lk.bits);
+    if (px[0] != 0xFFFF0000u || px[63 * (lk.rowPitch / 4) + 63] != 0xFF0000FFu) {
+        std::printf("  FAIL partial lock: read-only lock sees %08X / %08X\n", px[0], px[63 * (lk.rowPitch / 4) + 63]);
+        ++g_failures;
+    }
+    tex->unlock(0, 0);
+    f.dev.release(std::move(tex));
+}
+
+void testLockAfterUpload(Fixture& f) {
+    // a file texture (setLevelData) drops its CPU copy after the upload; a later whole-level lock without DISCARD that
+    // writes one corner must still see the file contents everywhere else (read back from the GPU)
+    TextureDesc d;
+    d.width = d.height = 64;
+    d.format = vk::d3dfmt::A8R8G8B8;
+    d.pool = POOL_MANAGED;
+    auto tex = f.dev.createTexture(d);
+    std::vector<std::uint32_t> green(64 * 64, 0xFF00FF00u);
+    tex->setLevelData(0, 0, {reinterpret_cast<const std::uint8_t*>(green.data()), green.size() * 4}, 64 * 4);
+    Pixels p;
+    drawTexture(f, tex.get(), "lock_after_upload_1", p);
+    expect("file texture", p, 50, 50, 0x00FF00);
+    Texture::Locked lk;
+    tex->lock(0, 0, nullptr, 0, lk);
+    fillLocked(lk, 0, 0, 0, 0, 16, 16, 0xFFFFFF00);
+    tex->unlock(0, 0);
+    drawTexture(f, tex.get(), "lock_after_upload_2", p);
+    expect("lock after upload: written corner", p, 5, 5, 0xFFFF00);
+    expect("lock after upload: file contents kept", p, 50, 50, 0x00FF00);
+    f.dev.release(std::move(tex));
+}
+
 }  // namespace
 
 // --present-test [vsync 0/1]: a real window, clears + presents 300 frames, prints the frame rate (vsync pacing check)
@@ -495,7 +603,8 @@ int main(int argc, char** argv) {
         {"depth", testDepth},         {"blend", testBlend},              {"alpha test", testAlphaTest},
         {"stencil", testStencil},     {"render to texture", testRenderToTexture}, {"dxt1", testDxt1},
         {"instancing", testInstancing}, {"UP + scissor", testUpAndScissor}, {"stretch rect", testStretchRect},
-        {"dynamic buffer", testDynamicBuffer},
+        {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
+        {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
     };
     for (const auto& [name, fn] : cases) {
         const int before = g_failures;
