@@ -26,6 +26,7 @@
 #include "vk/formats.h"
 #include "vk/frames.h"
 #include "vk/image.h"
+#include "vk/pacer.h"
 #include "vk/pipeline.h"
 #include "vk/swapchain.h"
 
@@ -195,6 +196,7 @@ struct DeviceOptions {
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     bool vsync = true;
+    double maxFps = 0.0;  // present-rate cap; 0 = the window monitor's refresh rate with vsync, none without
     std::uint32_t depthFormat = 0;  // D3DFORMAT of the auto depth stencil, 0 = none
     bool validation = false;
     int adapter = -1;
@@ -215,6 +217,13 @@ struct FrameStats {
     std::uint32_t pipelines = 0;
     std::uint32_t drawsSkipped = 0;  // draws without a usable shader / target
     std::uint32_t lastFrameDraws = 0;
+    std::uint64_t acquireFailures = 0;
+    std::uint64_t presentsQueued = 0;
+    std::uint64_t presentSuboptimal = 0;
+    std::uint64_t swapchainRecreates = 0;
+    double acquireMs = 0.0;  // summed time in vkAcquireNextImageKHR / vkQueuePresentKHR (per stats interval)
+    double presentMs = 0.0;
+    double pacerMs = 0.0;  // summed time the frame pacer slept
     // cumulative since creation
     std::uint64_t totalDraws = 0;
     std::uint64_t skippedNoShader = 0;
@@ -289,9 +298,15 @@ public:
     // frame
     void present();
     bool resize(std::uint32_t width, std::uint32_t height);
+    void setVsync(bool vsync);
     Surface* backBuffer() { return backBufferSurface_; }
     Surface* autoDepthStencil() { return depthSurface_; }
     const FrameStats& stats() const { return stats_; }
+    void resetTimings() {
+        stats_.acquireMs = 0.0;
+        stats_.presentMs = 0.0;
+        stats_.pacerMs = 0.0;
+    }
 
     // internals used by resources
     vk::Context& ctx() { return ctx_; }
@@ -339,6 +354,11 @@ private:
     vk::Bindless bindless_;
     vk::PipelineCache pipelines_;
     vk::Swapchain swapchain_;
+    vk::FramePacer pacer_;
+    std::chrono::steady_clock::time_point pacerChecked_{};
+    void* pacerMonitor_ = nullptr;
+    double pacerMonitorRate_ = 0.0;
+    void updatePacer();
     VkFormat d24s8_ = VK_FORMAT_D24_UNORM_S8_UINT;
     std::uint32_t renderThread_ = 0;
     bool created_ = false;

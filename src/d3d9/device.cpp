@@ -4,6 +4,7 @@
 
 #include <windows.h>
 
+#include <chrono>
 #include <cstring>
 #include <fstream>
 
@@ -155,6 +156,18 @@ bool Device::resize(std::uint32_t width, std::uint32_t height) {
     return true;
 }
 
+void Device::setVsync(bool vsync) {
+    if (vsync == options_.vsync) {
+        return;
+    }
+    options_.vsync = vsync;
+    pacerChecked_ = {};
+    swapchain_.setVsync(vsync);
+    if (swapchain_.valid()) {
+        swapchain_.recreate(swapchain_.extent().width, swapchain_.extent().height);
+    }
+}
+
 void Device::destroy() {
     if (!created_) {
         return;
@@ -249,6 +262,32 @@ void Device::submitFrame(VkSemaphore waitAcquire, VkSemaphore signalRendered) {
     frames_.submit(waitAcquire, signalRendered);
 }
 
+// the pacer's rate follows the window's monitor. EnumDisplaySettings is slow (it stalled the frames while the world loaded
+// when it ran once a second), so the rate is only queried again when the window moves to another monitor.
+void Device::updatePacer() {
+    const auto now = std::chrono::steady_clock::now();
+    if (now - pacerChecked_ < std::chrono::seconds(1)) {
+        return;
+    }
+    pacerChecked_ = now;
+    double rate = options_.maxFps;
+    if (rate <= 0.0 && options_.vsync) {
+        void* monitor = MonitorFromWindow(options_.window, MONITOR_DEFAULTTONEAREST);
+        if (monitor != pacerMonitor_) {
+            pacerMonitor_ = monitor;
+            const auto t0 = std::chrono::steady_clock::now();
+            pacerMonitorRate_ = vk::monitorRefreshRate(options_.window);
+            spdlog::info("vulkan: monitor refresh rate {} Hz (queried in {:.1f} ms)", pacerMonitorRate_,
+                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        }
+        rate = pacerMonitorRate_;
+    }
+    if (rate != pacer_.rate()) {
+        spdlog::info("vulkan: frame pacing at {} fps{}", rate, options_.maxFps > 0.0 ? " (max_fps)" : options_.vsync ? " (vsync)" : "");
+        pacer_.setRate(rate);
+    }
+}
+
 void Device::present() {
     endRendering();
     ++stats_.frames;
@@ -261,8 +300,16 @@ void Device::present() {
     const std::uint32_t slot = static_cast<std::uint32_t>(frames_.currentValue() % vk::Frames::kInFlight);
     VkSemaphore acquired = acquireSemaphores_[slot];
     std::uint32_t imageIndex = 0;
-    if (!swapchain_.acquire(acquired, imageIndex)) {
+    updatePacer();
+    const auto tw = std::chrono::steady_clock::now();
+    pacer_.wait();
+    stats_.pacerMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tw).count();
+    const auto ta = std::chrono::steady_clock::now();
+    const bool acquiredOk = swapchain_.acquire(acquired, imageIndex);
+    stats_.acquireMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - ta).count();
+    if (!acquiredOk) {
         // minimised or out of date: drop the frame's presentation, keep its work
+        ++stats_.acquireFailures;
         submitFrame(VK_NULL_HANDLE, VK_NULL_HANDLE);
         RECT rc{};
         GetClientRect(options_.window, &rc);
@@ -310,8 +357,13 @@ void Device::present() {
     b.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     vkCmdPipelineBarrier2(cmd, &di);
     submitFrame(acquired, swapchain_.renderedSemaphore(imageIndex));
+    const auto tp = std::chrono::steady_clock::now();
     const VkResult r = swapchain_.present(imageIndex);
+    stats_.presentMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tp).count();
+    ++stats_.presentsQueued;
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) {
+        ++stats_.presentSuboptimal;
+        ++stats_.swapchainRecreates;
         RECT rc{};
         GetClientRect(options_.window, &rc);
         if (rc.right > 0 && rc.bottom > 0) {

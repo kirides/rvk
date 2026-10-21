@@ -23,6 +23,7 @@ struct Config {
     bool validation = false;   // VK_LAYER_KHRONOS_validation (needs the Vulkan SDK)
     bool probe = true;         // log the Vulkan devices and their features at startup
     int adapter = -1;          // physical device index, -1 = best discrete GPU
+    double maxFps = 0.0;       // present-rate cap; 0 = the monitor's refresh rate with vsync, none without
 
     // [trace] (mode = "trace")
     int traceLogFirst = 3;     // calls per HAL slot logged with their arguments

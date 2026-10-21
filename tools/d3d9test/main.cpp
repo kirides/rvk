@@ -5,6 +5,9 @@
 // Every case renders into the 64x64 back buffer with D3D9-style calls (states, streams, D3DX-assembled shaders), reads the
 // pixels back (readBackBuffer) and compares them with what D3D9 produces. Exit code 0 = all pass and no validation errors.
 
+#include <windows.h>
+
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -420,6 +423,40 @@ void testDynamicBuffer(Fixture& f) {
 
 }  // namespace
 
+// --present-test [vsync 0/1]: a real window, clears + presents 300 frames, prints the frame rate (vsync pacing check)
+int presentTest(bool vsync) {
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"rvk_present_test";
+    RegisterClassW(&wc);
+    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"rvk present test", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 100, 100, 640, 400,
+                                nullptr, nullptr, wc.hInstance, nullptr);
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    Device dev;
+    DeviceOptions o;
+    o.window = hwnd;
+    o.width = static_cast<std::uint32_t>(rc.right);
+    o.height = static_cast<std::uint32_t>(rc.bottom);
+    o.vsync = vsync;
+    if (!dev.create(o)) return 2;
+    const auto t0 = std::chrono::steady_clock::now();
+    constexpr int kFrames = 300;
+    for (int i = 0; i < kFrames; ++i) {
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) DispatchMessageW(&msg);
+        dev.clear(CLEAR_TARGET, 0xFF000000u | static_cast<std::uint32_t>(i * 0x010101), 1.0f, 0);
+        dev.present();
+    }
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::printf("vsync %d: %d frames in %.2f s = %.1f fps (acquire failures %llu)\n", vsync ? 1 : 0, kFrames, secs, kFrames / secs,
+                static_cast<unsigned long long>(dev.stats().acquireFailures));
+    dev.destroy();
+    DestroyWindow(hwnd);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     bool validation = true;
@@ -427,6 +464,7 @@ int main(int argc, char** argv) {
         const std::string a = argv[i];
         if (a == "--no-validation") validation = false;
         if (a == "--keep-images") g_keepImages = true;
+        if (a == "--present-test") return presentTest(i + 1 >= argc || std::string(argv[i + 1]) != "0");
     }
     if (!devtools::D3DX::get().available()) {
         std::printf("d3dx9_39.dll not available\n");

@@ -88,6 +88,15 @@ bool Context::createInstance(const ContextOptions& options) {
         enabled.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     }
     std::vector<const char*> layers;
+    {
+        std::uint32_t ln = 0;
+        vkEnumerateInstanceLayerProperties(&ln, nullptr);
+        std::vector<VkLayerProperties> props(ln);
+        vkEnumerateInstanceLayerProperties(&ln, props.data());
+        std::string names;
+        for (const auto& l : props) names += std::string(names.empty() ? "" : ", ") + l.layerName;
+        spdlog::info("vulkan: available layers: {}", names.empty() ? "none" : names);
+    }
     if (options.validation) {
         std::uint32_t ln = 0;
         vkEnumerateInstanceLayerProperties(&ln, nullptr);

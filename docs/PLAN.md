@@ -59,9 +59,13 @@ with rain, water, vegetation, post chain and GUI) render through Vulkan, no D3D9
 `mode = "vulkan"`; ~65 fps unoptimised with ~1450 draws per frame. Layers: `hal/vulkan` (engine HAL) -> `d3d9::Device`
 (D3D9 state model, `rvk_d3d9test`) -> `vk/` (Vulkan core, `rvk_vktest`); effects through `src/fx` + `hal/vulkan/effect.cpp`.
 Open (next): D3D9 reference comparison at fixed poses; unimplemented slots seen in game (LoadSurfaceFromSurface,
-SaveTextureToFile, HLSL constant tables, FVF buffers); the early `Direct3DCreate9` (Engine.dll+0x74ec0b, adapter
-enumeration) still loads the system d3d9.dll; occlusion queries report "visible"; colour shadow maps only (depth textures
-reported unsupported); FIFO presents do not seem to throttle the menu (~1300 fps); performance pass.
+SaveTextureToFile, FVF buffers); the early `Direct3DCreate9` (Engine.dll+0x74ec0b, adapter enumeration) still loads the
+system d3d9.dll; occlusion queries report "visible"; colour shadow maps only (depth textures reported unsupported);
+performance pass (in game ~79.5 fps on a 120 Hz display with ~5 ms inside vkQueuePresentKHR).
+Done after M3: vsync. FIFO presents returned at once in the game window (menu ~1500 fps; a plain window is throttled), so
+`d3d9::Device` paces presents to the refresh rate of the window's monitor (`vk::FramePacer`, `[vulkan] max_fps`). HLSL
+constant tables (CTAB via `src/fx`): the engine walks them for sampler masks (Engine.dll 0x6bb440); the unimplemented
+GetConstantCount left its loop count uninitialised and froze the game for up to a minute after loading.
 Progress (2026-10-21): Vulkan core in `src/vk/` (context with the 1.3 floor + optional EDS3 / vertex-input-dynamic / robustness2,
 swapchain, frames on a timeline semaphore with deferred deletion and a BDA upload ring, bindless set + pipeline layout, images
 with sync2 layout tracking, pipeline cache for dynamic rendering). `rvk_vktest` renders a translated D3D9 shader pair off-screen

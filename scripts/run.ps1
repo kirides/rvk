@@ -17,6 +17,8 @@ param(
     [ValidateSet('passthrough', 'trace', 'vulkan')][string]$Mode = 'passthrough',
     [switch]$NoRenderer,
     [switch]$Validation,
+    # [vulkan] max_fps: present-rate cap, 0 = the monitor's refresh rate with vsync
+    [double]$MaxFps = 0,
     # frame numbers whose back buffer the Vulkan renderer saves to bin/rvk/screenshots/frame_<n>.png, e.g. 300,900
     [string]$Screenshots = '',
     # log the first N draws of the Vulkan renderer in detail
@@ -26,7 +28,9 @@ param(
     [ValidateSet('trace', 'debug', 'info', 'warn', 'error')][string]$RvkLogLevel = 'info',
     [string]$Config = 'RelWithDebInfo',
     [string]$GameDir = 'B:\DevDrive\risen-test-vk',
-    [string]$SpassRepo = 'B:\DevDrive\git\github\risen-spass',
+    # risen-spass instance id (own single-instance mutex, window offset): needed to run beside another Risen
+    [int]$Instance = 0,
+    [string]$SpassRepo ='B:\DevDrive\git\github\risen-spass',
     # passed to risen-spass's test-run.ps1
     [string[]]$Mods = @('testdemo'),
     [int]$Seconds = 240,
@@ -65,7 +69,7 @@ if ($NoRenderer) {
         '# written by scripts/run.ps1',
         '[renderer]', "mode = `"$Mode`"",
         '[log]', "level = `"$RvkLogLevel`"",
-        '[vulkan]', "validation = $($Validation.IsPresent.ToString().ToLower())",
+        '[vulkan]', "validation = $($Validation.IsPresent.ToString().ToLower())", "max_fps = $([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.0##}', $MaxFps))",
         '[debug]', "screenshot_frames = [$Screenshots]", "log_draws = $LogDraws", "log_frame = $LogFrame"
     )
     Remove-Item (Join-Path $rvkDir 'screenshots') -Recurse -Force -ErrorAction SilentlyContinue
@@ -75,7 +79,7 @@ if ($NoRenderer) {
 }
 
 $spassArgs = @{
-    GameDir = $GameDir; Mods = $Mods; Seconds = $Seconds; Param = $Param; WindowSize = $WindowSize; Filter = $Filter
+    GameDir = $GameDir; Instance = $Instance; Mods = $Mods; Seconds = $Seconds; Param = $Param; WindowSize = $WindowSize; Filter = $Filter
 }
 if ($Scenario) { $spassArgs.Scenario = $Scenario }
 if ($WaitForResult) { $spassArgs.WaitForResult = $true }

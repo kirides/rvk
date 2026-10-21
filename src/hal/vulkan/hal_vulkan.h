@@ -24,6 +24,7 @@ class HalDevice;
 struct Options {
     bool validation = false;
     int adapter = -1;
+    double maxFps = 0.0;
     std::filesystem::path cacheDir;  // <bin>/rvk/cache
     std::vector<std::uint32_t> screenshotFrames;  // frames whose back buffer is saved as PNG
     std::filesystem::path screenshotDir;           // <bin>/rvk/screenshots
@@ -188,6 +189,14 @@ public:
     bEResult GetShaderByteCodeSize(long& a0) const override;
     bEResult GetFunctionData(void** a0, unsigned long& a1) const override;
     bEResult GetShaderType(eCGfxShared::eEGfxHLSLShaderType& a0) const override;
+    // constant tables (ID3DXConstantTable): the engine walks them for the samplers a material shader uses
+    void* CreateConstantTable() override;
+    void DestroyConstantTable(void* a0) override;
+    bEResult GetShaderVersion(void* a0, unsigned long& a1) const override;
+    bEResult GetConstantCount(void* a0, unsigned int& a1) override;
+    bEResult GetConstantDescription(void* a0, void* const a1, unsigned int a2, eCGfxShared::eSGfxHLSLConstantDesc& a3,
+                                    bool a4) const override;
+    bEResult GetSamplerIndex(void* a0, void* const a1, unsigned int& a2) override;
     bEResult Execute() override;
     bEResult DestroyShader() override;
     bEResult CreateShader() override;

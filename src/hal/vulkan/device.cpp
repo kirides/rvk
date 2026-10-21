@@ -68,6 +68,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     o.depthFormat = static_cast<std::uint32_t>(p.depthFormat);
     o.validation = options.validation;
     o.adapter = options.adapter;
+    o.maxFps = options.maxFps;
     o.cacheDir = options.cacheDir;
     o.logDraws = options.logDraws;
     if (!p.windowed) {
@@ -374,6 +375,7 @@ bEResult HalDevice::DestroyDepthBuffer(void* a0) {
 
 bEResult HalDevice::ToggleNewMode(eCAPIDevice::eSAPIModeParameters const& a0) {
     spdlog::info("hal: ToggleNewMode {}x{} (windowed {}, vsync {})", a0.backBufferWidth, a0.backBufferHeight, a0.windowed, a0.vsync);
+    dev_.setVsync(a0.vsync);
     return dev_.resize(a0.backBufferWidth, a0.backBufferHeight) ? bEResult_Ok : bEResult_False;
 }
 
@@ -446,7 +448,12 @@ void HalDevice::logFrameStats() {
     const auto now = std::chrono::steady_clock::now();
     if (s.frames == 1 || now - lastStatsTime_ >= std::chrono::seconds(5)) {
         const double secs = std::chrono::duration<double>(now - lastStatsTime_).count();
-        spdlog::info("hal: {:.1f} fps, {} draws in the last frame", static_cast<double>(s.frames - lastStatsFrame_) / secs, s.lastFrameDraws);
+        const double frames = std::max(1.0, static_cast<double>(s.frames - lastStatsFrame_));
+        spdlog::info("hal: {:.1f} fps, {} draws in the last frame; presents {}, acquire failures {}, suboptimal {}; avg acquire "
+                     "{:.2f} ms, present {:.2f} ms, pacing {:.2f} ms",
+                     static_cast<double>(s.frames - lastStatsFrame_) / secs, s.lastFrameDraws, s.presentsQueued, s.acquireFailures,
+                     s.presentSuboptimal, s.acquireMs / frames, s.presentMs / frames, s.pacerMs / frames);
+        dev_.resetTimings();
         lastStatsTime_ = now;
         lastStatsFrame_ = s.frames;
         spdlog::info("hal: frame {}: {} draws total, {} clears, {} render passes; skipped: {} no shader, {} no target, {} vertex "

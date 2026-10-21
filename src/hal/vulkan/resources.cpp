@@ -5,6 +5,7 @@
 #include <spdlog/spdlog.h>
 
 #include "core/exports.h"
+#include "fx/effect_binary.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "vk/formats.h"
 
@@ -436,6 +437,76 @@ bEResult HalHLSLShader::GetFunctionData(void** a0, unsigned long& a1) const {
 bEResult HalHLSLShader::GetShaderType(eCGfxShared::eEGfxHLSLShaderType& a0) const {
     if (bytecode_.empty()) return bEResult_False;
     a0 = static_cast<eCGfxShared::eEGfxHLSLShaderType>(type_ & 1);  // 0 vertex, 1 pixel
+    return bEResult_Ok;
+}
+
+// Constant tables (eCDX9HLSLShader 0x749da0..0x74a750 on ID3DXConstantTable). The table handle is an fx::ConstantTable
+// parsed from the shader's CTAB; constant handles (D3DXHANDLE) point at its fx::Constant entries. The engine walks every
+// constant recursively (Engine.dll 0x6bb440: GetConstant for struct members, GetConstantElement for arrays) to collect the
+// sampler registers; with these slots unimplemented it looped over an uninitialised count.
+
+namespace {
+
+const fx::Constant* constantAt(const fx::ConstantTable& table, const void* parent, unsigned int index) {
+    if (parent == nullptr) {
+        return index < table.constants.size() ? &table.constants[index] : nullptr;
+    }
+    const auto& members = static_cast<const fx::Constant*>(parent)->members;
+    return index < members.size() ? &members[index] : nullptr;
+}
+
+}  // namespace
+
+void* HalHLSLShader::CreateConstantTable() {
+    if (bytecode_.empty()) return nullptr;
+    auto r = fx::parseConstantTable(bytecode_);
+    if (!r.ok()) {
+        static int logged = 0;
+        if (logged++ < 10) spdlog::warn("hal: shader {:016x}: bad constant table: {}", shader_ ? shader_->hash : 0, r.error);
+        return nullptr;
+    }
+    return new fx::ConstantTable(std::move(r.table));
+}
+
+void HalHLSLShader::DestroyConstantTable(void* a0) { delete static_cast<fx::ConstantTable*>(a0); }
+
+bEResult HalHLSLShader::GetShaderVersion(void* a0, unsigned long& a1) const {
+    if (a0 == nullptr) return bEResult_False;
+    a1 = static_cast<const fx::ConstantTable*>(a0)->version;
+    return bEResult_Ok;
+}
+
+bEResult HalHLSLShader::GetConstantCount(void* a0, unsigned int& a1) {
+    if (a0 == nullptr) return bEResult_False;
+    a1 = static_cast<unsigned int>(static_cast<const fx::ConstantTable*>(a0)->constants.size());
+    return bEResult_Ok;
+}
+
+bEResult HalHLSLShader::GetConstantDescription(void* a0, void* const a1, unsigned int a2, eCGfxShared::eSGfxHLSLConstantDesc& a3,
+                                               bool) const {
+    if (a0 == nullptr) return bEResult_False;
+    // a4 picks GetConstantElement (arrays) over GetConstant (struct members): both are the parent's `members`
+    const fx::Constant* c = constantAt(*static_cast<const fx::ConstantTable*>(a0), a1, a2);
+    if (c == nullptr) return bEResult_False;
+    a3.name = c->name.c_str();
+    a3.handle = const_cast<fx::Constant*>(c);
+    a3.registerSet = static_cast<std::uint32_t>(c->registerSet);
+    a3.parameterClass = static_cast<std::uint32_t>(c->cls);
+    a3.parameterType = static_cast<std::uint32_t>(c->type);
+    a3.rows = c->rows;
+    a3.columns = c->columns;
+    a3.elements = c->elements;
+    a3.structMembers = c->structMembers;
+    a3.bytes = c->bytes;
+    a3.registerIndex = c->registerIndex;
+    a3.registerCount = c->registerCount;
+    return bEResult_Ok;
+}
+
+bEResult HalHLSLShader::GetSamplerIndex(void* a0, void* const a1, unsigned int& a2) {
+    if (a0 == nullptr || a1 == nullptr) return bEResult_False;
+    const auto* c = static_cast<const fx::Constant*>(a1);
+    a2 = c->registerSet == fx::RegisterSet::Sampler ? c->registerIndex : ~0u;  // D3DX: -1 for non-samplers
     return bEResult_Ok;
 }
 

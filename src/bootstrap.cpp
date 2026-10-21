@@ -41,6 +41,7 @@ void detourInitializeAdmin(void* self, int apiType) {
         hal::vulkan::Options vo;
         vo.validation = g_config.validation;
         vo.adapter = g_config.adapter;
+        vo.maxFps = g_config.maxFps;
         vo.cacheDir = paths::dataDir() / L"cache";
         vo.screenshotFrames = g_config.screenshotFrames;
         vo.logDraws = g_config.logDraws;

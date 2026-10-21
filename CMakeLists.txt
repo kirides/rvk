@@ -110,6 +110,8 @@ add_library(rvk_core STATIC
     src/vk/image.h
     src/vk/pipeline.cpp
     src/vk/pipeline.h
+    src/vk/pacer.cpp
+    src/vk/pacer.h
     src/vk/probe.cpp
     src/vk/probe.h
     src/vk/swapchain.cpp
