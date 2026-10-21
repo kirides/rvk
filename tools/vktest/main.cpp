@@ -1,6 +1,8 @@
 // rvk_vktest: GPU smoke test of the Vulkan core and the shader contract, without the game.
 //
 //   rvk_vktest [out.png] [--no-validation]
+//   rvk_vktest --gpl-corpus <dir with *.spv> [--no-validation]: compiles every SPIR-V module as a graphics pipeline
+//   library (pre-rasterization / fragment shader), as the renderer does at shader creation (driver robustness check)
 //
 // Off-screen: assembles a D3D9 vs_3_0/ps_3_0 pair (D3DXAssembleShader), translates it (shader/glsl), renders a full-screen
 // quad that samples a 64x64 gradient with linear filtering into a 64x64 target through the bindless set, buffer-device-address
@@ -9,6 +11,8 @@
 
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -114,16 +118,88 @@ void setDynamicState(VkCommandBuffer cmd, const vk::Context& ctx, std::uint32_t 
 
 }  // namespace
 
+// SEH around the driver call: a crashing compile is counted instead of ending the run (diagnostics only; the driver may be
+// left in a bad state afterwards)
+bool prepareGuarded(vk::PipelineCache& pipes, VkShaderModule m, VkShaderStageFlagBits stage) {
+    __try {
+        pipes.prepareShader(m, stage);
+        return true;
+    } __except (1) {
+        return false;
+    }
+}
+
+// every module of `dir` through PipelineCache::prepareShader; prints each file before compiling it (a driver crash shows
+// which one)
+int gplCorpus(const std::filesystem::path& dir, bool validation) {
+    vk::Context ctx;
+    if (!ctx.create({validation, -1, "rvk_vktest"})) {
+        return 2;
+    }
+    if (!vk::PipelineCache::librariesSupported(ctx)) {
+        std::printf("graphics pipeline libraries not supported\n");
+        return 2;
+    }
+    vk::Frames frames;
+    vk::Bindless bindless;
+    vk::PipelineCache pipes;
+    if (!frames.create(ctx) || !bindless.create(ctx, frames) || !pipes.create(ctx, bindless.pipelineLayout(), {}, true)) {
+        return 2;
+    }
+    std::vector<VkShaderModule> modules;
+    int n = 0, crashes = 0;
+    for (const auto& e : std::filesystem::directory_iterator(dir)) {
+        if (e.path().extension() != ".spv") continue;
+        std::ifstream in(e.path(), std::ios::binary);
+        std::vector<char> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        std::vector<std::uint32_t> words(bytes.size() / 4);
+        std::memcpy(words.data(), bytes.data(), words.size() * 4);
+        // OpEntryPoint (opcode 15): execution model 0 = Vertex, 4 = Fragment
+        int model = -1;
+        for (std::size_t i = 5; i < words.size();) {
+            const std::uint32_t op = words[i] & 0xFFFF, len = words[i] >> 16;
+            if (op == 15 && i + 1 < words.size()) {
+                model = static_cast<int>(words[i + 1]);
+                break;
+            }
+            i += len == 0 ? 1 : len;
+        }
+        if (model != 0 && model != 4) continue;
+        std::printf("%s %s\n", model == 0 ? "vs" : "ps", e.path().filename().string().c_str());
+        std::fflush(stdout);
+        VkShaderModule m = vk::createShaderModule(ctx, words);
+        if (m == VK_NULL_HANDLE) continue;
+        if (!prepareGuarded(pipes, m, model == 0 ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT)) {
+            std::printf("CRASH %s\n", e.path().filename().string().c_str());
+            ++crashes;
+        }
+        modules.push_back(m);
+        ++n;
+    }
+    std::printf("%d modules, %d driver crashes, %u validation errors\n", n, crashes, ctx.validationErrors());
+    pipes.destroy();
+    for (VkShaderModule m : modules) vkDestroyShaderModule(ctx.device(), m, nullptr);
+    bindless.destroy();
+    frames.destroy();
+    return ctx.validationErrors() == 0 && crashes == 0 ? 0 : 1;
+}
+
 int main(int argc, char** argv) {
     std::string out = "vktest.png";
     bool validation = true;
+    std::string gplDir;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--no-validation") {
             validation = false;
+        } else if (a == "--gpl-corpus" && i + 1 < argc) {
+            gplDir = argv[++i];
         } else {
             out = a;
         }
+    }
+    if (!gplDir.empty()) {
+        return gplCorpus(gplDir, validation);
     }
     if (!devtools::D3DX::get().available()) {
         std::printf("d3dx9_39.dll not available\n");

@@ -18,7 +18,9 @@
 #include <mutex>
 #include <span>
 #include <string>
+#include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "d3d9/defs.h"
@@ -226,6 +228,7 @@ struct DeviceOptions {
     bool offscreen = false;          // no swapchain (tests)
     std::uint32_t logDraws = 0;      // log the first N draws in detail
     bool perf = false;               // [debug] perf: GPU timestamps + CPU timings (Device::takePerf)
+    bool pipelineLibraries = false;  // [vulkan] pipeline_libraries (off: AMD driver crash, vk/pipeline_library.cpp)
     std::uint32_t perfFrame = 0;     // [debug] perf_frame: log the GPU time of every pass of this frame
 };
 
@@ -279,8 +282,14 @@ struct PerfStats {
     std::uint64_t ringBytes = 0;           // transient ring memory handed out (constants, dynamic buffers, staging)
     std::uint64_t textureUploadBytes = 0;  // texel bytes copied to images
     std::uint64_t bufferUploadBytes = 0;   // bytes copied into dynamic-buffer ring copies / static buffers
-    std::uint64_t pipelinesBuilt = 0;      // vkCreateGraphicsPipelines calls
+    std::uint64_t pipelinesBuilt = 0;      // pipelines created at draw time (monolithic or linked from libraries)
     double pipelineMs = 0.0;
+    std::uint64_t libraries = 0;           // pipeline libraries compiled (shader creation; any thread)
+    double libraryMs = 0.0;
+    std::uint64_t optimized = 0;           // link-time-optimised pipelines built in the background
+    double optimizeMs = 0.0;
+    std::uint64_t prewarmed = 0;           // pipelines of earlier runs built in the background before their first draw
+    double prewarmMs = 0.0;
     std::uint64_t shadersBuilt = 0;        // translated shaders (decode + GLSL + module; glslang only on SPIR-V cache misses)
     std::uint64_t shadersCompiled = 0;     // of those, compiled by glslang (SPIR-V disk cache miss)
     double shaderMs = 0.0;
@@ -448,6 +457,26 @@ private:
     // shader cache
     std::mutex shaderMutex_;
     std::unordered_map<std::uint64_t, std::shared_ptr<Shader>> shaders_;
+    std::unordered_map<VkShaderModule, std::uint64_t> moduleHashes_;
+
+    // Pipelines of earlier runs (<cacheDir>/pipelines.keys): the shader hashes + the rest of the description. When both
+    // shaders of a known pipeline exist (they are created while the game loads), it is built in the background, so its
+    // first draw does not stall. New pipelines are appended and the file is rewritten every 10 s.
+    struct PipelineKey {
+        std::uint64_t vs = 0;
+        std::uint64_t ps = 0;
+        vk::PipelineDesc desc{};  // vs / fs = VK_NULL_HANDLE
+    };
+    void loadPipelineKeys();
+    void savePipelineKeys();
+    void recordPipelineKey(const vk::PipelineDesc& pd);
+    void prewarmPipelines(std::uint64_t shaderHash);
+    std::mutex keysMutex_;
+    std::vector<PipelineKey> keys_;
+    std::unordered_multimap<std::uint64_t, std::size_t> pendingKeys_;  // shader hash -> index into keys_, not yet built
+    std::unordered_set<std::string> keySet_;                             // raw bytes of every key in keys_
+    bool keysDirty_ = false;
+    std::thread keySaver_;
 
     // samplers
     std::mutex samplerMutex_;
@@ -557,6 +586,9 @@ private:
     PerfStats perf_;
     std::uint64_t perfPipelinesBase_ = 0;
     double perfPipelineMsBase_ = 0.0;
+    std::uint64_t perfLibrariesBase_ = 0, perfOptimizedBase_ = 0, perfPrewarmedBase_ = 0;
+    double perfPrewarmMsBase_ = 0.0;
+    double perfLibraryMsBase_ = 0.0, perfOptimizeMsBase_ = 0.0;
     std::atomic<std::uint64_t> shadersBuilt_{0};
     std::atomic<std::uint64_t> shadersCompiled_{0};
     std::atomic<std::uint64_t> shaderNs_{0};

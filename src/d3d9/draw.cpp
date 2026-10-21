@@ -501,7 +501,11 @@ bool Device::prepareDraw(std::uint32_t primitiveType) {
     if (lastPipelineValid_ && std::memcmp(&pd, &lastPipelineDesc_, sizeof(pd)) == 0) {
         pipeline = lastPipeline_;
     } else {
-        pipeline = pipelines_.get(pd);
+        bool created = false;
+        pipeline = pipelines_.get(pd, &created);
+        if (created && pipeline != VK_NULL_HANDLE) {
+            recordPipelineKey(pd);
+        }
         lastPipelineDesc_ = pd;
         lastPipeline_ = pipeline;
         lastPipelineValid_ = true;

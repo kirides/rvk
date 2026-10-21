@@ -6,8 +6,11 @@
 // renderer sets per draw. Pipelines are cached by the byte image of the description.
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
+#include <map>
 #include <mutex>
 #include <span>
 #include <thread>
@@ -66,11 +69,19 @@ struct PipelineDesc {
 
 class PipelineCache {
 public:
-    bool create(Context& ctx, VkPipelineLayout layout, const std::filesystem::path& cacheFile);
+    // libraries: use VK_EXT_graphics_pipeline_library when librariesSupported (pipeline_library.cpp)
+    bool create(Context& ctx, VkPipelineLayout layout, const std::filesystem::path& cacheFile, bool libraries = false);
     void destroy();
+    static bool librariesSupported(const Context& ctx);
+    bool usesLibraries() const { return useLibraries_; }
 
-    // thread-safe; VK_NULL_HANDLE on failure (logged once per description)
-    VkPipeline get(const PipelineDesc& desc);
+    // thread-safe; VK_NULL_HANDLE on failure (logged once per description). With libraries a new description is linked
+    // from precompiled libraries (fast, unoptimised) and replaced by its link-time-optimised build in the background.
+    VkPipeline get(const PipelineDesc& desc, bool* created = nullptr);  // created: this call made a new pipeline
+    // builds `desc` on a background thread unless it exists: pipelines known from earlier runs, before their first draw
+    void prewarm(const PipelineDesc& desc);
+    // with libraries: compiles the shader's library now (pre-rasterization or fragment shader state); thread-safe
+    void prepareShader(VkShaderModule module, VkShaderStageFlagBits stage);
     // writes the VkPipelineCache blob (at shutdown)
     void save();
     // the same while running, when pipelines were built since the last save: the blob is read on the calling thread, the
@@ -80,11 +91,64 @@ public:
     // statistics: pipelines built (vkCreateGraphicsPipelines calls) and the time spent in them, cumulative
     std::uint64_t built() const { return built_.load(std::memory_order_relaxed); }
     double buildMs() const { return static_cast<double>(buildNs_.load(std::memory_order_relaxed)) * 1e-6; }
+    // libraries compiled (mostly at shader creation) and optimised pipelines built in the background, cumulative
+    std::uint64_t libraries() const { return libraries_.load(std::memory_order_relaxed); }
+    double libraryMs() const { return static_cast<double>(libraryNs_.load(std::memory_order_relaxed)) * 1e-6; }
+    std::uint64_t optimized() const { return optimized_.load(std::memory_order_relaxed); }
+    std::uint64_t prewarmed() const { return prewarmed_.load(std::memory_order_relaxed); }
+    double prewarmMs() const { return static_cast<double>(prewarmNs_.load(std::memory_order_relaxed)) * 1e-6; }
+    double optimizeMs() const { return static_cast<double>(optimizeNs_.load(std::memory_order_relaxed)) * 1e-6; }
 
     static std::vector<VkDynamicState> dynamicStates(const Context& ctx);
 
 private:
     VkPipeline build(const PipelineDesc& desc);
+    void prewarmWorker();
+    void stopPrewarm();
+    std::vector<std::thread> prewarmThreads_;
+    std::mutex prewarmMutex_;
+    std::condition_variable prewarmCv_;
+    std::deque<PipelineDesc> prewarmQueue_;
+    bool prewarmQuit_ = false;
+    std::atomic<std::uint64_t> prewarmed_{0};
+    std::atomic<std::uint64_t> prewarmNs_{0};
+
+    // pipeline libraries (pipeline_library.cpp)
+    struct LibKey {
+        std::uint64_t module;
+        std::uint32_t polygonMode;  // 0xFFFFFFFF for fragment shaders
+        auto operator<=>(const LibKey&) const = default;
+    };
+    struct OutputKey {
+        std::uint32_t colorCount;
+        VkFormat colorFormats[kMaxColorTargets];
+        VkFormat depthFormat;
+        VkFormat stencilFormat;
+        auto operator<=>(const OutputKey&) const = default;
+    };
+    VkPipeline createLibrary(VkGraphicsPipelineLibraryFlagsEXT part, VkShaderModule module, VkPolygonMode polygonMode,
+                             VkPrimitiveTopology topology, const PipelineDesc* output);
+    VkPipeline shaderLibrary(VkShaderModule module, bool vertex, VkPolygonMode polygonMode);
+    VkPipeline link(const PipelineDesc& d, bool optimize);
+    void optimizer();
+    void startLibraries();
+    void stopLibraries();
+    void destroyLibraries();
+    bool useLibraries_ = false;
+    std::mutex libMutex_;
+    std::map<LibKey, VkPipeline> shaderLibs_;
+    std::map<VkPrimitiveTopology, VkPipeline> vertexInputLibs_;
+    std::map<OutputKey, VkPipeline> outputLibs_;
+    std::vector<VkPipeline> superseded_;  // fast-linked pipelines replaced by optimised ones (under mutex_)
+    std::thread optThread_;
+    std::mutex optMutex_;
+    std::condition_variable optCv_;
+    std::deque<PipelineDesc> optQueue_;
+    bool optQuit_ = false;
+    std::atomic<std::uint64_t> libraries_{0};
+    std::atomic<std::uint64_t> libraryNs_{0};
+    std::atomic<std::uint64_t> optimized_{0};
+    std::atomic<std::uint64_t> optimizeNs_{0};
 
     struct Hash {
         std::size_t operator()(const PipelineDesc& d) const;

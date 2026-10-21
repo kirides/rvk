@@ -74,6 +74,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     o.height = p.backBufferHeight;
     o.vsync = options.vsync < 0 ? p.vsync : options.vsync != 0;
     o.perf = options.perf;
+    o.pipelineLibraries = options.pipelineLibraries;
     o.perfFrame = options.perfFrame;
     o.depthFormat = static_cast<std::uint32_t>(p.depthFormat);
     o.validation = options.validation;
@@ -686,6 +687,14 @@ void HalDevice::logPerf(d3d9::PerfStats p) {
                  static_cast<double>(p.ringBytes) / n / 1024.0, static_cast<double>(p.textureUploadBytes) / n / 1024.0,
                  static_cast<double>(p.bufferUploadBytes) / n / 1024.0, p.pipelinesBuilt, p.pipelineMs, p.shadersBuilt, p.shadersCompiled,
                  p.shaderMs);
+    if (p.prewarmed > 0) {
+        spdlog::info("perf: {} pipelines of earlier runs built in the background ({:.1f} ms)", p.prewarmed, p.prewarmMs);
+    }
+    if (p.libraries > 0 || p.optimized > 0) {
+        spdlog::info("perf: pipeline libraries compiled {} ({:.1f} ms, mostly on loader threads), optimised pipelines {} ({:.1f} ms, "
+                     "background)",
+                     p.libraries, p.libraryMs, p.optimized, p.optimizeMs);
+    }
     if (p.pacerRate > 0.0) {
         const double w = std::max(1.0, static_cast<double>(p.pacer.waits));
         spdlog::info("perf: pacer {:.3f} fps{}: {} of {} frames waited, avg sleep {:.2f} ms + spin {:.3f} ms, timer late avg {:.3f} / "

@@ -59,9 +59,10 @@ bool Device::create(const DeviceOptions& options) {
         return false;
     }
     const auto pipelineFile = options.cacheDir.empty() ? std::filesystem::path() : options.cacheDir / "pipelines.bin";
-    if (!pipelines_.create(ctx_, bindless_.pipelineLayout(), pipelineFile)) {
+    if (!pipelines_.create(ctx_, bindless_.pipelineLayout(), pipelineFile, options.pipelineLibraries)) {
         return false;
     }
+    loadPipelineKeys();
     if (!options.offscreen && !swapchain_.create(ctx_, options.window, options.width, options.height, options.vsync)) {
         return false;
     }
@@ -216,6 +217,13 @@ void Device::destroy() {
         }
     }
     presenter_.stop();
+    if (keySaver_.joinable()) {
+        keySaver_.join();
+    }
+    savePipelineKeys();
+    if (keySaver_.joinable()) {
+        keySaver_.join();
+    }
     swapchain_.destroy();
     gpuTimer_.destroy();
     pipelines_.destroy();
@@ -278,6 +286,18 @@ PerfStats Device::takePerf() {
     p.pipelineMs = pipelines_.buildMs() - perfPipelineMsBase_;
     perfPipelinesBase_ = pipelines_.built();
     perfPipelineMsBase_ = pipelines_.buildMs();
+    p.libraries = pipelines_.libraries() - perfLibrariesBase_;
+    p.libraryMs = pipelines_.libraryMs() - perfLibraryMsBase_;
+    p.optimized = pipelines_.optimized() - perfOptimizedBase_;
+    p.optimizeMs = pipelines_.optimizeMs() - perfOptimizeMsBase_;
+    perfLibrariesBase_ = pipelines_.libraries();
+    perfLibraryMsBase_ = pipelines_.libraryMs();
+    perfOptimizedBase_ = pipelines_.optimized();
+    perfOptimizeMsBase_ = pipelines_.optimizeMs();
+    p.prewarmed = pipelines_.prewarmed() - perfPrewarmedBase_;
+    p.prewarmMs = pipelines_.prewarmMs() - perfPrewarmMsBase_;
+    perfPrewarmedBase_ = pipelines_.prewarmed();
+    perfPrewarmMsBase_ = pipelines_.prewarmMs();
     const std::uint64_t built = shadersBuilt_.load(), compiled = shadersCompiled_.load(), ns = shaderNs_.load();
     p.shadersBuilt = built - perfShadersBase_;
     p.shadersCompiled = compiled - perfShadersCompiledBase_;
@@ -487,6 +507,7 @@ void Device::present() {
     if (presentStart_ - pipelinesSaved_ > std::chrono::seconds(10)) {
         pipelinesSaved_ = presentStart_;
         pipelines_.saveAsync();
+        savePipelineKeys();
     }
     beginFrame();
 }
@@ -587,12 +608,19 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
     if (s->module == VK_NULL_HANDLE) {
         return nullptr;
     }
-    const std::lock_guard lock(shaderMutex_);
-    auto [it, inserted] = shaders_.emplace(hash, s);
-    if (!inserted) {  // another thread was faster
-        vkDestroyShaderModule(ctx_.device(), s->module, nullptr);
+    {
+        const std::lock_guard lock(shaderMutex_);
+        auto [it, inserted] = shaders_.emplace(hash, s);
+        if (!inserted) {  // another thread was faster
+            vkDestroyShaderModule(ctx_.device(), s->module, nullptr);
+            return it->second;
+        }
+        moduleHashes_.emplace(s->module, hash);
     }
-    return it->second;
+    prewarmPipelines(hash);
+    // with pipeline libraries the shader's compilation happens here (often a loader thread), not at its first draw
+    pipelines_.prepareShader(s->module, s->stage == shader::Stage::Vertex ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT);
+    return s;
 }
 
 void Device::release(std::unique_ptr<Texture> texture) {
@@ -1068,6 +1096,136 @@ bool Device::readBackBuffer(std::vector<std::uint8_t>& bgra, std::uint32_t& widt
     bgra.assign(static_cast<const std::uint8_t*>(lk.bits), static_cast<const std::uint8_t*>(lk.bits) + lk.rowPitch * height);
     release(std::move(tmp));
     return true;
+}
+
+// ---- pipelines of earlier runs ---------------------------------------------------------------------------------------
+
+namespace {
+
+constexpr char kKeysMagic[8] = {'R', 'V', 'K', 'P', 'K', 'E', 'Y', '1'};
+
+}  // namespace
+
+void Device::loadPipelineKeys() {
+    if (options_.cacheDir.empty()) {
+        return;
+    }
+    std::ifstream in(options_.cacheDir / "pipelines.keys", std::ios::binary);
+    char magic[8]{};
+    std::uint32_t recordSize = 0;
+    if (!in.read(magic, sizeof(magic)) || std::memcmp(magic, kKeysMagic, sizeof(magic)) != 0 ||
+        !in.read(reinterpret_cast<char*>(&recordSize), sizeof(recordSize)) || recordSize != sizeof(PipelineKey)) {
+        return;  // none yet, or written by another build (the description layout changed)
+    }
+    const std::lock_guard lock(keysMutex_);
+    PipelineKey k;
+    while (in.read(reinterpret_cast<char*>(&k), sizeof(k))) {
+        if (keySet_.emplace(reinterpret_cast<const char*>(&k), sizeof(k)).second) {
+            keys_.push_back(k);
+            pendingKeys_.emplace(k.vs, keys_.size() - 1);
+            if (k.ps != k.vs) {
+                pendingKeys_.emplace(k.ps, keys_.size() - 1);
+            }
+        }
+    }
+    spdlog::info("d3d9: {} pipelines known from earlier runs (built in the background once their shaders exist)", keys_.size());
+}
+
+void Device::savePipelineKeys() {
+    if (options_.cacheDir.empty()) {
+        return;
+    }
+    std::vector<char> blob;
+    {
+        const std::lock_guard lock(keysMutex_);
+        if (!keysDirty_) {
+            return;
+        }
+        keysDirty_ = false;
+        blob.resize(sizeof(kKeysMagic) + sizeof(std::uint32_t) + keys_.size() * sizeof(PipelineKey));
+        std::memcpy(blob.data(), kKeysMagic, sizeof(kKeysMagic));
+        const std::uint32_t recordSize = sizeof(PipelineKey);
+        std::memcpy(blob.data() + sizeof(kKeysMagic), &recordSize, sizeof(recordSize));
+        if (!keys_.empty()) {
+            std::memcpy(blob.data() + sizeof(kKeysMagic) + sizeof(recordSize), keys_.data(), keys_.size() * sizeof(PipelineKey));
+        }
+    }
+    if (keySaver_.joinable()) {
+        keySaver_.join();
+    }
+    // the file I/O off the render thread; <file>.tmp + rename so a killed game leaves the previous file
+    keySaver_ = std::thread([file = options_.cacheDir / "pipelines.keys", blob = std::move(blob)] {
+        std::error_code ec;
+        std::filesystem::create_directories(file.parent_path(), ec);
+        auto tmp = file;
+        tmp += ".tmp";
+        {
+            std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+            out.write(blob.data(), static_cast<std::streamsize>(blob.size()));
+        }
+        std::filesystem::rename(tmp, file, ec);
+    });
+}
+
+// a pipeline was created for a draw: remember it by its shaders' hashes (render thread)
+void Device::recordPipelineKey(const vk::PipelineDesc& pd) {
+    PipelineKey k;
+    {
+        const std::lock_guard lock(shaderMutex_);
+        const auto v = moduleHashes_.find(pd.vs);
+        const auto p = moduleHashes_.find(pd.fs);
+        if (v == moduleHashes_.end() || p == moduleHashes_.end()) {
+            return;
+        }
+        k.vs = v->second;
+        k.ps = p->second;
+    }
+    std::memcpy(&k.desc, &pd, sizeof(pd));
+    k.desc.vs = VK_NULL_HANDLE;
+    k.desc.fs = VK_NULL_HANDLE;
+    const std::lock_guard lock(keysMutex_);
+    if (keySet_.emplace(reinterpret_cast<const char*>(&k), sizeof(k)).second) {
+        keys_.push_back(k);
+        keysDirty_ = true;
+    }
+}
+
+// a shader was created (any thread): queue the known pipelines whose shaders now both exist
+void Device::prewarmPipelines(std::uint64_t shaderHash) {
+    std::vector<PipelineKey> ready;
+    {
+        const std::lock_guard lock(keysMutex_);
+        auto [b, e] = pendingKeys_.equal_range(shaderHash);
+        for (auto it = b; it != e;) {
+            const PipelineKey& k = keys_[it->second];
+            const std::uint64_t other = k.vs == shaderHash ? k.ps : k.vs;
+            bool otherReady = other == shaderHash;
+            if (!otherReady) {
+                const std::lock_guard sl(shaderMutex_);
+                otherReady = shaders_.contains(other);
+            }
+            if (otherReady) {
+                ready.push_back(k);
+                // the partner's entry for the same key is skipped by the descriptor check below when it comes
+                it = pendingKeys_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    for (PipelineKey& k : ready) {
+        {
+            const std::lock_guard sl(shaderMutex_);
+            const auto v = shaders_.find(k.vs);
+            const auto p = shaders_.find(k.ps);
+            if (v == shaders_.end() || p == shaders_.end()) {
+                continue;
+            }
+            k.desc.vs = v->second->module;
+            k.desc.fs = p->second->module;
+        }
+        pipelines_.prewarm(k.desc);
+    }
 }
 
 // ---- samplers -------------------------------------------------------------------------------------------------------

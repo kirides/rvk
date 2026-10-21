@@ -73,9 +73,9 @@ bool Context::create(const ContextOptions& options) {
         destroy();
         return false;
     }
-    spdlog::info("vulkan: device '{}' ready (api {}, eds3={}, vertexInputDynamic={}, anisotropy={})", deviceName_,
+    spdlog::info("vulkan: device '{}' ready (api {}, eds3={}, vertexInputDynamic={}, gpl={}, anisotropy={})", deviceName_,
                  versionString(props_.apiVersion), features_.extendedDynamicState3, features_.vertexInputDynamicState,
-                 features_.maxAnisotropy);
+                 features_.graphicsPipelineLibrary, features_.maxAnisotropy);
     return true;
 }
 
@@ -186,6 +186,7 @@ bool Context::pickPhysicalDevice(const ContextOptions& options) {
     deviceName_ = props_.deviceName;
     features_.extendedDynamicState3 = rep.extendedDynamicState3;
     features_.vertexInputDynamicState = rep.vertexInputDynamicState;
+    features_.graphicsPipelineLibrary = rep.graphicsPipelineLibrary;
     features_.memoryBudget = rep.memoryBudget;
     features_.deviceFault = rep.deviceFault;
 
@@ -281,6 +282,21 @@ bool Context::createDevice() {
         enabled.push_back(VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
         *tail = &vids;
         tail = &vids.pNext;
+    }
+    VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT gpl{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT};
+    if (features_.graphicsPipelineLibrary) {
+        VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT q{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT};
+        VkPhysicalDeviceFeatures2 qf{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &q};
+        vkGetPhysicalDeviceFeatures2(physical_, &qf);
+        if (q.graphicsPipelineLibrary && hasExtension(exts, VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME)) {
+            gpl.graphicsPipelineLibrary = VK_TRUE;
+            enabled.push_back(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
+            enabled.push_back(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
+            *tail = &gpl;
+            tail = &gpl.pNext;
+        } else {
+            features_.graphicsPipelineLibrary = false;
+        }
     }
     VkPhysicalDeviceRobustness2FeaturesEXT rob2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
     if (hasExtension(exts, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME)) {

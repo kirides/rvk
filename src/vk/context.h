@@ -21,6 +21,7 @@ struct ContextOptions {
 struct DeviceFeatures {
     bool extendedDynamicState3 = false;     // blend enable/equation/write mask + polygon mode as dynamic state
     bool vertexInputDynamicState = false;   // vertex input as dynamic state
+    bool graphicsPipelineLibrary = false;   // VK_EXT_graphics_pipeline_library: shaders compiled once, pipelines linked fast
     bool robustness2NullDescriptor = false;
     bool memoryBudget = false;
     bool deviceFault = false;

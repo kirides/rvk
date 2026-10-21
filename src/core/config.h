@@ -25,6 +25,7 @@ struct Config {
     int adapter = -1;          // physical device index, -1 = best discrete GPU
     double maxFps = 0.0;       // present-rate cap; 0 = the monitor's refresh rate with vsync, none without
     int vsync = -1;            // -1 = the engine's option, 0 = off, 1 = on ("engine" / false / true)
+    bool pipelineLibraries = false;  // link pipelines from VK_EXT_graphics_pipeline_library libraries (AMD crash: pipeline_library.cpp)
 
     // [trace] (mode = "trace")
     int traceLogFirst = 3;     // calls per HAL slot logged with their arguments

@@ -149,6 +149,7 @@ void detourInitializeAdmin(void* self, int apiType) {
         vo.adapter = g_config.adapter;
         vo.maxFps = g_config.maxFps;
         vo.vsync = g_config.vsync;
+        vo.pipelineLibraries = g_config.pipelineLibraries;
         vo.perf = g_config.perf || g_config.perfFrame != 0;
         vo.perfFrame = g_config.perfFrame;
         vo.cacheDir = paths::dataDir() / L"cache";

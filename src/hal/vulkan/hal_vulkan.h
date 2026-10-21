@@ -26,6 +26,7 @@ struct Options {
     int adapter = -1;
     double maxFps = 0.0;
     int vsync = -1;  // -1 = the engine's option, 0 = off, 1 = on
+    bool pipelineLibraries = false;
     bool perf = false;
     std::uint32_t perfFrame = 0;
     std::filesystem::path cacheDir;  // <bin>/rvk/cache

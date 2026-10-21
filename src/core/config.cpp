@@ -46,6 +46,7 @@ Config parseConfig(std::string_view text, std::string* error) {
     cfg.probe = tbl["vulkan"]["probe"].value_or(cfg.probe);
     cfg.adapter = tbl["vulkan"]["adapter"].value_or(cfg.adapter);
     cfg.maxFps = tbl["vulkan"]["max_fps"].value_or(cfg.maxFps);
+    cfg.pipelineLibraries = tbl["vulkan"]["pipeline_libraries"].value_or(cfg.pipelineLibraries);
     if (const auto v = tbl["vulkan"]["vsync"].value<bool>()) {
         cfg.vsync = *v ? 1 : 0;
     } else if (const auto str = tbl["vulkan"]["vsync"].value<std::string>(); str && *str != "engine" && error != nullptr) {

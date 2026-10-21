@@ -1,5 +1,8 @@
 #include "vk/pipeline.h"
 
+#include <windows.h>
+
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <fstream>
@@ -65,7 +68,7 @@ std::vector<VkDynamicState> PipelineCache::dynamicStates(const Context& ctx) {
     return s;
 }
 
-bool PipelineCache::create(Context& ctx, VkPipelineLayout layout, const std::filesystem::path& cacheFile) {
+bool PipelineCache::create(Context& ctx, VkPipelineLayout layout, const std::filesystem::path& cacheFile, bool libraries) {
     ctx_ = &ctx;
     layout_ = layout;
     file_ = cacheFile;
@@ -86,6 +89,10 @@ bool PipelineCache::create(Context& ctx, VkPipelineLayout layout, const std::fil
         }
     }
     spdlog::info("vulkan: pipeline cache {} ({} KiB loaded)", file_.string(), blob.size() / 1024);
+    if (libraries && librariesSupported(ctx)) {
+        startLibraries();
+        spdlog::info("vulkan: pipelines are linked from graphics pipeline libraries");
+    }
     return true;
 }
 
@@ -165,6 +172,8 @@ void PipelineCache::destroy() {
     if (ctx_ == nullptr) {
         return;
     }
+    stopPrewarm();
+    stopLibraries();
     save();
     for (auto& [d, p] : pipelines_) {
         if (p != VK_NULL_HANDLE) {
@@ -172,6 +181,7 @@ void PipelineCache::destroy() {
         }
     }
     pipelines_.clear();
+    destroyLibraries();
     if (cache_ != VK_NULL_HANDLE) {
         vkDestroyPipelineCache(ctx_->device(), cache_, nullptr);
         cache_ = VK_NULL_HANDLE;
@@ -184,17 +194,97 @@ std::size_t PipelineCache::size() const {
     return pipelines_.size();
 }
 
-VkPipeline PipelineCache::get(const PipelineDesc& desc) {
+void PipelineCache::prewarm(const PipelineDesc& desc) {
+    {
+        const std::lock_guard lock(prewarmMutex_);
+        if (prewarmThreads_.empty()) {
+            // a few threads: the driver compiles in parallel; the render thread keeps its core
+            const unsigned n = std::clamp(std::thread::hardware_concurrency() / 4, 1u, 4u);
+            for (unsigned i = 0; i < n; ++i) {
+                prewarmThreads_.emplace_back([this] { prewarmWorker(); });
+            }
+        }
+        prewarmQueue_.push_back(desc);
+    }
+    prewarmCv_.notify_one();
+}
+
+void PipelineCache::prewarmWorker() {
+    SetThreadDescription(GetCurrentThread(), L"rvk pipeline prewarm");
+    std::unique_lock lock(prewarmMutex_);
+    for (;;) {
+        prewarmCv_.wait(lock, [&] { return prewarmQuit_ || !prewarmQueue_.empty(); });
+        if (prewarmQuit_) {
+            return;
+        }
+        const PipelineDesc d = prewarmQueue_.front();
+        prewarmQueue_.pop_front();
+        lock.unlock();
+        bool exists = false;
+        {
+            const std::lock_guard pl(mutex_);
+            exists = pipelines_.contains(d);
+        }
+        if (!exists) {
+            // built outside the cache lock: draws meanwhile find their pipelines (or build a missing one themselves)
+            const auto t0 = std::chrono::steady_clock::now();
+            VkPipeline p = build(d);
+            const auto ns = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+            if (p != VK_NULL_HANDLE) {
+                prewarmed_.fetch_add(1, std::memory_order_relaxed);
+                prewarmNs_.fetch_add(ns, std::memory_order_relaxed);
+                const std::lock_guard pl(mutex_);
+                if (!pipelines_.emplace(d, p).second) {
+                    vkDestroyPipeline(ctx_->device(), p, nullptr);  // a draw was faster
+                }
+            }
+        }
+        lock.lock();
+    }
+}
+
+void PipelineCache::stopPrewarm() {
+    {
+        const std::lock_guard lock(prewarmMutex_);
+        prewarmQuit_ = true;
+        prewarmQueue_.clear();
+    }
+    prewarmCv_.notify_all();
+    for (auto& t : prewarmThreads_) {
+        t.join();
+    }
+    prewarmThreads_.clear();
+}
+
+VkPipeline PipelineCache::get(const PipelineDesc& desc, bool* created) {
     const std::lock_guard lock(mutex_);
+    if (created != nullptr) {
+        *created = false;
+    }
     if (auto it = pipelines_.find(desc); it != pipelines_.end()) {
         return it->second;
     }
+    if (created != nullptr) {
+        *created = true;
+    }
     const auto t0 = std::chrono::steady_clock::now();
-    VkPipeline p = build(desc);
+    VkPipeline p = useLibraries_ ? link(desc, false) : VK_NULL_HANDLE;
+    const bool linked = p != VK_NULL_HANDLE;
+    if (!linked) {
+        p = build(desc);
+    }
     built_.fetch_add(1, std::memory_order_relaxed);
     buildNs_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()),
                        std::memory_order_relaxed);
     pipelines_.emplace(desc, p);  // also caches failures (VK_NULL_HANDLE) so they are logged once
+    if (linked) {
+        {
+            const std::lock_guard ol(optMutex_);
+            optQueue_.push_back(desc);
+        }
+        optCv_.notify_one();
+    }
     return p;
 }
 
