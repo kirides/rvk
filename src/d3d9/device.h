@@ -415,6 +415,7 @@ private:
     bool bindVertexInput(vk::PipelineDesc& pd);
     void setDynamicState(std::uint32_t primitiveType);
     std::uint32_t samplerIndex(std::uint32_t slot);
+    std::uint32_t lookupSampler(std::uint32_t slot);
     void uploadConstants();
     void blit(vk::Image& src, std::uint32_t srcLevel, std::uint32_t srcLayer, const VkOffset3D srcBox[2], vk::Image& dst,
               std::uint32_t dstLevel, std::uint32_t dstLayer, const VkOffset3D dstBox[2], VkFilter filter);
@@ -505,6 +506,47 @@ private:
     VkDeviceAddress vsConstAddr_ = 0;
     VkDeviceAddress psConstAddr_ = 0;
     VkPipeline boundPipeline_ = VK_NULL_HANDLE;
+    // redundant-command filters, valid within one command buffer (reset by beginFrame)
+    vk::PipelineDesc lastPipelineDesc_{};
+    VkPipeline lastPipeline_ = VK_NULL_HANDLE;
+    bool lastPipelineValid_ = false;
+    struct VertexInputCache {
+        bool buffersValid = false;
+        bool layoutValid = false;
+        std::uint32_t bufferCount = 0;
+        VkBuffer buffers[vk::kMaxVertexBindings]{};
+        VkDeviceSize offsets[vk::kMaxVertexBindings]{};
+        std::uint32_t bindingCount = 0;
+        std::uint32_t attributeCount = 0;
+        VkVertexInputBindingDescription2EXT bindings[vk::kMaxVertexBindings]{};
+        VkVertexInputAttributeDescription2EXT attributes[vk::kMaxVertexAttributes]{};
+    } viCache_;
+    // the dynamic state last recorded (every pipeline declares the same dynamic states, so it survives pipeline binds)
+    struct DynamicStateCache {
+        bool valid = false;
+        VkViewport viewport{};
+        VkRect2D scissor{};
+        VkCullModeFlags cull = 0;
+        VkPrimitiveTopology topology{};
+        VkBool32 depthTest = 0;
+        VkBool32 depthWrite = 0;
+        VkCompareOp depthCompare{};
+        VkBool32 stencilTest = 0;
+        VkStencilOp stencilFront[3]{};
+        VkCompareOp stencilFrontCompare{};
+        VkStencilOp stencilBack[3]{};
+        VkCompareOp stencilBackCompare{};
+        std::uint32_t stencilMasks[3]{};  // compare, write, reference
+        VkBool32 depthBiasEnable = 0;
+        float depthBias[2]{};             // constant, slope
+        float blendConstants[4]{};
+        std::uint32_t colorCount = 0;
+        VkBool32 blendEnable[kRenderTargets]{};
+        VkColorBlendEquationEXT blendEquation[kRenderTargets]{};
+        VkColorComponentFlags writeMask[kRenderTargets]{};
+    } dyn_;
+    // bindless sampler index per slot (UINT32_MAX = look it up again after a SetSamplerState)
+    std::array<std::uint32_t, kSamplerCount> samplerSlotCache_{};
     std::uint32_t instanceCount_ = 1;
     FrameStats stats_;
 
@@ -522,6 +564,7 @@ private:
     std::chrono::steady_clock::time_point presentEnd_{};
     std::chrono::steady_clock::time_point presentStart_{};
     std::chrono::steady_clock::time_point lastPresentStart_{};
+    std::chrono::steady_clock::time_point pipelinesSaved_{};
     std::uint64_t ringBytesBase_ = 0;
     std::uint32_t passIndex_ = 0;   // render passes of the current submission (GPU detail labels)
     std::uint32_t passDraws_ = 0;   // draws in the open render pass

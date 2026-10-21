@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstring>
 #include <fstream>
+#include <thread>
 
 #include <spdlog/spdlog.h>
 
@@ -11,9 +12,18 @@
 namespace rvk::vk {
 
 std::size_t PipelineCache::Hash::operator()(const PipelineDesc& d) const {
+    // FNV-1a over 64-bit words (the description is ~520 bytes, hashed per draw that changes it)
+    static_assert(sizeof(PipelineDesc) % 4 == 0);
     std::uint64_t h = 0xcbf29ce484222325ull;
     const auto* p = reinterpret_cast<const unsigned char*>(&d);
-    for (std::size_t i = 0; i < sizeof(d); ++i) {
+    std::size_t i = 0;
+    for (; i + 8 <= sizeof(d); i += 8) {
+        std::uint64_t w;
+        std::memcpy(&w, p + i, 8);
+        h = (h ^ w) * 0x100000001b3ull;
+        h ^= h >> 29;
+    }
+    for (; i < sizeof(d); ++i) {
         h = (h ^ p[i]) * 0x100000001b3ull;
     }
     return static_cast<std::size_t>(h);
@@ -79,20 +89,76 @@ bool PipelineCache::create(Context& ctx, VkPipelineLayout layout, const std::fil
     return true;
 }
 
-void PipelineCache::save() {
-    if (cache_ == VK_NULL_HANDLE || file_.empty()) {
-        return;
+namespace {
+
+// write to <file>.tmp, then replace: a game killed while writing leaves the previous cache intact
+bool writeBlob(const std::filesystem::path& file, const std::vector<char>& blob) {
+    std::error_code ec;
+    std::filesystem::create_directories(file.parent_path(), ec);
+    auto tmp = file;
+    tmp += ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        out.write(blob.data(), static_cast<std::streamsize>(blob.size()));
+        if (!out) {
+            return false;
+        }
     }
+    std::filesystem::rename(tmp, file, ec);
+    return !ec;
+}
+
+}  // namespace
+
+std::vector<char> PipelineCache::data() {
+    std::vector<char> blob;
+    if (cache_ == VK_NULL_HANDLE) {
+        return blob;
+    }
+    // under the lock: no pipeline is being created into the cache meanwhile
+    const std::lock_guard lock(mutex_);
     std::size_t size = 0;
     vkGetPipelineCacheData(ctx_->device(), cache_, &size, nullptr);
-    std::vector<char> blob(size);
+    blob.resize(size);
     if (vkGetPipelineCacheData(ctx_->device(), cache_, &size, blob.data()) != VK_SUCCESS) {
+        blob.clear();
+    }
+    blob.resize(std::min(blob.size(), size));
+    savedBuilt_ = built_.load(std::memory_order_relaxed);
+    return blob;
+}
+
+void PipelineCache::save() {
+    if (file_.empty()) {
         return;
     }
-    std::error_code ec;
-    std::filesystem::create_directories(file_.parent_path(), ec);
-    std::ofstream out(file_, std::ios::binary | std::ios::trunc);
-    out.write(blob.data(), static_cast<std::streamsize>(size));
+    if (saver_.joinable()) {
+        saver_.join();
+    }
+    const std::vector<char> blob = data();
+    if (!blob.empty()) {
+        writeBlob(file_, blob);
+    }
+}
+
+void PipelineCache::saveAsync() {
+    if (file_.empty() || savedBuilt_ == built_.load(std::memory_order_relaxed)) {
+        return;
+    }
+    if (saver_.joinable()) {
+        saver_.join();
+    }
+    std::vector<char> blob = data();
+    if (blob.empty()) {
+        return;
+    }
+    // the game is often ended by killing it: the cache is written while it runs, the file I/O off the render thread
+    saver_ = std::thread([file = file_, blob = std::move(blob)] {
+        const auto t0 = std::chrono::steady_clock::now();
+        const bool ok = writeBlob(file, blob);
+        spdlog::debug("vulkan: pipeline cache saved ({} KiB{}, {:.1f} ms)", blob.size() / 1024, ok ? "" : ", FAILED",
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    });
 }
 
 void PipelineCache::destroy() {

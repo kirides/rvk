@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <mutex>
 #include <span>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -70,8 +71,11 @@ public:
 
     // thread-safe; VK_NULL_HANDLE on failure (logged once per description)
     VkPipeline get(const PipelineDesc& desc);
-    // writes the VkPipelineCache blob (called at shutdown and periodically)
+    // writes the VkPipelineCache blob (at shutdown)
     void save();
+    // the same while running, when pipelines were built since the last save: the blob is read on the calling thread, the
+    // file written on a background thread (<file>.tmp, then renamed)
+    void saveAsync();
     std::size_t size() const;
     // statistics: pipelines built (vkCreateGraphicsPipelines calls) and the time spent in them, cumulative
     std::uint64_t built() const { return built_.load(std::memory_order_relaxed); }
@@ -97,6 +101,9 @@ private:
     std::unordered_map<PipelineDesc, VkPipeline, Hash, Eq> pipelines_;
     std::atomic<std::uint64_t> built_{0};
     std::atomic<std::uint64_t> buildNs_{0};
+    std::uint64_t savedBuilt_ = 0;  // built_ at the last save
+    std::thread saver_;
+    std::vector<char> data();
 };
 
 VkShaderModule createShaderModule(Context& ctx, std::span<const std::uint32_t> spirv);

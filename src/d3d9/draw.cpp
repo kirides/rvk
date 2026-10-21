@@ -220,8 +220,17 @@ bool Device::bindVertexInput(vk::PipelineDesc& pd) {
             }
         }
     }
-    if (pd.bindingCount > 0) {
+    // the same buffers / layout as the previous draw of this command buffer: nothing to record
+    VertexInputCache& vc = viCache_;
+    if (pd.bindingCount > 0 &&
+        (!vc.buffersValid || vc.bufferCount != pd.bindingCount ||
+         std::memcmp(vc.buffers, buffers, sizeof(VkBuffer) * pd.bindingCount) != 0 ||
+         std::memcmp(vc.offsets, offsets, sizeof(VkDeviceSize) * pd.bindingCount) != 0)) {
         vkCmdBindVertexBuffers(cmd, 0, pd.bindingCount, buffers, offsets);
+        vc.bufferCount = pd.bindingCount;
+        std::memcpy(vc.buffers, buffers, sizeof(VkBuffer) * pd.bindingCount);
+        std::memcpy(vc.offsets, offsets, sizeof(VkDeviceSize) * pd.bindingCount);
+        vc.buffersValid = true;
     }
     if (ctx_.features().vertexInputDynamicState) {
         VkVertexInputBindingDescription2EXT b[vk::kMaxVertexBindings]{};
@@ -234,7 +243,16 @@ bool Device::bindVertexInput(vk::PipelineDesc& pd) {
             a[i] = {VK_STRUCTURE_TYPE_VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT, nullptr, pd.attributes[i].location,
                     pd.attributes[i].binding, pd.attributes[i].format, pd.attributes[i].offset};
         }
-        vkCmdSetVertexInputEXT(cmd, pd.bindingCount, b, pd.attributeCount, a);
+        if (!vc.layoutValid || vc.bindingCount != pd.bindingCount || vc.attributeCount != pd.attributeCount ||
+            std::memcmp(vc.bindings, b, sizeof(b[0]) * pd.bindingCount) != 0 ||
+            std::memcmp(vc.attributes, a, sizeof(a[0]) * pd.attributeCount) != 0) {
+            vkCmdSetVertexInputEXT(cmd, pd.bindingCount, b, pd.attributeCount, a);
+            vc.bindingCount = pd.bindingCount;
+            vc.attributeCount = pd.attributeCount;
+            std::memcpy(vc.bindings, b, sizeof(b[0]) * pd.bindingCount);
+            std::memcpy(vc.attributes, a, sizeof(a[0]) * pd.attributeCount);
+        }
+        vc.layoutValid = true;
         // the pipeline does not depend on the vertex layout then: keep the cache key small
         pd.bindingCount = 0;
         pd.attributeCount = 0;
@@ -273,13 +291,40 @@ vk::BlendAttachment blendState(const std::array<std::uint32_t, RS_COUNT>& rs, st
 
 }  // namespace
 
+namespace {
+
+// true (and the cache updated) when `value` differs from the cached one or the cache is not valid yet
+template <class T>
+bool changed(bool valid, T& cached, const T& value) {
+    if (valid && std::memcmp(&cached, &value, sizeof(T)) == 0) {
+        return false;
+    }
+    std::memcpy(&cached, &value, sizeof(T));
+    return true;
+}
+
+}  // namespace
+
+// Records only the dynamic state that differs from what this command buffer has already set (dyn_), the values themselves
+// are those of the full per-draw path.
 void Device::setDynamicState(std::uint32_t primitiveType) {
     VkCommandBuffer cmd = frames_.cmd();
+    DynamicStateCache& c = dyn_;
+    const bool v = c.valid;
+    if (!v) {
+        // a new command buffer: nothing is set yet (the cached colour attachment count would carry over otherwise)
+        c.colorCount = 0;
+        // constant for every draw
+        vkCmdSetFrontFace(cmd, kFrontFace);
+        vkCmdSetPrimitiveRestartEnable(cmd, VK_FALSE);
+    }
     // D3D9 screen space is y-down with a y-up clip space: flip with a negative viewport height
     const float vx = static_cast<float>(viewport_.x), vy = static_cast<float>(viewport_.y);
     const float vw = static_cast<float>(std::max(1u, viewport_.width)), vh = static_cast<float>(std::max(1u, viewport_.height));
     const VkViewport vp{vx, vy + vh, vw, -vh, viewport_.minZ, std::max(viewport_.minZ, viewport_.maxZ)};
-    vkCmdSetViewportWithCount(cmd, 1, &vp);
+    if (changed(v, c.viewport, vp)) {
+        vkCmdSetViewportWithCount(cmd, 1, &vp);
+    }
     std::int32_t x0 = static_cast<std::int32_t>(viewport_.x), y0 = static_cast<std::int32_t>(viewport_.y);
     std::int32_t x1 = x0 + static_cast<std::int32_t>(viewport_.width), y1 = y0 + static_cast<std::int32_t>(viewport_.height);
     if (rs_[RS_SCISSORTESTENABLE] != 0) {
@@ -293,54 +338,100 @@ void Device::setDynamicState(std::uint32_t primitiveType) {
     x1 = std::clamp(x1, x0, static_cast<std::int32_t>(targetWidth_));
     y1 = std::clamp(y1, y0, static_cast<std::int32_t>(targetHeight_));
     const VkRect2D sc{{x0, y0}, {static_cast<std::uint32_t>(x1 - x0), static_cast<std::uint32_t>(y1 - y0)}};
-    vkCmdSetScissorWithCount(cmd, 1, &sc);
-    vkCmdSetCullMode(cmd, cullMode(rs_[RS_CULLMODE]));
-    vkCmdSetFrontFace(cmd, kFrontFace);
-    vkCmdSetPrimitiveTopology(cmd, topology(primitiveType));
-    const bool depth = depthFormat_ != VK_FORMAT_UNDEFINED && rs_[RS_ZENABLE] != ZB_FALSE;
-    vkCmdSetDepthTestEnable(cmd, depth ? VK_TRUE : VK_FALSE);
-    vkCmdSetDepthWriteEnable(cmd, depth && rs_[RS_ZWRITEENABLE] != 0 ? VK_TRUE : VK_FALSE);
-    vkCmdSetDepthCompareOp(cmd, compareOp(rs_[RS_ZFUNC]));
-    const bool stencil = stencilFormat_ != VK_FORMAT_UNDEFINED && rs_[RS_STENCILENABLE] != 0;
-    vkCmdSetStencilTestEnable(cmd, stencil ? VK_TRUE : VK_FALSE);
-    // front = clockwise (kFrontFace); two-sided stencil gives the counter-clockwise (back) faces their own ops
-    vkCmdSetStencilOp(cmd, VK_STENCIL_FACE_FRONT_BIT, stencilOp(rs_[RS_STENCILFAIL]), stencilOp(rs_[RS_STENCILPASS]),
-                      stencilOp(rs_[RS_STENCILZFAIL]), compareOp(rs_[RS_STENCILFUNC]));
-    if (rs_[RS_TWOSIDEDSTENCILMODE] != 0) {
-        vkCmdSetStencilOp(cmd, VK_STENCIL_FACE_BACK_BIT, stencilOp(rs_[RS_CCW_STENCILFAIL]), stencilOp(rs_[RS_CCW_STENCILPASS]),
-                          stencilOp(rs_[RS_CCW_STENCILZFAIL]), compareOp(rs_[RS_CCW_STENCILFUNC]));
-    } else {
-        vkCmdSetStencilOp(cmd, VK_STENCIL_FACE_BACK_BIT, stencilOp(rs_[RS_STENCILFAIL]), stencilOp(rs_[RS_STENCILPASS]),
-                          stencilOp(rs_[RS_STENCILZFAIL]), compareOp(rs_[RS_STENCILFUNC]));
+    if (changed(v, c.scissor, sc)) {
+        vkCmdSetScissorWithCount(cmd, 1, &sc);
     }
-    vkCmdSetStencilCompareMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, rs_[RS_STENCILMASK] & 0xFF);
-    vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, rs_[RS_STENCILWRITEMASK] & 0xFF);
-    vkCmdSetStencilReference(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, rs_[RS_STENCILREF] & 0xFF);
+    if (const VkCullModeFlags cull = cullMode(rs_[RS_CULLMODE]); changed(v, c.cull, cull)) {
+        vkCmdSetCullMode(cmd, cull);
+    }
+    if (const VkPrimitiveTopology topo = topology(primitiveType); changed(v, c.topology, topo)) {
+        vkCmdSetPrimitiveTopology(cmd, topo);
+    }
+    const bool depth = depthFormat_ != VK_FORMAT_UNDEFINED && rs_[RS_ZENABLE] != ZB_FALSE;
+    if (const VkBool32 e = depth ? VK_TRUE : VK_FALSE; changed(v, c.depthTest, e)) {
+        vkCmdSetDepthTestEnable(cmd, e);
+    }
+    if (const VkBool32 e = depth && rs_[RS_ZWRITEENABLE] != 0 ? VK_TRUE : VK_FALSE; changed(v, c.depthWrite, e)) {
+        vkCmdSetDepthWriteEnable(cmd, e);
+    }
+    if (const VkCompareOp op = compareOp(rs_[RS_ZFUNC]); changed(v, c.depthCompare, op)) {
+        vkCmdSetDepthCompareOp(cmd, op);
+    }
+    const bool stencil = stencilFormat_ != VK_FORMAT_UNDEFINED && rs_[RS_STENCILENABLE] != 0;
+    if (const VkBool32 e = stencil ? VK_TRUE : VK_FALSE; changed(v, c.stencilTest, e)) {
+        vkCmdSetStencilTestEnable(cmd, e);
+    }
+    // front = clockwise (kFrontFace); two-sided stencil gives the counter-clockwise (back) faces their own ops
+    {
+        const VkStencilOp front[3] = {stencilOp(rs_[RS_STENCILFAIL]), stencilOp(rs_[RS_STENCILPASS]), stencilOp(rs_[RS_STENCILZFAIL])};
+        const VkCompareOp frontCmp = compareOp(rs_[RS_STENCILFUNC]);
+        const bool f1 = changed(v, c.stencilFront, front);
+        if (changed(v, c.stencilFrontCompare, frontCmp) || f1) {
+            vkCmdSetStencilOp(cmd, VK_STENCIL_FACE_FRONT_BIT, front[0], front[1], front[2], frontCmp);
+        }
+        const bool two = rs_[RS_TWOSIDEDSTENCILMODE] != 0;
+        const VkStencilOp back[3] = {two ? stencilOp(rs_[RS_CCW_STENCILFAIL]) : front[0], two ? stencilOp(rs_[RS_CCW_STENCILPASS]) : front[1],
+                                     two ? stencilOp(rs_[RS_CCW_STENCILZFAIL]) : front[2]};
+        const VkCompareOp backCmp = two ? compareOp(rs_[RS_CCW_STENCILFUNC]) : frontCmp;
+        const bool b1 = changed(v, c.stencilBack, back);
+        if (changed(v, c.stencilBackCompare, backCmp) || b1) {
+            vkCmdSetStencilOp(cmd, VK_STENCIL_FACE_BACK_BIT, back[0], back[1], back[2], backCmp);
+        }
+    }
+    if (const std::uint32_t m = rs_[RS_STENCILMASK] & 0xFF; changed(v, c.stencilMasks[0], m)) {
+        vkCmdSetStencilCompareMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, m);
+    }
+    if (const std::uint32_t m = rs_[RS_STENCILWRITEMASK] & 0xFF; changed(v, c.stencilMasks[1], m)) {
+        vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, m);
+    }
+    if (const std::uint32_t m = rs_[RS_STENCILREF] & 0xFF; changed(v, c.stencilMasks[2], m)) {
+        vkCmdSetStencilReference(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, m);
+    }
     // D3D9 depth bias is in depth units; Vulkan's constant factor is in units of the format's resolution (2^-24 for D24;
     // D32F (our D24S8 on AMD) resolves 2^-24 at depths 0.5..1, where most of a scene is)
     const float bias = asFloat(rs_[RS_DEPTHBIAS]);
     const float slope = asFloat(rs_[RS_SLOPESCALEDEPTHBIAS]);
     const float unit = depthFormat_ == VK_FORMAT_D16_UNORM ? 65535.0f : 16777215.0f;
-    vkCmdSetDepthBiasEnable(cmd, bias != 0.0f || slope != 0.0f ? VK_TRUE : VK_FALSE);
-    vkCmdSetDepthBias(cmd, bias * unit, 0.0f, slope);
+    if (const VkBool32 e = bias != 0.0f || slope != 0.0f ? VK_TRUE : VK_FALSE; changed(v, c.depthBiasEnable, e)) {
+        vkCmdSetDepthBiasEnable(cmd, e);
+    }
+    if (const float db[2] = {bias * unit, slope}; changed(v, c.depthBias, db)) {
+        vkCmdSetDepthBias(cmd, db[0], 0.0f, db[1]);
+    }
     float bc[4];
     colorToFloat4(rs_[RS_BLENDFACTOR], bc);
-    vkCmdSetBlendConstants(cmd, bc);
-    vkCmdSetPrimitiveRestartEnable(cmd, VK_FALSE);
+    if (changed(v, c.blendConstants, bc)) {
+        vkCmdSetBlendConstants(cmd, bc);
+    }
     if (ctx_.features().extendedDynamicState3 && colorCount_ > 0) {
-        VkBool32 enables[kRenderTargets];
-        VkColorBlendEquationEXT eqs[kRenderTargets];
-        VkColorComponentFlags masks[kRenderTargets];
+        VkBool32 enables[kRenderTargets]{};
+        VkColorBlendEquationEXT eqs[kRenderTargets]{};
+        VkColorComponentFlags masks[kRenderTargets]{};
         for (std::uint32_t i = 0; i < colorCount_; ++i) {
             const vk::BlendAttachment b = blendState(rs_, i);
             enables[i] = b.enable;
             eqs[i] = {b.srcColor, b.dstColor, b.colorOp, b.srcAlpha, b.dstAlpha, b.alphaOp};
             masks[i] = b.writeMask;
         }
-        vkCmdSetColorBlendEnableEXT(cmd, 0, colorCount_, enables);
-        vkCmdSetColorBlendEquationEXT(cmd, 0, colorCount_, eqs);
-        vkCmdSetColorWriteMaskEXT(cmd, 0, colorCount_, masks);
+        // attachments beyond colorCount_ keep stale values: only the first colorCount_ are compared and recorded
+        const bool sameCount = v && c.colorCount >= colorCount_;
+        if (!sameCount || std::memcmp(c.blendEnable, enables, sizeof(VkBool32) * colorCount_) != 0) {
+            vkCmdSetColorBlendEnableEXT(cmd, 0, colorCount_, enables);
+            std::memcpy(c.blendEnable, enables, sizeof(VkBool32) * colorCount_);
+        }
+        if (!sameCount || std::memcmp(c.blendEquation, eqs, sizeof(VkColorBlendEquationEXT) * colorCount_) != 0) {
+            vkCmdSetColorBlendEquationEXT(cmd, 0, colorCount_, eqs);
+            std::memcpy(c.blendEquation, eqs, sizeof(VkColorBlendEquationEXT) * colorCount_);
+        }
+        if (!sameCount || std::memcmp(c.writeMask, masks, sizeof(VkColorComponentFlags) * colorCount_) != 0) {
+            vkCmdSetColorWriteMaskEXT(cmd, 0, colorCount_, masks);
+            std::memcpy(c.writeMask, masks, sizeof(VkColorComponentFlags) * colorCount_);
+        }
+        if (!sameCount) {
+            c.colorCount = colorCount_;
+        }
     }
+    c.valid = true;
 }
 
 void Device::uploadConstants() {
@@ -405,7 +496,16 @@ bool Device::prepareDraw(std::uint32_t primitiveType) {
         ++stats_.skippedVertexInput;
         return false;
     }
-    VkPipeline pipeline = pipelines_.get(pd);
+    // consecutive draws mostly keep their pipeline: compare with the last description before hashing
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    if (lastPipelineValid_ && std::memcmp(&pd, &lastPipelineDesc_, sizeof(pd)) == 0) {
+        pipeline = lastPipeline_;
+    } else {
+        pipeline = pipelines_.get(pd);
+        lastPipelineDesc_ = pd;
+        lastPipeline_ = pipeline;
+        lastPipelineValid_ = true;
+    }
     if (pipeline == VK_NULL_HANDLE) {
         ++stats_.drawsSkipped;
         ++stats_.skippedPipeline;

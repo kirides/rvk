@@ -105,6 +105,7 @@ bool Device::create(const DeviceOptions& options) {
     for (auto& st : streams_) {
         st.freq = 1;
     }
+    samplerSlotCache_.fill(UINT32_MAX);
     created_ = true;
     beginFrame();
     if (!resize(options.width, options.height)) {
@@ -255,6 +256,9 @@ void Device::beginFrame() {
     uploadUsed_ = false;
     rendering_ = false;
     boundPipeline_ = VK_NULL_HANDLE;
+    lastPipelineValid_ = false;
+    viCache_.buffersValid = viCache_.layoutValid = false;
+    dyn_.valid = false;
     vsConstDirty_ = psConstDirty_ = true;
     passIndex_ = 0;
     const VkDescriptorSet set = bindless_.set();
@@ -479,6 +483,11 @@ void Device::present() {
     submitFrame(acquired, swapchain_.renderedSemaphore(imageIndex));
     presenter_.present(imageIndex);
     ++stats_.presentsQueued;
+    // persist new pipelines every 10 s (the game is usually killed, not shut down)
+    if (presentStart_ - pipelinesSaved_ > std::chrono::seconds(10)) {
+        pipelinesSaved_ = presentStart_;
+        pipelines_.saveAsync();
+    }
     beginFrame();
 }
 
@@ -658,8 +667,9 @@ void Device::setRenderState(std::uint32_t rs, std::uint32_t value) {
 
 void Device::setSamplerState(std::uint32_t sampler, std::uint32_t ss, std::uint32_t value) {
     const std::uint32_t slot = slotOf(sampler);
-    if (slot < kSamplerCount && ss < SAMP_COUNT) {
+    if (slot < kSamplerCount && ss < SAMP_COUNT && samp_[slot][ss] != value) {
         samp_[slot][ss] = value;
+        samplerSlotCache_[slot] = UINT32_MAX;
     }
 }
 
@@ -1069,6 +1079,15 @@ std::size_t Device::SamplerKeyHash::operator()(const SamplerKey& k) const {
 }
 
 std::uint32_t Device::samplerIndex(std::uint32_t slot) {
+    if (samplerSlotCache_[slot] != UINT32_MAX) {
+        return samplerSlotCache_[slot];
+    }
+    const std::uint32_t index = lookupSampler(slot);
+    samplerSlotCache_[slot] = index;
+    return index;
+}
+
+std::uint32_t Device::lookupSampler(std::uint32_t slot) {
     SamplerKey key{};
     std::memcpy(key.states, samp_[slot].data(), sizeof(key.states));
     key.states[SAMP_ELEMENTINDEX] = 0;
