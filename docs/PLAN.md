@@ -3,6 +3,14 @@
 A pure Vulkan renderer for **Risen Enhanced (x64)**. No D3D9 device is created; D3D9-era content (SM3 shader bytecode,
 D3DX effects, DDS textures) is executed on Vulkan. Afterwards the renderer is the platform for enhanced graphics.
 
+**North star (user, 2026-10-21):** the Vulkan backend is the base for future enhancements: custom water shaders and ocean
+simulation, ray-traced reflections, and finally ray-traced global illumination. D3D9 parity (M3-M5) is the first step.
+**Every enhancement is optional and configurable by players at their will**: per-feature toggles and quality levels, a
+fallback when the hardware lacks a feature (RT stays optional on top of the 1.3 floor), and the plain parity path is always
+available. Architecture work must keep that path open: scene and material semantics beyond the D3D9 draw stream (which
+draw is water, terrain, a static mesh, a skinned character), points to inject or replace passes, buffers that can feed
+acceleration structures when RT is enabled, and a player-facing settings system (docs/research/enhancements-roadmap.md).
+
 Research that this plan rests on (read these before changing the architecture):
 * `docs/research/engine-gfx.md`: the engine's graphics HAL, frame structure, shaders, formats (RVAs).
 * `docs/research/spass.md`: loading chain, hook infrastructure, test tooling of risen-spass.
