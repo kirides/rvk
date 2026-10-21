@@ -5,6 +5,7 @@
 #include <windows.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 
@@ -170,6 +171,7 @@ void Device::setVsync(bool vsync) {
     }
     options_.vsync = vsync;
     pacerChecked_ = {};
+    pacerRequested_ = -1.0;
     presenter_.waitIdle();
     swapchain_.setVsync(vsync);
     if (swapchain_.valid()) {
@@ -279,6 +281,9 @@ PerfStats Device::takePerf() {
     perfShadersBase_ = built;
     perfShadersCompiledBase_ = compiled;
     perfShaderNsBase_ = ns;
+    p.pacer = pacer_.takeStats();
+    p.pacerRate = pacer_.rate();
+    p.pacerVblank = pacer_.vblankLocked();
     return p;
 }
 
@@ -336,8 +341,8 @@ void Device::updatePacer() {
         return;
     }
     pacerChecked_ = now;
-    double rate = options_.maxFps;
-    if (rate <= 0.0 && options_.vsync) {
+    double refresh = 0.0;
+    if (options_.vsync) {
         void* monitor = MonitorFromWindow(options_.window, MONITOR_DEFAULTTONEAREST);
         if (monitor != pacerMonitor_) {
             pacerMonitor_ = monitor;
@@ -346,11 +351,29 @@ void Device::updatePacer() {
             spdlog::info("vulkan: monitor refresh rate {} Hz (queried in {:.1f} ms)", pacerMonitorRate_,
                          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
         }
-        rate = pacerMonitorRate_;
+        refresh = pacerMonitorRate_;
     }
-    if (rate != pacer_.rate()) {
-        spdlog::info("vulkan: frame pacing at {} fps{}", rate, options_.maxFps > 0.0 ? " (max_fps)" : options_.vsync ? " (vsync)" : "");
-        pacer_.setRate(rate);
+    // vsync: the refresh rate, or max_fps below it; without vsync max_fps or nothing
+    double rate = refresh;
+    if (options_.maxFps > 0.0 && (rate <= 0.0 || options_.maxFps < rate)) {
+        rate = options_.maxFps;
+    }
+    // an unlocked vsync pacer retries the lock (DWM's measured period strays under load)
+    vk::VblankClock probe;
+    const double vblanks = rate > 0.0 ? std::round(refresh / rate) : 0.0;
+    const bool lockable = refresh > 0.0 && vblanks >= 1.0 && vblanks <= 8.0 && std::abs(refresh / vblanks - rate) < 0.01 * rate;
+    const bool relock = rate == pacerRequested_ && lockable && !pacer_.vblankLocked() && vk::dwmVblankClock(probe) &&
+                        std::abs(probe.rate() - refresh) < 0.005 * refresh;
+    if (rate != pacerRequested_ || relock) {
+        pacerRequested_ = rate;
+        // with vsync the slots sit on DWM's vblank grid (the refresh rate or an integer fraction of it)
+        pacer_.setRate(rate, refresh);
+        vk::VblankClock clock;
+        const bool dwm = vk::dwmVblankClock(clock);
+        spdlog::info("vulkan: DWM composition clock {}", dwm ? std::format("{:.3f} Hz", clock.rate()) : std::string("unavailable"));
+        spdlog::info("vulkan: frame pacing at {:.3f} fps{}{}", pacer_.rate(),
+                     options_.maxFps > 0.0 && rate == options_.maxFps ? " (max_fps)" : options_.vsync ? " (vsync)" : "",
+                     pacer_.vblankLocked() ? ", locked to DWM's vblank" : "");
     }
 }
 

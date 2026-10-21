@@ -686,6 +686,13 @@ void HalDevice::logPerf(d3d9::PerfStats p) {
                  static_cast<double>(p.ringBytes) / n / 1024.0, static_cast<double>(p.textureUploadBytes) / n / 1024.0,
                  static_cast<double>(p.bufferUploadBytes) / n / 1024.0, p.pipelinesBuilt, p.pipelineMs, p.shadersBuilt, p.shadersCompiled,
                  p.shaderMs);
+    if (p.pacerRate > 0.0) {
+        const double w = std::max(1.0, static_cast<double>(p.pacer.waits));
+        spdlog::info("perf: pacer {:.3f} fps{}: {} of {} frames waited, avg sleep {:.2f} ms + spin {:.3f} ms, timer late avg {:.3f} / "
+                     "max {:.3f} ms, release error avg {:.3f} ms, {} cadence restarts",
+                     p.pacerRate, p.pacerVblank ? " (vblank-locked)" : "", p.pacer.waits, p.frames, p.pacer.sleptMs / w,
+                     p.pacer.spunMs / w, p.pacer.lateMs / w, p.pacer.maxLateMs, p.pacer.releaseErrorMs / w, p.pacer.restarts);
+    }
 }
 
 bEResult HalDevice::BeginScene() {

@@ -285,6 +285,9 @@ struct PerfStats {
     std::uint64_t shadersCompiled = 0;     // of those, compiled by glslang (SPIR-V disk cache miss)
     double shaderMs = 0.0;
     std::vector<float> frameIntervalsMs;   // present-to-present
+    vk::FramePacer::Stats pacer;
+    double pacerRate = 0.0;
+    bool pacerVblank = false;
 };
 
 class Device {
@@ -429,6 +432,7 @@ private:
     std::chrono::steady_clock::time_point pacerChecked_{};
     void* pacerMonitor_ = nullptr;
     double pacerMonitorRate_ = 0.0;
+    double pacerRequested_ = -1.0;
     void updatePacer();
     VkFormat d24s8_ = VK_FORMAT_D24_UNORM_S8_UINT;
     std::uint32_t renderThread_ = 0;
