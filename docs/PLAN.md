@@ -195,7 +195,23 @@ efcompare.ps1` + `mods/rvkcompare` (13 spots: beach rain/sun,
   clean; corpus + tint variants 2483 / 2483, compare_disasm 100 %; CPU 0.04-0.09 ms per frame (~1430 draws); refcompare
   against the stored reference 12 PASS + 1 WARN (beach_sun, temporal sea noise; PASS on rerun), run `20261021-212745`.
   Open: material names (water list), light-streak / dynamic-light contexts unseen.
-* remaining do-now items 5, 6, 8 of the roadmap (ABI slots, injection points, RT capability).
+* **GLSL build pipeline, ABI extension slots, injection points (do-now items 5, 6): done (2026-10-21,
+  docs/research/injection.md).** `shaders/**` (GLSL 4.60) compiled at build time by `rvk_glslc` (vcpkg glslang +
+  spirv-val, depfile include tracking) and embedded into the DLL; `shaders/include/rvk_abi.glsl` is the GLSL side of
+  `abi.h`, pasted into every translated shader (offsets compared with the C++ structs by rvk_tests). Push constants 48 bytes:
+  + `frame` (FrameBlock: camera / previous camera / matrices, depth conventions, target size, jitter slot, time, frame
+  index + flags, bindless slots of the tagged images, 16 feature params; uploaded ~4x per frame), `prevVsConsts` (0 for now),
+  `drawId`, `flags` (kind / pass / view). Translator hooks `extraGlobals` / `epilogue` / `constOverrides` (inert by default),
+  spec-constant ids reserved. Injection points `AfterDepthPrepass`, `AfterOpaque`, `AfterRefractionCopy`, `AfterMainView`,
+  `BeforeGui` (`Device::addPass`, `PassContext`), `vk/passes.h` (pass layout with push descriptors, compute / fullscreen
+  pipelines, transient images; sync2 barriers through tracked layouts). Proof: `debug.inject_view` (Debug, default off):
+  GLSL compute at AfterOpaque reconstructs world positions from the depth map + FrameBlock (world grid stays on the ground in
+  flight) or tints by time; 0.044 ms GPU at 1600x900. Verified: corpus 2483 / 2483 (+ tint), compare_disasm 100 %,
+  `rvk_vktest --passes` with sync validation, game runs with validation + sync validation clean, CPU +0.03-0.05 ms per
+  frame for ~1450 draws with everything off (fps unchanged), refcompare 13 / 13 PASS against the stored D3D9
+  reference (run `out\refcompare\20261021-222140`).
+  Deferred: motion / normal outputs, the previous-constants map, TAA jitter, CTAB-name overrides in Device.
+* remaining do-now item 8 of the roadmap (RT capability).
 
 ### M7+ Enhanced graphics
 * candidates: anisotropic filtering + MSAA/TAA/SMAA, higher-resolution and better-filtered shadows, modern tonemapping/HDR10,

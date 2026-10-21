@@ -53,6 +53,9 @@ draw-kind histogram ("draw kinds": kind x view; "untagged draw" lines name draws
 Debug view: `-Setting 'debug.tint_draws=kind'` (or `pass`; overlay category Debug) tints draws by kind (water blue, SpeedTree
 green, skinned red, instanced cyan, unknown magenta, ...); `rvkcompare` `-Param show_actors=1` keeps the player / NPCs visible.
 Scenario `rvk_camera` (this repo's mods) holds fixed camera poses to compare the camera block with `risen.camera.get`.
+Injection test view: `-Setting 'debug.inject_view=depth'` (distance bands + a 5 m world grid from the depth map and the
+FrameBlock camera, drawn after the opaque scene) or `tint`; `-SyncValidation` = `-Validation` + the layer's
+synchronization validation (`[vulkan] sync_validation`; environment variables do not reach the game).
 Performance (docs/research/performance.md): `-Perf` (GPU timestamps, CPU split, uploads, pipeline builds, pacer: `perf:`
 lines every 5 s), `-PerfFrame N` (GPU time of every render pass of frame N), `-Vsync on|off|engine`, `-MaxFps N`; the
 `rvk_shadows` scenario logs the fps for either renderer (also `-NoRenderer`). Other games on the GPU skew GPU times.
@@ -91,7 +94,22 @@ at InitializeAdmin" line lists uptime, D3D/Vulkan/overlay modules and the proces
 `rvk_shadertool corpus <dir>` translates + validates every captured shader (corpus from `mode = "trace"`:
 `<test copy>/bin/rvk/corpus`, copy it to `<repo>/corpus`, git-ignored: game-derived). `show <file>` prints listing + GLSL,
 `refdisasm <file>` the D3DX reference listing. `python tools/compare_disasm.py corpus` diffs our listing against D3DX for the
-whole corpus (must stay 100 %). The contract between translated shaders and the renderer is `src/shader/abi.h`.
+whole corpus (must stay 100 %). The contract between translated shaders and the renderer is `src/shader/abi.h`; its GLSL
+side is `shaders/include/rvk_abi.glsl`, which the translator pastes into every translated shader (change both together;
+rvk_tests `abi_glsl_layout_matches_cpp` compares the offsets; bump `kTranslatorVersion` in `d3d9/device.cpp` when the
+translated GLSL changes).
+
+## Hand-written shaders (GLSL only)
+
+Enhancement / pass shaders are **GLSL 4.60 in `shaders/`** (no HLSL, PLAN.md). `rvk_glslc` (`tools/glslc`, built from the
+vcpkg glslang + SPIRV-Tools: no Vulkan SDK needed) compiles each to SPIR-V 1.6 at build time, runs spirv-val, writes
+`build/generated/shaders/<path>.h` + a depfile (editing an include rebuilds its users); they are embedded into `d3d9.dll`
+(`shader::embedded::spirv("debug/inject_view.comp")`). **A new shader goes into `RVK_SHADERS` in `CMakeLists.txt`** (then
+`cmake --preset default`). `#include "rvk_abi.glsl"` (push constants, buffer references, FrameBlock, bindless set; pass
+shaders `#define RVK_PASS_SHADER` first and start their push block with `RVK_PASS_PUSH_HEADER`) and `rvk_common.glsl`
+(sampling, depth -> world helpers). Passes plug in at injection points (`Device::addPass(inject::Point::AfterOpaque, ...)`,
+`vk/passes.h`: pass layout, compute / fullscreen pipelines, transient images): docs/research/injection.md.
+`rvk_vktest --passes` checks the pass building blocks on the GPU with synchronization validation (`--hazard`: proves it is live).
 
 ## Architecture (src/)
 
@@ -104,13 +122,14 @@ whole corpus (must stay 100 %). The contract between translated shaders and the 
 | `overlay/` | in-game Dear ImGui overlay (settings, A/B, perf panel), window-procedure input filter, `[debug] commands`; ImGui's Vulkan backend is vendored in `third_party/imgui_vulkan` (compiled against volk) |
 | `engine/symbols.h` | X-macro table of the Engine.dll symbols we bind by decorated name |
 | `engine/scene_hooks.*` | frame phase markers (Vulkan mode only): detours on Execute / z pass / shadow / solid / alpha / sky / post / GUI, the RenderRefracted vtable slot, image-role tags, the main camera read (docs/research/frame-phases.md) |
-| `vk/` | Vulkan core: context (floor), swapchain, frames + upload ring, bindless set, images, pipeline cache, formats |
-| `d3d9/` | D3D9 device model on Vulkan (states, resources, draws, present): what the HAL and effects drive; `rvk_d3d9test`; `scene.*` = frame semantics (phase tracker, image roles, camera block); `draws.*` draw tags, records, tint palette; `identity.*` resource ids + generations; `semantics.*` CTAB shader semantics (draw-tags.md) |
+| `vk/` | Vulkan core: context (floor), swapchain, frames + upload ring, bindless set, images, pipeline cache, formats; `passes.*` = pass pipeline layout, compute / fullscreen pipelines, transient images |
+| `d3d9/` | D3D9 device model on Vulkan (states, resources, draws, present): what the HAL and effects drive; `rvk_d3d9test`; `scene.*` = frame semantics (phase tracker, image roles, camera block); `draws.*` draw tags, records, tint palette; `identity.*` resource ids + generations; `semantics.*` CTAB shader semantics (draw-tags.md); `inject.*` injection points (injection.md) |
 | `hal/vulkan/` | the engine HAL on `d3d9::Device` (mode = "vulkan"): instance, device, resources, HLSL shaders, effects |
 | `fx/` | fx_2_0 effect binaries: parser, constant tables, preshaders (`rvk_fxtool`) |
 | `res/` | DDS parsing |
 | `hal/` | generated HAL interfaces (`tools/gen_hal.py` -> `api_generated.h`, `trace_generated.h`), engine allocator, trace mode |
-| `shader/` | D3D9 bytecode decoder, listing, GLSL generator (`abi.h` = shader/renderer contract), glslang wrapper |
+| `shader/` | D3D9 bytecode decoder, listing, GLSL generator (`abi.h` = shader/renderer contract; variant hooks `GlslOptions`), glslang wrapper, `embedded.h` (build-time shaders) |
+| `enh/` | enhancements (injected passes): `debug_view.*` = `debug.inject_view` (docs/research/injection.md 5) |
 
 ## Tooling gotchas
 
