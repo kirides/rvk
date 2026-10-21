@@ -1,6 +1,6 @@
 -- A fixed view for renderer comparisons (risen-enhanced-graphics, Vulkan vs the game's D3D9 renderer):
 --
---   .\scripts\test-run.ps1 -Mods rvk_shadows -WaitForResult -Seconds 240 -Scenario rvk_shadows [-Param hour=12,hold=40,shots=2]
+--   .\scripts\run.ps1 -Mode vulkan -Mods rvk_shadows -WaitForResult -Seconds 240 -Scenario rvk_shadows [-Param hour=12,hold=40,shots=2]
 --
 -- New game, the start window closed, the clock held at <hour>:00, then the world runs untouched for <hold> seconds (the player
 -- stands, the camera looks at the beach). With the D3D9 renderer <shots> screenshots

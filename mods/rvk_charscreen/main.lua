@@ -1,7 +1,7 @@
 -- The character screen (key C) for renderer comparisons (risen-enhanced-graphics: the GUI font atlases are updated by partial
 -- texture locks whenever a new glyph shows up):
 --
---   .\scripts\test-run.ps1 -Mods rvk_charscreen -WaitForResult -Seconds 240 -Scenario rvk_charscreen [-Param hold=6,shots=1]
+--   .\scripts\run.ps1 -Mode vulkan -Mods rvk_charscreen -WaitForResult -Seconds 240 -Scenario rvk_charscreen [-Param hold=6,shots=1]
 --
 -- New game, the start window closed, then the character screen is opened through the engine's "Character" action, held for
 -- <hold> seconds while the mouse hovers over a grid of points (tooltips), closed, and opened again. Every step logs the number
