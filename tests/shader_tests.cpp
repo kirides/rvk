@@ -231,7 +231,7 @@ texldp r1, v0, s0
 texldb r2, v0, s0
 texld r3, v0, s1
 texld r4, v0, s2
-texldd r5, v0, s0, c1, c2
+texldd r5, v0, s0, r6, r7
 dsx r6, v0
 dsy r7, v0
 add r0.xy, r0, vPos
@@ -239,7 +239,7 @@ if_gt vFace, c0.x
   mov r0.w, c0.y
 endif
 cmp r0, r0, c0.y, c0.x
-lrp r1, c0.z, r0, r1
+lrp r8, c0.z, r0, r1
 nrm r2.xyz, r1
 pow r2.w, r1.x, c0.w
 dp2add r3.x, r0, r1, c0.z
