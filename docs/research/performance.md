@@ -62,9 +62,11 @@ In the world the game runs at **79.5-80.0 fps** whatever the renderer does:
   `eCTimer::RelaxTick` (0x4ced90) only smooths the frame time.
 * Global AMD settings: Radeon Chill off, FRTC off (registry `KMD_ChillEnabled=0`, `Gmx_FRTCEnabled=0`). The driver knows
   Risen (Adrenalin game list `amdId` 537, "profileCustomized": TRUE); the per-game settings are not readable from the
-  registry. **Open, for the user**: check Adrenalin's per-game settings for Risen (Radeon Chill, Frame Rate Target
-  Control, Anti-Lag) and whether the cap disappears when the game window is in the foreground or when no other game
-  (AION 2) runs. Our side cannot remove it; everything below improves what happens within it.
+  registry.
+* **Resolved (user, 2026-10-21): the cause was Radeon Chill in Adrenalin's per-game profile for Risen**; the user
+  disabled it. Chill throttles presents while there is no input, which is why it hit only the world (and background
+  test runs never give input). If a steady ~12.5 ms present cadence shows up again on an AMD machine, check Chill
+  per game first. The 80 fps figures in this document were measured under Chill.
 
 ## 3. Present thread
 
@@ -177,7 +179,7 @@ Not a limit at this resolution.
 
 ## 9. Remaining hotspots
 
-1. The external ~80 Hz present cadence (section 2): the largest item, outside our code.
+1. ~~The external ~80 Hz present cadence~~: AMD Radeon Chill, disabled (section 2). World fps without it: not yet measured.
 2. Engine CPU (~3-4.5 ms per frame, single-threaded) and our draw path (1.9 us per draw): the next candidates are
    `bindVertexInput` (declaration matching per input per draw, `Buffer::gpu()` lock per stream), the per-draw constant
    blocks (2 x 4.4 KiB of ring space per draw, ~11.5 MiB per frame; only the used registers are written), the 176-byte draw
