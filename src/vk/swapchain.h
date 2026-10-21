@@ -27,6 +27,9 @@ public:
 
     VkSemaphore renderedSemaphore(std::uint32_t imageIndex) const { return rendered_[imageIndex]; }
     VkImage image(std::uint32_t index) const { return images_[index]; }
+    VkImageView view(std::uint32_t index) const { return views_[index]; }
+    std::uint32_t imageCount() const { return static_cast<std::uint32_t>(images_.size()); }
+    std::uint32_t minImageCount() const { return minImageCount_; }
     VkFormat format() const { return format_; }
     VkExtent2D extent() const { return extent_; }
     bool valid() const { return swapchain_ != VK_NULL_HANDLE; }
@@ -44,6 +47,8 @@ private:
     VkExtent2D extent_{};
     bool vsync_ = true;
     std::vector<VkImage> images_;
+    std::vector<VkImageView> views_;
+    std::uint32_t minImageCount_ = 2;
     std::vector<VkSemaphore> rendered_;  // one per image (present may hold it until the image is re-acquired)
 };
 

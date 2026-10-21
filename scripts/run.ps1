@@ -36,6 +36,15 @@ param(
     [int]$LogFrame = 0,
     # the Vulkan renderer refuses eCAPITexture::SaveTextureToFile; with this switch it dumps the image to bin/rvk/dumps/*.png
     [switch]$DumpSavedTextures,
+    # player settings (bin/rvk/settings.toml, docs/research/overlay.md): every run starts from the defaults (the file is
+    # deleted) unless -KeepSettings; -Setting 'vulkan.max_fps=60','vulkan.vsync=off' writes a fresh file with these values
+    [string[]]$Setting = @(),
+    [switch]$KeepSettings,
+    # the in-game overlay: -NoOverlay = [overlay] enabled = false; -OverlayInScreenshots draws it into the back buffer so
+    # -Screenshots / rvk_screenshot capture it; -Commands '450: overlay open','600: set vulkan.max_fps 30' ([debug] commands)
+    [switch]$NoOverlay,
+    [switch]$OverlayInScreenshots,
+    [string[]]$Commands = @(),
     [ValidateSet('trace', 'debug', 'info', 'warn', 'error')][string]$RvkLogLevel = 'info',
     [string]$Config = 'RelWithDebInfo',
     [string]$GameDir = 'B:\DevDrive\risen-test-vk',
@@ -57,7 +66,7 @@ param(
     [switch]$AllowFocus,
     [string]$Filter = '\[error\]|\[warn\]|\[test\] (FAIL|finished|deadline)',
     # regex of rvk.log lines to print after the run ('' = none, '.' = all)
-    [string]$RvkFilter = '\[(warning|error|critical)\]|probe|  \[|missing|InitializeAdmin|ms_pAPI|Direct3DCreate9|hooks|mode =|selftest|snapshot'
+    [string]$RvkFilter = '\[(warning|error|critical)\]|probe|  \[|missing|InitializeAdmin|ms_pAPI|Direct3DCreate9|hooks|mode =|selftest|snapshot|overlay|settings'
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -88,8 +97,28 @@ if ($NoRenderer) {
         "vsync = $(@{ engine = '"engine"'; on = 'true'; off = 'false' }[$Vsync])",
         '[debug]', "screenshot_frames = [$Screenshots]", "log_draws = $LogDraws", "log_frame = $LogFrame", "snapshot_frames = [$Snapshots]",
         "dump_saved_textures = $($DumpSavedTextures.IsPresent.ToString().ToLower())",
-        "perf = $($Perf.IsPresent.ToString().ToLower())", "perf_frame = $PerfFrame"
+        "perf = $($Perf.IsPresent.ToString().ToLower())", "perf_frame = $PerfFrame",
+        "overlay_in_screenshots = $($OverlayInScreenshots.IsPresent.ToString().ToLower())",
+        "commands = [$(($Commands | ForEach-Object { '"' + ($_ -replace '"', '') + '"' }) -join ', ')]",
+        '[overlay]', "enabled = $((-not $NoOverlay.IsPresent).ToString().ToLower())"
     )
+    $settingsFile = Join-Path $rvkDir 'settings.toml'
+    if (-not $KeepSettings) { Remove-Item $settingsFile -Force -ErrorAction SilentlyContinue }
+    if ($Setting) {
+        # "table.key=value" -> [table] key = value (strings quoted unless number / bool)
+        $tables = [ordered]@{}
+        foreach ($kv in $Setting) {
+            $k, $v = $kv -split '=', 2
+            $dot = $k.LastIndexOf('.')
+            $t = $k.Substring(0, $dot); $name = $k.Substring($dot + 1)
+            if ($v -notmatch '^(true|false|-?[0-9.]+)$') { $v = '"' + $v + '"' }
+            if (-not $tables.Contains($t)) { $tables[$t] = @() }
+            $tables[$t] += "$name = $v"
+        }
+        $lines = @('# written by scripts/run.ps1 -Setting')
+        foreach ($t in $tables.Keys) { $lines += "[$t]"; $lines += $tables[$t] }
+        [IO.File]::WriteAllLines($settingsFile, $lines)
+    }
     Remove-Item (Join-Path $rvkDir 'screenshots') -Recurse -Force -ErrorAction SilentlyContinue
     [IO.File]::WriteAllLines((Join-Path $rvkDir 'config.toml'), $cfg)
     Remove-Item $rvkLog -Force -ErrorAction SilentlyContinue

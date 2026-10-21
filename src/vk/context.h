@@ -51,6 +51,8 @@ public:
     VkResult queueSubmit(const VkSubmitInfo2& submit, VkFence fence = VK_NULL_HANDLE);
     VkResult queuePresent(const VkPresentInfoKHR& present);
     void waitIdle();
+    // the queue lock itself, for queue access by foreign code (ImGui's texture uploads submit and wait on the queue)
+    std::unique_lock<std::mutex> queueLock() { return std::unique_lock<std::mutex>(queueMutex_); }
     std::uint32_t queueFamily() const { return queueFamily_; }
     VmaAllocator allocator() const { return allocator_; }
     const VkPhysicalDeviceProperties& properties() const { return props_; }

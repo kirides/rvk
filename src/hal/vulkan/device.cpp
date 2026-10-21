@@ -12,6 +12,7 @@
 
 #include "api/capture.h"
 #include "core/exports.h"
+#include "core/settings.h"
 #include "d3d9/fvf.h"
 #include "engine/vfs.h"
 #include "hal/vulkan/hal_vulkan.h"
@@ -54,6 +55,16 @@ HalDevice::HalDevice() {
 }
 
 HalDevice::~HalDevice() {
+    settings::registry().removeCallbacks(this);
+    if (overlay_) {
+        dev_.setOverlay(nullptr, false);
+        // ImGui's shutdown waits for the device (vkDeviceWaitIdle touches the queue the present thread uses)
+        auto lock = dev_.ctx().queueLock();
+        overlay_.reset();
+    }
+    if (settings::registry().dirty() && !options_.settingsFile.empty()) {
+        settings::registry().save(options_.settingsFile);
+    }
     {
         const std::lock_guard lock(handleMutex_);
         for (auto& [h, d] : decls_) dev_.release(std::move(d));
@@ -72,14 +83,22 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     o.window = p.window;
     o.width = p.backBufferWidth;
     o.height = p.backBufferHeight;
-    o.vsync = options.vsync < 0 ? p.vsync : options.vsync != 0;
+    engineVsync_ = p.vsync;
+    const auto& rs = settings::renderer();
+    if (rs.vsync != nullptr) {
+        // player settings (config.toml overrides are locks on them: bootstrap)
+        const std::string_view v = rs.vsync->asEnum();
+        o.vsync = v == "on" ? true : v == "off" ? false : p.vsync;
+    } else {
+        o.vsync = options.vsync < 0 ? p.vsync : options.vsync != 0;
+    }
     o.perf = options.perf;
     o.pipelineLibraries = options.pipelineLibraries;
     o.perfFrame = options.perfFrame;
     o.depthFormat = static_cast<std::uint32_t>(p.depthFormat);
     o.validation = options.validation;
     o.adapter = options.adapter;
-    o.maxFps = options.maxFps;
+    o.maxFps = rs.maxFps != nullptr ? rs.maxFps->value() : options.maxFps;
     o.cacheDir = options.cacheDir;
     o.logDraws = options.logDraws;
     if (!p.windowed) {
@@ -90,7 +109,62 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     }
     spdlog::info("hal: Vulkan device for window {} ({}x{}, vsync {}, depth {})", static_cast<void*>(p.window), o.width, o.height,
                  o.vsync, vk::d3dFormatName(o.depthFormat));
+    auto& reg = settings::registry();
+    if (rs.vsync != nullptr) reg.onChange(*rs.vsync, [this](const settings::Setting&) { applyVsync(); }, this);
+    if (rs.maxFps != nullptr) {
+        reg.onChange(*rs.maxFps, [this](const settings::Setting& s) {
+            dev_.setMaxFps(s.value());
+            spdlog::info("hal: settings: frame rate limit {}", s.value() > 0.0 ? std::format("{} fps", s.value()) : std::string("none"));
+        }, this);
+    }
+    if (options.overlay && dev_.swapchain().valid()) {
+        overlay_ = std::make_unique<overlay::Overlay>();
+        overlay::Options oo;
+        oo.intoBackBuffer = options.overlayInScreenshots;
+        oo.commands = options.overlayCommands;
+        oo.settingsFile = options.settingsFile;
+        dev_.setOverlay(overlay_.get(), oo.intoBackBuffer);  // first: the overlay asks the device for its colour format
+        if (!overlay_->init(dev_, p.window, oo)) {
+            dev_.setOverlay(nullptr, false);
+            overlay_.reset();
+            spdlog::warn("hal: the settings overlay is not available this session");
+        }
+    }
     return true;
+}
+
+void HalDevice::applyVsync() {
+    const auto& rs = settings::renderer();
+    if (rs.vsync == nullptr) return;
+    const std::string_view v = rs.vsync->asEnum();
+    const bool on = v == "on" ? true : v == "off" ? false : engineVsync_;
+    if (on != dev_.vsync()) {
+        spdlog::info("hal: settings: vsync {} ({})", on ? "on" : "off", v == "engine" ? "the game's option" : "player setting");
+    }
+    dev_.setVsync(on);
+}
+
+// render thread, before each present: setting callbacks, debounced saving of settings.toml
+void HalDevice::serviceSettings() {
+    auto& reg = settings::registry();
+    reg.dispatch();
+    if (!reg.dirty() || options_.settingsFile.empty()) {
+        settingsDirtySince_ = {};
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (settingsDirtySince_ == std::chrono::steady_clock::time_point{}) {
+        settingsDirtySince_ = now;
+    } else if (now - settingsDirtySince_ >= std::chrono::seconds(1)) {
+        std::string error;
+        if (reg.save(options_.settingsFile, &error)) {
+            spdlog::info("settings: saved {}", api::utf8(options_.settingsFile));
+        } else {
+            spdlog::warn("settings: saving {} failed: {}", api::utf8(options_.settingsFile), error);
+            reg.clearDirty();
+        }
+        settingsDirtySince_ = {};
+    }
 }
 
 void HalDevice::setRenderState(std::uint32_t rs, std::uint32_t value) {
@@ -530,7 +604,8 @@ bEResult HalDevice::DestroyDepthBuffer(void* a0) {
 
 bEResult HalDevice::ToggleNewMode(eCAPIDevice::eSAPIModeParameters const& a0) {
     spdlog::info("hal: ToggleNewMode {}x{} (windowed {}, vsync {})", a0.backBufferWidth, a0.backBufferHeight, a0.windowed, a0.vsync);
-    dev_.setVsync(options_.vsync < 0 ? a0.vsync : options_.vsync != 0);
+    engineVsync_ = a0.vsync;
+    applyVsync();
     return dev_.resize(a0.backBufferWidth, a0.backBufferHeight) ? bEResult_Ok : bEResult_False;
 }
 
@@ -583,6 +658,12 @@ bEResult HalDevice::ClearViewport(eCGfxShared::eEViewportClear a0, unsigned long
 
 bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
     const std::uint64_t frame = dev_.stats().frames + 1;
+    serviceSettings();
+    if (overlay_) {
+        overlay_->onPresent(frame);
+        // [debug] overlay_in_screenshots: into the back buffer, before the captures read it
+        dev_.drawOverlayIntoBackBuffer();
+    }
     auto& captures = api::captures();
     // [debug] screenshot_frames: a request of the tool API's queue, due at this present
     if (std::ranges::find(options_.screenshotFrames, static_cast<std::uint32_t>(frame)) != options_.screenshotFrames.end()) {

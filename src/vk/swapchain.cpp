@@ -103,6 +103,19 @@ bool Swapchain::build(std::uint32_t width, std::uint32_t height) {
     vkGetSwapchainImagesKHR(ctx_->device(), swapchain_, &n, nullptr);
     images_.resize(n);
     vkGetSwapchainImagesKHR(ctx_->device(), swapchain_, &n, images_.data());
+    views_.resize(n);
+    for (std::uint32_t i = 0; i < n; ++i) {
+        // the overlay renders into the swapchain image (src/overlay)
+        VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vci.image = images_[i];
+        vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vci.format = format_;
+        vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        if (vkCreateImageView(ctx_->device(), &vci, nullptr, &views_[i]) != VK_SUCCESS) {
+            views_[i] = VK_NULL_HANDLE;
+        }
+    }
+    minImageCount_ = imageCount;
     rendered_.resize(n);
     for (auto& s : rendered_) {
         VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
@@ -126,6 +139,10 @@ void Swapchain::destroySwapchain() {
         vkDestroySemaphore(ctx_->device(), s, nullptr);
     }
     rendered_.clear();
+    for (auto v : views_) {
+        if (v != VK_NULL_HANDLE) vkDestroyImageView(ctx_->device(), v, nullptr);
+    }
+    views_.clear();
     images_.clear();
     if (swapchain_ != VK_NULL_HANDLE) {
         vkDestroySwapchainKHR(ctx_->device(), swapchain_, nullptr);

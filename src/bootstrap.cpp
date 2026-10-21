@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cwctype>
 #include <filesystem>
+#include <format>
 #include <ranges>
 #include <string>
 #include <vector>
@@ -19,6 +20,7 @@
 #include "core/hooks.h"
 #include "core/log.h"
 #include "core/paths.h"
+#include "core/settings.h"
 #include "engine/symbols.h"
 #include "engine/vfs.h"
 #include "hal/trace.h"
@@ -158,6 +160,10 @@ void detourInitializeAdmin(void* self, int apiType) {
         vo.logFrame = g_config.logFrame;
         vo.screenshotDir = paths::dataDir() / L"screenshots";
         if (g_config.dumpSavedTextures) vo.dumpDir = paths::dataDir() / L"dumps";
+        vo.overlay = g_config.overlay;
+        vo.overlayInScreenshots = g_config.overlayInScreenshots;
+        vo.overlayCommands = g_config.commands;
+        vo.settingsFile = paths::dataDir() / L"settings.toml";
         *static_cast<void**>(s.gfxAdminApiInstance) = static_cast<hal::eCAPIInstance*>(new hal::vulkan::HalInstance(vo));
         g_initializeAdmin.original(self, 4);
         *reinterpret_cast<int*>(static_cast<char*>(self) + 0x648) = apiType;
@@ -278,6 +284,31 @@ void detourAppDraw(void* self, HWND hwnd) {
     }
 }
 
+// Player settings (core/settings.h, docs/research/overlay.md 2): the renderer's settings, the player's settings.toml, then the
+// developer overrides of config.toml (a non-default value there locks the setting for the session).
+void loadSettings() {
+    auto& reg = settings::registry();
+    const settings::RendererSettings rs = settings::registerRendererSettings(reg);
+    const auto file = paths::dataDir() / L"settings.toml";
+    std::vector<std::string> warnings;
+    if (!reg.load(file, &warnings)) {
+        spdlog::warn("settings.toml: not loaded, defaults used");
+    }
+    for (const auto& w : warnings) spdlog::warn("settings.toml: {}", w);
+    if (g_config.vsync >= 0) reg.lock(*rs.vsync, g_config.vsync != 0 ? 1.0 : 2.0, "config.toml [vulkan] vsync");
+    if (g_config.maxFps > 0.0) reg.lock(*rs.maxFps, g_config.maxFps, "config.toml [vulkan] max_fps");
+    if (g_config.adapter >= 0) reg.lock(*rs.adapter, g_config.adapter, "config.toml [vulkan] adapter");
+    reg.markStarted();
+    reg.dispatch();
+    g_config.adapter = rs.adapter->asInt();
+    std::string values;
+    for (const settings::Setting* s : reg.all()) {
+        if (!s->isDefault()) values += std::format("{}{} = {}{}", values.empty() ? "" : ", ", s->key(), reg.text(*s),
+                                                   s->locked() ? " (config.toml)" : "");
+    }
+    spdlog::info("settings: {} registered, non-default: [{}]", reg.size(), values);
+}
+
 }  // namespace
 
 void onProcessAttach(void* module) {
@@ -292,6 +323,7 @@ void onProcessAttach(void* module) {
     }
 
     api::setGameDir(paths::binDir().parent_path());
+    loadSettings();
 
     if (GetModuleHandleW(L"Engine.dll") == nullptr) {
         // loaded by something other than Risen (a tool, a test): stay a plain forwarder

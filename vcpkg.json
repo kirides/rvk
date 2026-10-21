@@ -6,6 +6,12 @@
   "builtin-baseline": "6f6324d69cc4d5229804bee9f72737fe2ef08087",
   "dependencies": [
     "glslang",
+    {
+      "name": "imgui",
+      "features": [
+        "win32-binding"
+      ]
+    },
     "minhook",
     "spdlog",
     "spirv-tools",

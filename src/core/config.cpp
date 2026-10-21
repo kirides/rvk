@@ -68,6 +68,13 @@ Config parseConfig(std::string_view text, std::string* error) {
             }
         }
     };
+    cfg.overlay = tbl["overlay"]["enabled"].value_or(cfg.overlay);
+    cfg.overlayInScreenshots = tbl["debug"]["overlay_in_screenshots"].value_or(cfg.overlayInScreenshots);
+    if (const auto* cmds = tbl["debug"]["commands"].as_array()) {
+        for (const auto& c : *cmds) {
+            if (const auto v = c.value<std::string>()) cfg.commands.push_back(*v);
+        }
+    }
     frameList("screenshot_frames", cfg.screenshotFrames);
     frameList("snapshot_frames", cfg.snapshotFrames);
     return cfg;

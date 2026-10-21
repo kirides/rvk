@@ -36,6 +36,7 @@ find_package(VulkanHeaders CONFIG REQUIRED)
 find_package(VulkanMemoryAllocator CONFIG REQUIRED)
 find_package(glslang CONFIG REQUIRED)
 find_package(SPIRV-Tools CONFIG REQUIRED)
+find_package(imgui CONFIG REQUIRED)
 find_path(STB_INCLUDE_DIR stb_image_write.h REQUIRED)
 
 function(rvk_warnings target)
@@ -49,6 +50,8 @@ add_library(rvk_core STATIC
     include/rvk_api.h
     src/api/capture.cpp
     src/api/capture.h
+    src/api/settings_api.cpp
+    src/api/settings_api.h
     src/core/config.cpp
     src/core/config.h
     src/core/exports.cpp
@@ -61,6 +64,8 @@ add_library(rvk_core STATIC
     src/core/png.h
     src/core/paths.cpp
     src/core/paths.h
+    src/core/settings.cpp
+    src/core/settings.h
     src/d3d9/convert.cpp
     src/d3d9/convert.h
     src/d3d9/defs.h
@@ -93,6 +98,9 @@ add_library(rvk_core STATIC
     src/hal/vulkan/hal_vulkan.h
     src/hal/vulkan/instance.cpp
     src/hal/vulkan/resources.cpp
+    src/overlay/imgui_vulkan.cpp
+    src/overlay/overlay.cpp
+    src/overlay/overlay.h
     src/res/dds.cpp
     src/res/dds.h
     src/shader/abi.h
@@ -133,7 +141,7 @@ add_library(rvk_core STATIC
     src/vk/volk_impl.c
 )
 target_include_directories(rvk_core PUBLIC src include)
-target_include_directories(rvk_core PRIVATE ${STB_INCLUDE_DIR})
+target_include_directories(rvk_core PRIVATE ${STB_INCLUDE_DIR} third_party/imgui_vulkan)
 # volk is compiled here (not vcpkg's volk.lib): it needs VK_USE_PLATFORM_WIN32_KHR for the Win32 surface entry points
 target_compile_definitions(rvk_core PUBLIC VK_NO_PROTOTYPES VK_USE_PLATFORM_WIN32_KHR VMA_STATIC_VULKAN_FUNCTIONS=0 VMA_DYNAMIC_VULKAN_FUNCTIONS=0)
 target_link_libraries(rvk_core PUBLIC
@@ -146,6 +154,7 @@ target_link_libraries(rvk_core PUBLIC
     glslang::glslang
     glslang::SPIRV
     glslang::glslang-default-resource-limits
+    imgui::imgui
 )
 rvk_warnings(rvk_core)
 target_precompile_headers(rvk_core PRIVATE
@@ -153,6 +162,8 @@ target_precompile_headers(rvk_core PRIVATE
     <spdlog/spdlog.h>
 )
 set_source_files_properties(src/vk/volk_impl.c PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+# Dear ImGui's Vulkan backend, vendored from the imgui release vcpkg installs (third_party/imgui_vulkan: why there)
+set_source_files_properties(src/overlay/imgui_vulkan.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON COMPILE_OPTIONS "/W3")
 
 # ---------------------------------------------------------------------------------------------
 # d3d9.dll: the proxy the game loads (Engine.dll imports d3d9.dll!Direct3DCreate9)
@@ -200,7 +211,7 @@ rvk_warnings(rvk_d3d9test)
 # tests
 # ---------------------------------------------------------------------------------------------
 if(RVK_BUILD_TESTS)
-    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp tests/api_tests.cpp tests/fvf_tests.cpp)
+    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp tests/api_tests.cpp tests/fvf_tests.cpp tests/settings_tests.cpp tests/settings_api_tests.cpp)
     target_link_libraries(rvk_tests PRIVATE rvk_core SPIRV-Tools-static)
     rvk_warnings(rvk_tests)
     add_test(NAME rvk_tests COMMAND rvk_tests)

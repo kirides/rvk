@@ -16,3 +16,9 @@ EXPORTS
     rvk_screenshot_status
     rvk_frame_index
     rvk_stats
+    rvk_setting_count
+    rvk_setting_info
+    rvk_setting_get
+    rvk_setting_set
+    rvk_ab
+    rvk_overlay

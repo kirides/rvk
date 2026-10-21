@@ -20,6 +20,8 @@
 #include <spdlog/spdlog.h>
 
 #include "api/capture.h"
+#include "api/settings_api.h"
+#include "overlay/overlay.h"
 #include "rvk_api.h"
 
 namespace rvk::proxy {
@@ -137,7 +139,10 @@ void WINAPI rvk_D3DPERF_SetRegion(DWORD color, LPCWSTR name) {
 const char* rvk_version() { return "0.1.0"; }
 
 uint32_t rvk_capabilities() {
-    return rvk::api::mode() == rvk::Mode::Vulkan ? (RVK_CAP_SCREENSHOT | RVK_CAP_STATS) : 0u;
+    if (rvk::api::mode() != rvk::Mode::Vulkan) {
+        return 0u;
+    }
+    return RVK_CAP_SCREENSHOT | RVK_CAP_STATS | (rvk::overlay::Overlay::instance() != nullptr ? RVK_CAP_OVERLAY : 0u);
 }
 
 uint32_t rvk_screenshot(const wchar_t* path, uint32_t wait_frames, uint32_t flags) {
@@ -205,6 +210,39 @@ int32_t rvk_stats(struct rvk_stats* out, uint32_t size) {
     s.size = n;
     std::memcpy(out, &s, n);
     return static_cast<int32_t>(n);
+}
+
+// ---- player settings, A/B, overlay (docs/research/overlay.md 4) ----------------------------------------------------------
+
+uint32_t rvk_setting_count() { return rvk::api::settingCount(rvk::settings::registry()); }
+
+int32_t rvk_setting_info(uint32_t index, struct rvk_setting_info* out, uint32_t size) {
+    return rvk::api::settingInfo(rvk::settings::registry(), index, out, size);
+}
+
+int32_t rvk_setting_get(const char* key, char* value, uint32_t value_size) {
+    return rvk::api::settingGet(rvk::settings::registry(), key, value, value_size);
+}
+
+int32_t rvk_setting_set(const char* key, const char* value, uint32_t flags) {
+    return rvk::api::settingSet(rvk::settings::registry(), key, value, flags);
+}
+
+int32_t rvk_ab(int32_t op) { return rvk::api::ab(rvk::settings::registry(), op); }
+
+int32_t rvk_overlay(int32_t op) {
+    if (op < RVK_OVERLAY_QUERY || op > RVK_OVERLAY_TOGGLE) {
+        return RVK_SETTING_BAD_ARGUMENT;
+    }
+    // the pointer is cleared before the overlay goes away; open / close only touch an atomic
+    rvk::overlay::Overlay* o = rvk::overlay::Overlay::instance();
+    if (o == nullptr) {
+        return -1;
+    }
+    if (op == RVK_OVERLAY_OPEN) o->setOpen(true);
+    if (op == RVK_OVERLAY_CLOSE) o->setOpen(false);
+    if (op == RVK_OVERLAY_TOGGLE) o->setOpen(!o->isOpen());
+    return o->isOpen() ? 1 : 0;
 }
 
 }  // extern "C"

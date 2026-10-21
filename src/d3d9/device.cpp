@@ -181,6 +181,64 @@ void Device::setVsync(bool vsync) {
     }
 }
 
+void Device::setMaxFps(double fps) {
+    fps = std::max(0.0, fps);
+    if (fps == options_.maxFps) {
+        return;
+    }
+    options_.maxFps = fps;
+    pacerChecked_ = {};  // updatePacer re-evaluates at the next present
+    pacerRequested_ = -1.0;
+}
+
+void Device::setOverlay(PresentOverlay* overlay, bool intoBackBuffer) {
+    overlay_ = overlay;
+    overlayIntoBackBuffer_ = intoBackBuffer;
+}
+
+VkFormat Device::overlayFormat() const {
+    if (overlayIntoBackBuffer_ || !swapchain_.valid()) {
+        return backBuffer_ ? backBuffer_->image().format() : VK_FORMAT_B8G8R8A8_UNORM;
+    }
+    return swapchain_.format();
+}
+
+// after foreign commands (the overlay binds its own pipeline, descriptor set and dynamic state) in the frame's command buffer
+void Device::invalidateRecordingState() {
+    boundPipeline_ = VK_NULL_HANDLE;
+    lastPipelineValid_ = false;
+    viCache_.buffersValid = viCache_.layoutValid = false;
+    dyn_.valid = false;
+    vsConstDirty_ = psConstDirty_ = true;
+    const VkDescriptorSet set = bindless_.set();
+    vkCmdBindDescriptorSets(frames_.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS, bindless_.pipelineLayout(), 0, 1, &set, 0, nullptr);
+}
+
+void Device::drawOverlayIntoBackBuffer() {
+    if (overlay_ == nullptr || !overlayIntoBackBuffer_ || !backBuffer_ || !overlay_->active()) {
+        return;
+    }
+    endRendering();
+    VkCommandBuffer cmd = frames_.cmd();
+    vk::Image& bb = backBuffer_->image();
+    bb.transition(cmd, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    att.imageView = bb.attachmentView(ctx_, 0, 0);
+    att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    const VkExtent2D extent{backBuffer_->desc().width, backBuffer_->desc().height};
+    VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
+    ri.renderArea = {{0, 0}, extent};
+    ri.layerCount = 1;
+    ri.colorAttachmentCount = 1;
+    ri.pColorAttachments = &att;
+    vkCmdBeginRendering(cmd, &ri);
+    overlay_->record(cmd, extent);
+    vkCmdEndRendering(cmd);
+    invalidateRecordingState();
+}
+
 void Device::destroy() {
     if (!created_) {
         return;
@@ -243,6 +301,7 @@ void Device::beginFrame() {
         const std::uint32_t slot = frames_.currentSlot();
         const vk::GpuTimer::Result r = gpuTimer_.collect(slot);
         if (r.valid) {
+            live_.gpuMs = static_cast<float>(r.mainMs + r.uploadMs);
             ++perf_.gpuSubmits;
             perf_.gpuMs += r.mainMs;
             perf_.gpuUploadMs += r.uploadMs;
@@ -405,7 +464,9 @@ void Device::present() {
     presentStart_ = std::chrono::steady_clock::now();
     if (stats_.frames > 0) {
         ++perf_.frames;
-        perf_.cpuFrameMs += std::chrono::duration<double, std::milli>(presentStart_ - presentEnd_).count();
+        const double cpu = std::chrono::duration<double, std::milli>(presentStart_ - presentEnd_).count();
+        perf_.cpuFrameMs += cpu;
+        live_.cpuMs = static_cast<float>(cpu);
     }
     struct PresentEnd {
         Device& d;
@@ -413,7 +474,11 @@ void Device::present() {
             const auto now = std::chrono::steady_clock::now();
             if (d.stats_.frames > 1) {
                 d.perf_.presentMs += std::chrono::duration<double, std::milli>(now - d.presentStart_).count();
-                d.perf_.frameIntervalsMs.push_back(std::chrono::duration<float, std::milli>(d.presentStart_ - d.lastPresentStart_).count());
+                const float interval = std::chrono::duration<float, std::milli>(d.presentStart_ - d.lastPresentStart_).count();
+                d.live_.intervalMs = interval;
+                if (d.options_.perf) {  // takePerf (the only consumer) runs only with [debug] perf
+                    d.perf_.frameIntervalsMs.push_back(interval);
+                }
             }
             d.lastPresentStart_ = d.presentStart_;
             d.presentEnd_ = now;
@@ -495,9 +560,33 @@ void Device::present() {
     vkCmdBlitImage2(cmd, &bi);
     b.srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
     b.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    // the overlay (src/overlay) on top of the copied frame: only in the swapchain image, never in the back buffer that
+    // captures read
+    if (overlay_ != nullptr && !overlayIntoBackBuffer_ && swapchain_.view(imageIndex) != VK_NULL_HANDLE && overlay_->active()) {
+        b.dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        b.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+        b.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        vkCmdPipelineBarrier2(cmd, &di);
+        VkRenderingAttachmentInfo att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+        att.imageView = swapchain_.view(imageIndex);
+        att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
+        ri.renderArea = {{0, 0}, ext};
+        ri.layerCount = 1;
+        ri.colorAttachmentCount = 1;
+        ri.pColorAttachments = &att;
+        vkCmdBeginRendering(cmd, &ri);
+        overlay_->record(cmd, ext);
+        vkCmdEndRendering(cmd);
+        b.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        b.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+        b.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    }
     b.dstStageMask = VK_PIPELINE_STAGE_2_NONE;
     b.dstAccessMask = VK_ACCESS_2_NONE;
-    b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     b.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     vkCmdPipelineBarrier2(cmd, &di);
     submitFrame(acquired, swapchain_.renderedSemaphore(imageIndex));

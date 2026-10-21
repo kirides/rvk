@@ -215,6 +215,19 @@ public:
 
 // ---- device -------------------------------------------------------------------------------------------------------
 
+// Drawn on top of the frame at present (the in-game overlay, src/overlay): after the back buffer was copied into the
+// swapchain image, so captures of the back buffer (rvk_screenshot, the engine snapshot) never contain it; or, for debugging,
+// into the back buffer itself (Device::drawOverlayIntoBackBuffer). Render thread.
+class PresentOverlay {
+public:
+    virtual ~PresentOverlay() = default;
+    // anything to draw this frame? false leaves the present path untouched
+    virtual bool active() = 0;
+    // records draws inside a dynamic rendering scope of one colour attachment of `extent` (LOAD / STORE; viewport, scissor,
+    // pipeline and descriptor sets are the overlay's own)
+    virtual void record(VkCommandBuffer cmd, VkExtent2D extent) = 0;
+};
+
 struct DeviceOptions {
     HWND__* window = nullptr;
     std::uint32_t width = 0;
@@ -372,6 +385,24 @@ public:
     void present();
     bool resize(std::uint32_t width, std::uint32_t height);
     void setVsync(bool vsync);
+    bool vsync() const { return options_.vsync; }
+    // present-rate cap (0 = the refresh rate with vsync, none without); applies at the next present
+    void setMaxFps(double fps);
+    double maxFps() const { return options_.maxFps; }
+    // the overlay drawn at present (null = none). intoBackBuffer: the HAL calls drawOverlayIntoBackBuffer before its captures
+    // instead (screenshots then contain the overlay; [debug] overlay_in_screenshots)
+    void setOverlay(PresentOverlay* overlay, bool intoBackBuffer);
+    void drawOverlayIntoBackBuffer();
+    // colour format the overlay renders to (the swapchain's, or the back buffer's with intoBackBuffer)
+    VkFormat overlayFormat() const;
+    const vk::Swapchain& swapchain() const { return swapchain_; }
+    // the last frame's numbers for the overlay's performance panel (cheap, always on; GPU only with [debug] perf)
+    struct LiveFrame {
+        float intervalMs = 0.0f;  // present to present
+        float cpuMs = 0.0f;       // engine + HAL: end of one present() to the start of the next
+        float gpuMs = -1.0f;      // GPU time of the latest measured submission (-1: no GPU timer)
+    };
+    const LiveFrame& liveFrame() const { return live_; }
     Surface* backBuffer() { return backBufferSurface_; }
     Surface* autoDepthStencil() { return depthSurface_; }
     const FrameStats& stats() const { return stats_; }
@@ -601,6 +632,12 @@ private:
     std::uint32_t passIndex_ = 0;   // render passes of the current submission (GPU detail labels)
     std::uint32_t passDraws_ = 0;   // draws in the open render pass
     std::uint64_t gpuDetailFrame_[vk::Frames::kInFlight]{};  // frame number whose details a slot records (0 = none)
+
+    // overlay
+    PresentOverlay* overlay_ = nullptr;
+    bool overlayIntoBackBuffer_ = false;
+    void invalidateRecordingState();
+    LiveFrame live_;
 };
 
 }  // namespace rvk::d3d9

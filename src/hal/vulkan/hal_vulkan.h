@@ -10,10 +10,12 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "d3d9/device.h"
+#include "overlay/overlay.h"
 #include "hal/stub_generated.h"
 #include "hal/types.h"
 
@@ -35,6 +37,11 @@ struct Options {
     std::uint32_t logDraws = 0;
     std::uint32_t logFrame = 0;  // log the HAL calls of this frame
     std::filesystem::path dumpDir;  // [debug] dump_saved_textures: SaveTextureToFile writes <dumpDir>/<name>.png; empty = off
+    // the overlay ([overlay] enabled; src/overlay) and the player settings file it saves (core/settings.h)
+    bool overlay = true;
+    bool overlayInScreenshots = false;            // [debug] overlay_in_screenshots
+    std::vector<std::string> overlayCommands;     // [debug] commands
+    std::filesystem::path settingsFile;           // <bin>/rvk/settings.toml
 };
 
 // true while the frame selected by Options::logFrame is being recorded
@@ -424,6 +431,9 @@ private:
     void applyAlphaTest(bool enable, const eCGfxShared::eSGfxAlphaTestData& d);
     void logFrameStats();
     void logPerf(d3d9::PerfStats p);
+    // player settings (core/settings.h): applied at create and on change (render thread); saved 1 s after the last change
+    void applyVsync();
+    void serviceSettings();
 
     d3d9::Device dev_;
     std::array<bool, M_COUNT> master_{};
@@ -450,6 +460,9 @@ private:
     std::uint64_t halDraws_ = 0;
     void updateLogFrame();
     Options options_;
+    bool engineVsync_ = true;  // the game's own vsync option (start parameters / ToggleNewMode)
+    std::unique_ptr<overlay::Overlay> overlay_;
+    std::chrono::steady_clock::time_point settingsDirtySince_{};
 };
 
 // the vertex/index data / texture behind a HAL object (nullptr for foreign objects)
