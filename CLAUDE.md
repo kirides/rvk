@@ -53,7 +53,7 @@ found) and again inside it; device creation in the AMD D3D9 driver takes ~10 s.
 ## Shader translator
 
 `rvk_shadertool corpus <dir>` translates + validates every captured shader (corpus from `mode = "trace"`:
-`<test copy>invk\corpus`, copy it to `<repo>\corpus`, git-ignored: game-derived). `show <file>` prints listing + GLSL,
+`<test copy>/bin/rvk/corpus`, copy it to `<repo>/corpus`, git-ignored: game-derived). `show <file>` prints listing + GLSL,
 `refdisasm <file>` the D3DX reference listing. `python tools/compare_disasm.py corpus` diffs our listing against D3DX for the
 whole corpus (must stay 100 %). The contract between translated shaders and the renderer is `src/shader/abi.h`.
 
@@ -71,9 +71,9 @@ whole corpus (must stay 100 %). The contract between translated shaders and the 
 
 ## Tooling gotchas
 
-- The Bash tool mangles backslash escapes even in quoted heredocs (`` becomes a control character, `
-` in Python strings
-  breaks): write files with the Write tool and edit with Edit when the text contains backslashes.
+- The Bash tool mangles backslash escapes even in quoted heredocs (a backslash-digit becomes a control character,
+  backslash-n inside Python strings breaks lines): write files with the Write tool and edit with Edit when the text
+  contains backslashes.
 
 ## Reverse engineering
 
