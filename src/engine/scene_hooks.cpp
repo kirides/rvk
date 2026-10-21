@@ -8,6 +8,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <utility>
 
 #include <spdlog/spdlog.h>
@@ -124,6 +125,54 @@ void readMainCamera(d3d9::Device& d, const void* db) {
         return;
     }
     d.setMainCamera(in);
+}
+
+// A bCString field (SharedBase: a char* whose int length sits 8 bytes before the text) -> its text ("" when unreadable)
+std::string readCString(const void* field) {
+    const char* text = nullptr;
+    if (!readAt(field, 0, text) || text == nullptr) return {};
+    std::int32_t length = 0;
+    if (!safeRead(text - 8, &length, sizeof(length))) length = 0;  // unknown: up to the terminator
+    char buf[256]{};
+    const std::size_t n = length > 0 ? std::min<std::size_t>(static_cast<std::size_t>(length), sizeof(buf) - 1) : sizeof(buf) - 1;
+    if (!safeRead(text, buf, n)) {
+        // the buffer may end before 255 bytes: read byte by byte up to the terminator
+        std::size_t i = 0;
+        for (; i < sizeof(buf) - 1; ++i) {
+            if (!safeRead(text + i, &buf[i], 1) || buf[i] == 0) break;
+        }
+        buf[i] = 0;
+    }
+    buf[n] = 0;
+    return std::string(buf, strnlen(buf, n));
+}
+
+// Material names (docs/research/water.md 2): eCMaterialResource2 derives from eCResource2, whose +0x40 bCString is the
+// resource's file title (eCResource2::GetFileTitleA 0xa02e0 copies it); eCMeshResource2 likewise. Cached per material
+// (render thread); re-read when the string buffer changes (a freed material's address reused by another).
+struct MaterialInfo {
+    const char* text = nullptr;
+    std::string name;
+    draws::Water water = draws::Water::None;
+};
+std::unordered_map<const void*, MaterialInfo> g_materials;
+
+const MaterialInfo* materialInfo(const void* material, const void* meshResource, Pass pass) {
+    const char* text = nullptr;
+    if (material == nullptr || !readAt(material, 0x40, text)) return nullptr;
+    auto [it, inserted] = g_materials.try_emplace(material);
+    MaterialInfo& e = it->second;
+    if (!inserted && e.text == text) return &e;
+    e.text = text;
+    e.name = readCString(static_cast<const std::uint8_t*>(material) + 0x40);
+    e.water = draws::classifyWater(e.name);
+    const bool interesting = e.water != draws::Water::None || pass == Pass::Refracted;
+    if (interesting || spdlog::should_log(spdlog::level::debug)) {
+        const std::string mesh = meshResource != nullptr ? readCString(static_cast<const std::uint8_t*>(meshResource) + 0x40) : "";
+        spdlog::log(interesting ? spdlog::level::info : spdlog::level::debug, "water: material {} '{}' (mesh '{}') in the {} pass -> {}",
+                    material, e.name, mesh, d3d9::scene::name(pass), draws::name(e.water));
+    }
+    return &e;
 }
 
 d3d9::Texture* textureOf(d3d9::Surface* s, d3d9::Device& d) {
@@ -296,6 +345,16 @@ struct TagScope {
         t.meshResource = meshResource;
         t.material = subMesh != nullptr ? *reinterpret_cast<const void* const*>(static_cast<const std::uint8_t*>(subMesh) + 0x38)
                                         : nullptr;
+        // water classification by material name: only where water is drawn (the refracted list; alpha for non-refracting
+        // water such as falls), main-like views
+        const auto ph = d->phases().current();
+        if (t.material != nullptr && (ph.pass == Pass::Refracted || ph.pass == Pass::Alpha || ph.pass == Pass::AlphaLate) &&
+            ph.view != View::Shadow) {
+            if (const MaterialInfo* m = materialInfo(t.material, meshResource, ph.pass)) {
+                t.water = m->water;
+                t.materialName = m->name.c_str();
+            }
+        }
     }
     ~TagScope() {
         if (d != nullptr) d->drawTag() = saved;

@@ -100,6 +100,11 @@ public:
     double optimizeMs() const { return static_cast<double>(optimizeNs_.load(std::memory_order_relaxed)) * 1e-6; }
 
     static std::vector<VkDynamicState> dynamicStates(const Context& ctx);
+    // whether a pipeline of `desc` exists (built or prewarmed); any thread
+    bool contains(const PipelineDesc& desc) const {
+        const std::lock_guard lock(mutex_);
+        return pipelines_.contains(desc);
+    }
 
 private:
     VkPipeline build(const PipelineDesc& desc);

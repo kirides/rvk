@@ -2,7 +2,9 @@
 
 #include <chrono>
 #include <cstring>
+#include <filesystem>
 #include <format>
+#include <fstream>
 #include <string>
 
 #include <spdlog/spdlog.h>
@@ -457,27 +459,140 @@ void Device::uploadConstants() {
     }
 }
 
+namespace {
+
+// the render states a replacement overrides (restored when prepareDraw returns)
+constexpr std::uint32_t kReplacedStates[] = {RS_ALPHABLENDENABLE, RS_SRCBLEND, RS_DESTBLEND, RS_BLENDOP, RS_SEPARATEALPHABLENDENABLE,
+                                             RS_COLORWRITEENABLE, RS_CULLMODE, RS_ALPHATESTENABLE};
+
+}  // namespace
+
 bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     lastRecord_ = nullptr;
+    customVertices_ = 0;
     if (!vs_ || !ps_ || vs_->module == VK_NULL_HANDLE || ps_->module == VK_NULL_HANDLE) {
         ++stats_.drawsSkipped;  // fixed-function draws are not emulated
         ++stats_.skippedNoShader;
         return false;
     }
+    // what the draw is (the engine hooks' tag + the phase)
+    const scene::Phase phase = phases_.current();
+    const draws::Kind kind = draws::classify(tag_.source, tag_.opDesc, phase.view, phase.pass);
+
+    // the engine's own state of the first water / refracted draw of each material (diagnostics)
+    if ((tag_.water != draws::Water::None || kind == draws::Kind::Refracted) && waterLogged_.size() < 256 &&
+        waterLogged_.insert(tag_.material).second) {
+        logWaterDraw(kind);
+    }
+    // draw replacement (enh/water, docs/research/water.md): the replacer decides before anything is recorded
+    DrawReplacement rep;
+    if (replacer_ != nullptr && (tag_.water != draws::Water::None || kind == draws::Kind::Refracted) &&
+        phase.view == scene::View::Main) {
+        ReplaceQuery q;
+        q.kind = kind;
+        q.phase = phase;
+        q.tag = &tag_;
+        q.mainView = firings_.mainViews();
+        q.vertexBuffer = geom.userPointer ? nullptr : streams_[0].buffer;
+        q.vertexOffset = streams_[0].offset;
+        q.vertexStride = streams_[0].stride;
+        q.indexBuffer = geom.indexed && !geom.userPointer ? indices_ : nullptr;
+        q.indexed = geom.indexed;
+        q.first = geom.first;
+        q.primitives = geom.primitives;
+        q.baseVertex = geom.baseVertex;
+        q.instanced = (streams_[0].freq & STREAMSOURCE_INDEXEDDATA) != 0;
+        q.textures = tex_.data();
+        q.engineVs = vs_.get();
+        q.enginePs = ps_.get();
+        replacer_->replace(*this, q, rep);
+        if ((rep.action == DrawReplacement::Action::Shaders || rep.action == DrawReplacement::Action::Procedural) &&
+            (!rep.vs || !rep.ps || rep.vs->module == VK_NULL_HANDLE || rep.ps->module == VK_NULL_HANDLE)) {
+            rep.action = DrawReplacement::Action::Engine;
+        }
+    }
+    if (rep.action == DrawReplacement::Action::Skip) {
+        draws_.count(kind, phase.view);
+        if (draws::Record* r = draws_.add()) {
+            r->index = stats_.draws;
+            r->view = phase.view;
+            r->pass = phase.pass;
+            r->kind = kind;
+            r->source = tag_.source;
+            r->opDesc = tag_.opDesc;
+            r->context = tag_.context;
+            r->entity = tag_.entity;
+            r->subMesh = tag_.subMesh;
+            r->material = tag_.material;
+            r->meshResource = tag_.meshResource;
+            r->water = rep.water != draws::Water::None ? rep.water : tag_.water;
+            r->replaced = true;
+            r->first = geom.first;
+            r->primitives = geom.primitives;
+        }
+        return false;
+    }
+    // a replacement swaps in its shaders and opaque / cull states for this draw; everything is restored on return
+    struct Swap {
+        Device& d;
+        bool active = false;
+        std::shared_ptr<Shader> vs, ps;
+        std::uint32_t states[std::size(kReplacedStates)]{};
+        ~Swap() {
+            if (!active) return;
+            d.vs_ = std::move(vs);
+            d.ps_ = std::move(ps);
+            for (std::size_t i = 0; i < std::size(kReplacedStates); ++i) d.rs_[kReplacedStates[i]] = states[i];
+            d.vsConstDirty_ = d.psConstDirty_ = true;
+        }
+    } swap{*this};
+    const bool replaced = rep.action == DrawReplacement::Action::Shaders || rep.action == DrawReplacement::Action::Procedural;
+    if (replaced) {
+        swap.active = true;
+        swap.vs = vs_;
+        swap.ps = ps_;
+        for (std::size_t i = 0; i < std::size(kReplacedStates); ++i) swap.states[i] = rs_[kReplacedStates[i]];
+        vs_ = rep.vs;
+        ps_ = rep.ps;
+        vsConstDirty_ = psConstDirty_ = true;
+        if (rep.opaque) {
+            rs_[RS_ALPHABLENDENABLE] = 0;
+            rs_[RS_SRCBLEND] = BLEND_ONE;
+            rs_[RS_DESTBLEND] = BLEND_ZERO;
+            rs_[RS_BLENDOP] = 1;  // D3DBLENDOP_ADD
+            rs_[RS_SEPARATEALPHABLENDENABLE] = 0;
+            rs_[RS_COLORWRITEENABLE] = 0xF;
+        }
+        rs_[RS_ALPHATESTENABLE] = 0;
+        if (rep.cullNone) rs_[RS_CULLMODE] = CULL_NONE;
+        if (rep.action == DrawReplacement::Action::Procedural) {
+            primitiveType = 4;  // D3DPT_TRIANGLELIST
+            customVertices_ = rep.vertices;
+        }
+        // the replacement's inputs (engine images: refraction copy, depth map, sky cube, ...) ready for sampling; barriers
+        // are not allowed inside a rendering scope
+        for (Texture* t : rep.sampled) {
+            if (t == nullptr || t->isNull()) continue;
+            if (t->pending_ || t->image().layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+                endRendering();
+                t->prepareForSampling(frames_.cmd());
+            }
+            t->lastUseFrame_ = frameValue();
+        }
+    }
     prepareTextures();
     if (!beginRendering()) {
         ++stats_.drawsSkipped;
         ++stats_.skippedNoTarget;
+        customVertices_ = 0;
         return false;
     }
     VkCommandBuffer cmd = frames_.cmd();
 
-    // what the draw is (the engine hooks' tag + the phase); the tint debug view swaps in the pixel shader's tint variant
-    const scene::Phase phase = phases_.current();
-    const draws::Kind kind = draws::classify(tag_.source, tag_.opDesc, phase.view, phase.pass);
+    // the tint debug view swaps in the pixel shader's tint variant
     std::uint32_t tint = 0;
     VkShaderModule fs = ps_->module;
-    if (tint_ != draws::TintMode::Off && (ps_->reflection.colorOutputs & 1u) != 0) {
+    if (!replaced && tint_ != draws::TintMode::Off && (ps_->reflection.colorOutputs & 1u) != 0) {
         tint = draws::tintColor(tint_, kind, phase.view, phase.pass);
         if (tint != 0) {
             const VkShaderModule t = tintModule(*ps_);
@@ -509,7 +624,17 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     if (!bindVertexInput(pd)) {
         ++stats_.drawsSkipped;
         ++stats_.skippedVertexInput;
+        customVertices_ = 0;
         return false;
+    }
+    if (kind == draws::Kind::Refracted && tag_.water != draws::Water::None && !replaced) {
+        // the formats / topology class of water draws (prebuildReplacement); the first one starts the background builds
+        const bool first = !waterTemplateValid_;
+        waterTemplate_ = pd;
+        waterTemplateValid_ = true;
+        if (first) {
+            for (const Registered& r : registered_) prebuildReplacement(*r.vs, *r.ps, r.procedural);
+        }
     }
     // consecutive draws mostly keep their pipeline: compare with the last description before hashing
     VkPipeline pipeline = VK_NULL_HANDLE;
@@ -528,6 +653,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     if (pipeline == VK_NULL_HANDLE) {
         ++stats_.drawsSkipped;
         ++stats_.skippedPipeline;
+        customVertices_ = 0;
         return false;
     }
     if (pipeline != boundPipeline_) {
@@ -583,7 +709,8 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     const std::uint32_t flags =
         shader::abi::drawFlags(static_cast<std::uint32_t>(kind), static_cast<std::uint32_t>(phase.pass), static_cast<std::uint32_t>(phase.view)) |
         (tint != 0 ? shader::abi::kDrawFlagTinted : 0u);
-    const shader::abi::PushConstants push{vsConstAddr_, psConstAddr_, db.address, frameBlockAddress(), 0, stats_.draws, flags};
+    const VkDeviceAddress drawBlock = rep.block != 0 && replaced ? rep.block : db.address;
+    const shader::abi::PushConstants push{vsConstAddr_, psConstAddr_, drawBlock, frameBlockAddress(), 0, stats_.draws, flags};
     vkCmdPushConstants(cmd, bindless_.pipelineLayout(), VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
     ++stats_.draws;
     ++stats_.totalDraws;
@@ -605,6 +732,8 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         r->subMesh = tag_.subMesh;
         r->material = tag_.material;
         r->meshResource = tag_.meshResource;
+        r->water = rep.water != draws::Water::None ? rep.water : tag_.water;
+        r->replaced = replaced;
         std::uint16_t f = 0;
         f |= geom.indexed ? draws::Record::Indexed : 0;
         f |= geom.userPointer ? draws::Record::UserPointer : 0;
@@ -629,7 +758,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         r->psFlags = ps_->semantics.flags;
         r->vsConsts = vsConstAddr_;
         r->psConsts = psConstAddr_;
-        r->drawBlock = db.address;
+        r->drawBlock = drawBlock;
         for (std::uint32_t slot = 0; slot < 16; ++slot) {
             if (ps_->reflection.samplers[slot] != shader::TextureType::Unknown && tex_[slot] != nullptr) {
                 r->textures[slot] = tex_[slot]->ref().id;
@@ -649,9 +778,60 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     return true;
 }
 
+// first water / refracted draw of each material: what the engine draws it with (docs/research/water.md)
+void Device::logWaterDraw(draws::Kind kind) {
+    const scene::Phase phase = phases_.current();
+    std::string decl;
+    if (decl_ != nullptr) {
+        for (const VertexElement& e : decl_->elements()) {
+            decl += std::format(" {}{}@{}+{}:t{}", e.usage, e.usageIndex, e.stream, e.offset, e.type);
+        }
+    }
+    std::string tex;
+    for (std::uint32_t slot = 0; slot < 16; ++slot) {
+        if (ps_->reflection.samplers[slot] == shader::TextureType::Unknown) continue;
+        const Texture* t = tex_[slot];
+        tex += std::format(" s{}={}", slot, t != nullptr ? std::format("{}x{} {}{}{}", t->desc().width, t->desc().height,
+                                                                        vk::d3dFormatName(t->desc().format),
+                                                                        t->desc().type == TextureType::Cube ? " cube" : "",
+                                                                        t->role() != scene::ImageRole::None
+                                                                            ? std::string(" ") + scene::name(t->role())
+                                                                            : std::string())
+                                                         : std::string("-"));
+    }
+    const auto v4 = [](const float* c) { return std::format("({:.4g} {:.4g} {:.4g} {:.4g})", c[0], c[1], c[2], c[3]); };
+    spdlog::info("water: draw of material {} '{}' ({}): kind {} in {}/{}, vs {:016x} ({} consts) ps {:016x} ({} consts), "
+                 "stride {} freq {:x}, decl [{} ], blend {} {}/{} op {}, z {} write {} func {}, cull {}, alphatest {}, "
+                 "samplers [{} ]",
+                 tag_.material, tag_.materialName != nullptr ? tag_.materialName : "?", draws::name(tag_.water), draws::name(kind),
+                 scene::name(phase.view), scene::name(phase.pass), vs_->hash, vs_->reflection.floatConstCount, ps_->hash,
+                 ps_->reflection.floatConstCount, streams_[0].stride, streams_[0].freq, decl, rs_[RS_ALPHABLENDENABLE],
+                 rs_[RS_SRCBLEND], rs_[RS_DESTBLEND], rs_[RS_BLENDOP], rs_[RS_ZENABLE], rs_[RS_ZWRITEENABLE], rs_[RS_ZFUNC],
+                 rs_[RS_CULLMODE], rs_[RS_ALPHATESTENABLE], tex);
+    spdlog::info("water:   vs c11 {} c30 {} c32 {} c33 {} c34 {} c35 {}; ps c0 {} c1 {} c3 {} c4 {} c6 {} c7 {} c22 {} c23 {} c24 {}",
+                 v4(vsF_[11]), v4(vsF_[30]), v4(vsF_[32]), v4(vsF_[33]), v4(vsF_[34]), v4(vsF_[35]), v4(psF_[0]), v4(psF_[1]),
+                 v4(psF_[3]), v4(psF_[4]), v4(psF_[6]), v4(psF_[7]), v4(psF_[22]), v4(psF_[23]), v4(psF_[24]));
+    // the shaders' D3D9 bytecode next to the shader cache (rvk_shadertool show / refdisasm)
+    if (!options_.cacheDir.empty()) {
+        std::error_code ec;
+        const auto dir = options_.cacheDir / "water";
+        std::filesystem::create_directories(dir, ec);
+        for (const Shader* sh : {vs_.get(), ps_.get()}) {
+            std::ofstream out(dir / std::format("{}_{:016x}.bin", sh->stage == shader::Stage::Vertex ? "vs" : "ps", sh->hash),
+                              std::ios::binary);
+            out.write(reinterpret_cast<const char*>(sh->bytecode.data()), static_cast<std::streamsize>(sh->bytecode.size() * 4));
+        }
+    }
+}
+
 void Device::drawPrimitive(std::uint32_t type, std::uint32_t startVertex, std::uint32_t primitiveCount) {
     const DrawTimer timer(*this);
     if (primitiveCount == 0 || !prepareDraw(type, DrawGeom{.first = startVertex, .primitives = primitiveCount})) {
+        return;
+    }
+    if (customVertices_ != 0) {
+        vkCmdDraw(frames_.cmd(), customVertices_, 1, 0, 0);
+        customVertices_ = 0;
         return;
     }
     vkCmdDraw(frames_.cmd(), vertexCount(type, primitiveCount), instanceCount_, startVertex, 0);
@@ -662,6 +842,11 @@ void Device::drawIndexedPrimitive(std::uint32_t type, std::int32_t baseVertex, s
     const DrawTimer timer(*this);
     if (primitiveCount == 0 || indices_ == nullptr ||
         !prepareDraw(type, DrawGeom{.indexed = true, .first = startIndex, .primitives = primitiveCount, .baseVertex = baseVertex})) {
+        return;
+    }
+    if (customVertices_ != 0) {
+        vkCmdDraw(frames_.cmd(), customVertices_, 1, 0, 0);
+        customVertices_ = 0;
         return;
     }
     const Buffer::Binding ib = indices_->gpu();

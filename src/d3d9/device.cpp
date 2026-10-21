@@ -1542,9 +1542,61 @@ std::uint32_t Device::samplerIndex(std::uint32_t slot) {
     return index;
 }
 
-std::uint32_t Device::lookupSampler(std::uint32_t slot) {
+std::uint32_t Device::lookupSampler(std::uint32_t slot) { return lookupSamplerStates(samp_[slot].data()); }
+
+std::uint32_t Device::samplerFor(bool linear, bool clamp) {
+    std::uint32_t states[SAMP_COUNT];
+    for (std::uint32_t i = 0; i < SAMP_COUNT; ++i) states[i] = defaultSamplerState(i);
+    const std::uint32_t f = linear ? TEXF_LINEAR : TEXF_POINT;
+    states[SAMP_MAGFILTER] = states[SAMP_MINFILTER] = f;
+    states[SAMP_MIPFILTER] = TEXF_LINEAR;
+    states[SAMP_ADDRESSU] = states[SAMP_ADDRESSV] = states[SAMP_ADDRESSW] = clamp ? TADDRESS_CLAMP : TADDRESS_WRAP;
+    return lookupSamplerStates(states);
+}
+
+void Device::registerReplacement(std::shared_ptr<Shader> vs, std::shared_ptr<Shader> ps, bool procedural) {
+    if (!vs || !ps) return;
+    if (waterTemplateValid_) prebuildReplacement(*vs, *ps, procedural);
+    registered_.push_back({std::move(vs), std::move(ps), procedural});
+}
+
+bool Device::prebuildReplacement(const Shader& vs, const Shader& ps, bool procedural) {
+    vk::PipelineDesc pd{};
+    if (!replacementDesc(vs, ps, procedural, pd)) return false;
+    if (!pipelines_.contains(pd)) pipelines_.prewarm(pd);
+    return true;
+}
+
+bool Device::replacementReady(const Shader& vs, const Shader& ps, bool procedural) const {
+    vk::PipelineDesc pd{};
+    return replacementDesc(vs, ps, procedural, pd) && pipelines_.contains(pd);
+}
+
+bool Device::replacementDesc(const Shader& vs, const Shader& ps, bool procedural, vk::PipelineDesc& out) const {
+    if (!waterTemplateValid_ || vs.module == VK_NULL_HANDLE || ps.module == VK_NULL_HANDLE) return false;
+    vk::PipelineDesc pd = waterTemplate_;
+    pd.vs = vs.module;
+    pd.fs = ps.module;
+    if (procedural) {
+        pd.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        pd.bindingCount = 0;
+        pd.attributeCount = 0;
+        std::memset(pd.bindings, 0, sizeof(pd.bindings));
+        std::memset(pd.attributes, 0, sizeof(pd.attributes));
+    }
+    for (std::uint32_t i = 0; i < pd.colorCount; ++i) {
+        if (!ctx_.features().extendedDynamicState3) {
+            pd.blend[i] = vk::BlendAttachment{};
+            pd.blend[i].writeMask = 0xF;
+        }
+    }
+    out = pd;
+    return true;
+}
+
+std::uint32_t Device::lookupSamplerStates(const std::uint32_t* states) {
     SamplerKey key{};
-    std::memcpy(key.states, samp_[slot].data(), sizeof(key.states));
+    std::memcpy(key.states, states, sizeof(key.states));
     key.states[SAMP_ELEMENTINDEX] = 0;
     key.states[SAMP_DMAPOFFSET] = 0;
     key.states[SAMP_SRGBTEXTURE] = 0;

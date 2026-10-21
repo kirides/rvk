@@ -16,6 +16,7 @@
 
 #include "d3d9/device.h"
 #include "enh/debug_view.h"
+#include "enh/water.h"
 #include "overlay/overlay.h"
 #include "hal/stub_generated.h"
 #include "hal/types.h"
@@ -469,6 +470,8 @@ private:
     bool engineVsync_ = true;  // the game's own vsync option (start parameters / ToggleNewMode)
     std::unique_ptr<overlay::Overlay> overlay_;
     std::unique_ptr<enh::DebugView> debugView_;  // debug.inject_view (an injected pass)
+    std::unique_ptr<enh::Water> water_;          // water.* (a draw replacer)
+    void applyWater();
     std::chrono::steady_clock::time_point settingsDirtySince_{};
 };
 

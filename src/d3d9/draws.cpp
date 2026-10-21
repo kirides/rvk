@@ -1,6 +1,7 @@
 #include "d3d9/draws.h"
 
 #include <algorithm>
+#include <cctype>
 #include <format>
 #include <iterator>
 
@@ -15,6 +16,22 @@ constexpr const char* kKindNames[] = {"Unknown",  "StaticMesh", "InstancedMesh",
                                       "SpeedTreeBillboard", "Vegetation", "Sky", "Particle", "Strip", "Decal",
                                       "Billboard", "Precipitation", "Debug", "ShadowMask", "Post", "Gui"};
 static_assert(std::size(kKindNames) == static_cast<std::size_t>(Kind::Count));
+
+constexpr const char* kWaterNames[] = {"None", "Ocean", "Lake", "River", "Swamp", "Waterfall", "Shore", "Other"};
+static_assert(std::size(kWaterNames) == static_cast<std::size_t>(Water::Count));
+
+bool containsNoCase(std::string_view hay, std::string_view needle) {
+    if (needle.size() > hay.size()) return false;
+    for (std::size_t i = 0; i + needle.size() <= hay.size(); ++i) {
+        std::size_t k = 0;
+        while (k < needle.size() &&
+               std::tolower(static_cast<unsigned char>(hay[i + k])) == std::tolower(static_cast<unsigned char>(needle[k]))) {
+            ++k;
+        }
+        if (k == needle.size()) return true;
+    }
+    return false;
+}
 
 constexpr std::uint32_t rgba(std::uint32_t r, std::uint32_t g, std::uint32_t b, std::uint32_t a = 220) {
     return r | g << 8 | b << 16 | a << 24;
@@ -51,6 +68,22 @@ const char* name(Source s) {
 const char* name(Kind k) {
     const auto i = static_cast<std::size_t>(k);
     return i < std::size(kKindNames) ? kKindNames[i] : "?";
+}
+
+const char* name(Water w) {
+    const auto i = static_cast<std::size_t>(w);
+    return i < std::size(kWaterNames) ? kWaterNames[i] : "?";
+}
+
+Water classifyWater(std::string_view n) {
+    if (!containsNoCase(n, "water")) return Water::None;
+    if (containsNoCase(n, "shore")) return Water::Shore;
+    if (containsNoCase(n, "ocean")) return Water::Ocean;
+    if (containsNoCase(n, "fall")) return Water::Waterfall;
+    if (containsNoCase(n, "river") || containsNoCase(n, "flow")) return Water::River;
+    if (containsNoCase(n, "swamp")) return Water::Swamp;
+    if (containsNoCase(n, "lake") || containsNoCase(n, "island")) return Water::Lake;
+    return Water::Other;
 }
 
 Kind classify(Source source, std::uint32_t opDesc, scene::View view, scene::Pass pass) {

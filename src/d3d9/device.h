@@ -182,6 +182,8 @@ public:
     // D3D9 Lock: pointer into the CPU copy (offset/size 0 = whole buffer); flags LOCK_*
     void* lock(std::uint32_t offset, std::uint32_t size, std::uint32_t flags);
     void unlock();
+    // a copy of bytes of the CPU copy (any thread; false when out of range): enhancements read engine geometry with it
+    bool readCpu(std::uint32_t offset, std::uint32_t size, void* out);
 
     // render thread: the GPU copy for a draw (uploads / renames as needed)
     struct Binding {
@@ -234,6 +236,50 @@ public:
 };
 
 // ---- device -------------------------------------------------------------------------------------------------------
+
+// Draw replacement (enhancements that take over engine draws, e.g. enh/water: docs/research/water.md). For draws of camera
+// views tagged as water (draws::Tag::water, or kind Refracted) the device asks the replacer what to do with the draw before
+// it records anything: draw it as the engine asked, skip it, draw the same geometry with other shaders, or draw procedural
+// geometry (vkCmdDraw without vertex / index buffers) instead. Render thread.
+struct ReplaceQuery {
+    draws::Kind kind = draws::Kind::Unknown;
+    scene::Phase phase{};
+    const draws::Tag* tag = nullptr;
+    std::uint32_t mainView = 0;               // 1 = the frame's first main view
+    Buffer* vertexBuffer = nullptr;           // stream 0
+    std::uint32_t vertexOffset = 0, vertexStride = 0;
+    Buffer* indexBuffer = nullptr;            // null for non-indexed draws
+    bool indexed = false;
+    std::uint32_t first = 0, primitives = 0;  // start index / vertex, primitive count
+    std::int32_t baseVertex = 0;
+    bool instanced = false;                   // stream 0 frequency INDEXEDDATA
+    Texture* const* textures = nullptr;       // the bound textures s0..s15 (pixel)
+    const Shader* engineVs = nullptr;
+    const Shader* enginePs = nullptr;
+};
+
+struct DrawReplacement {
+    enum class Action : std::uint8_t {
+        Engine,      // draw it as the engine asked
+        Skip,        // not drawn (still counted and recorded, flagged replaced)
+        Shaders,     // the engine's geometry and constants with `vs` / `ps`
+        Procedural,  // `vertices` vertices of `vs` / `ps` without vertex / index buffers (vkCmdDraw)
+    };
+    Action action = Action::Engine;
+    std::shared_ptr<Shader> vs, ps;     // reflections decide vertex inputs and constant uploads (all of c# when 256)
+    VkDeviceAddress block = 0;          // replaces the DrawBlock address (push constant `draw`); 0 = keep
+    std::uint32_t vertices = 0;         // Procedural
+    bool cullNone = false;              // override the cull mode
+    bool opaque = true;                 // blending off, all channels written
+    std::array<Texture*, 6> sampled{};  // made readable (SHADER_READ) before the rendering scope
+    draws::Water water = draws::Water::None;  // the body as the replacer classified it (goes into the record)
+};
+
+class DrawReplacer {
+public:
+    virtual ~DrawReplacer() = default;
+    virtual void replace(Device& device, const ReplaceQuery& query, DrawReplacement& out) = 0;
+};
 
 // Drawn on top of the frame at present (the in-game overlay, src/overlay): after the back buffer was copied into the
 // swapchain image, so captures of the back buffer (rvk_screenshot, the engine snapshot) never contain it; or, for debugging,
@@ -499,6 +545,19 @@ public:
     void beginMainView();
     void inject(inject::Point point);
     vk::Transients& transients() { return transients_; }
+    // draw replacement (null = none); the replacer must outlive its registration
+    void setDrawReplacer(DrawReplacer* replacer) { replacer_ = replacer; }
+    // the D3D9 float constants as last set (render thread)
+    const float* vsConstant(std::uint32_t reg) const { return vsF_[reg < kVsFloatConsts ? reg : 0]; }
+    const float* psConstant(std::uint32_t reg) const { return psF_[reg < kPsFloatConsts ? reg : 0]; }
+    // a bindless sampler index for passes / replacement shaders (linear or point, clamp or wrap, mips linear)
+    std::uint32_t samplerFor(bool linear, bool clamp);
+    // Pipelines of replacement shaders, built in the background (no hitch when a player turns a feature on): registered
+    // pairs are prewarmed as soon as the first water draw shows the formats (its pipeline description is the template);
+    // prebuildReplacement queues one now (false: no water draw seen yet); replacementReady: its pipeline exists
+    void registerReplacement(std::shared_ptr<Shader> vs, std::shared_ptr<Shader> ps, bool procedural);
+    bool prebuildReplacement(const Shader& vs, const Shader& ps, bool procedural);
+    bool replacementReady(const Shader& vs, const Shader& ps, bool procedural) const;
     // a texture ready for sampling (vertex / fragment / compute) in a pass: pending uploads + layout; false if not sampleable
     bool readable(Texture* texture, VkCommandBuffer cmd);
 
@@ -542,6 +601,7 @@ private:
         std::int32_t baseVertex = 0;
     };
     bool prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom);
+    void logWaterDraw(draws::Kind kind);
     VkShaderModule tintModule(Shader& ps);  // the tint variant of a pixel shader (null when it fails to build)
     bool bindVertexInput(vk::PipelineDesc& pd);
     void setDynamicState(std::uint32_t primitiveType);
@@ -735,6 +795,18 @@ private:
     draws::FrameDraws draws_;
     draws::Record* lastRecord_ = nullptr;  // the record of the draw being issued (its index buffer is bound after prepareDraw)
     draws::TintMode tint_ = draws::TintMode::Off;
+    std::unordered_set<const void*> waterLogged_;  // materials whose first water / refracted draw was logged
+    DrawReplacer* replacer_ = nullptr;
+    std::uint32_t customVertices_ = 0;    // the draw prepared by prepareDraw is procedural: vkCmdDraw(customVertices_)
+    vk::PipelineDesc waterTemplate_{};    // pipeline description of the last water draw (prebuildReplacement)
+    bool waterTemplateValid_ = false;
+    std::uint32_t lookupSamplerStates(const std::uint32_t* states);
+    bool replacementDesc(const Shader& vs, const Shader& ps, bool procedural, vk::PipelineDesc& out) const;
+    struct Registered {
+        std::shared_ptr<Shader> vs, ps;
+        bool procedural = false;
+    };
+    std::vector<Registered> registered_;
 
     // enhancements
     VkDeviceAddress frameAddr_ = 0;  // 0 = upload before the next use

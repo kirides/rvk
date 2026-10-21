@@ -63,6 +63,9 @@ set(RVK_SHADERS
     test/abi_layout.comp
     test/abi_pass_layout.comp
     test/rt_query.comp
+    water/water.frag
+    water/water_mesh.vert
+    water/water_ocean.vert
 )
 set(RVK_SHADER_OUTPUTS)
 set(RVK_SHADER_INCLUDES "")
@@ -139,6 +142,12 @@ add_library(rvk_core STATIC
     src/d3d9/semantics.h
     src/enh/debug_view.cpp
     src/enh/debug_view.h
+    src/enh/shore_field.cpp
+    src/enh/shore_field.h
+    src/enh/water.cpp
+    src/enh/water.h
+    src/enh/water_profile.cpp
+    src/enh/water_profile.h
     src/engine/scene_hooks.cpp
     src/engine/scene_hooks.h
     src/engine/symbols.cpp
@@ -287,7 +296,7 @@ rvk_warnings(rvk_d3d9test)
 # tests
 # ---------------------------------------------------------------------------------------------
 if(RVK_BUILD_TESTS)
-    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp tests/api_tests.cpp tests/fvf_tests.cpp tests/settings_tests.cpp tests/settings_api_tests.cpp tests/scene_tests.cpp tests/draws_tests.cpp tests/inject_tests.cpp tests/caps_tests.cpp)
+    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp tests/api_tests.cpp tests/fvf_tests.cpp tests/settings_tests.cpp tests/settings_api_tests.cpp tests/scene_tests.cpp tests/draws_tests.cpp tests/inject_tests.cpp tests/caps_tests.cpp tests/water_tests.cpp)
     target_link_libraries(rvk_tests PRIVATE rvk_core SPIRV-Tools-static)
     rvk_warnings(rvk_tests)
     add_test(NAME rvk_tests COMMAND rvk_tests)

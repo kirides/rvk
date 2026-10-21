@@ -10,6 +10,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "d3d9/identity.h"
@@ -58,8 +59,26 @@ enum class Kind : std::uint8_t {
     Count
 };
 
+// Which body of water a draw belongs to, from its material's name (docs/research/water.md 2): the engine has no water class;
+// water meshes are ordinary meshes with a refracting material. None = not water (glass, other materials).
+enum class Water : std::uint8_t {
+    None,
+    Ocean,      // Special_Water_Ocean_*: the sea around the island
+    Lake,       // lakes, ponds (Special_Water_Island_*, *Lake*)
+    River,      // rivers, streams, water flows (Special_Water_River_*, *Flow*)
+    Swamp,      // Special_Water_Swamp_*
+    Waterfall,  // Special_Water_Fall*_*: vertical sheets (Alpha pass, not refracted)
+    Shore,      // Special_Water_Shore_*: the engine's fake shore, scrolling foam strips along the sea coast (additive, Alpha
+                // pass; Levelmesh_Ocean_Shore_01/02)
+    Other,      // another material with "water" in its name (bath tubs, puddles)
+    Count
+};
+
 const char* name(Source s);
 const char* name(Kind k);
+const char* name(Water w);
+// the water body of a material name (case-insensitive substrings; "" / unknown -> None)
+Water classifyWater(std::string_view materialName);
 
 // the engine's current context (set by the hooks around the original calls; nested scopes save and restore it)
 struct Tag {
@@ -71,6 +90,8 @@ struct Tag {
     const void* subMesh = nullptr;       // eCSubMesh* (eCSubMesh::Render)
     const void* material = nullptr;      // eCMaterialResource2* (sub-mesh +0x38)
     const void* meshResource = nullptr;  // eCMeshResource2*
+    Water water = Water::None;           // the material's water body (only resolved in the Refracted / Alpha passes)
+    const char* materialName = nullptr;  // its name (engine hooks' cache: valid while the process runs), null = not read
 };
 
 Kind classify(Source source, std::uint32_t opDesc, scene::View view, scene::Pass pass);
@@ -98,6 +119,8 @@ struct Record {
     const void* subMesh = nullptr;
     const void* material = nullptr;
     const void* meshResource = nullptr;
+    Water water = Water::None;
+    bool replaced = false;  // drawn by an enhancement's replacement shaders (water.enabled) instead of the engine's
     // geometry
     ResourceRef vertexBuffer;  // stream 0
     ResourceRef indexBuffer;

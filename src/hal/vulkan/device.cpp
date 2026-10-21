@@ -76,6 +76,7 @@ HalDevice::~HalDevice() {
         settings::registry().save(options_.settingsFile);
     }
     debugView_.reset();  // removes its pass, retires its pipelines
+    water_.reset();      // unregisters its draw replacer
     {
         const std::lock_guard lock(handleMutex_);
         for (auto& [h, d] : decls_) dev_.release(std::move(d));
@@ -176,6 +177,15 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         if (!rs.injectView->isDefault()) applyInject(*rs.injectView);
         reg.onChange(*rs.injectView, applyInject, this);
     }
+    // enhanced water (enh/water.h, docs/research/water.md): a draw replacer, live settings
+    water_ = std::make_unique<enh::Water>(dev_);
+    if (rs.waterEnabled != nullptr) {
+        for (settings::Setting* s : {rs.waterEnabled, rs.waterQuality, rs.waterReflections, rs.waterOceanWaves, rs.waterWaveHeight,
+                                     rs.waterMurkiness, rs.waterReflectionStrength, rs.waterDebug}) {
+            if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyWater(); }, this);
+        }
+        if (rs.waterEnabled->asBool()) applyWater();
+    }
     if (options.overlay && dev_.swapchain().valid()) {
         overlay_ = std::make_unique<overlay::Overlay>();
         overlay::Options oo;
@@ -190,6 +200,23 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         }
     }
     return true;
+}
+
+void HalDevice::applyWater() {
+    const auto& rs = settings::renderer();
+    if (!water_ || rs.waterEnabled == nullptr) return;
+    enh::Water::Settings s;
+    s.enabled = rs.waterEnabled->asBool();
+    const std::string_view q = rs.waterQuality->asEnum();
+    s.quality = q == "low" ? 0 : q == "high" ? 2 : 1;
+    s.ssr = rs.waterReflections->asEnum() == "ssr";
+    s.oceanWaves = rs.waterOceanWaves->asBool();
+    s.waveHeight = rs.waterWaveHeight->asFloat();
+    s.murkiness = rs.waterMurkiness->asFloat();
+    s.reflections = rs.waterReflectionStrength->asFloat();
+    const std::string_view d = rs.waterDebug->asEnum();
+    s.debug = d == "shore_field" ? 1 : d == "depth" ? 2 : d == "normals" ? 3 : d == "reflection" ? 4 : 0;
+    water_->apply(s);
 }
 
 void HalDevice::applyVsync() {

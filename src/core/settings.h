@@ -243,6 +243,15 @@ struct RendererSettings {
     Setting* drawRecords = nullptr;  // debug.draw_records: per-frame draw records (hidden; the histogram is always on)
     Setting* injectView = nullptr;   // debug.inject_view: "off", "depth", "tint" (enh/debug_view.h, an injected pass)
     Setting* rtAllow = nullptr;      // rt.allow: enable the ray tracing extensions at device creation (restart)
+    // enhanced water (enh/water.h, docs/research/water.md)
+    Setting* waterEnabled = nullptr;      // water.enabled
+    Setting* waterQuality = nullptr;      // water.quality: "low", "medium", "high"
+    Setting* waterReflections = nullptr;  // water.reflections: "sky" (cube only), "ssr"
+    Setting* waterOceanWaves = nullptr;   // water.ocean_waves: wave grid + lower coast for the open sea
+    Setting* waterWaveHeight = nullptr;   // water.wave_height: multiplier
+    Setting* waterMurkiness = nullptr;    // water.murkiness: multiplier on the absorption
+    Setting* waterReflectionStrength = nullptr;  // water.reflection_strength
+    Setting* waterDebug = nullptr;        // water.debug: "off", "shore_field", "depth", "normals", "reflection"
 };
 // hotkey names of overlay.toggle_key / overlay.ab_key ("none" disables)
 const std::vector<std::string>& hotkeyNames();

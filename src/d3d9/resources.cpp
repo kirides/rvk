@@ -360,6 +360,13 @@ void* Buffer::lock(std::uint32_t offset, std::uint32_t size, std::uint32_t flags
 
 void Buffer::unlock() {}
 
+bool Buffer::readCpu(std::uint32_t offset, std::uint32_t size, void* out) {
+    const std::lock_guard lock(mutex_);
+    if (offset > size_ || size > size_ - offset) return false;
+    std::memcpy(out, cpu_.data() + offset, size);
+    return true;
+}
+
 Buffer::Binding Buffer::gpu() {
     const std::lock_guard lock(mutex_);
     const std::uint64_t frame = dev_.frameValue();

@@ -1,0 +1,6 @@
+id          = "rvk_water"
+name        = "Renderer water survey"
+version     = "1.0.0"
+author      = "risen-enhanced-graphics"
+description = "Finds the world's water meshes (level-mesh entities) and looks at each from a fixed camera, for the renderer's water classification and the enhanced water pass (scenario rvk_water, docs/research/water.md)."
+main        = "main.lua"

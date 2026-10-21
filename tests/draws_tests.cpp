@@ -333,3 +333,19 @@ TEST(draws_tint_epilogue) {
         CHECK(rvk::shader::toGlsl(vdec.program).glsl == rvk::shader::toGlsl(vdec.program, {.tintEpilogue = true}).glsl);
     }
 }
+
+TEST(draws_classify_water) {
+    using draws::Water;
+    CHECK(draws::classifyWater("Special_Water_Ocean_01_Diffuse_01") == Water::Ocean);
+    CHECK(draws::classifyWater("Special_Water_Island_01_Diffuse_01") == Water::Lake);
+    CHECK(draws::classifyWater("Special_Water_Swamp_01_Diffuse_01") == Water::Swamp);
+    CHECK(draws::classifyWater("Special_Water_River_01_Diffuse_01") == Water::River);
+    CHECK(draws::classifyWater("Special_Water_Fall_01_Diffuse_01") == Water::Waterfall);
+    CHECK(draws::classifyWater("Special_Water_Falls_01_Diffuse_01") == Water::Waterfall);
+    CHECK(draws::classifyWater("Special_Water_Shore_02_Diffuse_01") == Water::Shore);
+    CHECK(draws::classifyWater("Arch_Obj_Bathtub_Water_01_Diffuse_01") == Water::Other);
+    CHECK(draws::classifyWater("Nat_Obj_Crystal_01_Diffuse_02") == Water::None);
+    CHECK(draws::classifyWater("Nat_Sea_Bottom_01_Diffuse_01") == Water::None);
+    CHECK(draws::classifyWater("") == Water::None);
+    CHECK(std::string(draws::name(Water::Shore)) == "Shore");
+}

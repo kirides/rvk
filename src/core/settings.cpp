@@ -705,6 +705,92 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .requirements = caps::bit(caps::Cap::RayTracingHardware),
         .unmetValue = 0,
     });
+    r.waterEnabled = &reg.add({
+        .key = "water.enabled",
+        .label = "Enhanced water",
+        .category = "Water",
+        .description = "Replaces the game's water shading: refraction with depth-based colour and absorption, reflections of the "
+                       "scene and the sky, sun glints, foam on the sea, in the game's own fog. Each lake, river and swamp keeps "
+                       "the colour of its original material. Off renders the game's own water.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+    });
+    r.waterQuality = &reg.add({
+        .key = "water.quality",
+        .label = "Water quality",
+        .category = "Water",
+        .description = "Detail of the enhanced water: reflection ray steps and the density of the sea's wave grid.",
+        .type = Type::Enum,
+        .defaultValue = 1,
+        .options = {"low", "medium", "high"},
+        .optionLabels = {"Low", "Medium", "High"},
+    });
+    r.waterReflections = &reg.add({
+        .key = "water.reflections",
+        .label = "Water reflections",
+        .category = "Water",
+        .description = "\"Screen space\" reflects what is on screen (shores, ships, trees) and falls back to the sky; \"Sky\" "
+                       "reflects the sky only (cheaper).",
+        .type = Type::Enum,
+        .defaultValue = 1,
+        .options = {"sky", "ssr"},
+        .optionLabels = {"Sky", "Screen space"},
+    });
+    r.waterOceanWaves = &reg.add({
+        .key = "water.ocean_waves",
+        .label = "Sea waves and shore",
+        .category = "Water",
+        .description = "The open sea gets moving waves, calming down at the coast and around the player, and a real shoreline "
+                       "where the water runs up the beach and back instead of the game's painted surf. Lakes, rivers and swamps "
+                       "never get waves.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+    });
+    r.waterWaveHeight = &reg.add({
+        .key = "water.wave_height",
+        .label = "Wave height",
+        .category = "Water",
+        .description = "Height of the sea's waves (1 = about 70 cm for the largest).",
+        .type = Type::Float,
+        .defaultValue = 1,
+        .min = 0,
+        .max = 3,
+        .format = "%.2f",
+    });
+    r.waterMurkiness = &reg.add({
+        .key = "water.murkiness",
+        .label = "Water murkiness",
+        .category = "Water",
+        .description = "How quickly the water gets opaque with depth (1 = matched to each water's original look).",
+        .type = Type::Float,
+        .defaultValue = 1,
+        .min = 0.25,
+        .max = 4,
+        .format = "%.2f",
+    });
+    r.waterReflectionStrength = &reg.add({
+        .key = "water.reflection_strength",
+        .label = "Reflection strength",
+        .category = "Water",
+        .description = "Strength of reflections and sun glints on the water (1 = physically based, per water type).",
+        .type = Type::Float,
+        .defaultValue = 1,
+        .min = 0,
+        .max = 2,
+        .format = "%.2f",
+    });
+    r.waterDebug = &reg.add({
+        .key = "water.debug",
+        .label = "Water debug view",
+        .category = "Debug",
+        .description = "Developer view of the enhanced water: the shore field (distance to the coast), the water depth, the "
+                       "surface normals or the reflection alone.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "shore_field", "depth", "normals", "reflection"},
+        .optionLabels = {"Off", "Shore field", "Depth", "Normals", "Reflection"},
+        .flags = Flag::NoAB,
+    });
     if (&reg == &registry()) g_renderer = r;
     return r;
 }
