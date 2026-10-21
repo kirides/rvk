@@ -1,44 +1,22 @@
 // Unit tests for pure logic (no game, no GPU). Run: build\RelWithDebInfo\rvk_tests.exe (or ctest -C RelWithDebInfo --test-dir build).
 
 #include <cstdint>
-#include <cstdio>
 #include <iterator>
-#include <functional>
-#include <string>
-#include <vector>
 
 #include "core/config.h"
 #include "shader/sm_tokens.h"
+#include "test.h"
 
-namespace {
-
-struct TestCase {
-    const char* name;
-    std::function<void()> fn;
-};
+namespace rvk::test {
 std::vector<TestCase>& registry() {
     static std::vector<TestCase> r;
     return r;
 }
-struct Register {
-    Register(const char* name, std::function<void()> fn) { registry().push_back({name, std::move(fn)}); }
-};
-int g_failures = 0;
-
-#define TEST(name)                                  \
-    static void test_##name();                      \
-    static Register reg_##name(#name, test_##name); \
-    static void test_##name()
-
-#define CHECK(cond)                                                              \
-    do {                                                                         \
-        if (!(cond)) {                                                           \
-            std::printf("  FAILED %s:%d: %s\n", __FILE__, __LINE__, #cond);      \
-            ++g_failures;                                                        \
-        }                                                                        \
-    } while (0)
-
-}  // namespace
+int& failures() {
+    static int n = 0;
+    return n;
+}
+}  // namespace rvk::test
 
 TEST(config_defaults) {
     const rvk::Config c = rvk::parseConfig("");
@@ -123,11 +101,11 @@ TEST(sm_length) {
 }
 
 int main() {
-    for (const auto& t : registry()) {
-        const int before = g_failures;
+    for (const auto& t : rvk::test::registry()) {
+        const int before = rvk::test::failures();
         t.fn();
-        std::printf("%s %s\n", g_failures == before ? "ok  " : "FAIL", t.name);
+        std::printf("%s %s\n", rvk::test::failures() == before ? "ok  " : "FAIL", t.name);
     }
-    std::printf("%zu tests, %d failure(s)\n", registry().size(), g_failures);
-    return g_failures == 0 ? 0 : 1;
+    std::printf("%zu tests, %d failure(s)\n", rvk::test::registry().size(), rvk::test::failures());
+    return rvk::test::failures() == 0 ? 0 : 1;
 }

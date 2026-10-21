@@ -25,8 +25,8 @@ endif()
 set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>")
 
 # vcpkg only builds Debug and Release
-set(CMAKE_MAP_IMPORTED_CONFIG_RELWITHDEBINFO "Release")
-set(CMAKE_MAP_IMPORTED_CONFIG_MINSIZEREL "Release")
+set(CMAKE_MAP_IMPORTED_CONFIG_RELWITHDEBINFO "Release;")  # "" = imported targets without per-config locations (FindVulkan tools)
+set(CMAKE_MAP_IMPORTED_CONFIG_MINSIZEREL "Release;")
 
 find_package(spdlog CONFIG REQUIRED)
 find_package(minhook CONFIG REQUIRED)
@@ -34,6 +34,8 @@ find_package(tomlplusplus CONFIG REQUIRED)
 find_package(volk CONFIG REQUIRED)
 find_package(VulkanHeaders CONFIG REQUIRED)
 find_package(VulkanMemoryAllocator CONFIG REQUIRED)
+find_package(glslang CONFIG REQUIRED)
+find_package(SPIRV-Tools CONFIG REQUIRED)
 
 function(rvk_warnings target)
     target_compile_options(${target} PRIVATE /W4 /permissive- /utf-8 /Zc:__cplusplus /Zc:preprocessor /EHsc)
@@ -62,8 +64,16 @@ add_library(rvk_core STATIC
     src/hal/trace_generated.h
     src/hal/trace_support.h
     src/hal/types_base.h
+    src/shader/abi.h
+    src/shader/glsl.cpp
+    src/shader/glsl.h
+    src/shader/sm_decode.cpp
+    src/shader/sm_disasm.cpp
+    src/shader/sm_ir.h
     src/shader/sm_tokens.cpp
     src/shader/sm_tokens.h
+    src/shader/spirv.cpp
+    src/shader/spirv.h
     src/vk/probe.cpp
     src/vk/probe.h
     src/vk/volk_impl.c
@@ -78,6 +88,9 @@ target_link_libraries(rvk_core PUBLIC
     volk::volk_headers
     Vulkan::Headers
     GPUOpen::VulkanMemoryAllocator
+    glslang::glslang
+    glslang::SPIRV
+    glslang::glslang-default-resource-limits
 )
 rvk_warnings(rvk_core)
 target_precompile_headers(rvk_core PRIVATE
@@ -102,11 +115,18 @@ target_link_libraries(rvk_d3d9 PRIVATE rvk_core)
 rvk_warnings(rvk_d3d9)
 
 # ---------------------------------------------------------------------------------------------
+# rvk_shadertool: offline shader translator driver (corpus validation, listings)
+# ---------------------------------------------------------------------------------------------
+add_executable(rvk_shadertool tools/shadertool/main.cpp)
+target_link_libraries(rvk_shadertool PRIVATE rvk_core SPIRV-Tools-static)
+rvk_warnings(rvk_shadertool)
+
+# ---------------------------------------------------------------------------------------------
 # tests
 # ---------------------------------------------------------------------------------------------
 if(RVK_BUILD_TESTS)
-    add_executable(rvk_tests tests/test_main.cpp)
-    target_link_libraries(rvk_tests PRIVATE rvk_core)
+    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp)
+    target_link_libraries(rvk_tests PRIVATE rvk_core SPIRV-Tools-static)
     rvk_warnings(rvk_tests)
     add_test(NAME rvk_tests COMMAND rvk_tests)
 endif()

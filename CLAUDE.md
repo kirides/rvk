@@ -50,6 +50,13 @@ risen-spass's own `risen.debug.screenshot` grabs the D3D9 back buffer (hooks `Pr
 Startup facts (measured): `Direct3DCreate9` is called once ~6 s **before** `eCGfxAdmin::InitializeAdmin` (another caller, to be
 found) and again inside it; device creation in the AMD D3D9 driver takes ~10 s.
 
+## Shader translator
+
+`rvk_shadertool corpus <dir>` translates + validates every captured shader (corpus from `mode = "trace"`:
+`<test copy>invk\corpus`, copy it to `<repo>\corpus`, git-ignored: game-derived). `show <file>` prints listing + GLSL,
+`refdisasm <file>` the D3DX reference listing. `python tools/compare_disasm.py corpus` diffs our listing against D3DX for the
+whole corpus (must stay 100 %). The contract between translated shaders and the renderer is `src/shader/abi.h`.
+
 ## Architecture (src/)
 
 | Path | Role |
@@ -59,6 +66,14 @@ found) and again inside it; device creation in the AMD D3D9 driver takes ~10 s.
 | `core/` | config (`bin\rvk\config.toml`), log (`bin\rvk\rvk.log`), paths, MinHook wrapper (`Hook<Fn>`), export resolution |
 | `engine/symbols.h` | X-macro table of the Engine.dll symbols we bind by decorated name |
 | `vk/` | Vulkan: probe (floor check), later device, swapchain, HAL implementation |
+| `hal/` | generated HAL interfaces (`tools/gen_hal.py` -> `api_generated.h`, `trace_generated.h`), engine allocator, trace mode |
+| `shader/` | D3D9 bytecode decoder, listing, GLSL generator (`abi.h` = shader/renderer contract), glslang wrapper |
+
+## Tooling gotchas
+
+- The Bash tool mangles backslash escapes even in quoted heredocs (`` becomes a control character, `
+` in Python strings
+  breaks): write files with the Write tool and edit with Edit when the text contains backslashes.
 
 ## Reverse engineering
 

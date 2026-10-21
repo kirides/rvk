@@ -42,7 +42,13 @@ Each milestone ends verified (in the game where it touches the engine) and commi
   list of slots actually used, render-target formats, vertex declarations, lock patterns.
 * Capture every shader bytecode (VS/PS programs, effect shaders) to a corpus directory for M2.
 
-### M2 Shader translator (offline)
+### M2 Shader translator (offline): done (2026-10-21)
+Result: `src/shader/` decodes SM 2/3 bytecode (listing identical to `D3DXDisassembleShader` for all 2483 corpus shaders,
+`tools/compare_disasm.py`), generates GLSL 4.60 against the contract in `src/shader/abi.h` and compiles it with glslang; all
+corpus shaders pass `spirv-val`; unit tests assemble hand-written control-flow/texture shaders with `D3DXAssembleShader`.
+Chosen: GLSL + glslang instead of a hand-written SPIR-V emitter (readable output, ~7 ms per shader -> disk cache in M3).
+Open: SM 1.x (not used by the game so far), GPU-level semantic checks (M3/M4 screenshots), D3D9 `0 * inf = 0` emulation if needed.
+Original scope:
 * SM1-3 bytecode parser + SPIR-V emitter: registers (c/i/b, r, v, t, s, o), all opcodes the corpus uses, `dcl_*`, `texld*`, predicates,
   loops/rep, relative addressing, `oPos` half-pixel and clip-space fix-up, alpha test and fog as specialization constants.
 * Tests: the whole corpus translates, `spirv-val` passes, a disassembly-diff for a few hand-checked shaders.
