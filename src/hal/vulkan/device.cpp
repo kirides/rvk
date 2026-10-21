@@ -281,15 +281,36 @@ bEResult HalDevice::GetImageInfoFromMemory(void const* a0, unsigned int a1, eCGf
 }
 
 bEResult HalDevice::CheckDeviceFormat(eCGfxShared::eSGfxLayersDesc const& a0, bool a1) {
+    const bEResult r = checkFormat(a0, a1);
+    spdlog::debug("hal: CheckDeviceFormat {} (0x{:x}) {}x{} usage 0x{:x} blend {}: {}", vk::d3dFormatName(a0.format), a0.format,
+                  a0.width, a0.height, a0.usage, a1, r == bEResult_Ok ? "yes" : "no");
+    return r;
+}
+
+bEResult HalDevice::checkFormat(eCGfxShared::eSGfxLayersDesc const& a0, bool a1) {
     using namespace vk::d3dfmt;
     const std::uint32_t f = a0.format;
-    // shadow-map choice (eCDepthMap::SetupImageDesc): no depth textures (they would need fetch4 / hardware-PCF emulation),
-    // so the engine renders colour shadow maps and compares in the shader
-    if (f == DF16 || f == DF24 || f == INTZ || (a0.usage & USAGE_DEPTHSTENCIL) != 0) {
-        return bEResult_False;
-    }
     if (f == NULLFMT) {
         return bEResult_Ok;
+    }
+    // Shadow maps (eCShaderMaterialAdmin::PostInitialize 0x6ba9d0 probes R32F, R16F, D16, D24X8, DF16, DF24 in this order and
+    // takes the last supported one; docs/research/engine-gfx.md 5). The ATI depth textures DF16 / DF24 are sampled as a plain
+    // depth value (no compare, no fetch4 in post_SSM.fx): exactly a sampled Vulkan depth image, the D3D9 reference path on
+    // AMD. D16 / D24 depth textures would need NVIDIA's implicit hardware-PCF compare on tex2Dproj and INTZ is not used:
+    // reported unsupported. Without DF24 the engine falls back to R16F colour maps (16-bit float depth: striped shadows).
+    if (f == DF16 || f == DF24) {
+        if ((a0.usage & USAGE_DEPTHSTENCIL) == 0 || a0.depth > 1 || a0.cubeMap) {
+            return bEResult_False;
+        }
+        const auto info = vk::formatInfo(f, dev_.d24s8Format());
+        if (!info) return bEResult_False;
+        VkFormatProperties fp{};
+        vkGetPhysicalDeviceFormatProperties(dev_.ctx().physicalDevice(), info->format, &fp);
+        const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        return (fp.optimalTilingFeatures & need) == need ? bEResult_Ok : bEResult_False;
+    }
+    if (f == INTZ || (a0.usage & USAGE_DEPTHSTENCIL) != 0) {
+        return bEResult_False;
     }
     const auto info = vk::formatInfo(f, dev_.d24s8Format());
     if (!info || info->depth) {
@@ -524,6 +545,7 @@ bEResult HalDevice::GetMasterDepthWrite(eCGfxShared::eEMasterWrite* a0) {
     return bEResult_Ok;
 }
 bEResult HalDevice::SetMasterDepthBias(bool a0, float a1, float a2) {
+    HAL_LOG("hal> SetMasterDepthBias {} {} {}", a0, a1, a2);
     master_[M_DEPTHBIAS] = a0;
     if (a0) {
         setRenderState(RS_DEPTHBIAS, asDword(a1));
@@ -633,6 +655,7 @@ bEResult HalDevice::SetDepthWrite(eCGfxShared::eEWrite a0) {
     return bEResult_Ok;
 }
 bEResult HalDevice::SetDepthBias(float a0, float a1) {
+    HAL_LOG("hal> SetDepthBias {} {}{}", a0, a1, master_[M_DEPTHBIAS] ? " (master set)" : "");
     if (!master_[M_DEPTHBIAS]) {
         normal(RS_DEPTHBIAS, asDword(a0));
         normal(RS_SLOPESCALEDEPTHBIAS, asDword(a1));

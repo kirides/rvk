@@ -387,6 +387,7 @@ private:
                   M_FOG, M_COUNT };
     void normal(std::uint32_t rs, std::uint32_t value) { setRenderState(rs, value); }
     void applyStencil(bool enable, const eCGfxShared::eSGfxStencilData& d);
+    bEResult checkFormat(eCGfxShared::eSGfxLayersDesc const& desc, bool blend);
     void applyAlphaTest(bool enable, const eCGfxShared::eSGfxAlphaTestData& d);
     void logFrameStats();
 

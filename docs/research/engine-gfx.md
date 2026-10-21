@@ -291,6 +291,28 @@ Post-processing (bloom, HDR/eye adaptation, DoF, radial blur, wobble, distort, d
   `CheckDeviceFormat` (`eCDepthMap::IsFormatSupported`, `0x59f810`). No `INTZ`/`RAWZ`/`RESZ`/`ATOC`; **correction (M1 trace): a `NULL`
   FOURCC colour target and a `DF24` depth texture are created at 1024x1024** (docs/research/hal.md 5). Scene depth for SSM/DoF comes from the z pre-pass
   into an `R32F`-style depth map (`eEIFTextureMode_DepthBuffer`) **[I]**.
+* **How the shadow-map format is chosen** [C, decompiled + verified in game 2026-10-21; dumps `B:\DevDrive\risen-ghidra\rvk_shadow_dump*.txt`]:
+  * `eEDepthMapFormat` -> D3DFORMAT (`SetupImageDesc` `0x59fb20`): 0 `A8R8G8B8`, 1 `R16F`, 2 `R32F`, 3 `D16` (usage 2), 4 `D24S8` (usage 2),
+    5 `DF16` (usage 2), 6 `DF24` (usage 2), 7 `G16R16F`, 8 `G32R32F`; mips 1, usage 1 (render target) unless noted.
+  * `eCShaderMaterialAdmin::PostInitialize` (`0x6ba9d0`) probes the table at Engine.dll `0x9d2290` (formats) / `0x9d22b0` (enum values):
+    `R32F`=2, `R16F`=1, `D16`=3, `D24X8`=4, `DF16`=5, `DF24`=6, 512x512, usage 2 for 3..6 else 1, and keeps the **last** supported entry:
+    probe with `cubeMap = 0` -> `+0x178` directional (`GetDirectionalLightShadowMapFormat` `0x6b9f80`), with `cubeMap = 1` -> `+0x180`
+    point lights (`GetPointLightShadowMapFormat` `0x6b6eb0`); default 9 (none). `+0x17c` variance format = 8 (`G32R32F`, usage `0x401`)
+    or 9 if unsupported. **Order matters: without depth textures the last hit is `R16F`, not `R32F`.**
+  * `eCDepthMap::SetFormat` (`0x59f8d0`) walks down from the requested enum value to the first supported one (0 is never probed).
+    `eCCascadeShadowMap::SetSplitCount` (`0x59f650`) creates the splits with the directional format; `eCIlluminationAdmin::ApplyConfiguration`
+    (`0x577a50`) creates `eCShadowMapDirectionalLight2VS` with format 8 (the 1024 `G32R32F` VSM). `eCDepthMap::CreateRenderTarget` (`0x59fd00`)
+    adds a `D24S8`/`D24X8` depth buffer for formats 0..2 and 7..8. `BeginZPass` (`0x6b9720`) turns colour writes off for formats 3..6.
+  * The shadow pass pixel shader is `oC0 = texcoord2.z` (light-space z, `ps30_30b5b90954fbc60b`): for colour formats the map stores z
+    without any bias; for depth formats the rasterised depth is used. No `SetDepthBias` / `SetMasterDepthBias` calls in a frame of the beach.
+  * `post_SSM.fx` (`SSM`, `SSM_Low`, `PSSM`, `DSSM`, `VSSM`) samples `ShadowTexture` with point filtering and compares `.x` itself
+    (8 `texldp` taps, `cmp`): no hardware compare, no fetch4. `DF24` therefore needs plain depth sampling.
+  * System D3D9 on the AMD test machine (`IDirect3D9::CheckDeviceFormat`, X8R8G8B8): `D16`/`D24X8`/`D24S8`/`DF16`/`DF24`/`INTZ` as 2D
+    textures with usage 2 yes, as cube maps no; `R16F`/`R32F`/`G16R16F`/`G32R32F` yes (2D and cube). So the reference uses `DF24` for the
+    sun cascades (3 x 1024, `NULL` colour target) and `R16F` cube maps for point lights.
+  * Vulkan HAL: `DF24` = sampled `D32_SFLOAT`, `DF16` = `D16_UNORM` (2D only, like D3D9); `D16`/`D24` textures and `INTZ` stay unsupported
+    (they would need NVIDIA's implicit compare on `tex2Dproj`). Before 2026-10-21 all depth textures were refused and the sun got `R16F`
+    colour maps: 10-bit mantissa depth -> diagonal acne stripes and gaps (docs/images/shadows-r16f-vs-df24.png).
 * Back buffer: `X8R8G8B8` modes, auto depth-stencil (format from `eEDepthFormat`), optional MSAA 2..16 in fullscreen (ConfigDefault `MSAA="0"`).
 * **Vertex formats** [C]: meshes carry a D3D9 `D3DVERTEXELEMENT9` declaration (static 52-byte vertex: position, normal, tangent, 2 colors, UV;
   variants 28/60/68 bytes; a stream-3 FLOAT1 element; FLOAT4 billboards), indices 16 or 32 bit. Hardware instancing via

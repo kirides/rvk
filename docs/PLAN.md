@@ -60,12 +60,15 @@ with rain, water, vegetation, post chain and GUI) render through Vulkan, no D3D9
 (D3D9 state model, `rvk_d3d9test`) -> `vk/` (Vulkan core, `rvk_vktest`); effects through `src/fx` + `hal/vulkan/effect.cpp`.
 Open (next): D3D9 reference comparison at fixed poses; unimplemented slots seen in game (LoadSurfaceFromSurface,
 SaveTextureToFile, FVF buffers); the early `Direct3DCreate9` (Engine.dll+0x74ec0b, adapter enumeration) still loads the
-system d3d9.dll; occlusion queries report "visible"; colour shadow maps only (depth textures reported unsupported);
-performance pass (in game ~79.5 fps on a 120 Hz display with ~5 ms inside vkQueuePresentKHR).
+system d3d9.dll; occlusion queries report "visible"; performance pass (in game ~79.5 fps on a 120 Hz display with ~5 ms
+inside vkQueuePresentKHR).
 Done after M3: vsync. FIFO presents returned at once in the game window (menu ~1500 fps; a plain window is throttled), so
 `d3d9::Device` paces presents to the refresh rate of the window's monitor (`vk::FramePacer`, `[vulkan] max_fps`). HLSL
 constant tables (CTAB via `src/fx`): the engine walks them for sampler masks (Engine.dll 0x6bb440); the unimplemented
-GetConstantCount left its loop count uninitialised and froze the game for up to a minute after loading.
+GetConstantCount left its loop count uninitialised and froze the game for up to a minute after loading. Sun shadows: the
+HAL refused every depth texture, so the engine's format probe (last supported of R32F, R16F, D16, D24X8, DF16, DF24) picked
+**R16F** colour shadow maps (acne stripes, gaps); `DF24` is now a sampled `D32_SFLOAT` depth texture, the D3D9 reference
+path on AMD (engine-gfx.md 5, docs/images/shadows-r16f-vs-df24.png; scenario `rvk_shadows` in risen-spass for the beach view).
 Progress (2026-10-21): Vulkan core in `src/vk/` (context with the 1.3 floor + optional EDS3 / vertex-input-dynamic / robustness2,
 swapchain, frames on a timeline semaphore with deferred deletion and a BDA upload ring, bindless set + pipeline layout, images
 with sync2 layout tracking, pipeline cache for dynamic rendering). `rvk_vktest` renders a translated D3D9 shader pair off-screen
@@ -77,8 +80,9 @@ with validation on and checks every pixel against D3D9's rasterisation rules (ha
 
 ### M4 World parity
 * materials, lightmaps, instancing (`SetStreamSourceFreq`), skinned meshes, SpeedTree, vegetation, particles, decals, sky, water
-  (refraction copy), shadow maps (D16/D24S8 depth compare, DF16/DF24, VSM formats), occlusion queries, D3DX effects (post chain),
-  fonts (`eCAPIFont` glyph data), sprites, fixed-function remnants (generated shaders).
+  (refraction copy), shadow maps (DF24 sun cascades done; point lights use R16F cube maps as on D3D9/AMD; D16/D24 depth
+  compare only if a reference machine needs it; depth bias on D32F is not exact yet: unused by the shadow pass), occlusion
+  queries, D3DX effects (post chain), fonts (`eCAPIFont` glyph data), sprites, fixed-function remnants (generated shaders).
 * **Verify**: screenshot-diff suite at N poses (D3D9 reference vs Vulkan) within thresholds; a play session without validation errors.
 
 ### M5 Robustness and performance

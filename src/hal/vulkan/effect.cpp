@@ -90,6 +90,10 @@ public:
     bEResult OnLostDevice() override { return bEResult_Ok; }
 
     bEResult SetTexture(void* const a0, eCAPITexture* a1) override {
+        if (logThisFrame() && a1 != nullptr) {
+            const auto& d = static_cast<HalTexture*>(a1)->tex()->desc();
+            spdlog::info("hal> Effect::SetTexture {} ({}x{} {})", a0, d.width, d.height, vk::d3dFormatName(d.format));
+        }
         return setTex(a0, a1 != nullptr ? static_cast<HalTexture*>(a1)->tex() : nullptr);
     }
     bEResult SetCubeMap(void* const a0, eCAPICubeMap* a1) override {

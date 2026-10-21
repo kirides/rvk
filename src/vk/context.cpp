@@ -22,6 +22,9 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(VkDebugUtilsMessageSeverityFlagBits
     const bool error = (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0;
     if (error) {
         ctx->noteValidationError();
+    } else if (data->pMessage != nullptr && std::strstr(data->pMessage, "and this write is unused") != nullptr) {
+        // a pixel shader writing oC0 in a depth-only pass (D3D9 NULL colour target, shadow maps): defined, the write is dropped
+        return VK_FALSE;
     }
     // throttle: a broken state can produce a message per draw
     if (logged.fetch_add(1) < 500) {
