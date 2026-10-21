@@ -191,7 +191,8 @@ bool Device::readable(Texture* texture, VkCommandBuffer cmd) {
 bool Device::create(const DeviceOptions& options) {
     options_ = options;
     renderThread_ = GetCurrentThreadId();
-    if (!ctx_.create({options.validation || options.syncValidation, options.adapter, "Risen", options.syncValidation})) {
+    if (!ctx_.create({options.validation || options.syncValidation, options.adapter, "Risen", options.syncValidation,
+                      options.allowRayTracing})) {
         return false;
     }
     // D24S8 depth is optional in Vulkan (AMD has none): fall back to D32S8

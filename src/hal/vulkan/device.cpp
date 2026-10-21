@@ -13,6 +13,7 @@
 #include <spdlog/spdlog.h>
 
 #include "api/capture.h"
+#include "core/caps.h"
 #include "core/exports.h"
 #include "core/settings.h"
 #include "d3d9/fvf.h"
@@ -21,6 +22,7 @@
 #include "hal/vulkan/hal_vulkan.h"
 #include "res/dds.h"
 #include "vk/formats.h"
+#include "vk/raytracing.h"
 
 namespace rvk::hal::vulkan {
 
@@ -111,6 +113,8 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     o.maxFps = rs.maxFps != nullptr ? rs.maxFps->value() : options.maxFps;
     o.cacheDir = options.cacheDir;
     o.logDraws = options.logDraws;
+    // rt.allow is a restart setting: the value the session started with decides (its effective value waits for the report)
+    o.allowRayTracing = rs.rtAllow == nullptr || rs.rtAllow->startValue() != 0.0;
     if (!p.windowed) {
         spdlog::warn("hal: fullscreen requested, running windowed (exclusive fullscreen is not supported yet)");
     }
@@ -121,6 +125,23 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
                  o.vsync, vk::d3dFormatName(o.depthFormat));
     engine::scene::attach(&dev_);  // the frame phase markers (no-ops when they are not installed)
     auto& reg = settings::registry();
+    // capability report (core/caps.h, docs/research/raytracing.md 3): logged once, the overlay's "Capabilities", and the
+    // resolution of settings with requirements (greyed + parity fallback when unmet)
+    {
+        const caps::Report report = dev_.ctx().capabilities(options.pipelineLibraries);
+        for (const auto& line : report.lines()) spdlog::info("caps: {}", line);
+        caps::setCurrent(report);
+        reg.setCapabilities(report);
+    }
+    if (options.rtSelfTest) {
+        const vk::rt::SelfTestResult t = vk::rt::selfTest(dev_.ctx());
+        if (!t.ran) {
+            spdlog::info("rt selftest: skipped: {}", t.detail);
+        } else {
+            spdlog::log(t.pass ? spdlog::level::info : spdlog::level::err, "rt selftest: {} ({:.1f} ms): {}", t.pass ? "PASS" : "FAIL",
+                        t.milliseconds, t.detail);
+        }
+    }
     if (rs.vsync != nullptr) reg.onChange(*rs.vsync, [this](const settings::Setting&) { applyVsync(); }, this);
     if (rs.maxFps != nullptr) {
         reg.onChange(*rs.maxFps, [this](const settings::Setting& s) {
@@ -853,6 +874,23 @@ void HalDevice::logPerf(d3d9::PerfStats p) {
                  p.frames, pct(0.5), pct(0.95), iv.empty() ? 0.0 : static_cast<double>(iv.back()), p.cpuFrameMs / n, p.drawMs / n,
                  p.readbackMs / n, static_cast<double>(p.readbacks) / n, other / n, p.presentMs / n, p.submitMs / n, p.slotWaitMs / n,
                  p.gpuSubmits > 0 ? p.gpuMs / n : 0.0, p.gpuSubmits > 0 ? p.gpuUploadMs / n : 0.0, static_cast<double>(p.gpuSubmits) / n);
+    // GPU memory of the renderer (VMA's heap statistics: cheap); the ray tracing tier's buffer usage flags show up here
+    {
+        const VkPhysicalDeviceMemoryProperties* mp = nullptr;
+        vmaGetMemoryProperties(dev_.ctx().allocator(), &mp);
+        VmaBudget budgets[VK_MAX_MEMORY_HEAPS]{};
+        vmaGetHeapBudgets(dev_.ctx().allocator(), budgets);
+        std::uint64_t blocks = 0, allocs = 0, count = 0, local = 0;
+        for (std::uint32_t h = 0; h < mp->memoryHeapCount; ++h) {
+            blocks += budgets[h].statistics.blockBytes;
+            allocs += budgets[h].statistics.allocationBytes;
+            count += budgets[h].statistics.allocationCount;
+            if ((mp->memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) local += budgets[h].statistics.blockBytes;
+        }
+        spdlog::info("perf: GPU memory {:.1f} MiB in blocks ({:.1f} MiB device-local), {:.1f} MiB in {} allocations; ray tracing tier {}",
+                     static_cast<double>(blocks) / 1048576.0, static_cast<double>(local) / 1048576.0,
+                     static_cast<double>(allocs) / 1048576.0, count, dev_.ctx().features().rayTracing.enabled ? "on" : "off");
+    }
     spdlog::info("perf: draw tags + records {:.3f} ms per frame ({:.0f} ns per draw)", p.drawRecordMs / n,
                  p.draws > 0 ? p.drawRecordMs * 1e6 / static_cast<double>(p.draws) : 0.0);
     // enhancement plumbing (docs/research/injection.md): FrameBlock uploads, injection points that ran passes, their CPU time

@@ -7,6 +7,8 @@
 //   validation: the debug view's GLSL compute shader (embedded at build time) reads a FrameBlock and writes a transient
 //   image, its fullscreen composite multiplies a render target by it; pixels checked. --hazard leaves a barrier out on
 //   purpose (two copies into one buffer) and passes when synchronization validation reports it (proves the check is live)
+//   rvk_vktest --rt: the optional ray tracing tier: BLAS -> TLAS -> GL_EXT_ray_query compute (shaders/test/rt_query.comp),
+//   pixels checked; and a device with rt.allow off (docs/research/raytracing.md). SKIP (exit 0) on a GPU without it
 //
 // Off-screen: assembles a D3D9 vs_3_0/ps_3_0 pair (D3DXAssembleShader), translates it (shader/glsl), renders a full-screen
 // quad that samples a 64x64 gradient with linear filtering into a 64x64 target through the bindless set, buffer-device-address
@@ -27,6 +29,7 @@
 #include <stb_image_write.h>
 
 #include "common/d3dx.h"
+#include "core/caps.h"
 #include "d3d9/scene.h"
 #include "shader/abi.h"
 #include "shader/embedded.h"
@@ -39,6 +42,7 @@
 #include "vk/image.h"
 #include "vk/passes.h"
 #include "vk/pipeline.h"
+#include "vk/raytracing.h"
 
 using namespace rvk;
 
@@ -359,11 +363,59 @@ int passTest(bool hazard) {
     return pass ? 0 : 1;
 }
 
+// the optional ray tracing tier (docs/research/raytracing.md): a device with it (the frame ring then carries the BLAS-input
+// usage: validation checks it), the BLAS -> TLAS -> ray query self-test, and a device with rt.allow off (no tier, a reason,
+// the self-test skipped). A GPU without ray tracing passes with "SKIP" (the floor path is what matters there).
+int rtTest() {
+    int failures = 0;
+    std::uint32_t verrors = 0;
+    {
+        vk::Context ctx;
+        if (!ctx.create({true, -1, "rvk_vktest rt", true})) {
+            return 2;
+        }
+        for (const auto& l : ctx.capabilities(false).lines()) std::printf("%s\n", l.c_str());
+        if (!ctx.features().rayTracing.enabled) {
+            std::printf("SKIP: ray tracing off: %s\n", ctx.features().rayTracing.reason.c_str());
+            return 0;
+        }
+        vk::Frames frames;
+        if (!frames.create(ctx)) {
+            return 2;
+        }
+        frames.destroy();
+        const vk::rt::SelfTestResult t = vk::rt::selfTest(ctx);
+        std::printf("self-test (ray tracing on): %s, %.1f ms: %s\n", t.pass ? "pass" : "FAIL", t.milliseconds, t.detail.c_str());
+        failures += t.pass ? 0 : 1;
+        verrors += ctx.validationErrors();
+        ctx.destroy();
+    }
+    {
+        vk::Context ctx;
+        if (!ctx.create({true, -1, "rvk_vktest rt off", true, false})) {
+            return 2;
+        }
+        const auto& rt = ctx.features().rayTracing;
+        const caps::Report report = ctx.capabilities(false);
+        const bool ok = rt.available && !rt.enabled && rt.reason.find("rt.allow") != std::string::npos &&
+                        report.satisfies(caps::bit(caps::Cap::RayTracingHardware)) && !report.satisfies(caps::bit(caps::Cap::RayQuery));
+        const vk::rt::SelfTestResult t = vk::rt::selfTest(ctx);
+        std::printf("rt.allow off: tier %s (%s), self-test %s\n", rt.enabled ? "ON" : "off", rt.reason.c_str(),
+                    t.ran ? "RAN" : "skipped");
+        failures += ok && !t.ran ? 0 : 1;
+        verrors += ctx.validationErrors();
+        ctx.destroy();
+    }
+    const bool pass = failures == 0 && verrors == 0;
+    std::printf("%s: rt: %d failure(s), %u validation error(s)\n", pass ? "PASS" : "FAIL", failures, verrors);
+    return pass ? 0 : 1;
+}
+
 int main(int argc, char** argv) {
     std::string out = "vktest.png";
     bool validation = true;
     std::string gplDir;
-    bool passes = false, hazard = false;
+    bool passes = false, hazard = false, rtMode = false;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--no-validation") {
@@ -374,6 +426,8 @@ int main(int argc, char** argv) {
             passes = true;
         } else if (a == "--hazard") {
             hazard = true;
+        } else if (a == "--rt") {
+            rtMode = true;
         } else {
             out = a;
         }
@@ -383,6 +437,9 @@ int main(int argc, char** argv) {
     }
     if (passes) {
         return passTest(hazard);
+    }
+    if (rtMode) {
+        return rtTest();
     }
     if (!devtools::D3DX::get().available()) {
         std::printf("d3dx9_39.dll not available\n");

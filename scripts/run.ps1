@@ -27,6 +27,8 @@ param(
     [switch]$Perf,
     # [debug] perf_frame: log the GPU time of every render pass of this frame (implies -Perf)
     [int]$PerfFrame = 0,
+    # [debug] rt_selftest: BLAS + TLAS + a ray query compute shader at device creation ("rt selftest" in rvk.log)
+    [switch]$RtSelfTest,
     # frame numbers whose back buffer the Vulkan renderer saves to bin/rvk/screenshots/frame_<n>.png, e.g. 300,900
     [string]$Screenshots = '',
     # eCApplication::Draw calls at which the engine's own snapshot is taken (BMP in <copy>\localappdata\...\Risen\ScreenShots)
@@ -68,7 +70,7 @@ param(
     [switch]$AllowFocus,
     [string]$Filter = '\[error\]|\[warn\]|\[test\] (FAIL|finished|deadline)',
     # regex of rvk.log lines to print after the run ('' = none, '.' = all)
-    [string]$RvkFilter = '\[(warning|error|critical)\]|probe|  \[|missing|InitializeAdmin|ms_pAPI|Direct3DCreate9|hooks|mode =|selftest|snapshot|overlay|settings'
+    [string]$RvkFilter = '\[(warning|error|critical)\]|probe|  \[|missing|InitializeAdmin|ms_pAPI|Direct3DCreate9|hooks|mode =|selftest|snapshot|overlay|settings|caps:|ray tracing'
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -100,6 +102,7 @@ if ($NoRenderer) {
         '[debug]', "screenshot_frames = [$Screenshots]", "log_draws = $LogDraws", "log_frame = $LogFrame", "snapshot_frames = [$Snapshots]",
         "dump_saved_textures = $($DumpSavedTextures.IsPresent.ToString().ToLower())",
         "perf = $($Perf.IsPresent.ToString().ToLower())", "perf_frame = $PerfFrame",
+        "rt_selftest = $($RtSelfTest.IsPresent.ToString().ToLower())",
         "overlay_in_screenshots = $($OverlayInScreenshots.IsPresent.ToString().ToLower())",
         "commands = [$(($Commands | ForEach-Object { '"' + ($_ -replace '"', '') + '"' }) -join ', ')]",
         '[overlay]', "enabled = $((-not $NoOverlay.IsPresent).ToString().ToLower())"

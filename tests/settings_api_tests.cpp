@@ -14,7 +14,7 @@ TEST(settings_api_info_get_set) {
     settings::Registry reg;
     settings::registerRendererSettings(reg);
     const std::uint32_t n = api::settingCount(reg);
-    CHECK(n == 10);
+    CHECK(n == 11);
     struct rvk_setting_info info{};
     CHECK(api::settingInfo(reg, 0, &info, sizeof(info)) == 80);
     CHECK(info.size == 80);
@@ -46,6 +46,11 @@ TEST(settings_api_info_get_set) {
     CHECK(api::settingSet(reg, "vulkan.adapter", "1", 0) == RVK_SETTING_LOCKED);
     CHECK(api::settingInfo(reg, 2, &info, sizeof(info)) == 80);
     CHECK((info.flags & (RVK_SETTING_RESTART | RVK_SETTING_IS_LOCKED)) == (RVK_SETTING_RESTART | RVK_SETTING_IS_LOCKED));
+    // capability resolution: rt.allow needs ray tracing hardware; this registry has no device report
+    CHECK(api::settingInfo(reg, n - 1, &info, sizeof(info)) == 80);
+    CHECK(std::string(info.key) == "rt.allow");
+    CHECK((info.flags & RVK_SETTING_UNAVAILABLE) != 0);
+    CHECK(api::settingGet(reg, "rt.allow", buf, sizeof(buf)) == 4);  // the request ("true") is kept
 }
 
 TEST(settings_api_ab) {

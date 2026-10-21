@@ -21,6 +21,7 @@
 
 #include "api/capture.h"
 #include "api/settings_api.h"
+#include "core/caps.h"
 #include "overlay/overlay.h"
 #include "rvk_api.h"
 
@@ -142,7 +143,8 @@ uint32_t rvk_capabilities() {
     if (rvk::api::mode() != rvk::Mode::Vulkan) {
         return 0u;
     }
-    return RVK_CAP_SCREENSHOT | RVK_CAP_STATS | (rvk::overlay::Overlay::instance() != nullptr ? RVK_CAP_OVERLAY : 0u);
+    return RVK_CAP_SCREENSHOT | RVK_CAP_STATS | (rvk::overlay::Overlay::instance() != nullptr ? RVK_CAP_OVERLAY : 0u) |
+           (rvk::caps::current().satisfies(rvk::caps::bit(rvk::caps::Cap::RayQuery)) ? RVK_CAP_RAY_QUERY : 0u);
 }
 
 uint32_t rvk_screenshot(const wchar_t* path, uint32_t wait_frames, uint32_t flags) {

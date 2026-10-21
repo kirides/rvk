@@ -118,7 +118,7 @@ std::string_view toString(Result r) {
 }
 
 std::string_view Setting::asEnum() const {
-    const auto i = static_cast<std::size_t>(value());
+    const auto i = static_cast<std::size_t>(effective());
     return i < spec_.options.size() ? std::string_view(spec_.options[i]) : std::string_view();
 }
 
@@ -141,11 +141,18 @@ Setting& Registry::add(Spec spec) {
         def = 0.0;
     }
     spec.defaultValue = def;
+    double fallback = spec.unmetValue.value_or(def);
+    if (!normalise(spec, fallback)) fallback = def;
     auto s = std::unique_ptr<Setting>(new Setting(std::move(spec)));
     s->value_ = def;
     s->start_ = def;
     s->stored_ = def;
     s->other_ = def;
+    s->fallback_ = fallback;
+    if (s->spec_.requirements != 0) {
+        s->unmetReason_ = resolve(s->spec_, caps_);
+        s->unmet_ = !s->unmetReason_.empty();
+    }
     settings_.push_back(std::move(s));
     return *settings_.back();
 }
@@ -263,6 +270,46 @@ void Registry::lock(Setting& s, double value, std::string reason) {
 std::string Registry::lockReason(const Setting& s) const {
     const std::lock_guard lock(mutex_);
     return s.lockReason_;
+}
+
+// ---- capability resolution ------------------------------------------------------------------------------------------
+
+std::string Registry::resolve(const Spec& spec, const caps::Report& report) { return report.unmetReason(spec.requirements); }
+
+void Registry::resolveLocked(Setting& s) {
+    const double before = s.effective();
+    s.unmetReason_ = resolve(s.spec_, caps_);
+    s.unmet_ = !s.unmetReason_.empty();
+    if (s.effective() != before) changedLocked(s);
+}
+
+void Registry::setCapabilities(const caps::Report& report) {
+    std::vector<std::string> notes;
+    {
+        const std::lock_guard lock(mutex_);
+        caps_ = report;
+        for (auto& s : settings_) {
+            if (s->spec_.requirements == 0) continue;
+            resolveLocked(*s);
+            if (!s->available() && s->value() != s->fallback_) {
+                notes.push_back(std::format("settings: {} = {} requested, applies as {}: {}", s->spec_.key,
+                                            formatValue(s->spec_, s->value()), formatValue(s->spec_, s->fallback_),
+                                            s->unmetReason_));
+            }
+        }
+        ++generation_;
+    }
+    for (const auto& n : notes) spdlog::info("{}", n);
+}
+
+caps::Report Registry::capabilities() const {
+    const std::lock_guard lock(mutex_);
+    return caps_;
+}
+
+std::string Registry::unavailableReason(const Setting& s) const {
+    const std::lock_guard lock(mutex_);
+    return s.unmetReason_;
 }
 
 // ---- callbacks ------------------------------------------------------------------------------------------------------
@@ -644,6 +691,19 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .options = {"off", "depth", "tint"},
         .optionLabels = {"Off", "Depth + world grid", "Tint"},
+    });
+    r.rtAllow = &reg.add({
+        .key = "rt.allow",
+        .label = "Allow ray tracing",
+        .category = "Ray tracing",
+        .description = "Turn on the GPU's ray tracing support (acceleration structures + ray query) when the game starts: "
+                       "ray-traced enhancements need it. It does not change the image by itself; off keeps the extensions "
+                       "disabled (for drivers with problems). Greyed out when the GPU or driver has no ray tracing.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::Restart,
+        .requirements = caps::bit(caps::Cap::RayTracingHardware),
+        .unmetValue = 0,
     });
     if (&reg == &registry()) g_renderer = r;
     return r;

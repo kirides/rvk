@@ -62,6 +62,7 @@ set(RVK_SHADERS
     debug/inject_view.frag
     test/abi_layout.comp
     test/abi_pass_layout.comp
+    test/rt_query.comp
 )
 set(RVK_SHADER_OUTPUTS)
 set(RVK_SHADER_INCLUDES "")
@@ -105,6 +106,8 @@ add_library(rvk_core STATIC
     src/core/config.h
     src/core/exports.cpp
     src/core/exports.h
+    src/core/caps.cpp
+    src/core/caps.h
     src/core/hooks.cpp
     src/core/hooks.h
     src/core/log.cpp
@@ -201,6 +204,8 @@ add_library(rvk_core STATIC
     src/vk/presenter.h
     src/vk/probe.cpp
     src/vk/probe.h
+    src/vk/raytracing.cpp
+    src/vk/raytracing.h
     src/vk/swapchain.cpp
     src/vk/swapchain.h
     src/vk/vk.h
@@ -282,7 +287,7 @@ rvk_warnings(rvk_d3d9test)
 # tests
 # ---------------------------------------------------------------------------------------------
 if(RVK_BUILD_TESTS)
-    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp tests/api_tests.cpp tests/fvf_tests.cpp tests/settings_tests.cpp tests/settings_api_tests.cpp tests/scene_tests.cpp tests/draws_tests.cpp tests/inject_tests.cpp)
+    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp tests/api_tests.cpp tests/fvf_tests.cpp tests/settings_tests.cpp tests/settings_api_tests.cpp tests/scene_tests.cpp tests/draws_tests.cpp tests/inject_tests.cpp tests/caps_tests.cpp)
     target_link_libraries(rvk_tests PRIVATE rvk_core SPIRV-Tools-static)
     rvk_warnings(rvk_tests)
     add_test(NAME rvk_tests COMMAND rvk_tests)
@@ -291,6 +296,8 @@ if(RVK_BUILD_TESTS)
     set_tests_properties(rvk_vktest PROPERTIES LABELS gpu)
     add_test(NAME rvk_vktest_passes COMMAND rvk_vktest --passes)
     set_tests_properties(rvk_vktest_passes PROPERTIES LABELS gpu)
+    add_test(NAME rvk_vktest_rt COMMAND rvk_vktest --rt)
+    set_tests_properties(rvk_vktest_rt PROPERTIES LABELS gpu)
     add_test(NAME rvk_d3d9test COMMAND rvk_d3d9test)
     set_tests_properties(rvk_d3d9test PROPERTIES LABELS gpu)
 endif()

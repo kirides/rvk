@@ -1,0 +1,45 @@
+#version 460
+// Ray query self-test (src/vk/raytracing.cpp rt::selfTest, rvk_vktest --rt, [debug] rt_selftest): orthographic rays along +z
+// through a TLAS given by its device address; non-opaque candidates pass a stand-in alpha test (barycentric u < 0.5).
+// Output per pixel: 0 = miss, else bit 31 | primitive << 16 | round(t * 4) << 8 | (custom index + 1).
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference : require
+// The TLAS address arrives as a uvec2 (low, high): accelerationStructureEXT(uvec2) needs no shaderInt64 feature, which the
+// renderer does not enable (uint64_t would declare the Int64 capability).
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 4) writeonly buffer RtOut {
+    uint px[];
+};
+
+layout(push_constant, std430) uniform Push {
+    uvec2 tlas;
+    RtOut outBuf;
+    uint width;
+    uint height;
+} pc;
+
+void main() {
+    const uvec2 id = gl_GlobalInvocationID.xy;
+    if (id.x >= pc.width || id.y >= pc.height) return;
+    const vec2 p = (vec2(id) + 0.5) / vec2(pc.width, pc.height) * 2.0 - 1.0;
+
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, accelerationStructureEXT(pc.tlas), gl_RayFlagsNoneEXT, 0xFF, vec3(p, -10.0), 0.0,
+                          vec3(0.0, 0.0, 1.0), 100.0);
+    while (rayQueryProceedEXT(rq)) {
+        if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT) {
+            const vec2 bary = rayQueryGetIntersectionBarycentricsEXT(rq, false);
+            if (bary.x < 0.5) rayQueryConfirmIntersectionEXT(rq);
+        }
+    }
+    uint r = 0u;
+    if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+        const uint idx = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true));
+        const uint t4 = uint(round(rayQueryGetIntersectionTEXT(rq, true) * 4.0));
+        const uint prim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(rq, true));
+        r = (1u << 31) | (prim << 16) | (t4 << 8) | (idx + 1u);
+    }
+    pc.outBuf.px[id.y * pc.width + id.x] = r;
+}

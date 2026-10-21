@@ -51,6 +51,8 @@ param(
     [switch]$Validation,
     # Vulkan run: present-rate cap (run.ps1 -MaxFps), e.g. the D3D9 run's frame rate when frame-time-driven effects matter
     [double]$MaxFps = 0,
+    # Vulkan run: player settings (run.ps1 -Setting), e.g. 'rt.allow=false'
+    [string[]]$Setting = @(),
     [switch]$NoImages
 )
 $ErrorActionPreference = 'Stop'
@@ -155,7 +157,7 @@ function Invoke-GameRun([string]$tag, [string]$dir, [bool]$d3d9) {
         GameDir = $GameDir; Instance = $Instance; Mods = @('rvkcompare'); Scenario = 'rvkcompare'; WaitForResult = $true
         Seconds = $Seconds; Param = $p; WindowSize = $WindowSize; Config = $snapConfig
     }
-    if ($d3d9) { $runArgs.NoRenderer = $true } else { $runArgs.Mode = 'vulkan'; $runArgs.MaxFps = $MaxFps; if ($Validation) { $runArgs.Validation = $true } }
+    if ($d3d9) { $runArgs.NoRenderer = $true } else { $runArgs.Mode = 'vulkan'; $runArgs.MaxFps = $MaxFps; if ($Validation) { $runArgs.Validation = $true }; if ($Setting) { $runArgs.Setting = $Setting } }
     Write-Host "==== run $tag ($(if ($d3d9) { 'game D3D9' } else { 'Vulkan' })) -> $dir"
     $t0 = Get-Date
     & (Join-Path $PSScriptRoot 'run.ps1') @runArgs | Out-Host

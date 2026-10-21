@@ -391,6 +391,12 @@ Buffer::Binding Buffer::gpu() {
         VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
         bci.size = std::max<std::uint32_t>(size_, 4);
         bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | (index_ ? VK_BUFFER_USAGE_INDEX_BUFFER_BIT : VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+        if (dev_.ctx().features().rayTracing.enabled) {
+            // ray tracing tier on (rt.allow, docs/research/raytracing.md 2): allocated once as a possible BLAS build input
+            // (positions / indices) that shaders can also read through its address; nothing changes without the tier
+            bci.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+        }
         VmaAllocationCreateInfo aci{};
         aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
         VkBuffer nb = VK_NULL_HANDLE;

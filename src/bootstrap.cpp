@@ -166,6 +166,7 @@ void detourInitializeAdmin(void* self, int apiType) {
         vo.overlayInScreenshots = g_config.overlayInScreenshots;
         vo.overlayCommands = g_config.commands;
         vo.settingsFile = paths::dataDir() / L"settings.toml";
+        vo.rtSelfTest = g_config.rtSelfTest;
         *static_cast<void**>(s.gfxAdminApiInstance) = static_cast<hal::eCAPIInstance*>(new hal::vulkan::HalInstance(vo));
         g_initializeAdmin.original(self, 4);
         *reinterpret_cast<int*>(static_cast<char*>(self) + 0x648) = apiType;

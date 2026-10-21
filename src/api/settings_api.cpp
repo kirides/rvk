@@ -43,7 +43,7 @@ std::int32_t settingInfo(settings::Registry& reg, std::uint32_t index, struct rv
     i.flags = ((sp.flags & settings::Flag::Restart) != 0 ? RVK_SETTING_RESTART : 0u) |
               ((sp.flags & settings::Flag::NoAB) != 0 ? RVK_SETTING_NO_AB : 0u) |
               ((sp.flags & settings::Flag::Hidden) != 0 ? RVK_SETTING_HIDDEN : 0u) | (s.locked() ? RVK_SETTING_IS_LOCKED : 0u) |
-              (s.restartPending() ? RVK_SETTING_RESTART_PENDING : 0u);
+              (s.restartPending() ? RVK_SETTING_RESTART_PENDING : 0u) | (!s.available() ? RVK_SETTING_UNAVAILABLE : 0u);
     i.option_count = static_cast<std::uint32_t>(sp.options.size());
     i.key = sp.key.c_str();
     i.label = sp.label.c_str();

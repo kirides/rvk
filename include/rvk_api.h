@@ -26,6 +26,7 @@ extern "C" {
 #define RVK_CAP_STABLE_CAPTURE 0x2u  /* RVK_SHOT_STABLE (not implemented yet: never set) */
 #define RVK_CAP_STATS 0x4u           /* rvk_stats has live renderer numbers */
 #define RVK_CAP_OVERLAY 0x8u         /* the in-game overlay exists (rvk_overlay) */
+#define RVK_CAP_RAY_QUERY 0x10u      /* the ray tracing tier (acceleration structures + ray query) is enabled this session */
 
 /* rvk_screenshot() flags: none defined yet. Unknown bits make the request fail (returns 0), so a caller can probe for a
    future flag by trying it. Reserved: 0x1 RVK_SHOT_STABLE, 0x2 RVK_SHOT_DUMP_RTS (reference-compare.md 4.2). */
@@ -112,6 +113,7 @@ int32_t rvk_stats(struct rvk_stats* out, uint32_t size);
 #define RVK_SETTING_HIDDEN 0x4u           /* not shown in the overlay */
 #define RVK_SETTING_IS_LOCKED 0x8u        /* config.toml overrides it this session */
 #define RVK_SETTING_RESTART_PENDING 0x10u /* changed since the start; needs a restart to take effect */
+#define RVK_SETTING_UNAVAILABLE 0x20u     /* a capability it requires is missing: it applies as its parity value (overlay: greyed) */
 
 /* Versioned by size like rvk_stats. Strings are UTF-8, NUL-terminated and owned by the DLL (valid until it unloads). */
 struct rvk_setting_info {

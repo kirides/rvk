@@ -48,6 +48,9 @@ struct Config {
     bool dumpSavedTextures = false;
     bool perf = false;            // (vulkan) GPU timestamps + CPU timings, a "perf:" line in rvk.log every 5 s
     std::uint32_t perfFrame = 0;  // (vulkan) log the GPU time of every render pass of this frame (needs perf)
+    // (vulkan) build a tiny BLAS / TLAS and trace it with ray query at device creation (vk::rt::selfTest; "rt selftest" in
+    // rvk.log); needs the ray tracing tier (rt.allow + a GPU with ray query)
+    bool rtSelfTest = false;
     // (vulkan) the overlay is drawn into the back buffer instead of the swapchain image, so screenshots (rvk_screenshot,
     // screenshot_frames, the engine snapshot) include it; default: captures never show the overlay
     bool overlayInScreenshots = false;

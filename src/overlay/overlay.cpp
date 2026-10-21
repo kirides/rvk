@@ -611,7 +611,10 @@ void Overlay::buildSettingsWindow() {
             if (sp.category != cat || (sp.flags & settings::Flag::Hidden) != 0) continue;
             ImGui::PushID(sp.key.c_str());
             const bool locked = s->locked();
-            if (locked) ImGui::BeginDisabled();
+            // capability resolution (Spec::requirements): greyed, showing the value that applies, with the reason
+            const bool unavailable = !s->available();
+            const bool disabled = locked || unavailable;
+            if (disabled) ImGui::BeginDisabled();
             ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.45f);
             switch (sp.type) {
             case settings::Type::Bool: {
@@ -639,7 +642,7 @@ void Overlay::buildSettingsWindow() {
                 const auto label = [&](std::size_t i) {
                     return i < sp.optionLabels.size() ? sp.optionLabels[i].c_str() : sp.options[i].c_str();
                 };
-                const auto cur = static_cast<std::size_t>(s->value());
+                const auto cur = static_cast<std::size_t>(s->effective());
                 if (ImGui::BeginCombo(sp.label.c_str(), label(cur))) {
                     for (std::size_t i = 0; i < sp.options.size(); ++i) {
                         if (ImGui::Selectable(label(i), i == cur)) reg.set(*s, static_cast<double>(i));
@@ -649,12 +652,23 @@ void Overlay::buildSettingsWindow() {
                 break;
             }
             }
-            if (locked) ImGui::EndDisabled();
+            if (disabled) ImGui::EndDisabled();
+            const std::string unavailableReason = unavailable ? reg.unavailableReason(*s) : std::string();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled)) {
-                ImGui::SetTooltip("%s\n\n%s, default %s", sp.description.c_str(), sp.key.c_str(),
-                                  settings::Registry::formatValue(sp, sp.defaultValue).c_str());
+                if (unavailable) {
+                    ImGui::SetTooltip("%s\n\nUnavailable: %s\nYour choice (%s) is kept and applies once this is available.\n\n"
+                                      "%s, default %s",
+                                      sp.description.c_str(), unavailableReason.c_str(), reg.text(*s).c_str(), sp.key.c_str(),
+                                      settings::Registry::formatValue(sp, sp.defaultValue).c_str());
+                } else {
+                    ImGui::SetTooltip("%s\n\n%s, default %s", sp.description.c_str(), sp.key.c_str(),
+                                      settings::Registry::formatValue(sp, sp.defaultValue).c_str());
+                }
             }
-            if (locked) {
+            if (unavailable) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(unavailable)");
+            } else if (locked) {
                 ImGui::SameLine();
                 ImGui::TextDisabled("(set by config.toml)");
             } else if (!s->isDefault()) {
@@ -669,6 +683,49 @@ void Overlay::buildSettingsWindow() {
                 ImGui::TextDisabled("(after a restart)");
             }
             ImGui::PopID();
+        }
+    }
+
+    // ---- capabilities (core/caps.h, docs/research/raytracing.md 3) ----
+    if (ImGui::CollapsingHeader("Capabilities")) {
+        const caps::Report report = reg.capabilities();
+        if (!report.known) {
+            ImGui::TextDisabled("no Vulkan device");
+        } else {
+            ImGui::Text("GPU: %s", report.gpu.c_str());
+            ImGui::Text("Driver: %s", report.driver.c_str());
+            ImGui::Text("Vulkan: %s", report.api.c_str());
+            if (ImGui::BeginTable("##caps", 2, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
+                ImGui::TableSetupColumn("feature", ImGuiTableColumnFlags_WidthStretch, 0.45f);
+                ImGui::TableSetupColumn("state", ImGuiTableColumnFlags_WidthStretch, 0.55f);
+                ImGui::TableHeadersRow();
+                for (std::size_t i = 0; i < caps::kCount; ++i) {
+                    const auto c = static_cast<caps::Cap>(i);
+                    const caps::Entry& e = report[c];
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    ImGui::TextUnformatted(std::string(caps::label(c)).c_str());
+                    if (!e.detail.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) ImGui::SetTooltip("%s", e.detail.c_str());
+                    ImGui::TableNextColumn();
+                    if (e.enabled) {
+                        ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1.0f), "enabled");
+                    } else {
+                        ImGui::TextColored(e.available ? ImVec4(1.0f, 0.8f, 0.3f, 1.0f) : ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "%s",
+                                           e.available ? "available, off" : "unavailable");
+                        if (!e.reason.empty()) {
+                            ImGui::PushTextWrapPos(0.0f);
+                            ImGui::TextDisabled("%s", e.reason.c_str());
+                            ImGui::PopTextWrapPos();
+                        }
+                    }
+                }
+                ImGui::EndTable();
+            }
+            for (const auto& [k, v] : report.properties) {
+                ImGui::PushTextWrapPos(0.0f);
+                ImGui::TextDisabled("%s: %s", k.c_str(), v.c_str());
+                ImGui::PopTextWrapPos();
+            }
         }
     }
 

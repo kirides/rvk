@@ -7,6 +7,8 @@
 #include <mutex>
 #include <string>
 
+#include "core/caps.h"
+#include "vk/probe.h"
 #include "vk/vk.h"
 
 namespace rvk::vk {
@@ -16,6 +18,21 @@ struct ContextOptions {
     int adapter = -1;         // physical device index, -1 = best discrete GPU
     const char* appName = "Risen";
     bool syncValidation = false;  // the validation layer's synchronization validation (VkValidationFeaturesEXT)
+    // enable the ray tracing tier (acceleration structures + ray query + optional position fetch / opacity micromaps) when
+    // the device has it (player setting rt.allow, read at device creation; docs/research/raytracing.md)
+    bool allowRayTracing = true;
+};
+
+// The optional ray tracing tier of the device (docs/research/raytracing.md 1).
+struct RayTracingFeatures {
+    bool available = false;  // the device offers the tier (acceleration structures + ray query + deferred host operations)
+    bool enabled = false;    // enabled on this device: buffers get the BLAS-input usage, ray query shaders may be created
+    bool positionFetch = false;    // VK_KHR_ray_tracing_position_fetch enabled
+    bool opacityMicromap = false;  // VK_EXT_opacity_micromap enabled
+    bool maintenance1 = false;     // VK_KHR_ray_tracing_maintenance1 enabled
+    std::string reason;            // why not enabled (empty when enabled)
+    std::uint32_t minScratchOffsetAlignment = 0;  // acceleration structure build scratch alignment
+    std::uint64_t maxGeometryCount = 0, maxInstanceCount = 0, maxPrimitiveCount = 0;
 };
 
 // Optional device features that were found and enabled.
@@ -30,6 +47,7 @@ struct DeviceFeatures {
     float maxAnisotropy = 1.0f;
     bool hostQueryReset = false;  // vkResetQueryPool from the host (GPU timestamps of [debug] perf)
     float timestampPeriod = 0.0f; // ns per timestamp tick; 0 = the queue cannot write timestamps
+    RayTracingFeatures rayTracing;
 };
 
 class Context {
@@ -59,6 +77,9 @@ public:
     const VkPhysicalDeviceProperties& properties() const { return props_; }
     const DeviceFeatures& features() const { return features_; }
     const std::string& deviceName() const { return deviceName_; }
+    // the capability report of this device (core/caps.h): GPU, driver, optional features available / enabled + reasons.
+    // `pipelineLibrariesInUse`: [vulkan] pipeline_libraries (the device enables the extension; the pipeline cache decides)
+    caps::Report capabilities(bool pipelineLibrariesInUse) const;
 
     // validation messages of severity error seen so far (tests assert 0)
     std::uint32_t validationErrors() const { return validationErrors_.load(); }
@@ -74,7 +95,7 @@ public:
 private:
     bool createInstance(const ContextOptions& options);
     bool pickPhysicalDevice(const ContextOptions& options);
-    bool createDevice();
+    bool createDevice(bool withRayTracing);
     bool createAllocator();
 
     VkInstance instance_ = VK_NULL_HANDLE;
@@ -87,6 +108,7 @@ private:
     VkPhysicalDeviceProperties props_{};
     DeviceFeatures features_;
     std::string deviceName_;
+    DeviceReport report_;  // the probe of the chosen device (availability, driver, ray tracing limits)
     bool debugUtils_ = false;
     std::mutex queueMutex_;
     std::atomic<std::uint32_t> validationErrors_{0};

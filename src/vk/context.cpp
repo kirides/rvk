@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <format>
 #include <vector>
 
 #include <spdlog/spdlog.h>
@@ -69,9 +70,46 @@ bool Context::create(const ContextOptions& options) {
         spdlog::error("vulkan: loader version {} < 1.3", versionString(volkGetInstanceVersion()));
         return false;
     }
-    if (!createInstance(options) || !pickPhysicalDevice(options) || !createDevice() || !createAllocator()) {
+    if (!createInstance(options) || !pickPhysicalDevice(options)) {
         destroy();
         return false;
+    }
+    // the optional ray tracing tier (docs/research/raytracing.md 1): only when the device has it and rt.allow is on; a device
+    // creation that fails with it is retried without (the floor path must not depend on an optional tier)
+    RayTracingFeatures& rt = features_.rayTracing;
+    bool withRt = false;
+    if (!rt.available) {
+        rt.reason = !report_.rt.extensionsMissing.empty()
+                        ? "the GPU / driver has no " + report_.rt.extensionsMissing.front()
+                        : !report_.rt.featuresMissing.empty() ? "the driver does not support " + report_.rt.featuresMissing.front()
+                                                              : "not supported";
+    } else if (!options.allowRayTracing) {
+        rt.reason = "disabled by the setting rt.allow (takes effect after a restart)";
+    } else {
+        withRt = true;
+    }
+    bool deviceOk = createDevice(withRt);
+    if (!deviceOk && withRt) {
+        spdlog::warn("vulkan: device creation with the ray tracing extensions failed: retrying without them");
+        rt.reason = "vkCreateDevice failed with the ray tracing extensions";
+        withRt = false;
+        deviceOk = createDevice(false);
+    }
+    rt.enabled = withRt && deviceOk;
+    if (!rt.enabled) {
+        rt.positionFetch = rt.opacityMicromap = rt.maintenance1 = false;
+    }
+    if (!deviceOk || !createAllocator()) {
+        destroy();
+        return false;
+    }
+    if (rt.enabled) {
+        spdlog::info("vulkan: ray tracing enabled (acceleration structures + ray query; position fetch {}, opacity micromaps {}, "
+                     "maintenance1 {}; scratch alignment {}, max primitives {}, max instances {}, max geometries {})",
+                     rt.positionFetch, rt.opacityMicromap, rt.maintenance1, rt.minScratchOffsetAlignment, rt.maxPrimitiveCount,
+                     rt.maxInstanceCount, rt.maxGeometryCount);
+    } else {
+        spdlog::info("vulkan: ray tracing off: {}", rt.reason);
     }
     spdlog::info("vulkan: device '{}' ready (api {}, eds3={}, vertexInputDynamic={}, gpl={}, anisotropy={})", deviceName_,
                  versionString(props_.apiVersion), features_.extendedDynamicState3, features_.vertexInputDynamicState,
@@ -204,6 +242,16 @@ bool Context::pickPhysicalDevice(const ContextOptions& options) {
     features_.graphicsPipelineLibrary = rep.graphicsPipelineLibrary;
     features_.memoryBudget = rep.memoryBudget;
     features_.deviceFault = rep.deviceFault;
+    report_ = rep;
+    RayTracingFeatures& rt = features_.rayTracing;
+    rt.available = rep.rt.tier();
+    rt.positionFetch = rep.rt.positionFetch;      // reset in create() when the tier is not enabled
+    rt.opacityMicromap = rep.rt.opacityMicromap;
+    rt.maintenance1 = rep.rt.maintenance1;
+    rt.minScratchOffsetAlignment = rep.rt.minScratchOffsetAlignment;
+    rt.maxGeometryCount = rep.rt.maxGeometryCount;
+    rt.maxInstanceCount = rep.rt.maxInstanceCount;
+    rt.maxPrimitiveCount = rep.rt.maxPrimitiveCount;
 
     std::uint32_t qn = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(physical_, &qn, nullptr);
@@ -220,7 +268,7 @@ bool Context::pickPhysicalDevice(const ContextOptions& options) {
     return false;
 }
 
-bool Context::createDevice() {
+bool Context::createDevice(bool withRayTracing) {
     std::uint32_t n = 0;
     vkEnumerateDeviceExtensionProperties(physical_, nullptr, &n, nullptr);
     std::vector<VkExtensionProperties> exts(n);
@@ -336,6 +384,41 @@ bool Context::createDevice() {
         *tail = &fault;
         tail = &fault.pNext;
     }
+    // ray tracing tier (bufferDeviceAddress is already on): acceleration structures + ray query, plus the optional extras
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR as{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
+    VkPhysicalDeviceRayQueryFeaturesKHR rq{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
+    VkPhysicalDeviceRayTracingPositionFetchFeaturesKHR pf{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_POSITION_FETCH_FEATURES_KHR};
+    VkPhysicalDeviceOpacityMicromapFeaturesEXT omm{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_FEATURES_EXT};
+    VkPhysicalDeviceRayTracingMaintenance1FeaturesKHR m1{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_MAINTENANCE_1_FEATURES_KHR};
+    if (withRayTracing) {
+        const RayTracingFeatures& rt = features_.rayTracing;
+        enabled.push_back(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+        enabled.push_back(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
+        enabled.push_back(VK_KHR_RAY_QUERY_EXTENSION_NAME);
+        as.accelerationStructure = VK_TRUE;
+        rq.rayQuery = VK_TRUE;
+        *tail = &as;
+        as.pNext = &rq;
+        tail = &rq.pNext;
+        if (rt.positionFetch) {
+            enabled.push_back(VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME);
+            pf.rayTracingPositionFetch = VK_TRUE;
+            *tail = &pf;
+            tail = &pf.pNext;
+        }
+        if (rt.opacityMicromap) {
+            enabled.push_back(VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME);
+            omm.micromap = VK_TRUE;
+            *tail = &omm;
+            tail = &omm.pNext;
+        }
+        if (rt.maintenance1) {
+            enabled.push_back(VK_KHR_RAY_TRACING_MAINTENANCE_1_EXTENSION_NAME);
+            m1.rayTracingMaintenance1 = VK_TRUE;
+            *tail = &m1;
+            tail = &m1.pNext;
+        }
+    }
 
     const float priority = 1.0f;
     VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
@@ -414,6 +497,58 @@ void Context::destroy() {
         vkDestroyInstance(instance_, nullptr);
         instance_ = VK_NULL_HANDLE;
     }
+}
+
+caps::Report Context::capabilities(bool pipelineLibrariesInUse) const {
+    using caps::Cap;
+    caps::Report r;
+    r.known = device_ != VK_NULL_HANDLE;
+    r.gpu = deviceName_;
+    r.driver = report_.driverName.empty() ? std::format("version 0x{:x}", props_.driverVersion)
+                                          : std::format("{} {}", report_.driverName, report_.driverInfo);
+    r.api = versionString(props_.apiVersion);
+    const auto set = [&](Cap c, bool available, bool enabled, std::string reason, std::string detail = {}) {
+        caps::Entry& e = r[c];
+        e.available = available;
+        e.enabled = enabled;
+        e.reason = enabled ? std::string() : (!reason.empty() ? std::move(reason) : available ? "not used" : "the GPU / driver has no support");
+        e.detail = std::move(detail);
+    };
+    const RayTracingFeatures& rt = features_.rayTracing;
+    const auto& prt = report_.rt;
+    const std::string rtOff = rt.enabled ? std::string() : rt.reason;
+    set(Cap::RayTracingHardware, rt.available, rt.available, rt.available ? std::string() : rt.reason,
+        "VK_KHR_acceleration_structure + VK_KHR_ray_query + VK_KHR_deferred_host_operations");
+    set(Cap::RayQuery, rt.available, rt.enabled, rtOff);
+    const auto extra = [&](Cap c, bool hw, bool on, const char* ext) {
+        set(c, hw, on, !hw ? std::format("the GPU / driver has no {}", ext) : !rt.enabled ? "ray tracing is off: " + rt.reason : "",
+            ext);
+    };
+    extra(Cap::PositionFetch, prt.positionFetch, rt.enabled && rt.positionFetch, VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME);
+    extra(Cap::OpacityMicromap, prt.opacityMicromap, rt.enabled && rt.opacityMicromap, VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME);
+    set(Cap::RayTracingPipeline, prt.pipeline, false,
+        prt.pipeline ? "information only: the renderer uses ray query" : "the GPU / driver has no VK_KHR_ray_tracing_pipeline",
+        prt.pipeline ? std::format("max recursion {}, handle size {}", prt.maxRayRecursionDepth, prt.shaderGroupHandleSize) : "");
+    set(Cap::ExtendedDynamicState3, report_.extendedDynamicState3, features_.extendedDynamicState3,
+        report_.extendedDynamicState3 ? "the needed blend / write-mask subset is missing" : "");
+    set(Cap::VertexInputDynamicState, report_.vertexInputDynamicState, features_.vertexInputDynamicState, "");
+    set(Cap::GraphicsPipelineLibrary, report_.graphicsPipelineLibrary, features_.graphicsPipelineLibrary && pipelineLibrariesInUse,
+        features_.graphicsPipelineLibrary ? "off: config.toml [vulkan] pipeline_libraries (AMD driver crash, docs/PLAN.md M5)" : "");
+    set(Cap::Robustness2, report_.robustness2, features_.robustness2NullDescriptor, report_.robustness2 ? "no nullDescriptor" : "");
+    set(Cap::MemoryBudget, report_.memoryBudget, features_.memoryBudget, "");
+    set(Cap::DeviceFault, report_.deviceFault, features_.deviceFault, "");
+    set(Cap::SamplerAnisotropy, features_.samplerAnisotropy, features_.samplerAnisotropy, "",
+        features_.samplerAnisotropy ? std::format("max {:.0f}x", features_.maxAnisotropy) : "");
+    if (prt.accelerationStructure) {
+        r.properties.emplace_back("acceleration structures",
+                                  std::format("max geometries {}, max instances {}, max primitives {}, scratch alignment {}, "
+                                              "AS descriptors per stage {} / per set {}",
+                                              prt.maxGeometryCount, prt.maxInstanceCount, prt.maxPrimitiveCount,
+                                              prt.minScratchOffsetAlignment, prt.maxPerStageDescriptorAccelerationStructures,
+                                              prt.maxDescriptorSetAccelerationStructures));
+    }
+    if (prt.maintenance1) r.properties.emplace_back("ray tracing maintenance1", rt.enabled && rt.maintenance1 ? "enabled" : "available");
+    return r;
 }
 
 void Context::setName(VkObjectType type, std::uint64_t handle, const char* name) const {

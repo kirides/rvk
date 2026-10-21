@@ -10,6 +10,13 @@
 //     reg.onChange(water, [](const settings::Setting& s) { /* render thread, next frame boundary */ });
 //     if (water.asBool()) { ... }   // lock-free read, any thread
 //
+// A setting that needs an optional device capability declares it (docs/research/raytracing.md 3):
+//
+//     auto& refl = reg.add({.key = "rt.reflections", ..., .requirements = caps::bit(caps::Cap::RayQuery)});
+//     if (refl.asBool()) { ... }   // the effective value: false (the parity fallback) while ray query is unavailable
+//
+// The overlay greys it with the reason ("Ray query: disabled by the setting rt.allow"); the player's value() is kept.
+//
 // Values change from any thread (overlay, rvk_setting_set, file load); the change callbacks run on the render thread at the
 // next frame boundary (Registry::dispatch, called by the HAL before each present). Settings with Flag::Restart only take effect
 // at the next start (the overlay marks them while their value differs from the one the session started with).
@@ -25,9 +32,12 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include "core/caps.h"
 
 namespace rvk::settings {
 
@@ -52,6 +62,12 @@ struct Spec {
     std::vector<std::string> optionLabels;  // Enum: overlay labels (optional, same order)
     std::string format;                     // Int / Float overlay format, e.g. "%.0f fps" (optional)
     std::uint32_t flags = 0;                // Flag::*
+    // Capabilities the setting needs (caps::bit(caps::Cap::RayQuery) | ...; docs/research/raytracing.md 3). While one is
+    // unmet (no such hardware, disabled by rt.allow, no Vulkan device yet) the overlay shows the setting greyed with the
+    // reason, and its *effective* value (asBool / asInt / asFloat / asEnum) is `unmetValue` (default: defaultValue = the
+    // parity path); the player's value itself is kept (file, API) and applies again when the capability is there.
+    caps::Mask requirements = 0;
+    std::optional<double> unmetValue;
 };
 
 class Registry;
@@ -64,12 +80,16 @@ public:
     bool restart() const { return (spec_.flags & Flag::Restart) != 0; }
     bool abEligible() const { return (spec_.flags & (Flag::NoAB | Flag::Restart)) == 0 && !locked(); }
 
-    // the effective value (any thread, lock-free)
+    // the player's (requested) value: what the file, the API and A/B store (any thread, lock-free)
     double value() const { return value_.load(std::memory_order_relaxed); }
-    bool asBool() const { return value() != 0.0; }
-    int asInt() const { return static_cast<int>(value()); }
-    float asFloat() const { return static_cast<float>(value()); }
-    // Enum: the option name of the value
+    // capability resolution (Spec::requirements): false while a required capability is unmet
+    bool available() const { return !unmet_.load(std::memory_order_relaxed); }
+    // the value that applies: value(), or the spec's unmetValue while unavailable. Features read these:
+    double effective() const { return available() ? value() : fallback_; }
+    bool asBool() const { return effective() != 0.0; }
+    int asInt() const { return static_cast<int>(effective()); }
+    float asFloat() const { return static_cast<float>(effective()); }
+    // Enum: the option name of the effective value
     std::string_view asEnum() const;
     bool isDefault() const { return value() == spec_.defaultValue; }
 
@@ -85,6 +105,9 @@ private:
     Spec spec_;
     std::atomic<double> value_{0.0};
     std::atomic<bool> locked_{false};
+    std::atomic<bool> unmet_{false};
+    double fallback_ = 0.0;   // effective value while unmet (Spec::unmetValue or the default)
+    std::string unmetReason_;
     double start_ = 0.0;
     double stored_ = 0.0;  // locked: the player's own value (written to settings.toml instead of the forced one)
     std::string lockReason_;
@@ -137,6 +160,16 @@ public:
     void lock(Setting& s, double value, std::string reason);
     std::string lockReason(const Setting& s) const;
 
+    // ---- capability resolution (Spec::requirements, core/caps.h) ----
+    // The renderer calls this once its device exists (and again if it changes). Until then every setting with requirements is
+    // unavailable ("no Vulkan device"). Settings whose effective value changes are dispatched like a change.
+    void setCapabilities(const caps::Report& report);
+    caps::Report capabilities() const;
+    // why `s` is unavailable ("" when available)
+    std::string unavailableReason(const Setting& s) const;
+    // the requirements of a spec against a report: "" when met (pure; also what setCapabilities applies)
+    static std::string resolve(const Spec& spec, const caps::Report& report);
+
     // ---- change callbacks ----
     // `fn` runs on the render thread (dispatch) after each change of `s`, also after A/B flips and file loads. `owner`
     // identifies the subscriber for removeCallbacks (an object that goes away before the registry must remove its callbacks).
@@ -184,8 +217,11 @@ private:
     Result setLocked(Setting& s, double value);  // mutex_ held
     void changedLocked(Setting& s);              // mutex_ held
 
+    void resolveLocked(Setting& s);              // mutex_ held
+
     mutable std::mutex mutex_;
     std::vector<std::unique_ptr<Setting>> settings_;
+    caps::Report caps_;
     std::atomic<std::uint64_t> generation_{0};
     std::atomic<bool> dirty_{false};
     std::atomic<bool> bActive_{false};
@@ -206,6 +242,7 @@ struct RendererSettings {
     Setting* tintDraws = nullptr;    // debug.tint_draws: "off", "kind", "pass" (d3d9/draws.h TintMode)
     Setting* drawRecords = nullptr;  // debug.draw_records: per-frame draw records (hidden; the histogram is always on)
     Setting* injectView = nullptr;   // debug.inject_view: "off", "depth", "tint" (enh/debug_view.h, an injected pass)
+    Setting* rtAllow = nullptr;      // rt.allow: enable the ray tracing extensions at device creation (restart)
 };
 // hotkey names of overlay.toggle_key / overlay.ab_key ("none" disables)
 const std::vector<std::string>& hotkeyNames();
