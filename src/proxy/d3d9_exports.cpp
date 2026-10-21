@@ -5,6 +5,9 @@
 #include "proxy/d3d9_exports.h"
 
 #include <atomic>
+#include <cstdint>
+#include <cstring>
+#include <intrin.h>
 #include <mutex>
 #include <string>
 
@@ -51,7 +54,16 @@ extern "C" {
 
 void* WINAPI rvk_Direct3DCreate9(UINT sdkVersion) {
     static std::atomic<int> calls{0};
-    spdlog::info("Direct3DCreate9(0x{:x}) call #{}", sdkVersion, ++calls);
+    // who asks: Engine.dll calls it from eCGfxAdmin::InitializeAdmin and once earlier (docs/research/hal.md 3)
+    void* caller = _ReturnAddress();
+    HMODULE callerModule = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       static_cast<LPCWSTR>(caller), &callerModule);
+    char name[MAX_PATH]{};
+    GetModuleFileNameA(callerModule, name, MAX_PATH);
+    const char* base = std::strrchr(name, '\\') != nullptr ? std::strrchr(name, '\\') + 1 : name;
+    spdlog::info("Direct3DCreate9(0x{:x}) call #{} from {}+0x{:x}", sdkVersion, ++calls, base,
+                 reinterpret_cast<std::uintptr_t>(caller) - reinterpret_cast<std::uintptr_t>(callerModule));
     using Fn = void*(WINAPI*)(UINT);
     static const Fn fn = real<Fn>("Direct3DCreate9");
     return fn != nullptr ? fn(sdkVersion) : nullptr;
