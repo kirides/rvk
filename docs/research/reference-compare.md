@@ -1,6 +1,6 @@
 # Design: D3D9 reference comparison at fixed spots
 
-Status: design (2026-10-21); built so far: the renderer side, section 4.1 (exports, `include/rvk_api.h`) and 4.3 (slot 159). Goal (user decision): run the **same deterministic scenario** once
+Status: design (2026-10-21); built so far: the renderer side, section 4.1 (exports, `include/rvk_api.h`) and 4.3 (slot 159), and the diff tool (section 6, `tools/refcompare.py`). Goal (user decision): run the **same deterministic scenario** once
 with the game's own D3D9 renderer (`scripts\run.ps1 -NoRenderer`) and once with ours (`-Mode vulkan`), capture the back
 buffer at fixed spots (camera pose, time of day, weather, HUD state), and diff the pictures automatically with a report.
 This is the verification criterion of PLAN.md M4 ("screenshot-diff suite at N poses within thresholds").
@@ -500,6 +500,36 @@ numbers into `spots.lua`. Spots are data, so tuning never touches code.
 ## 6. Diff tool: `tools/refcompare.py` (this repo)
 
 Python 3.12 with numpy, Pillow, scipy (all installed here; no scikit-image/OpenCV needed: SSIM via `scipy.ndimage`).
+
+**Implemented (2026-10-21)**: `tools/refcompare.py`, tests `tools/tests/test_refcompare.py` (unittest, 25 cases on synthetic
+images: identical, shifts, brightness/colour bias, missing square, burst noise mask, lightning drop, size/missing/pose ->
+INVALID, threshold files, calibrate, CLI exit codes). As built, where it differs from the draft below:
+
+* CLI: `compare A B -o out [--thresholds f.json|f.toml] [--meta-a f --meta-b f] [--baseline A2 [--meta-baseline f]]
+  [--tag-a t --tag-b t] [--spots a,b] [--no-images]`, `calibrate A A2 -o thresholds.json [--margin 1.5]`, `selftest`.
+  A/B are directories or single image files (PNG/BMP). No thresholds file is read unless given (built-in defaults = 6.4).
+* Pairing: `<spot>.png` or bursts `<spot>_b<k>.png`; the tag prefix (`d3d9_`, `vk_`) is stripped from `--tag-*`, the
+  metadata's `tag`, or automatically (a first token common to all files of a side) when the names do not match otherwise.
+  A spot on one side only is INVALID (`missing in A/B`).
+* Metadata: `<dir>/meta.json` by default; accepts `RVKCMP {json}` log lines (spass.log as is), JSONL, a JSON list,
+  `{spots: [...]}` or `{<id>: {...}}`. Checked: camera `x,y,z` (eye), `dx,dy,dz` (angle), `fov`; weather `mode` + `weights`
+  (or a state name string); `time` as `[h, m]`, `{h, m}` or hours (wraps at midnight). Missing fields are listed as unchecked.
+* Units: `bad8`/`bad32`/`noise` in **percent**; `dluma`, `bias_rgb` = B - A (test minus reference); `chroma` = (R-G, B-G) of
+  `bias_rgb`. `shift`: phase correlation of the lumas (Hann window, peak in [-4, 4]^2, parabolic sub-pixel `shift_sub`);
+  `shift_significant` only when aligning by it lowers the luma MAE below 75 % (an unrelated image has a peak too); only a
+  significant shift counts for `shift_max`. `tiles`: 32x32 tiles (`--tile`) ranked by MAE, top 10 with x, y, mae, bad32, ssim.
+* Verdict rules are per tier (`pass`, `warn`): keys `ssim_min psnr_min psnr_q_min mae_max bad8_max bad32_max dluma_abs_max
+  chroma_abs_max shift_max`; plus `invalid.noise_max`, `noise.{burst_tol, dilate, flash_rel}`, `pose.{eye, dir_deg, fov,
+  weather, clock_min}`, per spot under `spot.<id>` with `known = "..."`. Exit code 2 wins over 1 (INVALID before FAIL).
+* Calibrate / `--baseline`: per spot and rule, error limits `max(default, margin x floor)`, `ssim_min = min(default,
+  1 - margin x (1 - ssim))`, PSNR limits `min(default, psnr - 20 log10 margin)`; never stricter than the defaults; the floor
+  metrics are stored as `spot.<id>.baseline`.
+* Outputs per spot: `_diff.png` (heat map as specified), `_ssim.png` (1 - SSIM, x4), `_blink.gif` (A/B at 1 Hz, labelled),
+  `_side.jpg` (A | B | diff at half size), `_tiles.png` (worst three tiles, x4 nearest, A | B | diff), `_a.png`/`_b.png`
+  (the burst medians); `report.html` (self-contained: embedded thumbnails, links to the files), `report.json`, `summary.md`.
+* First use on existing ad-hoc sets (not aligned in time; sanity check only): pixel-identical main menu D3D9 vs Vulkan (PASS,
+  MAE 0); the character page after the font fix PASS (psnr_q 43.8 dB, was WARN at 35.6 before it), the remaining
+  differences in the world behind the page (sky, swaying palms); world shots FAIL with the expected brightness/shadow differences.
 
 ### 6.1 Inputs and checks
 
