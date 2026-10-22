@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "d3d9/device.h"
+#include "d3d9/ffshader.h"
 #include "enh/debug_view.h"
 #include "enh/rt_debug.h"
 #include "enh/rt_scene.h"
@@ -249,6 +250,10 @@ public:
     HalDevice();
     ~HalDevice() override;
     bool create(const Options& options, const eCAPIDevice::eSAPIStartParameters& params);
+    // false once the device's destructor started: the engine releases some resources only after its device (static
+    // destructors at process exit, docs/research/debug-mode.md 8.2); their destructors then leak their d3d9 objects (the
+    // device already freed the GPU objects: d3d9::Device::destroy orphans the live ones) instead of touching the device
+    static bool isLive(const HalDevice* device);
     d3d9::Device& dev() { return dev_; }
     // live HAL textures by the engine's eCAPITexture pointer (any thread): engine image data -> our texture (the RT scene's
     // materials, enh/rt_material: eCGfxImageData +0x60)
@@ -362,6 +367,13 @@ public:
     bEResult SetVertexProgramRegisterI(unsigned long a0, int const* a1, unsigned long a2) override;
     bEResult SetVertexProgramRegisterB(unsigned long a0, int const* a1, unsigned long a2) override;
     bEResult GetVertexProgramRegisterF(unsigned long a0, float* a1, unsigned long a2) override;
+    // fixed function (the engine's debug drawing, d3d9/ffshader.h): an FVF with no shaders, coloured by texture stage 0
+    bEResult SetVertexProgram(unsigned long a0, bool a1, bool a2) override;
+    bEResult SetPixelProgram(unsigned long a0) override;
+    bEResult SetColorCalc(unsigned long a0, eCGfxShared::eETexOperation a1, eCGfxShared::eETexArgument a2,
+                          eCGfxShared::eETexArgument a3) override;
+    bEResult SetAlphaCalc(unsigned long a0, eCGfxShared::eETexOperation a1, eCGfxShared::eETexArgument a2,
+                          eCGfxShared::eETexArgument a3) override;
     bEResult SetPixelProgramRegisterF(unsigned long a0, float const* a1, unsigned long a2) override;
     bEResult SetPixelProgramRegisterI(unsigned long a0, int const* a1, unsigned long a2) override;
     bEResult SetPixelProgramRegisterB(unsigned long a0, int const* a1, unsigned long a2) override;
@@ -441,6 +453,14 @@ private:
                                                   int levelsWanted, std::uint32_t pool, std::uint32_t usage, int wantCube,
                                                   eCGfxShared::eSGfxLayersDesc& out);
     void applyAlphaTest(bool enable, const eCGfxShared::eSGfxAlphaTestData& d);
+    // fixed-function draws: the generated shaders' constants around a draw (saved and restored: the engine's constants stay)
+    struct FfConstants {
+        bool active = false;
+        float vs[16];
+        float ps[8];
+    };
+    FfConstants beginFixedFunctionDraw();
+    void endFixedFunctionDraw(const FfConstants& saved);
     void logFrameStats();
     void logFrameStructure();
     void logPerf(d3d9::PerfStats p);
@@ -488,6 +508,11 @@ private:
     void applyWater();
     void applyShadows();
     std::chrono::steady_clock::time_point settingsDirtySince_{};
+    // fixed function
+    d3d9::ff::Stage0 ffStage0_;
+    std::shared_ptr<d3d9::Shader> ffVs_[2];  // without / with a vertex colour
+    std::shared_ptr<d3d9::Shader> ffPs_;
+    std::uint64_t ffDraws_ = 0;
 };
 
 // the vertex/index data / texture behind a HAL object (nullptr for foreign objects)

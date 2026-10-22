@@ -5,6 +5,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <regex>
 #include <sstream>
@@ -13,6 +14,7 @@
 
 #include <spirv-tools/libspirv.hpp>
 
+#include "d3d9/ffshader.h"
 #include "shader/glsl.h"
 #include "shader/sm_ir.h"
 #include "shader/spirv.h"
@@ -99,6 +101,7 @@ std::string referenceListing(const std::vector<std::uint32_t>& tokens) {
 }
 
 // Assemble, decode, compare listings, translate, compile, validate. Returns the GLSL ("" on failure, CHECKs report).
+std::string roundTripTokens(const char* name, const std::vector<std::uint32_t>& tokens);
 std::string roundTrip(const char* name, const std::string& source) {
     std::string errors;
     const auto tokens = assemble(source, errors);
@@ -106,6 +109,11 @@ std::string roundTrip(const char* name, const std::string& source) {
     if (tokens.empty()) {
         return {};
     }
+    return roundTripTokens(name, tokens);
+}
+
+// decode (listing equal to D3DX's), translate, compile, validate
+std::string roundTripTokens(const char* name, const std::vector<std::uint32_t>& tokens) {
     const DecodeResult dec = decode(tokens);
     CHECK_MSG(dec.ok(), std::string(name) + ": decode: " + dec.error);
     if (!dec.ok()) {
@@ -297,4 +305,72 @@ TEST(shader_decode_errors) {
     const std::uint32_t sm1[] = {0xFFFF0101u, 0x0000FFFFu};
     CHECK(!decode(sm1).ok());
     CHECK(!decode({}).ok());
+}
+
+// the generated fixed-function shaders (d3d9/ffshader.h: the engine's debug drawing) equal what D3DX assembles from the
+// listing they stand for, and translate
+TEST(shader_fixed_function) {
+    if (!D3DX::get().available()) {
+        std::printf("  (skipped: d3dx9_39.dll not available)\n");
+        return;
+    }
+    namespace ff = rvk::d3d9::ff;
+    const auto same = [](const char* name, const std::vector<std::uint32_t>& ours, const std::string& source) {
+        std::string errors;
+        const auto ref = assemble(source, errors);
+        CHECK_MSG(!ref.empty(), std::string(name) + ": " + errors);
+        CHECK_MSG(normalizeListing(referenceListing(ref)) == normalizeListing(referenceListing(ours)),
+                  std::string(name) + ":\n" + referenceListing(ours));
+        CHECK(!roundTripTokens(name, ours).empty());
+    };
+    same("ff_vs_colour", ff::vertexShader(true), R"(vs_3_0
+dcl_position v0
+dcl_color v1
+dcl_position o0
+dcl_color o1
+dp4 o0.x, v0, c248
+dp4 o0.y, v0, c249
+dp4 o0.z, v0, c250
+dp4 o0.w, v0, c251
+mov o1, v1
+)");
+    same("ff_vs_white", ff::vertexShader(false), R"(vs_3_0
+dcl_position v0
+dcl_position o0
+dcl_color o1
+def c247, 1, 1, 1, 1
+dp4 o0.x, v0, c248
+dp4 o0.y, v0, c249
+dp4 o0.z, v0, c250
+dp4 o0.w, v0, c251
+mov o1, c247
+)");
+    same("ff_ps", ff::pixelShader(), R"(ps_3_0
+dcl_color v0
+mad oC0, v0, c220, c221
+)");
+}
+
+TEST(fixed_function_stage0) {
+    namespace ff = rvk::d3d9::ff;
+    // DrawLineList: colour and alpha = SELECTARG1(TFACTOR)
+    ff::Stage0 s{.colorOp = 2, .colorArg1 = 3, .colorArg2 = 2, .alphaOp = 2, .alphaArg1 = 3, .alphaArg2 = 2};
+    ff::Linear l = ff::reduce(s, 0x80FF0000u);
+    CHECK(l.mul == (std::array<float, 4>{0, 0, 0, 0}));
+    CHECK(l.add[0] == 1.0f && l.add[1] == 0.0f && l.add[2] == 0.0f && l.add[3] > 0.50f && l.add[3] < 0.51f);
+    // D3D9 defaults (MODULATE texture x diffuse, alpha = texture): the vertex colour, alpha 1
+    l = ff::reduce(ff::Stage0{}, 0);
+    CHECK(l.mul == (std::array<float, 4>{1, 1, 1, 0}) && l.add == (std::array<float, 4>{0, 0, 0, 1}));
+    // MODULATE diffuse x TFACTOR
+    l = ff::reduce(ff::Stage0{.colorOp = 4, .colorArg1 = 0, .colorArg2 = 3, .alphaOp = 4, .alphaArg1 = 0, .alphaArg2 = 3}, 0xFF808080u);
+    CHECK(l.mul[0] > 0.50f && l.mul[0] < 0.51f && l.mul[3] == 1.0f && l.add[0] == 0.0f);
+    // stage 0 disabled: the diffuse colour
+    l = ff::reduce(ff::Stage0{.colorOp = 1}, 0);
+    CHECK(l.mul == (std::array<float, 4>{1, 1, 1, 1}));
+    // world * view * projection, transposed: a translation lands in the last column = row 3 of the result's w row
+    const float id[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    const float tr[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 6, 7, 1};
+    const auto m = ff::transposedProduct(tr, id, id);
+    CHECK(m[3] == 5.0f && m[7] == 6.0f && m[11] == 7.0f && m[15] == 1.0f && m[12] == 0.0f);
+    CHECK(ff::supportedFvf(0x002) && ff::supportedFvf(0x042) && !ff::supportedFvf(0x004) && !ff::supportedFvf(0x006));
 }

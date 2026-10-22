@@ -44,6 +44,10 @@ HalTexture::HalTexture(HalDevice& dev, std::unique_ptr<d3d9::Texture> tex) : dev
     dev_.registerTexture(static_cast<const eCAPITexture*>(this), tex_.get());
 }
 HalTexture::~HalTexture() {
+    if (!HalDevice::isLive(&dev_)) {
+        (void)tex_.release();  // after the device (process exit): its GPU objects are gone already
+        return;
+    }
     dev_.unregisterTexture(static_cast<const eCAPITexture*>(this));
     dev_.dev().release(std::move(tex_));
 }
@@ -204,7 +208,13 @@ bEResult HalTexture::LoadSurfaceFromSurface(unsigned int a0, void const*, bCRect
 }
 
 HalCubeMap::HalCubeMap(HalDevice& dev, std::unique_ptr<d3d9::Texture> tex) : dev_(dev), tex_(std::move(tex)) {}
-HalCubeMap::~HalCubeMap() { dev_.dev().release(std::move(tex_)); }
+HalCubeMap::~HalCubeMap() {
+    if (!HalDevice::isLive(&dev_)) {
+        (void)tex_.release();  // as ~HalTexture
+        return;
+    }
+    dev_.dev().release(std::move(tex_));
+}
 
 bEResult HalCubeMap::LockRect(eCGfxShared::eECubeMapFace a0, unsigned int a1, eCGfxShared::eSGfxLockedRect* a2, tagRECT const*,
                               unsigned long a4) {
@@ -242,7 +252,13 @@ bEResult HalCubeMap::SetCubeMap(unsigned long a0) {
 }
 
 HalVolume::HalVolume(HalDevice& dev, std::unique_ptr<d3d9::Texture> tex) : dev_(dev), tex_(std::move(tex)) {}
-HalVolume::~HalVolume() { dev_.dev().release(std::move(tex_)); }
+HalVolume::~HalVolume() {
+    if (!HalDevice::isLive(&dev_)) {
+        (void)tex_.release();  // as ~HalTexture
+        return;
+    }
+    dev_.dev().release(std::move(tex_));
+}
 
 bEResult HalVolume::LockVolumeBox(unsigned int a0, unsigned long a1, int* a2, int* a3, void** a4) {
     d3d9::Texture::Locked lk;
@@ -268,7 +284,13 @@ bEResult HalVolume::SetVolume(unsigned long a0) {
 HalVertexData::HalVertexData(HalDevice& dev, const eCGfxShared::eSGfxVertexBufDesc& desc, std::uint32_t stride,
                              std::unique_ptr<d3d9::Buffer> buffer)
     : dev_(dev), desc_(desc), buffer_(std::move(buffer)), stride_(stride) {}
-HalVertexData::~HalVertexData() { dev_.dev().release(std::move(buffer_)); }
+HalVertexData::~HalVertexData() {
+    if (!HalDevice::isLive(&dev_)) {
+        (void)buffer_.release();  // as ~HalTexture
+        return;
+    }
+    dev_.dev().release(std::move(buffer_));
+}
 
 bEResult HalVertexData::LockBuffer(unsigned int a0, unsigned int a1, unsigned long a2, unsigned char** a3) {
     if (a3 == nullptr) return bEResult_False;
@@ -297,7 +319,13 @@ bEResult HalVertexData::SetStride(unsigned long a0) {
 
 HalIndexData::HalIndexData(HalDevice& dev, const eCGfxShared::eSGfxIndexBufDesc& desc, std::unique_ptr<d3d9::Buffer> buffer)
     : dev_(dev), desc_(desc), buffer_(std::move(buffer)) {}
-HalIndexData::~HalIndexData() { dev_.dev().release(std::move(buffer_)); }
+HalIndexData::~HalIndexData() {
+    if (!HalDevice::isLive(&dev_)) {
+        (void)buffer_.release();  // as ~HalTexture
+        return;
+    }
+    dev_.dev().release(std::move(buffer_));
+}
 
 bEResult HalIndexData::LockBuffer(unsigned int a0, unsigned int a1, unsigned long a2, unsigned char** a3) {
     if (a3 == nullptr) return bEResult_False;

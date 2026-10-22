@@ -117,6 +117,10 @@ public:
 
 private:
     friend class Device;
+    // Device::destroy with the texture still alive (the engine releases some at process exit, after its device): the GPU
+    // objects are freed now, the destructor later touches nothing of the device
+    void orphan();
+    bool orphaned_ = false;  // under Device::liveMutex_
     struct Level {
         std::vector<std::uint8_t> data;  // D3D9 layout
         std::uint32_t rowPitch = 0;
@@ -218,6 +222,9 @@ private:
     VkBuffer static_ = VK_NULL_HANDLE;
     VmaAllocation staticAlloc_ = VK_NULL_HANDLE;
     VkDeviceAddress staticAddress_ = 0;  // of static_ (lazy)
+    friend class Device;
+    void orphan();           // as Texture::orphan
+    bool orphaned_ = false;  // under Device::liveMutex_
 };
 
 class VertexDecl {
@@ -473,6 +480,13 @@ public:
     void release(std::unique_ptr<Texture> texture);
     void release(std::unique_ptr<Buffer> buffer);
     void release(std::unique_ptr<VertexDecl> decl);
+    // live textures / buffers (their constructors / destructors): destroy() frees the GPU objects of those still alive, so
+    // resources the engine releases only after its device (at process exit) never touch a destroyed device. Returns false
+    // (untrack) when the resource was orphaned: its destructor must not touch the device.
+    void trackLive(Texture* texture);
+    void trackLive(Buffer* buffer);
+    bool untrackLive(Texture* texture);
+    bool untrackLive(Buffer* buffer);
 
     // state (render thread)
     void setRenderState(std::uint32_t rs, std::uint32_t value);
@@ -487,6 +501,8 @@ public:
     void setVertexDecl(VertexDecl* decl);
     void setVertexShader(std::shared_ptr<Shader> shader);
     void setPixelShader(std::shared_ptr<Shader> shader);
+    const Shader* vertexShader() const { return vs_.get(); }
+    const Shader* pixelShader() const { return ps_.get(); }
     void setVertexShaderConstantF(std::uint32_t start, const float* data, std::uint32_t count);
     void setPixelShaderConstantF(std::uint32_t start, const float* data, std::uint32_t count);
     void setVertexShaderConstantI(std::uint32_t start, const std::int32_t* data, std::uint32_t count);
@@ -804,6 +820,13 @@ private:
     Surface* ds_ = nullptr;
     Viewport viewport_;
     std::int32_t scissor_[4]{};
+
+    // live resources (trackLive)
+    std::mutex liveMutex_;
+    std::unordered_set<Texture*> liveTextures_;
+    std::unordered_set<Buffer*> liveBuffers_;
+    void orphanLive();
+    void upAllocFailed(std::uint64_t bytes);
 
     // deferred releases
     std::mutex releaseMutex_;

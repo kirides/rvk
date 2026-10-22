@@ -61,7 +61,21 @@ Fn dx9(const char* name) {
 
 }  // namespace
 
+namespace {
+std::mutex g_liveDevicesMutex;
+std::vector<const HalDevice*> g_liveDevices;
+}  // namespace
+
+bool HalDevice::isLive(const HalDevice* device) {
+    const std::lock_guard lock(g_liveDevicesMutex);
+    return std::ranges::find(g_liveDevices, device) != g_liveDevices.end();
+}
+
 HalDevice::HalDevice() {
+    {
+        const std::lock_guard lock(g_liveDevicesMutex);
+        g_liveDevices.push_back(this);
+    }
     // eCDX9Device::CompileEffect* return 0 when the IDirect3DDevice9 at +0x10 is null; nothing else of `this` is used
     dx9Standin_[2] = 1;  // +0x10
 }
@@ -84,6 +98,11 @@ d3d9::Texture* HalDevice::textureOfApi(const void* api) {
 }
 
 HalDevice::~HalDevice() {
+    {
+        const std::lock_guard lock(g_liveDevicesMutex);
+        std::erase(g_liveDevices, this);
+    }
+    spdlog::info("hal: device released by the engine: shutting down");
     engine::scene::detach(&dev_);
     settings::registry().removeCallbacks(this);
     if (overlay_) {
@@ -96,10 +115,11 @@ HalDevice::~HalDevice() {
         settings::registry().save(options_.settingsFile);
     }
     debugView_.reset();  // removes its pass, retires its pipelines
+    // the RT scene's consumers (rt.debug, the water's traced reflections) release it in their destructors: before it
     rtDebug_.reset();    // releases the RT scene
-    rtScene_.reset();    // unregisters its observer / pass, retires its acceleration structures
-    water_.reset();      // unregisters its draw replacer
+    water_.reset();      // unregisters its draw replacer, releases the RT scene
     shadows_.reset();
+    rtScene_.reset();    // unregisters its observer / pass, retires its acceleration structures
     {
         const std::lock_guard lock(handleMutex_);
         for (auto& [h, d] : decls_) dev_.release(std::move(d));
@@ -1395,11 +1415,13 @@ bEResult HalDevice::Draw(eCGfxShared::eSGfxDrawCallDesc const& a0) {
             dev_.renderState(d3d9::RS_STENCILENABLE), dev_.renderState(d3d9::RS_STENCILFUNC), dev_.renderState(d3d9::RS_STENCILREF),
             dev_.renderState(d3d9::RS_COLORWRITEENABLE));
     const auto type = static_cast<std::uint32_t>(a0.type);
+    const FfConstants ff = beginFixedFunctionDraw();
     if (a0.indexed) {
         dev_.drawIndexedPrimitive(type, a0.baseVertexIndex, a0.minVertexIndex, a0.numVertices, a0.startIndex, a0.primitiveCount);
     } else {
         dev_.drawPrimitive(type, a0.startVertex, a0.primitiveCount);
     }
+    endFixedFunctionDraw(ff);
     return bEResult_Ok;
 }
 
@@ -1408,14 +1430,18 @@ bEResult HalDevice::DrawUP(eCGfxShared::eEPrimitiveType a0, unsigned int a1, voi
             static_cast<int>(a0), a1, a3, dev_.renderState(d3d9::RS_ZENABLE), dev_.renderState(d3d9::RS_ZWRITEENABLE),
             dev_.renderState(d3d9::RS_ZFUNC), dev_.renderState(d3d9::RS_STENCILENABLE), dev_.renderState(d3d9::RS_STENCILFUNC),
             dev_.renderState(d3d9::RS_STENCILREF), dev_.renderState(d3d9::RS_COLORWRITEENABLE));
+    const FfConstants ff = beginFixedFunctionDraw();
     dev_.drawPrimitiveUP(static_cast<std::uint32_t>(a0), a1, a2, a3);
+    endFixedFunctionDraw(ff);
     return bEResult_Ok;
 }
 
 bEResult HalDevice::DrawIndexedUP(eCGfxShared::eEPrimitiveType a0, unsigned int a1, unsigned int a2, unsigned int a3, void* const a4,
                                   void* const a5, unsigned int a6) {
     // always 16-bit indices (eCDX9Device::DrawIndexedUP 0x742160)
+    const FfConstants ff = beginFixedFunctionDraw();
     dev_.drawIndexedPrimitiveUP(static_cast<std::uint32_t>(a0), a1, a2, a3, a4, false, a5, a6);
+    endFixedFunctionDraw(ff);
     return bEResult_Ok;
 }
 
@@ -1437,6 +1463,108 @@ bEResult HalDevice::GetVertexProgramRegisterF(unsigned long a0, float* a1, unsig
     dev_.getVertexShaderConstantF(static_cast<std::uint32_t>(a0), a1, static_cast<std::uint32_t>(a2));
     return bEResult_Ok;
 }
+// ---- fixed function (d3d9/ffshader.h; docs/research/debug-mode.md 8.3) --------------------------------------------------
+
+bEResult HalDevice::SetVertexProgram(unsigned long a0, bool a1, bool a2) {
+    HAL_LOG("hal> SetVertexProgram 0x{:x} fvf {} {}", a0, a1, a2);
+    if (!a1) {
+        // an assembly vertex program (CreateVertexProgram: not implemented, never created)
+        noteUnimplemented(keCAPIDeviceId, 109);
+        return bEResult_Ok;
+    }
+    // eCDX9Device: SetVertexDeclaration(NULL) + SetFVF, no vertex shader
+    const auto fvf = static_cast<std::uint32_t>(a0);
+    dev_.setVertexDecl(fvfDecl(fvf));
+    if (!d3d9::ff::supportedFvf(fvf)) {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            spdlog::warn("hal: fixed-function FVF 0x{:x} is not emulated (only untransformed XYZ positions): such draws are skipped", fvf);
+        }
+        dev_.setVertexShader(nullptr);
+        return bEResult_Ok;
+    }
+    const bool diffuse = (fvf & d3d9::ff::kFvfDiffuse) != 0;
+    auto& vs = ffVs_[diffuse ? 1 : 0];
+    if (!vs) {
+        vs = dev_.createShader(d3d9::ff::vertexShader(diffuse));
+        spdlog::info("hal: fixed-function vertex shader (FVF 0x{:x}{}): {}", fvf, diffuse ? ", vertex colour" : "",
+                     vs ? "built" : "FAILED");
+    }
+    dev_.setVertexShader(vs);
+    return bEResult_Ok;
+}
+
+bEResult HalDevice::SetPixelProgram(unsigned long a0) {
+    HAL_LOG("hal> SetPixelProgram 0x{:x}", a0);
+    if (a0 != 0) {
+        noteUnimplemented(keCAPIDeviceId, 119);  // an assembly pixel program (CreatePixelProgram: not implemented)
+        return bEResult_Ok;
+    }
+    if (!ffPs_) {
+        ffPs_ = dev_.createShader(d3d9::ff::pixelShader());
+        spdlog::info("hal: fixed-function pixel shader: {}", ffPs_ ? "built" : "FAILED");
+    }
+    dev_.setPixelShader(ffPs_);
+    return bEResult_Ok;
+}
+
+bEResult HalDevice::SetColorCalc(unsigned long a0, eCGfxShared::eETexOperation a1, eCGfxShared::eETexArgument a2,
+                                 eCGfxShared::eETexArgument a3) {
+    HAL_LOG("hal> SetColorCalc stage {} op {} args {} {}", a0, static_cast<int>(a1), static_cast<int>(a2), static_cast<int>(a3));
+    if (a0 == 0) {
+        ffStage0_.colorOp = static_cast<std::uint32_t>(a1);
+        ffStage0_.colorArg1 = static_cast<std::uint32_t>(a2);
+        ffStage0_.colorArg2 = static_cast<std::uint32_t>(a3);
+    }
+    return bEResult_Ok;
+}
+
+bEResult HalDevice::SetAlphaCalc(unsigned long a0, eCGfxShared::eETexOperation a1, eCGfxShared::eETexArgument a2,
+                                 eCGfxShared::eETexArgument a3) {
+    HAL_LOG("hal> SetAlphaCalc stage {} op {} args {} {}", a0, static_cast<int>(a1), static_cast<int>(a2), static_cast<int>(a3));
+    if (a0 == 0) {
+        ffStage0_.alphaOp = static_cast<std::uint32_t>(a1);
+        ffStage0_.alphaArg1 = static_cast<std::uint32_t>(a2);
+        ffStage0_.alphaArg2 = static_cast<std::uint32_t>(a3);
+    }
+    return bEResult_Ok;
+}
+
+HalDevice::FfConstants HalDevice::beginFixedFunctionDraw() {
+    FfConstants saved;
+    const d3d9::Shader* vs = dev_.vertexShader();
+    const d3d9::Shader* ps = dev_.pixelShader();
+    const bool ffVs = vs != nullptr && (vs == ffVs_[0].get() || vs == ffVs_[1].get());
+    const bool ffPs = ps != nullptr && ps == ffPs_.get();
+    if (!ffVs && !ffPs) return saved;
+    saved.active = true;
+    dev_.getVertexShaderConstantF(d3d9::ff::kVsMatrix, saved.vs, 4);
+    dev_.getPixelShaderConstantF(d3d9::ff::kPsMul, saved.ps, 2);
+    const auto m = d3d9::ff::transposedProduct(reinterpret_cast<const float*>(&world_), reinterpret_cast<const float*>(&view_),
+                                               reinterpret_cast<const float*>(&projection_));
+    dev_.setVertexShaderConstantF(d3d9::ff::kVsMatrix, m.data(), 4);
+    const d3d9::ff::Linear l = d3d9::ff::reduce(ffStage0_, dev_.renderState(d3d9::RS_TEXTUREFACTOR));
+    float consts[8];
+    std::memcpy(consts, l.mul.data(), 16);
+    std::memcpy(consts + 4, l.add.data(), 16);
+    dev_.setPixelShaderConstantF(d3d9::ff::kPsMul, consts, 2);
+    if (ffDraws_++ == 0) {
+        spdlog::info("hal: first fixed-function draw (the engine's debug drawing): stage 0 colour op {} ({}, {}), alpha op {} ({}, {}), "
+                     "texture factor 0x{:08x}, {} vertex shader, {} pixel shader",
+                     ffStage0_.colorOp, ffStage0_.colorArg1, ffStage0_.colorArg2, ffStage0_.alphaOp, ffStage0_.alphaArg1,
+                     ffStage0_.alphaArg2, dev_.renderState(d3d9::RS_TEXTUREFACTOR), ffVs ? "generated" : "engine",
+                     ffPs ? "generated" : "engine");
+    }
+    return saved;
+}
+
+void HalDevice::endFixedFunctionDraw(const FfConstants& saved) {
+    if (!saved.active) return;
+    dev_.setVertexShaderConstantF(d3d9::ff::kVsMatrix, saved.vs, 4);
+    dev_.setPixelShaderConstantF(d3d9::ff::kPsMul, saved.ps, 2);
+}
+
 bEResult HalDevice::SetPixelProgramRegisterF(unsigned long a0, float const* a1, unsigned long a2) {
     dev_.setPixelShaderConstantF(static_cast<std::uint32_t>(a0), a1, static_cast<std::uint32_t>(a2));
     return bEResult_Ok;

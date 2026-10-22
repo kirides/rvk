@@ -901,6 +901,14 @@ void Device::drawIndexedPrimitive(std::uint32_t type, std::int32_t baseVertex, s
     vkCmdDrawIndexed(frames_.cmd(), vertexCount(type, primitiveCount), instanceCount_, startIndex, baseVertex, 0);
 }
 
+// the upload ring could not take a user-pointer draw's data (a ring chunk could not be created): the draw is dropped
+void Device::upAllocFailed(std::uint64_t bytes) {
+    ++stats_.drawsSkipped;
+    ++stats_.skippedVertexInput;
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true)) spdlog::warn("d3d9: user-pointer draw of {} bytes dropped: no upload ring memory", bytes);
+}
+
 void Device::drawPrimitiveUP(std::uint32_t type, std::uint32_t primitiveCount, const void* data, std::uint32_t stride) {
     const DrawTimer timer(*this);
     if (primitiveCount == 0 || data == nullptr) {
@@ -908,6 +916,10 @@ void Device::drawPrimitiveUP(std::uint32_t type, std::uint32_t primitiveCount, c
     }
     const std::uint32_t vertices = vertexCount(type, primitiveCount);
     vk::RingAlloc a = frames_.allocate(static_cast<VkDeviceSize>(vertices) * stride, 16);
+    if (a.ptr == nullptr) {
+        upAllocFailed(static_cast<std::uint64_t>(vertices) * stride);
+        return;
+    }
     std::memcpy(a.ptr, data, static_cast<std::size_t>(vertices) * stride);
     up_ = {true, a.buffer, a.offset, stride};
     if (prepareDraw(type, DrawGeom{.userPointer = true, .primitives = primitiveCount})) {
@@ -928,9 +940,13 @@ void Device::drawIndexedPrimitiveUP(std::uint32_t type, std::uint32_t minIndex, 
     const std::uint32_t count = vertexCount(type, primitiveCount);
     const std::uint32_t isize = index32 ? 4 : 2;
     vk::RingAlloc ia = frames_.allocate(static_cast<VkDeviceSize>(count) * isize, 16);
-    std::memcpy(ia.ptr, indices, static_cast<std::size_t>(count) * isize);
     const std::uint32_t vcount = minIndex + numVertices;
     vk::RingAlloc va = frames_.allocate(static_cast<VkDeviceSize>(vcount) * stride, 16);
+    if (ia.ptr == nullptr || va.ptr == nullptr) {
+        upAllocFailed(static_cast<std::uint64_t>(count) * isize + static_cast<std::uint64_t>(vcount) * stride);
+        return;
+    }
+    std::memcpy(ia.ptr, indices, static_cast<std::size_t>(count) * isize);
     std::memcpy(va.ptr, vertices, static_cast<std::size_t>(vcount) * stride);
     up_ = {true, va.buffer, va.offset, stride};
     if (prepareDraw(type, DrawGeom{.indexed = true, .userPointer = true, .primitives = primitiveCount})) {

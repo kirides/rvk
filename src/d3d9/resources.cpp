@@ -14,6 +14,7 @@ namespace rvk::d3d9 {
 // ---- Texture ---------------------------------------------------------------------------------------------------------
 
 Texture::Texture(Device& device, const TextureDesc& desc) : dev_(device), desc_(desc) {
+    dev_.trackLive(this);
     if (desc_.type != TextureType::Volume) {
         desc_.depth = 1;
     }
@@ -58,6 +59,12 @@ Texture::Texture(Device& device, const TextureDesc& desc) : dev_(device), desc_(
 }
 
 Texture::~Texture() {
+    if (!dev_.untrackLive(this)) {
+        // orphaned by Device::destroy: only the CPU copies are left
+        surfaces_.clear();
+        for (Level& l : cpu_) freeLevel(l);
+        return;
+    }
     if (role_ != scene::ImageRole::None) {
         dev_.forgetImage(this);
     }
@@ -92,6 +99,21 @@ Texture::Level& Texture::cpuLevel(std::uint32_t level, std::uint32_t face) {
         g_textureCpuBytes.fetch_add(l.data.size(), std::memory_order_relaxed);
     }
     return l;
+}
+
+void Texture::orphan() {
+    // Device::destroy (frames idle): what the destructor would hand to the device, now; the frames run the retired work
+    if (slot_ != 0) {
+        dev_.bindless().releaseTexture(kind_, slot_);
+        slot_ = 0;
+    }
+    if (image_.valid()) {
+        auto* ctx = &dev_.ctx();
+        auto img = std::make_shared<vk::Image>(std::move(image_));
+        dev_.frames().retire([ctx, img] { img->destroy(*ctx); });
+    }
+    role_ = scene::ImageRole::None;
+    orphaned_ = true;
 }
 
 void Texture::freeLevel(Level& l) {
@@ -353,15 +375,30 @@ Surface::~Surface() {
 // ---- Buffer ----------------------------------------------------------------------------------------------------------
 
 Buffer::Buffer(Device& device, std::uint32_t size, std::uint32_t usage, std::uint32_t pool, bool index, bool index32)
-    : dev_(device), size_(size), usage_(usage), pool_(pool), index_(index), index32_(index32), cpu_(size, 0) {}
+    : dev_(device), size_(size), usage_(usage), pool_(pool), index_(index), index32_(index32), cpu_(size, 0) {
+    dev_.trackLive(this);
+}
 
 Buffer::~Buffer() {
+    if (!dev_.untrackLive(this)) return;  // orphaned by Device::destroy
     if (static_ != VK_NULL_HANDLE) {
         auto* ctx = &dev_.ctx();
         VkBuffer b = static_;
         VmaAllocation a = staticAlloc_;
         dev_.frames().retire([ctx, b, a] { vmaDestroyBuffer(ctx->allocator(), b, a); });
     }
+}
+
+void Buffer::orphan() {
+    if (static_ != VK_NULL_HANDLE) {
+        auto* ctx = &dev_.ctx();
+        VkBuffer b = static_;
+        VmaAllocation a = staticAlloc_;
+        dev_.frames().retire([ctx, b, a] { vmaDestroyBuffer(ctx->allocator(), b, a); });
+        static_ = VK_NULL_HANDLE;
+        staticAlloc_ = VK_NULL_HANDLE;
+    }
+    orphaned_ = true;
 }
 
 void* Buffer::lock(std::uint32_t offset, std::uint32_t size, std::uint32_t flags) {

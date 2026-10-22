@@ -409,6 +409,7 @@ void Device::destroy() {
     processReleases();
     backBuffer_.reset();
     depthBuffer_.reset();
+    orphanLive();
     {
         const std::lock_guard lock(shaderMutex_);
         for (auto& [h, s] : shaders_) {
@@ -934,6 +935,40 @@ VkShaderModule Device::tintModule(Shader& ps) {
     ps.tintModule = vk::createShaderModule(ctx_, spirv);
     ps.tintFailed = ps.tintModule == VK_NULL_HANDLE;
     return ps.tintModule;
+}
+
+void Device::trackLive(Texture* texture) {
+    const std::lock_guard lock(liveMutex_);
+    liveTextures_.insert(texture);
+}
+void Device::trackLive(Buffer* buffer) {
+    const std::lock_guard lock(liveMutex_);
+    liveBuffers_.insert(buffer);
+}
+bool Device::untrackLive(Texture* texture) {
+    const std::lock_guard lock(liveMutex_);
+    if (texture->orphaned_) return false;
+    liveTextures_.erase(texture);
+    return true;
+}
+bool Device::untrackLive(Buffer* buffer) {
+    const std::lock_guard lock(liveMutex_);
+    if (buffer->orphaned_) return false;
+    liveBuffers_.erase(buffer);
+    return true;
+}
+
+void Device::orphanLive() {
+    const std::lock_guard lock(liveMutex_);
+    if (!liveTextures_.empty() || !liveBuffers_.empty()) {
+        spdlog::info("d3d9: device destroyed with {} textures and {} buffers still alive (released later by the engine, e.g. at "
+                     "process exit): their GPU objects are freed now",
+                     liveTextures_.size(), liveBuffers_.size());
+    }
+    for (Texture* t : liveTextures_) t->orphan();
+    for (Buffer* b : liveBuffers_) b->orphan();
+    liveTextures_.clear();
+    liveBuffers_.clear();
 }
 
 void Device::release(std::unique_ptr<Texture> texture) {
