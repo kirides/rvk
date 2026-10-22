@@ -364,8 +364,10 @@ reference). Differences: the floor comes from the main view's static mesh draws 
   * the interpolated world normal (material VS output `vNormalAndAO.xyz`, found by semantic)
   * a gloss proxy from the specular constants
 
-  Bump detail and the exact specular power are not recoverable from bytecode generically: use geometric normals plus
-  depth-reconstructed normals for SSR / RT reflections first.
+  Correction: the per-pixel normal-mapped normal **is** available (83 % of material PS decode a DXT5nm normal map into
+  `m_vecWorldNormal`; it can be exposed as an optional output, see `docs/research/materials.md` 2, 3, 6). The exact specular
+  power is still a texture or constant per material. First step for SSR / RT reflections: geometric normals plus
+  depth-reconstructed normals, then the perturbed normal.
 * **Motion vectors** (needed by temporal denoisers, TAA, DDGI stability):
   * Keep last frame's camera (harvested c0) and, **per geometry identity, last frame's VS constant block address**.
   * A generated VS variant transforms with both and writes `prevClip - curClip` to an RG16F target.
