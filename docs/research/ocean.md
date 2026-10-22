@@ -44,6 +44,7 @@ centimetres (Risen), the spectrum is evaluated in SI units.
 | the ocean in the water module: settings, sea state follower, the simulation pass (AfterOpaque), WaterBlock fields | `src/enh/water.{h,cpp}` |
 | settings `water.ocean`, `water.ocean_quality`, `water.sea_state`, `water.wind_direction`, `water.wave_scale`; debug views `sea_floor`, `waves` | `src/core/settings.{h,cpp}`, `src/hal/vulkan/device.cpp` (`applyWater`) |
 | spots `sea_cliff`, `sea_horizon`, `harbour_mouth`; motion sequences (`-Burst`, `-Interval` -> `motion_<spot>.png`) | `mods/rvkcompare/spots.lua`, `scripts/water-compare.ps1` |
+| the sky cube redrawn whole every frame while the water is on (9.8); spot `beach_night_storm` (thunder, the clock running, only by name: `explicit`) | `src/engine/scene_hooks.cpp` (`detourSkyCube`), `src/d3d9/device.h`, `src/hal/vulkan/device.cpp` (`applyWater`), `mods/rvkcompare` |
 
 ## 2. The simulation
 
@@ -544,6 +545,69 @@ the window of the session's first enable (was 48 ms), 13.9 - 25.6 ms in the othe
 refcompare against `out\refcompare\20261022-093252`: run `20261022-144459` 19 PASS (beach_sun and sea_cliff PASS too) +
 lava_cave INVALID (pose 7.5 > 4), lava_cave alone (`20261022-145028`) PASS.
 
+### 9.8 Bug: at night one half of the sea bright, the other dark (the sky cube's refresh; 2026-10-22)
+
+**Report** (user, a screenshot of the starting beach at night in a thunderstorm, third-person camera looking out to sea):
+"the water sometimes is bright on one side and dark on the other" - a perfectly vertical, sharp seam near the screen centre
+through the whole sea, from the horizon to the shore; left the dark night sea with its waves and foam, right a greyish-white,
+smooth, mirror-like sea with a glowing band at the rocks; the sky above uniformly dark.
+
+**Cause [C].** The water reflects the engine's sky environment cube (the ocean model's s12, the lake's s9, the river's s13;
+the FFT ocean's SSR misses keep it). The engine refreshes that cube in `eCSkydome_PS::UpdateSkydomeEnvCubemap`
+(Engine.dll 0x6e7ed0, called every frame from `eCIlluminationAdmin::Process`): `+0x3b8` accumulates `eCTimer`'s frame time
+(`+0x2c`) against the period `+0x3bc` (10.0 s; game time, so nothing under the time freeze); when it expires, a global step
+counter renders **one face per call**: +x, -x, +y, +z, -z in five consecutive frames, -y is not refreshed (decompiled;
+logged face binds: faces 0, 1, 2, 4, 5 at frames n .. n + 4, every ~800 frames at 80 fps). Between two refreshes the cube
+is up to 10 s old, and what the sky does during the five frames of a refresh stays baked into the faces drawn then:
+* a **lightning flash** (thunder: each frame `Rand() < ThunderProbability` of the dominant weather state) during a refresh
+  lights only the faces drawn in those frames; the water reflecting them is bright for ~10 s, up to a cube edge. The
+  reflection's horizontal direction is the view ray's, and the +x / -z face edge lies on the diagonal x = -z: a camera
+  looking along it (yaw ~225 - 230, exactly the beach's view out to sea) sees the edge as a vertical line through the
+  screen centre - the seam. Reproduced: spot `beach_night_storm` (23:00, `Stormy_Rain` with thunder, the clock running,
+  60 pictures 30 frames apart), run `out\water\20261022-152022\enh\enh_beach_night_storm_b24..b31.png`: a flash at b21 - b23,
+  the refresh during it, then the right half 43 .. 91 luma brighter than the left (13 - 22) for the rest of the run; the
+  user saw the same in that run's last frames.
+* a **time jump** (sleeping, a loaded save, rvkcompare's `set_time`) leaves the whole cube showing the old sky for up to
+  10 s: day -> 23:00 with 2 frames settled, the sea was 59 .. 86 luma (the day sky mirrored) instead of 12 .. 19
+  (`20261022-151648\enh\enh_xn_225*.png`).
+The engine's own water reflects the same cube (with the water off the effect is the engine's; its Fresnel at night makes it
+less obvious: not separately confirmed); the enhanced water shows the reflection over most of the grazing sea.
+
+**Fix.** While `water.enabled` is on, the device asks for the cube every frame (`d3d9::Device::setSkyCubeEveryFrame`, set
+in `HalDevice::applyWater`): the `UpdateSkydomeEnvCubemap` detour (`src/engine/scene_hooks.cpp`) sets the timer past the
+period and calls the original until the step counter wraps (the HAL counts the face binds in the SkyCube view: at most 5
+calls; each is self-contained: material begin / end, the main camera restored), so the whole cube is redrawn in one frame,
+all faces from the same sky. rvk.log: `scene: sky cube refreshed every frame (5 faces in this frame, the engine's period
+10.0 s)`. A flash now lights the whole sea for the frames it lasts (the sea mirrors the lightning) and nothing is left
+behind; after a time jump the cube is current in the next frame. With the water off the engine's own refresh is untouched
+(parity). Rejected: hiding the stale cube in the shader (a brightness clamp or a cube average would also dull the honest
+reflections of the day sky and lightning).
+
+**Cost** [C] (`beach_sun`, 1600 x 900, `-PerfFrame 1500`): 5 render passes of 128^2 with 4 sky draws each, **0.053 ms GPU**;
+the five original calls **~0.14 ms CPU** per frame (measured inside the detour over 600 frames).
+
+**Verified.** Before / after sheet `out\water\night_seam\before_after.png` (top: after a flash during a refresh, before /
+after; middle: the engine's water at night, a flash after the fix; bottom: the day -> night jump before / after). After the
+fix (`out\water\20261022-152434\enh`, the same spot, 60 pictures): flashes light both halves alike (+30 .. +60 during the
+flash), no lasting difference between the halves (the remaining +-5 .. 11 is the engine's wave-splash particle at the rock
+right of the centre); the day -> night jump shows the night sea at once (`20261022-152616`). Standard spots at the default
+quality (`out\water\20261022-153331`, engine + masks of `20261022-141017`): sea_cliff +8.0, sea_horizon +0.6, harbour_mouth
++0.1, harbour_docks +0.0, beach_sun -9.7, beach_rain -3.9 (9.7: +7.6, +0.6, +0.1, -0.1, -5.0, -6.0; the beaches' spread
+-9 .. +5 / -3 .. -6), the look unchanged; at high quality `20261022-153038`. `-SyncValidation` with water + ocean quality
+high at beach_night_storm (lightning) and beach_sun: no validation messages. rvk_tests 97 / 97. Water off (the refresh is inactive then):
+refcompare against `out\refcompare\20261022-093252`: run `20261022-153751` 18 PASS + 2 WARN (harbour_mouth: the engine's
+animated sea; hero_closeup psnr 37.7); re-runs: harbour_mouth PASS (`20261022-154300`), hero_closeup FAIL there (the
+hero's idle pose and the compass needle) and PASS in `20261022-154439`.
+
+**Night in general** (before the fix but with a current cube, 23:00 `Stormy_Rain` without thunder, yaw 208 / 238 / 268 and
+from 15 m up, `out\water\20261022-151111\sbs_xn_*.png`): the enhanced sea is much darker than the engine's (water luma
+16 - 28 vs 54 - 71). The open sea far out is close (engine 16 - 19, ours 13 - 15 in the band below the horizon); the
+difference is the surf: the engine's painted, additive shore overlay glows white along the beach at night as by day, ours
+is foam lit by the night's ambient + moon (>= 1.3 x the water). The physically plausible night sea is the dark one (the
+sky above is 6 - 9); the bright right half of the report was the day / lightning sky mirrored, not a night look.
+`water.reflection_strength` (0 .. 2) scales the reflection, but at night the cube is dark, so it brightens little; a
+deliberate "moonlit" night look would be a new tunable (not done: a matter of taste).
+
 ## 10. Limits / open issues
 
 * The floor field only knows geometry the engine drew in the main view (cache accumulates it); unseen texels count as
@@ -566,6 +630,9 @@ lava_cave INVALID (pose 7.5 > 4), lava_cave alone (`20261022-145028`) PASS.
   no drift); the residual foam has no notion of currents (it drifts towards the beach along the train's direction).
 * The foam buffer's sources come from the shore train only (one period / direction field); the open sea's whitecaps keep
   the tiles' Jacobian foam.
+* The sky cube (9.8) is refreshed every frame while the water is on (~0.05 ms GPU, ~0.14 ms CPU); the engine never
+  redraws its -y face. The enhanced sea at night is much darker than the
+  engine's painted, glowing surf (9.8, "Night in general"): plausible, but a matter of taste; no "moonlit" knob yet.
 * The engine's wave-splash particle effect at the harbour quay (the "glittery patch" bottom-left at `harbour_docks`) is an
   engine particle system shown by both renderers (it is in the engine capture `out\water\20261022-083322\eng`); it is not
   part of the water and is left as the engine draws it.

@@ -91,7 +91,11 @@ the spots' grazing views (crops of 2-5x, consecutive frames: `-Burst 4 -Interval
 axis (`foamDensity` dX / dY); lit foam must stay below clipping (shoulder in water.frag). The water's clock is the engine's
 game time (ocean.md 4.5: rvkcompare's pinned game time pins waves and foam; rvk.log `enh: water: clock ...`); what still
 varies between runs at the beaches is the engine's eye adaptation and splash particles (luma +-5). Ocean spots of rvkcompare: `sea_cliff`, `sea_horizon`,
-`harbour_mouth` (the camera's distance is capped near 6,000 units: give poses as target + distance <= 5,500). Swim check:
+`harbour_mouth` (the camera's distance is capped near 6,000 units: give poses as target + distance <= 5,500); spot fields
+`thunder = true` (lightning kept), `freeze = false` (the clock runs through the capture), `explicit = true` (only by name,
+not in "all" / refcompare): `beach_night_storm` reproduces the sky cube seam (ocean.md 9.8; while the water is on the
+sky cube is redrawn whole every frame, rvk.log `scene: sky cube refreshed every frame`). `water-compare.ps1 -Instance 1`
+runs beside another Risen. Swim check:
 scenario `rvk_swim` (the hero in the sea, his swim line logged, pictures `swim_follow_b*` / `swim_water_b*`). Survey
 scenario `rvk_water` (water level-mesh entities' boxes + a look at each; `-Param 'only=Levelmesh_Lakemesh_06','find=SP_Don'`;
 `'around=x;y;z','radius=2500'` = 17 pictures around a place; with `-RvkLogLevel trace` rvk.log also names opaque materials).

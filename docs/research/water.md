@@ -202,7 +202,8 @@ replacement draws opaque). Verified by drawing the engine's meshes with it and S
   would scatter it into noise), the hit's lookup is offset by the detail normal's deviation (the ripples break the
   reflected image up), a miss (off screen, through the sky) keeps the engine's cube. A traced dark wall may dim the cube's
   sky but never below 55 % (sea) / 85 % (lake, river: their cube is masked into glitter by the material and reads as the
-  light on the water, also in caves). The swamp, which reflects nothing in the engine, gets a dim reflection (Schlick
+  light on the water, also in caves). While the water is on, the engine's sky cube is redrawn whole every frame (the
+  engine draws one face per frame every 10 s: lightning and time jumps left stale faces, ocean.md 9.8). The swamp, which reflects nothing in the engine, gets a dim reflection (Schlick
   Fresnel x 0.45, the cube at 60 %). `water.reflection_strength` scales the models' Fresnel terms.
 * **The sea's waves**: the wave normal is the frame of the engine's normal maps; wind ripples (3 octaves of gradient
   noise with analytic derivatives, 420 units, 2.5 x choppier inside the engine's coast overlay: harbour basins, coves)

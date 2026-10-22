@@ -311,6 +311,13 @@ with validation on and checks every pixel against D3D9's rasterisation rules (ha
   exposure / particles), beach_rain -3 .. -6. Ocean GPU 1.8 - 1.9 ms at 1080p high at the beach (foam ~0.2 - 0.4 ms);
   sync validation clean; toggles without hitch; rvk_tests 96 / 96; water off: refcompare 20 / 20 PASS (lava_cave on a
   re-run).
+* **Night seam fixed (2026-10-22, ocean.md 9.8).** User report: at night in a storm one half of the sea bright, the other
+  dark, split by a vertical line. Cause: the engine redraws its sky cube one face per frame every 10 s (game time); a
+  lightning flash during those five frames stayed baked into some faces (the +x / -z edge projects to the screen centre at
+  the beach's view out to sea), a time jump left the whole cube stale. While the water is on, the cube is now redrawn whole
+  every frame (the `UpdateSkydomeEnvCubemap` detour runs the engine's cycle in one frame; ~0.05 ms GPU, ~0.14 ms CPU).
+  Reproduction spot `beach_night_storm` (rvkcompare spot fields `thunder`, `freeze`, `explicit`). The enhanced sea at
+  night stays much darker than the engine's glowing painted surf (plausible; a "moonlit" knob would be a matter of taste).
 
 ### M9+ Enhanced graphics
 * candidates: anisotropic filtering + MSAA/TAA/SMAA, higher-resolution and better-filtered shadows, modern tonemapping/HDR10,
