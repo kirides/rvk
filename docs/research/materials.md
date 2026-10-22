@@ -37,7 +37,8 @@ Shader classes: `eCShaderDefault`, `eCShaderLeafs`, `eCShaderSkyDome`, `eCShader
   source. **[I]** from the name only, not decompiled.
 * Other sources: `eCColorSrcSampler`, `eCColorSrcCubeSampler`, `eCTexCoordSrcReflect`.
 * `CompressNormalMapToDXT5InPlace` 0x752440 (the engine converts normal maps to DXT5nm).
-* `eCShaderMaterialAdmin::SetQuality` 0x6b8ea0 / `GetQuality` 0xa3730. The source of the quality value was not traced (open).
+* `eCShaderMaterialAdmin::SetQuality` 0x6b8ea0 / `GetQuality` 0xa3730 (both 1-3 instruction bodies: never detour). The value
+  is the `XFX_QUALITY` shader define, traced in section 5.
 
 ## 2. Material HLSL shipped with the game [C]
 
@@ -130,13 +131,64 @@ Example `Monastery_Stone_Floor_01_Diffuse_01._xmat`: Diffuse + Normal + Comp + B
 
 Terrain: not checked (unknown).
 
-## 5. Quality gating [I]
+## 5. Quality gating
 
-Inferred from the HLSL, **not verified in game:**
+The HLSL gates are read from source **[I]** (not verified in game); the source of the quality value is traced **[C]**
+(re-lookup 2026-10-22; Engine.dll RVAs, image base 0x180000000; dumps `B:\DevDrive\risen-ghidra\shaderq_engine_dump.txt`,
+`shaderq2..6_engine_dump.txt`, `shaderq_scriptgame_dump.txt`).
+
+**HLSL gates [I]:**
 
 * Normal mapping is **not** gated by `g_iQuality`.
 * Lower quality removes: specular (<= LOW), self-shadow (<= MEDIUM), lightmap specular (LOW), complex SH ambient
   (< HIGH), and swaps the gamma `pow` for `sqrt`.
+* `g_iQuality` is a compile-time define **[C]**: `ge_common.fxh:20-28` has `#define XFX_QUALITY_LOW 0 / MEDIUM 1 / HIGH 2`,
+  `#ifndef XFX_QUALITY #define XFX_QUALITY 2`, `static int g_iQuality = XFX_QUALITY;`.
+
+**Where the value comes from [C]:**
+
+| Step | Function / file | RVA |
+|---|---|---|
+| macro list | `eCShaderMaterialAdmin::SetupShaderMacros` appends ("XFX_QUALITY", `"%i"` of `*(uint*)(this+0x350)`) | 0x6b8ac0 |
+| init | `eCShaderMaterialAdmin::PostInitialize` writes `this+0x350` from config `/Engine/Render/Shader/Quality` | 0x6ba9d0 |
+| live set | `SetQuality`: `*(this+0x350) = q; ReadShaderPool(this)` | 0x6b8ea0 |
+| get | `GetQuality` returns `this+0x350` | 0xa3730 |
+| config | `eSRenderOptions` (`GetInstance` 0x66c190), created in 0x8b420 from the ctor 0x8b6a0; key pair at +0xe0, value at +0xe8 | |
+
+* Code default is 2 (High), written into config layer 0 when the key is missing.
+* Config files: `Risen.exe` main (0x140001290) uses the base name `Config` (string 0x14002504c, override `-config <name>`);
+  `eCApplication::LoadConfiguration` 0x4bfa40 loads `ConfigDefault.xml` (layer "global"), `Config.xml`, `ConfigLocal.xml`
+  ("local"); `ConfigUser.xml` (`#g3:/appdata/ConfigUser.xml`) via `LoadConfigXML` 0x4c9cf0. `ConfigGenomeDefault.xml` only
+  with `-config ConfigGenome`. `ConfigDefaultNew.xml` is never read (no binary references "DefaultNew"; leftover) **[C/I]**.
+  `ConfigDefault.xml` `<Shader>` has no `Quality` key, `ConfigUser.xml` has none either: the default 2 (High) applies.
+* In-game control: Options -> **Performance** page (`Menu_System`, DLG_MENU_OPTIONS_SYSTEM; "Shader Quality" label at 353,427,
+  spin id 1008 at 678,428; `B:\DevDrive\risen-ghidra\guitree2.txt`) **[C]** for the script, **[I]** for the binding. Same page:
+  Texture quality, Texture filter, Shadow details, Vegetation details, Effect quality, Range of sight, Depth of field.
+  * `OnSpin_Quality_Shader` (`Script_Game.dll` 0x159c60) cycles Low/Medium/High and writes the config (layer 2, probably the
+    "override:" layer = `ConfigUser.xml` **[I]**). It does not call `SetQuality`, so it applies on the next launch **[I]**.
+  * Console command `CON_ShaderQuality` (`Script_Game.dll` 0x14e230, "low/medium/high") writes the config **and** calls
+    `SetQuality` live ("Shader quality is now %s").
+
+**Shipped shaders are the High permutation [C]:** High gamma = `pow(acc, 0.45)`, lower = `sqrt` (`ge_default_phong.fx:229-236`);
+2267 of 2334 corpus PS contain 0.45 (bytes `66 66 E6 3E`); of the 67 without it only 14 are material-family and those still
+have `pow`/`log` (not the `sqrt` variant). Sample `ps30_002c975b5f451fc5.bin` shows 0.45 + Phong `pow` specular.
+
+**Pool consequences:**
+
+* `ReadShaderPool` 0x6b6ee0 loads `ShaderMaterialPool_Master.smp` + `ShaderMaterialPool_User.smp` from `materials.pak`, no
+  quality in the file name **[C]**. The pool is keyed by the "preprocessor id", which includes `XFX_QUALITY` **[I]**, so a
+  Low/Medium setting would miss the pool, compile at runtime from the `effects.pak` HLSL and write
+  `ShaderMaterialPool_User.smp` **[I]**. Whether Master holds Low/Medium variants is not verified. Master is extracted for
+  later parsing at `B:\DevDrive\risen-ghidra\smp_extract` (13 MB); User is 22 bytes (empty).
+* **Conclusion:** players get the highest material quality by default and the menu can only lower it. The Vulkan path already
+  receives the High shaders (specular, self-shadow, complex SH ambient, `pow` gamma present): nothing to force. A lower setting
+  in Vulkan mode would trigger runtime compiles + a pool write (CLAUDE.md hard rule 1 hazard): it needs a redirect /
+  read-only guard before anyone tests it.
+* Side finding: the code default of `/Engine/Render/Shadows/Quality` is "High", `ConfigDefault.xml` ships "Medium", the test
+  copy's `ConfigUser.xml` has "High".
+
+**Other [I]:**
+
 * `data\ini\ConfigPerformanceLow.xml` / `ConfigPerformanceHigh.xml` have no shader or normal-map switch (shadows, vegetation,
   effects, texture filter only). `ConfigDefault.xml`: `CurrentShaderVersion="3_0"`, `EnableMaterialFallbacks`.
 * Materials carry `MaxShaderVersion` + `FallbackMaterial`; an SM2 fallback might drop maps (untested).
@@ -152,7 +204,8 @@ Suggestions, all untested:
   `enhancements-roadmap.md`.
 * Anisotropic filtering on the material samplers (s9 and up).
 * Toksvig-style specular anti-aliasing from the normal-map length.
-* Force the quality-gated terms (self-shadow, specular, complex SH ambient) as on High.
+* ~~Force the quality-gated terms (self-shadow, specular, complex SH ambient) as on High.~~ Not needed: the shipped shaders
+  already are the High permutation (section 5).
 * Parallax only where height data exists: 67 BumpOffset materials, but no height map found; `_Comp` might hold height / AO
   (layout unknown).
 * Detail normals for classes that have none (`Special_*` decals / effects).
@@ -162,5 +215,8 @@ Suggestions, all untested:
 
 * Terrain materials (normal map usage unknown).
 * `_Comp` channel layout.
-* Where `eCShaderMaterialAdmin::SetQuality` gets its value, and whether the HLSL quality gates behave as read.
+* ~~Where `eCShaderMaterialAdmin::SetQuality` gets its value~~: traced (section 5: `/Engine/Render/Shader/Quality`, Options >
+  Performance, default High). Still open: whether the HLSL quality gates behave as read (needs a Low/Medium run with a
+  guarded pool write), whether `ShaderMaterialPool_Master.smp` holds Low/Medium variants (parse `smp_extract`), and which
+  config layer the `OnSpin_Quality_Shader` write lands in.
 * `eCTexCoordSrcBumpOffset` implementation (parallax or plain offset; decompile 0x6dbdb0 / 0x6dbf90).

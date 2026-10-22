@@ -12,7 +12,9 @@ Read first: `docs/PLAN.md` (decisions, milestones), `docs/research/engine-gfx.md
 1. **Never touch the real game install** `B:\SteamLibrary\steamapps\common\Risen` (nor Risen Classic 2009). Test only in the copy
    `B:\DevDrive\risen-test-vk`, **always windowed**. Careful: the copy's `data\common` and `data\compiled` are **junctions into the
    real install**; never write through them (the engine writes `Data/Compiled/Materials/ShaderMaterialPool_User.smp` on shader
-   pool misses: keep the pool hits intact / redirect such writes before shaders change).
+   pool misses: keep the pool hits intact / redirect such writes before shaders change; a Shader Quality below High
+   (Options > Performance, config `/Engine/Render/Shader/Quality`) makes every material miss the High-only Master pool → runtime
+   compiles + writes to `ShaderMaterialPool_User.smp` (materials.md)).
 2. **Vulkan floor**: Vulkan 1.3 core + `VK_KHR_push_descriptor`; everything else optional with a fallback (PLAN.md section 1).
    **Dynamic rendering only**: never `VkRenderPass` / `VkFramebuffer`.
 3. **Commit at milestones**: small, reviewable commits once a feature is built *and* verified (in the game where it touches the
