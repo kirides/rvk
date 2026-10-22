@@ -1,0 +1,6 @@
+id          = "rvk_highfps"
+name        = "Renderer high frame rate check"
+version     = "1.0.0"
+author      = "risen-enhanced-graphics"
+description = "Frame-rate dependence of the hero's movement: frame time distribution, a walk, running jumps, a 15 m drop and a ledge climb, each measured per tick (scenario rvk_highfps, docs/research/fps-limit.md)."
+main        = "main.lua"
