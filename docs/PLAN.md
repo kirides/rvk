@@ -282,6 +282,18 @@ efcompare.ps1` + `mods/rvkcompare` (13 spots: beach rain/sun,
   GPU 0.12 / 0.22 / 0.43 ms (low / medium / high) + the grid draw, floor bake ~0.4 s on a worker, sync validation clean,
   live toggles without hitch, rvk_tests 96 / 96, water off: refcompare 18 PASS + 2 WARN against the new stored reference
   `out\refcompare\20261022-093252` (20 spots). Open: ocean.md 10.
+* **Tuning pass: done (2026-10-22, ocean.md 9.6).** From the review of the side by sides (approved by the user): a long swell
+  from distant storms in every weather (calm 1.5 m / 12 s, narrow spreading) + the swell's tilt in the Fresnel surface: big
+  far waves in sunshine too; the harbour alive (28 % of the swell through the mouth, decaying inwards by a diffracted
+  exposure; chop; gusty wind ripples that also break up the reflections; drifting scum streaks; slosh foam at walls and
+  hulls); surf that reads as surf: a foam buffer (`ocean_foam.comp`, 1,024^2 toroidal cells of 24 units around the camera,
+  white water -> residual foam -> lace over time, advected towards the beach, contact foam pulsing at walls; breaking
+  segments peeling along the crests) shaded with a new foam pattern (warped fractal sheet + round holes of three sizes,
+  prototyped offline), a swash edge dense on the uprush and lacy on the backwash, a glossy wet film on the sand where the
+  swash just drained; shallow water shows the lit sea floor (transparency along the refracted light path); the near-water
+  wave cap follows the player (`eCWeatherAdmin::GetPlayerPosition`). Luma vs engine: sea_horizon -1, harbour_mouth -1,
+  harbour_docks +2, beach_sun -2 .. -16 by the surf's phase (was -34), beach_rain -8 (was -15), sea_cliff +12 .. +17 (its surf + the visible shelf).
+  Ocean GPU ~0.75 ms at 1080p high; sync validation clean; toggles without hitch; rvk_tests 96 / 96.
 
 ### M9+ Enhanced graphics
 * candidates: anisotropic filtering + MSAA/TAA/SMAA, higher-resolution and better-filtered shadows, modern tonemapping/HDR10,

@@ -81,7 +81,10 @@ water luma / hue table (`tools/water_stats.py`; `-Mask` = a `water.debug=normals
 FFT ocean (docs/research/ocean.md, M8; `water.ocean=fft`): compute passes at AfterOpaque (`pass water.ocean` in
 `-PerfFrame`), the sea floor field from the main view's static meshes (`DrawReplacer::observeOpaque`), baked on a worker
 and cached in `bin\rvk\cache\ocean\floor_v1.bin` (delete it to re-learn the coast); rvk.log `enh: ocean: ...` (cascades,
-sea state / Hs, weather -> sea state, `sea floor field ... ms`). Ocean spots of rvkcompare: `sea_cliff`, `sea_horizon`,
+sea state / Hs, weather -> sea state, `sea floor field ... ms`, `foam buffer`, `player position`). The surf's foam: a
+camera-centred buffer (`ocean_foam.comp`, ocean.md 4.4) + the pattern in `shaders/water/water_noise.glsl`; tune foam
+patterns offline first (a numpy port of the noise renders coverage ramps to PNG in seconds; game runs take minutes);
+`water.debug=foam` shows the terms (green white water, blue residual, red whitecaps, grey contact). Ocean spots of rvkcompare: `sea_cliff`, `sea_horizon`,
 `harbour_mouth` (the camera's distance is capped near 6,000 units: give poses as target + distance <= 5,500). Swim check:
 scenario `rvk_swim` (the hero in the sea, his swim line logged, pictures `swim_follow_b*` / `swim_water_b*`). Survey
 scenario `rvk_water` (water level-mesh entities' boxes + a look at each; `-Param 'only=Levelmesh_Lakemesh_06','find=SP_Don'`;

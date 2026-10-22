@@ -13,6 +13,11 @@ centimetres (Risen), the spectrum is evaluated in SI units.
 * 2026-10-22, verbatim: "For the ocean and the harbor it's ok to have a slightly different look, as long as the color
   matches well enough and we have a crazy beautiful water simulation, big far waves getting progressively smaller the closer
   they get towards the harbor/shore."
+* 2026-10-22, the tuning pass (review of `out\water\20261022-102006\sbs_*.png`, approved by the user): (1) big far waves
+  in every weather (the calm sea read as flat), the storm look kept; (2) the harbour calm but alive (chop, some swell through
+  the mouth, reflections, slosh at walls and hulls) and as bright as the engine's; (3) surf that reads as surf (breaking crest
+  lines, white water spreading into lacy residual foam, a bright swash edge with a wet, glossy sand line), not thin
+  filaments; (4) brighter beaches: shallow water showing the lit sea floor; the near-water wave cap keyed to the player.
 * Still in force (water.md 0): the ocean is the open sea only (the world-spanning sea plane, water.md 3); lakes, rivers,
   waterfalls, the swamp pond never get waves or a shore; volumetric water and a real lower shoreline instead of the painted
   surf; the colour anchored to the engine's sea / harbour material. GLSL only. Visual only: the engine's physics plane is
@@ -28,7 +33,11 @@ centimetres (Risen), the spectrum is evaluated in SI units.
 | sea floor field: top-down height raster of the engine's static meshes, signed distance, depth, travel time (eikonal), exposure, disk cache | `src/enh/sea_floor.{h,cpp}` (tests `tests/ocean_tests.cpp`); the rasteriser and the distance transform shared with `src/enh/shore_field.{h,cpp}` |
 | observing the engine's static geometry: `DrawReplacer::wantsOpaque / observeOpaque` (main view, Solid pass, indexed static meshes) | `src/d3d9/device.h`, `src/d3d9/draw.cpp` (`prepareDraw`), `src/enh/water.cpp` (`observeOpaque`, `serviceFloor`) |
 | the engine's weather (states + blend factors) -> sea-state level | `src/engine/weather.{h,cpp}`, symbols in `src/engine/symbols.h` |
-| surface: cascade sampling (vertex: explicit LOD by footprint; pixel: filtered + lost slope variance + macro slope), attenuation, near-camera cap, the shore wave train | `shaders/water/ocean_surface.glsl` (included by `water_common.glsl`) |
+| surface: cascade sampling (vertex: explicit LOD by footprint; pixel: filtered + lost slope variance + macro slopes), attenuation, the near-water cap (player) | `shaders/water/ocean_surface.glsl` (included by `water_common.glsl`) |
+| the floor field's sampling, the shore wave train and its surf terms as plain functions (shared by the draws and the foam pass) | `shaders/water/ocean_shore.glsl` |
+| noise and the foam pattern (warped fractal sheet + round holes of three sizes) | `shaders/water/water_noise.glsl` |
+| the surf's foam buffer: per-cell coverage over time around the camera (white water, residual foam, contact foam), advected | `shaders/water/ocean_foam.comp`, `src/enh/ocean.{h,cpp}` (`recordFoam`) |
+| the player's position (`eCWeatherAdmin::GetPlayerPosition`) | `src/engine/weather.{h,cpp}`, `src/engine/symbols.h` |
 | geometry (FFT path of the clipmap), shading (macro Fresnel, SSR on the macro normal, Toksvig-like spec, SSS, foam texture, surf milk) | `shaders/water/water_ocean.vert`, `shaders/water/water.frag`, `shaders/water/water_common.glsl` (`foamTexture`, `foamCover`, `waterWorley`) |
 | the ocean in the water module: settings, sea state follower, the simulation pass (AfterOpaque), WaterBlock fields | `src/enh/water.{h,cpp}` |
 | settings `water.ocean`, `water.ocean_quality`, `water.sea_state`, `water.wind_direction`, `water.wave_scale`; debug views `sea_floor`, `waves` | `src/core/settings.{h,cpp}`, `src/hal/vulkan/device.cpp` (`applyWater`) |
@@ -48,8 +57,10 @@ centimetres (Risen), the spectrum is evaluated in SI units.
 * **Directional spreading: Hasselmann** `D = Q(s) |cos(theta / 2)|^{2s}` with `s(w)` of Horvath 2015 eq. 39 plus his swell
   term `16 tanh(w_p / w) xi^2`, `Q(s)` from ln-Gamma (Stirling series after a shift; tested against `std::lgamma`);
   normalised over [-pi, pi] [C: test, 6 exponents within 0.2 %].
-* **Swell**: a second JONSWAP-shaped spectrum at its own period and direction (wind + 0.3 rad), narrow (`s` = 40), its
-  `alpha` solved so its significant height is the preset's [C: test].
+* **Swell**: a second JONSWAP-shaped spectrum at its own period and direction (wind + 0.3 rad), narrow (`s` = 60:
+  long-crested, from a distant storm), its `alpha` solved so its significant height is the preset's [C: test]. It is there in
+  every weather (tuning pass): the calm sea carries a 1.5 m / 12 s swell under its small wind sea, so the open sea always
+  shows big, long waves.
 * `S(k) = S(w, theta) dw/dk / k` (deep water); the k-plane integral equals the 1D `m0` [C: test, within 2 %]; the
   smallest ripples damped by `exp(-(k * 1 cm)^2)`.
 * Dispersion quantised to a repeat time of 256 s (Tessendorf): the animation loops, the time stays small (fp32 phase).
@@ -58,14 +69,15 @@ centimetres (Risen), the spectrum is evaluated in SI units.
 
 | level | U10 m/s | fetch km | wind-sea Hs (JONSWAP) | swell Hs / period | choppiness | weather (auto) |
 |---|---|---|---|---|---|---|
-| 0 calm | 5 | 25 | 0.5 m | 0.8 m / 10 s | 0.75 | |
+| 0 calm | 5.5 | 30 | 0.6 m | 1.5 m / 12 s | 0.8 | |
 | 0.6 | | | | | | `Sunny_Full` |
-| 1 moderate | 8 | 60 | 1.3 m | 1.1 m / 11 s | 0.9 | |
+| 1 moderate | 8 | 60 | 1.3 m | 1.7 m / 12.5 s | 0.9 | |
 | 1.2 | | | | | | `Sunny_Half_*`, clouds |
-| 2 rough | 11.5 | 110 | 2.6 m | 1.5 m / 12 s | 1.1 | rain |
-| 3 storm | 15 | 180 | 4.3 m | 2.2 m / 13 s | 1.25 | `Stormy_*`, thunder |
+| 2 rough | 11.5 | 110 | 2.6 m | 2.0 m / 13 s | 1.1 | rain |
+| 3 storm | 15 | 180 | 4.3 m | 2.5 m / 14 s | 1.25 | `Stormy_*`, thunder |
 
-Measured totals (log `enh: ocean: sea state: Hs ...`): storm Hs 4.68 m (wind-sea peak 118 m) [C]. `water.wave_scale`
+(Before the tuning pass: calm 5 m/s, 25 km, swell 0.8 m / 10 s; storm swell 2.2 m / 13 s; swell `s` 40.) Measured totals
+(log `enh: ocean: sea state: Hs ...`): storm Hs 4.60 m (wind-sea peak 118 m) [C]. `water.wave_scale`
 scales the amplitude (the spectrum's variance by its square).
 
 ### 2.3 Cascades (each wave number in exactly one band: no frequency counted twice)
@@ -108,14 +120,19 @@ footprint left out, odd outer-edge vertices averaged) is kept. Per vertex:
   (`max(25, distance * 6 / N)` world units): the same world point gets the same displacement on both sides of a level
   border (no cracks), the coarse levels take prefiltered waves from the mips (no aliasing, no popping where the clipmap's
   footprints move);
-* attenuated per cascade by the sea floor field (section 4) and capped near the camera when the camera is down at the
-  water (wading, swimming: `nearCameraCap`, 30 units at the camera, full from 3,000 units; the cap fades out for a camera
-  2 .. 7 m above the sea). The pixel shader caps only the two long cascades' slopes the same way: the short waves' normals
-  stay, so the flattened water near a swimmer still shows its chop;
+* attenuated per cascade by the sea floor field (section 4) and capped around a swimming or wading **player**
+  (`nearCameraCap`, 30 units within 700 units of him, full from 3,000 units). The player's position is the one the game
+  hands the weather (`eCWeatherAdmin::GetPlayerPosition`, Engine.dll 0x713ea0, read once per frame, SEH-guarded) [C: at the
+  spots it is the player's spawn point (-38,559 / 15 / -5,770) while the camera is elsewhere]; the cap is full while his
+  origin is >= 150 units below the sea level (swimming: -250), partial while he wades, off while he stands on the beach (the
+  surf rolls in in front of him). Without the symbol: around the camera when the camera is 2 .. 7 m above the sea, as
+  before. The pixel shader caps only the two long cascades' slopes the same way: the short waves' normals stay, so the
+  flattened water near a swimmer still shows its chop;
 * plus the shore wave train and the M7 lowered, swashing waterline (now in phase with the train: the run-up arrives with
   the crests);
-* towards the far plane (45 .. 90 % of the engine's far) the displacement fades to the mean level: the sea meets the
-  horizon without a jagged silhouette, the shading keeps the waves' normals.
+* towards the far plane (60 .. 97 % of the engine's far; 45 .. 90 % before the tuning pass) the displacement fades to the
+  mean level: the long swell still lifts the horizon line a little, the far plane cuts no jagged silhouette (the coarse
+  levels take the short waves from the mips), the shading keeps the waves' normals.
 
 The engine's sea plane draws stay skipped, the fake shore overlay too (water.md 4.1); the physics plane is untouched.
 
@@ -140,7 +157,9 @@ coast overlay's box + 30,000 units out to sea, fixed so the cache stays valid) a
 * **direction** of travel `-grad T` and the **coherence** of the fronts (the length of the box-blurred direction: ~0 on the
   ridges where fronts from two coasts meet);
 * **exposure**: on a coarse grid (~600-unit cells) the share of 16 directions in which the water stays open for 400 m,
-  remapped (an open beach sees ~half of them -> 1, a basin behind a narrow mouth -> ~0), blurred once (diffraction);
+  remapped (an open beach sees ~half of them -> 1, a basin behind a narrow mouth -> ~0), blurred once, then **diffracted**:
+  the exposure spreads from open water into sheltered water through the water only (geodesic, x 0.8 per cell, 16 rounds of
+  an 8-neighbour max), so a harbour gets calmer the further in from its mouth (tuning pass; +10 ms per bake);
 * the M7 distance to the engine's coast overlay (beaches: where the waterline is lowered and the sand gets wet).
 
 Two RGBA16F textures (A: signed distance, depth, direction x coherence; B: travel time, exposure, overlay distance, seen),
@@ -159,8 +178,9 @@ is a 1 m deep shelf out to x = -42,000 (the waves break on its edge), 10 m at -4
 
 * **depth**: `1 - exp(-d / (0.18 L_c))`: waves feel the bottom from about half their length, the long ones first;
 * **distance to the waterline**: `smoothstep(0, 0.8 L_c, sd)`: no long swell right at the shore;
-* **shelter**: `mix(1, exposure, (0.85, 0.75, 0.45, 0.2)[c])`: a harbour basin keeps 15 % of the long swell but most of the
-  short wind chop;
+* **shelter**: `mix(1, exposure, (0.72, 0.6, 0.3, 0.1)[c])`: a closed harbour basin keeps 28 % of the long swell (more near
+  its mouth: the diffracted exposure) and most of the short wind chop (before the tuning pass 0.85 / 0.75 / 0.45 / 0.2: the
+  harbour read as dead flat);
 * **breaking limit**: all weights scaled so the sea's amplitude (~Hs / 2) stays below 0.4 x the depth;
 * near the camera at the water: the cap above.
 
@@ -178,19 +198,44 @@ travel, by incoherent fronts and by low exposure. **Breaking**: where the height
 the crest leans forward (second harmonic), the horizontal motion grows, and the broken bore keeps ~0.5 x the depth over the
 surf zone. Displacement and slope are analytic (`d theta / d xz = -w dir / c`).
 
-### 4.4 Surf, foam, swash
+### 4.4 Surf, foam, swash (rewritten in the tuning pass)
 
-* **Breaking foam**: a white front on the breaking crest and a trail of broken water behind it (`exp(-4.5 x phase since
-  the crest)`), only on segments chosen by slow noise along the coast (not every stretch breaks at once).
-* **Surf zone**: where waves break or have broken: streaky broken water + **milk** (the aerated, sandy water of the surf
-  zone: the sea's own tint scattered back, up to 70 %).
-* **Folding foam** of the open sea (the Jacobian, temporal), **contact lace** at the waterline and at rocks / walls.
-* Every foam term is a coverage applied to one **foam texture** moving with the water (sampled at the undisplaced position):
-  ridged-noise filaments at 95 / 34 / 12 units over a warped domain, cellular bubbles punched in, broken into patches;
-  scales smaller than a few pixels (`fwidth` of the position) fade to their mean: no sparkle at distance. (The first
-  versions used cellular noise edges: they read as a hexagon net and were replaced.)
-* **Swash**: the M7 lowered waterline (13 units below the engine's, the overlay band only) swashes +-8 units in phase with
-  the train's arrival; the wet-beach pass (water.md 4.5) darkens the sand it reaches.
+**Coverage over time: the foam buffer** (`ocean_foam.comp`, `Ocean::recordFoam`, AfterOpaque after the simulation): a
+camera-centred window of 1,024 x 1,024 cells of 24 units (245 m), addressed toroidally (cell c in texel c mod N: the window
+follows the camera without copies; cells entering it start from an estimate of the steady state), two RGBA16F images
+(this frame's, last frame's = the history; 16 MiB, created with the tiles). Per cell and frame:
+
+* the history, read bilinear through a wrapping sampler **advected** back along the drift (towards the beach: 20 units/s,
+  110 in the surf zone) and spread a little (4 neighbours mixed in at 0.6 / s);
+* **white water** (r): set by a crest plunging where it breaks (the train's breaking x its crest front x a segment noise that
+  **peels along the crest**: advected along the crest by a two-phase flow map) and by the bores rolling on across the surf
+  zone (weaker the further past the break), decays at 2.2 / s;
+* **residual foam** (g): gains part of what the white water loses (16 % calm .. 45 % storm), dissolves at 0.28 / s (calm) ..
+  0.12 / s (storm), faster outside the surf zone;
+* **contact foam** (b): within ~0.5 .. 1.5 m of walls, rocks and hulls (the floor field's signed distance), pulsing with a
+  slosh at the train's period, out of phase along the wall.
+
+The shading turns coverages into foam with one **pattern** attached to the water (`water_noise.glsl foamField /
+foamAmount`, sampled at the undisplaced position): a domain-warped fractal sheet (5 octaves from 130 units, through a
+logistic so its values are ~uniform: coverage = share of foam) thresholded by the coverage, with round holes of three
+sizes (42 / 15 / 6 units, cellular distance to scattered points: round, not a net) punched in, larger at low coverage. High
+coverage = dense white water with a few holes, low = lace between merged holes; soft edges (thin foam translucent),
+octaves below a few pixels fade, far away (footprint > 25 .. 80 units) the mean coverage. (Rejected: cell borders - a
+hexagon net; ridged-noise filaments - cracks / lightning, `out\water\20261022-102006\sbs_beach_sun.png`.) Prototyped
+offline (numpy) before it went in.
+
+Per pixel on top: the open sea's **whitecaps** (the tiles' temporal Jacobian foam), the **swash zone** (the last metre of
+water before the beach: always some broken water), **sheltered streaks** (harbour basins, coves inside the engine's coast
+overlay, low exposure: faint drifting scum lines along the wind, where the engine painted its moving foam), the **swash
+edge** (the water's last centimetres on the beach or at a wall: 15 units deep and dense while the swash runs up, 5 units
+and lacy while it drains back, in phase with `water_ocean.vert`'s swash). Outside the buffer's window the same terms are
+evaluated in place (no history). Dense white water is lit at albedo 0.78, lace at 0.58, a little mottled; **milk** (the
+aerated water of the surf zone) mostly right behind the breaking crests, clearing between the bores.
+
+**The wet sand** (`wet_shore.frag`): besides the M7 darkening up to the swash's reach, where the FFT ocean's swash has just
+drained away (the time since the water uncovered the point, from the swash's phase: `pi - asin(y)`), the sand carries a
+film of water: darker (x up to 0.6) and **glossy** (the sky cube's reflection x Schlick Fresnel, strong at grazing views),
+drying within ~1.6 s (blend changed to `dst * src.a + src.rgb`; the sky cube via `ImageRole::SkyEnvCube`).
 
 ## 5. Shading (`water.frag`, the engine's ocean model kept)
 
@@ -204,6 +249,15 @@ surf zone. Displacement and slope are analytic (`d theta / d xz = -w dir / c`).
   dark rocks); on slopes facing away the cube lookup's direction is kept above the horizon.
 * **Specular without sparkle**: the slope variance the texture filtering removed (`textureQueryLod` per cascade x the
   band's slope variance) widens the engine's specular lobe (Toksvig-like, energy kept).
+* **The swell's bands** (tuning pass): the Fresnel weight's surface takes the longest cascade (the swell) at 85 % of its
+  tilt, the second cascade and the train at 40 % (masking): the long swell reads as light and dark bands towards the horizon.
+* **Shallow water shows the sea floor** (tuning pass): the transparency of the FFT ocean follows the light's real way through
+  the water (refracted down to the floor and back, `T = exp(-0.0011 murkiness path)`), not the view ray's length (the
+  engine's depth fade turned even 1 m of water opaque at grazing views): `colour += (1 - F) T (refraction - body)`, so what
+  is not reflected shows the lit floor through shallow water (tinted along the path) and the material's body colour where
+  it is deep; deep water is the engine's model unchanged.
+* **Wind ripples** (tuning pass): 3 octaves of drifting gradient-noise slopes (170 units) on top of the cascades, weak on
+  the open sea, stronger in sheltered water (gusty); they also break up the traced reflections of walls and hulls there.
 * **Subsurface scattering** on the crests: backlit by the sun when looking towards it (`((-V.L) / 2 + 1 / 2)^4`), more on
   thin grazing crests, a little sky light in every crest, in the material's own turquoise (its diffuse textures x 1.4).
 * Fog, refraction, depth fade, the engine's lighting curve, volume tint: as in M7.
@@ -239,6 +293,12 @@ simulation pass **0.432 ms** (medium 0.222, low 0.122), the render pass with the
 (dispatches, push descriptors, 4 x 2 x 9 blits); observing the static meshes for the floor field did not change the
 draw-call CPU time measurably (2.29 vs 2.33 ms per frame, Gerstner vs FFT). Live toggles of `water.ocean`, `water.ocean_quality`, `water.sea_state`, `water.enabled`: 0 pipelines built,
 max frame interval 15.4 - 25 ms in the 5 s windows (the session's normal spread at 80 fps).
+
+**Tuning pass** [C] (`beach_sun`, 1920 x 1080, vsync off, water quality high, ocean quality high, `-PerfFrame 2200`): the
+`water.ocean` pass (simulation + the foam buffer, 1,024^2 cells) **0.492 ms** (the simulation alone was 0.432: the foam pass
+~0.06 ms), the wet beach 0.026 ms, the render pass with the refracted + alpha draws incl. the sea 0.228 ms: the ocean
+**~0.75 ms** of a 3.0 ms GPU frame (budget 2 ms). Memory: + 16 MiB (the foam buffer). The floor bake's exposure stage + 10 ms
+(diffraction). The foam pattern is evaluated only where some coverage is > 0.004.
 
 ## 9. Verification
 
@@ -316,6 +376,57 @@ over the FFT water and hides his upper body (with the engine's water it lies beh
 * Water off: refcompare against the new stored reference `out\refcompare\20261022-093252` (20 spots): 18 PASS + 2 WARN
   (sea noise of the engine's animated sea), run `out\refcompare\20261022-094445`.
 
+### 9.6 Tuning pass (2026-10-22)
+
+Side by side + motion (`scripts\water-compare.ps1 -EngineDir / -MaskDir out\water\20261022-085233 -Burst 6 -Interval 6`):
+**`out\water\20261022-124354\`** (`sbs_<spot>.png`, `motion_<spot>.png`); earlier iterations of the pass in
+`20261022-121656` (first: foam far too dense), `122017`, `122428`, `122753`, `123059`, `123347`; the foam debug view
+(`water.debug=foam`: green white water, blue residual, red whitecaps, grey contact) in `20261022-122222`.
+
+| spot | engine luma | before (9.1) | tuning pass | d | engine hue | now | spread over runs 5-7 |
+|---|---|---|---|---|---|---|---|
+| sea_cliff | 86.1 | 85.8 | 103.3 | +17.2 | 180 | 183 | +12.4 .. +17.2 |
+| sea_horizon | 73.3 | 73.0 | 72.3 | -1.1 | 164 | 166 | -0.3 .. -1.1 |
+| harbour_mouth | 59.4 | 54.6 | 58.2 | -1.2 | 160 | 168 | +0.7 .. -1.6 |
+| harbour_docks | 39.2 | 36.5 | 41.5 | +2.3 | 114 | 118 | -0.9 .. +2.3 |
+| beach_sun | 132.3 | 98.7 | 130.1 | -2.2 | 99 | 113 | -1.8 .. -15.9 (mean of 5 runs -7) |
+| beach_rain (storm) | 60.7 | 45.9 | 52.1 | -8.5 | 192 | 192 | -6.9 .. -8.5 |
+
+(The spread: the ocean's time is not pinned by the scenario: the phase of the bores, the swash and the foam differ per
+capture, as do the engine's own splash particles; the frame's lighting was the same in every run: sand 55.3 .. 56.2, engine
+56.1. A sanity run after the last refactor, `20261022-124946`: beach_sun -15.9 in a phase between the bores, harbour_mouth
+-1.3.) sea_cliff by screen band (run 5,
+engine / ours): the sky-near sea 161 / 164, the open sea 62 / 58, the shelf 46 / 69 and 48 / 97: the open sea matches, the
+difference is the surf on the shelf (white water + lace where the engine shows dark rock under its two painted foam
+blobs) and the shallow shelf now showing its floor; accepted (the user asked for surf that reads as surf, the colour of the
+sea itself matches).
+
+Looked at, per spot:
+* **sea_horizon**: long swell rolling to the horizon in the calm Sunny_Half weather (before: almost flat), the bands of the
+  swell lit differently, the horizon line lifted a little by the swell; the storm look unchanged in character.
+* **sea_cliff**: crest lines breaking along the shelf's edge (segments peeling along the crest), white water behind them
+  spreading into lace with round, torn holes, the shelf turquoise over its rocks, the open sea with big swell.
+* **beach_sun / beach_rain**: breaking crest lines and bores rolling in, residual lace drifting towards the beach, the swash
+  edge running up and draining with a glossy film on the sand; the shallow water shows the lit sand (beach_sun -2 .. -16
+  instead of -34); beach_rain still darker than the engine's bright painted overlay (-7 .. -9 instead of -15).
+* **harbour_mouth / harbour_docks**: residual swell and chop in the basin, faint drifting scum streaks, a slosh line at the
+  walls and hulls, the traced reflections of walls and hulls broken up by the ripples; luma within 2.5. The bright splash at
+  the quay walls in some captures is the engine's wave-splash particle effect (section 10).
+* **Swimming** (`rvk_swim`, `out\water\swim2\`): the cap now follows the player (logged at the spots: player -38,559 / 15 /
+  -5,770 while the camera is elsewhere; in the sea the hero at -43,500 / -250 / -8,200): the waterline at his chest as
+  before; from the camera 1 m above the water the near foam showed round "cheese" holes and a beige tint (sand through
+  translucent foam): the holes got their own warp, the sheet's edge was sharpened, the foam colour made neutral.
+
+Checks: `-SyncValidation` with water + ocean quality high at beach_sun and harbour_mouth: no validation messages; live toggles
+(`rvk_shadows -Commands`: water on, ocean gerstner / fft, ocean quality high, sea state storm, water off / on): 0 pipelines
+built at draw time, max frame interval 13.4 - 25.3 ms per 5 s window except the window of the session's first enable
+(48 ms: the first floor-field upload and, at the time, the foam buffer's allocation, which now happens with the tiles);
+rvk_tests 96 / 96; water off: refcompare against `out\refcompare\20261022-093252`: run `20261022-124228` 16 PASS + 2 WARN
+(beach_sun, sea_cliff: the engine's animated sea) + sea_cliff FAIL / lava_cave INVALID (pose 4.4 > 4) while two other game
+sessions ran on the GPU (the engine's timed surf overlay at the rocks in another phase); re-run alone
+(`20261022-124747`, `-Spots sea_cliff,lava_cave,beach_sun`): sea_cliff WARN, beach_sun WARN, lava_cave PASS = the known
+state.
+
 ## 10. Limits / open issues
 
 * The floor field only knows geometry the engine drew in the main view (cache accumulates it); unseen texels count as
@@ -323,11 +434,15 @@ over the FFT water and hides his upper body (with the engine's water it lies beh
   meshes (constant instancing) are not rasterised.
 * The shore train is a single period and direction field; crossing seas at headlands fade (coherence) instead of
   interfering.
-* The near-camera cap uses the camera, not the player (the follow camera is ~3-7 m behind; `rvk_swim` shows the swim
-  line plausible from it). From a camera 1 m above the water next to a swimmer the engine's swim-splash particle is drawn
-  as a flat bright patch over the FFT water (9.4): not understood yet.
-* The beaches are 15 - 34 luma darker than the engine's painted surf (9.1); the colour of the open sea and the harbour
-  matches within 5.
+* The near-water cap follows the player (9.6, tuning pass). From a camera 1 m above the water next to a swimmer the
+  engine's swim-splash particle is drawn as a flat bright patch over the FFT water (9.4): not understood yet.
+* The beaches: beach_sun 2 - 16 luma below the engine (by the surf's phase), beach_rain 7 - 9 darker (the engine's additive overlay is brighter
+  than lit foam in the storm's dark light); sea_cliff 12 - 17 brighter (its surf and the visible shelf, 9.6). The open sea
+  and the harbour within 2.5.
+* The foam buffer covers 245 m around the camera; further out the surf terms are evaluated in place (no history: no trail,
+  no drift); the residual foam has no notion of currents (it drifts towards the beach along the train's direction).
+* The foam buffer's sources come from the shore train only (one period / direction field); the open sea's whitecaps keep
+  the tiles' Jacobian foam.
 * The engine's wave-splash particle effect at the harbour quay (the "glittery patch" bottom-left at `harbour_docks`) is an
   engine particle system shown by both renderers (it is in the engine capture `out\water\20261022-083322\eng`); it is not
   part of the water and is left as the engine draws it.
