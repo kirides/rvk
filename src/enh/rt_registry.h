@@ -28,6 +28,7 @@ struct BlasKey {
     std::uint32_t primitives = 0;          // triangles
     std::int32_t baseVertex = 0;
     std::uint32_t index32 = 0;
+    std::uint32_t strip = 0;               // a triangle strip (D3DPT_TRIANGLESTRIP: primitives + 2 indices), built as a list
     bool operator==(const BlasKey&) const = default;
 };
 std::uint64_t hash(const BlasKey& k);

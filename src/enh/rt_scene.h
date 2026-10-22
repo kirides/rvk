@@ -88,6 +88,13 @@ private:
         std::uint32_t instanceOffset = 0;
     };
     static Layout layoutOf(const d3d9::VertexDecl* decl);
+    // the BLAS key of a draw (its buffers' ids + generations, the range, a strip flag)
+    static rt::BlasKey keyOf(const d3d9::ReplaceQuery& q);
+    struct EngineSub {
+        std::uint32_t firstPrimitive = 0, primitives = 0;
+        const void* material = nullptr;
+    };
+    static bool engineSubMeshes(const d3d9::ReplaceQuery& q, std::vector<EngineSub>& out);
 
     enum class BlasState : std::uint8_t { Pending, Built, Failed };
     struct Blas {
@@ -101,6 +108,11 @@ private:
         vk::rt::AccelerationStructure as;
         rt::Aabb bounds;             // object space, from the CPU copy at build time
         std::uint32_t maxVertex = 0;
+        // a triangle strip (SpeedTree branches / fronds): its indices converted to a list at build time (degenerate
+        // triangles dropped), in a buffer of its own that the BLAS and the records read; triangles = the list's count
+        vk::rt::AddressBuffer listIndices;
+        std::vector<std::uint8_t> listData;  // the converted indices until the build copies them (CPU, prepareInputs)
+        std::uint32_t triangles = 0;
         std::uint32_t refs = 0;      // registry instances
         std::uint32_t serial = 0;    // build / compaction generation (stale compaction queries)
         bool compacted = false;
@@ -129,6 +141,13 @@ private:
         };
         std::vector<Segment> segments;
         std::uint64_t segmentsFrame = 0;
+        // depth-only draws (z pre-pass / cascades: eCMeshResource2::RenderZPass, no material in the tag): the engine's
+        // sub-meshes of the range: one = its material (engineSingle), several = per-triangle materials (engineSegments,
+        // material ids with a reference each), checked again every 4 x kMaterialRefresh frames or when one died
+        std::vector<Segment> engineSegments;
+        const void* engineSingle = nullptr;
+        std::uint64_t engineChecked = 0;
+        bool engineDead = false;
         const void* material = nullptr;  // the first draw's engine objects (diagnostics; may be stale)
         const void* entity = nullptr;
         std::uint32_t opDesc = 0;
@@ -164,6 +183,7 @@ private:
     static void applyMaterial(rt::Registry::Instance& in, std::uint32_t id, std::uint8_t rank, bool overlay, std::uint64_t frame);
     const RtMaterial* bestMaterial(const Blas& b) const;
     void refreshSegments(Blas& b);
+    void learnEngineMaterials(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& b, d3d9::draws::Tag& tagOut, bool& single);
     void learnLayer(d3d9::Device& dev, const d3d9::ReplaceQuery& q, const rt::BlasKey& key);
     // the record / segment material fields of `m` (bindless slots of this frame); returns whether the opacity has a texture
     struct MaterialFields {
@@ -232,6 +252,7 @@ private:
         std::uint64_t compactSaved = 0;
         double buildCpuMs = 0.0, passCpuMs = 0.0, observeMs = 0.0, gpuMs = 0.0;
         std::uint64_t textured = 0, untextured = 0, cutOut = 0, segmented = 0, segments = 0, speedTree = 0;  // records of the last frame
+        std::uint64_t engineSegments = 0, engineMerged = 0;
         std::uint64_t gpuSamples = 0;
     } iv_;
     std::deque<std::pair<std::uint64_t, std::vector<Entry>>> contents_;  // frame value -> the TLAS's instances (last 4)
@@ -239,6 +260,7 @@ private:
     std::uint64_t lastTriangles_ = 0;
     std::chrono::steady_clock::time_point lastLog_{};
     std::unordered_set<const void*> declLogged_;
+    std::unordered_map<std::uint64_t, const char*> vsVerdict_;  // VS hash (^ instanced) -> why its draws are not taken (null = taken)
     std::unordered_set<std::uint64_t> blendLogged_;
     std::unordered_set<const char*> speedTreeLogged_;  // reasons (string literals)
     std::unordered_set<std::uint32_t> reasonsLogged_;

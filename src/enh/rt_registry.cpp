@@ -31,6 +31,7 @@ std::uint64_t hash(const BlasKey& k) {
     h = mix(h, (static_cast<std::uint64_t>(k.vertexOffset) << 32) | k.stride);
     h = mix(h, (static_cast<std::uint64_t>(k.first) << 32) | k.primitives);
     h = mix(h, (static_cast<std::uint64_t>(static_cast<std::uint32_t>(k.baseVertex)) << 32) | k.index32);
+    h = mix(h, k.strip);
     return h;
 }
 

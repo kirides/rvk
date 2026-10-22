@@ -9,6 +9,7 @@
 #include <spdlog/spdlog.h>
 
 #include "engine/materials.h"
+#include "engine/memread.h"
 #include "vk/context.h"
 #include "vk/frames.h"
 
@@ -213,6 +214,108 @@ RtScene::Layout RtScene::layoutOf(const d3d9::VertexDecl* decl) {
     return l;
 }
 
+rt::BlasKey RtScene::keyOf(const d3d9::ReplaceQuery& q) {
+    rt::BlasKey key;
+    const d3d9::ResourceRef vr = q.vertexBuffer->ref(), ir = q.indexBuffer->ref();
+    key.vb = vr.id;
+    key.vbGen = vr.generation;
+    key.ib = ir.id;
+    key.ibGen = ir.generation;
+    key.vertexOffset = q.vertexOffset;
+    key.stride = q.vertexStride;
+    key.first = q.first;
+    key.primitives = q.primitives;
+    key.baseVertex = q.baseVertex;
+    key.index32 = q.indexBuffer->index32() ? 1u : 0u;
+    key.strip = q.primitiveType == 5 ? 1u : 0u;
+    return key;
+}
+
+// The engine's sub-meshes inside a depth-only draw (the main view's z pre-pass and the sun cascades run
+// eCMeshResource2::RenderZPass: one draw over a merged index range of the opaque sub-meshes, masked ones alone, no
+// eCSubMesh::Render and so no material in the draw tag; docs/research/rt-reflections.md 3.3). eCRenderContextMesh +0x28 =
+// its eCMeshResource2; sub-meshes at +0x58 (pointer) / +0x60 (count), 0x48 bytes each: first index +0x28, index count +0x2c,
+// eCMaterialResource2* +0x38 [C, Engine.dll RenderZPass 0x7603b0]. Sub-meshes lying wholly inside the draw's range, in
+// primitives relative to its start.
+bool RtScene::engineSubMeshes(const d3d9::ReplaceQuery& q, std::vector<EngineSub>& out) {
+    out.clear();
+    if (q.tag == nullptr || q.tag->source != d3d9::draws::Source::Mesh || q.tag->material != nullptr || q.tag->context == nullptr ||
+        q.instanced || q.primitiveType != 4) {
+        return false;
+    }
+    const void* mesh = nullptr;
+    const std::uint8_t* subs = nullptr;
+    std::int32_t count = 0;
+    if (!engine::readAt(q.tag->context, 0x28, mesh) || mesh == nullptr || !engine::readAt(mesh, 0x58, subs) || subs == nullptr ||
+        !engine::readAt(mesh, 0x60, count) || count <= 0 || count > 4096) {
+        return false;
+    }
+    const std::uint64_t first = q.first, end = first + 3ull * q.primitives;
+    for (std::int32_t i = 0; i < count; ++i) {
+        std::uint32_t range[2]{};
+        const void* material = nullptr;
+        const std::uint8_t* sub = subs + static_cast<std::size_t>(i) * 0x48;
+        if (!engine::safeRead(sub + 0x28, range, sizeof(range)) || !engine::readAt(sub, 0x38, material)) return false;
+        if (material == nullptr || range[1] < 3 || range[0] < first || static_cast<std::uint64_t>(range[0]) + range[1] > end) continue;
+        if ((range[0] - first) % 3 != 0) continue;
+        out.push_back({static_cast<std::uint32_t>((range[0] - first) / 3), range[1] / 3, material});
+    }
+    std::sort(out.begin(), out.end(), [](const EngineSub& a, const EngineSub& b) { return a.firstPrimitive < b.firstPrimitive; });
+    return !out.empty();
+}
+
+// a depth-only draw's materials from the engine's sub-meshes: one sub-mesh over the whole range = the draw's material
+// (`tagOut` gets it); several (a merged range) = per-triangle materials of the BLAS (engine segments, resolved once)
+void RtScene::learnEngineMaterials(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& b, d3d9::draws::Tag& tagOut, bool& single) {
+    single = false;
+    if (q.tag == nullptr || q.tag->material != nullptr) return;
+    const bool depthOnly = q.phase.view == View::Shadow || q.phase.pass == Pass::DepthPrepass;
+    if (!depthOnly) return;
+    const std::uint64_t frame = dev.frameValue();
+    if (b.engineChecked != 0 && frame < b.engineChecked + kMaterialRefresh * 4 && !b.engineDead) {
+        if (b.engineSingle != nullptr) {
+            tagOut = *q.tag;
+            tagOut.material = b.engineSingle;
+            single = true;
+        }
+        return;
+    }
+    std::vector<EngineSub> subs;
+    if (!engineSubMeshes(q, subs)) {
+        b.engineChecked = frame;
+        return;
+    }
+    if (subs.size() == 1 && subs[0].firstPrimitive == 0 && subs[0].primitives == q.primitives) {
+        b.engineSingle = subs[0].material;
+        b.engineChecked = frame;
+        b.engineDead = false;
+        tagOut = *q.tag;
+        tagOut.material = b.engineSingle;
+        single = true;
+        return;
+    }
+    b.engineChecked = frame;
+    if (b.key.primitives < 64) return;
+    // a merged range: each sub-mesh's material (the pool image of its diffuse: the depth pass samples none)
+    std::vector<Blas::Segment> segs;
+    d3d9::draws::Tag t = *q.tag;
+    d3d9::ReplaceQuery qs = q;
+    qs.tag = &t;
+    for (const EngineSub& e : subs) {
+        t.material = e.material;
+        const std::uint32_t id = materials_.resolve(dev, qs);
+        if (id == 0) continue;
+        segs.push_back({e.firstPrimitive, e.primitives, 0, id});
+    }
+    for (const Blas::Segment& old : b.engineSegments) materials_.release(old.material);
+    b.engineSegments = std::move(segs);
+    b.engineSingle = nullptr;
+    b.engineChecked = frame;
+    b.engineDead = false;
+    b.segmentsFrame = 0;  // the record's segment table again
+    ++iv_.engineMerged;
+}
+
 std::uint8_t RtScene::viewBit(View v) const { return v == View::Main ? 1 : v == View::Shadow ? 2 : 4; }
 
 void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
@@ -241,7 +344,8 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     };
     d3d9::Buffer* vb = q.vertexBuffer;
     d3d9::Buffer* ib = q.indexBuffer;
-    if (q.primitiveType != 4) return reject("not a triangle list");
+    // triangle lists; strips (SpeedTree branches / fronds) are converted to lists at build time
+    if (q.primitiveType != 4 && q.primitiveType != 5) return reject("not a triangle list / strip");
     if (vb == nullptr || ib == nullptr || q.primitives == 0 || q.engineVs == nullptr) return skip();
     // water reflects, it is not reflected: its meshes are learnt from the main view's refracted / water draws and left out
     // of every view (the sun cascades draw the sea too, untagged: StaticMesh there)
@@ -254,18 +358,7 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         // material on the same geometry): the frame's first layer is the base, its material is the range's
         if (!water && q.vertexBuffer != nullptr && q.indexBuffer != nullptr && !q.vertexBuffer->ringCopied() &&
             !q.indexBuffer->ringCopied()) {
-            rt::BlasKey key;
-            const d3d9::ResourceRef vr = q.vertexBuffer->ref(), ir = q.indexBuffer->ref();
-            key.vb = vr.id;
-            key.vbGen = vr.generation;
-            key.ib = ir.id;
-            key.ibGen = ir.generation;
-            key.vertexOffset = q.vertexOffset;
-            key.stride = q.vertexStride;
-            key.first = q.first;
-            key.primitives = q.primitives;
-            key.baseVertex = q.baseVertex;
-            key.index32 = q.indexBuffer->index32() ? 1u : 0u;
+            const rt::BlasKey key = keyOf(q);
             if (const auto it = blasByKey_.find(key); it != blasByKey_.end()) {
                 Blas* b = findBlas(it->second);
                 if (b != nullptr && blendLogged_.size() < 200 && blendLogged_.insert(reinterpret_cast<std::uintptr_t>(q.tag != nullptr ? q.tag->material : nullptr) ^ q.enginePs->hash).second) {
@@ -310,13 +403,22 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     if (q.tag != nullptr && q.tag->material != nullptr && waterMaterials_.contains(q.tag->material)) return skip();
     if (q.blending) return reject("blended");                                        // alpha-blended: not P1
     if (speedTree && (q.tag == nullptr || q.tag->opDesc > 1)) return reject(q.tag == nullptr ? "untagged" : "leaves (op > 1)");  // P4
-    const d3d9::ShaderSemantics& sem = q.engineVs->semantics;
-    using S = d3d9::ShaderSemantics;
-    if ((sem.flags & S::Material) == 0 || (sem.flags & (S::Skinned | S::Vegetation | S::Leaves)) != 0) return reject("vertex shader class");
-    const auto& instanceData = sem[d3d9::Semantic::InstanceData];
-    if (!instanceData.present() || static_cast<std::uint32_t>(instanceData.reg) != kInstanceDataBase) return reject("no g_vInstanceData at c32");
-    if (sem[d3d9::Semantic::InvView].present()) return reject("g_vInvView");  // screen-aligned billboard meshes: camera-dependent
-    if (q.instanced != ((sem.flags & S::Instanced) != 0)) return reject("instancing of the draw != of the VS");
+    // the vertex shader's verdict (cached by its hash and the draw's instancing: most rejected draws stop here)
+    {
+        const std::uint64_t vsKey = q.engineVs->hash ^ (q.instanced ? 0x9E3779B97F4A7C15ull : 0ull);
+        auto [it, fresh] = vsVerdict_.try_emplace(vsKey, nullptr);
+        if (fresh) {
+            const d3d9::ShaderSemantics& sem = q.engineVs->semantics;
+            using S = d3d9::ShaderSemantics;
+            const auto& instanceData = sem[d3d9::Semantic::InstanceData];
+            if ((sem.flags & S::Material) == 0 || (sem.flags & (S::Skinned | S::Vegetation | S::Leaves)) != 0) it->second = "vertex shader class";
+            else if (!instanceData.present() || static_cast<std::uint32_t>(instanceData.reg) != kInstanceDataBase) it->second = "no g_vInstanceData at c32";
+            else if (sem[d3d9::Semantic::InvView].present()) it->second = "g_vInvView";  // screen-aligned billboard meshes: camera-dependent
+            else if (q.instanced != ((sem.flags & S::Instanced) != 0)) it->second = "instancing of the draw != of the VS";
+            if (vsVerdict_.size() > 4096) vsVerdict_.clear();
+        }
+        if (it->second != nullptr) return reject(it->second);
+    }
     if (vb->ringCopied() || ib->ringCopied()) return reject("dynamic buffers");   // dynamic geometry: one frame only
     if (q.vertexStride < 12 || q.vertexStride % 4 != 0 || q.vertexOffset % 4 != 0) return skip();
     const Layout layout = layoutOf(q.decl);
@@ -338,17 +440,7 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     const VkDeviceAddress vbAddress = vb->deviceAddress(), ibAddress = ib->deviceAddress();
     if (vbAddress == 0 || ibAddress == 0) return skip();
     const d3d9::ResourceRef vr = vb->ref(), ir = ib->ref();
-    rt::BlasKey key;
-    key.vb = vr.id;
-    key.vbGen = vr.generation;
-    key.ib = ir.id;
-    key.ibGen = ir.generation;
-    key.vertexOffset = q.vertexOffset;
-    key.stride = q.vertexStride;
-    key.first = q.first;
-    key.primitives = q.primitives;
-    key.baseVertex = q.baseVertex;
-    key.index32 = ib->index32() ? 1u : 0u;
+    const rt::BlasKey key = keyOf(q);
 
     if (waterKeys_.contains(key)) return skip();
     // a range the main view draws only blended (the cascades draw it unblended) is not part of the scene
@@ -399,7 +491,13 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     if (b->state == BlasState::Failed) return skip();
     std::uint8_t materialRank = 0;
     bool overlay = false;
-    const std::uint32_t materialId = materialOf(dev, q, *b, materialRank, overlay);
+    // depth-only draws (z pre-pass, cascades) carry no material: the engine's sub-mesh of the range gives it
+    d3d9::draws::Tag engineTag;
+    bool single = false;
+    learnEngineMaterials(dev, q, *b, engineTag, single);
+    d3d9::ReplaceQuery qm = q;
+    if (single) qm.tag = &engineTag;
+    const std::uint32_t materialId = materialOf(dev, qm, *b, materialRank, overlay);
     b->lastUsedFrame = frame;
     b->lastUsedTime = now;
     if (mainOpaque) b->opaqueMainFrame = frame;
@@ -473,18 +571,7 @@ void RtScene::learnExcluded(const d3d9::ReplaceQuery& q, bool water) {
                      q.tag->materialName != nullptr ? q.tag->materialName : "?");
     }
     if (q.vertexBuffer == nullptr || q.indexBuffer == nullptr || q.vertexBuffer->ringCopied() || q.indexBuffer->ringCopied()) return;
-    const d3d9::ResourceRef vr = q.vertexBuffer->ref(), ir = q.indexBuffer->ref();
-    rt::BlasKey key;
-    key.vb = vr.id;
-    key.vbGen = vr.generation;
-    key.ib = ir.id;
-    key.ibGen = ir.generation;
-    key.vertexOffset = q.vertexOffset;
-    key.stride = q.vertexStride;
-    key.first = q.first;
-    key.primitives = q.primitives;
-    key.baseVertex = q.baseVertex;
-    key.index32 = q.indexBuffer->index32() ? 1u : 0u;
+    const rt::BlasKey key = keyOf(q);
     if (water) {
         if (!waterKeys_.insert(key).second) return;
         if (const auto it = blasByKey_.find(key); it != blasByKey_.end()) dropBlas(it->second, false);
@@ -623,7 +710,7 @@ void RtScene::refreshSegments(Blas& b) {
         const Blas* sub = findBlas(it->second);
         if (sub == nullptr) continue;
         const rt::BlasKey& s = sub->key;
-        if (s.vb != k.vb || s.ib != k.ib || s.vbGen != k.vbGen || s.ibGen != k.ibGen || s.vertexOffset != k.vertexOffset || s.stride != k.stride ||
+        if (s.strip != 0 || s.vb != k.vb || s.ib != k.ib || s.vbGen != k.vbGen || s.ibGen != k.ibGen || s.vertexOffset != k.vertexOffset || s.stride != k.stride ||
             s.baseVertex != k.baseVertex || s.index32 != k.index32 || s.first < k.first || (s.first - k.first) % 3 != 0 ||
             static_cast<std::uint64_t>(s.first) + 3ull * s.primitives > end) {
             continue;
@@ -632,14 +719,26 @@ void RtScene::refreshSegments(Blas& b) {
         b.segments.push_back({(s.first - k.first) / 3, s.primitives, sub->id});
     }
     for (const auto& [s, l] : layers_) {
-        if (l.material == 0 || s.vb != k.vb || s.ib != k.ib || s.vbGen != k.vbGen || s.ibGen != k.ibGen || s.vertexOffset != k.vertexOffset ||
+        if (l.material == 0 || s.strip != 0 || s.vb != k.vb || s.ib != k.ib || s.vbGen != k.vbGen || s.ibGen != k.ibGen || s.vertexOffset != k.vertexOffset ||
             s.stride != k.stride || s.baseVertex != k.baseVertex || s.index32 != k.index32 || s.first < k.first || (s.first - k.first) % 3 != 0 ||
             static_cast<std::uint64_t>(s.first) + 3ull * s.primitives > end) {
             continue;
         }
         b.segments.push_back({(s.first - k.first) / 3, s.primitives, 0, l.material});
     }
-    std::sort(b.segments.begin(), b.segments.end(), [](const auto& x, const auto& y) { return x.firstPrimitive < y.firstPrimitive; });
+    // the engine's sub-meshes of the merged range (depth-only draws): where the main view showed no sub-range
+    const std::size_t mainSegments = b.segments.size();
+    for (const Blas::Segment& e : b.engineSegments) {
+        const RtMaterial* m = materials_.get(e.material);
+        if (m == nullptr || m->dead) {
+            b.engineDead = true;
+            continue;
+        }
+        b.segments.push_back(e);
+    }
+    iv_.engineSegments += b.segments.size() - mainSegments;
+    // (the main view's first where both cover a range: stable sort, the main view's were pushed first)
+    std::stable_sort(b.segments.begin(), b.segments.end(), [](const auto& x, const auto& y) { return x.firstPrimitive < y.firstPrimitive; });
     // overlapping sub-ranges: the first one
     std::uint32_t covered = 0;
     std::erase_if(b.segments, [&](const Blas::Segment& seg) {
@@ -689,6 +788,8 @@ void RtScene::dropBlas(std::uint64_t id, bool countEvicted) {
     registry_.removeBlas(id);
     for (const Blas::MaterialSlot& m : b->materials) materials_.release(m.id);
     b->materials.clear();
+    for (const Blas::Segment& e : b->engineSegments) materials_.release(e.material);
+    b->engineSegments.clear();
     blasByKey_.erase(b->key);
     for (std::uint64_t buf : {b->key.vb, b->key.ib}) {
         const auto range = blasByBuffer_.equal_range(buf);
@@ -700,6 +801,12 @@ void RtScene::dropBlas(std::uint64_t id, bool countEvicted) {
         blasBytes_ -= std::min(blasBytes_, static_cast<std::uint64_t>(b->as.storage.size));
         vk::Context* ctx = &dev_.ctx();
         vk::rt::AccelerationStructure old = b->as;
+        dev_.frames().retire([ctx, old]() mutable { old.destroy(*ctx); });
+    }
+    if (b->listIndices.buffer != VK_NULL_HANDLE) {
+        blasBytes_ -= std::min(blasBytes_, static_cast<std::uint64_t>(b->listIndices.size));
+        vk::Context* ctx = &dev_.ctx();
+        vk::rt::AddressBuffer old = b->listIndices;
         dev_.frames().retire([ctx, old]() mutable { old.destroy(*ctx); });
     }
     if (countEvicted) ++iv_.evicted;
@@ -812,23 +919,52 @@ bool RtScene::prepareInputs(Blas& b) {
     };
     const rt::BlasKey& k = b.key;
     const std::uint32_t isize = k.index32 != 0 ? 4u : 2u;
-    const std::uint32_t count = k.primitives * 3;
+    const std::uint32_t count = k.strip != 0 ? k.primitives + 2 : k.primitives * 3;
     std::vector<std::uint8_t> idx(static_cast<std::size_t>(count) * isize);
     if (!b.ib->readCpu(k.first * isize, count * isize, idx.data())) {
         return fail(kReasonIndexRange, std::format("index range {} + {} outside the index buffer ({} bytes)", k.first, count, b.ib->size()));
     }
+    const auto at = [&](std::uint32_t i) {
+        if (isize == 4) {
+            std::uint32_t v;
+            std::memcpy(&v, idx.data() + static_cast<std::size_t>(i) * 4, 4);
+            return v;
+        }
+        std::uint16_t v;
+        std::memcpy(&v, idx.data() + static_cast<std::size_t>(i) * 2, 2);
+        return static_cast<std::uint32_t>(v);
+    };
     std::uint32_t lo = UINT32_MAX, hi = 0;
     for (std::uint32_t i = 0; i < count; ++i) {
-        std::uint32_t v;
-        if (isize == 4) {
-            std::memcpy(&v, idx.data() + i * 4, 4);
-        } else {
-            std::uint16_t s;
-            std::memcpy(&s, idx.data() + i * 2, 2);
-            v = s;
-        }
+        const std::uint32_t v = at(i);
         lo = std::min(lo, v);
         hi = std::max(hi, v);
+    }
+    b.triangles = k.primitives;
+    if (k.strip != 0) {
+        // the strip as a list: triangle t = (i[t], i[t+1], i[t+2]), every second one with its winding swapped (culling is off
+        // for every instance, the winding only orients the geometric normal); degenerate triangles (strip restarts) dropped
+        std::vector<std::uint32_t> list;
+        list.reserve(static_cast<std::size_t>(k.primitives) * 3);
+        for (std::uint32_t t = 0; t < k.primitives; ++t) {
+            const std::uint32_t a = at(t), c1 = at(t + 1), c2 = at(t + 2);
+            if (a == c1 || c1 == c2 || a == c2) continue;
+            list.push_back(a);
+            list.push_back((t & 1u) != 0 ? c2 : c1);
+            list.push_back((t & 1u) != 0 ? c1 : c2);
+        }
+        if (list.empty()) return fail(kReasonIndexRange, "a strip of degenerate triangles only");
+        b.triangles = static_cast<std::uint32_t>(list.size() / 3);
+        const std::size_t bytes = (list.size() * isize + 3) & ~static_cast<std::size_t>(3);  // whole words (the shaders' loads)
+        b.listData.assign(bytes, 0);
+        for (std::size_t i = 0; i < list.size(); ++i) {
+            if (isize == 4) {
+                std::memcpy(b.listData.data() + i * 4, &list[i], 4);
+            } else {
+                const std::uint16_t v = static_cast<std::uint16_t>(list[i]);
+                std::memcpy(b.listData.data() + i * 2, &v, 2);
+            }
+        }
     }
     if (k.baseVertex < 0) {
         // vertex 0 of the BLAS input (stream offset + base vertex) would lie before the buffer
@@ -905,8 +1041,16 @@ void RtScene::buildPending(VkCommandBuffer cmd, std::uint32_t slot) {
     const VkPipelineStageFlags2 asStages =
         VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
         (ctx.features().rayTracing.maintenance1 ? VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_COPY_BIT_KHR : 0);
+    bool copied = false;  // strip conversions copied into their index buffers: visible to the builds (and the shaders) first
     const auto flush = [&] {
         if (infos.empty()) return;
+        if (copied) {
+            barrier(cmd, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                    VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+                        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+            copied = false;
+        }
         std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> pr(ranges.size());
         for (std::size_t i = 0; i < ranges.size(); ++i) {
             infos[i].pGeometries = &geoms[i];
@@ -934,6 +1078,28 @@ void RtScene::buildPending(VkCommandBuffer cmd, std::uint32_t slot) {
             continue;
         }
         const std::uint32_t isize = k.index32 != 0 ? 4u : 2u;
+        if (k.strip != 0) {
+            // the converted list into a device buffer of its own (through the frame's ring)
+            const VkDeviceSize bytes = b->listData.size();
+            const vk::RingAlloc up = dev_.frames().allocate(bytes, 16);
+            if (up.ptr == nullptr ||
+                !b->listIndices.create(ctx, bytes,
+                                       VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                           VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                       false, 16, "rt scene strip indices")) {
+                b->state = BlasState::Failed;
+                ++iv_.failed;
+                registry_.removeBlas(b->id);
+                continue;
+            }
+            std::memcpy(up.ptr, b->listData.data(), bytes);
+            const VkBufferCopy region{up.offset, 0, bytes};
+            vkCmdCopyBuffer(cmd, up.buffer, b->listIndices.buffer, 1, &region);
+            b->listData.clear();
+            b->listData.shrink_to_fit();
+            blasBytes_ += bytes;
+            copied = true;
+        }
         VkAccelerationStructureGeometryKHR g{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
         g.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
         g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;  // alpha-tested instances: FORCE_NO_OPAQUE on the instance
@@ -944,7 +1110,7 @@ void RtScene::buildPending(VkCommandBuffer cmd, std::uint32_t slot) {
         tri.vertexStride = k.stride;
         tri.maxVertex = b->maxVertex;
         tri.indexType = k.index32 != 0 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
-        tri.indexData.deviceAddress = b->ibAddress + static_cast<VkDeviceSize>(k.first) * isize;
+        tri.indexData.deviceAddress = k.strip != 0 ? b->listIndices.address : b->ibAddress + static_cast<VkDeviceSize>(k.first) * isize;
         VkAccelerationStructureBuildGeometryInfoKHR info{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
         info.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
         info.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
@@ -952,7 +1118,7 @@ void RtScene::buildPending(VkCommandBuffer cmd, std::uint32_t slot) {
         info.geometryCount = 1;
         info.pGeometries = &g;
         VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-        vkGetAccelerationStructureBuildSizesKHR(ctx.device(), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &info, &k.primitives, &sizes);
+        vkGetAccelerationStructureBuildSizesKHR(ctx.device(), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &info, &b->triangles, &sizes);
         const VkDeviceSize need = (std::max<VkDeviceSize>(sizes.buildScratchSize, 4) + scratchAlign_ - 1) & ~(scratchAlign_ - 1);
         if (scratchUsed + need > scratch_.size) {
             // the scratch is full: record what we have, wait for it (scratch reuse), continue at its start
@@ -981,13 +1147,13 @@ void RtScene::buildPending(VkCommandBuffer cmd, std::uint32_t slot) {
         scratchUsed += need;
         geoms.push_back(g);
         infos.push_back(info);
-        ranges.push_back({k.primitives, 0, 0, 0});
+        ranges.push_back({b->triangles, 0, 0, 0});
         b->state = BlasState::Built;
         ++b->serial;
         blasBytes_ += b->as.storage.size;
         built.push_back(b->id);
         ++iv_.built;
-        iv_.builtTriangles += k.primitives;
+        iv_.builtTriangles += b->triangles;
         iv_.buildCpuMs += msSince(c0);
     }
     flush();
@@ -1161,7 +1327,8 @@ void RtScene::record(d3d9::PassContext& ctx) {
         abi::RtGeometryRecord r{};
         const rt::BlasKey& key = b.key;
         split(b.vbAddress + key.vertexOffset + static_cast<VkDeviceSize>(key.baseVertex) * key.stride, r.vertices);
-        split(b.ibAddress + static_cast<VkDeviceSize>(key.first) * (key.index32 != 0 ? 4u : 2u), r.indices);
+        split(key.strip != 0 ? b.listIndices.address : b.ibAddress + static_cast<VkDeviceSize>(key.first) * (key.index32 != 0 ? 4u : 2u),
+              r.indices);
         r.stride = key.stride;
         r.flags = (in.flags & ~abi::kRtRecordAlphaTested) | (alpha ? abi::kRtRecordAlphaTested : 0u) |
                   (((in.data >> 16) & 0xFFu) << abi::kRtRecordKindShift);
@@ -1180,7 +1347,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
         // a range without a main-view material of its own (a cascade's merged level-mesh range): per-triangle materials from
         // the main view's sub-ranges inside it
         const bool strong = std::any_of(b.materials.begin(), b.materials.end(), [](const auto& ms) { return ms.rank >= 3 && !ms.overlay; });
-        if (!strong && b.key.primitives >= 64) {
+        if (!strong && b.key.primitives >= 64 && b.key.strip == 0) {
             if (b.segmentsFrame == 0 || frame >= b.segmentsFrame + 60) {
                 refreshSegments(b);
                 b.segmentsFrame = frame;
@@ -1207,7 +1374,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
             }
         }
         recs[k] = r;
-        triangles += key.primitives;
+        triangles += b.triangles;
         if (content != nullptr) content->push_back({in.blas, in.id, r.flags, in.material, {in.rows[3], in.rows[7], in.rows[11]}});
     }
 
@@ -1300,9 +1467,11 @@ void RtScene::logStats(bool force) {
                  iv_.gpuSamples > 0 ? std::format("{:.3f} ms", iv_.gpuMs / static_cast<double>(iv_.gpuSamples)) : std::string("n/a ([debug] perf)"));
     const RtMaterials::Counters mc = materials_.takeCounters();
     spdlog::info("rt: scene: materials {} (per frame: {:.1f} resolves, {:.3f} ms; interval: {} uv evaluations, graph {} (pool image {}) / bytecode s9 {} / "
-                 "no texture {}, approximate {}, failed {}, active shader != material's {}); records: textured {}, untextured {}, cut-out {}, segmented {} ({} segments), SpeedTree {}",
+                 "no texture {}, approximate {}, failed {}, active shader != material's {}); records: textured {}, untextured {}, cut-out {}, segmented {} ({} segments; "
+                 "engine sub-mesh segments {}, merged ranges resolved {}), SpeedTree {}",
                  materials_.size(), static_cast<double>(mc.resolves) / f, mc.ms / f, mc.evaluations, mc.graph, mc.pool, mc.heuristic, mc.noTexture,
-                 mc.approx, mc.failed, mc.shaderMismatch, iv_.textured, iv_.untextured, iv_.cutOut, iv_.segmented, iv_.segments, iv_.speedTree);
+                 mc.approx, mc.failed, mc.shaderMismatch, iv_.textured, iv_.untextured, iv_.cutOut, iv_.segmented, iv_.segments,
+                 iv_.engineSegments, iv_.engineMerged, iv_.speedTree);
     iv_ = {};
     lastLog_ = now;
 }
