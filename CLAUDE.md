@@ -102,6 +102,18 @@ watchdog, scenario result; mods come from this repo's `mods/` (`-ModPath`), then
 **Process liveness and RAM checks run on the `sysprobe` agent** (`.claude/agents/sysprobe.md`, Haiku; user instruction):
 "is Risen.exe / the run still alive", free RAM, steamwebhelper size. Delegate them to it instead of checking yourself
 (if you cannot spawn agents, keep such checks to one cheap command).
+
+**Cheaper agents for routine work** (`.claude/agents/`, user instruction: delegate reasonable work to Haiku / Sonnet;
+implementation and design stay on the main model):
+
+| agent | model | use for |
+|---|---|---|
+| `sysprobe` | Haiku | process liveness, free RAM, steamwebhelper > 5 GiB |
+| `build-runner` | Haiku | build + rvk_tests / rvk_vktest / rvk_d3d9test / shader corpus / compare_disasm, pass/fail + error excerpts |
+| `game-runner` | Sonnet | one in-game run (run.ps1 / refcompare.ps1 / water-compare.ps1) + digest of verdicts, rvk.log, validation |
+| `shot-reviewer` | Sonnet | first-pass visual review of screenshots / side-by-sides / motion sequences, with crops |
+| `re-lookup` | Sonnet | focused Ghidra / export lookups (RVA, field, callers, thunk / COMDAT check), read-only |
+| `docs-scribe` | Sonnet | docs/research, PLAN, CLAUDE.md updates from given facts; commits doc files only |
 risen-spass's own `risen.debug.screenshot` grabs the D3D9 back buffer (hooks `Present`): it does not work in Vulkan mode.
 
 Screenshot diff (docs/research/reference-compare.md 6): `python tools/refcompare.py compare <d3d9 dir> <vk dir> -o <out>`
