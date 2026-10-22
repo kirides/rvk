@@ -175,6 +175,9 @@ through `Context::queueSubmit` (safe beside the present thread).
 
 ### 5.2 Deferred to M9: a BLAS of a real mesh from the draw records
 
+Done in M9 P1 (`enh/rt_scene`, docs/research/rt-reflections.md 3.1): the world's opaque meshes in a TLAS every frame, with
+the `rt.debug` views as the in-game proof. The paragraph below is the state before it.
+
 An in-game debug view (BLAS of one static mesh + a ray-query hit mask through an injection pass) is **not** part of this
 step: it needs the world transform of the draw (entity `+0x60` or the instance constants), the position element / stride of
 the declaration (FLOAT3 at offset 0 for the 52-byte static vertex, others need conversion), the sub-mesh index ranges, a

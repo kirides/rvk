@@ -113,6 +113,12 @@ Ray tracing tier (docs/research/raytracing.md): optional, enabled at device crea
 (the capability report, also the overlay's "Capabilities"). `-RtSelfTest` (`[debug] rt_selftest`) builds a BLAS/TLAS and
 traces it with ray query at device creation ("rt selftest: PASS"). Settings needing a capability declare
 `Spec::requirements` (greyed + parity fallback when unmet; features read `asX()` = the effective value).
+RT scene (M9, docs/research/rt-reflections.md 3): `enh/rt_scene` builds a TLAS of the world every frame at AfterOpaque while a
+consumer holds it (FrameBlock `rtScene` / `rtInfo`, GLSL `shaders/include/rvk_rt.glsl`: records, vertex fetch). Debug view
+`-Setting 'rt.debug=depth'` (or `instances`, `normals`; green = traced = raster from the hardware depth, red = geometry the
+RT scene lacks, magenta = extra / misplaced, blue = missed; a white square top left = hardware depth used) + rvk.log
+`enh: rt.debug probes` (5 x 5 probe pixels, mismatches named: instance, BLAS, entity, op); stats `rt: scene: instances ...`
+every 5 s (also the overlay's performance panel); hidden `rt.scene_views=main|shadow` isolates a source.
 
 `run.ps1` creates the test copy on first use (`scripts/new-test-copy.ps1`, from risen-spass's `B:\DevDrive\risen-test`), deploys
 `d3d9.dll` + `bin\rvk\config.toml`, and drives the game with **risen-spass's `scripts/test-run.ps1 -GameDir`** (windowed, muted,
@@ -199,7 +205,7 @@ docs/research/water.md 4.1.
 | `res/` | DDS parsing |
 | `hal/` | generated HAL interfaces (`tools/gen_hal.py` -> `api_generated.h`, `trace_generated.h`), engine allocator, trace mode |
 | `shader/` | D3D9 bytecode decoder, listing, GLSL generator (`abi.h` = shader/renderer contract; variant hooks `GlslOptions`), glslang wrapper, `embedded.h` (build-time shaders) |
-| `enh/` | enhancements: `debug_view.*` = `debug.inject_view` (an injected pass, docs/research/injection.md 5); `water.*` = the enhanced water (a `d3d9::DrawReplacer`: engine water draws drawn with `shaders/water/*`, the sea's wave grid), `shore_field.*` (coast distance field bake), `water_profile.*` (look per body of water): docs/research/water.md; `shadows.*` = the enhanced sun shadow mask (a `d3d9::DrawReplacer` for the shadow-mask pass, `shaders/shadows/*`): docs/research/shadows.md |
+| `enh/` | enhancements: `debug_view.*` = `debug.inject_view` (an injected pass, docs/research/injection.md 5); `water.*` = the enhanced water (a `d3d9::DrawReplacer`: engine water draws drawn with `shaders/water/*`, the sea's wave grid), `shore_field.*` (coast distance field bake), `water_profile.*` (look per body of water): docs/research/water.md; `shadows.*` = the enhanced sun shadow mask (a `d3d9::DrawReplacer` for the shadow-mask pass, `shaders/shadows/*`): docs/research/shadows.md; `rt_scene.*` / `rt_registry.*` = the RT scene (a `d3d9::DrawObserver` + a pass: BLAS cache, instance registry, TLAS, geometry records), `rt_debug.*` = `rt.debug`: docs/research/rt-reflections.md |
 
 ## Tooling gotchas
 

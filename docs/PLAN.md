@@ -332,7 +332,22 @@ with validation on and checks every pixel against D3D9's rasterisation rules (ha
   validation clean, GPU +0.69 ms at the beach (cascades 0.16 -> 0.69 ms, mask ~0.19 -> 0.27 ms), rvk_tests 99 / 99.
   Default off (parity). Open: the cliff walk itself (exact place), RT shadows, terrain map beyond the range.
 
-### M9+ Enhanced graphics
+### M9 Ray-traced water reflections with textured hits (docs/research/rt-reflections.md)
+User target: every enhanced water body reflects the real world (off screen too) with the hit's own texture, watery (bent by
+waves, softer with distance, Fresnel, the engine's tint). Phases P1 RT scene, P2 materials at hits, P3 water reflections,
+P4 the rest of the world (leaves, grass, characters).
+* **P1 RT scene: done (2026-10-22).** `enh/rt_scene` + `enh/rt_registry`: a draw observer on the main view's opaque passes
+  and the sun cascades (static / instanced meshes, SpeedTree branches + fronds in their rest pose), BLAS per engine draw
+  range on the static VB / IB (compacted, budgeted, LRU), a persistent instance registry (LOD switches and moved objects
+  replace at once; water and blended-only meshes learnt and left out), TLAS per frame at AfterOpaque, geometry records +
+  TLAS in the FrameBlock, GLSL `rvk_rt.glsl` (record, vertex fetch, interpolation). Debug view `rt.debug` (instances /
+  depth check against the hardware depth / normals) with probe logging. Verified at lake_jungle / harbour_docks /
+  beach_sun: traced geometry lines up with the raster (mismatch only where P1 has no geometry: leaves, grass, characters;
+  one shore strip 15-20 units off), normals from the records exact, 0 sync-validation messages, 170-420 instances /
+  66-93 MiB, GPU 0.13 ms (TLAS FAST_BUILD), observer 0.15-0.22 ms CPU per frame; nothing registered when off.
+* P2 materials at hits: next.
+
+### M10+ Enhanced graphics
 * candidates: anisotropic filtering + MSAA/TAA/SMAA, modern tonemapping/HDR10,
   SSAO/GTAO, upscaling (FSR), improved water/sky/fog, per-feature toggles (in the settings registry). Each measured and
   screenshotted.
