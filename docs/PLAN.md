@@ -127,8 +127,7 @@ with validation on and checks every pixel against D3D9's rasterisation rules (ha
   (post chain), fonts (the engine's own `eCFont` glyph atlases, not `eCAPIFont`: docs/research/fonts.md; atlas updates fixed),
   sprites, fixed-function remnants (generated shaders).
 * **Verify**: screenshot-diff suite at N poses (D3D9 reference vs Vulkan) within thresholds; a play session without validation errors.
-* Progress (2026-10-21): the suite exists and ran end to end: `scripts
-efcompare.ps1` + `mods/rvkcompare` (13 spots: beach rain/sun,
+* Progress (2026-10-21): the suite exists and ran end to end: `scripts\refcompare.ps1` + `mods/rvkcompare` (13 spots: beach rain/sun,
   forest, harbour docks/night, pub, monastery, volcano, crystal cave, hero close-up with HUD, inventory, character screen, ESC
   menu), game time pinned before the freeze (risen-spass `set_game_time`), known-noise masks from two D3D9 runs. First result:
   11 PASS, 2 WARN (particles/sea phase), no renderer difference found; Vulkan is not brighter than D3D9 (dluma -0.2..+0.7).
@@ -294,6 +293,20 @@ efcompare.ps1` + `mods/rvkcompare` (13 spots: beach rain/sun,
   wave cap follows the player (`eCWeatherAdmin::GetPlayerPosition`). Luma vs engine: sea_horizon -1, harbour_mouth -1,
   harbour_docks +2, beach_sun -2 .. -16 by the surf's phase (was -34), beach_rain -8 (was -15), sea_cliff +12 .. +17 (its surf + the visible shelf).
   Ocean GPU ~0.75 ms at 1080p high; sync validation clean; toggles without hitch; rvk_tests 96 / 96.
+* **Foam pass: done (2026-10-22, ocean.md 4.4, 4.5, 9.7).** From the review (approved by the user: beach surf like paper
+  cut-outs + a grey band at the waterline, "cow spots" on sea_cliff's shelf): foam as a lit, translucent layer - one
+  coverage (union of the terms + freshness) -> a thickness with its gradient (soft-thresholded warped sheet, holes of three
+  sizes with varied radii and soft rims, slow coverage variation), every transition >= ~2 pixels along the screen (filtered
+  per pixel axis for the grazing views), drifting with the water (two-phase flow map, switched region by region), shaded
+  with the engine's light on its relief normal (wrapped sun, occlusion, albedo 0.5 .. 0.78, at least 1.3 x the water under
+  it, a shoulder against clipping), opacity `1 - exp(-3.2 h)`; the waterline: thin water mirrors less (Fresnel to 30 %
+  below 3 units), a >= 2-pixel soft edge, the wet-sand film's front soft (it drew the jagged stair line). The water's
+  clock follows the engine's game time (1/60 s steps under the time freeze, jumps followed: sea state snapped, histories
+  reset, the foam buffer spun up over 10 s): pinned captures show the same sea. Noise hash -> pcg2d. Luma vs engine (pinned
+  game times): sea_cliff +8 .. +14, sea_horizon +0.6, harbour_mouth +0.1, harbour_docks -0.1, beach_sun -9 .. +5 (engine
+  exposure / particles), beach_rain -3 .. -6. Ocean GPU 1.8 - 1.9 ms at 1080p high at the beach (foam ~0.2 - 0.4 ms);
+  sync validation clean; toggles without hitch; rvk_tests 96 / 96; water off: refcompare 20 / 20 PASS (lava_cave on a
+  re-run).
 
 ### M9+ Enhanced graphics
 * candidates: anisotropic filtering + MSAA/TAA/SMAA, higher-resolution and better-filtered shadows, modern tonemapping/HDR10,

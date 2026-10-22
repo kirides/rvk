@@ -86,7 +86,11 @@ and cached in `bin\rvk\cache\ocean\floor_v1.bin` (delete it to re-learn the coas
 sea state / Hs, weather -> sea state, `sea floor field ... ms`, `foam buffer`, `player position`). The surf's foam: a
 camera-centred buffer (`ocean_foam.comp`, ocean.md 4.4) + the pattern in `shaders/water/water_noise.glsl`; tune foam
 patterns offline first (a numpy port of the noise renders coverage ramps to PNG in seconds; game runs take minutes);
-`water.debug=foam` shows the terms (green white water, blue residual, red whitecaps, grey contact). Ocean spots of rvkcompare: `sea_cliff`, `sea_horizon`,
+`water.debug=foam` shows the terms (green white water, blue residual, red whitecaps, grey contact). Judge foam in-game at
+the spots' grazing views (crops of 2-5x, consecutive frames: `-Burst 4 -Interval 1`): the pattern is filtered per pixel
+axis (`foamDensity` dX / dY); lit foam must stay below clipping (shoulder in water.frag). The water's clock is the engine's
+game time (ocean.md 4.5: rvkcompare's pinned game time pins waves and foam; rvk.log `enh: water: clock ...`); what still
+varies between runs at the beaches is the engine's eye adaptation and splash particles (luma +-5). Ocean spots of rvkcompare: `sea_cliff`, `sea_horizon`,
 `harbour_mouth` (the camera's distance is capped near 6,000 units: give poses as target + distance <= 5,500). Swim check:
 scenario `rvk_swim` (the hero in the sea, his swim line logged, pictures `swim_follow_b*` / `swim_water_b*`). Survey
 scenario `rvk_water` (water level-mesh entities' boxes + a look at each; `-Param 'only=Levelmesh_Lakemesh_06','find=SP_Don'`;
