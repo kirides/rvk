@@ -343,6 +343,71 @@ void Device::setVsync(bool vsync) {
     }
 }
 
+void Device::resetPacer() {
+    pacerChecked_ = {};
+    pacerRequested_ = -1.0;
+    pacerMonitor_ = nullptr;  // the monitor's refresh rate is queried again
+}
+
+void Device::displayModeChanged() { resetPacer(); }
+
+void Device::setRefreshCap(double hz) {
+    hz = std::max(0.0, hz);
+    if (hz == refreshCap_) return;
+    refreshCap_ = hz;
+    pacerChecked_ = {};
+    pacerRequested_ = -1.0;
+}
+
+bool Device::setFullScreenExclusive(void* monitor, bool hold) {
+    if (options_.offscreen || !swapchain_.valid()) return false;
+    if (!ctx_.features().fullScreenExclusive) monitor = nullptr;
+    bool recreated = false;
+    if (monitor != fseMonitor_) {
+        recreated = true;
+        fseMonitor_ = monitor;
+        presenter_.waitIdle();
+        swapchain_.releaseFullScreenExclusive();
+        swapchain_.setFullScreenExclusive(monitor);
+        recreateSwapchain();
+        fseRetry_ = {};
+        resetPacer();
+    }
+    if (hold != fseHold_) {
+        fseHold_ = hold;
+        fseRetry_ = {};
+        if (!hold && swapchain_.fullScreenExclusiveHeld()) {
+            presenter_.waitIdle();
+            swapchain_.releaseFullScreenExclusive();
+            spdlog::info("vulkan: exclusive fullscreen released");
+            resetPacer();
+        }
+    }
+    return recreated;
+}
+
+// render thread, the present thread idle: take the exclusive mode while wanted (retried once a second after a failure / loss)
+void Device::serviceFullScreenExclusive() {
+    if (swapchain_.takeExclusiveLost()) {
+        spdlog::info("vulkan: exclusive fullscreen lost (acquire): re-acquired later");
+        fseRetry_ = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        resetPacer();
+    }
+    if (!fseHold_ || !swapchain_.fullScreenExclusiveConfigured() || swapchain_.fullScreenExclusiveHeld()) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (now < fseRetry_) return;
+    const VkResult r = swapchain_.acquireFullScreenExclusive();
+    if (r == VK_SUCCESS) {
+        spdlog::info("vulkan: exclusive fullscreen acquired (swapchain {}x{}, present mode {})", swapchain_.extent().width,
+                     swapchain_.extent().height, static_cast<int>(swapchain_.presentMode()));
+        resetPacer();
+    } else {
+        static int logged = 0;
+        if (logged++ < 10) spdlog::warn("vulkan: vkAcquireFullScreenExclusiveModeEXT: {} (retried in 1 s)", vk::resultString(r));
+        fseRetry_ = now + std::chrono::seconds(1);
+    }
+}
+
 void Device::setMaxFps(double fps) {
     fps = std::max(0.0, fps);
     if (fps == options_.maxFps) {
@@ -606,8 +671,13 @@ void Device::updatePacer() {
         }
         refresh = pacerMonitorRate_;
     }
-    // vsync: the refresh rate, or max_fps below it; without vsync max_fps or nothing
+    // vsync: the refresh rate (or the game's refresh rate below it in borderless fullscreen: setRefreshCap), or max_fps
+    // below it; without vsync max_fps or nothing
     double rate = refresh;
+    const bool refreshCapped = refresh > 0.0 && refreshCap_ > 0.0 && refreshCap_ < refresh - 0.5;
+    if (refreshCapped) {
+        rate = refreshCap_;
+    }
     if (options_.maxFps > 0.0 && (rate <= 0.0 || options_.maxFps < rate)) {
         rate = options_.maxFps;
     }
@@ -625,7 +695,10 @@ void Device::updatePacer() {
         const bool dwm = vk::dwmVblankClock(clock);
         spdlog::info("vulkan: DWM composition clock {}", dwm ? std::format("{:.3f} Hz", clock.rate()) : std::string("unavailable"));
         spdlog::info("vulkan: frame pacing at {:.3f} fps{}{}", pacer_.rate(),
-                     options_.maxFps > 0.0 && rate == options_.maxFps ? " (max_fps)" : options_.vsync ? " (vsync)" : "",
+                     options_.maxFps > 0.0 && rate == options_.maxFps ? " (max_fps)"
+                     : refreshCapped && rate == refreshCap_           ? " (vsync, the game's refresh rate)"
+                     : options_.vsync                                 ? " (vsync)"
+                                                                      : "",
                      pacer_.vblankLocked() ? ", locked to DWM's vblank" : "");
     }
 }
@@ -690,18 +763,26 @@ void Device::present() {
         ++stats_.presentSuboptimal;
         ++stats_.swapchainRecreates;
         recreateSwapchain();
+    } else if (previous == VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT) {
+        // exclusive fullscreen taken away (another window, a mode change): presents go on non-exclusive, re-acquired later
+        swapchain_.noteExclusiveLost();
+        spdlog::info("vulkan: exclusive fullscreen lost (present): re-acquired later");
+        fseRetry_ = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        resetPacer();
     } else if (previous != VK_SUCCESS) {
         spdlog::error("vulkan: present: {}", vk::resultString(previous));
     }
+    serviceFullScreenExclusive();
     const auto ta = std::chrono::steady_clock::now();
     stats_.presentWaitMs += std::chrono::duration<double, std::milli>(ta - tq).count();
     const bool acquiredOk = swapchain_.acquire(acquired, imageIndex);
     stats_.acquireMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - ta).count();
     if (!acquiredOk) {
-        // minimised or out of date: drop the frame's presentation, keep its work
+        // minimised or out of date: drop the frame's presentation, keep its work (exclusive fullscreen lost: no recreation,
+        // serviceFullScreenExclusive re-acquires it)
         ++stats_.acquireFailures;
         submitFrame(VK_NULL_HANDLE, VK_NULL_HANDLE);
-        recreateSwapchain();
+        if (!swapchain_.exclusiveLost()) recreateSwapchain();
         beginFrame();
         return;
     }

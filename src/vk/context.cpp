@@ -55,6 +55,7 @@ const char* resultString(VkResult r) {
     case VK_ERROR_SURFACE_LOST_KHR: return "VK_ERROR_SURFACE_LOST_KHR";
     case VK_ERROR_OUT_OF_DATE_KHR: return "VK_ERROR_OUT_OF_DATE_KHR";
     case VK_ERROR_FORMAT_NOT_SUPPORTED: return "VK_ERROR_FORMAT_NOT_SUPPORTED";
+    case VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT: return "VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT";
     default: return "VK_ERROR_?";
     }
 }
@@ -128,6 +129,11 @@ bool Context::createInstance(const ContextOptions& options) {
     debugUtils_ = hasExtension(exts, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     if (debugUtils_) {
         enabled.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    }
+    // exclusive fullscreen (VK_EXT_full_screen_exclusive needs it; docs/research/window-mode.md 8)
+    surfaceCaps2_ = hasExtension(exts, VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
+    if (surfaceCaps2_) {
+        enabled.push_back(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
     }
     std::vector<const char*> layers;
     {
@@ -278,6 +284,12 @@ bool Context::createDevice(bool withRayTracing) {
     std::vector<const char*> enabled = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
     if (props_.apiVersion < VK_API_VERSION_1_4 || hasExtension(exts, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME)) {
         enabled.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
+    }
+    // exclusive fullscreen (setting vulkan.fullscreen = exclusive): only changes swapchains created with its structures
+    fullScreenExclusiveDevice_ = hasExtension(exts, VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME);
+    features_.fullScreenExclusive = fullScreenExclusiveDevice_ && surfaceCaps2_;
+    if (features_.fullScreenExclusive) {
+        enabled.push_back(VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME);
     }
 
     // supported core features
@@ -546,6 +558,11 @@ caps::Report Context::capabilities(bool pipelineLibrariesInUse) const {
     set(Cap::Robustness2, report_.robustness2, features_.robustness2NullDescriptor, report_.robustness2 ? "no nullDescriptor" : "");
     set(Cap::MemoryBudget, report_.memoryBudget, features_.memoryBudget, "");
     set(Cap::DeviceFault, report_.deviceFault, features_.deviceFault, "");
+    set(Cap::FullScreenExclusive, fullScreenExclusiveDevice_ && surfaceCaps2_, features_.fullScreenExclusive,
+        !fullScreenExclusiveDevice_ ? "the driver has no VK_EXT_full_screen_exclusive"
+        : !surfaceCaps2_            ? "the Vulkan loader has no VK_KHR_get_surface_capabilities2"
+                                    : "",
+        "VK_EXT_full_screen_exclusive + VK_KHR_get_surface_capabilities2");
     set(Cap::SamplerAnisotropy, features_.samplerAnisotropy, features_.samplerAnisotropy, "",
         features_.samplerAnisotropy ? std::format("max {:.0f}x", features_.maxAnisotropy) : "");
     if (prt.accelerationStructure) {

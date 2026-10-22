@@ -1,6 +1,8 @@
 #include "vk/swapchain.h"
 
 #include <algorithm>
+#include <format>
+#include <string>
 
 #include <windows.h>
 
@@ -31,8 +33,31 @@ bool Swapchain::create(Context& ctx, HWND__* window, std::uint32_t width, std::u
 }
 
 bool Swapchain::build(std::uint32_t width, std::uint32_t height) {
+    // exclusive fullscreen (docs/research/window-mode.md 8): the surface queries and the swapchain carry the exclusive mode
+    // and its monitor
+    VkSurfaceFullScreenExclusiveWin32InfoEXT fseWin32{VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_WIN32_INFO_EXT};
+    fseWin32.hmonitor = static_cast<HMONITOR>(fseMonitor_);
+    VkSurfaceFullScreenExclusiveInfoEXT fse{VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT, &fseWin32};
+    fse.fullScreenExclusive = VK_FULL_SCREEN_EXCLUSIVE_APPLICATION_CONTROLLED_EXT;
+    VkPhysicalDeviceSurfaceInfo2KHR surfaceInfo{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR, &fse};
+    surfaceInfo.surface = surface_;
+    bool exclusive = fseMonitor_ != nullptr && ctx_->features().fullScreenExclusive;
     VkSurfaceCapabilitiesKHR caps{};
-    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(ctx_->physicalDevice(), surface_, &caps);
+    if (exclusive) {
+        VkSurfaceCapabilitiesFullScreenExclusiveEXT fseCaps{VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_FULL_SCREEN_EXCLUSIVE_EXT};
+        VkSurfaceCapabilities2KHR caps2{VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_2_KHR, &fseCaps};
+        const VkResult r = vkGetPhysicalDeviceSurfaceCapabilities2KHR(ctx_->physicalDevice(), &surfaceInfo, &caps2);
+        if (r != VK_SUCCESS || !fseCaps.fullScreenExclusiveSupported) {
+            spdlog::warn("vulkan: exclusive fullscreen not supported on this surface / monitor ({}, supported {}): normal swapchain",
+                         resultString(r), fseCaps.fullScreenExclusiveSupported != 0);
+            exclusive = false;
+        } else {
+            caps = caps2.surfaceCapabilities;
+        }
+    }
+    if (!exclusive) {
+        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(ctx_->physicalDevice(), surface_, &caps);
+    }
     if (caps.currentExtent.width == 0 || caps.currentExtent.height == 0) {
         return false;  // minimised
     }
@@ -57,9 +82,17 @@ bool Swapchain::build(std::uint32_t width, std::uint32_t height) {
         }
     }
 
-    vkGetPhysicalDeviceSurfacePresentModesKHR(ctx_->physicalDevice(), surface_, &n, nullptr);
-    std::vector<VkPresentModeKHR> modes(n);
-    vkGetPhysicalDeviceSurfacePresentModesKHR(ctx_->physicalDevice(), surface_, &n, modes.data());
+    std::vector<VkPresentModeKHR> modes;
+    if (exclusive) {
+        vkGetPhysicalDeviceSurfacePresentModes2EXT(ctx_->physicalDevice(), &surfaceInfo, &n, nullptr);
+        modes.resize(n);
+        vkGetPhysicalDeviceSurfacePresentModes2EXT(ctx_->physicalDevice(), &surfaceInfo, &n, modes.data());
+    } else {
+        vkGetPhysicalDeviceSurfacePresentModesKHR(ctx_->physicalDevice(), surface_, &n, nullptr);
+        modes.resize(n);
+        vkGetPhysicalDeviceSurfacePresentModesKHR(ctx_->physicalDevice(), surface_, &n, modes.data());
+    }
+    modes.resize(n);
     VkPresentModeKHR mode = VK_PRESENT_MODE_FIFO_KHR;
     if (!vsync_) {
         for (auto m : {VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_IMMEDIATE_KHR}) {
@@ -76,7 +109,8 @@ bool Swapchain::build(std::uint32_t width, std::uint32_t height) {
     }
 
     VkSwapchainKHR old = swapchain_;
-    VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
+    releaseFullScreenExclusive();  // the old swapchain's exclusive mode: the new one acquires its own
+    VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, exclusive ? &fse : nullptr};
     ci.surface = surface_;
     ci.minImageCount = imageCount;
     ci.imageFormat = chosen.format;
@@ -99,6 +133,8 @@ bool Swapchain::build(std::uint32_t width, std::uint32_t height) {
     swapchain_ = created;
     format_ = chosen.format;
     extent_ = extent;
+    presentMode_ = mode;
+    fseActive_ = exclusive;
 
     vkGetSwapchainImagesKHR(ctx_->device(), swapchain_, &n, nullptr);
     images_.resize(n);
@@ -121,8 +157,11 @@ bool Swapchain::build(std::uint32_t width, std::uint32_t height) {
         VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         vkCreateSemaphore(ctx_->device(), &si, nullptr, &s);
     }
-    spdlog::info("vulkan: swapchain {}x{}, {} images, format {}, present mode {}", extent.width, extent.height, n,
-                 static_cast<int>(format_), static_cast<int>(mode));
+    std::string offered;
+    for (const auto m : modes) offered += std::format("{}{}", offered.empty() ? "" : ",", static_cast<int>(m));
+    spdlog::info("vulkan: swapchain {}x{}, {} images, format {}, present mode {} (offered {}){}", extent.width, extent.height, n,
+                 static_cast<int>(format_), static_cast<int>(mode), offered,
+                 exclusive ? std::format(", exclusive fullscreen (application controlled, monitor {})", fseMonitor_) : std::string());
     return true;
 }
 
@@ -145,9 +184,11 @@ void Swapchain::destroySwapchain() {
     views_.clear();
     images_.clear();
     if (swapchain_ != VK_NULL_HANDLE) {
-        vkDestroySwapchainKHR(ctx_->device(), swapchain_, nullptr);
+        vkDestroySwapchainKHR(ctx_->device(), swapchain_, nullptr);  // releases a held exclusive mode
         swapchain_ = VK_NULL_HANDLE;
     }
+    fseHeld_ = false;
+    fseActive_ = false;
 }
 
 void Swapchain::destroy() {
@@ -170,10 +211,30 @@ bool Swapchain::acquire(VkSemaphore acquired, std::uint32_t& imageIndex) {
     if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) {
         return true;
     }
+    if (r == VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT) {
+        fseHeld_ = false;
+        fseLost_ = true;
+        return false;
+    }
     if (r != VK_ERROR_OUT_OF_DATE_KHR) {
         spdlog::error("vulkan: vkAcquireNextImageKHR: {}", resultString(r));
     }
     return false;
+}
+
+VkResult Swapchain::acquireFullScreenExclusive() {
+    if (swapchain_ == VK_NULL_HANDLE || !fseActive_) return VK_ERROR_INITIALIZATION_FAILED;
+    if (fseHeld_) return VK_SUCCESS;
+    const VkResult r = vkAcquireFullScreenExclusiveModeEXT(ctx_->device(), swapchain_);
+    fseHeld_ = r == VK_SUCCESS;
+    return r;
+}
+
+void Swapchain::releaseFullScreenExclusive() {
+    if (swapchain_ != VK_NULL_HANDLE && fseHeld_) {
+        vkReleaseFullScreenExclusiveModeEXT(ctx_->device(), swapchain_);
+    }
+    fseHeld_ = false;
 }
 
 VkResult Swapchain::present(std::uint32_t imageIndex) {

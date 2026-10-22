@@ -23,6 +23,7 @@ constexpr std::array<Names, kCount> kNames = {{
     {"memory_budget", "Memory budget"},
     {"device_fault", "Device fault reports"},
     {"sampler_anisotropy", "Anisotropic filtering"},
+    {"full_screen_exclusive", "Exclusive fullscreen"},
 }};
 
 std::mutex g_mutex;

@@ -50,6 +50,7 @@ struct DeviceFeatures {
     bool hostQueryReset = false;  // vkResetQueryPool from the host (GPU timestamps of [debug] perf)
     float timestampPeriod = 0.0f; // ns per timestamp tick; 0 = the queue cannot write timestamps
     bool pipelineStatistics = false;  // VK_KHR_pipeline_executable_properties enabled (ContextOptions::pipelineStatistics)
+    bool fullScreenExclusive = false; // VK_EXT_full_screen_exclusive (+ instance VK_KHR_get_surface_capabilities2) enabled
     RayTracingFeatures rayTracing;
 };
 
@@ -114,6 +115,8 @@ private:
     std::string deviceName_;
     DeviceReport report_;  // the probe of the chosen device (availability, driver, ray tracing limits)
     bool debugUtils_ = false;
+    bool surfaceCaps2_ = false;              // instance: VK_KHR_get_surface_capabilities2 enabled
+    bool fullScreenExclusiveDevice_ = false; // the device offers VK_EXT_full_screen_exclusive
     std::mutex queueMutex_;
     std::atomic<std::uint32_t> validationErrors_{0};
 };

@@ -604,6 +604,21 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 500,
         .format = "%.0f fps",
     });
+    r.fullscreen = &reg.add({
+        .key = "vulkan.fullscreen",
+        .label = "Fullscreen mode",
+        .category = "Display",
+        .description = "How the game's fullscreen setting is shown. Borderless: a window covering the monitor at the desktop's "
+                       "resolution (instant alt-tab; a refresh rate below the desktop's from the game's options becomes a frame "
+                       "cap with vertical sync). Exclusive: the monitor switches to the resolution and refresh rate chosen in the "
+                       "game's options (e.g. 60 Hz on a 144 Hz display), back to the desktop's when the game loses focus.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"borderless", "exclusive"},
+        .optionLabels = {"Borderless window", "Exclusive (display mode change)"},
+        .flags = Flag::NoAB,
+        .requirements = caps::bit(caps::Cap::FullScreenExclusive),
+    });
     r.adapter = &reg.add({
         .key = "vulkan.adapter",
         .label = "GPU index",
@@ -615,6 +630,16 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .min = -1,
         .max = 15,
         .flags = Flag::Restart,
+    });
+    r.exclusiveAcquire = &reg.add({
+        .key = "vulkan.exclusive_acquire",
+        .label = "Vulkan exclusive mode",
+        .category = "Display",
+        .description = "Exclusive fullscreen: also take Vulkan's exclusive mode (VK_EXT_full_screen_exclusive) on top of the "
+                       "display mode change. Diagnostics (docs/research/window-mode.md 8.3).",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::NoAB | Flag::Hidden,
     });
     r.toggleKey = &reg.add({
         .key = "overlay.toggle_key",

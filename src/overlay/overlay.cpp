@@ -721,6 +721,13 @@ void Overlay::buildSettingsWindow() {
         const auto& st = device_->stats();
         ImGui::Text("%u draws, vsync %s, frame rate limit %s", st.lastFrameDraws, device_->vsync() ? "on" : "off",
                     device_->maxFps() > 0.0 ? std::format("{:.0f} fps", device_->maxFps()).c_str() : "none");
+        // window / display mode (docs/research/window-mode.md 8)
+        ImGui::TextUnformatted(engine::window::displaySummary().c_str());
+        ImGui::Text("present mode %d%s, frame pacing %.1f fps", static_cast<int>(device_->presentMode()),
+                    device_->fullScreenExclusiveHeld()       ? ", Vulkan exclusive fullscreen held"
+                    : device_->fullScreenExclusiveConfigured() ? ", exclusive swapchain (not held)"
+                                                               : "",
+                    device_->pacerRate());
         // enhancements' one-line status (e.g. the RT scene: instances, BLAS, memory)
         for (const auto& [key, text] : device_->status()) ImGui::TextUnformatted(text.c_str());
     }

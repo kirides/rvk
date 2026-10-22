@@ -28,6 +28,7 @@ enum class Cap : std::uint8_t {
     MemoryBudget,
     DeviceFault,
     SamplerAnisotropy,
+    FullScreenExclusive,  // VK_EXT_full_screen_exclusive + VK_KHR_get_surface_capabilities2 (vulkan.fullscreen = exclusive)
     Count
 };
 inline constexpr std::size_t kCount = static_cast<std::size_t>(Cap::Count);

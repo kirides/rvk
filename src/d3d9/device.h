@@ -552,6 +552,21 @@ public:
     // present-rate cap (0 = the refresh rate with vsync, none without); applies at the next present
     void setMaxFps(double fps);
     double maxFps() const { return options_.maxFps; }
+    // Exclusive fullscreen (docs/research/window-mode.md 8). `monitor` != null: the swapchain is built with the exclusive
+    // structures for that monitor (re-created now when this changes); `hold`: the window is in front, take the exclusive
+    // mode (vkAcquireFullScreenExclusiveModeEXT, retried while it fails) - false releases it. Engine thread, before present.
+    // Returns true when the swapchain was re-created.
+    bool setFullScreenExclusive(void* monitor, bool hold);
+    bool fullScreenExclusiveHeld() const { return swapchain_.fullScreenExclusiveHeld(); }
+    bool fullScreenExclusiveConfigured() const { return swapchain_.fullScreenExclusiveConfigured(); }
+    VkPresentModeKHR presentMode() const { return swapchain_.presentMode(); }
+    // the window's display mode changed (exclusive fullscreen): the pacer queries the monitor's refresh rate again
+    void displayModeChanged();
+    // the game's refresh rate as a frame cap with vsync (borderless fullscreen honouring a refresh choice below the
+    // desktop's; 0 = none). docs/research/window-mode.md 8.4
+    void setRefreshCap(double hz);
+    double refreshCap() const { return refreshCap_; }
+    double pacerRate() const { return pacer_.rate(); }
     // the overlay drawn at present (null = none). intoBackBuffer: the HAL calls drawOverlayIntoBackBuffer before its captures
     // instead (screenshots then contain the overlay; [debug] overlay_in_screenshots)
     void setOverlay(PresentOverlay* overlay, bool intoBackBuffer);
@@ -757,6 +772,12 @@ private:
     double pacerMonitorRate_ = 0.0;
     double pacerRequested_ = -1.0;
     void updatePacer();
+    void resetPacer();
+    double refreshCap_ = 0.0;
+    void* fseMonitor_ = nullptr;
+    bool fseHold_ = false;
+    std::chrono::steady_clock::time_point fseRetry_{};  // next acquire attempt after a failure / loss
+    void serviceFullScreenExclusive();
     VkFormat d24s8_ = VK_FORMAT_D24_UNORM_S8_UINT;
     std::uint32_t renderThread_ = 0;
     bool created_ = false;

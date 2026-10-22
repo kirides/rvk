@@ -283,8 +283,14 @@ TEST(settings_renderer_registration) {
     CHECK(r.rtSceneViews != nullptr && r.rtSceneViews->asEnum() == "all" && (r.rtSceneViews->spec().flags & Flag::Hidden) != 0);
     // ... and the water's RT reflection tweaks (cost measurements)
     CHECK(r.rtReflectionTweaks != nullptr && r.rtReflectionTweaks->asInt() == 0 && (r.rtReflectionTweaks->spec().flags & Flag::Hidden) != 0);
+    // ... and Vulkan's exclusive mode on top of exclusive fullscreen's display mode change (diagnostics); the fullscreen mode
+    // itself is a player setting that needs the exclusive fullscreen capability
+    CHECK(r.exclusiveAcquire != nullptr && r.exclusiveAcquire->asBool() && (r.exclusiveAcquire->spec().flags & Flag::Hidden) != 0);
+    CHECK(r.fullscreen != nullptr && r.fullscreen->spec().defaultValue == 0 &&
+          r.fullscreen->spec().requirements == rvk::caps::bit(rvk::caps::Cap::FullScreenExclusive));
     for (const Setting* s : reg.all()) {
-        CHECK(s == r.drawRecords || s == r.rtSceneViews || s == r.rtReflectionTweaks || (s->spec().flags & Flag::Hidden) == 0);
+        CHECK(s == r.drawRecords || s == r.rtSceneViews || s == r.rtReflectionTweaks || s == r.exclusiveAcquire ||
+              (s->spec().flags & Flag::Hidden) == 0);
     }
 }
 

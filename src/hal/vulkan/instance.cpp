@@ -5,11 +5,15 @@
 #include <algorithm>
 #include <cfloat>
 #include <cstring>
+#include <format>
+#include <string>
+#include <vector>
 #include <mutex>
 #include <optional>
 
 #include <spdlog/spdlog.h>
 
+#include "engine/window_mode.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "vk/probe.h"
 #include "vk/vk.h"
@@ -153,21 +157,27 @@ D3DCaps9Tail sm3Caps() {
 HalInstance::HalInstance(const Options& options) : options_(options) {}
 
 bEResult HalInstance::Init(eCGfxShared::eEAPIType) {
-    // the display's 32-bit modes: the engine picks the one matching the window exactly (as with D3D9's mode list)
+    // the primary display's 32-bit modes (the engine creates its window at 0,0): the engine picks the one matching the
+    // window's size and its configured refresh exactly, with RefreshRate 0 the first of that size - so per size the
+    // desktop's refresh rate comes first (engine/window_mode.h orderModes; docs/research/window-mode.md 8.1)
     DEVMODEW dm{};
     dm.dmSize = sizeof(dm);
+    std::vector<engine::window::DisplayMode> modes;
     for (DWORD i = 0; EnumDisplaySettingsW(nullptr, i, &dm); ++i) {
-        if (dm.dmBitsPerPel != 32) continue;
-        const Mode m{dm.dmPelsWidth, dm.dmPelsHeight, dm.dmDisplayFrequency};
-        const bool dup = std::ranges::any_of(modes_, [&](const Mode& o) {
-            return o.width == m.width && o.height == m.height && o.refresh == m.refresh;
-        });
-        if (!dup) modes_.push_back(m);
+        if (dm.dmBitsPerPel == 32) modes.push_back({dm.dmPelsWidth, dm.dmPelsHeight, dm.dmDisplayFrequency});
     }
+    std::uint32_t desktopRefresh = 0;
+    if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm)) desktopRefresh = dm.dmDisplayFrequency;
+    for (const auto& m : engine::window::orderModes(std::move(modes), desktopRefresh)) modes_.push_back({m.width, m.height, m.refresh});
     if (modes_.empty()) {
         modes_.push_back({1280, 720, 60});
     }
-    spdlog::info("hal: Vulkan instance, {} display modes", modes_.size());
+    std::string refreshes;
+    for (const Mode& m : modes_) {
+        if (m.width == dm.dmPelsWidth && m.height == dm.dmPelsHeight) refreshes += std::format("{}{}", refreshes.empty() ? "" : " ", m.refresh);
+    }
+    spdlog::info("hal: Vulkan instance, {} display modes (desktop {}x{} @ {} Hz; its size offers {} Hz)", modes_.size(),
+                 dm.dmPelsWidth, dm.dmPelsHeight, desktopRefresh, refreshes);
     return bEResult_Ok;
 }
 

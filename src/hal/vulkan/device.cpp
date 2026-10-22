@@ -162,9 +162,10 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     if (!dev_.create(o)) {
         return false;
     }
-    // never exclusive fullscreen: a fullscreen request becomes a borderless window over the monitor (engine/window_mode.h)
+    // fullscreen: a borderless window over the monitor, or exclusive fullscreen with vulkan.fullscreen = exclusive
+    // (engine/window_mode.h)
     window_ = p.window;
-    engine::window::onModeSet(p.window, p.windowed, o.width, o.height);
+    engine::window::onModeSet(p.window, p.windowed, o.width, o.height, p.refreshRate);
     spdlog::info("hal: Vulkan device for window {} ({}x{}, vsync {}, depth {})", static_cast<void*>(p.window), o.width, o.height,
                  o.vsync, vk::d3dFormatName(o.depthFormat));
     engine::scene::attach(&dev_);  // the frame phase markers (no-ops when they are not installed)
@@ -187,6 +188,12 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         }
     }
     if (rs.vsync != nullptr) reg.onChange(*rs.vsync, [this](const settings::Setting&) { applyVsync(); }, this);
+    if (rs.fullscreen != nullptr) {
+        // exclusive fullscreen (docs/research/window-mode.md 8): the effective value (borderless without the capability)
+        const auto applyFullscreen = [](const settings::Setting& s) { engine::window::setExclusive(s.asEnum() == "exclusive"); };
+        applyFullscreen(*rs.fullscreen);
+        reg.onChange(*rs.fullscreen, applyFullscreen, this);
+    }
     if (rs.maxFps != nullptr) {
         reg.onChange(*rs.maxFps, [this](const settings::Setting& s) {
             dev_.setMaxFps(s.value());
@@ -805,11 +812,12 @@ bEResult HalDevice::DestroyDepthBuffer(void* a0) {
 // ---- modes / frame --------------------------------------------------------------------------------------------------
 
 bEResult HalDevice::ToggleNewMode(eCAPIDevice::eSAPIModeParameters const& a0) {
-    spdlog::info("hal: ToggleNewMode {}x{} (windowed {}, vsync {})", a0.backBufferWidth, a0.backBufferHeight, a0.windowed, a0.vsync);
+    spdlog::info("hal: ToggleNewMode {}x{} @ {} Hz (windowed {}, vsync {})", a0.backBufferWidth, a0.backBufferHeight, a0.refreshRate,
+                 a0.windowed, a0.vsync);
     engineVsync_ = a0.vsync;
     applyVsync();
     if (!dev_.resize(a0.backBufferWidth, a0.backBufferHeight)) return bEResult_False;
-    engine::window::onModeSet(window_, a0.windowed, a0.backBufferWidth, a0.backBufferHeight);
+    engine::window::onModeSet(window_, a0.windowed, a0.backBufferWidth, a0.backBufferHeight, a0.refreshRate);
     return bEResult_Ok;
 }
 
@@ -878,8 +886,17 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
         return dev_.readBackBuffer(bgra, w, h);
     });
     HAL_LOG("hal> SwapScreen");
-    // borderless fullscreen: a pending window placement / mode correction, the window kept on its monitor
-    if (engine::window::onPresent()) dev_.windowResized();
+    // borderless / exclusive fullscreen: a pending window placement / mode correction, the window kept on its monitor,
+    // exclusive fullscreen's display mode and Vulkan exclusive mode (docs/research/window-mode.md)
+    const engine::window::Presentation wp = engine::window::onPresent();
+    if (wp.displayModeChanged) dev_.displayModeChanged();
+    dev_.setRefreshCap(wp.refreshCap);
+    // vulkan.exclusive_acquire = false (diagnostics): the display mode change without Vulkan's exclusive swapchain
+    const auto* acquireSetting = settings::renderer().exclusiveAcquire;
+    const bool acquire = acquireSetting == nullptr || acquireSetting->asBool();
+    if (!dev_.setFullScreenExclusive(acquire ? wp.exclusiveMonitor : nullptr, acquire && wp.holdExclusive) && wp.resized) {
+        dev_.windowResized();
+    }
     dev_.present();
     const auto& s = dev_.stats();
     api::publishPresent(s.frames, api::FrameNumbers{

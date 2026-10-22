@@ -459,6 +459,8 @@ void onProcessAttach(void* module) {
 
 void onProcessDetach(bool processTerminating) {
     spdlog::info("process detach (terminating = {})", processTerminating);
+    // exclusive fullscreen: the desktop's display mode back (Windows also restores it when the process is killed)
+    engine::window::restoreDisplayMode("process exit");
     if (g_config.mode == Mode::Trace) {
         hal::trace::writeStats();
     }

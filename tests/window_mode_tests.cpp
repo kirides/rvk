@@ -3,6 +3,8 @@
 #include "engine/window_mode.h"
 #include "test.h"
 
+#include <vector>
+
 using namespace rvk::engine::window;
 
 TEST(window_mode_decide) {
@@ -30,4 +32,35 @@ TEST(window_mode_decide) {
     d = decide(false, 1600, 900, Rect{});
     CHECK(!d.borderless && !d.resize);
     CHECK(kModePopup == 0x90000000u && kModeWindowed == 0x00c80000u);
+}
+
+TEST(window_mode_pick_display_mode) {
+    const std::vector<DisplayMode> modes = {{2560, 1440, 60}, {2560, 1440, 120}, {2560, 1440, 360}, {1920, 1080, 60},
+                                            {1920, 1080, 144}, {1600, 900, 75}};
+    // the exact mode
+    CHECK(pickDisplayMode(modes, 1920, 1080, 60, 120) == (DisplayMode{1920, 1080, 60}));
+    CHECK(pickDisplayMode(modes, 2560, 1440, 360, 120) == (DisplayMode{2560, 1440, 360}));
+    // refresh 0: the desktop's refresh if the size has it, else the highest
+    CHECK(pickDisplayMode(modes, 2560, 1440, 0, 120) == (DisplayMode{2560, 1440, 120}));
+    CHECK(pickDisplayMode(modes, 1920, 1080, 0, 120) == (DisplayMode{1920, 1080, 144}));
+    // a refresh the size lacks: the nearest, the higher on a tie
+    CHECK(pickDisplayMode(modes, 1920, 1080, 100, 120) == (DisplayMode{1920, 1080, 60}));
+    CHECK(pickDisplayMode(modes, 2560, 1440, 90, 120) == (DisplayMode{2560, 1440, 120}));
+    CHECK(pickDisplayMode(modes, 1600, 900, 60, 120) == (DisplayMode{1600, 900, 75}));
+    // no mode of that size
+    CHECK(!pickDisplayMode(modes, 1280, 720, 60, 120).has_value());
+    CHECK(!pickDisplayMode({}, 1920, 1080, 60, 60).has_value());
+}
+
+TEST(window_mode_order_modes) {
+    const std::vector<DisplayMode> in = {{2560, 1440, 60}, {1920, 1080, 60}, {2560, 1440, 120}, {2560, 1440, 360},
+                                         {1920, 1080, 120}, {2560, 1440, 60}, {1920, 1080, 48}};
+    const auto out = orderModes(in, 120);
+    // sizes ascending, per size the desktop's refresh first (the engine's RefreshRate 0 takes the first), then descending
+    const std::vector<DisplayMode> want = {{1920, 1080, 120}, {1920, 1080, 60}, {1920, 1080, 48},
+                                           {2560, 1440, 120}, {2560, 1440, 360}, {2560, 1440, 60}};
+    CHECK(out == want);
+    // the desktop's refresh missing at a size: descending
+    const auto out2 = orderModes({{1600, 900, 60}, {1600, 900, 75}}, 120);
+    CHECK(out2 == (std::vector<DisplayMode>{{1600, 900, 75}, {1600, 900, 60}}));
 }

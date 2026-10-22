@@ -234,6 +234,8 @@ Registry& registry();
 struct RendererSettings {
     Setting* vsync = nullptr;        // vulkan.vsync: "engine" (the game's option), "on", "off"
     Setting* maxFps = nullptr;       // vulkan.max_fps: 0 = no cap beyond vsync
+    Setting* exclusiveAcquire = nullptr;  // vulkan.exclusive_acquire: hold Vulkan's exclusive mode in exclusive fullscreen (hidden diagnostics)
+    Setting* fullscreen = nullptr;   // vulkan.fullscreen: "borderless", "exclusive" (needs FullScreenExclusive; window-mode.md 8)
     Setting* adapter = nullptr;      // vulkan.adapter: -1 = best discrete GPU (restart)
     Setting* toggleKey = nullptr;    // overlay.toggle_key
     Setting* abKey = nullptr;        // overlay.ab_key
