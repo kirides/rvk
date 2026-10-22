@@ -125,10 +125,10 @@ return {
     {
         id = "swamp_camp",
         player = { x = -30621, y = 8649, z = 27292, yaw = 0 },
-        camera = { target = { 0, 0, 0 }, yaw = 90, pitch = -25, distance = 3000 },
+        camera = { target = { -30621, 8649, 27292 }, abs = true, yaw = 225, pitch = -24, distance = 2400 },
         hide_player = true, hide_npcs = 3000,
         time = { 14, 0 }, weather = "Sunny_Half_02",
-        notes = "Don's bandit camp in the swamp (SP_Don): fog over wet ground (Levelmesh_Lakemesh_07 is Special_Fog_Ground_01, not water)",
+        notes = "Don's bandit camp in the swamp (SP_Don), from the north-east over the walkways: green mud ground (Nat_Ground_GreenMud_*) under ground fog (Levelmesh_Lakemesh_07 is Special_Fog_Ground_01); no water surface is drawn there (water.md 2.2)",
     },
     {
         id = "swamp_pond",

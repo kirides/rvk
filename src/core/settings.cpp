@@ -784,11 +784,11 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .label = "Water debug view",
         .category = "Debug",
         .description = "Developer view of the enhanced water: the shore field (distance to the coast), the water depth, the "
-                       "surface normals or the reflection alone.",
+                       "surface normals, the reflection alone or the foam (red) over the surf zone (green) and the depth (blue).",
         .type = Type::Enum,
         .defaultValue = 0,
-        .options = {"off", "shore_field", "depth", "normals", "reflection"},
-        .optionLabels = {"Off", "Shore field", "Depth", "Normals", "Reflection"},
+        .options = {"off", "shore_field", "depth", "normals", "reflection", "foam"},
+        .optionLabels = {"Off", "Shore field", "Depth", "Normals", "Reflection", "Foam"},
         .flags = Flag::NoAB,
     });
     if (&reg == &registry()) g_renderer = r;

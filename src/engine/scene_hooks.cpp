@@ -354,6 +354,10 @@ struct TagScope {
                 t.water = m->water;
                 t.materialName = m->name.c_str();
             }
+        } else if (t.material != nullptr && ph.pass == Pass::Solid && ph.view == View::Main &&
+                   spdlog::should_log(spdlog::level::trace)) {
+            // survey only (-RvkLogLevel trace): the opaque materials too (is there water drawn as an opaque surface?)
+            materialInfo(t.material, meshResource, ph.pass);
         }
     }
     ~TagScope() {

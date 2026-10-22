@@ -64,8 +64,8 @@ set(RVK_SHADERS
     test/abi_pass_layout.comp
     test/rt_query.comp
     water/water.frag
-    water/water_mesh.vert
     water/water_ocean.vert
+    water/wet_shore.frag
 )
 set(RVK_SHADER_OUTPUTS)
 set(RVK_SHADER_INCLUDES "")

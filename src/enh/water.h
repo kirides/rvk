@@ -1,14 +1,16 @@
 #pragma once
 
 // Enhanced water (settings category "Water", default off; docs/research/water.md). A draw replacer on d3d9::Device:
-//  * the engine's water draws (the Refracted pass, right after the refraction copy) are drawn with the GLSL water shaders
-//    instead (shaders/water/*): the engine's own geometry, transform and constants, our shading (refraction + absorption,
-//    SSR + sky cube reflection, sun glint, foam, the engine's fog), with a profile per body of water derived from the
-//    material (enh/water_profile.h);
+//  * the engine's water draws (the Refracted pass, right after the refraction copy) keep the engine's geometry and its own
+//    vertex shader (translated) and get the GLSL water pixel shader (shaders/water/water.frag), which evaluates the
+//    engine's water material (its pixel shader's model: normal maps, diffuse textures, constants, lighting, depth fade;
+//    enh/water_profile.h picks the model from the shader's sampler layout, unknown shaders keep the engine's draw) and adds
+//    traced reflections, foam and the sea's waves on top;
 //  * the open sea (the engine's world-spanning sea plane, found by its geometry) is replaced by a camera-centred wave grid
-//    (water.ocean_waves): waves offshore, damped at the coast and near the camera, a lower waterline with swash at the
-//    coast, using the shore field baked from the engine's own coast overlay (enh/shore_field.h); that overlay (the "fake
-//    shore", Special_Water_Shore_*) is then not drawn;
+//    (water.ocean_waves) that hands the same pixel shader the engine ocean VS's interpolators: waves offshore and rolling
+//    in towards the coast, a lower waterline with swash, surf foam, the beach above the swash darkened as wet sand (an
+//    AfterOpaque pass), using the shore field baked from the engine's own coast overlay (enh/shore_field.h); that overlay
+//    (the "fake shore", Special_Water_Shore_*) is then not drawn;
 //  * waterfalls, glass, crystals and everything else keep the engine's shading.
 // Off: the replacer answers "engine" for every draw; nothing else changes.
 
@@ -24,34 +26,61 @@
 #include "d3d9/device.h"
 #include "enh/shore_field.h"
 #include "enh/water_profile.h"
+#include "shader/abi.h"
+#include "vk/passes.h"
 
 namespace rvk::enh {
 
-// mirror of shaders/water/water_common.glsl WaterBlock (all vec4 / uvec4: std430 = this layout)
+// mirror of shaders/water/water_common.glsl WaterBlock (std430: this layout); starts with a DrawBlock (shader/abi.h RvkDraw)
 struct WaterBlock {
+    // = DrawBlock: the engine draw's texture / sampler slots (bindless), the half-pixel fix its vertex shader reads
+    std::uint32_t tex[20];
+    std::uint32_t smp[20];
     float posFix[4];
-    float sunColor[4];
+    std::uint32_t alphaFunc;
+    float alphaRef;
+    std::uint32_t tint;
+    std::uint32_t pad1;
+    // the engine draw's pixel constants
+    float camFar[4];      // c0
+    float fogColor[4];    // c3
+    float fogParams[4];   // c4
+    float mat[8][4];      // c6..c13 g_ShaderData
+    float indoor[4];      // c14
+    float sh[7][4];       // c15..c21 g_AmbientLight
+    float sunColor[4];    // c22..c24 g_DirLight
     float sunSpec[4];
     float sunDir[4];
-    float fogColor[4];
-    float fogParams[4];
-    float ambient[3][4];
-    float scatter[4];
-    float absorb[4];
-    float surface[4];
-    float foam[4];
+    // the sea grid
+    float vsTc[6][4];     // vs c232..c237 (the ocean VS's texcoord transforms)
+    float uvMapU[4];      // texcoord0 = affine (x, z) of the sea mesh
+    float uvMapV[4];
+    float meshFrame[4];   // tangent, binormal sign
+    float meshExtra[4];   // COLOR1.w, global alpha
+    // ours
     float ocean[4];
     float grid[4];
     float shoreMap[4];
+    float look[4];
     float misc[4];
-    std::uint32_t tex[4];
-    std::uint32_t tex2[4];
-    std::uint32_t smp[4];
+    std::uint32_t res[4];
+    std::uint32_t res2[4];
+    std::uint32_t smpOurs[4];
     float falls[4][4];
     float lights[12][4];
-    float look[4];
+    std::uint32_t lightInfo[4];
 };
-static_assert(sizeof(WaterBlock) == 37 * 16);
+static_assert(sizeof(WaterBlock) == 192 + 57 * 16);
+
+// mirror of shaders/water/wet_shore.frag WetPush
+struct WetShorePush {
+    shader::abi::PassPushHeader h;
+    std::uint32_t depthTex, fieldTex, smpLinear, smpPoint;
+    float shoreMap[4];
+    float ocean[4];
+    float params[4];
+};
+static_assert(sizeof(WetShorePush) == 80 && sizeof(WetShorePush) <= shader::abi::kPushConstantBudget);
 
 class Water final : public d3d9::DrawReplacer {
 public:
@@ -63,7 +92,7 @@ public:
         float waveHeight = 1.0f;   // multiplier
         float murkiness = 1.0f;    // multiplier on the absorption
         float reflections = 1.0f;  // multiplier on reflectivity + glint
-        int debug = 0;             // water.debug: 0 off, 1 shore field, 2 depth, 3 normals, 4 reflection
+        int debug = 0;             // water.debug: 0 off, 1 shore field, 2 depth, 3 normals, 4 reflection, 5 foam
     };
 
     explicit Water(d3d9::Device& device);
@@ -83,21 +112,35 @@ private:
         float minY = 0.0f, maxY = 0.0f, level = 0.0f;
         float extentX = 0.0f, extentZ = 0.0f;
         std::uint32_t vertices = 0;
+        // the mesh's texture mapping and frame (the wave grid reproduces the sea mesh's interpolators)
+        bool mapped = false;
+        float uvU[3]{}, uvV[3]{};     // texcoord0 = affine (x, z)
+        float tangent[3]{1.0f, 0.0f, 0.0f};
+        float binormalSign = 1.0f;
+        float outdoor = 1.0f;         // COLOR1.w
     };
     bool ensureShaders();
     void destroyShaders();
+    // the wet beach (AfterOpaque pass, wet_shore.frag) while the wave grid lowers the waterline
+    void updateWetPass();
+    bool ensureWetPipeline(VkFormat target);
+    void recordWet(d3d9::PassContext& ctx);
+    void destroyWetPipeline();
     const Body& body(d3d9::Device& device, const d3d9::ReplaceQuery& q);
     void collectCoast(d3d9::Device& device, const d3d9::ReplaceQuery& q);
     void serviceBake(d3d9::Device& device);
     void prebuild();
     bool worldRows(d3d9::Device& device, const d3d9::ReplaceQuery& q, float rows[3][4]) const;
-    VkDeviceAddress fillBlock(d3d9::Device& device, const d3d9::ReplaceQuery& q, d3d9::draws::Water kind, bool grid, const Body& b,
-                              std::array<d3d9::Texture*, 6>& sampled);
+    VkDeviceAddress fillBlock(d3d9::Device& device, const d3d9::ReplaceQuery& q, d3d9::draws::Water kind, WaterModel model, bool grid,
+                              const Body& b, std::array<d3d9::Texture*, 16>& sampled);
+    void measureMapping(const d3d9::ReplaceQuery& q, const float rows[3][4], const std::uint8_t* data, std::uint32_t count, Body& b);
 
     d3d9::Device& dev_;
     Settings settings_;
     bool failed_ = false;
-    std::shared_ptr<d3d9::Shader> meshVs_, oceanVs_, ps_;
+    std::shared_ptr<d3d9::Shader> oceanVs_, ps_;
+    std::unordered_set<std::uint64_t> meshVsRegistered_;  // engine water VS hashes whose pipelines with ps_ are prebuilt
+    std::unordered_set<std::uint64_t> loggedModels_;      // engine PS hashes logged (model or "not a known water shader")
     std::unordered_map<std::uint64_t, Body> bodies_;  // by vertex buffer id
     float fallCentre_[2]{};                           // xz box centre of the body measured last (body())
     // the coast (the engine's shore overlay meshes): triangles in world space, baked into the shore field
@@ -112,6 +155,14 @@ private:
         float x, z, radius, baseY;
     };
     std::unordered_map<std::uint64_t, Fall> falls_;
+    std::uint32_t wetPassId_ = 0;
+    vk::PassLayout wetLayout_;
+    VkPipeline wetPipeline_ = VK_NULL_HANDLE;
+    VkFormat wetFormat_ = VK_FORMAT_UNDEFINED;
+    bool wetFailed_ = false;
+    float seaLevel_ = 0.0f;
+    std::uint64_t lastGridFrame_ = 0;      // device frame of the last sea grid (0 = none yet)
+    std::uint64_t wetFrames_ = 0;
     std::uint64_t gridFrame_ = ~0ull;      // device frame whose sea grid was drawn
     std::uint32_t gridMainView_ = 0;
     std::uint64_t replacedDraws_ = 0, skippedDraws_ = 0;

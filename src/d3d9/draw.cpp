@@ -481,7 +481,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
 
     // the engine's own state of the first water / refracted draw of each material (diagnostics)
     if ((tag_.water != draws::Water::None || kind == draws::Kind::Refracted) && waterLogged_.size() < 256 &&
-        waterLogged_.insert(tag_.material).second) {
+        waterLogged_.insert(reinterpret_cast<std::uintptr_t>(tag_.material) ^ (ps_->hash * 0x9E3779B97F4A7C15ull)).second) {
         logWaterDraw(kind);
     }
     // draw replacement (enh/water, docs/research/water.md): the replacer decides before anything is recorded
@@ -505,6 +505,9 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         q.textures = tex_.data();
         q.engineVs = vs_.get();
         q.enginePs = ps_.get();
+        q.engineVsRef = vs_;
+        q.decl = decl_;
+        q.blended = rs_[RS_ALPHABLENDENABLE] != 0 && rs_[RS_SRCBLEND] == BLEND_SRCALPHA && rs_[RS_DESTBLEND] == BLEND_INVSRCALPHA;
         replacer_->replace(*this, q, rep);
         if ((rep.action == DrawReplacement::Action::Shaders || rep.action == DrawReplacement::Action::Procedural) &&
             (!rep.vs || !rep.ps || rep.vs->module == VK_NULL_HANDLE || rep.ps->module == VK_NULL_HANDLE)) {
@@ -811,6 +814,12 @@ void Device::logWaterDraw(draws::Kind kind) {
     spdlog::info("water:   vs c11 {} c30 {} c32 {} c33 {} c34 {} c35 {}; ps c0 {} c1 {} c3 {} c4 {} c6 {} c7 {} c22 {} c23 {} c24 {}",
                  v4(vsF_[11]), v4(vsF_[30]), v4(vsF_[32]), v4(vsF_[33]), v4(vsF_[34]), v4(vsF_[35]), v4(psF_[0]), v4(psF_[1]),
                  v4(psF_[3]), v4(psF_[4]), v4(psF_[6]), v4(psF_[7]), v4(psF_[22]), v4(psF_[23]), v4(psF_[24]));
+    // the material's own constants: g_ShaderData (ps c6..c13) and g_vShaderData (vs c232.., the texcoord transforms)
+    spdlog::info("water:   ps c8 {} c9 {} c10 {} c11 {} c12 {} c13 {} c14 {}; vs c232 {} c233 {} c234 {} c235 {} c236 {} c237 {} c238 {} "
+                 "c239 {} c240 {} c241 {}",
+                 v4(psF_[8]), v4(psF_[9]), v4(psF_[10]), v4(psF_[11]), v4(psF_[12]), v4(psF_[13]), v4(psF_[14]), v4(vsF_[232]),
+                 v4(vsF_[233]), v4(vsF_[234]), v4(vsF_[235]), v4(vsF_[236]), v4(vsF_[237]), v4(vsF_[238]), v4(vsF_[239]),
+                 v4(vsF_[240]), v4(vsF_[241]));
     // the shaders' D3D9 bytecode next to the shader cache (rvk_shadertool show / refdisasm)
     if (!options_.cacheDir.empty()) {
         std::error_code ec;

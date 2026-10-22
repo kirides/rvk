@@ -2,69 +2,94 @@
 
 #include <algorithm>
 #include <cmath>
+#include <initializer_list>
+#include <utility>
 
 namespace rvk::enh {
 
 using d3d9::draws::Water;
+using shader::TextureType;
 
 namespace {
 
-struct KindDefaults {
-    std::array<float, 3> scatter;  // when the material gives no usable colour
-    std::array<float, 3> absorb;   // per world unit
-    float reflectivity, roughness, glint, ripple, rippleScale, refraction, foam, turbidity;
-};
-
-// absorption: T = exp(-absorb * path); the green channel reaches ~5 % after the engine's opaque depth (c7 of the shaders)
-constexpr KindDefaults kOcean{{0.035f, 0.045f, 0.06f}, {0.0040f, 0.0016f, 0.0013f}, 1.0f, 0.07f, 1.0f, 0.55f, 700.0f, 1.0f, 1.0f, 0.12f};
-constexpr KindDefaults kLake{{0.11f, 0.15f, 0.18f}, {0.014f, 0.009f, 0.009f}, 0.9f, 0.06f, 0.8f, 0.35f, 420.0f, 0.7f, 0.0f, 0.25f};
-constexpr KindDefaults kRiver{{0.13f, 0.14f, 0.15f}, {0.012f, 0.008f, 0.008f}, 0.85f, 0.10f, 0.7f, 0.65f, 260.0f, 0.8f, 0.0f, 0.25f};
-constexpr KindDefaults kSwamp{{0.15f, 0.17f, 0.12f}, {0.050f, 0.034f, 0.060f}, 0.55f, 0.22f, 0.2f, 0.15f, 520.0f, 0.3f, 0.0f, 0.55f};
-
-const KindDefaults& defaults(Water kind) {
-    switch (kind) {
-    case Water::Ocean: return kOcean;
-    case Water::River: return kRiver;
-    case Water::Swamp: return kSwamp;
-    default: return kLake;
+bool layoutIs(const TextureType* s, std::initializer_list<std::pair<int, TextureType>> want) {
+    TextureType expect[16]{};
+    for (const auto& [slot, type] : want) expect[slot] = type;
+    for (int i = 0; i < 16; ++i) {
+        if (s[i] != expect[i]) return false;
     }
+    return true;
 }
 
 }  // namespace
 
-WaterProfile waterProfile(Water kind, const float* materialColour, float murkiness, float reflections) {
-    const KindDefaults& d = defaults(kind);
-    WaterProfile p;
-    p.scatter = d.scatter;
-    if (materialColour != nullptr) {
-        // c6.rgb is a colour in every water shader seen (ocean, lake, river, swamp); anything outside 0..2 is not
-        bool usable = true;
-        float maxc = 0.0f;
-        for (int i = 0; i < 3; ++i) {
-            const float c = materialColour[i];
-            usable = usable && std::isfinite(c) && c >= 0.0f && c <= 2.0f;
-            maxc = std::max(maxc, c);
-        }
-        if (usable && maxc > 1e-3f) p.scatter = {materialColour[0], materialColour[1], materialColour[2]};
+WaterModel engineWaterModel(const TextureType* s) {
+    if (s == nullptr) return WaterModel::None;
+    constexpr TextureType T = TextureType::Tex2D, C = TextureType::Cube;
+    if (layoutIs(s, {{0, T}, {1, T}, {2, T}, {9, T}, {10, T}, {11, T}, {12, C}, {13, T}, {14, T}})) return WaterModel::Ocean;
+    if (layoutIs(s, {{1, T}, {2, T}, {9, C}, {10, T}, {11, T}, {12, T}, {13, T}, {14, T}})) return WaterModel::Lake;
+    // the same with point lights (caves): s0 = the point lights' shadow mask
+    if (layoutIs(s, {{0, T}, {1, T}, {2, T}, {9, C}, {10, T}, {11, T}, {12, T}, {13, T}, {14, T}})) return WaterModel::Lake;
+    if (layoutIs(s, {{1, T}, {2, T}, {9, T}, {10, T}})) return WaterModel::Swamp;
+    if (layoutIs(s, {{1, T}, {2, T}, {9, T}, {10, T}, {11, T}, {12, T}, {13, C}, {14, T}, {15, T}})) return WaterModel::River;
+    return WaterModel::None;
+}
+
+const char* name(WaterModel m) {
+    switch (m) {
+    case WaterModel::Ocean: return "ocean";
+    case WaterModel::Lake: return "lake";
+    case WaterModel::Swamp: return "swamp";
+    case WaterModel::River: return "river";
+    default: return "none";
     }
-    const float m = std::clamp(murkiness, 0.05f, 20.0f);
-    for (int i = 0; i < 3; ++i) p.absorb[static_cast<std::size_t>(i)] = d.absorb[static_cast<std::size_t>(i)] * m;
-    const float r = std::clamp(reflections, 0.0f, 4.0f);
-    p.reflectivity = d.reflectivity * r;
-    p.glint = d.glint * r;
-    p.roughness = d.roughness;
-    p.ripple = d.ripple;
-    p.rippleScale = d.rippleScale;
-    p.refraction = d.refraction;
-    p.foamStrength = d.foam;
-    p.turbidity = std::clamp(d.turbidity * m, 0.0f, 0.9f);
-    // foam: mostly white, tinted by the water's own colour (a murky body never gets bright white foam)
-    const float maxc = std::max({p.scatter[0], p.scatter[1], p.scatter[2], 1e-3f});
-    for (int i = 0; i < 3; ++i) {
-        const auto k = static_cast<std::size_t>(i);
-        p.foam[k] = 0.82f * (0.8f + 0.2f * p.scatter[k] / maxc);
+}
+
+WaterProfile waterProfile(Water kind, float murkiness, float reflections, float waveHeight) {
+    WaterProfile p;
+    p.reflection = std::clamp(reflections, 0.0f, 4.0f);
+    p.murkiness = std::clamp(murkiness, 0.05f, 20.0f);
+    if (kind == Water::Swamp) p.extraReflection = 0.45f * p.reflection;  // still, dark water: the trees, dimly
+    if (kind == Water::Ocean) {
+        p.foam = 1.0f;
+        p.shoreWaves = 25.0f * std::clamp(waveHeight, 0.0f, 3.0f);
     }
     return p;
+}
+
+bool fitAffineXZ(const float* x, const float* z, const float* v, std::size_t n, float out[3], float* maxError) {
+    if (n < 3) return false;
+    // centred sums (x, z can be ~1e5: centring keeps the normal equations well conditioned)
+    double mx = 0, mz = 0, mv = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        mx += x[i];
+        mz += z[i];
+        mv += v[i];
+    }
+    mx /= static_cast<double>(n);
+    mz /= static_cast<double>(n);
+    mv /= static_cast<double>(n);
+    double sxx = 0, sxz = 0, szz = 0, sxv = 0, szv = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        const double dx = x[i] - mx, dz = z[i] - mz, dv = v[i] - mv;
+        sxx += dx * dx;
+        sxz += dx * dz;
+        szz += dz * dz;
+        sxv += dx * dv;
+        szv += dz * dv;
+    }
+    const double det = sxx * szz - sxz * sxz;
+    if (!(std::abs(det) > 1e-9 * std::max(1.0, sxx * szz))) return false;
+    const double a = (sxv * szz - szv * sxz) / det;
+    const double b = (szv * sxx - sxv * sxz) / det;
+    const double c = mv - a * mx - b * mz;
+    double err = 0;
+    for (std::size_t i = 0; i < n; ++i) err = std::max(err, std::abs(a * x[i] + b * z[i] + c - v[i]));
+    out[0] = static_cast<float>(a);
+    out[1] = static_cast<float>(b);
+    out[2] = static_cast<float>(c);
+    if (maxError != nullptr) *maxError = static_cast<float>(err);
+    return true;
 }
 
 }  // namespace rvk::enh

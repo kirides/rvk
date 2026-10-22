@@ -31,9 +31,11 @@ constexpr const char* kSeaOverrides[] = {""};
 // base values of the sea (world units = cm)
 constexpr float kWaveHeight = 70.0f;   // amplitude of the largest wave at water.wave_height 1
 constexpr float kNearCap = 30.0f;      // wave height near the camera (the player wades / swims there)
-constexpr float kLowering = 16.0f;     // the waterline at the coast below the engine's
-constexpr float kSwash = 10.0f;        // swash amplitude (< kLowering: the water never climbs above the engine's line)
-constexpr float kCoastBand = 1800.0f;  // how far from the coast overlay the lowering / swash / coast foam reach
+constexpr float kLowering = 13.0f;     // the waterline at the coast below the engine's
+constexpr float kSwash = 8.0f;         // swash amplitude (< kLowering: the water never climbs above the engine's line)
+constexpr float kCoastBand = 500.0f;   // how far from the coast overlay the lowering / swash reach (quays further out keep the level)
+constexpr float kWetHeight = 22.0f;     // damp sand above the swash's reach (world units)
+constexpr float kWetDarkening = 0.24f;  // wet sand: x (1 - this) of the dry colour
 constexpr float kGridSpacing = 25.0f;  // finest grid spacing
 constexpr int kGridLevels = 8;
 
@@ -44,20 +46,22 @@ std::uint64_t nameHash(const char* s) {
 }
 
 void copy4(float* dst, const float* src) { std::memcpy(dst, src, 16); }
+std::uint32_t w0(const d3d9::Texture* t) { return t != nullptr ? t->bindlessSlot() : 0; }
 
 }  // namespace
 
 Water::Water(d3d9::Device& device) : dev_(device) {
     // the shaders exist from the start, so their pipelines are built in the background at the session's first water draw
     // (also with the feature off): turning it on later costs no frame
-    if (ensureShaders()) {
-        dev_.registerReplacement(meshVs_, ps_, false);
-        dev_.registerReplacement(oceanVs_, ps_, true);
-    }
+    if (ensureShaders()) dev_.registerReplacement(oceanVs_, ps_, true);
+    // the wet-beach pass's pipeline for the scene target's format (A16B16G16R16F) now: turning the water on costs no frame
+    ensureWetPipeline(VK_FORMAT_R16G16B16A16_SFLOAT);
 }
 
 Water::~Water() {
     dev_.setDrawReplacer(nullptr);
+    if (wetPassId_ != 0) dev_.removePass(wetPassId_);
+    destroyWetPipeline();
     if (bake_.valid()) bake_.wait();
     if (field_) dev_.release(std::move(field_));
     destroyShaders();
@@ -65,7 +69,7 @@ Water::~Water() {
 
 void Water::destroyShaders() {
     vk::Context* ctx = &dev_.ctx();
-    for (auto* s : {&meshVs_, &oceanVs_, &ps_}) {
+    for (auto* s : {&oceanVs_, &ps_}) {
         if (*s && (*s)->module != VK_NULL_HANDLE) {
             const VkShaderModule m = (*s)->module;
             dev_.frames().retire([ctx, m] { vkDestroyShaderModule(ctx->device(), m, nullptr); });
@@ -76,7 +80,7 @@ void Water::destroyShaders() {
 
 bool Water::ensureShaders() {
     if (failed_) return false;
-    if (meshVs_ && oceanVs_ && ps_) return true;
+    if (oceanVs_ && ps_) return true;
     const auto make = [&](const char* name, shader::Stage stage) {
         auto s = std::make_shared<d3d9::Shader>();
         s->stage = stage;
@@ -85,15 +89,13 @@ bool Water::ensureShaders() {
         return s;
     };
     using shader::Usage;
-    meshVs_ = make("water/water_mesh.vert", shader::Stage::Vertex);
-    meshVs_->reflection.vertexInputs = {{0, Usage::Position, 0}, {1, Usage::Normal, 0}, {2, Usage::TexCoord, 0}, {3, Usage::TexCoord, 4}};
-    meshVs_->reflection.floatConstCount = 256;  // the whole VS pool: camera c0..c11, instance data c32+
+    // the engine's meshes keep the engine's own vertex shader (translated): its interpolators are what water.frag reads
     oceanVs_ = make("water/water_ocean.vert", shader::Stage::Vertex);
     oceanVs_->reflection.floatConstCount = 256;
     ps_ = make("water/water.frag", shader::Stage::Pixel);
     ps_->reflection.floatConstCount = 1;
     ps_->reflection.colorOutputs = 1;
-    if (meshVs_->module == VK_NULL_HANDLE || oceanVs_->module == VK_NULL_HANDLE || ps_->module == VK_NULL_HANDLE) {
+    if (oceanVs_->module == VK_NULL_HANDLE || ps_->module == VK_NULL_HANDLE) {
         spdlog::error("enh: water: shader modules failed, enhanced water stays off this session");
         failed_ = true;
         destroyShaders();
@@ -104,9 +106,7 @@ bool Water::ensureShaders() {
 
 void Water::prebuild() {
     if (prebuilt_ || !ensureShaders()) return;
-    const bool a = dev_.prebuildReplacement(*meshVs_, *ps_, false);
-    const bool b = dev_.prebuildReplacement(*oceanVs_, *ps_, true);
-    prebuilt_ = a && b;
+    prebuilt_ = dev_.prebuildReplacement(*oceanVs_, *ps_, true);
     spdlog::info("enh: water: pipelines {}", prebuilt_ ? "ready or building in the background"
                                                          : "built in the background at the first water draw");
 }
@@ -123,6 +123,7 @@ void Water::apply(const Settings& s) {
     } else if (was) {
         dev_.setDrawReplacer(nullptr);
     }
+    updateWetPass();
     spdlog::info("enh: water: {} (quality {}, reflections {}, ocean waves {}, wave height {:.2f}, murkiness {:.2f}, reflection "
                  "strength {:.2f}, debug {})",
                  s.enabled ? "on" : "off", s.quality, s.ssr ? "ssr" : "sky cube", s.oceanWaves, s.waveHeight, s.murkiness, s.reflections,
@@ -169,6 +170,7 @@ const Water::Body& Water::body(d3d9::Device& device, const d3d9::ReplaceQuery& q
             b.sea = std::max(b.extentX, b.extentZ) >= kSeaExtent && (hi[1] - lo[1]) <= kFlatSlack;
             fallCentre_[0] = 0.5f * (lo[0] + hi[0]);
             fallCentre_[1] = 0.5f * (lo[2] + hi[2]);
+            if (b.sea) measureMapping(q, rows, data.data(), count, b);
         }
     }
     const char* name = q.tag->materialName != nullptr ? q.tag->materialName : "?";
@@ -177,10 +179,64 @@ const Water::Body& Water::body(d3d9::Device& device, const d3d9::ReplaceQuery& q
             if (*o != '\0' && std::string_view(name).starts_with(o)) b.sea = true;
         }
     }
-    spdlog::info("enh: water: body '{}' ({}): {} vertices, extent {:.0f} x {:.0f}, height {:.1f}..{:.1f} -> {}", name,
-                 draws::name(q.tag->water), b.vertices, b.extentX, b.extentZ, b.minY, b.maxY,
+    spdlog::info("enh: water: body '{}' ({}): {} vertices, centre ({:.0f}, {:.0f}), extent {:.0f} x {:.0f}, height "
+                 "{:.1f}..{:.1f} -> {}",
+                 name, draws::name(q.tag->water), b.vertices, fallCentre_[0],
+                 fallCentre_[1], b.extentX, b.extentZ, b.minY, b.maxY,
                  b.sea ? "the open sea (reaches the world's border)" : "inland water");
     return bodies_.emplace(id, b).first->second;
+}
+
+// The sea mesh's texture mapping (texcoord0 as an affine function of world x, z), tangent frame and outdoor factor: the
+// wave grid hands water.frag the same interpolators as the engine's ocean VS would for the plane
+void Water::measureMapping(const d3d9::ReplaceQuery& q, const float rows[3][4], const std::uint8_t* data, std::uint32_t count, Body& b) {
+    if (q.decl == nullptr) return;
+    const d3d9::VertexElement* pos = nullptr;
+    const d3d9::VertexElement* uv = nullptr;
+    const d3d9::VertexElement* tan = nullptr;
+    const d3d9::VertexElement* col0 = nullptr;
+    const d3d9::VertexElement* col1 = nullptr;
+    for (const d3d9::VertexElement& e : q.decl->elements()) {
+        if (e.stream != 0) continue;
+        if (e.usage == 0 && e.usageIndex == 0 && e.type == 2) pos = &e;    // POSITION FLOAT3
+        if (e.usage == 5 && e.usageIndex == 0 && e.type == 1) uv = &e;     // TEXCOORD0 FLOAT2
+        if (e.usage == 6 && e.usageIndex == 0 && e.type == 2) tan = &e;    // TANGENT FLOAT3
+        if (e.usage == 10 && e.usageIndex == 0 && e.type == 4) col0 = &e;  // COLOR0 D3DCOLOR
+        if (e.usage == 10 && e.usageIndex == 1 && e.type == 4) col1 = &e;  // COLOR1 D3DCOLOR
+    }
+    const std::uint32_t stride = q.vertexStride;
+    if (pos == nullptr || uv == nullptr || count < 3) return;
+    std::vector<float> xs(count), zs(count), us(count), vs(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const std::uint8_t* v = data + static_cast<std::size_t>(i) * stride;
+        float p[3], t[2];
+        std::memcpy(p, v + pos->offset, 12);
+        std::memcpy(t, v + uv->offset, 8);
+        xs[i] = rows[0][0] * p[0] + rows[0][1] * p[1] + rows[0][2] * p[2] + rows[0][3];
+        zs[i] = rows[2][0] * p[0] + rows[2][1] * p[1] + rows[2][2] * p[2] + rows[2][3];
+        us[i] = t[0];
+        vs[i] = t[1];
+    }
+    float eu = 0.0f, ev = 0.0f;
+    b.mapped = fitAffineXZ(xs.data(), zs.data(), us.data(), count, b.uvU, &eu) &&
+               fitAffineXZ(xs.data(), zs.data(), vs.data(), count, b.uvV, &ev);
+    if (tan != nullptr) {
+        float tv[3];
+        std::memcpy(tv, data + tan->offset, 12);
+        float wt[3];
+        for (int r = 0; r < 3; ++r) wt[r] = rows[r][0] * tv[0] + rows[r][1] * tv[1] + rows[r][2] * tv[2];
+        const float len = std::sqrt(wt[0] * wt[0] + wt[1] * wt[1] + wt[2] * wt[2]);
+        if (len > 1e-6f) {
+            for (int r = 0; r < 3; ++r) b.tangent[r] = wt[r] / len;
+        }
+    }
+    // D3DCOLOR is B, G, R, A in memory: the engine VS's binormal sign is 1 - 2 * COLOR0.x (red), the outdoor factor COLOR1.w
+    if (col0 != nullptr) b.binormalSign = 1.0f - 2.0f * static_cast<float>(data[col0->offset + 2]) / 255.0f;
+    if (col1 != nullptr) b.outdoor = static_cast<float>(data[col1->offset + 3]) / 255.0f;
+    spdlog::info("enh: water: sea mesh mapping {}: u = {:.6g} x + {:.6g} z + {:.6g} (max error {:.3g}), v = {:.6g} x + {:.6g} z + "
+                 "{:.6g} (max error {:.3g}), tangent ({:.2f}, {:.2f}, {:.2f}), binormal sign {:.2f}, outdoor {:.2f}",
+                 b.mapped ? "fitted" : "failed", b.uvU[0], b.uvU[1], b.uvU[2], eu, b.uvV[0], b.uvV[1], b.uvV[2], ev, b.tangent[0],
+                 b.tangent[1], b.tangent[2], b.binormalSign, b.outdoor);
 }
 
 // The engine's coast overlay (Special_Water_Shore_*): its triangles in world space, all of the mesh at its first draw
@@ -267,38 +323,46 @@ void Water::serviceBake(d3d9::Device& device) {
     }
 }
 
-VkDeviceAddress Water::fillBlock(d3d9::Device& device, const d3d9::ReplaceQuery& q, draws::Water kind, bool grid, const Body& b,
-                                 std::array<d3d9::Texture*, 6>& sampled) {
+VkDeviceAddress Water::fillBlock(d3d9::Device& device, const d3d9::ReplaceQuery& q, draws::Water kind, WaterModel model, bool grid,
+                                 const Body& b, std::array<d3d9::Texture*, 16>& sampled) {
     const vk::RingAlloc a = device.frames().allocate(sizeof(WaterBlock), 16);
     if (a.ptr == nullptr) return 0;
     WaterBlock w{};
+    // the DrawBlock part: the engine draw's textures and samplers by slot (water.frag samples the material through them)
+    const shader::Reflection& er = q.enginePs->reflection;
+    sampled = {};
+    for (std::uint32_t slot = 0; slot < 16; ++slot) {
+        if (er.samplers[slot] == shader::TextureType::Unknown) continue;
+        d3d9::Texture* t = q.textures[slot];
+        if (t == nullptr || t->isNull()) continue;
+        const bool cube = t->kind() == vk::TextureKind::Cube;
+        if (cube != (er.samplers[slot] == shader::TextureType::Cube)) continue;  // a mismatching bind: the default texture
+        w.tex[slot] = t->bindlessSlot();
+        w.smp[slot] = device.samplerOfSlot(slot);
+        sampled[slot] = t;
+    }
     const d3d9::Viewport& vp = device.viewport();
     w.posFix[0] = 1.0f / static_cast<float>(std::max(1u, vp.width));
     w.posFix[1] = -1.0f / static_cast<float>(std::max(1u, vp.height));
+    copy4(w.camFar, device.psConstant(0));
+    copy4(w.fogColor, device.psConstant(3));
+    copy4(w.fogParams, device.psConstant(4));
+    for (std::uint32_t i = 0; i < 8; ++i) copy4(w.mat[i], device.psConstant(6 + i));
+    copy4(w.indoor, device.psConstant(14));
+    for (std::uint32_t i = 0; i < 7; ++i) copy4(w.sh[i], device.psConstant(15 + i));
     copy4(w.sunColor, device.psConstant(22));
     copy4(w.sunSpec, device.psConstant(23));
     copy4(w.sunDir, device.psConstant(24));
-    copy4(w.fogColor, device.psConstant(3));
-    copy4(w.fogParams, device.psConstant(4));
-    for (int i = 0; i < 3; ++i) copy4(w.ambient[i], device.psConstant(15 + static_cast<std::uint32_t>(i)));
-    const WaterProfile p = waterProfile(kind, device.psConstant(6), settings_.murkiness, settings_.reflections);
-    w.scatter[0] = p.scatter[0];
-    w.scatter[1] = p.scatter[1];
-    w.scatter[2] = p.scatter[2];
-    w.scatter[3] = p.refraction;
-    w.absorb[0] = p.absorb[0];
-    w.absorb[1] = p.absorb[1];
-    w.absorb[2] = p.absorb[2];
-    w.absorb[3] = p.reflectivity;
-    w.surface[0] = p.roughness;
-    w.surface[1] = p.glint;
-    w.surface[2] = p.ripple;
-    w.surface[3] = p.rippleScale;
-    w.foam[0] = p.foam[0];
-    w.foam[1] = p.foam[1];
-    w.foam[2] = p.foam[2];
-    w.foam[3] = p.foamStrength;
-    w.look[0] = p.turbidity;
+    for (std::uint32_t i = 0; i < 6; ++i) copy4(w.vsTc[i], device.vsConstant(232 + i));
+    for (int i = 0; i < 3; ++i) {
+        w.uvMapU[i] = b.uvU[i];
+        w.uvMapV[i] = b.uvV[i];
+        w.meshFrame[i] = b.tangent[i];
+    }
+    w.meshFrame[3] = b.binormalSign;
+    w.meshExtra[0] = b.outdoor;
+    w.meshExtra[1] = device.vsConstant(32)[3];  // the global alpha the engine VS passes on (c32.w)
+    const WaterProfile p = waterProfile(kind, settings_.murkiness, settings_.reflections, settings_.waveHeight);
     const int quality = std::clamp(settings_.quality, 0, 2);
     static constexpr int kGridQuads[3] = {48, 64, 96};
     static constexpr std::uint32_t kSsrSteps[3] = {0, 20, 40};
@@ -310,55 +374,39 @@ VkDeviceAddress Water::fillBlock(d3d9::Device& device, const d3d9::ReplaceQuery&
     w.grid[1] = static_cast<float>(kGridLevels);
     w.grid[2] = static_cast<float>(kGridQuads[quality]);
     w.grid[3] = static_cast<float>(std::fmod(device.secondsSinceCreate(), 16384.0));
-    w.shoreMap[0] = fieldMapping_[0];
-    w.shoreMap[1] = fieldMapping_[1];
-    w.shoreMap[2] = fieldMapping_[2];
-    w.shoreMap[3] = fieldMapping_[3];
-    w.misc[0] = 1.0f;  // sky cube scale
-    w.misc[1] = kNearCap;
-    w.misc[2] = kCoastBand;
-    w.misc[3] = 30000.0f;  // SSR distance
-    // inputs: the engine draw's own refraction copy (s1) and depth map (s2), the sky cube, its shadow mask (s0)
-    const shader::Reflection& er = q.enginePs->reflection;
-    const auto bound = [&](std::uint32_t slot, shader::TextureType type) -> d3d9::Texture* {
-        d3d9::Texture* t = q.textures[slot];
-        return er.samplers[slot] == type && t != nullptr && !t->isNull() ? t : nullptr;
-    };
-    d3d9::Texture* refraction = bound(1, shader::TextureType::Tex2D);
-    d3d9::Texture* depth = bound(2, shader::TextureType::Tex2D);
-    d3d9::Texture* shadow = bound(0, shader::TextureType::Tex2D);
+    for (int i = 0; i < 4; ++i) w.shoreMap[i] = fieldMapping_[static_cast<std::size_t>(i)];
+    w.look[0] = p.reflection;
+    w.look[1] = p.foam;
+    w.look[2] = p.extraReflection;
+    w.look[3] = p.shoreWaves;
+    w.misc[0] = kNearCap;
+    w.misc[1] = kCoastBand;
+    w.misc[2] = 30000.0f;  // SSR distance
+    w.misc[3] = p.murkiness;
+    // the sky cube (the swamp's dim reflection: its shader binds none) and the shore field
     d3d9::Texture* sky = device.imageWithRole(d3d9::scene::ImageRole::SkyEnvCube);
-    if (sky == nullptr) {
-        for (std::uint32_t s = 9; s < 16 && sky == nullptr; ++s) sky = bound(s, shader::TextureType::Cube);
+    if (sky != nullptr && !sky->isNull() && sky->kind() == vk::TextureKind::Cube) {
+        w.res[0] = sky->bindlessSlot();
+        sampled[4] = sky;
     }
-    sampled = {refraction, depth, sky, shadow, field_.get(), nullptr};
-    w.tex[0] = refraction != nullptr ? refraction->bindlessSlot() : 0;
-    w.tex[1] = depth != nullptr ? depth->bindlessSlot() : 0;
-    w.tex[2] = sky != nullptr && sky->kind() == vk::TextureKind::Cube ? sky->bindlessSlot() : 0;
-    w.tex[3] = field_ ? field_->bindlessSlot() : 0;
-    w.tex2[0] = shadow != nullptr ? shadow->bindlessSlot() : 0;
-    w.tex2[1] = settings_.ssr ? kSsrSteps[quality] : 0;
+    if (field_) {
+        w.res[1] = field_->bindlessSlot();
+        sampled[3] = field_.get();
+    }
     std::uint32_t flags = 0;
-    if (grid) flags |= 1u;  // WATER_OCEAN_GRID
-    if (kind == draws::Water::Ocean) flags |= 2u;  // WATER_SEA
-    if (q.instanced) flags |= 4u;
-    if (field_) flags |= 8u;
+    if (grid) flags |= 1u;                                         // WATER_OCEAN_GRID
+    if (kind == draws::Water::Ocean) flags |= 2u;                  // WATER_SEA
+    if (q.blended && !grid) flags |= 4u;                           // WATER_BLENDED
     if (grid && device.vsConstant(11)[1] < b.level) flags |= 16u;  // the camera is under the sea's surface
-    w.tex2[2] = flags;
-    w.tex2[3] = static_cast<std::uint32_t>(std::clamp(settings_.debug, 0, 4));
-    w.smp[0] = device.samplerFor(true, true);
-    w.smp[1] = device.samplerFor(true, false);
-    w.smp[2] = device.samplerFor(false, true);
-    // the engine's point lights of this draw (g_PointLights c25 + 4 i: position + 1 / range^2, diffuse, specular, shadow
-    // mask), when its pixel shader has them (torches, crystals in caves light the water like everything else)
-    {
-        const std::uint32_t n = q.enginePs->reflection.floatConstCount > 25 ? (q.enginePs->reflection.floatConstCount - 25) / 4 : 0;
-        for (std::uint32_t i = 0; i < std::min(n, 4u); ++i) {
-            copy4(w.lights[i * 3 + 0], device.psConstant(25 + i * 4));
-            copy4(w.lights[i * 3 + 1], device.psConstant(26 + i * 4));
-            copy4(w.lights[i * 3 + 2], device.psConstant(27 + i * 4));
-        }
-    }
+    w.res[2] = flags;
+    w.res[3] = static_cast<std::uint32_t>(std::clamp(settings_.debug, 0, 5));
+    w.res2[0] = static_cast<std::uint32_t>(model);
+    w.res2[1] = settings_.ssr ? kSsrSteps[quality] : 0;
+    w.res2[2] = w.tex[1];  // the refraction copy (s1 of every water shader)
+    w.res2[3] = w.tex[2];  // the depth map (s2)
+    w.smpOurs[0] = device.samplerFor(true, true);
+    w.smpOurs[1] = device.samplerFor(true, false);
+    w.smpOurs[2] = device.samplerFor(false, true);
     // the four waterfalls nearest to the camera (whitewater below them)
     {
         const float* cam = device.vsConstant(11);
@@ -375,6 +423,17 @@ VkDeviceAddress Water::fillBlock(d3d9::Device& device, const d3d9::ReplaceQuery&
             w.falls[i][2] = fl.radius;
             w.falls[i][3] = fl.baseY;
         }
+    }
+    // the engine's point lights of this draw (g_PointLights c25 + 4 i: position + 1 / range^2, diffuse colour, -, shadow-mask
+    // channel), when its pixel shader has them (the cave lake: crystals light the water as everything else)
+    if (er.floatConstCount > 25) {
+        const std::uint32_t n = std::min<std::uint32_t>((er.floatConstCount - 25) / 4, 4u);
+        for (std::uint32_t i = 0; i < n; ++i) {
+            copy4(w.lights[i * 3 + 0], device.psConstant(25 + i * 4));
+            copy4(w.lights[i * 3 + 1], device.psConstant(26 + i * 4));
+            copy4(w.lights[i * 3 + 2], device.psConstant(28 + i * 4));
+        }
+        w.lightInfo[0] = n;
     }
     std::memcpy(a.ptr, &w, sizeof(w));
     return a.address;
@@ -423,34 +482,50 @@ void Water::replace(d3d9::Device& device, const d3d9::ReplaceQuery& q, DrawRepla
         }
         return;
     }
-    if (!ensureShaders()) return;
-    // until the pipelines are built (in the background) the engine draws its water: no frame waits for a compiler
-    if (!pipelinesReady_) {
-        pipelinesReady_ = device.replacementReady(*meshVs_, *ps_, false) && device.replacementReady(*oceanVs_, *ps_, true);
-        if (!pipelinesReady_) {
-            if (!prebuilt_) prebuild();
-            return;
-        }
-        spdlog::info("enh: water: pipelines ready");
+    // the engine's shader of this material: one of the known water models, else the engine draws it
+    const WaterModel model = engineWaterModel(er.samplers.data());
+    if (loggedModels_.insert(q.enginePs->hash).second) {
+        spdlog::info("enh: water: material '{}' ({}): pixel shader {:016x} -> model {}{}",
+                     q.tag->materialName != nullptr ? q.tag->materialName : "?", draws::name(tagged), q.enginePs->hash, name(model),
+                     model == WaterModel::None ? " (not a known water shader: the engine's water)" : "");
     }
+    if (model == WaterModel::None || !ensureShaders()) return;
     const Body& b = body(device, q);
     const draws::Water kind = b.sea ? draws::Water::Ocean : (tagged == draws::Water::Ocean ? draws::Water::Lake : tagged);
-    const bool grid = b.sea && settings_.oceanWaves && !q.instanced;
+    const bool grid = b.sea && settings_.oceanWaves && !q.instanced && model == WaterModel::Ocean && b.mapped;
+    // until the pipelines are built (in the background) the engine draws its water: no frame waits for a compiler
     if (grid) {
+        if (!pipelinesReady_) {
+            pipelinesReady_ = device.replacementReady(*oceanVs_, *ps_, true);
+            if (!pipelinesReady_) {
+                if (!prebuilt_) prebuild();
+                return;
+            }
+            spdlog::info("enh: water: wave grid pipeline ready");
+        }
         if (gridFrame_ == frame && gridMainView_ == q.mainView) {
             out.action = DrawReplacement::Action::Skip;  // the grid of this view covers the whole sea
             out.water = kind;
             ++skippedDraws_;
             return;
         }
+    } else {
+        // the engine's mesh with the engine's own vertex shader: one background pipeline build per engine VS
+        if (!q.engineVsRef || q.engineVs == nullptr) return;
+        if (meshVsRegistered_.insert(q.engineVs->hash).second) device.registerReplacement(q.engineVsRef, ps_, false);
+        if (!device.replacementReady(*q.engineVs, *ps_, false)) return;
+    }
+    std::array<d3d9::Texture*, 16> sampled{};
+    const VkDeviceAddress block = fillBlock(device, q, kind, model, grid, b, sampled);
+    if (block == 0) return;
+    if (grid) {
         gridFrame_ = frame;
         gridMainView_ = q.mainView;
+        lastGridFrame_ = frame;
+        seaLevel_ = b.level;
     }
-    std::array<d3d9::Texture*, 6> sampled{};
-    const VkDeviceAddress block = fillBlock(device, q, kind, grid, b, sampled);
-    if (block == 0) return;
     out.action = grid ? DrawReplacement::Action::Procedural : DrawReplacement::Action::Shaders;
-    out.vs = grid ? oceanVs_ : meshVs_;
+    out.vs = grid ? oceanVs_ : q.engineVsRef;
     out.ps = ps_;
     out.block = block;
     out.cullNone = true;  // seen from below too (wading, swimming)
@@ -465,11 +540,125 @@ void Water::replace(d3d9::Device& device, const d3d9::ReplaceQuery& q, DrawRepla
     ++replacedDraws_;
     if (!loggedFirst_) {
         loggedFirst_ = true;
-        spdlog::info("enh: water: first replaced draw: '{}' as {} ({}), refraction slot {}, depth slot {}, sky cube {}, shore field {}",
+        spdlog::info("enh: water: first replaced draw: '{}' as {} ({}, model {}), refraction slot {}, depth slot {}, shore field {}",
                      q.tag->materialName != nullptr ? q.tag->materialName : "?", draws::name(kind), grid ? "wave grid" : "its own mesh",
-                     sampled[0] != nullptr ? sampled[0]->bindlessSlot() : 0, sampled[1] != nullptr ? sampled[1]->bindlessSlot() : 0,
-                     sampled[2] != nullptr ? "yes" : "no", field_ ? "yes" : "not yet");
+                     name(model), w0(sampled[1]), w0(sampled[2]), field_ ? "yes" : "not yet");
     }
+}
+
+// ---- the wet beach --------------------------------------------------------------------------------------------------------
+
+void Water::updateWetPass() {
+    const bool want = settings_.enabled && settings_.oceanWaves && !failed_ && !wetFailed_;
+    if (want && wetPassId_ == 0) {
+        wetPassId_ = dev_.addPass(d3d9::inject::Point::AfterOpaque, "water.wet_shore", [this](d3d9::PassContext& ctx) { recordWet(ctx); },
+                                  this);
+        wetFrames_ = 0;
+    } else if (!want && wetPassId_ != 0) {
+        dev_.removePass(wetPassId_);
+        wetPassId_ = 0;
+    }
+}
+
+void Water::destroyWetPipeline() {
+    vk::Context* ctx = &dev_.ctx();
+    const VkPipeline p = wetPipeline_;
+    vk::PassLayout layout = wetLayout_;
+    if (p != VK_NULL_HANDLE || layout.valid()) {
+        dev_.frames().retire([ctx, p, layout]() mutable {
+            if (p != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), p, nullptr);
+            layout.destroy(*ctx);
+        });
+    }
+    wetPipeline_ = VK_NULL_HANDLE;
+    wetLayout_ = vk::PassLayout{};
+    wetFormat_ = VK_FORMAT_UNDEFINED;
+}
+
+bool Water::ensureWetPipeline(VkFormat target) {
+    if (wetFailed_) return false;
+    vk::Context& ctx = dev_.ctx();
+    if (!wetLayout_.valid() && !wetLayout_.create(ctx, dev_.bindless(), {})) {
+        wetFailed_ = true;
+        return false;
+    }
+    if (wetPipeline_ != VK_NULL_HANDLE && wetFormat_ == target) return true;
+    if (wetPipeline_ != VK_NULL_HANDLE) {
+        const VkPipeline old = wetPipeline_;
+        vk::Context* c = &ctx;
+        dev_.frames().retire([c, old] { vkDestroyPipeline(c->device(), old, nullptr); });
+        wetPipeline_ = VK_NULL_HANDLE;
+    }
+    vk::PassGraphicsDesc gd;
+    gd.vs = shader::embedded::spirv("debug/fullscreen.vert");
+    gd.fs = shader::embedded::spirv("water/wet_shore.frag");
+    gd.color = target;
+    // dst * src: darkens the scene (keeps the engine's exposure); alpha kept
+    gd.blend.enable = 1;
+    gd.blend.srcColor = VK_BLEND_FACTOR_DST_COLOR;
+    gd.blend.dstColor = VK_BLEND_FACTOR_ZERO;
+    gd.blend.srcAlpha = VK_BLEND_FACTOR_ZERO;
+    gd.blend.dstAlpha = VK_BLEND_FACTOR_ONE;
+    gd.name = "water.wet_shore";
+    wetPipeline_ = vk::createPassGraphicsPipeline(ctx, wetLayout_.layout(), gd);
+    wetFormat_ = target;
+    if (wetPipeline_ == VK_NULL_HANDLE) {
+        spdlog::error("enh: water: wet shore pipeline failed, the beach stays dry this session");
+        wetFailed_ = true;
+        return false;
+    }
+    return true;
+}
+
+void Water::recordWet(d3d9::PassContext& ctx) {
+    d3d9::Texture* scene = ctx.sceneHdr;
+    // the frame's first main view rendering into the scene target, the sea's grid drawn last frame, the shore field baked
+    if (ctx.mainView != 1 || scene == nullptr || ctx.target != scene || ctx.depthMap == nullptr || !field_) return;
+    const std::uint64_t frame = dev_.stats().frames;
+    if (lastGridFrame_ == 0 || frame > lastGridFrame_ + 2) return;
+    vk::Image& target = scene->image();
+    if (!ensureWetPipeline(target.format())) return;
+    VkCommandBuffer cmd = ctx.cmd;
+    if (!dev_.readable(ctx.depthMap, cmd) || !dev_.readable(field_.get(), cmd)) return;
+    const std::uint32_t w = scene->desc().width, h = scene->desc().height;
+    WetShorePush push{};
+    push.h.frame = ctx.frameBlock;
+    push.h.passId = wetPassId_;
+    push.depthTex = ctx.depthMap->bindlessSlot();
+    push.fieldTex = field_->bindlessSlot();
+    push.smpLinear = dev_.samplerFor(true, true);
+    push.smpPoint = dev_.samplerFor(false, true);
+    for (int i = 0; i < 4; ++i) push.shoreMap[i] = fieldMapping_[static_cast<std::size_t>(i)];
+    push.ocean[0] = seaLevel_;
+    push.ocean[1] = kLowering;
+    push.ocean[2] = kSwash;
+    push.ocean[3] = kCoastBand;
+    push.params[0] = static_cast<float>(std::fmod(dev_.secondsSinceCreate(), 16384.0));
+    push.params[1] = kWetHeight;
+    push.params[2] = kWetDarkening;
+
+    target.transition(cmd, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    VkRenderingAttachmentInfo att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    att.imageView = target.attachmentView(dev_.ctx(), 0, 0);
+    att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
+    ri.renderArea = {{0, 0}, {w, h}};
+    ri.layerCount = 1;
+    ri.colorAttachmentCount = 1;
+    ri.pColorAttachments = &att;
+    vkCmdBeginRendering(cmd, &ri);
+    const VkViewport vp{0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h), 0.0f, 1.0f};
+    const VkRect2D sc{{0, 0}, {w, h}};
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, wetPipeline_);
+    wetLayout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, dev_.bindless());
+    wetLayout_.push(cmd, &push, sizeof(push));
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRendering(cmd);
+    if (wetFrames_++ == 0) spdlog::info("enh: water: wet shore pass at {}: {}x{}", d3d9::inject::name(ctx.point), w, h);
 }
 
 }  // namespace rvk::enh

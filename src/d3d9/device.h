@@ -256,6 +256,9 @@ struct ReplaceQuery {
     Texture* const* textures = nullptr;       // the bound textures s0..s15 (pixel)
     const Shader* engineVs = nullptr;
     const Shader* enginePs = nullptr;
+    std::shared_ptr<Shader> engineVsRef;      // the engine's vertex shader (a replacement may keep it: DrawReplacement::vs)
+    const VertexDecl* decl = nullptr;         // the draw's vertex declaration
+    bool blended = false;                     // alpha blending SRCALPHA / INVSRCALPHA on
 };
 
 struct DrawReplacement {
@@ -271,7 +274,7 @@ struct DrawReplacement {
     std::uint32_t vertices = 0;         // Procedural
     bool cullNone = false;              // override the cull mode
     bool opaque = true;                 // blending off, all channels written
-    std::array<Texture*, 6> sampled{};  // made readable (SHADER_READ) before the rendering scope
+    std::array<Texture*, 16> sampled{};  // made readable (SHADER_READ) before the rendering scope
     draws::Water water = draws::Water::None;  // the body as the replacer classified it (goes into the record)
 };
 
@@ -552,6 +555,8 @@ public:
     const float* psConstant(std::uint32_t reg) const { return psF_[reg < kPsFloatConsts ? reg : 0]; }
     // a bindless sampler index for passes / replacement shaders (linear or point, clamp or wrap, mips linear)
     std::uint32_t samplerFor(bool linear, bool clamp);
+    // the bindless sampler of the engine's sampler states at pixel slot s (render thread, inside a draw replacement)
+    std::uint32_t samplerOfSlot(std::uint32_t slot) { return samplerIndex(slot); }
     // Pipelines of replacement shaders, built in the background (no hitch when a player turns a feature on): registered
     // pairs are prewarmed as soon as the first water draw shows the formats (its pipeline description is the template);
     // prebuildReplacement queues one now (false: no water draw seen yet); replacementReady: its pipeline exists
@@ -795,7 +800,7 @@ private:
     draws::FrameDraws draws_;
     draws::Record* lastRecord_ = nullptr;  // the record of the draw being issued (its index buffer is bound after prepareDraw)
     draws::TintMode tint_ = draws::TintMode::Off;
-    std::unordered_set<const void*> waterLogged_;  // materials whose first water / refracted draw was logged
+    std::unordered_set<std::uint64_t> waterLogged_;  // material x pixel shader pairs whose first water / refracted draw was logged
     DrawReplacer* replacer_ = nullptr;
     std::uint32_t customVertices_ = 0;    // the draw prepared by prepareDraw is procedural: vkCmdDraw(customVertices_)
     vk::PipelineDesc waterTemplate_{};    // pipeline description of the last water draw (prebuildReplacement)

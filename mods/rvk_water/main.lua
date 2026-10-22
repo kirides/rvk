@@ -9,6 +9,9 @@
 -- size) and a screenshot `<tag>_<name>.png` is taken (bin\spass\screenshots). The renderer logs the materials it sees
 -- ("water: material ..." in rvk.log). Parameters: tag (file prefix, "w"), only, settle (frames before the picture, 300),
 -- time (hour, 12), weather ("Sunny_Full").
+-- `around=x;y;z` (+ `radius`, default 2500): instead of the entity survey, an orbit of pictures around that point (8
+-- directions looking at it from `radius`, 8 looking outwards from it, one from above), `<tag>_around_<n>.png`: what water
+-- is drawn near a place (with -RvkLogLevel debug rvk.log names every alpha / refracted material drawn).
 local T = risen.test
 
 local tag = T.param("tag", "w")
@@ -77,6 +80,38 @@ local function visit(name, b)
     player:enable_rendering(true)
 end
 
+local function orbit(spec)
+    local c = {}
+    for v in spec:gmatch("[^;,%s]+") do c[#c + 1] = tonumber(v) end
+    local radius = tonumber(T.param("radius", "2500")) or 2500
+    local player = risen.entity.player()
+    player:set_pose { x = c[1], y = c[2] + 100, z = c[3], yaw = 0 }
+    T.sleep_frames(200)
+    local np = risen.world.nav_point(c[1], c[2], c[3], 4000)
+    if np then player:set_pose { x = np[1], y = np[2], z = np[3], yaw = 0 } end
+    T.sleep_frames(30)
+    player:enable_rendering(false)
+    local n = 0
+    local function shot(pos, target)
+        n = n + 1
+        risen.camera.set { pos = pos, target = target, fov = 70, instant = true }
+        T.sleep_frames(settle)
+        local st = capture(("%s_around_%02d"):format(tag, n))
+        risen.log.info(("rvk_water: around %d camera (%.0f, %.0f, %.0f) target (%.0f, %.0f, %.0f) shot %s"):format(n, pos[1], pos[2],
+            pos[3], target[1], target[2], target[3], st))
+    end
+    for i = 0, 7 do
+        local a = math.rad(i * 45)
+        shot({ c[1] + math.sin(a) * radius, c[2] + radius * 0.45, c[3] + math.cos(a) * radius }, { c[1], c[2], c[3] })
+    end
+    for i = 0, 7 do
+        local a = math.rad(i * 45)
+        shot({ c[1], c[2] + 350, c[3] }, { c[1] + math.sin(a) * radius, c[2] - 300, c[3] + math.cos(a) * radius })
+    end
+    shot({ c[1] + 10, c[2] + radius * 1.6, c[3] }, { c[1], c[2], c[3] })
+    player:enable_rendering(true)
+end
+
 T.run(function()
     local started = T.wait_event("session.start", 300, function(m) return m == "new" end)
     T.eq("new game started", started, "new")
@@ -96,6 +131,16 @@ T.run(function()
         risen.log.info(("rvk_water: find %s -> %s"):format(n, e and ("(%.0f, %.0f, %.0f)"):format(x or 0, y or 0, z or 0) or "not found"))
     end
     local found = {}
+    local around = T.param("around", "")
+    if around ~= "" then
+        orbit(around)
+        T.eq("survey", true, true)
+        hold = nil
+        pcall(risen.camera.release)
+        risen.hud.set_visible(true)
+        T.finish()
+        return
+    end
     for _, n in ipairs(NAMES) do
         local e = risen.entity.get(n)
         local b = e and { e:bounds() }

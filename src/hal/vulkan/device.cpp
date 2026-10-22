@@ -215,7 +215,7 @@ void HalDevice::applyWater() {
     s.murkiness = rs.waterMurkiness->asFloat();
     s.reflections = rs.waterReflectionStrength->asFloat();
     const std::string_view d = rs.waterDebug->asEnum();
-    s.debug = d == "shore_field" ? 1 : d == "depth" ? 2 : d == "normals" ? 3 : d == "reflection" ? 4 : 0;
+    s.debug = d == "shore_field" ? 1 : d == "depth" ? 2 : d == "normals" ? 3 : d == "reflection" ? 4 : d == "foam" ? 5 : 0;
     water_->apply(s);
 }
 

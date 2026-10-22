@@ -8,7 +8,7 @@
     .\scripts\water-compare.ps1 -Spots beach_sun,swamp_pond -Setting 'water.quality=high' -Perf
 #>
 param(
-    [string]$Spots = 'beach_sun,beach_rain,harbour_docks,lake_jungle,waterfall_jungle,swamp_pond,swamp_camp',
+    [string]$Spots = 'beach_sun,beach_rain,harbour_docks,lake_jungle,waterfall_jungle,swamp_pond,swamp_camp,crystal_cave',
     # extra player settings of the enhanced run (water.enabled=true is always set)
     [string[]]$Setting = @(),
     [string]$GameDir = 'B:\DevDrive\risen-test-vk',
@@ -17,7 +17,11 @@ param(
     [switch]$Perf,
     [switch]$SkipEngine,
     # reuse the engine pictures of an earlier run (out\water\<stamp>)
-    [string]$EngineDir = ''
+    [string]$EngineDir = '',
+    # a third run with water.debug=normals: the water mask of each spot for the luma / hue numbers (tools/water_stats.py)
+    [switch]$Mask,
+    # reuse the masks of an earlier run (out\water\<stamp>)
+    [string]$MaskDir = ''
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -30,7 +34,7 @@ $spotParam = 'spots=' + ($Spots -replace ',', ';')
 function Invoke-Run([string]$tag, [string[]]$settings) {
     if (Test-Path $shots) { Get-ChildItem $shots -Filter "${tag}_*" | Remove-Item -Force }
     $runArgs = @{ Mode = 'vulkan'; GameDir = $GameDir; Mods = @('rvkcompare'); Scenario = 'rvkcompare'; WaitForResult = $true; Seconds = 1200
-                  Param = @("tag=$tag", $spotParam, 'burst=1') + $Param; Setting = $settings; RvkFilter = 'enh: water|\[error\]' }
+                  Param = @("tag=$tag", $spotParam, 'burst=1') + $Param; Setting = $settings; RvkFilter = 'enh: water: (first|wet|material .* none)|\[error\]' }
     if ($Validation) { $runArgs.Validation = $true }
     if ($Perf) { $runArgs.Perf = $true }
     & (Join-Path $PSScriptRoot 'run.ps1') @runArgs | Out-Host
@@ -43,6 +47,8 @@ function Invoke-Run([string]$tag, [string[]]$settings) {
 if ($EngineDir) { Copy-Item -Recurse (Join-Path $EngineDir 'eng') (Join-Path $out 'eng') }
 elseif (-not $SkipEngine) { Invoke-Run 'eng' @('water.enabled=false') }
 Invoke-Run 'enh' (@('water.enabled=true') + $Setting)
+if ($MaskDir) { Copy-Item -Recurse (Join-Path $MaskDir 'msk') (Join-Path $out 'msk') }
+elseif ($Mask) { Invoke-Run 'msk' @('water.enabled=true', 'water.debug=normals') }
 
 # side by side (left: engine, right: enhanced)
 $py = @'
@@ -71,4 +77,6 @@ for f in sorted(os.listdir(enh)):
 $pyFile = Join-Path $out 'sbs.py'
 Set-Content -Path $pyFile -Value $py -Encoding utf8
 python -I $pyFile $out
+# luma / hue / saturation of the water, engine vs enhanced (over the masks of the debug run when there are some)
+python -I (Join-Path $repo 'tools\water_stats.py') $out
 Write-Host "side by side: $out"

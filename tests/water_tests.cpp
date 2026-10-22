@@ -45,22 +45,49 @@ TEST(water_shore_field_distance_and_direction) {
 
 TEST(water_profiles_follow_the_material) {
     using d3d9::draws::Water;
-    // the swamp's own colour (c6 of Special_Water_Swamp_01) stays the in-water colour; it is murkier than the sea
-    const float swampC6[4] = {0.149f, 0.1725f, 0.1176f, 0.06f};
-    const enh::WaterProfile swamp = enh::waterProfile(Water::Swamp, swampC6);
-    CHECK(swamp.scatter[0] == swampC6[0] && swamp.scatter[1] == swampC6[1] && swamp.scatter[2] == swampC6[2]);
-    const float seaC6[4] = {0.035f, 0.035f, 0.059f, 0.1f};
-    const enh::WaterProfile sea = enh::waterProfile(Water::Ocean, seaC6);
-    CHECK(swamp.absorb[1] > 10.0f * sea.absorb[1]);
-    CHECK(swamp.glint < sea.glint && swamp.reflectivity < sea.reflectivity);
-    // only the sea has foam; foam is tinted by the water colour, never pure white
-    CHECK(sea.foamStrength > 0.0f && swamp.foamStrength == 0.0f);
-    CHECK(enh::waterProfile(Water::Lake, nullptr).foamStrength == 0.0f);
-    CHECK(sea.foam[0] < 0.9f && sea.foam[2] <= 0.83f);
-    // a constant that is not a colour falls back to the kind's default
-    const float junk[4] = {7.0f, -1.0f, 0.0f, 0.0f};
-    CHECK(enh::waterProfile(Water::River, junk).scatter[0] > 0.0f);
+    // only the open sea gets foam and waves rolling in; the swamp (its shader reflects nothing) a dim reflection
+    const enh::WaterProfile sea = enh::waterProfile(Water::Ocean);
+    const enh::WaterProfile swamp = enh::waterProfile(Water::Swamp);
+    CHECK(sea.foam > 0.0f && sea.shoreWaves > 0.0f);
+    CHECK(swamp.foam == 0.0f && swamp.shoreWaves == 0.0f);
+    CHECK(enh::waterProfile(Water::Lake).foam == 0.0f && enh::waterProfile(Water::River).shoreWaves == 0.0f);
+    CHECK(swamp.extraReflection > 0.0f && swamp.extraReflection < 1.0f && sea.extraReflection == 0.0f);
     // the player's tweaks scale it
-    CHECK(enh::waterProfile(Water::Ocean, seaC6, 2.0f).absorb[0] > sea.absorb[0] * 1.9f);
-    CHECK(enh::waterProfile(Water::Ocean, seaC6, 1.0f, 0.0f).glint == 0.0f);
+    CHECK(enh::waterProfile(Water::Ocean, 2.0f).murkiness == 2.0f);
+    CHECK(enh::waterProfile(Water::Swamp, 1.0f, 0.0f).extraReflection == 0.0f);
+    CHECK(enh::waterProfile(Water::Ocean, 1.0f, 1.0f, 0.0f).shoreWaves == 0.0f);
+}
+
+// the engine's water shaders are told apart by their sampler layout (docs/research/water.md 2.3); anything else is not
+// shaded by the enhanced water
+TEST(water_engine_models_from_the_sampler_layout) {
+    using shader::TextureType;
+    constexpr TextureType T = TextureType::Tex2D, C = TextureType::Cube, U = TextureType::Unknown;
+    const TextureType ocean[16] = {T, T, T, U, U, U, U, U, U, T, T, T, C, T, T, U};
+    const TextureType lake[16] = {U, T, T, U, U, U, U, U, U, C, T, T, T, T, T, U};
+    const TextureType swamp[16] = {U, T, T, U, U, U, U, U, U, T, T, U, U, U, U, U};
+    const TextureType river[16] = {U, T, T, U, U, U, U, U, U, T, T, T, T, C, T, T};
+    const TextureType crystal[16] = {U, T, T, U, U, U, U, U, U, T, T, T, U, U, U, U};
+    CHECK(enh::engineWaterModel(ocean) == enh::WaterModel::Ocean);
+    CHECK(enh::engineWaterModel(lake) == enh::WaterModel::Lake);
+    const TextureType caveLake[16] = {T, T, T, U, U, U, U, U, U, C, T, T, T, T, T, U};  // + point lights (the crystal cave)
+    CHECK(enh::engineWaterModel(caveLake) == enh::WaterModel::Lake);
+    CHECK(enh::engineWaterModel(swamp) == enh::WaterModel::Swamp);
+    CHECK(enh::engineWaterModel(river) == enh::WaterModel::River);
+    CHECK(enh::engineWaterModel(crystal) == enh::WaterModel::None);
+    CHECK(enh::engineWaterModel(nullptr) == enh::WaterModel::None);
+}
+
+TEST(water_affine_fit_of_the_sea_mapping) {
+    // v = 0.002 x - 0.0005 z + 3 at points far from the origin (the sea plane's corners are ~3e5 away)
+    const float x[5] = {-336000.0f, 336000.0f, 336000.0f, -336000.0f, 1000.0f};
+    const float z[5] = {-286000.0f, -286000.0f, 286000.0f, 286000.0f, -5000.0f};
+    float v[5];
+    for (int i = 0; i < 5; ++i) v[i] = 0.002f * x[i] - 0.0005f * z[i] + 3.0f;
+    float m[3], err = 1.0f;
+    CHECK(enh::fitAffineXZ(x, z, v, 5, m, &err));
+    CHECK(std::abs(m[0] - 0.002f) < 1e-6f && std::abs(m[1] + 0.0005f) < 1e-6f && std::abs(m[2] - 3.0f) < 1e-2f);
+    CHECK(err < 1e-2f);
+    const float lx[3] = {0.0f, 1.0f, 2.0f}, lz[3] = {0.0f, 1.0f, 2.0f}, lv[3] = {0.0f, 1.0f, 2.0f};
+    CHECK(!enh::fitAffineXZ(lx, lz, lv, 3, m));  // collinear
 }
