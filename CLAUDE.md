@@ -67,6 +67,15 @@ Player settings + overlay (docs/research/overlay.md): every run deletes `bin/rvk
 never in captures unless `-OverlayInScreenshots`; `-Commands '1500: overlay open','1600: key c','1700: ab flip'` runs
 overlay / settings commands at presents (`key`/`click` post real window messages: input tests in the background);
 `-NoOverlay`. config.toml's non-default `[vulkan] vsync / max_fps / adapter` lock the matching player setting.
+Enhanced shadows (docs/research/shadows.md; settings category Shadows, default off): `-Setting 'shadows.enabled=true'` (+
+`shadows.filter=low|medium|high`, `shadows.softness`, `shadows.cascade_blend`, `shadows.fade`, `shadows.bias`; the engine's
+cascades `shadows.map_size=auto|game|1024|2048|4096`, `shadows.range` (m, 0 = auto: 100 m / 4096² with the mask on, else
+the game's), `shadows.split`; debug `shadows.debug=cascades|cascade_term|terrain_term`). A draw replacer for the shadow-mask
+pass (enh/shadows) + a `RenderShadowMaps` pre-hook (engine/shadow_maps); rvk.log `enh: shadows: mask pass ...` (splits,
+texels), `engine: shadow cascades: ...`. Engine vs enhanced: `.\scripts\shadow-compare.ps1 [-Spots a,b] [-Setting k=v]
+[-EngineSetting k=v] [-EngineDir out\shadows\<stamp>]` (spots `shadow_inland_*` look inland from the beach; judge
+against a D3D9 run too: `run.ps1 -Mode passthrough -Mods rvkcompare -Scenario rvkcompare -Param 'tag=d3d','spots=..'`).
+`-LogFrame N` prints each effect pass's float constants and the render targets' sizes / formats.
 Enhanced water (docs/research/water.md; settings category Water, default off): `-Setting 'water.enabled=true'` (+
 `water.quality=low|medium|high`, `water.reflections=sky|ssr`, `water.ocean=off|gerstner|fft`, `water.ocean_quality=low|medium|high`, `water.sea_state=auto|calm|moderate|rough|storm`,
 `water.wind_direction`, `water.wave_scale`, `water.murkiness`,
@@ -181,6 +190,7 @@ docs/research/water.md 4.1.
 | `core/` | config (`bin\rvk\config.toml`), log (`bin\rvk\rvk.log`), paths, MinHook wrapper (`Hook<Fn>`), export resolution; `settings.*`: the player settings registry (`bin\rvk\settings.toml`, A/B; new features register their settings here, with capability requirements); `caps.*`: the capability report |
 | `overlay/` | in-game Dear ImGui overlay (settings, A/B, perf panel), window-procedure input filter, `[debug] commands`; ImGui's Vulkan backend is vendored in `third_party/imgui_vulkan` (compiled against volk) |
 | `engine/symbols.h` | X-macro table of the Engine.dll symbols we bind by decorated name |
+| `engine/shadow_maps.*` | the sun cascades' map size / range / split factor overrides (`eCCascadeShadowMap::RenderShadowMaps` pre-hook; docs/research/shadows.md 3) |
 | `engine/scene_hooks.*` | frame phase markers (Vulkan mode only): detours on Execute / z pass / shadow / solid / alpha / sky / post / GUI, the RenderRefracted vtable slot, image-role tags, the main camera read (docs/research/frame-phases.md) |
 | `vk/` | Vulkan core: context (floor), swapchain, frames + upload ring, bindless set, images, pipeline cache, formats; `passes.*` = pass pipeline layout, compute / fullscreen pipelines, transient images; `raytracing.*` = optional RT tier: AS builds, ray query self-test |
 | `d3d9/` | D3D9 device model on Vulkan (states, resources, draws, present): what the HAL and effects drive; `rvk_d3d9test`; `scene.*` = frame semantics (phase tracker, image roles, camera block); `draws.*` draw tags, records, tint palette; `identity.*` resource ids + generations; `semantics.*` CTAB shader semantics (draw-tags.md); `inject.*` injection points (injection.md) |
@@ -189,7 +199,7 @@ docs/research/water.md 4.1.
 | `res/` | DDS parsing |
 | `hal/` | generated HAL interfaces (`tools/gen_hal.py` -> `api_generated.h`, `trace_generated.h`), engine allocator, trace mode |
 | `shader/` | D3D9 bytecode decoder, listing, GLSL generator (`abi.h` = shader/renderer contract; variant hooks `GlslOptions`), glslang wrapper, `embedded.h` (build-time shaders) |
-| `enh/` | enhancements: `debug_view.*` = `debug.inject_view` (an injected pass, docs/research/injection.md 5); `water.*` = the enhanced water (a `d3d9::DrawReplacer`: engine water draws drawn with `shaders/water/*`, the sea's wave grid), `shore_field.*` (coast distance field bake), `water_profile.*` (look per body of water): docs/research/water.md |
+| `enh/` | enhancements: `debug_view.*` = `debug.inject_view` (an injected pass, docs/research/injection.md 5); `water.*` = the enhanced water (a `d3d9::DrawReplacer`: engine water draws drawn with `shaders/water/*`, the sea's wave grid), `shore_field.*` (coast distance field bake), `water_profile.*` (look per body of water): docs/research/water.md; `shadows.*` = the enhanced sun shadow mask (a `d3d9::DrawReplacer` for the shadow-mask pass, `shaders/shadows/*`): docs/research/shadows.md |
 
 ## Tooling gotchas
 

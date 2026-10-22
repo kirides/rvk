@@ -319,8 +319,21 @@ with validation on and checks every pixel against D3D9's rasterisation rules (ha
   Reproduction spot `beach_night_storm` (rvkcompare spot fields `thunder`, `freeze`, `explicit`). The enhanced sea at
   night stays much darker than the engine's glowing painted surf (plausible; a "moonlit" knob would be a matter of taste).
 
+### Sun shadows (docs/research/shadows.md)
+* **Enhanced mask + cascade overrides: built (2026-10-22).** User report: shadows fade in sharply walking towards the
+  starting area's cliff, the same in D3D9. Cause [C]: High's cascades reach 75 m, the mask lifts them over 60 - 75 m
+  (`FadOut`), beyond only the coarse terrain variance map; 8 dithered point taps, hard stencil switch at the splits. Decision
+  (user): raster first (RT shadows later as another source of the same mask), keep 3 cascades. Built: a draw replacer for
+  the shadow-mask pass (the engine's SSM cascade draws skipped, the whole mask in one pass on the last one: 4 x 4 bilinear PCF
+  taps per cascade, receiver-plane bias from depth-map neighbours, cascades blended before each split, a 35 % fade at the
+  end, the engine's terrain term) + a `RenderShadowMaps` pre-hook (map size, range, split factor). "Auto" with
+  `shadows.enabled`: 4096², 100 m, factor 0.4 -> texels 1.2 / 2.6 / 8.9 cm (game 3.6 / 7.9 / 26.7). Verified: D3D9 vs
+  Vulkan engine vs enhanced at `shadow_inland_*` (a false self-shadow from screen-derivative slopes found and fixed),
+  validation clean, GPU +0.69 ms at the beach (cascades 0.16 -> 0.69 ms, mask ~0.19 -> 0.27 ms), rvk_tests 99 / 99.
+  Default off (parity). Open: the cliff walk itself (exact place), RT shadows, terrain map beyond the range.
+
 ### M9+ Enhanced graphics
-* candidates: anisotropic filtering + MSAA/TAA/SMAA, higher-resolution and better-filtered shadows, modern tonemapping/HDR10,
+* candidates: anisotropic filtering + MSAA/TAA/SMAA, modern tonemapping/HDR10,
   SSAO/GTAO, upscaling (FSR), improved water/sky/fog, per-feature toggles (in the settings registry). Each measured and
   screenshotted.
 
