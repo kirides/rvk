@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <format>
 #include <string>
 
@@ -18,6 +19,7 @@
 #include "core/settings.h"
 #include "d3d9/fvf.h"
 #include "engine/scene_hooks.h"
+#include "engine/shadow_maps.h"
 #include "engine/vfs.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "res/dds.h"
@@ -77,6 +79,7 @@ HalDevice::~HalDevice() {
     }
     debugView_.reset();  // removes its pass, retires its pipelines
     water_.reset();      // unregisters its draw replacer
+    shadows_.reset();
     {
         const std::lock_guard lock(handleMutex_);
         for (auto& [h, d] : decls_) dev_.release(std::move(d));
@@ -187,6 +190,15 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         }
         if (rs.waterEnabled->asBool()) applyWater();
     }
+    // enhanced sun shadows (enh/shadows.h, docs/research/shadows.md): a draw replacer for the shadow mask, live settings
+    shadows_ = std::make_unique<enh::Shadows>(dev_);
+    if (rs.shadowsEnabled != nullptr) {
+        for (settings::Setting* s : {rs.shadowsEnabled, rs.shadowsFilter, rs.shadowsSoftness, rs.shadowsBlend, rs.shadowsFade,
+                                     rs.shadowsBias, rs.shadowsDebug, rs.shadowsMapSize, rs.shadowsRange, rs.shadowsSplit}) {
+            if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyShadows(); }, this);
+        }
+        applyShadows();  // also the engine's cascade overrides (shadows.map_size / range: "auto" follows shadows.enabled)
+    }
     if (options.overlay && dev_.swapchain().valid()) {
         overlay_ = std::make_unique<overlay::Overlay>();
         overlay::Options oo;
@@ -228,6 +240,33 @@ void HalDevice::applyWater() {
     // the enhanced water reflects the engine's sky cube everywhere: keep it current (the whole cube every frame; the
     // engine's own refresh, one face per frame every ~10 s, left lightning flashes baked into some faces: ocean.md 9.8)
     dev_.setSkyCubeEveryFrame(s.enabled);
+}
+
+void HalDevice::applyShadows() {
+    const auto& rs = settings::renderer();
+    if (!shadows_ || rs.shadowsEnabled == nullptr) return;
+    enh::Shadows::Settings s;
+    s.enabled = rs.shadowsEnabled->asBool();
+    const std::string_view f = rs.shadowsFilter->asEnum();
+    s.taps = f == "low" ? 2 : f == "medium" ? 3 : 4;
+    s.softness = rs.shadowsSoftness->asFloat();
+    s.blend = rs.shadowsBlend->asFloat();
+    s.fade = rs.shadowsFade->asFloat();
+    s.bias = rs.shadowsBias->asFloat();
+    const std::string_view dbg = rs.shadowsDebug->asEnum();
+    s.debug = dbg == "cascades" ? 1 : dbg == "cascade_term" ? 2 : dbg == "terrain_term" ? 3 : 0;
+    shadows_->apply(s);
+    // the engine's cascades (engine/shadow_maps.h): "auto" = the enhanced defaults while the enhanced mask is on
+    engine::shadowmaps::Overrides o;
+    const std::string_view size = rs.shadowsMapSize->asEnum();
+    o.mapSize = size == "auto" ? (s.enabled ? 4096 : 0) : size == "game" ? 0 : std::atoi(std::string(size).c_str());
+    const float metres = rs.shadowsRange->asFloat();
+    o.range = metres > 0.0f ? metres * 100.0f : (s.enabled ? 10000.0f : 0.0f);
+    o.splitFactor = o.range > 0.0f ? rs.shadowsSplit->asFloat() : -1.0f;
+    engine::shadowmaps::setOverrides(o);
+    spdlog::info("hal: settings: shadow cascades: map size {}, range {}, split factor {}", o.mapSize > 0 ? std::to_string(o.mapSize) : "game",
+                 o.range > 0.0f ? std::format("{:.0f} m", o.range / 100.0f) : std::string("game"),
+                 o.splitFactor >= 0.0f ? std::format("{:.2f}", o.splitFactor) : std::string("game"));
 }
 
 void HalDevice::applyVsync() {
@@ -1300,8 +1339,11 @@ bEResult HalDevice::GetViewMatrix(bCMatrix* a0) {
 
 bEResult HalDevice::Draw(eCGfxShared::eSGfxDrawCallDesc const& a0) {
     ++halDraws_;
-    HAL_LOG("hal> Draw indexed {} type {} prims {} start {}/{} base {}", a0.indexed, static_cast<int>(a0.type), a0.primitiveCount,
-            a0.startVertex, a0.startIndex, a0.baseVertexIndex);
+    HAL_LOG("hal> Draw indexed {} type {} prims {} start {}/{} base {} (z {} write {} func {}, stencil {} func {} ref {}, colour mask {:x})",
+            a0.indexed, static_cast<int>(a0.type), a0.primitiveCount, a0.startVertex, a0.startIndex, a0.baseVertexIndex,
+            dev_.renderState(d3d9::RS_ZENABLE), dev_.renderState(d3d9::RS_ZWRITEENABLE), dev_.renderState(d3d9::RS_ZFUNC),
+            dev_.renderState(d3d9::RS_STENCILENABLE), dev_.renderState(d3d9::RS_STENCILFUNC), dev_.renderState(d3d9::RS_STENCILREF),
+            dev_.renderState(d3d9::RS_COLORWRITEENABLE));
     const auto type = static_cast<std::uint32_t>(a0.type);
     if (a0.indexed) {
         dev_.drawIndexedPrimitive(type, a0.baseVertexIndex, a0.minVertexIndex, a0.numVertices, a0.startIndex, a0.primitiveCount);
@@ -1312,7 +1354,10 @@ bEResult HalDevice::Draw(eCGfxShared::eSGfxDrawCallDesc const& a0) {
 }
 
 bEResult HalDevice::DrawUP(eCGfxShared::eEPrimitiveType a0, unsigned int a1, void* const a2, unsigned int a3) {
-    HAL_LOG("hal> DrawUP type {} prims {} stride {}", static_cast<int>(a0), a1, a3);
+    HAL_LOG("hal> DrawUP type {} prims {} stride {} (z {} write {} func {}, stencil {} func {} ref {}, colour mask {:x})",
+            static_cast<int>(a0), a1, a3, dev_.renderState(d3d9::RS_ZENABLE), dev_.renderState(d3d9::RS_ZWRITEENABLE),
+            dev_.renderState(d3d9::RS_ZFUNC), dev_.renderState(d3d9::RS_STENCILENABLE), dev_.renderState(d3d9::RS_STENCILFUNC),
+            dev_.renderState(d3d9::RS_STENCILREF), dev_.renderState(d3d9::RS_COLORWRITEENABLE));
     dev_.drawPrimitiveUP(static_cast<std::uint32_t>(a0), a1, a2, a3);
     return bEResult_Ok;
 }
@@ -1400,9 +1445,18 @@ bEResult HalDevice::SetVertexDataNULL(unsigned long a0) {
 // ---- render targets (hal-structs.md 2.2) -----------------------------------------------------------------------------
 
 bEResult HalDevice::SetRenderTarget(void* a0, void* a1) {
-    HAL_LOG("hal> SetRenderTarget {} {} (back buffer {})", a0, a1, static_cast<void*>(dev_.backBuffer()));
-    unbindTextures();
     auto* rt = static_cast<d3d9::Surface*>(a0);
+    if (logThisFrame()) {
+        const auto describe = [](const d3d9::Surface* s) {
+            if (s == nullptr || s->texture() == nullptr) return std::string("-");
+            const auto& d = s->texture()->desc();
+            return std::format("{}x{} {} tex {}", s->width(), s->texture()->levelHeight(s->level()), vk::d3dFormatName(d.format),
+                               static_cast<const void*>(s->texture()));
+        };
+        HAL_LOG("hal> SetRenderTarget {} [{}] {} [{}] (back buffer {})", a0, describe(rt), a1,
+                describe(static_cast<d3d9::Surface*>(a1)), static_cast<void*>(dev_.backBuffer()));
+    }
+    unbindTextures();
     dev_.setRenderTarget(0, rt);
     dev_.setDepthStencil(static_cast<d3d9::Surface*>(a1));
     // eCSkydome_PS::UpdateSkydomeEnvCubemap binds a face of the sky cube (frame-phases.md 4)

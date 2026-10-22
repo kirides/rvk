@@ -43,6 +43,12 @@ enum class Semantic : std::uint8_t {
     AmbientLight,     // PS c15  g_AmbientLight[7]
     DirLight,         // PS c22  g_DirLight (3 registers)
     PointLights,      // PS c25  g_PointLights[]
+    // post_SSM.fx (the screen-space shadow mask, docs/research/shadows.md)
+    ShadowMatrix,     // PS c0   DepthToShadowMatrix (SSM / DSSM: depth-map position -> cascade texture coordinates)
+    VarianceMatrix,   // PS c4   DepthToVarianceShadowMatrix (SSM c4, VSSM c0: -> the terrain variance map)
+    ShadowFade,       // PS c8   FadOut (SSM c8, DSSM c5: saturate(depth * x + y) lifts the shadow at the range's end)
+    MinVariance,      // PS c9   MinVariance
+    MinLightBleeding, // PS c10  MinLightBleeding
     // samplers
     ShadowMask,       // s0 smpShadowMask
     Refract,          // s1 smpRefract (the refraction copy: water)
@@ -50,6 +56,9 @@ enum class Semantic : std::uint8_t {
     LightMap1,        // s4 smpLightMap1
     LightMap2,        // s5 smpLightMap2
     SamplerData,      // s9.. g_SamplerData[] (material samplers)
+    MaskDepth,        // post_SSM.fx DepthSampler (s0: the linear depth map)
+    ShadowSampler,    // post_SSM.fx ShadowSampler (SSM s2: a sun cascade's depth map)
+    VarianceSampler,  // post_SSM.fx VarianceShadowSampler (SSM s3: the terrain variance map)
     Count
 };
 const char* name(Semantic s);

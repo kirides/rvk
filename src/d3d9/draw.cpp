@@ -507,22 +507,26 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         q.decl = decl_;
         q.blended = rs_[RS_ALPHABLENDENABLE] != 0 && rs_[RS_SRCBLEND] == BLEND_SRCALPHA && rs_[RS_DESTBLEND] == BLEND_INVSRCALPHA;
     };
-    if (replacer_ != nullptr && kind == draws::Kind::StaticMesh && phase.view == scene::View::Main && phase.pass == scene::Pass::Solid &&
-        geom.indexed && !geom.userPointer && replacer_->wantsOpaque()) {
-        ReplaceQuery q;
-        query(q);
-        replacer_->observeOpaque(*this, q);
+    if (!replacers_.empty() && kind == draws::Kind::StaticMesh && phase.view == scene::View::Main && phase.pass == scene::Pass::Solid &&
+        geom.indexed && !geom.userPointer) {
+        for (DrawReplacer* r : replacers_) {
+            if (!r->wantsOpaque()) continue;
+            ReplaceQuery q;
+            query(q);
+            r->observeOpaque(*this, q);
+        }
     }
     DrawReplacement rep;
-    if (replacer_ != nullptr && (tag_.water != draws::Water::None || kind == draws::Kind::Refracted) &&
-        phase.view == scene::View::Main) {
+    for (DrawReplacer* r : replacers_) {
+        if (!r->handles(kind, phase, tag_)) continue;
         ReplaceQuery q;
         query(q);
-        replacer_->replace(*this, q, rep);
+        r->replace(*this, q, rep);
         if ((rep.action == DrawReplacement::Action::Shaders || rep.action == DrawReplacement::Action::Procedural) &&
             (!rep.vs || !rep.ps || rep.vs->module == VK_NULL_HANDLE || rep.ps->module == VK_NULL_HANDLE)) {
             rep.action = DrawReplacement::Action::Engine;
         }
+        break;
     }
     if (rep.action == DrawReplacement::Action::Skip) {
         draws_.count(kind, phase.view);

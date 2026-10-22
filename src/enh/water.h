@@ -125,6 +125,10 @@ public:
     void apply(const Settings& s);
     const Settings& settings() const { return settings_; }
 
+    // the water draws of the main view (tagged water, or the Refracted pass)
+    bool handles(d3d9::draws::Kind kind, d3d9::scene::Phase phase, const d3d9::draws::Tag& tag) const override {
+        return (tag.water != d3d9::draws::Water::None || kind == d3d9::draws::Kind::Refracted) && phase.view == d3d9::scene::View::Main;
+    }
     void replace(d3d9::Device& device, const d3d9::ReplaceQuery& q, d3d9::DrawReplacement& out) override;
     // the sea floor field: the main view's static meshes are rasterised top-down (once per mesh and placement)
     bool wantsOpaque() const override;

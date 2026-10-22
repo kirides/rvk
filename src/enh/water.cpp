@@ -115,7 +115,7 @@ Water::Water(d3d9::Device& device) : dev_(device) {
 }
 
 Water::~Water() {
-    dev_.setDrawReplacer(nullptr);
+    dev_.removeDrawReplacer(this);
     if (wetPassId_ != 0) dev_.removePass(wetPassId_);
     if (oceanPassId_ != 0) dev_.removePass(oceanPassId_);
     destroyWetPipeline();
@@ -178,12 +178,12 @@ void Water::apply(const Settings& s) {
     settings_ = s;
     if (s.enabled) {
         if (!was) {
-            dev_.setDrawReplacer(this);
+            dev_.addDrawReplacer(this);
             loggedFirst_ = false;
         }
         prebuild();
     } else if (was) {
-        dev_.setDrawReplacer(nullptr);
+        dev_.removeDrawReplacer(this);
     }
     updateWetPass();
     if (ocean_) {

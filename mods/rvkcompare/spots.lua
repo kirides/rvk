@@ -193,4 +193,46 @@ return {
         settle = 900,
         notes = "the new-game beach at night in a thunderstorm, looking out to sea along a diagonal (the sky cube's face edge +x / -z behind the screen centre), the clock running: lightning flashes during the engine's sky cube refresh left half of the sea bright (ocean.md 9.8)",
     },
+    -- the walk inland from the opening beach towards the starting area's cliff (yaw 58), for the sun shadows' range
+    -- (docs/research/shadows.md): the cliff's shadow popped in a few metres ahead with the game's shadows
+    {
+        id = "shadow_inland_top",
+        player = { x = -38559, y = 15, z = -5770, yaw = 58 },
+        camera = { target = { 0, 1500, 0 }, yaw = 58, pitch = -12, distance = 2500 },
+        hide_player = true, hide_npcs = 2500,
+        time = { 13, 0 }, weather = "Sunny_Full", explicit = true,
+        notes = "overview from 15 m above the beach inland: where the cliff is",
+    },
+    {
+        id = "shadow_inland_high",
+        player = { x = -38559, y = 15, z = -5770, yaw = 58 },
+        camera = { target = { 0, 3000, 0 }, yaw = 58, pitch = -22, distance = 3000 },
+        hide_player = true, hide_npcs = 2500,
+        time = { 13, 0 }, weather = "Sunny_Full", explicit = true,
+        notes = "30 m above the beach looking down inland: the ground from 40 to 150 m (cascade splits, the range's end)",
+    },
+    {
+        id = "shadow_inland_far",
+        player = { x = -38559, y = 15, z = -5770, yaw = 58 },
+        camera = { target = { 0, 2500, 0 }, yaw = 58, pitch = -9, distance = 1500 },
+        hide_player = true, hide_npcs = 2500,
+        time = { 13, 0 }, weather = "Sunny_Full", explicit = true,
+        notes = "25 m above the beach looking inland along the walk: shadows from 60 to 200 m",
+    },
+    {
+        id = "shadow_inland_a",
+        player = { x = -40255, y = 15, z = -6830, yaw = 58 },
+        camera = { target = { 0, 170, 0 }, yaw = 58, pitch = -4, distance = 300 },
+        hide_player = true, hide_npcs = 2500,
+        time = { 13, 0 }, weather = "Sunny_Full", explicit = true,
+        notes = "eye height inland from the beach, -20 m along the walk to the cliff",
+    },
+    {
+        id = "shadow_inland_b",
+        player = { x = -38559, y = 15, z = -5770, yaw = 58 },
+        camera = { target = { 0, 170, 0 }, yaw = 58, pitch = -4, distance = 300 },
+        hide_player = true, hide_npcs = 2500,
+        time = { 13, 0 }, weather = "Sunny_Full", explicit = true,
+        notes = "eye height inland from the beach, +0 m along the walk to the cliff",
+    },
 }

@@ -283,6 +283,9 @@ struct DrawReplacement {
 class DrawReplacer {
 public:
     virtual ~DrawReplacer() = default;
+    // whether the replacer is asked about this draw (called for every draw while it is registered: keep it cheap); the
+    // first registered replacer that handles a draw decides it
+    virtual bool handles(draws::Kind kind, scene::Phase phase, const draws::Tag& tag) const = 0;
     virtual void replace(Device& device, const ReplaceQuery& query, DrawReplacement& out) = 0;
     // the main view's opaque static meshes (Solid pass, indexed, from buffers), when wanted: an enhancement reads the
     // engine's geometry (enh/water: the sea floor field). Called before the draw is recorded; must not change device state.
@@ -561,8 +564,13 @@ public:
     void beginMainView();
     void inject(inject::Point point);
     vk::Transients& transients() { return transients_; }
-    // draw replacement (null = none); the replacer must outlive its registration
-    void setDrawReplacer(DrawReplacer* replacer) { replacer_ = replacer; }
+    // draw replacement (enh/water, enh/shadows): a replacer must outlive its registration; adding twice is a no-op
+    void addDrawReplacer(DrawReplacer* replacer);
+    void removeDrawReplacer(DrawReplacer* replacer);
+    // the sun cascades' depth maps rendered so far this frame (the scene hooks count each ExecuteShadowMap into a DF24 /
+    // DF16 depth texture; enh/shadows knows the frame's last cascade by it)
+    void countShadowDepthMap() { ++shadowDepthMaps_; }
+    std::uint32_t shadowDepthMaps() const { return shadowDepthMaps_; }
     // the D3D9 float constants as last set (render thread)
     const float* vsConstant(std::uint32_t reg) const { return vsF_[reg < kVsFloatConsts ? reg : 0]; }
     const float* psConstant(std::uint32_t reg) const { return psF_[reg < kPsFloatConsts ? reg : 0]; }
@@ -816,7 +824,8 @@ private:
     draws::Record* lastRecord_ = nullptr;  // the record of the draw being issued (its index buffer is bound after prepareDraw)
     draws::TintMode tint_ = draws::TintMode::Off;
     std::unordered_set<std::uint64_t> waterLogged_;  // material x pixel shader pairs whose first water / refracted draw was logged
-    DrawReplacer* replacer_ = nullptr;
+    std::vector<DrawReplacer*> replacers_;
+    std::uint32_t shadowDepthMaps_ = 0;
     std::uint32_t customVertices_ = 0;    // the draw prepared by prepareDraw is procedural: vkCmdDraw(customVertices_)
     vk::PipelineDesc waterTemplate_{};    // pipeline description of the last water draw (prebuildReplacement)
     bool waterTemplateValid_ = false;

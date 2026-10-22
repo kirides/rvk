@@ -828,6 +828,121 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Off", "Shore field", "Depth", "Normals", "Reflection", "Foam", "Sea floor", "Wave attenuation"},
         .flags = Flag::NoAB,
     });
+    r.shadowsEnabled = &reg.add({
+        .key = "shadows.enabled",
+        .label = "Enhanced shadows",
+        .category = "Shadows",
+        .description = "Replaces the game's sun shadow filtering: smooth edges instead of noisy dithered ones, the shadow "
+                       "cascades blended into each other instead of switching at a line, and a long fade at the end of the "
+                       "shadow range instead of shadows popping in a few metres ahead. Off renders the game's own shadows.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+    });
+    r.shadowsFilter = &reg.add({
+        .key = "shadows.filter",
+        .label = "Shadow filter",
+        .category = "Shadows",
+        .description = "Quality of the shadow edges: Low 4, Medium 9, High 16 filtered samples per pixel.",
+        .type = Type::Enum,
+        .defaultValue = 2,
+        .options = {"low", "medium", "high"},
+        .optionLabels = {"Low", "Medium", "High"},
+    });
+    r.shadowsSoftness = &reg.add({
+        .key = "shadows.softness",
+        .label = "Shadow softness",
+        .category = "Shadows",
+        .description = "Width of the shadow edges (1 = about one shadow-map texel per filter sample).",
+        .type = Type::Float,
+        .defaultValue = 1,
+        .min = 0.5,
+        .max = 3,
+        .format = "%.2f",
+    });
+    r.shadowsBlend = &reg.add({
+        .key = "shadows.cascade_blend",
+        .label = "Cascade blending",
+        .category = "Shadows",
+        .description = "How much of each shadow cascade's distance range is blended into the next, coarser one (0 = a hard "
+                       "switch like the game).",
+        .type = Type::Float,
+        .defaultValue = 0.2,
+        .min = 0,
+        .max = 0.5,
+        .format = "%.2f",
+    });
+    r.shadowsFade = &reg.add({
+        .key = "shadows.fade",
+        .label = "Shadow fade-out",
+        .category = "Shadows",
+        .description = "How much of the last cascade's distance range the shadows fade out over towards the end of the shadow "
+                       "range (the game fades over its last fifth).",
+        .type = Type::Float,
+        .defaultValue = 0.35,
+        .min = 0.05,
+        .max = 0.8,
+        .format = "%.2f",
+    });
+    r.shadowsBias = &reg.add({
+        .key = "shadows.bias",
+        .label = "Shadow bias",
+        .category = "Shadows",
+        .description = "Depth offset against shadow acne (stripes on lit surfaces); larger values detach shadows from their "
+                       "casters.",
+        .type = Type::Float,
+        .defaultValue = 0.5,
+        .min = 0,
+        .max = 4,
+        .format = "%.2f",
+    });
+    r.shadowsMapSize = &reg.add({
+        .key = "shadows.map_size",
+        .label = "Shadow map size",
+        .category = "Shadows",
+        .description = "Resolution of each of the three sun shadow cascades (the game's High quality uses 1024). \"Auto\" is "
+                       "4096 with enhanced shadows and the game's size without.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"auto", "game", "1024", "2048", "4096"},
+        .optionLabels = {"Auto", "Game", "1024", "2048", "4096"},
+    });
+    r.shadowsRange = &reg.add({
+        .key = "shadows.range",
+        .label = "Shadow range",
+        .category = "Shadows",
+        .description = "How far sun shadows reach, in metres (the game's High quality: 75 m). 0 = auto: 100 m with enhanced "
+                       "shadows, the game's range without. Farther shadows cost more draws.",
+        .type = Type::Float,
+        .defaultValue = 0,
+        .min = 0,
+        .max = 400,
+        .format = "%.0f m",
+    });
+    r.shadowsSplit = &reg.add({
+        .key = "shadows.split",
+        .label = "Cascade distribution",
+        .category = "Shadows",
+        .description = "Where the cascades split the shadow range when it is not the game's: 0 crowds the detail near the "
+                       "player (logarithmic), 1 spreads it evenly. The game uses 0.4 over its 75 m.",
+        .type = Type::Float,
+        .defaultValue = 0.4,
+        .min = 0,
+        .max = 1,
+        .format = "%.2f",
+    });
+    r.shadowsDebug = &reg.add({
+        .key = "shadows.debug",
+        .label = "Shadow debug view",
+        .category = "Debug",
+        .description = "Developer view of the enhanced shadows: the shadow mask shows the cascade instead of the shadow (dark "
+                       "= the nearest cascade, lighter = farther ones, unshadowed beyond the shadow range), or only the cascades' or only "
+                       "the terrain map's shadow.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "cascades", "cascade_term", "terrain_term"},
+        .optionLabels = {"Off", "Cascades", "Cascade shadows only", "Terrain shadows only"},
+        .flags = Flag::NoAB,
+    });
     if (&reg == &registry()) g_renderer = r;
     return r;
 }

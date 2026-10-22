@@ -43,13 +43,23 @@ constexpr NameEntry kNames[] = {
     {"smpLightMap1", Semantic::LightMap1},
     {"smpLightMap2", Semantic::LightMap2},
     {"g_SamplerData", Semantic::SamplerData},
+    {"DepthToShadowMatrix", Semantic::ShadowMatrix},
+    {"DepthToVarianceShadowMatrix", Semantic::VarianceMatrix},
+    {"FadOut", Semantic::ShadowFade},
+    {"MinVariance", Semantic::MinVariance},
+    {"MinLightBleeding", Semantic::MinLightBleeding},
+    {"DepthSampler", Semantic::MaskDepth},
+    {"ShadowSampler", Semantic::ShadowSampler},
+    {"VarianceShadowSampler", Semantic::VarianceSampler},
 };
 
 constexpr const char* kSemanticNames[] = {
     "ViewProjection", "InvProjection", "InvView",     "CamPosAndFar", "WindMatrix", "VegetationData", "LeafAngleMatrix",
     "LeafAngles",     "FogSettings",   "InstanceMisc", "WorldMatrix",  "InstanceData", "GlobalAlpha",  "ShaderData",
     "ViewToScreenPos", "FogColor",     "CamObstacle",  "IndoorAmbient", "AmbientLight", "DirLight",    "PointLights",
-    "ShadowMask",     "Refract",       "DepthMap",     "LightMap1",    "LightMap2",    "SamplerData",
+    "ShadowMatrix",   "VarianceMatrix", "ShadowFade",  "MinVariance",  "MinLightBleeding",
+    "ShadowMask",     "Refract",       "DepthMap",     "LightMap1",    "LightMap2",    "SamplerData",  "MaskDepth",
+    "ShadowSampler",  "VarianceSampler",
 };
 static_assert(std::size(kSemanticNames) == static_cast<std::size_t>(Semantic::Count));
 

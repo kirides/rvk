@@ -642,6 +642,7 @@ void Device::present() {
     ++stats_.frames;
     phases_.endFrame();
     firings_.endFrame();
+    shadowDepthMaps_ = 0;
     draws_.endFrame();
     lastRecord_ = nullptr;
     lastCamera_ = camera_;
@@ -1554,6 +1555,14 @@ std::uint32_t Device::samplerFor(bool linear, bool clamp) {
     states[SAMP_ADDRESSU] = states[SAMP_ADDRESSV] = states[SAMP_ADDRESSW] = clamp ? TADDRESS_CLAMP : TADDRESS_WRAP;
     return lookupSamplerStates(states);
 }
+
+void Device::addDrawReplacer(DrawReplacer* replacer) {
+    if (replacer != nullptr && std::find(replacers_.begin(), replacers_.end(), replacer) == replacers_.end()) {
+        replacers_.push_back(replacer);
+    }
+}
+
+void Device::removeDrawReplacer(DrawReplacer* replacer) { std::erase(replacers_, replacer); }
 
 void Device::registerReplacement(std::shared_ptr<Shader> vs, std::shared_ptr<Shader> ps, bool procedural) {
     if (!vs || !ps) return;

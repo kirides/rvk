@@ -215,7 +215,10 @@ void detourExecuteShadowMap(void* db, void* shadowMap) {
         }
         if (d3d9::Surface* ds = scope.d->depthStencil(); ds != nullptr && ds->texture() != nullptr) {
             const std::uint32_t f = ds->texture()->desc().format;
-            if (f == vk::d3dfmt::DF24 || f == vk::d3dfmt::DF16) scope.d->tagImage(ds->texture(), ImageRole::ShadowMap);
+            if (f == vk::d3dfmt::DF24 || f == vk::d3dfmt::DF16) {
+                scope.d->tagImage(ds->texture(), ImageRole::ShadowMap);
+                scope.d->countShadowDepthMap();
+            }
         }
     }
     g_executeShadowMap.original(db, shadowMap);

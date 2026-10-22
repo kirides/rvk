@@ -63,6 +63,8 @@ set(RVK_SHADERS
     test/abi_layout.comp
     test/abi_pass_layout.comp
     test/rt_query.comp
+    shadows/shadow_mask.frag
+    shadows/shadow_mask.vert
     water/ocean_evolve.comp
     water/ocean_fft.comp
     water/ocean_foam.comp
@@ -153,6 +155,8 @@ add_library(rvk_core STATIC
     src/enh/ocean_spectrum.h
     src/enh/sea_floor.cpp
     src/enh/sea_floor.h
+    src/enh/shadows.cpp
+    src/enh/shadows.h
     src/enh/shore_field.cpp
     src/enh/shore_field.h
     src/enh/water.cpp
@@ -161,6 +165,8 @@ add_library(rvk_core STATIC
     src/enh/water_profile.h
     src/engine/scene_hooks.cpp
     src/engine/scene_hooks.h
+    src/engine/shadow_maps.cpp
+    src/engine/shadow_maps.h
     src/engine/symbols.cpp
     src/engine/symbols.h
     src/engine/vfs.cpp
@@ -309,7 +315,7 @@ rvk_warnings(rvk_d3d9test)
 # tests
 # ---------------------------------------------------------------------------------------------
 if(RVK_BUILD_TESTS)
-    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp tests/api_tests.cpp tests/fvf_tests.cpp tests/settings_tests.cpp tests/settings_api_tests.cpp tests/scene_tests.cpp tests/draws_tests.cpp tests/inject_tests.cpp tests/caps_tests.cpp tests/water_tests.cpp tests/ocean_tests.cpp)
+    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp tests/api_tests.cpp tests/fvf_tests.cpp tests/settings_tests.cpp tests/settings_api_tests.cpp tests/scene_tests.cpp tests/draws_tests.cpp tests/inject_tests.cpp tests/caps_tests.cpp tests/water_tests.cpp tests/ocean_tests.cpp tests/shadows_tests.cpp)
     target_link_libraries(rvk_tests PRIVATE rvk_core SPIRV-Tools-static)
     rvk_warnings(rvk_tests)
     add_test(NAME rvk_tests COMMAND rvk_tests)

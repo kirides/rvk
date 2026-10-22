@@ -16,6 +16,7 @@
 
 #include "d3d9/device.h"
 #include "enh/debug_view.h"
+#include "enh/shadows.h"
 #include "enh/water.h"
 #include "overlay/overlay.h"
 #include "hal/stub_generated.h"
@@ -471,7 +472,9 @@ private:
     std::unique_ptr<overlay::Overlay> overlay_;
     std::unique_ptr<enh::DebugView> debugView_;  // debug.inject_view (an injected pass)
     std::unique_ptr<enh::Water> water_;          // water.* (a draw replacer)
+    std::unique_ptr<enh::Shadows> shadows_;      // shadows.* (a draw replacer: the sun's shadow mask)
     void applyWater();
+    void applyShadows();
     std::chrono::steady_clock::time_point settingsDirtySince_{};
 };
 

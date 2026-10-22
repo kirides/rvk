@@ -91,8 +91,11 @@ public:
 
     bEResult SetTexture(void* const a0, eCAPITexture* a1) override {
         if (logThisFrame() && a1 != nullptr) {
-            const auto& d = static_cast<HalTexture*>(a1)->tex()->desc();
-            spdlog::info("hal> Effect::SetTexture {} ({}x{} {})", a0, d.width, d.height, vk::d3dFormatName(d.format));
+            const d3d9::Texture* t = static_cast<HalTexture*>(a1)->tex();
+            const auto& d = t->desc();
+            const Handle* h = handleOf(a0);
+            spdlog::info("hal> Effect::SetTexture {} ({}x{} {} tex {})", h != nullptr ? paramOf(*h).name : std::string("?"), d.width,
+                         d.height, vk::d3dFormatName(d.format), static_cast<const void*>(t));
         }
         return setTex(a0, a1 != nullptr ? static_cast<HalTexture*>(a1)->tex() : nullptr);
     }
@@ -339,6 +342,13 @@ private:
         const auto ni = static_cast<std::uint32_t>(regs.i.size() / 4);
         const auto nb = static_cast<std::uint32_t>(regs.b.size());
         std::vector<std::int32_t> b(regs.b.begin(), regs.b.end());
+        if (logThisFrame()) {
+            // the pass's float registers (-LogFrame): what the engine set for this pass (e.g. the shadow mask's cascades)
+            for (std::uint32_t r = 0; r < std::min(nf, 16u); ++r) {
+                spdlog::info("hal>   {} c{} = {:.6g} {:.6g} {:.6g} {:.6g}", vertex ? "vs" : "ps", r, regs.f[r * 4], regs.f[r * 4 + 1],
+                             regs.f[r * 4 + 2], regs.f[r * 4 + 3]);
+            }
+        }
         if (vertex) {
             if (nf) d.setVertexShaderConstantF(0, regs.f.data(), nf);
             if (ni) d.setVertexShaderConstantI(0, regs.i.data(), ni);

@@ -137,6 +137,14 @@
        times; it stands still under the time freeze; risen-spass RE.md 60), unsigned long eCApplication::GetAppState() const     \
        (0x4c1ad0: 8 = the time freeze) */                                                                                         \
     X(timerGetInstance, L"Engine.dll", "?GetInstance@eCTimer@@SAAEAV1@XZ", false)                                                 \
+    /* ---- sun cascades (engine/shadow_maps.*, docs/research/shadows.md 3) ---- */                                            \
+    /* bool eCCascadeShadowMap::RenderShadowMaps() (0x59f200): fits and renders every cascade, each frame (reads MaxDistance  \
+       +0x1c, LogSplitFactor +0x20) */                                                                                         \
+    X(cascadeRenderShadowMaps, L"Engine.dll", "?RenderShadowMaps@eCCascadeShadowMap@@QEAA_NXZ", false)                          \
+    /* void eCCascadeShadowMap::SetShadowMapSize(int const&) (0x59f600): +0x24, frees the splits; SetSplitCount(int const&)   \
+       (0x59f650): creates them (map size, bias, cameras) */                                                                   \
+    X(cascadeSetShadowMapSize, L"Engine.dll", "?SetShadowMapSize@eCCascadeShadowMap@@QEAAXAEBH@Z", false)                       \
+    X(cascadeSetSplitCount, L"Engine.dll", "?SetSplitCount@eCCascadeShadowMap@@QEAAXAEBH@Z", false)                             \
     X(timerGetGameTime, L"Engine.dll", "?GetGameTime@eCTimer@@QEBAKXZ", false)                                                    \
     X(appGetAppState, L"Engine.dll", "?GetAppState@eCApplication@@QEBAKXZ", false)
 

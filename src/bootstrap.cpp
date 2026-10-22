@@ -22,6 +22,7 @@
 #include "core/paths.h"
 #include "core/settings.h"
 #include "engine/scene_hooks.h"
+#include "engine/shadow_maps.h"
 #include "engine/symbols.h"
 #include "engine/vfs.h"
 #include "hal/trace.h"
@@ -359,6 +360,7 @@ void onProcessAttach(void* module) {
     // frame phase markers (docs/research/frame-phases.md): Vulkan mode only, passthrough / trace stay untouched
     if (ok && g_config.mode == Mode::Vulkan) {
         engine::scene::install();
+        engine::shadowmaps::install();
     }
     // eCApplication::Draw: the Gui phase (Vulkan mode) and the debug snapshot + tool-API self-test at fixed Draw calls (any mode)
     if (ok && (g_config.mode == Mode::Vulkan || !g_config.snapshotFrames.empty()) &&

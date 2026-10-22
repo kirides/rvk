@@ -255,6 +255,17 @@ struct RendererSettings {
     Setting* waterMurkiness = nullptr;    // water.murkiness: multiplier on the absorption
     Setting* waterReflectionStrength = nullptr;  // water.reflection_strength
     Setting* waterDebug = nullptr;        // water.debug: "off", "shore_field", "depth", "normals", "reflection"
+    // enhanced sun shadows (enh/shadows.h, docs/research/shadows.md)
+    Setting* shadowsEnabled = nullptr;    // shadows.enabled
+    Setting* shadowsFilter = nullptr;     // shadows.filter: "low", "medium", "high" (bilinear taps per axis 2 / 3 / 4)
+    Setting* shadowsSoftness = nullptr;   // shadows.softness: tap spacing in texels
+    Setting* shadowsBlend = nullptr;      // shadows.cascade_blend: fraction of a cascade blended into the next
+    Setting* shadowsFade = nullptr;       // shadows.fade: fraction of the last cascade over which shadows fade out
+    Setting* shadowsBias = nullptr;       // shadows.bias: constant depth bias (texels of a 45° slope)
+    Setting* shadowsDebug = nullptr;      // shadows.debug: "off", "cascades"
+    Setting* shadowsMapSize = nullptr;    // shadows.map_size: "auto" (4096 with enhanced shadows, else the game's), "game", "1024", "2048", "4096"
+    Setting* shadowsRange = nullptr;      // shadows.range: metres, 0 = auto (100 with enhanced shadows, else the game's)
+    Setting* shadowsSplit = nullptr;      // shadows.split: 0 (logarithmic) .. 1 (uniform) cascade splits with an overridden range
 };
 // hotkey names of overlay.toggle_key / overlay.ab_key ("none" disables)
 const std::vector<std::string>& hotkeyNames();
