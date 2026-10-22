@@ -221,7 +221,8 @@ void main() {
         // + the waves rolling in; the slope variance the filtering removed becomes specular roughness
         fl = seaFloor(w, tc7.xy);
         float cap = nearCameraCap(w, tc7.xy, pc.vs.c[11].xyz);
-        fftWt = cascadeWeights(w, fl) * cap;
+        // the cap flattens the geometry near the camera; the short waves' normals stay (their displacement is small anyway)
+        fftWt = cascadeWeights(w, fl) * vec4(cap, cap, 1.0, 1.0);
         vec2 macro;
         fs = fftSamplePixel(w, tc7.xy, fftWt, lostVar, macro);
         st = shoreTrain(w, fl, t);
@@ -261,7 +262,13 @@ void main() {
         vec2 n01 = mix(nmap(mtex(w, 13u, tc1.xy)), nmap(mtex(w, 14u, tc0.xy)), mask.wy);
         // the FFT's own small waves carry the detail: the material's normal maps weaker on top where they are (its look stays;
         // full strength in sheltered water)
-        if (fft) n01 = mix(vec2(0.5), n01, 1.0 - 0.45 * clamp(max(fftWt.y, fftWt.z), 0.0, 1.0));
+        // (further away the FFT's short waves are filtered out, the material's maps carry the texture again)
+        // and at grazing views, where the material's sparkle on the sky reflection is the engine's look)
+        if (fft) {
+            float damp = 0.3 * clamp(max(fftWt.y, fftWt.z), 0.0, 1.0) * (1.0 - smoothstep(1500.0, 6000.0, dist)) *
+                         smoothstep(0.08, 0.35, dot(Ngeo, V));
+            n01 = mix(vec2(0.5), n01, 1.0 - damp);
+        }
         s.N = frameNormal(n01, T, B, Ngeo, s.nxy);
         vec3 lit = engineLight(w, s.N, Ngeo, outdoor, P, uv) * shadow;
         vec3 R = 2.0 * dot(V, s.N) * s.N - V;
@@ -279,7 +286,7 @@ void main() {
             // the waves smaller than a pixel widen the highlight instead of sparkling (Toksvig-like: the filtered slope
             // variance added to the lobe's), energy kept
             float p2 = specPow / (1.0 + specPow * 2.0 * lostVar);
-            specNorm = (p2 + 2.0) / (specPow + 2.0);
+            specNorm = max((p2 + 2.0) / (specPow + 2.0), 0.6);
             specPow = p2;
         }
         vec3 spec = clamp(dpow(rl, specPow) * specNorm * nl / max(nv, 1e-5), 0.0, 1.0) * w.sunSpec.rgb * up * clamp(cube * c8.x, 0.0, 1.0);
@@ -450,9 +457,17 @@ void main() {
         float breakDepth = max(w.shoreWave.y * st.weight / max(w.shoreWave.z, 0.1), 1.0);  // where the incoming waves break
         float surfZone = smoothstep(4.0, 15.0, vdepth0) *
                          max(st.breaking, 1.0 - smoothstep(0.6 * breakDepth, 1.3 * breakDepth, max(fl.depth, 0.0)));
-        float surf = foamCover(tex, surfZone * st.weight * (0.45 + 0.35 * trail));
+        // the bores passing over it carry the foam; between them it thins out, in patches
+        float patchy = smoothstep(0.35, 0.75, 0.5 + 0.5 * waterNoised(xz0 / 650.0 + vec2(t * 0.01, 0.0)).x);
+        float surf = foamCover(tex, surfZone * st.weight * (0.08 + 0.55 * trail) * mix(0.4, 1.0, patchy)) * 0.8;
+        // the swash zone (the last metre of water before the beach): always broken, streaky water
+        // (by the sea floor's depth: a swimmer or a rock under the surface is not a beach)
+        float swashZone = smoothstep(3.0, 14.0, vdepth0) * (1.0 - smoothstep(35.0, 110.0, max(fl.depth, 0.0))) *
+                          (1.0 - smoothstep(600.0, 1500.0, fl.overlay));
+        surf = max(surf, foamCover(tex, swashZone * (0.25 + 0.2 * patchy)) * 0.75);
         // the broken water is full of bubbles and stirred-up sand: milky turquoise rather than clear
         milk = clamp(surfZone * st.weight * (0.6 + 0.4 * trail) + 0.4 * brkW * trail, 0.0, 1.0) * fineFade;
+        milk = max(milk, swashZone * 0.5 * fineFade);
         // contact: a lace where the water meets the beach (follows the swash) or a wall / rock (short view-ray thickness)
         float contactD = min(vdepth0 * 1.5, thick0);
         float contactW = (1.0 - smoothstep(1.0, 9.0, contactD)) * smoothstep(1.0, 3.0, contactD + 2.0);
@@ -513,7 +528,8 @@ void main() {
         vec3 lit = engineLight(w, Ngeo, Ngeo, outdoor, P, uv) * shadow;
         float lum = dot(lit, vec3(0.2126, 0.7152, 0.0722));
         vec3 milkCol = mix(vec3(0.55 * lum), clamp(seaTint, 0.0, 1.0) * lum * 1.3, 0.55);
-        color = mix(color, mix(milkCol, w.fogColor.rgb, fog), milk * 0.7);
+        // it lightens what lies under the surface; it never darkens the sky's reflection on top of it
+        color = max(color, mix(color, mix(milkCol, w.fogColor.rgb, fog), milk * 0.7));
     }
     if (foam > 0.0) {
         // foam lies on top of the water: white-ish, lit like the beach (the engine's diffuse lighting curve, albedo ~0.7),

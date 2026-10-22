@@ -7,12 +7,12 @@
 -- swim), the game's own follow camera looks at him; his position is logged every second (`rvk_swim: player ...`: the
 -- swim line against the sea level 0), then pictures: `<tag>_follow_b<k>.png` (follow camera, a burst) and
 -- `<tag>_water_b<k>.png` (a fixed camera 1 m above the water next to him). Parameters: tag ("swim"), x / z (the spot,
--- default -47000 / -10500, ~15 m deep), sea (sea state for the log only), weather ("Sunny_Full"), time (13).
+-- default -43500 / -8200, a few metres deep; far out (15 m) the engine puts the hero back on the beach after ~6 s), sea (sea state for the log only), weather ("Sunny_Full"), time (13).
 local T = risen.test
 
 local tag = T.param("tag", "swim")
-local sx = tonumber(T.param("x", "-47000")) or -47000
-local sz = tonumber(T.param("z", "-10500")) or -10500
+local sx = tonumber(T.param("x", "-43500")) or -43500
+local sz = tonumber(T.param("z", "-8200")) or -8200
 local hour = tonumber(T.param("time", "13")) or 13
 local weather = T.param("weather", "Sunny_Full")
 
@@ -49,23 +49,25 @@ T.run(function()
     player:set_pose { x = -38559, y = 15, z = -5770, yaw = 238 }
     T.sleep_frames(240)
     player:set_pose { x = sx, y = 0, z = sz, yaw = 238 }
-    local ys = {}
-    for i = 1, 12 do
-        T.sleep_frames(60)
+    local function where(i)
         local x, y, z = player:position()
-        ys[#ys + 1] = y
-        risen.log.info(("rvk_swim: player %d (%.0f, %.1f, %.0f)"):format(i, x or 0, y or 0, z or 0))
+        risen.log.info(("rvk_swim: player %s (%.0f, %.1f, %.0f)"):format(tostring(i), x or 0, y or 0, z or 0))
+        return x, y, z
     end
-    local last = ys[#ys] or 0
-    -- the engine keeps a swimming character at a fixed depth below the water level 0 (a wading / standing one would be on
-    -- the ground, 15 m down here)
-    T.eq("swimming", last > -400 and last < 100, true)
+    for i = 1, 4 do
+        T.sleep_frames(30)
+        where(i)
+    end
+    local x, y, z = where("before pictures")
+    -- the engine keeps a swimming character at a fixed depth below the water level 0 (not on the ground, not back on land)
+    T.eq("swimming", y ~= nil and y < -50 and y > -400 and math.abs(x - sx) < 1500, true)
     local st1 = burst(tag .. "_follow", 4)
-    local x, y, z = player:position()
+    where("after the follow pictures")
     local a = math.rad(238)
     risen.camera.set { pos = { x - math.sin(a) * 600, 100, z - math.cos(a) * 600 }, target = { x, (y or 0) + 60, z }, fov = 60, instant = true }
     T.sleep_frames(120)
     local st2 = burst(tag .. "_water", 4)
+    where("after the water pictures")
     risen.log.info(("rvk_swim: pictures follow %s, water %s"):format(st1, st2))
     T.eq("pictures", st1 == "done" and st2 == "done", true)
     hold = nil

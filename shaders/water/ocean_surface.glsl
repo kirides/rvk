@@ -75,7 +75,7 @@ vec4 cascadeWeights(WaterBlock w, SeaFloor f) {
 float nearCameraCap(WaterBlock w, vec2 xz, vec3 cam) {
     float camDist = length(xz - cam.xz);
     float capFrac = clamp(w.misc.x / max(0.5 * w.seaInfo.x, 1.0), 0.0, 1.0);
-    float low = 1.0 - smoothstep(300.0, 1500.0, cam.y - w.ocean.x);  // only when the camera is down at the water
+    float low = 1.0 - smoothstep(200.0, 700.0, cam.y - w.ocean.x);  // only when the camera is down at the water (swimming, wading)
     return mix(1.0, mix(capFrac, 1.0, smoothstep(700.0, 3000.0, camDist)), low);
 }
 
