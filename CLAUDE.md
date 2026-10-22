@@ -118,12 +118,18 @@ runs beside another Risen. Swim check:
 scenario `rvk_swim` (the hero in the sea, his swim line logged, pictures `swim_follow_b*` / `swim_water_b*`). Survey
 scenario `rvk_water` (water level-mesh entities' boxes + a look at each; `-Param 'only=Levelmesh_Lakemesh_06','find=SP_Don'`;
 `'around=x;y;z','radius=2500'` = 17 pictures around a place; with `-RvkLogLevel trace` rvk.log also names opaque materials).
-Window modes (docs/research/window-mode.md): Vulkan mode never takes exclusive fullscreen; the engine's fullscreen and a
-windowed mode at the monitor's resolution become a borderless window over the monitor (`engine/window_mode.*`).
+Window modes (docs/research/window-mode.md): by default the engine's fullscreen and a windowed mode at the monitor's
+resolution become a borderless window over the monitor (`engine/window_mode.*`).
 `run.ps1 -Fullscreen` (exception to "always windowed": borderless, no mode change; keep such runs short) writes
 `<Window FullScreen="true">` into the copy's ConfigUser.xml (every other run removes it); `-WindowSize 2560x1440` =
 windowed at the monitor's size; `-Commands '900: window 1600x900','1300: window fullscreen','1700: window toggle'`
-switch at run time (`window state` logs the window); rvk.log `engine: window: ...`.
+switch at run time (`window state` logs the window); rvk.log `engine: window: ...`. Exclusive fullscreen (opt-in
+`vulkan.fullscreen=exclusive`, window-mode.md 8; changes the user's display mode: short runs, check the desktop mode
+afterwards; Windows restores it when the game is killed): `run.ps1 -Fullscreen -AllowFocus -Exe RisenTest.exe -Setting
+'vulkan.fullscreen=exclusive' -Commands '100: window focus','400: window fullscreen 1920x1080@60','800: window
+display','1000: window minimize','1100: window focus'` (`window fullscreen WxH@Hz` = the options menu's call; test runs
+start in the background, `window focus` brings the game to the front). Vsync / fps measurements need awake monitors
+(asleep: every FIFO swapchain runs at ~6 fps).
 Ray tracing tier (docs/research/raytracing.md): optional, enabled at device creation when the GPU has it and `rt.allow`
 (restart setting, default on; `-Setting 'rt.allow=false'` = floor only); rvk.log `vulkan: ray tracing ...` + `caps:` lines
 (the capability report, also the overlay's "Capabilities"). `-RtSelfTest` (`[debug] rt_selftest`) builds a BLAS/TLAS and
@@ -231,7 +237,7 @@ docs/research/water.md 4.1.
 | `overlay/` | in-game Dear ImGui overlay (settings, A/B, perf panel), window-procedure input filter, `[debug] commands`; ImGui's Vulkan backend is vendored in `third_party/imgui_vulkan` (compiled against volk) |
 | `engine/symbols.h` | X-macro table of the Engine.dll symbols we bind by decorated name |
 | `engine/materials.*` | the material graph of a draw's shader (diffuse / opacity / normal slots, blend mode, pool images; docs/research/rt-albedo-facts.md); `engine/memread.*` = SEH-guarded engine reads |
-| `engine/window_mode.*` | borderless fullscreen: `SetResolutionEx` pre-hook (fullscreen -> monitor size), window placement at present, DPI awareness (docs/research/window-mode.md) |
+| `engine/window_mode.*` | borderless fullscreen: `SetResolutionEx` pre-hook (fullscreen -> monitor size), window placement at present, DPI awareness; exclusive fullscreen's display mode switch / restore and focus handling (docs/research/window-mode.md) |
 | `engine/shadow_maps.*` | the sun cascades' map size / range / split factor overrides (`eCCascadeShadowMap::RenderShadowMaps` pre-hook; docs/research/shadows.md 3) |
 | `engine/scene_hooks.*` | frame phase markers (Vulkan mode only): detours on Execute / z pass / shadow / solid / alpha / sky / post / GUI, the RenderRefracted vtable slot, image-role tags, the main camera read (docs/research/frame-phases.md) |
 | `vk/` | Vulkan core: context (floor), swapchain, frames + upload ring, bindless set, images, pipeline cache, formats; `passes.*` = pass pipeline layout, compute / fullscreen pipelines, transient images; `raytracing.*` = optional RT tier: AS builds, ray query self-test |

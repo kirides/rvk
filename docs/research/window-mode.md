@@ -56,7 +56,8 @@ the monitor's size was clamped by Windows (client 2560x1421 for 2560x1440 with a
   surface's `currentExtent`). The engine's topmost flag is dropped already in `onModeSet` (z-order only), so the loading
   screen (first present 11-17 s after device creation) does not sit topmost over everything.
 * **Not topmost**: alt-tab and other windows behave as with any window; the window stays borderless when it loses focus
-  (no minimise). No exclusive fullscreen, no display mode change; DWM may promote the window to independent flip.
+  (no minimise). No display mode change (exclusive fullscreen is the opt-in setting of section 8); DWM may promote the
+  window to independent flip.
 * **Kept on its monitor**: every 250 ms while borderless (not minimised, no caption = the engine is not mid-change): moved
   away / topmost again -> placed again ([V]: an external `SetWindowPos` to (300,200) was undone within 0.4 s); on a
   monitor of another size -> `SetResolution(that size, same mode)` (at most twice in a row). The harness'
@@ -86,6 +87,7 @@ pixel size [I]. Not testable here (100 % displays).
 
 ## 5. Test tooling
 
+* Exclusive fullscreen: section 8.5.
 * `run.ps1 -Fullscreen`: writes `<Window FullScreen="true">` into the copy's `ConfigUser.xml` (the key players have
   from `ConfigDefault.xml`; test-run.ps1 keeps it and only rewrites `Right`/`Bottom`). Every run without the switch
   removes the key, so the copy's `ConfigLocal.xml` (`FullScreen="false"`) decides again. With the default
@@ -120,3 +122,106 @@ pixel size [I]. Not testable here (100 % displays).
   Ctrl+F2 themselves (need TestMode, debug-mode.md), the options menu's Accept/Revert dialog while fullscreen.
 * The mode list (`HalInstance`, `EnumDisplaySettings(nullptr)`) is the primary display's: a windowed resolution that
   only a secondary monitor has cannot be chosen at start (as with D3D9).
+
+## 8. Exclusive fullscreen (`vulkan.fullscreen = exclusive`, 2026-10-23)
+
+User request (2026-10-23): let players use exclusive fullscreen and make the game's Hz option work, "so players could
+decide to play 60 Hz vsync on an otherwise 360 Hz monitor, to save some energy/heat". Borderless stays the default.
+
+### 8.1 How the game's refresh rate reaches us [C] (headless Ghidra, dumps `rvk_refresh_dump*.txt`, `rvk_refresh_dis.txt`)
+
+* `CreateGraphicsSubsystem` 0x4c4330 picks the **first** context whose adapter matches, `setup.refresh == 0 ||
+  setup.refresh == mode.refresh`, format 22 and **exact** width x height (also in fullscreen: the `<=` branch hangs on
+  `setup+0x11` = `style == 3`, never true; hal-structs.md 1 corrected). Config `RefreshRate` (ConfigDefault: 0) is the
+  setup's refresh; 0 = the first mode of that size in the HAL's list. The matched context is copied to app `+0x170`, so
+  `+0x6cc` holds the **matched mode's** refresh (never 0), which also goes into the start parameters `+0x1c`.
+* `SetResolutionEx` stores the refresh at `+0x6cc` without a lookup; `Reset` -> `eCGfxContextAdmin::ToggleNewMode`
+  copies it into `eSAPIModeParameters +0x10` **in every mode** (windowed too; only D3D9 ignored it windowed).
+  `SetResolution` keeps `+0x6cc`.
+* Options menu (Game.dll `gCHudResolutionManager2`): `BuildResolutions` 0x8221d0 groups the contexts per size with the
+  refresh rates of that size ascending (no windowed filter: the Hz spinner works windowed as well); `ApplyResolution`
+  0x881db0 calls `SetResolutionEx(adapter, w, h, refresh value, vsync, fov, current mode)`; `AcceptResolution` ->
+  `eCApplication::SaveUserResolution` 0x4c0030 writes `Right`, `Bottom`, `RefreshRate` (`+0x6cc`), `AdapterNumber`,
+  `Vsync`, `FOV` (Left/Top = 0). `ApplyHardResolution` (the PerformanceMode spinner) hard-codes 60 Hz.
+* Ours: the HAL mode list (`HalInstance::Init`) is the primary display's 32-bit modes (the engine creates its window at
+  0,0), ordered by `engine::window::orderModes`: sizes ascending, per size **the desktop's refresh first**, then
+  descending, so `RefreshRate 0` means the desktop's refresh (D3D9's ascending list made it the lowest, e.g. 48 Hz).
+  rvk.log `hal: Vulkan instance, 128 display modes (desktop 2560x1440 @ 120 Hz; its size offers 120 360 240 100 75 60 48 Hz)`.
+  The refresh reaches `window::onModeSet` from the start parameters and `ToggleNewMode` (`engine: window: mode WxH @ N Hz`).
+
+### 8.2 What exclusive does
+
+| state | what happens |
+|---|---|
+| setting `exclusive`, engine fullscreen, window **in front** | `ChangeDisplaySettingsExW(device, WxH@Hz, CDS_FULLSCREEN)` on the window's monitor (`pickDisplayMode`: the exact mode; refresh 0 -> the desktop's / the highest; a missing refresh -> the nearest, the higher on a tie; no mode of that size -> the desktop size via `SetResolution`), the window over the switched monitor (popup, not topmost), a swapchain with `VkSurfaceFullScreenExclusiveInfoEXT` `APPLICATION_CONTROLLED` + `...Win32InfoEXT` (the monitor), `vkAcquireFullScreenExclusiveModeEXT` (retried once a second while it fails; `FULL_SCREEN_EXCLUSIVE_MODE_LOST` from acquire / present -> not held, re-acquired later, no swapchain re-creation) |
+| focus lost (alt-tab, another window, minimise) | desktop mode restored, the window minimised (`SW_SHOWMINNOACTIVE`, as D3D9's exclusive mode did), a normal swapchain; back in front -> switched again |
+| engine fullscreen, never in front yet (background start) | no mode change: the window at the back buffer's size in the monitor's corner (`exclusive fullscreen waits for the window to come to the front`) |
+| fullscreen request (options menu, F2, `window fullscreen WxH@Hz`) | the `SetResolutionEx` pre-hook keeps the requested size when the monitor has such a mode (borderless replaces it with the monitor's size) |
+| leaving fullscreen / setting -> borderless | the desktop mode back first (in the pre-hook, before the engine sizes and centres its window); borderless then switches the engine to the monitor's size |
+| process exit | `onProcessDetach` restores. Killed / crashed: **Windows restores a `CDS_FULLSCREEN` mode itself** when the process ends ([V]: a PowerShell process that set a monitor from 60 to 120 Hz was killed, back at 60 Hz within 4 s; every killed test run below ended at the desktop modes). No unhandled-exception hook needed. |
+
+* Restore = every attached display whose current mode differs from its registry mode gets `ChangeDisplaySettingsExW(name,
+  nullptr, ..., 0)`. GDI device names are **not stable** across mode changes here: `\\.\DISPLAY1` / `2` swapped between
+  the two monitors after a mode change was undone ([V], twice), so names are derived from the window's `HMONITOR` at the
+  moment of use.
+* Between `SetResolutionEx` and the engine's `ToggleNewMode` (its next `Reset`) no placement happens (at most 3 s):
+  leaving exclusive for a windowed size otherwise re-entered exclusive with the old size and left a popup window ([V], fixed).
+* The swapchain gets the exclusive structures **only while the mode is set and the window in front**.
+* Frame pacing: `Device::displayModeChanged` makes the pacer re-read the monitor's refresh (now the game's): vsync at 60 Hz
+  paces at 60. In **borderless** fullscreen a game refresh below the desktop's becomes a frame cap with vsync
+  (`Device::setRefreshCap`; vblank-locked when it divides the desktop's rate, e.g. 60 of 120 = every 2nd vblank; 100 of
+  120 is paced unlocked). Windowed modes ignore the game's refresh (as D3D9 did).
+
+### 8.3 Is Vulkan's exclusive acquire needed? (AMD RX 7900 XTX, driver 26.9.2, Windows 11 26300)
+
+Measured with the frame pacer disabled (temporary build) at 1920x1080 @ 60 Hz, window in front, world idle, one run that
+flipped the hidden diagnostic setting `vulkan.exclusive_acquire` live:
+
+| | present modes offered | fps | interval p50 / p95 | `vkAcquireNextImageKHR` wait |
+|---|---|---|---|---|
+| mode switch + Vulkan exclusive acquired | 0, 2, 1000361000, 3 | 60.0 | 16.66 / 17.1-17.5 ms | 8.3 ms |
+| mode switch + borderless popup (no acquire) | 0, 2, 1000361000, 3 (the same list with the exclusive info) | 60.0 | 16.66 / 17.1-17.3 ms | 8.3 ms |
+
+On AMD the display mode change is what matters; the acquire changes nothing measurable. FIFO throttles to the new refresh
+either way while the window is in front (so "AMD returns every present at once", performance.md, does not hold for a
+window in front). The acquire is kept (default on: the spec's way to ask for exclusive presentation, which other drivers
+may honour differently) with `vulkan.exclusive_acquire = false` (hidden) as the escape hatch. Latency / flip-model
+counters (PresentMon) were not available here.
+
+Test-machine pitfall: **while the monitors sleep (user idle beyond the display timeout) every FIFO swapchain runs at
+~6 fps** (acquire ~160 ms; `vkcube --present_mode 2` too). Vsync measurements need awake displays (a 1-pixel
+`SendInput` mouse nudge + `SetThreadExecutionState(ES_DISPLAY_REQUIRED | ES_CONTINUOUS)` kept them on).
+
+### 8.4 Verified [V] (2026-10-23, `RisenTest.exe`, `-AllowFocus`, testdemo; primary 2560x1440 @ 120 Hz (360 Hz capable), secondary 2560x1440 @ 60 Hz)
+
+* Start `-Fullscreen` (config 1600x900 @ 120): waits in the background; `window focus` -> `switched 2560x1440@120 ->
+  1600x900@120` (150-220 ms), exclusive acquired.
+* `window fullscreen 1920x1080@60` (the options menu's call): switched to 1920x1080@60 (420-560 ms), pacing 60, **60.0 fps**,
+  screenshots 1920x1080 with the GUI / HUD laid out for it; `window display` (`EnumDisplaySettings(ENUM_CURRENT)`) showed
+  the switched mode (the secondary monitor moved to x = 1920 meanwhile).
+* Native resolution at a lower refresh, `2560x1440@60`: 60.0 fps; `2560x1440@120`: back at the desktop mode.
+* `window minimize` -> `desktop display mode restored (the game window lost focus)`, window minimised; `window focus` ->
+  switched again, the GUI intact afterwards.
+* Live `set vulkan.fullscreen borderless` (desktop mode back, borderless at 2560x1440, game refresh 60 -> `frame pacing
+  at 60.000 fps (vsync, the game's refresh rate)`, **60.0 fps**) and back to `exclusive` (switched to 60 Hz again).
+* `window 1600x900` from exclusive: desktop mode restored, the engine's bordered 1600x900 window.
+* The end of every run (the harness kills the game) left both monitors at their desktop modes.
+* `-Validation`: 0 messages over mode switches, acquires, releases and setting flips. Default windowed test runs are
+  unchanged (bordered 1600x900, no exclusive lines). The overlay lists "Fullscreen mode" under Display.
+* Twice a test run lost focus ~3 s after the first switch and got it back 0.5 s later without a command [I: the harness's
+  foreground handling]; the exclusive state followed (restore + minimise, switch again).
+
+### 8.5 Player notes / left to check
+
+* Options > Video: resolution and Hz apply with `Fullscreen mode = Exclusive` (overlay F10 > Display); with Borderless the
+  window always covers the monitor at the desktop's resolution and a lower Hz becomes a frame cap (with vsync). The
+  overlay's Performance section shows the window / display mode, present mode and the exclusive state.
+* Alt-tab in exclusive costs a display mode change each way (~0.2-0.6 s of black; Windows may move other windows).
+* Unchecked here: a 360 Hz desktop setting (the primary runs at 120 by the user's choice), NVIDIA / Intel drivers, HDR
+  desktops (the swapchain is SDR), the game on a secondary monitor (the HAL's mode list is the primary's; a size the other
+  monitor lacks falls back to its desktop size), G-Sync / FreeSync, a real keyboard alt-tab (tests used minimise and the
+  focus command), the Performance section's new lines by eye.
+* Test tooling: `run.ps1 -Fullscreen -AllowFocus -Setting 'vulkan.fullscreen=exclusive' -Exe RisenTest.exe` +
+  `-Commands '100: window focus','400: window fullscreen 1920x1080@60','800: window display','1000: window minimize',
+  '1100: window focus'`; rvk.log `engine: window: exclusive fullscreen: ...`, `desktop display mode restored (...)`,
+  `vulkan: exclusive fullscreen acquired / released / lost`, `vulkan: swapchain ... (offered ...), exclusive fullscreen`.

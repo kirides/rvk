@@ -52,6 +52,8 @@ Enum, default, range or options, flags) plus its value. Values are doubles inter
 |---|---|---|---|---|
 | `vulkan.vsync` | enum `engine` / `on` / `off` | `engine` | live (swapchain recreated) | `engine` = the game's own video option (start parameters / `ToggleNewMode`) |
 | `vulkan.max_fps` | float 0..500 | 0 | live (pacer) | 0 = no cap beyond vsync |
+| `vulkan.fullscreen` | enum `borderless` / `exclusive` | `borderless` | live (display mode / swapchain) | exclusive: the monitor switches to the game's resolution + refresh while in front; needs the capability "Exclusive fullscreen" (window-mode.md 8) |
+| `vulkan.exclusive_acquire` | bool (hidden) | on | live | exclusive fullscreen also takes Vulkan's exclusive mode (diagnostics, window-mode.md 8.3) |
 | `vulkan.adapter` | int -1..15 | -1 | restart | Vulkan physical device (-1 = best discrete GPU) |
 | `overlay.toggle_key` | enum (none, f1..f12, insert, home, end, page_up, page_down, pause, scroll_lock) | `f10` | live | NoAB |
 | `overlay.ab_key` | same | `f11` | live | NoAB |

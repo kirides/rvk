@@ -45,7 +45,8 @@ RVAs; D3D9 vtable slots were resolved by index (`py/d3dnames.py`). **[C]** confi
 
 The engine then builds one `eSGfxContextDesc` (0x570: `+0` adapter, `+8` adapter desc, `+0x550` mode index, `+0x554` mode
 desc) per (adapter, mode) and `eCApplication::CreateGraphicsSubsystem` (`0x4c4330`) picks the one whose adapter, width,
-height (exact when windowed, `<=` when fullscreen) and refresh match the setup and whose **format is 22 (X8R8G8B8)**; if
+height (exact, also in fullscreen: the `<=` branch needs `style == 3`, never true; window-mode.md 8.1) and refresh match
+the setup (a setup refresh of 0 = any: the first of that size in the list) and whose **format is 22 (X8R8G8B8)**; if
 none matches it raises "can't find correct context in gfx-system". **A Vulkan instance must therefore report at least one
 X8R8G8B8 mode with the window's exact client size** (e.g. enumerate the monitor modes and add the window size).
 

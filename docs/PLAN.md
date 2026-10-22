@@ -146,6 +146,14 @@ with validation on and checks every pixel against D3D9's rasterisation rules (ha
   rewritten in an `eCApplication::SetResolutionEx` pre-hook / corrected once at the start, so back buffer, GUI and mouse
   agree); the window is kept on its monitor; per-monitor DPI awareness v2; runtime switches both ways verified with
   validation (`run.ps1 -Fullscreen`, overlay command `window ...`). Open: different-size / scaled multi-monitor setups.
+* **Exclusive fullscreen + the game's Hz option: done (2026-10-23, docs/research/window-mode.md 8).** Opt-in setting
+  `vulkan.fullscreen = exclusive` (capability VK_EXT_full_screen_exclusive): while the engine is fullscreen and in front
+  the monitor switches to the game's resolution + refresh (CDS_FULLSCREEN), Vulkan's exclusive mode is held, focus loss
+  restores the desktop and minimises; Windows restores the mode when the process is killed. The game's refresh now
+  reaches the HAL (mode list: the desktop's refresh first per size); borderless honours a lower game refresh as a vsync
+  frame cap. Verified: 1920x1080@60 and 2560x1440@60 -> 60.0 fps, minimise / refocus, live setting flips, validation
+  clean. On AMD the acquire adds nothing measurable over the mode switch (kept, hidden `vulkan.exclusive_acquire`).
+  Open: 360 Hz desktops, NVIDIA / Intel, HDR, the game on a secondary monitor.
 * **Debug mode / clean quit: done (2026-10-23, docs/research/debug-mode.md).** The engine's debug keys (`TestMode`, cheat
   `minsky`) work in Vulkan mode: quitting no longer crashes (RT scene torn down before its consumers; resources the engine
   frees after its device at process exit are orphaned / leaked instead of touching a dead device; validation clean at

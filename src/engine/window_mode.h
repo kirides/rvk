@@ -2,7 +2,7 @@
 
 // Borderless fullscreen (Vulkan mode only; docs/research/window-mode.md). The engine owns the game window (eCWindow /
 // eCApplication: style 0x90000000 = WS_POPUP | WS_VISIBLE + WS_EX_TOPMOST for fullscreen, 0xc80000 = caption + system menu
-// for windowed); with D3D9 the runtime then switches the display mode. Our HAL never takes exclusive fullscreen:
+// for windowed); with D3D9 the runtime then switches the display mode. By default (vulkan.fullscreen = borderless):
 //   * fullscreen requested (start / mode parameters windowed = false): the window becomes a borderless, non-topmost popup
 //     exactly over its monitor (rcMonitor), at the monitor's resolution. A different requested resolution is replaced by
 //     the monitor's through the engine's own eCApplication::SetResolutionEx (a pre-hook rewrites the size of fullscreen
