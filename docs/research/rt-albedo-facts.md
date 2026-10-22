@@ -96,7 +96,8 @@ It cannot tell diffuse from detail-diffuse, and misses materials without a `_Dif
 **s9, unless** it is declared `dcl_cube`, or the texture is a DXT5nm normal / named `*Normal*`, or it is the sampler the
 normal decode uses. Wrong for materials whose Diffuse has no sampler (~10 %): those get a normal / detail map as albedo.
 
-**Recommendation:** (a) with `ms_pActiveShader`, cached per (shader pointer, texture-id tuple) because the graph does not
+**Recommendation:** (a) (M9 P2 uses the draw tag's material's shader first: `ms_pActiveShader` is stale in depth passes,
+1.4) with `ms_pActiveShader`, cached per (shader pointer, texture-id tuple) because the graph does not
 change per draw; fall back to (c) `s9 + guards` when the shader pointer / vtable check fails or the tree has no sampler
 (constant-colour diffuse: use mid grey or the average of the bound texture).
 
@@ -108,12 +109,32 @@ sampled (the sampler's `SRGBRead` flag, pool entry +0x14, feeds D3DSAMP_SRGBTEXT
 Diffuse role may also be a combiner of diffuse * detail diffuse (`_Detail_*_Diffuse`, 17+11+4+2 xmats): the first sampler is
 the base; ignore the rest.
 
-### 1.4 In-game verification still to do [I]
+### 1.4 In-game verification (M9 P2, 2026-10-22) [C]
 
-Log once per distinct shader pointer: class (vtable), Diffuse / Opacity / Normal sampler slots, image names from the pool, and
-compare with the textures bound at s9..s15 in `-LogDraws` (names from the existing texture ids); pick a plain material
-(`Monastery_Stone_Floor_01`: Diffuse s9, Normal s10, Comp s11?), a diffuse-less one (`Ani_Hero_Armor_Smith_BodyMetal_Diffuse`:
-Reflect + Detail normal) and a SpeedTree leaf. Confirm that `ms_pActiveShader` is current inside `eCSubMesh::Render` draws.
+Method (a) is implemented (`src/engine/materials.*`, `src/enh/rt_material.*`; rvk.log `rt: material '<name>' (...)` once per
+material x pixel shader: class, blend mode / mask reference, the roles' sources, slots `k` -> `s(9 + k)`, pool image names,
+uv sets, the textures bound at s9..s15, the evaluated uv map). Over 5 spots (lake_jungle, harbour_docks, beach_sun,
+monastery_hall, crystal_cave; ~160 material x PS lines):
+
+* **Every Diffuse sampler is k = 0 = s9** (pool name `*_Diffuse*` of that material, e.g. `Arch_House_Wall_01_Diffuse_01`
+  2048x1024 DXT1 bound at s9); normal maps at k1..k5 (`*_Normal*`), `Comp` / detail at the slots between. The PS declares
+  exactly s9 .. s(9 + pool count - 1).
+* **`ms_pActiveShader` is current in the main view's solid draws**: it equals the draw tag's `eCMaterialResource2 +0x70` in
+  every resolve (counter `active shader != material's` = 0 over ~10,000 resolves). **It is stale in the z pre-pass and in
+  the sun cascades** of non-masked materials: their depth pixel shaders declare no s9 and the engine executes no material
+  constants there; the draw tag's material (z pre-pass) is the reliable source. The cascades' draws carry no material tag.
+* Diffuse-less materials seen: `Nat_Ground_Beach_01_Diffuse_01_Specular` / `Nat_Stone_Rock_01_Diffuse_01_Specular` (blend
+  mode 2, Diffuse = a cube sampler, opacity constant: a wet specular layer over the beach / rocks), items fading in (blend
+  2, Diffuse and Opacity constant), `Special_Water_Caustics_01_Diffuse_01` (blend 2, opacity = its own sampler: an overlay).
+  `Ani_Hero_Armor_Smith_BodyMetal` did not show up (skinned: not in the RT scene yet).
+* **Terrain / level-mesh layers are blend mode 2 with opacity = vertex colour**, drawn as alpha-over (SRCALPHA /
+  INVSRCALPHA) layers in the solid pass over one z pre-pass range; the frame's first layer is the base.
+* **Streaming**: until an image is loaded the engine binds a **4x4 DXT5 placeholder** (`GetPlaceHolderImageData`); the
+  real texture is another `d3d9::Texture` later (a new binding = a new material resolve).
+* `eCImageResource2 +0x70` = `eCGfxImageData*`, whose **+0x60 is the HAL texture (`eCAPITexture*`)** (`eCGfxImageData::Execute`
+  0x7551c0 calls its vtable +0x10 / +0x28 with the stage): our HAL's live-texture map resolves it (the z pre-pass's
+  textures come from there).
+* The opacity proxy's swizzle (+0x28) is 5 (`.a`) on the masked materials seen (herbs ref 90, ivy ref 150, banners).
 
 ## 2. Alpha-tested materials
 

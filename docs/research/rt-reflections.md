@@ -53,7 +53,7 @@ Legend: **[C]** confirmed, **[I]** inferred / proposed.
 | phase | content | verify |
 |---|---|---|
 | **P1 RT scene** | draw observer, BLAS cache, instance registry, TLAS per frame, geometry records, FrameBlock fields, stats (rvk.log / overlay), `rt.debug = instances / depth` (camera rays traced against the TLAS over the frame) | the traced view lines up with the raster at lake_jungle / harbour_docks / beach_sun (depth check ~0 except foliage / characters), no leaks over teleports, CPU / GPU cost, sync validation |
-| **P2 materials at hits** | albedo slot from the material graph (+ fallback), uv set + map, alpha-tested geometry (SpeedTree branches / fronds rest pose, Masked props) with the candidate loop, `rt.debug = albedo` | traced albedo view vs the frame at the spots |
+| **P2 materials at hits** (done, 3.2) | albedo slot from the material graph (+ fallback), uv set + map, alpha-tested geometry (SpeedTree branches / fronds rest pose, Masked props) with the candidate loop, `rt.debug = albedo` | traced albedo view vs the frame at the spots |
 | **P3 water RT reflections** | `rt.reflections`, hit shading (screen reuse, sun + shadow ray, SH ambient, lightmaps if cheap, fog), ray cones, the watery look, all water models, quality tiers | water-compare side by sides (SSR vs RT) at beach_sun, harbour_docks, lake_jungle, waterfall_jungle, swamp_pond, crystal_cave; GPU cost per tier; toggles without hitch |
 | **P4 the rest of the world** | leaf cards / billboards / grass (VS capture or their analytic expansion), skinned characters (VS capture per frame), lightmaps at hits | reflections of trees and the hero at lake_jungle / beach_sun |
 
@@ -159,6 +159,103 @@ shaders confirm every candidate.
 * Compaction runs on the main queue in the frame (copies are cheap; measured within the 0.13 ms).
 * Not done in P1: SpeedTree leaves / billboards, grass, skinned characters (P4), morph-target meshes, plain-world SpeedTree
   (not drawn at the spots), the `rt.debug=albedo` view (P2).
+
+### 3.2 P2: materials at hits (2026-10-22) [C unless noted]
+
+**Built**
+
+| piece | files |
+|---|---|
+| CPU interpreter of SM 3.0 programs (all arithmetic, a0 / aL relative constants, predicates, if / rep / loop / break, texld* through a callback) + a backward slice (the constants / inputs a source operand or an output depends on); `rvk_shadertool evalcheck <dir>` runs it over a corpus | `src/shader/sm_eval.{h,cpp}`, `tests/shader_eval_tests.cpp` (2 tests), `tools/shadertool/main.cpp` |
+| the engine's material graph: the shader of a draw (its tag's `eCMaterialResource2 +0x70`, else `eCShaderBase::ms_pActiveShader`), class by vtable, Diffuse / Opacity / Normal trees walked depth first to the first `eCColorSrcSampler` (slot +0x98, uv set +0xc8, tex-coord source +0xa8), blend mode +0x50, mask reference +0x58, the pool image (`+0xf8 + 0x20 + 0x28 k`) and its API texture (`eCImageResource2 +0x70` -> `eCGfxImageData +0x60`); SEH-guarded reads, cached per shader object, re-validated per lookup | `src/engine/materials.{h,cpp}`, `src/engine/memread.{h,cpp}` (safeRead / readAt / readCString, moved out of scene_hooks), symbols in `src/engine/symbols.h` |
+| materials of the RT scene: slot (graph, else s9), the draw's texture + sampler states at s(9 + k), the uv map by evaluating the draw's VS + PS on 7 probe vertices, opacity (diffuse alpha / the Opacity tree's sampler + channel / no texture), the masked alpha test; interned entries with reference counts, a released texture marks its entries dead; one log line per material x pixel shader | `src/enh/rt_material.{h,cpp}` |
+| scene side: per-BLAS material slots by draw signature (<= 8, LRU), per-instance material choice by rank (4 opaque solid draw > 3 first alpha-over blended solid layer > 2 z pre-pass > 1 cascades), overlays (caustics / decals: blend mode 2 with a texture opacity; untextured blended layers) never a base and their instances left out, blended-only layer ranges (`layers_`) and sub-range BLASes as **material segments** of merged ranges (the cascades / z pre-pass draw a level mesh in one range, the main view per material), records + segment table per frame | `src/enh/rt_scene.{h,cpp}` |
+| ABI: `RtGeometryRecord` 96 -> 112 bytes (`segments`, `segmentCount`), `RtMaterialSegment` (64 bytes), `kRtUv*` flags, `kRtRecordSegmented` | `src/shader/abi.h`, `shaders/include/rvk_rt.glsl`, `shaders/test/abi_rt_layout.comp`, `tests/inject_tests.cpp` |
+| GLSL helpers: `rvkRtApplySegment`, `rvkRtMaterialUv`, `rvkRtMaterialTriangle`, `rvkRtTextureLod` (ray cone, GD3D11's formula with the world-space triangle area), `rvkRtAlphaTest`, `rvkRtOpacity`, `rvkRtCandidatePasses`, `rvkRtAlbedo` (rvk_rt.glsl); `rvkRtTraceClosest` + `rvkRtHitSurface` (new `shaders/include/rvk_rt_trace.glsl`) | |
+| `rt.debug` = `albedo` / `albedo_split` / `albedo_opaque` / `uv`; probes every second in the material views with each probe's material and the BLAS's material slots | `src/enh/rt_debug.{h,cpp}`, `shaders/rt/rt_debug.{glsl,comp}`, `src/core/settings.cpp` |
+| d3d9 / HAL: `DrawObserver::textureReleased`, `Device::vsConstants / psConstants / *IntConstants / *BoolConstants`, `Device::engineTexture` (the HAL's live `eCAPITexture` -> `d3d9::Texture` map), `ReplaceQuery::srcBlend / dstBlend` | `src/d3d9/device.{h,cpp}`, `draw.cpp`, `src/hal/vulkan/{hal_vulkan.h,device.cpp,resources.cpp}` |
+
+No translator change (`kTranslatorVersion` unchanged; corpus / `compare_disasm` unaffected). The record grew to 112 bytes:
+hand-written shaders only (rvk_tests `abi_glsl_rt_layout_matches_cpp` checks record + segment offsets).
+
+**Methods chosen**
+
+* **Slot**: the material graph (rt-albedo-facts 1.2 (a)); the shader comes from the **draw tag's material** when there is
+  one (`ms_pActiveShader` is stale in the z pre-pass / cascades), else from `ms_pActiveShader`. The bytecode fallback (s9
+  if the PS declares a 2D s9) never triggered at the spots. A Diffuse without a sampler (constant, vertex colour, cube) =
+  no texture (`kRtUvNoTexture`, mid grey); a depth pass whose PS samples no s9 takes the pool image through the HAL map,
+  only with the tag's material.
+* **uv**: exact by evaluation, not by parsing: the draw's VS (probe vertex inputs: uv0 / uv1 = (0,0), (1,0), (0,1), a check
+  point, a moved position) feeds its outputs by semantic into the PS; the coordinate of the PS's first texld of the diffuse
+  sampler gives `coord = b + A0 uv0 + A1 uv1`; the larger of A0 / A1 picks the set (`kRtUvApprox` when the check point or
+  the moved position disagree: not affine / world dependent). Cached per (VS, PS, sampler) and the values of the constants
+  the backward slice names (0.45 PS constants on average), resolved again every 64 frames per BLAS slot (animated maps).
+* **Opacity / alpha test**: the draw's alpha test (D3DCMPFUNC | ref), else the masked material's own (GREATER
+  MaskReference); opacity = the Opacity tree's sampler with the proxy's channel (else the diffuse alpha; a non-texture
+  opacity = never cut). Instances are non-opaque only when there is a texture to test.
+* **Which draw gives an instance its material** (one range can be drawn with several materials): rank 4 the main view's
+  opaque solid draw (the last of the frame: opaque passes over one surface), 3 its first alpha-over blended solid layer
+  of the frame (the terrain's base; only layers with a diffuse texture and vertex-colour opacity), 2 its z pre-pass, 1 the
+  cascades. Overlays (blend mode 2 with a texture opacity; blended layers that are no terrain layer; untextured layers)
+  are never a base, and instances known only through one are left out of the TLAS.
+* **Segments**: a BLAS without a rank >= 3 material of its own (the cascades' / z pre-pass's merged range of a level mesh)
+  gets per-triangle materials from the BLASes and blended-only layer ranges inside it (same buffers, base vertex);
+  `rvkRtApplySegment` binary-searches the hit's primitive. Coplanar hits between the merged and the sub-range instances
+  then show the same texture.
+* **Lifetime**: records take each texture's bindless slot every frame (0 when it is not in SHADER_READ_ONLY); a released
+  texture (`DrawObserver::textureReleased`) marks its materials dead and their users resolve again at the next sighting.
+
+**Helper API for P3** (`#include "rvk_rt_trace.glsl"` after rvk_abi.glsl; enables GL_EXT_ray_query)
+
+* `RvkRtHit rvkRtTraceClosest(f, origin, dir, tMin, tMax, coneWidth0, coneSpread, flags)`: closest hit, alpha-tested
+  candidates tested with the record's alpha test on the opacity at the ray cone's mip (`width = coneWidth0 + coneSpread t`);
+  flags `RVK_RT_TRACE_OPAQUE` (cut-outs solid: the cheap tier), `RVK_RT_TRACE_NO_CUTOUTS` (mask them out).
+* `RvkRtHitSurface rvkRtHitSurface(f, hit, dir, coneWidth0, coneSpread)`: albedo (rgba as sampled at the cone's mip; the
+  record's colour without a texture), world position, normal + geometric normal (facing the ray), uv, lightmap uv, lod,
+  record flags / uvSet, instance id; segments applied.
+* Lower level (rvk_rt.glsl): `rvkRtRecord`, `rvkRtApplySegment`, `rvkRtMaterialTriangle`, `rvkRtTextureLod`,
+  `rvkRtAlphaTest`, `rvkRtOpacity`, `rvkRtCandidatePasses`, `rvkRtAlbedo`, `rvkRtSurface`.
+
+**Verification**
+
+* `rt.debug=albedo` (and `uv`) at lake_jungle, harbour_docks, beach_sun, monastery_hall, crystal_cave, jungle (`run.ps1 -Mode
+  vulkan -Mods rvkcompare -Scenario rvkcompare -Param 'spots=...','burst=1' -Setting 'rt.debug=albedo' -SyncValidation`):
+  pictures `out\rt-p2\final_<spot>.png`, side by side with the raster `out\rt-p2\final_sbs_<spot>.png`, overview
+  `final_overview.png`; uv `out\rt-p2\uvm_*.png`; cut-outs `out\rt-p2\cutouts_jungle.png` (raster / albedo /
+  albedo_opaque). Quay cobbles, quay wall, ship, crane, houses, walkway planks, rocks, cliffs, the lake / cave floors
+  (terrain layers), the monastery's brick walls, pillars and floor slabs, banners: pattern, scale and orientation match
+  the raster; herbs / ivy / ferns cut out (solid quads with `albedo_opaque`). The iterations that led there (`run1..12`
+  pictures): terrain untextured (its solid layers are blended), caustics / wet specular layers taken as the base, stale
+  active shaders in the depth passes, merged cascade ranges coplanar with the main view's sub-ranges (speckle, wrong
+  textures).
+* Material log: ~160 material x PS lines, every Diffuse at k0 = s9 with its `*_Diffuse*` pool image, 0 mismatches between
+  `ms_pActiveShader` and the tag's material in solid draws, 0 failed uv evaluations, 1-3 approximate maps (rt-scene-facts
+  4.2a, rt-albedo-facts 1.4).
+* Depth check unchanged from P1 (`out\rt-p2\dep_*.png`, probes at the captures: beach 11 match / 1 farther / 3 closer,
+  harbour 19 / 2 / 0, lake 6 / 19 / 0 - foliage).
+* `-SyncValidation`: 0 messages over the albedo (6 spots) and depth (3 spots) runs. rvk_tests 110 / 110, `rvk_vktest --rt`,
+  `--passes`, `rvk_d3d9test` PASS; `rvk_shadertool evalcheck corpus` 2476 / 2476.
+* Costs (`rvk_shadows`, beach, ~1060 observed draws, -Perf -Vsync off; **another game used the GPU at ~95 % during these
+  runs**: GPU numbers are upper bounds, CPU numbers skewed): draw calls 3.40-3.48 ms with everything off, 3.63-3.77 ms with
+  the scene + albedo view (+0.25-0.3 ms; the observer's own timer says 0.43-0.47 ms per frame, P1 0.15-0.22 without the
+  load); material resolves 2-5 per frame, 0.005-0.015 ms; uv evaluations 7-35 per 5 s; pass CPU 0.08-0.12 ms. GPU
+  (`-PerfFrame`): `rt.scene` 0.055 ms, `rt.debug` albedo 1.26 ms at 1600x900 (one ray per pixel, alpha test on),
+  `albedo_opaque` 0.70 ms: **the alpha-test candidate loop roughly doubles a primary ray at the beach** (herbs).
+
+**Open (for P3 / P4)**
+
+* SpeedTree branches / fronds are **not in the scene**: drawn as triangle strips (`rt: scene: SpeedTree draw ... not
+  taken: not a triangle list`); leaves (op > 1) P4. P1's statement corrected (rt-scene-facts 10).
+* Cascade-only instances without main-view sub-ranges stay untextured (~170 of ~420 records at the spots, mostly far /
+  behind the camera): the cascades carry no material tag and their PS samples no diffuse. Candidates: remember materials by
+  mesh resource, or tag the cascades' draws.
+* Approximate maps: reflection-vector coordinates (wet specular layers) and PS-computed offsets are taken as their affine
+  part.
+* Per-triangle materials only for merged ranges; one material per instance otherwise (a decal layer on the same surface is
+  ignored).
+* The far sea floor at beach_sun shows the caustics texture (an overlay only the cascades see): under water.
+* Observer cost grew (materials + blended-layer handling): the per-VS verdict cache (P1 item) is still open.
+* Lightmaps at hits (P4); the hit's lighting is P3 (`albedo * pow(SH + sun N.L * shadow, 0.45)`).
 
 ## 4. GD3D11's D3D12 RT path (survey 2026-10-22; root `E:\git\github\GD3D11\D3D11Engine\`)
 

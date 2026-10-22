@@ -345,7 +345,16 @@ P4 the rest of the world (leaves, grass, characters).
   beach_sun: traced geometry lines up with the raster (mismatch only where P1 has no geometry: leaves, grass, characters;
   one shore strip 15-20 units off), normals from the records exact, 0 sync-validation messages, 170-420 instances /
   66-93 MiB, GPU 0.13 ms (TLAS FAST_BUILD), observer 0.15-0.22 ms CPU per frame; nothing registered when off.
-* P2 materials at hits: next.
+* **P2 materials at hits: done (2026-10-22).** `engine/materials` (the material graph: diffuse slot s(9 + k), opacity,
+  blend mode / mask reference, pool images -> HAL textures), `shader/sm_eval` (CPU evaluation of the draw's VS + PS: the
+  exact affine uv map of the diffuse coordinate), `enh/rt_material` (interned materials, texture lifetime), per-instance
+  materials by rank in `enh/rt_scene` (opaque solid > first blended terrain layer > z pre-pass > cascades; overlays never a
+  base), material segments for the cascades' merged level-mesh ranges; GLSL `rvk_rt_trace.glsl` (`rvkRtTraceClosest` with
+  the alpha-test candidate loop + ray-cone mips, `rvkRtHitSurface`); `rt.debug = albedo / albedo_split / albedo_opaque /
+  uv`. Verified at 6 spots against the raster (textures, scale, orientation; cut-outs), depth check unchanged, 0
+  sync-validation messages; GPU: albedo view 1.26 ms (0.70 ms cut-outs solid), scene 0.055 ms. Open: SpeedTree branches
+  (triangle strips) not in the scene, cascade-only instances untextured (research/rt-reflections.md 3.2).
+* P3 water RT reflections: next.
 
 ### M10+ Enhanced graphics
 * candidates: anisotropic filtering + MSAA/TAA/SMAA, modern tonemapping/HDR10,

@@ -233,6 +233,19 @@ Survey of all 2282 material PS (`out/ps_samplers.py`):
   Example `ps30_b20d1a1354a09194`: `texld r0, v0, s9`, then `oC0.rgb = r0 * lighting + fog`.
 * Which sampler holds the albedo in general (s9 is the default, not a rule): see docs/research/rt-albedo-facts.md 1.
 
+### 4.2a Measured by M9 P2 (2026-10-22) [C]
+
+The proposal below was implemented as "evaluate the draw's own VS + PS on the CPU" (`src/shader/sm_eval.*`,
+`src/enh/rt_material.cpp`, rt-reflections.md 3.2): the coordinate of the PS's first texld of the diffuse sampler as a function
+of the vertex's TEXCOORD0 / TEXCOORD1, cached by the values of the constants a backward slice of both programs names.
+
+* Corpus (`rvk_shadertool evalcheck corpus`): **all 2476 SM 3.0 shaders evaluate** without an unsupported instruction; the
+  2273 PS sampling s9 have **no flow control** in the slice of that coordinate and depend on **0.45 PS constants** on average.
+* In game (5 spots, 159 material x PS lines): **136 identity maps, 17 x2, one each x3 / x3.5 / x5**, the lava's scale + scroll
+  (0.7, offset), **none on TEXCOORD1**, 2 not affine in the vertex uv (`Special_Skydome_Reflect_04` of a wet specular layer:
+  a reflection-vector coordinate; the lava). The tex-coord sources of the graph (56 lines say "tex-coord source") are the
+  scales: they live in the VS (c232+) as 4.1 found.
+
 ### 4.3 What a hit shader needs [I, a proposal]
 
 Per geometry record:
@@ -340,3 +353,18 @@ PS-computed coordinates (~23 % of the PS) fall back to the set's affine uv (appr
   of 800-140,000 triangles, VB / IB shared, 32-bit indices); terrain layers share geometry (opaque base + blended layers).
 * beach_sun's shore strip (level mesh `op 0x3`, 1872 triangles at sea level) renders 15-20 units away from its static
   vertices (VS displacement or offset; not resolved).
+
+## 10. Found by the RT materials (M9 P2) [C]
+
+* **Merged ranges**: the sun cascades (and the main view's z pre-pass) draw a level mesh in **one index range** (e.g. first
+  307113 x 141,446 triangles at lake_jungle) while the solid pass draws it **per material** in sub-ranges inside it (same
+  VB / IB / base vertex, e.g. first 307113 x 20,426). The merged range is a BLAS of its own, coplanar with the sub-range
+  BLASes; its triangles take the sub-ranges' materials (rt-reflections.md 3.2 "segments").
+* Level meshes / terrain: a z pre-pass range + alpha-over blended layers (blend mode 2, vertex-colour opacity) in the solid
+  pass, sometimes on sub-ranges that are never drawn opaque; overlays on top of them: caustics (texture opacity), wet
+  specular layers (a reflection map or a cube as the diffuse, constant opacity).
+* The same mesh range can be drawn with several materials (instanced items, layers): materials are per instance.
+* **SpeedTree branches / fronds are drawn as triangle strips** (D3DPT_TRIANGLESTRIP; `rt: scene: SpeedTree draw (op 0,
+  Shadow ShadowDepth, stride 60) not taken: not a triangle list`), contrary to 3 ("triangle lists in all world draws") and
+  P1's assumption: none reach the RT scene (0 SpeedTree records at jungle / lake_jungle / beach). A BLAS needs the strip
+  converted to a list (a CPU index conversion at build time).
