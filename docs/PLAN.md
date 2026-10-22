@@ -140,6 +140,12 @@ with validation on and checks every pixel against D3D9's rasterisation rules (ha
 ### M5 Robustness and performance
 * pipeline cache on disk, async/background pipeline compilation, frame pacing, alt-tab/resize, device-lost diagnostics
   (`VK_EXT_device_fault`, breadcrumbs), GPU timings, memory budget.
+* **Window modes / alt-tab / resize: done (2026-10-22, docs/research/window-mode.md).** Never exclusive fullscreen: the
+  engine's fullscreen (config `FullScreen`, F2) and a windowed mode at exactly the monitor's resolution become a
+  borderless, non-topmost window over the monitor at the monitor's resolution (a fullscreen request at another size is
+  rewritten in an `eCApplication::SetResolutionEx` pre-hook / corrected once at the start, so back buffer, GUI and mouse
+  agree); the window is kept on its monitor; per-monitor DPI awareness v2; runtime switches both ways verified with
+  validation (`run.ps1 -Fullscreen`, overlay command `window ...`). Open: different-size / scaled multi-monitor setups.
 * **Performance pass: done (2026-10-21, docs/research/performance.md).** Measured with `[debug] perf` / `perf_frame`
   (`run.ps1 -Perf`, `-PerfFrame`): GPU timestamps per submission and per pass, CPU split per frame, upload volume, pipeline
   and shader build counts; `[vulkan] vsync` override (`-Vsync`). The world's ~80 fps is an **external present cadence**:
