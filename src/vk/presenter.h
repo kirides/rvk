@@ -1,9 +1,8 @@
 #pragma once
 
-// Runs vkQueuePresentKHR on its own thread. In the game's (composited) window the AMD driver blocks inside vkQueuePresentKHR
-// until the frame's GPU work has finished and its copy to the window is done (~6 ms per world frame, with FIFO and IMMEDIATE
-// alike: docs/research/performance.md 2); on the render thread that serialised CPU and GPU work and capped the game at ~80
-// fps. Here the render thread submits, hands the present over and records the next frame meanwhile.
+// Runs vkQueuePresentKHR on its own thread, so time the driver spends inside it (its own frame limiter, e.g. an AMD Radeon
+// Chill profile: docs/research/fps-limit.md 9; waits for the frame's GPU work) does not stall the render thread: it
+// submits, hands the present over and records the next frame meanwhile (docs/research/performance.md 3).
 //
 // The swapchain is externally synchronised: the render thread calls waitIdle() before it touches the swapchain itself
 // (acquire, recreate, destroy). The queue is shared through Context's queue lock.

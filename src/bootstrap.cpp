@@ -22,6 +22,7 @@
 #include "core/log.h"
 #include "core/paths.h"
 #include "core/settings.h"
+#include "core/stall_sampler.h"
 #include "engine/scene_hooks.h"
 #include "engine/shadow_maps.h"
 #include "engine/symbols.h"
@@ -79,7 +80,9 @@ void logStartupState(const char* where) {
                                      base == L"d3d12.dll" || base == L"dxgi.dll" || base == L"d3d9on12.dll" ||
                                      base.starts_with(L"atidx") || base.starts_with(L"amdx") ||
                                      base == L"vulkan-1.dll" || base.starts_with(L"gameoverlayrenderer") ||
-                                     base.starts_with(L"graphics-hook");
+                                     base.starts_with(L"graphics-hook") || base.starts_with(L"amdvlk") ||
+                                     base.starts_with(L"steamoverlayvulkanlayer") || base.starts_with(L"discordhook") ||
+                                     base.starts_with(L"rtsshooks") || base.starts_with(L"nvspcap") || base == L"dxcore.dll";
             if (interesting) {
                 if (!mods.empty()) mods += ", ";
                 for (const wchar_t c : base) mods += static_cast<char>(c);
@@ -146,6 +149,10 @@ Hook<InitializeAdminFn> g_initializeAdmin;
 void detourInitializeAdmin(void* self, int apiType) {
     spdlog::info("eCGfxAdmin::InitializeAdmin(this={}, apiType={})", self, apiType);
     logStartupState("InitializeAdmin");
+    if (g_config.presentStalls > 0.0) {
+        diag::enablePresentSampler(g_config.mode == Mode::Vulkan ? "present thread vkQueuePresentKHR" : "SwapScreen (D3D9 Present)",
+                                   g_config.presentStalls);
+    }
     if (g_config.probe && !g_probed.exchange(true)) {
         vk::probe();
     }
@@ -193,6 +200,18 @@ void detourInitializeAdmin(void* self, int apiType) {
             spdlog::error("trace: install failed, running untraced");
         }
     }
+}
+
+// [debug] present_stalls outside Vulkan mode: the engine's D3D9 present (eCDX9Device::SwapScreen) on the main thread
+using SwapScreenFn = int (*)(void* self, HWND window, const void* src, const void* dst);
+Hook<SwapScreenFn> g_swapScreen;
+
+int detourSwapScreen(void* self, HWND window, const void* src, const void* dst) {
+    diag::StallSampler* sampler = diag::presentSampler();
+    if (sampler != nullptr) sampler->enter();
+    const int r = g_swapScreen.original(self, window, src, dst);
+    if (sampler != nullptr) sampler->leave();
+    return r;
 }
 
 // ---- [debug] snapshot_frames: the engine's snapshot + a self-test of the tool API (docs/research/reference-compare.md 4) ----
@@ -375,6 +394,14 @@ void onProcessAttach(void* module) {
     if (!cfgError.empty()) {
         spdlog::warn("config.toml: {}", cfgError);
     }
+    // [debug] environment: before anything in the process creates a Vulkan instance or a D3D device
+    for (const auto& kv : g_config.environment) {
+        const auto eq = kv.find('=');
+        const std::wstring name(kv.begin(), kv.begin() + static_cast<std::ptrdiff_t>(eq));
+        const std::wstring value(kv.begin() + static_cast<std::ptrdiff_t>(eq) + 1, kv.end());
+        SetEnvironmentVariableW(name.c_str(), value.empty() ? nullptr : value.c_str());
+        spdlog::info("environment: {}", value.empty() ? kv + " (removed)" : kv);
+    }
 
     api::setGameDir(paths::binDir().parent_path());
     loadSettings();
@@ -417,6 +444,10 @@ void onProcessAttach(void* module) {
     if (ok && (g_config.mode == Mode::Vulkan || !g_config.snapshotFrames.empty() || !g_drawCommands.empty()) &&
         !g_appDraw.install("eCApplication::Draw", reinterpret_cast<AppDrawFn>(s.appDraw), &detourAppDraw)) {
         spdlog::warn("eCApplication::Draw not hooked: no Gui phase, [debug] snapshot_frames ignored");
+    }
+    if (ok && g_config.mode != Mode::Vulkan && g_config.presentStalls > 0.0 &&
+        !g_swapScreen.install("eCDX9Device::SwapScreen", reinterpret_cast<SwapScreenFn>(s.dx9SwapScreen), &detourSwapScreen)) {
+        spdlog::warn("eCDX9Device::SwapScreen not hooked: [debug] present_stalls has nothing to watch");
     }
     if (ok) {
         ok = hooks::enableAll();

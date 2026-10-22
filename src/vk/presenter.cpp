@@ -4,6 +4,7 @@
 
 #include <chrono>
 
+#include "core/stall_sampler.h"
 #include "vk/swapchain.h"
 
 namespace rvk::vk {
@@ -66,7 +67,10 @@ void Presenter::run() {
         const std::uint32_t image = image_;
         lock.unlock();
         const auto t0 = std::chrono::steady_clock::now();
+        diag::StallSampler* sampler = diag::presentSampler();  // [debug] present_stalls
+        if (sampler != nullptr) sampler->enter();
         const VkResult r = swapchain_->present(image);
+        if (sampler != nullptr) sampler->leave();
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         lock.lock();
         presentMs_ += ms;

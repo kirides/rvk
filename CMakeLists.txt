@@ -158,6 +158,8 @@ add_library(rvk_core STATIC
     src/core/paths.h
     src/core/settings.cpp
     src/core/settings.h
+    src/core/stall_sampler.cpp
+    src/core/stall_sampler.h
     src/d3d9/convert.cpp
     src/d3d9/convert.h
     src/d3d9/defs.h

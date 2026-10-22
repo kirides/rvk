@@ -29,6 +29,12 @@ param(
     [int]$PerfFrame = 0,
     # [debug] rt_selftest: BLAS + TLAS + a ray query compute shader at device creation ("rt selftest" in rvk.log)
     [switch]$RtSelfTest,
+    # [debug] present_stalls (any mode): sample the presenting thread's stack while a present lasts longer than this many ms;
+    # "diag:" lines in rvk.log every 5 s name the modules / functions the time is spent in (docs/research/fps-limit.md)
+    [double]$PresentStalls = 0,
+    # [debug] environment: 'NAME=VALUE' variables set by the proxy in DllMain (run.ps1's own environment does not reach the
+    # game), e.g. -Environment 'VK_LOADER_LAYERS_DISABLE=~implicit~' or 'DISABLE_VULKAN_OBS_CAPTURE=1'
+    [string[]]$Environment = @(),
     # frame numbers whose back buffer the Vulkan renderer saves to bin/rvk/screenshots/frame_<n>.png, e.g. 300,900
     [string]$Screenshots = '',
     # eCApplication::Draw calls at which the engine's own snapshot is taken (BMP in <copy>\localappdata\...\Risen\ScreenShots)
@@ -74,9 +80,12 @@ param(
     [switch]$NoAutostart,
     # let the game take the foreground / move the cursor (default: risen-spass background mode)
     [switch]$AllowFocus,
+    # start a renamed copy of Risen.exe in the test copy (risen-spass test-run.ps1 -Exe; created when missing), e.g.
+    # -Exe RisenTest.exe: escapes per-executable driver profiles such as an AMD Radeon Chill cap (docs/research/fps-limit.md)
+    [string]$Exe = 'Risen.exe',
     [string]$Filter = '\[error\]|\[warn\]|\[test\] (FAIL|finished|deadline)',
     # regex of rvk.log lines to print after the run ('' = none, '.' = all)
-    [string]$RvkFilter = '\[(warning|error|critical)\]|probe|  \[|missing|InitializeAdmin|ms_pAPI|Direct3DCreate9|hooks|mode =|selftest|snapshot|overlay|settings|caps:|ray tracing'
+    [string]$RvkFilter = '\[(warning|error|critical)\]|probe|  \[|missing|InitializeAdmin|ms_pAPI|Direct3DCreate9|hooks|mode =|selftest|snapshot|overlay|settings|caps:|ray tracing|diag:|environment:'
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -109,6 +118,8 @@ if ($NoRenderer) {
         "dump_saved_textures = $($DumpSavedTextures.IsPresent.ToString().ToLower())",
         "perf = $($Perf.IsPresent.ToString().ToLower())", "perf_frame = $PerfFrame",
         "rt_selftest = $($RtSelfTest.IsPresent.ToString().ToLower())",
+        "present_stalls = $([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.0##}', $PresentStalls))",
+        "environment = [$(($Environment | ForEach-Object { '"' + ($_ -replace '"', '') + '"' }) -join ', ')]",
         "overlay_in_screenshots = $($OverlayInScreenshots.IsPresent.ToString().ToLower())",
         "commands = [$(($Commands | ForEach-Object { '"' + ($_ -replace '"', '') + '"' }) -join ', ')]",
         '[overlay]', "enabled = $((-not $NoOverlay.IsPresent).ToString().ToLower())"
@@ -146,6 +157,7 @@ if ($WaitForResult) { $spassArgs.WaitForResult = $true }
 if ($KeepRunning) { $spassArgs.KeepRunning = $true }
 if ($NoAutostart) { $spassArgs.NoAutostart = $true }
 if ($AllowFocus) { $spassArgs.AllowFocus = $true }
+if ($Exe -ne 'Risen.exe') { $spassArgs.Exe = $Exe }
 # Fullscreen request: <Window FullScreen="true"> in the copy's ConfigUser.xml (the key players have from ConfigDefault.xml;
 # test-run.ps1 keeps it, it only rewrites Right / Bottom). Every other run removes the key, so the copy's ConfigLocal.xml
 # (FullScreen="false") decides again and a fullscreen run never outlives itself.

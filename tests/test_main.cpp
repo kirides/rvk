@@ -48,6 +48,17 @@ adapter = 1
     CHECK(c.adapter == 1);
 }
 
+TEST(config_present_stalls_environment) {
+    CHECK(rvk::parseConfig("").presentStalls == 0.0);
+    CHECK(rvk::parseConfig("[debug]\npresent_stalls = true\n").presentStalls == 4.0);
+    CHECK(rvk::parseConfig("[debug]\npresent_stalls = false\n").presentStalls == 0.0);
+    CHECK(rvk::parseConfig("[debug]\npresent_stalls = 8.5\n").presentStalls == 8.5);
+    CHECK(rvk::parseConfig("[debug]\npresent_stalls = 6\n").presentStalls == 6.0);
+    const rvk::Config c = rvk::parseConfig("[debug]\nenvironment = [\"A=1\", \"no equals\", \"B=\"]\n");
+    CHECK(c.environment.size() == 2);
+    CHECK(c.environment.size() == 2 && c.environment[0] == "A=1" && c.environment[1] == "B=");
+}
+
 TEST(config_errors) {
     std::string err;
     rvk::Config c = rvk::parseConfig("[renderer]\nmode = \"dx12\"\n", &err);

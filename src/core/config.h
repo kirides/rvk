@@ -57,6 +57,12 @@ struct Config {
     // (vulkan) scripted overlay / settings commands at presents: "<frame>: <command>" (docs/research/overlay.md 5), e.g.
     // "450: overlay open", "600: set vulkan.max_fps 30", "700: ab flip", "800: key f10" (a posted WM_KEYDOWN/UP pair)
     std::vector<std::string> commands;
+    // (any mode) sample the presenting thread's stack while a present lasts longer than this many ms and log where the time
+    // goes every 5 s (diag::StallSampler, docs/research/fps-limit.md); 0 = off. `present_stalls = true` = 4 ms
+    double presentStalls = 0.0;
+    // (any mode) "NAME=VALUE" environment variables set in DllMain, before anything loads Vulkan or D3D (environment
+    // variables of run.ps1 do not reach the game), e.g. "VK_LOADER_LAYERS_DISABLE=~implicit~"; "NAME=" removes one
+    std::vector<std::string> environment;
 };
 
 // Parses config.toml text. Unknown keys are ignored, bad values keep the default; `error` gets a parse error message.

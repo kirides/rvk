@@ -1,5 +1,6 @@
 #include "core/config.h"
 
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 
@@ -76,6 +77,16 @@ Config parseConfig(std::string_view text, std::string* error) {
     if (const auto* cmds = tbl["debug"]["commands"].as_array()) {
         for (const auto& c : *cmds) {
             if (const auto v = c.value<std::string>()) cfg.commands.push_back(*v);
+        }
+    }
+    if (const auto stalls = tbl["debug"]["present_stalls"]; stalls.is_boolean()) {
+        cfg.presentStalls = stalls.value_or(false) ? 4.0 : 0.0;
+    } else {
+        cfg.presentStalls = std::max(0.0, stalls.value_or(0.0));
+    }
+    if (const auto* env = tbl["debug"]["environment"].as_array()) {
+        for (const auto& e : *env) {
+            if (const auto v = e.value<std::string>(); v && v->find('=') != std::string::npos) cfg.environment.push_back(*v);
         }
     }
     frameList("screenshot_frames", cfg.screenshotFrames);

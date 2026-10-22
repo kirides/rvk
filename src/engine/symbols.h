@@ -33,6 +33,9 @@
     /* bool eCApplication::SetResolution(w, h, eEWindowMode) (0x4c0430), bool eCApplication::ToggleFullscreen() (0x4c01f0) */ \
     X(appSetResolution, L"Engine.dll", "?SetResolution@eCApplication@@QEAA_NKKW4eEWindowMode@eCWindow@@@Z", false)              \
     X(appToggleFullscreen, L"Engine.dll", "?ToggleFullscreen@eCApplication@@QEAA_NXZ", false)                                   \
+    /* bEResult eCDX9Device::SwapScreen(HWND, bCRect const*, bCRect const*) (0x7407b0): IDirect3DDevice9::Present +         \
+       GetBackBuffer; hooked outside Vulkan mode for [debug] present_stalls (docs/research/fps-limit.md) */                   \
+    X(dx9SwapScreen, L"Engine.dll", "?SwapScreen@eCDX9Device@@UEAA?AW4bEResult@@PEAUHWND__@@PEBVbCRect@@1@Z", false)           \
     /* ---- frame phase markers (engine/scene_hooks.*, docs/research/frame-phases.md; all optional) ---- */                     \
     /* void eCFrustumDatabase::Execute(eSRenderTargetDesc*) (0x66e990): one camera view (z pre-pass, shadow mask, solid,     \
        refraction copy, refracted, alpha) */                                                                                   \
