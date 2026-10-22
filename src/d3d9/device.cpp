@@ -321,6 +321,14 @@ bool Device::resize(std::uint32_t width, std::uint32_t height) {
     return true;
 }
 
+void Device::windowResized() {
+    if (options_.offscreen) {
+        return;
+    }
+    presenter_.waitIdle();
+    recreateSwapchain();
+}
+
 void Device::setVsync(bool vsync) {
     if (vsync == options_.vsync) {
         return;

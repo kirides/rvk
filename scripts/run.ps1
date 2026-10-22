@@ -64,6 +64,9 @@ param(
     [switch]$WaitForResult,
     [string[]]$Param = @(),
     [string]$WindowSize = '1600x900',
+    # borderless fullscreen test (docs/research/window-mode.md): ConfigUser.xml <Window FullScreen="true"> (the engine's fullscreen
+    # request; Vulkan mode makes it a borderless window over the monitor at the monitor's resolution). Keep such runs short.
+    [switch]$Fullscreen,
     [switch]$KeepRunning,
     [switch]$NoAutostart,
     # let the game take the foreground / move the cursor (default: risen-spass background mode)
@@ -140,6 +143,19 @@ if ($WaitForResult) { $spassArgs.WaitForResult = $true }
 if ($KeepRunning) { $spassArgs.KeepRunning = $true }
 if ($NoAutostart) { $spassArgs.NoAutostart = $true }
 if ($AllowFocus) { $spassArgs.AllowFocus = $true }
+# Fullscreen request: <Window FullScreen="true"> in the copy's ConfigUser.xml (the key players have from ConfigDefault.xml;
+# test-run.ps1 keeps it, it only rewrites Right / Bottom). Every other run removes the key, so the copy's ConfigLocal.xml
+# (FullScreen="false") decides again and a fullscreen run never outlives itself.
+$cfgUser = Join-Path $GameDir 'localappdata\Local\Risen\ConfigUser.xml'
+if (Test-Path $cfgUser) {
+    $xml = [IO.File]::ReadAllText($cfgUser)
+    $new = [regex]::Replace($xml, '(?s)(<Window\b[^>]*?)\s+FullScreen="[^"]*"', '$1')
+    if ($Fullscreen) { $new = [regex]::Replace($new, '<Window\b', '<Window FullScreen="true"', 1) }
+    if ($new -ne $xml) { [IO.File]::WriteAllText($cfgUser, $new) }
+    Write-Host "ConfigUser.xml: FullScreen $(if ($Fullscreen) { '"true" (borderless fullscreen test)' } else { 'key absent (windowed)' })"
+} elseif ($Fullscreen) {
+    throw "-Fullscreen needs $cfgUser (created by the first run)"
+}
 
 & (Join-Path $SpassRepo 'scripts\test-run.ps1') @spassArgs
 $code = $LASTEXITCODE

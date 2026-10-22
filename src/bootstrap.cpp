@@ -25,6 +25,7 @@
 #include "engine/shadow_maps.h"
 #include "engine/symbols.h"
 #include "engine/vfs.h"
+#include "engine/window_mode.h"
 #include "hal/trace.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "hal/types_base.h"
@@ -122,6 +123,9 @@ int detourEnumAdapterDesc(unsigned long adapter, void* desc) {
     if (g_config.mode == Mode::Vulkan && *static_cast<void**>(s.gfxAdminApiInstance) == nullptr && desc != nullptr) {
         if (hal::vulkan::fillAdapterDesc(g_config.adapter, static_cast<hal::eCGfxShared::eSGfxAdapterDesc*>(desc))) {
             spdlog::info("eCGfxAdmin::sEnumAdapterDesc({}): answered from Vulkan (no Direct3DCreate9, no DxDiag)", adapter);
+            // before the game window exists: its size, the monitor rectangles and the modes in physical pixels
+            // (borderless fullscreen, docs/research/window-mode.md 4)
+            engine::window::enableDpiAwareness();
             return 1;  // bEResult_Ok, as the original always returns
         }
         spdlog::error("eCGfxAdmin::sEnumAdapterDesc: no usable Vulkan device: the game's D3D9 renderer runs this session "
@@ -361,6 +365,7 @@ void onProcessAttach(void* module) {
     if (ok && g_config.mode == Mode::Vulkan) {
         engine::scene::install();
         engine::shadowmaps::install();
+        engine::window::install();  // borderless fullscreen (docs/research/window-mode.md)
     }
     // eCApplication::Draw: the Gui phase (Vulkan mode) and the debug snapshot + tool-API self-test at fixed Draw calls (any mode)
     if (ok && (g_config.mode == Mode::Vulkan || !g_config.snapshotFrames.empty()) &&

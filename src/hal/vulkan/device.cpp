@@ -21,6 +21,7 @@
 #include "engine/scene_hooks.h"
 #include "engine/shadow_maps.h"
 #include "engine/vfs.h"
+#include "engine/window_mode.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "res/dds.h"
 #include "vk/formats.h"
@@ -138,12 +139,12 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     o.logDraws = options.logDraws;
     // rt.allow is a restart setting: the value the session started with decides (its effective value waits for the report)
     o.allowRayTracing = rs.rtAllow == nullptr || rs.rtAllow->startValue() != 0.0;
-    if (!p.windowed) {
-        spdlog::warn("hal: fullscreen requested, running windowed (exclusive fullscreen is not supported yet)");
-    }
     if (!dev_.create(o)) {
         return false;
     }
+    // never exclusive fullscreen: a fullscreen request becomes a borderless window over the monitor (engine/window_mode.h)
+    window_ = p.window;
+    engine::window::onModeSet(p.window, p.windowed, o.width, o.height);
     spdlog::info("hal: Vulkan device for window {} ({}x{}, vsync {}, depth {})", static_cast<void*>(p.window), o.width, o.height,
                  o.vsync, vk::d3dFormatName(o.depthFormat));
     engine::scene::attach(&dev_);  // the frame phase markers (no-ops when they are not installed)
@@ -787,7 +788,9 @@ bEResult HalDevice::ToggleNewMode(eCAPIDevice::eSAPIModeParameters const& a0) {
     spdlog::info("hal: ToggleNewMode {}x{} (windowed {}, vsync {})", a0.backBufferWidth, a0.backBufferHeight, a0.windowed, a0.vsync);
     engineVsync_ = a0.vsync;
     applyVsync();
-    return dev_.resize(a0.backBufferWidth, a0.backBufferHeight) ? bEResult_Ok : bEResult_False;
+    if (!dev_.resize(a0.backBufferWidth, a0.backBufferHeight)) return bEResult_False;
+    engine::window::onModeSet(window_, a0.windowed, a0.backBufferWidth, a0.backBufferHeight);
+    return bEResult_Ok;
 }
 
 bEResult HalDevice::IsResetNecessary(bool* a0) {
@@ -855,6 +858,8 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
         return dev_.readBackBuffer(bgra, w, h);
     });
     HAL_LOG("hal> SwapScreen");
+    // borderless fullscreen: a pending window placement / mode correction, the window kept on its monitor
+    if (engine::window::onPresent()) dev_.windowResized();
     dev_.present();
     const auto& s = dev_.stats();
     api::publishPresent(s.frames, api::FrameNumbers{

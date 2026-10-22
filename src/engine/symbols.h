@@ -27,6 +27,12 @@
     /* virtual void eCApplication::Draw(HWND) (0x4c13b0): GUI, DoSnapshot, SwapScreen; hooked for [debug] snapshot_frames   \
        and the Gui phase marker */                                                                                             \
     X(appDraw, L"Engine.dll", "?Draw@eCApplication@@UEAAXPEAUHWND__@@@Z", false)                                                \
+    /* window modes (engine/window_mode.*, docs/research/window-mode.md). bool eCApplication::SetResolutionEx(adapter, w, h,   \
+       refresh, vsync, float, eCWindow::eEWindowMode) (0x4c02e0): every mode change; hooked (fullscreen -> monitor size) */    \
+    X(appSetResolutionEx, L"Engine.dll", "?SetResolutionEx@eCApplication@@QEAA_NKKKK_NMW4eEWindowMode@eCWindow@@@Z", false)     \
+    /* bool eCApplication::SetResolution(w, h, eEWindowMode) (0x4c0430), bool eCApplication::ToggleFullscreen() (0x4c01f0) */ \
+    X(appSetResolution, L"Engine.dll", "?SetResolution@eCApplication@@QEAA_NKKW4eEWindowMode@eCWindow@@@Z", false)              \
+    X(appToggleFullscreen, L"Engine.dll", "?ToggleFullscreen@eCApplication@@QEAA_NXZ", false)                                   \
     /* ---- frame phase markers (engine/scene_hooks.*, docs/research/frame-phases.md; all optional) ---- */                     \
     /* void eCFrustumDatabase::Execute(eSRenderTargetDesc*) (0x66e990): one camera view (z pre-pass, shadow mask, solid,     \
        refraction copy, refracted, alpha) */                                                                                   \

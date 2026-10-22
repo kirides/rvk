@@ -478,6 +478,7 @@ private:
     void updateLogFrame();
     Options options_;
     bool engineVsync_ = true;  // the game's own vsync option (start parameters / ToggleNewMode)
+    HWND__* window_ = nullptr;  // the game window (start parameters)
     std::unique_ptr<overlay::Overlay> overlay_;
     std::unique_ptr<enh::DebugView> debugView_;  // debug.inject_view (an injected pass)
     std::unique_ptr<enh::Water> water_;          // water.* (a draw replacer)

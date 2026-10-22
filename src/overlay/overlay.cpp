@@ -17,6 +17,7 @@
 #include <spdlog/spdlog.h>
 
 #include "core/settings.h"
+#include "engine/window_mode.h"
 #define IMGUI_IMPL_VULKAN_USE_VOLK
 #include "imgui_impl_vulkan.h"
 
@@ -400,6 +401,11 @@ bool Overlay::runCommand(std::string_view command, std::string* out) {
         else if (w[1] == "reset") reg.resetOther();
         else return fail("ab flip|a|b|copy|reset");
         return ok(std::format("side {} active, {} settings differ", sideName(reg.bActive()), reg.abDifferences().size()));
+    }
+    if (w[0] == "window" && w.size() >= 2) {
+        // the engine's own mode changes (borderless fullscreen, docs/research/window-mode.md)
+        const auto rest = command.substr(static_cast<std::size_t>(w[1].data() - command.data()));
+        return engine::window::runCommand(rest, out);
     }
     if (w[0] == "key" && w.size() == 2) {
         const unsigned vk = vkFromName(w[1]);

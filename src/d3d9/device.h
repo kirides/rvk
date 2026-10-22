@@ -529,6 +529,8 @@ public:
     // frame
     void present();
     bool resize(std::uint32_t width, std::uint32_t height);
+    // the window's client size changed (borderless placement): the swapchain follows it now (the back buffer keeps its size)
+    void windowResized();
     void setVsync(bool vsync);
     bool vsync() const { return options_.vsync; }
     // present-rate cap (0 = the refresh rate with vsync, none without); applies at the next present
