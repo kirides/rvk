@@ -285,7 +285,9 @@ unless marked [I].
 * **Device 48/49 `Set/GetMasterZBias`** (wrappers `0x50adf0`/`0x50add0`, no callers), **76 `SetZBias`**,
   **86/88/92-95** (FF lights and material), **129/131-135** (`eCGfxTextureBlock` FF texture stages), **100-102,
   107-112, 117-121** (`eCGfxVertexProgram`/`eCGfxPixelProgram` assembly programs; hal.md confirms that the device programs
-  are unused): the legacy Gothic 3 fixed-function / asm material path.
+  are unused): the legacy Gothic 3 fixed-function / asm material path. **Correction (2026-10-23, debug-mode.md 8.3):** 109
+  `SetVertexProgram` (FVF form), 119 `SetPixelProgram(0)`, 134 `SetColorCalc`, 135 `SetAlphaCalc` *are* called by the debug
+  keys' line drawing (`eCGfxMixerAdmin::DrawLineList`); they are implemented now (generated fixed-function shaders).
 * **Device 143 `GetFVFSize`** (wrapper `0x50b360`, no caller), **150 `GetMethodSupport`** (`0x756130`, no caller),
   **151-158** (`GenerateLODMesh`, `CreateBox/Cylinder/Polygon/Sphere/Teapot/Text/Torus`: D3DX meshes for editor gizmos and
   `eCGfxMixerAdmin::Draw*` debug shapes), **160 `SaveBackbufferToMemory`**, **207 `CreateUVAtlas`** (lightmapper).

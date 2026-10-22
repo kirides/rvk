@@ -146,6 +146,12 @@ with validation on and checks every pixel against D3D9's rasterisation rules (ha
   rewritten in an `eCApplication::SetResolutionEx` pre-hook / corrected once at the start, so back buffer, GUI and mouse
   agree); the window is kept on its monitor; per-monitor DPI awareness v2; runtime switches both ways verified with
   validation (`run.ps1 -Fullscreen`, overlay command `window ...`). Open: different-size / scaled multi-monitor setups.
+* **Debug mode / clean quit: done (2026-10-23, docs/research/debug-mode.md).** The engine's debug keys (`TestMode`, cheat
+  `minsky`) work in Vulkan mode: quitting no longer crashes (RT scene torn down before its consumers; resources the engine
+  frees after its device at process exit are orphaned / leaked instead of touching a dead device; validation clean at
+  `vkDestroyDevice`), the debug line drawing gets a generated fixed-function shader pair (slots 109 / 119 / 134 / 135), free
+  fly / HUD off / freeze verified. Test tooling: key chords / held keys / `type` in `[debug] commands`, `run.ps1 -TestMode`,
+  `mods/rvk_debugkeys`. Not ours: Ctrl+E (stock crash), the exit faults in `SharedBase.dll+0x7caa9` / Steam's `tier0_s64`.
 * **Performance pass: done (2026-10-21, docs/research/performance.md).** Measured with `[debug] perf` / `perf_frame`
   (`run.ps1 -Perf`, `-PerfFrame`): GPU timestamps per submission and per pass, CPU split per frame, upload volume, pipeline
   and shader build counts; `[vulkan] vsync` override (`-Vsync`). The world's ~80 fps is an **external present cadence**:

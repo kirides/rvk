@@ -65,8 +65,13 @@ lines every 5 s), `-PerfFrame N` (GPU time of every render pass of frame N), `-V
 Player settings + overlay (docs/research/overlay.md): every run deletes `bin/rvk/settings.toml` (defaults) unless
 `-KeepSettings`; `-Setting 'vulkan.max_fps=60','vulkan.vsync=off'` writes one. The ImGui overlay (F10, A/B flip F11) is
 never in captures unless `-OverlayInScreenshots`; `-Commands '1500: overlay open','1600: key c','1700: ab flip'` runs
-overlay / settings commands at presents (`key`/`click` post real window messages: input tests in the background);
-`-NoOverlay`. config.toml's non-default `[vulkan] vsync / max_fps / adapter` lock the matching player setting.
+overlay / settings commands at presents (`key`/`click` post real window messages: input tests in the background;
+`key ctrl+insert`, `key w 150` = held 150 frames, `keydown`/`keyup <chord>`, `type minsky` = WM_CHAR; names in
+`src/overlay/keys.h`; the key commands also run in passthrough / trace mode, at `eCApplication::Draw` calls: D3D9 baselines);
+`-NoOverlay`. Engine debug keys (docs/research/debug-mode.md 8-9): `-TestMode` (ConfigUser.xml `<Debug TestMode="true">`,
+removed by other runs) + `-Mods rvk_debugkeys` (logs the camera each second, no scenario: ends at `-Seconds` or F12); free fly =
+`type minsky` then `key ctrl+insert`, W/A/S/D/Space; never press Ctrl+E (stock crash), F4 (writes the shader pool through
+the junction), Alt_R+F12 (deliberate crash). config.toml's non-default `[vulkan] vsync / max_fps / adapter` lock the matching player setting.
 Enhanced shadows (docs/research/shadows.md; settings category Shadows, default off): `-Setting 'shadows.enabled=true'` (+
 `shadows.filter=low|medium|high`, `shadows.softness`, `shadows.cascade_blend`, `shadows.fade`, `shadows.bias`; the engine's
 cascades `shadows.map_size=auto|game|1024|2048|4096`, `shadows.range` (m, 0 = auto: 100 m / 4096² with the mask on, else
