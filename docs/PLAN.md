@@ -245,7 +245,20 @@ efcompare.ps1` + `mods/rvkcompare` (13 spots: beach rain/sun,
   (GD3D11 ShoreField port); whitewater below waterfalls. Pipelines built in the background (no toggle hitch). Verified:
   side by side at 7 spots (`scripts\water-compare.ps1`), +0.027 ms GPU at 1080p (beach), sync validation clean, live
   toggles without hitch, refcompare with the feature off (water.md 8.1).
-  Rest of M7: underwater post, river flow, area profiles; M8: FFT, signed shore field with the sea floor (water.md 10).
+* **Visual quality pass: done (2026-10-22).** The first piece was worse than the engine at most spots (near-black harbour,
+  flat lake, grey sea, overexposed beach bands, dull cave pool): it used only the material's colour constant. Now **the
+  engine's own water material is evaluated** in `water.frag` (the four Risen water pixel shaders ported: normal maps,
+  diffuse / whitewater textures, sky cube, 9-coefficient ambient, sun + shadow mask, point lights, Fresnel, depth fade,
+  refraction offset; picked by sampler layout, unknown shaders keep the engine's draw), on the engine's meshes **with the
+  engine's own vertex shader** (its scrolling = river flow), the sea grid reproducing the ocean VS's interpolators (affine
+  fit of the sea mesh's mapping). Added on top: SSR on a calmer normal with ripple-broken lookups over the engine's cube
+  (never erasing its sky glitter), the sea's tint along the light path, wind ripples, **waves rolling in towards the coast**
+  (shore field direction), breaker / swash / churn / lace / crest foam, a lower waterline (13 units, swash ±8, only at the
+  beach) with the **wet beach** pass (AfterOpaque), a dim reflection for the swamp. Don's camp re-surveyed (opaque
+  materials too): green mud ground under ground fog, no water surface; spot `swamp_camp` re-posed. Verified: side by side
+  at 8 spots with water luma / hue numbers (`water-compare.ps1 -Mask`, `tools/water_stats.py`; water.md 8), +0.18 ms GPU
+  at 1080p (beach), sync validation clean, live toggles without hitch, rvk_tests 84 / 84, refcompare water off 16 / 16 PASS.
+  Rest of M7: underwater post, area profiles, wet-sand sheen; M8: FFT, signed shore field with the sea floor (water.md 10).
 
 ### M8+ Enhanced graphics
 * candidates: anisotropic filtering + MSAA/TAA/SMAA, higher-resolution and better-filtered shadows, modern tonemapping/HDR10,

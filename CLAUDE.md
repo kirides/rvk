@@ -67,12 +67,17 @@ overlay / settings commands at presents (`key`/`click` post real window messages
 `-NoOverlay`. config.toml's non-default `[vulkan] vsync / max_fps / adapter` lock the matching player setting.
 Enhanced water (docs/research/water.md; settings category Water, default off): `-Setting 'water.enabled=true'` (+
 `water.quality=low|medium|high`, `water.reflections=sky|ssr`, `water.ocean_waves`, `water.wave_height`, `water.murkiness`,
-`water.reflection_strength`; debug view `water.debug=shore_field|depth|normals|reflection`). rvk.log: `water: material
-...` (each water material's name / mesh / kind once), `water: draw of material ...` (its engine shaders, declaration,
-states, constants; bytecode in `bin/rvk/cache/water/`), `enh: water: body ...` (sea or inland, from its world box),
+`water.reflection_strength`; debug view `water.debug=shore_field|depth|normals|reflection|foam`). The look is the engine's
+own water material (its pixel shader's model ported in `shaders/water/water.frag`, picked by sampler layout; the engine's
+VS stays on its meshes; water.md 2.3, 4.3) + traced reflections, waves, foam, wet beach. rvk.log: `water: material ...`
+(each water material's name / mesh / kind once), `water: draw of material ...` (per material x pixel shader: its engine
+shaders, declaration, states, constants c6..c14 and VS c232..c241; bytecode in `bin/rvk/cache/water/`), `enh: water:
+material ... -> model ...` (`none` = an unknown water shader: engine draw), `enh: water: body ...`, `sea mesh mapping`,
 `coast overlay` / `shore field` lines. Side by side engine vs enhanced: `.\scripts\water-compare.ps1 [-Spots a,b]
-[-Setting k=v] [-EngineDir out\water\<stamp>]` -> `out\water\<stamp>\sbs_<spot>.png`. Survey scenario `rvk_water`
-(water level-mesh entities' boxes + a look at each; `-Param 'only=Levelmesh_Lakemesh_06','find=SP_Don'`).
+[-Setting k=v] [-EngineDir out\water\<stamp>] [-Mask | -MaskDir out\water\<stamp>]` -> `out\water\<stamp>\sbs_<spot>.png` +
+water luma / hue table (`tools/water_stats.py`; `-Mask` = a `water.debug=normals` run for the water masks). Survey
+scenario `rvk_water` (water level-mesh entities' boxes + a look at each; `-Param 'only=Levelmesh_Lakemesh_06','find=SP_Don'`;
+`'around=x;y;z','radius=2500'` = 17 pictures around a place; with `-RvkLogLevel trace` rvk.log also names opaque materials).
 Ray tracing tier (docs/research/raytracing.md): optional, enabled at device creation when the GPU has it and `rt.allow`
 (restart setting, default on; `-Setting 'rt.allow=false'` = floor only); rvk.log `vulkan: ray tracing ...` + `caps:` lines
 (the capability report, also the overlay's "Capabilities"). `-RtSelfTest` (`[debug] rt_selftest`) builds a BLAS/TLAS and
