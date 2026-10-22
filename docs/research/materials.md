@@ -202,7 +202,8 @@ Suggestions, all untested:
   translated material PS (MRT, through the reserved specialisation-constant hooks), for SSR / RT reflections / RT GI
   instead of geometric or depth-reconstructed normals. This supersedes the "not recoverable from bytecode" caveat in
   `enhancements-roadmap.md`.
-* Anisotropic filtering on the material samplers (s9 and up).
+* ~~Anisotropic filtering on the material samplers (s9 and up).~~ Already provided by the engine and reaching the materials
+  in Vulkan mode (section 6.1).
 * Toksvig-style specular anti-aliasing from the normal-map length.
 * ~~Force the quality-gated terms (self-shadow, specular, complex SH ambient) as on High.~~ Not needed: the shipped shaders
   already are the High permutation (section 5).
@@ -210,6 +211,35 @@ Suggestions, all untested:
   (layout unknown).
 * Detail normals for classes that have none (`Special_*` decals / effects).
 * Albedo-derived normals are a poor idea.
+
+### 6.1 Texture filtering (anisotropy)
+
+Source: game-runner agent, 2026-10-22, D3D9-passthrough trace logs (`B:\DevDrive\risen-test-vk-cmp\gr-trace-tfm*.log`).
+C = confirmed, I = inferred.
+
+* The engine never calls `SetTextureFiltering` (HAL slot 128). All filtering goes through `SetSamplerState` (slot 130) with
+  D3DSAMP numbers: 5 MAG, 6 MIN, 7 MIP, 8 MIPMAPLODBIAS, 10 MAXANISOTROPY, 11 SRGB (C). MAXANISOTROPY is set once per stage
+  (0..15) at device init; the per-bind calls set U/V/MAG/MIN/MIP/LODBIAS/SRGB (C).
+* `TextureFilterMode` (`ConfigUser.xml` `<Graphics>`, the in-game texture filter option) maps to the material stages s9..s15
+  (C):
+
+  | `TextureFilterMode` | MIN | MaxAnisotropy |
+  |---|---|---|
+  | 0 | linear (trilinear) | 1 |
+  | 1 | anisotropic | 2 |
+  | 2 | anisotropic | 4 |
+  | 3 | anisotropic | 8 |
+  | 4 | anisotropic | 16 |
+
+  MAG is always linear and MIP linear. s0..s2 are point/point/no mip, s4/s5 (lightmaps) linear: these are never anisotropic
+  (C). About 0.5 % of the material binds use MIN linear even at mode 4 (which materials: not checked).
+* Our Vulkan path (`src/d3d9/device.cpp`, sampler creation near line 1616) enables `VkSampler` anisotropy when MIN or MAG is
+  anisotropic, with `maxAnisotropy` = D3DSAMP_MAXANISOTROPY clamped to the device limit (16 on the RX 7900 XTX; our HAL caps
+  report 16). At `TextureFilterMode = 4` the materials therefore get 16x (C for the engine side and the code; the created
+  `VkSampler` itself was not observed in a Vulkan-mode log, I). Anisotropic filtering already reaches the materials: nothing
+  to add.
+* Tooling gap: `-LogFrame` / `-LogDraws` do not log sampler states (only `sN=slot(size format levels)`); `mode = "trace"`
+  with `[trace] log_first=N` shows every `SetSamplerState` call.
 
 ## 7. Open questions
 
