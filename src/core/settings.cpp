@@ -736,21 +736,55 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"sky", "ssr"},
         .optionLabels = {"Sky", "Screen space"},
     });
-    r.waterOceanWaves = &reg.add({
-        .key = "water.ocean_waves",
-        .label = "Sea waves and shore",
+    r.waterOcean = &reg.add({
+        .key = "water.ocean",
+        .label = "Sea simulation",
         .category = "Water",
-        .description = "The open sea gets moving waves, calming down at the coast and around the player, and a real shoreline "
-                       "where the water runs up the beach and back instead of the game's painted surf. Lakes, rivers and swamps "
-                       "never get waves.",
-        .type = Type::Bool,
-        .defaultValue = 1,
+        .description = "The open sea: \"FFT ocean\" simulates the sea from a wave spectrum (big waves far out getting smaller "
+                       "towards the shore and inside the harbour, breaking waves, foam), \"Simple waves\" is a sum of a few "
+                       "waves, \"Off\" shades the game's flat sea. Both simulations replace the game's painted surf with a real, "
+                       "lower shoreline. Lakes, rivers and swamps never get waves.",
+        .type = Type::Enum,
+        .defaultValue = 2,
+        .options = {"off", "gerstner", "fft"},
+        .optionLabels = {"Off", "Simple waves", "FFT ocean"},
     });
-    r.waterWaveHeight = &reg.add({
-        .key = "water.wave_height",
+    r.waterOceanQuality = &reg.add({
+        .key = "water.ocean_quality",
+        .label = "Sea detail",
+        .category = "Water",
+        .description = "Resolution of the FFT ocean's wave tiles: Low 3 tiles of 128 x 128, Medium 4 of 256 x 256, High 4 of 512 x 512.",
+        .type = Type::Enum,
+        .defaultValue = 1,
+        .options = {"low", "medium", "high"},
+        .optionLabels = {"Low", "Medium", "High"},
+    });
+    r.waterSeaState = &reg.add({
+        .key = "water.sea_state",
+        .label = "Sea state",
+        .category = "Water",
+        .description = "How rough the sea is. \"Weather\" follows the game's weather (calm in sunshine, rough in rain, high "
+                       "waves in storms).",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"auto", "calm", "moderate", "rough", "storm"},
+        .optionLabels = {"Weather", "Calm", "Moderate", "Rough", "Storm"},
+    });
+    r.waterWindDirection = &reg.add({
+        .key = "water.wind_direction",
+        .label = "Wind direction",
+        .category = "Water",
+        .description = "Where the wind blows the waves to, in degrees (0 = +x, 90 = +z); -1 = the island's prevailing wind.",
+        .type = Type::Int,
+        .defaultValue = -1,
+        .min = -1,
+        .max = 359,
+    });
+    r.waterWaveScale = &reg.add({
+        .key = "water.wave_scale",
         .label = "Wave height",
         .category = "Water",
-        .description = "Height of the sea's waves (1 = about 70 cm for the largest).",
+        .description = "Scales the height of the sea's waves (1 = the sea state's natural height).",
         .type = Type::Float,
         .defaultValue = 1,
         .min = 0,
@@ -784,11 +818,14 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .label = "Water debug view",
         .category = "Debug",
         .description = "Developer view of the enhanced water: the shore field (distance to the coast), the water depth, the "
-                       "surface normals, the reflection alone or the foam (red) over the surf zone (green) and the depth (blue).",
+                       "surface normals, the reflection alone, the foam (red) over the surf zone (green) and the depth (blue; FFT ocean: "
+                       "red folding foam, green breaking waves, blue surf, white contact), the sea floor field "
+                       "(red depth, green exposure, blue the waves' phase rolling in) or the FFT ocean's attenuation (red / "
+                       "green / blue the three longest cascades' weights).",
         .type = Type::Enum,
         .defaultValue = 0,
-        .options = {"off", "shore_field", "depth", "normals", "reflection", "foam"},
-        .optionLabels = {"Off", "Shore field", "Depth", "Normals", "Reflection", "Foam"},
+        .options = {"off", "shore_field", "depth", "normals", "reflection", "foam", "sea_floor", "waves"},
+        .optionLabels = {"Off", "Shore field", "Depth", "Normals", "Reflection", "Foam", "Sea floor", "Wave attenuation"},
         .flags = Flag::NoAB,
     });
     if (&reg == &registry()) g_renderer = r;

@@ -20,6 +20,7 @@
 //               lit sand
 //   fog         the engine's radial fog as the engine applies it
 
+#define WATER_FRAGMENT
 #include "water_common.glsl"
 
 layout(location = 0) in vec4 tc0;   // TEXCOORD0..6: the engine water VS's outputs (see enh/water.cpp)
@@ -208,7 +209,28 @@ void main() {
     vec3 Ngeo = tc4.xyz;
     vec3 T = tc5.xyz;
     vec3 B = tc6.xyz;
-    if (grid) {
+    bool fft = grid && fftMode(w);
+    SeaFloor fl;
+    ShoreTrain st;
+    FftSample fs;
+    float lostVar = 0.0;
+    vec4 fftWt = vec4(0.0);
+    vec3 Nmacro = vec3(0.0, 1.0, 0.0);
+    if (fft) {
+        // per pixel: the FFT cascades' slopes (filtered by the screen footprint) with the same attenuation as the geometry,
+        // + the waves rolling in; the slope variance the filtering removed becomes specular roughness
+        fl = seaFloor(w, tc7.xy);
+        float cap = nearCameraCap(w, tc7.xy, pc.vs.c[11].xyz);
+        fftWt = cascadeWeights(w, fl) * cap;
+        vec2 macro;
+        fs = fftSamplePixel(w, tc7.xy, fftWt, lostVar, macro);
+        st = shoreTrain(w, fl, t);
+        vec2 slope = fs.slope + st.slope * cap;
+        Nmacro = normalize(vec3(-(macro.x + st.slope.x * cap), 1.0, -(macro.y + st.slope.y * cap)));
+        Ngeo = normalize(vec3(-slope.x, 1.0, -slope.y));
+        T = normalize(w.meshFrame.xyz - Ngeo * dot(Ngeo, w.meshFrame.xyz));
+        B = cross(Ngeo, T) * w.meshFrame.w;
+    } else if (grid) {
         // the waves' frame (the sea mesh's tangent, re-orthogonalised on the wave normal)
         Ngeo = normalize(Ngeo);
         // wind ripples between the waves (faded with distance against glitter), under the engine's normal maps
@@ -228,6 +250,7 @@ void main() {
 
     Surface s;
     s.refl = vec3(0.0);
+    vec3 seaTint = w.mat[0].rgb;  // the material's water colour (ocean: its diffuse textures)
     vec3 L = w.sunDir.xyz;
     vec4 c6 = w.mat[0], c7 = w.mat[1], c8 = w.mat[2], c9 = w.mat[3], c10 = w.mat[4], c11 = w.mat[5], c12 = w.mat[6];
     float reflK = w.look.x;  // water.reflection_strength
@@ -236,25 +259,58 @@ void main() {
         // ps 6e22a01a6cf0ac0a: s14 / s13 normal maps blended by the mask s9, s11 * s10 diffuse, s12 sky cube
         vec4 mask = mtex(w, 9u, tc1.zw);
         vec2 n01 = mix(nmap(mtex(w, 13u, tc1.xy)), nmap(mtex(w, 14u, tc0.xy)), mask.wy);
+        // the FFT's own small waves carry the detail: the material's normal maps weaker on top where they are (its look stays;
+        // full strength in sheltered water)
+        if (fft) n01 = mix(vec2(0.5), n01, 1.0 - 0.45 * clamp(max(fftWt.y, fftWt.z), 0.0, 1.0));
         s.N = frameNormal(n01, T, B, Ngeo, s.nxy);
         vec3 lit = engineLight(w, s.N, Ngeo, outdoor, P, uv) * shadow;
         vec3 R = 2.0 * dot(V, s.N) * s.N - V;
+        // on wave slopes facing away at grazing views the mirror direction dips below the horizon: it would meet the
+        // next wave, which reflects the sky near the horizon, not the cube's dark lower half
+        if (fft) R = normalize(vec3(R.x, max(R.y, 0.04), R.z));
         float nv = dot(s.N, V);
         float nl = clamp(dot(L, s.N), 0.0, 1.0);
         float up = clamp(dot(L, Ngeo) * 4.0, 0.0, 1.0);
         vec3 cube = mcube(w, 12u, R).rgb;
         float rl = clamp(dot(R, L), 0.0, 1.0);
-        vec3 spec = clamp(dpow(rl, c8.w * 128.0) * nl / max(nv, 1e-5), 0.0, 1.0) * w.sunSpec.rgb * up * clamp(cube * c8.x, 0.0, 1.0);
-        float fres = (c9.y * dpow(1.0 - nv, c9.z) + c9.x) * reflK;
+        float specPow = c8.w * 128.0;
+        float specNorm = 1.0;
+        if (fft) {
+            // the waves smaller than a pixel widen the highlight instead of sparkling (Toksvig-like: the filtered slope
+            // variance added to the lobe's), energy kept
+            float p2 = specPow / (1.0 + specPow * 2.0 * lostVar);
+            specNorm = (p2 + 2.0) / (specPow + 2.0);
+            specPow = p2;
+        }
+        vec3 spec = clamp(dpow(rl, specPow) * specNorm * nl / max(nv, 1e-5), 0.0, 1.0) * w.sunSpec.rgb * up * clamp(cube * c8.x, 0.0, 1.0);
+        // FFT: the Fresnel weight of a calmer surface than the shading normal: at grazing views the wave faces turned away
+        // are hidden behind the crests and the eye sees the sky's reflection over most of the sea (as the engine's flat
+        // sea does); the short waves still bend the reflected ray and the specular
+        vec3 Nf = normalize(vec3(Nmacro.x * 0.4, Nmacro.y, Nmacro.z * 0.4));  // the macro tilt, damped (masking)
+        float nvF = fft ? dot(Nf, V) : nv;
+        float fres = (c9.y * dpow(1.0 - nvF, c9.z) + c9.x) * reflK;
         vec3 diffuse = mtex(w, 10u, tc0.zw).rgb * mtex(w, 11u, tc1.xy).rgb * c8.y;
+        seaTint = diffuse;
         vec3 refl = cube;
         if (!underside) {
+            // FFT: the traced ray follows the macro surface (the short waves would scatter it into the dark rocks / sea)
+            vec3 Nssr = fft ? Nmacro : Ngeo;
             float conf;
-            vec3 ssr = traceSSR(w, f, P, ssrDir(s.N, Ngeo, V), ssrJitter(s.N, Ngeo, dist), conf);
+            vec3 ssr = traceSSR(w, f, P, ssrDir(s.N, Nssr, V), ssrJitter(s.N, Nssr, dist), conf);
             refl = keepSky(cube, min(ssr, vec3(1.5)), conf, 0.55);
         }
         s.refl = refl;
         s.colour = c6.rgb * lit + spec + clamp(mix(diffuse, refl, clamp(fres, 0.0, 1.0)), 0.0, 1.5);
+        if (fft && !underside) {
+            // light through the thin crests (subsurface scattering): backlit by the sun when looking towards it, in the
+            // material's own turquoise; a little sky light in every crest
+            float crestH = clamp(tc5.w, 0.0, 1.0);
+            float back = dpow(clamp(dot(-V, L) * 0.5 + 0.5, 0.0, 1.0), 4.0);
+            float thin = 1.0 - clamp(nv, 0.0, 1.0);
+            vec3 sssCol = diffuse * 1.4;
+            vec3 amb = engineLight(w, vec3(0.0, 1.0, 0.0), vec3(0.0, 1.0, 0.0), outdoor, P, uv);
+            s.colour += sssCol * (w.sunColor.rgb * shadow * back * (0.35 + 0.65 * thin) * 0.22 + amb * 0.10) * crestH;
+        }
         float fade = dpow(thick0 * c7.x + c7.y, c7.z);
         vec3 a3 = clamp(fade * max(vec3(mask.x, mask.x, mask.y), vec3(fade)), 0.0, 1.0);
         s.alpha = a3.x * tc3.w;
@@ -367,7 +423,43 @@ void main() {
 
     // ---- foam (the sea only): surf lines, contact with the beach and walls, wave crests ----
     float foam = 0.0;
-    if (sea && grid && w.look.y > 0.0 && !underside) {
+    float milk = 0.0;  // aerated, sandy water of the surf zone (FFT ocean)
+    vec4 foamTerms = vec4(0.0);
+    if (fft && w.look.y > 0.0 && !underside) {
+        // FFT ocean foam: where the simulated surface folds (Jacobian, accumulated over time: trails behind crests), on the
+        // breaking waves rolling in (a white front on the crest, a trail of broken water behind it), the surf zone's broken
+        // water, a lace at the waterline and at walls / rocks. Each is a coverage (0..1) applied to a cellular foam texture
+        // that moves with the water (sampled at the undisplaced position): low coverage = a thin lace along the cell borders,
+        // high coverage = the cells fill in. Far away the texture fades to its mean (no shimmer)
+        vec2 xz0 = tc7.xy;
+        float fineFade = 1.0 / (1.0 + dist / 3000.0);
+        float footprint = max(length(fwidth(xz0)), 0.01);
+        float tex = foamTexture(xz0, t, footprint);
+        // folding foam of the open sea
+        float jf = clamp(fs.foam * 1.3, 0.0, 1.0);
+        float sea0 = foamCover(tex, jf * 0.8);
+        // breaking waves: the crest front (whitewater) + its trail
+        float saw = fract((st.phase - 1.5707963) / 6.2831853);  // 0 just behind the crest, growing until the next one
+        float front = smoothstep(0.88, 0.99, sin(st.phase + 0.3));
+        float trail = exp(-saw * 4.5) * 0.85;
+        // not every stretch of a crest breaks at once: a slow noise along the coast picks the breaking segments
+        float segment = smoothstep(0.25, 0.75, 0.5 + 0.5 * waterNoised(xz0 / 900.0 + vec2(0.0, t * 0.015)).x);
+        float brkW = st.breaking * st.weight * mix(0.35, 1.0, segment);
+        float breakFoam = max(foamCover(tex, brkW * front * 0.85), foamCover(tex, brkW * trail * 0.8));
+        // the surf zone: broken water over the shallows behind the breakers, thinning towards the beach
+        float breakDepth = max(w.shoreWave.y * st.weight / max(w.shoreWave.z, 0.1), 1.0);  // where the incoming waves break
+        float surfZone = smoothstep(4.0, 15.0, vdepth0) *
+                         max(st.breaking, 1.0 - smoothstep(0.6 * breakDepth, 1.3 * breakDepth, max(fl.depth, 0.0)));
+        float surf = foamCover(tex, surfZone * st.weight * (0.45 + 0.35 * trail));
+        // the broken water is full of bubbles and stirred-up sand: milky turquoise rather than clear
+        milk = clamp(surfZone * st.weight * (0.6 + 0.4 * trail) + 0.4 * brkW * trail, 0.0, 1.0) * fineFade;
+        // contact: a lace where the water meets the beach (follows the swash) or a wall / rock (short view-ray thickness)
+        float contactD = min(vdepth0 * 1.5, thick0);
+        float contactW = (1.0 - smoothstep(1.0, 9.0, contactD)) * smoothstep(1.0, 3.0, contactD + 2.0);
+        float contact = foamCover(tex, contactW * 0.55);
+        foam = clamp(max(max(sea0, breakFoam), max(surf, contact)) * w.look.y, 0.0, 1.0);
+        foamTerms = vec4(sea0, breakFoam, surf, contact);
+    } else if (sea && grid && w.look.y > 0.0 && !underside) {
         float coastDist = tc7.z;
         float fineFade = 1.0 / (1.0 + dist / 1500.0);
         float foamNoise = 0.5 + 0.5 * waterNoised(P.xz / 180.0 + vec2(t * 0.11, -t * 0.07)).x +
@@ -416,6 +508,13 @@ void main() {
     float fog = clamp(min(dist * w.fogParams.y + w.fogParams.x, w.fogParams.z), 0.0, 1.0);
     vec3 color = mix(refr, mix(s.colour, w.fogColor.rgb, fog), s.alpha);
     float alpha = s.alpha;
+    if (milk > 0.0) {
+        // the surf zone's aerated water: the light scattered back by bubbles and sand, in the sea's own tint
+        vec3 lit = engineLight(w, Ngeo, Ngeo, outdoor, P, uv) * shadow;
+        float lum = dot(lit, vec3(0.2126, 0.7152, 0.0722));
+        vec3 milkCol = mix(vec3(0.55 * lum), clamp(seaTint, 0.0, 1.0) * lum * 1.3, 0.55);
+        color = mix(color, mix(milkCol, w.fogColor.rgb, fog), milk * 0.7);
+    }
     if (foam > 0.0) {
         // foam lies on top of the water: white-ish, lit like the beach (the engine's diffuse lighting curve, albedo ~0.7),
         // fogged like the surface; never glowing
@@ -427,7 +526,8 @@ void main() {
         alpha = max(alpha, foam);
     }
     // a soft edge where the water gets very thin (no seam on the beach)
-    if (!sky0) color = mix(refractionColor(w, uv), color, smoothstep(0.0, 5.0, min(vdepth0 * 2.0, thick0)));
+    // (FFT ocean: a wider fade, the swash spreads the waterline over the flat beaches)
+    if (!sky0) color = mix(refractionColor(w, uv), color, smoothstep(0.0, fft ? 12.0 : 5.0, min(vdepth0 * 2.0, thick0)));
     if ((flags & WATER_BLENDED) != 0u) {
         // the engine draws this body blended (SRCALPHA / INVSRCALPHA) over the scene: the same, drawn opaque here
         color = mix(refractionColor(w, uv), color, alpha);
@@ -443,6 +543,9 @@ void main() {
     else if (dbg == 2u) color = vec3(clamp(vdepth / 500.0, 0.0, 1.0), clamp(thick0 / 3000.0, 0.0, 1.0), s.alpha);
     else if (dbg == 3u) color = normalize(s.N) * 0.5 + 0.5;
     else if (dbg == 4u) color = s.refl;
+    else if (dbg == 5u && fft) color = foamTerms.xyz + vec3(foamTerms.w * 0.5) + (any(isnan(foamTerms)) ? vec3(1.0, 1.0, 0.0) : vec3(0.0));
     else if (dbg == 5u) color = vec3(foam, (1.0 - smoothstep(0.0, 450.0, tc7.z)), clamp(vdepth / 200.0, 0.0, 1.0));
+    else if (dbg == 6u && fft) color = vec3(clamp(fl.depth / 1000.0, 0.0, 1.0), fl.exposure, (0.5 + 0.5 * sin(st.phase)) * st.weight);
+    else if (dbg == 7u && fft) color = vec3(fftWt.x, fftWt.y, fftWt.z) * 0.8 + vec3(st.breaking * st.weight * 0.2);
     outColor = vec4(max(color, vec3(0.0)), 1.0);
 }

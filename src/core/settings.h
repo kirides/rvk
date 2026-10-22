@@ -247,8 +247,11 @@ struct RendererSettings {
     Setting* waterEnabled = nullptr;      // water.enabled
     Setting* waterQuality = nullptr;      // water.quality: "low", "medium", "high"
     Setting* waterReflections = nullptr;  // water.reflections: "sky" (cube only), "ssr"
-    Setting* waterOceanWaves = nullptr;   // water.ocean_waves: wave grid + lower coast for the open sea
-    Setting* waterWaveHeight = nullptr;   // water.wave_height: multiplier
+    Setting* waterOcean = nullptr;        // water.ocean: "off", "gerstner", "fft" (the open sea's wave grid + lower coast)
+    Setting* waterOceanQuality = nullptr; // water.ocean_quality: "low", "medium", "high" (FFT tiles)
+    Setting* waterSeaState = nullptr;     // water.sea_state: "auto" (weather), "calm", "moderate", "rough", "storm"
+    Setting* waterWindDirection = nullptr;  // water.wind_direction: degrees, -1 = auto
+    Setting* waterWaveScale = nullptr;    // water.wave_scale: multiplier
     Setting* waterMurkiness = nullptr;    // water.murkiness: multiplier on the absorption
     Setting* waterReflectionStrength = nullptr;  // water.reflection_strength
     Setting* waterDebug = nullptr;        // water.debug: "off", "shore_field", "depth", "normals", "reflection"

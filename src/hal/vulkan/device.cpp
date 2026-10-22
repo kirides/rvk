@@ -180,8 +180,9 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     // enhanced water (enh/water.h, docs/research/water.md): a draw replacer, live settings
     water_ = std::make_unique<enh::Water>(dev_);
     if (rs.waterEnabled != nullptr) {
-        for (settings::Setting* s : {rs.waterEnabled, rs.waterQuality, rs.waterReflections, rs.waterOceanWaves, rs.waterWaveHeight,
-                                     rs.waterMurkiness, rs.waterReflectionStrength, rs.waterDebug}) {
+        for (settings::Setting* s : {rs.waterEnabled, rs.waterQuality, rs.waterReflections, rs.waterOcean, rs.waterOceanQuality,
+                                     rs.waterSeaState, rs.waterWindDirection, rs.waterWaveScale, rs.waterMurkiness,
+                                     rs.waterReflectionStrength, rs.waterDebug}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyWater(); }, this);
         }
         if (rs.waterEnabled->asBool()) applyWater();
@@ -210,12 +211,19 @@ void HalDevice::applyWater() {
     const std::string_view q = rs.waterQuality->asEnum();
     s.quality = q == "low" ? 0 : q == "high" ? 2 : 1;
     s.ssr = rs.waterReflections->asEnum() == "ssr";
-    s.oceanWaves = rs.waterOceanWaves->asBool();
-    s.waveHeight = rs.waterWaveHeight->asFloat();
+    const std::string_view oc = rs.waterOcean->asEnum();
+    s.ocean = oc == "off" ? 0 : oc == "gerstner" ? 1 : 2;
+    s.oceanWaves = s.ocean != 0;
+    const std::string_view oq = rs.waterOceanQuality->asEnum();
+    s.oceanQuality = oq == "low" ? 0 : oq == "high" ? 2 : 1;
+    const std::string_view ss = rs.waterSeaState->asEnum();
+    s.seaState = ss == "calm" ? 0 : ss == "moderate" ? 1 : ss == "rough" ? 2 : ss == "storm" ? 3 : -1;
+    s.windDirection = static_cast<int>(rs.waterWindDirection->asInt());
+    s.waveHeight = rs.waterWaveScale->asFloat();
     s.murkiness = rs.waterMurkiness->asFloat();
     s.reflections = rs.waterReflectionStrength->asFloat();
     const std::string_view d = rs.waterDebug->asEnum();
-    s.debug = d == "shore_field" ? 1 : d == "depth" ? 2 : d == "normals" ? 3 : d == "reflection" ? 4 : d == "foam" ? 5 : 0;
+    s.debug = d == "shore_field" ? 1 : d == "depth" ? 2 : d == "normals" ? 3 : d == "reflection" ? 4 : d == "foam" ? 5 : d == "sea_floor" ? 6 : d == "waves" ? 7 : 0;
     water_->apply(s);
 }
 

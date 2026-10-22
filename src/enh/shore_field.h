@@ -13,7 +13,9 @@
 // the top-down rasteriser, the Felzenszwalb-Huttenlocher distance transform and the blurred-gradient direction. Pure CPU
 // logic, no Vulkan, no engine access (unit tests: tests/water_tests.cpp); bake() runs on a worker thread.
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -38,6 +40,53 @@ struct Field {
     // decoded texel (tests, diagnostics): {distance, overlay height, dir x, dir z}
     std::array<float, 4> at(float x, float z) const;
 };
+
+// a top-down world grid (also enh/sea_floor)
+struct RasterGrid {
+    int width = 0, height = 0;
+    float minX = 0.0f, minZ = 0.0f, cell = 1.0f;
+    std::size_t index(int x, int z) const { return static_cast<std::size_t>(z) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x); }
+    std::size_t count() const { return static_cast<std::size_t>(width) * static_cast<std::size_t>(height); }
+};
+
+// Visits every texel centre inside the triangle's xz projection with the height there, plus the texels of its corners, so
+// slivers and small triangles still leave a mark (GD3D11 ShoreField.cpp RasterizeTopDown)
+template <typename Write>
+void rasterizeTopDown(const RasterGrid& g, const Triangle& t, Write&& write) {
+    const float ax = (t.a[0] - g.minX) / g.cell - 0.5f, az = (t.a[2] - g.minZ) / g.cell - 0.5f;
+    const float bx = (t.b[0] - g.minX) / g.cell - 0.5f, bz = (t.b[2] - g.minZ) / g.cell - 0.5f;
+    const float cx = (t.c[0] - g.minX) / g.cell - 0.5f, cz = (t.c[2] - g.minZ) / g.cell - 0.5f;
+    const auto splat = [&](float x, float z, float y) {
+        const int ix = static_cast<int>(std::lround(x));
+        const int iz = static_cast<int>(std::lround(z));
+        if (ix >= 0 && iz >= 0 && ix < g.width && iz < g.height) write(g.index(ix, iz), y);
+    };
+    splat(ax, az, t.a[1]);
+    splat(bx, bz, t.b[1]);
+    splat(cx, cz, t.c[1]);
+    const float area = (bx - ax) * (cz - az) - (bz - az) * (cx - ax);
+    if (std::abs(area) < 1e-6f) return;
+    const int x0 = std::max(0, static_cast<int>(std::ceil(std::min({ax, bx, cx}))));
+    const int x1 = std::min(g.width - 1, static_cast<int>(std::floor(std::max({ax, bx, cx}))));
+    const int z0 = std::max(0, static_cast<int>(std::ceil(std::min({az, bz, cz}))));
+    const int z1 = std::min(g.height - 1, static_cast<int>(std::floor(std::max({az, bz, cz}))));
+    const float invArea = 1.0f / area;
+    for (int z = z0; z <= z1; ++z) {
+        const float pz = static_cast<float>(z);
+        for (int x = x0; x <= x1; ++x) {
+            const float px = static_cast<float>(x);
+            const float w0 = ((cx - bx) * (pz - bz) - (cz - bz) * (px - bx)) * invArea;
+            const float w1 = ((ax - cx) * (pz - cz) - (az - cz) * (px - cx)) * invArea;
+            const float w2 = 1.0f - w0 - w1;
+            if (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f) continue;
+            write(g.index(x, z), w0 * t.a[1] + w1 * t.b[1] + w2 * t.c[1]);
+        }
+    }
+}
+
+inline constexpr float kFarSite = 1e20f;
+// in place: 0 at sites, kFarSite elsewhere -> squared distance in texels to the nearest site (Felzenszwalb-Huttenlocher)
+void squaredDistanceTransform(std::vector<float>& field, int width, int height);
 
 inline constexpr float kMaxDistance = 30000.0f;
 inline constexpr float kNoCoast = -30000.0f;

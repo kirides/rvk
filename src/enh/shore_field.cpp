@@ -4,54 +4,15 @@
 #include <cfloat>
 #include <cmath>
 #include <cstring>
+#include <execution>
 
 namespace rvk::enh::shore {
 namespace {
 
-constexpr float kFar = 1e20f;    // distance transform: not a site
+constexpr float kFar = kFarSite;  // distance transform: not a site
 constexpr int kBlurRadius = 2;   // texels; smooths the direction towards the coast
 
-struct Grid {
-    int width = 0, height = 0;
-    float minX = 0.0f, minZ = 0.0f, cell = 1.0f;
-    std::size_t index(int x, int z) const { return static_cast<std::size_t>(z) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x); }
-    std::size_t count() const { return static_cast<std::size_t>(width) * static_cast<std::size_t>(height); }
-};
-
-// Visits every texel centre inside the triangle's xz projection with the height there, plus the texels of its corners, so
-// slivers and small triangles still leave a mark (GD3D11 ShoreField.cpp RasterizeTopDown)
-template <typename Write>
-void rasterizeTopDown(const Grid& g, const Triangle& t, Write&& write) {
-    const float ax = (t.a[0] - g.minX) / g.cell - 0.5f, az = (t.a[2] - g.minZ) / g.cell - 0.5f;
-    const float bx = (t.b[0] - g.minX) / g.cell - 0.5f, bz = (t.b[2] - g.minZ) / g.cell - 0.5f;
-    const float cx = (t.c[0] - g.minX) / g.cell - 0.5f, cz = (t.c[2] - g.minZ) / g.cell - 0.5f;
-    const auto splat = [&](float x, float z, float y) {
-        const int ix = static_cast<int>(std::lround(x));
-        const int iz = static_cast<int>(std::lround(z));
-        if (ix >= 0 && iz >= 0 && ix < g.width && iz < g.height) write(g.index(ix, iz), y);
-    };
-    splat(ax, az, t.a[1]);
-    splat(bx, bz, t.b[1]);
-    splat(cx, cz, t.c[1]);
-    const float area = (bx - ax) * (cz - az) - (bz - az) * (cx - ax);
-    if (std::abs(area) < 1e-6f) return;
-    const int x0 = std::max(0, static_cast<int>(std::ceil(std::min({ax, bx, cx}))));
-    const int x1 = std::min(g.width - 1, static_cast<int>(std::floor(std::max({ax, bx, cx}))));
-    const int z0 = std::max(0, static_cast<int>(std::ceil(std::min({az, bz, cz}))));
-    const int z1 = std::min(g.height - 1, static_cast<int>(std::floor(std::max({az, bz, cz}))));
-    const float invArea = 1.0f / area;
-    for (int z = z0; z <= z1; ++z) {
-        const float pz = static_cast<float>(z);
-        for (int x = x0; x <= x1; ++x) {
-            const float px = static_cast<float>(x);
-            const float w0 = ((cx - bx) * (pz - bz) - (cz - bz) * (px - bx)) * invArea;
-            const float w1 = ((ax - cx) * (pz - cz) - (az - cz) * (px - cx)) * invArea;
-            const float w2 = 1.0f - w0 - w1;
-            if (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f) continue;
-            write(g.index(x, z), w0 * t.a[1] + w1 * t.b[1] + w2 * t.c[1]);
-        }
-    }
-}
+using Grid = RasterGrid;
 
 // Felzenszwalb-Huttenlocher squared distance transform of one row or column, in texels
 void distanceTransform1D(const float* f, float* d, int n, int* v, double* z) {
@@ -81,22 +42,24 @@ void distanceTransform1D(const float* f, float* d, int n, int* v, double* z) {
     }
 }
 
-// in place: 0 at sites, kFar elsewhere -> squared distance in texels to the nearest site
+// in place: 0 at sites, kFar elsewhere -> squared distance in texels to the nearest site; columns, then rows, each line
+// independent (in parallel)
 void distanceTransform2D(std::vector<float>& field, const Grid& g) {
     const int n = std::max(g.width, g.height);
-    std::vector<float> f(static_cast<std::size_t>(n)), d(static_cast<std::size_t>(n));
-    std::vector<int> v(static_cast<std::size_t>(n));
-    std::vector<double> z(static_cast<std::size_t>(n) + 1);
-    for (int x = 0; x < g.width; ++x) {
-        for (int iz = 0; iz < g.height; ++iz) f[static_cast<std::size_t>(iz)] = field[g.index(x, iz)];
-        distanceTransform1D(f.data(), d.data(), g.height, v.data(), z.data());
-        for (int iz = 0; iz < g.height; ++iz) field[g.index(x, iz)] = d[static_cast<std::size_t>(iz)];
-    }
-    for (int iz = 0; iz < g.height; ++iz) {
-        float* row = &field[g.index(0, iz)];
-        std::copy(row, row + g.width, f.begin());
-        distanceTransform1D(f.data(), row, g.width, v.data(), z.data());
-    }
+    const auto lines = [&](int count, int length, auto&& get, auto&& put) {
+        std::vector<int> idx(static_cast<std::size_t>(count));
+        for (int i = 0; i < count; ++i) idx[static_cast<std::size_t>(i)] = i;
+        std::for_each(std::execution::par, idx.begin(), idx.end(), [&](int line) {
+            std::vector<float> f(static_cast<std::size_t>(n)), d(static_cast<std::size_t>(n));
+            std::vector<int> v(static_cast<std::size_t>(n));
+            std::vector<double> z(static_cast<std::size_t>(n) + 1);
+            for (int i = 0; i < length; ++i) f[static_cast<std::size_t>(i)] = get(line, i);
+            distanceTransform1D(f.data(), d.data(), length, v.data(), z.data());
+            for (int i = 0; i < length; ++i) put(line, i, d[static_cast<std::size_t>(i)]);
+        });
+    };
+    lines(g.width, g.height, [&](int x, int iz) { return field[g.index(x, iz)]; }, [&](int x, int iz, float v) { field[g.index(x, iz)] = v; });
+    lines(g.height, g.width, [&](int iz, int x) { return field[g.index(x, iz)]; }, [&](int iz, int x, float v) { field[g.index(x, iz)] = v; });
 }
 
 void boxBlur(const std::vector<float>& src, std::vector<float>& dst, const Grid& g, int radius) {
@@ -119,6 +82,13 @@ void boxBlur(const std::vector<float>& src, std::vector<float>& dst, const Grid&
 }
 
 }  // namespace
+
+void squaredDistanceTransform(std::vector<float>& field, int width, int height) {
+    Grid g;
+    g.width = width;
+    g.height = height;
+    distanceTransform2D(field, g);
+}
 
 std::uint16_t floatToHalf(float f) {
     std::uint32_t x = 0;

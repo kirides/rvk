@@ -1,0 +1,32 @@
+#version 460
+// FFT ocean: the transformed fields -> displacement + derivatives of one cascade. The k-grid is centred (k = 2 pi (i - N/2)
+// / L), so each texel of the plain inverse FFT carries a (-1)^(x + z) sign. Foam: where the horizontal displacement folds
+// the surface (Jacobian J < threshold, Tessendorf 2001 sec. 4.6) foam appears; it decays over time (temporal accumulation in
+// the displacement's alpha, so foam trails behind breaking crests).
+#include "ocean_compute.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+OCEAN_WORK_A workA;
+OCEAN_WORK_B workB;
+OCEAN_DISP dispImage;
+OCEAN_DERIV derivImage;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    int n = int(pc.tile.w);
+    if (p.x >= n || p.y >= n) return;
+    float sgn = ((p.x + p.y) & 1) != 0 ? -1.0 : 1.0;
+    vec4 a = imageLoad(workA, p) * sgn;
+    vec4 b = imageLoad(workB, p) * sgn;
+    float lambda = pc.time.z;
+    float dx = a.x * lambda, dz = a.y * lambda, dy = a.z;
+    float dyx = a.w, dyz = b.x;
+    float dxx = b.y * lambda, dzz = b.z * lambda, dxz = b.w * lambda;
+    float jac = (1.0 + dxx) * (1.0 + dzz) - dxz * dxz;
+    float prev = imageLoad(dispImage, p).w;
+    if (isnan(prev) || isinf(prev)) prev = 0.0;
+    float fresh = clamp((pc.foam.y - jac) * pc.foam.z, 0.0, 1.0);
+    float foam = clamp(max(prev * exp(-pc.foam.x * pc.time.y), fresh), 0.0, 1.0);
+    imageStore(dispImage, p, vec4(dx, dy, dz, foam));
+    imageStore(derivImage, p, vec4(dyx, dyz, dxx, dzz));
+}

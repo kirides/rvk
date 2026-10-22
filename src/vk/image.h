@@ -42,6 +42,8 @@ public:
     void transition(VkCommandBuffer cmd, VkImageLayout layout, bool force = false);
     // forget the contents (next transition uses UNDEFINED as the old layout)
     void discard() { layout_ = VK_IMAGE_LAYOUT_UNDEFINED; }
+    // the caller recorded its own barriers (e.g. per mip level): the layout every subresource is in now
+    void setTrackedLayout(VkImageLayout layout) { layout_ = layout; }
 
     // view of one mip level / layer as a 2D attachment (created on demand, owned by the image)
     VkImageView attachmentView(Context& ctx, std::uint32_t mip, std::uint32_t layer);

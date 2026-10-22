@@ -4,9 +4,14 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
+#include <format>
+#include <optional>
 
 #include <spdlog/spdlog.h>
 
+#include "core/paths.h"
+#include "engine/weather.h"
 #include "shader/embedded.h"
 #include "vk/formats.h"
 #include "vk/pipeline.h"
@@ -39,6 +44,54 @@ constexpr float kWetDarkening = 0.24f;  // wet sand: x (1 - this) of the dry col
 constexpr float kGridSpacing = 25.0f;  // finest grid spacing
 constexpr int kGridLevels = 8;
 
+// the FFT ocean (docs/research/ocean.md)
+constexpr float kAutoWindAngle = 0.35f;  // rad: the prevailing wind blows from the south-west (towards +x, +z) onto the
+                                         // west beaches; water.wind_direction overrides it
+constexpr float kSwellOffset = 0.3f;     // the swell comes from a little further south than the wind sea
+constexpr float kBreakerIndex = 0.78f;   // waves break at ~0.78 x the water depth
+// the sea floor field's grid: fixed for Risen's island (the coast overlay's box -72,600 .. 36,300 x -63,800 .. 46,100 + a
+// 30,000-unit margin out to sea), so the disk cache stays valid between sessions and areas
+constexpr float kFloorMinX = -104000.0f, kFloorMinZ = -96000.0f, kFloorCell = 84.0f;
+constexpr int kFloorSize = 2048;
+constexpr std::uint64_t kFloorFrameBudget = 8u << 20;  // bytes of engine geometry read per frame
+constexpr std::size_t kFloorMaxPending = 4u << 20;     // triangles waiting for the worker
+constexpr double kFloorBakeInterval = 2.0;             // s between bakes while new geometry arrives
+constexpr double kFloorSaveInterval = 20.0;            // s between cache writes
+
+seafloor::Grid floorGrid() {
+    seafloor::Grid g;
+    g.width = g.height = kFloorSize;
+    g.minX = kFloorMinX;
+    g.minZ = kFloorMinZ;
+    g.cell = kFloorCell;
+    return g;
+}
+
+std::filesystem::path floorCacheFile() { return paths::dataDir() / "cache" / "ocean" / "floor_v1.bin"; }
+
+double steadySeconds() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+std::unique_ptr<d3d9::Texture> uploadHalf4(d3d9::Device& device, int width, int height, const std::vector<std::uint16_t>& texels) {
+    d3d9::TextureDesc desc;
+    desc.width = static_cast<std::uint32_t>(width);
+    desc.height = static_cast<std::uint32_t>(height);
+    desc.levels = 1;
+    desc.format = vk::d3dfmt::A16B16G16R16F;
+    desc.pool = d3d9::POOL_MANAGED;
+    auto tex = device.createTexture(desc);
+    d3d9::Texture::Locked l;
+    if (!tex || !tex->valid() || !tex->lock(0, 0, nullptr, 0, l)) return nullptr;
+    const std::size_t row = static_cast<std::size_t>(width) * 8;
+    for (int z = 0; z < height; ++z) {
+        std::memcpy(static_cast<std::uint8_t*>(l.bits) + static_cast<std::size_t>(z) * l.rowPitch,
+                    texels.data() + static_cast<std::size_t>(z) * width * 4, row);
+    }
+    tex->unlock(0, 0);
+    return tex;
+}
+
 std::uint64_t nameHash(const char* s) {
     std::uint64_t h = 1469598103934665603ull;
     for (; *s != 0; ++s) h = (h ^ static_cast<unsigned char>(*s)) * 1099511628211ull;
@@ -51,6 +104,9 @@ std::uint32_t w0(const d3d9::Texture* t) { return t != nullptr ? t->bindlessSlot
 }  // namespace
 
 Water::Water(d3d9::Device& device) : dev_(device) {
+    // the FFT ocean's compute pipelines exist from the start too (its tiles are created when it is first wanted)
+    ocean_ = std::make_unique<Ocean>(device);
+    floor_ = std::make_shared<FloorState>();
     // the shaders exist from the start, so their pipelines are built in the background at the session's first water draw
     // (also with the feature off): turning it on later costs no frame
     if (ensureShaders()) dev_.registerReplacement(oceanVs_, ps_, true);
@@ -61,9 +117,15 @@ Water::Water(d3d9::Device& device) : dev_(device) {
 Water::~Water() {
     dev_.setDrawReplacer(nullptr);
     if (wetPassId_ != 0) dev_.removePass(wetPassId_);
+    if (oceanPassId_ != 0) dev_.removePass(oceanPassId_);
     destroyWetPipeline();
     if (bake_.valid()) bake_.wait();
+    if (floorBake_.valid()) floorBake_.wait();
+    saveFloor();
     if (field_) dev_.release(std::move(field_));
+    if (floorA_) dev_.release(std::move(floorA_));
+    if (floorB_) dev_.release(std::move(floorB_));
+    ocean_.reset();
     destroyShaders();
 }
 
@@ -124,10 +186,16 @@ void Water::apply(const Settings& s) {
         dev_.setDrawReplacer(nullptr);
     }
     updateWetPass();
-    spdlog::info("enh: water: {} (quality {}, reflections {}, ocean waves {}, wave height {:.2f}, murkiness {:.2f}, reflection "
-                 "strength {:.2f}, debug {})",
-                 s.enabled ? "on" : "off", s.quality, s.ssr ? "ssr" : "sky cube", s.oceanWaves, s.waveHeight, s.murkiness, s.reflections,
-                 s.debug);
+    if (ocean_) {
+        if (fftWanted()) ocean_->setQuality(s.oceanQuality);
+        else ocean_->release();  // no GPU memory for tiles nobody samples
+    }
+    updateOceanPass();
+    static constexpr const char* kOcean[3] = {"off", "gerstner", "fft"};
+    spdlog::info("enh: water: {} (quality {}, reflections {}, ocean {} (quality {}, sea state {}, wind {}), wave scale {:.2f}, murkiness "
+                 "{:.2f}, reflection strength {:.2f}, debug {})",
+                 s.enabled ? "on" : "off", s.quality, s.ssr ? "ssr" : "sky cube", kOcean[std::clamp(s.ocean, 0, 2)], s.oceanQuality,
+                 s.seaState, s.windDirection, s.waveHeight, s.murkiness, s.reflections, s.debug);
 }
 
 bool Water::worldRows(d3d9::Device& device, const d3d9::ReplaceQuery& q, float rows[3][4]) const {
@@ -170,7 +238,11 @@ const Water::Body& Water::body(d3d9::Device& device, const d3d9::ReplaceQuery& q
             b.sea = std::max(b.extentX, b.extentZ) >= kSeaExtent && (hi[1] - lo[1]) <= kFlatSlack;
             fallCentre_[0] = 0.5f * (lo[0] + hi[0]);
             fallCentre_[1] = 0.5f * (lo[2] + hi[2]);
-            if (b.sea) measureMapping(q, rows, data.data(), count, b);
+            if (b.sea) {
+                measureMapping(q, rows, data.data(), count, b);
+                seaLevel_ = b.level;
+                seaKnown_ = true;
+            }
         }
     }
     const char* name = q.tag->materialName != nullptr ? q.tag->materialName : "?";
@@ -294,6 +366,8 @@ void Water::serviceBake(d3d9::Device& device) {
     if (bake_.valid() && bake_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
         shore::Field f = bake_.get();
         if (f.valid()) {
+            overlayField_ = f;  // the floor field records the distance to the overlay (beaches) too
+            floorDirty_ = true;
             d3d9::TextureDesc desc;
             desc.width = static_cast<std::uint32_t>(f.width);
             desc.height = static_cast<std::uint32_t>(f.height);
@@ -399,7 +473,7 @@ VkDeviceAddress Water::fillBlock(d3d9::Device& device, const d3d9::ReplaceQuery&
     if (q.blended && !grid) flags |= 4u;                           // WATER_BLENDED
     if (grid && device.vsConstant(11)[1] < b.level) flags |= 16u;  // the camera is under the sea's surface
     w.res[2] = flags;
-    w.res[3] = static_cast<std::uint32_t>(std::clamp(settings_.debug, 0, 5));
+    w.res[3] = static_cast<std::uint32_t>(std::clamp(settings_.debug, 0, 7));
     w.res2[0] = static_cast<std::uint32_t>(model);
     w.res2[1] = settings_.ssr ? kSsrSteps[quality] : 0;
     w.res2[2] = w.tex[1];  // the refraction copy (s1 of every water shader)
@@ -435,8 +509,265 @@ VkDeviceAddress Water::fillBlock(d3d9::Device& device, const d3d9::ReplaceQuery&
         }
         w.lightInfo[0] = n;
     }
+    // the FFT ocean (its tiles were simulated at AfterOpaque this frame) and the sea floor field
+    if (grid && fftWanted() && ocean_ && ocean_->ready()) {
+        const ocean::Cascades& cs = ocean_->cascades();
+        const float peak = ocean_->peakWavelength();
+        for (int c = 0; c < 4; ++c) {
+            if (c >= cs.count) continue;
+            const ocean::Cascade& cc = cs.c[static_cast<std::size_t>(c)];
+            w.fftLength[c] = cc.length * ocean::kUnitsPerMetre;
+            w.fftDisp[c] = ocean_->dispSlot(c);
+            w.fftDeriv[c] = ocean_->derivSlot(c);
+            w.fftSlopeVar[c] = cc.slopeVar;
+            // the band's typical wave length: the wind sea's peak when it lies inside the band, else the nearest edge
+            const float shortest = 2.0f * static_cast<float>(ocean::kPi) / std::min(cc.kHigh, 1e6f);
+            const float longest = cc.kLow > 0.0f ? 2.0f * static_cast<float>(ocean::kPi) / cc.kLow : cc.length;
+            w.fftBand[c] = std::clamp(peak, shortest, longest) * ocean::kUnitsPerMetre;
+        }
+        w.fftInfo[0] = 1;
+        w.fftInfo[1] = static_cast<std::uint32_t>(cs.count);
+        w.fftInfo[2] = ocean_->sampler();
+        w.fftInfo[3] = static_cast<std::uint32_t>(cs.size);
+        w.seaInfo[0] = ocean_->significantHeight() * ocean::kUnitsPerMetre;
+        w.seaInfo[1] = peak * ocean::kUnitsPerMetre;
+        w.seaInfo[2] = ocean_->sea().windAngle;
+        w.seaInfo[3] = seaLevelState_;
+        // the waves rolling in: their period grows with the sea, their height follows Hs (the floor field attenuates them)
+        w.shoreWave[0] = 6.0f + 1.5f * seaLevelState_;
+        w.shoreWave[1] = std::clamp(0.45f * w.seaInfo[0], 25.0f, 160.0f) * std::min(std::max(settings_.waveHeight, 0.0f), 1.0f);
+        w.shoreWave[2] = kBreakerIndex;
+        w.misc[0] = kNearCap;
+        if (floorA_ && floorB_) {
+            for (int i = 0; i < 4; ++i) w.floorMap[i] = floorMapping_[static_cast<std::size_t>(i)];
+            w.floorTex[0] = floorA_->bindlessSlot();
+            w.floorTex[1] = floorB_->bindlessSlot();
+            w.floorTex[2] = 1;
+            sampled[5] = floorA_.get();
+            sampled[6] = floorB_.get();
+        }
+    }
     std::memcpy(a.ptr, &w, sizeof(w));
     return a.address;
+}
+
+// ---- the FFT ocean: simulation pass, sea state ------------------------------------------------------------------------------
+
+void Water::updateOceanPass() {
+    const bool want = fftWanted() && ocean_ && !ocean_->failed();
+    if (want && oceanPassId_ == 0) {
+        oceanPassId_ = dev_.addPass(d3d9::inject::Point::AfterOpaque, "water.ocean", [this](d3d9::PassContext& ctx) { recordOcean(ctx); },
+                                    this, -10);
+    } else if (!want && oceanPassId_ != 0) {
+        dev_.removePass(oceanPassId_);
+        oceanPassId_ = 0;
+    }
+}
+
+void Water::updateSea(double seconds) {
+    float target = 1.0f;
+    if (settings_.seaState >= 0) {
+        target = static_cast<float>(settings_.seaState);
+    } else {
+        if (seconds - lastWeatherRead_ > 0.5) {
+            lastWeatherRead_ = seconds;
+            const std::vector<engine::WeatherState> states = engine::weatherStates();
+            if (const std::optional<float> lvl = engine::seaLevelOfWeather(states)) {
+                if (!haveWeather_ || std::abs(*lvl - weatherLevel_) > 0.2f || !loggedWeather_) {
+                    std::string list;
+                    for (const auto& st : states) {
+                        if (st.weight > 1e-3f) list += std::format("{} {:.2f}, ", st.name, st.weight);
+                    }
+                    spdlog::info("enh: ocean: weather {}-> sea state {:.2f}", list, *lvl);
+                    loggedWeather_ = true;
+                }
+                weatherLevel_ = *lvl;
+                haveWeather_ = true;
+            }
+        }
+        target = haveWeather_ ? weatherLevel_ : 1.0f;
+    }
+    const double dt = lastSeaSeconds_ < 0.0 ? 0.0 : std::clamp(seconds - lastSeaSeconds_, 0.0, 1.0);
+    lastSeaSeconds_ = seconds;
+    if (!haveSeaLevel_) {
+        seaLevelState_ = target;
+        haveSeaLevel_ = true;
+    } else {
+        // the sea follows the weather over a few seconds (waves grow as the storm comes)
+        seaLevelState_ += (target - seaLevelState_) * static_cast<float>(1.0 - std::exp(-dt / 3.0));
+    }
+    const float level = std::round(seaLevelState_ * 20.0f) / 20.0f;  // the spectrum is re-evaluated in steps
+    ocean::SeaState s = ocean::seaStateForLevel(level);
+    s.windAngle = settings_.windDirection >= 0 ? static_cast<float>(settings_.windDirection) * static_cast<float>(ocean::kPi) / 180.0f
+                                               : kAutoWindAngle;
+    s.swellAngle = s.windAngle + kSwellOffset;
+    s.scale = std::max(settings_.waveHeight, 0.0f);
+    ocean_->setSea(s);
+}
+
+void Water::recordOcean(d3d9::PassContext& ctx) {
+    if (ctx.mainView != 1 || !fftWanted() || !ocean_ || ocean_->failed()) return;
+    serviceFloor(dev_);
+    const std::uint64_t frame = dev_.stats().frames;
+    // only while the sea is seen (it was drawn lately, or it is known and the tiles are not filled yet)
+    if (!seaKnown_ || (ocean_->ready() && (lastGridFrame_ == 0 || frame > lastGridFrame_ + 30))) return;
+    const double seconds = dev_.secondsSinceCreate();
+    updateSea(seconds);
+    ocean_->record(ctx.cmd, ctx.frameBlock, seconds);
+    lastSimFrame_ = frame;
+}
+
+// ---- the sea floor field ----------------------------------------------------------------------------------------------------
+
+bool Water::wantsOpaque() const { return fftWanted() && settings_.oceanWaves && floorPending_.size() < kFloorMaxPending; }
+
+void Water::observeOpaque(d3d9::Device& device, const d3d9::ReplaceQuery& q) {
+    if (q.vertexBuffer == nullptr || q.indexBuffer == nullptr || q.decl == nullptr || q.instanced || q.vertexStride < 12 ||
+        q.primitives == 0 || (q.primitiveType != 4 && q.primitiveType != 5)) {
+        return;
+    }
+    const d3d9::VertexElement* pos = nullptr;
+    for (const d3d9::VertexElement& e : q.decl->elements()) {
+        if (e.stream != 0) continue;
+        if (e.usage == 2) return;                        // BLENDINDICES: skinned
+        if (e.usage == 5 && e.usageIndex == 4) return;  // TEXCOORD4: the engine's instance index (constant instancing)
+        if (e.usage == 0 && e.usageIndex == 0 && e.type == 2) pos = &e;
+    }
+    if (pos == nullptr) return;
+    float rows[3][4];
+    if (!worldRows(device, q, rows)) return;
+    // one entry per mesh range and placement
+    std::uint64_t key = 1469598103934665603ull;
+    const auto mix = [&key](const void* p, std::size_t n) {
+        const auto* b = static_cast<const std::uint8_t*>(p);
+        for (std::size_t i = 0; i < n; ++i) key = (key ^ b[i]) * 1099511628211ull;
+    };
+    const std::uint64_t ids[2] = {q.vertexBuffer->ref().id, q.indexBuffer->ref().id};
+    const std::uint32_t range[4] = {q.first, q.primitives, static_cast<std::uint32_t>(q.baseVertex), q.vertexOffset};
+    mix(ids, sizeof(ids));
+    mix(range, sizeof(range));
+    mix(rows, sizeof(rows));
+    if (floorMeshes_.contains(key)) return;
+    const std::uint64_t frame = device.stats().frames;
+    if (frame != floorFrame_) {
+        floorFrame_ = frame;
+        floorFrameBytes_ = 0;
+    }
+    if (floorFrameBytes_ > kFloorFrameBudget) return;  // next frame (it is drawn again)
+    const std::uint32_t isize = q.indexBuffer->index32() ? 4u : 2u;
+    const std::uint32_t icount = q.primitiveType == 4 ? q.primitives * 3 : q.primitives + 2;
+    std::vector<std::uint8_t> idata(static_cast<std::size_t>(icount) * isize);
+    if (!q.indexBuffer->readCpu(q.first * isize, icount * isize, idata.data())) return;
+    std::vector<std::uint32_t> idx(icount);
+    std::uint32_t lo = 0xffffffffu, hi = 0;
+    for (std::uint32_t i = 0; i < icount; ++i) {
+        std::uint32_t v = 0;
+        if (isize == 4) std::memcpy(&v, idata.data() + static_cast<std::size_t>(i) * 4, 4);
+        else {
+            std::uint16_t v16 = 0;
+            std::memcpy(&v16, idata.data() + static_cast<std::size_t>(i) * 2, 2);
+            v = v16;
+        }
+        const std::int64_t vv = static_cast<std::int64_t>(v) + q.baseVertex;
+        if (vv < 0) return;
+        idx[i] = static_cast<std::uint32_t>(vv);
+        lo = std::min(lo, idx[i]);
+        hi = std::max(hi, idx[i]);
+    }
+    const std::uint32_t stride = q.vertexStride;
+    const std::uint64_t vbytes = static_cast<std::uint64_t>(hi - lo + 1) * stride;
+    if (vbytes > (64u << 20)) return;
+    std::vector<std::uint8_t> vdata(static_cast<std::size_t>(vbytes));
+    if (!q.vertexBuffer->readCpu(q.vertexOffset + lo * stride, static_cast<std::uint32_t>(vbytes), vdata.data())) return;
+    floorMeshes_.insert(key);
+    floorFrameBytes_ += vbytes + idata.size();
+    const seafloor::Grid g = floorGrid();
+    const float gx1 = g.minX + static_cast<float>(g.width) * g.cell, gz1 = g.minZ + static_cast<float>(g.height) * g.cell;
+    const auto world = [&](std::uint32_t v, float out[3]) {
+        float p[3];
+        std::memcpy(p, vdata.data() + static_cast<std::size_t>(v - lo) * stride + pos->offset, 12);
+        for (int r = 0; r < 3; ++r) out[r] = rows[r][0] * p[0] + rows[r][1] * p[1] + rows[r][2] * p[2] + rows[r][3];
+    };
+    std::size_t added = 0;
+    const std::uint32_t tris = q.primitiveType == 4 ? icount / 3 : icount - 2;
+    for (std::uint32_t t = 0; t < tris; ++t) {
+        std::uint32_t a, b, c;
+        if (q.primitiveType == 4) {
+            a = idx[t * 3];
+            b = idx[t * 3 + 1];
+            c = idx[t * 3 + 2];
+        } else {
+            a = idx[t];
+            b = idx[t + 1];
+            c = idx[t + 2];
+            if (a == b || b == c || a == c) continue;  // strip restarts (degenerate)
+        }
+        shore::Triangle tri;
+        world(a, tri.a);
+        world(b, tri.b);
+        world(c, tri.c);
+        const float minX = std::min({tri.a[0], tri.b[0], tri.c[0]}), maxX = std::max({tri.a[0], tri.b[0], tri.c[0]});
+        const float minZ = std::min({tri.a[2], tri.b[2], tri.c[2]}), maxZ = std::max({tri.a[2], tri.b[2], tri.c[2]});
+        if (maxX < g.minX || maxZ < g.minZ || minX > gx1 || minZ > gz1) continue;
+        floorPending_.push_back(tri);
+        ++added;
+    }
+    ++floorMeshCount_;
+    if (added > 0) floorDirty_ = true;
+}
+
+void Water::serviceFloor(d3d9::Device& device) {
+    if (floorBake_.valid() && floorBake_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        seafloor::Field f = floorBake_.get();
+        if (f.valid()) {
+            auto a = uploadHalf4(device, f.grid.width, f.grid.height, f.a);
+            auto b = uploadHalf4(device, f.grid.width, f.grid.height, f.b);
+            if (a && b) {
+                if (floorA_) device.release(std::move(floorA_));
+                if (floorB_) device.release(std::move(floorB_));
+                floorA_ = std::move(a);
+                floorB_ = std::move(b);
+                floorMapping_ = f.grid.mapping();
+            }
+            spdlog::info("enh: ocean: sea floor field {}x{} of {:.0f} units: {} texels seen ({} land, {} water), max travel time {:.1f} s, "
+                         "{} meshes observed, {:.0f} ms (bake: distance {:.0f}, travel time {:.0f}, exposure {:.0f}, pack {:.0f} ms)",
+                         f.grid.width, f.grid.height, f.grid.cell, f.knownTexels, f.landTexels, f.waterTexels, f.maxTravel, floorMeshCount_,
+                         (steadySeconds() - lastFloorBake_) * 1000.0, f.msDistance, f.msTravel, f.msExposure, f.msPack);
+        }
+    }
+    const double now = steadySeconds();
+    if (floorBake_.valid() || !seaKnown_ || !floorDirty_ || now - lastFloorBake_ < kFloorBakeInterval) return;
+    floorDirty_ = false;
+    lastFloorBake_ = now;
+    std::vector<shore::Triangle> tris;
+    tris.swap(floorPending_);
+    floorBake_ = std::async(std::launch::async, [st = floor_, tris = std::move(tris), level = seaLevel_, overlay = overlayField_]() {
+        if (!st->loaded) {
+            st->heights.reset(floorGrid());
+            const bool cached = st->heights.load(floorCacheFile());
+            st->loaded = true;
+            st->lastSave = steadySeconds();
+            spdlog::info("enh: ocean: sea floor cache {}: {}", floorCacheFile().string(),
+                         cached ? std::format("{} texels known", st->heights.known()) : std::string("none yet"));
+        }
+        st->heights.add(tris);
+        st->unsaved += tris.size();
+        seafloor::Field f = seafloor::bake(st->heights, level, overlay);
+        if (st->unsaved > 0 && steadySeconds() - st->lastSave > kFloorSaveInterval) {
+            if (st->heights.save(floorCacheFile())) st->unsaved = 0;
+            st->lastSave = steadySeconds();
+        }
+        return f;
+    });
+}
+
+void Water::saveFloor() {
+    if (floor_ && floor_->loaded && floor_->unsaved > 0) {
+        if (floor_->heights.save(floorCacheFile())) {
+            spdlog::info("enh: ocean: sea floor cache saved ({} texels known)", floor_->heights.known());
+            floor_->unsaved = 0;
+        }
+    }
 }
 
 void Water::replace(d3d9::Device& device, const d3d9::ReplaceQuery& q, DrawReplacement& out) {

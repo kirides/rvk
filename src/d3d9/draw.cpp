@@ -485,10 +485,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         logWaterDraw(kind);
     }
     // draw replacement (enh/water, docs/research/water.md): the replacer decides before anything is recorded
-    DrawReplacement rep;
-    if (replacer_ != nullptr && (tag_.water != draws::Water::None || kind == draws::Kind::Refracted) &&
-        phase.view == scene::View::Main) {
-        ReplaceQuery q;
+    const auto query = [&](ReplaceQuery& q) {
         q.kind = kind;
         q.phase = phase;
         q.tag = &tag_;
@@ -498,6 +495,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         q.vertexStride = streams_[0].stride;
         q.indexBuffer = geom.indexed && !geom.userPointer ? indices_ : nullptr;
         q.indexed = geom.indexed;
+        q.primitiveType = primitiveType;
         q.first = geom.first;
         q.primitives = geom.primitives;
         q.baseVertex = geom.baseVertex;
@@ -508,6 +506,18 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         q.engineVsRef = vs_;
         q.decl = decl_;
         q.blended = rs_[RS_ALPHABLENDENABLE] != 0 && rs_[RS_SRCBLEND] == BLEND_SRCALPHA && rs_[RS_DESTBLEND] == BLEND_INVSRCALPHA;
+    };
+    if (replacer_ != nullptr && kind == draws::Kind::StaticMesh && phase.view == scene::View::Main && phase.pass == scene::Pass::Solid &&
+        geom.indexed && !geom.userPointer && replacer_->wantsOpaque()) {
+        ReplaceQuery q;
+        query(q);
+        replacer_->observeOpaque(*this, q);
+    }
+    DrawReplacement rep;
+    if (replacer_ != nullptr && (tag_.water != draws::Water::None || kind == draws::Kind::Refracted) &&
+        phase.view == scene::View::Main) {
+        ReplaceQuery q;
+        query(q);
         replacer_->replace(*this, q, rep);
         if ((rep.action == DrawReplacement::Action::Shaders || rep.action == DrawReplacement::Action::Procedural) &&
             (!rep.vs || !rep.ps || rep.vs->module == VK_NULL_HANDLE || rep.ps->module == VK_NULL_HANDLE)) {

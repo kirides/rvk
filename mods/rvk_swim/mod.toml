@@ -1,0 +1,6 @@
+id          = "rvk_swim"
+name        = "Renderer sea swim check"
+version     = "1.0.0"
+author      = "risen-enhanced-graphics"
+description = "Puts the hero into the open sea off the opening beach and takes pictures of him swimming with the game's own follow camera and from a fixed camera at the water: the FFT ocean's displacement cap near the camera / player (scenario rvk_swim, docs/research/ocean.md)."
+main        = "main.lua"

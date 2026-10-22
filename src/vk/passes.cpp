@@ -87,13 +87,31 @@ void PassLayout::pushStorageImage(VkCommandBuffer cmd, VkPipelineBindPoint bindP
     vkCmdPushDescriptorSetKHR(cmd, bindPoint, layout_, 1, 1, &w);
 }
 
+void PassLayout::pushStorageImages(VkCommandBuffer cmd, VkPipelineBindPoint bindPoint, std::span<const VkImageView> views) const {
+    VkDescriptorImageInfo ii[8]{};
+    VkWriteDescriptorSet w[8]{};
+    std::uint32_t n = 0;
+    for (std::size_t i = 0; i < views.size() && i < 8; ++i) {
+        if (views[i] == VK_NULL_HANDLE) continue;
+        ii[n] = {VK_NULL_HANDLE, views[i], VK_IMAGE_LAYOUT_GENERAL};
+        w[n] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w[n].dstBinding = static_cast<std::uint32_t>(i);
+        w[n].descriptorCount = 1;
+        w[n].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w[n].pImageInfo = &ii[n];
+        ++n;
+    }
+    if (n > 0) vkCmdPushDescriptorSetKHR(cmd, bindPoint, layout_, 1, n, w);
+}
+
 void PassLayout::push(VkCommandBuffer cmd, const void* data, std::uint32_t size) const {
     vkCmdPushConstants(cmd, layout_, kPassStages, 0, size, data);
 }
 
 // ---- pipelines -------------------------------------------------------------------------------------------------------------
 
-VkPipeline createComputePipeline(Context& ctx, VkPipelineLayout layout, std::span<const std::uint32_t> spirv, const char* name) {
+VkPipeline createComputePipeline(Context& ctx, VkPipelineLayout layout, std::span<const std::uint32_t> spirv, const char* name,
+                                 const VkSpecializationInfo* spec) {
     const VkShaderModule m = module(ctx, spirv);
     if (m == VK_NULL_HANDLE) {
         spdlog::error("vulkan: compute pass {}: no shader", name != nullptr ? name : "?");
@@ -104,6 +122,7 @@ VkPipeline createComputePipeline(Context& ctx, VkPipelineLayout layout, std::spa
     ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
     ci.stage.module = m;
     ci.stage.pName = "main";
+    ci.stage.pSpecializationInfo = spec;
     ci.layout = layout;
     VkPipeline p = VK_NULL_HANDLE;
     if (const VkResult r = vkCreateComputePipelines(ctx.device(), VK_NULL_HANDLE, 1, &ci, nullptr, &p); r != VK_SUCCESS) {

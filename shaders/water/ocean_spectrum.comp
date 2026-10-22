@@ -1,0 +1,14 @@
+#version 460
+// FFT ocean: the initial spectrum of one cascade (Tessendorf's h0(k) and conj(h0(-k))), re-run when the sea state changes
+#include "ocean_compute.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+OCEAN_H0 h0Image;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    int n = int(pc.tile.w);
+    if (p.x >= n || p.y >= n) return;
+    ivec2 m = (ivec2(n) - p) % n;  // the texel of -k
+    imageStore(h0Image, p, vec4(oceanH0(p), cconj(oceanH0(m))));
+}

@@ -1,0 +1,40 @@
+#version 460
+// FFT ocean: h(k, t) = h0(k) e^{i w t} + conj(h0(-k)) e^{-i w t} and the spectra of the displacement and its derivatives,
+// packed as four complex fields whose inverse transforms are real (two real fields per complex FFT):
+//   A.xy = Dx + i Dz        (Dx = -i kx / k h, Dz = -i kz / k h)
+//   A.zw = Dy + i dDy/dx    (Dy = h, dDy/dx = i kx h)
+//   B.xy = dDy/dz + i dDx/dx  (i kz h, kx^2 / k h)
+//   B.zw = dDz/dz + i dDx/dz  (kz^2 / k h, kx kz / k h)
+#include "ocean_compute.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+OCEAN_H0 h0Image;
+OCEAN_WORK_A workA;
+OCEAN_WORK_B workB;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    int n = int(pc.tile.w);
+    if (p.x >= n || p.y >= n) return;
+    vec2 kv = oceanWaveVector(p);
+    float k = length(kv);
+    if (k < 1e-6) {
+        imageStore(workA, p, vec4(0.0));
+        imageStore(workB, p, vec4(0.0));
+        return;
+    }
+    vec4 h0 = imageLoad(h0Image, p);
+    float ph = oceanDispersion(k) * pc.time.x;
+    vec2 e = vec2(cos(ph), sin(ph));
+    vec2 h = cmul(h0.xy, e) + cmul(h0.zw, cconj(e));
+    vec2 ih = ci(h);
+    vec2 dx = -ih * (kv.x / k);
+    vec2 dz = -ih * (kv.y / k);
+    vec2 dyx = ih * kv.x;
+    vec2 dyz = ih * kv.y;
+    vec2 dxx = h * (kv.x * kv.x / k);
+    vec2 dzz = h * (kv.y * kv.y / k);
+    vec2 dxz = h * (kv.x * kv.y / k);
+    imageStore(workA, p, vec4(dx + ci(dz), h + ci(dyx)));
+    imageStore(workB, p, vec4(dyz + ci(dxx), dzz + ci(dxz)));
+}

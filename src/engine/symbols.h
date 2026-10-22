@@ -116,7 +116,19 @@
     /* SharedBase.dll bCString(char const*), ~bCString(), char const* GetText() const */                                       \
     X(stringCtor, L"SharedBase.dll", "??0bCString@@QEAA@PEBD@Z", false)                                                         \
     X(stringDtor, L"SharedBase.dll", "??1bCString@@QEAA@XZ", false)                                                             \
-    X(stringGetText, L"SharedBase.dll", "?GetText@bCString@@QEBAPEBDXZ", false)
+    X(stringGetText, L"SharedBase.dll", "?GetText@bCString@@QEBAPEBDXZ", false)                                                   \
+    /* the weather (engine/weather.h, docs/research/ocean.md 6): eCModuleAdmin& eCModuleAdmin::GetInstance(),                     \
+       eCEngineComponentBase* eCModuleAdmin::FindModule(bCString const&) const; the eCWeatherAdmin vtable (the module found       \
+       by class name is checked against it); int eCWeatherAdmin::GetWeatherStatesCount() const, eCWeatherStates*                  \
+       eCWeatherAdmin::GetWeatherStatesAt(int) const; bCString const& eCWeatherStates::GetName() const, float                     \
+       eCWeatherStates::GetBlendFactor() const (the weight of the state in the current blend; risen-spass reads the same) */      \
+    X(moduleAdminGetInstance, L"Engine.dll", "?GetInstance@eCModuleAdmin@@SAAEAV1@XZ", false)                                     \
+    X(moduleAdminFindModule, L"Engine.dll", "?FindModule@eCModuleAdmin@@QEBAPEAVeCEngineComponentBase@@AEBVbCString@@@Z", false)  \
+    X(weatherAdminVftable, L"Engine.dll", "??_7eCWeatherAdmin@@6B@", false)                                                       \
+    X(weatherStatesCount, L"Engine.dll", "?GetWeatherStatesCount@eCWeatherAdmin@@QEBAHXZ", false)                                 \
+    X(weatherStatesAt, L"Engine.dll", "?GetWeatherStatesAt@eCWeatherAdmin@@QEBAPEAVeCWeatherStates@@H@Z", false)                  \
+    X(weatherStateName, L"Engine.dll", "?GetName@eCWeatherStates@@QEBAAEBVbCString@@XZ", false)                                   \
+    X(weatherStateBlend, L"Engine.dll", "?GetBlendFactor@eCWeatherStates@@QEBAMXZ", false)
 
 namespace rvk::engine {
 

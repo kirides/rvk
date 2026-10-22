@@ -24,6 +24,8 @@
 #include <vector>
 
 #include "d3d9/device.h"
+#include "enh/ocean.h"
+#include "enh/sea_floor.h"
 #include "enh/shore_field.h"
 #include "enh/water_profile.h"
 #include "shader/abi.h"
@@ -69,8 +71,19 @@ struct WaterBlock {
     float falls[4][4];
     float lights[12][4];
     std::uint32_t lightInfo[4];
+    // the FFT ocean (enh/ocean.h) and the sea floor field (enh/sea_floor.h)
+    float fftLength[4];      // cascade tile sizes, world units (0 = none)
+    std::uint32_t fftDisp[4];   // bindless slots: displacement (dx, dy, dz m, foam)
+    std::uint32_t fftDeriv[4];  // derivatives (d dy/dx, d dy/dz, d dx/dx, d dz/dz)
+    float fftSlopeVar[4];    // slope variance of each cascade's band
+    float fftBand[4];        // representative wavelength of each cascade (world units: attenuation)
+    std::uint32_t fftInfo[4];   // x mode (0 Gerstner, 1 FFT), y cascades, z sampler slot, w N
+    float seaInfo[4];        // x Hs (world units), y wind-sea peak wavelength (world units), z wind angle, w sea-state level
+    float floorMap[4];       // floor field: xy corner (world xz), zw 1 / extent
+    std::uint32_t floorTex[4];  // x field A, y field B (bindless), z valid
+    float shoreWave[4];      // x period (s), y amplitude (world units), z breaker index, w unused
 };
-static_assert(sizeof(WaterBlock) == 192 + 57 * 16);
+static_assert(sizeof(WaterBlock) == 192 + 67 * 16);
 
 // mirror of shaders/water/wet_shore.frag WetPush
 struct WetShorePush {
@@ -89,10 +102,14 @@ public:
         int quality = 1;           // 0 low, 1 medium, 2 high
         bool ssr = true;           // water.reflections: ssr (else the sky cube only)
         bool oceanWaves = true;    // the wave grid for the open sea + lower coast (else the sea is shaded on its own mesh)
-        float waveHeight = 1.0f;   // multiplier
+        int ocean = 2;             // water.ocean: 0 off (= !oceanWaves), 1 Gerstner (M7), 2 FFT
+        int oceanQuality = 1;      // water.ocean_quality: 0 low, 1 medium, 2 high (FFT tiles)
+        int seaState = -1;         // water.sea_state: -1 from the weather, 0 calm .. 3 storm
+        int windDirection = -1;    // water.wind_direction: degrees, -1 = the prevailing wind
+        float waveHeight = 1.0f;   // water.wave_scale: multiplier
         float murkiness = 1.0f;    // multiplier on the absorption
         float reflections = 1.0f;  // multiplier on reflectivity + glint
-        int debug = 0;             // water.debug: 0 off, 1 shore field, 2 depth, 3 normals, 4 reflection, 5 foam
+        int debug = 0;             // water.debug: 0 off, 1 shore field, 2 depth, 3 normals, 4 reflection, 5 foam, 6 sea floor, 7 waves
     };
 
     explicit Water(d3d9::Device& device);
@@ -105,6 +122,9 @@ public:
     const Settings& settings() const { return settings_; }
 
     void replace(d3d9::Device& device, const d3d9::ReplaceQuery& q, d3d9::DrawReplacement& out) override;
+    // the sea floor field: the main view's static meshes are rasterised top-down (once per mesh and placement)
+    bool wantsOpaque() const override;
+    void observeOpaque(d3d9::Device& device, const d3d9::ReplaceQuery& q) override;
 
 private:
     struct Body {
@@ -134,6 +154,13 @@ private:
     VkDeviceAddress fillBlock(d3d9::Device& device, const d3d9::ReplaceQuery& q, d3d9::draws::Water kind, WaterModel model, bool grid,
                               const Body& b, std::array<d3d9::Texture*, 16>& sampled);
     void measureMapping(const d3d9::ReplaceQuery& q, const float rows[3][4], const std::uint8_t* data, std::uint32_t count, Body& b);
+    // the FFT ocean: its simulation pass (AfterOpaque), the sea state (setting or weather), the sea floor field
+    bool fftWanted() const { return settings_.enabled && settings_.ocean == 2 && !failed_; }
+    void updateOceanPass();
+    void recordOcean(d3d9::PassContext& ctx);
+    void updateSea(double seconds);
+    void serviceFloor(d3d9::Device& device);
+    void saveFloor();
 
     d3d9::Device& dev_;
     Settings settings_;
@@ -161,11 +188,38 @@ private:
     VkFormat wetFormat_ = VK_FORMAT_UNDEFINED;
     bool wetFailed_ = false;
     float seaLevel_ = 0.0f;
+    bool seaKnown_ = false;  // the sea plane was measured (seaLevel_ is its height)
     std::uint64_t lastGridFrame_ = 0;      // device frame of the last sea grid (0 = none yet)
     std::uint64_t wetFrames_ = 0;
     std::uint64_t gridFrame_ = ~0ull;      // device frame whose sea grid was drawn
     std::uint32_t gridMainView_ = 0;
     std::uint64_t replacedDraws_ = 0, skippedDraws_ = 0;
+    // the FFT ocean
+    std::unique_ptr<Ocean> ocean_;
+    std::uint32_t oceanPassId_ = 0;
+    float seaLevelState_ = 1.0f;     // smoothed sea-state level (0 calm .. 3 storm)
+    float weatherLevel_ = 1.0f;
+    bool haveSeaLevel_ = false, haveWeather_ = false, loggedWeather_ = false;
+    double lastSeaSeconds_ = -1.0, lastWeatherRead_ = -1e9;
+    std::uint64_t lastSimFrame_ = 0;
+    shore::Field overlayField_;      // the M7 shore field (the coast overlay), kept for the floor bake
+    // the sea floor field (enh/sea_floor.h): the static meshes seen (keys), triangles waiting for the worker, the heights
+    // (owned by the worker while a bake runs), the textures
+    struct FloorState {
+        seafloor::Heights heights;
+        bool loaded = false;
+        std::size_t unsaved = 0;
+        double lastSave = 0.0;
+    };
+    std::unordered_set<std::uint64_t> floorMeshes_;
+    std::vector<shore::Triangle> floorPending_;
+    std::shared_ptr<FloorState> floor_;
+    std::future<seafloor::Field> floorBake_;
+    std::unique_ptr<d3d9::Texture> floorA_, floorB_;
+    std::array<float, 4> floorMapping_{};
+    double lastFloorBake_ = -1e9;
+    std::uint64_t floorFrame_ = 0, floorFrameBytes_ = 0, floorMeshCount_ = 0;
+    bool floorDirty_ = false;
     bool loggedFirst_ = false, loggedNoInputs_ = false, prebuilt_ = false, pipelinesReady_ = false;
 };
 

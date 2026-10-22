@@ -1,0 +1,55 @@
+#version 460
+// FFT ocean: one pass of the 2D inverse FFT (rows: pc.time.w == 0, columns: 1) over both work images (4 complex fields) of
+// one cascade, in place. One workgroup per line, N / 2 threads (one butterfly each per stage), the line in shared memory:
+// load in bit-reversed order, log2(N) radix-2 stages (Cooley-Tukey, decimation in time, + sign for the inverse). The same
+// algorithm as enh::ocean::ifft1D (unit-tested against a direct DFT). Shared memory: 2 x N x 16 bytes (16 KiB at 512).
+#include "ocean_compute.glsl"
+
+layout(constant_id = 0) const int N = 256;
+layout(constant_id = 1) const int LOG2N = 8;
+layout(local_size_x_id = 2) in;  // = N / 2
+
+OCEAN_WORK_A workA;
+OCEAN_WORK_B workB;
+
+shared vec4 sa[N];
+shared vec4 sb[N];
+
+ivec2 texel(int line, int i) { return pc.time.w < 0.5 ? ivec2(i, line) : ivec2(line, i); }
+
+void main() {
+    int line = int(gl_WorkGroupID.x);
+    int t = int(gl_LocalInvocationID.x);
+    for (int j = 0; j < 2; ++j) {
+        int i = t + j * (N / 2);
+        int r = int(bitfieldReverse(uint(i)) >> uint(32 - LOG2N));
+        ivec2 p = texel(line, i);
+        sa[r] = imageLoad(workA, p);
+        sb[r] = imageLoad(workB, p);
+    }
+    barrier();
+    for (int half_ = 1; half_ < N; half_ *= 2) {
+        int group = t / half_;
+        int pos = t - group * half_;
+        int i0 = group * 2 * half_ + pos;
+        int i1 = i0 + half_;
+        float ang = OCEAN_PI * float(pos) / float(half_);
+        vec2 w = vec2(cos(ang), sin(ang));
+        vec4 a = sa[i0], b = sa[i1];
+        vec4 bw = vec4(cmul(b.xy, w), cmul(b.zw, w));
+        sa[i0] = a + bw;
+        sa[i1] = a - bw;
+        a = sb[i0];
+        b = sb[i1];
+        bw = vec4(cmul(b.xy, w), cmul(b.zw, w));
+        sb[i0] = a + bw;
+        sb[i1] = a - bw;
+        barrier();
+    }
+    for (int j = 0; j < 2; ++j) {
+        int i = t + j * (N / 2);
+        ivec2 p = texel(line, i);
+        imageStore(workA, p, sa[i]);
+        imageStore(workB, p, sb[i]);
+    }
+}

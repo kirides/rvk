@@ -47,6 +47,17 @@ layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Wa
     vec4 falls[4];    // waterfalls near the camera: xz of the base, z radius (0 = none), w height of the base (whitewater)
     vec4 lights[12];  // the engine's point lights (g_PointLights c25 + 4 i, up to 4): position + 1 / range^2, colour, shadow-mask channel
     uvec4 lightInfo;  // x point lights (0..4)
+    // the FFT ocean (src/enh/ocean.h) and the sea floor field (src/enh/sea_floor.h)
+    vec4 fftLength;   // cascade tile sizes, world units (0 = none)
+    uvec4 fftDisp;    // bindless slots: displacement (dx, dy, dz in m, foam)
+    uvec4 fftDeriv;   // derivatives (d dy/dx, d dy/dz, d dx/dx, d dz/dz)
+    vec4 fftSlopeVar; // slope variance of each cascade's band
+    vec4 fftBand;     // representative wavelength of each cascade (world units)
+    uvec4 fftInfo;    // x mode (0 Gerstner, 1 FFT), y cascades, z sampler slot, w N
+    vec4 seaInfo;     // x Hs (world units), y wind-sea peak wavelength (world units), z wind angle, w sea-state level 0..3
+    vec4 floorMap;    // floor field: xy corner (world xz), zw 1 / extent
+    uvec4 floorTex;   // x field A, y field B (bindless t2D), z valid
+    vec4 shoreWave;   // x period (s), y amplitude (world units), z breaker index, w unused
 };
 
 const uint WATER_OCEAN_GRID = 1u;  // the camera-centred ocean grid (water_ocean.vert), shore + wave effects
@@ -143,6 +154,58 @@ vec3 waterNoised(vec2 p) {
                     du * (u.yx * (va - vb - vc + vd) + vec2(vb, vc) - va));
 }
 
+// cellular noise (Worley): distances to the nearest and second-nearest feature point (cells of size 1)
+vec2 waterWorley(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    float f1 = 8.0, f2 = 8.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            vec2 g = vec2(float(x), float(y));
+            vec2 o = waterHash(i + g) * 0.45 + 0.5;
+            vec2 r = g + o - f;
+            float d = dot(r, r);
+            if (d < f1) {
+                f2 = f1;
+                f1 = d;
+            } else if (d < f2) {
+                f2 = d;
+            }
+        }
+    }
+    return sqrt(vec2(f1, f2));
+}
+
+// a foam texture (0..1): filaments of ridged noise (1 - |n|, sharpened) at three scales over a warped domain, with bubbles
+// (cellular noise) punched into them and broken into patches by smooth noise; footprint = world units per pixel: scales
+// smaller than a few pixels fade to their mean (no sparkle)
+float foamTexture(vec2 xz, float t, float footprint) {
+    vec2 warp = vec2(waterNoised(xz / 170.0 + vec2(t * 0.02, 0.0)).x, waterNoised(xz / 170.0 + vec2(5.2, 1.3 - t * 0.02)).x);
+    vec2 p = xz + warp * 60.0;
+    const vec3 SCALE = vec3(95.0, 34.0, 12.0);
+    const vec3 WEIGHT = vec3(0.5, 0.32, 0.18);
+    float e = 0.0;
+    for (int i = 0; i < 3; ++i) {
+        vec2 drift = vec2(0.021, -0.013) * t * (1.0 + 0.6 * float(i));
+        float r = 1.0 - abs(waterNoised(p / SCALE[i] + drift + float(i) * 7.31).x * 1.6);
+        r = clamp(r, 0.0, 1.0);
+        r = r * r * r;
+        float vis = smoothstep(2.5, 6.0, SCALE[i] / max(footprint, 1e-3));
+        e += WEIGHT[i] * mix(0.3, r, vis);
+    }
+    // bubbles: dark cell centres in the filaments
+    vec2 wl = waterWorley(p / 18.0 + vec2(t * 0.03, -t * 0.02));
+    float bubble = mix(1.0, smoothstep(0.05, 0.35, wl.x) * 0.5 + 0.5, smoothstep(2.5, 6.0, 18.0 / max(footprint, 1e-3)));
+    float patches = 0.5 + 0.5 * waterNoised(xz / 420.0 + vec2(t * 0.01, -t * 0.006)).x;
+    return clamp(e * bubble * 1.25 + 0.4 * (patches - 0.5), 0.0, 1.0);
+}
+
+// coverage c (0..1) of a foam texture value: a lace at low coverage, filled cells at high
+float foamCover(float tex, float c) {
+    c = clamp(c, 0.0, 1.0);
+    return smoothstep(1.0 - c, 1.0 - c + 0.3, tex) * sqrt(c);
+}
+
 // slope (d height / d x, d height / d z) of wind ripples at xz (world units), scale = world units per tile: three octaves
 // drifting with time (the sea's chop between the waves, also in calm bays where the waves are damped)
 vec2 rippleSlope(vec2 xz, float t, float scale, int octaves) {
@@ -197,3 +260,5 @@ float shoreWaveScale(WaterBlock w, float coastDist, vec2 toCoast, vec2 xz, vec3 
     float nearCam = mix(0.6, 1.0, smoothstep(500.0, 2000.0, cam));
     return w.look.w * zone * dirOk * nearCam;
 }
+
+#include "ocean_surface.glsl"

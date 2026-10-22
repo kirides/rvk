@@ -250,6 +250,7 @@ struct ReplaceQuery {
     std::uint32_t vertexOffset = 0, vertexStride = 0;
     Buffer* indexBuffer = nullptr;            // null for non-indexed draws
     bool indexed = false;
+    std::uint32_t primitiveType = 4;          // D3DPRIMITIVETYPE (4 triangle list, 5 strip, 6 fan)
     std::uint32_t first = 0, primitives = 0;  // start index / vertex, primitive count
     std::int32_t baseVertex = 0;
     bool instanced = false;                   // stream 0 frequency INDEXEDDATA
@@ -282,6 +283,10 @@ class DrawReplacer {
 public:
     virtual ~DrawReplacer() = default;
     virtual void replace(Device& device, const ReplaceQuery& query, DrawReplacement& out) = 0;
+    // the main view's opaque static meshes (Solid pass, indexed, from buffers), when wanted: an enhancement reads the
+    // engine's geometry (enh/water: the sea floor field). Called before the draw is recorded; must not change device state.
+    virtual bool wantsOpaque() const { return false; }
+    virtual void observeOpaque(Device& /*device*/, const ReplaceQuery& /*query*/) {}
 };
 
 // Drawn on top of the frame at present (the in-game overlay, src/overlay): after the back buffer was copied into the

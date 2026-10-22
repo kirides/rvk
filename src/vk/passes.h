@@ -36,6 +36,8 @@ public:
     void bindSet0(VkCommandBuffer cmd, VkPipelineBindPoint bindPoint, const Bindless& bindless) const;
     // vkCmdPushDescriptorSetKHR of set 1: storage image `view` (GENERAL layout) at `binding`
     void pushStorageImage(VkCommandBuffer cmd, VkPipelineBindPoint bindPoint, std::uint32_t binding, VkImageView view) const;
+    // one push of storage images (GENERAL layout) at bindings 0 .. views.size() - 1 (a null view is left out)
+    void pushStorageImages(VkCommandBuffer cmd, VkPipelineBindPoint bindPoint, std::span<const VkImageView> views) const;
     // vkCmdPushConstants over all stages
     void push(VkCommandBuffer cmd, const void* data, std::uint32_t size) const;
 
@@ -45,7 +47,8 @@ private:
 };
 
 // a compute pipeline from SPIR-V (null on failure, logged)
-VkPipeline createComputePipeline(Context& ctx, VkPipelineLayout layout, std::span<const std::uint32_t> spirv, const char* name);
+VkPipeline createComputePipeline(Context& ctx, VkPipelineLayout layout, std::span<const std::uint32_t> spirv, const char* name,
+                                 const VkSpecializationInfo* spec = nullptr);
 
 // a graphics pipeline for a pass without vertex input (fullscreen triangles: vkCmdDraw(3)): no depth, no culling, dynamic
 // viewport + scissor, one colour attachment of `color` with `blend`
