@@ -12,7 +12,16 @@
 namespace rvk::enh {
 
 RtDebug::Mode RtDebug::parse(std::string_view option) {
-    return option == "instances" ? Mode::Instances : option == "depth" ? Mode::Depth : option == "normals" ? Mode::Normals : Mode::Off;
+    if (option == "instances") return Mode::Instances;
+    if (option == "depth") return Mode::Depth;
+    if (option == "normals") return Mode::Normals;
+    if (option == "albedo" || option == "albedo_split" || option == "albedo_opaque") return Mode::Albedo;
+    if (option == "uv") return Mode::Uv;
+    return Mode::Off;
+}
+
+std::uint32_t RtDebug::optionFlags(std::string_view option) {
+    return option == "albedo_split" ? kRtDebugSplit : option == "albedo_opaque" ? kRtDebugOpaque : 0u;
 }
 
 RtDebug::RtDebug(d3d9::Device& device, RtScene& scene) : dev_(device), scene_(scene) {}
@@ -29,7 +38,9 @@ void RtDebug::readProbes(std::uint32_t slot) {
     vmaInvalidateAllocation(dev_.ctx().allocator(), probes_[slot].allocation, 0, VK_WHOLE_SIZE);
     const auto* r = static_cast<const RtDebugProbe*>(probes_[slot].mapped);
     const auto now = std::chrono::steady_clock::now();
-    if (now - probeLogged_ >= std::chrono::seconds(5)) {
+    // the material views every second (the probe pixels of a capture's frozen frames get logged)
+    const bool materialView = mode_ == Mode::Albedo || mode_ == Mode::Uv;
+    if (now - probeLogged_ >= std::chrono::seconds(materialView ? 1 : 5)) {
         probeLogged_ = now;
         static constexpr const char* kCodes[] = {"nothing", "match", "traced farther", "traced closer", "missed (raster has geometry)",
                                                   "hit (raster has none)"};
@@ -38,7 +49,8 @@ void RtDebug::readProbes(std::uint32_t slot) {
         spdlog::info("enh: rt.debug probes of frame {} (5 x 5 grid): {} match, {} traced farther, {} traced closer, {} missed, {} hit sky",
                      frame, counts[1], counts[2], counts[3], counts[4], counts[5]);
         for (std::uint32_t k = 0; k < kRtDebugProbes; ++k) {
-            if (r[k].code == 0 || r[k].code == 1) continue;
+            // the material views name every probe's surface
+            if (r[k].code == 0 || (r[k].code == 1 && !materialView)) continue;
             spdlog::info("enh: rt.debug   probe {},{}: {}: t {:.1f}, raster {:.1f}{}", k % 5, k / 5, kCodes[std::min<std::uint32_t>(r[k].code, 5)],
                          r[k].t, r[k].rasterT, r[k].record != 0 ? "; " + scene_.describe(frame, r[k].record - 1) : std::string());
         }
@@ -46,7 +58,8 @@ void RtDebug::readProbes(std::uint32_t slot) {
     std::memset(probes_[slot].mapped, 0, sizeof(RtDebugProbe) * kRtDebugProbes);
 }
 
-void RtDebug::setMode(Mode mode) {
+void RtDebug::setMode(Mode mode, std::uint32_t flags) {
+    flags_ = flags;
     if (mode == mode_) return;
     mode_ = mode;
     if (mode == Mode::Off) {
@@ -193,7 +206,7 @@ void RtDebug::record(d3d9::PassContext& ctx) {
     push.h.passId = 1;
     push.width = w;
     push.height = h;
-    push.mode = static_cast<std::uint32_t>(mode_);
+    push.mode = static_cast<std::uint32_t>(mode_) | flags_;
     // the raster's depth: this frame's hardware depth capture (depth mode), else the engine's linear depth map (z-pass only)
     vk::Transients::Entry* captured = mode_ == Mode::Depth && depthFrame_ == dev_.frameValue()
                                           ? dev_.transients().get("rt.debug.depth", {VK_FORMAT_R32_SFLOAT, depthExtent_})

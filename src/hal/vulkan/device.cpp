@@ -65,6 +65,23 @@ HalDevice::HalDevice() {
     dx9Standin_[2] = 1;  // +0x10
 }
 
+void HalDevice::registerTexture(const void* api, d3d9::Texture* texture) {
+    const std::lock_guard lock(apiTextureMutex_);
+    apiTextures_[api] = texture;
+}
+
+void HalDevice::unregisterTexture(const void* api) {
+    const std::lock_guard lock(apiTextureMutex_);
+    apiTextures_.erase(api);
+}
+
+d3d9::Texture* HalDevice::textureOfApi(const void* api) {
+    if (api == nullptr) return nullptr;
+    const std::lock_guard lock(apiTextureMutex_);
+    const auto it = apiTextures_.find(api);
+    return it != apiTextures_.end() ? it->second : nullptr;
+}
+
 HalDevice::~HalDevice() {
     engine::scene::detach(&dev_);
     settings::registry().removeCallbacks(this);
@@ -183,11 +200,12 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         reg.onChange(*rs.injectView, applyInject, this);
     }
     // the ray tracing scene (enh/rt_scene.h, docs/research/rt-reflections.md 3) and its debug view rt.debug
+    dev_.setEngineTextureResolver([this](const void* api) { return textureOfApi(api); });
     rtScene_ = std::make_unique<enh::RtScene>(dev_);
     rtDebug_ = std::make_unique<enh::RtDebug>(dev_, *rtScene_);
     if (rs.rtDebug != nullptr) {
         const auto applyRtDebug = [this](const settings::Setting& s) {
-            rtDebug_->setMode(enh::RtDebug::parse(s.asEnum()));
+            rtDebug_->setMode(enh::RtDebug::parse(s.asEnum()), enh::RtDebug::optionFlags(s.asEnum()));
             spdlog::info("hal: settings: ray tracing scene view {}", s.asEnum());
         };
         if (rs.rtDebug->asEnum() != "off") applyRtDebug(*rs.rtDebug);

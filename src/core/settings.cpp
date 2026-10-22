@@ -712,11 +712,12 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .description = "Developer view of the ray tracing scene (the world geometry ray-traced effects see): \"Instances\" colours "
                        "each traced object, \"Depth check\" compares the traced distance with the rendered one (green = match, "
                        "red = missing in the RT scene, magenta = extra / misplaced, blue = missed), \"Normals\" shows the traced "
-                       "surface normals. Needs ray tracing. Off renders exactly as without it.",
+                       "surface normals, \"Albedo\" the traced surfaces' textures (unlit; split: the right half only, opaque: "
+                       "cut-outs solid), \"UV\" their texture coordinates. Needs ray tracing. Off renders exactly as without it.",
         .type = Type::Enum,
         .defaultValue = 0,
-        .options = {"off", "instances", "depth", "normals"},
-        .optionLabels = {"Off", "Instances", "Depth check", "Normals"},
+        .options = {"off", "instances", "depth", "normals", "albedo", "albedo_split", "albedo_opaque", "uv"},
+        .optionLabels = {"Off", "Instances", "Depth check", "Normals", "Albedo", "Albedo (split)", "Albedo (cut-outs solid)", "UV"},
         .flags = Flag::NoAB,
         .requirements = caps::bit(caps::Cap::RayQuery),
     });

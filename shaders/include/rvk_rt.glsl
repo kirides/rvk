@@ -3,6 +3,9 @@
 // vertex / index fetches from the engine's buffers by device address, barycentric interpolation. Include after
 // rvk_abi.glsl. Shaders that trace enable GL_EXT_ray_query themselves and use rvkRtTlas(frame).
 //
+// Materials (M9 P2): rvkRtMaterialTriangle / rvkRtTextureLod / rvkRtAlbedo / rvkRtCandidatePasses below; tracing with the
+// alpha test and the hit's surface: rvk_rt_trace.glsl (rvkRtTraceClosest, rvkRtHitSurface).
+//
 // A hit: record = rvkRtRecord(frame, rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true)
 //                                      + rayQueryGetIntersectionGeometryIndexEXT(rq, true));
 //        RvkRtSurface s = rvkRtSurface(record, rayQueryGetIntersectionPrimitiveIndexEXT(rq, true),
@@ -13,6 +16,8 @@
 #define RVK_RT_GLSL
 
 #extension GL_EXT_buffer_reference_uvec2 : require
+
+#include "rvk_common.glsl"
 
 // D3DDECLTYPE of an attribute word (offset | type << 16; RVK_RT_ABSENT = the declaration has no such element)
 const uint RVK_RT_ABSENT = 0xFFFFFFFFu;
@@ -29,13 +34,22 @@ const uint RVK_RT_SPEEDTREE = 4u;
 const uint RVK_RT_INSTANCED = 8u;
 const uint RVK_RT_NO_DEPTH_WRITE = 16u;  // a main-view solid draw of it had z writes off
 const uint RVK_RT_DEPTH_BIAS = 32u;      // a main-view draw of it had a depth bias
+const uint RVK_RT_SEGMENTED = 64u;       // per-triangle materials (segments: rvkRtApplySegment)
 const uint RVK_RT_VIEW_MAIN = 0x10000u;
 const uint RVK_RT_VIEW_SHADOW = 0x20000u;
 // TLAS instance masks (abi.h kRtMask*)
 const uint RVK_RT_MASK_OPAQUE = 1u;
 const uint RVK_RT_MASK_ALPHA_TESTED = 2u;
+// RvkRtRecord.uvSet (abi.h kRtUv*)
+const uint RVK_RT_UV_SET_MASK = 3u;            // 0 = the vertex's TEXCOORD0, 1 = TEXCOORD1
+const uint RVK_RT_UV_APPROX = 4u;              // the pixel shader's coordinate is not affine in that set
+const uint RVK_RT_UV_NO_TEXTURE = 8u;          // no diffuse texture: uvMap0.w = a colour (RGBA8 bits)
+const uint RVK_RT_UV_HEURISTIC = 0x10u;        // slot from the bytecode fallback
+const uint RVK_RT_UV_OPACITY_SHIFT = 8u;       // bits 8-9: the opacity's channel
+const uint RVK_RT_UV_OPACITY_OPAQUE = 0x400u;  // the opacity is no texture
+const uint RVK_RT_UV_OPACITY_TEXTURE = 0x800u; // the opacity's own texture: bindless slot in uvMap1.w
 
-// one geometry of one TLAS instance (96 bytes)
+// one geometry of one TLAS instance (112 bytes)
 struct RvkRtRecord {
     uvec2 vertices;      //  0 device address of vertex 0 (stream offset + base vertex applied)
     uvec2 indices;       //  8 device address of the draw's first index
@@ -47,12 +61,32 @@ struct RvkRtRecord {
     uint texcoord6;      // 36 the lightmap uv
     uint color0;         // 40
     uint instanceId;     // 44 stable id of the instance (debug colours)
-    uint albedoTex;      // 48 (M9 P2) bindless t2D slot of the diffuse texture, 0 = none
-    uint albedoSampler;  // 52 (P2) bindless sampler
+    uint albedoTex;      // 48 bindless t2D slot of the diffuse texture, 0 = none
+    uint albedoSampler;  // 52 bindless sampler (the draw's states of that slot)
     uint alpha;          // 56 alpha test: D3DCMPFUNC | reference << 8 (func 8 = always)
-    uint uvSet;          // 60 (P2) which uv set the albedo uses + flags
-    vec4 uvMap0;         // 64 (P2) u' = dot(uvMap0.xy, uv) + uvMap0.z
-    vec4 uvMap1;         // 80 (P2) v' = dot(uvMap1.xy, uv) + uvMap1.z
+    uint uvSet;          // 60 RVK_RT_UV_*: which vertex uv set the diffuse coordinate follows from + flags
+    vec4 uvMap0;         // 64 u' = dot(uvMap0.xy, uv) + uvMap0.z; .w = colour without a texture (RGBA8 bits)
+    vec4 uvMap1;         // 80 v' = dot(uvMap1.xy, uv) + uvMap1.z; .w = the opacity texture's slot (bits)
+    uvec2 segments;      // 96 address of segmentCount RvkRtSegment (sorted by firstPrimitive), RVK_RT_SEGMENTED
+    uint segmentCount;   // 104
+    uint pad;            // 108
+};
+
+// the material of a sub-range of a record's triangles (abi.h RtMaterialSegment, 64 bytes)
+struct RvkRtSegment {
+    uint firstPrimitive;
+    uint primitiveCount;
+    uint albedoTex;
+    uint albedoSampler;
+    uint alpha;
+    uint uvSet;
+    uint pad0;
+    uint pad1;
+    vec4 uvMap0;
+    vec4 uvMap1;
+};
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer RvkRtSegments {
+    RvkRtSegment s[];
 };
 
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer RvkRtRecords {
@@ -162,5 +196,109 @@ RvkRtSurface rvkRtSurface(RvkRtRecord r, uint primitive, vec2 bary) {
 // object -> world for normals: n * worldToObject's 3x3 (= the inverse transpose of objectToWorld applied to n)
 vec3 rvkRtWorldNormal(mat4x3 worldToObject, vec3 n) { return normalize(n * mat3(worldToObject)); }
 vec3 rvkRtWorldPosition(mat4x3 objectToWorld, vec3 p) { return objectToWorld * vec4(p, 1.0); }
+
+// ---- materials (M9 P2, docs/research/rt-reflections.md 3.2) ------------------------------------------------------------------
+
+// a segmented record (a cascade's merged range of a level mesh): the material of the segment holding `primitive`
+void rvkRtApplySegment(inout RvkRtRecord r, uint primitive) {
+    if ((r.flags & RVK_RT_SEGMENTED) == 0u || r.segmentCount == 0u) return;
+    RvkRtSegments table = RvkRtSegments(r.segments);
+    uint lo = 0u, hi = r.segmentCount;
+    for (int i = 0; i < 16 && lo < hi; ++i) {
+        uint mid = (lo + hi) >> 1;
+        RvkRtSegment s = table.s[mid];
+        if (primitive < s.firstPrimitive) {
+            hi = mid;
+        } else if (primitive >= s.firstPrimitive + s.primitiveCount) {
+            lo = mid + 1u;
+        } else {
+            r.albedoTex = s.albedoTex;
+            r.albedoSampler = s.albedoSampler;
+            r.alpha = s.alpha;
+            r.uvSet = s.uvSet;
+            r.uvMap0 = s.uvMap0;
+            r.uvMap1 = s.uvMap1;
+            return;
+        }
+    }
+}
+
+// the diffuse coordinate of a vertex: its uv set through the material's affine map (the pixel shader's coordinate)
+vec2 rvkRtMaterialUv(RvkRtRecord r, uint vertex) {
+    uint word = (r.uvSet & RVK_RT_UV_SET_MASK) == 1u ? r.texcoord1 : r.texcoord0;
+    vec2 uv = rvkRtAttribute(r, vertex, word).xy;
+    return vec2(dot(r.uvMap0.xy, uv) + r.uvMap0.z, dot(r.uvMap1.xy, uv) + r.uvMap1.z);
+}
+
+// a triangle's object-space positions and diffuse coordinates
+struct RvkRtMaterialTri {
+    vec3 p0, p1, p2;
+    vec2 uv0, uv1, uv2;
+};
+RvkRtMaterialTri rvkRtMaterialTriangle(RvkRtRecord r, uint primitive) {
+    uvec3 i = rvkRtTriangle(r, primitive);
+    RvkRtMaterialTri t;
+    t.p0 = rvkRtPosition(r, i.x);
+    t.p1 = rvkRtPosition(r, i.y);
+    t.p2 = rvkRtPosition(r, i.z);
+    t.uv0 = rvkRtMaterialUv(r, i.x);
+    t.uv1 = rvkRtMaterialUv(r, i.y);
+    t.uv2 = rvkRtMaterialUv(r, i.z);
+    return t;
+}
+vec2 rvkRtMaterialTriUv(RvkRtMaterialTri t, vec2 bary) { return t.uv0 + bary.x * (t.uv1 - t.uv0) + bary.y * (t.uv2 - t.uv0); }
+
+// Ray-cone mip level (Akenine-Moeller et al., "Improved shader and texture level of detail using ray cones"; as in GD3D11's
+// RtScene.hlsl TextureLod): the texel-to-world area ratio of the triangle (world space: the instance's scale counts) plus
+// the cone's width at the hit over the incidence cosine.
+float rvkRtTextureLod(RvkRtMaterialTri t, mat4x3 objectToWorld, ivec2 texSize, float coneWidth, float cosine) {
+    vec2 d1 = t.uv1 - t.uv0, d2 = t.uv2 - t.uv0;
+    float ta = abs(d1.x * d2.y - d2.x * d1.y) * float(texSize.x) * float(texSize.y);
+    mat3 m = mat3(objectToWorld);
+    float pa = length(cross(m * (t.p1 - t.p0), m * (t.p2 - t.p0)));
+    return 0.5 * log2(max(ta, 1e-12) / max(pa, 1e-12)) + log2(max(coneWidth, 1e-4) / max(cosine, 0.1));
+}
+
+// the D3D9 alpha test of the record (D3DCMPFUNC on the alpha quantised to 0..255 against the reference)
+bool rvkRtAlphaTest(RvkRtRecord r, float alpha) {
+    float q = round(clamp(alpha, 0.0, 1.0) * 255.0);
+    float ref = float((r.alpha >> 8) & 0xFFu);
+    switch (r.alpha & 0xFFu) {
+    case 1u: return false;
+    case 2u: return q < ref;
+    case 3u: return q == ref;
+    case 4u: return q <= ref;
+    case 5u: return q > ref;
+    case 6u: return q != ref;
+    case 7u: return q >= ref;
+    default: return true;
+    }
+}
+
+// the opacity the alpha test reads (the diffuse alpha, or the opacity texture's channel), at mip `lod`
+float rvkRtOpacity(RvkRtRecord r, vec2 uv, float lod) {
+    if ((r.uvSet & RVK_RT_UV_OPACITY_OPAQUE) != 0u) return 1.0;
+    uint tex = (r.uvSet & RVK_RT_UV_OPACITY_TEXTURE) != 0u ? floatBitsToUint(r.uvMap1.w) : r.albedoTex;
+    if (tex == 0u) return 1.0;
+    vec4 s = rvkSample2DLod(tex, r.albedoSampler, uv, lod);
+    return s[(r.uvSet >> RVK_RT_UV_OPACITY_SHIFT) & 3u];
+}
+
+// whether a candidate hit of an alpha-tested instance stands (`coneWidth`: the ray cone's width at the hit)
+bool rvkRtCandidatePasses(RvkRtRecord r, uint primitive, vec2 bary, mat4x3 objectToWorld, float coneWidth) {
+    rvkRtApplySegment(r, primitive);
+    if ((r.flags & RVK_RT_ALPHA_TESTED) == 0u || (r.uvSet & RVK_RT_UV_OPACITY_OPAQUE) != 0u) return true;
+    uint tex = (r.uvSet & RVK_RT_UV_OPACITY_TEXTURE) != 0u ? floatBitsToUint(r.uvMap1.w) : r.albedoTex;
+    if (tex == 0u) return true;
+    RvkRtMaterialTri t = rvkRtMaterialTriangle(r, primitive);
+    float lod = max(rvkRtTextureLod(t, objectToWorld, rvkSize2D(tex), coneWidth, 1.0), 0.0);
+    return rvkRtAlphaTest(r, rvkRtOpacity(r, rvkRtMaterialTriUv(t, bary), lod));
+}
+
+// the diffuse colour (rgba as sampled) at `uv`, mip `lod`; the record's constant colour without a texture
+vec4 rvkRtAlbedo(RvkRtRecord r, vec2 uv, float lod) {
+    if (r.albedoTex == 0u || (r.uvSet & RVK_RT_UV_NO_TEXTURE) != 0u) return unpackUnorm4x8(floatBitsToUint(r.uvMap0.w));
+    return rvkSample2DLod(r.albedoTex, r.albedoSampler, uv, lod);
+}
 
 #endif

@@ -239,6 +239,11 @@ const Registry::Instance* Registry::find(std::uint64_t key) const {
     return it != index_.end() ? &list_[it->second] : nullptr;
 }
 
+Registry::Instance* Registry::find(std::uint64_t key) {
+    const auto it = index_.find(key);
+    return it != index_.end() ? &list_[it->second] : nullptr;
+}
+
 std::vector<std::uint32_t> selectForTlas(const std::vector<Registry::Instance>& list, const float camera[3], std::uint32_t max,
                                          const std::function<bool(const Registry::Instance&)>& take) {
     std::vector<std::uint32_t> out;

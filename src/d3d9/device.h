@@ -13,6 +13,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -272,6 +273,7 @@ struct ReplaceQuery {
     const VertexDecl* decl = nullptr;         // the draw's vertex declaration
     bool blended = false;                     // alpha blending SRCALPHA / INVSRCALPHA on
     bool blending = false;                    // alpha blending on (any factors)
+    std::uint8_t srcBlend = 2, dstBlend = 1;  // D3DBLEND of the colour (when blending)
     bool alphaTest = false;                   // alpha test on with a function other than ALWAYS
     std::uint32_t alphaFunc = 8;              // D3DCMPFUNC of the alpha test (8 = always)
     std::uint32_t alphaRef = 0;               // its reference 0..255
@@ -323,6 +325,8 @@ public:
     // the buffer `id` got a new static GPU copy (a new generation: the old VkBuffer and its address are retired) or is
     // released (its GPU copy dies after the frame): anything built from it must be forgotten
     virtual void bufferChanged(std::uint64_t /*bufferId*/) {}
+    // the texture is about to be destroyed (render thread, Device::processReleases): pointers to it must be forgotten
+    virtual void textureReleased(const Texture* /*texture*/) {}
 };
 
 // The ray tracing scene of the frame, for the FrameBlock (shader/abi.h FrameBlock::rtScene / rtInfo): valid only in the
@@ -647,8 +651,18 @@ public:
     // the D3D9 float constants as last set (render thread)
     const float* vsConstant(std::uint32_t reg) const { return vsF_[reg < kVsFloatConsts ? reg : 0]; }
     const float* psConstant(std::uint32_t reg) const { return psF_[reg < kPsFloatConsts ? reg : 0]; }
+    // all of them (render thread; CPU evaluation of the draw's shaders, shader/sm_eval.h)
+    const float (*vsConstants() const)[4] { return vsF_; }
+    const float (*psConstants() const)[4] { return psF_; }
+    const std::int32_t (*vsIntConstants() const)[4] { return vsI_; }
+    const std::int32_t (*psIntConstants() const)[4] { return psI_; }
+    const std::uint32_t* vsBoolConstants() const { return vsB_; }
+    const std::uint32_t* psBoolConstants() const { return psB_; }
     // a bindless sampler index for passes / replacement shaders (linear or point, clamp or wrap, mips linear)
     std::uint32_t samplerFor(bool linear, bool clamp);
+    // the texture behind an engine eCAPITexture pointer (the HAL sets the resolver; null when it is none of ours)
+    void setEngineTextureResolver(std::function<Texture*(const void*)> resolver) { engineTextureResolver_ = std::move(resolver); }
+    Texture* engineTexture(const void* api) const { return engineTextureResolver_ ? engineTextureResolver_(api) : nullptr; }
     // the bindless sampler of the engine's sampler states at pixel slot s (render thread, inside a draw replacement)
     std::uint32_t samplerOfSlot(std::uint32_t slot) { return samplerIndex(slot); }
     // Pipelines of replacement shaders, built in the background (no hitch when a player turns a feature on): registered
@@ -779,6 +793,7 @@ private:
     std::shared_ptr<Shader> ps_;
     float vsF_[kVsFloatConsts][4]{};
     float psF_[kPsFloatConsts][4]{};
+    std::function<Texture*(const void*)> engineTextureResolver_;
     std::int32_t vsI_[16][4]{};
     std::int32_t psI_[16][4]{};
     std::uint32_t vsB_[16]{};

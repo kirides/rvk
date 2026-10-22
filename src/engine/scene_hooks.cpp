@@ -16,6 +16,7 @@
 
 #include "core/hooks.h"
 #include "d3d9/device.h"
+#include "engine/memread.h"
 #include "engine/symbols.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "vk/formats.h"
@@ -92,21 +93,6 @@ void setPass(Pass p, const char* what) {
     }
 }
 
-// engine memory reads that cannot crash the game (pointers of objects we do not own)
-bool safeRead(const void* src, void* dst, std::size_t size) {
-    __try {
-        std::memcpy(dst, src, size);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-
-template <class T>
-bool readAt(const void* base, std::size_t offset, T& out) {
-    return base != nullptr && safeRead(static_cast<const std::uint8_t*>(base) + offset, &out, sizeof(T));
-}
-
 // The main view's camera (engine-gfx.md 4, frame-phases.md 3): eCFrustumDatabase +0x14c0 = its eCCameraBase, whose +0x1738
 // is the eCGfxCamera that eCCameraBase::ExecuteGfxCamera executes (eCGfxCamera::Execute renders through ms_pMasterCamera
 // instead when that is set). eCGfxCamera: view +0x20, projection +0x60, view-projection +0xe0, inverse view +0x120, camera
@@ -126,26 +112,6 @@ void readMainCamera(d3d9::Device& d, const void* db) {
         return;
     }
     d.setMainCamera(in);
-}
-
-// A bCString field (SharedBase: a char* whose int length sits 8 bytes before the text) -> its text ("" when unreadable)
-std::string readCString(const void* field) {
-    const char* text = nullptr;
-    if (!readAt(field, 0, text) || text == nullptr) return {};
-    std::int32_t length = 0;
-    if (!safeRead(text - 8, &length, sizeof(length))) length = 0;  // unknown: up to the terminator
-    char buf[256]{};
-    const std::size_t n = length > 0 ? std::min<std::size_t>(static_cast<std::size_t>(length), sizeof(buf) - 1) : sizeof(buf) - 1;
-    if (!safeRead(text, buf, n)) {
-        // the buffer may end before 255 bytes: read byte by byte up to the terminator
-        std::size_t i = 0;
-        for (; i < sizeof(buf) - 1; ++i) {
-            if (!safeRead(text + i, &buf[i], 1) || buf[i] == 0) break;
-        }
-        buf[i] = 0;
-    }
-    buf[n] = 0;
-    return std::string(buf, strnlen(buf, n));
 }
 
 // Material names (docs/research/water.md 2): eCMaterialResource2 derives from eCResource2, whose +0x40 bCString is the

@@ -508,6 +508,8 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         q.decl = decl_;
         q.blended = rs_[RS_ALPHABLENDENABLE] != 0 && rs_[RS_SRCBLEND] == BLEND_SRCALPHA && rs_[RS_DESTBLEND] == BLEND_INVSRCALPHA;
         q.blending = rs_[RS_ALPHABLENDENABLE] != 0;
+        q.srcBlend = static_cast<std::uint8_t>(rs_[RS_SRCBLEND]);
+        q.dstBlend = static_cast<std::uint8_t>(rs_[RS_DESTBLEND]);
         q.alphaFunc = rs_[RS_ALPHATESTENABLE] != 0 ? rs_[RS_ALPHAFUNC] : static_cast<std::uint32_t>(CMP_ALWAYS);
         q.alphaTest = q.alphaFunc != static_cast<std::uint32_t>(CMP_ALWAYS);
         q.alphaRef = rs_[RS_ALPHAREF] & 0xFF;

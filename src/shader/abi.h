@@ -140,13 +140,34 @@ struct RtGeometryRecord {
     std::uint32_t texcoord6;     // the lightmap uv
     std::uint32_t color0;
     std::uint32_t instanceId;    // stable id of the instance in the registry (debug colours, temporal reuse)
-    std::uint32_t albedoTex;     // P2: bindless t2D slot of the diffuse texture (0 = none)
-    std::uint32_t albedoSampler; // P2: bindless sampler
+    std::uint32_t albedoTex;     // bindless t2D slot of the diffuse texture (0 = none: kRtUvNoTexture's colour)
+    std::uint32_t albedoSampler; // bindless sampler (the draw's sampler states of that slot)
     std::uint32_t alpha;         // alpha test: D3DCMPFUNC | reference (0..255) << 8 (func 8 = always)
-    std::uint32_t uvSet;         // P2: which vertex uv set the albedo uses (0 = TEXCOORD0) + flags
-    float uvMap[2][4];           // P2: affine uv map, u' = dot(uvMap[0].xy, uv) + uvMap[0].z, v' likewise with [1]
+    std::uint32_t uvSet;         // kRtUv*: which vertex uv set the albedo's coordinate follows from + flags
+    // affine map of that uv set to the pixel shader's diffuse coordinate: u' = dot(uvMap[0].xy, uv) + uvMap[0].z, v' with
+    // [1]; uvMap[0].w = the constant colour (RGBA8 bits) of kRtUvNoTexture, uvMap[1].w = the opacity texture's bindless slot
+    // (kRtUvOpacityTexture)
+    float uvMap[2][4];
+    // material segments (kRtRecordSegmented): the materials of sub-ranges of this draw range, as the main view drew them
+    // (the sun cascades draw a level mesh in one merged range, the main view per material): device address of
+    // segmentCount RtMaterialSegment sorted by firstPrimitive; triangles outside every segment keep the record's material
+    std::uint32_t segments[2];
+    std::uint32_t segmentCount;
+    std::uint32_t pad;
 };
-static_assert(sizeof(RtGeometryRecord) == 96);
+static_assert(sizeof(RtGeometryRecord) == 112);
+// the material of the record's triangles [firstPrimitive, firstPrimitive + primitiveCount) (the record's fields of that name)
+struct RtMaterialSegment {
+    std::uint32_t firstPrimitive;
+    std::uint32_t primitiveCount;
+    std::uint32_t albedoTex;
+    std::uint32_t albedoSampler;
+    std::uint32_t alpha;
+    std::uint32_t uvSet;
+    std::uint32_t pad[2];
+    float uvMap[2][4];
+};
+static_assert(sizeof(RtMaterialSegment) == 64);
 inline constexpr std::uint32_t kRtAttribAbsent = 0xFFFFFFFFu;
 inline constexpr std::uint32_t kRtRecordIndex32 = 1u;      // 32-bit indices (else 16-bit)
 inline constexpr std::uint32_t kRtRecordAlphaTested = 2u;  // the draw had an alpha test (non-opaque instance)
@@ -154,8 +175,17 @@ inline constexpr std::uint32_t kRtRecordSpeedTree = 4u;    // SpeedTree branches
 inline constexpr std::uint32_t kRtRecordInstanced = 8u;    // from an instanced batch
 inline constexpr std::uint32_t kRtRecordNoDepthWrite = 16u; // a main-view solid draw of it had z writes off (not in the depth buffer)
 inline constexpr std::uint32_t kRtRecordDepthBias = 32u;    // a main-view draw of it had a depth bias (the depth buffer is offset)
+inline constexpr std::uint32_t kRtRecordSegmented = 64u;    // per-triangle materials: RtGeometryRecord::segments
 inline constexpr std::uint32_t kRtRecordKindShift = 8;   // bits 8-15: draws::Kind of the draw
 inline constexpr std::uint32_t kRtRecordViewShift = 16;  // bits 16-23: views it was seen in (1 main, 2 sun cascades)
+// RtGeometryRecord::uvSet (M9 P2, docs/research/rt-reflections.md 3.2)
+inline constexpr std::uint32_t kRtUvSetMask = 0x3u;          // 0 = TEXCOORD0, 1 = TEXCOORD1 of the vertex
+inline constexpr std::uint32_t kRtUvApprox = 0x4u;           // the pixel shader's coordinate is not affine in that set (parallax, ...)
+inline constexpr std::uint32_t kRtUvNoTexture = 0x8u;        // no diffuse texture: uvMap[0].w holds a colour
+inline constexpr std::uint32_t kRtUvHeuristic = 0x10u;       // slot from the bytecode fallback (s9), not the material graph
+inline constexpr std::uint32_t kRtUvOpacityShift = 8;        // bits 8-9: the opacity's channel (0 r .. 3 a) of its texture
+inline constexpr std::uint32_t kRtUvOpacityOpaque = 0x400u;  // the opacity is no texture: never cut out
+inline constexpr std::uint32_t kRtUvOpacityTexture = 0x800u; // the opacity has its own texture (bindless slot in uvMap[1].w)
 // TLAS instance masks
 inline constexpr std::uint32_t kRtMaskOpaque = 0x01u;
 inline constexpr std::uint32_t kRtMaskAlphaTested = 0x02u;

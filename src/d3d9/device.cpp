@@ -958,6 +958,7 @@ void Device::processReleases() {
         decls.swap(releasedDecls_);
     }
     for (auto& t : textures) {
+        for (DrawObserver* o : observers_) o->textureReleased(t.get());
         for (auto& bound : tex_) {
             if (bound == t.get()) {
                 bound = nullptr;

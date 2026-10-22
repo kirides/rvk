@@ -6,7 +6,9 @@
 // fullscreen pass blends the result over the frame: "instances" (a colour per instance), "depth" (the traced distance
 // against the rendered one, from the main view's hardware depth buffer captured at AfterOpaque (every solid draw; the
 // engine's linear depth map has only the z-pass subset): green match, red the TLAS lacks geometry, magenta the TLAS has
-// extra / misplaced geometry, blue a miss where the raster has geometry), "normals" (interpolated vertex normals fetched from the geometry records). Holds
+// extra / misplaced geometry, blue a miss where the raster has geometry), "normals" (interpolated vertex normals fetched from the geometry records),
+// "albedo" (the hits' diffuse textures through the materials, alpha-tested geometry cut out; "albedo_split" the right half
+// only, "albedo_opaque" cut-outs solid) and "uv" (the diffuse coordinate). Holds
 // the RT scene while on; off = nothing registered.
 
 #include <chrono>
@@ -42,19 +44,24 @@ struct RtDebugProbe {
 };
 inline constexpr std::uint32_t kRtDebugProbes = 25;
 inline constexpr std::uint32_t kRtDebugLinearDepth = 0x100u;  // depthTex holds view depth (the hardware depth capture)
+inline constexpr std::uint32_t kRtDebugOpaque = 0x200u;       // alpha-tested geometry traced as solid
+inline constexpr std::uint32_t kRtDebugSplit = 0x400u;        // albedo / uv on the right half of the picture only
 static_assert(sizeof(RtDebugPush) == 48 && sizeof(RtDebugPush) <= shader::abi::kPushConstantBudget);
 
 class RtDebug {
 public:
-    enum class Mode : std::uint8_t { Off, Instances, Depth, Normals };
-    static Mode parse(std::string_view option);  // "off" / "instances" / "depth" / "normals"
+    enum class Mode : std::uint8_t { Off, Instances, Depth, Normals, Albedo, Uv };
+    // "off" / "instances" / "depth" / "normals" / "albedo" / "albedo_split" / "albedo_opaque" / "uv"
+    static Mode parse(std::string_view option);
+    // the shader flags of an option (kRtDebugSplit: the right half only; kRtDebugOpaque: alpha-tested geometry solid)
+    static std::uint32_t optionFlags(std::string_view option);
 
     RtDebug(d3d9::Device& device, RtScene& scene);
     ~RtDebug();
     RtDebug(const RtDebug&) = delete;
     RtDebug& operator=(const RtDebug&) = delete;
 
-    void setMode(Mode mode);  // render thread (settings callbacks)
+    void setMode(Mode mode, std::uint32_t flags = 0);  // render thread (settings callbacks)
     Mode mode() const { return mode_; }
 
 private:
@@ -67,6 +74,7 @@ private:
     d3d9::Device& dev_;
     RtScene& scene_;
     Mode mode_ = Mode::Off;
+    std::uint32_t flags_ = 0;
     std::uint32_t passId_ = 0;
     std::uint32_t depthPassId_ = 0;
     std::uint64_t depthFrame_ = 0;  // frame value of the last depth capture

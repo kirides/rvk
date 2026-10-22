@@ -99,6 +99,12 @@ public:
         std::uint32_t flags = 0;   // the caller's (record flags), OR-ed over sightings
         std::uint32_t data = 0;    // the caller's (the alpha test word), the latest non-zero
         std::uint8_t views = 0;    // bit per view it was seen in (the caller's numbering)
+        // the caller's material of this instance (enh/rt_material id, 0 = none) and the rank of the draw that gave it; the
+        // frame + rank of the last draw that counted (the first per frame and rank: layered materials keep their base)
+        std::uint32_t material = 0;
+        std::uint8_t materialRank = 0;
+        std::uint8_t sightRank = 0;
+        std::uint64_t sightFrame = 0;
         std::uint64_t firstFrame = 0, lastFrame = 0;
         double lastTime = 0.0;
     };
@@ -123,6 +129,7 @@ public:
     std::size_t size() const { return list_.size(); }
     const std::vector<Instance>& instances() const { return list_; }
     const Instance* find(std::uint64_t key) const;
+    Instance* find(std::uint64_t key);  // (pointer valid until the next change)
     // an instance only `view` saw while its owner has a live instance seen in `preferred` (the cascades draw some objects at
     // another level of detail than the main view: the TLAS takes the main view's, not both)
     bool supersededBy(const Instance& in, std::uint8_t preferred) const;

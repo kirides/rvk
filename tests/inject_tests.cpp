@@ -118,8 +118,19 @@ TEST(abi_glsl_rt_layout_matches_cpp) {
                   {"texcoord1", offsetof(R, texcoord1)}, {"texcoord6", offsetof(R, texcoord6)}, {"color0", offsetof(R, color0)},
                   {"instanceId", offsetof(R, instanceId)}, {"albedoTex", offsetof(R, albedoTex)},
                   {"albedoSampler", offsetof(R, albedoSampler)}, {"alpha", offsetof(R, alpha)}, {"uvSet", offsetof(R, uvSet)},
-                  {"uvMap0", offsetof(R, uvMap)}, {"uvMap1", offsetof(R, uvMap) + 16}},
+                  {"uvMap0", offsetof(R, uvMap)}, {"uvMap1", offsetof(R, uvMap) + 16}, {"segments", offsetof(R, segments)},
+                  {"segmentCount", offsetof(R, segmentCount)}, {"pad", offsetof(R, pad)}},
                  "RvkRtRecord");
+    CHECK(m.contains("RvkRtSegment"));
+    if (m.contains("RvkRtSegment")) {
+        using S = abi::RtMaterialSegment;
+        checkOffsets(m.at("RvkRtSegment"),
+                     {{"firstPrimitive", offsetof(S, firstPrimitive)}, {"primitiveCount", offsetof(S, primitiveCount)},
+                      {"albedoTex", offsetof(S, albedoTex)}, {"albedoSampler", offsetof(S, albedoSampler)}, {"alpha", offsetof(S, alpha)},
+                      {"uvSet", offsetof(S, uvSet)}, {"pad0", offsetof(S, pad)}, {"pad1", offsetof(S, pad) + 4},
+                      {"uvMap0", offsetof(S, uvMap)}, {"uvMap1", offsetof(S, uvMap) + 16}},
+                     "RvkRtSegment");
+    }
     using P = enh::RtDebugPush;
     checkOffsets(m.at("RtDebugPush"),
                  {{"frame", offsetof(P, h) + offsetof(abi::PassPushHeader, frame)},

@@ -16,6 +16,12 @@
 // * At AfterOpaque (the first main view): builds, compaction copies, the instance + geometry-record arrays in the frame's
 //   ring, the TLAS (one per frame slot, sized to the cap), sync2 barriers to fragment / compute ray queries, and the
 //   FrameBlock's rtScene / rtInfo (Device::setRtScene). GLSL side: shaders/include/rvk_rt.glsl.
+// * Materials (M9 P2, enh/rt_material.h): each draw's material is resolved (cached per BLAS by the draw's material
+//   signature) and each instance keeps the best-ranked one (the main view's opaque solid draw > its first alpha-over
+//   blended solid layer > its z pre-pass > the cascades); overlays (caustics, decals, wet specular layers) are never a base
+//   and instances known only through one are left out; merged ranges (the cascades draw a level mesh in one range, the
+//   main view per material) get per-triangle materials from the sub-ranges inside them (segments). Records carry the
+//   albedo's bindless slot of the frame, sampler, uv map, opacity and alpha test.
 // * Stats every 5 s in rvk.log (`rt: scene: ...`), a status line for the overlay's performance panel, GPU time of the
 //   pass with [debug] perf (`pass rt.scene at AfterOpaque` in -PerfFrame).
 //
@@ -32,6 +38,7 @@
 #include <vector>
 
 #include "d3d9/device.h"
+#include "enh/rt_material.h"
 #include "enh/rt_registry.h"
 #include "shader/abi.h"
 #include "vk/raytracing.h"
@@ -65,6 +72,7 @@ public:
     bool observes(d3d9::draws::Kind kind, d3d9::scene::Phase phase) const override;
     void observe(d3d9::Device& device, const d3d9::ReplaceQuery& query) override;
     void bufferChanged(std::uint64_t bufferId) override;
+    void textureReleased(const d3d9::Texture* texture) override;
 
 private:
     // which vertex attributes the declaration of a draw has (record words: offset | D3DDECLTYPE << 16)
@@ -100,6 +108,27 @@ private:
         double lastUsedTime = 0.0;
         std::uint64_t opaqueMainFrame = 0;  // the main view's last opaque draw of it (blended-only ranges stay out)
         std::uint32_t kind = 0;      // draws::Kind of the first draw (records)
+        // the materials its draws showed (enh/rt_material ids, M9 P2), by the draw's material signature: one range may be
+        // drawn with several materials (instanced variants, terrain layers); each instance picks its own (Instance::material),
+        // records fall back to the best one here. Resolved again when a texture died or every kMaterialRefresh frames
+        // (animated uv maps); at most kMaterialSlots, least recently used out.
+        struct MaterialSlot {
+            std::uint64_t sig = 0;
+            std::uint32_t id = 0;
+            std::uint64_t resolved = 0, used = 0;  // frames
+            std::uint8_t rank = 0;                 // the best rank of the draws that used it
+            bool overlay = false;                  // alpha-blended with a texture opacity (caustics, decals)
+        };
+        std::vector<MaterialSlot> materials;
+        // a range without a main-view material (the cascades' merged range of a level mesh): the BLASes of the main view's
+        // sub-ranges inside it (same buffers and base vertex) give its triangles their materials (RtMaterialSegment)
+        struct Segment {
+            std::uint32_t firstPrimitive = 0, primitiveCount = 0;
+            std::uint64_t blas = 0;         // a sub-range BLAS (its best material) ...
+            std::uint32_t material = 0;     // ... or a blended-only layer range's material (layers_)
+        };
+        std::vector<Segment> segments;
+        std::uint64_t segmentsFrame = 0;
         const void* material = nullptr;  // the first draw's engine objects (diagnostics; may be stale)
         const void* entity = nullptr;
         std::uint32_t opDesc = 0;
@@ -107,7 +136,7 @@ private:
     // what the TLAS of a frame held (diagnostics: describe)
     struct Entry {
         std::uint64_t blas = 0;
-        std::uint32_t instanceId = 0, flags = 0;
+        std::uint32_t instanceId = 0, flags = 0, material = 0;
         float translation[3]{};
     };
     struct Compaction {
@@ -128,6 +157,21 @@ private:
     Blas* findBlas(std::uint64_t id);
     void dropBlas(std::uint64_t id, bool countEvicted);
     void learnExcluded(const d3d9::ReplaceQuery& q, bool water);  // water / alpha-blended meshes of the main view
+    // the material of the draw `q` for the BLAS (0 = none / not eligible) and the draw's rank: 4 the main view's opaque
+    // solid draw, 3 its alpha-over blended solid layers (the terrain), 2 its z pre-pass, 1 the cascades
+    std::uint32_t materialOf(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& b, std::uint8_t& rank, bool& overlay);
+    // an instance takes it: the best rank wins, the first eligible draw per frame and rank (layers keep their base)
+    static void applyMaterial(rt::Registry::Instance& in, std::uint32_t id, std::uint8_t rank, bool overlay, std::uint64_t frame);
+    const RtMaterial* bestMaterial(const Blas& b) const;
+    void refreshSegments(Blas& b);
+    void learnLayer(d3d9::Device& dev, const d3d9::ReplaceQuery& q, const rt::BlasKey& key);
+    // the record / segment material fields of `m` (bindless slots of this frame); returns whether the opacity has a texture
+    struct MaterialFields {
+        std::uint32_t albedoTex = 0, albedoSampler = 0, uvSet = 0, opacityTex = 0;
+        float uvMap[2][4]{};
+    };
+    static MaterialFields materialFields(const RtMaterial* m);
+    static constexpr std::size_t kMaterialSlots = 8;
     // CPU side of a build: index range scan (max vertex, bounds); false = unusable (logged once per reason)
     bool prepareInputs(Blas& b);
     void processCompactions(VkCommandBuffer cmd, std::uint32_t slot);
@@ -156,12 +200,20 @@ private:
     std::uint64_t nextBlasId_ = 1;
     std::uint64_t blasBytes_ = 0;
     rt::Registry registry_;
+    RtMaterials materials_;
     // not part of the scene: water (it reflects, it is not reflected) and alpha-blended meshes: materials and exact draw
     // ranges seen in the main view's refracted / water / blended draws; the sun cascades draw the same meshes untagged and
     // unblended
     std::unordered_set<const void*> waterMaterials_;
     std::unordered_set<rt::BlasKey, rt::BlasKeyHash> waterKeys_;
     std::unordered_map<rt::BlasKey, std::uint64_t, rt::BlasKeyHash> blendedKeys_;  // -> the frame the main view last drew it blended
+    // ranges the main view draws only as blended solid layers (no BLAS): the first layer's material (a reference held), a
+    // segment source for the merged ranges covering them
+    struct Layer {
+        std::uint32_t material = 0;
+        std::uint64_t sig = 0, seen = 0, resolved = 0;
+    };
+    std::unordered_map<rt::BlasKey, Layer, rt::BlasKeyHash> layers_;
 
     // GPU resources (while active)
     vk::rt::AddressBuffer scratch_;
@@ -179,6 +231,7 @@ private:
         std::uint64_t frames = 0, built = 0, builtTriangles = 0, compacted = 0, evicted = 0, failed = 0, observed = 0, skipped = 0;
         std::uint64_t compactSaved = 0;
         double buildCpuMs = 0.0, passCpuMs = 0.0, observeMs = 0.0, gpuMs = 0.0;
+        std::uint64_t textured = 0, untextured = 0, cutOut = 0, segmented = 0, segments = 0, speedTree = 0;  // records of the last frame
         std::uint64_t gpuSamples = 0;
     } iv_;
     std::deque<std::pair<std::uint64_t, std::vector<Entry>>> contents_;  // frame value -> the TLAS's instances (last 4)
@@ -186,6 +239,8 @@ private:
     std::uint64_t lastTriangles_ = 0;
     std::chrono::steady_clock::time_point lastLog_{};
     std::unordered_set<const void*> declLogged_;
+    std::unordered_set<std::uint64_t> blendLogged_;
+    std::unordered_set<const char*> speedTreeLogged_;  // reasons (string literals)
     std::unordered_set<std::uint32_t> reasonsLogged_;
     bool instanceIndexChecked_ = false;
     std::uint64_t indexDeviations_ = 0;

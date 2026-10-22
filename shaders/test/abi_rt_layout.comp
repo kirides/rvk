@@ -12,7 +12,10 @@ void main() {
     RvkRtRecord r = rvkRtRecord(pc.frame, 0u);
     uint v = pc.passId + pc.passFlags + pc.depthTex + pc.width + pc.height + pc.srcTex + pc.srcSampler + pc.mode +
              r.vertices.x + r.indices.y + r.stride + r.flags + r.normal + r.texcoord0 + r.texcoord1 + r.texcoord6 + r.color0 +
-             r.instanceId + r.albedoTex + r.albedoSampler + r.alpha + r.uvSet + floatBitsToUint(r.uvMap0.x + r.uvMap1.w) +
+             r.instanceId + r.albedoTex + r.albedoSampler + r.alpha + r.uvSet + floatBitsToUint(r.uvMap0.x + r.uvMap1.w) + r.segments.y + r.segmentCount + r.pad +
+             RvkRtSegments(r.segments).s[0].firstPrimitive + RvkRtSegments(r.segments).s[0].primitiveCount +
+             RvkRtSegments(r.segments).s[0].albedoTex + RvkRtSegments(r.segments).s[0].albedoSampler + RvkRtSegments(r.segments).s[0].alpha +
+             RvkRtSegments(r.segments).s[0].uvSet + floatBitsToUint(RvkRtSegments(r.segments).s[0].uvMap0.x + RvkRtSegments(r.segments).s[0].uvMap1.w) +
              pc.frame.rtScene.x + pc.frame.rtInfo.y + pc.probes.x;
     imageStore(sink, ivec2(0), uvec4(v));
 }

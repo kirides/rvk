@@ -5,6 +5,8 @@
 //                                                                (--tint: the pixel shaders' tint debug-view variant)
 //   rvk_shadertool show <file>                                   disassembly, GLSL, compiler log of one shader
 //   rvk_shadertool refdisasm <file>                              D3DXDisassembleShader (d3dx9_39.dll) as the reference listing
+//   rvk_shadertool evalcheck <dir>                               the CPU evaluator (shader/sm_eval.h) on every SM 3.0 shader of a
+//                                                                corpus: failures by reason, pixel shaders sampling s9, slices
 //
 // The corpus comes from mode = "trace" (bin\rvk\corpus). Exit code 0 when every shader passes.
 
@@ -23,6 +25,7 @@
 #include <spirv-tools/libspirv.hpp>
 
 #include "shader/glsl.h"
+#include "shader/sm_eval.h"
 #include "shader/sm_ir.h"
 #include "shader/spirv.h"
 
@@ -168,6 +171,47 @@ int cmdRefDisasm(const fs::path& file) {
     return 0;
 }
 
+int cmdEvalCheck(const fs::path& dir) {
+    namespace ev = rvk::shader::eval;
+    std::map<std::string, int> errors;
+    int total = 0, ok = 0, ps9 = 0, ps9Flow = 0, ps9Rel = 0, ps9Consts = 0;
+    static float consts[256][4];
+    for (int i = 0; i < 256; ++i) consts[i][0] = consts[i][1] = consts[i][2] = consts[i][3] = 0.5f;
+    for (const auto& e : fs::directory_iterator(dir)) {
+        const std::string name = e.path().filename().string();
+        if (name.rfind("vs30_", 0) != 0 && name.rfind("ps30_", 0) != 0) continue;
+        const DecodeResult dec = decode(readTokens(e.path()));
+        if (!dec.ok()) continue;
+        ++total;
+        ev::Env env;
+        env.floats = consts;
+        env.floatCount = 224;
+        for (auto& v : env.inputs) v = {0.25f, 0.5f, 0.75f, 1.0f};
+        const ev::Result r = ev::run(dec.program, env);
+        if (r.ok) {
+            ++ok;
+        } else {
+            std::string key = r.error.substr(0, r.error.find(" at token"));
+            ++errors[key];
+        }
+        if (dec.program.version.stage == Stage::Pixel) {
+            const std::size_t at = ev::firstSample(dec.program, 9);
+            if (at != SIZE_MAX) {
+                ++ps9;
+                const ev::Slice s = ev::sliceSource(dec.program, at, 0, 0x3);
+                ps9Flow += s.flow ? 1 : 0;
+                ps9Rel += s.relative ? 1 : 0;
+                ps9Consts += static_cast<int>(s.floatConsts.size());
+            }
+        }
+    }
+    std::printf("evaluated %d of %d SM 3.0 shaders without error\n", ok, total);
+    for (const auto& [k, n] : errors) std::printf("  %5d  %s\n", n, k.c_str());
+    std::printf("pixel shaders sampling s9: %d (slice with flow control %d, relative %d, %.2f constants on average)\n", ps9, ps9Flow, ps9Rel,
+                ps9 > 0 ? static_cast<double>(ps9Consts) / ps9 : 0.0);
+    return ok == total ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -194,6 +238,7 @@ int main(int argc, char** argv) {
     }
     if (cmd == "show") return cmdShow(argv[2]);
     if (cmd == "refdisasm") return cmdRefDisasm(argv[2]);
+    if (cmd == "evalcheck") return cmdEvalCheck(argv[2]);
     std::printf("unknown command %s\n", cmd.c_str());
     return 2;
 }

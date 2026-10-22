@@ -40,8 +40,13 @@ bool linearFilter(eCGfxShared::eETexFilter f) { return static_cast<std::uint32_t
 
 // ---- textures --------------------------------------------------------------------------------------------------------
 
-HalTexture::HalTexture(HalDevice& dev, std::unique_ptr<d3d9::Texture> tex) : dev_(dev), tex_(std::move(tex)) {}
-HalTexture::~HalTexture() { dev_.dev().release(std::move(tex_)); }
+HalTexture::HalTexture(HalDevice& dev, std::unique_ptr<d3d9::Texture> tex) : dev_(dev), tex_(std::move(tex)) {
+    dev_.registerTexture(static_cast<const eCAPITexture*>(this), tex_.get());
+}
+HalTexture::~HalTexture() {
+    dev_.unregisterTexture(static_cast<const eCAPITexture*>(this));
+    dev_.dev().release(std::move(tex_));
+}
 
 bEResult HalTexture::LockRect(unsigned int a0, eCGfxShared::eSGfxLockedRect* a1, tagRECT const* a2, unsigned long a3) {
     return lockLevel(tex_.get(), a0, 0, a2, a3, a1) ? bEResult_Ok : bEResult_False;

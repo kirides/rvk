@@ -146,7 +146,19 @@
     X(cascadeSetShadowMapSize, L"Engine.dll", "?SetShadowMapSize@eCCascadeShadowMap@@QEAAXAEBH@Z", false)                       \
     X(cascadeSetSplitCount, L"Engine.dll", "?SetSplitCount@eCCascadeShadowMap@@QEAAXAEBH@Z", false)                             \
     X(timerGetGameTime, L"Engine.dll", "?GetGameTime@eCTimer@@QEBAKXZ", false)                                                    \
-    X(appGetAppState, L"Engine.dll", "?GetAppState@eCApplication@@QEBAKXZ", false)
+    X(appGetAppState, L"Engine.dll", "?GetAppState@eCApplication@@QEBAKXZ", false)                                              \
+    /* ---- the material graph (engine/materials.*, docs/research/rt-albedo-facts.md 1): eCShaderBase* eCShaderBase::         \
+       ms_pActiveShader (0xc62970, set by ExecuteShaderConstants 0x6d2f90), the shader / colour-source vtables ---- */         \
+    X(shaderBaseActiveShader, L"Engine.dll", "?ms_pActiveShader@eCShaderBase@@1PEAV1@EA", false)                                \
+    X(shaderDefaultVftable, L"Engine.dll", "??_7eCShaderDefault@@6B@", false)                                                   \
+    X(shaderLeafsVftable, L"Engine.dll", "??_7eCShaderLeafs@@6B@", false)                                                       \
+    X(colorSrcSamplerVftable, L"Engine.dll", "??_7eCColorSrcSampler@@6B@", false)                                               \
+    X(colorSrcCombinerVftable, L"Engine.dll", "??_7eCColorSrcCombiner@@6B@", false)                                             \
+    X(colorSrcBlendVftable, L"Engine.dll", "??_7eCColorSrcBlend@@6B@", false)                                                   \
+    X(colorSrcMaskVftable, L"Engine.dll", "??_7eCColorSrcMask@@6B@", false)                                                     \
+    X(colorSrcCubeSamplerVftable, L"Engine.dll", "??_7eCColorSrcCubeSampler@@6B@", false)                                       \
+    X(colorSrcConstantVftable, L"Engine.dll", "??_7eCColorSrcConstant@@6B@", false)                                             \
+    X(colorSrcVertexColorVftable, L"Engine.dll", "??_7eCColorSrcVertexColor@@6B@", false)
 
 namespace rvk::engine {
 

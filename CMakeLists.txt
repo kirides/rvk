@@ -155,6 +155,8 @@ add_library(rvk_core STATIC
     src/enh/debug_view.h
     src/enh/rt_debug.cpp
     src/enh/rt_debug.h
+    src/enh/rt_material.cpp
+    src/enh/rt_material.h
     src/enh/rt_registry.cpp
     src/enh/rt_registry.h
     src/enh/rt_scene.cpp
@@ -173,6 +175,10 @@ add_library(rvk_core STATIC
     src/enh/water.h
     src/enh/water_profile.cpp
     src/enh/water_profile.h
+    src/engine/materials.cpp
+    src/engine/materials.h
+    src/engine/memread.cpp
+    src/engine/memread.h
     src/engine/scene_hooks.cpp
     src/engine/scene_hooks.h
     src/engine/shadow_maps.cpp
@@ -214,6 +220,8 @@ add_library(rvk_core STATIC
     src/shader/glsl.h
     src/shader/sm_decode.cpp
     src/shader/sm_disasm.cpp
+    src/shader/sm_eval.cpp
+    src/shader/sm_eval.h
     src/shader/sm_ir.h
     src/shader/sm_tokens.cpp
     src/shader/sm_tokens.h
@@ -325,7 +333,7 @@ rvk_warnings(rvk_d3d9test)
 # tests
 # ---------------------------------------------------------------------------------------------
 if(RVK_BUILD_TESTS)
-    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp tests/api_tests.cpp tests/fvf_tests.cpp tests/settings_tests.cpp tests/settings_api_tests.cpp tests/scene_tests.cpp tests/draws_tests.cpp tests/inject_tests.cpp tests/caps_tests.cpp tests/water_tests.cpp tests/ocean_tests.cpp tests/shadows_tests.cpp tests/rt_tests.cpp)
+    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp tests/api_tests.cpp tests/fvf_tests.cpp tests/settings_tests.cpp tests/settings_api_tests.cpp tests/scene_tests.cpp tests/draws_tests.cpp tests/inject_tests.cpp tests/caps_tests.cpp tests/water_tests.cpp tests/ocean_tests.cpp tests/shadows_tests.cpp tests/rt_tests.cpp tests/shader_eval_tests.cpp)
     target_link_libraries(rvk_tests PRIVATE rvk_core SPIRV-Tools-static)
     rvk_warnings(rvk_tests)
     add_test(NAME rvk_tests COMMAND rvk_tests)

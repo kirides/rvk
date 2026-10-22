@@ -250,6 +250,11 @@ public:
     ~HalDevice() override;
     bool create(const Options& options, const eCAPIDevice::eSAPIStartParameters& params);
     d3d9::Device& dev() { return dev_; }
+    // live HAL textures by the engine's eCAPITexture pointer (any thread): engine image data -> our texture (the RT scene's
+    // materials, enh/rt_material: eCGfxImageData +0x60)
+    void registerTexture(const void* api, d3d9::Texture* texture);
+    void unregisterTexture(const void* api);
+    d3d9::Texture* textureOfApi(const void* api);
     const Options& options() const { return options_; }
 
     // render-state writes: `normal` setters respect the master flags; effects call setRenderState directly
@@ -457,6 +462,8 @@ private:
     float clipPlanes_[6][4]{};
     // handles
     std::mutex handleMutex_;
+    std::mutex apiTextureMutex_;
+    std::unordered_map<const void*, d3d9::Texture*> apiTextures_;
     std::unordered_map<void*, std::unique_ptr<d3d9::VertexDecl>> decls_;
     std::unordered_map<std::uint32_t, std::unique_ptr<d3d9::VertexDecl>> fvfDecls_;
     std::unordered_map<void*, std::unique_ptr<d3d9::Texture>> depthBuffers_;
