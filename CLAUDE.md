@@ -66,8 +66,9 @@ never in captures unless `-OverlayInScreenshots`; `-Commands '1500: overlay open
 overlay / settings commands at presents (`key`/`click` post real window messages: input tests in the background);
 `-NoOverlay`. config.toml's non-default `[vulkan] vsync / max_fps / adapter` lock the matching player setting.
 Enhanced water (docs/research/water.md; settings category Water, default off): `-Setting 'water.enabled=true'` (+
-`water.quality=low|medium|high`, `water.reflections=sky|ssr`, `water.ocean_waves`, `water.wave_height`, `water.murkiness`,
-`water.reflection_strength`; debug view `water.debug=shore_field|depth|normals|reflection|foam`). The look is the engine's
+`water.quality=low|medium|high`, `water.reflections=sky|ssr`, `water.ocean=off|gerstner|fft`, `water.ocean_quality=low|medium|high`, `water.sea_state=auto|calm|moderate|rough|storm`,
+`water.wind_direction`, `water.wave_scale`, `water.murkiness`,
+`water.reflection_strength`; debug view `water.debug=shore_field|depth|normals|reflection|foam|sea_floor|waves`). The look is the engine's
 own water material (its pixel shader's model ported in `shaders/water/water.frag`, picked by sampler layout; the engine's
 VS stays on its meshes; water.md 2.3, 4.3) + traced reflections, waves, foam, wet beach. rvk.log: `water: material ...`
 (each water material's name / mesh / kind once), `water: draw of material ...` (per material x pixel shader: its engine
@@ -75,7 +76,14 @@ shaders, declaration, states, constants c6..c14 and VS c232..c241; bytecode in `
 material ... -> model ...` (`none` = an unknown water shader: engine draw), `enh: water: body ...`, `sea mesh mapping`,
 `coast overlay` / `shore field` lines. Side by side engine vs enhanced: `.\scripts\water-compare.ps1 [-Spots a,b]
 [-Setting k=v] [-EngineDir out\water\<stamp>] [-Mask | -MaskDir out\water\<stamp>]` -> `out\water\<stamp>\sbs_<spot>.png` +
-water luma / hue table (`tools/water_stats.py`; `-Mask` = a `water.debug=normals` run for the water masks). Survey
+water luma / hue table (`tools/water_stats.py`; `-Mask` = a `water.debug=normals` run for the water masks; `-Burst 4
+-Interval 8` = a motion sequence per spot -> `motion_<spot>.png`).
+FFT ocean (docs/research/ocean.md, M8; `water.ocean=fft`): compute passes at AfterOpaque (`pass water.ocean` in
+`-PerfFrame`), the sea floor field from the main view's static meshes (`DrawReplacer::observeOpaque`), baked on a worker
+and cached in `bin\rvk\cache\ocean\floor_v1.bin` (delete it to re-learn the coast); rvk.log `enh: ocean: ...` (cascades,
+sea state / Hs, weather -> sea state, `sea floor field ... ms`). Ocean spots of rvkcompare: `sea_cliff`, `sea_horizon`,
+`harbour_mouth` (the camera's distance is capped near 6,000 units: give poses as target + distance <= 5,500). Swim check:
+scenario `rvk_swim` (the hero in the sea, his swim line logged, pictures `swim_follow_b*` / `swim_water_b*`). Survey
 scenario `rvk_water` (water level-mesh entities' boxes + a look at each; `-Param 'only=Levelmesh_Lakemesh_06','find=SP_Don'`;
 `'around=x;y;z','radius=2500'` = 17 pictures around a place; with `-RvkLogLevel trace` rvk.log also names opaque materials).
 Ray tracing tier (docs/research/raytracing.md): optional, enabled at device creation when the GPU has it and `rt.allow`
@@ -98,7 +106,7 @@ from two runs of one renderer (+ known-noise masks). Tests: `python -m unittest 
 run in the dedicated copy `B:\DevDrive\risen-test-vk-cmp`, instance 3, pinned ConfigUser.xml; report
 `out\refcompare\<stamp>\report\report.html`). `-Calibrate` = two D3D9 runs -> a reusable reference (thresholds + known-noise
 masks); `-ReferenceDir out\refcompare\<stamp>` = only the Vulkan run against it (current stored reference:
-`out\refcompare\20261022-002054`, 17 spots); `-Spots a,b`; `-Setting k=v` (Vulkan run's
+`out\refcompare\20261022-093252`, 20 spots); `-Spots a,b`; `-Setting k=v` (Vulkan run's
 player settings, e.g. `rt.allow=false`). Renderer scenario mods live in
 this repo's `mods/` (never in risen-spass). Details, spot list, noise handling: docs/research/reference-compare.md 5, 7, 8, 11.
 

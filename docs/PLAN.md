@@ -260,7 +260,30 @@ efcompare.ps1` + `mods/rvkcompare` (13 spots: beach rain/sun,
   at 1080p (beach), sync validation clean, live toggles without hitch, rvk_tests 84 / 84, refcompare water off 16 / 16 PASS.
   Rest of M7: underwater post, area profiles, wet-sand sheen; M8: FFT, signed shore field with the sea floor (water.md 10).
 
-### M8+ Enhanced graphics
+### M8 Ocean (docs/research/ocean.md; roadmap 2.3)
+* **FFT ocean: done (2026-10-22).** User direction: the ocean / harbour may look slightly different as long as the colour
+  matches; a beautiful simulation, big far waves getting progressively smaller towards the harbour / shore. Built:
+  Tessendorf FFT on compute (spectrum when the sea changes, time evolution of 4 packed complex fields, shared-memory radix-2
+  FFT with specialisation constants, resolve + temporal Jacobian foam, mip chains), JONSWAP wind sea (Hasselmann / Horvath
+  parameters and spreading with the swell term) + a swell spectrum, 3 x 128^2 / 4 x 256^2 / 4 x 512^2 cascades with
+  disjoint bands, sea state from the engine's weather states (`eCWeatherAdmin` blend factors: calm in sunshine .. storm Hs
+  4.7 m) or the player's choice. The M7 clipmap reads the cascades with a continuous footprint LOD (no cracks / popping),
+  capped near the camera at the water, faded towards the far plane. **The sea floor field**: the main view's static meshes
+  (a new `DrawReplacer::observeOpaque` hook) rasterised top-down on a worker into a fixed 2048^2 grid of 84 units, baked to
+  signed distance, depth, the eikonal travel time to the shore (fast sweeping, shallow-water phase speed), the fronts'
+  direction / coherence and the exposure to the open sea; cached in `bin\rvk\cache\ocean`. Per cascade attenuation by
+  depth, distance and shelter + a breaking limit; a wave train rolling in along the travel time (shoaling, refraction,
+  breaking at 0.78 x depth), surf foam, milky surf water, swash in phase. Shading keeps the engine's ocean material + macro
+  Fresnel, SSR on the macro normal, Toksvig-like specular from the filtered slope variance, crest SSS, a filament foam
+  texture without sparkle. Settings `water.ocean`, `water.ocean_quality`, `water.sea_state`, `water.wind_direction`,
+  `water.wave_scale` (`water.ocean_waves` / `water.wave_height` renamed), debug `sea_floor` / `waves`. New spots
+  `sea_cliff`, `sea_horizon`, `harbour_mouth`; scenario `rvk_swim`. Verified: side by side at 6 sea spots + motion
+  sequences (luma vs engine: open sea / cliff / harbour within 5, beaches 15 - 34 darker without the painted surf), ocean
+  GPU 0.12 / 0.22 / 0.43 ms (low / medium / high) + the grid draw, floor bake ~0.4 s on a worker, sync validation clean,
+  live toggles without hitch, rvk_tests 96 / 96, water off: refcompare 18 PASS + 2 WARN against the new stored reference
+  `out\refcompare\20261022-093252` (20 spots). Open: ocean.md 10.
+
+### M9+ Enhanced graphics
 * candidates: anisotropic filtering + MSAA/TAA/SMAA, higher-resolution and better-filtered shadows, modern tonemapping/HDR10,
   SSAO/GTAO, upscaling (FSR), improved water/sky/fog, per-feature toggles (in the settings registry). Each measured and
   screenshotted.

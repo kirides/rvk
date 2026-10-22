@@ -814,8 +814,13 @@ spots do not cover shadows of point lights up close, decals, combat effects or t
 
 ### 11.1 The current stored reference (2026-10-22)
 
-**`out\refcompare\20261022-002054`** (`-Calibrate` with the 17 spots incl. the four water spots, two game-D3D9 runs of 261 /
+**`out\refcompare\20261022-093252`** (M8: `-Calibrate` with the 20 spots incl. the new ocean spots `sea_cliff`,
+`sea_horizon`, `harbour_mouth` and the re-posed `swamp_camp`; all 20 calibrated). Vulkan run against it with the water off
+(the default): **18 PASS + 2 WARN** (`sea_cliff` bad32 0.37 %, psnr_q 37.4; `beach_sun` bad32 0.21 %: the engine's
+animated sea and surf overlay), run `out\refcompare\20261022-094445`. Use `-ReferenceDir out\refcompare\20261022-093252`.
+
+Previous: **`out\refcompare\20261022-002054`** (`-Calibrate` with the 17 spots incl. the four water spots, two game-D3D9 runs of 261 /
 309 s; the old reference `20261021-190139` predates the spots.lua / main.lua changes and is superseded). `lava_cave` was
 skipped by the calibration (eye 4.93 apart between the two D3D9 runs > 4.0): it keeps the default thresholds. First
 Vulkan run against it (water off, HEAD with the water work): **16 PASS + 1 WARN** (beach_rain: bad32 0.53 %, psnr_q 35.2:
-rain and sea noise, as before), run `out\refcompare\20261022-003113`. Use `-ReferenceDir out\refcompare\20261022-002054`.
+rain and sea noise, as before), run `out\refcompare\20261022-003113` (superseded by `20261022-093252`).

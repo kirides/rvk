@@ -6,6 +6,10 @@ GLSL (the same water) with traced reflections, a wave grid for the open sea with
 with surf foam and wet sand instead of the engine's painted surf (better). Builds on the draw tags (draw-tags.md), the frame phases (frame-phases.md)
 and the GLSL pipeline (injection.md).
 
+**M8 (2026-10-22): the open sea's FFT ocean, the sea floor field and the attenuation towards the shore and the harbour
+are in docs/research/ocean.md** (`water.ocean = fft`, the default; the Gerstner sum below is `water.ocean = gerstner`).
+Settings renamed there: `water.ocean_waves` -> `water.ocean` (off / gerstner / fft), `water.wave_height` -> `water.wave_scale`.
+
 Legend: **[C]** confirmed (decompiled, disassembled, or measured in the running game), **[I]** inferred / proposed. RVAs are
 Engine.dll unless marked. Dumps: `B:\DevDrive\risen-ghidra\rvk_water_dump.txt`, `rvk_water_sb_dump.txt` (SharedBase).
 
@@ -149,7 +153,7 @@ layout and logs every new water pixel shader (`enh: water: material '...' (...):
 
 | body | what happens with `water.enabled` |
 |---|---|
-| the open sea, `water.ocean_waves` on | the first sea draw of the main view draws the **wave grid** (procedural), the other sea draws are skipped; the engine's **fake shore overlay is skipped** in frames with the grid |
+| the open sea, `water.ocean` gerstner / fft | the first sea draw of the main view draws the **wave grid** (procedural), the other sea draws are skipped; the engine's **fake shore overlay is skipped** in frames with the grid |
 | the open sea, waves off; lakes, rivers, swamp | the engine's mesh and VS with our pixel shader (the material's model) |
 | a water material whose pixel shader is not one of the four models | the engine's |
 | waterfalls | the engine's (their base becomes whitewater on a lake below: section 4.3) |
@@ -163,12 +167,12 @@ level (level 7 reaches ~1 km past the 600 m far plane), each level snapped to tw
 the world while the camera moves: no swimming), the finer level's footprint left out of each coarser level (degenerate
 quads), odd vertices on a level's outer edge averaged from their even neighbours (no T-junction cracks). 196,608 vertices
 at medium. Height = the sea plane's level + **Gerstner waves** (8 waves, 240 .. 5,200 units long, deep-water dispersion,
-wind angle 0.65 rad, largest amplitude 70 units at `water.wave_height` 1), **damped near the coast** (shore field distance,
+wind angle 0.65 rad, largest amplitude 70 units at `water.wave_scale` 1), **damped near the coast** (shore field distance,
 full height from 4,500 units out) and **near the camera** (capped to 30 units within ~7-30 m: the player wades and swims
 in a calm sea; the roadmap's displacement cap). **Waves rolling in towards the coast** take over inside the coast band
 (250 .. 5,000 units from the overlay): phase over the shore field's distance (crests parallel to the beach, moving towards
 it), direction = the field's direction to the coast, 1,100 units long with a steeper front (a second harmonic), 25 units
-high at `water.wave_height` 1, faded where the field has no direction (coves, points). At the coast the waterline sits **13
+high at `water.wave_scale` 1, faded where the field has no direction (coves, points). At the coast the waterline sits **13
 units below the engine's** and **swashes** ±8 units (it never climbs above the engine's line, so nothing the engine kept
 dry is flooded); the lowering is full at the engine's coast overlay and gone 500 units from it (quays and cliffs keep the
 engine's level). Clip position from the engine's own c0..c3, so the depth test against the beach is exact.
@@ -222,7 +226,7 @@ replacement draws opaque). Verified by drawing the engine's meshes with it and S
 
 The look is the material's; the profile only scales what is added: `reflection` (the player's
 `water.reflection_strength`), `extraReflection` (swamp 0.45, others 0), `foam` (sea 1, others 0), `shoreWaves` (sea 25 x
-`water.wave_height`), `murkiness` (`water.murkiness`: the sea's tint). Lakes, rivers, swamps never get foam, shore waves or
+`water.wave_scale`), `murkiness` (`water.murkiness`: the sea's tint). Lakes, rivers, swamps never get foam, shore waves or
 a lowered waterline (they are never the sea: section 3).
 
 ### 4.5 The wet beach (`wet_shore.frag`, injection point AfterOpaque)
@@ -241,8 +245,8 @@ Cost 0.020 ms at 1080p.
 | `water.enabled` | off | the enhanced water |
 | `water.quality` | medium | low: sky reflections only, grid N 48; medium: 20 SSR steps, N 64; high: 40 steps, N 96 |
 | `water.reflections` | `ssr` | `sky` = the sky cube only |
-| `water.ocean_waves` | on | the sea's wave grid + lower coast + the fake shore off (off: the sea shaded on its own mesh, engine surf kept) |
-| `water.wave_height` | 1.0 (0..3) | offshore waves and the waves rolling in |
+| `water.ocean` | fft | `gerstner` / `fft` (ocean.md): the sea's wave grid + lower coast + the fake shore off; `off`: the sea shaded on its own mesh, engine surf kept (was `water.ocean_waves`) |
+| `water.wave_scale` | 1.0 (0..3) | offshore waves and the waves rolling in (was `water.wave_height`); FFT: `water.ocean_quality`, `water.sea_state`, `water.wind_direction` (ocean.md 7) |
 | `water.murkiness` | 1.0 (0.25..4) | the sea's tint along the light's path |
 | `water.reflection_strength` | 1.0 (0..2) | |
 | `water.debug` | off | Debug category, NoAB: `shore_field`, `depth`, `normals`, `reflection`, `foam` |
@@ -330,7 +334,9 @@ the body / coast / falls / mapping caches are built once per vertex buffer.
 
 ### 8.1 Regression with the feature off
 
-Stored reference `out\refcompare\20261022-002054` (`-Calibrate`, 17 spots). Vulkan run with the water off (the default),
+M8 (2026-10-22): new stored reference `out\refcompare\20261022-093252` (20 spots, `swamp_camp` re-recorded), water off:
+18 PASS + 2 WARN (sea noise), run `20261022-094445` (reference-compare.md 11.1). Before: stored reference
+`out\refcompare\20261022-002054` (`-Calibrate`, 17 spots). Vulkan run with the water off (the default),
 after this pass: **16 / 16 PASS** (beach_rain too), run `out\refcompare\20261022-022425`; `swamp_camp` left out (its pose
 changed, so the stored reference's spots.lua hash differs: re-calibrate that spot with the next `-Calibrate`).
 Earlier: 16 PASS + 1 WARN (beach_rain) in `20261022-003113`.
@@ -354,7 +360,7 @@ Earlier: 16 PASS + 1 WARN (beach_rain) in `20261022-003113`.
 * **M7 rest**: underwater fog / absorption post (water zones + sea level), area profiles (a table keyed by region / water
   zone, overlay-tweakable values), a sheen on wet sand, a water depth prepass (depth of the water surface for later passes),
   more engine models when variants show up.
-* **M8 ocean**: FFT cascades (Tessendorf, JONSWAP from the weather's wind) on the same grid; the shore field upgraded to a
-  signed field with the sea floor (a persistent top-down height field accumulated from the depth map, or the static
-  meshes' geometry from the draw records rasterised like the coast) for wave shoaling, run-up and refraction towards the
-  coast; breaking waves; the displacement cap tied to the player's swim state.
+* **M8 ocean: done (2026-10-22), docs/research/ocean.md**: FFT cascades (Tessendorf, JONSWAP + Hasselmann spreading + swell,
+  sea state from the engine's weather) on the same grid; the sea floor field from the engine's static meshes (signed
+  distance, depth, travel time to the shore, exposure) for the attenuation, shoaling, refraction-like turning, breaking and
+  surf; the displacement cap near the camera at the water. Open there: ocean.md 10.
