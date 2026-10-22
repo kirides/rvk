@@ -12,6 +12,8 @@ param(
     # extra player settings of the enhanced run (water.enabled=true is always set)
     [string[]]$Setting = @(),
     [string]$GameDir = 'B:\DevDrive\risen-test-vk',
+    # risen-spass instance id (run.ps1 -Instance): needed to run beside another Risen
+    [int]$Instance = 0,
     [string[]]$Param = @(),
     [switch]$Validation,
     [switch]$Perf,
@@ -37,7 +39,7 @@ $spotParam = 'spots=' + ($Spots -replace ',', ';')
 
 function Invoke-Run([string]$tag, [string[]]$settings, [int]$burstCount = 1) {
     if (Test-Path $shots) { Get-ChildItem $shots -Filter "${tag}_*" | Remove-Item -Force }
-    $runArgs = @{ Mode = 'vulkan'; GameDir = $GameDir; Mods = @('rvkcompare'); Scenario = 'rvkcompare'; WaitForResult = $true; Seconds = 1200
+    $runArgs = @{ Mode = 'vulkan'; GameDir = $GameDir; Instance = $Instance; Mods = @('rvkcompare'); Scenario = 'rvkcompare'; WaitForResult = $true; Seconds = 1200
                   Param = @("tag=$tag", $spotParam, "burst=$burstCount", "interval=$Interval") + $Param; Setting = $settings; RvkFilter = 'enh: water: (first|wet|material .* none)|\[error\]' }
     if ($Validation) { $runArgs.Validation = $true }
     if ($Perf) { $runArgs.Perf = $true }

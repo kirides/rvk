@@ -225,6 +225,9 @@ void HalDevice::applyWater() {
     const std::string_view d = rs.waterDebug->asEnum();
     s.debug = d == "shore_field" ? 1 : d == "depth" ? 2 : d == "normals" ? 3 : d == "reflection" ? 4 : d == "foam" ? 5 : d == "sea_floor" ? 6 : d == "waves" ? 7 : 0;
     water_->apply(s);
+    // the enhanced water reflects the engine's sky cube everywhere: keep it current (the whole cube every frame; the
+    // engine's own refresh, one face per frame every ~10 s, left lightning flashes baked into some faces: ocean.md 9.8)
+    dev_.setSkyCubeEveryFrame(s.enabled);
 }
 
 void HalDevice::applyVsync() {
@@ -1406,6 +1409,7 @@ bEResult HalDevice::SetRenderTarget(void* a0, void* a1) {
     if (rt != nullptr && rt->texture() != nullptr && rt->texture()->desc().type == d3d9::TextureType::Cube &&
         dev_.phases().view() == d3d9::scene::View::SkyCube) {
         dev_.tagImage(rt->texture(), d3d9::scene::ImageRole::SkyEnvCube);
+        dev_.countSkyCubeFace();
     }
     return bEResult_Ok;
 }

@@ -529,6 +529,13 @@ public:
     void tagImage(Texture* texture, scene::ImageRole role);
     Texture* imageWithRole(scene::ImageRole role) const { return roles_[static_cast<std::size_t>(role)]; }
     void forgetImage(Texture* texture);  // a tagged texture dies
+    // the sky environment cube (eCSkydome_PS::UpdateSkydomeEnvCubemap, docs/research/ocean.md 9.8): faces bound so far (the
+    // HAL counts each face SetRenderTarget in the SkyCube view), and the request to refresh the whole cube every frame
+    // instead of the engine's one face per frame every ~10 s (an enhancement asks for it: the enhanced water's reflection)
+    void countSkyCubeFace() { ++skyCubeFaces_; }
+    std::uint64_t skyCubeFaces() const { return skyCubeFaces_; }
+    void setSkyCubeEveryFrame(bool on) { skyCubeEveryFrame_ = on; }
+    bool skyCubeEveryFrame() const { return skyCubeEveryFrame_; }
     double secondsSinceCreate() const;
     // draw tags (d3d9/draws.h, docs/research/draw-tags.md): the engine hooks keep the current tag; every draw copies it into
     // the frame's records (when recording) and counts its kind in the frame's histogram
@@ -800,6 +807,8 @@ private:
     scene::CameraBlock camera_;
     scene::CameraBlock lastCamera_;
     std::array<Texture*, static_cast<std::size_t>(scene::ImageRole::Count)> roles_{};
+    std::uint64_t skyCubeFaces_ = 0;
+    bool skyCubeEveryFrame_ = false;
     std::uint32_t roleLogs_ = 0;
     std::chrono::steady_clock::time_point createdAt_ = std::chrono::steady_clock::now();
     draws::Tag tag_;

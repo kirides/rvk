@@ -7,6 +7,9 @@
 --   hide_player  the player is not rendered (no idle animation, no shadow); hide_npcs = radius: NPCs and monsters around the player are not rendered
 --   time         { hour, minute }, held every tick until the freeze
 --   weather      a state name or { State = weight, ... } (forced, mode 2, thunder off); interiors use the weights their weather zone gives (calibration)
+--   thunder      true: the forced weather keeps its lightning flashes (default off)
+--   freeze       false: the game time runs on through the capture (default: frozen)
+--   explicit     true: only run when named in -Param spots=... (not part of "all": the reference comparison)
 --   hud          true: HUD visible (default false); gui = { page = n } opens a GUI page, { key = vk, page = n } presses a key (ESC menu)
 --   settle       rendered frames between placement and freeze (weather/wetness/sea need hundreds); default from -Param settle
 --   notes        what the spot exercises
@@ -180,5 +183,14 @@ return {
         hide_player = true, hide_npcs = 3000,
         time = { 12, 0 }, weather = "Sunny_Full",
         notes = "the waterfall Levelmesh_Waterfall_0001 between the lake Levelmesh_Lakemesh_04 and the river Levelmesh_Rivermesh_01",
+    },
+    {
+        id = "beach_night_storm",
+        player = { x = -38559, y = 15, z = -5770, yaw = 58 },
+        camera = { target = { 0, 120, 0 }, yaw = 227, pitch = -6, distance = 700 },
+        hide_player = true, hide_npcs = 2500,
+        time = { 23, 0 }, weather = "Stormy_Rain", thunder = true, freeze = false, explicit = true,
+        settle = 900,
+        notes = "the new-game beach at night in a thunderstorm, looking out to sea along a diagonal (the sky cube's face edge +x / -z behind the screen centre), the clock running: lightning flashes during the engine's sky cube refresh left half of the sea bright (ocean.md 9.8)",
     },
 }

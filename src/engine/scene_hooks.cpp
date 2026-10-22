@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -277,9 +278,39 @@ void detourEndRenderAlpha(void* self) {
 
 using SkyCubeFn = bool (*)(void* sky, void* image);
 Hook<SkyCubeFn> g_skyCube;
+// The engine refreshes its sky cube one face per call (+x, -x, +y, +z, -z: five calls in a row; -y is not refreshed) when
+// its timer expires: eCSkydome_PS +0x3b8 accumulates eCTimer's frame time against the period +0x3bc (~10 s; game time:
+// none under the time freeze) [C: decompiled 0x6e7ed0, face binds logged]. Between two refreshes the cube is stale (a time
+// jump, a loaded save), and a lightning flash during the five frames of a refresh stays baked into some faces for ~10 s:
+// the water reflecting them was bright on one side of a cube edge and dark on the other (docs/research/ocean.md 9.8).
+// With Device::skyCubeEveryFrame the timer is made to expire every frame and the whole cycle runs in that frame (the
+// original called until the face counter wraps; each call is self-contained: its own material begin / end, the main
+// camera restored), so the cube always shows this frame's sky, all faces alike.
+constexpr std::size_t kSkyCubeTimer = 0x3b8;
+constexpr std::size_t kSkyCubePeriod = 0x3bc;
+constexpr int kSkyCubeFacesPerCycle = 5;
+
 bool detourSkyCube(void* sky, void* image) {
     ViewScope scope(View::SkyCube, Pass::Sky, "UpdateSkydomeEnvCubemap");
-    return g_skyCube.original(sky, image);
+    d3d9::Device* d = scope.d;
+    if (d == nullptr || !d->skyCubeEveryFrame() || sky == nullptr || image == nullptr) return g_skyCube.original(sky, image);
+    auto* timer = reinterpret_cast<float*>(static_cast<char*>(sky) + kSkyCubeTimer);
+    const float period = *reinterpret_cast<const float*>(static_cast<char*>(sky) + kSkyCubePeriod);
+    if (!(*timer > period)) *timer = std::max(period, 0.0f) + 1.0f;
+    bool r = true;
+    const std::uint64_t start = d->skyCubeFaces();
+    for (int i = 0; i < kSkyCubeFacesPerCycle; ++i) {
+        const std::uint64_t before = d->skyCubeFaces();
+        r = g_skyCube.original(sky, image);
+        if (d->skyCubeFaces() == before) break;  // the cycle is complete (or the engine has no cube to draw into)
+    }
+    static bool logged = false;
+    if (!logged && d->skyCubeFaces() > start) {
+        logged = true;
+        spdlog::info("scene: sky cube refreshed every frame ({} faces in this frame, the engine's period {:.1f} s)", d->skyCubeFaces() - start,
+                     period);
+    }
+    return r;
 }
 
 using SceneUpdateFn = bool (*)(void* filter, int index);

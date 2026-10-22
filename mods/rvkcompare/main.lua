@@ -46,7 +46,9 @@ do
         for id in only:gmatch("[^,;%s]+") do want[id] = true end
     end
     for _, s in ipairs(SPOTS) do
-        if not want or want[s.id] then selected[#selected + 1] = s end
+        -- (explicit = true: only when asked for by id, never part of "all": spots that are not reproducible enough for the
+        -- reference comparison, e.g. with thunder or a running clock)
+        if (not want and not s.explicit) or (want and want[s.id]) then selected[#selected + 1] = s end
     end
 end
 local plan = { "new game started" }
@@ -226,8 +228,8 @@ local function pin_view(spot, p)
     return false, "camera type " .. tostring(c and c.type)
 end
 
-local function set_weather(spec)
-    return risen.world.set_weather(spec, { thunder = false })
+local function set_weather(spec, thunder)
+    return risen.world.set_weather(spec, { thunder = thunder == true })
 end
 
 local function close_gui(spot)
@@ -263,7 +265,7 @@ local function run_spot(spot)
     local f_start = frames
     hold_time = spot.time or { 12, 0 }
     risen.world.set_time(hold_time[1], hold_time[2])
-    local okw, whyw = set_weather(spot.weather or "Sunny_Full")
+    local okw, whyw = set_weather(spot.weather or "Sunny_Full", spot.thunder)
     if not okw then return false, "weather: " .. tostring(whyw) end
     local p, why = place_player(spot)
     if not p then return false, "player: " .. tostring(why) end
@@ -289,7 +291,9 @@ local function run_spot(spot)
         end
         T.sleep_frames(2)
     end
-    risen.debug.time_freeze(true)
+    -- (freeze = false: the game time runs on through the capture: weather flashes, the engine's sky cube refresh)
+    local freeze = spot.freeze ~= false
+    if freeze then risen.debug.time_freeze(true) end
     T.sleep_frames(freeze_wait)
     local gui_note = nil
     if spot.gui then
@@ -315,7 +319,7 @@ local function run_spot(spot)
         game_ms = timer and timer.game_ms, playing_s = timer and timer.playing_s, pinned_game_ms = pinned,
     })
     close_gui(spot)
-    risen.debug.time_freeze(false)
+    if freeze then risen.debug.time_freeze(false) end
     risen.hud.set_visible(true)
     restore_hidden()
     return status == "done", status
