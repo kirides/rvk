@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "d3d9/device.h"
+#include "overlay/keys.h"
 
 struct HWND__;
 
@@ -47,8 +48,9 @@ public:
 
     // render thread, before each present (frame = the present's number, 1-based): runs the [debug] commands that are due
     void onPresent(std::uint64_t frame);
-    // "overlay open|close|toggle", "set <key> <value>", "ab flip|a|b|copy|reset", "key <name>", "move <x> <y>",
-    // "click <x> <y>": the result / error text in `out`
+    // "overlay open|close|toggle", "set <key> <value>", "ab flip|a|b|copy|reset", "window ...", "key <chord> [frames]",
+    // "keydown <chord>", "keyup <chord>", "type <text>" (overlay/keys.h), "move <x> <y>", "click <x> <y>": the result / error
+    // text in `out`
     bool runCommand(std::string_view command, std::string* out);
 
     // d3d9::PresentOverlay
@@ -70,7 +72,6 @@ private:
     void buildUi();
     void buildSettingsWindow();
     void buildBadges();
-    void postKey(unsigned vk);
 
     d3d9::Device* device_ = nullptr;
     HWND__* window_ = nullptr;
@@ -108,6 +109,7 @@ private:
         std::string text;
     };
     std::vector<Command> commands_;
+    keys::Poster keyPoster_;  // key / keydown / keyup / type
 };
 
 }  // namespace rvk::overlay

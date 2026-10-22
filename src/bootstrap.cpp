@@ -1,6 +1,7 @@
 #include "bootstrap.h"
 
 #include <algorithm>
+#include <charconv>
 #include <atomic>
 #include <cstdint>
 #include <cwctype>
@@ -29,6 +30,7 @@
 #include "hal/trace.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "hal/types_base.h"
+#include "overlay/keys.h"
 #include "rvk_api.h"
 #include "vk/probe.h"
 
@@ -276,10 +278,52 @@ void apiSelfTestPoll() {
     }
 }
 
+// [debug] commands outside Vulkan mode (no overlay): the key commands at eCApplication::Draw calls, so a D3D9 baseline gets the
+// same scripted input (overlay/keys.h; docs/research/debug-mode.md 8)
+struct DrawCommand {
+    std::uint64_t draw;
+    std::string text;
+};
+std::vector<DrawCommand> g_drawCommands;
+overlay::keys::Poster g_drawKeys;
+
+void parseDrawCommands() {
+    if (g_config.mode == Mode::Vulkan) return;  // the overlay runs them at presents
+    for (const auto& c : g_config.commands) {
+        const auto colon = c.find(':');
+        std::uint64_t n = 0;
+        const auto [p, ec] = std::from_chars(c.data(), c.data() + (colon == std::string::npos ? 0 : colon), n);
+        std::string text = colon == std::string::npos ? std::string() : c.substr(colon + 1);
+        text.erase(0, text.find_first_not_of(" \t"));
+        const auto verb = std::string_view(text).substr(0, text.find(' '));
+        if (ec != std::errc() || n == 0 || !overlay::keys::Poster::handles(verb)) {
+            spdlog::warn("[debug] commands: '{}' ignored in mode {} (only \"<draw>: key|keydown|keyup|type ...\" run without the overlay)",
+                         c, toString(g_config.mode));
+            continue;
+        }
+        g_drawCommands.push_back({n, std::move(text)});
+    }
+}
+
+void runDrawCommands(std::uint64_t n, HWND hwnd) {
+    g_drawKeys.tick(hwnd, n);
+    for (auto it = g_drawCommands.begin(); it != g_drawCommands.end();) {
+        if (it->draw <= n) {
+            std::string out;
+            const bool ok = g_drawKeys.run(hwnd, it->text, n, &out);
+            spdlog::info("[debug] command at Draw {}: '{}' -> {}{}", n, it->text, ok ? "" : "FAILED: ", out);
+            it = g_drawCommands.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 void detourAppDraw(void* self, HWND hwnd) {
     engine::scene::appDrawEnter();  // the Gui phase (Vulkan mode; a no-op otherwise)
     const std::uint32_t n = ++g_drawCalls;
     apiSelfTestPoll();
+    runDrawCommands(n, hwnd);
     const bool snap = std::ranges::find(g_config.snapshotFrames, n) != g_config.snapshotFrames.end();
     if (snap) {
         const bool requested = engine::requestEngineSnapshot();
@@ -367,8 +411,10 @@ void onProcessAttach(void* module) {
         engine::shadowmaps::install();
         engine::window::install();  // borderless fullscreen (docs/research/window-mode.md)
     }
-    // eCApplication::Draw: the Gui phase (Vulkan mode) and the debug snapshot + tool-API self-test at fixed Draw calls (any mode)
-    if (ok && (g_config.mode == Mode::Vulkan || !g_config.snapshotFrames.empty()) &&
+    // eCApplication::Draw: the Gui phase (Vulkan mode), the debug snapshot + tool-API self-test at fixed Draw calls (any mode) and
+    // the scripted key commands outside Vulkan mode
+    parseDrawCommands();
+    if (ok && (g_config.mode == Mode::Vulkan || !g_config.snapshotFrames.empty() || !g_drawCommands.empty()) &&
         !g_appDraw.install("eCApplication::Draw", reinterpret_cast<AppDrawFn>(s.appDraw), &detourAppDraw)) {
         spdlog::warn("eCApplication::Draw not hooked: no Gui phase, [debug] snapshot_frames ignored");
     }

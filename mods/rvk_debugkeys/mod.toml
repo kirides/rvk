@@ -1,0 +1,6 @@
+id          = "rvk_debugkeys"
+name        = "Renderer debug-key check"
+version     = "1.0.0"
+author      = "risen-enhanced-graphics"
+description = "Logs the camera every second after a new game started (closes the start window), for the engine's debug keys / free camera driven by run.ps1 -TestMode -Commands (docs/research/debug-mode.md)."
+main        = "main.lua"

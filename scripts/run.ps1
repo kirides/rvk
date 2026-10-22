@@ -67,6 +67,9 @@ param(
     # borderless fullscreen test (docs/research/window-mode.md): ConfigUser.xml <Window FullScreen="true"> (the engine's fullscreen
     # request; Vulkan mode makes it a borderless window over the monitor at the monitor's resolution). Keep such runs short.
     [switch]$Fullscreen,
+    # the engine's debug keys (docs/research/debug-mode.md): <Engine><Debug TestMode="true"> in the copy's ConfigUser.xml; every
+    # other run removes the attribute again (also one the game wrote itself after the cheat code "minsky")
+    [switch]$TestMode,
     [switch]$KeepRunning,
     [switch]$NoAutostart,
     # let the game take the foreground / move the cursor (default: risen-spass background mode)
@@ -151,10 +154,14 @@ if (Test-Path $cfgUser) {
     $xml = [IO.File]::ReadAllText($cfgUser)
     $new = [regex]::Replace($xml, '(?s)(<Window\b[^>]*?)\s+FullScreen="[^"]*"', '$1')
     if ($Fullscreen) { $new = [regex]::Replace($new, '<Window\b', '<Window FullScreen="true"', 1) }
+    # TestMode: drop every TestMode attribute and Debug elements left empty, then add ours
+    $new = [regex]::Replace($new, '(?s)(<Debug\b[^>]*?)\s+TestMode="[^"]*"', '$1')
+    $new = [regex]::Replace($new, '(?s)\s*<Debug\s*>\s*</Debug>|\s*<Debug\s*/>', '')
+    if ($TestMode) { $new = [regex]::Replace($new, '<Engine>', "<Engine>`n`t`t<Debug TestMode=`"true`">`n`t`t</Debug>", 1) }
     if ($new -ne $xml) { [IO.File]::WriteAllText($cfgUser, $new) }
-    Write-Host "ConfigUser.xml: FullScreen $(if ($Fullscreen) { '"true" (borderless fullscreen test)' } else { 'key absent (windowed)' })"
-} elseif ($Fullscreen) {
-    throw "-Fullscreen needs $cfgUser (created by the first run)"
+    Write-Host "ConfigUser.xml: FullScreen $(if ($Fullscreen) { '"true" (borderless fullscreen test)' } else { 'key absent (windowed)' }), TestMode $(if ($TestMode) { '"true" (debug keys)' } else { 'absent' })"
+} elseif ($Fullscreen -or $TestMode) {
+    throw "-Fullscreen / -TestMode need $cfgUser (created by the first run)"
 }
 
 & (Join-Path $SpassRepo 'scripts\test-run.ps1') @spassArgs

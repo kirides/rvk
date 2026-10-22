@@ -17,6 +17,7 @@
 #include <spdlog/spdlog.h>
 
 #include "core/settings.h"
+#include "overlay/keys.h"
 #include "engine/window_mode.h"
 #define IMGUI_IMPL_VULKAN_USE_VOLK
 #include "imgui_impl_vulkan.h"
@@ -48,40 +49,6 @@ unsigned hotkeyVk(const settings::Setting* s) {
     if (n == "pause") return VK_PAUSE;
     if (n == "scroll_lock") return VK_SCROLL;
     return 0;
-}
-
-// key names of the "key" command
-unsigned vkFromName(std::string_view n) {
-    if (n.size() == 1) {
-        const char c = static_cast<char>(std::toupper(static_cast<unsigned char>(n[0])));
-        if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) return static_cast<unsigned>(c);
-    }
-    if (n.size() >= 2 && (n[0] == 'f' || n[0] == 'F')) {
-        int k = 0;
-        const auto [p, ec] = std::from_chars(n.data() + 1, n.data() + n.size(), k);
-        if (ec == std::errc() && p == n.data() + n.size() && k >= 1 && k <= 12) return VK_F1 + static_cast<unsigned>(k - 1);
-    }
-    struct Named {
-        const char* name;
-        unsigned vk;
-    };
-    static constexpr Named names[] = {{"escape", VK_ESCAPE}, {"enter", VK_RETURN}, {"space", VK_SPACE}, {"tab", VK_TAB},
-                                      {"up", VK_UP},         {"down", VK_DOWN},    {"left", VK_LEFT},   {"right", VK_RIGHT},
-                                      {"backspace", VK_BACK}};
-    for (const auto& x : names) {
-        if (n == x.name) return x.vk;
-    }
-    return 0;
-}
-
-bool isExtendedKey(unsigned vk) {
-    switch (vk) {
-    case VK_INSERT: case VK_DELETE: case VK_HOME: case VK_END: case VK_PRIOR: case VK_NEXT:
-    case VK_LEFT: case VK_RIGHT: case VK_UP: case VK_DOWN: case VK_RCONTROL: case VK_RMENU:
-        return true;
-    default:
-        return false;
-    }
 }
 
 bool isKeyboardMessage(UINT msg) {
@@ -337,14 +304,6 @@ LRESULT Overlay::handleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return callGame(hwnd, msg, wp, lp);
 }
 
-void Overlay::postKey(unsigned vk) {
-    const auto scan = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
-    const LPARAM down = 1 | (static_cast<LPARAM>(scan & 0xff) << 16) | (isExtendedKey(vk) ? (1 << 24) : 0);
-    const LPARAM up = down | (1 << 30) | (static_cast<LPARAM>(1) << 31);
-    PostMessageW(window_, WM_KEYDOWN, vk, down);
-    PostMessageW(window_, WM_KEYUP, vk, up);
-}
-
 // ---- commands -------------------------------------------------------------------------------------------------------
 
 void Overlay::onPresent(std::uint64_t frame) {
@@ -355,6 +314,7 @@ void Overlay::onPresent(std::uint64_t frame) {
     gpu_[historyPos_] = live.gpuMs;
     historyPos_ = (historyPos_ + 1) % kHistory;
     historyCount_ = std::min(historyCount_ + 1, kHistory);
+    keyPoster_.tick(window_, frame);  // releases of "key" chords first (a press stays down for at least one frame)
     for (auto it = commands_.begin(); it != commands_.end();) {
         if (it->frame <= frame) {
             std::string out;
@@ -407,12 +367,7 @@ bool Overlay::runCommand(std::string_view command, std::string* out) {
         const auto rest = command.substr(static_cast<std::size_t>(w[1].data() - command.data()));
         return engine::window::runCommand(rest, out);
     }
-    if (w[0] == "key" && w.size() == 2) {
-        const unsigned vk = vkFromName(w[1]);
-        if (vk == 0) return fail("unknown key name");
-        postKey(vk);
-        return ok(std::format("posted WM_KEYDOWN/UP vk 0x{:02x}", vk));
-    }
+    if (keys::Poster::handles(w[0])) return keyPoster_.run(window_, command, frame_, out);
     if ((w[0] == "move" || w[0] == "click") && w.size() == 3) {
         int x = 0, y = 0;
         std::from_chars(w[1].data(), w[1].data() + w[1].size(), x);
