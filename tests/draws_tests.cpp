@@ -175,6 +175,20 @@ TEST(identity_ring_buffer_generations) {
     CHECK(p.op == Op::Patch && p.lo == 1000 && p.hi == 1024);
 }
 
+TEST(identity_texture_lock_dirty) {
+    // a write lock uploads the locked rect, whether or not the level was uploaded before
+    CHECK(textureLockDirty(0, false) == LockDirty::Locked);
+    CHECK(textureLockDirty(0, true) == LockDirty::Locked);
+    CHECK(textureLockDirty(LOCK_DISCARD, true) == LockDirty::Locked);
+    CHECK(textureLockDirty(LOCK_NOSYSLOCK, false) == LockDirty::Locked);
+    // READONLY on a fresh level: D3D9 keeps it dirty as a whole until the first upload (eCGfxImageData::OnRead writes the
+    // savegame thumbnail through such a lock)
+    CHECK(textureLockDirty(LOCK_READONLY, false) == LockDirty::WholeLevel);
+    CHECK(textureLockDirty(LOCK_READONLY | LOCK_NOSYSLOCK, false) == LockDirty::WholeLevel);
+    // READONLY once the image holds data (uploaded or a blit destination): nothing
+    CHECK(textureLockDirty(LOCK_READONLY, true) == LockDirty::None);
+}
+
 // ---- shader semantics ----
 
 TEST(semantics_names) {

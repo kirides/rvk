@@ -56,4 +56,15 @@ private:
     std::uint32_t generation_ = 0;
 };
 
+// What a D3D9 texture lock (LOCK_* flags) adds to the level's next upload. D3D9's managed / system-memory pools keep a level
+// dirty as a whole from creation until its first upload, so the data written under a READONLY lock of a fresh level reaches
+// the GPU: eCGfxImageData::OnRead fills the savegame thumbnails that way (docs/research/savegame-thumbnails.md). Once the GPU
+// image holds data (uploaded, or written by a blit), READONLY adds nothing.
+enum class LockDirty : std::uint8_t {
+    None,        // nothing to upload
+    Locked,      // the locked rect (null = the whole level)
+    WholeLevel,  // the whole level, whatever the rect
+};
+LockDirty textureLockDirty(std::uint32_t flags, bool levelHoldsGpuData);
+
 }  // namespace rvk::d3d9

@@ -202,8 +202,23 @@ bool Texture::lock(std::uint32_t level, std::uint32_t face, const std::int32_t* 
     out.bits = l.data.data() + offset;
     out.rowPitch = l.rowPitch;
     out.slicePitch = l.slicePitch;
-    if ((flags & LOCK_READONLY) == 0) {
-        markDirty(l, level, rect);
+    switch (textureLockDirty(flags, l.uploaded || gpuWritten_)) {
+        case LockDirty::Locked:
+            markDirty(l, level, rect);
+            break;
+        case LockDirty::WholeLevel: {
+            // a fresh level is dirty as a whole in D3D9: what is written under this READONLY lock is uploaded (the savegame
+            // thumbnails, eCGfxImageData::OnRead; docs/research/savegame-thumbnails.md)
+            markDirty(l, level, nullptr);
+            static std::atomic<int> logged{0};
+            if (desc_.pool != POOL_SYSTEMMEM && logged.fetch_add(1) < 4) {  // system memory: read-back targets, not sampled
+                spdlog::info("d3d9: read-only lock of level {} of a fresh {}x{} {} texture (pool {}): the level is uploaded as a whole",
+                             level, desc_.width, desc_.height, vk::d3dFormatName(desc_.format), desc_.pool);
+            }
+            break;
+        }
+        case LockDirty::None:
+            break;
     }
     return true;
 }

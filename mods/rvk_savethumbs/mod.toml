@@ -1,0 +1,6 @@
+id          = "rvk_savethumbs"
+name        = "Renderer savegame thumbnail shots"
+version     = "1.0.0"
+author      = "risen-enhanced-graphics"
+description = "Writes a named savegame and screenshots the Load / Save pages with their thumbnails (risen-enhanced-graphics): scenario rvk_savethumbs."
+main        = "main.lua"

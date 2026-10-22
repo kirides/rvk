@@ -79,4 +79,11 @@ void BufferCopyState::committed(const Plan& plan, bool ring, std::uint64_t frame
     }
 }
 
+LockDirty textureLockDirty(std::uint32_t flags, bool levelHoldsGpuData) {
+    if ((flags & LOCK_READONLY) == 0) {
+        return LockDirty::Locked;
+    }
+    return levelHoldsGpuData ? LockDirty::None : LockDirty::WholeLevel;
+}
+
 }  // namespace rvk::d3d9

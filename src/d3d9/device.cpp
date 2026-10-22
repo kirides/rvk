@@ -1229,6 +1229,7 @@ void Device::stretchRect(Surface* src, const std::int32_t* srcRect, Surface* dst
          linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
     src->texture()->lastUseFrame_ = frameValue();
     dst->texture()->lastUseFrame_ = frameValue();
+    dst->texture()->gpuWritten_ = true;  // a later READONLY lock must not upload the (stale) CPU copy over it
 }
 
 bool Device::readRenderTarget(Surface* src, Texture* dst, std::uint32_t dstLevel) {

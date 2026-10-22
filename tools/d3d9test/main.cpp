@@ -530,6 +530,32 @@ void testLockAfterUpload(Fixture& f) {
     f.dev.release(std::move(tex));
 }
 
+void testReadOnlyLockOfFreshTexture(Fixture& f) {
+    // eCGfxImageData::OnRead (the savegame thumbnails) fills a fresh managed texture through LockImageLayer(level,
+    // D3DLOCK_READONLY): D3D9 keeps a fresh level dirty until its first upload, so the written texels are sampled
+    TextureDesc d;
+    d.width = d.height = 64;
+    d.format = vk::d3dfmt::A8R8G8B8;
+    d.pool = POOL_MANAGED;
+    auto tex = f.dev.createTexture(d);
+    Texture::Locked lk;
+    tex->lock(0, 0, nullptr, LOCK_READONLY, lk);
+    fillLocked(lk, 0, 0, 0, 0, 64, 64, 0xFF00FF00);
+    fillLocked(lk, 0, 0, 0, 0, 16, 16, 0xFFFF0000);
+    tex->unlock(0, 0);
+    Pixels p;
+    drawTexture(f, tex.get(), "readonly_fresh_1", p);
+    expect("read-only lock of a fresh level", p, 50, 50, 0x00FF00);
+    expect("read-only lock of a fresh level: corner", p, 5, 5, 0xFF0000);
+    // after the upload a READONLY lock adds nothing: a write through it is not uploaded (D3D9 behaves alike)
+    tex->lock(0, 0, nullptr, LOCK_READONLY, lk);
+    fillLocked(lk, 0, 0, 32, 32, 64, 64, 0xFF0000FF);
+    tex->unlock(0, 0);
+    drawTexture(f, tex.get(), "readonly_fresh_2", p);
+    expect("read-only lock after the upload", p, 50, 50, 0x00FF00);
+    f.dev.release(std::move(tex));
+}
+
 void testFvf(Fixture& f) {
     // an FVF vertex buffer (XYZ | DIFFUSE | TEX2, the engine's 0x242): stride and declaration from the FVF, like
     // IDirect3DDevice9::SetFVF with a vertex shader bound
@@ -771,6 +797,7 @@ int main(int argc, char** argv) {
         {"instancing", testInstancing}, {"UP + scissor", testUpAndScissor}, {"stretch rect", testStretchRect},
         {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
+        {"read-only lock of a fresh texture", testReadOnlyLockOfFreshTexture},
         {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
     };
     for (const auto& [name, fn] : cases) {

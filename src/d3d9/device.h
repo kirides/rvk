@@ -142,6 +142,7 @@ private:
     std::vector<Level> cpu_;            // [face * levels + level], allocated on demand
     std::atomic<bool> pending_{false};  // some level is dirty
     bool lockedOnce_ = false;           // ever locked: keep the CPU copies (D3D9 managed semantics)
+    std::atomic<bool> gpuWritten_{false};  // a blit destination (Device::stretchRect): its image holds data the CPU copy lacks
     bool restoreWarned_ = false;
     std::uint64_t lastUseFrame_ = 0;
     std::vector<std::unique_ptr<Surface>> surfaces_;
