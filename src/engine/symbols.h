@@ -121,14 +121,17 @@
        eCEngineComponentBase* eCModuleAdmin::FindModule(bCString const&) const; the eCWeatherAdmin vtable (the module found       \
        by class name is checked against it); int eCWeatherAdmin::GetWeatherStatesCount() const, eCWeatherStates*                  \
        eCWeatherAdmin::GetWeatherStatesAt(int) const; bCString const& eCWeatherStates::GetName() const, float                     \
-       eCWeatherStates::GetBlendFactor() const (the weight of the state in the current blend; risen-spass reads the same) */      \
+       eCWeatherStates::GetBlendFactor() const (the weight of the state in the current blend; risen-spass reads the same);        \
+       bCVector const& eCWeatherAdmin::GetPlayerPosition() const (0x713ea0: the player's position the game hands the weather      \
+       for its zones; the FFT ocean's near-water wave cap follows it) */                                                          \
     X(moduleAdminGetInstance, L"Engine.dll", "?GetInstance@eCModuleAdmin@@SAAEAV1@XZ", false)                                     \
     X(moduleAdminFindModule, L"Engine.dll", "?FindModule@eCModuleAdmin@@QEBAPEAVeCEngineComponentBase@@AEBVbCString@@@Z", false)  \
     X(weatherAdminVftable, L"Engine.dll", "??_7eCWeatherAdmin@@6B@", false)                                                       \
     X(weatherStatesCount, L"Engine.dll", "?GetWeatherStatesCount@eCWeatherAdmin@@QEBAHXZ", false)                                 \
     X(weatherStatesAt, L"Engine.dll", "?GetWeatherStatesAt@eCWeatherAdmin@@QEBAPEAVeCWeatherStates@@H@Z", false)                  \
     X(weatherStateName, L"Engine.dll", "?GetName@eCWeatherStates@@QEBAAEBVbCString@@XZ", false)                                   \
-    X(weatherStateBlend, L"Engine.dll", "?GetBlendFactor@eCWeatherStates@@QEBAMXZ", false)
+    X(weatherStateBlend, L"Engine.dll", "?GetBlendFactor@eCWeatherStates@@QEBAMXZ", false)                                        \
+    X(weatherPlayerPosition,L"Engine.dll", "?GetPlayerPosition@eCWeatherAdmin@@QEBAAEBVbCVector@@XZ", false)
 
 namespace rvk::engine {
 

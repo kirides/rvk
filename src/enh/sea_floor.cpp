@@ -346,8 +346,42 @@ Field bake(const Heights& h, float seaLevel, const shore::Field& overlay) {
         }
     });
     boxBlur(cexp, cw, ch, 1);
+    // diffraction: waves entering a sheltered basin through its mouth spread into it and decay with the way they travel
+    // through the water (x 0.8 per ~600-unit cell, geodesic: land cells pass nothing on), so a harbour gets calmer the
+    // further in from its mouth
+    {
+        constexpr float kDecay = 0.8f;
+        const float kDiag = kDecay * kDecay * 0.92f;  // ~0.8^1.41
+        std::vector<float> next = cexp;
+        for (int it = 0; it < 16; ++it) {
+            bool changed = false;
+            for (int z = 0; z < ch; ++z) {
+                for (int x = 0; x < cw; ++x) {
+                    const std::size_t i = static_cast<std::size_t>(z) * cw + x;
+                    if (cland[i]) continue;
+                    float m = cexp[i];
+                    for (int oz = -1; oz <= 1; ++oz) {
+                        for (int ox = -1; ox <= 1; ++ox) {
+                            if (ox == 0 && oz == 0) continue;
+                            const int nx = x + ox, nz = z + oz;
+                            if (nx < 0 || nz < 0 || nx >= cw || nz >= ch) continue;
+                            const std::size_t j = static_cast<std::size_t>(nz) * cw + nx;
+                            if (cland[j]) continue;
+                            m = std::max(m, cexp[j] * (ox != 0 && oz != 0 ? kDiag : kDecay));
+                        }
+                    }
+                    if (m > next[i] + 1e-4f) {
+                        next[i] = m;
+                        changed = true;
+                    }
+                }
+            }
+            cexp = next;
+            if (!changed) break;
+        }
+    }
     out.msExposure = static_cast<float>(nowMs() - t0);
-    t0 = nowMs();  // long waves bend into the lee a little (diffraction)
+    t0 = nowMs();
 
     // ---- pack ----
     out.grid = g;

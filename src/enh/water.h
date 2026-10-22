@@ -82,8 +82,11 @@ struct WaterBlock {
     float floorMap[4];       // floor field: xy corner (world xz), zw 1 / extent
     std::uint32_t floorTex[4];  // x field A, y field B (bindless), z valid
     float shoreWave[4];      // x period (s), y amplitude (world units), z breaker index, w unused
+    float player[4];         // the player's position (eCWeatherAdmin), w 1 = known
+    float foamMap[4];        // the foam buffer: xy its first cell (world), z its extent, w 1 / extent
+    std::uint32_t foamTex[4];   // x the foam buffer (bindless t2D, 0 = none), y its sampler (linear, wrap)
 };
-static_assert(sizeof(WaterBlock) == 192 + 67 * 16);
+static_assert(sizeof(WaterBlock) == 192 + 70 * 16);
 
 // mirror of shaders/water/wet_shore.frag WetPush
 struct WetShorePush {
@@ -91,9 +94,10 @@ struct WetShorePush {
     std::uint32_t depthTex, fieldTex, smpLinear, smpPoint;
     float shoreMap[4];
     float ocean[4];
-    float params[4];
+    float params[4];         // time, wet height, darkening, swash period (0 = the M7 swash)
+    std::uint32_t sky[4];    // the sky cube (tCube slot), its sampler
 };
-static_assert(sizeof(WetShorePush) == 80 && sizeof(WetShorePush) <= shader::abi::kPushConstantBudget);
+static_assert(sizeof(WetShorePush) == 96 && sizeof(WetShorePush) <= shader::abi::kPushConstantBudget);
 
 class Water final : public d3d9::DrawReplacer {
 public:
@@ -159,6 +163,8 @@ private:
     void updateOceanPass();
     void recordOcean(d3d9::PassContext& ctx);
     void updateSea(double seconds);
+    // the waves rolling in (WaterBlock::shoreWave xyz): period (s), amplitude (world units), breaker index
+    std::array<float, 3> shoreWave() const;
     void serviceFloor(d3d9::Device& device);
     void saveFloor();
 
@@ -202,6 +208,8 @@ private:
     bool haveSeaLevel_ = false, haveWeather_ = false, loggedWeather_ = false;
     double lastSeaSeconds_ = -1.0, lastWeatherRead_ = -1e9;
     std::uint64_t lastSimFrame_ = 0;
+    float player_[4]{};              // the player's position (engine::playerPosition), [3] = 1 when known this frame
+    bool loggedPlayer_ = false;
     shore::Field overlayField_;      // the M7 shore field (the coast overlay), kept for the floor bake
     // the sea floor field (enh/sea_floor.h): the static meshes seen (keys), triangles waiting for the worker, the heights
     // (owned by the worker while a bake runs), the textures

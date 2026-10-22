@@ -22,6 +22,10 @@ constexpr VkFormat kOutFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 constexpr float kFoamDecay = 0.35f;
 constexpr float kFoamThreshold = 0.8f;
 constexpr float kFoamGain = 2.0f;
+// the surf's foam buffer: N x N cells of kFoamCell world units around the camera (245 m)
+constexpr int kFoamSize = 1024;
+constexpr float kFoamCell = 24.0f;
+constexpr VkFormat kFoamFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 
 int log2i(int n) {
     int b = 0;
@@ -84,15 +88,18 @@ Ocean::Ocean(d3d9::Device& device) : dev_(device) {
 
 Ocean::~Ocean() {
     destroyTiles();
+    destroyFoam();
     vk::Context* ctx = &dev_.ctx();
-    std::vector<VkPipeline> pipes = {spectrum_, evolve_, resolve_, fft_[0], fft_[1], fft_[2]};
+    std::vector<VkPipeline> pipes = {spectrum_, evolve_, resolve_, fft_[0], fft_[1], fft_[2], foam_};
     vk::PassLayout layout = layout_;
+    vk::PassLayout foamLayout = foamLayout_;
     const VkSampler smp = sampler_;
-    dev_.frames().retire([ctx, pipes, layout, smp]() mutable {
+    dev_.frames().retire([ctx, pipes, layout, foamLayout, smp]() mutable {
         for (VkPipeline p : pipes) {
             if (p != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), p, nullptr);
         }
         if (layout.valid()) layout.destroy(*ctx);
+        if (foamLayout.valid()) foamLayout.destroy(*ctx);
         // the sampler's bindless slot is never re-used (one per session)
         if (smp != VK_NULL_HANDLE) vkDestroySampler(ctx->device(), smp, nullptr);
     });
@@ -139,6 +146,16 @@ bool Ocean::createPipelines() {
         sci.maxAnisotropy = std::min(8.0f, ctx.features().maxAnisotropy);
     }
     if (vkCreateSampler(ctx.device(), &sci, nullptr, &sampler_) == VK_SUCCESS) samplerSlot_ = dev_.bindless().addSampler(sampler_);
+    // the foam pass (one storage image; its history and the floor field through the bindless set). Optional: without it the
+    // shading evaluates the surf's foam in place
+    VkDescriptorSetLayoutBinding fb{};
+    fb.binding = 0;
+    fb.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    fb.descriptorCount = 1;
+    fb.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    if (foamLayout_.create(ctx, dev_.bindless(), std::span<const VkDescriptorSetLayoutBinding>(&fb, 1))) {
+        foam_ = vk::createComputePipeline(ctx, foamLayout_.layout(), shader::embedded::spirv("water/ocean_foam.comp"), "ocean.foam");
+    }
     return spectrum_ != VK_NULL_HANDLE && evolve_ != VK_NULL_HANDLE && resolve_ != VK_NULL_HANDLE && fft_[0] != VK_NULL_HANDLE &&
            samplerSlot_ != 0;
 }
@@ -199,6 +216,118 @@ bool Ocean::createTiles() {
     return true;
 }
 
+bool Ocean::createFoam() {
+    vk::Context& ctx = dev_.ctx();
+    for (int i = 0; i < 2; ++i) {
+        vk::ImageDesc d;
+        d.extent = {static_cast<std::uint32_t>(kFoamSize), static_cast<std::uint32_t>(kFoamSize), 1};
+        d.format = kFoamFormat;
+        d.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        d.name = "ocean.foam";
+        if (!foamImg_[static_cast<std::size_t>(i)].create(ctx, d)) {
+            spdlog::error("enh: ocean: foam buffer {}x{} failed, the surf's foam is evaluated in place", kFoamSize, kFoamSize);
+            destroyFoam();
+            return false;
+        }
+        foamSlot_[static_cast<std::size_t>(i)] = dev_.bindless().addTexture(vk::TextureKind::Tex2D, foamImg_[static_cast<std::size_t>(i)].view());
+    }
+    foamCreated_ = true;
+    foamValid_ = false;
+    foamSeconds_ = -1.0;
+    spdlog::info("enh: ocean: foam buffer {}x{} cells of {:.0f} units ({:.0f} MiB)", kFoamSize, kFoamSize, kFoamCell,
+                 2.0 * kFoamSize * kFoamSize * 8.0 / (1024.0 * 1024.0));
+    return true;
+}
+
+void Ocean::destroyFoam() {
+    vk::Context* ctx = &dev_.ctx();
+    for (auto& slot : foamSlot_) {
+        if (slot != 0) dev_.bindless().releaseTexture(vk::TextureKind::Tex2D, slot);
+        slot = 0;
+    }
+    std::array<vk::Image, 2> imgs = foamImg_;
+    foamImg_ = {};
+    dev_.frames().retire([ctx, imgs]() mutable {
+        for (vk::Image& i : imgs) {
+            if (i.valid()) i.destroy(*ctx);
+        }
+    });
+    foamCreated_ = false;
+    foamValid_ = false;
+}
+
+std::array<float, 4> Ocean::foamMap() const {
+    const float extent = kFoamCell * static_cast<float>(kFoamSize);
+    return {static_cast<float>(foamFirst_[0]) * kFoamCell, static_cast<float>(foamFirst_[1]) * kFoamCell, extent, 1.0f / extent};
+}
+
+void Ocean::recordFoam(VkCommandBuffer cmd, VkDeviceAddress frameBlock, const OceanFoamInputs& in) {
+    if (failed_ || foamFailed_ || foam_ == VK_NULL_HANDLE || quality_ < 0 || in.floorA == 0 || in.floorB == 0) {
+        foamValid_ = false;
+        return;
+    }
+    if (!foamCreated_ && !createFoam()) {
+        foamFailed_ = true;  // not again this session
+        return;
+    }
+    const double dtRaw = foamSeconds_ < 0.0 ? 1e9 : in.seconds - foamSeconds_;
+    foamSeconds_ = in.seconds;
+    // the history continues while the pass runs every frame; after a pause (the sea out of view) it starts over
+    const bool history = foamValid_ && dtRaw >= 0.0 && dtRaw < 0.5;
+    const float dt = history ? static_cast<float>(std::clamp(dtRaw, 0.0, 0.1)) : 0.0f;
+    const int cur = foamValid_ ? 1 - foamCur_ : 0;
+    const int prev = 1 - cur;
+    const int prevFirst[2] = {foamFirst_[0], foamFirst_[1]};
+    foamFirst_[0] = static_cast<int>(std::floor(in.camX / kFoamCell)) - kFoamSize / 2;
+    foamFirst_[1] = static_cast<int>(std::floor(in.camZ / kFoamCell)) - kFoamSize / 2;
+
+    Barriers bar;
+    vk::Image& out = foamImg_[static_cast<std::size_t>(cur)];
+    vk::Image& hist = foamImg_[static_cast<std::size_t>(prev)];
+    // this frame's image: all of it is rewritten (after its last use: the water's sampling two frames ago, the foam pass
+    // reading it as the history last frame)
+    bar.image(out.image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, kSampleStages | kCompute, VK_ACCESS_2_NONE, kCompute,
+              VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+    if (!foamValid_) {
+        // the first frame: the history image gets a defined layout (never read: prev.w = 0)
+        bar.image(hist.image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_NONE,
+                  VK_ACCESS_2_NONE, kCompute | kSampleStages, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        hist.setTrackedLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
+    bar.flush(cmd);
+    OceanFoamPush p{};
+    p.h.frame = frameBlock;
+    p.window[0] = static_cast<float>(foamFirst_[0]);
+    p.window[1] = static_cast<float>(foamFirst_[1]);
+    p.window[2] = kFoamCell;
+    p.window[3] = static_cast<float>(kFoamSize);
+    p.prev[0] = static_cast<float>(prevFirst[0]);
+    p.prev[1] = static_cast<float>(prevFirst[1]);
+    p.prev[2] = dt;
+    p.prev[3] = history ? 1.0f : 0.0f;
+    for (int i = 0; i < 4; ++i) {
+        p.floorMap[i] = in.floorMap[i];
+        p.shoreWave[i] = in.shoreWave[i];
+    }
+    p.tex[0] = in.floorA;
+    p.tex[1] = in.floorB;
+    p.tex[2] = foamSlot_[static_cast<std::size_t>(prev)];
+    p.tex[3] = in.smpClamp;
+    p.info[0] = samplerSlot_;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, foam_);
+    foamLayout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, dev_.bindless());
+    foamLayout_.pushStorageImage(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, 0, out.view());
+    foamLayout_.push(cmd, &p, sizeof(p));
+    const std::uint32_t groups = (kFoamSize + 7) / 8;
+    vkCmdDispatch(cmd, groups, groups, 1);
+    bar.image(out.image(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kCompute, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+              kSampleStages | kCompute, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    out.setTrackedLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    bar.flush(cmd);
+    foamCur_ = cur;
+    foamValid_ = true;
+}
+
 void Ocean::setQuality(int quality) {
     if (failed_) return;
     quality = std::clamp(quality, 0, 2);
@@ -212,6 +341,8 @@ void Ocean::setQuality(int quality) {
         failed_ = true;
         return;
     }
+    // the foam buffer with the tiles (not at its first use: no allocation in a later frame)
+    if (!foamCreated_ && !foamFailed_ && foam_ != VK_NULL_HANDLE && !createFoam()) foamFailed_ = true;
     setSea(sea_);
     spectrumDirty_ = true;
 }
@@ -219,6 +350,7 @@ void Ocean::setQuality(int quality) {
 void Ocean::release() {
     if (quality_ < 0) return;
     destroyTiles();
+    if (foamCreated_) destroyFoam();
     quality_ = -1;
     spdlog::info("enh: ocean: tiles released");
 }

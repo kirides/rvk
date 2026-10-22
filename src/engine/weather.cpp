@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstring>
 
 #include <windows.h>
@@ -24,6 +25,7 @@ using StatesCountFn = int (*)(const void* admin);
 using StatesAtFn = void* (*)(const void* admin, int index);
 using StateNameFn = const void* (*)(const void* state);
 using StateBlendFn = float (*)(const void* state);
+using PlayerPositionFn = const float* (*)(const void* admin);
 
 struct RawState {
     char name[64];
@@ -62,6 +64,26 @@ int readRaw(RawState* out, int max) {
     }
 }
 
+// SEH only: the weather admin's player position
+bool readPlayer(float* out) {
+    const auto& s = sym();
+    __try {
+        EngineString cls;
+        reinterpret_cast<StringCtorFn>(s.stringCtor)(&cls, "eCWeatherAdmin");
+        void* admin = reinterpret_cast<FindModuleFn>(s.moduleAdminFindModule)(reinterpret_cast<ModuleAdminFn>(s.moduleAdminGetInstance)(), &cls);
+        reinterpret_cast<StringDtorFn>(s.stringDtor)(&cls);
+        if (admin == nullptr || *static_cast<void* const*>(admin) != s.weatherAdminVftable) return false;
+        const float* p = reinterpret_cast<PlayerPositionFn>(s.weatherPlayerPosition)(admin);
+        if (p == nullptr) return false;
+        out[0] = p[0];
+        out[1] = p[1];
+        out[2] = p[2];
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 bool contains(const std::string& lower, const char* what) { return lower.find(what) != std::string::npos; }
 
 }  // namespace
@@ -78,6 +100,18 @@ std::vector<WeatherState> weatherStates() {
     const int n = readRaw(raw, 256);
     for (int i = 0; i < n; ++i) out.push_back({raw[i].name, raw[i].weight});
     return out;
+}
+
+std::optional<std::array<float, 3>> playerPosition() {
+    const auto& s = sym();
+    if (s.stringCtor == nullptr || s.stringDtor == nullptr || s.moduleAdminGetInstance == nullptr || s.moduleAdminFindModule == nullptr ||
+        s.weatherAdminVftable == nullptr || s.weatherPlayerPosition == nullptr) {
+        return std::nullopt;
+    }
+    std::array<float, 3> p{};
+    if (!readPlayer(p.data())) return std::nullopt;
+    if (!(std::abs(p[0]) + std::abs(p[1]) + std::abs(p[2]) > 1e-3f) || !std::isfinite(p[0] + p[1] + p[2])) return std::nullopt;
+    return p;
 }
 
 std::optional<float> seaLevelOfWeather(const std::vector<WeatherState>& states) {

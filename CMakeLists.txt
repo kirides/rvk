@@ -65,6 +65,7 @@ set(RVK_SHADERS
     test/rt_query.comp
     water/ocean_evolve.comp
     water/ocean_fft.comp
+    water/ocean_foam.comp
     water/ocean_resolve.comp
     water/ocean_spectrum.comp
     water/water.frag

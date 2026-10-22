@@ -5,6 +5,7 @@
 // or a forced state (mode 2, risen-spass risen.world.set_weather). The FFT ocean derives its sea state from it.
 // Render thread (the engine's main thread), after the world is loaded; every engine call SEH-guarded.
 
+#include <array>
 #include <optional>
 #include <string>
 #include <vector>
@@ -18,6 +19,10 @@ struct WeatherState {
 
 // every weather state with its blend factor; empty when the symbols or the admin are missing
 std::vector<WeatherState> weatherStates();
+
+// the player's position as the game hands it to the weather (eCWeatherAdmin::GetPlayerPosition, world units); nullopt when
+// the symbols or the admin are missing or the position is still the origin (no world)
+std::optional<std::array<float, 3>> playerPosition();
 
 // the sea state level (0 calm, 1 moderate, 2 rough, 3 storm) of a blend of weather states: each state's level from its name
 // (storm / thunder 3, rain 2, clouds 1.2, fog 0.5, sun 0.6, other 1), dungeon / cave states carry no weight; nullopt without

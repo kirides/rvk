@@ -32,6 +32,27 @@ struct OceanPush {
 };
 static_assert(sizeof(OceanPush) == 112 && sizeof(OceanPush) <= shader::abi::kPushConstantBudget);
 
+// mirror of shaders/water/ocean_foam.comp FoamPush
+struct OceanFoamPush {
+    shader::abi::PassPushHeader h;
+    float window[4];        // first cell (cell index), cell size, N
+    float prev[4];          // last frame's first cell, dt, history valid
+    float floorMap[4];      // the floor field's mapping
+    std::uint32_t tex[4];   // floor A, floor B, history, linear clamp sampler
+    std::uint32_t info[4];  // linear wrap sampler
+    float shoreWave[4];     // period, amplitude, breaker index, time
+};
+static_assert(sizeof(OceanFoamPush) == 112 && sizeof(OceanFoamPush) <= shader::abi::kPushConstantBudget);
+
+// what the foam pass needs from the water module (the floor field, the waves rolling in)
+struct OceanFoamInputs {
+    float camX = 0.0f, camZ = 0.0f;
+    float floorMap[4]{};
+    std::uint32_t floorA = 0, floorB = 0, smpClamp = 0;
+    float shoreWave[4]{};  // period (s), amplitude (world units), breaker index, time (s: the water's)
+    double seconds = 0.0;  // for dt
+};
+
 class Ocean {
 public:
     explicit Ocean(d3d9::Device& device);
@@ -47,6 +68,12 @@ public:
     void setSea(const ocean::SeaState& sea);
     // records the simulation of this frame (outside a rendering scope); t in seconds (any epoch)
     void record(VkCommandBuffer cmd, VkDeviceAddress frameBlock, double seconds);
+    // the surf's foam coverage around the camera (ocean_foam.comp, docs/research/ocean.md 4.4): records this frame's step
+    // (outside a rendering scope, after record); the image is then readable by the vertex / fragment stages
+    void recordFoam(VkCommandBuffer cmd, VkDeviceAddress frameBlock, const OceanFoamInputs& in);
+    bool foamReady() const { return foamValid_; }
+    std::uint32_t foamSlot() const { return foamSlot_[static_cast<std::size_t>(foamCur_)]; }  // bindless t2D (wrap sampling)
+    std::array<float, 4> foamMap() const;  // xy the window's first cell (world), z its extent, w 1 / extent
 
     bool ready() const { return ready_; }  // the tiles hold a simulated frame
     const ocean::Cascades& cascades() const { return cascades_; }
@@ -67,6 +94,8 @@ private:
     bool createPipelines();
     bool createTiles();
     void destroyTiles();
+    bool createFoam();
+    void destroyFoam();
     void push(VkCommandBuffer cmd, VkDeviceAddress frameBlock, int cascade, float t, float dt, float direction);
     void bindImages(VkCommandBuffer cmd, Tile& tile);
 
@@ -86,6 +115,15 @@ private:
     std::uint32_t samplerSlot_ = 0;
     double lastSeconds_ = -1.0;
     std::uint64_t frames_ = 0;
+    // the foam buffer: two images (this frame's, last frame's = the history), toroidal window of cells around the camera
+    vk::PassLayout foamLayout_;
+    VkPipeline foam_ = VK_NULL_HANDLE;
+    std::array<vk::Image, 2> foamImg_{};
+    std::array<std::uint32_t, 2> foamSlot_{};
+    int foamCur_ = 0;
+    bool foamValid_ = false, foamCreated_ = false, foamFailed_ = false;
+    int foamFirst_[2]{};
+    double foamSeconds_ = -1.0;
 };
 
 }  // namespace rvk::enh

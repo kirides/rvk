@@ -49,10 +49,10 @@ SeaPoint surfacePoint(WaterBlock w, vec2 xz, float t, vec3 cam) {
         FftSample fs = fftSampleLod(w, xz, wt, footprint);
         ShoreTrain st = shoreTrain(w, fl, t);
         vec3 d = fs.d + st.d * cap;
-        // towards the far plane the displacement fades (the sea meets the horizon without a jagged silhouette); the
-        // shading keeps the waves' normals
+        // towards the far plane the displacement fades (no jagged silhouette where the far plane cuts the sea; only the long
+        // swell, which the coarse levels still resolve, rises above the horizon line); the shading keeps the waves' normals
         float camDist = length(xz - cam.xz);
-        d *= 1.0 - smoothstep(0.45, 0.9, camDist / max(pc.vs.c[11].w, 1.0));
+        d *= 1.0 - smoothstep(0.6, 0.97, camDist / max(pc.vs.c[11].w, 1.0));
         float level = w.ocean.x;
         float band = max(w.misc.y, 1.0);
         float near = 1.0 - smoothstep(0.2 * band, band, fl.overlay);

@@ -533,11 +533,16 @@ VkDeviceAddress Water::fillBlock(d3d9::Device& device, const d3d9::ReplaceQuery&
         w.seaInfo[1] = peak * ocean::kUnitsPerMetre;
         w.seaInfo[2] = ocean_->sea().windAngle;
         w.seaInfo[3] = seaLevelState_;
-        // the waves rolling in: their period grows with the sea, their height follows Hs (the floor field attenuates them)
-        w.shoreWave[0] = 6.0f + 1.5f * seaLevelState_;
-        w.shoreWave[1] = std::clamp(0.45f * w.seaInfo[0], 25.0f, 160.0f) * std::min(std::max(settings_.waveHeight, 0.0f), 1.0f);
-        w.shoreWave[2] = kBreakerIndex;
+        const std::array<float, 3> sw = shoreWave();
+        for (int i = 0; i < 3; ++i) w.shoreWave[i] = sw[static_cast<std::size_t>(i)];
         w.misc[0] = kNearCap;
+        for (int i = 0; i < 4; ++i) w.player[i] = player_[i];
+        if (ocean_->foamReady()) {
+            const std::array<float, 4> fm = ocean_->foamMap();
+            for (int i = 0; i < 4; ++i) w.foamMap[i] = fm[static_cast<std::size_t>(i)];
+            w.foamTex[0] = ocean_->foamSlot();
+            w.foamTex[1] = ocean_->sampler();
+        }
         if (floorA_ && floorB_) {
             for (int i = 0; i < 4; ++i) w.floorMap[i] = floorMapping_[static_cast<std::size_t>(i)];
             w.floorTex[0] = floorA_->bindlessSlot();
@@ -562,6 +567,13 @@ void Water::updateOceanPass() {
         dev_.removePass(oceanPassId_);
         oceanPassId_ = 0;
     }
+}
+
+std::array<float, 3> Water::shoreWave() const {
+    // the waves rolling in: their period grows with the sea, their height follows Hs (the floor field attenuates them)
+    const float hs = ocean_ ? ocean_->significantHeight() * ocean::kUnitsPerMetre : 0.0f;
+    return {6.0f + 1.5f * seaLevelState_, std::clamp(0.45f * hs, 25.0f, 160.0f) * std::min(std::max(settings_.waveHeight, 0.0f), 1.0f),
+            kBreakerIndex};
 }
 
 void Water::updateSea(double seconds) {
@@ -615,6 +627,34 @@ void Water::recordOcean(d3d9::PassContext& ctx) {
     updateSea(seconds);
     ocean_->record(ctx.cmd, ctx.frameBlock, seconds);
     lastSimFrame_ = frame;
+    // the player (the near-water wave cap follows him)
+    player_[3] = 0.0f;
+    if (const std::optional<std::array<float, 3>> pl = engine::playerPosition()) {
+        for (int i = 0; i < 3; ++i) player_[i] = (*pl)[static_cast<std::size_t>(i)];
+        player_[3] = 1.0f;
+        if (!loggedPlayer_) {
+            const float* cam = dev_.vsConstant(11);
+            spdlog::info("enh: ocean: player position {:.0f} {:.0f} {:.0f} (camera {:.0f} {:.0f} {:.0f})", player_[0], player_[1], player_[2],
+                         cam[0], cam[1], cam[2]);
+            loggedPlayer_ = true;
+        }
+    }
+    // the surf's foam around the camera (needs the floor field)
+    if (floorA_ && floorB_ && dev_.readable(floorA_.get(), ctx.cmd) && dev_.readable(floorB_.get(), ctx.cmd)) {
+        OceanFoamInputs in;
+        const float* cam = dev_.vsConstant(11);
+        in.camX = cam[0];
+        in.camZ = cam[2];
+        for (int i = 0; i < 4; ++i) in.floorMap[i] = floorMapping_[static_cast<std::size_t>(i)];
+        in.floorA = floorA_->bindlessSlot();
+        in.floorB = floorB_->bindlessSlot();
+        in.smpClamp = dev_.samplerFor(true, true);
+        const std::array<float, 3> sw = shoreWave();
+        for (int i = 0; i < 3; ++i) in.shoreWave[i] = sw[static_cast<std::size_t>(i)];
+        in.shoreWave[3] = static_cast<float>(std::fmod(seconds, 16384.0));
+        in.seconds = seconds;
+        ocean_->recordFoam(ctx.cmd, ctx.frameBlock, in);
+    }
 }
 
 // ---- the sea floor field ----------------------------------------------------------------------------------------------------
@@ -924,10 +964,10 @@ bool Water::ensureWetPipeline(VkFormat target) {
     gd.vs = shader::embedded::spirv("debug/fullscreen.vert");
     gd.fs = shader::embedded::spirv("water/wet_shore.frag");
     gd.color = target;
-    // dst * src: darkens the scene (keeps the engine's exposure); alpha kept
+    // dst * src.a + src.rgb: darkens the scene (keeps the engine's exposure), adds the wet film's sheen; alpha kept
     gd.blend.enable = 1;
-    gd.blend.srcColor = VK_BLEND_FACTOR_DST_COLOR;
-    gd.blend.dstColor = VK_BLEND_FACTOR_ZERO;
+    gd.blend.srcColor = VK_BLEND_FACTOR_ONE;
+    gd.blend.dstColor = VK_BLEND_FACTOR_SRC_ALPHA;
     gd.blend.srcAlpha = VK_BLEND_FACTOR_ZERO;
     gd.blend.dstAlpha = VK_BLEND_FACTOR_ONE;
     gd.name = "water.wet_shore";
@@ -967,6 +1007,15 @@ void Water::recordWet(d3d9::PassContext& ctx) {
     push.params[0] = static_cast<float>(std::fmod(dev_.secondsSinceCreate(), 16384.0));
     push.params[1] = kWetHeight;
     push.params[2] = kWetDarkening;
+    // the FFT ocean's swash (in phase with its waves rolling in): the film the draining water leaves on the sand
+    if (fftWanted() && ocean_ && ocean_->ready()) {
+        push.params[3] = shoreWave()[0];
+        d3d9::Texture* sky = dev_.imageWithRole(d3d9::scene::ImageRole::SkyEnvCube);
+        if (sky != nullptr && !sky->isNull() && sky->kind() == vk::TextureKind::Cube && dev_.readable(sky, cmd)) {
+            push.sky[0] = sky->bindlessSlot();
+            push.sky[1] = dev_.samplerFor(true, true);
+        }
+    }
 
     target.transition(cmd, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};

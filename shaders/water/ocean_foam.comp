@@ -1,0 +1,94 @@
+#version 460
+// The surf's foam coverage (docs/research/ocean.md 4.4): a camera-centred window of the sea (N x N cells, addressed
+// toroidally: cell c lives in texel c mod N, so the window moves with the camera without copying) holding per cell
+//   r  fresh white water: set where a crest breaks and on the bores rolling across the surf zone, decays in ~1 s
+//   g  residual foam: what the white water leaves behind; decays slowly (~8 s), drifts towards the beach with the broken
+//      waves and spreads (the shading turns low coverage into lace: water_noise.glsl foamAmount)
+//   b  contact foam: at walls, rocks and hulls, pulsing with the slosh
+// Each frame: the history (last frame's image, bilinear through a wrapping sampler) advected back along the drift, decayed,
+// the sources of this frame added. Cells entering the window start from an estimate of the steady state.
+#define RVK_PASS_SHADER
+#extension GL_EXT_buffer_reference_uvec2 : require
+#include "rvk_abi.glsl"
+#include "rvk_common.glsl"
+#include "water_noise.glsl"
+#include "ocean_shore.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+// mirror: enh::OceanFoamPush
+layout(push_constant) uniform FoamPush {
+    RVK_PASS_PUSH_HEADER
+    vec4 window;     // xy the window's first cell (cell index), z cell size (world units), w N
+    vec4 prev;       // xy last frame's first cell, z dt (s), w 1 = the history is valid
+    vec4 floorMap;   // the floor field: xy corner (world xz), zw 1 / extent
+    uvec4 tex;       // x floor A, y floor B, z the history (t2D), w linear clamp sampler
+    uvec4 info;      // x linear wrap sampler
+    vec4 shoreWave;  // x period (s), y amplitude (world units), z breaker index, w time (s, the water's)
+} pc;
+
+layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D foamOut;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    int n = int(pc.window.w);
+    if (p.x >= n || p.y >= n) return;
+    ivec2 first = ivec2(pc.window.xy);
+    ivec2 cell = first + ((p - first) % n + n) % n;  // the cell of the window this texel holds
+    float cs = pc.window.z;
+    vec2 xz = (vec2(cell) + 0.5) * cs;
+    ivec2 pf = ivec2(pc.prev.xy);
+    bool known = pc.prev.w > 0.5 && all(greaterThanEqual(cell, pf)) && all(lessThan(cell, pf + ivec2(n)));
+    float dt = pc.prev.z;
+    float t = pc.shoreWave.w;
+
+    SeaFloor f = seaFloorAt(pc.tex.x, pc.tex.y, pc.tex.w, pc.floorMap, xz);
+    if (f.sd <= 0.0) {
+        imageStore(foamOut, p, vec4(0.0));
+        return;
+    }
+    ShoreTrain st = shoreTrainAt(pc.shoreWave, f, t);
+    Surf s = surfAt(pc.shoreWave, f, st, xz, t);
+    float coh = length(f.dir);
+    vec2 dir = coh > 1e-4 ? f.dir / coh : vec2(0.0);
+
+    // ---- sources ----
+    // a crest plunging (where and while it breaks), the bores rolling across the surf zone after it
+    // (a bore loses its white water as it runs on towards the beach: less of it the further it is past the break)
+    // rough seas: more and longer-lasting foam (amplitude of the waves rolling in: 25 .. 160 units)
+    float storm = smoothstep(50.0, 160.0, pc.shoreWave.y);
+    float white = max(s.breakW * s.front, s.surfZone * s.front * mix(0.2, 0.55, s.patchy) * mix(0.5, 1.0, st.breaking) * mix(1.0, 1.6, storm));
+    // walls, rocks, hulls: the water sloshing against them (a local oscillation at the train's period, out of phase along
+    // the wall)
+    float period = max(pc.shoreWave.x, 2.0);
+    float slosh = 0.5 + 0.5 * sin(6.2831853 / period * t + 4.0 * waterNoise(xz / 500.0));
+    float wall = (1.0 - smoothstep(25.0, 55.0 + 90.0 * slosh, f.sd)) * mix(0.35, 0.8, slosh);
+
+    // ---- history: advected back along the drift (the broken waves carry their foam towards the beach), spread ----
+    vec4 old;
+    if (known) {
+        float drift = 20.0 + 90.0 * s.surfZone;  // world units / s
+        vec2 back = xz - dir * drift * dt;
+        float span = cs * float(n);
+        uint hist = pc.tex.z;
+        uint smp = pc.info.x;
+        old = rvkSample2DLod(hist, smp, back / span, 0.0);
+        // spreading: a little of the neighbours mixed in
+        vec4 nb = rvkSample2DLod(hist, smp, (back + vec2(cs, 0.0)) / span, 0.0) + rvkSample2DLod(hist, smp, (back - vec2(cs, 0.0)) / span, 0.0) +
+                  rvkSample2DLod(hist, smp, (back + vec2(0.0, cs)) / span, 0.0) + rvkSample2DLod(hist, smp, (back - vec2(0.0, cs)) / span, 0.0);
+        old = mix(old, nb * 0.25, clamp(dt * 0.6, 0.0, 1.0));
+        if (any(isnan(old)) || any(isinf(old))) old = vec4(0.0);
+    } else {
+        // a cell entering the window: about the steady state (the residual foam of the surf zone, the contact foam)
+        old = vec4(0.0, s.surfZone * (0.08 + 0.15 * s.trail) * s.patchy, wall * 0.6, 0.0);
+    }
+
+    // ---- decay: the white water turns into residual foam, the residual foam dissolves ----
+    float fr = old.r * exp(-2.2 * dt);
+    float res = old.g * exp(-mix(0.28, 0.12, storm) * dt) + (old.r - fr) * mix(0.16, 0.45, storm);
+    // outside the surf zone (deeper water) the foam dissolves faster
+    res *= exp(-dt * 0.25 * (1.0 - s.surfZone));
+    fr = max(fr, clamp(white, 0.0, 1.0));
+    float con = max(old.b * exp(-0.9 * dt), wall);
+    imageStore(foamOut, p, vec4(clamp(fr, 0.0, 1.0), clamp(res, 0.0, 1.0), clamp(con, 0.0, 1.0), 0.0));
+}

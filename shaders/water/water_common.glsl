@@ -9,6 +9,8 @@
 
 #include "rvk_abi.glsl"
 #include "rvk_common.glsl"
+#include "water_noise.glsl"
+#include "ocean_shore.glsl"
 
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer WaterBlock {
     // = RvkDraw (192 bytes): s0..s15 of the engine draw (bindless texture / sampler), posFix (read by the engine VS)
@@ -58,6 +60,9 @@ layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Wa
     vec4 floorMap;    // floor field: xy corner (world xz), zw 1 / extent
     uvec4 floorTex;   // x field A, y field B (bindless t2D), z valid
     vec4 shoreWave;   // x period (s), y amplitude (world units), z breaker index, w unused
+    vec4 player;      // xyz the player's position (eCWeatherAdmin), w 1 = known (else the near-water cap follows the camera)
+    vec4 foamMap;     // the foam buffer (ocean_foam.comp): xy its first cell (world units), z its extent (world units), w 1 / extent
+    uvec4 foamTex;    // x the foam buffer (bindless t2D, 0 = none), y its sampler (linear, wrap)
 };
 
 const uint WATER_OCEAN_GRID = 1u;  // the camera-centred ocean grid (water_ocean.vert), shore + wave effects
@@ -126,84 +131,6 @@ vec3 shoreWaves(float coastDist, vec2 toCoast, float t, float amp, out vec2 slop
     vec3 d = vec3(0.0, h, 0.0);
     d.xz = toCoast * (0.35 * amp * c);  // crests lean towards the beach
     return d;
-}
-
-// ---- noise (foam): gradient noise with analytic derivatives (after Inigo Quilez, MIT) ------------------------------------
-
-vec2 waterHash(vec2 p) {
-    p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
-    return -1.0 + 2.0 * fract(sin(p) * 43758.5453123);
-}
-
-// value, d/dx, d/dy
-vec3 waterNoised(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
-    vec2 du = 30.0 * f * f * (f * (f - 2.0) + 1.0);
-    vec2 ga = waterHash(i + vec2(0.0, 0.0));
-    vec2 gb = waterHash(i + vec2(1.0, 0.0));
-    vec2 gc = waterHash(i + vec2(0.0, 1.0));
-    vec2 gd = waterHash(i + vec2(1.0, 1.0));
-    float va = dot(ga, f - vec2(0.0, 0.0));
-    float vb = dot(gb, f - vec2(1.0, 0.0));
-    float vc = dot(gc, f - vec2(0.0, 1.0));
-    float vd = dot(gd, f - vec2(1.0, 1.0));
-    return vec3(va + u.x * (vb - va) + u.y * (vc - va) + u.x * u.y * (va - vb - vc + vd),
-                ga + u.x * (gb - ga) + u.y * (gc - ga) + u.x * u.y * (ga - gb - gc + gd) +
-                    du * (u.yx * (va - vb - vc + vd) + vec2(vb, vc) - va));
-}
-
-// cellular noise (Worley): distances to the nearest and second-nearest feature point (cells of size 1)
-vec2 waterWorley(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    float f1 = 8.0, f2 = 8.0;
-    for (int y = -1; y <= 1; ++y) {
-        for (int x = -1; x <= 1; ++x) {
-            vec2 g = vec2(float(x), float(y));
-            vec2 o = waterHash(i + g) * 0.45 + 0.5;
-            vec2 r = g + o - f;
-            float d = dot(r, r);
-            if (d < f1) {
-                f2 = f1;
-                f1 = d;
-            } else if (d < f2) {
-                f2 = d;
-            }
-        }
-    }
-    return sqrt(vec2(f1, f2));
-}
-
-// a foam texture (0..1): filaments of ridged noise (1 - |n|, sharpened) at three scales over a warped domain, with bubbles
-// (cellular noise) punched into them and broken into patches by smooth noise; footprint = world units per pixel: scales
-// smaller than a few pixels fade to their mean (no sparkle)
-float foamTexture(vec2 xz, float t, float footprint) {
-    vec2 warp = vec2(waterNoised(xz / 170.0 + vec2(t * 0.02, 0.0)).x, waterNoised(xz / 170.0 + vec2(5.2, 1.3 - t * 0.02)).x);
-    vec2 p = xz + warp * 60.0;
-    const vec3 SCALE = vec3(95.0, 34.0, 12.0);
-    const vec3 WEIGHT = vec3(0.5, 0.32, 0.18);
-    float e = 0.0;
-    for (int i = 0; i < 3; ++i) {
-        vec2 drift = vec2(0.021, -0.013) * t * (1.0 + 0.6 * float(i));
-        float r = 1.0 - abs(waterNoised(p / SCALE[i] + drift + float(i) * 7.31).x * 1.6);
-        r = clamp(r, 0.0, 1.0);
-        r = r * r * r;
-        float vis = smoothstep(2.5, 6.0, SCALE[i] / max(footprint, 1e-3));
-        e += WEIGHT[i] * mix(0.3, r, vis);
-    }
-    // bubbles: dark cell centres in the filaments
-    vec2 wl = waterWorley(p / 18.0 + vec2(t * 0.03, -t * 0.02));
-    float bubble = mix(1.0, smoothstep(0.05, 0.35, wl.x) * 0.5 + 0.5, smoothstep(2.5, 6.0, 18.0 / max(footprint, 1e-3)));
-    float patches = 0.5 + 0.5 * waterNoised(xz / 420.0 + vec2(t * 0.01, -t * 0.006)).x;
-    return clamp(e * bubble * 1.25 + 0.4 * (patches - 0.5), 0.0, 1.0);
-}
-
-// coverage c (0..1) of a foam texture value: a lace at low coverage, filled cells at high
-float foamCover(float tex, float c) {
-    c = clamp(c, 0.0, 1.0);
-    return smoothstep(1.0 - c, 1.0 - c + 0.3, tex) * sqrt(c);
 }
 
 // slope (d height / d x, d height / d z) of wind ripples at xz (world units), scale = world units per tile: three octaves

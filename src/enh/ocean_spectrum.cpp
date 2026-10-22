@@ -12,17 +12,19 @@ float lerpf(float a, float b, float t) { return a + (b - a) * t; }
 }  // namespace
 
 SeaState seaStateForLevel(float level) {
-    // calm / moderate / rough / storm: the wind sea's U10 and fetch (JONSWAP Hs of the wind sea 0.5 / 1.3 / 2.6 / 4.3 m), the
-    // swell's height and period, the choppiness. Risen's island is small and its harbour sheltered: the shore field
-    // attenuates all of it towards the coast (ocean.md 4)
+    // calm / moderate / rough / storm: the wind sea's U10 and fetch (JONSWAP Hs of the wind sea 0.6 / 1.3 / 2.6 / 4.3 m), the
+    // swell's height and period, the choppiness. The swell comes from storms far away and is there in every weather: a
+    // long, regular swell (1.5 m / 12 s on a calm day) rolls in under the local wind sea, so the open sea always shows big,
+    // long waves. Risen's island is small and its harbour sheltered: the floor field attenuates all of it towards the coast
+    // (ocean.md 4)
     struct Level {
         float wind, fetch, swellH, swellT, chop;
     };
     static constexpr Level kLevels[4] = {
-        {5.0f, 25000.0f, 0.80f, 10.0f, 0.75f},
-        {8.0f, 60000.0f, 1.10f, 11.0f, 0.90f},
-        {11.5f, 110000.0f, 1.50f, 12.0f, 1.10f},
-        {15.0f, 180000.0f, 2.20f, 13.0f, 1.25f},
+        {5.5f, 30000.0f, 1.50f, 12.0f, 0.80f},
+        {8.0f, 60000.0f, 1.70f, 12.5f, 0.90f},
+        {11.5f, 110000.0f, 2.00f, 13.0f, 1.10f},
+        {15.0f, 180000.0f, 2.50f, 14.0f, 1.25f},
     };
     const float l = std::clamp(level, 0.0f, 3.0f);
     const int i = std::min(static_cast<int>(l), 2);
@@ -36,6 +38,7 @@ SeaState seaStateForLevel(float level) {
     s.swellHeight = lerpf(a.swellH, b.swellH, t);
     s.swellPeriod = lerpf(a.swellT, b.swellT, t);
     s.choppiness = lerpf(a.chop, b.chop, t);
+    s.swellSpread = 60.0f;  // long-crested: a distant storm's swell arrives from a narrow range of directions
     return s;
 }
 
