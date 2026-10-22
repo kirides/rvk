@@ -447,7 +447,7 @@ VkDeviceAddress Water::fillBlock(d3d9::Device& device, const d3d9::ReplaceQuery&
     w.grid[0] = kGridSpacing;
     w.grid[1] = static_cast<float>(kGridLevels);
     w.grid[2] = static_cast<float>(kGridQuads[quality]);
-    w.grid[3] = static_cast<float>(std::fmod(device.secondsSinceCreate(), 16384.0));
+    w.grid[3] = static_cast<float>(std::fmod(seaClock(), 16384.0));
     for (int i = 0; i < 4; ++i) w.shoreMap[i] = fieldMapping_[static_cast<std::size_t>(i)];
     w.look[0] = p.reflection;
     w.look[1] = p.foam;
@@ -577,6 +577,11 @@ std::array<float, 3> Water::shoreWave() const {
 }
 
 void Water::updateSea(double seconds) {
+    // after a jump of the water's clock the sea takes the weather's state at once (a pinned capture sees the same sea
+    // whatever the spot before it was)
+    const bool snap = clockJumped_;
+    clockJumped_ = false;
+    if (snap) lastWeatherRead_ = -1e18;
     float target = 1.0f;
     if (settings_.seaState >= 0) {
         target = static_cast<float>(settings_.seaState);
@@ -601,7 +606,7 @@ void Water::updateSea(double seconds) {
     }
     const double dt = lastSeaSeconds_ < 0.0 ? 0.0 : std::clamp(seconds - lastSeaSeconds_, 0.0, 1.0);
     lastSeaSeconds_ = seconds;
-    if (!haveSeaLevel_) {
+    if (!haveSeaLevel_ || snap) {
         seaLevelState_ = target;
         haveSeaLevel_ = true;
     } else {
@@ -617,13 +622,59 @@ void Water::updateSea(double seconds) {
     ocean_->setSea(s);
 }
 
+double Water::seaClock() {
+    const std::uint64_t frame = dev_.stats().frames;
+    if (frame == clockFrame_ && clock_ >= 0.0) return clock_;
+    clockFrame_ = frame;
+    const double real = dev_.secondsSinceCreate();
+    const double realGap = clockLastReal_ < 0.0 ? 1e9 : real - clockLastReal_;
+    const double realDt = std::clamp(realGap, 0.0, 0.25);
+    clockLastReal_ = real;
+    const std::optional<std::uint32_t> ms = engine::gameTimeMs();
+    if (!ms) {
+        clock_ = clock_ < 0.0 ? real : clock_ + realDt;
+        return clock_;
+    }
+    const double game = static_cast<double>(*ms) / 1000.0;
+    if (clock_ < 0.0 || clockLastGame_ < 0.0 || realGap > 0.5) {
+        clock_ = game;  // the first frame with water, or the first after a while without
+        clockJumped_ = true;
+    } else {
+        const double d = game - clockLastGame_;
+        if (d > 0.0 && d < 1.0) {
+            clock_ += d;
+        } else if (d == 0.0) {
+            // the game time stands still: the time freeze (deterministic steps: a capture under it sees the same water in
+            // every run), a loading screen or a menu (real time)
+            const std::optional<std::uint32_t> st = engine::appState();
+            const bool frozen = st && *st == 8u;
+            clock_ += frozen ? 1.0 / 60.0 : realDt;
+            if (frozen != clockFrozen_) {
+                clockFrozen_ = frozen;
+                if (clockFreezes_++ < 8) spdlog::info("enh: water: clock {} (app state {})", frozen ? "in fixed steps under the time freeze" : "on real time", st ? *st : 0u);
+            }
+        } else {
+            clock_ = game;  // the game time jumped (set by a tool, a loaded save): the water follows
+            clockJumped_ = true;
+            if (clockJumps_++ < 8) spdlog::info("enh: water: clock follows a game time jump of {:.1f} s to {:.3f} s", d, game);
+        }
+    }
+    clockLastGame_ = game;
+    if (!loggedClock_) {
+        spdlog::info("enh: water: clock from the engine's game time ({:.3f} s)", game);
+        loggedClock_ = true;
+    }
+    return clock_;
+}
+
 void Water::recordOcean(d3d9::PassContext& ctx) {
     if (ctx.mainView != 1 || !fftWanted() || !ocean_ || ocean_->failed()) return;
     serviceFloor(dev_);
     const std::uint64_t frame = dev_.stats().frames;
     // only while the sea is seen (it was drawn lately, or it is known and the tiles are not filled yet)
     if (!seaKnown_ || (ocean_->ready() && (lastGridFrame_ == 0 || frame > lastGridFrame_ + 30))) return;
-    const double seconds = dev_.secondsSinceCreate();
+    const double seconds = seaClock();
+    if (clockJumped_) ocean_->resetHistory();
     updateSea(seconds);
     ocean_->record(ctx.cmd, ctx.frameBlock, seconds);
     lastSimFrame_ = frame;
@@ -1004,7 +1055,7 @@ void Water::recordWet(d3d9::PassContext& ctx) {
     push.ocean[1] = kLowering;
     push.ocean[2] = kSwash;
     push.ocean[3] = kCoastBand;
-    push.params[0] = static_cast<float>(std::fmod(dev_.secondsSinceCreate(), 16384.0));
+    push.params[0] = static_cast<float>(std::fmod(seaClock(), 16384.0));
     push.params[1] = kWetHeight;
     push.params[2] = kWetDarkening;
     // the FFT ocean's swash (in phase with its waves rolling in): the film the draining water leaves on the sand

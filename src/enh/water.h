@@ -163,6 +163,10 @@ private:
     void updateOceanPass();
     void recordOcean(d3d9::PassContext& ctx);
     void updateSea(double seconds);
+    // the water's clock (s, docs/research/ocean.md 4.5): the engine's game time (so a pinned game time pins the waves, the
+    // swash and the foam: reproducible captures), stepping on while the game time stands still (1 / 60 s per frame under
+    // the time freeze, the real time otherwise: loading screens, menus); a jump of the game time is followed at once
+    double seaClock();
     // the waves rolling in (WaterBlock::shoreWave xyz): period (s), amplitude (world units), breaker index
     std::array<float, 3> shoreWave() const;
     void serviceFloor(d3d9::Device& device);
@@ -208,6 +212,11 @@ private:
     bool haveSeaLevel_ = false, haveWeather_ = false, loggedWeather_ = false;
     double lastSeaSeconds_ = -1.0, lastWeatherRead_ = -1e9;
     std::uint64_t lastSimFrame_ = 0;
+    double clock_ = -1.0, clockLastGame_ = -1.0, clockLastReal_ = -1.0;
+    std::uint64_t clockFrame_ = ~0ull;
+    std::uint32_t clockJumps_ = 0;
+    bool loggedClock_ = false, clockFrozen_ = false, clockJumped_ = false;
+    std::uint32_t clockFreezes_ = 0;
     float player_[4]{};              // the player's position (engine::playerPosition), [3] = 1 when known this frame
     bool loggedPlayer_ = false;
     shore::Field overlayField_;      // the M7 shore field (the coast overlay), kept for the floor bake

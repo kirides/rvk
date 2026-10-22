@@ -3,7 +3,7 @@
 // toroidally: cell c lives in texel c mod N, so the window moves with the camera without copying) holding per cell
 //   r  fresh white water: set where a crest breaks and on the bores rolling across the surf zone, decays in ~1 s
 //   g  residual foam: what the white water leaves behind; decays slowly (~8 s), drifts towards the beach with the broken
-//      waves and spreads (the shading turns low coverage into lace: water_noise.glsl foamAmount)
+//      waves and spreads (the shading turns low coverage into lace: water_noise.glsl foamDensity)
 //   b  contact foam: at walls, rocks and hulls, pulsing with the slosh
 // Each frame: the history (last frame's image, bilinear through a wrapping sampler) advected back along the drift, decayed,
 // the sources of this frame added. Cells entering the window start from an estimate of the steady state.

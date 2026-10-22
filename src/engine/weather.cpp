@@ -84,6 +84,36 @@ bool readPlayer(float* out) {
     }
 }
 
+using TimerInstanceFn = void* (*)();
+using TimerGameTimeFn = unsigned long (*)(const void* timer);
+using AppInstanceFn = void* (*)();
+using AppStateFn = unsigned long (*)(const void* app);
+
+// SEH only
+bool readGameTime(std::uint32_t* out) {
+    const auto& s = sym();
+    __try {
+        void* timer = reinterpret_cast<TimerInstanceFn>(s.timerGetInstance)();
+        if (timer == nullptr) return false;
+        *out = static_cast<std::uint32_t>(reinterpret_cast<TimerGameTimeFn>(s.timerGetGameTime)(timer));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool readAppState(std::uint32_t* out) {
+    const auto& s = sym();
+    __try {
+        void* app = reinterpret_cast<AppInstanceFn>(s.appGetInstance)();
+        if (app == nullptr) return false;
+        *out = static_cast<std::uint32_t>(reinterpret_cast<AppStateFn>(s.appGetAppState)(app));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 bool contains(const std::string& lower, const char* what) { return lower.find(what) != std::string::npos; }
 
 }  // namespace
@@ -112,6 +142,22 @@ std::optional<std::array<float, 3>> playerPosition() {
     if (!readPlayer(p.data())) return std::nullopt;
     if (!(std::abs(p[0]) + std::abs(p[1]) + std::abs(p[2]) > 1e-3f) || !std::isfinite(p[0] + p[1] + p[2])) return std::nullopt;
     return p;
+}
+
+std::optional<std::uint32_t> gameTimeMs() {
+    const auto& s = sym();
+    if (s.timerGetInstance == nullptr || s.timerGetGameTime == nullptr) return std::nullopt;
+    std::uint32_t ms = 0;
+    if (!readGameTime(&ms)) return std::nullopt;
+    return ms;
+}
+
+std::optional<std::uint32_t> appState() {
+    const auto& s = sym();
+    if (s.appGetInstance == nullptr || s.appGetAppState == nullptr) return std::nullopt;
+    std::uint32_t st = 0;
+    if (!readAppState(&st)) return std::nullopt;
+    return st;
 }
 
 std::optional<float> seaLevelOfWeather(const std::vector<WeatherState>& states) {

@@ -58,7 +58,10 @@ void main() {
             float since = mod(ph - leave, 6.2831853);
             float wetAge = since / omega;
             // under water right now (sin > y): the water draws over it; the film just after it drained: glossy
-            float film = sin(ph) > y ? 1.0 : exp(-wetAge / 1.6);
+            // (a soft front: a hard one drew a jagged line along the sand's height lines where the water's own edge, drawn
+            // by the wave grid's interpolated vertices, does not lie exactly on it)
+            float under = smoothstep(-0.12, 0.12, sin(ph) - y);
+            float film = mix(exp(-wetAge / 1.6), 1.0, under);
             film *= near;
             vec3 V = normalize(f.cameraPos.xyz - G);
             float nv = clamp(V.y, 0.0, 1.0);

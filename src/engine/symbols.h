@@ -131,7 +131,14 @@
     X(weatherStatesAt, L"Engine.dll", "?GetWeatherStatesAt@eCWeatherAdmin@@QEBAPEAVeCWeatherStates@@H@Z", false)                  \
     X(weatherStateName, L"Engine.dll", "?GetName@eCWeatherStates@@QEBAAEBVbCString@@XZ", false)                                   \
     X(weatherStateBlend, L"Engine.dll", "?GetBlendFactor@eCWeatherStates@@QEBAMXZ", false)                                        \
-    X(weatherPlayerPosition,L"Engine.dll", "?GetPlayerPosition@eCWeatherAdmin@@QEBAAEBVbCVector@@XZ", false)
+    X(weatherPlayerPosition,L"Engine.dll", "?GetPlayerPosition@eCWeatherAdmin@@QEBAAEBVbCVector@@XZ", false)                     \
+    /* the water's clock (engine/weather.h gameTimeMs, docs/research/ocean.md 4.5): static eCTimer& eCTimer::GetInstance()        \
+       (0x4ceef0), unsigned long eCTimer::GetGameTime() const (0x4ceee0: the game time in ms, the sum of the scaled frame        \
+       times; it stands still under the time freeze; risen-spass RE.md 60), unsigned long eCApplication::GetAppState() const     \
+       (0x4c1ad0: 8 = the time freeze) */                                                                                         \
+    X(timerGetInstance, L"Engine.dll", "?GetInstance@eCTimer@@SAAEAV1@XZ", false)                                                 \
+    X(timerGetGameTime, L"Engine.dll", "?GetGameTime@eCTimer@@QEBAKXZ", false)                                                    \
+    X(appGetAppState, L"Engine.dll", "?GetAppState@eCApplication@@QEBAKXZ", false)
 
 namespace rvk::engine {
 

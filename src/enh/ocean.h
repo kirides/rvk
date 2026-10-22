@@ -72,6 +72,12 @@ public:
     // (outside a rendering scope, after record); the image is then readable by the vertex / fragment stages
     void recordFoam(VkCommandBuffer cmd, VkDeviceAddress frameBlock, const OceanFoamInputs& in);
     bool foamReady() const { return foamValid_; }
+    // the tiles' temporal foam (whitecaps) and the foam buffer start over (a jump of the water's clock: their history is of
+    // another moment)
+    void resetHistory() {
+        for (auto& t : tiles_) t.cleared = false;
+        foamValid_ = false;
+    }
     std::uint32_t foamSlot() const { return foamSlot_[static_cast<std::size_t>(foamCur_)]; }  // bindless t2D (wrap sampling)
     std::array<float, 4> foamMap() const;  // xy the window's first cell (world), z its extent, w 1 / extent
 
@@ -95,6 +101,7 @@ private:
     bool createTiles();
     void destroyTiles();
     bool createFoam();
+    void foamStep(VkCommandBuffer cmd, VkDeviceAddress frameBlock, const OceanFoamInputs& in, double t, float dt, const int prevFirst[2]);
     void destroyFoam();
     void push(VkCommandBuffer cmd, VkDeviceAddress frameBlock, int cascade, float t, float dt, float direction);
     void bindImages(VkCommandBuffer cmd, Tile& tile);
@@ -124,6 +131,7 @@ private:
     bool foamValid_ = false, foamCreated_ = false, foamFailed_ = false;
     int foamFirst_[2]{};
     double foamSeconds_ = -1.0;
+    std::uint32_t foamPrerolls_ = 0;
 };
 
 }  // namespace rvk::enh

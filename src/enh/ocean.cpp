@@ -25,6 +25,10 @@ constexpr float kFoamGain = 2.0f;
 // the surf's foam buffer: N x N cells of kFoamCell world units around the camera (245 m)
 constexpr int kFoamSize = 1024;
 constexpr float kFoamCell = 24.0f;
+// the spin-up without history: 10 s of the water's time in steps of 0.25 s (the bores move ~75 units per step, their white
+// fronts are ~300 units wide: no gaps)
+constexpr int kFoamPrerollSteps = 40;
+constexpr double kFoamPrerollStep = 0.25;
 constexpr VkFormat kFoamFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 
 int log2i(int n) {
@@ -272,25 +276,43 @@ void Ocean::recordFoam(VkCommandBuffer cmd, VkDeviceAddress frameBlock, const Oc
     }
     const double dtRaw = foamSeconds_ < 0.0 ? 1e9 : in.seconds - foamSeconds_;
     foamSeconds_ = in.seconds;
-    // the history continues while the pass runs every frame; after a pause (the sea out of view) it starts over
-    const bool history = foamValid_ && dtRaw >= 0.0 && dtRaw < 0.5;
-    const float dt = history ? static_cast<float>(std::clamp(dtRaw, 0.0, 0.1)) : 0.0f;
-    const int cur = foamValid_ ? 1 - foamCur_ : 0;
-    const int prev = 1 - cur;
     const int prevFirst[2] = {foamFirst_[0], foamFirst_[1]};
     foamFirst_[0] = static_cast<int>(std::floor(in.camX / kFoamCell)) - kFoamSize / 2;
     foamFirst_[1] = static_cast<int>(std::floor(in.camZ / kFoamCell)) - kFoamSize / 2;
+    // the history continues while the pass runs every frame and the window overlaps the last one
+    const bool overlap = std::abs(foamFirst_[0] - prevFirst[0]) < kFoamSize / 2 && std::abs(foamFirst_[1] - prevFirst[1]) < kFoamSize / 2;
+    if (foamValid_ && dtRaw >= 0.0 && dtRaw < 0.5 && overlap) {
+        foamStep(cmd, frameBlock, in, in.seconds, static_cast<float>(std::clamp(dtRaw, 0.0, 0.1)), prevFirst);
+        return;
+    }
+    // no history (the sea comes into view, a pause, a jump of the water's clock, a teleport): the buffer is spun up over the
+    // last kFoamPreroll seconds of the water's time, so the surf shows its steady state at once (no foam fading in; a capture
+    // at a pinned game time sees the same foam in every run)
+    foamValid_ = false;
+    for (int i = kFoamPrerollSteps; i >= 0; --i) {
+        const double ti = in.seconds - static_cast<double>(i) * kFoamPrerollStep;
+        foamStep(cmd, frameBlock, in, ti, i == kFoamPrerollSteps ? 0.0f : static_cast<float>(kFoamPrerollStep), foamFirst_);
+    }
+    if (foamPrerolls_++ < 4) {
+        spdlog::info("enh: ocean: foam buffer spun up over {:.1f} s ({} steps)", kFoamPrerollSteps * kFoamPrerollStep, kFoamPrerollSteps + 1);
+    }
+}
 
+// one step of the foam buffer at the water's time t (s) after dt (0: no history), the history's window prevFirst
+void Ocean::foamStep(VkCommandBuffer cmd, VkDeviceAddress frameBlock, const OceanFoamInputs& in, double t, float dt, const int prevFirst[2]) {
+    const bool history = foamValid_ && dt > 0.0f;
+    const int cur = foamValid_ ? 1 - foamCur_ : 0;
+    const int prev = 1 - cur;
     Barriers bar;
     vk::Image& out = foamImg_[static_cast<std::size_t>(cur)];
     vk::Image& hist = foamImg_[static_cast<std::size_t>(prev)];
-    // this frame's image: all of it is rewritten (after its last use: the water's sampling two frames ago, the foam pass
-    // reading it as the history last frame)
+    // this step's image: all of it is rewritten (after its last use: the water's sampling two frames ago, the foam pass
+    // reading it as the history in the step before)
     bar.image(out.image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, kSampleStages | kCompute, VK_ACCESS_2_NONE, kCompute,
               VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
     if (!foamValid_) {
-        // the first frame: the history image gets a defined layout (never read: prev.w = 0)
-        bar.image(hist.image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_2_NONE,
+        // the first step: the history image gets a defined layout (never read: prev.w = 0)
+        bar.image(hist.image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kSampleStages | kCompute,
                   VK_ACCESS_2_NONE, kCompute | kSampleStages, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
         hist.setTrackedLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
@@ -303,12 +325,13 @@ void Ocean::recordFoam(VkCommandBuffer cmd, VkDeviceAddress frameBlock, const Oc
     p.window[3] = static_cast<float>(kFoamSize);
     p.prev[0] = static_cast<float>(prevFirst[0]);
     p.prev[1] = static_cast<float>(prevFirst[1]);
-    p.prev[2] = dt;
+    p.prev[2] = history ? dt : 0.0f;
     p.prev[3] = history ? 1.0f : 0.0f;
     for (int i = 0; i < 4; ++i) {
         p.floorMap[i] = in.floorMap[i];
         p.shoreWave[i] = in.shoreWave[i];
     }
+    p.shoreWave[3] = static_cast<float>(std::fmod(std::max(t, 0.0), 16384.0));
     p.tex[0] = in.floorA;
     p.tex[1] = in.floorB;
     p.tex[2] = foamSlot_[static_cast<std::size_t>(prev)];
@@ -438,16 +461,17 @@ void Ocean::record(VkCommandBuffer cmd, VkDeviceAddress frameBlock, double secon
     const std::uint32_t mips = static_cast<std::uint32_t>(mipCount(cascades_.size));
     Barriers bar;
 
-    // into GENERAL: work images every frame (contents rewritten), h0 kept, the outputs from last frame's sampling
+    // into GENERAL: work images every frame (contents rewritten), h0 kept, the outputs from last frame's sampling (all of them
+    // discarded and cleared the first time and after resetHistory: after an earlier frame's sampling, hence the stages)
     for (int c = 0; c < count; ++c) {
         Tile& tl = tiles_[static_cast<std::size_t>(c)];
         if (!tl.cleared) {
-            bar.image(tl.h0.image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_NONE, 0, kCompute, kStorageRW);
-            bar.image(tl.workA.image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_NONE, 0, kCompute, kStorageRW);
-            bar.image(tl.workB.image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_NONE, 0, kCompute, kStorageRW);
-            bar.image(tl.disp.image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_NONE, 0,
+            bar.image(tl.h0.image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, kSampleStages | kCompute, 0, kCompute, kStorageRW);
+            bar.image(tl.workA.image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, kSampleStages | kCompute, 0, kCompute, kStorageRW);
+            bar.image(tl.workB.image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, kSampleStages | kCompute, 0, kCompute, kStorageRW);
+            bar.image(tl.disp.image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, kSampleStages | kCompute, 0,
                       VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
-            bar.image(tl.deriv.image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_NONE, 0, kCompute, kStorageRW);
+            bar.image(tl.deriv.image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, kSampleStages | kCompute, 0, kCompute, kStorageRW);
         } else {
             // last frame's FFT used the work images, its sampling read the outputs
             bar.image(tl.workA.image(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, kCompute, kStorageRW, kCompute, kStorageRW);

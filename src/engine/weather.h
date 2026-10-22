@@ -6,6 +6,7 @@
 // Render thread (the engine's main thread), after the world is loaded; every engine call SEH-guarded.
 
 #include <array>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -23,6 +24,13 @@ std::vector<WeatherState> weatherStates();
 // the player's position as the game hands it to the weather (eCWeatherAdmin::GetPlayerPosition, world units); nullopt when
 // the symbols or the admin are missing or the position is still the origin (no world)
 std::optional<std::array<float, 3>> playerPosition();
+
+// the engine's game time in ms (eCTimer::GetGameTime: the sum of the scaled frame times; it stands still under the time freeze
+// and in loading screens and jumps when a tool sets it); nullopt without the symbols
+std::optional<std::uint32_t> gameTimeMs();
+
+// eCApplication::GetAppState (8 = the time freeze, risen-spass RE.md 59); nullopt without the symbols
+std::optional<std::uint32_t> appState();
 
 // the sea state level (0 calm, 1 moderate, 2 rough, 3 storm) of a blend of weather states: each state's level from its name
 // (storm / thunder 3, rain 2, clouds 1.2, fog 0.5, sun 0.6, other 1), dungeon / cave states carry no weight; nullopt without

@@ -6,9 +6,19 @@
 
 // ---- gradient noise with analytic derivatives (after Inigo Quilez, MIT) ---------------------------------------------------
 
+// two random numbers in -1..1 for an integer lattice point (p = floor of something): the pcg2d hash (Jarzynski and Olano,
+// "Hash Functions for GPU Rendering", 2020) - integer arithmetic, much cheaper than the classic sin-fract hash and without
+// its precision artefacts far from the origin
 vec2 waterHash(vec2 p) {
-    p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
-    return -1.0 + 2.0 * fract(sin(p) * 43758.5453123);
+    uvec2 v = uvec2(ivec2(p));
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * 1664525u;
+    v.y += v.x * 1664525u;
+    v ^= v >> 16u;
+    v.x += v.y * 1664525u;
+    v.y += v.x * 1664525u;
+    v ^= v >> 16u;
+    return vec2(v >> 8u) * (2.0 / 16777216.0) - 1.0;
 }
 
 // value, d/dx, d/dy
@@ -85,7 +95,7 @@ float waterFbm(vec2 xz, float footprint, float scale, int octaves, float gain) {
     float s = 0.0, a = 1.0, n = 0.0;
     for (int i = 0; i < octaves; ++i) {
         float vis = smoothstep(2.0, 5.0, scale / footprint);
-        s += a * vis * waterNoise(xz / scale + vec2(3.1, -1.7) * float(i));
+        if (vis > 0.0) s += a * vis * waterNoise(xz / scale + vec2(3.1, -1.7) * float(i));
         n += a;
         a *= gain;
         scale /= 2.1;
@@ -93,57 +103,146 @@ float waterFbm(vec2 xz, float footprint, float scale, int octaves, float gain) {
     return s / n;
 }
 
+// the same with its gradient: x value, yz d value / d xz (world units^-1)
+vec3 waterFbmd(vec2 xz, float footprint, float scale, int octaves, float gain) {
+    vec3 s = vec3(0.0);
+    float a = 1.0, n = 0.0;
+    for (int i = 0; i < octaves; ++i) {
+        float vis = smoothstep(2.0, 5.0, scale / footprint);
+        if (vis > 0.0) {
+            vec3 nd = waterNoised(xz / scale + vec2(3.1, -1.7) * float(i));
+            s += a * vis * vec3(nd.x, nd.yz / scale);
+        }
+        n += a;
+        a *= gain;
+        scale /= 2.1;
+    }
+    return s / n;
+}
+
+// the nearest feature point (cells of size 1), each point with its own size (0.6 .. 1.25): x the distance divided by the
+// point's size (round holes of varied sizes), yz its gradient
+vec3 waterWorleyF1d(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    float f1 = 8.0;
+    vec2 best = vec2(1.0, 0.0);
+    float bestK = 1.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            vec2 g = vec2(float(x), float(y));
+            vec2 hsh = waterHash(i + g);
+            vec2 r = g + hsh * 0.45 + 0.5 - f;
+            float k = 1.0 / (0.92 + 0.33 * fract(hsh.x * 7.31 + hsh.y * 3.17) * 2.0 - 0.33);
+            float d = dot(r, r) * k * k;
+            if (d < f1) {
+                f1 = d;
+                best = r;
+                bestK = k;
+            }
+        }
+    }
+    float d = sqrt(f1);
+    return vec3(d, -best * (bestK * bestK) / max(d, 1e-4));
+}
+
 // ---- foam pattern ----------------------------------------------------------------------------------------------------------
-// Sea foam is a sheet of bubbles torn open by round holes of many sizes: dense white water right after a wave broke (few,
-// small holes), lacy residual foam as it decays (the holes grow and merge until only a lace between them is left). The
-// pattern: a warped fractal sheet (5 octaves) thresholded by the coverage, with round holes of three sizes (cellular
-// distance to scattered points: round, not a net) punched in, larger at low coverage. Attached to the water (the undisplaced
-// position), evolving slowly. (The earlier patterns, cell borders and ridged-noise filaments, read as a hexagon net and as
-// cracks / lightning.)
+// Sea foam is a layer of bubbles of many sizes: dense, thick white water right after a wave broke, torn open by holes that
+// grow and merge as it ages until a thin lace is left between them, then streaks and specks. The pattern (prototyped
+// offline, docs/research/ocean.md 4.4): a warped fractal sheet thresholded softly by the coverage (the soft band is wider
+// for thin, old foam), round holes of three sizes with soft rims (cellular distance to scattered points: round, not a
+// net), a slow variation of the coverage over the water (no large uniform areas) and a thickness variation (bubbles of
+// different sizes). It returns a thickness (0..1, the shading turns it into opacity and light) and the thickness's gradient
+// (the foam's relief: lit on the sun's side, shaded in its lee). Attached to the water; the caller advects it with the flow.
 
 struct FoamField {
-    float v;        // the sheet: ~uniform 0..1 (foam where v > 1 - coverage)
-    vec3 hole;      // nearest-point distances of the three hole sizes (cells of 42 / 15 / 6 units)
-    vec3 vis;       // visibility of each hole size at this footprint
-    float var;      // slow variation of the hole sizes
-    float far;      // 0 .. 1: the pattern is below a pixel, the foam is its mean coverage
+    float sheet;     // ~uniform 0..1 (the logistic of a warped fbm): foam where sheet > 1 - coverage
+    vec2 sheetGrad;  // its gradient (world units^-1)
+    float macro;     // 0..1 slow variation of the coverage over the water
+    vec3 hole;       // nearest-point distances of the three hole sizes (cells of 48 / 17 / 7 units)
+    vec2 holeGrad[3];  // gradients of the holes' distances (world units^-1)
+    vec3 vis;        // visibility of each hole size at this footprint
+    float var;       // slow variation of the hole sizes
+    float detail;    // 0..1 thickness variation (bubbles of different sizes)
+    float far;       // 0..1: the pattern is below a pixel, the foam is its mean
 };
 
-FoamField foamField(vec2 xz, float t, float footprint) {
+// fpMin / fpMax: the pixel's shortest and longest extent on the water (world units; at grazing views the pattern is squashed
+// along the view: the fractal sheet follows the longest extent, the holes keep their detail along the shortest and are
+// filtered per pixel by foamDensity)
+FoamField foamField(vec2 xz, float fpMin, float fpMax) {
     FoamField ff;
-    footprint = max(footprint, 1e-3);
-    ff.far = smoothstep(25.0, 80.0, footprint);
-    vec2 drift = vec2(0.6, -0.4) * t;
-    vec2 w = vec2(waterFbm(xz + vec2(13.0, 0.0) + drift, footprint, 260.0, 3, 0.5),
-                  waterFbm(xz + vec2(0.0, 71.0) - drift.yx, footprint, 260.0, 3, 0.5));
-    vec2 p = xz + w * 90.0;
+    float footprint = max(fpMax, 1e-3);
+    fpMin = max(fpMin, 1e-3);
+    float fpMean = sqrt(fpMin * footprint);
+    ff.far = smoothstep(30.0, 90.0, fpMean);
+    vec2 w = vec2(waterNoise(xz / 300.0 + vec2(0.04, 0.0)), waterNoise(xz / 300.0 + vec2(0.0, 0.24))) * 0.75;
+    vec2 p = xz + w * 110.0;
     // the sheet's fbm (std ~0.1) through a logistic: about uniform, so the coverage is the share of foam
-    ff.v = 1.0 / (1.0 + exp(-17.0 * waterFbm(p, footprint, 130.0, 5, 0.6)));
-    ff.var = clamp(0.55 + 1.35 * waterFbm(p + vec2(300.0, 0.0), footprint, 90.0, 2, 0.5) * 3.0, 0.2, 1.3);
-    const vec3 SIZE = vec3(42.0, 15.0, 6.0);
+    vec3 s = waterFbmd(p, footprint, 150.0, 4, 0.58);
+    ff.sheet = 1.0 / (1.0 + exp(-11.0 * s.x));
+    ff.sheetGrad = 11.0 * ff.sheet * (1.0 - ff.sheet) * s.yz;
+    ff.macro = clamp(0.5 + 0.8 * waterNoise(xz / 900.0 + vec2(5.2, -1.3)), 0.0, 1.0);
+    ff.var = clamp(0.55 + 2.7 * waterFbm(p + vec2(300.0, 0.0), footprint, 90.0, 1, 0.5), 0.3, 1.3);
+    ff.detail = clamp(0.5 + 2.0 * waterFbm(p + vec2(51.0, -17.0), footprint, 22.0, 1, 0.5), 0.0, 1.0);
     // the holes' own small warp: torn, irregular openings rather than circles (seen from close by)
-    vec2 hw = vec2(waterNoise(p / 19.0 + vec2(2.3, 7.7)), waterNoise(p / 19.0 + vec2(9.1, 1.4))) * smoothstep(2.0, 5.0, 19.0 / footprint);
-    vec2 ph = p + hw * 9.0;
+    vec2 ph = p;
+    float hwVis = smoothstep(2.0, 5.0, 19.0 / footprint);
+    if (hwVis > 0.0) ph += vec2(waterNoise(p / 19.0 + vec2(2.3, 7.7)), waterNoise(p / 19.0 + vec2(9.1, 1.4))) * (14.0 * hwVis);
+    const vec3 SIZE = vec3(48.0, 17.0, 7.0);
     for (int i = 0; i < 3; ++i) {
-        ff.vis[i] = smoothstep(2.0, 5.0, SIZE[i] / footprint);
-        ff.hole[i] = ff.vis[i] > 0.0 ? waterWorleyF1(ph / SIZE[i] + vec2(17.3, 4.1) * float(i)) : 1.0;
+        // (a hole thinner than ~2 pixels along the longest extent would flicker as a dash: gone)
+        ff.vis[i] = smoothstep(2.5, 6.0, SIZE[i] / fpMin) * smoothstep(1.0, 2.5, SIZE[i] / footprint);
+        ff.hole[i] = 1.0;
+        ff.holeGrad[i] = vec2(0.0);
+        if (ff.vis[i] > 0.0) {
+            vec3 h = waterWorleyF1d(ph / SIZE[i] + vec2(17.3, 4.1) * float(i));
+            ff.hole[i] = h.x;
+            ff.holeGrad[i] = h.yz / SIZE[i];
+        }
     }
     return ff;
 }
 
-// foam (0..1) of the pattern at coverage c (0..1)
-float foamAmount(FoamField ff, float c) {
+// thickness (0..1) of the foam at coverage c (0..1) and freshness (0 old lace .. 1 fresh white water); dX / dY = the screen
+// derivatives of the pattern's position (world units per pixel along x / y): every transition is at least ~2 pixels wide
+// along the screen (soft edges also where the view squashes the pattern, at grazing views: no hard lines, no sparkle);
+// grad = the thickness's gradient (world units^-1)
+float foamDensity(FoamField ff, float c, float fresh, vec2 dX, vec2 dY, out vec2 grad) {
+    grad = vec2(0.0);
     c = clamp(c, 0.0, 1.0);
     if (c <= 0.0) return 0.0;
-    float sc = min(c * 1.2, 1.0);
-    // soft towards its edges: thin foam is translucent, the thick middle of a patch opaque
-    float sheet = smoothstep(1.0 - sc, 1.0 - sc + 0.12, ff.v);
-    float r = (0.72 - 0.62 * c) * ff.var;
-    const vec3 W = vec3(1.0, 0.9, 0.6);
-    float holes = 1.0;
-    for (int i = 0; i < 3; ++i) holes *= 1.0 - ff.vis[i] * W[i] * (1.0 - smoothstep(r - 0.1, r, ff.hole[i]));
-    // far away (holes and sheet below a pixel) the foam fades to its mean coverage
-    return mix(sheet * holes, 0.75 * c, ff.far);
+    // the coverage varies slowly over the water: no large uniform areas
+    float ce = clamp(c * (0.5 + ff.macro), 0.0, 1.0);
+    // the sheet: a soft threshold, wider for thin, old foam (no cut-out edges)
+    float sc = clamp(ce * 1.2, 0.0, 1.0);
+    float pxS = length(vec2(dot(ff.sheetGrad, dX), dot(ff.sheetGrad, dY)));  // the sheet's change per pixel
+    float wv = max(0.14 + 0.12 * (1.0 - ce), 1.2 * pxS);
+    float e0 = 1.0 - sc - wv;
+    float ts = clamp((ff.sheet - e0) / (2.0 * wv), 0.0, 1.0);
+    float S = ts * ts * (3.0 - 2.0 * ts);
+    vec2 gS = (6.0 * ts * (1.0 - ts) / (2.0 * wv)) * ff.sheetGrad;
+    // the big holes: large in old, thin foam (only a lace between them is left), small in fresh white water; soft rims
+    float r1 = (0.68 - 0.62 * ce) * ff.var * mix(1.0, 0.7, fresh);
+    float pxH = length(vec2(dot(ff.holeGrad[0], dX), dot(ff.holeGrad[0], dY)));
+    float w1 = max(0.18, 2.4 * pxH);
+    float t1 = clamp((ff.hole.x - (r1 - 0.35 * w1)) / w1, 0.0, 1.0);
+    float L = mix(1.0, t1 * t1 * (3.0 - 2.0 * t1), ff.vis.x);
+    vec2 gL = (ff.vis.x * 6.0 * t1 * (1.0 - t1) / w1) * ff.holeGrad[0];
+    float r2 = (0.72 - 0.6 * ce) * ff.var * mix(1.0, 0.75, fresh);
+    float w2 = max(0.2, 2.4 * length(vec2(dot(ff.holeGrad[1], dX), dot(ff.holeGrad[1], dY))));
+    float M = mix(1.0, smoothstep(r2 - 0.4 * w2, r2 + 0.6 * w2, ff.hole.y), ff.vis.y);
+    float r3 = 0.6 - 0.45 * ce;
+    float w3 = max(0.25, 2.4 * length(vec2(dot(ff.holeGrad[2], dX), dot(ff.holeGrad[2], dY))));
+    float B = mix(1.0, smoothstep(r3 - 0.4 * w3, r3 + 0.6 * w3, ff.hole.z), ff.vis.z);
+    // inside: bubbles of different sizes make the layer thicker and thinner
+    float thick = (0.6 + 0.4 * ff.detail) * mix(0.55, 1.0, fresh);
+    float inner = (0.35 + 0.65 * M) * (0.55 + 0.45 * B) * thick * smoothstep(0.0, 0.06, c);
+    float h = S * L * inner;
+    grad = (gS * L + S * gL) * inner;
+    // far away (the pattern below a pixel) the foam is its mean thickness
+    grad *= 1.0 - ff.far;
+    return mix(h, 0.55 * c, ff.far);
 }
 
 #endif

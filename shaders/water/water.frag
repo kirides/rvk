@@ -122,16 +122,18 @@ vec3 traceSSR(WaterBlock w, RvkFrame f, vec3 origin, vec3 dir, vec2 jitter, out 
 
 // + the engine's point lights (shaders with g_PointLights: falloff 1 - saturate(d^2 / range^2), the point-light shadow mask
 // s0 by channel), added before the curve as the engine does
-vec3 engineLight(WaterBlock w, vec3 N, vec3 Ngeo, float outdoor, vec3 P, vec2 uv) {
+// (wrap > 0: the sun's light wrapped around the normal, as through a scattering layer; ambK / sunK scale the ambient and the
+// sun before the curve: foam)
+vec3 engineLightEx(WaterBlock w, vec3 N, vec3 Ngeo, float outdoor, vec3 P, vec2 uv, float wrap, float ambK, float sunK) {
     vec4 n1 = vec4(N, 1.0);
     vec4 n2 = N.yzzx * N.xyzz;
     vec3 sh = vec3(dot(w.sh[0], n1) + dot(w.sh[3], n2), dot(w.sh[1], n1) + dot(w.sh[4], n2), dot(w.sh[2], n1) + dot(w.sh[5], n2)) +
               w.sh[6].rgb * (N.x * N.x - N.y * N.y);
-    vec3 amb = mix(w.indoor.rgb, sh, outdoor);
+    vec3 amb = mix(w.indoor.rgb, sh, outdoor) * ambK;
     vec3 L = w.sunDir.xyz;
-    float nl = clamp(dot(L, N), 0.0, 1.0);
+    float nl = clamp((dot(L, N) + wrap) / (1.0 + wrap), 0.0, 1.0);
     float up = clamp(dot(L, Ngeo) * 4.0, 0.0, 1.0);
-    vec3 l = amb + w.sunColor.rgb * nl * up;
+    vec3 l = amb + w.sunColor.rgb * nl * up * sunK;
     uint nLights = w.lightInfo.x;
     if (nLights > 0u) {
         vec4 mask = w.tex[0] != 0u ? rvkSample2DLod(w.tex[0], w.smpOurs.x, uv, 0.0) : vec4(0.0);
@@ -147,6 +149,8 @@ vec3 engineLight(WaterBlock w, vec3 N, vec3 Ngeo, float outdoor, vec3 P, vec2 uv
     }
     return vec3(dpow(l.r, 0.45), dpow(l.g, 0.45), dpow(l.b, 0.45));
 }
+
+vec3 engineLight(WaterBlock w, vec3 N, vec3 Ngeo, float outdoor, vec3 P, vec2 uv) { return engineLightEx(w, N, Ngeo, outdoor, P, uv, 0.0, 1.0, 1.0); }
 
 vec2 nmap(vec4 t) { return t.wy; }  // DXT5 normal maps: x in alpha, y in green
 
@@ -205,6 +209,13 @@ void main() {
     float viewW = 1.0 / gl_FragCoord.w;  // the water point's view depth (the engine's v2.w)
     float sceneZ0 = sceneViewDepth(w, f, uv);
     float thick0 = sceneZ0 - viewW;  // the view ray's way through the water (the engine's depth fade input)
+    // the vertical depth over the ground without the refraction offset (smooth: foam, the thin water at the waterline and
+    // the soft edge follow it)
+    bool sky0 = sceneZ0 >= far * 0.995;
+    float vdepth0 = sky0 ? 1e6 : max(P.y - rvkWorldFromViewDepth(f, uv, sceneZ0).y, 0.0);
+    // the soft edge where the water meets the ground: at least a few pixels wide (no hard line, no stair steps)
+    float edgeD = min(vdepth0 * 2.0, thick0);
+    float softEdgeW = clamp(2.0 * fwidth(edgeD), 12.0, 30.0);
 
     vec3 Ngeo = tc4.xyz;
     vec3 T = tc5.xyz;
@@ -310,6 +321,13 @@ void main() {
         // sea does); the short waves still bend the reflected ray and the specular
         float nvF = fft ? dot(Nfres, V) : nv;
         float fres = (c9.y * dpow(1.0 - nvF, c9.z) + c9.x) * reflK;
+        if (fft) {
+            // the thin water at the waterline (the swash's last centimetres over the sand) is a broken, rough film rather
+            // than a mirror: less of the sky, the sand shows through (no grey band along the beach)
+            float thinW = mix(0.3, 1.0, smoothstep(3.0, 35.0, vdepth0));
+            fres *= thinW;
+            spec *= thinW;
+        }
         vec3 diffuse = mtex(w, 10u, tc0.zw).rgb * mtex(w, 11u, tc1.xy).rgb * c8.y;
         seaTint = diffuse;
         vec3 refl = cube;
@@ -431,9 +449,6 @@ void main() {
     bool skyBehind = sceneZ >= far * 0.995;
     vec3 G = rvkWorldFromViewDepth(f, ruv, sceneZ);
     float vdepth = skyBehind ? 1e6 : max(P.y - G.y, 0.0);  // vertical depth over the ground
-    // the same without the refraction offset (smooth: foam and the soft edge follow it)
-    bool sky0 = sceneZ0 >= far * 0.995;
-    float vdepth0 = sky0 ? 1e6 : max(P.y - rvkWorldFromViewDepth(f, uv, sceneZ0).y, 0.0);
 
     // ---- volume (the sea): what lies under the water loses red, then green, along the light's way through it ----
     float path = 1e6;
@@ -458,7 +473,10 @@ void main() {
     float foam = 0.0;
     float milk = 0.0;  // aerated, sandy water of the surf zone (FFT ocean)
     vec4 foamTerms = vec4(0.0);
-    float foamWhite = 0.0;  // share of the foam that is dense white water (brighter than the lace)
+    float foamH = 0.0;          // FFT ocean: the foam's thickness (0..1), its gradient (world units^-1), freshness
+    vec2 foamGrad = vec2(0.0);
+    float foamFresh = 0.0;
+    float foamFoot = 1.0;       // world units per pixel
     if (fft && w.look.y > 0.0 && !underside) {
         // FFT ocean foam (docs/research/ocean.md 4.4): coverages (0..1) turned into foam by one pattern attached to the water
         // (the undisplaced position): low coverage = lace with round holes, high = dense white water.
@@ -471,7 +489,9 @@ void main() {
         // near the camera; further out from the same terms evaluated in place.
         vec2 xz0 = tc7.xy;
         float fineFade = 1.0 / (1.0 + dist / 3000.0);
-        float footprint = max(length(fwidth(xz0)), 0.01);
+        vec2 dX = dFdx(xz0), dY = dFdy(xz0);  // world units per pixel (the foam's soft edges follow the screen)
+        float footprint = max(max(length(dX), length(dY)), 0.01);
+        float fpMin = max(min(length(dX), length(dY)), 0.01);
         Surf su = surfAt(w.shoreWave, fl, st, xz0, t);
         float wetHere = smoothstep(3.0, 12.0, vdepth0);  // a rock or a swimmer just under the surface is not surf
         float cCap = clamp(fs.foam * 1.3, 0.0, 1.0) * 0.8;
@@ -506,19 +526,33 @@ void main() {
         float edgeW = mix(5.0, 15.0, uprush);
         float contactW = (1.0 - smoothstep(1.0, edgeW, contactD)) * smoothstep(1.0, 3.0, contactD + 2.0);
         cCon = max(cCon * 0.75, contactW * mix(0.4, 0.9, uprush));
-        float cMax = max(max(max(cCap, cWhite), max(cRes, cCon)), cStreak);
-        float fWhite = 0.0, fRes = 0.0, fCap = 0.0, fCon = 0.0, fStreak = 0.0;
-        if (cMax > 0.004) {
-            FoamField ff = foamField(xz0, t, footprint);
-            fWhite = foamAmount(ff, cWhite) * (0.55 + 0.45 * cWhite);
-            fRes = foamAmount(ff, cRes * 0.9) * 0.72;
-            fStreak = foamAmount(ff, cStreak) * 0.3;
-            fCap = foamAmount(ff, cCap);
-            fCon = foamAmount(ff, cCon);
+        // one coverage (the union of the terms) and its freshness (dense white water and the swash's rim vs old lace)
+        float cAll = 1.0 - (1.0 - cWhite * (0.55 + 0.45 * cWhite)) * (1.0 - cRes * 0.7) * (1.0 - cCap) * (1.0 - cCon * 0.85) * (1.0 - cStreak * 0.4);
+        if (cAll > 0.004) {
+            foamFresh = clamp((cWhite + 0.8 * cCon + 0.6 * cCap) / max(cAll, 1e-3), 0.0, 1.0);
+            // the pattern drifts with the water as the foam buffer advects the coverage (towards the beach, faster in the
+            // surf zone): two phases of a flow map, switched region by region at different moments (no global pulse)
+            float coh = length(fl.dir);
+            vec2 vel = (coh > 1e-4 ? fl.dir / coh : vec2(0.0)) * (smoothstep(0.05, 0.2, coh) * (20.0 + 90.0 * su.surfZone));
+            const float FT = 6.0;
+            float a0 = fract(t / FT);
+            float m = smoothstep(0.42, 0.58, 1.0 - abs(2.0 * a0 - 1.0) + 0.4 * waterNoise(xz0 / 420.0 + vec2(4.1, 8.3)));
+            vec2 g0 = vec2(0.0), g1 = vec2(0.0);
+            float h0 = 0.0, h1 = 0.0;
+            if (m > 0.0) {
+                FoamField ff = foamField(xz0 - vel * ((a0 - 0.5) * FT), fpMin, footprint);
+                h0 = foamDensity(ff, cAll, foamFresh, dX, dY, g0);
+            }
+            if (m < 1.0) {
+                float a1 = fract(a0 + 0.5);
+                FoamField ff = foamField(xz0 - vel * ((a1 - 0.5) * FT) + vec2(731.0, -419.0), fpMin, footprint);
+                h1 = foamDensity(ff, cAll, foamFresh, dX, dY, g1);
+            }
+            foamH = clamp(mix(h1, h0, m) * w.look.y, 0.0, 1.0);
+            foamGrad = mix(g1, g0, m) * w.look.y;
         }
-        foam = clamp(max(max(max(fCap, fWhite), max(fRes, fCon)), fStreak) * w.look.y, 0.0, 1.0);
-        foamWhite = clamp(max(fWhite, fCon * 0.7) / max(foam, 1e-3), 0.0, 1.0);
-        foamTerms = vec4(fCap, fWhite, fRes, fCon);
+        foamFoot = footprint;
+        foamTerms = vec4(cCap, cWhite, cRes, cCon);
         // the broken water is full of bubbles and stirred-up sand: milky turquoise rather than clear
         // (most right behind the breaking crests, clearing between the bores)
         milk = clamp(su.surfZone * wetHere * (0.12 + 0.3 * su.trail) + 0.5 * cWhite + 0.3 * cRes, 0.0, 1.0) * fineFade;
@@ -578,7 +612,7 @@ void main() {
         float lum = dot(lit, vec3(0.2126, 0.7152, 0.0722));
         vec3 milkCol = mix(vec3(0.55 * lum), clamp(seaTint, 0.0, 1.0) * lum * 1.3, 0.55);
         // it lightens what lies under the surface; it never darkens the sky's reflection on top of it
-        color = max(color, mix(color, mix(milkCol, w.fogColor.rgb, fog), milk * 0.7));
+        color = max(color, mix(color, mix(milkCol, w.fogColor.rgb, fog), milk * 0.45));
     }
     if (foam > 0.0) {
         // foam lies on top of the water: white-ish, lit like the beach (the engine's diffuse lighting curve, albedo ~0.7),
@@ -586,15 +620,45 @@ void main() {
         vec3 lit = engineLight(w, Ngeo, Ngeo, outdoor, P, uv) * shadow;
         // white: the light's brightness, a little of the sky's tint (the sun's warm colour made it look like sand)
         float lum = dot(lit, vec3(0.2126, 0.7152, 0.0722));
-        // thick, fresh foam brighter than thin, old lace; a little mottling (bubbles of different sizes)
+        // a little mottling (bubbles of different sizes)
         float mottle = 0.88 + 0.12 * waterNoise(tc7.xy / 23.0 + vec2(t * 0.05, 0.0));
-        vec3 foamCol = mix(0.58, 0.78, foamWhite) * mottle * vec3(lum);
+        vec3 foamCol = 0.58 * mottle * vec3(lum);
         color = mix(color, mix(foamCol, w.fogColor.rgb, fog), foam);
         alpha = max(alpha, foam);
     }
+    if (foamH > 0.0) {
+        // FFT ocean foam: a layer of bubbles on the water, lit by the sun and the sky (the engine's light and curve) on its
+        // own relief (thick lumps brighter on the sun's side, their lee and the hollows between them darker), the light
+        // scattered through it (wrapped), thin foam translucent and tinted by the water under it; never flat white
+        float h = foamH;
+        float reliefK = 9.0 / (1.0 + foamFoot / 4.0);  // the relief fades where the pattern gets small on screen
+        vec2 relief = foamGrad * reliefK;
+        relief *= min(1.0, 0.7 / max(length(relief), 1e-4));  // gentle lumps, never a face turned away from the light
+        vec3 Nf = normalize(normalize(Ngeo) + vec3(-relief.x, 0.0, -relief.y));
+        float ao = mix(0.72, 1.0, smoothstep(0.1, 0.8, h));
+        vec3 lf = engineLightEx(w, Nf, Ngeo, outdoor, P, uv, 0.45, ao, mix(0.75, 1.0, h) * shadow);
+        float lum = dot(lf, vec3(0.2126, 0.7152, 0.0722));
+        vec3 base = vec3(lum);  // neutral (the sun's warm colour made it read as sand)
+        float albedo = mix(0.5, 0.78, smoothstep(0.1, 0.9, h));
+        float tl = dot(seaTint, vec3(0.2126, 0.7152, 0.0722));
+        vec3 thinTint = mix(vec3(1.0), clamp(seaTint / max(tl, 1e-3), vec3(0.0), vec3(1.4)), 0.12);
+        vec3 fc = base * albedo * mix(thinTint, vec3(1.0), smoothstep(0.2, 0.8, h));
+        // matte foam is brighter than the water it lies on (at grazing views the water mirrors the bright sky, in a storm the
+        // light is dim: foam darker than the water read as dirt)
+        fc *= max(1.0, 1.3 * dot(color, vec3(0.2126, 0.7152, 0.0722)) / max(dot(fc, vec3(0.2126, 0.7152, 0.0722)), 1e-4));
+        // a shoulder on the foam's brightness: under a strong sun the lit foam would clip to flat white (the scene target
+        // is shown without a tone curve); its shading stays, compressed towards ~0.9
+        float fl0 = dot(fc, vec3(0.2126, 0.7152, 0.0722));
+        if (fl0 > 0.55) fc *= (0.55 + 0.35 * (1.0 - exp(-(fl0 - 0.55) / 0.35))) / fl0;
+        // (dense where thick, a translucent veil where thin)
+        float alphaF = 1.0 - exp(-3.2 * h);
+        color = mix(color, mix(fc, w.fogColor.rgb, fog), alphaF);
+        alpha = max(alpha, alphaF);
+    }
     // a soft edge where the water gets very thin (no seam on the beach)
-    // (FFT ocean: a wider fade, the swash spreads the waterline over the flat beaches)
-    if (!sky0) color = mix(refractionColor(w, uv), color, smoothstep(0.0, fft ? 12.0 : 5.0, min(vdepth0 * 2.0, thick0)));
+    // (FFT ocean: a wider fade, at least a few pixels: the swash spreads the waterline over the flat beaches)
+    float edgeK = smoothstep(0.0, fft ? softEdgeW : 5.0, edgeD);
+    if (!sky0) color = mix(refractionColor(w, uv), color, edgeK);
     if ((flags & WATER_BLENDED) != 0u) {
         // the engine draws this body blended (SRCALPHA / INVSRCALPHA) over the scene: the same, drawn opaque here
         color = mix(refractionColor(w, uv), color, alpha);
