@@ -354,7 +354,17 @@ P4 the rest of the world (leaves, grass, characters).
   uv`. Verified at 6 spots against the raster (textures, scale, orientation; cut-outs), depth check unchanged, 0
   sync-validation messages; GPU: albedo view 1.26 ms (0.70 ms cut-outs solid), scene 0.055 ms. Open: SpeedTree branches
   (triangle strips) not in the scene, cascade-only instances untextured (research/rt-reflections.md 3.2).
-* P3 water RT reflections: next.
+* **P3 water RT reflections: done (2026-10-22).** Step 0: SpeedTree branches / fronds (strips -> lists at BLAS build) in
+  the scene, materials of the depth-only draws from the engine's sub-meshes (`eCMeshResource2::RenderZPass` merges them;
+  render context +0x28 -> sub-mesh array) - untextured records 13-23 of ~500 (was ~170 of ~420). Step 1: `rt.reflections`
+  (off / low / medium / high, default medium) = `enh/water_rt` + `water_rt.comp`: a compute pass at AfterRefractionCopy
+  traces the mirror rays of the water bodies' planes (fitted per body) into a reflection image (1 ray / 2 x 2 px at low /
+  medium), screen reuse or the engine's material lighting + sun shadow ray + fog; `water.frag` looks it up bent by the
+  waves and ripples, SSR fills in. Verified at 8 spots: the engine water's look and luma (within +-3), off-screen masts,
+  hulls, quay walls, canopies reflected, no added shimmer, 0 sync-validation messages; +1.0 .. +1.6 ms GPU at medium
+  (1080p, 7900 XTX). Ray query in the water's pixel shader was built first and dropped (+3.4-3.7 ms). Details and open
+  items: research/rt-reflections.md 3.3.
+* P4 the rest of the world: leaf cards / billboards / grass, skinned characters, lightmaps / point lights at hits: next.
 
 ### M10+ Enhanced graphics
 * candidates: anisotropic filtering + MSAA/TAA/SMAA, modern tonemapping/HDR10,

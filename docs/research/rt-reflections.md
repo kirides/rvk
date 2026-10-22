@@ -38,9 +38,10 @@ Legend: **[C]** confirmed, **[I]** inferred / proposed.
 * **Albedo** = the texture bound at s(9 + k), k from walking the material's Diffuse tree (rt-albedo-facts 1.2); bytecode
   fallback s9 unless it is a cube / the normal map. Alpha-tested (`Masked`) materials are non-opaque geometry resolved by
   the ray-query candidate loop with the draw's own alpha reference, mip by ray cone.
-* **Reflections in `water.frag`**, inline ray query in the fragment shader at the place of `traceSSR` (all four water
-  models): one mirror ray along the calmer normal the SSR uses (the waves are the roughness, as GD3D11), the ripple
-  deviation breaks the lookup up; **screen reuse**: a hit that lies on screen and matches the depth map takes the engine's
+* **Reflections for `water.frag`** [P3: built as a compute pass before the water draws, a reflection image of the water
+  planes' mirror rays that water.frag looks up bent by its waves: ray query inside the water's pixel shader cost 2-3x
+  more, 3.3], (all four water models): one mirror ray along the calmer normal the SSR uses (the waves are the roughness,
+  as GD3D11), the ripple deviation breaks the lookup up; **screen reuse**: a hit that lies on screen and matches the depth map takes the engine's
   fully shaded scene colour (refraction copy); off screen the hit is shaded like the engine's material: albedo x
   `pow(SH ambient + sun N.L x shadow ray, 0.45)` with the water draw's own light constants, the engine's fog over the
   path; texture LOD from a ray cone widened by the ripples (distant reflections soften); miss = the engine's sky cube as
@@ -54,7 +55,7 @@ Legend: **[C]** confirmed, **[I]** inferred / proposed.
 |---|---|---|
 | **P1 RT scene** | draw observer, BLAS cache, instance registry, TLAS per frame, geometry records, FrameBlock fields, stats (rvk.log / overlay), `rt.debug = instances / depth` (camera rays traced against the TLAS over the frame) | the traced view lines up with the raster at lake_jungle / harbour_docks / beach_sun (depth check ~0 except foliage / characters), no leaks over teleports, CPU / GPU cost, sync validation |
 | **P2 materials at hits** (done, 3.2) | albedo slot from the material graph (+ fallback), uv set + map, alpha-tested geometry (SpeedTree branches / fronds rest pose, Masked props) with the candidate loop, `rt.debug = albedo` | traced albedo view vs the frame at the spots |
-| **P3 water RT reflections** | `rt.reflections`, hit shading (screen reuse, sun + shadow ray, SH ambient, lightmaps if cheap, fog), ray cones, the watery look, all water models, quality tiers | water-compare side by sides (SSR vs RT) at beach_sun, harbour_docks, lake_jungle, waterfall_jungle, swamp_pond, crystal_cave; GPU cost per tier; toggles without hitch |
+| **P3 water RT reflections** (done, 3.3) | `rt.reflections`, hit shading (screen reuse, sun + shadow ray, SH ambient, fog), ray cones, the watery look, all water models, quality tiers; a compute pass (reflection image) instead of ray query in the water's pixel shader | water-compare side by sides (SSR vs RT) at beach_sun, harbour_docks, lake_jungle, waterfall_jungle, swamp_pond, crystal_cave; GPU cost per tier; toggles without hitch |
 | **P4 the rest of the world** | leaf cards / billboards / grass (VS capture or their analytic expansion), skinned characters (VS capture per frame), lightmaps at hits | reflections of trees and the hero at lake_jungle / beach_sun |
 
 ## 3. Record
@@ -256,6 +257,113 @@ hand-written shaders only (rvk_tests `abi_glsl_rt_layout_matches_cpp` checks rec
 * The far sea floor at beach_sun shows the caustics texture (an overlay only the cascades see): under water.
 * Observer cost grew (materials + blended-layer handling): the per-VS verdict cache (P1 item) is still open.
 * Lightmaps at hits (P4); the hit's lighting is P3 (`albedo * pow(SH + sun N.L * shadow, 0.45)`).
+
+### 3.3 P3: ray-traced water reflections (2026-10-22) [C unless noted]
+
+**Step 0: the scene's gaps**
+
+| piece | files |
+|---|---|
+| SpeedTree branches / fronds (triangle **strips**) in the scene: a strip's indices are converted to a list at BLAS build (every second triangle's winding swapped, degenerate restarts dropped) into a device buffer of the BLAS (uploaded through the frame's ring, a copy -> build / shader barrier); the BLAS and the geometry record read that list (`rt::BlasKey::strip`, `Blas::listIndices`, `Blas::triangles`) | `src/enh/rt_registry.{h,cpp}`, `src/enh/rt_scene.{h,cpp}` |
+| materials of **depth-only draws** (main-view z pre-pass, sun cascades): they run `eCMeshResource2::RenderZPass` (Engine.dll 0x7603b0): one DrawIndexedPrimitive over the merged range of the opaque sub-meshes (start = the first one's first index, count = the sum of index counts / 3), masked sub-meshes alone, blended ones skipped; no `eCSubMesh::Render`, so no material in the draw tag. The render context (`eCRenderContextMesh +0x28` = `eCMeshResource2`; sub-mesh array `+0x58` pointer / `+0x60` count, 0x48 bytes each: first index `+0x28`, index count `+0x2c`, first vertex `+0x30`, vertex count `+0x34`, `eCMaterialResource2*` `+0x38`) names them: one sub-mesh over the range = the draw's material (resolved with its pool image, uv unmapped), several = per-triangle **engine segments** of the BLAS, filling the gaps the main view's sub-ranges leave (checked again every 256 frames or when a material died) | `src/enh/rt_scene.cpp` (`engineSubMeshes`, `learnEngineMaterials`, `refreshSegments`) |
+| a per-VS verdict cache in the observer (shader class, `g_vInstanceData`, billboards, instancing) | `src/enh/rt_scene.cpp` |
+
+Result at the spots (rvk.log `rt: scene: materials ...`): **SpeedTree records 230-300** (P2: 0), **untextured records
+13-23 of ~500** (P2: ~170 of ~420), engine sub-mesh segments 120-250. `rt.debug=albedo` shows palms with fronds, the bare
+lake trees' branches, the harbour's sea floor and quay textured (`out\water\20261022-212216\enh\`). One ship hull at
+harbour_mouth stays untextured (checker). The observer's own timer: 0.35-0.46 ms per frame (P2 0.43-0.47: the verdict
+cache saves little; the cost is per instance of the instanced batches, now with SpeedTree).
+
+**Step 1: the reflections**
+
+| piece | files |
+|---|---|
+| setting `rt.reflections` (Ray tracing; off / low / medium / high, default medium, needs RayQuery, unmet = off; acts with `water.enabled` + `water.reflections = ssr` only) and hidden `rt.reflection_tweaks` (cost measurements: 1 cut-outs solid, 2 no shadow rays, 4 no SSR fallback, 8 unshaded); `water.debug = reflection_source / reflection_shaded` | `src/core/settings.{h,cpp}`, `src/hal/vulkan/device.cpp` |
+| the pass: `enh::WaterRt` (holds the RT scene while on), compute `water.rt` at **AfterRefractionCopy** (before the water draws) into a transient RGBA16F reflection image (premultiplied colour + coverage), its pipeline built in the background from device creation | `src/enh/water_rt.{h,cpp}`, `shaders/water/water_rt.comp` |
+| the surfaces: each water body as a plane (least squares over its world vertices, worst error logged; > 150 units = no plane: such a body keeps the SSR), its world box, its outdoor factor (mean COLOR1.w); bodies drawn in the last 120 frames, the 16 nearest; the light of the water draws (c3 / c4, c14..c22, c24) | `src/enh/water.{h,cpp}` (`fitPlane`, `measureOutdoor`, `fillBlock`) |
+| `water.frag` looks the image up like a planar reflection (`traceReflection`), SSR where it has nothing; `WaterBlock::rtRefl` | `shaders/water/water.frag`, `water_common.glsl`, `src/enh/water.h` |
+| `rvkRtVisibility` (shadow rays: terminate on first hit, the same alpha-tested candidate loop) | `shaders/include/rvk_rt_trace.glsl` |
+| `rvk_vktest --shader-stats` (`VK_KHR_pipeline_executable_properties`: VGPRs / LDS / scratch of the water PS and the compute pass; `vk::ContextOptions::pipelineStatistics`) | `tools/vktest/main.cpp`, `src/vk/context.{h,cpp}` |
+| `rvk_glslc -D NAME[=VALUE]` and CMake `RVK_SHADER_VARIANTS` (`"<name>=<source>:<DEF>,<DEF>=v"`; empty now) | `tools/glslc/main.cpp`, `CMakeLists.txt` |
+| `water-compare.ps1 -EngineSetting` (the left run's settings instead of the engine's water: SSR vs RT) | `scripts/water-compare.ps1` |
+
+**How it works.** Per pixel of the reflection image (1 per 2 x 2 screen pixels at low / medium, per pixel at high): the
+view ray against the body planes (camera above the plane, inside the box + 60, in front of the engine's depth map), the
+nearest one; the **mirror ray of that plane** (`dir.y >= 0.02`, origin + 2 units along the normal, tMin 1), traced with
+`rvkRtTraceClosest` (cut-outs alpha-tested except at low), ray cone = the output pixel's angle x distance + 0.0015 rad
+(texture mips: sharp near contact, softer with distance). Hit: **screen reuse** when it projects on screen, lies above the
+plane (a hit under the waterline projects onto the refraction copy's underwater scene: it lit quay walls up as the bright
+floor in the first version) and the depth map agrees within max(30, 1.5 % viewZ), faded over the screen's 3 % border;
+else **shaded** like the engine's material: albedo (no texture: the constant colour <= 0.5; no material: 0.2 grey) x
+`pow(max(mix(c14, SH9(N), outdoor), 0) + c22 x sat(N.L) x sat(4 G.L) x shadow, 0.45)`, a shadow ray (medium: cut-outs
+solid; high: alpha-tested; reach 20,000), the engine's fog over the camera's distance to the hit (the same fog a reused hit
+carries: no seam). Coverage fades over the last 15 % of the reach (low 15,000, medium 20,000, high 30,000 units; the RT
+scene's radius is 30,000). No lightmaps / point lights at hits (P4). In `water.frag`: the image at the pixel's uv +
+**bend** = `0.12 x nr.xz / (1 + dist / 4000)` (nr = the 35 % ripple normal SSR's ray follows: the FFT macro waves' tilt
+and the ripples) + SSR's ripple jitter; if the bent lookup lands off the water (coverage < half the pixel's own) the
+pixel's own; the colour un-premultiplied, coverage = conf; where coverage < 1 (medium / high, the model's reflection weight
+>= 2 %) SSR fills in underneath (leaf cards, grass, characters are not in the TLAS); then each model's own path:
+`keepSky` with an RT floor of 0.3 (sea) / 0.75 (lake, river) x mix(0.35, 1, outdoor) (the lake / river glitter stays; SSR
+keeps 0.55 / 0.85), the swamp's dim mirror, the sun's glint x (1 - 0.85 coverage) where the world is reflected
+(sea, swamp). Underwater camera: the body is skipped (camera below its plane) and the water's `underside` path as before.
+
+**Why not ray query in the water's pixel shader** (built first, measured, replaced): one ray per water pixel inside
+`water.frag` cost **+3.4-3.7 ms GPU** at lake_jungle / harbour_docks (1080p, 7900 XTX, medium): the ray query raised the
+pixel shader from 163 to 234 VGPRs (`--shader-stats`; per-model variants 160-200 did not help: 3.5-3.8 ms), the rays in
+dense foliage with alpha-tested fronds, shadow rays and SSR fallback. A FAST_TRACE TLAS saved ~1 ms there but costs 0.25-0.6
+ms per build; with the compute pass FAST_BUILD is better (P1's choice stays).
+
+**Costs** (1920 x 1080, vsync off, the GPU otherwise idle except a browser; frame GPU time, A/B within one hold of the spot
+via `[debug] commands` (`run.ps1 -Perf -WindowSize 1920x1080 -Commands '5200: set rt.reflections medium',...`, rvkcompare
+`freeze_wait=4800`; the spot's hold starts near frame 3,800), rvk.log `perf:` windows):
+
+| spot | off (SSR) | low | medium | high |
+|---|---|---|---|---|
+| lake_jungle | 2.6 ms | 3.55 (+0.95) | 4.2 (+1.6) | 5.15 (+2.5) |
+| harbour_docks | 3.05 | 3.53 (+0.5) | 4.08 (+1.0) | 4.4 (+1.35) |
+
+`-PerfFrame` at lake_jungle medium: `water.rt` 1.32 ms, `rt.scene` ~0.1 ms, the water's render pass 0.38 ms (SSR 0.44:
+fewer SSR rays); compute 121 VGPRs (wave64), water.frag 172 (SSR-only 163). Of the 1.32 ms: alpha-tested cut-outs ~0.5,
+shading ~0.13, shadow rays ~0.1 (`rt.reflection_tweaks` 1 / 8 / 2). CPU: one 1.2 KiB parameter block per frame, the pass
+< 0.05 ms. Turning the tier on from off costs one ~26 ms frame (the RT scene rebuilds its BLASes within its budget; the
+session's first activation ~300 ms: the driver's build kernels); medium <-> high: none.
+
+**Verification**
+
+* SSR vs RT medium, composites (`water-compare.ps1 -EngineDir out\water\20261022-210848 -MaskDir ... -Setting
+  rt.reflections=medium -Burst 4 -Interval 1`): **`out\water\20261022-225604\`** (8 spots, left SSR / right RT): the look
+  and colour stay the engine water's; luma over the water masks within -2.6 .. +3.2 of SSR (beach_sun +2.6, crystal_cave
+  -2.6, harbour_docks -0.5, harbour_mouth -0.6, lake_jungle -1.1, sea_cliff -0.3, swamp_pond -0.2, waterfall_jungle +3.2),
+  hue +-2.
+* Reflection only (`water.debug=reflection`, SSR left / RT right): **`out\water\20261022-230105\`**: harbour_mouth
+  (`crop_harbour_mouth_0_450.png`: SSR shows a broken piece of the hull; RT the whole hull, the mast and the rigging,
+  broken up by the ripples), harbour_docks (the quay wall and cliff reflected whole), lake_jungle (trunks and canopy over
+  the lake, darker than the cube SSR kept), beach_sun (the rocks' complete reflections), swamp_pond (the trees mirrored).
+* Where each reflection comes from (`water.debug=reflection_source`, left; reflection right): `out\water\20261022-223731\`
+  (`sheet.png`): green screen reuse, blue shaded hits (off-screen canopy at the lake), yellow SSR fallback, black sky.
+* Motion (`-Burst 4 -Interval 1`, mean absolute frame-to-frame difference of the 8-bit pictures): RT = SSR within noise
+  (lake 0.02-0.03 / 0.02-0.03, harbour_docks 0.07 / 0.10, sea_cliff 0.45 / 0.46, beach_sun 0.37 / 0.32): no shimmer added
+  (no stochastic rays; the half-resolution image is bilinear).
+* First version findings fixed on the way: bright blobs at quay walls (hits under the waterline reused the underwater
+  refraction copy), lakes' glitter lost (RT floor 0.6 -> 0.75), caves (floor x outdoor).
+* `-SyncValidation` (tier high, lake_jungle / harbour_mouth / crystal_cave): 0 messages. rvk_tests 110 / 110,
+  `rvk_vktest --rt` / `--passes` / `--shader-stats`, `rvk_d3d9test` PASS.
+* Defaults (water off: no RT consumer) against the stored reference (`refcompare.ps1 -ReferenceDir
+  outefcompare61022-093252`, run `outefcompare61022-231047`): 18 PASS, 1 WARN (swamp_camp ssim 0.975), 1 FAIL
+  harbour_docks = the engine's timed wave-splash particles over the basin in that capture (water.md 8); re-run of the spot
+  `outefcompare61022-231618`: PASS (psnr_q 51.7).
+
+**Open (for P4 and later)**
+
+* Leaf cards, billboards, grass and skinned characters are not in the TLAS: screen reuse / the SSR fallback show them on
+  screen only; off screen the canopies reflect as fronds + branches (the leaf cards' gaps let the cube through).
+* Lightmaps and point lights at shaded hits (caves: hits are lit by the water's ambient and the sun with a shadow ray; the
+  cube floor x outdoor keeps the engine's cave glitter, which is the engine's look, not a leak).
+* Bodies that are no plane (rivers with falls; none at the spots) keep the SSR; the sea's swell is a bent lookup of the
+  flat plane's image, not a per-wave ray.
+* The reflection image is screen-space at 1 ray / 4 pixels at medium: thin far objects (rigging) alias a little.
+* Cost at the jungle lake (+1.6 ms medium) is mostly the alpha-tested fronds' candidate loop: opacity micromaps (not on
+  this GPU) or a cheaper cut-out rule for far candidates would help.
 
 ## 4. GD3D11's D3D12 RT path (survey 2026-10-22; root `E:\git\github\GD3D11\D3D11Engine\`)
 

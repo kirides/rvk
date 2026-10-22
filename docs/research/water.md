@@ -205,6 +205,12 @@ replacement draws opaque). Verified by drawing the engine's meshes with it and S
   light on the water, also in caves). While the water is on, the engine's sky cube is redrawn whole every frame (the
   engine draws one face per frame every 10 s: lightning and time jumps left stale faces, ocean.md 9.8). The swamp, which reflects nothing in the engine, gets a dim reflection (Schlick
   Fresnel x 0.45, the cube at 60 %). `water.reflection_strength` scales the models' Fresnel terms.
+  **Ray traced** (`rt.reflections`, M9 P3, rt-reflections.md 3.3): a compute pass before the water draws traces the mirror
+  ray of each body's plane against the world's TLAS into a reflection image (screen reuse or the engine's material lighting
+  with a sun shadow ray, the engine's fog, ray-cone mips); `traceReflection` looks it up at the pixel bent by the waves'
+  macro tilt and the ripples (as SSR's jitter), SSR fills in where it has nothing (medium / high), floors 0.3 (sea) / 0.75
+  (lake, river) x the outdoor factor, the glint suppressed where the world is reflected. Off screen cliffs, canopies,
+  masts and houses are reflected with their textures.
 * **The sea's waves**: the wave normal is the frame of the engine's normal maps; wind ripples (3 octaves of gradient
   noise with analytic derivatives, 420 units, 2.5 x choppier inside the engine's coast overlay: harbour basins, coves)
   perturb it, faded with distance.
@@ -221,7 +227,9 @@ replacement draws opaque). Verified by drawing the engine's meshes with it and S
 * **Whitewater** below waterfalls on lakes (the river material has its own whitewater art): the falls' bases (from their
   own boxes) within ~35 % of their width, at half strength.
 * A soft edge over the last 5 units of water (no seam at the waterline).
-* `water.debug`: shore field, depth, normals, reflection only, foam (red) over the surf zone (green) and depth (blue).
+* `water.debug`: shore field, depth, normals, reflection only, foam (red) over the surf zone (green) and depth (blue),
+  `reflection_source` (rt.reflections: green screen reuse, blue shaded hit, yellow SSR, black the cube),
+  `reflection_shaded` (the reflection with every RT hit shaded: the exposure match of shaded vs reused hits).
 
 ### 4.4 Profiles (`enh/water_profile.*`)
 
@@ -246,6 +254,7 @@ Cost 0.020 ms at 1080p.
 | `water.enabled` | off | the enhanced water |
 | `water.quality` | medium | low: sky reflections only, grid N 48; medium: 20 SSR steps, N 64; high: 40 steps, N 96 |
 | `water.reflections` | `ssr` | `sky` = the sky cube only |
+| `rt.reflections` (category Ray tracing) | medium | with `ssr`: off = SSR; low / medium / high = the ray-traced reflection image (rt-reflections.md 3.3: low 1 ray / 2 x 2 px, cut-outs solid, no shadows, no SSR fallback; medium + alpha-tested cut-outs, sun shadow rays, SSR fallback; high 1 ray / px, alpha-tested shadows, reach 30,000); needs the ray tracing tier |
 | `water.ocean` | fft | `gerstner` / `fft` (ocean.md): the sea's wave grid + lower coast + the fake shore off; `off`: the sea shaded on its own mesh, engine surf kept (was `water.ocean_waves`) |
 | `water.wave_scale` | 1.0 (0..3) | offshore waves and the waves rolling in (was `water.wave_height`); FFT: `water.ocean_quality`, `water.sea_state`, `water.wind_direction` (ocean.md 7) |
 | `water.murkiness` | 1.0 (0.25..4) | the sea's tint along the light's path |
@@ -286,7 +295,9 @@ sea, an AfterMainView post pass with the profile's absorption and scattering (se
 ms with the enhanced water**, the wet-beach pass **0.020 ms**: **+0.18 ms GPU**, the whole frame 1.531 -> 1.707 ms. The
 first piece cost +0.027 ms; the engine material's texture fetches, the per-pixel SSR on a calmer normal, the shore waves
 and the foam noise are the difference. Well inside the 1.5 ms budget. CPU: one ring block (1,104 bytes) per water draw;
-the body / coast / falls / mapping caches are built once per vertex buffer.
+the body / coast / falls / mapping caches are built once per vertex buffer. Ray-traced reflections (`rt.reflections`,
+1080p): medium +1.0 ms (harbour_docks) .. +1.6 ms (lake_jungle) GPU per frame, low +0.5 .. +0.95, high +1.35 .. +2.5
+(rt-reflections.md 3.3).
 
 ## 8. Verification
 

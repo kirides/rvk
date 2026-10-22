@@ -29,7 +29,7 @@ $env:VCPKG_ROOT = 'E:\git\github\vcpkg'
 cmake --preset default                                  # only after CMakeLists.txt changed (new files!)
 cmake --build build --config RelWithDebInfo             # -> build\RelWithDebInfo\d3d9.dll, rvk_tests.exe
 build\RelWithDebInfo\rvk_tests.exe                      # unit tests (pure logic, no game)
-build\RelWithDebInfo\rvk_vktest.exe --rt                 # GPU: optional RT tier (BLAS/TLAS/ray query self-test; also --passes)
+build\RelWithDebInfo\rvk_vktest.exe --rt                 # GPU: optional RT tier (BLAS/TLAS/ray query self-test; also --passes, --shader-stats)
 ```
 C++23, MSVC (VS 18 2026), CMake + vcpkg manifest (`vcpkg.json`, `builtin-baseline` = the user's vcpkg checkout; when they pull,
 take `git -C E:\git\github\vcpkg log -1 --format=%H`). Triplet `x64-windows-static-md`. New source files go into `CMakeLists.txt`.
@@ -123,8 +123,20 @@ Materials at hits (M9 P2, rt-reflections.md 3.2): `-Setting 'rt.debug=albedo'` (
 half only, `albedo_opaque` cut-outs solid, `uv` the diffuse coordinate); in these views the probes log every second with
 each hit's material and the BLAS's material slots; rvk.log `rt: material '<name>' (...)` once per material x pixel shader
 (graph slots, pool images, bound textures, evaluated uv map), `rt: scene: materials ...` stats. Consumers trace with
-`shaders/include/rvk_rt_trace.glsl` (`rvkRtTraceClosest` + `rvkRtHitSurface`). `rvk_shadertool evalcheck corpus` checks
+`shaders/include/rvk_rt_trace.glsl` (`rvkRtTraceClosest` + `rvkRtHitSurface`, `rvkRtVisibility`). `rvk_shadertool evalcheck corpus` checks
 the CPU shader evaluator (`shader/sm_eval`) on every captured shader.
+Ray-traced water reflections (M9 P3, rt-reflections.md 3.3): `-Setting 'rt.reflections=low|medium|high'` (default medium,
+acts with `water.enabled` + `water.reflections=ssr`; off = SSR): compute pass `water.rt` at AfterRefractionCopy
+(`enh/water_rt`, `shaders/water/water_rt.comp`) -> a reflection image `water.frag` looks up; rvk.log `enh: water.rt: ...`
+(image size, bodies), `enh: water: body ... plane ...` (each body's fitted plane; error > 150 = no RT). Debug:
+`water.debug=reflection_source` (green screen reuse, blue shaded hit, yellow SSR, black cube) / `reflection_shaded` (every
+hit shaded: exposure check) / `reflection`; hidden `rt.reflection_tweaks` (1 cut-outs solid, 2 no shadow rays, 4 no SSR
+fallback, 8 unshaded). Compare SSR vs RT: `.\scripts\water-compare.ps1 -EngineSetting 'water.enabled=true','rt.reflections=off'
+-Setting 'rt.reflections=medium'` (add `'water.debug=reflection'` to both for the reflection alone). Costs: A/B inside one
+spot hold (`run.ps1 -Mods rvkcompare -Param 'spots=lake_jungle','freeze_wait=4800' -Perf -WindowSize 1920x1080
+-Commands '4400: set rt.reflections off','5200: set rt.reflections medium'`; the hold starts near frame 3,800; `perf:`
+windows) and `-PerfFrame` (`pass water.rt`). `rvk_vktest --shader-stats` prints VGPRs / LDS / scratch of `water.frag` and
+`water_rt.comp` (`VK_KHR_pipeline_executable_properties`).
 
 `run.ps1` creates the test copy on first use (`scripts/new-test-copy.ps1`, from risen-spass's `B:\DevDrive\risen-test`), deploys
 `d3d9.dll` + `bin\rvk\config.toml`, and drives the game with **risen-spass's `scripts/test-run.ps1 -GameDir`** (windowed, muted,
@@ -212,7 +224,7 @@ docs/research/water.md 4.1.
 | `res/` | DDS parsing |
 | `hal/` | generated HAL interfaces (`tools/gen_hal.py` -> `api_generated.h`, `trace_generated.h`), engine allocator, trace mode |
 | `shader/` | D3D9 bytecode decoder, listing, CPU evaluator + backward slice (`sm_eval.*`), GLSL generator (`abi.h` = shader/renderer contract; variant hooks `GlslOptions`), glslang wrapper, `embedded.h` (build-time shaders) |
-| `enh/` | enhancements: `debug_view.*` = `debug.inject_view` (an injected pass, docs/research/injection.md 5); `water.*` = the enhanced water (a `d3d9::DrawReplacer`: engine water draws drawn with `shaders/water/*`, the sea's wave grid), `shore_field.*` (coast distance field bake), `water_profile.*` (look per body of water): docs/research/water.md; `shadows.*` = the enhanced sun shadow mask (a `d3d9::DrawReplacer` for the shadow-mask pass, `shaders/shadows/*`): docs/research/shadows.md; `rt_scene.*` / `rt_registry.*` = the RT scene (a `d3d9::DrawObserver` + a pass: BLAS cache, instance registry, TLAS, geometry records), `rt_material.*` = its materials (albedo slot, uv map by CPU shader evaluation, opacity), `rt_debug.*` = `rt.debug`: docs/research/rt-reflections.md |
+| `enh/` | enhancements: `debug_view.*` = `debug.inject_view` (an injected pass, docs/research/injection.md 5); `water.*` = the enhanced water (a `d3d9::DrawReplacer`: engine water draws drawn with `shaders/water/*`, the sea's wave grid), `shore_field.*` (coast distance field bake), `water_profile.*` (look per body of water), `water_rt.*` (rt.reflections: the reflection image's compute pass): docs/research/water.md; `shadows.*` = the enhanced sun shadow mask (a `d3d9::DrawReplacer` for the shadow-mask pass, `shaders/shadows/*`): docs/research/shadows.md; `rt_scene.*` / `rt_registry.*` = the RT scene (a `d3d9::DrawObserver` + a pass: BLAS cache, instance registry, TLAS, geometry records), `rt_material.*` = its materials (albedo slot, uv map by CPU shader evaluation, opacity), `rt_debug.*` = `rt.debug`: docs/research/rt-reflections.md |
 
 ## Tooling gotchas
 
