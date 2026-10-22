@@ -63,10 +63,14 @@ In the world the game runs at **79.5-80.0 fps** whatever the renderer does:
 * Global AMD settings: Radeon Chill off, FRTC off (registry `KMD_ChillEnabled=0`, `Gmx_FRTCEnabled=0`). The driver knows
   Risen (Adrenalin game list `amdId` 537, "profileCustomized": TRUE); the per-game settings are not readable from the
   registry.
-* **Resolved (user, 2026-10-21): the cause was Radeon Chill in Adrenalin's per-game profile for Risen**; the user
-  disabled it. Chill throttles presents while there is no input, which is why it hit only the world (and background
-  test runs never give input). If a steady ~12.5 ms present cadence shows up again on an AMD machine, check Chill
-  per game first. The 80 fps figures in this document were measured under Chill.
+* ~~Resolved (user, 2026-10-21): Radeon Chill in the per-game profile, disabled~~: **wrong.** The user switched Chill off
+  on 10-21, but every world run afterwards was still capped. **Measured 2026-10-23 (docs/research/fps-limit.md 9): the cause
+  is the AMD driver's Radeon Chill limiter from an Adrenalin per-application profile for `Risen.exe` that has Chill on with
+  min = max = 80 fps** (read from the driver's globals in the running process). 80 % of every 12.4 ms present is
+  `amdvlk64.dll` sleeping in its frame limiter (`[debug] present_stalls` stacks). Chill skips frames below 150 draws
+  (loading-screen detection), hence uncapped menus and loading screens. The same executable renamed (`run.ps1 -Exe
+  RisenTest.exe`) runs the world at **175-240 fps** with vsync off (CPU-bound: engine+HAL 4-5.5 ms per frame). Not the
+  Steam overlay or OBS (all implicit layers disabled: unchanged). What the user can do: fps-limit.md 11.
 
 ## 3. Present thread
 
@@ -179,7 +183,8 @@ Not a limit at this resolution.
 
 ## 9. Remaining hotspots
 
-1. ~~The external ~80 Hz present cadence~~: AMD Radeon Chill, disabled (section 2). World fps without it: not yet measured.
+1. ~~The external ~80 Hz present cadence~~: an AMD Chill profile on `Risen.exe` (section 2, fps-limit.md). Without it
+   (renamed executable) the world runs at 175-240 fps, CPU-bound.
 2. Engine CPU (~3-4.5 ms per frame, single-threaded) and our draw path (1.9 us per draw): the next candidates are
    `bindVertexInput` (declaration matching per input per draw, `Buffer::gpu()` lock per stream), the per-draw constant
    blocks (2 x 4.4 KiB of ring space per draw, ~11.5 MiB per frame; only the used registers are written), the 176-byte draw

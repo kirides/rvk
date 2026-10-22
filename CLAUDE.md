@@ -62,6 +62,11 @@ synchronization validation (`[vulkan] sync_validation`; environment variables do
 Performance (docs/research/performance.md): `-Perf` (GPU timestamps, CPU split, uploads, pipeline builds, pacer: `perf:`
 lines every 5 s), `-PerfFrame N` (GPU time of every render pass of frame N), `-Vsync on|off|engine`, `-MaxFps N`; the
 `rvk_shadows` scenario logs the fps for either renderer (also `-NoRenderer`). Other games on the GPU skew GPU times.
+**The world's 80 fps cap is an AMD Radeon Chill profile on `Risen.exe`** (min = max = 80, in the driver's present;
+docs/research/fps-limit.md): `-Exe RisenTest.exe` runs a renamed copy of the exe (uncapped: 175-240 fps); `-PresentStalls 4`
+samples the presenting thread's stack during long presents (`diag:` lines: module / export of the wait, any mode);
+`-Environment 'NAME=VALUE'` sets environment variables from the proxy's DllMain (e.g. `VK_LOADER_LAYERS_DISABLE=~implicit~`).
+Scenario `rvk_highfps`: frame-time distribution + the hero's walk / jumps / drop / ledge per tick (compare rates).
 Player settings + overlay (docs/research/overlay.md): every run deletes `bin/rvk/settings.toml` (defaults) unless
 `-KeepSettings`; `-Setting 'vulkan.max_fps=60','vulkan.vsync=off'` writes one. The ImGui overlay (F10, A/B flip F11) is
 never in captures unless `-OverlayInScreenshots`; `-Commands '1500: overlay open','1600: key c','1700: ab flip'` runs

@@ -76,8 +76,8 @@ with rain, water, vegetation, post chain and GUI) render through Vulkan, no D3D9
 (D3D9 state model, `rvk_d3d9test`) -> `vk/` (Vulkan core, `rvk_vktest`); effects through `src/fx` + `hal/vulkan/effect.cpp`.
 Open (next): D3D9 reference comparison at fixed poses; unimplemented slots seen in game (LoadSurfaceFromSurface,
 SaveTextureToFile, FVF buffers: done, see below); performance pass (in game ~79.5 fps on a 120 Hz display with ~5 ms
-inside vkQueuePresentKHR: done in M5; the ~80 Hz present cadence was AMD Radeon Chill's per-game profile, disabled by
-the user, docs/research/performance.md).
+inside vkQueuePresentKHR: done in M5; the ~80 Hz present cadence is an AMD Radeon Chill profile on `Risen.exe` with
+min = max = 80 fps, measured in the driver, docs/research/fps-limit.md).
 Done after M3: vsync. FIFO presents returned at once in the game window (menu ~1500 fps; a plain window is throttled), so
 `d3d9::Device` paces presents to the refresh rate of the window's monitor (`vk::FramePacer`, `[vulkan] max_fps`). HLSL
 constant tables (CTAB via `src/fx`): the engine walks them for sampler masks (Engine.dll 0x6bb440); the unimplemented
@@ -156,8 +156,12 @@ with validation on and checks every pixel against D3D9's rasterisation rules (ha
   (`run.ps1 -Perf`, `-PerfFrame`): GPU timestamps per submission and per pass, CPU split per frame, upload volume, pipeline
   and shader build counts; `[vulkan] vsync` override (`-Vsync`). The world's ~80 fps is an **external present cadence**:
   `vkQueuePresentKHR` returns every ~12.5 ms in the world (FIFO and IMMEDIATE alike), the game's own D3D9 renderer with
-  vsync off also runs at 79.9 fps; CPU 6-7.5 ms and GPU ~1 ms per frame are far below it. Cause: AMD Radeon Chill in
-  Adrenalin's per-game profile for Risen (disabled by the user; performance.md 2). Done: presents on their own thread (`vk::Presenter`, queue lock in `Context`); frame
+  vsync off also runs at 79.9 fps; CPU 6-7.5 ms and GPU ~1 ms per frame are far below it. Cause (measured 2026-10-23,
+  docs/research/fps-limit.md): the AMD driver's Radeon Chill limiter from an Adrenalin per-application profile for
+  `Risen.exe` with min = max = 80 fps (`amdvlk64.dll` sleeps inside `vkQueuePresentKHR`; frames under 150 draws count as
+  loading screens and stay uncapped); a renamed executable runs the world at 175-240 fps. User action: Chill off in the
+  profile that applies (fps-limit.md 11). Tools: `[debug] present_stalls` (stack sampler of the present), `[debug]
+  environment`, `run.ps1 -Exe`, scenario `rvk_highfps` (at ~190 fps an uphill running jump is cancelled; 80 / 120 fine). Done: presents on their own thread (`vk::Presenter`, queue lock in `Context`); frame
   pacer with a QPC cadence, DWM-vblank lock (also integer fractions) and an adaptive spin margin, adapted from GD3D11's
   `fpslimiter.h` (`max_fps` 60: 43-47 -> 60.0 fps); the draw path records only changed dynamic state / vertex input and
   skips redundant pipeline and sampler lookups (3.6 -> 2.8 ms per frame for ~1440 draws); pipelines of earlier runs are
