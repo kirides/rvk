@@ -243,7 +243,9 @@ struct RendererSettings {
     Setting* drawRecords = nullptr;  // debug.draw_records: per-frame draw records (hidden; the histogram is always on)
     Setting* injectView = nullptr;   // debug.inject_view: "off", "depth", "tint" (enh/debug_view.h, an injected pass)
     Setting* rtAllow = nullptr;      // rt.allow: enable the ray tracing extensions at device creation (restart)
+    Setting* rtReflections = nullptr; // rt.reflections: "off", "low", "medium", "high" (the water's ray-traced reflections, needs RayQuery)
     Setting* rtDebug = nullptr;      // rt.debug: "off", "instances", "depth", "normals" (enh/rt_debug.h, needs RayQuery)
+    Setting* rtReflectionTweaks = nullptr;  // rt.reflection_tweaks: hidden diagnostics bitmask of the water's RT reflections (enh/water.h)
     Setting* rtSceneViews = nullptr; // rt.scene_views: "all", "main", "shadow": which views feed the RT scene (hidden, diagnostics)
     // enhanced water (enh/water.h, docs/research/water.md)
     Setting* waterEnabled = nullptr;      // water.enabled

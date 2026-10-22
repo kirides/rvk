@@ -69,6 +69,27 @@ RvkRtHit rvkRtTraceClosest(RvkFrame f, vec3 origin, vec3 dir, float tMin, float 
     return h;
 }
 
+// visibility along a ray (1 = nothing in [tMin, tMax]: shadow rays); the first confirmed hit ends the query. Alpha-tested
+// candidates as in rvkRtTraceClosest (RVK_RT_TRACE_OPAQUE: solid, the cheap shadow)
+float rvkRtVisibility(RvkFrame f, vec3 origin, vec3 dir, float tMin, float tMax, float coneWidth0, float coneSpread, uint flags) {
+    if (!rvkRtValid(f)) return 1.0;
+    uint mask = (flags & RVK_RT_TRACE_NO_CUTOUTS) != 0u ? RVK_RT_MASK_OPAQUE : 0xFFu;
+    uint rayFlags = gl_RayFlagsTerminateOnFirstHitEXT | ((flags & RVK_RT_TRACE_OPAQUE) != 0u ? gl_RayFlagsOpaqueEXT : gl_RayFlagsNoneEXT);
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, accelerationStructureEXT(rvkRtTlas(f)), rayFlags, mask, origin, tMin, dir, tMax);
+    while (rayQueryProceedEXT(rq)) {
+        if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
+        uint index = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false)) + uint(rayQueryGetIntersectionGeometryIndexEXT(rq, false));
+        RvkRtRecord r = rvkRtRecord(f, index);
+        float t = rayQueryGetIntersectionTEXT(rq, false);
+        if (rvkRtCandidatePasses(r, uint(rayQueryGetIntersectionPrimitiveIndexEXT(rq, false)), rayQueryGetIntersectionBarycentricsEXT(rq, false),
+                                 rayQueryGetIntersectionObjectToWorldEXT(rq, false), coneWidth0 + coneSpread * t)) {
+            rayQueryConfirmIntersectionEXT(rq);
+        }
+    }
+    return rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT ? 1.0 : 0.0;
+}
+
 struct RvkRtHitSurface {
     vec4 albedo;           // the diffuse at the ray cone's mip, as sampled (rgb, a = its alpha); the record's colour without a texture
     vec3 position;         // world

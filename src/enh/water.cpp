@@ -12,6 +12,7 @@
 
 #include "core/paths.h"
 #include "engine/weather.h"
+#include "enh/rt_scene.h"
 #include "shader/embedded.h"
 #include "vk/formats.h"
 #include "vk/pipeline.h"
@@ -103,7 +104,9 @@ std::uint32_t w0(const d3d9::Texture* t) { return t != nullptr ? t->bindlessSlot
 
 }  // namespace
 
-Water::Water(d3d9::Device& device) : dev_(device) {
+Water::Water(d3d9::Device& device, RtScene* rt) : dev_(device) {
+    // ray-traced reflections (rt.reflections): their compute pipeline is built in the background from the start
+    if (rt != nullptr && rt->supported()) rtRefl_ = std::make_unique<WaterRt>(device, rt);
     // the FFT ocean's compute pipelines exist from the start too (its tiles are created when it is first wanted)
     ocean_ = std::make_unique<Ocean>(device);
     floor_ = std::make_shared<FloorState>();
@@ -116,6 +119,7 @@ Water::Water(d3d9::Device& device) : dev_(device) {
 
 Water::~Water() {
     dev_.removeDrawReplacer(this);
+    rtRefl_.reset();
     if (wetPassId_ != 0) dev_.removePass(wetPassId_);
     if (oceanPassId_ != 0) dev_.removePass(oceanPassId_);
     destroyWetPipeline();
@@ -186,6 +190,7 @@ void Water::apply(const Settings& s) {
         dev_.removeDrawReplacer(this);
     }
     updateWetPass();
+    updateRtReflections();
     if (ocean_) {
         if (fftWanted()) ocean_->setQuality(s.oceanQuality);
         else ocean_->release();  // no GPU memory for tiles nobody samples
@@ -193,9 +198,17 @@ void Water::apply(const Settings& s) {
     updateOceanPass();
     static constexpr const char* kOcean[3] = {"off", "gerstner", "fft"};
     spdlog::info("enh: water: {} (quality {}, reflections {}, ocean {} (quality {}, sea state {}, wind {}), wave scale {:.2f}, murkiness "
-                 "{:.2f}, reflection strength {:.2f}, debug {})",
+                 "{:.2f}, reflection strength {:.2f}, debug {}, ray-traced reflections {})",
                  s.enabled ? "on" : "off", s.quality, s.ssr ? "ssr" : "sky cube", kOcean[std::clamp(s.ocean, 0, 2)], s.oceanQuality,
-                 s.seaState, s.windDirection, s.waveHeight, s.murkiness, s.reflections, s.debug);
+                 s.seaState, s.windDirection, s.waveHeight, s.murkiness, s.reflections, s.debug,
+                 rtWanted() ? std::format("tier {}", s.rtTier)
+                            : s.rtTier > 0 ? std::string(rtRefl_ && rtRefl_->available() ? "off (needs water.reflections = ssr)" : "unavailable (no ray tracing tier)")
+                                           : std::string("off"));
+}
+
+void Water::updateRtReflections() {
+    if (!rtRefl_) return;
+    rtRefl_->configure(rtWanted() ? settings_.rtTier : 0, settings_.rtTweaks, settings_.debug == 8 ? 1 : settings_.debug == 9 ? 2 : 0);
 }
 
 bool Water::worldRows(d3d9::Device& device, const d3d9::ReplaceQuery& q, float rows[3][4]) const {
@@ -236,6 +249,12 @@ const Water::Body& Water::body(d3d9::Device& device, const d3d9::ReplaceQuery& q
             b.extentX = hi[0] - lo[0];
             b.extentZ = hi[2] - lo[2];
             b.sea = std::max(b.extentX, b.extentZ) >= kSeaExtent && (hi[1] - lo[1]) <= kFlatSlack;
+            b.box[0] = lo[0];
+            b.box[1] = lo[2];
+            b.box[2] = hi[0];
+            b.box[3] = hi[2];
+            fitPlane(rows, data.data(), count, stride, b);
+            measureOutdoor(q, data.data(), count, stride, b);
             fallCentre_[0] = 0.5f * (lo[0] + hi[0]);
             fallCentre_[1] = 0.5f * (lo[2] + hi[2]);
             if (b.sea) {
@@ -252,11 +271,82 @@ const Water::Body& Water::body(d3d9::Device& device, const d3d9::ReplaceQuery& q
         }
     }
     spdlog::info("enh: water: body '{}' ({}): {} vertices, centre ({:.0f}, {:.0f}), extent {:.0f} x {:.0f}, height "
-                 "{:.1f}..{:.1f} -> {}",
+                 "{:.1f}..{:.1f} -> {}; plane y = {:.4f} x + {:.4f} z + {:.1f} (max error {:.1f}{}), outdoor {:.2f}",
                  name, draws::name(q.tag->water), b.vertices, fallCentre_[0],
                  fallCentre_[1], b.extentX, b.extentZ, b.minY, b.maxY,
-                 b.sea ? "the open sea (reaches the world's border)" : "inland water");
+                 b.sea ? "the open sea (reaches the world's border)" : "inland water", b.plane[0], b.plane[1], b.plane[2], b.planeError,
+                 b.planeError < 150.0f ? "" : ": no plane, no ray-traced reflections", b.outdoor);
     return bodies_.emplace(id, b).first->second;
+}
+
+// The body's surface as a plane y = a x + b z + c (least squares over its world vertices) and the plane's worst error: the
+// ray-traced reflections trace the mirror ray of that plane (lakes and ponds are flat, a gently sloping river is a tilted
+// plane; a river with falls is none)
+void Water::fitPlane(const float rows[3][4], const std::uint8_t* data, std::uint32_t count, std::uint32_t stride, Body& b) {
+    if (count < 3) return;
+    double sxx = 0, sxz = 0, szz = 0, sx = 0, sz = 0, sy = 0, sxy = 0, szy = 0;
+    const double ox = 0.5 * (b.box[0] + b.box[2]), oz = 0.5 * (b.box[1] + b.box[3]);  // centred: a well-conditioned fit
+    const auto world = [&](std::uint32_t i, double out[3]) {
+        float p[3];
+        std::memcpy(p, data + static_cast<std::size_t>(i) * stride, 12);
+        for (int r = 0; r < 3; ++r) out[r] = rows[r][0] * p[0] + rows[r][1] * p[1] + rows[r][2] * p[2] + rows[r][3];
+    };
+    for (std::uint32_t i = 0; i < count; ++i) {
+        double v[3];
+        world(i, v);
+        const double x = v[0] - ox, z = v[2] - oz, y = v[1];
+        sxx += x * x;
+        sxz += x * z;
+        szz += z * z;
+        sx += x;
+        sz += z;
+        sy += y;
+        sxy += x * y;
+        szy += z * y;
+    }
+    // normal equations [sxx sxz sx; sxz szz sz; sx sz n] [a b c]' = [sxy szy sy]'
+    const double n = count;
+    const double m[3][3] = {{sxx, sxz, sx}, {sxz, szz, sz}, {sx, sz, n}};
+    const double r[3] = {sxy, szy, sy};
+    const auto det3 = [](const double a[3][3]) {
+        return a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) +
+               a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
+    };
+    const double d = det3(m);
+    double coef[3];
+    if (std::abs(d) < 1e-9) {
+        coef[0] = coef[1] = 0.0;  // degenerate (a line of vertices): flat at the mean height
+        coef[2] = sy / n;
+    } else {
+        for (int k = 0; k < 3; ++k) {
+            double mk[3][3];
+            std::memcpy(mk, m, sizeof(m));
+            for (int row = 0; row < 3; ++row) mk[row][k] = r[row];
+            coef[k] = det3(mk) / d;
+        }
+    }
+    double err = 0.0;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        double v[3];
+        world(i, v);
+        err = std::max(err, std::abs(coef[0] * (v[0] - ox) + coef[1] * (v[2] - oz) + coef[2] - v[1]));
+    }
+    b.plane[0] = static_cast<float>(coef[0]);
+    b.plane[1] = static_cast<float>(coef[1]);
+    b.plane[2] = static_cast<float>(coef[2] - coef[0] * ox - coef[1] * oz);
+    b.planeError = static_cast<float>(err);
+}
+
+// the body's outdoor factor (COLOR1.w of its vertices, the engine water VS's indoor / outdoor blend), averaged
+void Water::measureOutdoor(const d3d9::ReplaceQuery& q, const std::uint8_t* data, std::uint32_t count, std::uint32_t stride, Body& b) {
+    if (q.decl == nullptr || count == 0) return;
+    for (const d3d9::VertexElement& e : q.decl->elements()) {
+        if (e.stream != 0 || e.usage != 10 || e.usageIndex != 1 || e.type != 4) continue;  // COLOR1 D3DCOLOR
+        double sum = 0.0;
+        for (std::uint32_t i = 0; i < count; ++i) sum += data[static_cast<std::size_t>(i) * stride + e.offset + 3];
+        b.outdoor = static_cast<float>(sum / count / 255.0);
+        return;
+    }
 }
 
 // The sea mesh's texture mapping (texcoord0 as an affine function of world x, z), tangent frame and outdoor factor: the
@@ -473,7 +563,7 @@ VkDeviceAddress Water::fillBlock(d3d9::Device& device, const d3d9::ReplaceQuery&
     if (q.blended && !grid) flags |= 4u;                           // WATER_BLENDED
     if (grid && device.vsConstant(11)[1] < b.level) flags |= 16u;  // the camera is under the sea's surface
     w.res[2] = flags;
-    w.res[3] = static_cast<std::uint32_t>(std::clamp(settings_.debug, 0, 7));
+    w.res[3] = static_cast<std::uint32_t>(std::clamp(settings_.debug, 0, 9));
     w.res2[0] = static_cast<std::uint32_t>(model);
     w.res2[1] = settings_.ssr ? kSsrSteps[quality] : 0;
     w.res2[2] = w.tex[1];  // the refraction copy (s1 of every water shader)
@@ -551,6 +641,19 @@ VkDeviceAddress Water::fillBlock(d3d9::Device& device, const d3d9::ReplaceQuery&
             sampled[5] = floorA_.get();
             sampled[6] = floorB_.get();
         }
+    }
+    // ray-traced reflections (enh/water_rt.h): this frame's reflection image, and the light its hits are shaded with
+    if (rtRefl_ && rtRefl_->tier() > 0) {
+        w.rtRefl[0] = rtRefl_->imageSlot(device.frameValue(), q.mainView);
+        w.rtRefl[1] = rtRefl_->flags();
+        WaterRt::Light l;
+        std::memcpy(l.fogColor, w.fogColor, 16);
+        std::memcpy(l.fogParams, w.fogParams, 16);
+        std::memcpy(l.indoor, w.indoor, 16);
+        std::memcpy(l.sh, w.sh, sizeof(l.sh));
+        std::memcpy(l.sunColor, w.sunColor, 16);
+        std::memcpy(l.sunDir, w.sunDir, 16);
+        rtRefl_->setLight(l);
     }
     std::memcpy(a.ptr, &w, sizeof(w));
     return a.address;
@@ -949,6 +1052,14 @@ void Water::replace(d3d9::Device& device, const d3d9::ReplaceQuery& q, DrawRepla
     out.action = grid ? DrawReplacement::Action::Procedural : DrawReplacement::Action::Shaders;
     out.vs = grid ? oceanVs_ : q.engineVsRef;
     out.ps = ps_;
+    // the ray-traced reflections' surfaces: this body as a plane (the next frame's pass; not for bodies that are no plane)
+    if (rtRefl_ && rtRefl_->tier() > 0 && q.mainView == 1 && b.planeError < 150.0f && q.vertexBuffer != nullptr) {
+        WaterRt::Body rb;
+        std::memcpy(rb.plane, b.plane, sizeof(rb.plane));
+        std::memcpy(rb.box, b.box, sizeof(rb.box));
+        rb.outdoor = b.outdoor;
+        rtRefl_->seeBody(q.vertexBuffer->ref().id, rb, device.frameValue());
+    }
     out.block = block;
     out.cullNone = true;  // seen from below too (wading, swimming)
     out.opaque = true;

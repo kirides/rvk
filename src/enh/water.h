@@ -28,6 +28,7 @@
 #include "enh/sea_floor.h"
 #include "enh/shore_field.h"
 #include "enh/water_profile.h"
+#include "enh/water_rt.h"
 #include "shader/abi.h"
 #include "vk/passes.h"
 
@@ -85,8 +86,11 @@ struct WaterBlock {
     float player[4];         // the player's position (eCWeatherAdmin), w 1 = known
     float foamMap[4];        // the foam buffer: xy its first cell (world), z its extent, w 1 / extent
     std::uint32_t foamTex[4];   // x the foam buffer (bindless t2D, 0 = none), y its sampler (linear, wrap)
+    // ray-traced reflections (rt.reflections, enh/water_rt.h): x this frame's reflection image (bindless t2D, 0 = none), y flags
+    // (1 = the screen-space trace where it has nothing)
+    std::uint32_t rtRefl[4];
 };
-static_assert(sizeof(WaterBlock) == 192 + 70 * 16);
+static_assert(sizeof(WaterBlock) == 192 + 71 * 16);
 
 // mirror of shaders/water/wet_shore.frag WetPush
 struct WetShorePush {
@@ -98,6 +102,8 @@ struct WetShorePush {
     std::uint32_t sky[4];    // the sky cube (tCube slot), its sampler
 };
 static_assert(sizeof(WetShorePush) == 96 && sizeof(WetShorePush) <= shader::abi::kPushConstantBudget);
+
+class RtScene;
 
 class Water final : public d3d9::DrawReplacer {
 public:
@@ -113,10 +119,14 @@ public:
         float waveHeight = 1.0f;   // water.wave_scale: multiplier
         float murkiness = 1.0f;    // multiplier on the absorption
         float reflections = 1.0f;  // multiplier on reflectivity + glint
-        int debug = 0;             // water.debug: 0 off, 1 shore field, 2 depth, 3 normals, 4 reflection, 5 foam, 6 sea floor, 7 waves
+        int debug = 0;             // water.debug: 0 off, 1 shore field, 2 depth, 3 normals, 4 reflection, 5 foam, 6 sea floor, 7 waves,
+                                   // 8 reflection source
+        int rtTier = 0;            // rt.reflections: 0 off (SSR), 1 low, 2 medium, 3 high (with ssr only)
+        int rtTweaks = 0;          // rt.reflection_tweaks (hidden): 1 cut-outs solid, 2 no shadow rays, 4 no SSR fallback, 8 unshaded
     };
 
-    explicit Water(d3d9::Device& device);
+    // `rt`: the ray tracing scene (rt.reflections acquire it while the water traces against it); null = no RT reflections
+    explicit Water(d3d9::Device& device, RtScene* rt = nullptr);
     ~Water() override;
     Water(const Water&) = delete;
     Water& operator=(const Water&) = delete;
@@ -146,8 +156,16 @@ private:
         float tangent[3]{1.0f, 0.0f, 0.0f};
         float binormalSign = 1.0f;
         float outdoor = 1.0f;         // COLOR1.w
+        // the surface as a plane (ray-traced reflections): y = a x + b z + c fitted to the world vertices, its worst error; the
+        // world box
+        float plane[3]{0.0f, 0.0f, 0.0f};
+        float planeError = 1e9f;
+        float box[4]{};
     };
     bool ensureShaders();
+    // rt.reflections: wanted by the settings and possible (the ray tracing tier)
+    bool rtWanted() const { return settings_.enabled && settings_.ssr && settings_.rtTier > 0 && rtRefl_ && rtRefl_->available(); }
+    void updateRtReflections();
     void destroyShaders();
     // the wet beach (AfterOpaque pass, wet_shore.frag) while the wave grid lowers the waterline
     void updateWetPass();
@@ -162,6 +180,8 @@ private:
     VkDeviceAddress fillBlock(d3d9::Device& device, const d3d9::ReplaceQuery& q, d3d9::draws::Water kind, WaterModel model, bool grid,
                               const Body& b, std::array<d3d9::Texture*, 16>& sampled);
     void measureMapping(const d3d9::ReplaceQuery& q, const float rows[3][4], const std::uint8_t* data, std::uint32_t count, Body& b);
+    static void fitPlane(const float rows[3][4], const std::uint8_t* data, std::uint32_t count, std::uint32_t stride, Body& b);
+    static void measureOutdoor(const d3d9::ReplaceQuery& q, const std::uint8_t* data, std::uint32_t count, std::uint32_t stride, Body& b);
     // the FFT ocean: its simulation pass (AfterOpaque), the sea state (setting or weather), the sea floor field
     bool fftWanted() const { return settings_.enabled && settings_.ocean == 2 && !failed_; }
     void updateOceanPass();
@@ -180,6 +200,7 @@ private:
     Settings settings_;
     bool failed_ = false;
     std::shared_ptr<d3d9::Shader> oceanVs_, ps_;
+    std::unique_ptr<WaterRt> rtRefl_;     // the ray-traced reflections' pass (rt.reflections)
     std::unordered_set<std::uint64_t> meshVsRegistered_;  // engine water VS hashes whose pipelines with ps_ are prebuilt
     std::unordered_set<std::uint64_t> loggedModels_;      // engine PS hashes logged (model or "not a known water shader")
     std::unordered_map<std::uint64_t, Body> bodies_;  // by vertex buffer id

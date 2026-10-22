@@ -9,6 +9,8 @@
 //   purpose (two copies into one buffer) and passes when synchronization validation reports it (proves the check is live)
 //   rvk_vktest --rt: the optional ray tracing tier: BLAS -> TLAS -> GL_EXT_ray_query compute (shaders/test/rt_query.comp),
 //   pixels checked; and a device with rt.allow off (docs/research/raytracing.md). SKIP (exit 0) on a GPU without it
+//   rvk_vktest --shader-stats: the driver's register / spill / instruction statistics of the water pixel shader (in a
+//   pipeline like the renderer's) and of the ray-traced reflections' compute pass (VK_KHR_pipeline_executable_properties)
 //
 // Off-screen: assembles a D3D9 vs_3_0/ps_3_0 pair (D3DXAssembleShader), translates it (shader/glsl), renders a full-screen
 // quad that samples a 64x64 gradient with linear filtering into a 64x64 target through the bindless set, buffer-device-address
@@ -411,6 +413,145 @@ int rtTest() {
     return pass ? 0 : 1;
 }
 
+// --shader-stats: the driver's statistics (VK_KHR_pipeline_executable_properties: registers, spills, instructions) of the
+// embedded water pixel shader in a pipeline like the renderer's (the draw layout, the sea grid's vertex shader), and of
+// the ray-traced reflections' compute shader (occupancy / spill checks, docs/research/rt-reflections.md 3.3)
+int shaderStats() {
+    vk::Context ctx;
+    vk::ContextOptions o;
+    o.validation = false;
+    o.appName = "rvk_vktest shader-stats";
+    o.pipelineStatistics = true;
+    if (!ctx.create(o)) return 2;
+    if (!ctx.features().pipelineStatistics) {
+        std::printf("SKIP: the driver has no VK_KHR_pipeline_executable_properties\n");
+        ctx.destroy();
+        return 0;
+    }
+    vk::Frames frames;
+    vk::Bindless bindless;
+    if (!frames.create(ctx) || !bindless.create(ctx, frames)) return 2;
+    const auto report = [&](VkPipeline p, const char* what) {
+        VkPipelineInfoKHR pi{VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR};
+        pi.pipeline = p;
+        std::uint32_t n = 0;
+        vkGetPipelineExecutablePropertiesKHR(ctx.device(), &pi, &n, nullptr);
+        std::vector<VkPipelineExecutablePropertiesKHR> props(n, {VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_PROPERTIES_KHR});
+        vkGetPipelineExecutablePropertiesKHR(ctx.device(), &pi, &n, props.data());
+        for (std::uint32_t i = 0; i < n; ++i) {
+            std::printf("%s: executable %u '%s' (subgroup %u)\n", what, i, props[i].name, props[i].subgroupSize);
+            VkPipelineExecutableInfoKHR ei{VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR};
+            ei.pipeline = p;
+            ei.executableIndex = i;
+            std::uint32_t m = 0;
+            vkGetPipelineExecutableStatisticsKHR(ctx.device(), &ei, &m, nullptr);
+            std::vector<VkPipelineExecutableStatisticKHR> st(m, {VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR});
+            vkGetPipelineExecutableStatisticsKHR(ctx.device(), &ei, &m, st.data());
+            for (const auto& s : st) {
+                switch (s.format) {
+                case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR: std::printf("    %-28s %s\n", s.name, s.value.b32 ? "true" : "false"); break;
+                case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR: std::printf("    %-28s %lld\n", s.name, static_cast<long long>(s.value.i64)); break;
+                case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR: std::printf("    %-28s %llu\n", s.name, static_cast<unsigned long long>(s.value.u64)); break;
+                default: std::printf("    %-28s %.3f\n", s.name, s.value.f64); break;
+                }
+            }
+        }
+    };
+    int failures = 0;
+    for (const char* fsName : {"water/water.frag"}) {
+        VkShaderModule vs = vk::createShaderModule(ctx, shader::embedded::spirv("water/water_ocean.vert"));
+        VkShaderModule fs = vk::createShaderModule(ctx, shader::embedded::spirv(fsName));
+        VkPipelineShaderStageCreateInfo stages[2]{{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}, {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
+        stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        stages[0].module = vs;
+        stages[0].pName = "main";
+        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        stages[1].module = fs;
+        stages[1].pName = "main";
+        VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+        vp.viewportCount = 1;
+        vp.scissorCount = 1;
+        VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+        rs.lineWidth = 1.0f;
+        VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+        ds.depthTestEnable = VK_TRUE;
+        ds.depthWriteEnable = VK_TRUE;
+        ds.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+        VkPipelineColorBlendAttachmentState ba{};
+        ba.colorWriteMask = 0xF;
+        VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+        cb.attachmentCount = 1;
+        cb.pAttachments = &ba;
+        const VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+        VkPipelineDynamicStateCreateInfo dy{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+        dy.dynamicStateCount = 2;
+        dy.pDynamicStates = dyn;
+        const VkFormat color = VK_FORMAT_R16G16B16A16_SFLOAT;
+        VkPipelineRenderingCreateInfo ri{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+        ri.colorAttachmentCount = 1;
+        ri.pColorAttachmentFormats = &color;
+        ri.depthAttachmentFormat = VK_FORMAT_D32_SFLOAT;
+        VkGraphicsPipelineCreateInfo ci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &ri};
+        ci.flags = VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
+        ci.stageCount = 2;
+        ci.pStages = stages;
+        ci.pVertexInputState = &vi;
+        ci.pInputAssemblyState = &ia;
+        ci.pViewportState = &vp;
+        ci.pRasterizationState = &rs;
+        ci.pMultisampleState = &ms;
+        ci.pDepthStencilState = &ds;
+        ci.pColorBlendState = &cb;
+        ci.pDynamicState = &dy;
+        ci.layout = bindless.pipelineLayout();
+        VkPipeline p = VK_NULL_HANDLE;
+        if (vs == VK_NULL_HANDLE || fs == VK_NULL_HANDLE || vkCreateGraphicsPipelines(ctx.device(), VK_NULL_HANDLE, 1, &ci, nullptr, &p) != VK_SUCCESS) {
+            std::printf("FAIL: %s: pipeline\n", fsName);
+            ++failures;
+        } else {
+            report(p, fsName);
+            vkDestroyPipeline(ctx.device(), p, nullptr);
+        }
+        if (vs != VK_NULL_HANDLE) vkDestroyShaderModule(ctx.device(), vs, nullptr);
+        if (fs != VK_NULL_HANDLE) vkDestroyShaderModule(ctx.device(), fs, nullptr);
+    }
+    // the ray-traced reflections' compute pass (needs the tier)
+    if (ctx.features().rayTracing.enabled) {
+        vk::PassLayout layout;
+        const VkDescriptorSetLayoutBinding out{0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        VkShaderModule cs = vk::createShaderModule(ctx, shader::embedded::spirv("water/water_rt.comp"));
+        if (layout.create(ctx, bindless, {&out, 1}) && cs != VK_NULL_HANDLE) {
+            VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+            ci.flags = VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
+            ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+            ci.stage.module = cs;
+            ci.stage.pName = "main";
+            ci.layout = layout.layout();
+            VkPipeline p = VK_NULL_HANDLE;
+            if (vkCreateComputePipelines(ctx.device(), VK_NULL_HANDLE, 1, &ci, nullptr, &p) == VK_SUCCESS) {
+                report(p, "water/water_rt.comp");
+                vkDestroyPipeline(ctx.device(), p, nullptr);
+            } else {
+                std::printf("FAIL: water/water_rt.comp: pipeline\n");
+                ++failures;
+            }
+        }
+        if (cs != VK_NULL_HANDLE) vkDestroyShaderModule(ctx.device(), cs, nullptr);
+        layout.destroy(ctx);
+    }
+    bindless.destroy();
+    frames.destroy();
+    ctx.destroy();
+    std::printf("%s: shader-stats: %d failure(s)\n", failures == 0 ? "PASS" : "FAIL", failures);
+    return failures == 0 ? 0 : 1;
+}
+
 int main(int argc, char** argv) {
     std::string out = "vktest.png";
     bool validation = true;
@@ -428,6 +569,8 @@ int main(int argc, char** argv) {
             hazard = true;
         } else if (a == "--rt") {
             rtMode = true;
+        } else if (a == "--shader-stats") {
+            return shaderStats();
         } else {
             out = a;
         }

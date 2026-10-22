@@ -21,6 +21,8 @@ struct ContextOptions {
     // enable the ray tracing tier (acceleration structures + ray query + optional position fetch / opacity micromaps) when
     // the device has it (player setting rt.allow, read at device creation; docs/research/raytracing.md)
     bool allowRayTracing = true;
+    // VK_KHR_pipeline_executable_properties when the driver has it (shader statistics: rvk_vktest --shader-stats)
+    bool pipelineStatistics = false;
 };
 
 // The optional ray tracing tier of the device (docs/research/raytracing.md 1).
@@ -47,6 +49,7 @@ struct DeviceFeatures {
     float maxAnisotropy = 1.0f;
     bool hostQueryReset = false;  // vkResetQueryPool from the host (GPU timestamps of [debug] perf)
     float timestampPeriod = 0.0f; // ns per timestamp tick; 0 = the queue cannot write timestamps
+    bool pipelineStatistics = false;  // VK_KHR_pipeline_executable_properties enabled (ContextOptions::pipelineStatistics)
     RayTracingFeatures rayTracing;
 };
 
@@ -96,6 +99,7 @@ private:
     bool createInstance(const ContextOptions& options);
     bool pickPhysicalDevice(const ContextOptions& options);
     bool createDevice(bool withRayTracing);
+    bool wantPipelineStatistics_ = false;
     bool createAllocator();
 
     VkInstance instance_ = VK_NULL_HANDLE;

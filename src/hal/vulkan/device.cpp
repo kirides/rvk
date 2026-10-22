@@ -220,11 +220,11 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         reg.onChange(*rs.rtSceneViews, applyViews, this);
     }
     // enhanced water (enh/water.h, docs/research/water.md): a draw replacer, live settings
-    water_ = std::make_unique<enh::Water>(dev_);
+    water_ = std::make_unique<enh::Water>(dev_, rtScene_.get());
     if (rs.waterEnabled != nullptr) {
         for (settings::Setting* s : {rs.waterEnabled, rs.waterQuality, rs.waterReflections, rs.waterOcean, rs.waterOceanQuality,
                                      rs.waterSeaState, rs.waterWindDirection, rs.waterWaveScale, rs.waterMurkiness,
-                                     rs.waterReflectionStrength, rs.waterDebug}) {
+                                     rs.waterReflectionStrength, rs.waterDebug, rs.rtReflections, rs.rtReflectionTweaks}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyWater(); }, this);
         }
         if (rs.waterEnabled->asBool()) applyWater();
@@ -273,8 +273,14 @@ void HalDevice::applyWater() {
     s.waveHeight = rs.waterWaveScale->asFloat();
     s.murkiness = rs.waterMurkiness->asFloat();
     s.reflections = rs.waterReflectionStrength->asFloat();
+    // rt.reflections (effective value: off while the ray tracing tier is unavailable)
+    if (rs.rtReflections != nullptr) {
+        const std::string_view rt = rs.rtReflections->asEnum();
+        s.rtTier = rt == "low" ? 1 : rt == "medium" ? 2 : rt == "high" ? 3 : 0;
+    }
+    if (rs.rtReflectionTweaks != nullptr) s.rtTweaks = static_cast<int>(rs.rtReflectionTweaks->asInt());
     const std::string_view d = rs.waterDebug->asEnum();
-    s.debug = d == "shore_field" ? 1 : d == "depth" ? 2 : d == "normals" ? 3 : d == "reflection" ? 4 : d == "foam" ? 5 : d == "sea_floor" ? 6 : d == "waves" ? 7 : 0;
+    s.debug = d == "shore_field" ? 1 : d == "depth" ? 2 : d == "normals" ? 3 : d == "reflection" ? 4 : d == "foam" ? 5 : d == "sea_floor" ? 6 : d == "waves" ? 7 : d == "reflection_source" ? 8 : d == "reflection_shaded" ? 9 : 0;
     water_->apply(s);
     // the enhanced water reflects the engine's sky cube everywhere: keep it current (the whole cube every frame; the
     // engine's own refresh, one face per frame every ~10 s, left lightning flashes baked into some faces: ocean.md 9.8)

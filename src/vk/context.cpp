@@ -62,6 +62,7 @@ const char* resultString(VkResult r) {
 Context::~Context() { destroy(); }
 
 bool Context::create(const ContextOptions& options) {
+    wantPipelineStatistics_ = options.pipelineStatistics;
     if (volkInitialize() != VK_SUCCESS) {
         spdlog::error("vulkan: no Vulkan loader");
         return false;
@@ -383,6 +384,14 @@ bool Context::createDevice(bool withRayTracing) {
         enabled.push_back(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
         *tail = &fault;
         tail = &fault.pNext;
+    }
+    VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR pexe{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR};
+    if (wantPipelineStatistics_ && hasExtension(exts, VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME)) {
+        pexe.pipelineExecutableInfo = VK_TRUE;
+        enabled.push_back(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
+        *tail = &pexe;
+        tail = &pexe.pNext;
+        features_.pipelineStatistics = true;
     }
     // ray tracing tier (bufferDeviceAddress is already on): acceleration structures + ray query, plus the optional extras
     VkPhysicalDeviceAccelerationStructureFeaturesKHR as{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};

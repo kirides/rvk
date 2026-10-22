@@ -76,8 +76,12 @@ set(RVK_SHADERS
     water/ocean_spectrum.comp
     water/water.frag
     water/water_ocean.vert
+    water/water_rt.comp
     water/wet_shore.frag
 )
+# variants: "<name>=<source>:<DEFINE>[,<DEFINE>[=<value>]]..." (the source compiled again with these defines, embedded under
+# <name>; rvk_glslc -D); none at the moment
+set(RVK_SHADER_VARIANTS)
 set(RVK_SHADER_OUTPUTS)
 set(RVK_SHADER_INCLUDES "")
 set(RVK_SHADER_TABLE "")
@@ -94,6 +98,28 @@ foreach(shader ${RVK_SHADERS})
     list(APPEND RVK_SHADER_OUTPUTS ${out})
     string(APPEND RVK_SHADER_INCLUDES "#include \"shaders/${shader}.h\"\n")
     string(APPEND RVK_SHADER_TABLE "    {\"${shader}\", data::${ident}},\n")
+endforeach()
+foreach(variant ${RVK_SHADER_VARIANTS})
+    string(REGEX MATCH "^([^=]+)=([^:]+):(.+)$" _ ${variant})
+    set(vname ${CMAKE_MATCH_1})
+    set(vsrc ${CMAKE_MATCH_2})
+    string(REPLACE "," ";" vdefs ${CMAKE_MATCH_3})
+    set(vdefargs)
+    foreach(d ${vdefs})
+        list(APPEND vdefargs -D ${d})
+    endforeach()
+    string(MAKE_C_IDENTIFIER ${vname} ident)
+    set(out ${RVK_GENERATED_DIR}/shaders/${vname}.h)
+    add_custom_command(
+        OUTPUT ${out}
+        COMMAND rvk_glslc compile ${RVK_SHADER_DIR}/${vsrc} -o ${out} --name ${ident} -I ${RVK_SHADER_DIR}/include --depfile ${out}.d ${vdefargs}
+        DEPENDS rvk_glslc ${RVK_SHADER_DIR}/${vsrc}
+        DEPFILE ${out}.d
+        COMMENT "GLSL shaders/${vsrc} (${vdefs}) -> ${vname}"
+        VERBATIM)
+    list(APPEND RVK_SHADER_OUTPUTS ${out})
+    string(APPEND RVK_SHADER_INCLUDES "#include \"shaders/${vname}.h\"\n")
+    string(APPEND RVK_SHADER_TABLE "    {\"${vname}\", data::${ident}},\n")
 endforeach()
 # the ABI header as text: the D3D9 translator puts it into every translated shader
 add_custom_command(
@@ -174,6 +200,7 @@ add_library(rvk_core STATIC
     src/enh/water.cpp
     src/enh/water.h
     src/enh/water_profile.cpp
+    src/enh/water_rt.cpp
     src/enh/water_profile.h
     src/engine/materials.cpp
     src/engine/materials.h

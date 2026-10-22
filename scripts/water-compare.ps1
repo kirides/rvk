@@ -4,6 +4,7 @@
     true), side-by-side pictures (left engine, right enhanced) in out\water\<stamp>\ (docs/research/water.md 8).
 
 .EXAMPLE
+    .\scripts\water-compare.ps1 -EngineSetting 'water.enabled=true','rt.reflections=off' -Setting 'rt.reflections=medium'
     .\scripts\water-compare.ps1
     .\scripts\water-compare.ps1 -Spots beach_sun,swamp_pond -Setting 'water.quality=high' -Perf
 #>
@@ -11,6 +12,9 @@ param(
     [string]$Spots = 'beach_sun,beach_rain,harbour_docks,lake_jungle,waterfall_jungle,swamp_pond,swamp_camp,crystal_cave',
     # extra player settings of the enhanced run (water.enabled=true is always set)
     [string[]]$Setting = @(),
+    # the left run's player settings instead of the engine's water (water.enabled=false): e.g. SSR vs ray-traced reflections
+    # -EngineSetting 'water.enabled=true','rt.reflections=off' -Setting 'rt.reflections=medium'
+    [string[]]$EngineSetting = @(),
     [string]$GameDir = 'B:\DevDrive\risen-test-vk',
     # risen-spass instance id (run.ps1 -Instance): needed to run beside another Risen
     [int]$Instance = 0,
@@ -51,7 +55,7 @@ function Invoke-Run([string]$tag, [string[]]$settings, [int]$burstCount = 1) {
 }
 
 if ($EngineDir) { Copy-Item -Recurse (Join-Path $EngineDir 'eng') (Join-Path $out 'eng') }
-elseif (-not $SkipEngine) { Invoke-Run 'eng' @('water.enabled=false') }
+elseif (-not $SkipEngine) { Invoke-Run 'eng' $(if ($EngineSetting.Count -gt 0) { $EngineSetting } else { @('water.enabled=false') }) }
 Invoke-Run 'enh' (@('water.enabled=true') + $Setting) $Burst
 if ($MaskDir) { Copy-Item -Recurse (Join-Path $MaskDir 'msk') (Join-Path $out 'msk') }
 elseif ($Mask) { Invoke-Run 'msk' @('water.enabled=true', 'water.debug=normals') }

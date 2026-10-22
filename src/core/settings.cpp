@@ -705,6 +705,23 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .requirements = caps::bit(caps::Cap::RayTracingHardware),
         .unmetValue = 0,
     });
+    r.rtReflections = &reg.add({
+        .key = "rt.reflections",
+        .label = "Ray-traced water reflections",
+        .category = "Ray tracing",
+        .description = "The enhanced water (Water: on, reflections \"Screen space\") takes its reflections from the ray-traced "
+                       "world instead of the screen: cliffs, canopies, masts and houses above or behind the view are reflected "
+                       "too, with their own textures, bent by the waves and softer with distance. Low: one ray per 2 x 2 "
+                       "pixels, cut-outs solid, no shadows in reflections; Medium: cut-outs (fronds, ivy), sun shadows, "
+                       "screen space where the ray finds nothing (leaves, characters); High: one ray per pixel, longer reach, "
+                       "cut-outs in the shadows too. Off: screen-space reflections. Needs ray tracing.",
+        .type = Type::Enum,
+        .defaultValue = 2,
+        .options = {"off", "low", "medium", "high"},
+        .optionLabels = {"Off", "Low", "Medium", "High"},
+        .requirements = caps::bit(caps::Cap::RayQuery),
+        .unmetValue = 0,
+    });
     r.rtDebug = &reg.add({
         .key = "rt.debug",
         .label = "Ray tracing scene view",
@@ -720,6 +737,18 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Off", "Instances", "Depth check", "Normals", "Albedo", "Albedo (split)", "Albedo (cut-outs solid)", "UV"},
         .flags = Flag::NoAB,
         .requirements = caps::bit(caps::Cap::RayQuery),
+    });
+    r.rtReflectionTweaks = &reg.add({
+        .key = "rt.reflection_tweaks",
+        .label = "RT reflection tweaks",
+        .category = "Debug",
+        .description = "Developer switch (cost measurements of rt.reflections): 1 cut-outs solid, 2 no shadow rays, 4 no "
+                       "screen-space fallback, 8 hits unshaded.",
+        .type = Type::Int,
+        .defaultValue = 0,
+        .min = 0,
+        .max = 15,
+        .flags = Flag::NoAB | Flag::Hidden,
     });
     r.rtSceneViews = &reg.add({
         .key = "rt.scene_views",
@@ -849,11 +878,14 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "surface normals, the reflection alone, the foam (red) over the surf zone (green) and the depth (blue; FFT ocean: "
                        "red folding foam, green breaking waves, blue surf, white contact), the sea floor field "
                        "(red depth, green exposure, blue the waves' phase rolling in) or the FFT ocean's attenuation (red / "
-                       "green / blue the three longest cascades' weights).",
+                       "green / blue the three longest cascades' weights), or where each reflection comes from (rt.reflections: green the "
+                       "screen, blue a shaded ray-traced hit, yellow the screen-space fallback, black the sky; brightness = "
+                       "coverage); \"Reflection (RT hits all shaded)\" = the reflection with every ray-traced hit shaded, none "
+                       "taken from the screen (the exposure match of the two).",
         .type = Type::Enum,
         .defaultValue = 0,
-        .options = {"off", "shore_field", "depth", "normals", "reflection", "foam", "sea_floor", "waves"},
-        .optionLabels = {"Off", "Shore field", "Depth", "Normals", "Reflection", "Foam", "Sea floor", "Wave attenuation"},
+        .options = {"off", "shore_field", "depth", "normals", "reflection", "foam", "sea_floor", "waves", "reflection_source", "reflection_shaded"},
+        .optionLabels = {"Off", "Shore field", "Depth", "Normals", "Reflection", "Foam", "Sea floor", "Wave attenuation", "Reflection source", "Reflection (RT hits all shaded)"},
         .flags = Flag::NoAB,
     });
     r.shadowsEnabled = &reg.add({

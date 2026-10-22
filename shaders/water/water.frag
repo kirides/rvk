@@ -20,6 +20,10 @@
 //               lit sand
 //   fog         the engine's radial fog as the engine applies it
 
+//   rt          (setting rt.reflections) the reflection comes from the world's ray tracing scene instead of the screen: a
+//               reflection image traced before the water is drawn (water_rt.comp, docs/research/rt-reflections.md 3.3),
+//               looked up like a planar reflection bent by the waves and ripples; SSR where it has nothing
+
 #define WATER_FRAGMENT
 #include "water_common.glsl"
 
@@ -181,6 +185,68 @@ vec2 ssrJitter(vec3 N, vec3 Ngeo, float dist) {
     return (n.xz - g.xz) * vec2(0.12, -0.12) / (1.0 + dist / 4000.0);
 }
 
+// ---- the traced reflection: screen space, or ray traced (rt.reflections) -------------------------------------------------
+
+const uint REFL_SKY = 0u, REFL_SCREEN = 1u, REFL_SHADED = 2u, REFL_SSR = 3u;
+struct Refl {
+    vec3 c;       // the reflected colour (linear HDR, as the scene target)
+    float conf;   // its coverage over the engine's sky cube (0 = the cube)
+    uint src;     // REFL_*: where it came from (water.debug = reflection_source)
+};
+
+// The reflection along the calmer normal (Nray: the geometric / macro normal; N: the shading normal whose ripples break it
+// up). Screen space: GD3D11's TraceWaterSSR (traceSSR). Ray traced (rt.reflections, w.rtRefl.x = this frame's reflection
+// image of water_rt.comp: the mirror ray of the body's surface plane against the TLAS, premultiplied colour + coverage):
+// looked up where the reflected ray of this pixel leans away from the plane's mirror ray (the waves' macro tilt and the
+// ripples' share of ssrDir, the same kind of screen offset the SSR's jitter takes): a planar reflection bent by the waves,
+// broken up by the ripples, without stochastic noise. Where it has nothing (a miss: leaf cards, grass and characters are
+// not in the scene yet) the screen-space trace (medium / high), then the sky cube. `weight`: how much of the reflection
+// reaches the picture (Fresnel / masks, fog): no screen-space fallback below 2 %.
+Refl traceReflection(WaterBlock w, RvkFrame f, vec3 P, vec3 N, vec3 Nray, vec3 V, vec2 uv, float dist, float weight) {
+    Refl r;
+    r.c = vec3(0.0);
+    r.conf = 0.0;
+    r.src = REFL_SKY;
+    vec3 dir = ssrDir(N, Nray, V);
+    vec2 jitter = ssrJitter(N, Nray, dist);
+    float rtA = 0.0;
+    if (w.rtRefl.x != 0u) {
+        vec3 nr = normalize(mix(normalize(Nray), normalize(N), 0.35));
+        vec2 bend = nr.xz * vec2(0.12, -0.12) / (1.0 + dist / 4000.0) + jitter;
+        vec4 rt0 = rvkSample2DLod(w.rtRefl.x, w.smpOurs.x, uv, 0.0);
+        vec4 rt = rvkSample2DLod(w.rtRefl.x, w.smpOurs.x, clamp(uv + bend, vec2(0.0), vec2(1.0)), 0.0);
+        // bent off the water (a shore, a hull in front): the pixel's own
+        if (abs(rt.a) < 0.5 * abs(rt0.a)) rt = rt0;
+        rtA = clamp(abs(rt.a), 0.0, 1.0);
+        if (rtA > 1e-3) {
+            r.c = rt.rgb / max(abs(rt.a), 1e-3);
+            r.conf = rtA;
+            r.src = rt.a < 0.0 ? REFL_SHADED : REFL_SCREEN;
+        }
+        if (rtA >= 0.99 || (w.rtRefl.y & 1u) == 0u || weight < 0.02) return r;
+    }
+    float conf;
+    vec3 ssr = traceSSR(w, f, P, dir, jitter, conf);
+    if (rtA > 1e-3) {
+        // the screen-space trace under the traced image's partial coverage (its fade, a shore)
+        float c = rtA + conf * (1.0 - rtA);
+        r.c = (r.c * rtA + ssr * conf * (1.0 - rtA)) / max(c, 1e-3);
+        r.conf = c;
+        return r;
+    }
+    r.c = ssr;
+    r.conf = conf;
+    r.src = conf > 0.0 ? REFL_SSR : REFL_SKY;
+    return r;
+}
+
+// the floor under the traced reflection over the cube (keepSky): SSR's as before; a ray-traced hit takes less of the cube
+// (it is the world where the screen had nothing)
+// (indoors, by the water's outdoor factor, less: a cave's ceiling is no bright sky, its pool must not glow)
+float reflFloor(Refl r, float ssrFloor, float rtFloor, float outdoor) {
+    return r.src == REFL_SCREEN || r.src == REFL_SHADED ? rtFloor * mix(0.35, 1.0, clamp(outdoor, 0.0, 1.0)) : ssrFloor;
+}
+
 struct Surface {
     vec3 colour;      // the engine's surface colour (before fog)
     float alpha;      // its opacity over what is seen through it
@@ -267,6 +333,7 @@ void main() {
         B = cross(Ngeo, T) * w.meshFrame.w;
     }
     float outdoor = tc4.w;
+    float fogK = 1.0 - clamp(min(dist * w.fogParams.y + w.fogParams.x, w.fogParams.z), 0.0, 1.0);  // what the fog leaves
     bool underside = (flags & WATER_UNDERSIDE) != 0u || (!grid && dot(V, Ngeo) < 0.0);
 
     // the engine's shadow mask (s0, screen space, the sea only)
@@ -281,6 +348,10 @@ void main() {
     vec3 L = w.sunDir.xyz;
     vec4 c6 = w.mat[0], c7 = w.mat[1], c8 = w.mat[2], c9 = w.mat[3], c10 = w.mat[4], c11 = w.mat[5], c12 = w.mat[6];
     float reflK = w.look.x;  // water.reflection_strength
+    Refl rfl;  // the traced reflection of this pixel (debug view)
+    rfl.c = vec3(0.0);
+    rfl.conf = 0.0;
+    rfl.src = REFL_SKY;
 
     if (model == WATER_MODEL_OCEAN) {
         // ps 6e22a01a6cf0ac0a: s14 / s13 normal maps blended by the mask s9, s11 * s10 diffuse, s12 sky cube
@@ -334,9 +405,11 @@ void main() {
         if (!underside) {
             // FFT: the traced ray follows the macro surface (the short waves would scatter it into the dark rocks / sea)
             vec3 Nssr = fft ? Nmacro : Ngeo;
-            float conf;
-            vec3 ssr = traceSSR(w, f, P, ssrDir(s.N, Nssr, V), ssrJitter(s.N, Nssr, dist), conf);
-            refl = keepSky(cube, min(ssr, vec3(1.5)), conf, 0.55);
+            rfl = traceReflection(w, f, P, s.N, Nssr, V, uv, dist, clamp(fres, 0.0, 1.0) * fogK);
+            refl = keepSky(cube, min(rfl.c, vec3(1.5)), rfl.conf, reflFloor(rfl, 0.55, 0.3, outdoor));
+            // the sun's glint is the sun's reflection: none where the traced ray meets the world (ray traced only: SSR's
+            // look stays as it was)
+            if (rfl.src == REFL_SCREEN || rfl.src == REFL_SHADED) spec *= 1.0 - 0.85 * rfl.conf;
         }
         s.refl = refl;
         s.colour = c6.rgb * lit + spec + clamp(mix(diffuse, refl, clamp(fres, 0.0, 1.0)), 0.0, 1.5);
@@ -365,17 +438,17 @@ void main() {
         vec3 R = 2.0 * dot(V, s.N) * s.N - V;
         float nv = dot(s.N, V);
         vec3 cube = clamp(mcube(w, 9u, R).rgb, 0.0, 1.0);
-        vec3 refl = cube;
-        if (!underside) {
-            float conf;
-            vec3 ssr = traceSSR(w, f, P, ssrDir(s.N, Ngeo, V), ssrJitter(s.N, Ngeo, dist), conf);
-            refl = keepSky(cube, min(ssr, vec3(1.0)), conf, 0.85);
-        }
-        s.refl = refl;
         vec2 rm = R.xy * 0.5 + 0.5;
         float m10 = clamp(mtex(w, 10u, rm).y, 0.0, 1.0);
         float m11 = mtex(w, 11u, rm).y;
         float fresR = (c8.y * dpow(1.0 - nv, c8.z) + c8.x) * reflK;
+        vec3 refl = cube;
+        if (!underside) {
+            float wt = clamp(m10 * fresR * c7.y * (m11 * c7.z) * c6.w, 0.0, 1.0) * c7.x * 2.0 * fogK;
+            rfl = traceReflection(w, f, P, s.N, Ngeo, V, uv, dist, wt);
+            refl = keepSky(cube, min(rfl.c, vec3(1.0)), rfl.conf, reflFloor(rfl, 0.85, 0.75, outdoor));
+        }
+        s.refl = refl;
         vec3 r = clamp(refl * m10 * fresR * c7.y * (m11 * c7.z) * c6.w, 0.0, 1.0);
         vec3 base = (r + c6.rgb) * c7.x;
         s.colour = base * lit + base;
@@ -397,13 +470,13 @@ void main() {
         s.colour = c6.rgb * lit + spec;
         if (!underside && w.look.z > 0.0) {
             // still dark water mirrors the trees around it, a little: Schlick Fresnel x look.z over the murky colour
-            float conf;
-            vec3 ssr = traceSSR(w, f, P, ssrDir(s.N, Ngeo, V), ssrJitter(s.N, Ngeo, dist), conf);
+            float F = (0.02 + 0.98 * dpow(1.0 - clamp(nv, 0.0, 1.0), 5.0)) * w.look.z * reflK;
+            rfl = traceReflection(w, f, P, s.N, Ngeo, V, uv, dist, clamp(F, 0.0, 1.0) * fogK);
             vec3 cube = w.res.x != 0u ? clamp(textureLod(samplerCube(tCube[nonuniformEXT(w.res.x)], samp[nonuniformEXT(w.smpOurs.x)]), R, 0.0).rgb, 0.0, 1.0)
                                       : s.colour;
-            vec3 refl = mix(cube * 0.6, min(ssr, vec3(1.0)), conf);
+            vec3 refl = mix(cube * 0.6, min(rfl.c, vec3(1.0)), rfl.conf);
+            if (rfl.src == REFL_SCREEN || rfl.src == REFL_SHADED) s.colour -= spec * 0.85 * rfl.conf;  // no glint behind the world
             s.refl = refl;
-            float F = (0.02 + 0.98 * dpow(1.0 - clamp(nv, 0.0, 1.0), 5.0)) * w.look.z * reflK;
             s.colour = mix(s.colour, refl, clamp(F, 0.0, 1.0));
         }
         float fade = dpow(thick0 * c7.x + c7.y, c7.z);
@@ -420,16 +493,15 @@ void main() {
         vec3 R = 2.0 * dot(V, s.N) * s.N - V;
         float nv = dot(s.N, V);
         vec3 cube = clamp(mcube(w, 13u, R).rgb, 0.0, 1.0);
+        float fres = (c8.y * dpow(1.0 - nv, c8.z) + c8.x) * reflK;
         vec3 refl = cube;
         if (!underside) {
-            float conf;
-            vec3 ssr = traceSSR(w, f, P, ssrDir(s.N, Ngeo, V), ssrJitter(s.N, Ngeo, dist), conf);
-            refl = keepSky(cube, min(ssr, vec3(1.0)), conf, 0.85);
+            rfl = traceReflection(w, f, P, s.N, Ngeo, V, uv, dist, clamp(fres, 0.0, 1.0) * c6.w * 2.0 * fogK);
+            refl = keepSky(cube, min(rfl.c, vec3(1.0)), rfl.conf, reflFloor(rfl, 0.85, 0.75, outdoor));
         }
         s.refl = refl;
         float k = mtex(w, 9u, R.xy * 0.5 + 0.5).y * c7.w;
         vec3 base = clamp(k * diff + c6.rgb, 0.0, 1.0);
-        float fres = (c8.y * dpow(1.0 - nv, c8.z) + c8.x) * reflK;
         vec3 c = clamp(mix(base, refl, fres) * c6.w, 0.0, 1.0);
         s.colour = c * lit + c;
         float fade = dpow(thick0 * c9.x + c9.y, c9.z);
@@ -673,10 +745,15 @@ void main() {
     if (dbg == 1u) color = vec3(fract(tc7.z / 1000.0), clamp(tc7.z / 30000.0, 0.0, 1.0), sea ? 1.0 : 0.0);
     else if (dbg == 2u) color = vec3(clamp(vdepth / 500.0, 0.0, 1.0), clamp(thick0 / 3000.0, 0.0, 1.0), s.alpha);
     else if (dbg == 3u) color = normalize(s.N) * 0.5 + 0.5;
-    else if (dbg == 4u) color = s.refl;
+    else if (dbg == 4u || dbg == 9u) color = s.refl;
     else if (dbg == 5u && fft) color = foamTerms.xyz + vec3(foamTerms.w * 0.5) + (any(isnan(foamTerms)) ? vec3(1.0, 1.0, 0.0) : vec3(0.0));
     else if (dbg == 5u) color = vec3(foam, (1.0 - smoothstep(0.0, 450.0, tc7.z)), clamp(vdepth / 200.0, 0.0, 1.0));
     else if (dbg == 6u && fft) color = vec3(clamp(fl.depth / 1000.0, 0.0, 1.0), fl.exposure, (0.5 + 0.5 * sin(st.phase)) * st.weight);
     else if (dbg == 7u && fft) color = vec3(fftWt.x, fftWt.y, fftWt.z) * 0.8 + vec3(st.breaking * st.weight * 0.2);
+    else if (dbg == 8u) {
+        // where the reflection came from: green the screen (RT hit reused), blue a shaded RT hit, yellow SSR, black the cube
+        const vec3 kSrc[4] = vec3[](vec3(0.0), vec3(0.1, 0.9, 0.1), vec3(0.15, 0.3, 1.0), vec3(1.0, 0.85, 0.1));
+        color = kSrc[min(rfl.src, 3u)] * (0.25 + 0.75 * rfl.conf);
+    }
     outColor = vec4(max(color, vec3(0.0)), 1.0);
 }

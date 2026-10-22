@@ -63,6 +63,9 @@ layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Wa
     vec4 player;      // xyz the player's position (eCWeatherAdmin), w 1 = known (else the near-water cap follows the camera)
     vec4 foamMap;     // the foam buffer (ocean_foam.comp): xy its first cell (world units), z its extent (world units), w 1 / extent
     uvec4 foamTex;    // x the foam buffer (bindless t2D, 0 = none), y its sampler (linear, wrap)
+    // ray-traced reflections (rt.reflections): x this frame's reflection image of water_rt.comp (bindless t2D, 0 = none: SSR),
+    // y 1 = the screen-space trace where it has nothing
+    uvec4 rtRefl;
 };
 
 const uint WATER_OCEAN_GRID = 1u;  // the camera-centred ocean grid (water_ocean.vert), shore + wave effects

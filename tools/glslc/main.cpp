@@ -117,7 +117,7 @@ std::string header(const fs::path& in, std::string_view body) {
 }
 
 int compile(const fs::path& in, const fs::path& out, const std::string& name, const std::vector<fs::path>& dirs,
-            const fs::path& depfile, const fs::path& spvOut) {
+            const fs::path& depfile, const fs::path& spvOut, const std::vector<std::string>& defines) {
     EShLanguage stage{};
     if (!stageOf(in, stage)) {
         std::fprintf(stderr, "%s: unknown shader stage (extension .vert / .frag / .comp / .geom / .tesc / .tese)\n",
@@ -138,7 +138,12 @@ int compile(const fs::path& in, const fs::path& out, const std::string& name, co
         const int length = static_cast<int>(source.size());
         const char* names = inName.c_str();
         shader.setStringsWithLengthsAndNames(&text, &length, &names, 1);
-        shader.setPreamble("#extension GL_GOOGLE_include_directive : require\n");
+        std::string preamble = "#extension GL_GOOGLE_include_directive : require\n";
+        for (const std::string& d : defines) {
+            const auto eq = d.find('=');
+            preamble += eq == std::string::npos ? "#define " + d + " 1\n" : "#define " + d.substr(0, eq) + " " + d.substr(eq + 1) + "\n";
+        }
+        shader.setPreamble(preamble.c_str());
         shader.setEnvInput(glslang::EShSourceGlsl, stage, glslang::EShClientVulkan, 100);
         shader.setEnvClient(glslang::EShClientVulkan, glslang::EShTargetVulkan_1_3);
         shader.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetSpv_1_6);
@@ -219,7 +224,7 @@ int text(const fs::path& in, const fs::path& out, const std::string& name) {
 
 int usage() {
     std::fprintf(stderr,
-                 "usage: rvk_glslc compile <in> -o <out.h> --name <ident> [-I <dir>]... [--depfile <out.d>] [--spv <out.spv>]\n"
+                 "usage: rvk_glslc compile <in> -o <out.h> --name <ident> [-I <dir>]... [--depfile <out.d>] [--spv <out.spv>] [-D NAME[=VALUE]]...\n"
                  "       rvk_glslc text <in> -o <out.h> --name <ident>\n");
     return 2;
 }
@@ -232,6 +237,7 @@ int main(int argc, char** argv) {
     fs::path in = argv[2], out, depfile, spv;
     std::string name;
     std::vector<fs::path> dirs;
+    std::vector<std::string> defines;
     for (int i = 3; i < argc; ++i) {
         const std::string a = argv[i];
         const bool hasValue = i + 1 < argc;
@@ -240,10 +246,11 @@ int main(int argc, char** argv) {
         else if (a == "-I" && hasValue) dirs.emplace_back(argv[++i]);
         else if (a == "--depfile" && hasValue) depfile = argv[++i];
         else if (a == "--spv" && hasValue) spv = argv[++i];
+        else if (a == "-D" && hasValue) defines.emplace_back(argv[++i]);
         else return usage();
     }
     if (out.empty() || name.empty()) return usage();
-    if (mode == "compile") return compile(in, out, name, dirs, depfile, spv);
+    if (mode == "compile") return compile(in, out, name, dirs, depfile, spv, defines);
     if (mode == "text") return text(in, out, name);
     return usage();
 }
