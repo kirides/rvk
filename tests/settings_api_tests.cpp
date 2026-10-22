@@ -14,7 +14,7 @@ TEST(settings_api_info_get_set) {
     settings::Registry reg;
     settings::registerRendererSettings(reg);
     const std::uint32_t n = api::settingCount(reg);
-    CHECK(n == 32);  // 11 + the 11 water.* + the 10 shadows.* settings
+    CHECK(n == 34);  // 13 (incl. rt.debug, rt.scene_views) + the 11 water.* + the 10 shadows.* settings
     struct rvk_setting_info info{};
     CHECK(api::settingInfo(reg, 0, &info, sizeof(info)) == 80);
     CHECK(info.size == 80);

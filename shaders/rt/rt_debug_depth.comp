@@ -1,0 +1,20 @@
+#version 460
+// RT scene debug view, depth capture (rt.debug depth mode, src/enh/rt_debug.cpp): at AfterOpaque the main view's hardware
+// depth buffer holds every opaque draw of the solid pass (the engine's linear depth map only the z-pass subset); this pass
+// converts it to view depth (the FrameBlock projection: D3D z = A + B / viewZ) into an R32F image that the BeforeGui pass
+// compares the traced distances with. 0 = nothing drawn (cleared to the far plane).
+
+#include "rt_debug.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 1, binding = 0, r32f) uniform writeonly image2D outDepth;
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (p.x >= pc.width || p.y >= pc.height) return;
+    RvkFrame f = pc.frame;
+    float z = rvkFetch2D(pc.depthTex, ivec2(p)).r;
+    float a = f.proj[2][2], b = f.proj[3][2];  // engine row-vector projection: z' = (z a + b) / z
+    float viewZ = (z < 1.0 && abs(z - a) > 1e-9) ? b / (z - a) : 0.0;
+    imageStore(outDepth, ivec2(p), vec4(max(viewZ, 0.0), 0.0, 0.0, 0.0));
+}

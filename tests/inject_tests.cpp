@@ -16,6 +16,7 @@
 #include "d3d9/inject.h"
 #include "d3d9/scene.h"
 #include "enh/debug_view.h"
+#include "enh/rt_debug.h"
 #include "shader/abi.h"
 #include "shader/embedded.h"
 #include "shader/glsl.h"
@@ -101,8 +102,32 @@ TEST(abi_glsl_layout_matches_cpp) {
                   {"cameraPos", offsetof(FB, cameraPos)}, {"prevCameraPos", offsetof(FB, prevCameraPos)},
                   {"depthParams", offsetof(FB, depthParams)}, {"viewport", offsetof(FB, viewport)}, {"jitter", offsetof(FB, jitter)},
                   {"time", offsetof(FB, time)}, {"frameInfo", offsetof(FB, frameInfo)}, {"images", offsetof(FB, images)},
-                  {"params", offsetof(FB, params)}},
+                  {"params", offsetof(FB, params)}, {"rtScene", offsetof(FB, rtScene)}, {"rtInfo", offsetof(FB, rtInfo)}},
                  "RvkFrame");
+}
+
+// the RT scene's geometry record (shaders/include/rvk_rt.glsl) and the RT debug view's push block (shaders/rt/rt_debug.glsl)
+TEST(abi_glsl_rt_layout_matches_cpp) {
+    const auto m = memberOffsets(shader::embedded::spirv("test/abi_rt_layout.comp"));
+    CHECK(m.contains("RvkRtRecord") && m.contains("RtDebugPush"));
+    if (!m.contains("RvkRtRecord") || !m.contains("RtDebugPush")) return;
+    using R = abi::RtGeometryRecord;
+    checkOffsets(m.at("RvkRtRecord"),
+                 {{"vertices", offsetof(R, vertices)}, {"indices", offsetof(R, indices)}, {"stride", offsetof(R, stride)},
+                  {"flags", offsetof(R, flags)}, {"normal", offsetof(R, normal)}, {"texcoord0", offsetof(R, texcoord0)},
+                  {"texcoord1", offsetof(R, texcoord1)}, {"texcoord6", offsetof(R, texcoord6)}, {"color0", offsetof(R, color0)},
+                  {"instanceId", offsetof(R, instanceId)}, {"albedoTex", offsetof(R, albedoTex)},
+                  {"albedoSampler", offsetof(R, albedoSampler)}, {"alpha", offsetof(R, alpha)}, {"uvSet", offsetof(R, uvSet)},
+                  {"uvMap0", offsetof(R, uvMap)}, {"uvMap1", offsetof(R, uvMap) + 16}},
+                 "RvkRtRecord");
+    using P = enh::RtDebugPush;
+    checkOffsets(m.at("RtDebugPush"),
+                 {{"frame", offsetof(P, h) + offsetof(abi::PassPushHeader, frame)},
+                  {"passId", offsetof(P, h) + offsetof(abi::PassPushHeader, passId)},
+                  {"passFlags", offsetof(P, h) + offsetof(abi::PassPushHeader, passFlags)}, {"depthTex", offsetof(P, depthTex)},
+                  {"width", offsetof(P, width)}, {"height", offsetof(P, height)}, {"srcTex", offsetof(P, srcTex)},
+                  {"srcSampler", offsetof(P, srcSampler)}, {"mode", offsetof(P, mode)}, {"probes", offsetof(P, probes)}},
+                 "RtDebugPush");
 }
 
 TEST(abi_glsl_pass_push_matches_cpp) {

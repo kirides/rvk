@@ -1,0 +1,18 @@
+#version 460
+// Not used by the renderer: rvk_tests reads the offsets of the RT geometry record (shaders/include/rvk_rt.glsl) and of
+// the RT debug view's push block (shaders/rt/rt_debug.glsl) from this module's SPIR-V.
+
+#include "../rt/rt_debug.glsl"
+
+layout(local_size_x = 1) in;
+
+layout(set = 1, binding = 0, r32ui) uniform writeonly uimage2D sink;
+
+void main() {
+    RvkRtRecord r = rvkRtRecord(pc.frame, 0u);
+    uint v = pc.passId + pc.passFlags + pc.depthTex + pc.width + pc.height + pc.srcTex + pc.srcSampler + pc.mode +
+             r.vertices.x + r.indices.y + r.stride + r.flags + r.normal + r.texcoord0 + r.texcoord1 + r.texcoord6 + r.color0 +
+             r.instanceId + r.albedoTex + r.albedoSampler + r.alpha + r.uvSet + floatBitsToUint(r.uvMap0.x + r.uvMap1.w) +
+             pc.frame.rtScene.x + pc.frame.rtInfo.y + pc.probes.x;
+    imageStore(sink, ivec2(0), uvec4(v));
+}

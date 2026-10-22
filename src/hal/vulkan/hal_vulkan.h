@@ -16,6 +16,8 @@
 
 #include "d3d9/device.h"
 #include "enh/debug_view.h"
+#include "enh/rt_debug.h"
+#include "enh/rt_scene.h"
 #include "enh/shadows.h"
 #include "enh/water.h"
 #include "overlay/overlay.h"
@@ -473,6 +475,8 @@ private:
     std::unique_ptr<enh::DebugView> debugView_;  // debug.inject_view (an injected pass)
     std::unique_ptr<enh::Water> water_;          // water.* (a draw replacer)
     std::unique_ptr<enh::Shadows> shadows_;      // shadows.* (a draw replacer: the sun's shadow mask)
+    std::unique_ptr<enh::RtScene> rtScene_;      // the ray tracing scene (a draw observer + a pass; active while a consumer holds it)
+    std::unique_ptr<enh::RtDebug> rtDebug_;      // rt.debug (a consumer of rtScene_)
     void applyWater();
     void applyShadows();
     std::chrono::steady_clock::time_point settingsDirtySince_{};

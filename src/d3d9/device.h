@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -177,8 +178,11 @@ public:
     bool isIndex() const { return index_; }
     bool index32() const { return index32_; }
     bool dynamic() const { return (usage_ & USAGE_DYNAMIC) != 0; }
+    // a fresh copy in the frame's upload ring per use (dynamic / system-memory buffers) instead of one static GPU buffer
+    bool ringCopied() const { return dynamic() || pool_ == POOL_SYSTEMMEM; }
     // persistent identity (d3d9/identity.h): the generation counts the GPU copies (render thread)
     ResourceRef ref() const { return {id_, copies_.generation()}; }
+    std::uint64_t id() const { return id_; }
 
     // D3D9 Lock: pointer into the CPU copy (offset/size 0 = whole buffer); flags LOCK_*
     void* lock(std::uint32_t offset, std::uint32_t size, std::uint32_t flags);
@@ -192,6 +196,10 @@ public:
         VkDeviceSize offset = 0;
     };
     Binding gpu();
+    // render thread, after gpu(): the device address of the static GPU copy (ray tracing tier only: BLAS inputs, vertex
+    // fetches of RT hit shaders; docs/research/rt-reflections.md 3); 0 for ring-copied buffers or without the tier. Valid
+    // until the next generation (Device::notifyBufferChanged tells the observers)
+    VkDeviceAddress deviceAddress();
 
 private:
     Device& dev_;
@@ -208,6 +216,7 @@ private:
     std::uint8_t* boundPtr_ = nullptr;  // CPU address of the frame's ring copy (dynamic buffers)
     VkBuffer static_ = VK_NULL_HANDLE;
     VmaAllocation staticAlloc_ = VK_NULL_HANDLE;
+    VkDeviceAddress staticAddress_ = 0;  // of static_ (lazy)
 };
 
 class VertexDecl {
@@ -255,12 +264,19 @@ struct ReplaceQuery {
     std::uint32_t first = 0, primitives = 0;  // start index / vertex, primitive count
     std::int32_t baseVertex = 0;
     bool instanced = false;                   // stream 0 frequency INDEXEDDATA
+    std::uint32_t instances = 1;              // its instance count (1 when not instanced)
     Texture* const* textures = nullptr;       // the bound textures s0..s15 (pixel)
     const Shader* engineVs = nullptr;
     const Shader* enginePs = nullptr;
     std::shared_ptr<Shader> engineVsRef;      // the engine's vertex shader (a replacement may keep it: DrawReplacement::vs)
     const VertexDecl* decl = nullptr;         // the draw's vertex declaration
     bool blended = false;                     // alpha blending SRCALPHA / INVSRCALPHA on
+    bool blending = false;                    // alpha blending on (any factors)
+    bool alphaTest = false;                   // alpha test on with a function other than ALWAYS
+    std::uint32_t alphaFunc = 8;              // D3DCMPFUNC of the alpha test (8 = always)
+    std::uint32_t alphaRef = 0;               // its reference 0..255
+    bool depthWrite = true;                   // z test + z write on (a depth target bound)
+    bool depthBias = false;                   // a depth bias (constant or slope-scaled) is set
 };
 
 struct DrawReplacement {
@@ -291,6 +307,32 @@ public:
     // engine's geometry (enh/water: the sea floor field). Called before the draw is recorded; must not change device state.
     virtual bool wantsOpaque() const { return false; }
     virtual void observeOpaque(Device& /*device*/, const ReplaceQuery& /*query*/) {}
+};
+
+// Draw observation (enh/rt_scene: the ray tracing scene, docs/research/rt-reflections.md 3): an enhancement that reads the
+// engine's geometry and per-draw constants (world rows in the vertex shader constants) without changing anything. Indexed
+// draws from buffers of the views / kinds it observes are shown to it in prepareDraw, before the draw is recorded (the
+// constants and the bound state are the draw's). Render thread.
+class DrawObserver {
+public:
+    virtual ~DrawObserver() = default;
+    // whether a draw of this kind in this phase is observed (called for every indexed draw while registered: keep it cheap)
+    virtual bool observes(draws::Kind kind, scene::Phase phase) const = 0;
+    // must not change device state (Device::vsConstant, streamSource, Buffer::gpu / readCpu / deviceAddress are fine)
+    virtual void observe(Device& device, const ReplaceQuery& query) = 0;
+    // the buffer `id` got a new static GPU copy (a new generation: the old VkBuffer and its address are retired) or is
+    // released (its GPU copy dies after the frame): anything built from it must be forgotten
+    virtual void bufferChanged(std::uint64_t /*bufferId*/) {}
+};
+
+// The ray tracing scene of the frame, for the FrameBlock (shader/abi.h FrameBlock::rtScene / rtInfo): valid only in the
+// submission that built it (`frame` = Device::frameValue() at the build; a mid-frame flush starts another one)
+struct RtSceneRef {
+    VkDeviceAddress tlas = 0;
+    VkDeviceAddress records = 0;
+    std::uint32_t instances = 0;
+    std::uint32_t recordCount = 0;
+    std::uint64_t frame = 0;
 };
 
 // Drawn on top of the frame at present (the in-game overlay, src/overlay): after the back buffer was copied into the
@@ -567,6 +609,37 @@ public:
     // draw replacement (enh/water, enh/shadows): a replacer must outlive its registration; adding twice is a no-op
     void addDrawReplacer(DrawReplacer* replacer);
     void removeDrawReplacer(DrawReplacer* replacer);
+    // draw observation (enh/rt_scene): an observer must outlive its registration; adding twice is a no-op
+    void addDrawObserver(DrawObserver* observer);
+    void removeDrawObserver(DrawObserver* observer);
+    // Buffer: its static GPU copy was replaced, or it is released (render thread; tells the observers)
+    void notifyBufferChanged(std::uint64_t bufferId) {
+        for (DrawObserver* o : observers_) o->bufferChanged(bufferId);
+    }
+    // a vertex stream as last set (render thread): instance data of instanced draws (TEXCOORD4 = the instance index)
+    struct StreamSource {
+        Buffer* buffer = nullptr;
+        std::uint32_t offset = 0, stride = 0, freq = 1;
+    };
+    StreamSource streamSource(std::uint32_t stream) const {
+        if (stream >= kStreams) return {};
+        const Stream& s = streams_[stream];
+        return {s.buffer, s.offset, s.stride, s.freq};
+    }
+    // the ray tracing scene of the frame (enh/rt_scene): its TLAS + geometry records go into the FrameBlock while the
+    // submission that built it is recorded
+    void setRtScene(const RtSceneRef& scene) {
+        rtScene_ = scene;
+        frameAddr_ = 0;
+    }
+    const RtSceneRef& rtScene() const { return rtScene_; }
+    bool rtSceneValid() const { return rtScene_.tlas != 0 && rtScene_.frame == frameValue(); }
+    // one-line status texts of enhancements for the overlay's performance panel (key -> text; empty text removes it)
+    void setStatus(const std::string& key, std::string text) {
+        if (text.empty()) status_.erase(key);
+        else status_[key] = std::move(text);
+    }
+    const std::map<std::string, std::string>& status() const { return status_; }
     // the sun cascades' depth maps rendered so far this frame (the scene hooks count each ExecuteShadowMap into a DF24 /
     // DF16 depth texture; enh/shadows knows the frame's last cascade by it)
     void countShadowDepthMap() { ++shadowDepthMaps_; }
@@ -825,6 +898,9 @@ private:
     draws::TintMode tint_ = draws::TintMode::Off;
     std::unordered_set<std::uint64_t> waterLogged_;  // material x pixel shader pairs whose first water / refracted draw was logged
     std::vector<DrawReplacer*> replacers_;
+    std::vector<DrawObserver*> observers_;
+    RtSceneRef rtScene_;
+    std::map<std::string, std::string> status_;
     std::uint32_t shadowDepthMaps_ = 0;
     std::uint32_t customVertices_ = 0;    // the draw prepared by prepareDraw is procedural: vkCmdDraw(customVertices_)
     vk::PipelineDesc waterTemplate_{};    // pipeline description of the last water draw (prebuildReplacement)

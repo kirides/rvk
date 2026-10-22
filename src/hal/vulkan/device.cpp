@@ -78,6 +78,8 @@ HalDevice::~HalDevice() {
         settings::registry().save(options_.settingsFile);
     }
     debugView_.reset();  // removes its pass, retires its pipelines
+    rtDebug_.reset();    // releases the RT scene
+    rtScene_.reset();    // unregisters its observer / pass, retires its acceleration structures
     water_.reset();      // unregisters its draw replacer
     shadows_.reset();
     {
@@ -179,6 +181,25 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         };
         if (!rs.injectView->isDefault()) applyInject(*rs.injectView);
         reg.onChange(*rs.injectView, applyInject, this);
+    }
+    // the ray tracing scene (enh/rt_scene.h, docs/research/rt-reflections.md 3) and its debug view rt.debug
+    rtScene_ = std::make_unique<enh::RtScene>(dev_);
+    rtDebug_ = std::make_unique<enh::RtDebug>(dev_, *rtScene_);
+    if (rs.rtDebug != nullptr) {
+        const auto applyRtDebug = [this](const settings::Setting& s) {
+            rtDebug_->setMode(enh::RtDebug::parse(s.asEnum()));
+            spdlog::info("hal: settings: ray tracing scene view {}", s.asEnum());
+        };
+        if (rs.rtDebug->asEnum() != "off") applyRtDebug(*rs.rtDebug);
+        reg.onChange(*rs.rtDebug, applyRtDebug, this);
+    }
+    if (rs.rtSceneViews != nullptr) {
+        const auto applyViews = [this](const settings::Setting& s) {
+            const std::string_view v = s.asEnum();
+            rtScene_->setViews(v == "main" ? 1 : v == "shadow" ? 2 : 3);
+        };
+        if (!rs.rtSceneViews->isDefault()) applyViews(*rs.rtSceneViews);
+        reg.onChange(*rs.rtSceneViews, applyViews, this);
     }
     // enhanced water (enh/water.h, docs/research/water.md): a draw replacer, live settings
     water_ = std::make_unique<enh::Water>(dev_);

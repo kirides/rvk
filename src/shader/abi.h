@@ -23,8 +23,9 @@
 //                       alphaFunc: D3DCMPFUNC (1 never .. 8 always), alphaRef: 0..1
 //                       pad[0]: debug tint, RGBA8 (unpackUnorm4x8; 0 = none), read only by the tint variant of a pixel
 //                       shader (GlslOptions::tintEpilogue, the "tint draws" debug view); pad[1] unused
-// FrameBlock (std430, 896 bytes): the main camera (current + previous), depth conventions, target size, jitter, time, frame
-//                       index + flags, bindless slots of the tagged engine images, 16 vec4 feature parameters (below)
+// FrameBlock (std430, 928 bytes): the main camera (current + previous), depth conventions, target size, jitter, time, frame
+//                       index + flags, bindless slots of the tagged engine images, 16 vec4 feature parameters (below), the
+//                       ray tracing scene (TLAS + geometry record addresses, RtGeometryRecord below)
 //
 // Pass shaders (injected passes, d3d9/inject.h) use their own pipeline layout: set 0 = this bindless set, set 1 = a push
 // descriptor set of the pass, 128 bytes of push constants starting with PassPushHeader (GLSL RVK_PASS_PUSH_HEADER).
@@ -112,13 +113,52 @@ struct FrameBlock {
     std::uint32_t frameInfo[4]; // frame index (low 32 bits), kFrame* flags, main views so far this frame, 0
     std::uint32_t images[4];    // bindless t2D slots: scene HDR, refraction copy, depth map; tCube slot of the sky cube
     float params[16][4];        // feature parameters: kFrameParam* (an enhancement owns its indices)
+    // the ray tracing scene (enh/rt_scene, docs/research/rt-reflections.md 3; zero while there is none this submission):
+    // TLAS device address (low, high: GLSL accelerationStructureEXT(uvec2) needs no shaderInt64), geometry records address
+    std::uint32_t rtScene[4];
+    std::uint32_t rtInfo[4];    // instances in the TLAS, records, kFrameRt* flags, 0
 };
-static_assert(sizeof(FrameBlock) == 896);
+static_assert(sizeof(FrameBlock) == 928);
+inline constexpr std::uint32_t kFrameRtValid = 1u;  // rtScene holds this frame's TLAS (built at AfterOpaque)
 inline constexpr std::uint32_t kFrameCameraValid = 1u;      // this frame's main camera
 inline constexpr std::uint32_t kFrameCameraPredicted = 2u;  // the previous frame's (no main view yet this frame)
 inline constexpr std::uint32_t kFramePrevValid = 4u;        // the prev* fields hold the frame before
 inline constexpr std::uint32_t kFrameParams = 16;
 inline constexpr std::uint32_t kFrameParamDebugView = 0;   // debug.inject_view: x mode, y strength, z grid spacing
+
+// One geometry record per TLAS instance x geometry of the ray tracing scene (enh/rt_scene; GLSL RvkRtRecord in
+// shaders/include/rvk_rt.glsl, reached as records[instanceCustomIndex + geometryIndex]). Vertex attributes are words
+// `offset | D3DDECLTYPE << 16` (kRtAttribAbsent = not in the declaration). Material fields are filled from M9 P2 on.
+struct RtGeometryRecord {
+    std::uint32_t vertices[2];   // device address of vertex 0 (the draw's stream offset + base vertex applied)
+    std::uint32_t indices[2];    // device address of the draw's first index
+    std::uint32_t stride;        // vertex stride (bytes)
+    std::uint32_t flags;         // kRtRecord* | draws::Kind << 8 | view bits << 16
+    std::uint32_t normal;        // attribute words
+    std::uint32_t texcoord0;
+    std::uint32_t texcoord1;
+    std::uint32_t texcoord6;     // the lightmap uv
+    std::uint32_t color0;
+    std::uint32_t instanceId;    // stable id of the instance in the registry (debug colours, temporal reuse)
+    std::uint32_t albedoTex;     // P2: bindless t2D slot of the diffuse texture (0 = none)
+    std::uint32_t albedoSampler; // P2: bindless sampler
+    std::uint32_t alpha;         // alpha test: D3DCMPFUNC | reference (0..255) << 8 (func 8 = always)
+    std::uint32_t uvSet;         // P2: which vertex uv set the albedo uses (0 = TEXCOORD0) + flags
+    float uvMap[2][4];           // P2: affine uv map, u' = dot(uvMap[0].xy, uv) + uvMap[0].z, v' likewise with [1]
+};
+static_assert(sizeof(RtGeometryRecord) == 96);
+inline constexpr std::uint32_t kRtAttribAbsent = 0xFFFFFFFFu;
+inline constexpr std::uint32_t kRtRecordIndex32 = 1u;      // 32-bit indices (else 16-bit)
+inline constexpr std::uint32_t kRtRecordAlphaTested = 2u;  // the draw had an alpha test (non-opaque instance)
+inline constexpr std::uint32_t kRtRecordSpeedTree = 4u;    // SpeedTree branches / fronds in their rest pose (no wind)
+inline constexpr std::uint32_t kRtRecordInstanced = 8u;    // from an instanced batch
+inline constexpr std::uint32_t kRtRecordNoDepthWrite = 16u; // a main-view solid draw of it had z writes off (not in the depth buffer)
+inline constexpr std::uint32_t kRtRecordDepthBias = 32u;    // a main-view draw of it had a depth bias (the depth buffer is offset)
+inline constexpr std::uint32_t kRtRecordKindShift = 8;   // bits 8-15: draws::Kind of the draw
+inline constexpr std::uint32_t kRtRecordViewShift = 16;  // bits 16-23: views it was seen in (1 main, 2 sun cascades)
+// TLAS instance masks
+inline constexpr std::uint32_t kRtMaskOpaque = 0x01u;
+inline constexpr std::uint32_t kRtMaskAlphaTested = 0x02u;
 
 // Specialisation-constant ids reserved for variant hooks (GlslOptions::extraGlobals: one SPIR-V module, the variant chosen
 // per pipeline). The default translation declares none; the first enhancement that adds an extra output takes these.

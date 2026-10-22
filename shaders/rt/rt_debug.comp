@@ -1,0 +1,142 @@
+#version 460
+// RT scene debug view, compute part (setting rt.debug, src/enh/rt_debug.cpp): one camera ray per back-buffer pixel against
+// the frame's TLAS (FrameBlock rtScene), written as a colour + coverage into a transient image that the composite blends
+// over the post-processed frame (BeforeGui: the colours are not tone-mapped).
+//   instances: a colour per instance (stable registry id), alpha-tested instances striped, instances only the sun
+//              cascades saw white-checkered; dark blue = the raster has geometry where the ray missed
+//   depth:     the traced hit distance against the raster's (the hardware depth captured at AfterOpaque, else the
+//              engine's linear depth map, which has only the z-pass subset of the opaque draws): green = match, red = the ray hit farther (geometry the
+//              raster has and the TLAS lacks: foliage, characters, ...), magenta = the ray hit closer (TLAS geometry the
+//              raster does not show there: a wrong transform / index range would show up so; cyan when the engine drew
+//              that object without depth writes or with a depth bias, so the depth buffer cannot show it exactly), blue =
+//              the ray missed
+//   normals:   the interpolated vertex normal from the geometry records (vertex fetch by device address), magenta where the
+//              fetched triangle's position disagrees with the hit (a wrong record)
+#extension GL_EXT_ray_query : require
+
+#include "rt_debug.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D outColor;
+
+uint hashU(uint x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+vec3 hue(float h) { return clamp(abs(fract(h + vec3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0, 0.0, 1.0); }
+
+// the probe index of pixel p (a 5 x 5 grid; picture rows 15 % .. 85 %: inside the letterbox), or -1
+int probeIndex(uvec2 p) {
+    uint i = uint((float(p.x) + 0.5) * 5.0 / float(pc.width));
+    float fy = ((float(p.y) + 0.5) / float(pc.height) - 0.15) / 0.7;
+    if (fy < 0.0 || fy >= 1.0) return -1;
+    uint j = uint(fy * 5.0);
+    uint px = uint((float(i) + 0.5) * float(pc.width) / 5.0);
+    uint py = uint((0.15 + (float(j) + 0.5) / 5.0 * 0.7) * float(pc.height));
+    return (p.x == px && p.y == py && i < 5u && j < 5u) ? int(j * 5u + i) : -1;
+}
+
+void probe(uvec2 p, uint record, float t, float rasterT, uint code) {
+    if (pc.probes == uvec2(0u)) return;
+    int k = probeIndex(p);
+    if (k >= 0) RtDebugProbes(pc.probes).p[k] = RtDebugProbe(record, t, rasterT, code);
+}
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (p.x >= pc.width || p.y >= pc.height) return;
+    RvkFrame f = pc.frame;
+    vec4 result = vec4(0.0);
+    if (!rvkRtValid(f) || (f.frameInfo.y & RVK_FRAME_CAMERA_VALID) == 0u) {
+        imageStore(outColor, ivec2(p), result);
+        return;
+    }
+    vec2 uv = (vec2(p) + 0.5) / vec2(pc.width, pc.height);
+    vec4 farPoint = f.invViewProj * vec4(rvkUvToNdc(uv), 1.0, 1.0);
+    vec3 farPos = farPoint.xyz / farPoint.w;
+    vec3 origin = f.cameraPos.xyz;
+    vec3 dir = farPos - origin;
+    float farLen = length(dir);
+    dir /= max(farLen, 1e-6);
+
+    // the raster's distance along this ray from the engine's linear depth map (cleared to 1 = nothing)
+    bool raster = false;
+    float rasterT = 0.0;
+    if (pc.depthTex != 0u) {
+        ivec2 dsize = rvkSize2D(pc.depthTex);
+        float d = rvkFetch2D(pc.depthTex, clamp(ivec2(uv * vec2(dsize)), ivec2(0), dsize - 1)).r;
+        // the hardware depth capture holds view depth (0 = nothing), the engine's depth map view depth / far (1 = nothing)
+        bool linear = (pc.mode & RT_DEBUG_LINEAR_DEPTH) != 0u;
+        float viewDepth = linear ? d : (d < 0.9999 ? rvkViewDepth(f, d) : 0.0);
+        if (viewDepth > 0.0) {
+            raster = true;
+            rasterT = farLen * viewDepth / max(f.depthParams.y, 1e-3);
+        }
+    }
+    uint mode = pc.mode & 0xFFu;
+    // which raster depth the depth check uses: a square at the top left, white = the hardware depth capture, grey = the
+    // engine's linear depth map (z-pass draws only)
+    if (mode == RT_DEBUG_DEPTH && p.x < 12u && p.y < 12u) {
+        imageStore(outColor, ivec2(p), (pc.mode & RT_DEBUG_LINEAR_DEPTH) != 0u ? vec4(1.0) : vec4(0.4, 0.4, 0.4, 1.0));
+        return;
+    }
+
+    rayQueryEXT rq;
+    float tMin = max(f.depthParams.x * 0.5, 1.0);
+    rayQueryInitializeEXT(rq, accelerationStructureEXT(rvkRtTlas(f)), gl_RayFlagsNoneEXT, 0xFFu, origin, tMin, dir, 1.0e7);
+    while (rayQueryProceedEXT(rq)) {
+        // alpha-tested instances (FORCE_NO_OPAQUE): M9 P1 accepts every candidate (P2 tests the albedo's alpha here)
+        if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT) rayQueryConfirmIntersectionEXT(rq);
+    }
+    bool hit = rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT;
+
+    if (!hit) {
+        if (raster) result = vec4(0.05, 0.15, 0.9, 0.55);
+        probe(p, 0u, 0.0, rasterT, raster ? 4u : 0u);
+        imageStore(outColor, ivec2(p), result);
+        return;
+    }
+    float t = rayQueryGetIntersectionTEXT(rq, true);
+    uint index = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true)) + uint(rayQueryGetIntersectionGeometryIndexEXT(rq, true));
+    RvkRtRecord rec = rvkRtRecord(f, index);
+    {
+        float tol = max(4.0, rasterT * 0.004);
+        probe(p, index + 1u, t, rasterT, !raster ? 5u : abs(t - rasterT) <= tol ? 1u : t > rasterT ? 2u : 3u);
+    }
+    if (mode == RT_DEBUG_INSTANCES) {
+        vec3 c = hue(float(hashU(rec.instanceId) & 0xFFFFu) / 65536.0) * 0.85 + 0.15;
+        if ((rec.flags & RVK_RT_ALPHA_TESTED) != 0u && ((p.x + p.y) & 4u) != 0u) c *= 0.35;  // alpha-tested: stripes
+        if ((rec.flags & RVK_RT_VIEW_MAIN) == 0u && ((p.x ^ p.y) & 4u) != 0u) c = vec3(1.0, 1.0, 1.0);  // only the cascades saw it: checker
+        result = vec4(c, 0.6);
+    } else if (mode == RT_DEBUG_DEPTH) {
+        if (!raster) {
+            result = vec4(1.0, 0.0, 1.0, 0.75);  // the ray hit, the raster shows sky
+        } else {
+            float diff = t - rasterT;
+            float tol = max(4.0, rasterT * 0.004);
+            if (abs(diff) <= tol) {
+                result = vec4(0.1, 0.9, 0.2, 0.5);
+            } else if (diff < 0.0 && (rec.flags & (RVK_RT_NO_DEPTH_WRITE | RVK_RT_DEPTH_BIAS)) != 0u) {
+                result = vec4(0.0, 0.9, 0.9, 0.75);  // closer, but the raster drew it without depth writes / with a depth bias: cyan
+            } else {
+                float k = clamp((abs(diff) - tol) / max(4.0 * tol, 50.0), 0.0, 1.0);
+                result = diff > 0.0 ? vec4(mix(vec3(1.0, 0.8, 0.1), vec3(1.0, 0.05, 0.05), k), 0.75)    // farther: missing in the TLAS
+                                    : vec4(mix(vec3(0.8, 0.4, 1.0), vec3(1.0, 0.0, 1.0), k), 0.75);     // closer: extra / wrong
+            }
+        }
+    } else {
+        RvkRtSurface s = rvkRtSurface(rec, uint(rayQueryGetIntersectionPrimitiveIndexEXT(rq, true)),
+                                      rayQueryGetIntersectionBarycentricsEXT(rq, true));
+        vec3 world = rvkRtWorldPosition(rayQueryGetIntersectionObjectToWorldEXT(rq, true), s.position);
+        float err = distance(world, origin + dir * t);
+        vec3 n = dot(s.normal, s.normal) > 1e-12 ? s.normal : s.geometricNormal;
+        n = rvkRtWorldNormal(rayQueryGetIntersectionWorldToObjectEXT(rq, true), n);
+        result = err > max(2.0, t * 0.002) ? vec4(1.0, 0.0, 1.0, 0.9) : vec4(n * 0.5 + 0.5, 0.85);
+    }
+    imageStore(outColor, ivec2(p), result);
+}

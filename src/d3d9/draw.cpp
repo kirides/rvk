@@ -500,13 +500,29 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         q.primitives = geom.primitives;
         q.baseVertex = geom.baseVertex;
         q.instanced = (streams_[0].freq & STREAMSOURCE_INDEXEDDATA) != 0;
+        q.instances = q.instanced ? std::max(1u, streams_[0].freq & 0x3FFFFFFFu) : 1u;
         q.textures = tex_.data();
         q.engineVs = vs_.get();
         q.enginePs = ps_.get();
         q.engineVsRef = vs_;
         q.decl = decl_;
         q.blended = rs_[RS_ALPHABLENDENABLE] != 0 && rs_[RS_SRCBLEND] == BLEND_SRCALPHA && rs_[RS_DESTBLEND] == BLEND_INVSRCALPHA;
+        q.blending = rs_[RS_ALPHABLENDENABLE] != 0;
+        q.alphaFunc = rs_[RS_ALPHATESTENABLE] != 0 ? rs_[RS_ALPHAFUNC] : static_cast<std::uint32_t>(CMP_ALWAYS);
+        q.alphaTest = q.alphaFunc != static_cast<std::uint32_t>(CMP_ALWAYS);
+        q.alphaRef = rs_[RS_ALPHAREF] & 0xFF;
+        q.depthWrite = rs_[RS_ZENABLE] != ZB_FALSE && rs_[RS_ZWRITEENABLE] != 0;
+        q.depthBias = rs_[RS_DEPTHBIAS] != 0 || rs_[RS_SLOPESCALEDEPTHBIAS] != 0;
     };
+    // draw observers (enh/rt_scene): indexed draws from buffers of the kinds / phases they ask for
+    if (!observers_.empty() && geom.indexed && !geom.userPointer) {
+        for (DrawObserver* o : observers_) {
+            if (!o->observes(kind, phase)) continue;
+            ReplaceQuery q;
+            query(q);
+            o->observe(*this, q);
+        }
+    }
     if (!replacers_.empty() && kind == draws::Kind::StaticMesh && phase.view == scene::View::Main && phase.pass == scene::Pass::Solid &&
         geom.indexed && !geom.userPointer) {
         for (DrawReplacer* r : replacers_) {

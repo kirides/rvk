@@ -279,7 +279,9 @@ TEST(settings_renderer_registration) {
     // debug: the tint view is off by default and not part of A/B; draw records are on and hidden (cost measurements only)
     CHECK(r.tintDraws != nullptr && r.tintDraws->asEnum() == "off" && !r.tintDraws->abEligible());
     CHECK(r.drawRecords != nullptr && r.drawRecords->asBool() && (r.drawRecords->spec().flags & Flag::Hidden) != 0);
-    for (const Setting* s : reg.all()) CHECK(s == r.drawRecords || (s->spec().flags & Flag::Hidden) == 0);
+    // ... and so is the RT scene's source switch (diagnostics)
+    CHECK(r.rtSceneViews != nullptr && r.rtSceneViews->asEnum() == "all" && (r.rtSceneViews->spec().flags & Flag::Hidden) != 0);
+    for (const Setting* s : reg.all()) CHECK(s == r.drawRecords || s == r.rtSceneViews || (s->spec().flags & Flag::Hidden) == 0);
 }
 
 TEST(config_overlay_options) {

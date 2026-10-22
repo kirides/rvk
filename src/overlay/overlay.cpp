@@ -760,6 +760,8 @@ void Overlay::buildSettingsWindow() {
         const auto& st = device_->stats();
         ImGui::Text("%u draws, vsync %s, frame rate limit %s", st.lastFrameDraws, device_->vsync() ? "on" : "off",
                     device_->maxFps() > 0.0 ? std::format("{:.0f} fps", device_->maxFps()).c_str() : "none");
+        // enhancements' one-line status (e.g. the RT scene: instances, BLAS, memory)
+        for (const auto& [key, text] : device_->status()) ImGui::TextUnformatted(text.c_str());
     }
 
     // ---- the last frame's phases and camera (d3d9/scene.h, docs/research/frame-phases.md) ----

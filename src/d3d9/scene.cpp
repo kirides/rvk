@@ -388,6 +388,15 @@ void fillFrameBlock(shader::abi::FrameBlock& out, const CameraBlock& cur, const 
     if (x.params != nullptr) {
         for (std::size_t i = 0; i < abi::kFrameParams; ++i) std::memcpy(out.params[i], (*x.params)[i].data(), sizeof(out.params[i]));
     }
+    if (x.rtTlas != 0) {
+        out.rtScene[0] = static_cast<std::uint32_t>(x.rtTlas);
+        out.rtScene[1] = static_cast<std::uint32_t>(x.rtTlas >> 32);
+        out.rtScene[2] = static_cast<std::uint32_t>(x.rtRecords);
+        out.rtScene[3] = static_cast<std::uint32_t>(x.rtRecords >> 32);
+        out.rtInfo[0] = x.rtInstances;
+        out.rtInfo[1] = x.rtRecordCount;
+        out.rtInfo[2] = abi::kFrameRtValid;
+    }
 }
 
 }  // namespace rvk::d3d9::scene

@@ -177,6 +177,8 @@ struct FrameExtras {
     float height = 0.0f;
     std::array<std::uint32_t, 4> images{};  // bindless slots: scene HDR, refraction copy, depth map (t2D), sky cube (tCube)
     const std::array<std::array<float, 4>, 16>* params = nullptr;  // feature parameters (null = zeros)
+    std::uint64_t rtTlas = 0, rtRecords = 0;  // the ray tracing scene of this submission (0 = none)
+    std::uint32_t rtInstances = 0, rtRecordCount = 0;
 };
 
 // The frame block from the current frame's camera `cur` (valid from its main view on) and the last presented frame's `last`.

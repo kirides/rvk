@@ -705,6 +705,33 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .requirements = caps::bit(caps::Cap::RayTracingHardware),
         .unmetValue = 0,
     });
+    r.rtDebug = &reg.add({
+        .key = "rt.debug",
+        .label = "Ray tracing scene view",
+        .category = "Debug",
+        .description = "Developer view of the ray tracing scene (the world geometry ray-traced effects see): \"Instances\" colours "
+                       "each traced object, \"Depth check\" compares the traced distance with the rendered one (green = match, "
+                       "red = missing in the RT scene, magenta = extra / misplaced, blue = missed), \"Normals\" shows the traced "
+                       "surface normals. Needs ray tracing. Off renders exactly as without it.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "instances", "depth", "normals"},
+        .optionLabels = {"Off", "Instances", "Depth check", "Normals"},
+        .flags = Flag::NoAB,
+        .requirements = caps::bit(caps::Cap::RayQuery),
+    });
+    r.rtSceneViews = &reg.add({
+        .key = "rt.scene_views",
+        .label = "RT scene sources",
+        .category = "Debug",
+        .description = "Developer switch: which views feed the ray tracing scene: the main view and the sun's shadow cascades "
+                       "(all), only the main view, or only the cascades.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"all", "main", "shadow"},
+        .optionLabels = {"Main view + sun cascades", "Main view", "Sun cascades"},
+        .flags = Flag::NoAB | Flag::Hidden,
+    });
     r.waterEnabled = &reg.add({
         .key = "water.enabled",
         .label = "Enhanced water",

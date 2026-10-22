@@ -436,7 +436,8 @@ Buffer::Binding Buffer::gpu() {
         VkCommandBuffer cmd = dev_.uploadCommands();
         const VkBufferCopy copy{staging.offset, 0, size_};
         vkCmdCopyBuffer(cmd, staging.buffer, nb, 1, &copy);
-        if (static_ != VK_NULL_HANDLE) {
+        const bool renamed = static_ != VK_NULL_HANDLE;
+        if (renamed) {
             auto* ctx = &dev_.ctx();
             VkBuffer ob = static_;
             VmaAllocation oa = staticAlloc_;
@@ -444,10 +445,24 @@ Buffer::Binding Buffer::gpu() {
         }
         static_ = nb;
         staticAlloc_ = na;
+        staticAddress_ = 0;
         binding_ = {nb, 0};
         copies_.committed(plan, false, frame);
+        // observers (enh/rt_scene) forget what they built from the old copy (its address dies with it)
+        if (renamed) dev_.notifyBufferChanged(id_);
     }
     return binding_;
+}
+
+VkDeviceAddress Buffer::deviceAddress() {
+    const std::lock_guard lock(mutex_);
+    if (static_ == VK_NULL_HANDLE || dynamic() || pool_ == POOL_SYSTEMMEM || !dev_.ctx().features().rayTracing.enabled) return 0;
+    if (staticAddress_ == 0) {
+        VkBufferDeviceAddressInfo ai{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+        ai.buffer = static_;
+        staticAddress_ = vkGetBufferDeviceAddress(dev_.ctx().device(), &ai);
+    }
+    return staticAddress_;
 }
 
 // ---- VertexDecl ------------------------------------------------------------------------------------------------------

@@ -111,6 +111,12 @@ VkDeviceAddress Device::frameBlockAddress() {
     x.images = {slot(scene::ImageRole::SceneHdr), slot(scene::ImageRole::Refraction), slot(scene::ImageRole::DepthMap),
                 slot(scene::ImageRole::SkyEnvCube)};
     x.params = &frameParams_;
+    if (rtSceneValid()) {
+        x.rtTlas = rtScene_.tlas;
+        x.rtRecords = rtScene_.records;
+        x.rtInstances = rtScene_.instances;
+        x.rtRecordCount = rtScene_.recordCount;
+    }
     const vk::RingAlloc a = frames_.allocate(sizeof(shader::abi::FrameBlock), 16);
     scene::fillFrameBlock(*static_cast<shader::abi::FrameBlock*>(a.ptr), camera_, lastCamera_, x);
     frameAddr_ = a.address;
@@ -168,6 +174,7 @@ void Device::inject(inject::Point point) {
     injecting_ = true;
     const auto& list = passes_.passes(point);
     for (std::size_t i = 0; i < list.size(); ++i) {
+        ctx.frameBlock = frameBlockAddress();  // an earlier pass may have changed it (e.g. the RT scene's TLAS)
         list[i].fn(ctx);
         if (gpuTimer_.enabled()) {
             const std::uint32_t slot = frames_.currentSlot();
@@ -966,6 +973,7 @@ void Device::processReleases() {
         }
     }
     for (auto& b : buffers) {
+        if (!observers_.empty()) notifyBufferChanged(b->id());
         for (auto& st : streams_) {
             if (st.buffer == b.get()) {
                 st.buffer = nullptr;
@@ -1563,6 +1571,14 @@ void Device::addDrawReplacer(DrawReplacer* replacer) {
 }
 
 void Device::removeDrawReplacer(DrawReplacer* replacer) { std::erase(replacers_, replacer); }
+
+void Device::addDrawObserver(DrawObserver* observer) {
+    if (observer != nullptr && std::find(observers_.begin(), observers_.end(), observer) == observers_.end()) {
+        observers_.push_back(observer);
+    }
+}
+
+void Device::removeDrawObserver(DrawObserver* observer) { std::erase(observers_, observer); }
 
 void Device::registerReplacement(std::shared_ptr<Shader> vs, std::shared_ptr<Shader> ps, bool procedural) {
     if (!vs || !ps) return;
