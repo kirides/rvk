@@ -299,7 +299,9 @@ unless marked [I].
     `0x99b760`.
   * Saving: `gCSaveGame::CopyThumbnail` `0x99af10` → `eCGfxImageData::OnWrite`, which reads every level with
     `LockImageLayer(level, 0x10 READONLY)`.
-  * Loading: `OnRead` → `CreateLayers` + `LockImageLayer`. All implemented.
+  * Loading: `OnRead` → `CreateLayers` + `LockImageLayer`. All implemented, but `OnRead` writes the texels under a
+    `D3DLOCK_READONLY` lock, which uploaded nothing: the thumbnails were empty / garbage in Vulkan mode until a READONLY lock
+    of a fresh level marked it dirty (fixed 2026-10-22, docs/research/savegame-thumbnails.md).
   * Risk to verify in game: `CopyCurrentRTToImage` reads `renderTarget(0)` outside the scene. Check that it is the
     persistent back-buffer image and not a swapchain image already presented (a black thumbnail would show up there).
 * **Intro / videos**: `PlayVideo` → `.bik` → `eCVideoPlayer` + `CreateLayers` (CreateTexture, LockRect). Implemented.

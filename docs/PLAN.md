@@ -110,6 +110,10 @@ declaration from the FVF, device `GetFVFSize` answers. Cube `Lock/UnlockCubeMapL
 `SaveTextureToFile` (refused and logged; `[debug] dump_saved_textures` / `run.ps1 -DumpSavedTextures` writes a PNG to
 `bin/rvk/dumps`). `testdemo` in Vulkan mode: 0 unimplemented slots, validation clean. `rvk_d3d9test` cases "fvf vertex buffer",
 "cube map face lock", "load surface from surface".
+Savegame thumbnails (user report "thumbnails scrambled in Vulkan", docs/research/savegame-thumbnails.md, confirmed and
+fixed 2026-10-22): `eCGfxImageData::OnRead` fills them under a `D3DLOCK_READONLY` lock; D3D9 keeps a fresh managed level dirty
+until its first upload, ours uploaded nothing (undefined image). A READONLY lock of a level without GPU data now marks it
+dirty as a whole. Scenario `mods/rvk_savethumbs`; `rvk_d3d9test` "read-only lock of a fresh texture".
 Progress (2026-10-21): Vulkan core in `src/vk/` (context with the 1.3 floor + optional EDS3 / vertex-input-dynamic / robustness2,
 swapchain, frames on a timeline semaphore with deferred deletion and a BDA upload ring, bindless set + pipeline layout, images
 with sync2 layout tracking, pipeline cache for dynamic rendering). `rvk_vktest` renders a translated D3D9 shader pair off-screen
