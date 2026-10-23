@@ -38,6 +38,7 @@
 #include "common/d3dx.h"
 #include "core/caps.h"
 #include "d3d9/scene.h"
+#include "enh/upscale.h"
 #include "shader/abi.h"
 #include "shader/embedded.h"
 #include "shader/glsl.h"
@@ -667,6 +668,10 @@ int fsrTest(const std::string& dllArg, bool validation) {
                 d.cameraFar = 1000.0f;
                 d.cameraFovY = 1.0f;
                 fsr.jitterOffset(frame % std::max(phases, 1), phases, d.jitterX, d.jitterY);
+                // our own sequence (enh/upscale: what the game jitters with) must be the DLL's
+                const auto mine = enh::upscaleJitter(static_cast<std::uint64_t>(frame), phases);
+                check(std::fabs(mine[0] - d.jitterX) < 1e-5f && std::fabs(mine[1] - d.jitterY) < 1e-5f, "jitter sequence = the DLL's");
+                check(phases == enh::upscaleJitterPhases(kW, kW), "jitter phase count = the DLL's");
                 check(fsr.dispatch(d), "ffxDispatch");
                 if (frame == kFrames - 1) {
                     output.transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);

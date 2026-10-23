@@ -18,6 +18,7 @@
 #include "d3d9/ffshader.h"
 #include "enh/debug_view.h"
 #include "enh/gbuffer.h"
+#include "enh/upscale.h"
 #include "enh/gi.h"
 #include "enh/rt_debug.h"
 #include "enh/rt_scene.h"
@@ -511,10 +512,12 @@ private:
     std::unique_ptr<enh::RtScene> rtScene_;      // the ray tracing scene (a draw observer + a pass; active while a consumer holds it)
     std::unique_ptr<enh::RtDebug> rtDebug_;      // rt.debug (a consumer of rtScene_)
     std::unique_ptr<enh::Gi> gi_;                // gi.* (a draw observer + passes, a consumer of rtScene_)
+    std::unique_ptr<enh::Upscale> upscale_;     // upscale.mode (camera jitter, FSR)
     std::unique_ptr<enh::Gbuffer> gbuffer_;      // ao.* / gbuffer.debug (the G-buffer attachments + passes)
     void applyWater();
     void applyGi();
     void applyGbuffer();
+    void applyUpscale();
     void applyShadows();
     void applyLod();
     std::chrono::steady_clock::time_point settingsDirtySince_{};

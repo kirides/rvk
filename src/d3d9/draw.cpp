@@ -909,6 +909,12 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     // half a pixel right/down in NDC units of the viewport (shader/abi.h)
     block.posFix[0] = 1.0f / static_cast<float>(std::max(1u, viewport_.width));
     block.posFix[1] = -1.0f / static_cast<float>(std::max(1u, viewport_.height));
+    {
+        float jx, jy;
+        geometryJitter(jx, jy);  // camera jitter of the main view's geometry (TAA / upscaling)
+        block.posFix[0] += jx;
+        block.posFix[1] += jy;
+    }
     block.alphaFunc = rs_[RS_ALPHATESTENABLE] != 0 ? rs_[RS_ALPHAFUNC] : static_cast<std::uint32_t>(CMP_ALWAYS);
     block.alphaRef = static_cast<float>(rs_[RS_ALPHAREF] & 0xFF);
     block.pad[0] = tint;

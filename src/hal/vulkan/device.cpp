@@ -120,6 +120,7 @@ HalDevice::~HalDevice() {
     debugView_.reset();  // removes its pass, retires its pipelines
     // the RT scene's consumers (rt.debug, the water's traced reflections) release it in their destructors: before it
     rtDebug_.reset();    // releases the RT scene
+    upscale_.reset();    // clears the device's jitter source
     gbuffer_.reset();    // removes its passes, the G-buffer attachments
     gi_.reset();         // unregisters its observer / pass, releases the RT scene
     water_.reset();      // unregisters its draw replacer, releases the RT scene
@@ -297,6 +298,12 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         }
         applyGbuffer();
     }
+    // camera jitter / FSR (enh/upscale.h, docs/research/upscaling.md)
+    upscale_ = std::make_unique<enh::Upscale>(dev_);
+    if (rs.upscaleMode != nullptr) {
+        reg.onChange(*rs.upscaleMode, [this](const settings::Setting&) { applyUpscale(); }, this);
+        applyUpscale();
+    }
     // detail distances (engine/lod.h, docs/research/lod.md)
     for (settings::Setting* s : {rs.lodTrees, rs.lodMeshes, rs.lodView}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyLod(); }, this);
@@ -383,6 +390,14 @@ void HalDevice::applyGbuffer() {
     // the screen probes (enh/gi) read the G-buffer
     s.forced = rs.giEnabled != nullptr && rs.giEnabled->asBool() && rs.giScreen != nullptr && rs.giScreen->asEnum() != "off";
     gbuffer_->apply(s);
+}
+
+void HalDevice::applyUpscale() {
+    const auto& rs = settings::renderer();
+    if (!upscale_ || rs.upscaleMode == nullptr) return;
+    const std::string_view m = rs.upscaleMode->asEnum();
+    upscale_->apply(m == "native_aa" ? enh::UpscaleMode::NativeAa : m == "jitter_only" ? enh::UpscaleMode::JitterOnly
+                                                                                          : enh::UpscaleMode::Off);
 }
 
 void HalDevice::applyShadows() {

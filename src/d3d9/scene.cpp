@@ -381,6 +381,7 @@ void fillFrameBlock(shader::abi::FrameBlock& out, const CameraBlock& cur, const 
     out.viewport[3] = x.height > 0.0f ? 1.0f / x.height : 0.0f;
     out.time[0] = static_cast<float>(cur.valid ? cur.time : x.now);
     out.time[1] = cur.valid && last.valid ? static_cast<float>(cur.time - last.time) : 0.0f;
+    for (std::size_t i = 0; i < 4; ++i) out.jitter[i] = x.jitter[i];
     out.frameInfo[0] = static_cast<std::uint32_t>(x.frameIndex);
     out.frameInfo[1] = flags;
     out.frameInfo[2] = x.mainViews;

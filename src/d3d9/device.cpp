@@ -128,6 +128,7 @@ VkDeviceAddress Device::frameBlockAddress() {
     }
     x.ao = ao_;
     x.sgi = sgi_;
+    x.jitter = jitter_;
     const vk::RingAlloc a = frames_.allocate(sizeof(shader::abi::FrameBlock), 16);
     scene::fillFrameBlock(*static_cast<shader::abi::FrameBlock*>(a.ptr), camera_, lastCamera_, x);
     frameAddr_ = a.address;
@@ -164,7 +165,43 @@ void Device::removePasses(const void* owner) {
     if (!injecting_) passes_.removeOwner(owner);
 }
 
-void Device::beginMainView() { firings_.beginMainView(); }
+void Device::beginMainView() {
+    firings_.beginMainView();
+    if (firings_.mainViews() != 1) return;  // a frame's later main views keep its jitter
+    std::array<float, 4> j{};
+    if (jitterSource_) {
+        const std::array<float, 2> now = jitterSource_(stats_.frames + 1);
+        j = {now[0], now[1], jitter_[0], jitter_[1]};
+    }
+    if (j != jitter_) {
+        jitter_ = j;
+        frameAddr_ = 0;
+    }
+}
+
+void Device::setJitterSource(JitterSource source) {
+    jitterSource_ = std::move(source);
+    if (!jitterSource_ && jitter_ != std::array<float, 4>{}) {
+        jitter_ = {};
+        frameAddr_ = 0;
+    }
+}
+
+void Device::geometryJitter(float& ndcX, float& ndcY) const {
+    ndcX = ndcY = 0.0f;
+    if (jitter_[0] == 0.0f && jitter_[1] == 0.0f) return;
+    const scene::Phase ph = phases_.current();
+    if (ph.view != scene::View::Main) return;
+    if (ph.pass != scene::Pass::DepthPrepass && ph.pass != scene::Pass::Solid && ph.pass != scene::Pass::Refracted &&
+        ph.pass != scene::Pass::Alpha && ph.pass != scene::Pass::AlphaLate) {
+        return;
+    }
+    const Texture* hdr = imageWithRole(scene::ImageRole::SceneHdr);
+    if (hdr == nullptr || targetWidth_ != hdr->desc().width || targetHeight_ != hdr->desc().height) return;
+    // the projection translation FSR documents (Cauldron: +2 jx / w, -2 jy / h in y-up NDC; posFix is in that space)
+    ndcX = 2.0f * jitter_[0] / static_cast<float>(targetWidth_);
+    ndcY = -2.0f * jitter_[1] / static_cast<float>(targetHeight_);
+}
 
 void Device::inject(inject::Point point) {
     if (!passes_.any(point) || injecting_ || !created_) return;  // the common case: nothing registered

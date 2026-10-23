@@ -508,6 +508,12 @@ VkDeviceAddress Water::fillBlock(d3d9::Device& device, const d3d9::ReplaceQuery&
     const d3d9::Viewport& vp = device.viewport();
     w.posFix[0] = 1.0f / static_cast<float>(std::max(1u, vp.width));
     w.posFix[1] = -1.0f / static_cast<float>(std::max(1u, vp.height));
+    {
+        float jx, jy;
+        device.geometryJitter(jx, jy);
+        w.posFix[0] += jx;
+        w.posFix[1] += jy;
+    }
     copy4(w.camFar, device.psConstant(0));
     copy4(w.fogColor, device.psConstant(3));
     copy4(w.fogParams, device.psConstant(4));

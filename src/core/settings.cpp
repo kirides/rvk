@@ -1326,6 +1326,20 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB | Flag::Debug,
     });
 
+    // ---- Graphics tab: upscaling / anti-aliasing (enh/upscale.h) ----
+    r.upscaleMode = &reg.add({
+        .key = "upscale.mode",
+        .label = "Anti-aliasing / upscaling",
+        .category = "Image",
+        .description = "AMD FidelityFX Super Resolution 3.1 at the screen's resolution: removes jagged edges and shimmer with a "
+                       "temporal filter (a little softer than none). \"Jitter only\" shakes the camera without the filter "
+                       "(developer test).",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "native_aa", "jitter_only"},
+        .optionLabels = {"Off", "FSR native AA", "Jitter only (test)"},
+    });
+
     // ---- Graphics tab: detail distances (engine/lod.h) ----
     r.lodTrees = &reg.add({
         .key = "lod.trees",

@@ -316,6 +316,8 @@ struct RendererSettings {
     Setting* aoStrength = nullptr;        // ao.strength: 0..1
     Setting* aoRadius = nullptr;          // ao.radius: metres
     Setting* gbufferDebug = nullptr;      // gbuffer.debug: "off", "normals", "motion", "ao"
+    // upscaling / anti-aliasing (enh/upscale.h, docs/research/upscaling.md)
+    Setting* upscaleMode = nullptr;       // upscale.mode: "off", "jitter_only" (debug), "native_aa" (FSR 3.1 at the output size)
     // detail distances (engine/lod.h, docs/research/lod.md): multipliers, 1 = the game's
     Setting* lodTrees = nullptr;          // lod.trees: SpeedTree LOD + billboard fade distances
     Setting* lodMeshes = nullptr;         // lod.meshes: mesh LOD ranges (eCMesh_PS)

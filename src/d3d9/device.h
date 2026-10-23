@@ -691,6 +691,15 @@ public:
     // the scene hooks: a main view begins (the once-per-view guard of its points); an injection point is reached
     void beginMainView();
     void inject(inject::Point point);
+    // Camera jitter (TAA / upscaling, enh/upscale): `source` is asked once per frame at its first main view for that frame's
+    // sub-pixel jitter in pixels of the scene target (null = no jitter). The offset reaches the main view's geometry draws
+    // through DrawBlock::posFix (geometryJitter) and shaders through FrameBlock::jitter; the motion vectors stay jitter-free
+    // (they come from the unjittered camera matrices).
+    using JitterSource = std::function<std::array<float, 2>(std::uint64_t frameIndex)>;
+    void setJitterSource(JitterSource source);
+    // NDC offset to add to posFix for the draw being recorded now: non-zero only for geometry of the main view's scene passes
+    // (depth prepass, solid, refracted, alpha) into a target of the scene's size
+    void geometryJitter(float& ndcX, float& ndcY) const;
     vk::Transients& transients() { return transients_; }
     // draw replacement (enh/water, enh/shadows): a replacer must outlive its registration; adding twice is a no-op
     void addDrawReplacer(DrawReplacer* replacer);
@@ -1188,6 +1197,8 @@ private:
     bool variantStop_ = false;
     std::atomic<std::uint64_t> variantsBuilt_{0}, variantsFailed_{0};
     VkDeviceAddress frameAddr_ = 0;  // 0 = upload before the next use
+    JitterSource jitterSource_;
+    std::array<float, 4> jitter_{};  // this frame's jitter (pixels, xy), the previous frame's (zw)
     std::array<std::array<float, 4>, shader::abi::kFrameParams> frameParams_{};
     inject::Registry passes_;
     inject::Firings firings_;
