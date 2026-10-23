@@ -1907,6 +1907,14 @@ std::uint32_t Device::samplerIndex(std::uint32_t slot) {
     return index;
 }
 
+// the slot's sampler with `bias` added to its LOD bias (not cached per slot: the bias depends on the draw)
+std::uint32_t Device::samplerIndexBiased(std::uint32_t slot, float bias) {
+    std::uint32_t states[SAMP_COUNT];
+    std::memcpy(states, samp_[slot].data(), sizeof(states));
+    states[SAMP_MIPMAPLODBIAS] = std::bit_cast<std::uint32_t>(asFloat(states[SAMP_MIPMAPLODBIAS]) + bias);
+    return lookupSamplerStates(states);
+}
+
 std::uint32_t Device::lookupSampler(std::uint32_t slot) { return lookupSamplerStates(samp_[slot].data()); }
 
 std::uint32_t Device::samplerFor(bool linear, bool clamp) {

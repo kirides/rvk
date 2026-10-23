@@ -67,6 +67,7 @@ set(RVK_SHADERS
     gbuffer/ao_white.frag
     gbuffer/gbuffer_debug.frag
     gbuffer/gtao.comp
+    upscale/prep.comp
     gbuffer/gtao_filter.comp
     test/abi_layout.comp
     test/abi_pass_layout.comp

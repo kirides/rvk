@@ -22,6 +22,8 @@ try {
     New-Item -ItemType Directory -Force "$stage\rvk" | Out-Null
     Copy-Item $dll $stage
     Copy-Item package\rvk\config.toml "$stage\rvk"
+    # FSR 3.1 (upscale.mode): AMD's signed FidelityFX DLL
+    Copy-Item third_party\amd_fidelityfx\presigned_dll\amd_fidelityfx_vk.dll "$stage\rvk"
 
     # README.txt + the build it belongs to (bug reports), CRLF for Notepad
     $sha = git rev-parse --short HEAD

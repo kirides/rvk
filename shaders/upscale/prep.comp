@@ -1,0 +1,25 @@
+#version 460
+// FSR input preparation (src/enh/upscale.cpp, docs/research/upscaling.md): the main view's hardware depth (D24S8 / D32S8, not
+// accepted by the FidelityFX DLL as a 32-bit depth input) copied into an R32F image. Device depth as the engine's projection
+// writes it (z / w, 0 near .. 1 far; the sky stays 1).
+
+#define RVK_PASS_SHADER 1
+#include "rvk_abi.glsl"
+#include "rvk_common.glsl"
+
+layout(push_constant, std430) uniform UpscalePush {
+    RVK_PASS_PUSH_HEADER
+    uint depthTex;  // the main view's hardware depth (bindless t2D)
+    uint width;
+    uint height;
+    uint pad;
+} pc;
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 1, binding = 0, r32f) uniform writeonly image2D outDepth;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= int(pc.width) || p.y >= int(pc.height)) return;
+    imageStore(outDepth, p, vec4(rvkFetch2D(pc.depthTex, p).r, 0.0, 0.0, 0.0));
+}

@@ -317,6 +317,8 @@ struct RendererSettings {
     Setting* aoRadius = nullptr;          // ao.radius: metres
     Setting* gbufferDebug = nullptr;      // gbuffer.debug: "off", "normals", "motion", "ao"
     // upscaling / anti-aliasing (enh/upscale.h, docs/research/upscaling.md)
+    Setting* upscaleSharpness = nullptr;  // upscale.sharpness: 0..1, FSR's RCAS sharpening pass
+    Setting* upscaleJitterFlip = nullptr; // upscale.jitter_flip: debug, "none", "x", "y", "xy" (the geometry jitter's sign)
     Setting* upscaleMode = nullptr;       // upscale.mode: "off", "jitter_only" (debug), "native_aa" (FSR 3.1 at the output size)
     // detail distances (engine/lod.h, docs/research/lod.md): multipliers, 1 = the game's
     Setting* lodTrees = nullptr;          // lod.trees: SpeedTree LOD + billboard fade distances

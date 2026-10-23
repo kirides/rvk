@@ -301,7 +301,9 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     // camera jitter / FSR (enh/upscale.h, docs/research/upscaling.md)
     upscale_ = std::make_unique<enh::Upscale>(dev_);
     if (rs.upscaleMode != nullptr) {
-        reg.onChange(*rs.upscaleMode, [this](const settings::Setting&) { applyUpscale(); }, this);
+        for (settings::Setting* s : {rs.upscaleMode, rs.upscaleSharpness, rs.upscaleJitterFlip}) {
+            if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyUpscale(); }, this);
+        }
         applyUpscale();
     }
     // detail distances (engine/lod.h, docs/research/lod.md)
@@ -389,6 +391,8 @@ void HalDevice::applyGbuffer() {
     s.debug = d == "normals" ? 1 : d == "motion" ? 2 : d == "ao" ? 3 : d == "screen_gi" ? 4 : 0;
     // the screen probes (enh/gi) read the G-buffer
     s.forced = rs.giEnabled != nullptr && rs.giEnabled->asBool() && rs.giScreen != nullptr && rs.giScreen->asEnum() != "off";
+    // native AA (enh/upscale) reads the motion vectors
+    s.forced = s.forced || (upscale_ && upscale_->mode() == enh::UpscaleMode::NativeAa);
     gbuffer_->apply(s);
 }
 
@@ -396,8 +400,15 @@ void HalDevice::applyUpscale() {
     const auto& rs = settings::renderer();
     if (!upscale_ || rs.upscaleMode == nullptr) return;
     const std::string_view m = rs.upscaleMode->asEnum();
+    if (rs.upscaleSharpness != nullptr) upscale_->setSharpness(rs.upscaleSharpness->asFloat());
+    unsigned flip = 0;
+    if (rs.upscaleJitterFlip != nullptr) {
+        const std::string_view f = rs.upscaleJitterFlip->asEnum();
+        flip = f == "x" ? 1u : f == "y" ? 2u : f == "xy" ? 3u : 0u;
+    }
     upscale_->apply(m == "native_aa" ? enh::UpscaleMode::NativeAa : m == "jitter_only" ? enh::UpscaleMode::JitterOnly
-                                                                                          : enh::UpscaleMode::Off);
+                                                                                          : enh::UpscaleMode::Off, flip);
+    applyGbuffer();  // native AA needs the motion vectors
 }
 
 void HalDevice::applyShadows() {

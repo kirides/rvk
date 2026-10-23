@@ -700,6 +700,11 @@ public:
     // NDC offset to add to posFix for the draw being recorded now: non-zero only for geometry of the main view's scene passes
     // (depth prepass, solid, refracted, alpha) into a target of the scene's size
     void geometryJitter(float& ndcX, float& ndcY) const;
+    // texture LOD bias added to the samplers of the draws the jitter applies to (FSR: log2(render / display) - 1, so the
+    // temporal filter has the detail to accumulate); 0 = none
+    void setGeometryLodBias(float bias) { geometryLodBias_ = bias; }
+    // this frame's jitter in pixels of the scene target (0, 0 = none)
+    std::array<float, 2> jitter() const { return {jitter_[0], jitter_[1]}; }
     vk::Transients& transients() { return transients_; }
     // draw replacement (enh/water, enh/shadows): a replacer must outlive its registration; adding twice is a no-op
     void addDrawReplacer(DrawReplacer* replacer);
@@ -943,6 +948,7 @@ private:
     // is recorded into the frame's command buffer (endRendering, clear, a draw that is not batched)
     void flushBatch();
     std::uint32_t samplerIndex(std::uint32_t slot);
+    std::uint32_t samplerIndexBiased(std::uint32_t slot, float bias);
     std::uint32_t lookupSampler(std::uint32_t slot);
     void uploadConstants();
     void blit(vk::Image& src, std::uint32_t srcLevel, std::uint32_t srcLayer, const VkOffset3D srcBox[2], vk::Image& dst,
@@ -1198,6 +1204,7 @@ private:
     std::atomic<std::uint64_t> variantsBuilt_{0}, variantsFailed_{0};
     VkDeviceAddress frameAddr_ = 0;  // 0 = upload before the next use
     JitterSource jitterSource_;
+    float geometryLodBias_ = 0.0f;
     std::array<float, 4> jitter_{};  // this frame's jitter (pixels, xy), the previous frame's (zw)
     std::array<std::array<float, 4>, shader::abi::kFrameParams> frameParams_{};
     inject::Registry passes_;

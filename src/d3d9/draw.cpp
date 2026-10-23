@@ -892,6 +892,9 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     uploadConstants();
 
     shader::abi::DrawBlock block{};
+    float jitterX = 0.0f, jitterY = 0.0f;
+    geometryJitter(jitterX, jitterY);  // camera jitter of the main view's geometry (TAA / upscaling)
+    const float lodBias = (jitterX != 0.0f || jitterY != 0.0f) ? geometryLodBias_ : 0.0f;
     for (std::uint32_t slot = 0; slot < kSamplerCount; ++slot) {
         const shader::Reflection& r = slot < 16 ? ps_->reflection : vs_->reflection;
         if (r.samplers[slot] == shader::TextureType::Unknown) {
@@ -904,17 +907,13 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         const bool usable = t != nullptr && !t->isNull() && kindMatches &&
                             t->image().layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         block.tex[slot] = usable ? t->bindlessSlot() : 0;
-        block.smp[slot] = samplerIndex(slot);
+        block.smp[slot] = lodBias != 0.0f && slot < 16 ? samplerIndexBiased(slot, lodBias) : samplerIndex(slot);
     }
     // half a pixel right/down in NDC units of the viewport (shader/abi.h)
     block.posFix[0] = 1.0f / static_cast<float>(std::max(1u, viewport_.width));
     block.posFix[1] = -1.0f / static_cast<float>(std::max(1u, viewport_.height));
-    {
-        float jx, jy;
-        geometryJitter(jx, jy);  // camera jitter of the main view's geometry (TAA / upscaling)
-        block.posFix[0] += jx;
-        block.posFix[1] += jy;
-    }
+    block.posFix[0] += jitterX;
+    block.posFix[1] += jitterY;
     block.alphaFunc = rs_[RS_ALPHATESTENABLE] != 0 ? rs_[RS_ALPHAFUNC] : static_cast<std::uint32_t>(CMP_ALWAYS);
     block.alphaRef = static_cast<float>(rs_[RS_ALPHAREF] & 0xFF);
     block.pad[0] = tint;

@@ -1340,6 +1340,31 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Off", "FSR native AA", "Jitter only (test)"},
     });
 
+    r.upscaleSharpness = &reg.add({
+        .key = "upscale.sharpness",
+        .label = "Sharpening",
+        .category = "Image",
+        .description = "How much FSR's sharpening pass (RCAS) crisps the picture after the temporal filter. 0 = off, 0.4 = about "
+                       "the detail of the game's own picture, 1 = crunchy.",
+        .type = Type::Float,
+        .defaultValue = 0.4,
+        .min = 0,
+        .max = 1,
+        .format = "%.2f",
+    });
+    r.upscaleJitterFlip = &reg.add({
+        .key = "upscale.jitter_flip",
+        .label = "Jitter sign (test)",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Developer test: flips the sign of the camera jitter on the geometry (not in what FSR is told).",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"none", "x", "y", "xy"},
+        .optionLabels = {"None", "X", "Y", "X and Y"},
+        .flags = Flag::NoAB | Flag::Debug,
+    });
+
     // ---- Graphics tab: detail distances (engine/lod.h) ----
     r.lodTrees = &reg.add({
         .key = "lod.trees",

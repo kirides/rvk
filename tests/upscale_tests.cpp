@@ -15,6 +15,13 @@ TEST(upscale_jitter_phase_count) {
     CHECK(enh::upscaleJitterPhases(960, 1920) == 32);    // 2x
 }
 
+TEST(upscale_lod_bias_follows_the_resolution) {
+    CHECK(enh::upscaleLodBias(1920, 1920) == -1.0f);                              // native AA
+    CHECK(std::abs(enh::upscaleLodBias(1280, 1920) - (std::log2(1280.0f / 1920.0f) - 1.0f)) < 1e-6f);  // 1.5x: -1.585
+    CHECK(std::abs(enh::upscaleLodBias(960, 1920) - (-2.0f)) < 1e-6f);            // 2x
+    CHECK(enh::upscaleLodBias(0, 1920) == 0.0f && enh::upscaleLodBias(1920, 0) == 0.0f);
+}
+
 TEST(upscale_jitter_sequence) {
     // the first Halton(2, 3) points minus 0.5: (0, -1/6), (-1/4, 1/6), (1/4, -0.5 + 2/9) ... and a period of `phases`
     const auto a = enh::upscaleJitter(0, 8);
