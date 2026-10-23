@@ -24,6 +24,7 @@
 #include "core/settings.h"
 #include "core/stall_sampler.h"
 #include "engine/scene_hooks.h"
+#include "engine/lod.h"
 #include "engine/shadow_maps.h"
 #include "engine/symbols.h"
 #include "engine/vfs.h"
@@ -436,6 +437,7 @@ void onProcessAttach(void* module) {
     if (ok && g_config.mode == Mode::Vulkan) {
         engine::scene::install();
         engine::shadowmaps::install();
+        engine::lod::install();     // detail distances (docs/research/lod.md)
         engine::window::install();  // borderless fullscreen (docs/research/window-mode.md)
     }
     // eCApplication::Draw: the Gui phase (Vulkan mode), the debug snapshot + tool-API self-test at fixed Draw calls (any mode) and

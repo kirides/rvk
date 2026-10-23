@@ -299,6 +299,10 @@ struct RendererSettings {
     Setting* shadowsMapSize = nullptr;    // shadows.map_size: "auto" (4096 with enhanced shadows, else the game's), "game", "1024", "2048", "4096"
     Setting* shadowsRange = nullptr;      // shadows.range: metres, 0 = auto (100 with enhanced shadows, else the game's)
     Setting* shadowsSplit = nullptr;      // shadows.split: 0 (logarithmic) .. 1 (uniform) cascade splits with an overridden range
+    // detail distances (engine/lod.h, docs/research/lod.md): multipliers, 1 = the game's
+    Setting* lodTrees = nullptr;          // lod.trees: SpeedTree LOD + billboard fade distances
+    Setting* lodMeshes = nullptr;         // lod.meshes: mesh LOD ranges (eCMesh_PS)
+    Setting* lodView = nullptr;           // lod.view: the view range of objects (eCFrustumDatabase view range factor)
 };
 // hotkey names of overlay.toggle_key / overlay.ab_key ("none" disables)
 const std::vector<std::string>& hotkeyNames();

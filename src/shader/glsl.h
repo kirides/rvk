@@ -55,6 +55,14 @@ struct GlslOptions {
     // relative); `$c` in the expression stands for the original value (e.g. pc.ps.c[15]). Callers pick registers by CTAB
     // name through d3d9::ShaderSemantics (g_AmbientLight, ...). Registers defined in the shader (def c#) are not overridden.
     std::map<std::uint32_t, std::string> constOverrides;
+    // vertex shader input overrides: the declared input of this semantic is read through the GLSL expression (`$v` = the
+    // attribute as fetched), e.g. the SpeedTree billboards' fade distances scaled (engine/lod.h)
+    struct InputOverride {
+        Usage usage = Usage::Position;
+        std::uint8_t usageIndex = 0;
+        std::string expr;
+    };
+    std::vector<InputOverride> inputOverrides;
 };
 
 GlslResult toGlsl(const Program& program, const GlslOptions& options = {});

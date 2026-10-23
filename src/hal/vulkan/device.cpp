@@ -19,6 +19,7 @@
 #include "core/settings.h"
 #include "d3d9/fvf.h"
 #include "engine/scene_hooks.h"
+#include "engine/lod.h"
 #include "engine/shadow_maps.h"
 #include "engine/vfs.h"
 #include "engine/window_mode.h"
@@ -266,6 +267,11 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         }
         applyShadows();  // also the engine's cascade overrides (shadows.map_size / range: "auto" follows shadows.enabled)
     }
+    // detail distances (engine/lod.h, docs/research/lod.md)
+    for (settings::Setting* s : {rs.lodTrees, rs.lodMeshes, rs.lodView}) {
+        if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyLod(); }, this);
+    }
+    applyLod();
     if (options.overlay && dev_.swapchain().valid()) {
         overlay_ = std::make_unique<overlay::Overlay>();
         overlay::Options oo;
@@ -340,6 +346,18 @@ void HalDevice::applyShadows() {
     spdlog::info("hal: settings: shadow cascades: map size {}, range {}, split factor {}", o.mapSize > 0 ? std::to_string(o.mapSize) : "game",
                  o.range > 0.0f ? std::format("{:.0f} m", o.range / 100.0f) : std::string("game"),
                  o.splitFactor >= 0.0f ? std::format("{:.2f}", o.splitFactor) : std::string("game"));
+}
+
+void HalDevice::applyLod() {
+    const auto& rs = settings::renderer();
+    if (rs.lodTrees == nullptr) return;
+    engine::lod::Scales s;
+    s.trees = rs.lodTrees->asFloat();
+    s.meshes = rs.lodMeshes->asFloat();
+    s.view = rs.lodView->asFloat();
+    engine::lod::setScales(s);
+    dev_.setBillboardFadeScale(s.trees);
+    spdlog::info("hal: settings: detail distances: trees x{:.2f}, objects x{:.2f}, view range x{:.2f}", s.trees, s.meshes, s.view);
 }
 
 void HalDevice::applyVsync() {

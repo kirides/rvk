@@ -23,6 +23,8 @@ namespace {
 constexpr std::uint32_t kTranslatorVersion = 2;
 // bump when the tint epilogue (GlslOptions::tintEpilogue) changes: the tint variants' cache files
 constexpr std::uint32_t kTintVersion = 2;
+// bump when the billboard fade variant (Device::lodModule) changes
+constexpr std::uint32_t kLodVariantVersion = 1;
 
 std::uint64_t fnv1a(const void* data, std::size_t size, std::uint64_t h = 0xcbf29ce484222325ull) {
     const auto* p = static_cast<const unsigned char*>(data);
@@ -482,9 +484,11 @@ void Device::destroy() {
                 vkDestroyShaderModule(ctx_.device(), s->module, nullptr);
                 s->module = VK_NULL_HANDLE;
             }
-            if (s->tintModule != VK_NULL_HANDLE) {
-                vkDestroyShaderModule(ctx_.device(), s->tintModule, nullptr);
-                s->tintModule = VK_NULL_HANDLE;
+            for (VkShaderModule* m : {&s->tintModule, &s->lodModule}) {
+                if (*m != VK_NULL_HANDLE) {
+                    vkDestroyShaderModule(ctx_.device(), *m, nullptr);
+                    *m = VK_NULL_HANDLE;
+                }
             }
         }
         shaders_.clear();
@@ -975,22 +979,49 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
 // draw (render thread; a short hitch when the view is switched on), cached on the shader and in the SPIR-V disk cache. The
 // normal module is never touched, so with the view off every draw renders exactly as before.
 VkShaderModule Device::tintModule(Shader& ps) {
-    if (ps.tintModule != VK_NULL_HANDLE || ps.tintFailed) {
-        return ps.tintModule;
+    if (ps.tintModule == VK_NULL_HANDLE && !ps.tintFailed) {
+        ps.tintFailed = true;  // until it succeeds: one attempt per shader
+        ps.tintModule = variantModule(ps, shader::GlslOptions{.tintEpilogue = true}, std::format("tint{}", kTintVersion));
+        ps.tintFailed = ps.tintModule == VK_NULL_HANDLE;
     }
-    ps.tintFailed = true;  // until it succeeds: one attempt per shader
-    const auto dec = shader::decode(ps.bytecode);
+    return ps.tintModule;
+}
+
+// The SpeedTree billboards' vertex shader with the baked fade-in distances (BLENDWEIGHT1.xy: start, range; engine/lod.h)
+// scaled by FrameBlock params[kFrameParamLod].x: used for billboard draws while lod.trees is not 1, built as tintModule
+VkShaderModule Device::lodModule(Shader& vs) {
+    if (vs.lodModule == VK_NULL_HANDLE && !vs.lodFailed) {
+        vs.lodFailed = true;
+        shader::GlslOptions o;
+        o.inputOverrides.push_back(
+            {shader::Usage::BlendWeight, 1, std::format("vec4($v.xy * pc.frame.params[{}].x, $v.zw)", shader::abi::kFrameParamLod)});
+        vs.lodModule = variantModule(vs, o, std::format("lod{}_t{}", kLodVariantVersion, kTranslatorVersion));
+        vs.lodFailed = vs.lodModule == VK_NULL_HANDLE;
+        spdlog::info("d3d9: billboard fade variant of vertex shader {:016x}: {}", vs.hash, vs.lodFailed ? "FAILED" : "built");
+    }
+    return vs.lodModule;
+}
+
+void Device::setBillboardFadeScale(float scale) {
+    billboardFadeScale_ = scale;
+    setFrameParam(shader::abi::kFrameParamLod, {scale, 0.0f, 0.0f, 0.0f});
+}
+
+// a variant of a translated shader (render thread): translated with `options`, compiled (or read from the SPIR-V disk cache
+// under `<hash>_<tag>.spv`), null when it fails
+VkShaderModule Device::variantModule(const Shader& s, const shader::GlslOptions& options, std::string_view tag) {
+    const auto dec = shader::decode(s.bytecode);
     if (!dec.ok()) {
         return VK_NULL_HANDLE;
     }
-    const auto glsl = shader::toGlsl(dec.program, shader::GlslOptions{.tintEpilogue = true});
+    const auto glsl = shader::toGlsl(dec.program, options);
     if (!glsl.ok()) {
-        spdlog::warn("d3d9: tint variant of shader {:016x}: {}", ps.hash, glsl.error);
+        spdlog::warn("d3d9: {} variant of shader {:016x}: {}", tag, s.hash, glsl.error);
         return VK_NULL_HANDLE;
     }
     std::vector<std::uint32_t> spirv;
     const auto cacheFile = options_.cacheDir.empty() ? std::filesystem::path()
-                                                     : options_.cacheDir / "spirv" / std::format("{:016x}_tint{}.spv", ps.hash, kTintVersion);
+                                                     : options_.cacheDir / "spirv" / std::format("{:016x}_{}.spv", s.hash, tag);
     if (!cacheFile.empty()) {
         std::ifstream in(cacheFile, std::ios::binary | std::ios::ate);
         if (in) {
@@ -1002,7 +1033,7 @@ VkShaderModule Device::tintModule(Shader& ps) {
     if (spirv.empty()) {
         auto compiled = shader::compileGlsl(dec.program.version.stage, glsl.glsl);
         if (!compiled.ok()) {
-            spdlog::error("d3d9: tint variant of shader {:016x} does not compile:\n{}", ps.hash, compiled.log);
+            spdlog::error("d3d9: {} variant of shader {:016x} does not compile:\n{}", tag, s.hash, compiled.log);
             return VK_NULL_HANDLE;
         }
         spirv = std::move(compiled.words);
@@ -1013,9 +1044,7 @@ VkShaderModule Device::tintModule(Shader& ps) {
             out.write(reinterpret_cast<const char*>(spirv.data()), static_cast<std::streamsize>(spirv.size() * 4));
         }
     }
-    ps.tintModule = vk::createShaderModule(ctx_, spirv);
-    ps.tintFailed = ps.tintModule == VK_NULL_HANDLE;
-    return ps.tintModule;
+    return vk::createShaderModule(ctx_, spirv);
 }
 
 void Device::trackLive(Texture* texture) {

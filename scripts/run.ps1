@@ -134,6 +134,7 @@ if ($NoRenderer) {
             $values['water.enabled'] = 'false'; $values['water.quality'] = 'medium'; $values['water.ocean_quality'] = 'medium'
             $values['rt.reflections'] = 'medium'
             $values['shadows.enabled'] = 'false'; $values['shadows.filter'] = 'high'; $values['shadows.map_size'] = 'auto'
+            $values['lod.trees'] = '1'; $values['lod.meshes'] = '1'; $values['lod.view'] = '1'
         }
         foreach ($kv in $Setting) { $k, $v = $kv -split '=', 2; $values[$k] = $v }
         # "table.key=value" -> [table] key = value (strings quoted unless number / bool)

@@ -1129,6 +1129,46 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Off", "Cascades", "Cascade shadows only", "Terrain shadows only"},
         .flags = Flag::NoAB | Flag::Debug,
     });
+
+    // ---- Graphics tab: detail distances (engine/lod.h) ----
+    r.lodTrees = &reg.add({
+        .key = "lod.trees",
+        .label = "Tree detail distance",
+        .category = "Detail",
+        .description = "How far away trees and palms keep their full detail before they thin out and turn into flat distant "
+                       "images. 1 = the game's distances (10-45 m full detail, flat beyond 60-135 m, per tree). Farther costs "
+                       "some frame rate in forests.",
+        .type = Type::Float,
+        .defaultValue = 2,
+        .min = 1,
+        .max = 4,
+        .format = "%.1fx",
+    });
+    r.lodMeshes = &reg.add({
+        .key = "lod.meshes",
+        .label = "Object detail distance",
+        .category = "Detail",
+        .description = "How far away buildings, rocks and other objects keep their full detail before simpler versions "
+                       "replace them. 1 = the game's distance.",
+        .type = Type::Float,
+        .defaultValue = 2,
+        .min = 1,
+        .max = 4,
+        .format = "%.1fx",
+    });
+    r.lodView = &reg.add({
+        .key = "lod.view",
+        .label = "Object draw distance",
+        .category = "Detail",
+        .description = "How far away objects are still drawn before they fade out. 1 = the game's distance. Objects the game "
+                       "has not loaded yet still cannot appear, and farther costs frame rate.",
+        .type = Type::Float,
+        .defaultValue = 1,
+        .min = 1,
+        .max = 3,
+        .format = "%.1fx",
+        .flags = Flag::Advanced,
+    });
     reg.setDebugSwitch(*r.debugMode);
     if (&reg == &registry()) g_renderer = r;
     return r;

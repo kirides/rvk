@@ -221,6 +221,19 @@ TEST(glsl_abi_header_and_hooks) {
         CHECK(v.glsl.find("rvk_clip = rvk_pos;") < v.glsl.find("rvk_pos.xy += pc.draw.posFix.xy"));
         const auto vspv = shader::compileGlsl(shader::Stage::Vertex, v.glsl);
         CHECK_MSG(vspv.ok(), vspv.log);
+        // input override: the attribute is fetched as rvk_in#, v# assigned from the expression before the body runs
+        shader::GlslOptions io;
+        io.inputOverrides.push_back({shader::Usage::Position, 0, "vec4($v.xy * pc.frame.params[1].x, $v.zw)"});
+        const auto iv = shader::toGlsl(vdec.program, io);
+        CHECK(iv.ok());
+        CHECK(iv.glsl.find("in vec4 rvk_in0;") != std::string::npos);
+        CHECK(iv.glsl.find("    v0 = (vec4(rvk_in0.xy * pc.frame.params[1].x, rvk_in0.zw));") < iv.glsl.find("    rvk_main();"));
+        const auto ispv = shader::compileGlsl(shader::Stage::Vertex, iv.glsl);
+        CHECK_MSG(ispv.ok(), ispv.log + "\n" + iv.glsl);
+        // an override of a semantic the shader does not declare changes nothing
+        shader::GlslOptions none;
+        none.inputOverrides.push_back({shader::Usage::BlendWeight, 1, "$v * 2.0"});
+        CHECK(shader::toGlsl(vdec.program, none).glsl == shader::toGlsl(vdec.program).glsl);
     }
 }
 

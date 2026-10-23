@@ -507,6 +507,7 @@ private:
     std::unique_ptr<enh::RtDebug> rtDebug_;      // rt.debug (a consumer of rtScene_)
     void applyWater();
     void applyShadows();
+    void applyLod();
     std::chrono::steady_clock::time_point settingsDirtySince_{};
     // fixed function
     d3d9::ff::Stage0 ffStage0_;

@@ -636,8 +636,15 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         }
     }
 
+    // detail distances (lod.trees): the billboards' baked fade-in distances scaled with the trees' LOD
+    VkShaderModule vsModule = vs_->module;
+    if (!replaced && kind == draws::Kind::SpeedTreeBillboard && billboardFadeScale_ != 1.0f) {
+        const VkShaderModule m = lodModule(*vs_);
+        vsModule = m != VK_NULL_HANDLE ? m : vsModule;
+    }
+
     vk::PipelineDesc pd{};
-    pd.vs = vs_->module;
+    pd.vs = vsModule;
     pd.fs = fs;
     pd.topology = topology(primitiveType);
     // only the topology class matters (dynamic topology): normalise strips/fans to their list type for a smaller cache

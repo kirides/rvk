@@ -154,6 +154,18 @@
        (0x59f650): creates them (map size, bias, cameras) */                                                                   \
     X(cascadeSetShadowMapSize, L"Engine.dll", "?SetShadowMapSize@eCCascadeShadowMap@@QEAAXAEBH@Z", false)                       \
     X(cascadeSetSplitCount, L"Engine.dll", "?SetSplitCount@eCCascadeShadowMap@@QEAAXAEBH@Z", false)                             \
+    /* ---- detail distances (engine/lod.*, docs/research/lod.md) ---- */                                                       \
+    /* void eCWraper_SpeedTreeRT::UpdateLoD(bCVector const&) (0x6f8f30): the tree's LOD from the camera distance, its LOD      \
+       limits scaled by the factor +0x30 for the computation; GetBillboardFadeValues(float&, float&) (0x6f8a00): the same      \
+       limits x factor -> the billboard fade range */                                                                          \
+    X(speedTreeUpdateLoD, L"Engine.dll", "?UpdateLoD@eCWraper_SpeedTreeRT@@QEAAXAEBVbCVector@@@Z", false)                     \
+    X(speedTreeBillboardFade, L"Engine.dll", "?GetBillboardFadeValues@eCWraper_SpeedTreeRT@@QEAAXAEAM0@Z", false)             \
+    /* void eCRenderContextMesh::UpdateLoD(eCFrustumDatabase&) (0x5c74b0): picks the mesh LOD against eCMesh_PS's ranges      \
+       (+0x60 float[], count +0x6c) */                                                                                         \
+    X(meshUpdateLoD, L"Engine.dll", "?UpdateLoD@eCRenderContextMesh@@UEAAXAEAVeCFrustumDatabase@@@Z", false)                  \
+    /* void eCFrustumDatabase::UpdateFromAppTemplate() (0x6708a0): copies eCRenderSystemAdmin's caps template (+0x70..0x97)   \
+       into the database (+0x1590..), among them the view range factor +0x15b4 (always 1.0 in the game) */                     \
+    X(frustumUpdateFromApp, L"Engine.dll", "?UpdateFromAppTemplate@eCFrustumDatabase@@QEAAXXZ", false)                        \
     X(timerGetGameTime, L"Engine.dll", "?GetGameTime@eCTimer@@QEBAKXZ", false)                                                    \
     X(appGetAppState, L"Engine.dll", "?GetAppState@eCApplication@@QEBAKXZ", false)                                              \
     /* ---- the material graph (engine/materials.*, docs/research/rt-albedo-facts.md 1): eCShaderBase* eCShaderBase::         \

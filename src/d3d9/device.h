@@ -251,6 +251,9 @@ public:
     // pixel shaders: the tint debug view's variant (GlslOptions::tintEpilogue), built on first use (render thread)
     VkShaderModule tintModule = VK_NULL_HANDLE;
     bool tintFailed = false;
+    // vertex shaders of SpeedTree billboards: the fade distance variant (Device::lodModule, engine/lod.h)
+    VkShaderModule lodModule = VK_NULL_HANDLE;
+    bool lodFailed = false;
 };
 
 // ---- device -------------------------------------------------------------------------------------------------------
@@ -627,6 +630,9 @@ public:
     // debug view: tint colour draws by kind / pass (draws::tintColor; the pixel shaders' tint variants are built on demand)
     void setTintMode(draws::TintMode mode) { tint_ = mode; }
     draws::TintMode tintMode() const { return tint_; }
+    // detail distances (engine/lod.h lod.trees): the SpeedTree billboards' fade-in distances times `scale` (1 = the engine's
+    // vertex shader unchanged; else its fade variant, FrameBlock params[kFrameParamLod].x)
+    void setBillboardFadeScale(float scale);
 
     // ---- enhancements: frame block, injection points, transient images (docs/research/injection.md; render thread) ----
     // the FrameBlock of the frame being recorded (shader/abi.h): uploaded into the frame's ring on first use and again after
@@ -749,6 +755,8 @@ private:
     bool prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom);
     void logWaterDraw(draws::Kind kind);
     VkShaderModule tintModule(Shader& ps);  // the tint variant of a pixel shader (null when it fails to build)
+    VkShaderModule lodModule(Shader& vs);   // the billboard fade variant of a vertex shader (null when it fails to build)
+    VkShaderModule variantModule(const Shader& s, const shader::GlslOptions& options, std::string_view tag);
     bool bindVertexInput(vk::PipelineDesc& pd);
     void setDynamicState(std::uint32_t primitiveType);
     std::uint32_t samplerIndex(std::uint32_t slot);
@@ -957,6 +965,7 @@ private:
     draws::FrameDraws draws_;
     draws::Record* lastRecord_ = nullptr;  // the record of the draw being issued (its index buffer is bound after prepareDraw)
     draws::TintMode tint_ = draws::TintMode::Off;
+    float billboardFadeScale_ = 1.0f;
     std::unordered_set<std::uint64_t> waterLogged_;  // material x pixel shader pairs whose first water / refracted draw was logged
     std::vector<DrawReplacer*> replacers_;
     std::vector<DrawObserver*> observers_;

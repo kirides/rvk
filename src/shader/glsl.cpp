@@ -293,11 +293,11 @@ private:
         }
     }
 
-    // GlslOptions::constOverrides: the expression with `$c` replaced by the original read
-    static std::string overrideExpr(const std::string& expr, const std::string& original) {
+    // GlslOptions::constOverrides / inputOverrides: the expression with `$c` (`$v`) replaced by the original read
+    static std::string overrideExpr(const std::string& expr, const std::string& original, std::string_view placeholder = "$c") {
         std::string out = "(";
         for (std::size_t i = 0; i < expr.size(); ++i) {
-            if (expr[i] == '$' && i + 1 < expr.size() && expr[i + 1] == 'c') {
+            if (expr[i] == '$' && i + 1 < expr.size() && expr[i + 1] == placeholder[1]) {
                 out += original;
                 ++i;
             } else {
@@ -793,7 +793,11 @@ private:
         for (const auto& d : p_.inputs) {
             if (vs_) {
                 if (d.reg.type == RegType::Input) {
-                    g += std::format("layout(location = {}) in vec4 v{};\n", d.reg.index, d.reg.index);
+                    if (inputOverride(d) != nullptr) {  // GlslOptions::inputOverrides: v# is assigned at the start of main()
+                        g += std::format("layout(location = {}) in vec4 rvk_in{};\nvec4 v{};\n", d.reg.index, d.reg.index, d.reg.index);
+                    } else {
+                        g += std::format("layout(location = {}) in vec4 v{};\n", d.reg.index, d.reg.index);
+                    }
                 }
                 continue;
             }
@@ -889,8 +893,24 @@ private:
         return g;
     }
 
+    const GlslOptions::InputOverride* inputOverride(const Declaration& d) const {
+        for (const auto& o : opt_.inputOverrides) {
+            if (o.usage == d.usage && o.usageIndex == d.usageIndex) return &o;
+        }
+        return nullptr;
+    }
+
     std::string mainFunction() const {
-        std::string m = "void main() {\n    rvk_main();\n";
+        std::string m = "void main() {\n";
+        if (vs_) {
+            for (const auto& d : p_.inputs) {
+                if (d.reg.type != RegType::Input) continue;
+                if (const auto* o = inputOverride(d)) {
+                    m += std::format("    v{} = {};\n", d.reg.index, overrideExpr(o->expr, std::format("rvk_in{}", d.reg.index), "$v"));
+                }
+            }
+        }
+        m += "    rvk_main();\n";
         if (vs_) {
             std::string pos = "oPos";
             if (major_ >= 3) {
