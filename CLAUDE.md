@@ -233,7 +233,7 @@ at InitializeAdmin" line lists uptime, D3D/Vulkan/overlay modules and the proces
 whole corpus (must stay 100 %). `rvk_shadertool export corpus game-shaders` writes the game's shaders as plain GLSL 4.60 sources (`<name>.vert/.frag`: the translator's exact output, ABI as `#include`, D3D9 listing + CTAB names in comments; `glslc -I game-shaders/include`; git-ignored, game-derived). The contract between translated shaders and the renderer is `src/shader/abi.h`; its GLSL
 side is `shaders/include/rvk_abi.glsl`, which the translator pastes into every translated shader (change both together;
 rvk_tests `abi_glsl_layout_matches_cpp` compares the offsets; bump `kTranslatorVersion` in `d3d9/device.cpp` when the
-translated GLSL changes).
+translated GLSL changes). **The game's material shaders are one HLSL ubershader with `XFX_*` defines** (docs/research/shader-permutations.md): the GLSL port is `shaders/material/ge_default.{glsl,frag,vert}` (same defines, `-D...`; the engine's `XFX_PS_*` expressions are valid GLSL as they are). `python tools/shader_equiv.py [--vs]` proves it against the translated game shaders on the GPU (`rvk_shadereq`; needs `out/hlsl-fx` = `python tools/hlsl_infer.py <shadermaterial dir> --make-fx out/hlsl-fx`; the pool was compiled with `d3dx9_29.dll`, flags 0, `half3 vecWorldEye`); `tools/hlsl_match.py` reproduces a corpus shader from HLSL + defines instruction for instruction.
 
 ## Hand-written shaders (GLSL only)
 

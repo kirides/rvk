@@ -382,6 +382,12 @@ target_include_directories(rvk_vktest PRIVATE tools ${STB_INCLUDE_DIR})
 target_link_libraries(rvk_vktest PRIVATE rvk_core)
 rvk_warnings(rvk_vktest)
 
+# rvk_shadereq: two pixel shaders on the GPU with identical random inputs, outputs compared (translated game shader vs the GLSL port)
+add_executable(rvk_shadereq tools/shadereq/main.cpp)
+target_include_directories(rvk_shadereq PRIVATE tools)
+target_link_libraries(rvk_shadereq PRIVATE rvk_core)
+rvk_warnings(rvk_shadereq)
+
 # rvk_fxtool: fx_2_0 effect binaries (dump, corpus check against D3DX, compile)
 add_executable(rvk_fxtool tools/fxtool/main.cpp tools/common/d3dx.h)
 target_include_directories(rvk_fxtool PRIVATE tools)
