@@ -314,10 +314,21 @@ target_link_libraries(rvk_core PUBLIC
     imgui::imgui
 )
 rvk_warnings(rvk_core)
-target_precompile_headers(rvk_core PRIVATE
+# ccache cannot cache files built with a PCH: CI configures with RVK_PCH=OFF and force-includes the same headers instead
+# (rvk_core's sources rely on them)
+option(RVK_PCH "Precompiled header for rvk_core" ON)
+set(RVK_CORE_PCH
     <algorithm> <array> <cstdint> <filesystem> <memory> <optional> <span> <string> <string_view> <vector>
     <spdlog/spdlog.h>
 )
+if(RVK_PCH)
+    target_precompile_headers(rvk_core PRIVATE ${RVK_CORE_PCH})
+else()
+    foreach(header ${RVK_CORE_PCH})
+        string(REGEX REPLACE "^<(.*)>$" "\\1" header ${header})
+        target_compile_options(rvk_core PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/FI${header}>)
+    endforeach()
+endif()
 set_source_files_properties(src/vk/volk_impl.c PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 # Dear ImGui's Vulkan backend, vendored from the imgui release vcpkg installs (third_party/imgui_vulkan: why there)
 set_source_files_properties(src/overlay/imgui_vulkan.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON COMPILE_OPTIONS "/W3")

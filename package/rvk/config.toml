@@ -1,0 +1,15 @@
+# risen-enhanced-graphics: start configuration (read once at game start).
+# Player settings live in settings.toml next to this file: change them in the game's F10 overlay.
+
+[renderer]
+# vulkan      = the Vulkan renderer
+# passthrough = the game's own D3D9 renderer (the renderer stays inactive)
+mode = "vulkan"
+
+[log]
+# rvk.log next to this file: error | warn | info | debug | trace
+level = "info"
+
+[overlay]
+# false = no F10 overlay at all
+enabled = true

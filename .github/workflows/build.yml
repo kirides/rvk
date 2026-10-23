@@ -1,0 +1,109 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  # Nightly release (tag "nightly"): risen-enhanced-graphics.zip (unpacked onto <Risen>\bin)
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+# A newer push to the same branch cancels the older run (nightly / manual runs are never cancelled)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
+
+# Jobs: gate -> build -> release (nightly only). The build uses a compiler cache (.github/actions/windows-build): after the
+# first run only the files whose source or headers changed are compiled.
+jobs:
+  # Decides whether to build and whether to publish the nightly release. A scheduled run is skipped when the nightly
+  # tag already points at the current commit; a manual run on the default branch always rebuilds and republishes.
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+      release: ${{ steps.decide.outputs.release }}
+    steps:
+      - id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          ON_DEFAULT: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+        run: |
+          build=true
+          release=false
+          if [ "$EVENT" = schedule ] || { [ "$EVENT" = workflow_dispatch ] && [ "$ON_DEFAULT" = true ]; }; then
+            release=true
+            if [ "$EVENT" = schedule ]; then
+              tagged=$(gh api "repos/$GH_REPO/commits/nightly" --jq .sha 2>/dev/null || true)
+              if [ "$tagged" = "$GITHUB_SHA" ]; then
+                echo "nightly is already at $GITHUB_SHA, nothing to do"
+                build=false
+                release=false
+              fi
+            fi
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+
+  # d3d9.dll + the unit tests (pure logic: no GPU, no game; the D3DX comparisons skip without d3dx9_39.dll)
+  build:
+    needs: gate
+    if: needs.gate.outputs.build == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/windows-build
+      - name: Build
+        run: cmake --build build-ninja --config RelWithDebInfo --target rvk_d3d9 rvk_tests
+      - name: Unit tests
+        run: build-ninja\RelWithDebInfo\rvk_tests.exe
+
+      - name: Package
+        shell: pwsh
+        run: .\scripts\package.ps1 -BinDir build-ninja\RelWithDebInfo -Out dist
+      - name: Upload risen-enhanced-graphics.zip
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/risen-enhanced-graphics.zip
+          archive: false
+      # symbols for crash dumps of a nightly (not part of the player zip)
+      - name: Upload d3d9.pdb
+        uses: actions/upload-artifact@v7
+        with:
+          path: build-ninja/RelWithDebInfo/d3d9.pdb
+          archive: false
+
+  # Publishes only when the build and the unit tests passed. The release is recreated so the "nightly" tag moves to this
+  # commit.
+  release:
+    needs: [gate, build]
+    if: needs.gate.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: risen-enhanced-graphics.zip
+          path: nightly
+          skip-decompress: true
+      - uses: actions/download-artifact@v8
+        with:
+          name: d3d9.pdb
+          path: nightly
+          skip-decompress: true
+      - name: Publish the nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ls -l nightly
+          gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
+          notes="Automated build of ${GITHUB_SHA} ($(date -u '+%Y-%m-%d %H:%M') UTC).
+
+          - **risen-enhanced-graphics.zip**: unpack into <Risen>\\bin (d3d9.dll next to Risen.exe, plus rvk\\config.toml and rvk\\README.txt). In game, F10 opens the settings overlay.
+          - **d3d9.pdb**: debug symbols (only for crash analysis)"
+          gh release create nightly nightly/risen-enhanced-graphics.zip nightly/d3d9.pdb \
+              --target "$GITHUB_SHA" --prerelease --title "Nightly (${GITHUB_SHA::7})" --notes "$notes"

@@ -3,7 +3,7 @@
 A pure Vulkan renderer for **Risen Enhanced** (64-bit). Work in progress: see [docs/PLAN.md](docs/PLAN.md).
 
 It is a `d3d9.dll` placed next to `Risen.exe` that replaces the engine's graphics layer with a Vulkan implementation
-(dynamic rendering, Vulkan 1.3). Today (milestone M0) it only forwards to the system D3D9 and probes Vulkan.
+(dynamic rendering, Vulkan 1.3).
 
 ## Build
 
@@ -16,13 +16,9 @@ cmake --build build --config RelWithDebInfo
 
 ## Install
 
-Copy `build\RelWithDebInfo\d3d9.dll` into `<Risen>\bin`. Settings: `<Risen>\bin\rvk\config.toml`, log: `<Risen>\bin\rvk\rvk.log`.
+Nightly build: [releases/nightly](https://github.com/kirides/rvk/releases/tag/nightly), `risen-enhanced-graphics.zip`:
+unpack it into `<Risen>\bin` (`d3d9.dll` + `rvk\config.toml` + `rvk\README.txt`). In game, F10 opens the settings overlay.
 
-```toml
-[renderer]
-mode = "passthrough"   # passthrough (the game's D3D9 renderer) | trace | vulkan (not implemented yet)
-[log]
-level = "info"
-[vulkan]
-validation = false
-```
+From a local build: `.\scripts\package.ps1` packs the same zip from `build\RelWithDebInfo` into `out\package`.
+Start configuration: `<Risen>\bin\rvk\config.toml` ([package/rvk/config.toml](package/rvk/config.toml)), player
+settings: `rvk\settings.toml`, log: `rvk\rvk.log`.
