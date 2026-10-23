@@ -284,9 +284,60 @@ bool detourSkyCube(void* sky, void* image) {
 
 using SceneUpdateFn = bool (*)(void* filter, int index);
 Hook<SceneUpdateFn> g_sceneUpdate;
+
+// The main camera's screen rect (left, top, right, bottom ints at +0xc4 of the eCCameraBase: the application's camera +0x38,
+// else +0xc8; docs/research/upscaling.md 7): eCImageFilterScene::UpdateRenderTargets sizes the scene image, depth map and
+// masks from it, eCCameraBase::ExecuteGfxCamera sets the main view's viewport from it. eCApplication::DoRender rewrites it
+// from the client rect every frame.
+using AppInstanceFn = void* (*)();
+constexpr std::size_t kAppCamera = 0x38, kAppCameraFallback = 0xc8, kCameraRect = 0xc4;
+
+std::int32_t* mainCameraRect() {
+    const auto& s = sym();
+    if (s.appGetInstance == nullptr) return nullptr;
+    const void* app = reinterpret_cast<AppInstanceFn>(s.appGetInstance)();
+    void* camera = nullptr;
+    if (!readAt(app, kAppCamera, camera) || camera == nullptr) {
+        if (!readAt(app, kAppCameraFallback, camera) || camera == nullptr) return nullptr;
+    }
+    std::int32_t rect[4];
+    if (!readAt(camera, kCameraRect, rect)) return nullptr;
+    return reinterpret_cast<std::int32_t*>(static_cast<char*>(camera) + kCameraRect);
+}
+
 bool detourSceneUpdate(void* filter, int index) {
     ++g_inSceneFilter;
+    d3d9::Device* d = device();
+    std::int32_t* rect = d != nullptr ? mainCameraRect() : nullptr;
+    std::int32_t saved[4] = {};
+    bool scaled = false;
+    if (rect != nullptr) {
+        std::memcpy(saved, rect, sizeof(saved));
+        const std::int32_t w = saved[2] - saved[0], h = saved[3] - saved[1];
+        if (w > 0 && h > 0) {
+            d->setDisplaySize(static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h));
+            const float ratio = d->renderRatio();
+            if (ratio > 1.001f) {
+                rect[2] = saved[0] + std::max(1, static_cast<std::int32_t>(static_cast<float>(w) / ratio));
+                rect[3] = saved[1] + std::max(1, static_cast<std::int32_t>(static_cast<float>(h) / ratio));
+                scaled = true;
+            }
+        }
+    }
     const bool r = g_sceneUpdate.original(filter, index);
+    if (scaled) {
+        std::memcpy(rect, saved, sizeof(saved));
+        // the scene pass leaves the (scaled) main view's viewport set; the image effects' last pass draws into the back buffer
+        // with whatever is current
+        d->setViewport({static_cast<std::uint32_t>(saved[0]), static_cast<std::uint32_t>(saved[1]),
+                        static_cast<std::uint32_t>(saved[2] - saved[0]), static_cast<std::uint32_t>(saved[3] - saved[1]), 0.0f, 1.0f});
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            spdlog::info("scene: render scale: the main camera's rect {}x{} is rendered at 1/{:.2f} while the scene image is built",
+                         saved[2] - saved[0], saved[3] - saved[1], d->renderRatio());
+        }
+    }
     --g_inSceneFilter;
     return r;
 }

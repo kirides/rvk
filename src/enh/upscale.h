@@ -6,12 +6,18 @@
 //   geometry by FSR's Halton sub-pixel offset (d3d9::Device::geometryJitter -> DrawBlock::posFix, FrameBlock::jitter); the
 //   motion vectors stay jitter-free. "jitter_only" is the developer test: the shaking without the filter (a still camera's
 //   frames must average to the unjittered image).
-// * native_aa: render size = display size. A pass at AfterMainView (the scene HDR target is complete, linear, before the post
-//   chain's eye adaptation / tonemapping) copies the hardware depth into an R32F image (shaders/upscale/prep.comp), runs
-//   vk::Fsr on {scene HDR, depth, the G-buffer's motion} into a transient and copies the result back into the scene HDR target,
-//   which the engine's post chain then reads. Needs the G-buffer (motion vectors; forced on by the HAL while this mode is on).
+// * Render scale: the quality modes render the engine's main view at 1 / ratio of the output (native AA 1, Quality 1.5,
+//   Balanced 1.7, Performance 2, Ultra performance 3): the scene hook (engine/scene_hooks) shrinks the main camera's screen
+//   rect while the engine builds its scene image, so every scene-sized target, viewport and mask follows; the GUI, the final
+//   image effect pass and the back buffer stay at the output size.
+// * The FSR pass at AfterMainView (the scene HDR target is complete, linear, before the post chain's eye adaptation /
+//   tonemapping) copies the hardware depth into an R32F image (shaders/upscale/prep.comp) and runs vk::Fsr on {scene HDR,
+//   depth, the G-buffer's motion} into an output-sized transient, which the engine's post chain then samples instead of the
+//   scene image (Device::setSceneSubstitute: both are sampled by uv). Needs the G-buffer (motion vectors; forced on by the
+//   HAL while an FSR mode is on).
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 
@@ -21,7 +27,11 @@
 
 namespace rvk::enh {
 
-enum class UpscaleMode : std::uint8_t { Off, NativeAa, JitterOnly };
+enum class UpscaleMode : std::uint8_t { Off, JitterOnly, NativeAa, Quality, Balanced, Performance, UltraPerformance };
+
+constexpr bool usesFsr(UpscaleMode m) { return m >= UpscaleMode::NativeAa; }
+// the per-dimension ratio output / render of an FSR mode (FfxApiUpscaleQualityMode); 1 for the others
+float upscaleRatio(UpscaleMode m);
 
 // FSR's jitter sequence: phase count = ceil(8 * (display width / render width)^2), offset = Halton(index % phases + 1; 2, 3) - 0.5
 // (the FFX API's ffxQueryDescUpscaleGetJitterPhaseCount / GetJitterOffset compute the same; rvk_vktest --fsr compares them)
@@ -45,18 +55,19 @@ public:
 
 private:
     void record(d3d9::PassContext& ctx);
-    bool ensureFsr(std::uint32_t width, std::uint32_t height);
+    bool ensureFsr(VkExtent2D render, VkExtent2D display);
     void dropFsr();
 
     d3d9::Device& dev_;
     UpscaleMode mode_ = UpscaleMode::Off;
     unsigned flip_ = 0;
     float sharpness_ = 0.4f;
-    bool failed_ = false;  // the DLL / the context / the pipeline is not available: native AA stays off this session
+    std::atomic<int> phases_{8};  // the jitter sequence's length (the jitter source runs on the render thread; set from the sizes)
+    bool failed_ = false;  // the DLL / the context / the pipeline is not available: FSR stays off this session
     vk::PassLayout layout_;  // set 1: one storage image (the R32F depth)
     VkPipeline prep_ = VK_NULL_HANDLE;
     std::shared_ptr<vk::Fsr> fsr_;  // retired with the frame that last used it
-    std::uint32_t fsrWidth_ = 0, fsrHeight_ = 0;
+    VkExtent2D fsrRender_{}, fsrDisplay_{};
     bool needReset_ = true;  // the next dispatch drops the history (first frame, size change, skipped frames)
     std::uint64_t frames_ = 0, skipped_ = 0;
     double lastLog_ = -1e9;

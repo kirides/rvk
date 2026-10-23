@@ -703,6 +703,16 @@ public:
     // texture LOD bias added to the samplers of the draws the jitter applies to (FSR: log2(render / display) - 1, so the
     // temporal filter has the detail to accumulate); 0 = none
     void setGeometryLodBias(float bias) { geometryLodBias_ = bias; }
+    // Render scale (enh/upscale): while the engine renders the main view, engine/scene_hooks shrinks the main camera's screen
+    // rect by this ratio (>= 1; 1 = off), so the scene target, depth map, viewports and masks are all that much smaller; the
+    // rect's real size (the display / output size) is reported back through setDisplaySize
+    void setRenderRatio(float ratio) { renderRatio_ = ratio < 1.0f ? 1.0f : ratio; }
+    float renderRatio() const { return renderRatio_; }
+    void setDisplaySize(std::uint32_t width, std::uint32_t height) { displaySize_ = {width, height}; }
+    std::array<std::uint32_t, 2> displaySize() const { return displaySize_; }
+    // the post chain's input: until the frame ends, draws that sample `from` get the bindless slot `slot` instead (the upscaled
+    // scene, which has a different size than the engine's scene target; the engine samples both by uv)
+    void setSceneSubstitute(const Texture* from, std::uint32_t slot) { substituteFrom_ = from; substituteSlot_ = slot; }
     // this frame's jitter in pixels of the scene target (0, 0 = none)
     std::array<float, 2> jitter() const { return {jitter_[0], jitter_[1]}; }
     vk::Transients& transients() { return transients_; }
@@ -1205,6 +1215,10 @@ private:
     VkDeviceAddress frameAddr_ = 0;  // 0 = upload before the next use
     JitterSource jitterSource_;
     float geometryLodBias_ = 0.0f;
+    float renderRatio_ = 1.0f;
+    std::array<std::uint32_t, 2> displaySize_{};
+    const Texture* substituteFrom_ = nullptr;
+    std::uint32_t substituteSlot_ = 0;
     std::array<float, 4> jitter_{};  // this frame's jitter (pixels, xy), the previous frame's (zw)
     std::array<std::array<float, 4>, shader::abi::kFrameParams> frameParams_{};
     inject::Registry passes_;

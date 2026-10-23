@@ -605,6 +605,8 @@ void Device::destroy() {
 
 void Device::beginFrame() {
     frames_.begin();
+    substituteFrom_ = nullptr;
+    substituteSlot_ = 0;
     perf_.slotWaitMs += frames_.lastSlotWaitMs();
     if (gpuTimer_.enabled()) {
         const std::uint32_t slot = frames_.currentSlot();

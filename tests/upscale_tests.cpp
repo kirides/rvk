@@ -15,6 +15,15 @@ TEST(upscale_jitter_phase_count) {
     CHECK(enh::upscaleJitterPhases(960, 1920) == 32);    // 2x
 }
 
+TEST(upscale_modes_and_ratios) {
+    using M = enh::UpscaleMode;
+    CHECK(!enh::usesFsr(M::Off) && !enh::usesFsr(M::JitterOnly));
+    for (const M m : {M::NativeAa, M::Quality, M::Balanced, M::Performance, M::UltraPerformance}) CHECK(enh::usesFsr(m));
+    CHECK(enh::upscaleRatio(M::NativeAa) == 1.0f && enh::upscaleRatio(M::Quality) == 1.5f && enh::upscaleRatio(M::Balanced) == 1.7f);
+    CHECK(enh::upscaleRatio(M::Performance) == 2.0f && enh::upscaleRatio(M::UltraPerformance) == 3.0f);
+    CHECK(enh::upscaleRatio(M::Off) == 1.0f && enh::upscaleRatio(M::JitterOnly) == 1.0f);
+}
+
 TEST(upscale_lod_bias_follows_the_resolution) {
     CHECK(enh::upscaleLodBias(1920, 1920) == -1.0f);                              // native AA
     CHECK(std::abs(enh::upscaleLodBias(1280, 1920) - (std::log2(1280.0f / 1920.0f) - 1.0f)) < 1e-6f);  // 1.5x: -1.585

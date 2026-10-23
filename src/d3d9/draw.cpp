@@ -906,7 +906,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
                                  ((r.samplers[slot] == shader::TextureType::Volume) == (t->kind() == vk::TextureKind::Volume));
         const bool usable = t != nullptr && !t->isNull() && kindMatches &&
                             t->image().layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        block.tex[slot] = usable ? t->bindlessSlot() : 0;
+        block.tex[slot] = !usable ? 0 : (t == substituteFrom_ && substituteSlot_ != 0) ? substituteSlot_ : t->bindlessSlot();
         block.smp[slot] = lodBias != 0.0f && slot < 16 ? samplerIndexBiased(slot, lodBias) : samplerIndex(slot);
     }
     // half a pixel right/down in NDC units of the viewport (shader/abi.h)

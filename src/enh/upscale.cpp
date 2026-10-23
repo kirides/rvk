@@ -36,9 +36,19 @@ static_assert(sizeof(PrepPush) == 32 && sizeof(PrepPush) <= shader::abi::kPushCo
 constexpr VkFormat kDepthFormat = VK_FORMAT_R32_SFLOAT;
 constexpr VkFormat kOutputFormat = VK_FORMAT_R16G16B16A16_SFLOAT;  // the scene HDR target's format (A16B16G16R16F)
 constexpr VkImageUsageFlags kDepthUsage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-constexpr VkImageUsageFlags kOutputUsage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+constexpr VkImageUsageFlags kOutputUsage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
 
 }  // namespace
+
+float upscaleRatio(UpscaleMode m) {
+    switch (m) {
+        case UpscaleMode::Quality: return 1.5f;
+        case UpscaleMode::Balanced: return 1.7f;
+        case UpscaleMode::Performance: return 2.0f;
+        case UpscaleMode::UltraPerformance: return 3.0f;
+        default: return 1.0f;
+    }
+}
 
 int upscaleJitterPhases(std::uint32_t renderWidth, std::uint32_t displayWidth) {
     const float ratio = static_cast<float>(displayWidth) / static_cast<float>(renderWidth > 0 ? renderWidth : 1);
@@ -59,6 +69,7 @@ Upscale::Upscale(d3d9::Device& device) : dev_(device) {}
 
 Upscale::~Upscale() {
     dev_.setGeometryLodBias(0.0f);
+    dev_.setRenderRatio(1.0f);
     dev_.removePasses(this);
     dev_.setJitterSource(nullptr);
     dropFsr();
@@ -75,43 +86,47 @@ Upscale::~Upscale() {
 void Upscale::apply(UpscaleMode mode, unsigned flip) {
     if (mode == mode_ && flip == flip_) return;
     flip_ = flip;
-    const bool wasAa = mode_ == UpscaleMode::NativeAa;
+    const bool wasFsr = usesFsr(mode_);
     mode_ = mode;
-    if (wasAa) {
+    if (wasFsr) {
         dev_.setGeometryLodBias(0.0f);
         dev_.removePasses(this);
         dropFsr();
         for (const char* k : {"upscale.depth", "upscale.out"}) dev_.transients().release(k);
     }
+    // the render scale (the scene hook shrinks the camera rect by it from the next frame on; the scene image follows)
+    dev_.setRenderRatio(usesFsr(mode) && !failed_ ? upscaleRatio(mode) : 1.0f);
     if (mode == UpscaleMode::Off) {
         dev_.setJitterSource(nullptr);
         spdlog::info("enh: upscale: off");
         return;
     }
-    // render size = display size: 8 phases
-    const int phases = upscaleJitterPhases(1, 1);
+    const float ratio = upscaleRatio(mode);
+    phases_ = static_cast<int>(std::ceil(8.0f * ratio * ratio));
     const float sx = (flip & 1u) != 0 ? -1.0f : 1.0f, sy = (flip & 2u) != 0 ? -1.0f : 1.0f;
-    dev_.setJitterSource([phases, sx, sy](std::uint64_t frame) {
-        const std::array<float, 2> j = upscaleJitter(frame, phases);
+    dev_.setJitterSource([this, sx, sy](std::uint64_t frame) {
+        const std::array<float, 2> j = upscaleJitter(frame, phases_.load());
         return std::array<float, 2>{j[0] * sx, j[1] * sy};
     });
     if (mode == UpscaleMode::JitterOnly) {
-        spdlog::info("enh: upscale: jitter only, jitter {} phases", phases);
+        spdlog::info("enh: upscale: jitter only, jitter {} phases", phases_.load());
         return;
     }
     if (failed_) {
-        spdlog::warn("enh: upscale: native AA is not available this session (see earlier messages): jitter only");
+        spdlog::warn("enh: upscale: FSR is not available this session (see earlier messages): jitter only");
         return;
     }
     if (!layout_.valid()) {
         const VkDescriptorSetLayoutBinding bind{0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
         if (!layout_.create(dev_.ctx(), dev_.bindless(), {&bind, 1})) {
             failed_ = true;
+            dev_.setRenderRatio(1.0f);
             return;
         }
         prep_ = vk::createComputePipeline(dev_.ctx(), layout_.layout(), shader::embedded::spirv("upscale/prep.comp"), "upscale.prep");
         if (prep_ == VK_NULL_HANDLE) {
             failed_ = true;
+            dev_.setRenderRatio(1.0f);
             return;
         }
     }
@@ -119,7 +134,7 @@ void Upscale::apply(UpscaleMode mode, unsigned flip) {
     // FSR's texture LOD bias for the geometry it accumulates (set from the actual sizes every frame in record())
     dev_.setGeometryLodBias(upscaleLodBias(1, 1));
     dev_.addPass(d3d9::inject::Point::AfterMainView, "upscale.fsr", [this](d3d9::PassContext& ctx) { record(ctx); }, this, 100);
-    spdlog::info("enh: upscale: native AA (FSR 3.1), jitter {} phases", phases);
+    spdlog::info("enh: upscale: FSR 3.1 at 1/{:.2f} of the output, jitter {} phases", ratio, phases_.load());
 }
 
 void Upscale::dropFsr() {
@@ -127,33 +142,39 @@ void Upscale::dropFsr() {
     // the context's internal images may still be in use by frames in flight
     dev_.frames().retire([f = std::move(fsr_)]() mutable { f->destroy(); });
     fsr_.reset();
-    fsrWidth_ = fsrHeight_ = 0;
+    fsrRender_ = fsrDisplay_ = {};
 }
 
-bool Upscale::ensureFsr(std::uint32_t width, std::uint32_t height) {
-    if (fsr_ && fsrWidth_ == width && fsrHeight_ == height) return true;
+bool Upscale::ensureFsr(VkExtent2D render, VkExtent2D display) {
+    if (fsr_ && fsrRender_.width == render.width && fsrRender_.height == render.height && fsrDisplay_.width == display.width &&
+        fsrDisplay_.height == display.height) {
+        return true;
+    }
     dropFsr();
     auto f = std::make_shared<vk::Fsr>();
     const std::filesystem::path dll = paths::dataDir() / "amd_fidelityfx_vk.dll";
     vk::FsrCreateInfo ci;
-    ci.maxRenderSize = ci.maxUpscaleSize = {width, height};
+    ci.maxRenderSize = render;
+    ci.maxUpscaleSize = display;
     ci.hdr = true;  // the scene HDR target: linear, before the post chain's tonemapping
     ci.autoExposure = true;
     if (!f->load(dll) || !f->createContext(dev_.ctx(), ci)) {
-        spdlog::error("enh: upscale: FSR is not available ({}): native AA stays off this session", dll.string());
+        spdlog::error("enh: upscale: FSR is not available ({}): it stays off this session", dll.string());
         failed_ = true;
+        dev_.setRenderRatio(1.0f);
         return false;
     }
     fsr_ = std::move(f);
-    fsrWidth_ = width;
-    fsrHeight_ = height;
+    fsrRender_ = render;
+    fsrDisplay_ = display;
     needReset_ = true;
-    spdlog::info("enh: upscale: FSR provider '{}' at {}x{}", fsr_->providerName(), width, height);
+    spdlog::info("enh: upscale: FSR provider '{}': {}x{} -> {}x{}", fsr_->providerName(), render.width, render.height, display.width,
+                 display.height);
     return true;
 }
 
 void Upscale::record(d3d9::PassContext& ctx) {
-    if (ctx.mainView != 1 || mode_ != UpscaleMode::NativeAa || failed_) return;
+    if (ctx.mainView != 1 || !usesFsr(mode_) || failed_) return;
     d3d9::Surface* ds = dev_.depthStencil();
     d3d9::Texture* hdr = ctx.sceneHdr;
     VkCommandBuffer cmd = ctx.cmd;
@@ -162,17 +183,22 @@ void Upscale::record(d3d9::PassContext& ctx) {
         needReset_ = true;
         return;
     }
-    const std::uint32_t w = hdr->desc().width, h = hdr->desc().height;
-    if (ds->width() < w || ds->height() < h || !ensureFsr(w, h)) {
+    // render size = the scene target, display size = the main camera's real rect (the output)
+    const VkExtent2D render{hdr->desc().width, hdr->desc().height};
+    const std::array<std::uint32_t, 2> disp = dev_.displaySize();
+    const VkExtent2D display = disp[0] != 0 && disp[1] != 0 ? VkExtent2D{disp[0], disp[1]} : render;
+    if (ds->width() < render.width || ds->height() < render.height || !ensureFsr(render, display)) {
         ++skipped_;
         needReset_ = true;
         return;
     }
-    // render size = the scene target, display size = the output (native AA: equal; a render scale makes the bias follow)
-    dev_.setGeometryLodBias(upscaleLodBias(w, w));
-    vk::Transients::Entry* motion = dev_.transients().get("gbuffer.motion", {kGbufferMotionFormat, {w, h}, kGbufferMotionUsage});
-    vk::Transients::Entry* depth = dev_.transients().get("upscale.depth", {kDepthFormat, {w, h}, kDepthUsage});
-    vk::Transients::Entry* out = dev_.transients().get("upscale.out", {kOutputFormat, {w, h}, kOutputUsage});
+    // the jitter sequence and the texture bias follow the actual sizes (the next frame's geometry)
+    phases_ = upscaleJitterPhases(render.width, display.width);
+    dev_.setGeometryLodBias(upscaleLodBias(render.width, display.width));
+    vk::Transients::Entry* motion =
+        dev_.transients().get("gbuffer.motion", {kGbufferMotionFormat, {render.width, render.height}, kGbufferMotionUsage});
+    vk::Transients::Entry* depth = dev_.transients().get("upscale.depth", {kDepthFormat, render, kDepthUsage});
+    vk::Transients::Entry* out = dev_.transients().get("upscale.out", {kOutputFormat, display, kOutputUsage});
     if (motion == nullptr || depth == nullptr || out == nullptr || !dev_.readable(ds->texture(), cmd) || !dev_.readable(hdr, cmd)) {
         ++skipped_;
         needReset_ = true;
@@ -183,14 +209,14 @@ void Upscale::record(d3d9::PassContext& ctx) {
     PrepPush push{};
     push.h.frame = ctx.frameBlock;
     push.depthTex = ds->texture()->bindlessSlot();
-    push.width = w;
-    push.height = h;
+    push.width = render.width;
+    push.height = render.height;
     depth->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, prep_);
     layout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, dev_.bindless());
     layout_.pushStorageImage(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, 0, depth->image.view());
     layout_.push(cmd, &push, sizeof(push));
-    vkCmdDispatch(cmd, (w + 7) / 8, (h + 7) / 8, 1);
+    vkCmdDispatch(cmd, (render.width + 7) / 8, (render.height + 7) / 8, 1);
 
     const d3d9::scene::CameraBlock& cam = dev_.camera();
     const d3d9::scene::CameraBlock& last = dev_.lastCamera();
@@ -200,13 +226,14 @@ void Upscale::record(d3d9::PassContext& ctx) {
     d.depth = &depth->image;
     d.motion = &motion->image;
     d.output = &out->image;
-    d.renderSize = d.upscaleSize = {w, h};
+    d.renderSize = render;
+    d.upscaleSize = display;
     const std::array<float, 2> j = dev_.jitter();
     d.jitterX = (flip_ & 1u) != 0 ? -j[0] : j[0];  // what FSR is told: the unflipped sequence
     d.jitterY = (flip_ & 2u) != 0 ? -j[1] : j[1];
     d.sharpness = sharpness_;
-    d.motionScaleX = static_cast<float>(w);  // the G-buffer's motion is in uv (previous - current)
-    d.motionScaleY = static_cast<float>(h);
+    d.motionScaleX = static_cast<float>(render.width);  // the G-buffer's motion is in uv (previous - current)
+    d.motionScaleY = static_cast<float>(render.height);
     d.reset = needReset_ || !cam.prevValid;
     d.frameTimeMs = cam.valid && last.valid ? static_cast<float>(std::clamp((cam.time - last.time) * 1000.0, 1.0, 100.0)) : 16.6f;
     d.cameraNear = cam.nearZ > 0.0f ? cam.nearZ : 10.0f;
@@ -217,24 +244,22 @@ void Upscale::record(d3d9::PassContext& ctx) {
         ++skipped_;
         needReset_ = true;
         failed_ = true;  // a dispatch the DLL rejects will be rejected again
-        spdlog::error("enh: upscale: the FSR dispatch failed: native AA stays off this session");
+        dev_.setRenderRatio(1.0f);
+        spdlog::error("enh: upscale: the FSR dispatch failed: FSR stays off this session");
         return;
     }
     needReset_ = false;
 
-    // the result replaces the scene HDR target (the post chain reads it next)
-    out->image.transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    hdr->image().transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    const VkImageCopy region{{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {w, h, 1}};
-    vkCmdCopyImage(cmd, out->image.image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, hdr->image().image(),
-                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-    hdr->image().transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    // the post chain samples the upscaled image where it would sample the engine's scene image (both by uv)
+    out->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    dev_.setSceneSubstitute(hdr, out->slot);
     ++frames_;
     const double now = dev_.secondsSinceCreate();
     if (now - lastLog_ > 5.0) {
         lastLog_ = now;
-        spdlog::info("enh: upscale: {} frames upscaled ({} skipped), provider '{}', jitter ({:.3f}, {:.3f}) px, reset {}", frames_,
-                     skipped_, fsr_->providerName(), d.jitterX, d.jitterY, d.reset ? "yes" : "no");
+        spdlog::info("enh: upscale: {} frames upscaled ({} skipped), provider '{}', {}x{} -> {}x{}, jitter ({:.3f}, {:.3f}) px, reset {}",
+                     frames_, skipped_, fsr_->providerName(), render.width, render.height, display.width, display.height, d.jitterX,
+                     d.jitterY, d.reset ? "yes" : "no");
     }
 }
 
