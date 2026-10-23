@@ -13,7 +13,15 @@
 // The replacements read the setting each call (compat.high_fps): off = the game's behaviour. A site whose bytes do not match
 // this build is left alone. Any mode (gameplay, not rendering).
 
+#include <cstddef>
+#include <cstdint>
+
 namespace rvk::engine::highfps {
+
+// The climb sites' stub: `mov r9, rsi; jmp [rip + 0]` + the 8-byte target (9 + 8 bytes): the caller's RSI (the
+// gCCharacterMovement_PS) arrives as the target's fourth argument. Writes kRsiStubSize bytes, returns that size.
+inline constexpr std::size_t kRsiStubSize = 17;
+std::size_t writeRsiStub(std::uint8_t* dst, const void* target);
 
 // Redirects the call sites (DllMain: Game.dll / Engine.dll are mapped, nothing is called); false when none could be patched
 bool install();

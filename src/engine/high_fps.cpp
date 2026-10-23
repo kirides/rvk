@@ -168,17 +168,25 @@ void* redirect(const Site& s, NearPage& page, void* target, bool passRsi) {
     void* original = nullptr;
     std::memcpy(&original, reinterpret_cast<const void*>(importSlot), sizeof(void*));
     void* callee = target;
+    std::uint8_t* stub = nullptr;
     if (passRsi) {
-        std::uint8_t* stub = page.take(16);
+        stub = page.take(kRsiStubSize);
         if (stub == nullptr) return nullptr;
-        const std::uint8_t code[] = {0x49, 0x89, 0xF1, 0xFF, 0x25, 0x00, 0x00, 0x00, 0x00};  // mov r9, rsi; jmp [rip]
-        std::memcpy(stub, code, sizeof(code));
-        std::memcpy(stub + sizeof(code), &target, sizeof(void*));
+        writeRsiStub(stub, target);
         callee = stub;
     }
     std::uint8_t* slot = page.take(sizeof(void*));
     if (slot == nullptr) return nullptr;
     std::memcpy(slot, &callee, sizeof(void*));
+    // read back: nothing written later may overlap the stub's jump target or the slot
+    void* check = nullptr;
+    if (stub != nullptr) {
+        std::memcpy(&check, stub + kRsiStubSize - sizeof(void*), sizeof(void*));
+        if (check != target) {
+            spdlog::error("engine: high fps: {}: stub check failed: not patched", s.name);
+            return nullptr;
+        }
+    }
     const auto insn = reinterpret_cast<std::uint8_t*>(moduleBase + s.rva);
     const std::intptr_t disp = reinterpret_cast<std::intptr_t>(slot) - reinterpret_cast<std::intptr_t>(insn + 6);
     if (disp < INT32_MIN || disp > INT32_MAX) return nullptr;
@@ -193,6 +201,14 @@ void* redirect(const Site& s, NearPage& page, void* target, bool passRsi) {
 }
 
 }  // namespace
+
+std::size_t writeRsiStub(std::uint8_t* dst, const void* target) {
+    const std::uint8_t code[] = {0x49, 0x89, 0xF1, 0xFF, 0x25, 0x00, 0x00, 0x00, 0x00};  // mov r9, rsi; jmp [rip + 0]
+    static_assert(sizeof(code) + sizeof(void*) == kRsiStubSize);
+    std::memcpy(dst, code, sizeof(code));
+    std::memcpy(dst + sizeof(code), &target, sizeof(void*));
+    return kRsiStubSize;
+}
 
 float frameScale(float frameTimeSeconds) {
     if (!(frameTimeSeconds > 0.0f)) return 1.0f;
