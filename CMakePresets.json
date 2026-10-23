@@ -24,10 +24,22 @@
         "VCPKG_TARGET_TRIPLET": "x64-windows-static-md",
         "VCPKG_HOST_TRIPLET": "x64-windows-static-md"
       }
+    },
+    {
+      "name": "public-release",
+      "displayName": "Public Release (Ninja, RelWithDebInfo linked without /INCREMENTAL, /OPT:REF /OPT:ICF; CI + nightly)",
+      "inherits": "ninja",
+      "binaryDir": "${sourceDir}/build-release",
+      "cacheVariables": {
+        "CMAKE_SHARED_LINKER_FLAGS_RELWITHDEBINFO": "/DEBUG /INCREMENTAL:NO /OPT:REF /OPT:ICF",
+        "CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO": "/DEBUG /INCREMENTAL:NO /OPT:REF /OPT:ICF",
+        "CMAKE_MODULE_LINKER_FLAGS_RELWITHDEBINFO": "/DEBUG /INCREMENTAL:NO /OPT:REF /OPT:ICF"
+      }
     }
   ],
   "buildPresets": [
     { "name": "debug", "configurePreset": "default", "configuration": "Debug" },
-    { "name": "release", "configurePreset": "default", "configuration": "RelWithDebInfo" }
+    { "name": "release", "configurePreset": "default", "configuration": "RelWithDebInfo" },
+    { "name": "public-release", "configurePreset": "public-release", "configuration": "RelWithDebInfo" }
   ]
 }

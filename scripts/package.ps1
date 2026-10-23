@@ -3,7 +3,7 @@
     Packs the player zip: unpacked onto <Risen>\bin it gives d3d9.dll + rvk\config.toml + rvk\README.txt.
 .EXAMPLE
     .\scripts\package.ps1                                   # build\RelWithDebInfo\d3d9.dll -> out\package\risen-enhanced-graphics.zip
-    .\scripts\package.ps1 -BinDir build-ninja\RelWithDebInfo -Out dist   # CI
+    .\scripts\package.ps1 -BinDir build-release\RelWithDebInfo -Out dist   # CI
 #>
 param(
     [string]$BinDir = 'build\RelWithDebInfo',

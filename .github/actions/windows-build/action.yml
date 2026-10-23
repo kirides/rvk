@@ -1,7 +1,7 @@
 name: Windows build setup
 description: >
-  Visual Studio x64 developer environment, the vcpkg binary cache, the ccache compiler cache and `cmake --preset ninja`
-  (the same setup as risen-spass).
+  Visual Studio x64 developer environment, the vcpkg binary cache, the ccache compiler cache and `cmake --preset
+  public-release` (Ninja + the shipped linker flags: no incremental linking, /OPT:REF /OPT:ICF; setup as in risen-spass).
 
 runs:
   using: composite
@@ -52,7 +52,7 @@ runs:
       shell: pwsh
       run: |
         Write-Host "cl: $((Get-Command cl).Source)  ninja $(ninja --version)  $(ccache --version | Select-Object -First 1)"
-        cmake --preset ninja -DRVK_PCH=OFF -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_C_COMPILER_LAUNCHER=ccache
+        cmake --preset public-release -DRVK_PCH=OFF -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_C_COMPILER_LAUNCHER=ccache
 
     - name: Save the vcpkg binary cache
       if: steps.vcpkg-cache.outputs.cache-hit != 'true'

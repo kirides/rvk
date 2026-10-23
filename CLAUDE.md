@@ -37,8 +37,9 @@ volk is compiled in `src/vk/volk_impl.c` (`VK_NO_PROTOTYPES`, `VK_USE_PLATFORM_W
 The editor's clang diagnostics ("file not found", "undeclared identifier std") are noise: only the MSBuild result counts.
 `rvk_core` has a private PCH (std + spdlog): files outside it (the DLL target, tests) must include what they use.
 The Vulkan SDK (`C:\VulkanSDK\1.4.363.0`, `VULKAN_SDK`) provides validation layers, `spirv-val`, `glslc`, `dxc`.
-CI (`.github/workflows/build.yml`, setup as in risen-spass): `cmake --preset ninja -DRVK_PCH=OFF` + ccache (rvk_core's PCH
-headers force-included instead), d3d9.dll + rvk_tests; the nightly release (tag `nightly`, 03:00 UTC or manual dispatch on
+CI (`.github/workflows/build.yml`, setup as in risen-spass): `cmake --preset public-release -DRVK_PCH=OFF` + ccache (rvk_core's
+PCH headers force-included instead; preset "Public Release" = `ninja` into `build-release` linked with `/INCREMENTAL:NO
+/OPT:REF /OPT:ICF`: the shipped d3d9.dll / d3d9.pdb; the local VS build stays incremental), d3d9.dll + rvk_tests; the nightly release (tag `nightly`, 03:00 UTC or manual dispatch on
 main) ships `risen-enhanced-graphics.zip` = `scripts/package.ps1`: d3d9.dll + `package/rvk/config.toml` (mode vulkan) +
 `package/rvk/README.txt` (player notes: keep it short; the build line is appended) + d3d9.pdb as a separate asset.
 
