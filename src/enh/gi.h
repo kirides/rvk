@@ -147,8 +147,9 @@ private:
     void selectProbes(std::vector<std::uint32_t>& out, std::uint32_t budget);
     void pickLight();
     void logStats(std::uint32_t probes);
-    // stage C: the screen probes after the volume's update (the G-buffer of this frame's solid pass)
-    void recordScreen(d3d9::PassContext& ctx, const GiPassParams& base);
+    // stage C: the screen probes after the z pre-pass (this frame's depth, the RT scene built there), with the last update's
+    // light and volume
+    void recordScreen(d3d9::PassContext& ctx);
 
     d3d9::Device& dev_;
     RtScene* scene_ = nullptr;
@@ -163,6 +164,9 @@ private:
     VkPipeline spTrace_ = VK_NULL_HANDLE, spResolve_ = VK_NULL_HANDLE;
     std::future<VkPipeline> spTraceBuild_, spResolveBuild_;
     std::uint32_t sgiHistory_ = 0;  // the resolved image written last (0 / 1)
+    GiPassParams lastParams_{};
+    GiVolumeHeader lastHeader_{};
+    bool haveLast_ = false;
     bool sgiValid_ = false;
     std::uint64_t screenFrames_ = 0, screenSkipped_ = 0;
     vk::rt::AddressBuffer probes_, depth_, rays_;

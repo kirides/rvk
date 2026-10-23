@@ -25,4 +25,30 @@ vec3 spWorldPos(RvkFrame f, ivec2 px, vec2 size, float z) {
     return w.xyz / w.w;
 }
 
+// the geometric normal of a pixel from the hardware depth (per axis the neighbour nearer in depth: no smearing across
+// edges), towards the camera; the probes run after the z pre-pass, before the G-buffer exists
+vec3 spDepthNormal(RvkFrame f, ivec2 px, vec2 size, uint depthTex) {
+    ivec2 maxP = ivec2(size) - 1;
+    float z0 = rvkFetch2D(depthTex, px).r;
+    vec3 P = spWorldPos(f, px, size, z0);
+    ivec2 pl = max(px - ivec2(1, 0), ivec2(0)), pr = min(px + ivec2(1, 0), maxP);
+    ivec2 pu = max(px - ivec2(0, 1), ivec2(0)), pd = min(px + ivec2(0, 1), maxP);
+    float zl = rvkFetch2D(depthTex, pl).r, zr = rvkFetch2D(depthTex, pr).r;
+    float zu = rvkFetch2D(depthTex, pu).r, zd = rvkFetch2D(depthTex, pd).r;
+    vec3 dx = abs(zr - z0) < abs(z0 - zl) ? spWorldPos(f, pr, size, zr) - P : P - spWorldPos(f, pl, size, zl);
+    vec3 dy = abs(zd - z0) < abs(z0 - zu) ? spWorldPos(f, pd, size, zd) - P : P - spWorldPos(f, pu, size, zu);
+    vec3 n = cross(dx, dy);
+    n = dot(n, n) > 1e-12 ? normalize(n) : vec3(0.0, 1.0, 0.0);
+    if (dot(n, f.cameraPos.xyz - P) < 0.0) n = -n;
+    return n;
+}
+
+// previous uv - this uv of a world point (the camera's motion)
+vec2 spCameraMotion(RvkFrame f, vec3 P) {
+    vec4 c = f.viewProj * vec4(P, 1.0);
+    vec4 q = f.prevViewProj * vec4(P, 1.0);
+    if (c.w <= 1e-6 || q.w <= 1e-6) return vec2(0.0);
+    return (q.xy / q.w - c.xy / c.w) * vec2(0.5, -0.5);
+}
+
 #endif

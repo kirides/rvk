@@ -115,7 +115,9 @@ void Gbuffer::enable() {
     historyValid_ = false;
     // the targets for the frame's solid pass (after the z pre-pass), and for the next frame (after the opaque scene)
     dev_.addPass(d3d9::inject::Point::AfterDepthPrepass, "gbuffer.targets", [this](d3d9::PassContext& ctx) { ensureTargets(ctx); }, this);
-    dev_.addPass(d3d9::inject::Point::AfterOpaque, "gbuffer.ao", [this](d3d9::PassContext& ctx) { recordAo(ctx); }, this, 20);
+    // the AO right after the z pre-pass (the solid pass reads it this frame), the motion fill after the opaque scene
+    dev_.addPass(d3d9::inject::Point::AfterDepthPrepass, "gbuffer.ao", [this](d3d9::PassContext& ctx) { recordAo(ctx); }, this, 20);
+    dev_.addPass(d3d9::inject::Point::AfterOpaque, "gbuffer.motion", [this](d3d9::PassContext& ctx) { recordMotionFill(ctx); }, this, 20);
     dev_.addPass(d3d9::inject::Point::BeforeGui, "gbuffer.debug", [this](d3d9::PassContext& ctx) { recordDebug(ctx); }, this);
     // characters' own motion (the vertex capture runs while the RT scene is active: GI, RT reflections)
     if (scene_ != nullptr) scene_->setDynamic(this, true);
@@ -190,13 +192,49 @@ bool Gbuffer::pipelinesReady() {
     return true;
 }
 
-void Gbuffer::recordAo(d3d9::PassContext& ctx) {
+// the camera's motion in the G-buffer's motion image where no material wrote one (after the opaque scene)
+void Gbuffer::recordMotionFill(d3d9::PassContext& ctx) {
     if (ctx.mainView != 1 || !on_) return;
     ensureTargets(ctx);  // for the next frame's solid pass (the z pre-pass point may not fire)
-    if (!s_.ao) return;
     d3d9::Surface* ds = dev_.depthStencil();
     VkCommandBuffer cmd = ctx.cmd;
     if (!dev_.gbufferWritten() || ds == nullptr || ds->texture() == nullptr || ctx.sceneHdr == nullptr || !pipelinesReady() ||
+        !dev_.readable(ds->texture(), cmd)) {
+        return;
+    }
+    const std::uint32_t w = ctx.sceneHdr->desc().width, h = ctx.sceneHdr->desc().height;
+    vk::Transients::Entry* normal = dev_.transients().get("gbuffer.normal", {kNormalFormat, {w, h}, kNormalUsage});
+    vk::Transients::Entry* motion = dev_.transients().get("gbuffer.motion", {kMotionFormat, {w, h}, kMotionUsage});
+    vk::Transients::Entry* raw = dev_.transients().get("gtao.raw", {VK_FORMAT_R32_SFLOAT, {w, h}});
+    if (normal == nullptr || motion == nullptr || raw == nullptr) return;
+    GbufferPush push{};
+    push.h.frame = ctx.frameBlock;
+    push.h.passId = 2;
+    push.depthTex = ds->texture()->bindlessSlot();
+    push.normalTex = normal->slot;
+    push.width = std::min(w, ds->width());
+    push.height = std::min(h, ds->height());
+    push.flags = 2u;  // gtao.comp: the motion fill only
+    normal->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    motion->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
+    raw->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
+    const VkImageView views[2] = {raw->image.view(), motion->image.view()};
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gtao_);
+    layout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, dev_.bindless());
+    layout_.pushStorageImages(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, views);
+    layout_.push(cmd, &push, sizeof(push));
+    vkCmdDispatch(cmd, (push.width + 7) / 8, (push.height + 7) / 8, 1);
+    motion->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+}
+
+// the AO of this frame from the depth after the z pre-pass (the material shaders of the solid pass read it at their pixel)
+void Gbuffer::recordAo(d3d9::PassContext& ctx) {
+    if (ctx.mainView != 1 || !on_) return;
+    ensureTargets(ctx);
+    if (!s_.ao) return;
+    d3d9::Surface* ds = dev_.depthStencil();
+    VkCommandBuffer cmd = ctx.cmd;
+    if (ds == nullptr || ds->texture() == nullptr || ctx.sceneHdr == nullptr || !pipelinesReady() ||
         !dev_.readable(ds->texture(), cmd)) {
         ++skipped_;
         dev_.setFrameAo({});
@@ -208,8 +246,8 @@ void Gbuffer::recordAo(d3d9::PassContext& ctx) {
     vk::Transients::Entry* motion = dev_.transients().get("gbuffer.motion", {kMotionFormat, {w, h}, kMotionUsage});
     vk::Transients::Entry* raw = dev_.transients().get("gtao.raw", {VK_FORMAT_R32_SFLOAT, {w, h}});
     const std::uint32_t cur = history_ ^ 1u;
-    vk::Transients::Entry* hist[2] = {dev_.transients().get("gtao.history0", {VK_FORMAT_R32_SFLOAT, {w, h}}),
-                                      dev_.transients().get("gtao.history1", {VK_FORMAT_R32_SFLOAT, {w, h}})};
+    vk::Transients::Entry* hist[2] = {dev_.transients().get("gtao.history0", {VK_FORMAT_R16G16_SFLOAT, {w, h}}),
+                                      dev_.transients().get("gtao.history1", {VK_FORMAT_R16G16_SFLOAT, {w, h}})};
     if (normal == nullptr || motion == nullptr || raw == nullptr || hist[0] == nullptr || hist[1] == nullptr) {
         ++skipped_;
         return;
@@ -228,9 +266,9 @@ void Gbuffer::recordAo(d3d9::PassContext& ctx) {
     push.strength = s_.aoStrength;
     push.blend = 0.85f;
     push.frameIndex = static_cast<std::uint32_t>(dev_.frameValue());
+    push.flags = 1u;  // gtao.comp: the AO
 
-    // the raw AO (+ the camera's motion where no material wrote one)
-    normal->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    // the raw AO (the motion image is bound but not written in this mode)
     motion->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
     raw->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
     const VkImageView views1[2] = {raw->image.view(), motion->image.view()};
@@ -242,7 +280,6 @@ void Gbuffer::recordAo(d3d9::PassContext& ctx) {
 
     // filter + temporal into this frame's history
     raw->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    motion->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     hist[history_]->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     hist[cur]->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
     push.aoTex = raw->slot;
@@ -255,7 +292,7 @@ void Gbuffer::recordAo(d3d9::PassContext& ctx) {
     hist[cur]->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     history_ = cur;
     historyValid_ = true;
-    // -> the next frame's material shaders (Gbuffer variants: the reprojected AO scales their ambient)
+    // -> this frame's material shaders (Gbuffer variants: the AO at their pixel scales their ambient)
     dev_.setFrameAo({hist[cur]->slot, dev_.samplerFor(true, true), shader::abi::kFrameAoValid, std::bit_cast<std::uint32_t>(s_.aoStrength)});
     if (aoFrames_++ == 0) {
         spdlog::info("enh: gbuffer: first AO frame {}x{} (radius {:.0f}, strength {:.2f})", push.width, push.height, s_.aoRadius, s_.aoStrength);
@@ -309,9 +346,9 @@ void Gbuffer::recordDebug(d3d9::PassContext& ctx) {
     push.linearSampler = dev_.samplerFor(false, true);
     push.mode = static_cast<std::uint32_t>(s_.debug);
     if (s_.debug == 4) push.aoTex = dev_.frameSgi()[0];  // the screen probes' factor (enh/gi)
-    if (s_.ao && historyValid_) {
+    if (s_.debug != 4 && s_.ao && historyValid_) {
         vk::Transients::Entry* hst = dev_.transients().get(history_ == 0 ? "gtao.history0" : "gtao.history1",
-                                                           {VK_FORMAT_R32_SFLOAT, normal->desc.extent});
+                                                           {VK_FORMAT_R16G16_SFLOAT, normal->desc.extent});
         if (hst != nullptr) push.aoTex = hst->slot;
     }
     const std::uint32_t w = bb->width(), h = bb->height();

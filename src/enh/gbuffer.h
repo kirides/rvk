@@ -78,6 +78,7 @@ private:
     bool ensureTargets(d3d9::PassContext& ctx);
     bool pipelinesReady();
     void recordAo(d3d9::PassContext& ctx);
+    void recordMotionFill(d3d9::PassContext& ctx);
     void recordDebug(d3d9::PassContext& ctx);
 
     d3d9::Device& dev_;

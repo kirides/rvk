@@ -6,6 +6,9 @@
 // and normal: the material shaders scale the DDGI lookup by it (the exact per-surface visibility and near bounce the 1.5 m
 // probe grid cannot hold; the DDGI keeps the direction-dependent SH). rgb = the ratio, a = the probe's view depth (0 = none).
 //
+// Runs right after the z pre-pass (this frame's depth, the TLAS built there): the material shaders of this frame's solid pass
+// read the result at their own pixel (no reprojection lag). The probe's normal: from the depth.
+//
 // One ray per invocation (64 per workgroup = 64 / rays probes; a thread per probe looping over its rays left the GPU with a
 // few hundred long waves: 28 ms in a dense town), the rays of a probe summed in shared memory.
 #extension GL_EXT_ray_query : require
@@ -47,13 +50,11 @@ void main() {
     if (inRange) {
         px = spProbePixel(p, tile);
         z = rvkFetch2D(p.screen.x, px).r;
-        vec4 g = rvkFetch2D(p.screen.y, px);
         viewZ = spViewDepth(f, z);
-        if (viewZ > 0.0 && g.w >= 0.16) {
+        if (viewZ > 0.0) {
             P = spWorldPos(f, px, size, z);
-            N = rvkGiOctDecode(g.xy);
+            N = spDepthNormal(f, px, size, p.screen.x);
             V = normalize(f.cameraPos.xyz - P);
-            if (dot(N, V) < 0.0) N = -N;
             valid = true;
         }
     }

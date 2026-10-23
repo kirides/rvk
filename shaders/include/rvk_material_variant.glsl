@@ -6,7 +6,8 @@
 //                         g_IndoorAmbientColor at c[RVK_MV_IND_REG]: every read of them becomes rvk_gi[1..7] / rvk_gi[0]
 //                         (constant overrides), filled by the prologue: the GI probes (when the FrameBlock has a volume) and
 //                         the reprojected ambient occlusion (G-buffer variants, when the FrameBlock has one)
-//   RVK_MV_GBUFFER        writes the thin G-buffer: location 1 octahedral world normal + id, location 2 motion (enh/gbuffer)
+//   RVK_MV_GBUFFER        writes the thin G-buffer: location 1 octahedral world normal + id, location 2 motion (enh/gbuffer);
+//                         reads this frame's AO and screen probe factor (computed after the z pre-pass) at its pixel
 //   RVK_MV_MOTION         + reads the vertex capture's previous world position (location 15): per-object motion (characters)
 //   RVK_MV_VNORMAL        the prologue's argument is the interpolated world normal (TEXCOORD4), else vec4(0)
 //   RVK_MV_KIND_SKINNED   draws::Kind::Skinned (the G-buffer id of characters)
@@ -14,6 +15,8 @@
 // main() starts with rvkMvPrologue(<normal input or vec4(0)>) and ends with rvkMvEpilogue(oC0) (the C++ side requires colour
 // output 0). The normal-mapped world normal comes from GlslOptions::dotCaptures (the operand the shader dots with
 // g_AmbientLight[0], rvk_gbN); without ambient: the interpolated normal, else the geometric one.
+
+#extension GL_EXT_samplerless_texture_functions : require  // texelFetch of this frame's AO / screen probe images
 
 vec4 rvk_gi[8];  // [0] = g_IndoorAmbientColor, [1..7] = g_AmbientLight
 uint rvk_giCascade = 0xFFu;
@@ -31,6 +34,13 @@ layout(location = 2) out vec2 rvk_gbMotion;  // R16G16F: previous uv - this uv
 layout(location = 15) in vec4 rvk_prevWorld;  // enh::kPrevWorldLocation
 #endif
 
+// this fragment's view depth (the engine's row-vector projection: z' = (z a + b) / z)
+float rvkMvViewDepth() {
+    float a = pc.frame.proj[2][2], b = pc.frame.proj[3][2];
+    float z = gl_FragCoord.z;
+    return abs(z - a) > 1e-9 ? b / (z - a) : 0.0;
+}
+
 #ifdef RVK_MV_AMBIENT
 // GI: the probes' irradiance as the draw's ambient (enh/gi)
 void rvkMvGi(vec3 P, vec3 n, vec3 V) {
@@ -39,18 +49,15 @@ void rvkMvGi(vec3 P, vec3 n, vec3 V) {
     if (!rvkGiLookup(pc.frame, P, n, V, regs, rvk_giCascade)) return;
     RvkGiVolume v = rvkGiVolume(pc.frame);
 #ifdef RVK_MV_GBUFFER
-    // the screen probes (rtgi.md 11): last frame's per-surface correction of the DDGI irradiance at this point's previous
-    // screen position (the registers are per colour channel: c15 / c18 red, c16 / c19 green, c17 / c20 blue, c21.rgb)
+    // the screen probes (rtgi.md 11): this frame's per-surface correction of the DDGI irradiance (the registers are per
+    // colour channel: c15 / c18 red, c16 / c19 green, c17 / c20 blue, c21.rgb)
     uvec4 sg = pc.frame.sgi;
     if ((sg.z & RVK_FRAME_SGI_VALID) != 0u && sg.x != 0u) {
-        vec4 pp = pc.frame.prevViewProj * vec4(P, 1.0);
-        vec2 suv = pp.xy / max(pp.w, 1e-6) * vec2(0.5, -0.5) + 0.5;
-        // outside last frame's screen (turning: the strip that just came into view) the nearest edge texel continues it: no
-        // hard edge between corrected and uncorrected light
-        suv = clamp(suv, vec2(0.0), vec2(1.0));
-        if (pp.w > 1e-4) {
-            vec4 s = textureLod(sampler2D(t2D[sg.x], samp[sg.y]), suv, 0.0);
-            if (s.a > 0.5) {
+        // this frame's (computed after the z pre-pass) at this pixel, when its depth is this surface's
+        vec4 s = texelFetch(t2D[sg.x], ivec2(gl_FragCoord.xy), 0);
+        float myZ = rvkMvViewDepth();
+        {
+            if (s.a > 0.0 && abs(s.a - myZ) < max(myZ * 0.02, 4.0)) {
                 vec3 k = clamp(s.rgb, vec3(0.0), vec3(2.0));
                 rvk_mvSgi = k;
                 for (int c = 0; c < 3; ++c) {
@@ -86,15 +93,15 @@ void rvkMvGi(vec3 P, vec3 n, vec3 V) {
 }
 
 #ifdef RVK_MV_GBUFFER
-// ambient occlusion (enh/gbuffer GTAO): last frame's image at this point's previous screen position scales the ambient
+// ambient occlusion (enh/gbuffer GTAO): this frame's (after the z pre-pass) at this pixel scales the ambient
 void rvkMvAo(vec3 P) {
     uvec4 a = pc.frame.ao;
     if ((a.z & RVK_FRAME_AO_VALID) == 0u || a.x == 0u) return;
-    vec4 pp = pc.frame.prevViewProj * vec4(P, 1.0);
-    if (pp.w <= 1e-4) return;
-    vec2 uv = pp.xy / pp.w * vec2(0.5, -0.5) + 0.5;
-    uv = clamp(uv, vec2(0.0), vec2(1.0));  // outside last frame's screen: its edge continues (no hard edge when turning)
-    float ao = clamp(textureLod(sampler2D(t2D[a.x], samp[a.y]), uv, 0.0).r, 0.0, 1.0);
+    // this frame's (computed after the z pre-pass) at this pixel, when its depth is this surface's
+    vec2 s = texelFetch(t2D[a.x], ivec2(gl_FragCoord.xy), 0).rg;
+    float myZ = rvkMvViewDepth();
+    if (s.g <= 0.0 || abs(s.g - myZ) > max(myZ * 0.02, 4.0)) return;
+    float ao = clamp(s.r, 0.0, 1.0);
     float f = mix(1.0, ao, clamp(uintBitsToFloat(a.w), 0.0, 1.0));
     rvk_mvAo = f;
     for (int i = 1; i < 7; ++i) rvk_gi[i] *= f;

@@ -257,7 +257,8 @@ private:
     bool failed_ = false;
     std::uint8_t views_ = 3;
     bool keepContents_ = false;
-    std::uint32_t passId_ = 0;
+    std::uint32_t passId_ = 0, passId2_ = 0;
+    std::uint64_t builtFrame_ = 0;  // the frame whose TLAS is built (once: at the z pre-pass, else at AfterOpaque)
 
     // BLAS cache
     std::unordered_map<rt::BlasKey, std::uint64_t, rt::BlasKeyHash> blasByKey_;

@@ -2,7 +2,9 @@
 // Screen probe resolve (M10 stage C P8, src/enh/gi.cpp, docs/research/rtgi.md 11): per pixel the 2 x 2 nearest tile probes,
 // weighted bilinearly x depth x normal similarity (the probes' own pixels in the G-buffer), then temporal accumulation with
 // the previous frame's result at the motion-reprojected position, clamped to the probes' range. rgb = the GI ratio the
-// material shaders apply next frame (reprojected), a = 1 where probes covered the pixel.
+// material shaders of this frame read at their own pixel, a = the pixel's view depth (0 = no probe covered it): a draw whose
+// depth differs (not in the z pre-pass: characters, alpha) leaves it alone. Normals and motion from the depth (after the z
+// pre-pass, before the G-buffer).
 
 #define RVK_PASS_SHADER 1
 #include "rvk_abi.glsl"
@@ -21,14 +23,14 @@ void main() {
     ivec2 sizeI = ivec2(p.screen2.zw);
     if (px.x >= sizeI.x || px.y >= sizeI.y) return;
     vec2 size = vec2(sizeI);
-    float viewZ = spViewDepth(f, rvkFetch2D(p.screen.x, px).r);
-    vec4 g = rvkFetch2D(p.screen.y, px);
-    if (viewZ <= 0.0 || g.w < 0.16) {
+    float zpx = rvkFetch2D(p.screen.x, px).r;
+    float viewZ = spViewDepth(f, zpx);
+    if (viewZ <= 0.0) {
         imageStore(outResolved, px, vec4(1.0, 1.0, 1.0, 0.0));
         return;
     }
-    vec3 N = rvkGiOctDecode(g.xy);
-    vec3 P = spWorldPos(f, px, size, rvkFetch2D(p.screen.x, px).r);
+    vec3 N = spDepthNormal(f, px, size, p.screen.x);
+    vec3 P = spWorldPos(f, px, size, zpx);
     float tsize = float(max(p.screen2.x, 1u));
     ivec2 grid = ivec2(p.screen.zw);
     ivec2 centre = clamp(ivec2((vec2(px) + 0.5) / tsize), ivec2(0), grid - 1);
@@ -49,7 +51,7 @@ void main() {
         vec3 pp = spWorldPos(f, ppx, size, rvkFetch2D(p.screen.x, ppx).r);
         float plane = abs(dot(pp - P, N));
         w *= exp(-plane / max(viewZ * 0.01, 2.0));
-        vec3 pn = rvkGiOctDecode(rvkFetch2D(p.screen.y, ppx).xy);
+        vec3 pn = spDepthNormal(f, ppx, size, p.screen.x);
         w *= pow(max(dot(pn, N), 0.0), 4.0);
         sum += pr.rgb * w;
         wsum += w;
@@ -57,19 +59,20 @@ void main() {
         hi = max(hi, pr.rgb);
     }
     vec4 result = vec4(1.0, 1.0, 1.0, 0.0);
-    if (wsum > 1e-4) result = vec4(sum / wsum, 1.0);
+    bool covered = wsum > 1e-4;
+    if (covered) result = vec4(sum / wsum, viewZ);
     // temporal accumulation
     if (p.screen3.y != 0u) {
         vec2 uv = (vec2(px) + 0.5) / size;
-        vec2 prev = uv + rvkFetch2D(p.screen3.z, px).xy;
+        vec2 prev = uv + spCameraMotion(f, P);
         if (all(greaterThanEqual(prev, vec2(0.0))) && all(lessThanEqual(prev, vec2(1.0)))) {
             vec4 h = rvkSample2DLod(p.screen3.y, p.screen3.w, prev, 0.0);
-            if (h.a > 0.5) {
-                if (result.a > 0.5) {
+            if (h.a > 0.0) {
+                if (covered) {
                     vec3 hc = clamp(h.rgb, lo - 0.25, hi + 0.25);
                     result.rgb = mix(result.rgb, hc, p.screen4.z);
                 } else {
-                    result = vec4(h.rgb, 1.0);
+                    result = vec4(h.rgb, viewZ);
                 }
             }
         }

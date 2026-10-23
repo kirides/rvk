@@ -777,6 +777,7 @@ void Device::present() {
     firings_.endFrame();
     shadowDepthMaps_ = 0;
     draws_.endFrame();
+    capturedPrev_.swap(captured_);
     captured_.clear();
     // the G-buffer's attachments are armed once a frame's solid pass found every pipeline / variant they need
     if (gbuf_.normal != nullptr && !gbufArmed_) {

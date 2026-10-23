@@ -139,6 +139,8 @@ void Gi::enable() {
     dev_.addDrawObserver(this);
     // after the RT scene's pass (order -100): its TLAS of this frame
     passId_ = dev_.addPass(d3d9::inject::Point::AfterOpaque, "gi", [this](d3d9::PassContext& ctx) { record(ctx); }, this, 10);
+    // the screen probes right after the z pre-pass (after the RT scene's build there): the solid pass reads them this frame
+    dev_.addPass(d3d9::inject::Point::AfterDepthPrepass, "gi.screen", [this](d3d9::PassContext& ctx) { recordScreen(ctx); }, this, 10);
     for (Cascade& c : cascades_) {
         c.valid = false;
         c.priority.clear();
@@ -160,8 +162,9 @@ void Gi::disable() {
     sgiValid_ = false;
     for (const char* k : {"sgi.probes", "sgi.resolved0", "sgi.resolved1"}) dev_.transients().release(k);
     dev_.removeDrawObserver(this);
-    if (passId_ != 0) dev_.removePass(passId_);
+    dev_.removePasses(this);
     passId_ = 0;
+    haveLast_ = false;
     scene_->setDynamic(this, false);
     scene_->release(this);
     destroyResources();
@@ -542,7 +545,10 @@ void Gi::record(d3d9::PassContext& ctx) {
                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
     }
     dev_.setGiHeader({reinterpret_cast<const std::uint8_t*>(&hd), sizeof(hd)});
-    if (s_.screen > 0) recordScreen(ctx, p);
+    // the screen probes of the next frame trace with this update's light and volume (they run before the solid pass)
+    lastParams_ = p;
+    lastHeader_ = hd;
+    haveLast_ = true;
     ++passes_;
     probesTraced_ += n;
     if (updatesTotal_++ == 0) {
@@ -556,8 +562,9 @@ void Gi::record(d3d9::PassContext& ctx) {
 
 // ---- stage C: the screen probes (rtgi.md 11) ----
 
-void Gi::recordScreen(d3d9::PassContext& ctx, const GiPassParams& base) {
-    // the pipelines, this frame's G-buffer, the main view's depth
+void Gi::recordScreen(d3d9::PassContext& ctx) {
+    if (ctx.mainView != 1 || !on_ || s_.screen == 0 || !haveLast_) return;
+    // the pipelines, the main view's depth after the z pre-pass, the RT scene built there
     if (spTrace_ == VK_NULL_HANDLE || spResolve_ == VK_NULL_HANDLE) {
         for (auto [future, out] : {std::pair{&spTraceBuild_, &spTrace_}, std::pair{&spResolveBuild_, &spResolve_}}) {
             if (*out != VK_NULL_HANDLE || !future->valid() || future->wait_for(std::chrono::seconds(0)) != std::future_status::ready) continue;
@@ -570,8 +577,7 @@ void Gi::recordScreen(d3d9::PassContext& ctx, const GiPassParams& base) {
     }
     d3d9::Surface* ds = dev_.depthStencil();
     VkCommandBuffer cmd = ctx.cmd;
-    if (!dev_.gbufferWritten() || ctx.sceneHdr == nullptr || ds == nullptr || ds->texture() == nullptr || !dev_.rtSceneValid() ||
-        !dev_.readable(ds->texture(), cmd)) {
+    if (ctx.sceneHdr == nullptr || ds == nullptr || ds->texture() == nullptr || !dev_.rtSceneValid() || !dev_.readable(ds->texture(), cmd)) {
         ++screenSkipped_;
         dev_.setFrameSgi({});
         sgiValid_ = false;
@@ -579,8 +585,6 @@ void Gi::recordScreen(d3d9::PassContext& ctx, const GiPassParams& base) {
     }
     const std::uint32_t w = std::min(ctx.sceneHdr->desc().width, ds->width()), h = std::min(ctx.sceneHdr->desc().height, ds->height());
     const std::uint32_t sw = ctx.sceneHdr->desc().width, sh = ctx.sceneHdr->desc().height;
-    vk::Transients::Entry* normal = dev_.transients().get("gbuffer.normal", {kGbufferNormalFormat, {sw, sh}, kGbufferNormalUsage});
-    vk::Transients::Entry* motion = dev_.transients().get("gbuffer.motion", {kGbufferMotionFormat, {sw, sh}, kGbufferMotionUsage});
     // low: 16 x 16 tiles x 8 rays, medium: 16 x 16 x 16, high: 8 x 8 x 16 (1600 x 900: 5.7k / 5.7k / 22.5k probes)
     const std::uint32_t tile = s_.screen == 3 ? 8u : 16u;
     const std::uint32_t rays = s_.screen == 1 ? 8u : 16u;
@@ -590,13 +594,18 @@ void Gi::recordScreen(d3d9::PassContext& ctx, const GiPassParams& base) {
     vk::Transients::Entry* res[2] = {dev_.transients().get("sgi.resolved0", {VK_FORMAT_R16G16B16A16_SFLOAT, {sw, sh}}),
                                      dev_.transients().get("sgi.resolved1", {VK_FORMAT_R16G16B16A16_SFLOAT, {sw, sh}})};
     const vk::RingAlloc pa = dev_.frames().allocate(sizeof(GiPassParams), 16);
-    if (normal == nullptr || motion == nullptr || probes == nullptr || res[0] == nullptr || res[1] == nullptr || pa.ptr == nullptr) {
+    const vk::RingAlloc ha = dev_.frames().allocate(sizeof(GiVolumeHeader), 16);
+    if (probes == nullptr || res[0] == nullptr || res[1] == nullptr || pa.ptr == nullptr || ha.ptr == nullptr) {
         ++screenSkipped_;
         return;
     }
-    GiPassParams p = base;
+    // the last update's light and volume header (a copy in this frame's ring)
+    std::memcpy(ha.ptr, &lastHeader_, sizeof(lastHeader_));
+    GiPassParams p = lastParams_;
+    split(ha.address, &p.volume[0]);
+    p.volume[3] = static_cast<std::uint32_t>(dev_.frameValue());
     p.screen[0] = ds->texture()->bindlessSlot();
-    p.screen[1] = normal->slot;
+    p.screen[1] = 0;
     p.screen[2] = gw;
     p.screen[3] = gh;
     p.screen2[0] = tile;
@@ -605,7 +614,7 @@ void Gi::recordScreen(d3d9::PassContext& ctx, const GiPassParams& base) {
     p.screen2[3] = h;
     p.screen3[0] = probes->slot;
     p.screen3[1] = sgiValid_ ? res[sgiHistory_]->slot : 0u;
-    p.screen3[2] = motion->slot;
+    p.screen3[2] = 0;
     p.screen3[3] = dev_.samplerFor(true, true);
     p.screen4[0] = 4000.0f;  // ray reach (world units); a ray that runs out takes the probe volume's light at its end
     p.screen4[1] = 2.0f;     // ratio cap
@@ -616,9 +625,7 @@ void Gi::recordScreen(d3d9::PassContext& ctx, const GiPassParams& base) {
     push.h.passId = passId_;
     split(pa.address, push.params);
 
-    // the G-buffer (written by the solid pass) for sampling
-    normal->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    motion->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    // the DDGI probes (last frame's update) -> these reads: ordered by the update's own end barrier
     probes->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, spTrace_);
     screenLayout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, dev_.bindless());
@@ -637,7 +644,7 @@ void Gi::recordScreen(d3d9::PassContext& ctx, const GiPassParams& base) {
     res[cur]->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     sgiHistory_ = cur;
     sgiValid_ = true;
-    // -> the next frame's material shaders (Gbuffer variants: the reprojected factor on their DDGI lookup)
+    // -> this frame's material shaders (Gbuffer variants: the factor on their DDGI lookup at their pixel)
     dev_.setFrameSgi({res[cur]->slot, dev_.samplerFor(true, true), shader::abi::kFrameSgiValid, 0u});
     if (screenFrames_++ == 0) {
         spdlog::info("enh: gi: screen probes: {}x{} probes ({} px tiles, {} rays each) over {}x{}", gw, gh, tile, rays, w, h);

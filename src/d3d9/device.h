@@ -776,6 +776,10 @@ public:
     bool vertexCaptured(VkDeviceAddress buffer) const {
         return std::find(captured_.begin(), captured_.end(), buffer) != captured_.end();
     }
+    // ... ran in the previous frame (the RT scene built after the z pre-pass uses the previous frame's captures)
+    bool vertexCapturedPrev(VkDeviceAddress buffer) const {
+        return std::find(capturedPrev_.begin(), capturedPrev_.end(), buffer) != capturedPrev_.end();
+    }
     // one-line status texts of enhancements for the overlay's performance panel (key -> text; empty text removes it)
     void setStatus(const std::string& key, std::string text) {
         if (text.empty()) status_.erase(key);
@@ -1171,6 +1175,7 @@ private:
     std::uint64_t giDrawCount_ = 0;
     VkDeviceAddress captureRequest_ = 0;    // the draw being prepared (DrawObserver::observe)
     std::vector<VkDeviceAddress> captured_;  // this frame's captures that ran
+    std::vector<VkDeviceAddress> capturedPrev_;  // the previous frame's
     std::array<VariantProvider, static_cast<std::size_t>(VariantSlot::Count)> variantProviders_;
     struct VariantJob {
         std::shared_ptr<Shader> shader;

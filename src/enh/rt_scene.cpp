@@ -104,7 +104,10 @@ void RtScene::activate() {
     active_ = true;
     dev_.addDrawObserver(this);
     // before every other pass at AfterOpaque (they may trace it)
-    passId_ = dev_.addPass(d3d9::inject::Point::AfterOpaque, "rt.scene", [this](d3d9::PassContext& ctx) { record(ctx); }, this, -100);
+    // built right after the z pre-pass (the consumers that shade this frame's surfaces need it before the solid pass: the
+    // screen probes); AfterOpaque builds it in frames without a z pre-pass
+    passId_ = dev_.addPass(d3d9::inject::Point::AfterDepthPrepass, "rt.scene", [this](d3d9::PassContext& ctx) { record(ctx); }, this, -100);
+    passId2_ = dev_.addPass(d3d9::inject::Point::AfterOpaque, "rt.scene", [this](d3d9::PassContext& ctx) { record(ctx); }, this, -100);
     lastLog_ = std::chrono::steady_clock::now();
     iv_ = {};
     spdlog::info("rt: scene: on (TLAS cap {} instances, {} builds / {}k triangles per frame, BLAS budget {} MiB, radius {:.0f})",
@@ -117,7 +120,8 @@ void RtScene::deactivate() {
     active_ = false;
     dev_.removeDrawObserver(this);
     if (passId_ != 0) dev_.removePass(passId_);
-    passId_ = 0;
+    if (passId2_ != 0) dev_.removePass(passId2_);
+    passId_ = passId2_ = 0;
     logStats(true);
     registry_.clear();
     dropDynamic(true, 0);
@@ -1364,7 +1368,10 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
 // the frame's captured characters -> one BLAS each: refit while the topology holds (30 times), else a full build
 void RtScene::buildDynamic(VkCommandBuffer cmd, std::uint64_t frame) {
     if (frame % 120 == 0) dropDynamic(false, frame);
-    if (!dynamic_ || dynFrame_ != frame || dyn_.empty()) return;
+    // the captures of this frame (a build at AfterOpaque) or, built after the z pre-pass, of the previous frame (its solid
+    // pass captured them; its ring memory lives one frame more)
+    const bool current = dynFrame_ == frame;
+    if (!dynamic_ || (!current && dynFrame_ + 1 != frame) || dyn_.empty()) return;
     vk::Context& ctx = dev_.ctx();
     constexpr VkBuildAccelerationStructureFlagsKHR kFlags =
         VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
@@ -1379,11 +1386,11 @@ void RtScene::buildDynamic(VkCommandBuffer cmd, std::uint64_t frame) {
     VkDeviceSize scratchTotal = 0;
     for (std::size_t i = 0; i < dyn_.size(); ++i) {
         DynDraw& d = dyn_[i];
-        if (!dev_.vertexCaptured(d.capture)) continue;
+        if (!(current ? dev_.vertexCaptured(d.capture) : dev_.vertexCapturedPrev(d.capture))) continue;
         DynBlas& b = dynBlas_[d.key];
         b.lastCapture = d.capture;
         b.lastSlots = d.slots;
-        b.lastCaptureFrame = frame;
+        b.lastCaptureFrame = dynFrame_;
         VkAccelerationStructureGeometryKHR g{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
         g.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
         g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
@@ -1496,6 +1503,8 @@ void RtScene::dropDynamic(bool all, std::uint64_t frame) {
 
 void RtScene::record(d3d9::PassContext& ctx) {
     if (ctx.mainView != 1 || !active_ || failed_) return;
+    if (builtFrame_ == dev_.frameValue()) return;  // built at the z pre-pass already
+    builtFrame_ = dev_.frameValue();
     if (!ensureResources()) return;
     const auto t0 = std::chrono::steady_clock::now();
     vk::Context& vctx = dev_.ctx();
@@ -1552,7 +1561,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
 
     // characters built this frame (setDynamic) after the world's instances
     std::uint32_t dynCount = 0;
-    if (dynFrame_ == frame) {
+    if (dynFrame_ + 1 >= frame) {
         for (const DynDraw& d : dyn_) dynCount += d.built ? 1u : 0u;
     }
     dynCount = std::min(dynCount, tlas_[slot].capacity / 8);
@@ -1677,7 +1686,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
         std::uint32_t k = worldCount;
         for (const DynDraw& d : dyn_) {
             if (k >= n) break;
-            if (dynFrame_ != frame || !d.built) continue;
+            if (dynFrame_ + 1 < frame || !d.built) continue;
             const auto it = dynBlas_.find(d.key);
             if (it == dynBlas_.end() || !it->second.built) continue;
             const DynBlas& b = it->second;

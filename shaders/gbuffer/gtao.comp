@@ -9,6 +9,7 @@
 
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 1, binding = 0, r32f) uniform writeonly image2D outAo;
+// pc.flags: 1 = the AO (after the z pre-pass), 2 = the G-buffer's motion fill (after the opaque scene)
 layout(set = 1, binding = 1, rg16f) uniform image2D motionImage;
 
 const int GB_SLICES = 2;
@@ -29,9 +30,12 @@ void main() {
     vec2 size = vec2(pc.width, pc.height);
     vec2 uv = (vec2(p) + 0.5) / size;
     float z = depthAt(p);
-    vec4 nrm = rvkFetch2D(pc.normalTex, p);
-    // the camera's motion where no material pass wrote one (id 0)
-    if (nrm.w < 0.16) imageStore(motionImage, p, vec4(gbCameraMotion(f, gbWorldPos(f, uv, z)), 0.0, 0.0));
+    if ((pc.flags & 2u) != 0u) {
+        // the camera's motion where no material pass wrote one (id 0)
+        vec4 nrm = rvkFetch2D(pc.normalTex, p);
+        if (nrm.w < 0.16) imageStore(motionImage, p, vec4(gbCameraMotion(f, gbWorldPos(f, uv, z)), 0.0, 0.0));
+        return;
+    }
     if (z >= 1.0) {
         imageStore(outAo, p, vec4(1.0));
         return;
