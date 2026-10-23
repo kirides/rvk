@@ -3,7 +3,7 @@
 Build and measurements of 2026-10-23 (RX 7900 XTX). Legend: [C] confirmed (measured), [I] inferred.
 Built: **native AA** (FSR 3.1 at render size = display size) and **render scale / quality modes** (section 7) through AMD's
 signed FFX API DLL, with an **automatic reactive mask** for translucent effects (section 8). Open: explicit / water masks,
-FSR 4, uncapped GPU cost (section 10).
+FSR 4, uncapped GPU cost (section 11). Per-object motion for characters / moving rigid draws: section 9.
 
 ## 1. Code
 
@@ -164,7 +164,58 @@ spot. The rain's thin 1 px streaks are inherently fainter at 1 / 1.5 resolution;
 mask. **Not in the mask:** the sea is in the Refracted pass, before the BeforeAlpha snapshot: it is not reactive and
 accumulates with background motion (a transparency and composition mask would be needed).
 
-## 9. Cost
+## 9. Per-object motion (characters, moving rigid draws)
+
+**Before [C].** The G-buffer's motion (`enh/gbuffer`, `GbufferMotion` pixel variant) = the camera motion of the surface point
+for every material pixel. Per-object motion existed only for skinned draws and only while the RT scene was active (GI / RT
+reflections): `enh/rt_scene`'s capture (`VariantSlot::Capture`, SPIR-V tag `cap3`: the vertex shader writes each vertex's world
+position, = invViewProj * clip position before the posFix / jitter, into a ring buffer indexed by the index buffer value; the
+header holds the slots + the previous frame's capture address) was driven by its `DrawObserver`, registered only while the RT
+scene is active. With only FSR on, characters had camera-only motion: the idle animation accumulated misregistered (blur / lost
+detail).
+
+**Code.** `src/enh/object_motion.{h,cpp}`: `ObjectMotion : d3d9::DrawObserver`, registered while an FSR mode is on and
+`upscale.object_motion` (advanced, default on). It observes Main view / Solid pass draws of `Kind::Skinned` (skipped while
+`RtScene::capturingCharacters()` = active && dynamic) and `Kind::StaticMesh` (rigid). Key = entity pointer x vertex / index
+buffer ids + generations x range; per key `State{previous capture address + slots + frame, hash}`. Per draw: resolve the last
+request (it ran if `Device::vertexCapturedPrev(addr)`); skinned draws are always captured; rigid draws only while the hash of
+the VS constants c31..c37 (`g_vInstanceMisc` / `g_vInstanceData`: placement) changed in the last 4 frames (a fade's alpha
+changes them too: harmless, previous position = current, motion = the camera's). It allocates 16 + 32 x slots bytes from the
+frame ring (slots = highest index of the range, scanned once; rigid cap 200k slots, max 256 captures per frame), writes the
+header (slots, previous capture) and calls `Device::requestVertexCapture`; the G-buffer draw path then uses the Capture vertex
+variant + the `GbufferMotion` pixel variant (`draw.cpp`: `gbufMaterial && scopeGbuf_`). Same tag `cap3` as the RT scene.
+Requires `vertexPipelineStoresAndAtomics`. rvk.log: `enh: object motion: on (skinned yes, moving rigid draws yes)` and every
+10 s `N captures so far (M rigid draws seen moving), K tracked draws`. Validation (testdemo, `-Validation -SyncValidation`,
+quality): 0 errors, only the known `rw_luma_history` warning. In game: ~75-80k captures in a 90 s run, 150-200 rigid draws seen
+moving (includes things that sway / swing: the detector is placement-based, not weapon-specific).
+
+**Test caveat [C].** `mods/rvkcompare` calls `risen.debug.time_freeze(true)` before each capture (unless `spot.freeze ==
+false`): animations stop, so characters do not animate in the existing spots (also `hero_closeup` etc.) and the benefit cannot
+show there. New explicit spots `hero_idle` (hero, `freeze = false`, camera distance 260) and `pub_idle` (pub; its NPCs need
+`-Param show_actors=1`) run the clock.
+
+**Results [C]** (`water-compare -Spots hero_idle -Param show_actors=1 -Burst 8 -Interval 1`; shirt region (750,360)-(850,500) of
+the 1600x900 capture; engine = upscale off; dirs `out\water\20261023-211643` native AA motion off, `-211936` native on,
+`-212102` quality off, `-212223` quality on): frame-to-frame mean abs difference over the 8 burst frames (flicker):
+
+| mode | object motion off | on |
+|---|---|---|
+| native AA | 0.35 | 0.32 |
+| quality | 0.65 | 0.47 (-28 %) |
+
+Crops (face / shirt): quality without object motion smears the face and shirt (the blur and lost detail in idle poses), with it
+clearly crisper; native AA looks close to the engine's picture either way (cloth fibre detail softer: Laplacian-variance ratio
+0.44-0.46). The Laplacian-variance ratio does **not** rank on / off correctly (quality 0.15 off vs 0.11 on: the noisier picture
+has more high-frequency energy): use flicker + crops. Quality still loses fine cloth detail vs the engine (renders at 1 / 1.5,
+ratio 0.11-0.15).
+
+**Not tested:** weapons (no scene with a drawn weapon: needs a guard / the hero with the weapon drawn; check that the rigid path
+catches it: it should show in the "rigid draws seen moving" count and get motion). **Known gaps:** characters in the shadow /
+alpha passes (only the solid pass is captured: alpha-blended parts such as hair cards / cloaks keep camera motion), instanced
+and non-indexed draws (the capture variant needs indexed, non-instanced), SpeedTree wind (sway: camera motion only), skinned
+draws beyond 256 captures per frame; while the RT scene is active its own capture is used (its own limits).
+
+## 10. Cost
 
 Native AA / render scale, jungle hold [C, noisy]: the Radeon Chill profile caps the world at ~80 fps (p50 12.4 ms in every
 mode), so fps says nothing. GPU ms / frame: off 3.4-7.8, native AA 5.5, quality 4.1-5.9, performance 3.4-4.1. CPU recording of
@@ -175,16 +226,17 @@ Uncapped attempt (`RisenTest.exe`, 2560x1440) [C, contaminated]: `AION2.exe` use
 phases the FSR pass (`pass upscale.fsr`, `-PerfFrame 5000`) took 0.63 ms native AA / 0.42 quality / 0.33 performance; CPU
 recording of the injected passes ~0.3 ms. A clean total frame cost needs the GPU to itself (to repeat).
 
-## 10. Open
+## 11. Open
 
-* Render scale: the uncapped GPU cost (section 9), refcompare thresholds for scaled renders (recalibrate).
+* Render scale: the uncapped GPU cost (section 10), refcompare thresholds for scaled renders (recalibrate).
 * Reactive masks: the automatic form is built (section 8). Open: explicit per-draw reactive output (particle / precipitation
   draws writing a reactive value: the more precise alternative), a transparency and composition mask for water (the sea is
   not reactive), a debug view of the mask, a test with real spell effects.
-* Motion of moving non-skinned objects is camera-only.
+* Per-object motion is built for skinned and moving rigid draws (section 9). Still camera-only: SpeedTree wind, alpha-pass
+  parts of characters, instanced / non-indexed draws; weapons untested (no scene with a drawn weapon).
 * Exposure input (auto now).
 * FSR 4: untested until an RDNA4 card (no provider on RDNA3, section 2).
 * The engine's DoF / post at render size (section 7).
 * Jitter in shadow-mask / SSR lookups: sub-pixel mismatch (accepted).
-* GPU cost (section 9); loading / menu transitions rely on the reset.
+* GPU cost (section 10); loading / menu transitions rely on the reset.
 * Refcompare with upscale off must stay identical to before (not run yet).
