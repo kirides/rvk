@@ -55,10 +55,11 @@ Enum, default, range or options, flags) plus its value. Values are doubles inter
 | `vulkan.fullscreen` | enum `borderless` / `exclusive` | `borderless` | live (display mode / swapchain) | exclusive: the monitor switches to the game's resolution + refresh while in front; needs the capability "Exclusive fullscreen" (window-mode.md 8) |
 | `vulkan.exclusive_acquire` | bool (hidden) | on | live | exclusive fullscreen also takes Vulkan's exclusive mode (diagnostics, window-mode.md 8.3) |
 | `vulkan.adapter` | int -1..15 | -1 | restart | Vulkan physical device (-1 = best discrete GPU) |
-| `overlay.toggle_key` | enum (none, f1..f12, insert, home, end, page_up, page_down, pause, scroll_lock) | `f10` | live | NoAB |
-| `overlay.ab_key` | same | `f11` | live | NoAB |
+| `overlay.toggle_key` | enum (none, f1..f12, insert, home, end, page_up, page_down, pause, scroll_lock) | `f11` | live | NoAB (F11 since 2026-10-23: GD3D11 players know it; was F10) |
+| `overlay.ab_key` | same | `f10` | live | NoAB, Debug (the hotkey only acts in debug mode; outside it the game gets the key) |
 | `overlay.fps_counter` | bool | false | live | small fps readout while the overlay is closed; NoAB |
-| `overlay.ab_badge` | bool | true | live | flip badge (1.5 s) and a "B" tag while side B is active; NoAB |
+| `overlay.ab_badge` | bool | true | live | flip badge (1.5 s) and a "B" tag while side B is active; NoAB, Debug |
+| `overlay.debug_mode` | bool | false | live | the registry's debug switch (2.5); NoAB |
 | `rt.allow` | bool | true | restart | enable the ray tracing tier at device creation; requires `RayTracingHardware` (greyed + off without it); docs/research/raytracing.md |
 
 ### 2.3 Files and precedence (decision)
@@ -73,20 +74,36 @@ Enum, default, range or options, flags) plus its value. Values are doubles inter
   `adapter` >= 0): the setting is *locked* for the session (read-only in the overlay with "(set by config.toml)",
   `rvk_setting_set` returns `RVK_SETTING_LOCKED`, excluded from A/B); the player's own value stays in settings.toml.
   `run.ps1` always writes `vsync = "engine"` and `max_fps = 0.0`, i.e. no lock unless `-Vsync` / `-MaxFps` are given.
-* Test runs: `run.ps1` deletes settings.toml before each run (reproducible renderer tests, refcompare included) unless
-  `-KeepSettings`; `-Setting 'vulkan.max_fps=60','vulkan.vsync=off'` writes a fresh one.
+* Test runs: `run.ps1` writes a fresh settings.toml before each run (reproducible renderer tests, refcompare included):
+  the **test baseline** (`overlay.debug_mode = true`; `water.enabled` / `shadows.enabled` false, `water.quality` /
+  `water.ocean_quality` / `rt.reflections` medium, `shadows.filter` high, `shadows.map_size` auto = the defaults before
+  2026-10-23, i.e. parity) plus `-Setting 'vulkan.max_fps=60',...` (per key, over the baseline). `-PlayerDefaults` =
+  the shipped defaults instead of the baseline (debug mode still on); `-KeepSettings` without `-Setting` keeps the file.
+* Player defaults (2026-10-23): `water.enabled` on, `water.quality` / `water.ocean_quality` / `rt.reflections` high,
+  `shadows.enabled` on, `shadows.filter` low, `shadows.map_size` 2048.
 
 ### 2.4 A/B comparison
 
-Two sides: the active values and a stored other side, **initially the defaults** (= the plain renderer, so a player who
-enabled features compares them against parity with one key). `flipAB()` swaps the two for every eligible setting (not
+Two sides: the active values and a stored other side, **initially the defaults** (since 2026-10-23 the defaults enable
+water and shadows: for parity, set side B's features off). `flipAB()` swaps the two for every eligible setting (not
 NoAB, not Restart, not locked) and fires the callbacks of what changed. The overlay offers "Flip", "Copy A to B" (the
 active side over the other) and "Reset B to defaults", and lists the settings whose sides differ. The session always
-starts on side A; saving while B is active still writes A to the main tables. Hotkey `overlay.ab_key` (F11) works with the
+starts on side A; saving while B is active still writes A to the main tables. Hotkey `overlay.ab_key` (F10, debug mode) works with the
 overlay closed; the badge shows the side for 1.5 s, and a small "B" stays in the top-right corner while B is active.
 
 Verified [C]: `ab flip` with A = `vsync off` switched the swapchain FIFO <-> IMMEDIATE each time (rvk.log "present mode
 2/0"), with validation on.
+
+### 2.5 Debug mode
+
+`overlay.debug_mode` (default off) is the registry's debug switch (`Registry::setDebugSwitch`). Settings with
+`Flag::Debug` (the Debug category's views `debug.tint_draws`, `debug.inject_view`, `rt.debug`, `water.debug`,
+`shadows.debug`, plus `overlay.ab_key` / `overlay.ab_badge`) are shown in the overlay only in debug mode; outside it they
+are *gated*: their effective value is the default (debug views off), the player's value stays in settings.toml, and the
+change callbacks fire when the effective value changes. The A/B section (and its F10 hotkey), the "Frame structure"
+panel and the performance panel's diagnostics (present mode, pacing, enhancement status lines) are debug-mode only too.
+Turning debug mode off returns the A/B comparison to side A. `rvk_ab` / `[debug] commands` `ab ...` keep working
+without it (scripted runs have debug mode on through run.ps1 anyway). Unit test `settings_debug_mode`.
 
 ## 3. Input: how the engine reads it, how the overlay takes it
 
@@ -126,7 +143,7 @@ Verified [C]: `ab flip` with A = `vsync off` switched the swapchain FIFO <-> IMM
 
 ### 3.3 Hotkeys
 
-F10 (overlay) and F11 (A/B) are unbound in Risen [C]: the game's bindings (`ConfigUser.xml` `<Keys>`: F8 QuickSave, F9
+F11 (overlay) and F10 (A/B, debug mode) are unbound in Risen [C]: the game's bindings (`ConfigUser.xml` `<Keys>`: F8 QuickSave, F9
 QuickLoad) and debug keys (`ConfigDefault.xml` `<DebugKeys>`: F1-F7, F12, Ctrl+F2, Ctrl+F8, Alt+F12) leave them free.
 Both are player settings (`overlay.toggle_key`, `overlay.ab_key`; `none` disables).
 

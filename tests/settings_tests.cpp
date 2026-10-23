@@ -272,8 +272,8 @@ TEST(settings_renderer_registration) {
     CHECK(r.vsync != nullptr && r.vsync->asEnum() == "engine");
     CHECK(r.maxFps != nullptr && r.maxFps->asInt() == 0);
     CHECK(r.adapter != nullptr && r.adapter->restart());
-    CHECK(r.toggleKey != nullptr && r.toggleKey->asEnum() == "f10");
-    CHECK(r.abKey != nullptr && r.abKey->asEnum() == "f11");
+    CHECK(r.toggleKey != nullptr && r.toggleKey->asEnum() == "f11");  // as in GD3D11
+    CHECK(r.abKey != nullptr && r.abKey->asEnum() == "f10");
     CHECK(r.abBadge->asBool());
     CHECK(!r.fpsCounter->asBool());
     // debug: the tint view is off by default and not part of A/B; draw records are on and hidden (cost measurements only)
@@ -292,6 +292,50 @@ TEST(settings_renderer_registration) {
         CHECK(s == r.drawRecords || s == r.rtSceneViews || s == r.rtReflectionTweaks || s == r.exclusiveAcquire ||
               (s->spec().flags & Flag::Hidden) == 0);
     }
+    // the player defaults: enhanced water (high, RT reflections high) and enhanced shadows (low filter, 2048 maps)
+    CHECK(r.waterEnabled->asBool() && r.waterQuality->asEnum() == "high" && r.waterOceanQuality->asEnum() == "high");
+    CHECK(r.rtReflections->value() == 3);  // "high" (effective "off" until a device reports ray query)
+    CHECK(r.shadowsEnabled->asBool() && r.shadowsFilter->asEnum() == "low" && r.shadowsMapSize->asEnum() == "2048");
+    // debug mode: off by default, the developer settings are gated, the A/B comparison belongs to it
+    CHECK(r.debugMode != nullptr && !r.debugMode->asBool() && !reg.debugMode());
+    for (const Setting* s : {r.abKey, r.abBadge, r.tintDraws, r.injectView, r.rtDebug, r.waterDebug, r.shadowsDebug}) {
+        CHECK((s->spec().flags & Flag::Debug) != 0 && s->gated());
+    }
+    CHECK(!r.waterEnabled->gated() && (r.debugMode->spec().flags & Flag::Debug) == 0);
+}
+
+TEST(settings_debug_mode) {
+    Registry reg;
+    const RendererSettings r = registerRendererSettings(reg);
+    // outside debug mode a debug view applies as its default; the player's value is kept (file, API)
+    CHECK(reg.setText("water.debug", "normals") == Result::Ok);
+    CHECK(r.waterDebug->value() != 0 && r.waterDebug->asEnum() == "off");
+    reg.dispatch();
+    std::size_t calls = 0;
+    reg.onChange(*r.waterDebug, [&](const Setting&) { ++calls; });
+    CHECK(reg.set(*r.debugMode, 1) == Result::Ok);
+    CHECK(reg.debugMode() && !r.waterDebug->gated() && r.waterDebug->asEnum() == "normals");
+    reg.dispatch();
+    CHECK(calls == 1);  // its effective value changed: features hear about it
+    // leaving debug mode returns to side A and gates the views again
+    CHECK(reg.set(*r.waterEnabled, 0) == Result::Ok);
+    reg.flipAB();
+    CHECK(reg.bActive() && r.waterEnabled->asBool());
+    CHECK(reg.set(*r.debugMode, 0) == Result::Ok);
+    CHECK(!reg.bActive() && !r.waterEnabled->asBool() && r.waterDebug->asEnum() == "off");
+    reg.dispatch();
+    CHECK(calls == 2);
+    // settings.toml switches it like any other setting
+    CHECK(reg.fromToml("[overlay]\ndebug_mode = true\n"));
+    CHECK(reg.debugMode() && r.waterDebug->asEnum() == "normals");
+    // an enum with numeric option names also reads from a TOML integer (run.ps1 -Setting 'shadows.map_size=1024')
+    CHECK(reg.fromToml("[shadows]\nmap_size = 1024\n"));
+    CHECK(r.shadowsMapSize->asEnum() == "1024");
+    // a registry without a debug switch applies everything
+    Registry plain;
+    Setting& view = plain.add({.key = "x.view", .label = "View", .category = "Debug", .type = Type::Bool, .flags = Flag::Debug});
+    CHECK(plain.debugMode() && !view.gated());
+    CHECK(plain.set(view, 1) == Result::Ok && view.asBool());
 }
 
 TEST(config_overlay_options) {

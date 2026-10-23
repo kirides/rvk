@@ -46,10 +46,13 @@ param(
     [int]$LogFrame = 0,
     # the Vulkan renderer refuses eCAPITexture::SaveTextureToFile; with this switch it dumps the image to bin/rvk/dumps/*.png
     [switch]$DumpSavedTextures,
-    # player settings (bin/rvk/settings.toml, docs/research/overlay.md): every run starts from the defaults (the file is
-    # deleted) unless -KeepSettings; -Setting 'vulkan.max_fps=60','vulkan.vsync=off' writes a fresh file with these values
+    # player settings (bin/rvk/settings.toml, docs/research/overlay.md): every run writes a fresh file (unless -KeepSettings
+    # without -Setting) = the test baseline (debug mode on, the enhancements at their pre-2026-10-23 defaults: water and
+    # enhanced shadows off = parity, what refcompare and the compare scripts expect) + -Setting 'vulkan.max_fps=60',...;
+    # -PlayerDefaults = the shipped player defaults instead of the baseline (debug mode still on)
     [string[]]$Setting = @(),
     [switch]$KeepSettings,
+    [switch]$PlayerDefaults,
     # the in-game overlay: -NoOverlay = [overlay] enabled = false; -OverlayInScreenshots draws it into the back buffer so
     # -Screenshots / rvk_screenshot capture it; -Commands '450: overlay open','600: set vulkan.max_fps 30' ([debug] commands)
     [switch]$NoOverlay,
@@ -125,19 +128,25 @@ if ($NoRenderer) {
         '[overlay]', "enabled = $((-not $NoOverlay.IsPresent).ToString().ToLower())"
     )
     $settingsFile = Join-Path $rvkDir 'settings.toml'
-    if (-not $KeepSettings) { Remove-Item $settingsFile -Force -ErrorAction SilentlyContinue }
-    if ($Setting) {
+    if (-not $KeepSettings -or $Setting) {
+        $values = [ordered]@{ 'overlay.debug_mode' = 'true' }
+        if (-not $PlayerDefaults) {
+            $values['water.enabled'] = 'false'; $values['water.quality'] = 'medium'; $values['water.ocean_quality'] = 'medium'
+            $values['rt.reflections'] = 'medium'
+            $values['shadows.enabled'] = 'false'; $values['shadows.filter'] = 'high'; $values['shadows.map_size'] = 'auto'
+        }
+        foreach ($kv in $Setting) { $k, $v = $kv -split '=', 2; $values[$k] = $v }
         # "table.key=value" -> [table] key = value (strings quoted unless number / bool)
         $tables = [ordered]@{}
-        foreach ($kv in $Setting) {
-            $k, $v = $kv -split '=', 2
+        foreach ($k in $values.Keys) {
+            $v = $values[$k]
             $dot = $k.LastIndexOf('.')
             $t = $k.Substring(0, $dot); $name = $k.Substring($dot + 1)
             if ($v -notmatch '^(true|false|-?[0-9.]+)$') { $v = '"' + $v + '"' }
             if (-not $tables.Contains($t)) { $tables[$t] = @() }
             $tables[$t] += "$name = $v"
         }
-        $lines = @('# written by scripts/run.ps1 -Setting')
+        $lines = @('# written by scripts/run.ps1 (test baseline + -Setting)')
         foreach ($t in $tables.Keys) { $lines += "[$t]"; $lines += $tables[$t] }
         [IO.File]::WriteAllLines($settingsFile, $lines)
     }

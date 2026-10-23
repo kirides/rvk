@@ -80,6 +80,13 @@ bool nodeValue(const Spec& spec, const toml::node& node, double& out) {
         return true;
     }
     if (const auto i = node.value_exact<std::int64_t>()) {
+        // an Enum whose options are numbers (shadows.map_size = 2048): the option of that name, else the index
+        if (spec.type == Type::Enum) {
+            if (const auto it = std::ranges::find(spec.options, std::to_string(*i)); it != spec.options.end()) {
+                out = static_cast<double>(it - spec.options.begin());
+                return true;
+            }
+        }
         out = static_cast<double>(*i);
         return spec.type != Type::Bool || *i == 0 || *i == 1 ? normalise(spec, out) : false;
     }
@@ -153,6 +160,7 @@ Setting& Registry::add(Spec spec) {
         s->unmetReason_ = resolve(s->spec_, caps_);
         s->unmet_ = !s->unmetReason_.empty();
     }
+    s->gated_ = (s->spec_.flags & Flag::Debug) != 0 && debugSwitch_ != nullptr && debugSwitch_->value() == 0.0;
     settings_.push_back(std::move(s));
     return *settings_.back();
 }
@@ -185,6 +193,7 @@ std::size_t Registry::size() const {
 void Registry::changedLocked(Setting& s) {
     s.pending_ = true;
     ++generation_;
+    if (&s == debugSwitch_) gateLocked();
 }
 
 Result Registry::setLocked(Setting& s, double value) {
@@ -312,6 +321,32 @@ std::string Registry::unavailableReason(const Setting& s) const {
     return s.unmetReason_;
 }
 
+// ---- debug mode -----------------------------------------------------------------------------------------------------
+
+void Registry::gateLocked() {
+    const bool on = debugSwitch_ == nullptr || debugSwitch_->value() != 0.0;
+    for (auto& s : settings_) {
+        if ((s->spec_.flags & Flag::Debug) == 0) continue;
+        const double before = s->effective();
+        s->gated_ = !on;
+        if (s->effective() != before) changedLocked(*s);
+    }
+    // the A/B comparison is part of debug mode
+    if (!on && bActive()) flipLocked();
+    ++generation_;
+}
+
+void Registry::setDebugSwitch(Setting& s) {
+    const std::lock_guard lock(mutex_);
+    debugSwitch_ = &s;
+    gateLocked();
+}
+
+bool Registry::debugMode() const {
+    const std::lock_guard lock(mutex_);
+    return debugSwitch_ == nullptr || debugSwitch_->value() != 0.0;
+}
+
 // ---- callbacks ------------------------------------------------------------------------------------------------------
 
 void Registry::onChange(Setting& s, std::function<void(const Setting&)> fn, const void* owner) {
@@ -347,6 +382,10 @@ std::size_t Registry::dispatch() {
 
 void Registry::flipAB() {
     const std::lock_guard lock(mutex_);
+    flipLocked();
+}
+
+void Registry::flipLocked() {
     for (auto& s : settings_) {
         if (!s->abEligible()) continue;
         const double v = s->value();
@@ -434,7 +473,7 @@ std::string Registry::toToml() const {
         }
     }
     std::string out =
-        "# Risen Enhanced Graphics: player settings. The in-game overlay (F10 by default) writes this file.\n"
+        "# Risen Enhanced Graphics: player settings. The in-game overlay (F11 by default) writes this file.\n"
         "# Only values that differ from the defaults are listed; delete a line (or the file) to go back to the default.\n"
         "# [ab.*] tables hold side B of the A/B comparison (missing values = defaults).\n";
     for (const auto& [table, entries] : tables) {
@@ -647,7 +686,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .category = "Overlay",
         .description = "Hotkey of this overlay. The game never sees it.",
         .type = Type::Enum,
-        .defaultValue = keyIndex("f10"),
+        .defaultValue = keyIndex("f11"),
         .options = hotkeyNames(),
         .optionLabels = keyLabels,
         .flags = Flag::NoAB,
@@ -659,10 +698,10 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .description = "Hotkey that flips between settings side A and side B (also while the overlay is closed). The game "
                        "never sees it.",
         .type = Type::Enum,
-        .defaultValue = keyIndex("f11"),
+        .defaultValue = keyIndex("f10"),
         .options = hotkeyNames(),
         .optionLabels = keyLabels,
-        .flags = Flag::NoAB,
+        .flags = Flag::NoAB | Flag::Debug,
     });
     r.fpsCounter = &reg.add({
         .key = "overlay.fps_counter",
@@ -680,6 +719,16 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .description = "Show which side (A or B) is active after a flip, and a small \"B\" while side B stays active.",
         .type = Type::Bool,
         .defaultValue = 1,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
+    r.debugMode = &reg.add({
+        .key = "overlay.debug_mode",
+        .label = "Debug mode",
+        .category = "Overlay",
+        .description = "Shows the developer tools: the A/B settings comparison (and its hotkey), debug views and diagnostics. "
+                       "Off returns to side A and turns the debug views off.",
+        .type = Type::Bool,
+        .defaultValue = 0,
         .flags = Flag::NoAB,
     });
     r.tintDraws = &reg.add({
@@ -693,7 +742,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .options = {"off", "kind", "pass"},
         .optionLabels = {"Off", "By kind", "By pass"},
-        .flags = Flag::NoAB,
+        .flags = Flag::NoAB | Flag::Debug,
     });
     r.drawRecords = &reg.add({
         .key = "debug.draw_records",
@@ -716,6 +765,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .options = {"off", "depth", "tint"},
         .optionLabels = {"Off", "Depth + world grid", "Tint"},
+        .flags = Flag::Debug,
     });
     r.rtAllow = &reg.add({
         .key = "rt.allow",
@@ -741,7 +791,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "screen space where the ray finds nothing (leaves, characters); High: one ray per pixel, longer reach, "
                        "cut-outs in the shadows too. Off: screen-space reflections. Needs ray tracing.",
         .type = Type::Enum,
-        .defaultValue = 2,
+        .defaultValue = 3,
         .options = {"off", "low", "medium", "high"},
         .optionLabels = {"Off", "Low", "Medium", "High"},
         .requirements = caps::bit(caps::Cap::RayQuery),
@@ -760,7 +810,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .options = {"off", "instances", "depth", "normals", "albedo", "albedo_split", "albedo_opaque", "uv"},
         .optionLabels = {"Off", "Instances", "Depth check", "Normals", "Albedo", "Albedo (split)", "Albedo (cut-outs solid)", "UV"},
-        .flags = Flag::NoAB,
+        .flags = Flag::NoAB | Flag::Debug,
         .requirements = caps::bit(caps::Cap::RayQuery),
     });
     r.rtReflectionTweaks = &reg.add({
@@ -795,7 +845,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "scene and the sky, sun glints, foam on the sea, in the game's own fog. Each lake, river and swamp keeps "
                        "the colour of its original material. Off renders the game's own water.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
     });
     r.waterQuality = &reg.add({
         .key = "water.quality",
@@ -803,7 +853,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .category = "Water",
         .description = "Detail of the enhanced water: reflection ray steps and the density of the sea's wave grid.",
         .type = Type::Enum,
-        .defaultValue = 1,
+        .defaultValue = 2,
         .options = {"low", "medium", "high"},
         .optionLabels = {"Low", "Medium", "High"},
     });
@@ -837,7 +887,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .category = "Water",
         .description = "Resolution of the FFT ocean's wave tiles: Low 3 tiles of 128 x 128, Medium 4 of 256 x 256, High 4 of 512 x 512.",
         .type = Type::Enum,
-        .defaultValue = 1,
+        .defaultValue = 2,
         .options = {"low", "medium", "high"},
         .optionLabels = {"Low", "Medium", "High"},
     });
@@ -911,7 +961,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .options = {"off", "shore_field", "depth", "normals", "reflection", "foam", "sea_floor", "waves", "reflection_source", "reflection_shaded"},
         .optionLabels = {"Off", "Shore field", "Depth", "Normals", "Reflection", "Foam", "Sea floor", "Wave attenuation", "Reflection source", "Reflection (RT hits all shaded)"},
-        .flags = Flag::NoAB,
+        .flags = Flag::NoAB | Flag::Debug,
     });
     r.shadowsEnabled = &reg.add({
         .key = "shadows.enabled",
@@ -921,7 +971,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "cascades blended into each other instead of switching at a line, and a long fade at the end of the "
                        "shadow range instead of shadows popping in a few metres ahead. Off renders the game's own shadows.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
     });
     r.shadowsFilter = &reg.add({
         .key = "shadows.filter",
@@ -929,7 +979,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .category = "Shadows",
         .description = "Quality of the shadow edges: Low 4, Medium 9, High 16 filtered samples per pixel.",
         .type = Type::Enum,
-        .defaultValue = 2,
+        .defaultValue = 0,
         .options = {"low", "medium", "high"},
         .optionLabels = {"Low", "Medium", "High"},
     });
@@ -987,7 +1037,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .description = "Resolution of each of the three sun shadow cascades (the game's High quality uses 1024). \"Auto\" is "
                        "4096 with enhanced shadows and the game's size without.",
         .type = Type::Enum,
-        .defaultValue = 0,
+        .defaultValue = 3,
         .options = {"auto", "game", "1024", "2048", "4096"},
         .optionLabels = {"Auto", "Game", "1024", "2048", "4096"},
     });
@@ -1026,8 +1076,9 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .options = {"off", "cascades", "cascade_term", "terrain_term"},
         .optionLabels = {"Off", "Cascades", "Cascade shadows only", "Terrain shadows only"},
-        .flags = Flag::NoAB,
+        .flags = Flag::NoAB | Flag::Debug,
     });
+    reg.setDebugSwitch(*r.debugMode);
     if (&reg == &registry()) g_renderer = r;
     return r;
 }

@@ -1,7 +1,7 @@
 # Water: classification, the enhanced water pass, the sea's shore (M7, first piece)
 
 What Risen's water is (materials, meshes, passes, the engine's own sea and coast), how the renderer recognises each body of
-water, and the optional enhanced water (settings category "Water", default off): the engine's own water materials evaluated in
+water, and the optional enhanced water (settings category "Water", player default on since 2026-10-23, off in the test baseline: overlay.md 2.3): the engine's own water materials evaluated in
 GLSL (the same water) with traced reflections, a wave grid for the open sea with waves rolling in, a lower, moving shoreline
 with surf foam and wet sand instead of the engine's painted surf (better). Builds on the draw tags (draw-tags.md), the frame phases (frame-phases.md)
 and the GLSL pipeline (injection.md).

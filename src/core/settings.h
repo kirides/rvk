@@ -47,6 +47,9 @@ namespace Flag {
 inline constexpr std::uint32_t Restart = 1u << 0;  // takes effect at the next start
 inline constexpr std::uint32_t NoAB = 1u << 1;     // not part of the A/B comparison (hotkeys, overlay options)
 inline constexpr std::uint32_t Hidden = 1u << 2;   // not shown in the overlay (file / API only)
+// developer setting (debug views, A/B): shown in the overlay only in debug mode (Registry::setDebugSwitch); outside it the
+// setting applies as its default, the player's value is kept
+inline constexpr std::uint32_t Debug = 1u << 3;
 }  // namespace Flag
 
 struct Spec {
@@ -84,8 +87,10 @@ public:
     double value() const { return value_.load(std::memory_order_relaxed); }
     // capability resolution (Spec::requirements): false while a required capability is unmet
     bool available() const { return !unmet_.load(std::memory_order_relaxed); }
-    // the value that applies: value(), or the spec's unmetValue while unavailable. Features read these:
-    double effective() const { return available() ? value() : fallback_; }
+    // Flag::Debug outside debug mode: applies as the default
+    bool gated() const { return gated_.load(std::memory_order_relaxed); }
+    // the value that applies: value(), the spec's unmetValue while unavailable, the default while gated. Features read these:
+    double effective() const { return !available() ? fallback_ : gated() ? spec_.defaultValue : value(); }
     bool asBool() const { return effective() != 0.0; }
     int asInt() const { return static_cast<int>(effective()); }
     float asFloat() const { return static_cast<float>(effective()); }
@@ -106,7 +111,8 @@ private:
     std::atomic<double> value_{0.0};
     std::atomic<bool> locked_{false};
     std::atomic<bool> unmet_{false};
-    double fallback_ = 0.0;   // effective value while unmet (Spec::unmetValue or the default)
+    std::atomic<bool> gated_{false};
+    double fallback_ = 0.0;  // effective value while unmet (Spec::unmetValue or the default)
     std::string unmetReason_;
     double start_ = 0.0;
     double stored_ = 0.0;  // locked: the player's own value (written to settings.toml instead of the forced one)
@@ -170,6 +176,12 @@ public:
     // the requirements of a spec against a report: "" when met (pure; also what setCapabilities applies)
     static std::string resolve(const Spec& spec, const caps::Report& report);
 
+    // ---- debug mode ----
+    // `s` (a Bool) switches debug mode: while it is false, Flag::Debug settings are gated (effective = default, hidden in the
+    // overlay) and switching it off returns the A/B comparison to side A. Without a switch every setting applies (debug mode).
+    void setDebugSwitch(Setting& s);
+    bool debugMode() const;
+
     // ---- change callbacks ----
     // `fn` runs on the render thread (dispatch) after each change of `s`, also after A/B flips and file loads. `owner`
     // identifies the subscriber for removeCallbacks (an object that goes away before the registry must remove its callbacks).
@@ -181,7 +193,7 @@ public:
     std::uint64_t generation() const { return generation_.load(std::memory_order_relaxed); }
 
     // ---- A/B comparison ----
-    // Two sides: the active values and a stored other side (initially the defaults: the plain parity renderer). flipAB swaps
+    // Two sides: the active values and a stored other side (initially the defaults). flipAB swaps
     // them for every A/B-eligible setting (not NoAB, not Restart, not locked). Side A is the one the session starts with.
     bool bActive() const { return bActive_.load(std::memory_order_relaxed); }
     void flipAB();
@@ -218,9 +230,12 @@ private:
     void changedLocked(Setting& s);              // mutex_ held
 
     void resolveLocked(Setting& s);              // mutex_ held
+    void gateLocked();                           // mutex_ held: Flag::Debug settings follow the debug switch
+    void flipLocked();                           // mutex_ held
 
     mutable std::mutex mutex_;
     std::vector<std::unique_ptr<Setting>> settings_;
+    Setting* debugSwitch_ = nullptr;
     caps::Report caps_;
     std::atomic<std::uint64_t> generation_{0};
     std::atomic<bool> dirty_{false};
@@ -241,6 +256,7 @@ struct RendererSettings {
     Setting* abKey = nullptr;        // overlay.ab_key
     Setting* fpsCounter = nullptr;   // overlay.fps_counter: small fps readout while the overlay is closed
     Setting* abBadge = nullptr;      // overlay.ab_badge: "B" tag while side B is active and the overlay is closed
+    Setting* debugMode = nullptr;    // overlay.debug_mode: shows the Flag::Debug settings, the A/B comparison, diagnostics
     Setting* tintDraws = nullptr;    // debug.tint_draws: "off", "kind", "pass" (d3d9/draws.h TintMode)
     Setting* drawRecords = nullptr;  // debug.draw_records: per-frame draw records (hidden; the histogram is always on)
     Setting* injectView = nullptr;   // debug.inject_view: "off", "depth", "tint" (enh/debug_view.h, an injected pass)

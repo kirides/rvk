@@ -1,7 +1,7 @@
 # Sun shadows: the engine's cascades and shadow mask, the enhanced mask (M11 shadows)
 
 Status: the enhanced mask pass and the cascade overrides are built and verified in game (`src/enh/shadows.*`, `src/engine/shadow_maps.*`,
-`shaders/shadows/shadow_mask.*`); settings category Shadows (`shadows.*`, default off = the game's shadows).
+`shaders/shadows/shadow_mask.*`); settings category Shadows (`shadows.*`; player default on since 2026-10-23 with filter low + 2048 maps, off = the game's shadows in the test baseline: overlay.md 2.3).
 [C] = confirmed (decompiled and/or measured in the running game), [I] = inferred.
 
 ## 1. The complaint, and its cause

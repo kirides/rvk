@@ -1,5 +1,5 @@
 # risen-enhanced-graphics: start configuration (read once at game start).
-# Player settings live in settings.toml next to this file: change them in the game's F10 overlay.
+# Player settings live in settings.toml next to this file: change them in the game's F11 overlay.
 
 [renderer]
 # vulkan      = the Vulkan renderer
@@ -11,5 +11,5 @@ mode = "vulkan"
 level = "info"
 
 [overlay]
-# false = no F10 overlay at all
+# false = no F11 overlay at all
 enabled = true

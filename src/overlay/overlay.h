@@ -1,7 +1,7 @@
 #pragma once
 
 // The in-game overlay (docs/research/overlay.md): Dear ImGui on the Vulkan swapchain with the player settings
-// (core/settings.h), the A/B comparison and a performance panel. Toggled with a hotkey (overlay.toggle_key, F10); while it is
+// (core/settings.h), the A/B comparison and a performance panel. Toggled with a hotkey (overlay.toggle_key, F11); while it is
 // open it takes the game window's keyboard and mouse input (the engine reads WM_KEY*/WM_*BUTTON* messages and WM_INPUT raw
 // mouse motion through its window procedure: a subclass of that procedure filters them); while it is closed the game's input
 // is untouched apart from the two hotkeys.

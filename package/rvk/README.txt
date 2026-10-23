@@ -7,11 +7,12 @@ INSTALL
   Uninstall: delete <Risen>\bin\d3d9.dll and the <Risen>\bin\rvk folder.
 
 IN GAME
-  F10  opens / closes the settings overlay. While it is open, mouse and keyboard go to the overlay.
-  F11  A/B: flips between your settings and the defaults (the game's original look), to compare.
-  Both keys can be changed in the overlay (Overlay section).
-  Enhanced water and shadows are off by default: turn them on in the overlay.
+  F11  opens / closes the settings overlay (the key can be changed there). While it is open, mouse and
+       keyboard go to the overlay.
+  Enhanced water (with ray-traced reflections) and enhanced shadows are on by default; each "Enhanced ..."
+  checkbox off gives the game's original look. Lower water / shadow quality if the frame rate is low.
   Settings save automatically to rvk\settings.toml. Settings marked "restart needed" apply at the next start.
+  "Debug mode" (Overlay section) shows developer tools: debug views and an A/B comparison (F10).
 
 QUIRKS
   - Fullscreen is a borderless window over the monitor. Real exclusive fullscreen: overlay, Display section.

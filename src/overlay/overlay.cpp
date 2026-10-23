@@ -256,7 +256,8 @@ LRESULT Overlay::handleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // the hotkeys never reach the game (F10 / F11 are unbound in Risen: docs/research/overlay.md 3.3)
         const auto& r = settings::renderer();
         const unsigned toggle = hotkeyVk(r.toggleKey);
-        const unsigned ab = hotkeyVk(r.abKey);
+        // the A/B comparison is a debug-mode tool: outside it the game gets the key
+        const unsigned ab = settings::registry().debugMode() ? hotkeyVk(r.abKey) : 0;
         const bool repeat = (lp & (1 << 30)) != 0;
         if (vk != 0 && vk == toggle) {
             if (keyDown && !repeat) setOpen(!isOpen());
@@ -523,45 +524,51 @@ void Overlay::buildSettingsWindow() {
         return;
     }
 
-    // ---- A/B ----
+    // ---- A/B (debug mode) ----
+    const bool debug = reg.debugMode();
     const bool b = reg.bActive();
-    ImGui::SeparatorText("A/B comparison");
-    ImGui::TextUnformatted("Active side:");
-    ImGui::SameLine();
-    ImGui::TextColored(b ? ImVec4(1.0f, 0.75f, 0.3f, 1.0f) : ImVec4(0.45f, 0.8f, 1.0f, 1.0f), "%s", sideName(b));
-    ImGui::SameLine();
-    if (ImGui::Button(std::format("Flip to {} ({})", sideName(!b), keyLabel(r.abKey)).c_str())) reg.flipAB();
-    ImGui::SameLine();
-    if (ImGui::Button(std::format("Copy {} to {}", sideName(b), sideName(!b)).c_str())) reg.copyActiveToOther();
-    ImGui::SameLine();
-    if (ImGui::Button(std::format("Reset {} to defaults", sideName(!b)).c_str())) reg.resetOther();
-    const auto diffs = reg.abDifferences();
-    if (diffs.empty()) {
-        ImGui::TextDisabled("Both sides are the same. Side B starts as the defaults (the plain renderer):\n"
-                            "change settings on one side, then flip to compare.");
-    } else if (ImGui::BeginTable("##ab", 3, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
-        ImGui::TableSetupColumn("setting");
-        ImGui::TableSetupColumn("A");
-        ImGui::TableSetupColumn("B");
-        ImGui::TableHeadersRow();
-        for (const settings::Setting* s : diffs) {
-            const double active = s->value(), other = reg.otherValue(*s);
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(s->spec().label.c_str());
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(settings::Registry::formatValue(s->spec(), b ? other : active).c_str());
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(settings::Registry::formatValue(s->spec(), b ? active : other).c_str());
+    if (debug) {
+        ImGui::SeparatorText("A/B comparison");
+        ImGui::TextUnformatted("Active side:");
+        ImGui::SameLine();
+        ImGui::TextColored(b ? ImVec4(1.0f, 0.75f, 0.3f, 1.0f) : ImVec4(0.45f, 0.8f, 1.0f, 1.0f), "%s", sideName(b));
+        ImGui::SameLine();
+        if (ImGui::Button(std::format("Flip to {} ({})", sideName(!b), keyLabel(r.abKey)).c_str())) reg.flipAB();
+        ImGui::SameLine();
+        if (ImGui::Button(std::format("Copy {} to {}", sideName(b), sideName(!b)).c_str())) reg.copyActiveToOther();
+        ImGui::SameLine();
+        if (ImGui::Button(std::format("Reset {} to defaults", sideName(!b)).c_str())) reg.resetOther();
+        const auto diffs = reg.abDifferences();
+        if (diffs.empty()) {
+            ImGui::TextDisabled("Both sides are the same. Side B starts as the defaults:\n"
+                                "change settings on one side, then flip to compare.");
+        } else if (ImGui::BeginTable("##ab", 3, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupColumn("setting");
+            ImGui::TableSetupColumn("A");
+            ImGui::TableSetupColumn("B");
+            ImGui::TableHeadersRow();
+            for (const settings::Setting* s : diffs) {
+                const double active = s->value(), other = reg.otherValue(*s);
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(s->spec().label.c_str());
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(settings::Registry::formatValue(s->spec(), b ? other : active).c_str());
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(settings::Registry::formatValue(s->spec(), b ? active : other).c_str());
+            }
+            ImGui::EndTable();
         }
-        ImGui::EndTable();
     }
 
-    // ---- settings by category ----
+    // ---- settings by category (Flag::Debug ones in debug mode only) ----
     const auto all = reg.all();
     std::vector<std::string> categories;
+    const auto shown = [&](const settings::Spec& sp) {
+        return (sp.flags & settings::Flag::Hidden) == 0 && (debug || (sp.flags & settings::Flag::Debug) == 0);
+    };
     for (const settings::Setting* s : all) {
-        if ((s->spec().flags & settings::Flag::Hidden) == 0 && std::ranges::find(categories, s->spec().category) == categories.end()) {
+        if (shown(s->spec()) && std::ranges::find(categories, s->spec().category) == categories.end()) {
             categories.push_back(s->spec().category);
         }
     }
@@ -569,7 +576,7 @@ void Overlay::buildSettingsWindow() {
         if (!ImGui::CollapsingHeader(cat.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) continue;
         for (settings::Setting* s : all) {
             const settings::Spec& sp = s->spec();
-            if (sp.category != cat || (sp.flags & settings::Flag::Hidden) != 0) continue;
+            if (sp.category != cat || !shown(sp)) continue;
             ImGui::PushID(sp.key.c_str());
             const bool locked = s->locked();
             // capability resolution (Spec::requirements): greyed, showing the value that applies, with the reason
@@ -710,7 +717,7 @@ void Overlay::buildSettingsWindow() {
         ImGui::Text("CPU (engine + renderer) %.2f ms", n > 0 ? cpuSum / static_cast<float>(n) : 0.0f);
         if (gpuN > 0) {
             ImGui::Text("GPU %.2f ms", gpuSum / static_cast<float>(gpuN));
-        } else {
+        } else if (debug) {
             ImGui::TextDisabled("GPU time: off (config.toml [debug] perf = true)");
         }
         // the history as a line, oldest first
@@ -723,17 +730,19 @@ void Overlay::buildSettingsWindow() {
                     device_->maxFps() > 0.0 ? std::format("{:.0f} fps", device_->maxFps()).c_str() : "none");
         // window / display mode (docs/research/window-mode.md 8)
         ImGui::TextUnformatted(engine::window::displaySummary().c_str());
-        ImGui::Text("present mode %d%s, frame pacing %.1f fps", static_cast<int>(device_->presentMode()),
-                    device_->fullScreenExclusiveHeld()       ? ", Vulkan exclusive fullscreen held"
-                    : device_->fullScreenExclusiveConfigured() ? ", exclusive swapchain (not held)"
-                                                               : "",
-                    device_->pacerRate());
-        // enhancements' one-line status (e.g. the RT scene: instances, BLAS, memory)
-        for (const auto& [key, text] : device_->status()) ImGui::TextUnformatted(text.c_str());
+        if (debug) {
+            ImGui::Text("present mode %d%s, frame pacing %.1f fps", static_cast<int>(device_->presentMode()),
+                        device_->fullScreenExclusiveHeld()       ? ", Vulkan exclusive fullscreen held"
+                        : device_->fullScreenExclusiveConfigured() ? ", exclusive swapchain (not held)"
+                                                                   : "",
+                        device_->pacerRate());
+            // enhancements' one-line status (e.g. the RT scene: instances, BLAS, memory)
+            for (const auto& [key, text] : device_->status()) ImGui::TextUnformatted(text.c_str());
+        }
     }
 
-    // ---- the last frame's phases and camera (d3d9/scene.h, docs/research/frame-phases.md) ----
-    if (ImGui::CollapsingHeader("Frame structure")) {
+    // ---- the last frame's phases and camera (d3d9/scene.h, docs/research/frame-phases.md; debug mode) ----
+    if (debug && ImGui::CollapsingHeader("Frame structure")) {
         const auto& ph = device_->phases();
         const std::string seq = d3d9::scene::PhaseTracker::summary(ph.lastFrame());
         ImGui::PushTextWrapPos(0.0f);
@@ -770,8 +779,8 @@ void Overlay::buildSettingsWindow() {
     }
 
     ImGui::Separator();
-    ImGui::TextDisabled("%s  |  %s: close  |  %s: A/B", reg.dirty() ? "saving..." : "saved in bin\\rvk\\settings.toml",
-                        keyLabel(r.toggleKey).c_str(), keyLabel(r.abKey).c_str());
+    ImGui::TextDisabled("%s  |  %s: close%s", reg.dirty() ? "saving..." : "saved in bin\\rvk\\settings.toml",
+                        keyLabel(r.toggleKey).c_str(), debug ? std::format("  |  {}: A/B", keyLabel(r.abKey)).c_str() : "");
     ImGui::End();
     if (!keepOpen) setOpen(false);
 }

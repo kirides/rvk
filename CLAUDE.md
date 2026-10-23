@@ -71,8 +71,11 @@ docs/research/fps-limit.md): `-Exe RisenTest.exe` runs a renamed copy of the exe
 samples the presenting thread's stack during long presents (`diag:` lines: module / export of the wait, any mode);
 `-Environment 'NAME=VALUE'` sets environment variables from the proxy's DllMain (e.g. `VK_LOADER_LAYERS_DISABLE=~implicit~`).
 Scenario `rvk_highfps`: frame-time distribution + the hero's walk / jumps / drop / ledge per tick (compare rates).
-Player settings + overlay (docs/research/overlay.md): every run deletes `bin/rvk/settings.toml` (defaults) unless
-`-KeepSettings`; `-Setting 'vulkan.max_fps=60','vulkan.vsync=off'` writes one. The ImGui overlay (F10, A/B flip F11) is
+Player settings + overlay (docs/research/overlay.md): every run writes `bin/rvk/settings.toml` = the **test baseline**
+(`overlay.debug_mode` on; water, enhanced shadows and their qualities at the old parity defaults, since the player
+defaults turn them on) + `-Setting 'vulkan.max_fps=60','vulkan.vsync=off'`; `-PlayerDefaults` = the shipped defaults instead;
+`-KeepSettings` keeps the file. Debug mode (`Flag::Debug`) shows the Debug category, A/B and diagnostics in the overlay;
+outside it those settings apply as their defaults. The ImGui overlay (F11, as in GD3D11; A/B flip F10 in debug mode) is
 never in captures unless `-OverlayInScreenshots`; `-Commands '1500: overlay open','1600: key c','1700: ab flip'` runs
 overlay / settings commands at presents (`key`/`click` post real window messages: input tests in the background;
 `key ctrl+insert`, `key w 150` = held 150 frames, `keydown`/`keyup <chord>`, `type minsky` = WM_CHAR; names in
@@ -81,7 +84,7 @@ overlay / settings commands at presents (`key`/`click` post real window messages
 removed by other runs) + `-Mods rvk_debugkeys` (logs the camera each second, no scenario: ends at `-Seconds` or F12); free fly =
 `type minsky` then `key ctrl+insert`, W/A/S/D/Space; never press Ctrl+E (stock crash), F4 (writes the shader pool through
 the junction), Alt_R+F12 (deliberate crash). config.toml's non-default `[vulkan] vsync / max_fps / adapter` lock the matching player setting.
-Enhanced shadows (docs/research/shadows.md; settings category Shadows, default off): `-Setting 'shadows.enabled=true'` (+
+Enhanced shadows (docs/research/shadows.md; settings category Shadows, player default on, test baseline off): `-Setting 'shadows.enabled=true'` (+
 `shadows.filter=low|medium|high`, `shadows.softness`, `shadows.cascade_blend`, `shadows.fade`, `shadows.bias`; the engine's
 cascades `shadows.map_size=auto|game|1024|2048|4096`, `shadows.range` (m, 0 = auto: 100 m / 4096² with the mask on, else
 the game's), `shadows.split`; debug `shadows.debug=cascades|cascade_term|terrain_term`). A draw replacer for the shadow-mask
@@ -90,7 +93,7 @@ texels), `engine: shadow cascades: ...`. Engine vs enhanced: `.\scripts\shadow-c
 [-EngineSetting k=v] [-EngineDir out\shadows\<stamp>]` (spots `shadow_inland_*` look inland from the beach; judge
 against a D3D9 run too: `run.ps1 -Mode passthrough -Mods rvkcompare -Scenario rvkcompare -Param 'tag=d3d','spots=..'`).
 `-LogFrame N` prints each effect pass's float constants and the render targets' sizes / formats.
-Enhanced water (docs/research/water.md; settings category Water, default off): `-Setting 'water.enabled=true'` (+
+Enhanced water (docs/research/water.md; settings category Water, player default on, test baseline off): `-Setting 'water.enabled=true'` (+
 `water.quality=low|medium|high`, `water.reflections=sky|ssr`, `water.ocean=off|gerstner|fft`, `water.ocean_quality=low|medium|high`, `water.sea_state=auto|calm|moderate|rough|storm`,
 `water.wind_direction`, `water.wave_scale`, `water.murkiness`,
 `water.reflection_strength`; debug view `water.debug=shore_field|depth|normals|reflection|foam|sea_floor|waves`). The look is the engine's

@@ -14,7 +14,7 @@ TEST(settings_api_info_get_set) {
     settings::Registry reg;
     settings::registerRendererSettings(reg);
     const std::uint32_t n = api::settingCount(reg);
-    CHECK(n == 38);  // 17 (incl. vulkan.fullscreen, vulkan.exclusive_acquire, rt.reflections, rt.reflection_tweaks, rt.debug, rt.scene_views) + the 11 water.* + the 10 shadows.* settings
+    CHECK(n == 39);  // 18 (incl. overlay.debug_mode, vulkan.fullscreen, vulkan.exclusive_acquire, rt.reflections, rt.reflection_tweaks, rt.debug, rt.scene_views) + the 11 water.* + the 10 shadows.* settings
     struct rvk_setting_info info{};
     CHECK(api::settingInfo(reg, 0, &info, sizeof(info)) == 80);
     CHECK(info.size == 80);
@@ -47,7 +47,7 @@ TEST(settings_api_info_get_set) {
     CHECK(api::settingInfo(reg, 3, &info, sizeof(info)) == 80);  // vulkan.adapter (after vulkan.fullscreen)
     CHECK((info.flags & (RVK_SETTING_RESTART | RVK_SETTING_IS_LOCKED)) == (RVK_SETTING_RESTART | RVK_SETTING_IS_LOCKED));
     // capability resolution: rt.allow needs ray tracing hardware; this registry has no device report
-    CHECK(api::settingInfo(reg, 12, &info, sizeof(info)) == 80);
+    CHECK(api::settingInfo(reg, 13, &info, sizeof(info)) == 80);
     CHECK(std::string(info.key) == "rt.allow");
     CHECK((info.flags & RVK_SETTING_UNAVAILABLE) != 0);
     CHECK(api::settingGet(reg, "rt.allow", buf, sizeof(buf)) == 4);  // the request ("true") is kept

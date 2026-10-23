@@ -17,7 +17,7 @@ cmake --build build --config RelWithDebInfo
 ## Install
 
 Nightly build: [releases/nightly](https://github.com/kirides/rvk/releases/tag/nightly), `risen-enhanced-graphics.zip`:
-unpack it into `<Risen>\bin` (`d3d9.dll` + `rvk\config.toml` + `rvk\README.txt`). In game, F10 opens the settings overlay.
+unpack it into `<Risen>\bin` (`d3d9.dll` + `rvk\config.toml` + `rvk\README.txt`). In game, F11 opens the settings overlay.
 
 From a local build: `.\scripts\package.ps1` packs the same zip from `build\RelWithDebInfo` into `out\package`.
 Start configuration: `<Risen>\bin\rvk\config.toml` ([package/rvk/config.toml](package/rvk/config.toml)), player
