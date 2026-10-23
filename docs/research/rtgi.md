@@ -112,7 +112,9 @@ with the probe lookup + the world position from `gl_FragCoord` + depth / the int
 * **Budget** [est, RX 7900 XTX 1440p]: trace 0.3-1.0 ms (128k-512k rays), blend 0.1-0.3, PS lookup 0.2-0.5, SSAO 0.3-0.6:
   ~1-2.5 ms.
 
-## 6. Phases
+## 6. Phases (order decided 2026-10-23)
+
+**Stage A: DDGI and working ray-traced lighting, characters included.**
 
 * **P0 global light capture**: sun (c22-24), the hemisphere SH (c15-21 of an outdoor draw with f = 1 / or read
   `eCHemisphere_PS` directly), indoor colour, fog (c3 / c4), per-frame point-light list (c25+ deduplicated) into the FrameBlock;
@@ -121,11 +123,52 @@ with the probe lookup + the world position from `gl_FragCoord` + depth / the int
   `gi.debug=irradiance` (the lookup as the pixel's ambient); costs in `-PerfFrame`.
 * **P2 material integration**: the c14..c21 override variant (built in the background like `registerReplacement`), the modes,
   a first-pass-only rule; refcompare at strength 0 (parity) and in-game A/B at the pub / monastery / caves / jungle.
-* **P3**: cascades, interior volumes from portal rooms, lightmap / SSAO policies, screen-space AO.
-* **P4 ultra**: screen probes after the z pre-pass (short screen march catches characters, then ray query, terminate into
-  DDGI), probe-space filtering; optional ReSTIR-style temporal reuse of probe rays.
+* **P3 characters in the RT scene**: skinned draws (hero, NPCs, monsters) as per-frame BLASes from GPU-skinned vertices
+  (a compute pass running the draw's skinning with its bone constants, or a VS-capture variant writing positions), refit /
+  rebuild budget per frame; so characters occlude and bounce GI (and appear in the water's RT reflections).
+* **P4**: DDGI cascades, interior volumes from portal rooms, lightmap / SSAO policies.
 
-## 7. Risks / open questions
+**Stage B: frame data (also needed for FSR 3 / 4 upscaling and GTAO).**
+
+* **P5 thin G-buffer**: extra outputs of the existing translated material PS (the reserved `kSpecNormalOutput` specialisation
+  hook): octahedral world normal (RG16 / RGB10A2) + material / dynamic id; never a separate geometry pass (the game is
+  CPU-bound). Depth: the hardware depth of the main view, not only the z pre-pass map.
+* **P6 motion vectors**: camera reprojection from depth for the static world; per-object motion for characters and moving
+  objects through VS variants (previous vs current clip position: `prevVsConsts`, a per-draw history of the vertex constants;
+  injection.md 4). Consumers: FSR 3 / 4, TAA, GTAO / SSAO temporal accumulation, GI temporal reuse.
+* **P7 GTAO / screen-space AO** on the G-buffer (XeGTAO or visibility bitmask, MIT), applied to the ambient / GI term only.
+
+**Stage C: advanced GI on top of Stage B.**
+
+* **P8 screen probes** (GI-1.0 style): probes per 8x8 tile after the z pre-pass, short screen march then ray query,
+  terminating into DDGI; probe-space filtering; interpolated in the material PS.
+* **Later / optional**: a denoiser of our own (SVGF / A-SVGF style), ReSTIR GI with a world radiance cache, materials at hits
+  through RT pipelines (section 8), path tracing as an experiment.
+
+## 8. Beyond ray queries: what RT pipelines and other techniques would add (2026-10-23)
+
+The ray API is not the bottleneck: what limits the options is the frame data (G-buffer, motion vectors, a denoiser) and
+complete geometry. Ray query was chosen as the floor; this GPU / driver also offer `VK_KHR_ray_tracing_pipeline` (caps report:
+"exists, information only").
+
+* **RT pipelines add**: per-material hit shaders, i.e. the real material at a hit (normal map, lightmap, self-illumination,
+  alpha) instead of the mean albedo, by turning translated engine shaders into closest-hit / any-hit shaders; ray reordering
+  (large wins on NVIDIA, about none on RDNA3); recursion / callables for multi-bounce paths.
+
+| option | needs | cost / fit |
+|---|---|---|
+| GI-1.0 screen probes + hash-grid world cache (AMD, MIT) | depth, normals, camera motion | [P] 2-3 ms at 1080p on RDNA2; ray query is enough; Stage C |
+| ReSTIR GI + world cache + denoiser ("RTXGI 2" style) | full G-buffer, per-object motion vectors, strong denoiser | [P] 8+ ms at 1080p on a 3090 for ReSTIR GI: too heavy on RDNA3 now |
+| full path tracing (ReSTIR PT) | the above + materials at hits + emissives | 15-30+ ms; needs upscaling + a neural denoiser (DLSS Ray Reconstruction is NVIDIA-only; AMD's counterpart is not available in Vulkan) |
+| surfel GI (EA GIBS) | G-buffer normals, surfel grid | [P] 2.5-3 ms on consoles; very complex |
+| Lumen-style (screen -> world trace -> surface cache) | mesh cards / SDFs, surface cache | [P] 4 ms at 1080p on consoles; too big |
+| neural radiance cache (NVIDIA NRC) | cooperative matrix (`VK_KHR_cooperative_matrix`, RDNA3 has it) | research grade |
+| no RT hardware: Brixelizer GI (MIT, SDF), voxel cone tracing, radiance cascades (screen space only in practice) | | Brixelizer ~2 ms on a 7900 XTX: a fallback for GPUs without RT |
+
+Prerequisites for anything beyond DDGI / screen probes, in the order of Stage A-C: characters in the RT scene (P3), the thin
+G-buffer (P5), motion vectors (P6), a denoiser of our own (NRD's licence does not fit an MIT project), materials at hits (RT
+pipelines). Path tracing proper is a multi-milestone project whose GPU cost is several times today's frame.
+## 9. Risks / open questions
 
 * Light leaks: single-sided walls / roofs in the harbour town, coplanar duplicates, interiors with geometry missing behind the
   camera (no cascades indoors) -> interior volumes used exclusively by indoor pixels (`f < 1`), backface classification.
