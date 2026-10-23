@@ -168,6 +168,7 @@ complete geometry. Ray query was chosen as the floor; this GPU / driver also off
 Prerequisites for anything beyond DDGI / screen probes, in the order of Stage A-C: characters in the RT scene (P3), the thin
 G-buffer (P5), motion vectors (P6), a denoiser of our own (NRD's licence does not fit an MIT project), materials at hits (RT
 pipelines). Path tracing proper is a multi-milestone project whose GPU cost is several times today's frame.
+
 ## 8. Risks / open questions
 
 * Light leaks: single-sided walls / roofs in the harbour town, coplanar duplicates, interiors with geometry missing behind the
@@ -181,3 +182,59 @@ pipelines). Path tracing proper is a multi-milestone project whose GPU cost is s
   final image, not the target.
 * Open RE: indoor zone / `eCLightSet` assignment, the weather -> ambient mapping, whether the exposure semantic reaches the
   tonemap, terrain lightmaps, lightmap sRGB.
+
+## 9. Stage A first light: built (2026-10-23)
+
+([C] = measured / read in code.)
+
+**Code** [C]: `src/enh/gi.{h,cpp}` (a `d3d9::DrawObserver` + a pass `gi` at AfterOpaque, order 10, after `rt.scene`),
+`shaders/gi/gi_trace.comp`, `gi_blend.comp`, `gi_common.glsl`, `shaders/include/rvk_gi.glsl` (self-contained; embedded as text via
+`rvk_glslc text` and pasted into the GI variants with `GlslOptions::prelude`; mirrors `enh::GiVolumeHeader`, 304 bytes).
+
+**P0, light from the main view's solid draws** [C]: outdoor ambient = the most frequent `g_AmbientLight` set of the frame (kept
+from earlier frames when it covers < 30 % of the ambient draws), indoor colour c14, sun = the most frequent non-zero `g_DirLight`,
+up to 32 deduplicated point lights (`g_PointLights`, nearest the camera). Measured: noon beach sky L0 (0.85, 0.83, 0.75), sun
+(3.93, 3.27, 1.94).
+
+**P1, probes** [C]: 3 cascades of 32 x 16 x 32 probes, 150 / 300 / 600 units apart, toroidal scrolling; each probe stores its
+absolute cell as a key, lookups skip probes whose key differs. Per frame a budget (`gi.quality` low 1024 / medium 2048 / high 4096
+probes; shares 50 / 30 / 20 % per cascade): scrolled-in cells first, then round robin. 64 spherical-Fibonacci rays per probe,
+randomly rotated per frame, cut-outs solid. Hits: albedo^2.2 x (sun x N.L x shadow ray + one point light picked by its unshadowed
+light with a shadow ray + the probes' own lookup at the hit = multi-bounce); misses = the engine's outdoor ambient as radiance
+(L1 x 3/2, L2 x 4: an all-sky probe returns the engine's ambient). Back faces (interpolated vertex normal facing away; not for
+alpha-tested / SpeedTree / characters) store 0 and -0.2 t; > 25 % back faces = probe inside, never used. Blend: SH projection
+4 pi / 64, band factors 1, 2/3, 1/4 (acc units = irradiance / pi), stored directly in the engine's 7-register layout (c15..c21),
+hysteresis 0.97 (depth 0.95) with a 1/(n+1) ramp; depth moments 8 x 8 octahedral (fp32, distances in cells capped at 4, cosine^10
+lobe). Memory 34 MiB.
+
+**P2, material variants** [C]: the material pixel shaders' GI variant (`d3d9::VariantSlot::Gi`, tag `gi3`): `constOverrides` of
+`g_AmbientLight` + `g_IndoorAmbientColor` -> `rvk_gi[]` filled in a prologue (world position from `gl_FragCoord` + FrameBlock
+`invViewProj`, geometric normal from derivatives, DDGI weights: trilinear x backface x Chebyshev, normal bias 0.1 / view bias 0.3
+cells, 2-cell cascade blend band); c14 := the GI average. Only main-view Solid / Alpha / AlphaLate draws with colour output,
+non-water, the engine's ambient non-zero and not ONE/ONE blending (`Device::giEligible`). Variants translate + compile on 3
+background threads (SPIR-V cache), pipelines through `PipelineCache::prewarmOnce`; the draw uses the engine's shaders until both
+exist. `gi.lightmaps = keep` (default): the draw's own ambient beyond the outdoor sky stays on top: engine = f x sky + static with
+static >= 0, f bounded by min over channels of L0(draw) / L0(sky), remainder = draw - f x sky (0 for outdoor draws); `replace`:
+lightmap samplers read black and no remainder. The first version without the remainder made the pub nearly black (static lights
+are not point lights the probes know).
+
+**P3, characters in the RT scene** [C]: skinned main-view solid draws: the vertex shader's capture variant
+(`VariantSlot::Capture`, needs `vertexPipelineStoresAndAtomics`) writes world position + TEXCOORD0 (32 bytes per index-buffer
+value, 16-byte header with the slot count) into the frame's ring; `RtScene` builds / refits one BLAS per character draw
+(PREFER_FAST_BUILD | ALLOW_UPDATE, full rebuild every 30 refits), identity transform, instance mask `kRtMaskDynamic` (rays can
+skip them: `RVK_RT_TRACE_NO_DYNAMIC`; `gi.characters` off = GI rays skip them), records without normals, the draw's material.
+Measured: 9 characters in the TLAS at `hero_closeup`, ~120 builds + ~3400 refits per 5 s.
+
+**Debug** [C]: `gi.debug=irradiance` (the lookup on a white surface, geometric normal), `cascades` (red / green / blue, dark red =
+no probes). rvk.log `enh: gi:` lines every 5 s (probes per frame, pending cells, GI draws/s, light), `rt: scene: characters ...`.
+Offline check: `rvk_shadertool corpus corpus --gi` (2246 PS pass) / `--capture` (149 VS pass).
+
+**Results** [C] (water-compare runs `out\water\20261023-145539` / `-150204` / `-151353`, rvkcompare spots): no errors / failed
+variants; outdoor spots close to the engine with soft extra occlusion (jungle canopy, eaves, hero); monastery luma +4; pub +24
+(brighter than the engine with `keep`: tuning open); crystal cave darker (-14); debug views smooth, no leaks visible at these
+spots. Cost: ~0.4 ms GPU at 1920x1080 on an RX 7900 XTX (harbour hold: 3.56 ms with GI vs 3.15 ms without), 2047 probes x 64 rays
+per frame at medium.
+
+**Open**: interior volumes (portal rooms), true hemisphere SH from the engine (`eCHemisphere_PS`) instead of the most frequent
+draw set, interior brightness tuning (the `keep` remainder over-brightens some rooms), SSAO policy, `water_rt` switching to the
+captured light, lightmaps at hits, per-pass GPU timing via `-PerfFrame`.

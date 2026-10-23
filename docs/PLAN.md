@@ -45,7 +45,7 @@ Each milestone ends verified (in the game where it touches the engine) and commi
 | M9 RT water reflections | P1-P3 done (2026-10-22) | RT scene (BLAS cache, TLAS), materials at hits, `rt.reflections` for water | rt-reflections.md, rt-scene-facts.md, rt-albedo-facts.md |
 | High fps compatibility | done (2026-10-23, 4817bab) | ported Vaana's falling / climbing / thunder fixes (`compat.high_fps`) | fps-limit.md 12 |
 | Menu frame rate limit | done (2026-10-23) | `vulkan.menu_fps` (default 60) while a menu page is open; loading screens never paced (a 30 fps cap made a quick load 20 s instead of 2 s) | menu-fps.md |
-| M10 RT GI | researched (2026-10-23) | Stage A: DDGI probes holding L2 SH in the engine's ambient format (constant overrides of c14..c21), RT lighting incl. characters (skinned BLASes); Stage B: thin G-buffer + motion vectors (also for FSR 3/4, GTAO); Stage C: screen probes, later ReSTIR / RT pipelines | rtgi.md 6-7 |
+| M10 RT GI | Stage A first light built (2026-10-23, 12cc3f5) | Delivered: DDGI probes as the engine's ambient (c14..c21 overrides), multi-bounce, characters in the RT scene (details rtgi.md 9). Plan: Stage A: DDGI probes holding L2 SH in the engine's ambient format (constant overrides of c14..c21), RT lighting incl. characters (skinned BLASes); Stage B: thin G-buffer + motion vectors (also for FSR 3/4, GTAO); Stage C: screen probes, later ReSTIR / RT pipelines | rtgi.md 6-7 |
 | M11+ | open | anisotropic filtering, AA (MSAA / TAA / SMAA), tonemapping / HDR10, SSAO / GTAO, upscaling (FSR), sky / fog | enhancements-roadmap.md 3.6 |
 
 ### Open
@@ -61,6 +61,7 @@ Each milestone ends verified (in the game where it touches the engine) and commi
 * M7: underwater post, area profiles, wet-sand sheen (water.md 10).
 * M8: ocean.md 10.
 * Shadows: the cliff walk itself (exact place), RT shadows, terrain map beyond the range.
+* M10: interior volumes (portal rooms), true hemisphere SH from the engine (`eCHemisphere_PS`) instead of the most frequent draw set, interior brightness tuning (the `keep` remainder over-brightens some rooms; pub +24 luma), SSAO policy, `water_rt` on the captured light, lightmaps at hits, per-pass GPU timing via `-PerfFrame` (rtgi.md 9).
 * M9: P4 (leaf cards / billboards / grass, skinned characters, lightmaps / point lights at hits); SpeedTree strip details and cascade-only instance textures (rt-reflections.md 3.2); dynamic geometry, motion vectors, denoise (enhancements-roadmap.md 3.3-3.5).
 
 ## 3. Test tooling
