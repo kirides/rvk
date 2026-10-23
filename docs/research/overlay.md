@@ -60,6 +60,7 @@ Enum, default, range or options, flags) plus its value. Values are doubles inter
 | `overlay.fps_counter` | bool | false | live | small fps readout while the overlay is closed; NoAB |
 | `overlay.ab_badge` | bool | true | live | flip badge (1.5 s) and a "B" tag while side B is active; NoAB, Debug |
 | `overlay.debug_mode` | bool | false | live | the registry's debug switch (2.5); NoAB |
+| `overlay.show_advanced` | bool (hidden) | false | live | shows the `Flag::Advanced` settings: the checkbox at the top right of the window (2.6); NoAB |
 | `rt.allow` | bool | true | restart | enable the ray tracing tier at device creation; requires `RayTracingHardware` (greyed + off without it); docs/research/raytracing.md |
 
 ### 2.3 Files and precedence (decision)
@@ -104,6 +105,27 @@ change callbacks fire when the effective value changes. The A/B section (and its
 panel and the performance panel's diagnostics (present mode, pacing, enhancement status lines) are debug-mode only too.
 Turning debug mode off returns the A/B comparison to side A. `rvk_ab` / `[debug] commands` `ab ...` keep working
 without it (scripted runs have debug mode on through run.ps1 anyway). Unit test `settings_debug_mode`.
+
+### 2.6 The settings window (player layout, 2026-10-23)
+
+Tabs like the game's own options and GD3D11: **Display | Graphics | System**, plus **Debug** in debug mode
+(`Spec::tab`; sections inside a tab = `Spec::category`, in registration order). A checkbox "Show advanced settings" at
+the top right (`overlay.show_advanced`, forced on in debug mode) adds the `Flag::Advanced` fine tuning.
+
+| tab | sections, settings (advanced in italics) |
+|---|---|
+| Display | Display: vertical sync, frame rate limit ("Unlimited" at 0), fullscreen mode; a pointer to the game's Options menu |
+| Graphics | Preset row (Original / Low / Medium / High / Ultra, "(custom)" when none matches); Water: enhanced water, water quality, ray-traced reflections, sea waves, sea detail, sea state, *water reflections, wind direction, wave height, murkiness, reflection strength*; Shadows: enhanced shadows, edge quality, resolution, *softness, detail blending, fade-out, offset, distance, detail distribution* |
+| System | Menu: settings menu key, show frame rate, debug mode; Hardware: *graphics card, ray tracing support*; "Graphics card" (capability report) and "Performance" panels (diagnostic lines in debug mode only) |
+| Debug | A/B comparison panel; A/B options (key, indicator); Debug views (tint, injection, RT scene, water, shadows); "Frame structure" |
+
+Each tab ends with "Reset <tab> settings to defaults" (`settings::resetTab`: every setting of the tab, advanced and
+hidden ones included, locked ones kept). Presets (`settings::graphicsPresets`, `applyPreset`, `matchPreset`) set water,
+sea, RT reflections and shadows together; advanced settings are not part of them; High = the defaults; Original lists
+only what turns the enhancements off. The preset choices (which quality per preset) are a first judgement, not measured.
+Tooltips are the specs' descriptions in player language (developer wording only on the Debug tab), wrapped, plus
+"Default: <label>" (and `key = value` in debug mode). `[debug] commands`: `overlay tab <display|graphics|system|debug>`
+selects a tab (screenshots of each tab). Unit test `settings_presets_and_tabs`.
 
 ## 3. Input: how the engine reads it, how the overlay takes it
 

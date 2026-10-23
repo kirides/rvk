@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <charconv>
 #include <cmath>
+#include <cstdio>
 #include <format>
 
 #include <imgui.h>
@@ -340,6 +341,11 @@ bool Overlay::runCommand(std::string_view command, std::string* out) {
     };
     if (w.empty()) return fail("empty command");
     auto& reg = settings::registry();
+    if (w[0] == "overlay" && w.size() == 3 && w[1] == "tab") {
+        // selects a tab of the settings window at its next build (screenshots of each tab)
+        selectTab_ = std::string(w[2]);
+        return ok("tab " + selectTab_);
+    }
     if (w[0] == "overlay" && w.size() == 2) {
         if (w[1] == "open") setOpen(true);
         else if (w[1] == "close") setOpen(false);
@@ -506,6 +512,155 @@ void Overlay::buildBadges() {
     }
 }
 
+namespace {
+
+// a value as the overlay shows it: option labels, On / Off, the spec's format, its auto label at the minimum
+std::string displayValue(const settings::Spec& sp, double v) {
+    switch (sp.type) {
+    case settings::Type::Bool: return v != 0.0 ? "On" : "Off";
+    case settings::Type::Enum: {
+        const auto i = static_cast<std::size_t>(v);
+        if (i < sp.optionLabels.size()) return sp.optionLabels[i];
+        return i < sp.options.size() ? sp.options[i] : std::string();
+    }
+    case settings::Type::Int:
+    case settings::Type::Float:
+        if (!sp.autoLabel.empty() && v == sp.min) return sp.autoLabel;
+        if (sp.format.empty()) return settings::Registry::formatValue(sp, v);
+        char buf[64];
+        if (sp.type == settings::Type::Int) std::snprintf(buf, sizeof(buf), sp.format.c_str(), static_cast<int>(v));
+        else std::snprintf(buf, sizeof(buf), sp.format.c_str(), v);
+        return buf;
+    }
+    return {};
+}
+
+// a tooltip wrapped at a readable width (descriptions are long single lines)
+void wrappedTooltip(const std::string& text) {
+    if (!ImGui::BeginTooltip()) return;
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 32.0f);
+    ImGui::TextUnformatted(text.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::EndTooltip();
+}
+
+// one setting: its control, tooltip and state notes (reset, locked, unavailable, restart)
+void drawSetting(settings::Registry& reg, settings::Setting& s, bool debug) {
+    const settings::Spec& sp = s.spec();
+    ImGui::PushID(sp.key.c_str());
+    const bool locked = s.locked();
+    // capability resolution (Spec::requirements): greyed, showing the value that applies, with the reason
+    const bool unavailable = !s.available();
+    const bool disabled = locked || unavailable;
+    if (disabled) ImGui::BeginDisabled();
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.45f);
+    switch (sp.type) {
+    case settings::Type::Bool: {
+        bool v = s.asBool();
+        if (ImGui::Checkbox(sp.label.c_str(), &v)) reg.set(s, v ? 1.0 : 0.0);
+        break;
+    }
+    case settings::Type::Int: {
+        int v = s.asInt();
+        // the auto label replaces the number at the minimum ("Auto"); ImGui prints a format without '%' as it is
+        const std::string fmt = !sp.autoLabel.empty() && v == static_cast<int>(sp.min) ? sp.autoLabel
+                                : sp.format.empty()                                    ? std::string("%d")
+                                                                                       : sp.format;
+        if (ImGui::SliderInt(sp.label.c_str(), &v, static_cast<int>(sp.min), static_cast<int>(sp.max), fmt.c_str(),
+                             ImGuiSliderFlags_AlwaysClamp)) {
+            reg.set(s, v);
+        }
+        break;
+    }
+    case settings::Type::Float: {
+        float v = s.asFloat();
+        const std::string fmt = !sp.autoLabel.empty() && v == static_cast<float>(sp.min) ? sp.autoLabel
+                                : sp.format.empty()                                        ? std::string("%.2f")
+                                                                                           : sp.format;
+        if (ImGui::SliderFloat(sp.label.c_str(), &v, static_cast<float>(sp.min), static_cast<float>(sp.max), fmt.c_str(),
+                               ImGuiSliderFlags_AlwaysClamp)) {
+            reg.set(s, v);
+        }
+        break;
+    }
+    case settings::Type::Enum: {
+        const auto label = [&](std::size_t i) {
+            return i < sp.optionLabels.size() ? sp.optionLabels[i].c_str() : sp.options[i].c_str();
+        };
+        const auto cur = static_cast<std::size_t>(s.effective());
+        if (ImGui::BeginCombo(sp.label.c_str(), label(cur))) {
+            for (std::size_t i = 0; i < sp.options.size(); ++i) {
+                if (ImGui::Selectable(label(i), i == cur)) reg.set(s, static_cast<double>(i));
+            }
+            ImGui::EndCombo();
+        }
+        break;
+    }
+    }
+    if (disabled) ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled)) {
+        std::string tip = sp.description;
+        if (unavailable) {
+            tip += std::format("\n\nUnavailable: {}\nYour choice ({}) is kept and applies once this is available.",
+                               reg.unavailableReason(s), displayValue(sp, s.value()));
+        }
+        if (locked) tip += "\n\nSet by rvk\\config.toml for this session.";
+        tip += std::format("\n\nDefault: {}", displayValue(sp, sp.defaultValue));
+        if (debug) tip += std::format("  ({} = {})", sp.key, settings::Registry::formatValue(sp, s.value()));
+        wrappedTooltip(tip);
+    }
+    if (unavailable) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(unavailable)");
+    } else if (locked) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(set by config.toml)");
+    } else if (!s.isDefault()) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Reset")) reg.resetToDefault(s);
+    }
+    if (s.restartPending()) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "restart needed");
+    } else if (s.restart()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(after a restart)");
+    }
+    ImGui::PopID();
+}
+
+// the settings of one tab, in sections (Spec::category) by first appearance; Hidden never, Debug / Advanced as enabled
+void drawTabSettings(settings::Registry& reg, std::string_view tab, bool debug, bool advanced) {
+    const auto all = reg.all();
+    const auto shown = [&](const settings::Spec& sp) {
+        return sp.tab == tab && (sp.flags & settings::Flag::Hidden) == 0 && (debug || (sp.flags & settings::Flag::Debug) == 0) &&
+               (advanced || (sp.flags & settings::Flag::Advanced) == 0);
+    };
+    std::vector<std::string> sections;
+    for (const settings::Setting* s : all) {
+        if (shown(s->spec()) && std::ranges::find(sections, s->spec().category) == sections.end()) {
+            sections.push_back(s->spec().category);
+        }
+    }
+    for (const std::string& section : sections) {
+        ImGui::SeparatorText(section.c_str());
+        for (settings::Setting* s : all) {
+            if (s->spec().category == section && shown(s->spec())) drawSetting(reg, *s, debug);
+        }
+    }
+}
+
+void resetTabButton(settings::Registry& reg, std::string_view tab) {
+    ImGui::Spacing();
+    ImGui::Separator();
+    if (ImGui::Button(std::format("Reset {} settings to defaults", tab).c_str())) {
+        const std::size_t n = settings::resetTab(reg, tab);
+        spdlog::info("overlay: {} tab reset to defaults ({} settings)", tab, n);
+    }
+}
+
+}  // namespace
+
 void Overlay::buildSettingsWindow() {
     auto& reg = settings::registry();
     const auto& r = settings::renderer();
@@ -516,273 +671,263 @@ void Overlay::buildSettingsWindow() {
         return l;
     };
     ImGui::SetNextWindowPos(ImVec2(40.0f, 40.0f), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(620.0f, 700.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(640.0f, 700.0f), ImGuiCond_FirstUseEver);
     bool keepOpen = true;
     if (!ImGui::Begin("Risen Enhanced Graphics###rvk_settings", &keepOpen, ImGuiWindowFlags_NoCollapse)) {
         ImGui::End();
         if (!keepOpen) setOpen(false);
         return;
     }
-
-    // ---- A/B (debug mode) ----
     const bool debug = reg.debugMode();
-    const bool b = reg.bActive();
-    if (debug) {
-        ImGui::SeparatorText("A/B comparison");
-        ImGui::TextUnformatted("Active side:");
-        ImGui::SameLine();
-        ImGui::TextColored(b ? ImVec4(1.0f, 0.75f, 0.3f, 1.0f) : ImVec4(0.45f, 0.8f, 1.0f, 1.0f), "%s", sideName(b));
-        ImGui::SameLine();
-        if (ImGui::Button(std::format("Flip to {} ({})", sideName(!b), keyLabel(r.abKey)).c_str())) reg.flipAB();
-        ImGui::SameLine();
-        if (ImGui::Button(std::format("Copy {} to {}", sideName(b), sideName(!b)).c_str())) reg.copyActiveToOther();
-        ImGui::SameLine();
-        if (ImGui::Button(std::format("Reset {} to defaults", sideName(!b)).c_str())) reg.resetOther();
-        const auto diffs = reg.abDifferences();
-        if (diffs.empty()) {
-            ImGui::TextDisabled("Both sides are the same. Side B starts as the defaults:\n"
-                                "change settings on one side, then flip to compare.");
-        } else if (ImGui::BeginTable("##ab", 3, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
-            ImGui::TableSetupColumn("setting");
-            ImGui::TableSetupColumn("A");
-            ImGui::TableSetupColumn("B");
-            ImGui::TableHeadersRow();
-            for (const settings::Setting* s : diffs) {
-                const double active = s->value(), other = reg.otherValue(*s);
-                ImGui::TableNextRow();
-                ImGui::TableNextColumn();
-                ImGui::TextUnformatted(s->spec().label.c_str());
-                ImGui::TableNextColumn();
-                ImGui::TextUnformatted(settings::Registry::formatValue(s->spec(), b ? other : active).c_str());
-                ImGui::TableNextColumn();
-                ImGui::TextUnformatted(settings::Registry::formatValue(s->spec(), b ? active : other).c_str());
-            }
-            ImGui::EndTable();
+    const bool advanced = debug || (r.showAdvanced != nullptr && r.showAdvanced->value() != 0.0);
+
+    // ---- "Show advanced settings" at the top right (always on in debug mode) ----
+    {
+        const char* label = "Show advanced settings";
+        const ImGuiStyle& style = ImGui::GetStyle();
+        const float width = ImGui::GetFrameHeight() + style.ItemInnerSpacing.x + ImGui::CalcTextSize(label).x;
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, ImGui::GetContentRegionAvail().x - width));
+        bool v = advanced;
+        if (debug) ImGui::BeginDisabled();
+        if (ImGui::Checkbox(label, &v) && r.showAdvanced != nullptr) reg.set(*r.showAdvanced, v ? 1.0 : 0.0);
+        if (debug) ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("%s", debug ? "Always on in debug mode."
+                                          : "Also shows the fine-tuning settings (wave height, shadow distance, ...).");
         }
     }
 
-    // ---- settings by category (Flag::Debug ones in debug mode only) ----
-    const auto all = reg.all();
-    std::vector<std::string> categories;
-    const auto shown = [&](const settings::Spec& sp) {
-        return (sp.flags & settings::Flag::Hidden) == 0 && (debug || (sp.flags & settings::Flag::Debug) == 0);
+    // [debug] command "overlay tab <name>" (case-insensitive)
+    const auto tabFlags = [&](std::string_view tab) -> ImGuiTabItemFlags {
+        const bool select = selectTab_.size() == tab.size() && std::equal(tab.begin(), tab.end(), selectTab_.begin(), [](char a, char b) {
+            return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+        });
+        return select ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None;
     };
-    for (const settings::Setting* s : all) {
-        if (shown(s->spec()) && std::ranges::find(categories, s->spec().category) == categories.end()) {
-            categories.push_back(s->spec().category);
+    if (ImGui::BeginTabBar("##rvk_tabs")) {
+        // ---- Display ----
+        if (ImGui::BeginTabItem(settings::kTabDisplay, nullptr, tabFlags(settings::kTabDisplay))) {
+            drawTabSettings(reg, settings::kTabDisplay, debug, advanced);
+            ImGui::Spacing();
+            ImGui::TextDisabled("Resolution, brightness and the game's own graphics options: the game's Options menu.");
+            resetTabButton(reg, settings::kTabDisplay);
+            ImGui::EndTabItem();
         }
-    }
-    for (const std::string& cat : categories) {
-        if (!ImGui::CollapsingHeader(cat.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) continue;
-        for (settings::Setting* s : all) {
-            const settings::Spec& sp = s->spec();
-            if (sp.category != cat || !shown(sp)) continue;
-            ImGui::PushID(sp.key.c_str());
-            const bool locked = s->locked();
-            // capability resolution (Spec::requirements): greyed, showing the value that applies, with the reason
-            const bool unavailable = !s->available();
-            const bool disabled = locked || unavailable;
-            if (disabled) ImGui::BeginDisabled();
-            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.45f);
-            switch (sp.type) {
-            case settings::Type::Bool: {
-                bool v = s->asBool();
-                if (ImGui::Checkbox(sp.label.c_str(), &v)) reg.set(*s, v ? 1.0 : 0.0);
-                break;
-            }
-            case settings::Type::Int: {
-                int v = s->asInt();
-                if (ImGui::SliderInt(sp.label.c_str(), &v, static_cast<int>(sp.min), static_cast<int>(sp.max),
-                                     sp.format.empty() ? "%d" : sp.format.c_str(), ImGuiSliderFlags_AlwaysClamp)) {
-                    reg.set(*s, v);
-                }
-                break;
-            }
-            case settings::Type::Float: {
-                float v = s->asFloat();
-                if (ImGui::SliderFloat(sp.label.c_str(), &v, static_cast<float>(sp.min), static_cast<float>(sp.max),
-                                       sp.format.empty() ? "%.2f" : sp.format.c_str(), ImGuiSliderFlags_AlwaysClamp)) {
-                    reg.set(*s, v);
-                }
-                break;
-            }
-            case settings::Type::Enum: {
-                const auto label = [&](std::size_t i) {
-                    return i < sp.optionLabels.size() ? sp.optionLabels[i].c_str() : sp.options[i].c_str();
-                };
-                const auto cur = static_cast<std::size_t>(s->effective());
-                if (ImGui::BeginCombo(sp.label.c_str(), label(cur))) {
-                    for (std::size_t i = 0; i < sp.options.size(); ++i) {
-                        if (ImGui::Selectable(label(i), i == cur)) reg.set(*s, static_cast<double>(i));
-                    }
-                    ImGui::EndCombo();
-                }
-                break;
-            }
-            }
-            if (disabled) ImGui::EndDisabled();
-            const std::string unavailableReason = unavailable ? reg.unavailableReason(*s) : std::string();
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled)) {
-                if (unavailable) {
-                    ImGui::SetTooltip("%s\n\nUnavailable: %s\nYour choice (%s) is kept and applies once this is available.\n\n"
-                                      "%s, default %s",
-                                      sp.description.c_str(), unavailableReason.c_str(), reg.text(*s).c_str(), sp.key.c_str(),
-                                      settings::Registry::formatValue(sp, sp.defaultValue).c_str());
-                } else {
-                    ImGui::SetTooltip("%s\n\n%s, default %s", sp.description.c_str(), sp.key.c_str(),
-                                      settings::Registry::formatValue(sp, sp.defaultValue).c_str());
-                }
-            }
-            if (unavailable) {
-                ImGui::SameLine();
-                ImGui::TextDisabled("(unavailable)");
-            } else if (locked) {
-                ImGui::SameLine();
-                ImGui::TextDisabled("(set by config.toml)");
-            } else if (!s->isDefault()) {
-                ImGui::SameLine();
-                if (ImGui::SmallButton("default")) reg.resetToDefault(*s);
-            }
-            if (s->restartPending()) {
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "restart needed");
-            } else if (s->restart()) {
-                ImGui::SameLine();
-                ImGui::TextDisabled("(after a restart)");
-            }
-            ImGui::PopID();
-        }
-    }
 
-    // ---- capabilities (core/caps.h, docs/research/raytracing.md 3) ----
-    if (ImGui::CollapsingHeader("Capabilities")) {
-        const caps::Report report = reg.capabilities();
-        if (!report.known) {
-            ImGui::TextDisabled("no Vulkan device");
-        } else {
-            ImGui::Text("GPU: %s", report.gpu.c_str());
-            ImGui::Text("Driver: %s", report.driver.c_str());
-            ImGui::Text("Vulkan: %s", report.api.c_str());
-            if (ImGui::BeginTable("##caps", 2, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
-                ImGui::TableSetupColumn("feature", ImGuiTableColumnFlags_WidthStretch, 0.45f);
-                ImGui::TableSetupColumn("state", ImGuiTableColumnFlags_WidthStretch, 0.55f);
-                ImGui::TableHeadersRow();
-                for (std::size_t i = 0; i < caps::kCount; ++i) {
-                    const auto c = static_cast<caps::Cap>(i);
-                    const caps::Entry& e = report[c];
-                    ImGui::TableNextRow();
-                    ImGui::TableNextColumn();
-                    ImGui::TextUnformatted(std::string(caps::label(c)).c_str());
-                    if (!e.detail.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) ImGui::SetTooltip("%s", e.detail.c_str());
-                    ImGui::TableNextColumn();
-                    if (e.enabled) {
-                        ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1.0f), "enabled");
-                    } else {
-                        ImGui::TextColored(e.available ? ImVec4(1.0f, 0.8f, 0.3f, 1.0f) : ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "%s",
-                                           e.available ? "available, off" : "unavailable");
-                        if (!e.reason.empty()) {
-                            ImGui::PushTextWrapPos(0.0f);
-                            ImGui::TextDisabled("%s", e.reason.c_str());
-                            ImGui::PopTextWrapPos();
-                        }
-                    }
+        // ---- Graphics: presets + the enhancements ----
+        if (ImGui::BeginTabItem(settings::kTabGraphics, nullptr, tabFlags(settings::kTabGraphics))) {
+            const auto& presets = settings::graphicsPresets();
+            const int current = settings::matchPreset(reg);
+            ImGui::SeparatorText("Preset");
+            for (std::size_t i = 0; i < presets.size(); ++i) {
+                if (i > 0) ImGui::SameLine();
+                const bool active = static_cast<int>(i) == current;
+                if (active) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+                if (ImGui::Button(presets[i].label.c_str())) {
+                    settings::applyPreset(reg, presets[i]);
+                    spdlog::info("overlay: preset {}", presets[i].name);
                 }
-                ImGui::EndTable();
+                if (active) ImGui::PopStyleColor();
             }
-            for (const auto& [k, v] : report.properties) {
-                ImGui::PushTextWrapPos(0.0f);
-                ImGui::TextDisabled("%s: %s", k.c_str(), v.c_str());
-                ImGui::PopTextWrapPos();
-            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", current < 0 ? "(custom)" : "");
+            ImGui::TextDisabled("Original = the game's own look. Lower presets run faster.");
+            drawTabSettings(reg, settings::kTabGraphics, debug, advanced);
+            resetTabButton(reg, settings::kTabGraphics);
+            ImGui::EndTabItem();
         }
-    }
 
-    // ---- performance ----
-    if (ImGui::CollapsingHeader("Performance", ImGuiTreeNodeFlags_DefaultOpen)) {
-        const std::size_t n = historyCount_;
-        float sum = 0.0f, worst = 0.0f, cpuSum = 0.0f, gpuSum = 0.0f;
-        std::size_t gpuN = 0;
-        for (std::size_t i = 0; i < n; ++i) {
-            const std::size_t k = (historyPos_ + kHistory - 1 - i) % kHistory;
-            sum += intervals_[k];
-            worst = std::max(worst, intervals_[k]);
-            cpuSum += cpu_[k];
-            if (gpu_[k] >= 0.0f) {
-                gpuSum += gpu_[k];
-                ++gpuN;
-            }
+        // ---- System: menu, hardware, capabilities, performance ----
+        if (ImGui::BeginTabItem(settings::kTabSystem, nullptr, tabFlags(settings::kTabSystem))) {
+            drawTabSettings(reg, settings::kTabSystem, debug, advanced);
+            buildCapabilitiesPanel();
+            buildPerformancePanel(debug);
+            resetTabButton(reg, settings::kTabSystem);
+            ImGui::EndTabItem();
         }
-        const float avg = n > 0 ? sum / static_cast<float>(n) : 0.0f;
-        ImGui::Text("%.1f fps   frame %.2f ms (worst %.2f ms over %zu frames)", avg > 0.0f ? 1000.0f / avg : 0.0f, avg, worst, n);
-        ImGui::Text("CPU (engine + renderer) %.2f ms", n > 0 ? cpuSum / static_cast<float>(n) : 0.0f);
-        if (gpuN > 0) {
-            ImGui::Text("GPU %.2f ms", gpuSum / static_cast<float>(gpuN));
-        } else if (debug) {
-            ImGui::TextDisabled("GPU time: off (config.toml [debug] perf = true)");
-        }
-        // the history as a line, oldest first
-        float ordered[kHistory];
-        for (std::size_t i = 0; i < n; ++i) ordered[i] = intervals_[(historyPos_ + kHistory - n + i) % kHistory];
-        ImGui::PlotLines("##frametimes", ordered, static_cast<int>(n), 0, "frame time (ms)", 0.0f, std::max(20.0f, worst * 1.1f),
-                         ImVec2(ImGui::GetContentRegionAvail().x, 70.0f));
-        const auto& st = device_->stats();
-        ImGui::Text("%u draws, vsync %s, frame rate limit %s", st.lastFrameDraws, device_->vsync() ? "on" : "off",
-                    device_->maxFps() > 0.0 ? std::format("{:.0f} fps", device_->maxFps()).c_str() : "none");
-        // window / display mode (docs/research/window-mode.md 8)
-        ImGui::TextUnformatted(engine::window::displaySummary().c_str());
-        if (debug) {
-            ImGui::Text("present mode %d%s, frame pacing %.1f fps", static_cast<int>(device_->presentMode()),
-                        device_->fullScreenExclusiveHeld()       ? ", Vulkan exclusive fullscreen held"
-                        : device_->fullScreenExclusiveConfigured() ? ", exclusive swapchain (not held)"
-                                                                   : "",
-                        device_->pacerRate());
-            // enhancements' one-line status (e.g. the RT scene: instances, BLAS, memory)
-            for (const auto& [key, text] : device_->status()) ImGui::TextUnformatted(text.c_str());
-        }
-    }
 
-    // ---- the last frame's phases and camera (d3d9/scene.h, docs/research/frame-phases.md; debug mode) ----
-    if (debug && ImGui::CollapsingHeader("Frame structure")) {
-        const auto& ph = device_->phases();
-        const std::string seq = d3d9::scene::PhaseTracker::summary(ph.lastFrame());
-        ImGui::PushTextWrapPos(0.0f);
-        ImGui::TextUnformatted(seq.empty() ? "(no phase markers)" : seq.c_str());
-        ImGui::PopTextWrapPos();
-        const auto& dr = device_->drawRecords();
-        const std::string kinds = dr.lastHistogram().summary();
-        ImGui::PushTextWrapPos(0.0f);
-        ImGui::Text("draw kinds (%zu records): %s", dr.last().size(), kinds.c_str());
-        ImGui::PopTextWrapPos();
-        const auto& c = device_->lastCamera();
-        if (c.valid) {
-            ImGui::Text("camera (%.1f, %.1f, %.1f), near %.1f, far %.0f", c.position[0], c.position[1], c.position[2], c.nearZ,
-                        c.engineFar);
-        } else {
-            ImGui::TextDisabled("no main view in the last frame");
+        // ---- Debug (debug mode): A/B, debug views, frame structure ----
+        if (debug && ImGui::BeginTabItem(settings::kTabDebug, nullptr, tabFlags(settings::kTabDebug))) {
+            buildAbPanel();
+            drawTabSettings(reg, settings::kTabDebug, debug, advanced);
+            buildFramePanel();
+            ImGui::EndTabItem();
         }
-        // injected passes (d3d9/inject.h, docs/research/injection.md)
-        const auto& passes = device_->passes();
-        if (passes.empty()) {
-            ImGui::TextDisabled("injected passes: none");
-        } else {
-            std::string list;
-            for (std::size_t i = 0; i < d3d9::inject::kPointCount; ++i) {
-                const auto point = static_cast<d3d9::inject::Point>(i);
-                for (const auto& e : passes.passes(point)) {
-                    list += std::format("{}{} at {}", list.empty() ? "" : ", ", e.name, d3d9::inject::name(point));
-                }
-            }
-            ImGui::PushTextWrapPos(0.0f);
-            ImGui::Text("injected passes: %s", list.c_str());
-            ImGui::PopTextWrapPos();
-        }
+        ImGui::EndTabBar();
+        selectTab_.clear();
     }
 
     ImGui::Separator();
-    ImGui::TextDisabled("%s  |  %s: close%s", reg.dirty() ? "saving..." : "saved in bin\\rvk\\settings.toml",
+    ImGui::TextDisabled("%s  |  %s: close%s", reg.dirty() ? "saving..." : "saved in rvk\\settings.toml",
                         keyLabel(r.toggleKey).c_str(), debug ? std::format("  |  {}: A/B", keyLabel(r.abKey)).c_str() : "");
     ImGui::End();
     if (!keepOpen) setOpen(false);
+}
+
+void Overlay::buildAbPanel() {
+    auto& reg = settings::registry();
+    const auto& r = settings::renderer();
+    std::string key = r.abKey != nullptr ? std::string(r.abKey->asEnum()) : "?";
+    for (auto& c : key) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    const bool b = reg.bActive();
+    ImGui::SeparatorText("A/B comparison");
+    ImGui::TextUnformatted("Active side:");
+    ImGui::SameLine();
+    ImGui::TextColored(b ? ImVec4(1.0f, 0.75f, 0.3f, 1.0f) : ImVec4(0.45f, 0.8f, 1.0f, 1.0f), "%s", sideName(b));
+    ImGui::SameLine();
+    if (ImGui::Button(std::format("Flip to {} ({})", sideName(!b), key).c_str())) reg.flipAB();
+    ImGui::SameLine();
+    if (ImGui::Button(std::format("Copy {} to {}", sideName(b), sideName(!b)).c_str())) reg.copyActiveToOther();
+    ImGui::SameLine();
+    if (ImGui::Button(std::format("Reset {} to defaults", sideName(!b)).c_str())) reg.resetOther();
+    const auto diffs = reg.abDifferences();
+    if (diffs.empty()) {
+        ImGui::TextDisabled("Both sides are the same. Side B starts as the defaults:\n"
+                            "change settings on one side, then flip to compare.");
+    } else if (ImGui::BeginTable("##ab", 3, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("setting");
+        ImGui::TableSetupColumn("A");
+        ImGui::TableSetupColumn("B");
+        ImGui::TableHeadersRow();
+        for (const settings::Setting* s : diffs) {
+            const double active = s->value(), other = reg.otherValue(*s);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(s->spec().label.c_str());
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(settings::Registry::formatValue(s->spec(), b ? other : active).c_str());
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(settings::Registry::formatValue(s->spec(), b ? active : other).c_str());
+        }
+        ImGui::EndTable();
+    }
+}
+
+// ---- capabilities (core/caps.h, docs/research/raytracing.md 3) ----
+void Overlay::buildCapabilitiesPanel() {
+    if (!ImGui::CollapsingHeader("Graphics card")) return;
+    const caps::Report report = settings::registry().capabilities();
+    if (!report.known) {
+        ImGui::TextDisabled("no Vulkan device");
+        return;
+    }
+    ImGui::Text("GPU: %s", report.gpu.c_str());
+    ImGui::Text("Driver: %s", report.driver.c_str());
+    ImGui::Text("Vulkan: %s", report.api.c_str());
+    if (ImGui::BeginTable("##caps", 2, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("feature", ImGuiTableColumnFlags_WidthStretch, 0.45f);
+        ImGui::TableSetupColumn("state", ImGuiTableColumnFlags_WidthStretch, 0.55f);
+        ImGui::TableHeadersRow();
+        for (std::size_t i = 0; i < caps::kCount; ++i) {
+            const auto c = static_cast<caps::Cap>(i);
+            const caps::Entry& e = report[c];
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(std::string(caps::label(c)).c_str());
+            if (!e.detail.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) ImGui::SetTooltip("%s", e.detail.c_str());
+            ImGui::TableNextColumn();
+            if (e.enabled) {
+                ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1.0f), "enabled");
+            } else {
+                ImGui::TextColored(e.available ? ImVec4(1.0f, 0.8f, 0.3f, 1.0f) : ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "%s",
+                                   e.available ? "available, off" : "unavailable");
+                if (!e.reason.empty()) {
+                    ImGui::PushTextWrapPos(0.0f);
+                    ImGui::TextDisabled("%s", e.reason.c_str());
+                    ImGui::PopTextWrapPos();
+                }
+            }
+        }
+        ImGui::EndTable();
+    }
+    for (const auto& [k, v] : report.properties) {
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextDisabled("%s: %s", k.c_str(), v.c_str());
+        ImGui::PopTextWrapPos();
+    }
+}
+
+// ---- performance; `debug` adds the diagnostics (present mode, pacing, enhancement status lines) ----
+void Overlay::buildPerformancePanel(bool debug) {
+    if (!ImGui::CollapsingHeader("Performance", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    const std::size_t n = historyCount_;
+    float sum = 0.0f, worst = 0.0f, cpuSum = 0.0f, gpuSum = 0.0f;
+    std::size_t gpuN = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        const std::size_t k = (historyPos_ + kHistory - 1 - i) % kHistory;
+        sum += intervals_[k];
+        worst = std::max(worst, intervals_[k]);
+        cpuSum += cpu_[k];
+        if (gpu_[k] >= 0.0f) {
+            gpuSum += gpu_[k];
+            ++gpuN;
+        }
+    }
+    const float avg = n > 0 ? sum / static_cast<float>(n) : 0.0f;
+    ImGui::Text("%.1f fps   frame %.2f ms (worst %.2f ms over %zu frames)", avg > 0.0f ? 1000.0f / avg : 0.0f, avg, worst, n);
+    ImGui::Text("CPU (engine + renderer) %.2f ms", n > 0 ? cpuSum / static_cast<float>(n) : 0.0f);
+    if (gpuN > 0) {
+        ImGui::Text("GPU %.2f ms", gpuSum / static_cast<float>(gpuN));
+    } else if (debug) {
+        ImGui::TextDisabled("GPU time: off (config.toml [debug] perf = true)");
+    }
+    // the history as a line, oldest first
+    float ordered[kHistory];
+    for (std::size_t i = 0; i < n; ++i) ordered[i] = intervals_[(historyPos_ + kHistory - n + i) % kHistory];
+    ImGui::PlotLines("##frametimes", ordered, static_cast<int>(n), 0, "frame time (ms)", 0.0f, std::max(20.0f, worst * 1.1f),
+                     ImVec2(ImGui::GetContentRegionAvail().x, 70.0f));
+    const auto& st = device_->stats();
+    ImGui::Text("%u draws, vsync %s, frame rate limit %s", st.lastFrameDraws, device_->vsync() ? "on" : "off",
+                device_->maxFps() > 0.0 ? std::format("{:.0f} fps", device_->maxFps()).c_str() : "none");
+    // window / display mode (docs/research/window-mode.md 8)
+    ImGui::TextUnformatted(engine::window::displaySummary().c_str());
+    if (debug) {
+        ImGui::Text("present mode %d%s, frame pacing %.1f fps", static_cast<int>(device_->presentMode()),
+                    device_->fullScreenExclusiveHeld()       ? ", Vulkan exclusive fullscreen held"
+                    : device_->fullScreenExclusiveConfigured() ? ", exclusive swapchain (not held)"
+                                                               : "",
+                    device_->pacerRate());
+        // enhancements' one-line status (e.g. the RT scene: instances, BLAS, memory)
+        for (const auto& [key, text] : device_->status()) ImGui::TextUnformatted(text.c_str());
+    }
+}
+
+// ---- the last frame's phases and camera (d3d9/scene.h, docs/research/frame-phases.md; debug mode) ----
+void Overlay::buildFramePanel() {
+    if (!ImGui::CollapsingHeader("Frame structure")) return;
+    const auto& ph = device_->phases();
+    const std::string seq = d3d9::scene::PhaseTracker::summary(ph.lastFrame());
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextUnformatted(seq.empty() ? "(no phase markers)" : seq.c_str());
+    ImGui::PopTextWrapPos();
+    const auto& dr = device_->drawRecords();
+    const std::string kinds = dr.lastHistogram().summary();
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::Text("draw kinds (%zu records): %s", dr.last().size(), kinds.c_str());
+    ImGui::PopTextWrapPos();
+    const auto& c = device_->lastCamera();
+    if (c.valid) {
+        ImGui::Text("camera (%.1f, %.1f, %.1f), near %.1f, far %.0f", c.position[0], c.position[1], c.position[2], c.nearZ,
+                    c.engineFar);
+    } else {
+        ImGui::TextDisabled("no main view in the last frame");
+    }
+    // injected passes (d3d9/inject.h, docs/research/injection.md)
+    const auto& passes = device_->passes();
+    if (passes.empty()) {
+        ImGui::TextDisabled("injected passes: none");
+    } else {
+        std::string list;
+        for (std::size_t i = 0; i < d3d9::inject::kPointCount; ++i) {
+            const auto point = static_cast<d3d9::inject::Point>(i);
+            for (const auto& e : passes.passes(point)) {
+                list += std::format("{}{} at {}", list.empty() ? "" : ", ", e.name, d3d9::inject::name(point));
+            }
+        }
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::Text("injected passes: %s", list.c_str());
+        ImGui::PopTextWrapPos();
+    }
 }
 
 }  // namespace rvk::overlay

@@ -50,13 +50,22 @@ inline constexpr std::uint32_t Hidden = 1u << 2;   // not shown in the overlay (
 // developer setting (debug views, A/B): shown in the overlay only in debug mode (Registry::setDebugSwitch); outside it the
 // setting applies as its default, the player's value is kept
 inline constexpr std::uint32_t Debug = 1u << 3;
+// fine tuning: shown in the overlay only with "Show advanced settings" (overlay.show_advanced) or in debug mode
+inline constexpr std::uint32_t Advanced = 1u << 4;
 }  // namespace Flag
+
+// overlay tabs (Spec::tab)
+inline constexpr const char* kTabDisplay = "Display";
+inline constexpr const char* kTabGraphics = "Graphics";
+inline constexpr const char* kTabSystem = "System";
+inline constexpr const char* kTabDebug = "Debug";  // shown in debug mode only
 
 struct Spec {
     std::string key;          // "<table>.<name>" (lower case, digits, '_'): stable, it is the TOML path and the API key
     std::string label;        // overlay label
-    std::string category;     // overlay group
-    std::string description;  // overlay tooltip
+    std::string category;     // overlay section (inside the tab)
+    std::string tab = kTabGraphics;  // overlay tab: kTabDisplay / kTabGraphics / kTabSystem / kTabDebug
+    std::string description;  // overlay tooltip (player language; developer details only for Flag::Debug settings)
     Type type = Type::Bool;
     double defaultValue = 0.0;  // Bool 0/1, Enum: option index
     double min = 0.0;           // Int / Float range (values are clamped)
@@ -64,6 +73,7 @@ struct Spec {
     std::vector<std::string> options;       // Enum: the values as written to the file / API, e.g. {"engine", "on", "off"}
     std::vector<std::string> optionLabels;  // Enum: overlay labels (optional, same order)
     std::string format;                     // Int / Float overlay format, e.g. "%.0f fps" (optional)
+    std::string autoLabel;                  // Int / Float: the overlay shows this instead of the minimum ("Unlimited", "Auto")
     std::uint32_t flags = 0;                // Flag::*
     // Capabilities the setting needs (caps::bit(caps::Cap::RayQuery) | ...; docs/research/raytracing.md 3). While one is
     // unmet (no such hardware, disabled by rt.allow, no Vulkan device yet) the overlay shows the setting greyed with the
@@ -257,6 +267,7 @@ struct RendererSettings {
     Setting* fpsCounter = nullptr;   // overlay.fps_counter: small fps readout while the overlay is closed
     Setting* abBadge = nullptr;      // overlay.ab_badge: "B" tag while side B is active and the overlay is closed
     Setting* debugMode = nullptr;    // overlay.debug_mode: shows the Flag::Debug settings, the A/B comparison, diagnostics
+    Setting* showAdvanced = nullptr; // overlay.show_advanced: shows the Flag::Advanced settings (hidden: the overlay's checkbox)
     Setting* tintDraws = nullptr;    // debug.tint_draws: "off", "kind", "pass" (d3d9/draws.h TintMode)
     Setting* drawRecords = nullptr;  // debug.draw_records: per-frame draw records (hidden; the histogram is always on)
     Setting* injectView = nullptr;   // debug.inject_view: "off", "depth", "tint" (enh/debug_view.h, an injected pass)
@@ -295,5 +306,20 @@ const std::vector<std::string>& hotkeyNames();
 RendererSettings registerRendererSettings(Registry& reg);
 // the renderer's settings in registry() (null pointers before registerRendererSettings(registry()))
 const RendererSettings& renderer();
+
+// ---- graphics presets (the overlay's Graphics tab) ----
+struct Preset {
+    std::string name;   // "original", "low", ...
+    std::string label;  // overlay
+    std::vector<std::pair<std::string, std::string>> values;  // key -> value text (Registry::setText)
+};
+// Original (the game's look), Low, Medium, High (= the defaults), Ultra
+const std::vector<Preset>& graphicsPresets();
+// sets the preset's values (locked settings keep theirs)
+void applyPreset(Registry& reg, const Preset& preset);
+// index of the first preset whose values all match the current ones, -1 = custom
+int matchPreset(const Registry& reg);
+// resets every setting of an overlay tab to its default (locked ones stay); returns how many changed
+std::size_t resetTab(Registry& reg, std::string_view tab);
 
 }  // namespace rvk::settings

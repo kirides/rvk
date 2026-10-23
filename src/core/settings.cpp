@@ -619,13 +619,18 @@ RendererSettings registerRendererSettings(Registry& reg) {
         for (auto& c : l) c = c == '_' ? ' ' : static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
         keyLabels.push_back(std::move(l));
     }
+    // Registration order = the overlay's order: tabs, then sections by first appearance. Descriptions are the overlay's
+    // tooltips: player language, except for the Debug tab.
     RendererSettings r;
+
+    // ---- Display tab ----
     r.vsync = &reg.add({
         .key = "vulkan.vsync",
         .label = "Vertical sync",
         .category = "Display",
-        .description = "Wait for the display's refresh before showing a frame (no tearing). \"Game option\" follows the "
-                       "game's own video setting.",
+        .tab = kTabDisplay,
+        .description = "Waits for the monitor before showing each frame: no tearing, but the frame rate cannot go above the "
+                       "monitor's refresh rate. \"Game option\" uses the setting from the game's own video options.",
         .type = Type::Enum,
         .defaultValue = 0,
         .options = {"engine", "on", "off"},
@@ -635,106 +640,146 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .key = "vulkan.max_fps",
         .label = "Frame rate limit",
         .category = "Display",
-        .description = "Upper limit of frames per second (0 = none beyond vertical sync). Below the refresh rate with "
-                       "vertical sync on, frames stay locked to the display's refresh (e.g. 60 on a 120 Hz display).",
+        .tab = kTabDisplay,
+        .description = "The highest frame rate the game runs at. A limit saves power and keeps the graphics card cooler. With "
+                       "vertical sync on, a limit below the monitor's refresh rate keeps frames in step with the monitor "
+                       "(e.g. 60 on a 120 Hz monitor).",
         .type = Type::Float,
         .defaultValue = 0,
         .min = 0,
         .max = 500,
         .format = "%.0f fps",
+        .autoLabel = "Unlimited",
     });
     r.fullscreen = &reg.add({
         .key = "vulkan.fullscreen",
         .label = "Fullscreen mode",
         .category = "Display",
-        .description = "How the game's fullscreen setting is shown. Borderless: a window covering the monitor at the desktop's "
-                       "resolution (instant alt-tab; a refresh rate below the desktop's from the game's options becomes a frame "
-                       "cap with vertical sync). Exclusive: the monitor switches to the resolution and refresh rate chosen in the "
-                       "game's options (e.g. 60 Hz on a 144 Hz display), back to the desktop's when the game loses focus.",
+        .tab = kTabDisplay,
+        .description = "How the game's fullscreen setting is shown. Borderless window: covers the monitor at the desktop's "
+                       "resolution, switching to other programs is instant. Exclusive: the monitor switches to the resolution "
+                       "and refresh rate chosen in the game's video options, and back when you switch away.",
         .type = Type::Enum,
         .defaultValue = 0,
         .options = {"borderless", "exclusive"},
-        .optionLabels = {"Borderless window", "Exclusive (display mode change)"},
+        .optionLabels = {"Borderless window", "Exclusive"},
         .flags = Flag::NoAB,
         .requirements = caps::bit(caps::Cap::FullScreenExclusive),
     });
-    r.adapter = &reg.add({
-        .key = "vulkan.adapter",
-        .label = "GPU index",
-        .category = "Display",
-        .description = "Vulkan physical device to render on (-1 = the best discrete GPU). The list is in bin\\rvk\\rvk.log "
-                       "(\"probe\").",
-        .type = Type::Int,
-        .defaultValue = -1,
-        .min = -1,
-        .max = 15,
-        .flags = Flag::Restart,
-    });
-    r.exclusiveAcquire = &reg.add({
-        .key = "vulkan.exclusive_acquire",
-        .label = "Vulkan exclusive mode",
-        .category = "Display",
-        .description = "Exclusive fullscreen: also take Vulkan's exclusive mode (VK_EXT_full_screen_exclusive) on top of the "
-                       "display mode change. Diagnostics (docs/research/window-mode.md 8.3).",
-        .type = Type::Bool,
-        .defaultValue = 1,
-        .flags = Flag::NoAB | Flag::Hidden,
-    });
+
+    // ---- System tab ----
     r.toggleKey = &reg.add({
         .key = "overlay.toggle_key",
-        .label = "Open / close this overlay",
-        .category = "Overlay",
-        .description = "Hotkey of this overlay. The game never sees it.",
+        .label = "Settings menu key",
+        .category = "Menu",
+        .tab = kTabSystem,
+        .description = "The key that opens and closes this menu. The game never receives it.",
         .type = Type::Enum,
         .defaultValue = keyIndex("f11"),
         .options = hotkeyNames(),
         .optionLabels = keyLabels,
         .flags = Flag::NoAB,
     });
+    r.fpsCounter = &reg.add({
+        .key = "overlay.fps_counter",
+        .label = "Show frame rate",
+        .category = "Menu",
+        .tab = kTabSystem,
+        .description = "Shows the frame rate in the top left corner while this menu is closed.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB,
+    });
+    r.debugMode = &reg.add({
+        .key = "overlay.debug_mode",
+        .label = "Debug mode",
+        .category = "Menu",
+        .tab = kTabSystem,
+        .description = "Developer tools: debug views, an A/B settings comparison and technical details. Not needed for "
+                       "playing. Turning it off also turns the debug views off.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB,
+    });
+    r.showAdvanced = &reg.add({
+        .key = "overlay.show_advanced",
+        .label = "Show advanced settings",
+        .category = "Menu",
+        .tab = kTabSystem,
+        .description = "Also shows the fine-tuning settings (wave height, shadow distance, ...). Always on in debug mode.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Hidden,  // the checkbox at the top of the menu
+    });
+    r.adapter = &reg.add({
+        .key = "vulkan.adapter",
+        .label = "Graphics card",
+        .category = "Hardware",
+        .tab = kTabSystem,
+        .description = "Which graphics card renders the game when the PC has more than one. Auto picks the fastest dedicated "
+                       "card. The numbered list is in rvk\\rvk.log (\"probe\").",
+        .type = Type::Int,
+        .defaultValue = -1,
+        .min = -1,
+        .max = 15,
+        .autoLabel = "Auto",
+        .flags = Flag::Restart | Flag::Advanced,
+    });
+    r.exclusiveAcquire = &reg.add({
+        .key = "vulkan.exclusive_acquire",
+        .label = "Vulkan exclusive mode",
+        .category = "Hardware",
+        .tab = kTabSystem,
+        .description = "Exclusive fullscreen: also take Vulkan's exclusive mode (VK_EXT_full_screen_exclusive) on top of the "
+                       "display mode change. Diagnostics (docs/research/window-mode.md 8.3).",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::NoAB | Flag::Hidden,
+    });
+    r.rtAllow = &reg.add({
+        .key = "rt.allow",
+        .label = "Ray tracing support",
+        .category = "Hardware",
+        .tab = kTabSystem,
+        .description = "Turns on the graphics card's ray tracing when the game starts; the ray-traced effects need it. Turn "
+                       "it off only if the game has problems with your graphics driver. Greyed out when the card has no ray "
+                       "tracing.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::Restart | Flag::Advanced,
+        .requirements = caps::bit(caps::Cap::RayTracingHardware),
+        .unmetValue = 0,
+    });
+
+    // ---- Debug tab (debug mode) ----
     r.abKey = &reg.add({
         .key = "overlay.ab_key",
-        .label = "A/B flip",
-        .category = "Overlay",
-        .description = "Hotkey that flips between settings side A and side B (also while the overlay is closed). The game "
-                       "never sees it.",
+        .label = "A/B flip key",
+        .category = "A/B options",
+        .tab = kTabDebug,
+        .description = "Hotkey that flips between settings side A and side B (also while the menu is closed). The game never "
+                       "sees it.",
         .type = Type::Enum,
         .defaultValue = keyIndex("f10"),
         .options = hotkeyNames(),
         .optionLabels = keyLabels,
         .flags = Flag::NoAB | Flag::Debug,
     });
-    r.fpsCounter = &reg.add({
-        .key = "overlay.fps_counter",
-        .label = "Frame rate counter",
-        .category = "Overlay",
-        .description = "Show the frame rate in a corner while the overlay is closed.",
-        .type = Type::Bool,
-        .defaultValue = 0,
-        .flags = Flag::NoAB,
-    });
     r.abBadge = &reg.add({
         .key = "overlay.ab_badge",
         .label = "A/B indicator",
-        .category = "Overlay",
+        .category = "A/B options",
+        .tab = kTabDebug,
         .description = "Show which side (A or B) is active after a flip, and a small \"B\" while side B stays active.",
         .type = Type::Bool,
         .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
     });
-    r.debugMode = &reg.add({
-        .key = "overlay.debug_mode",
-        .label = "Debug mode",
-        .category = "Overlay",
-        .description = "Shows the developer tools: the A/B settings comparison (and its hotkey), debug views and diagnostics. "
-                       "Off returns to side A and turns the debug views off.",
-        .type = Type::Bool,
-        .defaultValue = 0,
-        .flags = Flag::NoAB,
-    });
     r.tintDraws = &reg.add({
         .key = "debug.tint_draws",
         .label = "Tint draws",
-        .category = "Debug",
+        .category = "Debug views",
+        .tab = kTabDebug,
         .description = "Developer view: colours the scene's draws by what they are (kind: water blue, SpeedTree green, "
                        "skinned red, static meshes grey, instanced cyan, particles orange, unknown magenta, ...) or by their "
                        "pass (solid grey, refracted blue, alpha orange). Off renders exactly as without it.",
@@ -747,7 +792,8 @@ RendererSettings registerRendererSettings(Registry& reg) {
     r.drawRecords = &reg.add({
         .key = "debug.draw_records",
         .label = "Draw records",
-        .category = "Debug",
+        .category = "Debug views",
+        .tab = kTabDebug,
         .description = "Keep a record of every draw of the frame (tags, geometry identity, constants, textures) for later "
                        "features and tools. Off only to measure their cost.",
         .type = Type::Bool,
@@ -757,7 +803,8 @@ RendererSettings registerRendererSettings(Registry& reg) {
     r.injectView = &reg.add({
         .key = "debug.inject_view",
         .label = "Injection test view",
-        .category = "Debug",
+        .category = "Debug views",
+        .tab = kTabDebug,
         .description = "Developer view that tests the enhancement plumbing (a GLSL compute pass injected after the opaque "
                        "scene): \"Depth\" colours the scene by distance from the engine's depth map and draws a 5 m grid "
                        "fixed in the world, \"Tint\" cycles the scene's colour over time. Off renders exactly as without it.",
@@ -767,40 +814,11 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Off", "Depth + world grid", "Tint"},
         .flags = Flag::Debug,
     });
-    r.rtAllow = &reg.add({
-        .key = "rt.allow",
-        .label = "Allow ray tracing",
-        .category = "Ray tracing",
-        .description = "Turn on the GPU's ray tracing support (acceleration structures + ray query) when the game starts: "
-                       "ray-traced enhancements need it. It does not change the image by itself; off keeps the extensions "
-                       "disabled (for drivers with problems). Greyed out when the GPU or driver has no ray tracing.",
-        .type = Type::Bool,
-        .defaultValue = 1,
-        .flags = Flag::Restart,
-        .requirements = caps::bit(caps::Cap::RayTracingHardware),
-        .unmetValue = 0,
-    });
-    r.rtReflections = &reg.add({
-        .key = "rt.reflections",
-        .label = "Ray-traced water reflections",
-        .category = "Ray tracing",
-        .description = "The enhanced water (Water: on, reflections \"Screen space\") takes its reflections from the ray-traced "
-                       "world instead of the screen: cliffs, canopies, masts and houses above or behind the view are reflected "
-                       "too, with their own textures, bent by the waves and softer with distance. Low: one ray per 2 x 2 "
-                       "pixels, cut-outs solid, no shadows in reflections; Medium: cut-outs (fronds, ivy), sun shadows, "
-                       "screen space where the ray finds nothing (leaves, characters); High: one ray per pixel, longer reach, "
-                       "cut-outs in the shadows too. Off: screen-space reflections. Needs ray tracing.",
-        .type = Type::Enum,
-        .defaultValue = 3,
-        .options = {"off", "low", "medium", "high"},
-        .optionLabels = {"Off", "Low", "Medium", "High"},
-        .requirements = caps::bit(caps::Cap::RayQuery),
-        .unmetValue = 0,
-    });
     r.rtDebug = &reg.add({
         .key = "rt.debug",
         .label = "Ray tracing scene view",
-        .category = "Debug",
+        .category = "Debug views",
+        .tab = kTabDebug,
         .description = "Developer view of the ray tracing scene (the world geometry ray-traced effects see): \"Instances\" colours "
                        "each traced object, \"Depth check\" compares the traced distance with the rendered one (green = match, "
                        "red = missing in the RT scene, magenta = extra / misplaced, blue = missed), \"Normals\" shows the traced "
@@ -816,7 +834,8 @@ RendererSettings registerRendererSettings(Registry& reg) {
     r.rtReflectionTweaks = &reg.add({
         .key = "rt.reflection_tweaks",
         .label = "RT reflection tweaks",
-        .category = "Debug",
+        .category = "Debug views",
+        .tab = kTabDebug,
         .description = "Developer switch (cost measurements of rt.reflections): 1 cut-outs solid, 2 no shadow rays, 4 no "
                        "screen-space fallback, 8 hits unshaded.",
         .type = Type::Int,
@@ -828,7 +847,8 @@ RendererSettings registerRendererSettings(Registry& reg) {
     r.rtSceneViews = &reg.add({
         .key = "rt.scene_views",
         .label = "RT scene sources",
-        .category = "Debug",
+        .category = "Debug views",
+        .tab = kTabDebug,
         .description = "Developer switch: which views feed the ray tracing scene: the main view and the sun's shadow cascades "
                        "(all), only the main view, or only the cascades.",
         .type = Type::Enum,
@@ -837,13 +857,15 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Main view + sun cascades", "Main view", "Sun cascades"},
         .flags = Flag::NoAB | Flag::Hidden,
     });
+
+    // ---- Graphics tab: water ----
     r.waterEnabled = &reg.add({
         .key = "water.enabled",
         .label = "Enhanced water",
         .category = "Water",
-        .description = "Replaces the game's water shading: refraction with depth-based colour and absorption, reflections of the "
-                       "scene and the sky, sun glints, foam on the sea, in the game's own fog. Each lake, river and swamp keeps "
-                       "the colour of its original material. Off renders the game's own water.",
+        .description = "New water: clear shallows that get darker with depth, reflections of the world and the sky, sun "
+                       "glints and foam. Every lake, river and swamp keeps its original colour. Off: the game's original "
+                       "water.",
         .type = Type::Bool,
         .defaultValue = 1,
     });
@@ -851,41 +873,43 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .key = "water.quality",
         .label = "Water quality",
         .category = "Water",
-        .description = "Detail of the enhanced water: reflection ray steps and the density of the sea's wave grid.",
+        .description = "Detail of the water's reflections and of the sea's waves. Lower it if the frame rate drops near water.",
         .type = Type::Enum,
         .defaultValue = 2,
         .options = {"low", "medium", "high"},
         .optionLabels = {"Low", "Medium", "High"},
     });
-    r.waterReflections = &reg.add({
-        .key = "water.reflections",
-        .label = "Water reflections",
+    r.rtReflections = &reg.add({
+        .key = "rt.reflections",
+        .label = "Ray-traced reflections",
         .category = "Water",
-        .description = "\"Screen space\" reflects what is on screen (shores, ships, trees) and falls back to the sky; \"Sky\" "
-                       "reflects the sky only (cheaper).",
+        .description = "Reflections on the water traced through the world: cliffs, trees, ships and houses are reflected even "
+                       "when they are not on screen, with their own textures and shadows. Low is the fastest, High looks "
+                       "best. Off: the water reflects only what is on screen. Needs a graphics card with ray tracing.",
         .type = Type::Enum,
-        .defaultValue = 1,
-        .options = {"sky", "ssr"},
-        .optionLabels = {"Sky", "Screen space"},
+        .defaultValue = 3,
+        .options = {"off", "low", "medium", "high"},
+        .optionLabels = {"Off", "Low", "Medium", "High"},
+        .requirements = caps::bit(caps::Cap::RayQuery),
+        .unmetValue = 0,
     });
     r.waterOcean = &reg.add({
         .key = "water.ocean",
-        .label = "Sea simulation",
+        .label = "Sea waves",
         .category = "Water",
-        .description = "The open sea: \"FFT ocean\" simulates the sea from a wave spectrum (big waves far out getting smaller "
-                       "towards the shore and inside the harbour, breaking waves, foam), \"Simple waves\" is a sum of a few "
-                       "waves, \"Off\" shades the game's flat sea. Both simulations replace the game's painted surf with a real, "
-                       "lower shoreline. Lakes, rivers and swamps never get waves.",
+        .description = "Waves on the open sea. Realistic: a simulated sea with big waves far out, smaller ones near the shore "
+                       "and in the harbour, breaking waves and foam. Simple: a few rolling waves, faster. Off: the game's flat "
+                       "sea. Lakes, rivers and swamps never get waves.",
         .type = Type::Enum,
         .defaultValue = 2,
         .options = {"off", "gerstner", "fft"},
-        .optionLabels = {"Off", "Simple waves", "FFT ocean"},
+        .optionLabels = {"Off", "Simple", "Realistic"},
     });
     r.waterOceanQuality = &reg.add({
         .key = "water.ocean_quality",
         .label = "Sea detail",
         .category = "Water",
-        .description = "Resolution of the FFT ocean's wave tiles: Low 3 tiles of 128 x 128, Medium 4 of 256 x 256, High 4 of 512 x 512.",
+        .description = "Detail of the realistic sea's waves. Lower it if the frame rate drops at the coast.",
         .type = Type::Enum,
         .defaultValue = 2,
         .options = {"low", "medium", "high"},
@@ -895,60 +919,78 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .key = "water.sea_state",
         .label = "Sea state",
         .category = "Water",
-        .description = "How rough the sea is. \"Weather\" follows the game's weather (calm in sunshine, rough in rain, high "
-                       "waves in storms).",
+        .description = "How rough the sea is. Follow weather: calm in sunshine, rough in rain, high waves in storms.",
         .type = Type::Enum,
         .defaultValue = 0,
         .options = {"auto", "calm", "moderate", "rough", "storm"},
-        .optionLabels = {"Weather", "Calm", "Moderate", "Rough", "Storm"},
+        .optionLabels = {"Follow weather", "Calm", "Moderate", "Rough", "Storm"},
+    });
+    r.waterReflections = &reg.add({
+        .key = "water.reflections",
+        .label = "Water reflections",
+        .category = "Water",
+        .description = "World: the water reflects the shores, trees and ships (needed for ray-traced reflections). Sky only: "
+                       "just the sky, faster.",
+        .type = Type::Enum,
+        .defaultValue = 1,
+        .options = {"sky", "ssr"},
+        .optionLabels = {"Sky only", "World"},
+        .flags = Flag::Advanced,
     });
     r.waterWindDirection = &reg.add({
         .key = "water.wind_direction",
         .label = "Wind direction",
         .category = "Water",
-        .description = "Where the wind blows the waves to, in degrees (0 = +x, 90 = +z); -1 = the island's prevailing wind.",
+        .description = "The direction the wind pushes the waves, in degrees. Auto: the island's usual wind.",
         .type = Type::Int,
         .defaultValue = -1,
         .min = -1,
         .max = 359,
+        .format = "%d degrees",
+        .autoLabel = "Auto",
+        .flags = Flag::Advanced,
     });
     r.waterWaveScale = &reg.add({
         .key = "water.wave_scale",
         .label = "Wave height",
         .category = "Water",
-        .description = "Scales the height of the sea's waves (1 = the sea state's natural height).",
+        .description = "Makes the sea's waves higher or lower (1 = natural for the sea state).",
         .type = Type::Float,
         .defaultValue = 1,
         .min = 0,
         .max = 3,
         .format = "%.2f",
+        .flags = Flag::Advanced,
     });
     r.waterMurkiness = &reg.add({
         .key = "water.murkiness",
         .label = "Water murkiness",
         .category = "Water",
-        .description = "How quickly the water gets opaque with depth (1 = matched to each water's original look).",
+        .description = "How quickly the water gets cloudy with depth (1 = like each water's original look).",
         .type = Type::Float,
         .defaultValue = 1,
         .min = 0.25,
         .max = 4,
         .format = "%.2f",
+        .flags = Flag::Advanced,
     });
     r.waterReflectionStrength = &reg.add({
         .key = "water.reflection_strength",
         .label = "Reflection strength",
         .category = "Water",
-        .description = "Strength of reflections and sun glints on the water (1 = physically based, per water type).",
+        .description = "Brightness of the reflections and sun glints on the water (1 = realistic).",
         .type = Type::Float,
         .defaultValue = 1,
         .min = 0,
         .max = 2,
         .format = "%.2f",
+        .flags = Flag::Advanced,
     });
     r.waterDebug = &reg.add({
         .key = "water.debug",
         .label = "Water debug view",
-        .category = "Debug",
+        .category = "Debug views",
+        .tab = kTabDebug,
         .description = "Developer view of the enhanced water: the shore field (distance to the coast), the water depth, the "
                        "surface normals, the reflection alone, the foam (red) over the surf zone (green) and the depth (blue; FFT ocean: "
                        "red folding foam, green breaking waves, blue surf, white contact), the sea floor field "
@@ -963,112 +1005,121 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Off", "Shore field", "Depth", "Normals", "Reflection", "Foam", "Sea floor", "Wave attenuation", "Reflection source", "Reflection (RT hits all shaded)"},
         .flags = Flag::NoAB | Flag::Debug,
     });
+
+    // ---- Graphics tab: shadows ----
     r.shadowsEnabled = &reg.add({
         .key = "shadows.enabled",
         .label = "Enhanced shadows",
         .category = "Shadows",
-        .description = "Replaces the game's sun shadow filtering: smooth edges instead of noisy dithered ones, the shadow "
-                       "cascades blended into each other instead of switching at a line, and a long fade at the end of the "
-                       "shadow range instead of shadows popping in a few metres ahead. Off renders the game's own shadows.",
+        .description = "Smoother sun shadows: soft edges instead of grainy ones, no visible line where the shadow detail "
+                       "changes, and shadows that fade in gently in the distance instead of popping up. Off: the game's "
+                       "original shadows.",
         .type = Type::Bool,
         .defaultValue = 1,
     });
     r.shadowsFilter = &reg.add({
         .key = "shadows.filter",
-        .label = "Shadow filter",
+        .label = "Shadow edge quality",
         .category = "Shadows",
-        .description = "Quality of the shadow edges: Low 4, Medium 9, High 16 filtered samples per pixel.",
+        .description = "How smooth the shadow edges are. Higher costs more, mostly at high screen resolutions.",
         .type = Type::Enum,
         .defaultValue = 0,
         .options = {"low", "medium", "high"},
         .optionLabels = {"Low", "Medium", "High"},
     });
+    r.shadowsMapSize = &reg.add({
+        .key = "shadows.map_size",
+        .label = "Shadow resolution",
+        .category = "Shadows",
+        .description = "How sharp sun shadows are. Higher is sharper and uses more graphics memory. Auto: High with enhanced "
+                       "shadows, otherwise the game's own setting.",
+        .type = Type::Enum,
+        .defaultValue = 3,
+        .options = {"auto", "game", "1024", "2048", "4096"},
+        .optionLabels = {"Auto", "Game setting", "Low (1024)", "Medium (2048)", "High (4096)"},
+    });
     r.shadowsSoftness = &reg.add({
         .key = "shadows.softness",
         .label = "Shadow softness",
         .category = "Shadows",
-        .description = "Width of the shadow edges (1 = about one shadow-map texel per filter sample).",
+        .description = "Width of the soft shadow edges.",
         .type = Type::Float,
         .defaultValue = 1,
         .min = 0.5,
         .max = 3,
         .format = "%.2f",
+        .flags = Flag::Advanced,
     });
     r.shadowsBlend = &reg.add({
         .key = "shadows.cascade_blend",
-        .label = "Cascade blending",
+        .label = "Shadow detail blending",
         .category = "Shadows",
-        .description = "How much of each shadow cascade's distance range is blended into the next, coarser one (0 = a hard "
-                       "switch like the game).",
+        .description = "How gently the sharp shadows near the player blend into the coarser distant ones (0 = a hard line, "
+                       "like the game).",
         .type = Type::Float,
         .defaultValue = 0.2,
         .min = 0,
         .max = 0.5,
         .format = "%.2f",
+        .flags = Flag::Advanced,
     });
     r.shadowsFade = &reg.add({
         .key = "shadows.fade",
         .label = "Shadow fade-out",
         .category = "Shadows",
-        .description = "How much of the last cascade's distance range the shadows fade out over towards the end of the shadow "
-                       "range (the game fades over its last fifth).",
+        .description = "How gradually shadows fade out towards the end of the shadow distance.",
         .type = Type::Float,
         .defaultValue = 0.35,
         .min = 0.05,
         .max = 0.8,
         .format = "%.2f",
+        .flags = Flag::Advanced,
     });
     r.shadowsBias = &reg.add({
         .key = "shadows.bias",
-        .label = "Shadow bias",
+        .label = "Shadow offset",
         .category = "Shadows",
-        .description = "Depth offset against shadow acne (stripes on lit surfaces); larger values detach shadows from their "
-                       "casters.",
+        .description = "Moves shadows slightly away from surfaces. Raise it if lit surfaces show stripes; too high and "
+                       "shadows come loose from their objects.",
         .type = Type::Float,
         .defaultValue = 0.5,
         .min = 0,
         .max = 4,
         .format = "%.2f",
-    });
-    r.shadowsMapSize = &reg.add({
-        .key = "shadows.map_size",
-        .label = "Shadow map size",
-        .category = "Shadows",
-        .description = "Resolution of each of the three sun shadow cascades (the game's High quality uses 1024). \"Auto\" is "
-                       "4096 with enhanced shadows and the game's size without.",
-        .type = Type::Enum,
-        .defaultValue = 3,
-        .options = {"auto", "game", "1024", "2048", "4096"},
-        .optionLabels = {"Auto", "Game", "1024", "2048", "4096"},
+        .flags = Flag::Advanced,
     });
     r.shadowsRange = &reg.add({
         .key = "shadows.range",
-        .label = "Shadow range",
+        .label = "Shadow distance",
         .category = "Shadows",
-        .description = "How far sun shadows reach, in metres (the game's High quality: 75 m). 0 = auto: 100 m with enhanced "
-                       "shadows, the game's range without. Farther shadows cost more draws.",
+        .description = "How far away objects still cast sun shadows. Auto: 100 m with enhanced shadows, otherwise the game's "
+                       "75 m. Farther costs more.",
         .type = Type::Float,
         .defaultValue = 0,
         .min = 0,
         .max = 400,
         .format = "%.0f m",
+        .autoLabel = "Auto",
+        .flags = Flag::Advanced,
     });
     r.shadowsSplit = &reg.add({
         .key = "shadows.split",
-        .label = "Cascade distribution",
+        .label = "Shadow detail distribution",
         .category = "Shadows",
-        .description = "Where the cascades split the shadow range when it is not the game's: 0 crowds the detail near the "
-                       "player (logarithmic), 1 spreads it evenly. The game uses 0.4 over its 75 m.",
+        .description = "Where the shadow detail goes when the shadow distance is changed: 0 keeps the most detail close to "
+                       "the player, 1 spreads it evenly.",
         .type = Type::Float,
         .defaultValue = 0.4,
         .min = 0,
         .max = 1,
         .format = "%.2f",
+        .flags = Flag::Advanced,
     });
     r.shadowsDebug = &reg.add({
         .key = "shadows.debug",
         .label = "Shadow debug view",
-        .category = "Debug",
+        .category = "Debug views",
+        .tab = kTabDebug,
         .description = "Developer view of the enhanced shadows: the shadow mask shows the cascade instead of the shadow (dark "
                        "= the nearest cascade, lighter = farther ones, unshadowed beyond the shadow range), or only the cascades' or only "
                        "the terrain map's shadow.",
@@ -1084,5 +1135,59 @@ RendererSettings registerRendererSettings(Registry& reg) {
 }
 
 const RendererSettings& renderer() { return g_renderer; }
+
+// ---- presets ----------------------------------------------------------------------------------------------------------
+
+const std::vector<Preset>& graphicsPresets() {
+    // High = the defaults. Original lists only what turns the enhancements off (the rest does not matter then).
+    static const std::vector<Preset> presets = {
+        {"original", "Original",
+         {{"water.enabled", "false"}, {"rt.reflections", "off"}, {"shadows.enabled", "false"}, {"shadows.map_size", "game"}}},
+        {"low", "Low",
+         {{"water.enabled", "true"}, {"water.quality", "low"}, {"water.reflections", "sky"}, {"water.ocean", "gerstner"},
+          {"water.ocean_quality", "low"}, {"rt.reflections", "off"}, {"shadows.enabled", "true"}, {"shadows.filter", "low"},
+          {"shadows.map_size", "1024"}}},
+        {"medium", "Medium",
+         {{"water.enabled", "true"}, {"water.quality", "medium"}, {"water.reflections", "ssr"}, {"water.ocean", "fft"},
+          {"water.ocean_quality", "medium"}, {"rt.reflections", "medium"}, {"shadows.enabled", "true"}, {"shadows.filter", "low"},
+          {"shadows.map_size", "2048"}}},
+        {"high", "High",
+         {{"water.enabled", "true"}, {"water.quality", "high"}, {"water.reflections", "ssr"}, {"water.ocean", "fft"},
+          {"water.ocean_quality", "high"}, {"rt.reflections", "high"}, {"shadows.enabled", "true"}, {"shadows.filter", "low"},
+          {"shadows.map_size", "2048"}}},
+        {"ultra", "Ultra",
+         {{"water.enabled", "true"}, {"water.quality", "high"}, {"water.reflections", "ssr"}, {"water.ocean", "fft"},
+          {"water.ocean_quality", "high"}, {"rt.reflections", "high"}, {"shadows.enabled", "true"}, {"shadows.filter", "high"},
+          {"shadows.map_size", "4096"}}},
+    };
+    return presets;
+}
+
+void applyPreset(Registry& reg, const Preset& preset) {
+    for (const auto& [key, text] : preset.values) reg.setText(key, text);
+}
+
+int matchPreset(const Registry& reg) {
+    const auto& presets = graphicsPresets();
+    for (std::size_t i = 0; i < presets.size(); ++i) {
+        const bool all = std::ranges::all_of(presets[i].values, [&](const auto& kv) {
+            const Setting* s = reg.find(kv.first);
+            double v = 0.0;
+            return s != nullptr && Registry::parseText(s->spec(), kv.second, v) && s->value() == v;
+        });
+        if (all) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+std::size_t resetTab(Registry& reg, std::string_view tab) {
+    std::size_t n = 0;
+    for (Setting* s : reg.all()) {
+        if (s->spec().tab != tab || s->isDefault() || s->locked()) continue;
+        reg.resetToDefault(*s);
+        ++n;
+    }
+    return n;
+}
 
 }  // namespace rvk::settings

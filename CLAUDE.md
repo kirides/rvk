@@ -76,7 +76,7 @@ Player settings + overlay (docs/research/overlay.md): every run writes `bin/rvk/
 defaults turn them on) + `-Setting 'vulkan.max_fps=60','vulkan.vsync=off'`; `-PlayerDefaults` = the shipped defaults instead;
 `-KeepSettings` keeps the file. Debug mode (`Flag::Debug`) shows the Debug category, A/B and diagnostics in the overlay;
 outside it those settings apply as their defaults. The ImGui overlay (F11, as in GD3D11; A/B flip F10 in debug mode) is
-never in captures unless `-OverlayInScreenshots`; `-Commands '1500: overlay open','1600: key c','1700: ab flip'` runs
+never in captures unless `-OverlayInScreenshots`; `-Commands '1500: overlay open','1550: overlay tab graphics','1600: key c','1700: ab flip'` runs
 overlay / settings commands at presents (`key`/`click` post real window messages: input tests in the background;
 `key ctrl+insert`, `key w 150` = held 150 frames, `keydown`/`keyup <chord>`, `type minsky` = WM_CHAR; names in
 `src/overlay/keys.h`; the key commands also run in passthrough / trace mode, at `eCApplication::Draw` calls: D3D9 baselines);
@@ -139,7 +139,7 @@ start in the background, `window focus` brings the game to the front). Vsync / f
 (asleep: every FIFO swapchain runs at ~6 fps).
 Ray tracing tier (docs/research/raytracing.md): optional, enabled at device creation when the GPU has it and `rt.allow`
 (restart setting, default on; `-Setting 'rt.allow=false'` = floor only); rvk.log `vulkan: ray tracing ...` + `caps:` lines
-(the capability report, also the overlay's "Capabilities"). `-RtSelfTest` (`[debug] rt_selftest`) builds a BLAS/TLAS and
+(the capability report, also the overlay's System tab "Graphics card"). `-RtSelfTest` (`[debug] rt_selftest`) builds a BLAS/TLAS and
 traces it with ray query at device creation ("rt selftest: PASS"). Settings needing a capability declare
 `Spec::requirements` (greyed + parity fallback when unmet; features read `asX()` = the effective value).
 RT scene (M9, docs/research/rt-reflections.md 3): `enh/rt_scene` builds a TLAS of the world every frame at AfterOpaque while a

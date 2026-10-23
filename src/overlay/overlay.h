@@ -71,6 +71,10 @@ private:
     std::intptr_t callGame(HWND__* hwnd, unsigned msg, std::uintptr_t wparam, std::intptr_t lparam);
     void buildUi();
     void buildSettingsWindow();
+    void buildAbPanel();                 // Debug tab
+    void buildCapabilitiesPanel();       // System tab
+    void buildPerformancePanel(bool debug);  // System tab; debug: + diagnostics
+    void buildFramePanel();              // Debug tab
     void buildBadges();
 
     d3d9::Device* device_ = nullptr;
@@ -109,6 +113,7 @@ private:
         std::string text;
     };
     std::vector<Command> commands_;
+    std::string selectTab_;  // [debug] command "overlay tab <name>": selected at the next build of the settings window
     keys::Poster keyPoster_;  // key / keydown / keyup / type
 };
 

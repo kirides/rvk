@@ -289,7 +289,7 @@ TEST(settings_renderer_registration) {
     CHECK(r.fullscreen != nullptr && r.fullscreen->spec().defaultValue == 0 &&
           r.fullscreen->spec().requirements == rvk::caps::bit(rvk::caps::Cap::FullScreenExclusive));
     for (const Setting* s : reg.all()) {
-        CHECK(s == r.drawRecords || s == r.rtSceneViews || s == r.rtReflectionTweaks || s == r.exclusiveAcquire ||
+        CHECK(s == r.drawRecords || s == r.rtSceneViews || s == r.rtReflectionTweaks || s == r.exclusiveAcquire || s == r.showAdvanced ||
               (s->spec().flags & Flag::Hidden) == 0);
     }
     // the player defaults: enhanced water (high, RT reflections high) and enhanced shadows (low filter, 2048 maps)
@@ -302,6 +302,41 @@ TEST(settings_renderer_registration) {
         CHECK((s->spec().flags & Flag::Debug) != 0 && s->gated());
     }
     CHECK(!r.waterEnabled->gated() && (r.debugMode->spec().flags & Flag::Debug) == 0);
+}
+
+TEST(settings_presets_and_tabs) {
+    Registry reg;
+    const RendererSettings r = registerRendererSettings(reg);
+    const auto& presets = graphicsPresets();
+    CHECK(presets.size() == 5);
+    for (const Preset& p : presets) {
+        for (const auto& [key, text] : p.values) {
+            const Setting* s = reg.find(key);
+            double v = 0.0;
+            CHECK_MSG(s != nullptr && Registry::parseText(s->spec(), text, v), p.name + ": " + key + " = " + text);
+        }
+    }
+    CHECK(matchPreset(reg) == 3);  // the defaults are "High"
+    applyPreset(reg, presets[0]);
+    CHECK(matchPreset(reg) == 0 && !r.waterEnabled->asBool() && !r.shadowsEnabled->asBool());
+    applyPreset(reg, presets[4]);
+    CHECK(matchPreset(reg) == 4 && r.shadowsMapSize->asEnum() == "4096");
+    CHECK(reg.set(*r.waterWaveScale, 2) == Result::Ok);  // advanced settings are not part of the presets
+    CHECK(matchPreset(reg) == 4);
+    CHECK(reg.setText("shadows.filter", "medium") == Result::Ok);
+    CHECK(matchPreset(reg) == -1);  // custom
+    // "Reset to defaults" of a tab: only that tab
+    CHECK(reg.set(*r.maxFps, 60) == Result::Ok);
+    CHECK(resetTab(reg, kTabGraphics) > 0);
+    CHECK(matchPreset(reg) == 3 && r.waterWaveScale->value() == 1 && r.maxFps->value() == 60);
+    CHECK(resetTab(reg, kTabGraphics) == 0);
+    // every setting is in one of the tabs; the Debug tab holds the debug-mode settings (and hidden diagnostics)
+    for (const Setting* s : reg.all()) {
+        const std::string& tab = s->spec().tab;
+        const bool debug = (s->spec().flags & Flag::Debug) != 0, hidden = (s->spec().flags & Flag::Hidden) != 0;
+        CHECK_MSG(tab == kTabDisplay || tab == kTabGraphics || tab == kTabSystem || tab == kTabDebug, s->key());
+        CHECK_MSG(debug == (tab == kTabDebug) || hidden, s->key());
+    }
 }
 
 TEST(settings_debug_mode) {
