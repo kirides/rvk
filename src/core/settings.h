@@ -259,6 +259,7 @@ Registry& registry();
 struct RendererSettings {
     Setting* vsync = nullptr;        // vulkan.vsync: "engine" (the game's option), "on", "off"
     Setting* maxFps = nullptr;       // vulkan.max_fps: 0 = no cap beyond vsync
+    Setting* menuFps = nullptr;      // vulkan.menu_fps: cap while a menu page is open (engine/menu_state.h); 0 = none
     Setting* exclusiveAcquire = nullptr;  // vulkan.exclusive_acquire: hold Vulkan's exclusive mode in exclusive fullscreen (hidden diagnostics)
     Setting* fullscreen = nullptr;   // vulkan.fullscreen: "borderless", "exclusive" (needs FullScreenExclusive; window-mode.md 8)
     Setting* adapter = nullptr;      // vulkan.adapter: -1 = best discrete GPU (restart)
@@ -270,6 +271,7 @@ struct RendererSettings {
     Setting* showAdvanced = nullptr; // overlay.show_advanced: shows the Flag::Advanced settings (hidden: the overlay's checkbox)
     Setting* tintDraws = nullptr;    // debug.tint_draws: "off", "kind", "pass" (d3d9/draws.h TintMode)
     Setting* drawRecords = nullptr;  // debug.draw_records: per-frame draw records (hidden; the histogram is always on)
+    Setting* paceLoading = nullptr;  // debug.pace_loading: loading screens wait for the pacer (hidden; load-time A/B)
     Setting* injectView = nullptr;   // debug.inject_view: "off", "depth", "tint" (enh/debug_view.h, an injected pass)
     Setting* rtAllow = nullptr;      // rt.allow: enable the ray tracing extensions at device creation (restart)
     Setting* rtReflections = nullptr; // rt.reflections: "off", "low", "medium", "high" (the water's ray-traced reflections, needs RayQuery)

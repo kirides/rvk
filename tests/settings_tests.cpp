@@ -288,9 +288,12 @@ TEST(settings_renderer_registration) {
     CHECK(r.exclusiveAcquire != nullptr && r.exclusiveAcquire->asBool() && (r.exclusiveAcquire->spec().flags & Flag::Hidden) != 0);
     CHECK(r.fullscreen != nullptr && r.fullscreen->spec().defaultValue == 0 &&
           r.fullscreen->spec().requirements == rvk::caps::bit(rvk::caps::Cap::FullScreenExclusive));
+    // ... and the loading screens' pacing (the load-time A/B); the menu frame rate limit is a player setting (60 fps)
+    CHECK(r.paceLoading != nullptr && !r.paceLoading->asBool() && (r.paceLoading->spec().flags & Flag::Hidden) != 0);
+    CHECK(r.menuFps != nullptr && r.menuFps->value() == 60 && (r.menuFps->spec().flags & Flag::Hidden) == 0);
     for (const Setting* s : reg.all()) {
         CHECK(s == r.drawRecords || s == r.rtSceneViews || s == r.rtReflectionTweaks || s == r.exclusiveAcquire || s == r.showAdvanced ||
-              (s->spec().flags & Flag::Hidden) == 0);
+              s == r.paceLoading || (s->spec().flags & Flag::Hidden) == 0);
     }
     // the player defaults: enhanced water (high, RT reflections high) and enhanced shadows (low filter, 2048 maps)
     CHECK(r.waterEnabled->asBool() && r.waterQuality->asEnum() == "high" && r.waterOceanQuality->asEnum() == "high");

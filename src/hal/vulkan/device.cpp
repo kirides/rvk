@@ -20,6 +20,7 @@
 #include "d3d9/fvf.h"
 #include "engine/scene_hooks.h"
 #include "engine/lod.h"
+#include "engine/menu_state.h"
 #include "engine/shadow_maps.h"
 #include "engine/vfs.h"
 #include "engine/window_mode.h"
@@ -915,6 +916,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
     if (!dev_.setFullScreenExclusive(acquire ? wp.exclusiveMonitor : nullptr, acquire && wp.holdExclusive) && wp.resized) {
         dev_.windowResized();
     }
+    updateMenuPacing();
     dev_.present();
     const auto& s = dev_.stats();
     api::publishPresent(s.frames, api::FrameNumbers{
@@ -933,6 +935,25 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
     updateLogFrame();
     logFrameStats();
     return bEResult_Ok;
+}
+
+// A menu page caps the frame rate at vulkan.menu_fps; the loading screen is never paced: the engine loads on this thread and
+// presents after every load step, so each pacer wait would lengthen the load (docs/research/menu-fps.md)
+void HalDevice::updateMenuPacing() {
+    const engine::menu::Status st = engine::menu::query();
+    const auto& rs = settings::renderer();
+    const auto* menuFps = rs.menuFps;
+    const bool paceLoading = rs.paceLoading != nullptr && rs.paceLoading->asBool();
+    dev_.setUnpaced(st.state == engine::menu::State::Loading && !paceLoading);
+    dev_.setMenuCap(st.state == engine::menu::State::Menu && menuFps != nullptr ? menuFps->value() : 0.0);
+    if (static_cast<int>(st.state) != menuState_) {
+        menuState_ = static_cast<int>(st.state);
+        spdlog::info("engine: menu state {} (pages {:#x}, app state {:#x}{}) at present {}: {}", engine::menu::name(st.state),
+                     st.pages, st.appState, st.faulted ? ", the query faulted" : "", dev_.stats().frames + 1,
+                     dev_.unpaced()                           ? std::string("unpaced")
+                     : dev_.menuCap() > 0.0                   ? std::format("frame rate limit {} fps", dev_.menuCap())
+                                                              : std::string("no menu limit"));
+    }
 }
 
 // The last presented frame's phase sequence and main camera (docs/research/frame-phases.md), every 5 s and for -LogFrame
@@ -1022,9 +1043,11 @@ void HalDevice::logFrameStats() {
         const double secs = std::chrono::duration<double>(now - lastStatsTime_).count();
         const double frames = std::max(1.0, static_cast<double>(s.frames - lastStatsFrame_));
         spdlog::info("hal: {:.1f} fps, {} draws in the last frame; presents {}, acquire failures {}, suboptimal {}; avg acquire "
-                     "{:.2f} ms, present {:.2f} ms (present thread; render thread waited {:.2f} ms), pacing {:.2f} ms",
+                     "{:.2f} ms, present {:.2f} ms (present thread; render thread waited {:.2f} ms), pacing {:.2f} ms; loading "
+                     "frames not shown {}",
                      static_cast<double>(s.frames - lastStatsFrame_) / secs, s.lastFrameDraws, s.presentsQueued, s.acquireFailures,
-                     s.presentSuboptimal, s.acquireMs / frames, s.presentMs / frames, s.presentWaitMs / frames, s.pacerMs / frames);
+                     s.presentSuboptimal, s.acquireMs / frames, s.presentMs / frames, s.presentWaitMs / frames, s.pacerMs / frames,
+                     s.loadingFramesDropped);
         dev_.resetTimings();
         if (dev_.perfEnabled()) {
             logPerf(dev_.takePerf());

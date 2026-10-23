@@ -643,11 +643,26 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .tab = kTabDisplay,
         .description = "The highest frame rate the game runs at. A limit saves power and keeps the graphics card cooler. With "
                        "vertical sync on, a limit below the monitor's refresh rate keeps frames in step with the monitor "
-                       "(e.g. 60 on a 120 Hz monitor).",
+                       "(e.g. 60 on a 120 Hz monitor). Loading screens are never limited, so loading stays fast.",
         .type = Type::Float,
         .defaultValue = 0,
         .min = 0,
         .max = 500,
+        .format = "%.0f fps",
+        .autoLabel = "Unlimited",
+    });
+    r.menuFps = &reg.add({
+        .key = "vulkan.menu_fps",
+        .label = "Menu frame rate limit",
+        .category = "Display",
+        .tab = kTabDisplay,
+        .description = "The highest frame rate while a menu is open (the game menu, inventory, character screen, map, ...), so "
+                       "the graphics card does not work flat out on a still picture. Loading screens are never limited, so "
+                       "loading stays fast.",
+        .type = Type::Float,
+        .defaultValue = 60,
+        .min = 0,
+        .max = 240,
         .format = "%.0f fps",
         .autoLabel = "Unlimited",
     });
@@ -811,6 +826,17 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "features and tools. Off only to measure their cost.",
         .type = Type::Bool,
         .defaultValue = 1,
+        .flags = Flag::NoAB | Flag::Hidden,
+    });
+    r.paceLoading = &reg.add({
+        .key = "debug.pace_loading",
+        .label = "Pace loading screens",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Loading screens wait for the frame rate limit / vsync like other frames (the behaviour before "
+                       "2026-10-23: each wait lengthens the load). Only to measure the load-time penalty.",
+        .type = Type::Bool,
+        .defaultValue = 0,
         .flags = Flag::NoAB | Flag::Hidden,
     });
     r.injectView = &reg.add({

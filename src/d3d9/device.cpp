@@ -420,6 +420,15 @@ void Device::setMaxFps(double fps) {
     pacerRequested_ = -1.0;
 }
 
+void Device::setMenuCap(double fps) {
+    fps = std::max(0.0, fps);
+    if (fps == menuCap_) {
+        return;
+    }
+    menuCap_ = fps;
+    pacerChecked_ = {};  // updatePacer re-evaluates at the next present (the requested rate decides whether it changes)
+}
+
 void Device::setOverlay(PresentOverlay* overlay, bool intoBackBuffer) {
     overlay_ = overlay;
     overlayIntoBackBuffer_ = intoBackBuffer;
@@ -685,6 +694,10 @@ void Device::updatePacer() {
     if (options_.maxFps > 0.0 && (rate <= 0.0 || options_.maxFps < rate)) {
         rate = options_.maxFps;
     }
+    const bool menuCapped = menuCap_ > 0.0 && (rate <= 0.0 || menuCap_ < rate);
+    if (menuCapped) {
+        rate = menuCap_;
+    }
     // an unlocked vsync pacer retries the lock (DWM's measured period strays under load)
     vk::VblankClock probe;
     const double vblanks = rate > 0.0 ? std::round(refresh / rate) : 0.0;
@@ -699,7 +712,8 @@ void Device::updatePacer() {
         const bool dwm = vk::dwmVblankClock(clock);
         spdlog::info("vulkan: DWM composition clock {}", dwm ? std::format("{:.3f} Hz", clock.rate()) : std::string("unavailable"));
         spdlog::info("vulkan: frame pacing at {:.3f} fps{}{}", pacer_.rate(),
-                     options_.maxFps > 0.0 && rate == options_.maxFps ? " (max_fps)"
+                     menuCapped                                       ? " (menu)"
+                     : options_.maxFps > 0.0 && rate == options_.maxFps ? " (max_fps)"
                      : refreshCapped && rate == refreshCap_           ? " (vsync, the game's refresh rate)"
                      : options_.vsync                                 ? " (vsync)"
                                                                       : "",
@@ -752,12 +766,29 @@ void Device::present() {
         beginFrame();
         return;
     }
+    if (unpaced_) {
+        // loading screen: never wait, neither for the pacer nor for a vsync swapchain (FIFO blocks acquire / present at the
+        // refresh rate: 5.6 s instead of 2.1 s per quick load, docs/research/menu-fps.md 4). A frame is shown at most every
+        // 1 / kLoadingFps (or the pacer's interval when that is longer); the others are submitted without presenting.
+        constexpr double kLoadingFps = 30.0;
+        const auto now = std::chrono::steady_clock::now();
+        const double fps = pacer_.rate() > 0.0 ? std::min(pacer_.rate(), kLoadingFps) : kLoadingFps;
+        if (now - loadingShown_ < std::chrono::duration<double>(1.0 / fps)) {
+            ++stats_.loadingFramesDropped;
+            submitFrame(VK_NULL_HANDLE, VK_NULL_HANDLE);
+            beginFrame();
+            return;
+        }
+        loadingShown_ = now;
+    }
     const std::uint32_t slot = static_cast<std::uint32_t>(frames_.currentValue() % vk::Frames::kInFlight);
     VkSemaphore acquired = acquireSemaphores_[slot];
     std::uint32_t imageIndex = 0;
     updatePacer();
     const auto tw = std::chrono::steady_clock::now();
-    pacer_.wait();
+    if (!unpaced_) {
+        pacer_.wait();  // after an unpaced stretch the slot is long past: the pacer restarts its cadence
+    }
     const auto tq = std::chrono::steady_clock::now();
     stats_.pacerMs += std::chrono::duration<double, std::milli>(tq - tw).count();
     // the swapchain is the present thread's until its present returned

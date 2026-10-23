@@ -409,6 +409,7 @@ struct FrameStats {
     std::uint32_t drawsSkipped = 0;  // draws without a usable shader / target
     std::uint32_t lastFrameDraws = 0;
     std::uint64_t acquireFailures = 0;
+    std::uint64_t loadingFramesDropped = 0;  // loading-screen frames rendered but not shown (setUnpaced)
     std::uint64_t presentsQueued = 0;
     std::uint64_t presentSuboptimal = 0;
     std::uint64_t swapchainRecreates = 0;
@@ -555,6 +556,15 @@ public:
     // present-rate cap (0 = the refresh rate with vsync, none without); applies at the next present
     void setMaxFps(double fps);
     double maxFps() const { return options_.maxFps; }
+    // a further cap while a menu page is open (0 = none; the HAL sets it every present from engine/menu_state.h); a change
+    // applies at the next present
+    void setMenuCap(double fps);
+    double menuCap() const { return menuCap_; }
+    // loading screen: presents never wait (any cap's or vsync's wait would add to the load time: the engine loads on the
+    // thread that presents, one present after each load step; docs/research/menu-fps.md 3): at most 30 frames a second
+    // are shown, the others are rendered but not presented
+    void setUnpaced(bool unpaced) { unpaced_ = unpaced; }
+    bool unpaced() const { return unpaced_; }
     // Exclusive fullscreen (docs/research/window-mode.md 8). `monitor` != null: the swapchain is built with the exclusive
     // structures for that monitor (re-created now when this changes); `hold`: the window is in front, take the exclusive
     // mode (vkAcquireFullScreenExclusiveModeEXT, retried while it fails) - false releases it. Engine thread, before present.
@@ -782,6 +792,9 @@ private:
     void updatePacer();
     void resetPacer();
     double refreshCap_ = 0.0;
+    double menuCap_ = 0.0;
+    bool unpaced_ = false;
+    std::chrono::steady_clock::time_point loadingShown_{};  // the last loading-screen frame actually presented
     void* fseMonitor_ = nullptr;
     bool fseHold_ = false;
     std::chrono::steady_clock::time_point fseRetry_{};  // next acquire attempt after a failure / loss

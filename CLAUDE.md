@@ -72,6 +72,11 @@ docs/research/fps-limit.md): `-Exe RisenTest.exe` runs a renamed copy of the exe
 samples the presenting thread's stack during long presents (`diag:` lines: module / export of the wait, any mode);
 `-Environment 'NAME=VALUE'` sets environment variables from the proxy's DllMain (e.g. `VK_LOADER_LAYERS_DISABLE=~implicit~`).
 Scenario `rvk_highfps`: frame-time distribution + the hero's walk / jumps / drop / ledge per tick (compare rates).
+Menu frame rate limit (docs/research/menu-fps.md): `vulkan.menu_fps` (default 60) while the ESC / main menu, inventory,
+character, log or map page is open (`engine/menu_state.*`, GUI2 page predicates); **loading screens never wait** (the
+engine loads on the presenting thread, one present per load step: any wait, also vsync's FIFO, lengthens the load; at most
+30 loading frames/s are presented, the rest are not shown; hidden `debug.pace_loading=true` = the old behaviour for A/B). rvk.log `engine: menu state ...` per change. Scenario `rvk_menufps`:
+fps in world / ESC menu / character screen + quick-load times (works with `-NoRenderer` too).
 Player settings + overlay (docs/research/overlay.md): every run writes `bin/rvk/settings.toml` = the **test baseline**
 (`overlay.debug_mode` on; water, enhanced shadows and their qualities at the old parity defaults, since the player
 defaults turn them on) + `-Setting 'vulkan.max_fps=60','vulkan.vsync=off'`; `-PlayerDefaults` = the shipped defaults instead;
@@ -248,6 +253,7 @@ docs/research/water.md 4.1.
 | `engine/materials.*` | the material graph of a draw's shader (diffuse / opacity / normal slots, blend mode, pool images; docs/research/rt-albedo-facts.md); `engine/memread.*` = SEH-guarded engine reads |
 | `engine/window_mode.*` | borderless fullscreen: `SetResolutionEx` pre-hook (fullscreen -> monitor size), window placement at present, DPI awareness; exclusive fullscreen's display mode switch / restore and focus handling (docs/research/window-mode.md) |
 | `engine/shadow_maps.*` | the sun cascades' map size / range / split factor overrides (`eCCascadeShadowMap::RenderShadowMaps` pre-hook; docs/research/shadows.md 3) |
+| `engine/menu_state.*` | game / menu / loading from the GUI's page predicates (Script.dll `GUI2::IsLoading` / `GetMode` / `IsVisible`): the menu frame rate limit and the unpaced loading screen (docs/research/menu-fps.md) |
 | `engine/lod.*` | detail distances (SpeedTree / mesh LOD and the view range factor scaled in detours; the billboard fade variant: docs/research/lod.md) |
 | `engine/high_fps.*` | the high fps gameplay fixes (falling, climbing, thunder; call sites redirected; docs/research/fps-limit.md 12) |
 | `engine/scene_hooks.*` | frame phase markers (Vulkan mode only): detours on Execute / z pass / shadow / solid / alpha / sky / post / GUI, the RenderRefracted vtable slot, image-role tags, the main camera read (docs/research/frame-phases.md) |

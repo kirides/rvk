@@ -1,0 +1,6 @@
+id          = "rvk_menufps"
+name        = "Renderer menu / loading frame rates"
+version     = "1.0.0"
+author      = "risen-enhanced-graphics"
+description = "Frame rates in the world, the ESC menu, the character screen and the loading screen, and quick-load times (risen-enhanced-graphics: the menu frame rate limit): scenario rvk_menufps."
+main        = "main.lua"

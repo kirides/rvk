@@ -216,6 +216,8 @@ add_library(rvk_core STATIC
     src/engine/high_fps.h
     src/engine/lod.cpp
     src/engine/lod.h
+    src/engine/menu_state.cpp
+    src/engine/menu_state.h
     src/engine/shadow_maps.cpp
     src/engine/shadow_maps.h
     src/engine/symbols.cpp

@@ -496,6 +496,9 @@ private:
     std::uint32_t cameraFrames_ = 0;       // frames with a main-view camera since the last camera report
     std::uint32_t cameraMovedFrames_ = 0;  // of those, frames whose camera position differs from the previous frame's
     void updateLogFrame();
+    // the menu frame rate limit and the unpaced loading screen (engine/menu_state.h), each present
+    void updateMenuPacing();
+    int menuState_ = -1;  // engine::menu::State of the last present (-1 = none yet), for the change log
     Options options_;
     bool engineVsync_ = true;  // the game's own vsync option (start parameters / ToggleNewMode)
     HWND__* window_ = nullptr;  // the game window (start parameters)
