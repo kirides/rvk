@@ -325,7 +325,21 @@ in every run:
 3. For gameplay, vsync on (120 Hz) or `vulkan.max_fps` 120 is the tested safe rate (section 10; 144 untested); at ~190
    fps a jump on a slope can fail.
 
-## 12. Files
+## 12. VaanaCZ Risen-FPS-Patch (2009 32-bit) vs the x64 build
+
+The patch (github.com/VaanaCZ/Risen-FPS-Patch; a `Script_*.dll` for the original 2009 build only) fixes three
+frame-rate dependencies. Checked against the x64 build in the decompilation (dumps
+`B:\DevDrive\risen-ghidra\rvk_fpspatch_*.txt`); **[C]** = read in the code, **[I]** = inferred, not measured.
+
+| # | patch | x64 build |
+|---|---|---|
+| 1 climbing | `ProcessClimbStandard` / `ProcessClimbHigh` divide the position correction by the frame time and call `AddToCurrentVelocity`; the patch sets Y through `SetCurrentPosition` | **Present** [C] in `gCCharacterMovement_PS::ProcessClimbStandard` 0x8e8dc0 and `ProcessClimbHigh` 0x8e8910: `EL_GetFrameTimeInSeconds` 0x4ac550 returns max(frame time, 0.0084) (`DAT_180f63174`), then `bCVector::GetInvScaled`, `AddToCurrentVelocity` 0x8ee170. Above ~119 fps the clamped dt exceeds the real one: under-travel rather than overshoot [I] |
+| 2 airwalk | the falling landing check is \|dy\| < 5 cm per frame; the patch scales it by 30 fps / dt | **Present** [C] in `CheckChangedMovementStates` 0x8e53f0, movement mode 0xf (`IsFalling` 0x8f4ba0): \|worldPos.y - this+0x18c\| < 5.0 (`DAT_180f632c4`) or velocity.y > 0 accumulates `GetLastFrameTimeInSeconds` into this+0x50c; > 0.5 s (`DAT_180f631e8`) -> `PutToGround` + landed mode (also when the ground is within 1.0, `DAT_180f63238`). A fall slower than 5 / dt units/s (500 at 100 fps, 1200 at 240 fps) counts as stalled: a mid-air landing after 0.5 s [I] |
+| 3 thunder | one `rand` per frame against the probability; the patch scales it by 30 fps / dt | **Present** [C] in `eCWeatherAdmin::Process` (Engine.dll 0x710730): one `bCMersenneTwister::Rand` per call compared with `eCWeatherStates` ThunderProbability (+0x54) and the random-effect sound probability (+0x70), no dt factor; only the flash duration (`DAT_180c6eaec`) is decremented by the frame time. Consequence: storms thunder more at high fps |
+
+Options (not built): detours scaling these by dt like the patch, or the existing `vulkan.max_fps` cap (~120, section 10).
+
+## 13. Files
 
 Dumps (outside the repo): `B:\DevDrive\risen-ghidra\fpslimit\` (`engine_imports.txt`, `engine_phys*.txt`,
 `game_imports.txt`, `game_session.txt`, `game_move.txt`, `game_maxspeed.txt`, `sb_imports.txt`; script

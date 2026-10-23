@@ -255,6 +255,16 @@ with validation on and checks every pixel against D3D9's rasterisation rules (ha
   `rt.allow=false` (`20261021-225041`), validation clean, rvk_tests 78 / 78.
   Deferred to M9: a BLAS of real meshes from the draw records (RT instance registry + BLAS cache, TLAS address in the
   FrameBlock).
+* **Detail distances: done (2026-10-23, commit 916040b, docs/research/lod.md).** Settings `lod.trees` / `lod.meshes` /
+  `lod.view` (Graphics tab, category Detail; player defaults 2 / 2 / 1, test baseline 1 / 1 / 1): the game's pop distances
+  are world data no config key reaches, so `engine/lod.*` scales them in detours (SpeedTree LOD limits, mesh LOD ranges,
+  the frustum database's view-range factor) and a billboard vertex-shader variant keeps the fade in step. Verified at
+  rvkcompare jungle / beach_sun / shadow_inland_far, x1 vs x3 (distant billboards become full trees, more mesh detail,
+  no doubled billboard + tree, no validation messages). Open (lod.md 5): cost (needs `-Exe RisenTest.exe -Perf`), a motion
+  test, `lod.view` > 1 in game.
+* **Public release preset: done (2026-10-23, commit 2e758a0).** `CMakePresets.json` preset `public-release` = ninja +
+  `/DEBUG /INCREMENTAL:NO /OPT:REF /OPT:ICF` into `build-release`; CI and the nightly use it. d3d9.dll 12.0 -> 5.3 MB,
+  d3d9.pdb 430.8 -> 45.9 MB.
 
 ### M7 Enhanced water (docs/research/water.md; roadmap 2.2, 6)
 * **First piece: done (2026-10-22).** Classification: material / mesh names (`eCResource2 +0x40`) on the draw tags
