@@ -225,3 +225,24 @@ Test-machine pitfall: **while the monitors sleep (user idle beyond the display t
   `-Commands '100: window focus','400: window fullscreen 1920x1080@60','800: window display','1000: window minimize',
   '1100: window focus'`; rvk.log `engine: window: exclusive fullscreen: ...`, `desktop display mode restored (...)`,
   `vulkan: exclusive fullscreen acquired / released / lost`, `vulkan: swapchain ... (offered ...), exclusive fullscreen`.
+
+## 9. The OS cursor (2026-10-23)
+
+Symptom in Vulkan mode: the Windows arrow over the game at all times (menus: on top of the game's own cursor; in game too).
+
+* The game's cursor is a GUI sprite: `eCGuiCursor2::Draw(eCSprite*, ...)` (0x537f40) through the HAL's sprite path;
+  `eCGuiModule2::ShowCursor(bool)` (0x519f20) only toggles that sprite (IFFModuleGui2 slot +0xf0); `eCGuiModule2::Draw`
+  (0x519a60) reads the position with `GetCursorPos` / `ScreenToClient` [C].
+* The engine never hides the OS cursor in a window [C]: no `SetCursor` / `SetSystemCursor` import; the class "Engine" has
+  `hCursor = LoadCursorA(NULL, IDC_ARROW)` (`eCWindow::Create`); `eCApplication::OnHandleMessage` (0x4bf0b0) handles only
+  WM_SETFOCUS, WM_ACTIVATEAPP, WM_SYSCOMMAND and WM_LBUTTONDOWN: WM_SETCURSOR reaches `DefWindowProcA` = the arrow.
+  `ShowCursor(FALSE)` runs only in popup mode (`eCWindow::Create`, `SetWindowMode`, WM_SETFOCUS's inlined
+  `UpdateShowCursor` and 0x4c6cf0: `GetCursorInfo`, hide if showing); it lowers the display counter but does not survive
+  DefWindowProc's WM_SETCURSOR in our borderless window. `IDirect3DDevice9::SetCursorProperties / SetCursorPosition /
+  ShowCursor` are never called by the DX9 layer [C, grep of the decompiled layer].
+* In D3D9 mode the system d3d9.dll's window subclass answers WM_SETCURSOR with `SetCursor(NULL)` while the device cursor is
+  hidden (its default) [I: documented D3D9 behaviour, not traced].
+* Fix (`engine/window_mode.cpp` `hideOsCursor`, from `onModeSet`, Vulkan mode only): a subclass of the game window answers
+  WM_SETCURSOR over `HTCLIENT` with `SetCursor(NULL)`; caption and frame keep their cursors. It is installed before the
+  overlay's subclass, so the overlay (open: hides the cursor itself, ImGui draws one) forwards to it when closed.
+  rvk.log `engine: window: OS cursor hidden over the client area (the game draws its own)`.

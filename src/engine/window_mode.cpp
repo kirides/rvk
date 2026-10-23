@@ -262,6 +262,46 @@ void enableDpiAwareness() {
     }
 }
 
+// The OS cursor over the client area. The engine draws its own GUI cursor (eCGuiCursor2, a sprite) and never hides the OS
+// one in a window: it has no WM_SETCURSOR handler, so DefWindowProc sets the class cursor (IDC_ARROW); its ShowCursor(FALSE)
+// (popup mode only) just lowers the display counter. In D3D9 mode the system d3d9.dll's window subclass answers
+// WM_SETCURSOR with SetCursor(NULL) while the device cursor is hidden (the engine never shows it). Without a D3D9 device we
+// do the same; caption and frame keep their cursors (docs/research/window-mode.md 9).
+namespace {
+WNDPROC g_cursorOriginal = nullptr;
+HWND g_cursorWindow = nullptr;
+bool g_cursorUnicode = false;
+
+LRESULT CALLBACK cursorWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_SETCURSOR && LOWORD(lp) == HTCLIENT) {
+        SetCursor(nullptr);
+        return TRUE;
+    }
+    return g_cursorUnicode ? CallWindowProcW(g_cursorOriginal, hwnd, msg, wp, lp) : CallWindowProcA(g_cursorOriginal, hwnd, msg, wp, lp);
+}
+
+void hideOsCursor(HWND window) {
+    if (window == nullptr || window == g_cursorWindow) return;
+    if (g_cursorWindow != nullptr) {
+        spdlog::warn("engine: window: a new game window: the OS cursor stays hidden only over the first one");
+        return;
+    }
+    g_cursorUnicode = IsWindowUnicode(window) != FALSE;
+    const auto proc = reinterpret_cast<LONG_PTR>(&cursorWndProc);
+    const LONG_PTR previous = g_cursorUnicode ? SetWindowLongPtrW(window, GWLP_WNDPROC, proc) : SetWindowLongPtrA(window, GWLP_WNDPROC, proc);
+    if (previous == 0) {
+        spdlog::warn("engine: window: subclassing the game window failed (error {}): the OS cursor stays visible", GetLastError());
+        return;
+    }
+    g_cursorOriginal = reinterpret_cast<WNDPROC>(previous);
+    g_cursorWindow = window;
+    // the cursor already over the window keeps its shape until the next mouse move: hide it now
+    POINT p{};
+    if (GetCursorPos(&p) && WindowFromPoint(p) == window) SetCursor(nullptr);
+    spdlog::info("engine: window: OS cursor hidden over the client area (the game draws its own)");
+}
+}  // namespace
+
 bool install() {
     const auto& s = sym();
     if (s.appSetResolutionEx == nullptr) {
@@ -285,6 +325,7 @@ void onModeSet(HWND__* window, bool windowed, std::uint32_t width, std::uint32_t
         }
         spdlog::info("engine: window: the engine's fullscreen window is no longer topmost");
     }
+    hideOsCursor(window);
     g.window = window;
     g.windowed = windowed;
     g.width = width;
