@@ -3,6 +3,11 @@
 A Vulkan renderer for **Risen Enhanced** (64-bit): a `d3d9.dll` next to `Risen.exe` that replaces the engine's graphics layer
 (Vulkan 1.3, dynamic rendering). Work in progress, see [docs/PLAN.md](docs/PLAN.md).
 
+[Image Comparison](https://www.diffchecker.com/image-compare/7Ttb27k6/)
+
+![RVK-RT-image](docs/images/rvk_enhanced_rt.jpg)
+![RVK-Original](docs/images/rvk_original.jpg)
+
 ## Install
 
 Download `risen-enhanced-graphics.zip` from the [nightly release](https://github.com/kirides/rvk/releases/tag/nightly) and unpack
