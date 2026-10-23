@@ -175,8 +175,10 @@ scene is active. With only FSR on, characters had camera-only motion: the idle a
 detail).
 
 **Code.** `src/enh/object_motion.{h,cpp}`: `ObjectMotion : d3d9::DrawObserver`, registered while an FSR mode is on and
-`upscale.object_motion` (advanced, default on). It observes Main view / Solid pass draws of `Kind::Skinned` (skipped while
-`RtScene::capturingCharacters()` = active && dynamic) and `Kind::StaticMesh` (rigid). Key = entity pointer x vertex / index
+`upscale.object_motion` (advanced; an enum `off | characters | all`, default `characters`: skinned draws only; `all` adds the
+moving rigid draws, untested with weapons). It observes Main view / Solid pass draws of `Kind::Skinned` (skipped while
+`RtScene::capturingCharacters()` = active && dynamic) and `Kind::StaticMesh` (rigid, `all` only; **only with
+`q.tag->entity` set**, see the jitter bug below). Key = entity pointer x vertex / index
 buffer ids + generations x range; per key `State{previous capture address + slots + frame, hash}`. Per draw: resolve the last
 request (it ran if `Device::vertexCapturedPrev(addr)`); skinned draws are always captured; rigid draws only while the hash of
 the VS constants c31..c37 (`g_vInstanceMisc` / `g_vInstanceData`: placement) changed in the last 4 frames (a fade's alpha
@@ -209,6 +211,29 @@ clearly crisper; native AA looks close to the engine's picture either way (cloth
 has more high-frequency energy): use flicker + crops. Quality still loses fine cloth detail vs the engine (renders at 1 / 1.5,
 ratio 0.11-0.15).
 
+**Jitter bug on buildings [C by measurement, fixed 2026-10-23].** The user reported massive jitter on large buildings at Ultra
+Performance with "Motion of characters and objects" on. Cause: rigid captures were keyed by entity pointer x buffer ids x range;
+draws of one mesh whose entity pointer is null all shared one key / `State`, so different instances fed each other their
+previous-frame world positions (and the per-frame "first draw of the key counts" dedupe skipped the others): wrong, large
+per-pixel motion on repeated building pieces. The count of "rigid draws seen moving" also kept growing in a scene with frozen
+game time (the hash of c31..c37 alternates between instances). Fix: a `StaticMesh` draw without `q.tag->entity` is not captured
+(camera-only motion). The setting became the enum above, default `characters`.
+
+**Measurement on frozen scenes [C].** `rvkcompare` spots freeze the game time, so any change between the 8 consecutive burst
+frames is an artefact: temporal standard deviation per pixel over the 8 frames (mean std / p99 / % of pixels > 3), Ultra
+Performance (533x300 -> 1600x900):
+
+| spot | motion off | characters | all (before guard) | all (entity guard) |
+|---|---|---|---|---|
+| harbour_docks | 0.107 / 1.78 / 0.51 % | 0.109 / 1.61 / 0.44 % | 0.153 / 3.09 / 1.04 % | 0.106 / 1.83 / 0.49 % |
+| harbour_mouth | 0.180 / 3.30 / 1.07 % | 0.130 / 1.37 / 0.52 % | 0.131 / 1.27 / 0.51 % | 0.131 / 1.30 / 0.54 % |
+| monastery_hall | 0.150 / 1.22 / 0.26 % | 0.134 / 1.13 / 0.23 % | 0.144 (mean only) | 0.140 / 1.16 / 0.22 % |
+
+Native AA + all (docks): 0.085 / 0.95 / 0.16 %. The bug shows only in the docks row (buildings: 0.153 / 1.04 % before, back to
+the level of off after the guard). Capture dirs: `out\water\20261023-213926` (off), `-214247` (characters), `-214428` (all
+before the guard), `-215544` (all with the guard), `-214607` (native all). Default stays `characters` (conservative): `all` is
+for weapons / rigid objects, still untested. The script was a scratchpad `temporal.py` (not in the repo).
+
 **Not tested:** weapons (no scene with a drawn weapon: needs a guard / the hero with the weapon drawn; check that the rigid path
 catches it: it should show in the "rigid draws seen moving" count and get motion). **Known gaps:** characters in the shadow /
 alpha passes (only the solid pass is captured: alpha-blended parts such as hair cards / cloaks keep camera motion), instanced
@@ -233,7 +258,16 @@ recording of the injected passes ~0.3 ms. A clean total frame cost needs the GPU
   draws writing a reactive value: the more precise alternative), a transparency and composition mask for water (the sea is
   not reactive), a debug view of the mask, a test with real spell effects.
 * Per-object motion is built for skinned and moving rigid draws (section 9). Still camera-only: SpeedTree wind, alpha-pass
-  parts of characters, instanced / non-indexed draws; weapons untested (no scene with a drawn weapon).
+  parts of characters, instanced / non-indexed draws; weapons untested (no scene with a drawn weapon; `all` is for them).
+  Why "rigid draws seen moving" keeps growing in frozen scenes (484 in a run with the guard) is unexplained; harmless
+  (captures with previous == current).
+* Known issues (2026-10-23): the user's real game died with 0xc0000374 (heap corruption, ntdll, 21:27:45, right after the
+  first FSR frame) under RenderDoc when enabling ray traced lighting; the crashes at 18:43, 19:59 and 21:41 were 0xc0000005 in
+  the engine's `SharedBase.dll` (stock engine crash, `RisenHighFps.exe`, not ours). Not reproduced in the test copy without
+  RenderDoc (FSR native + quality with GI at startup, GI toggled at run time via `-Commands` with validation, object motion
+  all, GTAO, water RT): no crash, no validation errors. RenderDoc only partly supports the ray tracing extensions
+  (acceleration structures, ray query): treat captures with `rt.allow=true` as unsupported; for RenderDoc use `rt.allow=false`
+  (restart setting, floor only).
 * Exposure input (auto now).
 * FSR 4: untested until an RDNA4 card (no provider on RDNA3, section 2).
 * The engine's DoF / post at render size (section 7).
