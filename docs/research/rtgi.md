@@ -324,6 +324,28 @@ shadow map 2.0, GI off + forced 4096 map 3.0, GI on 4.6 -> 3.7 after the hystere
 palms in the wind (present in D3D9); detail 4x and the 4096 map make more / sharper moving shadows; GI adds faint grain in shaded areas.
 
 **Open**: the DDGI's own multi-bounce now uses the cheap lookup (possible leaks through walls at the second bounce); one-frame lag of AO /
-screen probes (next: GTAO at AfterDepthPrepass in the same frame; screen probes need the TLAS before the solid pass); remaining GI grain;
+screen probes (solved in section 12); remaining GI grain;
 the `gi.screen` high cost over time (unverified, measurement contaminated); the per-pixel ratio is luminance only (no colour bleeding
 from near bounces).
+
+## 12. Follow-ups after stage C (2026-10-23)
+
+([C] = measured / read in code.)
+
+**Stable screen probe filter (015bfda)** [C]: the `sp_resolve` 3 x 3 probes are weighted by a Gaussian of the distance to each TILE
+CENTRE (sigma one tile) x tangent-plane x normal weights. Weighting by the probe's own (per-frame jittered) pixel made the filter flicker.
+Grain (luma std mean, 12 frames of a still view at the player's quicksave): 2x2 3.72, 3x3 jittered weights 4.29, 3x3 stable 2.33, screen
+probes off 3.13, GI off 2.98; a later run of the same build family gave 3.42 (the run-to-run spread from the palms' wind motion is large:
+treat +-1 as noise). Tried and reverted: per-channel ratios (colour noise, 3.7 -> 4.3) and removing the engine's indoor fill from the kept
+remainder (the pub's barrels went black: there the fill is the only light).
+
+**Same-frame AO and screen probes (ebff985)** [C]: the RT scene builds its TLAS at AfterDepthPrepass (AfterOpaque only for frames without a
+z pre-pass); characters come from the previous frame's vertex captures (`Device::vertexCapturedPrev`). Screen probes (own pass `gi.screen`
+at AfterDepthPrepass, using the last DDGI update's light / volume) and GTAO (AfterDepthPrepass, history RG16F ao + view depth) run on this
+frame's depth with depth normals and camera-only temporal reprojection. The material shaders' Gbuffer variants `texelFetch` them at their
+own pixel where the stored view depth matches theirs (2 %, >= 4 units): no reprojection lag, ghosting or screen-edge band. Draws not in the
+z pre-pass (characters, alpha) keep the uncorrected DDGI and no AO. The G-buffer motion fill stays at AfterOpaque (`gtao.comp` mode 2).
+Player quicksave (harbour town, detail 4x, 1600x900): 95.8 fps, GPU ~8.3 ms, CPU-bound ~10.4 ms; validation clean.
+
+**Open**: characters / alpha get no same-frame AO or screen probe correction (could fall back to a reprojected previous result); the GTAO
+arc pattern next to the pub wall persists; characters lag one frame in the RT scene.
