@@ -3,7 +3,8 @@
 Build and measurements of 2026-10-23 (RX 7900 XTX). Legend: [C] confirmed (measured), [I] inferred.
 Built: **native AA** (FSR 3.1 at render size = display size) and **render scale / quality modes** (section 7) through AMD's
 signed FFX API DLL, with an **automatic reactive mask** for translucent effects (section 8). Open: explicit / water masks,
-FSR 4, uncapped GPU cost (section 11). Per-object motion for characters / moving rigid draws: section 9.
+FSR 4, uncapped GPU cost (section 11). Per-object motion for characters / moving rigid draws: section 9. Jitter-aware depth
+reconstruction (positions rebuilt from the jittered depth): section 10.
 
 ## 1. Code
 
@@ -33,7 +34,7 @@ Advanced), `upscale.reactive` (default on) + advanced `upscale.reactive_cutoff` 
 `FrameBlock::jitter` and `DrawBlock::posFix += (2 jx / W, -2 jy / H)` NDC (Cauldron's convention) on the geometry of the main
 view's DepthPrepass / Solid / Refracted / Alpha / AlphaLate into a scene-sized target (`Device::geometryJitter`). The first
 main view of a frame asks the source: Halton(2,3) - 0.5, phases = ceil(8 (display / render)^2) from the actual sizes (8 for native AA; 18 / 23 / 32 / 72
-at 1.5 / 1.7 / 2 / 3x [C]), identical to the DLL's. Motion vectors stay jitter-free: the G-buffer computes them from the unjittered matrices.
+at 1.5 / 1.7 / 2 / 3x [C]), identical to the DLL's. Motion vectors stay jitter-free: the G-buffer computes them from the unjittered matrices. Positions rebuilt from the jittered depth must subtract the jitter: section 10.
 
 Checks [C]: `jitter_only`, still camera, 4 burst frames: consecutive frames differ by 1-2 grey levels (mode off: 0.00). Sign
 check with `upscale.jitter_flip` (Laplacian-variance sharpness ratio vs the engine, native AA, no RCAS; harbour_mouth / jungle /
@@ -240,7 +241,47 @@ alpha passes (only the solid pass is captured: alpha-blended parts such as hair 
 and non-indexed draws (the capture variant needs indexed, non-instanced), SpeedTree wind (sway: camera motion only), skinned
 draws beyond 256 captures per frame; while the RT scene is active its own capture is used (its own limits).
 
-## 10. Cost
+## 10. Jitter and depth reconstruction [C, 2026-10-23]
+
+The jitter (section 3) is a clip-space offset on the main view's geometry only; the FrameBlock matrices stay the unjittered
+camera's. So the surface rasterised at a pixel whose centre has NDC `c` has the unjittered NDC `c - J`: any position rebuilt from
+the main view's depth (depth map R32F or hardware depth) with the unjittered inverse matrices is off by `J` (up to 0.5 render
+pixel = 1.5 output pixels at Ultra Performance). Fix: `rvkJitterNdc(RvkFrame f)` in `shaders/include/rvk_common.glsl` =
+`vec2(2 f.jitter.x, -2 f.jitter.y) * f.viewport.zw` (zero without jitter); consumers use `rvkUvToNdc(uv) - rvkJitterNdc(f)`:
+
+| consumer | place |
+|---|---|
+| GTAO, normals from depth, the motion fill | `gbViewPos` / `gbWorldPos`, `shaders/gbuffer/gbuffer_common.glsl` |
+| screen probes (GI) | `spWorldPos`, `shaders/gi/screen_common.glsl` |
+| generic helper | `rvkWorldFromViewDepth`, `rvk_common.glsl` |
+| material variants' fragment world position | `shaders/include/rvk_material_variant.glsl` (inlined: that text does not include `rvk_common.glsl`) |
+| enhanced sun shadow mask | `reconstruct()` in `shaders/shadows/shadow_mask.frag`: `p = d * (pixel NDC - J, 1)` |
+
+**Not corrected:** the engine's own `post_SSM.fx` cascade draws (`shadows.enabled` off): the view ray is interpolated from the
+fullscreen quad's vertices (not jittered: the ShadowMask pass is outside the jitter whitelist) and `p = depth x ray` feeds
+`DepthToShadowMatrix`; a constant change cannot express the depth-dependent offset (needs the quad's input positions shifted by
+`-J`, or jittering the engine's camera matrices before it computes its constants). Also not corrected: forward lookups of world
+points into jittered buffers (water SSR, history reprojection): sub-pixel, FSR / the own filters absorb it.
+
+Measurement (frozen scenes; temporal std per pixel over 8 consecutive frames; Ultra Performance 533x300 -> 1600x900,
+`shadows.enabled` + `ao.enabled`; dirs `out\water\20261023-221713` before, `-222631` after, `-222105` upscale off), mean:
+
+| spot | before | after | upscale off |
+|---|---|---|---|
+| sea_cliff | 0.577 (p99 6.45, > 3: 3.80 %) | 0.438 (p99 5.30, 2.68 %) | 0.820 (the sea animates: not comparable) |
+| harbour_docks | 0.103 | 0.103 | 0.128 |
+| jungle | 0.105 | 0.105 | 0.033 |
+| beach_sun | 0.322 | 0.326 (unchanged within noise) | 0.642 |
+
+So the mismatch was a minor shimmer source except at sea_cliff; the building jitter the user saw was the rigid object-motion
+bug (section 9). Validation (testdemo `-Validation -SyncValidation`, ultra_performance + GI screen probes + GTAO): 0 errors,
+0 SYNC, only the known `rw_luma_history` warning.
+
+**Tooling lesson:** the material variants' GLSL is embedded text compiled at run time, so a missing helper only shows in the
+game. After editing `rvk_material_variant.glsl` run the offline checks `rvk_shadertool corpus corpus --gbuf`, `--gi`,
+`--gbuf-motion` (each ~40 s; the first run caught the missing `rvkUvToNdc` in that text: 2230 shaders failing).
+
+## 11. Cost
 
 Native AA / render scale, jungle hold [C, noisy]: the Radeon Chill profile caps the world at ~80 fps (p50 12.4 ms in every
 mode), so fps says nothing. GPU ms / frame: off 3.4-7.8, native AA 5.5, quality 4.1-5.9, performance 3.4-4.1. CPU recording of
@@ -251,9 +292,9 @@ Uncapped attempt (`RisenTest.exe`, 2560x1440) [C, contaminated]: `AION2.exe` use
 phases the FSR pass (`pass upscale.fsr`, `-PerfFrame 5000`) took 0.63 ms native AA / 0.42 quality / 0.33 performance; CPU
 recording of the injected passes ~0.3 ms. A clean total frame cost needs the GPU to itself (to repeat).
 
-## 11. Open
+## 12. Open
 
-* Render scale: the uncapped GPU cost (section 10), refcompare thresholds for scaled renders (recalibrate).
+* Render scale: the uncapped GPU cost (section 11), refcompare thresholds for scaled renders (recalibrate).
 * Reactive masks: the automatic form is built (section 8). Open: explicit per-draw reactive output (particle / precipitation
   draws writing a reactive value: the more precise alternative), a transparency and composition mask for water (the sea is
   not reactive), a debug view of the mask, a test with real spell effects.
@@ -271,6 +312,8 @@ recording of the injected passes ~0.3 ms. A clean total frame cost needs the GPU
 * Exposure input (auto now).
 * FSR 4: untested until an RDNA4 card (no provider on RDNA3, section 2).
 * The engine's DoF / post at render size (section 7).
-* Jitter in shadow-mask / SSR lookups: sub-pixel mismatch (accepted).
-* GPU cost (section 10); loading / menu transitions rely on the reset.
+* Jitter: depth reconstruction is corrected (section 10), except the engine's own `post_SSM.fx` cascade shadow draws
+  (`shadows.enabled` off: needs the quad's input positions shifted by `-J` or jittered engine camera matrices); forward
+  lookups into jittered buffers (water SSR, history reprojection) keep a sub-pixel mismatch (accepted).
+* GPU cost (section 11); loading / menu transitions rely on the reset.
 * Refcompare with upscale off must stay identical to before (not run yet).
