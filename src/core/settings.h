@@ -317,6 +317,9 @@ struct RendererSettings {
     Setting* aoRadius = nullptr;          // ao.radius: metres
     Setting* gbufferDebug = nullptr;      // gbuffer.debug: "off", "normals", "motion", "ao"
     // upscaling / anti-aliasing (enh/upscale.h, docs/research/upscaling.md)
+    Setting* upscaleReactive = nullptr;   // upscale.reactive: FSR's automatic reactive mask (particles, rain, spells)
+    Setting* upscaleReactiveCutoff = nullptr;  // upscale.reactive_cutoff: advanced, the difference above which a pixel is reactive
+    Setting* upscaleReactiveScale = nullptr;   // upscale.reactive_scale: advanced, multiplies the mask
     Setting* upscaleSharpness = nullptr;  // upscale.sharpness: 0..1, FSR's RCAS sharpening pass
     Setting* upscaleJitterFlip = nullptr; // upscale.jitter_flip: debug, "none", "x", "y", "xy" (the geometry jitter's sign)
     Setting* upscaleMode = nullptr;       // upscale.mode: "off", "jitter_only" (debug), "native_aa" (FSR 3.1 at the output size)

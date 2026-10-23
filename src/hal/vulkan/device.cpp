@@ -301,7 +301,8 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     // camera jitter / FSR (enh/upscale.h, docs/research/upscaling.md)
     upscale_ = std::make_unique<enh::Upscale>(dev_);
     if (rs.upscaleMode != nullptr) {
-        for (settings::Setting* s : {rs.upscaleMode, rs.upscaleSharpness, rs.upscaleJitterFlip}) {
+        for (settings::Setting* s : {rs.upscaleMode, rs.upscaleReactive, rs.upscaleReactiveCutoff, rs.upscaleReactiveScale, rs.upscaleSharpness,
+                                     rs.upscaleJitterFlip}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyUpscale(); }, this);
         }
         applyUpscale();
@@ -401,6 +402,10 @@ void HalDevice::applyUpscale() {
     if (!upscale_ || rs.upscaleMode == nullptr) return;
     const std::string_view m = rs.upscaleMode->asEnum();
     if (rs.upscaleSharpness != nullptr) upscale_->setSharpness(rs.upscaleSharpness->asFloat());
+    if (rs.upscaleReactive != nullptr) upscale_->setReactive(rs.upscaleReactive->asBool());
+    if (rs.upscaleReactiveCutoff != nullptr && rs.upscaleReactiveScale != nullptr) {
+        upscale_->setReactiveTuning(rs.upscaleReactiveCutoff->asFloat(), rs.upscaleReactiveScale->asFloat());
+    }
     unsigned flip = 0;
     if (rs.upscaleJitterFlip != nullptr) {
         const std::string_view f = rs.upscaleJitterFlip->asEnum();

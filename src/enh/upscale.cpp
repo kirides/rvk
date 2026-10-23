@@ -37,6 +37,9 @@ constexpr VkFormat kDepthFormat = VK_FORMAT_R32_SFLOAT;
 constexpr VkFormat kOutputFormat = VK_FORMAT_R16G16B16A16_SFLOAT;  // the scene HDR target's format (A16B16G16R16F)
 constexpr VkImageUsageFlags kDepthUsage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
 constexpr VkImageUsageFlags kOutputUsage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+constexpr VkFormat kReactiveFormat = VK_FORMAT_R32_SFLOAT;  // what the DLL's auto-reactive shader declares (rw_output_autoreactive)
+constexpr VkImageUsageFlags kReactiveUsage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+constexpr VkImageUsageFlags kOpaqueUsage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 
 }  // namespace
 
@@ -80,7 +83,7 @@ Upscale::~Upscale() {
         if (prep != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), prep, nullptr);
         if (layout.valid()) layout.destroy(*ctx);
     });
-    for (const char* k : {"upscale.depth", "upscale.out"}) dev_.transients().release(k);
+    for (const char* k : {"upscale.depth", "upscale.out", "upscale.opaque", "upscale.reactive"}) dev_.transients().release(k);
 }
 
 void Upscale::apply(UpscaleMode mode, unsigned flip) {
@@ -92,7 +95,7 @@ void Upscale::apply(UpscaleMode mode, unsigned flip) {
         dev_.setGeometryLodBias(0.0f);
         dev_.removePasses(this);
         dropFsr();
-        for (const char* k : {"upscale.depth", "upscale.out"}) dev_.transients().release(k);
+        for (const char* k : {"upscale.depth", "upscale.out", "upscale.opaque", "upscale.reactive"}) dev_.transients().release(k);
     }
     // the render scale (the scene hook shrinks the camera rect by it from the next frame on; the scene image follows)
     dev_.setRenderRatio(usesFsr(mode) && !failed_ ? upscaleRatio(mode) : 1.0f);
@@ -133,6 +136,7 @@ void Upscale::apply(UpscaleMode mode, unsigned flip) {
     needReset_ = true;
     // FSR's texture LOD bias for the geometry it accumulates (set from the actual sizes every frame in record())
     dev_.setGeometryLodBias(upscaleLodBias(1, 1));
+    dev_.addPass(d3d9::inject::Point::BeforeAlpha, "upscale.opaque", [this](d3d9::PassContext& ctx) { recordOpaque(ctx); }, this);
     dev_.addPass(d3d9::inject::Point::AfterMainView, "upscale.fsr", [this](d3d9::PassContext& ctx) { record(ctx); }, this, 100);
     spdlog::info("enh: upscale: FSR 3.1 at 1/{:.2f} of the output, jitter {} phases", ratio, phases_.load());
 }
@@ -171,6 +175,25 @@ bool Upscale::ensureFsr(VkExtent2D render, VkExtent2D display) {
     spdlog::info("enh: upscale: FSR provider '{}': {}x{} -> {}x{}", fsr_->providerName(), render.width, render.height, display.width,
                  display.height);
     return true;
+}
+
+// the opaque (and refracted) scene as it is when the first translucent effect is about to be drawn: FSR derives its reactive
+// mask from the difference to the finished frame
+void Upscale::recordOpaque(d3d9::PassContext& ctx) {
+    if (ctx.mainView != 1 || !usesFsr(mode_) || failed_ || !reactive_ || ctx.sceneHdr == nullptr) return;
+    d3d9::Texture* hdr = ctx.sceneHdr;
+    const VkExtent2D render{hdr->desc().width, hdr->desc().height};
+    vk::Transients::Entry* opaque = dev_.transients().get("upscale.opaque", {kOutputFormat, render, kOpaqueUsage});
+    if (opaque == nullptr || hdr->image().format() != kOutputFormat) return;
+    VkCommandBuffer cmd = ctx.cmd;
+    hdr->image().transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    opaque->image.transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    const VkImageCopy region{{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0},
+                             {render.width, render.height, 1}};
+    vkCmdCopyImage(cmd, hdr->image().image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, opaque->image.image(),
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    opaque->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    opaqueValid_ = true;
 }
 
 void Upscale::record(d3d9::PassContext& ctx) {
@@ -218,9 +241,21 @@ void Upscale::record(d3d9::PassContext& ctx) {
     layout_.push(cmd, &push, sizeof(push));
     vkCmdDispatch(cmd, (render.width + 7) / 8, (render.height + 7) / 8, 1);
 
+    // the automatic reactive mask: translucent effects (particles, rain, spells, spray) drawn after the BeforeAlpha snapshot
+    vk::Transients::Entry* reactive = nullptr;
+    if (reactive_ && opaqueValid_) {
+        vk::Transients::Entry* opaque = dev_.transients().get("upscale.opaque", {kOutputFormat, render, kOpaqueUsage});
+        reactive = dev_.transients().get("upscale.reactive", {kReactiveFormat, render, kReactiveUsage});
+        if (opaque != nullptr && reactive != nullptr && !fsr_->generateReactiveMask(cmd, opaque->image, hdr->image(), reactive->image, render, reactiveScale_, reactiveCutoff_)) {
+            reactive = nullptr;
+        }
+    }
+    opaqueValid_ = false;
+
     const d3d9::scene::CameraBlock& cam = dev_.camera();
     const d3d9::scene::CameraBlock& last = dev_.lastCamera();
     vk::FsrDispatch d;
+    d.reactive = reactive != nullptr ? &reactive->image : nullptr;
     d.cmd = cmd;
     d.color = &hdr->image();
     d.depth = &depth->image;

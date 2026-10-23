@@ -9,6 +9,7 @@ const char* name(Point p) {
         case Point::AfterDepthPrepass: return "AfterDepthPrepass";
         case Point::AfterOpaque: return "AfterOpaque";
         case Point::AfterRefractionCopy: return "AfterRefractionCopy";
+        case Point::BeforeAlpha: return "BeforeAlpha";
         case Point::AfterMainView: return "AfterMainView";
         case Point::BeforeGui: return "BeforeGui";
         case Point::Count: break;

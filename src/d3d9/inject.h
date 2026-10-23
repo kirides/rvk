@@ -25,6 +25,9 @@ enum class Point : std::uint8_t {
     AfterOpaque,          // Main view, end of Solid: before the refraction copy (or at DoBeginRenderAlpha without one). The
                           // scene HDR target holds the opaque scene (sky, solid, decals); water and alpha are not drawn yet
     AfterRefractionCopy,  // Main view, right after the refraction copy (CopyCurrentRTToImage), before the refracted (water) draws
+    BeforeAlpha,          // Main view, just before the first draw of the alpha passes (Alpha / AlphaLate): the opaque and refracted
+                          // scene (sky, solid, decals, water) is in the scene HDR target, no translucent effect (particles, rain,
+                          // spells, spray) is drawn yet. Fired from the draw path (Device::prepareDraw), once per main view
     AfterMainView,        // the main view's eCFrustumDatabase::Execute returns: the scene HDR target is complete (incl. water,
                           // alpha), the image-effect post chain (eye adaptation, tonemapping, DoF) has not run yet
     BeforeGui,            // eCApplication::Draw: the post chain is done (the back buffer holds the tonemapped frame), no GUI yet

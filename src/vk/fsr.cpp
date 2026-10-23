@@ -94,10 +94,7 @@ bool Fsr::load(const std::filesystem::path& dll) {
     return true;
 }
 
-bool Fsr::createContext(Context& ctx, const FsrCreateInfo& info) {
-    if (module_ == nullptr) return false;
-    destroyContext();
-
+static void* createRaw(const ffxFunctions& api, Context& ctx, const FsrCreateInfo& info, std::uint32_t& flagsOut) {
     ffxCreateBackendVKDesc backend{};
     backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
     backend.vkDevice = ctx.device();
@@ -119,23 +116,40 @@ bool Fsr::createContext(Context& ctx, const FsrCreateInfo& info) {
     create.fpMessage = ffxMessage;
 
     ffxContext c = nullptr;
-    const ffxReturnCode_t rc = fn_->api.CreateContext(&c, &create.header, nullptr);
+    const ffxReturnCode_t rc = api.CreateContext(&c, &create.header, nullptr);
     if (rc != FFX_API_RETURN_OK || c == nullptr) {
         spdlog::error("fsr: ffxCreateContext failed ({})", rc);
-        return false;
+        return nullptr;
     }
+    flagsOut = create.flags;
+    return c;
+}
+
+bool Fsr::createContext(Context& ctx, const FsrCreateInfo& info) {
+    if (module_ == nullptr) return false;
+    destroyContext();
+    std::uint32_t flags = 0;
+    ffxContext c = createRaw(fn_->api, ctx, info, flags);
+    if (c == nullptr) return false;
     context_ = c;
+    ctx_ = &ctx;
+    info_ = info;
 
     ffxQueryGetProviderVersion q{};
     q.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
     provider_.clear();
     if (fn_->api.Query(&c, &q.header) == FFX_API_RETURN_OK && q.versionName != nullptr) provider_ = q.versionName;
     spdlog::info("fsr: context {}x{} -> {}x{} flags 0x{:x}, provider '{}'", info.maxRenderSize.width, info.maxRenderSize.height,
-                 info.maxUpscaleSize.width, info.maxUpscaleSize.height, create.flags, provider_);
+                 info.maxUpscaleSize.width, info.maxUpscaleSize.height, flags, provider_);
     return true;
 }
 
 void Fsr::destroyContext() {
+    if (reactiveContext_ != nullptr && fn_ != nullptr) {
+        ffxContext r = reactiveContext_;
+        fn_->api.DestroyContext(&r, nullptr);
+    }
+    reactiveContext_ = nullptr;
     if (context_ != nullptr && fn_ != nullptr) {
         ffxContext c = context_;
         fn_->api.DestroyContext(&c, nullptr);
@@ -196,6 +210,42 @@ bool Fsr::dispatch(const FsrDispatch& d) {
     d.output->setTrackedLayout(layoutOf(kWrite));
     if (rc != FFX_API_RETURN_OK) {
         spdlog::error("fsr: ffxDispatch failed ({})", rc);
+        return false;
+    }
+    return true;
+}
+
+bool Fsr::generateReactiveMask(VkCommandBuffer cmd, Image& opaque, Image& color, Image& out, VkExtent2D renderSize, float scale,
+                                float cutoff, float binaryValue) {
+    if (context_ == nullptr || ctx_ == nullptr) return false;
+    if (reactiveContext_ == nullptr) {
+        FsrCreateInfo tiny = info_;
+        tiny.maxRenderSize = tiny.maxUpscaleSize = {32, 32};  // the mask pass reads its size from the dispatch
+        std::uint32_t flags = 0;
+        reactiveContext_ = createRaw(fn_->api, *ctx_, tiny, flags);
+        if (reactiveContext_ == nullptr) return false;
+        spdlog::info("fsr: reactive mask context (32x32: only its own pipeline is used)");
+    }
+    constexpr std::uint32_t kRead = FFX_API_RESOURCE_STATE_COMPUTE_READ;
+    for (Image* img : {&opaque, &color, &out}) img->transition(cmd, layoutOf(kRead));
+    ffxDispatchDescUpscaleGenerateReactiveMask r{};
+    r.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE_GENERATEREACTIVEMASK;
+    r.commandList = cmd;
+    r.colorOpaqueOnly = resource(&opaque, kRead);
+    r.colorPreUpscale = resource(&color, kRead);
+    r.outReactive = resource(&out, kRead);
+    r.renderSize = {renderSize.width, renderSize.height};
+    r.scale = scale;
+    r.cutoffThreshold = cutoff;
+    r.binaryValue = binaryValue;
+    // a cutoff of 0 = no threshold: the (scaled) difference itself is the mask
+    r.flags = FFX_UPSCALE_AUTOREACTIVEFLAGS_APPLY_TONEMAP | (cutoff > 0.0f ? FFX_UPSCALE_AUTOREACTIVEFLAGS_APPLY_THRESHOLD : 0u) |
+              FFX_UPSCALE_AUTOREACTIVEFLAGS_USE_COMPONENTS_MAX;
+    ffxContext c = reactiveContext_;
+    const ffxReturnCode_t rc = fn_->api.Dispatch(&c, &r.header);
+    for (Image* img : {&opaque, &color, &out}) img->setTrackedLayout(layoutOf(kRead));
+    if (rc != FFX_API_RETURN_OK) {
+        spdlog::error("fsr: reactive mask dispatch failed ({})", rc);
         return false;
     }
     return true;

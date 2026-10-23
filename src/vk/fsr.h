@@ -72,6 +72,11 @@ public:
 
     // recorded into `d.cmd`; the images' tracked layouts must be their stable ones (transitions are recorded here)
     bool dispatch(const FsrDispatch& d);
+    // FSR's automatic reactive mask (R8 / R16F storage image `out`, left readable): where `color` (opaque + translucent) differs
+    // from `opaque` (the opaque scene alone, same size) the temporal history is trusted less
+    // (own context, created on first use)
+    bool generateReactiveMask(VkCommandBuffer cmd, Image& opaque, Image& color, Image& out, VkExtent2D renderSize, float scale = 1.0f,
+                              float cutoff = 0.2f, float binaryValue = 0.9f);
 
     // the provider behind the context ("3.1.x" / "4.x"), empty without a context
     const std::string& providerName() const { return provider_; }
@@ -86,6 +91,12 @@ public:
 private:
     void* module_ = nullptr;  // HMODULE
     void* context_ = nullptr;  // ffxContext
+    // The DLL's Vulkan backend advances a ring of 4 dynamic resource view slots per ffxDispatch and destroys the views of the
+    // slot it enters: two dispatches per frame on one context (reactive mask + upscale) cycle it faster than our frames in flight
+    // finish (validation: vkDestroyImageView in use). The reactive mask runs on its own, tiny context (a dispatch per frame each).
+    void* reactiveContext_ = nullptr;
+    Context* ctx_ = nullptr;
+    FsrCreateInfo info_{};
     struct Functions;
     Functions* fn_ = nullptr;
     std::string provider_;

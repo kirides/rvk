@@ -52,9 +52,12 @@ public:
     void apply(UpscaleMode mode, unsigned flip = 0);
     UpscaleMode mode() const { return mode_; }
     void setSharpness(float s) { sharpness_ = s < 0.0f ? 0.0f : s > 1.0f ? 1.0f : s; }
+    void setReactive(bool on) { reactive_ = on; }
+    void setReactiveTuning(float cutoff, float scale) { reactiveCutoff_ = cutoff; reactiveScale_ = scale; }
 
 private:
     void record(d3d9::PassContext& ctx);
+    void recordOpaque(d3d9::PassContext& ctx);
     bool ensureFsr(VkExtent2D render, VkExtent2D display);
     void dropFsr();
 
@@ -62,6 +65,9 @@ private:
     UpscaleMode mode_ = UpscaleMode::Off;
     unsigned flip_ = 0;
     float sharpness_ = 0.4f;
+    bool reactive_ = true;
+    float reactiveCutoff_ = 0.08f, reactiveScale_ = 1.0f;
+    bool opaqueValid_ = false;  // this frame's BeforeAlpha snapshot (the scene without translucent effects) was taken
     std::atomic<int> phases_{8};  // the jitter sequence's length (the jitter source runs on the render thread; set from the sizes)
     bool failed_ = false;  // the DLL / the context / the pipeline is not available: FSR stays off this session
     vk::PassLayout layout_;  // set 1: one storage image (the R32F depth)

@@ -1342,6 +1342,40 @@ RendererSettings registerRendererSettings(Registry& reg) {
                          "Ultra performance (3x)", "Jitter only (test)"},
     });
 
+    r.upscaleReactive = &reg.add({
+        .key = "upscale.reactive",
+        .label = "Clean up effects",
+        .category = "Image",
+        .description = "Keeps particles, rain, spells and spray from leaving smeared trails behind them: FSR trusts its history "
+                       "less where such effects are drawn.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+    });
+    r.upscaleReactiveCutoff = &reg.add({
+        .key = "upscale.reactive_cutoff",
+        .label = "Effect detection threshold",
+        .category = "Image",
+        .description = "How different a pixel must look with and without the translucent effects before FSR treats it as an "
+                       "effect. Lower catches fainter effects (rain), 0 = every difference counts.",
+        .type = Type::Float,
+        .defaultValue = 0.08,
+        .min = 0,
+        .max = 1,
+        .format = "%.3f",
+        .flags = Flag::Advanced,
+    });
+    r.upscaleReactiveScale = &reg.add({
+        .key = "upscale.reactive_scale",
+        .label = "Effect clean-up strength",
+        .category = "Image",
+        .description = "Multiplies the effect mask: higher trusts the temporal history less where effects are drawn.",
+        .type = Type::Float,
+        .defaultValue = 1,
+        .min = 0,
+        .max = 4,
+        .format = "%.2f",
+        .flags = Flag::Advanced,
+    });
     r.upscaleSharpness = &reg.add({
         .key = "upscale.sharpness",
         .label = "Sharpening",
