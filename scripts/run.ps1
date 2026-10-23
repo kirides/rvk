@@ -35,8 +35,6 @@ param(
     # [debug] cpu_profile (Vulkan mode): a sampled flat profile of the engine thread between presents every 5 s (`diag: profile`
     # lines: per module, self and inclusive per function; docs/research/performance.md 8)
     [switch]$CpuProfile,
-    # [debug] generated_draws: VK_EXT_device_generated_commands for batched draws (opt-in; docs/research/performance.md 12)
-    [switch]$GeneratedDraws,
     # [debug] environment: 'NAME=VALUE' variables set by the proxy in DllMain (run.ps1's own environment does not reach the
     # game), e.g. -Environment 'VK_LOADER_LAYERS_DISABLE=~implicit~' or 'DISABLE_VULKAN_OBS_CAPTURE=1'
     [string[]]$Environment = @(),
@@ -137,7 +135,7 @@ if ($NoRenderer) {
         "perf = $($Perf.IsPresent.ToString().ToLower())", "perf_frame = $PerfFrame",
         "rt_selftest = $($RtSelfTest.IsPresent.ToString().ToLower())",
         "present_stalls = $([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.0##}', $PresentStalls))",
-        "cpu_profile = $($CpuProfile.IsPresent.ToString().ToLower())", "generated_draws = $($GeneratedDraws.IsPresent.ToString().ToLower())",
+        "cpu_profile = $($CpuProfile.IsPresent.ToString().ToLower())",
         "environment = [$(($Environment | ForEach-Object { '"' + ($_ -replace '"', '') + '"' }) -join ', ')]",
         "overlay_in_screenshots = $($OverlayInScreenshots.IsPresent.ToString().ToLower())",
         "commands = [$(($Commands | ForEach-Object { '"' + ($_ -replace '"', '') + '"' }) -join ', ')]",

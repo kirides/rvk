@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cstddef>
 #include <cstring>
 #include <filesystem>
 #include <format>
@@ -1024,77 +1023,10 @@ void Device::flushBatch() {
                          [&](std::uint32_t a, std::uint32_t b) { return rank[batch_[a].pipeline] < rank[batch_[b].pipeline]; });
     }
     VkCommandBuffer cmd = frames_.cmd();
-    // runs of draws with the same state: one device-generated execution each (the push constants and the draw per
-    // sequence); short runs (or no generated commands) are recorded draw by draw
-    constexpr std::uint32_t kMinRun = 4;
-    using Gd = vk::GeneratedDraws;
-    std::uint32_t k = 0;
-    while (k < n) {
-        const DrawPacket& head = batch_[batchOrder_[k]];
-        std::uint32_t end = k + 1;
-        if (generated_.available() && head.op == DrawPacket::Op::DrawIndexed) {
-            while (end < n && sameRunState(head, batch_[batchOrder_[end]])) ++end;
-        }
-        const std::uint32_t run = end - k;
-        bool done = false;
-        if (run >= kMinRun) {
-            vk::RingAlloc seq = frames_.allocate(static_cast<VkDeviceSize>(run) * Gd::kStride, 16);
-            if (seq.ptr != nullptr) {
-                auto* out = static_cast<std::uint8_t*>(seq.ptr);
-                for (std::uint32_t j = k; j < end; ++j, out += Gd::kStride) {
-                    const DrawPacket& p = batch_[batchOrder_[j]];
-                    std::memcpy(out, &p.push, Gd::kPushSize);
-                    const VkDrawIndexedIndirectCommand d{p.count, p.instances, p.first, p.vertexOffset, 0};
-                    std::memcpy(out + Gd::kPushSize, &d, sizeof(d));
-                }
-                // the run's state as its first draw would set it, then the generated draws
-                applyVertexInput(cmd, head.vi);
-                if (head.pipeline != boundPipeline_) {
-                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, head.pipeline);
-                    boundPipeline_ = head.pipeline;
-                    ++perf_.pipelineBinds;
-                }
-                applyDynamicState(cmd, head.dyn);
-                bindIndexBuffer(cmd, head.indexBuffer, head.indexOffset, head.index32);
-                done = generated_.execute(cmd, head.pipeline, seq.address, run);
-                if (done) {
-                    perf_.generatedDraws += run;
-                    ++perf_.generatedRuns;
-                }
-            }
-        }
-        if (!done) {
-            for (std::uint32_t j = k; j < end; ++j) applyPacket(cmd, batch_[batchOrder_[j]]);
-        }
-        k = end;
-    }
+    for (const std::uint32_t i : batchOrder_) applyPacket(cmd, batch_[i]);
     perf_.batchedDraws += n;
     ++perf_.batches;
     batch_.clear();
-}
-
-bool Device::sameRunState(const DrawPacket& a, const DrawPacket& b) {
-    if (b.op != DrawPacket::Op::DrawIndexed || a.pipeline != b.pipeline || a.indexBuffer != b.indexBuffer ||
-        a.indexOffset != b.indexOffset || a.index32 != b.index32) {
-        return false;
-    }
-    const VertexInputValues& x = a.vi;
-    const VertexInputValues& y = b.vi;
-    if (x.bufferCount != y.bufferCount || x.dynamicLayout != y.dynamicLayout || x.bindingCount != y.bindingCount ||
-        x.attributeCount != y.attributeCount || std::memcmp(x.buffers, y.buffers, sizeof(VkBuffer) * x.bufferCount) != 0 ||
-        std::memcmp(x.offsets, y.offsets, sizeof(VkDeviceSize) * x.bufferCount) != 0 ||
-        std::memcmp(x.bindings, y.bindings, sizeof(x.bindings[0]) * x.bindingCount) != 0 ||
-        std::memcmp(x.attributes, y.attributes, sizeof(x.attributes[0]) * x.attributeCount) != 0) {
-        return false;
-    }
-    // the dynamic state up to the blend arrays (written whole by computeDynamicState), then their used entries
-    const DynamicStateValues& s = a.dyn;
-    const DynamicStateValues& t = b.dyn;
-    if (std::memcmp(&s, &t, offsetof(DynamicStateValues, blendEnable)) != 0) return false;
-    const std::uint32_t c = s.colorCount;
-    return std::memcmp(s.blendEnable, t.blendEnable, sizeof(VkBool32) * c) == 0 &&
-           std::memcmp(s.blendEquation, t.blendEquation, sizeof(VkColorBlendEquationEXT) * c) == 0 &&
-           std::memcmp(s.writeMask, t.writeMask, sizeof(VkColorComponentFlags) * c) == 0;
 }
 
 // the upload ring could not take a user-pointer draw's data (a ring chunk could not be created): the draw is dropped

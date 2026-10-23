@@ -63,9 +63,6 @@ struct Config {
     // [debug] cpu_profile: a sampled flat profile of the engine thread between presents every 5 s (diag::frameSampler,
     // docs/research/performance.md 8); Vulkan mode
     bool cpuProfile = false;
-    // [debug] generated_draws: enable VK_EXT_device_generated_commands (+ maintenance5) and record runs of batched draws with
-    // it (docs/research/performance.md 12). Off: no gain measured, and with the extensions on the overlay is not drawn on AMD
-    bool generatedDraws = false;
     // (any mode) "NAME=VALUE" environment variables set in DllMain, before anything loads Vulkan or D3D (environment
     // variables of run.ps1 do not reach the game), e.g. "VK_LOADER_LAYERS_DISABLE=~implicit~"; "NAME=" removes one
     std::vector<std::string> environment;

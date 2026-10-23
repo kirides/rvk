@@ -37,7 +37,6 @@
 #include "vk/context.h"
 #include "vk/formats.h"
 #include "vk/frames.h"
-#include "vk/generated_draws.h"
 #include "vk/gputimer.h"
 #include "vk/image.h"
 #include "vk/mesh_arena.h"
@@ -401,7 +400,6 @@ struct DeviceOptions {
     bool pipelineLibraries = false;  // [vulkan] pipeline_libraries (off: AMD driver crash, vk/pipeline_library.cpp)
     std::uint32_t perfFrame = 0;     // [debug] perf_frame: log the GPU time of every pass of this frame
     bool allowRayTracing = true;     // rt.allow: enable the ray tracing tier when the GPU has it (vk::ContextOptions)
-    bool generatedDraws = false;     // [debug] generated_draws: batch runs as device-generated commands (opt-in, restart)
 };
 
 struct Viewport {
@@ -455,8 +453,6 @@ struct PerfStats {
     std::uint64_t pipelineBinds = 0;
     std::uint64_t batchedDraws = 0;        // draws recorded through a batch (flushBatch)
     std::uint64_t batches = 0;             // batches recorded
-    std::uint64_t generatedDraws = 0;      // of the batched draws, recorded as device-generated commands
-    std::uint64_t generatedRuns = 0;       // their executions
     std::uint64_t ringBytes = 0;           // transient ring memory handed out (constants, dynamic buffers, staging)
     std::uint64_t textureUploadBytes = 0;  // texel bytes copied to images
     std::uint64_t bufferUploadBytes = 0;   // bytes copied into dynamic-buffer ring copies / static buffers
@@ -1012,9 +1008,6 @@ private:
     std::vector<DrawPacket> batch_;
     std::vector<std::uint32_t> batchOrder_;
     bool batching_ = true;  // debug.batch_draws
-    vk::GeneratedDraws generated_;  // runs of a batch as device-generated commands ([debug] generated_draws, optional)
-    // the state of two draws is the same: one run of generated draws (pipeline, vertex input, dynamic state, index buffer)
-    static bool sameRunState(const DrawPacket& a, const DrawPacket& b);
     // bindless sampler index per slot (UINT32_MAX = look it up again after a SetSamplerState)
     std::array<std::uint32_t, kSamplerCount> samplerSlotCache_{};
     std::uint32_t instanceCount_ = 1;

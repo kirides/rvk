@@ -23,9 +23,6 @@ struct ContextOptions {
     bool allowRayTracing = true;
     // VK_KHR_pipeline_executable_properties when the driver has it (shader statistics: rvk_vktest --shader-stats)
     bool pipelineStatistics = false;
-    // VK_EXT_device_generated_commands + VK_KHR_maintenance5 when the driver has them ([debug] generated_draws). Opt-in:
-    // with them enabled the ImGui overlay drawn into the swapchain image does not show on AMD 26.10.1 (performance.md 12)
-    bool deviceGeneratedCommands = false;
 };
 
 // The optional ray tracing tier of the device (docs/research/raytracing.md 1).
@@ -54,11 +51,6 @@ struct DeviceFeatures {
     float timestampPeriod = 0.0f; // ns per timestamp tick; 0 = the queue cannot write timestamps
     bool pipelineStatistics = false;  // VK_KHR_pipeline_executable_properties enabled (ContextOptions::pipelineStatistics)
     bool fullScreenExclusive = false; // VK_EXT_full_screen_exclusive (+ instance VK_KHR_get_surface_capabilities2) enabled
-    // VK_EXT_device_generated_commands (+ VK_KHR_maintenance5) enabled, with push constants in vertex + fragment stages: the
-    // batched draws (d3d9 Device::flushBatch, docs/research/performance.md 12)
-    bool deviceGeneratedCommands = false;
-    std::uint32_t dgcMaxSequences = 0;
-    std::uint32_t dgcMaxStride = 0;
     RayTracingFeatures rayTracing;
 };
 
@@ -109,7 +101,6 @@ private:
     bool pickPhysicalDevice(const ContextOptions& options);
     bool createDevice(bool withRayTracing);
     bool wantPipelineStatistics_ = false;
-    bool wantDeviceGeneratedCommands_ = false;
     bool createAllocator();
 
     VkInstance instance_ = VK_NULL_HANDLE;

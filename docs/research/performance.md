@@ -267,10 +267,13 @@ first (a draw that is not batchable, `endRendering`, `clear`), so the order betw
 first appeared). Only surfaces at exactly the same depth can show a different winner. `debug.batch_draws` (Debug tab, default
 on) switches it off.
 
-Runs of draws with identical state (pipeline, vertex input, dynamic state, index binding; >= 4 draws) can be recorded as one
-`vkCmdExecuteGeneratedCommandsEXT` (`vk::GeneratedDraws`: tokens push constants 48 B + indexed draw, 68-byte sequences written
-into the ring; per-slot preprocess buffers; no execution set: the device has no pipeline switching in generated commands).
-`[debug] generated_draws = true` (config.toml, restart; **off by default**): it validates clean, but measured without a gain on this driver, and with `VK_EXT_device_generated_commands` + `VK_KHR_maintenance5` enabled on the device the ImGui overlay drawn into the swapchain image does not show (AMD 26.10.1; found with `scripts/capture-window.ps1`): the extensions are only enabled with that opt-in. Bisect: `maintenance5` alone is fine; enabling the `deviceGeneratedCommands` feature breaks it even without our indirect-commands layout and without any generated draw; validation is clean. GD3D11 enables the same pair with a working ImGui overlay, but creates a Vulkan 1.4 device and vendors another ImGui backend version: open (a RenderDoc capture of the overlay draw would tell).
+Tried and **removed** (commit after c60541f): runs of identical-state draws as `VK_EXT_device_generated_commands` executions
+(push-constant + indexed-draw tokens, 68-byte sequences in the ring, per-slot preprocess buffers; the device has no pipeline
+switching inside generated commands). It validated clean but measured no gain (table below), and merely enabling the
+`deviceGeneratedCommands` feature (with `VK_KHR_maintenance5`) hid the ImGui overlay drawn into the swapchain image on AMD
+26.10.1 (bisected with `scripts/capture-window.ps1`: `maintenance5` alone was fine, the DGC feature broke it even without any
+indirect-commands layout or generated draw; validation clean). GD3D11 enables the same pair with a working overlay but
+creates a Vulkan 1.4 device and vendors another ImGui backend: the difference was not investigated.
 
 A/B at the savegame (2x, one 60 s hold, switches flipped at run time; `perf:` lines):
 
