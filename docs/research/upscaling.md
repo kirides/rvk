@@ -2,7 +2,8 @@
 
 Build and measurements of 2026-10-23 (RX 7900 XTX). Legend: [C] confirmed (measured), [I] inferred.
 Built: **native AA** (FSR 3.1 at render size = display size) and **render scale / quality modes** (section 7) through AMD's
-signed FFX API DLL. Open: masks, FSR 4, uncapped GPU cost (section 9).
+signed FFX API DLL, with an **automatic reactive mask** for translucent effects (section 8). Open: explicit / water masks,
+FSR 4, uncapped GPU cost (section 10).
 
 ## 1. Code
 
@@ -14,7 +15,7 @@ signed FFX API DLL. Open: masks, FSR 4, uncapped GPU cost (section 9).
 | `rvk_vktest --fsr` | self-test: load, versions, context, 12 jittered dispatches on a constant image (output within 0.0005), compares our jitter sequence with the DLL's; SKIP without the DLL |
 
 Settings: `upscale.mode off|native_aa|quality|balanced|performance|ultra_performance|jitter_only` (Image category), `upscale.sharpness` 0..1 (default 0.4, main page, not
-Advanced), debug `upscale.jitter_flip none|x|y|xy`.
+Advanced), `upscale.reactive` (default on) + advanced `upscale.reactive_cutoff` (0.08) / `upscale.reactive_scale` (1) (section 8), debug `upscale.jitter_flip none|x|y|xy`.
 
 ## 2. DLL findings [C]
 
@@ -52,7 +53,7 @@ image's slot until the frame ends (`d3d9/draw.cpp`), section 7.
 * Reset on the first frame, on skipped frames (no G-buffer: loading) and without a previous camera.
 * The context is recreated (the old one retired with the frame) when the scene size changes.
 * Validation (`-Validation -SyncValidation`, testdemo): no errors, only the DLL's `rw_luma_history` warning. rvk.log
-  `enh: upscale: N frames upscaled (S skipped)` every 5 s.
+  `enh: upscale: N frames upscaled (S skipped)` every 5 s. The reactive mask (section 8) is generated just before this dispatch.
 
 ## 5. Texture LOD bias
 
@@ -118,22 +119,72 @@ effects (bloom / DoF intermediates) run at render size. Unchecked: the SCREENSIZ
 (per .fx), `Camera::Update(void)` frustum code reading the scaled rect during the scene pass, `WorldToScreen` users during the
 scene pass.
 
-## 8. Cost
+## 8. Reactive mask (translucent effects)
+
+Particles, rain and spell effects have no motion vectors of their own and ghost / smear in the temporal accumulation. FSR's
+auto-generated reactive mask compares the scene without and with the translucent effects.
+
+**Injection point.** `Point::BeforeAlpha` (`d3d9/inject.h`, injection.md 4.1) fires once per main view from
+`Device::prepareDraw` at the first draw of the Main view's Alpha or AlphaLate pass [C]: the scene HDR target then holds the
+opaque + refracted scene (sky, solid, decals, water) and no translucent effect. The pass `upscale.opaque` (`enh/upscale`)
+copies it into a transient (render size, RGBA16F). At AfterMainView FSR's `ffxDispatchDescUpscaleGenerateReactiveMask` (flags
+TONEMAP | THRESHOLD | COMPONENTS_MAX, scale, cutoff threshold, `binaryValue` 0.9) compares it with the final scene HDR and
+writes the mask; the upscale dispatch gets it as `reactive`. The mask is an **R32F** transient (`upscale.reactive`): the format
+the shader's `rw_output_autoreactive` declares (R8 gave a validation format-mismatch warning, undefined stores) [C]. Cutoff 0 =
+no THRESHOLD flag (the scaled difference is the mask).
+
+**Second context [C].** The DLL's VK backend (SDK `ffx_vk.cpp` `UnregisterResourcesVK` / `destroyDynamicViews`,
+`FFX_MAX_QUEUED_FRAMES` = 4) advances the context's dynamic resource view ring by one slot per `ffxDispatch` and destroys the
+views of the slot it enters. Two dispatches per frame (mask + upscale) on ONE context cycled the ring twice as fast as the
+frames in flight finish: validation error `VUID-vkDestroyImageView-imageView-01026` (10x, views in use by FSR's command
+buffers). Fix: the mask runs on its own second FFX context (32x32: the mask dispatch reads its size from the dispatch
+description, only its pipeline is used); rvk.log `fsr: reactive mask context (32x32 ...)`. Afterwards testdemo with
+`-Validation -SyncValidation` at quality and performance: 0 errors, 0 SYNC, only the known `rw_luma_history` warning.
+
+**Settings.** `upscale.reactive` (default on), advanced `upscale.reactive_cutoff` (default 0.08), `upscale.reactive_scale`
+(default 1).
+
+**Tuning sweep [C]** (beach_rain = rain, harbour_night = torch fire; quality, 1 / 1.5, 4 burst frames; hf = mean |laplacian| of
+the luma; "vs engine" = mean abs difference to the upscale-off image; engine hf 1.69 / 3.88):
+
+| setting | beach_rain hf (vs engine) | harbour_night hf (vs engine) |
+|---|---|---|
+| mask off | 0.94 (1.13) | 1.71 (1.60) |
+| cutoff 0.2 | 0.97 (1.27) | 1.73 (1.62) |
+| cutoff 0.08 | 0.97 (1.11) | 1.76 (1.57) |
+| cutoff 0.03 | 0.99 (1.46) | 1.72 (1.59), frame-to-frame 0.10 |
+| cutoff 0 | 0.97 (1.24) | 1.71 (1.60) |
+| cutoff 0.03, scale 2 | 1.01 (1.16), most visible rain, f2f 0.08 | 1.76 (1.81), f2f 0.18 = flicker, less AA |
+
+Chosen default cutoff 0.08 / scale 1: stable frame to frame (0.06), smallest difference to the engine picture at the torch
+spot. The rain's thin 1 px streaks are inherently fainter at 1 / 1.5 resolution; the mask recovers only part of them (crops
+`out\water\20261023-204730` vs `-203931`; sweep dirs `-205226`, `-205402`, `-205545`, `-205717`).
+
+**Not tested:** actual spell effects (no scenario / spot has one: needs a pose with a cast spell); a debug visualisation of the
+mask. **Not in the mask:** the sea is in the Refracted pass, before the BeforeAlpha snapshot: it is not reactive and
+accumulates with background motion (a transparency and composition mask would be needed).
+
+## 9. Cost
 
 Native AA / render scale, jungle hold [C, noisy]: the Radeon Chill profile caps the world at ~80 fps (p50 12.4 ms in every
 mode), so fps says nothing. GPU ms / frame: off 3.4-7.8, native AA 5.5, quality 4.1-5.9, performance 3.4-4.1. CPU recording of
 the injected FSR pass 0.36-0.46 ms. A clean GPU cost needs `-Exe RisenTest.exe` (uncapped) with `-PerfFrame` (`pass
 upscale.fsr`): not done.
 
-## 9. Open
+Uncapped attempt (`RisenTest.exe`, 2560x1440) [C, contaminated]: `AION2.exe` used ~70 % of the GPU, so totals are void. In fast
+phases the FSR pass (`pass upscale.fsr`, `-PerfFrame 5000`) took 0.63 ms native AA / 0.42 quality / 0.33 performance; CPU
+recording of the injected passes ~0.3 ms. A clean total frame cost needs the GPU to itself (to repeat).
 
-* Render scale: reactive / transparency masks (below), the uncapped GPU cost (section 8), refcompare thresholds for scaled
-  renders (recalibrate).
-* Reactive / transparency masks (water, particles and the alpha pass have background motion).
+## 10. Open
+
+* Render scale: the uncapped GPU cost (section 9), refcompare thresholds for scaled renders (recalibrate).
+* Reactive masks: the automatic form is built (section 8). Open: explicit per-draw reactive output (particle / precipitation
+  draws writing a reactive value: the more precise alternative), a transparency and composition mask for water (the sea is
+  not reactive), a debug view of the mask, a test with real spell effects.
 * Motion of moving non-skinned objects is camera-only.
 * Exposure input (auto now).
 * FSR 4: untested until an RDNA4 card (no provider on RDNA3, section 2).
 * The engine's DoF / post at render size (section 7).
 * Jitter in shadow-mask / SSR lookups: sub-pixel mismatch (accepted).
-* GPU cost (section 8); loading / menu transitions rely on the reset.
+* GPU cost (section 9); loading / menu transitions rely on the reset.
 * Refcompare with upscale off must stay identical to before (not run yet).

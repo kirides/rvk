@@ -127,6 +127,7 @@ attachments change the pipeline keys and the draw path), the per-geometry previo
 | `AfterDepthPrepass` | `EndZPass` in the main view | the linear depth map (R32F, view depth / engine far) complete |
 | `AfterOpaque` | `CopyCurrentRTToImage` in Main/Solid (before the copy), else `DoBeginRenderAlpha` in Main | scene HDR = sky + solid + decals; water / alpha not yet; once per main view |
 | `AfterRefractionCopy` | right after that copy | the refraction copy holds the opaque scene (incl. what `AfterOpaque` passes drew) |
+| `BeforeAlpha` | `Device::prepareDraw` at the first draw of the Main view's Alpha or AlphaLate pass (refracted ops draw before the alpha list) | scene HDR = sky + solid + decals + refracted (water), no translucent effect (particles are in Alpha, precipitation in AlphaLate); once per main view; used by `upscale.opaque` (upscaling.md 8) |
 | `AfterMainView` | the main view's `eCFrustumDatabase::Execute` returns | scene HDR complete; the post chain (eye adaptation, tonemap, DoF) not yet |
 | `BeforeGui` | `eCApplication::Draw` entry | the back buffer holds the post-processed frame; no GUI yet |
 
