@@ -3,7 +3,7 @@
 Build and measurements of 2026-10-23 (RX 7900 XTX). Legend: [C] confirmed (measured), [I] inferred.
 Built: **native AA** (FSR 3.1 at render size = display size) and **render scale / quality modes** (section 7) through AMD's
 signed FFX API DLL, with an **automatic reactive mask** for translucent effects (section 8). Open: explicit / water masks,
-FSR 4, uncapped GPU cost (section 11). Per-object motion for characters / moving rigid draws: section 9. Jitter-aware depth
+FSR 4 (section 13), thin alpha-tested geometry such as nets (section 12), uncapped GPU cost (section 11). Per-object motion for characters / moving rigid draws: section 9. Jitter-aware depth
 reconstruction (positions rebuilt from the jittered depth): section 10.
 
 ## 1. Code
@@ -292,8 +292,89 @@ Uncapped attempt (`RisenTest.exe`, 2560x1440) [C, contaminated]: `AION2.exe` use
 phases the FSR pass (`pass upscale.fsr`, `-PerfFrame 5000`) took 0.63 ms native AA / 0.42 quality / 0.33 performance; CPU
 recording of the injected passes ~0.3 ms. A clean total frame cost needs the GPU to itself (to repeat).
 
-## 12. Open
+## 12. Thin alpha-tested geometry (fishing nets) [C, 2026-10-23]
 
+User complaint: fishing nets (and opaque leaves) look horrible / "too sharp" under FSR. The net's material in RenderDoc: texture
+`t2D` BC1_UNORM 512x512; the PS is a translated engine material with a render-state alpha test (`rvk_alphaTest(oC0.w)`,
+alpha = texture alpha x vertex alpha, `demote`).
+
+**Test scene:** the user's savegame `C:\Users\johnh\AppData\Local\Risen\SaveGames\Risen_Save_0008.save` (read-only copy loaded
+in the test copy with `run.ps1 -QuickSave` + scenario `rvk_perfsave`): hero at (-13098, 1041, -19673) near Harbour Town, camera
+held 268 units behind and above. Explicit `rvkcompare` spots `net8_n` / `net8_e` / `net8_s` / `net8_w` (player at that position,
+camera at eye height looking N / E / S / W): `net8_s` = a large fishing net against the sky (the problem case), `net8_w` a net
+at the left edge, `net8_e` foliage.
+
+**Measurements** (frozen scenes, net region (980,110)-(1590,330) of the 1600x900 capture of `net8_s`, 8 burst frames, engine
+laplacian variance 21163; dirs `out\water\20261023-232515` .. `233320`, engine `20261023-232112`):
+
+| mode | sharpness vs engine | temporal std | p99 | pixels > 3 |
+|---|---|---|---|---|
+| native AA | 0.447 | 0.48 | 2.0 | 0.15 % |
+| Quality | 0.11 | 4.57 | 31 | 40 % |
+| Ultra Performance | 0.04 | 4.9-5.4 | 27 | ~50 % |
+
+Native AA is clean and close to the engine's own weave. At Quality and below the net is **unstable noise, not over-sharpened**:
+the strands are thinner than a render pixel, so there is nothing stable for the history to accumulate.
+
+**Not effective** (all measured, no difference beyond noise; the features were reverted, not kept: `cutout_lod` and the four
+tuning settings):
+
+* The share of the texture LOD bias for alpha-tested / blended draws (scale 1.0 / 0.3 / 0.0). The pub net (512x512 magnified
+  there: bias is irrelevant) and the jungle leaves gave identical sharpness and temporal std to 3 digits.
+* RCAS sharpness 0.4 vs 0.
+* The reactive mask on / off / cutoff 0.3 (the user also tested "Clean up effects" off in game: no difference).
+* FSR 3.1's tuning keys via `ffxConfigure` (`ffxConfigureDescUpscaleKeyValue`, key + pointer to a float: `fVelocityFactor`,
+  `fShadingChangeScale`, `fAccumulationAddedPerFrame`, `fMinDisocclusionAccumulation`): net temporal std 4.6-5.5 vs 5.14
+  baseline over 8 variants (best: accumulation 0.1 = 4.6, softer); foliage 0.35-0.44 vs 0.41.
+
+Conclusion: thin sub-pixel alpha-tested geometry is a known hard case for any temporal upscaler at Quality and below; native AA
+(render scale 1) is clean. **Ideas not tried:** a stochastic (hashed) alpha test while the jitter is active (consistent noise in
+the depth prepass and the colour pass, via a FrameBlock parameter + frame index); an alpha-to-coverage-like soft alpha for
+cut-out textures; drawing alpha-tested thin meshes with a transparency and composition mask (FSR's second mask). A "native AA
+for nets" is not possible (one render target size).
+
+## 13. Driver-side FSR 4 provider (`amdvkffx64.dll`) [C, 2026-10-23]
+
+AMD's driver package (here `C:\Windows\System32\DriverStore\FileRepository\u0205306.inf_amd64_ed4bdb51fc506ec7\B026676`, driver
+26.10.1) ships `amdvkffx64.dll` ("VK AMD Driver Based FidelityFX Library" 2.4.0.4370, 72 MB, signed by Microsoft WHCP),
+`amdxcffx64.dll` (DX12, 85 MB), `amdxc64.dll` etc. `amdvkffx64.dll` exports `UpdateFfxApiProvider` and
+`UpdateFfxApiProviderEx`; it loads fine via `LoadLibrary` on the RX 7900 XTX (RDNA3).
+
+**How the FFX API gets driver providers** (vendored source `third_party/amd_fidelityfx/ffx-api/src/ffx_provider.cpp`,
+`ffx_provider_external.h`): `GetModuleHandleA("amdxc64.dll")` + `AmdExtD3DCreateInterface(ID3D12Device, IAmdExtFfxApi)` ->
+`UpdateFfxApiProvider(ExternalProviderData{structVersion, descType, ffxProviderInterface})`. The signed 1.1.4
+`amd_fidelityfx_vk.dll` contains the same code (strings `amdxc64.dll`, `AmdExtD3DCreateInterface`, `ffxProviderExternal`) and
+**no Vulkan-specific route**: in a Vulkan process the driver's provider is never offered (our `ffxQuery` GET_VERSIONS lists only
+3.1.4 and 2.3.3).
+
+**The newer interface** (documented by OptiScaler commit b686ef4): `UpdateFfxApiProviderEx(void* data, uint32 size,
+ProviderOption* options)`, struct version 3. `ExternalProviderData` is 0x60 bytes: `u32 structVersion`, `u64 descType`,
+`ProviderInterface` (0x40 bytes: `versionId`, `versionName`, `canProvide`, `createContext`, `destroyContext`, `configure`,
+`query`, `dispatch`), `bool (*isSupported)(const void* backend{VkDevice, VkPhysicalDevice, vkGetDeviceProcAddr})` at 0x50,
+reserved. `ProviderOption` is 0x18 bytes `{u32 type (unused), u32 effect (0 upscale, 1 frame generation, 5 FG swapchain), bool
+enable, next}`. Vulkan backend desc type `FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK_V2` 0x01000003. Versions:
+`FFX_UPSCALER_VERSION_V2` = (4<<22)|(1<<12)|2 (4.1.2; the driver accepts 4.0.0-4.1.2), frame generation (4<<22)|2, FG
+swapchain 4<<22 (>= 3.1.5). The driver's FSR 4 shaders read / write 16-bit float images (OptiScaler rewrites the SPIR-V to
+32-bit via `NormalizeHalfImageIO` and swaps `vkGetDeviceProcAddr` for `vkCreateShaderModule`). OptiScaler also spoofs module
+names (`GetModuleHandle` for `amd_fidelityfx_*.dll`), signature checks (Crypt32) and the AMD GPU identity (gdi32 D3DKMT adapter
+info: family / revision at indices 12 / 13 of the 608-byte AMD private data; INT8 Lite = 150 / 1 gfx11.5, INT8 RDNA2 = 143 / 40)
+to make older GPUs run INT8 models.
+
+**Our probe:** `rvk_vktest --ffx-driver <path>` (committed) calls `UpdateFfxApiProviderEx` / `UpdateFfxApiProvider` from the
+test executable with struct versions 1-4, sizes 0x40-0x70, with / without the option chain: 84 combinations, all `E_INVALIDARG`
+(0x80070057). The driver library gates its caller (it expects AMD's signed FFX DLL; OptiScaler hooks to impersonate it). We do
+**not** impersonate the signed module or hook signature checks.
+
+**Plan [I, from the user]:** recent drivers support FSR 4.1 on RDNA2 / 3 natively (no spoofing needed). AMD's release page: FSR
+SDK v2.3.0 (24 Jun), Upscaling 4.1.1 "adds RX 7000 discrete GPU support"; v2.x splits effects into a loader DLL + per-effect
+DLLs. The v2.3.0 prebuilt does not contain Vulkan DLLs yet; v2.4.0 is expected to ship prebuilt Vulkan DLLs. The plan is to
+adopt v2.4.0's signed Vulkan loader + upscaler DLLs (new headers, loader flow, version query / override) and keep the 1.1.4
+DLL as the fallback; until then FSR 3.1.4 only. Status: waiting for SDK 2.4.0.
+
+## 14. Open
+
+* Thin alpha-tested geometry (nets, opaque leaves) is unstable at Quality and below (section 12): ideas not tried are hashed
+  alpha while jittered, soft alpha, FSR's transparency and composition mask.
 * Render scale: the uncapped GPU cost (section 11), refcompare thresholds for scaled renders (recalibrate).
 * Reactive masks: the automatic form is built (section 8). Open: explicit per-draw reactive output (particle / precipitation
   draws writing a reactive value: the more precise alternative), a transparency and composition mask for water (the sea is
@@ -310,7 +391,8 @@ recording of the injected passes ~0.3 ms. A clean total frame cost needs the GPU
   (acceleration structures, ray query): treat captures with `rt.allow=true` as unsupported; for RenderDoc use `rt.allow=false`
   (restart setting, floor only).
 * Exposure input (auto now).
-* FSR 4: untested until an RDNA4 card (no provider on RDNA3, section 2).
+* FSR 4: untested until an RDNA4 card (no provider on RDNA3, section 2); the driver's provider is not reachable from a Vulkan
+  process with the 1.1.4 DLL (section 13), waiting for FSR SDK 2.4.0's signed Vulkan DLLs.
 * The engine's DoF / post at render size (section 7).
 * Jitter: depth reconstruction is corrected (section 10), except the engine's own `post_SSM.fx` cascade shadow draws
   (`shadows.enabled` off: needs the quad's input positions shifted by `-J` or jittered engine camera matrices); forward

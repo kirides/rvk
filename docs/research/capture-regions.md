@@ -46,7 +46,7 @@ Validation (`-Validation -SyncValidation`, rvkcompare jungle; run-time commands 
 
 **Not tested in a real capture tool** (RenderDoc itself was not run by us). RenderDoc supports the ray tracing extensions only
 partly (acceleration structures, ray query): captures with `rt.allow=true` are unsupported, use `-Setting 'rt.allow=false'`
-(restart setting, floor only); a crash seen under RenderDoc with ray traced lighting is noted in upscaling.md 12.
+(restart setting, floor only); a crash seen under RenderDoc with ray traced lighting is noted in upscaling.md 14.
 
 ## 5. Open
 
