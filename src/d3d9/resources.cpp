@@ -381,23 +381,18 @@ Buffer::Buffer(Device& device, std::uint32_t size, std::uint32_t usage, std::uin
 
 Buffer::~Buffer() {
     if (!dev_.untrackLive(this)) return;  // orphaned by Device::destroy
-    if (static_ != VK_NULL_HANDLE) {
-        auto* ctx = &dev_.ctx();
-        VkBuffer b = static_;
-        VmaAllocation a = staticAlloc_;
-        dev_.frames().retire([ctx, b, a] { vmaDestroyBuffer(ctx->allocator(), b, a); });
+    if (static_.valid()) {
+        auto* arena = &dev_.meshArena();
+        dev_.frames().retire([arena, a = static_] { arena->free(a); });
     }
 }
 
 void Buffer::orphan() {
     cleanStatic_.store(false, std::memory_order_release);
-    if (static_ != VK_NULL_HANDLE) {
-        auto* ctx = &dev_.ctx();
-        VkBuffer b = static_;
-        VmaAllocation a = staticAlloc_;
-        dev_.frames().retire([ctx, b, a] { vmaDestroyBuffer(ctx->allocator(), b, a); });
-        static_ = VK_NULL_HANDLE;
-        staticAlloc_ = VK_NULL_HANDLE;
+    if (static_.valid()) {
+        auto* arena = &dev_.meshArena();
+        dev_.frames().retire([arena, a = static_] { arena->free(a); });
+        static_ = {};
     }
     orphaned_ = true;
 }
@@ -421,12 +416,12 @@ bool Buffer::readCpu(std::uint32_t offset, std::uint32_t size, void* out) {
     return true;
 }
 
-Buffer::Binding Buffer::gpu() {
+Buffer::Binding Buffer::gpu(std::uint32_t strideHint) {
     if (cleanStatic_.load(std::memory_order_acquire)) return binding_;
     const std::lock_guard lock(mutex_);
     const std::uint64_t frame = dev_.frameValue();
     const bool ring = dynamic() || pool_ == POOL_SYSTEMMEM;
-    const BufferCopyState::Plan plan = copies_.plan(ring, frame, size_, static_ != VK_NULL_HANDLE);
+    const BufferCopyState::Plan plan = copies_.plan(ring, frame, size_, static_.valid());
     using Op = BufferCopyState::Plan::Op;
     if (ring) {
         // ring copy per frame (identity.h: BufferCopyState::plan)
@@ -449,61 +444,43 @@ Buffer::Binding Buffer::gpu() {
         return binding_;
     }
     if (plan.op == Op::NewCopy) {
-        // static buffer: a fresh GPU buffer per update, so draws recorded earlier keep the old contents
-        VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-        bci.size = std::max<std::uint32_t>(size_, 4);
-        bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | (index_ ? VK_BUFFER_USAGE_INDEX_BUFFER_BIT : VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-        if (dev_.ctx().features().rayTracing.enabled) {
-            // ray tracing tier on (rt.allow, docs/research/raytracing.md 2): allocated once as a possible BLAS build input
-            // (positions / indices) that shaders can also read through its address; nothing changes without the tier
-            bci.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
-        }
-        VmaAllocationCreateInfo aci{};
-        aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
-        VkBuffer nb = VK_NULL_HANDLE;
-        VmaAllocation na = VK_NULL_HANDLE;
-        if (vmaCreateBuffer(dev_.ctx().allocator(), &bci, &aci, &nb, &na, nullptr) != VK_SUCCESS) {
+        // static buffer: a fresh copy per update in the mesh arena (vk/mesh_arena.h), so draws recorded earlier keep the old
+        // contents; it starts at a multiple of the first use's stride / index size (draws fold the offset into the draw).
+        // With the ray tracing tier the arena is also a BLAS build input that shaders read through its address
+        // (docs/research/raytracing.md 2)
+        const vk::MeshArena::Alloc na = dev_.meshArena().allocate(size_, strideHint != 0 ? strideHint : (index32_ ? 4u : 2u));
+        if (!na.valid()) {
             return {};
         }
         vk::RingAlloc staging = dev_.frames().allocate(size_, 16);
         if (staging.ptr == nullptr) {
-            vmaDestroyBuffer(dev_.ctx().allocator(), nb, na);
+            dev_.meshArena().free(na);
             return {};
         }
         std::memcpy(staging.ptr, cpu_.data(), size_);
         dev_.countUpload(false, size_);
         VkCommandBuffer cmd = dev_.uploadCommands();
-        const VkBufferCopy copy{staging.offset, 0, size_};
-        vkCmdCopyBuffer(cmd, staging.buffer, nb, 1, &copy);
-        const bool renamed = static_ != VK_NULL_HANDLE;
+        const VkBufferCopy copy{staging.offset, na.offset, size_};
+        vkCmdCopyBuffer(cmd, staging.buffer, na.buffer, 1, &copy);
+        const bool renamed = static_.valid();
         if (renamed) {
-            auto* ctx = &dev_.ctx();
-            VkBuffer ob = static_;
-            VmaAllocation oa = staticAlloc_;
-            dev_.frames().retire([ctx, ob, oa] { vmaDestroyBuffer(ctx->allocator(), ob, oa); });
+            auto* arena = &dev_.meshArena();
+            dev_.frames().retire([arena, a = static_] { arena->free(a); });
         }
-        static_ = nb;
-        staticAlloc_ = na;
-        staticAddress_ = 0;
-        binding_ = {nb, 0};
+        static_ = na;
+        binding_ = {na.buffer, na.offset};
         copies_.committed(plan, false, frame);
         // observers (enh/rt_scene) forget what they built from the old copy (its address dies with it)
         if (renamed) dev_.notifyBufferChanged(id_);
     }
-    if (static_ != VK_NULL_HANDLE && !copies_.dirty()) cleanStatic_.store(true, std::memory_order_release);
+    if (static_.valid() && !copies_.dirty()) cleanStatic_.store(true, std::memory_order_release);
     return binding_;
 }
 
 VkDeviceAddress Buffer::deviceAddress() {
     const std::lock_guard lock(mutex_);
-    if (static_ == VK_NULL_HANDLE || dynamic() || pool_ == POOL_SYSTEMMEM || !dev_.ctx().features().rayTracing.enabled) return 0;
-    if (staticAddress_ == 0) {
-        VkBufferDeviceAddressInfo ai{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
-        ai.buffer = static_;
-        staticAddress_ = vkGetBufferDeviceAddress(dev_.ctx().device(), &ai);
-    }
-    return staticAddress_;
+    if (!static_.valid() || dynamic() || pool_ == POOL_SYSTEMMEM || !dev_.ctx().features().rayTracing.enabled) return 0;
+    return static_.address;
 }
 
 // ---- VertexDecl ------------------------------------------------------------------------------------------------------

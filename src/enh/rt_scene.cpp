@@ -435,8 +435,9 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         return skip();
     }
     // the buffers' current GPU copies (the draw binds them right after): a new generation drops what was built from the old
-    vb->gpu();
-    ib->gpu();
+    // (the stride / index size hints as the draw's own binding gives them: the first use places the copy in the mesh arena)
+    vb->gpu(q.vertexStride);
+    ib->gpu(ib->index32() ? 4 : 2);
     const VkDeviceAddress vbAddress = vb->deviceAddress(), ibAddress = ib->deviceAddress();
     if (vbAddress == 0 || ibAddress == 0) return skip();
     const d3d9::ResourceRef vr = vb->ref(), ir = ib->ref();

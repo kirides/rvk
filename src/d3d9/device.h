@@ -39,6 +39,7 @@
 #include "vk/frames.h"
 #include "vk/gputimer.h"
 #include "vk/image.h"
+#include "vk/mesh_arena.h"
 #include "vk/pacer.h"
 #include "vk/passes.h"
 #include "vk/pipeline.h"
@@ -200,7 +201,9 @@ public:
         VkBuffer buffer = VK_NULL_HANDLE;
         VkDeviceSize offset = 0;
     };
-    Binding gpu();
+    // strideHint: the first use's vertex stride / index size: a new static copy starts at a multiple of it in the mesh arena,
+    // so a draw can bind the arena at offset 0 and pass the offset as vertexOffset / firstIndex (0 = no hint)
+    Binding gpu(std::uint32_t strideHint = 0);
     // render thread, after gpu(): the device address of the static GPU copy (ray tracing tier only: BLAS inputs, vertex
     // fetches of RT hit shaders; docs/research/rt-reflections.md 3); 0 for ring-copied buffers or without the tier. Valid
     // until the next generation (Device::notifyBufferChanged tells the observers)
@@ -222,9 +225,7 @@ private:
     // Cleared under mutex_ by lock() / orphan(), set by gpu() after a static copy
     std::atomic<bool> cleanStatic_{false};
     std::uint8_t* boundPtr_ = nullptr;  // CPU address of the frame's ring copy (dynamic buffers)
-    VkBuffer static_ = VK_NULL_HANDLE;
-    VmaAllocation staticAlloc_ = VK_NULL_HANDLE;
-    VkDeviceAddress staticAddress_ = 0;  // of static_ (lazy)
+    vk::MeshArena::Alloc static_;  // the static GPU copy, in the device's mesh arena
     friend class Device;
     void orphan();           // as Texture::orphan
     bool orphaned_ = false;  // under Device::liveMutex_
@@ -282,7 +283,9 @@ struct ReplaceQuery {
     Texture* const* textures = nullptr;       // the bound textures s0..s15 (pixel)
     const Shader* engineVs = nullptr;
     const Shader* enginePs = nullptr;
-    std::shared_ptr<Shader> engineVsRef;      // the engine's vertex shader (a replacement may keep it: DrawReplacement::vs)
+    // the device's reference to the engine's vertex shader (a replacement may keep it: DrawReplacement::vs); a pointer, so
+    // building a query per observer / replacer costs no atomic reference count
+    const std::shared_ptr<Shader>* engineVsRef = nullptr;
     const VertexDecl* decl = nullptr;         // the draw's vertex declaration
     bool blended = false;                     // alpha blending SRCALPHA / INVSRCALPHA on
     bool blending = false;                    // alpha blending on (any factors)
@@ -729,6 +732,7 @@ public:
     // internals used by resources
     vk::Context& ctx() { return ctx_; }
     vk::Frames& frames() { return frames_; }
+    vk::MeshArena& meshArena() { return meshArena_; }
     vk::Bindless& bindless() { return bindless_; }
     std::uint64_t frameValue() const { return frames_.currentValue(); }
     VkFormat d24s8Format() const { return d24s8_; }
@@ -782,6 +786,7 @@ private:
     DeviceOptions options_;
     vk::Context ctx_;
     vk::Frames frames_;
+    vk::MeshArena meshArena_;
     vk::Bindless bindless_;
     vk::PipelineCache pipelines_;
     vk::Swapchain swapchain_;
@@ -916,6 +921,15 @@ private:
         VkVertexInputBindingDescription2EXT bindings[vk::kMaxVertexBindings]{};
         VkVertexInputAttributeDescription2EXT attributes[vk::kMaxVertexAttributes]{};
     } viCache_;
+    struct IndexBindingCache {
+        bool valid = false;
+        bool index32 = false;
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VkDeviceSize offset = 0;
+    } ibCache_;
+    // the draw's vertexOffset / firstVertex for a per-vertex stream bound at offset 0 (bindVertexInput: mesh arena)
+    std::int32_t vertexShift_ = 0;
+    std::uint32_t bindIndexBuffer(VkBuffer buffer, VkDeviceSize offset, bool index32, std::uint32_t firstIndex);
     // the dynamic state last recorded (every pipeline declares the same dynamic states, so it survives pipeline binds)
     struct DynamicStateCache {
         bool valid = false;

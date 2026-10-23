@@ -213,6 +213,16 @@ bool Device::create(const DeviceOptions& options) {
     if (!frames_.create(ctx_) || !bindless_.create(ctx_, frames_)) {
         return false;
     }
+    {
+        // the static vertex / index buffers' arena (vk/mesh_arena.h); with the ray tracing tier also BLAS build inputs that
+        // shaders read through their addresses (docs/research/raytracing.md 2)
+        VkBufferUsageFlags usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+        if (ctx_.features().rayTracing.enabled) {
+            usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                     VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+        }
+        meshArena_.create(ctx_, usage);
+    }
     transients_.init(ctx_, frames_, bindless_);
     const auto pipelineFile = options.cacheDir.empty() ? std::filesystem::path() : options.cacheDir / "pipelines.bin";
     if (!pipelines_.create(ctx_, bindless_.pipelineLayout(), pipelineFile, options.pipelineLibraries)) {
@@ -446,6 +456,7 @@ void Device::invalidateRecordingState() {
     boundPipeline_ = VK_NULL_HANDLE;
     lastPipelineValid_ = false;
     viCache_.buffersValid = viCache_.layoutValid = false;
+    ibCache_.valid = false;
     dyn_.valid = false;
     vsConstDirty_ = psConstDirty_ = true;
     const VkDescriptorSet set = bindless_.set();
@@ -534,6 +545,7 @@ void Device::destroy() {
     transients_.destroy();  // retired: frames_ destroys them
     // frames_ runs the retired destructors (images, bindless slot releases): before the bindless heap goes away
     frames_.destroy();
+    meshArena_.destroy();  // after frames_: its retired frees go into the arena
     bindless_.destroy();
     ctx_.destroy();
     created_ = false;
@@ -572,6 +584,7 @@ void Device::beginFrame() {
     boundPipeline_ = VK_NULL_HANDLE;
     lastPipelineValid_ = false;
     viCache_.buffersValid = viCache_.layoutValid = false;
+    ibCache_.valid = false;
     dyn_.valid = false;
     vsConstDirty_ = psConstDirty_ = true;
     frameAddr_ = 0;  // ring memory of the frame block belongs to a submission

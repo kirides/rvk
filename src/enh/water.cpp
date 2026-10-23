@@ -1036,8 +1036,8 @@ void Water::replace(d3d9::Device& device, const d3d9::ReplaceQuery& q, DrawRepla
         }
     } else {
         // the engine's mesh with the engine's own vertex shader: one background pipeline build per engine VS
-        if (!q.engineVsRef || q.engineVs == nullptr) return;
-        if (meshVsRegistered_.insert(q.engineVs->hash).second) device.registerReplacement(q.engineVsRef, ps_, false);
+        if (q.engineVsRef == nullptr || !*q.engineVsRef || q.engineVs == nullptr) return;
+        if (meshVsRegistered_.insert(q.engineVs->hash).second) device.registerReplacement(*q.engineVsRef, ps_, false);
         if (!device.replacementReady(*q.engineVs, *ps_, false)) return;
     }
     std::array<d3d9::Texture*, 16> sampled{};
@@ -1050,7 +1050,7 @@ void Water::replace(d3d9::Device& device, const d3d9::ReplaceQuery& q, DrawRepla
         seaLevel_ = b.level;
     }
     out.action = grid ? DrawReplacement::Action::Procedural : DrawReplacement::Action::Shaders;
-    out.vs = grid ? oceanVs_ : q.engineVsRef;
+    out.vs = grid ? oceanVs_ : *q.engineVsRef;
     out.ps = ps_;
     // the ray-traced reflections' surfaces: this body as a plane (the next frame's pass; not for bodies that are no plane)
     if (rtRefl_ && rtRefl_->tier() > 0 && q.mainView == 1 && b.planeError < 150.0f && q.vertexBuffer != nullptr) {

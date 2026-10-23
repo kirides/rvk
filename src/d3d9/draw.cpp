@@ -194,7 +194,7 @@ bool Device::bindVertexInput(vk::PipelineDesc& pd) {
                     buffers[b] = up_.buffer;
                     offsets[b] = up_.offset;
                 } else {
-                    const Buffer::Binding g = st.buffer->gpu();
+                    const Buffer::Binding g = st.buffer->gpu(st.stride);
                     if (g.buffer == VK_NULL_HANDLE) {
                         return false;
                     }
@@ -219,6 +219,26 @@ bool Device::bindVertexInput(vk::PipelineDesc& pd) {
             }
             if (pd.attributeCount < vk::kMaxVertexAttributes) {
                 pd.attributes[pd.attributeCount++] = {in.location, nullBinding, VK_FORMAT_R32G32B32A32_SFLOAT, 0};
+            }
+        }
+    }
+    // one per-vertex stream whose offset is a multiple of its stride (static meshes in the mesh arena): bound at offset 0,
+    // the offset goes into the draw's vertexOffset / firstVertex, so consecutive meshes of an arena block keep the binding
+    // (not for procedural replacements: their vertices start at 0)
+    vertexShift_ = 0;
+    if (customVertices_ == 0) {
+        std::uint32_t perVertex = UINT32_MAX, count = 0;
+        for (std::uint32_t i = 0; i < pd.bindingCount; ++i) {
+            if (pd.bindings[i].stride != 0 && !pd.bindings[i].perInstance) {
+                perVertex = i;
+                ++count;
+            }
+        }
+        if (count == 1) {
+            const VkDeviceSize stride = pd.bindings[perVertex].stride;
+            if (offsets[perVertex] % stride == 0 && offsets[perVertex] / stride <= 0x3FFFFFFF) {
+                vertexShift_ = static_cast<std::int32_t>(offsets[perVertex] / stride);
+                offsets[perVertex] = 0;
             }
         }
     }
@@ -504,7 +524,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         q.textures = tex_.data();
         q.engineVs = vs_.get();
         q.enginePs = ps_.get();
-        q.engineVsRef = vs_;
+        q.engineVsRef = &vs_;
         q.decl = decl_;
         q.blended = rs_[RS_ALPHABLENDENABLE] != 0 && rs_[RS_SRCBLEND] == BLEND_SRCALPHA && rs_[RS_DESTBLEND] == BLEND_INVSRCALPHA;
         q.blending = rs_[RS_ALPHABLENDENABLE] != 0;
@@ -882,7 +902,24 @@ void Device::drawPrimitive(std::uint32_t type, std::uint32_t startVertex, std::u
         customVertices_ = 0;
         return;
     }
-    vkCmdDraw(frames_.cmd(), vertexCount(type, primitiveCount), instanceCount_, startVertex, 0);
+    vkCmdDraw(frames_.cmd(), vertexCount(type, primitiveCount), instanceCount_, startVertex + static_cast<std::uint32_t>(vertexShift_), 0);
+}
+
+// the index buffer binding, recorded only when it differs from this command buffer's last one; returns the first index to
+// draw (an offset that is a multiple of the index size goes into firstIndex: the arena block stays bound)
+std::uint32_t Device::bindIndexBuffer(VkBuffer buffer, VkDeviceSize offset, bool index32, std::uint32_t firstIndex) {
+    const VkDeviceSize size = index32 ? 4 : 2;
+    VkDeviceSize bindOffset = offset;
+    if (offset % size == 0 && offset / size <= 0x3FFFFFFF) {
+        firstIndex += static_cast<std::uint32_t>(offset / size);
+        bindOffset = 0;
+    }
+    IndexBindingCache& c = ibCache_;
+    if (!c.valid || c.buffer != buffer || c.offset != bindOffset || c.index32 != index32) {
+        vkCmdBindIndexBuffer(frames_.cmd(), buffer, bindOffset, index32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
+        c = {true, index32, buffer, bindOffset};
+    }
+    return firstIndex;
 }
 
 void Device::drawIndexedPrimitive(std::uint32_t type, std::int32_t baseVertex, std::uint32_t, std::uint32_t, std::uint32_t startIndex,
@@ -897,15 +934,16 @@ void Device::drawIndexedPrimitive(std::uint32_t type, std::int32_t baseVertex, s
         customVertices_ = 0;
         return;
     }
-    const Buffer::Binding ib = indices_->gpu();
+    const bool index32 = indices_->index32();
+    const Buffer::Binding ib = indices_->gpu(index32 ? 4 : 2);
     if (lastRecord_ != nullptr) {
         lastRecord_->indexBuffer = indices_->ref();
     }
     if (ib.buffer == VK_NULL_HANDLE) {
         return;
     }
-    vkCmdBindIndexBuffer(frames_.cmd(), ib.buffer, ib.offset, indices_->index32() ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
-    vkCmdDrawIndexed(frames_.cmd(), vertexCount(type, primitiveCount), instanceCount_, startIndex, baseVertex, 0);
+    const std::uint32_t first = bindIndexBuffer(ib.buffer, ib.offset, index32, startIndex);
+    vkCmdDrawIndexed(frames_.cmd(), vertexCount(type, primitiveCount), instanceCount_, first, baseVertex + vertexShift_, 0);
 }
 
 // the upload ring could not take a user-pointer draw's data (a ring chunk could not be created): the draw is dropped
@@ -930,7 +968,7 @@ void Device::drawPrimitiveUP(std::uint32_t type, std::uint32_t primitiveCount, c
     std::memcpy(a.ptr, data, static_cast<std::size_t>(vertices) * stride);
     up_ = {true, a.buffer, a.offset, stride};
     if (prepareDraw(type, DrawGeom{.userPointer = true, .primitives = primitiveCount})) {
-        vkCmdDraw(frames_.cmd(), vertices, 1, 0, 0);
+        vkCmdDraw(frames_.cmd(), vertices, 1, static_cast<std::uint32_t>(vertexShift_), 0);
     }
     up_.active = false;
     // D3D9 unbinds stream 0 and the index buffer after a UP draw
@@ -957,8 +995,8 @@ void Device::drawIndexedPrimitiveUP(std::uint32_t type, std::uint32_t minIndex, 
     std::memcpy(va.ptr, vertices, static_cast<std::size_t>(vcount) * stride);
     up_ = {true, va.buffer, va.offset, stride};
     if (prepareDraw(type, DrawGeom{.indexed = true, .userPointer = true, .primitives = primitiveCount})) {
-        vkCmdBindIndexBuffer(frames_.cmd(), ia.buffer, ia.offset, index32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
-        vkCmdDrawIndexed(frames_.cmd(), count, 1, 0, 0, 0);
+        const std::uint32_t first = bindIndexBuffer(ia.buffer, ia.offset, index32, 0);
+        vkCmdDrawIndexed(frames_.cmd(), count, 1, first, vertexShift_, 0);
     }
     up_.active = false;
     streams_[0] = {};

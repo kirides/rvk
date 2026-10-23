@@ -1103,6 +1103,9 @@ void HalDevice::logPerf(d3d9::PerfStats p) {
         spdlog::info("perf: GPU memory {:.1f} MiB in blocks ({:.1f} MiB device-local), {:.1f} MiB in {} allocations; ray tracing tier {}",
                      static_cast<double>(blocks) / 1048576.0, static_cast<double>(local) / 1048576.0,
                      static_cast<double>(allocs) / 1048576.0, count, dev_.ctx().features().rayTracing.enabled ? "on" : "off");
+        const vk::MeshArena::Stats a = dev_.meshArena().stats();
+        spdlog::info("perf: mesh arena {} blocks of {} MiB + {} dedicated buffers, {:.1f} MiB used", a.blocks,
+                     vk::MeshArena::kBlockSize >> 20, a.dedicated, static_cast<double>(a.used) / 1048576.0);
     }
     spdlog::info("perf: draw tags + records {:.3f} ms per frame ({:.0f} ns per draw)", p.drawRecordMs / n,
                  p.draws > 0 ? p.drawRecordMs * 1e6 / static_cast<double>(p.draws) : 0.0);

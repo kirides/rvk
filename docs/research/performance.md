@@ -228,3 +228,29 @@ Changes:
 Result at 2x: **103 -> 110 fps** (`-Perf`; 118 fps without it), CPU frame 9.4 -> 8.75 ms (draw calls 4.6 -> 4.25 ms), the
 TLAS unchanged (~2450-2550 instances). The rest is spread over many ~1 % items; the next step is structural (fewer Vulkan
 calls per draw, or recording off the engine thread).
+
+## 11. Mesh arena (2026-10-23)
+
+`vk::MeshArena` (`src/vk/mesh_arena.*`): the static vertex / index buffers' GPU copies are suballocated from 64 MiB
+device-local buffers (VMA virtual blocks; above 8 MiB a dedicated buffer). `Buffer::gpu(strideHint)` places a new copy at a
+multiple of its first use's vertex stride / index size; `bindVertexInput` binds a single per-vertex stream whose offset is a
+multiple of its stride at offset 0 and adds the offset to the draw's `vertexOffset` (`vertexShift_`), `bindIndexBuffer`
+folds the index offset into `firstIndex` and records the binding only when it changed (`ibCache_`). Consecutive meshes keep
+their bindings; the arena is also the base for batched indirect draws (one binding per batch). With the RT tier the arena
+carries the BLAS-input / device-address usages; `Buffer::deviceAddress` = the block's address + offset.
+
+At the savegame (2x): the whole scene's static meshes take 69.5 MiB (1 block + 1 dedicated buffer); **110 -> 115 fps**
+(draw calls 4.25 -> 4.0 ms); the TLAS unchanged; `-Validation` clean; rvkcompare against the stored reference: beach_sun,
+jungle, harbour_docks, hero_closeup, gui_inventory, lake_jungle PASS (ssim >= 0.991). The replace query no longer copies the
+engine vertex shader's `shared_ptr` per observer / replacer (`ReplaceQuery::engineVsRef` is a pointer: 1.3 % of the engine
+thread in atomic reference counts).
+
+Profile after it (2x, engine thread 9.1 ms): amdvlk64 14.8 % (pipeline binds, push constants, draws: ~985 pipeline binds per
+2283 draws), `prepareDraw` 4.4 % self, the RT scene ~6 %, vertex input / constants / dynamic state / textures ~5 %, Engine.dll
++ SharedBase + Game.dll ~32 %.
+
+Batching options measured on this machine (RX 7900 XTX, driver 26.10.1): `VK_EXT_device_generated_commands` is available
+(push-constant tokens: the shaders stay as they are) but without pipeline switching inside a batch
+(`supportedIndirectCommandsShaderStagesPipelineBinding` none); the engine's order gives runs of ~2.3 draws per pipeline, so
+useful batches need the opaque passes' draws grouped by pipeline (order-independent under the depth test except coplanar
+surfaces).

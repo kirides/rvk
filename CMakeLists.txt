@@ -276,6 +276,8 @@ add_library(rvk_core STATIC
     src/vk/formats.h
     src/vk/frames.cpp
     src/vk/frames.h
+    src/vk/mesh_arena.cpp
+    src/vk/mesh_arena.h
     src/vk/gputimer.cpp
     src/vk/gputimer.h
     src/vk/image.cpp
