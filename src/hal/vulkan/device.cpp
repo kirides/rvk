@@ -120,6 +120,7 @@ HalDevice::~HalDevice() {
     debugView_.reset();  // removes its pass, retires its pipelines
     // the RT scene's consumers (rt.debug, the water's traced reflections) release it in their destructors: before it
     rtDebug_.reset();    // releases the RT scene
+    objectMotion_.reset();  // unregisters its observer
     upscale_.reset();    // clears the device's jitter source
     gbuffer_.reset();    // removes its passes, the G-buffer attachments
     gi_.reset();         // unregisters its observer / pass, releases the RT scene
@@ -300,8 +301,9 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     }
     // camera jitter / FSR (enh/upscale.h, docs/research/upscaling.md)
     upscale_ = std::make_unique<enh::Upscale>(dev_);
+    objectMotion_ = std::make_unique<enh::ObjectMotion>(dev_, rtScene_.get());
     if (rs.upscaleMode != nullptr) {
-        for (settings::Setting* s : {rs.upscaleMode, rs.upscaleReactive, rs.upscaleReactiveCutoff, rs.upscaleReactiveScale, rs.upscaleSharpness,
+        for (settings::Setting* s : {rs.upscaleMode, rs.upscaleObjectMotion, rs.upscaleReactive, rs.upscaleReactiveCutoff, rs.upscaleReactiveScale, rs.upscaleSharpness,
                                      rs.upscaleJitterFlip}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyUpscale(); }, this);
         }
@@ -419,6 +421,10 @@ void HalDevice::applyUpscale() {
     else if (m == "ultra_performance") mode = enh::UpscaleMode::UltraPerformance;
     else if (m == "jitter_only") mode = enh::UpscaleMode::JitterOnly;
     upscale_->apply(mode, flip);
+    if (objectMotion_) {
+        const bool on = enh::usesFsr(mode) && (rs.upscaleObjectMotion == nullptr || rs.upscaleObjectMotion->asBool());
+        objectMotion_->apply(on, on);
+    }
     applyGbuffer();  // native AA needs the motion vectors
 }
 

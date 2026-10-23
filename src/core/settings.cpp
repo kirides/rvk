@@ -1342,6 +1342,16 @@ RendererSettings registerRendererSettings(Registry& reg) {
                          "Ultra performance (3x)", "Jitter only (test)"},
     });
 
+    r.upscaleObjectMotion = &reg.add({
+        .key = "upscale.object_motion",
+        .label = "Motion of characters and objects",
+        .category = "Image",
+        .description = "Tells FSR how characters and moving objects (a drawn weapon) really move, so they stay sharp instead of "
+                       "blurring while they animate.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::Advanced,
+    });
     r.upscaleReactive = &reg.add({
         .key = "upscale.reactive",
         .label = "Clean up effects",

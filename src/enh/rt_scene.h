@@ -74,6 +74,8 @@ public:
     // mask kRtMaskDynamic (rays can leave characters out: RVK_RT_TRACE_NO_DYNAMIC); records have no normals (geometric)
     void setDynamic(const void* consumer, bool on);
     bool dynamicSupported() const;
+    // the scene captures skinned draws right now (enh/object_motion leaves them to it)
+    bool capturingCharacters() const { return active_ && dynamic_; }
     // the GLSL options of a vertex shader's capture variant (d3d9::VariantSlot::Capture); public for rvk_shadertool --capture
     static bool captureOptions(const d3d9::Shader& s, shader::GlslOptions& o);
 

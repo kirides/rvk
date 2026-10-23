@@ -125,6 +125,24 @@ return {
         hud = true,
         notes = "the hero close up with the HUD: skinned mesh, armour/skin/hair, self-shadowing, HUD bars and compass",
     },
+    -- live idle animation (freeze = false: the clock and so the animations run through the capture): the per-object motion
+    -- vectors of characters (docs/research/upscaling.md); the pictures are not reproducible, judge sharpness / ghosting only
+    {
+        id = "hero_idle",
+        player = { x = -38559, y = 15, z = -5770, yaw = 58 },
+        camera = { target = { 0, 160, 0 }, yaw = 238, pitch = -5, distance = 260 },
+        hide_player = false, hide_npcs = 2500,
+        time = { 13, 0 }, weather = "Sunny_Full", freeze = false, explicit = true,
+        notes = "the hero in his idle animation, the world clock running",
+    },
+    {
+        id = "pub_idle",
+        player = { x = -1100, y = 600, z = -19300, yaw = 0 },
+        camera = { target = { 0, 150, 0 }, yaw = 90, pitch = -10, distance = 400 },
+        hide_player = true, hide_npcs = 2000,
+        time = { 20, 0 }, weather = { Sunny_Half_02 = 0.87, Sunny_Full = 0.13 }, freeze = false, explicit = true,
+        notes = "the Harbour Town pub with its NPCs (run with -Param show_actors=1) in their idle animations, the world clock running",
+    },
     {
         id = "gui_inventory",
         player = { x = -38559, y = 15, z = -5770, yaw = 58 },

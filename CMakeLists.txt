@@ -210,6 +210,8 @@ add_library(rvk_core STATIC
     src/enh/gi.h
     src/enh/gbuffer.cpp
     src/enh/gbuffer.h
+    src/enh/object_motion.cpp
+    src/enh/object_motion.h
     src/enh/upscale.cpp
     src/enh/upscale.h
     src/enh/material_variant.cpp
