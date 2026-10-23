@@ -292,3 +292,18 @@ Totals at the savegame, 2x object draw distance, `-Perf`: **103 -> ~127 fps** (C
 What remains: Engine.dll + SharedBase ~4.5 ms (culling, render ops, material constants: the engine's, single-threaded), our
 per-draw bookkeeping ~1.5 us per draw (`prepareDraw`: classification, replacers / observers, the RT scene's sightings, draw
 records, constants and draw block).
+
+## 13. Engine-side candidates (researched 2026-10-23, not built)
+
+Code-only RE of Engine.dll (dumps `B:\DevDrive\risen-ghidra\enginecpu\`); savings estimated from the 2x profile, unmeasured.
+Ranked: (1) drop far ops from the main view's z pre-pass list after `eCCameraBase::Update`'s Request (db+0x1520 / count
++0x1528, op key +0x10 = depth x 16777215 / zFar; SpeedTree via a pre-hook on `eCSpeedTreeRenderBuffer::AddToZPassRenderQueue`
+0x6f82d0): 3-10 %, visual risk (the depth map feeds the shadow mask, SSAO / DoF, water); (2) a typed sort for the CRT
+`qsort` 0x4a4aa0 (comparators: z 0x66e670 u32 at +0x10, solid 0x66e6a0 u64 at +0x10, alpha 0x66e600): 1.5-2 %; (3) throttle
+`eCPrefetchAdmin::CacheEntities` 0x6969c0 (the cache-in sphere-tree walk, ~3 %, enlarged by `lod.view`; the profile's
+"eCSpeedTreeRenderBuffer::operator=" is this non-exported code); (4) skip the no-op `SetTime` calls in
+`eCShaderMaterialAdmin::Process` (~0.6 %); (5) stagger the far sun cascade / a chain-only `eCBeamTree::Cull` fast path. Facts:
+one Extract + Request per view (the main view is not culled twice; each sun cascade walks the scene again); material
+constants are already cached by the engine; `eCBeamTree` is the frustum test itself; the engine's `eCDX9Device` state cache is
+bypassed with our vtables, so redundant render / sampler states (7 `SetSamplerState` per sampler on each material switch)
+reach our HAL. Threading the engine's extract / request is high risk (shared per-resource state).
