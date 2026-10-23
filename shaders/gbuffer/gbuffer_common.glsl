@@ -37,13 +37,13 @@ const float GB_HALF_PI = 1.57079633;
 vec3 gbViewPos(RvkFrame f, vec2 uv, float z) {
     float a = f.proj[2][2], b = f.proj[3][2];
     float vz = abs(z - a) > 1e-9 ? b / (z - a) : 1e9;
-    vec2 ndc = rvkUvToNdc(uv);
+    vec2 ndc = rvkUvToNdc(uv) - rvkJitterNdc(f);
     return vec3(ndc.x * vz / f.proj[0][0], ndc.y * vz / f.proj[1][1], vz);
 }
 
 // world position of a pixel from the hardware depth (the far plane's point for the sky)
 vec3 gbWorldPos(RvkFrame f, vec2 uv, float z) {
-    vec4 w = f.invViewProj * vec4(rvkUvToNdc(uv), min(z, 1.0), 1.0);
+    vec4 w = f.invViewProj * vec4(rvkUvToNdc(uv) - rvkJitterNdc(f), min(z, 1.0), 1.0);
     return w.xyz / w.w;
 }
 

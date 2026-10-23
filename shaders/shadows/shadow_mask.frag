@@ -100,7 +100,8 @@ float varianceShadow(ShadowBlock b, vec4 p) {
 // the engine's quad: texcoord t = the D3D9 pixel position / size (pixel centres at integers), p = d * the view ray
 vec4 reconstruct(ShadowBlock b, vec2 fragCoord, float d) {
     vec2 t = (fragCoord - 0.5) * b.target.xy;
-    return vec4(d * vec3(t.x * 2.0 - 1.0, 1.0 - t.y * 2.0, 1.0), 1.0);
+    // the depth map was rendered with the camera jitter: the surface at this pixel is at the pixel's NDC - J (rvk_common.glsl)
+    return vec4(d * vec3(vec2(t.x * 2.0 - 1.0, 1.0 - t.y * 2.0) - rvkJitterNdc(pc.frame), 1.0), 1.0);
 }
 
 float depthAt(ShadowBlock b, vec2 fragCoord) { return rvkSample2DLod(b.res.x, b.res.y, fragCoord * b.target.xy, 0.0).r; }

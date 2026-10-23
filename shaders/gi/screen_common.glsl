@@ -21,7 +21,7 @@ float spViewDepth(RvkFrame f, float z) {
 // world position of a pixel (D3D9 pixel centres as the material shaders: uv = pixel / size)
 vec3 spWorldPos(RvkFrame f, ivec2 px, vec2 size, float z) {
     vec2 uv = (vec2(px) + 0.5) / size;
-    vec4 w = f.invViewProj * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, z, 1.0);
+    vec4 w = f.invViewProj * vec4(rvkUvToNdc(uv) - rvkJitterNdc(f), z, 1.0);
     return w.xyz / w.w;
 }
 

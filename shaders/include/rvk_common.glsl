@@ -16,13 +16,19 @@ ivec2 rvkSize2D(uint tex) { return textureSize(t2D[nonuniformEXT(tex)], 0); }
 // Texture coordinates (0,0 = top left, D3D9 / Vulkan image order) -> D3D NDC (y up)
 vec2 rvkUvToNdc(vec2 uv) { return vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0); }
 
+// This frame's camera jitter as an NDC offset (src/enh/upscale: the main view's geometry is shifted by it in clip space, the
+// FrameBlock's matrices stay the unjittered camera's; zero without jitter). The surface rasterised at a pixel whose centre is
+// at NDC c has the unjittered NDC c - J: every reconstruction of a position from the main view's depth (depth map / hardware
+// depth) takes `rvkUvToNdc(uv) - rvkJitterNdc(f)`.
+vec2 rvkJitterNdc(RvkFrame f) { return vec2(2.0 * f.jitter.x, -2.0 * f.jitter.y) * f.viewport.zw; }
+
 // The engine's linear depth map (R32F, ge_default_ps.fx: view depth / far, cleared to 1) -> view depth
 float rvkViewDepth(RvkFrame f, float depthMapValue) { return depthMapValue * f.cameraPos.w; }
 
 // World position of a pixel from its view depth: the point of the pixel's ray at that depth (the far-plane point has the
 // projection's far as its view depth; the view depth grows linearly along a ray from the camera)
 vec3 rvkWorldFromViewDepth(RvkFrame f, vec2 uv, float viewDepth) {
-    vec4 farPoint = f.invViewProj * vec4(rvkUvToNdc(uv), 1.0, 1.0);
+    vec4 farPoint = f.invViewProj * vec4(rvkUvToNdc(uv) - rvkJitterNdc(f), 1.0, 1.0);
     vec3 p = farPoint.xyz / farPoint.w;
     float projFar = max(f.depthParams.y, 1e-3);
     return f.cameraPos.xyz + (p - f.cameraPos.xyz) * (viewDepth / projFar);

@@ -122,7 +122,9 @@ void rvkMvPrologue(vec4 vertexNormal) {
 #endif
     // the pixel's world position (hardware depth + the FrameBlock camera; D3D9 pixel centres) and geometric normal
     vec2 uv = (gl_FragCoord.xy - 0.5) * pc.frame.viewport.zw;
-    vec4 w = pc.frame.invViewProj * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, gl_FragCoord.z, 1.0);
+    // the depth was rasterised with the camera jitter (src/enh/upscale): the fragment is at the pixel's NDC - J (rvk_common.glsl)
+    vec2 jitterNdc = vec2(2.0 * pc.frame.jitter.x, -2.0 * pc.frame.jitter.y) * pc.frame.viewport.zw;
+    vec4 w = pc.frame.invViewProj * vec4(uv.x * 2.0 - 1.0 - jitterNdc.x, 1.0 - uv.y * 2.0 - jitterNdc.y, gl_FragCoord.z, 1.0);
     vec3 P = w.xyz / w.w;
     vec3 n = cross(dFdx(P), dFdy(P));
     vec3 V = normalize(pc.frame.cameraPos.xyz - P);
