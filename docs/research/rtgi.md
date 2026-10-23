@@ -238,3 +238,55 @@ per frame at medium.
 **Open**: interior volumes (portal rooms), true hemisphere SH from the engine (`eCHemisphere_PS`) instead of the most frequent
 draw set, interior brightness tuning (the `keep` remainder over-brightens some rooms), SSAO policy, `water_rt` switching to the
 captured light, lightmaps at hits, per-pass GPU timing via `-PerfFrame`.
+
+## 10. Stage B frame data: built (2026-10-23)
+
+([C] = measured / read in code.)
+
+**Code** [C]: `src/enh/gbuffer.{h,cpp}` (passes `gbuffer.targets` at AfterDepthPrepass, `gbuffer.ao` at AfterOpaque order 20,
+`gbuffer.debug` at BeforeGui; also a `d3d9::DrawReplacer` for the game's SSAO), `src/enh/material_variant.{h,cpp}` +
+`shaders/include/rvk_material_variant.glsl` (embedded as text; the shared Gi / Gbuffer / GbufferMotion pixel shader variants,
+replacing the GI variant code of section 9), `shaders/gbuffer/{gtao.comp, gtao_filter.comp, gbuffer_debug.frag, ao_white.frag,
+gbuffer_common.glsl}`. Device: `Device::setGbuffer` / `gbufferArmed` / `setFrameAo`, `VariantSlot::Gbuffer` / `GbufferMotion`.
+Translator: `GlslOptions::dotCaptures`, `Reflection::pixelInputs`.
+
+**P5, G-buffer** [C]: extra colour attachments 1 and 2 of the first main view's solid pass when it renders into the scene HDR
+target alone at the G-buffer's size. Normal = A2B10G10R10_UNORM (xy octahedral world normal via `rvkGiOctEncode`, z free, w =
+id / 3: 1 static material, 2 character, 0 none); motion = R16G16_SFLOAT (previous uv - this uv); 8 bytes per pixel. Cleared at the
+frame's first scope (loadOp CLEAR). Written by the Gbuffer variants of the material pixel shaders (`Device::gbufferEligible`: main
+view solid, depth tested, not ONE/ONE additive, not sky / particles / precipitation / water, a first pass when lit); every other
+draw in the scope keeps them (write mask 0 with EDS3, in the pipeline otherwise). The normal: the operand the shader dots with
+`g_AmbientLight[0]` (`GlslOptions::dotCaptures`: normal-mapped, world space), else the interpolated TEXCOORD4 normal, else the
+geometric one. Arming: the device prewarms the 3-attachment pipeline of every solid draw (`PipelineCache::prewarmOnce`) and switches
+the attachments on once a frame's solid pass found all pipelines + variants (measured: "g-buffer armed: 301 solid draws, 0
+missing"; with validation it took the 10 s timeout, 72 missing, then built at their draws).
+
+**P6, motion** [C]: material pixels write the camera's motion of their surface point; characters their own: the capture vertex
+shader variant (cap3) reads the previous frame's capture buffer of the same draw (header y/z = its address) and outputs the
+previous world position at varying location 15 (TEXCOORD15; location 30 exceeded maxVertexOutputComponents 128:
+VUID-RuntimeSpirv-Location-06272), read by the GbufferMotion pixel variant; needs the RT scene active (GI or RT reflections).
+Pixels without a material (id 0: sky, effects) get the camera's motion from the hardware depth in the AO pass (motion is a storage
+image there: needs shaderStorageImageExtendedFormats, else AO is unavailable). No TAA jitter yet.
+
+**P7, GTAO** [C]: XeGTAO-style horizon search, 2 slices x 8 steps per side, radius `ao.radius` (default 1 m = 100 units, falloff
+60 %), per-pixel interleaved gradient noise rotated per frame; normal from the depth (nearest neighbour per axis): the
+normal-mapped G-buffer normal self-occluded (speckles on floors / terrain in the first test). Depth-aware 3x3 filter + temporal
+accumulation (history 0.85, motion reprojection, clamped to the 3x3 raw range +- 0.1) into a ping-pong history (R32F). The
+material shaders' Gbuffer variants reproject last frame's AO (`prevViewProj`) and scale all ambient registers (c14..c21, so the GI
+too) by mix(1, ao, `ao.strength`). `ao.mode = replace` (default): the game's SSAO (`post_SSM.fx`, the shadow mask's red channel,
+multiplies the whole lit result incl. the sun) is switched off by replacing its draws into the half-size A8R8G8B8 targets of the
+ShadowMask pass (SSAO + 2 blurs, 800x450 at 1600x900) with a fullscreen write of 1 (log "the game's SSAO draws replaced (800x450
+target)"); `add` = both. Draw replacers now hand a draw on when they leave it to the engine (enh/shadows handles the same pass).
+
+**Settings**: `ao.enabled` (default off, Lighting), `ao.mode` replace|add, `ao.strength`, `ao.radius` (m); `gbuffer.debug` =
+normals|motion|ao (Debug). rvk.log `d3d9: g-buffer requested / armed`, `enh: gbuffer:`. Offline: `rvk_shadertool corpus corpus
+--gbuf | --gbuf-motion`.
+
+**Results** [C] (`out\water\20261023-161012` AO vs off, `-161202` debug views): smooth contact AO at barrels / stools / beams /
+corners / clothing; normal-map detail visible in the normals view; sky excluded; validation run with GI + AO + water: no messages.
+Luma vs AO off: beach -7, harbour -4, hero -6, jungle +3, pub +20 (the pub's GI keeps its brightness).
+
+**Open**: a faint arc pattern near the pub's right wall (stepping / temporal), strong contact shade under thin overlay meshes
+(beach seaweed patches), no depth history for the temporal rejection, no TAA jitter / FSR yet, moving non-skinned objects have
+camera-only motion, AO costs not measured separately.
+
