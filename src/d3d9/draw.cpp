@@ -575,6 +575,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     }
     // what the draw is (the engine hooks' tag + the phase)
     const scene::Phase phase = phases_.current();
+    syncPhaseRegions();
     if (phase.view == scene::View::Main && (phase.pass == scene::Pass::Alpha || phase.pass == scene::Pass::AlphaLate) &&
         passes_.any(inject::Point::BeforeAlpha)) {
         inject(inject::Point::BeforeAlpha);  // once per main view (inject.h): the scene without its translucent effects

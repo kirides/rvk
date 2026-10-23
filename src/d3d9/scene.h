@@ -72,6 +72,8 @@ public:
     View view() const { return cur_.view; }
     Pass pass() const { return cur_.pass; }
     std::size_t depth() const { return stack_.size(); }
+    // the phases enclosing the current one (outermost first; the first is the one before any view was entered)
+    const std::vector<Phase>& enclosing() const { return stack_; }
     void countDraw();
 
     // frame boundary (present): the frame's segments become lastFrame(); a scope still open (present inside a view:

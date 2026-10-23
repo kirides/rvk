@@ -78,6 +78,9 @@ void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     }
     if (perFrame_ >= kMaxCapturesPerFrame) return;
 
+    // a rigid draw without its entity cannot be told apart from the other objects sharing its mesh: they would feed each
+    // other their previous positions (wrong, large motion on buildings)
+    if (q.kind == Kind::StaticMesh && (q.tag == nullptr || q.tag->entity == nullptr)) return;
     const d3d9::ResourceRef vr = q.vertexBuffer->ref(), ir = q.indexBuffer->ref();
     std::uint64_t key = 1469598103934665603ull;
     key = mix(key, reinterpret_cast<std::uintptr_t>(q.tag != nullptr ? q.tag->entity : nullptr));

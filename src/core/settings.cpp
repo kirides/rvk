@@ -839,6 +839,17 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .flags = Flag::NoAB | Flag::Hidden,
     });
+    r.debugRegions = &reg.add({
+        .key = "debug.regions",
+        .label = "Capture regions",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Names the frame's parts (views, passes, the renderer's own passes) for graphics captures (RenderDoc, PIX, "
+                       "Radeon GPU Profiler) with debug labels: a capture shows a tree instead of one long list of draws.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
     r.batchDraws = &reg.add({
         .key = "debug.batch_draws",
         .label = "Batch opaque draws",
@@ -1346,10 +1357,12 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .key = "upscale.object_motion",
         .label = "Motion of characters and objects",
         .category = "Image",
-        .description = "Tells FSR how characters and moving objects (a drawn weapon) really move, so they stay sharp instead of "
-                       "blurring while they animate.",
-        .type = Type::Bool,
+        .description = "Tells FSR how characters (and with \"Characters and objects\" also moving rigid objects such as a drawn "
+                       "weapon) really move, so they stay sharp instead of blurring while they animate.",
+        .type = Type::Enum,
         .defaultValue = 1,
+        .options = {"off", "characters", "all"},
+        .optionLabels = {"Off", "Characters", "Characters and objects"},
         .flags = Flag::Advanced,
     });
     r.upscaleReactive = &reg.add({

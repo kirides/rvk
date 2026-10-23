@@ -217,6 +217,10 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         if (!rs.tintDraws->isDefault()) applyTint(*rs.tintDraws);
         reg.onChange(*rs.tintDraws, applyTint, this);
     }
+    if (rs.debugRegions != nullptr) {
+        dev_.setRegionsEnabled(rs.debugRegions->asBool());
+        reg.onChange(*rs.debugRegions, [this](const settings::Setting& s) { dev_.setRegionsEnabled(s.asBool()); }, this);
+    }
     if (rs.batchDraws != nullptr) {
         dev_.setBatching(rs.batchDraws->asBool());
         reg.onChange(*rs.batchDraws, [this](const settings::Setting& s) {
@@ -422,8 +426,9 @@ void HalDevice::applyUpscale() {
     else if (m == "jitter_only") mode = enh::UpscaleMode::JitterOnly;
     upscale_->apply(mode, flip);
     if (objectMotion_) {
-        const bool on = enh::usesFsr(mode) && (rs.upscaleObjectMotion == nullptr || rs.upscaleObjectMotion->asBool());
-        objectMotion_->apply(on, on);
+        const std::string_view om = rs.upscaleObjectMotion != nullptr ? rs.upscaleObjectMotion->asEnum() : std::string_view("characters");
+        const bool fsr = enh::usesFsr(mode);
+        objectMotion_->apply(fsr && om != "off", fsr && om == "all");
     }
     applyGbuffer();  // native AA needs the motion vectors
 }

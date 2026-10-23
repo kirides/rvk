@@ -84,6 +84,8 @@ public:
     const VkPhysicalDeviceProperties& properties() const { return props_; }
     const DeviceFeatures& features() const { return features_; }
     const std::string& deviceName() const { return deviceName_; }
+    // VK_EXT_debug_utils is enabled on the instance (object names, command buffer labels)
+    bool debugUtilsAvailable() const { return debugUtils_; }
     // the capability report of this device (core/caps.h): GPU, driver, optional features available / enabled + reasons.
     // `pipelineLibrariesInUse`: [vulkan] pipeline_libraries (the device enables the extension; the pipeline cache decides)
     caps::Report capabilities(bool pipelineLibrariesInUse) const;

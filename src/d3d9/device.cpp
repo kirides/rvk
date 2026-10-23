@@ -5,6 +5,7 @@
 #include <windows.h>
 
 #include <chrono>
+#include <charconv>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -207,6 +208,7 @@ void Device::inject(inject::Point point) {
     if (!passes_.any(point) || injecting_ || !created_) return;  // the common case: nothing registered
     const bool inMain = phases_.view() == scene::View::Main;
     if (!firings_.take(point, inMain)) return;
+    syncPhaseRegions();
     const auto t0 = std::chrono::steady_clock::now();
     endRendering();
     VkCommandBuffer cmd = frames_.cmd();
@@ -223,7 +225,10 @@ void Device::inject(inject::Point point) {
     const auto& list = passes_.passes(point);
     for (std::size_t i = 0; i < list.size(); ++i) {
         ctx.frameBlock = frameBlockAddress();  // an earlier pass may have changed it (e.g. the RT scene's TLAS)
-        list[i].fn(ctx);
+        {
+            RegionScope region(*this, list[i].name.c_str());
+            list[i].fn(ctx);
+        }
         if (gpuTimer_.enabled()) {
             const std::uint32_t slot = frames_.currentSlot();
             gpuTimer_.mark(cmd, slot, vk::GpuTimer::Stream::Main,
@@ -643,6 +648,134 @@ void Device::beginFrame() {
     passIndex_ = 0;
     const VkDescriptorSet set = bindless_.set();
     vkCmdBindDescriptorSets(frames_.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS, bindless_.pipelineLayout(), 0, 1, &set, 0, nullptr);
+    regionsReopen();
+}
+
+// ---- debug regions ----------------------------------------------------------------------------------------------------------
+
+namespace {
+
+void beginLabel(VkCommandBuffer cmd, const char* name) {
+    // a colour per name (stable): the label's hue from a hash, so neighbouring regions differ
+    std::uint32_t h = 2166136261u;
+    for (const char* c = name; *c != 0; ++c) h = (h ^ static_cast<std::uint8_t>(*c)) * 16777619u;
+    const float hue = static_cast<float>(h % 360u) / 60.0f;
+    const float x = 1.0f - std::fabs(std::fmod(hue, 2.0f) - 1.0f);
+    const float rgb[6][3] = {{1, x, 0}, {x, 1, 0}, {0, 1, x}, {0, x, 1}, {x, 0, 1}, {1, 0, x}};
+    const float* c = rgb[static_cast<int>(hue) % 6];
+    VkDebugUtilsLabelEXT l{VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT};
+    l.pLabelName = name;
+    l.color[0] = 0.35f + 0.5f * c[0];
+    l.color[1] = 0.35f + 0.5f * c[1];
+    l.color[2] = 0.35f + 0.5f * c[2];
+    l.color[3] = 1.0f;
+    vkCmdBeginDebugUtilsLabelEXT(cmd, &l);
+}
+
+// "base" or "base #index" into a fixed buffer (no allocation)
+void formatLabel(char (&out)[48], const char* base, std::uint32_t index) {
+    std::size_t n = 0;
+    for (; base[n] != 0 && n < sizeof(out) - 12; ++n) out[n] = base[n];
+    if (index != Device::kNoRegionIndex) {
+        out[n++] = ' ';
+        out[n++] = '#';
+        const auto r = std::to_chars(out + n, out + sizeof(out) - 1, index);
+        n = static_cast<std::size_t>(r.ptr - out);
+    }
+    out[n] = 0;
+}
+
+}  // namespace
+
+void Device::regionBegin(const char* name, std::uint32_t index) {
+    if (!regionsOn_ || regionCount_ >= kMaxRegions) return;
+    OpenRegion& r = regions_[regionCount_++];
+    r.base = name;
+    r.index = index;
+    formatLabel(r.text, name, index);
+    beginLabel(frames_.cmd(), r.text);
+}
+
+void Device::regionEnd() {
+    if (!regionsOn_ || regionCount_ == 0) return;
+    --regionCount_;
+    vkCmdEndDebugUtilsLabelEXT(frames_.cmd());
+}
+
+void Device::setRegionsEnabled(bool on) {
+    const bool can = ctx_.debugUtilsAvailable() && vkCmdBeginDebugUtilsLabelEXT != nullptr && vkCmdEndDebugUtilsLabelEXT != nullptr;
+    on = on && can && created_;
+    if (on == regionsOn_) return;
+    if (on) {
+        regionsOn_ = true;
+        regionsFrame_ = ~0ull;  // a fresh stack
+        regionCount_ = 0;
+        regionsReopen();
+    } else {
+        for (std::uint32_t i = 0; i < regionCount_; ++i) vkCmdEndDebugUtilsLabelEXT(frames_.cmd());
+        regionCount_ = 0;
+        regionsOn_ = false;
+    }
+}
+
+// a submission is about to be made: its command buffer must not end with labels open
+void Device::regionsClose() {
+    if (!regionsOn_) return;
+    for (std::uint32_t i = 0; i < regionCount_; ++i) vkCmdEndDebugUtilsLabelEXT(frames_.cmd());
+}
+
+// a new command buffer: the frame's region (a new frame: a new one) and whatever was open at the submit
+void Device::regionsReopen() {
+    if (!regionsOn_) return;
+    VkCommandBuffer cmd = frames_.cmd();
+    if (regionCount_ == 0 || regionsFrame_ != stats_.frames) {
+        regionCount_ = 0;
+        regionsFrame_ = stats_.frames;
+        phaseKey_ = 0;
+        regionBegin("Frame", static_cast<std::uint32_t>(stats_.frames + 1));
+        return;
+    }
+    for (std::uint32_t i = 0; i < regionCount_; ++i) beginLabel(cmd, regions_[i].text);
+}
+
+// The view / pass regions follow the phase tracker; called when a draw is recorded and before an injection. Cheap when the
+// phase did not change (a key over the open scopes); the wanted path is built in a fixed array.
+void Device::syncPhaseRegions() {
+    if (!regionsOn_ || injecting_ || regionCount_ == 0) return;
+    const scene::Phase cur = phases_.current();
+    std::uint64_t key = 1469598103934665603ull;
+    const auto mixKey = [&](std::uint64_t v) {
+        key ^= v;
+        key *= 1099511628211ull;
+    };
+    for (const scene::Phase& e : phases_.enclosing()) mixKey((static_cast<std::uint64_t>(e.view) << 8) | static_cast<std::uint64_t>(e.pass));
+    mixKey((static_cast<std::uint64_t>(cur.view) << 8) | static_cast<std::uint64_t>(cur.pass));
+    mixKey(phases_.viewsEntered(cur.view));
+    if (key == phaseKey_) return;
+    phaseKey_ = key;
+    flushBatch();  // the batched draws belong to the regions they were issued in
+    struct Want {
+        const char* base;
+        std::uint32_t index;
+    };
+    std::array<Want, scene::PhaseTracker::kMaxDepth + 2> want;
+    std::size_t n = 0;
+    const auto view = [&](scene::View v) {
+        const bool numbered = v == scene::View::Shadow || v == scene::View::Main || v == scene::View::Preview;
+        want[n++] = {scene::name(v), numbered ? phases_.viewsEntered(v) : kNoRegionIndex};
+    };
+    for (const scene::Phase& e : phases_.enclosing()) {
+        if (e.view != scene::View::None && n < want.size() - 2) view(e.view);
+    }
+    if (cur.view != scene::View::None && n < want.size() - 1) {
+        view(cur.view);
+        if (cur.pass != scene::Pass::None) want[n++] = {scene::name(cur.pass), kNoRegionIndex};
+    }
+    // reconcile with the open stack below the frame's region (names are static strings: the pointers identify them)
+    std::uint32_t k = 1;
+    while (k < regionCount_ && k - 1 < n && regions_[k].base == want[k - 1].base && regions_[k].index == want[k - 1].index) ++k;
+    while (regionCount_ > k) regionEnd();
+    for (std::size_t i = k - 1; i < n; ++i) regionBegin(want[i].base, want[i].index);
 }
 
 void Device::gpuMark(const char* what) {
@@ -722,6 +855,7 @@ void Device::submitFrame(VkSemaphore waitAcquire, VkSemaphore signalRendered) {
     }
     gpuMark(signalRendered != VK_NULL_HANDLE ? "present blit + barriers since the last pass"
                                              : "copies + barriers since the last pass (flush)");
+    regionsClose();
     const auto t0 = std::chrono::steady_clock::now();
     frames_.submit(waitAcquire, signalRendered);
     perf_.submitMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -898,6 +1032,8 @@ void Device::present() {
         beginFrame();
         return;
     }
+    std::optional<RegionScope> presentRegion;
+    presentRegion.emplace(*this, "Present");
     VkCommandBuffer cmd = frames_.cmd();
     vk::Image& bb = backBuffer_->image();
     bb.transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -949,7 +1085,10 @@ void Device::present() {
         ri.colorAttachmentCount = 1;
         ri.pColorAttachments = &att;
         vkCmdBeginRendering(cmd, &ri);
-        overlay_->record(cmd, ext);
+        {
+            RegionScope overlayRegion(*this, "Overlay");
+            overlay_->record(cmd, ext);
+        }
         vkCmdEndRendering(cmd);
         b.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
         b.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
@@ -959,6 +1098,7 @@ void Device::present() {
     b.dstAccessMask = VK_ACCESS_2_NONE;
     b.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     vkCmdPipelineBarrier2(cmd, &di);
+    presentRegion.reset();
     submitFrame(acquired, swapchain_.renderedSemaphore(imageIndex));
     presenter_.present(imageIndex);
     ++stats_.presentsQueued;

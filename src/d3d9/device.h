@@ -700,6 +700,19 @@ public:
     // NDC offset to add to posFix for the draw being recorded now: non-zero only for geometry of the main view's scene passes
     // (depth prepass, solid, refracted, alpha) into a target of the scene's size
     void geometryJitter(float& ndcX, float& ndcY) const;
+    // Debug regions (debug.regions): VK_EXT_debug_utils command buffer labels in the frame's command buffer, so graphics
+    // captures (RenderDoc, PIX, Radeon GPU Profiler) show "Frame N > Post > Main #1 > Solid > ..." and every injected pass by
+    // name instead of one flat list of draws. The view / pass regions follow the phase tracker (reconciled when a draw is
+    // recorded and before an injection); regions never span submissions: they are closed before a submit and re-opened in
+    // the next command buffer.
+    // Zero allocation: the open regions live in inline buffers (names are copied into them: a literal or a short-lived
+    // c_str() both do), RegionScope below is the RAII way: `RegionScope r(device, "Name");` or `RegionScope r(device, "Shadow", 2)`
+    // for "Shadow #2". Not for threads other than the render thread.
+    void setRegionsEnabled(bool on);
+    bool regionsEnabled() const { return regionsOn_; }
+    static constexpr std::uint32_t kNoRegionIndex = ~0u;
+    void regionBegin(const char* name, std::uint32_t index = kNoRegionIndex);
+    void regionEnd();
     // texture LOD bias added to the samplers of the draws the jitter applies to (FSR: log2(render / display) - 1, so the
     // temporal filter has the detail to accumulate); 0 = none
     void setGeometryLodBias(float bias) { geometryLodBias_ = bias; }
@@ -1215,6 +1228,20 @@ private:
     VkDeviceAddress frameAddr_ = 0;  // 0 = upload before the next use
     JitterSource jitterSource_;
     float geometryLodBias_ = 0.0f;
+    bool regionsOn_ = false;
+    struct OpenRegion {
+        const char* base = nullptr;  // the name as given (identity of literals: the phase names; compared with `index`)
+        std::uint32_t index = kNoRegionIndex;
+        char text[48] = {};  // the label: base [+ " #index"]
+    };
+    static constexpr std::uint32_t kMaxRegions = 32;
+    std::array<OpenRegion, kMaxRegions> regions_{};  // the labels open in the current command buffer (outermost first; [0] = the frame)
+    std::uint32_t regionCount_ = 0;
+    std::uint64_t regionsFrame_ = ~0ull;  // stats_.frames when regions_[0] began
+    std::uint64_t phaseKey_ = 0;
+    void syncPhaseRegions();
+    void regionsClose();
+    void regionsReopen();
     float renderRatio_ = 1.0f;
     std::array<std::uint32_t, 2> displaySize_{};
     const Texture* substituteFrom_ = nullptr;
@@ -1231,6 +1258,20 @@ private:
     bool overlayIntoBackBuffer_ = false;
     void invalidateRecordingState();
     LiveFrame live_;
+};
+
+// RAII debug region (Device::regionBegin / regionEnd): no allocation, a few instructions when regions are off
+class RegionScope {
+public:
+    RegionScope(Device& device, const char* name, std::uint32_t index = Device::kNoRegionIndex) : device_(device) {
+        device_.regionBegin(name, index);
+    }
+    ~RegionScope() { device_.regionEnd(); }
+    RegionScope(const RegionScope&) = delete;
+    RegionScope& operator=(const RegionScope&) = delete;
+
+private:
+    Device& device_;
 };
 
 }  // namespace rvk::d3d9
