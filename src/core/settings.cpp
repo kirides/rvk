@@ -1199,14 +1199,14 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .key = "lod.view",
         .label = "Object draw distance",
         .category = "Detail",
-        .description = "How far away objects are still drawn before they fade out. 1 = the game's distance. Objects the game "
-                       "has not loaded yet still cannot appear, and farther costs frame rate.",
+        .description = "How far away small objects (barrels, crates, furniture, effects) are still drawn before they fade out "
+                       "and stop popping in. 1 = the game's distances (often only 35-70 m). Farther costs frame rate in "
+                       "towns and a little memory.",
         .type = Type::Float,
-        .defaultValue = 1,
+        .defaultValue = 2,
         .min = 1,
         .max = 3,
         .format = "%.1fx",
-        .flags = Flag::Advanced,
     });
     reg.setDebugSwitch(*r.debugMode);
     if (&reg == &registry()) g_renderer = r;

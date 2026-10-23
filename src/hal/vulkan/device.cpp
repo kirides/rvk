@@ -917,6 +917,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
         dev_.windowResized();
     }
     updateMenuPacing();
+    engine::lod::onPresent();  // a changed object draw distance: the world's cache-in spheres (engine thread)
     dev_.present();
     const auto& s = dev_.stats();
     api::publishPresent(s.frames, api::FrameNumbers{

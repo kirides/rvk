@@ -166,6 +166,15 @@
     /* void eCFrustumDatabase::UpdateFromAppTemplate() (0x6708a0): copies eCRenderSystemAdmin's caps template (+0x70..0x97)   \
        into the database (+0x1590..), among them the view range factor +0x15b4 (always 1.0 in the game) */                     \
     X(frustumUpdateFromApp, L"Engine.dll", "?UpdateFromAppTemplate@eCFrustumDatabase@@QEAAXXZ", false)                        \
+    /* the object draw distance's other gates (lod.md 6): bool eCPrefetchAdmin::GetPrefetchSphere(eCGeometryEntity*,         \
+       bCSphere&) (0x6967e0: the cache-in sphere, radius = CacheInRange or bound + ViewRange / the default EntityROI);       \
+       void eCPrefetchAdmin::SetDefaultCacheInRange(float) (0x695c10: re-evaluates every entity's sphere when the value       \
+       changes); eECullStatus eCFrustumElementItem::CullTree(eCFrustumDatabase&) (0x6711a0: a parent entity's subtree cull    \
+       with its raw ViewRange) */                                                                                              \
+    X(prefetchGetSphere, L"Engine.dll", "?GetPrefetchSphere@eCPrefetchAdmin@@QEAA_NPEAVeCGeometryEntity@@AEAVbCSphere@@@Z", false) \
+    X(prefetchSetDefaultRange, L"Engine.dll", "?SetDefaultCacheInRange@eCPrefetchAdmin@@QEAAXM@Z", false)                       \
+    X(frustumItemCullTree, L"Engine.dll",                                                                                       \
+      "?CullTree@eCFrustumElementItem@@QEAA?AW4eECullStatus@eCFrustumFilter@@AEAVeCFrustumDatabase@@@Z", false)                \
     /* ---- high fps compatibility (engine/high_fps.*, docs/research/fps-limit.md 12): float eCTimer::GetFrameTimeInSeconds()  \
        const (0x4ced50); Game.dll gCCharacterMovement_PS::GetCurrentPosition (0x8dccb0, bCVector by value) and                 \
        SetCurrentPosition(bCVector const&, bool, bool) (0x8edfb0) ---- */                                                      \

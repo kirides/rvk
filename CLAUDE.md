@@ -90,7 +90,7 @@ overlay / settings commands at presents (`key`/`click` post real window messages
 removed by other runs) + `-Mods rvk_debugkeys` (logs the camera each second, no scenario: ends at `-Seconds` or F12); free fly =
 `type minsky` then `key ctrl+insert`, W/A/S/D/Space; never press Ctrl+E (stock crash), F4 (writes the shader pool through
 the junction), Alt_R+F12 (deliberate crash). config.toml's non-default `[vulkan] vsync / max_fps / adapter` lock the matching player setting.
-Detail distances (docs/research/lod.md; settings category Detail, player defaults trees/objects 2x, test baseline 1x): `-Setting 'lod.trees=3','lod.meshes=3','lod.view=1.5'`; rvk.log `engine: lod:` (the game's tree limits / mesh ranges), `detail distances`, `billboard fade variant`.
+Detail distances (docs/research/lod.md; settings category Detail, player defaults trees/objects/view 2x, test baseline 1x; `lod.view` also scales the cache-in spheres and CullTree, lod.md 6): `-Setting 'lod.trees=3','lod.meshes=3','lod.view=1.5'`; rvk.log `engine: lod:` (the game's tree limits / mesh ranges), `detail distances`, `billboard fade variant`.
 Enhanced shadows (docs/research/shadows.md; settings category Shadows, player default on, test baseline off): `-Setting 'shadows.enabled=true'` (+
 `shadows.filter=low|medium|high`, `shadows.softness`, `shadows.cascade_blend`, `shadows.fade`, `shadows.bias`; the engine's
 cascades `shadows.map_size=auto|game|1024|2048|4096`, `shadows.range` (m, 0 = auto: 100 m / 4096² with the mask on, else

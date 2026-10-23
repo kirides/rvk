@@ -23,6 +23,19 @@ TEST(lod_mesh_ranges_scale_and_restore) {
     CHECK(lod::scaleRanges(four, 4, 1.5f, saved) == 3 && four[2] == 4.5f);
 }
 
+TEST(lod_cache_in_radius) {
+    namespace lod = engine::lod;
+    // ViewRange 7000, bound 300: the game's radius 7300 -> x3 = 300 + 21000
+    CHECK(lod::scaledCacheInRadius(7300.0f, 0.0f, 7000.0f, 4000.0f, 3.0f) == 21300.0f);
+    // CacheInRange set: the radius is CacheInRange alone -> scaled
+    CHECK(lod::scaledCacheInRadius(9000.0f, 9000.0f, 7000.0f, 4000.0f, 2.0f) == 18000.0f);
+    // neither: bound + the default range (EntityROI)
+    CHECK(lod::scaledCacheInRadius(4100.0f, 0.0f, 0.0f, 4000.0f, 1.5f) == 6100.0f);
+    // x1 and no range at all: unchanged
+    CHECK(lod::scaledCacheInRadius(7300.0f, 0.0f, 7000.0f, 4000.0f, 1.0f) == 7300.0f);
+    CHECK(lod::scaledCacheInRadius(100.0f, 0.0f, 0.0f, 0.0f, 3.0f) == 100.0f);
+}
+
 TEST(lod_scales_roundtrip) {
     namespace lod = engine::lod;
     const lod::Scales before = lod::scales();

@@ -1,6 +1,6 @@
 # Detail distances (LOD)
 
-Settings `lod.trees` / `lod.meshes` / `lod.view` (Graphics tab, category Detail; player defaults 2 / 2 / 1, test baseline in
+Settings `lod.trees` / `lod.meshes` / `lod.view` (Graphics tab, category Detail; player defaults 2 / 2 / 2, test baseline in
 `scripts/run.ps1` = 1 / 1 / 1). Code: `src/engine/lod.{h,cpp}`, `Device::lodModule` (`src/d3d9/device.cpp`),
 `GlslOptions::inputOverrides` (`src/shader/glsl.h`), `abi::kFrameParamLod` = 1. Commit 916040b. **[C]** = read in the
 decompilation (Engine.dll / Game.dll RVAs, image base 0x180000000) or measured in the game, **[I]** = inferred.
@@ -74,6 +74,38 @@ rvkcompare spots jungle, beach_sun, shadow_inland_far at x1 vs x3 (`out\lod\lod1
 * 4 billboard VS variants built; no errors, no validation messages;
 * fps capped at 80 (Radeon Chill) in both, draws ~1500-1600 in both: **cost unmeasured** (needs `-Exe RisenTest.exe -Perf`).
 
-Open: a motion test across the transition at x3; cost in dense forests; `lod.view` in game (only x1 tested); whether
-DoRender's `UpdateFromAppTemplate` runs every frame (otherwise a `lod.view` change applies at the next configuration apply);
-`CacheInRange` streaming limits for `lod.view` > 1.
+Open: a motion test across the transition at x3; cost in dense forests.
+
+## 6. Object draw distance beyond the cache-in range (2026-10-23)
+
+User report: `lod.view` had no visible effect beyond ~70 m (barrels on a building popped in at the same place at x3). Cause
+[C]: the frustum factor (+0x15b4) is only the last of three gates; the other two use the entity's raw range. Dumps:
+`B:\DevDrive\risen-ghidra\viewdist\` (`prefetch_dump.txt`, `range_dump.txt`, `scene_opts_dump.txt`, `prerender_dump.txt`).
+
+1. **Cache-in.** `eCFrustumDatabase::ExtractFromEntity` 0x66d750 only takes entities with flag 0x20 (cached in, set by
+   `eCGeometryEntity::OnCacheIn` 0x6a9720). `eCApplication::OnPreRender` 0x4c0650 -> `eCPrefetchAdmin::CacheEntities` 0x6969c0
+   (prefetch admin = scene admin +0xe8, centre = the camera +0x90): an entity is cached in while the camera is inside its
+   sphere (`OnTestCacheInPos` 0x696530). **`GetPrefetchSphere` 0x6967e0**: radius = CacheInRange (+0xd0) when > 0, else
+   bound radius + (ViewRange +0xcc when > 0, else the default range prefetch +0x28 = `/Engine/Scene/EntityROI`, 4000,
+   `SetDefaultCacheInRange` 0x695c10). No view factor: at x3 the entity is still not resident beyond its own range.
+2. **Subtree cull.** `eCFrustumDatabase::ExtractFromEntities` 0x66f790 culls entities with children (flag 0x10000) with
+   **`eCFrustumElementItem::CullTree` 0x6711a0**, which passes the raw ViewRange to `CullCamera` (CullNode 0x6710e0 multiplies
+   by +0x15b4).
+3. `UpdateFromAppTemplate` runs every frame from `DoRender` (unconditional), so the +0x15b4 post-hook holds.
+
+Other facts: the default ViewRange is 0 (`eCGeometryEntity::Invalidate` 0x6a6cf0; property "Culling/ViewRange", CacheInRange
+"Rendering/CacheInRange": world / template data). An entity with ViewRange 0 has no distance cull, only the EntityROI
+cache-in (bound + 40 m). `CalculateFadeOut` 0x671220 fades over the last 10 % of R (`DAT_1809f1674` = 0.9), so a scaled range
+keeps its fade. The far clip (15000 / 30000 / 60000 by ViewDistance) is the only global limit. Ranges seen (rvk.log `engine:
+lod: entity ViewRange ...`, logged unscaled): 3500, 4500 (props: 35-45 m + bound), 150000 (CacheInRange = ViewRange), 0.
+
+**Built**: post-hook on `GetPrefetchSphere` adds `(f - 1) x` the range term (`scaledCacheInRadius`, unit-tested); `CullTree`
+scales the entity's ViewRange by the database's factor for the call; a factor change re-evaluates every entity's sphere at
+the next present (`SetDefaultCacheInRange(d + 1)` then `(d)`: the engine's own walk re-inserts the changed spheres; the
+prefetch admin is the `this` seen in the hook). `lod.view` is a normal (not advanced) setting now, player default 2x (test
+baseline 1x).
+
+Measured (rvkcompare harbour_mouth / harbour_docks / swamp_camp, x1 vs x3, `out\viewdist\`): props appear on the far quay
+(a stall, crates, the quay's wave-splash effect), harbour_mouth 347 -> 436 draws, harbour_docks 1019 -> 1135; ~1 % of the
+harbour_mouth pixels change strongly. Cost: on the beach approach the draws went from ~1465 to ~2750 at x3 (170 -> 107 fps
+uncapped, RX 7900 XTX); GPU memory allocated 635 -> 792 MiB.

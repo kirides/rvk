@@ -1,10 +1,15 @@
 #include "engine/lod.h"
 
+#include <windows.h>
+
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <set>
 #include <tuple>
+#include <utility>
 
 #include <spdlog/spdlog.h>
 
@@ -121,7 +126,96 @@ void detourUpdateFromApp(void* self) {
     if (game == 1.0f) setField(self, kViewFactor, g_view.load(std::memory_order_relaxed));
 }
 
+// ---- the object draw distance's other gates (lod.md 6) ----
+// eCGeometryEntity: +0x28 flags, +0xcc ViewRange, +0xd0 CacheInRange; eCPrefetchAdmin +0x28 the default cache-in range
+// (/Engine/Scene/EntityROI, 4000); eCFrustumElementItem +0 the entity
+constexpr std::size_t kEntityViewRange = 0xcc;
+constexpr std::size_t kEntityCacheInRange = 0xd0;
+constexpr std::size_t kPrefetchDefaultRange = 0x28;
+
+std::atomic<void*> g_prefetchAdmin{nullptr};  // the scene's eCPrefetchAdmin, seen in GetPrefetchSphere
+std::atomic<bool> g_refreshPending{false};
+std::mutex g_rangeLogMutex;
+std::set<std::pair<float, float>> g_entityRanges;  // distinct (ViewRange, CacheInRange), diagnostics
+std::atomic<std::size_t> g_entityRangesLogged{0};
+
+using PrefetchSphereFn = bool (*)(void* self, void* entity, float* sphere);
+Hook<PrefetchSphereFn> g_prefetchSphere;
+
+// An entity is drawn only while cached in: the camera inside this sphere (eCPrefetchAdmin::CacheEntities ->
+// OnTestCacheInPos). Its radius is the entity's unscaled range, so it is scaled with lod.view too.
+bool detourPrefetchSphere(void* self, void* entity, float* sphere) {
+    const bool ok = g_prefetchSphere.original(self, entity, sphere);
+    if (!ok || self == nullptr || entity == nullptr || sphere == nullptr) return ok;
+    g_prefetchAdmin.store(self, std::memory_order_relaxed);
+    const float viewRange = field<float>(entity, kEntityViewRange);
+    const float cacheIn = field<float>(entity, kEntityCacheInRange);
+    if (g_entityRangesLogged.load(std::memory_order_relaxed) < kLogDistinct) {
+        const std::lock_guard lock(g_rangeLogMutex);
+        if (g_entityRanges.size() < kLogDistinct && g_entityRanges.emplace(viewRange, cacheIn).second) {
+            g_entityRangesLogged.store(g_entityRanges.size(), std::memory_order_relaxed);
+            spdlog::info("engine: lod: entity ViewRange {:.0f}, CacheInRange {:.0f} (cache-in radius {:.0f}, default range {:.0f})",
+                         viewRange, cacheIn, sphere[0], field<float>(self, kPrefetchDefaultRange));
+        }
+    }
+    const float s = g_view.load(std::memory_order_relaxed);
+    if (s != 1.0f) {
+        sphere[0] = scaledCacheInRadius(sphere[0], cacheIn, viewRange, field<float>(self, kPrefetchDefaultRange), s);
+    }
+    return ok;
+}
+
+using CullTreeFn = int (*)(void* self, void* db);
+Hook<CullTreeFn> g_cullTree;
+
+// A parent entity culls its whole subtree with its raw ViewRange (CullNode multiplies by the database's factor, CullTree
+// does not): scaled by the same factor for the call
+int detourCullTree(void* self, void* db) {
+    void* entity = self != nullptr ? field<void*>(self, 0) : nullptr;
+    const float factor = db != nullptr ? field<float>(db, kViewFactor) : 1.0f;
+    if (entity == nullptr || factor == 1.0f) return g_cullTree.original(self, db);
+    const float range = field<float>(entity, kEntityViewRange);
+    if (range <= 0.0f) return g_cullTree.original(self, db);
+    setField(entity, kEntityViewRange, range * factor);
+    const int r = g_cullTree.original(self, db);
+    setField(entity, kEntityViewRange, range);
+    return r;
+}
+
+using SetDefaultRangeFn = void (*)(void* self, float range);
+
+// SEH only: SetDefaultCacheInRange re-evaluates every entity's sphere when the value changes (a different value, then back)
+bool refreshSpheres(void* admin, SetDefaultRangeFn fn) {
+    __try {
+        const float d = field<float>(admin, kPrefetchDefaultRange);
+        fn(admin, d + 1.0f);
+        fn(admin, d);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 }  // namespace
+
+float scaledCacheInRadius(float radius, float cacheInRange, float viewRange, float defaultRange, float scale) {
+    // GetPrefetchSphere: CacheInRange when set, else the bounding radius + (ViewRange, else the default range)
+    const float term = cacheInRange > 0.0f ? cacheInRange : viewRange > 0.0f ? viewRange : defaultRange;
+    return term > 0.0f ? radius + (scale - 1.0f) * term : radius;
+}
+
+void onPresent() {
+    if (!g_refreshPending.load(std::memory_order_relaxed)) return;
+    void* admin = g_prefetchAdmin.load(std::memory_order_relaxed);
+    const auto fn = reinterpret_cast<SetDefaultRangeFn>(sym().prefetchSetDefaultRange);
+    if (admin == nullptr || fn == nullptr) return;  // no world yet: its entities get the current factor when they are added
+    g_refreshPending.store(false, std::memory_order_relaxed);
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool ok = refreshSpheres(admin, fn);
+    spdlog::info("engine: lod: cache-in spheres re-evaluated for object draw distance x{:.2f}{} ({:.1f} ms)",
+                 g_view.load(std::memory_order_relaxed), ok ? "" : ": faulted",
+                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+}
 
 int scaleRanges(float* ranges, int count, float scale, float* saved) {
     const int n = count - 1 < kMaxMeshLods ? count - 1 : kMaxMeshLods;
@@ -139,7 +233,7 @@ void restoreRanges(float* ranges, int n, const float* saved) {
 void setScales(const Scales& s) {
     g_trees.store(s.trees, std::memory_order_relaxed);
     g_meshes.store(s.meshes, std::memory_order_relaxed);
-    g_view.store(s.view, std::memory_order_relaxed);
+    if (g_view.exchange(s.view, std::memory_order_relaxed) != s.view) g_refreshPending.store(true, std::memory_order_relaxed);
 }
 
 Scales scales() {
@@ -164,6 +258,15 @@ bool install() {
     if (!g_updateFromApp.install("eCFrustumDatabase::UpdateFromAppTemplate", reinterpret_cast<UpdateFromAppFn>(s.frustumUpdateFromApp),
                                  &detourUpdateFromApp)) {
         spdlog::warn("engine: eCFrustumDatabase::UpdateFromAppTemplate not hooked: lod.view has no effect");
+        ok = false;
+    }
+    if (!g_prefetchSphere.install("eCPrefetchAdmin::GetPrefetchSphere", reinterpret_cast<PrefetchSphereFn>(s.prefetchGetSphere),
+                                  &detourPrefetchSphere)) {
+        spdlog::warn("engine: eCPrefetchAdmin::GetPrefetchSphere not hooked: lod.view ends at the game's cache-in range");
+        ok = false;
+    }
+    if (!g_cullTree.install("eCFrustumElementItem::CullTree", reinterpret_cast<CullTreeFn>(s.frustumItemCullTree), &detourCullTree)) {
+        spdlog::warn("engine: eCFrustumElementItem::CullTree not hooked: grouped objects keep the game's view range");
         ok = false;
     }
     return ok;
