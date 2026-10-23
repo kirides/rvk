@@ -143,9 +143,9 @@ with the probe lookup + the world position from `gl_FragCoord` + depth / the int
 * **P8 screen probes** (GI-1.0 style): probes per 8x8 tile after the z pre-pass, short screen march then ray query,
   terminating into DDGI; probe-space filtering; interpolated in the material PS.
 * **Later / optional**: a denoiser of our own (SVGF / A-SVGF style), ReSTIR GI with a world radiance cache, materials at hits
-  through RT pipelines (section 8), path tracing as an experiment.
+  through RT pipelines (section 7), path tracing as an experiment.
 
-## 8. Beyond ray queries: what RT pipelines and other techniques would add (2026-10-23)
+## 7. Beyond ray queries: what RT pipelines and other techniques would add (2026-10-23)
 
 The ray API is not the bottleneck: what limits the options is the frame data (G-buffer, motion vectors, a denoiser) and
 complete geometry. Ray query was chosen as the floor; this GPU / driver also offer `VK_KHR_ray_tracing_pipeline` (caps report:
@@ -168,7 +168,7 @@ complete geometry. Ray query was chosen as the floor; this GPU / driver also off
 Prerequisites for anything beyond DDGI / screen probes, in the order of Stage A-C: characters in the RT scene (P3), the thin
 G-buffer (P5), motion vectors (P6), a denoiser of our own (NRD's licence does not fit an MIT project), materials at hits (RT
 pipelines). Path tracing proper is a multi-milestone project whose GPU cost is several times today's frame.
-## 9. Risks / open questions
+## 8. Risks / open questions
 
 * Light leaks: single-sided walls / roofs in the harbour town, coplanar duplicates, interiors with geometry missing behind the
   camera (no cascades indoors) -> interior volumes used exclusively by indoor pixels (`f < 1`), backface classification.
