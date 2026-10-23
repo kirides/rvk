@@ -285,6 +285,11 @@ bool Context::createDevice(bool withRayTracing) {
     if (props_.apiVersion < VK_API_VERSION_1_4 || hasExtension(exts, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME)) {
         enabled.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
     }
+    // core since 1.1, enabled by name too: the FidelityFX DLL's backend calls vkGetBufferMemoryRequirements2KHR (fetched by
+    // that name from vkGetDeviceProcAddr, null without the extensions) when the GPU lists dedicated allocation
+    for (const char* name : {VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME, VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME}) {
+        if (hasExtension(exts, name)) enabled.push_back(name);
+    }
     // exclusive fullscreen (setting vulkan.fullscreen = exclusive): only changes swapchains created with its structures
     fullScreenExclusiveDevice_ = hasExtension(exts, VK_EXT_FULL_SCREEN_EXCLUSIVE_EXTENSION_NAME);
     features_.fullScreenExclusive = fullScreenExclusiveDevice_ && surfaceCaps2_;
@@ -310,6 +315,8 @@ bool Context::createDevice(bool withRayTracing) {
     features_.vertexStores = sup2.features.vertexPipelineStoresAndAtomics == VK_TRUE;
     f2.features.shaderStorageImageExtendedFormats = sup2.features.shaderStorageImageExtendedFormats;
     features_.storageImageExtendedFormats = sup2.features.shaderStorageImageExtendedFormats == VK_TRUE;
+    // 16-bit arithmetic: the FidelityFX DLL's shader variants (fp16 path) when the GPU has it (vk/fsr.h)
+    f2.features.shaderInt16 = sup2.features.shaderInt16;
     features_.samplerAnisotropy = sup2.features.samplerAnisotropy == VK_TRUE;
     features_.maxAnisotropy = features_.samplerAnisotropy ? props_.limits.maxSamplerAnisotropy : 1.0f;
 
@@ -325,6 +332,8 @@ bool Context::createDevice(bool withRayTracing) {
     f12.bufferDeviceAddress = VK_TRUE;
     f12.scalarBlockLayout = VK_TRUE;
     f12.hostQueryReset = sup12.hostQueryReset;
+    f12.shaderFloat16 = sup12.shaderFloat16;
+    features_.shaderFloat16Int16 = sup12.shaderFloat16 == VK_TRUE && sup2.features.shaderInt16 == VK_TRUE;
     features_.hostQueryReset = sup12.hostQueryReset == VK_TRUE;
     VkPhysicalDeviceVulkan13Features f13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
     f13.dynamicRendering = VK_TRUE;

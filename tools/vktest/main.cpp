@@ -9,6 +9,8 @@
 //   purpose (two copies into one buffer) and passes when synchronization validation reports it (proves the check is live)
 //   rvk_vktest --rt: the optional ray tracing tier: BLAS -> TLAS -> GL_EXT_ray_query compute (shaders/test/rt_query.comp),
 //   pixels checked; and a device with rt.allow off (docs/research/raytracing.md). SKIP (exit 0) on a GPU without it
+//   rvk_vktest --fsr [dll]: FSR 3.1 through the signed FFX API DLL (third_party/amd_fidelityfx): load, create a native AA
+//   context, dispatch the jitter sequence on a constant image under validation, output checked; SKIP (exit 0) without the DLL
 //   rvk_vktest --shader-stats: the driver's register / spill / instruction statistics of the water pixel shader (in a
 //   pipeline like the renderer's) and of the ray-traced reflections' compute pass (VK_KHR_pipeline_executable_properties)
 //
@@ -18,6 +20,9 @@
 // (pixel centres on integers: the half-pixel fix-up must give 4i-2, not 4i). Exit code 0 = pass, no validation errors.
 
 #include <cmath>
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -41,6 +46,7 @@
 #include "vk/bindless.h"
 #include "vk/context.h"
 #include "vk/frames.h"
+#include "vk/fsr.h"
 #include "vk/image.h"
 #include "vk/passes.h"
 #include "vk/pipeline.h"
@@ -552,11 +558,163 @@ int shaderStats() {
     return failures == 0 ? 0 : 1;
 }
 
+// prints where an access violation happened (module + offset of the top frames): the FFX DLL has no symbols here
+long __stdcall crashReport(EXCEPTION_POINTERS* e) {
+    if (e->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
+    void* frames[24];
+    const USHORT n = CaptureStackBackTrace(0, 24, frames, nullptr);
+    std::printf("CRASH: access violation at %p (%s address %p)\n", e->ExceptionRecord->ExceptionAddress,
+                e->ExceptionRecord->ExceptionInformation[0] != 0 ? "write" : "read",
+                reinterpret_cast<void*>(e->ExceptionRecord->ExceptionInformation[1]));
+    auto where = [](void* a) {
+        HMODULE mod = nullptr;
+        char name[MAX_PATH] = "?";
+        if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                static_cast<const char*>(a), &mod)) {
+            return false;
+        }
+        GetModuleFileNameA(mod, name, MAX_PATH);
+        std::printf("  %s + 0x%llx\n", name, static_cast<unsigned long long>(static_cast<char*>(a) - reinterpret_cast<char*>(mod)));
+        return true;
+    };
+    // the faulting thread's stack: words pointing into a loaded module are mostly return addresses
+    const auto* sp = reinterpret_cast<void**>(e->ContextRecord->Rsp);
+    for (int i = 0, shown = 0; i < 512 && shown < 14; ++i) {
+        if (sp[i] != nullptr && where(sp[i])) ++shown;
+    }
+    (void)frames;
+    (void)n;
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// FSR 3.1 native AA through the FFX API DLL on a constant image: every pixel of the output must keep the input colour.
+int fsrTest(const std::string& dllArg, bool validation) {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);  // a crash inside the DLL must not swallow the output
+    AddVectoredExceptionHandler(1, crashReport);
+    constexpr std::uint32_t kW = 256, kH = 144;
+    const std::filesystem::path dll = dllArg.empty() ? std::filesystem::path(RVK_FFX_DLL) : std::filesystem::path(dllArg);
+    if (!std::filesystem::exists(dll)) {
+        std::printf("SKIP: %s not found\n", dll.string().c_str());
+        return 0;
+    }
+    vk::Context ctx;
+    if (!ctx.create({validation, -1, "rvk_vktest"})) return 2;
+    vk::Frames frames;
+    if (!frames.create(ctx)) return 2;
+
+    vk::Fsr fsr;
+    int failures = 0;
+    auto check = [&](bool ok, const char* what) {
+        if (!ok) {
+            std::printf("FAIL: %s\n", what);
+            ++failures;
+        }
+        return ok;
+    };
+    if (check(fsr.load(dll), "load the DLL")) {
+        std::printf("versions: %s\n", fsr.versions(ctx).c_str());
+        vk::FsrCreateInfo ci;
+        ci.maxRenderSize = ci.maxUpscaleSize = {kW, kH};
+        ci.hdr = true;
+        ci.debugChecking = true;
+        if (check(fsr.createContext(ctx, ci), "ffxCreateContext")) {
+            std::printf("provider: %s\n", fsr.providerName().c_str());
+            const int phases = fsr.jitterPhaseCount(kW, kW);
+            std::printf("jitter phases (native AA): %d\n", phases);
+            check(phases > 0, "jitter phase count");
+
+            const VkImageUsageFlags inUsage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+            vk::Image color, depth, motion, output;
+            color.create(ctx, {VK_IMAGE_TYPE_2D, VK_FORMAT_R16G16B16A16_SFLOAT, {kW, kH, 1}, 1, 1, false, inUsage, {}, "fsr color"});
+            depth.create(ctx, {VK_IMAGE_TYPE_2D, VK_FORMAT_R32_SFLOAT, {kW, kH, 1}, 1, 1, false, inUsage, {}, "fsr depth"});
+            motion.create(ctx, {VK_IMAGE_TYPE_2D, VK_FORMAT_R16G16_SFLOAT, {kW, kH, 1}, 1, 1, false, inUsage, {}, "fsr motion"});
+            output.create(ctx, {VK_IMAGE_TYPE_2D, VK_FORMAT_R16G16B16A16_SFLOAT, {kW, kH, 1}, 1, 1, false,
+                                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, {},
+                                "fsr output"});
+            VkBuffer readback = VK_NULL_HANDLE;
+            VmaAllocation readbackAlloc = VK_NULL_HANDLE;
+            VmaAllocationInfo readbackInfo{};
+            {
+                VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+                bci.size = kW * kH * 8;
+                bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                VmaAllocationCreateInfo aci{};
+                aci.usage = VMA_MEMORY_USAGE_AUTO;
+                aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+                vmaCreateBuffer(ctx.allocator(), &bci, &aci, &readback, &readbackAlloc, &readbackInfo);
+            }
+            constexpr int kFrames = 12;
+            for (int frame = 0; frame < kFrames; ++frame) {
+                frames.begin();
+                VkCommandBuffer cmd = frames.cmd();
+                const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                auto clear = [&](vk::Image& img, VkClearColorValue v) {
+                    img.transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+                    vkCmdClearColorImage(cmd, img.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &v, 1, &range);
+                };
+                clear(color, {{0.25f, 0.5f, 0.75f, 1.0f}});
+                clear(depth, {{0.5f, 0.0f, 0.0f, 0.0f}});
+                clear(motion, {{0.0f, 0.0f, 0.0f, 0.0f}});
+                vk::FsrDispatch d;
+                d.cmd = cmd;
+                d.color = &color;
+                d.depth = &depth;
+                d.motion = &motion;
+                d.output = &output;
+                d.renderSize = d.upscaleSize = {kW, kH};
+                d.reset = frame == 0;
+                d.cameraNear = 1.0f;
+                d.cameraFar = 1000.0f;
+                d.cameraFovY = 1.0f;
+                fsr.jitterOffset(frame % std::max(phases, 1), phases, d.jitterX, d.jitterY);
+                check(fsr.dispatch(d), "ffxDispatch");
+                if (frame == kFrames - 1) {
+                    output.transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+                    VkBufferImageCopy back{};
+                    back.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                    back.imageExtent = {kW, kH, 1};
+                    vkCmdCopyImageToBuffer(cmd, output.image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback, 1, &back);
+                }
+                frames.submit(VK_NULL_HANDLE, VK_NULL_HANDLE);
+                frames.waitIdle();
+            }
+            const auto* px = static_cast<const std::uint16_t*>(readbackInfo.pMappedData);
+            const float want[3] = {0.25f, 0.5f, 0.75f};
+            int bad = 0;
+            float worst = 0.0f;
+            for (std::uint32_t i = 0; i < kW * kH; ++i) {
+                for (int c = 0; c < 3; ++c) {
+                    const float got = halfToFloat(px[i * 4 + c]);
+                    const float e = std::fabs(got - want[c]);
+                    worst = std::max(worst, e);
+                    if (e > 0.02f && bad++ < 4) std::printf("pixel %u channel %d = %f (want %f)\n", i, c, got, want[c]);
+                }
+            }
+            std::printf("output: %d channel(s) off, worst error %f\n", bad, worst);
+            check(bad == 0, "output keeps the constant input");
+            vmaDestroyBuffer(ctx.allocator(), readback, readbackAlloc);
+            frames.retire([&] {});
+            color.destroy(ctx);
+            depth.destroy(ctx);
+            motion.destroy(ctx);
+            output.destroy(ctx);
+        }
+        fsr.destroy();
+    }
+    frames.destroy();
+    const std::uint32_t verrors = ctx.validationErrors();
+    ctx.destroy();
+    if (verrors != 0) ++failures;
+    std::printf("%s: fsr: %d failure(s), %u validation error(s)\n", failures == 0 ? "PASS" : "FAIL", failures, verrors);
+    return failures == 0 ? 0 : 1;
+}
+
 int main(int argc, char** argv) {
     std::string out = "vktest.png";
     bool validation = true;
     std::string gplDir;
-    bool passes = false, hazard = false, rtMode = false;
+    bool passes = false, hazard = false, rtMode = false, fsrMode = false;
+    std::string fsrDll;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--no-validation") {
@@ -569,6 +727,9 @@ int main(int argc, char** argv) {
             hazard = true;
         } else if (a == "--rt") {
             rtMode = true;
+        } else if (a == "--fsr") {
+            fsrMode = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') fsrDll = argv[++i];
         } else if (a == "--shader-stats") {
             return shaderStats();
         } else {
@@ -583,6 +744,9 @@ int main(int argc, char** argv) {
     }
     if (rtMode) {
         return rtTest();
+    }
+    if (fsrMode) {
+        return fsrTest(fsrDll, validation);
     }
     if (!devtools::D3DX::get().available()) {
         std::printf("d3dx9_39.dll not available\n");

@@ -303,6 +303,8 @@ add_library(rvk_core STATIC
     src/vk/formats.cpp
     src/vk/formats.h
     src/vk/frames.cpp
+    src/vk/fsr.cpp
+    src/vk/fsr.h
     src/vk/frames.h
     src/vk/mesh_arena.cpp
     src/vk/mesh_arena.h
@@ -335,6 +337,8 @@ add_library(rvk_core STATIC
 target_include_directories(rvk_core PUBLIC src include)
 target_include_directories(rvk_core PRIVATE ${RVK_GENERATED_DIR})
 target_include_directories(rvk_core PRIVATE ${STB_INCLUDE_DIR} third_party/imgui_vulkan)
+# AMD FidelityFX API headers (MIT); the signed DLL is loaded at run time, never linked (third_party/amd_fidelityfx)
+target_include_directories(rvk_core PRIVATE third_party/amd_fidelityfx/ffx-api/include)
 # volk is compiled here (not vcpkg's volk.lib): it needs VK_USE_PLATFORM_WIN32_KHR for the Win32 surface entry points
 target_compile_definitions(rvk_core PUBLIC VK_NO_PROTOTYPES VK_USE_PLATFORM_WIN32_KHR VMA_STATIC_VULKAN_FUNCTIONS=0 VMA_DYNAMIC_VULKAN_FUNCTIONS=0)
 target_link_libraries(rvk_core PUBLIC
@@ -397,6 +401,7 @@ rvk_warnings(rvk_shadertool)
 add_executable(rvk_vktest tools/vktest/main.cpp tools/common/d3dx.h)
 target_include_directories(rvk_vktest PRIVATE tools ${STB_INCLUDE_DIR})
 target_link_libraries(rvk_vktest PRIVATE rvk_core)
+target_compile_definitions(rvk_vktest PRIVATE RVK_FFX_DLL="${CMAKE_SOURCE_DIR}/third_party/amd_fidelityfx/presigned_dll/amd_fidelityfx_vk.dll")
 rvk_warnings(rvk_vktest)
 
 # rvk_shadereq: two pixel shaders on the GPU with identical random inputs, outputs compared (translated game shader vs the GLSL port)
@@ -432,6 +437,8 @@ if(RVK_BUILD_TESTS)
     set_tests_properties(rvk_vktest_passes PROPERTIES LABELS gpu)
     add_test(NAME rvk_vktest_rt COMMAND rvk_vktest --rt)
     set_tests_properties(rvk_vktest_rt PROPERTIES LABELS gpu)
+    add_test(NAME rvk_vktest_fsr COMMAND rvk_vktest --fsr)
+    set_tests_properties(rvk_vktest_fsr PROPERTIES LABELS gpu)
     add_test(NAME rvk_d3d9test COMMAND rvk_d3d9test)
     set_tests_properties(rvk_d3d9test PROPERTIES LABELS gpu)
 endif()
