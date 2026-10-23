@@ -218,6 +218,9 @@ private:
     BufferCopyState copies_;  // writes since the last GPU copy, what the next use copies, the generation
     std::uint64_t id_ = newResourceId();
     Binding binding_;
+    // gpu()'s fast path (most draws): a static copy that no lock touched since it was made; binding_ is final then.
+    // Cleared under mutex_ by lock() / orphan(), set by gpu() after a static copy
+    std::atomic<bool> cleanStatic_{false};
     std::uint8_t* boundPtr_ = nullptr;  // CPU address of the frame's ring copy (dynamic buffers)
     VkBuffer static_ = VK_NULL_HANDLE;
     VmaAllocation staticAlloc_ = VK_NULL_HANDLE;

@@ -390,6 +390,7 @@ Buffer::~Buffer() {
 }
 
 void Buffer::orphan() {
+    cleanStatic_.store(false, std::memory_order_release);
     if (static_ != VK_NULL_HANDLE) {
         auto* ctx = &dev_.ctx();
         VkBuffer b = static_;
@@ -407,6 +408,7 @@ void* Buffer::lock(std::uint32_t offset, std::uint32_t size, std::uint32_t flags
     }
     const std::lock_guard lock(mutex_);
     copies_.lock(offset, size, flags, size_);
+    cleanStatic_.store(!copies_.dirty() && cleanStatic_.load(std::memory_order_relaxed), std::memory_order_release);
     return cpu_.data() + offset;
 }
 
@@ -420,6 +422,7 @@ bool Buffer::readCpu(std::uint32_t offset, std::uint32_t size, void* out) {
 }
 
 Buffer::Binding Buffer::gpu() {
+    if (cleanStatic_.load(std::memory_order_acquire)) return binding_;
     const std::lock_guard lock(mutex_);
     const std::uint64_t frame = dev_.frameValue();
     const bool ring = dynamic() || pool_ == POOL_SYSTEMMEM;
@@ -488,6 +491,7 @@ Buffer::Binding Buffer::gpu() {
         // observers (enh/rt_scene) forget what they built from the old copy (its address dies with it)
         if (renamed) dev_.notifyBufferChanged(id_);
     }
+    if (static_ != VK_NULL_HANDLE && !copies_.dirty()) cleanStatic_.store(true, std::memory_order_release);
     return binding_;
 }
 

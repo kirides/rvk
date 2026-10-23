@@ -108,6 +108,9 @@ public:
         std::uint64_t sightFrame = 0;
         std::uint64_t firstFrame = 0, lastFrame = 0;
         double lastTime = 0.0;
+        // age()'s world sphere, computed once the BLAS bounds are known (the rows never change: they are part of the key)
+        Sphere sphere{};
+        bool sphereValid = false;
     };
     struct Counters {
         std::uint64_t added = 0, replaced = 0, aged = 0, tooFar = 0, capped = 0, dropped = 0;

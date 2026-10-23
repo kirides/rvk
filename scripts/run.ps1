@@ -32,6 +32,9 @@ param(
     # [debug] present_stalls (any mode): sample the presenting thread's stack while a present lasts longer than this many ms;
     # "diag:" lines in rvk.log every 5 s name the modules / functions the time is spent in (docs/research/fps-limit.md)
     [double]$PresentStalls = 0,
+    # [debug] cpu_profile (Vulkan mode): a sampled flat profile of the engine thread between presents every 5 s (`diag: profile`
+    # lines: per module, self and inclusive per function; docs/research/performance.md 8)
+    [switch]$CpuProfile,
     # [debug] environment: 'NAME=VALUE' variables set by the proxy in DllMain (run.ps1's own environment does not reach the
     # game), e.g. -Environment 'VK_LOADER_LAYERS_DISABLE=~implicit~' or 'DISABLE_VULKAN_OBS_CAPTURE=1'
     [string[]]$Environment = @(),
@@ -86,6 +89,9 @@ param(
     # start a renamed copy of Risen.exe in the test copy (risen-spass test-run.ps1 -Exe; created when missing), e.g.
     # -Exe RisenTest.exe: escapes per-executable driver profiles such as an AMD Radeon Chill cap (docs/research/fps-limit.md)
     [string]$Exe = 'Risen.exe',
+    # a savegame copied over the test copy's QuickSave.save before the start (read only: e.g. a player's save; scenario
+    # rvk_perfsave quick-loads it)
+    [string]$QuickSave = '',
     [string]$Filter = '\[error\]|\[warn\]|\[test\] (FAIL|finished|deadline)',
     # regex of rvk.log lines to print after the run ('' = none, '.' = all)
     [string]$RvkFilter = '\[(warning|error|critical)\]|probe|  \[|missing|InitializeAdmin|ms_pAPI|Direct3DCreate9|hooks|mode =|selftest|snapshot|overlay|settings|caps:|ray tracing|diag:|environment:'
@@ -98,6 +104,13 @@ if (-not (Test-Path (Join-Path $GameDir 'bin\Risen.exe'))) {
     & (Join-Path $PSScriptRoot 'new-test-copy.ps1') -GameDir $GameDir
 }
 $bin = Join-Path $GameDir 'bin'
+if ($QuickSave) {
+    if (-not (Test-Path $QuickSave)) { throw "savegame $QuickSave not found" }
+    $saves = Join-Path $GameDir 'localappdata\Local\Risen\SaveGames'
+    New-Item -ItemType Directory -Force $saves | Out-Null
+    Copy-Item $QuickSave (Join-Path $saves 'QuickSave.save') -Force
+    Write-Host "quicksave: $QuickSave -> $saves\QuickSave.save"
+}
 $rvkDir = Join-Path $bin 'rvk'
 $rvkLog = Join-Path $rvkDir 'rvk.log'
 
@@ -122,6 +135,7 @@ if ($NoRenderer) {
         "perf = $($Perf.IsPresent.ToString().ToLower())", "perf_frame = $PerfFrame",
         "rt_selftest = $($RtSelfTest.IsPresent.ToString().ToLower())",
         "present_stalls = $([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.0##}', $PresentStalls))",
+        "cpu_profile = $($CpuProfile.IsPresent.ToString().ToLower())",
         "environment = [$(($Environment | ForEach-Object { '"' + ($_ -replace '"', '') + '"' }) -join ', ')]",
         "overlay_in_screenshots = $($OverlayInScreenshots.IsPresent.ToString().ToLower())",
         "commands = [$(($Commands | ForEach-Object { '"' + ($_ -replace '"', '') + '"' }) -join ', ')]",

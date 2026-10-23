@@ -1,6 +1,7 @@
 #include "core/stall_sampler.h"
 
 #include <windows.h>
+#include <dbghelp.h>
 #include <psapi.h>
 
 #include <algorithm>
@@ -16,12 +17,15 @@
 
 #include <spdlog/spdlog.h>
 
+#pragma comment(lib, "dbghelp.lib")
+
 namespace rvk::diag {
 namespace {
 
 constexpr int kMaxFrames = 48;
 
 std::unique_ptr<StallSampler> g_present;
+std::unique_ptr<StallSampler> g_frame;
 
 std::uint64_t qpc() {
     LARGE_INTEGER v;
@@ -79,25 +83,18 @@ int sampleThread(HANDLE thread, std::uint64_t* pcs, int max) {
     return unwindStack(ctx, pcs, max);
 }
 
-// module name + nearest named export, cached per module (after the thread was resumed)
+// module name + nearest named export, cached per module (after the thread was resumed); our own module by its PDB
 class Symbolizer {
 public:
-    std::string name(std::uint64_t pc) {
-        HMODULE m = nullptr;
-        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                reinterpret_cast<LPCWSTR>(pc), &m)) {
-            return std::format("0x{:x}", pc);
+    ~Symbolizer() {
+        if (dbgProcess_ != nullptr) {
+            SymCleanup(dbgProcess_);
+            CloseHandle(dbgProcess_);
         }
-        Module& mod = module(m);
-        const auto rva = static_cast<std::uint32_t>(pc - reinterpret_cast<std::uint64_t>(m));
-        auto it = std::upper_bound(mod.exports.begin(), mod.exports.end(), rva,
-                                   [](std::uint32_t v, const auto& e) { return v < e.first; });
-        if (it != mod.exports.begin()) {
-            --it;
-            if (rva - it->first < 0x4000) return std::format("{}!{}+0x{:x}", mod.name, it->second, rva - it->first);
-        }
-        return std::format("{}+0x{:x}", mod.name, rva);
     }
+    std::string name(std::uint64_t pc) { return lookup(pc, true); }
+    // the function without the offset (the key of a flat profile); unnamed code is bucketed per 4 KiB
+    std::string function(std::uint64_t pc) { return lookup(pc, false); }
     std::string moduleName(std::uint64_t pc) {
         HMODULE m = nullptr;
         if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -108,22 +105,107 @@ public:
     }
 
 private:
+    std::string lookup(std::uint64_t pc, bool offset) {
+        if (auto hit = cacheByPc_.find(pc ^ (offset ? 1ull << 63 : 0)); hit != cacheByPc_.end()) return hit->second;
+        std::string s = resolve(pc, offset);
+        cacheByPc_.emplace(pc ^ (offset ? 1ull << 63 : 0), s);
+        return s;
+    }
+    std::string resolve(std::uint64_t pc, bool offset) {
+        HMODULE m = nullptr;
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                reinterpret_cast<LPCWSTR>(pc), &m)) {
+            return offset ? std::format("0x{:x}", pc) : std::string("?");
+        }
+        Module& mod = module(m);
+        auto rva = static_cast<std::uint32_t>(pc - reinterpret_cast<std::uint64_t>(m));
+        // the function's start from the unwind table: exact function granularity also for code without a name
+        DWORD64 imageBase = 0;
+        const PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(pc, &imageBase, nullptr);
+        const std::uint32_t start = fe != nullptr && imageBase == reinterpret_cast<DWORD64>(m) ? fe->BeginAddress : rva;
+        if (mod.pdb) {
+            alignas(SYMBOL_INFO) char buf[sizeof(SYMBOL_INFO) + 512]{};
+            auto* si = reinterpret_cast<SYMBOL_INFO*>(buf);
+            si->SizeOfStruct = sizeof(SYMBOL_INFO);
+            si->MaxNameLen = 511;
+            DWORD64 disp = 0;
+            if (SymFromAddr(dbgProcess_, pc, &disp, si)) {
+                return offset ? std::format("{}!{}+0x{:x}", mod.name, si->Name, disp) : std::format("{}!{}", mod.name, si->Name);
+            }
+            if (!symFailLogged_) {
+                symFailLogged_ = true;
+                spdlog::info("diag: SymFromAddr({}+0x{:x}) failed: error {}", mod.name, rva, GetLastError());
+            }
+        }
+        if (!offset) {
+            // name the function by its start (an export there), else the start itself (symbolize offline: llvm-symbolizer
+            // --obj=<module> 0x180000000+start)
+            auto ex = std::ranges::lower_bound(mod.exports, start, {}, &std::pair<std::uint32_t, std::string>::first);
+            if (ex != mod.exports.end() && ex->first == start) return std::format("{}!{}", mod.name, ex->second);
+            if (fe != nullptr) {
+                // not exported: the nearest export below as a hint
+                if (ex != mod.exports.begin() && start - std::prev(ex)->first < 0x4000) {
+                    return std::format("{}@0x{:x} (~{})", mod.name, start, std::prev(ex)->second);
+                }
+                return std::format("{}@0x{:x}", mod.name, start);
+            }
+            rva = start;
+        }
+        auto it = std::upper_bound(mod.exports.begin(), mod.exports.end(), rva,
+                                   [](std::uint32_t v, const auto& e) { return v < e.first; });
+        if (it != mod.exports.begin()) {
+            --it;
+            if (rva - it->first < 0x4000) {
+                return offset ? std::format("{}!{}+0x{:x}", mod.name, it->second, rva - it->first)
+                              : std::format("{}!{}", mod.name, it->second);
+            }
+        }
+        return offset ? std::format("{}+0x{:x}", mod.name, rva) : std::format("{}+0x{:x}", mod.name, rva & ~0xFFFu);
+    }
+
     struct Module {
         std::string name;
         std::vector<std::pair<std::uint32_t, std::string>> exports;  // sorted by RVA
+        bool pdb = false;  // symbols through dbghelp (our module)
     };
     Module& module(HMODULE m) {
         auto [it, fresh] = cache_.try_emplace(m);
         if (fresh) load(m, it->second);
         return it->second;
     }
-    static void load(HMODULE m, Module& out) {
+    // our own module's PDB (next to the DLL) through dbghelp, on a private process handle (dbghelp keys its state by the
+    // handle: another user in the process keeps its own)
+    void loadPdb(HMODULE m, const wchar_t* path, Module& out) {
+        HMODULE self = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(&presentSampler), &self);
+        if (m != self) return;
+        if (dbgProcess_ == nullptr) {
+            HANDLE h = nullptr;
+            if (!DuplicateHandle(GetCurrentProcess(), GetCurrentProcess(), GetCurrentProcess(), &h, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+                return;
+            }
+            SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_FAIL_CRITICAL_ERRORS);
+            std::wstring dir(path);
+            dir.resize(dir.find_last_of(L'\\') == std::wstring::npos ? 0 : dir.find_last_of(L'\\'));
+            if (!SymInitializeW(h, dir.c_str(), FALSE)) {
+                CloseHandle(h);
+                return;
+            }
+            dbgProcess_ = h;
+        }
+        out.pdb = SymLoadModuleExW(dbgProcess_, nullptr, path, nullptr, reinterpret_cast<DWORD64>(m), 0, nullptr, 0) != 0 ||
+                  GetLastError() == ERROR_SUCCESS;
+        spdlog::info("diag: symbols of {}: {}", out.name, out.pdb ? "PDB" : "exports only");
+    }
+    void load(HMODULE m, Module& out) {
         wchar_t path[MAX_PATH]{};
         GetModuleFileNameW(m, path, MAX_PATH);
         const wchar_t* slash = wcsrchr(path, L'\\');
         for (const wchar_t* p = slash != nullptr ? slash + 1 : path; *p != 0; ++p) out.name += static_cast<char>(towlower(*p));
         if (out.name.ends_with(".dll")) out.name.resize(out.name.size() - 4);
         if (out.name.empty()) out.name = "?";
+        loadPdb(m, path, out);
         const auto* base = reinterpret_cast<const std::uint8_t*>(m);
         const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
         if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
@@ -143,6 +225,9 @@ private:
         std::ranges::sort(out.exports);
     }
     std::unordered_map<HMODULE, Module> cache_;
+    std::unordered_map<std::uint64_t, std::string> cacheByPc_;
+    HANDLE dbgProcess_ = nullptr;
+    bool symFailLogged_ = false;
 };
 
 bool isSystemModule(std::string_view name) {
@@ -158,8 +243,15 @@ void enablePresentSampler(const char* what, double thresholdMs) {
     if (g_present == nullptr) g_present = std::make_unique<StallSampler>(what, thresholdMs);
 }
 
+StallSampler* frameSampler() { return g_frame.get(); }
+
+void enableFrameSampler() {
+    if (g_frame == nullptr) g_frame = std::make_unique<StallSampler>("engine thread between presents", 0.0, true);
+}
+
 struct StallSampler::Impl {
     std::string what;
+    bool profile = false;
     double freq = qpcFreq();
     std::uint64_t thresholdTicks = 0;
     Range stopRanges[2];  // our module and Engine.dll: stacks are cut there
@@ -182,10 +274,40 @@ struct StallSampler::Impl {
 
     void run();
     void report(double seconds);
+    void reportProfile(const std::map<std::vector<std::uint64_t>, std::uint32_t>& taken, std::uint32_t n);
 };
 
-StallSampler::StallSampler(std::string what, double thresholdMs) : impl_(new Impl) {
+// flat profile: per module (leaf), self per function (leaf), inclusive per function (once per stack)
+void StallSampler::Impl::reportProfile(const std::map<std::vector<std::uint64_t>, std::uint32_t>& taken, std::uint32_t n) {
+    std::unordered_map<std::string, std::uint32_t> modules, self, incl;
+    for (const auto& [stack, count] : taken) {
+        if (stack.empty()) continue;
+        modules[sym.moduleName(stack[0])] += count;
+        self[sym.function(stack[0])] += count;
+        std::vector<std::string> seen;
+        for (const std::uint64_t pc : stack) {
+            std::string f = sym.function(pc);
+            if (std::ranges::find(seen, f) != seen.end()) continue;
+            incl[f] += count;
+            seen.push_back(std::move(f));
+        }
+    }
+    const auto top = [&](const std::unordered_map<std::string, std::uint32_t>& m, std::size_t k, const char* label) {
+        std::vector<std::pair<std::uint32_t, const std::string*>> v;
+        for (const auto& [name, c] : m) v.emplace_back(c, &name);
+        std::ranges::sort(v, [](const auto& a, const auto& b) { return a.first > b.first; });
+        for (std::size_t i = 0; i < std::min(v.size(), k); ++i) {
+            spdlog::info("diag: profile {} {:5.1f} % {}", label, 100.0 * v[i].first / n, *v[i].second);
+        }
+    };
+    top(modules, 12, "module");
+    top(self, 30, "self");
+    top(incl, 45, "incl");
+}
+
+StallSampler::StallSampler(std::string what, double thresholdMs, bool profile) : impl_(new Impl) {
     impl_->what = std::move(what);
+    impl_->profile = profile;
     impl_->thresholdTicks = static_cast<std::uint64_t>(thresholdMs * impl_->freq / 1000.0);
     HMODULE self = nullptr;
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -258,7 +380,7 @@ void StallSampler::Impl::run() {
         ResumeThread(h);
         if (!same || n == 0) continue;
         int keep = n;
-        for (int i = 0; i < n; ++i) {
+        for (int i = 0; i < n && !profile; ++i) {
             if (stopRanges[0].contains(pcs[i]) || stopRanges[1].contains(pcs[i])) {
                 keep = i + 1;
                 break;
@@ -304,6 +426,10 @@ void StallSampler::Impl::report(double seconds) {
     spdlog::info("diag: {}: {:.1f} calls/s, avg {:.2f} ms, max {:.2f} ms; {} calls >= threshold ({:.2f} ms avg); {} samples; {}", what,
                  nCalls / seconds, sumMs / nCalls, mx, nLong, nLong > 0 ? sumLong / nLong : 0.0, n, state);
     if (n == 0) return;
+    if (profile) {
+        reportProfile(taken, n);
+        return;
+    }
     // who owns the wait: the first frame (from the leaf) outside the OS's user-mode DLLs
     std::map<std::string, std::uint32_t> owners;
     for (const auto& [stack, count] : taken) {

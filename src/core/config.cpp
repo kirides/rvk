@@ -84,6 +84,7 @@ Config parseConfig(std::string_view text, std::string* error) {
     } else {
         cfg.presentStalls = std::max(0.0, stalls.value_or(0.0));
     }
+    cfg.cpuProfile = tbl["debug"]["cpu_profile"].value_or(cfg.cpuProfile);
     if (const auto* env = tbl["debug"]["environment"].as_array()) {
         for (const auto& e : *env) {
             if (const auto v = e.value<std::string>(); v && v->find('=') != std::string::npos) cfg.environment.push_back(*v);

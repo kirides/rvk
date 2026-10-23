@@ -17,6 +17,7 @@
 #include "core/caps.h"
 #include "core/exports.h"
 #include "core/settings.h"
+#include "core/stall_sampler.h"
 #include "d3d9/fvf.h"
 #include "engine/scene_hooks.h"
 #include "engine/lod.h"
@@ -888,6 +889,12 @@ bEResult HalDevice::ClearViewport(eCGfxShared::eEViewportClear a0, unsigned long
 }
 
 bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
+    // [debug] cpu_profile: the engine thread is sampled from the end of one present to the start of the next
+    struct ProfileWindow {
+        diag::StallSampler* s = diag::frameSampler();
+        ProfileWindow() { if (s) s->leave(); }
+        ~ProfileWindow() { if (s) s->enter(); }
+    } profileWindow;
     const std::uint64_t frame = dev_.stats().frames + 1;
     serviceSettings();
     if (overlay_) {

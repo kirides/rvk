@@ -175,12 +175,16 @@ std::size_t Registry::age(const float camera[3], std::uint64_t frame, double tim
                           const std::function<const Aabb*(std::uint64_t)>& bounds) {
     std::size_t dropped = 0;
     for (std::size_t i = 0; i < list_.size();) {
-        const Instance& in = list_[i];
+        Instance& in = list_[i];
         const bool stale = frame > in.lastFrame + limits.unseenFrames && time > in.lastTime + limits.unseenSeconds;
         bool tooFar = false;
         if (!stale && camera != nullptr && limits.radius > 0.0f) {
-            const Aabb* box = bounds ? bounds(in.blas) : nullptr;
-            const Sphere s = worldSphere(box != nullptr ? *box : Aabb{}, in.rows);
+            if (!in.sphereValid) {
+                const Aabb* box = bounds ? bounds(in.blas) : nullptr;
+                in.sphere = worldSphere(box != nullptr ? *box : Aabb{}, in.rows);
+                in.sphereValid = box != nullptr;  // without bounds (BLAS not built yet): its translation, again next time
+            }
+            const Sphere& s = in.sphere;
             const float dx = s.c[0] - camera[0], dy = s.c[1] - camera[1], dz = s.c[2] - camera[2];
             tooFar = std::sqrt(dx * dx + dy * dy + dz * dz) - s.r > limits.radius;
         }

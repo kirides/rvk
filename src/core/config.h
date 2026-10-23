@@ -60,6 +60,9 @@ struct Config {
     // (any mode) sample the presenting thread's stack while a present lasts longer than this many ms and log where the time
     // goes every 5 s (diag::StallSampler, docs/research/fps-limit.md); 0 = off. `present_stalls = true` = 4 ms
     double presentStalls = 0.0;
+    // [debug] cpu_profile: a sampled flat profile of the engine thread between presents every 5 s (diag::frameSampler,
+    // docs/research/performance.md 8); Vulkan mode
+    bool cpuProfile = false;
     // (any mode) "NAME=VALUE" environment variables set in DllMain, before anything loads Vulkan or D3D (environment
     // variables of run.ps1 do not reach the game), e.g. "VK_LOADER_LAYERS_DISABLE=~implicit~"; "NAME=" removes one
     std::vector<std::string> environment;

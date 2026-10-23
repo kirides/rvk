@@ -155,6 +155,7 @@ void detourInitializeAdmin(void* self, int apiType) {
         diag::enablePresentSampler(g_config.mode == Mode::Vulkan ? "present thread vkQueuePresentKHR" : "SwapScreen (D3D9 Present)",
                                    g_config.presentStalls);
     }
+    if (g_config.cpuProfile && g_config.mode == Mode::Vulkan) diag::enableFrameSampler();
     if (g_config.probe && !g_probed.exchange(true)) {
         vk::probe();
     }

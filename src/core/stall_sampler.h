@@ -23,9 +23,16 @@ StallSampler* presentSampler();
 // Creates it (bootstrap, once). thresholdMs: samples are taken only once a call has lasted that long.
 void enablePresentSampler(const char* what, double thresholdMs);
 
+// [debug] cpu_profile (docs/research/performance.md 8): the engine thread's CPU time between presents (the engine's frame
+// and our HAL work) as a flat profile: every 5 s the self and inclusive time per function (our DLL named from its PDB
+// through dbghelp, other modules by the nearest export) and the time per module. Null unless enabled.
+StallSampler* frameSampler();
+void enableFrameSampler();
+
 class StallSampler {
 public:
-    StallSampler(std::string what, double thresholdMs);
+    // profile: whole stacks, reported as a flat profile (self / inclusive per function) instead of the top stacks
+    StallSampler(std::string what, double thresholdMs, bool profile = false);
     ~StallSampler();
     StallSampler(const StallSampler&) = delete;
     StallSampler& operator=(const StallSampler&) = delete;

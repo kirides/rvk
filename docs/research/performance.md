@@ -193,3 +193,38 @@ Not a limit at this resolution.
    the first run if the AMD crash goes away; a shipped keys file (from a full play-through) would also do.
 4. Ring memory is device-local host-visible (ReBAR); 11.5 MiB of address space per frame is fine, the CPU writes are the
    constant registers actually used.
+
+## 10. Larger object draw distances (2026-10-23)
+
+Scene: a player savegame (forest cliff, hero at -17392 / 7652 / 14352; `run.ps1 -QuickSave <save>` copies it over the test
+copy's quicksave, scenario `mods/rvk_perfsave` loads it and holds the view), player defaults (water, enhanced shadows, RT
+reflections), `RisenTest.exe`, vsync off, `-Perf`.
+
+| `lod.view` | fps | draws | CPU frame | of it draw calls | engine + HAL rest | GPU |
+|---|---|---|---|---|---|---|
+| 1x | 175 | 1105 | 5.4 ms | 2.2 ms | 3.2 ms | 3.0 ms |
+| 2x | 103 | 2283 | 9.4 ms | 4.6 ms | 4.8 ms | 3.7 ms |
+| 3x | 84 | 2630 | 11.5 ms | 5.5 ms | 6.0 ms | 3.7 ms |
+
+CPU-bound throughout; the extra draws are mostly the main view's (2x: z pre-pass 323 -> 709, solid 374 -> 951; the
+cascades 301 -> 519).
+
+**CPU profile** (`run.ps1 -CpuProfile`, `[debug] cpu_profile`: `diag::frameSampler` samples the engine thread between
+presents every 0.5 ms and logs a flat profile every 5 s: per module, self and inclusive per function; functions keyed by
+their start in the unwind table, our DLL named from its PDB or symbolized offline with `llvm-symbolizer
+--obj=build\RelWithDebInfo\d3d9.dll 0x180000000+<start>`; costs ~6 % fps). At 2x: d3d9 (ours) 42 % self, Engine.dll 22 %,
+amdvlk64 13 % (the `vkCmd*` recording), ntdll 8 %, SharedBase 6 %. Inclusive: `drawIndexedPrimitive` 50 %, `prepareDraw`
+38 %, `RtScene::observe` 13 % (the RT scene's per-draw bookkeeping), the engine's cascades 20 %, its game logic
+(`eCProcessor::Process`) 9 %; `Buffer::gpu` 3.6 % self + its SRW lock.
+
+Changes:
+* `Buffer::gpu()` returns a clean static buffer's binding without the mutex / copy plan (`cleanStatic_`, cleared by a
+  writing lock).
+* `rt::Registry::age` caches each instance's world sphere (its rows are part of its key) instead of transforming its BLAS
+  bounds every frame.
+* Tried and dropped: observing the RT scene's draws on every 3rd frame (or the main view only): 128 / 121 fps, but the TLAS
+  plateaued at ~1800 instead of ~2450 instances: the scene's learning depends on per-frame sightings.
+
+Result at 2x: **103 -> 110 fps** (`-Perf`; 118 fps without it), CPU frame 9.4 -> 8.75 ms (draw calls 4.6 -> 4.25 ms), the
+TLAS unchanged (~2450-2550 instances). The rest is spread over many ~1 % items; the next step is structural (fewer Vulkan
+calls per draw, or recording off the engine thread).

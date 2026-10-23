@@ -125,12 +125,15 @@ TEST(rt_registry_aging_radius_cap) {
     big.add(hi);
     const auto bounds = [&](std::uint64_t blas) -> const rt::Aabb* { return blas == 2 ? &big : nullptr; };
     CHECK(reg.age(cam, 2, 0.1, l, bounds) == 0 && reg.size() == 2);
-    // without the bounds it is too far
-    CHECK(reg.age(cam, 2, 0.1, l, nullptr) == 1 && reg.size() == 1 && reg.counters().tooFar == 1);
+    // its world sphere is kept once the bounds were known (a BLAS's bounds never change: rows are part of the key)
+    CHECK(reg.age(cam, 2, 0.1, l, nullptr) == 0 && reg.size() == 2);
+    // without any bounds an instance is judged by its translation: too far
+    reg.see(rt::instanceKey(4, farRows), 4, farRows, 0, 0, 0, 1, 1, 0.0);
+    CHECK(reg.age(cam, 2, 0.1, l, nullptr) == 1 && reg.size() == 2 && reg.counters().tooFar == 1);
     // unseen: both frames AND seconds must pass (a 300 fps burst or a frozen game clock alone does not age it)
     CHECK(reg.age(cam, 500, 1.0, l, nullptr) == 0);
     CHECK(reg.age(cam, 50, 100.0, l, nullptr) == 0);
-    CHECK(reg.age(cam, 500, 100.0, l, nullptr) == 1 && reg.size() == 0 && reg.counters().aged == 1);
+    CHECK(reg.age(cam, 500, 100.0, l, nullptr) == 2 && reg.size() == 0 && reg.counters().aged == 2);
     // cap: the longest unseen go first
     l.maxRegistered = 3;
     for (int i = 0; i < 5; ++i) {

@@ -1,0 +1,6 @@
+id          = "rvk_perfsave"
+name        = "Renderer performance at a savegame"
+version     = "1.0.0"
+author      = "risen-enhanced-graphics"
+description = "Loads the quicksave and holds the view for -Perf measurements (risen-enhanced-graphics: scenario rvk_perfsave)."
+main        = "main.lua"
