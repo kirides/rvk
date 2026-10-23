@@ -45,7 +45,8 @@ Each milestone ends verified (in the game where it touches the engine) and commi
 | M9 RT water reflections | P1-P3 done (2026-10-22) | RT scene (BLAS cache, TLAS), materials at hits, `rt.reflections` for water | rt-reflections.md, rt-scene-facts.md, rt-albedo-facts.md |
 | High fps compatibility | done (2026-10-23, 4817bab) | ported Vaana's falling / climbing / thunder fixes (`compat.high_fps`) | fps-limit.md 12 |
 | Menu frame rate limit | done (2026-10-23) | `vulkan.menu_fps` (default 60) while a menu page is open; loading screens never paced (a 30 fps cap made a quick load 20 s instead of 2 s) | menu-fps.md |
-| M10+ | open | RT GI (DDGI), anisotropic filtering, AA (MSAA / TAA / SMAA), tonemapping / HDR10, SSAO / GTAO, upscaling (FSR), sky / fog | enhancements-roadmap.md 3.6 |
+| M10 RT GI | researched (2026-10-23) | DDGI probes storing L2 SH = the engine's ambient format, entering through constant overrides of c14..c21 in the material PS; phases P0 light capture .. P4 screen probes | rtgi.md |
+| M11+ | open | anisotropic filtering, AA (MSAA / TAA / SMAA), tonemapping / HDR10, SSAO / GTAO, upscaling (FSR), sky / fog | enhancements-roadmap.md 3.6 |
 
 ### Open
 
