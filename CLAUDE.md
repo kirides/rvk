@@ -226,7 +226,7 @@ at InitializeAdmin" line lists uptime, D3D/Vulkan/overlay modules and the proces
 `rvk_shadertool corpus <dir>` translates + validates every captured shader (corpus from `mode = "trace"`:
 `<test copy>/bin/rvk/corpus`, copy it to `<repo>/corpus`, git-ignored: game-derived). `show <file>` prints listing + GLSL,
 `refdisasm <file>` the D3DX reference listing. `python tools/compare_disasm.py corpus` diffs our listing against D3DX for the
-whole corpus (must stay 100 %). The contract between translated shaders and the renderer is `src/shader/abi.h`; its GLSL
+whole corpus (must stay 100 %). `rvk_shadertool export corpus game-shaders` writes the game's shaders as plain GLSL 4.60 sources (`<name>.vert/.frag`: the translator's exact output, ABI as `#include`, D3D9 listing + CTAB names in comments; `glslc -I game-shaders/include`; git-ignored, game-derived). The contract between translated shaders and the renderer is `src/shader/abi.h`; its GLSL
 side is `shaders/include/rvk_abi.glsl`, which the translator pastes into every translated shader (change both together;
 rvk_tests `abi_glsl_layout_matches_cpp` compares the offsets; bump `kTranslatorVersion` in `d3d9/device.cpp` when the
 translated GLSL changes).

@@ -18,3 +18,4 @@ __pycache__/
 # captured game data (shader corpus, screenshots): derived from the game, never commit
 /corpus/
 /captures/
+/game-shaders/

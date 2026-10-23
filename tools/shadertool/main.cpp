@@ -4,6 +4,10 @@
 //                                                                translate + validate every vs*/ps* file of a capture corpus
 //                                                                (--tint: the pixel shaders' tint debug-view variant)
 //   rvk_shadertool show <file>                                   disassembly, GLSL, compiler log of one shader
+//   rvk_shadertool export <corpus dir> <out dir>                 write every shader as plain GLSL 4.60 source (<name>.vert / .frag): the
+//                                                                translator's exact output, the ABI block replaced by an #include,
+//                                                                the D3D9 listing + CTAB register names in a comment; out/include/
+//                                                                gets rvk_abi.glsl; glslc -I <out>/include compiles each file
 //   rvk_shadertool refdisasm <file>                              D3DXDisassembleShader (d3dx9_39.dll) as the reference listing
 //   rvk_shadertool evalcheck <dir>                               the CPU evaluator (shader/sm_eval.h) on every SM 3.0 shader of a
 //                                                                corpus: failures by reason, pixel shaders sampling s9, slices
@@ -15,6 +19,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <format>
@@ -24,6 +29,7 @@
 
 #include <spirv-tools/libspirv.hpp>
 
+#include "shader/embedded.h"
 #include "shader/glsl.h"
 #include "shader/sm_eval.h"
 #include "shader/sm_ir.h"
@@ -133,6 +139,98 @@ int cmdCorpus(const fs::path& dir, const fs::path& out, int maxErrors, const Gls
     return totalFailed == 0 ? 0 : 1;
 }
 
+
+// The constant table (CTAB comment) of a shader: "//   c4..c7 g_vViewProjection" lines
+std::string ctabComment(const std::vector<std::uint32_t>& tokens) {
+    std::string out;
+    for (std::size_t i = 1; i < tokens.size();) {
+        const std::uint32_t t = tokens[i];
+        if ((t & 0xffff) != 0xfffe) break;  // past the leading comments
+        const std::size_t len = (t >> 16) & 0x7fff;
+        if (len >= 8 && i + 1 + len <= tokens.size() && tokens[i + 1] == 0x42415443) {  // 'CTAB'
+            const auto* base = reinterpret_cast<const unsigned char*>(&tokens[i + 2]);
+            const std::size_t bytes = (len - 1) * 4;
+            auto rd32 = [&](std::size_t o) {
+                std::uint32_t v = 0;
+                if (o + 4 <= bytes) std::memcpy(&v, base + o, 4);
+                return v;
+            };
+            auto rd16 = [&](std::size_t o) {
+                std::uint16_t v = 0;
+                if (o + 2 <= bytes) std::memcpy(&v, base + o, 2);
+                return v;
+            };
+            const std::uint32_t count = rd32(12), info = rd32(16);
+            for (std::uint32_t k = 0; k < count && k < 512; ++k) {
+                const std::size_t e = info + k * 20;
+                const std::uint32_t nameOff = rd32(e);
+                if (nameOff >= bytes) continue;
+                const char* np = reinterpret_cast<const char*>(base + nameOff);
+                const std::string name(np, strnlen(np, bytes - nameOff));
+                const std::uint16_t set = rd16(e + 4), reg = rd16(e + 6), n = rd16(e + 8);
+                const char* kind = set == 0 ? "b" : set == 1 ? "i" : set == 2 ? "c" : "s";
+                out += n > 1 ? std::format("//   {}{}..{}{} {}\n", kind, reg, kind, reg + n - 1, name)
+                             : std::format("//   {}{} {}\n", kind, reg, name);
+            }
+        }
+        i += 1 + len;
+    }
+    return out;
+}
+
+int cmdExport(const fs::path& dir, const fs::path& out) {
+    fs::create_directories(out / "include");
+    const std::string_view abi = embedded::abiGlsl();
+    std::ofstream(out / "include" / "rvk_abi.glsl", std::ios::binary) << abi;
+    std::vector<fs::path> files;
+    for (const auto& e : fs::directory_iterator(dir)) {
+        const auto name = e.path().filename().string();
+        if (e.is_regular_file() && (name.starts_with("vs") || name.starts_with("ps"))) files.push_back(e.path());
+    }
+    std::ranges::sort(files);
+    int exported = 0, failed = 0;
+    std::ofstream index(out / "index.txt");
+    for (const auto& f : files) {
+        const auto tokens = readTokens(f);
+        const DecodeResult dec = decode(tokens);
+        const GlslResult g = dec.ok() ? toGlsl(dec.program) : GlslResult{};
+        if (!dec.ok() || !g.ok()) {
+            ++failed;
+            std::printf("FAIL %s: %s\n", f.filename().string().c_str(), dec.ok() ? g.error.c_str() : dec.error.c_str());
+            continue;
+        }
+        std::string text = g.glsl;
+        const std::size_t at = text.find(abi);
+        if (at == std::string::npos) {
+            ++failed;
+            std::printf("FAIL %s: ABI block not found\n", f.filename().string().c_str());
+            continue;
+        }
+        text.replace(at, abi.size(), "#extension GL_GOOGLE_include_directive : require\n#include \"rvk_abi.glsl\"\n");
+        const bool vertex = dec.program.version.stage == Stage::Vertex;
+        const std::string head = std::format("// {} : the game's {} shader, as translated at run time (src/shader/glsl.cpp).\n"
+                                             "// Constant registers (pc.{}->c[n]) by the shader's own constant table:\n{}"
+                                             "// ---- D3D9 listing\n",
+                                             f.stem().string(), vertex ? "vertex" : "pixel", vertex ? "vs" : "ps", ctabComment(tokens));
+        const std::string listing = disassemble(dec.program);
+        std::string commented;
+        for (std::size_t p = 0; p < listing.size();) {
+            const std::size_t nl = listing.find('\n', p);
+            const std::size_t e = nl == std::string::npos ? listing.size() : nl;
+            if (e > p) commented += "// " + listing.substr(p, e - p) + "\n";
+            p = e + 1;
+        }
+        // #version stays the first line: the comment goes right after it
+        text.insert(text.find('\n') + 1, head + commented + "\n");
+        const std::string ext = vertex ? ".vert" : ".frag";
+        std::ofstream(out / (f.stem().string() + ext), std::ios::binary) << text;
+        index << f.stem().string() << ext << "\n";
+        ++exported;
+    }
+    std::printf("exported %d shaders to %s (%d failed)\n", exported, out.string().c_str(), failed);
+    return failed == 0 ? 0 : 1;
+}
+
 int cmdShow(const fs::path& file) {
     spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
     const Outcome o = translate(readTokens(file), tools);
@@ -235,6 +333,13 @@ int main(int argc, char** argv) {
             }
         }
         return cmdCorpus(argv[2], out, maxErrors, options);
+    }
+    if (cmd == "export") {
+        if (argc < 4) {
+            std::printf("usage: rvk_shadertool export <corpus dir> <out dir>\n");
+            return 2;
+        }
+        return cmdExport(argv[2], argv[3]);
     }
     if (cmd == "show") return cmdShow(argv[2]);
     if (cmd == "refdisasm") return cmdRefDisasm(argv[2]);
