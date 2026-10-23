@@ -290,3 +290,40 @@ Luma vs AO off: beach -7, harbour -4, hero -6, jungle +3, pub +20 (the pub's GI 
 (beach seaweed patches), no depth history for the temporal rejection, no TAA jitter / FSR yet, moving non-skinned objects have
 camera-only motion, AO costs not measured separately.
 
+## 11. Stage C screen probes: built (2026-10-23)
+
+([C] = measured / read in code.)
+
+**Code** [C]: `shaders/gi/sp_trace.comp`, `shaders/gi/sp_resolve.comp`, `shaders/gi/screen_common.glsl`, `shaders/gi/gi_shade.glsl` (the
+hit shading, shared with `gi_trace.comp`); `src/enh/gi.cpp` `Gi::recordScreen` (after the DDGI update in the `gi` pass at AfterOpaque;
+needs this frame's G-buffer, RT scene and hardware depth); `FrameBlock::sgi` (976 bytes). Setting `gi.screen` off|low|medium|high
+(default medium, Advanced; needs RayQuery; turns the G-buffer on); debug `gbuffer.debug=screen_gi`.
+
+**Method** [C] (after GI-1.0, Boisse et al. 2023, adapted): one probe per tile at a per-frame jittered pixel; tiles / rays per probe: low
+16x16 / 8, medium 16x16 / 16, high 8x8 / 16. Cosine-weighted hemisphere rays around the G-buffer normal, one ray per invocation (64 per
+workgroup), shaded by `gi_shade.glsl` like the DDGI probe rays (sun + one point light with shadow rays, the DDGI at hits, sky on misses).
+Probe rays are 40 m (4000 units); a ray that runs out takes the DDGI's light at its end (`rvkGiLookupFast` evaluated towards -dir).
+The probe stores the LUMINANCE ratio traced irradiance / DDGI irradiance at its point and normal (cap 2; neutral where the DDGI is
+< 2e-3). `sp_resolve`: per pixel the 2x2 nearest probes, weighted bilinear x tangent-plane distance x normal similarity, then temporal
+accumulation (0.95, motion reprojection, clamp to the probes' range +- 0.25) into a ping-pong RGBA16F image. The material shaders'
+Gbuffer variants scale their DDGI registers by last frame's factor at the reprojected position.
+
+**Cost** [C] (a player's quicksave `Risen_Save_0007`: harbour town, detail trees / objects 4x, view 2x, GI high, 1600x900, RX 7900 XTX).
+First version (a thread per probe looping over 16 rays, 8x8 tiles, 80 m rays, full DDGI lookup + 200 m sun rays at hits): pass `gi` 29.5 ms
+of 32 ms GPU, 28 fps; screen probes off: GPU 4.7 ms (96 fps, CPU-bound); GI off 1.86 ms. After the fix (one ray per invocation,
+`rvkGiLookupFast` at hits = trilinear without visibility, 40 m rays, 120 m sun shadow rays, 16x16 tiles at low / medium): medium GPU
+7-8.5 ms total frame (~80-90 fps, CPU-bound at ~11 ms). The measurements had the player's own game running on the same GPU (the high /
+low windows are contaminated).
+
+**Fixes in the same commit** [C]: the reprojected screen-probe factor and the AO clamp their lookup to the previous screen's edge (a hard
+band appeared at the screen edge when turning: the strip new on screen had no correction); the DDGI "inside" flag has hysteresis on a
+smoothed back-face share (key.w bits 16-23); variant SPIR-V cache tags = base + hash of the embedded GLSL (`materialVariantTag`).
+
+**Flicker investigation** [C] (12 consecutive captures of a still view at the quicksave, luma std mean): D3D9 1.2, Vulkan GI off + game
+shadow map 2.0, GI off + forced 4096 map 3.0, GI on 4.6 -> 3.7 after the hysteresis. The shadows moving near the big house are the game's
+palms in the wind (present in D3D9); detail 4x and the 4096 map make more / sharper moving shadows; GI adds faint grain in shaded areas.
+
+**Open**: the DDGI's own multi-bounce now uses the cheap lookup (possible leaks through walls at the second bounce); one-frame lag of AO /
+screen probes (next: GTAO at AfterDepthPrepass in the same frame; screen probes need the TLAS before the solid pass); remaining GI grain;
+the `gi.screen` high cost over time (unverified, measurement contaminated); the per-pixel ratio is luminance only (no colour bleeding
+from near bounces).

@@ -185,6 +185,8 @@ A/B: `.\scripts\water-compare.ps1 -EngineSetting 'water.enabled=true','gi.enable
 offline `rvk_shadertool corpus corpus --gi | --capture`.
 G-buffer / GTAO (rtgi.md 10; Lighting, default off): `-Setting 'ao.enabled=true'` (+ `ao.mode=replace|add`, `ao.strength`, `ao.radius`);
 debug `gbuffer.debug=normals|motion|ao`; rvk.log `d3d9: g-buffer requested / armed`, `enh: gbuffer:`; offline `rvk_shadertool corpus corpus --gbuf | --gbuf-motion`.
+Screen probes (rtgi.md 11): `gi.screen=off|low|medium|high` (default medium; needs the G-buffer, turned on with it); debug `gbuffer.debug=screen_gi`; rvk.log `enh: gi: screen probes: ...`.
+Cost at a savegame: `run.ps1 -Exe RisenTest.exe -Vsync off -Perf -QuickSave <save> -Mods rvk_perfsave -Scenario rvk_perfsave -Param hold=40`, one fixed setting per run (`-Commands` frame numbers count loading-screen frames: they fire before the hold; `-PerfFrame` likewise).
 
 `run.ps1` creates the test copy on first use (`scripts/new-test-copy.ps1`, from risen-spass's `B:\DevDrive\risen-test`), deploys
 `d3d9.dll` + `bin\rvk\config.toml`, and drives the game with **risen-spass's `scripts/test-run.ps1 -GameDir`** (windowed, muted,
