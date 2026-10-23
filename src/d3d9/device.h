@@ -401,6 +401,7 @@ struct DeviceOptions {
     bool pipelineLibraries = false;  // [vulkan] pipeline_libraries (off: AMD driver crash, vk/pipeline_library.cpp)
     std::uint32_t perfFrame = 0;     // [debug] perf_frame: log the GPU time of every pass of this frame
     bool allowRayTracing = true;     // rt.allow: enable the ray tracing tier when the GPU has it (vk::ContextOptions)
+    bool generatedDraws = false;     // [debug] generated_draws: batch runs as device-generated commands (opt-in, restart)
 };
 
 struct Viewport {
@@ -570,8 +571,6 @@ public:
     // draw (a pending batch is recorded first)
     void setBatching(bool on);
     bool batching() const { return batching_; }
-    // runs of a batch as device-generated commands when the device has them (debug.generated_draws)
-    void setGeneratedDraws(bool on) { generatedOn_ = on; }
     double maxFps() const { return options_.maxFps; }
     // a further cap while a menu page is open (0 = none; the HAL sets it every present from engine/menu_state.h); a change
     // applies at the next present
@@ -1013,8 +1012,7 @@ private:
     std::vector<DrawPacket> batch_;
     std::vector<std::uint32_t> batchOrder_;
     bool batching_ = true;  // debug.batch_draws
-    vk::GeneratedDraws generated_;  // runs of a batch as device-generated commands (optional)
-    bool generatedOn_ = false;      // debug.generated_draws
+    vk::GeneratedDraws generated_;  // runs of a batch as device-generated commands ([debug] generated_draws, optional)
     // the state of two draws is the same: one run of generated draws (pipeline, vertex input, dynamic state, index buffer)
     static bool sameRunState(const DrawPacket& a, const DrawPacket& b);
     // bindless sampler index per slot (UINT32_MAX = look it up again after a SetSamplerState)

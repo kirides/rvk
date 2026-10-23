@@ -23,6 +23,9 @@ struct ContextOptions {
     bool allowRayTracing = true;
     // VK_KHR_pipeline_executable_properties when the driver has it (shader statistics: rvk_vktest --shader-stats)
     bool pipelineStatistics = false;
+    // VK_EXT_device_generated_commands + VK_KHR_maintenance5 when the driver has them ([debug] generated_draws). Opt-in:
+    // with them enabled the ImGui overlay drawn into the swapchain image does not show on AMD 26.10.1 (performance.md 12)
+    bool deviceGeneratedCommands = false;
 };
 
 // The optional ray tracing tier of the device (docs/research/raytracing.md 1).
@@ -106,6 +109,7 @@ private:
     bool pickPhysicalDevice(const ContextOptions& options);
     bool createDevice(bool withRayTracing);
     bool wantPipelineStatistics_ = false;
+    bool wantDeviceGeneratedCommands_ = false;
     bool createAllocator();
 
     VkInstance instance_ = VK_NULL_HANDLE;

@@ -64,6 +64,7 @@ Context::~Context() { destroy(); }
 
 bool Context::create(const ContextOptions& options) {
     wantPipelineStatistics_ = options.pipelineStatistics;
+    wantDeviceGeneratedCommands_ = options.deviceGeneratedCommands;
     if (volkInitialize() != VK_SUCCESS) {
         spdlog::error("vulkan: no Vulkan loader");
         return false;
@@ -409,7 +410,8 @@ bool Context::createDevice(bool withRayTracing) {
     // (core in 1.4; the device is created as 1.3, so the extension is enabled)
     VkPhysicalDeviceMaintenance5FeaturesKHR m5{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR};
     VkPhysicalDeviceDeviceGeneratedCommandsFeaturesEXT dgc{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_GENERATED_COMMANDS_FEATURES_EXT};
-    if (hasExtension(exts, VK_EXT_DEVICE_GENERATED_COMMANDS_EXTENSION_NAME) && hasExtension(exts, VK_KHR_MAINTENANCE_5_EXTENSION_NAME)) {
+    if (wantDeviceGeneratedCommands_ && hasExtension(exts, VK_EXT_DEVICE_GENERATED_COMMANDS_EXTENSION_NAME) &&
+        hasExtension(exts, VK_KHR_MAINTENANCE_5_EXTENSION_NAME)) {
         VkPhysicalDeviceMaintenance5FeaturesKHR qm5{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR};
         VkPhysicalDeviceDeviceGeneratedCommandsFeaturesEXT qd{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_GENERATED_COMMANDS_FEATURES_EXT, &qm5};
         VkPhysicalDeviceFeatures2 qf{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &qd};

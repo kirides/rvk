@@ -162,6 +162,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     o.logDraws = options.logDraws;
     // rt.allow is a restart setting: the value the session started with decides (its effective value waits for the report)
     o.allowRayTracing = rs.rtAllow == nullptr || rs.rtAllow->startValue() != 0.0;
+    o.generatedDraws = options.generatedDraws;
     if (!dev_.create(o)) {
         return false;
     }
@@ -218,13 +219,6 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         reg.onChange(*rs.batchDraws, [this](const settings::Setting& s) {
             dev_.setBatching(s.asBool());
             spdlog::info("hal: settings: batch opaque draws {}", s.asBool() ? "on" : "off");
-        }, this);
-    }
-    if (rs.generatedDraws != nullptr) {
-        dev_.setGeneratedDraws(rs.generatedDraws->asBool());
-        reg.onChange(*rs.generatedDraws, [this](const settings::Setting& s) {
-            dev_.setGeneratedDraws(s.asBool());
-            spdlog::info("hal: settings: generated draws {}", s.asBool() ? "on" : "off");
         }, this);
     }
     if (rs.drawRecords != nullptr) {

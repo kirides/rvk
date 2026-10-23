@@ -92,7 +92,7 @@ never in captures unless `-OverlayInScreenshots`; `-Commands '1500: overlay open
 overlay / settings commands at presents (`key`/`click` post real window messages: input tests in the background;
 `key ctrl+insert`, `key w 150` = held 150 frames, `keydown`/`keyup <chord>`, `type minsky` = WM_CHAR; names in
 `src/overlay/keys.h`; the key commands also run in passthrough / trace mode, at `eCApplication::Draw` calls: D3D9 baselines);
-`-NoOverlay`. Engine debug keys (docs/research/debug-mode.md 8-9): `-TestMode` (ConfigUser.xml `<Debug TestMode="true">`,
+`-NoOverlay`; `scripts/capture-window.ps1` grabs the presented window (swapchain + overlay) while a run is up. Engine debug keys (docs/research/debug-mode.md 8-9): `-TestMode` (ConfigUser.xml `<Debug TestMode="true">`,
 removed by other runs) + `-Mods rvk_debugkeys` (logs the camera each second, no scenario: ends at `-Seconds` or F12); free fly =
 `type minsky` then `key ctrl+insert`, W/A/S/D/Space; never press Ctrl+E (stock crash), F4 (writes the shader pool through
 the junction), Alt_R+F12 (deliberate crash). config.toml's non-default `[vulkan] vsync / max_fps / adapter` lock the matching player setting.

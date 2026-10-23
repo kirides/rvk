@@ -850,18 +850,6 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 1,
         .flags = Flag::Debug,
     });
-    r.generatedDraws = &reg.add({
-        .key = "debug.generated_draws",
-        .label = "Generated draws",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "Records runs of batched draws with the same state as device-generated commands (needs "
-                       "VK_EXT_device_generated_commands). Measured without a gain on an RX 7900 XTX (driver 26.10.1), so off "
-                       "by default; for other drivers.",
-        .type = Type::Bool,
-        .defaultValue = 0,
-        .flags = Flag::Debug,
-    });
     r.injectView = &reg.add({
         .key = "debug.inject_view",
         .label = "Injection test view",

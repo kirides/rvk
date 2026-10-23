@@ -1032,7 +1032,7 @@ void Device::flushBatch() {
     while (k < n) {
         const DrawPacket& head = batch_[batchOrder_[k]];
         std::uint32_t end = k + 1;
-        if (generatedOn_ && generated_.available() && head.op == DrawPacket::Op::DrawIndexed) {
+        if (generated_.available() && head.op == DrawPacket::Op::DrawIndexed) {
             while (end < n && sameRunState(head, batch_[batchOrder_[end]])) ++end;
         }
         const std::uint32_t run = end - k;
