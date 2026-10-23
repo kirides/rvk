@@ -60,7 +60,7 @@ SkyCube{} Post{Shadow{ShadowDepth(33)} Shadow{ShadowDepth(69)} Shadow{ShadowDept
 3. **The scene image effect** (`eCImageEffect::Execute`, default `DoF`):
    * **The three sun cascades come first, before the main view**, from the effect's job list, each: `SetRenderTarget(NULL
      FOURCC target, DF24 1024²)`, clear z + stencil, `ExecuteShadowMap` (33 / 69 / 100 draws). So they are **not** rendered
-     inside `UpdateShadowMask` (correcting engine-gfx.md 4.2 / roadmap 1.1). [I: the path is
+     inside `UpdateShadowMask` (correcting engine-gfx.md 4.2 / engine-gfx.md 8). [I: the path is
      `eCDirectionalLight_PS::UpdateShadowMaps` -> `eCCascadeShadowMap::RenderShadowMaps` (`0x59f200`) ->
      `eCShadowMapBase::RenderShadowMap` -> `eCRenderSystemAdmin::RenderShadowMap` -> `ExecuteShadowMap`, started by a job of the
      effect; the job itself was not traced.]

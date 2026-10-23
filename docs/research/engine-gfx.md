@@ -367,3 +367,81 @@ d3dx9 at runtime; the hard parts are the same under either approach (SM3 shader 
   (GUI `eCGuiDevice2`, `eCSprite`, debug draw).
 * Trace image-effect graphs in `compiled_imageeffects` (RT formats, e.g. `A16B16G16R16F` for HDR) and `eCImageFilterScene`.
 * Map `eEPoolType` and the pool used for each resource class; confirm MSAA/windowed flags of `eSAPIStartParameters`.
+
+## 8. Render contexts, render ops, meshes, VS/PS constants, gameplay water (moved from enhancements-roadmap.md 1.1, 2.1)
+
+All **[C]** unless marked. Phase markers and draw tags built on these: frame-phases.md, draw-tags.md.
+
+**Render-op lists** of `eCFrustumDatabase::Execute` (`bTValArray<eCRenderOp2>`: header `+0`, data `+8`, count `+0x10`):
+
+| list (db offset) | pass | dispatch (render-context vtable) |
+|---|---|---|
+| `+0x1518` | z pre-pass into the depth map (`this[0x1590]`, between `BeginZPass` `0x6b9720` and `EndZPass` `0x6b9910`) | `+0x18` RenderZPass |
+| `+0x1500` | solid, qsorted, after `UpdateShadowMask` `0x5748d0`, `BeginMaterial` `0x6b9d20`, `DoBeginRenderSolid` `0x4cb810` | `+0x00` Render |
+| `+0x1560` | debug | `+0x00` |
+| (none) | `eCModuleAdmin` modules (vtbl `+0x158`), `RenderDecals` `0x4fc220`, `RenderBillboards` `0x4f0530`, list `+0x1530` | |
+| (none) | refraction copy: caller passed an `eSRenderTargetDesc` with a texture and gfx admin `+0x5b8` set -> `EndMaterial`, `CopyCurrentRTToImage` (HAL slot 11, `src/hal/vulkan/resources.cpp`) of `desc->image+0x60`; `eCShaderMaterialAdmin+0x248` (refract map, `SetRefractmap` `0x6b9a10`) = that image | |
+| `+0x1578` | refracted (water), after `DoBeginRenderAlpha` `0x4cb710` | `+0x10` RenderRefracted |
+| `+0x14e8` | alpha, depth-sorted | `+0x08` RenderAlpha |
+| `+0x1548` | after `DoEndRenderAlpha` `0x4cb680` | `+0x08` |
+
+* `Execute` runs for the main view (`eCCameraBase::Render` `0x4f8470`), the image-filter scene RT (`eCImageFilterScene::OnUpdateOutput`
+  `0x75cf10`, the normal in-game case), `RenderEntity` `0x66ceb0` (previews) and, as `ExecuteShadowMap` `0x66f630`, shadow maps.
+  Main camera = `eCGfxCamera::ms_pMasterCamera` (`0xc62590`); active camera `ms_pActiveCamera` `0xc62580`.
+* `eCRenderOp2` (0x18 bytes, `Create` `0x67f680`): `+0` `eCRenderContext*`; `+8` desc (bits 0-7 sub-mesh index, `0xff` = all;
+  bits 8-31 hierarchy node, `0xffffff` = instanced batch); `+0xc` fade (float); `+0x10` 24-bit view-depth key; `+0x14` sort id
+  (material id `& 0xfff`, the shader's sort id `<< 12`, `shader+0x7c << 20`). No material pointer.
+* `eCRenderContextMesh` (vtable `0x9ae070`; `RequestRenderOps` `0x5c75e0`): `+0x10` entity (`+0x60` world matrix, also
+  `eCGeometryEntity::GetWorldMatrix` `0x6aaff0`; `+0xf8` illumination; `+0x28` flags), `+0x18` mesh PS (LOD `+0x20`), `+0x28`
+  `eCMeshResource2*`. `RequestRenderOps` sorts a sub-mesh by its material's flag mask: `0x20` refracted, `4` alpha, `2` / `0x200`
+  solid, `0x18` z-pass.
+* `eCMeshResource2`: `+0x58` sub-mesh array (stride 0x48), `+0x60` count, `+0x88` `eCGfxVisual*`, `+0xa0` instancing flag,
+  `+0xa8..0xb8` render-instance array (0x58 bytes: matrix, LOD, illumination, flags; `AddRenderInstance` `0x7602a0`,
+  `ExecuteRenderInstances` `0x7607b0`). `eCSubMesh` (`Render` `0x5c7eb0`): `+0x28` start index, `+0x2c` index count, `+0x30` /
+  `+0x34` vertex range, `+0x38` `eCMaterialResource2*`, `+0x40` hierarchy.
+* `eCGfxVisual::Execute` (`0x5069a0`): device slots `0x230/0x240/0x248/0x250` with visual `+0x18..+0x24`, `eCGfxShader::Execute`
+  (visual `+0x60`), then `eCAPIPrimitive::Execute` on visual `+0x10` = our `HalPrimitive`. `eCSubMesh::Render` writes the draw
+  description per sub-mesh into it (`GetDrawCallDescription`, slot 12), sets the world matrix through the shader (vtbl `+0x208`,
+  `+0x210` = global alpha) and runs the passes (`GetPasses` + vtbl `+0x1d0` = `ExecutePass` `0x6d2060`).
+* Material: `eCMaterialResource2 +0x70` = `eCShaderBase*`, `+0x78` material id. `IsRefracted` (`eCShaderDefault` `0x6c9d20`) = the
+  refraction colour-source GUID (`+0x410`) is valid; base classes return false (`0x6d2f60`).
+* Skinned actors: `eCRenderContextAnimation2::Render(op)` `0x4dd860` -> `eCAnimation_PS::Render` `0x4d6fe0`,
+  `UpdateRenderMatrices`, `eCAnimation_HardRenderActor2::Render` `0x4dd650`, `RenderPrimitive` `0x4dd0a0`.
+* Other emitters: SpeedTree `0x6ee320`, SpeedTree billboards `0x6ee8d0`, vegetation (instanced) `0x70d4b0`, sky
+  `eCSkydome_PS::Render` `0x6e4730`, particles `0x5e0080`, strips `0x6feae0`, GUI in `eCApplication::Draw` `0x4c13b0`.
+* Thunks: `eCRenderContextMesh::Render(op, db)` / `RenderAlpha` / `RenderRefracted` / `RenderZPass` (`0x5c73e0 / 0x5c73f0 /
+  0x5c7400 / 0x5c7410`) are 16 bytes apart (tail jumps into `0x5c7110`); likewise `eCRenderOp2::Render*` `0x67f5c0..0x67f660`
+  and `eCRenderContextMesh::Destroy` `0x5c72c0` (0x20 bytes): never detour them, patch the vtable slot (`0x9ae080` / `0x9ae078`
+  for `+0x10` / `+0x08`) or the caller. Render-context vtables are safe to patch (the "own vtables" rule is for `eCDX9*`).
+  `Create` is `0x5c7360`; `eCRenderSystemAdmin::Extract(db)` `0x66cd80` fills a database without `Execute`.
+* Camera (`eCShaderMaterialAdmin::SetCamera` `0x6ba1d0`) writes the VS pool: c0 view-projection (camera `+0xe0`, or `+0xa0 * +0x20`
+  with the depth-bias flag at admin `+0x310`), c4 inverse projection (`+0x60`), c8 inverse view 3x3 (`+0x120`), c11 position
+  (`+0x150..0x158`) + far; the PS pool gets position, far and screen-size terms.
+
+**VS constants of material shaders** (`ge_common_vs.fxh`, `ge_default.fxh`, `ge_default_vs.fx` 213-247): c0 `g_vViewProjection`;
+c4 `g_vInvProjection`; c8 `g_vInvView`; c11 `g_vCamPosAndFar`; c12-c29 vegetation and wind; c30 fog; c31 `g_vInstanceMisc`;
+c32+ `g_vInstanceData[]` (`[0].a` global alpha, `[1..3]` world 3x4; instanced `[i*4+1..+3]`; **skinned: bone `i` at
+`[idx*3+1..+3]`**, blended by BLENDWEIGHT / BLENDINDICES); c232 `g_vShaderData`.
+**PS:** c0 camera / far; c3 fog colour; c6 `g_ShaderData`; c14 `g_IndoorAmbientColor`; c15-c21 `g_AmbientLight[7]`; c22
+`g_DirLight`; c25+ point lights; s0 shadow mask; s1 refraction; s2 depth map (linear: `.r * g_FarDist`); s3-s5 lightmaps; s9-s15
+`g_SamplerData[7]`.
+CTAB names survive in the shipped bytecode (corpus: `g_vInstanceData` in 141 of 149 VS, `g_vViewProjection` 148, `g_SamplerData`
+2286 of 2334 PS, `smpRefract` 132 PS). `g_bSkinned` / `g_bInstanced` are compile-time and absent: skinning = BLENDINDICES in the
+declaration, instancing = stream frequency / TEXCOORD4 input.
+
+**Water in the original engine**: a normal `eCMesh_PS` mesh with an `eCShaderDefault` material that has a refraction colour source
+and the material VS (`ge_default_vs.fx`); waves are scrolling texture coordinates and normal maps (`eCTexCoordSrc*`, [I: not
+traced]). Refraction (`ge_default.fxh` `Refract`, 559-581): distort the screen position by `m_vecDistortionOffset`; above low
+quality reject the offset when the depth map there is in front of the water; `lerp(refract, shaded, alpha)`. Reflection:
+`m_vecWorldReflect = reflect(-eye, normal)` (`ge_default_ps.fx:255`) -> the sky-only 128² cube (`UpdateSkydomeCubemap` `0x574630`,
+`UpdateSkydomeEnvCubemap` `0x6e7ed0`). No planar / screen-space reflections, shore foam or depth fog. Without an active image
+effect there is no refraction source.
+**Gameplay water** (Game.dll / Script.dll): `gCWaterZone_PS` (ctor `0x945780`; sub-zones `gCWaterSubZone_PS`: polygon points,
+`Min/MaxX/Z`, `FaceNormal`, `DepthRange`; `AccessDepthRange`, `AccessEffectMaterial`, `UseWadeMovement`, `OnContact`) registered
+in `gCNavigationAdmin` (`RegisterWaterZonePS` `0x8fc8d0`, `GetWaterZonePSList` `0x8fc830`); character state
+`gCCharacterMovement_PS` (`WaterWadeDepth`, `WaterDeathDepth`, `TreatWaterAsSolid`); `PSNavigation::GetUnderWaterDepth` (Script.dll
+`0x2283b0`), `Entity::IsSwimming` `0x209060`; splash emitters `gCWaterZone_PS::CreateEmitter` `0x945550`. No engine-side underwater
+post effect found; presumably an overlay image effect (`eCImageFilterAdmin+0x98`; `post_wobble` / `post_distort`) switched by
+scripts [I].
+Mesh lightmaps: `eCMeshResource2::BindLightmaps` `0x764220` (rt-albedo-facts.md); albedo slot: `eCShaderBase::GetDeclarations`
+`0x6d29b0` (rt-albedo-facts.md).

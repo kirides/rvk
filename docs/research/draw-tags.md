@@ -53,7 +53,7 @@ PS: `g_CamPosAndFar` c0 (2297), `g_SamplerData` s9.. (2286, 1-7 samplers), `g_Fo
 `g_AmbientLight` c15x7, `g_IndoorAmbientColor` c14, `g_ViewToScreenPos` c1, `g_ShaderData` c6 (1-7 registers),
 `smpShadowMask` s0 (2168), `g_PointLights` c25 (1599, 2-12 registers), `g_DirLight` c22x3 (1148), `smpLightMap1/2` s4/s5
 (576), `smpDepthmap` s2 (156), `smpRefract` s1 (132), `g_CamObstacleAndMaskReference` c5 (40). The registers are the same in
-every shader that has the name (the engine's fixed layout, roadmap 1.1).
+every shader that has the name (the engine's fixed layout, engine-gfx.md 8).
 
 VS inputs (`dcl_*`): **TEXCOORD4 = the instance index** (with `g_vInstanceData` x200); **BLENDINDICES = bones**, except in
 SpeedTree shaders, which use BLENDINDICES / BLENDWEIGHT for wind and leaf data (they have `g_vWindMatrix`). Grass

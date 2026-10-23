@@ -327,6 +327,10 @@ in every run:
 
 ## 12. VaanaCZ Risen-FPS-Patch (2009 32-bit) vs the x64 build
 
+**Built** (commit 4817bab, `src/engine/high_fps.*`, setting `compat.high_fps` "High Fps compatibility (Vaana)", System tab,
+default on). In game at ~190 fps all 4 sites are patched, the fall scaling is active (x6.1), walk / jumps / the 15 m drop are
+unchanged; climbing and thunder are not exercised by the scenario.
+
 The patch (github.com/VaanaCZ/Risen-FPS-Patch; a `Script_*.dll` for the original 2009 build only) fixes three
 frame-rate dependencies. Checked against the x64 build in the decompilation (dumps
 `B:\DevDrive\risen-ghidra\rvk_fpspatch_*.txt`); **[C]** = read in the code, **[I]** = inferred, not measured.

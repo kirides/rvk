@@ -139,6 +139,6 @@ restores today's stub, since the stub is the proven-safe behaviour for the only 
 `-Validation`. In-game verification is not possible without driving the static-light preprocessor (editor command).
 
 ## 5. Doc follow-ups (not done here: read-only task)
-* `docs/PLAN.md:63` / `:80`: occlusion queries are unused by the game (only the editor's radiosity baker); the "visible"
+* PLAN.md (the old M3 / M4 text, condensed 2026-10-23): occlusion queries were noted as "report visible"; they are unused by the game (only the editor's radiosity baker); the "visible"
   stub is correct for it.
 * `docs/research/hal.md:104`: "occlusion queries: not seen" is now explained (static proof, section 2).
