@@ -22,6 +22,10 @@ void main() {
         float a = atan(m.y, m.x) / (2.0 * GB_PI) + 0.5;
         vec3 hue = clamp(abs(fract(a + vec3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0, 0.0, 1.0);
         outColor = vec4(hue * len + vec3(0.05), 1.0);
+    } else if (pc.mode == 4u) {
+        // the screen probes' factor on the DDGI: 0.5 = 1 (no change), darker = less light than the probe volume says
+        vec4 s = pc.aoTex != 0u ? rvkSample2DLod(pc.aoTex, pc.linearSampler, uv, 0.0) : vec4(1.0, 1.0, 1.0, 0.0);
+        outColor = vec4(s.a > 0.5 ? clamp(s.rgb * 0.5, 0.0, 1.0) : vec3(0.3, 0.0, 0.3), 1.0);
     } else {
         float ao = pc.aoTex != 0u ? rvkSample2DLod(pc.aoTex, pc.linearSampler, uv, 0.0).r : 1.0;
         outColor = vec4(vec3(ao), 1.0);

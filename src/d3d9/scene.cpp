@@ -405,6 +405,9 @@ void fillFrameBlock(shader::abi::FrameBlock& out, const CameraBlock& cur, const 
     if (x.ao[0] != 0) {
         for (std::size_t i = 0; i < 4; ++i) out.ao[i] = x.ao[i];
     }
+    if (x.sgi[0] != 0) {
+        for (std::size_t i = 0; i < 4; ++i) out.sgi[i] = x.sgi[i];
+    }
 }
 
 }  // namespace rvk::d3d9::scene

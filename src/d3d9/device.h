@@ -757,6 +757,13 @@ public:
         ao_ = ao;
         frameAddr_ = 0;
     }
+    // FrameBlock::sgi: last frame's screen probe GI ratio (enh/gi)
+    void setFrameSgi(const std::array<std::uint32_t, 4>& sgi) {
+        if (sgi_ == sgi) return;
+        sgi_ = sgi;
+        frameAddr_ = 0;
+    }
+    const std::array<std::uint32_t, 4>& frameSgi() const { return sgi_; }
     // ---- shader variants of enhancements (render thread) ----
     void setVariantProvider(VariantSlot slot, VariantProvider provider);
     // the slot's variant of `s` when it is built (queues its build on the first call); null until then / when not applicable
@@ -1159,6 +1166,7 @@ private:
     std::uint32_t gbufMissing_ = 0, gbufSolid_ = 0;  // this frame: solid draws whose G-buffer pipeline / variant is not ready, all
     double gbufRequestedAt_ = 0.0;
     std::array<std::uint32_t, 4> ao_{};
+    std::array<std::uint32_t, 4> sgi_{};
     GiDraws giDraws_;
     std::uint64_t giDrawCount_ = 0;
     VkDeviceAddress captureRequest_ = 0;    // the draw being prepared (DrawObserver::observe)

@@ -10,6 +10,17 @@ namespace rvk::enh {
 
 using d3d9::Semantic;
 
+std::string materialVariantTag(std::string_view base) {
+    std::uint64_t h = 1469598103934665603ull;
+    for (const std::string_view t : {shader::embedded::giGlsl(), shader::embedded::materialVariantGlsl()}) {
+        for (const char c : t) {
+            h ^= static_cast<std::uint8_t>(c);
+            h *= 1099511628211ull;
+        }
+    }
+    return std::format("{}{:08x}", base, static_cast<std::uint32_t>(h ^ (h >> 32)));
+}
+
 bool materialVariantOptions(const d3d9::Shader& s, MaterialVariant kind, shader::GlslOptions& o) {
     if (s.stage != shader::Stage::Pixel || (s.reflection.colorOutputs & 1u) == 0) return false;
     const auto& amb = s.semantics[Semantic::AmbientLight];

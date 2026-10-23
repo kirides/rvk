@@ -62,6 +62,8 @@ set(RVK_SHADERS
     debug/inject_view.frag
     gi/gi_blend.comp
     gi/gi_trace.comp
+    gi/sp_resolve.comp
+    gi/sp_trace.comp
     gbuffer/ao_white.frag
     gbuffer/gbuffer_debug.frag
     gbuffer/gtao.comp

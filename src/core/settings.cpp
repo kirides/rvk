@@ -1237,6 +1237,20 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 1,
         .flags = Flag::Advanced,
     });
+    r.giScreen = &reg.add({
+        .key = "gi.screen",
+        .label = "Lighting detail",
+        .category = "Lighting",
+        .description = "Traces the bounced light from the surfaces on screen as well: exact shade where objects meet, light "
+                       "that leaks less through walls. Lower it if the frame rate drops.",
+        .type = Type::Enum,
+        .defaultValue = 2,
+        .options = {"off", "low", "medium", "high"},
+        .optionLabels = {"Off", "Low", "Medium", "High"},
+        .flags = Flag::Advanced,
+        .requirements = caps::bit(caps::Cap::RayQuery),
+        .unmetValue = 0,
+    });
     r.giDebug = &reg.add({
         .key = "gi.debug",
         .label = "GI debug view",
@@ -1307,8 +1321,8 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "material), \"Motion\" the motion vectors (hue = direction), \"AO\" the ambient occlusion.",
         .type = Type::Enum,
         .defaultValue = 0,
-        .options = {"off", "normals", "motion", "ao"},
-        .optionLabels = {"Off", "Normals", "Motion", "AO"},
+        .options = {"off", "normals", "motion", "ao", "screen_gi"},
+        .optionLabels = {"Off", "Normals", "Motion", "AO", "Screen probes (GI factor)"},
         .flags = Flag::NoAB | Flag::Debug,
     });
 

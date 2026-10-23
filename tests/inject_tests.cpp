@@ -103,7 +103,7 @@ TEST(abi_glsl_layout_matches_cpp) {
                   {"depthParams", offsetof(FB, depthParams)}, {"viewport", offsetof(FB, viewport)}, {"jitter", offsetof(FB, jitter)},
                   {"time", offsetof(FB, time)}, {"frameInfo", offsetof(FB, frameInfo)}, {"images", offsetof(FB, images)},
                   {"params", offsetof(FB, params)}, {"rtScene", offsetof(FB, rtScene)}, {"rtInfo", offsetof(FB, rtInfo)},
-                  {"gi", offsetof(FB, gi)}, {"ao", offsetof(FB, ao)}},
+                  {"gi", offsetof(FB, gi)}, {"ao", offsetof(FB, ao)}, {"sgi", offsetof(FB, sgi)}},
                  "RvkFrame");
 }
 

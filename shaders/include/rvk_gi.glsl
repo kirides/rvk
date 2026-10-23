@@ -20,7 +20,8 @@ const uint RVK_GI_MAX_CASCADES = 4u;
 const uint RVK_GI_DEPTH_RES = 8u;         // depth moments per probe: 8 x 8 octahedral texels
 const uint RVK_GI_PROBE_VALID = 1u;       // RvkGiProbe.key.w: the probe has been traced at least once at its cell
 const uint RVK_GI_PROBE_INSIDE = 2u;      // ... it sees mostly back faces (inside geometry): never used by lookups
-const uint RVK_GI_PROBE_COUNT_SHIFT = 8u; // ... bits 8-15: updates so far (saturating, the hysteresis ramp)
+const uint RVK_GI_PROBE_COUNT_SHIFT = 8u; // ... bits 8-15: updates so far (saturating, the hysteresis ramp); bits 16-23 the
+                                          // smoothed back-face share (0..255, the inside flag's hysteresis)
 
 // one probe (128 bytes): its absolute cell (xyz) + flags (w), the irradiance in the engine's 7 ambient registers
 struct RvkGiProbe {
@@ -195,6 +196,39 @@ bool rvkGiLookupVolume(RvkGiVolume v, vec3 P, vec3 N, vec3 V, out vec4 regs[7], 
         }
         for (int k = 0; k < 7; ++k) regs[k] = a[k];
         cascadeOut = c;
+        return true;
+    }
+    return false;
+}
+
+// A cheap lookup for ray hits (the probes' own multi-bounce, the screen probes' hits): the finest cascade holding P, its 8
+// probes trilinear x valid only (no backface / visibility weights: a hit's second bounce tolerates leaks)
+bool rvkGiLookupFast(RvkGiVolume v, vec3 P, out vec4 regs[7]) {
+    for (int k = 0; k < 7; ++k) regs[k] = vec4(0.0);
+    uint n = min(v.dims.w, RVK_GI_MAX_CASCADES);
+    ivec3 dims = ivec3(v.dims.xyz);
+    RvkGiProbes probes = RvkGiProbes(v.data.xy);
+    for (uint c = 0u; c < n; ++c) {
+        RvkGiCascade cs = v.cascade[c];
+        vec3 local = P * cs.spacing.y - vec3(cs.origin.xyz);
+        ivec3 base = ivec3(floor(local));
+        if (any(lessThan(base, ivec3(0))) || any(greaterThan(base, dims - 2))) continue;
+        vec3 a = local - vec3(base);
+        float wsum = 0.0;
+        uint first = c * v.info.z;
+        for (int i = 0; i < 8; ++i) {
+            ivec3 o = ivec3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+            ivec3 cell = cs.origin.xyz + base + o;
+            uint index = first + rvkGiSlot(dims, cell);
+            ivec4 key = probes.p[index].key;
+            if (key.xyz != cell || (key.w & int(RVK_GI_PROBE_VALID)) == 0 || (key.w & int(RVK_GI_PROBE_INSIDE)) != 0) continue;
+            vec3 tri = mix(1.0 - a, a, vec3(o));
+            float w = tri.x * tri.y * tri.z;
+            for (int k = 0; k < 7; ++k) regs[k] += probes.p[index].reg[k] * w;
+            wsum += w;
+        }
+        if (wsum <= 1e-4) continue;
+        for (int k = 0; k < 7; ++k) regs[k] /= wsum;
         return true;
     }
     return false;

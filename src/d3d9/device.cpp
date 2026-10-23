@@ -127,6 +127,7 @@ VkDeviceAddress Device::frameBlockAddress() {
         }
     }
     x.ao = ao_;
+    x.sgi = sgi_;
     const vk::RingAlloc a = frames_.allocate(sizeof(shader::abi::FrameBlock), 16);
     scene::fillFrameBlock(*static_cast<shader::abi::FrameBlock*>(a.ptr), camera_, lastCamera_, x);
     frameAddr_ = a.address;

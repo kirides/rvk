@@ -281,8 +281,11 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     // ray-traced global illumination (enh/gi.h, docs/research/rtgi.md): probes + the material shaders' GI variants
     gi_ = std::make_unique<enh::Gi>(dev_, rtScene_.get());
     if (rs.giEnabled != nullptr) {
-        for (settings::Setting* s : {rs.giEnabled, rs.giQuality, rs.giStrength, rs.giLightmaps, rs.giCharacters, rs.giDebug}) {
-            if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyGi(); }, this);
+        for (settings::Setting* s : {rs.giEnabled, rs.giQuality, rs.giStrength, rs.giLightmaps, rs.giCharacters, rs.giScreen, rs.giDebug}) {
+            if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) {
+                applyGi();
+                applyGbuffer();  // the screen probes need the G-buffer
+            }, this);
         }
         if (rs.giEnabled->asBool()) applyGi();
     }
@@ -292,7 +295,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         for (settings::Setting* s : {rs.aoEnabled, rs.aoMode, rs.aoStrength, rs.aoRadius, rs.gbufferDebug}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyGbuffer(); }, this);
         }
-        if (rs.aoEnabled->asBool() || rs.gbufferDebug->asEnum() != "off") applyGbuffer();
+        applyGbuffer();
     }
     // detail distances (engine/lod.h, docs/research/lod.md)
     for (settings::Setting* s : {rs.lodTrees, rs.lodMeshes, rs.lodView}) {
@@ -360,6 +363,10 @@ void HalDevice::applyGi() {
     s.characters = rs.giCharacters->asBool();
     const std::string_view d = rs.giDebug->asEnum();
     s.debug = d == "irradiance" ? 1 : d == "cascades" ? 2 : 0;
+    if (rs.giScreen != nullptr) {
+        const std::string_view sc = rs.giScreen->asEnum();
+        s.screen = sc == "low" ? 1 : sc == "medium" ? 2 : sc == "high" ? 3 : 0;
+    }
     gi_->apply(s);
 }
 
@@ -372,7 +379,9 @@ void HalDevice::applyGbuffer() {
     s.aoStrength = rs.aoStrength->asFloat();
     s.aoRadius = rs.aoRadius->asFloat() * 100.0f;
     const std::string_view d = rs.gbufferDebug->asEnum();
-    s.debug = d == "normals" ? 1 : d == "motion" ? 2 : d == "ao" ? 3 : 0;
+    s.debug = d == "normals" ? 1 : d == "motion" ? 2 : d == "ao" ? 3 : d == "screen_gi" ? 4 : 0;
+    // the screen probes (enh/gi) read the G-buffer
+    s.forced = rs.giEnabled != nullptr && rs.giEnabled->asBool() && rs.giScreen != nullptr && rs.giScreen->asEnum() != "off";
     gbuffer_->apply(s);
 }
 

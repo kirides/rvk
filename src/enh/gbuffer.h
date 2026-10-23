@@ -31,6 +31,15 @@ namespace rvk::enh {
 
 class RtScene;
 
+// the G-buffer's images (transients "gbuffer.normal" / "gbuffer.motion", also read by enh/gi's screen probes): octahedral
+// normal 10 + 10 bits + id in the 2-bit alpha (4 bytes), motion RG16F (4 bytes; also a storage image: the AO pass fills it
+// where no material wrote it, shaderStorageImageExtendedFormats)
+inline constexpr VkFormat kGbufferNormalFormat = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+inline constexpr VkFormat kGbufferMotionFormat = VK_FORMAT_R16G16_SFLOAT;
+inline constexpr VkImageUsageFlags kGbufferNormalUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+inline constexpr VkImageUsageFlags kGbufferMotionUsage =
+    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+
 // mirror of shaders/gbuffer/gbuffer_common.glsl GbufferPush
 struct GbufferPush {
     shader::abi::PassPushHeader h;
@@ -48,7 +57,8 @@ public:
         bool replaceEngineSsao = true;  // ao.mode = replace
         float aoStrength = 1.0f;
         float aoRadius = 100.0f;  // world units (cm)
-        int debug = 0;            // 1 normals, 2 motion, 3 AO
+        int debug = 0;            // 1 normals, 2 motion, 3 AO, 4 the screen probes' GI factor
+        bool forced = false;      // on for another consumer (enh/gi's screen probes)
     };
 
     Gbuffer(d3d9::Device& device, RtScene* scene);

@@ -69,8 +69,12 @@ struct GiPassParams {
     float sunDir[4];
     float sky[7][4];
     float lights[kGiMaxLights * 2][4];
+    std::uint32_t screen[4];   // screen probes: depth, G-buffer normal, grid width, height
+    std::uint32_t screen2[4];  // tile size, rays per probe, scene width, height
+    std::uint32_t screen3[4];  // probes image, previous resolve, G-buffer motion, linear sampler
+    float screen4[4];          // ray reach, ratio cap, history blend, 0
 };
-static_assert(sizeof(GiPassParams) == 16 * (3 + 3 + 1 + 1 + 1 + 1 + 1 + 7 + kGiMaxLights * 2));
+static_assert(sizeof(GiPassParams) == 16 * (3 + 3 + 1 + 1 + 1 + 1 + 1 + 7 + kGiMaxLights * 2 + 4));
 
 // mirror of gi_common.glsl GiPush
 struct GiPush {
@@ -89,6 +93,7 @@ public:
         bool replaceLightmaps = false;
         bool characters = true;   // skinned draws in the RT scene
         int debug = 0;            // 1 irradiance, 2 cascades
+        int screen = 2;           // screen probes (stage C, rtgi.md 11): 0 off, 1 low, 2 medium, 3 high
     };
 
     Gi(d3d9::Device& device, RtScene* scene);
@@ -142,6 +147,8 @@ private:
     void selectProbes(std::vector<std::uint32_t>& out, std::uint32_t budget);
     void pickLight();
     void logStats(std::uint32_t probes);
+    // stage C: the screen probes after the volume's update (the G-buffer of this frame's solid pass)
+    void recordScreen(d3d9::PassContext& ctx, const GiPassParams& base);
 
     d3d9::Device& dev_;
     RtScene* scene_ = nullptr;
@@ -151,6 +158,13 @@ private:
     vk::PassLayout layout_;
     VkPipeline trace_ = VK_NULL_HANDLE, blend_ = VK_NULL_HANDLE;
     std::future<VkPipeline> traceBuild_, blendBuild_;
+    // the screen probes (set 1: one storage image)
+    vk::PassLayout screenLayout_;
+    VkPipeline spTrace_ = VK_NULL_HANDLE, spResolve_ = VK_NULL_HANDLE;
+    std::future<VkPipeline> spTraceBuild_, spResolveBuild_;
+    std::uint32_t sgiHistory_ = 0;  // the resolved image written last (0 / 1)
+    bool sgiValid_ = false;
+    std::uint64_t screenFrames_ = 0, screenSkipped_ = 0;
     vk::rt::AddressBuffer probes_, depth_, rays_;
     bool cleared_ = false;
     std::array<Cascade, kGiCascades> cascades_;

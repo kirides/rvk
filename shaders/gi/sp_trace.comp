@@ -1,0 +1,105 @@
+#version 460
+// Screen probes (M10 stage C P8, src/enh/gi.cpp, docs/research/rtgi.md 11; after GI-1.0, Boisse et al. 2023): one probe per
+// screen tile at a jittered pixel of this frame's G-buffer, cosine-weighted hemisphere rays around its normal against the TLAS,
+// shaded like the DDGI probes' rays (gi_shade.glsl: sun + a point light with shadow rays, the DDGI probes at hits, the sky on
+// misses). The probe stores the (luminance) ratio of its traced irradiance to the DDGI volume's irradiance at the same point
+// and normal: the material shaders scale the DDGI lookup by it (the exact per-surface visibility and near bounce the 1.5 m
+// probe grid cannot hold; the DDGI keeps the direction-dependent SH). rgb = the ratio, a = the probe's view depth (0 = none).
+//
+// One ray per invocation (64 per workgroup = 64 / rays probes; a thread per probe looping over its rays left the GPU with a
+// few hundred long waves: 28 ms in a dense town), the rays of a probe summed in shared memory.
+#extension GL_EXT_ray_query : require
+
+#define RVK_PASS_SHADER 1
+#include "rvk_abi.glsl"
+#include "rvk_common.glsl"
+#include "rvk_rt_trace.glsl"
+#include "rvk_gi.glsl"
+#include "gi_common.glsl"
+#include "gi_shade.glsl"
+#include "screen_common.glsl"
+
+layout(local_size_x = 64) in;
+layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D outProbes;
+
+shared vec3 sRad[64];
+
+void main() {
+    GiPassParams p = GiPassParams(pc.params);
+    RvkFrame f = pc.frame;
+    uint rays = clamp(p.screen2.y, 1u, 64u);
+    uint perGroup = 64u / rays;
+    uint lane = gl_LocalInvocationID.x;
+    uint local = lane / rays;  // the probe within the group
+    uint ray = lane % rays;
+    uint probe = gl_WorkGroupID.x * perGroup + local;
+    uint gw = p.screen.z, gh = p.screen.w;
+    bool inRange = local < perGroup && probe < gw * gh;
+    ivec2 tile = ivec2(int(probe % max(gw, 1u)), int(probe / max(gw, 1u)));
+    vec2 size = vec2(p.screen2.zw);
+
+    // the probe's surface (every lane of the probe reads the same texels)
+    bool valid = false;
+    vec3 P = vec3(0.0), N = vec3(0.0, 1.0, 0.0), V = vec3(0.0, 1.0, 0.0);
+    float viewZ = 0.0;
+    float z = 1.0;
+    ivec2 px = ivec2(0);
+    if (inRange) {
+        px = spProbePixel(p, tile);
+        z = rvkFetch2D(p.screen.x, px).r;
+        vec4 g = rvkFetch2D(p.screen.y, px);
+        viewZ = spViewDepth(f, z);
+        if (viewZ > 0.0 && g.w >= 0.16) {
+            P = spWorldPos(f, px, size, z);
+            N = rvkGiOctDecode(g.xy);
+            V = normalize(f.cameraPos.xyz - P);
+            if (dot(N, V) < 0.0) N = -N;
+            valid = true;
+        }
+    }
+    RvkGiVolume v = RvkGiVolume(p.volume.xy);
+    vec3 radiance = vec3(0.0);
+    if (valid) {
+        // cosine-weighted (stratified, rotated per probe and frame): E / pi = mean of the radiance
+        vec3 t = normalize(abs(N.y) < 0.99 ? cross(N, vec3(0.0, 1.0, 0.0)) : cross(N, vec3(1.0, 0.0, 0.0)));
+        vec3 b = cross(N, t);
+        uint seed = giHash(uint(tile.x) * 9781u + uint(tile.y) * 6271u + p.volume.w * 26699u);
+        float u1 = (float(ray) + float(giHash(seed + ray * 747796405u) & 0xFFFFu) / 65536.0) / float(rays);
+        float u2 = fract(float(ray) * 0.618034 + float(seed & 0xFFFFu) / 65536.0);
+        float r = sqrt(u1), phi = 6.2831853 * u2;
+        vec3 dir = normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + N * sqrt(max(0.0, 1.0 - u1)));
+        float u = float(giHash(seed ^ (ray * 2654435761u)) & 0xFFFFFFu) / 16777216.0;
+        vec4 hit = giShadeRay(p, f, v, P + N * 3.0 + V * 2.0, dir, p.screen4.x, u);
+        radiance = hit.rgb;
+        // a ray that ran out of reach without a hit: the probe volume's light at its end (the far field) instead of the sky
+        if (hit.w >= p.screen4.x) {
+            vec4 regs[7];
+            if (rvkGiLookupFast(v, P + dir * p.screen4.x, regs)) radiance = max(rvkGiEvalRegs(regs, -dir), vec3(0.0));
+        }
+    }
+    sRad[lane] = radiance;
+    barrier();
+    if (!inRange || ray != 0u) return;
+    if (!valid) {
+        imageStore(outProbes, tile, vec4(1.0, 1.0, 1.0, 0.0));
+        return;
+    }
+    vec3 traced = vec3(0.0);
+    for (uint i = 0u; i < rays; ++i) traced += sRad[local * rays + i];
+    traced /= float(rays);
+    // the DDGI's irradiance here (the denominator)
+    vec4 regs[7];
+    uint hc;
+    if (!rvkGiLookupVolume(v, P, N, V, regs, hc)) {
+        imageStore(outProbes, tile, vec4(1.0, 1.0, 1.0, 0.0));
+        return;
+    }
+    vec3 ddgi = max(rvkGiEvalRegs(regs, N), vec3(0.0));
+    // a luminance ratio (per colour channel the noise of few rays turns into colour noise); where the DDGI has almost
+    // nothing (deep interiors) it is meaningless: neutral
+    const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+    float dl = dot(ddgi, lw);
+    float k = dl > 2e-3 ? clamp(dot(traced, lw) / dl, 0.0, p.screen4.y) : 1.0;
+    if (isnan(k) || isinf(k)) k = 1.0;
+    imageStore(outProbes, tile, vec4(vec3(k), viewZ));
+}

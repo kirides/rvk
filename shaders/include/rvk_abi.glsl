@@ -28,7 +28,7 @@ layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Rv
     uint pad1;
 };
 
-// Per-frame block (FrameBlock, 960 bytes; Device::frameBlockAddress): the main view's camera (current + previous), depth
+// Per-frame block (FrameBlock, 976 bytes; Device::frameBlockAddress): the main view's camera (current + previous), depth
 // conventions, target size, jitter, time, frame index, image roles, feature parameters. Matrices are the engine's
 // row-vector D3D matrices stored as they are, which GLSL reads as their transpose: clip = viewProj * vec4(world, 1).
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer RvkFrame {
@@ -55,10 +55,12 @@ layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Rv
     uvec4 gi;              // 928  the GI probe volume (rvk_gi.glsl): xy its header's address, z RVK_FRAME_GI_* flags, w 0
     uvec4 ao;              // 944  last frame's ambient occlusion (enh/gbuffer): x t2D slot, y sampler, z RVK_FRAME_AO_* flags,
                            //      w strength (float bits)
+    uvec4 sgi;             // 960  last frame's screen probe GI ratio (enh/gi): x t2D slot, y sampler, z RVK_FRAME_SGI_* flags, w 0
 };
 const uint RVK_FRAME_RT_VALID = 1u;
 const uint RVK_FRAME_GI_VALID = 1u;
 const uint RVK_FRAME_AO_VALID = 1u;
+const uint RVK_FRAME_SGI_VALID = 1u;
 
 // RvkFrame.frameInfo.y
 const uint RVK_FRAME_CAMERA_VALID = 1u;      // the camera fields hold this frame's main view

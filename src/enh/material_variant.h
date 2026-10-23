@@ -10,6 +10,8 @@
 //                   capture vertex shader variant: it writes that varying)
 
 #include <cstdint>
+#include <string>
+#include <string_view>
 
 #include "d3d9/device.h"
 #include "shader/glsl.h"
@@ -20,6 +22,10 @@ enum class MaterialVariant : std::uint8_t { Gi, Gbuffer, GbufferMotion };
 
 // the variant's options for a pixel shader; false = not applicable (Gi: no ambient constants; all: no colour output 0)
 bool materialVariantOptions(const d3d9::Shader& s, MaterialVariant kind, shader::GlslOptions& o);
+
+// the SPIR-V cache tag of a variant: `base` + a hash of the embedded GLSL it pastes (an edit of rvk_gi.glsl /
+// rvk_material_variant.glsl never reuses a stale cached variant)
+std::string materialVariantTag(std::string_view base);
 
 // the varying location of the capture vertex shader's previous world position (enh/rt_scene)
 inline constexpr std::uint32_t kPrevWorldLocation = 15;  // TEXCOORD15: no game shader writes it (location 30 exceeded maxVertexOutputComponents 128)

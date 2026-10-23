@@ -18,13 +18,10 @@ namespace rvk::enh {
 
 namespace {
 
-// the G-buffer's formats: octahedral normal 10 + 10 bits + id in the 2-bit alpha (4 bytes), motion RG16F (4 bytes; also a
-// storage image: the AO pass fills it where no material wrote it, shaderStorageImageExtendedFormats)
-constexpr VkFormat kNormalFormat = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
-constexpr VkFormat kMotionFormat = VK_FORMAT_R16G16_SFLOAT;
-constexpr VkImageUsageFlags kNormalUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-constexpr VkImageUsageFlags kMotionUsage =
-    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+constexpr VkFormat kNormalFormat = kGbufferNormalFormat;
+constexpr VkFormat kMotionFormat = kGbufferMotionFormat;
+constexpr VkImageUsageFlags kNormalUsage = kGbufferNormalUsage;
+constexpr VkImageUsageFlags kMotionUsage = kGbufferMotionUsage;
 
 bool gbufferVariant(const d3d9::Shader& s, shader::GlslOptions& o) { return materialVariantOptions(s, MaterialVariant::Gbuffer, o); }
 bool gbufferMotionVariant(const d3d9::Shader& s, shader::GlslOptions& o) {
@@ -50,7 +47,7 @@ Gbuffer::Gbuffer(d3d9::Device& device, RtScene* scene) : dev_(device), scene_(sc
     filterBuild_ = std::async(std::launch::async, [ctx, layout]() {
         return vk::createComputePipeline(*ctx, layout, shader::embedded::spirv("gbuffer/gtao_filter.comp"), "gbuffer.gtao filter");
     });
-    dev_.setVariantProvider(d3d9::VariantSlot::Gbuffer, {"gbuf1", gbufferVariant});
+    dev_.setVariantProvider(d3d9::VariantSlot::Gbuffer, {materialVariantTag("gbuf"), gbufferVariant});
     // the replacement of the game's SSAO draws (ao.mode = replace)
     const auto make = [&](const char* name, shader::Stage stage) {
         auto s = std::make_shared<d3d9::Shader>();
@@ -61,7 +58,7 @@ Gbuffer::Gbuffer(d3d9::Device& device, RtScene* scene) : dev_(device), scene_(sc
     whiteVs_ = make("debug/fullscreen.vert", shader::Stage::Vertex);
     whitePs_ = make("gbuffer/ao_white.frag", shader::Stage::Pixel);
     whitePs_->reflection.colorOutputs = 1;
-    dev_.setVariantProvider(d3d9::VariantSlot::GbufferMotion, {"gbufm2", gbufferMotionVariant});
+    dev_.setVariantProvider(d3d9::VariantSlot::GbufferMotion, {materialVariantTag("gbufm"), gbufferMotionVariant});
 }
 
 Gbuffer::~Gbuffer() {
@@ -99,7 +96,7 @@ void Gbuffer::apply(const Settings& s) {
         spdlog::warn("enh: gbuffer: the GPU lacks shaderStorageImageExtendedFormats (RG16F storage images): AO is not available");
         failed_ = true;
     }
-    const bool want = (s.ao || s.debug != 0) && !failed_;
+    const bool want = (s.ao || s.debug != 0 || s.forced) && !failed_;
     if (want && !on_) enable();
     if (!want && on_) disable();
     if (on_ && !s_.ao) dev_.setFrameAo({});
@@ -311,6 +308,7 @@ void Gbuffer::recordDebug(d3d9::PassContext& ctx) {
     push.motionTex = motion->slot;
     push.linearSampler = dev_.samplerFor(false, true);
     push.mode = static_cast<std::uint32_t>(s_.debug);
+    if (s_.debug == 4) push.aoTex = dev_.frameSgi()[0];  // the screen probes' factor (enh/gi)
     if (s_.ao && historyValid_) {
         vk::Transients::Entry* hst = dev_.transients().get(history_ == 0 ? "gtao.history0" : "gtao.history1",
                                                            {VK_FORMAT_R32_SFLOAT, normal->desc.extent});

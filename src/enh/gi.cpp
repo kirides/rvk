@@ -9,6 +9,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "enh/gbuffer.h"
 #include "enh/material_variant.h"
 #include "enh/rt_scene.h"
 #include "shader/embedded.h"
@@ -77,27 +78,38 @@ Gi::Gi(d3d9::Device& device, RtScene* scene) : dev_(device), scene_(scene) {
     blendBuild_ = std::async(std::launch::async, [ctx, layout]() {
         return vk::createComputePipeline(*ctx, layout, shader::embedded::spirv("gi/gi_blend.comp"), "gi.blend");
     });
-    dev_.setVariantProvider(d3d9::VariantSlot::Gi, {"gi4", variantOptions});
+    dev_.setVariantProvider(d3d9::VariantSlot::Gi, {materialVariantTag("gi"), variantOptions});
+    // the screen probes' passes (stage C)
+    const VkDescriptorSetLayoutBinding out{0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+    if (screenLayout_.create(dev_.ctx(), dev_.bindless(), {&out, 1})) {
+        const VkPipelineLayout sl = screenLayout_.layout();
+        spTraceBuild_ = std::async(std::launch::async, [ctx, sl]() {
+            return vk::createComputePipeline(*ctx, sl, shader::embedded::spirv("gi/sp_trace.comp"), "gi.screen trace");
+        });
+        spResolveBuild_ = std::async(std::launch::async, [ctx, sl]() {
+            return vk::createComputePipeline(*ctx, sl, shader::embedded::spirv("gi/sp_resolve.comp"), "gi.screen resolve");
+        });
+    }
 }
 
 Gi::~Gi() {
     disable();
     vk::Context* ctx = &dev_.ctx();
-    for (std::future<VkPipeline>* f : {&traceBuild_, &blendBuild_}) {
+    for (std::future<VkPipeline>* f : {&traceBuild_, &blendBuild_, &spTraceBuild_, &spResolveBuild_}) {
         if (f->valid()) {
             const VkPipeline p = f->get();
             if (p != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), p, nullptr);
         }
     }
-    const VkPipeline t = trace_, b = blend_;
-    vk::PassLayout layout = layout_;
-    if (t != VK_NULL_HANDLE || b != VK_NULL_HANDLE || layout.valid()) {
-        dev_.frames().retire([ctx, t, b, layout]() mutable {
-            if (t != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), t, nullptr);
-            if (b != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), b, nullptr);
-            layout.destroy(*ctx);
-        });
-    }
+    const VkPipeline t = trace_, b = blend_, st = spTrace_, sr = spResolve_;
+    vk::PassLayout layout = layout_, screenLayout = screenLayout_;
+    dev_.frames().retire([ctx, t, b, st, sr, layout, screenLayout]() mutable {
+        for (VkPipeline p : {t, b, st, sr}) {
+            if (p != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), p, nullptr);
+        }
+        if (layout.valid()) layout.destroy(*ctx);
+        if (screenLayout.valid()) screenLayout.destroy(*ctx);
+    });
 }
 
 bool Gi::available() const { return scene_ != nullptr && scene_->supported() && !failed_; }
@@ -113,8 +125,12 @@ void Gi::apply(const Settings& s) {
         scene_->setDynamic(this, s_.characters);
         dev_.setGiDraws({true, s_.replaceLightmaps});
     }
-    spdlog::info("enh: gi: {} (quality {}, strength {:.2f}, lightmaps {}, characters {}, debug {})", on_ ? "on" : "off", s_.quality, s_.strength,
-                 s_.replaceLightmaps ? "replaced" : "kept", s_.characters ? "on" : "off", s_.debug);
+    if (!on_ || s_.screen == 0) {
+        dev_.setFrameSgi({});
+        sgiValid_ = false;
+    }
+    spdlog::info("enh: gi: {} (quality {}, strength {:.2f}, lightmaps {}, characters {}, screen probes {}, debug {})", on_ ? "on" : "off",
+                 s_.quality, s_.strength, s_.replaceLightmaps ? "replaced" : "kept", s_.characters ? "on" : "off", s_.screen, s_.debug);
 }
 
 void Gi::enable() {
@@ -140,6 +156,9 @@ void Gi::disable() {
     on_ = false;
     dev_.setGiDraws({});
     dev_.setGiHeader({});
+    dev_.setFrameSgi({});
+    sgiValid_ = false;
+    for (const char* k : {"sgi.probes", "sgi.resolved0", "sgi.resolved1"}) dev_.transients().release(k);
     dev_.removeDrawObserver(this);
     if (passId_ != 0) dev_.removePass(passId_);
     passId_ = 0;
@@ -478,7 +497,7 @@ void Gi::record(d3d9::PassContext& ctx) {
     p.blend[3] = 0.25f;  // back-face share: inside geometry
     p.shade[0] = 1.0f;   // bounce
     p.shade[1] = 1.0f;   // albedo scale
-    p.shade[2] = 20000.0f;
+    p.shade[2] = 12000.0f;  // sun shadow rays (120 m)
     p.shade[3] = 0.25f;  // ray cone spread (a low mip: the mean albedo)
     std::memcpy(p.sunColor, sunColor_, 16);
     std::memcpy(p.sunDir, sunDir_, 16);
@@ -523,6 +542,7 @@ void Gi::record(d3d9::PassContext& ctx) {
                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
     }
     dev_.setGiHeader({reinterpret_cast<const std::uint8_t*>(&hd), sizeof(hd)});
+    if (s_.screen > 0) recordScreen(ctx, p);
     ++passes_;
     probesTraced_ += n;
     if (updatesTotal_++ == 0) {
@@ -532,6 +552,96 @@ void Gi::record(d3d9::PassContext& ctx) {
                      sunColor_[1], sunColor_[2], sunDir_[0], sunDir_[1], sunDir_[2], frameLights_.size());
     }
     logStats(n);
+}
+
+// ---- stage C: the screen probes (rtgi.md 11) ----
+
+void Gi::recordScreen(d3d9::PassContext& ctx, const GiPassParams& base) {
+    // the pipelines, this frame's G-buffer, the main view's depth
+    if (spTrace_ == VK_NULL_HANDLE || spResolve_ == VK_NULL_HANDLE) {
+        for (auto [future, out] : {std::pair{&spTraceBuild_, &spTrace_}, std::pair{&spResolveBuild_, &spResolve_}}) {
+            if (*out != VK_NULL_HANDLE || !future->valid() || future->wait_for(std::chrono::seconds(0)) != std::future_status::ready) continue;
+            *out = future->get();
+        }
+        if (spTrace_ == VK_NULL_HANDLE || spResolve_ == VK_NULL_HANDLE) {
+            ++screenSkipped_;
+            return;
+        }
+    }
+    d3d9::Surface* ds = dev_.depthStencil();
+    VkCommandBuffer cmd = ctx.cmd;
+    if (!dev_.gbufferWritten() || ctx.sceneHdr == nullptr || ds == nullptr || ds->texture() == nullptr || !dev_.rtSceneValid() ||
+        !dev_.readable(ds->texture(), cmd)) {
+        ++screenSkipped_;
+        dev_.setFrameSgi({});
+        sgiValid_ = false;
+        return;
+    }
+    const std::uint32_t w = std::min(ctx.sceneHdr->desc().width, ds->width()), h = std::min(ctx.sceneHdr->desc().height, ds->height());
+    const std::uint32_t sw = ctx.sceneHdr->desc().width, sh = ctx.sceneHdr->desc().height;
+    vk::Transients::Entry* normal = dev_.transients().get("gbuffer.normal", {kGbufferNormalFormat, {sw, sh}, kGbufferNormalUsage});
+    vk::Transients::Entry* motion = dev_.transients().get("gbuffer.motion", {kGbufferMotionFormat, {sw, sh}, kGbufferMotionUsage});
+    // low: 16 x 16 tiles x 8 rays, medium: 16 x 16 x 16, high: 8 x 8 x 16 (1600 x 900: 5.7k / 5.7k / 22.5k probes)
+    const std::uint32_t tile = s_.screen == 3 ? 8u : 16u;
+    const std::uint32_t rays = s_.screen == 1 ? 8u : 16u;
+    const std::uint32_t gw = (w + tile - 1) / tile, gh = (h + tile - 1) / tile;
+    vk::Transients::Entry* probes = dev_.transients().get("sgi.probes", {VK_FORMAT_R16G16B16A16_SFLOAT, {gw, gh}});
+    const std::uint32_t cur = sgiHistory_ ^ 1u;
+    vk::Transients::Entry* res[2] = {dev_.transients().get("sgi.resolved0", {VK_FORMAT_R16G16B16A16_SFLOAT, {sw, sh}}),
+                                     dev_.transients().get("sgi.resolved1", {VK_FORMAT_R16G16B16A16_SFLOAT, {sw, sh}})};
+    const vk::RingAlloc pa = dev_.frames().allocate(sizeof(GiPassParams), 16);
+    if (normal == nullptr || motion == nullptr || probes == nullptr || res[0] == nullptr || res[1] == nullptr || pa.ptr == nullptr) {
+        ++screenSkipped_;
+        return;
+    }
+    GiPassParams p = base;
+    p.screen[0] = ds->texture()->bindlessSlot();
+    p.screen[1] = normal->slot;
+    p.screen[2] = gw;
+    p.screen[3] = gh;
+    p.screen2[0] = tile;
+    p.screen2[1] = rays;
+    p.screen2[2] = w;
+    p.screen2[3] = h;
+    p.screen3[0] = probes->slot;
+    p.screen3[1] = sgiValid_ ? res[sgiHistory_]->slot : 0u;
+    p.screen3[2] = motion->slot;
+    p.screen3[3] = dev_.samplerFor(true, true);
+    p.screen4[0] = 4000.0f;  // ray reach (world units); a ray that runs out takes the probe volume's light at its end
+    p.screen4[1] = 2.0f;     // ratio cap
+    p.screen4[2] = 0.95f;    // history weight
+    std::memcpy(pa.ptr, &p, sizeof(p));
+    GiPush push{};
+    push.h.frame = ctx.frameBlock;
+    push.h.passId = passId_;
+    split(pa.address, push.params);
+
+    // the G-buffer (written by the solid pass) for sampling
+    normal->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    motion->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    probes->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, spTrace_);
+    screenLayout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, dev_.bindless());
+    screenLayout_.pushStorageImage(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, 0, probes->image.view());
+    screenLayout_.push(cmd, &push, sizeof(push));
+    const std::uint32_t perGroup = 64u / rays;  // one ray per invocation
+    vkCmdDispatch(cmd, (gw * gh + perGroup - 1) / perGroup, 1, 1);
+    // resolve + temporal into this frame's image
+    probes->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    res[sgiHistory_]->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    res[cur]->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, spResolve_);
+    screenLayout_.pushStorageImage(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, 0, res[cur]->image.view());
+    screenLayout_.push(cmd, &push, sizeof(push));
+    vkCmdDispatch(cmd, (w + 7) / 8, (h + 7) / 8, 1);
+    res[cur]->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    sgiHistory_ = cur;
+    sgiValid_ = true;
+    // -> the next frame's material shaders (Gbuffer variants: the reprojected factor on their DDGI lookup)
+    dev_.setFrameSgi({res[cur]->slot, dev_.samplerFor(true, true), shader::abi::kFrameSgiValid, 0u});
+    if (screenFrames_++ == 0) {
+        spdlog::info("enh: gi: screen probes: {}x{} probes ({} px tiles, {} rays each) over {}x{}", gw, gh, tile, rays, w, h);
+    }
 }
 
 void Gi::logStats(std::uint32_t probes) {
@@ -553,6 +663,10 @@ void Gi::logStats(std::uint32_t probes) {
                  ambientDraws_, sunColor_[0], sunColor_[1], sunColor_[2], frameLights_.size(), cascades_[0].origin[0], cascades_[0].origin[1],
                  cascades_[0].origin[2]);
     dev_.setStatus("gi", std::format("GI: {} probes / frame, {} new pending", probes, pending));
+    if (s_.screen > 0) {
+        spdlog::info("enh: gi: screen probes: {} frames ({} skipped: no G-buffer / RT scene / pipelines this frame)", screenFrames_,
+                     screenSkipped_);
+    }
     passes_ = skipped_ = probesTraced_ = 0;
 }
 

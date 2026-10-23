@@ -181,6 +181,7 @@ struct FrameExtras {
     std::uint32_t rtInstances = 0, rtRecordCount = 0;
     std::uint64_t gi = 0;  // the GI volume header of this frame (0 = none)
     std::array<std::uint32_t, 4> ao{};  // FrameBlock::ao (slot 0 = none)
+    std::array<std::uint32_t, 4> sgi{};  // FrameBlock::sgi (slot 0 = none)
 };
 
 // The frame block from the current frame's camera `cur` (valid from its main view on) and the last presented frame's `last`.

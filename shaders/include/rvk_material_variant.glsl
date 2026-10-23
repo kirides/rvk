@@ -21,6 +21,7 @@ vec3 rvk_giN = vec3(0.0, 1.0, 0.0);  // geometric normal (towards the viewer)
 vec3 rvk_mvP = vec3(0.0);            // world position
 vec4 rvk_gbN = vec4(0.0);            // the shaded normal (dot capture / interpolated normal)
 float rvk_mvAo = 1.0;                // the reprojected ambient occlusion applied (debug)
+vec3 rvk_mvSgi = vec3(1.0);          // the screen probes' factor applied (debug)
 
 #ifdef RVK_MV_GBUFFER
 layout(location = 1) out vec4 rvk_gbNormal;  // A2B10G10R10: xy octahedral world normal (rvkGiOctEncode), z 0, w id / 3
@@ -37,6 +38,30 @@ void rvkMvGi(vec3 P, vec3 n, vec3 V) {
     vec4 regs[7];
     if (!rvkGiLookup(pc.frame, P, n, V, regs, rvk_giCascade)) return;
     RvkGiVolume v = rvkGiVolume(pc.frame);
+#ifdef RVK_MV_GBUFFER
+    // the screen probes (rtgi.md 11): last frame's per-surface correction of the DDGI irradiance at this point's previous
+    // screen position (the registers are per colour channel: c15 / c18 red, c16 / c19 green, c17 / c20 blue, c21.rgb)
+    uvec4 sg = pc.frame.sgi;
+    if ((sg.z & RVK_FRAME_SGI_VALID) != 0u && sg.x != 0u) {
+        vec4 pp = pc.frame.prevViewProj * vec4(P, 1.0);
+        vec2 suv = pp.xy / max(pp.w, 1e-6) * vec2(0.5, -0.5) + 0.5;
+        // outside last frame's screen (turning: the strip that just came into view) the nearest edge texel continues it: no
+        // hard edge between corrected and uncorrected light
+        suv = clamp(suv, vec2(0.0), vec2(1.0));
+        if (pp.w > 1e-4) {
+            vec4 s = textureLod(sampler2D(t2D[sg.x], samp[sg.y]), suv, 0.0);
+            if (s.a > 0.5) {
+                vec3 k = clamp(s.rgb, vec3(0.0), vec3(2.0));
+                rvk_mvSgi = k;
+                for (int c = 0; c < 3; ++c) {
+                    regs[c] *= k[c];
+                    regs[3 + c] *= k[c];
+                }
+                regs[6].rgb *= k;
+            }
+        }
+    }
+#endif
     // the draw's own ambient beyond the outdoor sky (indoor colour, static lights; 0 for outdoor draws) stays on top:
     // engine = f x sky + static (static >= 0): f <= L0(engine) / L0(sky) per channel; that bound keeps the remainder's
     // average >= 0 and makes it 0 for outdoor draws (engine = sky)
@@ -68,7 +93,7 @@ void rvkMvAo(vec3 P) {
     vec4 pp = pc.frame.prevViewProj * vec4(P, 1.0);
     if (pp.w <= 1e-4) return;
     vec2 uv = pp.xy / pp.w * vec2(0.5, -0.5) + 0.5;
-    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return;
+    uv = clamp(uv, vec2(0.0), vec2(1.0));  // outside last frame's screen: its edge continues (no hard edge when turning)
     float ao = clamp(textureLod(sampler2D(t2D[a.x], samp[a.y]), uv, 0.0).r, 0.0, 1.0);
     float f = mix(1.0, ao, clamp(uintBitsToFloat(a.w), 0.0, 1.0));
     rvk_mvAo = f;

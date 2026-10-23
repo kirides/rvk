@@ -102,8 +102,16 @@ void main() {
             vec4 old = fresh ? regs[k] : probes.p[index].reg[k];
             probes.p[index].reg[k] = mix(old, regs[k], alpha);
         }
-        int flags = int(RVK_GI_PROBE_VALID) | (float(sBack) > p.blend.w * float(GI_RAYS) ? int(RVK_GI_PROBE_INSIDE) : 0) |
-                    int(min(count + 1u, 255u) << RVK_GI_PROBE_COUNT_SHIFT);
+        // inside geometry: the back-face share smoothed over the updates (bits 16-23, 0..255) with hysteresis: a probe near
+        // a wall whose share hovers around the threshold does not flip between used and ignored with each ray rotation
+        float share = float(sBack) / float(GI_RAYS);
+        float oldShare = fresh ? share : float((uint(sKey.w) >> 16) & 0xFFu) / 255.0;
+        float smoothed = fresh ? share : mix(oldShare, share, 0.25);
+        bool wasInside = !fresh && (sKey.w & int(RVK_GI_PROBE_INSIDE)) != 0;
+        bool inside = wasInside ? smoothed > p.blend.w * 0.7 : smoothed > p.blend.w;
+        int flags = int(RVK_GI_PROBE_VALID) | (inside ? int(RVK_GI_PROBE_INSIDE) : 0) |
+                    int(min(count + 1u, 255u) << RVK_GI_PROBE_COUNT_SHIFT) |
+                    int(uint(clamp(smoothed, 0.0, 1.0) * 255.0 + 0.5) << 16);
         probes.p[index].key = ivec4(cell, flags);
     }
 
