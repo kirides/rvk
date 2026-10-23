@@ -22,6 +22,12 @@ struct Reflection {
     };
     std::vector<VertexInput> vertexInputs;
     std::uint32_t varyingMask = 0;                                  // locations written (vs) / read (ps)
+    // pixel shader inputs: varying location -> the GLSL variable holding it (v# / t#), for variant hooks that read a varying
+    struct PixelInput {
+        std::uint32_t location;
+        std::string name;
+    };
+    std::vector<PixelInput> pixelInputs;
     std::array<TextureType, abi::kSamplerSlots> samplers{};        // TextureType::Unknown = unused
     std::uint32_t floatConstCount = 0;                              // highest c# read + 1 (256 with relative addressing)
     bool relativeConstants = false;
@@ -70,6 +76,14 @@ struct GlslOptions {
         std::string expr;
     };
     std::vector<InputOverride> inputOverrides;
+    // operand captures: just before the first dp3 / dp4 that reads float constant `reg` directly, its other source operand
+    // (as read, swizzle applied) is copied into the GLSL global `target` (a vec4 the prelude declares): the value a shader
+    // dots with a named constant, e.g. the normal-mapped world normal its ambient SH is evaluated with (enh/gbuffer)
+    struct DotCapture {
+        std::uint32_t reg = 0;
+        std::string target;
+    };
+    std::vector<DotCapture> dotCaptures;
 };
 
 GlslResult toGlsl(const Program& program, const GlslOptions& options = {});

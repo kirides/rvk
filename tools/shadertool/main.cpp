@@ -1,6 +1,6 @@
 // rvk_shadertool: offline driver of the D3D9 -> SPIR-V shader translator.
 //
-//   rvk_shadertool corpus <dir> [--out <dir>] [--max-errors N] [--tint | --gi | --capture]
+//   rvk_shadertool corpus <dir> [--out <dir>] [--max-errors N] [--tint | --gi | --gbuf | --gbuf-motion | --capture]
 //                                                                translate + validate every vs*/ps* file of a capture corpus
 //                                                                (--tint: the pixel shaders' tint debug-view variant; --gi: the
 //                                                                material pixel shaders' GI variant, enh/gi; --capture: the vertex
@@ -34,6 +34,7 @@
 #include "d3d9/device.h"
 #include "d3d9/semantics.h"
 #include "enh/gi.h"
+#include "enh/material_variant.h"
 #include "enh/rt_scene.h"
 #include "shader/embedded.h"
 #include "shader/glsl.h"
@@ -352,6 +353,14 @@ int main(int argc, char** argv) {
             const std::string a = argv[i];
             if (a == "--gi") {
                 variant = &rvk::enh::Gi::variantOptions;
+            } else if (a == "--gbuf") {
+                variant = [](const rvk::d3d9::Shader& sh, GlslOptions& o) {
+                    return rvk::enh::materialVariantOptions(sh, rvk::enh::MaterialVariant::Gbuffer, o);
+                };
+            } else if (a == "--gbuf-motion") {
+                variant = [](const rvk::d3d9::Shader& sh, GlslOptions& o) {
+                    return rvk::enh::materialVariantOptions(sh, rvk::enh::MaterialVariant::GbufferMotion, o);
+                };
             } else if (a == "--capture") {
                 variant = &rvk::enh::RtScene::captureOptions;
             } else if (a == "--tint") {

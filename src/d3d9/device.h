@@ -261,8 +261,8 @@ public:
     VkShaderModule lodModule = VK_NULL_HANDLE;
     bool lodFailed = false;
     // variants of enhancements built in the background (Device::variant, VariantSlot): the module once ready
-    std::array<std::atomic<VkShaderModule>, 2> variants{};
-    std::array<std::atomic<std::uint8_t>, 2> variantState{};  // 0 not requested, 1 queued, 2 ready, 3 failed / not applicable
+    std::array<std::atomic<VkShaderModule>, 4> variants{};
+    std::array<std::atomic<std::uint8_t>, 4> variantState{};  // 0 not requested, 1 queued, 2 ready, 3 failed / not applicable
 };
 
 // Shader variants an enhancement supplies (Device::setVariantProvider), translated + compiled on a background thread on
@@ -270,6 +270,8 @@ public:
 enum class VariantSlot : std::uint8_t {
     Gi = 0,       // pixel shaders: the ambient constants from the GI probe volume (enh/gi)
     Capture = 1,  // vertex shaders: world positions + TEXCOORD0 written to a buffer (skinned draws in the RT scene, enh/rt_scene)
+    Gbuffer = 2,  // pixel shaders: GI + the thin G-buffer outputs + AO (enh/gbuffer, enh/material_variant)
+    GbufferMotion = 3,  // ... + per-object motion from the capture vertex shader's previous world position
     Count
 };
 struct VariantProvider {
@@ -733,6 +735,28 @@ public:
     };
     void setGiDraws(const GiDraws& g) { giDraws_ = g; }
     std::uint64_t giDrawsThisInterval() const { return giDrawCount_; }
+    // ---- thin G-buffer (enh/gbuffer, docs/research/rtgi.md 10) ----
+    // Extra colour attachments of the first main view's solid pass (scene HDR target only): `normal` (A2B10G10R10: xy the
+    // octahedral world normal, w id / 3: 1 static material, 2 character, 0 nothing written) at index 1 and `motion` (RG16F:
+    // previous uv - this uv) at index 2, cleared at the frame's first use. The material pixel shaders' Gbuffer variants write them; every other draw
+    // of the scope keeps them (write mask 0). The pipelines of such a scope differ from the plain ones: the device first
+    // builds them in the background (prewarm, the frame's solid draws as the template) and arms the attachments once a
+    // frame's solid pass found all of them (or after 10 s). Render thread; normal == null = off.
+    struct GbufferTargets {
+        vk::Image* normal = nullptr;
+        vk::Image* motion = nullptr;
+        std::uint32_t width = 0, height = 0;
+    };
+    void setGbuffer(const GbufferTargets& g);
+    bool gbufferArmed() const { return gbufArmed_; }
+    // the G-buffer was written in this frame's main view (its contents are this frame's)
+    bool gbufferWritten() const { return gbufWrittenFrame_ == frameValue() && gbufWrittenFrame_ != 0; }
+    // FrameBlock::ao (shader/abi.h): last frame's AO image for the material shaders' Gbuffer variants
+    void setFrameAo(const std::array<std::uint32_t, 4>& ao) {
+        if (ao_ == ao) return;
+        ao_ = ao;
+        frameAddr_ = 0;
+    }
     // ---- shader variants of enhancements (render thread) ----
     void setVariantProvider(VariantSlot slot, VariantProvider provider);
     // the slot's variant of `s` when it is built (queues its build on the first call); null until then / when not applicable
@@ -825,6 +849,12 @@ private:
     bool prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom);
     // GI variant eligibility of the current draw (prepareDraw): the engine set its ambient constants (a first pass)
     bool giEligible(const scene::Phase& phase) const;
+    // the G-buffer: whether the current targets / phase are its scope (first main view, solid pass, the scene HDR target)
+    bool gbufferTargetsMatch() const;
+    bool gbufferScope() const { return gbuf_.normal != nullptr && gbufArmed_ && gbufferTargetsMatch(); }
+    // a G-buffer material draw: the material pixel shader's Gbuffer variant applies (opaque or alpha-over, depth tested)
+    bool gbufferEligible(const scene::Phase& phase, draws::Kind kind) const;
+    vk::BlendAttachment attachmentBlend(std::uint32_t index) const;
     void variantWorker();
     void stopVariantWorker();
     void logWaterDraw(draws::Kind kind);
@@ -1120,6 +1150,15 @@ private:
 
     // enhancements
     std::vector<std::uint8_t> giHeader_;
+    GbufferTargets gbuf_;
+    bool gbufArmed_ = false;
+    bool scopeGbuf_ = false;                // the open rendering scope has the G-buffer attachments
+    std::uint32_t engineColorCount_ = 0;    // the engine's colour attachments of the open scope (the G-buffer's come after)
+    bool gbufWrite_ = false;                // the draw being prepared writes the G-buffer
+    std::uint64_t gbufWrittenFrame_ = 0;    // frame value whose main view cleared / wrote the G-buffer
+    std::uint32_t gbufMissing_ = 0, gbufSolid_ = 0;  // this frame: solid draws whose G-buffer pipeline / variant is not ready, all
+    double gbufRequestedAt_ = 0.0;
+    std::array<std::uint32_t, 4> ao_{};
     GiDraws giDraws_;
     std::uint64_t giDrawCount_ = 0;
     VkDeviceAddress captureRequest_ = 0;    // the draw being prepared (DrawObserver::observe)

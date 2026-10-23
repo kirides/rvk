@@ -1,0 +1,47 @@
+#version 460
+// GTAO filter (M10 P7, src/enh/gbuffer.cpp): a depth-aware 3x3 blur of the raw AO, then temporal accumulation with the
+// previous frame's history at the motion-reprojected position, clamped to the raw AO's 3x3 range (rejects history from
+// disoccluded / moved surfaces without a depth history). The result is the history the material shaders read next frame.
+
+#include "gbuffer_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 1, binding = 0, r32f) uniform writeonly image2D outAo;
+
+float viewDepth(RvkFrame f, ivec2 p) {
+    float z = rvkFetch2D(pc.depthTex, p).r;
+    float a = f.proj[2][2], b = f.proj[3][2];
+    return z < 1.0 && abs(z - a) > 1e-9 ? b / (z - a) : 1e9;
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= int(pc.width) || p.y >= int(pc.height)) return;
+    RvkFrame f = pc.frame;
+    ivec2 maxP = ivec2(int(pc.width) - 1, int(pc.height) - 1);
+    float d0 = viewDepth(f, p);
+    float sum = 0.0, wsum = 0.0, lo = 1.0, hi = 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            ivec2 q = clamp(p + ivec2(x, y), ivec2(0), maxP);
+            float a = rvkFetch2D(pc.aoTex, q).r;
+            float d = viewDepth(f, q);
+            float w = exp(-abs(d - d0) / max(d0 * 0.02, 1.0)) * (x == 0 && y == 0 ? 2.0 : 1.0);
+            sum += a * w;
+            wsum += w;
+            lo = min(lo, a);
+            hi = max(hi, a);
+        }
+    }
+    float ao = sum / max(wsum, 1e-5);
+    if (pc.historyTex != 0u) {
+        vec2 uv = (vec2(p) + 0.5) / vec2(pc.width, pc.height);
+        vec2 prev = uv + rvkFetch2D(pc.motionTex, p).xy;
+        if (all(greaterThanEqual(prev, vec2(0.0))) && all(lessThanEqual(prev, vec2(1.0)))) {
+            float h = rvkSample2DLod(pc.historyTex, pc.linearSampler, prev, 0.0).r;
+            h = clamp(h, lo - 0.1, hi + 0.1);
+            ao = mix(ao, h, pc.blend);
+        }
+    }
+    imageStore(outAo, p, vec4(clamp(ao, 0.0, 1.0)));
+}

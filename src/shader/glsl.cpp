@@ -196,6 +196,8 @@ private:
                 }
             } else if (const std::uint32_t loc = psInputLocation(d); loc != abi::kInvalidLocation) {
                 reflection_.varyingMask |= 1u << loc;
+                reflection_.pixelInputs.push_back(
+                    {loc, d.reg.type == RegType::Addr ? std::format("t{}", d.reg.index) : std::format("v{}", d.reg.index)});
             }
         }
         if (vs_) {
@@ -531,9 +533,26 @@ private:
                 }
                 continue;
             }
+            emitCaptures(ins);
             emitInstruction(ins, loopId);
         }
         closeFunction();
+    }
+
+    // GlslOptions::dotCaptures (first match each)
+    void emitCaptures(const Instruction& ins) {
+        if (opt_.dotCaptures.empty() || (ins.op != Op::Dp3 && ins.op != Op::Dp4) || ins.src.size() < 2) return;
+        for (std::size_t c = 0; c < opt_.dotCaptures.size(); ++c) {
+            if (capturesDone_.contains(c)) continue;
+            const auto& cap = opt_.dotCaptures[c];
+            for (int k = 0; k < 2; ++k) {
+                const SrcParam& a = ins.src[static_cast<std::size_t>(k)];
+                if (a.reg.type != RegType::Const || a.rel.present || a.reg.index != cap.reg) continue;
+                line(std::format("{} = {};", cap.target, srcExpr(ins.src[static_cast<std::size_t>(1 - k)])));
+                capturesDone_.insert(c);
+                break;
+            }
+        }
     }
 
     void emitInstruction(const Instruction& ins, int& loopId) {
@@ -989,6 +1008,7 @@ private:
     std::string error_;
 
     std::set<std::uint32_t> temps_, rastOut_, attrOut_, outputs_, labels_;
+    std::set<std::size_t> capturesDone_;  // GlslOptions::dotCaptures emitted
     std::map<std::uint32_t, std::array<std::uint32_t, 4>> defF_, defI_;
     std::map<std::uint32_t, bool> defB_;
 

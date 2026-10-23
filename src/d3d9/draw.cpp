@@ -75,6 +75,26 @@ bool Device::beginRendering() {
         targetWidth_ = std::min(targetWidth_, s->width());
         targetHeight_ = std::min(targetHeight_, s->height());
     }
+    // the thin G-buffer (enh/gbuffer): normal + motion after the engine's target, cleared at the frame's first use
+    engineColorCount_ = colorCount_;
+    scopeGbuf_ = false;
+    if (colorCount_ == 1 && gbufferScope()) {
+        const bool first = gbufWrittenFrame_ != frameValue();
+        for (vk::Image* img : {gbuf_.normal, gbuf_.motion}) {
+            img->transition(cmd, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+            VkRenderingAttachmentInfo& a = colors[colorCount_];
+            a.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+            a.imageView = img->view();
+            a.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            a.loadOp = first ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+            a.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            a.clearValue.color = {{0.0f, 0.0f, 0.0f, 0.0f}};
+            colorFormats_[colorCount_] = img->format();
+            ++colorCount_;
+        }
+        gbufWrittenFrame_ = frameValue();
+        scopeGbuf_ = true;
+    }
     VkRenderingAttachmentInfo depth{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     VkRenderingAttachmentInfo stencil{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     depthFormat_ = VK_FORMAT_UNDEFINED;
@@ -326,6 +346,15 @@ vk::BlendAttachment blendState(const std::array<std::uint32_t, RS_COUNT>& rs, st
 
 }  // namespace
 
+// the blend state of colour attachment `index`: the engine's targets from its render states, the G-buffer's (after them)
+// unblended, written only by the draws that write it (gbufWrite_)
+vk::BlendAttachment Device::attachmentBlend(std::uint32_t index) const {
+    if (index < engineColorCount_) return blendState(rs_, index);
+    vk::BlendAttachment b;
+    b.writeMask = gbufWrite_ ? 0xFu : 0u;
+    return b;
+}
+
 namespace {
 
 // true (and the cache updated) when `value` differs from the cached one or the cache is not valid yet
@@ -393,7 +422,7 @@ void Device::computeDynamicState(std::uint32_t primitiveType, DynamicStateValues
     if (ctx_.features().extendedDynamicState3 && colorCount_ > 0) {
         o.colorCount = colorCount_;
         for (std::uint32_t i = 0; i < colorCount_; ++i) {
-            const vk::BlendAttachment b = blendState(rs_, i);
+            const vk::BlendAttachment b = attachmentBlend(i);
             o.blendEnable[i] = b.enable;
             o.blendEquation[i] = {b.srcColor, b.dstColor, b.colorOp, b.srcAlpha, b.dstAlpha, b.alphaOp};
             o.writeMask[i] = b.writeMask;
@@ -506,6 +535,36 @@ bool Device::giEligible(const scene::Phase& phase) const {
     return false;
 }
 
+// the G-buffer's scope: the frame's first main view, its solid pass, rendering into the scene HDR target alone at the
+// G-buffer's size
+bool Device::gbufferTargetsMatch() const {
+    const scene::Phase ph = phases_.current();
+    if (ph.view != scene::View::Main || ph.pass != scene::Pass::Solid || firings_.mainViews() != 1) return false;
+    const Texture* hdr = imageWithRole(scene::ImageRole::SceneHdr);
+    if (rt_[0] == nullptr || hdr == nullptr || rt_[0]->texture() != hdr) return false;
+    for (std::uint32_t i = 1; i < kRenderTargets; ++i) {
+        if (rt_[i] != nullptr) return false;
+    }
+    return rt_[0]->width() == gbuf_.width && rt_[0]->height() == gbuf_.height;
+}
+
+// a material draw of the solid pass that writes the G-buffer (its Gbuffer variant): depth tested, not an additive light pass,
+// and when lit, a first pass (the engine set its ambient)
+bool Device::gbufferEligible(const scene::Phase& phase, draws::Kind kind) const {
+    if (phase.view != scene::View::Main || phase.pass != scene::Pass::Solid || tag_.water != draws::Water::None) return false;
+    if (kind == draws::Kind::Sky || kind == draws::Kind::Particle || kind == draws::Kind::Precipitation) return false;
+    if ((ps_->reflection.colorOutputs & 1u) == 0 || rs_[RS_ZENABLE] == ZB_FALSE) return false;
+    if (rs_[RS_ALPHABLENDENABLE] != 0 && rs_[RS_DESTBLEND] == BLEND_ONE) return false;
+    const auto& amb = ps_->semantics[Semantic::AmbientLight];
+    if (!amb.present()) return ps_->semantics.has(ShaderSemantics::Material);
+    if (amb.count < 7 || amb.reg + 7 > static_cast<int>(kPsFloatConsts)) return false;
+    for (std::int32_t i = 0; i < 7; ++i) {
+        const float* c = psF_[amb.reg + i];
+        if (c[0] != 0.0f || c[1] != 0.0f || c[2] != 0.0f || c[3] != 0.0f) return true;
+    }
+    return false;
+}
+
 bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     lastRecord_ = nullptr;
     customVertices_ = 0;
@@ -586,7 +645,8 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
             (!rep.vs || !rep.ps || rep.vs->module == VK_NULL_HANDLE || rep.ps->module == VK_NULL_HANDLE)) {
             rep.action = DrawReplacement::Action::Engine;
         }
-        break;
+        // the first replacer that takes the draw decides it; one that leaves it to the engine lets the next one look
+        if (rep.action != DrawReplacement::Action::Engine) break;
     }
     if (rep.action == DrawReplacement::Action::Skip) {
         draws_.count(kind, phase.view);
@@ -658,6 +718,8 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         }
     }
     prepareTextures();
+    // the G-buffer's attachments belong to the first main view's solid pass only: another scope when that changes
+    if (rendering_ && scopeGbuf_ != gbufferScope()) endRendering();
     if (!beginRendering()) {
         ++stats_.drawsSkipped;
         ++stats_.skippedNoTarget;
@@ -685,11 +747,20 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     }
     // enhancement variants (built in the background; the engine's modules until they and their pipeline exist): GI reads the
     // probe volume instead of the engine's ambient constants (enh/gi), the vertex capture writes a skinned draw's world
-    // positions for the RT scene (enh/rt_scene)
-    VkShaderModule fsVariant = VK_NULL_HANDLE, vsVariant = VK_NULL_HANDLE;
-    if (!replaced && tint == 0 && giDraws_.on && giEligible(phase)) fsVariant = variant(ps_, VariantSlot::Gi);
-    if (!replaced && captureRequest_ != 0 && geom.indexed && instanceCount_ == 1 && vsModule == vs_->module) {
+    // positions for the RT scene (enh/rt_scene), the G-buffer variants write the thin G-buffer (enh/gbuffer)
+    gbufWrite_ = false;
+    VkShaderModule fsVariant = VK_NULL_HANDLE, vsVariant = VK_NULL_HANDLE, fsPlain = VK_NULL_HANDLE;
+    const bool notInstanced = (streams_[0].freq & STREAMSOURCE_INDEXEDDATA) == 0;
+    if (!replaced && captureRequest_ != 0 && geom.indexed && notInstanced && vsModule == vs_->module) {
         vsVariant = variant(vs_, VariantSlot::Capture);
+    }
+    const bool gbufMaterial = !replaced && tint == 0 && gbuf_.normal != nullptr && gbufferEligible(phase, kind);
+    if (gbufMaterial && scopeGbuf_) {
+        fsPlain = variant(ps_, VariantSlot::Gbuffer);
+        const VkShaderModule motion = vsVariant != VK_NULL_HANDLE ? variant(ps_, VariantSlot::GbufferMotion) : VK_NULL_HANDLE;
+        fsVariant = motion != VK_NULL_HANDLE ? motion : fsPlain;
+    } else if (!replaced && tint == 0 && giDraws_.on && giEligible(phase)) {
+        fsVariant = variant(ps_, VariantSlot::Gi);
     }
 
     vk::PipelineDesc pd{};
@@ -707,7 +778,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     for (std::uint32_t i = 0; i < colorCount_; ++i) {
         pd.colorFormats[i] = colorFormats_[i];
         if (!ctx_.features().extendedDynamicState3) {
-            pd.blend[i] = blendState(rs_, i);
+            pd.blend[i] = attachmentBlend(i);
         }
     }
     pd.depthFormat = depthFormat_;
@@ -719,16 +790,72 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         return false;
     }
     bool giDraw = false, captureDraw = false;
-    if (fsVariant != VK_NULL_HANDLE || vsVariant != VK_NULL_HANDLE) {
+    const bool eds3 = ctx_.features().extendedDynamicState3;
+    // a variant combination whose pipeline exists is taken; a missing one is built in the background (this draw keeps
+    // the engine's shaders). `writes`: the pixel shader writes the G-buffer (without EDS3 its write mask is in the pipeline)
+    const auto tryVariant = [&](VkShaderModule vsM, VkShaderModule fsM, bool writes) {
         vk::PipelineDesc vd = pd;
-        if (fsVariant != VK_NULL_HANDLE) vd.fs = fsVariant;
-        if (vsVariant != VK_NULL_HANDLE) vd.vs = vsVariant;
+        if (vsM != VK_NULL_HANDLE) vd.vs = vsM;
+        if (fsM != VK_NULL_HANDLE) vd.fs = fsM;
+        if (writes && !eds3) {
+            for (std::uint32_t i = engineColorCount_; i < colorCount_; ++i) vd.blend[i].writeMask = 0xF;
+        }
         if (pipelines_.contains(vd)) {
             pd = vd;
+            return true;
+        }
+        pipelines_.prewarmOnce(vd);
+        return false;
+    };
+    if (gbufMaterial && scopeGbuf_) {
+        // the G-buffer material pass: capture VS + motion PS, else the plain G-buffer PS, else at least the capture
+        if (vsVariant != VK_NULL_HANDLE && fsVariant != VK_NULL_HANDLE && tryVariant(vsVariant, fsVariant, true)) {
+            captureDraw = gbufWrite_ = true;
+        } else if (fsPlain != VK_NULL_HANDLE && tryVariant(VK_NULL_HANDLE, fsPlain, true)) {
+            gbufWrite_ = true;
+        } else if (vsVariant != VK_NULL_HANDLE && tryVariant(vsVariant, VK_NULL_HANDLE, false)) {
+            captureDraw = true;
+        }
+        giDraw = gbufWrite_ && giDraws_.on && ps_->semantics[Semantic::AmbientLight].present();
+    } else if (fsVariant != VK_NULL_HANDLE || vsVariant != VK_NULL_HANDLE) {
+        if (tryVariant(vsVariant, fsVariant, false)) {
             giDraw = fsVariant != VK_NULL_HANDLE;
             captureDraw = vsVariant != VK_NULL_HANDLE;
-        } else {
-            pipelines_.prewarmOnce(vd);  // built in the background; this draw keeps the engine's shaders
+        } else if (vsVariant != VK_NULL_HANDLE && fsVariant != VK_NULL_HANDLE) {
+            if (tryVariant(vsVariant, VK_NULL_HANDLE, false)) {
+                captureDraw = true;
+            } else if (tryVariant(VK_NULL_HANDLE, fsVariant, false)) {
+                giDraw = true;
+            }
+        }
+    }
+    // arming the G-buffer (Device::setGbuffer): this solid draw's pipeline with the attachments, built in the background
+    if (gbuf_.normal != nullptr && !gbufArmed_ && !scopeGbuf_ && colorCount_ == 1 && gbufferTargetsMatch()) {
+        ++gbufSolid_;
+        vk::PipelineDesc md = pd;
+        md.colorCount = 3;
+        md.colorFormats[1] = gbuf_.normal->format();
+        md.colorFormats[2] = gbuf_.motion->format();
+        bool writes = false;
+        if (gbufMaterial) {
+            const VariantSlot slot = captureDraw ? VariantSlot::GbufferMotion : VariantSlot::Gbuffer;
+            const VkShaderModule m = variant(ps_, slot);
+            if (m != VK_NULL_HANDLE) {
+                md.fs = m;
+                writes = true;
+            } else if (ps_->variantState[static_cast<std::size_t>(slot)].load() != 3) {
+                ++gbufMissing_;  // its variant is still being built
+            }
+        }
+        if (!eds3) {
+            for (std::uint32_t i = 1; i < 3; ++i) {
+                md.blend[i] = vk::BlendAttachment{};
+                md.blend[i].writeMask = writes ? 0xFu : 0u;
+            }
+        }
+        if (!pipelines_.contains(md)) {
+            pipelines_.prewarmOnce(md);
+            ++gbufMissing_;
         }
     }
     if (kind == draws::Kind::Refracted && tag_.water != draws::Water::None && !replaced) {
@@ -787,7 +914,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     block.pad[0] = tint;
     if (giDraw) {
         ++giDrawCount_;
-        if (giDraws_.replaceLightmaps) {
+        if (giDraws_.on && giDraws_.replaceLightmaps) {
             for (const Semantic sem : {Semantic::LightMap1, Semantic::LightMap2}) {
                 const auto& r = ps_->semantics[sem];
                 if (r.present() && r.reg < 16) block.tex[r.reg] = 0;

@@ -1253,6 +1253,65 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .requirements = caps::bit(caps::Cap::RayQuery),
     });
 
+    r.aoEnabled = &reg.add({
+        .key = "ao.enabled",
+        .label = "Ambient occlusion",
+        .category = "Lighting",
+        .description = "Soft contact shade in corners, creases, under furniture and where objects meet the ground (on the "
+                       "ambient light; works with and without ray-traced lighting).",
+        .type = Type::Bool,
+        .defaultValue = 0,
+    });
+    r.aoMode = &reg.add({
+        .key = "ao.mode",
+        .label = "Game's ambient occlusion",
+        .category = "Lighting",
+        .description = "Replace: the game's own ambient occlusion is switched off and only the new one shades (on the ambient "
+                       "light only: sunlit edges stay bright). Add: both shade (darker creases).",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"replace", "add"},
+        .optionLabels = {"Replace", "Add"},
+        .flags = Flag::Advanced,
+    });
+    r.aoStrength = &reg.add({
+        .key = "ao.strength",
+        .label = "Ambient occlusion strength",
+        .category = "Lighting",
+        .description = "How dark the contact shade gets.",
+        .type = Type::Float,
+        .defaultValue = 1,
+        .min = 0,
+        .max = 1,
+        .format = "%.2f",
+        .flags = Flag::Advanced,
+    });
+    r.aoRadius = &reg.add({
+        .key = "ao.radius",
+        .label = "Ambient occlusion reach",
+        .category = "Lighting",
+        .description = "How far (in metres) surfaces shade each other.",
+        .type = Type::Float,
+        .defaultValue = 1,
+        .min = 0.25,
+        .max = 3,
+        .format = "%.2f m",
+        .flags = Flag::Advanced,
+    });
+    r.gbufferDebug = &reg.add({
+        .key = "gbuffer.debug",
+        .label = "G-buffer debug view",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Developer view of the frame data: \"Normals\" the surfaces' normals (red tint = characters, black = no "
+                       "material), \"Motion\" the motion vectors (hue = direction), \"AO\" the ambient occlusion.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "normals", "motion", "ao"},
+        .optionLabels = {"Off", "Normals", "Motion", "AO"},
+        .flags = Flag::NoAB | Flag::Debug,
+    });
+
     // ---- Graphics tab: detail distances (engine/lod.h) ----
     r.lodTrees = &reg.add({
         .key = "lod.trees",

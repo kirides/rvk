@@ -1,0 +1,106 @@
+#version 460
+// Ground-truth ambient occlusion (M10 P7, src/enh/gbuffer.cpp, docs/research/rtgi.md 10): XeGTAO-style horizon search (Jimenez
+// et al. 2016, "Practical realtime strategies for accurate indirect occlusion"; the slice formulation as in Intel's XeGTAO,
+// MIT, reimplemented) from the main view's hardware depth and the G-buffer normal, per pixel 2 slices x 6 steps on each side,
+// the slice angle and step offsets jittered per pixel and frame (the temporal filter integrates them). Pixels the material
+// passes did not reach (no G-buffer id: sky, unlit effects) also get the camera's motion here.
+
+#include "gbuffer_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 1, binding = 0, r32f) uniform writeonly image2D outAo;
+layout(set = 1, binding = 1, rg16f) uniform image2D motionImage;
+
+const int GB_SLICES = 2;
+const int GB_STEPS = 8;
+
+float depthAt(ivec2 p) { return rvkFetch2D(pc.depthTex, p).r; }
+
+// interleaved gradient noise (Jimenez 2014), shifted per frame
+float ign(vec2 p, uint frame) {
+    p += 5.588238 * float(frame & 63u);
+    return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= int(pc.width) || p.y >= int(pc.height)) return;
+    RvkFrame f = pc.frame;
+    vec2 size = vec2(pc.width, pc.height);
+    vec2 uv = (vec2(p) + 0.5) / size;
+    float z = depthAt(p);
+    vec4 nrm = rvkFetch2D(pc.normalTex, p);
+    // the camera's motion where no material pass wrote one (id 0)
+    if (nrm.w < 0.16) imageStore(motionImage, p, vec4(gbCameraMotion(f, gbWorldPos(f, uv, z)), 0.0, 0.0));
+    if (z >= 1.0) {
+        imageStore(outAo, p, vec4(1.0));
+        return;
+    }
+    vec3 P = gbViewPos(f, uv, z);
+    // the geometric normal from the depth (the G-buffer's is normal-mapped: bumps would tilt it into the depth surface and
+    // occlude themselves): per axis the neighbour nearer in depth (no smearing across edges)
+    ivec2 maxP = ivec2(size) - 1;
+    vec3 pl = gbViewPos(f, uv - vec2(1.0 / size.x, 0.0), depthAt(max(p - ivec2(1, 0), ivec2(0))));
+    vec3 pr = gbViewPos(f, uv + vec2(1.0 / size.x, 0.0), depthAt(min(p + ivec2(1, 0), maxP)));
+    vec3 pu = gbViewPos(f, uv - vec2(0.0, 1.0 / size.y), depthAt(max(p - ivec2(0, 1), ivec2(0))));
+    vec3 pd = gbViewPos(f, uv + vec2(0.0, 1.0 / size.y), depthAt(min(p + ivec2(0, 1), maxP)));
+    vec3 dx = abs(pr.z - P.z) < abs(P.z - pl.z) ? pr - P : P - pl;
+    vec3 dy = abs(pd.z - P.z) < abs(P.z - pu.z) ? pd - P : P - pu;
+    vec3 N = cross(dy, dx);
+    N = dot(N, N) > 1e-12 ? normalize(N) : vec3(0.0, 0.0, -1.0);
+    vec3 V = normalize(-P);
+    if (dot(N, V) < 0.0) N = -N;
+    // the radius on screen (pixels)
+    float radiusPx = pc.radius * f.proj[0][0] / max(P.z, 1.0) * 0.5 * size.x;
+    if (radiusPx < 1.5) {
+        imageStore(outAo, p, vec4(1.0));
+        return;
+    }
+    radiusPx = min(radiusPx, 160.0);
+    float n0 = ign(vec2(p), pc.frameIndex), n1 = ign(vec2(p) + vec2(13.0, 7.0), pc.frameIndex);
+    float falloffRange = max(pc.falloff * pc.radius, 1.0);
+    float visibility = 0.0;
+    for (int s = 0; s < GB_SLICES; ++s) {
+        float phi = (float(s) + n0) * GB_PI / float(GB_SLICES);
+        vec2 dir = vec2(cos(phi), sin(phi));     // screen (pixels, y down)
+        vec3 dirV = vec3(dir.x, -dir.y, 0.0);    // the same direction in view space (y up)
+        vec3 orthoDir = dirV - dot(dirV, V) * V;
+        vec3 axis = normalize(cross(orthoDir, V));
+        vec3 projN = N - axis * dot(N, axis);
+        float projLen = length(projN);
+        float cosN = clamp(dot(projN, V) / max(projLen, 1e-5), 0.0, 1.0);
+        float n = (dot(orthoDir, projN) >= 0.0 ? 1.0 : -1.0) * acos(cosN);
+        // the horizons on the + and - side, starting at the tangent plane
+        float hcPlus = cos(n + GB_HALF_PI), hcMinus = cos(n - GB_HALF_PI);
+        float lowPlus = hcPlus, lowMinus = hcMinus;
+        for (int j = 0; j < GB_STEPS; ++j) {
+            float t = (float(j) + n1) / float(GB_STEPS);
+            float off = max(t * t * radiusPx, float(j) + 1.0);
+            for (int side = 0; side < 2; ++side) {
+                float sgn = side == 0 ? 1.0 : -1.0;
+                vec2 q = vec2(p) + 0.5 + sgn * dir * off;
+                if (any(lessThan(q, vec2(0.0))) || any(greaterThanEqual(q, size))) continue;
+                float sz = depthAt(ivec2(q));
+                vec3 S = gbViewPos(f, q / size, sz);
+                vec3 d = S - P;
+                float dl = length(d);
+                if (dl < 1e-3) continue;
+                float shc = dot(d / dl, V);
+                float weight = clamp((pc.radius - dl) / falloffRange, 0.0, 1.0);
+                if (side == 0) {
+                    hcPlus = max(hcPlus, mix(lowPlus, shc, weight));
+                } else {
+                    hcMinus = max(hcMinus, mix(lowMinus, shc, weight));
+                }
+            }
+        }
+        float hPlus = n + clamp(acos(clamp(hcPlus, -1.0, 1.0)) - n, -GB_HALF_PI, GB_HALF_PI);
+        float hMinus = n + clamp(-acos(clamp(hcMinus, -1.0, 1.0)) - n, -GB_HALF_PI, GB_HALF_PI);
+        float sinN = sin(n);
+        float arcPlus = -cos(2.0 * hPlus - n) + cosN + 2.0 * hPlus * sinN;
+        float arcMinus = -cos(2.0 * hMinus - n) + cosN + 2.0 * hMinus * sinN;
+        visibility += projLen * 0.25 * (arcPlus + arcMinus);
+    }
+    float ao = clamp(visibility / float(GB_SLICES), 0.0, 1.0);
+    imageStore(outAo, p, vec4(ao));
+}

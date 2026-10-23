@@ -120,6 +120,7 @@ HalDevice::~HalDevice() {
     debugView_.reset();  // removes its pass, retires its pipelines
     // the RT scene's consumers (rt.debug, the water's traced reflections) release it in their destructors: before it
     rtDebug_.reset();    // releases the RT scene
+    gbuffer_.reset();    // removes its passes, the G-buffer attachments
     gi_.reset();         // unregisters its observer / pass, releases the RT scene
     water_.reset();      // unregisters its draw replacer, releases the RT scene
     shadows_.reset();
@@ -285,6 +286,14 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         }
         if (rs.giEnabled->asBool()) applyGi();
     }
+    // the thin G-buffer, motion vectors and GTAO (enh/gbuffer.h, docs/research/rtgi.md 10)
+    gbuffer_ = std::make_unique<enh::Gbuffer>(dev_, rtScene_.get());
+    if (rs.aoEnabled != nullptr) {
+        for (settings::Setting* s : {rs.aoEnabled, rs.aoMode, rs.aoStrength, rs.aoRadius, rs.gbufferDebug}) {
+            if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyGbuffer(); }, this);
+        }
+        if (rs.aoEnabled->asBool() || rs.gbufferDebug->asEnum() != "off") applyGbuffer();
+    }
     // detail distances (engine/lod.h, docs/research/lod.md)
     for (settings::Setting* s : {rs.lodTrees, rs.lodMeshes, rs.lodView}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyLod(); }, this);
@@ -352,6 +361,19 @@ void HalDevice::applyGi() {
     const std::string_view d = rs.giDebug->asEnum();
     s.debug = d == "irradiance" ? 1 : d == "cascades" ? 2 : 0;
     gi_->apply(s);
+}
+
+void HalDevice::applyGbuffer() {
+    const auto& rs = settings::renderer();
+    if (!gbuffer_ || rs.aoEnabled == nullptr) return;
+    enh::Gbuffer::Settings s;
+    s.ao = rs.aoEnabled->asBool();
+    s.replaceEngineSsao = rs.aoMode == nullptr || rs.aoMode->asEnum() != "add";
+    s.aoStrength = rs.aoStrength->asFloat();
+    s.aoRadius = rs.aoRadius->asFloat() * 100.0f;
+    const std::string_view d = rs.gbufferDebug->asEnum();
+    s.debug = d == "normals" ? 1 : d == "motion" ? 2 : d == "ao" ? 3 : 0;
+    gbuffer_->apply(s);
 }
 
 void HalDevice::applyShadows() {

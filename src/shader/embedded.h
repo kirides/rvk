@@ -23,5 +23,7 @@ std::span<const std::uint32_t> spirv(std::string_view name);
 std::string_view abiGlsl();
 // shaders/include/rvk_gi.glsl (the GI probe lookup; enh/gi pastes it into the material pixel shaders' GI variants)
 std::string_view giGlsl();
+// shaders/include/rvk_material_variant.glsl (the material pixel shaders' enhancement variants, enh/material_variant)
+std::string_view materialVariantGlsl();
 
 }  // namespace rvk::shader::embedded

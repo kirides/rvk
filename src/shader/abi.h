@@ -23,7 +23,7 @@
 //                       alphaFunc: D3DCMPFUNC (1 never .. 8 always), alphaRef: 0..1
 //                       pad[0]: debug tint, RGBA8 (unpackUnorm4x8; 0 = none), read only by the tint variant of a pixel
 //                       shader (GlslOptions::tintEpilogue, the "tint draws" debug view); pad[1] unused
-// FrameBlock (std430, 944 bytes): the main camera (current + previous), depth conventions, target size, jitter, time, frame
+// FrameBlock (std430, 960 bytes): the main camera (current + previous), depth conventions, target size, jitter, time, frame
 //                       index + flags, bindless slots of the tagged engine images, 16 vec4 feature parameters (below), the
 //                       ray tracing scene (TLAS + geometry record addresses, RtGeometryRecord below), the GI volume (enh/gi)
 //
@@ -120,9 +120,14 @@ struct FrameBlock {
     // the GI probe volume (enh/gi, docs/research/rtgi.md 5; GLSL shaders/include/rvk_gi.glsl): its header's device address
     // (low, high), kFrameGi* flags, 0
     std::uint32_t gi[4];
+    // ambient occlusion of the previous frame (enh/gbuffer GTAO, docs/research/rtgi.md 10): bindless t2D slot (R8 / R16F,
+    // the scene target's size), bindless sampler, kFrameAo* flags, strength (float bits); the material shaders' GBuffer
+    // variant reprojects it with the previous camera and scales the ambient by it
+    std::uint32_t ao[4];
 };
-static_assert(sizeof(FrameBlock) == 944);
+static_assert(sizeof(FrameBlock) == 960);
 inline constexpr std::uint32_t kFrameGiValid = 1u;  // gi holds a volume header
+inline constexpr std::uint32_t kFrameAoValid = 1u;  // ao holds last frame's AO image
 inline constexpr std::uint32_t kFrameRtValid = 1u;  // rtScene holds this frame's TLAS (built at AfterOpaque)
 inline constexpr std::uint32_t kFrameCameraValid = 1u;      // this frame's main camera
 inline constexpr std::uint32_t kFrameCameraPredicted = 2u;  // the previous frame's (no main view yet this frame)

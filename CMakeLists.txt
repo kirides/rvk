@@ -62,6 +62,10 @@ set(RVK_SHADERS
     debug/inject_view.frag
     gi/gi_blend.comp
     gi/gi_trace.comp
+    gbuffer/ao_white.frag
+    gbuffer/gbuffer_debug.frag
+    gbuffer/gtao.comp
+    gbuffer/gtao_filter.comp
     test/abi_layout.comp
     test/abi_pass_layout.comp
     test/abi_rt_layout.comp
@@ -138,6 +142,13 @@ add_custom_command(
     COMMENT "GLSL GI lookup text shaders/include/rvk_gi.glsl"
     VERBATIM)
 list(APPEND RVK_SHADER_OUTPUTS ${RVK_GENERATED_DIR}/shaders/rvk_gi_glsl.h)
+add_custom_command(
+    OUTPUT ${RVK_GENERATED_DIR}/shaders/rvk_material_variant_glsl.h
+    COMMAND rvk_glslc text ${RVK_SHADER_DIR}/include/rvk_material_variant.glsl -o ${RVK_GENERATED_DIR}/shaders/rvk_material_variant_glsl.h --name rvk_material_variant_glsl
+    DEPENDS rvk_glslc ${RVK_SHADER_DIR}/include/rvk_material_variant.glsl
+    COMMENT "GLSL material variant text shaders/include/rvk_material_variant.glsl"
+    VERBATIM)
+list(APPEND RVK_SHADER_OUTPUTS ${RVK_GENERATED_DIR}/shaders/rvk_material_variant_glsl.h)
 configure_file(src/shader/embedded.cpp.in ${RVK_GENERATED_DIR}/embedded_shaders.cpp @ONLY)
 file(GLOB RVK_SHADER_SOURCES CONFIGURE_DEPENDS ${RVK_SHADER_DIR}/*/*.glsl ${RVK_SHADER_DIR}/*/*.vert ${RVK_SHADER_DIR}/*/*.frag ${RVK_SHADER_DIR}/*/*.comp)
 source_group(TREE ${RVK_SHADER_DIR} PREFIX shaders FILES ${RVK_SHADER_SOURCES})
@@ -194,6 +205,10 @@ add_library(rvk_core STATIC
     src/enh/debug_view.h
     src/enh/gi.cpp
     src/enh/gi.h
+    src/enh/gbuffer.cpp
+    src/enh/gbuffer.h
+    src/enh/material_variant.cpp
+    src/enh/material_variant.h
     src/enh/rt_debug.cpp
     src/enh/rt_debug.h
     src/enh/rt_material.cpp

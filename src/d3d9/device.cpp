@@ -126,6 +126,7 @@ VkDeviceAddress Device::frameBlockAddress() {
             x.gi = g.address;
         }
     }
+    x.ao = ao_;
     const vk::RingAlloc a = frames_.allocate(sizeof(shader::abi::FrameBlock), 16);
     scene::fillFrameBlock(*static_cast<shader::abi::FrameBlock*>(a.ptr), camera_, lastCamera_, x);
     frameAddr_ = a.address;
@@ -776,6 +777,16 @@ void Device::present() {
     shadowDepthMaps_ = 0;
     draws_.endFrame();
     captured_.clear();
+    // the G-buffer's attachments are armed once a frame's solid pass found every pipeline / variant they need
+    if (gbuf_.normal != nullptr && !gbufArmed_) {
+        const bool timeout = secondsSinceCreate() - gbufRequestedAt_ > 10.0;
+        if ((gbufSolid_ > 0 && gbufMissing_ == 0) || (timeout && gbufSolid_ > 0)) {
+            gbufArmed_ = true;
+            spdlog::info("d3d9: g-buffer armed: {} solid draws, {} without their pipeline / variant yet{}", gbufSolid_, gbufMissing_,
+                         gbufMissing_ != 0 ? " (10 s timeout: built at their draws)" : "");
+        }
+    }
+    gbufSolid_ = gbufMissing_ = 0;
     lastRecord_ = nullptr;
     lastCamera_ = camera_;
     camera_.advance();
@@ -1101,6 +1112,23 @@ VkShaderModule Device::variantModule(const Shader& s, const shader::GlslOptions&
         }
     }
     return vk::createShaderModule(ctx_, spirv);
+}
+
+// ---- thin G-buffer (enh/gbuffer) ----
+
+void Device::setGbuffer(const GbufferTargets& g) {
+    const bool was = gbuf_.normal != nullptr;
+    gbuf_ = g;
+    if (g.normal == nullptr) {
+        if (was) spdlog::info("d3d9: g-buffer off");
+        gbufArmed_ = false;
+        return;
+    }
+    if (!was) {
+        gbufRequestedAt_ = secondsSinceCreate();
+        gbufArmed_ = false;
+        spdlog::info("d3d9: g-buffer requested ({}x{}): building the solid pass's pipelines with its attachments", g.width, g.height);
+    }
 }
 
 // ---- background variants (VariantSlot; enh/gi, enh/rt_scene) ----
@@ -1430,6 +1458,7 @@ void Device::setScissorRect(std::int32_t left, std::int32_t top, std::int32_t ri
 
 void Device::clear(std::uint32_t flags, std::uint32_t color, float z, std::uint32_t stencil) {
     ++stats_.totalClears;
+    if (rendering_ && scopeGbuf_ != gbufferScope()) endRendering();
     if (!beginRendering()) {
         return;
     }
@@ -1455,7 +1484,7 @@ void Device::clear(std::uint32_t flags, std::uint32_t color, float z, std::uint3
     if ((flags & CLEAR_TARGET) != 0) {
         float c[4];
         colorToFloat4(color, c);
-        for (std::uint32_t i = 0; i < colorCount_; ++i) {
+        for (std::uint32_t i = 0; i < engineColorCount_; ++i) {
             atts[n].aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             atts[n].colorAttachment = i;
             std::memcpy(atts[n].clearValue.color.float32, c, sizeof(c));

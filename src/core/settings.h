@@ -309,6 +309,12 @@ struct RendererSettings {
     Setting* giLightmaps = nullptr;       // gi.lightmaps: "keep", "replace"
     Setting* giCharacters = nullptr;      // gi.characters: skinned draws in the RT scene (enh/rt_scene)
     Setting* giDebug = nullptr;           // gi.debug: "off", "irradiance", "cascades"
+    // G-buffer / motion vectors / GTAO (enh/gbuffer.h, docs/research/rtgi.md 10)
+    Setting* aoEnabled = nullptr;         // ao.enabled: GTAO on the ambient light
+    Setting* aoMode = nullptr;            // ao.mode: "replace" (the game's SSAO off), "add"
+    Setting* aoStrength = nullptr;        // ao.strength: 0..1
+    Setting* aoRadius = nullptr;          // ao.radius: metres
+    Setting* gbufferDebug = nullptr;      // gbuffer.debug: "off", "normals", "motion", "ao"
     // detail distances (engine/lod.h, docs/research/lod.md): multipliers, 1 = the game's
     Setting* lodTrees = nullptr;          // lod.trees: SpeedTree LOD + billboard fade distances
     Setting* lodMeshes = nullptr;         // lod.meshes: mesh LOD ranges (eCMesh_PS)

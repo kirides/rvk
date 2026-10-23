@@ -9,6 +9,7 @@
 #include <spdlog/spdlog.h>
 
 #include "engine/materials.h"
+#include "enh/material_variant.h"
 #include "engine/memread.h"
 #include "vk/context.h"
 #include "vk/frames.h"
@@ -1225,22 +1226,33 @@ bool RtScene::captureOptions(const d3d9::Shader& s, shader::GlslOptions& o) {
     for (const auto& in : s.reflection.vertexInputs) {
         if (in.usage == shader::Usage::TexCoord && in.usageIndex == 0) tc = std::format("v{}", in.location);
     }
-    o.prelude =
+    o.prelude = std::format(
         "#extension GL_EXT_buffer_reference_uvec2 : require\n"
-        "layout(buffer_reference, std430, buffer_reference_align = 16) buffer RvkCapture {\n"
-        "    uvec4 info;  // x slots\n"
+        "layout(buffer_reference, std430, buffer_reference_align = 16) buffer RvkCapture {{\n"
+        "    uvec4 info;  // x slots, yz the previous frame's capture of the draw (0 = none), w its slots\n"
         "    vec4 v[];    // per slot: world position (w = 1), TEXCOORD0\n"
-        "};\n";
+        "}};\n"
+        "// the previous frame's world position of the vertex (w = 1; 0 = unknown): per-object motion (enh/gbuffer)\n"
+        "layout(location = {}) out vec4 rvk_prevWorld;\n",
+        kPrevWorldLocation);
     o.epilogue = std::format(
+        "    rvk_prevWorld = vec4(0.0);\n"
         "    {{\n"
         "        uvec2 rvk_capAddr = uvec2(pc.prevVs);\n"
         "        if (rvk_capAddr != uvec2(0u)) {{\n"
         "            RvkCapture rvk_cap = RvkCapture(rvk_capAddr);\n"
         "            int rvk_slot = gl_VertexIndex - int(pc.draw.pad1);\n"
         "            vec4 rvk_w = pc.frame.invViewProj * rvk_pos;\n"
-        "            if (rvk_slot >= 0 && uint(rvk_slot) < rvk_cap.info.x && abs(rvk_w.w) > 1e-20) {{\n"
-        "                rvk_cap.v[rvk_slot * 2] = vec4(rvk_w.xyz / rvk_w.w, 1.0);\n"
+        "            uvec4 rvk_info = rvk_cap.info;\n"
+        "            if (rvk_slot >= 0 && uint(rvk_slot) < rvk_info.x && abs(rvk_w.w) > 1e-20) {{\n"
+        "                vec3 rvk_world = rvk_w.xyz / rvk_w.w;\n"
+        "                rvk_cap.v[rvk_slot * 2] = vec4(rvk_world, 1.0);\n"
         "                rvk_cap.v[rvk_slot * 2 + 1] = {};\n"
+        "                rvk_prevWorld = vec4(rvk_world, 0.0);\n"
+        "                if (rvk_info.yz != uvec2(0u) && uint(rvk_slot) < rvk_info.w) {{\n"
+        "                    vec4 rvk_prev = RvkCapture(rvk_info.yz).v[rvk_slot * 2];\n"
+        "                    if (rvk_prev.w == 1.0) rvk_prevWorld = vec4(rvk_prev.xyz, 1.0);\n"
+        "                }}\n"
         "            }}\n"
         "        }}\n"
         "    }}",
@@ -1261,7 +1273,7 @@ void RtScene::setDynamic(const void* consumer, bool on) {
     dynamic_ = want;
     if (want) {
         if (!captureRegistered_) {
-            dev_.setVariantProvider(d3d9::VariantSlot::Capture, {"cap1", captureOptions});
+            dev_.setVariantProvider(d3d9::VariantSlot::Capture, {"cap3", captureOptions});
             captureRegistered_ = true;
         }
         spdlog::info("rt: scene: characters on (skinned solid draws captured each frame)");
@@ -1327,8 +1339,14 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     if (ibAddress == 0) return;
     const vk::RingAlloc a = dev.frames().allocate(16 + static_cast<VkDeviceSize>(slots) * 32, 16);
     if (a.ptr == nullptr) return;
-    std::memset(a.ptr, 0, 16);
-    std::memcpy(a.ptr, &slots, 4);
+    // header: slots, the previous frame's capture of this draw (its vertex shader reads the previous positions: motion)
+    std::uint32_t header[4] = {slots, 0, 0, 0};
+    if (b.lastCapture != 0 && b.lastCaptureFrame + 1 == frame) {
+        header[1] = static_cast<std::uint32_t>(b.lastCapture);
+        header[2] = static_cast<std::uint32_t>(b.lastCapture >> 32);
+        header[3] = b.lastSlots;
+    }
+    std::memcpy(a.ptr, header, 16);
     dev.requestVertexCapture(a.address);
     // the draw's material (diffuse + uv map), resolved again when it changes
     const std::uint64_t sig = RtMaterials::signature(q);
@@ -1363,6 +1381,9 @@ void RtScene::buildDynamic(VkCommandBuffer cmd, std::uint64_t frame) {
         DynDraw& d = dyn_[i];
         if (!dev_.vertexCaptured(d.capture)) continue;
         DynBlas& b = dynBlas_[d.key];
+        b.lastCapture = d.capture;
+        b.lastSlots = d.slots;
+        b.lastCaptureFrame = frame;
         VkAccelerationStructureGeometryKHR g{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
         g.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
         g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;

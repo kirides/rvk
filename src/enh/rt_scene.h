@@ -236,6 +236,9 @@ private:
         std::uint32_t id = 0;          // instance id (records, debug colours)
         std::uint32_t maxIndex = 0;    // scanned once from the index buffer's CPU copy
         bool scanned = false;
+        VkDeviceAddress lastCapture = 0;  // the last capture that ran (the next frame's vertex shader reads it: motion)
+        std::uint32_t lastSlots = 0;
+        std::uint64_t lastCaptureFrame = 0;
     };
     std::unordered_set<const void*> dynamicConsumers_;
     bool dynamic_ = false;

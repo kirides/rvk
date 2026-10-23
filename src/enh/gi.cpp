@@ -9,6 +9,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "enh/material_variant.h"
 #include "enh/rt_scene.h"
 #include "shader/embedded.h"
 #include "vk/context.h"
@@ -76,7 +77,7 @@ Gi::Gi(d3d9::Device& device, RtScene* scene) : dev_(device), scene_(scene) {
     blendBuild_ = std::async(std::launch::async, [ctx, layout]() {
         return vk::createComputePipeline(*ctx, layout, shader::embedded::spirv("gi/gi_blend.comp"), "gi.blend");
     });
-    dev_.setVariantProvider(d3d9::VariantSlot::Gi, {"gi3", variantOptions});
+    dev_.setVariantProvider(d3d9::VariantSlot::Gi, {"gi4", variantOptions});
 }
 
 Gi::~Gi() {
@@ -149,70 +150,7 @@ void Gi::disable() {
 
 // ---- P2: the material pixel shaders' GI variant -----------------------------------------------------------------------------
 
-bool Gi::variantOptions(const d3d9::Shader& s, shader::GlslOptions& o) {
-    if (s.stage != shader::Stage::Pixel || (s.reflection.colorOutputs & 1u) == 0) return false;
-    const auto& amb = s.semantics[Semantic::AmbientLight];
-    if (!amb.present() || amb.count < 7) return false;
-    const auto& ind = s.semantics[Semantic::IndoorAmbient];
-    const int e = amb.reg;
-    o.prelude = std::string(shader::embedded::giGlsl());
-    o.prelude += std::format(
-        "\n// the GI variant (enh/gi): c{0}..c{1} (g_AmbientLight) and c14 (g_IndoorAmbientColor) from the probe volume\n"
-        "vec4 rvk_gi[8];  // [0] = g_IndoorAmbientColor, [1..7] = g_AmbientLight\n"
-        "uint rvk_giCascade = 0xFFu;\n"
-        "vec3 rvk_giN = vec3(0.0, 1.0, 0.0);\n"
-        "void rvkGiPixel() {{\n"
-        "    for (int i = 0; i < 7; ++i) rvk_gi[1 + i] = pc.ps.c[{0} + i];\n"
-        "    rvk_gi[0] = {2};\n"
-        "    vec2 uv = (gl_FragCoord.xy - 0.5) * pc.frame.viewport.zw;\n"
-        "    vec4 w = pc.frame.invViewProj * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, gl_FragCoord.z, 1.0);\n"
-        "    vec3 P = w.xyz / w.w;\n"
-        "    vec3 n = cross(dFdx(P), dFdy(P));\n"
-        "    vec3 V = normalize(pc.frame.cameraPos.xyz - P);\n"
-        "    n = dot(n, n) > 1e-12 ? normalize(n) : V;\n"
-        "    if (dot(n, V) < 0.0) n = -n;\n"
-        "    rvk_giN = n;\n"
-        "    if (!rvkGiValid(pc.frame) || (pc.frame.frameInfo.y & RVK_FRAME_CAMERA_VALID) == 0u) return;\n"
-        "    vec4 regs[7];\n"
-        "    if (!rvkGiLookup(pc.frame, P, n, V, regs, rvk_giCascade)) return;\n"
-        "    RvkGiVolume v = rvkGiVolume(pc.frame);\n"
-        "    // the draw's own ambient beyond the outdoor sky (indoor colour, static lights; 0 for outdoor draws) stays on top\n"
-        "    if ((v.info.x & RVK_GI_FLAG_KEEP_STATIC) != 0u) {{\n"
-        "        // engine = f x sky + static (static >= 0): f <= L0(engine) / L0(sky) per channel; that bound keeps the\n"
-        "        // remainder's average >= 0 and makes it 0 for outdoor draws (engine = sky)\n"
-        "        vec4 eng[7], sk[7];\n"
-        "        for (int i = 0; i < 7; ++i) {{ eng[i] = rvk_gi[1 + i]; sk[i] = v.sky[i]; }}\n"
-        "        vec3 le = max(rvkGiAverage(eng), vec3(0.0)), ls = rvkGiAverage(sk);\n"
-        "        float f = 1.0;\n"
-        "        for (int c = 0; c < 3; ++c) if (ls[c] > 1e-4) f = min(f, le[c] / ls[c]);\n"
-        "        f = clamp(f, 0.0, 1.0);\n"
-        "        for (int i = 0; i < 7; ++i) regs[i] += eng[i] - sk[i] * f;\n"
-        "    }}\n"
-        "    float k = clamp(v.params.x, 0.0, 1.0);\n"
-        "    for (int i = 0; i < 6; ++i) rvk_gi[1 + i] = mix(rvk_gi[1 + i], regs[i], k);\n"
-        "    rvk_gi[7] = vec4(mix(rvk_gi[7].rgb, regs[6].rgb, k), rvk_gi[7].w);\n"
-        "    rvk_gi[0] = vec4(mix(rvk_gi[0].rgb, rvkGiAverage(regs), k), rvk_gi[0].w);\n"
-        "}}\n",
-        e, e + 6, ind.present() ? std::format("pc.ps.c[{}]", ind.reg) : std::string("vec4(0.0)"));
-    o.prologue = "    rvkGiPixel();";
-    for (int i = 0; i < 7; ++i) o.constOverrides[static_cast<std::uint32_t>(e + i)] = std::format("rvk_gi[{}]", 1 + i);
-    if (ind.present()) o.constOverrides[static_cast<std::uint32_t>(ind.reg)] = "rvk_gi[0]";
-    // gi.debug: 1 the probes' light on a white surface (geometric normal), 2 the cascade used
-    o.epilogue =
-        "    if (rvkGiValid(pc.frame)) {\n"
-        "        uint rvk_dbg = rvkGiVolume(pc.frame).info.y;\n"
-        "        if (rvk_dbg == 1u) {\n"
-        "            vec4 rvk_r[7];\n"
-        "            for (int i = 0; i < 7; ++i) rvk_r[i] = rvk_gi[1 + i];\n"
-        "            oC0 = vec4(pow(max(rvkGiEvalRegs(rvk_r, rvk_giN), vec3(0.0)), vec3(0.45)), oC0.a);\n"
-        "        } else if (rvk_dbg == 2u) {\n"
-        "            vec3 rvk_c = rvk_giCascade == 0u ? vec3(1.0, 0.25, 0.25) : rvk_giCascade == 1u ? vec3(0.25, 1.0, 0.25)\n"
-        "                       : rvk_giCascade == 2u ? vec3(0.3, 0.45, 1.0) : vec3(0.3, 0.0, 0.0);\n"
-        "            oC0 = vec4(rvk_c * (0.35 + 0.65 * clamp(dot(oC0.rgb, vec3(0.333)) * 2.0, 0.0, 1.0)), oC0.a);\n"
-        "        }\n"
-        "    }";
-    return true;
-}
+bool Gi::variantOptions(const d3d9::Shader& s, shader::GlslOptions& o) { return materialVariantOptions(s, MaterialVariant::Gi, o); }
 
 // ---- P0: the frame's light ----------------------------------------------------------------------------------------------------
 
