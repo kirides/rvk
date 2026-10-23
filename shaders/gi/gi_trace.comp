@@ -1,0 +1,133 @@
+#version 460
+// GI probe rays (M10 stage A, src/enh/gi.cpp, docs/research/rtgi.md 5): one workgroup per probe of this frame's update list,
+// one ray per invocation (64 spherical-Fibonacci directions, randomly rotated each frame) against the frame's TLAS. A hit is
+// shaded in the engine's acc units the way its material shaders light a surface (rtgi.md 1): albedo (linear) x (sun x N.L
+// x a shadow ray + one of the frame's point lights with a shadow ray + the probes' own irradiance at the hit: multi-bounce).
+// A miss sees the sky: the engine's outdoor ambient as radiance. A back face (the interpolated vertex normal facing away:
+// the probe sits inside geometry) stores no light and a short negative distance (DDGI). gi_blend.comp then folds the rays
+// into the probe.
+#extension GL_EXT_ray_query : require
+
+#define RVK_PASS_SHADER 1
+#include "rvk_abi.glsl"
+#include "rvk_common.glsl"
+#include "rvk_rt_trace.glsl"
+#include "rvk_gi.glsl"
+#include "gi_common.glsl"
+
+layout(local_size_x = 64) in;
+
+uint giHash(uint x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+// one of the frame's point lights at the hit, chosen in proportion to its unshadowed light, with a shadow ray (an unbiased
+// one-sample estimate of the sum; the hysteresis averages the noise)
+vec3 pointLights(GiPassParams p, RvkFrame f, vec3 P, vec3 N, vec3 G, float u) {
+    uint n = min(p.flags.y, GI_MAX_LIGHTS);
+    if (n == 0u) return vec3(0.0);
+    float total = 0.0;
+    for (uint i = 0u; i < n; ++i) {
+        vec4 lp = p.lights[i * 2u];
+        vec3 d = lp.xyz - P;
+        float d2 = dot(d, d);
+        vec3 L = d * inversesqrt(max(d2, 1e-4));
+        float fall = 1.0 - clamp(d2 * lp.w, 0.0, 1.0);
+        float k = clamp(dot(N, L), 0.0, 1.0) * clamp(4.0 * dot(G, L), 0.0, 1.0) * fall;
+        total += k * dot(p.lights[i * 2u + 1u].rgb, vec3(0.333));
+    }
+    if (total <= 1e-6) return vec3(0.0);
+    float pick = u * total;
+    for (uint i = 0u; i < n; ++i) {
+        vec4 lp = p.lights[i * 2u];
+        vec3 d = lp.xyz - P;
+        float d2 = dot(d, d);
+        float dist = sqrt(max(d2, 1e-4));
+        vec3 L = d / dist;
+        float fall = 1.0 - clamp(d2 * lp.w, 0.0, 1.0);
+        float k = clamp(dot(N, L), 0.0, 1.0) * clamp(4.0 * dot(G, L), 0.0, 1.0) * fall;
+        vec3 col = p.lights[i * 2u + 1u].rgb;
+        float w = k * dot(col, vec3(0.333));
+        if (w <= 0.0) continue;
+        pick -= w;
+        if (pick > 0.0 && i + 1u < n) continue;
+        float vis = rvkRtVisibility(f, P + G * 2.0, L, 1.0, max(dist - 8.0, 1.0), 0.0, 0.0, RVK_RT_TRACE_OPAQUE);
+        // estimate = (the light's term / its probability) = its colour x k x total / w
+        return col * k * (total / w) * vis;
+    }
+    return vec3(0.0);
+}
+
+void main() {
+    GiPassParams p = GiPassParams(pc.params);
+    RvkFrame f = pc.frame;
+    uint item = gl_WorkGroupID.x;
+    if (item >= p.volume.z) return;
+    uint ray = gl_LocalInvocationID.x;
+    RvkGiVolume v = RvkGiVolume(p.volume.xy);
+    uint e = GiList(p.lists.xy).e[item];
+    uint c = e >> 24;
+    uint slot = e & 0xFFFFFFu;
+    ivec3 dims = ivec3(v.dims.xyz);
+    ivec3 cell = rvkGiCellOfSlot(dims, v.cascade[c].origin.xyz, slot);
+    vec3 P = vec3(cell) * v.cascade[c].spacing.x;
+    vec3 dir = giRayDir(p, ray);
+    float tMax = p.reach[c];
+    vec4 result = vec4(0.0, 0.0, 0.0, tMax);
+    if (!rvkRtValid(f)) {
+        result.rgb = rvkGiSkyRadiance(p.sky, dir);
+    } else {
+        float spread = p.shade.w;
+        RvkRtHit h = rvkRtTraceClosest(f, P, dir, 1.0, tMax, 0.0, spread, p.flags.x);
+        if (!h.hit) {
+            result.rgb = rvkGiSkyRadiance(p.sky, dir);
+        } else {
+            RvkRtRecord r = rvkRtRecord(f, h.record);
+            // inside geometry: the hit's own (interpolated) normal faces away from the probe; foliage and characters are
+            // two-sided / have no normals: never back faces
+            bool back = false;
+            if ((r.flags & (RVK_RT_ALPHA_TESTED | RVK_RT_SPEEDTREE | RVK_RT_DYNAMIC)) == 0u && r.normal != RVK_RT_ABSENT) {
+                RvkRtSurface raw = rvkRtSurface(r, h.primitive, h.bary);
+                if (dot(raw.normal, raw.normal) > 1e-12) back = dot(rvkRtWorldNormal(h.worldToObject, raw.normal), dir) > 0.0;
+            }
+            if (back) {
+                result = vec4(0.0, 0.0, 0.0, -0.2 * h.t);
+            } else {
+                RvkRtHitSurface s = rvkRtHitSurface(f, h, dir, 0.0, spread);
+                vec3 albedo = s.albedo.rgb;
+                if ((s.uvSet & RVK_RT_UV_NO_TEXTURE) != 0u) {
+                    albedo = (s.uvSet & RVK_RT_UV_HEURISTIC) != 0u ? vec3(0.2) : min(albedo, vec3(0.5));
+                }
+                // the textures hold gamma-encoded colours: rgb = albedo x pow(acc, 0.45) = pow(albedo^2.2 x acc, 0.45)
+                vec3 lin = pow(clamp(albedo, vec3(0.0), vec3(1.0)), vec3(2.2)) * p.shade.y;
+                vec3 N = normalize(s.normal), G = s.geometricNormal;
+                vec3 E = vec3(0.0);
+                vec3 L = p.sunDir.xyz;
+                float nl = clamp(dot(L, N), 0.0, 1.0) * clamp(dot(L, G) * 4.0, 0.0, 1.0);
+                if (nl > 0.0 && dot(p.sunColor.rgb, vec3(1.0)) > 1e-3) {
+                    float vis = rvkRtVisibility(f, s.position + G * 2.0, L, 1.0, p.shade.z, 0.0, 0.0, RVK_RT_TRACE_OPAQUE);
+                    E += p.sunColor.rgb * (nl * vis);
+                }
+                float u = float(giHash(item * 64u + ray + p.volume.w * 7919u) & 0xFFFFFFu) / 16777216.0;
+                E += pointLights(p, f, s.position, N, G, u);
+                // the probes' irradiance at the hit (last frames': multi-bounce); where no probe covers the hit, the
+                // engine's outdoor ambient
+                vec4 regs[7];
+                uint hc;
+                if (rvkGiLookupVolume(v, s.position, N, -dir, regs, hc)) {
+                    E += max(rvkGiEvalRegs(regs, N), vec3(0.0)) * p.shade.x;
+                } else {
+                    E += max(rvkGiEvalRegs(p.sky, N), vec3(0.0)) * p.shade.x;
+                }
+                result = vec4(lin * E, h.t);
+            }
+        }
+    }
+    if (any(isnan(result)) || any(isinf(result))) result = vec4(0.0, 0.0, 0.0, tMax);
+    GiRays(p.lists.zw).r[item * GI_RAYS + ray] = result;
+}

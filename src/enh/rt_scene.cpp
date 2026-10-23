@@ -119,6 +119,7 @@ void RtScene::deactivate() {
     passId_ = 0;
     logStats(true);
     registry_.clear();
+    dropDynamic(true, 0);
     std::vector<std::uint64_t> ids;
     ids.reserve(blas_.size());
     for (const auto& [id, b] : blas_) ids.push_back(id);
@@ -135,6 +136,7 @@ void RtScene::deactivate() {
 // ---- draw observation -----------------------------------------------------------------------------------------------------
 
 bool RtScene::observes(Kind kind, d3d9::scene::Phase phase) const {
+    if (kind == Kind::Skinned) return dynamic_ && phase.view == View::Main && phase.pass == Pass::Solid;  // characters
     if (kind == Kind::Refracted) return phase.view == View::Main;  // learnt as water (excluded in every view)
     if (kind != Kind::StaticMesh && kind != Kind::InstancedMesh && kind != Kind::SpeedTree) return false;
     if (phase.view == View::Shadow) return (views_ & 2) != 0;
@@ -320,6 +322,10 @@ std::uint8_t RtScene::viewBit(View v) const { return v == View::Main ? 1 : v == 
 
 void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     if (!active_) return;
+    if (q.kind == Kind::Skinned) {
+        observeSkinned(dev, q);
+        return;
+    }
     const bool timed = dev.perfEnabled();
     const auto t0 = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     struct Timer {
@@ -1207,6 +1213,264 @@ void RtScene::evictOverBudget() {
     }
 }
 
+// ---- characters (M10 P3) -------------------------------------------------------------------------------------------------------
+
+// the capture variant of a vertex shader (d3d9::VariantSlot::Capture): after its clip position, the world position (the
+// main view's inverse view-projection; the skinned draws use its camera) and the TEXCOORD0 input go to the push constant
+// prevVs's buffer (16-byte header: slots) at the vertex's index-buffer value (gl_VertexIndex - the draw's vertexOffset,
+// DrawBlock pad1)
+bool RtScene::captureOptions(const d3d9::Shader& s, shader::GlslOptions& o) {
+    if (s.stage != shader::Stage::Vertex) return false;
+    std::string tc = "vec4(0.0)";
+    for (const auto& in : s.reflection.vertexInputs) {
+        if (in.usage == shader::Usage::TexCoord && in.usageIndex == 0) tc = std::format("v{}", in.location);
+    }
+    o.prelude =
+        "#extension GL_EXT_buffer_reference_uvec2 : require\n"
+        "layout(buffer_reference, std430, buffer_reference_align = 16) buffer RvkCapture {\n"
+        "    uvec4 info;  // x slots\n"
+        "    vec4 v[];    // per slot: world position (w = 1), TEXCOORD0\n"
+        "};\n";
+    o.epilogue = std::format(
+        "    {{\n"
+        "        uvec2 rvk_capAddr = uvec2(pc.prevVs);\n"
+        "        if (rvk_capAddr != uvec2(0u)) {{\n"
+        "            RvkCapture rvk_cap = RvkCapture(rvk_capAddr);\n"
+        "            int rvk_slot = gl_VertexIndex - int(pc.draw.pad1);\n"
+        "            vec4 rvk_w = pc.frame.invViewProj * rvk_pos;\n"
+        "            if (rvk_slot >= 0 && uint(rvk_slot) < rvk_cap.info.x && abs(rvk_w.w) > 1e-20) {{\n"
+        "                rvk_cap.v[rvk_slot * 2] = vec4(rvk_w.xyz / rvk_w.w, 1.0);\n"
+        "                rvk_cap.v[rvk_slot * 2 + 1] = {};\n"
+        "            }}\n"
+        "        }}\n"
+        "    }}",
+        tc);
+    return true;
+}
+
+bool RtScene::dynamicSupported() const { return supported() && dev_.ctx().features().vertexStores; }
+
+void RtScene::setDynamic(const void* consumer, bool on) {
+    if (on) {
+        dynamicConsumers_.insert(consumer);
+    } else {
+        dynamicConsumers_.erase(consumer);
+    }
+    const bool want = !dynamicConsumers_.empty() && dynamicSupported();
+    if (want == dynamic_) return;
+    dynamic_ = want;
+    if (want) {
+        if (!captureRegistered_) {
+            dev_.setVariantProvider(d3d9::VariantSlot::Capture, {"cap1", captureOptions});
+            captureRegistered_ = true;
+        }
+        spdlog::info("rt: scene: characters on (skinned solid draws captured each frame)");
+    } else {
+        dropDynamic(true, 0);
+        spdlog::info("rt: scene: characters off");
+    }
+}
+
+void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
+    if (!dynamic_ || q.primitiveType != 4 || q.vertexBuffer == nullptr || q.indexBuffer == nullptr || q.primitives == 0 || q.instanced ||
+        q.indexBuffer->ringCopied()) {
+        return;
+    }
+    const std::uint64_t frame = dev.frameValue();
+    if (dynFrame_ != frame) {
+        dyn_.clear();
+        dynFrame_ = frame;
+    }
+    if (dyn_.size() >= 256) return;
+    // the draw: entity x buffers x range (the later passes of a character draw the same range again: the first one counts)
+    const d3d9::ResourceRef vr = q.vertexBuffer->ref(), ir = q.indexBuffer->ref();
+    std::uint64_t key = 1469598103934665603ull;
+    const auto mix = [&](std::uint64_t v) {
+        key ^= v;
+        key *= 1099511628211ull;
+    };
+    mix(reinterpret_cast<std::uintptr_t>(q.tag != nullptr ? q.tag->entity : nullptr));
+    mix(vr.id);
+    mix(vr.generation);
+    mix(ir.id);
+    mix(ir.generation);
+    mix(q.first);
+    mix(q.primitives);
+    mix(static_cast<std::uint32_t>(q.baseVertex));
+    mix(q.vertexOffset);
+    for (const DynDraw& d : dyn_) {
+        if (d.key == key) return;
+    }
+    DynBlas& b = dynBlas_[key];
+    if (b.id == 0) b.id = nextDynId_++;
+    d3d9::Buffer* ib = q.indexBuffer;
+    const bool index32 = ib->index32();
+    const std::uint32_t isize = index32 ? 4u : 2u;
+    if (!b.scanned) {
+        // the highest index of the range (the capture's slot count; D3D9's minIndex / numVertices are not trusted)
+        b.scanned = true;
+        std::vector<std::uint8_t> idx(static_cast<std::size_t>(q.primitives) * 3 * isize);
+        if (ib->readCpu(q.first * isize, static_cast<std::uint32_t>(idx.size()), idx.data())) {
+            std::uint32_t m = 0;
+            for (std::size_t i = 0; i < idx.size(); i += isize) {
+                std::uint32_t v = 0;
+                std::memcpy(&v, idx.data() + i, isize);
+                m = std::max(m, v);
+            }
+            b.maxIndex = m;
+        }
+    }
+    if (b.maxIndex == 0 || b.maxIndex >= (1u << 20)) return;
+    const std::uint32_t slots = b.maxIndex + 1;
+    ib->gpu(isize);
+    const VkDeviceAddress ibAddress = ib->deviceAddress();
+    if (ibAddress == 0) return;
+    const vk::RingAlloc a = dev.frames().allocate(16 + static_cast<VkDeviceSize>(slots) * 32, 16);
+    if (a.ptr == nullptr) return;
+    std::memset(a.ptr, 0, 16);
+    std::memcpy(a.ptr, &slots, 4);
+    dev.requestVertexCapture(a.address);
+    // the draw's material (diffuse + uv map), resolved again when it changes
+    const std::uint64_t sig = RtMaterials::signature(q);
+    if (b.material == 0 || b.sig != sig || frame >= b.resolved + 600) {
+        if (const std::uint32_t id = materials_.resolve(dev, q); id != 0) {
+            if (b.material != 0) materials_.release(b.material);
+            b.material = id;
+            b.sig = sig;
+            b.resolved = frame;
+        }
+    }
+    dyn_.push_back({key, a.address, ibAddress + static_cast<VkDeviceAddress>(q.first) * isize, slots, q.primitives, index32, false});
+}
+
+// the frame's captured characters -> one BLAS each: refit while the topology holds (30 times), else a full build
+void RtScene::buildDynamic(VkCommandBuffer cmd, std::uint64_t frame) {
+    if (frame % 120 == 0) dropDynamic(false, frame);
+    if (!dynamic_ || dynFrame_ != frame || dyn_.empty()) return;
+    vk::Context& ctx = dev_.ctx();
+    constexpr VkBuildAccelerationStructureFlagsKHR kFlags =
+        VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+    std::vector<VkAccelerationStructureGeometryKHR> geoms;
+    std::vector<VkAccelerationStructureBuildGeometryInfoKHR> infos;
+    std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges;
+    std::vector<VkDeviceSize> scratchOffsets;
+    std::vector<std::size_t> which;
+    geoms.reserve(dyn_.size());
+    infos.reserve(dyn_.size());
+    ranges.reserve(dyn_.size());
+    VkDeviceSize scratchTotal = 0;
+    for (std::size_t i = 0; i < dyn_.size(); ++i) {
+        DynDraw& d = dyn_[i];
+        if (!dev_.vertexCaptured(d.capture)) continue;
+        DynBlas& b = dynBlas_[d.key];
+        VkAccelerationStructureGeometryKHR g{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+        g.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+        g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+        auto& t = g.geometry.triangles;
+        t.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+        t.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+        t.vertexData.deviceAddress = d.capture + 16;
+        t.vertexStride = 32;
+        t.maxVertex = d.slots - 1;
+        t.indexType = d.index32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
+        t.indexData.deviceAddress = d.indices;
+        VkAccelerationStructureBuildGeometryInfoKHR info{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+        info.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+        info.flags = kFlags;
+        info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+        info.geometryCount = 1;
+        info.pGeometries = &g;
+        VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+        vkGetAccelerationStructureBuildSizesKHR(ctx.device(), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &info, &d.triangles, &sizes);
+        const bool update = b.built && b.slots == d.slots && b.triangles == d.triangles && b.indices == d.indices && b.updates < 30 &&
+                            b.as.handle != VK_NULL_HANDLE;
+        if (!update) {
+            if (b.as.handle == VK_NULL_HANDLE || b.as.storage.size < sizes.accelerationStructureSize) {
+                if (b.as.handle != VK_NULL_HANDLE || b.as.storage.buffer != VK_NULL_HANDLE) {
+                    vk::Context* c = &ctx;
+                    vk::rt::AccelerationStructure old = b.as;
+                    dev_.frames().retire([c, old]() mutable { old.destroy(*c); });
+                    b.as = {};
+                }
+                if (!createAs(ctx, VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, sizes.accelerationStructureSize, b.as, "rt scene character")) {
+                    b.built = false;
+                    continue;
+                }
+            }
+            b.updates = 0;
+        } else {
+            ++b.updates;
+        }
+        info.mode = update ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+        info.srcAccelerationStructure = update ? b.as.handle : VK_NULL_HANDLE;
+        info.dstAccelerationStructure = b.as.handle;
+        const VkDeviceSize need = update ? sizes.updateScratchSize : sizes.buildScratchSize;
+        scratchOffsets.push_back(scratchTotal);
+        scratchTotal += (need + scratchAlign_ - 1) & ~(scratchAlign_ - 1);
+        geoms.push_back(g);
+        info.pGeometries = &geoms.back();
+        infos.push_back(info);
+        ranges.push_back({d.triangles, 0, 0, 0});
+        which.push_back(i);
+        b.slots = d.slots;
+        b.triangles = d.triangles;
+        b.indices = d.indices;
+        b.lastFrame = frame;
+        (update ? dynRefit_ : dynBuilt_) += 1;
+    }
+    if (infos.empty()) return;
+    if (dynScratch_.buffer == VK_NULL_HANDLE || dynScratch_.size < scratchTotal) {
+        if (dynScratch_.buffer != VK_NULL_HANDLE) {
+            vk::Context* c = &ctx;
+            vk::rt::AddressBuffer old = dynScratch_;
+            dev_.frames().retire([c, old]() mutable { old.destroy(*c); });
+            dynScratch_ = {};
+        }
+        if (!dynScratch_.create(ctx, std::max<VkDeviceSize>(scratchTotal * 2, 4ull << 20), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false, scratchAlign_,
+                                "rt scene character scratch")) {
+            for (std::size_t i : which) dynBlas_[dyn_[i].key].built = false;
+            return;
+        }
+    }
+    for (std::size_t k = 0; k < infos.size(); ++k) infos[k].scratchData.deviceAddress = dynScratch_.address + scratchOffsets[k];
+    // the vertex shaders' captures (this frame's solid pass) -> the builds
+    barrier(cmd, VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+            VK_ACCESS_2_SHADER_READ_BIT);
+    std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> pr(ranges.size());
+    for (std::size_t k = 0; k < ranges.size(); ++k) pr[k] = &ranges[k];
+    vkCmdBuildAccelerationStructuresKHR(cmd, static_cast<std::uint32_t>(infos.size()), infos.data(), pr.data());
+    for (std::size_t i : which) {
+        dyn_[i].built = true;
+        dynBlas_[dyn_[i].key].built = true;
+    }
+}
+
+// characters not seen for 2 s (all: off / deactivated): BLAS + material released
+void RtScene::dropDynamic(bool all, std::uint64_t frame) {
+    vk::Context* ctx = &dev_.ctx();
+    for (auto it = dynBlas_.begin(); it != dynBlas_.end();) {
+        DynBlas& b = it->second;
+        if (!all && b.lastFrame + 120 >= frame) {
+            ++it;
+            continue;
+        }
+        if (b.material != 0) materials_.release(b.material);
+        if (b.as.handle != VK_NULL_HANDLE || b.as.storage.buffer != VK_NULL_HANDLE) {
+            vk::rt::AccelerationStructure old = b.as;
+            dev_.frames().retire([ctx, old]() mutable { old.destroy(*ctx); });
+        }
+        it = dynBlas_.erase(it);
+    }
+    if (all) {
+        dyn_.clear();
+        if (dynScratch_.buffer != VK_NULL_HANDLE) {
+            vk::rt::AddressBuffer old = dynScratch_;
+            dev_.frames().retire([ctx, old]() mutable { old.destroy(*ctx); });
+            dynScratch_ = {};
+        }
+    }
+}
+
 // ---- the pass ----------------------------------------------------------------------------------------------------------------
 
 void RtScene::record(d3d9::PassContext& ctx) {
@@ -1260,13 +1524,20 @@ void RtScene::record(d3d9::PassContext& ctx) {
     }
     processCompactions(cmd, slot);
     buildPending(cmd, slot);
+    buildDynamic(cmd, frame);
     // BLAS builds / compaction copies -> the TLAS build
     barrier(cmd, asStages, VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
             VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR);
 
+    // characters built this frame (setDynamic) after the world's instances
+    std::uint32_t dynCount = 0;
+    if (dynFrame_ == frame) {
+        for (const DynDraw& d : dyn_) dynCount += d.built ? 1u : 0u;
+    }
+    dynCount = std::min(dynCount, tlas_[slot].capacity / 8);
     // the instances and their geometry records (one geometry per BLAS: record index = instanceCustomIndex)
     const auto& list = registry_.instances();
-    const std::vector<std::uint32_t> chosen = rt::selectForTlas(list, camera, tlas_[slot].capacity, [this](const rt::Registry::Instance& in) {
+    const std::vector<std::uint32_t> chosen = rt::selectForTlas(list, camera, tlas_[slot].capacity - dynCount, [this](const rt::Registry::Instance& in) {
         const Blas* b = findBlas(in.blas);
         // an object the cascades draw at another level of detail than the main view: the main view's
         if (b == nullptr || b->state != BlasState::Built || registry_.supersededBy(in, viewBit(View::Main))) return false;
@@ -1280,7 +1551,8 @@ void RtScene::record(d3d9::PassContext& ctx) {
         // no own material: the BLAS's best, unless it has only overlays
         return b->materials.empty() || std::any_of(b->materials.begin(), b->materials.end(), [](const auto& m) { return !m.overlay; });
     });
-    const std::uint32_t n = static_cast<std::uint32_t>(chosen.size());
+    const std::uint32_t worldCount = std::min<std::uint32_t>(static_cast<std::uint32_t>(chosen.size()), tlas_[slot].capacity - dynCount);
+    const std::uint32_t n = worldCount + dynCount;
     const vk::RingAlloc ia = frames.allocate(std::max<VkDeviceSize>(n, 1) * sizeof(VkAccelerationStructureInstanceKHR), 16);
     const vk::RingAlloc ra = frames.allocate(std::max<VkDeviceSize>(n, 1) * sizeof(abi::RtGeometryRecord), 16);
     if (ia.ptr == nullptr || ra.ptr == nullptr) {
@@ -1301,7 +1573,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
     std::uint64_t textured = 0, untextured = 0, cutOut = 0, segmented = 0, speedTrees = 0;
     std::vector<abi::RtMaterialSegment> segs;              // the frame's segment table
     std::vector<std::pair<std::uint32_t, std::uint32_t>> segRecords;  // record -> its first segment
-    for (std::uint32_t k = 0; k < n; ++k) {
+    for (std::uint32_t k = 0; k < worldCount; ++k) {
         const rt::Registry::Instance& in = list[chosen[k]];
         Blas& b = *findBlas(in.blas);
         // the material (M9 P2): the bindless slots of this frame (a texture that died is gone from the entry)
@@ -1377,6 +1649,49 @@ void RtScene::record(d3d9::PassContext& ctx) {
         recs[k] = r;
         triangles += b.triangles;
         if (content != nullptr) content->push_back({in.blas, in.id, r.flags, in.material, {in.rows[3], in.rows[7], in.rows[11]}});
+    }
+
+    // the characters: world-space vertices (identity transform), no normals, the draw's diffuse material
+    {
+        std::uint32_t k = worldCount;
+        for (const DynDraw& d : dyn_) {
+            if (k >= n) break;
+            if (dynFrame_ != frame || !d.built) continue;
+            const auto it = dynBlas_.find(d.key);
+            if (it == dynBlas_.end() || !it->second.built) continue;
+            const DynBlas& b = it->second;
+            VkAccelerationStructureInstanceKHR vi{};
+            vi.transform.matrix[0][0] = vi.transform.matrix[1][1] = vi.transform.matrix[2][2] = 1.0f;
+            vi.instanceCustomIndex = k;
+            vi.mask = abi::kRtMaskDynamic;
+            vi.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR | VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
+            vi.accelerationStructureReference = b.as.address;
+            insts[k] = vi;
+            abi::RtGeometryRecord r{};
+            split(d.capture + 16, r.vertices);
+            split(d.indices, r.indices);
+            r.stride = 32;
+            r.flags = (d.index32 ? abi::kRtRecordIndex32 : 0u) | abi::kRtRecordDynamic | (static_cast<std::uint32_t>(Kind::Skinned) << abi::kRtRecordKindShift) |
+                      (1u << abi::kRtRecordViewShift);
+            r.normal = abi::kRtAttribAbsent;
+            r.texcoord0 = 16u | (1u << 16);  // FLOAT2 at 16: the capture's TEXCOORD0
+            r.texcoord1 = r.texcoord0;
+            r.texcoord6 = abi::kRtAttribAbsent;
+            r.color0 = abi::kRtAttribAbsent;
+            r.instanceId = b.id;
+            r.alpha = 8u;
+            const RtMaterial* m = b.material != 0 ? materials_.get(b.material) : nullptr;
+            const MaterialFields mf = materialFields(m != nullptr && !m->dead ? m : nullptr);
+            r.albedoTex = mf.albedoTex;
+            r.albedoSampler = mf.albedoSampler;
+            r.uvSet = mf.uvSet | abi::kRtUvOpacityOpaque;
+            std::memcpy(r.uvMap, mf.uvMap, sizeof(r.uvMap));
+            recs[k] = r;
+            triangles += d.triangles;
+            if (content != nullptr) content->push_back({0, b.id, r.flags, b.material, {0.0f, 0.0f, 0.0f}});
+            ++k;
+        }
+        iv_.dynamic = k - worldCount;
     }
 
     // the segment table (after the records: their addresses)
@@ -1473,6 +1788,12 @@ void RtScene::logStats(bool force) {
                  materials_.size(), static_cast<double>(mc.resolves) / f, mc.ms / f, mc.evaluations, mc.graph, mc.pool, mc.heuristic, mc.noTexture,
                  mc.approx, mc.failed, mc.shaderMismatch, iv_.textured, iv_.untextured, iv_.cutOut, iv_.segmented, iv_.segments,
                  iv_.engineSegments, iv_.engineMerged, iv_.speedTree);
+    if (dynamic_) {
+        spdlog::info("rt: scene: characters {} in the last TLAS ({} tracked, interval: {} BLAS builds, {} refits; capture variant needs "
+                     "vertexPipelineStoresAndAtomics: {})",
+                     iv_.dynamic, dynBlas_.size(), dynBuilt_, dynRefit_, dev_.ctx().features().vertexStores ? "yes" : "no");
+        dynBuilt_ = dynRefit_ = 0;
+    }
     iv_ = {};
     lastLog_ = now;
 }

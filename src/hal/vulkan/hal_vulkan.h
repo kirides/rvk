@@ -17,6 +17,7 @@
 #include "d3d9/device.h"
 #include "d3d9/ffshader.h"
 #include "enh/debug_view.h"
+#include "enh/gi.h"
 #include "enh/rt_debug.h"
 #include "enh/rt_scene.h"
 #include "enh/shadows.h"
@@ -508,7 +509,9 @@ private:
     std::unique_ptr<enh::Shadows> shadows_;      // shadows.* (a draw replacer: the sun's shadow mask)
     std::unique_ptr<enh::RtScene> rtScene_;      // the ray tracing scene (a draw observer + a pass; active while a consumer holds it)
     std::unique_ptr<enh::RtDebug> rtDebug_;      // rt.debug (a consumer of rtScene_)
+    std::unique_ptr<enh::Gi> gi_;                // gi.* (a draw observer + passes, a consumer of rtScene_)
     void applyWater();
+    void applyGi();
     void applyShadows();
     void applyLod();
     std::chrono::steady_clock::time_point settingsDirtySince_{};

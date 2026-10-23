@@ -96,7 +96,8 @@ public:
             res.error = error_;
             return res;
         }
-        res.glsl = header() + globals() + (opt_.extraGlobals.empty() ? std::string() : opt_.extraGlobals + "\n") + functions_ +
+        res.glsl = header() + (opt_.prelude.empty() ? std::string() : opt_.prelude + "\n") + globals() +
+                   (opt_.extraGlobals.empty() ? std::string() : opt_.extraGlobals + "\n") + functions_ +
                    mainFunction();
         res.reflection = reflection_;
         res.reflection.version = p_.version;
@@ -909,6 +910,10 @@ private:
                     m += std::format("    v{} = {};\n", d.reg.index, overrideExpr(o->expr, std::format("rvk_in{}", d.reg.index), "$v"));
                 }
             }
+        }
+        if (!opt_.prologue.empty()) {
+            m += opt_.prologue;
+            m += "\n";
         }
         m += "    rvk_main();\n";
         if (vs_) {

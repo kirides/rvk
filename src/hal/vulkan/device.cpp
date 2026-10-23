@@ -120,6 +120,7 @@ HalDevice::~HalDevice() {
     debugView_.reset();  // removes its pass, retires its pipelines
     // the RT scene's consumers (rt.debug, the water's traced reflections) release it in their destructors: before it
     rtDebug_.reset();    // releases the RT scene
+    gi_.reset();         // unregisters its observer / pass, releases the RT scene
     water_.reset();      // unregisters its draw replacer, releases the RT scene
     shadows_.reset();
     rtScene_.reset();    // unregisters its observer / pass, retires its acceleration structures
@@ -276,6 +277,14 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         }
         applyShadows();  // also the engine's cascade overrides (shadows.map_size / range: "auto" follows shadows.enabled)
     }
+    // ray-traced global illumination (enh/gi.h, docs/research/rtgi.md): probes + the material shaders' GI variants
+    gi_ = std::make_unique<enh::Gi>(dev_, rtScene_.get());
+    if (rs.giEnabled != nullptr) {
+        for (settings::Setting* s : {rs.giEnabled, rs.giQuality, rs.giStrength, rs.giLightmaps, rs.giCharacters, rs.giDebug}) {
+            if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyGi(); }, this);
+        }
+        if (rs.giEnabled->asBool()) applyGi();
+    }
     // detail distances (engine/lod.h, docs/research/lod.md)
     for (settings::Setting* s : {rs.lodTrees, rs.lodMeshes, rs.lodView}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyLod(); }, this);
@@ -328,6 +337,21 @@ void HalDevice::applyWater() {
     // the enhanced water reflects the engine's sky cube everywhere: keep it current (the whole cube every frame; the
     // engine's own refresh, one face per frame every ~10 s, left lightning flashes baked into some faces: ocean.md 9.8)
     dev_.setSkyCubeEveryFrame(s.enabled);
+}
+
+void HalDevice::applyGi() {
+    const auto& rs = settings::renderer();
+    if (!gi_ || rs.giEnabled == nullptr) return;
+    enh::Gi::Settings s;
+    s.enabled = rs.giEnabled->asBool();
+    const std::string_view q = rs.giQuality->asEnum();
+    s.quality = q == "low" ? 0 : q == "high" ? 2 : 1;
+    s.strength = rs.giStrength->asFloat();
+    s.replaceLightmaps = rs.giLightmaps->asEnum() == "replace";
+    s.characters = rs.giCharacters->asBool();
+    const std::string_view d = rs.giDebug->asEnum();
+    s.debug = d == "irradiance" ? 1 : d == "cascades" ? 2 : 0;
+    gi_->apply(s);
 }
 
 void HalDevice::applyShadows() {

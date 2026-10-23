@@ -3,6 +3,7 @@
 #include "shader/embedded.h"
 
 @RVK_SHADER_INCLUDES@#include "shaders/rvk_abi_glsl.h"
+#include "shaders/rvk_gi_glsl.h"
 
 namespace rvk::shader::embedded {
 namespace {
@@ -22,5 +23,6 @@ std::span<const std::uint32_t> spirv(std::string_view name) {
 }
 
 std::string_view abiGlsl() { return std::string_view(data::rvk_abi_glsl, sizeof(data::rvk_abi_glsl) - 1); }
+std::string_view giGlsl() { return std::string_view(data::rvk_gi_glsl, sizeof(data::rvk_gi_glsl) - 1); }
 
 }  // namespace rvk::shader::embedded

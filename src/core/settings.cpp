@@ -1180,6 +1180,79 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB | Flag::Debug,
     });
 
+    // ---- Graphics tab: global illumination (enh/gi.h, docs/research/rtgi.md) ----
+    r.giEnabled = &reg.add({
+        .key = "gi.enabled",
+        .label = "Ray-traced lighting",
+        .category = "Lighting",
+        .description = "Light that bounces: sunlit walls and ground light their surroundings, rooms are darker away from "
+                       "their windows and doors, caves and forests get their own shade, characters cast soft shade. Replaces "
+                       "the game's flat ambient light. Needs a graphics card with ray tracing.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .requirements = caps::bit(caps::Cap::RayQuery),
+        .unmetValue = 0,
+    });
+    r.giQuality = &reg.add({
+        .key = "gi.quality",
+        .label = "Lighting quality",
+        .category = "Lighting",
+        .description = "How quickly the bounced light follows changes (moving, time of day). Lower it if the frame rate drops.",
+        .type = Type::Enum,
+        .defaultValue = 1,
+        .options = {"low", "medium", "high"},
+        .optionLabels = {"Low", "Medium", "High"},
+    });
+    r.giStrength = &reg.add({
+        .key = "gi.strength",
+        .label = "Bounced light strength",
+        .category = "Lighting",
+        .description = "0: the game's ambient light, 1: the traced light, between: a mix.",
+        .type = Type::Float,
+        .defaultValue = 1,
+        .min = 0,
+        .max = 1,
+        .format = "%.2f",
+        .flags = Flag::Advanced,
+    });
+    r.giLightmaps = &reg.add({
+        .key = "gi.lightmaps",
+        .label = "Baked indoor light",
+        .category = "Lighting",
+        .description = "Keep: interiors keep the game's own light of their lamps and fires (baked into the walls and added to "
+                       "objects) on top of the traced light. Replace: only the traced light (much darker interiors).",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"keep", "replace"},
+        .optionLabels = {"Keep", "Replace"},
+        .flags = Flag::Advanced,
+    });
+    r.giCharacters = &reg.add({
+        .key = "gi.characters",
+        .label = "Characters in ray tracing",
+        .category = "Lighting",
+        .description = "The hero, people and monsters block and bounce the traced light (and appear in ray-traced "
+                       "reflections).",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::Advanced,
+    });
+    r.giDebug = &reg.add({
+        .key = "gi.debug",
+        .label = "GI debug view",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Developer view of the ray-traced lighting: \"Irradiance\" shows the probes' light on a white surface "
+                       "(geometric normal), \"Cascades\" the probe cascade each pixel uses (red, green, blue; dark red = no "
+                       "probes: the game's ambient).",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "irradiance", "cascades"},
+        .optionLabels = {"Off", "Irradiance", "Cascades"},
+        .flags = Flag::NoAB | Flag::Debug,
+        .requirements = caps::bit(caps::Cap::RayQuery),
+    });
+
     // ---- Graphics tab: detail distances (engine/lod.h) ----
     r.lodTrees = &reg.add({
         .key = "lod.trees",

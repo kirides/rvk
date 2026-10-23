@@ -179,6 +179,7 @@ struct FrameExtras {
     const std::array<std::array<float, 4>, 16>* params = nullptr;  // feature parameters (null = zeros)
     std::uint64_t rtTlas = 0, rtRecords = 0;  // the ray tracing scene of this submission (0 = none)
     std::uint32_t rtInstances = 0, rtRecordCount = 0;
+    std::uint64_t gi = 0;  // the GI volume header of this frame (0 = none)
 };
 
 // The frame block from the current frame's camera `cur` (valid from its main view on) and the last presented frame's `last`.

@@ -397,6 +397,11 @@ void fillFrameBlock(shader::abi::FrameBlock& out, const CameraBlock& cur, const 
         out.rtInfo[1] = x.rtRecordCount;
         out.rtInfo[2] = abi::kFrameRtValid;
     }
+    if (x.gi != 0) {
+        out.gi[0] = static_cast<std::uint32_t>(x.gi);
+        out.gi[1] = static_cast<std::uint32_t>(x.gi >> 32);
+        out.gi[2] = abi::kFrameGiValid;
+    }
 }
 
 }  // namespace rvk::d3d9::scene

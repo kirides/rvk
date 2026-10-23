@@ -1,0 +1,49 @@
+// Shared by the GI probe passes (gi_trace.comp, gi_blend.comp; src/enh/gi.cpp, docs/research/rtgi.md 5): the pass
+// parameters (mirror: enh::GiPassParams, static_assert'ed size), the probe list, the ray buffer and the ray directions.
+
+#ifndef GI_COMMON_GLSL
+#define GI_COMMON_GLSL
+
+const uint GI_RAYS = 64u;        // rays per probe and update (= the workgroup size of both passes)
+const uint GI_MAX_LIGHTS = 32u;  // point lights of the frame (deduplicated from the draws' g_PointLights)
+
+// mirror: enh::GiPassParams
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer GiPassParams {
+    uvec4 lists;        // xy probe list address (GiList), zw ray buffer address (GiRays)
+    uvec4 volume;       // xy this frame's volume header (RvkGiVolume), z probes in the list, w frame
+    uvec4 flags;        // x RVK_RT_TRACE_* of the probe rays, y lights, z tweaks, w 0
+    vec4 rot[3];        // the frame's random rotation of the ray set (rows)
+    vec4 reach;         // ray length per cascade (world units)
+    vec4 blend;         // x irradiance hysteresis, y depth hysteresis, z depth sharpness, w backface share that marks a probe inside
+    vec4 shade;         // x bounce factor (the probes' own light at hits), y albedo scale, z sun shadow ray reach, w ray cone spread
+    vec4 sunColor;      // c22 (rgb; 0 = no sun)
+    vec4 sunDir;        // c24 (towards the sun)
+    vec4 sky[7];        // the engine's outdoor ambient c15..c21 (rays that miss)
+    vec4 lights[GI_MAX_LIGHTS * 2];  // position + 1 / R^2, colour
+};
+// (cascade << 24) | slot of each probe to update
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer GiList {
+    uint e[];
+};
+// per probe x ray: radiance (rgb, acc units) + hit distance (w; negative = a back face, -0.2 t)
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer GiRays {
+    vec4 r[];
+};
+
+layout(push_constant, std430) uniform GiPush {
+    RVK_PASS_PUSH_HEADER
+    uvec2 params;  // GiPassParams address
+    uvec2 pad;
+} pc;
+
+// spherical Fibonacci directions (uniform over the sphere), rotated by the frame's rotation
+vec3 giRayDir(GiPassParams p, uint i) {
+    const float golden = 2.39996323;  // pi * (3 - sqrt(5))
+    float z = 1.0 - (2.0 * float(i) + 1.0) / float(GI_RAYS);
+    float r = sqrt(max(0.0, 1.0 - z * z));
+    float phi = float(i) * golden;
+    vec3 d = vec3(cos(phi) * r, z, sin(phi) * r);
+    return normalize(vec3(dot(p.rot[0].xyz, d), dot(p.rot[1].xyz, d), dot(p.rot[2].xyz, d)));
+}
+
+#endif

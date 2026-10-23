@@ -17,6 +17,8 @@
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <condition_variable>
+#include <deque>
 #include <mutex>
 #include <span>
 #include <string>
@@ -258,6 +260,22 @@ public:
     // vertex shaders of SpeedTree billboards: the fade distance variant (Device::lodModule, engine/lod.h)
     VkShaderModule lodModule = VK_NULL_HANDLE;
     bool lodFailed = false;
+    // variants of enhancements built in the background (Device::variant, VariantSlot): the module once ready
+    std::array<std::atomic<VkShaderModule>, 2> variants{};
+    std::array<std::atomic<std::uint8_t>, 2> variantState{};  // 0 not requested, 1 queued, 2 ready, 3 failed / not applicable
+};
+
+// Shader variants an enhancement supplies (Device::setVariantProvider), translated + compiled on a background thread on
+// their first request; the draw uses the engine's own module until the variant (and its pipeline) is ready
+enum class VariantSlot : std::uint8_t {
+    Gi = 0,       // pixel shaders: the ambient constants from the GI probe volume (enh/gi)
+    Capture = 1,  // vertex shaders: world positions + TEXCOORD0 written to a buffer (skinned draws in the RT scene, enh/rt_scene)
+    Count
+};
+struct VariantProvider {
+    std::string tag;  // part of the SPIR-V cache name (bump it when the variant's GLSL changes)
+    // the options of a shader's variant; false = not applicable (the draw keeps the engine's module). Any thread
+    std::function<bool(const Shader&, shader::GlslOptions&)> options;
 };
 
 // ---- device -------------------------------------------------------------------------------------------------------
@@ -278,6 +296,7 @@ struct ReplaceQuery {
     std::uint32_t primitiveType = 4;          // D3DPRIMITIVETYPE (4 triangle list, 5 strip, 6 fan)
     std::uint32_t first = 0, primitives = 0;  // start index / vertex, primitive count
     std::int32_t baseVertex = 0;
+    std::uint32_t minIndex = 0, numVertices = 0;  // DrawIndexedPrimitive's vertex range (indexed draws; 0 / 0 when unknown)
     bool instanced = false;                   // stream 0 frequency INDEXEDDATA
     std::uint32_t instances = 1;              // its instance count (1 when not instanced)
     Texture* const* textures = nullptr;       // the bound textures s0..s15 (pixel)
@@ -699,6 +718,33 @@ public:
     }
     const RtSceneRef& rtScene() const { return rtScene_; }
     bool rtSceneValid() const { return rtScene_.tlas != 0 && rtScene_.frame == frameValue(); }
+    // ---- GI (enh/gi, docs/research/rtgi.md 5) ----
+    // the probe volume's header (shaders/include/rvk_gi.glsl RvkGiVolume): copied into each FrameBlock's ring upload from now
+    // on (FrameBlock::gi); empty = none
+    void setGiHeader(std::span<const std::uint8_t> header) {
+        giHeader_.assign(header.begin(), header.end());
+        frameAddr_ = 0;
+    }
+    // which draws take the pixel shader's GI variant (VariantSlot::Gi): the main view's lit material draws (a first pass with
+    // the engine's ambient constants set) while `on`; replaceLightmaps: their lightmap samplers read the black texture
+    struct GiDraws {
+        bool on = false;
+        bool replaceLightmaps = false;
+    };
+    void setGiDraws(const GiDraws& g) { giDraws_ = g; }
+    std::uint64_t giDrawsThisInterval() const { return giDrawCount_; }
+    // ---- shader variants of enhancements (render thread) ----
+    void setVariantProvider(VariantSlot slot, VariantProvider provider);
+    // the slot's variant of `s` when it is built (queues its build on the first call); null until then / when not applicable
+    VkShaderModule variant(const std::shared_ptr<Shader>& s, VariantSlot slot);
+    // ---- vertex capture (enh/rt_scene: skinned draws in the RT scene) ----
+    // inside DrawObserver::observe: the draw's vertex shader writes, per vertex index i of the draw (index buffer value),
+    // the world position (vec4, w = 1) and its TEXCOORD0 input (vec4) to `buffer` + 32 i (the capture variant, once it and
+    // its pipeline are ready); vertexCaptured tells whether it ran this frame (render thread)
+    void requestVertexCapture(VkDeviceAddress buffer) { captureRequest_ = buffer; }
+    bool vertexCaptured(VkDeviceAddress buffer) const {
+        return std::find(captured_.begin(), captured_.end(), buffer) != captured_.end();
+    }
     // one-line status texts of enhancements for the overlay's performance panel (key -> text; empty text removes it)
     void setStatus(const std::string& key, std::string text) {
         if (text.empty()) status_.erase(key);
@@ -774,8 +820,13 @@ private:
         std::uint32_t first = 0;
         std::uint32_t primitives = 0;
         std::int32_t baseVertex = 0;
+        std::uint32_t minIndex = 0, numVertices = 0;
     };
     bool prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom);
+    // GI variant eligibility of the current draw (prepareDraw): the engine set its ambient constants (a first pass)
+    bool giEligible(const scene::Phase& phase) const;
+    void variantWorker();
+    void stopVariantWorker();
     void logWaterDraw(draws::Kind kind);
     VkShaderModule tintModule(Shader& ps);  // the tint variant of a pixel shader (null when it fails to build)
     VkShaderModule lodModule(Shader& vs);   // the billboard fade variant of a vertex shader (null when it fails to build)
@@ -1068,6 +1119,22 @@ private:
     std::vector<Registered> registered_;
 
     // enhancements
+    std::vector<std::uint8_t> giHeader_;
+    GiDraws giDraws_;
+    std::uint64_t giDrawCount_ = 0;
+    VkDeviceAddress captureRequest_ = 0;    // the draw being prepared (DrawObserver::observe)
+    std::vector<VkDeviceAddress> captured_;  // this frame's captures that ran
+    std::array<VariantProvider, static_cast<std::size_t>(VariantSlot::Count)> variantProviders_;
+    struct VariantJob {
+        std::shared_ptr<Shader> shader;
+        VariantSlot slot;
+    };
+    std::mutex variantMutex_;
+    std::condition_variable variantCv_;
+    std::deque<VariantJob> variantJobs_;
+    std::vector<std::thread> variantThreads_;  // 3 workers, started by the first request
+    bool variantStop_ = false;
+    std::atomic<std::uint64_t> variantsBuilt_{0}, variantsFailed_{0};
     VkDeviceAddress frameAddr_ = 0;  // 0 = upload before the next use
     std::array<std::array<float, 4>, shader::abi::kFrameParams> frameParams_{};
     inject::Registry passes_;

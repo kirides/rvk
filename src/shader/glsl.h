@@ -44,6 +44,13 @@ struct GlslOptions {
     bool tintEpilogue = false;
 
     // ---- variant hooks for enhancements (docs/research/injection.md 4). All empty = the default translation, unchanged.
+    // GLSL right after the ABI declarations, before the generated globals: declarations and functions that constOverrides /
+    // inputOverrides expressions call (they are used inside the generated helpers, e.g. rvk_cRel), e.g. the GI lookup
+    // (shaders/include/rvk_gi.glsl, enh/gi)
+    std::string prelude;
+    // statements at the start of main(), before the translated program runs (uniform control flow: derivatives are defined;
+    // vertex shaders: after the input overrides)
+    std::string prologue;
     // GLSL added after the generated globals: extra outputs (e.g. `layout(location = 4) out vec4 rvk_motion;`), specialisation
     // constants (`layout(constant_id = N) const bool ...`, ids from abi.h kSpec*), helper functions
     std::string extraGlobals;

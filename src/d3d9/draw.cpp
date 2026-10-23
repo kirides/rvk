@@ -490,6 +490,22 @@ constexpr std::uint32_t kReplacedStates[] = {RS_ALPHABLENDENABLE, RS_SRCBLEND, R
 
 }  // namespace
 
+// GI (enh/gi): the main view's lit material draws whose ambient the engine set (its first pass: the later point-light passes
+// add with ONE / ONE blending and no ambient)
+bool Device::giEligible(const scene::Phase& phase) const {
+    if (phase.view != scene::View::Main || tag_.water != draws::Water::None) return false;
+    if (phase.pass != scene::Pass::Solid && phase.pass != scene::Pass::Alpha && phase.pass != scene::Pass::AlphaLate) return false;
+    if ((ps_->reflection.colorOutputs & 1u) == 0) return false;
+    const auto& amb = ps_->semantics[Semantic::AmbientLight];
+    if (!amb.present() || amb.count < 7 || amb.reg + 7 > static_cast<int>(kPsFloatConsts)) return false;
+    if (rs_[RS_ALPHABLENDENABLE] != 0 && rs_[RS_DESTBLEND] == BLEND_ONE) return false;
+    for (std::int32_t i = 0; i < 7; ++i) {
+        const float* c = psF_[amb.reg + i];
+        if (c[0] != 0.0f || c[1] != 0.0f || c[2] != 0.0f || c[3] != 0.0f) return true;
+    }
+    return false;
+}
+
 bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     lastRecord_ = nullptr;
     customVertices_ = 0;
@@ -522,6 +538,8 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         q.first = geom.first;
         q.primitives = geom.primitives;
         q.baseVertex = geom.baseVertex;
+        q.minIndex = geom.minIndex;
+        q.numVertices = geom.numVertices;
         q.instanced = (streams_[0].freq & STREAMSOURCE_INDEXEDDATA) != 0;
         q.instances = q.instanced ? std::max(1u, streams_[0].freq & 0x3FFFFFFFu) : 1u;
         q.textures = tex_.data();
@@ -539,7 +557,8 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         q.depthWrite = rs_[RS_ZENABLE] != ZB_FALSE && rs_[RS_ZWRITEENABLE] != 0;
         q.depthBias = rs_[RS_DEPTHBIAS] != 0 || rs_[RS_SLOPESCALEDEPTHBIAS] != 0;
     };
-    // draw observers (enh/rt_scene): indexed draws from buffers of the kinds / phases they ask for
+    // draw observers (enh/rt_scene, enh/gi): indexed draws from buffers of the kinds / phases they ask for
+    captureRequest_ = 0;
     if (!observers_.empty() && geom.indexed && !geom.userPointer) {
         for (DrawObserver* o : observers_) {
             if (!o->observes(kind, phase)) continue;
@@ -664,6 +683,14 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         const VkShaderModule m = lodModule(*vs_);
         vsModule = m != VK_NULL_HANDLE ? m : vsModule;
     }
+    // enhancement variants (built in the background; the engine's modules until they and their pipeline exist): GI reads the
+    // probe volume instead of the engine's ambient constants (enh/gi), the vertex capture writes a skinned draw's world
+    // positions for the RT scene (enh/rt_scene)
+    VkShaderModule fsVariant = VK_NULL_HANDLE, vsVariant = VK_NULL_HANDLE;
+    if (!replaced && tint == 0 && giDraws_.on && giEligible(phase)) fsVariant = variant(ps_, VariantSlot::Gi);
+    if (!replaced && captureRequest_ != 0 && geom.indexed && instanceCount_ == 1 && vsModule == vs_->module) {
+        vsVariant = variant(vs_, VariantSlot::Capture);
+    }
 
     vk::PipelineDesc pd{};
     pd.vs = vsModule;
@@ -690,6 +717,19 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         ++stats_.skippedVertexInput;
         customVertices_ = 0;
         return false;
+    }
+    bool giDraw = false, captureDraw = false;
+    if (fsVariant != VK_NULL_HANDLE || vsVariant != VK_NULL_HANDLE) {
+        vk::PipelineDesc vd = pd;
+        if (fsVariant != VK_NULL_HANDLE) vd.fs = fsVariant;
+        if (vsVariant != VK_NULL_HANDLE) vd.vs = vsVariant;
+        if (pipelines_.contains(vd)) {
+            pd = vd;
+            giDraw = fsVariant != VK_NULL_HANDLE;
+            captureDraw = vsVariant != VK_NULL_HANDLE;
+        } else {
+            pipelines_.prewarmOnce(vd);  // built in the background; this draw keeps the engine's shaders
+        }
     }
     if (kind == draws::Kind::Refracted && tag_.water != draws::Water::None && !replaced) {
         // the formats / topology class of water draws (prebuildReplacement); the first one starts the background builds
@@ -745,6 +785,20 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     block.alphaFunc = rs_[RS_ALPHATESTENABLE] != 0 ? rs_[RS_ALPHAFUNC] : static_cast<std::uint32_t>(CMP_ALWAYS);
     block.alphaRef = static_cast<float>(rs_[RS_ALPHAREF] & 0xFF);
     block.pad[0] = tint;
+    if (giDraw) {
+        ++giDrawCount_;
+        if (giDraws_.replaceLightmaps) {
+            for (const Semantic sem : {Semantic::LightMap1, Semantic::LightMap2}) {
+                const auto& r = ps_->semantics[sem];
+                if (r.present() && r.reg < 16) block.tex[r.reg] = 0;
+            }
+        }
+    }
+    if (captureDraw) {
+        // the capture variant's slot = gl_VertexIndex - this draw's vertexOffset (= the index buffer value)
+        block.pad[1] = static_cast<std::uint32_t>(geom.baseVertex + vertexShift_);
+        captured_.push_back(captureRequest_);
+    }
     vk::RingAlloc db = frames_.allocate(sizeof(block), 16);
     std::memcpy(db.ptr, &block, sizeof(block));
 
@@ -770,7 +824,8 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         shader::abi::drawFlags(static_cast<std::uint32_t>(kind), static_cast<std::uint32_t>(phase.pass), static_cast<std::uint32_t>(phase.view)) |
         (tint != 0 ? shader::abi::kDrawFlagTinted : 0u);
     const VkDeviceAddress drawBlock = rep.block != 0 && replaced ? rep.block : db.address;
-    packet_.push = shader::abi::PushConstants{vsConstAddr_, psConstAddr_, drawBlock, frameBlockAddress(), 0, stats_.draws, flags};
+    packet_.push = shader::abi::PushConstants{vsConstAddr_, psConstAddr_, drawBlock, frameBlockAddress(), captureDraw ? captureRequest_ : 0,
+                                              stats_.draws, flags};
     // the opaque passes' draws may be recorded later, grouped by pipeline (flushBatch): their order only matters for surfaces
     // at exactly the same depth (docs/research/performance.md 12)
     {
@@ -941,11 +996,12 @@ void Device::bindIndexBuffer(VkCommandBuffer cmd, VkBuffer buffer, VkDeviceSize 
     }
 }
 
-void Device::drawIndexedPrimitive(std::uint32_t type, std::int32_t baseVertex, std::uint32_t, std::uint32_t, std::uint32_t startIndex,
-                                  std::uint32_t primitiveCount) {
+void Device::drawIndexedPrimitive(std::uint32_t type, std::int32_t baseVertex, std::uint32_t minIndex, std::uint32_t numVertices,
+                                  std::uint32_t startIndex, std::uint32_t primitiveCount) {
     const DrawTimer timer(*this);
     if (primitiveCount == 0 || indices_ == nullptr ||
-        !prepareDraw(type, DrawGeom{.indexed = true, .first = startIndex, .primitives = primitiveCount, .baseVertex = baseVertex})) {
+        !prepareDraw(type, DrawGeom{.indexed = true, .first = startIndex, .primitives = primitiveCount, .baseVertex = baseVertex,
+                                    .minIndex = minIndex, .numVertices = numVertices})) {
         return;
     }
     if (customVertices_ != 0) {

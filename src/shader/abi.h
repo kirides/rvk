@@ -23,9 +23,9 @@
 //                       alphaFunc: D3DCMPFUNC (1 never .. 8 always), alphaRef: 0..1
 //                       pad[0]: debug tint, RGBA8 (unpackUnorm4x8; 0 = none), read only by the tint variant of a pixel
 //                       shader (GlslOptions::tintEpilogue, the "tint draws" debug view); pad[1] unused
-// FrameBlock (std430, 928 bytes): the main camera (current + previous), depth conventions, target size, jitter, time, frame
+// FrameBlock (std430, 944 bytes): the main camera (current + previous), depth conventions, target size, jitter, time, frame
 //                       index + flags, bindless slots of the tagged engine images, 16 vec4 feature parameters (below), the
-//                       ray tracing scene (TLAS + geometry record addresses, RtGeometryRecord below)
+//                       ray tracing scene (TLAS + geometry record addresses, RtGeometryRecord below), the GI volume (enh/gi)
 //
 // Pass shaders (injected passes, d3d9/inject.h) use their own pipeline layout: set 0 = this bindless set, set 1 = a push
 // descriptor set of the pass, 128 bytes of push constants starting with PassPushHeader (GLSL RVK_PASS_PUSH_HEADER).
@@ -117,8 +117,12 @@ struct FrameBlock {
     // TLAS device address (low, high: GLSL accelerationStructureEXT(uvec2) needs no shaderInt64), geometry records address
     std::uint32_t rtScene[4];
     std::uint32_t rtInfo[4];    // instances in the TLAS, records, kFrameRt* flags, 0
+    // the GI probe volume (enh/gi, docs/research/rtgi.md 5; GLSL shaders/include/rvk_gi.glsl): its header's device address
+    // (low, high), kFrameGi* flags, 0
+    std::uint32_t gi[4];
 };
-static_assert(sizeof(FrameBlock) == 928);
+static_assert(sizeof(FrameBlock) == 944);
+inline constexpr std::uint32_t kFrameGiValid = 1u;  // gi holds a volume header
 inline constexpr std::uint32_t kFrameRtValid = 1u;  // rtScene holds this frame's TLAS (built at AfterOpaque)
 inline constexpr std::uint32_t kFrameCameraValid = 1u;      // this frame's main camera
 inline constexpr std::uint32_t kFrameCameraPredicted = 2u;  // the previous frame's (no main view yet this frame)
@@ -177,6 +181,7 @@ inline constexpr std::uint32_t kRtRecordInstanced = 8u;    // from an instanced 
 inline constexpr std::uint32_t kRtRecordNoDepthWrite = 16u; // a main-view solid draw of it had z writes off (not in the depth buffer)
 inline constexpr std::uint32_t kRtRecordDepthBias = 32u;    // a main-view draw of it had a depth bias (the depth buffer is offset)
 inline constexpr std::uint32_t kRtRecordSegmented = 64u;    // per-triangle materials: RtGeometryRecord::segments
+inline constexpr std::uint32_t kRtRecordDynamic = 128u;     // a skinned draw's vertices captured this frame (world space)
 inline constexpr std::uint32_t kRtRecordKindShift = 8;   // bits 8-15: draws::Kind of the draw
 inline constexpr std::uint32_t kRtRecordViewShift = 16;  // bits 16-23: views it was seen in (1 main, 2 sun cascades)
 // RtGeometryRecord::uvSet (M9 P2, docs/research/rt-reflections.md 3.2)
@@ -190,6 +195,7 @@ inline constexpr std::uint32_t kRtUvOpacityTexture = 0x800u; // the opacity has 
 // TLAS instance masks
 inline constexpr std::uint32_t kRtMaskOpaque = 0x01u;
 inline constexpr std::uint32_t kRtMaskAlphaTested = 0x02u;
+inline constexpr std::uint32_t kRtMaskDynamic = 0x04u;  // characters (skinned draws captured per frame)
 
 // Specialisation-constant ids reserved for variant hooks (GlslOptions::extraGlobals: one SPIR-V module, the variant chosen
 // per pipeline). The default translation declares none; the first enhancement that adds an extra output takes these.

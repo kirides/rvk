@@ -1,8 +1,10 @@
 // rvk_shadertool: offline driver of the D3D9 -> SPIR-V shader translator.
 //
-//   rvk_shadertool corpus <dir> [--out <dir>] [--max-errors N] [--tint]
+//   rvk_shadertool corpus <dir> [--out <dir>] [--max-errors N] [--tint | --gi | --capture]
 //                                                                translate + validate every vs*/ps* file of a capture corpus
-//                                                                (--tint: the pixel shaders' tint debug-view variant)
+//                                                                (--tint: the pixel shaders' tint debug-view variant; --gi: the
+//                                                                material pixel shaders' GI variant, enh/gi; --capture: the vertex
+//                                                                shaders' capture variant, enh/rt_scene; shaders without one skipped)
 //   rvk_shadertool show <file>                                   disassembly, GLSL, compiler log of one shader
 //   rvk_shadertool export <corpus dir> <out dir>                 write every shader as plain GLSL 4.60 source (<name>.vert / .frag): the
 //                                                                translator's exact output, the ABI block replaced by an #include,
@@ -29,6 +31,10 @@
 
 #include <spirv-tools/libspirv.hpp>
 
+#include "d3d9/device.h"
+#include "d3d9/semantics.h"
+#include "enh/gi.h"
+#include "enh/rt_scene.h"
 #include "shader/embedded.h"
 #include "shader/glsl.h"
 #include "shader/sm_eval.h"
@@ -86,7 +92,11 @@ Outcome translate(const std::vector<std::uint32_t>& tokens, spvtools::SpirvTools
     return o;
 }
 
-int cmdCorpus(const fs::path& dir, const fs::path& out, int maxErrors, const GlslOptions& options) {
+// a variant's options for one shader (null = the plain options)
+using VariantFn = bool (*)(const rvk::d3d9::Shader&, GlslOptions&);
+
+int cmdCorpus(const fs::path& dir, const fs::path& out, int maxErrors, const GlslOptions& baseOptions, VariantFn variant) {
+    int skipped = 0;
     spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
     std::map<std::string, int> ok, failed;
     std::map<std::string, int> failuresByMessage;
@@ -102,7 +112,22 @@ int cmdCorpus(const fs::path& dir, const fs::path& out, int maxErrors, const Gls
     std::ranges::sort(files);
     for (const auto& f : files) {
         const std::string kind = f.filename().string().substr(0, f.filename().string().find('_'));
-        const Outcome o = translate(readTokens(f), tools, options);
+        const std::vector<std::uint32_t> tokens = readTokens(f);
+        GlslOptions options = baseOptions;
+        if (variant != nullptr) {
+            // the shader as the device sees it: stage, reflection, CTAB semantics
+            const DecodeResult dec = decode(tokens);
+            const GlslResult plain = dec.ok() ? toGlsl(dec.program) : GlslResult{};
+            rvk::d3d9::Shader sh;
+            sh.stage = dec.ok() ? dec.program.version.stage : Stage::Vertex;
+            sh.reflection = plain.reflection;
+            if (dec.ok() && plain.ok()) sh.semantics = rvk::d3d9::shaderSemantics(tokens, plain.reflection);
+            if (!dec.ok() || !plain.ok() || !variant(sh, options)) {
+                ++skipped;
+                continue;
+            }
+        }
+        const Outcome o = translate(tokens, tools, options);
         if (o.stage.empty()) {
             ++ok[kind];
             continue;
@@ -135,7 +160,7 @@ int cmdCorpus(const fs::path& dir, const fs::path& out, int maxErrors, const Gls
             std::printf("%6d  %s\n", n, m.c_str());
         }
     }
-    std::printf("\n%zu shaders in %.1f s\n", files.size(), secs);
+    std::printf("\n%zu shaders in %.1f s (%d without the variant: skipped)\n", files.size(), secs, skipped);
     return totalFailed == 0 ? 0 : 1;
 }
 
@@ -322,9 +347,14 @@ int main(int argc, char** argv) {
         fs::path out;
         int maxErrors = 20;
         GlslOptions options;
+        VariantFn variant = nullptr;
         for (int i = 3; i < argc; ++i) {
             const std::string a = argv[i];
-            if (a == "--tint") {
+            if (a == "--gi") {
+                variant = &rvk::enh::Gi::variantOptions;
+            } else if (a == "--capture") {
+                variant = &rvk::enh::RtScene::captureOptions;
+            } else if (a == "--tint") {
                 options.tintEpilogue = true;
             } else if (i + 1 < argc && a == "--out") {
                 out = argv[++i];
@@ -332,7 +362,7 @@ int main(int argc, char** argv) {
                 maxErrors = std::atoi(argv[++i]);
             }
         }
-        return cmdCorpus(argv[2], out, maxErrors, options);
+        return cmdCorpus(argv[2], out, maxErrors, options, variant);
     }
     if (cmd == "export") {
         if (argc < 4) {

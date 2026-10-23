@@ -306,6 +306,8 @@ bool Context::createDevice(bool withRayTracing) {
     f2.features.depthClamp = sup2.features.depthClamp;
     f2.features.depthBiasClamp = sup2.features.depthBiasClamp;
     f2.features.imageCubeArray = sup2.features.imageCubeArray;
+    f2.features.vertexPipelineStoresAndAtomics = sup2.features.vertexPipelineStoresAndAtomics;
+    features_.vertexStores = sup2.features.vertexPipelineStoresAndAtomics == VK_TRUE;
     features_.samplerAnisotropy = sup2.features.samplerAnisotropy == VK_TRUE;
     features_.maxAnisotropy = features_.samplerAnisotropy ? props_.limits.maxSamplerAnisotropy : 1.0f;
 

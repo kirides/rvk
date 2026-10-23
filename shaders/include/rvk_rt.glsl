@@ -35,11 +35,13 @@ const uint RVK_RT_INSTANCED = 8u;
 const uint RVK_RT_NO_DEPTH_WRITE = 16u;  // a main-view solid draw of it had z writes off
 const uint RVK_RT_DEPTH_BIAS = 32u;      // a main-view draw of it had a depth bias
 const uint RVK_RT_SEGMENTED = 64u;       // per-triangle materials (segments: rvkRtApplySegment)
+const uint RVK_RT_DYNAMIC = 128u;        // a skinned draw's vertices captured this frame (world space, no normals)
 const uint RVK_RT_VIEW_MAIN = 0x10000u;
 const uint RVK_RT_VIEW_SHADOW = 0x20000u;
 // TLAS instance masks (abi.h kRtMask*)
 const uint RVK_RT_MASK_OPAQUE = 1u;
 const uint RVK_RT_MASK_ALPHA_TESTED = 2u;
+const uint RVK_RT_MASK_DYNAMIC = 4u;  // characters
 // RvkRtRecord.uvSet (abi.h kRtUv*)
 const uint RVK_RT_UV_SET_MASK = 3u;            // 0 = the vertex's TEXCOORD0, 1 = TEXCOORD1
 const uint RVK_RT_UV_APPROX = 4u;              // the pixel shader's coordinate is not affine in that set

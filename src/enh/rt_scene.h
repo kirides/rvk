@@ -67,6 +67,15 @@ public:
         keepContents_ = on;
         if (!on) contents_.clear();
     }
+    // Characters (M10 P3, docs/research/rtgi.md 6): the main view's skinned solid draws join the scene every frame while a
+    // consumer asks for them (and the GPU lets vertex shaders write buffers): their vertex shader's capture variant
+    // (d3d9::VariantSlot::Capture) writes the world positions + TEXCOORD0 into the frame's ring, the pass builds / refits one
+    // BLAS per draw from that (PREFER_FAST_BUILD | ALLOW_UPDATE) and adds it with an identity transform under the instance
+    // mask kRtMaskDynamic (rays can leave characters out: RVK_RT_TRACE_NO_DYNAMIC); records have no normals (geometric)
+    void setDynamic(const void* consumer, bool on);
+    bool dynamicSupported() const;
+    // the GLSL options of a vertex shader's capture variant (d3d9::VariantSlot::Capture); public for rvk_shadertool --capture
+    static bool captureOptions(const d3d9::Shader& s, shader::GlslOptions& o);
 
     // d3d9::DrawObserver
     bool observes(d3d9::draws::Kind kind, d3d9::scene::Phase phase) const override;
@@ -202,6 +211,41 @@ private:
     bool ensureScratch(VkDeviceSize bytes);
     void logStats(bool force);
     std::uint8_t viewBit(d3d9::scene::View v) const;
+    // characters (setDynamic)
+    void observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q);
+    void buildDynamic(VkCommandBuffer cmd, std::uint64_t frame);
+    void dropDynamic(bool all, std::uint64_t frame);
+    struct DynDraw {
+        std::uint64_t key = 0;
+        VkDeviceAddress capture = 0;   // the ring allocation: uvec4 header (slots) + 2 x vec4 per vertex index
+        VkDeviceAddress indices = 0;   // the draw's first index
+        std::uint32_t slots = 0;       // highest index + 1
+        std::uint32_t triangles = 0;
+        bool index32 = false;
+        bool built = false;            // its BLAS was built / refit this frame
+    };
+    struct DynBlas {
+        vk::rt::AccelerationStructure as;
+        std::uint32_t slots = 0, triangles = 0;
+        VkDeviceAddress indices = 0;
+        std::uint64_t lastFrame = 0;
+        std::uint32_t updates = 0;     // refits since the last full build
+        bool built = false;
+        std::uint32_t material = 0;    // RtMaterials id (a reference held)
+        std::uint64_t sig = 0, resolved = 0;
+        std::uint32_t id = 0;          // instance id (records, debug colours)
+        std::uint32_t maxIndex = 0;    // scanned once from the index buffer's CPU copy
+        bool scanned = false;
+    };
+    std::unordered_set<const void*> dynamicConsumers_;
+    bool dynamic_ = false;
+    bool captureRegistered_ = false;
+    std::vector<DynDraw> dyn_;  // this frame's captures
+    std::uint64_t dynFrame_ = 0;
+    std::unordered_map<std::uint64_t, DynBlas> dynBlas_;
+    vk::rt::AddressBuffer dynScratch_;
+    std::uint32_t nextDynId_ = 1u << 30;
+    std::uint64_t dynBuilt_ = 0, dynRefit_ = 0;  // interval counters
 
     d3d9::Device& dev_;
     rt::Limits limits_;
@@ -252,6 +296,7 @@ private:
         std::uint64_t compactSaved = 0;
         double buildCpuMs = 0.0, passCpuMs = 0.0, observeMs = 0.0, gpuMs = 0.0;
         std::uint64_t textured = 0, untextured = 0, cutOut = 0, segmented = 0, segments = 0, speedTree = 0;  // records of the last frame
+        std::uint64_t dynamic = 0;  // characters in the last frame's TLAS
         std::uint64_t engineSegments = 0, engineMerged = 0;
         std::uint64_t gpuSamples = 0;
     } iv_;

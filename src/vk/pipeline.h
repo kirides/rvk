@@ -15,6 +15,7 @@
 #include <span>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "vk/vk.h"
@@ -80,6 +81,9 @@ public:
     VkPipeline get(const PipelineDesc& desc, bool* created = nullptr);  // created: this call made a new pipeline
     // builds `desc` on a background thread unless it exists: pipelines known from earlier runs, before their first draw
     void prewarm(const PipelineDesc& desc);
+    // the same for draw-time requests that repeat every frame until the pipeline exists (shader variants of enhancements): a
+    // description is queued once
+    void prewarmOnce(const PipelineDesc& desc);
     // with libraries: compiles the shader's library now (pre-rasterization or fragment shader state); thread-safe
     void prepareShader(VkShaderModule module, VkShaderStageFlagBits stage);
     // writes the VkPipelineCache blob (at shutdown)
@@ -115,6 +119,13 @@ private:
     std::condition_variable prewarmCv_;
     std::deque<PipelineDesc> prewarmQueue_;
     bool prewarmQuit_ = false;
+    struct HashOf {
+        std::size_t operator()(const PipelineDesc& d) const;
+    };
+    struct EqOf {
+        bool operator()(const PipelineDesc& a, const PipelineDesc& b) const;
+    };
+    std::unordered_set<PipelineDesc, HashOf, EqOf> prewarmRequested_;  // prewarmOnce (under prewarmMutex_)
     std::atomic<std::uint64_t> prewarmed_{0};
     std::atomic<std::uint64_t> prewarmNs_{0};
 

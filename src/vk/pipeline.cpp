@@ -209,6 +209,17 @@ void PipelineCache::prewarm(const PipelineDesc& desc) {
     prewarmCv_.notify_one();
 }
 
+std::size_t PipelineCache::HashOf::operator()(const PipelineDesc& d) const { return Hash{}(d); }
+bool PipelineCache::EqOf::operator()(const PipelineDesc& a, const PipelineDesc& b) const { return Eq{}(a, b); }
+
+void PipelineCache::prewarmOnce(const PipelineDesc& desc) {
+    {
+        const std::lock_guard lock(prewarmMutex_);
+        if (!prewarmRequested_.insert(desc).second) return;
+    }
+    prewarm(desc);
+}
+
 void PipelineCache::prewarmWorker() {
     SetThreadDescription(GetCurrentThread(), L"rvk pipeline prewarm");
     std::unique_lock lock(prewarmMutex_);

@@ -1,0 +1,126 @@
+#version 460
+// GI probe update (M10 stage A, src/enh/gi.cpp, docs/research/rtgi.md 5): one workgroup per probe of the update list folds
+// its 64 rays (gi_trace.comp) into the probe: the radiance projected onto L2 spherical harmonics (uniform directions:
+// 4 pi / N per ray), convolved with the cosine lobe in the engine's units (irradiance / pi: A0 = 1, A1 = 2/3, A2 = 1/4), stored
+// as the engine's 7 ambient registers (CalcAmbientLightComplex's layout, rtgi.md 1) and blended with the probe's history
+// (hysteresis; a probe new at its cell takes the rays as they are, then ramps up). The 8 x 8 octahedral depth moments
+// (mean, mean^2 of the distance in cells, a cosine-power lobe per texel) feed the lookups' visibility test. A probe that
+// sees mostly back faces is inside geometry: flagged, never used by lookups.
+
+#define RVK_PASS_SHADER 1
+#include "rvk_abi.glsl"
+#include "rvk_gi.glsl"
+#include "gi_common.glsl"
+
+layout(local_size_x = 64) in;
+
+// the writable views of the probe data (rvk_gi.glsl declares them read-only for the lookups)
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer GiProbesRW {
+    RvkGiProbe p[];
+};
+layout(buffer_reference, std430, buffer_reference_align = 8) buffer GiDepthRW {
+    vec2 m[];
+};
+
+shared vec3 sRad[GI_RAYS];
+shared vec4 sDir[GI_RAYS];  // xyz direction, w distance in cells (negative: back face)
+shared float sCoef[27];     // 9 coefficients x rgb
+shared uint sBack;
+shared ivec4 sKey;
+
+void main() {
+    GiPassParams p = GiPassParams(pc.params);
+    uint item = gl_WorkGroupID.x;
+    if (item >= p.volume.z) return;
+    uint t = gl_LocalInvocationID.x;
+    RvkGiVolume v = RvkGiVolume(p.volume.xy);
+    uint e = GiList(p.lists.xy).e[item];
+    uint c = e >> 24;
+    uint slot = e & 0xFFFFFFu;
+    ivec3 dims = ivec3(v.dims.xyz);
+    ivec3 cell = rvkGiCellOfSlot(dims, v.cascade[c].origin.xyz, slot);
+    float invS = v.cascade[c].spacing.y;
+    float cap = v.cascade[c].spacing.z;
+    uint index = c * v.info.z + slot;
+
+    vec4 ray = GiRays(p.lists.zw).r[item * GI_RAYS + t];
+    sRad[t] = ray.rgb;
+    float dc = ray.w < 0.0 ? -min(-ray.w * invS, cap) : min(ray.w * invS, cap);
+    sDir[t] = vec4(giRayDir(p, t), dc);
+    if (t == 0u) {
+        sBack = 0u;
+        sKey = GiProbesRW(v.data.xy).p[index].key;
+    }
+    barrier();
+    if (ray.w < 0.0) atomicAdd(sBack, 1u);
+
+    // SH projection: invocation t < 27 sums coefficient t / 3 of channel t % 3 over the rays
+    if (t < 27u) {
+        uint k = t / 3u, ch = t % 3u;
+        float sum = 0.0;
+        for (uint i = 0u; i < GI_RAYS; ++i) {
+            vec3 d = sDir[i].xyz;
+            float y;
+            switch (k) {
+            case 0u: y = 0.282095; break;
+            case 1u: y = 0.488603 * d.y; break;
+            case 2u: y = 0.488603 * d.z; break;
+            case 3u: y = 0.488603 * d.x; break;
+            case 4u: y = 1.092548 * d.x * d.y; break;
+            case 5u: y = 1.092548 * d.y * d.z; break;
+            case 6u: y = 0.315392 * (3.0 * d.z * d.z - 1.0); break;
+            case 7u: y = 1.092548 * d.x * d.z; break;
+            default: y = 0.546274 * (d.x * d.x - d.y * d.y); break;
+            }
+            sum += sRad[i][ch] * y;
+        }
+        // 4 pi / N (uniform directions) x the cosine lobe's band factor in acc units (irradiance / pi)
+        float band = k == 0u ? 1.0 : k < 4u ? 2.0 / 3.0 : 0.25;
+        sCoef[t] = sum * (12.566371 / float(GI_RAYS)) * band;
+    }
+    barrier();
+
+    bool fresh = sKey.xyz != cell || (sKey.w & int(RVK_GI_PROBE_VALID)) == 0;
+    uint count = fresh ? 0u : (uint(sKey.w) >> RVK_GI_PROBE_COUNT_SHIFT) & 0xFFu;
+    if (t == 0u) {
+        // the engine's layout per channel: (L1x, L1y, L1z, L0 - C7), (C6, C5, 3 C7, C4) for (xy, yz, zz, zx), C8 for x^2 - y^2
+        vec4 regs[7];
+        for (uint ch = 0u; ch < 3u; ++ch) {
+            float a0 = sCoef[0u * 3u + ch], a1m1 = sCoef[1u * 3u + ch], a10 = sCoef[2u * 3u + ch], a11 = sCoef[3u * 3u + ch];
+            float a2m2 = sCoef[4u * 3u + ch], a2m1 = sCoef[5u * 3u + ch], a20 = sCoef[6u * 3u + ch], a21 = sCoef[7u * 3u + ch];
+            float a22 = sCoef[8u * 3u + ch];
+            float L0 = 0.282095 * a0;
+            float C7 = 0.315392 * a20;
+            regs[ch] = vec4(0.488603 * a11, 0.488603 * a1m1, 0.488603 * a10, L0 - C7);
+            regs[3u + ch] = vec4(1.092548 * a2m2, 1.092548 * a2m1, 3.0 * C7, 1.092548 * a21);
+            regs[6][ch] = 0.546274 * a22;
+        }
+        regs[6].w = 0.0;
+        float alpha = fresh ? 1.0 : max(1.0 - p.blend.x, 1.0 / float(count + 1u));
+        GiProbesRW probes = GiProbesRW(v.data.xy);
+        for (int k = 0; k < 7; ++k) {
+            vec4 old = fresh ? regs[k] : probes.p[index].reg[k];
+            probes.p[index].reg[k] = mix(old, regs[k], alpha);
+        }
+        int flags = int(RVK_GI_PROBE_VALID) | (float(sBack) > p.blend.w * float(GI_RAYS) ? int(RVK_GI_PROBE_INSIDE) : 0) |
+                    int(min(count + 1u, 255u) << RVK_GI_PROBE_COUNT_SHIFT);
+        probes.p[index].key = ivec4(cell, flags);
+    }
+
+    // depth moments: invocation t = texel t of the 8 x 8 octahedral map
+    vec3 texelDir = rvkGiOctDecode((vec2(float(t % RVK_GI_DEPTH_RES), float(t / RVK_GI_DEPTH_RES)) + 0.5) / float(RVK_GI_DEPTH_RES));
+    float wsum = 0.0, m1 = 0.0, m2 = 0.0;
+    for (uint i = 0u; i < GI_RAYS; ++i) {
+        float w = pow(max(dot(texelDir, sDir[i].xyz), 0.0), p.blend.z);
+        float d = abs(sDir[i].w);
+        wsum += w;
+        m1 += w * d;
+        m2 += w * d * d;
+    }
+    GiDepthRW depth = GiDepthRW(v.data.zw);
+    uint di = index * RVK_GI_DEPTH_RES * RVK_GI_DEPTH_RES + t;
+    vec2 moments = wsum > 1e-5 ? vec2(m1, m2) / wsum : vec2(cap, cap * cap);
+    float alphaD = fresh ? 1.0 : max(1.0 - p.blend.y, 1.0 / float(count + 1u));
+    vec2 old = fresh ? moments : depth.m[di];
+    depth.m[di] = mix(old, moments, alphaD);
+}

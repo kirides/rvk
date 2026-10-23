@@ -46,6 +46,7 @@ struct DeviceFeatures {
     bool memoryBudget = false;
     bool deviceFault = false;
     bool samplerAnisotropy = false;
+    bool vertexStores = false;    // vertexPipelineStoresAndAtomics: vertex shaders write buffers (enh/gi: skinned positions)
     float maxAnisotropy = 1.0f;
     bool hostQueryReset = false;  // vkResetQueryPool from the host (GPU timestamps of [debug] perf)
     float timestampPeriod = 0.0f; // ns per timestamp tick; 0 = the queue cannot write timestamps

@@ -302,6 +302,13 @@ struct RendererSettings {
     Setting* shadowsMapSize = nullptr;    // shadows.map_size: "auto" (4096 with enhanced shadows, else the game's), "game", "1024", "2048", "4096"
     Setting* shadowsRange = nullptr;      // shadows.range: metres, 0 = auto (100 with enhanced shadows, else the game's)
     Setting* shadowsSplit = nullptr;      // shadows.split: 0 (logarithmic) .. 1 (uniform) cascade splits with an overridden range
+    // ray-traced global illumination (enh/gi.h, docs/research/rtgi.md; needs RayQuery)
+    Setting* giEnabled = nullptr;         // gi.enabled
+    Setting* giQuality = nullptr;         // gi.quality: "low", "medium", "high" (probes traced per frame)
+    Setting* giStrength = nullptr;        // gi.strength: 0 = the engine's ambient .. 1 = GI
+    Setting* giLightmaps = nullptr;       // gi.lightmaps: "keep", "replace"
+    Setting* giCharacters = nullptr;      // gi.characters: skinned draws in the RT scene (enh/rt_scene)
+    Setting* giDebug = nullptr;           // gi.debug: "off", "irradiance", "cascades"
     // detail distances (engine/lod.h, docs/research/lod.md): multipliers, 1 = the game's
     Setting* lodTrees = nullptr;          // lod.trees: SpeedTree LOD + billboard fade distances
     Setting* lodMeshes = nullptr;         // lod.meshes: mesh LOD ranges (eCMesh_PS)

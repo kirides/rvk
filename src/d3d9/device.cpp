@@ -119,6 +119,13 @@ VkDeviceAddress Device::frameBlockAddress() {
         x.rtInstances = rtScene_.instances;
         x.rtRecordCount = rtScene_.recordCount;
     }
+    if (!giHeader_.empty()) {
+        const vk::RingAlloc g = frames_.allocate(giHeader_.size(), 16);
+        if (g.ptr != nullptr) {
+            std::memcpy(g.ptr, giHeader_.data(), giHeader_.size());
+            x.gi = g.address;
+        }
+    }
     const vk::RingAlloc a = frames_.allocate(sizeof(shader::abi::FrameBlock), 16);
     scene::fillFrameBlock(*static_cast<shader::abi::FrameBlock*>(a.ptr), camera_, lastCamera_, x);
     frameAddr_ = a.address;
@@ -492,6 +499,7 @@ void Device::destroy() {
     if (!created_) {
         return;
     }
+    stopVariantWorker();
     frames_.waitIdle();
     processReleases();
     backBuffer_.reset();
@@ -509,6 +517,9 @@ void Device::destroy() {
                     vkDestroyShaderModule(ctx_.device(), *m, nullptr);
                     *m = VK_NULL_HANDLE;
                 }
+            }
+            for (auto& m : s->variants) {
+                if (const VkShaderModule v = m.exchange(VK_NULL_HANDLE); v != VK_NULL_HANDLE) vkDestroyShaderModule(ctx_.device(), v, nullptr);
             }
         }
         shaders_.clear();
@@ -764,6 +775,7 @@ void Device::present() {
     firings_.endFrame();
     shadowDepthMaps_ = 0;
     draws_.endFrame();
+    captured_.clear();
     lastRecord_ = nullptr;
     lastCamera_ = camera_;
     camera_.advance();
@@ -1089,6 +1101,82 @@ VkShaderModule Device::variantModule(const Shader& s, const shader::GlslOptions&
         }
     }
     return vk::createShaderModule(ctx_, spirv);
+}
+
+// ---- background variants (VariantSlot; enh/gi, enh/rt_scene) ----
+
+void Device::setVariantProvider(VariantSlot slot, VariantProvider provider) {
+    const std::lock_guard lock(variantMutex_);
+    variantProviders_[static_cast<std::size_t>(slot)] = std::move(provider);
+}
+
+VkShaderModule Device::variant(const std::shared_ptr<Shader>& s, VariantSlot slot) {
+    const std::size_t i = static_cast<std::size_t>(slot);
+    const std::uint8_t state = s->variantState[i].load(std::memory_order_acquire);
+    if (state == 2) return s->variants[i].load(std::memory_order_acquire);
+    if (state != 0) return VK_NULL_HANDLE;
+    s->variantState[i].store(1, std::memory_order_release);
+    {
+        const std::lock_guard lock(variantMutex_);
+        if (!variantProviders_[i].options) {
+            s->variantState[i].store(3);
+            return VK_NULL_HANDLE;
+        }
+        variantJobs_.push_back({s, slot});
+        if (variantThreads_.empty()) {
+            variantStop_ = false;
+            for (int t = 0; t < 3; ++t) variantThreads_.emplace_back([this] { variantWorker(); });
+        }
+    }
+    variantCv_.notify_one();
+    return VK_NULL_HANDLE;
+}
+
+// translates + compiles the queued variants (SPIR-V disk cache as variantModule), in request order
+void Device::variantWorker() {
+    SetThreadDescription(GetCurrentThread(), L"rvk shader variants");
+    for (;;) {
+        VariantJob job;
+        VariantProvider provider;
+        {
+            std::unique_lock lock(variantMutex_);
+            variantCv_.wait(lock, [this] { return variantStop_ || !variantJobs_.empty(); });
+            if (variantStop_) return;
+            job = std::move(variantJobs_.front());
+            variantJobs_.pop_front();
+            provider = variantProviders_[static_cast<std::size_t>(job.slot)];
+        }
+        const std::size_t i = static_cast<std::size_t>(job.slot);
+        shader::GlslOptions o;
+        if (!provider.options || !provider.options(*job.shader, o)) {
+            job.shader->variantState[i].store(3, std::memory_order_release);
+            continue;
+        }
+        const VkShaderModule m = variantModule(*job.shader, o, std::format("{}_t{}", provider.tag, kTranslatorVersion));
+        if (m == VK_NULL_HANDLE) {
+            ++variantsFailed_;
+            spdlog::warn("d3d9: {} variant of shader {:016x} failed (the draws keep the engine's shader)", provider.tag, job.shader->hash);
+            job.shader->variantState[i].store(3, std::memory_order_release);
+            continue;
+        }
+        ++variantsBuilt_;
+        job.shader->variants[i].store(m, std::memory_order_release);
+        job.shader->variantState[i].store(2, std::memory_order_release);
+    }
+}
+
+void Device::stopVariantWorker() {
+    {
+        const std::lock_guard lock(variantMutex_);
+        variantStop_ = true;
+        for (VariantJob& j : variantJobs_) j.shader->variantState[static_cast<std::size_t>(j.slot)].store(0);
+        variantJobs_.clear();
+    }
+    variantCv_.notify_all();
+    for (std::thread& t : variantThreads_) {
+        if (t.joinable()) t.join();
+    }
+    variantThreads_.clear();
 }
 
 void Device::trackLive(Texture* texture) {

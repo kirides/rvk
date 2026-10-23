@@ -20,6 +20,15 @@
 
 const uint RVK_RT_TRACE_OPAQUE = 1u;       // alpha-tested instances count as solid (cheap tier: no candidate loop work)
 const uint RVK_RT_TRACE_NO_CUTOUTS = 2u;   // alpha-tested instances are left out (cull mask)
+const uint RVK_RT_TRACE_NO_DYNAMIC = 4u;   // characters are left out (cull mask)
+
+// the cull mask of RVK_RT_TRACE_* flags
+uint rvkRtTraceMask(uint flags) {
+    uint mask = 0xFFu;
+    if ((flags & RVK_RT_TRACE_NO_CUTOUTS) != 0u) mask &= ~RVK_RT_MASK_ALPHA_TESTED;
+    if ((flags & RVK_RT_TRACE_NO_DYNAMIC) != 0u) mask &= ~RVK_RT_MASK_DYNAMIC;
+    return mask;
+}
 
 struct RvkRtHit {
     bool hit;
@@ -43,7 +52,7 @@ RvkRtHit rvkRtTraceClosest(RvkFrame f, vec3 origin, vec3 dir, float tMin, float 
     h.objectToWorld = mat4x3(1.0);
     h.worldToObject = mat4x3(1.0);
     if (!rvkRtValid(f)) return h;
-    uint mask = (flags & RVK_RT_TRACE_NO_CUTOUTS) != 0u ? RVK_RT_MASK_OPAQUE : 0xFFu;
+    uint mask = rvkRtTraceMask(flags);
     uint rayFlags = (flags & RVK_RT_TRACE_OPAQUE) != 0u ? gl_RayFlagsOpaqueEXT : gl_RayFlagsNoneEXT;
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, accelerationStructureEXT(rvkRtTlas(f)), rayFlags, mask, origin, tMin, dir, tMax);
@@ -73,7 +82,7 @@ RvkRtHit rvkRtTraceClosest(RvkFrame f, vec3 origin, vec3 dir, float tMin, float 
 // candidates as in rvkRtTraceClosest (RVK_RT_TRACE_OPAQUE: solid, the cheap shadow)
 float rvkRtVisibility(RvkFrame f, vec3 origin, vec3 dir, float tMin, float tMax, float coneWidth0, float coneSpread, uint flags) {
     if (!rvkRtValid(f)) return 1.0;
-    uint mask = (flags & RVK_RT_TRACE_NO_CUTOUTS) != 0u ? RVK_RT_MASK_OPAQUE : 0xFFu;
+    uint mask = rvkRtTraceMask(flags);
     uint rayFlags = gl_RayFlagsTerminateOnFirstHitEXT | ((flags & RVK_RT_TRACE_OPAQUE) != 0u ? gl_RayFlagsOpaqueEXT : gl_RayFlagsNoneEXT);
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, accelerationStructureEXT(rvkRtTlas(f)), rayFlags, mask, origin, tMin, dir, tMax);
