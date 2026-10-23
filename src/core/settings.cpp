@@ -751,6 +751,19 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .unmetValue = 0,
     });
 
+    r.highFps = &reg.add({
+        .key = "compat.high_fps",
+        .label = "High Fps compatibility (Vaana)",
+        .category = "Gameplay",
+        .tab = kTabSystem,
+        .description = "Fixes for gameplay bugs at high frame rates: the hero stopping in mid-air during long falls, "
+                       "climbing at over 120 fps, and far too much thunder in storms. Ported from VaanaCZ's Risen FPS Patch "
+                       "(github.com/VaanaCZ/Risen-FPS-Patch). Off: the game's own behaviour.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::NoAB,
+    });
+
     // ---- Debug tab (debug mode) ----
     r.abKey = &reg.add({
         .key = "overlay.ab_key",

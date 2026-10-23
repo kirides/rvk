@@ -24,6 +24,7 @@
 #include "core/settings.h"
 #include "core/stall_sampler.h"
 #include "engine/scene_hooks.h"
+#include "engine/high_fps.h"
 #include "engine/lod.h"
 #include "engine/shadow_maps.h"
 #include "engine/symbols.h"
@@ -440,6 +441,8 @@ void onProcessAttach(void* module) {
         engine::lod::install();     // detail distances (docs/research/lod.md)
         engine::window::install();  // borderless fullscreen (docs/research/window-mode.md)
     }
+    // gameplay fixes for high frame rates (any mode: not rendering; docs/research/fps-limit.md 12)
+    if (ok) engine::highfps::install();
     // eCApplication::Draw: the Gui phase (Vulkan mode), the debug snapshot + tool-API self-test at fixed Draw calls (any mode) and
     // the scripted key commands outside Vulkan mode
     parseDrawCommands();

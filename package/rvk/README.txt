@@ -22,5 +22,9 @@ QUIRKS
     in rvk\cache.
   - To play with the game's own D3D9 renderer, set mode = "passthrough" in rvk\config.toml.
 
+CREDITS
+  High fps gameplay fixes (falling, climbing, thunder; System tab, "High Fps compatibility (Vaana)"):
+  ported from VaanaCZ's Risen FPS Patch (VaanaCZ and Auronen), https://github.com/VaanaCZ/Risen-FPS-Patch
+
 PROBLEMS
   Attach rvk\rvk.log (written each start) to bug reports, plus the build line below.

@@ -166,6 +166,12 @@
     /* void eCFrustumDatabase::UpdateFromAppTemplate() (0x6708a0): copies eCRenderSystemAdmin's caps template (+0x70..0x97)   \
        into the database (+0x1590..), among them the view range factor +0x15b4 (always 1.0 in the game) */                     \
     X(frustumUpdateFromApp, L"Engine.dll", "?UpdateFromAppTemplate@eCFrustumDatabase@@QEAAXXZ", false)                        \
+    /* ---- high fps compatibility (engine/high_fps.*, docs/research/fps-limit.md 12): float eCTimer::GetFrameTimeInSeconds()  \
+       const (0x4ced50); Game.dll gCCharacterMovement_PS::GetCurrentPosition (0x8dccb0, bCVector by value) and                 \
+       SetCurrentPosition(bCVector const&, bool, bool) (0x8edfb0) ---- */                                                      \
+    X(timerFrameTimeSeconds, L"Engine.dll", "?GetFrameTimeInSeconds@eCTimer@@QEBAMXZ", false)                                   \
+    X(movementGetPosition, L"Game.dll", "?GetCurrentPosition@gCCharacterMovement_PS@@QEBA?AVbCVector@@XZ", false)               \
+    X(movementSetPosition, L"Game.dll", "?SetCurrentPosition@gCCharacterMovement_PS@@IEAAXAEBVbCVector@@_N1@Z", false)           \
     X(timerGetGameTime, L"Engine.dll", "?GetGameTime@eCTimer@@QEBAKXZ", false)                                                    \
     X(appGetAppState, L"Engine.dll", "?GetAppState@eCApplication@@QEBAKXZ", false)                                              \
     /* ---- the material graph (engine/materials.*, docs/research/rt-albedo-facts.md 1): eCShaderBase* eCShaderBase::         \

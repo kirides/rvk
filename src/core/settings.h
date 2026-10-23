@@ -303,6 +303,7 @@ struct RendererSettings {
     Setting* lodTrees = nullptr;          // lod.trees: SpeedTree LOD + billboard fade distances
     Setting* lodMeshes = nullptr;         // lod.meshes: mesh LOD ranges (eCMesh_PS)
     Setting* lodView = nullptr;           // lod.view: the view range of objects (eCFrustumDatabase view range factor)
+    Setting* highFps = nullptr;           // compat.high_fps: the high frame rate gameplay fixes (engine/high_fps.h)
 };
 // hotkey names of overlay.toggle_key / overlay.ab_key ("none" disables)
 const std::vector<std::string>& hotkeyNames();
