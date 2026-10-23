@@ -228,6 +228,7 @@ bool Device::create(const DeviceOptions& options) {
     if (!pipelines_.create(ctx_, bindless_.pipelineLayout(), pipelineFile, options.pipelineLibraries)) {
         return false;
     }
+    generated_.create(ctx_, frames_, bindless_.pipelineLayout());  // optional: batched draws as device-generated commands
     loadPipelineKeys();
     if (!options.offscreen && !swapchain_.create(ctx_, options.window, options.width, options.height, options.vsync)) {
         return false;
@@ -540,6 +541,7 @@ void Device::destroy() {
     }
     swapchain_.destroy();
     gpuTimer_.destroy();
+    generated_.destroy();
     pipelines_.destroy();
     passes_ = inject::Registry{};
     transients_.destroy();  // retired: frames_ destroys them
@@ -1383,6 +1385,7 @@ void Device::clear(std::uint32_t flags, std::uint32_t color, float z, std::uint3
         ++n;
     }
     if (n > 0) {
+        flushBatch();  // the draws batched before the clear
         vkCmdClearAttachments(frames_.cmd(), n, atts, 1, &rect);
     }
 }

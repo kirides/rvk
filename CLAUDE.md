@@ -77,6 +77,12 @@ character, log or map page is open (`engine/menu_state.*`, GUI2 page predicates)
 engine loads on the presenting thread, one present per load step: any wait, also vsync's FIFO, lengthens the load; at most
 30 loading frames/s are presented, the rest are not shown; hidden `debug.pace_loading=true` = the old behaviour for A/B). rvk.log `engine: menu state ...` per change. Scenario `rvk_menufps`:
 fps in world / ESC menu / character screen + quick-load times (works with `-NoRenderer` too).
+CPU performance (docs/research/performance.md 10-12): `-CpuProfile` (`[debug] cpu_profile`: a sampled flat profile of the
+engine thread between presents, `diag: profile` lines; our DLL's unnamed functions: `llvm-symbolizer
+--obj=build\RelWithDebInfo\d3d9.dll 0x180000000+<start>`); `-QuickSave <save>` + scenario `rvk_perfsave` (loads that savegame,
+holds the view). Static meshes live in `vk::MeshArena`; the opaque passes' draws are batched and grouped by pipeline
+(`debug.batch_draws`, default on; `debug.generated_draws` = runs as VK_EXT_device_generated_commands, default off: no gain
+measured); `perf:` lines count batched / generated draws and pipeline binds.
 Player settings + overlay (docs/research/overlay.md): every run writes `bin/rvk/settings.toml` = the **test baseline**
 (`overlay.debug_mode` on; water, enhanced shadows and their qualities at the old parity defaults, since the player
 defaults turn them on) + `-Setting 'vulkan.max_fps=60','vulkan.vsync=off'`; `-PlayerDefaults` = the shipped defaults instead;

@@ -213,6 +213,20 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         if (!rs.tintDraws->isDefault()) applyTint(*rs.tintDraws);
         reg.onChange(*rs.tintDraws, applyTint, this);
     }
+    if (rs.batchDraws != nullptr) {
+        dev_.setBatching(rs.batchDraws->asBool());
+        reg.onChange(*rs.batchDraws, [this](const settings::Setting& s) {
+            dev_.setBatching(s.asBool());
+            spdlog::info("hal: settings: batch opaque draws {}", s.asBool() ? "on" : "off");
+        }, this);
+    }
+    if (rs.generatedDraws != nullptr) {
+        dev_.setGeneratedDraws(rs.generatedDraws->asBool());
+        reg.onChange(*rs.generatedDraws, [this](const settings::Setting& s) {
+            dev_.setGeneratedDraws(s.asBool());
+            spdlog::info("hal: settings: generated draws {}", s.asBool() ? "on" : "off");
+        }, this);
+    }
     if (rs.drawRecords != nullptr) {
         dev_.setDrawRecords(rs.drawRecords->asBool());
         reg.onChange(*rs.drawRecords, [this](const settings::Setting& s) {
@@ -1112,9 +1126,12 @@ void HalDevice::logPerf(d3d9::PerfStats p) {
     // enhancement plumbing (docs/research/injection.md): FrameBlock uploads, injection points that ran passes, their CPU time
     spdlog::info("perf: frame blocks {:.2f} per frame; injected passes: {:.2f} points per frame, {:.3f} ms per frame (CPU recording)",
                  static_cast<double>(p.frameBlocks) / n, static_cast<double>(p.injections) / n, p.injectMs / n);
-    spdlog::info("perf: per frame {:.0f} draws, {:.1f} render passes, {:.0f} pipeline binds; ring {:.0f} KiB, texture uploads {:.0f} KiB, "
-                 "buffer uploads {:.0f} KiB; in the interval: {} pipelines built ({:.1f} ms), {} shaders translated ({} compiled, {:.1f} ms)",
-                 static_cast<double>(p.draws) / n, static_cast<double>(p.renderPasses) / n, static_cast<double>(p.pipelineBinds) / n,
+    spdlog::info("perf: per frame {:.0f} draws ({:.0f} batched in {:.1f} batches, {:.0f} of them generated in {:.1f} runs), {:.1f} render "
+                 "passes, {:.0f} pipeline binds; ring {:.0f} KiB, texture uploads {:.0f} KiB, buffer uploads {:.0f} KiB; in the interval: {} "
+                 "pipelines built ({:.1f} ms), {} shaders translated ({} compiled, {:.1f} ms)",
+                 static_cast<double>(p.draws) / n, static_cast<double>(p.batchedDraws) / n, static_cast<double>(p.batches) / n,
+                 static_cast<double>(p.generatedDraws) / n, static_cast<double>(p.generatedRuns) / n,
+                 static_cast<double>(p.renderPasses) / n, static_cast<double>(p.pipelineBinds) / n,
                  static_cast<double>(p.ringBytes) / n / 1024.0, static_cast<double>(p.textureUploadBytes) / n / 1024.0,
                  static_cast<double>(p.bufferUploadBytes) / n / 1024.0, p.pipelinesBuilt, p.pipelineMs, p.shadersBuilt, p.shadersCompiled,
                  p.shaderMs);

@@ -254,3 +254,38 @@ Batching options measured on this machine (RX 7900 XTX, driver 26.10.1): `VK_EXT
 (`supportedIndirectCommandsShaderStagesPipelineBinding` none); the engine's order gives runs of ~2.3 draws per pipeline, so
 useful batches need the opaque passes' draws grouped by pipeline (order-independent under the depth test except coplanar
 surfaces).
+
+## 12. Batched opaque draws, device-generated commands (2026-10-23)
+
+Every draw is computed into a `Device::DrawPacket` (pipeline, `VertexInputValues`, `DynamicStateValues`, push constants,
+index binding, draw parameters; `prepareDraw` + the draw call) and recorded by `applyPacket` through the per-command-buffer
+caches. **Batchable** packets: kinds StaticMesh / InstancedMesh / SpeedTree / Skinned in the main view's z pre-pass and
+solid pass and the shadow views' depth pass, not replaced, not tinted, indexed, no blending, depth test with LESS /
+LESS_EQUAL / EQUAL, no stencil. They wait in `batch_`; anything else that records into the frame's command buffer flushes
+first (a draw that is not batchable, `endRendering`, `clear`), so the order between batched and other draws is kept.
+`flushBatch` groups the batch by pipeline (stable: the engine's order within a pipeline, groups in the order their pipelines
+first appeared). Only surfaces at exactly the same depth can show a different winner. `debug.batch_draws` (Debug tab, default
+on) switches it off.
+
+Runs of draws with identical state (pipeline, vertex input, dynamic state, index binding; >= 4 draws) can be recorded as one
+`vkCmdExecuteGeneratedCommandsEXT` (`vk::GeneratedDraws`: tokens push constants 48 B + indexed draw, 68-byte sequences written
+into the ring; per-slot preprocess buffers; no execution set: the device has no pipeline switching in generated commands).
+`debug.generated_draws`, **default off**: it validates clean, but measured without a gain on this driver.
+
+A/B at the savegame (2x, one 60 s hold, switches flipped at run time; `perf:` lines):
+
+| mode | fps | CPU frame | pipeline binds |
+|---|---|---|---|
+| batching + generated draws (~1100 of ~1950 draws in ~80 executions) | 127-128 | 7.47-7.56 ms | ~410 |
+| batching only | 126-128 | 7.51-7.61 ms | ~410 |
+| neither | 122-123 | 7.79-7.86 ms | ~825 |
+
+The grouping's gain is the halved pipeline binds (the AMD driver's most expensive per-draw call); recording a push constant +
+indexed draw directly is already cheap, so generating them on the GPU saves nothing measurable. `-Validation` clean;
+rvkcompare against the stored reference: 19 PASS, harbour_docks WARN (a wave-splash particle effect at the quay that varies
+between runs; particles are not batched).
+
+Totals at the savegame, 2x object draw distance, `-Perf`: **103 -> ~127 fps** (CPU frame 9.4 -> 7.5 ms) over sections 10-12.
+What remains: Engine.dll + SharedBase ~4.5 ms (culling, render ops, material constants: the engine's, single-threaded), our
+per-draw bookkeeping ~1.5 us per draw (`prepareDraw`: classification, replacers / observers, the RT scene's sightings, draw
+records, constants and draw block).

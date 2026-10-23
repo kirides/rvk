@@ -272,6 +272,8 @@ struct RendererSettings {
     Setting* tintDraws = nullptr;    // debug.tint_draws: "off", "kind", "pass" (d3d9/draws.h TintMode)
     Setting* drawRecords = nullptr;  // debug.draw_records: per-frame draw records (hidden; the histogram is always on)
     Setting* paceLoading = nullptr;  // debug.pace_loading: loading screens wait for the pacer (hidden; load-time A/B)
+    Setting* batchDraws = nullptr;   // debug.batch_draws: the opaque passes' draws grouped by pipeline (d3d9::Device::setBatching)
+    Setting* generatedDraws = nullptr;  // debug.generated_draws: batch runs as device-generated commands (setGeneratedDraws)
     Setting* injectView = nullptr;   // debug.inject_view: "off", "depth", "tint" (enh/debug_view.h, an injected pass)
     Setting* rtAllow = nullptr;      // rt.allow: enable the ray tracing extensions at device creation (restart)
     Setting* rtReflections = nullptr; // rt.reflections: "off", "low", "medium", "high" (the water's ray-traced reflections, needs RayQuery)

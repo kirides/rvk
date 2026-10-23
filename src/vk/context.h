@@ -51,6 +51,11 @@ struct DeviceFeatures {
     float timestampPeriod = 0.0f; // ns per timestamp tick; 0 = the queue cannot write timestamps
     bool pipelineStatistics = false;  // VK_KHR_pipeline_executable_properties enabled (ContextOptions::pipelineStatistics)
     bool fullScreenExclusive = false; // VK_EXT_full_screen_exclusive (+ instance VK_KHR_get_surface_capabilities2) enabled
+    // VK_EXT_device_generated_commands (+ VK_KHR_maintenance5) enabled, with push constants in vertex + fragment stages: the
+    // batched draws (d3d9 Device::flushBatch, docs/research/performance.md 12)
+    bool deviceGeneratedCommands = false;
+    std::uint32_t dgcMaxSequences = 0;
+    std::uint32_t dgcMaxStride = 0;
     RayTracingFeatures rayTracing;
 };
 

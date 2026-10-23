@@ -37,6 +37,7 @@
 #include "vk/context.h"
 #include "vk/formats.h"
 #include "vk/frames.h"
+#include "vk/generated_draws.h"
 #include "vk/gputimer.h"
 #include "vk/image.h"
 #include "vk/mesh_arena.h"
@@ -451,6 +452,10 @@ struct PerfStats {
     std::uint64_t draws = 0;
     std::uint64_t renderPasses = 0;
     std::uint64_t pipelineBinds = 0;
+    std::uint64_t batchedDraws = 0;        // draws recorded through a batch (flushBatch)
+    std::uint64_t batches = 0;             // batches recorded
+    std::uint64_t generatedDraws = 0;      // of the batched draws, recorded as device-generated commands
+    std::uint64_t generatedRuns = 0;       // their executions
     std::uint64_t ringBytes = 0;           // transient ring memory handed out (constants, dynamic buffers, staging)
     std::uint64_t textureUploadBytes = 0;  // texel bytes copied to images
     std::uint64_t bufferUploadBytes = 0;   // bytes copied into dynamic-buffer ring copies / static buffers
@@ -561,6 +566,12 @@ public:
     bool vsync() const { return options_.vsync; }
     // present-rate cap (0 = the refresh rate with vsync, none without); applies at the next present
     void setMaxFps(double fps);
+    // the opaque passes' draws grouped by pipeline (vulkan.batch_draws, docs/research/performance.md 12); applies from the next
+    // draw (a pending batch is recorded first)
+    void setBatching(bool on);
+    bool batching() const { return batching_; }
+    // runs of a batch as device-generated commands when the device has them (debug.generated_draws)
+    void setGeneratedDraws(bool on) { generatedOn_ = on; }
     double maxFps() const { return options_.maxFps; }
     // a further cap while a menu page is open (0 = none; the HAL sets it every present from engine/menu_state.h); a change
     // applies at the next present
@@ -774,8 +785,67 @@ private:
     VkShaderModule tintModule(Shader& ps);  // the tint variant of a pixel shader (null when it fails to build)
     VkShaderModule lodModule(Shader& vs);   // the billboard fade variant of a vertex shader (null when it fails to build)
     VkShaderModule variantModule(const Shader& s, const shader::GlslOptions& options, std::string_view tag);
-    bool bindVertexInput(vk::PipelineDesc& pd);
-    void setDynamicState(std::uint32_t primitiveType);
+    // A draw's recording state, computed by prepareDraw / the draw call and recorded by applyPacket: now, or later in a
+    // batch (docs/research/performance.md 12: the opaque passes' draws grouped by pipeline)
+    struct VertexInputValues {
+        std::uint32_t bufferCount = 0;
+        VkBuffer buffers[vk::kMaxVertexBindings]{};
+        VkDeviceSize offsets[vk::kMaxVertexBindings]{};
+        bool dynamicLayout = false;  // VK_EXT_vertex_input_dynamic_state: the layout below is recorded, not in the pipeline
+        std::uint32_t bindingCount = 0;
+        std::uint32_t attributeCount = 0;
+        vk::VertexBinding bindings[vk::kMaxVertexBindings]{};
+        vk::VertexAttribute attributes[vk::kMaxVertexAttributes]{};
+        std::int32_t vertexShift = 0;  // vertexOffset / firstVertex of a per-vertex stream bound at offset 0 (mesh arena)
+    };
+    struct DynamicStateValues {
+        VkViewport viewport{};
+        VkRect2D scissor{};
+        VkCullModeFlags cull = 0;
+        VkPrimitiveTopology topology{};
+        VkBool32 depthTest = 0;
+        VkBool32 depthWrite = 0;
+        VkCompareOp depthCompare{};
+        VkBool32 stencilTest = 0;
+        VkStencilOp stencilFront[3]{};
+        VkCompareOp stencilFrontCompare{};
+        VkStencilOp stencilBack[3]{};
+        VkCompareOp stencilBackCompare{};
+        std::uint32_t stencilMasks[3]{};  // compare, write, reference
+        VkBool32 depthBiasEnable = 0;
+        float depthBias[2]{};             // constant, slope
+        float blendConstants[4]{};
+        std::uint32_t colorCount = 0;     // the blend arrays' used entries (extended dynamic state 3)
+        VkBool32 blendEnable[kRenderTargets]{};
+        VkColorBlendEquationEXT blendEquation[kRenderTargets]{};
+        VkColorComponentFlags writeMask[kRenderTargets]{};
+    };
+    struct DrawPacket {
+        enum class Op : std::uint8_t { Draw, DrawIndexed };
+        Op op = Op::Draw;
+        bool batchable = false;
+        bool index32 = false;
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        VertexInputValues vi;
+        DynamicStateValues dyn;
+        shader::abi::PushConstants push{};
+        VkBuffer indexBuffer = VK_NULL_HANDLE;
+        VkDeviceSize indexOffset = 0;  // the binding's offset (0 when folded into first)
+        std::uint32_t count = 0;       // vertices / indices
+        std::uint32_t instances = 1;
+        std::uint32_t first = 0;       // first vertex / index
+        std::int32_t vertexOffset = 0; // indexed draws
+    };
+    bool computeVertexInput(vk::PipelineDesc& pd, VertexInputValues& out);
+    void applyVertexInput(VkCommandBuffer cmd, const VertexInputValues& vi);
+    void computeDynamicState(std::uint32_t primitiveType, DynamicStateValues& out) const;
+    void applyDynamicState(VkCommandBuffer cmd, const DynamicStateValues& v);
+    // records the packet now (after the pending batch) or, when it is batchable and batching is on, appends it to the batch
+    void submitPacket(const DrawPacket& p);
+    void applyPacket(VkCommandBuffer cmd, const DrawPacket& p);
+    // records the pending batch, its draws grouped by pipeline (the engine's order within a pipeline); before anything else
+    // is recorded into the frame's command buffer (endRendering, clear, a draw that is not batched)
+    void flushBatch();
     std::uint32_t samplerIndex(std::uint32_t slot);
     std::uint32_t lookupSampler(std::uint32_t slot);
     void uploadConstants();
@@ -910,6 +980,7 @@ private:
     vk::PipelineDesc lastPipelineDesc_{};
     VkPipeline lastPipeline_ = VK_NULL_HANDLE;
     bool lastPipelineValid_ = false;
+    // the vertex buffers / layout last recorded in this command buffer
     struct VertexInputCache {
         bool buffersValid = false;
         bool layoutValid = false;
@@ -918,8 +989,8 @@ private:
         VkDeviceSize offsets[vk::kMaxVertexBindings]{};
         std::uint32_t bindingCount = 0;
         std::uint32_t attributeCount = 0;
-        VkVertexInputBindingDescription2EXT bindings[vk::kMaxVertexBindings]{};
-        VkVertexInputAttributeDescription2EXT attributes[vk::kMaxVertexAttributes]{};
+        vk::VertexBinding bindings[vk::kMaxVertexBindings]{};
+        vk::VertexAttribute attributes[vk::kMaxVertexAttributes]{};
     } viCache_;
     struct IndexBindingCache {
         bool valid = false;
@@ -927,33 +998,25 @@ private:
         VkBuffer buffer = VK_NULL_HANDLE;
         VkDeviceSize offset = 0;
     } ibCache_;
-    // the draw's vertexOffset / firstVertex for a per-vertex stream bound at offset 0 (bindVertexInput: mesh arena)
+    // the draw's vertexOffset / firstVertex for a per-vertex stream bound at offset 0 (computeVertexInput: mesh arena)
     std::int32_t vertexShift_ = 0;
-    std::uint32_t bindIndexBuffer(VkBuffer buffer, VkDeviceSize offset, bool index32, std::uint32_t firstIndex);
+    // an index buffer binding: an offset that is a multiple of the index size goes into firstIndex (the arena block stays
+    // bound); returns the first index, `bindOffset` the binding's offset
+    static std::uint32_t foldIndexOffset(VkDeviceSize offset, bool index32, std::uint32_t firstIndex, VkDeviceSize& bindOffset);
+    void bindIndexBuffer(VkCommandBuffer cmd, VkBuffer buffer, VkDeviceSize bindOffset, bool index32);
     // the dynamic state last recorded (every pipeline declares the same dynamic states, so it survives pipeline binds)
-    struct DynamicStateCache {
+    struct DynamicStateCache : DynamicStateValues {
         bool valid = false;
-        VkViewport viewport{};
-        VkRect2D scissor{};
-        VkCullModeFlags cull = 0;
-        VkPrimitiveTopology topology{};
-        VkBool32 depthTest = 0;
-        VkBool32 depthWrite = 0;
-        VkCompareOp depthCompare{};
-        VkBool32 stencilTest = 0;
-        VkStencilOp stencilFront[3]{};
-        VkCompareOp stencilFrontCompare{};
-        VkStencilOp stencilBack[3]{};
-        VkCompareOp stencilBackCompare{};
-        std::uint32_t stencilMasks[3]{};  // compare, write, reference
-        VkBool32 depthBiasEnable = 0;
-        float depthBias[2]{};             // constant, slope
-        float blendConstants[4]{};
-        std::uint32_t colorCount = 0;
-        VkBool32 blendEnable[kRenderTargets]{};
-        VkColorBlendEquationEXT blendEquation[kRenderTargets]{};
-        VkColorComponentFlags writeMask[kRenderTargets]{};
     } dyn_;
+    // the draw being prepared (prepareDraw -> the draw call) and the pending batch (flushBatch)
+    DrawPacket packet_;
+    std::vector<DrawPacket> batch_;
+    std::vector<std::uint32_t> batchOrder_;
+    bool batching_ = true;  // debug.batch_draws
+    vk::GeneratedDraws generated_;  // runs of a batch as device-generated commands (optional)
+    bool generatedOn_ = false;      // debug.generated_draws
+    // the state of two draws is the same: one run of generated draws (pipeline, vertex input, dynamic state, index buffer)
+    static bool sameRunState(const DrawPacket& a, const DrawPacket& b);
     // bindless sampler index per slot (UINT32_MAX = look it up again after a SetSamplerState)
     std::array<std::uint32_t, kSamplerCount> samplerSlotCache_{};
     std::uint32_t instanceCount_ = 1;

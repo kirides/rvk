@@ -405,6 +405,33 @@ bool Context::createDevice(bool withRayTracing) {
         tail = &pexe.pNext;
         features_.pipelineStatistics = true;
     }
+    // device-generated commands for the batched draws (optional): push-constant + indexed-draw sequences. Needs maintenance5
+    // (core in 1.4; the device is created as 1.3, so the extension is enabled)
+    VkPhysicalDeviceMaintenance5FeaturesKHR m5{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR};
+    VkPhysicalDeviceDeviceGeneratedCommandsFeaturesEXT dgc{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_GENERATED_COMMANDS_FEATURES_EXT};
+    if (hasExtension(exts, VK_EXT_DEVICE_GENERATED_COMMANDS_EXTENSION_NAME) && hasExtension(exts, VK_KHR_MAINTENANCE_5_EXTENSION_NAME)) {
+        VkPhysicalDeviceMaintenance5FeaturesKHR qm5{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR};
+        VkPhysicalDeviceDeviceGeneratedCommandsFeaturesEXT qd{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_GENERATED_COMMANDS_FEATURES_EXT, &qm5};
+        VkPhysicalDeviceFeatures2 qf{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &qd};
+        vkGetPhysicalDeviceFeatures2(physical_, &qf);
+        VkPhysicalDeviceDeviceGeneratedCommandsPropertiesEXT dp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_GENERATED_COMMANDS_PROPERTIES_EXT};
+        VkPhysicalDeviceProperties2 pp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &dp};
+        vkGetPhysicalDeviceProperties2(physical_, &pp);
+        const VkShaderStageFlags need = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        if (qd.deviceGeneratedCommands && qm5.maintenance5 && (dp.supportedIndirectCommandsShaderStages & need) == need &&
+            dp.maxIndirectSequenceCount > 0) {
+            m5.maintenance5 = VK_TRUE;
+            dgc.deviceGeneratedCommands = VK_TRUE;
+            enabled.push_back(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
+            enabled.push_back(VK_EXT_DEVICE_GENERATED_COMMANDS_EXTENSION_NAME);
+            *tail = &m5;
+            m5.pNext = &dgc;
+            tail = &dgc.pNext;
+            features_.deviceGeneratedCommands = true;
+            features_.dgcMaxSequences = dp.maxIndirectSequenceCount;
+            features_.dgcMaxStride = dp.maxIndirectCommandsIndirectStride;
+        }
+    }
     // ray tracing tier (bufferDeviceAddress is already on): acceleration structures + ray query, plus the optional extras
     VkPhysicalDeviceAccelerationStructureFeaturesKHR as{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
     VkPhysicalDeviceRayQueryFeaturesKHR rq{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
