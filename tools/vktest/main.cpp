@@ -11,6 +11,8 @@
 //   pixels checked; and a device with rt.allow off (docs/research/raytracing.md). SKIP (exit 0) on a GPU without it
 //   rvk_vktest --fsr [dll]: FSR 3.1 through the signed FFX API DLL (third_party/amd_fidelityfx): load, create a native AA
 //   context, dispatch the jitter sequence on a constant image under validation, output checked; SKIP (exit 0) without the DLL
+//   rvk_vktest --ffx-driver [dll]: the AMD driver's FidelityFX provider library (amdvkffx64.dll): loaded and asked for its
+//   provider interface (UpdateFfxApiProvider), what it offers on this GPU is printed; no context is created
 //   rvk_vktest --shader-stats: the driver's register / spill / instruction statistics of the water pixel shader (in a
 //   pipeline like the renderer's) and of the ray-traced reflections' compute pass (VK_KHR_pipeline_executable_properties)
 //
@@ -26,6 +28,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -588,6 +591,166 @@ long __stdcall crashReport(EXCEPTION_POINTERS* e) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+// The driver's FidelityFX provider (amdvkffx64.dll, shipped in AMD's driver package): loaded and asked for its provider
+// interface the way the driver-aware FFX API does (UpdateFfxApiProviderEx, struct version 3 + an option chain; layouts as
+// OptiScaler documents them: ExternalProviderData 0x60 bytes with isSupported at 0x50, ProviderOption 0x18 bytes), then
+// canProvide and isSupported(device) are called. Only a probe: no context is created.
+struct FfxProviderInterface {  // ffxProviderInterface (ffx-api/src/ffx_provider_external.h)
+    std::uint64_t versionId;
+    const char* versionName;
+    std::uint32_t (*canProvide)(std::uint64_t typeId);
+    std::uint32_t (*createContext)(void* context, void* desc, const void* allocator);
+    std::uint32_t (*destroyContext)(void* context, const void* allocator);
+    std::uint32_t (*configure)(void* context, const void* desc);
+    std::uint32_t (*query)(void* context, void* desc);
+    std::uint32_t (*dispatch)(void* context, const void* desc);
+};
+struct FfxExternalProviderData {  // 0x60 bytes
+    std::uint32_t structVersion = 0;
+    std::uint64_t descType = 0;
+    FfxProviderInterface provider{};
+    bool (*isSupported)(const void* backend) = nullptr;  // 0x50 (struct version >= 3)
+    void* reserved = nullptr;
+};
+struct FfxProviderOption {  // 0x18 bytes
+    std::uint32_t type = 0;
+    std::uint32_t effect = 0;  // 0 upscale, 1 frame generation, 5 frame generation swapchain
+    bool enable = true;
+    FfxProviderOption* next = nullptr;
+};
+static_assert(sizeof(FfxProviderInterface) == 0x40 && sizeof(FfxExternalProviderData) == 0x60 && sizeof(FfxProviderOption) == 0x18);
+struct FfxVkBackendArg {  // what isSupported receives (a VkDeviceContext)
+    VkDevice device;
+    VkPhysicalDevice physical;
+    PFN_vkGetDeviceProcAddr getDeviceProcAddr;
+};
+
+// SEH wrappers (no C++ objects in these functions: MSVC refuses __try otherwise)
+long sehUpdateEx(long (*update)(void*, std::uint32_t, void*), FfxExternalProviderData* data, FfxProviderOption* options, bool& crashed) {
+    __try {
+        return update(data, static_cast<std::uint32_t>(sizeof(*data)), options);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        crashed = true;
+        return -1;
+    }
+}
+
+long sehUpdatePlain(long (*update)(void*, std::uint32_t), void* data, std::uint32_t size, bool& crashed) {
+    __try {
+        return update(data, size);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        crashed = true;
+        return -1;
+    }
+}
+
+long sehUpdateBuf(long (*update)(void*, std::uint32_t, void*), void* data, std::uint32_t size, void* options, bool& crashed) {
+    __try {
+        return update(data, size, options);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        crashed = true;
+        return -1;
+    }
+}
+
+std::uint32_t sehCanProvide(const FfxProviderInterface& p, std::uint64_t type) {
+    __try {
+        return p.canProvide != nullptr ? p.canProvide(type) : 0xFFFFFFFEu;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0xFFFFFFFDu;
+    }
+}
+
+int sehIsSupported(bool (*fn)(const void*), const FfxVkBackendArg& arg) {
+    __try {
+        return fn == nullptr ? 2 : (fn(&arg) ? 1 : 0);  // 2: the provider has no callback (treated as supported)
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+void sehCopyName(const char* name, char* out, std::size_t size) {
+    __try {
+        if (name != nullptr) std::snprintf(out, size, "%.90s", name);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+int ffxDriverProbe(const std::string& dllArg, bool validation) {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    if (dllArg.empty() || !std::filesystem::exists(dllArg)) {
+        std::printf("usage: rvk_vktest --ffx-driver <path to amdvkffx64.dll> (e.g. in the driver's DriverStore folder)\n");
+        return 0;
+    }
+    vk::Context ctx;
+    if (!ctx.create({validation, -1, "rvk_vktest"})) return 2;
+    std::printf("device: %s\n", ctx.deviceName().c_str());
+    HMODULE m = LoadLibraryExW(std::filesystem::path(dllArg).c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (m == nullptr) {
+        std::printf("FAIL: LoadLibrary error %lu\n", GetLastError());
+        return 1;
+    }
+    using UpdateExFn = long (*)(void*, std::uint32_t, void*);
+    const auto updateEx = reinterpret_cast<UpdateExFn>(GetProcAddress(m, "UpdateFfxApiProviderEx"));
+    if (updateEx == nullptr) {
+        std::printf("FAIL: no UpdateFfxApiProviderEx export\n");
+        return 1;
+    }
+    FfxProviderOption fgSwap{0, 5, true, nullptr}, fg{0, 1, true, &fgSwap}, up{0, 0, true, &fg};
+    const FfxVkBackendArg backend{ctx.device(), ctx.physicalDevice(), vkGetDeviceProcAddr};
+    for (const std::uint64_t type : {std::uint64_t{0x00010000}, std::uint64_t{0x00020000}, std::uint64_t{0x00040001}}) {
+        FfxExternalProviderData data{};
+        data.structVersion = 3;
+        data.descType = type;
+        bool crashed = false;
+        const long hr = sehUpdateEx(updateEx, &data, &up, crashed);
+        std::printf("descType 0x%llx: UpdateFfxApiProviderEx -> %s hr 0x%08lx", static_cast<unsigned long long>(type),
+                    crashed ? "EXCEPTION" : "returned", static_cast<unsigned long>(hr));
+        if (!crashed && hr == 0) {
+            char nameBuf[96] = "?";
+            sehCopyName(data.provider.versionName, nameBuf, sizeof(nameBuf));
+            std::printf("; versionId 0x%llx '%s', canProvide %u, isSupported %d, createContext %s, dispatch %s",
+                        static_cast<unsigned long long>(data.provider.versionId), nameBuf, sehCanProvide(data.provider, type),
+                        sehIsSupported(data.isSupported, backend), data.provider.createContext != nullptr ? "yes" : "no",
+                        data.provider.dispatch != nullptr ? "yes" : "no");
+        }
+        std::printf("\n");
+    }
+    // a matrix: which (function, struct version, size, options) does the driver accept?
+    using UpdateFn = long (*)(void*, std::uint32_t);
+    const auto update = reinterpret_cast<UpdateFn>(GetProcAddress(m, "UpdateFfxApiProvider"));
+    std::map<long, int> counts;
+    int accepted = 0;
+    for (int fn = 0; fn < 3; ++fn) {  // 0 plain, 1 Ex with options, 2 Ex without
+        for (const std::uint32_t version : {1u, 2u, 3u, 4u}) {
+            for (const std::uint32_t size : {0x40u, 0x48u, 0x50u, 0x58u, 0x60u, 0x68u, 0x70u}) {
+                alignas(16) std::uint8_t buf[0x100] = {};
+                auto* d = reinterpret_cast<FfxExternalProviderData*>(buf);
+                d->structVersion = version;
+                d->descType = 0x00010000;
+                bool crashed = false;
+                long hr;
+                if (fn == 0) hr = sehUpdatePlain(update, buf, size, crashed);
+                else hr = sehUpdateBuf(updateEx, buf, size, fn == 1 ? &up : nullptr, crashed);
+                ++counts[crashed ? -2 : hr];
+                if (!crashed && hr == 0) {
+                    ++accepted;
+                    char nameBuf[96] = "?";
+                    sehCopyName(d->provider.versionName, nameBuf, sizeof(nameBuf));
+                    std::printf("ACCEPTED: %s version %u size 0x%x -> versionId 0x%llx '%s', canProvide %u, isSupported %d\n",
+                                fn == 0 ? "plain" : fn == 1 ? "Ex+options" : "Ex", version, size,
+                                static_cast<unsigned long long>(d->provider.versionId), nameBuf, sehCanProvide(d->provider, 0x00010000),
+                                sehIsSupported(d->isSupported, backend));
+                }
+            }
+        }
+    }
+    for (const auto& [hr, n] : counts) std::printf("matrix: hr 0x%08lx x%d\n", static_cast<unsigned long>(hr), n);
+    std::printf("matrix: %d combinations accepted\n", accepted);
+    ctx.destroy();
+    return 0;
+}
+
 // FSR 3.1 native AA through the FFX API DLL on a constant image: every pixel of the output must keep the input colour.
 int fsrTest(const std::string& dllArg, bool validation) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // a crash inside the DLL must not swallow the output
@@ -732,6 +895,8 @@ int main(int argc, char** argv) {
             hazard = true;
         } else if (a == "--rt") {
             rtMode = true;
+        } else if (a == "--ffx-driver") {
+            return ffxDriverProbe(i + 1 < argc ? argv[i + 1] : "", validation);
         } else if (a == "--fsr") {
             fsrMode = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') fsrDll = argv[++i];
