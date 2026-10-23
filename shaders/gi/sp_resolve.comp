@@ -30,19 +30,20 @@ void main() {
     vec3 N = rvkGiOctDecode(g.xy);
     vec3 P = spWorldPos(f, px, size, rvkFetch2D(p.screen.x, px).r);
     float tsize = float(max(p.screen2.x, 1u));
-    vec2 tc = (vec2(px) + 0.5) / tsize - 0.5;
-    ivec2 base = ivec2(floor(tc));
-    vec2 fr = tc - vec2(base);
     ivec2 grid = ivec2(p.screen.zw);
+    ivec2 centre = clamp(ivec2((vec2(px) + 0.5) / tsize), ivec2(0), grid - 1);
     vec3 sum = vec3(0.0), lo = vec3(1e9), hi = vec3(-1e9);
     float wsum = 0.0;
-    for (int i = 0; i < 4; ++i) {
-        ivec2 o = ivec2(i & 1, i >> 1);
-        ivec2 tile = clamp(base + o, ivec2(0), grid - 1);
+    // the 3 x 3 probes around the pixel's tile: a Gaussian of the distance to each tile's centre (sigma = one tile) x the
+    // surface weights (a spatial filter over 9 probes: less grain than the bilinear 2 x 2)
+    for (int i = 0; i < 9; ++i) {
+        ivec2 tile = clamp(centre + ivec2(i % 3 - 1, i / 3 - 1), ivec2(0), grid - 1);
         vec4 pr = rvkFetch2D(p.screen3.x, tile);
         if (pr.a <= 0.0) continue;
-        vec2 bw = mix(1.0 - fr, fr, vec2(o));
-        float w = max(bw.x * bw.y, 1e-3);
+        // the distance to the tile's centre (stable from frame to frame; the probe's own pixel is jittered per frame: as the
+        // weight it made the filter flicker, measured)
+        vec2 dpx = ((vec2(tile) + 0.5) * tsize - (vec2(px) + 0.5)) / tsize;
+        float w = exp(-0.5 * dot(dpx, dpx)) + 1e-3;
         // the probe's distance to this pixel's tangent plane (slanted surfaces keep their neighbours) and normal similarity
         ivec2 ppx = spProbePixel(p, tile);
         vec3 pp = spWorldPos(f, ppx, size, rvkFetch2D(p.screen.x, ppx).r);
