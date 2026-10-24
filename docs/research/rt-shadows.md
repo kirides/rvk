@@ -167,3 +167,51 @@ use. What was measured and built instead:
   Refits from this frame's capture: 55 % of all (all characters, none of the trees) with the switch on, 30 % off.
 * Open: a velocity extrapolation of the previous captures would remove the remaining lag without the cascades' cost; the GI still uses
   the previous frame's characters.
+
+## 8. Cheaper tracing: profile and what did not pay (2026-10-24)
+
+Question: cut the GPU cost of the trace pass without visible loss (no new trails / flicker / comb). Everything below was measured at
+`shadow_inland_b` (the forest-floor spot, almost every pixel inside 35 m), `shadows.rt = extended`, quality medium, 1600x900, RX 7900
+XTX, the camera held (rvkcompare hold), `RisenTest.exe` (uncapped). New tooling: the environment variable `RVK_PERF_FRAMES=M` (with
+`run.ps1 -PerfFrame N -Environment 'RVK_PERF_FRAMES=24'`) logs the pass timings of the M frames from N on, so a pass time is an
+average of 24 frames instead of one noisy frame.
+
+**Where the time goes** [C] (average of 24 frames): rt.scene (TLAS) 0.22 ms, trace 0.78 - 0.84, temporal 0.06, spatial 0.07 - 0.14.
+A frame with RT shadows off: GPU 1.84 ms, CPU 3.13 ms; RT shadows on with `debug.rt_shadow_sync` off: 2.45 / 4.06; with the sync
+(default): 2.67 / 4.37. So the RT term costs more CPU (+0.9 ms: observing the draws for the RT scene, the TLAS instance assembly,
+the tree captures) than GPU, and the game is CPU bound; the cascade sync adds +0.22 GPU / +0.30 CPU while the camera is held (while
+the camera moves, the engine redraws the cascades every frame anyway). The trace pass itself is set up cheaply (depth fetches, the
+normal): 0.04 ms with the rays removed; the rest is ray traversal.
+
+**What did not pay** [C] (trace pass ms, medium, extended; baseline 0.78 - 0.84):
+
+| experiment | trace ms | verdict |
+|---|---|---|
+| ray reach 120 m -> 40 m | 0.84 | no change: lit rays do not travel far, the cost is the canopy near the surface |
+| cap of 4 / 8 / 1 alpha-tested candidates per ray | 0.83 / 0.91 / 0.87 | no change: the leaf alpha test is not the tail |
+| opacity mip x4 (coarser leaf alpha fetch) | 0.84 | no change |
+| TLAS built `PREFER_FAST_TRACE` | 0.82 (rt.scene 0.22 -> 0.63) | no trace gain, 3x build |
+| animated tree BLASes `PREFER_FAST_TRACE` | 0.88 (rt.scene 0.22 -> 0.36) | no trace gain |
+| the same sun-disc sample for each 4 x 4 / 2 x 2 pixels (coherent rays) | 0.76 / 0.82 | within noise: not divergence bound |
+| only 1/4 of the lanes trace / 1/4 of the 8 x 8 tiles trace / 1/32 of the tiles | 0.70 / 0.58 / 0.25 | the cost is far from proportional to the rays: a fixed tail of ~0.2 ms remains with 3 % of the tiles; skipping most rays buys ~0.25 ms |
+| quality low (cut-outs solid), full / 1/32 of the tiles | 0.78 / 0.125 | the tail is the canopy's traversal through leaf cards (rays that pass the gaps keep going) |
+| coarse pass (one ray per 2 x 2 pixels, every frame) + the fine pass skipping rays where the 3 x 3 coarse blocks agree, the depth fits and the history is converged to the same value | coarse 0.45 + fine 0.61 = 1.06 | **worse than no skipping** (0.84): the coarse pass alone costs 55 % of the full trace for 25 % of the rays, and the converged-and-calm test passes for few pixels where the wind moves leaves (jungle, beach, harbour: 0.96 - 1.06 against 0.83) |
+
+Why ray skipping barely helps: the pass time is dominated by the slowest rays (long traversals through overlapping leaf-card
+instances) and a per-wave tail, not by the number of rays; a wave with one blocked / lit mix still pays its slowest lane. Staleness
+would also come with it (a shadow edge entering a skipped area shows one frame late: the player had just reported trails). Dropped.
+
+**What was kept**
+* **The second ray of `rt_quality = high` only where it can matter** (`rt_shadow_trace.comp`): a pixel whose history is settled (>= 4
+  frames, variance < 0.002, mean < 0.03 or > 0.97) is confirmed by one ray as well as by two; penumbra and new pixels keep two. Trace
+  1.34 -> 1.23 ms (-8 %; the pixels that still take two rays are most of a forest floor). Stability (12 consecutive captures at
+  `shadow_inland_b`, high): luma std mean 0.319 against 0.299 for two rays everywhere, p99 3.27 / 2.78; the two runs' median images
+  differ by 1.88 (the game's own run-to-run difference is 0.9 - 2.5). Validation + synchronization validation (walking scenario,
+  extended, high): no messages; `rvk_tests` 133.
+* `rtsHistory` (the history reprojection of the temporal pass) moved into `rt_shadow_common.glsl` so the trace pass can read it; the
+  temporal pass is arithmetically unchanged.
+
+**Open** (where the real cost is): the CPU side of the RT scene (observe 0.42 ms + TLAS assembly 0.34 ms per frame at ~890
+instance sightings) and shading fewer rays by a cheaper *scene* (a shadow LOD of the leaf cards, distant canopies as solid blobs) rather
+than by skipping pixels; velocity extrapolation of the characters' last capture instead of the cascade sync (-0.22 ms GPU / -0.30
+ms CPU with the camera held).

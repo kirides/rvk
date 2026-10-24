@@ -32,32 +32,12 @@ void main() {
         }
     }
     float hv = raw, hm2 = raw * raw, n = 0.0;
-    if (p.mode.y != 0u && (f.frameInfo.y & RVK_FRAME_PREV_VALID) != 0u) {
-        vec3 P = rtsPos(f, p, q, d);
-        vec4 pc4 = f.prevViewProj * vec4(P, 1.0);
-        if (pc4.w > 1e-3) {
-            // last frame's pixel of this point (its jitter added back: the history is stored per rasterised pixel)
-            vec2 pndc = pc4.xy / pc4.w + vec2(2.0 * f.jitter.z, -2.0 * f.jitter.w) * f.viewport.zw;
-            vec2 pp = vec2(pndc.x * 0.5 + 0.5, 0.5 - pndc.y * 0.5) * vec2(p.info.xy);
-            ivec2 b = ivec2(floor(pp));
-            vec2 fr = pp - vec2(b);
-            float wsum = 0.0, vsum = 0.0, nsum = 0.0, msum = 0.0;
-            for (int k = 0; k < 4; ++k) {
-                ivec2 t = b + ivec2(k & 1, k >> 1);
-                if (any(lessThan(t, ivec2(0))) || any(greaterThanEqual(t, ivec2(p.info.xy)))) continue;
-                vec4 h = rvkFetch2D(p.tex.z, t);
-                float w = (((k & 1) == 0) ? 1.0 - fr.x : fr.x) * (((k >> 1) == 0) ? 1.0 - fr.y : fr.y);
-                if (abs(h.y - pc4.w) > 0.02 * pc4.w + 3.0 || h.z <= 0.0) w = 0.0;
-                wsum += w;
-                vsum += w * h.x;
-                nsum += w * h.z;
-                msum += w * h.w;
-            }
-            if (wsum > 0.05) {
-                hv = clamp(vsum / wsum, mn, mx);
-                n = nsum / wsum;
-                hm2 = msum / wsum;
-            }
+    {
+        vec4 h = rtsHistory(f, p, rtsPos(f, p, q, d));
+        if (h.w > 0.05) {
+            hv = clamp(h.x, mn, mx);
+            n = h.y;
+            hm2 = h.z;
         }
     }
     float count = min(n + 1.0, RTS_MAX_FRAMES);

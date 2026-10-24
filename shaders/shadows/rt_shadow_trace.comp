@@ -32,6 +32,12 @@ void main() {
         float width0 = pixelAngle * vz;
         float spread = max(p.sun.w, pixelAngle);
         uint rays = max(p.info.z, 1u);
+        if (rays > 1u) {
+            // the second ray is for pixels still in doubt: a settled history (long, fully lit or fully blocked, no variance) is
+            // confirmed by one ray as well as by two, only the penumbra and new pixels gain from the extra sample
+            vec4 h = rtsHistory(f, p, P);
+            if (h.w > 0.05 && h.y >= 4.0 && max(h.z - h.x * h.x, 0.0) < 0.002 && (h.x < 0.03 || h.x > 0.97)) rays = 1u;
+        }
         float sum = 0.0;
         for (uint r = 0u; r < rays; ++r) {
             // a disc sample: interleaved gradient noise per pixel, rotated per frame and ray (the temporal pass integrates them)

@@ -65,7 +65,7 @@ Injection test view: `-Setting 'debug.inject_view=depth'` (distance bands + a 5 
 FrameBlock camera, drawn after the opaque scene) or `tint`; `-SyncValidation` = `-Validation` + the layer's
 synchronization validation (`[vulkan] sync_validation`; environment variables do not reach the game).
 Performance (docs/research/performance.md): `-Perf` (GPU timestamps, CPU split, uploads, pipeline builds, pacer: `perf:`
-lines every 5 s), `-PerfFrame N` (GPU time of every render pass of frame N), `-Vsync on|off|engine`, `-MaxFps N`; the
+lines every 5 s), `-PerfFrame N` (GPU time of every render pass of frame N; `-Environment 'RVK_PERF_FRAMES=24'` = the 24 frames from N on, average them: one frame's pass times are noisy), `-Vsync on|off|engine`, `-MaxFps N`; the
 `rvk_shadows` scenario logs the fps for either renderer (also `-NoRenderer`). Other games on the GPU skew GPU times.
 **The world's 80 fps cap is an AMD Radeon Chill profile on `Risen.exe`** (min = max = 80, in the driver's present;
 docs/research/fps-limit.md): `-Exe RisenTest.exe` runs a renamed copy of the exe (uncapped: 175-240 fps); `-PresentStalls 4`

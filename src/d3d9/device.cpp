@@ -639,8 +639,14 @@ void Device::beginFrame() {
             }
         }
         // a frame's submissions: the present's and any mid-frame flush (read-backs)
-        const bool details = options_.perfFrame != 0 && stats_.frames + 1 == options_.perfFrame;
-        gpuDetailFrame_[slot] = details ? options_.perfFrame : 0;
+        // -PerfFrame N: that frame; the environment variable RVK_PERF_FRAMES = M extends it to the M frames from N on
+        static const std::uint64_t perfSpan = [] {
+            char e[16];  // the Win32 environment (the proxy sets it from DllMain; the CRT's copy is stale)
+            const DWORD n = GetEnvironmentVariableA("RVK_PERF_FRAMES", e, sizeof e);
+            return n > 0 && n < sizeof e ? std::max<std::uint64_t>(std::strtoull(e, nullptr, 10), 1) : 1;
+        }();
+        const bool details = options_.perfFrame != 0 && stats_.frames + 1 >= options_.perfFrame && stats_.frames + 1 < options_.perfFrame + perfSpan;
+        gpuDetailFrame_[slot] = details ? stats_.frames + 1 : 0;
         gpuTimer_.start(slot, details);
         gpuTimer_.mark(frames_.cmd(), slot, vk::GpuTimer::Stream::Main, "begin");
     }

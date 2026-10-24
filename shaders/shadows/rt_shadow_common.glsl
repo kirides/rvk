@@ -57,4 +57,31 @@ float rtsIgn(vec2 p, uint frame) {
     return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
 }
 
+// last frame's accumulated result at the point P of pixel q: the history reprojected with the camera's motion (its jitter added
+// back: the history is stored per rasterised pixel), 4 depth-checked bilinear taps. x mean visibility, y frames accumulated, z
+// second moment, w the taps' weight sum (< 0.05 = no usable history: a new pixel, disoccluded, off screen)
+vec4 rtsHistory(RvkFrame f, RtShadowParams p, vec3 P) {
+    if (p.mode.y == 0u || (f.frameInfo.y & RVK_FRAME_PREV_VALID) == 0u) return vec4(0.0);
+    vec4 pc4 = f.prevViewProj * vec4(P, 1.0);
+    if (pc4.w <= 1e-3) return vec4(0.0);
+    vec2 pndc = pc4.xy / pc4.w + vec2(2.0 * f.jitter.z, -2.0 * f.jitter.w) * f.viewport.zw;
+    vec2 pp = vec2(pndc.x * 0.5 + 0.5, 0.5 - pndc.y * 0.5) * vec2(p.info.xy);
+    ivec2 b = ivec2(floor(pp));
+    vec2 fr = pp - vec2(b);
+    float wsum = 0.0, vsum = 0.0, nsum = 0.0, msum = 0.0;
+    for (int k = 0; k < 4; ++k) {
+        ivec2 t = b + ivec2(k & 1, k >> 1);
+        if (any(lessThan(t, ivec2(0))) || any(greaterThanEqual(t, ivec2(p.info.xy)))) continue;
+        vec4 h = rvkFetch2D(p.tex.z, t);
+        float w = (((k & 1) == 0) ? 1.0 - fr.x : fr.x) * (((k >> 1) == 0) ? 1.0 - fr.y : fr.y);
+        if (abs(h.y - pc4.w) > 0.02 * pc4.w + 3.0 || h.z <= 0.0) w = 0.0;
+        wsum += w;
+        vsum += w * h.x;
+        nsum += w * h.z;
+        msum += w * h.w;
+    }
+    if (wsum <= 0.05) return vec4(0.0, 0.0, 0.0, wsum);
+    return vec4(vsum / wsum, nsum / wsum, msum / wsum, wsum);
+}
+
 #endif
