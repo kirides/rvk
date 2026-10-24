@@ -95,8 +95,8 @@ private:
 
     std::unordered_map<std::uint64_t, Program> programs_;
     std::unordered_map<std::uint64_t, Analysis> analyses_;
-    std::unordered_map<std::uint32_t, Entry> entries_;
-    std::unordered_map<std::uint64_t, std::uint32_t> byKey_;
+    std::unordered_map<std::uint32_t, Entry, IdHash> entries_;
+    std::unordered_map<std::uint64_t, std::uint32_t, IdHash> byKey_;
     std::unordered_multimap<const d3d9::Texture*, std::uint32_t> byTexture_;
     std::uint32_t nextId_ = 1;
     std::unordered_set<std::uint64_t> logged_;  // material x pixel shader

@@ -34,6 +34,8 @@ constexpr std::size_t kViewFactor = 0x15b4;
 std::atomic<float> g_trees{1.0f};
 std::atomic<float> g_meshes{1.0f};
 std::atomic<float> g_view{1.0f};
+std::atomic<int> g_prefetchStride{1};
+std::atomic<bool> g_walkNext{true};
 
 template <class T>
 T field(const void* self, std::size_t offset) {
@@ -230,18 +232,55 @@ void restoreRanges(float* ranges, int n, const float* saved) {
     for (int i = 0; i < n; ++i) ranges[i] = saved[i];
 }
 
+void setPrefetchStride(int stride) {
+    g_prefetchStride.store(stride < 1 ? 1 : stride > 8 ? 8 : stride, std::memory_order_relaxed);
+    g_walkNext.store(true, std::memory_order_relaxed);
+}
+
 void setScales(const Scales& s) {
     g_trees.store(s.trees, std::memory_order_relaxed);
     g_meshes.store(s.meshes, std::memory_order_relaxed);
-    if (g_view.exchange(s.view, std::memory_order_relaxed) != s.view) g_refreshPending.store(true, std::memory_order_relaxed);
+    if (g_view.exchange(s.view, std::memory_order_relaxed) != s.view) {
+        g_refreshPending.store(true, std::memory_order_relaxed);
+        g_walkNext.store(true, std::memory_order_relaxed);  // the changed spheres are walked at once
+    }
 }
 
 Scales scales() {
     return {g_trees.load(std::memory_order_relaxed), g_meshes.load(std::memory_order_relaxed), g_view.load(std::memory_order_relaxed)};
 }
 
+using CacheEntitiesFn = void (*)(void* self, const float* center, std::uint8_t slot, bool walkRange, bool walkCache);
+Hook<CacheEntitiesFn> g_cacheEntities;
+float g_walkCenter[3]{};
+int g_sinceWalk = 0;
+constexpr float kWalkMoveSq = 100.0f * 100.0f;  // 1 m (world units are cm)
+
+// eCApplication::OnPreRender calls it every frame with the camera position. A repeat call at about the same position changes
+// nothing (the tree's per-node bits flip only on a sphere crossing), so most frames skip the two walks: the entities at the
+// edge of their cache-in sphere appear or vanish up to stride - 1 frames later; a camera that moved a metre walks at once.
+void detourCacheEntities(void* self, const float* center, std::uint8_t slot, bool walkRange, bool walkCache) {
+    const int stride = g_prefetchStride.load(std::memory_order_relaxed);
+    if (stride > 1 && center != nullptr && (walkRange || walkCache) && !g_walkNext.load(std::memory_order_relaxed) &&
+        ++g_sinceWalk < stride) {
+        const float dx = center[0] - g_walkCenter[0], dy = center[1] - g_walkCenter[1], dz = center[2] - g_walkCenter[2];
+        if (dx * dx + dy * dy + dz * dz < kWalkMoveSq) {
+            g_cacheEntities.original(self, center, slot, false, false);  // the dirty lists, the centre: no walks
+            return;
+        }
+    }
+    g_sinceWalk = 0;
+    g_walkNext.store(false, std::memory_order_relaxed);
+    if (center != nullptr) std::memcpy(g_walkCenter, center, sizeof(g_walkCenter));
+    g_cacheEntities.original(self, center, slot, walkRange, walkCache);
+}
+
 bool install() {
     const auto& s = sym();
+    if (!g_cacheEntities.install("eCPrefetchAdmin::CacheEntities", reinterpret_cast<CacheEntitiesFn>(s.prefetchCacheEntities),
+                                 &detourCacheEntities)) {
+        spdlog::warn("engine: eCPrefetchAdmin::CacheEntities not hooked: the cache-in walk runs every frame");
+    }
     bool ok = true;
     if (!g_treeUpdate.install("eCWraper_SpeedTreeRT::UpdateLoD", reinterpret_cast<TreeUpdateFn>(s.speedTreeUpdateLoD), &detourTreeUpdate)) {
         spdlog::warn("engine: eCWraper_SpeedTreeRT::UpdateLoD not hooked: lod.trees has no effect");

@@ -16,6 +16,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "core/id_hash.h"
+
 namespace rvk::enh::rt {
 
 // one BLAS = one indexed draw range of the engine (triangle list) on the current generation of its static buffers
@@ -147,8 +149,8 @@ private:
     static std::uint64_t ownerSlot(std::uint64_t owner, std::uint8_t view);
     void removeAt(std::size_t i);
     std::vector<Instance> list_;
-    std::unordered_map<std::uint64_t, std::size_t> index_;   // key -> list_ index
-    std::unordered_map<std::uint64_t, std::uint64_t> owners_; // owner x view -> the key of its latest instance there
+    std::unordered_map<std::uint64_t, std::size_t, IdHash> index_;   // key -> list_ index
+    std::unordered_map<std::uint64_t, std::uint64_t, IdHash> owners_; // owner x view -> the key of its latest instance there
     std::uint32_t nextId_ = 1;
     Counters counters_;
 };

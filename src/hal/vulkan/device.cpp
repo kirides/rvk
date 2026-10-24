@@ -221,6 +221,13 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         dev_.setRegionsEnabled(rs.debugRegions->asBool());
         reg.onChange(*rs.debugRegions, [this](const settings::Setting& s) { dev_.setRegionsEnabled(s.asBool()); }, this);
     }
+    if (rs.recordThreads != nullptr) {
+        dev_.setRecordThreads(rs.recordThreads->asBool());
+        reg.onChange(*rs.recordThreads, [this](const settings::Setting& s) {
+            dev_.setRecordThreads(s.asBool());
+            spdlog::info("hal: settings: record threads {}", s.asBool() ? "on" : "off");
+        }, this);
+    }
     if (rs.batchDraws != nullptr) {
         dev_.setBatching(rs.batchDraws->asBool());
         reg.onChange(*rs.batchDraws, [this](const settings::Setting& s) {
@@ -318,6 +325,10 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyLod(); }, this);
     }
     applyLod();
+    if (rs.prefetchStride != nullptr) {
+        engine::lod::setPrefetchStride(static_cast<int>(rs.prefetchStride->asInt()));
+        reg.onChange(*rs.prefetchStride, [](const settings::Setting& s) { engine::lod::setPrefetchStride(static_cast<int>(s.asInt())); }, this);
+    }
     if (options.overlay && dev_.swapchain().valid()) {
         overlay_ = std::make_unique<overlay::Overlay>();
         overlay::Options oo;

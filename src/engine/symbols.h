@@ -172,7 +172,7 @@
        changes); eECullStatus eCFrustumElementItem::CullTree(eCFrustumDatabase&) (0x6711a0: a parent entity's subtree cull    \
        with its raw ViewRange) */                                                                                              \
     X(prefetchGetSphere, L"Engine.dll", "?GetPrefetchSphere@eCPrefetchAdmin@@QEAA_NPEAVeCGeometryEntity@@AEAVbCSphere@@@Z", false) \
-    X(prefetchSetDefaultRange, L"Engine.dll", "?SetDefaultCacheInRange@eCPrefetchAdmin@@QEAAXM@Z", false)                       \
+    /* void eCPrefetchAdmin::CacheEntities(bCVector const&, unsigned char, bool, bool) (0x6969c0): the per-frame cache-in walk of the         scene's sphere tree (OnPreRender); its two bools gate the walks (lod.md 7, performance.md 14) */                              X(prefetchCacheEntities, L"Engine.dll", "?CacheEntities@eCPrefetchAdmin@@QEAAXAEBVbCVector@@E_N1@Z", false)                      X(prefetchSetDefaultRange, L"Engine.dll", "?SetDefaultCacheInRange@eCPrefetchAdmin@@QEAAXM@Z", false)                       \
     X(frustumItemCullTree, L"Engine.dll",                                                                                       \
       "?CullTree@eCFrustumElementItem@@QEAA?AW4eECullStatus@eCFrustumFilter@@AEAVeCFrustumDatabase@@@Z", false)                \
     /* ---- high fps compatibility (engine/high_fps.*, docs/research/fps-limit.md 12): float eCTimer::GetFrameTimeInSeconds()  \

@@ -850,6 +850,17 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
     });
+    r.recordThreads = &reg.add({
+        .key = "debug.record_threads",
+        .label = "Record draws on worker threads",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Records the opaque passes' draws into secondary command buffers on two worker threads while the engine "
+                       "thread goes on (less CPU time on the engine thread). Off = recorded inline, to compare.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::Debug,
+    });
     r.batchDraws = &reg.add({
         .key = "debug.batch_draws",
         .label = "Batch opaque draws",
@@ -1449,6 +1460,20 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .min = 1,
         .max = 4,
         .format = "%.1fx",
+    });
+    r.prefetchStride = &reg.add({
+        .key = "debug.prefetch_stride",
+        .label = "Cache-in walk every n-th frame",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The game walks its whole scene tree every frame to load and unload objects around the camera. Every n-th "
+                       "frame (and whenever the camera moved a metre) is enough: objects at the edge of their range appear or "
+                       "vanish up to n - 1 frames later. 1 = every frame, to compare.",
+        .type = Type::Int,
+        .defaultValue = 4,
+        .min = 1,
+        .max = 8,
+        .flags = Flag::Debug,
     });
     r.lodView = &reg.add({
         .key = "lod.view",

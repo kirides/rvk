@@ -1,7 +1,9 @@
 // d3d9::Device draws: rendering scopes, texture preparation, pipeline state, vertex input, dynamic state, constants.
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
+#include <cstddef>
 #include <cstring>
 #include <filesystem>
 #include <format>
@@ -32,8 +34,16 @@ struct Device::DrawTimer {
 void Device::endRendering() {
     if (rendering_) {
         flushBatch();  // the batched draws belong to this rendering scope
+        const bool secondary = scopeSecondary_;
+        if (secondary) finishSecondaryScope();
         vkCmdEndRendering(frames_.cmd());
         rendering_ = false;
+        if (secondary) {
+            // executing secondary command buffers leaves the primary's pipeline, dynamic state and descriptor sets undefined
+            rec_.reset();
+            const VkDescriptorSet set = bindless_.set();
+            vkCmdBindDescriptorSets(frames_.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS, bindless_.pipelineLayout(), 0, 1, &set, 0, nullptr);
+        }
         if (gpuTimer_.enabled()) {
             const std::uint32_t slot = frames_.currentSlot();
             std::string label;
@@ -136,6 +146,8 @@ bool Device::beginRendering() {
     ri.pColorAttachments = colors;
     ri.pDepthAttachment = depthFormat_ != VK_FORMAT_UNDEFINED ? &depth : nullptr;
     ri.pStencilAttachment = stencilFormat_ != VK_FORMAT_UNDEFINED ? &stencil : nullptr;
+    scopeSecondary_ = wantSecondaryScope();
+    if (scopeSecondary_) ri.flags = VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT;
     vkCmdBeginRendering(cmd, &ri);
     rendering_ = true;
     ++stats_.renderPasses;
@@ -154,11 +166,8 @@ bool Device::prepareTextures() {
         }
         return ds_ != nullptr && ds_->texture() == t;
     };
-    for (std::uint32_t slot = 0; slot < kSamplerCount; ++slot) {
-        const shader::Reflection& r = slot < 16 ? ps_->reflection : vs_->reflection;
-        if (r.samplers[slot] == shader::TextureType::Unknown) {
-            continue;
-        }
+    for (std::uint32_t mask = boundSamplerMask(); mask != 0; mask &= mask - 1) {
+        const std::uint32_t slot = static_cast<std::uint32_t>(std::countr_zero(mask));
         Texture* t = tex_[slot];
         if (t == nullptr || t->isNull() || isTarget(t)) {
             continue;  // unbound, or a feedback loop (undefined in D3D9): the default texture is sampled
@@ -179,6 +188,55 @@ bool Device::prepareTextures() {
     return true;
 }
 
+// The shader's inputs against the declaration, computed once per pair (the declaration and the shader never change)
+const Device::VertexPlan& Device::vertexPlan(const VertexDecl* decl, Shader& vs) {
+    const std::uint64_t declId = decl != nullptr ? decl->id() : 0;
+    if (plan_ != nullptr && planShader_ == &vs && planDeclId_ == declId) {
+        return *plan_;
+    }
+    Shader& shader = vs;
+    for (const Shader::PlanSlot& slot : shader.planSlots) {
+        if (slot.plan != nullptr && slot.declId == declId) {
+            planShader_ = &vs;
+            planDeclId_ = declId;
+            plan_ = static_cast<const VertexPlan*>(slot.plan);
+            return *plan_;
+        }
+    }
+    const std::uint64_t key = (declId * 0x9E3779B97F4A7C15ull) ^ vs.hash;
+    auto [it, fresh] = vertexPlans_.try_emplace(key);
+    VertexPlan& plan = it->second;
+    if (fresh) {
+        for (const auto& in : vs.reflection.vertexInputs) {
+            VertexPlanInput pi;
+            pi.location = in.location;
+            const VertexElement* el = nullptr;
+            if (decl != nullptr) {
+                for (const auto& e : decl->elements()) {
+                    if (e.usage == static_cast<std::uint8_t>(in.usage) && e.usageIndex == in.usageIndex) {
+                        el = &e;
+                        break;
+                    }
+                }
+            }
+            if (el != nullptr) {
+                const DeclTypeInfo dt = declType(el->type);
+                if (dt.format != VK_FORMAT_UNDEFINED && el->stream < kStreams) {
+                    pi.stream = el->stream;
+                    pi.offset = el->offset;
+                    pi.format = dt.format;
+                }
+            }
+            plan.inputs.push_back(pi);
+        }
+    }
+    shader.planSlots[shader.planNext++ % shader.planSlots.size()] = {declId, &plan};
+    planShader_ = &vs;
+    planDeclId_ = declId;
+    plan_ = &plan;  // unordered_map nodes are stable
+    return plan;
+}
+
 // The draw's vertex buffers and layout (recorded by applyVertexInput). With dynamic vertex input the layout leaves `pd`
 // (the pipeline does not depend on it: a smaller pipeline key).
 bool Device::computeVertexInput(vk::PipelineDesc& pd, VertexInputValues& out) {
@@ -191,27 +249,16 @@ bool Device::computeVertexInput(vk::PipelineDesc& pd, VertexInputValues& out) {
     if ((streams_[0].freq & STREAMSOURCE_INDEXEDDATA) != 0) {
         instanceCount_ = std::max(1u, streams_[0].freq & 0x3FFFFFFFu);
     }
-    for (const auto& in : vs_->reflection.vertexInputs) {
-        const VertexElement* el = nullptr;
-        if (decl_ != nullptr) {
-            for (const auto& e : decl_->elements()) {
-                if (e.usage == static_cast<std::uint8_t>(in.usage) && e.usageIndex == in.usageIndex) {
-                    el = &e;
-                    break;
-                }
-            }
-        }
-        const DeclTypeInfo dt = el != nullptr ? declType(el->type) : DeclTypeInfo{};
-        if (el != nullptr && dt.format != VK_FORMAT_UNDEFINED && el->stream < kStreams &&
-            (streams_[el->stream].buffer != nullptr || (el->stream == 0 && up_.active))) {
-            std::uint32_t& b = streamBinding[el->stream];
+    for (const VertexPlanInput& in : vertexPlan(decl_, *vs_).inputs) {
+        if (in.stream != UINT32_MAX && (streams_[in.stream].buffer != nullptr || (in.stream == 0 && up_.active))) {
+            std::uint32_t& b = streamBinding[in.stream];
             if (b == UINT32_MAX) {
                 if (pd.bindingCount >= vk::kMaxVertexBindings) {
                     return false;
                 }
                 b = pd.bindingCount++;
-                const Stream& st = streams_[el->stream];
-                if (el->stream == 0 && up_.active) {
+                const Stream& st = streams_[in.stream];
+                if (in.stream == 0 && up_.active) {
                     pd.bindings[b] = {up_.stride, 0};
                     out.buffers[b] = up_.buffer;
                     out.offsets[b] = up_.offset;
@@ -226,7 +273,7 @@ bool Device::computeVertexInput(vk::PipelineDesc& pd, VertexInputValues& out) {
                 }
             }
             if (pd.attributeCount < vk::kMaxVertexAttributes) {
-                pd.attributes[pd.attributeCount++] = {in.location, b, dt.format, el->offset};
+                pd.attributes[pd.attributeCount++] = {in.location, b, in.format, in.offset};
             }
         } else {
             // the declaration does not provide this input: D3D9 reads (0,0,0,1)
@@ -282,8 +329,8 @@ bool Device::computeVertexInput(vk::PipelineDesc& pd, VertexInputValues& out) {
 }
 
 // records the buffers / layout that differ from what this command buffer has
-void Device::applyVertexInput(VkCommandBuffer cmd, const VertexInputValues& vi) {
-    VertexInputCache& vc = viCache_;
+void Device::applyVertexInput(RecordState& rs, VkCommandBuffer cmd, const VertexInputValues& vi) {
+    VertexInputCache& vc = rs.vi;
     const std::uint32_t n = vi.bufferCount;
     if (n > 0 && (!vc.buffersValid || vc.bufferCount != n || std::memcmp(vc.buffers, vi.buffers, sizeof(VkBuffer) * n) != 0 ||
                   std::memcmp(vc.offsets, vi.offsets, sizeof(VkDeviceSize) * n) != 0)) {
@@ -431,8 +478,8 @@ void Device::computeDynamicState(std::uint32_t primitiveType, DynamicStateValues
 }
 
 // Records only the dynamic state that differs from what this command buffer has already set (dyn_)
-void Device::applyDynamicState(VkCommandBuffer cmd, const DynamicStateValues& s) {
-    DynamicStateCache& c = dyn_;
+void Device::applyDynamicState(RecordState& rs, VkCommandBuffer cmd, const DynamicStateValues& s) {
+    DynamicStateCache& c = rs.dyn;
     const bool v = c.valid;
     if (!v) {
         // a new command buffer: nothing is set yet (the cached colour attachment count would carry over otherwise)
@@ -609,7 +656,6 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         q.textures = tex_.data();
         q.engineVs = vs_.get();
         q.enginePs = ps_.get();
-        q.engineVsRef = &vs_;
         q.decl = decl_;
         q.blended = rs_[RS_ALPHABLENDENABLE] != 0 && rs_[RS_SRCBLEND] == BLEND_SRCALPHA && rs_[RS_DESTBLEND] == BLEND_INVSRCALPHA;
         q.blending = rs_[RS_ALPHABLENDENABLE] != 0;
@@ -678,12 +724,12 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     struct Swap {
         Device& d;
         bool active = false;
-        std::shared_ptr<Shader> vs, ps;
+        ShaderRef vs, ps;
         std::uint32_t states[std::size(kReplacedStates)]{};
         ~Swap() {
             if (!active) return;
-            d.vs_ = std::move(vs);
-            d.ps_ = std::move(ps);
+            d.vs_ = vs;
+            d.ps_ = ps;
             for (std::size_t i = 0; i < std::size(kReplacedStates); ++i) d.rs_[kReplacedStates[i]] = states[i];
             d.vsConstDirty_ = d.psConstDirty_ = true;
         }
@@ -724,7 +770,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     }
     prepareTextures();
     // the G-buffer's attachments belong to the first main view's solid pass only: another scope when that changes
-    if (rendering_ && scopeGbuf_ != gbufferScope()) endRendering();
+    if (rendering_ && (scopeGbuf_ != gbufferScope() || scopeSecondary_ != wantSecondaryScope())) endRendering();
     if (!beginRendering()) {
         ++stats_.drawsSkipped;
         ++stats_.skippedNoTarget;
@@ -788,7 +834,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     }
     pd.depthFormat = depthFormat_;
     pd.stencilFormat = stencilFormat_;
-    if (!computeVertexInput(pd, packet_.vi)) {
+    if (!computeVertexInput(pd, workVi_)) {
         ++stats_.drawsSkipped;
         ++stats_.skippedVertexInput;
         customVertices_ = 0;
@@ -877,10 +923,25 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     if (lastPipelineValid_ && std::memcmp(&pd, &lastPipelineDesc_, sizeof(pd)) == 0) {
         pipeline = lastPipeline_;
     } else {
-        bool created = false;
-        pipeline = pipelines_.get(pd, &created);
-        if (created && pipeline != VK_NULL_HANDLE) {
-            recordPipelineKey(pd);
+        // a direct-mapped cache of recent descriptions in front of the pipeline map: no 520-byte hash, no lock, no node walk
+        // (a pipeline never changes once made)
+        const std::uint64_t slot = ((reinterpret_cast<std::uintptr_t>(pd.vs) >> 4) * 0x9E3779B97F4A7C15ull ^
+                                    (reinterpret_cast<std::uintptr_t>(pd.fs) >> 4) * 0xC2B2AE3D27D4EB4Full ^ pd.colorFormats[0] ^
+                                    (static_cast<std::uint64_t>(pd.depthFormat) << 8) ^ (static_cast<std::uint64_t>(pd.colorCount) << 16)) >>
+                                   40;
+        RecentPipeline& recent = recentPipelines_[slot % recentPipelines_.size()];
+        if (recent.pipeline != VK_NULL_HANDLE && std::memcmp(&recent.desc, &pd, sizeof(pd)) == 0) {
+            pipeline = recent.pipeline;
+        } else {
+            bool created = false;
+            pipeline = pipelines_.get(pd, &created);
+            if (created && pipeline != VK_NULL_HANDLE) {
+                recordPipelineKey(pd);
+            }
+            if (pipeline != VK_NULL_HANDLE) {
+                recent.desc = pd;
+                recent.pipeline = pipeline;
+            }
         }
         lastPipelineDesc_ = pd;
         lastPipeline_ = pipeline;
@@ -893,18 +954,16 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         return false;
     }
     packet_.pipeline = pipeline;
-    computeDynamicState(primitiveType, packet_.dyn);
+    computeDynamicState(primitiveType, workDyn_);
     uploadConstants();
 
     shader::abi::DrawBlock block{};
     float jitterX = 0.0f, jitterY = 0.0f;
     geometryJitter(jitterX, jitterY);  // camera jitter of the main view's geometry (TAA / upscaling)
     const float lodBias = (jitterX != 0.0f || jitterY != 0.0f) ? geometryLodBias_ : 0.0f;
-    for (std::uint32_t slot = 0; slot < kSamplerCount; ++slot) {
+    for (std::uint32_t mask = boundSamplerMask(); mask != 0; mask &= mask - 1) {
+        const std::uint32_t slot = static_cast<std::uint32_t>(std::countr_zero(mask));
         const shader::Reflection& r = slot < 16 ? ps_->reflection : vs_->reflection;
-        if (r.samplers[slot] == shader::TextureType::Unknown) {
-            continue;
-        }
         Texture* t = tex_[slot];
         const bool kindMatches = t != nullptr &&
                                  ((r.samplers[slot] == shader::TextureType::Cube) == (t->kind() == vk::TextureKind::Cube)) &&
@@ -971,9 +1030,9 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
                               k == draws::Kind::Skinned;
         const bool opaquePass = (phase.view == scene::View::Main && (phase.pass == scene::Pass::DepthPrepass || phase.pass == scene::Pass::Solid)) ||
                                 (phase.view == scene::View::Shadow && phase.pass == scene::Pass::ShadowDepth);
-        const VkCompareOp z = packet_.dyn.depthCompare;
+        const VkCompareOp z = workDyn_.depthCompare;
         packet_.batchable = batching_ && meshKind && opaquePass && !replaced && tint == 0 && customVertices_ == 0 && geom.indexed &&
-                            !geom.userPointer && rs_[RS_ALPHABLENDENABLE] == 0 && packet_.dyn.depthTest != 0 && packet_.dyn.stencilTest == 0 &&
+                            !geom.userPointer && rs_[RS_ALPHABLENDENABLE] == 0 && workDyn_.depthTest != 0 && workDyn_.stencilTest == 0 &&
                             (z == VK_COMPARE_OP_LESS || z == VK_COMPARE_OP_LESS_OR_EQUAL || z == VK_COMPARE_OP_EQUAL);
     }
     ++stats_.draws;
@@ -1023,10 +1082,9 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         r->vsConsts = vsConstAddr_;
         r->psConsts = psConstAddr_;
         r->drawBlock = drawBlock;
-        for (std::uint32_t slot = 0; slot < 16; ++slot) {
-            if (ps_->reflection.samplers[slot] != shader::TextureType::Unknown && tex_[slot] != nullptr) {
-                r->textures[slot] = tex_[slot]->ref().id;
-            }
+        for (std::uint32_t mask = ps_->samplerMask & 0xFFFFu; mask != 0; mask &= mask - 1) {
+            const std::uint32_t slot = static_cast<std::uint32_t>(std::countr_zero(mask));
+            if (tex_[slot] != nullptr) r->textures[slot] = tex_[slot]->ref().id;
         }
     }
     if (options_.perf) {
@@ -1125,8 +1183,8 @@ std::uint32_t Device::foldIndexOffset(VkDeviceSize offset, bool index32, std::ui
 }
 
 // the index buffer binding, recorded only when it differs from this command buffer's last one
-void Device::bindIndexBuffer(VkCommandBuffer cmd, VkBuffer buffer, VkDeviceSize bindOffset, bool index32) {
-    IndexBindingCache& c = ibCache_;
+void Device::bindIndexBuffer(RecordState& rs, VkCommandBuffer cmd, VkBuffer buffer, VkDeviceSize bindOffset, bool index32) {
+    IndexBindingCache& c = rs.ib;
     if (!c.valid || c.buffer != buffer || c.offset != bindOffset || c.index32 != index32) {
         vkCmdBindIndexBuffer(cmd, buffer, bindOffset, index32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
         c = {true, index32, buffer, bindOffset};
@@ -1175,26 +1233,67 @@ void Device::setBatching(bool on) {
     batching_ = on;
 }
 
-void Device::submitPacket(const DrawPacket& p) {
+// the used parts only: the work blocks keep stale bytes beyond the counts
+const Device::VertexInputValues* Device::internVi(const VertexInputValues& v) {
+    const auto same = [](const VertexInputValues& a, const VertexInputValues& b) {
+        return a.bufferCount == b.bufferCount && a.dynamicLayout == b.dynamicLayout && a.bindingCount == b.bindingCount &&
+               a.attributeCount == b.attributeCount && a.vertexShift == b.vertexShift &&
+               std::memcmp(a.buffers, b.buffers, sizeof(VkBuffer) * a.bufferCount) == 0 &&
+               std::memcmp(a.offsets, b.offsets, sizeof(VkDeviceSize) * a.bufferCount) == 0 &&
+               std::memcmp(a.bindings, b.bindings, sizeof(a.bindings[0]) * a.bindingCount) == 0 &&
+               std::memcmp(a.attributes, b.attributes, sizeof(a.attributes[0]) * a.attributeCount) == 0;
+    };
+    if (lastVi_ == nullptr || !same(*lastVi_, v)) lastVi_ = viArena_.push(v);
+    return lastVi_;
+}
+
+const Device::DynamicStateValues* Device::internDyn(const DynamicStateValues& v) {
+    const auto same = [](const DynamicStateValues& a, const DynamicStateValues& b) {
+        constexpr std::size_t prefix = offsetof(DynamicStateValues, blendEnable);
+        const std::uint32_t n = a.colorCount;
+        return std::memcmp(&a, &b, prefix) == 0 && std::memcmp(a.blendEnable, b.blendEnable, sizeof(VkBool32) * n) == 0 &&
+               std::memcmp(a.blendEquation, b.blendEquation, sizeof(VkColorBlendEquationEXT) * n) == 0 &&
+               std::memcmp(a.writeMask, b.writeMask, sizeof(VkColorComponentFlags) * n) == 0;
+    };
+    if (lastDyn_ == nullptr || !same(*lastDyn_, v)) lastDyn_ = dynArena_.push(v);
+    return lastDyn_;
+}
+
+void Device::submitPacket(DrawPacket& p) {
+    p.vi = internVi(workVi_);
+    p.dyn = internDyn(workDyn_);
     if (p.batchable && rendering_) {
         batch_.push_back(p);
+        // with record threads a full segment goes to a worker at once (the draws of a pass are recorded while the engine goes on
+        // producing them, not all at the scope's end)
+        if (scopeSecondary_ && batch_.size() >= kChunkPackets) flushBatch();
         return;
     }
     flushBatch();  // the batch's draws come before this one
-    applyPacket(frames_.cmd(), p);
+    if (scopeSecondary_ && rendering_) {
+        emitPacket(p);
+        return;
+    }
+    applyPacket(rec_, frames_.cmd(), bindless_.pipelineLayout(), p);
 }
 
-void Device::applyPacket(VkCommandBuffer cmd, const DrawPacket& p) {
-    applyVertexInput(cmd, p.vi);
-    if (p.pipeline != boundPipeline_) {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p.pipeline);
-        boundPipeline_ = p.pipeline;
-        ++perf_.pipelineBinds;
+void Device::applyPacket(RecordState& rs, VkCommandBuffer cmd, VkPipelineLayout layout, const DrawPacket& p) {
+    if (p.vi != rs.lastVi) {
+        applyVertexInput(rs, cmd, *p.vi);
+        rs.lastVi = p.vi;
     }
-    applyDynamicState(cmd, p.dyn);
-    vkCmdPushConstants(cmd, bindless_.pipelineLayout(), VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(p.push), &p.push);
+    if (p.pipeline != rs.bound) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p.pipeline);
+        rs.bound = p.pipeline;
+        ++rs.pipelineBinds;
+    }
+    if (p.dyn != rs.lastDyn) {
+        applyDynamicState(rs, cmd, *p.dyn);
+        rs.lastDyn = p.dyn;
+    }
+    vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(p.push), &p.push);
     if (p.op == DrawPacket::Op::DrawIndexed) {
-        bindIndexBuffer(cmd, p.indexBuffer, p.indexOffset, p.index32);
+        bindIndexBuffer(rs, cmd, p.indexBuffer, p.indexOffset, p.index32);
         vkCmdDrawIndexed(cmd, p.count, p.instances, p.first, p.vertexOffset, 0);
     } else {
         vkCmdDraw(cmd, p.count, p.instances, p.first, 0);
@@ -1205,18 +1304,34 @@ void Device::applyPacket(VkCommandBuffer cmd, const DrawPacket& p) {
 void Device::flushBatch() {
     if (batch_.empty()) return;
     const std::uint32_t n = static_cast<std::uint32_t>(batch_.size());
-    batchOrder_.resize(n);
-    for (std::uint32_t i = 0; i < n; ++i) batchOrder_[i] = i;
-    if (n > 2) {
-        // rank of each pipeline = the index of its first draw: groups keep the order in which their pipelines first appeared
-        std::unordered_map<VkPipeline, std::uint32_t> rank;
-        rank.reserve(n);
-        for (std::uint32_t i = 0; i < n; ++i) rank.try_emplace(batch_[i].pipeline, i);
-        std::stable_sort(batchOrder_.begin(), batchOrder_.end(),
-                         [&](std::uint32_t a, std::uint32_t b) { return rank[batch_[a].pipeline] < rank[batch_[b].pipeline]; });
-    }
     VkCommandBuffer cmd = frames_.cmd();
-    for (const std::uint32_t i : batchOrder_) applyPacket(cmd, batch_[i]);
+    const bool threaded = scopeSecondary_ && rendering_;
+    const auto record = [&](const DrawPacket& p) {
+        if (threaded) emitPacket(p);
+        else applyPacket(rec_, cmd, bindless_.pipelineLayout(), p);
+    };
+    if (n <= 2) {
+        for (std::uint32_t i = 0; i < n; ++i) record(batch_[i]);
+    } else {
+        // rank of each pipeline = the index of its first draw: groups keep the order in which their pipelines first appeared.
+        // An open-addressing table of (pipeline, rank) and one sort of (rank << 32 | index) keys: stable by construction
+        std::uint32_t cap = 256;
+        while (cap < 2 * n) cap <<= 1;
+        if (rankTable_.size() < cap) rankTable_.assign(cap, {});
+        else std::fill_n(rankTable_.begin(), cap, RankEntry{});
+        const std::uint32_t mask = cap - 1;
+        batchKeys_.resize(n);
+        for (std::uint32_t i = 0; i < n; ++i) {
+            const VkPipeline p = batch_[i].pipeline;
+            std::uint32_t h = static_cast<std::uint32_t>((reinterpret_cast<std::uintptr_t>(p) >> 4) * 0x9E3779B97F4A7C15ull >> 32) & mask;
+            while (rankTable_[h].pipeline != VK_NULL_HANDLE && rankTable_[h].pipeline != p) h = (h + 1) & mask;
+            if (rankTable_[h].pipeline == VK_NULL_HANDLE) rankTable_[h] = {p, i};
+            batchKeys_[i] = (static_cast<std::uint64_t>(rankTable_[h].rank) << 32) | i;
+        }
+        std::sort(batchKeys_.begin(), batchKeys_.end());
+        for (const std::uint64_t k : batchKeys_) record(batch_[static_cast<std::uint32_t>(k)]);
+    }
+    if (threaded) closeChunk();  // a flush is one chunk: a worker starts on it now
     perf_.batchedDraws += n;
     ++perf_.batches;
     batch_.clear();

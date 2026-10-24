@@ -95,6 +95,19 @@ public:
     std::string name(std::uint64_t pc) { return lookup(pc, true); }
     // the function without the offset (the key of a flat profile); unnamed code is bucketed per 4 KiB
     std::string function(std::uint64_t pc) { return lookup(pc, false); }
+    // the RVA of `pc` inside our own module (the d3d9.dll proxy), 0 elsewhere: raw material for llvm-symbolizer --inlines
+    std::uint32_t ownRva(std::uint64_t pc) {
+        HMODULE m = nullptr;
+        HMODULE self = nullptr;
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                reinterpret_cast<LPCWSTR>(pc), &m) ||
+            !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                reinterpret_cast<LPCWSTR>(&presentSampler), &self) ||
+            m != self) {
+            return 0;
+        }
+        return static_cast<std::uint32_t>(pc - reinterpret_cast<std::uint64_t>(m));
+    }
     std::string moduleName(std::uint64_t pc) {
         HMODULE m = nullptr;
         if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -303,6 +316,17 @@ void StallSampler::Impl::reportProfile(const std::map<std::vector<std::uint64_t>
     top(modules, 12, "module");
     top(self, 30, "self");
     top(incl, 45, "incl");
+    // our module's leaf addresses (16-byte buckets): `llvm-symbolizer --obj=d3d9.dll --inlines 0x180000000+<rva>` gives lines
+    std::unordered_map<std::uint32_t, std::uint32_t> pcs;
+    for (const auto& [stack, count] : taken) {
+        if (stack.empty()) continue;
+        if (const std::uint32_t rva = sym.ownRva(stack[0]); rva != 0) pcs[rva & ~0xFu] += count;
+    }
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> v(pcs.begin(), pcs.end());
+    std::ranges::sort(v, [](const auto& a, const auto& b) { return a.second > b.second; });
+    for (std::size_t i = 0; i < std::min<std::size_t>(v.size(), 120); ++i) {
+        spdlog::info("diag: profile pc {:5.2f} % 0x{:x}", 100.0 * v[i].second / n, v[i].first);
+    }
 }
 
 StallSampler::StallSampler(std::string what, double thresholdMs, bool profile) : impl_(new Impl) {

@@ -504,11 +504,8 @@ VkFormat Device::overlayFormat() const {
 
 // after foreign commands (the overlay binds its own pipeline, descriptor set and dynamic state) in the frame's command buffer
 void Device::invalidateRecordingState() {
-    boundPipeline_ = VK_NULL_HANDLE;
+    rec_.reset();
     lastPipelineValid_ = false;
-    viCache_.buffersValid = viCache_.layoutValid = false;
-    ibCache_.valid = false;
-    dyn_.valid = false;
     vsConstDirty_ = psConstDirty_ = true;
     const VkDescriptorSet set = bindless_.set();
     vkCmdBindDescriptorSets(frames_.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS, bindless_.pipelineLayout(), 0, 1, &set, 0, nullptr);
@@ -545,6 +542,7 @@ void Device::destroy() {
     }
     stopVariantWorker();
     frames_.waitIdle();
+    stopRecordThreads();
     processReleases();
     backBuffer_.reset();
     depthBuffer_.reset();
@@ -610,6 +608,11 @@ void Device::destroy() {
 
 void Device::beginFrame() {
     frames_.begin();
+    viArena_.clear();  // every chunk of the last submission has been recorded and executed
+    dynArena_.clear();
+    lastVi_ = nullptr;
+    lastDyn_ = nullptr;
+    resetRecordPools(frames_.currentSlot());
     substituteFrom_ = nullptr;
     substituteSlot_ = 0;
     perf_.slotWaitMs += frames_.lastSlotWaitMs();
@@ -638,11 +641,8 @@ void Device::beginFrame() {
     processReleases();
     uploadUsed_ = false;
     rendering_ = false;
-    boundPipeline_ = VK_NULL_HANDLE;
+    rec_.reset();
     lastPipelineValid_ = false;
-    viCache_.buffersValid = viCache_.layoutValid = false;
-    ibCache_.valid = false;
-    dyn_.valid = false;
     vsConstDirty_ = psConstDirty_ = true;
     frameAddr_ = 0;  // ring memory of the frame block belongs to a submission
     passIndex_ = 0;
@@ -693,13 +693,21 @@ void Device::regionBegin(const char* name, std::uint32_t index) {
     r.base = name;
     r.index = index;
     formatLabel(r.text, name, index);
-    beginLabel(frames_.cmd(), r.text);
+    if (rendering_ && scopeSecondary_) {
+        scopeLabel(true, r.text);  // in order with the scope's chunks
+    } else {
+        beginLabel(frames_.cmd(), r.text);
+    }
 }
 
 void Device::regionEnd() {
     if (!regionsOn_ || regionCount_ == 0) return;
     --regionCount_;
-    vkCmdEndDebugUtilsLabelEXT(frames_.cmd());
+    if (rendering_ && scopeSecondary_) {
+        scopeLabel(false, nullptr);
+    } else {
+        vkCmdEndDebugUtilsLabelEXT(frames_.cmd());
+    }
 }
 
 void Device::setRegionsEnabled(bool on) {
@@ -785,6 +793,8 @@ void Device::gpuMark(const char* what) {
 }
 
 PerfStats Device::takePerf() {
+    perf_.pipelineBinds += rec_.pipelineBinds;
+    rec_.pipelineBinds = 0;
     PerfStats p = std::move(perf_);
     perf_ = PerfStats{};
     p.pipelinesBuilt = pipelines_.built() - perfPipelinesBase_;
@@ -1205,6 +1215,9 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
     s->bytecode.assign(tokens.begin(), tokens.end());
     s->hash = hash;
     s->semantics = shaderSemantics(tokens, s->reflection);
+    for (std::uint32_t slot = 0; slot < kSamplerCount; ++slot) {
+        if (s->reflection.samplers[slot] != shader::TextureType::Unknown) s->samplerMask |= 1u << slot;
+    }
     if (s->module == VK_NULL_HANDLE) {
         return nullptr;
     }
@@ -1319,7 +1332,14 @@ void Device::setVariantProvider(VariantSlot slot, VariantProvider provider) {
     variantProviders_[static_cast<std::size_t>(slot)] = std::move(provider);
 }
 
-VkShaderModule Device::variant(const std::shared_ptr<Shader>& s, VariantSlot slot) {
+std::shared_ptr<Shader> Device::shaderOwner(const Shader* s) {
+    if (s == nullptr) return nullptr;
+    const std::lock_guard lock(shaderMutex_);
+    const auto it = shaders_.find(s->hash);
+    return it != shaders_.end() && it->second.get() == s ? it->second : nullptr;
+}
+
+VkShaderModule Device::variant(const ShaderRef& s, VariantSlot slot) {
     const std::size_t i = static_cast<std::size_t>(slot);
     const std::uint8_t state = s->variantState[i].load(std::memory_order_acquire);
     if (state == 2) return s->variants[i].load(std::memory_order_acquire);
@@ -1331,7 +1351,12 @@ VkShaderModule Device::variant(const std::shared_ptr<Shader>& s, VariantSlot slo
             s->variantState[i].store(3);
             return VK_NULL_HANDLE;
         }
-        variantJobs_.push_back({s, slot});
+        std::shared_ptr<Shader> owner = shaderOwner(s.get());
+        if (!owner) {
+            s->variantState[i].store(3);
+            return VK_NULL_HANDLE;
+        }
+        variantJobs_.push_back({std::move(owner), slot});
         if (variantThreads_.empty()) {
             variantStop_ = false;
             for (int t = 0; t < 3; ++t) variantThreads_.emplace_back([this] { variantWorker(); });
@@ -1536,16 +1561,16 @@ void Device::setStreamSourceFreq(std::uint32_t stream, std::uint32_t setting) {
 void Device::setIndices(Buffer* buffer) { indices_ = buffer; }
 void Device::setVertexDecl(VertexDecl* decl) { decl_ = decl; }
 
-void Device::setVertexShader(std::shared_ptr<Shader> shader) {
-    if (shader != vs_) {
-        vs_ = std::move(shader);
+void Device::setVertexShader(const std::shared_ptr<Shader>& shader) {
+    if (const ShaderRef ref(shader); ref != vs_) {
+        vs_ = ref;
         vsConstDirty_ = true;
     }
 }
 
-void Device::setPixelShader(std::shared_ptr<Shader> shader) {
-    if (shader != ps_) {
-        ps_ = std::move(shader);
+void Device::setPixelShader(const std::shared_ptr<Shader>& shader) {
+    if (const ShaderRef ref(shader); ref != ps_) {
+        ps_ = ref;
         psConstDirty_ = true;
     }
 }
@@ -1639,7 +1664,7 @@ void Device::setScissorRect(std::int32_t left, std::int32_t top, std::int32_t ri
 
 void Device::clear(std::uint32_t flags, std::uint32_t color, float z, std::uint32_t stencil) {
     ++stats_.totalClears;
-    if (rendering_ && scopeGbuf_ != gbufferScope()) endRendering();
+    if (rendering_ && (scopeGbuf_ != gbufferScope() || scopeSecondary_ != wantSecondaryScope())) endRendering();
     if (!beginRendering()) {
         return;
     }
@@ -1682,7 +1707,15 @@ void Device::clear(std::uint32_t flags, std::uint32_t color, float z, std::uint3
     }
     if (n > 0) {
         flushBatch();  // the draws batched before the clear
-        vkCmdClearAttachments(frames_.cmd(), n, atts, 1, &rect);
+        if (scopeSecondary_) {
+            ClearOp op;
+            std::copy(atts, atts + n, op.atts);
+            op.count = n;
+            op.rect = rect;
+            emitClear(op);
+        } else {
+            vkCmdClearAttachments(frames_.cmd(), n, atts, 1, &rect);
+        }
     }
 }
 

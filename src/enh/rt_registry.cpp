@@ -19,20 +19,18 @@ std::uint64_t mix(std::uint64_t h, std::uint64_t v) {
     return x;
 }
 
-std::int64_t quantise(float v, float scale) { return static_cast<std::int64_t>(std::llround(static_cast<double>(v) * scale)); }
-
 }  // namespace
 
 std::uint64_t hash(const BlasKey& k) {
-    std::uint64_t h = 0x84222325CBF29CE4ull;
-    h = mix(h, k.vb);
-    h = mix(h, k.ib);
-    h = mix(h, (static_cast<std::uint64_t>(k.vbGen) << 32) | k.ibGen);
-    h = mix(h, (static_cast<std::uint64_t>(k.vertexOffset) << 32) | k.stride);
-    h = mix(h, (static_cast<std::uint64_t>(k.first) << 32) | k.primitives);
-    h = mix(h, (static_cast<std::uint64_t>(static_cast<std::uint32_t>(k.baseVertex)) << 32) | k.index32);
-    h = mix(h, k.strip);
-    return h;
+    // multiply-xor over the key's words, one final avalanche (the key is looked up for every sighting)
+    constexpr std::uint64_t kMul = 0x9E3779B97F4A7C15ull;
+    std::uint64_t h = (k.vb ^ 0x84222325CBF29CE4ull) * kMul;
+    h = (h ^ k.ib ^ (h >> 29)) * kMul;
+    h = (h ^ ((static_cast<std::uint64_t>(k.vbGen) << 32) | k.ibGen)) * kMul;
+    h = (h ^ ((static_cast<std::uint64_t>(k.vertexOffset) << 32) | k.stride)) * kMul;
+    h = (h ^ ((static_cast<std::uint64_t>(k.first) << 32) | k.primitives)) * kMul;
+    h = (h ^ ((static_cast<std::uint64_t>(static_cast<std::uint32_t>(k.baseVertex)) << 32) | (k.index32 | (k.strip << 1)))) * kMul;
+    return h ^ (h >> 31);
 }
 
 bool finite(const Rows& r) {
@@ -43,13 +41,19 @@ bool finite(const Rows& r) {
 }
 
 std::uint64_t instanceKey(std::uint64_t blasId, const Rows& rows) {
-    std::uint64_t h = mix(0x51ED270B27C6A2B1ull, blasId);
+    // the translation to 1/16 unit, the 3x3 part to 1/4096 (round half away from zero), folded by multiply-xor
+    constexpr std::uint64_t kMul = 0x9E3779B97F4A7C15ull;
+    std::uint64_t h = (blasId ^ 0x51ED270B27C6A2B1ull) * kMul;
     for (int row = 0; row < 3; ++row) {
         for (int col = 0; col < 4; ++col) {
             const float v = rows[static_cast<std::size_t>(row * 4 + col)];
-            h = mix(h, static_cast<std::uint64_t>(quantise(v, col == 3 ? 16.0f : 4096.0f)));
+            const double scaled = static_cast<double>(v) * (col == 3 ? 16.0 : 4096.0);
+            const auto q = static_cast<std::int64_t>(scaled + (v < 0.0f ? -0.5 : 0.5));
+            h = (h ^ static_cast<std::uint64_t>(q)) * kMul;
+            h ^= h >> 32;
         }
     }
+    h = mix(h, 0);
     return h == 0 ? 1 : h;
 }
 
@@ -78,21 +82,14 @@ Sphere worldSphere(const Aabb& box, const Rows& r) {
         s.c[2] = r[11];
         return s;
     }
-    Aabb w;
-    for (int corner = 0; corner < 8; ++corner) {
-        const float p[3] = {(corner & 1) ? box.max[0] : box.min[0], (corner & 2) ? box.max[1] : box.min[1],
-                            (corner & 4) ? box.max[2] : box.min[2]};
-        float q[3];
-        for (int row = 0; row < 3; ++row) {
-            q[row] = r[static_cast<std::size_t>(row * 4)] * p[0] + r[static_cast<std::size_t>(row * 4 + 1)] * p[1] +
-                     r[static_cast<std::size_t>(row * 4 + 2)] * p[2] + r[static_cast<std::size_t>(row * 4 + 3)];
-        }
-        w.add(q);
-    }
+    // the transformed box's axis-aligned bounds: its centre is the transformed centre, its half extents |R| x half extents
+    const float cx = 0.5f * (box.min[0] + box.max[0]), cy = 0.5f * (box.min[1] + box.max[1]), cz = 0.5f * (box.min[2] + box.max[2]);
+    const float hx = 0.5f * (box.max[0] - box.min[0]), hy = 0.5f * (box.max[1] - box.min[1]), hz = 0.5f * (box.max[2] - box.min[2]);
     float d2 = 0.0f;
-    for (int i = 0; i < 3; ++i) {
-        s.c[i] = 0.5f * (w.min[i] + w.max[i]);
-        const float e = 0.5f * (w.max[i] - w.min[i]);
+    for (int row = 0; row < 3; ++row) {
+        const float* m = &r[static_cast<std::size_t>(row * 4)];
+        s.c[row] = m[0] * cx + m[1] * cy + m[2] * cz + m[3];
+        const float e = std::fabs(m[0]) * hx + std::fabs(m[1]) * hy + std::fabs(m[2]) * hz;
         d2 += e * e;
     }
     s.r = std::sqrt(d2);

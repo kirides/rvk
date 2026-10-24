@@ -371,7 +371,7 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
             !q.indexBuffer->ringCopied()) {
             const rt::BlasKey key = keyOf(q);
             if (const auto it = blasByKey_.find(key); it != blasByKey_.end()) {
-                Blas* b = findBlas(it->second);
+                Blas* b = it->second;
                 if (b != nullptr && blendLogged_.size() < 200 && blendLogged_.insert(reinterpret_cast<std::uintptr_t>(q.tag != nullptr ? q.tag->material : nullptr) ^ q.enginePs->hash).second) {
                     spdlog::info("rt: scene: main-view blended draw of BLAS #{} ({} {}): material '{}', blend {}/{}{}", b->id, d3d9::scene::name(q.phase.pass),
                                  q.instanced ? "instanced" : "plain", q.tag != nullptr && q.tag->material != nullptr ? engine::materials::resourceName(q.tag->material) : "?",
@@ -460,7 +460,7 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     if (!mainOpaque && !blendedKeys_.empty()) {
         if (const auto it = blendedKeys_.find(key); it != blendedKeys_.end() && it->second + kOpaqueRecent >= dev.frameValue()) {
             const auto bk = blasByKey_.find(key);
-            const Blas* known = bk != blasByKey_.end() ? findBlas(bk->second) : nullptr;
+            const Blas* known = bk != blasByKey_.end() ? bk->second : nullptr;
             if (known == nullptr || known->opaqueMainFrame + kOpaqueRecent < dev.frameValue()) return skip();
         }
     }
@@ -468,7 +468,7 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     const double now = dev.secondsSinceCreate();
     Blas* b = nullptr;
     if (const auto it = blasByKey_.find(key); it != blasByKey_.end()) {
-        b = findBlas(it->second);
+        b = it->second;
         if (b != nullptr) {
             // a later declaration may name more attributes (the shadow pass's can be shorter)
             Layout& l = b->layout;
@@ -494,7 +494,7 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
             nb.entity = q.tag->entity;
             nb.opDesc = q.tag->opDesc;
         }
-        blasByKey_[key] = id;
+        blasByKey_[key] = &nb;
         blasByBuffer_.emplace(vr.id, id);
         if (ir.id != vr.id) blasByBuffer_.emplace(ir.id, id);
         pending_.push_back(id);
@@ -586,7 +586,7 @@ void RtScene::learnExcluded(const d3d9::ReplaceQuery& q, bool water) {
     const rt::BlasKey key = keyOf(q);
     if (water) {
         if (!waterKeys_.insert(key).second) return;
-        if (const auto it = blasByKey_.find(key); it != blasByKey_.end()) dropBlas(it->second, false);
+        if (const auto it = blasByKey_.find(key); it != blasByKey_.end()) dropBlas(it->second->id, false);
         return;
     }
     // blended: excluded unless the main view also draws the range opaque (multi-pass materials: an opaque base pass plus
@@ -594,8 +594,8 @@ void RtScene::learnExcluded(const d3d9::ReplaceQuery& q, bool water) {
     const std::uint64_t frame = dev_.frameValue();
     blendedKeys_[key] = frame;
     if (const auto it = blasByKey_.find(key); it != blasByKey_.end()) {
-        const Blas* b = findBlas(it->second);
-        if (b != nullptr && b->opaqueMainFrame + kOpaqueRecent < frame) dropBlas(it->second, false);
+        const Blas* b = it->second;
+        if (b != nullptr && b->opaqueMainFrame + kOpaqueRecent < frame) dropBlas(b->id, false);
     }
 }
 

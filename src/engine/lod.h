@@ -25,6 +25,11 @@ struct Scales {
 void setScales(const Scales& s);
 Scales scales();
 
+// The per-frame cache-in walk (eCPrefetchAdmin::CacheEntities, ~3 % of the engine thread) runs every `stride`-th frame, and
+// at once when the camera moved a metre since the last walk; in between the call only flushes the tree's dirty lists (its
+// two walk flags false). 1 = every frame (the game's behaviour). Any thread.
+void setPrefetchStride(int stride);
+
 // Creates the detours (enabled with the others by hooks::enableAll); false when a symbol is missing
 bool install();
 

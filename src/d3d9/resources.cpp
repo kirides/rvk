@@ -486,6 +486,8 @@ VkDeviceAddress Buffer::deviceAddress() {
 // ---- VertexDecl ------------------------------------------------------------------------------------------------------
 
 VertexDecl::VertexDecl(std::span<const VertexElement> elements) {
+    static std::atomic<std::uint64_t> nextId{1};
+    id_ = nextId.fetch_add(1, std::memory_order_relaxed);
     for (const auto& e : elements) {
         if (e.stream == kDeclEndStream) {
             break;

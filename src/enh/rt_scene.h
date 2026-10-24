@@ -263,8 +263,8 @@ private:
     std::uint64_t builtFrame_ = 0;  // the frame whose TLAS is built (once: at the z pre-pass, else at AfterOpaque)
 
     // BLAS cache
-    std::unordered_map<rt::BlasKey, std::uint64_t, rt::BlasKeyHash> blasByKey_;
-    std::unordered_map<std::uint64_t, Blas> blas_;
+    std::unordered_map<rt::BlasKey, Blas*, rt::BlasKeyHash> blasByKey_;  // Blas nodes of blas_ are stable until dropBlas erases both
+    std::unordered_map<std::uint64_t, Blas, IdHash> blas_;
     std::unordered_multimap<std::uint64_t, std::uint64_t> blasByBuffer_;  // buffer id -> BLAS id
     std::deque<std::uint64_t> pending_;
     std::uint64_t nextBlasId_ = 1;
@@ -311,7 +311,7 @@ private:
     std::uint64_t lastTriangles_ = 0;
     std::chrono::steady_clock::time_point lastLog_{};
     std::unordered_set<const void*> declLogged_;
-    std::unordered_map<std::uint64_t, const char*> vsVerdict_;  // VS hash (^ instanced) -> why its draws are not taken (null = taken)
+    std::unordered_map<std::uint64_t, const char*, IdHash> vsVerdict_;  // VS hash (^ instanced) -> why its draws are not taken (null = taken)
     std::unordered_set<std::uint64_t> blendLogged_;
     std::unordered_set<const char*> speedTreeLogged_;  // reasons (string literals)
     std::unordered_set<std::uint32_t> reasonsLogged_;

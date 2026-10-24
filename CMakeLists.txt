@@ -190,6 +190,7 @@ add_library(rvk_core STATIC
     src/d3d9/device.h
     src/d3d9/draw.cpp
     src/d3d9/draws.cpp
+    src/d3d9/record.cpp
     src/d3d9/draws.h
     src/d3d9/ffshader.cpp
     src/d3d9/ffshader.h
