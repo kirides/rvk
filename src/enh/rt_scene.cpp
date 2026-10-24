@@ -145,7 +145,8 @@ void RtScene::deactivate() {
 // ---- draw observation -----------------------------------------------------------------------------------------------------
 
 bool RtScene::observes(Kind kind, d3d9::scene::Phase phase) const {
-    if (kind == Kind::Skinned) return dynamic_ && phase.view == View::Main && phase.pass == Pass::Solid;  // characters
+    // characters: the main view's solid pass (also their motion) and the sun cascades' views (this frame's pose, before the main view)
+    if (kind == Kind::Skinned) return dynamic_ && ((phase.view == View::Main && phase.pass == Pass::Solid) || phase.view == View::Shadow);
     if (kind == Kind::Refracted) return phase.view == View::Main;  // learnt as water (excluded in every view)
     if (kind != Kind::StaticMesh && kind != Kind::InstancedMesh && kind != Kind::SpeedTree) return false;
     if (phase.view == View::Shadow) return (views_ & 2) != 0;
@@ -1274,8 +1275,13 @@ bool RtScene::captureOptions(const d3d9::Shader& s, shader::GlslOptions& o) {
         "    vec4 v[];    // per slot: world position (w = 1), TEXCOORD0\n"
         "}};\n"
         "// the previous frame's world position of the vertex (w = 1; 0 = unknown): per-object motion (enh/gbuffer)\n"
-        "layout(location = {}) out vec4 rvk_prevWorld;\n",
+        "layout(location = {}) out vec4 rvk_prevWorld;\n"
+        "// the operand the shader multiplies with its view-projection: the world position, in any view (GlslOptions::dotCaptures)\n"
+        "vec4 rvk_capW = vec4(0.0);\n",
         kPrevWorldLocation);
+    if (const auto& vp = s.semantics[d3d9::Semantic::ViewProjection]; vp.present()) {
+        o.dotCaptures.push_back({static_cast<std::uint32_t>(vp.reg), "rvk_capW"});
+    }
     o.epilogue = std::format(
         "    rvk_prevWorld = vec4(0.0);\n"
         "    {{\n"
@@ -1283,11 +1289,14 @@ bool RtScene::captureOptions(const d3d9::Shader& s, shader::GlslOptions& o) {
         "        if (rvk_capAddr != uvec2(0u)) {{\n"
         "            RvkCapture rvk_cap = RvkCapture(rvk_capAddr);\n"
         "            int rvk_slot = gl_VertexIndex - int(pc.draw.pad1);\n"
-        "            vec4 rvk_w = pc.frame.invViewProj * rvk_pos;\n"
         "            uvec4 rvk_info = rvk_cap.info;\n"
-        "            if (rvk_slot >= 0 && uint(rvk_slot) < rvk_info.x && abs(rvk_w.w) > 1e-20) {{\n"
+        "            uint rvk_slots = rvk_info.x & 0x7FFFFFFFu;\n"
+        "            // the main view: the clip position back to the world; a cascade's view (bit 31 of the header's slots): the operand the\n"
+        "            // shader multiplied with its view-projection\n"
+        "            vec4 rvk_w = (rvk_info.x & 0x80000000u) != 0u ? rvk_capW : pc.frame.invViewProj * rvk_pos;\n"
+        "            if (rvk_slot >= 0 && uint(rvk_slot) < rvk_slots && abs(rvk_w.w) > 1e-20) {{\n"
         "                vec3 rvk_world = rvk_w.xyz / rvk_w.w;\n"
-        "                uint rvk_at = uint(gl_InstanceIndex) * rvk_info.x + uint(rvk_slot);  // instanced draws: one run of slots per instance\n"
+        "                uint rvk_at = uint(gl_InstanceIndex) * rvk_slots + uint(rvk_slot);  // instanced draws: one run of slots per instance\n"
         "                rvk_cap.v[rvk_at * 2] = vec4(rvk_world, 1.0);\n"
         "                rvk_cap.v[rvk_at * 2 + 1] = {};\n"
         "                rvk_prevWorld = vec4(rvk_world, 0.0);\n"
@@ -1325,7 +1334,7 @@ void RtScene::setDynamic(const void* consumer, bool on) {
     dynamic_ = want;
     if (want) {
         if (!captureRegistered_) {
-            dev_.setVariantProvider(d3d9::VariantSlot::Capture, {"cap4", captureOptions});
+            dev_.setVariantProvider(d3d9::VariantSlot::Capture, {"cap5", captureOptions});
             captureRegistered_ = true;
         }
         spdlog::info("rt: scene: characters on (skinned solid draws captured each frame)");
@@ -1333,6 +1342,20 @@ void RtScene::setDynamic(const void* consumer, bool on) {
         dropDynamic(true, 0);
         spdlog::info("rt: scene: characters off");
     }
+}
+
+// the capture requests of a new frame: the list of the frame before is kept (a character the cascades did not draw this frame
+// is built from its main-view capture of the previous frame)
+void RtScene::rollDyn(std::uint64_t frame) {
+    if (dynFrame_ == frame) return;
+    if (dynFrame_ + 1 == frame) {
+        dynPrev_ = std::move(dyn_);
+    } else {
+        dynPrev_.clear();
+    }
+    dyn_.clear();
+    dynFrame_ = frame;
+    dynTrees_ = 0;
 }
 
 void RtScene::setAnimated(const void* consumer, bool on, float rangeUnits) {
@@ -1364,14 +1387,10 @@ void RtScene::observeTree(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& 
         return;
     }
     const std::uint64_t frame = dev.frameValue();
-    if (dynFrame_ != frame) {
-        dyn_.clear();
-        dynFrame_ = frame;
-        dynTrees_ = 0;
-    }
+    rollDyn(frame);
     if (dynTrees_ >= kMaxAnimatedTrees || dyn_.size() >= 512) return;
     for (const DynDraw& d : dyn_) {
-        if (d.key == in.key) return;
+        if (d.key == in.key && d.main) return;
     }
     const bool index32 = b.key.index32 != 0;
     const VkDeviceAddress indices = b.key.strip != 0 ? b.listIndices.address
@@ -1410,12 +1429,10 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         return;
     }
     const std::uint64_t frame = dev.frameValue();
-    if (dynFrame_ != frame) {
-        dyn_.clear();
-        dynFrame_ = frame;
-        dynTrees_ = 0;
-    }
+    rollDyn(frame);
     if (dyn_.size() >= 512) return;
+    // a cascade's view (the sun's shadow maps are drawn before the main view of the frame, with this frame's pose) or the main view's
+    const bool mainView = q.phase.view == View::Main;
     // the draw: entity x buffers x range (the later passes of a character draw the same range again: the first one counts)
     const d3d9::ResourceRef vr = q.vertexBuffer->ref(), ir = q.indexBuffer->ref();
     std::uint64_t key = 1469598103934665603ull;
@@ -1433,7 +1450,7 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     mix(static_cast<std::uint32_t>(q.baseVertex));
     mix(q.vertexOffset);
     for (const DynDraw& d : dyn_) {
-        if (d.key == key) return;
+        if (d.key == key && d.main == mainView) return;
     }
     DynBlas& b = dynBlas_[key];
     if (b.id == 0) b.id = nextDynId_++;
@@ -1462,17 +1479,18 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     const vk::RingAlloc a = dev.frames().allocate(16 + static_cast<VkDeviceSize>(slots) * 32, 16);
     if (a.ptr == nullptr) return;
     // header: slots, the previous frame's capture of this draw (its vertex shader reads the previous positions: motion)
-    std::uint32_t header[4] = {slots, 0, 0, 0};
-    if (b.lastCapture != 0 && b.lastCaptureFrame + 1 == frame) {
+    // (bit 31 of the slots: a cascade's view, whose vertex shader's world position operand is captured instead of the clip position)
+    std::uint32_t header[4] = {slots | (mainView ? 0u : 0x80000000u), 0, 0, 0};
+    if (mainView && b.lastCapture != 0 && b.lastCaptureFrame + 1 == frame) {
         header[1] = static_cast<std::uint32_t>(b.lastCapture);
         header[2] = static_cast<std::uint32_t>(b.lastCapture >> 32);
         header[3] = b.lastSlots;
     }
     std::memcpy(a.ptr, header, 16);
     dev.requestVertexCapture(a.address);
-    // the draw's material (diffuse + uv map), resolved again when it changes
+    // the draw's material (diffuse + uv map), resolved again when it changes (the main view's draws carry it)
     const std::uint64_t sig = RtMaterials::signature(q);
-    if (b.material == 0 || b.sig != sig || frame >= b.resolved + 600) {
+    if (mainView && (b.material == 0 || b.sig != sig || frame >= b.resolved + 600)) {
         if (const std::uint32_t id = materials_.resolve(dev, q); id != 0) {
             if (b.material != 0) materials_.release(b.material);
             b.material = id;
@@ -1480,17 +1498,62 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
             b.resolved = frame;
         }
     }
-    dyn_.push_back({key, a.address, ibAddress + static_cast<VkDeviceAddress>(q.first) * isize, slots, q.primitives, index32, false});
+    DynDraw d{key, a.address, ibAddress + static_cast<VkDeviceAddress>(q.first) * isize, slots, q.primitives, index32, false};
+    d.main = mainView;
+    dyn_.push_back(d);
 }
 
 // the frame's captured characters -> one BLAS each: refit while the topology holds (30 times), else a full build
 void RtScene::buildDynamic(VkCommandBuffer cmd, std::uint64_t frame) {
     animatedKeys_.clear();
     if (frame % 120 == 0) dropDynamic(false, frame);
-    // the captures of this frame (a build at AfterOpaque) or, built after the z pre-pass, of the previous frame (its solid
-    // pass captured them; its ring memory lives one frame more)
-    const bool current = dynFrame_ == frame;
-    if (!dynamic_ || (!current && dynFrame_ + 1 != frame) || dyn_.empty()) return;
+    // Per key the newest capture that ran: this frame's (the cascades' views before the main view, all of them at AfterOpaque),
+    // else the previous frame's (its main-view solid pass; its ring memory lives one frame more)
+    dynUse_.clear();
+    if (!dynamic_) return;
+    if (dynFrame_ != frame) rollDyn(frame);
+    {
+        std::unordered_set<std::uint64_t> taken;
+        for (const DynDraw& d : dyn_) {
+            if (taken.contains(d.key)) continue;
+            const VkDeviceAddress asked = d.requested != 0 ? d.requested : d.capture;
+            if (!dev_.vertexCaptured(asked)) continue;
+            taken.insert(d.key);
+            dynUse_.push_back(d);
+            dynUse_.back().built = false;
+            ++iv_.capCurrent;
+        }
+        for (const DynDraw& d : dynPrev_) {
+            if (taken.contains(d.key)) continue;
+            const VkDeviceAddress asked = d.requested != 0 ? d.requested : d.capture;
+            if (!dev_.vertexCapturedPrev(asked)) continue;
+            taken.insert(d.key);
+            dynUse_.push_back(d);
+            dynUse_.back().built = false;
+            ++iv_.capPrevious;
+        }
+        // the motion chain (the main view's vertex shader reads the previous main-view capture of the draw)
+        for (const DynDraw& d : dyn_) {
+            if (!d.main || d.tree) continue;
+            const VkDeviceAddress asked = d.requested != 0 ? d.requested : d.capture;
+            if (!dev_.vertexCaptured(asked)) continue;
+            DynBlas& b = dynBlas_[d.key];
+            b.lastCapture = d.capture;
+            b.lastSlots = d.slots;
+            b.lastCaptureFrame = frame;
+        }
+        for (const DynDraw& d : dynPrev_) {
+            if (!d.main || d.tree) continue;
+            DynBlas& b = dynBlas_[d.key];
+            if (b.lastCaptureFrame >= frame - 1 && b.lastCapture != 0) continue;
+            const VkDeviceAddress asked = d.requested != 0 ? d.requested : d.capture;
+            if (!dev_.vertexCapturedPrev(asked)) continue;
+            b.lastCapture = d.capture;
+            b.lastSlots = d.slots;
+            b.lastCaptureFrame = frame - 1;
+        }
+    }
+    if (dynUse_.empty()) return;
     vk::Context& ctx = dev_.ctx();
     constexpr VkBuildAccelerationStructureFlagsKHR kFlags =
         VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
@@ -1499,18 +1562,13 @@ void RtScene::buildDynamic(VkCommandBuffer cmd, std::uint64_t frame) {
     std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges;
     std::vector<VkDeviceSize> scratchOffsets;
     std::vector<std::size_t> which;
-    geoms.reserve(dyn_.size());
-    infos.reserve(dyn_.size());
-    ranges.reserve(dyn_.size());
+    geoms.reserve(dynUse_.size());
+    infos.reserve(dynUse_.size());
+    ranges.reserve(dynUse_.size());
     VkDeviceSize scratchTotal = 0;
-    for (std::size_t i = 0; i < dyn_.size(); ++i) {
-        DynDraw& d = dyn_[i];
-        const VkDeviceAddress asked = d.requested != 0 ? d.requested : d.capture;
-        if (!(current ? dev_.vertexCaptured(asked) : dev_.vertexCapturedPrev(asked))) continue;
+    for (std::size_t i = 0; i < dynUse_.size(); ++i) {
+        DynDraw& d = dynUse_[i];
         DynBlas& b = dynBlas_[d.key];
-        b.lastCapture = d.capture;
-        b.lastSlots = d.slots;
-        b.lastCaptureFrame = dynFrame_;
         VkAccelerationStructureGeometryKHR g{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
         g.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
         g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
@@ -1576,7 +1634,7 @@ void RtScene::buildDynamic(VkCommandBuffer cmd, std::uint64_t frame) {
         }
         if (!dynScratch_.create(ctx, std::max<VkDeviceSize>(scratchTotal * 2, 4ull << 20), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false, scratchAlign_,
                                 "rt scene character scratch")) {
-            for (std::size_t i : which) dynBlas_[dyn_[i].key].built = false;
+            for (std::size_t i : which) dynBlas_[dynUse_[i].key].built = false;
             return;
         }
     }
@@ -1588,9 +1646,9 @@ void RtScene::buildDynamic(VkCommandBuffer cmd, std::uint64_t frame) {
     for (std::size_t k = 0; k < ranges.size(); ++k) pr[k] = &ranges[k];
     vkCmdBuildAccelerationStructuresKHR(cmd, static_cast<std::uint32_t>(infos.size()), infos.data(), pr.data());
     for (std::size_t i : which) {
-        dyn_[i].built = true;
-        dynBlas_[dyn_[i].key].built = true;
-        if (dyn_[i].tree) animatedKeys_.insert(dyn_[i].key);
+        dynUse_[i].built = true;
+        dynBlas_[dynUse_[i].key].built = true;
+        if (dynUse_[i].tree) animatedKeys_.insert(dynUse_[i].key);
     }
 }
 
@@ -1612,6 +1670,8 @@ void RtScene::dropDynamic(bool all, std::uint64_t frame) {
     }
     if (all) {
         dyn_.clear();
+        dynPrev_.clear();
+        dynUse_.clear();
         if (dynScratch_.buffer != VK_NULL_HANDLE) {
             vk::rt::AddressBuffer old = dynScratch_;
             dev_.frames().retire([ctx, old]() mutable { old.destroy(*ctx); });
@@ -1682,9 +1742,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
 
     // characters built this frame (setDynamic) after the world's instances
     std::uint32_t dynCount = 0;
-    if (dynFrame_ + 1 >= frame) {
-        for (const DynDraw& d : dyn_) dynCount += d.built ? 1u : 0u;
-    }
+    for (const DynDraw& d : dynUse_) dynCount += d.built ? 1u : 0u;
     dynCount = std::min(dynCount, tlas_[slot].capacity / 8);
     // the instances and their geometry records (one geometry per BLAS: record index = instanceCustomIndex)
     const auto& list = registry_.instances();
@@ -1818,9 +1876,9 @@ void RtScene::record(d3d9::PassContext& ctx) {
     {
         std::uint32_t k = worldCount;
         std::uint32_t treesNow = 0;
-        for (const DynDraw& d : dyn_) {
+        for (const DynDraw& d : dynUse_) {
             if (k >= n) break;
-            if (dynFrame_ + 1 < frame || !d.built) continue;
+            if (!d.built) continue;
             const auto it = dynBlas_.find(d.key);
             if (it == dynBlas_.end() || !it->second.built) continue;
             const DynBlas& b = it->second;
@@ -1993,8 +2051,8 @@ void RtScene::logStats(bool force) {
                  iv_.engineSegments, iv_.engineMerged, iv_.speedTree);
     if (dynamic_) {
         spdlog::info("rt: scene: characters {} + animated SpeedTrees {} in the last TLAS ({} tracked, interval: {} BLAS builds, {} refits; "
-                     "volatile ranges {}; tree draws {} ({} beyond the range, {} captured); capture variant needs vertexPipelineStoresAndAtomics: {})",
-                     iv_.dynamic - iv_.animatedTrees, iv_.animatedTrees, dynBlas_.size(), dynBuilt_, dynRefit_, iv_.volatileBlas, iv_.treeDraws, iv_.treeFar, iv_.treeCaptured,
+                     "volatile ranges {}; tree draws {} ({} beyond the range, {} captured); BLAS refits from this frame's capture {} / the previous frame's {}; capture variant needs vertexPipelineStoresAndAtomics: {})",
+                     iv_.dynamic - iv_.animatedTrees, iv_.animatedTrees, dynBlas_.size(), dynBuilt_, dynRefit_, iv_.volatileBlas, iv_.treeDraws, iv_.treeFar, iv_.treeCaptured, iv_.capCurrent, iv_.capPrevious,
                      dev_.ctx().features().vertexStores ? "yes" : "no");
         dynBuilt_ = dynRefit_ = 0;
     }

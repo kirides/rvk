@@ -1636,6 +1636,18 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 4,
         .flags = Flag::Debug,
     });
+    r.rtShadowSync = &reg.add({
+        .key = "debug.rt_shadow_sync",
+        .label = "Sun shadow maps every frame with ray-traced shadows",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "While the ray-traced shadows are on, the sun cascades are redrawn every frame (the stride setting is "
+                       "ignored): the characters are drawn into them before the main view, which gives the ray-traced shadows "
+                       "the characters' pose of this frame instead of the previous one. Off: the stride decides.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::Debug,
+    });
     r.prefetchStride = &reg.add({
         .key = "debug.prefetch_stride",
         .label = "Cache-in walk every n-th frame",

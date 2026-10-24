@@ -16,6 +16,10 @@ struct Overrides {
 // any thread; applies at the next RenderShadowMaps
 void setOverrides(const Overrides& o);
 
+// The cascades are drawn every frame while on (the RT shadows: the characters' cascade draws are where their pose of this frame is
+// captured before the main view, rt-shadows.md 7); false = the stride below decides. Any thread
+void setEveryFrame(bool on);
+
 // the cascades are redrawn every n-th frame (1 = every frame) while the camera moves / turns little; any thread
 void setUpdateStride(int stride);
 

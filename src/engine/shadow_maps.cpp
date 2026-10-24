@@ -26,6 +26,7 @@ std::atomic<int> g_size{0};
 std::atomic<float> g_range{0.0f};
 std::atomic<float> g_factor{-1.0f};
 std::atomic<int> g_stride{2};
+std::atomic<bool> g_everyFrame{false};
 std::atomic<float> g_sun[3]{};
 std::atomic<bool> g_sunKnown{false};
 std::atomic<float> g_trueSun[3]{};
@@ -134,7 +135,7 @@ bool detourRender(void* self) {
         t.wroteSize = field<int>(self, kMapSize);
     }
     // alternate frames: the maps and their matrices stay in the cascade object, the mask pass reads them as they are
-    const int stride = g_stride.load(std::memory_order_relaxed);
+    const int stride = g_everyFrame.load(std::memory_order_relaxed) ? 1 : g_stride.load(std::memory_order_relaxed);
     d3d9::Device* dev = stride > 1 && self != nullptr ? engine::scene::renderDevice() : nullptr;
     // the cascades are drawn before the main view of the frame: its camera is not read yet, the last frame's is
     const auto* cam = dev != nullptr && dev->camera().prevValid ? &dev->camera() : nullptr;
@@ -177,6 +178,8 @@ bool detourRender(void* self) {
 }
 
 }  // namespace
+
+void setEveryFrame(bool on) { g_everyFrame.store(on, std::memory_order_relaxed); }
 
 void setUpdateStride(int stride) { g_stride.store(stride < 1 ? 1 : stride, std::memory_order_relaxed); }
 

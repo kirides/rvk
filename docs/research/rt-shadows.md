@@ -140,3 +140,30 @@ BLAS per draw is refitted from it) now covers the trees too:
 * Checks [C]: validation + synchronization validation clean (walk, extended, high); `rvk_shadertool corpus corpus --capture` 0 failures
   (cap4), `--gbuf-motion` 0; `rt.debug=depth` at the beach: red (RT lacks geometry) -5 % with the leaves in range, magenta (misplaced)
   unchanged.
+
+## 7. Characters: this frame's pose from the cascades' draws (2026-10-24)
+
+The player asked to skin the characters on the GPU in a compute / vertex pass whose result both the RT scene and the raster draws
+use. What was measured and built instead:
+
+* **Size of the lag** [C]: the RT scene took the previous frame's captures (the main view's solid pass comes after the shadow mask).
+  The hero walks 340 units/s: 1.7 cm per frame at 200 fps, 5.7 cm at 60 fps (a few pixels at 3 m, visible as a gap at the foot's
+  contact at low frame rates; not the cause of the trails, which were the ghost instances of 5).
+* **Why not a skinning pass of our own** [I]: the bone matrices are VS constants (`g_vInstanceData[idx x 3 + 1 ..]`, engine-gfx.md)
+  that exist only when the engine issues the draw; the engine skins in the vertex shader, there is no earlier place that owns the
+  palette (the render ops are built from the animation's matrices inside `eCAnimation_PS::Render`), so a compute pass would need a
+  second copy of the engine's animation output and a replacement vertex shader for every skinned material. Not built.
+* **Built**: the sun cascades are drawn before the main view of every frame, with the same bone constants: the skinned draws of the
+  cascades' views (`Shadow`) are captured by the same vertex shader variant (`cap5`; in a cascade's view the world position is the
+  operand the shader multiplies with its view-projection: `GlslOptions::dotCaptures` on `g_vViewProjection`, header bit 31 of the
+  slot count; the main view keeps the clip-position path). `RtScene::buildDynamic` takes per key the newest capture that ran: this
+  frame's (cascade views, or the main view when the build runs at AfterOpaque), else the previous frame's. The main-view capture
+  still runs for the motion vectors (the previous main-view capture chain is kept separately). Characters outside the camera's view
+  but inside a cascade now cast RT shadows too (characters in the TLAS 28 -> ~57 in the harbour).
+* **Cost / switch** [C] (harbour quicksave, walking, `shadows.rt=near`, `-Perf`): the engine redraws its cascades at most every other
+  frame while the camera barely moves (`debug.shadow_stride`); with RT shadows on they are now drawn every frame (`debug.rt_shadow_sync`,
+  default on, Debug): CPU 5.7 -> 6.2 ms, GPU 3.2 -> 3.6 ms, frame interval 5.8 -> 6.1 ms (RT shadows off: 4.9 / 1.9 / 5.0 ms). Off: the
+  stride decides and about a third of the character refits use this frame's capture, the rest the previous frame's.
+  Refits from this frame's capture: 55 % of all (all characters, none of the trees) with the switch on, 30 % off.
+* Open: a velocity extrapolation of the previous captures would remove the remaining lag without the cascades' cost; the GI still uses
+  the previous frame's characters.

@@ -247,6 +247,7 @@ private:
         bool tree = false;             // an animated SpeedTree (key = the registry instance of its rest pose, blas = its BLAS)
         std::uint64_t blas = 0;
         VkDeviceAddress requested = 0; // the address the draw's capture was requested with, when `capture` lies inside it (instanced batches)
+        bool main = true;              // requested for the main view's solid pass (else for a sun cascade's view: this frame's pose before the main view)
     };
     struct DynBlas {
         vk::rt::AccelerationStructure as;
@@ -272,7 +273,10 @@ private:
     std::unordered_set<std::uint64_t> animatedKeys_;   // rest-pose instances whose animated BLAS was built this frame (left out of the TLAS)
     bool dynamic_ = false;
     bool captureRegistered_ = false;
-    std::vector<DynDraw> dyn_;  // this frame's captures
+    std::vector<DynDraw> dyn_;      // this frame's capture requests (cascades' views first, then the main view's)
+    std::vector<DynDraw> dynPrev_;  // the previous frame's
+    std::vector<DynDraw> dynUse_;   // what buildDynamic took for this frame's TLAS (one per key, built = its BLAS is up to date)
+    void rollDyn(std::uint64_t frame);
     std::uint64_t dynFrame_ = 0;
     std::unordered_map<std::uint64_t, DynBlas> dynBlas_;
     vk::rt::AddressBuffer dynScratch_;
@@ -326,6 +330,7 @@ private:
     // stats (interval since the last log line)
     struct Interval {
         std::uint64_t treeDraws = 0, treeFar = 0, treeCaptured = 0;  // observeTree: calls, beyond the range, captures requested
+        std::uint64_t capCurrent = 0, capPrevious = 0;  // captures a frame's BLAS refits used: this frame's (the cascades' views) / the previous frame's
         std::uint64_t animatedTrees = 0;  // animated SpeedTrees in the last TLAS
         std::uint64_t volatileBlas = 0;  // ranges that turned volatile (churning instances) in the interval
         std::uint64_t frames = 0, built = 0, builtTriangles = 0, compacted = 0, evicted = 0, failed = 0, observed = 0, skipped = 0, sightings = 0;

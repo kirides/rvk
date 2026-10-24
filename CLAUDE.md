@@ -115,7 +115,7 @@ only happen while the RT term is active and be reverted when it turns off. The s
 cascade object's copy moves in 0.5 degree steps); `shadows.rt_wind` (default on): SpeedTrees / leaves within the range are captured from their vertex shader
 every frame (`RtScene::observeTree`, capture variant `cap4` also covers instanced batches) so the RT shadows sway; ranges whose instances churn every frame
 are "volatile" (`rt: scene: ... volatile ranges`). Test scenario `mods/rvk_rtwalk` (the hero walks / the sun runs, picture bursts: params in its main.lua; delete
-the test copy's `AutoSave.save` before runs with `load=1`).
+the test copy's `AutoSave.save` before runs with `load=1`). Characters of this frame: their cascade-view draws are captured (`debug.rt_shadow_sync` = cascades every frame while the RT shadows are on, +0.4 ms; rt-shadows.md 7).
 Enhanced water (docs/research/water.md; settings category Water, player default on, test baseline off): `-Setting 'water.enabled=true'` (+
 `water.quality=low|medium|high`, `water.reflections=sky|ssr`, `water.ocean=off|gerstner|fft`, `water.ocean_quality=low|medium|high`, `water.sea_state=auto|calm|moderate|rough|storm`,
 `water.wind_direction`, `water.wave_scale`, `water.murkiness`,

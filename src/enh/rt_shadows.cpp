@@ -83,6 +83,7 @@ void RtShadows::apply(const Settings& s) {
         dev_.addPass(d3d9::inject::Point::AfterDepthPrepass, "shadows.rt spatial", [this](d3d9::PassContext& ctx) { record(ctx, 2); }, this, 14);
         historyValid_ = false;
     } else if (!want && held_) {
+        engine::shadowmaps::setEveryFrame(false);
         dev_.removePasses(this);
         passId_ = 0;
         pending_ = {};
@@ -96,6 +97,7 @@ void RtShadows::apply(const Settings& s) {
         historyValid_ = false;
     }
     if (held_) {
+        engine::shadowmaps::setEveryFrame(settings_.sync);
         // the trees in the wind (RtScene::observeTree) within the range + the cascade blend and a tree's reach
         const float range = (settings_.rangeMetres > 0.0f ? settings_.rangeMetres : modeRangeMetres(settings_.mode)) * 100.0f + 1500.0f;
         scene_->setAnimated(this, settings_.wind, range);
