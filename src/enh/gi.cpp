@@ -9,6 +9,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "engine/hemisphere.h"
 #include "enh/gbuffer.h"
 #include "enh/material_variant.h"
 #include "enh/rt_scene.h"
@@ -264,9 +265,21 @@ void Gi::pickLight() {
     if (tallyFrame_ != dev_.frameValue()) return;
     const auto best = std::max_element(ambient_.begin(), ambient_.end(), [](const auto& a, const auto& b) { return a.count < b.count; });
     if (best != ambient_.end() && (!haveSky_ || best->count * 10 >= ambientDraws_ * 3)) {
-        std::memcpy(sky_, best->regs[1], sizeof(sky_));
-        std::memcpy(indoor_, best->regs[0], sizeof(indoor_));
-        haveSky_ = true;
+        std::memcpy(drawSky_, best->regs[1], sizeof(drawSky_));
+        std::memcpy(drawIndoor_, best->regs[0], sizeof(drawIndoor_));
+        if (!trueSky_) {
+            std::memcpy(sky_, drawSky_, sizeof(sky_));
+            std::memcpy(indoor_, drawIndoor_, sizeof(indoor_));
+            haveSky_ = true;
+        }
+    }
+    // the engine's own hemisphere light (rtgi.md 17): the sky of every outdoor object, whatever this frame's draws are
+    engine::hemisphere::Light hemi;
+    if (engine::hemisphere::latest(hemi)) {
+        std::memcpy(sky_, hemi.regs, sizeof(sky_));
+        std::memcpy(indoor_, hemi.indoor, sizeof(hemi.indoor));
+        indoor_[3] = 0.0f;
+        trueSky_ = haveSky_ = true;
     }
     const auto sun = std::max_element(sun_.begin(), sun_.end(), [](const auto& a, const auto& b) { return a.count < b.count; });
     if (sun != sun_.end()) {
@@ -665,12 +678,21 @@ void Gi::logStats(std::uint32_t probes) {
     for (const Cascade& c : cascades_) pending += c.priority.size();
     spdlog::info("enh: gi: {} updates ({} skipped), {} probes per frame ({} traced in the interval, {} new cells pending), GI draws {:.0f} / s; "
                  "light: sky L0 ({:.2f}, {:.2f}, {:.2f}) from {} of {} ambient draws, sun ({:.2f}, {:.2f}, {:.2f}), {} point lights; cascade 0 "
-                 "origin ({}, {}, {})",
+                 "origin ({}, {}, {}); sky source {}",
                  passes_, skipped_, probes, probesTraced_, pending, span > 0.0 ? static_cast<double>(giDraws) / span : 0.0,
                  sky_[0][3] + sky_[3][2] / 3.0f, sky_[1][3] + sky_[4][2] / 3.0f, sky_[2][3] + sky_[5][2] / 3.0f,
                  ambient_.empty() ? 0u : std::max_element(ambient_.begin(), ambient_.end(), [](const auto& a, const auto& b) { return a.count < b.count; })->count,
                  ambientDraws_, sunColor_[0], sunColor_[1], sunColor_[2], frameLights_.size(), cascades_[0].origin[0], cascades_[0].origin[1],
-                 cascades_[0].origin[2]);
+                 cascades_[0].origin[2], trueSky_ ? "engine hemisphere" : "draws");
+    if (trueSky_) {
+        // the hemisphere's registers against the draws' most frequent set (an outdoor object: f = 1, plus its static lights)
+        double dMax = 0.0;
+        for (int i = 0; i < 7; ++i) {
+            for (int c = 0; c < 4; ++c) dMax = std::max(dMax, static_cast<double>(std::abs(sky_[i][c] - drawSky_[i][c])));
+        }
+        spdlog::info("enh: gi: hemisphere vs draws: max register difference {:.4f}; indoor ({:.3f}, {:.3f}, {:.3f}) vs c14 ({:.3f}, {:.3f}, {:.3f})",
+                     dMax, indoor_[0], indoor_[1], indoor_[2], drawIndoor_[0], drawIndoor_[1], drawIndoor_[2]);
+    }
     dev_.setStatus("gi", std::format("GI: {} probes / frame, {} new pending", probes, pending));
     if (s_.screen > 0) {
         spdlog::info("enh: gi: screen probes: {} frames ({} skipped: no G-buffer / RT scene / pipelines this frame)", screenFrames_,

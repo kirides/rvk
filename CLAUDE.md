@@ -271,6 +271,7 @@ docs/research/water.md 4.1.
 | `engine/materials.*` | the material graph of a draw's shader (diffuse / opacity / normal slots, blend mode, pool images; docs/research/rt-albedo-facts.md); `engine/memread.*` = SEH-guarded engine reads |
 | `engine/window_mode.*` | borderless fullscreen: `SetResolutionEx` pre-hook (fullscreen -> monitor size), window placement at present, DPI awareness; exclusive fullscreen's display mode switch / restore and focus handling (docs/research/window-mode.md) |
 | `engine/shadow_maps.*` | the sun cascades' map size / range / split factor overrides (`eCCascadeShadowMap::RenderShadowMaps` pre-hook; docs/research/shadows.md 3) |
+| `engine/hemisphere.*` | post-hook of `eCHemisphere_PS::AddToLightList`: the engine's weather-driven sky SH (7 registers) + indoor colour = the GI sky and the water RT hit light (docs/research/rtgi.md 17) |
 | `engine/menu_state.*` | game / menu / loading from the GUI's page predicates (Script.dll `GUI2::IsLoading` / `GetMode` / `IsVisible`): the menu frame rate limit and the unpaced loading screen (docs/research/menu-fps.md) |
 | `engine/material_source.*` | hook on `CompileShaderPoolEllement`: the engine's request (file, entry, macros) per material shader attached to the `d3d9::Shader`; `debug.material_sources` JSON lines (shader-permutations.md 8) |
 | `shader/uber.*` | assembles the GLSL material shader (`shaders/material/ge_default.*`) from a request's macros + variant hooks; `debug.ubershader` (shader-permutations.md 10) |

@@ -257,6 +257,8 @@ add_library(rvk_core STATIC
     src/engine/memread.h
     src/engine/scene_hooks.cpp
     src/engine/scene_hooks.h
+    src/engine/hemisphere.cpp
+    src/engine/hemisphere.h
     src/engine/high_fps.cpp
     src/engine/high_fps.h
     src/engine/lod.cpp

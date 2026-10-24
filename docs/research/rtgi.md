@@ -461,3 +461,44 @@ corpus `--gi` / `--gbuf` / `--gbuf-motion` 0 failures.
 
 **Open**: no scene with a clear thin-wall leak was found among the spots (a dedicated one: a lit room next to a dark one, would
 show it better); the screen probes' ray ends still use the cheap lookup; `-PerfFrame` pass times for `gi` / `gi.screen`.
+
+## 17. The engine's hemisphere light, read directly (2026-10-24)
+
+([C] = measured / read in code, [I] = inferred.)
+
+**RE** [C] (Ghidra dumps `B:\DevDrive\risen-ghidra\gi\hemi_dump.txt`, `sh_dump.txt`, `b5bb0_dump.txt`): `eCHemisphere_PS` (vftable 0x9a5200) keeps
+its colours at GeneralAmbient +0x48, BackLight +0x60, GroundLight +0x78 (bCFloatColor: 3 floats), intensity +0x94, SunLight fill +0xa0,
+IndoorAmbientColor +0xc8 (3 floats), a dirty flag at +0xd8 and the result of `UpdateSHHemisphere` (0x593eb0) at **+0xdc: a
+`bTSphericalHarmonics3<bCVector4>`, 9 x vec4 (0x90 bytes), coefficient k at +0xdc + 16 k (rgb; .w unused)**. `GetSphericalHarmonics`
+(0x593c90) re-runs the update when dirty and returns it. `eCHemisphere_PS::AddToLightList` (virtual, 0x593c20, exported) updates it
+the same way and folds it into the light set's `eSShaderMaterialLightList` (FUN_18014b390): **7 registers at list +0xb8 in the
+c15..c21 layout of section 1** (c15..c17 = (L1x, L1y, L1z, L0 - C7) per channel, c18..c20, c21.rgb = C8) and the indoor colour at list
++0x128 (3 floats). `FUN_1806b5bb0` (0x6b5bb0, unexported) then writes a draw's constants from that list scaled by its illumination
+(`f` at illumination +8, static SH at +0x94 when the byte at +0x90 is set): regs = SH x f + static, `.w` of c15..c17 += (1 - f) x indoor.
+
+**Code** [C]: `src/engine/hemisphere.{h,cpp}`: a post-hook of `AddToLightList` (symbol `hemisphereAddToLightList`, Vulkan mode, installed
+with the scene hooks) copies the list's 7 registers, the indoor colour and the intensity under a mutex; `hemisphere::latest()`.
+`Gi::pickLight` takes `sky_` / `indoor_` from it (the draw tallies stay as the fallback and for the log); `water.cpp` gives the
+water RT reflections' hit lighting the same SH + indoor (it used the water draw's own constants). rvk.log:
+`engine: hemisphere light N (object ...)` once per distinct object (always 1 so far), `enh: gi: ... sky source engine hemisphere` and
+`enh: gi: hemisphere vs draws: max register difference ...` every 5 s.
+
+**Confirmed in game** [C]: the hemisphere's 7 registers equal the most frequent draw set exactly (max register difference 0.0000 in
+every 5 s window of a six-spot run, outdoors and in the pub / cave / monastery) and its indoor colour equals c14 (0.110, 0.110, 0.130
+by day, 0.040, 0.040, 0.052 in the dungeon weather). There is one hemisphere object, weather driven: the sky is dim (L0 0.12-0.14) while the
+Dungeon / interior weather state is blended in (pub, cave), 0.72-0.86 on a sunny beach. So **the engine's "sky" indoors is its fill light,
+not a missing outdoor sky**: that is why the minimum ambient of section 13 stays. Test: with the floor at 0 (true sky in place) the
+pub's left wall, net and pillar fall into black (dark share <12: 0.47 vs 0.39 with the floor, `out\water\20261024-142158` vs `-141714`) and
+the cave drops from +1.2 to -3.9 luma against the engine.
+
+**Effect** [C] (whole-image luma, enhanced minus engine; `out\water\20261024-130906` before, `-141714` now; the engine's own image moves
+by +-2 between runs through weather / time): pub +0.8 (was -3.9, engine state differs), cave +1.2 (+1.3), monastery -0.6 (+0.9), jungle -0.9
+(-0.8), beach -5.0 (-1.6; engine +2.1 in this run), harbour -0.4 (+0.3): unchanged within the noise, as expected from identical values.
+What changes is robustness: the sky is exact from the first frame, follows the weather without the "covers 30 % of the ambient
+draws" heuristic and survives frames with few outdoor draws. Validation (GI + water + RT reflections, six spots): no messages; rvk_tests 131 / 131.
+
+**Not done / negative** [C/I]: the per-object `f` and the static SH are only visible inside `FUN_1806b5bb0` (unexported; its callers are
+unnamed): exact `f` would need an RVA hook (no precedent in this repo, pinned to this Engine.dll build) and a per-draw channel into the
+variant (the draw's constants are all the shader sees). The bound `f <= min_c L0(draw) / L0(sky)` is exact for draws without
+static lights (the sky only) and too high for lit ones, which only shifts a small sky share into the kept remainder; the benefit did not
+justify the hook. Open: a per-draw `f` through that hook, indoor zones as portal-room volumes.

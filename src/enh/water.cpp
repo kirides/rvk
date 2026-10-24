@@ -11,6 +11,7 @@
 #include <spdlog/spdlog.h>
 
 #include "core/paths.h"
+#include "engine/hemisphere.h"
 #include "engine/weather.h"
 #include "enh/rt_scene.h"
 #include "shader/embedded.h"
@@ -657,6 +658,12 @@ VkDeviceAddress Water::fillBlock(d3d9::Device& device, const d3d9::ReplaceQuery&
         std::memcpy(l.fogParams, w.fogParams, 16);
         std::memcpy(l.indoor, w.indoor, 16);
         std::memcpy(l.sh, w.sh, sizeof(l.sh));
+        // the engine's hemisphere light itself (rtgi.md 17): this frame's sky for the traced hits, not the water draw's set
+        engine::hemisphere::Light hemi;
+        if (engine::hemisphere::latest(hemi)) {
+            std::memcpy(l.sh, hemi.regs, sizeof(l.sh));
+            std::memcpy(l.indoor, hemi.indoor, sizeof(hemi.indoor));
+        }
         std::memcpy(l.sunColor, w.sunColor, 16);
         std::memcpy(l.sunDir, w.sunDir, 16);
         rtRefl_->setLight(l);

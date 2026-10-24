@@ -146,6 +146,10 @@
        times; it stands still under the time freeze; risen-spass RE.md 60), unsigned long eCApplication::GetAppState() const     \
        (0x4c1ad0: 8 = the time freeze) */                                                                                         \
     X(timerGetInstance, L"Engine.dll", "?GetInstance@eCTimer@@SAAEAV1@XZ", false)                                                 \
+    /* ---- the hemisphere light (engine/hemisphere.*, docs/research/rtgi.md 17) ---- */                                          \
+    /* virtual void eCHemisphere_PS::AddToLightList(eSShaderMaterialLightList&) (0x593c20): updates the hemisphere's SH when    \
+       dirty and copies it (7 registers in the c15..c21 layout) to list +0xb8, its indoor colour to list +0x128 */              \
+    X(hemisphereAddToLightList, L"Engine.dll", "?AddToLightList@eCHemisphere_PS@@UEAAXAEAUeSShaderMaterialLightList@@@Z", false) \
     /* ---- sun cascades (engine/shadow_maps.*, docs/research/shadows.md 3) ---- */                                            \
     /* bool eCCascadeShadowMap::RenderShadowMaps() (0x59f200): fits and renders every cascade, each frame (reads MaxDistance  \
        +0x1c, LogSplitFactor +0x20) */                                                                                         \

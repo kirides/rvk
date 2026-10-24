@@ -183,6 +183,9 @@ private:
     std::uint32_t ambientDraws_ = 0;
     float sky_[7][4]{}, indoor_[4]{}, sunColor_[4]{}, sunDir_[4]{0.0f, 1.0f, 0.0f, 0.0f};
     bool haveSky_ = false;
+    bool trueSky_ = false;                // sky_ / indoor_ come from the engine's hemisphere light (engine/hemisphere)
+    float drawSky_[7][4]{};               // the draws' most frequent set (the old inference; logged against the hemisphere's)
+    float drawIndoor_[4]{};
     std::vector<Light> frameLights_;
 
     // stats
