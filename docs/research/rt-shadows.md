@@ -215,3 +215,25 @@ would also come with it (a shadow edge entering a skipped area shows one frame l
 instance sightings) and shading fewer rays by a cheaper *scene* (a shadow LOD of the leaf cards, distant canopies as solid blobs) rather
 than by skipping pixels; velocity extrapolation of the characters' last capture instead of the cascade sync (-0.22 ms GPU / -0.30
 ms CPU with the camera held).
+
+## 9. RT scene CPU (2026-10-24)
+
+Profile at the harbour quicksave (`Risen_Save_0007`-style player save, detail 2x, RT shadows extended, 1600x900, CPU bound: frame 8.4 ms,
+CPU 8.2 ms) with temporary section timers [C]: the pass (`rt.scene @AfterDepthPrepass`, 0.46 ms CPU per frame) was `buildDynamic` 0.30
+(of that `vkCmdBuildAccelerationStructuresKHR` recording 0.226: 194 refits per frame = 85 skinned draws + 109 trees at ~1.2 us of driver
+time each), selection 0.046, assembly of instances and records 0.062, ageing 0.02; the draw observation 0.67 ms (1,550 draws, 1,400
+sightings; with the `-Perf` timers). The sampled CPU profile puts the whole RT scene at ~3 % of the engine thread. What was done:
+
+* **Trees are refitted every other frame** (staggered by their key; `RtScene::buildDynamic`): the wind is slow, the BLAS of the frame
+  before stands in and the instance still takes this frame's capture for the vertex reads (the capture itself is written every
+  frame). 109 -> ~55 refits per frame: pass CPU 0.46 -> 0.37 ms, GPU 0.25 -> 0.23 ms.
+* `vkGetAccelerationStructureBuildSizesKHR` per captured draw per frame is cached per BLAS (it only depends on the counts and the index
+  type): -0.03 ms.
+* `materialOf` answers repeats of the same BLAS / signature / rank in a frame from a memo (a range is sighted in several views and
+  instances), the water-key lookup runs only for ranges without a BLAS and `observe` looks the BLAS up once: observe 0.67 -> 0.64 ms.
+* `logStats` no longer walks every BLAS each frame, only when its numbers are shown.
+
+Together about -0.12 ms CPU per frame in this scene (1.5 % of the frame); validation + synchronization validation (walking scenario,
+GI + RT shadows extended): no messages; `rvk_tests` 133. **Not done / the rest**: the 85 skinned draws' refits (1.2 us each; their
+distance is not known on the CPU: far characters could be refitted less often), the registry's per-sighting hash lookups and
+`Registry::see` (cache-missing `list_` entries), skipping the cascade views' sightings of draws the main view already registered.

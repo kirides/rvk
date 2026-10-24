@@ -154,6 +154,12 @@ private:
             bool overlay = false;                  // alpha-blended with a texture opacity (caustics, decals)
         };
         std::vector<MaterialSlot> materials;
+        // the last materialOf answer of the BLAS: its range is sighted in several views and instances every frame with the same
+        // signature, the repeats are answered from here (the slot's bookkeeping is idempotent within a frame)
+        std::uint64_t memoFrame = 0, memoSig = 0;
+        std::uint32_t memoId = 0;
+        std::uint8_t memoRank = 0;
+        bool memoBlending = false, memoOverlay = false;
         // a range without a main-view material (the cascades' merged range of a level mesh): the BLASes of the main view's
         // sub-ranges inside it (same buffers and base vertex) give its triangles their materials (RtMaterialSegment)
         struct Segment {
@@ -264,6 +270,11 @@ private:
         VkDeviceAddress lastCapture = 0;  // the last capture that ran (the next frame's vertex shader reads it: motion)
         std::uint32_t lastSlots = 0;
         std::uint64_t lastCaptureFrame = 0;
+        // vkGetAccelerationStructureBuildSizesKHR of the geometry below: it only depends on the counts and the index type, so it is
+        // asked again only when they change (the call costs microseconds per character / tree per frame)
+        std::uint32_t sizeTriangles = 0, sizeSlots = 0;
+        bool sizeIndex32 = false;
+        VkDeviceSize sizeAs = 0, sizeBuildScratch = 0, sizeUpdateScratch = 0;
     };
     std::unordered_set<const void*> dynamicConsumers_;
     std::unordered_set<const void*> animConsumers_;

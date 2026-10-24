@@ -464,21 +464,22 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     const d3d9::ResourceRef vr = vb->ref(), ir = ib->ref();
     const rt::BlasKey key = keyOf(q);
 
-    if (waterKeys_.contains(key)) return skip();
+    // the BLAS of the range, one lookup (a range with a BLAS cannot be a water key: learnExcluded drops its BLAS when it turns water)
+    const auto known = blasByKey_.find(key);
+    if (known == blasByKey_.end() && waterKeys_.contains(key)) return skip();
     // a range the main view draws only blended (the cascades draw it unblended) is not part of the scene
     const bool mainOpaque = q.phase.view == View::Main;
     if (!mainOpaque && !blendedKeys_.empty()) {
         if (const auto it = blendedKeys_.find(key); it != blendedKeys_.end() && it->second + kOpaqueRecent >= dev.frameValue()) {
-            const auto bk = blasByKey_.find(key);
-            const Blas* known = bk != blasByKey_.end() ? bk->second : nullptr;
-            if (known == nullptr || known->opaqueMainFrame + kOpaqueRecent < dev.frameValue()) return skip();
+            const Blas* knownBlas = known != blasByKey_.end() ? known->second : nullptr;
+            if (knownBlas == nullptr || knownBlas->opaqueMainFrame + kOpaqueRecent < dev.frameValue()) return skip();
         }
     }
     const std::uint64_t frame = dev.frameValue();
     const double now = dev.secondsSinceCreate();
     Blas* b = nullptr;
-    if (const auto it = blasByKey_.find(key); it != blasByKey_.end()) {
-        b = it->second;
+    if (known != blasByKey_.end()) {
+        b = known->second;
         if (b != nullptr) {
             // a later declaration may name more attributes (the shadow pass's can be shorter)
             Layout& l = b->layout;
@@ -643,6 +644,10 @@ std::uint32_t RtScene::materialOf(d3d9::Device& dev, const d3d9::ReplaceQuery& q
     rank = q.phase.view != View::Main ? 1 : q.phase.pass != Pass::Solid ? 2 : q.blending ? 3 : 4;
     const std::uint64_t frame = dev.frameValue();
     const std::uint64_t sig = RtMaterials::signature(q);
+    if (b.memoFrame == frame && b.memoSig == sig && b.memoRank == rank && b.memoBlending == q.blending && b.memoId != 0) {
+        overlay = b.memoOverlay;
+        return b.memoId;
+    }
     for (Blas::MaterialSlot& m : b.materials) {
         if (m.sig != sig) continue;
         const RtMaterial* mat = materials_.get(m.id);
@@ -653,12 +658,19 @@ std::uint32_t RtScene::materialOf(d3d9::Device& dev, const d3d9::ReplaceQuery& q
             // z pre-pass may have shown it first, unblended)
             if (q.blending && (mat->uvSet & shader::abi::kRtUvNoTexture) != 0) m.overlay = true;
             overlay = m.overlay;
+            b.memoFrame = frame;
+            b.memoSig = sig;
+            b.memoRank = rank;
+            b.memoBlending = q.blending;
+            b.memoId = m.id;
+            b.memoOverlay = m.overlay;
             return m.id;
         }
         // a texture died or the refresh is due (animated uv maps): resolved again
         const std::uint32_t id = materials_.resolve(dev, q);
         if (id == 0) return 0;
         materials_.release(m.id);
+        b.memoId = 0;  // the memoized id was just released
         m.id = id;
         m.resolved = m.used = frame;
         m.rank = std::max(m.rank, rank);
@@ -669,6 +681,7 @@ std::uint32_t RtScene::materialOf(d3d9::Device& dev, const d3d9::ReplaceQuery& q
     if (id == 0) return 0;
     if (b.materials.size() >= kMaterialSlots) {
         const auto lru = std::min_element(b.materials.begin(), b.materials.end(), [](const auto& x, const auto& y) { return x.used < y.used; });
+        if (b.memoId == lru->id) b.memoId = 0;
         materials_.release(lru->id);
         b.materials.erase(lru);
     }
@@ -838,6 +851,7 @@ void RtScene::dropBlas(std::uint64_t id, bool countEvicted) {
     registry_.removeBlas(id);
     for (const Blas::MaterialSlot& m : b->materials) materials_.release(m.id);
     b->materials.clear();
+    b->memoId = 0;
     for (const Blas::Segment& e : b->engineSegments) materials_.release(e.material);
     b->engineSegments.clear();
     blasByKey_.erase(b->key);
@@ -1562,6 +1576,7 @@ void RtScene::buildDynamic(VkCommandBuffer cmd, std::uint64_t frame) {
     std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges;
     std::vector<VkDeviceSize> scratchOffsets;
     std::vector<std::size_t> which;
+    std::vector<std::size_t> skippedRefits;
     geoms.reserve(dynUse_.size());
     infos.reserve(dynUse_.size());
     ranges.reserve(dynUse_.size());
@@ -1586,10 +1601,29 @@ void RtScene::buildDynamic(VkCommandBuffer cmd, std::uint64_t frame) {
         info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
         info.geometryCount = 1;
         info.pGeometries = &g;
+        if (b.sizeTriangles != d.triangles || b.sizeSlots != d.slots || b.sizeIndex32 != d.index32 || b.sizeAs == 0) {
+            VkAccelerationStructureBuildSizesInfoKHR asked{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+            vkGetAccelerationStructureBuildSizesKHR(ctx.device(), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &info, &d.triangles, &asked);
+            b.sizeTriangles = d.triangles;
+            b.sizeSlots = d.slots;
+            b.sizeIndex32 = d.index32;
+            b.sizeAs = asked.accelerationStructureSize;
+            b.sizeBuildScratch = asked.buildScratchSize;
+            b.sizeUpdateScratch = asked.updateScratchSize;
+        }
         VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-        vkGetAccelerationStructureBuildSizesKHR(ctx.device(), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &info, &d.triangles, &sizes);
+        sizes.accelerationStructureSize = b.sizeAs;
+        sizes.buildScratchSize = b.sizeBuildScratch;
+        sizes.updateScratchSize = b.sizeUpdateScratch;
         const bool update = b.built && b.slots == d.slots && b.triangles == d.triangles && b.indices == d.indices && b.updates < 30 &&
                             b.as.handle != VK_NULL_HANDLE;
+        // the wind moves slowly: a tree's BLAS is refitted every other frame (staggered by its key), the BLAS of the frame before
+        // stands in (its instance still takes the capture of this frame for the materials' vertex reads); a refit costs the
+        // driver about a microsecond of command recording each, 100 trees in range are the bulk of the pass
+        if (update && d.tree && ((frame + (d.key >> 7)) & 1u) != 0) {
+            skippedRefits.push_back(i);
+            continue;
+        }
         if (!update) {
             if (b.as.handle == VK_NULL_HANDLE || b.as.storage.size < sizes.accelerationStructureSize) {
                 if (b.as.handle != VK_NULL_HANDLE || b.as.storage.buffer != VK_NULL_HANDLE) {
@@ -1623,6 +1657,10 @@ void RtScene::buildDynamic(VkCommandBuffer cmd, std::uint64_t frame) {
         b.indices = d.indices;
         b.lastFrame = frame;
         (update ? dynRefit_ : dynBuilt_) += 1;
+    }
+    for (std::size_t i : skippedRefits) {
+        dynUse_[i].built = true;
+        animatedKeys_.insert(dynUse_[i].key);
     }
     if (infos.empty()) return;
     if (dynScratch_.buffer == VK_NULL_HANDLE || dynScratch_.size < scratchTotal) {
@@ -2017,6 +2055,8 @@ void RtScene::record(d3d9::PassContext& ctx) {
 void RtScene::logStats(bool force) {
     const auto now = std::chrono::steady_clock::now();
     const bool due = now - lastLog_ >= std::chrono::seconds(5);
+    const bool statusDue = iv_.frames % 30 == 1;
+    if (!due && !force && !statusDue) return;  // the counts below walk every BLAS: only when they are shown
     std::size_t built = 0, pendingCount = 0, failed = 0;
     for (const auto& [id, b] : blas_) {
         built += b.state == BlasState::Built ? 1 : 0;
