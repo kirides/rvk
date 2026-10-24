@@ -116,14 +116,6 @@ bool detourRender(void* self) {
     // the cascades are drawn before the main view of the frame: its camera is not read yet, the last frame's is
     const auto* cam = dev != nullptr && dev->camera().prevValid ? &dev->camera() : nullptr;
     Throttle& th = g_throttle;
-    if (stride > 1) {
-        static std::atomic<bool> once{false};
-        if (!once.exchange(true)) {
-            d3d9::Device* any = engine::scene::attachedDevice();
-            spdlog::info("engine: shadow cascades: throttle {}: device {} (any thread {}), camera {}", stride, dev != nullptr, any != nullptr,
-                         cam != nullptr);
-        }
-    }
     if (cam != nullptr) {
         const auto& vp = cam->prevViewProjection;
         float axes[12], sun[3], pos[3] = {cam->prevPosition[0], cam->prevPosition[1], cam->prevPosition[2]};

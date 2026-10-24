@@ -1602,51 +1602,6 @@ void RtScene::record(d3d9::PassContext& ctx) {
         content = &contents_.back().second;
         content->reserve(n);
     }
-    // the occlusion measurement (enh/occlusion.h): this frame's world instances as spheres, tested against the z pre-pass depth
-    std::vector<OccSphere> occSpheres;
-    std::vector<std::uint32_t> occTriangles;
-    const bool probing = occlusionProbe_ && ctx.point == d3d9::inject::Point::AfterDepthPrepass && ctx.mainView == 1;
-    if (probing) {
-        occSpheres.reserve(worldCount);
-        occTriangles.reserve(worldCount);
-        for (std::uint32_t k = 0; k < worldCount; ++k) {
-            const rt::Registry::Instance& in = list[chosen[k]];
-            const Blas* b = findBlas(in.blas);
-            rt::Sphere s = in.sphere;
-            if (!in.sphereValid && b != nullptr && b->bounds.valid()) s = rt::worldSphere(b->bounds, in.rows);
-            const bool known = in.sphereValid || (b != nullptr && b->bounds.valid());
-            occSpheres.push_back({s.c[0], s.c[1], s.c[2], known ? s.r : 0.0f});
-            occTriangles.push_back(b != nullptr ? static_cast<std::uint32_t>(b->triangles) : 0u);
-        }
-        if (!occProbe_) occProbe_ = std::make_unique<OcclusionProbe>(dev_);
-        occProbe_->run(ctx, occSpheres, occTriangles);
-        // the size of the registry's instances by the views that saw them (1 main, 2 cascades): what a small-caster cull of the
-        // sun cascades would drop (a cascade texel is ~5-10 cm: an object under ~20 cm radius covers a few texels)
-        static double lastHist = 0.0;
-        static std::uint64_t histFrames = 0;
-        static std::uint64_t hist[3][7] = {};  // views: main only, cascades only, both; radius bins (cm): <5 <10 <20 <40 <80 <160 >=160
-        ++histFrames;
-        for (const rt::Registry::Instance& in : list) {
-            const Blas* b = findBlas(in.blas);
-            float r = in.sphereValid ? in.sphere.r : (b != nullptr && b->bounds.valid() ? rt::worldSphere(b->bounds, in.rows).r : -1.0f);
-            if (r < 0.0f) continue;
-            const int v = (in.views & 3) == 1 ? 0 : (in.views & 3) == 2 ? 1 : 2;
-            const int bin = r < 5.0f ? 0 : r < 10.0f ? 1 : r < 20.0f ? 2 : r < 40.0f ? 3 : r < 80.0f ? 4 : r < 160.0f ? 5 : 6;
-            ++hist[v][bin];
-        }
-        if (now - lastHist >= 5.0 && histFrames > 0) {
-            lastHist = now;
-            const double f = static_cast<double>(histFrames);
-            auto row = [&](int v) {
-                return std::format("{:.0f} {:.0f} {:.0f} {:.0f} {:.0f} {:.0f} {:.0f}", hist[v][0] / f, hist[v][1] / f, hist[v][2] / f, hist[v][3] / f,
-                                   hist[v][4] / f, hist[v][5] / f, hist[v][6] / f);
-            };
-            spdlog::info("enh: occlusion probe: registry instances per frame by radius (<5 <10 <20 <40 <80 <160 >=160 cm): main only [{}]; cascades only [{}]; both [{}]",
-                         row(0), row(1), row(2));
-            std::memset(hist, 0, sizeof(hist));
-            histFrames = 0;
-        }
-    }
     std::uint64_t textured = 0, untextured = 0, cutOut = 0, segmented = 0, speedTrees = 0;
     std::vector<abi::RtMaterialSegment> segs;              // the frame's segment table
     std::vector<std::pair<std::uint32_t, std::uint32_t>> segRecords;  // record -> its first segment

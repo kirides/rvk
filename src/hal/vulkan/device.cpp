@@ -257,10 +257,6 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     dev_.setEngineTextureResolver([this](const void* api) { return textureOfApi(api); });
     rtScene_ = std::make_unique<enh::RtScene>(dev_);
     rtDebug_ = std::make_unique<enh::RtDebug>(dev_, *rtScene_);
-    if (rs.occlusionProbe != nullptr) {
-        rtScene_->setOcclusionProbe(rs.occlusionProbe->asBool());
-        reg.onChange(*rs.occlusionProbe, [this](const settings::Setting& s) { rtScene_->setOcclusionProbe(s.asBool()); }, this);
-    }
     if (rs.rtDebug != nullptr) {
         const auto applyRtDebug = [this](const settings::Setting& s) {
             rtDebug_->setMode(enh::RtDebug::parse(s.asEnum()), enh::RtDebug::optionFlags(s.asEnum()));

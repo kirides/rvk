@@ -31,7 +31,5 @@ const char* currentLabel();
 
 // the attached device when called on its render thread, else null (engine detours that need the frame state)
 d3d9::Device* renderDevice();
-// the attached device whatever the thread (diagnostics)
-d3d9::Device* attachedDevice();
 
 }  // namespace rvk::engine::scene

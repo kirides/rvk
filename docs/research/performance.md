@@ -421,9 +421,9 @@ Scene and recipe as in section 14 (savegame, lod 2x, vsync off, `-PlayerDefaults
   Measured: `-Perf` fps 139 -> ~150 (CPU 6.35 ms per frame at stride 2); frames alternate 2285 / 1765 draws. Validation +
   synchronization validation clean; `shadow-compare` images (static rvkcompare camera) equal within noise (the only larger
   difference was animated water). Moving-camera quality was not A/B'd separately (the force conditions cover it).
-* **Occlusion probe** (`debug.occlusion_probe`, measurement only; `enh/occlusion.*`: HZB of the z pre-pass + a per-sphere test over
-  the RT registry's instances): ~24 % of the instances (21-25 % of the triangles) are hidden at lod 2x, ~8 % at lod 1x, 10-16 % are
-  off-screen. Realizable gain ~0.5 ms at 2x / ~0.1 ms at 1x, with pop-in risk and a 2-frame lag: not built.
+* **Occlusion probe** (a HZB of the z pre-pass + a per-sphere test over the RT registry's instances; code removed, see 15.1): ~24 % of the
+  instances (21-25 % of the triangles) are hidden at lod 2x, ~8 % at lod 1x, 10-16 % are off-screen. Realizable gain ~0.5 ms at 2x /
+  ~0.1 ms at 1x, with pop-in risk and a 2-frame lag: not built.
 * **Small-caster cull** (histogram in cm bins <5 <10 <20 <40 <80 <160 >=160): almost nothing under 20 cm; ~1430 instances of
   20-40 cm, seen by both the main view and the cascades: not worth culling.
 * **Render-thread split audit: rejected** (weeks of work, silent-corruption risk from live engine pointers, <= 1.3 ms net; see 14.1).
@@ -431,3 +431,15 @@ Scene and recipe as in section 14 (savegame, lod 2x, vsync off, `-PlayerDefaults
   the others negligible.
 * **Remaining candidates**: `rt.scene` incremental records (<= 0.15 ms), a typed `qsort` replacement (2 %), the
   `eCFrustumDatabase` copy constructor (0.9 %), a no-op `SetTime` (0.6 %).
+
+### 15.1 Tried and removed (do not redo without a new idea)
+
+| Idea | Result | Why dropped |
+|---|---|---|
+| GPU occlusion probe (HZB of the z pre-pass, sphere test of the RT registry's instances; `debug.occlusion_probe`) | 24 % of instances hidden at 2x, 8 % at 1x | realizable ~0.5 ms / ~0.1 ms, pop-in risk, 2-frame lag; code deleted (in git history, commit 12579b2) |
+| Small-caster cull of the cascades | almost no instances under 20 cm radius | nothing to cull |
+| Render-thread split (engine thread / render thread) | <= 1.3 ms net | weeks of work, silent-corruption risk from live engine pointers read in `prepareDraw` and the observers |
+| Per-draw vertex-constant range trimming | no gain | reverted (14) |
+| Device-generated commands for the opaque passes | no gain | removed (12) |
+| Record threads off vs on | on wins 5-6 fps at 2x | kept on |
+| GLSL material shaders (`debug.ubershader`) | equal image and GPU time, +0.05-0.1 ms CPU | kept as a base for visual improvements, default off |

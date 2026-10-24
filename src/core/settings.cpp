@@ -861,17 +861,6 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 1,
         .flags = Flag::Debug,
     });
-    r.occlusionProbe = &reg.add({
-        .key = "debug.occlusion_probe",
-        .label = "Occlusion probe",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "Measures (and logs every 5 s) which share of the world objects drawn in the main view lies entirely behind "
-                       "the depth the z pre-pass wrote. Needs the ray tracing scene (water / reflections / GI on). Costs a little GPU time.",
-        .type = Type::Bool,
-        .defaultValue = 0,
-        .flags = Flag::Debug | Flag::NoAB,
-    });
     r.ubershaderSkip = &reg.add({
         .key = "debug.ubershader_skip",
         .label = "GLSL material shaders: keep classes translated",
