@@ -89,6 +89,30 @@ std::string uberPixelGlsl(std::string_view entry, const MacroList& macros, std::
     return out;
 }
 
+std::uint32_t uberClassMask(std::string_view entry, const MacroList& macros) {
+    std::uint32_t m = entry.ends_with("ZPass") ? 1u : 0u;
+    const auto on = [&](std::string_view name) {
+        for (const auto& [n, v] : macros) {
+            if (n == name) return v == "true" || v == "1";
+        }
+        return false;
+    };
+    const auto has = [&](std::string_view name) {
+        for (const auto& [n, v] : macros) {
+            if (n == name) return true;
+        }
+        return false;
+    };
+    if (on("XFX_MASKED")) m |= 2u;
+    if (on("XFX_ALPHABLEND")) m |= 4u;
+    if (on("XFX_LIGHTMAP")) m |= 8u;
+    if (has("XFX_PS_NORMAL")) m |= 16u;
+    if (on("XFX_SPECULAR")) m |= 32u;
+    if (has("XFX_PS_DISTORTION")) m |= 64u;
+    if (m == 0) m = 128u;
+    return m;
+}
+
 std::uint64_t uberSourceHash() {
     std::uint64_t h = 1469598103934665603ull;
     for (const std::string_view t : {embedded::uberGlsl(), embedded::uberFrag()}) {

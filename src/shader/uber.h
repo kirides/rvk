@@ -22,6 +22,10 @@ bool uberSupports(std::string_view effectFile, std::string_view entry);
 // ABI declarations, the enhancement code when there are hooks, then the shader. Empty when the macro list has an invalid name.
 std::string uberPixelGlsl(std::string_view entry, const MacroList& macros, std::string_view hookDefines);
 
+// A bit per class of request (debug.ubershader_skip: classes kept on the translated shader, to bisect differences):
+// 1 z pass, 2 masked, 4 alpha blend, 8 lightmap, 16 normal map, 32 specular, 64 distortion, 128 anything else (plain)
+std::uint32_t uberClassMask(std::string_view entry, const MacroList& macros);
+
 // a hash of the embedded source text (cache names of compiled variants change when the shader does)
 std::uint64_t uberSourceHash();
 

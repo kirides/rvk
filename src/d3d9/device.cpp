@@ -1274,14 +1274,23 @@ void Device::setBillboardFadeScale(float scale) {
 namespace {
 
 // VariantSlot::Base: the plain GLSL material shader of a request the port covers
+std::atomic<std::uint32_t> g_uberSkip{0};  // debug.ubershader_skip
+
+bool uberCovers(const MaterialSource& src) {
+    return shader::uberSupports(src.file, src.entry) &&
+           (shader::uberClassMask(src.entry, src.macros) & g_uberSkip.load(std::memory_order_relaxed)) == 0;
+}
+
 bool uberBaseOptions(const Shader& s, shader::GlslOptions& o) {
     const MaterialSource* src = s.source.load(std::memory_order_acquire);
-    if (s.stage != shader::Stage::Pixel || src == nullptr || !shader::uberSupports(src->file, src->entry)) return false;
+    if (s.stage != shader::Stage::Pixel || src == nullptr || !uberCovers(*src)) return false;
     o.uber = true;
     return true;
 }
 
 }  // namespace
+
+void Device::setUbershaderSkip(std::uint32_t mask) { g_uberSkip.store(mask, std::memory_order_relaxed); }
 
 void Device::setUbershader(bool on) {
     ubershader_.store(on, std::memory_order_relaxed);
@@ -1334,7 +1343,7 @@ VkShaderModule Device::uberModule(const Shader& s, const MaterialSource& src, co
 VkShaderModule Device::variantModule(const Shader& s, const shader::GlslOptions& options, std::string_view tag) {
     if (options.uber && ubershader_.load(std::memory_order_relaxed) && s.stage == shader::Stage::Pixel) {
         const MaterialSource* src = s.source.load(std::memory_order_acquire);
-        if (src != nullptr && shader::uberSupports(src->file, src->entry)) return uberModule(s, *src, options, tag);
+        if (src != nullptr && uberCovers(*src)) return uberModule(s, *src, options, tag);
     }
     const auto dec = shader::decode(s.bytecode);
     if (!dec.ok()) {

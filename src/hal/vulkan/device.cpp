@@ -326,7 +326,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyLod(); }, this);
     }
     applyLod();
-    if (rs.materialSources != nullptr && rs.ubershader != nullptr) {
+    if (rs.materialSources != nullptr && rs.ubershader != nullptr && rs.ubershaderSkip != nullptr) {
         engine::matsrc::setResolver(&HalHLSLShader::shaderOf);
         const auto applyMaterials = [this, dir = options.cacheDir]() {
             const auto& r = settings::renderer();
@@ -335,10 +335,11 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
             // the requests are collected for the dump and for the GLSL material shaders; the file only for the dump
             engine::matsrc::setOutput(dump && !dir.empty() ? dir / "materials" / "sources.jsonl" : std::filesystem::path());
             engine::matsrc::setEnabled(dump || uber);
+            dev_.setUbershaderSkip(static_cast<std::uint32_t>(r.ubershaderSkip->asInt()));
             dev_.setUbershader(uber);
         };
         applyMaterials();
-        for (settings::Setting* s : {rs.materialSources, rs.ubershader}) {
+        for (settings::Setting* s : {rs.materialSources, rs.ubershader, rs.ubershaderSkip}) {
             reg.onChange(*s, [applyMaterials](const settings::Setting&) { applyMaterials(); }, this);
         }
     }

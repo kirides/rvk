@@ -861,6 +861,19 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 1,
         .flags = Flag::Debug,
     });
+    r.ubershaderSkip = &reg.add({
+        .key = "debug.ubershader_skip",
+        .label = "GLSL material shaders: keep classes translated",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Bit mask of material shader classes that stay on the translated shaders (1 z pass, 2 masked, 4 alpha blend, "
+                       "8 lightmap, 16 normal map, 32 specular, 64 distortion, 128 plain): to find which kind differs.",
+        .type = Type::Int,
+        .defaultValue = 0,
+        .min = 0,
+        .max = 255,
+        .flags = Flag::Debug | Flag::NoAB,
+    });
     r.ubershader = &reg.add({
         .key = "debug.ubershader",
         .label = "GLSL material shaders",

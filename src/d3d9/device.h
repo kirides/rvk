@@ -844,6 +844,7 @@ public:
     // request is known (Shader::source): the plain module (VariantSlot::Base) and the enhancement variants (GI, G-buffer) are
     // built from it in the background; a shader it cannot build stays translated. Applies to modules requested afterwards
     void setUbershader(bool on);
+    void setUbershaderSkip(std::uint32_t mask);  // classes of material shader that stay translated (shader::uberClassMask)
     bool ubershader() const { return ubershader_.load(std::memory_order_relaxed); }
     // the slot's variant of `s` when it is built (queues its build on the first call); null until then / when not applicable
     VkShaderModule variant(const ShaderRef& s, VariantSlot slot);
