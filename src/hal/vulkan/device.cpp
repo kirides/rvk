@@ -306,6 +306,16 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         }
         applyShadows();  // also the engine's cascade overrides (shadows.map_size / range: "auto" follows shadows.enabled)
     }
+    // the native renderer's opaque pass (enh/native_opaque.h, docs/research/native-renderer.md N3)
+    nativeOpaque_ = std::make_unique<enh::NativeOpaque>(dev_);
+    if (rs.nativeOpaque != nullptr) {
+        reg.onChange(*rs.nativeOpaque, [this](const settings::Setting& s) { nativeOpaque_->apply(s.asBool()); }, this);
+        nativeOpaque_->apply(rs.nativeOpaque->asBool());
+    }
+    if (rs.nativeDebug != nullptr) {
+        reg.onChange(*rs.nativeDebug, [this](const settings::Setting& s) { nativeOpaque_->setDebug(static_cast<std::uint32_t>(s.asInt())); }, this);
+        nativeOpaque_->setDebug(static_cast<std::uint32_t>(rs.nativeDebug->asInt()));
+    }
     // ray-traced global illumination (enh/gi.h, docs/research/rtgi.md): probes + the material shaders' GI variants
     gi_ = std::make_unique<enh::Gi>(dev_, rtScene_.get());
     if (rs.giEnabled != nullptr) {

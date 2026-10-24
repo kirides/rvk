@@ -82,6 +82,9 @@ public:
     // the sub-mesh `subMesh` of the entity: its mesh context (parts left empty) and part; false when unknown
     bool lookupPart(const void* ptr, const void* subMesh, MeshInfo& info, MeshPart& part) const;
 
+    // the entity's world matrix (one lookup); false when not mirrored
+    bool worldOf(const void* ptr, Matrix& out) const;
+
     bool contains(const void* ptr) const;
     std::size_t size() const;
     std::size_t withContexts() const;

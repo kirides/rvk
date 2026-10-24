@@ -21,6 +21,7 @@
 #include "enh/object_motion.h"
 #include "enh/upscale.h"
 #include "enh/gi.h"
+#include "enh/native_opaque.h"
 #include "enh/rt_debug.h"
 #include "enh/rt_scene.h"
 #include "enh/rt_shadows.h"
@@ -515,6 +516,7 @@ private:
     std::unique_ptr<enh::Water> water_;          // water.* (a draw replacer)
     std::unique_ptr<enh::RtShadows> rtShadows_;  // shadows.rt* (ray-traced sun shadows near the camera; the mask takes them)
     std::unique_ptr<enh::Shadows> shadows_;      // shadows.* (a draw replacer: the sun's shadow mask)
+    std::unique_ptr<enh::NativeOpaque> nativeOpaque_;  // native.opaque (a draw replacer + a pass: the native renderer's static meshes)
     std::unique_ptr<enh::RtScene> rtScene_;      // the ray tracing scene (a draw observer + a pass; active while a consumer holds it)
     std::unique_ptr<enh::RtDebug> rtDebug_;      // rt.debug (a consumer of rtScene_)
     std::unique_ptr<enh::Gi> gi_;                // gi.* (a draw observer + passes, a consumer of rtScene_)

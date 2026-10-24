@@ -58,6 +58,15 @@ struct PassGraphicsDesc {
     VkFormat color = VK_FORMAT_UNDEFINED;
     BlendAttachment blend{};
     const char* name = nullptr;
+    // optional depth (+ stencil) attachment of a geometry pass (enh/native_opaque); none: no depth state
+    VkFormat depth = VK_FORMAT_UNDEFINED;
+    VkFormat stencil = VK_FORMAT_UNDEFINED;
+    bool depthTest = false;
+    bool depthWrite = false;
+    VkCompareOp depthOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+    VkCullModeFlags cull = VK_CULL_MODE_NONE;
+    VkFrontFace frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    bool dynamicCullMode = false;  // the cull mode is set per draw (vkCmdSetCullMode), `cull` is the pipeline's default
 };
 VkPipeline createPassGraphicsPipeline(Context& ctx, VkPipelineLayout layout, const PassGraphicsDesc& desc);
 

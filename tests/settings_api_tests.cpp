@@ -14,7 +14,7 @@ TEST(settings_api_info_get_set) {
     settings::Registry reg;
     settings::registerRendererSettings(reg);
     const std::uint32_t n = api::settingCount(reg);
-    CHECK(n == 85);  // 28 (incl. overlay.debug_mode, overlay.show_advanced, vulkan.fullscreen, vulkan.exclusive_acquire, vulkan.menu_fps, debug.pace_loading, debug.batch_draws, debug.record_threads, debug.prefetch_stride, debug.material_sources, debug.ubershader, debug.ubershader_skip, debug.shadow_stride, rt.reflections, rt.reflection_tweaks, rt.debug, rt.scene_views) + the 11 water.* + the 15 shadows.* + the 11 gi.* + the 5 ao.* / gbuffer.* + the 3 lod.* settings + debug.rt_shadow_sync + debug.rt_skin + debug.rt_skin_verify + compat.high_fps + debug.regions + upscale.mode + upscale.object_motion + upscale.reactive + upscale.reactive_cutoff + upscale.reactive_scale + upscale.sharpness + upscale.jitter_flip
+    CHECK(n == 87);  // 28 (incl. overlay.debug_mode, overlay.show_advanced, vulkan.fullscreen, vulkan.exclusive_acquire, vulkan.menu_fps, debug.pace_loading, debug.batch_draws, debug.record_threads, debug.prefetch_stride, debug.material_sources, debug.ubershader, debug.ubershader_skip, debug.shadow_stride, rt.reflections, rt.reflection_tweaks, rt.debug, rt.scene_views) + the 11 water.* + the 15 shadows.* + the 11 gi.* + the 5 ao.* / gbuffer.* + the 3 lod.* settings + debug.rt_shadow_sync + debug.rt_skin + debug.rt_skin_verify + compat.high_fps + debug.regions + upscale.mode + upscale.object_motion + upscale.reactive + upscale.reactive_cutoff + upscale.reactive_scale + upscale.sharpness + upscale.jitter_flip + native.opaque + native.debug
     struct rvk_setting_info info{};
     CHECK(api::settingInfo(reg, 0, &info, sizeof(info)) == 80);
     CHECK(info.size == 80);

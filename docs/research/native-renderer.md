@@ -161,3 +161,35 @@ answers the lifecycle question below). `deleted / unknown` (6836) counts entitie
 tree's size field; dynamic entities' node box overrides; whether `+0x60` is final for bone-attached entities [I: yes, `Process` writes it];
 `ActorInstance +0x28` = inverse bind (check at a rest pose); off-screen actors' W; vegetation entry fields `+0x10..0x27`; SpeedTree billboards;
 property-set type ids (use the context vtable as the kind instead); the `bool` of `GetVertexData`.
+
+## 9. N3 first light: the native opaque pass (2026-10-25, `native.opaque`, default off) [C]
+
+`src/enh/native_opaque.*`, `shaders/native/static_mesh.{glsl,vert,frag}`. A draw replacer skips the engine's main-view solid draws of plain
+indexed static meshes (kind StaticMesh, triangle lists from static buffers, not blended; alpha-tested ones included) and records them; a pass
+at `AfterOpaque` draws them into the scene HDR target + the hardware depth: vertices pulled from the engine's buffers by device address (one
+pipeline for every static layout, `vkCmdDraw(indexCount, first = firstIndex)`), the engine's clip space (same matrix, half-pixel fix, jitter,
+flipped viewport), the engine's per-draw cull mode (`D3DRS_CULLMODE`, dynamic state). The z pre-pass, cascades and shadow mask stay the
+engine's; the native shader samples the mask (s0: `.a` sun shadow, `.r` occlusion).
+
+* **Shading = the engine's material lighting for static meshes** (shaders/material/ge_default.frag): SH ambient (3 or 7 registers c15..21,
+  mixed with the indoor colour c14 by the vertex AO = COLOR1.a), the directional lightmaps (s4 / s5, TEXCOORD6, alpha = ambient light direction),
+  the sun (c22..c24, Lambert x mask.a), up to 3 point lights (c25..), `pow(acc, 0.45)`, x mask.r, radial fog (c3 / c4), tangent frame
+  (`B = cross(N, T)`), DXT5nm normal maps. Which terms a draw uses = what its pixel shader's constant table lists (CTAB semantics: sun,
+  mask, lightmaps, ambient registers, point light count). First light takes the per-draw inputs (PS constants c0..c47, bound textures s0 / s4 / s5 /
+  the material's diffuse + normal slots) from the skipped engine draw; N3.2 replaces them by native sources.
+* **The mirror's matrix = the draw's world rows** in 0 of ~134,000 compared draws (row r of the 3x4 = column r of the entity's row-vector
+  matrix): the mirror can supply every transform.
+* **Result** (savegame, hero standing, sync validation clean): the native image equals the engine's in geometry, textures, the door facade /
+  stairs / cart, and the sun-shadow pattern (through the engine's mask); the difference left is colour warmth of the lit walls (lightmap /
+  sRGB handling not yet checked).
+* **What it took to find** (the method is worth keeping): `native.debug` views (albedo, normal, mask channels, ambient / lightmap / sun alone,
+  feature flags, and two raster-state views). The first lit versions looked "right" while showing none of our fragments: the picture was
+  the engine's remaining draws, and the black facade was a hole where we drew nothing. The no-depth / no-cull view proved the transforms; the
+  depth-test-only view proved the depth; the culling-only view exposed **culling**: Risen's materials set their own cull mode, a fixed
+  `BACK` + `CLOCKWISE` removed the front faces of level meshes. Rule: per-draw state comes from the engine's state, never a default.
+* **Left to the engine** (about 2/3 of the draws counted by "blended / state"): blended passes (terrain layers, decals, overlays), instanced
+  meshes, skinned characters, SpeedTree, vegetation, particles, water, sky. The terrain's cobbles in the first pictures were such blended
+  layers drawn over the engine's base: the native pass does not draw them yet.
+* Next (N3.2 - N4): list the parts from the mirror (own frustum / distance cull, level of detail from the contexts, no engine draw needed),
+  take the lighting inputs natively (hemisphere / lights readers, per-object nearest lights, lightmaps from the mesh resource), then our own
+  cascades from the mirror for the native shadow term.

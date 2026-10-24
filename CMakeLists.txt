@@ -64,6 +64,8 @@ set(RVK_SHADERS
     gi/gi_trace.comp
     gi/sp_resolve.comp
     gi/sp_trace.comp
+    native/static_mesh.frag
+    native/static_mesh.vert
     gbuffer/ao_white.frag
     gbuffer/gbuffer_debug.frag
     gbuffer/gtao.comp
@@ -238,6 +240,8 @@ add_library(rvk_core STATIC
     src/enh/rt_material.h
     src/scene/mirror.cpp
     src/scene/mirror.h
+    src/enh/native_opaque.cpp
+    src/enh/native_opaque.h
     src/enh/rt_registry.cpp
     src/enh/rt_registry.h
     src/enh/rt_scene.cpp

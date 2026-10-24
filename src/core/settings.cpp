@@ -1671,6 +1671,31 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .flags = Flag::Debug,
     });
+    r.nativeOpaque = &reg.add({
+        .key = "native.opaque",
+        .label = "Native opaque pass (static meshes)",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The renderer draws the world's static meshes itself (its own shaders, the engine's buffers and material textures) "
+                       "instead of replaying the engine's solid draws. Experimental: first light of the native renderer.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::Debug,
+    });
+    r.nativeDebug = &reg.add({
+        .key = "native.debug",
+        .label = "Native opaque debug view",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "One term of the native opaque pass's shading as the colour: the diffuse texture, the world normal, the shadow "
+                       "mask's channels, the ambient, lightmap or sun term alone, the draw's feature flags.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "albedo", "normal", "mask_shadow", "mask_ao", "ambient", "lightmap", "sun", "flags", "albedo_depth", "albedo_cull"},
+        .optionLabels = {"Off", "Diffuse texture", "Normal", "Shadow mask (sun)", "Shadow mask (occlusion)", "Ambient only", "Lightmap only",
+                         "Sun only", "Feature flags", "Diffuse (depth test only)", "Diffuse (culling only)"},
+        .flags = Flag::NoAB | Flag::Debug,
+    });
     r.prefetchStride = &reg.add({
         .key = "debug.prefetch_stride",
         .label = "Cache-in walk every n-th frame",

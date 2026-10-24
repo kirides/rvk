@@ -103,6 +103,14 @@ bool Mirror::lookupPart(const void* ptr, const void* subMesh, MeshInfo& info, Me
     return false;
 }
 
+bool Mirror::worldOf(const void* ptr, Matrix& out) const {
+    std::lock_guard lock(mutex_);
+    const auto it = map_.find(ptr);
+    if (it == map_.end()) return false;
+    out = it->second.state.world;
+    return true;
+}
+
 bool Mirror::contains(const void* ptr) const {
     std::lock_guard lock(mutex_);
     return map_.contains(ptr);
