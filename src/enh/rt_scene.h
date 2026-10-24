@@ -298,7 +298,7 @@ private:
 
     // stats (interval since the last log line)
     struct Interval {
-        std::uint64_t frames = 0, built = 0, builtTriangles = 0, compacted = 0, evicted = 0, failed = 0, observed = 0, skipped = 0;
+        std::uint64_t frames = 0, built = 0, builtTriangles = 0, compacted = 0, evicted = 0, failed = 0, observed = 0, skipped = 0, sightings = 0;
         std::uint64_t compactSaved = 0;
         double buildCpuMs = 0.0, passCpuMs = 0.0, observeMs = 0.0, gpuMs = 0.0;
         std::uint64_t textured = 0, untextured = 0, cutOut = 0, segmented = 0, segments = 0, speedTree = 0;  // records of the last frame

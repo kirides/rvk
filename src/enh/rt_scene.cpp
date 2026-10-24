@@ -540,6 +540,7 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         rt::Rows rows;
         if (!rowsAt(kInstanceDataBase + 1, rows) || outside(rows)) return skip();
         const std::uint64_t owner = q.tag != nullptr ? rt::ownerKey(q.tag->entity, q.tag->opDesc) : 0;
+        ++iv_.sightings;
         rt::Registry::Instance* in = registry_.see(rt::instanceKey(b->id, rows), b->id, rows, owner, flags, alphaWord, view, frame, now).first;
         if (in != nullptr && materialId != 0) applyMaterial(*in, materialId, materialRank, overlay, frame);
         return;
@@ -565,6 +566,7 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         if (reg + 2 >= kInstanceDataEnd) continue;
         rt::Rows rows;
         if (!rowsAt(reg, rows) || outside(rows)) continue;
+        ++iv_.sightings;
         rt::Registry::Instance* in = registry_.see(rt::instanceKey(b->id, rows), b->id, rows, 0, flags, alphaWord, view, frame, now).first;
         if (in != nullptr && materialId != 0) applyMaterial(*in, materialId, materialRank, overlay, frame);
     }
@@ -1805,11 +1807,11 @@ void RtScene::logStats(bool force) {
     spdlog::info("rt: scene: instances {} in the TLAS (registry {}: added {}, replaced {}, aged {}, far {}, capped {}, dropped {}), "
                  "blas {} (+built {} / {}k triangles, pending {}, failed {}, compacted {} saving {:.1f} MiB, evicted {}), triangles {}, "
                  "AS memory {:.1f} MiB (BLAS {:.1f}, TLAS {:.1f}, scratch {:.1f}); per frame: observe {:.3f} ms ({:.0f} draws, {:.0f} "
-                 "skipped), build CPU {:.3f} ms, pass CPU {:.3f} ms, GPU {}",
+                 "skipped, {:.0f} instance sightings), build CPU {:.3f} ms, pass CPU {:.3f} ms, GPU {}",
                  lastInstances_, registry_.size(), c.added, c.replaced, c.aged, c.tooFar, c.capped, c.dropped, built, iv_.built,
                  iv_.builtTriangles / 1000, pendingCount, failed, iv_.compacted, static_cast<double>(iv_.compactSaved) / 1048576.0, iv_.evicted,
                  lastTriangles_, blasMiB + tlasMiB + scratchMiB, blasMiB, tlasMiB, scratchMiB, iv_.observeMs / f,
-                 static_cast<double>(iv_.observed) / f, static_cast<double>(iv_.skipped) / f, iv_.buildCpuMs / f, iv_.passCpuMs / f,
+                 static_cast<double>(iv_.observed) / f, static_cast<double>(iv_.skipped) / f, static_cast<double>(iv_.sightings) / f, iv_.buildCpuMs / f, iv_.passCpuMs / f,
                  iv_.gpuSamples > 0 ? std::format("{:.3f} ms", iv_.gpuMs / static_cast<double>(iv_.gpuSamples)) : std::string("n/a ([debug] perf)"));
     const RtMaterials::Counters mc = materials_.takeCounters();
     spdlog::info("rt: scene: materials {} (per frame: {:.1f} resolves, {:.3f} ms; interval: {} uv evaluations, graph {} (pool image {}) / bytecode s9 {} / "

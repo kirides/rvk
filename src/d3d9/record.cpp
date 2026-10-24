@@ -39,7 +39,9 @@ void beginScopeLabel(VkCommandBuffer cmd, const char* name) {
 // Which scopes the record threads take: the main view's z pre-pass and solid pass, the sun cascades' depth pass (the passes
 // whose draws are batched: docs/research/performance.md 12), when the device has the threads' prerequisites.
 bool Device::wantSecondaryScope() const {
-    if (!recordThreadsWanted_) return false;
+    // with fewer than four hardware threads the workers would compete with the engine thread and the driver
+    static const bool enoughCores = std::thread::hardware_concurrency() >= 4;
+    if (!recordThreadsWanted_ || !enoughCores) return false;
     const scene::Phase phase = phases_.current();
     return (phase.view == scene::View::Main && (phase.pass == scene::Pass::DepthPrepass || phase.pass == scene::Pass::Solid)) ||
            (phase.view == scene::View::Shadow && phase.pass == scene::Pass::ShadowDepth);
@@ -65,7 +67,15 @@ void Device::startRecordThreads() {
         recordThreads_.push_back(std::move(t));
         raw->thread = std::thread([this, raw] { recordThreadMain(*raw); });
     }
-    spdlog::info("d3d9: record threads: {} worker(s), chunks of {} draws", recordThreads_.size(), kChunkPackets);
+    recordSelf_ = std::make_unique<RecordThread>();
+    for (std::uint32_t s = 0; s < vk::Frames::kInFlight; ++s) {
+        VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+        pci.queueFamilyIndex = ctx_.queueFamily();
+        if (vkCreateCommandPool(ctx_.device(), &pci, nullptr, &recordSelf_->pools[s]) != VK_SUCCESS) recordSelf_.reset();
+        if (!recordSelf_) break;
+    }
+    spdlog::info("d3d9: record threads: {} worker(s) + the engine thread, chunks of {} draws", recordThreads_.size(), kChunkPackets);
 }
 
 void Device::stopRecordThreads() {
@@ -81,6 +91,12 @@ void Device::stopRecordThreads() {
         }
     }
     recordThreads_.clear();
+    if (recordSelf_) {
+        for (VkCommandPool pool : recordSelf_->pools) {
+            if (pool != VK_NULL_HANDLE) vkDestroyCommandPool(ctx_.device(), pool, nullptr);
+        }
+        recordSelf_.reset();
+    }
     chunkPool_.clear();
     chunksUsed_ = 0;
     openChunk_ = nullptr;
@@ -93,6 +109,10 @@ void Device::resetRecordPools(std::uint32_t slot) {
     for (auto& t : recordThreads_) {
         vkResetCommandPool(ctx_.device(), t->pools[slot], 0);
         t->used[slot] = 0;
+    }
+    if (recordSelf_) {
+        vkResetCommandPool(ctx_.device(), recordSelf_->pools[slot], 0);
+        recordSelf_->used[slot] = 0;
     }
 }
 
@@ -113,7 +133,10 @@ void Device::recordThreadMain(RecordThread& t) {
                 recordCv_.wait(lock, [this] { return recordQuit_ || !recordQueue_.empty(); });
                 recordSleepers_.fetch_sub(1);
             }
-            if (recordQueue_.empty()) return;  // quitting
+            if (recordQueue_.empty()) {
+                if (recordQuit_) return;
+                continue;  // the engine thread took the chunk first
+            }
             c = recordQueue_.front();
             recordQueue_.pop_front();
             recordPending_.fetch_sub(1, std::memory_order_release);
@@ -234,6 +257,19 @@ void Device::scopeLabel(bool begin, const char* text) {
 
 void Device::finishSecondaryScope() {
     closeChunk();
+    // the engine thread takes the chunks no worker has started on and records them itself instead of idling
+    while (recordSelf_) {
+        RecordChunk* c = nullptr;
+        {
+            const std::lock_guard lock(recordMutex_);
+            if (recordQueue_.empty()) break;
+            c = recordQueue_.front();
+            recordQueue_.pop_front();
+            recordPending_.fetch_sub(1, std::memory_order_release);
+        }
+        recordChunk(*recordSelf_, *c);
+        c->done.store(true, std::memory_order_release);
+    }
     VkCommandBuffer cmd = frames_.cmd();
     VkCommandBuffer run[64];
     std::uint32_t runCount = 0;

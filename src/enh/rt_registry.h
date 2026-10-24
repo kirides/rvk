@@ -102,6 +102,7 @@ public:
         std::uint32_t flags = 0;   // the caller's (record flags), OR-ed over sightings
         std::uint32_t data = 0;    // the caller's (the alpha test word), the latest non-zero
         std::uint8_t views = 0;    // bit per view it was seen in (the caller's numbering)
+        std::uint8_t ownerViews = 0;  // views whose owners_ slot is known to name this instance (see() skips the map then)
         // the caller's material of this instance (enh/rt_material id, 0 = none) and the rank of the draw that gave it; the
         // frame + rank of the last draw that counted (the first per frame and rank: layered materials keep their base)
         std::uint32_t material = 0;

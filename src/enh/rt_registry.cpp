@@ -117,7 +117,15 @@ std::pair<Registry::Instance*, bool> Registry::see(std::uint64_t key, std::uint6
         in.views |= view;
         if (owner != 0) {
             in.owner = owner;
-            owners_[ownerSlot(owner, view)] = key;
+            if ((in.ownerViews & view) != view) {
+                // the owner's latest instance in this view: a holder that is another instance loses its claim
+                auto [slot, fresh] = owners_.try_emplace(ownerSlot(owner, view), key);
+                if (!fresh && slot->second != key) {
+                    if (Instance* prev = find(slot->second)) prev->ownerViews &= static_cast<std::uint8_t>(~view);
+                    slot->second = key;
+                }
+                in.ownerViews |= view;
+            }
         }
         return {&in, false};
     }
@@ -145,7 +153,13 @@ std::pair<Registry::Instance*, bool> Registry::see(std::uint64_t key, std::uint6
     in.lastTime = time;
     index_[key] = list_.size();
     list_.push_back(in);
-    if (owner != 0) owners_[slot] = key;
+    if (owner != 0) {
+        if (auto [it, fresh] = owners_.try_emplace(slot, key); !fresh) {
+            if (Instance* prev = find(it->second); prev != nullptr && prev != &list_.back()) prev->ownerViews &= static_cast<std::uint8_t>(~view);
+            it->second = key;
+        }
+        list_.back().ownerViews = view;
+    }
     ++counters_.added;
     if (onAdded) onAdded(list_.back());
     return {&list_.back(), true};

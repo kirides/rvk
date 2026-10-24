@@ -1259,6 +1259,7 @@ private:
     RecordChunk* openChunk_ = nullptr;
     std::vector<ScopeItem> scopeItems_;
     std::vector<std::unique_ptr<RecordThread>> recordThreads_;
+    std::unique_ptr<RecordThread> recordSelf_;  // the engine thread's own pools: it records queued chunks while it waits (work stealing)
     std::mutex recordMutex_;
     std::condition_variable recordCv_;
     std::deque<RecordChunk*> recordQueue_;
