@@ -156,7 +156,21 @@ float rcp(float x) { return 1.0 / x; }
 // normalize(0) = 0 (0 * inf = 0): never NaN where D3D9 gives a finite colour (e.g. a negative SH ambient term under the gamma pow,
 // a DXT block whose decoded normal has x^2 + y^2 > 1 under the sqrt)
 float powD3D(float x, float y) { return pow(abs(x), y); }
+vec2 powD3D(vec2 x, float y) { return pow(abs(x), vec2(y)); }
 vec3 powD3D(vec3 x, float y) { return pow(abs(x), vec3(y)); }
+vec4 powD3D(vec4 x, float y) { return pow(abs(x), vec4(y)); }
+vec2 powD3D(vec2 x, vec2 y) { return pow(abs(x), y); }
+vec3 powD3D(vec3 x, vec3 y) { return pow(abs(x), y); }
+vec4 powD3D(vec4 x, vec4 y) { return pow(abs(x), y); }
+// HLSL broadcasts a scalar first operand (GLSL's max / min only take the scalar second)
+vec2 max(float a, vec2 b) { return max(vec2(a), b); }
+vec3 max(float a, vec3 b) { return max(vec3(a), b); }
+vec4 max(float a, vec4 b) { return max(vec4(a), b); }
+vec2 min(float a, vec2 b) { return min(vec2(a), b); }
+vec3 min(float a, vec3 b) { return min(vec3(a), b); }
+vec4 min(float a, vec4 b) { return min(vec4(a), b); }
+// the engine's material snippets (XFX_PS_*) call the HLSL pow: from here on the D3D9 one (the bytecode's pow is |x|^y)
+#define pow(x, y) powD3D(x, y)
 float sqrtD3D(float x) { return sqrt(abs(x)); }
 // D3DX compiles atan2 to this polynomial (max error ~1e-4; constants as in the shipped shaders): same curve, same colours
 float atan2D3D(float y, float x) {
@@ -200,6 +214,7 @@ vec4 texCUBE(int slot, vec3 dir) { return texture(samplerCube(tCube[pc.draw.tex[
 #define g_FogColor RVK_STAGE.c[3]
 #define g_FogSettings RVK_STAGE.c[4]
 #define g_CamObstacleAndMaskReference RVK_STAGE.c[5]
+#define g_CamObstacleDistances g_CamObstacleAndMaskReference.xy
 #define g_MaskReference g_CamObstacleAndMaskReference.w
 #define g_CamPos g_CamPosAndFar.xyz
 #define g_FarDist g_CamPosAndFar.w

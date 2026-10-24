@@ -249,6 +249,8 @@ add_library(rvk_core STATIC
     src/engine/high_fps.cpp
     src/engine/high_fps.h
     src/engine/lod.cpp
+    src/engine/material_source.cpp
+    src/engine/material_source.h
     src/engine/lod.h
     src/engine/menu_state.cpp
     src/engine/menu_state.h

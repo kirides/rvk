@@ -222,6 +222,9 @@ private:
 class HalHLSLShader final : public StubHLSLShader {
 public:
     explicit HalHLSLShader(HalDevice& dev);
+    ~HalHLSLShader() override;
+    // the d3d9 shader behind an engine API shader pointer that is one of ours (engine/material_source), else null (any thread)
+    static d3d9::Shader* shaderOf(void* apiShader);
 
     bEResult Compile(eCGfxShared::eSGfxHLSLShaderSrc const& a0) override;
     bEResult GetShaderByteCodeSize(long& a0) const override;

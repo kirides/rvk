@@ -861,6 +861,18 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 1,
         .flags = Flag::Debug,
     });
+    r.materialSources = &reg.add({
+        .key = "debug.material_sources",
+        .label = "Collect material shader sources",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Records, for every material shader the game asks for, its effect, entry function and the full macro list "
+                       "(the material graph's code snippets included) and writes them to bin/rvk/cache/materials/sources.jsonl "
+                       "(developer data for the GLSL material shader).",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::Debug | Flag::NoAB,
+    });
     r.batchDraws = &reg.add({
         .key = "debug.batch_draws",
         .label = "Batch opaque draws",

@@ -21,6 +21,7 @@
 #include "d3d9/fvf.h"
 #include "engine/scene_hooks.h"
 #include "engine/lod.h"
+#include "engine/material_source.h"
 #include "engine/menu_state.h"
 #include "engine/shadow_maps.h"
 #include "engine/vfs.h"
@@ -325,6 +326,12 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyLod(); }, this);
     }
     applyLod();
+    if (rs.materialSources != nullptr) {
+        engine::matsrc::setResolver(&HalHLSLShader::shaderOf);
+        engine::matsrc::setOutput(options.cacheDir.empty() ? std::filesystem::path() : options.cacheDir / "materials" / "sources.jsonl");
+        engine::matsrc::setEnabled(rs.materialSources->asBool());
+        reg.onChange(*rs.materialSources, [](const settings::Setting& s) { engine::matsrc::setEnabled(s.asBool()); }, this);
+    }
     if (rs.prefetchStride != nullptr) {
         engine::lod::setPrefetchStride(static_cast<int>(rs.prefetchStride->asInt()));
         reg.onChange(*rs.prefetchStride, [](const settings::Setting& s) { engine::lod::setPrefetchStride(static_cast<int>(s.asInt())); }, this);
@@ -1045,6 +1052,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
         dev_.windowResized();
     }
     updateMenuPacing();
+    engine::matsrc::onPresent();
     engine::lod::onPresent();  // a changed object draw distance: the world's cache-in spheres (engine thread)
     dev_.present();
     const auto& s = dev_.stats();

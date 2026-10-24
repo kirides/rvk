@@ -1,5 +1,7 @@
 // HAL resource objects on d3d9::Device: textures, cube maps, volumes, vertex/index data, primitives, HLSL shaders.
 
+#include <mutex>
+#include <unordered_set>
 #include <atomic>
 #include <cstring>
 
@@ -444,7 +446,26 @@ bool HalPrimitive::Execute() {
 
 // ---- HLSL shaders ----------------------------------------------------------------------------------------------------
 
-HalHLSLShader::HalHLSLShader(HalDevice& dev) : dev_(dev) {}
+namespace {
+std::mutex g_hlslMutex;
+std::unordered_set<const void*> g_hlslShaders;  // live HalHLSLShader objects (the pool element's API shader is validated against it)
+}  // namespace
+
+HalHLSLShader::HalHLSLShader(HalDevice& dev) : dev_(dev) {
+    const std::lock_guard lock(g_hlslMutex);
+    g_hlslShaders.insert(this);
+}
+
+HalHLSLShader::~HalHLSLShader() {
+    const std::lock_guard lock(g_hlslMutex);
+    g_hlslShaders.erase(this);
+}
+
+d3d9::Shader* HalHLSLShader::shaderOf(void* apiShader) {
+    const std::lock_guard lock(g_hlslMutex);
+    if (!g_hlslShaders.contains(apiShader)) return nullptr;
+    return static_cast<HalHLSLShader*>(apiShader)->shader_.get();
+}
 
 bool HalHLSLShader::create(std::vector<std::uint32_t> bytecode, std::uint32_t type) {
     bytecode_ = std::move(bytecode);

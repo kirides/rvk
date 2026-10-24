@@ -26,6 +26,7 @@
 #include "engine/scene_hooks.h"
 #include "engine/high_fps.h"
 #include "engine/lod.h"
+#include "engine/material_source.h"
 #include "engine/shadow_maps.h"
 #include "engine/symbols.h"
 #include "engine/vfs.h"
@@ -440,6 +441,7 @@ void onProcessAttach(void* module) {
         engine::scene::install();
         engine::shadowmaps::install();
         engine::lod::install();     // detail distances (docs/research/lod.md)
+        if (!engine::matsrc::install()) spdlog::warn("engine: CompileShaderPoolEllement not hooked: no material shader sources");
         engine::window::install();  // borderless fullscreen (docs/research/window-mode.md)
     }
     // gameplay fixes for high frame rates (any mode: not rendering; docs/research/fps-limit.md 12)

@@ -32,6 +32,7 @@
 #include "d3d9/draws.h"
 #include "d3d9/identity.h"
 #include "d3d9/inject.h"
+#include "d3d9/material_source.h"
 #include "d3d9/scene.h"
 #include "d3d9/semantics.h"
 #include "shader/abi.h"
@@ -257,6 +258,9 @@ public:
     std::vector<std::uint32_t> bytecode;  // the D3D9 tokens (kept for GetFunctionData)
     std::uint64_t hash = 0;
     ShaderSemantics semantics;  // named constants / samplers from the CTAB (d3d9/semantics.h)
+    // the engine request this pool shader was found by (set once by engine/material_source, any thread; null: unknown / not a
+    // material shader). Owned by the registry there
+    std::atomic<const MaterialSource*> source{nullptr};
     // vertex shaders: the vertex layout plans (Device::vertexPlan) of the last declarations they were drawn with (render thread)
     struct PlanSlot {
         std::uint64_t declId = 0;

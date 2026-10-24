@@ -75,7 +75,7 @@ struct sPassData {
 
 // material expression macros (ge_default.fxh): the generated XFX_PS_* code refers to these
 #define XFX_PS_REFLECT PassData.m_vecWorldReflect
-#define XFX_PS_TANGENTEYE PassData.m_vecTangentEye
+#define XFX_PS_TANGENTEYE PassData.m_vecTangentEye.xy  // only used as (float2 expr) * XFX_PS_TANGENTEYE: HLSL truncates the float3
 #define XFX_PS_WORLDEYE PassData.m_vecWorldEye
 #define XFX_PS_WORLDNORMAL PassData.m_vecWorldNormal
 #define XFX_PS_TANGENTNORMAL PassData.m_vecTangentNormal
