@@ -406,3 +406,28 @@ but the engine-shader-hash -> define list + material-graph snippet mapping canno
   z pre-pass, so it needs bit-identical vertex math (a different shader permutation rounds differently); (b) a deferred
   render-thread Device API (what DXVK's CS thread does): dynamic vertex buffers are copied at draw time and the enhancements read
   live engine objects, so silent corruption is a risk for ~1.3 ms.
+
+## 15. CPU overhead pass 2 (2026-10-24, 12579b2)
+
+Scene and recipe as in section 14 (savegame, lod 2x, vsync off, `-PlayerDefaults`).
+
+* **Sun cascade update stride** (`debug.shadow_stride`, 1..4, default 2; `engine/shadow_maps.cpp`): the `eCCascadeShadowMap::RenderShadowMaps`
+  pre-hook skips the call on alternate frames while the camera is nearly still. Conditions for a skip (all): the camera moved
+  < 1.5 m and its view-projection rows 0..2 changed < 0.015 (~1 deg), measured against the previous frame's camera block
+  (`RenderShadowMaps` runs BEFORE the main view, so the current camera is not read yet); sun direction changed < ~0.1 deg; cascade
+  range / split factor / map size unchanged; gap since the last update < 0.25 s. The cascade maps and matrices stay in the cascade
+  object; a skipped frame credits the cascade count (split count at +0x28) through `Device::creditShadowDepthMaps`, so the mask pass
+  of `enh/shadows` expects the right number of depth maps. rvk.log: `engine: shadow cascades: N updates, M skipped so far`.
+  Measured: `-Perf` fps 139 -> ~150 (CPU 6.35 ms per frame at stride 2); frames alternate 2285 / 1765 draws. Validation +
+  synchronization validation clean; `shadow-compare` images (static rvkcompare camera) equal within noise (the only larger
+  difference was animated water). Moving-camera quality was not A/B'd separately (the force conditions cover it).
+* **Occlusion probe** (`debug.occlusion_probe`, measurement only; `enh/occlusion.*`: HZB of the z pre-pass + a per-sphere test over
+  the RT registry's instances): ~24 % of the instances (21-25 % of the triangles) are hidden at lod 2x, ~8 % at lod 1x, 10-16 % are
+  off-screen. Realizable gain ~0.5 ms at 2x / ~0.1 ms at 1x, with pop-in risk and a 2-frame lag: not built.
+* **Small-caster cull** (histogram in cm bins <5 <10 <20 <40 <80 <160 >=160): almost nothing under 20 cm; ~1430 instances of
+  20-40 cm, seen by both the main view and the cascades: not worth culling.
+* **Render-thread split audit: rejected** (weeks of work, silent-corruption risk from live engine pointers, <= 1.3 ms net; see 14.1).
+* **Per-pass injected CPU** (`-Perf` line `injected pass CPU`): `rt.scene` at AfterDepthPrepass 0.20 ms, `water.ocean` 0.16 ms,
+  the others negligible.
+* **Remaining candidates**: `rt.scene` incremental records (<= 0.15 ms), a typed `qsort` replacement (2 %), the
+  `eCFrustumDatabase` copy constructor (0.9 %), a no-op `SetTime` (0.6 %).
