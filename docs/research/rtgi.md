@@ -600,8 +600,11 @@ is outside the view drop out of the drawn lists as the camera turns. `rvk_lightt
 GI's world set stays at 129 in all 1938 frames of the sweep. The extended, range-aware, out-of-frustum set therefore exists on the RT
 side only (a read of the registry, no frustum test at all): **the engine's own culling, per-draw light lists, constants and cubemap
 shadow passes are not touched** (the two hooks call the original and remember `this`; `AddToLightList` is called on dynamic point
-lights only while `gi.lights=world` and GI are on, into a scratch list). Not verified by an image / draw-count A/B against the
-previous build with the features off [open].
+lights only while `gi.lights=world` and GI are on, into a scratch list). A/B against the previous commit (de6407d, built in a worktree) with GI,
+water and shadows off (`rvk_camera` scenario, `-LogDraws 400`): the first 400 draws (shaders, targets, states, textures) are identical
+line for line, and the frames' pass structures agree (`Main{DepthPrepass(391) ShadowMask(9) Solid(852) Refracted(6) Alpha(21) ...}` in both;
+the cascade passes appear on the frames the stride of `debug.shadow_stride` updates them, in both builds) [C]. No cubemap shadow pass
+occurs in that scene; no image comparison was made [open].
 
 **Open**: the registry holds only what is cached in (no lights beyond about the cache-in radius, none at the new-game beach where the
 objects' own lists are the only source); dynamic `eCPointLight_PS` lights are untested (none registered in the tested places);
