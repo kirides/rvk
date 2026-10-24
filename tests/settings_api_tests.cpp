@@ -14,7 +14,7 @@ TEST(settings_api_info_get_set) {
     settings::Registry reg;
     settings::registerRendererSettings(reg);
     const std::uint32_t n = api::settingCount(reg);
-    CHECK(n == 72);  // 27 (incl. overlay.debug_mode, overlay.show_advanced, vulkan.fullscreen, vulkan.exclusive_acquire, vulkan.menu_fps, debug.pace_loading, debug.batch_draws, debug.record_threads, debug.prefetch_stride, debug.material_sources, debug.ubershader, debug.ubershader_skip, rt.reflections, rt.reflection_tweaks, rt.debug, rt.scene_views) + the 11 water.* + the 10 shadows.* + the 7 gi.* + the 5 ao.* / gbuffer.* + the 3 lod.* settings + compat.high_fps + debug.regions + upscale.mode + upscale.object_motion + upscale.reactive + upscale.reactive_cutoff + upscale.reactive_scale + upscale.sharpness + upscale.jitter_flip
+    CHECK(n == 74);  // 28 (incl. overlay.debug_mode, overlay.show_advanced, vulkan.fullscreen, vulkan.exclusive_acquire, vulkan.menu_fps, debug.pace_loading, debug.batch_draws, debug.record_threads, debug.prefetch_stride, debug.material_sources, debug.ubershader, debug.ubershader_skip, debug.occlusion_probe, debug.shadow_stride, rt.reflections, rt.reflection_tweaks, rt.debug, rt.scene_views) + the 11 water.* + the 10 shadows.* + the 7 gi.* + the 5 ao.* / gbuffer.* + the 3 lod.* settings + compat.high_fps + debug.regions + upscale.mode + upscale.object_motion + upscale.reactive + upscale.reactive_cutoff + upscale.reactive_scale + upscale.sharpness + upscale.jitter_flip
     struct rvk_setting_info info{};
     CHECK(api::settingInfo(reg, 0, &info, sizeof(info)) == 80);
     CHECK(info.size == 80);

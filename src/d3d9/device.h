@@ -523,6 +523,7 @@ struct PerfStats {
     double shaderMs = 0.0;
     std::uint64_t injections = 0;          // injection points that ran passes (d3d9/inject.h)
     double injectMs = 0.0;                 // CPU time recording them
+    std::map<std::string, double> injectPassMs;  // ... per pass (name at point; [debug] perf only)
     std::uint64_t frameBlocks = 0;         // FrameBlock uploads
     std::vector<float> frameIntervalsMs;   // present-to-present
     vk::FramePacer::Stats pacer;
@@ -871,6 +872,8 @@ public:
     // the sun cascades' depth maps rendered so far this frame (the scene hooks count each ExecuteShadowMap into a DF24 /
     // DF16 depth texture; enh/shadows knows the frame's last cascade by it)
     void countShadowDepthMap() { ++shadowDepthMaps_; }
+    // a frame that skipped the cascades' update (engine/shadow_maps): the maps it still reads count as drawn
+    void creditShadowDepthMaps(std::uint32_t n) { shadowDepthMaps_ += n; }
     std::uint32_t shadowDepthMaps() const { return shadowDepthMaps_; }
     // the D3D9 float constants as last set (render thread)
     const float* vsConstant(std::uint32_t reg) const { return vsF_[reg < kVsFloatConsts ? reg : 0]; }

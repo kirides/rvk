@@ -1,0 +1,59 @@
+#version 460
+// Occlusion probe (src/enh/occlusion.cpp): for each world sphere, is it hidden behind the depth the z pre-pass wrote? Output per
+// sphere: 0 visible (or touching the near plane), 1 hidden, 2 outside the screen. The test is conservative: the sphere's
+// nearest view depth against the farthest depth of the pyramid texels its screen rectangle touches.
+
+#define RVK_PASS_SHADER 1
+#include "rvk_abi.glsl"
+#include "rvk_common.glsl"
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer OccSpheres { vec4 s[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer OccOut { uint v[]; };
+
+layout(push_constant, std430) uniform ProbePush {
+    RVK_PASS_PUSH_HEADER
+    OccSpheres spheres;  // xyz world centre, w radius
+    OccOut outFlags;
+    uint count;
+    uint levels;
+    uint width;   // the depth map's size (level 0 is half of it)
+    uint height;
+    uint hzb[8];  // bindless t2D of pyramid levels 0 .. levels - 1
+} pc;
+
+layout(local_size_x = 64) in;
+
+float hzbMax(uint level, ivec2 p) { return rvkFetch2D(pc.hzb[level], p).r; }
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) return;
+    vec4 sph = pc.spheres.s[i];
+    RvkFrame f = pc.frame;
+    uint flag = 0u;
+    vec4 cc = f.viewProj * vec4(sph.xyz, 1.0);
+    float z = cc.w;
+    float r = sph.w;
+    if (r > 0.0 && z - r > f.depthParams.x) {
+        vec2 uv = cc.xy / z * vec2(0.5, -0.5) + 0.5;
+        float rx = r * abs(f.proj[0][0]) / z * 0.5;
+        float ry = r * abs(f.proj[1][1]) / z * 0.5;
+        vec2 lo = uv - vec2(rx, ry);
+        vec2 hi = uv + vec2(rx, ry);
+        if (hi.x <= 0.0 || hi.y <= 0.0 || lo.x >= 1.0 || lo.y >= 1.0) {
+            flag = 2u;
+        } else {
+            lo = clamp(lo, vec2(0.0), vec2(1.0));
+            hi = clamp(hi, vec2(0.0), vec2(1.0));
+            float px = max((hi.x - lo.x) * float(pc.width), (hi.y - lo.y) * float(pc.height));
+            uint level = min(uint(max(ceil(log2(max(px, 1.0))) - 1.0, 0.0)), pc.levels - 1u);
+            ivec2 sz = rvkSize2D(pc.hzb[level]);
+            ivec2 a = clamp(ivec2(lo * vec2(sz)), ivec2(0), sz - 1);
+            ivec2 b = clamp(ivec2(hi * vec2(sz)), ivec2(0), sz - 1);
+            float m = max(max(hzbMax(level, a), hzbMax(level, ivec2(b.x, a.y))), max(hzbMax(level, ivec2(a.x, b.y)), hzbMax(level, b)));
+            float zn = (z - r) / f.cameraPos.w;  // the depth map stores view depth / engine far
+            if (zn > m * 1.002 + 1e-5) flag = 1u;
+        }
+    }
+    pc.outFlags.v[i] = flag;
+}

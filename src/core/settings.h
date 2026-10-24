@@ -274,6 +274,7 @@ struct RendererSettings {
     Setting* paceLoading = nullptr;  // debug.pace_loading: loading screens wait for the pacer (hidden; load-time A/B)
     Setting* debugRegions = nullptr;  // debug.regions: command buffer labels for graphics captures (d3d9::Device::setRegionsEnabled)
     Setting* recordThreads = nullptr;  // debug.record_threads: the opaque passes' draws recorded on worker threads (d3d9::Device::setRecordThreads)
+    Setting* occlusionProbe = nullptr;   // debug.occlusion_probe: how much of the main view the z pre-pass hides (enh/occlusion)
     Setting* ubershaderSkip = nullptr;   // debug.ubershader_skip: classes of material shaders kept translated (bisecting)
     Setting* ubershader = nullptr;       // debug.ubershader: the GLSL material shader for the engine's material pixel shaders (d3d9::Device::setUbershader)
     Setting* materialSources = nullptr;  // debug.material_sources: the engine's request of each material shader (engine::matsrc)
@@ -332,6 +333,7 @@ struct RendererSettings {
     // detail distances (engine/lod.h, docs/research/lod.md): multipliers, 1 = the game's
     Setting* lodTrees = nullptr;          // lod.trees: SpeedTree LOD + billboard fade distances
     Setting* lodMeshes = nullptr;         // lod.meshes: mesh LOD ranges (eCMesh_PS)
+    Setting* shadowStride = nullptr;      // debug.shadow_stride: the sun cascades redrawn every n-th frame (engine::shadowmaps::setUpdateStride)
     Setting* prefetchStride = nullptr;    // debug.prefetch_stride: the cache-in walk every n-th frame (engine::lod::setPrefetchStride)
     Setting* lodView = nullptr;           // lod.view: the view range of objects (eCFrustumDatabase view range factor)
     Setting* highFps = nullptr;           // compat.high_fps: the high frame rate gameplay fixes (engine/high_fps.h)

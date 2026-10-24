@@ -1,5 +1,6 @@
 #include "engine/shadow_maps.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -8,6 +9,8 @@
 #include <spdlog/spdlog.h>
 
 #include "core/hooks.h"
+#include "d3d9/device.h"
+#include "engine/scene_hooks.h"
 #include "engine/symbols.h"
 
 namespace rvk::engine::shadowmaps {
@@ -22,6 +25,24 @@ constexpr std::size_t kSplitCount = 0x28;
 std::atomic<int> g_size{0};
 std::atomic<float> g_range{0.0f};
 std::atomic<float> g_factor{-1.0f};
+std::atomic<int> g_stride{2};
+
+// the throttle's memory (render thread): the camera (inverse view: rows 0..2 the axes, row 3 the position) of the last real update
+struct Throttle {
+    bool valid = false;
+    int skipped = 0;
+    std::uint32_t cascades = 0;  // shadow depth maps the last real update drew
+    float axes[12]{};
+    float pos[3]{};
+    float sun[3]{};
+    float range = 0.0f, factor = 0.0f;
+    int size = 0;
+    double time = 0.0;
+};
+Throttle g_throttle;
+constexpr float kMoveLimit = 150.0f;       // cm the camera may drift from the last update
+constexpr float kTurnLimit = 0.015f;      // a view-projection entry (rows 0..2) moved: ~1 degree
+constexpr double kStaleSeconds = 0.25;     // a longer gap (loading, menu): always redraw
 
 template <class T>
 T field(void* self, std::size_t offset) {
@@ -89,10 +110,60 @@ bool detourRender(void* self) {
         }
         t.wroteSize = field<int>(self, kMapSize);
     }
+    // alternate frames: the maps and their matrices stay in the cascade object, the mask pass reads them as they are
+    const int stride = g_stride.load(std::memory_order_relaxed);
+    d3d9::Device* dev = stride > 1 && self != nullptr ? engine::scene::renderDevice() : nullptr;
+    // the cascades are drawn before the main view of the frame: its camera is not read yet, the last frame's is
+    const auto* cam = dev != nullptr && dev->camera().prevValid ? &dev->camera() : nullptr;
+    Throttle& th = g_throttle;
+    if (stride > 1) {
+        static std::atomic<bool> once{false};
+        if (!once.exchange(true)) {
+            d3d9::Device* any = engine::scene::attachedDevice();
+            spdlog::info("engine: shadow cascades: throttle {}: device {} (any thread {}), camera {}", stride, dev != nullptr, any != nullptr,
+                         cam != nullptr);
+        }
+    }
+    if (cam != nullptr) {
+        const auto& vp = cam->prevViewProjection;
+        float axes[12], sun[3], pos[3] = {cam->prevPosition[0], cam->prevPosition[1], cam->prevPosition[2]};
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 4; ++c) axes[r * 4 + c] = vp.at(r, c);  // rows 0..2: rotation and projection (row 3 = translation)
+        for (int i = 0; i < 3; ++i) sun[i] = field<float>(self, 0x10 + 4 * i);
+        const float range = field<float>(self, kMaxDistance), factor = field<float>(self, kSplitFactor);
+        const int size = field<int>(self, kMapSize);
+        const double now = dev->secondsSinceCreate();
+        bool redraw = !th.valid || th.skipped + 1 >= stride || th.cascades == 0 || now - th.time > kStaleSeconds || range != th.range ||
+                      factor != th.factor || size != th.size;
+        if (!redraw) {
+            const float dx = pos[0] - th.pos[0], dy = pos[1] - th.pos[1], dz = pos[2] - th.pos[2];
+            redraw = dx * dx + dy * dy + dz * dz > kMoveLimit * kMoveLimit;
+            for (int i = 0; i < 12 && !redraw; ++i) redraw = std::fabs(axes[i] - th.axes[i]) > kTurnLimit;
+            const float sx = sun[0] - th.sun[0], sy = sun[1] - th.sun[1], sz = sun[2] - th.sun[2];
+            redraw = redraw || sx * sx + sy * sy + sz * sz > 3e-6f;  // ~0.1 degree: the sun creeps with game time
+        }
+        static std::atomic<int> reasons[2]{};
+        if (reasons[redraw ? 1 : 0].fetch_add(1) % 600 == 0) spdlog::info("engine: shadow cascades: {} updates, {} skipped so far", reasons[1].load(), reasons[0].load());
+        if (!redraw) {
+            ++th.skipped;
+            dev->creditShadowDepthMaps(th.cascades);
+            th.time = now;
+            return true;
+        }
+        const bool r = g_render.original(self);
+        th = Throttle{true, 0, static_cast<std::uint32_t>(std::max(field<int>(self, kSplitCount), 0)), {}, {}, {}, range, factor, size, now};
+        std::memcpy(th.axes, axes, sizeof axes);
+        std::memcpy(th.pos, pos, sizeof pos);
+        std::memcpy(th.sun, sun, sizeof sun);
+        return r;
+    }
+    th.valid = false;
     return g_render.original(self);
 }
 
 }  // namespace
+
+void setUpdateStride(int stride) { g_stride.store(stride < 1 ? 1 : stride, std::memory_order_relaxed); }
 
 void setOverrides(const Overrides& o) {
     g_size.store(o.mapSize, std::memory_order_relaxed);

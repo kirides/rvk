@@ -257,6 +257,10 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     dev_.setEngineTextureResolver([this](const void* api) { return textureOfApi(api); });
     rtScene_ = std::make_unique<enh::RtScene>(dev_);
     rtDebug_ = std::make_unique<enh::RtDebug>(dev_, *rtScene_);
+    if (rs.occlusionProbe != nullptr) {
+        rtScene_->setOcclusionProbe(rs.occlusionProbe->asBool());
+        reg.onChange(*rs.occlusionProbe, [this](const settings::Setting& s) { rtScene_->setOcclusionProbe(s.asBool()); }, this);
+    }
     if (rs.rtDebug != nullptr) {
         const auto applyRtDebug = [this](const settings::Setting& s) {
             rtDebug_->setMode(enh::RtDebug::parse(s.asEnum()), enh::RtDebug::optionFlags(s.asEnum()));
@@ -342,6 +346,10 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         for (settings::Setting* s : {rs.materialSources, rs.ubershader, rs.ubershaderSkip}) {
             reg.onChange(*s, [applyMaterials](const settings::Setting&) { applyMaterials(); }, this);
         }
+    }
+    if (rs.shadowStride != nullptr) {
+        engine::shadowmaps::setUpdateStride(static_cast<int>(rs.shadowStride->asInt()));
+        reg.onChange(*rs.shadowStride, [](const settings::Setting& s) { engine::shadowmaps::setUpdateStride(static_cast<int>(s.asInt())); }, this);
     }
     if (rs.prefetchStride != nullptr) {
         engine::lod::setPrefetchStride(static_cast<int>(rs.prefetchStride->asInt()));
@@ -1252,6 +1260,11 @@ void HalDevice::logPerf(d3d9::PerfStats p) {
     // enhancement plumbing (docs/research/injection.md): FrameBlock uploads, injection points that ran passes, their CPU time
     spdlog::info("perf: frame blocks {:.2f} per frame; injected passes: {:.2f} points per frame, {:.3f} ms per frame (CPU recording)",
                  static_cast<double>(p.frameBlocks) / n, static_cast<double>(p.injections) / n, p.injectMs / n);
+    {
+        std::string passes;
+        for (const auto& [name, ms] : p.injectPassMs) passes += std::format(" {} {:.3f};", name, ms / n);
+        if (!passes.empty()) spdlog::info("perf: injected pass CPU (ms per frame):{}", passes);
+    }
     spdlog::info("perf: per frame {:.0f} draws ({:.0f} batched in {:.1f} batches), {:.1f} render "
                  "passes, {:.0f} pipeline binds; ring {:.0f} KiB, texture uploads {:.0f} KiB, buffer uploads {:.0f} KiB; in the interval: {} "
                  "pipelines built ({:.1f} ms), {} shaders translated ({} compiled, {:.1f} ms)",

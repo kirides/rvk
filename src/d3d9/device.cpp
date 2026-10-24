@@ -228,7 +228,12 @@ void Device::inject(inject::Point point) {
         ctx.frameBlock = frameBlockAddress();  // an earlier pass may have changed it (e.g. the RT scene's TLAS)
         {
             RegionScope region(*this, list[i].name.c_str());
+            const auto p0 = options_.perf ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             list[i].fn(ctx);
+            if (options_.perf) {
+                perf_.injectPassMs[std::format("{} @{}", list[i].name, inject::name(point))] +=
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - p0).count();
+            }
         }
         if (gpuTimer_.enabled()) {
             const std::uint32_t slot = frames_.currentSlot();

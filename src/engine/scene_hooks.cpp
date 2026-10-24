@@ -671,6 +671,9 @@ int install() {
     return n;
 }
 
+d3d9::Device* renderDevice() { return device(); }
+d3d9::Device* attachedDevice() { return g_device.load(std::memory_order_acquire); }
+
 void attach(d3d9::Device* device) {
     g_device.store(device, std::memory_order_release);
     if (device != nullptr && g_execute.installed()) patchContextSlots();

@@ -69,6 +69,8 @@ set(RVK_SHADERS
     gbuffer/gtao.comp
     upscale/prep.comp
     gbuffer/gtao_filter.comp
+    occlusion/hzb_down.comp
+    occlusion/probe.comp
     test/abi_layout.comp
     test/abi_pass_layout.comp
     test/abi_rt_layout.comp
@@ -234,6 +236,8 @@ add_library(rvk_core STATIC
     src/enh/rt_material.h
     src/enh/rt_registry.cpp
     src/enh/rt_registry.h
+    src/enh/occlusion.cpp
+    src/enh/occlusion.h
     src/enh/rt_scene.cpp
     src/enh/rt_scene.h
     src/enh/ocean.cpp

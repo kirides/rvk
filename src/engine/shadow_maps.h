@@ -16,6 +16,9 @@ struct Overrides {
 // any thread; applies at the next RenderShadowMaps
 void setOverrides(const Overrides& o);
 
+// the cascades are redrawn every n-th frame (1 = every frame) while the camera moves / turns little; any thread
+void setUpdateStride(int stride);
+
 // Creates the detour (enabled with the others by hooks::enableAll); false when the symbols are missing
 bool install();
 

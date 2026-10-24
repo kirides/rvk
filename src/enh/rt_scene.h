@@ -38,6 +38,7 @@
 #include <vector>
 
 #include "d3d9/device.h"
+#include "enh/occlusion.h"
 #include "enh/rt_material.h"
 #include "enh/rt_registry.h"
 #include "shader/abi.h"
@@ -52,6 +53,8 @@ public:
     RtScene(const RtScene&) = delete;
     RtScene& operator=(const RtScene&) = delete;
 
+    // debug.occlusion_probe: the occlusion measurement (enh/occlusion.h) runs in this scene's pass after the z pre-pass
+    void setOcclusionProbe(bool on) { occlusionProbe_ = on; }
     // the tier is on (Context::features().rayTracing.enabled)
     bool supported() const;
     // consumers (render thread, e.g. settings callbacks): the scene is active while at least one holds it
@@ -263,6 +266,8 @@ private:
     std::uint64_t builtFrame_ = 0;  // the frame whose TLAS is built (once: at the z pre-pass, else at AfterOpaque)
 
     // BLAS cache
+    std::unique_ptr<OcclusionProbe> occProbe_;
+    bool occlusionProbe_ = false;
     std::unordered_map<rt::BlasKey, Blas*, rt::BlasKeyHash> blasByKey_;  // Blas nodes of blas_ are stable until dropBlas erases both
     std::unordered_map<std::uint64_t, Blas, IdHash> blas_;
     std::unordered_multimap<std::uint64_t, std::uint64_t> blasByBuffer_;  // buffer id -> BLAS id
