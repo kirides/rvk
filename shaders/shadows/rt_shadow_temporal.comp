@@ -1,0 +1,68 @@
+#version 460
+// Ray-traced soft sun shadows, stage 2: temporal accumulation (src/enh/rt_shadows.cpp, docs/research/rt-shadows.md). The raw
+// visibility (1 ray per pixel and frame: noisy in the penumbra only) is blended into the previous frame's result reprojected
+// with the camera's motion (depth-checked bilinear taps of the history), the history clamped to the range of the raw 3x3
+// neighbourhood (a shadow that moved leaves no ghost where the neighbourhood is uniform). The history holds
+// x mean visibility, y view depth, z frames accumulated, w second moment (the spatial pass's variance estimate).
+#include "rt_shadow_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D outHistory;
+
+const float RTS_MAX_FRAMES = 12.0;
+
+void main() {
+    ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    RtShadowParams p = RtShadowParams(pc.params);
+    if (q.x >= int(p.info.x) || q.y >= int(p.info.y)) return;
+    RvkFrame f = pc.frame;
+    float d = rtsDepthMap(p, q);
+    float vz = d * f.cameraPos.w;
+    if (d >= RTS_SKY || vz >= p.range.x) {
+        imageStore(outHistory, q, vec4(1.0, vz, 0.0, 1.0));
+        return;
+    }
+    float raw = rvkFetch2D(p.tex.y, q).r;
+    float mn = raw, mx = raw;
+    for (int j = -1; j <= 1; ++j) {
+        for (int i = -1; i <= 1; ++i) {
+            float s = rvkFetch2D(p.tex.y, rtsClamp(p, q + ivec2(i, j))).r;
+            mn = min(mn, s);
+            mx = max(mx, s);
+        }
+    }
+    float hv = raw, hm2 = raw * raw, n = 0.0;
+    if (p.mode.y != 0u && (f.frameInfo.y & RVK_FRAME_PREV_VALID) != 0u) {
+        vec3 P = rtsPos(f, p, q, d);
+        vec4 pc4 = f.prevViewProj * vec4(P, 1.0);
+        if (pc4.w > 1e-3) {
+            // last frame's pixel of this point (its jitter added back: the history is stored per rasterised pixel)
+            vec2 pndc = pc4.xy / pc4.w + vec2(2.0 * f.jitter.z, -2.0 * f.jitter.w) * f.viewport.zw;
+            vec2 pp = vec2(pndc.x * 0.5 + 0.5, 0.5 - pndc.y * 0.5) * vec2(p.info.xy);
+            ivec2 b = ivec2(floor(pp));
+            vec2 fr = pp - vec2(b);
+            float wsum = 0.0, vsum = 0.0, nsum = 0.0, msum = 0.0;
+            for (int k = 0; k < 4; ++k) {
+                ivec2 t = b + ivec2(k & 1, k >> 1);
+                if (any(lessThan(t, ivec2(0))) || any(greaterThanEqual(t, ivec2(p.info.xy)))) continue;
+                vec4 h = rvkFetch2D(p.tex.z, t);
+                float w = (((k & 1) == 0) ? 1.0 - fr.x : fr.x) * (((k >> 1) == 0) ? 1.0 - fr.y : fr.y);
+                if (abs(h.y - pc4.w) > 0.02 * pc4.w + 3.0 || h.z <= 0.0) w = 0.0;
+                wsum += w;
+                vsum += w * h.x;
+                nsum += w * h.z;
+                msum += w * h.w;
+            }
+            if (wsum > 0.05) {
+                hv = clamp(vsum / wsum, mn, mx);
+                n = nsum / wsum;
+                hm2 = msum / wsum;
+            }
+        }
+    }
+    float count = min(n + 1.0, RTS_MAX_FRAMES);
+    float a = 1.0 / count;
+    float v = mix(hv, raw, a);
+    float m2 = mix(hm2, raw * raw, a);
+    imageStore(outHistory, q, vec4(v, vz, count, m2));
+}

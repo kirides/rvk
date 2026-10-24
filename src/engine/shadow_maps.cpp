@@ -26,6 +26,8 @@ std::atomic<int> g_size{0};
 std::atomic<float> g_range{0.0f};
 std::atomic<float> g_factor{-1.0f};
 std::atomic<int> g_stride{2};
+std::atomic<float> g_sun[3]{};
+std::atomic<bool> g_sunKnown{false};
 
 // the throttle's memory (render thread): the camera (inverse view: rows 0..2 the axes, row 3 the position) of the last real update
 struct Throttle {
@@ -75,6 +77,8 @@ Hook<RenderFn> g_render;
 
 bool detourRender(void* self) {
     if (self != nullptr) {
+        for (int i = 0; i < 3; ++i) g_sun[i].store(field<float>(self, 0x10 + 4 * i), std::memory_order_relaxed);
+        g_sunKnown.store(true, std::memory_order_relaxed);
         Tracked& t = g_tracked;
         const float range = field<float>(self, kMaxDistance);
         const float factor = field<float>(self, kSplitFactor);
@@ -161,6 +165,12 @@ void setOverrides(const Overrides& o) {
     g_size.store(o.mapSize, std::memory_order_relaxed);
     g_range.store(o.range, std::memory_order_relaxed);
     g_factor.store(o.splitFactor, std::memory_order_relaxed);
+}
+
+bool sunVector(float out[3]) {
+    if (!g_sunKnown.load(std::memory_order_relaxed)) return false;
+    for (int i = 0; i < 3; ++i) out[i] = g_sun[i].load(std::memory_order_relaxed);
+    return true;
 }
 
 bool install() {

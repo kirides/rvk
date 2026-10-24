@@ -307,6 +307,10 @@ struct RendererSettings {
     Setting* shadowsMapSize = nullptr;    // shadows.map_size: "auto" (4096 with enhanced shadows, else the game's), "game", "1024", "2048", "4096"
     Setting* shadowsRange = nullptr;      // shadows.range: metres, 0 = auto (100 with enhanced shadows, else the game's)
     Setting* shadowsSplit = nullptr;      // shadows.split: 0 (logarithmic) .. 1 (uniform) cascade splits with an overridden range
+    Setting* shadowsRt = nullptr;         // shadows.rt: "off", "near", "extended" (ray-traced sun shadows near the camera, enh/rt_shadows)
+    Setting* shadowsRtQuality = nullptr;  // shadows.rt_quality: "low", "medium", "high"
+    Setting* shadowsRtSoftness = nullptr; // shadows.rt_softness: the sun cone's half angle in degrees
+    Setting* shadowsRtRange = nullptr;    // shadows.rt_range: metres, 0 = from the mode
     // ray-traced global illumination (enh/gi.h, docs/research/rtgi.md; needs RayQuery)
     Setting* giEnabled = nullptr;         // gi.enabled
     Setting* giQuality = nullptr;         // gi.quality: "low", "medium", "high" (probes traced per frame)

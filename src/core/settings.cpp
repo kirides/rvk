@@ -1224,6 +1224,65 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .format = "%.2f",
         .flags = Flag::Advanced,
     });
+    r.shadowsRt = &reg.add({
+        .key = "shadows.rt",
+        .label = "Ray-traced shadows",
+        .category = "Shadows",
+        .description = "Shadows near the player traced against the world instead of read from the shadow maps: soft edges that "
+                       "get sharper where an object touches the ground, leaves that shade their own shape, no shimmer. Near: "
+                       "the closest 15 m. Extended: 35 m. Farther away the enhanced shadow maps take over. Needs a graphics "
+                       "card with ray tracing.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "near", "extended"},
+        .optionLabels = {"Off", "Near", "Extended"},
+        .requirements = caps::bit(caps::Cap::RayQuery),
+        .unmetValue = 0,
+    });
+    r.shadowsRtQuality = &reg.add({
+        .key = "shadows.rt_quality",
+        .label = "Ray-traced shadow quality",
+        .category = "Shadows",
+        .description = "Low: leaves cast solid shadows. Medium: leaves cast their own shape. High: twice the rays, smoother "
+                       "soft edges.",
+        .type = Type::Enum,
+        .defaultValue = 1,
+        .options = {"low", "medium", "high"},
+        .optionLabels = {"Low", "Medium", "High"},
+        .requirements = caps::bit(caps::Cap::RayQuery),
+        .unmetValue = 1,
+    });
+    r.shadowsRtSoftness = &reg.add({
+        .key = "shadows.rt_softness",
+        .label = "Ray-traced shadow softness",
+        .category = "Shadows",
+        .description = "How wide the soft edge of a shadow grows with the distance to the object casting it (the sun's apparent "
+                       "size; the real sun is 0.27 degrees).",
+        .type = Type::Float,
+        .defaultValue = 1,
+        .min = 0.25,
+        .max = 4,
+        .format = "%.2f deg",
+        .flags = Flag::Advanced,
+        .requirements = caps::bit(caps::Cap::RayQuery),
+        .unmetValue = 1,
+    });
+    r.shadowsRtRange = &reg.add({
+        .key = "shadows.rt_range",
+        .label = "Ray-traced shadow distance",
+        .category = "Shadows",
+        .description = "How far from the player shadows are traced (the shadow maps take over beyond it). Auto: 15 m (near) or "
+                       "35 m (extended). Farther costs more.",
+        .type = Type::Float,
+        .defaultValue = 0,
+        .min = 0,
+        .max = 120,
+        .format = "%.0f m",
+        .autoLabel = "Auto",
+        .flags = Flag::Advanced,
+        .requirements = caps::bit(caps::Cap::RayQuery),
+        .unmetValue = 0,
+    });
     r.shadowsDebug = &reg.add({
         .key = "shadows.debug",
         .label = "Shadow debug view",
@@ -1234,8 +1293,8 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "the terrain map's shadow.",
         .type = Type::Enum,
         .defaultValue = 0,
-        .options = {"off", "cascades", "cascade_term", "terrain_term"},
-        .optionLabels = {"Off", "Cascades", "Cascade shadows only", "Terrain shadows only"},
+        .options = {"off", "cascades", "cascade_term", "terrain_term", "rt_term", "rt_coverage"},
+        .optionLabels = {"Off", "Cascades", "Cascade shadows only", "Terrain shadows only", "Ray-traced shadows only", "Ray-traced coverage"},
         .flags = Flag::NoAB | Flag::Debug,
     });
 
@@ -1324,6 +1383,46 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::Advanced,
         .requirements = caps::bit(caps::Cap::RayQuery),
     });
+    r.giLights = &reg.add({
+        .key = "gi.lights",
+        .label = "Light sources",
+        .category = "Lighting",
+        .description = "Which lamps, fires and torches light the scene through the traced light. Nearby: only those the game "
+                       "lights the visible objects with (they fade out within a few dozen metres). World: all the lights the game "
+                       "has loaded around you, so distant light sources still light the places near them.",
+        .type = Type::Enum,
+        .defaultValue = 1,
+        .options = {"nearby", "world"},
+        .optionLabels = {"Nearby", "World"},
+        .flags = Flag::Advanced,
+        .requirements = caps::bit(caps::Cap::RayQuery),
+    });
+    r.giEmissive = &reg.add({
+        .key = "gi.emissive",
+        .label = "Glowing surfaces",
+        .category = "Lighting",
+        .description = "How strongly lava, glowing glass and other self-lit surfaces light their surroundings.",
+        .type = Type::Float,
+        .defaultValue = 1.0,
+        .min = 0,
+        .max = 4,
+        .format = "%.2f",
+        .flags = Flag::Advanced,
+        .requirements = caps::bit(caps::Cap::RayQuery),
+    });
+    r.giLightCount = &reg.add({
+        .key = "gi.light_count",
+        .label = "GI light sources (most)",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The most light sources the traced light considers per frame (the strongest / nearest of the world's "
+                       "lights). More = lamps further away light their surroundings.",
+        .type = Type::Int,
+        .defaultValue = 128,
+        .min = 4,
+        .max = 128,
+        .flags = Flag::Debug | Flag::NoAB,
+    });
     r.giDebug = &reg.add({
         .key = "gi.debug",
         .label = "GI debug view",
@@ -1384,46 +1483,6 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 3,
         .format = "%.2f m",
         .flags = Flag::Advanced,
-    });
-    r.giLights = &reg.add({
-        .key = "gi.lights",
-        .label = "Light sources",
-        .category = "Lighting",
-        .description = "Which lamps, fires and torches light the scene through the traced light. Nearby: only those the game "
-                       "lights the visible objects with (they fade out within a few dozen metres). World: all the lights the game "
-                       "has loaded around you, so distant light sources still light the places near them.",
-        .type = Type::Enum,
-        .defaultValue = 1,
-        .options = {"nearby", "world"},
-        .optionLabels = {"Nearby", "World"},
-        .flags = Flag::Advanced,
-        .requirements = caps::bit(caps::Cap::RayQuery),
-    });
-    r.giEmissive = &reg.add({
-        .key = "gi.emissive",
-        .label = "Glowing surfaces",
-        .category = "Lighting",
-        .description = "How strongly lava, glowing glass and other self-lit surfaces light their surroundings.",
-        .type = Type::Float,
-        .defaultValue = 1.0,
-        .min = 0,
-        .max = 4,
-        .format = "%.2f",
-        .flags = Flag::Advanced,
-        .requirements = caps::bit(caps::Cap::RayQuery),
-    });
-    r.giLightCount = &reg.add({
-        .key = "gi.light_count",
-        .label = "GI light sources (most)",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "The most light sources the traced light considers per frame (the strongest / nearest of the world's "
-                       "lights). More = lamps further away light their surroundings.",
-        .type = Type::Int,
-        .defaultValue = 128,
-        .min = 4,
-        .max = 128,
-        .flags = Flag::Debug | Flag::NoAB,
     });
     r.gbufferDebug = &reg.add({
         .key = "gbuffer.debug",

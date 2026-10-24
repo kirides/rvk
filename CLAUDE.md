@@ -106,6 +106,12 @@ texels), `engine: shadow cascades: ...`. Engine vs enhanced: `.\scripts\shadow-c
 [-EngineSetting k=v] [-EngineDir out\shadows\<stamp>]` (spots `shadow_inland_*` look inland from the beach; judge
 against a D3D9 run too: `run.ps1 -Mode passthrough -Mods rvkcompare -Scenario rvkcompare -Param 'tag=d3d','spots=..'`).
 `-LogFrame N` prints each effect pass's float constants and the render targets' sizes / formats.
+Ray-traced sun shadows (docs/research/rt-shadows.md; Shadows, RT tier, default off, needs the enhanced mask): `-Setting 'shadows.rt=near|extended'` (15 / 35 m;
++ `shadows.rt_quality=low|medium|high` (rays, alpha-tested leaves), `shadows.rt_softness` (sun cone half angle, deg), `shadows.rt_range` (m); debug
+`shadows.debug=rt_term|rt_coverage`): three compute passes at AfterDepthPrepass (`shadows.rt trace / temporal / spatial` in `-PerfFrame`: 0.4 - 1.3 ms +
+0.13 at 1600x900) write a visibility image the mask shader takes inside the range (blended out to the cascades); rvk.log `enh: shadows.rt: ...`. **Off =
+nothing exists** (no pipelines / passes / RT scene use; the cascades and the mask are unchanged: rt-shadows.md 2); any future skipping of cascade 0 / 1 must
+only happen while the RT term is active and be reverted when it turns off.
 Enhanced water (docs/research/water.md; settings category Water, player default on, test baseline off): `-Setting 'water.enabled=true'` (+
 `water.quality=low|medium|high`, `water.reflections=sky|ssr`, `water.ocean=off|gerstner|fft`, `water.ocean_quality=low|medium|high`, `water.sea_state=auto|calm|moderate|rough|storm`,
 `water.wind_direction`, `water.wave_scale`, `water.murkiness`,

@@ -5,6 +5,7 @@
 
 #include "d3d9/scene.h"
 #include "engine/shadow_maps.h"
+#include "enh/rt_shadows.h"
 #include "enh/shadows.h"
 #include "test.h"
 
@@ -39,4 +40,12 @@ TEST(shadows_hardware_z_to_depth_map) {
     float d = 0.0f;
     d3d9::scene::Mat4 ortho = d3d9::scene::Mat4::identity();
     CHECK(!enh::viewDepthOfHardwareZ(ortho, 0.5f, f, d));
+}
+
+TEST(shadows_rt_mode_ranges) {
+    // the ray-traced range replaces the enhanced cascades 0 (1 / 1347 units) and 1 (up to 2945): near 15 m, extended 35 m
+    CHECK(enh::RtShadows::modeRangeMetres(0) == 0.0f);
+    CHECK(enh::RtShadows::modeRangeMetres(1) == 15.0f);
+    CHECK(enh::RtShadows::modeRangeMetres(2) == 35.0f);
+    CHECK(sizeof(enh::RtShadowParams) == 80);
 }

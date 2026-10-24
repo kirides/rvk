@@ -26,7 +26,10 @@ layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Sh
     vec4 params;       // x blend band (fraction of a cascade's depth range), y fade band (of the last cascade), z constant
                        // bias (texels of a 45° slope), w steepest receiver slope the bias follows (tan)
     vec4 target;       // x 1 / width, y 1 / height, z width, w height
-    uvec4 mode;        // x taps per axis (1..4), y debug view (0 off, 1 cascades, 2 cascade term only, 3 terrain term only), zw 0
+    uvec4 mode;        // x taps per axis (1..4), y debug view (0 off, 1 cascades, 2 cascade term only, 3 terrain term only,
+                       // 4 the ray-traced term only, 5 the ray-traced coverage), zw 0
+    uvec4 rt;          // x the ray-traced visibility (t2D, enh/rt_shadows; 0 = none), yzw 0
+    vec4 rtParams;     // x range (depth-map units), y blend band (fraction of the range), zw 0
 };
 
 layout(location = 0) out vec4 outColor;
@@ -157,8 +160,18 @@ void main() {
     }
     float terrain = varianceShadow(b, p);
     float mask = shadow * terrain;
+    // the ray-traced shadow within its range (rt_shadow_*.comp: same depth map, same reconstruction), blended out to the
+    // cascades over the last band; its rays see the terrain as well, so the variance map's term goes with it
+    float rtWeight = 0.0, rtVis = 1.0;
+    if (b.rt.x != 0u && d < b.rtParams.x) {
+        rtWeight = 1.0 - smoothstep(b.rtParams.x * (1.0 - b.rtParams.y), b.rtParams.x, d);
+        if (rtWeight > 0.0) rtVis = rvkFetch2D(b.rt.x, ivec2(gl_FragCoord.xy)).r;
+        mask = mix(mask, rtVis, rtWeight);
+    }
     if (b.mode.y == 1u) mask = level;
     else if (b.mode.y == 2u) mask = shadow;
     else if (b.mode.y == 3u) mask = terrain;
+    else if (b.mode.y == 4u) mask = mix(1.0, rtVis, rtWeight);
+    else if (b.mode.y == 5u) mask = rtWeight;
     outColor = vec4(mask);
 }

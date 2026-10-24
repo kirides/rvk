@@ -76,6 +76,9 @@ set(RVK_SHADERS
     rt/rt_debug.comp
     rt/rt_debug_depth.comp
     rt/rt_debug.frag
+    shadows/rt_shadow_spatial.comp
+    shadows/rt_shadow_temporal.comp
+    shadows/rt_shadow_trace.comp
     shadows/shadow_mask.frag
     shadows/shadow_mask.vert
     water/ocean_evolve.comp
@@ -236,6 +239,8 @@ add_library(rvk_core STATIC
     src/enh/rt_registry.h
     src/enh/rt_scene.cpp
     src/enh/rt_scene.h
+    src/enh/rt_shadows.cpp
+    src/enh/rt_shadows.h
     src/enh/ocean.cpp
     src/enh/ocean.h
     src/enh/ocean_spectrum.cpp

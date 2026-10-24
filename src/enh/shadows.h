@@ -32,12 +32,16 @@ struct ShadowBlock {
     float params[4];       // x blend band, y fade band, z constant bias (texels), w receiver slope limit (tan)
     float target[4];       // x 1 / width, y 1 / height, z width, w height
     std::uint32_t mode[4];  // x taps per axis, y debug view
+    std::uint32_t rt[4];    // x the ray-traced visibility (bindless t2D, enh/rt_shadows; 0 = none)
+    float rtParams[4];      // x range (depth-map units), y blend band
 };
-static_assert(sizeof(ShadowBlock) == 25 * 16);
+static_assert(sizeof(ShadowBlock) == 27 * 16);
 
 // The view depth (in units of `engineFar`, the depth map's) of a hardware depth `z` under a D3D perspective projection
 // (row-vector convention: z' = (z * m22 + m32) / z); false when the projection is not perspective or z is at infinity
 bool viewDepthOfHardwareZ(const d3d9::scene::Mat4& projection, float z, float engineFar, float& depthMapUnits);
+
+class RtShadows;
 
 class Shadows final : public d3d9::DrawReplacer {
 public:
@@ -50,7 +54,8 @@ public:
         float bias = 0.5f;      // shadows.bias: constant depth bias in texels of a 45° slope
         float maxSlope = 3.0f;  // steepest receiver slope (tan) the receiver-plane bias follows
         int debug = 0;          // shadows.debug: 0 off, 1 cascades (the mask shows the cascade: 25 / 50 / 75 %, lit beyond),
-                                // 2 the cascade term only, 3 the terrain term only
+                                // 2 the cascade term only, 3 the terrain term only, 4 the ray-traced term only, 5 its coverage
+        float rtBlend = 0.25f;  // fraction of the ray-traced range blended out to the cascades
     };
 
     explicit Shadows(d3d9::Device& device);
@@ -61,6 +66,8 @@ public:
     // render thread (settings callbacks run at the frame boundary)
     void apply(const Settings& s);
     const Settings& settings() const { return settings_; }
+    // the ray-traced shadows whose result the mask takes inside their range (enh/rt_shadows; null = cascades only)
+    void setRtShadows(const RtShadows* rt) { rt_ = rt; }
 
     // the shadow-mask pass of the main view
     bool handles(d3d9::draws::Kind kind, d3d9::scene::Phase phase, const d3d9::draws::Tag& tag) const override;
@@ -79,6 +86,7 @@ private:
                   int varianceSampler, int depthSampler, d3d9::DrawReplacement& out);
 
     d3d9::Device& dev_;
+    const RtShadows* rt_ = nullptr;
     Settings settings_;
     bool registered_ = false;
     bool failed_ = false;

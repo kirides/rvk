@@ -8,6 +8,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "enh/rt_shadows.h"
 #include "shader/embedded.h"
 #include "vk/pipeline.h"
 
@@ -218,6 +219,15 @@ void Shadows::drawMask(d3d9::Device& device, const d3d9::ReplaceQuery& q, int va
     b.target[3] = h;
     b.mode[0] = static_cast<std::uint32_t>(std::clamp(settings_.taps, 1, 4));
     b.mode[1] = static_cast<std::uint32_t>(settings_.debug);
+    // the ray-traced shadows of this frame (their image has the mask target's size; the engine's depth map pixel = the mask's)
+    if (rt_ != nullptr) {
+        const RtShadows::Frame rf = rt_->frame(device.frameValue());
+        if (rf.slot != 0 && rf.width == static_cast<std::uint32_t>(w) && rf.height == static_cast<std::uint32_t>(h) && cam.engineFar > 0.0f) {
+            b.rt[0] = rf.slot;
+            b.rtParams[0] = rf.range / cam.engineFar;
+            b.rtParams[1] = settings_.rtBlend;
+        }
+    }
 
     const vk::RingAlloc a = device.frames().allocate(sizeof(b), 16);
     std::memcpy(a.ptr, &b, sizeof(b));
@@ -235,6 +245,7 @@ void Shadows::drawMask(d3d9::Device& device, const d3d9::ReplaceQuery& q, int va
         for (int i = 0; i < n; ++i) {
             splits += std::format("{}{:.0f}", i ? ", " : "", b.split[i] * cam.engineFar);
         }
+        if (b.rt[0] != 0) spdlog::info("enh: shadows: ray-traced term inside {:.0f} m (blend band {:.2f})", b.rtParams[0] * cam.engineFar / 100.0f, b.rtParams[1]);
         spdlog::info("enh: shadows: mask pass with {} cascades (map {}^2), splits {} (engine far {:.0f}), texels {:.1f} / {:.1f} / {:.1f} "
                      "units, variance map {}",
                      n, b.texel[0][0], splits, cam.engineFar, texelWorld[0], texelWorld[1], texelWorld[2], b.res[2] != 0 ? "yes" : "no");

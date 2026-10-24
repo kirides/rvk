@@ -127,6 +127,7 @@ HalDevice::~HalDevice() {
     gi_.reset();         // unregisters its observer / pass, releases the RT scene
     water_.reset();      // unregisters its draw replacer, releases the RT scene
     shadows_.reset();
+    rtShadows_.reset();  // removes its pass, releases the RT scene
     rtScene_.reset();    // unregisters its observer / pass, retires its acceleration structures
     {
         const std::lock_guard lock(handleMutex_);
@@ -285,8 +286,10 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     }
     // enhanced sun shadows (enh/shadows.h, docs/research/shadows.md): a draw replacer for the shadow mask, live settings
     shadows_ = std::make_unique<enh::Shadows>(dev_);
+    rtShadows_ = std::make_unique<enh::RtShadows>(dev_, rtScene_.get());
+    shadows_->setRtShadows(rtShadows_.get());
     if (rs.shadowsEnabled != nullptr) {
-        for (settings::Setting* s : {rs.shadowsEnabled, rs.shadowsFilter, rs.shadowsSoftness, rs.shadowsBlend, rs.shadowsFade,
+        for (settings::Setting* s : {rs.shadowsRt, rs.shadowsRtQuality, rs.shadowsRtSoftness, rs.shadowsRtRange, rs.shadowsEnabled, rs.shadowsFilter, rs.shadowsSoftness, rs.shadowsBlend, rs.shadowsFade,
                                      rs.shadowsBias, rs.shadowsDebug, rs.shadowsMapSize, rs.shadowsRange, rs.shadowsSplit}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyShadows(); }, this);
         }
@@ -411,12 +414,12 @@ void HalDevice::applyGi() {
     s.replaceLightmaps = rs.giLightmaps->asEnum() == "replace";
     s.characters = rs.giCharacters->asBool();
     if (rs.giBleed != nullptr) s.bleed = rs.giBleed->asFloat();
-    const std::string_view d = rs.giDebug->asEnum();
-    s.debug = d == "irradiance" ? 1 : d == "cascades" ? 2 : 0;
-    if (rs.giScreen != nullptr) {
     if (rs.giEmissive != nullptr) s.emissive = rs.giEmissive->asFloat();
     if (rs.giLightCount != nullptr) s.lightCount = rs.giLightCount->asInt();
     if (rs.giLights != nullptr) s.lights = rs.giLights->asEnum() == "world" ? 1 : 0;
+    const std::string_view d = rs.giDebug->asEnum();
+    s.debug = d == "irradiance" ? 1 : d == "cascades" ? 2 : 0;
+    if (rs.giScreen != nullptr) {
         const std::string_view sc = rs.giScreen->asEnum();
         s.screen = sc == "low" ? 1 : sc == "medium" ? 2 : sc == "high" ? 3 : 0;
     }
@@ -482,8 +485,19 @@ void HalDevice::applyShadows() {
     s.fade = rs.shadowsFade->asFloat();
     s.bias = rs.shadowsBias->asFloat();
     const std::string_view dbg = rs.shadowsDebug->asEnum();
-    s.debug = dbg == "cascades" ? 1 : dbg == "cascade_term" ? 2 : dbg == "terrain_term" ? 3 : 0;
+    s.debug = dbg == "cascades" ? 1 : dbg == "cascade_term" ? 2 : dbg == "terrain_term" ? 3 : dbg == "rt_term" ? 4 : dbg == "rt_coverage" ? 5 : 0;
     shadows_->apply(s);
+    if (rtShadows_ && rs.shadowsRt != nullptr) {
+        // the ray-traced term replaces the cascades' mask inside its range: only through the enhanced mask
+        enh::RtShadows::Settings r;
+        const std::string_view m = rs.shadowsRt->asEnum();
+        r.mode = s.enabled ? (m == "near" ? 1 : m == "extended" ? 2 : 0) : 0;
+        r.rangeMetres = rs.shadowsRtRange->asFloat();
+        r.softness = rs.shadowsRtSoftness->asFloat();
+        const std::string_view q = rs.shadowsRtQuality->asEnum();
+        r.quality = q == "low" ? 1 : q == "high" ? 3 : 2;
+        rtShadows_->apply(r);
+    }
     // the engine's cascades (engine/shadow_maps.h): "auto" = the enhanced defaults while the enhanced mask is on
     engine::shadowmaps::Overrides o;
     const std::string_view size = rs.shadowsMapSize->asEnum();

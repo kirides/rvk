@@ -19,6 +19,10 @@ void setOverrides(const Overrides& o);
 // the cascades are redrawn every n-th frame (1 = every frame) while the camera moves / turns little; any thread
 void setUpdateStride(int stride);
 
+// The light direction the cascade object holds (+0x10, as stored: the direction the light travels) at the last RenderShadowMaps
+// call; false before the first call (and in interiors without sun shadows, where it is not called). Any thread
+bool sunVector(float out[3]);
+
 // Creates the detour (enabled with the others by hooks::enableAll); false when the symbols are missing
 bool install();
 
