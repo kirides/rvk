@@ -307,3 +307,78 @@ one Extract + Request per view (the main view is not culled twice; each sun casc
 constants are already cached by the engine; `eCBeamTree` is the frustum test itself; the engine's `eCDX9Device` state cache is
 bypassed with our vtables, so redundant render / sampler states (7 `SetSamplerState` per sampler on each material switch)
 reach our HAL. Threading the engine's extract / request is high risk (shared per-resource state).
+## 14. CPU overhead pass 1 (2026-10-24, e6b5dab)
+
+Scene: savegame `Risen_Save_0005` (hero -17392 / 7652 / 14352), `run.ps1 -Mode vulkan -Exe RisenTest.exe -Vsync off -PlayerDefaults
+-Setting 'lod.view=2','lod.trees=2','lod.meshes=2' -QuickSave <save> -Mods rvk_perfsave -Scenario rvk_perfsave -Param hold=60`.
+Baseline (98c377e): plain 118 fps; `-Perf`: CPU 8.35 ms per frame (draw calls 3.56, rest 4.79), GPU 3.45 ms, 2283 draws (Main
+DepthPrepass 709 / Solid 951 / Alpha 45; cascades 39 / 67 / 414). `-CpuProfile` modules: d3d9 (ours) 41 %, Engine.dll 26 %,
+amdvlk64 10 %, ntdll 8 %, SharedBase 7 %, vcruntime140 5 %. Inclusive: `HalPrimitive::Execute` 44 %, `prepareDraw` 32 %,
+`RtScene::observe` ~13 % (0.5-0.75 ms), `applyPacket` + `flushBatch` 8 %, the engine's cascades (`RenderShadowMaps`) 19.5 %,
+`eCFrustumDatabase::Execute` 56 %, `eCProcessor::Process` 10 %.
+
+**Profiler**: `diag: profile pc` lines (our module's leaf addresses in 16-byte buckets, top 120 per 5 s window);
+`tools/pcprofile.py <rvk.log> [--dll] [--top] [--skip]` aggregates the windows and symbolizes with `llvm-symbolizer --inlines`
+to functions / lines. Gotchas: line numbers are right only if the DLL matches the log's build; leaf code without unwind info is
+bucketed per 4 KiB page in the old "self" list (names there are unreliable).
+
+Changes:
+* Draw path: a direct-mapped cache of recent pipeline descriptions in front of the pipeline map; `flushBatch` groups with one
+  open-addressing table + one sort; shader switches by non-owning `ShaderRef`; vertex layout plans per (declaration, shader);
+  per-shader sampler masks; draw packets hold interned vertex-input / dynamic-state blocks (pointers, not ~850 bytes inline).
+* RT scene: cheaper BlasKey / instance key hashing, `IdHash` (`core/id_hash.h`) for u64-keyed maps, closed-form `worldSphere`,
+  `blasByKey_` holds `Blas*`.
+* **Record threads** (`debug.record_threads`, default on; `src/d3d9/record.cpp`): scopes of Main DepthPrepass / Solid and Shadow
+  ShadowDepth only (`wantSecondaryScope`), decided per scope at `beginRendering` (a scope that started inline is restarted at the
+  first eligible draw / clear). Chunk = 160 draw packets, recorded by two workers into secondary command buffers (pools per
+  worker thread x frame slot, reset in `beginFrame`; the inheritance rendering info carries the scope's attachment formats). A
+  flush of the batch = one chunk (batch limit 160 when threaded: the workers record while the engine still produces draws; before
+  this the batch was flushed only at the scope's end and the engine thread idled: `NtWaitForAlertByThreadId` 3.6 % in the
+  profile). Clears are `Op::Clear` packets (`vkCmdClearAttachments` inside the secondary); debug labels are scope items replayed
+  in order in the primary between the `vkCmdExecuteCommands` calls. Workers spin ~4000 pauses before sleeping on the condition
+  variable (the engine thread notifies only when a worker sleeps). Validation found: after `vkCmdExecuteCommands` the primary's
+  pipeline, dynamic state and descriptor sets are undefined: `rec_.reset()` + rebinding the bindless set after
+  `vkCmdEndRendering` (24 VUIDs "state was invalidated by vkCmdExecuteCommands" before the fix; clean with `-Validation
+  -SyncValidation` after).
+* **CacheEntities stride** (`debug.prefetch_stride`, 1..8, default 4; hook in `engine/lod.cpp`):
+  `eCPrefetchAdmin::CacheEntities(bCVector const&, unsigned char slot, bool walkRange, bool walkCache)` 0x6969c0 (exported; this =
+  scene admin + 0xe8; called by `eCApplication::OnPreRender` every frame with the camera position, slot 0, true, bVar3) has no
+  camera-moved early-out. Its two bools gate the two tree walks (FUN 0x217570: slot 0 = prefetch range walk, slot + 1 = cache-in
+  walk; callbacks fire only on per-node bit transitions, so a repeat call at the same position changes nothing); the dirty-list
+  flush and the centre store always run. The hook calls the original with both bools false unless `stride` frames passed, the
+  centre moved >= 100 units (1 m) since the last walk, or `lod.view` changed. Cost: entities at their cache-in sphere edge appear /
+  vanish up to stride - 1 frames late (also the first frames after a savegame load). RE source (inferred, `ClearPrefetchCoherence`
+  0x6963c0 body not verified live): `B:\DevDrive\risen-ghidra\viewdist\prefetch_dump.txt`, `enginecpu\d2.txt`.
+
+Results (plain fps / `-Perf` CPU per frame / draw calls):
+
+| step | plain fps | CPU frame | draw calls |
+|---|---|---|---|
+| baseline 98c377e | 118 | 8.35 ms | 3.56 ms |
+| round 1 (pipeline cache, flushBatch table sort, ShaderRef, IdHash, worldSphere, RT keys) | 132.5-133.4 | 7.65 ms | 3.05 ms |
+| + vertex plans, sampler masks, interning | ~133-136 | neutral on their own | |
+| + record threads: on vs off | 138.5-139.8 vs 134.9-136.8 | | 2.7 vs 3.0 ms |
+| + stride 4 vs stride 1 | 141-142.6 vs 138.9 | rest 4.29 vs 4.56 ms | |
+| end state | ~142 (+20 %) | 7.05 ms | GPU 3.63 ms |
+
+**Image parity** (record threads): `refcompare` against the stored reference (its main_lua / spass_dll hashes differ from the
+calibration: stale): threads on 11 PASS / 7 WARN / 1 FAIL / 1 INVALID; off 15 / 3 / 1 / 1, a second off run 15 / 4 / 1 / 0. Vulkan
+on vs off directly (`tools/refcompare.py compare A B`): 7 FAIL / 6 WARN; off vs off with identical settings: 6 FAIL / 7 WARN
+(harbour_docks 5 % bad32, hero_closeup 4 %, jungle ssim 0.92, sea_cliff 2.8 %): run-to-run noise (splash particles, foliage wind,
+eye adaptation) of the same size. Visual review of the on-vs-off differences (sea_cliff, hero_closeup, jungle, harbour_docks b0):
+breaking-wave spray in one run only, wind-swayed leaves, a drifting soft ground shadow; no missing draws, no depth-order errors, no
+shadow differences on static objects. Lesson: `refcompare.ps1 -Calibrate` first, else renderer changes and noise are not
+separable at those spots.
+
+**Remaining** (record-threads run, engine thread 7.0 ms): d3d9 ~35 %, engine 30 %, ntdll 12 % (incl. the `-Perf` QPC timers),
+SharedBase 8 %, amdvlk64 6 %, vcruntime140 5 % (memmove). Ours: many ~1 % items (`prepareDraw`, `computeVertexInput`,
+`Registry::see`, `RtScene::findBlas`, `RtScene::record`, `uploadConstants`: a 4.4 KiB ring block per draw = 18.6 MB per frame).
+Engine: `eCFrustumDatabase` copy constructor 0.9 %, `qsort`, `eCBeamTree::Cull`, `OnQueryNodes`. Ideas not built: observe
+sightings on a worker (needs RtScene thread safety; slow paths need engine-thread state), far-cascade small-caster culling
+(cascade 3 = 414 of 518 cascade draws), throttling the far cascade (visual risk), a deferred render-thread Device API (large;
+our enhancement code reads engine memory during draws: too risky).
+
+**Ubershader replacement of the translated engine shaders: blocked, not built.** The port verifies (shader-permutations.md 7),
+but the engine-shader-hash -> define list + material-graph snippet mapping cannot be inferred automatically (section 5:
+`hlsl_infer` solves 6.7 %). It needs the node-string generators (`eCShaderDefault::GetDeclarations` 0x6c8650,
+`eCColorSrc*::GetImplementation`) or a decode of `ShaderMaterialPool_Master.smp`.
