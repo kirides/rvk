@@ -349,3 +349,37 @@ Player quicksave (harbour town, detail 4x, 1600x900): 95.8 fps, GPU ~8.3 ms, CPU
 
 **Open**: characters / alpha get no same-frame AO or screen probe correction (could fall back to a reprojected previous result); the GTAO
 arc pattern next to the pub wall persists; characters lag one frame in the RT scene.
+
+## 13. Interior brightness: a minimum ambient (2026-10-24)
+
+([C] = measured in the game.)
+
+**Finding** [C]: the old "pub +24 luma, cave -14" numbers no longer hold. Whole-image luma (the water-compare table's `px` mask
+varies between runs and is not usable indoors; compare the full frame, letterbox cropped) of GI on vs engine at the rvkcompare spots
+was already within +-6 (pub -5.2, monastery +1.9, cave -5.7, jungle -1.9, beach -3.0, harbour +0.2). What was wrong is local: the pub's
+barrels, tables and floor patches in sun shadow went **black** (`gi.strength=0` and screen probes off do not change it: it is the
+DDGI plus the `keep` remainder). Cause [C] (a `gi.debug=irradiance` view with f / L0 written out): in an interior the engine's
+hemisphere is dim (the zone's weather: pub sky L0 ~0.12), so the sky-derived factor `f = L0(engine) / L0(sky)` is ~1 and the `keep`
+remainder `eng - sky * f` is ~0; the probes only get sun patches through the windows, so shadowed objects had no ambient at all
+while the engine lights them with its indoor fill (dynamic objects have no lightmap).
+
+**Change** [C] (`shaders/include/rvk_material_variant.glsl`, `rvkMvGi`): a minimum ambient. The average (L0 of the final registers)
+is lifted by a constant on c15.w / c16.w / c17.w to `min(L0(engine), RVK_MV_FLOOR_MAX) * RVK_MV_INDOOR_FLOOR` (0.15 and 0.85) where
+it is lower. The cap leaves bright (outdoor) engine ambient alone, so canopy / contact shade is untouched; only deep darks are lifted.
+No setting (the two defines can be overridden by the C++ prelude). A first version scaled by the sky-derived indoor factor
+`1 - f` did nothing for exactly the reason above.
+
+| spot (whole-image luma, GI - engine) | before | after |
+|---|---|---|
+| pub_interior | -5.2 | -5.1 (barrels / table now visible, as the engine) |
+| crystal_cave | -5.7 | +1.7 |
+| monastery_hall | +1.9 | +1.2 |
+| jungle | -1.9 | -1.0 |
+| beach_sun | -3.0 | -2.1 |
+| harbour_docks | +0.2 | +0.3 |
+
+Run `out\water\20261024-130906` (before: `-125229`), 1600x900, GI on at the player's defaults (screen probes medium). Validation run (pub +
+cave): no messages; `rvk_shadertool corpus corpus --gi / --gbuf / --gbuf-motion`: 0 failures; rvk_tests 131 ok.
+
+**Open**: the true hemisphere SH from the engine would give a reliable sky (and `f`) indoors; with it the remainder could keep exactly
+the engine's non-sky ambient instead of this cap.

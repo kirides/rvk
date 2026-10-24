@@ -18,13 +18,21 @@
 
 #extension GL_EXT_samplerless_texture_functions : require  // texelFetch of this frame's AO / screen probe images
 
+#ifndef RVK_MV_INDOOR_FLOOR
+#define RVK_MV_INDOOR_FLOOR 0.85  // share of the engine's average ambient kept as a floor (up to RVK_MV_FLOOR_MAX)
+#endif
+#ifndef RVK_MV_FLOOR_MAX
+#define RVK_MV_FLOOR_MAX 0.15  // L0 level above which the floor stops growing
+#endif
+
 vec4 rvk_gi[8];  // [0] = g_IndoorAmbientColor, [1..7] = g_AmbientLight
 uint rvk_giCascade = 0xFFu;
 vec3 rvk_giN = vec3(0.0, 1.0, 0.0);  // geometric normal (towards the viewer)
 vec3 rvk_mvP = vec3(0.0);            // world position
 vec4 rvk_gbN = vec4(0.0);            // the shaded normal (dot capture / interpolated normal)
 float rvk_mvAo = 1.0;                // the reprojected ambient occlusion applied (debug)
-vec3 rvk_mvSgi = vec3(1.0);          // the screen probes' factor applied (debug)
+vec3 rvk_mvSgi = vec3(1.0);
+          // the screen probes' factor applied (debug)
 
 #ifdef RVK_MV_GBUFFER
 layout(location = 1) out vec4 rvk_gbNormal;  // A2B10G10R10: xy octahedral world normal (rvkGiOctEncode), z 0, w id / 3
@@ -72,19 +80,31 @@ void rvkMvGi(vec3 P, vec3 n, vec3 V) {
     // the draw's own ambient beyond the outdoor sky (indoor colour, static lights; 0 for outdoor draws) stays on top:
     // engine = f x sky + static (static >= 0): f <= L0(engine) / L0(sky) per channel; that bound keeps the remainder's
     // average >= 0 and makes it 0 for outdoor draws (engine = sky)
+    vec4 eng[7], sk[7];
+    for (int i = 0; i < 7; ++i) {
+        eng[i] = rvk_gi[1 + i];
+        sk[i] = v.sky[i];
+    }
+    vec3 le = max(rvkGiAverage(eng), vec3(0.0)), ls = rvkGiAverage(sk);
+    float f = 1.0;
+    for (int c = 0; c < 3; ++c) {
+        if (ls[c] > 1e-4) f = min(f, le[c] / ls[c]);
+    }
+    f = clamp(f, 0.0, 1.0);
     if ((v.info.x & RVK_GI_FLAG_KEEP_STATIC) != 0u) {
-        vec4 eng[7], sk[7];
-        for (int i = 0; i < 7; ++i) {
-            eng[i] = rvk_gi[1 + i];
-            sk[i] = v.sky[i];
-        }
-        vec3 le = max(rvkGiAverage(eng), vec3(0.0)), ls = rvkGiAverage(sk);
-        float f = 1.0;
-        for (int c = 0; c < 3; ++c) {
-            if (ls[c] > 1e-4) f = min(f, le[c] / ls[c]);
-        }
-        f = clamp(f, 0.0, 1.0);
         for (int i = 0; i < 7; ++i) regs[i] += eng[i] - sk[i] * f;
+    }
+    // minimum ambient (rtgi.md 13): the probe volume is dark where little light reaches (barrels / tables in the pub were
+    // black: the engine's own indoor fill, a dim hemisphere there, is gone) while the engine lit them with it. The average is
+    // lifted to a share of the engine's, capped at a dim level: bright engine ambient (outdoors) never lifts canopy or
+    // contact shade, only deep darks
+    {
+        vec3 want = min(le, vec3(RVK_MV_FLOOR_MAX)) * RVK_MV_INDOOR_FLOOR;
+        vec3 have = max(rvkGiAverage(regs), vec3(0.0));
+        vec3 add = max(want - have, vec3(0.0));
+        regs[0].w += add.x;
+        regs[1].w += add.y;
+        regs[2].w += add.z;
     }
     float k = clamp(v.params.x, 0.0, 1.0);
     for (int i = 0; i < 6; ++i) rvk_gi[1 + i] = mix(rvk_gi[1 + i], regs[i], k);
