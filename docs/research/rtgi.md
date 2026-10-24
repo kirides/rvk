@@ -502,3 +502,30 @@ unnamed): exact `f` would need an RVA hook (no precedent in this repo, pinned to
 variant (the draw's constants are all the shader sees). The bound `f <= min_c L0(draw) / L0(sky)` is exact for draws without
 static lights (the sky only) and too high for lit ones, which only shifts a small sky share into the kept remainder; the benefit did not
 justify the hook. Open: a per-draw `f` through that hook, indoor zones as portal-room volumes.
+
+## 18. Ambient floor tuned down (2026-10-24)
+
+([C] = measured.) User feedback: the minimum-ambient floor of section 13 (share 0.85 of the engine's average ambient, capped at
+L0 0.15) looked brighter than the game, indoors most. Measured with `water-compare.ps1 -EngineSetting 'water.enabled=true',
+'gi.enabled=false' -Setting 'gi.enabled=true'` (8 spots, the engine pictures reused across the variants) and a script over the
+side-by-sides: luma of shaded pixels (engine luma < 60) enhanced minus engine, and the share of pixels below luma 12 (a hole
+count; engine in the last column).
+
+| floor (share / cap) | pub shaded dL | pub dark | cave shaded dL | cave dark | lava dark | monastery dark | outdoor shaded dL (beach / jungle / harbour) |
+|---|---|---|---|---|---|---|---|
+| 0.85 / 0.15 (c9988dd) | +0.4 | 0.360 | +1.4 | 0.453 | 0.479 | 0.403 | -2.5 / -0.9 / -1.0 |
+| 0.5 / 0.10 | -0.8 | 0.512 | -3.3 | 0.649 | 0.465 | 0.424 | -4.1 / -1.7 / -2.1 |
+| 0.75 / 0.15 | +1.1 (0.35-0.44 between runs) | 0.35-0.44 | +0.9 | 0.482 | 0.481 | 0.408 | -3.6 / -1.5 / -2.1 |
+| **0.6 / 0.15 (now)** | +1.2 | 0.360 | **+0.1** | **0.519** | 0.473 | 0.411 | -3.9 / -0.95 / -1.9 |
+| engine | | 0.374 | | 0.519 | 0.407 | 0.376 | |
+
+Findings [C]: (1) the floor barely touches outdoors (outdoor dark share equals the engine's at every share; the outdoor
+shaded difference is the GI's own occlusion, -1 to -4); (2) a share of 0.5 / cap 0.10 opens black holes indoors (pub 0.51,
+cave 0.65 vs 0.37 / 0.52): the pub needs a floor near 0.09 L0; (3) fading the floor out by the engine's L0 (tried: 0.12-0.30,
+0.20-0.40, 0.40-0.70) darkens the cave to 0.64 like the low floor: the cave's engine ambient is bright (L0 above ~0.5), so L0
+cannot tell the cave from sunny outdoors; the fade was dropped. The floor is added before the AO, so the engine-AO-darkened
+corners scale it down (rvkMvAo). Result: share 0.6, cap 0.15 (`RVK_MV_INDOOR_FLOOR`): the cave equals the engine in shaded
+pixels (+0.07, dark share 0.519 = 0.519), the pub 0.360 (engine 0.374), pub left wall / net / pillar visible, no black holes.
+Validation clean, `rvk_tests` 131/131, corpus `--gi` / `--gbuf` / `--gbuf-motion` 0 failures. The run-to-run spread of the pub's
+dark share is about +-0.04 (candles); the lava cave stays 0.07 darker in holes than the engine (0.473 vs 0.407, not from the floor:
+the same at every share).

@@ -19,7 +19,7 @@
 #extension GL_EXT_samplerless_texture_functions : require  // texelFetch of this frame's AO / screen probe images
 
 #ifndef RVK_MV_INDOOR_FLOOR
-#define RVK_MV_INDOOR_FLOOR 0.85  // share of the engine's average ambient kept as a floor (up to RVK_MV_FLOOR_MAX)
+#define RVK_MV_INDOOR_FLOOR 0.6  // share of the engine's average ambient kept as a floor (up to RVK_MV_FLOOR_MAX)
 #endif
 #ifndef RVK_MV_FLOOR_MAX
 #define RVK_MV_FLOOR_MAX 0.15  // L0 level above which the floor stops growing
@@ -127,10 +127,10 @@ void rvkMvGi(vec3 P, vec3 n, vec3 V) {
     if ((v.info.x & RVK_GI_FLAG_KEEP_STATIC) != 0u) {
         for (int i = 0; i < 7; ++i) regs[i] += eng[i] - sk[i] * f;
     }
-    // minimum ambient (rtgi.md 13): the probe volume is dark where little light reaches (barrels / tables in the pub were
+    // minimum ambient (rtgi.md 13, 18): the probe volume is dark where little light reaches (barrels / tables in the pub were
     // black: the engine's own indoor fill, a dim hemisphere there, is gone) while the engine lit them with it. The average is
-    // lifted to a share of the engine's, capped at a dim level: bright engine ambient (outdoors) never lifts canopy or
-    // contact shade, only deep darks
+    // lifted to a share (0.6) of the engine's, capped at a dim level: never lifts canopy or
+    // contact shade of bright ambient, only deep darks (a fade by engine L0 cannot tell the cave from the sunny outdoors: rtgi.md 18)
     {
         vec3 want = min(le, vec3(RVK_MV_FLOOR_MAX)) * RVK_MV_INDOOR_FLOOR;
         vec3 have = max(rvkGiAverage(regs), vec3(0.0));
