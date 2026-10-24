@@ -86,7 +86,7 @@ vec4 giShadeRay(GiPassParams p, RvkFrame f, RvkGiVolume v, vec3 origin, vec3 dir
     // the probes' irradiance at the hit (last frames': multi-bounce); where no probe covers the hit, the engine's outdoor
     // ambient
     vec4 regs[7];
-    if (rvkGiLookupFast(v, s.position + N * 4.0, regs)) {
+    if (rvkGiLookupHit(v, s.position + N * 4.0, N, regs)) {
         E += max(rvkGiEvalRegs(regs, N), vec3(0.0)) * p.shade.x;
     } else {
         E += max(rvkGiEvalRegs(p.sky, N), vec3(0.0)) * p.shade.x;

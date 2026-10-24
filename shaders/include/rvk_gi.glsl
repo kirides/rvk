@@ -234,6 +234,23 @@ bool rvkGiLookupFast(RvkGiVolume v, vec3 P, out vec4 regs[7]) {
     return false;
 }
 
+// The lookup of a probe ray's hit (the DDGI's own multi-bounce, rtgi.md 16): the finest cascade holding P, its 8 probes
+// weighted as in rvkGiCascadeSample (trilinear x wrap-around backface x Chebyshev visibility) without the view bias and the
+// cascade blend: a probe behind a wall from the hit gets no weight, so the second bounce does not leak through thin walls
+bool rvkGiLookupHit(RvkGiVolume v, vec3 P, vec3 N, out vec4 regs[7]) {
+    for (int k = 0; k < 7; ++k) regs[k] = vec4(0.0);
+    uint n = min(v.dims.w, RVK_GI_MAX_CASCADES);
+    for (uint c = 0u; c < n; ++c) {
+        vec4 a[7];
+        float edge;
+        float w = rvkGiCascadeSample(v, c, P, N, N, a, edge);
+        if (w <= 1e-5) continue;
+        for (int k = 0; k < 7; ++k) regs[k] = a[k] / w;
+        return true;
+    }
+    return false;
+}
+
 bool rvkGiLookup(RvkFrame f, vec3 P, vec3 N, vec3 V, out vec4 regs[7], out uint cascadeOut) {
     if (!rvkGiValid(f)) {
         for (int k = 0; k < 7; ++k) regs[k] = vec4(0.0);

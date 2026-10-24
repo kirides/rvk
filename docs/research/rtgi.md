@@ -434,3 +434,30 @@ bursts of 11 frames (bleed 0 / 0.5 / 1, `-Burst 12 -Interval 1`): chromaticity s
 dedicated spot is missing); the grain measurement at the player's quicksave (palms in the wind, the rtgi.md 12 method) and the cost
 (`-Perf`) were not run: the resolve adds a handful of ALU ops and no fetches. The default 0.5 rests on "no noise, no artefacts",
 not on a demonstrated improvement.
+
+
+## 16. Multi-bounce leaks: a visibility-aware lookup at probe-ray hits (2026-10-24)
+
+([C] = measured / read in code.)
+
+**Change** [C]: `rvkGiLookupHit` (`shaders/include/rvk_gi.glsl`) = `rvkGiCascadeSample` for the finest cascade holding the hit (the
+normal lookup's weights: trilinear x wrap-around backface x Chebyshev visibility from the depth moments, the normal bias along the
+hit normal, no cascade blend), used by `gi_shade.glsl` for the DDGI probe rays' hits (second bounce) and the screen probes' hit
+shading. The screen probes' ray ends (`sp_trace.comp`, no surface normal) keep `rvkGiLookupFast`. No setting.
+
+**Is the leak visible?** [C] A/B of both lookups (`gi.debug=irradiance` + the final image, `out\water\20261024-134700` cheap vs
+`-134954` visibility; spots pub_interior, monastery_hall, harbour_docks, jungle). Irradiance view mean abs difference (0..255): pub
+1.9, monastery 1.0, jungle 0.7, harbour 0.2; final image 3.1 / 0.8 / 1.9 / 0.2. The pub gets a little more irradiance (luma 41.3 ->
+42.2): the wall behind the bar no longer takes a darker second bounce from probes across the wall; the monastery changes at the
+doorway / fireplace. No obvious light leak through a thin wall was visible with the cheap lookup in any of these spots: the change
+is small and mostly a smoother, more local second bounce.
+
+**Cost** [C]: quicksave of the harbour town (GI + screen probes high, detail 2x, 1600x900, `-Perf`, two runs per variant): GPU per
+frame cheap 10.17 / 11.78 ms, visibility 10.81 / 9.67 ms: within the run-to-run noise (another game shares the GPU); the frame
+stays CPU-bound at ~10.7 ms (interval p50), `gi` CPU recording unchanged (0.024 ms). No separate `-PerfFrame` pass time was taken.
+
+**Verdict**: kept (negligible cost, more correct second bounce). Validation clean (A/B run with `-Validation`), `rvk_tests` 131 / 131,
+corpus `--gi` / `--gbuf` / `--gbuf-motion` 0 failures.
+
+**Open**: no scene with a clear thin-wall leak was found among the spots (a dedicated one: a lit room next to a dark one, would
+show it better); the screen probes' ray ends still use the cheap lookup; `-PerfFrame` pass times for `gi` / `gi.screen`.
