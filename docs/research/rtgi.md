@@ -408,3 +408,29 @@ Cost (quicksave `Risen_Save_0007`, detail 2x, GI + AO on, 1600x900, `-Perf`, two
 
 **Open**: pixels with no neighbour at their depth (a character in front of distant terrain, alpha over the sky) stay uncorrected;
 the 12 taps could drop to 8 if the 0.35 ms matters (it is probably the alpha-tested foliage that fails the match as well).
+
+## 15. Colour bleeding: a filtered chroma ratio (2026-10-24)
+
+([C] = measured / read in code.)
+
+**Method** [C]: the screen probe stores (luminance ratio, chroma red, chroma blue) instead of a replicated luminance ratio
+(`sp_trace.comp`). Chroma = (traced / traced luminance) / (DDGI / DDGI luminance) per channel, clamped to 0.6 .. 1.6, renormalised to
+unit luminance (green follows from it) and blended to 1 by `gi.bleed` (0 = the old luminance-only behaviour exactly). Only where both
+irradiances exceed 2e-3. `sp_resolve.comp` filters the chroma over the same 3 x 3 probes with a wider Gaussian (sigma two tiles; the
+luminance keeps one tile) and accumulates it with a longer history (1 - 0.3 x (1 - 0.95) = 0.985 vs 0.95). The history needs no extra
+channel: a resolved texel is `k x chroma` with unit-luminance chroma, so its luminance is `k` and colour / luminance the chroma. The
+material shaders' clamp of the factor is 3.2 (luminance cap 2 x chroma up to 1.6; was 2). Bleed is applied at the probe, so the
+history holds the blended values (no shrinking over time).
+
+**Setting**: `gi.bleed` (Lighting, Advanced, 0..1, default 0.5, needs RayQuery); rvk.log `enh: gi: on (... bleed 0.50 ...)`.
+
+**Checks** [C]: `rvk_tests` 131 / 131 (settings count 74), corpus `--gi` 2246 / `--gbuf` 2325 / `--gbuf-motion` 2325 ok, validation run
+(4 spots, bleed 1) 0 messages. A/B bleed 0 vs 1 (`out\water61024-133702`): whole-frame luma delta within 1 (pub -0.9 = candle
+flicker, unfrozen), mean abs RGB difference 0.2 (harbour) .. 2.2 (jungle, wind-animated foliage dominates the difference). Frozen-time
+bursts of 11 frames (bleed 0 / 0.5 / 1, `-Burst 12 -Interval 1`): chromaticity std x1000 pub 0.47 / 0.51 / 0.53, monastery 0.12 /
+0.12 / 0.13, harbour 0.58 for all: no measurable colour noise. The pub warms slightly with bleed (mean red 35.1 -> 37.1).
+
+**Not done / open**: the effect is subtle at the rvkcompare spots (no strongly coloured surface beside a neutral one among them: a
+dedicated spot is missing); the grain measurement at the player's quicksave (palms in the wind, the rtgi.md 12 method) and the cost
+(`-Perf`) were not run: the resolve adds a handful of ALU ops and no fetches. The default 0.5 rests on "no noise, no artefacts",
+not on a demonstrated improvement.

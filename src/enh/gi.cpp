@@ -118,6 +118,7 @@ void Gi::apply(const Settings& s) {
     s_ = s;
     s_.quality = std::clamp(s_.quality, 0, 2);
     s_.strength = std::clamp(s_.strength, 0.0f, 1.0f);
+    s_.bleed = std::clamp(s_.bleed, 0.0f, 1.0f);
     const bool want = s.enabled && available();
     if (want && !on_) enable();
     if (!want && on_) disable();
@@ -129,8 +130,8 @@ void Gi::apply(const Settings& s) {
         dev_.setFrameSgi({});
         sgiValid_ = false;
     }
-    spdlog::info("enh: gi: {} (quality {}, strength {:.2f}, lightmaps {}, characters {}, screen probes {}, debug {})", on_ ? "on" : "off",
-                 s_.quality, s_.strength, s_.replaceLightmaps ? "replaced" : "kept", s_.characters ? "on" : "off", s_.screen, s_.debug);
+    spdlog::info("enh: gi: {} (quality {}, strength {:.2f}, lightmaps {}, characters {}, screen probes {}, bleed {:.2f}, debug {})", on_ ? "on" : "off",
+                 s_.quality, s_.strength, s_.replaceLightmaps ? "replaced" : "kept", s_.characters ? "on" : "off", s_.screen, s_.bleed, s_.debug);
 }
 
 void Gi::enable() {
@@ -619,6 +620,7 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
     p.screen4[0] = 4000.0f;  // ray reach (world units); a ray that runs out takes the probe volume's light at its end
     p.screen4[1] = 2.0f;     // ratio cap
     p.screen4[2] = 0.95f;    // history weight
+    p.screen4[3] = s_.bleed;  // colour bleeding
     std::memcpy(pa.ptr, &p, sizeof(p));
     GiPush push{};
     push.h.frame = ctx.frameBlock;

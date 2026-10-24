@@ -3,7 +3,7 @@
 // screen tile at a jittered pixel of this frame's G-buffer, cosine-weighted hemisphere rays around its normal against the TLAS,
 // shaded like the DDGI probes' rays (gi_shade.glsl: sun + a point light with shadow rays, the DDGI probes at hits, the sky on
 // misses). The probe stores the (luminance) ratio of its traced irradiance to the DDGI volume's irradiance at the same point
-// and normal: the material shaders scale the DDGI lookup by it (the exact per-surface visibility and near bounce the 1.5 m
+// (plus a chroma ratio for colour bleeding, gi.bleed) and normal: the material shaders scale the DDGI lookup by it (the exact per-surface visibility and near bounce the 1.5 m
 // probe grid cannot hold; the DDGI keeps the direction-dependent SH). rgb = the ratio, a = the probe's view depth (0 = none).
 //
 // Runs right after the z pre-pass (this frame's depth, the TLAS built there): the material shaders of this frame's solid pass
@@ -100,7 +100,17 @@ void main() {
     // the DDGI has almost nothing (deep interiors) it is meaningless: neutral
     const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
     float dl = dot(ddgi, lw);
-    float k = dl > 2e-3 ? clamp(dot(traced, lw) / dl, 0.0, p.screen4.y) : 1.0;
+    float tl = dot(traced, lw);
+    float k = dl > 2e-3 ? clamp(tl / dl, 0.0, p.screen4.y) : 1.0;
     if (isnan(k) || isinf(k)) k = 1.0;
-    imageStore(outProbes, tile, vec4(vec3(k), viewZ));
+    // colour bleeding (gi.bleed, rtgi.md 15): the traced light's chromaticity relative to the DDGI's, a unit-luminance colour
+    // ratio kept within 0.6 .. 1.6 and blended by the setting; the resolve filters it wider and longer than the luminance
+    vec3 chroma = vec3(1.0);
+    if (dl > 2e-3 && tl > 2e-3 && p.screen4.w > 0.0) {
+        chroma = clamp((traced / tl) / max(ddgi / dl, vec3(1e-3)), vec3(0.6), vec3(1.6));
+        chroma = mix(vec3(1.0), chroma / dot(chroma, lw), p.screen4.w);
+        if (any(isnan(chroma)) || any(isinf(chroma))) chroma = vec3(1.0);
+    }
+    // rgb = (luminance ratio, chroma red, chroma blue); green follows from the unit luminance
+    imageStore(outProbes, tile, vec4(k, chroma.r, chroma.b, viewZ));
 }

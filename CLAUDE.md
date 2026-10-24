@@ -180,7 +180,7 @@ spot hold (`run.ps1 -Mods rvkcompare -Param 'spots=lake_jungle','freeze_wait=480
 windows) and `-PerfFrame` (`pass water.rt`). `rvk_vktest --shader-stats` prints VGPRs / LDS / scratch of `water.frag` and
 `water_rt.comp` (`VK_KHR_pipeline_executable_properties`).
 RT GI (docs/research/rtgi.md 9; settings category Lighting, default off): `-Setting 'gi.enabled=true'` (+ `gi.quality=low|medium|high`,
-`gi.strength`, `gi.lightmaps=keep|replace`, `gi.characters`; debug `gi.debug=irradiance|cascades`); rvk.log `enh: gi:` lines, `rt: scene: characters`.
+`gi.strength`, `gi.bleed` (0..1 colour bleeding of the screen probes, default 0.5; rtgi.md 15), `gi.lightmaps=keep|replace`, `gi.characters`; debug `gi.debug=irradiance|cascades`); rvk.log `enh: gi:` lines, `rt: scene: characters`.
 A/B: `.\scripts\water-compare.ps1 -EngineSetting 'water.enabled=true','gi.enabled=false' -Setting 'gi.enabled=true' -Spots pub_interior,monastery_hall,jungle`;
 offline `rvk_shadertool corpus corpus --gi | --capture`.
 G-buffer / GTAO (rtgi.md 10; Lighting, default off): `-Setting 'ao.enabled=true'` (+ `ao.mode=replace|add`, `ao.strength`, `ao.radius`);

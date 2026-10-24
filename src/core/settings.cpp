@@ -1310,6 +1310,20 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .requirements = caps::bit(caps::Cap::RayQuery),
         .unmetValue = 0,
     });
+    r.giBleed = &reg.add({
+        .key = "gi.bleed",
+        .label = "Colour bleeding",
+        .category = "Lighting",
+        .description = "How much surfaces tint the light they bounce onto their neighbours (a red wall reddens the floor next "
+                       "to it). Needs Lighting detail.",
+        .type = Type::Float,
+        .defaultValue = 0.5,
+        .min = 0,
+        .max = 1,
+        .format = "%.2f",
+        .flags = Flag::Advanced,
+        .requirements = caps::bit(caps::Cap::RayQuery),
+    });
     r.giDebug = &reg.add({
         .key = "gi.debug",
         .label = "GI debug view",

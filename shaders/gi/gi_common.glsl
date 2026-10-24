@@ -25,7 +25,7 @@ layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Gi
     uvec4 screen2;    // x tile size (pixels), y rays per probe, z scene width, w scene height
     uvec4 screen3;    // x the probes image (t2D, the resolve's input), y the previous frame's resolved image (t2D, 0 = none),
                       // z G-buffer motion (t2D), w linear clamp sampler
-    vec4 screen4;     // x ray reach, y ratio cap, z history blend, w 0
+    vec4 screen4;     // x ray reach, y ratio cap, z history blend, w colour bleeding (0..1)
 };
 // (cascade << 24) | slot of each probe to update
 layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer GiList {

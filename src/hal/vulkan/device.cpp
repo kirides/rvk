@@ -295,7 +295,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     // ray-traced global illumination (enh/gi.h, docs/research/rtgi.md): probes + the material shaders' GI variants
     gi_ = std::make_unique<enh::Gi>(dev_, rtScene_.get());
     if (rs.giEnabled != nullptr) {
-        for (settings::Setting* s : {rs.giEnabled, rs.giQuality, rs.giStrength, rs.giLightmaps, rs.giCharacters, rs.giScreen, rs.giDebug}) {
+        for (settings::Setting* s : {rs.giEnabled, rs.giQuality, rs.giStrength, rs.giLightmaps, rs.giCharacters, rs.giScreen, rs.giBleed, rs.giDebug}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) {
                 applyGi();
                 applyGbuffer();  // the screen probes need the G-buffer
@@ -410,6 +410,7 @@ void HalDevice::applyGi() {
     s.strength = rs.giStrength->asFloat();
     s.replaceLightmaps = rs.giLightmaps->asEnum() == "replace";
     s.characters = rs.giCharacters->asBool();
+    if (rs.giBleed != nullptr) s.bleed = rs.giBleed->asFloat();
     const std::string_view d = rs.giDebug->asEnum();
     s.debug = d == "irradiance" ? 1 : d == "cascades" ? 2 : 0;
     if (rs.giScreen != nullptr) {

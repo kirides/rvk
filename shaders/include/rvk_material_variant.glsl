@@ -99,7 +99,7 @@ void rvkMvGi(vec3 P, vec3 n, vec3 V) {
                 hit = g.w > 0.0;
             }
             if (hit) {
-                vec3 k = clamp(s.rgb, vec3(0.0), vec3(2.0));
+                vec3 k = clamp(s.rgb, vec3(0.0), vec3(3.2));  // luminance ratio (cap 2) x chroma (up to 1.6)
                 rvk_mvSgi = k;
                 for (int c = 0; c < 3; ++c) {
                     regs[c] *= k[c];

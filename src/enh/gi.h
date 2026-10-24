@@ -72,7 +72,7 @@ struct GiPassParams {
     std::uint32_t screen[4];   // screen probes: depth, G-buffer normal, grid width, height
     std::uint32_t screen2[4];  // tile size, rays per probe, scene width, height
     std::uint32_t screen3[4];  // probes image, previous resolve, G-buffer motion, linear sampler
-    float screen4[4];          // ray reach, ratio cap, history blend, 0
+    float screen4[4];          // ray reach, ratio cap, history blend, colour bleeding
 };
 static_assert(sizeof(GiPassParams) == 16 * (3 + 3 + 1 + 1 + 1 + 1 + 1 + 7 + kGiMaxLights * 2 + 4));
 
@@ -93,6 +93,7 @@ public:
         bool replaceLightmaps = false;
         bool characters = true;   // skinned draws in the RT scene
         int debug = 0;            // 1 irradiance, 2 cascades
+        float bleed = 0.5f;       // colour bleeding of the screen probes (rtgi.md 15): 0 luminance only .. 1 full chroma ratio
         int screen = 2;           // screen probes (stage C, rtgi.md 11): 0 off, 1 low, 2 medium, 3 high
     };
 
