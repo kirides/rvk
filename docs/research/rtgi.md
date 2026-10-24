@@ -347,7 +347,7 @@ own pixel where the stored view depth matches theirs (2 %, >= 4 units): no repro
 z pre-pass (characters, alpha) keep the uncorrected DDGI and no AO. The G-buffer motion fill stays at AfterOpaque (`gtao.comp` mode 2).
 Player quicksave (harbour town, detail 4x, 1600x900): 95.8 fps, GPU ~8.3 ms, CPU-bound ~10.4 ms; validation clean.
 
-**Open**: characters / alpha get no same-frame AO or screen probe correction (could fall back to a reprojected previous result); the GTAO
+**Open**: characters / alpha: see section 14 (depth-gathered fallback); the GTAO
 arc pattern next to the pub wall persists; characters lag one frame in the RT scene.
 
 ## 13. Interior brightness: a minimum ambient (2026-10-24)
@@ -383,3 +383,28 @@ cave): no messages; `rvk_shadertool corpus corpus --gi / --gbuf / --gbuf-motion`
 
 **Open**: the true hemisphere SH from the engine would give a reliable sky (and `f`) indoors; with it the remainder could keep exactly
 the engine's non-sky ambient instead of this cap.
+
+## 14. Characters / alpha: a depth-gathered correction (2026-10-24)
+
+([C] = measured in the game.)
+
+**Problem** [C]: the same-frame AO and screen probe images (sections 12) are valid only where the z pre-pass wrote the pixel; a
+character or alpha draw's own pixel holds the background's stored view depth, the 2 % depth match fails and the draw kept the
+uncorrected DDGI and no AO (a character in a corner was lit as if in the open).
+
+**Change** [C] (`shaders/include/rvk_material_variant.glsl`, `rvkMvGather`): where the match fails, a depth-aware gather of the same
+image: 12 fixed taps on a spiral (radius 4..20 px, no per-pixel noise: stable), a tap counts with weight `1 - |z - myZ| / tol` x
+`1 / (1 + r / 8)` (tol = max(5 % of the depth, 15 units)); the weighted average is blended in by a confidence (share of valid weight,
+full at half the taps valid), so with no neighbour at the surface's depth (a character against the far sky) nothing is applied and
+there is no halo from the background's values. AO and the screen probe factor use the same helper (AO in .x / depth .y, probes
+rgb / depth .a). Only the Gbuffer variants have it; no setting.
+
+**Check** [C]: hero_closeup / hero_idle / pub_idle with `show_actors=1`, before (`out\water61024-132406`) vs after
+(`-131809`): the hero is a little more shaded (hero-region luma 110.6 -> 109.3, 107.8 -> 107.4), no halo or outline at the silhouettes,
+pub unchanged within the candle flicker; validation clean, no variant compile errors; `rvk_shadertool corpus corpus --gi / --gbuf /
+--gbuf-motion` 0 failures; rvk_tests 131 ok.
+Cost (quicksave `Risen_Save_0007`, detail 2x, GI + AO on, 1600x900, `-Perf`, two 5 s windows each): GPU 8.00 / 8.27 ms with it vs
+7.66 / 7.88 ms without (~+0.35 ms); CPU-bound at ~10.5 ms either way.
+
+**Open**: pixels with no neighbour at their depth (a character in front of distant terrain, alpha over the sky) stay uncorrected;
+the 12 taps could drop to 8 if the 0.35 ms matters (it is probably the alpha-tested foliage that fails the match as well).

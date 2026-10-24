@@ -50,6 +50,33 @@ float rvkMvViewDepth() {
 }
 
 #ifdef RVK_MV_AMBIENT
+#ifdef RVK_MV_GBUFFER
+// Fallback for pixels the z pre-pass did not write (characters, alpha: the stored depth there is the background's): a
+// depth-aware gather of this frame's AO / screen probe image around the pixel. 12 fixed taps on a spiral (fixed, no per-pixel
+// noise: stable), only texels whose stored view depth is close to this surface's count; the share of valid weight is the
+// confidence the result is blended in with (rtgi.md 14). vec4(value, confidence); .xyz = rgb (sgi) or .x = ao.
+vec4 rvkMvGather(uint img, float myZ, bool isAo) {
+    ivec2 sz = textureSize(t2D[img], 0);
+    ivec2 c0 = ivec2(gl_FragCoord.xy);
+    float tol = max(myZ * 0.05, 15.0);
+    vec3 acc = vec3(0.0);
+    float wsum = 0.0, wmax = 0.0;
+    for (int i = 0; i < 12; ++i) {
+        float r = 4.0 + 16.0 * (float(i) + 0.5) / 12.0;
+        float a = float(i) * 2.39996323;
+        ivec2 q = clamp(c0 + ivec2(round(vec2(cos(a), sin(a)) * r)), ivec2(0), sz - 1);
+        vec4 t = texelFetch(t2D[img], q, 0);
+        float z = isAo ? t.g : t.a;
+        float w = z > 0.0 ? max(1.0 - abs(z - myZ) / tol, 0.0) : 0.0;
+        w *= 1.0 / (1.0 + r * (1.0 / 8.0));
+        acc += w * (isAo ? vec3(t.r, 0.0, 0.0) : t.rgb);
+        wsum += w;
+        wmax += 1.0 / (1.0 + r * (1.0 / 8.0));
+    }
+    if (wsum <= 1e-4) return vec4(0.0);
+    return vec4(acc / wsum, clamp(wsum / (0.5 * wmax), 0.0, 1.0));  // half the taps valid = full confidence
+}
+#endif
 // GI: the probes' irradiance as the draw's ambient (enh/gi)
 void rvkMvGi(vec3 P, vec3 n, vec3 V) {
     if (!rvkGiValid(pc.frame) || (pc.frame.frameInfo.y & RVK_FRAME_CAMERA_VALID) == 0u) return;
@@ -65,7 +92,13 @@ void rvkMvGi(vec3 P, vec3 n, vec3 V) {
         vec4 s = texelFetch(t2D[sg.x], ivec2(gl_FragCoord.xy), 0);
         float myZ = rvkMvViewDepth();
         {
-            if (s.a > 0.0 && abs(s.a - myZ) < max(myZ * 0.02, 4.0)) {
+            bool hit = s.a > 0.0 && abs(s.a - myZ) < max(myZ * 0.02, 4.0);
+            if (!hit) {
+                vec4 g = rvkMvGather(sg.x, myZ, false);
+                s = vec4(mix(vec3(1.0), g.rgb, g.w), 1.0);
+                hit = g.w > 0.0;
+            }
+            if (hit) {
                 vec3 k = clamp(s.rgb, vec3(0.0), vec3(2.0));
                 rvk_mvSgi = k;
                 for (int c = 0; c < 3; ++c) {
@@ -120,7 +153,11 @@ void rvkMvAo(vec3 P) {
     // this frame's (computed after the z pre-pass) at this pixel, when its depth is this surface's
     vec2 s = texelFetch(t2D[a.x], ivec2(gl_FragCoord.xy), 0).rg;
     float myZ = rvkMvViewDepth();
-    if (s.g <= 0.0 || abs(s.g - myZ) > max(myZ * 0.02, 4.0)) return;
+    if (s.g <= 0.0 || abs(s.g - myZ) > max(myZ * 0.02, 4.0)) {
+        vec4 g = rvkMvGather(a.x, myZ, true);
+        if (g.w <= 0.0) return;
+        s = vec2(mix(1.0, g.x, g.w), myZ);
+    }
     float ao = clamp(s.r, 0.0, 1.0);
     float f = mix(1.0, ao, clamp(uintBitsToFloat(a.w), 0.0, 1.0));
     rvk_mvAo = f;
