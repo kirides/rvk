@@ -90,3 +90,28 @@ The user's constraint: the RT shadows must not touch the regular render parts. H
   (a pre-baked opacity), `rt_range` per quality.
 * Wind: the RT scene holds SpeedTree fronds in their rest pose; the raster is animated, so frond self-shadows differ slightly.
 * Interiors with sun shadow views (windows) work like outdoors; interiors without shadow views have no pass.
+
+## 5. Fixes after the first player test (2026-10-24)
+
+The player reported (1) trails of shadow behind a walking hero, plus a comb pattern along shadow edges, (2) shadows that move in
+big chunks, (3) no wind in trees / grass. Test scenario `mods/rvk_rtwalk` (a quicksave or a new game, the hero walks with
+`keys=MoveBackward` / `MoveForward`, a picture burst via `risen.debug.screenshot`: `walk2`-style runs, e.g. `-Mods rvk_rtwalk
+-Scenario rvk_rtwalk -Param 'load=1','hour=18','keys=MoveBackward','burst=40','interval=10','name=rt1'`; the quicksave's
+AutoSave of an earlier run in the test copy would be loaded instead: delete it first).
+
+* **Chunky sun** [C]: `eCDirectionalLight_PS::UpdateShadowMaps` (0x591fb0) keeps the sun's true direction at `this+0x80` and a copy at
+  `+0x8c`; the copy follows only after the sun turned ~0.5 degree and is what the cascade object (`+0x10`) gets. The RT shadows read
+  the cascade object's copy: the shadows jumped in 0.5 degree steps (logged: the vector changed every ~15 frames at 20 game
+  minutes per second). Now `engine::shadowmaps::trueSunVector` (a pre-hook of that function, read-only) feeds the rays: the sun
+  changes every frame (checked in the same scenario). The cascades keep the engine's stepped vector (what they were rendered with).
+* **Trails** [C]: not the temporal filter. Grass blades (small `StaticMesh` / `InstancedMesh` ranges of ~200 triangles, 16 x 6 x 80
+  units) get new world rows almost every frame while the camera moves (fading by distance / per-frame instance data): each new row
+  was a new registry instance (key = BLAS + quantised rows) without an owner, kept for 600 frames / 20 s. While the hero walked 5 s the
+  registry went 490 -> 25,558 instances (`added 48,223, replaced 21,956`) and the TLAS filled to its cap of 16,384 with ghosts of
+  places the blades had been: shadows of every earlier frame. Fix (`RtScene::noteNewInstance`): a range with >= 48 new instances in 90
+  frames is volatile for 360 frames; the TLAS takes its instances only while seen in the last 3 frames, and every 16 frames the
+  registry drops the ones unseen for 12 (`Registry::removeIf`, unit test `rt_registry_remove_if`). After: TLAS 513 - 605 instances,
+  registry ~700 during the same walk.
+* **Comb** [C]: along every terminator (the sun grazing a wall or a tower) the random cone samples that point below the surface hit
+  the surface itself; the interleaved gradient noise made a diagonal comb of it. A sample with `dot(dir, N) < 0.02` is now counted lit
+  (the material's own N.L darkens the terminator). Gone in the same scenario.

@@ -224,6 +224,20 @@ std::size_t Registry::age(const float camera[3], std::uint64_t frame, double tim
     return dropped;
 }
 
+std::size_t Registry::removeIf(const std::function<bool(const Instance&)>& pred) {
+    std::size_t n = 0;
+    for (std::size_t i = 0; i < list_.size();) {
+        if (pred(list_[i])) {
+            removeAt(i);
+            ++n;
+        } else {
+            ++i;
+        }
+    }
+    counters_.dropped += n;
+    return n;
+}
+
 std::size_t Registry::removeBlas(std::uint64_t blas) {
     std::size_t n = 0;
     for (std::size_t i = 0; i < list_.size();) {

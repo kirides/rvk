@@ -161,6 +161,9 @@
     /* ---- sun cascades (engine/shadow_maps.*, docs/research/shadows.md 3) ---- */                                            \
     /* bool eCCascadeShadowMap::RenderShadowMaps() (0x59f200): fits and renders every cascade, each frame (reads MaxDistance  \
        +0x1c, LogSplitFactor +0x20) */                                                                                         \
+    /* virtual void eCDirectionalLight_PS::UpdateShadowMaps() (0x591fb0): +0x80 the sun's true direction (the direction the light      \
+       travels), +0x8c a copy that follows it only after a turn of ~0.5 degree (handed to the cascade object +0x10) */                  \
+    X(directionalLightUpdateShadowMaps, L"Engine.dll", "?UpdateShadowMaps@eCDirectionalLight_PS@@UEAAXXZ", false)                      \
     X(cascadeRenderShadowMaps, L"Engine.dll", "?RenderShadowMaps@eCCascadeShadowMap@@QEAA_NXZ", false)                          \
     /* void eCCascadeShadowMap::SetShadowMapSize(int const&) (0x59f600): +0x24, frees the splits; SetSplitCount(int const&)   \
        (0x59f650): creates them (map size, bias, cameras) */                                                                   \

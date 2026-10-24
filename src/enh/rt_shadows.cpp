@@ -173,7 +173,11 @@ void RtShadows::record(d3d9::PassContext& ctx, int stage) {
         ++skipped_;
         return;
     }
-    // the stored vector is the direction the light travels (shadows.md 3): the rays go the other way
+    // the stored vector is the direction the light travels (shadows.md 3): the rays go the other way. The cascade object's copy
+    // moves in steps of ~0.5 degree (the engine re-aims it only after such a turn: shadows jumped in chunks), the light's own
+    // direction is exact every frame
+    float trueSun[3];
+    if (engine::shadowmaps::trueSunVector(trueSun)) std::memcpy(sunStored, trueSun, sizeof(sunStored));
     float toSun[3] = {-sunStored[0], -sunStored[1], -sunStored[2]};
     const float len = std::sqrt(toSun[0] * toSun[0] + toSun[1] * toSun[1] + toSun[2] * toSun[2]);
     if (!(len > 1e-4f)) {

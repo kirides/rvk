@@ -23,6 +23,11 @@ void setUpdateStride(int stride);
 // call; false before the first call (and in interiors without sun shadows, where it is not called). Any thread
 bool sunVector(float out[3]);
 
+// The sun's TRUE direction (eCDirectionalLight_PS +0x80, the direction the light travels), read each frame in a pre-hook of
+// eCDirectionalLight_PS::UpdateShadowMaps; the cascade object's vector (sunVector) is a copy that follows only after the sun
+// turned ~0.5 degree, so anything that wants the sun to move smoothly (RT shadows) reads this one; false before the first call
+bool trueSunVector(float out[3]);
+
 // Creates the detour (enabled with the others by hooks::enableAll); false when the symbols are missing
 bool install();
 

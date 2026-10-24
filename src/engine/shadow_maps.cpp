@@ -28,6 +28,8 @@ std::atomic<float> g_factor{-1.0f};
 std::atomic<int> g_stride{2};
 std::atomic<float> g_sun[3]{};
 std::atomic<bool> g_sunKnown{false};
+std::atomic<float> g_trueSun[3]{};
+std::atomic<bool> g_trueSunKnown{false};
 
 // the throttle's memory (render thread): the camera (inverse view: rows 0..2 the axes, row 3 the position) of the last real update
 struct Throttle {
@@ -74,6 +76,23 @@ SetIntFn g_setCount = nullptr;
 
 using RenderFn = bool (*)(void* self);
 Hook<RenderFn> g_render;
+using LightUpdateFn = void (*)(void* self);
+Hook<LightUpdateFn> g_lightUpdate;
+
+// eCDirectionalLight_PS::UpdateShadowMaps (shadows.md 3, rt-shadows.md 5): the sun's true direction at +0x80 (unnormalised or not:
+// normalised here), before the call quantises it for the cascade object
+void detourLightUpdate(void* self) {
+    if (self != nullptr) {
+        float v[3];
+        for (int i = 0; i < 3; ++i) v[i] = field<float>(self, 0x80 + 4 * i);
+        const float len = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        if (std::isfinite(len) && len > 1e-4f) {
+            for (int i = 0; i < 3; ++i) g_trueSun[i].store(v[i] / len, std::memory_order_relaxed);
+            g_trueSunKnown.store(true, std::memory_order_relaxed);
+        }
+    }
+    g_lightUpdate.original(self);
+}
 
 bool detourRender(void* self) {
     if (self != nullptr) {
@@ -173,8 +192,18 @@ bool sunVector(float out[3]) {
     return true;
 }
 
+bool trueSunVector(float out[3]) {
+    if (!g_trueSunKnown.load(std::memory_order_relaxed)) return false;
+    for (int i = 0; i < 3; ++i) out[i] = g_trueSun[i].load(std::memory_order_relaxed);
+    return true;
+}
+
 bool install() {
     const auto& s = sym();
+    if (s.directionalLightUpdateShadowMaps != nullptr) {
+        g_lightUpdate.install("eCDirectionalLight_PS::UpdateShadowMaps", reinterpret_cast<LightUpdateFn>(s.directionalLightUpdateShadowMaps),
+                              &detourLightUpdate);
+    }
     g_setSize = reinterpret_cast<SetIntFn>(s.cascadeSetShadowMapSize);
     g_setCount = reinterpret_cast<SetIntFn>(s.cascadeSetSplitCount);
     if (s.cascadeRenderShadowMaps == nullptr) {

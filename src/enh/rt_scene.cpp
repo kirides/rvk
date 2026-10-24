@@ -27,6 +27,9 @@ constexpr std::uint8_t kDeclFloat1 = 0, kDeclFloat3 = 2;  // D3DDECLTYPE
 constexpr std::uint32_t kInstanceDataBase = 32;           // c32 g_vInstanceData[200]
 constexpr std::uint32_t kInstanceDataEnd = 232;
 constexpr std::uint32_t kMaxBatch = 64;                    // instances read per instanced draw (the engine: <= 50)
+constexpr std::uint64_t kChurnWindow = 90;   // frames: a range with kChurnLimit new instances in this many is volatile (rt-shadows.md 5)
+constexpr std::uint32_t kChurnLimit = 48;
+constexpr std::uint64_t kVolatileKeep = 3;   // frames a volatile range's instance stays in the TLAS after its last sighting
 constexpr std::uint64_t kOpaqueRecent = 600;               // frames: "the main view draws this range opaque"
 constexpr std::uint64_t kMaterialRefresh = 64;             // frames: a BLAS's material is resolved again (animated uv maps)
 // the TLAS is rebuilt every frame
@@ -541,7 +544,9 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         if (!rowsAt(kInstanceDataBase + 1, rows) || outside(rows)) return skip();
         const std::uint64_t owner = q.tag != nullptr ? rt::ownerKey(q.tag->entity, q.tag->opDesc) : 0;
         ++iv_.sightings;
-        rt::Registry::Instance* in = registry_.see(rt::instanceKey(b->id, rows), b->id, rows, owner, flags, alphaWord, view, frame, now).first;
+        auto sr = registry_.see(rt::instanceKey(b->id, rows), b->id, rows, owner, flags, alphaWord, view, frame, now);
+        rt::Registry::Instance* in = sr.first;
+        if (sr.second) noteNewInstance(*b, frame);
         if (in != nullptr && materialId != 0) applyMaterial(*in, materialId, materialRank, overlay, frame);
         return;
     }
@@ -567,7 +572,9 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         rt::Rows rows;
         if (!rowsAt(reg, rows) || outside(rows)) continue;
         ++iv_.sightings;
-        rt::Registry::Instance* in = registry_.see(rt::instanceKey(b->id, rows), b->id, rows, 0, flags, alphaWord, view, frame, now).first;
+        auto sr = registry_.see(rt::instanceKey(b->id, rows), b->id, rows, 0, flags, alphaWord, view, frame, now);
+        rt::Registry::Instance* in = sr.first;
+        if (sr.second) noteNewInstance(*b, frame);
         if (in != nullptr && materialId != 0) applyMaterial(*in, materialId, materialRank, overlay, frame);
     }
     if (!instanceIndexChecked_ && fromStream && iv_.observed > 2000) {
@@ -575,6 +582,19 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         spdlog::info("rt: scene: instance stream check: {}", indexDeviations_ == 0 ? "TEXCOORD4 = 0, 1, 2, ... in every batch so far"
                                                                                    : std::format("{} instances deviate from 0, 1, 2, ...", indexDeviations_));
     }
+}
+
+// a range that gets new instances all the time (kChurnLimit within kChurnWindow frames) is volatile for a while
+void RtScene::noteNewInstance(Blas& b, std::uint64_t frame) {
+    if (frame >= b.churnStart + kChurnWindow) {
+        b.churnStart = frame;
+        b.churnNew = 0;
+    }
+    if (++b.churnNew >= kChurnLimit && b.volatileUntil < frame) {
+        if (b.volatileUntil == 0) ++iv_.volatileBlas;
+        b.volatileUntil = frame + 4 * kChurnWindow;
+    }
+    if (b.churnNew >= kChurnLimit) b.volatileUntil = frame + 4 * kChurnWindow;
 }
 
 void RtScene::learnExcluded(const d3d9::ReplaceQuery& q, bool water) {
@@ -1569,10 +1589,19 @@ void RtScene::record(d3d9::PassContext& ctx) {
     dynCount = std::min(dynCount, tlas_[slot].capacity / 8);
     // the instances and their geometry records (one geometry per BLAS: record index = instanceCustomIndex)
     const auto& list = registry_.instances();
-    const std::vector<std::uint32_t> chosen = rt::selectForTlas(list, camera, tlas_[slot].capacity - dynCount, [this](const rt::Registry::Instance& in) {
+    if (frame % 16 == 0) {
+        // the registry's ghosts of volatile ranges (the TLAS skips them anyway): dropped
+        registry_.removeIf([&](const rt::Registry::Instance& in) {
+            const Blas* b = findBlas(in.blas);
+            return b != nullptr && b->volatileUntil >= frame && in.lastFrame + 4 * kVolatileKeep < frame;
+        });
+    }
+    const std::vector<std::uint32_t> chosen = rt::selectForTlas(list, camera, tlas_[slot].capacity - dynCount, [this, frame](const rt::Registry::Instance& in) {
         const Blas* b = findBlas(in.blas);
         // an object the cascades draw at another level of detail than the main view: the main view's
         if (b == nullptr || b->state != BlasState::Built || registry_.supersededBy(in, viewBit(View::Main))) return false;
+        // volatile ranges (churning instances): only what was seen in the last frames, the stale ones are ghosts of earlier places
+        if (b->volatileUntil >= frame && in.lastFrame + kVolatileKeep < frame) return false;
         // an instance known only through an overlay material (caustics, a blended untextured wet-sand strip) lies on another
         // surface: left out (its coplanar hits would speckle the base)
         if (in.material != 0) {

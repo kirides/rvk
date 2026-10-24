@@ -1,0 +1,6 @@
+id          = "rvk_rtwalk"
+name        = "Renderer test: the hero walks through shadows"
+version     = "1.0.0"
+author      = "risen-enhanced-graphics"
+description = "Loads the quicksave, then the hero walks / turns for -Param seconds while the game time is pinned or runs fast (risen-enhanced-graphics: RT shadows, docs/research/rt-shadows.md)."
+main        = "main.lua"

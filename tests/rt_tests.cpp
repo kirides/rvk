@@ -144,6 +144,25 @@ TEST(rt_registry_aging_radius_cap) {
     for (const auto& in : reg.instances()) CHECK(in.lastFrame >= 1002);
 }
 
+TEST(rt_registry_remove_if) {
+    rt::Registry reg;
+    int refs = 0;
+    reg.onAdded = [&](const rt::Registry::Instance&) { ++refs; };
+    reg.onRemoved = [&](const rt::Registry::Instance&) { --refs; };
+    // the ghosts of a churning range (rt-shadows.md 5): old sightings of blas 7 go, a fresh one and other ranges stay
+    for (int i = 0; i < 6; ++i) {
+        const rt::Rows r = at(static_cast<float>(i * 10), 0, 0);
+        reg.see(rt::instanceKey(7, r), 7, r, 0, 0, 0, 1, 100 + static_cast<std::uint64_t>(i), 1.0);
+    }
+    const rt::Rows other = at(500, 0, 0);
+    reg.see(rt::instanceKey(8, other), 8, other, 0, 0, 0, 1, 100, 1.0);
+    CHECK(reg.size() == 7 && refs == 7);
+    CHECK(reg.removeIf([](const rt::Registry::Instance& in) { return in.blas == 7 && in.lastFrame + 3 < 105; }) == 2);
+    CHECK(reg.size() == 5 && refs == 5 && reg.find(rt::instanceKey(8, other)) != nullptr);
+    for (const auto& in : reg.instances()) CHECK(in.blas == 8 || in.lastFrame + 3 >= 105);
+    CHECK(reg.removeIf([](const rt::Registry::Instance&) { return false; }) == 0);
+}
+
 TEST(rt_world_sphere) {
     rt::Aabb box;
     CHECK(!box.valid());

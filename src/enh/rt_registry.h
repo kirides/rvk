@@ -130,6 +130,8 @@ public:
     // limits.maxRegistered the longest unseen. Returns how many were dropped.
     std::size_t age(const float camera[3], std::uint64_t frame, double time, const Limits& limits,
                     const std::function<const Aabb*(std::uint64_t)>& bounds);
+    // drops the instances `pred` accepts; returns how many
+    std::size_t removeIf(const std::function<bool(const Instance&)>& pred);
     // drops every instance of a BLAS (its buffers changed / died); returns how many
     std::size_t removeBlas(std::uint64_t blas);
     void clear();

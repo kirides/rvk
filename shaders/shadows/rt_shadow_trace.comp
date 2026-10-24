@@ -41,6 +41,13 @@ void main() {
             float rad = sqrt(u1) * p.sun.w;
             float phi = 6.2831853 * u2;
             vec3 dir = normalize(L + (T * cos(phi) + B * sin(phi)) * rad);
+            // a sample below the surface's tangent plane is no light path at all (the material's N.L already darkens the
+            // terminator): counting it lit keeps the surface from shadowing itself at grazing sun, where the random samples
+            // that dip into it made an interleaved-gradient-noise comb along every terminator
+            if (dot(dir, N) < 0.02) {
+                sum += 1.0;
+                continue;
+            }
             sum += rvkRtVisibility(f, o, dir, 0.25, p.range.y, width0, spread, p.info.w);
         }
         vis = sum / float(rays);

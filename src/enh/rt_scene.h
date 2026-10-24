@@ -131,6 +131,11 @@ private:
         double lastUsedTime = 0.0;
         std::uint64_t opaqueMainFrame = 0;  // the main view's last opaque draw of it (blended-only ranges stay out)
         std::uint32_t kind = 0;      // draws::Kind of the first draw (records)
+        // churn (rt-shadows.md 5): a range whose instances are new almost every frame (grass blades fading by distance, rigid parts
+        // of moving objects without an owner) leaves a trail of stale instances in the registry: while `volatileUntil` has
+        // not passed, its instances count only while they are seen (this frame or the two before)
+        std::uint64_t churnStart = 0, volatileUntil = 0;
+        std::uint32_t churnNew = 0;
         // the materials its draws showed (enh/rt_material ids, M9 P2), by the draw's material signature: one range may be
         // drawn with several materials (instanced variants, terrain layers); each instance picks its own (Instance::material),
         // records fall back to the best one here. Resolved again when a texture died or every kMaterialRefresh frames
@@ -208,6 +213,7 @@ private:
     void processCompactions(VkCommandBuffer cmd, std::uint32_t slot);
     void buildPending(VkCommandBuffer cmd, std::uint32_t slot);
     void evictOverBudget();
+    void noteNewInstance(Blas& b, std::uint64_t frame);
     void barrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess, VkPipelineStageFlags2 dstStage,
                  VkAccessFlags2 dstAccess);
     bool ensureScratch(VkDeviceSize bytes);
@@ -298,6 +304,7 @@ private:
 
     // stats (interval since the last log line)
     struct Interval {
+        std::uint64_t volatileBlas = 0;  // ranges that turned volatile (churning instances) in the interval
         std::uint64_t frames = 0, built = 0, builtTriangles = 0, compacted = 0, evicted = 0, failed = 0, observed = 0, skipped = 0, sightings = 0;
         std::uint64_t compactSaved = 0;
         double buildCpuMs = 0.0, passCpuMs = 0.0, observeMs = 0.0, gpuMs = 0.0;
