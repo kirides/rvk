@@ -127,3 +127,82 @@ renderer does at run time, and **run against the port** by `rvk_shadereq` (new, 
   `shader_equiv.py` passes `--billboard-valid` for these vectors) 2000 trials are equal. A game that hits the exact boundary
   can therefore pick image 0 instead of the last one in the original; not reproduced.
 * Textures are random 8x8 RGBA8 with a repeat / linear sampler: the check is arithmetic equality, not a look-alike.
+
+## 8. The engine's request per material shader [C]
+
+* `ShaderMaterialPool_Master.smp` holds only an MD5 key per entry, not the defines: header `SMPL`, u16 version 2, then the counts
+  4318 / 914 / 5506 / 1032 / 2549; the 5506 entries are 5444 `ge_default_phong.fx` + 62 `ge_default_leafs.fx`. An entry = 4 bytes,
+  the 16-byte key, 4 zero bytes, u16 length + effect name, a few fields, the D3D9 bytecode with CTAB.
+* The defines are in the engine's **request**: `eCShaderMaterialAdmin::CompileShaderPoolEllement(eSGfxHLSLShaderSrc const&,
+  eEShaderMaterialVersion, unsigned long)` RVA `0x6b8140` (exported; 3778 bytes), called for every material shader the engine asks
+  for, pool hits included. Compile path on a miss: overload `0x6b8890` -> `FUN 0x6bb7c0` -> `eCGfxHLSLShader` vtable `+0xe8` -> HAL
+  Compile; in the DX9 layer `eCDX9HLSLShader::Compile` `0x749810` -> `D3DXCompileShader` (d3dx9_39.dll). `SaveShaderPool` `0x6b6260`
+  writes `Data/Compiled/Materials/ShaderMaterialPool_%s.smp` (trigger unknown, F4 writes it).
+* Key preimage [C: dump `shaderq_engine_dump.txt` 3601-3643]: MD5 over `src+0` text / file name, `src+0x10` entry, the 4 bytes at
+  `src+0x18` (profile), then each macro name and value of the sorted list; a second key, the "preprocessor id" (D3DX-preprocessed text
+  without blanks), on a miss. `shaderId = MD5(bytecode ++ file name)` [I].
+* `eSGfxHLSLShaderSrc`: `+0` bCString file name / text, `+8` `eSGfxEffectMacro*` ({name, value}, 16 bytes each, a null name ends),
+  `+0x10` bCString entry, `+0x18` u32 profile (0..7 ps, 8..11 vs), `+0x1c` u32 D3DX flags, `+0x20` byte "source is a file".
+* The macro list: `eCShaderDefault::GetDeclarations` `0x6c8650` (flags by offset: `+0x2b8` transformation, `+0x2c0` XFX_SPECULAR,
+  `0x2c1` DISABLELIGHTING, `0x2c2` FOG, `0x2c3` DIRLIGHTSHADOWS, `0x2c4` PNTLIGHTSHADOWS, `0x2c5` AMBIENTOCCLUSION, `0x2c6`
+  COMPRESSEDNORMALMAP, `0x2d9` DOUBLESIDED, `0x2d0` LIGHTINGTYPE; the colour-source proxies' `GetImplementation` give the
+  `XFX_PS_<SLOT>` snippet text), then `eCShaderBase::SetupShaderMacros` `0x6d06b0` (renumbers texture slots, merges duplicates, qsort
+  by name `0x6ce7b0`) and `eCShaderMaterialAdmin::SetupShaderMacros` `0x6b8ac0` (adds XFX_QUALITY).
+* The returned element: `+0x18` = the engine's `eCGfxHLSLShader`, whose `+0x18` = the API shader = our `HalHLSLShader`.
+* Our hook (`engine/material_source.*`, symbol `shaderPoolCompile`) attaches the request to the `d3d9::Shader` (`source`) and, with
+  `debug.material_sources`, writes JSON lines to `bin/rvk/cache/materials/sources.jsonl`: hash (run-time name), corpus (FNV-1a of
+  the bytecode = the corpus file name), stage, profile, flags, inline, file, entry, macros.
+* First capture (savegame spot, 40 s hold): 250 shaders (194 ps, 56 vs); entries PS_Default 180, VS_Default 33, VS_DefaultZPass 19,
+  PS_DefaultZPass 10, 4 `VS` + 4 `PS` (other effects). Macros seen: XFX_QUALITY, XFX_VS_TEX0.., XFX_PS_DIFFUSE .. SPECULAR /
+  SPECULARPOWER / NORMAL / OPACITY / SELFILLUMINATION / DISTORTION / ABSORBATION / CLOUDS, XFX_LIGHTINGTYPE, XFX_COMPRESSEDNORMALMAP,
+  XFX_PNTLIGHTCOUNT, XFX_AMBIENTLIGHT(TYPE), XFX_DIRLIGHT, XFX_LIGHTMAP, XFX_MASKED, XFX_ALPHABLEND, XFX_SCENEDEPTH,
+  XFX_TANGENTSPACE(_EYE), XFX_FRESNEL, XFX_SKINNED / INSTANCED / MORPHED / ST_* / VEGETATION / BILLBOARD, XFX_ZPASS ... The
+  snippets use `tex2D`, `texCUBE`, `saturate`, `lerp`, `pow`, `max`, `min`, `dot`, `mul`, `transpose`, `float3`, `float3x3` (and
+  XFX_PS_TEXn, VERTEXCOLOR, TANGENTEYE, SCENEDEPTH, PROJDISTANCE, REFLECT, CAMDISTANCE, VIEWPOS, `g_ShaderData`,
+  `g_CamObstacleDistances`).
+
+## 9. The GLSL material shader on the captured set [C]
+
+`python tools/ubershader_check.py out/matsrc/*.jsonl`: per captured pixel shader the translated game shader
+`game-shaders/ps30_<corpus>.frag` (`rvk_shadertool export corpus game-shaders`) against `shaders/material/ge_default.frag` with the
+captured macros as `-D`, run by `rvk_shadereq` (16 trials, 8 jobs; 14 s for 194 shaders).
+
+* First run: 139 of 194 EQUAL, 19 DIFF, 25 PORT-ERR, 11 UNSUPPORTED.
+* Fixes: `XFX_PS_TANGENTEYE` = `.xy` (the parallax uv is `(float2 expr) * TANGENTEYE`: HLSL truncates the float3) cured 23 compile
+  errors; `#define pow powD3D` + vec overloads (the snippets call the HLSL `pow` = |x|^y; all 20 DIFFs had `pow(` in a snippet, 6 %
+  of the equal ones did) cured the numeric differences; scalar-first `max` / `min` overloads; `g_CamObstacleDistances` =
+  `g_CamObstacleAndMaskReference.xy`.
+* Final: **183 of 183 supported pixel shaders EQUAL**; the 11 unsupported are other effects: `ge_default_leafs.fx` PS_Default /
+  PS_DefaultZPass (7), `ge_particle_2_0.fx` (3), `ge_skydome_2_0.fx` (1). `shader_equiv.py` 31/31 and `--vs` 17/17 still equal.
+
+## 10. The GLSL material shader at run time [C]
+
+* Setting `debug.ubershader` (default **off**), with `debug.material_sources` and `debug.ubershader_skip` (bit mask of classes kept
+  translated, for bisecting: 1 z pass, 2 masked, 4 alpha blend, 8 lightmap, 16 normal map, 32 specular, 64 distortion, 128 plain).
+* `shader/uber.*` assembles `#version` + the macros as `#define` (true / false -> 1 / 0, one line) + hook defines (`RVK_MV_*`) +
+  `rvk_abi` + (with hooks) `rvk_gi` + `rvk_material_variant` + `ge_default.glsl` + `ge_default.frag` (the includes removed: embedded
+  text, `rvk_glslc` text). `VariantSlot::Base` = the plain module; the GI / G-buffer / motion variants are built from it too
+  (`GlslOptions::uber` / `uberDefines` set by `enh/material_variant`). Hooks in the shader: `g_AmbientLight_c` /
+  `g_IndoorAmbientColor` read `rvk_gi[]` under `RVK_MV_AMBIENT`, `rvk_gbN` = the normal-mapped world normal in
+  `CustumFragmentAmbient`, `rvkMvPrologue(vNormalAndAO)` at the start of `main`, `rvkMvEpilogue(oC0)` after the alpha test.
+* Built in the background (`variantWorker`); SPIR-V cache `bin/rvk/cache/spirv/<hash>_<tag>_u<source hash>.spv`. A shader not
+  covered, not built or whose pipeline is not there yet stays translated (same fallback as the other variants; `prepareDraw`:
+  `uberBase`, `findPipeline` / `prewarmOnce`). rvk.log `d3d9: GLSL material shaders: N modules built, M failed`.
+* Result at the savegame: 150-250 modules built, 0 failed (plain; 500 with gi + ao + native_aa); validation + synchronization
+  validation clean (the only warning with FSR on is unrelated: `rw_luma_history` declared Rgba8 but the image is RGBA16F); fps
+  unchanged (142.7 vs 142.5).
+* Images: refcompare Vulkan runs A, C (off), B, D (on), 20 spots, mean abs difference of frame b0 over the spots: off/off 1.19
+  (median 0.95), on/on 1.54 (1.38), off/on 1.44 (1.18): no separate systematic effect. Interior spots (no wind / water noise) equal
+  to noise (pub_interior bad32 0.003 %, monastery_hall 0.06 %). The foliage spots jungle (off/on 1.75-2.18 vs off/off 0.88, on/on
+  1.54) and swamp_camp (0.91-1.16 vs 0.58 / 0.94) show at most a faint excess (<= ~0.7 of 255) not isolated by the class bisect
+  (skip masks 1..128 all 1.6-2.3 against a two-spot control run whose own noise was 1.9).
+* **Lesson**: the run-to-run noise of the spots varies between 0.9 and 1.9 (jungle) between run types (full 20-spot runs vs 2-spot
+  runs; two runs with identical effective settings, off2 vs skip255, differ by 1.89), so a single noise pair is not a floor: use
+  >= 4 runs and compare the off/on pairs with the off/off and on/on pairs. `water-compare.ps1` is no ubershader A/B (it forces
+  `water.enabled` on the enhanced side only).
+
+### Open
+
+* Not ported: `ge_default_leafs.fx`, particles, the sky dome pixel shader and all vertex shaders (the VS ubershader exists in
+  `shaders/material/ge_default.vert` and is proven by `shader_equiv.py --vs`, but is not wired to the run time).
+* The ubershader stays off by default until it brings something (coverage + improvements).

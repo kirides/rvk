@@ -241,6 +241,7 @@ whole corpus (must stay 100 %). `rvk_shadertool export corpus game-shaders` writ
 side is `shaders/include/rvk_abi.glsl`, which the translator pastes into every translated shader (change both together;
 rvk_tests `abi_glsl_layout_matches_cpp` compares the offsets; bump `kTranslatorVersion` in `d3d9/device.cpp` when the
 translated GLSL changes). **The game's material shaders are one HLSL ubershader with `XFX_*` defines** (docs/research/shader-permutations.md): the GLSL port is `shaders/material/ge_default.{glsl,frag,vert}` (same defines, `-D...`; the engine's `XFX_PS_*` expressions are valid GLSL as they are). `python tools/shader_equiv.py [--vs]` proves it against the translated game shaders on the GPU (`rvk_shadereq`; needs `out/hlsl-fx` = `python tools/hlsl_infer.py <shadermaterial dir> --make-fx out/hlsl-fx`; the pool was compiled with `d3dx9_29.dll`, flags 0, `half3 vecWorldEye`); `tools/hlsl_match.py` reproduces a corpus shader from HLSL + defines instruction for instruction.
+**GLSL material shader at run time** (shader-permutations.md 8-10): `-Setting 'debug.material_sources=true'` writes the engine's request per material shader (`bin/rvk/cache/materials/sources.jsonl`; copy to `out/matsrc/`); `python tools/ubershader_check.py out/matsrc/*.jsonl` checks the GLSL material shader against the translated game shaders on the GPU for every captured pixel shader (needs `game-shaders` from `rvk_shadertool export corpus game-shaders`); `-Setting 'debug.ubershader=true'` (default off; `debug.ubershader_skip` = bit mask of classes kept translated) uses it at run time.
 
 ## Hand-written shaders (GLSL only)
 
@@ -271,6 +272,8 @@ docs/research/water.md 4.1.
 | `engine/window_mode.*` | borderless fullscreen: `SetResolutionEx` pre-hook (fullscreen -> monitor size), window placement at present, DPI awareness; exclusive fullscreen's display mode switch / restore and focus handling (docs/research/window-mode.md) |
 | `engine/shadow_maps.*` | the sun cascades' map size / range / split factor overrides (`eCCascadeShadowMap::RenderShadowMaps` pre-hook; docs/research/shadows.md 3) |
 | `engine/menu_state.*` | game / menu / loading from the GUI's page predicates (Script.dll `GUI2::IsLoading` / `GetMode` / `IsVisible`): the menu frame rate limit and the unpaced loading screen (docs/research/menu-fps.md) |
+| `engine/material_source.*` | hook on `CompileShaderPoolEllement`: the engine's request (file, entry, macros) per material shader attached to the `d3d9::Shader`; `debug.material_sources` JSON lines (shader-permutations.md 8) |
+| `shader/uber.*` | assembles the GLSL material shader (`shaders/material/ge_default.*`) from a request's macros + variant hooks; `debug.ubershader` (shader-permutations.md 10) |
 | `engine/lod.*` | the `CacheEntities` stride hook (`debug.prefetch_stride`); detail distances (SpeedTree / mesh LOD and the view range factor scaled in detours; the billboard fade variant: docs/research/lod.md) |
 | `d3d9/record.cpp` | record threads: draw-packet chunks recorded into secondary command buffers by worker threads (`debug.record_threads`; performance.md 14) |
 | `engine/high_fps.*` | the high fps gameplay fixes (falling, climbing, thunder; call sites redirected; docs/research/fps-limit.md 12) |
