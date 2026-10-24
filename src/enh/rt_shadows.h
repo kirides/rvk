@@ -49,6 +49,7 @@ public:
         float rangeMetres = 0.0f;  // shadows.rt_range: 0 = from the mode
         float softness = 1.0f;     // shadows.rt_softness: the sun cone's half angle in degrees
         int quality = 2;           // shadows.rt_quality: 1 low (1 ray, cut-outs solid), 2 medium (1 ray), 3 high (2 rays)
+        bool wind = true;          // shadows.rt_wind: the trees near the camera in the wind (animated SpeedTrees)
         float filter = 1.0f;       // spatial filter strength (0 = temporal only)
         float bias = 1.5f;         // origin offset along the surface normal (world units)
         int debug = 0;             // shadows.debug rt_term / rt_coverage are handled by the mask shader

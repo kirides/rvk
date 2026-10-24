@@ -41,7 +41,7 @@ void ObjectMotion::apply(bool skinned, bool rigid) {
     registered_ = want;
     if (want) {
         // the same capture variant as the RT scene's (its SPIR-V cache tag too)
-        dev_.setVariantProvider(d3d9::VariantSlot::Capture, {"cap3", RtScene::captureOptions});
+        dev_.setVariantProvider(d3d9::VariantSlot::Capture, {"cap4", RtScene::captureOptions});
         dev_.addDrawObserver(this);
         spdlog::info("enh: object motion: on (skinned {}, moving rigid draws {})", skinned ? "yes" : "no", rigid ? "yes" : "no");
     } else {

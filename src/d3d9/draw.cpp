@@ -689,6 +689,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     };
     // draw observers (enh/rt_scene, enh/gi): indexed draws from buffers of the kinds / phases they ask for
     captureRequest_ = 0;
+    captureInstances_ = false;
     if (!observers_.empty() && geom.indexed && !geom.userPointer) {
         for (DrawObserver* o : observers_) {
             if (!o->observes(kind, phase)) continue;
@@ -828,7 +829,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     gbufWrite_ = false;
     VkShaderModule fsVariant = VK_NULL_HANDLE, vsVariant = VK_NULL_HANDLE, fsPlain = VK_NULL_HANDLE;
     const bool notInstanced = (streams_[0].freq & STREAMSOURCE_INDEXEDDATA) == 0;
-    if (!replaced && captureRequest_ != 0 && geom.indexed && notInstanced && vsModule == vs_->module) {
+    if (!replaced && captureRequest_ != 0 && geom.indexed && (notInstanced || captureInstances_) && vsModule == vs_->module) {
         vsVariant = variant(vs_, VariantSlot::Capture);
     }
     const bool gbufMaterial = !replaced && tint == 0 && gbuf_.normal != nullptr && gbufferEligible(phase, kind);

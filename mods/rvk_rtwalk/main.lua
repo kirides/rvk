@@ -80,6 +80,12 @@ T.run(function()
         if started then T.wait_until(function() return risen.debug.screenshot_status(name) ~= "pending" end, 120, "screenshot " .. name) end
         press(false)
     else
+        wait_s(1)
+        if burst > 0 then
+            local ok, why = risen.debug.screenshot(name, { burst = burst, interval = interval, wait_frames = 1 })
+            risen.log.info(("rvk_rtwalk: burst %d x %d frames from frame %d: %s %s"):format(burst, interval, frames, tostring(ok), tostring(why)))
+            T.wait_until(function() return risen.debug.screenshot_status(name) ~= "pending" end, 120, "screenshot " .. name)
+        end
         wait_s(seconds)
     end
     risen.log.info(("rvk_rtwalk: ends at frame %d"):format(frames))

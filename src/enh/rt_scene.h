@@ -73,6 +73,11 @@ public:
     // BLAS per draw from that (PREFER_FAST_BUILD | ALLOW_UPDATE) and adds it with an identity transform under the instance
     // mask kRtMaskDynamic (rays can leave characters out: RVK_RT_TRACE_NO_DYNAMIC); records have no normals (geometric)
     void setDynamic(const void* consumer, bool on);
+    // Animated SpeedTrees (rt-shadows.md 6): with characters on, the SpeedTree branches / fronds within `rangeUnits` of the camera
+    // are captured like characters (their vertex shader writes the wind-animated world positions: the draw of the main
+    // view's solid pass) and their BLAS is refitted from that every frame; the instance of the rest pose is left out of the
+    // TLAS while the animated one stands in for it. Needs setDynamic.
+    void setAnimated(const void* consumer, bool on, float rangeUnits);
     bool dynamicSupported() const;
     // the scene captures skinned draws right now (enh/object_motion leaves them to it)
     bool capturingCharacters() const { return active_ && dynamic_; }
@@ -134,6 +139,7 @@ private:
         // churn (rt-shadows.md 5): a range whose instances are new almost every frame (grass blades fading by distance, rigid parts
         // of moving objects without an owner) leaves a trail of stale instances in the registry: while `volatileUntil` has
         // not passed, its instances count only while they are seen (this frame or the two before)
+        bool animatedOnly = false;   // SpeedTree leaves: no rest pose, only the animated capture goes into the TLAS (observeTree)
         std::uint64_t churnStart = 0, volatileUntil = 0;
         std::uint32_t churnNew = 0;
         // the materials its draws showed (enh/rt_material ids, M9 P2), by the draw's material signature: one range may be
@@ -221,6 +227,13 @@ private:
     std::uint8_t viewBit(d3d9::scene::View v) const;
     // characters (setDynamic)
     void observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q);
+    struct TreeBatch {  // the capture buffer of one draw (a plain draw or an instanced batch of trees)
+        VkDeviceAddress base = 0;
+        std::uint32_t slots = 0;
+        bool failed = false;
+    };
+    void observeTree(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& b, const rt::Registry::Instance& in, const rt::Rows& rows, TreeBatch& batch,
+                     std::uint32_t index, std::uint32_t count);
     void buildDynamic(VkCommandBuffer cmd, std::uint64_t frame);
     void dropDynamic(bool all, std::uint64_t frame);
     struct DynDraw {
@@ -231,6 +244,9 @@ private:
         std::uint32_t triangles = 0;
         bool index32 = false;
         bool built = false;            // its BLAS was built / refit this frame
+        bool tree = false;             // an animated SpeedTree (key = the registry instance of its rest pose, blas = its BLAS)
+        std::uint64_t blas = 0;
+        VkDeviceAddress requested = 0; // the address the draw's capture was requested with, when `capture` lies inside it (instanced batches)
     };
     struct DynBlas {
         vk::rt::AccelerationStructure as;
@@ -249,6 +265,11 @@ private:
         std::uint64_t lastCaptureFrame = 0;
     };
     std::unordered_set<const void*> dynamicConsumers_;
+    std::unordered_set<const void*> animConsumers_;
+    bool animated_ = false;
+    float animRange_ = 4500.0f;                        // units from the camera
+    std::uint32_t dynTrees_ = 0;                       // this frame's tree captures
+    std::unordered_set<std::uint64_t> animatedKeys_;   // rest-pose instances whose animated BLAS was built this frame (left out of the TLAS)
     bool dynamic_ = false;
     bool captureRegistered_ = false;
     std::vector<DynDraw> dyn_;  // this frame's captures
@@ -304,6 +325,8 @@ private:
 
     // stats (interval since the last log line)
     struct Interval {
+        std::uint64_t treeDraws = 0, treeFar = 0, treeCaptured = 0;  // observeTree: calls, beyond the range, captures requested
+        std::uint64_t animatedTrees = 0;  // animated SpeedTrees in the last TLAS
         std::uint64_t volatileBlas = 0;  // ranges that turned volatile (churning instances) in the interval
         std::uint64_t frames = 0, built = 0, builtTriangles = 0, compacted = 0, evicted = 0, failed = 0, observed = 0, skipped = 0, sightings = 0;
         std::uint64_t compactSaved = 0;

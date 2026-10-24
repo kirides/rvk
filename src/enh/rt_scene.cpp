@@ -30,6 +30,7 @@ constexpr std::uint32_t kMaxBatch = 64;                    // instances read per
 constexpr std::uint64_t kChurnWindow = 90;   // frames: a range with kChurnLimit new instances in this many is volatile (rt-shadows.md 5)
 constexpr std::uint32_t kChurnLimit = 48;
 constexpr std::uint64_t kVolatileKeep = 3;   // frames a volatile range's instance stays in the TLAS after its last sighting
+constexpr std::uint32_t kMaxAnimatedTrees = 160;  // SpeedTree draws captured per frame (their captures take 32 bytes per vertex of the frame's ring)
 constexpr std::uint64_t kOpaqueRecent = 600;               // frames: "the main view draws this range opaque"
 constexpr std::uint64_t kMaterialRefresh = 64;             // frames: a BLAS's material is resolved again (animated uv maps)
 // the TLAS is rebuilt every frame
@@ -416,16 +417,21 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     if (q.phase.view == View::Main && (q.phase.pass == Pass::Alpha || q.phase.pass == Pass::AlphaLate)) return skip();
     if (q.tag != nullptr && q.tag->material != nullptr && waterMaterials_.contains(q.tag->material)) return skip();
     if (q.blending) return reject("blended");                                        // alpha-blended: not P1
-    if (speedTree && (q.tag == nullptr || q.tag->opDesc > 1)) return reject(q.tag == nullptr ? "untagged" : "leaves (op > 1)");  // P4
+    // SpeedTree leaves (op > 1): cards positioned by their vertex shader (wind, facing), so there is no rest pose to put in the
+    // TLAS: only the animated capture of the main view's solid pass stands for them (observeTree), the static BLAS only gives
+    // the topology and the material (`animatedOnly`)
+    const bool leaf = speedTree && q.tag != nullptr && q.tag->opDesc > 1;
+    const bool leafAnimated = leaf && animated_ && q.phase.view == View::Main && q.phase.pass == Pass::Solid;
+    if (speedTree && (q.tag == nullptr || (leaf && !leafAnimated))) return reject(q.tag == nullptr ? "untagged" : "leaves (op > 1)");  // P4
     // the vertex shader's verdict (cached by its hash and the draw's instancing: most rejected draws stop here)
     {
-        const std::uint64_t vsKey = q.engineVs->hash ^ (q.instanced ? 0x9E3779B97F4A7C15ull : 0ull);
+        const std::uint64_t vsKey = q.engineVs->hash ^ (q.instanced ? 0x9E3779B97F4A7C15ull : 0ull) ^ (leafAnimated ? 0xD1B54A32D192ED03ull : 0ull);
         auto [it, fresh] = vsVerdict_.try_emplace(vsKey, nullptr);
         if (fresh) {
             const d3d9::ShaderSemantics& sem = q.engineVs->semantics;
             using S = d3d9::ShaderSemantics;
             const auto& instanceData = sem[d3d9::Semantic::InstanceData];
-            if ((sem.flags & S::Material) == 0 || (sem.flags & (S::Skinned | S::Vegetation | S::Leaves)) != 0) it->second = "vertex shader class";
+            if ((sem.flags & S::Material) == 0 || (sem.flags & (S::Skinned | S::Vegetation | (leafAnimated ? 0u : S::Leaves))) != 0) it->second = "vertex shader class";
             else if (!instanceData.present() || static_cast<std::uint32_t>(instanceData.reg) != kInstanceDataBase) it->second = "no g_vInstanceData at c32";
             else if (sem[d3d9::Semantic::InvView].present()) it->second = "g_vInvView";  // screen-aligned billboard meshes: camera-dependent
             else if (q.instanced != ((sem.flags & S::Instanced) != 0)) it->second = "instancing of the draw != of the VS";
@@ -504,6 +510,7 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         b = &nb;
     }
     if (b->state == BlasState::Failed) return skip();
+    if (leaf) b->animatedOnly = true;
     std::uint8_t materialRank = 0;
     bool overlay = false;
     // depth-only draws (z pre-pass, cascades) carry no material: the engine's sub-mesh of the range gives it
@@ -548,6 +555,10 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         rt::Registry::Instance* in = sr.first;
         if (sr.second) noteNewInstance(*b, frame);
         if (in != nullptr && materialId != 0) applyMaterial(*in, materialId, materialRank, overlay, frame);
+        if (in != nullptr && speedTree && animated_ && q.phase.view == View::Main && q.phase.pass == Pass::Solid) {
+            TreeBatch batch;
+            observeTree(dev, q, *b, *in, rows, batch, 0, 1);
+        }
         return;
     }
     // instanced batch: instance i reads g_vInstanceData[floor(4 v) + 1 ..] with v = its TEXCOORD4 (the instance stream)
@@ -563,6 +574,8 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
             fromStream = true;
         }
     }
+    TreeBatch treeBatch;
+    const bool treeBatchOk = speedTree && animated_ && fromStream && q.phase.view == View::Main && q.phase.pass == Pass::Solid;
     for (std::uint32_t i = 0; i < n; ++i) {
         const float v = fromStream ? index[i] : static_cast<float>(i);
         if (fromStream && v != static_cast<float>(i)) ++indexDeviations_;
@@ -576,6 +589,8 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         rt::Registry::Instance* in = sr.first;
         if (sr.second) noteNewInstance(*b, frame);
         if (in != nullptr && materialId != 0) applyMaterial(*in, materialId, materialRank, overlay, frame);
+        // the capture's instance k is the batch's k-th instance (the instance stream is 0, 1, 2, ...)
+        if (in != nullptr && treeBatchOk && v == static_cast<float>(i)) observeTree(dev, q, *b, *in, rows, treeBatch, i, n);
     }
     if (!instanceIndexChecked_ && fromStream && iv_.observed > 2000) {
         instanceIndexChecked_ = true;
@@ -1272,8 +1287,9 @@ bool RtScene::captureOptions(const d3d9::Shader& s, shader::GlslOptions& o) {
         "            uvec4 rvk_info = rvk_cap.info;\n"
         "            if (rvk_slot >= 0 && uint(rvk_slot) < rvk_info.x && abs(rvk_w.w) > 1e-20) {{\n"
         "                vec3 rvk_world = rvk_w.xyz / rvk_w.w;\n"
-        "                rvk_cap.v[rvk_slot * 2] = vec4(rvk_world, 1.0);\n"
-        "                rvk_cap.v[rvk_slot * 2 + 1] = {};\n"
+        "                uint rvk_at = uint(gl_InstanceIndex) * rvk_info.x + uint(rvk_slot);  // instanced draws: one run of slots per instance\n"
+        "                rvk_cap.v[rvk_at * 2] = vec4(rvk_world, 1.0);\n"
+        "                rvk_cap.v[rvk_at * 2 + 1] = {};\n"
         "                rvk_prevWorld = vec4(rvk_world, 0.0);\n"
         "                if (rvk_info.yz != uvec2(0u) && uint(rvk_slot) < rvk_info.w) {{\n"
         "                    vec4 rvk_prev = RvkCapture(rvk_info.yz).v[rvk_slot * 2];\n"
@@ -1289,6 +1305,16 @@ bool RtScene::captureOptions(const d3d9::Shader& s, shader::GlslOptions& o) {
 bool RtScene::dynamicSupported() const { return supported() && dev_.ctx().features().vertexStores; }
 
 void RtScene::setDynamic(const void* consumer, bool on) {
+    struct Sync {
+        RtScene& s;
+        ~Sync() {
+            const bool a = !s.animConsumers_.empty() && s.dynamic_;
+            if (a != s.animated_) {
+                s.animated_ = a;
+                if (!a) s.animatedKeys_.clear();
+            }
+        }
+    } sync{*this};
     if (on) {
         dynamicConsumers_.insert(consumer);
     } else {
@@ -1299,7 +1325,7 @@ void RtScene::setDynamic(const void* consumer, bool on) {
     dynamic_ = want;
     if (want) {
         if (!captureRegistered_) {
-            dev_.setVariantProvider(d3d9::VariantSlot::Capture, {"cap3", captureOptions});
+            dev_.setVariantProvider(d3d9::VariantSlot::Capture, {"cap4", captureOptions});
             captureRegistered_ = true;
         }
         spdlog::info("rt: scene: characters on (skinned solid draws captured each frame)");
@@ -1307,6 +1333,75 @@ void RtScene::setDynamic(const void* consumer, bool on) {
         dropDynamic(true, 0);
         spdlog::info("rt: scene: characters off");
     }
+}
+
+void RtScene::setAnimated(const void* consumer, bool on, float rangeUnits) {
+    if (on) {
+        animConsumers_.insert(consumer);
+        animRange_ = rangeUnits;
+    } else {
+        animConsumers_.erase(consumer);
+    }
+    const bool want = !animConsumers_.empty() && dynamic_;
+    if (want != animated_) spdlog::info("rt: scene: animated SpeedTrees {} (within {:.0f} m)", want ? "on" : "off", animRange_ / 100.0f);
+    animated_ = want;
+    if (!animated_) animatedKeys_.clear();
+    vsVerdict_.clear();
+}
+
+// An animated SpeedTree (the draw of the main view's solid pass): its vertex shader's capture variant writes the wind-animated
+// world positions into the frame's ring; the next frame's AfterDepthPrepass build refits a BLAS of its own from them
+// (buildDynamic), and the TLAS takes it instead of the rest-pose instance of the registry (same key)
+void RtScene::observeTree(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& b, const rt::Registry::Instance& in, const rt::Rows& rows, TreeBatch& batch,
+                          std::uint32_t index, std::uint32_t count) {
+    ++iv_.treeDraws;
+    if (batch.failed || b.state != BlasState::Built || b.maxVertex == 0 || b.maxVertex >= (1u << 20) || b.triangles == 0 || q.indexBuffer == nullptr) return;
+    const d3d9::scene::CameraBlock& cam = dev.camera().valid ? dev.camera() : dev.lastCamera();
+    if (!cam.valid) return;
+    const float dx = rows[3] - cam.position[0], dy = rows[7] - cam.position[1], dz = rows[11] - cam.position[2];
+    if (dx * dx + dy * dy + dz * dz > animRange_ * animRange_) {
+        ++iv_.treeFar;
+        return;
+    }
+    const std::uint64_t frame = dev.frameValue();
+    if (dynFrame_ != frame) {
+        dyn_.clear();
+        dynFrame_ = frame;
+        dynTrees_ = 0;
+    }
+    if (dynTrees_ >= kMaxAnimatedTrees || dyn_.size() >= 512) return;
+    for (const DynDraw& d : dyn_) {
+        if (d.key == in.key) return;
+    }
+    const bool index32 = b.key.index32 != 0;
+    const VkDeviceAddress indices = b.key.strip != 0 ? b.listIndices.address
+                                                     : b.ibAddress + static_cast<VkDeviceAddress>(b.key.first) * (index32 ? 4u : 2u);
+    if (indices == 0) return;
+    const std::uint32_t slots = b.maxVertex + 1;
+    if (batch.base == 0) {
+        // the draw's capture buffer: a header + `count` runs of `slots` vertices (an instanced batch's instances, whether or
+        // not they are all close enough: instance k always writes run k)
+        const vk::RingAlloc a = dev.frames().allocate(16 + static_cast<VkDeviceSize>(slots) * 32 * count, 16);
+        if (a.ptr == nullptr) {
+            batch.failed = true;
+            return;
+        }
+        const std::uint32_t header[4] = {slots, 0, 0, 0};
+        std::memcpy(a.ptr, header, 16);
+        batch.base = a.address;
+        batch.slots = slots;
+        dev.requestVertexCapture(a.address, q.instanced);
+    }
+    if (batch.slots != slots) return;
+    DynBlas& db = dynBlas_[in.key];
+    if (db.id == 0) {
+        db.id = nextDynId_++;
+        db.updates = static_cast<std::uint32_t>((in.key >> 8) % 30);  // refits / rebuilds of the trees do not all fall in one frame
+    }
+    DynDraw d{in.key, batch.base + static_cast<VkDeviceAddress>(index) * slots * 32, indices, slots, b.triangles, index32, false, true, b.id, batch.base};
+    dyn_.push_back(d);
+    ++dynTrees_;
+    ++iv_.treeCaptured;
 }
 
 void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
@@ -1318,8 +1413,9 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     if (dynFrame_ != frame) {
         dyn_.clear();
         dynFrame_ = frame;
+        dynTrees_ = 0;
     }
-    if (dyn_.size() >= 256) return;
+    if (dyn_.size() >= 512) return;
     // the draw: entity x buffers x range (the later passes of a character draw the same range again: the first one counts)
     const d3d9::ResourceRef vr = q.vertexBuffer->ref(), ir = q.indexBuffer->ref();
     std::uint64_t key = 1469598103934665603ull;
@@ -1389,6 +1485,7 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
 
 // the frame's captured characters -> one BLAS each: refit while the topology holds (30 times), else a full build
 void RtScene::buildDynamic(VkCommandBuffer cmd, std::uint64_t frame) {
+    animatedKeys_.clear();
     if (frame % 120 == 0) dropDynamic(false, frame);
     // the captures of this frame (a build at AfterOpaque) or, built after the z pre-pass, of the previous frame (its solid
     // pass captured them; its ring memory lives one frame more)
@@ -1408,7 +1505,8 @@ void RtScene::buildDynamic(VkCommandBuffer cmd, std::uint64_t frame) {
     VkDeviceSize scratchTotal = 0;
     for (std::size_t i = 0; i < dyn_.size(); ++i) {
         DynDraw& d = dyn_[i];
-        if (!(current ? dev_.vertexCaptured(d.capture) : dev_.vertexCapturedPrev(d.capture))) continue;
+        const VkDeviceAddress asked = d.requested != 0 ? d.requested : d.capture;
+        if (!(current ? dev_.vertexCaptured(asked) : dev_.vertexCapturedPrev(asked))) continue;
         DynBlas& b = dynBlas_[d.key];
         b.lastCapture = d.capture;
         b.lastSlots = d.slots;
@@ -1492,6 +1590,7 @@ void RtScene::buildDynamic(VkCommandBuffer cmd, std::uint64_t frame) {
     for (std::size_t i : which) {
         dyn_[i].built = true;
         dynBlas_[dyn_[i].key].built = true;
+        if (dyn_[i].tree) animatedKeys_.insert(dyn_[i].key);
     }
 }
 
@@ -1600,6 +1699,9 @@ void RtScene::record(d3d9::PassContext& ctx) {
         const Blas* b = findBlas(in.blas);
         // an object the cascades draw at another level of detail than the main view: the main view's
         if (b == nullptr || b->state != BlasState::Built || registry_.supersededBy(in, viewBit(View::Main))) return false;
+        if (b->animatedOnly) return false;
+        // an animated SpeedTree stands in for its rest-pose instance (the wind: observeTree)
+        if (!animatedKeys_.empty() && animatedKeys_.contains(in.key)) return false;
         // volatile ranges (churning instances): only what was seen in the last frames, the stale ones are ghosts of earlier places
         if (b->volatileUntil >= frame && in.lastFrame + kVolatileKeep < frame) return false;
         // an instance known only through an overlay material (caustics, a blended untextured wet-sand strip) lies on another
@@ -1715,6 +1817,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
     // the characters: world-space vertices (identity transform), no normals, the draw's diffuse material
     {
         std::uint32_t k = worldCount;
+        std::uint32_t treesNow = 0;
         for (const DynDraw& d : dyn_) {
             if (k >= n) break;
             if (dynFrame_ + 1 < frame || !d.built) continue;
@@ -1727,6 +1830,44 @@ void RtScene::record(d3d9::PassContext& ctx) {
             vi.mask = abi::kRtMaskDynamic;
             vi.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR | VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
             vi.accelerationStructureReference = b.as.address;
+            if (d.tree) {
+                // an animated SpeedTree: the rest-pose instance's record (its material, alpha test, flags) with the captured
+                // world-space vertices; a world instance for the masks (not a character)
+                const Blas* sb = findBlas(d.blas);
+                const rt::Registry::Instance* in = registry_.find(d.key);
+                if (sb == nullptr || in == nullptr) continue;
+                const RtMaterial* m = in->material != 0 ? materials_.get(in->material) : nullptr;
+                if (m == nullptr || m->dead) m = bestMaterial(*sb);
+                const MaterialFields mf = materialFields(m);
+                const bool wantsCut = (in->flags & abi::kRtRecordAlphaTested) != 0 || (m != nullptr && m->masked);
+                const bool alpha = wantsCut && m != nullptr && mf.opacityTex != 0 && (m->uvSet & abi::kRtUvOpacityOpaque) == 0;
+                vi.mask = alpha ? abi::kRtMaskAlphaTested : abi::kRtMaskOpaque;
+                vi.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR |
+                           (alpha ? VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR : VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR);
+                insts[k] = vi;
+                abi::RtGeometryRecord r{};
+                split(d.capture + 16, r.vertices);
+                split(d.indices, r.indices);
+                r.stride = 32;
+                r.flags = (in->flags & ~abi::kRtRecordAlphaTested) | (alpha ? abi::kRtRecordAlphaTested : 0u) | (((in->data >> 16) & 0xFFu) << abi::kRtRecordKindShift);
+                r.normal = abi::kRtAttribAbsent;
+                r.texcoord0 = 16u | (1u << 16);  // FLOAT2 at 16: the capture's TEXCOORD0
+                r.texcoord1 = r.texcoord0;
+                r.texcoord6 = abi::kRtAttribAbsent;
+                r.color0 = abi::kRtAttribAbsent;
+                r.instanceId = in->id;
+                r.alpha = (in->data & 0xFFFFu) != 0 ? (in->data & 0xFFFFu) : (m != nullptr && m->alpha != 0) ? m->alpha : 8u;
+                r.albedoTex = mf.albedoTex;
+                r.albedoSampler = mf.albedoSampler;
+                r.uvSet = mf.uvSet;
+                std::memcpy(r.uvMap, mf.uvMap, sizeof(r.uvMap));
+                recs[k] = r;
+                triangles += d.triangles;
+                ++treesNow;
+                if (content != nullptr) content->push_back({d.blas, in->id, r.flags, in->material, {in->rows[3], in->rows[7], in->rows[11]}});
+                ++k;
+                continue;
+            }
             insts[k] = vi;
             abi::RtGeometryRecord r{};
             split(d.capture + 16, r.vertices);
@@ -1753,6 +1894,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
             ++k;
         }
         iv_.dynamic = k - worldCount;
+        iv_.animatedTrees = treesNow;
     }
 
     // the segment table (after the records: their addresses)
@@ -1850,9 +1992,10 @@ void RtScene::logStats(bool force) {
                  mc.approx, mc.failed, mc.shaderMismatch, iv_.textured, iv_.untextured, iv_.cutOut, iv_.segmented, iv_.segments,
                  iv_.engineSegments, iv_.engineMerged, iv_.speedTree);
     if (dynamic_) {
-        spdlog::info("rt: scene: characters {} in the last TLAS ({} tracked, interval: {} BLAS builds, {} refits; capture variant needs "
-                     "vertexPipelineStoresAndAtomics: {})",
-                     iv_.dynamic, dynBlas_.size(), dynBuilt_, dynRefit_, dev_.ctx().features().vertexStores ? "yes" : "no");
+        spdlog::info("rt: scene: characters {} + animated SpeedTrees {} in the last TLAS ({} tracked, interval: {} BLAS builds, {} refits; "
+                     "volatile ranges {}; tree draws {} ({} beyond the range, {} captured); capture variant needs vertexPipelineStoresAndAtomics: {})",
+                     iv_.dynamic - iv_.animatedTrees, iv_.animatedTrees, dynBlas_.size(), dynBuilt_, dynRefit_, iv_.volatileBlas, iv_.treeDraws, iv_.treeFar, iv_.treeCaptured,
+                     dev_.ctx().features().vertexStores ? "yes" : "no");
         dynBuilt_ = dynRefit_ = 0;
     }
     iv_ = {};

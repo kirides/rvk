@@ -115,3 +115,28 @@ AutoSave of an earlier run in the test copy would be loaded instead: delete it f
 * **Comb** [C]: along every terminator (the sun grazing a wall or a tower) the random cone samples that point below the surface hit
   the surface itself; the interleaved gradient noise made a diagonal comb of it. A sample with `dot(dir, N) < 0.02` is now counted lit
   (the material's own N.L darkens the terminator). Gone in the same scenario.
+
+## 6. Trees in the wind: animated geometry = the vertex shader's output, captured (2026-10-24)
+
+The RT scene holds SpeedTree branches / fronds in their rest pose, and no leaves at all (rtgi.md 8 / the "leaves (op > 1)"
+rejection): the cascades' shadows (animated mesh) and the RT ones differed, and the jungle's bushes cast no RT shadow. The
+character mechanism (rt-reflections.md 3, rtgi.md 9: a vertex shader variant writes the world positions into the frame's ring, one
+BLAS per draw is refitted from it) now covers the trees too:
+
+* `RtScene::observeTree` (called for SpeedTree draws of the main view's solid pass, plain draws and instanced batches; within
+  `shadows.rt` range + 15 m of the camera, at most 160 draws a frame): `Device::requestVertexCapture(buffer, instances)`; the capture
+  variant (tag `cap4`) writes instance k's vertices at `(k x slots + index)` (`gl_InstanceIndex`; `draw.cpp` lets instanced draws
+  take the capture only when the request says so). `slots` = the BLAS's highest index + 1; strips use the converted list indices of the
+  rest-pose BLAS (same vertex numbering).
+* The animated BLAS (`DynBlas`, key = the rest-pose instance's key) is refitted from the **previous frame's** capture at the
+  next AfterDepthPrepass (a rebuild every 30th refit, staggered per tree); its record is the rest-pose instance's (material, alpha
+  test, flags) with the captured vertices (stride 32, TEXCOORD0 at 16) and the world masks (not the characters' mask: `gi.characters`
+  does not leave trees out). While it was built this frame the rest-pose instance is left out of the TLAS (`animatedKeys_`).
+* Leaves (`op > 1`, vertex shader class Leaves) have no rest pose: their BLAS exists only for topology and material (`animatedOnly`:
+  never an instance of its own), the animated capture is all of them. Grass / ferns (vertex shader class Vegetation, instances whose
+  rows change every frame) are still not in the RT scene.
+* Setting `shadows.rt_wind` (default on, Advanced). Cost [C] (beach, 16 trees in range, near mode): GPU +0.07 ms, CPU +0.10 ms per
+  frame; 81 trees at `extended`.
+* Checks [C]: validation + synchronization validation clean (walk, extended, high); `rvk_shadertool corpus corpus --capture` 0 failures
+  (cap4), `--gbuf-motion` 0; `rt.debug=depth` at the beach: red (RT lacks geometry) -5 % with the leaves in range, magenta (misplaced)
+  unchanged.

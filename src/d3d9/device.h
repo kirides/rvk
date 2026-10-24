@@ -855,7 +855,12 @@ public:
     // inside DrawObserver::observe: the draw's vertex shader writes, per vertex index i of the draw (index buffer value),
     // the world position (vec4, w = 1) and its TEXCOORD0 input (vec4) to `buffer` + 32 i (the capture variant, once it and
     // its pipeline are ready); vertexCaptured tells whether it ran this frame (render thread)
-    void requestVertexCapture(VkDeviceAddress buffer) { captureRequest_ = buffer; }
+    // `instances`: an instanced draw may be captured too: instance k writes its vertices at `buffer` + 16 + 32 (k x slots + i),
+    // slots = the header's first word (the buffer holds instances x slots x 32 bytes)
+    void requestVertexCapture(VkDeviceAddress buffer, bool instances = false) {
+        captureRequest_ = buffer;
+        captureInstances_ = instances;
+    }
     bool vertexCaptured(VkDeviceAddress buffer) const {
         return std::find(captured_.begin(), captured_.end(), buffer) != captured_.end();
     }
@@ -1400,6 +1405,7 @@ private:
     std::array<std::uint32_t, 4> sgi_{};
     GiDraws giDraws_;
     std::uint64_t giDrawCount_ = 0;
+    bool captureInstances_ = false;         // the request covers an instanced draw (requestVertexCapture)
     VkDeviceAddress captureRequest_ = 0;    // the draw being prepared (DrawObserver::observe)
     std::vector<VkDeviceAddress> captured_;  // this frame's captures that ran
     std::vector<VkDeviceAddress> capturedPrev_;  // the previous frame's

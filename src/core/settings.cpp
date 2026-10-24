@@ -1283,6 +1283,18 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .requirements = caps::bit(caps::Cap::RayQuery),
         .unmetValue = 0,
     });
+    r.shadowsRtWind = &reg.add({
+        .key = "shadows.rt_wind",
+        .label = "Ray-traced shadows follow the wind",
+        .category = "Shadows",
+        .description = "The branches and fronds of the trees near the player sway in the shadows as they do on screen. Costs a "
+                       "little graphics card time per tree.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::Advanced,
+        .requirements = caps::bit(caps::Cap::RayQuery),
+        .unmetValue = 0,
+    });
     r.shadowsDebug = &reg.add({
         .key = "shadows.debug",
         .label = "Shadow debug view",

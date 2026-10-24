@@ -86,6 +86,7 @@ void RtShadows::apply(const Settings& s) {
         dev_.removePasses(this);
         passId_ = 0;
         pending_ = {};
+        scene_->setAnimated(this, false, 0.0f);
         scene_->setDynamic(this, false);
         scene_->release(this);
         held_ = false;
@@ -93,6 +94,11 @@ void RtShadows::apply(const Settings& s) {
         frame_ = ~0ull;
         info_ = Frame{};
         historyValid_ = false;
+    }
+    if (held_) {
+        // the trees in the wind (RtScene::observeTree) within the range + the cascade blend and a tree's reach
+        const float range = (settings_.rangeMetres > 0.0f ? settings_.rangeMetres : modeRangeMetres(settings_.mode)) * 100.0f + 1500.0f;
+        scene_->setAnimated(this, settings_.wind, range);
     }
     if (want) {
         spdlog::info("enh: shadows.rt: mode {} (range {:.0f} m), softness {:.2f} deg, quality {}, filter {:.2f}, bias {:.1f}, debug {}", settings_.mode,

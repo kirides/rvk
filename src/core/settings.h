@@ -310,6 +310,7 @@ struct RendererSettings {
     Setting* shadowsRt = nullptr;         // shadows.rt: "off", "near", "extended" (ray-traced sun shadows near the camera, enh/rt_shadows)
     Setting* shadowsRtQuality = nullptr;  // shadows.rt_quality: "low", "medium", "high"
     Setting* shadowsRtSoftness = nullptr; // shadows.rt_softness: the sun cone's half angle in degrees
+    Setting* shadowsRtWind = nullptr;     // shadows.rt_wind: the animated SpeedTrees in the RT scene
     Setting* shadowsRtRange = nullptr;    // shadows.rt_range: metres, 0 = from the mode
     // ray-traced global illumination (enh/gi.h, docs/research/rtgi.md; needs RayQuery)
     Setting* giEnabled = nullptr;         // gi.enabled

@@ -289,7 +289,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     rtShadows_ = std::make_unique<enh::RtShadows>(dev_, rtScene_.get());
     shadows_->setRtShadows(rtShadows_.get());
     if (rs.shadowsEnabled != nullptr) {
-        for (settings::Setting* s : {rs.shadowsRt, rs.shadowsRtQuality, rs.shadowsRtSoftness, rs.shadowsRtRange, rs.shadowsEnabled, rs.shadowsFilter, rs.shadowsSoftness, rs.shadowsBlend, rs.shadowsFade,
+        for (settings::Setting* s : {rs.shadowsRt, rs.shadowsRtQuality, rs.shadowsRtSoftness, rs.shadowsRtRange, rs.shadowsRtWind, rs.shadowsEnabled, rs.shadowsFilter, rs.shadowsSoftness, rs.shadowsBlend, rs.shadowsFade,
                                      rs.shadowsBias, rs.shadowsDebug, rs.shadowsMapSize, rs.shadowsRange, rs.shadowsSplit}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyShadows(); }, this);
         }
@@ -494,6 +494,7 @@ void HalDevice::applyShadows() {
         r.mode = s.enabled ? (m == "near" ? 1 : m == "extended" ? 2 : 0) : 0;
         r.rangeMetres = rs.shadowsRtRange->asFloat();
         r.softness = rs.shadowsRtSoftness->asFloat();
+        r.wind = rs.shadowsRtWind->asBool();
         const std::string_view q = rs.shadowsRtQuality->asEnum();
         r.quality = q == "low" ? 1 : q == "high" ? 3 : 2;
         rtShadows_->apply(r);
