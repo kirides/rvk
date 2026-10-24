@@ -5,13 +5,14 @@
 #define GI_COMMON_GLSL
 
 const uint GI_RAYS = 64u;        // rays per probe and update (= the workgroup size of both passes)
-const uint GI_MAX_LIGHTS = 32u;  // point lights of the frame (deduplicated from the draws' g_PointLights)
+const uint GI_MAX_PROBE_ITEMS = 4096u;  // probes per update (the most gi.quality allows): the light visibility words follow the rays
+const uint GI_MAX_LIGHTS = 128u;  // point lights of the frame: the world's most relevant (engine/lights), else the draws' g_PointLights
 
 // mirror: enh::GiPassParams
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer GiPassParams {
     uvec4 lists;        // xy probe list address (GiList), zw ray buffer address (GiRays)
     uvec4 volume;       // xy this frame's volume header (RvkGiVolume), z probes in the list, w frame
-    uvec4 flags;        // x RVK_RT_TRACE_* of the probe rays, y lights, z tweaks, w 0
+    uvec4 flags;        // x RVK_RT_TRACE_* of the probe rays, y lights, z bit 0: the probes take the lights' direct light (gi.lights world + replaced lightmaps), w the emissive gain (float bits)
     vec4 rot[3];        // the frame's random rotation of the ray set (rows)
     vec4 reach;         // ray length per cascade (world units)
     vec4 blend;         // x irradiance hysteresis, y depth hysteresis, z depth sharpness, w backface share that marks a probe inside
@@ -31,7 +32,8 @@ layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Gi
 layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer GiList {
     uint e[];
 };
-// per probe x ray: radiance (rgb, acc units) + hit distance (w; negative = a back face, -0.2 t)
+// per probe x ray: radiance (rgb, acc units) + hit distance (w; negative = a back face, -0.2 t); after GI_MAX_PROBE_ITEMS x
+// GI_RAYS entries one uvec4 (as float bits) per probe: the lights it sees (bit j = light j is visible from the probe)
 layout(buffer_reference, std430, buffer_reference_align = 16) buffer GiRays {
     vec4 r[];
 };

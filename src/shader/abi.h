@@ -201,6 +201,7 @@ inline constexpr std::uint32_t kRtUvHeuristic = 0x10u;       // slot from the by
 inline constexpr std::uint32_t kRtUvOpacityShift = 8;        // bits 8-9: the opacity's channel (0 r .. 3 a) of its texture
 inline constexpr std::uint32_t kRtUvOpacityOpaque = 0x400u;  // the opacity is no texture: never cut out
 inline constexpr std::uint32_t kRtUvOpacityTexture = 0x800u; // the opacity has its own texture (bindless slot in uvMap[1].w)
+inline constexpr std::uint32_t kRtUvEmissive = 0x1000u;       // the material has a textured SelfIllumination role: the GI treats its diffuse colour as light it emits
 // TLAS instance masks
 inline constexpr std::uint32_t kRtMaskOpaque = 0x01u;
 inline constexpr std::uint32_t kRtMaskAlphaTested = 0x02u;

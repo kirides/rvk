@@ -50,6 +50,7 @@ const uint RVK_RT_UV_HEURISTIC = 0x10u;        // slot from the bytecode fallbac
 const uint RVK_RT_UV_OPACITY_SHIFT = 8u;       // bits 8-9: the opacity's channel
 const uint RVK_RT_UV_OPACITY_OPAQUE = 0x400u;  // the opacity is no texture
 const uint RVK_RT_UV_OPACITY_TEXTURE = 0x800u; // the opacity's own texture: bindless slot in uvMap1.w
+const uint RVK_RT_UV_EMISSIVE = 0x1000u;        // a textured self-illumination role: the diffuse colour is emitted (GI)
 
 // one geometry of one TLAS instance (112 bytes)
 struct RvkRtRecord {

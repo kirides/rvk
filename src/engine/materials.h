@@ -37,6 +37,7 @@ struct ShaderInfo {
     std::uint8_t samplerBase = 9;   // +0x219 (first register)
     std::uint8_t samplerCount = 0;  // +0x21b (slots handed out)
     Role diffuse, opacity, normal;
+    Role selfIllum;                 // the SelfIllumination role (+0x340): added unlit after the lighting (lava, lamps, fire meshes)
 };
 
 // whether the symbols (ms_pActiveShader, the vtables) were found

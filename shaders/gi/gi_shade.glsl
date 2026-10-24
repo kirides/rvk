@@ -91,7 +91,12 @@ vec4 giShadeRay(GiPassParams p, RvkFrame f, RvkGiVolume v, vec3 origin, vec3 dir
     } else {
         E += max(rvkGiEvalRegs(p.sky, N), vec3(0.0)) * p.shade.x;
     }
-    result = vec4(lin * E, h.t);
+    // self-illuminated surfaces (lava, lamp glass: rtgi.md 19) emit their diffuse colour; the engine adds the self-illumination
+    // after the pow, so its acc-unit equivalent is the colour ^ 2.2; flags.w = the gain (gi.emissive)
+    vec3 emission = vec3(0.0);
+    float gain = uintBitsToFloat(p.flags.w);
+    if ((s.uvSet & RVK_RT_UV_EMISSIVE) != 0u && gain > 0.0) emission = pow(clamp(albedo, vec3(0.0), vec3(1.0)), vec3(2.2)) * gain;
+    result = vec4(lin * E + emission, h.t);
     if (any(isnan(result)) || any(isinf(result))) result = vec4(0.0, 0.0, 0.0, tMax);
     return result;
 }

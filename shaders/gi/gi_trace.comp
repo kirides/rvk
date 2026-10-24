@@ -15,6 +15,8 @@
 
 layout(local_size_x = 64) in;
 
+shared uint sVis[4];
+
 void main() {
     GiPassParams p = GiPassParams(pc.params);
     RvkFrame f = pc.frame;
@@ -29,5 +31,26 @@ void main() {
     ivec3 cell = rvkGiCellOfSlot(dims, v.cascade[c].origin.xyz, slot);
     vec3 P = vec3(cell) * v.cascade[c].spacing.x;
     float u = float(giHash(item * 64u + ray + p.volume.w * 7919u) & 0xFFFFFFu) / 16777216.0;
+    // the lights this probe sees (their direct light enters the probe in gi_blend.comp: rtgi.md 19): light j by invocation
+    // j % 64, one visibility ray each
+    if ((p.flags.z & 1u) != 0u) {
+        if (ray < 4u) sVis[ray] = 0u;
+        barrier();
+        uint nL = min(p.flags.y, GI_MAX_LIGHTS);
+        for (uint j = ray; j < nL; j += GI_RAYS) {
+            vec4 lp = p.lights[j * 2u];
+            vec3 d = lp.xyz - P;
+            float d2 = dot(d, d);
+            if (d2 * lp.w >= 1.0 || dot(p.lights[j * 2u + 1u].rgb, vec3(1.0)) <= 1e-4) continue;
+            float dist = sqrt(max(d2, 1e-4));
+            if (rvkRtVisibility(f, P, d / dist, 1.0, max(dist - 8.0, 1.0), 0.0, 0.0, RVK_RT_TRACE_OPAQUE) > 0.5) {
+                atomicOr(sVis[j >> 5u], 1u << (j & 31u));
+            }
+        }
+        barrier();
+        if (ray == 0u) {
+            GiRays(p.lists.zw).r[GI_MAX_PROBE_ITEMS * GI_RAYS + item] = uintBitsToFloat(uvec4(sVis[0], sVis[1], sVis[2], sVis[3]));
+        }
+    }
     GiRays(p.lists.zw).r[item * GI_RAYS + ray] = giShadeRay(p, f, v, P, giRayDir(p, ray), p.reach[c], u);
 }

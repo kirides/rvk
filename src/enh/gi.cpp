@@ -1,5 +1,7 @@
 #include "enh/gi.h"
 
+#include <windows.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -10,6 +12,7 @@
 #include <spdlog/spdlog.h>
 
 #include "engine/hemisphere.h"
+#include "engine/symbols.h"
 #include "enh/gbuffer.h"
 #include "enh/material_variant.h"
 #include "enh/rt_scene.h"
@@ -30,6 +33,7 @@ constexpr std::int32_t kDims[3] = {32, 16, 32};  // probes per cascade along x, 
 constexpr std::uint32_t kProbesPerCascade = 32 * 16 * 32;
 constexpr float kSpacing[kGiCascades] = {150.0f, 300.0f, 600.0f};  // world units (cm)
 constexpr float kReach[kGiCascades] = {4000.0f, 8000.0f, 16000.0f};
+constexpr float kWorldLightRadius = 16000.0f;  // the world's lights whose reach touches 160 m around the camera (the outer cascade)
 constexpr float kShare[kGiCascades] = {0.5f, 0.3f, 0.2f};           // of the per-frame budget
 constexpr std::uint32_t kBudget[3] = {1024, 2048, 4096};            // probes per frame by gi.quality
 constexpr float kDepthCap = 4.0f;                                   // depth moments: distances clamped (cells)
@@ -294,8 +298,58 @@ void Gi::pickLight() {
         const float dx = l.pos[0] - cam.position[0], dy = l.pos[1] - cam.position[1], dz = l.pos[2] - cam.position[2];
         return dx * dx + dy * dy + dz * dz;
     };
-    std::sort(frameLights_.begin(), frameLights_.end(), [&](const Light& a, const Light& b) { return dist2(a) < dist2(b); });
-    if (frameLights_.size() > kGiMaxLights) frameLights_.resize(kGiMaxLights);
+    worldLightsUsed_ = 0;
+    if (s_.lights == 1 && engine::lights::collect(cam.position.data(), kWorldLightRadius, worldScratch_, lightStats_)) {
+        // every light of the cached-in world (static + dynamic) within reach of the camera; the drawn objects' lights that
+        // are none of them (a light the registries do not know) are kept
+        std::vector<Light> merged;
+        merged.reserve(worldScratch_.size() + frameLights_.size());
+        for (const auto& w : worldScratch_) {
+            Light l;
+            l.pos[0] = w.pos[0];
+            l.pos[1] = w.pos[1];
+            l.pos[2] = w.pos[2];
+            l.pos[3] = 1.0f / (w.range * w.range);
+            l.col[0] = w.col[0];
+            l.col[1] = w.col[1];
+            l.col[2] = w.col[2];
+            l.col[3] = w.range;  // (the shaders read rgb only)
+            merged.push_back(l);
+        }
+        worldLightsUsed_ = static_cast<std::uint32_t>(merged.size());
+        // check of the colour units: the draws' constants of the same light (within 8 units) over the registry's
+        for (const Light& d : frameLights_) {
+            for (std::uint32_t i = 0; i < worldLightsUsed_; ++i) {
+                const Light& l = merged[i];
+                if (std::abs(l.pos[0] - d.pos[0]) < 8.0f && std::abs(l.pos[1] - d.pos[1]) < 8.0f && std::abs(l.pos[2] - d.pos[2]) < 8.0f) {
+                    const float a = d.col[0] + d.col[1] + d.col[2], b = l.col[0] + l.col[1] + l.col[2];
+                    if (a > 1e-4f && b > 1e-4f) {
+                        ratioSum_ += a / b;
+                        ++ratioCount_;
+                    }
+                    break;
+                }
+            }
+        }
+        for (const Light& d : frameLights_) {
+            const bool known = std::any_of(merged.begin(), merged.begin() + worldLightsUsed_, [&](const Light& l) {
+                return std::abs(l.pos[0] - d.pos[0]) < 8.0f && std::abs(l.pos[1] - d.pos[1]) < 8.0f && std::abs(l.pos[2] - d.pos[2]) < 8.0f;
+            });
+            if (!known) merged.push_back(d);
+        }
+        frameLights_ = std::move(merged);
+    }
+    // the most relevant first: luminance x the share of the light's reach that the camera is inside of (a far light with a
+    // small range matters little to the cascades around the camera; a big one still lights a wall near it)
+    const auto score = [&](const Light& l) {
+        const float lum = (l.col[0] + l.col[1] + l.col[2]) * (1.0f / 3.0f);
+        const float r2 = l.pos[3] > 0.0f ? 1.0f / l.pos[3] : 1.0f;
+        return lum * r2 / (dist2(l) + r2);
+    };
+    std::sort(frameLights_.begin(), frameLights_.end(), [&](const Light& a, const Light& b) { return score(a) > score(b); });
+    const std::size_t cap = std::clamp<std::size_t>(static_cast<std::size_t>(s_.lightCount), 4, kGiMaxLights);
+    if (frameLights_.size() > cap) frameLights_.resize(cap);
+    spdlog::debug("enh: gi: turn: drawn objects' lights {} world {} in use {}", lights_.size(), worldLightsUsed_, frameLights_.size());
 }
 
 // ---- P1: the probes -----------------------------------------------------------------------------------------------------------
@@ -391,7 +445,7 @@ bool Gi::ensureResources(VkCommandBuffer cmd) {
     const VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     bool ok = probes_.create(ctx, probes * 128, usage, false, 0, "gi probes");
     ok = ok && depth_.create(ctx, probes * kGiDepthTexels * 8, usage, false, 0, "gi depth moments");
-    ok = ok && rays_.create(ctx, static_cast<VkDeviceSize>(kBudget[2]) * kGiRays * 16, usage, false, 0, "gi rays");
+    ok = ok && rays_.create(ctx, static_cast<VkDeviceSize>(kBudget[2]) * (kGiRays + 1) * 16, usage, false, 0, "gi rays");
     if (!ok) {
         spdlog::error("enh: gi: GPU buffers failed: GI stays off this session");
         destroyResources();
@@ -494,6 +548,9 @@ void Gi::record(d3d9::PassContext& ctx) {
     // cut-outs solid (cheap); characters only with gi.characters (the scene holds them for the other consumers too)
     p.flags[0] = 1u | (s_.characters ? 0u : 4u);
     p.flags[1] = static_cast<std::uint32_t>(frameLights_.size());
+    std::memcpy(&p.flags[3], &s_.emissive, sizeof(float));
+    // the lights' direct light enters the probes where the baked lighting that carried it is replaced (rtgi.md 19)
+    p.flags[2] = (s_.lights == 1 && s_.replaceLightmaps && worldLightsUsed_ > 0) ? 1u : 0u;
     // a uniformly random rotation of the ray set per frame (a random unit quaternion)
     {
         std::uniform_real_distribution<float> u(0.0f, 1.0f);
@@ -692,6 +749,40 @@ void Gi::logStats(std::uint32_t probes) {
         }
         spdlog::info("enh: gi: hemisphere vs draws: max register difference {:.4f}; indoor ({:.3f}, {:.3f}, {:.3f}) vs c14 ({:.3f}, {:.3f}, {:.3f})",
                      dMax, indoor_[0], indoor_[1], indoor_[2], drawIndoor_[0], drawIndoor_[1], drawIndoor_[2]);
+    }
+    {
+        spdlog::info("enh: gi: world lights: {} used of {} static ({} in the tree, {} nodes, {} unknown) + {} dynamic ({} registered); draws / registry colour ratio {:.3f} ({} matches); {} drawn lights",
+                     worldLightsUsed_, lightStats_.staticNear, lightStats_.staticTotal, lightStats_.nodes, lightStats_.unknown,
+                     lightStats_.dynamicNear, lightStats_.dynamicTotal, ratioCount_ > 0 ? ratioSum_ / static_cast<double>(ratioCount_) : 0.0,
+                     ratioCount_, lights_.size());
+        ratioSum_ = 0.0;
+        ratioCount_ = 0;
+        const auto& cam = dev_.camera().valid ? dev_.camera() : dev_.lastCamera();
+        std::string nearest;
+        std::vector<const Light*> sorted;
+        for (const Light& l : frameLights_) sorted.push_back(&l);
+        const auto d2 = [&](const Light* l) {
+            const float dx = l->pos[0] - cam.position[0], dy = l->pos[1] - cam.position[1], dz = l->pos[2] - cam.position[2];
+            return dx * dx + dy * dy + dz * dz;
+        };
+        std::sort(sorted.begin(), sorted.end(), [&](const Light* a, const Light* b) { return d2(a) < d2(b); });
+        for (std::size_t i = 0; i < sorted.size() && i < 10; ++i) {
+            nearest += std::format(" [{:.0f} u at ({:.0f} {:.0f} {:.0f}), R {:.0f}, rgb {:.2f} {:.2f} {:.2f}]", std::sqrt(d2(sorted[i])), sorted[i]->pos[0], sorted[i]->pos[1], sorted[i]->pos[2], sorted[i]->pos[3] > 0.0f ? 1.0f / std::sqrt(sorted[i]->pos[3]) : 0.0f,
+                                sorted[i]->col[0], sorted[i]->col[1], sorted[i]->col[2]);
+        }
+        {
+            float farthest = 0.0f;
+            for (const Light& d : lights_) farthest = std::max(farthest, std::sqrt(d2(&d)));
+            spdlog::info("enh: gi: the drawn objects' lights reach {:.0f} units from the camera (farthest of {})", farthest, lights_.size());
+        }
+        {
+            const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(L"Engine.dll"));
+            spdlog::info("enh: gi: dynamic light vtables (rva): {:x} {:x} {:x} {:x}; eCPointLight_PS {:x}", lightStats_.dynamicVt[0] - base,
+                         lightStats_.dynamicVt[1] - base, lightStats_.dynamicVt[2] - base, lightStats_.dynamicVt[3] - base,
+                         reinterpret_cast<std::uintptr_t>(engine::sym().pointLightVftable) - base);
+        }
+        spdlog::info("enh: gi: lights in use {} (dynamic registered {}); camera ({:.0f}, {:.0f}, {:.0f}); nearest:{}", frameLights_.size(),
+                     lightStats_.dynamicRaw, cam.position[0], cam.position[1], cam.position[2], nearest);
     }
     dev_.setStatus("gi", std::format("GI: {} probes / frame, {} new pending", probes, pending));
     if (s_.screen > 0) {

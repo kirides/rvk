@@ -1,6 +1,7 @@
 #include "enh/rt_material.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -38,6 +39,17 @@ ev::Vec4 vec(float x, float y, float z, float w) { return {x, y, z, w}; }
 
 bool finite(const ev::Vec4& v) { return std::isfinite(v[0]) && std::isfinite(v[1]); }
 
+}  // namespace
+
+namespace {
+// lava and magma surfaces (not the stones around them: "Nat_Stone_Lava_*" are rocks)
+bool isEmitterName(const std::string& name) {
+    std::string n;
+    n.reserve(name.size());
+    for (char c : name) n.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    if (n.find("stone") != std::string::npos || n.find("rock") != std::string::npos) return false;
+    return n.find("lava") != std::string::npos || n.find("magma") != std::string::npos;
+}
 }  // namespace
 
 bool RtMaterial::operator==(const RtMaterial& o) const {
@@ -413,6 +425,10 @@ std::uint32_t RtMaterials::resolve(d3d9::Device& dev, const d3d9::ReplaceQuery& 
     m.uvSet |= channel << abi::kRtUvOpacityShift;
     if (graph && info.diffuse.slot >= 0) m.name = mats::poolImageName(info, info.diffuse.slot);
     if (m.name.empty() && q.tag != nullptr && q.tag->material != nullptr) m.name = mats::resourceName(q.tag->material);
+    // light emitters (the GI lets them emit their diffuse colour, rtgi.md 19): the engine has no emission term the RT scene could
+    // read (a lava material's self-illumination role is empty: its glow is the baked lightmap, and the macro of other materials
+    // is a mostly zero constant), so they are recognised by name
+    if (isEmitterName(m.name)) m.uvSet |= abi::kRtUvEmissive;
     const std::uint32_t id = intern(m);
     iv_.ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 
@@ -429,6 +445,7 @@ std::uint32_t RtMaterials::resolve(d3d9::Device& dev, const d3d9::ReplaceQuery& 
             };
             s = std::format("shader {} {} blend {} ref {} pool {}:{}{}{}", info.shader, mats::name(info.cls), info.blendMode, info.maskReference,
                             info.samplerCount, role("diffuse", info.diffuse), role("opacity", info.opacity), role("normal", info.normal));
+            if (info.selfIllum.source != mats::Source::None) s += role("self-illumination", info.selfIllum);
             if (info.opacity.source != mats::Source::None) s += std::format(" (opacity swizzle {})", info.opacity.swizzle);
         } else {
             s = "no material graph (bytecode fallback s9)";
@@ -440,11 +457,11 @@ std::uint32_t RtMaterials::resolve(d3d9::Device& dev, const d3d9::ReplaceQuery& 
             declared += std::format(" s{}={}", r, t == nullptr ? std::string("-") : std::format("{}x{} {}", t->desc().width, t->desc().height, vk::d3dFormatName(t->desc().format)));
         }
         const std::string matName = q.tag != nullptr && q.tag->material != nullptr ? mats::resourceName(q.tag->material) : std::string("?");
-        spdlog::info("rt: material '{}' ({} {}, vs {:016x} ps {:016x}): {}; bound{}; albedo {} uv set {} map ({:.4g} {:.4g} {:.4g} / {:.4g} {:.4g} {:.4g}){}{}{}{}",
+        spdlog::info("rt: material '{}' ({} {}, vs {:016x} ps {:016x}): {}; bound{}; albedo {} uv set {} map ({:.4g} {:.4g} {:.4g} / {:.4g} {:.4g} {:.4g}){}{}{}{}{}",
                      matName, d3d9::draws::name(q.kind), d3d9::scene::name(q.phase.view), q.engineVs->hash, q.enginePs->hash, s, declared,
                      slot >= 0 ? std::format("s{}", slot) : std::string("none"), m.uvSet & abi::kRtUvSetMask, m.uvMap[0][0], m.uvMap[0][1],
                      m.uvMap[0][2], m.uvMap[1][0], m.uvMap[1][1], m.uvMap[1][2], (m.uvSet & abi::kRtUvApprox) ? " approx" : "",
-                     (m.uvSet & abi::kRtUvNoTexture) ? " no-texture" : "", (m.uvSet & abi::kRtUvHeuristic) ? " heuristic" : "", detail);
+                     (m.uvSet & abi::kRtUvNoTexture) ? " no-texture" : "", (m.uvSet & abi::kRtUvHeuristic) ? " heuristic" : "", (m.uvSet & abi::kRtUvEmissive) ? " emissive" : "", detail);
     }
     return id;
 }

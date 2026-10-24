@@ -1,0 +1,6 @@
+id          = "rvk_lightturn"
+name        = "Renderer light set during a camera turn"
+version     = "1.0.0"
+author      = "risen-enhanced-graphics"
+description = "Turns the camera one full circle at the new-game beach (risen.camera.set, instant poses) so that rvk.log's per-frame light counts (-RvkLogLevel debug: the drawn objects' lights vs the GI's world light set) can be compared while lights enter and leave the frustum (scenario rvk_lightturn, docs/research/rtgi.md 19)."
+main        = "main.lua"

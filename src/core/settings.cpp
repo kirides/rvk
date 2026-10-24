@@ -1383,6 +1383,46 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .min = 0.25,
         .max = 3,
         .format = "%.2f m",
+    r.giLights = &reg.add({
+        .key = "gi.lights",
+        .label = "Light sources",
+        .category = "Lighting",
+        .description = "Which lamps, fires and torches light the scene through the traced light. Nearby: only those the game "
+                       "lights the visible objects with (they fade out within a few dozen metres). World: all the lights the game "
+                       "has loaded around you, so distant light sources still light the places near them.",
+        .type = Type::Enum,
+        .defaultValue = 1,
+        .options = {"nearby", "world"},
+        .optionLabels = {"Nearby", "World"},
+        .flags = Flag::Advanced,
+        .requirements = caps::bit(caps::Cap::RayQuery),
+    });
+    r.giEmissive = &reg.add({
+        .key = "gi.emissive",
+        .label = "Glowing surfaces",
+        .category = "Lighting",
+        .description = "How strongly lava, glowing glass and other self-lit surfaces light their surroundings.",
+        .type = Type::Float,
+        .defaultValue = 1.0,
+        .min = 0,
+        .max = 4,
+        .format = "%.2f",
+        .flags = Flag::Advanced,
+        .requirements = caps::bit(caps::Cap::RayQuery),
+    });
+    r.giLightCount = &reg.add({
+        .key = "gi.light_count",
+        .label = "GI light sources (most)",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The most light sources the traced light considers per frame (the strongest / nearest of the world's "
+                       "lights). More = lamps further away light their surroundings.",
+        .type = Type::Int,
+        .defaultValue = 128,
+        .min = 4,
+        .max = 128,
+        .flags = Flag::Debug | Flag::NoAB,
+    });
         .flags = Flag::Advanced,
     });
     r.gbufferDebug = &reg.add({

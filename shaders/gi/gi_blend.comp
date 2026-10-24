@@ -28,6 +28,21 @@ shared float sCoef[27];     // 9 coefficients x rgb
 shared uint sBack;
 shared ivec4 sKey;
 
+// the real spherical harmonics basis k (0 .. 8) in the engine's order of the projection (l = 0; l = 1: y, z, x; l = 2: xy, yz, z^2, xz, x^2 - y^2)
+float giShBasis(uint k, vec3 d) {
+    switch (k) {
+    case 0u: return 0.282095;
+    case 1u: return 0.488603 * d.y;
+    case 2u: return 0.488603 * d.z;
+    case 3u: return 0.488603 * d.x;
+    case 4u: return 1.092548 * d.x * d.y;
+    case 5u: return 1.092548 * d.y * d.z;
+    case 6u: return 0.315392 * (3.0 * d.z * d.z - 1.0);
+    case 7u: return 1.092548 * d.x * d.z;
+    default: return 0.546274 * (d.x * d.x - d.y * d.y);
+    }
+}
+
 void main() {
     GiPassParams p = GiPassParams(pc.params);
     uint item = gl_WorkGroupID.x;
@@ -58,25 +73,26 @@ void main() {
     if (t < 27u) {
         uint k = t / 3u, ch = t % 3u;
         float sum = 0.0;
-        for (uint i = 0u; i < GI_RAYS; ++i) {
-            vec3 d = sDir[i].xyz;
-            float y;
-            switch (k) {
-            case 0u: y = 0.282095; break;
-            case 1u: y = 0.488603 * d.y; break;
-            case 2u: y = 0.488603 * d.z; break;
-            case 3u: y = 0.488603 * d.x; break;
-            case 4u: y = 1.092548 * d.x * d.y; break;
-            case 5u: y = 1.092548 * d.y * d.z; break;
-            case 6u: y = 0.315392 * (3.0 * d.z * d.z - 1.0); break;
-            case 7u: y = 1.092548 * d.x * d.z; break;
-            default: y = 0.546274 * (d.x * d.x - d.y * d.y); break;
+        for (uint i = 0u; i < GI_RAYS; ++i) sum += sRad[i][ch] * giShBasis(k, sDir[i].xyz);
+        // the lights' direct light (gi_trace.comp saw which ones): a delta light of colour c x falloff is the radiance
+        // pi c fall delta(w - w_j) (acc = irradiance / pi, the engine's c x N.L), projected like a ray
+        float direct = 0.0;
+        if ((p.flags.z & 1u) != 0u) {
+            uvec4 vw = floatBitsToUint(GiRays(p.lists.zw).r[GI_MAX_PROBE_ITEMS * GI_RAYS + item]);
+            vec3 P = vec3(cell) * v.cascade[c].spacing.x;
+            uint nL = min(p.flags.y, GI_MAX_LIGHTS);
+            for (uint j = 0u; j < nL; ++j) {
+                if (((vw[j >> 5u] >> (j & 31u)) & 1u) == 0u) continue;
+                vec4 lp = p.lights[j * 2u];
+                vec3 d = lp.xyz - P;
+                float d2 = dot(d, d);
+                float fall = 1.0 - clamp(d2 * lp.w, 0.0, 1.0);
+                direct += 3.14159265 * p.lights[j * 2u + 1u].rgb[ch] * fall * giShBasis(k, d * inversesqrt(max(d2, 1e-4)));
             }
-            sum += sRad[i][ch] * y;
         }
-        // 4 pi / N (uniform directions) x the cosine lobe's band factor in acc units (irradiance / pi)
+        // 4 pi / N (uniform directions) x the cosine lobe's band factor in acc units (irradiance / pi: A0 = 1, A1 = 2/3, A2 = 1/4)
         float band = k == 0u ? 1.0 : k < 4u ? 2.0 / 3.0 : 0.25;
-        sCoef[t] = sum * (12.566371 / float(GI_RAYS)) * band;
+        sCoef[t] = (sum * (12.566371 / float(GI_RAYS)) + direct) * band;
     }
     barrier();
 

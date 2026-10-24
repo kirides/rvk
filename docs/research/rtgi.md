@@ -529,3 +529,82 @@ pixels (+0.07, dark share 0.519 = 0.519), the pub 0.360 (engine 0.374), pub left
 Validation clean, `rvk_tests` 131/131, corpus `--gi` / `--gbuf` / `--gbuf-motion` 0 failures. The run-to-run spread of the pub's
 dark share is about +-0.04 (candles); the lava cave stays 0.07 darker in holes than the engine (0.473 vs 0.407, not from the floor:
 the same at every share).
+
+## 19. The world's lights, direct light in the probes, glowing lava (2026-10-24)
+
+([C] = measured / read in code, [I] = inferred.)
+
+**Why** [C]: the GI knew only the point lights that the objects drawn in a frame carried in their constants (`Gi::observe`, <= 4 per
+draw, 32 kept). Where the engine's baked lighting is replaced (`gi.lightmaps=replace`), what the lightmaps carried (the direct
+light of the static lamps on the walls, then bounced) was gone: lamps lit only what the engine lit per pixel, the rays saw their
+bounce only on surfaces they happened to hit, and lava (its glow is a baked lightmap on a lit material, below) went dull.
+
+**The engine's light registry** [C] (headless Ghidra, `B:\DevDrive\risen-ghidra\lights_dump.txt`, `lights2_dump.txt`): the
+illumination admin (`eCIlluminationAdmin`, found through the `this` of `FindWightedStaticLights` 0x5765a0 / `RegisterDynamicLightPS`
+0x577040: pass-through hooks, `engine/lights.cpp`) holds
+* `+0x38` the dynamic lights (`eCDynamicLight_PS*`; data `+0x40`, count `+0x48`): only the lights registered at cache-in (a handful: the
+  sun / moon classes, vtables 0x9a5200 / 0x9a3dc8), **not** every dynamic point light,
+* `+0x68` an `eTSphereTree<eCStaticLight_PS*>`: root index `tree+0x20`, node array `tree+0x30`, 0x50-byte nodes (sphere x y z r at +0,
+  light payload at +0x10, next sibling +0x28, first child +0x38, flags +0x48, bit 4 = leaf with a payload). It holds the static lights of
+  the **cached-in world** (848 - 1370 in the town, 0 at the new-game beach where the objects carry theirs from earlier);
+* `eCStaticLight_PS` fields: rgb `+0x30`, intensity `+0x40`, range `+0x44`, position `+0x6c` (`eCStaticPointLight_PS`, vftable 0x9a95c8)
+  or `+0x58` (`eCStaticAmbientLight_PS`, 0x9a8250). The colour constant the shaders get is rgb x intensity x `DAT_1809f1730` (= 4.0)
+  x 0.5: over 10,000 matches the drawn constants are 0.49 - 0.50 of rgb x intensity x 4 [C] (`kDrawShare`);
+* a dynamic `eCPointLight_PS` (vftable 0x9a7440) hands its exact constants (flicker included) through `AddToLightList` 0x5976b0 into a
+  scratch `eSShaderMaterialLightList` (count byte +0x34, entry i at i x 0x40: position +0x38, 1/R^2 +0x44, colour +0x58);
+  none were registered in the tested places.
+* The objects keep the lights found when their illumination was last computed (the draws' lists reach 130 - 160 m from the camera
+  in the town): the tree is only what is loaded now. `lod.view` (cache-in spheres, lod.md 6) grows it.
+
+**What is built** [C]: `src/engine/lights.{h,cpp}` (`collect`: the tree walk pruned by the node spheres, <= 60,000 nodes, SEH-guarded
+reads, on the render thread; read-only: nothing the engine's draws or cubemap passes consume changes). `Gi::pickLight` merges
+the registry's lights within 160 m (+ their range) of the camera with the drawn objects' lights that are none of them (within 8
+units), ranks them by luminance x range^2 / (distance^2 + range^2) and keeps the best `gi.light_count` (default and cap 128;
+`GiPassParams::lights`, `GI_MAX_LIGHTS`). Setting `gi.lights=nearby|world` (default world, Lighting, Advanced; nearby = the old
+behaviour). rvk.log `enh: gi: world lights: N used of M static (K in the tree ...)`, `lights in use`, `the drawn objects' lights reach`.
+* **Bounce**: the hit shading (`gi_shade.glsl`) samples the 128 lights as before (one, in proportion to its unshadowed light, with a
+  shadow ray), so surfaces near far lamps are lit when the probe rays / screen probes hit them.
+* **Direct light in the probes** (`gi.lights=world` and `gi.lightmaps=replace`; `p.flags.z` bit 0): `gi_trace.comp` spends one
+  visibility ray per light and probe (light j by invocation j % 64: a 128-bit mask per probe, stored behind the rays), `gi_blend.comp`
+  adds each visible light as a delta of pi x colour x falloff (the engine's `col x N.L x (1 - d^2/R^2)` in acc units) to the probe's SH.
+  This stands in for the baked direct light: the lamps' light reaches walls the engine does not light per pixel. It is off in `keep` mode
+  (the baked lighting and the static SH remainder carry it there: it would count twice). Near the camera the engine's own <= 3 per-pixel
+  lights add the same light sharply on top of the probes' smooth part [I: slightly bright near lamps in replace mode; not visible in the
+  tested spots].
+* **Emissive**: `kRtUvEmissive` (`RVK_RT_UV_EMISSIVE`, record `uvSet` bit 0x1000) marks materials by name (lava / magma, not stones;
+  `isEmitterName` in `enh/rt_material.cpp`): a ray that hits one returns pow(diffuse, 2.2) x `gi.emissive` (default 1, 0..4) as radiance.
+  The engine has no emission term to read: the lava material (`Nat_Lava_01`) has no self-illumination role (`engine/materials` reads the
+  role at +0x340 now: empty for `Nat_Lava_01`, a texture for chests), and the `XFX_PS_SELFILLUMINATION` macro is present on 35 % of the
+  material pixel shaders (vegetation, ground: mostly a zero constant), so a macro test lit herbs and burnt ground [C: tried and removed].
+
+**Results** [C] (water-compare runs `20261024-154655` / `-155050`, `gi.lightmaps=replace` on both sides; whole-image luma computed from
+the side-by-sides: the table's `px` mask is not usable indoors):
+
+| spot | nearby (old) -> world + direct | dark pixels (luma < 12) |
+|---|---|---|
+| monastery_hall | 37.0 -> 42.5 | 0.462 -> 0.327 (the far wall, the arch and the alcoves lit by the candles) |
+| lava_cave | 7.6 -> 9.9 | 0.786 -> 0.714 (the lava floor and the pillars glow red / orange) |
+| pub_interior | 21.0 -> 21.8 | 0.098 -> 0.092 |
+| harbour_night | 26.3 -> 26.1 | 0.217 -> 0.219 (the tree held no lights near the camera yet) |
+| lava_cave, `gi.emissive` 0 -> 1 | 10.1 -> 11.8 | 0.725 -> 0.674 (the lava floor around the pools turns orange) |
+
+`gi.lights=world` without the direct term (keep mode) changes the whole-image luma by < 1.5 at the monastery (control run nearby vs
+nearby: +1.4; the earlier table's -14 .. -20 were the water mask, not the picture). Validation clean (`-Validation`, no VUID lines).
+Cost at the monastery (`RisenTest.exe`, vsync off, median GPU per frame while turning): nearby 2.10 ms, world + direct 2.19 ms,
+world keep 2.08 ms, nearby keep 1.98 ms; CPU `gi @AfterOpaque` 0.05 -> 0.14 ms per frame.
+
+**Frustum culling** [C]: the engine hands an object only the lights of the light set found at its last update, so the lights of what
+is outside the view drop out of the drawn lists as the camera turns. `rvk_lightturn` (this repo's mod; `run.ps1 -Mode vulkan
+-RvkLogLevel debug -Mods rvk_lightturn -Scenario rvk_lightturn -Setting 'gi.enabled=true'`, one full turn at the monastery,
+`-Param place=x;y;z`) logs a line per frame: the drawn objects' light count changes 75 times and ranges 3 .. 15 during the turn, the
+GI's world set stays at 129 in all 1938 frames of the sweep. The extended, range-aware, out-of-frustum set therefore exists on the RT
+side only (a read of the registry, no frustum test at all): **the engine's own culling, per-draw light lists, constants and cubemap
+shadow passes are not touched** (the two hooks call the original and remember `this`; `AddToLightList` is called on dynamic point
+lights only while `gi.lights=world` and GI are on, into a scratch list). Not verified by an image / draw-count A/B against the
+previous build with the features off [open].
+
+**Open**: the registry holds only what is cached in (no lights beyond about the cache-in radius, none at the new-game beach where the
+objects' own lists are the only source); dynamic `eCPointLight_PS` lights are untested (none registered in the tested places);
+emissive surfaces other than lava / magma (lamp glass, fire meshes) need a name list or a self-illumination evaluation; the emission
+uses the diffuse colour, not the self-illumination texture; the probes' direct term and the engine's per-pixel lights overlap near lamps
+in replace mode.

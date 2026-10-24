@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "d3d9/device.h"
+#include "engine/lights.h"
 #include "shader/abi.h"
 #include "vk/passes.h"
 #include "vk/raytracing.h"
@@ -38,7 +39,7 @@ namespace rvk::enh {
 class RtScene;
 
 inline constexpr std::uint32_t kGiCascades = 3;
-inline constexpr std::uint32_t kGiMaxLights = 32;
+inline constexpr std::uint32_t kGiMaxLights = 128;  // the most relevant lights of the frame (rtgi.md 19)
 inline constexpr std::uint32_t kGiRays = 64;
 inline constexpr std::uint32_t kGiDepthTexels = 64;  // 8 x 8 octahedral depth moments per probe
 
@@ -94,6 +95,9 @@ public:
         bool characters = true;   // skinned draws in the RT scene
         int debug = 0;            // 1 irradiance, 2 cascades
         float bleed = 0.5f;       // colour bleeding of the screen probes (rtgi.md 15): 0 luminance only .. 1 full chroma ratio
+        float emissive = 1.0f;    // gain of self-illuminated surfaces as light sources (gi.emissive, rtgi.md 19)
+        int lights = 1;           // point lights the rays see (rtgi.md 19): 0 the drawn objects' (nearby), 1 the world's (engine/lights)
+        int lightCount = 128;     // the most lights per frame (gi.light_count, debug)
         int screen = 2;           // screen probes (stage C, rtgi.md 11): 0 off, 1 low, 2 medium, 3 high
     };
 
@@ -187,6 +191,11 @@ private:
     float drawSky_[7][4]{};               // the draws' most frequent set (the old inference; logged against the hemisphere's)
     float drawIndoor_[4]{};
     std::vector<Light> frameLights_;
+    std::vector<engine::lights::WorldLight> worldScratch_;
+    engine::lights::Stats lightStats_{};
+    std::uint32_t worldLightsUsed_ = 0;
+    double ratioSum_ = 0.0;
+    std::uint64_t ratioCount_ = 0;
 
     // stats
     double lastLog_ = -1e9;

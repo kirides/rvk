@@ -26,6 +26,7 @@
 #include "engine/scene_hooks.h"
 #include "engine/high_fps.h"
 #include "engine/hemisphere.h"
+#include "engine/lights.h"
 #include "engine/lod.h"
 #include "engine/material_source.h"
 #include "engine/shadow_maps.h"
@@ -442,6 +443,7 @@ void onProcessAttach(void* module) {
         engine::scene::install();
         engine::shadowmaps::install();
         engine::hemisphere::install();  // the weather hemisphere light for the GI sky (docs/research/rtgi.md 17)
+        engine::lights::install();      // the illumination admin: all of the world's lights for the GI (rtgi.md 19)
         engine::lod::install();     // detail distances (docs/research/lod.md)
         if (!engine::matsrc::install()) spdlog::warn("engine: CompileShaderPoolEllement not hooked: no material shader sources");
         engine::window::install();  // borderless fullscreen (docs/research/window-mode.md)

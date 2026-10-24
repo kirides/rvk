@@ -9,7 +9,7 @@ namespace rvk::engine::materials {
 namespace {
 
 // eCShaderDefault proxies (rt-albedo-facts 1.1): 0x30 bytes each, the element pointer at +8, swizzle +0x28
-constexpr std::size_t kDiffuseProxy = 0x2e0, kOpacityProxy = 0x310, kNormalProxy = 0x3d0;
+constexpr std::size_t kDiffuseProxy = 0x2e0, kOpacityProxy = 0x310, kNormalProxy = 0x3d0, kSelfIllumProxy = 0x340;
 constexpr std::size_t kProxyElement = 8, kProxySwizzle = 0x28;
 constexpr std::size_t kBlendMode = 0x50, kMaskReference = 0x58;
 constexpr std::size_t kSamplerBase = 0x219, kSamplerCount = 0x21b;
@@ -59,8 +59,8 @@ void walk(const void* element, int depth, Walk& w) {
 
 struct Cached {
     const void* vtable = nullptr;
-    const void* elements[3]{};  // diffuse, opacity, normal role elements at the walk
-    const void* samplers[3]{};  // their first samplers
+    const void* elements[4]{};  // diffuse, opacity, normal, self-illumination role elements at the walk
+    const void* samplers[4]{};  // their first samplers
     ShaderInfo info;
 };
 std::unordered_map<const void*, Cached> g_cache;
@@ -107,16 +107,18 @@ bool active(ShaderInfo& out, const void* material) {
         out = c.info;
         return true;
     }
-    const void* elements[3]{};
+    const void* elements[4]{};
     readAt(shader, kDiffuseProxy + kProxyElement, elements[0]);
     readAt(shader, kOpacityProxy + kProxyElement, elements[1]);
     readAt(shader, kNormalProxy + kProxyElement, elements[2]);
-    if (c.vtable != vt || c.elements[0] != elements[0] || c.elements[1] != elements[1] || c.elements[2] != elements[2]) {
+    readAt(shader, kSelfIllumProxy + kProxyElement, elements[3]);
+    if (c.vtable != vt || c.elements[0] != elements[0] || c.elements[1] != elements[1] || c.elements[2] != elements[2] ||
+        c.elements[3] != elements[3]) {
         // a new shader object at this address, or its graph changed: walk again
         c = {};
         c.vtable = vt;
-        Role* roles[3] = {&c.info.diffuse, &c.info.opacity, &c.info.normal};
-        for (int i = 0; i < 3; ++i) {
+        Role* roles[4] = {&c.info.diffuse, &c.info.opacity, &c.info.normal, &c.info.selfIllum};
+        for (int i = 0; i < 4; ++i) {
             c.elements[i] = elements[i];
             Walk w;
             walk(elements[i], 0, w);
@@ -135,9 +137,9 @@ bool active(ShaderInfo& out, const void* material) {
         info.samplerCount = bytes[2];
     }
     // the slots are handed out by UpdateShaderConstants: read them every time
-    const std::size_t proxies[3] = {kDiffuseProxy, kOpacityProxy, kNormalProxy};
-    Role* roles[3] = {&info.diffuse, &info.opacity, &info.normal};
-    for (int i = 0; i < 3; ++i) {
+    const std::size_t proxies[4] = {kDiffuseProxy, kOpacityProxy, kNormalProxy, kSelfIllumProxy};
+    Role* roles[4] = {&info.diffuse, &info.opacity, &info.normal, &info.selfIllum};
+    for (int i = 0; i < 4; ++i) {
         fillRole(shader, proxies[i], c.elements[i], c.samplers[i], *roles[i]);
         roles[i]->image = nullptr;
         if (roles[i]->slot >= 0) {

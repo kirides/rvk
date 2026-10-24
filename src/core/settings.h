@@ -318,6 +318,9 @@ struct RendererSettings {
     Setting* giDebug = nullptr;           // gi.debug: "off", "irradiance", "cascades"
     // G-buffer / motion vectors / GTAO (enh/gbuffer.h, docs/research/rtgi.md 10)
     Setting* aoEnabled = nullptr;         // ao.enabled: GTAO on the ambient light
+    Setting* giLights = nullptr;          // gi.lights: "nearby" (the drawn objects' lights) or "world" (engine/lights: every loaded light)
+    Setting* giEmissive = nullptr;        // gi.emissive: gain of self-illuminated surfaces as light sources
+    Setting* giLightCount = nullptr;      // gi.light_count (debug): the most lights the GI considers per frame
     Setting* aoMode = nullptr;            // ao.mode: "replace" (the game's SSAO off), "add"
     Setting* aoStrength = nullptr;        // ao.strength: 0..1
     Setting* aoRadius = nullptr;          // ao.radius: metres

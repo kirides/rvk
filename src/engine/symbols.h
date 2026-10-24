@@ -150,6 +150,14 @@
     /* virtual void eCHemisphere_PS::AddToLightList(eSShaderMaterialLightList&) (0x593c20): updates the hemisphere's SH when    \
        dirty and copies it (7 registers in the c15..c21 layout) to list +0xb8, its indoor colour to list +0x128 */              \
     X(hemisphereAddToLightList, L"Engine.dll", "?AddToLightList@eCHemisphere_PS@@UEAAXAEAUeSShaderMaterialLightList@@@Z", false) \
+    /* ---- the world's lights (engine/lights.*, docs/research/rtgi.md 19): the illumination admin (found through the `this` of   \
+       its calls), its dynamic light array (+0x38, data +0x40, count +0x48) and static light sphere tree (+0x68) ---- */         \
+    X(illuminationFindWighted, L"Engine.dll", "?FindWightedStaticLights@eCIlluminationAdmin@@QEAAHPEAUeSWightedStaticLight@1@KAEBVbCBox@@PEAVeCPortalRoom_PS@@@Z", false) \
+    X(illuminationRegisterDynamic, L"Engine.dll", "?RegisterDynamicLightPS@eCIlluminationAdmin@@QEAA?AW4bEResult@@PEAVeCDynamicLight_PS@@@Z", false) \
+    X(pointLightAddToLightList, L"Engine.dll", "?AddToLightList@eCPointLight_PS@@UEAAXAEAUeSShaderMaterialLightList@@@Z", false) \
+    X(pointLightVftable, L"Engine.dll", "??_7eCPointLight_PS@@6B@", false)                                                       \
+    X(staticPointLightVftable, L"Engine.dll", "??_7eCStaticPointLight_PS@@6B@", false)                                           \
+    X(staticAmbientLightVftable, L"Engine.dll", "??_7eCStaticAmbientLight_PS@@6B@", false)                                       \
     /* ---- sun cascades (engine/shadow_maps.*, docs/research/shadows.md 3) ---- */                                            \
     /* bool eCCascadeShadowMap::RenderShadowMaps() (0x59f200): fits and renders every cascade, each frame (reads MaxDistance  \
        +0x1c, LogSplitFactor +0x20) */                                                                                         \
