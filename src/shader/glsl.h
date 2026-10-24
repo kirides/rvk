@@ -84,6 +84,12 @@ struct GlslOptions {
         std::string target;
     };
     std::vector<DotCapture> dotCaptures;
+
+    // material pixel shaders (enh/material_variant): the variant may be built from the GLSL material shader instead of the
+    // translated bytecode (d3d9::Device ubershader setting, shader/uber.h). `uberDefines` = the RVK_MV_* defines of the hooks
+    // (empty: the plain shader); the translator ignores both
+    bool uber = false;
+    std::string uberDefines;
 };
 
 GlslResult toGlsl(const Program& program, const GlslOptions& options = {});

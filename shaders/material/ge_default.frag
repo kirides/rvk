@@ -197,6 +197,9 @@ vec3 CalcAmbientLightComplex(vec3 n) {
 }
 
 void CustumFragmentAmbient(inout sPassData PassData, inout vec3 colAmbient) {
+#ifdef RVK_MV_GBUFFER
+    rvk_gbN = vec4(PassData.m_vecWorldNormal, 0.0);  // the normal-mapped world normal the ambient is evaluated with: the G-buffer's
+#endif
 #if XFX_AMBIENTLIGHTTYPE == EAmbientLightType_None
     colAmbient = vec3(0.0);
 #elif XFX_AMBIENTLIGHTTYPE == EAmbientLightType_Simple
@@ -543,11 +546,21 @@ vec4 PS_DefaultZPass() {
 
 void main() {
     RVK_LOAD_SHADER_DATA();
+#ifdef RVK_UBER_HOOKS
+#ifdef RVK_MV_VNORMAL
+    rvkMvPrologue(vNormalAndAO);
+#else
+    rvkMvPrologue(vec4(0.0));
+#endif
+#endif
 #if XFX_PASS == XFX_PASS_DEFAULT
     vec4 oC0 = PS_Default();
 #else
     vec4 oC0 = PS_DefaultZPass();
 #endif
     if (!rvk_alphaTest(oC0.a)) discard;
+#ifdef RVK_UBER_HOOKS
+    rvkMvEpilogue(oC0);
+#endif
     rvk_oC0 = oC0;
 }

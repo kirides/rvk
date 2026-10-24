@@ -276,8 +276,8 @@ public:
     VkShaderModule lodModule = VK_NULL_HANDLE;
     bool lodFailed = false;
     // variants of enhancements built in the background (Device::variant, VariantSlot): the module once ready
-    std::array<std::atomic<VkShaderModule>, 4> variants{};
-    std::array<std::atomic<std::uint8_t>, 4> variantState{};  // 0 not requested, 1 queued, 2 ready, 3 failed / not applicable
+    std::array<std::atomic<VkShaderModule>, 5> variants{};
+    std::array<std::atomic<std::uint8_t>, 5> variantState{};  // 0 not requested, 1 queued, 2 ready, 3 failed / not applicable
 };
 
 // A non-owning reference to the device's current shader (setVertexShader / setPixelShader / a replacement's): switching
@@ -305,6 +305,7 @@ enum class VariantSlot : std::uint8_t {
     Capture = 1,  // vertex shaders: world positions + TEXCOORD0 written to a buffer (skinned draws in the RT scene, enh/rt_scene)
     Gbuffer = 2,  // pixel shaders: GI + the thin G-buffer outputs + AO (enh/gbuffer, enh/material_variant)
     GbufferMotion = 3,  // ... + per-object motion from the capture vertex shader's previous world position
+    Base = 4,     // pixel shaders: the plain GLSL material shader (Device::setUbershader), no enhancement hooks
     Count
 };
 struct VariantProvider {
@@ -839,6 +840,11 @@ public:
     const std::array<std::uint32_t, 4>& frameSgi() const { return sgi_; }
     // ---- shader variants of enhancements (render thread) ----
     void setVariantProvider(VariantSlot slot, VariantProvider provider);
+    // the GLSL material shader (shader/uber.h) instead of the translated bytecode for the engine's material pixel shaders whose
+    // request is known (Shader::source): the plain module (VariantSlot::Base) and the enhancement variants (GI, G-buffer) are
+    // built from it in the background; a shader it cannot build stays translated. Applies to modules requested afterwards
+    void setUbershader(bool on);
+    bool ubershader() const { return ubershader_.load(std::memory_order_relaxed); }
     // the slot's variant of `s` when it is built (queues its build on the first call); null until then / when not applicable
     VkShaderModule variant(const ShaderRef& s, VariantSlot slot);
     // the owning pointer of a device shader (its entry in the shader cache), null for a shader that is not cached
@@ -947,6 +953,9 @@ private:
     VkShaderModule tintModule(Shader& ps);  // the tint variant of a pixel shader (null when it fails to build)
     VkShaderModule lodModule(Shader& vs);   // the billboard fade variant of a vertex shader (null when it fails to build)
     VkShaderModule variantModule(const Shader& s, const shader::GlslOptions& options, std::string_view tag);
+    VkShaderModule uberModule(const Shader& s, const MaterialSource& src, const shader::GlslOptions& options, std::string_view tag);
+    std::atomic<bool> ubershader_{false};
+    std::atomic<std::uint64_t> ubershadersBuilt_{0}, ubershadersFailed_{0};
     // A draw's recording state, computed by prepareDraw / the draw call and recorded by applyPacket: now, or later in a
     // batch (docs/research/performance.md 12: the opaque passes' draws grouped by pipeline)
     struct VertexInputValues {
@@ -1188,6 +1197,8 @@ private:
         VkPipeline pipeline = VK_NULL_HANDLE;
     };
     std::array<RecentPipeline, 256> recentPipelines_{};
+    static std::size_t recentSlot(const vk::PipelineDesc& pd);
+    VkPipeline findPipeline(const vk::PipelineDesc& d);
     RecordState rec_;
     // what a vertex shader's inputs read from a vertex declaration (computeVertexInput): fixed per (declaration, shader)
     struct VertexPlanInput {

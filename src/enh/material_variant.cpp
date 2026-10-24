@@ -46,6 +46,8 @@ bool materialVariantOptions(const d3d9::Shader& s, MaterialVariant kind, shader:
     }
     if (vertexNormal != "vec4(0.0)") defines += "#define RVK_MV_VNORMAL 1\n";
 
+    o.uber = true;  // built from the GLSL material shader when the device uses it (d3d9::Device::setUbershader)
+    o.uberDefines = defines;
     o.prelude = "// enhancement variant (enh/material_variant)\n" + defines + std::string(shader::embedded::giGlsl()) + "\n" +
                 std::string(shader::embedded::materialVariantGlsl());
     o.prologue = std::format("    rvkMvPrologue({});", vertexNormal);

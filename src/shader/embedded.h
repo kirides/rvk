@@ -26,4 +26,8 @@ std::string_view giGlsl();
 // shaders/include/rvk_material_variant.glsl (the material pixel shaders' enhancement variants, enh/material_variant)
 std::string_view materialVariantGlsl();
 
+// shaders/material/ge_default.glsl / ge_default.frag: the GLSL material pixel shader (shader/uber.h)
+std::string_view uberGlsl();
+std::string_view uberFrag();
+
 }  // namespace rvk::shader::embedded

@@ -239,6 +239,26 @@ const Device::VertexPlan& Device::vertexPlan(const VertexDecl* decl, Shader& vs)
 
 // The draw's vertex buffers and layout (recorded by applyVertexInput). With dynamic vertex input the layout leaves `pd`
 // (the pipeline does not depend on it: a smaller pipeline key).
+std::size_t Device::recentSlot(const vk::PipelineDesc& pd) {
+    const std::uint64_t h = ((reinterpret_cast<std::uintptr_t>(pd.vs) >> 4) * 0x9E3779B97F4A7C15ull ^
+                             (reinterpret_cast<std::uintptr_t>(pd.fs) >> 4) * 0xC2B2AE3D27D4EB4Full ^ pd.colorFormats[0] ^
+                             (static_cast<std::uint64_t>(pd.depthFormat) << 8) ^ (static_cast<std::uint64_t>(pd.colorCount) << 16)) >>
+                            40;
+    return static_cast<std::size_t>(h % 256);
+}
+
+// the pipeline of `d` when it exists (a direct-mapped cache of recent descriptions first: no 520-byte hash, no lock), never builds
+VkPipeline Device::findPipeline(const vk::PipelineDesc& d) {
+    RecentPipeline& recent = recentPipelines_[recentSlot(d)];
+    if (recent.pipeline != VK_NULL_HANDLE && std::memcmp(&recent.desc, &d, sizeof(d)) == 0) return recent.pipeline;
+    const VkPipeline p = pipelines_.find(d);
+    if (p != VK_NULL_HANDLE) {
+        recent.desc = d;
+        recent.pipeline = p;
+    }
+    return p;
+}
+
 bool Device::computeVertexInput(vk::PipelineDesc& pd, VertexInputValues& out) {
     std::uint32_t streamBinding[kStreams];
     std::fill(std::begin(streamBinding), std::end(streamBinding), UINT32_MAX);
@@ -790,6 +810,12 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         }
     }
 
+    // the GLSL material shader (Device::setUbershader): the plain module of a material pixel shader whose request is known
+    VkShaderModule uberBase = VK_NULL_HANDLE;
+    if (!replaced && tint == 0 && ubershader_.load(std::memory_order_relaxed) && ps_->source.load(std::memory_order_acquire) != nullptr) {
+        uberBase = variant(ps_, VariantSlot::Base);
+    }
+
     // detail distances (lod.trees): the billboards' baked fade-in distances scaled with the trees' LOD
     VkShaderModule vsModule = vs_->module;
     if (!replaced && kind == draws::Kind::SpeedTreeBillboard && billboardFadeScale_ != 1.0f) {
@@ -851,7 +877,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         if (writes && !eds3) {
             for (std::uint32_t i = engineColorCount_; i < colorCount_; ++i) vd.blend[i].writeMask = 0xF;
         }
-        if (pipelines_.contains(vd)) {
+        if (findPipeline(vd) != VK_NULL_HANDLE) {
             pd = vd;
             return true;
         }
@@ -918,6 +944,16 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
             for (const Registered& r : registered_) prebuildReplacement(*r.vs, *r.ps, r.procedural);
         }
     }
+    // no enhancement variant took the draw: the GLSL material shader when it and its pipeline exist (else the translated one)
+    if (uberBase != VK_NULL_HANDLE && pd.fs == fs) {
+        vk::PipelineDesc ud = pd;
+        ud.fs = uberBase;
+        if (findPipeline(ud) != VK_NULL_HANDLE) {
+            pd = ud;
+        } else {
+            pipelines_.prewarmOnce(ud);
+        }
+    }
     // consecutive draws mostly keep their pipeline: compare with the last description before hashing
     VkPipeline pipeline = VK_NULL_HANDLE;
     if (lastPipelineValid_ && std::memcmp(&pd, &lastPipelineDesc_, sizeof(pd)) == 0) {
@@ -925,20 +961,15 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     } else {
         // a direct-mapped cache of recent descriptions in front of the pipeline map: no 520-byte hash, no lock, no node walk
         // (a pipeline never changes once made)
-        const std::uint64_t slot = ((reinterpret_cast<std::uintptr_t>(pd.vs) >> 4) * 0x9E3779B97F4A7C15ull ^
-                                    (reinterpret_cast<std::uintptr_t>(pd.fs) >> 4) * 0xC2B2AE3D27D4EB4Full ^ pd.colorFormats[0] ^
-                                    (static_cast<std::uint64_t>(pd.depthFormat) << 8) ^ (static_cast<std::uint64_t>(pd.colorCount) << 16)) >>
-                                   40;
-        RecentPipeline& recent = recentPipelines_[slot % recentPipelines_.size()];
-        if (recent.pipeline != VK_NULL_HANDLE && std::memcmp(&recent.desc, &pd, sizeof(pd)) == 0) {
-            pipeline = recent.pipeline;
-        } else {
+        pipeline = findPipeline(pd);
+        if (pipeline == VK_NULL_HANDLE) {
             bool created = false;
             pipeline = pipelines_.get(pd, &created);
             if (created && pipeline != VK_NULL_HANDLE) {
                 recordPipelineKey(pd);
             }
             if (pipeline != VK_NULL_HANDLE) {
+                RecentPipeline& recent = recentPipelines_[recentSlot(pd)];
                 recent.desc = pd;
                 recent.pipeline = pipeline;
             }

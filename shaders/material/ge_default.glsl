@@ -222,12 +222,20 @@ vec4 texCUBE(int slot, vec3 dir) { return texture(samplerCube(tCube[pc.draw.tex[
 #define g_FogDensity g_FogSettings.z
 #define g_ViewToScreenScale g_ViewToScreenPos.xy
 #define g_ViewToScreenOffset g_ViewToScreenPos.zw
+#ifdef RVK_MV_AMBIENT
+#define g_IndoorAmbientColor rvk_gi[0]  // enhancement variants: the GI probes' ambient (rvk_material_variant.glsl)
+#else
 #define g_IndoorAmbientColor RVK_STAGE.c[14]
+#endif
 
 // g_ShaderData[8] c6, g_AmbientLight[7] c15, g_DirLight c22 (diffuse, specular, direction), g_PointLights[3] c25 (4 registers each)
 #define g_ShaderData_c(i) RVK_STAGE.c[6 + (i)]
 vec4 g_ShaderData[8];
+#ifdef RVK_MV_AMBIENT
+#define g_AmbientLight_c(i) rvk_gi[1 + (i)]
+#else
 #define g_AmbientLight_c(i) RVK_STAGE.c[15 + (i)]
+#endif
 #define g_DirLight_Diffuse RVK_STAGE.c[22]
 #define g_DirLight_Specular RVK_STAGE.c[23]
 #define g_DirLight_Direction RVK_STAGE.c[24]

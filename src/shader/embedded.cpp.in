@@ -5,6 +5,8 @@
 @RVK_SHADER_INCLUDES@#include "shaders/rvk_abi_glsl.h"
 #include "shaders/rvk_gi_glsl.h"
 #include "shaders/rvk_material_variant_glsl.h"
+#include "shaders/uber_ge_default_glsl.h"
+#include "shaders/uber_ge_default_frag.h"
 
 namespace rvk::shader::embedded {
 namespace {
@@ -28,5 +30,8 @@ std::string_view giGlsl() { return std::string_view(data::rvk_gi_glsl, sizeof(da
 std::string_view materialVariantGlsl() {
     return std::string_view(data::rvk_material_variant_glsl, sizeof(data::rvk_material_variant_glsl) - 1);
 }
+
+std::string_view uberGlsl() { return std::string_view(data::uber_ge_default_glsl, sizeof(data::uber_ge_default_glsl) - 1); }
+std::string_view uberFrag() { return std::string_view(data::uber_ge_default_frag, sizeof(data::uber_ge_default_frag) - 1); }
 
 }  // namespace rvk::shader::embedded

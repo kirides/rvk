@@ -1,6 +1,7 @@
 // d3d9::Device: creation, frames, resources, state setters, clears, copies. Draw preparation is in draw.cpp.
 
 #include "d3d9/device.h"
+#include "shader/uber.h"
 
 #include <windows.h>
 
@@ -1270,7 +1271,71 @@ void Device::setBillboardFadeScale(float scale) {
 
 // a variant of a translated shader (render thread): translated with `options`, compiled (or read from the SPIR-V disk cache
 // under `<hash>_<tag>.spv`), null when it fails
+namespace {
+
+// VariantSlot::Base: the plain GLSL material shader of a request the port covers
+bool uberBaseOptions(const Shader& s, shader::GlslOptions& o) {
+    const MaterialSource* src = s.source.load(std::memory_order_acquire);
+    if (s.stage != shader::Stage::Pixel || src == nullptr || !shader::uberSupports(src->file, src->entry)) return false;
+    o.uber = true;
+    return true;
+}
+
+}  // namespace
+
+void Device::setUbershader(bool on) {
+    ubershader_.store(on, std::memory_order_relaxed);
+    if (on) setVariantProvider(VariantSlot::Base, {std::format("base_t{}", kTranslatorVersion), &uberBaseOptions});
+    spdlog::info("d3d9: GLSL material shaders {}", on ? "on" : "off");
+}
+
+// A material pixel shader built from the GLSL material shader with its request's macros (+ the enhancement hooks of
+// options.uberDefines); null when it does not build (the draw keeps the translated shader)
+VkShaderModule Device::uberModule(const Shader& s, const MaterialSource& src, const shader::GlslOptions& options, std::string_view tag) {
+    const std::string glsl = shader::uberPixelGlsl(src.entry, src.macros, options.uberDefines);
+    if (glsl.empty()) return VK_NULL_HANDLE;
+    std::vector<std::uint32_t> spirv;
+    const auto cacheFile =
+        options_.cacheDir.empty()
+            ? std::filesystem::path()
+            : options_.cacheDir / "spirv" /
+                  std::format("{:016x}_{}_u{:08x}.spv", s.hash, tag, static_cast<std::uint32_t>(shader::uberSourceHash() ^ (shader::uberSourceHash() >> 32)));
+    if (!cacheFile.empty()) {
+        std::ifstream in(cacheFile, std::ios::binary | std::ios::ate);
+        if (in) {
+            spirv.resize(static_cast<std::size_t>(in.tellg()) / 4);
+            in.seekg(0);
+            in.read(reinterpret_cast<char*>(spirv.data()), static_cast<std::streamsize>(spirv.size() * 4));
+        }
+    }
+    if (spirv.empty()) {
+        auto compiled = shader::compileGlsl(shader::Stage::Pixel, glsl);
+        if (!compiled.ok()) {
+            if (ubershadersFailed_.fetch_add(1) < 12) {
+                spdlog::warn("d3d9: GLSL material shader of {:016x} ({} {} variant {}) does not compile: {}", s.hash, src.file, src.entry, tag,
+                             compiled.log.substr(0, 600));
+            }
+            return VK_NULL_HANDLE;
+        }
+        spirv = std::move(compiled.words);
+        if (!cacheFile.empty()) {
+            std::error_code ec;
+            std::filesystem::create_directories(cacheFile.parent_path(), ec);
+            std::ofstream out(cacheFile, std::ios::binary);
+            out.write(reinterpret_cast<const char*>(spirv.data()), static_cast<std::streamsize>(spirv.size() * 4));
+        }
+    }
+    if (const std::uint64_t n = ++ubershadersBuilt_; n == 1 || n % 50 == 0) {
+        spdlog::info("d3d9: GLSL material shaders: {} modules built, {} failed", n, ubershadersFailed_.load());
+    }
+    return vk::createShaderModule(ctx_, spirv);
+}
+
 VkShaderModule Device::variantModule(const Shader& s, const shader::GlslOptions& options, std::string_view tag) {
+    if (options.uber && ubershader_.load(std::memory_order_relaxed) && s.stage == shader::Stage::Pixel) {
+        const MaterialSource* src = s.source.load(std::memory_order_acquire);
+        if (src != nullptr && shader::uberSupports(src->file, src->entry)) return uberModule(s, *src, options, tag);
+    }
     const auto dec = shader::decode(s.bytecode);
     if (!dec.ok()) {
         return VK_NULL_HANDLE;

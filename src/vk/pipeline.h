@@ -109,6 +109,12 @@ public:
         const std::lock_guard lock(mutex_);
         return pipelines_.contains(desc);
     }
+    // the pipeline of `desc` when it exists, else VK_NULL_HANDLE (never builds); any thread
+    VkPipeline find(const PipelineDesc& desc) const {
+        const std::lock_guard lock(mutex_);
+        const auto it = pipelines_.find(desc);
+        return it != pipelines_.end() ? it->second : VK_NULL_HANDLE;
+    }
 
 private:
     VkPipeline build(const PipelineDesc& desc);

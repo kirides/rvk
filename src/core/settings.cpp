@@ -861,6 +861,18 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 1,
         .flags = Flag::Debug,
     });
+    r.ubershader = &reg.add({
+        .key = "debug.ubershader",
+        .label = "GLSL material shaders",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Draws the game's material pixel shaders with the GLSL port of its material shader (built from the same "
+                       "macros the game compiled them with) instead of the translated precompiled shaders. Shaders the port "
+                       "cannot build stay translated.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::Debug,
+    });
     r.materialSources = &reg.add({
         .key = "debug.material_sources",
         .label = "Collect material shader sources",

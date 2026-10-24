@@ -152,6 +152,17 @@ add_custom_command(
     COMMENT "GLSL material variant text shaders/include/rvk_material_variant.glsl"
     VERBATIM)
 list(APPEND RVK_SHADER_OUTPUTS ${RVK_GENERATED_DIR}/shaders/rvk_material_variant_glsl.h)
+# the GLSL material shader as text: the renderer assembles it with the engine's macros at run time (src/shader/uber.cpp)
+foreach(utext ge_default.glsl ge_default.frag)
+    string(MAKE_C_IDENTIFIER "${utext}" uident)
+    add_custom_command(
+        OUTPUT ${RVK_GENERATED_DIR}/shaders/uber_${uident}.h
+        COMMAND rvk_glslc text ${RVK_SHADER_DIR}/material/${utext} -o ${RVK_GENERATED_DIR}/shaders/uber_${uident}.h --name uber_${uident}
+        DEPENDS rvk_glslc ${RVK_SHADER_DIR}/material/${utext}
+        COMMENT "GLSL material text shaders/material/${utext}"
+        VERBATIM)
+    list(APPEND RVK_SHADER_OUTPUTS ${RVK_GENERATED_DIR}/shaders/uber_${uident}.h)
+endforeach()
 configure_file(src/shader/embedded.cpp.in ${RVK_GENERATED_DIR}/embedded_shaders.cpp @ONLY)
 file(GLOB RVK_SHADER_SOURCES CONFIGURE_DEPENDS ${RVK_SHADER_DIR}/*/*.glsl ${RVK_SHADER_DIR}/*/*.vert ${RVK_SHADER_DIR}/*/*.frag ${RVK_SHADER_DIR}/*/*.comp)
 source_group(TREE ${RVK_SHADER_DIR} PREFIX shaders FILES ${RVK_SHADER_SOURCES})
@@ -303,6 +314,8 @@ add_library(rvk_core STATIC
     src/shader/sm_tokens.cpp
     src/shader/sm_tokens.h
     src/shader/spirv.cpp
+    src/shader/uber.cpp
+    src/shader/uber.h
     src/shader/spirv.h
     src/vk/bindless.cpp
     src/vk/bindless.h
