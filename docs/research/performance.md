@@ -382,3 +382,27 @@ our enhancement code reads engine memory during draws: too risky).
 but the engine-shader-hash -> define list + material-graph snippet mapping cannot be inferred automatically (section 5:
 `hlsl_infer` solves 6.7 %). It needs the node-string generators (`eCShaderDefault::GetDeclarations` 0x6c8650,
 `eCColorSrc*::GetImplementation`) or a decode of `ShaderMaterialPool_Master.smp`.
+
+### 14.1 Follow-ups (commit 88bc1a0)
+
+* **Record threads, engine thread helps**: at a scope's end the engine thread records queued chunks itself (work stealing, own
+  command pools) instead of waiting. A worker whose chunk was stolen must wait again: it used to treat the empty queue as "quit"
+  and exit (found by reading, fixed). Record threads need >= 4 hardware threads (guard).
+* `rt::Registry::see` skips the `owners_` write via `Instance::ownerViews`.
+* **Observe cost**: `rt: scene:` stats now print "N instance sightings" per frame: ~1426 sightings for ~1273 accepted draws (2055
+  observed, 782 skipped) at the savegame; observe 0.68 ms with `-Perf` timers (~0.33 us per observed draw). Instanced batches are
+  not what makes observe expensive: it is the ~5 hash lookups per draw.
+* **Tried and removed, no measurable gain**: copying only the vertex shader's used float constant ranges per draw (reflection
+  bitset of read registers; relative-addressing shaders excluded; pixel shaders excluded because the GI / G-buffer variants read
+  ambient registers the engine shader may not read). Plain 141.8-142.9 vs 141-142.6 fps, CPU 7.11 vs 7.05 ms.
+* **Final numbers** (savegame, 2x object distance, plain): 141.9 / 142.9 fps with record threads, 135.5 without; `-Perf` CPU
+  7.1-7.4 ms, GPU 3.6 ms. At the game's own distances (lod 1x): 227.6 vs 223.5 fps. Validation + synchronization validation clean;
+  `rvk_shadertool corpus` 2483 / 2483. Baseline of the whole pass: 118 fps, so +20 % at 2x.
+* **Profile of that state** (`-Perf -CpuProfile`, engine thread): d3d9 37.8 %, engine 29.0 %, ntdll 10.7 % (4 % of it the `-Perf` QPC
+  timers, 2.4 % waiting for workers before stealing), SharedBase 6.8 %, amdvlk64 6.8 %, vcruntime140 5.0 %. Inclusive:
+  `eCFrustumDatabase::Execute` 53 % (`HalPrimitive::Execute` 41.8 %, `prepareDraw` 32.4 %, `RtScene::observe` 11.5 % incl. timers),
+  camera `Update` (cascades) 24 %, `eCProcessor::Process` 11.7 %, inject 7 %.
+* **Not worth building**: (a) replacing the z pre-pass by a GPU-driven pass: the solid pass tests depth EQUAL against the engine's
+  z pre-pass, so it needs bit-identical vertex math (a different shader permutation rounds differently); (b) a deferred
+  render-thread Device API (what DXVK's CS thread does): dynamic vertex buffers are copied at draw time and the enhancements read
+  live engine objects, so silent corruption is a risk for ~1.3 ms.
