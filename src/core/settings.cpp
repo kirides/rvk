@@ -1645,7 +1645,30 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "ignored): the characters are drawn into them before the main view, which gives the ray-traced shadows "
                        "the characters' pose of this frame instead of the previous one. Off: the stride decides.",
         .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::Debug,
+    });
+    r.rtSkin = &reg.add({
+        .key = "debug.rt_skin",
+        .label = "Characters skinned by compute for ray tracing",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The ray tracing scene (shadows, GI, reflections) skins the characters itself from the draws' vertex buffers "
+                       "and bone matrices, once per frame before the scene is built: this frame's pose, no sun cascade redraw. "
+                       "Off: the vertex shaders' captures (this frame's from the cascades when they are drawn, else the previous frame's).",
+        .type = Type::Bool,
         .defaultValue = 1,
+        .flags = Flag::Debug,
+    });
+    r.rtSkinVerify = &reg.add({
+        .key = "debug.rt_skin_verify",
+        .label = "Verify the compute skinning",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Compares the compute skinning with the vertex shader's own result on the sun cascades' draws and logs the "
+                       "largest difference (rvk.log `rt: skin verify`). Costs a second capture per character.",
+        .type = Type::Bool,
+        .defaultValue = 0,
         .flags = Flag::Debug,
     });
     r.prefetchStride = &reg.add({

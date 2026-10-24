@@ -10,6 +10,7 @@
 
 #include "engine/materials.h"
 #include "enh/material_variant.h"
+#include "shader/embedded.h"
 #include "engine/memread.h"
 #include "vk/context.h"
 #include "vk/frames.h"
@@ -129,6 +130,7 @@ void RtScene::deactivate() {
     logStats(true);
     registry_.clear();
     dropDynamic(true, 0);
+    destroySkin();
     std::vector<std::uint64_t> ids;
     ids.reserve(blas_.size());
     for (const auto& [id, b] : blas_) ids.push_back(id);
@@ -146,7 +148,11 @@ void RtScene::deactivate() {
 
 bool RtScene::observes(Kind kind, d3d9::scene::Phase phase) const {
     // characters: the main view's solid pass (also their motion) and the sun cascades' views (this frame's pose, before the main view)
-    if (kind == Kind::Skinned) return dynamic_ && ((phase.view == View::Main && phase.pass == Pass::Solid) || phase.view == View::Shadow);
+    // (with the skinning pass: the z pre-pass's draws too, they carry this frame's bone matrices before the TLAS is built)
+    if (kind == Kind::Skinned) {
+        return dynamic_ && ((phase.view == View::Main && (phase.pass == Pass::Solid || (skinWanted_ && phase.pass == Pass::DepthPrepass))) ||
+                            phase.view == View::Shadow);
+    }
     if (kind == Kind::Refracted) return phase.view == View::Main;  // learnt as water (excluded in every view)
     if (kind != Kind::StaticMesh && kind != Kind::InstancedMesh && kind != Kind::SpeedTree) return false;
     if (phase.view == View::Shadow) return (views_ & 2) != 0;
@@ -1368,6 +1374,7 @@ void RtScene::rollDyn(std::uint64_t frame) {
         dynPrev_.clear();
     }
     dyn_.clear();
+    skinJobs_.clear();
     dynFrame_ = frame;
     dynTrees_ = 0;
 }
@@ -1437,6 +1444,38 @@ void RtScene::observeTree(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& 
     ++iv_.treeCaptured;
 }
 
+// the vertex layout the skinning pass reads (rt_skin.comp): stream 0 only, POSITION F3, BLENDWEIGHT0 F4, BLENDINDICES0 UBYTE4,
+// TEXCOORD0 F2; morph targets (POSITION1..3 in streams 1..3, the heads') only while their weights (the vertex shader's c31.xyz) are
+// zero, then the vertex shader adds nothing of them; a draw with active morph targets keeps the vertex shader capture; `offsets`
+// packs the four byte offsets
+bool RtScene::skinEligible(const d3d9::ReplaceQuery& q, const float* morphWeights, std::uint32_t& offsets) const {
+    if (q.decl == nullptr || q.vertexBuffer == nullptr || q.vertexStride == 0 || (q.vertexStride & 3u) != 0 || q.vertexStride > 255 ||
+        q.vertexBuffer->ringCopied() || (q.vertexOffset & 3u) != 0) {
+        return false;
+    }
+    int pos = -1, bw = -1, bi = -1, tc = -1;
+    bool morph = false;
+    for (const d3d9::VertexElement& e : q.decl->elements()) {
+        if (e.stream == d3d9::kDeclEndStream) break;
+        if (e.stream != 0) {
+            morph = true;
+            continue;
+        }
+        if (e.usage == 0 && e.usageIndex == 0 && e.type == 2) pos = e.offset;
+        else if (e.usage == 0) morph = true;  // POSITION1..3
+        else if (e.usage == 1 && e.usageIndex == 0 && e.type == 3) bw = e.offset;
+        else if (e.usage == 2 && e.usageIndex == 0 && e.type == 5) bi = e.offset;
+        else if (e.usage == 5 && e.usageIndex == 0 && e.type == 1) tc = e.offset;
+    }
+    for (int o : {pos, bw, bi, tc}) {
+        if (o < 0 || o > 252 || (o & 3) != 0) return false;
+    }
+    if (morph && (std::fabs(morphWeights[0]) > 1e-6f || std::fabs(morphWeights[1]) > 1e-6f || std::fabs(morphWeights[2]) > 1e-6f)) return false;
+    offsets = static_cast<std::uint32_t>(pos) | (static_cast<std::uint32_t>(bw) << 8) | (static_cast<std::uint32_t>(bi) << 16) |
+              (static_cast<std::uint32_t>(tc) << 24);
+    return true;
+}
+
 void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     if (!dynamic_ || q.primitiveType != 4 || q.vertexBuffer == nullptr || q.indexBuffer == nullptr || q.primitives == 0 || q.instanced ||
         q.indexBuffer->ringCopied()) {
@@ -1447,6 +1486,24 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     if (dyn_.size() >= 512) return;
     // a cascade's view (the sun's shadow maps are drawn before the main view of the frame, with this frame's pose) or the main view's
     const bool mainView = q.phase.view == View::Main;
+    const bool solid = mainView && q.phase.pass == Pass::Solid;
+    // the skinning pass takes the draws of the z pre-pass and of the cascades (before the TLAS is built); the solid pass keeps
+    // its vertex shader capture (the previous main-view positions: motion vectors, and the fallback for a character the others missed)
+    std::uint32_t skinOffsets = 0;
+    const bool skin = skinWanted_ && !solid && skinReady() && skinEligible(q, dev.vsConstant(31), skinOffsets);
+    if (skinWanted_ && !solid) ++(skin ? iv_.skinDraws : iv_.skinIneligible);
+    if (skinWanted_ && !solid && !skin && skinReady_ && q.decl != nullptr && skinLogged_.insert(q.decl->id()).second && skinLogged_.size() <= 8) {
+        std::string els;
+        for (const d3d9::VertexElement& e : q.decl->elements()) {
+            if (e.stream == d3d9::kDeclEndStream) break;
+            els += std::format(" [s{} +{} type {} usage {}.{}]", e.stream, e.offset, e.type, e.usage, e.usageIndex);
+        }
+        spdlog::info("rt: skin: a draw the skinning pass cannot take: stride {}, vertex offset {}, buffer ring-copied {}:{}", q.vertexStride, q.vertexOffset,
+                     q.vertexBuffer != nullptr && q.vertexBuffer->ringCopied(), els);
+    }
+    if (mainView && !solid && !skin) return;  // the pre-pass's draws only feed the skinning pass
+    // verify: only the cascades' draws (the vertex shader capture of the same draw is the reference)
+    if (skin && skinVerify_ && mainView) return;
     // the draw: entity x buffers x range (the later passes of a character draw the same range again: the first one counts)
     const d3d9::ResourceRef vr = q.vertexBuffer->ref(), ir = q.indexBuffer->ref();
     std::uint64_t key = 1469598103934665603ull;
@@ -1464,7 +1521,19 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     mix(static_cast<std::uint32_t>(q.baseVertex));
     mix(q.vertexOffset);
     for (const DynDraw& d : dyn_) {
-        if (d.key == key && d.main == mainView) return;
+        if (d.key == key && d.skin == skin && (skin || d.main == mainView)) return;
+    }
+    if (solid && skinWanted_ && skinReady_) {
+        // diagnostics: a solid-pass character draw without a skinning job of this frame (the pose of the previous frame is used for it)
+        bool has = false;
+        for (const DynDraw& d : dyn_) has = has || (d.key == key && d.skin);
+        ++(has ? iv_.solidWithSkin : iv_.solidNoSkin);
+        if (!has && skinLogged_.size() < 12 && skinLogged_.insert(key).second) {
+            std::uint32_t o = 0;
+            spdlog::info("rt: skin: a solid-pass draw without a skinning job: entity {}, primitives {}, morph weights {:.3f} {:.3f} {:.3f}, eligible {}, maxIndex {}, jobs {}",
+                         reinterpret_cast<std::uintptr_t>(q.tag != nullptr ? q.tag->entity : nullptr), q.primitives, dev.vsConstant(31)[0], dev.vsConstant(31)[1],
+                         dev.vsConstant(31)[2], skinEligible(q, dev.vsConstant(31), o), dynBlas_[key].maxIndex, skinJobs_.size());
+        }
     }
     DynBlas& b = dynBlas_[key];
     if (b.id == 0) b.id = nextDynId_++;
@@ -1490,21 +1559,57 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     ib->gpu(isize);
     const VkDeviceAddress ibAddress = ib->deviceAddress();
     if (ibAddress == 0) return;
+    // the skinning pass reads the draw's static vertex buffer by address
+    VkDeviceAddress vertexAddress = 0;
+    if (skin) {
+        q.vertexBuffer->gpu(q.vertexStride);
+        const VkDeviceAddress vb = q.vertexBuffer->deviceAddress();
+        const std::int64_t at = static_cast<std::int64_t>(q.vertexOffset) + static_cast<std::int64_t>(q.baseVertex) * q.vertexStride;
+        if (vb != 0 && at >= 0) vertexAddress = vb + static_cast<VkDeviceAddress>(at);
+    }
+    const bool useSkin = skin && vertexAddress != 0;
+    if (mainView && !solid && !useSkin) return;
     const vk::RingAlloc a = dev.frames().allocate(16 + static_cast<VkDeviceSize>(slots) * 32, 16);
     if (a.ptr == nullptr) return;
     // header: slots, the previous frame's capture of this draw (its vertex shader reads the previous positions: motion)
     // (bit 31 of the slots: a cascade's view, whose vertex shader's world position operand is captured instead of the clip position)
-    std::uint32_t header[4] = {slots | (mainView ? 0u : 0x80000000u), 0, 0, 0};
-    if (mainView && b.lastCapture != 0 && b.lastCaptureFrame + 1 == frame) {
+    std::uint32_t header[4] = {slots | ((mainView || useSkin) ? 0u : 0x80000000u), 0, 0, 0};
+    if (mainView && !useSkin && b.lastCapture != 0 && b.lastCaptureFrame + 1 == frame) {
         header[1] = static_cast<std::uint32_t>(b.lastCapture);
         header[2] = static_cast<std::uint32_t>(b.lastCapture >> 32);
         header[3] = b.lastSlots;
     }
     std::memcpy(a.ptr, header, 16);
-    dev.requestVertexCapture(a.address);
-    // the draw's material (diffuse + uv map), resolved again when it changes (the main view's draws carry it)
+    if (useSkin) {
+        SkinJob j;
+        j.vertices = vertexAddress;
+        j.out = a.address;
+        j.slots = slots;
+        j.stride = q.vertexStride;
+        j.offsets = skinOffsets;
+        // the bone matrices: c32 .. c231 of this draw's vertex shader constants
+        const vk::RingAlloc bones = dev.frames().allocate(200u * 16u, 16);
+        if (bones.ptr == nullptr) return;
+        std::memcpy(bones.ptr, dev.vsConstant(kInstanceDataBase), 200u * 16u);
+        j.bones = bones.address;
+        if (skinVerify_) {
+            // the vertex shader's own result for the same draw (the cascade view's capture variant), zeroed: slots it did not write have w = 0
+            const vk::RingAlloc ref = dev.frames().allocate(16 + static_cast<VkDeviceSize>(slots) * 32, 16);
+            if (ref.ptr != nullptr) {
+                std::uint32_t rh[4] = {slots | 0x80000000u, 0, 0, 0};
+                std::memcpy(ref.ptr, rh, 16);
+                std::memset(static_cast<std::uint8_t*>(ref.ptr) + 16, 0, static_cast<std::size_t>(slots) * 32);
+                dev.requestVertexCapture(ref.address);
+                j.ref = ref.address;
+            }
+        }
+        skinJobs_.push_back(j);
+    } else {
+        dev.requestVertexCapture(a.address);
+    }
+    // the draw's material (diffuse + uv map), resolved again when it changes (the solid pass's draws carry it)
     const std::uint64_t sig = RtMaterials::signature(q);
-    if (mainView && (b.material == 0 || b.sig != sig || frame >= b.resolved + 600)) {
+    if (solid && (b.material == 0 || b.sig != sig || frame >= b.resolved + 600)) {
         if (const std::uint32_t id = materials_.resolve(dev, q); id != 0) {
             if (b.material != 0) materials_.release(b.material);
             b.material = id;
@@ -1513,7 +1618,8 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         }
     }
     DynDraw d{key, a.address, ibAddress + static_cast<VkDeviceAddress>(q.first) * isize, slots, q.primitives, index32, false};
-    d.main = mainView;
+    d.main = mainView && !useSkin;
+    d.skin = useSkin;
     dyn_.push_back(d);
 }
 
@@ -1526,6 +1632,7 @@ void RtScene::buildDynamic(VkCommandBuffer cmd, std::uint64_t frame) {
     dynUse_.clear();
     if (!dynamic_) return;
     if (dynFrame_ != frame) rollDyn(frame);
+    recordSkin(cmd);
     {
         std::unordered_set<std::uint64_t> taken;
         for (const DynDraw& d : dyn_) {
@@ -1536,6 +1643,10 @@ void RtScene::buildDynamic(VkCommandBuffer cmd, std::uint64_t frame) {
             dynUse_.push_back(d);
             dynUse_.back().built = false;
             ++iv_.capCurrent;
+            if (!d.tree) {
+                ++iv_.charCurrent;
+                if (d.skin) ++iv_.charSkinned;
+            }
         }
         for (const DynDraw& d : dynPrev_) {
             if (taken.contains(d.key)) continue;
@@ -1545,6 +1656,7 @@ void RtScene::buildDynamic(VkCommandBuffer cmd, std::uint64_t frame) {
             dynUse_.push_back(d);
             dynUse_.back().built = false;
             ++iv_.capPrevious;
+            if (!d.tree) ++iv_.charPrevious;
         }
         // the motion chain (the main view's vertex shader reads the previous main-view capture of the draw)
         for (const DynDraw& d : dyn_) {
@@ -1677,9 +1789,9 @@ void RtScene::buildDynamic(VkCommandBuffer cmd, std::uint64_t frame) {
         }
     }
     for (std::size_t k = 0; k < infos.size(); ++k) infos[k].scratchData.deviceAddress = dynScratch_.address + scratchOffsets[k];
-    // the vertex shaders' captures (this frame's solid pass) -> the builds
-    barrier(cmd, VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-            VK_ACCESS_2_SHADER_READ_BIT);
+    // the vertex shaders' captures (the cascades' and the solid pass's draws) and the skinning pass's output -> the builds
+    barrier(cmd, VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_2_SHADER_READ_BIT);
     std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> pr(ranges.size());
     for (std::size_t k = 0; k < ranges.size(); ++k) pr[k] = &ranges[k];
     vkCmdBuildAccelerationStructuresKHR(cmd, static_cast<std::uint32_t>(infos.size()), infos.data(), pr.data());
@@ -1687,6 +1799,164 @@ void RtScene::buildDynamic(VkCommandBuffer cmd, std::uint64_t frame) {
         dynUse_[i].built = true;
         dynBlas_[dynUse_[i].key].built = true;
         if (dynUse_[i].tree) animatedKeys_.insert(dynUse_[i].key);
+    }
+}
+
+// ---- characters skinned by compute ----------------------------------------------------------------------------------------------
+
+void RtScene::setGpuSkinning(bool on, bool verify) {
+    skinWanted_ = on;
+    skinVerify_ = on && verify;
+    if (!on) skinJobs_.clear();
+}
+
+// the pipeline builds in the background on first use; until it is ready the characters take the vertex shader captures
+bool RtScene::skinReady() {
+    if (!skinWanted_ || skinFailed_ || !dynamicSupported()) return false;
+    if (skinReady_) return true;
+    if (!skinStarted_) {
+        skinStarted_ = true;
+        if (!skinLayout_.create(dev_.ctx(), dev_.bindless(), {})) {
+            skinFailed_ = true;
+            return false;
+        }
+        vk::Context* ctx = &dev_.ctx();
+        const VkPipelineLayout layout = skinLayout_.layout();
+        skinBuild_ = std::async(std::launch::async, [ctx, layout]() {
+            return vk::createComputePipeline(*ctx, layout, shader::embedded::spirv("rt/rt_skin.comp"), "rt.skin");
+        });
+        return false;
+    }
+    if (!skinBuild_.valid() || skinBuild_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
+    skinPipe_ = skinBuild_.get();
+    if (skinPipe_ == VK_NULL_HANDLE) {
+        spdlog::error("rt: skin: the compute pipeline failed: characters keep the vertex shader captures");
+        skinFailed_ = true;
+        return false;
+    }
+    skinReady_ = true;
+    spdlog::info("rt: skin: characters skinned by compute (bone matrices of the draws' vertex shader constants){}", skinVerify_ ? ", verifying against the capture variant" : "");
+    return true;
+}
+
+void RtScene::destroySkin() {
+    skinJobs_.clear();
+    vk::Context* ctx = &dev_.ctx();
+    if (skinBuild_.valid()) {
+        const VkPipeline p = skinBuild_.get();
+        if (p != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), p, nullptr);
+    }
+    const VkPipeline pipe = skinPipe_;
+    vk::PassLayout layout = skinLayout_;
+    vk::rt::AddressBuffer err = skinErr_;
+    if (pipe != VK_NULL_HANDLE || layout.valid() || err.buffer != VK_NULL_HANDLE) {
+        dev_.frames().retire([ctx, pipe, layout, err]() mutable {
+            if (pipe != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), pipe, nullptr);
+            layout.destroy(*ctx);
+            err.destroy(*ctx);
+        });
+    }
+    skinPipe_ = VK_NULL_HANDLE;
+    skinLayout_ = {};
+    skinErr_ = {};
+    skinReady_ = skinStarted_ = false;
+}
+
+// one dispatch for all of the frame's jobs (the frame's first skinned draws: z pre-pass and cascades), before the BLAS builds
+void RtScene::recordSkin(VkCommandBuffer cmd) {
+    if (skinJobs_.empty()) return;
+    if (!skinReady()) {
+        skinJobs_.clear();
+        return;
+    }
+    const std::uint32_t n = static_cast<std::uint32_t>(std::min<std::size_t>(skinJobs_.size(), 512));
+    std::uint32_t chunks = 0;
+    for (std::uint32_t i = 0; i < n; ++i) chunks += (skinJobs_[i].slots + 63) / 64;
+    const vk::RingAlloc t = dev_.frames().allocate(16 + 64ull * n, 16);
+    if (t.ptr == nullptr) {
+        skinJobs_.clear();
+        return;
+    }
+    VkDeviceAddress errAddress = 0;
+    const std::uint32_t slot = dev_.frames().currentSlot();
+    if (skinVerify_) {
+        if (skinErr_.buffer == VK_NULL_HANDLE &&
+            !skinErr_.create(dev_.ctx(), 16ull * vk::Frames::kInFlight, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, 16, "rt skin verify")) {
+            skinVerify_ = false;
+        } else if (skinErr_.mapped != nullptr) {
+            auto* e = reinterpret_cast<std::uint32_t*>(static_cast<std::uint8_t*>(skinErr_.mapped) + 16ull * slot);
+            // this slot's previous frame has completed (Frames::begin waited for it)
+            if (e[1] != 0 || e[2] != 0) {
+                float maxErr = 0.0f;
+                std::memcpy(&maxErr, &e[0], 4);
+                skinVerifyCompared_ += e[1];
+                skinVerifyMissing_ += e[2];
+                skinVerifyMax_ = std::max(skinVerifyMax_, maxErr);
+                const double now = dev_.secondsSinceCreate();
+                if (now >= skinVerifyAt_ + 1.0) {
+                    spdlog::info("rt: skin verify: {} vertices compared with the vertex shader's capture, max error {:.4f} units, {} slots the reference did not write",
+                                 skinVerifyCompared_, skinVerifyMax_, skinVerifyMissing_);
+                    skinVerifyCompared_ = skinVerifyMissing_ = 0;
+                    skinVerifyMax_ = 0.0f;
+                    skinVerifyAt_ = now;
+                }
+            }
+            e[0] = e[1] = e[2] = e[3] = 0;
+            errAddress = skinErr_.address + 16ull * slot;
+        }
+    }
+    auto* head = static_cast<std::uint32_t*>(t.ptr);
+    head[0] = n;
+    head[1] = chunks;
+    head[2] = static_cast<std::uint32_t>(errAddress);
+    head[3] = static_cast<std::uint32_t>(errAddress >> 32);
+    std::uint32_t* jobs = head + 4;
+    std::uint32_t chunk = 0;
+    for (std::uint32_t i = 0; i < n; ++i) {
+        const SkinJob& j = skinJobs_[i];
+        std::uint32_t* w = jobs + 16ull * i;
+        w[0] = static_cast<std::uint32_t>(j.vertices);
+        w[1] = static_cast<std::uint32_t>(j.vertices >> 32);
+        w[2] = static_cast<std::uint32_t>(j.bones);
+        w[3] = static_cast<std::uint32_t>(j.bones >> 32);
+        w[4] = static_cast<std::uint32_t>(j.out);
+        w[5] = static_cast<std::uint32_t>(j.out >> 32);
+        w[6] = j.slots;
+        w[7] = j.stride;
+        w[8] = chunk;
+        w[9] = 0;
+        w[10] = static_cast<std::uint32_t>(j.ref);
+        w[11] = static_cast<std::uint32_t>(j.ref >> 32);
+        w[12] = j.offsets;
+        w[13] = w[14] = w[15] = 0;
+        chunk += (j.slots + 63) / 64;
+        skinVerticesTotal_ += j.slots;
+    }
+    {
+        d3d9::RegionScope r(dev_, "rt.skin");
+        // a reference capture written by a cascade's vertex shader (verify) before the compute reads it
+        barrier(cmd, VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, skinPipe_);
+        skinLayout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, dev_.bindless());
+        struct Push {
+            abi::PassPushHeader h;
+            std::uint32_t table[2];
+            std::uint32_t pad[2];
+        } push{};
+        push.h.frame = 0;
+        push.table[0] = static_cast<std::uint32_t>(t.address);
+        push.table[1] = static_cast<std::uint32_t>(t.address >> 32);
+        skinLayout_.push(cmd, &push, sizeof(push));
+        vkCmdDispatch(cmd, chunks, 1, 1);
+    }
+    for (std::uint32_t i = 0; i < n; ++i) dev_.markVertexCaptured(skinJobs_[i].out);
+    skinJobsTotal_ += n;
+    skinJobs_.clear();
+    const double now = dev_.secondsSinceCreate();
+    if (now >= skinLogAt_ + 5.0) {
+        skinLogAt_ = now;
+        spdlog::info("rt: skin: {} draws / {} vertices skinned by compute so far ({} this frame)", skinJobsTotal_, skinVerticesTotal_, n);
     }
 }
 
@@ -2091,9 +2361,9 @@ void RtScene::logStats(bool force) {
                  iv_.engineSegments, iv_.engineMerged, iv_.speedTree);
     if (dynamic_) {
         spdlog::info("rt: scene: characters {} + animated SpeedTrees {} in the last TLAS ({} tracked, interval: {} BLAS builds, {} refits; "
-                     "volatile ranges {}; tree draws {} ({} beyond the range, {} captured); BLAS refits from this frame's capture {} / the previous frame's {}; capture variant needs vertexPipelineStoresAndAtomics: {})",
+                     "volatile ranges {}; tree draws {} ({} beyond the range, {} captured); BLAS refits from this frame's capture {} / the previous frame's {}; characters: {} from this frame's pose ({} skinned by compute) / {} from the previous frame's (skinning pass: {} draws taken, {} not eligible; solid-pass draws {} with / {} without a job); capture variant needs vertexPipelineStoresAndAtomics: {})",
                      iv_.dynamic - iv_.animatedTrees, iv_.animatedTrees, dynBlas_.size(), dynBuilt_, dynRefit_, iv_.volatileBlas, iv_.treeDraws, iv_.treeFar, iv_.treeCaptured, iv_.capCurrent, iv_.capPrevious,
-                     dev_.ctx().features().vertexStores ? "yes" : "no");
+                     iv_.charCurrent, iv_.charSkinned, iv_.charPrevious, iv_.skinDraws, iv_.skinIneligible, iv_.solidWithSkin, iv_.solidNoSkin, dev_.ctx().features().vertexStores ? "yes" : "no");
         dynBuilt_ = dynRefit_ = 0;
     }
     iv_ = {};

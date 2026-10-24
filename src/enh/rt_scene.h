@@ -31,6 +31,7 @@
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <future>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -79,6 +80,12 @@ public:
     // TLAS while the animated one stands in for it. Needs setDynamic.
     void setAnimated(const void* consumer, bool on, float rangeUnits);
     bool dynamicSupported() const;
+    // Characters skinned by a compute pass (rt-shadows.md 10): the draw's own vertex buffer + the bone matrices of its vertex shader
+    // constants (copied at the draw: the first skinned draw of a frame, in the z pre-pass or a sun cascade, has this frame's pose)
+    // give the world positions before the TLAS is built, no vertex shader capture and no cascade redraw needed. `verify` also
+    // runs the capture variant on the cascades' draws and compares both (rvk.log `rt: skin verify`). The engine's draws are untouched.
+    void setGpuSkinning(bool on, bool verify);
+    bool gpuSkinning() const { return skinWanted_ && skinReady_; }
     // the scene captures skinned draws right now (enh/object_motion leaves them to it)
     bool capturingCharacters() const { return active_ && dynamic_; }
     // the GLSL options of a vertex shader's capture variant (d3d9::VariantSlot::Capture); public for rvk_shadertool --capture
@@ -254,7 +261,31 @@ private:
         std::uint64_t blas = 0;
         VkDeviceAddress requested = 0; // the address the draw's capture was requested with, when `capture` lies inside it (instanced batches)
         bool main = true;              // requested for the main view's solid pass (else for a sun cascade's view: this frame's pose before the main view)
+        bool skin = false;             // written by the skinning compute pass (`capture` = its output; no vertex shader capture)
     };
+    // characters skinned by compute (setGpuSkinning)
+    struct SkinJob {
+        VkDeviceAddress vertices = 0;  // vertex 0 of the draw's index range's slot 0 (base vertex and stream offset applied)
+        VkDeviceAddress bones = 0;     // c32.. of the draw's vertex shader constants (200 vec4, copied into the ring)
+        VkDeviceAddress out = 0;       // the capture-layout buffer
+        VkDeviceAddress ref = 0;       // verify: the vertex shader capture of the same draw
+        std::uint32_t slots = 0, stride = 0, offsets = 0;
+    };
+    bool skinReady();
+    void recordSkin(VkCommandBuffer cmd);
+    bool skinEligible(const d3d9::ReplaceQuery& q, const float* morphWeights, std::uint32_t& offsets) const;
+    void destroySkin();
+    std::vector<SkinJob> skinJobs_;
+    std::unordered_set<std::uint64_t> skinLogged_;
+    bool skinWanted_ = false, skinVerify_ = false, skinReady_ = false, skinFailed_ = false, skinStarted_ = false;
+    vk::PassLayout skinLayout_;
+    std::future<VkPipeline> skinBuild_;
+    VkPipeline skinPipe_ = VK_NULL_HANDLE;
+    vk::rt::AddressBuffer skinErr_;    // verify: 16 bytes per frame slot (max error bits, compared, missing)
+    double skinVerifyAt_ = 0.0, skinLogAt_ = 0.0;
+    std::uint64_t skinVerifyCompared_ = 0, skinVerifyMissing_ = 0;
+    float skinVerifyMax_ = 0.0f;
+    std::uint64_t skinJobsTotal_ = 0, skinVerticesTotal_ = 0;
     struct DynBlas {
         vk::rt::AccelerationStructure as;
         std::uint32_t slots = 0, triangles = 0;
@@ -341,6 +372,9 @@ private:
     // stats (interval since the last log line)
     struct Interval {
         std::uint64_t treeDraws = 0, treeFar = 0, treeCaptured = 0;  // observeTree: calls, beyond the range, captures requested
+        std::uint64_t solidWithSkin = 0, solidNoSkin = 0;
+        std::uint64_t skinIneligible = 0, skinDraws = 0;  // skinned draws of the cascades / pre-pass the skinning pass could not take (morph targets, dynamic buffer) / took
+        std::uint64_t charCurrent = 0, charPrevious = 0, charSkinned = 0;  // characters' BLAS refits: from this frame's capture / the previous frame's / of them by the skinning pass
         std::uint64_t capCurrent = 0, capPrevious = 0;  // captures a frame's BLAS refits used: this frame's (the cascades' views) / the previous frame's
         std::uint64_t animatedTrees = 0;  // animated SpeedTrees in the last TLAS
         std::uint64_t volatileBlas = 0;  // ranges that turned volatile (churning instances) in the interval

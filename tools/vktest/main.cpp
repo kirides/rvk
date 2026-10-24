@@ -13,6 +13,8 @@
 //   context, dispatch the jitter sequence on a constant image under validation, output checked; SKIP (exit 0) without the DLL
 //   rvk_vktest --ffx-driver [dll]: the AMD driver's FidelityFX provider library (amdvkffx64.dll): loaded and asked for its
 //   provider interface (UpdateFfxApiProvider), what it offers on this GPU is printed; no context is created
+//   rvk_vktest --skin: the character skinning compute pass of the ray tracing scene (shaders/rt/rt_skin.comp) against a CPU
+//   reference of the engine's skinned vertex shader (two jobs of different vertex layouts, one dispatch), under validation
 //   rvk_vktest --shader-stats: the driver's register / spill / instruction statistics of the water pixel shader (in a
 //   pipeline like the renderer's) and of the ray-traced reflections' compute pass (VK_KHR_pipeline_executable_properties)
 //
@@ -372,6 +374,164 @@ int passTest(bool hazard) {
     const bool pass = bad == 0 && (hazard ? verrors > 0 : verrors == 0);
     std::printf("%s: passes: %d bad value(s), %u validation error(s)%s\n", pass ? "PASS" : "FAIL", bad, verrors,
                 hazard ? " (a hazard was expected)" : "");
+    return pass ? 0 : 1;
+}
+
+// --skin: the ray tracing scene's character skinning compute pass (shaders/rt/rt_skin.comp, docs/research/rt-shadows.md 10) against a
+// CPU reference of the engine's skinned vertex shader: two jobs of different vertex layouts in one dispatch (the chunk lookup),
+// random bones / weights, bone indices past the palette (ignored), the output checked slot by slot. Needs no ray tracing tier.
+int skinTest() {
+    vk::Context ctx;
+    if (!ctx.create({true, -1, "rvk_vktest skin", true})) {
+        return 2;
+    }
+    vk::Frames frames;
+    vk::Bindless bindless;
+    if (!frames.create(ctx) || !bindless.create(ctx, frames)) {
+        return 2;
+    }
+    vk::PassLayout layout;
+    if (!layout.create(ctx, bindless, {})) {
+        return 2;
+    }
+    VkPipeline pipe = vk::createComputePipeline(ctx, layout.layout(), shader::embedded::spirv("rt/rt_skin.comp"), "test skin");
+    if (pipe == VK_NULL_HANDLE) {
+        return 2;
+    }
+    std::uint32_t seed = 12345;
+    const auto rnd = [&]() {
+        seed = seed * 1664525u + 1013904223u;
+        return static_cast<float>(seed >> 8) / 16777216.0f;
+    };
+    struct Layout {
+        std::uint32_t slots, stride, pos, bw, bi, tc;
+    };
+    const Layout layouts[2] = {{200, 72, 0, 12, 28, 64}, {97, 80, 4, 16, 32, 44}};
+    constexpr std::uint32_t kBoneVec4 = 200;
+    std::vector<float> bones[2];
+    std::vector<std::uint8_t> verts[2];
+    for (int j = 0; j < 2; ++j) {
+        bones[j].resize(kBoneVec4 * 4);
+        for (float& f : bones[j]) f = rnd() * 2.0f - 1.0f;
+        verts[j].assign(static_cast<std::size_t>(layouts[j].slots) * layouts[j].stride, 0);
+        for (std::uint32_t i = 0; i < layouts[j].slots; ++i) {
+            std::uint8_t* v = verts[j].data() + static_cast<std::size_t>(i) * layouts[j].stride;
+            float pos[3] = {rnd() * 100.0f, rnd() * 100.0f, rnd() * 100.0f};
+            float w[4] = {rnd(), rnd(), rnd(), rnd()};
+            std::uint8_t idx[4];
+            for (auto& b : idx) b = static_cast<std::uint8_t>(rnd() < 0.15f ? 66 + static_cast<int>(rnd() * 100.0f) : static_cast<int>(rnd() * 66.0f));
+            float tc[2] = {rnd(), rnd()};
+            std::memcpy(v + layouts[j].pos, pos, 12);
+            std::memcpy(v + layouts[j].bw, w, 16);
+            std::memcpy(v + layouts[j].bi, idx, 4);
+            std::memcpy(v + layouts[j].tc, tc, 8);
+        }
+    }
+    constexpr VkBufferUsageFlags kUse = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    vk::rt::AddressBuffer vb[2], bb[2], out[2], table;
+    bool ok = table.create(ctx, 16 + 64 * 2, kUse, true, 16, "test skin table");
+    for (int j = 0; j < 2 && ok; ++j) {
+        ok = vb[j].create(ctx, verts[j].size(), kUse, true, 16, "test skin vertices") &&
+             bb[j].create(ctx, kBoneVec4 * 16, kUse, true, 16, "test skin bones") &&
+             out[j].create(ctx, 16 + static_cast<VkDeviceSize>(layouts[j].slots) * 32, kUse, true, 16, "test skin out");
+        if (!ok) break;
+        std::memcpy(vb[j].mapped, verts[j].data(), verts[j].size());
+        std::memcpy(bb[j].mapped, bones[j].data(), bones[j].size() * 4);
+        std::memset(out[j].mapped, 0, out[j].size);
+    }
+    if (!ok) {
+        return 2;
+    }
+    auto* t = static_cast<std::uint32_t*>(table.mapped);
+    t[0] = 2;
+    std::uint32_t chunk = 0;
+    for (int j = 0; j < 2; ++j) {
+        std::uint32_t* w = t + 4 + 16 * j;
+        const Layout& l = layouts[j];
+        w[0] = static_cast<std::uint32_t>(vb[j].address);
+        w[1] = static_cast<std::uint32_t>(vb[j].address >> 32);
+        w[2] = static_cast<std::uint32_t>(bb[j].address);
+        w[3] = static_cast<std::uint32_t>(bb[j].address >> 32);
+        w[4] = static_cast<std::uint32_t>(out[j].address);
+        w[5] = static_cast<std::uint32_t>(out[j].address >> 32);
+        w[6] = l.slots;
+        w[7] = l.stride;
+        w[8] = chunk;
+        w[9] = w[10] = w[11] = 0;
+        w[12] = l.pos | (l.bw << 8) | (l.bi << 16) | (l.tc << 24);
+        w[13] = w[14] = w[15] = 0;
+        chunk += (l.slots + 63) / 64;
+    }
+    t[1] = chunk;
+    t[2] = t[3] = 0;
+
+    frames.begin();
+    VkCommandBuffer cmd = frames.cmd();
+    bindless.recordInit(cmd);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
+    layout.bindSet0(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, bindless);
+    struct Push {
+        shader::abi::PassPushHeader h;
+        std::uint32_t table[2];
+        std::uint32_t pad[2];
+    } push{};
+    push.table[0] = static_cast<std::uint32_t>(table.address);
+    push.table[1] = static_cast<std::uint32_t>(table.address >> 32);
+    layout.push(cmd, &push, sizeof(push));
+    vkCmdDispatch(cmd, chunk, 1, 1);
+    frames.submit(VK_NULL_HANDLE, VK_NULL_HANDLE);
+    frames.waitIdle();
+
+    int bad = 0;
+    float maxErr = 0.0f;
+    for (int j = 0; j < 2; ++j) {
+        const Layout& l = layouts[j];
+        const auto* o = static_cast<const float*>(out[j].mapped) + 4;  // after the 16-byte header
+        for (std::uint32_t i = 0; i < l.slots; ++i) {
+            const std::uint8_t* v = verts[j].data() + static_cast<std::size_t>(i) * l.stride;
+            float p[4] = {0, 0, 0, 1}, w[4], tc[2];
+            std::uint8_t idx[4];
+            std::memcpy(p, v + l.pos, 12);
+            std::memcpy(w, v + l.bw, 16);
+            std::memcpy(idx, v + l.bi, 4);
+            std::memcpy(tc, v + l.tc, 8);
+            float rows[3][4] = {};
+            for (int k = 0; k < 4; ++k) {
+                if (idx[k] >= 66 || w[k] == 0.0f) continue;
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 4; ++c) rows[r][c] += bones[j][(1 + 3 * idx[k] + r) * 4 + c] * w[k];
+                }
+            }
+            float expect[8];
+            for (int r = 0; r < 3; ++r) expect[r] = p[0] * rows[r][0] + p[1] * rows[r][1] + p[2] * rows[r][2] + p[3] * rows[r][3];
+            expect[3] = 1.0f;
+            expect[4] = tc[0];
+            expect[5] = tc[1];
+            expect[6] = 0.0f;
+            expect[7] = 1.0f;
+            for (int c = 0; c < 8; ++c) {
+                const float e = std::abs(o[i * 8 + c] - expect[c]);
+                maxErr = std::max(maxErr, e);
+                if (e > 1e-3f * std::max(1.0f, std::abs(expect[c])) && bad++ < 5) {
+                    std::printf("job %d slot %u component %d = %f, expected %f\n", j, i, c, o[i * 8 + c], expect[c]);
+                }
+            }
+        }
+    }
+    for (int j = 0; j < 2; ++j) {
+        vb[j].destroy(ctx);
+        bb[j].destroy(ctx);
+        out[j].destroy(ctx);
+    }
+    table.destroy(ctx);
+    vkDestroyPipeline(ctx.device(), pipe, nullptr);
+    layout.destroy(ctx);
+    frames.destroy();
+    bindless.destroy();
+    const std::uint32_t verrors = ctx.validationErrors();
+    ctx.destroy();
+    const bool pass = bad == 0 && verrors == 0;
+    std::printf("%s: skin: %d bad component(s), max error %g, %u validation error(s)\n", pass ? "PASS" : "FAIL", bad, maxErr, verrors);
     return pass ? 0 : 1;
 }
 
@@ -900,6 +1060,8 @@ int main(int argc, char** argv) {
         } else if (a == "--fsr") {
             fsrMode = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') fsrDll = argv[++i];
+        } else if (a == "--skin") {
+            return skinTest();
         } else if (a == "--shader-stats") {
             return shaderStats();
         } else {

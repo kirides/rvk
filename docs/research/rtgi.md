@@ -348,7 +348,7 @@ z pre-pass (characters, alpha) keep the uncorrected DDGI and no AO. The G-buffer
 Player quicksave (harbour town, detail 4x, 1600x900): 95.8 fps, GPU ~8.3 ms, CPU-bound ~10.4 ms; validation clean.
 
 **Open**: characters / alpha: see section 14 (depth-gathered fallback); the GTAO
-arc pattern next to the pub wall persists; characters lag one frame in the RT scene (the RT shadows take this frame's pose from the cascades' draws, rt-shadows.md 7).
+arc pattern next to the pub wall persists; characters lag one frame in the RT scene (the RT shadows take this frame's pose from the cascades' draws, rt-shadows.md 7; every character the z pre-pass draws is skinned by compute before the TLAS is built, rt-shadows.md 10).
 
 ## 13. Interior brightness: a minimum ambient (2026-10-24)
 

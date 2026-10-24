@@ -1,0 +1,94 @@
+#version 460
+// Characters skinned for the ray tracing scene (src/enh/rt_scene.cpp, docs/research/rt-shadows.md 10): the engine's skinned vertex
+// shader (ge_default_vs.fx, hardware skinning) evaluated once per frame per draw from the draw's own inputs: the vertex buffer
+// (POSITION F3, BLENDWEIGHT0 F4, BLENDINDICES UBYTE4, TEXCOORD0 F2) and the bone matrices the engine put into the vertex shader
+// constants (bone b at c33 + 3 b: three rows of a 3x4 matrix, `g_vInstanceData`), copied at the draw. The result has the layout
+// of the capture variant's buffer (vertex shader writes of the draw: 16-byte header, then per vertex index i two vec4s: the
+// world position (w = 1) and TEXCOORD0), so the BLAS builds, the material vertex reads and the motion code take it as it is.
+//
+//   world = sum_k w_k * (bone row_j(b_k) . (position, 1)),  j = 0..2          (the VS: `dp4 r.x, v0, r0` with r0 = blended c33[a0])
+//
+// One dispatch for all of the frame's jobs: workgroup g skins 64 vertex slots of the job whose chunk range holds g.
+#define RVK_PASS_SHADER 1
+#extension GL_EXT_buffer_reference_uvec2 : require
+#include "rvk_abi.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer SkinTable {
+    uvec4 head;  // x jobs, y chunks, zw the error accumulator's address (0 = none: not verifying)
+    uvec4 job[]; // 4 per job (below)
+};
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Words { uint w[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Bones { vec4 c[]; };  // c32 at 0
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer Capture { uvec4 info; vec4 v[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer SkinErr { uint maxBits; uint compared; uint missing; uint pad; };
+
+layout(push_constant, std430) uniform SkinPush {
+    RVK_PASS_PUSH_HEADER
+    uvec2 table;
+    uvec2 pad;
+} pc;
+
+// job[4 j + 0] = (vertex 0's address lo, hi, bones lo, hi)
+// job[4 j + 1] = (output lo, hi, slots, vertex stride in bytes)
+// job[4 j + 2] = (first chunk, 0, reference capture lo, hi)   (the reference: a capture variant's output of the same draw)
+// job[4 j + 3] = (offsets: position | blend weight << 8 | blend indices << 16 | texcoord0 << 24, 0, 0, 0)
+const uint BONE_COUNT = 66;  // c33 .. c230: 3 b + 3 <= 199 constants after c32
+
+float f(Words v, uint byteOffset) { return uintBitsToFloat(v.w[byteOffset >> 2]); }
+
+void main() {
+    SkinTable t = SkinTable(pc.table);
+    uint jobs = t.head.x;
+    uint g = gl_WorkGroupID.x;
+    // the job: the last one whose first chunk is <= g
+    uint lo = 0u, hi = jobs;
+    while (hi - lo > 1u) {
+        uint mid = (lo + hi) >> 1;
+        if (t.job[4u * mid + 2u].x <= g) lo = mid; else hi = mid;
+    }
+    uvec4 j0 = t.job[4u * lo], j1 = t.job[4u * lo + 1u], j2 = t.job[4u * lo + 2u], j3 = t.job[4u * lo + 3u];
+    uint slot = (g - j2.x) * 64u + gl_LocalInvocationID.x;
+    uint slots = j1.z;
+    if (slot >= slots) return;
+    // vertex address = base + slot * stride (64-bit add without the Int64 feature: the floor does not have it)
+    uint carry;
+    uint lowWord = uaddCarry(j0.x, slot * j1.w, carry);
+    Words v = Words(uvec2(lowWord, j0.y + carry));
+    uint oPos = j3.x & 0xFFu, oBw = (j3.x >> 8) & 0xFFu, oBi = (j3.x >> 16) & 0xFFu, oTc = (j3.x >> 24) & 0xFFu;
+    vec4 p = vec4(f(v, oPos), f(v, oPos + 4u), f(v, oPos + 8u), 1.0);
+    vec4 bw = vec4(f(v, oBw), f(v, oBw + 4u), f(v, oBw + 8u), f(v, oBw + 12u));
+    uint bi = v.w[oBi >> 2];
+    Bones bones = Bones(j0.zw);
+    // rows of the blended 3x4 matrix (the VS blends c33 / c34 / c35 [3 b])
+    vec4 r0 = vec4(0.0), r1 = vec4(0.0), r2 = vec4(0.0);
+    for (uint k = 0u; k < 4u; ++k) {
+        uint b = (bi >> (8u * k)) & 0xFFu;
+        float w = bw[k];
+        if (b >= BONE_COUNT || w == 0.0) continue;
+        uint c = 1u + 3u * b;  // c33 + 3 b, relative to c32
+        r0 += bones.c[c] * w;
+        r1 += bones.c[c + 1u] * w;
+        r2 += bones.c[c + 2u] * w;
+    }
+    vec3 world = vec3(dot(p, r0), dot(p, r1), dot(p, r2));
+    Capture o = Capture(j1.xy);
+    vec4 tc = vec4(f(v, oTc), f(v, oTc + 4u), 0.0, 1.0);
+    uvec2 refAddr = j2.zw;
+    if (refAddr != uvec2(0u) && t.head.zw != uvec2(0u)) {
+        // verification (debug.rt_skin_verify): against the vertex shader's own result of this draw, where it wrote this slot
+        Capture r = Capture(refAddr);
+        vec4 rp = r.v[slot * 2u];
+        SkinErr e = SkinErr(t.head.zw);
+        if (rp.w == 1.0) {
+            float err = length(rp.xyz - world);
+            atomicMax(e.maxBits, floatBitsToUint(err));
+            atomicAdd(e.compared, 1u);
+        } else {
+            atomicAdd(e.missing, 1u);
+        }
+    }
+    o.v[slot * 2u] = vec4(world, 1.0);
+    o.v[slot * 2u + 1u] = tc;
+}

@@ -274,6 +274,16 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         if (!rs.rtSceneViews->isDefault()) applyViews(*rs.rtSceneViews);
         reg.onChange(*rs.rtSceneViews, applyViews, this);
     }
+    // characters skinned by compute for the RT scene (docs/research/rt-shadows.md 10)
+    if (rs.rtSkin != nullptr && rs.rtSkinVerify != nullptr) {
+        const auto applySkin = [this](const settings::Setting&) {
+            const auto& rs2 = settings::renderer();
+            rtScene_->setGpuSkinning(rs2.rtSkin->asBool(), rs2.rtSkinVerify->asBool());
+        };
+        applySkin(*rs.rtSkin);
+        reg.onChange(*rs.rtSkin, applySkin, this);
+        reg.onChange(*rs.rtSkinVerify, applySkin, this);
+    }
     // enhanced water (enh/water.h, docs/research/water.md): a draw replacer, live settings
     water_ = std::make_unique<enh::Water>(dev_, rtScene_.get());
     if (rs.waterEnabled != nullptr) {

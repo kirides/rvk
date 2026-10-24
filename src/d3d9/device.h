@@ -861,6 +861,8 @@ public:
         captureRequest_ = buffer;
         captureInstances_ = instances;
     }
+    // a buffer written by a compute pass counts as captured this frame (enh/rt_scene's skinning pass)
+    void markVertexCaptured(VkDeviceAddress buffer) { captured_.push_back(buffer); }
     bool vertexCaptured(VkDeviceAddress buffer) const {
         return std::find(captured_.begin(), captured_.end(), buffer) != captured_.end();
     }

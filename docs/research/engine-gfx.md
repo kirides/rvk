@@ -407,6 +407,14 @@ All **[C]** unless marked. Phase markers and draw tags built on these: frame-pha
   refraction colour-source GUID (`+0x410`) is valid; base classes return false (`0x6d2f60`).
 * Skinned actors: `eCRenderContextAnimation2::Render(op)` `0x4dd860` -> `eCAnimation_PS::Render` `0x4d6fe0`,
   `UpdateRenderMatrices`, `eCAnimation_HardRenderActor2::Render` `0x4dd650`, `RenderPrimitive` `0x4dd0a0`.
+  [C, decompiled 2026-10-24] EMotionFX: `eCWrapper_emfx3ActorInstance::UpdateRenderMatrices(frameId)` (`0x4dfee0`) copies the actor's
+  bone world matrices into its render palette once per frame (stamp at `this+0x58` = the render admin's frame id (`+0x4c`), array of
+  0x40-byte matrices at `+0x48`, count `+0x50` = the skeleton's bone count at the actor `+0xd8`) and returns true; `HardRenderActor2::Render`
+  hands the matrix of each remapped bone of a sub-primitive (`eSHardPrimitive` `+0x18` start, `+0x1a` count, bone list `this+0x28`, 16-bit
+  palette indices) to the shader through vtable `+0x1f0` (slot i, matrix pointer), morph targets through `SetupMorphTargets` (`+0x1f8`,
+  weights -> c31.xyz), the global alpha `+0x210`, then `RenderPrimitive`. The VS reads the slots as c33 + 3 i (rows 0..2): the constants of
+  every skinned draw hold the frame's final pose (used by `rt_skin.comp`, rt-shadows.md 10). The palette of an actor that is not rendered
+  in a frame is not updated.
 * Other emitters: SpeedTree `0x6ee320`, SpeedTree billboards `0x6ee8d0`, vegetation (instanced) `0x70d4b0`, sky
   `eCSkydome_PS::Render` `0x6e4730`, particles `0x5e0080`, strips `0x6feae0`, GUI in `eCApplication::Draw` `0x4c13b0`.
 * Thunks: `eCRenderContextMesh::Render(op, db)` / `RenderAlpha` / `RenderRefracted` / `RenderZPass` (`0x5c73e0 / 0x5c73f0 /

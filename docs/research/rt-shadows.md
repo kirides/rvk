@@ -237,3 +237,58 @@ Together about -0.12 ms CPU per frame in this scene (1.5 % of the frame); valida
 GI + RT shadows extended): no messages; `rvk_tests` 133. **Not done / the rest**: the 85 skinned draws' refits (1.2 us each; their
 distance is not known on the CPU: far characters could be refitted less often), the registry's per-sighting hash lookups and
 `Registry::see` (cache-missing `list_` entries), skipping the cascade views' sightings of draws the main view already registered.
+
+## 10. Characters skinned by compute from the engine's own inputs (2026-10-24)
+
+The player asked: "can't we just get real character skinning data instead of extrapolating". Yes: the inputs are in hand at the draw.
+
+**Where the data lives** (engine-gfx.md 9, [C] from the decompilation, matching the VS listings of the corpus):
+the engine skins in the vertex shader (hardware skinning, EMotionFX). A skinned draw's vertex shader reads the bone matrices from the
+constants `c33 + 3 b` (rows of a 3x4 matrix; bone `b` = BLENDINDICES UBYTE4, 4 influences with BLENDWEIGHT0 FLOAT4) and computes
+`world = sum_k w_k (row_j(b_k) . (position, 1))`; the morph variants add `position += POSITION1..3 x c31.xyz` first (the heads;
+the weights are zero most of the time). `eCAnimation_PS::Render` (0x4d6fe0) -> `eCWrapper_emfx3ActorInstance::UpdateRenderMatrices`
+(0x4dfee0: fills the actor's palette once per frame, stamped with the frame id at `+0x58`: an array of 0x40-byte matrices at `+0x48`,
+count `+0x50`) -> `eCAnimation_HardRenderActor2::Render` (0x4dd650) which hands the matrix of each of a sub-primitive's remapped
+bones to the shader (vtable `+0x1f0`, slot i = palette[remap[i]]), then `RenderPrimitive` draws. So the constants of any skinned draw
+of the frame, in the z pre-pass or in a sun cascade, hold this frame's final pose.
+
+**Built** (`shaders/rt/rt_skin.comp`, `RtScene::observeSkinned / recordSkin`, setting `debug.rt_skin`, default on): at each skinned draw
+of the z pre-pass and of the cascades the scene copies c32..c231 (3.2 KB) into the frame's ring and records a job (the draw's static
+vertex buffer by address, its stream offset and base vertex, the layout offsets from the declaration, the capture-format output buffer
+of the BLAS builder). One compute dispatch before the BLAS builds skins all jobs (64 vertex slots per workgroup, the job found by binary
+search over the chunk starts) and writes the capture layout: world position (w = 1) + TEXCOORD0 per vertex-index slot, so the BLAS
+refit, the material vertex reads and everything downstream take it unchanged. The z pre-pass is complete before the TLAS is built
+(AfterDepthPrepass), so every character on screen is this frame's pose with no cascade redraw. The solid pass keeps its vertex shader
+capture for the motion vectors (the previous main-view positions) and as the fallback for a draw the pass cannot take (active morph
+targets, a dynamic vertex buffer, another declaration). Floor: no Int64 (the address maths is a 32-bit add with carry).
+
+**Verified** [C]:
+* `rvk_vktest --skin`: the compute shader against a CPU reference of the vertex shader (two jobs of different layouts in one dispatch,
+  bone indices past the palette, random weights): max error 2.4e-5, no validation message.
+* In the game (`debug.rt_skin_verify`: the cascades' draws also run the capture variant and the compute pass compares both): max error
+  0.006 - 0.012 world units (0.1 mm) over ~2 million vertices per second, morph draws with zero weights included. Slots the reference did
+  not write are index gaps of a draw (not referenced by its triangles).
+* Validation + synchronization validation (walking scenario, harbour, extended, RT shadows): no messages.
+* `rvk_tests` 133.
+
+**Result** (harbour quicksave, walking, `shadows.rt=extended`, `-Perf`, one run per configuration: treat 0.1 ms as noise):
+
+| configuration | characters from this frame's pose | engine+HAL CPU | GPU | frame p50 |
+|---|---|---|---|---|
+| RT shadows off | - | 4.41 ms | 1.15 ms | 3.56 ms |
+| old default: capture + cascade sync (`debug.rt_shadow_sync` on) | 95 % | 5.36 | 2.06 | 4.64 |
+| capture, no sync | 48 % | 4.99 | 1.89 | 4.15 |
+| **skinning pass** (the new default, sync off) | 74 % (every character the z pre-pass draws: 100 %) | 5.11 | 1.89 | 4.35 |
+
+The rest of the 74 % are characters outside the view that only a sun cascade draws, in frames in which the engine skips its cascades
+(`debug.shadow_stride`): they keep the previous frame's pose (their shadows reach the picture only as a one-frame lag of off-screen
+casters). The pass itself costs nothing measurable (`rt.scene` pass 0.206 ms CPU / 0.125 ms GPU with and without). 93 % of the cascade /
+pre-pass draws are taken (the others have active morph targets). Against the old default the sync's cost is gone (-0.25 ms CPU,
+-0.17 GPU, -0.3 ms frame) with the hero and every other visible character in this frame's pose; `debug.rt_shadow_sync` now defaults
+off (kept as the way to get the off-screen casters of this frame too).
+
+**Not done / open**: the engine's palette (`UpdateRenderMatrices`) is only filled for actors it renders, so an actor outside every view
+has no fresh matrices to read anywhere (calling it ourselves would need the actor registry: not attempted); morph draws with active
+weights (faces speaking, 7 % of the draws) keep the capture; the motion vectors still come from the main-view capture; the engine's
+own draws still skin in their vertex shaders (sharing the result with them needs a replacement vertex shader for every skinned
+material: not built, no frame-time gain expected since the draw calls stay).

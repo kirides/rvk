@@ -76,6 +76,7 @@ set(RVK_SHADERS
     rt/rt_debug.comp
     rt/rt_debug_depth.comp
     rt/rt_debug.frag
+    rt/rt_skin.comp
     shadows/rt_shadow_spatial.comp
     shadows/rt_shadow_temporal.comp
     shadows/rt_shadow_trace.comp
