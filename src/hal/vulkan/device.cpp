@@ -307,7 +307,14 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         applyShadows();  // also the engine's cascade overrides (shadows.map_size / range: "auto" follows shadows.enabled)
     }
     // the native renderer's opaque pass (enh/native_opaque.h, docs/research/native-renderer.md N3)
+    nativeParts_ = std::make_unique<enh::NativeParts>(dev_, [this](const void* handle) { return declFromHandle(const_cast<void*>(handle)); });
+    nativeShadows_ = std::make_unique<enh::NativeShadows>(dev_, *nativeParts_);
     nativeOpaque_ = std::make_unique<enh::NativeOpaque>(dev_);
+    nativeOpaque_->setShadows(nativeShadows_.get());
+    if (rs.nativeShadows != nullptr) {
+        reg.onChange(*rs.nativeShadows, [this](const settings::Setting& s) { nativeShadows_->apply(s.asBool()); }, this);
+        nativeShadows_->apply(rs.nativeShadows->asBool());
+    }
     if (rs.nativeOpaque != nullptr) {
         reg.onChange(*rs.nativeOpaque, [this](const settings::Setting& s) { nativeOpaque_->apply(s.asBool()); }, this);
         nativeOpaque_->apply(rs.nativeOpaque->asBool());
@@ -1175,6 +1182,8 @@ void HalDevice::logFrameStructure() {
             p.first = r.first;
             p.primitives = r.primitives;
             p.baseVertex = r.baseVertex;
+            p.vertexOffset = r.vertexOffset;
+            p.vertexStride = r.vertexStride;
             p.plainIndexedMesh = r.kind == draws::Kind::StaticMesh && (r.flags & draws::Record::Indexed) != 0 &&
                                  (r.flags & (draws::Record::Instanced | draws::Record::UserPointer)) == 0 && r.primitiveType == 4;
             probes.push_back(p);

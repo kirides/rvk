@@ -64,6 +64,8 @@ set(RVK_SHADERS
     gi/gi_trace.comp
     gi/sp_resolve.comp
     gi/sp_trace.comp
+    native/shadow_mesh.frag
+    native/shadow_mesh.vert
     native/static_mesh.frag
     native/static_mesh.vert
     gbuffer/ao_white.frag
@@ -242,6 +244,10 @@ add_library(rvk_core STATIC
     src/scene/mirror.h
     src/enh/native_opaque.cpp
     src/enh/native_opaque.h
+    src/enh/native_parts.cpp
+    src/enh/native_parts.h
+    src/enh/native_shadows.cpp
+    src/enh/native_shadows.h
     src/enh/rt_registry.cpp
     src/enh/rt_registry.h
     src/enh/rt_scene.cpp

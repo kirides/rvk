@@ -1682,6 +1682,17 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .flags = Flag::Debug,
     });
+    r.nativeShadows = &reg.add({
+        .key = "native.shadows",
+        .label = "Native sun shadows",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The native opaque pass takes the sun's shadow from the renderer's own cascades, drawn from the scene mirror's static "
+                       "mesh parts (also the ones off screen), instead of the engine's shadow mask. Experimental.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::Debug,
+    });
     r.nativeDebug = &reg.add({
         .key = "native.debug",
         .label = "Native opaque debug view",
@@ -1691,9 +1702,9 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "mask's channels, the ambient, lightmap or sun term alone, the draw's feature flags.",
         .type = Type::Enum,
         .defaultValue = 0,
-        .options = {"off", "albedo", "normal", "mask_shadow", "mask_ao", "ambient", "lightmap", "sun", "flags", "albedo_depth", "albedo_cull"},
+        .options = {"off", "albedo", "normal", "mask_shadow", "mask_ao", "ambient", "lightmap", "sun", "flags", "albedo_depth", "albedo_cull", "shadow"},
         .optionLabels = {"Off", "Diffuse texture", "Normal", "Shadow mask (sun)", "Shadow mask (occlusion)", "Ambient only", "Lightmap only",
-                         "Sun only", "Feature flags", "Diffuse (depth test only)", "Diffuse (culling only)"},
+                         "Sun only", "Feature flags", "Diffuse (depth test only)", "Diffuse (culling only)", "Sun shadow"},
         .flags = Flag::NoAB | Flag::Debug,
     });
     r.prefetchStride = &reg.add({

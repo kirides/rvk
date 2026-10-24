@@ -193,3 +193,52 @@ engine's; the native shader samples the mask (s0: `.a` sun shadow, `.r` occlusio
 * Next (N3.2 - N4): list the parts from the mirror (own frustum / distance cull, level of detail from the contexts, no engine draw needed),
   take the lighting inputs natively (hemisphere / lights readers, per-object nearest lights, lightmaps from the mesh resource), then our own
   cascades from the mirror for the native shadow term.
+
+## 10. Where the engine's per-entity lighting comes from (RE, 2026-10-25; dumps `B:\DevDrive\risen-ghidra\native_light_dump*.txt`) [C unless marked]
+
+So a native pass can build the pixel shader constants without the engine's draw:
+
+* **Camera / fog (once per view, `eCFrustumDatabase::Execute`)**: c0 = camera position, `.w` = far (`eCShaderMaterialAdmin::SetCamera` 0x6ba1d0);
+  c1 = (0.5, -0.5, 1/vpW + 0.5, 1/vpH + 0.5); c3 = fog colour / 255, c4 = (-start k, k, density) with k = density / (end - start)
+  (`SetFog` 0x6b9fc0 from `eCGfxFog::Execute`, fog data `+0x18 enable, +0x1c colour bytes, +0x28 start, +0x2c end, +0x30 density`).
+* **Illumination of an entity**: `eCIlluminated_PS` = entity `+0xf8`, its `eSShaderMaterialIllumination` at `PS + 0x78`:
+  `+0x00` pointer to the shared light list, `+0x08` float f (outdoor factor, eased by +-dt / 0.3), `+0x0d` count of static per-pixel lights (0..2),
+  `+0x10 + 0x40 i` static light i (4 vec4 = the point light registers c25 + 4 i), `+0x90` byte: static SH present, `+0x94 + 0x10 k` (k < 7) static SH.
+  Static data (`StaticIlluminated` = Static, the default) is baked into the world file (`ComputeInstanceLighting`), valid right after load;
+  Dynamic ones are recomputed only when requested for drawing (`eCFrustumElementItem::Request` with request bit 0x80, `UpdateIllumination`
+  0x595300), so a mirrored Dynamic entity needs one request before its data is real.
+* **Light list (per light set, shared; refreshed every frame by `eCIlluminationAdmin::Process` -> `UpdateLightSets`)**: `+0x00` byte sun present,
+  `+0x04 / +0x14 / +0x24` = c22 diffuse x intensity, c23 specular, c24 towards-sun direction (verbatim), `+0x34` byte dynamic light count (0..2),
+  `+0x38 + 0x40 i` dynamic light i (4 vec4 = c25 + 4 i ...), `+0xb8 + 0x10 k` (k < 7) hemisphere SH (c15..c21 layout), `+0x128` indoor ambient (c14.rgb).
+* **Copy to registers** (`FUN_1806cd1d0` 0x6cd1d0 / `FUN_1806b5bb0` 0x6b5bb0): c14 = list `+0x128`; **c15..c21 = hemisphere SH x f, `.w` of c15..c17 += (1 - f) x
+  indoor.rgb, + the static SH when `illum+0x90`** (whether the add covers all four components: [I]); c22..c24 verbatim from the list; c25 + 4 i: the
+  static lights first (illum), then the dynamic ones (list), at most 3 per pass (up to 2 + 2 lights per entity = 2 passes). Nothing depends on the camera, no
+  shadow flag multiplies the sun (the shadow mask is a texture). Validation plan: compose the block natively and compare it with the constants of the
+  engine's own draws of the same entity (counter in rvk.log).
+* **Lightmaps are per mesh resource**: `res +0x90` (s4, `_1.dds`) and `res +0x98` (s5, `_2.dds`) are `eCImageResource2*`; `mats::apiTextureOf(image)` (+0x70 image data,
+  +0x60 API texture) -> `Device::engineTexture`; null until loaded. The uv is the mesh's TEXCOORD6.
+* **Fade** (`CalculateFadeOut` 0x671220, per frame, not stored): base = entity `+0xc8`, R = `+0xcc` (ViewRange) x `db +0x15b4` (the view factor, `lod.view`); d = distance
+  camera -> entity sphere centre; R <= 0 (or db `+0x15a9`): base; d > R: 0 (dropped); d > 0.9 R: base x (1 - (d - 0.9 R) / 0.1 R). **A fade < 1 moves the mesh out of
+  the opaque list into the alpha-blended list** (global alpha = fade; not a dither): the native opaque list must leave such parts to the engine.
+* Open: the weather path that sets the fog fields; `bCVector4::Translate`'s component count; `eCMesh_PS::Lightmaped`; a runtime comparison of `illum+0x0d / +0x90 / +0x08`
+  of Static vs Dynamic entities with the draw constants.
+
+## 11. N4: native sun shadow cascades (2026-10-25, `native.shadows`, default off) [C]
+
+`src/enh/native_shadows.*`, `src/enh/native_parts.*`, `shaders/native/shadow_mesh.*`. Three sphere-fitted, texel-snapped cascades (2048², splits 1500 / 4000 /
+10000 units, light = `engine::shadowmaps::trueSunVector`) rendered at `AfterDepthPrepass` into transient D32 images from **the scene mirror's static mesh parts**
+(every cached-in entity within reach of the cascades, off-screen casters included, masked parts alpha-tested through the material graph's diffuse),
+depth-only, vertices pulled by address like the opaque pass. The native opaque shader samples them (3x3 PCF, slope-scaled bias + normal offset, the last
+cascade fading into the engine's mask) in place of the mask's `.a`.
+
+* `NativeParts` turns a mirror part into draw data without a draw: buffers (HAL objects -> `d3d9::Buffer`, `buffer_lookup`), the vertex layout from the engine's declaration
+  handle (visual `+0x50` = our `VertexDecl*`), the material graph (blend mode, mask reference, diffuse image -> `Device::engineTexture`). Geometry cached per sub-mesh
+  (validated by the identity of the resource's buffers and the part's numbers), textures per material; it is a `DrawObserver` that observes no draws, only
+  `bufferChanged` / `textureReleased` (no stale pointer survives a release).
+* Verified (savegame, sync validation clean): the term view equals the engine's mask in the shadow shapes (cobbles, the right-hand wall's tree shadow), the lit
+  image equals the engine's. First version: shadow acne on walls at grazing sun (a fine hatch) - fixed by slope-scaled depth bias and normal offset.
+* Cost: ~1100 casters, ~2450 depth draws per frame over the 3 cascades; 7 ms CPU with synchronization validation on (draw recording dominates; 58 -> 40 fps
+  in that run, 58 -> 36 before the part cache). Open: merge / cache the cascade draw lists while the sun and the camera barely move (the engine updates its own
+  every other frame), instancing, a GPU culling pass.
+* Not casters yet: characters, trees, grass, instanced meshes (not in the native parts): the engine's cascades keep drawing for them and the engine's mask still
+  carries their shadows beyond / besides ours. Next: skinned characters from the compute skinning (rt-shadows.md 10), SpeedTree.

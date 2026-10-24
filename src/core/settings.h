@@ -346,6 +346,7 @@ struct RendererSettings {
     Setting* rtSkinVerify = nullptr;      // debug.rt_skin_verify: compare it with the vertex shader capture
     Setting* nativeOpaque = nullptr;      // native.opaque: the static meshes drawn by our own pass (native-renderer.md N3)
     Setting* nativeDebug = nullptr;       // native.debug: one term of the native shading as the colour
+    Setting* nativeShadows = nullptr;     // native.shadows: the native sun cascades (native-renderer.md N4)
     Setting* shadowStride = nullptr;      // debug.shadow_stride: the sun cascades redrawn every n-th frame (engine::shadowmaps::setUpdateStride)
     Setting* prefetchStride = nullptr;    // debug.prefetch_stride: the cache-in walk every n-th frame (engine::lod::setPrefetchStride)
     Setting* lodView = nullptr;           // lod.view: the view range of objects (eCFrustumDatabase view range factor)

@@ -50,6 +50,32 @@ bool alphaPass(float a, uint func, float ref) {
     }
 }
 
+// the native cascades' sun shadow at a world position (1 lit); `cover` = how far the cascades are the answer (0 beyond their range)
+float nativeShadowTerm(NativeShadow sh, vec3 world, vec3 n, vec3 toSun, float viewDepth, out float cover) {
+    cover = 0.0;
+    int c = -1;
+    if (viewDepth < sh.split.x) c = 0;
+    else if (viewDepth < sh.split.y) c = 1;
+    else if (viewDepth < sh.split.z) c = 2;
+    if (c < 0) return 1.0;
+    const float texelW = sh.texel[c];
+    // slope-scaled bias and normal offset: a surface at a grazing angle to the sun needs more of both (the acne on walls)
+    const float ndl = clamp(dot(n, toSun), 0.0, 1.0);
+    const float slope = min(sqrt(max(1.0 - ndl * ndl, 0.0)) / max(ndl, 0.15), 8.0);
+    const vec4 sc = sh.viewProj[c] * vec4(world + n * (sh.params.z * texelW * (0.5 + 0.5 * min(slope, 4.0))), 1.0);
+    const vec2 uv = sc.xy * 0.5 + 0.5;
+    const float depth = sc.z - (sh.params.y * texelW * (1.0 + slope)) / sh.range[c];
+    float lit = 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            const float d = rvkSample2DLod(sh.maps[c], sh.maps.w, uv + vec2(float(x), float(y)) * sh.params.x, 0.0).r;
+            lit += depth <= d ? 1.0 : 0.0;
+        }
+    }
+    cover = c < 2 ? 1.0 : 1.0 - smoothstep(sh.split.z * (1.0 - sh.params.w), sh.split.z, viewDepth);
+    return lit / 9.0;
+}
+
 void main() {
     NativeItem it = NativeItem(pc.item);
     const uint flags = it.tex2.y;
@@ -81,6 +107,15 @@ void main() {
     vec4 mask = vec4(1.0);
     if (it.tex1.x != 0u && (flags & NATIVE_NO_MASK) == 0u) mask = rvkSample2D(it.tex1.x, it.tex1.y, screen);
 
+    // the sun's shadow: the native cascades inside their range (fading to the engine's mask beyond), else the engine's mask
+    float sunShadow = mask.a;
+    if (pc.shadow != uvec2(0u)) {
+        NativeShadow sh = NativeShadow(pc.shadow);
+        float cover;
+        const float ours = nativeShadowTerm(sh, inWorld, N, normalize(it.ps[24].xyz), inViewPos.w, cover);
+        sunShadow = mix(sunShadow, ours, cover);
+    }
+
     vec3 acc = vec3(0.0);
     vec3 ambTerm = vec3(0.0), lmTerm = vec3(0.0), sunTerm = vec3(0.0);
     // ambient: SH of the normal, the indoor colour where the vertex occlusion is high
@@ -104,7 +139,7 @@ void main() {
     // the sun (Lambert x the shadow mask)
     if ((flags & NATIVE_NO_SUN) == 0u) {
         const vec3 L = it.ps[24].xyz;
-        const float lamb = sat(dot(L, n)) * mask.a;
+        const float lamb = sat(dot(L, n)) * sunShadow;
         const float selfShadow = (flags & NATIVE_NORMALMAP) != 0u ? sat(4.0 * dot(L, N)) : 1.0;
         sunTerm = it.ps[22].rgb * lamb * selfShadow;
         acc += sunTerm;
@@ -137,6 +172,7 @@ void main() {
     case 5u: color = ambTerm; break;
     case 6u: color = lmTerm; break;
     case 7u: color = sunTerm; break;
+    case 11u: color = vec3(sunShadow); break;
     case 8u:
         color = vec3((flags & NATIVE_LIGHTMAP) != 0u ? 1.0 : 0.0, (flags & NATIVE_NORMALMAP) != 0u ? 1.0 : 0.0, (flags & NATIVE_NO_ALBEDO) != 0u ? 1.0 : 0.0);
         if (it.tex1.x == 0u) color += vec3(0.3);

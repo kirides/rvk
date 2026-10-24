@@ -29,6 +29,7 @@ struct DrawProbe {
     std::uint64_t vertexBufferId = 0, indexBufferId = 0;  // d3d9 resource ids of stream 0 / the indices (0 = none)
     std::uint32_t first = 0, primitives = 0;               // start index, triangles
     std::int32_t baseVertex = 0;
+    std::uint32_t vertexOffset = 0, vertexStride = 0;      // stream 0 (bytes)
     bool plainIndexedMesh = false;                         // a non-instanced indexed triangle-list draw of a static mesh
 };
 

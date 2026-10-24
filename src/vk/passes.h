@@ -51,7 +51,7 @@ VkPipeline createComputePipeline(Context& ctx, VkPipelineLayout layout, std::spa
                                  const VkSpecializationInfo* spec = nullptr);
 
 // a graphics pipeline for a pass without vertex input (fullscreen triangles: vkCmdDraw(3)): no depth, no culling, dynamic
-// viewport + scissor, one colour attachment of `color` with `blend`
+// viewport + scissor, one colour attachment of `color` with `blend` (none when `color` is VK_FORMAT_UNDEFINED: a depth-only pass)
 struct PassGraphicsDesc {
     std::span<const std::uint32_t> vs;
     std::span<const std::uint32_t> fs;
@@ -66,6 +66,7 @@ struct PassGraphicsDesc {
     VkCompareOp depthOp = VK_COMPARE_OP_LESS_OR_EQUAL;
     VkCullModeFlags cull = VK_CULL_MODE_NONE;
     VkFrontFace frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    float depthBiasConstant = 0.0f, depthBiasSlope = 0.0f;  // a rasterizer depth bias (0 / 0 = off)
     bool dynamicCullMode = false;  // the cull mode is set per draw (vkCmdSetCullMode), `cull` is the pipeline's default
 };
 VkPipeline createPassGraphicsPipeline(Context& ctx, VkPipelineLayout layout, const PassGraphicsDesc& desc);

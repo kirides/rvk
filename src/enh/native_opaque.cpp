@@ -13,6 +13,7 @@
 #include "d3d9/defs.h"
 #include "engine/materials.h"
 #include "engine/scene_mirror.h"
+#include "enh/native_shadows.h"
 #include "shader/embedded.h"
 #include "vk/image.h"
 
@@ -344,6 +345,7 @@ void NativeOpaque::pass(d3d9::PassContext& ctx) {
     vkCmdSetViewport(cmd, 0, 1, &vp);
     vkCmdSetScissor(cmd, 0, 1, &sc);
     layout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, dev_.bindless());
+    const VkDeviceAddress shadowBlock = shadows_ != nullptr ? shadows_->block() : 0;
     VkPipeline bound = VK_NULL_HANDLE;
     VkCullModeFlags boundCull = 0xFFFFFFFFu;
     for (const Item& it : items) {
@@ -371,6 +373,8 @@ void NativeOpaque::pass(d3d9::PassContext& ctx) {
         push.vertices[1] = static_cast<std::uint32_t>(it.vertices >> 32);
         push.indices[0] = static_cast<std::uint32_t>(it.indices);
         push.indices[1] = static_cast<std::uint32_t>(it.indices >> 32);
+        push.shadow[0] = static_cast<std::uint32_t>(shadowBlock);
+        push.shadow[1] = static_cast<std::uint32_t>(shadowBlock >> 32);
         layout_.push(cmd, &push, sizeof(push));
         vkCmdDraw(cmd, it.indexCount, 1, it.first, 0);
         ++stats_.drawn;

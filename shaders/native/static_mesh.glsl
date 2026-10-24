@@ -30,9 +30,20 @@ layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Na
     vec4 params;   // x alpha reference 0..255
 };
 
+// mirror of enh::NativeShadowBlock (272 bytes): the native sun cascades (enh/native_shadows)
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer NativeShadow {
+    mat4 viewProj[3];  // world -> cascade clip
+    vec4 split;        // far end of cascades 0..2 (view depth, world units)
+    uvec4 maps;        // bindless t2D slots; w = the point / clamp sampler
+    vec4 params;       // x 1 / map size, y depth bias (texels), z normal offset (texels), w last cascade fade fraction
+    vec4 texel;        // world units per texel of each cascade
+    vec4 range;        // depth range of each cascade (world units)
+};
+
 layout(push_constant, std430) uniform NativePush {
-    RVK_PASS_PUSH_HEADER  // frame, passId, passFlags (16)
+    RVK_PASS_PUSH_HEADER  // frame, passId (the debug view), passFlags (16)
     uvec2 item;           // NativeItem
     uvec2 vertices;       // stream 0 start (buffer address + stream offset)
     uvec2 indices;        // index buffer start
+    uvec2 shadow;         // NativeShadow (0: no native cascades this frame: the engine's mask)
 } pc;

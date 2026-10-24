@@ -153,6 +153,9 @@ VkPipeline createPassGraphicsPipeline(Context& ctx, VkPipelineLayout layout, con
         rs.cullMode = desc.cull;
         rs.frontFace = desc.frontFace;
         rs.lineWidth = 1.0f;
+        rs.depthBiasEnable = desc.depthBiasConstant != 0.0f || desc.depthBiasSlope != 0.0f ? VK_TRUE : VK_FALSE;
+        rs.depthBiasConstantFactor = desc.depthBiasConstant;
+        rs.depthBiasSlopeFactor = desc.depthBiasSlope;
         VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
         ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
         VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
@@ -169,14 +172,14 @@ VkPipeline createPassGraphicsPipeline(Context& ctx, VkPipelineLayout layout, con
         ba.alphaBlendOp = desc.blend.alphaOp;
         ba.colorWriteMask = desc.blend.writeMask;
         VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-        cb.attachmentCount = 1;
+        cb.attachmentCount = desc.color != VK_FORMAT_UNDEFINED ? 1u : 0u;
         cb.pAttachments = &ba;
         const VkDynamicState dyn[3] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_CULL_MODE};
         VkPipelineDynamicStateCreateInfo dy{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
         dy.dynamicStateCount = desc.dynamicCullMode ? 3u : 2u;
         dy.pDynamicStates = dyn;
         VkPipelineRenderingCreateInfo ri{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
-        ri.colorAttachmentCount = 1;
+        ri.colorAttachmentCount = desc.color != VK_FORMAT_UNDEFINED ? 1u : 0u;
         ri.pColorAttachmentFormats = &desc.color;
         ri.depthAttachmentFormat = desc.depth;
         ri.stencilAttachmentFormat = desc.stencil;

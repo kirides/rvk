@@ -157,7 +157,8 @@ std::size_t g_refreshed = 0, g_meshReloads = 0;
 
 // N1: the draws' geometry against the mirror's mesh parts
 struct PartCheck {
-    std::uint64_t draws = 0, partMissing = 0, bufferOk = 0, bufferBad = 0, rangeOk = 0, rangeBad = 0, baseBad = 0, unresolvedBuffers = 0;
+    std::uint64_t draws = 0, partMissing = 0, bufferOk = 0, bufferBad = 0, rangeOk = 0, rangeBad = 0, baseBad = 0, unresolvedBuffers = 0,
+        offsetBad = 0, strideBad = 0;
 } g_check;
 int g_badLogged = 0;
 
@@ -180,9 +181,9 @@ void report() {
                  c.deletedUnknown, g_refreshed, g_refreshMs, c.moved, g_meshReloads, c.drawsResolved, c.drawsUnresolved, meshes, parts);
     if (g_check.draws != 0) {
         spdlog::info("scene mirror: mesh parts vs draws: {} plain mesh draws, sub-mesh unknown to the mirror {}, buffers equal {} / differ {} "
-                     "(unresolved HAL objects {}), index range inside the part {} / outside {}, base vertex != 0 {}",
+                     "(unresolved HAL objects {}), index range inside the part {} / outside {}, base vertex != 0 {}, stream offset != 0 {}, stride differs {}",
                      g_check.draws, g_check.partMissing, g_check.bufferOk, g_check.bufferBad, g_check.unresolvedBuffers, g_check.rangeOk,
-                     g_check.rangeBad, g_check.baseBad);
+                     g_check.rangeBad, g_check.baseBad, g_check.offsetBad, g_check.strideBad);
     }
 }
 
@@ -282,6 +283,8 @@ void crossCheck(const std::vector<DrawProbe>& draws) {
             }
         }
         if (d.baseVertex != 0) ++g_check.baseBad;
+        if (d.vertexOffset != 0) ++g_check.offsetBad;
+        if (vb.buffer != nullptr && vb.stride != d.vertexStride) ++g_check.strideBad;
     }
 }
 

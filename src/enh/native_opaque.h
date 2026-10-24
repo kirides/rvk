@@ -30,15 +30,18 @@ struct NativeItemBlock {
 };
 static_assert(sizeof(NativeItemBlock) == 912);
 
-// mirror of shaders/native/static_mesh.glsl NativePush (40 bytes)
+// mirror of shaders/native/static_mesh.glsl NativePush (48 bytes)
 struct NativeStaticPush {
     VkDeviceAddress frame = 0;
     std::uint32_t passId = 0, passFlags = 0;
     std::uint32_t item[2]{};
     std::uint32_t vertices[2]{};  // stream 0 start (address)
     std::uint32_t indices[2]{};   // index buffer start (address)
+    std::uint32_t shadow[2]{};    // NativeShadowBlock (0: none)
 };
-static_assert(sizeof(NativeStaticPush) == 40);
+static_assert(sizeof(NativeStaticPush) == 48);
+
+class NativeShadows;
 
 class NativeOpaque final : public d3d9::DrawReplacer {
 public:
@@ -50,7 +53,8 @@ public:
     // render thread (settings callbacks run at the frame boundary)
     void apply(bool enabled);
     bool enabled() const { return enabled_; }
-    void setDebug(std::uint32_t mode);  // native.debug: 0 off, 1 albedo, 2 normal, 3 mask shadow, 4 mask ao, 5 ambient, 6 lightmap, 7 sun, 8 flags
+    void setDebug(std::uint32_t mode);
+    void setShadows(const NativeShadows* shadows) { shadows_ = shadows; }  // the native sun cascades the shader samples (null: the engine's mask)  // native.debug: 0 off, 1 albedo, 2 normal, 3 mask shadow, 4 mask ao, 5 ambient, 6 lightmap, 7 sun, 8 flags
 
     bool handles(d3d9::draws::Kind kind, d3d9::scene::Phase phase, const d3d9::draws::Tag& tag) const override;
     void replace(d3d9::Device& device, const d3d9::ReplaceQuery& q, d3d9::DrawReplacement& out) override;
@@ -78,6 +82,7 @@ private:
     d3d9::Device& dev_;
     bool enabled_ = false;
     std::uint32_t debug_ = 0;
+    const NativeShadows* shadows_ = nullptr;
     std::uint32_t passId_ = 0;
     bool registered_ = false;
     bool failed_ = false;
