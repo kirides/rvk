@@ -220,7 +220,13 @@
        (0x696040, pre: before they are freed), void eCEntityAdmin::NotifyDeleteEntities(eCEntity*) (0x695310: the delete net) */ \
     X(prefetchEntityCachedIn, L"Engine.dll", "?OnEntityCachedIn@eCPrefetchAdmin@@QEAAXPEAVeCGeometryEntity@@@Z", false)         \
     X(prefetchEntityCachedOut, L"Engine.dll", "?OnEntityCachedOut@eCPrefetchAdmin@@QEAAXPEAVeCGeometryEntity@@@Z", false)       \
-    X(entityAdminNotifyDelete, L"Engine.dll", "?NotifyDeleteEntities@eCEntityAdmin@@QEAAXPEAVeCEntity@@@Z", false)
+    X(entityAdminNotifyDelete, L"Engine.dll", "?NotifyDeleteEntities@eCEntityAdmin@@QEAAXPEAVeCEntity@@@Z", false)             \
+    /* the render context kinds (a context's +0 is its vftable) */                                                              \
+    X(ctxMeshVftable, L"Engine.dll", "??_7eCRenderContextMesh@@6B@", false)                                                     \
+    X(ctxAnimationVftable, L"Engine.dll", "??_7eCRenderContextAnimation2@@6B@", false)                                          \
+    X(ctxSpeedTreeVftable, L"Engine.dll", "??_7eCRenderContextSpeedTree@@6B@", false)                                           \
+    X(ctxSpeedTreeBBVftable, L"Engine.dll", "??_7eCRenderContextSpeedTreeBB@@6B@", false)                                       \
+    X(ctxVegetationVftable, L"Engine.dll", "??_7eCRenderContextVegetation@@6B@", false)
 
 namespace rvk::engine {
 

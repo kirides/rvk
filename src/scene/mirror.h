@@ -26,10 +26,30 @@ struct EntityState {
     std::array<const void*, 8> kinds{};      // the first contexts' vtables (a context's kind)
 };
 
+// one sub-mesh of a mesh resource (eCSubMesh, stride 0x48): an indexed triangle list range of the resource's buffers
+struct MeshPart {
+    const void* subMesh = nullptr;           // eCSubMesh* (also the draw tag's subMesh)
+    std::uint32_t firstIndex = 0, indexCount = 0;      // +0x28, +0x2c (triangle lists: indexCount / 3 primitives)
+    std::uint32_t firstVertex = 0, vertexCount = 0;    // +0x30, +0x34 (the indices are absolute)
+    const void* material = nullptr;          // eCMaterialResource2* (+0x38)
+};
+
+// a mesh render context (eCRenderContextMesh) of an entity and the mesh resource it currently draws (its level of detail)
+struct MeshInfo {
+    const void* context = nullptr;           // eCRenderContextMesh*
+    const void* meshResource = nullptr;      // eCMeshResource2* (context +0x28): changes with the level of detail
+    const void* visual = nullptr;            // eCGfxVisual* (resource +0x88)
+    const void* vertexData[3]{};             // eCGfxVertexData* of streams 0..2 (visual +0x30 / +0x38 / +0x40)
+    const void* indexData = nullptr;         // eCGfxIndexData* (visual +0x58)
+    const void* declaration = nullptr;       // vertex declaration object (visual +0x50)
+    std::vector<MeshPart> parts;
+};
+
 struct Entity {
     const void* ptr = nullptr;
     std::uint64_t id = 0;                    // stable while cached in, never reused
     EntityState state;
+    std::vector<MeshInfo> meshes;            // its mesh render contexts (native-renderer.md N1)
     std::uint64_t addedFrame = 0, updatedFrame = 0;
     std::uint32_t moved = 0;                 // times its world matrix changed since it was added
 };
@@ -52,6 +72,15 @@ public:
     bool deleted(const void* ptr);     // the entity is being destroyed; false: not mirrored
     // a fresh state (the world matrix moved?); false: not mirrored
     bool update(const void* ptr, const EntityState& state, std::uint64_t frame);
+    // the entity's mesh contexts (as read from the engine now); stored when they differ from the stored ones (a level of detail
+    // switch changes a context's mesh resource); false: not mirrored. `changed` tells whether it was stored.
+    bool setMeshes(const void* ptr, std::vector<MeshInfo>&& meshes, bool* changed = nullptr);
+    // the stored mesh contexts of an entity (a copy; empty when not mirrored)
+    std::vector<MeshInfo> meshesOf(const void* ptr) const;
+    // `check` sees the stored mesh contexts under the lock (no copy); its verdict is returned (false when not mirrored)
+    bool checkMeshes(const void* ptr, const std::function<bool(const std::vector<MeshInfo>&)>& check) const;
+    // the sub-mesh `subMesh` of the entity: its mesh context (parts left empty) and part; false when unknown
+    bool lookupPart(const void* ptr, const void* subMesh, MeshInfo& info, MeshPart& part) const;
 
     bool contains(const void* ptr) const;
     std::size_t size() const;

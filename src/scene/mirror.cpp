@@ -60,6 +60,49 @@ bool Mirror::update(const void* ptr, const EntityState& state, std::uint64_t fra
     return true;
 }
 
+bool Mirror::setMeshes(const void* ptr, std::vector<MeshInfo>&& meshes, bool* changed) {
+    std::lock_guard lock(mutex_);
+    const auto it = map_.find(ptr);
+    if (it == map_.end()) return false;
+    std::vector<MeshInfo>& cur = it->second.meshes;
+    bool differs = cur.size() != meshes.size();
+    for (std::size_t i = 0; !differs && i < cur.size(); ++i) {
+        differs = cur[i].context != meshes[i].context || cur[i].meshResource != meshes[i].meshResource ||
+                  cur[i].parts.size() != meshes[i].parts.size();
+    }
+    if (changed != nullptr) *changed = differs;
+    if (differs) cur = std::move(meshes);
+    return true;
+}
+
+std::vector<MeshInfo> Mirror::meshesOf(const void* ptr) const {
+    std::lock_guard lock(mutex_);
+    const auto it = map_.find(ptr);
+    return it != map_.end() ? it->second.meshes : std::vector<MeshInfo>{};
+}
+
+bool Mirror::checkMeshes(const void* ptr, const std::function<bool(const std::vector<MeshInfo>&)>& check) const {
+    std::lock_guard lock(mutex_);
+    const auto it = map_.find(ptr);
+    return it != map_.end() && check(it->second.meshes);
+}
+
+bool Mirror::lookupPart(const void* ptr, const void* subMesh, MeshInfo& info, MeshPart& part) const {
+    std::lock_guard lock(mutex_);
+    const auto it = map_.find(ptr);
+    if (it == map_.end()) return false;
+    for (const MeshInfo& m : it->second.meshes) {
+        for (const MeshPart& p : m.parts) {
+            if (p.subMesh != subMesh) continue;
+            info = m;
+            info.parts.clear();
+            part = p;
+            return true;
+        }
+    }
+    return false;
+}
+
 bool Mirror::contains(const void* ptr) const {
     std::lock_guard lock(mutex_);
     return map_.contains(ptr);

@@ -303,6 +303,8 @@ add_library(rvk_core STATIC
     src/hal/trace_support.h
     src/hal/types.h
     src/hal/types_base.h
+    src/hal/vulkan/buffer_lookup.cpp
+    src/hal/vulkan/buffer_lookup.h
     src/hal/vulkan/device.cpp
     src/hal/vulkan/effect.cpp
     src/hal/vulkan/hal_vulkan.h

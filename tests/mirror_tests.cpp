@@ -75,3 +75,31 @@ TEST(mirror_draw_cross_check) {
     CHECK(m.size() == 2 && m.withContexts() == 1);
     CHECK(m.pointers().size() == 2);
 }
+
+TEST(mirror_mesh_parts_and_lod_switch) {
+    scene::Mirror m;
+    int e = 0, res0 = 0, res1 = 0, ctx = 0, sub0 = 0, sub1 = 0, sub2 = 0;
+    m.cachedIn(&e, at(0), 1);
+    scene::MeshInfo lod0;
+    lod0.context = &ctx;
+    lod0.meshResource = &res0;
+    lod0.parts = {{&sub0, 0, 300, 0, 100, nullptr}, {&sub1, 300, 600, 100, 200, nullptr}};
+    bool changed = false;
+    CHECK(m.setMeshes(&e, {lod0}, &changed) && changed);
+    // the same contexts / resources again: nothing to store
+    CHECK(m.setMeshes(&e, {lod0}, &changed) && !changed);
+    CHECK(m.checkMeshes(&e, [&](const std::vector<scene::MeshInfo>& cur) { return cur.size() == 1 && cur[0].meshResource == &res0; }));
+    scene::MeshInfo info;
+    scene::MeshPart part;
+    CHECK(m.lookupPart(&e, &sub1, info, part) && part.firstIndex == 300 && part.indexCount == 600 && info.meshResource == &res0 && info.parts.empty());
+    CHECK(!m.lookupPart(&e, &sub2, info, part));
+    // a level of detail switch: another mesh resource (and sub-meshes) for the same context: stored, the old parts are gone
+    scene::MeshInfo lod1 = lod0;
+    lod1.meshResource = &res1;
+    lod1.parts = {{&sub2, 0, 150, 0, 50, nullptr}};
+    CHECK(m.setMeshes(&e, {lod1}, &changed) && changed);
+    CHECK(!m.lookupPart(&e, &sub0, info, part) && m.lookupPart(&e, &sub2, info, part) && info.meshResource == &res1);
+    CHECK(m.meshesOf(&e).size() == 1);
+    int other = 0;
+    CHECK(!m.setMeshes(&other, {}, nullptr) && !m.checkMeshes(&other, [](const auto&) { return true; }));
+}

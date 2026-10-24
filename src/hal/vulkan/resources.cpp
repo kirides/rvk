@@ -10,6 +10,7 @@
 #include "api/capture.h"
 #include "core/exports.h"
 #include "fx/effect_binary.h"
+#include "hal/vulkan/buffer_lookup.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "vk/formats.h"
 
@@ -285,8 +286,11 @@ bEResult HalVolume::SetVolume(unsigned long a0) {
 
 HalVertexData::HalVertexData(HalDevice& dev, const eCGfxShared::eSGfxVertexBufDesc& desc, std::uint32_t stride,
                              std::unique_ptr<d3d9::Buffer> buffer)
-    : dev_(dev), desc_(desc), buffer_(std::move(buffer)), stride_(stride) {}
+    : dev_(dev), desc_(desc), buffer_(std::move(buffer)), stride_(stride) {
+    noteVertexData(this, buffer_.get(), stride_);
+}
 HalVertexData::~HalVertexData() {
+    forgetVertexData(this);
     if (!HalDevice::isLive(&dev_)) {
         (void)buffer_.release();  // as ~HalTexture
         return;
@@ -320,8 +324,11 @@ bEResult HalVertexData::SetStride(unsigned long a0) {
 }
 
 HalIndexData::HalIndexData(HalDevice& dev, const eCGfxShared::eSGfxIndexBufDesc& desc, std::unique_ptr<d3d9::Buffer> buffer)
-    : dev_(dev), desc_(desc), buffer_(std::move(buffer)) {}
+    : dev_(dev), desc_(desc), buffer_(std::move(buffer)) {
+    noteIndexData(this, buffer_.get());
+}
 HalIndexData::~HalIndexData() {
+    forgetIndexData(this);
     if (!HalDevice::isLive(&dev_)) {
         (void)buffer_.release();  // as ~HalTexture
         return;

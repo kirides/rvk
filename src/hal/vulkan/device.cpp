@@ -1153,10 +1153,23 @@ void HalDevice::logFrameStructure() {
                  dr.lastHistogram().summary());
     {
         // the native scene mirror against the draws' entity tags (native-renderer.md N0)
-        std::vector<const void*> entities;
-        entities.reserve(dr.last().size());
-        for (const auto& r : dr.last()) entities.push_back(r.entity);
-        engine::mirror::crossCheck(entities);
+        std::vector<engine::mirror::DrawProbe> probes;
+        probes.reserve(dr.last().size());
+        for (const auto& r : dr.last()) {
+            engine::mirror::DrawProbe p;
+            p.entity = r.entity;
+            p.subMesh = r.subMesh;
+            p.meshResource = r.meshResource;
+            p.vertexBufferId = r.vertexBuffer.id;
+            p.indexBufferId = r.indexBuffer.id;
+            p.first = r.first;
+            p.primitives = r.primitives;
+            p.baseVertex = r.baseVertex;
+            p.plainIndexedMesh = r.kind == draws::Kind::StaticMesh && (r.flags & draws::Record::Indexed) != 0 &&
+                                 (r.flags & (draws::Record::Instanced | draws::Record::UserPointer)) == 0 && r.primitiveType == 4;
+            probes.push_back(p);
+        }
+        engine::mirror::crossCheck(probes);
     }
     // untagged draws of camera views: a draw path without a hook (first three of the frame)
     int unknown = 0;
