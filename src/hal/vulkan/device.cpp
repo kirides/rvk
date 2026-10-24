@@ -21,6 +21,7 @@
 #include "d3d9/fvf.h"
 #include "engine/scene_hooks.h"
 #include "engine/lod.h"
+#include "engine/scene_mirror.h"
 #include "engine/material_source.h"
 #include "engine/menu_state.h"
 #include "engine/shadow_maps.h"
@@ -1099,6 +1100,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
     updateMenuPacing();
     engine::matsrc::onPresent();
     engine::lod::onPresent();  // a changed object draw distance: the world's cache-in spheres (engine thread)
+    engine::mirror::onPresent();  // the native scene mirror: snapshot refresh + report (native-renderer.md N0)
     dev_.present();
     const auto& s = dev_.stats();
     api::publishPresent(s.frames, api::FrameNumbers{
@@ -1149,6 +1151,13 @@ void HalDevice::logFrameStructure() {
                  dr.lastDropped() != 0 ? std::format(", {} dropped", dr.lastDropped()) : std::string(),
                  dr.lastHistogram().tinted != 0 ? std::format(", {} tinted", dr.lastHistogram().tinted) : std::string(),
                  dr.lastHistogram().summary());
+    {
+        // the native scene mirror against the draws' entity tags (native-renderer.md N0)
+        std::vector<const void*> entities;
+        entities.reserve(dr.last().size());
+        for (const auto& r : dr.last()) entities.push_back(r.entity);
+        engine::mirror::crossCheck(entities);
+    }
     // untagged draws of camera views: a draw path without a hook (first three of the frame)
     int unknown = 0;
     for (const auto& r : dr.last()) {

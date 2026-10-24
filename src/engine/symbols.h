@@ -214,7 +214,13 @@
     X(colorSrcMaskVftable, L"Engine.dll", "??_7eCColorSrcMask@@6B@", false)                                                     \
     X(colorSrcCubeSamplerVftable, L"Engine.dll", "??_7eCColorSrcCubeSampler@@6B@", false)                                       \
     X(colorSrcConstantVftable, L"Engine.dll", "??_7eCColorSrcConstant@@6B@", false)                                             \
-    X(colorSrcVertexColorVftable, L"Engine.dll", "??_7eCColorSrcVertexColor@@6B@", false)
+    X(colorSrcVertexColorVftable, L"Engine.dll", "??_7eCColorSrcVertexColor@@6B@", false)                                       \
+    /* the native scene mirror's lifecycle events (engine/scene_mirror.*, docs/research/native-renderer.md 3): void              \
+       eCPrefetchAdmin::OnEntityCachedIn(eCGeometryEntity*) (0x696120, post: the render contexts exist), OnEntityCachedOut      \
+       (0x696040, pre: before they are freed), void eCEntityAdmin::NotifyDeleteEntities(eCEntity*) (0x695310: the delete net) */ \
+    X(prefetchEntityCachedIn, L"Engine.dll", "?OnEntityCachedIn@eCPrefetchAdmin@@QEAAXPEAVeCGeometryEntity@@@Z", false)         \
+    X(prefetchEntityCachedOut, L"Engine.dll", "?OnEntityCachedOut@eCPrefetchAdmin@@QEAAXPEAVeCGeometryEntity@@@Z", false)       \
+    X(entityAdminNotifyDelete, L"Engine.dll", "?NotifyDeleteEntities@eCEntityAdmin@@QEAAXPEAVeCEntity@@@Z", false)
 
 namespace rvk::engine {
 
