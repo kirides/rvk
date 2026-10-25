@@ -1383,6 +1383,8 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .min = 0.25,
         .max = 3,
         .format = "%.2f m",
+        .flags = Flag::Advanced,
+    });
     r.giLights = &reg.add({
         .key = "gi.lights",
         .label = "Light sources",
@@ -1422,8 +1424,6 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .min = 4,
         .max = 128,
         .flags = Flag::Debug | Flag::NoAB,
-    });
-        .flags = Flag::Advanced,
     });
     r.gbufferDebug = &reg.add({
         .key = "gbuffer.debug",
