@@ -9,6 +9,7 @@
 // and list the parts from the scene mirror (scene/mirror.h) instead.
 
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 #include "d3d9/device.h"
@@ -42,6 +43,7 @@ struct NativeStaticPush {
 static_assert(sizeof(NativeStaticPush) == 48);
 
 class NativeShadows;
+class NativeParts;
 
 class NativeOpaque final : public d3d9::DrawReplacer {
 public:
@@ -54,6 +56,9 @@ public:
     void apply(bool enabled);
     bool enabled() const { return enabled_; }
     void setDebug(std::uint32_t mode);
+    // where the draw list comes from: 0 = the engine's draws (captured as it draws them), 1 = the scene mirror (culled and lit natively; native.list)
+    void setListMode(std::uint32_t mode);
+    void setParts(NativeParts* parts) { parts_ = parts; }
     void setShadows(const NativeShadows* shadows) { shadows_ = shadows; }  // the native sun cascades the shader samples (null: the engine's mask)  // native.debug: 0 off, 1 albedo, 2 normal, 3 mask shadow, 4 mask ao, 5 ambient, 6 lightmap, 7 sun, 8 flags
 
     bool handles(d3d9::draws::Kind kind, d3d9::scene::Phase phase, const d3d9::draws::Tag& tag) const override;
@@ -75,6 +80,9 @@ private:
         const void* subMesh = nullptr;
     };
     void pass(d3d9::PassContext& ctx);
+    void buildMirrorList(d3d9::PassContext& ctx);                        // mirror mode, AfterDepthPrepass
+    bool composeLighting(const void* entity, NativeItemBlock& blk, std::uint32_t& lights) const;  // c14..c40 from the entity's illumination
+    void compareLighting(const Item& listed, const d3d9::Device& device);  // the composed block against the constants of the engine's own draw
     bool ensurePipeline(VkFormat color, VkFormat depth);
     void destroyPipeline();
     void report();
@@ -87,7 +95,21 @@ private:
     bool registered_ = false;
     bool failed_ = false;
 
-    std::vector<Item> items_;  // this view's skipped draws, drawn at AfterOpaque
+    std::vector<Item> items_;  // this view's skipped draws, drawn at AfterOpaque (engine list mode)
+    // mirror list mode
+    std::uint32_t listMode_ = 0;
+    NativeParts* parts_ = nullptr;
+    std::uint32_t listPassId_ = 0;
+    std::vector<Item> mirrorItems_;
+    std::vector<std::uint8_t> listSeen_;                                  // the engine drew this listed part too
+    std::unordered_map<std::uint64_t, std::uint32_t> listIndex_;          // key(entity, sub-mesh) -> mirrorItems_
+    std::unordered_map<const void*, VkCullModeFlags> cullByMaterial_;     // the cull mode the engine used per material (learnt from its draws)
+    struct ViewConsts {                                                   // the engine's per-view constants, taken from its latest main-view solid draw
+        float fog[2][4]{};                                                // c3, c4
+        d3d9::Texture* mask = nullptr;                                    // s0: the screen-space shadow mask
+        std::uint32_t maskSampler = 0;
+        std::uint64_t frame = 0;
+    } view_;
     std::uint64_t itemsFrame_ = 0;
 
     vk::PassLayout layout_;
@@ -100,6 +122,12 @@ private:
         std::uint64_t taken = 0, drawn = 0, passes = 0;
         std::uint64_t declined[8]{};  // by reason (kReasons)
         std::uint64_t rowsMismatch = 0, rowsCompared = 0;
+        // mirror list mode
+        std::uint64_t listBuilt = 0, listParts = 0, listEntities = 0, listSkippedEntities = 0, listFading = 0, listNoLight = 0, listEngineDrew = 0,
+                      listEngineOther = 0, listUnseen = 0, listFrames = 0;
+        std::uint64_t cmpDraws = 0, cmpMismatch[6]{};  // per register group: camera, fog, indoor, SH, sun, lights
+        // what the engine's draws of static meshes use (to settle the native rules): lightmap x ambient, shadow mask, sun, alpha test functions, cull modes
+        std::uint64_t permLmAmb[2][2]{}, permMask[2]{}, permSun[2]{}, alphaFunc[9]{}, cullModes[4]{};
     } stats_;
     double lastReport_ = 0.0;
     int loggedDecl_ = 0;

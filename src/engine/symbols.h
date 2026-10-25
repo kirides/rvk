@@ -226,7 +226,9 @@
     X(ctxAnimationVftable, L"Engine.dll", "??_7eCRenderContextAnimation2@@6B@", false)                                          \
     X(ctxSpeedTreeVftable, L"Engine.dll", "??_7eCRenderContextSpeedTree@@6B@", false)                                           \
     X(ctxSpeedTreeBBVftable, L"Engine.dll", "??_7eCRenderContextSpeedTreeBB@@6B@", false)                                       \
-    X(ctxVegetationVftable, L"Engine.dll", "??_7eCRenderContextVegetation@@6B@", false)
+    X(ctxVegetationVftable, L"Engine.dll", "??_7eCRenderContextVegetation@@6B@", false)                                       \
+    /* eEResourceState eCResource2::RequestData(eEResourceLoadMode) (0x684100): queues a resource's data (mode 1 = what the render code passes) */ \
+    X(resourceRequestData, L"Engine.dll", "?RequestData@eCResource2@@QEAA?AW4eEResourceState@@W4eEResourceLoadMode@@@Z", false)
 
 namespace rvk::engine {
 

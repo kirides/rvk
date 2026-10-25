@@ -243,6 +243,7 @@ add_library(rvk_core STATIC
     src/scene/mirror.cpp
     src/scene/mirror.h
     src/enh/native_opaque.cpp
+    src/enh/native_opaque_list.cpp
     src/enh/native_opaque.h
     src/enh/native_parts.cpp
     src/enh/native_parts.h

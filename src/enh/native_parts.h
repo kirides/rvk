@@ -30,6 +30,9 @@ struct NativePart {
     NativeLayout layout;
     d3d9::Texture* diffuse = nullptr;           // the material graph's diffuse image (null: none)
     std::uint32_t diffuseUvSet = 0;
+    d3d9::Texture* normal = nullptr;            // its normal map (DXT5nm: the engine converts them), null: none
+    std::uint32_t normalUvSet = 0;
+    d3d9::Texture* lightmap[2]{};               // the mesh resource's directional lightmaps (res +0x90 / +0x98), null until loaded
     bool masked = false;                        // blend mode masked: alpha tested against alphaRef
     float alphaRef = 0.0f;                      // 0..255
     const void* material = nullptr;
@@ -46,10 +49,15 @@ public:
 
     // false when the part cannot be drawn opaquely by the native passes (no buffers, not a material shader of the default / leaf class, blended,
     // unsupported layout). `out` is valid for this frame.
-    bool resolve(const scene::MeshInfo& mesh, const scene::MeshPart& part, NativePart& out);
+    // `touch`: refresh the part's material and images in the engine's resource cache (every draw of the engine does: without it its LRU unloads what only
+    // we use); the opaque pass wants it, the shadow cascades only need what is loaded
+    bool resolve(const scene::MeshInfo& mesh, const scene::MeshPart& part, NativePart& out, bool touch = true);
 
     struct Stats {
         std::uint64_t resolved = 0, cached = 0, noBuffers = 0, noDecl = 0, noMaterial = 0;
+        std::uint64_t uvAbsent = 0, color1Absent = 0, tangentAbsent = 0, normalAbsent = 0;  // resolved parts whose declaration lacks the attribute
+        std::uint64_t lightmapParts = 0, lightmapNoResource = 0, lightmapNotLoaded = 0, water = 0;  // parts with a lightmap uv: no image resource / not loaded yet; water left out
+        std::uint64_t diffuseNoImage = 0, diffuseNoApi = 0, diffuseNoTexture = 0;  // materials whose diffuse could not be had (no image / not loaded / not ours)
     };
     const Stats& stats() const { return stats_; }
 
@@ -67,6 +75,10 @@ private:
         float alphaRef = 0.0f;
         std::uint32_t uvSet = 0;
         d3d9::Texture* diffuse = nullptr;
+        std::uint32_t normalUvSet = 0;
+        d3d9::Texture* normal = nullptr;
+        const void* diffuseImage = nullptr;  // the graph's image resources (kept alive by touch())
+        const void* normalImage = nullptr;
     };
     struct Geometry {
         const void* vertexData = nullptr;
@@ -79,6 +91,11 @@ private:
         NativePart part;  // geometry fields only (the diffuse is looked up per frame)
     };
     const MaterialEntry& material(const void* material);
+    // eCResource2::RequestData(resource, 1) as every engine draw does for its material and images: queues the data when it is not loaded (async), else
+    // refreshes the resource's LRU stamp; once per frame per resource
+    void touchResource(const void* resource);
+    std::unordered_map<const void*, std::uint64_t> touched_;
+    int diagLogged_ = 0, layoutLogged_ = 0;
 
     d3d9::Device& dev_;
     DeclResolver resolveDecl_;

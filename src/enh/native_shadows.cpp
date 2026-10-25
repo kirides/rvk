@@ -205,7 +205,7 @@ void NativeShadows::pass(d3d9::PassContext& ctx) {
         for (const scene::MeshInfo& mesh : e.meshes) {
             for (const scene::MeshPart& part : mesh.parts) {
                 Caster c;
-                if (!parts_.resolve(mesh, part, c.part)) continue;
+                if (!parts_.resolve(mesh, part, c.part, false)) continue;
                 for (std::uint32_t r = 0; r < 3; ++r) {
                     for (std::uint32_t col = 0; col < 4; ++col) c.rows[r][col] = e.state.world[col * 4 + r];  // row r of the 3x4 = column r of the row-vector matrix
                 }
@@ -326,6 +326,7 @@ void NativeShadows::pass(d3d9::PassContext& ctx) {
                      "no declaration {}, no material / blended {}); sun ({:.2f}, {:.2f}, {:.2f})",
                      stats_.frames, static_cast<double>(stats_.casters) / n, static_cast<double>(stats_.draws) / n, kCascades, stats_.ms / n, ps.resolved,
                      ps.noBuffers, ps.noDecl, ps.noMaterial, travel.x, travel.y, travel.z);
+        spdlog::info("enh: native parts: diffuse missing: no sampler image {}, image not loaded (no API texture) {}, no texture of ours {}; water left out {}; declaration lacks uv0 {} / color1 {} / tangent {} / normal {}; parts with a lightmap uv {}: no lightmap resource {}, not loaded {}", ps.diffuseNoImage, ps.diffuseNoApi, ps.diffuseNoTexture, ps.water, ps.uvAbsent, ps.color1Absent, ps.tangentAbsent, ps.normalAbsent, ps.lightmapParts, ps.lightmapNoResource, ps.lightmapNotLoaded);
         stats_ = Stats{};
     }
 }

@@ -34,6 +34,8 @@ constexpr std::size_t kMaxParts = 512;
 bool snapshot(const void* e, ::rvk::scene::EntityState& s) {
     if (!readAt(e, 0x60, s.world)) return false;
     readAt(e, 0x28, s.flags);
+    readAt(e, 0xcc, s.viewRange);
+    readAt(e, 0xc8, s.alpha);
     readAt(e, 0xb8, s.sphere[3]);
     readAt(e, 0xbc, s.sphere[0]);
     readAt(e, 0xc0, s.sphere[1]);

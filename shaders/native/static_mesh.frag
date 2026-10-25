@@ -88,14 +88,11 @@ void main() {
     vec3 N = normalize(inNormal);
     vec3 T = normalize(inTangent);
     vec3 B = cross(N, T);
-    if (!gl_FrontFacing) {
-        N = -N;
-        T = -T;
-        B = -B;
-    }
+    // no face flip: the engine's viewport is flipped, so every triangle it keeps is 'back facing' here; its materials flip the tangent frame only when
+    // double sided, and every static draw uses a culling mode (docs/research/native-renderer.md 9)
     vec3 tn = vec3(0.0, 0.0, 1.0);
     vec3 n = N;
-    if ((flags & NATIVE_NORMALMAP) != 0u && it.tex0.z != 0u) {
+    if ((flags & NATIVE_NORMALMAP) != 0u && it.tex0.z != 0u && pc.passFlags != 12u) {
         const vec4 m = (rvkSample2D(it.tex0.z, it.tex0.w, inUv.zw) - 0.5) * 2.0;
         if ((flags & NATIVE_DXT5NM) != 0u) tn = vec3(m.w, m.y, sqrt(max(1.0 - m.w * m.w - m.y * m.y, 0.0)));
         else tn = normalize(m.xyz);
@@ -146,7 +143,7 @@ void main() {
     }
     // point lights
     const uint pointCount = it.off1.w & 255u;
-    for (uint i = 0u; i < pointCount && i < 3u; ++i) {
+    for (uint i = 0u; i < pointCount && i < 4u; ++i) {
         const vec4 posRange = it.ps[25 + 4 * i];
         vec3 Lp = posRange.xyz - inWorld;
         const float falloff = 1.0 - sat(dot(Lp, Lp) * posRange.w);
@@ -173,6 +170,7 @@ void main() {
     case 6u: color = lmTerm; break;
     case 7u: color = sunTerm; break;
     case 11u: color = vec3(sunShadow); break;
+    case 13u: color = tn * 0.5 + 0.5; break;
     case 8u:
         color = vec3((flags & NATIVE_LIGHTMAP) != 0u ? 1.0 : 0.0, (flags & NATIVE_NORMALMAP) != 0u ? 1.0 : 0.0, (flags & NATIVE_NO_ALBEDO) != 0u ? 1.0 : 0.0);
         if (it.tex1.x == 0u) color += vec3(0.3);

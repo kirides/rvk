@@ -278,6 +278,9 @@ public:
     // 16-stage unbind done on every render-target change (eCDX9Device::SetRenderTarget)
     void unbindTextures();
     d3d9::VertexDecl* declFromHandle(void* handle);
+    // the declaration the engine's object `object` stands for: the value itself when it is one of our live handles, else the first of its first 16
+    // words that is (the engine wraps the HAL's handle in an eCGfxVertexDeclaration-like object); null when none is
+    d3d9::VertexDecl* findDecl(const void* object);
     // the declaration equivalent to an FVF (cached per FVF; nullptr for an invalid FVF)
     d3d9::VertexDecl* fvfDecl(std::uint32_t fvf);
 

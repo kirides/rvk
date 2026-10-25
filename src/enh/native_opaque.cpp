@@ -56,6 +56,10 @@ Layout layoutOf(const d3d9::VertexDecl* decl) {
     return l;
 }
 
+std::uint64_t partKey(const void* entity, const void* subMesh) {
+    return (reinterpret_cast<std::uintptr_t>(entity) * 0x9E3779B97F4A7C15ull) ^ reinterpret_cast<std::uintptr_t>(subMesh);
+}
+
 }  // namespace
 
 NativeOpaque::NativeOpaque(d3d9::Device& device) : dev_(device) {}
@@ -98,12 +102,20 @@ void NativeOpaque::apply(bool enabled) {
         registered_ = true;
         failed_ = false;
         spdlog::info("enh: native opaque: on (static meshes drawn by shaders/native/static_mesh.*)");
+        if (listMode_ == 1) setListMode(1);
     } else if (!enabled_ && registered_) {
         dev_.removeDrawReplacer(this);
         dev_.removePass(passId_);
         passId_ = 0;
+        if (listPassId_ != 0) {
+            dev_.removePass(listPassId_);
+            listPassId_ = 0;
+        }
         registered_ = false;
         items_.clear();
+        mirrorItems_.clear();
+        listIndex_.clear();
+        listSeen_.clear();
         spdlog::info("enh: native opaque: off");
     }
 }
@@ -119,6 +131,39 @@ void NativeOpaque::replace(d3d9::Device& device, const d3d9::ReplaceQuery& q, d3
     if (frame != itemsFrame_) {
         items_.clear();
         itemsFrame_ = frame;
+    }
+    // what the engine's static mesh draws use: the cull mode per material (the mirror list takes it), the per-view constants (fog, the shadow mask),
+    // the permutations (to settle the native rules)
+    if (q.tag != nullptr && q.tag->material != nullptr && q.enginePs != nullptr) {
+        const VkCullModeFlags cm = d3d9::cullMode(device.renderState(d3d9::RS_CULLMODE));
+        cullByMaterial_[q.tag->material] = cm;
+        ++stats_.cullModes[cm == VK_CULL_MODE_NONE ? 0 : cm == VK_CULL_MODE_FRONT_BIT ? 1 : 2];
+        std::memcpy(view_.fog[0], device.psConstant(3), 16);
+        std::memcpy(view_.fog[1], device.psConstant(4), 16);
+        if (q.textures != nullptr && q.textures[0] != nullptr && !q.textures[0]->isNull() && q.textures[0]->kind() == vk::TextureKind::Tex2D) {
+            view_.mask = q.textures[0];
+            view_.maskSampler = device.samplerOfSlot(0);
+        }
+        view_.frame = frame;
+        const auto& sm = q.enginePs->semantics;
+        ++stats_.permLmAmb[sm[d3d9::Semantic::LightMap1].present() ? 1 : 0][sm[d3d9::Semantic::AmbientLight].present() ? 1 : 0];
+        ++stats_.permMask[sm[d3d9::Semantic::ShadowMask].present() ? 1 : 0];
+        ++stats_.permSun[sm.has(d3d9::ShaderSemantics::DirLight) ? 1 : 0];
+        if (q.alphaTest) ++stats_.alphaFunc[std::min<std::uint32_t>(q.alphaFunc, 8u)];
+    }
+    if (listMode_ == 1) {
+        // the list comes from the mirror: the engine's draw of a listed part is replaced by ours (compared with what we composed), the rest stays the engine's
+        if (q.tag != nullptr && q.tag->subMesh != nullptr) {
+            if (const auto it = listIndex_.find(partKey(q.tag->entity, q.tag->subMesh)); it != listIndex_.end()) {
+                compareLighting(mirrorItems_[it->second], device);
+                listSeen_[it->second] = 1;
+                out.action = d3d9::DrawReplacement::Action::Skip;
+                ++stats_.taken;
+                return;
+            }
+        }
+        ++stats_.listEngineDrew;
+        return;
     }
     const auto decline = [&](Reason r) { ++stats_.declined[r]; };
     if (!q.indexed || q.instanced || q.primitiveType != 4 || q.primitives == 0 || q.tag == nullptr) return decline(kNotPlain);
@@ -280,9 +325,25 @@ bool NativeOpaque::ensurePipeline(VkFormat color, VkFormat depth) {
 }
 
 void NativeOpaque::pass(d3d9::PassContext& ctx) {
-    if (items_.empty()) return;
+    if (listMode_ == 1 ? mirrorItems_.empty() : items_.empty()) return;
     std::vector<Item> items;
-    items.swap(items_);
+    if (listMode_ == 1) {
+        for (const std::uint8_t seen : listSeen_) stats_.listUnseen += seen == 0 ? 1u : 0u;
+        items.swap(mirrorItems_);
+        listIndex_.clear();
+        listSeen_.clear();
+        // the per-view constants of this frame's engine draws (fog, the shadow mask)
+        const bool fresh = view_.frame == dev_.frameValue();
+        for (Item& it : items) {
+            if (!fresh) break;
+            std::memcpy(it.block.ps[3], view_.fog[0], 16);
+            std::memcpy(it.block.ps[4], view_.fog[1], 16);
+            it.mask = view_.mask;
+            it.maskSampler = view_.maskSampler;
+        }
+    } else {
+        items.swap(items_);
+    }
     d3d9::Surface* ds = dev_.depthStencil();
     d3d9::Texture* scene = ctx.sceneHdr;
     if (ds == nullptr || ds->texture() == nullptr || scene == nullptr || ctx.target != scene) return;
@@ -397,6 +458,20 @@ void NativeOpaque::report() {
     spdlog::info("enh: native opaque: {} draws taken from the engine, {} drawn in {} passes; left to the engine: {}; the mirror's matrix differs from the "
                  "draw's rows in {} of {} compared",
                  stats_.taken, stats_.drawn, stats_.passes, why.empty() ? "nothing" : why, stats_.rowsMismatch, stats_.rowsCompared);
+    if (listMode_ == 1 && stats_.listFrames != 0) {
+        const double n = static_cast<double>(stats_.listFrames);
+        spdlog::info("enh: native opaque: mirror list {} frames: per frame {:.0f} entities seen, {:.0f} parts listed, {} fading entities left to the engine, {} without "
+                     "lighting data; the engine drew {} static parts that are not in the list, {} listed parts it did not draw; lighting vs the engine ({} draws): "
+                     "differs in camera {} / fog {} / indoor {} / SH {} / sun {} / lights {}",
+                     stats_.listFrames, static_cast<double>(stats_.listEntities) / n, static_cast<double>(stats_.listParts) / n, stats_.listFading, stats_.listNoLight,
+                     stats_.listEngineDrew, stats_.listUnseen, stats_.cmpDraws, stats_.cmpMismatch[0], stats_.cmpMismatch[1], stats_.cmpMismatch[2],
+                     stats_.cmpMismatch[3], stats_.cmpMismatch[4], stats_.cmpMismatch[5]);
+    }
+    spdlog::info("enh: native opaque: the engine's static draws: lightmap x ambient [no/no {}, no/yes {}, yes/no {}, yes/yes {}], shadow mask no/yes {} / {}, sun no/yes {} / {}, "
+                 "alpha test funcs [1:{} 2:{} 3:{} 4:{} 5:{} 6:{} 7:{} 8:{}], cull none {} / front {} / back {}",
+                 stats_.permLmAmb[0][0], stats_.permLmAmb[0][1], stats_.permLmAmb[1][0], stats_.permLmAmb[1][1], stats_.permMask[0], stats_.permMask[1], stats_.permSun[0],
+                 stats_.permSun[1], stats_.alphaFunc[1], stats_.alphaFunc[2], stats_.alphaFunc[3], stats_.alphaFunc[4], stats_.alphaFunc[5], stats_.alphaFunc[6],
+                 stats_.alphaFunc[7], stats_.alphaFunc[8], stats_.cullModes[0], stats_.cullModes[1], stats_.cullModes[2]);
 }
 
 }  // namespace rvk::enh

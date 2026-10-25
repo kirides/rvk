@@ -23,6 +23,7 @@ struct EntityState {
     std::uint32_t flags = 0;                 // entity +0x28
     float sphere[4]{};                       // world tree sphere: centre xyz, radius
     std::uint32_t contexts = 0;              // render contexts built for it
+    float viewRange = 0.0f, alpha = 1.0f;    // entity +0xcc (ViewRange: 0 = no distance cull), +0xc8 (its own alpha)
     std::array<const void*, 8> kinds{};      // the first contexts' vtables (a context's kind)
 };
 

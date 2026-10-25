@@ -1,9 +1,14 @@
 #include "enh/native_parts.h"
 
 #include <algorithm>
+#include <format>
+#include <string>
+
+#include <spdlog/spdlog.h>
 
 #include "engine/materials.h"
 #include "engine/memread.h"
+#include "engine/symbols.h"
 #include "hal/vulkan/buffer_lookup.h"
 
 namespace rvk::enh {
@@ -49,8 +54,19 @@ void NativeParts::bufferChanged(std::uint64_t bufferId) {
 
 void NativeParts::textureReleased(const d3d9::Texture* texture) {
     for (auto& kv : materials_) {
-        if (kv.second.diffuse == texture) kv.second = MaterialEntry{};  // looked up again at the next use
+        if (kv.second.diffuse == texture || kv.second.normal == texture) kv.second = MaterialEntry{};  // looked up again at the next use
     }
+}
+
+void NativeParts::touchResource(const void* resource) {
+    if (resource == nullptr || engine::sym().resourceRequestData == nullptr) return;
+    const std::uint64_t frame = dev_.frameValue();
+    std::uint64_t& last = touched_[resource];
+    if (last == frame) return;
+    last = frame;
+    if (touched_.size() > 16384) touched_.clear();
+    using RequestFn = int (*)(const void* self, int mode);
+    reinterpret_cast<RequestFn>(engine::sym().resourceRequestData)(resource, 1);
 }
 
 const NativeParts::MaterialEntry& NativeParts::material(const void* material) {
@@ -60,6 +76,11 @@ const NativeParts::MaterialEntry& NativeParts::material(const void* material) {
     m = MaterialEntry{};
     m.frame = frame;
     mats::ShaderInfo info;
+    // water (refracted, a constant diffuse): the engine's own pass, never opaque
+    if (material != nullptr && mats::resourceName(material).find("Water") != std::string::npos) {
+        ++stats_.water;
+        return m;
+    }
     if (material != nullptr && mats::active(info, material) && (info.cls == mats::ShaderClass::Default || info.cls == mats::ShaderClass::Leafs) &&
         info.blendMode <= 1) {
         m.ok = true;
@@ -67,19 +88,48 @@ const NativeParts::MaterialEntry& NativeParts::material(const void* material) {
         m.alphaRef = static_cast<float>(info.maskReference);
         m.uvSet = std::min<std::uint32_t>(info.diffuse.uvSet, 1u);
         if (info.diffuse.source == mats::Source::Sampler && info.diffuse.image != nullptr) {
-            d3d9::Texture* t = dev_.engineTexture(mats::apiTextureOf(info.diffuse.image));
-            if (t != nullptr && !t->isNull() && t->kind() == vk::TextureKind::Tex2D) m.diffuse = t;
+            const void* api = mats::apiTextureOf(info.diffuse.image);
+            d3d9::Texture* t = dev_.engineTexture(api);
+            if (t != nullptr && !t->isNull() && t->kind() == vk::TextureKind::Tex2D) {
+                m.diffuse = t;
+            } else {
+                ++(api == nullptr ? stats_.diffuseNoApi : stats_.diffuseNoTexture);
+                if (diagLogged_ < 10) {
+                    ++diagLogged_;
+                    spdlog::info("enh: native parts: diffuse of material {} '{}' unavailable: image '{}', API texture {}, our texture {}", material,
+                                 mats::resourceName(material), mats::resourceName(info.diffuse.image), api, static_cast<const void*>(t));
+                }
+            }
+        } else {
+            ++stats_.diffuseNoImage;
+            if (diagLogged_ < 10) {
+                ++diagLogged_;
+                spdlog::info("enh: native parts: diffuse of material {} '{}' has no sampler image (source {}, slot {}, image {})", material, mats::resourceName(material),
+                             mats::name(info.diffuse.source), info.diffuse.slot, info.diffuse.image);
+            }
+        }
+        m.normalUvSet = std::min<std::uint32_t>(info.normal.uvSet, 1u);
+        if (info.diffuse.source == mats::Source::Sampler) m.diffuseImage = info.diffuse.image;
+        if (info.normal.source == mats::Source::Sampler) m.normalImage = info.normal.image;
+        if (info.normal.source == mats::Source::Sampler && info.normal.image != nullptr) {
+            d3d9::Texture* t = dev_.engineTexture(mats::apiTextureOf(info.normal.image));
+            if (t != nullptr && !t->isNull() && t->kind() == vk::TextureKind::Tex2D) m.normal = t;
         }
     }
     return m;
 }
 
-bool NativeParts::resolve(const scene::MeshInfo& mesh, const scene::MeshPart& part, NativePart& out) {
+bool NativeParts::resolve(const scene::MeshInfo& mesh, const scene::MeshPart& part, NativePart& out, bool touch) {
     out = NativePart{};
     const MaterialEntry& m = material(part.material);
     if (!m.ok) {
         ++stats_.noMaterial;
         return false;
+    }
+    if (touch) {
+        touchResource(part.material);
+        touchResource(m.diffuseImage);
+        touchResource(m.normalImage);
     }
     const std::uint64_t frame = dev_.frameValue();
     Geometry& g = geometry_[part.subMesh];
@@ -131,6 +181,20 @@ bool NativeParts::resolve(const scene::MeshInfo& mesh, const scene::MeshPart& pa
         g.part.material = part.material;
         g.ok = true;
         ++stats_.resolved;
+        stats_.uvAbsent += layout.uv[0] == 0xFFFFu ? 1u : 0u;
+        stats_.color1Absent += layout.color1 == 0xFFFFu ? 1u : 0u;
+        stats_.tangentAbsent += layout.tangent == 0xFFFFu ? 1u : 0u;
+        stats_.normalAbsent += layout.normal == 0xFFFFu ? 1u : 0u;
+        if ((layout.uv[0] == 0xFFFFu || layout.color1 == 0xFFFFu) && layoutLogged_ < 6) {
+            ++layoutLogged_;
+            std::string d;
+            for (const d3d9::VertexElement& e : decl->elements()) {
+                if (e.stream == d3d9::kDeclEndStream) break;
+                d += std::format(" s{}+{} t{} u{}.{}", e.stream, e.offset, e.type, e.usage, e.usageIndex);
+            }
+            spdlog::info("enh: native parts: a part with no uv0 / color1 in its declaration: stride {}, entity-less sub-mesh {}, material '{}', declaration [{} ]", vb.stride,
+                         part.subMesh, mats::resourceName(part.material), d);
+        }
     } else {
         ++stats_.cached;
     }
@@ -138,6 +202,22 @@ bool NativeParts::resolve(const scene::MeshInfo& mesh, const scene::MeshPart& pa
     out = g.part;
     out.diffuse = m.diffuse;
     out.diffuseUvSet = m.uvSet;
+    out.normal = m.normal;
+    out.normalUvSet = m.normalUvSet;
+    // the lightmaps belong to the mesh resource: its image resources at +0x90 / +0x98 (null until the images are loaded)
+    for (int i = 0; i < 2; ++i) {
+        const void* image = nullptr;
+        if (mesh.meshResource != nullptr && engine::readAt(mesh.meshResource, 0x90 + 8 * static_cast<std::size_t>(i), image) && image != nullptr) {
+            d3d9::Texture* t = dev_.engineTexture(mats::apiTextureOf(image));
+            if (t != nullptr && !t->isNull() && t->kind() == vk::TextureKind::Tex2D) out.lightmap[i] = t;
+            if (touch) touchResource(image);
+        }
+        if (i == 0 && g.part.layout.lightmap != 0xFFFFu) {
+            ++stats_.lightmapParts;
+            if (image == nullptr) ++stats_.lightmapNoResource;
+            else if (out.lightmap[0] == nullptr) ++stats_.lightmapNotLoaded;
+        }
+    }
     out.masked = m.masked;
     out.alphaRef = m.alphaRef;
     return true;

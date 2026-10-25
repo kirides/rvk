@@ -242,3 +242,26 @@ cascade fading into the engine's mask) in place of the mask's `.a`.
   every other frame), instancing, a GPU culling pass.
 * Not casters yet: characters, trees, grass, instanced meshes (not in the native parts): the engine's cascades keep drawing for them and the engine's mask still
   carries their shadows beyond / besides ours. Next: skinned characters from the compute skinning (rt-shadows.md 10), SpeedTree.
+
+## 12. N3.2: the opaque pass driven by the scene mirror (2026-10-25, `native.list = mirror`, default `engine`) [C]
+
+`src/enh/native_opaque_list.cpp`, `native_parts.*`. At `AfterDepthPrepass` the pass builds its list from the mirror: the engine's own entity rules (`flags & 0x8026 == 0x8026`,
+not killed), a frustum test on the entity sphere, the fade rule (alpha < 1 or beyond 0.9 x ViewRange x `lod.view` = a blended op: left to the engine), the lighting composed
+natively from the entity's illumination structs and the shared light list (section 10), parts / buffers / layout / material / lightmaps from `NativeParts`. The engine's own draws
+of listed parts are skipped (and compared with what was composed: rvk.log `lighting vs the engine`).
+
+* **Verified against the engine's constants** over ~135,000 replaced draws: camera c0 / c1 0 differences, indoor c14 0, SH ambient c15..c21 0, light registers 0, sun c22..c24 11 (0.01 %),
+  fog c3 / c4 only before the first capture (taken from the engine's latest main-view draw: the weather path of `eCGfxFog` is not read natively yet). The native image
+  equals the engine's: textures, lightmaps, normal maps, ambient, sun with the engine's mask or with the native cascades, the shadow shapes.
+* **Bugs found on the way** (each worth remembering):
+  1. **The engine's vertex declaration handle is wrapped**: the pointer at `visual +0x50` is an engine object that holds our HAL handle, not the handle; an unchecked cast read
+     garbage layouts (no uv, no AO: flat tan facades, white ambient). Now `HalDevice::findDecl` validates against the live declarations and looks inside the wrapper.
+  2. **No face flip**: the engine's viewport is flipped, so every triangle it keeps counts as back-facing; flipping normals by `gl_FrontFacing` negated every normal (sun term 0, ambient
+     saturated). Its materials flip the tangent frame only when double sided; every static draw (2.3 M) uses cull mode FRONT, none is double sided.
+  3. **Textures must be touched every frame**: the engine keeps a resource loaded by calling `RequestData` (queue, or refresh the cache's LRU stamp) in each draw that uses it (`BindLightmaps`,
+     `ExecuteShaderConstants`, `eCSubMesh::Render`); with its draws skipped, its LRU unloads what only we use. `NativeParts::touchResource` = `eCResource2::RequestData(res, 1)` once per
+     frame per material, diffuse, normal and lightmap image (`resourceRequestData` symbol, 0x684100).
+  4. Water materials (constant diffuse, refracted) are never drawn natively.
+* Left to the engine: fading parts (alpha / view range), blended layers (terrain, decals), instanced meshes, skinned characters, SpeedTree, vegetation, particles, water, sky.
+* Cost with sync validation on: native lists + native cascades ~39 fps against ~40 for the engine's own frame; the cascade draw lists (~2450 draws / frame, 7 ms CPU) are the
+  next thing to cache / instance.

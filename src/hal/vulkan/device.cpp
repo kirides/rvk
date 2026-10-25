@@ -21,6 +21,7 @@
 #include "d3d9/fvf.h"
 #include "engine/scene_hooks.h"
 #include "engine/lod.h"
+#include "engine/memread.h"
 #include "engine/scene_mirror.h"
 #include "engine/material_source.h"
 #include "engine/menu_state.h"
@@ -307,7 +308,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         applyShadows();  // also the engine's cascade overrides (shadows.map_size / range: "auto" follows shadows.enabled)
     }
     // the native renderer's opaque pass (enh/native_opaque.h, docs/research/native-renderer.md N3)
-    nativeParts_ = std::make_unique<enh::NativeParts>(dev_, [this](const void* handle) { return declFromHandle(const_cast<void*>(handle)); });
+    nativeParts_ = std::make_unique<enh::NativeParts>(dev_, [this](const void* object) { return findDecl(object); });
     nativeShadows_ = std::make_unique<enh::NativeShadows>(dev_, *nativeParts_);
     nativeOpaque_ = std::make_unique<enh::NativeOpaque>(dev_);
     nativeOpaque_->setShadows(nativeShadows_.get());
@@ -318,6 +319,11 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     if (rs.nativeOpaque != nullptr) {
         reg.onChange(*rs.nativeOpaque, [this](const settings::Setting& s) { nativeOpaque_->apply(s.asBool()); }, this);
         nativeOpaque_->apply(rs.nativeOpaque->asBool());
+    }
+    nativeOpaque_->setParts(nativeParts_.get());
+    if (rs.nativeList != nullptr) {
+        reg.onChange(*rs.nativeList, [this](const settings::Setting& s) { nativeOpaque_->setListMode(static_cast<std::uint32_t>(s.asInt())); }, this);
+        nativeOpaque_->setListMode(static_cast<std::uint32_t>(rs.nativeList->asInt()));
     }
     if (rs.nativeDebug != nullptr) {
         reg.onChange(*rs.nativeDebug, [this](const settings::Setting& s) { nativeOpaque_->setDebug(static_cast<std::uint32_t>(s.asInt())); }, this);
@@ -603,6 +609,24 @@ void HalDevice::unbindTextures() {
 }
 
 d3d9::VertexDecl* HalDevice::declFromHandle(void* handle) { return static_cast<d3d9::VertexDecl*>(handle); }
+
+d3d9::VertexDecl* HalDevice::findDecl(const void* object) {
+    if (object == nullptr) return nullptr;
+    const std::lock_guard lock(handleMutex_);
+    const auto known = [&](const void* p) -> d3d9::VertexDecl* {
+        const auto it = decls_.find(const_cast<void*>(p));
+        return it != decls_.end() ? it->second.get() : nullptr;
+    };
+    if (d3d9::VertexDecl* d = known(object)) return d;
+    const void* words[16]{};
+    if (!engine::safeRead(object, words, sizeof(words))) return nullptr;
+    for (const void* w : words) {
+        if (w != nullptr) {
+            if (d3d9::VertexDecl* d = known(w)) return d;
+        }
+    }
+    return nullptr;
+}
 
 // ---- resources ------------------------------------------------------------------------------------------------------
 
