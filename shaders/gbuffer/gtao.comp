@@ -15,7 +15,7 @@ layout(set = 1, binding = 1, rg16f) uniform image2D motionImage;
 const int GB_SLICES = 2;
 const int GB_STEPS = 8;
 
-float depthAt(ivec2 p) { return rvkFetch2D(pc.depthTex, p).r; }
+float depthAt(ivec2 p) { return rvkHwDepthToD3D(pc.frame, rvkFetch2D(pc.depthTex, p).r); }
 
 // interleaved gradient noise (Jimenez 2014), shifted per frame
 float ign(vec2 p, uint frame) {

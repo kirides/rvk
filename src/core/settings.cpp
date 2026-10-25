@@ -898,6 +898,18 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .flags = Flag::Debug | Flag::NoAB,
     });
+    r.reverseZ = &reg.add({
+        .key = "debug.reverse_z",
+        .label = "Reversed infinite depth",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The main view's depth buffer holds near / distance (1 at the near plane, 0 at infinity) with a floating point "
+                       "buffer instead of the game's 24 bit depth: no z-fighting far away, no far clipping. Applies from the next "
+                       "frame (the native passes read it when they are built).",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::Debug | Flag::NoAB,
+    });
     r.batchDraws = &reg.add({
         .key = "debug.batch_draws",
         .label = "Batch opaque draws",

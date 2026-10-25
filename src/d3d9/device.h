@@ -156,6 +156,7 @@ private:
     std::atomic<bool> gpuWritten_{false};  // a blit destination (Device::stretchRect): its image holds data the CPU copy lacks
     bool restoreWarned_ = false;
     std::uint64_t lastUseFrame_ = 0;
+    bool reverseZ_ = false;  // a depth buffer holding reversed depth (Device::setReverseZ; set by its last clear)
     std::vector<std::unique_ptr<Surface>> surfaces_;
     scene::ImageRole role_ = scene::ImageRole::None;
     std::uint64_t id_ = newResourceId();
@@ -626,6 +627,18 @@ public:
     // the opaque passes' draws recorded on worker threads (debug.record_threads); applies from the next rendering scope
     void setRecordThreads(bool on) { recordThreadsWanted_ = on; }
     bool batching() const { return batching_; }
+    // Reversed infinite depth (debug.reverse_z, docs/research/reverse-z.md): a depth buffer cleared in a main view holds
+    // near / view z (1 at the near plane, 0 at infinity and for the cleared sky) instead of the engine's D3D value. The engine's
+    // vertex output is remapped in the shaders (DrawBlock::posFix.zw: z' = z (1 + zw.x) + zw.y w, = w - k z with k = 1 - near / far
+    // of the main camera), the depth tests and the bias are flipped, the clear value mapped. Applies from the next clear.
+    void setReverseZ(bool on);
+    bool reverseZ() const { return reverseZ_; }
+    // k of the mapping above (the main camera's, as the FrameBlock holds it)
+    float reverseDepthK() const;
+    // the depth buffer bound now holds reversed depth
+    bool boundDepthReversed() const;
+    // posFix.zw of a draw into the bound depth buffer: identity (0, 0) unless it is reversed
+    void depthRemap(float& zScale, float& zBias) const;
     double maxFps() const { return options_.maxFps; }
     // a further cap while a menu page is open (0 = none; the HAL sets it every present from engine/menu_state.h); a change
     // applies at the next present
@@ -1334,6 +1347,8 @@ private:
     std::vector<RankEntry> rankTable_;       // flushBatch: pipeline -> index of its first draw
     std::vector<std::uint64_t> batchKeys_;   // flushBatch: (rank << 32 | draw index), sorted
     bool batching_ = true;  // debug.batch_draws
+    bool reverseZ_ = true;  // debug.reverse_z
+    mutable float reverseK_ = 0.99f;  // the last k computed from a valid camera
     // bindless sampler index per slot (UINT32_MAX = look it up again after a SetSamplerState)
     std::array<std::uint32_t, kSamplerCount> samplerSlotCache_{};
     std::uint32_t instanceCount_ = 1;

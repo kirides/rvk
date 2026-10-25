@@ -515,6 +515,7 @@ VkDeviceAddress Water::fillBlock(d3d9::Device& device, const d3d9::ReplaceQuery&
         w.posFix[0] += jx;
         w.posFix[1] += jy;
     }
+    device.depthRemap(w.posFix[2], w.posFix[3]);  // reversed depth (abi.h posFix.zw)
     copy4(w.camFar, device.psConstant(0));
     copy4(w.fogColor, device.psConstant(3));
     copy4(w.fogParams, device.psConstant(4));

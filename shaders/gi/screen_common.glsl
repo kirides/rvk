@@ -29,12 +29,12 @@ vec3 spWorldPos(RvkFrame f, ivec2 px, vec2 size, float z) {
 // edges), towards the camera; the probes run after the z pre-pass, before the G-buffer exists
 vec3 spDepthNormal(RvkFrame f, ivec2 px, vec2 size, uint depthTex) {
     ivec2 maxP = ivec2(size) - 1;
-    float z0 = rvkFetch2D(depthTex, px).r;
+    float z0 = rvkHwDepthToD3D(f, rvkFetch2D(depthTex, px).r);
     vec3 P = spWorldPos(f, px, size, z0);
     ivec2 pl = max(px - ivec2(1, 0), ivec2(0)), pr = min(px + ivec2(1, 0), maxP);
     ivec2 pu = max(px - ivec2(0, 1), ivec2(0)), pd = min(px + ivec2(0, 1), maxP);
-    float zl = rvkFetch2D(depthTex, pl).r, zr = rvkFetch2D(depthTex, pr).r;
-    float zu = rvkFetch2D(depthTex, pu).r, zd = rvkFetch2D(depthTex, pd).r;
+    float zl = rvkHwDepthToD3D(f, rvkFetch2D(depthTex, pl).r), zr = rvkHwDepthToD3D(f, rvkFetch2D(depthTex, pr).r);
+    float zu = rvkHwDepthToD3D(f, rvkFetch2D(depthTex, pu).r), zd = rvkHwDepthToD3D(f, rvkFetch2D(depthTex, pd).r);
     vec3 dx = abs(zr - z0) < abs(z0 - zl) ? spWorldPos(f, pr, size, zr) - P : P - spWorldPos(f, pl, size, zl);
     vec3 dy = abs(zd - z0) < abs(z0 - zu) ? spWorldPos(f, pd, size, zd) - P : P - spWorldPos(f, pu, size, zu);
     vec3 n = cross(dx, dy);

@@ -20,6 +20,9 @@
 //                       posFix.xy: added to gl_Position.xy * w. D3D9 puts pixel centres on integer coordinates, Vulkan on
 //                       +0.5; moving the geometry half a pixel right/down makes Vulkan sample where D3D9 did:
 //                       (+1/width, -1/height) with the y-flipped viewport (rvk_vktest checks this)
+//                       posFix.zw: reversed depth (debug.reverse_z): z' = z (1 + zw.x) + zw.y w; (0, 0) = none. Reversed: (-k - 1, 1),
+//                       z' = w - k z with k = 1 - near / far, i.e. depth = near / view z (1 near, 0 at infinity); fragment depth
+//                       written by a pixel shader: d' = d (1 + zw.x) + zw.y
 //                       alphaFunc: D3DCMPFUNC (1 never .. 8 always), alphaRef: 0..1
 //                       pad[0]: debug tint, RGBA8 (unpackUnorm4x8; 0 = none), read only by the tint variant of a pixel
 //                       shader (GlslOptions::tintEpilogue, the "tint draws" debug view); pad[1] unused
@@ -136,6 +139,7 @@ inline constexpr std::uint32_t kFrameRtValid = 1u;  // rtScene holds this frame'
 inline constexpr std::uint32_t kFrameCameraValid = 1u;      // this frame's main camera
 inline constexpr std::uint32_t kFrameCameraPredicted = 2u;  // the previous frame's (no main view yet this frame)
 inline constexpr std::uint32_t kFramePrevValid = 4u;        // the prev* fields hold the frame before
+inline constexpr std::uint32_t kFrameReverseZ = 8u;         // the main view's hardware depth is reversed (see DrawBlock posFix.zw)
 inline constexpr std::uint32_t kFrameParams = 16;
 inline constexpr std::uint32_t kFrameParamDebugView = 0;   // debug.inject_view: x mode, y strength, z grid spacing
 inline constexpr std::uint32_t kFrameParamLod = 1;         // lod.trees: x the billboard fade distance scale (Device::lodModule)

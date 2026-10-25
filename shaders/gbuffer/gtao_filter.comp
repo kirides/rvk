@@ -10,7 +10,7 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 1, binding = 0, rg16f) uniform writeonly image2D outAo;
 
 float viewDepth(RvkFrame f, ivec2 p) {
-    float z = rvkFetch2D(pc.depthTex, p).r;
+    float z = rvkHwDepthToD3D(f, rvkFetch2D(pc.depthTex, p).r);
     float a = f.proj[2][2], b = f.proj[3][2];
     return z < 1.0 && abs(z - a) > 1e-9 ? b / (z - a) : 1e9;
 }
@@ -37,7 +37,7 @@ void main() {
     float ao = sum / max(wsum, 1e-5);
     if (pc.historyTex != 0u) {
         vec2 uv = (vec2(p) + 0.5) / vec2(pc.width, pc.height);
-        vec2 prev = uv + gbCameraMotion(f, gbWorldPos(f, uv, rvkFetch2D(pc.depthTex, p).r));
+        vec2 prev = uv + gbCameraMotion(f, gbWorldPos(f, uv, rvkHwDepthToD3D(f, rvkFetch2D(pc.depthTex, p).r)));
         if (all(greaterThanEqual(prev, vec2(0.0))) && all(lessThanEqual(prev, vec2(1.0)))) {
             float h = rvkSample2DLod(pc.historyTex, pc.linearSampler, prev, 0.0).r;
             h = clamp(h, lo - 0.1, hi + 0.1);

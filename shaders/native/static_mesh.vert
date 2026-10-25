@@ -54,6 +54,8 @@ void main() {
     outViewPos = clip;
     // the engine's half-pixel fix + camera jitter (abi.h posFix: 1 / w, -1 / h plus the jitter in NDC)
     clip.xy += (vec2(f.viewport.z, -f.viewport.w) + vec2(2.0 * f.jitter.x, -2.0 * f.jitter.y) * f.viewport.zw) * clip.w;
+    // reversed depth (abi.h posFix.zw, rvk_common.glsl rvkHwDepthToD3D): z' = w - k z, k = 1 - near / far
+    if ((f.frameInfo.y & RVK_FRAME_REVERSE_Z) != 0u) clip.z = clip.w - (1.0 - f.depthParams.x / f.depthParams.y) * clip.z;
     gl_Position = clip;
     outWorld = world;
 

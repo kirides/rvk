@@ -49,7 +49,7 @@ void main() {
     ivec2 px = ivec2(0);
     if (inRange) {
         px = spProbePixel(p, tile);
-        z = rvkFetch2D(p.screen.x, px).r;
+        z = rvkHwDepthToD3D(f, rvkFetch2D(p.screen.x, px).r);
         viewZ = spViewDepth(f, z);
         if (viewZ > 0.0) {
             P = spWorldPos(f, px, size, z);

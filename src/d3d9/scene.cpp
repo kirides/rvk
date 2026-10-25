@@ -341,6 +341,7 @@ void fillFrameBlock(shader::abi::FrameBlock& out, const CameraBlock& cur, const 
     const auto put = [](float (&dst)[16], const Mat4& m) { std::memcpy(dst, m.m.data(), sizeof(dst)); };
     const CameraBlock* cam = cur.valid ? &cur : last.valid ? &last : nullptr;
     std::uint32_t flags = cur.valid ? abi::kFrameCameraValid : last.valid ? abi::kFrameCameraPredicted : 0u;
+    if (x.reverseZ) flags |= abi::kFrameReverseZ;
     if (cam != nullptr) {
         put(out.viewProj, cam->viewProjection);
         put(out.invViewProj, cam->inverseViewProjection);

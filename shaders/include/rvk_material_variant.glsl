@@ -42,10 +42,18 @@ layout(location = 2) out vec2 rvk_gbMotion;  // R16G16F: previous uv - this uv
 layout(location = 15) in vec4 rvk_prevWorld;  // enh::kPrevWorldLocation
 #endif
 
+// this fragment's hardware depth as the engine's D3D depth (rvkHwDepthToD3D in rvk_common.glsl, which this text does not include)
+float rvkMvD3dZ() {
+    float z = gl_FragCoord.z;
+    if ((pc.frame.frameInfo.y & RVK_FRAME_REVERSE_Z) == 0u) return z;
+    float k = 1.0 - pc.frame.depthParams.x / max(pc.frame.depthParams.y, 1e-3);
+    return min((1.0 - z) / max(k, 1e-6), 1.0);
+}
+
 // this fragment's view depth (the engine's row-vector projection: z' = (z a + b) / z)
 float rvkMvViewDepth() {
     float a = pc.frame.proj[2][2], b = pc.frame.proj[3][2];
-    float z = gl_FragCoord.z;
+    float z = rvkMvD3dZ();
     return abs(z - a) > 1e-9 ? b / (z - a) : 0.0;
 }
 
@@ -181,7 +189,7 @@ void rvkMvPrologue(vec4 vertexNormal) {
     vec2 uv = (gl_FragCoord.xy - 0.5) * pc.frame.viewport.zw;
     // the depth was rasterised with the camera jitter (src/enh/upscale): the fragment is at the pixel's NDC - J (rvk_common.glsl)
     vec2 jitterNdc = vec2(2.0 * pc.frame.jitter.x, -2.0 * pc.frame.jitter.y) * pc.frame.viewport.zw;
-    vec4 w = pc.frame.invViewProj * vec4(uv.x * 2.0 - 1.0 - jitterNdc.x, 1.0 - uv.y * 2.0 - jitterNdc.y, gl_FragCoord.z, 1.0);
+    vec4 w = pc.frame.invViewProj * vec4(uv.x * 2.0 - 1.0 - jitterNdc.x, 1.0 - uv.y * 2.0 - jitterNdc.y, rvkMvD3dZ(), 1.0);
     vec3 P = w.xyz / w.w;
     vec3 n = cross(dFdx(P), dFdy(P));
     vec3 V = normalize(pc.frame.cameraPos.xyz - P);

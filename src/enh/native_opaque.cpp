@@ -304,7 +304,8 @@ bool NativeOpaque::ensurePipeline(VkFormat color, VkFormat depth) {
         pipelineState_ = stateOf(debug_);
         gd.depthTest = pipelineState_ == 0 || pipelineState_ == 2;
         gd.depthWrite = gd.depthTest;
-        gd.depthOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+        // the main depth buffer is reversed (debug.reverse_z; the setting is read when the pipelines are built)
+        gd.depthOp = dev_.reverseZ() ? VK_COMPARE_OP_GREATER_OR_EQUAL : VK_COMPARE_OP_LESS_OR_EQUAL;
         gd.frontFace = VK_FRONT_FACE_CLOCKWISE;  // as the engine's draws (d3d9/convert.h kFrontFace with the flipped viewport)
         gd.cull = pipelineState_ == 0 || pipelineState_ == 3 ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
         gd.dynamicCullMode = true;

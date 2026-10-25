@@ -461,6 +461,8 @@ void Device::computeDynamicState(std::uint32_t primitiveType, DynamicStateValues
     o.depthTest = depth ? VK_TRUE : VK_FALSE;
     o.depthWrite = depth && rs_[RS_ZWRITEENABLE] != 0 ? VK_TRUE : VK_FALSE;
     o.depthCompare = compareOp(rs_[RS_ZFUNC]);
+    const bool reversed = boundDepthReversed();
+    if (reversed) o.depthCompare = reverseCompareOp(o.depthCompare);
     const bool stencil = stencilFormat_ != VK_FORMAT_UNDEFINED && rs_[RS_STENCILENABLE] != 0;
     o.stencilTest = stencil ? VK_TRUE : VK_FALSE;
     // front = clockwise (kFrontFace); two-sided stencil gives the counter-clockwise (back) faces their own ops
@@ -482,8 +484,8 @@ void Device::computeDynamicState(std::uint32_t primitiveType, DynamicStateValues
     const float slope = asFloat(rs_[RS_SLOPESCALEDEPTHBIAS]);
     const float unit = depthFormat_ == VK_FORMAT_D16_UNORM ? 65535.0f : 16777215.0f;
     o.depthBiasEnable = bias != 0.0f || slope != 0.0f ? VK_TRUE : VK_FALSE;
-    o.depthBias[0] = bias * unit;
-    o.depthBias[1] = slope;
+    o.depthBias[0] = reversed ? -bias * unit : bias * unit;  // reversed depth grows towards the camera
+    o.depthBias[1] = reversed ? -slope : slope;
     colorToFloat4(rs_[RS_BLENDFACTOR], o.blendConstants);
     o.colorCount = 0;
     if (ctx_.features().extendedDynamicState3 && colorCount_ > 0) {
@@ -1010,6 +1012,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     block.posFix[1] = -1.0f / static_cast<float>(std::max(1u, viewport_.height));
     block.posFix[0] += jitterX;
     block.posFix[1] += jitterY;
+    depthRemap(block.posFix[2], block.posFix[3]);
     block.alphaFunc = rs_[RS_ALPHATESTENABLE] != 0 ? rs_[RS_ALPHAFUNC] : static_cast<std::uint32_t>(CMP_ALWAYS);
     block.alphaRef = static_cast<float>(rs_[RS_ALPHAREF] & 0xFF);
     block.pad[0] = tint;
@@ -1065,7 +1068,8 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         const VkCompareOp z = workDyn_.depthCompare;
         packet_.batchable = batching_ && meshKind && opaquePass && !replaced && tint == 0 && customVertices_ == 0 && geom.indexed &&
                             !geom.userPointer && rs_[RS_ALPHABLENDENABLE] == 0 && workDyn_.depthTest != 0 && workDyn_.stencilTest == 0 &&
-                            (z == VK_COMPARE_OP_LESS || z == VK_COMPARE_OP_LESS_OR_EQUAL || z == VK_COMPARE_OP_EQUAL);
+                            (z == VK_COMPARE_OP_LESS || z == VK_COMPARE_OP_LESS_OR_EQUAL || z == VK_COMPARE_OP_EQUAL ||
+                         z == VK_COMPARE_OP_GREATER || z == VK_COMPARE_OP_GREATER_OR_EQUAL);
     }
     ++stats_.draws;
     ++stats_.totalDraws;
@@ -1257,6 +1261,27 @@ void Device::drawIndexedPrimitive(std::uint32_t type, std::int32_t baseVertex, s
     packet_.instances = instanceCount_;
     packet_.vertexOffset = baseVertex + vertexShift_;
     submitPacket(packet_);
+}
+
+// ---- reversed infinite depth (docs/research/reverse-z.md) ----------------------------------------------------------------
+
+void Device::setReverseZ(bool on) { reverseZ_ = on; }
+
+float Device::reverseDepthK() const {
+    const scene::CameraBlock* cam = camera_.valid ? &camera_ : lastCamera_.valid ? &lastCamera_ : nullptr;
+    if (cam != nullptr && cam->nearZ > 0.0f && cam->farZ > cam->nearZ) reverseK_ = 1.0f - cam->nearZ / cam->farZ;
+    return reverseK_;
+}
+
+bool Device::boundDepthReversed() const {
+    return ds_ != nullptr && !ds_->texture()->isNull() && ds_->texture()->reverseZ_;
+}
+
+void Device::depthRemap(float& zScale, float& zBias) const {
+    zScale = zBias = 0.0f;
+    if (!boundDepthReversed()) return;
+    zScale = -reverseDepthK() - 1.0f;  // z' = z (1 + zScale) + zBias w = w - k z
+    zBias = 1.0f;
 }
 
 void Device::setBatching(bool on) {

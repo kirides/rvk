@@ -13,8 +13,6 @@ void main() {
     uvec2 p = gl_GlobalInvocationID.xy;
     if (p.x >= pc.width || p.y >= pc.height) return;
     RvkFrame f = pc.frame;
-    float z = rvkFetch2D(pc.depthTex, ivec2(p)).r;
-    float a = f.proj[2][2], b = f.proj[3][2];  // engine row-vector projection: z' = (z a + b) / z
-    float viewZ = (z < 1.0 && abs(z - a) > 1e-9) ? b / (z - a) : 0.0;
+    float viewZ = rvkHwDepthToViewZ(f, rvkFetch2D(pc.depthTex, ivec2(p)).r);
     imageStore(outDepth, ivec2(p), vec4(max(viewZ, 0.0), 0.0, 0.0, 0.0));
 }

@@ -23,7 +23,7 @@ void main() {
     ivec2 sizeI = ivec2(p.screen2.zw);
     if (px.x >= sizeI.x || px.y >= sizeI.y) return;
     vec2 size = vec2(sizeI);
-    float zpx = rvkFetch2D(p.screen.x, px).r;
+    float zpx = rvkHwDepthToD3D(f, rvkFetch2D(p.screen.x, px).r);
     float viewZ = spViewDepth(f, zpx);
     if (viewZ <= 0.0) {
         imageStore(outResolved, px, vec4(1.0, 1.0, 1.0, 0.0));
@@ -53,7 +53,7 @@ void main() {
         float wc = exp(-0.125 * dot(dpx, dpx)) + 1e-3;
         // the probe's distance to this pixel's tangent plane (slanted surfaces keep their neighbours) and normal similarity
         ivec2 ppx = spProbePixel(p, tile);
-        vec3 pp = spWorldPos(f, ppx, size, rvkFetch2D(p.screen.x, ppx).r);
+        vec3 pp = spWorldPos(f, ppx, size, rvkHwDepthToD3D(f, rvkFetch2D(p.screen.x, ppx).r));
         float plane = abs(dot(pp - P, N));
         vec3 pn = spDepthNormal(f, ppx, size, p.screen.x);
         float surf = exp(-plane / max(viewZ * 0.01, 2.0)) * pow(max(dot(pn, N), 0.0), 4.0);

@@ -232,6 +232,13 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
             spdlog::info("hal: settings: record threads {}", s.asBool() ? "on" : "off");
         }, this);
     }
+    if (rs.reverseZ != nullptr) {
+        dev_.setReverseZ(rs.reverseZ->asBool());
+        reg.onChange(*rs.reverseZ, [this](const settings::Setting& s) {
+            dev_.setReverseZ(s.asBool());
+            spdlog::info("hal: settings: reversed depth {}", s.asBool() ? "on" : "off");
+        }, this);
+    }
     if (rs.batchDraws != nullptr) {
         dev_.setBatching(rs.batchDraws->asBool());
         reg.onChange(*rs.batchDraws, [this](const settings::Setting& s) {

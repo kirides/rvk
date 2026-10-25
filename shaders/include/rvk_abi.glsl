@@ -66,6 +66,7 @@ const uint RVK_FRAME_SGI_VALID = 1u;
 const uint RVK_FRAME_CAMERA_VALID = 1u;      // the camera fields hold this frame's main view
 const uint RVK_FRAME_CAMERA_PREDICTED = 2u;  // ... the previous frame's (no main view yet this frame, e.g. shadow maps)
 const uint RVK_FRAME_PREV_VALID = 4u;        // the prev* fields hold the frame before
+const uint RVK_FRAME_REVERSE_Z = 8u;         // the main view's hardware depth is reversed: near / view z, 0 = infinity (rvk_common.glsl)
 
 #ifndef RVK_PASS_SHADER
 // Push constants of draws (48 bytes, vertex + fragment). drawId: the draw's index in the frame (= its draw record's index);

@@ -184,6 +184,7 @@ struct FrameExtras {
     std::uint64_t gi = 0;  // the GI volume header of this frame (0 = none)
     std::array<std::uint32_t, 4> ao{};  // FrameBlock::ao (slot 0 = none)
     std::array<std::uint32_t, 4> sgi{};  // FrameBlock::sgi (slot 0 = none)
+    bool reverseZ = false;               // the main view's depth buffer holds reversed depth (kFrameReverseZ)
     std::array<float, 4> jitter{};       // FrameBlock::jitter: this frame's camera jitter (pixels), the previous frame's
 };
 

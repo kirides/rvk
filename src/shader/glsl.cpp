@@ -967,7 +967,9 @@ private:
                 m += opt_.epilogue;
                 m += "\n";
             }
-            m += "    rvk_pos.xy += pc.draw.posFix.xy * rvk_pos.w;\n    gl_Position = rvk_pos;\n";
+            // the half-pixel fix, then the reversed depth remap (abi.h posFix: xy fix, zw z' = z (1 + zw.x) + zw.y w; 0 = none)
+            m += "    rvk_pos.xy += pc.draw.posFix.xy * rvk_pos.w;\n";
+            m += "    rvk_pos.z += pc.draw.posFix.z * rvk_pos.z + pc.draw.posFix.w * rvk_pos.w;\n    gl_Position = rvk_pos;\n";
         } else {
             if ((reflection_.colorOutputs & 1u) != 0) {
                 m += "    if (!rvk_alphaTest(oC0.a)) discard;\n";
@@ -992,7 +994,7 @@ private:
                 }
             }
             if (reflection_.writesDepth) {
-                m += "    gl_FragDepth = clamp(oDepth.x, 0.0, 1.0);\n";
+                m += "    gl_FragDepth = clamp(oDepth.x, 0.0, 1.0) * (1.0 + pc.draw.posFix.z) + pc.draw.posFix.w;\n";
             }
         }
         m += "}\n";

@@ -22,6 +22,23 @@ vec2 rvkUvToNdc(vec2 uv) { return vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0); }
 // depth) takes `rvkUvToNdc(uv) - rvkJitterNdc(f)`.
 vec2 rvkJitterNdc(RvkFrame f) { return vec2(2.0 * f.jitter.x, -2.0 * f.jitter.y) * f.viewport.zw; }
 
+// The main view's hardware depth (docs/research/reverse-z.md). With RVK_FRAME_REVERSE_Z the buffer holds near / view z (1 at the
+// near plane, 0 at infinity and for the sky); the engine's projection wrote D3D depth z = f / (f - n) (1 - n / viewZ). This
+// returns the D3D depth (0 near .. 1 far, the sky and everything beyond the far plane 1), so code written for the engine's
+// convention keeps working; without the flag it is the identity.
+float rvkHwDepthToD3D(RvkFrame f, float d) {
+    if ((f.frameInfo.y & RVK_FRAME_REVERSE_Z) == 0u) return d;
+    float k = 1.0 - f.depthParams.x / max(f.depthParams.y, 1e-3);
+    return min((1.0 - d) / max(k, 1e-6), 1.0);
+}
+
+// View depth (distance along the view axis) of a hardware depth value; 0 for the sky / infinity
+float rvkHwDepthToViewZ(RvkFrame f, float d) {
+    if ((f.frameInfo.y & RVK_FRAME_REVERSE_Z) != 0u) return d > 0.0 ? f.depthParams.x / d : 0.0;
+    float a = f.proj[2][2], b = f.proj[3][2];
+    return (d < 1.0 && abs(d - a) > 1e-9) ? max(b / (d - a), 0.0) : 0.0;
+}
+
 // The engine's linear depth map (R32F, ge_default_ps.fx: view depth / far, cleared to 1) -> view depth
 float rvkViewDepth(RvkFrame f, float depthMapValue) { return depthMapValue * f.cameraPos.w; }
 

@@ -626,5 +626,6 @@ void main() {
     // the translator's half-pixel fix
     vec4 rvk_pos = o.vPos;
     rvk_pos.xy += pc.draw.posFix.xy * rvk_pos.w;
+    rvk_pos.z += pc.draw.posFix.z * rvk_pos.z + pc.draw.posFix.w * rvk_pos.w;  // reversed depth (posFix.zw, abi.h)
     gl_Position = rvk_pos;
 }

@@ -158,5 +158,6 @@ void main() {
     vec4 p4 = vec4(sp.p, 1.0);
     vec4 clip = vec4(dot(pc.vs.c[0], p4), dot(pc.vs.c[1], p4), dot(pc.vs.c[2], p4), dot(pc.vs.c[3], p4));
     clip.xy += w.posFix.xy * clip.w;
+    clip.z += w.posFix.z * clip.z + w.posFix.w * clip.w;  // reversed depth (abi.h)
     gl_Position = clip;
 }

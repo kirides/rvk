@@ -277,6 +277,7 @@ struct RendererSettings {
     Setting* ubershaderSkip = nullptr;   // debug.ubershader_skip: classes of material shaders kept translated (bisecting)
     Setting* ubershader = nullptr;       // debug.ubershader: the GLSL material shader for the engine's material pixel shaders (d3d9::Device::setUbershader)
     Setting* materialSources = nullptr;  // debug.material_sources: the engine's request of each material shader (engine::matsrc)
+    Setting* reverseZ = nullptr;     // debug.reverse_z: reversed infinite depth in the main view (d3d9::Device::setReverseZ)
     Setting* batchDraws = nullptr;   // debug.batch_draws: the opaque passes' draws grouped by pipeline (d3d9::Device::setBatching)
     Setting* injectView = nullptr;   // debug.inject_view: "off", "depth", "tint" (enh/debug_view.h, an injected pass)
     Setting* rtAllow = nullptr;      // rt.allow: enable the ray tracing extensions at device creation (restart)

@@ -12,6 +12,8 @@ namespace rvk::d3d9 {
 VkBlendFactor blendFactor(std::uint32_t d3dBlend, bool alphaChannel);
 VkBlendOp blendOp(std::uint32_t d3dBlendOp);
 VkCompareOp compareOp(std::uint32_t d3dCmp);
+// the same test on reversed depth (LESS <-> GREATER, LESS_OR_EQUAL <-> GREATER_OR_EQUAL; the others unchanged)
+VkCompareOp reverseCompareOp(VkCompareOp op);
 VkStencilOp stencilOp(std::uint32_t d3dStencilOp);
 // D3D9 culls by screen-space winding; with the y-flipped viewport Vulkan's framebuffer winding is the same, so front = CW
 VkCullModeFlags cullMode(std::uint32_t d3dCull);

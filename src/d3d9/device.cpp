@@ -22,7 +22,7 @@ namespace {
 
 // bump when the translator's output changes: invalidates the SPIR-V disk cache
 // 2: the ABI declarations come from shaders/include/rvk_abi.glsl (48-byte push block, FrameBlock)
-constexpr std::uint32_t kTranslatorVersion = 2;
+constexpr std::uint32_t kTranslatorVersion = 3;
 // bump when the tint epilogue (GlslOptions::tintEpilogue) changes: the tint variants' cache files
 constexpr std::uint32_t kTintVersion = 2;
 // bump when the billboard fade variant (Device::lodModule) changes
@@ -115,6 +115,7 @@ VkDeviceAddress Device::frameBlockAddress() {
     x.images = {slot(scene::ImageRole::SceneHdr), slot(scene::ImageRole::Refraction), slot(scene::ImageRole::DepthMap),
                 slot(scene::ImageRole::SkyEnvCube)};
     x.params = &frameParams_;
+    x.reverseZ = reverseZ_;
     if (rtSceneValid()) {
         x.rtTlas = rtScene_.tlas;
         x.rtRecords = rtScene_.records;
@@ -1783,7 +1784,12 @@ void Device::clear(std::uint32_t flags, std::uint32_t color, float z, std::uint3
         }
     }
     VkImageAspectFlags ds = 0;
-    if ((flags & CLEAR_ZBUFFER) != 0 && depthFormat_ != VK_FORMAT_UNDEFINED) ds |= VK_IMAGE_ASPECT_DEPTH_BIT;
+    if ((flags & CLEAR_ZBUFFER) != 0 && depthFormat_ != VK_FORMAT_UNDEFINED) {
+        ds |= VK_IMAGE_ASPECT_DEPTH_BIT;
+        // the convention of the buffer follows the view that clears it (reversed: 1 -> 0 = infinity, else 1 - k z)
+        ds_->texture()->reverseZ_ = reverseZ_ && phases_.current().view == scene::View::Main;
+        if (ds_->texture()->reverseZ_) z = z >= 1.0f ? 0.0f : 1.0f - reverseDepthK() * std::max(z, 0.0f);
+    }
     if ((flags & CLEAR_STENCIL) != 0 && stencilFormat_ != VK_FORMAT_UNDEFINED) ds |= VK_IMAGE_ASPECT_STENCIL_BIT;
     if (ds != 0) {
         atts[n].aspectMask = ds;

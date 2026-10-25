@@ -101,6 +101,16 @@ VkBlendOp blendOp(std::uint32_t op) {
     }
 }
 
+VkCompareOp reverseCompareOp(VkCompareOp op) {
+    switch (op) {
+    case VK_COMPARE_OP_LESS: return VK_COMPARE_OP_GREATER;
+    case VK_COMPARE_OP_LESS_OR_EQUAL: return VK_COMPARE_OP_GREATER_OR_EQUAL;
+    case VK_COMPARE_OP_GREATER: return VK_COMPARE_OP_LESS;
+    case VK_COMPARE_OP_GREATER_OR_EQUAL: return VK_COMPARE_OP_LESS_OR_EQUAL;
+    default: return op;
+    }
+}
+
 VkCompareOp compareOp(std::uint32_t c) {
     switch (c) {
     case CMP_NEVER: return VK_COMPARE_OP_NEVER;
