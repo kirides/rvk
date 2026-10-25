@@ -94,9 +94,9 @@ const NativeParts::MaterialEntry& NativeParts::material(const void* material) {
         (layer ? stats_.layers : stats_.skippedMaterials)++;
         if (classLogged_ < 24) {
             ++classLogged_;
-            spdlog::info("enh: native parts: material '{}' is {}: {}, blend mode {}, diffuse {}, opacity {}, normal {}", mats::resourceName(material),
+            spdlog::info("enh: native parts: material '{}' is {}: {}, blend mode {}, diffuse {}, opacity {} (swizzle {}), normal {}", mats::resourceName(material),
                          layer ? "a terrain layer" : "never opaque", known ? mats::name(info.cls) : "unreadable / other class", known ? info.blendMode : 0,
-                         known ? mats::name(info.diffuse.source) : "-", known ? mats::name(info.opacity.source) : "-", known ? mats::name(info.normal.source) : "-");
+                         known ? mats::name(info.diffuse.source) : "-", known ? mats::name(info.opacity.source) : "-", known ? info.opacity.swizzle : 0, known ? mats::name(info.normal.source) : "-");
         }
     }
     if (known && (info.blendMode <= 1 || layer)) {
@@ -127,6 +127,7 @@ const NativeParts::MaterialEntry& NativeParts::material(const void* material) {
             }
         }
         m.normalUvSet = std::min<std::uint32_t>(info.normal.uvSet, 1u);
+        m.opacitySwizzle = info.opacity.swizzle;
         if (info.diffuse.source == mats::Source::Sampler) m.diffuseImage = info.diffuse.image;
         if (info.normal.source == mats::Source::Sampler) m.normalImage = info.normal.image;
         // opacity of masked materials: the Opacity tree's sampler (channel by the proxy's swizzle; a sampler other than the diffuse's is a texture of its own), else the diffuse alpha
@@ -283,6 +284,7 @@ bool NativeParts::resolve(const scene::MeshInfo& mesh, const scene::MeshPart& pa
     }
     out.masked = m.masked;
     out.layer = m.layer;
+    out.opacitySwizzle = m.opacitySwizzle;
     out.alphaRef = m.alphaRef;
     return true;
 }

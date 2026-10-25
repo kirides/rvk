@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstring>
 #include <format>
+#include <unordered_map>
 
 #include <spdlog/spdlog.h>
 
@@ -133,6 +134,61 @@ void RtScene::feedMirror(std::uint64_t frame, double now, const float camera[3])
             }
         }
         if (resolved.empty()) return;
+        // diagnostics (first three entities with several terrain layers): do the layer parts cover the same triangles, which vertex colour channel carries a layer's weight
+        {
+            std::vector<const NativePart*> layers;
+            for (const NativePart& np : resolved) {
+                if (np.layer) layers.push_back(&np);
+            }
+            static int logged = 0;
+            if (layers.size() >= 2 && logged < 3) {
+                ++logged;
+                std::unordered_map<std::uint64_t, std::uint32_t> perTriangle;  // sorted vertex indices -> layers covering it
+                std::string detail;
+                std::uint32_t total = 0;
+                for (const NativePart* l : layers) {
+                    const std::uint32_t tris = l->indexCount / 3, isz = l->index32 != 0 ? 4u : 2u;
+                    std::vector<std::uint8_t> idx(static_cast<std::size_t>(tris) * 3 * isz);
+                    const bool have = l->indexBuffer != nullptr && l->indexBuffer->readCpu(l->first * isz, static_cast<std::uint32_t>(idx.size()), idx.data());
+                    std::uint32_t minV = 0xFFFFFFFFu, maxV = 0;
+                    if (have) {
+                        for (std::uint32_t t = 0; t < tris; ++t) {
+                            std::uint32_t v[3]{};
+                            for (int k = 0; k < 3; ++k) {
+                                if (isz == 4) std::memcpy(&v[k], idx.data() + (t * 3 + k) * 4, 4);
+                                else {
+                                    std::uint16_t h = 0;
+                                    std::memcpy(&h, idx.data() + (t * 3 + k) * 2, 2);
+                                    v[k] = h;
+                                }
+                                minV = std::min(minV, v[k]);
+                                maxV = std::max(maxV, v[k]);
+                            }
+                            std::sort(v, v + 3);
+                            ++perTriangle[(static_cast<std::uint64_t>(v[0]) * 0x9E3779B97F4A7C15ull) ^ (static_cast<std::uint64_t>(v[1]) << 21) ^ (static_cast<std::uint64_t>(v[2]) << 42) ^ v[2]];
+                        }
+                    }
+                    total += tris;
+                    // the first vertices' colours of the layer's own range (D3DCOLOR argb)
+                    std::string colours;
+                    if (have && l->vertexBuffer != nullptr && l->layout.color0 != 0xFFFFu && minV != 0xFFFFFFFFu) {
+                        for (std::uint32_t k = 0; k < 3; ++k) {
+                            std::uint32_t c = 0;
+                            if (l->vertexBuffer->readCpu((minV + k) * l->stride + l->layout.color0, 4, &c)) colours += std::format(" {:08x}", c);
+                        }
+                    }
+                    detail += std::format("\n    '{}' swizzle {}: first index {}, {} triangles, vertices {}..{} (vb {}), colours of its first vertices{}", l->name != nullptr ? *l->name : std::string("?"),
+                                          l->opacitySwizzle, l->first, tris, minV, maxV, l->vbId, colours);
+                }
+                std::uint32_t shared = 0, maxLayers = 0;
+                for (const auto& kv : perTriangle) {
+                    shared += kv.second > 1 ? 1u : 0u;
+                    maxLayers = std::max(maxLayers, kv.second);
+                }
+                spdlog::info("rt: scene: terrain entity {}: {} layer parts of {} parts, {} triangles in the layers, {} distinct, {} covered by more than one layer, at most {} layers per triangle{}", e.ptr,
+                             layers.size(), resolved.size(), total, perTriangle.size(), shared, maxLayers, detail);
+            }
+        }
         rt::Rows rows;
         for (std::uint32_t r = 0; r < 3; ++r) {
             for (std::uint32_t c = 0; c < 4; ++c) rows[r * 4 + c] = e.state.world[c * 4 + r];  // row r of the 3x4 = column r of the row-vector matrix
@@ -165,7 +221,7 @@ void RtScene::feedMirror(std::uint64_t frame, double now, const float camera[3])
             const std::uint32_t mid = materials_.fromGraph(m);
             materials.push_back(mid);
             const std::uint64_t key = rt::instanceKey(b->id, rows);
-            auto sr2 = registry_.see(key, b->id, rows, 0, (np.index32 != 0 ? abi::kRtRecordIndex32 : 0u) | (viewBits << abi::kRtRecordViewShift),
+            auto sr2 = registry_.see(key, b->id, rows, 0, (np.index32 != 0 ? abi::kRtRecordIndex32 : 0u) | (np.layer ? abi::kRtRecordLayer : 0u) | (viewBits << abi::kRtRecordViewShift),
                                      static_cast<std::uint32_t>(Kind::StaticMesh) << 16, static_cast<std::uint8_t>(viewBits), frame, now);
             if (sr2.first == nullptr) continue;
             sr2.first->pinned = true;

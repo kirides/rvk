@@ -36,6 +36,7 @@ const uint RVK_RT_NO_DEPTH_WRITE = 16u;  // a main-view solid draw of it had z w
 const uint RVK_RT_DEPTH_BIAS = 32u;      // a main-view draw of it had a depth bias
 const uint RVK_RT_SEGMENTED = 64u;       // per-triangle materials (segments: rvkRtApplySegment)
 const uint RVK_RT_DYNAMIC = 128u;        // a skinned draw's vertices captured this frame (world space, no normals)
+const uint RVK_RT_LAYER = 0x1000000u;     // a terrain layer: blended by its vertex colour alpha over the coplanar layers below
 const uint RVK_RT_VIEW_MAIN = 0x10000u;
 const uint RVK_RT_VIEW_SHADOW = 0x20000u;
 // TLAS instance masks (abi.h kRtMask*)

@@ -191,6 +191,7 @@ inline constexpr std::uint32_t kRtRecordNoDepthWrite = 16u; // a main-view solid
 inline constexpr std::uint32_t kRtRecordDepthBias = 32u;    // a main-view draw of it had a depth bias (the depth buffer is offset)
 inline constexpr std::uint32_t kRtRecordSegmented = 64u;    // per-triangle materials: RtGeometryRecord::segments
 inline constexpr std::uint32_t kRtRecordDynamic = 128u;     // a skinned draw's vertices captured this frame (world space)
+inline constexpr std::uint32_t kRtRecordLayer = 1u << 24;   // a terrain layer: blended over the coplanar layers below by its vertex colour alpha (rvkRtHitSurface)
 inline constexpr std::uint32_t kRtRecordKindShift = 8;   // bits 8-15: draws::Kind of the draw
 inline constexpr std::uint32_t kRtRecordViewShift = 16;  // bits 16-23: views it was seen in (1 main, 2 sun cascades)
 // RtGeometryRecord::uvSet (M9 P2, docs/research/rt-reflections.md 3.2)

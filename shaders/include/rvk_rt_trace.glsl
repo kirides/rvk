@@ -112,6 +112,55 @@ struct RvkRtHitSurface {
     uint instanceId;
 };
 
+// Terrain layers (a level's ground is several coplanar copies of its triangles, one per ground texture, each fading out through its vertex colour alpha; the
+// engine draws them in order with alpha blending): the layer hits of the ray within a few units of the closest hit, blended in record order (the engine's
+// draw order), each weighted by its interpolated vertex alpha; the lowest layer is the base.
+const float RVK_RT_LAYER_DEPTH = 6.0;
+const int RVK_RT_LAYER_MAX = 4;
+
+vec4 rvkRtBlendLayers(RvkFrame f, RvkRtHit h, vec3 origin, vec3 dir, float lod, vec4 closest) {
+    uint rec[RVK_RT_LAYER_MAX];
+    uint prim[RVK_RT_LAYER_MAX];
+    vec2 bary[RVK_RT_LAYER_MAX];
+    int n = 0;
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, accelerationStructureEXT(rvkRtTlas(f)), gl_RayFlagsNoOpaqueEXT, 0xFFu, origin, max(h.t - RVK_RT_LAYER_DEPTH, 0.0), dir, h.t + RVK_RT_LAYER_DEPTH);
+    while (rayQueryProceedEXT(rq)) {
+        if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
+        uint index = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false)) + uint(rayQueryGetIntersectionGeometryIndexEXT(rq, false));
+        if ((rvkRtRecord(f, index).flags & RVK_RT_LAYER) == 0u) continue;
+        // an insertion sort by record index (a hit of the same record twice cannot happen: one layer's triangles do not overlap)
+        uint p = uint(rayQueryGetIntersectionPrimitiveIndexEXT(rq, false));
+        vec2 b = rayQueryGetIntersectionBarycentricsEXT(rq, false);
+        int at = n < RVK_RT_LAYER_MAX ? n : RVK_RT_LAYER_MAX - 1;
+        if (n == RVK_RT_LAYER_MAX && rec[at] <= index) continue;
+        while (at > 0 && rec[at - 1] > index) {
+            rec[at] = rec[at - 1];
+            prim[at] = prim[at - 1];
+            bary[at] = bary[at - 1];
+            --at;
+        }
+        rec[at] = index;
+        prim[at] = p;
+        bary[at] = b;
+        if (n < RVK_RT_LAYER_MAX) ++n;
+    }
+    if (n < 2) return closest;
+    vec3 c = vec3(0.0);
+    for (int i = 0; i < n; ++i) {
+        RvkRtRecord r = rvkRtRecord(f, rec[i]);
+        rvkRtApplySegment(r, prim[i]);
+        RvkRtMaterialTri tri = rvkRtMaterialTriangle(r, prim[i]);
+        vec4 a = rvkRtAlbedo(r, rvkRtMaterialTriUv(tri, bary[i]), lod);
+        uvec3 t = rvkRtTriangle(r, prim[i]);
+        vec3 w = rvkRtWeights(bary[i]);
+        float weight = r.color0 == RVK_RT_ABSENT ? 1.0
+                       : rvkRtAttribute(r, t.x, r.color0).w * w.x + rvkRtAttribute(r, t.y, r.color0).w * w.y + rvkRtAttribute(r, t.z, r.color0).w * w.z;
+        c = i == 0 ? a.rgb : mix(c, a.rgb, clamp(weight, 0.0, 1.0));
+    }
+    return vec4(c, 1.0);
+}
+
 RvkRtHitSurface rvkRtHitSurface(RvkFrame f, RvkRtHit h, vec3 dir, float coneWidth0, float coneSpread) {
     RvkRtRecord r = rvkRtRecord(f, h.record);
     rvkRtApplySegment(r, h.primitive);
@@ -135,6 +184,7 @@ RvkRtHitSurface rvkRtHitSurface(RvkFrame f, RvkRtHit h, vec3 dir, float coneWidt
         o.lod = max(rvkRtTextureLod(tri, h.objectToWorld, rvkSize2D(r.albedoTex), coneWidth0 + coneSpread * h.t, abs(dot(g, dir))), 0.0);
     }
     o.albedo = rvkRtAlbedo(r, o.uv, o.lod);
+    if ((r.flags & RVK_RT_LAYER) != 0u) o.albedo = rvkRtBlendLayers(f, h, o.position - dir * h.t, dir, o.lod, o.albedo);
     return o;
 }
 

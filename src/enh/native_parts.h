@@ -44,6 +44,7 @@ struct NativePart {
     std::uint64_t vbId = 0, ibId = 0;
     std::uint32_t vbGen = 0, ibGen = 0;
     bool masked = false;                        // blend mode masked: alpha tested against alphaRef
+    std::uint32_t opacitySwizzle = 0;           // the opacity role proxy's channel swizzle (0 none, 1 .rgb, 2 .r, 3 .g, 4 .b, 5 .a): a terrain layer's weight channel of the vertex colour
     bool layer = false;                         // a terrain layer: blended over other layers by the vertex colour (only with allowLayers: the RT scene takes it as a base surface)
     float alphaRef = 0.0f;                      // 0..255
     const void* material = nullptr;
@@ -100,6 +101,7 @@ private:
         const void* opacityImage = nullptr;
         d3d9::Texture* opacity = nullptr;
         std::uint32_t opacityChannel = 3;
+        std::uint32_t opacitySwizzle = 0;
         bool opacityOpaque = false;
         std::string name;
     };
