@@ -321,6 +321,11 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         nativeOpaque_->apply(rs.nativeOpaque->asBool());
     }
     nativeOpaque_->setParts(nativeParts_.get());
+    if (rs.rtSource != nullptr && rtScene_) {
+        const auto applyRtSource = [this](const settings::Setting& s) { rtScene_->setMirrorSource(s.asInt() == 1 ? nativeParts_.get() : nullptr); };
+        reg.onChange(*rs.rtSource, applyRtSource, this);
+        applyRtSource(*rs.rtSource);
+    }
     if (rs.nativeList != nullptr) {
         reg.onChange(*rs.nativeList, [this](const settings::Setting& s) { nativeOpaque_->setListMode(static_cast<std::uint32_t>(s.asInt())); }, this);
         nativeOpaque_->setListMode(static_cast<std::uint32_t>(rs.nativeList->asInt()));

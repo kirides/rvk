@@ -265,3 +265,27 @@ of listed parts are skipped (and compared with what was composed: rvk.log `light
 * Left to the engine: fading parts (alpha / view range), blended layers (terrain, decals), instanced meshes, skinned characters, SpeedTree, vegetation, particles, water, sky.
 * Cost with sync validation on: native lists + native cascades ~39 fps against ~40 for the engine's own frame; the cascade draw lists (~2450 draws / frame, 7 ms CPU) are the
   next thing to cache / instance.
+
+## 13. Instanced static meshes and the RT scene from the mirror (2026-10-25) [C]
+
+**Instancing** (`native_shadows.*`, `shaders/native/shadow_mesh.*`). The cascades' casters are grouped by identical geometry + masked-diffuse (vertex / index address,
+first index, count): one draw per group per cascade, the per-instance transforms in a ring array read by `gl_InstanceIndex`, the instances culled per cascade (the
+cylinder toward the sun) while they are copied. Measured (savegame, ~1100 casters): **2,442 draws per frame -> 931 draws (426 groups), CPU 7 ms -> 3 ms**, frame rate unchanged,
+image unchanged. The groups are cached: rebuilt only when entities / meshes / resolved parts changed (debounced to 8 frames, 0.34 ms each; 121 rebuilds where the first version
+rebuilt every frame: the device's `textureReleased` / `bufferChanged` fire for the engine's dynamic resources every frame and bumped the parts' generation: now only a release of
+something a part uses counts), or the camera moved 15 m, or 90 frames passed; entities that only moved update their instances in place (`Mirror::transformVersion`, 0.06 ms).
+The mirror's version is split in `structureVersion` (add / remove / level of detail) and `transformVersion` (matrices of entities with meshes; characters do not count).
+The native opaque pass is **not** instanced: the mirror list holds ~160 frustum-culled parts per frame (one draw each), nothing to gain.
+
+**RT scene from the mirror** (`rt.source = mirror`, default `draws`; `rt_scene_mirror.cpp`). Every cached-in entity whose mesh parts are all drawable opaquely
+(`NativeParts`) feeds the RT scene directly: one BLAS per sub-mesh range (the draws' cache and keys, equal ranges merge), one **pinned** registry instance per (entity, part)
+with the entity's own matrix (`Registry::Instance::pinned`: aging by time / distance / the cap never takes it; a rebuild keeps the instance of an unchanged part, removes the
+ones the mirror no longer wants, so a moving rigid object has exactly one instance and an LOD switch leaves no ghost), materials from the engine's material graph
+(`RtMaterials::fromGraph`: textures, an identity uv map on the diffuse's uv set, the opacity role: an approximation of the draws' CPU-evaluated uv maps). The draws of fed entities
+are no longer observed. Entities with a part that is blended / water / without a buffer (terrain layers, water, ~165 of ~900), skinned characters, SpeedTrees and instanced batches
+without an entity stay on the draw observation; rt.log `rt: scene: mirror source: ...`.
+* Result (savegame): TLAS **438 -> 1,320 instances, 480k -> 908k triangles** (the mirror knows the off-screen and the far entities the draws never showed), BLAS 522 -> 540, pass CPU 0.84 -> 1.0 ms,
+  frame rate unchanged. The RT shadow term (extended, high) with the mirror source equals the one fed by the draws (correlation 0.993 over the ground area, mean difference 2.6 / 255, the
+  rest are walking NPCs), validation clean.
+* Open: the terrain / level meshes (blended layers) are still draw-fed; uv maps of animated / scaled materials; skinned characters and trees from the mirror's own data (the
+  palette of off-screen actors, the global wind state: native-renderer.md 8); the GI's characters.

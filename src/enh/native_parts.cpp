@@ -48,13 +48,18 @@ NativeParts::NativeParts(d3d9::Device& device, DeclResolver resolver) : dev_(dev
 
 NativeParts::~NativeParts() { dev_.removeDrawObserver(this); }
 
+// the device tells about every buffer / texture it releases (the engine's dynamic ones every frame): only ones a resolved part uses matter
 void NativeParts::bufferChanged(std::uint64_t bufferId) {
-    std::erase_if(geometry_, [&](const auto& kv) { return kv.second.vbId == bufferId || kv.second.ibId == bufferId; });
+    const std::size_t erased = std::erase_if(geometry_, [&](const auto& kv) { return kv.second.vbId == bufferId || kv.second.ibId == bufferId; });
+    if (erased != 0) ++generation_;
 }
 
 void NativeParts::textureReleased(const d3d9::Texture* texture) {
     for (auto& kv : materials_) {
-        if (kv.second.diffuse == texture || kv.second.normal == texture) kv.second = MaterialEntry{};  // looked up again at the next use
+        if (kv.second.diffuse == texture || kv.second.normal == texture || kv.second.opacity == texture) {
+            kv.second = MaterialEntry{};  // looked up again at the next use
+            ++generation_;
+        }
     }
 }
 
@@ -111,6 +116,20 @@ const NativeParts::MaterialEntry& NativeParts::material(const void* material) {
         m.normalUvSet = std::min<std::uint32_t>(info.normal.uvSet, 1u);
         if (info.diffuse.source == mats::Source::Sampler) m.diffuseImage = info.diffuse.image;
         if (info.normal.source == mats::Source::Sampler) m.normalImage = info.normal.image;
+        // opacity of masked materials: the Opacity tree's sampler (channel by the proxy's swizzle; a sampler other than the diffuse's is a texture of its own), else the diffuse alpha
+        if (info.opacity.source == mats::Source::Sampler && info.opacity.slot >= 0) {
+            m.opacityChannel = info.opacity.swizzle >= 2 && info.opacity.swizzle <= 5 ? static_cast<std::uint32_t>(info.opacity.swizzle - 2) : 3u;
+            if (info.opacity.slot != info.diffuse.slot) {
+                m.opacityImage = info.opacity.image;
+                d3d9::Texture* t = m.opacityImage != nullptr ? dev_.engineTexture(mats::apiTextureOf(m.opacityImage)) : nullptr;
+                if (t != nullptr && !t->isNull() && t->kind() == vk::TextureKind::Tex2D) m.opacity = t;
+                else m.opacityOpaque = true;
+            }
+        } else if (info.opacity.source != mats::Source::None) {
+            m.opacityOpaque = true;
+        }
+        m.name = info.diffuse.slot >= 0 ? mats::poolImageName(info, info.diffuse.slot) : std::string();
+        if (m.name.empty()) m.name = mats::resourceName(material);
         if (info.normal.source == mats::Source::Sampler && info.normal.image != nullptr) {
             d3d9::Texture* t = dev_.engineTexture(mats::apiTextureOf(info.normal.image));
             if (t != nullptr && !t->isNull() && t->kind() == vk::TextureKind::Tex2D) m.normal = t;
@@ -119,17 +138,20 @@ const NativeParts::MaterialEntry& NativeParts::material(const void* material) {
     return m;
 }
 
-bool NativeParts::resolve(const scene::MeshInfo& mesh, const scene::MeshPart& part, NativePart& out, bool touch) {
+bool NativeParts::resolve(const scene::MeshInfo& mesh, const scene::MeshPart& part, NativePart& out, bool touch, Reject* why) {
     out = NativePart{};
+    if (why != nullptr) *why = Reject::None;
     const MaterialEntry& m = material(part.material);
     if (!m.ok) {
         ++stats_.noMaterial;
+        if (why != nullptr) *why = Reject::Material;
         return false;
     }
     if (touch) {
         touchResource(part.material);
         touchResource(m.diffuseImage);
         touchResource(m.normalImage);
+        touchResource(m.opacityImage);
     }
     const std::uint64_t frame = dev_.frameValue();
     Geometry& g = geometry_[part.subMesh];
@@ -154,12 +176,26 @@ bool NativeParts::resolve(const scene::MeshInfo& mesh, const scene::MeshPart& pa
             ib == nullptr || vb.stride < 12 || vb.stride % 4 != 0 || part.indexCount == 0 || part.indexCount % 3 != 0 || vb.buffer->ringCopied() ||
             ib->ringCopied()) {
             ++stats_.noBuffers;
+            if (why != nullptr) *why = Reject::Buffers;
             return false;
         }
         d3d9::VertexDecl* decl = mesh.declaration != nullptr ? resolveDecl_(mesh.declaration) : nullptr;
         const NativeLayout layout = nativeLayoutOf(decl);
         if (!layout.positionOk) {
             ++stats_.noDecl;
+            if (declLogged_ < 6) {
+                ++declLogged_;
+                std::string d;
+                if (decl != nullptr) {
+                    for (const d3d9::VertexElement& e : decl->elements()) {
+                        if (e.stream == d3d9::kDeclEndStream) break;
+                        d += std::format(" s{}+{} t{} u{}.{}", e.stream, e.offset, e.type, e.usage, e.usageIndex);
+                    }
+                }
+                spdlog::info("enh: native parts: declaration rejected: material '{}', stride {}, {} [{} ]", mats::resourceName(part.material), vb.stride,
+                             decl == nullptr ? std::format("no declaration object found for visual +0x50 = {}", mesh.declaration) : std::string("declaration:"), d);
+            }
+            if (why != nullptr) *why = Reject::Declaration;
             return false;
         }
         vb.buffer->gpu(vb.stride);
@@ -167,10 +203,17 @@ bool NativeParts::resolve(const scene::MeshInfo& mesh, const scene::MeshPart& pa
         const VkDeviceAddress va = vb.buffer->deviceAddress(), ia = ib->deviceAddress();
         if (va == 0 || ia == 0) {
             ++stats_.noBuffers;
+            if (why != nullptr) *why = Reject::Buffers;
             return false;
         }
         g.vbId = vb.buffer->ref().id;
         g.ibId = ib->ref().id;
+        g.part.vertexBuffer = vb.buffer;
+        g.part.indexBuffer = ib;
+        g.part.vbId = g.vbId;
+        g.part.ibId = g.ibId;
+        g.part.vbGen = static_cast<std::uint32_t>(vb.buffer->ref().generation);
+        g.part.ibGen = static_cast<std::uint32_t>(ib->ref().generation);
         g.part.vertices = va;  // the mesh resource's stream 0 starts at the buffer's start (verified: stream offset 0 in every compared draw)
         g.part.indices = ia;
         g.part.stride = vb.stride;
@@ -198,12 +241,19 @@ bool NativeParts::resolve(const scene::MeshInfo& mesh, const scene::MeshPart& pa
     } else {
         ++stats_.cached;
     }
-    if (!g.ok) return false;
+    if (!g.ok) {
+        if (why != nullptr) *why = Reject::Buffers;
+        return false;
+    }
     out = g.part;
     out.diffuse = m.diffuse;
     out.diffuseUvSet = m.uvSet;
     out.normal = m.normal;
     out.normalUvSet = m.normalUvSet;
+    out.opacity = m.opacity;
+    out.opacityChannel = m.opacityChannel;
+    out.opacityOpaque = m.opacityOpaque;
+    out.name = &m.name;
     // the lightmaps belong to the mesh resource: its image resources at +0x90 / +0x98 (null until the images are loaded)
     for (int i = 0; i < 2; ++i) {
         const void* image = nullptr;

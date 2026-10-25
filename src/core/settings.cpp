@@ -1682,6 +1682,20 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .flags = Flag::Debug,
     });
+    r.rtSource = &reg.add({
+        .key = "rt.source",
+        .label = "Ray tracing scene: static mesh source",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Where the ray tracing scene (shadows, reflections, GI) takes the world's static meshes from: the engine's draws "
+                       "(observed, instances guessed from their transforms), or the scene mirror (stable identity per entity and part, no ghosts, "
+                       "off-screen entities included). Entities with blended or water parts, characters and trees stay on the draws.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"draws", "mirror"},
+        .optionLabels = {"Engine's draws", "Scene mirror"},
+        .flags = Flag::NoAB | Flag::Debug,
+    });
     r.nativeList = &reg.add({
         .key = "native.list",
         .label = "Native opaque pass: draw list",

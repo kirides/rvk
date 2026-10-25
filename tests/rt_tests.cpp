@@ -224,3 +224,24 @@ TEST(rt_frame_block_fields) {
     CHECK(fb.rtScene[0] == 0x34567890u && fb.rtScene[1] == 0x12u && fb.rtScene[2] == 0x1000u && fb.rtScene[3] == 0xABCu);
     CHECK(fb.rtInfo[0] == 42 && fb.rtInfo[1] == 42 && fb.rtInfo[2] == shader::abi::kFrameRtValid);
 }
+
+// the scene mirror's instances are pinned: aging (time, distance, the cap) never takes them, removeIf does
+TEST(rt_registry_pinned_instances) {
+    rt::Registry reg;
+    const rt::Rows far = at(1.0e6f, 0, 0), near = at(0, 0, 0);
+    auto [p, fresh] = reg.see(rt::instanceKey(1, far), 1, far, 0, 0, 0, 1, 1, 0.0);
+    CHECK(fresh);
+    p->pinned = true;
+    reg.see(rt::instanceKey(2, near), 2, near, 0, 0, 0, 1, 1, 0.0);  // an ordinary one, long unseen below
+    rt::Limits limits;
+    limits.radius = 1000.0f;
+    limits.unseenFrames = 10;
+    limits.unseenSeconds = 1.0;
+    limits.maxRegistered = 1;  // the cap would drop one of the two
+    const float camera[3] = {0, 0, 0};
+    const auto bounds = [](std::uint64_t) -> const rt::Aabb* { return nullptr; };
+    reg.age(camera, 1000, 1000.0, limits, bounds);
+    CHECK(reg.find(rt::instanceKey(1, far)) != nullptr);   // pinned: too far and stale, still there
+    CHECK(reg.find(rt::instanceKey(2, near)) == nullptr);  // the ordinary one: aged out
+    CHECK(reg.removeIf([](const rt::Registry::Instance& in) { return in.pinned; }) == 1 && reg.size() == 0);
+}

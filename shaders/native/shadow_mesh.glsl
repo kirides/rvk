@@ -1,5 +1,6 @@
 // Native sun shadow cascades (src/enh/native_shadows.*, docs/research/native-renderer.md N4): depth-only draws of the scene mirror's static
-// mesh parts from the sun, vertices pulled from the engine's buffers by device address (as static_mesh.*).
+// mesh parts from the sun, vertices pulled from the engine's buffers by device address (as static_mesh.*). Parts with the same geometry and
+// material are one instanced draw: the per-instance transforms are read from a ring array by gl_InstanceIndex.
 #define RVK_PASS_SHADER
 #include "rvk_abi.glsl"
 
@@ -11,19 +12,22 @@ layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Sh
     mat4 viewProj;
 };
 
-// per part (ring): 3x4 object -> world rows and the alpha test's texture
+// per group (ring): the alpha test's texture and the vertex layout
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer ShadowItem {
-    vec4 row0;
-    vec4 row1;
-    vec4 row2;
     uvec4 tex;    // x albedo bindless slot, y sampler, z uv byte offset (0xFFFF = none), w flags
     uvec4 vtx;    // x stride
     vec4 params;  // x alpha reference 0..255
 };
 
+// per cascade (ring): the visible instances of all groups, 3 vec4 each (object -> world 3x4 rows)
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer ShadowInstances {
+    vec4 rows[];
+};
+
 layout(push_constant, std430) uniform ShadowPush {
     uvec2 cascade;
     uvec2 item;
+    uvec2 instances;
     uvec2 vertices;
     uvec2 indices;
 } pc;

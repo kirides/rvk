@@ -21,6 +21,8 @@ const Entity& Mirror::cachedIn(const void* ptr, const EntityState& state, std::u
     }
     e.state = state;
     e.updatedFrame = frame;
+    ++version_;
+    ++structure_;
     return e;
 }
 
@@ -31,6 +33,8 @@ bool Mirror::cachedOut(const void* ptr) {
         return false;
     }
     ++counters_.removed;
+    ++version_;
+    ++structure_;
     return true;
 }
 
@@ -42,6 +46,8 @@ bool Mirror::deleted(const void* ptr) {
     }
     ++counters_.deletedLive;
     ++counters_.removed;
+    ++version_;
+    ++structure_;
     return true;
 }
 
@@ -54,6 +60,10 @@ bool Mirror::update(const void* ptr, const EntityState& state, std::uint64_t fra
     if (!sameMatrix(e.state.world, state.world)) {
         ++e.moved;
         ++counters_.moved;
+        if (!e.meshes.empty()) {  // characters (animation contexts only) move every frame and do not matter to the mesh caches
+            ++version_;
+            ++transform_;
+        }
     }
     e.state = state;
     e.updatedFrame = frame;
@@ -71,7 +81,11 @@ bool Mirror::setMeshes(const void* ptr, std::vector<MeshInfo>&& meshes, bool* ch
                   cur[i].parts.size() != meshes[i].parts.size();
     }
     if (changed != nullptr) *changed = differs;
-    if (differs) cur = std::move(meshes);
+    if (differs) {
+        cur = std::move(meshes);
+        ++version_;
+        ++structure_;
+    }
     return true;
 }
 
@@ -101,6 +115,14 @@ bool Mirror::lookupPart(const void* ptr, const void* subMesh, MeshInfo& info, Me
         }
     }
     return false;
+}
+
+bool Mirror::stateOf(const void* ptr, EntityState& out) const {
+    std::lock_guard lock(mutex_);
+    const auto it = map_.find(ptr);
+    if (it == map_.end()) return false;
+    out = it->second.state;
+    return true;
 }
 
 bool Mirror::worldOf(const void* ptr, Matrix& out) const {

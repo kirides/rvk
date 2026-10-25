@@ -50,6 +50,8 @@ public:
     // a cheap signature of the draw's material state (shaders, the engine shader, the textures s9..s15): unchanged = the
     // last resolve still holds (apart from animated constants)
     static std::uint64_t signature(const d3d9::ReplaceQuery& q);
+    // an entry for a material described by the scene mirror's parts (no draw: the graph's textures, identity uv map): an id with one reference for the caller
+    std::uint32_t fromGraph(RtMaterial m);
     const RtMaterial* get(std::uint32_t id) const;
     void addRef(std::uint32_t id);
     void release(std::uint32_t id);

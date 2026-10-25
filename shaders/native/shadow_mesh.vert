@@ -32,7 +32,9 @@ void main() {
     }
     const uvec2 v = addrAdd(pc.vertices, index * it.vtx.x);
     const vec4 p = vec4(loadF(v, 0u), loadF(v, 4u), loadF(v, 8u), 1.0);
-    const vec3 world = vec3(dot(it.row0, p), dot(it.row1, p), dot(it.row2, p));
+    ShadowInstances inst = ShadowInstances(pc.instances);
+    const uint at = uint(gl_InstanceIndex) * 3u;
+    const vec3 world = vec3(dot(inst.rows[at], p), dot(inst.rows[at + 1u], p), dot(inst.rows[at + 2u], p));
     gl_Position = cs.viewProj * vec4(world, 1.0);
     outUv = it.tex.z != 0xFFFFu ? vec2(loadF(v, it.tex.z), loadF(v, it.tex.z + 4u)) : vec2(0.0);
 }

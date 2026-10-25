@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <unordered_map>
 
 #include "d3d9/device.h"
@@ -33,6 +34,15 @@ struct NativePart {
     d3d9::Texture* normal = nullptr;            // its normal map (DXT5nm: the engine converts them), null: none
     std::uint32_t normalUvSet = 0;
     d3d9::Texture* lightmap[2]{};               // the mesh resource's directional lightmaps (res +0x90 / +0x98), null until loaded
+    d3d9::Texture* opacity = nullptr;           // the graph's own opacity texture (a separate sampler), null: the diffuse's alpha / opaque
+    std::uint32_t opacityChannel = 3;           // its channel (0 r .. 3 a)
+    bool opacityOpaque = false;                 // the opacity role has no texture we can read: treat as opaque
+    const std::string* name = nullptr;          // the material's diagnostic name (pool image of the diffuse), stable while NativeParts lives
+    // the buffers behind the addresses (the RT scene's BLAS cache keys on them)
+    d3d9::Buffer* vertexBuffer = nullptr;
+    d3d9::Buffer* indexBuffer = nullptr;
+    std::uint64_t vbId = 0, ibId = 0;
+    std::uint32_t vbGen = 0, ibGen = 0;
     bool masked = false;                        // blend mode masked: alpha tested against alphaRef
     float alphaRef = 0.0f;                      // 0..255
     const void* material = nullptr;
@@ -51,7 +61,8 @@ public:
     // unsupported layout). `out` is valid for this frame.
     // `touch`: refresh the part's material and images in the engine's resource cache (every draw of the engine does: without it its LRU unloads what only
     // we use); the opaque pass wants it, the shadow cascades only need what is loaded
-    bool resolve(const scene::MeshInfo& mesh, const scene::MeshPart& part, NativePart& out, bool touch = true);
+    enum class Reject : std::uint8_t { None, Material, Buffers, Declaration };
+    bool resolve(const scene::MeshInfo& mesh, const scene::MeshPart& part, NativePart& out, bool touch = true, Reject* why = nullptr);
 
     struct Stats {
         std::uint64_t resolved = 0, cached = 0, noBuffers = 0, noDecl = 0, noMaterial = 0;
@@ -60,6 +71,8 @@ public:
         std::uint64_t diffuseNoImage = 0, diffuseNoApi = 0, diffuseNoTexture = 0;  // materials whose diffuse could not be had (no image / not loaded / not ours)
     };
     const Stats& stats() const { return stats_; }
+    // bumped when a cached pointer of a resolved part may have died (a buffer changed, a texture was released): caches of NativePart copies rebuild
+    std::uint64_t generation() const { return generation_; }
 
     // DrawObserver: no draws are observed, only the lifetime callbacks
     bool observes(d3d9::draws::Kind, d3d9::scene::Phase) const override { return false; }
@@ -79,6 +92,11 @@ private:
         d3d9::Texture* normal = nullptr;
         const void* diffuseImage = nullptr;  // the graph's image resources (kept alive by touch())
         const void* normalImage = nullptr;
+        const void* opacityImage = nullptr;
+        d3d9::Texture* opacity = nullptr;
+        std::uint32_t opacityChannel = 3;
+        bool opacityOpaque = false;
+        std::string name;
     };
     struct Geometry {
         const void* vertexData = nullptr;
@@ -88,14 +106,15 @@ private:
         std::uint64_t vbId = 0, ibId = 0;
         std::uint64_t frame = 0;
         bool ok = false;
-        NativePart part;  // geometry fields only (the diffuse is looked up per frame)
+        NativePart part;  // geometry fields only (the textures are looked up per frame)
     };
     const MaterialEntry& material(const void* material);
     // eCResource2::RequestData(resource, 1) as every engine draw does for its material and images: queues the data when it is not loaded (async), else
     // refreshes the resource's LRU stamp; once per frame per resource
     void touchResource(const void* resource);
     std::unordered_map<const void*, std::uint64_t> touched_;
-    int diagLogged_ = 0, layoutLogged_ = 0;
+    int diagLogged_ = 0, layoutLogged_ = 0, declLogged_ = 0;
+    std::uint64_t generation_ = 1;
 
     d3d9::Device& dev_;
     DeclResolver resolveDecl_;

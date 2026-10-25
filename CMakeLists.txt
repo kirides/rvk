@@ -252,6 +252,7 @@ add_library(rvk_core STATIC
     src/enh/rt_registry.cpp
     src/enh/rt_registry.h
     src/enh/rt_scene.cpp
+    src/enh/rt_scene_mirror.cpp
     src/enh/rt_scene.h
     src/enh/rt_shadows.cpp
     src/enh/rt_shadows.h

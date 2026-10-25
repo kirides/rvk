@@ -41,10 +41,16 @@ public:
     VkDeviceAddress block() const { return blockFrame_ == dev_.frameValue() ? block_ : 0; }
 
 private:
-    struct Caster {
-        NativePart part;
+    // parts with the same geometry and material are one instanced draw; the groups are cached while the mirror, the resolved parts and the camera stay
+    // (rebuilt when any changes, at the latest every kRebuildFrames)
+    struct Inst {
         float rows[3][4]{};
         float sphere[4]{};
+        const void* entity = nullptr;  // its mirror entity (the rows follow it when it moves)
+    };
+    struct Group {
+        NativePart part;
+        std::vector<Inst> instances;
     };
     struct Cascade {
         double center[3]{};
@@ -64,12 +70,19 @@ private:
     vk::PassLayout layout_;
     VkPipeline pipeline_ = VK_NULL_HANDLE;
     VkPipeline pipelineMasked_ = VK_NULL_HANDLE;
-    std::vector<Caster> casters_;
+    std::vector<Group> groups_;
+    std::uint64_t builtStructure_ = 0, builtTransform_ = 0, builtParts_ = 0, builtFrame_ = 0, refreshedFrame_ = 0;
+    double builtCamera_[3]{};
+    void rebuildGroups(const double camPos[3], double reach);
+    void refreshTransforms();
+    double rebuildMs_ = 0.0, refreshMs_ = 0.0;
+    std::uint64_t refreshes_ = 0;
+    std::uint64_t casterCount_ = 0, rebuilds_ = 0;
     VkDeviceAddress block_ = 0;
     std::uint64_t blockFrame_ = ~0ull;
 
     struct Stats {
-        std::uint64_t frames = 0, casters = 0, draws = 0, skippedNoSun = 0, skippedNoCamera = 0;
+        std::uint64_t frames = 0, casters = 0, draws = 0, instances = 0, groups = 0, skippedNoSun = 0, skippedNoCamera = 0, rebuilds = 0;
         double ms = 0.0;
     } stats_;
     double lastReport_ = 0.0;

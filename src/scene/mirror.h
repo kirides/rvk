@@ -7,6 +7,7 @@
 // tests/mirror_tests.cpp. Thread-safe (the engine thread feeds it, the render thread reads it).
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -98,6 +99,15 @@ public:
     Counters counters() const;
     void clear();
 
+    // bumped by every change a cache of mirror parts must notice: an entity added / removed, its mesh contexts replaced (level of detail), its world
+    // matrix changed (any thread)
+    std::uint64_t version() const { return version_.load(std::memory_order_relaxed); }
+    // the two parts of it: the set of entities / their mesh contexts (add, remove, level of detail), and the world matrices of entities with meshes
+    std::uint64_t structureVersion() const { return structure_.load(std::memory_order_relaxed); }
+    std::uint64_t transformVersion() const { return transform_.load(std::memory_order_relaxed); }
+    // a copy of the entity's state (one lookup); false when not mirrored
+    bool stateOf(const void* ptr, EntityState& out) const;
+
     static bool sameMatrix(const Matrix& a, const Matrix& b);
 
 private:
@@ -105,6 +115,7 @@ private:
     std::unordered_map<const void*, Entity> map_;
     std::uint64_t nextId_ = 1;
     Counters counters_;
+    std::atomic<std::uint64_t> version_{1}, structure_{1}, transform_{1};
 };
 
 }  // namespace rvk::scene

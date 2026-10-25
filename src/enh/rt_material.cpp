@@ -143,6 +143,11 @@ std::uint32_t RtMaterials::intern(const RtMaterial& m) {
     return id;
 }
 
+std::uint32_t RtMaterials::fromGraph(RtMaterial m) {
+    if (isEmitterName(m.name)) m.uvSet |= abi::kRtUvEmissive;
+    return intern(m);
+}
+
 const RtMaterials::Program* RtMaterials::program(const d3d9::Shader* s) {
     if (s == nullptr) return nullptr;
     auto [it, inserted] = programs_.try_emplace(s->hash);
