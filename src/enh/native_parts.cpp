@@ -77,7 +77,7 @@ void NativeParts::touchResource(const void* resource) {
 const NativeParts::MaterialEntry& NativeParts::material(const void* material) {
     const std::uint64_t frame = dev_.frameValue();
     MaterialEntry& m = materials_[material];
-    if (m.frame != 0 && frame < m.frame + kMaterialRefresh && !(m.ok && m.diffuse == nullptr && frame >= m.frame + 8)) return m;
+    if (m.frame != 0 && frame < m.frame + kMaterialRefresh && !((m.ok || m.layer) && m.diffuse == nullptr && frame >= m.frame + 8)) return m;
     m = MaterialEntry{};
     m.frame = frame;
     mats::ShaderInfo info;
@@ -86,9 +86,22 @@ const NativeParts::MaterialEntry& NativeParts::material(const void* material) {
         ++stats_.water;
         return m;
     }
-    if (material != nullptr && mats::active(info, material) && (info.cls == mats::ShaderClass::Default || info.cls == mats::ShaderClass::Leafs) &&
-        info.blendMode <= 1) {
-        m.ok = true;
+    // classes: opaque / masked (blend mode 0 / 1: drawn natively), terrain layers (alpha blend with the opacity in the vertex colour and a diffuse texture: blended over
+    // each other by the engine, a base surface for the RT scene), everything else (overlays with their own opacity texture, additive blends, other shader classes)
+    const bool known = material != nullptr && mats::active(info, material) && (info.cls == mats::ShaderClass::Default || info.cls == mats::ShaderClass::Leafs);
+    const bool layer = known && info.blendMode == 2 && info.diffuse.source == mats::Source::Sampler && info.opacity.source == mats::Source::VertexColor;
+    if (material != nullptr && !(known && info.blendMode <= 1)) {
+        (layer ? stats_.layers : stats_.skippedMaterials)++;
+        if (classLogged_ < 24) {
+            ++classLogged_;
+            spdlog::info("enh: native parts: material '{}' is {}: {}, blend mode {}, diffuse {}, opacity {}, normal {}", mats::resourceName(material),
+                         layer ? "a terrain layer" : "never opaque", known ? mats::name(info.cls) : "unreadable / other class", known ? info.blendMode : 0,
+                         known ? mats::name(info.diffuse.source) : "-", known ? mats::name(info.opacity.source) : "-", known ? mats::name(info.normal.source) : "-");
+        }
+    }
+    if (known && (info.blendMode <= 1 || layer)) {
+        m.ok = info.blendMode <= 1;
+        m.layer = layer;
         m.masked = info.blendMode == 1;
         m.alphaRef = static_cast<float>(info.maskReference);
         m.uvSet = std::min<std::uint32_t>(info.diffuse.uvSet, 1u);
@@ -138,13 +151,13 @@ const NativeParts::MaterialEntry& NativeParts::material(const void* material) {
     return m;
 }
 
-bool NativeParts::resolve(const scene::MeshInfo& mesh, const scene::MeshPart& part, NativePart& out, bool touch, Reject* why) {
+bool NativeParts::resolve(const scene::MeshInfo& mesh, const scene::MeshPart& part, NativePart& out, bool touch, Reject* why, bool allowLayers) {
     out = NativePart{};
     if (why != nullptr) *why = Reject::None;
     const MaterialEntry& m = material(part.material);
-    if (!m.ok) {
+    if (!m.ok && !(m.layer && allowLayers)) {
         ++stats_.noMaterial;
-        if (why != nullptr) *why = Reject::Material;
+        if (why != nullptr) *why = m.layer ? Reject::Material : Reject::Skipped;
         return false;
     }
     if (touch) {
@@ -269,6 +282,7 @@ bool NativeParts::resolve(const scene::MeshInfo& mesh, const scene::MeshPart& pa
         }
     }
     out.masked = m.masked;
+    out.layer = m.layer;
     out.alphaRef = m.alphaRef;
     return true;
 }

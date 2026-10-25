@@ -117,12 +117,18 @@ void RtScene::feedMirror(std::uint64_t frame, double now, const float camera[3])
             for (const scene::MeshPart& part : mesh.parts) {
                 NativePart np;
                 NativeParts::Reject why = NativeParts::Reject::None;
-                if (!mirrorParts_->resolve(mesh, part, np, false, &why)) {
+                if (!mirrorParts_->resolve(mesh, part, np, false, &why, true)) {
+                    // water, overlays and other never-opaque materials are not part of the RT scene (the draws' path leaves them out too): the part is ignored
+                    if (why == NativeParts::Reject::Skipped) {
+                        ++mirrorSkippedParts_;
+                        continue;
+                    }
                     ++(why == NativeParts::Reject::Material ? mirrorRejectMaterial_ : why == NativeParts::Reject::Buffers ? mirrorRejectBuffers_ : mirrorRejectDecl_);
                     resolved.clear();
                     ++partial;
                     return;
                 }
+                if (np.layer) ++mirrorLayerParts_;
                 resolved.push_back(np);
             }
         }
@@ -184,8 +190,8 @@ void RtScene::feedMirror(std::uint64_t frame, double now, const float camera[3])
     if (now - lastLog > 5.0) {
         lastLog = now;
         spdlog::info("rt: scene: mirror source: rebuild {} in frame {}: {} entities ({} fully fed), {} part instances, {} entities left to the draws (a part was blended / water / "
-                     "without buffers: material {}, buffers {}, declaration {}), {} draws of fed entities skipped so far",
-                     mirrorRebuilds_, frame, entities, mirrorEntities_.size(), parts, partial, mirrorRejectMaterial_, mirrorRejectBuffers_, mirrorRejectDecl_, mirrorSkippedDraws_);
+                     "without buffers: material {}, buffers {}, declaration {}), terrain-layer parts {} / ignored never-opaque parts {} counted so far, {} draws of fed entities skipped so far",
+                     mirrorRebuilds_, frame, entities, mirrorEntities_.size(), parts, partial, mirrorRejectMaterial_, mirrorRejectBuffers_, mirrorRejectDecl_, mirrorLayerParts_, mirrorSkippedParts_, mirrorSkippedDraws_);
     }
 }
 

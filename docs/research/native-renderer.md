@@ -289,3 +289,12 @@ without an entity stay on the draw observation; rt.log `rt: scene: mirror source
   rest are walking NPCs), validation clean.
 * Open: the terrain / level meshes (blended layers) are still draw-fed; uv maps of animated / scaled materials; skinned characters and trees from the mirror's own data (the
   palette of off-screen actors, the global wind state: native-renderer.md 8); the GI's characters.
+
+### 13.1 Terrain and level meshes from the mirror (2026-10-25) [C]
+
+`NativeParts` classifies a part's material: **opaque / masked** (blend mode 0 / 1), **terrain layer** (alpha blend, a diffuse sampler, the opacity in the vertex colour: the engine blends such sub-meshes over
+each other; `NativePart::layer`, accepted with `allowLayers` as a base surface by the RT feed, never by the native passes), **never opaque** (water, overlays with an opacity texture of their own such as the
+cobbled-path decal, additive / specular layers with a cube diffuse, other shader classes: the part is ignored by the RT feed, as the draw path leaves them out, and no longer disqualifies its entity).
+Only a part without buffers / declaration keeps an entity on the draws. Measured (savegame): fully fed entities 737 -> **834 of 874** (1,222 part instances; 40 entities left to the draws, all without buffers),
+59k terrain-layer parts counted, validation clean. The RT depth check (`rt.debug=depth`, 25 probes) is identical for both sources: 18 match, 7 'traced farther' (the hero in the grid, a tree, the cobbled-path
+overlay), 0 closer, 0 missed. Per-material classification log: rvk.log `native parts: material '...' is a terrain layer / never opaque`.

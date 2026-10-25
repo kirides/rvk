@@ -44,6 +44,7 @@ struct NativePart {
     std::uint64_t vbId = 0, ibId = 0;
     std::uint32_t vbGen = 0, ibGen = 0;
     bool masked = false;                        // blend mode masked: alpha tested against alphaRef
+    bool layer = false;                         // a terrain layer: blended over other layers by the vertex colour (only with allowLayers: the RT scene takes it as a base surface)
     float alphaRef = 0.0f;                      // 0..255
     const void* material = nullptr;
 };
@@ -61,12 +62,15 @@ public:
     // unsupported layout). `out` is valid for this frame.
     // `touch`: refresh the part's material and images in the engine's resource cache (every draw of the engine does: without it its LRU unloads what only
     // we use); the opaque pass wants it, the shadow cascades only need what is loaded
-    enum class Reject : std::uint8_t { None, Material, Buffers, Declaration };
-    bool resolve(const scene::MeshInfo& mesh, const scene::MeshPart& part, NativePart& out, bool touch = true, Reject* why = nullptr);
+    // Reject: Material = a terrain layer where layers are not allowed; Skipped = a material that is never drawn opaquely (water, overlays, other shader classes, additive
+    // blends); Buffers / Declaration = the part cannot be drawn at all
+    enum class Reject : std::uint8_t { None, Material, Buffers, Declaration, Skipped };
+    bool resolve(const scene::MeshInfo& mesh, const scene::MeshPart& part, NativePart& out, bool touch = true, Reject* why = nullptr, bool allowLayers = false);
 
     struct Stats {
         std::uint64_t resolved = 0, cached = 0, noBuffers = 0, noDecl = 0, noMaterial = 0;
         std::uint64_t uvAbsent = 0, color1Absent = 0, tangentAbsent = 0, normalAbsent = 0;  // resolved parts whose declaration lacks the attribute
+        std::uint64_t layers = 0, skippedMaterials = 0;  // materials classified as terrain layers / never opaque (counted per classification)
         std::uint64_t lightmapParts = 0, lightmapNoResource = 0, lightmapNotLoaded = 0, water = 0;  // parts with a lightmap uv: no image resource / not loaded yet; water left out
         std::uint64_t diffuseNoImage = 0, diffuseNoApi = 0, diffuseNoTexture = 0;  // materials whose diffuse could not be had (no image / not loaded / not ours)
     };
@@ -84,6 +88,7 @@ private:
     struct MaterialEntry {
         std::uint64_t frame = 0;
         bool ok = false;
+        bool layer = false;  // a terrain layer (blend mode 2, diffuse sampler, opacity from the vertex colour)
         bool masked = false;
         float alphaRef = 0.0f;
         std::uint32_t uvSet = 0;
@@ -113,7 +118,7 @@ private:
     // refreshes the resource's LRU stamp; once per frame per resource
     void touchResource(const void* resource);
     std::unordered_map<const void*, std::uint64_t> touched_;
-    int diagLogged_ = 0, layoutLogged_ = 0, declLogged_ = 0;
+    int diagLogged_ = 0, layoutLogged_ = 0, declLogged_ = 0, classLogged_ = 0;
     std::uint64_t generation_ = 1;
 
     d3d9::Device& dev_;

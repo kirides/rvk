@@ -412,7 +412,7 @@ private:
     std::unordered_set<const void*> mirrorEntities_;  // entities fully fed by the mirror (their draws are not observed)
     std::vector<std::uint32_t> mirrorMaterials_;      // RtMaterials references held by the mirror's instances
     std::uint64_t mirrorVersion_ = 0, mirrorGeneration_ = 0, mirrorFrame_ = 0;
-    std::uint64_t mirrorRebuilds_ = 0, mirrorSkippedDraws_ = 0;
+    std::uint64_t mirrorRebuilds_ = 0, mirrorSkippedDraws_ = 0, mirrorLayerParts_ = 0, mirrorSkippedParts_ = 0;
     std::uint64_t mirrorEntityCount_ = 0, mirrorPartCount_ = 0, mirrorPartiallyRejected_ = 0, mirrorRejectMaterial_ = 0, mirrorRejectBuffers_ = 0, mirrorRejectDecl_ = 0;
     bool instanceIndexChecked_ = false;
     std::uint64_t indexDeviations_ = 0;
