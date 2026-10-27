@@ -51,6 +51,7 @@ struct Config {
     // (vulkan) build a tiny BLAS / TLAS and trace it with ray query at device creation (vk::rt::selfTest; "rt selftest" in
     // rvk.log); needs the ray tracing tier (rt.allow + a GPU with ray query)
     bool rtSelfTest = false;
+    bool shaderDebugInfo = false;  // [debug] shader_debug_info: SPIR-V with names, source lines and the GLSL text (RenderDoc), optimizer off
     // (vulkan) the overlay is drawn into the back buffer instead of the swapchain image, so screenshots (rvk_screenshot,
     // screenshot_frames, the engine snapshot) include it; default: captures never show the overlay
     bool overlayInScreenshots = false;

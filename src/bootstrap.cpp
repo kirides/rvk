@@ -32,6 +32,7 @@
 #include "engine/material_source.h"
 #include "engine/shadow_maps.h"
 #include "engine/symbols.h"
+#include "shader/spirv.h"
 #include "engine/vfs.h"
 #include "engine/window_mode.h"
 #include "hal/trace.h"
@@ -188,6 +189,8 @@ void detourInitializeAdmin(void* self, int apiType) {
         vo.overlayCommands = g_config.commands;
         vo.settingsFile = paths::dataDir() / L"settings.toml";
         vo.rtSelfTest = g_config.rtSelfTest;
+        shader::setDebugInfo(g_config.shaderDebugInfo);
+        if (g_config.shaderDebugInfo) spdlog::info("shaders: debug info on (names, source text, no optimizer): RenderDoc shows the GLSL");
         *static_cast<void**>(s.gfxAdminApiInstance) = static_cast<hal::eCAPIInstance*>(new hal::vulkan::HalInstance(vo));
         g_initializeAdmin.original(self, 4);
         *reinterpret_cast<int*>(static_cast<char*>(self) + 0x648) = apiType;

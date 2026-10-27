@@ -27,3 +27,7 @@ flags unchanged), the material variants (`rvkMvD3dZ`). The native opaque pass re
 Savegame-free `water-compare` of jungle / pub_interior / sea_horizon / monastery_hall, reverse_z on vs off with the same settings:
 images equal to the eye, sync validation clean, testdemo PASS. Known: the sea's horizon edge shows tiny dashes (the sea plane is no
 longer far-clipped).
+
+## Native passes
+The native pre-pass / colour pass write `clip.z = near` (the exact constant: `w - k z` is that constant mathematically, but cancels to a value that differs by rounding
+between shader programs) and the pre-pass a further 1e-5 farther; see native-renderer.md 14.

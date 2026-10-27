@@ -48,6 +48,10 @@ struct NativePart {
     bool layer = false;                         // a terrain layer: blended over other layers by the vertex colour (only with allowLayers: the RT scene takes it as a base surface)
     float alphaRef = 0.0f;                      // 0..255
     const void* material = nullptr;
+    // an image of the part (diffuse, normal map, opacity, lightmaps) is not completely loaded yet (eCResource2 state != 3): the engine's loader fills a texture's
+    // mip levels progressively and the engine itself only samples it once loaded; sampled earlier, the unfilled levels are black (and the picture flickers between
+    // the mip levels with the camera). The native passes leave such a part to the engine.
+    bool pending = false;
 };
 
 class NativeParts final : public d3d9::DrawObserver {
@@ -73,11 +77,14 @@ public:
         std::uint64_t uvAbsent = 0, color1Absent = 0, tangentAbsent = 0, normalAbsent = 0;  // resolved parts whose declaration lacks the attribute
         std::uint64_t layers = 0, skippedMaterials = 0;  // materials classified as terrain layers / never opaque (counted per classification)
         std::uint64_t lightmapParts = 0, lightmapNoResource = 0, lightmapNotLoaded = 0, water = 0;  // parts with a lightmap uv: no image resource / not loaded yet; water left out
+        std::uint64_t pendingImages = 0;  // resolved parts with an image not completely loaded yet
         std::uint64_t diffuseNoImage = 0, diffuseNoApi = 0, diffuseNoTexture = 0;  // materials whose diffuse could not be had (no image / not loaded / not ours)
     };
     const Stats& stats() const { return stats_; }
     // bumped when a cached pointer of a resolved part may have died (a buffer changed, a texture was released): caches of NativePart copies rebuild
     std::uint64_t generation() const { return generation_; }
+    // eCResource2 state == 3 (data fully loaded)
+    static bool imageLoaded(const void* imageResource);
 
     // DrawObserver: no draws are observed, only the lifetime callbacks
     bool observes(d3d9::draws::Kind, d3d9::scene::Phase) const override { return false; }

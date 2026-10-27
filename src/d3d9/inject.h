@@ -21,7 +21,11 @@ namespace rvk::d3d9::inject {
 
 // Where (in engine order within a frame; frame-phases.md 3). The Main points fire once per main view.
 enum class Point : std::uint8_t {
+    BeforeDepthPrepass,   // Main view, BeginZPass: the depth map (R32F) and the hardware depth are bound and cleared, the engine's z pass has drawn nothing yet
     AfterDepthPrepass,    // Main view, EndZPass: the linear depth map (R32F, view depth / engine far) is complete
+    BeforeSolid,          // Main view, DoBeginRenderSolid has returned: the scene HDR target and the hardware depth (the z pass's) are bound, the engine's solid
+                          // draws (solid ops incl. blended terrain layers, decals, billboards, then the sky dome last) have not started: what is drawn here lies
+                          // under all of them (engine-frame/B-frustum-db.md 2.6)
     AfterOpaque,          // Main view, end of Solid: before the refraction copy (or at DoBeginRenderAlpha without one). The
                           // scene HDR target holds the opaque scene (sky, solid, decals); water and alpha are not drawn yet
     AfterRefractionCopy,  // Main view, right after the refraction copy (CopyCurrentRTToImage), before the refracted (water) draws

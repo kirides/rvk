@@ -6,7 +6,9 @@ namespace rvk::d3d9::inject {
 
 const char* name(Point p) {
     switch (p) {
+        case Point::BeforeDepthPrepass: return "BeforeDepthPrepass";
         case Point::AfterDepthPrepass: return "AfterDepthPrepass";
+        case Point::BeforeSolid: return "BeforeSolid";
         case Point::AfterOpaque: return "AfterOpaque";
         case Point::AfterRefractionCopy: return "AfterRefractionCopy";
         case Point::BeforeAlpha: return "BeforeAlpha";

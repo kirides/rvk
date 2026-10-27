@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <string>
 
 #include <spdlog/spdlog.h>
 
@@ -21,29 +22,10 @@ namespace rvk::enh {
 
 namespace {
 
-constexpr std::uint32_t kFlagIndex32 = 1, kFlagMasked = 2, kFlagNoAlbedo = 4, kFlagLightmap = 8, kFlagAmbComplex = 16, kFlagNormalMap = 32, kFlagDxt5nm = 64;
+constexpr std::uint32_t kFlagMasked = 2, kFlagNoAlbedo = 4, kFlagLightmap = 8, kFlagAmbComplex = 16, kFlagNormalMap = 32, kFlagDxt5nm = 64;
 constexpr std::uint32_t kMaxLights = 4;  // up to 2 static + 2 dynamic lights per entity (the engine splits them into passes of 3)
 
-std::uint64_t partKey(const void* entity, const void* subMesh) {
-    return (reinterpret_cast<std::uintptr_t>(entity) * 0x9E3779B97F4A7C15ull) ^ reinterpret_cast<std::uintptr_t>(subMesh);
-}
-
 }  // namespace
-
-void NativeOpaque::setListMode(std::uint32_t mode) {
-    listMode_ = mode;
-    if (listMode_ == 1 && registered_ && listPassId_ == 0) {
-        listPassId_ = dev_.addPass(d3d9::inject::Point::AfterDepthPrepass, "native.opaque.list", [this](d3d9::PassContext& c) { buildMirrorList(c); }, this, 6);
-        spdlog::info("enh: native opaque: draw list from the scene mirror");
-    } else if (listMode_ != 1 && listPassId_ != 0) {
-        dev_.removePass(listPassId_);
-        listPassId_ = 0;
-        mirrorItems_.clear();
-        listIndex_.clear();
-        listSeen_.clear();
-        spdlog::info("enh: native opaque: draw list from the engine's draws");
-    }
-}
 
 // c14..c40 of an entity from its illumination (eCIlluminated_PS entity +0xf8, struct at +0x78) and the shared light list it points to
 bool NativeOpaque::composeLighting(const void* entity, NativeItemBlock& blk, std::uint32_t& lights) const {
@@ -127,11 +109,10 @@ void NativeOpaque::compareLighting(const Item& listed, const d3d9::Device& devic
     }
 }
 
-void NativeOpaque::buildMirrorList(d3d9::PassContext& ctx) {
-    mirrorItems_.clear();
+void NativeOpaque::buildList(d3d9::PassContext& ctx) {
+    items_.clear();
     listIndex_.clear();
     listSeen_.clear();
-    if (ctx.mainView != 1 || listMode_ != 1 || parts_ == nullptr || failed_ || !enabled_) return;
     const d3d9::scene::CameraBlock& cam = dev_.camera();
     if (!cam.valid) return;
     ++stats_.listFrames;
@@ -203,14 +184,38 @@ void NativeOpaque::buildMirrorList(d3d9::PassContext& ctx) {
             for (std::uint32_t c = 0; c < 4; ++c) lit.row[r][c] = e.state.world[c * 4 + r];  // row r of the 3x4 = column r of the row-vector matrix
         }
         for (const scene::MeshInfo& mesh : e.meshes) {
+            // The mirror's mesh data is refreshed every few frames: the engine may have switched the level of detail or evicted the resource
+            // since (its buffers are freed with it, and the GPU would read freed memory: flickering black triangles). Check the context's live
+            // resource: loaded (eCResource2 +0x38 == 3), the same visual / vertex data / index data as the mirror holds; else the engine draws it.
+            {
+                const void* res = nullptr;
+                std::int32_t state = 0;
+                const void* visual = nullptr;
+                const void* vdata = nullptr;
+                const void* idata = nullptr;
+                if (!engine::readAt(mesh.context, 0x28, res) || res == nullptr || res != mesh.meshResource || !engine::readAt(res, 0x38, state) || state != 3 ||
+                    !engine::readAt(res, 0x88, visual) || visual == nullptr || visual != mesh.visual || !engine::readAt(visual, 0x30, vdata) || vdata != mesh.vertexData[0] ||
+                    !engine::readAt(visual, 0x58, idata) || idata != mesh.indexData) {
+                    ++stats_.listStale;
+                    continue;
+                }
+            }
             for (const scene::MeshPart& part : mesh.parts) {
                 NativePart np;
                 if (!parts_->resolve(mesh, part, np)) continue;
+                if (np.pending) {
+                    ++stats_.listPending;
+                    continue;
+                }
                 Item it;
                 it.block = lit;
                 NativeItemBlock& blk = it.block;
                 std::uint32_t flags = kFlagAmbComplex;
-                if (np.index32 != 0) flags |= kFlagIndex32;
+                const std::uint32_t arenaFirst = arena_.get(np);
+                if (arenaFirst == NativeIndexArena::kNone) {
+                    ++stats_.listNoIndices;
+                    continue;
+                }
                 it.masked = np.masked;
                 if (np.masked) {
                     flags |= kFlagMasked;
@@ -241,21 +246,24 @@ void NativeOpaque::buildMirrorList(d3d9::PassContext& ctx) {
                 const std::uint32_t nSet = std::min<std::uint32_t>(np.normalUvSet, 1u);
                 blk.off1[1] = np.layout.uv[nSet] != 0xFFFFu ? np.layout.uv[nSet] : np.layout.uv[0];
                 blk.off1[2] = np.layout.lightmap;
-                it.vertices = np.vertices;
-                it.indices = np.indices;
-                it.first = np.first;
+                blk.addr[0] = static_cast<std::uint32_t>(np.vertices);
+                blk.addr[1] = static_cast<std::uint32_t>(np.vertices >> 32);
+                it.arenaFirst = arenaFirst;
+                it.ibId = np.ibId;
+                it.firstIndex = np.first;
                 it.indexCount = np.indexCount;
+                it.dist = static_cast<float>(dist);
                 it.entity = e.ptr;
                 it.subMesh = part.subMesh;
-                const auto cull = cullByMaterial_.find(np.material);
-                it.cull = cull != cullByMaterial_.end() ? cull->second : VK_CULL_MODE_FRONT_BIT;  // the engine's own mode once it drew the material, else the one every static draw used
-                listIndex_[partKey(e.ptr, part.subMesh)] = static_cast<std::uint32_t>(mirrorItems_.size());
-                mirrorItems_.push_back(std::move(it));
+                items_.push_back(std::move(it));
             }
         }
     });
-    listSeen_.assign(mirrorItems_.size(), 0);
-    stats_.listParts += mirrorItems_.size();
+    // two classes, each front to back (the pre-pass rejects the most hidden fragments early): opaque first, then alpha tested
+    std::stable_sort(items_.begin(), items_.end(), [](const Item& a, const Item& b) { return a.masked != b.masked ? !a.masked : a.dist < b.dist; });
+    for (std::uint32_t i = 0; i < items_.size(); ++i) listIndex_[partKey(items_[i].entity, items_[i].ibId, items_[i].firstIndex, items_[i].indexCount)] = i;
+    listSeen_.assign(items_.size(), 0);
+    stats_.listParts += items_.size();
     ++stats_.listBuilt;
 }
 

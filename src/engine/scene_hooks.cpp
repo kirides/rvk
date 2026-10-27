@@ -199,6 +199,7 @@ bool detourBeginZPass(void* admin, void* depthMap, bool a, bool b) {
             logPhase(*d, "BeginZPass");
             // eCFrustumDatabase::Execute binds the depth map (the caller's eSRenderTargetDesc +8) before BeginZPass(nullptr)
             if (d3d9::Texture* t = textureOf(d->renderTarget(0), *d)) d->tagImage(t, ImageRole::DepthMap);
+            if (d->phases().view() == View::Main) d->inject(d3d9::inject::Point::BeforeDepthPrepass);
         }
     }
     return g_beginZPass.original(admin, depthMap, a, b);
@@ -227,6 +228,7 @@ Hook<VoidThisFn> g_beginRenderSolid;
 void detourBeginRenderSolid(void* self) {
     setPass(Pass::Solid, "DoBeginRenderSolid");
     g_beginRenderSolid.original(self);
+    if (d3d9::Device* d = device(); d != nullptr && d->phases().view() == View::Main) d->inject(d3d9::inject::Point::BeforeSolid);
 }
 
 Hook<VoidThisFn> g_beginRenderAlpha;

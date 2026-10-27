@@ -349,7 +349,6 @@ struct RendererSettings {
     Setting* nativeDebug = nullptr;       // native.debug: one term of the native shading as the colour
     Setting* nativeShadows = nullptr;     // native.shadows: the native sun cascades (native-renderer.md N4)
     Setting* rtSource = nullptr;          // rt.source: where the RT scene's static meshes come from (the engine's draws / the scene mirror)
-    Setting* nativeList = nullptr;        // native.list: where the native opaque pass takes its parts from (engine draws / the scene mirror)
     Setting* shadowStride = nullptr;      // debug.shadow_stride: the sun cascades redrawn every n-th frame (engine::shadowmaps::setUpdateStride)
     Setting* prefetchStride = nullptr;    // debug.prefetch_stride: the cache-in walk every n-th frame (engine::lod::setPrefetchStride)
     Setting* lodView = nullptr;           // lod.view: the view range of objects (eCFrustumDatabase view range factor)

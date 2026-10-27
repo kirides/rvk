@@ -8,6 +8,13 @@ if(NOT (WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8))
 endif()
 
 option(RVK_BUILD_TESTS "Build the unit tests" ON)
+# the embedded GLSL shaders (shaders/**) with debug info: names, source lines, the source text, optimizer off (RenderDoc / PIX show readable shaders).
+# The translated D3D9 / material shaders compiled at run time use run.ps1 -ShaderDebug / config.toml [debug] shader_debug_info instead
+option(RVK_SHADER_DEBUG "Embedded shaders with debug info" OFF)
+set(RVK_GLSLC_DEBUG_ARGS)
+if(RVK_SHADER_DEBUG)
+    set(RVK_GLSLC_DEBUG_ARGS --debug)
+endif()
 if(RVK_BUILD_TESTS)
     enable_testing()
 endif()
@@ -68,6 +75,8 @@ set(RVK_SHADERS
     native/shadow_mesh.vert
     native/static_mesh.frag
     native/static_mesh.vert
+    native/static_prepass.frag
+    native/static_prepass.vert
     gbuffer/ao_white.frag
     gbuffer/gbuffer_debug.frag
     gbuffer/gtao.comp
@@ -98,7 +107,11 @@ set(RVK_SHADERS
 )
 # variants: "<name>=<source>:<DEFINE>[,<DEFINE>[=<value>]]..." (the source compiled again with these defines, embedded under
 # <name>; rvk_glslc -D); none at the moment
-set(RVK_SHADER_VARIANTS)
+set(RVK_SHADER_VARIANTS
+    "native/static_mesh_opaque.frag=native/static_mesh.frag:NATIVE_NO_CLIP"
+    "native/static_prepass_masked.frag=native/static_prepass.frag:NATIVE_PREPASS_MASKED"
+    "native/static_prepass_masked.vert=native/static_prepass.vert:NATIVE_PREPASS_MASKED"
+)
 set(RVK_SHADER_OUTPUTS)
 set(RVK_SHADER_INCLUDES "")
 set(RVK_SHADER_TABLE "")
@@ -107,7 +120,7 @@ foreach(shader ${RVK_SHADERS})
     set(out ${RVK_GENERATED_DIR}/shaders/${shader}.h)
     add_custom_command(
         OUTPUT ${out}
-        COMMAND rvk_glslc compile ${RVK_SHADER_DIR}/${shader} -o ${out} --name ${ident} -I ${RVK_SHADER_DIR}/include --depfile ${out}.d
+        COMMAND rvk_glslc compile ${RVK_SHADER_DIR}/${shader} -o ${out} --name ${ident} -I ${RVK_SHADER_DIR}/include --depfile ${out}.d ${RVK_GLSLC_DEBUG_ARGS}
         DEPENDS rvk_glslc ${RVK_SHADER_DIR}/${shader}
         DEPFILE ${out}.d
         COMMENT "GLSL shaders/${shader}"
@@ -129,7 +142,7 @@ foreach(variant ${RVK_SHADER_VARIANTS})
     set(out ${RVK_GENERATED_DIR}/shaders/${vname}.h)
     add_custom_command(
         OUTPUT ${out}
-        COMMAND rvk_glslc compile ${RVK_SHADER_DIR}/${vsrc} -o ${out} --name ${ident} -I ${RVK_SHADER_DIR}/include --depfile ${out}.d ${vdefargs}
+        COMMAND rvk_glslc compile ${RVK_SHADER_DIR}/${vsrc} -o ${out} --name ${ident} -I ${RVK_SHADER_DIR}/include --depfile ${out}.d ${vdefargs} ${RVK_GLSLC_DEBUG_ARGS}
         DEPENDS rvk_glslc ${RVK_SHADER_DIR}/${vsrc}
         DEPFILE ${out}.d
         COMMENT "GLSL shaders/${vsrc} (${vdefs}) -> ${vname}"
@@ -243,6 +256,8 @@ add_library(rvk_core STATIC
     src/scene/mirror.cpp
     src/scene/mirror.h
     src/enh/native_opaque.cpp
+    src/enh/native_index_arena.cpp
+    src/enh/native_index_arena.h
     src/enh/native_opaque_list.cpp
     src/enh/native_opaque.h
     src/enh/native_parts.cpp

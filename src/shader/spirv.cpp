@@ -1,5 +1,6 @@
 #include "shader/spirv.h"
 
+#include <atomic>
 #include <mutex>
 
 #include <glslang/Public/ResourceLimits.h>
@@ -16,8 +17,13 @@ void initGlslang() {
 
 }  // namespace
 
+static std::atomic<bool> g_debugInfo{false};
+void setDebugInfo(bool on) { g_debugInfo.store(on, std::memory_order_relaxed); }
+bool debugInfo() { return g_debugInfo.load(std::memory_order_relaxed); }
+
 SpirvResult compileGlsl(Stage stage, std::string_view glsl) {
     initGlslang();
+    const bool debug = debugInfo();
     SpirvResult result;
     const EShLanguage lang = stage == Stage::Vertex ? EShLangVertex : EShLangFragment;
     glslang::TShader shader(lang);
@@ -27,7 +33,7 @@ SpirvResult compileGlsl(Stage stage, std::string_view glsl) {
     shader.setEnvInput(glslang::EShSourceGlsl, lang, glslang::EShClientVulkan, 100);
     shader.setEnvClient(glslang::EShClientVulkan, glslang::EShTargetVulkan_1_3);
     shader.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetSpv_1_6);
-    const auto messages = static_cast<EShMessages>(EShMsgSpvRules | EShMsgVulkanRules);
+    const auto messages = static_cast<EShMessages>(EShMsgSpvRules | EShMsgVulkanRules | (debug ? EShMsgDebugInfo : 0));
     if (!shader.parse(GetDefaultResources(), 460, false, messages)) {
         result.log = shader.getInfoLog();
         return result;
@@ -39,8 +45,8 @@ SpirvResult compileGlsl(Stage stage, std::string_view glsl) {
         return result;
     }
     glslang::SpvOptions options;
-    options.generateDebugInfo = false;
-    options.disableOptimizer = false;
+    options.generateDebugInfo = debug;
+    options.disableOptimizer = debug;
     options.optimizeSize = false;
     spv::SpvBuildLogger logger;
     glslang::GlslangToSpv(*program.getIntermediate(lang), result.words, &logger, &options);

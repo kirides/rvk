@@ -199,7 +199,7 @@ engine's; the native shader samples the mask (s0: `.a` sun shadow, `.r` occlusio
 So a native pass can build the pixel shader constants without the engine's draw:
 
 * **Camera / fog (once per view, `eCFrustumDatabase::Execute`)**: c0 = camera position, `.w` = far (`eCShaderMaterialAdmin::SetCamera` 0x6ba1d0);
-  c1 = (0.5, -0.5, 1/vpW + 0.5, 1/vpH + 0.5); c3 = fog colour / 255, c4 = (-start k, k, density) with k = density / (end - start)
+  c1 = (0.5, -0.5, 0.5 + 0.5/vpW, 0.5 + 0.5/vpH) (corrected 2026-10-27, engine-frame/C-materials.md 3.2); c3 = fog colour / 255, c4 = (-start k, k, density) with k = density / (end - start)
   (`SetFog` 0x6b9fc0 from `eCGfxFog::Execute`, fog data `+0x18 enable, +0x1c colour bytes, +0x28 start, +0x2c end, +0x30 density`).
 * **Illumination of an entity**: `eCIlluminated_PS` = entity `+0xf8`, its `eSShaderMaterialIllumination` at `PS + 0x78`:
   `+0x00` pointer to the shared light list, `+0x08` float f (outdoor factor, eased by +-dt / 0.3), `+0x0d` count of static per-pixel lights (0..2),
@@ -298,3 +298,36 @@ cobbled-path decal, additive / specular layers with a cube diffuse, other shader
 Only a part without buffers / declaration keeps an entity on the draws. Measured (savegame): fully fed entities 737 -> **834 of 874** (1,222 part instances; 40 entities left to the draws, all without buffers),
 59k terrain-layer parts counted, validation clean. The RT depth check (`rt.debug=depth`, 25 probes) is identical for both sources: 18 match, 7 'traced farther' (the hero in the grid, a tree, the cobbled-path
 overlay), 0 closer, 0 missed. Per-material classification log: rvk.log `native parts: material '...' is a terrain layer / never opaque`.
+
+## 14. N3.3: depth pre-pass + colour pass, one indirect call per class (2026-10-25) [C]
+
+`native.opaque` (default off) now replaces the engine's z pass and solid pass draws of the mirror's static parts (`enh/native_opaque.*`, `native_opaque_list.cpp`,
+`native_index_arena.*`, `shaders/native/static_*`). The old "engine list" mode is gone; `native.list` was removed.
+
+* **Frame**: `BeforeDepthPrepass` (new injection point, `BeginZPass`): the list is built from the mirror (engine entity rules, frustum, view range, lighting composed natively),
+  split into **opaque** and **alpha tested** (`masked`), each sorted **front to back**; the indices of every part go into `NativeIndexArena` (one device-local u32 buffer, widened
+  once from the engine buffers' CPU copies, cached by (buffer id, generation, first, count)); one `NativeItemBlock` (928 B) and one `VkDrawIndexedIndirectCommand`
+  (`firstInstance` = item index) per part in the frame's ring. The pre-pass draws **each class with one `vkCmdDrawIndexedIndirect`** (fallback without
+  `multiDrawIndirect + drawIndirectFirstInstance`: a loop) into the hardware depth + the engine's linear depth map: the opaque class has no discard and no texture fetch; only the
+  alpha tested class clips. The engine's z-pass and solid-pass draws of listed parts are skipped.
+* **Colour pass at `BeforeSolid`** (new point, after `DoBeginRenderSolid`): again one indirect call per class, depth nearer-or-equal against the pre-pass, which wrote its depth
+  a relative 1e-5 farther (`static_prepass.vert`), no depth write; **no `clip` in the opaque shader** (`static_mesh_opaque.frag` = `static_mesh.frag` -D NATIVE_NO_CLIP), the alpha
+  tested class keeps its alpha test. A depth EQUAL test was tried first: reversed depth is near / w with the full float precision, one ulp of difference between two shader programs
+  failed whole triangles. **Order matters (found with RenderDoc, user's flicker report): the colour pass has to come before the engine's solid draws.** The engine blends
+  terrain layers and decals over the base surface in the solid pass; our base drawn at the end of the pass (`AfterOpaque`) painted over them wherever the depths tied: black
+  wedges (7.5 % of the pub's frame, 0.7 % now, engine 0.14 %) that flickered with every sub-pixel camera move. Fog constants are the last frame's, the shadow-mask texture the same
+  object every frame (holds this frame's mask).
+* **Guards**: the mirror's mesh data is refreshed every few frames, so each mesh is checked against the live context (`ctx +0x28` resource, `eCResource2 +0x38 == 3` loaded, same
+  visual / vertex data / index data) before it is listed; parts whose images (diffuse, normal, opacity, lightmaps) are not completely loaded (`state != 3`) are left to the engine
+  (`NativePart::pending`).
+* Memory barriers (all commands / memory) bracket both passes: dynamic rendering has no implicit dependencies between scopes.
+* Diagnostics worth keeping: `native.debug` (albedo, normal, mask, ambient, lightmap, sun, flags ...), rvk.log `enh: native opaque:` every 5 s (classes drawn, indirect calls, stale
+  meshes, parts with images loading, index arena size, lighting vs the engine), `enh: native index arena: suspect indices`.
+* Not native yet: terrain layers (a third indirect call is planned), fading parts, instanced meshes, characters (skinned), SpeedTree, grass, particles, water, sky.
+* **Not verified at every spot** (2026-10-27, `water-compare` engine `native.opaque=false` vs `true`, water off on both sides, validation clean):
+  jungle luma -0.3 (equal), **monastery_hall +10.2, pub_interior +19.9**: the native walls / floors are lit brighter and the pub has holes (a wall
+  section behind a table, floor wedges, parts of barrels and the post). The composed constants equal the engine's (camera, ambient, sun, lights over
+  113k draws; fog differs in 58), so the cause is the hand-written `static_mesh.frag` (no material constants / combiners, uv transforms, specular,
+  emission, compressed vs DXT5nm normals, ... engine-frame/C-materials.md 6.2) and list rules (opacity-node materials drawn opaque, instanced meshes,
+  dynamic-entity bounds, loose fade test: engine-frame/B-frustum-db.md 5). Next: the native frame plan (engine-frame/README.md 4) executes the engine's
+  own ops with its own shaders first; this mirror-driven list becomes one of the later optimized modes.

@@ -117,7 +117,7 @@ std::string header(const fs::path& in, std::string_view body) {
 }
 
 int compile(const fs::path& in, const fs::path& out, const std::string& name, const std::vector<fs::path>& dirs,
-            const fs::path& depfile, const fs::path& spvOut, const std::vector<std::string>& defines) {
+            const fs::path& depfile, const fs::path& spvOut, const std::vector<std::string>& defines, bool debugInfo) {
     EShLanguage stage{};
     if (!stageOf(in, stage)) {
         std::fprintf(stderr, "%s: unknown shader stage (extension .vert / .frag / .comp / .geom / .tesc / .tese)\n",
@@ -147,7 +147,7 @@ int compile(const fs::path& in, const fs::path& out, const std::string& name, co
         shader.setEnvInput(glslang::EShSourceGlsl, stage, glslang::EShClientVulkan, 100);
         shader.setEnvClient(glslang::EShClientVulkan, glslang::EShTargetVulkan_1_3);
         shader.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetSpv_1_6);
-        const auto messages = static_cast<EShMessages>(EShMsgSpvRules | EShMsgVulkanRules);
+        const auto messages = static_cast<EShMessages>(EShMsgSpvRules | EShMsgVulkanRules | (debugInfo ? EShMsgDebugInfo : 0));
         Includer includer(dirs);
         std::vector<std::uint32_t> words;
         if (!shader.parse(GetDefaultResources(), 460, false, messages, includer)) {
@@ -159,8 +159,8 @@ int compile(const fs::path& in, const fs::path& out, const std::string& name, co
                 std::fprintf(stderr, "%s\n", program.getInfoLog());
             } else {
                 glslang::SpvOptions options;
-                options.generateDebugInfo = false;
-                options.disableOptimizer = false;
+                options.generateDebugInfo = debugInfo;
+                options.disableOptimizer = debugInfo;
                 spv::SpvBuildLogger logger;
                 glslang::GlslangToSpv(*program.getIntermediate(stage), words, &logger, &options);
                 if (const std::string msgs = logger.getAllMessages(); !msgs.empty()) std::fprintf(stderr, "%s", msgs.c_str());
@@ -224,7 +224,7 @@ int text(const fs::path& in, const fs::path& out, const std::string& name) {
 
 int usage() {
     std::fprintf(stderr,
-                 "usage: rvk_glslc compile <in> -o <out.h> --name <ident> [-I <dir>]... [--depfile <out.d>] [--spv <out.spv>] [-D NAME[=VALUE]]...\n"
+                 "usage: rvk_glslc compile <in> -o <out.h> --name <ident> [-I <dir>]... [--depfile <out.d>] [--spv <out.spv>] [-D NAME[=VALUE]]... [--debug]\n"
                  "       rvk_glslc text <in> -o <out.h> --name <ident>\n");
     return 2;
 }
@@ -238,6 +238,7 @@ int main(int argc, char** argv) {
     std::string name;
     std::vector<fs::path> dirs;
     std::vector<std::string> defines;
+    bool debugInfo = false;  // --debug: names, source lines and the source text in the SPIR-V, optimizer off (RenderDoc)
     for (int i = 3; i < argc; ++i) {
         const std::string a = argv[i];
         const bool hasValue = i + 1 < argc;
@@ -247,10 +248,11 @@ int main(int argc, char** argv) {
         else if (a == "--depfile" && hasValue) depfile = argv[++i];
         else if (a == "--spv" && hasValue) spv = argv[++i];
         else if (a == "-D" && hasValue) defines.emplace_back(argv[++i]);
+        else if (a == "--debug") debugInfo = true;
         else return usage();
     }
     if (out.empty() || name.empty()) return usage();
-    if (mode == "compile") return compile(in, out, name, dirs, depfile, spv, defines);
+    if (mode == "compile") return compile(in, out, name, dirs, depfile, spv, defines, debugInfo);
     if (mode == "text") return text(in, out, name);
     return usage();
 }

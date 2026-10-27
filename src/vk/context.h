@@ -48,6 +48,7 @@ struct DeviceFeatures {
     bool samplerAnisotropy = false;
     bool shaderFloat16Int16 = false;  // shaderFloat16 + shaderInt16 enabled (the FidelityFX upscaler's fp16 shaders)
     bool storageImageExtendedFormats = false;  // RG16F / R16F ... storage images (the G-buffer's motion)
+    bool indirectDraws = false;   // multiDrawIndirect + drawIndirectFirstInstance: one vkCmdDrawIndexedIndirect for many draws, the item index as firstInstance (enh/native_opaque)
     bool vertexStores = false;    // vertexPipelineStoresAndAtomics: vertex shaders write buffers (enh/gi: skinned positions)
     float maxAnisotropy = 1.0f;
     bool hostQueryReset = false;  // vkResetQueryPool from the host (GPU timestamps of [debug] perf)

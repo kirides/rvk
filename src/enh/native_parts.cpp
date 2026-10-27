@@ -63,6 +63,11 @@ void NativeParts::textureReleased(const d3d9::Texture* texture) {
     }
 }
 
+bool NativeParts::imageLoaded(const void* imageResource) {
+    std::int32_t state = 0;
+    return imageResource != nullptr && engine::readAt(imageResource, 0x38, state) && state == 3;
+}
+
 void NativeParts::touchResource(const void* resource) {
     if (resource == nullptr || engine::sym().resourceRequestData == nullptr) return;
     const std::uint64_t frame = dev_.frameValue();
@@ -282,6 +287,15 @@ bool NativeParts::resolve(const scene::MeshInfo& mesh, const scene::MeshPart& pa
             else if (out.lightmap[0] == nullptr) ++stats_.lightmapNotLoaded;
         }
     }
+    // every image the part samples must be completely loaded (see NativePart::pending)
+    for (const void* image : {m.diffuseImage, m.normalImage, m.opacityImage}) {
+        if (image != nullptr && !imageLoaded(image)) out.pending = true;
+    }
+    for (int i = 0; i < 2; ++i) {
+        const void* image = nullptr;
+        if (mesh.meshResource != nullptr && engine::readAt(mesh.meshResource, 0x90 + 8 * static_cast<std::size_t>(i), image) && image != nullptr && !imageLoaded(image)) out.pending = true;
+    }
+    if (out.pending) ++stats_.pendingImages;
     out.masked = m.masked;
     out.layer = m.layer;
     out.opacitySwizzle = m.opacitySwizzle;

@@ -1708,19 +1708,6 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Engine's draws", "Scene mirror"},
         .flags = Flag::NoAB | Flag::Debug,
     });
-    r.nativeList = &reg.add({
-        .key = "native.list",
-        .label = "Native opaque pass: draw list",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "Where the native opaque pass takes its parts from: the engine's own solid draws (captured as it draws them), or the "
-                       "scene mirror (culled and lit by the renderer itself: no engine draw needed).",
-        .type = Type::Enum,
-        .defaultValue = 0,
-        .options = {"engine", "mirror"},
-        .optionLabels = {"Engine's draws", "Scene mirror"},
-        .flags = Flag::NoAB | Flag::Debug,
-    });
     r.nativeShadows = &reg.add({
         .key = "native.shadows",
         .label = "Native sun shadows",
@@ -1741,9 +1728,9 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "mask's channels, the ambient, lightmap or sun term alone, the draw's feature flags.",
         .type = Type::Enum,
         .defaultValue = 0,
-        .options = {"off", "albedo", "normal", "mask_shadow", "mask_ao", "ambient", "lightmap", "sun", "flags", "albedo_depth", "albedo_cull", "shadow", "no_normal_map", "tangent_normal"},
+        .options = {"off", "albedo", "normal", "mask_shadow", "mask_ao", "ambient", "lightmap", "sun", "flags", "albedo_depth", "albedo_cull", "shadow", "no_normal_map", "tangent_normal", "item_id"},
         .optionLabels = {"Off", "Diffuse texture", "Normal", "Shadow mask (sun)", "Shadow mask (occlusion)", "Ambient only", "Lightmap only",
-                         "Sun only", "Feature flags", "Diffuse (depth test only)", "Diffuse (culling only)", "Sun shadow", "Lit without the normal map", "Tangent-space normal"},
+                         "Sun only", "Feature flags", "Diffuse (depth test only)", "Diffuse (culling only)", "Sun shadow", "Lit without the normal map", "Tangent-space normal", "Item id colour"},
         .flags = Flag::NoAB | Flag::Debug,
     });
     r.prefetchStride = &reg.add({

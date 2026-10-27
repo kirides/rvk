@@ -29,6 +29,8 @@ param(
     [int]$PerfFrame = 0,
     # [debug] rt_selftest: BLAS + TLAS + a ray query compute shader at device creation ("rt selftest" in rvk.log)
     [switch]$RtSelfTest,
+    # [debug] shader_debug_info: SPIR-V with names / source lines / the GLSL text embedded and the optimizer off (RenderDoc shows readable shaders)
+    [switch]$ShaderDebug,
     # [debug] present_stalls (any mode): sample the presenting thread's stack while a present lasts longer than this many ms;
     # "diag:" lines in rvk.log every 5 s name the modules / functions the time is spent in (docs/research/fps-limit.md)
     [double]$PresentStalls = 0,
@@ -136,6 +138,7 @@ if ($NoRenderer) {
         "dump_saved_textures = $($DumpSavedTextures.IsPresent.ToString().ToLower())",
         "perf = $($Perf.IsPresent.ToString().ToLower())", "perf_frame = $PerfFrame",
         "rt_selftest = $($RtSelfTest.IsPresent.ToString().ToLower())",
+        "shader_debug_info = $($ShaderDebug.IsPresent.ToString().ToLower())",
         "present_stalls = $([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.0##}', $PresentStalls))",
         "cpu_profile = $($CpuProfile.IsPresent.ToString().ToLower())",
         "environment = [$(($Environment | ForEach-Object { '"' + ($_ -replace '"', '') + '"' }) -join ', ')]",

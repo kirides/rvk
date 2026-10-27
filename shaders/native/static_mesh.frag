@@ -16,6 +16,7 @@ layout(location = 4) in vec4 inColor1;
 layout(location = 5) in vec4 inUv;
 layout(location = 6) in vec2 inLightmap;
 layout(location = 7) in vec4 inViewPos;
+layout(location = 8) flat in uint inItem;
 layout(location = 0) out vec4 outColor;
 
 float sat(float x) { return clamp(x, 0.0, 1.0); }
@@ -77,12 +78,15 @@ float nativeShadowTerm(NativeShadow sh, vec3 world, vec3 n, vec3 toSun, float vi
 }
 
 void main() {
-    NativeItem it = NativeItem(pc.item);
+    NativeItem it = nativeItem(inItem);
     const uint flags = it.tex2.y;
 
     vec4 diffuse = vec4(0.5, 0.5, 0.5, 1.0);
     if ((flags & NATIVE_NO_ALBEDO) == 0u) diffuse = rvkSample2D(it.tex0.x, it.tex0.y, inUv.xy);
+#ifndef NATIVE_NO_CLIP
+    // NATIVE_NO_CLIP (the depth-EQUAL colour pass): the depth pre-pass has already discarded what fails the alpha test
     if ((flags & NATIVE_MASKED) != 0u && !alphaPass(diffuse.a, (it.off1.w >> 8) & 255u, it.params.x)) discard;
+#endif
 
     // tangent space, the normal map
     vec3 N = normalize(inNormal);
@@ -171,6 +175,12 @@ void main() {
     case 7u: color = sunTerm; break;
     case 11u: color = vec3(sunShadow); break;
     case 13u: color = tn * 0.5 + 0.5; break;
+    case 14u: {  // the item that drew the pixel: a colour from its index (masked items brighter)
+        const uint h = inItem * 2654435761u;
+        color = vec3(float((h >> 8) & 255u), float((h >> 16) & 255u), float((h >> 24) & 255u)) * (1.0 / 255.0) * 0.8 + 0.2;
+        if ((flags & NATIVE_MASKED) != 0u) color = color.zxy;
+        break;
+    }
     case 8u:
         color = vec3((flags & NATIVE_LIGHTMAP) != 0u ? 1.0 : 0.0, (flags & NATIVE_NORMALMAP) != 0u ? 1.0 : 0.0, (flags & NATIVE_NO_ALBEDO) != 0u ? 1.0 : 0.0);
         if (it.tex1.x == 0u) color += vec3(0.3);

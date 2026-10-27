@@ -1168,7 +1168,8 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
         return nullptr;
     }
     const std::span<const std::uint32_t> tokens = bytecode.first(bytes / 4);
-    const std::uint64_t hash = fnv1a(tokens.data(), tokens.size_bytes(), fnv1a(&kTranslatorVersion, sizeof(kTranslatorVersion)));
+    const std::uint32_t hashSeed = kTranslatorVersion | (shader::debugInfo() ? 0x80000000u : 0u);  // debug-info SPIR-V is cached apart
+    const std::uint64_t hash = fnv1a(tokens.data(), tokens.size_bytes(), fnv1a(&hashSeed, sizeof(hashSeed)));
     {
         const std::lock_guard lock(shaderMutex_);
         if (auto it = shaders_.find(hash); it != shaders_.end()) {

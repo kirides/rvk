@@ -333,10 +333,6 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         reg.onChange(*rs.rtSource, applyRtSource, this);
         applyRtSource(*rs.rtSource);
     }
-    if (rs.nativeList != nullptr) {
-        reg.onChange(*rs.nativeList, [this](const settings::Setting& s) { nativeOpaque_->setListMode(static_cast<std::uint32_t>(s.asInt())); }, this);
-        nativeOpaque_->setListMode(static_cast<std::uint32_t>(rs.nativeList->asInt()));
-    }
     if (rs.nativeDebug != nullptr) {
         reg.onChange(*rs.nativeDebug, [this](const settings::Setting& s) { nativeOpaque_->setDebug(static_cast<std::uint32_t>(s.asInt())); }, this);
         nativeOpaque_->setDebug(static_cast<std::uint32_t>(rs.nativeDebug->asInt()));

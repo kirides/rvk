@@ -62,6 +62,7 @@ Config parseConfig(std::string_view text, std::string* error) {
     cfg.dumpSavedTextures = tbl["debug"]["dump_saved_textures"].value_or(cfg.dumpSavedTextures);
     cfg.perf = tbl["debug"]["perf"].value_or(cfg.perf);
     cfg.rtSelfTest = tbl["debug"]["rt_selftest"].value_or(cfg.rtSelfTest);
+    cfg.shaderDebugInfo = tbl["debug"]["shader_debug_info"].value_or(cfg.shaderDebugInfo);
     cfg.perfFrame = static_cast<std::uint32_t>(tbl["debug"]["perf_frame"].value_or(0));
     const auto frameList = [&](const char* key, std::vector<std::uint32_t>& out) {
         if (const auto* frames = tbl["debug"][key].as_array()) {

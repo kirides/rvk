@@ -313,6 +313,9 @@ bool Context::createDevice(bool withRayTracing) {
     f2.features.imageCubeArray = sup2.features.imageCubeArray;
     f2.features.vertexPipelineStoresAndAtomics = sup2.features.vertexPipelineStoresAndAtomics;
     features_.vertexStores = sup2.features.vertexPipelineStoresAndAtomics == VK_TRUE;
+    f2.features.multiDrawIndirect = sup2.features.multiDrawIndirect;
+    f2.features.drawIndirectFirstInstance = sup2.features.drawIndirectFirstInstance;
+    features_.indirectDraws = sup2.features.multiDrawIndirect == VK_TRUE && sup2.features.drawIndirectFirstInstance == VK_TRUE;
     f2.features.shaderStorageImageExtendedFormats = sup2.features.shaderStorageImageExtendedFormats;
     features_.storageImageExtendedFormats = sup2.features.shaderStorageImageExtendedFormats == VK_TRUE;
     // 16-bit arithmetic: the FidelityFX DLL's shader variants (fp16 path) when the GPU has it (vk/fsr.h)
