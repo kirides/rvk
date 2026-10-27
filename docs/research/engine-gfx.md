@@ -240,6 +240,7 @@ pre-passes `+0x14d0`, alpha `+0x14e8`, solid `+0x1500`, z-pass `+0x1518`, `+0x15
    `DoEndRenderAlpha`; list `+0x1548`; `EndMaterial`.
 
 Measured order of a whole frame (views, passes, draws per pass, image roles, the camera block): docs/research/frame-phases.md.
+**The complete decompiled frame (every step, state, constant, sort key, shader permutation): docs/research/engine-frame/README.md.**
 
 Sky (`eCSkydome_PS` / `eCSkyObject` / `eCShaderSkyDome`), particles (`eCParticle_PS` / `eCShaderParticle`), light streaks, strips, SpeedTree
 (`eCRenderContextSpeedTree`, `...BB`), vegetation (`eCRenderContextVegetation`, instanced) and skinned actors (`eCRenderContextAnimation2`,
