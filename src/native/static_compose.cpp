@@ -657,3 +657,24 @@ void billboardQuadIndices(std::uint32_t firstQuad, std::uint32_t quads, std::vec
 }
 
 }  // namespace rvk::native::sc
+
+namespace rvk::native::sc {
+
+MorphPick pickMorphTargets(std::span<const float> weights) {
+    MorphPick p;
+    for (std::uint32_t k = 0; k < weights.size(); ++k) {
+        const float w = weights[k];
+        // comiss w0, w1; cmova: slot 1 when w0 > w1 (unordered: not above)
+        const std::uint32_t c = p.weight[0] > p.weight[1] ? 1u : 0u;
+        // comiss w[c], w2; cmovbe: c when w[c] <= w2 or unordered, else 2
+        const std::uint32_t m = p.weight[c] > p.weight[2] ? 2u : c;
+        // comiss w, w[m]; jbe skip: replaced only when strictly greater (ordered)
+        if (w > p.weight[m]) {
+            p.weight[m] = w;
+            p.target[m] = k;
+        }
+    }
+    return p;
+}
+
+}  // namespace rvk::native::sc

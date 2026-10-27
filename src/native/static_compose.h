@@ -169,6 +169,29 @@ void planBillboards(std::span<const BillboardEntry> entries, std::uint32_t maxQu
 // the indices of quad q (cycle-relative): 4q + (0, 1, 3, 1, 2, 3)
 void billboardQuadIndices(std::uint32_t firstQuad, std::uint32_t quads, std::vector<std::uint8_t>& out);
 
+// ---- skinned actors (eCAnimation_HardRenderActor2, README.md "10. N5.3 result") ----------------------------------------------
+
+// eCAnimation_HardRenderActor2::SetupMorphTargets 0x4dd220 (disassembled): three slots (target, weight) start at (0, 0); for each
+// morph target k of the actor instance's setup (weight at +4 of 0xc-byte entries) the slot with the smallest weight (slot 1 when
+// w0 > w1, else 0; that one when its weight <= w2, else 2) takes (k, w) when w is strictly greater than its weight
+struct MorphPick {
+    std::array<std::uint32_t, 3> target{};
+    std::array<float, 3> weight{};
+};
+MorphPick pickMorphTargets(std::span<const float> weights);
+// ... and each slot i sets the stream offset of stream i + 1: target x the LOD's vertex count (HRA +0x48 + 0x14 lod) x 0x10
+inline std::uint32_t morphStreamOffset(std::uint32_t target, std::uint32_t lodVertexCount) { return target * lodVertexCount << 4; }
+// eCAnimation_HardRenderActor2::Render 0x4dd650: the actor LOD (ActorInstance +0x250, unsigned) clamped to 4; the primitive
+// index u16(first of the LOD (HRA +0x38 + 0x14 lod) + the op's primitive)
+inline std::uint32_t actorLod(std::uint32_t lod) { return lod < 4 ? lod & 0xffffu : 4u; }
+inline std::uint32_t actorPrimitive(std::uint16_t first, std::uint16_t primIdx) { return static_cast<std::uint16_t>(first + primIdx); }
+// the bones a primitive sets (eSHardPrimitive +0x18 start, +0x1a count): `start < u16(start + count)` or none
+inline std::uint32_t primitiveBones(std::uint16_t start, std::uint16_t count) {
+    return start < static_cast<std::uint16_t>(start + count) ? count : 0u;
+}
+// eCShaderDefault::SetBoneMatrix 0x6c9d80: bone b -> the global pool's c(3 (b + 11)) .. +2 (3x4 transpose)
+inline std::uint32_t boneRegister(std::uint32_t b) { return (b + 11) * 3; }
+
 // ---- constants ----------------------------------------------------------------------------------------------------------
 
 // eCShaderMaterialAdmin::SetFog 0x6b9fc0: PS c3 = colour, PS c4 = VS c30 = (-start k, k, density, 0), k = 1 / ((end - start) / density)

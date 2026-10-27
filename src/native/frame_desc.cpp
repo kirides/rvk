@@ -81,6 +81,8 @@ bool nothingToDraw(const Op& op) {
         case OpKind::Particle: return op.state == 0;       // no live particle
         case OpKind::SpeedTreeBB: return op.state == 0;    // the billboard mesh resource is not cached (eCResource2 +0x38 != 3)
         case OpKind::Mesh: return op.state != 0xf;         // resource / visual / materials / shaders not all ready (meshState)
+        case OpKind::Animation: return op.state != 0x1f;   // wrapper / matrices / resource / shader / passes not all there (frame_tap
+                                                           // animationState, read at the slot's entry)
         default: return false;
     }
 }

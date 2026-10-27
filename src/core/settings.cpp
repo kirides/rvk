@@ -1785,7 +1785,8 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .tab = kTabDebug,
         .description = "Bit mask of the scene ops' groups: 1 alpha / refracted mesh ops, 2 entity overlay passes (also of the static ops "
                        "while scene ops are on), 4 decals (eCDecalAdmin::RenderDecals), 8 the sky dome op (stars, sun, moon, dome), 16 the opaque "
-                       "billboards (eCBillboardAdmin::RenderBillboards), 32 the sky environment cube's faces.",
+                       "billboards (eCBillboardAdmin::RenderBillboards), 32 the sky environment cube's faces, 64 the skinned actors' ops "
+                       "(eCRenderContextAnimation2: bones, morphs, body parts, overlays).",
         .type = Type::Int,
         .defaultValue = 63,
         .min = 0,

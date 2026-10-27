@@ -219,6 +219,72 @@ static std::int32_t meshState(const void* ctx, std::uint32_t desc) {
     return bits | (cached ? 4 : 0) | (shaders ? 8 : 0);
 }
 
+// What a skinned op needs to draw (eCAnimation_PS::Render 0x4d6fe0 -> eCAnimation_HardRenderActor2::Render 0x4dd650 ->
+// RenderPrimitive 0x4dd0a0), as bits read at the op's slot entry (just before the engine's code): 1 the actor's wrapper (actor 0:
+// PS +0x30, else body part k - 1 +0x30) with its resource (+0x18) and render hook (+0x98), 2 UpdateRenderMatrices can run (the
+// ActorInstance +8, the resource's actor +0x70), 4 the hook's resource cached (+0x38 == 3), 8 the LOD's primitive's material has
+// its shader (+0x70), 16 the shader has passes there (the z pass: the depth-map type's special pass compiled in the admin's version;
+// else a version object and a valid shader: GetPasses' conditions)
+static std::int32_t animationState(const Op& op) {
+    const std::uint8_t* ps = nullptr;
+    if (!readAt(op.raw.context, 0x18, ps) || ps == nullptr) return -1;
+    const std::uint32_t actorIdx = op.raw.desc & 0xffffu, primIdx = op.raw.desc >> 16;
+    const std::uint8_t* wrapper = ps + 0x30;
+    if (actorIdx != 0) {
+        const std::uint8_t* parts = nullptr;
+        const std::uint8_t* part = nullptr;
+        if (!readAt(ps, 0x1b0, parts) || !readAt(parts, 8 * static_cast<std::size_t>(actorIdx - 1), part) || part == nullptr) return 0;
+        wrapper = part + 0x30;
+    }
+    const std::uint8_t* res = nullptr;
+    const std::uint8_t* hra = nullptr;
+    if (!readAt(wrapper, 0x18, res) || res == nullptr || !readAt(res, 0x98, hra) || hra == nullptr) return 0;
+    std::int32_t bits = 1;
+    const std::uint8_t* ai = nullptr;
+    const void* actor = nullptr;
+    if (readAt(wrapper, 8, ai) && ai != nullptr && readAt(res, 0x70, actor) && actor != nullptr) bits |= 2;
+    const std::uint8_t* hres = nullptr;
+    std::int32_t state = 0;
+    if (readAt(hra, 0, hres) && readAt(hres, 0x38, state) && state == 3) bits |= 4;
+    std::uint32_t lod = 0;
+    if (ai != nullptr) readAt(ai, 0x250, lod);
+    lod = lod < 4 ? lod & 0xffffu : 4u;
+    std::uint16_t first = 0;
+    const std::uint8_t* prims = nullptr;
+    const std::uint8_t* material = nullptr;
+    const std::uint8_t* shader = nullptr;
+    if (!readAt(hra, 0x38 + 0x14 * lod, first) || !readAt(hra, 0x90, prims) || prims == nullptr) return bits;
+    const std::size_t prim = static_cast<std::uint16_t>(first + primIdx);
+    if (!readAt(prims + 0x20 * prim, 0x10, material) || material == nullptr || !readAt(material, 0x70, shader) || shader == nullptr) return bits;
+    bits |= 8;
+    const std::uint8_t* admin = nullptr;
+    std::int32_t adminVersion = 0, type = 6, shaderVersion = 0;
+    if (!readAt(shader, 0x220, admin) || admin == nullptr || !readAt(admin, 0x170, adminVersion)) return bits;
+    const auto versionAt = [&](std::int32_t v) {
+        const void* p = nullptr;
+        return v >= 0 && readAt(shader, 0x258 + 8 * static_cast<std::size_t>(v), p) ? p : nullptr;
+    };
+    if (op.list == List::ZPass) {
+        std::uint8_t compiled = 0;
+        const auto* version = static_cast<const std::uint8_t*>(versionAt(adminVersion));
+        if (readAt(admin, 0x314, type) && type != 6 && version != nullptr && readAt(version, 0x18 + 2 * static_cast<std::size_t>(type), compiled) &&
+            compiled != 0) {
+            bits |= 16;
+        }
+    } else {
+        std::int32_t v = adminVersion;
+        if (readAt(shader, 0x68, shaderVersion)) v = std::min(v, shaderVersion);
+        const void* version = versionAt(std::max(v, 0));
+        while (version == nullptr && v > 0) version = versionAt(--v);
+        std::uint8_t invalid = 0;
+        std::uint32_t adminInvalid = 0;
+        readAt(shader, 0x2a8, invalid);
+        readAt(admin, 0x31c, adminInvalid);
+        if (version != nullptr && invalid != 1 && adminInvalid == 0) bits |= 16;
+    }
+    return bits;
+}
+
 void FrameTap::resolve(Op& op) {
     const void* ctx = op.raw.context;
     if (ctx == nullptr || !readAt(ctx, 0, op.vtable) || op.vtable == nullptr) return;
@@ -321,6 +387,7 @@ void FrameTap::executeBegin(void* db, void* desc) {
 
 void FrameTap::opEnter(const void* op) {
     if (!executing_) return;
+    if (Op* o = desc_.find(op); o != nullptr && o->kind == OpKind::Animation && !o->emptySlot) o->state = animationState(*o);
     RawOp live;
     attr_.enterOp(op, safeRead(op, &live, sizeof(live)) ? &live : nullptr);
     if (statics_ != nullptr && staticsWanted_) {

@@ -55,6 +55,7 @@ public:
         Sky,     // N5.2c: the sky dome op (list +0x1530: stars, sun, moon, dome; group bit 8)
         Billboards,  // N5.2c: eCBillboardAdmin::RenderBillboards, the opaque billboards' queue (group bit 16)
         SkyCube,     // N5.2c: the sky environment cube's faces (eCSkydome_PS::Render with the cube camera; group bit 32)
+        Actors,      // N5.3: the skinned actors' ops (eCRenderContextAnimation2: z / solid / alpha / refracted lists; group bit 64)
         Count
     };
     static constexpr std::size_t kGroups = static_cast<std::size_t>(Group::Count);
@@ -88,7 +89,7 @@ public:
 
     enum class Skip : std::uint8_t {
         None, Kind, Overlay, ShaderClass, Version, InvalidShader, NotCompiled, Switch, Primitive, ImageOverride, Unreadable, PassKind,
-        Sort, Texture, OverlayShader, DecalProxy, NotCreated, VisualShader, SkyCamera, SkyRebuilt, Count
+        Sort, Texture, OverlayShader, DecalProxy, NotCreated, VisualShader, SkyCamera, SkyRebuilt, Bones, Count
     };
     static const char* name(Skip s);
 
@@ -142,6 +143,8 @@ private:
         std::array<sc::DrawDesc::Stream, 4> streams{};
         const void* indices = nullptr;
         std::uint32_t minIndex = 0, numVertices = 0, startIndex = 0, primCount = 0;
+        std::uint32_t primType = 4;   // the static path: an indexed triangle list, base vertex 0; skinned primitives: the record's
+        std::int32_t baseVertex = 0;
         sc::Visual visual;
         const void* subMesh = nullptr;
         const void* material = nullptr;
@@ -162,6 +165,10 @@ private:
     Skip subMeshDraws(const std::uint8_t* res, const std::uint8_t* sub, std::uint32_t node, std::int32_t switchValue,
                       std::uint32_t combi, const std::uint8_t* illum, float fade, const float* world, bool instanced,
                       std::uint8_t flags, std::uint32_t batchCount);
+    // eCShaderBase::GetPasses 0x6d1ee0 (-> OnGetPasses: the base shader's passes, then the overlay materials' for flags 1 / 2 / 4)
+    // + ExecutePass per pass over `geometry` (the sub-mesh draws, the skinned primitives); world: for the 4-light log only
+    Skip materialDraws(const std::uint8_t* shader, const std::uint8_t* illum, std::uint32_t combi, bool instanced, std::int32_t switchValue,
+                       std::uint8_t flags, const Geom& geometry, const float* world);
     // eCShaderBase::OnGetPasses' version GetPasses for `owner` (the base shader, or an overlay shader) appended to `out`
     Skip shaderPasses(const std::uint8_t* owner, const sc::PassInputs& in, const std::uint8_t*& version, std::vector<sc::Pass>& out);
     // ExecutePass: `shader` = the base shader (SetSwitch, depth bias), `owner` = the pass's version owner (states, pools, samplers)
@@ -195,6 +202,13 @@ private:
     // the opaque billboards' queue (static_ops_nonop.cpp)
     Skip composeBillboards(const std::uint8_t* admin);
     bool verifyBillboards();
+    // the skinned actors' ops (static_ops_actors.cpp)
+    bool verifyActors();
+    Skip composeActor(const Op& op);
+    // the bone b's matrix as the shader gets it: the palette entry the engine reads (stored this frame) or composed as
+    // UpdateRenderMatrices will (X[i] *= W[i] with the engine's own affine product)
+    bool paletteMatrix(const std::uint8_t* wrapper, std::uint32_t bone, float out[16]);
+    void writeBone(std::uint32_t slot, const float* m);
     // the sky dome op (static_ops_sky.cpp)
     Skip composeSky(const Op& op);
     Skip composeSkyDraws(const std::uint8_t* sky, const std::uint8_t* camera);
@@ -256,7 +270,19 @@ private:
     // the sky cube's faces: UpdateSkydomeEnvCubemap's BeginMaterial binds the admin stages, then SetRenderTarget(face) unbinds all
     // 16 stages (eCDX9Device / HalDevice::SetRenderTarget): s0 / s1 / s2 / s4 / s5 are empty at the faces' draws
     bool adminStagesUnbound_ = false;
-    int decalsVerified_ = 0, billboardsVerified_ = 0, skyVerified_ = 0;
+    int decalsVerified_ = 0, billboardsVerified_ = 0, skyVerified_ = 0, actorsVerified_ = 0;
+    // the skinned actors (static_ops_actors.cpp): the frame admin getter eCAnimation_PS::Render calls first (frame id at +0x4c), the
+    // affine product of UpdateRenderMatrices (FUN_1800a2710: a *= b)
+    void* (*frameAdmin_)() = nullptr;
+    void (*affineMul_)(float* a, const float* b) = nullptr;
+    struct ActorStats {
+        std::uint64_t ops = 0, palettesStored = 0, palettesComposed = 0, morphActive = 0, morphOps = 0, bodyParts = 0, bones = 0;
+        std::array<std::uint64_t, 5> lod{};
+        std::uint64_t emptySlot = 0;  // refracted-list ops: eCRenderContextAnimation2 has no RenderRefracted (0 draws)
+        std::uint64_t overlayOps = 0;
+        std::array<std::uint64_t, 3> overlayKinds{};  // burned, frozen, highlighted
+    } actorWindow_, actorTotal_;
+    std::uint32_t frameId_ = 0;
     int (*billboardCmp_)(const void*, const void*) = nullptr;
     // the BlendMode a non-op path writes into a shader before its passes (SetCurrentRenderStates reads +0x50): -1 none
     const std::uint8_t* blendOverrideShader_ = nullptr;

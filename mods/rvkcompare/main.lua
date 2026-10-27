@@ -9,7 +9,8 @@
 -- settle (default frames before the freeze, 600), freeze_wait (frames between freeze and capture, 60), start_wait (seconds after the new game, 30),
 -- wind (1 = keep the vegetation wind, default 0: SetVegWindParams 0 0 0 0 so grass and leaves rest), repeat (n: every spot n times in a row,
 -- ids <id>_r<k>), pin_time (default 1: risen.debug.set_game_time to a fixed value per spot two frames before the freeze), show_actors
--- (1: hide neither the player nor NPCs, e.g. for the draw-tag tint view: docs/research/draw-tags.md 6).
+-- (1: hide neither the player nor NPCs, e.g. for the draw-tag tint view: docs/research/draw-tags.md 6), focus (1: pin the interaction focus
+-- on the nearest NPC during each spot).
 --
 -- Per spot (spots.lua): weather (forced, thunder off) + clock held each tick -> player placed at the anchor (snapped to the navigation mesh), hidden on request,
 -- NPCs around hidden -> fixed camera (risen.camera.set, instant) -> HUD off/on -> settle frames -> time freeze -> GUI page if any -> burst capture with the
@@ -33,6 +34,9 @@ local keep_wind = T.param("wind", "0") == "1"
 local repeats = tonumber(T.param("repeat", "1")) or 1
 local pin_time = T.param("pin_time", "1") == "1"
 local show_actors = T.param("show_actors", "0") == "1"
+-- focus (1: the interaction focus pinned on the NPC nearest to the player (within 2000) for the spot: the engine's highlighted
+-- overlay pass on that actor, docs/research/engine-frame/README.md 10)
+local focus_npc = T.param("focus", "0") == "1"
 -- the game time each spot is frozen at (by its position in spots.lua, so a subset of spots gets the same values)
 local spot_index = {}
 for i, s in ipairs(SPOTS) do spot_index[s.id] = i end
@@ -272,6 +276,22 @@ local function run_spot(spot)
     apply_hiding(spot)
     local okc, whyc = set_camera(camera_spec(spot, p))
     if not okc then return false, "camera: " .. tostring(whyc) end
+    local focused = nil
+    if focus_npc and risen.interact and risen.interact.set_focus then
+        local player = risen.entity.player()
+        for _, e in ipairs((player and risen.entity.npcs(player, 2000)) or {}) do
+            if e ~= player and not e:is_player() then
+                focused = e
+                break
+            end
+        end
+        if focused and risen.interact.set_focus(focused, true) then
+            risen.log.info("rvkcompare: " .. spot.id .. ": focus pinned on an NPC")
+        else
+            risen.log.warn("rvkcompare: " .. spot.id .. ": no NPC to focus")
+            focused = nil
+        end
+    end
     risen.hud.set_visible(spot.hud == true)
     T.sleep_frames(spot.settle or settle_default)
     -- re-pin the view (identical spec: a no-op unless the streaming reset something), a few frames for it, then freeze
@@ -320,6 +340,7 @@ local function run_spot(spot)
     })
     close_gui(spot)
     if freeze then risen.debug.time_freeze(false) end
+    if focused then risen.interact.set_focus(nil) end
     risen.hud.set_visible(true)
     restore_hidden()
     return status == "done", status

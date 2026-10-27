@@ -542,3 +542,36 @@ TEST(billboard_queue_records_and_cycles) {
     std::memcpy(q, idx.data(), sizeof(q));
     CHECK(q[0] == 4 && q[1] == 5 && q[2] == 7 && q[3] == 5 && q[4] == 6 && q[5] == 7);
 }
+
+TEST(actor_morph_targets_and_bones) {
+    // SetupMorphTargets 0x4dd220: the three strongest weights replace the weakest slot (strictly greater), ties keep the first
+    const float w[] = {0.1f, 0.5f, 0.3f, 0.7f, 0.0f};
+    const sc::MorphPick p = sc::pickMorphTargets(w);
+    CHECK(p.target[0] == 3 && p.weight[0] == 0.7f && p.target[1] == 1 && p.weight[1] == 0.5f && p.target[2] == 2 && p.weight[2] == 0.3f);
+    // all zero (the usual case: a blink between two closings): nothing replaced, targets 0, weights 0
+    const float z[] = {0.0f, 0.0f, 0.0f, 0.0f};
+    const sc::MorphPick q = sc::pickMorphTargets(z);
+    CHECK(q.target == (std::array<std::uint32_t, 3>{0, 0, 0}) && q.weight[0] == 0.0f && q.weight[2] == 0.0f);
+    // one active target lands in slot 0; equal weights later do not displace it
+    const float one[] = {0.0f, 0.0f, 0.25f, 0.25f};
+    const sc::MorphPick r = sc::pickMorphTargets(one);
+    CHECK(r.target[0] == 2 && r.weight[0] == 0.25f && r.target[1] == 3 && r.weight[1] == 0.25f && r.weight[2] == 0.0f);
+    CHECK(sc::morphStreamOffset(2, 1000) == 32000);
+    // HardRenderActor2::Render: LOD clamp, the u16 primitive index, the bone loop's u16 bound, SetBoneMatrix's register
+    CHECK(sc::actorLod(0) == 0 && sc::actorLod(3) == 3 && sc::actorLod(4) == 4 && sc::actorLod(0xffffffffu) == 4);
+    CHECK(sc::actorPrimitive(10, 3) == 13 && sc::actorPrimitive(0xffff, 2) == 1);
+    CHECK(sc::primitiveBones(0, 66) == 66 && sc::primitiveBones(5, 0) == 0 && sc::primitiveBones(0xfff0, 0x20) == 0);
+    CHECK(sc::boneRegister(0) == 33 && sc::boneRegister(65) == 228);
+}
+
+TEST(native_attribution_skinned_zero_draws) {
+    // a skinned op without draws is explained when its draw condition (frame_tap animationState) lacks a bit
+    Op op;
+    op.kind = OpKind::Animation;
+    op.state = 0x1f;
+    CHECK(!native::nothingToDraw(op));
+    op.state = 0x1b;  // the hook's resource not cached
+    CHECK(native::nothingToDraw(op) && !native::cannotDraw(op));
+    op.state = -1;
+    CHECK(!native::nothingToDraw(op));
+}

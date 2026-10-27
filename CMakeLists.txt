@@ -262,6 +262,7 @@ add_library(rvk_core STATIC
     src/native/static_compose.cpp
     src/native/static_ops_nonop.cpp
     src/native/static_ops_sky.cpp
+    src/native/static_ops_actors.cpp
     src/native/static_compose.h
     src/native/static_ops.cpp
     src/native/static_ops.h

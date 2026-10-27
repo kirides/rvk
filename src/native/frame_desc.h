@@ -132,7 +132,8 @@ struct Op {
     std::int32_t state = -1;         // the context's draw condition at Execute's end (strip: segments PS+0xe8; precipitation:
                                      // PS+0x18 & 1 ? 1 + drops alive (PS+0xe0 - PS+0xc8) : 0; particle: live particles PS+0x390;
                                      // tree billboard: its resource cached at Execute's entry 1 / 0; mesh: bits 1 resource
-                                     // cached, 2 visual, 4 materials cached, 8 shaders, at Execute's entry); -1 = not read
+                                     // cached, 2 visual, 4 materials cached, 8 shaders, at Execute's entry; skinned: bits 1 actor,
+                                     // 2 matrices, 4 resource cached, 8 shader, 16 passes, at the slot's entry); -1 = not read
     std::uint32_t overlay = 0;       // mesh / skinned ops: the entity's overlay flags (+0x28 & 0xe00000)
     std::uint16_t notes = 0;         // OpNote, set by Attribution::end for ops with 0 or > 1 draws
 };

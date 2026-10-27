@@ -135,7 +135,8 @@ const char* StaticOps::name(Skip s) {
     static constexpr const char* kNames[] = {"none", "kind", "overlay passes", "shader class", "shader version", "invalid shader",
                                              "permutation not compiled", "switch element", "primitive", "image override", "unreadable",
                                              "pass kind", "instance sort", "texture", "overlay shader", "decal entity proxy",
-                                             "buffers not created yet", "visual shader", "sky camera", "sky object rebuilt this frame"};
+                                             "buffers not created yet", "visual shader", "sky camera", "sky object rebuilt this frame",
+                                             "more than 66 bones / a bone outside the palette"};
     const auto i = static_cast<std::size_t>(s);
     return i < std::size(kNames) ? kNames[i] : "?";
 }
@@ -148,6 +149,7 @@ const char* StaticOps::name(Group g) {
         case Group::Sky: return "scene ops [sky dome]";
         case Group::Billboards: return "scene ops [opaque billboards]";
         case Group::SkyCube: return "scene ops [sky cube faces]";
+        case Group::Actors: return "scene ops [skinned actors]";
         default: return "?";
     }
 }
@@ -171,7 +173,8 @@ void StaticOps::setMode(Group group, bool takeOver, bool compare) {
                                                    "the main view's decals (eCDecalAdmin::RenderDecals)",
                                                    "the main view's sky dome op (stars, sun, moon, dome)",
                                                    "the main view's opaque billboards (eCBillboardAdmin::RenderBillboards)",
-                                                   "the sky environment cube's faces (eCSkydome_PS::Render, cube camera)"};
+                                                   "the sky environment cube's faces (eCSkydome_PS::Render, cube camera)",
+                                                   "the main view's skinned actor ops (eCRenderContextAnimation2: z / solid / alpha / refracted)"};
     spdlog::info("native: {}: {} ({}{}{})", name(group), g.active() ? "on" : "off", kWhat[static_cast<std::size_t>(group)],
                  takeOver ? ", drawn by the renderer" : "", compare ? ", compared with the engine's draws" : "");
 }
@@ -543,8 +546,10 @@ sc::DrawDesc& StaticOps::drawFrom(const Geom& g) {
     d.decl = g.decl;
     d.streams = g.streams;
     d.indices = g.indices;
-    d.primType = 4;    // eCSubMesh::Render / RenderZPass / ExecuteRenderInstances: an indexed triangle list
-    d.baseVertex = 0;  // RenderZPass sets it 0; nothing else of the static path writes it
+    // eCSubMesh::Render / RenderZPass / ExecuteRenderInstances: an indexed triangle list, base vertex 0 (RenderZPass sets it 0;
+    // nothing else of the static path writes it); a skinned primitive: the record's (RenderPrimitive writes the ranges only)
+    d.primType = g.primType;
+    d.baseVertex = g.baseVertex;
     d.minIndex = g.minIndex;
     d.numVertices = g.numVertices;
     d.startIndex = g.startIndex;
@@ -711,7 +716,7 @@ StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8
     const sc::Visual& vis = geometry.visual;
     d.passFlags = pass.flags;
     d.drawClass = sc::passClass(pass.flags, overlay);
-    if (sc::passNonInstanced(pass.flags)) {
+    if (sc::passNonInstanced(pass.flags) && geometry.subMesh != nullptr) {
         // eCSubMesh::Render's tag (engine/scene_hooks: TagScope(sub-mesh, mesh resource))
         d.tagSubMesh = geometry.subMesh;
         d.tagMaterial = geometry.material;
@@ -799,7 +804,13 @@ StaticOps::Skip StaticOps::subMeshDraws(const std::uint8_t* res, const std::uint
     geometry.subMesh = sub;
     geometry.material = material;
     geometry.meshResource = res;
-    // GetPasses 0x6d1ee0 -> OnGetPasses 0x6d3170 -> eCShaderVersionDefault_3_0::GetPasses 0x6cc970
+    return materialDraws(shader, illum, combi, instanced, switchValue, flags, geometry, world);
+}
+
+// GetPasses 0x6d1ee0 -> OnGetPasses 0x6d3170 -> eCShaderVersionDefault_3_0::GetPasses 0x6cc970, ExecutePass per pass
+StaticOps::Skip StaticOps::materialDraws(const std::uint8_t* shader, const std::uint8_t* illum, std::uint32_t combi, bool instanced,
+                                         std::int32_t switchValue, std::uint8_t flags, const Geom& geometry, const float* world) {
+    U8* admin = view_.admin;
     if (get<std::uint8_t>(shader, 0x2a8) == 1) return Skip::InvalidShader;
     if (get<std::uint32_t>(admin, 0x31c) != 0) return Skip::InvalidShader;
     if (flags != 0 && !overlays_) return Skip::Overlay;
@@ -821,7 +832,7 @@ StaticOps::Skip StaticOps::subMeshDraws(const std::uint8_t* res, const std::uint
             ++fourLightsLogged_;
             spdlog::info("native: lights: a sub-mesh with {} dynamic + {} static lights (an additive light pass) at ({:.0f}, {:.0f}, {:.0f}), "
                          "material '{}'", in.dynamicLights, in.staticLights, world[12], world[13], world[14],
-                         engine::readCString(material + 0x40));
+                         geometry.material != nullptr ? engine::readCString(static_cast<U8*>(geometry.material) + 0x40) : std::string());
         }
     }
     // the base shader's passes, then (OnGetPasses, flags 1 burned +0x88, 2 frozen +0x80, 4 highlighted +0x90) each overlay
@@ -1050,6 +1061,7 @@ StaticOps::Skip StaticOps::composeSolid(const Op& op) {
 }
 
 StaticOps::Skip StaticOps::composeOp(const Op& op) {
+    if (op.kind == OpKind::Animation) return composeActor(op);
     if (op.kind != OpKind::Mesh || op.list == List::Debug || op.list == List::Sky || op.list == List::Late) return Skip::Kind;
     if (!view_.valid) {
         // the admin from the op's shader (eCShaderBase +0x220): any material shader of the view
@@ -1118,10 +1130,20 @@ void StaticOps::opEnter(const Op& op) {
         }
         return;
     }
-    if (op.kind != OpKind::Mesh) return;
+    if (op.kind != OpKind::Mesh && op.kind != OpKind::Animation) return;
     Group group = Group::Count;
-    if (op.list == List::ZPass || op.list == List::Solid) group = Group::Static;
-    if (op.list == List::Alpha || op.list == List::Refracted) group = Group::Mesh;
+    if (op.kind == OpKind::Animation) {
+        // eCRenderContextAnimation2: Render / RenderAlpha / RenderZPass (slots 0 / 1 / 3); its RenderRefracted is empty
+        if (op.list == List::ZPass || op.list == List::Solid || op.list == List::Alpha || op.list == List::Refracted) group = Group::Actors;
+        if (group != Group::Count && groups_[static_cast<std::size_t>(group)].active()) {
+            if (actorsVerified_ == 0) actorsVerified_ = verifyActors() ? 1 : -1;
+            if (actorsVerified_ < 0) return;
+        }
+    } else if (op.list == List::ZPass || op.list == List::Solid) {
+        group = Group::Static;
+    } else if (op.list == List::Alpha || op.list == List::Refracted) {
+        group = Group::Mesh;
+    }
     if (group == Group::Count || !groups_[static_cast<std::size_t>(group)].active()) return;
     g_ = &groups_[static_cast<std::size_t>(group)];
     drawCount_ = 0;
@@ -1463,6 +1485,31 @@ void StaticOps::report() {
         }
         g.window = {};
         g.skips = {};
+    }
+    if (groups_[static_cast<std::size_t>(Group::Actors)].active()) {
+        const auto line = [](const ActorStats& a) {
+            return std::format("{} ops ({} body-part ops, {} refracted with the empty slot), palettes read {} / composed {} (stamp not this frame), "
+                               "{} bones, LOD 0 {} / 1 {} / 2 {} / 3 {} / 4 {}, morph ops {} (active weights {}), overlay ops {} (burned {}, frozen "
+                               "{}, highlighted {})",
+                               a.ops, a.bodyParts, a.emptySlot, a.palettesStored, a.palettesComposed, a.bones, a.lod[0], a.lod[1], a.lod[2], a.lod[3],
+                               a.lod[4], a.morphOps, a.morphActive, a.overlayOps, a.overlayKinds[0], a.overlayKinds[1], a.overlayKinds[2]);
+        };
+        ActorStats& t = actorTotal_;
+        const ActorStats& w = actorWindow_;
+        t.ops += w.ops;
+        t.palettesStored += w.palettesStored;
+        t.palettesComposed += w.palettesComposed;
+        t.morphActive += w.morphActive;
+        t.morphOps += w.morphOps;
+        t.bodyParts += w.bodyParts;
+        t.bones += w.bones;
+        t.emptySlot += w.emptySlot;
+        t.overlayOps += w.overlayOps;
+        for (std::size_t i = 0; i < t.lod.size(); ++i) t.lod[i] += w.lod[i];
+        for (std::size_t i = 0; i < t.overlayKinds.size(); ++i) t.overlayKinds[i] += w.overlayKinds[i];
+        spdlog::info("native: skinned actors (5 s): {}", line(w));
+        spdlog::info("native: skinned actors (total): {}", line(t));
+        actorWindow_ = {};
     }
 }
 
