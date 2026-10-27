@@ -104,7 +104,7 @@ Each stage behind a `native.*` setting (default off), A/B against the engine pat
 | **N5.0 op tap** | read the main view's sorted lists at `Execute` every frame into a `native::FrameDesc` (views, passes, ops: context kind, entity, material, desc, sort key, list) | nothing (observer) | per pass and kind equal to the HAL draw stream (`-LogFrame` counts; ops -> draws incl. z-pass merges, instancing, SpeedTree batches) |
 | **N5.1 static ops** | z pre-pass + solid ops of static meshes (incl. terrain layers, masked, instanced) executed by our recorder with the engine's own translated shaders, constants / states composed natively; the engine's `RenderZPass` / `Render` of those ops skipped | the HAL path of those ops | pub_interior / monastery_hall / jungle / savegame equal to the engine |
 | N5.2 alpha / refracted / fading statics, decals, billboards, sky dome (+ sky cube faces) | the rest of the main view's mesh-like ops | | as above + water spots (done: sections 8, 9) |
-| N5.3 skinned actors | palette + morphs from the actor (D 1), body parts | | hero_idle / pub_idle |
+| N5.3 skinned actors | palette + morphs from the actor (D 1), body parts | | hero_idle / pub_idle (done: section 10) |
 | N5.4 SpeedTree, billboards, vegetation | global wind, batches, the 1000-instance grass ring | | jungle / forest spots |
 | N5.5 shadows | terrain VSM, cascades (engine fit E 2.2), point atlas, `post_SSM` mask | engine cascades + mask | shadow-compare |
 | N5.6 particles, strips, streaks, precipitation | CPU vertex data from the engine's buffers | | rain / fire spots |
@@ -281,7 +281,7 @@ reproduced first (the "own modes" of section 4).
 ## 8. N5.2 result: alpha / refracted mesh ops, overlay passes, decals (2026-10-27)
 
 Settings `native.scene_ops` (the renderer draws them) and `native.scene_ops_compare` (every engine draw of them is diffed against the
-composed draw of its position), Debug | NoAB, default off; `native.scene_ops_groups` (Debug, default 7; 63 since N5.2c, section 9) = bit 1 alpha / refracted mesh
+composed draw of its position), Debug | NoAB, default off; `native.scene_ops_groups` (Debug, default 7; 63 since N5.2c, section 9; 127 since N5.3, section 10) = bit 1 alpha / refracted mesh
 ops, bit 2 entity overlay passes (also for the N5.1 static ops while scene ops are on), bit 4 decals. Off = nothing beyond the N5.0 tap's
 pass-through; `native.static_ops` behaves as before (its overlay ops stay the engine's unless scene ops are on). Same machinery as N5.1
 (`native::StaticOps`, one `GroupState` per group: take-over / compare switches, counts, skips), the decals in
@@ -595,3 +595,125 @@ draws; the SpeedTree wind runs on the game time with 40-ms clamped steps.
 ~1 per view): a billboard-heavy view was not found; the one "unreadable" billboard skip is not explained; the lightning flash in the
 sky cube (beach_night_storm) is not judged (no flash in the enhanced pictures); the water-on sky shift is attributed to our CPU cost
 [I], not proven; the overlay / additive light passes of section 8 still never met.
+
+## 10. N5.3 result: skinned actors (2026-10-28)
+
+Group **64** of `native.scene_ops_groups` (behind `native.scene_ops` / `native.scene_ops_compare` as in sections 8 / 9; the entity
+overlay passes of actors need bit 2 as for meshes): the main view's `eCRenderContextAnimation2` ops in the z, solid, alpha and
+refracted lists. Code: `src/native/static_ops_actors.cpp` (+ `materialDraws`, factored out of `subMeshDraws` in `static_ops.cpp`:
+GetPasses + overlays + ExecutePass over any geometry), the pure rules in `static_compose.*` (`pickMorphTargets`, `actorLod`,
+`actorPrimitive`, `primitiveBones`, `boneRegister`, `morphStreamOffset`; test `actor_morph_targets_and_bones`). Read in the
+disassembly of the test copy's Engine.dll (capstone) and the dumps `skin_dump.txt` / `nativemesh_dump2.txt`; all [C] unless marked;
+"checked" = held in the compare runs below. The composition checks 13 code sites (call targets, the `+0x250` / `+0x4c` /
+`+0x1f0` / `+0x48` operands) and the eCShaderDefault slots `+0x1f0` SetBoneMatrix / `+0x1f8` SetMorphTargetWeights at first use.
+
+**The op [C, checked].** Slots 0 / 1 / 3 (`0x4ddc10` Render, `0x4ddc60` RenderAlpha, `0x4ddcb0` RenderZPass) all call
+`eCAnimation_PS::Render(PS = context +0x18, desc & 0xffff = actor, desc >> 16 = primitive, zpass, fade)` with (false, op fade) /
+(false, op fade) / (true, 1.0 = DAT_1809f1698). **Slot 2 (RenderRefracted) is eCRenderContext's empty function**: an actor primitive
+whose material IsRefracted is requested into the refracted list (D 1.1) and never drawn (none occurred in the runs below).
+`eCAnimation_PS::Render` 0x4d6fe0: overlay flags from the entity (`PS +0x10`) `+0x28` (0x200000 -> 2 frozen, 0x400000 -> 1 burned,
+0x800000 -> 4 highlighted); the wrapper = `PS +0x30` (switch `PS +0x20`) for actor 0, else body part `PS +0x1b0[actor - 1]` `+0x30`
+(switch part `+0x20`); nothing without the resource (`wrapper +0x18`) or its render hook (`resource +0x98` =
+eCAnimation_HardRenderActor2, HRA) or when `UpdateRenderMatrices(wrapper, frame id)` returns false (no ActorInstance `wrapper +8` or no
+`resource +0x70` actor). The frame id = `[FUN_1800a1c40() + 0x4c]` (a module getter; Render calls it first).
+
+**Palette [C, checked].** `UpdateRenderMatrices` 0x4dfee0 rebuilds the palette (`wrapper +0x48`, count `+0x50`, capacity `+0x54`)
+when the stamp `+0x58` (32-bit) differs from the frame id or the count is 0: n = the actor's bone count (`resource +0x70 +0xd8`),
+`palette[i] = X[i]` (ActorInstance `+0x28`) then `FUN_1800a2710(palette[i], W[i])` (ActorInstance `+0x18`): an inline 3x4 affine
+product `a *= b` of Engine.dll's own (not SharedBase's). The composition reads the stored palette when the stamp is this frame's,
+else computes the entries it needs with the same function on copies (bit-equal: the first op of an actor in a frame whose cascades
+did not render it, ~8 % of the ops; the engine's own refresh happens later inside the same Render). It is never refreshed for actors
+nobody renders (rt-shadows.md 10).
+
+**HardRenderActor2::Render 0x4dd650 [C, checked].** LOD = ActorInstance `+0x250` (u32) clamped to 4; the HRA's resource (`HRA +0`)
+must be cached (`+0x38 == 3`; QueueData / CacheResource side effects before the check); primitive = `HRA +0x90 + 0x20 *
+u16(HRA +0x38 + 0x14 lod (u16 first) + primitive)` (eSHardPrimitive: `+0` start index, `+4` primitives, `+8` min vertex, `+0xc`
+vertices, `+0x10` material, `+0x18` bone start, `+0x1a` bone count); shader = material `+0x70` (null: nothing). Bones: for i <
+count (the loop runs while `start < u16(start + count)`) `SetBoneMatrix(i, palette + 0x40 * remap[start + i])` (u16 remap `HRA
++0x28`) -> the global pool's c(3 (i + 11)) .. +2, the 3x4 transpose (FUN_180238390, as SetWorldMatrix). Morphs when `HRA +0xa8`
+(target count, unsigned) != 0: `SetupMorphTargets` 0x4dd220 keeps three (target, weight) slots starting at (0, 0); for each target
+k of the ActorInstance's setup (`+0x1d0`, 0xc-byte entries, weight at `+4`) the weakest slot (1 when w0 > w1 else 0; that one when
+its weight <= w2 else 2) takes (k, w) if w is strictly greater; then weight i -> the vector and the stream offset of stream i + 1
+(the morph VB) = target x the LOD's vertex count (`HRA +0x48 + 0x14 lod`) x 0x10 through the primitive's SetStreamOffset (slot 6).
+Always `SetMorphTargetWeights` (c31.xyz; zeros without targets) and `SetGlobalAlpha(fade, 0)` (c32.w). `RenderPrimitive` 0x4dd0a0:
+the material admin's `+0x312` (z pass) -> `ExecuteSpecialPass(false)` + one draw, else `eCShaderBase::GetPasses(shader, switch,
+illumination = entity +0xf8 +0x78 (null in the z pass), combi 0, not instanced, flags)` + per pass ExecutePass + the visual (`HRA
++0xa0`) with the primitive's four range fields written into the record (type, indexed, base vertex as created). Overlay passes as
+for meshes (section 8). **The engine skins on the GPU only**: eCAnimation_HardRenderActor2 is the one render hook
+(`eCMotionActorResource2::GetAnimationRenderHook`), no CPU-skinned path exists. The draws keep the slot's tag (Skinned, context, op,
+entity) and no sub-mesh tag (no eCSubMesh::Render), so `draws::Kind::Skinned` and every consumer see them as before.
+
+**Verification** (compare = every field class of sections 7 - 9 incl. bool / int registers; draws equal / compared, 0 mismatches
+everywhere; skips = "permutation not compiled", the engine compiles it at that draw):
+
+| run | skinned draws | z / solid / alpha | overlay passes | other groups in the same run | skips |
+|---|---|---|---|---|---|
+| compare, pub_idle + hero_idle + pub_interior, actors shown | 173,284 / 173,284 | 82,733 / 89,651 / 900 | 6,928 (highlighted) | alpha / refracted 64,143, sky 12,948, all equal | 52 |
+| compare, savegame Risen_Save_0009 (`rvk_perfsave` hold 30) | 161,686 / 161,686 | 80,845 / 80,841 / 0 | 0 | 71,138 / 3,122 / 14,436, all equal | 60 |
+| compare, 9 spots, actors shown, `focus=1` (+ `native.static_ops_compare`) | 396,531 / 396,531 | 183,175 / 200,696 / 12,660 | 17,660 | static 2,333,910 equal, **incl. 2,696 mesh overlay passes** | 164 |
+| compare, 13 spots (section 8's list), actors shown | 448,162 / 448,162 | 213,040 / 223,341 / 11,781 | 10,335 | all equal | 167 |
+| take-over + compare, savegame, hero walking (`rvk_rtwalk`; ~200 units, then a dialogue), **validation on** (0 messages), groups 127 | 160,215 / 160,215 | 80,116 / 80,099 / 0 | 0 | every group drawn by us, all equal | 101 |
+| take-over + compare, new game's beach, the hero walking ~2,700 units (`rvk_rtwalk load=0`, 6.5 s of walking), groups 127 | 104,648 / 104,648 | 51,884 / 52,548 / 216 | 676 | every group drawn by us, all equal | 54 |
+| take-over + compare, savegame switched 63 -> 127 at frame 2000, **validation on** (0 messages) | 197,186 / 197,186 | 96,412 / 100,774 | 0 | | 15 |
+| take-over + compare, pub_interior / pub_idle / hero_idle, actors shown, groups 66, **validation on** (0) | 184,863 / 184,863 | 88,617 / 95,481 / 765 | 6,874 | | 52 |
+
+In every take-over run each own draw equals its composition at its own `prepareDraw` (e.g. 160,215 of 160,215). Statistics over
+the runs (~1.6 M skinned ops): **actor LOD always 0** (ActorInstance `+0x250` never non-zero; its writer is still not found: EMotionFX
+internal, `ms_fMaxBoneLODDistance` unreferenced), 73 - 93 % of the ops are body-part actors (heads, armour, hair), 30 - 41 % have morph targets,
+of those 2 - 4 % with a non-zero weight (blinks, speech), burned / frozen never occurred, the refracted list never held an actor. The
+**highlighted overlay** (bit 4) occurs on the NPC the interaction focus is on (rvkcompare `focus=1` pins it with
+`risen.interact.set_focus`; in the pub it happens without it); it is the entity's flag, so the focused NPC's attached mesh entities
+(weapon, items) get it too [I: the first overlay passes on mesh ops, section 8 had none, appeared only in the focus run].
+
+**0-draw Animation ops** (sections 8 / 9: "NOT clean" tap windows). Section 8's were whole actors (every primitive of one entity or
+body part, z and solid) in the windows of rvkcompare's teleports pub_interior -> monastery_hall and lava_cave -> crystal_cave, read
+without a condition (state -1). The tap now reads a skinned op's draw condition at its slot entry (`frame_tap animationState`: bit 1
+wrapper + resource + hook, 2 UpdateRenderMatrices can run, 4 the hook's resource cached, 8 the primitive's shader, 16 passes for the
+list), and a 0-draw op with a bit missing counts as "nothing to draw". In the N5.3 runs (~1.6 M skinned ops, ~190 tap windows incl.
+the same 13-spot teleport sequence) **no 0-draw Animation op occurred**, so the cause is [I]: an actor appearing at a teleport before
+its HRA resource / material is cached (the streaming rule of mesh ops, N5.0); a recurrence now names its missing bit in the tap's
+mismatch line. The 0-draw **Vegetation** ops recurred once (13-spot run, the sea_cliff -> harbour_mouth teleport, frame 4289: one
+vegetation entity's z / solid ops with desc 0x0 / 0x23 / 0x24, key 0, state -1): left for N5.4.
+
+**Consumers** (savegame hold, `native.scene_ops_groups` 2 -> 66 at frame 2400 in one run, `-MaxFps 60`):
+* RT skinning + GI characters (`shadows.rt=near`, `debug.rt_skin_verify`, `gi.enabled`): `rt: skin verify` max error 0.0044 units
+  before and after (1.1 - 1.45 M vertices per second either way); `rt: scene: characters` 99.1 % / 99.3 % of the characters' refits
+  from this frame's pose skinned by compute before / after, solid-pass draws with a job 47 % / 47 %; the counts follow the NPCs in
+  view (61 -> 54 characters).
+* Object motion (`upscale.mode=native_aa`, `upscale.object_motion=characters`; without RT, where object motion takes its own
+  captures): 28,879 / 25,682 captures per 10 s before, 28,818 / 28,807 / 26,297 / 24,610 after, 41 - 48 tracked draws throughout.
+
+**Images.** `water-compare.ps1` (water off both sides, actors shown, take-over groups 66 vs the plain engine; mean |d| 8-bit / share
+of pixels with a channel |d| > 32), `out\water\20261028-003032` (take-over) and `003319` (a second engine run = the noise floor):
+
+| spot | engine vs take-over | engine vs engine |
+|---|---|---|
+| hero_idle (clock running) | 4.20 / 1.504 % | 10.43 / 11.07 % |
+| pub_idle (clock running) | 1.19 / 0.022 % | 2.74 / 1.297 % |
+| pub_interior (frozen) | 0.66 / 0.153 % | 0.95 / 0.030 % |
+
+`shot-reviewer` (crops engine / take-over / noise, the 8-frame motion sequences 1 frame apart; out/n53/review): faces, hands, hair,
+shirt, straps, trousers, feet identical; the only differences are the idle animation's phase (head / arm angle, smaller than in the
+noise run); no popping or flicker between consecutive frames. Morphs (blinks), the highlight and weapons are too small in these views
+to judge by eye (they compare equal field by field). Savegame switched inside one run (frames 1940 / 1960 / 1980 groups 63, 2020 /
+2040 / 2060 groups 127): on the 2,634 8x8 blocks static in all four 20-frame same-mode pairs, the 40-frame pairs give mean |d|
+0.271 before, **0.190 across the switch**, 0.118 after, 0 blocks above 1.0 in any; a first switch run with 20-frame same-mode pairs
+showed 41 of 16,118 static blocks moving across the 40-frame switch pair, all on slowly moving things (the chickens pecking, the
+bushes, an NPC in a doorway).
+
+**Cost** (savegame, `-Exe RisenTest.exe -Vsync off -Perf`, `rvk_perfsave` hold 40, scene ops taken over in both runs, groups 63 vs 127,
+the last four 5-s `perf:` windows; the machine idle before the runs (2.6 % CPU, `sysprobe`); out/n53/perf_off / perf_on_rvk.log): GPU
+unchanged (1.50 vs 1.47 - 1.50 ms); CPU engine + HAL per frame 3.70 - 3.73 ms (p50 frame 4.01 - 4.07 ms) -> 4.02 - 4.04 ms (p50 4.35 -
+4.40 ms): **+0.32 ms** for the ~38 skinned ops per frame (44,308 per 5 s), i.e. ~8 us per op (the bone / palette reads, the pool mirror,
+the state save / restore and the second set of setter calls; the engine's own code still runs for every op).
+
+Engine rules newly learned [C]: eCRenderContextAnimation2 has no RenderRefracted (refracted actor primitives are never drawn); the
+palette is the product `X[i] *= W[i]` with Engine.dll's inline affine function, stamped per frame by a module's frame id and
+rebuilt at the actor's first Render of a frame (in the cascades or the main view, whichever comes first); a primitive's bones are a
+remapped subset (<= 66) set from slot 0; the morph weights always reach c31.xyz (zeros without targets), the three strongest by a
+"replace the weakest when strictly greater" rule, their offsets into the primitive record (persisting); RenderPrimitive keys the z
+pass on the admin's `+0x312`, not on its bool; the actor LOD stays 0; no CPU skinning exists; the highlighted overlay follows the
+interaction focus and reaches the focused NPC's attachments.
+
+**Not yet / open**: burned / frozen overlays and refracted actor primitives never met (composed by the same rules); the 0-draw
+Animation ops not reproduced (cause inferred); the actor LOD writer; as before the engine's code still runs for every taken-over op.

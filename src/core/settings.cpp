@@ -1760,7 +1760,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .label = "Native frame: scene ops",
         .category = "Debug views",
         .tab = kTabDebug,
-        .description = "The rest of the main view's mesh-like work (alpha and refracted mesh ops, entity overlay passes) is drawn by the "
+        .description = "The rest of the main view's mesh-like work (alpha and refracted mesh ops, entity overlay passes, decals, the sky, skinned actors) is drawn by the "
                        "renderer itself from engine data; the engine's draws of those ops are dropped. Groups: native.scene_ops_groups. "
                        "rvk.log `native: scene ops` every 5 s.",
         .type = Type::Bool,
@@ -1788,7 +1788,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "billboards (eCBillboardAdmin::RenderBillboards), 32 the sky environment cube's faces, 64 the skinned actors' ops "
                        "(eCRenderContextAnimation2: bones, morphs, body parts, overlays).",
         .type = Type::Int,
-        .defaultValue = 63,
+        .defaultValue = 127,
         .min = 0,
         .max = 255,
         .flags = Flag::NoAB | Flag::Debug,
