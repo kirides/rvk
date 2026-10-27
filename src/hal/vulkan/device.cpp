@@ -115,7 +115,7 @@ void HalDevice::applyStaticOps() {
     // N5.2 scene ops (native.scene_ops*): groups 1 alpha / refracted mesh ops, 2 entity overlay passes, 4 decals, 8 sky, 16 billboards
     const bool sceneTake = rs.nativeSceneOps != nullptr && rs.nativeSceneOps->asBool();
     const bool sceneCompare = rs.nativeSceneOpsCompare != nullptr && rs.nativeSceneOpsCompare->asBool();
-    const int groups = rs.nativeSceneOpsGroups != nullptr ? rs.nativeSceneOpsGroups->asInt() : 7;
+    const int groups = rs.nativeSceneOpsGroups != nullptr ? rs.nativeSceneOpsGroups->asInt() : 63;
     staticOps_->setMode(native::StaticOps::Group::Mesh, sceneTake && (groups & 1) != 0, sceneCompare && (groups & 1) != 0);
     staticOps_->setOverlays((sceneTake || sceneCompare) && (groups & 2) != 0);
     staticOps_->setMode(native::StaticOps::Group::Decals, sceneTake && (groups & 4) != 0, sceneCompare && (groups & 4) != 0);

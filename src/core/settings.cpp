@@ -1787,7 +1787,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "while scene ops are on), 4 decals (eCDecalAdmin::RenderDecals), 8 the sky dome op (stars, sun, moon, dome), 16 the opaque "
                        "billboards (eCBillboardAdmin::RenderBillboards), 32 the sky environment cube's faces.",
         .type = Type::Int,
-        .defaultValue = 7,
+        .defaultValue = 63,
         .min = 0,
         .max = 255,
         .flags = Flag::NoAB | Flag::Debug,

@@ -1369,12 +1369,13 @@ void StaticOps::issue() {
             if (!ownIb_) ownIb_ = dev_.createBuffer(64 * 1024, USAGE_DYNAMIC | USAGE_WRITEONLY, POOL_DEFAULT, true, false);
             const std::uint32_t vOff = d.streams[0].offset + d.minIndex * d.vertexStride, iOff = d.startIndex * 2;
             if (vOff + d.vertexBytes.size() <= ownVb_->size() && iOff + d.indexBytes.size() <= ownIb_->size()) {
-                if (void* p = ownVb_->lock(0, 0, LOCK_DISCARD)) {
-                    std::memcpy(static_cast<std::uint8_t*>(p) + vOff, d.vertexBytes.data(), d.vertexBytes.size());
+                // DISCARD of just the range the draw reads: the fresh GPU copy takes only those bytes (BufferCopyState)
+                if (void* p = ownVb_->lock(vOff, static_cast<std::uint32_t>(d.vertexBytes.size()), LOCK_DISCARD)) {
+                    std::memcpy(p, d.vertexBytes.data(), d.vertexBytes.size());
                     ownVb_->unlock();
                 }
-                if (void* p = ownIb_->lock(0, 0, LOCK_DISCARD)) {
-                    std::memcpy(static_cast<std::uint8_t*>(p) + iOff, d.indexBytes.data(), d.indexBytes.size());
+                if (void* p = ownIb_->lock(iOff, static_cast<std::uint32_t>(d.indexBytes.size()), LOCK_DISCARD)) {
+                    std::memcpy(p, d.indexBytes.data(), d.indexBytes.size());
                     ownIb_->unlock();
                 }
                 dev_.setStreamSource(0, ownVb_.get(), d.streams[0].offset, d.streams[0].stride);
