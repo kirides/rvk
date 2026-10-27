@@ -289,6 +289,8 @@ public:
     void registerTexture(const void* api, d3d9::Texture* texture);
     void unregisterTexture(const void* api);
     d3d9::Texture* textureOfApi(const void* api);
+    // the main view's refraction copy (HalTexture::CopyCurrentRTToImage) into the engine texture `api` (the op tap checks it)
+    void refractionCopied(const void* api);
     // live HAL cube maps by the engine's eCAPICubeMap pointer (kept apart: textureOfApi's users expect 2D textures)
     void registerCube(const void* api, d3d9::Texture* texture);
     void unregisterCube(const void* api);

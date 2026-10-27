@@ -143,6 +143,15 @@ inline constexpr std::uint32_t kVsRegs = 256, kPsRegs = 224, kStages = 16;
 // where a constant register's value came from (diagnostics)
 enum class Src : std::uint8_t { None, Native, Pool, Inherit };
 
+// what a draw is, for the per-class counts: a z pre-pass draw (special pass), a base pass (kind 0), an additive light pass
+// (kind 1, lights 4..), a z-fill pass (kind 2, EnableAlphaZWrite), an entity overlay pass (burned / frozen / highlighted:
+// another material's passes over the same geometry), a non-op path (decals, billboards) or the sky dome's parts
+enum class DrawClass : std::uint8_t { ZPass, Base, Additive, ZFill, Overlay, NonOp, Sky, Count };
+inline constexpr std::size_t kDrawClassCount = static_cast<std::size_t>(DrawClass::Count);
+const char* name(DrawClass c);
+// the class of a material pass (eSShaderMaterialPass flags) drawn as an overlay or not
+DrawClass passClass(std::uint32_t flags, bool overlay);
+
 struct DrawDesc {
     const void* vs = nullptr;  // d3d9::Shader*
     const void* ps = nullptr;
@@ -172,6 +181,12 @@ struct DrawDesc {
     std::bitset<kPsRegs> psLive;
     std::array<Src, kVsRegs> vsSrc{};
     std::array<Src, kPsRegs> psSrc{};
+    // bool / int registers: the material path never writes them (HAL slots 104 / 105 / 114 / 115), so the composition is the
+    // device's register file at the op's entry; every register is compared (the CTAB-live ones are counted)
+    std::array<std::uint32_t, 16> vsB{}, psB{};
+    std::int32_t vsI[16][4]{};
+    std::int32_t psI[16][4]{};
+    std::uint32_t biLive = 0;  // captured draws: bool / int registers in the shaders' CTABs
     // the op it belongs to
     const void* subMesh = nullptr;
     const void* material = nullptr;
@@ -182,11 +197,20 @@ struct DrawDesc {
     const void* tagSubMesh = nullptr;
     const void* tagMaterial = nullptr;
     const void* tagMeshResource = nullptr;
+    // ... and its water classification (the Refracted / Alpha passes: the enhanced water's DrawReplacer acts on it)
+    std::uint8_t tagWater = 0;            // draws::Water
+    const char* tagMaterialName = nullptr;
+    DrawClass drawClass = DrawClass::Base;
+    // CPU-generated geometry (non-op paths: decals): the vertex bytes of [minIndex, minIndex + numVertices) and the index bytes
+    // of [startIndex, startIndex + 3 primCount) as the engine writes them into its dynamic buffers; empty: static geometry
+    std::uint32_t vertexStride = 0;
+    std::vector<std::uint8_t> vertexBytes, indexBytes;
 };
 
 // what the comparison counts (one class per field group; constants by register group)
 enum class Field : std::uint8_t {
-    DrawCount, Tag, Vs, Ps, Decl, Streams, Indices, Range, ZFunc, ZWrite, Blend, ColorWrite, AlphaTest, Cull, Fill, Fog, Texture, SamplerState,
+    DrawCount, Tag, Vs, Ps, Decl, Streams, Indices, Range, GeometryData, ZFunc, ZWrite, Blend, ColorWrite, AlphaTest, Cull, Fill, Fog, Texture, SamplerState,
+    VsBool, VsInt, PsBool, PsInt,
     VsCamera, VsInvProj, VsInvView, VsCamPos, VsAdminOther, VsFog, VsInstance, VsGlobalOther, VsMaterial,
     PsCamPos, PsScreen, PsReserved, PsFogColor, PsFog, PsObstacle, PsMaskRef, PsMaterial, PsIndoor, PsSh, PsSun, PsLights,
     UnownedConstant, Count
@@ -200,6 +224,7 @@ struct Diff {
     std::bitset<kFieldCount> fields;  // mismatching field classes
     std::uint32_t closeFloats = 0;    // floats equal within 1e-5 relative (not bit-equal)
     std::uint32_t regs = 0, stages = 0;  // constant registers / sampler stages compared (the comparison is not vacuous)
+    std::uint32_t biRegs = 0;            // bool / int registers compared (whole register files)
     std::string first;                // the first difference, as text
 };
 // composed vs captured (the engine's draw): only registers live in the captured draw's shaders and only the captured sampled
@@ -213,8 +238,13 @@ struct CompareCounts {
     std::array<std::uint64_t, kFieldCount> mismatches{};
     std::uint64_t closeFloats = 0;
     std::uint64_t regs = 0, stages = 0;
+    std::uint64_t biRegs = 0, biLive = 0;  // bool / int registers compared / live in the captured shaders' CTABs
+    // per draw class (DrawClass) and per op list (native::List index): draws compared, equal
+    std::array<std::uint64_t, kDrawClassCount> classDraws{}, classClean{};
+    std::array<std::uint64_t, 8> listDraws{}, listClean{};
     void add(const CompareCounts& o);
 };
-std::string summary(const CompareCounts& c);
+// listNames: the names of the list indices (null: no per-list part)
+std::string summary(const CompareCounts& c, const char* const* listNames = nullptr, std::size_t listCount = 0);
 
 }  // namespace rvk::native::sc

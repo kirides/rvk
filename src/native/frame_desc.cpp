@@ -150,6 +150,7 @@ void FrameDesc::clear() {
     count.fill(0);
     first.fill(0);
     ops.clear();
+    refraction = {};
 }
 
 Op* FrameDesc::find(const void* opPointer) {
@@ -212,7 +213,12 @@ void TapCounts::add(const TapCounts& o) {
     stateContradiction += o.stateContradiction;
     for (std::size_t k = 0; k < noOp.size(); ++k) noOp[k] += o.noOp[k];
     noOpTotal += o.noOpTotal;
+    refractionViews += o.refractionViews;
+    refractionOk += o.refractionOk;
+    refractionBad += o.refractionBad;
 }
+
+bool refractionCopyInPlace(const FrameDesc& f, std::size_t nextOp) { return nextOp == f.first[idx(List::Refracted)]; }
 
 bool explainedWithoutOp(Kind kind) { return kind == Kind::ShadowMask || kind == Kind::Decal || kind == Kind::Billboard; }
 
@@ -227,7 +233,7 @@ bool TapCounts::clean() const {
     }
     return notEntered == 0 && outOfOrder == 0 && repeated == 0 && contentMismatch == 0 && unknownOps == 0 && countMismatch == 0 &&
            drawOrder == 0 && passMismatch == 0 && entityMismatch == 0 && materialMismatch == 0 && subMeshMismatch == 0 &&
-           unknownOpDraws == 0 && stateContradiction == 0 && unexplained == 0 && other == 0;
+           unknownOpDraws == 0 && stateContradiction == 0 && unexplained == 0 && other == 0 && refractionBad == 0;
 }
 
 void Attribution::note(std::string text) {
@@ -337,6 +343,15 @@ void Attribution::draw(const DrawInfo& d) {
 
 void Attribution::end(const std::array<std::uint32_t, kListCount>& liveCounts) {
     if (frame_ == nullptr) return;
+    const FrameDesc::Refraction& r = frame_->refraction;
+    if (r.image != nullptr) ++counts_.refractionViews;
+    if (r.image != nullptr && r.copies == 1 && r.inPlace == 1 && r.other == 0) {
+        ++counts_.refractionOk;
+    } else if (r.image != nullptr || r.copies != 0 || r.other != 0) {
+        ++counts_.refractionBad;
+        note(std::format("refraction copy: image {} (texture {}): {} copies into it, {} at the documented point, {} into other textures", r.image,
+                         r.api, r.copies, r.inPlace, r.other));
+    }
     for (std::size_t l = 0; l < kListCount; ++l) {
         if (liveCounts[l] != frame_->count[l]) {
             ++counts_.countMismatch;
@@ -487,10 +502,10 @@ std::vector<std::string> reportLines(const TapCounts& last, std::uint64_t lastFr
     const auto checks = [](const TapCounts& c) {
         return std::format("out of order {}, content differs {}, not entered {}, repeated {}, unknown ops {}, list counts changed {}, "
                            "draw order {}, pass / entity / material / sub-mesh mismatches {} / {} / {} / {}, unknown-op draws {}, "
-                           "draw-condition contradictions {}",
+                           "draw-condition contradictions {}, refraction copies ok {} of {} (bad {})",
                            c.outOfOrder, c.contentMismatch, c.notEntered, c.repeated, c.unknownOps, c.countMismatch, c.drawOrder,
                            c.passMismatch, c.entityMismatch, c.materialMismatch, c.subMeshMismatch, c.unknownOpDraws,
-                           c.stateContradiction);
+                           c.stateContradiction, c.refractionOk, c.refractionViews, c.refractionBad);
     };
     std::string lists;
     for (std::size_t l = 0; l < kListCount; ++l) {

@@ -350,10 +350,26 @@ void ambientSh(const float list[7][4], const float indoor[3], float f, const flo
 
 // ---- comparison -----------------------------------------------------------------------------------------------------------
 
+const char* name(DrawClass c) {
+    static constexpr const char* kNames[kDrawClassCount] = {"z pre-pass", "base pass", "additive light pass", "z-fill pass", "overlay pass",
+                                                            "non-op", "sky"};
+    const auto i = static_cast<std::size_t>(c);
+    return i < kDrawClassCount ? kNames[i] : "?";
+}
+
+DrawClass passClass(std::uint32_t flags, bool overlay) {
+    if (overlay) return DrawClass::Overlay;
+    switch (passKind(flags)) {
+        case 1: return DrawClass::Additive;
+        case 2: return DrawClass::ZFill;
+        default: return DrawClass::Base;
+    }
+}
+
 const char* name(Field f) {
     static constexpr const char* kNames[kFieldCount] = {
-        "draw count", "draw tag", "vs", "ps", "declaration", "streams", "indices", "range", "zfunc", "zwrite", "blend", "colour write", "alpha test",
-        "cull", "fill", "fog state", "texture", "sampler state",
+        "draw count", "draw tag", "vs", "ps", "declaration", "streams", "indices", "range", "vertex / index data", "zfunc", "zwrite", "blend", "colour write", "alpha test",
+        "cull", "fill", "fog state", "texture", "sampler state", "vs bool", "vs int", "ps bool", "ps int",
         "vs camera c0-3", "vs inv proj c4-7", "vs inv view c8-10", "vs cam pos c11", "vs admin other", "vs fog c30", "vs instance c32+",
         "vs global other", "vs material c232+",
         "ps cam pos c0", "ps screen c1", "ps reserved", "ps fog colour c3", "ps fog c4", "ps obstacle c5.xy", "ps mask ref c5.w",
@@ -411,9 +427,11 @@ Diff compare(const DrawDesc& a, const DrawDesc& e) {
         d.fields.set(static_cast<std::size_t>(f));
         if (d.first.empty()) d.first = std::move(text);
     };
-    if (a.tagSubMesh != e.tagSubMesh || a.tagMaterial != e.tagMaterial || a.tagMeshResource != e.tagMeshResource) {
-        bad(Field::Tag, std::format("tag sub-mesh {} material {} mesh {} vs engine {} {} {}", a.tagSubMesh, a.tagMaterial, a.tagMeshResource,
-                                    e.tagSubMesh, e.tagMaterial, e.tagMeshResource));
+    if (a.tagSubMesh != e.tagSubMesh || a.tagMaterial != e.tagMaterial || a.tagMeshResource != e.tagMeshResource ||
+        a.tagWater != e.tagWater || a.tagMaterialName != e.tagMaterialName) {
+        bad(Field::Tag, std::format("tag sub-mesh {} material {} mesh {} water {} name {} vs engine {} {} {} {} {}", a.tagSubMesh, a.tagMaterial,
+                                    a.tagMeshResource, a.tagWater, static_cast<const void*>(a.tagMaterialName), e.tagSubMesh, e.tagMaterial,
+                                    e.tagMeshResource, e.tagWater, static_cast<const void*>(e.tagMaterialName)));
     }
     if (a.vs != e.vs) bad(Field::Vs, std::format("vs {} vs engine {}", a.vs, e.vs));
     if (a.ps != e.ps) bad(Field::Ps, std::format("ps {} vs engine {}", a.ps, e.ps));
@@ -473,6 +491,20 @@ Diff compare(const DrawDesc& a, const DrawDesc& e) {
     };
     regs([&](std::uint32_t r) { return e.vsLive.test(r); }, a.vsF, e.vsF, a.vsSrc.data(), kVsRegs, true);
     regs([&](std::uint32_t r) { return e.psLive.test(r); }, a.psF, e.psF, a.psSrc.data(), kPsRegs, false);
+    // bool / int register files (16 + 16 per stage)
+    for (std::uint32_t r = 0; r < 16; ++r) {
+        d.biRegs += 4;
+        if (a.vsB[r] != e.vsB[r]) bad(Field::VsBool, std::format("vs b{} {} vs engine {}", r, a.vsB[r], e.vsB[r]));
+        if (a.psB[r] != e.psB[r]) bad(Field::PsBool, std::format("ps b{} {} vs engine {}", r, a.psB[r], e.psB[r]));
+        if (std::memcmp(a.vsI[r], e.vsI[r], 16) != 0) {
+            bad(Field::VsInt, std::format("vs i{} ({}, {}, {}, {}) vs engine ({}, {}, {}, {})", r, a.vsI[r][0], a.vsI[r][1], a.vsI[r][2], a.vsI[r][3],
+                                          e.vsI[r][0], e.vsI[r][1], e.vsI[r][2], e.vsI[r][3]));
+        }
+        if (std::memcmp(a.psI[r], e.psI[r], 16) != 0) {
+            bad(Field::PsInt, std::format("ps i{} ({}, {}, {}, {}) vs engine ({}, {}, {}, {})", r, a.psI[r][0], a.psI[r][1], a.psI[r][2], a.psI[r][3],
+                                          e.psI[r][0], e.psI[r][1], e.psI[r][2], e.psI[r][3]));
+        }
+    }
     return d;
 }
 
@@ -486,9 +518,19 @@ void CompareCounts::add(const CompareCounts& o) {
     closeFloats += o.closeFloats;
     regs += o.regs;
     stages += o.stages;
+    biRegs += o.biRegs;
+    biLive += o.biLive;
+    for (std::size_t i = 0; i < kDrawClassCount; ++i) {
+        classDraws[i] += o.classDraws[i];
+        classClean[i] += o.classClean[i];
+    }
+    for (std::size_t i = 0; i < listDraws.size(); ++i) {
+        listDraws[i] += o.listDraws[i];
+        listClean[i] += o.listClean[i];
+    }
 }
 
-std::string summary(const CompareCounts& c) {
+std::string summary(const CompareCounts& c, const char* const* listNames, std::size_t listCount) {
     std::string s = std::format("{} ops ({} composed, {} left to the engine), {} draws compared, {} equal", c.ops, c.opsComposed,
                                 c.opsNotComposed, c.draws, c.cleanDraws);
     std::string bad;
@@ -498,7 +540,22 @@ std::string summary(const CompareCounts& c) {
     }
     s += bad.empty() ? "; mismatches: none" : "; mismatches: " + bad;
     if (c.closeFloats != 0) s += std::format("; {} floats equal within 1e-5 only", c.closeFloats);
-    s += std::format("; {} constant registers and {} sampler stages compared", c.regs, c.stages);
+    s += std::format("; {} float registers, {} bool / int registers ({} live in the CTABs) and {} sampler stages compared", c.regs, c.biRegs,
+                     c.biLive, c.stages);
+    std::string classes;
+    for (std::size_t i = 0; i < kDrawClassCount; ++i) {
+        if (c.classDraws[i] == 0) continue;
+        classes += std::format("{}{} {}/{}", classes.empty() ? "" : ", ", name(static_cast<DrawClass>(i)), c.classClean[i], c.classDraws[i]);
+    }
+    if (!classes.empty()) s += "; equal per class: " + classes;
+    if (listNames != nullptr) {
+        std::string lists;
+        for (std::size_t i = 0; i < std::min(listCount, c.listDraws.size()); ++i) {
+            if (c.listDraws[i] == 0) continue;
+            lists += std::format("{}{} {}/{}", lists.empty() ? "" : ", ", listNames[i], c.listClean[i], c.listDraws[i]);
+        }
+        if (!lists.empty()) s += "; per list: " + lists;
+    }
     return s;
 }
 

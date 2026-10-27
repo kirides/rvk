@@ -233,6 +233,12 @@
       "?ms_pGlobalShaderConstants@eCShaderDefault@@1PEAVeCGlobalShaderConstantsDefault@1@EA", false)                            \
     X(appInstancePtr, L"Engine.dll", "?ms_pApplication@eCApplication@@1PEAV1@EA", false)                                        \
     X(gfxMasterFog, L"Engine.dll", "?ms_pMasterFog@eCGfxFog@@1PEAV1@EA", false)                                                 \
+    /* N5.2 scene ops, decals (native/static_ops_nonop.cpp): the entity proxy's resolver (a decal's entity is the fast path   \
+       when its vtable slot +8 is this function), the decal queue's comparator, SharedBase's bCVector transforms */            \
+    X(entityProxyResolve, L"Engine.dll", "?ResolveEntity@eCEntityProxy@@MEAAPEAVeCEntity@@XZ", false)                         \
+    X(decalSortRenderQueue, L"Engine.dll", "?SortRenderQueue@eCDecalAdmin@@KAHPEBX0@Z", false)                                 \
+    X(vectorTransform, L"SharedBase.dll", "?Transform@bCVector@@QEAAXAEBVbCMatrix@@@Z", false)                                  \
+    X(vectorTransformDirection, L"SharedBase.dll", "?TransformDirection@bCVector@@QEAAXAEBVbCMatrix@@@Z", false)                \
     /* eEResourceState eCResource2::RequestData(eEResourceLoadMode) (0x684100): queues a resource's data (mode 1 = what the render code passes) */ \
     X(resourceRequestData, L"Engine.dll", "?RequestData@eCResource2@@QEAA?AW4eEResourceState@@W4eEResourceLoadMode@@@Z", false)
 

@@ -151,6 +151,15 @@ struct FrameDesc {
     std::array<const std::uint8_t*, kListCount> liveData{};  // the engine's arrays at Execute's entry
     std::array<std::uint32_t, kListCount> count{}, first{};  // list l = ops[first[l] .. first[l] + count[l])
     std::vector<Op> ops;                                     // all lists in Execute's order
+    // the refraction copy (Execute after the +0x1530 list: EndMaterial, CopyCurrentRTToImage of the current target into the
+    // render-target desc's refraction image desc +0, the material admin's s1 := it, BeginMaterial), as data
+    struct Refraction {
+        const void* image = nullptr;  // desc +0: the refraction map's eCImageData (null: Execute copies nothing)
+        const void* api = nullptr;    // its API texture (image +0x60): the copy's target
+        std::uint32_t copies = 0;     // copies into `api` during the view
+        std::uint32_t inPlace = 0;    // ... of those at the documented point (refractionCopyInPlace)
+        std::uint32_t other = 0;      // copies into another texture during the view
+    } refraction;
 
     void clear();
     // the op the engine passes to a context slot (a pointer into a list's array) -> the op, null when not in the snapshot
@@ -197,6 +206,9 @@ struct TapCounts {
     std::uint32_t stateContradiction = 0;  // an op that drew although its draw condition says nothing is drawn
     std::array<std::uint32_t, static_cast<std::size_t>(d3d9::draws::Kind::Count)> noOp{};  // draws without an op, by kind
     std::uint32_t noOpTotal = 0;
+    // the refraction copy: views with a refraction image, of those copied once at the documented point into it, views where
+    // that does not hold (a missing, misplaced or extra copy)
+    std::uint32_t refractionViews = 0, refractionOk = 0, refractionBad = 0;
     // per list x kind: ops, draws, ops with 0 draws, ops with > 1 draws, the largest draw count of an op
     struct Bucket {
         std::uint32_t ops = 0, draws = 0, zero = 0, multi = 0, maxDraws = 0;
@@ -224,6 +236,8 @@ public:
     // the view's Execute returned; liveCounts = the lists' counts at that moment
     void end(const std::array<std::uint32_t, kListCount>& liveCounts);
     const TapCounts& counts() const { return counts_; }
+    // the global index of the op expected next (= every op before it entered)
+    std::size_t nextOp() const { return next_; }
     // the first mismatches of this view, named (kind, list, index, entity, desc)
     const std::vector<std::string>& mismatches() const { return mismatches_; }
 
@@ -235,6 +249,10 @@ private:
     TapCounts counts_;
     std::vector<std::string> mismatches_;
 };
+
+// is a refraction copy, made when the op expected next is `nextOp`, at the place Execute makes it: after the last op up to
+// the +0x1530 list (sky dome), before the first refracted op
+bool refractionCopyInPlace(const FrameDesc& f, std::size_t nextOp);
 
 // is a draw without an op one of the documented non-op paths of the main view (the screen-space shadow mask, decals,
 // opaque billboards of the billboard admin)?

@@ -103,11 +103,22 @@ d3d9::Texture* HalDevice::textureOfApi(const void* api) {
     return it != apiTextures_.end() ? it->second : nullptr;
 }
 
+void HalDevice::refractionCopied(const void* api) {
+    if (frameTap_) frameTap_->refractionCopy(api);
+}
+
 void HalDevice::applyStaticOps() {
     const auto& rs = settings::renderer();
     const bool takeOver = rs.nativeStaticOps != nullptr && rs.nativeStaticOps->asBool();
     const bool compare = rs.nativeStaticOpsCompare != nullptr && rs.nativeStaticOpsCompare->asBool();
-    staticOps_->setMode(takeOver, compare);
+    staticOps_->setMode(native::StaticOps::Group::Static, takeOver, compare);
+    // N5.2 scene ops (native.scene_ops*): groups 1 alpha / refracted mesh ops, 2 entity overlay passes, 4 decals
+    const bool sceneTake = rs.nativeSceneOps != nullptr && rs.nativeSceneOps->asBool();
+    const bool sceneCompare = rs.nativeSceneOpsCompare != nullptr && rs.nativeSceneOpsCompare->asBool();
+    const int groups = rs.nativeSceneOpsGroups != nullptr ? rs.nativeSceneOpsGroups->asInt() : 7;
+    staticOps_->setMode(native::StaticOps::Group::Mesh, sceneTake && (groups & 1) != 0, sceneCompare && (groups & 1) != 0);
+    staticOps_->setOverlays((sceneTake || sceneCompare) && (groups & 2) != 0);
+    staticOps_->setMode(native::StaticOps::Group::Decals, sceneTake && (groups & 4) != 0, sceneCompare && (groups & 4) != 0);
     frameTap_->setStaticOpsActive(staticOps_->active());
 }
 
@@ -362,7 +373,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     // N5.1 static ops (native/static_ops.h): driven by the frame tap
     staticOps_ = std::make_unique<native::StaticOps>(*this);
     frameTap_->setStaticOps(staticOps_.get());
-    for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare}) {
+    for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
     applyStaticOps();

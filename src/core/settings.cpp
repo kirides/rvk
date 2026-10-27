@@ -1755,6 +1755,42 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .flags = Flag::NoAB | Flag::Debug,
     });
+    r.nativeSceneOps = &reg.add({
+        .key = "native.scene_ops",
+        .label = "Native frame: scene ops",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The rest of the main view's mesh-like work (alpha and refracted mesh ops, entity overlay passes) is drawn by the "
+                       "renderer itself from engine data; the engine's draws of those ops are dropped. Groups: native.scene_ops_groups. "
+                       "rvk.log `native: scene ops` every 5 s.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
+    r.nativeSceneOpsCompare = &reg.add({
+        .key = "native.scene_ops_compare",
+        .label = "Native frame: scene ops compare",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Composes the scene ops' draws and compares each with the draw the engine makes; with native.scene_ops on, the "
+                       "dropped engine draws are compared with what the renderer drew instead.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
+    r.nativeSceneOpsGroups = &reg.add({
+        .key = "native.scene_ops_groups",
+        .label = "Native frame: scene op groups",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Bit mask of the scene ops' groups: 1 alpha / refracted mesh ops, 2 entity overlay passes (also of the static ops "
+                       "while scene ops are on), 4 decals (eCDecalAdmin::RenderDecals).",
+        .type = Type::Int,
+        .defaultValue = 7,
+        .min = 0,
+        .max = 255,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
     r.nativeDebug = &reg.add({
         .key = "native.debug",
         .label = "Native opaque debug view",

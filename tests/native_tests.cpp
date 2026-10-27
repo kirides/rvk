@@ -402,3 +402,67 @@ TEST(static_compare_counts_fields) {
     e->samplerMask = 1u << 3;
     CHECK(sc::compare(*a, *e).fields.test(static_cast<std::size_t>(sc::Field::Texture)));
 }
+
+TEST(scene_compare_bool_int_tag_and_classes) {
+    auto a = std::make_unique<sc::DrawDesc>();
+    auto e = std::make_unique<sc::DrawDesc>();
+    auto d = sc::compare(*a, *e);
+    CHECK(d.fields.none() && d.biRegs == 64);
+    e->psB[3] = 1;
+    CHECK(sc::compare(*a, *e).fields.test(static_cast<std::size_t>(sc::Field::PsBool)));
+    e->psB[3] = 0;
+    e->vsI[2][1] = 7;
+    CHECK(sc::compare(*a, *e).fields.test(static_cast<std::size_t>(sc::Field::VsInt)));
+    e->vsI[2][1] = 0;
+    // the water classification is part of the tag (the enhanced water's DrawReplacer decides by it)
+    e->tagWater = 2;
+    CHECK(sc::compare(*a, *e).fields.test(static_cast<std::size_t>(sc::Field::Tag)));
+    a->tagWater = 2;
+    CHECK(sc::compare(*a, *e).fields.none());
+    // draw classes: kind 0 base, 1 additive light pass, 2 z-fill; overlays win
+    CHECK(sc::passClass(0x200, false) == sc::DrawClass::Base);
+    CHECK(sc::passClass(0x200 | 0x40 | (3u << 2), false) == sc::DrawClass::Additive);
+    CHECK(sc::passClass(0x280, false) == sc::DrawClass::ZFill);
+    CHECK(sc::passClass(0x40, true) == sc::DrawClass::Overlay);
+    sc::CompareCounts c;
+    c.classDraws[static_cast<std::size_t>(sc::DrawClass::Additive)] = 3;
+    c.classClean[static_cast<std::size_t>(sc::DrawClass::Additive)] = 3;
+    c.listDraws[5] = 3;
+    c.listClean[5] = 3;
+    static constexpr const char* kNames[] = {"z", "solid", "debug", "sky", "refracted", "alpha", "late"};
+    const std::string s = sc::summary(c, kNames, std::size(kNames));
+    CHECK(s.find("additive light pass 3/3") != std::string::npos && s.find("alpha 3/3") != std::string::npos);
+}
+
+TEST(scene_alpha_pass_states) {
+    // an alpha-list op of a blended material with EnableAlphaZWrite: the z-fill pass (kind 2) first, then the colour pass;
+    // the base pass blends with the material's mode, depth write off
+    sc::PassInputs in;
+    in.zFill = true;
+    std::vector<sc::Pass> p;
+    sc::buildPasses(in, p);
+    CHECK(p.size() == 2 && sc::passKind(p[0].flags) == 2 && sc::passKind(p[1].flags) == 0);
+    sc::BlendInputs b;
+    b.mode = 7;  // Brighten
+    const auto z = sc::deviceStates(sc::passStates(p[0].flags, b, 0.5f), sc::Visual{}, 0);
+    CHECK(z[sc::StColorWrite] == 0 && z[sc::StZWrite] == 1 && z[sc::StBlend] == 0);
+    const auto c = sc::deviceStates(sc::passStates(p[1].flags, b, 0.5f), sc::Visual{}, 0);
+    CHECK(c[sc::StBlend] == 1 && c[sc::StSrc] == 5 && c[sc::StDst] == 2 && c[sc::StZWrite] == 0 && c[sc::StColorWrite] == 7);
+    // a fading opaque material (mode 0, fade < 1): blended SrcAlpha / InvSrcAlpha, depth write as the visual's (not IsBlended)
+    sc::BlendInputs o;
+    const auto f = sc::deviceStates(sc::passStates(0x200, o, 0.5f), sc::Visual{}, 0);
+    CHECK(f[sc::StBlend] == 1 && f[sc::StSrc] == 5 && f[sc::StDst] == 6 && f[sc::StZWrite] == 1);
+    // a refracted material (water): unblended, depth write on
+    sc::BlendInputs w;
+    w.refracted = true;
+    const auto r = sc::deviceStates(sc::passStates(0x200, w, 1.0f), sc::Visual{}, 0);
+    CHECK(r[sc::StBlend] == 0 && r[sc::StZWrite] == 1);
+}
+
+TEST(native_refraction_copy_place) {
+    native::FrameDesc f;
+    f.first = {0, 4, 9, 9, 10, 12, 20};
+    CHECK(native::refractionCopyInPlace(f, 10));
+    CHECK(!native::refractionCopyInPlace(f, 9));
+    CHECK(!native::refractionCopyInPlace(f, 11));
+}

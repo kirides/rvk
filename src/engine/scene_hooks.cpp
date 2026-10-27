@@ -476,13 +476,17 @@ template <std::size_t I>
 void contextSlot(void* context, const void* op, void* db) {
     constexpr const ContextSlot& e = kContextSlots[I];
     TagScope tag(e.source, context, op, 0x10);
-    if (tag.d != nullptr) {
-        if (OpTap* t = g_opTap.load(std::memory_order_relaxed)) t->opEnter(op);
-    }
+    // the op tap inside the slot's pass marker: what it draws itself at the op's entry (N5.2 scene ops) is in the op's pass
     if constexpr (e.pass != Pass::None) {
         PassScope pass(e.pass, e.name);
+        if (tag.d != nullptr) {
+            if (OpTap* t = g_opTap.load(std::memory_order_relaxed)) t->opEnter(op);
+        }
         g_slotOriginal[I](context, op, db);
     } else {
+        if (tag.d != nullptr) {
+            if (OpTap* t = g_opTap.load(std::memory_order_relaxed)) t->opEnter(op);
+        }
         g_slotOriginal[I](context, op, db);
     }
 }
@@ -684,7 +688,11 @@ using DecalsFn = bool (*)(void* admin, void* db);
 Hook<DecalsFn> g_decalsRender;
 bool detourDecalsRender(void* admin, void* db) {
     TagScope tag(Source::Decal, admin, nullptr, 0);
-    return g_decalsRender.original(admin, db);
+    OpTap* t = tag.d != nullptr ? g_opTap.load(std::memory_order_relaxed) : nullptr;
+    if (t != nullptr) t->nonOpBegin(OpTap::NonOp::Decals, admin, db);
+    const bool r = g_decalsRender.original(admin, db);
+    if (t != nullptr) t->nonOpEnd(OpTap::NonOp::Decals);
+    return r;
 }
 
 using BillboardsFn = bool (*)(void* admin);
@@ -736,6 +744,20 @@ int install() {
 d3d9::Device* renderDevice() { return device(); }
 
 void setOpTap(OpTap* tap) { g_opTap.store(tap, std::memory_order_release); }
+
+void subMeshWater(const void* material, const void* meshResource, draws::Water& water, const char*& name) {
+    water = draws::Water::None;
+    name = nullptr;
+    d3d9::Device* d = device();
+    if (d == nullptr || material == nullptr) return;
+    const auto ph = d->phases().current();
+    if ((ph.pass == Pass::Refracted || ph.pass == Pass::Alpha || ph.pass == Pass::AlphaLate) && ph.view != View::Shadow) {
+        if (const MaterialInfo* m = materialInfo(material, meshResource, ph.pass)) {
+            water = m->water;
+            name = m->name.c_str();
+        }
+    }
+}
 
 bool ensureOpSlot(const void* vtable, int slot, const void** original) {
     if (vtable == nullptr || slot < 0 || slot > 3) return false;

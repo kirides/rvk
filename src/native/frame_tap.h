@@ -38,10 +38,15 @@ public:
     // the last main view's ops (valid until the next main view's Execute)
     const FrameDesc& last() const { return desc_; }
 
+    // the HAL's CopyCurrentRTToImage into the API texture `api` in the main view (the refraction copy)
+    void refractionCopy(const void* api);
+
     // engine::scene::OpTap
     void executeBegin(void* db, void* desc) override;
     void executeEnd(void* db) override;
     void opEnter(const void* op) override;
+    void nonOpBegin(NonOp which, void* admin, void* db) override;
+    void nonOpEnd(NonOp which) override;
     // d3d9::DrawTap
     bool onDraw(const d3d9::DrawTapInfo& draw) override;
 

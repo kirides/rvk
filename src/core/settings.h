@@ -351,6 +351,9 @@ struct RendererSettings {
     Setting* nativeFrameTap = nullptr;    // native.frame_tap: the main view's render ops + draw attribution (engine-frame N5.0)
     Setting* nativeStaticOps = nullptr;   // native.static_ops: the static mesh z / solid ops drawn by the renderer (engine-frame N5.1)
     Setting* nativeStaticOpsCompare = nullptr;  // native.static_ops_compare: their composed draws diffed against the engine's
+    Setting* nativeSceneOps = nullptr;         // native.scene_ops: the rest of the main view's mesh-like work drawn by the renderer (N5.2)
+    Setting* nativeSceneOpsCompare = nullptr;  // native.scene_ops_compare: ... composed and diffed against the engine's draws
+    Setting* nativeSceneOpsGroups = nullptr;   // native.scene_ops_groups: which N5.2 groups (bit mask, hidden)
     Setting* rtSource = nullptr;          // rt.source: where the RT scene's static meshes come from (the engine's draws / the scene mirror)
     Setting* shadowStride = nullptr;      // debug.shadow_stride: the sun cascades redrawn every n-th frame (engine::shadowmaps::setUpdateStride)
     Setting* prefetchStride = nullptr;    // debug.prefetch_stride: the cache-in walk every n-th frame (engine::lod::setPrefetchStride)

@@ -100,6 +100,7 @@ bEResult HalTexture::CopyCurrentRTToImage(eCGfxShared::eETexFilter a0, bCRect* a
                                      d3d9::scene::name(phase.pass));
     const bool refraction = phase.view == d3d9::scene::View::Main && phase.pass == d3d9::scene::Pass::Solid;
     if (refraction) {
+        dev_.refractionCopied(static_cast<const eCAPITexture*>(this));
         d.tagImage(tex_.get(), d3d9::scene::ImageRole::Refraction);
         d.inject(d3d9::inject::Point::AfterOpaque);  // injection points (d3d9/inject.h) around the copy
     }

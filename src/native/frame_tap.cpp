@@ -308,6 +308,10 @@ void FrameTap::executeBegin(void* db, void* desc) {
             desc_.ops.push_back(op);
         }
     }
+    // the refraction copy Execute makes after the +0x1530 list: into the render-target desc's image desc +0 (API texture +0x60)
+    if (desc != nullptr && readAt(desc, 0, desc_.refraction.image) && desc_.refraction.image != nullptr) {
+        readAt(desc_.refraction.image, 0x60, desc_.refraction.api);
+    }
     desc_.valid = true;
     db_ = db;
     executing_ = true;
@@ -321,6 +325,27 @@ void FrameTap::opEnter(const void* op) {
     attr_.enterOp(op, safeRead(op, &live, sizeof(live)) ? &live : nullptr);
     if (statics_ != nullptr && staticsWanted_) {
         if (const Op* o = desc_.find(op)) statics_->opEnter(*o);
+    }
+}
+
+void FrameTap::nonOpBegin(NonOp which, void* admin, void* db) {
+    if (!executing_ || db != db_ || statics_ == nullptr || !staticsWanted_) return;
+    if (which == NonOp::Decals) statics_->decalsBegin(admin, db);
+}
+
+void FrameTap::nonOpEnd(NonOp which) {
+    if (!executing_ || statics_ == nullptr || !staticsWanted_) return;
+    if (which == NonOp::Decals) statics_->decalsEnd();
+}
+
+void FrameTap::refractionCopy(const void* api) {
+    if (!executing_) return;
+    FrameDesc::Refraction& r = desc_.refraction;
+    if (api != nullptr && api == r.api) {
+        ++r.copies;
+        if (refractionCopyInPlace(desc_, attr_.nextOp())) ++r.inPlace;
+    } else {
+        ++r.other;
     }
 }
 

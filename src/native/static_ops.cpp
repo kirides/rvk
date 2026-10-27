@@ -11,6 +11,7 @@
 
 #include "d3d9/defs.h"
 #include "engine/memread.h"
+#include "engine/scene_hooks.h"
 #include "engine/symbols.h"
 #include "fx/effect_binary.h"
 #include "hal/vulkan/hal_vulkan.h"
@@ -133,23 +134,40 @@ bool bitsEqual(const void* a, const void* b, std::size_t n) { return std::memcmp
 const char* StaticOps::name(Skip s) {
     static constexpr const char* kNames[] = {"none", "kind", "overlay passes", "shader class", "shader version", "invalid shader",
                                              "permutation not compiled", "switch element", "primitive", "image override", "unreadable",
-                                             "pass kind", "instance sort", "texture"};
+                                             "pass kind", "instance sort", "texture", "overlay shader", "decal entity proxy",
+                                             "buffers not created yet", "visual shader"};
     const auto i = static_cast<std::size_t>(s);
     return i < std::size(kNames) ? kNames[i] : "?";
+}
+
+const char* StaticOps::name(Group g) {
+    switch (g) {
+        case Group::Static: return "static ops";
+        case Group::Mesh: return "scene ops [alpha / refracted meshes]";
+        case Group::Decals: return "scene ops [decals]";
+        default: return "?";
+    }
 }
 
 StaticOps::StaticOps(hal::vulkan::HalDevice& hal) : hal_(hal), dev_(hal.dev()), scratch_(std::make_unique<sc::DrawDesc>()) {}
 
 StaticOps::~StaticOps() = default;
 
-void StaticOps::setMode(bool takeOver, bool compare) {
-    if (takeOver == takeOver_ && compare == compare_) return;
-    takeOver_ = takeOver;
-    compare_ = compare;
-    window_ = {};
-    skips_ = {};
-    spdlog::info("native: static ops: {} (the main view's static mesh z / solid ops{}{})", active() ? "on" : "off",
-                 takeOver_ ? ", drawn by the renderer" : "", compare_ ? ", compared with the engine's draws" : "");
+bool StaticOps::active() const {
+    return std::any_of(groups_.begin(), groups_.end(), [](const GroupState& g) { return g.active(); });
+}
+
+void StaticOps::setMode(Group group, bool takeOver, bool compare) {
+    GroupState& g = groups_[static_cast<std::size_t>(group)];
+    if (takeOver == g.takeOver && compare == g.compare) return;
+    g.takeOver = takeOver;
+    g.compare = compare;
+    g.window = {};
+    g.skips = {};
+    static constexpr const char* kWhat[kGroups] = {"the main view's static mesh z / solid ops", "the main view's alpha / refracted mesh ops",
+                                                   "the main view's decals (eCDecalAdmin::RenderDecals)"};
+    spdlog::info("native: {}: {} ({}{}{})", name(group), g.active() ? "on" : "off", kWhat[static_cast<std::size_t>(group)],
+                 takeOver ? ", drawn by the renderer" : "", compare ? ", compared with the engine's draws" : "");
 }
 
 bool StaticOps::verify() {
@@ -289,7 +307,7 @@ const StaticOps::Live& StaticOps::liveOf(const d3d9::Shader* s) {
                 if (c.registerSet == fx::RegisterSet::Float4) {
                     for (std::uint32_t i = 0; i < c.registerCount && c.registerIndex + i < sc::kVsRegs; ++i) it->second.f.set(c.registerIndex + i);
                 } else if (c.registerSet != fx::RegisterSet::Sampler) {
-                    it->second.other = true;
+                    it->second.boolInt += c.registerCount;
                 }
             }
         }
@@ -328,6 +346,17 @@ sc::DrawDesc& StaticOps::newDraw() {
     d.psSrc.fill(sc::Src::None);
     d.passFlags = 0;
     d.zPass = false;
+    d.tagWater = 0;
+    d.tagMaterialName = nullptr;
+    d.drawClass = sc::DrawClass::Base;
+    d.vertexStride = 0;
+    d.vertexBytes.clear();
+    d.indexBytes.clear();
+    d.vsB = entryVsB_;
+    d.psB = entryPsB_;
+    std::memcpy(d.vsI, entryVsI_, sizeof(d.vsI));
+    std::memcpy(d.psI, entryPsI_, sizeof(d.psI));
+    d.biLive = 0;
     return d;
 }
 
@@ -515,7 +544,7 @@ sc::DrawDesc& StaticOps::drawFrom(const Geom& g) {
 }
 
 // every live register of the draw's shaders from the mirror (+ the shader's own pools)
-void StaticOps::constantsInto(sc::DrawDesc& d, const std::uint8_t* shader) {
+void StaticOps::constantsInto(sc::DrawDesc& d, const std::uint8_t* shader, const std::uint8_t* biasShader) {
     const auto* vs = static_cast<const d3d9::Shader*>(d.vs);
     const auto* ps = static_cast<const d3d9::Shader*>(d.ps);
     const Live& lv = liveOf(vs);
@@ -523,7 +552,8 @@ void StaticOps::constantsInto(sc::DrawDesc& d, const std::uint8_t* shader) {
     for (std::uint32_t r = 0; r < sc::kVsRegs; ++r) d.vsLive[r] = lv.f[r];
     for (std::uint32_t r = 0; r < sc::kPsRegs; ++r) d.psLive[r] = lp.f[r];
     // c0..c3: the view-projection, or the depth-bias one for UseDepthBias materials (ExecutePass / ExecuteSpecialPass)
-    const bool depthBias = get<std::uint8_t>(shader, 0x78) != 0;
+    // (ExecutePass reads the base shader's flag, also for an overlay's passes)
+    const bool depthBias = get<std::uint8_t>(biasShader != nullptr ? biasShader : shader, 0x78) != 0;
     for (std::uint32_t k = 0; k < 4; ++k) std::memcpy(mirror_.adminVs[k], depthBias ? view_.dbvp[k] : view_.vp[k], 16);
     const Mirror::ShaderPools* pools = poolsOf(shader);
     for (std::uint32_t r = 0; r < sc::kVsRegs; ++r) {
@@ -619,6 +649,7 @@ StaticOps::Skip StaticOps::specialPassDraw(const std::uint8_t* shader, const Geo
     sc::DrawDesc& d = drawFrom(geometry);
     const sc::Visual& vis = geometry.visual;
     d.zPass = true;
+    d.drawClass = sc::DrawClass::ZPass;
     d.vs = vs;
     d.ps = ps;
     d.states = sc::deviceStates(sc::zPassStates(get<std::uint8_t>(admin, 0x313) != 0, view_.zColorWrite), vis, get<std::uint32_t>(admin, 0x340));
@@ -635,7 +666,8 @@ StaticOps::Skip StaticOps::specialPassDraw(const std::uint8_t* shader, const Geo
     return Skip::None;
 }
 
-StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8_t* version, const sc::Pass& pass, const Geom& geometry) {
+StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8_t* owner, const std::uint8_t* version, const sc::Pass& pass,
+                                    const Geom& geometry, bool overlay) {
     U8* admin = view_.admin;
     Skip skip = Skip::None;
     applySwitch(shader, pass.switchValue, skip);
@@ -646,11 +678,11 @@ StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8
     if (vsElem == nullptr || psElem == nullptr) return Skip::NotCompiled;
     writeLighting(pass);
     sc::BlendInputs b;
-    b.mode = get<std::int32_t>(shader, 0x50);
-    b.maskRef = get<std::uint8_t>(shader, 0x58);
-    b.hasOpacity = get<std::uint8_t>(shader, 0x330) != 0;
-    b.refracted = get<std::uint8_t>(shader, 0x420) != 0;
-    b.tradeAlphaAsSolid = get<std::uint8_t>(shader, 0x79) != 0;
+    b.mode = get<std::int32_t>(owner, 0x50);
+    b.maskRef = get<std::uint8_t>(owner, 0x58);
+    b.hasOpacity = get<std::uint8_t>(owner, 0x330) != 0;
+    b.refracted = get<std::uint8_t>(owner, 0x420) != 0;
+    b.tradeAlphaAsSolid = get<std::uint8_t>(owner, 0x79) != 0;
     const sc::RenderStates rs = sc::passStates(pass.flags, b, mirror_.global[1][3]);
     if (!rs.valid) return Skip::PassKind;
     if (rs.alphaTest == 2) mirror_.adminPs[5][3] = static_cast<float>(rs.alphaRef) * (1.0f / 256.0f);
@@ -660,17 +692,22 @@ StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8
     sc::DrawDesc& d = drawFrom(geometry);
     const sc::Visual& vis = geometry.visual;
     d.passFlags = pass.flags;
+    d.drawClass = sc::passClass(pass.flags, overlay);
     if (sc::passNonInstanced(pass.flags)) {
         // eCSubMesh::Render's tag (engine/scene_hooks: TagScope(sub-mesh, mesh resource))
         d.tagSubMesh = geometry.subMesh;
         d.tagMaterial = geometry.material;
         d.tagMeshResource = geometry.meshResource;
+        // ... and the water classification eCSubMesh::Render's tag gets (the Refracted / Alpha passes)
+        d3d9::draws::Water water = d3d9::draws::Water::None;
+        engine::scene::subMeshWater(geometry.material, geometry.meshResource, water, d.tagMaterialName);
+        d.tagWater = static_cast<std::uint8_t>(water);
     }
     d.vs = vs;
     d.ps = ps;
     d.states = sc::deviceStates(rs, vis, get<std::uint32_t>(admin, 0x340));
-    constantsInto(d, shader);
-    if (const Skip s = materialSamplers(d, shader, psElem); s != Skip::None) return s;
+    constantsInto(d, owner, shader);
+    if (const Skip s = materialSamplers(d, owner, psElem); s != Skip::None) return s;
     // the admin's samplers bound by BeginMaterial (s0 mask, s1 refraction, s2 depth map) and BindLightmaps (s4, s5)
     struct AdminSlot {
         std::uint32_t stage, slot;
@@ -692,11 +729,11 @@ StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8
         for (std::uint32_t i = 0; i < 6; ++i) s.ss[i] = raw[i] == kNoState ? defFilter : raw[i];
         s.ss[6] = static_cast<std::uint32_t>(static_cast<std::int32_t>(get<std::int8_t>(slot, 0x14)));
     }
-    const std::uint32_t base = get<std::uint8_t>(shader, 0x219);
+    const std::uint32_t base = get<std::uint8_t>(owner, 0x219);
     for (std::uint32_t st = 0; st < sc::kStages; ++st) {
         if (ps->reflection.samplers[st] == shader::TextureType::Unknown) continue;
         d.samplerMask |= static_cast<std::uint16_t>(1u << st);
-        const bool material = st >= base && st < base + poolsOf(shader)->slots;
+        const bool material = st >= base && st < base + poolsOf(owner)->slots;
         const bool adminStage = st == 0 || st == 1 || st == 2 || st == 4 || st == 5;
         if (!material && !adminStage) d.inheritMask |= static_cast<std::uint16_t>(1u << st);
     }
@@ -711,7 +748,6 @@ StaticOps::Skip StaticOps::subMeshDraws(const std::uint8_t* res, const std::uint
     U8* shader = ptr(material, 0x70);
     if (ptr(res, 0x88) == nullptr || material == nullptr || shader == nullptr) return Skip::None;
     if (!shaderClassOk(shader)) return Skip::ShaderClass;
-    if (flags != 0) return Skip::Overlay;
     U8* admin = ptr(shader, 0x220);
     if (admin != view_.admin) return Skip::Unreadable;
     if (!instanced) {
@@ -742,18 +778,8 @@ StaticOps::Skip StaticOps::subMeshDraws(const std::uint8_t* res, const std::uint
     // GetPasses 0x6d1ee0 -> OnGetPasses 0x6d3170 -> eCShaderVersionDefault_3_0::GetPasses 0x6cc970
     if (get<std::uint8_t>(shader, 0x2a8) == 1) return Skip::InvalidShader;
     if (get<std::uint32_t>(admin, 0x31c) != 0) return Skip::InvalidShader;
-    std::int32_t v = std::min(get<std::int32_t>(admin, 0x170), get<std::int32_t>(shader, 0x68));
-    U8* version = ptr(shader, 0x258 + 8 * static_cast<std::size_t>(std::max(v, 0)));
-    while (version == nullptr && v > 0) version = ptr(shader, 0x258 + 8 * static_cast<std::size_t>(--v));
-    if (version == nullptr) return Skip::None;
-    if (get<const void*>(version, 0) != engine_ + kVersionDefault3Vtable) return Skip::Version;
-    sc::BlendInputs b;
-    b.mode = get<std::int32_t>(shader, 0x50);
-    b.hasOpacity = get<std::uint8_t>(shader, 0x330) != 0;
-    b.refracted = get<std::uint8_t>(shader, 0x420) != 0;
-    b.tradeAlphaAsSolid = get<std::uint8_t>(shader, 0x79) != 0;
+    if (flags != 0 && !overlays_) return Skip::Overlay;
     sc::PassInputs in;
-    in.zFill = get<std::uint8_t>(shader, 0x2d8) != 0 && sc::isBlended(b);
     in.illum = illum;
     U8* list = ptr(illum, 0);
     in.hasList = list != nullptr;
@@ -764,11 +790,76 @@ StaticOps::Skip StaticOps::subMeshDraws(const std::uint8_t* res, const std::uint
     in.combi = combi;
     in.instanced = instanced;
     in.switchValue = switchValue;
-    std::vector<sc::Pass> passes;
-    sc::buildPasses(in, passes);
-    for (const sc::Pass& p : passes) {
-        if (const Skip s = passDraw(shader, version, p, geometry); s != Skip::None) return s;
+    if (g_ != nullptr) {
+        const std::uint32_t total = in.hasList ? std::min<std::uint32_t>(in.dynamicLights + in.staticLights, 4u) : 0u;
+        ++g_->lights[total];
+        if (total == 4 && fourLightsLogged_ < 16 && world != nullptr) {
+            ++fourLightsLogged_;
+            spdlog::info("native: lights: a sub-mesh with {} dynamic + {} static lights (an additive light pass) at ({:.0f}, {:.0f}, {:.0f}), "
+                         "material '{}'", in.dynamicLights, in.staticLights, world[12], world[13], world[14],
+                         engine::readCString(material + 0x40));
+        }
     }
+    // the base shader's passes, then (OnGetPasses, flags 1 burned +0x88, 2 frozen +0x80, 4 highlighted +0x90) each overlay
+    // material's shader's own OnGetPasses with the same switch, illumination, combi and instancing, flags 0
+    struct Owner {
+        const std::uint8_t* shader;
+        const std::uint8_t* version;
+        std::size_t first, count;
+        bool overlay;
+    };
+    std::array<Owner, 4> owners{};
+    std::size_t ownerCount = 0;
+    std::vector<sc::Pass> passes;
+    {
+        const std::uint8_t* version = nullptr;
+        const std::size_t before = passes.size();
+        if (const Skip k = shaderPasses(shader, in, version, passes); k != Skip::None) return k;
+        if (version == nullptr) return Skip::None;
+        owners[ownerCount++] = {shader, version, before, passes.size() - before, false};
+    }
+    static constexpr std::pair<std::uint8_t, std::uint32_t> kOverlays[] = {{1, 0x88}, {2, 0x80}, {4, 0x90}};
+    for (const auto& [bit, off] : kOverlays) {
+        if ((flags & bit) == 0) continue;
+        U8* ovRes = ptr(shader, off);
+        U8* ov = ptr(ovRes, 0x70);  // RequestData(res, 1) first (the engine's; it does not wait), then the shader if there is one
+        if (ovRes == nullptr || ov == nullptr) continue;
+        if (!shaderClassOk(ov)) return Skip::OverlayShader;
+        if (ptr(ov, 0x220) != view_.admin) return Skip::Unreadable;
+        const std::uint8_t* version = nullptr;
+        const std::size_t before = passes.size();
+        if (const Skip k = shaderPasses(ov, in, version, passes); k != Skip::None) return k;
+        if (version != nullptr) owners[ownerCount++] = {ov, version, before, passes.size() - before, true};
+    }
+    for (std::size_t o = 0; o < ownerCount; ++o) {
+        const Owner& w = owners[o];
+        for (std::size_t i = 0; i < w.count; ++i) {
+            if (const Skip s = passDraw(shader, w.shader, w.version, passes[w.first + i], geometry, w.overlay); s != Skip::None) return s;
+        }
+    }
+    return Skip::None;
+}
+
+// eCShaderBase::OnGetPasses 0x6d3170 for one shader: its version (min(admin +0x170, shader +0x68), falling back to a lower
+// existing one) and eCShaderVersionDefault_3_0::GetPasses 0x6cc970 (the z-fill pass first for EnableAlphaZWrite blended
+// materials); version = null: no passes
+StaticOps::Skip StaticOps::shaderPasses(const std::uint8_t* owner, const sc::PassInputs& base, const std::uint8_t*& version,
+                                        std::vector<sc::Pass>& out) {
+    version = nullptr;
+    std::int32_t v = std::min(get<std::int32_t>(view_.admin, 0x170), get<std::int32_t>(owner, 0x68));
+    U8* ver = ptr(owner, 0x258 + 8 * static_cast<std::size_t>(std::max(v, 0)));
+    while (ver == nullptr && v > 0) ver = ptr(owner, 0x258 + 8 * static_cast<std::size_t>(--v));
+    if (ver == nullptr) return Skip::None;
+    if (get<const void*>(ver, 0) != engine_ + kVersionDefault3Vtable) return Skip::Version;
+    sc::BlendInputs b;
+    b.mode = get<std::int32_t>(owner, 0x50);
+    b.hasOpacity = get<std::uint8_t>(owner, 0x330) != 0;
+    b.refracted = get<std::uint8_t>(owner, 0x420) != 0;
+    b.tradeAlphaAsSolid = get<std::uint8_t>(owner, 0x79) != 0;
+    sc::PassInputs in = base;
+    in.zFill = get<std::uint8_t>(owner, 0x2d8) != 0 && sc::isBlended(b);
+    sc::buildPasses(in, out);
+    version = ver;
     return Skip::None;
 }
 
@@ -935,7 +1026,7 @@ StaticOps::Skip StaticOps::composeSolid(const Op& op) {
 }
 
 StaticOps::Skip StaticOps::composeOp(const Op& op) {
-    if (op.kind != OpKind::Mesh || (op.list != List::ZPass && op.list != List::Solid)) return Skip::Kind;
+    if (op.kind != OpKind::Mesh || op.list == List::Debug || op.list == List::Sky || op.list == List::Late) return Skip::Kind;
     if (!view_.valid) {
         // the admin from the op's shader (eCShaderBase +0x220): any material shader of the view
         U8* shader = static_cast<U8*>(op.shader);
@@ -959,22 +1050,33 @@ void StaticOps::opEnter(const Op& op) {
     if (!active() || !inView_) return;
     if (verified_ == 0) verified_ = verify() ? 1 : -1;
     if (verified_ < 0) return;
-    if (op.kind != OpKind::Mesh || (op.list != List::ZPass && op.list != List::Solid)) return;
+    if (op.kind != OpKind::Mesh) return;
+    Group group = Group::Count;
+    if (op.list == List::ZPass || op.list == List::Solid) group = Group::Static;
+    if (op.list == List::Alpha || op.list == List::Refracted) group = Group::Mesh;
+    if (group == Group::Count || !groups_[static_cast<std::size_t>(group)].active()) return;
+    g_ = &groups_[static_cast<std::size_t>(group)];
     drawCount_ = 0;
-    ++window_.ops;
+    ++g_->window.ops;
+    // the bool / int register files as the op finds them (nothing of the op's path writes them)
+    std::memcpy(entryVsB_.data(), dev_.vsBoolConstants(), sizeof(entryVsB_));
+    std::memcpy(entryPsB_.data(), dev_.psBoolConstants(), sizeof(entryPsB_));
+    std::memcpy(entryVsI_, dev_.vsIntConstants(), sizeof(entryVsI_));
+    std::memcpy(entryPsI_, dev_.psIntConstants(), sizeof(entryPsI_));
     const Skip s = composeOp(op);
     if (s != Skip::None) {
-        ++skips_[static_cast<std::size_t>(s)];
-        ++window_.opsNotComposed;
+        ++g_->skips[static_cast<std::size_t>(s)];
+        ++g_->window.opsNotComposed;
         drawCount_ = 0;
+        g_ = nullptr;
         return;
     }
-    ++window_.opsComposed;
+    ++g_->window.opsComposed;
     op_ = &op;
     engineDraws_ = 0;
     opDiffLogged_ = false;
     taken_ = false;
-    if (takeOver_) {
+    if (g_->takeOver) {
         issue();
         taken_ = true;
     }
@@ -982,14 +1084,16 @@ void StaticOps::opEnter(const Op& op) {
 
 void StaticOps::finishOp() {
     if (op_ == nullptr) return;
-    if (compare_ && engineDraws_ != drawCount_) {
-        ++window_.mismatches[static_cast<std::size_t>(sc::Field::DrawCount)];
+    if (g_ != nullptr && g_->compare && engineDraws_ != drawCount_) {
+        ++g_->window.mismatches[static_cast<std::size_t>(sc::Field::DrawCount)];
         if (mismatchLogged_ < 24) {
             ++mismatchLogged_;
-            spdlog::info("native: static ops: mismatch: {} composed {} draws, the engine made {}", describe(*op_), drawCount_, engineDraws_);
+            spdlog::info("native: {}: mismatch: {} composed {} draws, the engine made {}", name(static_cast<Group>(g_ - groups_.data())),
+                         describe(*op_), drawCount_, engineDraws_);
         }
     }
     op_ = nullptr;
+    g_ = nullptr;
     taken_ = false;
 }
 
@@ -1006,6 +1110,12 @@ void StaticOps::capture(const d3d9::DrawTapInfo& t, sc::DrawDesc& out) {
     out.tagSubMesh = t.tag != nullptr ? t.tag->subMesh : nullptr;
     out.tagMaterial = t.tag != nullptr ? t.tag->material : nullptr;
     out.tagMeshResource = t.tag != nullptr ? t.tag->meshResource : nullptr;
+    out.tagWater = t.tag != nullptr ? static_cast<std::uint8_t>(t.tag->water) : 0;
+    out.tagMaterialName = t.tag != nullptr ? t.tag->materialName : nullptr;
+    std::memcpy(out.vsB.data(), d.vsBoolConstants(), sizeof(out.vsB));
+    std::memcpy(out.psB.data(), d.psBoolConstants(), sizeof(out.psB));
+    std::memcpy(out.vsI, d.vsIntConstants(), sizeof(out.vsI));
+    std::memcpy(out.psI, d.psIntConstants(), sizeof(out.psI));
     out.primType = t.primitiveType;
     out.baseVertex = t.baseVertex;
     out.minIndex = t.minIndex;
@@ -1036,6 +1146,7 @@ void StaticOps::capture(const d3d9::DrawTapInfo& t, sc::DrawDesc& out) {
     }
     const Live& lv = liveOf(d.vertexShader());
     const Live& lp = liveOf(ps);
+    out.biLive = lv.boolInt + lp.boolInt;
     for (std::uint32_t r = 0; r < sc::kVsRegs; ++r) {
         out.vsLive[r] = lv.f[r];
         if (lv.f[r]) std::memcpy(out.vsF[r], d.vsConstant(r), 16);
@@ -1047,61 +1158,97 @@ void StaticOps::capture(const d3d9::DrawTapInfo& t, sc::DrawDesc& out) {
 }
 
 void StaticOps::ownDraw(const d3d9::DrawTapInfo& t) {
-    if (!compare_ || issueIndex_ >= drawCount_) return;
+    if (g_ == nullptr || !g_->compare || issueIndex_ >= drawCount_) return;
     capture(t, *scratch_);
-    const sc::Diff diff = sc::compare(*draws_[issueIndex_], *scratch_);
-    ++ownChecked_;
+    const sc::DrawDesc& composed = *draws_[issueIndex_];
+    std::string why;
+    const bool bytesOk = geometryBytesEqual(composed, *scratch_, why);
+    // CPU-generated geometry is drawn from our own buffers (the same bytes at the same positions)
+    if (!composed.vertexBytes.empty() && scratch_->streams[0].buffer == ownVb_.get()) scratch_->streams[0].buffer = composed.streams[0].buffer;
+    if (!composed.vertexBytes.empty() && scratch_->indices == ownIb_.get()) scratch_->indices = composed.indices;
+    sc::Diff diff = sc::compare(composed, *scratch_);
+    if (!bytesOk) {
+        diff.fields.set(static_cast<std::size_t>(sc::Field::GeometryData));
+        if (diff.first.empty()) diff.first = why;
+    }
+    if (ownKind_.size() < drawCount_) ownKind_.resize(drawCount_);
+    ownKind_[issueIndex_] = static_cast<std::uint8_t>(t.kind);
+    ++g_->ownChecked;
     if (diff.fields.any()) {
-        ++ownMismatch_;
-        if (ownMismatch_ <= 8) spdlog::info("native: static ops: our own draw differs from its composition: {}", diff.first);
+        ++g_->ownMismatch;
+        if (g_->ownMismatch <= 8) spdlog::info("native: {}: our own draw differs from its composition: {}", name(static_cast<Group>(g_ - groups_.data())), diff.first);
     }
 }
 
 bool StaticOps::engineDraw(const d3d9::DrawTapInfo& t, const Op* op) {
-    if (op_ == nullptr || op != op_ || issuing_) return false;
+    if (op == nullptr && inNonOp_) op = op_;  // a non-op path's draws (decals) carry no op
+    if (op_ == nullptr || op != op_ || issuing_ || g_ == nullptr) return false;
     const std::uint32_t k = engineDraws_++;
-    if (compare_) {
-        ++window_.draws;
+    sc::CompareCounts& w = g_->window;
+    if (g_->compare) {
+        ++w.draws;
         if (k >= drawCount_) {
             // counted once per op in finishOp
         } else {
             capture(t, *scratch_);
-            const sc::Diff diff = sc::compare(*draws_[k], *scratch_);
+            sc::Diff diff = sc::compare(*draws_[k], *scratch_);
+            if (std::string why; !geometryBytesEqual(*draws_[k], *scratch_, why)) {
+                diff.fields.set(static_cast<std::size_t>(sc::Field::GeometryData));
+                if (diff.first.empty()) diff.first = why;
+            }
+            // take-over: our own draw of this position must have been classified as the engine's (draws::Kind: the
+            // replacers / observers / debug views decide by it)
+            if (taken_ && k < ownKind_.size() && ownKind_[k] != static_cast<std::uint8_t>(t.kind)) {
+                diff.fields.set(static_cast<std::size_t>(sc::Field::Tag));
+                if (diff.first.empty()) {
+                    diff.first = std::format("draw kind {} vs engine {}", d3d9::draws::name(static_cast<d3d9::draws::Kind>(ownKind_[k])),
+                                             d3d9::draws::name(t.kind));
+                }
+            }
+            const sc::DrawDesc& c = *draws_[k];
             if (hal::vulkan::logThisFrame() && frameLogged_ < 12) {
                 ++frameLogged_;
-                const sc::DrawDesc& c = *draws_[k];
                 const auto* vs = static_cast<const d3d9::Shader*>(c.vs);
                 const auto* ps = static_cast<const d3d9::Shader*>(c.ps);
-                spdlog::info("native: static ops: {} draw {}: vs {:016x} ps {:016x}, {} vs + {} ps live registers, sampled stages {:#x} "
-                             "(inherited {:#x}), {} prims from {}, states z {} zw {} blend {} cw {:#x} cull {}; vs c33 ({}, {}, {}, {}), "
+                spdlog::info("native: {}: {} draw {} ({}): vs {:016x} ps {:016x}, {} vs + {} ps live registers, sampled stages {:#x} "
+                             "(inherited {:#x}), {} prims from {}, states z {} zw {} blend {} {}/{} cw {:#x} cull {}; vs c33 ({}, {}, {}, {}), "
                              "ps c15 ({}, {}, {}, {}); {} registers / {} stages compared, {}",
-                             describe(*op), k, vs != nullptr ? vs->hash : 0, ps != nullptr ? ps->hash : 0, scratch_->vsLive.count(),
-                             scratch_->psLive.count(), scratch_->samplerMask, c.inheritMask, c.primCount, c.startIndex,
-                             c.states[sc::StZFunc], c.states[sc::StZWrite], c.states[sc::StBlend], c.states[sc::StColorWrite],
-                             c.states[sc::StCull], c.vsF[33][0], c.vsF[33][1], c.vsF[33][2], c.vsF[33][3], c.psF[15][0], c.psF[15][1],
-                             c.psF[15][2], c.psF[15][3], diff.regs, diff.stages, diff.fields.none() ? "equal" : diff.first);
+                             name(static_cast<Group>(g_ - groups_.data())), describe(*op), k, sc::name(c.drawClass), vs != nullptr ? vs->hash : 0,
+                             ps != nullptr ? ps->hash : 0, scratch_->vsLive.count(), scratch_->psLive.count(), scratch_->samplerMask, c.inheritMask,
+                             c.primCount, c.startIndex, c.states[sc::StZFunc], c.states[sc::StZWrite], c.states[sc::StBlend], c.states[sc::StSrc],
+                             c.states[sc::StDst], c.states[sc::StColorWrite], c.states[sc::StCull], c.vsF[33][0], c.vsF[33][1], c.vsF[33][2],
+                             c.vsF[33][3], c.psF[15][0], c.psF[15][1], c.psF[15][2], c.psF[15][3], diff.regs, diff.stages,
+                             diff.fields.none() ? "equal" : diff.first);
             }
-            window_.closeFloats += diff.closeFloats;
-            window_.regs += diff.regs;
-            window_.stages += diff.stages;
+            w.closeFloats += diff.closeFloats;
+            w.regs += diff.regs;
+            w.stages += diff.stages;
+            w.biRegs += diff.biRegs;
+            w.biLive += scratch_->biLive;
+            const auto cls = static_cast<std::size_t>(c.drawClass);
+            const auto list = static_cast<std::size_t>(op->list);
+            ++w.classDraws[cls];
+            if (list < w.listDraws.size()) ++w.listDraws[list];
             if (diff.fields.none()) {
-                ++window_.cleanDraws;
+                ++w.cleanDraws;
+                ++w.classClean[cls];
+                if (list < w.listClean.size()) ++w.listClean[list];
             } else {
                 for (std::size_t f = 0; f < sc::kFieldCount; ++f) {
-                    if (diff.fields.test(f)) ++window_.mismatches[f];
+                    if (diff.fields.test(f)) ++w.mismatches[f];
                 }
                 if (mismatchLogged_ < 24 || (hal::vulkan::logThisFrame() && !opDiffLogged_)) {
                     ++mismatchLogged_;
                     opDiffLogged_ = true;
                     std::string mat;
-                    if (draws_[k]->material != nullptr) mat = engine::readCString(static_cast<U8*>(draws_[k]->material) + 0x40);
-                    spdlog::info("native: static ops: mismatch: {} draw {} (pass flags {:#x}{}) material '{}': {}", describe(*op), k,
-                                 draws_[k]->passFlags, draws_[k]->zPass ? ", z" : "", mat, diff.first);
+                    if (c.material != nullptr) mat = engine::readCString(static_cast<U8*>(c.material) + 0x40);
+                    spdlog::info("native: {}: mismatch: {} draw {} ({}, pass flags {:#x}{}) material '{}': {}", name(static_cast<Group>(g_ - groups_.data())),
+                                 describe(*op), k, sc::name(c.drawClass), c.passFlags, c.zPass ? ", z" : "", mat, diff.first);
                 }
             }
         }
     }
-    if (taken_) ++droppedDraws_;
+    if (taken_) ++g_->droppedDraws;
     return taken_;
 }
 
@@ -1145,6 +1292,24 @@ void StaticOps::issue() {
             if (s.buffer != nullptr) dev_.setStreamSourceFreq(i, s.freq);
         }
         dev_.setIndices(const_cast<Buffer*>(static_cast<const Buffer*>(d.indices)));
+        if (!d.vertexBytes.empty()) {
+            // CPU-generated geometry (decals): our own dynamic buffers, the composed bytes at the engine's positions
+            if (!ownVb_) ownVb_ = dev_.createBuffer(360000, USAGE_DYNAMIC | USAGE_WRITEONLY, POOL_DEFAULT, false, false);
+            if (!ownIb_) ownIb_ = dev_.createBuffer(20000, USAGE_DYNAMIC | USAGE_WRITEONLY, POOL_DEFAULT, true, false);
+            const std::uint32_t vOff = d.streams[0].offset + d.minIndex * d.vertexStride, iOff = d.startIndex * 2;
+            if (vOff + d.vertexBytes.size() <= ownVb_->size() && iOff + d.indexBytes.size() <= ownIb_->size()) {
+                if (void* p = ownVb_->lock(0, 0, LOCK_DISCARD)) {
+                    std::memcpy(static_cast<std::uint8_t*>(p) + vOff, d.vertexBytes.data(), d.vertexBytes.size());
+                    ownVb_->unlock();
+                }
+                if (void* p = ownIb_->lock(0, 0, LOCK_DISCARD)) {
+                    std::memcpy(static_cast<std::uint8_t*>(p) + iOff, d.indexBytes.data(), d.indexBytes.size());
+                    ownIb_->unlock();
+                }
+                dev_.setStreamSource(0, ownVb_.get(), d.streams[0].offset, d.streams[0].stride);
+                dev_.setIndices(ownIb_.get());
+            }
+        }
         for (std::uint32_t i = 0; i < sc::StOwnedCount; ++i) dev_.setRenderState(kRs[i], d.states[i]);
         for (std::uint32_t st = 0; st < sc::kStages; ++st) {
             if ((d.samplerMask >> st & 1u) == 0 || (d.inheritMask >> st & 1u) != 0) continue;
@@ -1162,13 +1327,15 @@ void StaticOps::issue() {
             tag.subMesh = d.tagSubMesh;
             tag.material = d.tagMaterial;
             tag.meshResource = d.tagMeshResource;
+            tag.water = static_cast<draws::Water>(d.tagWater);
+            tag.materialName = d.tagMaterialName;
         }
         issueIndex_ = k;
         dev_.drawIndexedPrimitive(d.primType, d.baseVertex, d.minIndex, d.numVertices, d.startIndex, d.primCount);
-        ++issuedDraws_;
+        ++g_->issuedDraws;
     }
     issuing_ = false;
-    ++issuedOps_;
+    ++g_->issuedOps;
 
     // restore
     tag = savedTag;
@@ -1190,28 +1357,41 @@ void StaticOps::issue() {
 }
 
 void StaticOps::report() {
-    if (!active()) return;
-    total_.add(window_);
-    for (std::size_t i = 0; i < skips_.size(); ++i) skipsTotal_[i] += skips_[i];
-    std::string skips;
-    for (std::size_t i = 1; i < skips_.size(); ++i) {
-        if (skips_[i] != 0) skips += std::format("{}{} {}", skips.empty() ? "" : ", ", name(static_cast<Skip>(i)), skips_[i]);
-    }
-    if (verified_ < 0) {
+    if (verified_ < 0 && active()) {
         spdlog::info("native: static ops: idle (the engine checks failed)");
-    } else if (compare_) {
-        spdlog::info("native: static ops: compare (5 s): {}{}", sc::summary(window_), skips.empty() ? "" : "; left to the engine: " + skips);
-        spdlog::info("native: static ops: compare (total): {}", sc::summary(total_));
-    } else {
-        spdlog::info("native: static ops (5 s): {} ops, {} composed{}", window_.ops, window_.opsComposed, skips.empty() ? "" : "; left to the engine: " + skips);
+        return;
     }
-    if (takeOver_) {
-        spdlog::info("native: static ops: drawn by the renderer: {} ops, {} draws (total); engine draws dropped {}; own draws checked {}, "
-                     "differing from their composition {}",
-                     issuedOps_, issuedDraws_, droppedDraws_, ownChecked_, ownMismatch_);
+    static constexpr const char* kListNames[] = {"z", "solid", "debug", "sky", "refracted", "alpha", "late", "decals"};
+    for (std::size_t gi = 0; gi < kGroups; ++gi) {
+        GroupState& g = groups_[gi];
+        if (!g.active()) continue;
+        const char* what = name(static_cast<Group>(gi));
+        g.total.add(g.window);
+        for (std::size_t i = 0; i < g.skips.size(); ++i) g.skipsTotal[i] += g.skips[i];
+        std::string skips, skipsTotal;
+        for (std::size_t i = 1; i < g.skips.size(); ++i) {
+            if (g.skips[i] != 0) skips += std::format("{}{} {}", skips.empty() ? "" : ", ", name(static_cast<Skip>(i)), g.skips[i]);
+            if (g.skipsTotal[i] != 0) skipsTotal += std::format("{}{} {}", skipsTotal.empty() ? "" : ", ", name(static_cast<Skip>(i)), g.skipsTotal[i]);
+        }
+        if (g.compare) {
+            spdlog::info("native: {}: compare (5 s): {}{}", what, sc::summary(g.window, kListNames, std::size(kListNames)),
+                         skips.empty() ? "" : "; left to the engine: " + skips);
+            spdlog::info("native: {}: compare (total): {}{}", what, sc::summary(g.total, kListNames, std::size(kListNames)),
+                         skipsTotal.empty() ? "" : "; left to the engine: " + skipsTotal);
+        } else {
+            spdlog::info("native: {} (5 s): {} ops, {} composed{}", what, g.window.ops, g.window.opsComposed,
+                         skips.empty() ? "" : "; left to the engine: " + skips);
+        }
+        spdlog::info("native: {}: sub-mesh draws by lights (total): 0 {}, 1 {}, 2 {}, 3 {}, 4 {}", what, g.lights[0], g.lights[1], g.lights[2],
+                     g.lights[3], g.lights[4]);
+        if (g.takeOver) {
+            spdlog::info("native: {}: drawn by the renderer: {} ops, {} draws (total); engine draws dropped {}; own draws checked {}, "
+                         "differing from their composition {}",
+                         what, g.issuedOps, g.issuedDraws, g.droppedDraws, g.ownChecked, g.ownMismatch);
+        }
+        g.window = {};
+        g.skips = {};
     }
-    window_ = {};
-    skips_ = {};
 }
 
 }  // namespace rvk::native

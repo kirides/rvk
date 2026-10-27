@@ -6,6 +6,10 @@
 // render functions set the device's current draws::Tag (source, context, entity, sub-mesh, material) around the original
 // calls. Installed in Vulkan mode only; with no device attached every detour just calls the original.
 
+#include <cstdint>
+
+#include "d3d9/draws.h"
+
 namespace rvk::d3d9 {
 class Device;
 }
@@ -40,6 +44,10 @@ public:
     virtual void executeBegin(void* db, void* desc) = 0;
     virtual void executeEnd(void* db) = 0;
     virtual void opEnter(const void* op) = 0;
+    // a main-view non-op path of Execute begins / ends (eCDecalAdmin::RenderDecals: admin, db; inside its draw tag)
+    enum class NonOp : std::uint8_t { Decals };
+    virtual void nonOpBegin(NonOp /*which*/, void* /*admin*/, void* /*db*/) {}
+    virtual void nonOpEnd(NonOp /*which*/) {}
 };
 void setOpTap(OpTap* tap);
 
@@ -47,5 +55,10 @@ void setOpTap(OpTap* tap);
 // already ours stays; any other is replaced by a pass-through thunk (only the tag's op around the original). Returns false
 // when the slot cannot be patched (pool full, unreadable). `original` receives the engine's function of the slot.
 bool ensureOpSlot(const void* vtable, int slot, const void** original);
+
+// The water classification and material name eCSubMesh::Render's draw tag gets for `material` in the current phase (only in
+// the Refracted / Alpha / AlphaLate passes of non-shadow views; else None / null): the N5.2 scene ops compose it for their
+// own draws so the enhanced water's DrawReplacer acts on them as on the engine's. Render thread.
+void subMeshWater(const void* material, const void* meshResource, d3d9::draws::Water& water, const char*& name);
 
 }  // namespace rvk::engine::scene
