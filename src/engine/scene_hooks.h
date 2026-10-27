@@ -44,8 +44,10 @@ public:
     virtual void executeBegin(void* db, void* desc) = 0;
     virtual void executeEnd(void* db) = 0;
     virtual void opEnter(const void* op) = 0;
-    // a main-view non-op path of Execute begins / ends (eCDecalAdmin::RenderDecals: admin, db; inside its draw tag)
-    enum class NonOp : std::uint8_t { Decals };
+    // a main-view non-op path of Execute begins / ends (eCDecalAdmin::RenderDecals: admin, db; eCBillboardAdmin::
+    // RenderBillboards: admin, no db; inside its draw tag)
+    // eCSkydome_PS::Render of a sky cube face (outside Execute: the property set, no db)
+    enum class NonOp : std::uint8_t { Decals, Billboards, SkyCube };
     virtual void nonOpBegin(NonOp /*which*/, void* /*admin*/, void* /*db*/) {}
     virtual void nonOpEnd(NonOp /*which*/) {}
 };

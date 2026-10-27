@@ -1784,7 +1784,8 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .category = "Debug views",
         .tab = kTabDebug,
         .description = "Bit mask of the scene ops' groups: 1 alpha / refracted mesh ops, 2 entity overlay passes (also of the static ops "
-                       "while scene ops are on), 4 decals (eCDecalAdmin::RenderDecals).",
+                       "while scene ops are on), 4 decals (eCDecalAdmin::RenderDecals), 8 the sky dome op (stars, sun, moon, dome), 16 the opaque "
+                       "billboards (eCBillboardAdmin::RenderBillboards), 32 the sky environment cube's faces.",
         .type = Type::Int,
         .defaultValue = 7,
         .min = 0,

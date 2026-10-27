@@ -223,6 +223,7 @@ public:
     }
     d3d9::Buffer* indexBuffer() const { return indices_ != nullptr ? indices_->buffer() : nullptr; }
     d3d9::VertexDecl* vertexDecl() const { return decl_; }
+    const eCGfxShared::eSGfxDrawCallDesc& drawDesc() const { return draw_; }
     // `api` (an engine eCAPIPrimitive*) when it is one of ours, else null (vtable check; any thread)
     static HalPrimitive* fromApi(const void* api);
 

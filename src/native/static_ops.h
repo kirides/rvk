@@ -52,6 +52,9 @@ public:
         Static,  // N5.1: z pre-pass + solid mesh ops (native.static_ops)
         Mesh,    // N5.2: alpha + refracted mesh ops (native.scene_ops, group bit 1)
         Decals,  // N5.2: eCDecalAdmin::RenderDecals (group bit 4)
+        Sky,     // N5.2c: the sky dome op (list +0x1530: stars, sun, moon, dome; group bit 8)
+        Billboards,  // N5.2c: eCBillboardAdmin::RenderBillboards, the opaque billboards' queue (group bit 16)
+        SkyCube,     // N5.2c: the sky environment cube's faces (eCSkydome_PS::Render with the cube camera; group bit 32)
         Count
     };
     static constexpr std::size_t kGroups = static_cast<std::size_t>(Group::Count);
@@ -65,9 +68,15 @@ public:
     void viewBegin(void* db, void* desc);
     void viewEnd();
     void opEnter(const Op& op);
-    // eCDecalAdmin::RenderDecals of the main view begins (inside its draw tag, before the engine's code) / ends
+    // eCDecalAdmin::RenderDecals / eCBillboardAdmin::RenderBillboards of the main view begins (inside its draw tag, before the
+    // engine's code) / either ends
     void decalsBegin(void* admin, void* db);
-    void decalsEnd();
+    void billboardsBegin(void* admin);
+    // eCSkydome_PS::Render of a sky cube face (UpdateSkydomeEnvCubemap, outside Execute: the cube camera +0x3c0) begins; its
+    // draws (view SkyCube) go to cubeDraw; nonOpEnd ends it
+    void skyCubeBegin(void* sky);
+    bool inSkyCube() const { return inSkyCube_; }
+    void nonOpEnd();
     // an engine draw of the main view (op = the executing op, null: none); true = drop it (we drew the op ourselves)
     bool engineDraw(const d3d9::DrawTapInfo& draw, const Op* op);
     // true while our own draws are being issued (the tap must not attribute them to the engine)
@@ -79,7 +88,7 @@ public:
 
     enum class Skip : std::uint8_t {
         None, Kind, Overlay, ShaderClass, Version, InvalidShader, NotCompiled, Switch, Primitive, ImageOverride, Unreadable, PassKind,
-        Sort, Texture, OverlayShader, DecalProxy, NotCreated, VisualShader, Count
+        Sort, Texture, OverlayShader, DecalProxy, NotCreated, VisualShader, SkyCamera, SkyRebuilt, Count
     };
     static const char* name(Skip s);
 
@@ -121,6 +130,7 @@ private:
         float vp[4][4]{}, dbvp[4][4]{}, invProj[4][4]{}, invView[3][4]{};
         float camPos[4]{};
         float fogC3[4]{}, fogC4[4]{};
+        bool fog = true;  // the view executes its fog (eCGfxFog::Execute); false: PS c3 / c4, VS c30 as the admin's pools hold them
         float obstacleX = 0, obstacleY = 0;
         bool zColorWrite = true;
         int dbOrder = -1;  // the depth-bias product's order matched against the admin's copy (0 P x V, 1 V x P, -1 neither)
@@ -137,7 +147,8 @@ private:
         const void* material = nullptr;
         const void* meshResource = nullptr;
     };
-    bool composeView(const std::uint8_t* admin);
+    // camera null: the database's (db +0x14c0 -> +0x1738), with its fog; else that camera, no fog of its own (the sky cube)
+    bool composeView(const std::uint8_t* admin, const std::uint8_t* camera = nullptr);
     bool shaderClassOk(const void* shader);
     const Live& liveOf(const d3d9::Shader* s);
     d3d9::Shader* shaderOfElement(const void* element);
@@ -157,9 +168,12 @@ private:
     Skip passDraw(const std::uint8_t* shader, const std::uint8_t* owner, const std::uint8_t* version, const sc::Pass& pass,
                   const Geom& geometry, bool overlay);
     Skip specialPassDraw(const std::uint8_t* shader, const Geom& geometry);
+    Skip adminSamplers(sc::DrawDesc& d, const std::uint8_t* owner, const d3d9::Shader* ps);
     bool geometryOf(const std::uint8_t* res, Geom& g, int stream3);  // stream3: 0 off, 1 on, -1 as the record has it
     sc::DrawDesc& drawFrom(const Geom& g);
-    void constantsInto(sc::DrawDesc& d, const std::uint8_t* shader, const std::uint8_t* biasShader = nullptr);
+    // defaultClass: eCShaderDefault's register map (admin c0..c30, global c31..c231, the shader's pools from c232 / PS c6..c13,
+    // the lighting pool PS c14..c37); else eCShaderBase's (no global constants, no lighting: the shader's pools where they are)
+    void constantsInto(sc::DrawDesc& d, const std::uint8_t* shader, const std::uint8_t* biasShader = nullptr, bool defaultClass = true);
     Skip materialSamplers(sc::DrawDesc& d, const std::uint8_t* shader, const void* psElement);
     void applySwitch(const std::uint8_t* shader, std::int32_t switchValue, Skip& skip);
     void writeWorld(std::uint32_t slot, const float* m);
@@ -169,11 +183,30 @@ private:
     void capture(const d3d9::DrawTapInfo& t, sc::DrawDesc& out);
     // the decals (static_ops_nonop.cpp)
     Skip composeDecals(const std::uint8_t* admin, const std::uint8_t* db);
-    Skip nonOpPasses(const std::uint8_t* shader, const std::uint8_t* illum, std::uint32_t combi, const Geom& geometry);
+    Skip nonOpPasses(const std::uint8_t* shader, const std::uint8_t* illum, std::uint32_t combi, const Geom& geometry,
+                     std::int32_t switchValue = 0);
+    // a non-op path's unit begins (false: the group is off / the checks failed) / its composition's result (issued on take-over)
+    bool nonOpGroupBegin(Group group, void* admin);
+    void nonOpGroupComposed(Skip s);
     bool geometryOfVisual(const std::uint8_t* visual, Geom& g);
     bool verifyDecals();
     // a composed draw's vertex / index bytes against the engine buffer's (the vertex data the engine generated on the CPU)
     bool geometryBytesEqual(const sc::DrawDesc& c, const sc::DrawDesc& captured, std::string& why);
+    // the opaque billboards' queue (static_ops_nonop.cpp)
+    Skip composeBillboards(const std::uint8_t* admin);
+    bool verifyBillboards();
+    // the sky dome op (static_ops_sky.cpp)
+    Skip composeSky(const Op& op);
+    Skip composeSkyDraws(const std::uint8_t* sky, const std::uint8_t* camera);
+    bool verifySky();
+    // the camera matrices eCGfxCamera::Execute -> SetCamera uploads for view / projection / depth-bias projection, computed with
+    // the engine's own bCMatrix functions (the sky's camera hack and its restore): into view_ and the mirror's admin VS c4..c10
+    void setCamera(const float view[16], const float proj[16], const float dbProj[16]);
+    // eCSkyObject::Render 0x6e25e0 of a sky object (stars / sun / moon); bb: the billboards FillVertexBuffer writes (null: the
+    // object's array), renderCount: the billboards drawn (0: the record's primitive count / 2)
+    Skip skyObjectDraws(const std::uint8_t* object, const float* world, const std::uint8_t* bb, std::uint32_t renderCount);
+    Skip skyDomeDraw(const std::uint8_t* shader, const std::uint8_t* visual);
+    int blendModeOf(const std::uint8_t* owner) const;
     void finishOp();
     void issue();
 
@@ -219,12 +252,29 @@ private:
     // non-op paths (decals): the unit whose draws are composed in place of an op
     Op nonOp_;
     bool inNonOp_ = false;
-    int decalsVerified_ = 0;
+    bool inSkyCube_ = false;
+    // the sky cube's faces: UpdateSkydomeEnvCubemap's BeginMaterial binds the admin stages, then SetRenderTarget(face) unbinds all
+    // 16 stages (eCDX9Device / HalDevice::SetRenderTarget): s0 / s1 / s2 / s4 / s5 are empty at the faces' draws
+    bool adminStagesUnbound_ = false;
+    int decalsVerified_ = 0, billboardsVerified_ = 0, skyVerified_ = 0;
+    int (*billboardCmp_)(const void*, const void*) = nullptr;
+    // the BlendMode a non-op path writes into a shader before its passes (SetCurrentRenderStates reads +0x50): -1 none
+    const std::uint8_t* blendOverrideShader_ = nullptr;
+    std::int32_t blendOverride_ = -1;
+    using MatInvertFn = void (*)(void* m);
+    using MatMulFn = void* (*)(const void* a, void* ret, const void* b);
+    using MatMulAssignFn = void* (*)(void* a, const void* b);
+    using MatInvertedFn = void* (*)(const void* m, void* ret);
+    MatInvertFn matInvert_ = nullptr;
+    MatMulFn matMul_ = nullptr;
+    MatMulAssignFn matMulAssign_ = nullptr;
+    MatInvertedFn matInverted_ = nullptr;
+    std::uint32_t skyLogged_ = 0;
     using VecFn = void (*)(void* vector, const void* matrix);
     VecFn transform_ = nullptr, transformDirection_ = nullptr;
     int (*decalCmp_)(const void*, const void*) = nullptr;
     float decalAlphaScale_ = 255.0f, one_ = 1.0f;  // DAT_1809f17b4, DAT_1809f1698
-    std::unique_ptr<d3d9::Buffer> ownVb_, ownIb_;    // take-over: our own copies of the decals' vertex / index data  // draws::Kind of our own draws (take-over + compare: checked against the engine's)
+    std::unique_ptr<d3d9::Buffer> ownVb_, ownIb_;  // take-over: our own copies of the CPU-generated vertex / index data
     std::vector<std::string> firstMismatches_;
     std::uint32_t mismatchLogged_ = 0;
     std::uint32_t fourLightsLogged_ = 0;

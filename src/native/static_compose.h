@@ -125,6 +125,50 @@ std::int32_t constantSwitchIndex(std::int32_t s, std::int32_t count, std::int32_
 // sampler or no image)
 std::int32_t samplerSwitchIndex(std::int32_t s, std::int32_t begin, std::int32_t count, std::int32_t repeat, std::int32_t type);
 
+// ---- sky dome (eCSkydome_PS::Render 0x6e4730) -------------------------------------------------------------------------------
+
+// eCSkyObject::eSSkyObjectBillboard (0x30 bytes): position f3 @0, half size s f2 @0xc, second axis r f2 @0x14, colour @0x1c,
+// uv rect (u0, v0, u1, v1) @0x20
+inline constexpr std::uint32_t kSkyBillboardSize = 0x30, kSkyVertexStride = 0x20;
+// eCSkyObject::FillVertexBuffer 0x6e1a50: 4 vertices per billboard (stride 0x20): position @0, colour @0xc, uv @0x10, the
+// corner offset @0x18: (-s + r, u0 v0), (s + r, u1 v0), (s - r, u1 v1), (-s - r, u0 v1)
+void skyBillboardVertices(std::span<const std::uint8_t> billboards, std::uint32_t count, std::vector<std::uint8_t>& out);
+// eCSkyObject::FillIndexBuffers 0x6e1940: billboard k -> 4k + (0, 1, 2, 0, 2, 3), 16-bit
+void skyQuadIndices(std::uint32_t count, std::vector<std::uint8_t>& out);
+// eCShaderVersionSkyDome_2_0's states (0x6d9740): FillBlendingRenderStates (not additive, fade = GetGlobalAlpha(0) = 1), colour
+// write on, alpha write off, depth func LESSEQUAL, depth write off for IsBlended && !IsRefracted (else the visual's), render mode 0
+RenderStates skyDomeStates(const BlendInputs& b, float fade);
+
+// ---- the opaque billboards' queue (eCBillboardAdmin::RenderBillboards 0x4f0530) -------------------------------------------------
+
+// a queue entry after the engine's sort (SortRenderQueue 0x4f0ff0): {eCBillboard*, eCLightSet*, blend mode, switch}; the record
+// keys are the billboard's material (+0) and image (+8), the light set, the blend mode and the switch value
+struct BillboardEntry {
+    const void* material = nullptr;
+    const void* image = nullptr;
+    const void* lightSet = nullptr;
+    std::int32_t blend = 0;
+    std::int32_t switchValue = 0;
+    std::uint32_t quads = 0;  // eCBillboard +0x20
+};
+struct BillboardRecord {
+    std::uint32_t cycle = 0;                       // lock cycle (VB / IB locked DISCARD at offset 0)
+    std::uint32_t firstQuad = 0, quads = 0;        // in the cycle's buffers
+    std::uint32_t firstEntry = 0, entryCount = 0;  // the entries it holds (consecutive, zero-quad entries included)
+    BillboardEntry keys;
+};
+// per entry: the cycle and quad position its vertices are copied to (-1 cycle: not drawn, 0 quads)
+struct BillboardPlace {
+    std::int32_t cycle = -1;
+    std::uint32_t quad = 0;
+};
+// a cycle holds at most maxQuads (1000) quads: the records are drawn (and the buffers unlocked) when the next entry would
+// overflow it, and at the end; a new record starts when a key differs from the previous record's
+void planBillboards(std::span<const BillboardEntry> entries, std::uint32_t maxQuads, std::vector<BillboardRecord>& records,
+                    std::vector<BillboardPlace>& places);
+// the indices of quad q (cycle-relative): 4q + (0, 1, 3, 1, 2, 3)
+void billboardQuadIndices(std::uint32_t firstQuad, std::uint32_t quads, std::vector<std::uint8_t>& out);
+
 // ---- constants ----------------------------------------------------------------------------------------------------------
 
 // eCShaderMaterialAdmin::SetFog 0x6b9fc0: PS c3 = colour, PS c4 = VS c30 = (-start k, k, density, 0), k = 1 / ((end - start) / density)

@@ -239,6 +239,16 @@
     X(decalSortRenderQueue, L"Engine.dll", "?SortRenderQueue@eCDecalAdmin@@KAHPEBX0@Z", false)                                 \
     X(vectorTransform, L"SharedBase.dll", "?Transform@bCVector@@QEAAXAEBVbCMatrix@@@Z", false)                                  \
     X(vectorTransformDirection, L"SharedBase.dll", "?TransformDirection@bCVector@@QEAAXAEBVbCMatrix@@@Z", false)                \
+    /* N5.2c scene ops, sky dome + opaque billboards (native/static_ops_sky.cpp, static_ops_nonop.cpp): the active camera     \
+       (eCSkydome_PS::Render rewrites its matrices), SharedBase's bCMatrix functions the sky's camera hack and SetCamera call  \
+       (Invert, operator*, operator*=, GetInverted), the sky dome's shader class, the billboard queue's comparator */          \
+    X(gfxActiveCamera, L"Engine.dll", "?ms_pActiveCamera@eCGfxCamera@@1PEAV1@EA", false)                                       \
+    X(shaderSkyDomeVftable, L"Engine.dll", "??_7eCShaderSkyDome@@6B@", false)                                                   \
+    X(billboardSortRenderQueue, L"Engine.dll", "?SortRenderQueue@eCBillboardAdmin@@KAHPEBX0@Z", false)                         \
+    X(matrixInvert, L"SharedBase.dll", "?Invert@bCMatrix@@QEAAXXZ", false)                                                     \
+    X(matrixMul, L"SharedBase.dll", "??DbCMatrix@@QEBA?AV0@AEBV0@@Z", false)                                                   \
+    X(matrixMulAssign, L"SharedBase.dll", "??XbCMatrix@@QEAAAEAV0@AEBV0@@Z", false)                                            \
+    X(matrixGetInverted, L"SharedBase.dll", "?GetInverted@bCMatrix@@QEBA?AV1@XZ", false)                                       \
     /* eEResourceState eCResource2::RequestData(eEResourceLoadMode) (0x684100): queues a resource's data (mode 1 = what the render code passes) */ \
     X(resourceRequestData, L"Engine.dll", "?RequestData@eCResource2@@QEAA?AW4eEResourceState@@W4eEResourceLoadMode@@@Z", false)
 

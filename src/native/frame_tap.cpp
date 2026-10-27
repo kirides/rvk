@@ -329,13 +329,25 @@ void FrameTap::opEnter(const void* op) {
 }
 
 void FrameTap::nonOpBegin(NonOp which, void* admin, void* db) {
-    if (!executing_ || db != db_ || statics_ == nullptr || !staticsWanted_) return;
-    if (which == NonOp::Decals) statics_->decalsBegin(admin, db);
+    if (which == NonOp::SkyCube) {
+        // outside Execute (eCIlluminationAdmin::Process -> UpdateSkydomeEnvCubemap)
+        if (!executing_ && statics_ != nullptr && staticsWanted_) statics_->skyCubeBegin(admin);
+        return;
+    }
+    if (!executing_ || nested_ > 0 || statics_ == nullptr || !staticsWanted_) return;
+    if (which == NonOp::Decals && db == db_) statics_->decalsBegin(admin, db);
+    // RenderBillboards takes no database: it runs inside the main view's Execute (not a nested one)
+    if (which == NonOp::Billboards) statics_->billboardsBegin(admin);
 }
 
 void FrameTap::nonOpEnd(NonOp which) {
-    if (!executing_ || statics_ == nullptr || !staticsWanted_) return;
-    if (which == NonOp::Decals) statics_->decalsEnd();
+    if (statics_ == nullptr || !staticsWanted_) return;
+    if (which == NonOp::SkyCube) {
+        statics_->nonOpEnd();
+        return;
+    }
+    if (!executing_) return;
+    if (which == NonOp::Decals || which == NonOp::Billboards) statics_->nonOpEnd();
 }
 
 void FrameTap::refractionCopy(const void* api) {
@@ -354,6 +366,10 @@ bool FrameTap::onDraw(const d3d9::DrawTapInfo& d) {
     if (statics_ != nullptr && statics_->issuing()) {
         statics_->ownDraw(d);
         return false;
+    }
+    // a sky cube face's draws (N5.2c, outside Execute)
+    if (statics_ != nullptr && staticsWanted_ && statics_->inSkyCube() && d.phase.view == d3d9::scene::View::SkyCube) {
+        return statics_->engineDraw(d, nullptr);
     }
     if (!executing_ || d.phase.view != d3d9::scene::View::Main) return false;
     DrawInfo info;

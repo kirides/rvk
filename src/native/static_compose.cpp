@@ -559,4 +559,101 @@ std::string summary(const CompareCounts& c, const char* const* listNames, std::s
     return s;
 }
 
+// ---- sky dome ---------------------------------------------------------------------------------------------------------------
+
+void skyBillboardVertices(std::span<const std::uint8_t> billboards, std::uint32_t count, std::vector<std::uint8_t>& out) {
+    out.assign(static_cast<std::size_t>(count) * 4 * kSkyVertexStride, 0);
+    for (std::uint32_t i = 0; i < count && (i + 1) * kSkyBillboardSize <= billboards.size(); ++i) {
+        const std::uint8_t* b = billboards.data() + static_cast<std::size_t>(i) * kSkyBillboardSize;
+        float s[2], r[2];
+        std::memcpy(s, b + 0xc, 8);
+        std::memcpy(r, b + 0x14, 8);
+        // GetInverted(s).GetTranslated(r), s + r, s - r, -s - r (0x6e1b70..: xorps with the sign mask, addss / subss)
+        const float corner[4][2] = {{-s[0] + r[0], -s[1] + r[1]}, {s[0] + r[0], s[1] + r[1]}, {s[0] - r[0], s[1] - r[1]}, {-s[0] - r[0], -s[1] - r[1]}};
+        // uv per corner: (u0, v0), (u1, v0), (u1, v1), (u0, v1) from the rect @0x20 (u0, v0, u1, v1)
+        static constexpr std::uint32_t kU[4] = {0x20, 0x28, 0x28, 0x20}, kV[4] = {0x24, 0x24, 0x2c, 0x2c};
+        for (std::uint32_t k = 0; k < 4; ++k) {
+            std::uint8_t* v = out.data() + (static_cast<std::size_t>(i) * 4 + k) * kSkyVertexStride;
+            std::memcpy(v, b, 12);
+            std::memcpy(v + 0xc, b + 0x1c, 4);
+            std::memcpy(v + 0x10, b + kU[k], 4);
+            std::memcpy(v + 0x14, b + kV[k], 4);
+            std::memcpy(v + 0x18, corner[k], 8);
+        }
+    }
+}
+
+void skyQuadIndices(std::uint32_t count, std::vector<std::uint8_t>& out) {
+    out.resize(static_cast<std::size_t>(count) * 12);
+    for (std::uint32_t k = 0; k < count; ++k) {
+        const std::uint16_t b = static_cast<std::uint16_t>(4 * k);
+        const std::uint16_t q[6] = {b, static_cast<std::uint16_t>(b + 1), static_cast<std::uint16_t>(b + 2), b, static_cast<std::uint16_t>(b + 2),
+                                    static_cast<std::uint16_t>(b + 3)};
+        std::memcpy(out.data() + static_cast<std::size_t>(k) * 12, q, 12);
+    }
+}
+
+RenderStates skyDomeStates(const BlendInputs& b, float fade) {
+    RenderStates rs;
+    rs.depthFunc = 4;
+    fillBlending(rs, b, false, fade);
+    rs.colorWrite = true;
+    rs.alphaWrite = false;
+    rs.depthWriteMaster = isBlended(b) && !b.refracted ? 1u : 0u;
+    rs.renderMode = 0;
+    return rs;
+}
+
+// ---- the opaque billboards' queue -------------------------------------------------------------------------------------------
+
+void planBillboards(std::span<const BillboardEntry> entries, std::uint32_t maxQuads, std::vector<BillboardRecord>& records,
+                    std::vector<BillboardPlace>& places) {
+    records.clear();
+    places.assign(entries.size(), {});
+    std::uint32_t cycle = 0, quad = 0;
+    bool locked = false;
+    std::size_t open = 0;  // records of the current cycle not drawn yet
+    BillboardEntry prev;
+    for (std::uint32_t i = 0; i < entries.size(); ++i) {
+        const BillboardEntry& e = entries[i];
+        // 0x4f068c: quads of the cycle + this one's > 1000 -> the open records are drawn first (the buffers unlocked)
+        if (quad + e.quads > maxQuads && open > 0) {
+            open = 0;
+            locked = false;
+            ++cycle;
+        }
+        if (e.quads == 0) continue;  // 0x4f08ae: nothing locked, written or recorded
+        if (!locked) {
+            locked = true;
+            quad = 0;
+        }
+        if (open == 0 || e.material != prev.material || e.image != prev.image || e.blend != prev.blend || e.lightSet != prev.lightSet ||
+            e.switchValue != prev.switchValue) {
+            BillboardRecord r;
+            r.cycle = cycle;
+            r.firstQuad = quad;
+            r.firstEntry = i;
+            r.keys = e;
+            records.push_back(r);
+            ++open;
+            prev = e;
+        }
+        BillboardRecord& r = records.back();
+        r.quads += e.quads;
+        r.entryCount = i + 1 - r.firstEntry;
+        places[i] = {static_cast<std::int32_t>(cycle), quad};
+        quad += e.quads;
+    }
+}
+
+void billboardQuadIndices(std::uint32_t firstQuad, std::uint32_t quads, std::vector<std::uint8_t>& out) {
+    out.resize(static_cast<std::size_t>(quads) * 12);
+    for (std::uint32_t k = 0; k < quads; ++k) {
+        const std::uint16_t b = static_cast<std::uint16_t>(4 * (firstQuad + k));
+        const std::uint16_t q[6] = {b, static_cast<std::uint16_t>(b + 1), static_cast<std::uint16_t>(b + 3), static_cast<std::uint16_t>(b + 1),
+                                    static_cast<std::uint16_t>(b + 2), static_cast<std::uint16_t>(b + 3)};
+        std::memcpy(out.data() + static_cast<std::size_t>(k) * 12, q, 12);
+    }
+}
+
 }  // namespace rvk::native::sc

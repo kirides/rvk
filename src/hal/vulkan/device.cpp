@@ -112,13 +112,17 @@ void HalDevice::applyStaticOps() {
     const bool takeOver = rs.nativeStaticOps != nullptr && rs.nativeStaticOps->asBool();
     const bool compare = rs.nativeStaticOpsCompare != nullptr && rs.nativeStaticOpsCompare->asBool();
     staticOps_->setMode(native::StaticOps::Group::Static, takeOver, compare);
-    // N5.2 scene ops (native.scene_ops*): groups 1 alpha / refracted mesh ops, 2 entity overlay passes, 4 decals
+    // N5.2 scene ops (native.scene_ops*): groups 1 alpha / refracted mesh ops, 2 entity overlay passes, 4 decals, 8 sky, 16 billboards
     const bool sceneTake = rs.nativeSceneOps != nullptr && rs.nativeSceneOps->asBool();
     const bool sceneCompare = rs.nativeSceneOpsCompare != nullptr && rs.nativeSceneOpsCompare->asBool();
     const int groups = rs.nativeSceneOpsGroups != nullptr ? rs.nativeSceneOpsGroups->asInt() : 7;
     staticOps_->setMode(native::StaticOps::Group::Mesh, sceneTake && (groups & 1) != 0, sceneCompare && (groups & 1) != 0);
     staticOps_->setOverlays((sceneTake || sceneCompare) && (groups & 2) != 0);
     staticOps_->setMode(native::StaticOps::Group::Decals, sceneTake && (groups & 4) != 0, sceneCompare && (groups & 4) != 0);
+    // N5.2c: 8 the sky dome op, 16 the opaque billboards' queue
+    staticOps_->setMode(native::StaticOps::Group::Sky, sceneTake && (groups & 8) != 0, sceneCompare && (groups & 8) != 0);
+    staticOps_->setMode(native::StaticOps::Group::Billboards, sceneTake && (groups & 16) != 0, sceneCompare && (groups & 16) != 0);
+    staticOps_->setMode(native::StaticOps::Group::SkyCube, sceneTake && (groups & 32) != 0, sceneCompare && (groups & 32) != 0);
     frameTap_->setStaticOpsActive(staticOps_->active());
 }
 

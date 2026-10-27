@@ -1,6 +1,7 @@
 // The native frame's op tap (N5.0, docs/research/engine-frame/README.md): the engine's sort rules, op lookup, attribution.
 
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <vector>
 
@@ -465,4 +466,79 @@ TEST(native_refraction_copy_place) {
     CHECK(native::refractionCopyInPlace(f, 10));
     CHECK(!native::refractionCopyInPlace(f, 9));
     CHECK(!native::refractionCopyInPlace(f, 11));
+}
+
+// ---- N5.2c: the sky dome op's billboards and the opaque billboards' queue -------------------------------------------------
+
+TEST(sky_billboard_vertices_follow_fill_vertex_buffer) {
+    // one billboard: position (1, 2, 3), s = (2, 0), r = (0, 3), colour 0x80808080, uv rect (0.25, 0.5, 0.75, 1)
+    std::uint8_t bb[sc::kSkyBillboardSize]{};
+    const float pos[3] = {1, 2, 3}, axes[4] = {2, 0, 0, 3}, uv[4] = {0.25f, 0.5f, 0.75f, 1.0f};
+    const std::uint32_t colour = 0x80808080u;
+    std::memcpy(bb, pos, 12);
+    std::memcpy(bb + 0xc, axes, 16);
+    std::memcpy(bb + 0x1c, &colour, 4);
+    std::memcpy(bb + 0x20, uv, 16);
+    std::vector<std::uint8_t> v;
+    sc::skyBillboardVertices(bb, 1, v);
+    CHECK(v.size() == 4 * sc::kSkyVertexStride);
+    const auto f = [&](std::uint32_t vertex, std::uint32_t off) {
+        float x = 0;
+        std::memcpy(&x, v.data() + vertex * sc::kSkyVertexStride + off, 4);
+        return x;
+    };
+    // corners -s + r, s + r, s - r, -s - r; uv (u0 v0), (u1 v0), (u1 v1), (u0 v1)
+    CHECK(f(0, 0x18) == -2 && f(0, 0x1c) == 3 && f(1, 0x18) == 2 && f(1, 0x1c) == 3);
+    CHECK(f(2, 0x18) == 2 && f(2, 0x1c) == -3 && f(3, 0x18) == -2 && f(3, 0x1c) == -3);
+    CHECK(f(0, 0x10) == 0.25f && f(0, 0x14) == 0.5f && f(1, 0x10) == 0.75f && f(2, 0x14) == 1.0f && f(3, 0x10) == 0.25f);
+    for (std::uint32_t k = 0; k < 4; ++k) {
+        std::uint32_t c = 0;
+        std::memcpy(&c, v.data() + k * sc::kSkyVertexStride + 0xc, 4);
+        CHECK(f(k, 0) == 1 && f(k, 4) == 2 && f(k, 8) == 3 && c == colour);
+    }
+    std::vector<std::uint8_t> idx;
+    sc::skyQuadIndices(2, idx);
+    std::uint16_t q[12];
+    std::memcpy(q, idx.data(), sizeof(q));
+    CHECK(idx.size() == 24 && q[0] == 0 && q[2] == 2 && q[3] == 0 && q[5] == 3 && q[6] == 4 && q[11] == 7);
+}
+
+TEST(sky_dome_states) {
+    // the dome's BlendMode 4 (One / InvSrcAlpha): blended, depth write off, colour without alpha, LESSEQUAL
+    sc::BlendInputs b;
+    b.mode = 4;
+    const auto s = sc::deviceStates(sc::skyDomeStates(b, 1.0f), sc::Visual{3, 1, 0, 1}, 0);
+    CHECK(s[sc::StBlend] == 1 && s[sc::StSrc] == 2 && s[sc::StDst] == 6 && s[sc::StZWrite] == 0 && s[sc::StZFunc] == 4);
+    CHECK(s[sc::StColorWrite] == 7 && s[sc::StCull] == 1 && s[sc::StAlphaTest] == 0);
+    // opaque: the visual's depth write
+    sc::BlendInputs o;
+    const auto t = sc::deviceStates(sc::skyDomeStates(o, 1.0f), sc::Visual{3, 1, 0, 2}, 0);
+    CHECK(t[sc::StBlend] == 0 && t[sc::StZWrite] == 1);
+}
+
+TEST(billboard_queue_records_and_cycles) {
+    int a = 0, b = 0;
+    std::vector<sc::BillboardEntry> e(5);
+    e[0] = {&a, nullptr, nullptr, 0, 0, 3};
+    e[1] = {&a, nullptr, nullptr, 0, 0, 2};    // same keys: the same record
+    e[2] = {&b, nullptr, nullptr, 0, 0, 1};    // another material: a new record
+    e[3] = {&b, nullptr, nullptr, 0, 0, 0};    // no quads: nothing
+    e[4] = {&b, nullptr, nullptr, 0, 0, 995};  // 6 + 995 > 1000: the cycle's records drawn first, a new cycle at quad 0
+    std::vector<sc::BillboardRecord> r;
+    std::vector<sc::BillboardPlace> p;
+    sc::planBillboards(e, 1000, r, p);
+    CHECK(r.size() == 3);
+    CHECK(r[0].cycle == 0 && r[0].firstQuad == 0 && r[0].quads == 5 && r[0].keys.material == &a);
+    CHECK(r[1].cycle == 0 && r[1].firstQuad == 5 && r[1].quads == 1);
+    CHECK(r[2].cycle == 1 && r[2].firstQuad == 0 && r[2].quads == 995);
+    CHECK(p[1].cycle == 0 && p[1].quad == 3 && p[3].cycle == -1 && p[4].cycle == 1 && p[4].quad == 0);
+    // a light set / switch / blend change also starts a record
+    e[1].switchValue = 2;
+    sc::planBillboards(e, 1000, r, p);
+    CHECK(r.size() == 4 && r[1].firstQuad == 3 && r[1].quads == 2);
+    std::vector<std::uint8_t> idx;
+    sc::billboardQuadIndices(1, 1, idx);
+    std::uint16_t q[6];
+    std::memcpy(q, idx.data(), sizeof(q));
+    CHECK(q[0] == 4 && q[1] == 5 && q[2] == 7 && q[3] == 5 && q[4] == 6 && q[5] == 7);
 }

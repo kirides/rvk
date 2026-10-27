@@ -668,7 +668,11 @@ bool detourSubMeshRender(void* self, const void* mesh, std::uint32_t node, int l
 Hook<VoidThisFn> g_skydomeRender;
 void detourSkydomeRender(void* self) {
     TagScope tag(Source::Sky, self, nullptr, 0x10);
+    // a sky cube face (UpdateSkydomeEnvCubemap's view): the N5.2c scene ops compose it like the main view's sky op
+    OpTap* t = tag.d != nullptr && tag.d->phases().view() == View::SkyCube ? g_opTap.load(std::memory_order_relaxed) : nullptr;
+    if (t != nullptr) t->nonOpBegin(OpTap::NonOp::SkyCube, self, nullptr);
     g_skydomeRender.original(self);
+    if (t != nullptr) t->nonOpEnd(OpTap::NonOp::SkyCube);
 }
 
 using RenderFloatFn = void (*)(void* self, float t);
@@ -699,7 +703,11 @@ using BillboardsFn = bool (*)(void* admin);
 Hook<BillboardsFn> g_billboardsRender;
 bool detourBillboardsRender(void* admin) {
     TagScope tag(Source::Billboard, admin, nullptr, 0);
-    return g_billboardsRender.original(admin);
+    OpTap* t = tag.d != nullptr ? g_opTap.load(std::memory_order_relaxed) : nullptr;
+    if (t != nullptr) t->nonOpBegin(OpTap::NonOp::Billboards, admin, nullptr);
+    const bool r = g_billboardsRender.original(admin);
+    if (t != nullptr) t->nonOpEnd(OpTap::NonOp::Billboards);
+    return r;
 }
 
 }  // namespace

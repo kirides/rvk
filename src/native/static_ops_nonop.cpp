@@ -113,8 +113,9 @@ bool StaticOps::geometryOfVisual(const std::uint8_t* visual, Geom& g) {
     return true;
 }
 
-// GetPasses(shader, switch 0, illum, combi, not instanced, flags 0) + ExecutePass + the visual's states, per pass
-StaticOps::Skip StaticOps::nonOpPasses(const std::uint8_t* shader, const std::uint8_t* illum, std::uint32_t combi, const Geom& geometry) {
+// GetPasses(shader, switch, illum, combi, not instanced, flags 0) + ExecutePass + the visual's states, per pass
+StaticOps::Skip StaticOps::nonOpPasses(const std::uint8_t* shader, const std::uint8_t* illum, std::uint32_t combi, const Geom& geometry,
+                                       std::int32_t switchValue) {
     if (!shaderClassOk(shader)) return Skip::ShaderClass;
     if (ptr(shader, 0x220) != view_.admin) return Skip::Unreadable;
     if (get<std::uint8_t>(shader, 0x2a8) == 1) return Skip::InvalidShader;
@@ -129,7 +130,7 @@ StaticOps::Skip StaticOps::nonOpPasses(const std::uint8_t* shader, const std::ui
     in.dynamicLights = get<std::uint8_t>(list, 0x34);
     in.combi = combi;
     in.instanced = false;
-    in.switchValue = 0;
+    in.switchValue = switchValue;
     std::vector<sc::Pass> passes;
     const std::uint8_t* version = nullptr;
     if (const Skip k = shaderPasses(shader, in, version, passes); k != Skip::None) return k;
@@ -324,48 +325,230 @@ StaticOps::Skip StaticOps::composeDecals(const std::uint8_t* admin, const std::u
     return Skip::None;
 }
 
-void StaticOps::decalsBegin(void* admin, void* db) {
+bool StaticOps::nonOpGroupBegin(Group group, void* admin) {
     finishOp();
-    GroupState& gs = groups_[static_cast<std::size_t>(Group::Decals)];
-    if (!gs.active() || !inView_) return;
+    GroupState& gs = groups_[static_cast<std::size_t>(group)];
+    if (!gs.active() || !inView_) return false;
     if (verified_ == 0) verified_ = verify() ? 1 : -1;
-    if (verified_ < 0) return;
-    if (decalsVerified_ == 0) decalsVerified_ = verifyDecals() ? 1 : -1;
-    if (decalsVerified_ < 0) return;
+    if (verified_ < 0) return false;
     g_ = &gs;
     drawCount_ = 0;
-    ++gs.window.ops;
     std::memcpy(entryVsB_.data(), dev_.vsBoolConstants(), sizeof(entryVsB_));
     std::memcpy(entryPsB_.data(), dev_.psBoolConstants(), sizeof(entryPsB_));
     std::memcpy(entryVsI_, dev_.vsIntConstants(), sizeof(entryVsI_));
     std::memcpy(entryPsI_, dev_.psIntConstants(), sizeof(entryPsI_));
     nonOp_ = {};
     nonOp_.raw.context = admin;
-    nonOp_.list = List::Count;  // the per-list counts' "decals" slot
-    const Skip s = composeDecals(static_cast<U8*>(admin), static_cast<U8*>(db));
+    nonOp_.list = List::Count;  // the per-list counts' "non-op" slot
+    return true;
+}
+
+void StaticOps::nonOpGroupComposed(Skip s) {
+    blendOverrideShader_ = nullptr;
+    blendOverride_ = -1;
+    if (g_ == nullptr) return;
+    ++g_->window.ops;
     if (s != Skip::None) {
-        ++gs.skips[static_cast<std::size_t>(s)];
-        ++gs.window.opsNotComposed;
+        ++g_->skips[static_cast<std::size_t>(s)];
+        ++g_->window.opsNotComposed;
         drawCount_ = 0;
         g_ = nullptr;
         return;
     }
-    ++gs.window.opsComposed;
+    ++g_->window.opsComposed;
     op_ = &nonOp_;
     inNonOp_ = true;
     engineDraws_ = 0;
     opDiffLogged_ = false;
     taken_ = false;
-    if (gs.takeOver) {
+    if (g_->takeOver) {
         issue();
         taken_ = true;
     }
 }
 
-void StaticOps::decalsEnd() {
+void StaticOps::decalsBegin(void* admin, void* db) {
+    if (!nonOpGroupBegin(Group::Decals, admin)) return;
+    if (decalsVerified_ == 0) decalsVerified_ = verifyDecals() ? 1 : -1;
+    if (decalsVerified_ < 0) {
+        g_ = nullptr;
+        return;
+    }
+    nonOpGroupComposed(composeDecals(static_cast<U8*>(admin), static_cast<U8*>(db)));
+}
+
+void StaticOps::billboardsBegin(void* admin) {
+    if (!nonOpGroupBegin(Group::Billboards, admin)) return;
+    if (billboardsVerified_ == 0) billboardsVerified_ = verifyBillboards() ? 1 : -1;
+    if (billboardsVerified_ < 0) {
+        g_ = nullptr;
+        return;
+    }
+    nonOpGroupComposed(composeBillboards(static_cast<U8*>(admin)));
+}
+
+void StaticOps::nonOpEnd() {
     if (!inNonOp_) return;
     finishOp();
     inNonOp_ = false;
+    inSkyCube_ = false;
+}
+
+// ---- the opaque billboards' queue (eCBillboardAdmin::RenderBillboards 0x4f0530, read in the disassembly: the decompile lost
+// the vertex / index buffer writes; n52c_dump1.txt) ----------------------------------------------------------------------------
+
+namespace {
+constexpr std::uint32_t kBillboardStride = 0x34;    // CreateBuffers 0x4f00a0: POSITION, NORMAL, TANGENT, TEXCOORD0, TEXCOORD5
+constexpr std::uint32_t kBillboardMaxQuads = 1000;  // 0x4f0696: cmp ecx, 0x3e8 (VB DAT_18097115c 4000 vertices, IB 6000 indices)
+struct BbSite {
+    std::uint32_t rva;
+    std::array<std::uint8_t, 8> b;
+    std::uint32_t n;
+};
+constexpr BbSite kBillboardSites[] = {
+    {0x4f0696, {0x81, 0xf9, 0xe8, 0x03, 0, 0, 0, 0}, 6},     // the cycle's quad limit
+    {0x97115c, {0xa0, 0x0f, 0, 0, 0x70, 0x17, 0, 0}, 8},     // the buffers' sizes
+};
+}  // namespace
+
+bool StaticOps::verifyBillboards() {
+    const auto& s = engine::sym();
+    if (s.billboardSortRenderQueue == nullptr || s.billboardsRender == nullptr || engine_ == nullptr) {
+        spdlog::warn("native: scene ops: billboard symbols missing: the opaque billboards stay the engine's");
+        return false;
+    }
+    // the sort: lea r9, [rip + SortRenderQueue] (+0x54) ... call qsort (+0x9c)
+    std::array<std::uint8_t, 0xa4> b{};
+    const auto* at = static_cast<U8*>(s.billboardsRender);
+    if (at != engine_ + 0x4f0530 || !safeRead(at, b.data(), b.size())) return false;
+    constexpr std::size_t kLea = 0x4f0584 - 0x4f0530, kCall = 0x4f05cc - 0x4f0530;
+    if (b[kLea] != 0x4c || b[kLea + 1] != 0x8d || b[kLea + 2] != 0x0d || at + kLea + 7 + rel32(&b[kLea + 3]) != s.billboardSortRenderQueue ||
+        b[kCall] != 0xe8 || at + kCall + 5 + rel32(&b[kCall + 1]) != engine_ + kQsortRva) {
+        spdlog::warn("native: scene ops: RenderBillboards' qsort call site not found: the opaque billboards stay the engine's");
+        return false;
+    }
+    for (const BbSite& x : kBillboardSites) {
+        std::array<std::uint8_t, 8> got{};
+        if (!safeRead(engine_ + x.rva, got.data(), x.n) || !std::equal(got.begin(), got.begin() + x.n, x.b.begin())) {
+            spdlog::warn("native: scene ops: RenderBillboards differs at RVA {:#x}: the opaque billboards stay the engine's", x.rva);
+            return false;
+        }
+    }
+    billboardCmp_ = reinterpret_cast<int (*)(const void*, const void*)>(s.billboardSortRenderQueue);
+    if (qsort_ == nullptr) qsort_ = reinterpret_cast<QsortFn>(const_cast<std::uint8_t*>(engine_ + kQsortRva));
+    spdlog::info("native: scene ops: billboard checks passed (qsort site, comparator {:#x}, {} quads per cycle)",
+                 static_cast<U8*>(s.billboardSortRenderQueue) - engine_, kBillboardMaxQuads);
+    return true;
+}
+
+StaticOps::Skip StaticOps::composeBillboards(const std::uint8_t* admin) {
+    // CreateBuffers / CreateDefaultMaterial run first in RenderBillboards: composed from the next call on
+    U8* defaultMaterial = ptr(admin, 0x30);
+    U8* sampler = ptr(admin, 0x38);
+    U8* visual = ptr(admin, 0x40);
+    U8* defaultShader = ptr(defaultMaterial, 0x70);
+    if (visual == nullptr || ptr(admin, 0x48) == nullptr || ptr(admin, 0x50) == nullptr || defaultShader == nullptr || sampler == nullptr) {
+        return Skip::NotCreated;
+    }
+    const std::int32_t count = get<std::int32_t>(admin, 0x28);
+    if (count <= 0) return Skip::None;
+    if (!view_.valid) {
+        U8* a = ptr(defaultShader, 0x220);
+        if (a == nullptr || !composeView(a)) return Skip::Unreadable;
+    }
+    if (ptr(visual, 0x60) != nullptr) return Skip::VisualShader;
+    const auto* prim = hal::vulkan::HalPrimitive::fromApi(ptr(visual, 0x10));
+    if (prim == nullptr || !prim->drawDesc().indexed) return Skip::Primitive;
+    const auto primType = static_cast<std::uint32_t>(prim->drawDesc().type);
+    initMirror();
+    Geom base;
+    if (!geometryOfVisual(visual, base)) return Skip::Primitive;
+    if (base.streams[0].buffer == nullptr || base.streams[0].stride != kBillboardStride) return Skip::Primitive;
+    // the queue (admin +0x20, entries 0x18: billboard, light set, blend mode, switch) sorted by the engine's qsort + comparator
+    std::vector<std::uint8_t> queue(static_cast<std::size_t>(count) * 0x18);
+    if (!safeRead(ptr(admin, 0x20), queue.data(), queue.size())) return Skip::Unreadable;
+    qsort_(queue.data(), static_cast<std::size_t>(count), 0x18, billboardCmp_);
+    std::vector<sc::BillboardEntry> entries(static_cast<std::size_t>(count));
+    std::vector<U8*> boards(static_cast<std::size_t>(count));
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        const std::uint8_t* q = queue.data() + 0x18 * i;
+        U8* bb = nullptr;
+        std::memcpy(&bb, q, 8);
+        sc::BillboardEntry& e = entries[i];
+        std::memcpy(&e.lightSet, q + 8, 8);
+        std::memcpy(&e.blend, q + 0x10, 4);
+        std::memcpy(&e.switchValue, q + 0x14, 4);
+        e.material = ptr(bb, 0);
+        e.image = ptr(bb, 8);
+        const std::int32_t quads = get<std::int32_t>(bb, 0x20);
+        // more than a cycle holds would overflow the engine's buffers
+        if (quads < 0 || static_cast<std::uint32_t>(quads) > kBillboardMaxQuads) return Skip::Unreadable;
+        e.quads = static_cast<std::uint32_t>(quads);
+        boards[i] = bb;
+    }
+    std::vector<sc::BillboardRecord> records;
+    std::vector<sc::BillboardPlace> places;
+    sc::planBillboards(entries, kBillboardMaxQuads, records, places);
+    // the cycles' vertex data: each billboard's prebuilt vertices (+0x18, 4 x 0x34 per quad) copied to its quad
+    std::uint32_t cycles = 0;
+    for (const sc::BillboardRecord& r : records) cycles = std::max(cycles, r.cycle + 1);
+    std::vector<std::vector<std::uint8_t>> vb(cycles, std::vector<std::uint8_t>(static_cast<std::size_t>(kBillboardMaxQuads) * 4 * kBillboardStride));
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        if (places[i].cycle < 0) continue;
+        const std::size_t bytes = static_cast<std::size_t>(entries[i].quads) * 4 * kBillboardStride;
+        std::uint8_t* dst = vb[static_cast<std::size_t>(places[i].cycle)].data() + static_cast<std::size_t>(places[i].quad) * 4 * kBillboardStride;
+        if (!safeRead(ptr(boards[i], 0x18), dst, bytes)) return Skip::Unreadable;
+    }
+    static constexpr float kIdentityM[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    for (const sc::BillboardRecord& r : records) {
+        // the record's shader: its material's (the resource touched / cached by the engine first), else the admin's default
+        // shader with the record's BlendMode (+0x50) and image (eCColorSrcSampler::SetImageResource(admin +0x38))
+        U8* shader = nullptr;
+        blendOverrideShader_ = nullptr;
+        blendOverride_ = -1;
+        if (r.keys.material != nullptr) {
+            shader = ptr(r.keys.material, 0x70);
+        } else if (r.keys.image != nullptr) {
+            shader = defaultShader;
+            blendOverrideShader_ = defaultShader;
+            blendOverride_ = r.keys.blend;
+            if (ptr(sampler, 0x90) != defaultShader + 0xf8) return Skip::Unreadable;
+            const std::int32_t slot = get<std::int32_t>(sampler, 0x98, -1);
+            if (slot < 0 || slot >= 16) return Skip::Unreadable;
+            poolsOf(defaultShader)->slotImage[static_cast<std::size_t>(slot)] = r.keys.image;
+        }
+        if (shader == nullptr) continue;
+        // SetGlobalAlpha(1, 0), SetWorldMatrix(identity, 0)
+        writeAlpha(0, 1.0f);
+        writeWorld(0, kIdentityM);
+        // the illumination built on the stack: list = light set +0x10 (or null), f 1, +0xc / +0xd 0, no static SH (+0x90 0)
+        alignas(16) std::uint8_t illum[0x120]{};
+        U8* list = r.keys.lightSet != nullptr ? static_cast<U8*>(r.keys.lightSet) + 0x10 : nullptr;
+        const float one = 1.0f;
+        std::memcpy(illum, &list, 8);
+        std::memcpy(illum + 8, &one, 4);
+        // the visual's record: min vertex 4 first, 4 n vertices, start index 6 first, 2 n primitives, base 0
+        Geom g = base;
+        g.minIndex = r.firstQuad * 4;
+        g.numVertices = r.quads * 4;
+        g.startIndex = r.firstQuad * 6;
+        g.primCount = r.quads * 2;
+        const std::size_t before = drawCount_;
+        if (const Skip k = nonOpPasses(shader, illum, 0, g, r.keys.switchValue); k != Skip::None) return k;
+        std::vector<std::uint8_t> idx;
+        sc::billboardQuadIndices(r.firstQuad, r.quads, idx);
+        const auto* v0 = vb[r.cycle].data() + static_cast<std::size_t>(r.firstQuad) * 4 * kBillboardStride;
+        for (std::size_t d = before; d < drawCount_; ++d) {
+            sc::DrawDesc& x = *draws_[d];
+            x.primType = primType;
+            x.vertexStride = kBillboardStride;
+            x.vertexBytes.assign(v0, v0 + static_cast<std::size_t>(r.quads) * 4 * kBillboardStride);
+            x.indexBytes = idx;
+        }
+    }
+    blendOverrideShader_ = nullptr;
+    blendOverride_ = -1;
+    return Skip::None;
 }
 
 bool StaticOps::geometryBytesEqual(const sc::DrawDesc& c, const sc::DrawDesc& captured, std::string& why) {

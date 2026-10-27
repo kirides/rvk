@@ -135,7 +135,7 @@ const char* StaticOps::name(Skip s) {
     static constexpr const char* kNames[] = {"none", "kind", "overlay passes", "shader class", "shader version", "invalid shader",
                                              "permutation not compiled", "switch element", "primitive", "image override", "unreadable",
                                              "pass kind", "instance sort", "texture", "overlay shader", "decal entity proxy",
-                                             "buffers not created yet", "visual shader"};
+                                             "buffers not created yet", "visual shader", "sky camera", "sky object rebuilt this frame"};
     const auto i = static_cast<std::size_t>(s);
     return i < std::size(kNames) ? kNames[i] : "?";
 }
@@ -145,6 +145,9 @@ const char* StaticOps::name(Group g) {
         case Group::Static: return "static ops";
         case Group::Mesh: return "scene ops [alpha / refracted meshes]";
         case Group::Decals: return "scene ops [decals]";
+        case Group::Sky: return "scene ops [sky dome]";
+        case Group::Billboards: return "scene ops [opaque billboards]";
+        case Group::SkyCube: return "scene ops [sky cube faces]";
         default: return "?";
     }
 }
@@ -165,7 +168,10 @@ void StaticOps::setMode(Group group, bool takeOver, bool compare) {
     g.window = {};
     g.skips = {};
     static constexpr const char* kWhat[kGroups] = {"the main view's static mesh z / solid ops", "the main view's alpha / refracted mesh ops",
-                                                   "the main view's decals (eCDecalAdmin::RenderDecals)"};
+                                                   "the main view's decals (eCDecalAdmin::RenderDecals)",
+                                                   "the main view's sky dome op (stars, sun, moon, dome)",
+                                                   "the main view's opaque billboards (eCBillboardAdmin::RenderBillboards)",
+                                                   "the sky environment cube's faces (eCSkydome_PS::Render, cube camera)"};
     spdlog::info("native: {}: {} ({}{}{})", name(group), g.active() ? "on" : "off", kWhat[static_cast<std::size_t>(group)],
                  takeOver ? ", drawn by the renderer" : "", compare ? ", compared with the engine's draws" : "");
 }
@@ -240,12 +246,11 @@ void StaticOps::viewEnd() {
     inView_ = false;
 }
 
-bool StaticOps::composeView(const std::uint8_t* admin) {
+bool StaticOps::composeView(const std::uint8_t* admin, const std::uint8_t* camera) {
     view_ = {};
     view_.admin = admin;
     view_.gfx = ptr(admin, 0x38);
-    U8* base = ptr(db_, 0x14c0);
-    U8* cam = ptr(base, 0x1738);
+    U8* cam = camera != nullptr ? camera : ptr(ptr(db_, 0x14c0), 0x1738);
     if (cam == nullptr) return false;
     float view[16], proj[16], vp[16], db[16], invView[16];
     if (!rd(cam, 0x20, view, 64) || !rd(cam, 0x60, proj, 64) || !rd(cam, 0xa0, db, 64) || !rd(cam, 0xe0, vp, 64) ||
@@ -282,8 +287,9 @@ bool StaticOps::composeView(const std::uint8_t* admin) {
     sc::camObstacle(get<float>(appCam, 0xe4), view_.obstacleX, view_.obstacleY);
     // eCGfxFog::Execute(db +0x14c8), unless eCGfxFog::ms_pMasterFog is set
     U8* fog = engine::sym().gfxMasterFog != nullptr ? ptr(engine::sym().gfxMasterFog, 0) : nullptr;
-    if (fog == nullptr) fog = ptr(db_, 0x14c8);
-    if (fog != nullptr) {
+    if (fog == nullptr && camera == nullptr) fog = ptr(db_, 0x14c8);
+    view_.fog = camera == nullptr;
+    if (view_.fog && fog != nullptr) {
         sc::fogConstants(get<std::uint8_t>(fog, 0x18) == 1, get<std::uint32_t>(fog, 0x1c), get<float>(fog, 0x28), get<float>(fog, 0x2c),
                          get<float>(fog, 0x30), view_.fogC3, view_.fogC4);
     }
@@ -297,6 +303,10 @@ bool StaticOps::composeView(const std::uint8_t* admin) {
 // ---- helpers ----------------------------------------------------------------------------------------------------------------
 
 bool StaticOps::shaderClassOk(const void* shader) { return get<const void*>(shader, 0) == engine_ + kShaderDefaultVtable; }
+
+int StaticOps::blendModeOf(const std::uint8_t* owner) const {
+    return owner == blendOverrideShader_ && blendOverride_ >= 0 ? blendOverride_ : get<std::int32_t>(owner, 0x50);
+}
 
 const StaticOps::Live& StaticOps::liveOf(const d3d9::Shader* s) {
     auto [it, inserted] = live_.try_emplace(s);
@@ -391,7 +401,7 @@ void StaticOps::initMirror() {
     for (std::uint32_t k = 0; k < 4; ++k) std::memcpy(mirror_.adminVs[4 + k], view_.invProj[k], 16);
     for (std::uint32_t k = 0; k < 3; ++k) std::memcpy(mirror_.adminVs[8 + k], view_.invView[k], 12);
     std::memcpy(mirror_.adminVs[11], view_.camPos, 16);
-    std::memcpy(mirror_.adminVs[30], view_.fogC4, 16);
+    if (view_.fog) std::memcpy(mirror_.adminVs[30], view_.fogC4, 16);
     std::memcpy(mirror_.adminPs[0], view_.camPos, 16);
     std::int32_t w = 0, h = 0;
     {
@@ -400,8 +410,10 @@ void StaticOps::initMirror() {
         h = static_cast<std::int32_t>(vp.height);
     }
     sc::viewToScreen(w, h, mirror_.adminPs[1]);
-    std::memcpy(mirror_.adminPs[3], view_.fogC3, 16);
-    std::memcpy(mirror_.adminPs[4], view_.fogC4, 16);
+    if (view_.fog) {
+        std::memcpy(mirror_.adminPs[3], view_.fogC3, 16);
+        std::memcpy(mirror_.adminPs[4], view_.fogC4, 16);
+    }
     mirror_.adminPs[5][0] = view_.obstacleX;
     mirror_.adminPs[5][1] = view_.obstacleY;
 }
@@ -544,7 +556,7 @@ sc::DrawDesc& StaticOps::drawFrom(const Geom& g) {
 }
 
 // every live register of the draw's shaders from the mirror (+ the shader's own pools)
-void StaticOps::constantsInto(sc::DrawDesc& d, const std::uint8_t* shader, const std::uint8_t* biasShader) {
+void StaticOps::constantsInto(sc::DrawDesc& d, const std::uint8_t* shader, const std::uint8_t* biasShader, bool defaultClass) {
     const auto* vs = static_cast<const d3d9::Shader*>(d.vs);
     const auto* ps = static_cast<const d3d9::Shader*>(d.ps);
     const Live& lv = liveOf(vs);
@@ -560,9 +572,13 @@ void StaticOps::constantsInto(sc::DrawDesc& d, const std::uint8_t* shader, const
         if (!d.vsLive[r]) continue;
         const float* v = nullptr;
         sc::Src src = sc::Src::Pool;
-        if (r < 31) {
+        if (!defaultClass && r >= pools->vsFirst && r - pools->vsFirst < pools->vsCount) {
+            v = pools->vs[r - pools->vsFirst];
+        } else if (r < 31) {
             v = mirror_.adminVs[r];
             if (r <= 11 || r == 30) src = sc::Src::Native;
+        } else if (!defaultClass) {
+            // eCShaderBase::GetGlobalShaderConstants is null: nothing else of the path writes these
         } else if (r < 232) {
             v = mirror_.global[r - 31];
             if (r >= 32) src = sc::Src::Native;  // the instances' world rows and fade (.xyz of c32 + 4i: carry-over)
@@ -580,6 +596,8 @@ void StaticOps::constantsInto(sc::DrawDesc& d, const std::uint8_t* shader, const
         if (r < 6) {
             v = mirror_.adminPs[r];
             if (r != 2) src = sc::Src::Native;
+        } else if (!defaultClass) {
+            if (r >= pools->psFirst && r - pools->psFirst < pools->psCount) v = pools->ps[r - pools->psFirst];
         } else if (r < 14) {
             if (r >= pools->psFirst && r - pools->psFirst < pools->psCount) v = pools->ps[r - pools->psFirst];
         } else if (r < 38) {
@@ -678,7 +696,7 @@ StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8
     if (vsElem == nullptr || psElem == nullptr) return Skip::NotCompiled;
     writeLighting(pass);
     sc::BlendInputs b;
-    b.mode = get<std::int32_t>(owner, 0x50);
+    b.mode = blendModeOf(owner);
     b.maskRef = get<std::uint8_t>(owner, 0x58);
     b.hasOpacity = get<std::uint8_t>(owner, 0x330) != 0;
     b.refracted = get<std::uint8_t>(owner, 0x420) != 0;
@@ -708,7 +726,13 @@ StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8
     d.states = sc::deviceStates(rs, vis, get<std::uint32_t>(admin, 0x340));
     constantsInto(d, owner, shader);
     if (const Skip s = materialSamplers(d, owner, psElem); s != Skip::None) return s;
-    // the admin's samplers bound by BeginMaterial (s0 mask, s1 refraction, s2 depth map) and BindLightmaps (s4, s5)
+    return adminSamplers(d, owner, ps);
+}
+
+// the admin's samplers bound by BeginMaterial (s0 mask, s1 refraction, s2 depth map) and BindLightmaps (s4, s5); stages the PS
+// samples beyond those and the material's are inherited
+StaticOps::Skip StaticOps::adminSamplers(sc::DrawDesc& d, const std::uint8_t* owner, const d3d9::Shader* ps) {
+    U8* admin = view_.admin;
     struct AdminSlot {
         std::uint32_t stage, slot;
         const void* image;
@@ -722,8 +746,8 @@ StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8
         if (ptr(imageOverride_, 8 * a.stage) != nullptr) return Skip::ImageOverride;
         bool ok = false;
         sc::DrawDesc::Sampler& s = d.samplers[a.stage];
-        s.texture = textureOfImageData(data, ok);
-        if (!ok) d.inheritMask |= static_cast<std::uint16_t>(1u << a.stage);
+        s.texture = adminStagesUnbound_ ? nullptr : textureOfImageData(data, ok);
+        if (!ok && !adminStagesUnbound_) d.inheritMask |= static_cast<std::uint16_t>(1u << a.stage);
         std::uint32_t raw[6] = {get<std::uint32_t>(slot, 0), get<std::uint32_t>(slot, 4), get<std::uint32_t>(slot, 0xc), get<std::uint32_t>(slot, 8),
                                 get<std::uint32_t>(slot, 0x10), get<std::uint32_t>(slot, 0x18)};
         for (std::uint32_t i = 0; i < 6; ++i) s.ss[i] = raw[i] == kNoState ? defFilter : raw[i];
@@ -852,7 +876,7 @@ StaticOps::Skip StaticOps::shaderPasses(const std::uint8_t* owner, const sc::Pas
     if (ver == nullptr) return Skip::None;
     if (get<const void*>(ver, 0) != engine_ + kVersionDefault3Vtable) return Skip::Version;
     sc::BlendInputs b;
-    b.mode = get<std::int32_t>(owner, 0x50);
+    b.mode = blendModeOf(owner);
     b.hasOpacity = get<std::uint8_t>(owner, 0x330) != 0;
     b.refracted = get<std::uint8_t>(owner, 0x420) != 0;
     b.tradeAlphaAsSolid = get<std::uint8_t>(owner, 0x79) != 0;
@@ -1050,6 +1074,50 @@ void StaticOps::opEnter(const Op& op) {
     if (!active() || !inView_) return;
     if (verified_ == 0) verified_ = verify() ? 1 : -1;
     if (verified_ < 0) return;
+    if (op.kind == OpKind::Skydome && op.list == List::Sky) {
+        GroupState& gs = groups_[static_cast<std::size_t>(Group::Sky)];
+        if (!gs.active()) return;
+        if (skyVerified_ == 0) skyVerified_ = verifySky() ? 1 : -1;
+        if (skyVerified_ < 0) return;
+        g_ = &gs;
+        drawCount_ = 0;
+        ++g_->window.ops;
+        std::memcpy(entryVsB_.data(), dev_.vsBoolConstants(), sizeof(entryVsB_));
+        std::memcpy(entryPsB_.data(), dev_.psBoolConstants(), sizeof(entryPsB_));
+        std::memcpy(entryVsI_, dev_.vsIntConstants(), sizeof(entryVsI_));
+        std::memcpy(entryPsI_, dev_.psIntConstants(), sizeof(entryPsI_));
+        const Skip s = composeSky(op);
+        blendOverrideShader_ = nullptr;
+        blendOverride_ = -1;
+        if (s != Skip::None) {
+            ++g_->skips[static_cast<std::size_t>(s)];
+            ++g_->window.opsNotComposed;
+            drawCount_ = 0;
+            g_ = nullptr;
+            return;
+        }
+        ++g_->window.opsComposed;
+        op_ = &op;
+        engineDraws_ = 0;
+        opDiffLogged_ = false;
+        taken_ = false;
+        if (g_->takeOver) {
+            // eCSkydome_PS::Render's draw tag (engine/scene_hooks: TagScope(Sky, the property set, entity +0x10), the op kept)
+            d3d9::draws::Tag& tag = dev_.drawTag();
+            const d3d9::draws::Tag saved = tag;
+            const void* sky = ptr(op.raw.context, 0x18);
+            const void* op0 = tag.op;
+            tag = {};  // opDesc 0: the scope is opened without an op of its own
+            tag.source = d3d9::draws::Source::Sky;
+            tag.context = sky;
+            tag.op = op0;
+            tag.entity = ptr(sky, 0x10);
+            issue();
+            tag = saved;
+            taken_ = true;
+        }
+        return;
+    }
     if (op.kind != OpKind::Mesh) return;
     Group group = Group::Count;
     if (op.list == List::ZPass || op.list == List::Solid) group = Group::Static;
@@ -1293,9 +1361,12 @@ void StaticOps::issue() {
         }
         dev_.setIndices(const_cast<Buffer*>(static_cast<const Buffer*>(d.indices)));
         if (!d.vertexBytes.empty()) {
-            // CPU-generated geometry (decals): our own dynamic buffers, the composed bytes at the engine's positions
-            if (!ownVb_) ownVb_ = dev_.createBuffer(360000, USAGE_DYNAMIC | USAGE_WRITEONLY, POOL_DEFAULT, false, false);
-            if (!ownIb_) ownIb_ = dev_.createBuffer(20000, USAGE_DYNAMIC | USAGE_WRITEONLY, POOL_DEFAULT, true, false);
+            // CPU-generated geometry (decals, billboards, the sky's billboards): our own dynamic buffers, the composed bytes at
+            // the engine's positions
+            // CPU-generated geometry (decals 360,000 / 20,000 bytes, billboards 208,000 / 12,000, the sky's stars 0x80 / 12 bytes
+            // per star)
+            if (!ownVb_) ownVb_ = dev_.createBuffer(512 * 1024, USAGE_DYNAMIC | USAGE_WRITEONLY, POOL_DEFAULT, false, false);
+            if (!ownIb_) ownIb_ = dev_.createBuffer(64 * 1024, USAGE_DYNAMIC | USAGE_WRITEONLY, POOL_DEFAULT, true, false);
             const std::uint32_t vOff = d.streams[0].offset + d.minIndex * d.vertexStride, iOff = d.startIndex * 2;
             if (vOff + d.vertexBytes.size() <= ownVb_->size() && iOff + d.indexBytes.size() <= ownIb_->size()) {
                 if (void* p = ownVb_->lock(0, 0, LOCK_DISCARD)) {
@@ -1361,7 +1432,7 @@ void StaticOps::report() {
         spdlog::info("native: static ops: idle (the engine checks failed)");
         return;
     }
-    static constexpr const char* kListNames[] = {"z", "solid", "debug", "sky", "refracted", "alpha", "late", "decals"};
+    static constexpr const char* kListNames[] = {"z", "solid", "debug", "sky", "refracted", "alpha", "late", "non-op"};
     for (std::size_t gi = 0; gi < kGroups; ++gi) {
         GroupState& g = groups_[gi];
         if (!g.active()) continue;
