@@ -103,7 +103,7 @@ Each stage behind a `native.*` setting (default off), A/B against the engine pat
 |---|---|---|---|
 | **N5.0 op tap** | read the main view's sorted lists at `Execute` every frame into a `native::FrameDesc` (views, passes, ops: context kind, entity, material, desc, sort key, list) | nothing (observer) | per pass and kind equal to the HAL draw stream (`-LogFrame` counts; ops -> draws incl. z-pass merges, instancing, SpeedTree batches) |
 | **N5.1 static ops** | z pre-pass + solid ops of static meshes (incl. terrain layers, masked, instanced) executed by our recorder with the engine's own translated shaders, constants / states composed natively; the engine's `RenderZPass` / `Render` of those ops skipped | the HAL path of those ops | pub_interior / monastery_hall / jungle / savegame equal to the engine |
-| N5.2 alpha / refracted / fading statics, decals, billboards, sky dome | the rest of the main view's mesh-like ops | | as above + water spots |
+| N5.2 alpha / refracted / fading statics, decals, billboards, sky dome (+ sky cube faces) | the rest of the main view's mesh-like ops | | as above + water spots (done: sections 8, 9) |
 | N5.3 skinned actors | palette + morphs from the actor (D 1), body parts | | hero_idle / pub_idle |
 | N5.4 SpeedTree, billboards, vegetation | global wind, batches, the 1000-instance grass ring | | jungle / forest spots |
 | N5.5 shadows | terrain VSM, cascades (engine fit E 2.2), point atlas, `post_SSM` mask | engine cascades + mask | shadow-compare |
@@ -281,7 +281,7 @@ reproduced first (the "own modes" of section 4).
 ## 8. N5.2 result: alpha / refracted mesh ops, overlay passes, decals (2026-10-27)
 
 Settings `native.scene_ops` (the renderer draws them) and `native.scene_ops_compare` (every engine draw of them is diffed against the
-composed draw of its position), Debug | NoAB, default off; `native.scene_ops_groups` (Debug, default 7) = bit 1 alpha / refracted mesh
+composed draw of its position), Debug | NoAB, default off; `native.scene_ops_groups` (Debug, default 7; 63 since N5.2c, section 9) = bit 1 alpha / refracted mesh
 ops, bit 2 entity overlay passes (also for the N5.1 static ops while scene ops are on), bit 4 decals. Off = nothing beyond the N5.0 tap's
 pass-through; `native.static_ops` behaves as before (its overlay ops stay the engine's unless scene ops are on). Same machinery as N5.1
 (`native::StaticOps`, one `GroupState` per group: take-over / compare switches, counts, skips), the decals in
@@ -424,7 +424,8 @@ sampled places).
   `eCShaderVersionSkyDome_2_0` 0x9da420, one pass, states 0x6d9740: AlphaModulate One / InvSrcAlpha, alpha write off, LESSEQUAL, depth
   write off) with VS c31 sun normal, c32 sun colour, c33 sky colour, c34 haze colour (corrects E 2.7), PS c6 cloud rgb + thickness,
   c7 sun colour, samplers s9.. cloud / absorption images; the 32 x 25 screen-grid strip (1534 triangles). Composing it needs the camera
-  hack's matrices, the sky version class's element offsets and the sun's per-frame vertex data: not done in this stage.
+  hack's matrices, the sky version class's element offsets and the sun's per-frame vertex data: done in N5.2c (section 9, which also
+  corrects this register map: the registers are pool registers written by the shader's property notify).
 * **Opaque billboards' queue** (`eCBillboardAdmin::RenderBillboards` 0x4f0530; ~1 draw per view at the savegame, none at the spots): queue
   entries 0x18 {billboard, light set, blend, lights}, the engine's qsort with `SortRenderQueue` 0x4f0ff0, batches of <= 1000 quads, the
   default shader `admin +0x30` with BlendMode written directly (+0x50) and `SetImageResource(admin +0x38)`, an illumination built on the
@@ -432,3 +433,165 @@ sampled places).
   (re-read the disassembly before composing it).
 * Overlay passes and additive light passes: composed, never met in game (above).
 * As in N5.1 the engine's code still runs for every taken-over op / path (only its GPU work is ours).
+
+## 9. N5.2c result: the sky dome op, the opaque billboards' queue, the sky cube faces (2026-10-27)
+
+Groups of `native.scene_ops_groups` (behind `native.scene_ops` / `native.scene_ops_compare` as in section 8): **8** the sky dome op
+(list +0x1530), **16** the opaque billboards' queue (`eCBillboardAdmin::RenderBillboards`), **32** the sky environment cube's
+faces (`eCSkydome_PS::Render` inside `UpdateSkydomeEnvCubemap`). Code: `src/native/static_ops_sky.cpp` (sky + cube faces),
+`static_ops_nonop.cpp` (billboards, beside the decals), the pure rules in `static_compose.*` (`skyBillboardVertices`,
+`skyQuadIndices`, `skyDomeStates`, `planBillboards`, `billboardQuadIndices`; tests `sky_*`, `billboard_*`). Dumps:
+`B:\DevDrive\risen-ghidra\n52c_dump1.txt` / `n52c_dump2.txt` (clone EngineD) + capstone disassembly of the test copy's Engine.dll.
+All [C] unless marked; "checked" = held in the compare runs below.
+
+**Sky dome op [C, checked]** (`eCSkydome_PS::Render` 0x6e4730, disassembled; the context's slot 0x6e8a10 passes context +0x18 = the
+property set; nothing when it is null or `PS +0x18 & 1` is clear):
+* Camera: `eCGfxCamera::ms_pActiveCamera` (main view; the cube camera `+0x3c0` when `+0x3cc`). The hack copies the view (+0x20),
+  zeroes `_41 _42 _43`, writes it back, `+0x120 = view; bCMatrix::Invert(+0x120)`; `+0xe0 = (+0x60) * (+0x20)` (SharedBase
+  `bCMatrix::operator*`, the projection on the left); a projection copy with `_33 = 1`, `_43 = 0`, `+0xe0` recomputed, dirty
+  `+0x160`, `eCGfxCamera::Execute` (full path: SetCamera c0..c3 = +0xe0, or `+0xa0 *= +0x20` for depth-bias materials, c4..c7 =
+  `bCMatrix::GetInverted(+0x60)`, c8..c10 = +0x120, c11 / PS c0 = position + the app camera's far, PS c1 viewport, PS c5.xy
+  obstacle). The restore after the moon does the same with the saved view / projection (Invert and operator* again, not a copy),
+  then Execute. The composition calls the same four SharedBase functions (`Invert`, `operator*`, `operator*=`, `GetInverted`) on
+  copies: bit-equal. The later ops of the view keep the pre-sky camera constants (the restore reproduces them bit for bit: the
+  N5.2 alpha / refracted compares agree).
+* Stars (`CreateStars` 0x6e3ee0 true: texture +0x140 and the object's count +0x290 == StarCount +0x28; else rebuilt inside this
+  Render: that frame is left to the engine): shader +0x148 `BlendMode` = 7 through the property notify, `SetImageResource(+0x160,
+  +0x140)` (the sampler's pool slot, `UpdateSampler` 0x6c3ab0), `eCColorSrcConstant::SetColor(+0x168, +0x390)` -> its pool register
+  (element +0x68 pool, +0x70 register: r, g, b of the colour and a = element +0x60; `OnNotifyPropertyValueChangedExitEx` 0x6bfda0),
+  then `eCSkyObject::Render(+0x2d0)` of the object at +0x278. Sun (texture +0x138): `SetImageResource(+0x158, +0x138)` on shader
+  +0x150 (its BlendMode untouched), `SetBillboardRenderCount(1)`, its one billboard rewritten every frame = position (0, 0, -1 =
+  DAT_1809f1854), s = (size, 0), r = (0, size), colour 0xffffffff, uv (0, 0, 1, 1), size = SunSize +0x3a8 x +0x50; dirty +0x49 ->
+  FillVertexBuffer locks the (managed) VB at 0 with flags 0 every frame; object +0x170, matrix +0x310. Moon (texture +0x130;
+  `CreateMoon` builds the billboard (0, 0, -1), s = (+0x78, 0), r = (0, +0x78) once): shader +0x148 again with `BlendMode` 5, image
+  +0x130, colour +0x58, object +0x220, matrix +0x350. **Stars and moon share one eCShaderDefault whose blend mode, image and colour
+  change between the two draws every frame** (at the op's entry it holds the moon's).
+* `eCSkyObject`: billboards `bTValArray` data +0x10 / count +0x18 (`eSSkyObjectBillboard` 0x30: position, s @0xc, r @0x14, colour
+  @0x1c, uv rect @0x20), shader +0x20, vertex data +0x28, index data +0x30, declaration +0x38, visual +0x40, dynamic +0x48, dirty
+  +0x49, depth write +0x4c, depth func +0x50. `Render(world)` 0x6e25e0: shader and `FillVertexBuffer` 0x6e1a50 (vertex data; the
+  record's primitives / 2 billboards; when dirty: lock 0, n x 0x80 bytes, DISCARD only when dynamic) -> `SetWorldMatrix(world, 0)`,
+  `SetGlobalAlpha(1, 0)`, `GetPasses(shader, 0, null, 0, false, 0)`, ExecutePass + `eCGfxVisual::Execute`. Vertex (stride 0x20; decl
+  POSITION f3, COLOR @0xc, TEXCOORD0 f2 @0x10, TEXCOORD1 f2 @0x18 = the corner): corners `-s + r`, `s + r`, `s - r`, `-s - r` with
+  uv (u0 v0), (u1 v0), (u1 v1), (u0 v1); indices `4k + (0, 1, 2, 0, 2, 3)` (FillIndexBuffers 0x6e1940); visual cull 1 (none).
+* Dome: `eCShaderSkyDome` (vtable 0x9da1e8: eCShaderBase's ExecutePass / OnGetPasses / ExecuteShaderConstants / SetSwitch,
+  `GetGlobalShaderConstants` null, `HasOpacity` / `IsRefracted` false, `GetGlobalAlpha` 1, `SetGlobalAlpha` a no-op, `SetWorldMatrix`
+  -> its own VS pool register 0x23) with **one** version object `eCShaderVersionSkyDome_2_0` (vtable 0x9da420, at +0x268 = version
+  2; OnGetPasses' min(admin +0x170, +0x68) falls back to it): GetPasses 0x6d91a0 = one pass {version, flags 0, illumination, switch};
+  Execute 0x6d90d0: VS element `version +0x1b0`, PS `+0x1d0` (+0x1c0 / +0x1e0 with SunOcclusion `shader +0x324`), states 0x6d9740 =
+  FillBlendingRenderStates(not additive, fade 1), colour on / alpha off, LESSEQUAL, depth write off when blended (the dome's
+  BlendMode 4: One / InvSrcAlpha), render mode 0; then `ExecuteShaderConstants` with **eCShaderBase's register map**: admin VS
+  c0..c30, the shader's VS pool from `+0x9c` (c31 = (+0x318 .. +0x320, 1), c32 = (+0x2d0 .. +0x2d8, 1), c33 = (+0x2b8 .. +0x2c0, 1),
+  c34 = (+0x2e8 .. +0x2f0, 1), c35.. world; which field is sun normal / sky / haze / sun colour stays as E 2.7 inferred it), admin PS
+  c0..c5, the shader's PS pool from `+0xcc` (c6 = (+0x300, +0x304, +0x308, thickness +0x310), c7 = the same vector as VS c32); no
+  global pool, no lighting pool. **Correction to E 2.7 / section 8**: those pool registers are written by
+  `eCShaderSkyDome::OnNotifyPropertyValueChangedExitEx` 0x6d7840 (property changes: the weather's), not by Render: Render writes the
+  fields +0x300..+0x310 directly without a notify, so PS c6 holds the values of the last notify; the composition takes the pools at
+  the op's entry. Geometry: the screen grid (`CreateBuffers` 0x6e5f90: 32 x 25 vertices, x, y = `2 i / (n - 1) - 1`, z = 1, float3; a
+  zig-zag triangle strip of `rows x cols x 2 - 2` = 1534 triangles), visual cull 1, depth write off.
+* Render's other work (kept: the engine's code still runs in a take-over): the sun VB rewrite; the clouds' `Scale` (1 / +0xb8,
+  1 / +0xbc on elements +0x110 / +0x118) and the scroller's `SetDirection(+0x108, +0xb0)` through property notifies (the scroller
+  writes its pool register only in `SetTime` 0x6e0c00, the admin's Process); none of them changed a composed register in the runs.
+
+**Opaque billboards' queue [C, checked]** (`eCBillboardAdmin::RenderBillboards` 0x4f0530, read in the disassembly; the decompile
+lost the buffer writes): `CreateBuffers` / `CreateDefaultMaterial` 0x4efdc0 (admin +0x30 = a material resource whose +0x70 is an
+eCShaderDefault: TransformationType 7, DisableLighting, MaxShaderVersion 3, BlendMode 0; its one sampler at admin +0x38); queue +0x20 /
+count +0x28 (entries 0x18: billboard, light set, blend mode, **switch value** = the `GetPasses` argument; section 8 called it
+"lights"), qsorted by the engine's qsort with `SortRenderQueue` 0x4f0ff0 (call site checked), emptied (+0x28 = 0) at the end. For
+each entry: if the cycle's quads + its quads > 1000 (0x4f0696) and records are open, the open records are drawn first; entries with
+0 quads (`bb +0x20`) are skipped entirely; the first added entry of a cycle locks VB +0x48 (4000 x 0x34, DISCARD) and IB +0x50 (6000 x
+2, DISCARD) and resets the cycle's quad count; a record {material bb +0, image bb +8, blend, first quad, quads, light set, switch}
+starts when the cycle has none or any of the five keys differs from the previous record's; quad q's indices `4q + (0, 1, 3, 1, 2,
+3)` at `6q`; vertices = the billboard's prebuilt `bb +0x18` (quads x 0xd0 bytes) copied at `q x 0xd0`. Drawing a cycle: unlock both;
+per record the visual's draw record (`admin +0x40`) gets start index 6 first, min vertex 4 first, 4 n vertices, base 0, 2 n
+primitives; shader = the material's +0x70 (the resource touched first: QueueData / CacheResource; no shader: skipped) or, without
+material and with an image, the default shader with `BlendMode` = the record's and `SetImageResource(admin +0x38, image)`;
+`SetGlobalAlpha(1, 0)`, `SetWorldMatrix(identity, 0)`; an illumination on the stack `{light set ? light set +0x10 : null, f = 1,
++0xc = +0xd = 0, static SH +0x90 = 0}`; `GetPasses(shader, switch, &illum, 0, false, 0)`, ExecutePass + `eCGfxVisual::Execute`. Composed
+and compared byte for byte (vertex / index data) like the decals; the take-over draws from our own buffers.
+
+**Sky cube faces [C, checked]** (`UpdateSkydomeEnvCubemap`, A 2.4): each face's `eCSkydome_PS::Render` with `+0x3cc = 1` is the
+same composition with the cube camera `+0x3c0` (view at the origin, 90 deg, near 1, far 1000) and the face's viewport; that path runs
+no `eCGfxFog::Execute` (PS c3 / c4, VS c30 as the admin's pools hold them). Hooked in `eCSkydome_PS::Render`'s draw-tag detour (view
+SkyCube), outside Execute, as a non-op unit. With the enhanced water the cube is redrawn whole every frame (5 faces), else one face per
+frame during a 10-s refresh.
+
+**SpeedTree wind clock (section 8's side question) [C]**: `eCSpeedTreeAdmin::UpdateWindMatrices` 0x6efa10 reads
+`eCTimer::GetInstance() +0x10` (= `eCTimer::GetGameTime` 0x4ceee0, ms) / 1000: the **game time**, the clock the enhanced water
+follows (ocean.md 4.5), not real time. `eCTimer::Update` 0x4cf0e0 advances +0x10 by the real time-stamp delta x the time scale +0x34
+(not while paused). The wind accumulates `min(max(t - last, 0), 0.04 s)` (DAT_1809f159c) per update at `admin +0x40` and advances every
+`eCSpeedTreeWind_PS` with it. So the wind stands still under rvkcompare's time freeze, and its phase is the sum of **clamped** steps:
+every frame longer than 40 ms (loading screens at ~0.1 fps, hitches) adds only 0.04 s. Two runs reach a spot with a different history
+of long frames (load times; a take-over's CPU cost) and so with a different frozen wind phase: that explains section 8's
+waterfall_jungle frond without a real-time dependency [I: those frond draws were not compared]. For N5.4: take the wind from `admin
++0xac` / `+0x6c` at the op (D 2.4), never from a clock of our own.
+
+**Verification** (compare = the composed draw vs the engine's own device state at `prepareDraw`, every field class of sections 7 / 8:
+draw count, tag, shaders, declaration, streams, indices, ranges incl. primitive type and base vertex, the CPU vertex / index bytes
+against the engine's buffers at its draw, states, textures + sampler states, every CTAB-live float register, all bool / int
+registers):
+
+| run | sky dome | sky cube faces | opaque billboards | N5.1 static / N5.2 alpha + refracted / decals (same run) | left to the engine |
+|---|---|---|---|---|---|
+| compare, 4 spots (harbour_night, sea_horizon, jungle, pub_interior), water off | 22,760 / 22,760 | - | 568 / 568 | - | billboards: unreadable 1 |
+| compare, 7 spots (+ beach_night_storm, hero_idle (clock running), harbour_docks), water on (cube every frame) | 31,812 / 31,812 | 158,496 / 158,496 | 0 | 1,932,280 / 154,185 / 47,995, all equal | cube: buffers not created 1; permutations not compiled 256 / 36 / 2 |
+| compare, savegame Risen_Save_0009 (`rvk_perfsave` hold 30) | 13,976 / 13,976 | 92 / 92 | 0 (the engine drew none: the tap lists no Billboard draw without op) | 892,782 / 68,770 / 3,062, all equal | cube 2, permutations 186 / 25 / 1 |
+| take-over + compare, 6 spots, water on, **validation on** | 28,324 / 28,324 | 147,636 / 147,636 | 573 / 573 | - / 142,407 / 22,955 | as above |
+| savegame, take-over switched on at frame 2000 (+ compare, **validation on**, `-MaxFps 60`) | 10,104 / 10,104 (5,880 drawn by us) | 72 / 72 (40) | 0 | - / 49,985 / 2,200 | cube 2 |
+
+(draws equal / compared; 0 mismatches in every field class; in the take-over runs every dropped engine draw equals ours and every own draw
+equals its composition at its own `prepareDraw`; 0 validation messages in both validation runs, also in the savegame switch run. The
+op tap: every 5-s window clean except one savegame window with two unexplained 0-draw Animation ops (outside scope, as in section 8).)
+The first cube build compared 111,987 of 149,316 face draws different in one field: s0 (the shadow mask stage of the billboard shaders)
+was composed as the admin's image while the engine had none: `HalDevice::SetRenderTarget` (as `eCDX9Device`) unbinds all 16 stages, and
+UpdateSkydomeEnvCubemap's BeginMaterial runs **before** the face's SetRenderTarget, so the admin stages are empty at the faces' draws
+(a new engine rule; composed since). The one billboard skip ("unreadable": a queue read / count check of one frame) was not
+investigated further.
+
+Images (`water-compare.ps1`, the 6 spots; mean |d| 8-bit / share of pixels with a channel |d| > 32; engine vs take-over with
+`native.scene_ops_groups=63`, engine vs engine = the noise floor; `out\water\20261027-230512` / `230911` / `231059` / `231432`):
+
+| spot | water off: take-over | water off: noise | water on: take-over | water on: noise |
+|---|---|---|---|---|
+| harbour_night | 0.50 / 0.037 % | 0.56 / 0.036 % | 0.51 / 0.027 % | 0.43 / 0.030 % |
+| beach_night_storm | 4.54 / 3.215 % | 4.07 / 3.442 % | 42.14 / 29.21 % | 41.65 / 28.55 % |
+| sea_horizon | 0.41 / 0.000 % | 0.77 / 0.000 % | 1.48 / 0.000 % | 0.12 / 0.000 % |
+| jungle | 1.14 / 0.149 % | 1.35 / 0.240 % | 2.31 / 0.740 % | 1.12 / 0.170 % |
+| pub_interior | 0.58 / 0.003 % | 0.49 / 0.004 % | 1.19 / 0.101 % | 0.63 / 0.002 % |
+| hero_idle | 2.20 / 1.698 % | 3.16 / 2.773 % | 4.87 / 1.718 % | 1.72 / 0.966 % |
+
+`shot-reviewer` (out/n52c/review: grids, x8 / x12 diff maps): water off, every spot at the noise floor; no dome seam, haze, cloud,
+sun / moon / star, billboard, decal, transparency or geometry difference anywhere. beach_night_storm with water on: the engine picture
+caught a lightning flash, both enhanced runs did not (take-over vs noise run directly: 2.04, no sky-cube seam visible in either; the
+flash's reflection is not judged by these pictures). **With water on the take-over darkens the sky slightly** (sea_horizon: the
+upper image bands -2.9 .. -3.5 levels, the noise run -0.1; hero_idle about -4 %): reproduced weaker in a repeat (sea_horizon 0.55,
+bands -1.1; noise 0.14), absent with water off. Bisected by group at sea_horizon (noise 0.12 - 0.14): groups 31 (no cube) 0.17,
+sky op alone 0.26, cube faces alone 0.56, all 0.55 - 1.48 - and **compare only (no draw of ours, the engine draws everything) 0.36
+with the same darker-sky bands (-0.7)**. So the shift is not in the drawn content (which compares equal) but follows our CPU cost:
+with the water on the cube's five faces are composed every frame, the frames take longer, and the frozen spot reaches its capture
+with a different history [I: most likely more game time / weather blending between rvkcompare's `set_game_time` and its time freeze,
+which moves the sky colours; the same mechanism as the wind phase above; not proven]. Savegame switched inside one run (frames 1960 /
+1980 off, 2020 / 2040 on): 3.61 / 0.69 % (off -> off), 4.49 / 1.08 % (across the switch, 40 frames apart), 3.59 / 0.65 % (on -> on);
+the 1,731 8x8 blocks static in both same-mode pairs stay static across the switch (mean 0.038; 0.016 / 0.018 within the modes).
+
+Cost (savegame, `-Exe RisenTest.exe -Vsync off -Perf`, `rvk_perfsave` hold 40, the last six 5-s `perf:` windows; the machine idle (no
+ffmpeg / find.exe, checked before); scene ops on = groups 63, i.e. N5.2 + N5.2c; out/n52c/perf_1..4_rvk.log): GPU unchanged (1.50 /
+1.51 ms water off, 2.00 - 2.03 / 2.01 - 2.02 ms water on); CPU engine + HAL per frame water off 3.36 - 3.45 ms (p50 frame 3.73 - 3.83 ms,
+269 - 276 fps) -> 3.80 - 3.93 ms (p50 4.19 - 4.30, 239 - 246 fps): **+0.45 ms**; water on 4.14 - 4.21 ms (p50 4.58 - 4.62, 222 - 225
+fps) -> 4.88 - 4.93 ms (p50 5.29 - 5.34, 192 - 193 fps): **+0.73 ms**, the extra ~0.3 ms being the sky cube's five faces composed and
+issued every frame. As before the engine's code still runs for every taken-over op / path. Our own CPU-geometry buffers are now locked
+DISCARD over just the range a draw reads (was the whole 512 KB / 64 KB buffer per draw: a full ring copy per decal / billboard / sky
+object draw).
+
+Engine rules newly learned [C]: the sky's camera hack recomputes the inverse view and the view-projection with SharedBase's `Invert` /
+`operator*` (projection on the left) and the restore does it again; stars and moon share one eCShaderDefault re-configured (BlendMode,
+image, colour) between the two draws every frame; the sun's billboard and its VB are rewritten every frame (a plain lock of a managed
+buffer); the dome's sky / haze / sun registers are pool registers written by its shader's property notify, not by Render (PS c6 lags
+Render's field writes by one notify); `eCShaderSkyDome` has one version object (2) and eCShaderBase's register map (no global, no
+lighting pool); the billboard queue's fourth field is the GetPasses switch value, records break on five keys, cycles hold 1000 quads;
+in the sky cube `SetRenderTarget` empties every stage after the refresh's BeginMaterial, so the admin stages are unbound at the faces'
+draws; the SpeedTree wind runs on the game time with 40-ms clamped steps.
+
+**Not yet / open**: the billboard queue was met only at the spot runs (~570 draws; none in the savegame runs this time, where N5.0 had
+~1 per view): a billboard-heavy view was not found; the one "unreadable" billboard skip is not explained; the lightning flash in the
+sky cube (beach_night_storm) is not judged (no flash in the enhanced pictures); the water-on sky shift is attributed to our CPU cost
+[I], not proven; the overlay / additive light passes of section 8 still never met.
