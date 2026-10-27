@@ -328,6 +328,12 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         nativeOpaque_->apply(rs.nativeOpaque->asBool());
     }
     nativeOpaque_->setParts(nativeParts_.get());
+    // the native frame's op tap (native/frame_tap.h, docs/research/engine-frame/README.md N5.0)
+    frameTap_ = std::make_unique<native::FrameTap>(dev_);
+    if (rs.nativeFrameTap != nullptr) {
+        reg.onChange(*rs.nativeFrameTap, [this](const settings::Setting& s) { frameTap_->apply(s.asBool()); }, this);
+        frameTap_->apply(rs.nativeFrameTap->asBool());
+    }
     if (rs.rtSource != nullptr && rtScene_) {
         const auto applyRtSource = [this](const settings::Setting& s) { rtScene_->setMirrorSource(s.asInt() == 1 ? nativeParts_.get() : nullptr); };
         reg.onChange(*rs.rtSource, applyRtSource, this);
@@ -1310,6 +1316,7 @@ void HalDevice::logFrameStats() {
         lastStatsTime_ = now;
         lastStatsFrame_ = s.frames;
         logFrameStructure();
+        if (frameTap_) frameTap_->report();
         spdlog::info("hal: frame {}: {} draws total, {} clears, {} render passes; skipped: {} no shader, {} no target, {} vertex "
                      "input, {} pipeline; HAL Draw calls {}; {} unimplemented slots seen; texture CPU copies {:.1f} MiB",
                      s.frames, s.totalDraws, s.totalClears, s.totalRenderPasses, s.skippedNoShader, s.skippedNoTarget,

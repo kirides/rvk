@@ -32,4 +32,20 @@ const char* currentLabel();
 // the attached device when called on its render thread, else null (engine detours that need the frame state)
 d3d9::Device* renderDevice();
 
+// The N5.0 op tap (native/frame_tap.*): told about every main-view eCFrustumDatabase::Execute (before and after the original)
+// and every render-context slot entry with the eCRenderOp2* the engine passes. Render thread; set / cleared on it.
+class OpTap {
+public:
+    virtual ~OpTap() = default;
+    virtual void executeBegin(void* db, void* desc) = 0;
+    virtual void executeEnd(void* db) = 0;
+    virtual void opEnter(const void* op) = 0;
+};
+void setOpTap(OpTap* tap);
+
+// Makes the entries of slot `slot` (0..3) of a render-context vtable reach the op tap and the draw tag's op: a slot that is
+// already ours stays; any other is replaced by a pass-through thunk (only the tag's op around the original). Returns false
+// when the slot cannot be patched (pool full, unreadable). `original` receives the engine's function of the slot.
+bool ensureOpSlot(const void* vtable, int slot, const void** original);
+
 }  // namespace rvk::engine::scene

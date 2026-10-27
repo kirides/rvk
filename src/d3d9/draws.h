@@ -92,6 +92,7 @@ struct Tag {
     const void* meshResource = nullptr;  // eCMeshResource2*
     Water water = Water::None;           // the material's water body (only resolved in the Refracted / Alpha passes)
     const char* materialName = nullptr;  // its name (engine hooks' cache: valid while the process runs), null = not read
+    const void* op = nullptr;            // the eCRenderOp2* whose context slot is executing (native/frame_tap: N5.0), null = none
 };
 
 Kind classify(Source source, std::uint32_t opDesc, scene::View view, scene::Pass pass);

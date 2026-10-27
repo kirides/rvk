@@ -30,6 +30,7 @@ using d3d9::scene::Pass;
 using d3d9::scene::View;
 
 std::atomic<d3d9::Device*> g_device{nullptr};
+std::atomic<OpTap*> g_opTap{nullptr};  // native/frame_tap (N5.0), null = off
 
 // call-nesting flags: which caller an eCFrustumDatabase::Execute belongs to (render thread only)
 int g_inSceneFilter = 0;   // eCImageFilterScene::OnUpdateOutput: the main camera into the image effect's scene target
@@ -154,6 +155,7 @@ Hook<ExecuteFn> g_execute;
 void detourExecute(void* db, void* desc) {
     const View v = g_inRenderEntity > 0 ? View::Preview : (g_inSceneFilter > 0 || g_inCameraRender > 0) ? View::Main : View::Other;
     ViewScope scope(v, Pass::Setup, "eCFrustumDatabase::Execute");
+    OpTap* tap = nullptr;
     if (scope.d != nullptr && v == View::Main) {
         scope.d->beginMainView();
         readMainCamera(*scope.d, db);
@@ -161,8 +163,12 @@ void detourExecute(void* db, void* desc) {
         if (g_inSceneFilter > 0) {
             if (d3d9::Texture* t = textureOf(scope.d->renderTarget(0), *scope.d)) scope.d->tagImage(t, ImageRole::SceneHdr);
         }
+        // the N5.0 op tap: the lists as Execute will run them (native/frame_tap)
+        tap = g_opTap.load(std::memory_order_relaxed);
+        if (tap != nullptr) tap->executeBegin(db, desc);
     }
     g_execute.original(db, desc);
+    if (tap != nullptr) tap->executeEnd(db);
     // injection point (d3d9/inject.h): the scene is complete, the post chain has not run
     if (scope.d != nullptr && v == View::Main) {
         scope.d->inject(d3d9::inject::Point::AfterMainView);
@@ -384,6 +390,8 @@ struct TagScope {
         t = {};
         t.source = source;
         t.context = object;
+        // a render function inside an op's slot (particles, sky, ...) keeps the executing op
+        t.op = op != nullptr ? op : saved.op;
         if (op != nullptr) t.opDesc = *reinterpret_cast<const std::uint32_t*>(static_cast<const std::uint8_t*>(op) + 8);
         if (entityAt != 0 && object != nullptr) {
             t.entity = *reinterpret_cast<const void* const*>(static_cast<const std::uint8_t*>(object) + entityAt);
@@ -468,6 +476,9 @@ template <std::size_t I>
 void contextSlot(void* context, const void* op, void* db) {
     constexpr const ContextSlot& e = kContextSlots[I];
     TagScope tag(e.source, context, op, 0x10);
+    if (tag.d != nullptr) {
+        if (OpTap* t = g_opTap.load(std::memory_order_relaxed)) t->opEnter(op);
+    }
     if constexpr (e.pass != Pass::None) {
         PassScope pass(e.pass, e.name);
         g_slotOriginal[I](context, op, db);
@@ -536,6 +547,9 @@ template <std::size_t I>
 void dynamicSlot(void* context, const void* op, void* db) {
     const DynamicSlot& e = g_dynamic[I];
     TagScope tag(e.source, context, op, 0x10);
+    if (tag.d != nullptr) {
+        if (OpTap* t = g_opTap.load(std::memory_order_relaxed)) t->opEnter(op);
+    }
     e.original.load(std::memory_order_acquire)(context, op, db);
 }
 
@@ -544,6 +558,8 @@ constexpr std::array<RenderOpFn, sizeof...(I)> makeDynamicThunks(std::index_sequ
     return {&dynamicSlot<I>...};
 }
 constexpr std::array<RenderOpFn, kDynamicSlots> kDynamicThunks = makeDynamicThunks(std::make_index_sequence<kDynamicSlots>{});
+
+RenderOpFn originalOfThunk(const void* fn);
 
 void patchContextVtable(const void* context, Source source, const char* what) {
     void* vtable = nullptr;
@@ -560,6 +576,7 @@ void patchContextVtable(const void* context, Source source, const char* what) {
         void** slot = static_cast<void**>(vtable) + s;
         void* current = nullptr;
         if (!safeRead(slot, &current, sizeof(current)) || current == nullptr || current == empty) continue;
+        if (originalOfThunk(current) != nullptr) continue;  // already ours (the op tap's pass-through)
         if (g_dynamicUsed >= kDynamicSlots) break;
         DWORD old = 0;
         if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) continue;
@@ -588,6 +605,49 @@ void* detourSkydomeCreateContext(void* ps) {
     void* context = g_skydomeCreateContext.original(ps);
     if (sym().rcBaseRender != nullptr) patchContextVtable(context, Source::Sky, "eCSkydome_PS");
     return context;
+}
+
+// ---- the N5.0 op tap's pass-through slots (native/frame_tap) ----------------------------------------------------------------
+// Slots of render contexts without a draw-tag thunk (particles, strips, light streaks, billboards, the empty RenderRefracted of
+// the animation context, the sky's empty RenderAlpha, ...) get one when the tap first sees an op of theirs: it only sets the
+// tag's op around the original call and tells the tap. Patched on the render thread before Execute calls the slot.
+struct OpSlot {
+    std::atomic<RenderOpFn> original{nullptr};
+};
+constexpr std::size_t kOpSlots = 32;
+std::array<OpSlot, kOpSlots> g_opSlots;
+std::size_t g_opSlotsUsed = 0;
+
+template <std::size_t I>
+void opSlot(void* context, const void* op, void* db) {
+    const RenderOpFn original = g_opSlots[I].original.load(std::memory_order_acquire);
+    d3d9::Device* d = device();
+    if (d == nullptr) return original(context, op, db);
+    const void* saved = d->drawTag().op;
+    d->drawTag().op = op;
+    if (OpTap* t = g_opTap.load(std::memory_order_relaxed)) t->opEnter(op);
+    original(context, op, db);
+    d->drawTag().op = saved;
+}
+
+template <std::size_t... I>
+constexpr std::array<RenderOpFn, sizeof...(I)> makeOpThunks(std::index_sequence<I...>) {
+    return {&opSlot<I>...};
+}
+constexpr std::array<RenderOpFn, kOpSlots> kOpThunks = makeOpThunks(std::make_index_sequence<kOpSlots>{});
+
+// the engine's function behind one of our thunks, null when `fn` is not ours
+RenderOpFn originalOfThunk(const void* fn) {
+    for (std::size_t i = 0; i < kSlotCount; ++i) {
+        if (reinterpret_cast<const void*>(kSlotThunks[i]) == fn) return g_slotOriginal[i];
+    }
+    for (std::size_t i = 0; i < kDynamicSlots; ++i) {
+        if (reinterpret_cast<const void*>(kDynamicThunks[i]) == fn) return g_dynamic[i].original.load(std::memory_order_acquire);
+    }
+    for (std::size_t i = 0; i < kOpSlots; ++i) {
+        if (reinterpret_cast<const void*>(kOpThunks[i]) == fn) return g_opSlots[i].original.load(std::memory_order_acquire);
+    }
+    return nullptr;
 }
 
 // bool eCSubMesh::Render(eCMeshResource2 const*, ulong node, int, eEShaderMaterialLightmapCombi, eSShaderMaterialIllumination*,
@@ -674,6 +734,33 @@ int install() {
 }
 
 d3d9::Device* renderDevice() { return device(); }
+
+void setOpTap(OpTap* tap) { g_opTap.store(tap, std::memory_order_release); }
+
+bool ensureOpSlot(const void* vtable, int slot, const void** original) {
+    if (vtable == nullptr || slot < 0 || slot > 3) return false;
+    void** p = static_cast<void**>(const_cast<void*>(vtable)) + slot;
+    void* current = nullptr;
+    if (!safeRead(p, &current, sizeof(current)) || current == nullptr) return false;
+    if (const RenderOpFn o = originalOfThunk(current)) {
+        if (original != nullptr) *original = reinterpret_cast<const void*>(o);
+        return true;
+    }
+    const std::lock_guard lock(g_dynamicMutex);
+    if (g_opSlotsUsed >= kOpSlots) return false;
+    DWORD old = 0;
+    if (!VirtualProtect(p, sizeof(void*), PAGE_READWRITE, &old)) return false;
+    const std::size_t i = g_opSlotsUsed++;
+    g_opSlots[i].original.store(reinterpret_cast<RenderOpFn>(current), std::memory_order_release);
+    *p = reinterpret_cast<void*>(kOpThunks[i]);
+    DWORD ignored = 0;
+    VirtualProtect(p, sizeof(void*), old, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), p, sizeof(void*));
+    if (original != nullptr) *original = current;
+    spdlog::info("scene: op tap: vtable {} slot {} ({}) patched (pass-through, {} of {} op slots used)", vtable, slot, current, g_opSlotsUsed,
+                 kOpSlots);
+    return true;
+}
 
 void attach(d3d9::Device* device) {
     g_device.store(device, std::memory_order_release);

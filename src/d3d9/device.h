@@ -382,6 +382,28 @@ public:
     virtual void observeOpaque(Device& /*device*/, const ReplaceQuery& /*query*/) {}
 };
 
+// The N5.0 op tap (native/frame_tap.*): every draw, at the start of prepareDraw (before anything is decided), with the tag
+// and the phase. Must not change device state. Render thread.
+struct DrawTapInfo {
+    std::uint32_t index = 0;  // the device's draw number (stats().draws)
+    scene::Phase phase{};
+    draws::Kind kind = draws::Kind::Unknown;
+    const draws::Tag* tag = nullptr;
+    std::uint32_t primitives = 0;
+    std::uint32_t instances = 1;
+    bool instanced = false;  // stream 0 frequency INDEXEDDATA
+    bool additive = false;   // alpha blending on with destination ONE
+    bool colorWrite = true;  // any colour channel written (COLORWRITEENABLE != 0)
+    std::uint64_t vsHash = 0;  // the vertex shader's hash (0 = none bound)
+    std::uint64_t psHash = 0;
+    std::uint32_t blend = 0;   // (ALPHABLENDENABLE != 0) | SRCBLEND << 8 | DESTBLEND << 16 | ZFUNC << 24 (diagnostics)
+};
+class DrawTap {
+public:
+    virtual ~DrawTap() = default;
+    virtual void onDraw(const DrawTapInfo& draw) = 0;
+};
+
 // Draw observation (enh/rt_scene: the ray tracing scene, docs/research/rt-reflections.md 3): an enhancement that reads the
 // engine's geometry and per-draw constants (world rows in the vertex shader constants) without changing anything. Indexed
 // draws from buffers of the views / kinds it observes are shown to it in prepareDraw, before the draw is recorded (the
@@ -784,6 +806,8 @@ public:
     void addDrawReplacer(DrawReplacer* replacer);
     void removeDrawReplacer(DrawReplacer* replacer);
     // draw observation (enh/rt_scene): an observer must outlive its registration; adding twice is a no-op
+    // the N5.0 op tap (native/frame_tap): null = off
+    void setDrawTap(DrawTap* tap) { drawTap_ = tap; }
     void addDrawObserver(DrawObserver* observer);
     void removeDrawObserver(DrawObserver* observer);
     // Buffer: its static GPU copy was replaced, or it is released (render thread; tells the observers)
@@ -1394,6 +1418,7 @@ private:
     std::unordered_set<std::uint64_t> waterLogged_;  // material x pixel shader pairs whose first water / refracted draw was logged
     std::vector<DrawReplacer*> replacers_;
     std::vector<DrawObserver*> observers_;
+    DrawTap* drawTap_ = nullptr;
     RtSceneRef rtScene_;
     std::map<std::string, std::string> status_;
     std::uint32_t shadowDepthMaps_ = 0;

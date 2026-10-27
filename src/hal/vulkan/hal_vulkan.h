@@ -29,6 +29,7 @@
 #include "enh/rt_shadows.h"
 #include "enh/shadows.h"
 #include "enh/water.h"
+#include "native/frame_tap.h"
 #include "overlay/overlay.h"
 #include "hal/stub_generated.h"
 #include "hal/types.h"
@@ -523,6 +524,7 @@ private:
     std::unique_ptr<enh::Shadows> shadows_;      // shadows.* (a draw replacer: the sun's shadow mask)
     std::unique_ptr<enh::NativeParts> nativeParts_;      // the scene mirror's parts as draw data (native passes)
     std::unique_ptr<enh::NativeShadows> nativeShadows_;  // native.shadows (the native sun cascades)
+    std::unique_ptr<native::FrameTap> frameTap_;          // native.frame_tap (N5.0: the main view's ops + draw attribution)
     std::unique_ptr<enh::NativeOpaque> nativeOpaque_;  // native.opaque (a draw replacer + a pass: the native renderer's static meshes)
     std::unique_ptr<enh::RtScene> rtScene_;      // the ray tracing scene (a draw observer + a pass; active while a consumer holds it)
     std::unique_ptr<enh::RtDebug> rtDebug_;      // rt.debug (a consumer of rtScene_)

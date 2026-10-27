@@ -1719,6 +1719,18 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .flags = Flag::Debug,
     });
+    r.nativeFrameTap = &reg.add({
+        .key = "native.frame_tap",
+        .label = "Native frame: op tap",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Reads the main view's render ops as the engine executes them (the sorted lists of eCFrustumDatabase::Execute) "
+                       "and maps every draw of the view to its op; rvk.log `native: frame tap:` every 5 s, the op lists with -LogFrame. "
+                       "Observes only.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
     r.nativeDebug = &reg.add({
         .key = "native.debug",
         .label = "Native opaque debug view",

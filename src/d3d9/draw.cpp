@@ -637,6 +637,24 @@ bool Device::gbufferEligible(const scene::Phase& phase, draws::Kind kind) const 
 bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     lastRecord_ = nullptr;
     customVertices_ = 0;
+    if (drawTap_ != nullptr) {
+        // the N5.0 op tap sees every draw, also the ones skipped below
+        DrawTapInfo t;
+        t.index = stats_.draws;
+        t.phase = phases_.current();
+        t.kind = draws::classify(tag_.source, tag_.opDesc, t.phase.view, t.phase.pass);
+        t.tag = &tag_;
+        t.primitives = geom.primitives;
+        t.instanced = (streams_[0].freq & STREAMSOURCE_INDEXEDDATA) != 0;
+        t.instances = t.instanced ? std::max(1u, streams_[0].freq & 0x3FFFFFFFu) : 1u;
+        t.additive = rs_[RS_ALPHABLENDENABLE] != 0 && rs_[RS_DESTBLEND] == BLEND_ONE;
+        t.colorWrite = rs_[RS_COLORWRITEENABLE] != 0;
+        t.vsHash = vs_ ? vs_->hash : 0;
+        t.psHash = ps_ ? ps_->hash : 0;
+        t.blend = (rs_[RS_ALPHABLENDENABLE] != 0 ? 1u : 0u) | (rs_[RS_SRCBLEND] & 0xff) << 8 | (rs_[RS_DESTBLEND] & 0xff) << 16 |
+                  (rs_[RS_ZFUNC] & 0xff) << 24;
+        drawTap_->onDraw(t);
+    }
     if (!vs_ || !ps_ || vs_->module == VK_NULL_HANDLE || ps_->module == VK_NULL_HANDLE) {
         ++stats_.drawsSkipped;  // fixed-function draws are not emulated
         ++stats_.skippedNoShader;
