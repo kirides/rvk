@@ -277,3 +277,158 @@ Not yet: the overlay passes; additive light passes (kind 1) follow the same rule
 material classes (`eCShaderLeafs`, decals, sky), alpha / refracted lists (N5.2). The engine's code still runs for every taken-over op
 (only its GPU work is ours): the CPU cost is the engine's plus the composition; skipping the engine's slot needs its side effects
 reproduced first (the "own modes" of section 4).
+
+## 8. N5.2 result: alpha / refracted mesh ops, overlay passes, decals (2026-10-27)
+
+Settings `native.scene_ops` (the renderer draws them) and `native.scene_ops_compare` (every engine draw of them is diffed against the
+composed draw of its position), Debug | NoAB, default off; `native.scene_ops_groups` (Debug, default 7) = bit 1 alpha / refracted mesh
+ops, bit 2 entity overlay passes (also for the N5.1 static ops while scene ops are on), bit 4 decals. Off = nothing beyond the N5.0 tap's
+pass-through; `native.static_ops` behaves as before (its overlay ops stay the engine's unless scene ops are on). Same machinery as N5.1
+(`native::StaticOps`, one `GroupState` per group: take-over / compare switches, counts, skips), the decals in
+`src/native/static_ops_nonop.cpp`.
+
+**Scope.** Kind Mesh ops of the alpha list (+0x14e8) and the refracted list (+0x1578): every blend mode (C 2.2), the EnableAlphaZWrite
+z-fill + colour pair, fading statics (fade < 1: alpha ops), node / whole-mesh ops; the entity overlay passes of any mesh op; the decals.
+Left to the engine (counted as skips): a permutation not compiled yet (compiled on demand by the engine at that draw), shader classes
+other than `eCShaderDefault` / `eCShaderVersionDefault_3_0`. Not done: the sky dome op, the opaque billboards' queue (see "Not yet").
+
+**Alpha / refracted mesh ops [C].** `eCRenderContextMesh::Render / RenderAlpha / RenderRefracted` are all `jmp 0x5c7110` (F 3): the N5.1
+solid composition applies unchanged; only the op's fade and the material's blend mode differ, and between the lists Execute's
+`EndMaterial` / `CopyCurrentRTToImage` / `BeginMaterial` re-binds the admin samplers (s1 = the refraction copy): the composition reads the
+admin slots and pools at each op's entry, so the re-bind is seen. Two engine-side details matter for a take-over:
+* the slot thunk tells the op tap about an op **inside** the slot's pass marker (`engine/scene_hooks.cpp contextSlot`): the refracted
+  ops' own draws must be in the Refracted pass (draw kind Refracted, the water replacer, phase-dependent observers);
+* the draw tag of `eCSubMesh::Render` carries the material's water classification and name in the Refracted / Alpha passes
+  (`TagScope`); the composition reproduces it (`engine::scene::subMeshWater`) and it is a compared field. With `water.enabled` the
+  enhanced water's DrawReplacer therefore acts on the composed draw exactly as on the engine's (same kind, tag, state, constants).
+
+**Overlay passes [C]** (`eCShaderBase::OnGetPasses` 0x6d3170, `ExecutePass` 0x6d2060, FUN_1806cc610; dumps frameC_dump2..4): after the
+base shader's version GetPasses, for flags 1 (burned, shader +0x88), 2 (frozen, +0x80), 4 (highlighted, +0x90) in that order:
+`RequestData(res, 1)` (no wait) and, when `res +0x70` (an `eCShaderDefault`) exists, that shader's own `OnGetPasses` (vtable +0x1c8) with
+the base's switch, illumination, combi and instancing, flags 0 (overlays do not nest; its version = min(admin +0x170, its +0x68)). The
+passes land in the shared `ms_arrShaderPasses` with the overlay's version object; `ExecutePass(i)` on the base shader: **SetSwitch and
+the depth-bias c0 switch use the base shader**, the version's Execute uses its owner (the overlay shader): blend mode, global alpha
+(the shared c32.w), `ExecuteShaderConstants` (its pools and samplers). Instanced batches carry flags too (they break on them). Composed
+for static and scene ops (`native.scene_ops_groups` bit 2).
+
+**Decals [C]** (`eCDecalAdmin::RenderDecals` 0x4fc220, frameD_dump1.txt 5582-6124; layouts in byte offsets): queue = admin `+0x20` (array of
+decal pointers, count `+0x28`) filtered by: entity (proxy at decal `+0x10`: when its slot +8 is `eCEntityProxy::ResolveEntity`, the
+entity is `*(decal +0x18)` +0), `entity +0xe4 == db +8`, vertex count `+0x30` != 0, index count `+0x48` != 0, entity `+0xf8` != 0; entries
+`{decal, entity +0xf8 + 0x78}` (16 bytes) qsorted by the engine's qsort with `SortRenderQueue` 0x4fcf80 (call site checked). Lock cycles
+(VB admin `+0x60` 360,000 bytes, IB `+0x68` 20,000, DISCARD at offset 0): a decal above 6,000 vertices or 10,000 indices is never
+drawn; the cycle flushes (draws its records) when a decal would overflow it, and at the end. A new record (material `+0`, image `+8`,
+lightmap mesh `+0x58`, illumination, first vertex, start index) starts when material, image, lightmap mesh, light list (`illum +0`) or
+outdoor factor (`illum +8`) change, or after a record whose first decal has static lights (`illum +0xd`), static SH (`+0x90`) or a
+lightmap mesh. Per decal: indices first, rebased by `(short)` the cycle's vertex count; vertices (stride 0x3c) from `+0x28`: dynamic
+decals (`+0x54 == 1`) through SharedBase's `bCVector::Transform` (position) and `TransformDirection` (normal `+0xc`, tangent `+0x18`) with
+the entity's `+0x60`, COLOR0 = `int(alpha +0x50 x 255) << 24 | 0xffffff`; static decals copied, COLOR0 replaced only when alpha < 1.
+Per record: material shader (`+0x70`; null: skipped) or, without material, the admin's default shader `+0x48` with
+`eCColorSrcSampler::SetImageResource(admin +0x50, image)` (the pool slot's image; no image: skipped); `SetGlobalAlpha(1, 0)`,
+`SetWorldMatrix(identity, 0)`, `BindLightmaps(lightmap mesh, 1)` when there is one, `GetPasses(shader, 0, illum, combi, false, 0)`, per pass
+`ExecutePass` + the visual's (`admin +0x58`) render mode / cull / depth / depth write and the primitive: indexed list, min vertex = first
+vertex, vertices, start index, `indices / 3` primitives, base 0. No Begin / EndMaterial, no state block. Compared: everything above plus
+the vertex / index bytes against the engine's dynamic buffers at its draw; take-over draws from our own dynamic VB / IB (the same bytes at
+the same positions) and the engine's code still runs (its side effects: resource cache touches, BindLightmaps, SetImageResource, the
+locks).
+
+**Refraction copy (as data).** `FrameDesc::refraction`: the render-target desc's image `desc +0` and its API texture (`+0x60`) at Execute's
+entry; the HAL's `CopyCurrentRTToImage` in the main view reports to the tap, which checks that exactly one copy goes into that texture,
+after the last op up to the +0x1530 list and before the first refracted op (`refractionCopyInPlace`): every main view of every run below
+(e.g. 400 of 400 per window, 0 bad). The gfx admin's `+0x5b8` gate was not read (the copy was never missing).
+
+**Bool / int registers.** None of the 2,483 captured game shaders (corpus) has a bool or int constant in its CTAB, and no CTAB-live one
+was met in any compared draw ("0 live in the CTABs"). The material path never calls the HAL's bool / int setters, so the composition of
+the two register files is the device's at the op's entry; every draw compares all 16 + 16 per stage (64 per draw: 190 M registers in
+the spot run below), all equal (also for the N5.1 ops).
+
+**Verification** (compare only: `native.frame_tap` + `native.static_ops_compare` + `native.scene_ops_compare`, water off, validation off):
+
+| run | static z / solid (N5.1) | alpha | refracted | z-fill (of alpha / refracted) | decals | left to the engine |
+|---|---|---|---|---|---|---|
+| 13 rvkcompare spots (pub_interior, monastery_hall, jungle, lake_jungle, waterfall_jungle, sea_cliff, harbour_mouth, harbour_night, harbour_docks, lava_cave, crystal_cave, swamp_camp, pub_idle; actors shown) | 2,976,196 / 2,976,196 | 189,034 / 189,034 | 67,163 / 67,163 | 5,182 / 5,182 | 65,316 / 65,316 | permutation not compiled 359 + 50 + 5, unreadable 6 |
+| savegame Risen_Save_0009 (`rvk_perfsave` hold 30) | 774,953 / 774,953 | 52,990 / 52,990 | 6,723 / 6,723 | 304 / 304 | 2,724 / 2,724 | 162 + 22 + 1 |
+| 11 spots, first build (no decals) | 2,771,343 / 2,771,343 | 179,533 / 179,533 | 63,044 / 63,044 | 5,164 / 5,164 | - | 366 + 53 |
+
+(draws equal / compared; every field class of N5.1 plus bool / int registers, the water tag and the decals' vertex / index bytes;
+0 mismatches in every class; the op tap's order / content / attribution checks 0 everywhere, but 3 of its 5-s windows per spot run are
+NOT clean from unexplained 0-draw Vegetation / Animation ops while actors are shown (`show_actors=1`, outside N5.2's scope)). Registers / stages compared in the 13-spot run: 173 M + 7.0 M + 1.7 M float, 9.4 M + 1.3 M + 0.4 M stages.
+
+**Additive light passes (kind 1).** Counted per draw class and by the lights of each composed sub-mesh draw (dynamic list `+0x34` +
+static `illum +0xd`). At all 13 spots and the savegame: 0, 1 or 2 lights only (spots: 1,198,502 / 291,040 / 103,399 static-op draws,
+173,252 / 41,791 / 36,022 alpha / refracted; 3 or 4 lights: 0). An additive pass needs 4 (passes of up to 3): the light sets give at most
+2 dynamic point lights (E 3.2: `count +0x34 < 2`), and `illum +0xd` (the static per-pixel lights of `eCIlluminated_PS`) was 0 for every
+composed draw, so no draw with 3 lights exists either. Kind-1 passes are composed by the same verified rules (pass flags, PS index,
+states: blend One / One or the mode's, no sun / lightmap) but **were never met, so they are not verified in game**; `native: lights:` in
+rvk.log names the first 4-light sub-meshes should a place have them.
+
+**Overlay passes.** Composed, 0 met in these runs: in the pub and elsewhere the overlay flags occur on skinned actors (N5.0), which are
+not mesh ops; a highlighted (focused) static item would be one. **Not verified in game.**
+
+**Take-over** (`native.scene_ops`, with compare: the dropped engine draws vs ours; our own draws re-captured at their `prepareDraw` and
+compared with their composition; static ops off; `water-compare.ps1`, validation on):
+
+| run | alpha | refracted | z-fill | decals | own draws vs composition | validation |
+|---|---|---|---|---|---|---|
+| 7 spots, water off | 110,591 / 110,591 | 35,367 / 35,367 | 4,367 / 4,367 | 7,188 / 7,188 | 153,146 equal | 0 messages (both runs) |
+| 7 spots, water on (enhanced water replaces the composed water draws: the same `enh: water:` models on both sides) | 103,258 / 103,258 | 33,516 / 33,516 | 4,493 / 4,493 | 7,624 / 7,624 | 144,398 equal | 0 messages |
+| savegame, switched on at frame 2000 (`-MaxFps 60`) | 53,438 / 53,438 | 6,987 / 6,987 | 329 / 329 | 2,714 / 2,714 | 43,428 equal | not run |
+
+Images (mean |d| 8-bit / share of pixels with a channel |d| > 32; engine vs take-over, engine vs engine = the noise floor):
+
+| spot | water off: take-over | water off: noise | water on: take-over | water on: noise |
+|---|---|---|---|---|
+| pub_interior | 0.48 / 0.004 % | 0.56 / 0.004 % | 0.81 / 0.140 % | 0.97 / 0.005 % |
+| monastery_hall | 0.97 / 0.164 % | 1.38 / 0.196 % | 0.83 / 0.070 % | 0.80 / 0.117 % |
+| jungle | 2.28 / 0.789 % | 1.82 / 0.417 % | 2.27 / 0.828 % | 2.26 / 0.988 % |
+| lake_jungle | 1.28 / 0.710 % | 1.49 / 0.871 % | 1.40 / 0.841 % | 1.68 / 1.170 % |
+| waterfall_jungle | 1.49 / 0.562 % | 2.38 / 1.917 % | 2.95 / 2.613 % | 1.75 / 0.780 % |
+| sea_cliff | 3.66 / 3.509 % | 7.41 / 6.631 % | 6.76 / 7.542 % | 5.00 / 5.028 % |
+| harbour_mouth | 0.26 / 0.008 % | 0.29 / 0.003 % | 0.33 / 0.008 % | 0.37 / 0.010 % |
+
+`shot-reviewer` (diff maps, crops against the noise pair; out/n52/review_a, review_b): no hole, missing / extra transparency, wrong
+blending, unreplaced or missing water, decal or sky difference at any spot. What differs is the noise pair's: candle flames and their
+light (pub), the haze shafts (monastery), a flickering light on the jungle ground, wind on the fronds, the surf / foam at sea_cliff
+(the shore foam and wash move between runs: up to 2.3x brighter patches in either pair). A second take-over sample (water on, sea_cliff + waterfall_jungle) against the same engine
+pictures: sea_cliff 5.45 / 5.23 % (the bright wash patch of the first sample is gone: box 830-960 x 700-780 mean RGB (47, 67, 64), as in
+the noise run's (47, 66, 63), the first sample's (139, 193, 194)); waterfall_jungle 3.11 / 2.88 %. At waterfall_jungle with water on the two
+take-over samples agree with each other (1.41) but both differ from both engine runs in one place: the blurred foreground palm frond
+(x 0 - 400, y 100 - 450) is in another sway phase (shifted, brighter). That frond is a SpeedTree (its draws are the engine's, not scene
+ops), so this is a different wind phase at the capture frame, not a composed draw: every taken-over draw compared equal [I: the wind
+clock advances with real time and the take-over's CPU cost shifts the time of the capture frame; not checked]. Savegame switched inside one run (frames
+1960 / 1980 off, 2020 / 2040 on): 3.35 / 0.46 % (off -> off, 20 frames), 4.00 / 0.68 % (across the switch, 40 frames), 3.89 / 0.70 % (on ->
+on, 20 frames): the view is mostly in motion (hero idle, NPCs, foliage); the 142 8x8 blocks static in both same-mode pairs stay static
+across the switch (mean 0.061).
+
+Cost (savegame, `-Exe RisenTest.exe -Vsync off -Perf`, ~915 draws per frame, the last six 5-s `perf:` windows of each run; an unrelated
+ffmpeg used ~10 cores of the machine during both runs, so absolute numbers are inflated): GPU 1.50 - 1.51 ms per frame in both; CPU
+(engine + HAL) off 5.53 - 6.01 ms (p50 frame 5.85 - 6.40), scene ops on 5.89 - 6.41 ms (p50 6.29 - 6.91): about +0.3 - 0.4 ms for ~60 alpha /
+refracted / decal ops per frame (the engine's code still runs for every op; ours is the composition, the state save / restore and the
+second set of setter calls, as in N5.1).
+
+Engine rules newly learned [C]: overlay passes = the overlay shader's own OnGetPasses with the base's switch / illumination / combi /
+instancing and flags 0, executed with the base shader's SetSwitch and depth-bias flag and the overlay's states / constants / samplers;
+`eCSubMesh::Render`'s tag holds the water class + name in the Refracted / Alpha passes; the refraction copy happens exactly once per
+main view, between the +0x1530 list and the refracted list; decal records break on light list and outdoor factor although the sort key
+ignores them, and a decal with static lights / SH / a lightmap mesh closes its record; static decals at alpha 1 keep their stored
+COLOR0; no captured game shader has bool / int constants; no composed draw had more than 2 lights (no additive light pass exists at the
+sampled places).
+
+**Not yet** (RE done, recorded for the next stage):
+* **Sky dome op** (list +0x1530, 4 draws; RE 2026-10-27, dumps skyrender*_dump.txt [C unless marked]): `eCSkydome_PS::Render` 0x6e4730
+  (op slot 0x6e8a10 is a 4-instruction tail jump: never detour it). It rewrites the active camera (view translation zeroed; projection
+  `_33 = 1`, `_43 = 0`: depth exactly 1) and runs `eCGfxCamera::Execute` (c0..c11, PS c0 / c1 from the hacked camera); draws stars (sky
+  object +0x278, shader +0x148, BlendMode 7 SrcAlpha / One), sun (+0x170, shader +0x150, mode 7; its 1-billboard VB is rewritten every
+  frame by a non-DISCARD lock), moon (+0x220, shader +0x148 with BlendMode 5 One / InvSrcColor) through `eCSkyObject::Render` 0x6e25e0
+  (eCShaderDefault, TransformationType 7 = XFX_BILLBOARD, DisableLighting / DisableFog; world from +0x2d0 / +0x310 / +0x350; billboard
+  quads stride 0x20); restores the camera (second `Execute`), then the dome: `eCShaderSkyDome` (vtable 0x9da1e8; version class
+  `eCShaderVersionSkyDome_2_0` 0x9da420, one pass, states 0x6d9740: AlphaModulate One / InvSrcAlpha, alpha write off, LESSEQUAL, depth
+  write off) with VS c31 sun normal, c32 sun colour, c33 sky colour, c34 haze colour (corrects E 2.7), PS c6 cloud rgb + thickness,
+  c7 sun colour, samplers s9.. cloud / absorption images; the 32 x 25 screen-grid strip (1534 triangles). Composing it needs the camera
+  hack's matrices, the sky version class's element offsets and the sun's per-frame vertex data: not done in this stage.
+* **Opaque billboards' queue** (`eCBillboardAdmin::RenderBillboards` 0x4f0530; ~1 draw per view at the savegame, none at the spots): queue
+  entries 0x18 {billboard, light set, blend, lights}, the engine's qsort with `SortRenderQueue` 0x4f0ff0, batches of <= 1000 quads, the
+  default shader `admin +0x30` with BlendMode written directly (+0x50) and `SetImageResource(admin +0x38)`, an illumination built on the
+  stack `{light set +0x10, f = 1, ...}`, `GetPasses(shader, lights, &illum, 0, false, 0)`; the decompiled VB / IB write addresses are lost
+  (re-read the disassembly before composing it).
+* Overlay passes and additive light passes: composed, never met in game (above).
+* As in N5.1 the engine's code still runs for every taken-over op / path (only its GPU work is ours).
