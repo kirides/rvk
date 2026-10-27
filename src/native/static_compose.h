@@ -177,11 +177,16 @@ struct DrawDesc {
     const void* material = nullptr;
     std::uint32_t passFlags = 0;  // the shader pass (0 for z draws)
     bool zPass = false;
+    // the draw tag's sub-mesh fields as the engine's hooks set them (only eCSubMesh::Render sets them: solid non-instanced
+    // draws; z draws and instanced batches keep the slot's null)
+    const void* tagSubMesh = nullptr;
+    const void* tagMaterial = nullptr;
+    const void* tagMeshResource = nullptr;
 };
 
 // what the comparison counts (one class per field group; constants by register group)
 enum class Field : std::uint8_t {
-    DrawCount, Vs, Ps, Decl, Streams, Indices, Range, ZFunc, ZWrite, Blend, ColorWrite, AlphaTest, Cull, Fill, Fog, Texture, SamplerState,
+    DrawCount, Tag, Vs, Ps, Decl, Streams, Indices, Range, ZFunc, ZWrite, Blend, ColorWrite, AlphaTest, Cull, Fill, Fog, Texture, SamplerState,
     VsCamera, VsInvProj, VsInvView, VsCamPos, VsAdminOther, VsFog, VsInstance, VsGlobalOther, VsMaterial,
     PsCamPos, PsScreen, PsReserved, PsFogColor, PsFog, PsObstacle, PsMaskRef, PsMaterial, PsIndoor, PsSh, PsSun, PsLights,
     UnownedConstant, Count

@@ -352,7 +352,7 @@ void ambientSh(const float list[7][4], const float indoor[3], float f, const flo
 
 const char* name(Field f) {
     static constexpr const char* kNames[kFieldCount] = {
-        "draw count", "vs", "ps", "declaration", "streams", "indices", "range", "zfunc", "zwrite", "blend", "colour write", "alpha test",
+        "draw count", "draw tag", "vs", "ps", "declaration", "streams", "indices", "range", "zfunc", "zwrite", "blend", "colour write", "alpha test",
         "cull", "fill", "fog state", "texture", "sampler state",
         "vs camera c0-3", "vs inv proj c4-7", "vs inv view c8-10", "vs cam pos c11", "vs admin other", "vs fog c30", "vs instance c32+",
         "vs global other", "vs material c232+",
@@ -411,6 +411,10 @@ Diff compare(const DrawDesc& a, const DrawDesc& e) {
         d.fields.set(static_cast<std::size_t>(f));
         if (d.first.empty()) d.first = std::move(text);
     };
+    if (a.tagSubMesh != e.tagSubMesh || a.tagMaterial != e.tagMaterial || a.tagMeshResource != e.tagMeshResource) {
+        bad(Field::Tag, std::format("tag sub-mesh {} material {} mesh {} vs engine {} {} {}", a.tagSubMesh, a.tagMaterial, a.tagMeshResource,
+                                    e.tagSubMesh, e.tagMaterial, e.tagMeshResource));
+    }
     if (a.vs != e.vs) bad(Field::Vs, std::format("vs {} vs engine {}", a.vs, e.vs));
     if (a.ps != e.ps) bad(Field::Ps, std::format("ps {} vs engine {}", a.ps, e.ps));
     if (a.decl != e.decl) bad(Field::Decl, std::format("declaration {} vs engine {}", a.decl, e.decl));

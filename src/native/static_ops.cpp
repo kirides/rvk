@@ -510,6 +510,7 @@ sc::DrawDesc& StaticOps::drawFrom(const Geom& g) {
     d.primCount = g.primCount;
     d.subMesh = g.subMesh;
     d.material = g.material;
+    d.tagSubMesh = d.tagMaterial = d.tagMeshResource = nullptr;
     return d;
 }
 
@@ -659,6 +660,12 @@ StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8
     sc::DrawDesc& d = drawFrom(geometry);
     const sc::Visual& vis = geometry.visual;
     d.passFlags = pass.flags;
+    if (sc::passNonInstanced(pass.flags)) {
+        // eCSubMesh::Render's tag (engine/scene_hooks: TagScope(sub-mesh, mesh resource))
+        d.tagSubMesh = geometry.subMesh;
+        d.tagMaterial = geometry.material;
+        d.tagMeshResource = geometry.meshResource;
+    }
     d.vs = vs;
     d.ps = ps;
     d.states = sc::deviceStates(rs, vis, get<std::uint32_t>(admin, 0x340));
@@ -731,6 +738,7 @@ StaticOps::Skip StaticOps::subMeshDraws(const std::uint8_t* res, const std::uint
     }
     geometry.subMesh = sub;
     geometry.material = material;
+    geometry.meshResource = res;
     // GetPasses 0x6d1ee0 -> OnGetPasses 0x6d3170 -> eCShaderVersionDefault_3_0::GetPasses 0x6cc970
     if (get<std::uint8_t>(shader, 0x2a8) == 1) return Skip::InvalidShader;
     if (get<std::uint32_t>(admin, 0x31c) != 0) return Skip::InvalidShader;
@@ -995,6 +1003,9 @@ void StaticOps::capture(const d3d9::DrawTapInfo& t, sc::DrawDesc& out) {
         out.streams[i] = {s.buffer, s.offset, s.stride, s.freq};
     }
     out.indices = d.indexBuffer();
+    out.tagSubMesh = t.tag != nullptr ? t.tag->subMesh : nullptr;
+    out.tagMaterial = t.tag != nullptr ? t.tag->material : nullptr;
+    out.tagMeshResource = t.tag != nullptr ? t.tag->meshResource : nullptr;
     out.primType = t.primitiveType;
     out.baseVertex = t.baseVertex;
     out.minIndex = t.minIndex;
@@ -1146,8 +1157,12 @@ void StaticOps::issue() {
         for (std::uint32_t r = 0; r < sc::kPsRegs; ++r) {
             if (d.psSrc[r] != sc::Src::None) dev_.setPixelShaderConstantF(r, d.psF[r], 1);
         }
-        tag.subMesh = d.subMesh;
-        tag.material = d.material;
+        tag = savedTag;
+        if (d.tagSubMesh != nullptr) {
+            tag.subMesh = d.tagSubMesh;
+            tag.material = d.tagMaterial;
+            tag.meshResource = d.tagMeshResource;
+        }
         issueIndex_ = k;
         dev_.drawIndexedPrimitive(d.primType, d.baseVertex, d.minIndex, d.numVertices, d.startIndex, d.primCount);
         ++issuedDraws_;

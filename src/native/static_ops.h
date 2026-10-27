@@ -106,6 +106,7 @@ private:
         sc::Visual visual;
         const void* subMesh = nullptr;
         const void* material = nullptr;
+        const void* meshResource = nullptr;
     };
     bool composeView(const std::uint8_t* admin);
     bool shaderClassOk(const void* shader);

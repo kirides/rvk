@@ -189,3 +189,91 @@ thunks.
 
 For N5.1 the tap is the source of truth: the executed sequence of the main view's ops is known before Execute's loops run, with each
 op's context, kind, entity, mesh sub-mesh / material / shader, desc, key and sort id, and the draw-count rules above.
+
+## 7. N5.1 result: static ops (2026-10-27)
+
+Settings `native.static_ops` (the renderer draws the ops) and `native.static_ops_compare` (every engine draw of those ops is diffed
+against the composed draw of its position), both Debug | NoAB, default off; off = nothing beyond the N5.0 tap's pass-through.
+`src/native/static_compose.*` = the engine's rules re-written (pure, unit tests `tests/native_tests.cpp` `static_*`),
+`src/native/static_ops.*` = the engine side, driven by the frame tap (`FrameTap` forwards view begin / end, slot entries and draws).
+
+**Scope.** Ops of kind Mesh in the z list and the solid list of the main view: single sub-mesh and whole-mesh z ops (desc `i` / `0xff`,
+hierarchy nodes `node << 8 | i`), solid sub-mesh / whole-mesh / node ops, blended terrain layers (solid ops with fade, request bit 0x200),
+instanced ops (desc `0xffffff00 | i`: hardware batches and the per-instance fallback). Only `eCShaderDefault` materials whose version is
+`eCShaderVersionDefault_3_0` (vtables and 14 + 5 virtual slots checked once against their RVAs; anything else is left to the engine and
+counted). Entities with overlay flags (burned / frozen / highlighted) are left to the engine (their extra passes are not composed).
+
+**When and how.** At the op's slot entry (the tap's thunk, before the engine's `RenderZPass` / `Render` code) the op is composed into its
+complete draw list. Take-over issues those draws right there through `d3d9::Device` (shaders, declaration, streams, indices, the owned
+states, textures + sampler states, the owned constant registers, the draw tag as the engine's hooks would set it) with the device state
+saved before and restored after; then the engine's slot runs as usual and each of its draws is dropped at the start of `prepareDraw`
+(`DrawTap::onDraw` returns true: nothing recorded, observed or counted as a draw). So **every side effect of the engine's code stays**
+(material / image `RequestData` and LRU stamps, `BindLightmaps` and the admin's lightmap slots, `SetSwitch` on the pools, the pools'
+dirty ranges, the `ms_pActiveShader` / lighting-pool caches, the record's stream-3 enable flag, the instance sort): the engine's state
+machine evolves exactly as without the take-over, and because the device state is restored around our draws, its caches stay true.
+
+**Composition (all from engine data, in the engine's order) [C]:**
+
+| group | how |
+|---|---|
+| draw list | z: `RenderZPass` 0x7603b0 (whole mesh: consecutive non-masked sub-meshes merge and draw with the **last added** sub-mesh's shader; a masked one alone; blended ones skipped and end a run; not-cached materials passed over); solid: `eCSubMesh::Render` 0x5c7eb0 per sub-mesh, passes by `eCShaderVersionDefault_3_0::GetPasses` 0x6cc970 (z-fill kind 2 first for `EnableAlphaZWrite` blended materials; lights in passes of up to 3; sun only in the first, gated by list `+0` and illum `+0xc`); instanced: `ExecuteRenderInstances` 0x7607b0 (instances sorted by a copy sorted with the engine's own qsort 0x4a4aa0 + `SortRenderInstances` 0x75f690, call site verified in `eCRenderContextMesh::Render`; a batch breaks on light list, switch, overlay flags, f, 50 instances, and after an instance with static lights / SH; fallback per instance when not capable, < 2 instances or lightmapped) |
+| shaders | VS / PS of the permutation: version `shader +0x258 + 8 v` (z: v = admin `+0x170`; solid: min(admin `+0x170`, shader `+0x68`), falling back to a lower existing one); z: special pass `type = admin +0x314`, idx `2 type`, compiled byte `+0x18 + idx`, elements `+0x30 / +0xf0 + 16 idx`; solid: `+0x1b0 + 16 vsIdx`, `+0x210 + 16 psIdx` (`vsIdx = nonInstanced 3 + variant`, `psIdx = lights + 4 (kind + 3 (combi + 2 sun))`); element `+0x18 +0x18` = our `HalHLSLShader` |
+| states | `zPassStates` (BeginZPass: colour writes = the desc's depth image has an API texture) / `passStates` (FUN_1806cc610 + `FillBlendingRenderStates` 0x6d0430) through the HAL's master semantics: ZFUNC master; ZWRITE master or the visual's `+0x24`; blend / src / dst; COLORWRITE = colour 7 \| alpha 8 (**kind 0 / 1 write colour, not alpha**: `local_3c._1_2_ = 1`); alpha test always off; CULL = visual `+0x1c`; FILL = admin `+0x340` master or visual `+0x18`; FOGENABLE 0 |
+| constants | a mirror of the engine's pools taken at the op's entry (admin VS c0..c30, admin PS c0..c5, `ms_pGlobalShaderConstants` c31..c231, the lighting pool c14..c37 (`DAT_180c62968`, address decoded from FUN_1806cd1d0), the shader's VS c232+ / PS c6+ pools), written as the op's path writes them: **natively** the camera c0..c3 (VP, or the depth-bias VP for `+0x78`), c4..c7 (transposed inverse projection), c8..c10.xyz, c11 and PS c0, PS c1 (viewport), fog PS c3 / c4 and VS c30 (db `+0x14c8` or `ms_pMasterFog`), PS c5.xy (application camera `+0xe4`), c5.w (mask reference / 256 where the pass sets it), world c33+4i..c35+4i, fade c32+4i.w, the lighting block per pass (FUN_1806cd1d0 / FUN_1806b5bb0); **from the pools** the material graph registers (SetTime ran in the admin's Process before the frame) with the switch elements applied (constant switch 0x6c0c60), and the carry-over registers nobody writes per draw (c32+4i.xyz, c8..c10.w, PS c2, c14.w, lights beyond the pass's count) |
+| samplers | material slots (`shader +0xf8 + 0x28 k` -> stage `+0x219 + k` when the PS element's mask `+0x38` has it; image `+0x20` (switch samplers 0x6c5310 applied) -> `+0x70` image data, the per-stage placeholder (table decoded from 0x68c650) while streaming, the ErrorImage `admin +0x348` for none; states U, V, MAG, MIN, MIP, BIAS, SRGB of the slot, `0xABABABAB` = gfx `+0x640`); admin s0 / s1 / s2 / s4 / s5 in the solid pass (s4 / s5 as `BindLightmaps` updates them); other sampled stages inherited (the z pass's s0..s8); the per-stage override table of `eCGfxImageData::Execute` (decoded from 0x7551c0) must be empty |
+| geometry | the visual's record (`eCGfxVisual +0x10` = our `HalPrimitive`): declaration, streams (stream 3 off in the z pass, on for batches, else the record's flag), indices; ranges from the sub-mesh (`+0x28 / +0x2c / +0x30 / +0x34`, node ops through the `+0x40` entries); batches: streams 0..2 frequency `n \| 0x40000000` |
+| tag | sub-mesh / material / mesh resource only for draws of `eCSubMesh::Render` (the engine's hook sets them there only: z draws and batches keep null) |
+
+**Verification** (compare = the composed draw vs the engine's own device state at `prepareDraw`, every field above; constant registers
+those live in the shaders' CTAB):
+
+| run | draws compared | equal | registers / stages compared | ops left to the engine |
+|---|---|---|---|---|
+| compare only, pub_interior + monastery_hall + jungle | 1,343,887 | 1,343,887 | 84.3 M / 3.78 M | 234 of 1,089,550 |
+| compare only, savegame Risen_Save_0009 (`rvk_perfsave` hold 30) | 1,152,012 | 1,152,012 | 48.0 M / 3.69 M | 256 of 1,050,884 |
+| take-over + compare (the dropped engine draws vs ours), 3 spots | 1,300,511 | 1,300,511 | 81.8 M / 3.65 M | 234 |
+| take-over + compare, 3 spots, validation on (0 messages) | 1,273,444 | 1,273,444 | 80.2 M / 3.57 M | 232 |
+| take-over + compare, savegame (uncapped) | 1,700,948 | 1,700,948 | 71.2 M / 5.45 M | 253 of 1,550,665 |
+
+In take-over runs our own draws are captured at their own `prepareDraw` as well and compared with their composition (what the recorder got
+= what was composed): every one equal (1,300,511 and 1,273,444). Ops left to the engine: a permutation not compiled yet (the engine
+compiles it on demand at that draw; the next frame composes it) and 3 "unreadable" (the admin / sub-mesh index checks). The first build
+already compared at 0 mismatches (the rules above were read before the code was written); one difference outside the compared fields was
+found by the scene mirror's cross-check (z merges tagged with a sub-mesh, which the engine's hooks never do) and fixed; the tag is now a
+compared field.
+
+Images (`water-compare.ps1 -Spots pub_interior,monastery_hall,jungle`, water off on both sides; mean |d| 8-bit / share of pixels with a
+channel |d| > 32):
+
+| spot | engine vs take-over | engine vs engine (noise floor) |
+|---|---|---|
+| pub_interior | 0.43 / 0.004 % | 0.49 / 0.003 % |
+| monastery_hall | 0.75 / 0.147 % | 1.12 / 0.088 % |
+| jungle | 0.79 / 0.032 % | 0.70 / 0.007 % |
+| savegame, separate runs (`-MaxFps 60`, frames 2000 / 2600) | 3.77 / 2.10 %, 4.16 / 2.67 % | 2.08 / 1.28 %, 2.27 / 1.37 % |
+| savegame, one run switched at frame 2000 (`-Commands '2000: set native.static_ops true'`; frames 1980 -> 2020) | 1.00 / 0.80 % (40 frames apart) | 0.75 / 0.49 % (1960 -> 1980, 20 frames) |
+
+`shot-reviewer` (crops, amplified diff maps against the noise pair): no holes, missing / extra geometry, texture, layer, decal or lighting
+difference at any spot; what differs is candle flames, glow, fog / particles and wind, as in the noise pair. At the savegame two separate
+runs differ more than two engine runs (high-frequency detail on the cobblestones, NPC poses: the runs reach a frame number at different game
+times and stream differently); switched inside one run, the static scene is pixel-equal across the switch (8x8 block means 0.003 - 0.05 on
+every static block, e.g. the cobblestones 0.01 both off -> off and off -> on) and the remaining difference is the moving NPCs, the hero's idle
+and the foliage, the same blocks as in the off / off and on / on pairs.
+
+Cost (savegame, `-Exe RisenTest.exe -Vsync off -Perf`, 1,165 draws per frame, `perf:` 5-s windows): the GPU time is unchanged (1.42 - 1.48
+ms per frame); the CPU (engine + HAL per frame) grows. Pair 1 (back to back): off 4.53 - 4.56 ms (p50 frame 5.0 ms) vs take-over +
+compare 7.60 - 7.70 ms (p50 8.0 ms): +3.1 ms. Pair 2 (later, an unrelated ffmpeg process at ~80 % CPU on the machine: both runs slower): off 7.53 - 7.91 ms vs take-over alone
+10.09 - 11.48 ms: +2.6 - 3.6 ms. The engine's code still runs completely for every op (only its GPU work is replaced), so the extra is
+ours: the composition (the pool mirror read per op, ~4 KB; the register and sampler loops), the device state saved and restored per op and
+a second set of device setter calls per draw. Not optimised yet (as planned: the take-over pays off when the engine's slot is skipped).
+
+Engine rules newly learned [C]: the whole-mesh z merge draws with the last added sub-mesh's special-pass shader; `ExecuteSpecialPass` uses
+admin `+0x170` without the shader's max version; kind 0 / 1 passes write colour but not alpha; the lighting pool's c14 / sun registers are
+rewritten only when the light list changes (c14.w never), so composing the whole block every pass is equal; an instance batch takes the
+illumination, switch and flags of its **last** instance; `eCSubMesh::Render` never touches the record's stream-3 flag (it keeps what the
+last z op / batch of that visual set); bCGuid validity is its byte `+0x10` (HasOpacity = shader `+0x330`, IsRefracted = `+0x420`).
+
+Not yet: the overlay passes; additive light passes (kind 1) follow the same rules but were not counted separately in these runs; other
+material classes (`eCShaderLeafs`, decals, sky), alpha / refracted lists (N5.2). The engine's code still runs for every taken-over op
+(only its GPU work is ours): the CPU cost is the engine's plus the composition; skipping the engine's slot needs its side effects
+reproduced first (the "own modes" of section 4).
