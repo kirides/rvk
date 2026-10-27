@@ -11,6 +11,7 @@
 #include "engine/memread.h"
 #include "engine/symbols.h"
 #include "hal/vulkan/hal_vulkan.h"
+#include "native/static_ops.h"
 
 namespace rvk::native {
 
@@ -74,6 +75,17 @@ FrameTap::FrameTap(d3d9::Device& device) : dev_(device) {}
 FrameTap::~FrameTap() { apply(false); }
 
 void FrameTap::apply(bool on) {
+    wanted_ = on;
+    update();
+}
+
+void FrameTap::setStaticOpsActive(bool on) {
+    staticsWanted_ = on;
+    update();
+}
+
+void FrameTap::update() {
+    const bool on = wanted_ || staticsWanted_;
     if (on == on_) return;
     on_ = on;
     if (on) {
@@ -252,7 +264,7 @@ void FrameTap::resolve(Op& op) {
     }
 }
 
-void FrameTap::executeBegin(void* db, void* /*desc*/) {
+void FrameTap::executeBegin(void* db, void* desc) {
     if (!on_) return;
     if (executing_) {
         ++nested_;
@@ -300,16 +312,25 @@ void FrameTap::executeBegin(void* db, void* /*desc*/) {
     db_ = db;
     executing_ = true;
     attr_.begin(&desc_);
+    if (statics_ != nullptr && staticsWanted_) statics_->viewBegin(db, desc);
 }
 
 void FrameTap::opEnter(const void* op) {
     if (!executing_) return;
     RawOp live;
     attr_.enterOp(op, safeRead(op, &live, sizeof(live)) ? &live : nullptr);
+    if (statics_ != nullptr && staticsWanted_) {
+        if (const Op* o = desc_.find(op)) statics_->opEnter(*o);
+    }
 }
 
-void FrameTap::onDraw(const d3d9::DrawTapInfo& d) {
-    if (!executing_ || d.phase.view != d3d9::scene::View::Main) return;
+bool FrameTap::onDraw(const d3d9::DrawTapInfo& d) {
+    // the static ops' own draws (N5.1) are not the engine's
+    if (statics_ != nullptr && statics_->issuing()) {
+        statics_->ownDraw(d);
+        return false;
+    }
+    if (!executing_ || d.phase.view != d3d9::scene::View::Main) return false;
     DrawInfo info;
     info.index = d.index;
     info.pass = d.phase.pass;
@@ -328,6 +349,8 @@ void FrameTap::onDraw(const d3d9::DrawTapInfo& d) {
     info.psHash = d.psHash;
     info.blend = d.blend;
     attr_.draw(info);
+    if (statics_ != nullptr && staticsWanted_) return statics_->engineDraw(d, d.tag != nullptr ? desc_.find(d.tag->op) : nullptr);
+    return false;
 }
 
 void FrameTap::executeEnd(void* db) {
@@ -368,6 +391,7 @@ void FrameTap::executeEnd(void* db) {
             if (readAt(ps, 0x390, live)) op.state = live;
         }
     }
+    if (statics_ != nullptr && staticsWanted_) statics_->viewEnd();
     attr_.end(liveCounts);
     executing_ = false;
     last_ = attr_.counts();
@@ -377,7 +401,7 @@ void FrameTap::executeEnd(void* db) {
         windowMismatches_.push_back(std::format("(first mismatches of the window, frame {} view {})", desc_.frame, desc_.view));
         windowMismatches_.insert(windowMismatches_.end(), attr_.mismatches().begin(), attr_.mismatches().end());
     }
-    if (hal::vulkan::logThisFrame()) logOps();
+    if (hal::vulkan::logThisFrame() && wanted_) logOps();
 }
 
 void FrameTap::logOps() const {
@@ -392,7 +416,8 @@ void FrameTap::logOps() const {
 }
 
 void FrameTap::report() {
-    if (!on_) return;
+    if (statics_ != nullptr) statics_->report();
+    if (!on_ || !wanted_) return;
     if (verified_ < 0) {
         spdlog::info("native: frame tap: idle (Execute's sort sites did not verify)");
         return;

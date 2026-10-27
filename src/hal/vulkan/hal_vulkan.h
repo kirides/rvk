@@ -30,6 +30,7 @@
 #include "enh/shadows.h"
 #include "enh/water.h"
 #include "native/frame_tap.h"
+#include "native/static_ops.h"
 #include "overlay/overlay.h"
 #include "hal/stub_generated.h"
 #include "hal/types.h"
@@ -209,6 +210,22 @@ public:
     bool IsStreamEnabled(unsigned long a0) const override;
     bool Execute() override;
 
+    // the record as Execute would bind it (native/static_ops: the engine's visual -> our draw description; render thread)
+    struct StreamView {
+        d3d9::Buffer* buffer = nullptr;  // the attached data's buffer (null: none), also while the stream is disabled
+        std::uint32_t offset = 0, stride = 0, freq = 1;
+        bool enabled = true;
+    };
+    StreamView streamView(std::uint32_t i) const {
+        if (i >= 4) return {};
+        const Stream& s = streams_[i];
+        return {s.data != nullptr ? s.data->buffer() : nullptr, s.offset, s.stride, s.freq, s.enabled};
+    }
+    d3d9::Buffer* indexBuffer() const { return indices_ != nullptr ? indices_->buffer() : nullptr; }
+    d3d9::VertexDecl* vertexDecl() const { return decl_; }
+    // `api` (an engine eCAPIPrimitive*) when it is one of ours, else null (vtable check; any thread)
+    static HalPrimitive* fromApi(const void* api);
+
 private:
     struct Stream {
         HalVertexData* data = nullptr;
@@ -272,6 +289,10 @@ public:
     void registerTexture(const void* api, d3d9::Texture* texture);
     void unregisterTexture(const void* api);
     d3d9::Texture* textureOfApi(const void* api);
+    // live HAL cube maps by the engine's eCAPICubeMap pointer (kept apart: textureOfApi's users expect 2D textures)
+    void registerCube(const void* api, d3d9::Texture* texture);
+    void unregisterCube(const void* api);
+    d3d9::Texture* cubeOfApi(const void* api);
     const Options& options() const { return options_; }
 
     // render-state writes: `normal` setters respect the master flags; effects call setRenderState directly
@@ -499,6 +520,7 @@ private:
     std::mutex handleMutex_;
     std::mutex apiTextureMutex_;
     std::unordered_map<const void*, d3d9::Texture*> apiTextures_;
+    std::unordered_map<const void*, d3d9::Texture*> apiCubes_;
     std::unordered_map<void*, std::unique_ptr<d3d9::VertexDecl>> decls_;
     std::unordered_map<std::uint32_t, std::unique_ptr<d3d9::VertexDecl>> fvfDecls_;
     std::unordered_map<void*, std::unique_ptr<d3d9::Texture>> depthBuffers_;
@@ -525,6 +547,8 @@ private:
     std::unique_ptr<enh::NativeParts> nativeParts_;      // the scene mirror's parts as draw data (native passes)
     std::unique_ptr<enh::NativeShadows> nativeShadows_;  // native.shadows (the native sun cascades)
     std::unique_ptr<native::FrameTap> frameTap_;          // native.frame_tap (N5.0: the main view's ops + draw attribution)
+    std::unique_ptr<native::StaticOps> staticOps_;        // native.static_ops (N5.1: the static mesh ops composed / drawn by us)
+    void applyStaticOps();
     std::unique_ptr<enh::NativeOpaque> nativeOpaque_;  // native.opaque (a draw replacer + a pass: the native renderer's static meshes)
     std::unique_ptr<enh::RtScene> rtScene_;      // the ray tracing scene (a draw observer + a pass; active while a consumer holds it)
     std::unique_ptr<enh::RtDebug> rtDebug_;      // rt.debug (a consumer of rtScene_)

@@ -349,6 +349,8 @@ struct RendererSettings {
     Setting* nativeDebug = nullptr;       // native.debug: one term of the native shading as the colour
     Setting* nativeShadows = nullptr;     // native.shadows: the native sun cascades (native-renderer.md N4)
     Setting* nativeFrameTap = nullptr;    // native.frame_tap: the main view's render ops + draw attribution (engine-frame N5.0)
+    Setting* nativeStaticOps = nullptr;   // native.static_ops: the static mesh z / solid ops drawn by the renderer (engine-frame N5.1)
+    Setting* nativeStaticOpsCompare = nullptr;  // native.static_ops_compare: their composed draws diffed against the engine's
     Setting* rtSource = nullptr;          // rt.source: where the RT scene's static meshes come from (the engine's draws / the scene mirror)
     Setting* shadowStride = nullptr;      // debug.shadow_stride: the sun cascades redrawn every n-th frame (engine::shadowmaps::setUpdateStride)
     Setting* prefetchStride = nullptr;    // debug.prefetch_stride: the cache-in walk every n-th frame (engine::lod::setPrefetchStride)

@@ -9,6 +9,7 @@
 
 #include "api/capture.h"
 #include "core/exports.h"
+#include "engine/memread.h"
 #include "fx/effect_binary.h"
 #include "hal/vulkan/buffer_lookup.h"
 #include "hal/vulkan/hal_vulkan.h"
@@ -210,12 +211,15 @@ bEResult HalTexture::LoadSurfaceFromSurface(unsigned int a0, void const*, bCRect
     return bEResult_Ok;
 }
 
-HalCubeMap::HalCubeMap(HalDevice& dev, std::unique_ptr<d3d9::Texture> tex) : dev_(dev), tex_(std::move(tex)) {}
+HalCubeMap::HalCubeMap(HalDevice& dev, std::unique_ptr<d3d9::Texture> tex) : dev_(dev), tex_(std::move(tex)) {
+    dev_.registerCube(static_cast<const eCAPICubeMap*>(this), tex_.get());
+}
 HalCubeMap::~HalCubeMap() {
     if (!HalDevice::isLive(&dev_)) {
         (void)tex_.release();  // as ~HalTexture
         return;
     }
+    dev_.unregisterCube(static_cast<const eCAPICubeMap*>(this));
     dev_.dev().release(std::move(tex_));
 }
 
@@ -355,7 +359,21 @@ bEResult HalIndexData::GetDesc(eCGfxShared::eSGfxIndexBufDesc* a0) {
 
 // ---- primitive -------------------------------------------------------------------------------------------------------
 
-HalPrimitive::HalPrimitive(HalDevice& dev) : dev_(dev) {}
+namespace {
+std::atomic<const void*> g_primitiveVtable{nullptr};  // HalPrimitive's vtable (set by the first one created)
+}  // namespace
+
+HalPrimitive::HalPrimitive(HalDevice& dev) : dev_(dev) {
+    const void* vt = *reinterpret_cast<const void* const*>(static_cast<const eCAPIPrimitive*>(this));
+    g_primitiveVtable.store(vt, std::memory_order_relaxed);
+}
+
+HalPrimitive* HalPrimitive::fromApi(const void* api) {
+    const void* vt = nullptr;
+    const void* ours = g_primitiveVtable.load(std::memory_order_relaxed);
+    if (api == nullptr || ours == nullptr || !engine::safeRead(api, &vt, sizeof(vt)) || vt != ours) return nullptr;
+    return static_cast<HalPrimitive*>(static_cast<eCAPIPrimitive*>(const_cast<void*>(api)));
+}
 
 bool HalPrimitive::SetStream(unsigned long a0, eCAPIVertexData* a1) {
     if (a0 >= 4) return false;

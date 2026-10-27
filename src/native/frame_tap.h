@@ -28,8 +28,11 @@ public:
     FrameTap(const FrameTap&) = delete;
     FrameTap& operator=(const FrameTap&) = delete;
 
+    // native.frame_tap (its report); the tap also runs while the static ops (N5.1) use it
     void apply(bool on);
     bool enabled() const { return on_; }
+    void setStaticOps(class StaticOps* ops) { statics_ = ops; }
+    void setStaticOpsActive(bool on);
     // the report (HalDevice, every 5 s): the last main view + the window since the last report
     void report();
     // the last main view's ops (valid until the next main view's Execute)
@@ -40,7 +43,7 @@ public:
     void executeEnd(void* db) override;
     void opEnter(const void* op) override;
     // d3d9::DrawTap
-    void onDraw(const d3d9::DrawTapInfo& draw) override;
+    bool onDraw(const d3d9::DrawTapInfo& draw) override;
 
 private:
     using CompareFn = int (*)(const void*, const void*);
@@ -55,8 +58,12 @@ private:
     void resolve(Op& op);
     void logOps() const;
 
+    void update();
     d3d9::Device& dev_;
     bool on_ = false;
+    bool wanted_ = false;         // native.frame_tap
+    bool staticsWanted_ = false;  // the static ops are active
+    class StaticOps* statics_ = nullptr;
     int verified_ = 0;  // 0 not yet, 1 the sort sites are as expected, -1 not (the tap stays idle)
     QsortFn qsort_ = nullptr;
     std::array<CompareFn, kListCount> compare_{};

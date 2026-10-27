@@ -288,6 +288,7 @@ class ShaderRef {
 public:
     ShaderRef() = default;
     ShaderRef(const std::shared_ptr<Shader>& s) : p_(s.get()) {}  // NOLINT(google-explicit-constructor)
+    explicit ShaderRef(Shader* s) : p_(s) {}  // a shader of Device::shaders_ (lives as long as the device)
     Shader* operator->() const { return p_; }
     Shader& operator*() const { return *p_; }
     Shader* get() const { return p_; }
@@ -383,12 +384,19 @@ public:
 };
 
 // The N5.0 op tap (native/frame_tap.*): every draw, at the start of prepareDraw (before anything is decided), with the tag
-// and the phase. Must not change device state. Render thread.
+// and the phase. Must not change device state. Render thread. onDraw returning true drops the draw (N5.1 native/static_ops:
+// an op whose draws were issued by the renderer itself): nothing of it is recorded or observed.
 struct DrawTapInfo {
     std::uint32_t index = 0;  // the device's draw number (stats().draws)
     scene::Phase phase{};
     draws::Kind kind = draws::Kind::Unknown;
     const draws::Tag* tag = nullptr;
+    const Device* device = nullptr;  // the full state of the draw (getters only)
+    bool indexed = false;
+    std::uint32_t primitiveType = 0;
+    std::uint32_t first = 0;  // start index / vertex
+    std::int32_t baseVertex = 0;
+    std::uint32_t minIndex = 0, numVertices = 0;
     std::uint32_t primitives = 0;
     std::uint32_t instances = 1;
     bool instanced = false;  // stream 0 frequency INDEXEDDATA
@@ -401,7 +409,7 @@ struct DrawTapInfo {
 class DrawTap {
 public:
     virtual ~DrawTap() = default;
-    virtual void onDraw(const DrawTapInfo& draw) = 0;
+    virtual bool onDraw(const DrawTapInfo& draw) = 0;  // true: drop the draw
 };
 
 // Draw observation (enh/rt_scene: the ray tracing scene, docs/research/rt-reflections.md 3): an enhancement that reads the
@@ -490,6 +498,7 @@ struct FrameStats {
     std::uint32_t renderPasses = 0;
     std::uint32_t pipelines = 0;
     std::uint32_t drawsSkipped = 0;  // draws without a usable shader / target
+    std::uint64_t drawsTakenOver = 0;  // engine draws dropped because the renderer drew them itself (cumulative; DrawTap)
     std::uint32_t lastFrameDraws = 0;
     std::uint64_t acquireFailures = 0;
     std::uint64_t loadingFramesDropped = 0;  // loading-screen frames rendered but not shown (setUnpaced)
@@ -595,6 +604,23 @@ public:
     std::uint32_t boundSamplerMask() const { return (ps_->samplerMask & 0xFFFFu) | (vs_->samplerMask & ~0xFFFFu); }
     const Shader* vertexShader() const { return vs_.get(); }
     const Shader* pixelShader() const { return ps_.get(); }
+    // the current shaders as references (save / restore around draws the renderer issues itself: native/static_ops)
+    ShaderRef vertexShaderRef() const { return vs_; }
+    ShaderRef pixelShaderRef() const { return ps_; }
+    void setVertexShaderRef(ShaderRef shader) {
+        if (shader != vs_) {
+            vs_ = shader;
+            vsConstDirty_ = true;
+        }
+    }
+    void setPixelShaderRef(ShaderRef shader) {
+        if (shader != ps_) {
+            ps_ = shader;
+            psConstDirty_ = true;
+        }
+    }
+    VertexDecl* vertexDecl() const { return decl_; }
+    Buffer* indexBuffer() const { return indices_; }
     void setVertexShaderConstantF(std::uint32_t start, const float* data, std::uint32_t count);
     void setPixelShaderConstantF(std::uint32_t start, const float* data, std::uint32_t count);
     void setVertexShaderConstantI(std::uint32_t start, const std::int32_t* data, std::uint32_t count);

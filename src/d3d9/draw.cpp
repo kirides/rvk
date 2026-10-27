@@ -644,6 +644,13 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         t.phase = phases_.current();
         t.kind = draws::classify(tag_.source, tag_.opDesc, t.phase.view, t.phase.pass);
         t.tag = &tag_;
+        t.device = this;
+        t.indexed = geom.indexed && !geom.userPointer;
+        t.primitiveType = primitiveType;
+        t.first = geom.first;
+        t.baseVertex = geom.baseVertex;
+        t.minIndex = geom.minIndex;
+        t.numVertices = geom.numVertices;
         t.primitives = geom.primitives;
         t.instanced = (streams_[0].freq & STREAMSOURCE_INDEXEDDATA) != 0;
         t.instances = t.instanced ? std::max(1u, streams_[0].freq & 0x3FFFFFFFu) : 1u;
@@ -653,7 +660,10 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         t.psHash = ps_ ? ps_->hash : 0;
         t.blend = (rs_[RS_ALPHABLENDENABLE] != 0 ? 1u : 0u) | (rs_[RS_SRCBLEND] & 0xff) << 8 | (rs_[RS_DESTBLEND] & 0xff) << 16 |
                   (rs_[RS_ZFUNC] & 0xff) << 24;
-        drawTap_->onDraw(t);
+        if (drawTap_->onDraw(t)) {
+            ++stats_.drawsTakenOver;
+            return false;
+        }
     }
     if (!vs_ || !ps_ || vs_->module == VK_NULL_HANDLE || ps_->module == VK_NULL_HANDLE) {
         ++stats_.drawsSkipped;  // fixed-function draws are not emulated

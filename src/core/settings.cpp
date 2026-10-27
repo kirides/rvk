@@ -1731,6 +1731,30 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .flags = Flag::NoAB | Flag::Debug,
     });
+    r.nativeStaticOps = &reg.add({
+        .key = "native.static_ops",
+        .label = "Native frame: static ops",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The main view's z pre-pass and solid draws of static meshes are drawn by the renderer itself from engine data "
+                       "(the engine's own shaders, constants and states composed natively); the engine's draws of those ops are dropped. "
+                       "rvk.log `native: static ops:` every 5 s.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
+    r.nativeStaticOpsCompare = &reg.add({
+        .key = "native.static_ops_compare",
+        .label = "Native frame: static ops compare",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Composes the static mesh ops' draws and compares each with the draw the engine makes (shaders, constants, "
+                       "states, samplers, buffers, ranges); rvk.log `native: static ops: compare` every 5 s with the first mismatches. "
+                       "With native.static_ops on, the dropped engine draws are compared with what the renderer drew instead.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
     r.nativeDebug = &reg.add({
         .key = "native.debug",
         .label = "Native opaque debug view",

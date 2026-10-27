@@ -227,6 +227,12 @@
     X(ctxSpeedTreeVftable, L"Engine.dll", "??_7eCRenderContextSpeedTree@@6B@", false)                                           \
     X(ctxSpeedTreeBBVftable, L"Engine.dll", "??_7eCRenderContextSpeedTreeBB@@6B@", false)                                       \
     X(ctxVegetationVftable, L"Engine.dll", "??_7eCRenderContextVegetation@@6B@", false)                                       \
+    /* N5.1 static ops (native/static_ops.*): the material shader class, its global constants (c31..c231), the application   \
+       (camera far / obstacle), the master fog override (eCGfxFog::Execute) */                                                 \
+    X(shaderDefaultGlobalConstants, L"Engine.dll",                                                                              \
+      "?ms_pGlobalShaderConstants@eCShaderDefault@@1PEAVeCGlobalShaderConstantsDefault@1@EA", false)                            \
+    X(appInstancePtr, L"Engine.dll", "?ms_pApplication@eCApplication@@1PEAV1@EA", false)                                        \
+    X(gfxMasterFog, L"Engine.dll", "?ms_pMasterFog@eCGfxFog@@1PEAV1@EA", false)                                                 \
     /* eEResourceState eCResource2::RequestData(eEResourceLoadMode) (0x684100): queues a resource's data (mode 1 = what the render code passes) */ \
     X(resourceRequestData, L"Engine.dll", "?RequestData@eCResource2@@QEAA?AW4eEResourceState@@W4eEResourceLoadMode@@@Z", false)
 

@@ -103,6 +103,31 @@ d3d9::Texture* HalDevice::textureOfApi(const void* api) {
     return it != apiTextures_.end() ? it->second : nullptr;
 }
 
+void HalDevice::applyStaticOps() {
+    const auto& rs = settings::renderer();
+    const bool takeOver = rs.nativeStaticOps != nullptr && rs.nativeStaticOps->asBool();
+    const bool compare = rs.nativeStaticOpsCompare != nullptr && rs.nativeStaticOpsCompare->asBool();
+    staticOps_->setMode(takeOver, compare);
+    frameTap_->setStaticOpsActive(staticOps_->active());
+}
+
+void HalDevice::registerCube(const void* api, d3d9::Texture* texture) {
+    const std::lock_guard lock(apiTextureMutex_);
+    apiCubes_[api] = texture;
+}
+
+void HalDevice::unregisterCube(const void* api) {
+    const std::lock_guard lock(apiTextureMutex_);
+    apiCubes_.erase(api);
+}
+
+d3d9::Texture* HalDevice::cubeOfApi(const void* api) {
+    if (api == nullptr) return nullptr;
+    const std::lock_guard lock(apiTextureMutex_);
+    const auto it = apiCubes_.find(api);
+    return it != apiCubes_.end() ? it->second : nullptr;
+}
+
 HalDevice::~HalDevice() {
     {
         const std::lock_guard lock(g_liveDevicesMutex);
@@ -334,6 +359,13 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         reg.onChange(*rs.nativeFrameTap, [this](const settings::Setting& s) { frameTap_->apply(s.asBool()); }, this);
         frameTap_->apply(rs.nativeFrameTap->asBool());
     }
+    // N5.1 static ops (native/static_ops.h): driven by the frame tap
+    staticOps_ = std::make_unique<native::StaticOps>(*this);
+    frameTap_->setStaticOps(staticOps_.get());
+    for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare}) {
+        if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
+    }
+    applyStaticOps();
     if (rs.rtSource != nullptr && rtScene_) {
         const auto applyRtSource = [this](const settings::Setting& s) { rtScene_->setMirrorSource(s.asInt() == 1 ? nativeParts_.get() : nullptr); };
         reg.onChange(*rs.rtSource, applyRtSource, this);
