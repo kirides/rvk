@@ -85,6 +85,7 @@ set(RVK_SHADERS
     test/abi_layout.comp
     test/abi_pass_layout.comp
     test/abi_rt_layout.comp
+    test/shadow_layout.comp
     test/rt_query.comp
     rt/rt_debug.comp
     rt/rt_debug_depth.comp

@@ -34,8 +34,11 @@ struct ShadowBlock {
     std::uint32_t mode[4];  // x taps per axis, y debug view
     std::uint32_t rt[4];    // x the ray-traced visibility (bindless t2D, enh/rt_shadows; 0 = none)
     float rtParams[4];      // x range (depth-map units), y blend band
+    // the vertex shader's depth remap (Device::depthRemap: x, y added to the quad's z = w = 1; 0 without reversed depth). The mask
+    // draw replaces the draw's DrawBlock with this block, so it must carry the remap itself (shadow_mask.vert)
+    float depthRemap[4];
 };
-static_assert(sizeof(ShadowBlock) == 27 * 16);
+static_assert(sizeof(ShadowBlock) == 28 * 16);
 
 // The view depth (in units of `engineFar`, the depth map's) of a hardware depth `z` under a D3D perspective projection
 // (row-vector convention: z' = (z * m22 + m32) / z); false when the projection is not perspective or z is at infinity

@@ -4,11 +4,17 @@
 // front of the far plane, i.e. not the sky; stencil EQUAL 0 INCR; alpha writes only), so the engine's following passes see
 // the stencil and the mask as after its own cascades.
 
+#extension GL_EXT_buffer_reference_uvec2 : require
+
 #include "rvk_abi.glsl"
+#include "shadow_block.glsl"
 
 void main() {
     vec2 uv = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);
     gl_Position = vec4(uv * 2.0 - 1.0, 1.0, 1.0);
-    // reversed depth: the engine's far plane (z 1) maps to near / far (abi.h posFix.zw)
-    gl_Position.z += pc.draw.posFix.z + pc.draw.posFix.w;
+    // pc.draw points at the ShadowBlock here, not at a DrawBlock (a replaced draw's block): reading pc.draw.posFix took
+    // cascade rows as the depth remap and the triangle was clipped / failed the depth test (docs/research/engine-frame/shadow-bug.md).
+    // Reversed depth: the engine's far plane (z 1) maps to near / far (abi.h posFix.zw, filled by enh::Shadows from Device::depthRemap)
+    ShadowBlock b = ShadowBlock(uvec2(pc.draw));
+    gl_Position.z += b.depthRemap.x + b.depthRemap.y;
 }

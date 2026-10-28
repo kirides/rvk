@@ -17,6 +17,7 @@
 #include "d3d9/scene.h"
 #include "enh/debug_view.h"
 #include "enh/rt_debug.h"
+#include "enh/shadows.h"
 #include "shader/abi.h"
 #include "shader/embedded.h"
 #include "shader/glsl.h"
@@ -140,6 +141,25 @@ TEST(abi_glsl_rt_layout_matches_cpp) {
                   {"width", offsetof(P, width)}, {"height", offsetof(P, height)}, {"srcTex", offsetof(P, srcTex)},
                   {"srcSampler", offsetof(P, srcSampler)}, {"mode", offsetof(P, mode)}, {"probes", offsetof(P, probes)}},
                  "RtDebugPush");
+}
+
+// the shadow mask's block (shaders/shadows/shadow_block.glsl, shared by its vertex and fragment shader) against enh::ShadowBlock:
+// the vertex shader reads depthRemap from the block that replaces the draw's DrawBlock (docs/research/engine-frame/shadow-bug.md)
+TEST(shadows_block_glsl_matches_cpp) {
+    const auto m = memberOffsets(shader::embedded::spirv("test/shadow_layout.comp"));
+    CHECK(m.contains("ShadowBlock"));
+    if (!m.contains("ShadowBlock")) return;
+    using B = enh::ShadowBlock;
+    checkOffsets(m.at("ShadowBlock"),
+                 {{"cascade", offsetof(B, cascade)}, {"split", offsetof(B, split)}, {"texel", offsetof(B, texel)},
+                  {"maps", offsetof(B, maps)}, {"res", offsetof(B, res)}, {"vsm", offsetof(B, vsm)},
+                  {"vsmParams", offsetof(B, vsmParams)}, {"params", offsetof(B, params)}, {"target", offsetof(B, target)},
+                  {"mode", offsetof(B, mode)}, {"rt", offsetof(B, rt)}, {"rtParams", offsetof(B, rtParams)},
+                  {"depthRemap", offsetof(B, depthRemap)}},
+                 "ShadowBlock");
+    // the old bug: the vertex shader read RvkDraw.posFix from this block; a ShadowBlock member must never sit where a DrawBlock's
+    // posFix does unless it is the remap itself
+    CHECK(offsetof(B, depthRemap) != offsetof(abi::DrawBlock, posFix));
 }
 
 TEST(abi_glsl_pass_push_matches_cpp) {

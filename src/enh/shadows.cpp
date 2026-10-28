@@ -217,6 +217,7 @@ void Shadows::drawMask(d3d9::Device& device, const d3d9::ReplaceQuery& q, int va
     b.target[1] = 1.0f / h;
     b.target[2] = w;
     b.target[3] = h;
+    device.depthRemap(b.depthRemap[0], b.depthRemap[1]);  // the vertex shader's z += x + y (reversed depth; 0 otherwise)
     b.mode[0] = static_cast<std::uint32_t>(std::clamp(settings_.taps, 1, 4));
     b.mode[1] = static_cast<std::uint32_t>(settings_.debug);
     // the ray-traced shadows of this frame (their image has the mask target's size; the engine's depth map pixel = the mask's)

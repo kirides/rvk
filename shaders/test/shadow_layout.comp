@@ -1,0 +1,20 @@
+#version 460
+// Not used by the renderer: rvk_tests (shadows_block_glsl_matches_cpp) reads the member offsets of ShadowBlock
+// (shaders/shadows/shadow_block.glsl) from this module's SPIR-V and compares them with enh::ShadowBlock (src/enh/shadows.h).
+
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+#include "rvk_abi.glsl"
+#include "../shadows/shadow_block.glsl"
+
+layout(local_size_x = 1) in;
+
+layout(set = 1, binding = 0, r32ui) uniform writeonly uimage2D sink;
+
+void main() {
+    ShadowBlock b = ShadowBlock(uvec2(pc.draw));
+    uint v = floatBitsToUint(b.cascade[0].x + b.split.x + b.texel[0].x + b.vsm[0].x + b.vsmParams.x + b.params.x + b.target.x +
+                             b.rtParams.x + b.depthRemap.x) +
+             b.maps.x + b.res.x + b.mode.x + b.rt.x;
+    imageStore(sink, ivec2(0), uvec4(v));
+}
