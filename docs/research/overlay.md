@@ -50,6 +50,7 @@ Enum, default, range or options, flags) plus its value. Values are doubles inter
 
 | key | type | default | applies | notes |
 |---|---|---|---|---|
+| `renderer.mode` | enum `original` / `wrapper` / `full` | `wrapper` | Wrapper <-> Full live (frame boundary), Original <-> the others restart | System tab, "Renderer" (2026-10-28, 2.7): Original = the system d3d9 forwarded (no Vulkan, no enhancements, no overlay), Wrapper = the D3D9 model on Vulkan + enhancements, Full = the native frame takes over every draw (`native.static_ops` + `native.scene_ops`, all groups); `Spec::restartGroups` {0, 1, 1}; A/B-eligible (F10 flips Wrapper / Full in debug mode); config.toml's non-default `[renderer] mode` locks it |
 | `vulkan.vsync` | enum `engine` / `on` / `off` | `engine` | live (swapchain recreated) | `engine` = the game's own video option (start parameters / `ToggleNewMode`) |
 | `vulkan.max_fps` | float 0..500 | 0 | live (pacer) | 0 = no cap beyond vsync |
 | `vulkan.fullscreen` | enum `borderless` / `exclusive` | `borderless` | live (display mode / swapchain) | exclusive: the monitor switches to the game's resolution + refresh while in front; needs the capability "Exclusive fullscreen" (window-mode.md 8) |
@@ -75,6 +76,7 @@ Enum, default, range or options, flags) plus its value. Values are doubles inter
   `adapter` >= 0): the setting is *locked* for the session (read-only in the overlay with "(set by config.toml)",
   `rvk_setting_set` returns `RVK_SETTING_LOCKED`, excluded from A/B); the player's own value stays in settings.toml.
   `run.ps1` always writes `vsync = "engine"` and `max_fps = 0.0`, i.e. no lock unless `-Vsync` / `-MaxFps` are given.
+  Since 2026-10-28 `[renderer] mode` too: a value other than `wrapper` locks `renderer.mode` (2.7).
 * Test runs: `run.ps1` writes a fresh settings.toml before each run (reproducible renderer tests, refcompare included):
   the **test baseline** (`overlay.debug_mode = true`; `water.enabled` / `shadows.enabled` false, `water.quality` /
   `water.ocean_quality` / `rt.reflections` medium, `shadows.filter` high, `shadows.map_size` auto = the defaults before
@@ -116,7 +118,7 @@ the top right (`overlay.show_advanced`, forced on in debug mode) adds the `Flag:
 |---|---|
 | Display | Display: vertical sync, frame rate limit ("Unlimited" at 0), fullscreen mode; a pointer to the game's Options menu |
 | Graphics | Preset row (Original / Low / Medium / High / Ultra, "(custom)" when none matches); Water: enhanced water, water quality, ray-traced reflections, sea waves, sea detail, sea state, *water reflections, wind direction, wave height, murkiness, reflection strength*; Shadows: enhanced shadows, edge quality, resolution, *softness, detail blending, fade-out, offset, distance, detail distribution* |
-| System | Menu: settings menu key, show frame rate, debug mode; Hardware: *graphics card, ray tracing support*; "Graphics card" (capability report) and "Performance" panels (diagnostic lines in debug mode only) |
+| System | Renderer: render mode (2.7); Menu: settings menu key, show frame rate, debug mode; Hardware: *graphics card, ray tracing support*; "Graphics card" (capability report) and "Performance" panels (diagnostic lines in debug mode only) |
 | Debug | A/B comparison panel; A/B options (key, indicator); Debug views (tint, injection, RT scene, water, shadows); "Frame structure" |
 
 Each tab ends with "Reset <tab> settings to defaults" (`settings::resetTab`: every setting of the tab, advanced and
@@ -126,6 +128,50 @@ only what turns the enhancements off. The preset choices (which quality per pres
 Tooltips are the specs' descriptions in player language (developer wording only on the Debug tab), wrapped, plus
 "Default: <label>" (and `key = value` in debug mode). `[debug] commands`: `overlay tab <display|graphics|system|debug>`
 selects a tab (screenshots of each tab). Unit test `settings_presets_and_tabs`.
+
+### 2.7 Render mode (`renderer.mode`, 2026-10-28)
+
+The user's decision: three render modes. **Original** = the system d3d9 forwarded (backend `Mode::Passthrough`: no Vulkan,
+no enhancements, no overlay); **Wrapper** = the D3D9 model on Vulkan + the enhancements, the engine draws through the HAL
+(what Vulkan mode was before the native frame); **Full** = Vulkan with the native frame taking over everything
+(`native.static_ops` + `native.scene_ops`, every group of `native.scene_ops_groups`; the op tap runs as they need it;
+compare modes off). `trace` stays a developer mode outside the three. Shipped default: Wrapper (Full still costs about
++5.4 ms CPU per frame at the savegame because the engine's own slot code still runs; to be revisited after the first
+optimization). Code: `core/config.h` (`RenderMode`, `parseRenderMode`, `configModeLock`, `sessionBackend`,
+`vulkanSessionMode`, `nativePlan`), `HalDevice::applyRenderMode` / `applyStaticOps`, bootstrap `loadSettings`.
+
+* **Source of truth**: settings.toml's `renderer.mode` (the overlay writes it). config.toml's `[renderer] mode` is the
+  developer override: when it is not the default (`wrapper`; aliases `vulkan` = wrapper, `passthrough` / `d3d9` =
+  original), it locks the setting for the session like `[vulkan] vsync` (`"trace"` locks it to original; an unknown value
+  or a broken config.toml = original, the safe mode). The shipped config.toml says `wrapper` = the overlay decides.
+  A missing `[renderer] mode` (or a missing config.toml) = the player's value too.
+* **Restart**: the backend is decided at start (bootstrap, after settings.toml, before the hooks). Wrapper <-> Full apply
+  live: the change callback runs in the registry's dispatch before a present, i.e. at a frame boundary (the per-stage
+  take-overs were already switchable mid-run, README.md 16). Original <-> Wrapper / Full need a restart: `Spec::restartGroups`
+  ({0, 1, 1}: options of different groups) makes `restartPending()` true, so the overlay shows "restart needed". A Vulkan
+  session asked for Original renders as Wrapper until the restart. To leave Original (no overlay), delete the
+  `[renderer]` lines of settings.toml (README.txt says so).
+* **A/B**: the setting is A/B-eligible (no Restart flag), so in debug mode F10 flips Wrapper vs Full (side B = full).
+* **Debug overrides**: `native.static_ops` / `native.scene_ops` (Debug) turn a stage on in Wrapper too; in Full
+  `native.scene_ops_groups` masks groups; `native.*_compare` work on top of either mode. `native.opaque` / `native.shadows`
+  / `native.debug` (the N3 mirror-driven path) stay Debug-only as the basis of a later optimized mode.
+* rvk.log: `renderer: mode <m> at start (<default | settings.toml renderer.mode | config.toml [renderer] mode>; backend
+  <passthrough | vulkan | trace>)`, then in a Vulkan session `renderer: mode wrapper|full (...)` at the device and on every
+  change (`mode original requested ...` for a pending restart). The capability report (`caps:` lines, the System tab's
+  "Graphics card" panel) has `render mode: <m> at start`.
+* Tooling: `run.ps1 -Mode original|wrapper|full` (also `passthrough`, `vulkan`, `trace`; default original); `original` /
+  `full` lock the setting, `wrapper` / `vulkan` leave it to the baseline settings.toml (wrapper), so `-Commands '2000: set
+  renderer.mode full'` / `-Setting 'renderer.mode=full'` work. `refcompare.ps1` / `water-compare.ps1` / `shadow-compare.ps1
+  -Mode wrapper|full` (default wrapper); Wrapper vs Full side by side: `water-compare.ps1 -EngineSetting
+  'renderer.mode=wrapper' -Setting 'renderer.mode=full'`. Unit tests `config_render_modes`, `render_mode_native_plan`,
+  `settings_renderer_mode`.
+* Verified [C] (2026-10-28): `-Mode original` / `passthrough` testdemo PASS, system d3d9 loaded, no Vulkan device, no
+  `native:` lines; `-Mode wrapper -Validation` testdemo PASS, `renderer: mode wrapper`, no `native:` lines, 0 validation
+  messages; `-Mode full -Validation` savegame (`rvk_perfsave`, hold 30) PASS, coverage 100.000 % ours per 5 s window,
+  99.976 % over the run (685 engine draws, all after the load), 0 validation messages; `-Mode vulkan -Validation` savegame
+  with `-Commands '2000: set renderer.mode full','3000: set renderer.mode wrapper'`: PASS, `renderer: mode full` / the
+  frame tap on at the first command, coverage 100.000 % ours in both Full windows, tap off and no coverage after the
+  second, 0 validation messages, 80 fps (Chill cap) throughout.
 
 ## 3. Input: how the engine reads it, how the overlay takes it
 

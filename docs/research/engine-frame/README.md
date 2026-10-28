@@ -111,6 +111,7 @@ Each stage behind a `native.*` setting (default off), A/B against the engine pat
 | N5.6 particles, strips, streaks, precipitation | the particle quads (UpdateVertices re-done natively), the strips' vertex fill, the rain's billboard records from the drops; light streaks never met (done: section 14) | the engine's particle / strip / rain draws | compare + same-frame switch at fire / rain / spell spots (done) |
 | N5.7 post + GUI | every effect filter job of the graphs that run (DoF 19 draws, HDRI 14, the OverlayMovieStrips overlay), composed with the semantic parameters natively; the sprite batcher's batches + vertex / index data (done: section 15) | the engine's post and GUI draws | compare + same-frame switch at spots, savegame, menus, loading, native AA / quality (done) |
 | N5.8 leftovers + completeness proof | a coverage counter for every device draw (who issued it, the reason it stayed), the PSSM point-light pass and the point-light atlas's setup, the never-met kinds forced by a scenario (lit / instanced emitters, alpha billboards, strips, light streaks), the unreachable ones named (done: sections 16, 17) | the last engine draws of the main frame | coverage 99.96 - 99.99 % ours in every run, compare + same-frame switches, validation (done) |
+| render modes (2026-10-28) | the finished copy as the player mode Full of `renderer.mode` (Original / Wrapper / Full, section 17; overlay.md 2.7) | | unit tests, Original / Wrapper / Full runs, a validated Wrapper -> Full -> Wrapper switch |
 | then | own modes, one at a time: mirror-driven lists (the current N3.3 code), GPU culling, merged indirect draws, the ubershader, bindless materials, RT consumers from the native frame | | A/B against the copy |
 
 ## 5. Open across slices
@@ -1618,6 +1619,12 @@ Every element of the engine's frame, who draws it with every group on (`native.s
 `native.scene_ops_groups` bit and where it is verified. "us" = our own draw replaces the engine's (after the first frame of a unit that
 needs buffers / a compiled permutation: section 16's leftovers); "the engine" = stays the engine's; "never met" = composed or not, no
 run produced it; "unreachable" = cannot occur in the shipped game.
+
+**Player mode (2026-10-28)**: this copy is the render mode **Full** of the player setting `renderer.mode` (Original = the system
+d3d9, Wrapper = the D3D9 model on Vulkan as before the native frame, Full = every group on; default Wrapper while Full costs about
++5.4 ms CPU; overlay.md 2.7). Wrapper <-> Full switch at a frame boundary (A/B F10 in debug mode); the `native.*` settings of this
+table stay Debug overrides (a stage in Wrapper, `native.scene_ops_groups` masks Full's groups, compare on top of either). Test runs:
+`run.ps1 -Mode full` (locks the mode) or `-Mode wrapper -Commands '2000: set renderer.mode full'`.
 
 | frame element | drawn by | group | verification |
 |---|---|---|---|
