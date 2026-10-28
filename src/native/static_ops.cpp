@@ -1775,10 +1775,10 @@ void StaticOps::report() {
             return std::format("particle ops {} ({} quads; 0 quads built {}; generated natively {} (sorted copies), the engine's bytes of this tick "
                                "{}; orientation 0 {} / 1 {} / 2 {} / 3 {} / 4 {} / other {}; world {} / entity-relative {}; frame blending {}; lit "
                                "{}, instanced emitters {}; no live particle at the entry {}, of them drawn by the engine {}), strip ops {} ({} segments), "
-                               "light streak ops {}, precipitation ops {} ({} drops; off {})",
+                               "light streak ops {}, precipitation ops {} ({} drops; off {}; billboard records re-done from the drops equal {} / differ {})",
                                a.particleOps, a.particleQuads, a.particleZeroQuads, a.particleSorted, a.particleEngineBytes, a.orient[0], a.orient[1],
                                a.orient[2], a.orient[3], a.orient[4], a.orient[5], a.coords[0], a.coords[1], a.frameBlend, a.lit, a.instancedEmitters,
-                               a.simulatedOps, a.simulatedDrew, a.stripOps, a.stripSegments, a.streakOps, a.precipOps, a.precipDrops, a.precipOff);
+                               a.simulatedOps, a.simulatedDrew, a.stripOps, a.stripSegments, a.streakOps, a.precipOps, a.precipDrops, a.precipOff, a.precipRecordsEqual, a.precipRecordsDiffer);
         };
         FxStats& t = fxTotal_;
         const FxStats& w = fxWindow_;
@@ -1802,6 +1802,8 @@ void StaticOps::report() {
         t.precipOff += w.precipOff;
         t.simulatedOps += w.simulatedOps;
         t.simulatedDrew += w.simulatedDrew;
+        t.precipRecordsEqual += w.precipRecordsEqual;
+        t.precipRecordsDiffer += w.precipRecordsDiffer;
         spdlog::info("native: effects (5 s): {}", line(w));
         spdlog::info("native: effects (total): {}", line(t));
         fxWindow_ = {};

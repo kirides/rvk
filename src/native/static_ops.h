@@ -259,6 +259,10 @@ private:
     const std::uint8_t* particleGlobalVar_ = nullptr;  // &eCShaderParticle::ms_pGlobalShaderConstants (decoded from 0x6d5fc2)
     bool fogOverride_ = false;  // EnableFog (shader +0x2b0) as ApplyRenderStates writes it
     Skip particlePassDraw(const std::uint8_t* shader, const std::uint8_t* version, std::uint32_t key, const Geom& geometry, float alpha);
+    bool precipitationRecords(const std::uint8_t* ps, std::uint32_t records, std::vector<std::uint8_t>& out);
+    std::uint32_t precipLogged_ = 0;
+    // the billboard records skyObjectDraws expands instead of the object's array (precipitation: re-done from the drops)
+    const std::vector<std::uint8_t>* billboardsOverride_ = nullptr;
     bool particleVertices(const std::uint8_t* ps, const std::uint8_t* entity, std::vector<std::uint8_t>& out, std::uint32_t& quads);
     struct FxStats {
         std::uint64_t particleOps = 0, particleQuads = 0, particleSkipped = 0, particleEngineBytes = 0, particleZeroQuads = 0, particleSorted = 0;
@@ -268,6 +272,8 @@ private:
         std::uint64_t stripOps = 0, stripSegments = 0, streakOps = 0, precipOps = 0, precipDrops = 0, precipOff = 0;
         // particle ops left to the engine because no particle was alive at the entry, and those of them the engine then drew
         std::uint64_t simulatedOps = 0, simulatedDrew = 0;
+        // the precipitation's billboard records re-done from the drops vs the engine's (eCPrecipitation_PS::Update's fill)
+        std::uint64_t precipRecordsEqual = 0, precipRecordsDiffer = 0;
     } fxWindow_, fxTotal_;
     // a draw tag for the issued draws other than the slot's (particles: eCParticle_PS::Render's TagScope inside the slot)
     bool tagOverride_ = false;

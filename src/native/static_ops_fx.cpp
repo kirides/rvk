@@ -247,6 +247,9 @@ struct VecFns {
     void (*clamp)(void* colour) = nullptr;                                      // ?Clamp@bCFloatAlphaColor@@QEAAXXZ
     void* (*matMulAssign)(float* self, const float* m) = nullptr;               // ??XbCMatrix@@QEAAAEAV0@AEBV0@@Z
     void* (*timer)() = nullptr;                                                 // Engine.dll ?GetInstance@eCTimer@@SAAEAV1@XZ
+    float (*sinf)(float) = nullptr;                                             // SharedBase g_sinf (eCPrecipitation_PS::Update's jitter)
+    float (*cosf)(float) = nullptr;                                             // SharedBase g_cosf
+    float (*magnitude2)(const float* self) = nullptr;                           // ?GetMagnitude@bCVector2@@QEBAMXZ
     bool ok() const {
         return zero && up && addAssign && scaledV && scaledF && transformDirection && isEqual && cross && inverted && mulMatrix &&
                mulMatrix3 && normalize && normalized && translated && invTranslated && matInvertedRef && matInverted && rotation && clamp &&
@@ -748,6 +751,72 @@ StaticOps::Skip StaticOps::composeParticle(const Op& op) {
 
 // ---- precipitation ----------------------------------------------------------------------------------------------------------------
 
+// eCPrecipitation_PS::Update 0x71a4d0, its record fill (disassembled 0x71b3df..0x71b640): the camera basis from the precipitation
+// direction PS +0x34 through the application camera's matrix (+0x10), D normalised, k = |D.xy| x PS +0x54 + 1, Rt = (0, 0, 1) x D,
+// V = (0, 0, 1) x Rt (both normalised); per live drop (stride 0x34 at PS +0xd8; dead byte +0x1d) in order: size.x Rt.xy, size.y
+// V.xy (x k while falling: timer +0x28 == 0), colour 0xffffffff, the position (jittered by g_sinf / g_cosf when PS +0x68 and
+// +0x6c > 0), the tile uv (+0x20, +0x24) and + 1 / tiles (PS +0x58, +0x5c). The fill covers the drops of Update's start (count
+// PS +0xe0 before the spawning); drops appended by the spawning come after them, so the first `records` live drops are the ones
+bool StaticOps::precipitationRecords(const std::uint8_t* ps, std::uint32_t records, std::vector<std::uint8_t>& out) {
+    if (g_vec.sinf == nullptr || g_vec.cosf == nullptr || g_vec.magnitude2 == nullptr) return false;
+    U8* app = ptr(engine::sym().appInstancePtr, 0);
+    U8* appCam = ptr(app, 0x38);
+    if (appCam == nullptr) appCam = ptr(app, 0xc8);
+    alignas(16) float cm[16];
+    if (appCam == nullptr || !rd(appCam, 0x10, cm, 64)) return false;
+    V D = vec3(ps + 0x34);
+    g_vec.transformDirection(D.p(), cm);
+    g_vec.normalize(D.p());
+    alignas(8) float xy[2] = {D.v[0], D.v[1]};
+    const float k = g_vec.magnitude2(xy) * get<float>(ps, 0x54) + one_;
+    V up;
+    up.v[2] = 1.0f;
+    V Rt = cross(up, D);
+    g_vec.normalize(Rt.p());
+    V Vv = cross(up, Rt);
+    g_vec.normalize(Vv.p());
+    const float invU = one_ / static_cast<float>(get<std::int32_t>(ps, 0x58));
+    const float invV = one_ / static_cast<float>(get<std::int32_t>(ps, 0x5c));
+    const float jitterPower = get<float>(ps, 0x68), jitterSpeed = get<float>(ps, 0x6c);
+    const std::int32_t drops = get<std::int32_t>(ps, 0xe0);
+    if (drops <= 0) return false;
+    std::vector<std::uint8_t> d(static_cast<std::size_t>(drops) * 0x34);
+    if (!rd(ptr(ps, 0xd8), 0, d.data(), d.size())) return false;
+    out.assign(static_cast<std::size_t>(records) * sc::kSkyBillboardSize, 0);
+    std::uint32_t r = 0;
+    for (std::int32_t i = 0; i < drops && r < records; ++i) {
+        const std::uint8_t* x = d.data() + static_cast<std::size_t>(i) * 0x34;
+        if (x[0x1d] != 0) continue;
+        float f[13];
+        std::memcpy(f, x, sizeof(f));
+        float o[12];
+        o[3] = f[11] * Rt.v[0];
+        o[4] = f[11] * Rt.v[1];
+        o[5] = f[12] * Vv.v[0];
+        o[6] = f[12] * Vv.v[1];
+        if (f[10] == 0.0f) {
+            o[6] = k * o[6];
+            o[5] = k * o[5];
+        }
+        const std::uint32_t white = 0xffffffffu;
+        std::memcpy(&o[7], &white, 4);
+        o[0] = f[0];
+        o[1] = f[1];
+        o[2] = f[2];
+        if (jitterPower > 0.0f && jitterSpeed > 0.0f) {
+            o[0] = g_vec.sinf((f[0] + f[1]) * jitterSpeed) * jitterPower + o[0];
+            o[2] = g_vec.cosf((f[1] + o[2]) * jitterSpeed) * jitterPower + o[2];
+        }
+        o[8] = f[8];
+        o[9] = f[9];
+        o[10] = f[8] + invU;
+        o[11] = f[9] + invV;
+        std::memcpy(out.data() + static_cast<std::size_t>(r) * sc::kSkyBillboardSize, o, sizeof(o));
+        ++r;
+    }
+    return r == records;
+}
+
 // The slot 0x719b00 (= eCPrecipitation_PS::RenderAlpha 0x71d1a0 inlined): when PS +0x18 & 1, the embedded eCSkyObject at PS +0x108
 // (vtable 0x989f28; its slot +0x10 = eCSkyObject::Render 0x6e25e0) is rendered with the identity world. Its billboard array (sky
 // +0x10, 0x30-byte records) is written by eCPrecipitation_PS::Update (OnProcess, before the frame's rendering: one record per
@@ -774,8 +843,40 @@ StaticOps::Skip StaticOps::composePrecipitation(const Op& op) {
         if (a == nullptr || !composeView(a)) return Skip::Unreadable;
     }
     initMirror();
+    // the billboard records natively from the drops (Update's fill 0x71b3df..0x71b640), compared with the engine's array; the draw
+    // expands the native ones (the engine's array when they cannot be made)
+    std::vector<std::uint8_t> mine;
+    bool native = false;
+    if (const auto* prim = hal::vulkan::HalPrimitive::fromApi(ptr(ptr(sky, 0x40), 0x10)); prim != nullptr) {
+        const std::uint32_t n = prim->drawDesc().primitiveCount / 2;
+        std::vector<std::uint8_t> theirs(static_cast<std::size_t>(n) * sc::kSkyBillboardSize);
+        if (n != 0 && precipitationRecords(ps, n, mine) && rd(ptr(sky, 0x10), 0, theirs.data(), theirs.size())) {
+            native = true;
+            if (mine == theirs) {
+                ++fxWindow_.precipRecordsEqual;
+            } else {
+                ++fxWindow_.precipRecordsDiffer;
+                if (precipLogged_ < 4) {
+                    ++precipLogged_;
+                    std::size_t at = 0;
+                    while (at < mine.size() && mine[at] == theirs[at]) ++at;
+                    float a = 0, b = 0;
+                    if (at + 4 <= mine.size()) {
+                        std::memcpy(&a, mine.data() + (at & ~std::size_t{3}), 4);
+                        std::memcpy(&b, theirs.data() + (at & ~std::size_t{3}), 4);
+                    }
+                    spdlog::info("native: precipitation: native records differ from the engine's at record {} float {} ({} vs {})",
+                                 at / sc::kSkyBillboardSize, (at % sc::kSkyBillboardSize) / 4, a, b);
+                }
+            }
+        }
+    }
     const std::size_t before = drawCount_;
-    if (const Skip k = skyObjectDraws(sky, kIdentity, nullptr, 0); k != Skip::None) return k;
+    // (the composed vertex bytes come from the native records: a differing record shows as a vertex-data mismatch)
+    billboardsOverride_ = native ? &mine : nullptr;
+    const Skip k = skyObjectDraws(sky, kIdentity, nullptr, 0);
+    billboardsOverride_ = nullptr;
+    if (k != Skip::None) return k;
     for (std::size_t i = before; i < drawCount_; ++i) {
         if (draws_[i]->vertexBytes.size() + draws_[i]->minIndex * sc::kSkyVertexStride > kOwnVbBytes) return Skip::Unreadable;
         draws_[i]->drawClass = sc::DrawClass::NonOp;
@@ -823,6 +924,9 @@ bool StaticOps::verifyFx() {
     bindFn(sb, g_vec.clamp, "?Clamp@bCFloatAlphaColor@@QEAAXXZ");
     bindFn(sb, g_vec.matMulAssign, "??XbCMatrix@@QEAAAEAV0@AEBV0@@Z");
     if (HMODULE e = GetModuleHandleW(L"Engine.dll")) bindFn(e, g_vec.timer, "?GetInstance@eCTimer@@SAAEAV1@XZ");
+    bindFn(sb, g_vec.sinf, "g_sinf");
+    bindFn(sb, g_vec.cosf, "g_cosf");
+    bindFn(sb, g_vec.magnitude2, "?GetMagnitude@bCVector2@@QEBAMXZ");
     if (!g_vec.ok() || engine::sym().gfxActiveCamera == nullptr || engine::sym().appInstancePtr == nullptr) {
         spdlog::warn("native: scene ops: SharedBase vector functions / engine symbols missing: particles stay the engine's");
         return false;

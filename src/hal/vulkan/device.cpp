@@ -116,7 +116,7 @@ void HalDevice::applyStaticOps() {
     // 32 sky cube faces, 64 skinned actors, 128 SpeedTrees + tree billboards, 256 vegetation, 512 shadow views, 1024 effect draws
     const bool sceneTake = rs.nativeSceneOps != nullptr && rs.nativeSceneOps->asBool();
     const bool sceneCompare = rs.nativeSceneOpsCompare != nullptr && rs.nativeSceneOpsCompare->asBool();
-    const int groups = rs.nativeSceneOpsGroups != nullptr ? rs.nativeSceneOpsGroups->asInt() : 4095;
+    const int groups = rs.nativeSceneOpsGroups != nullptr ? rs.nativeSceneOpsGroups->asInt() : 32767;
     staticOps_->setMode(native::StaticOps::Group::Mesh, sceneTake && (groups & 1) != 0, sceneCompare && (groups & 1) != 0);
     staticOps_->setOverlays((sceneTake || sceneCompare) && (groups & 2) != 0);
     staticOps_->setMode(native::StaticOps::Group::Decals, sceneTake && (groups & 4) != 0, sceneCompare && (groups & 4) != 0);

@@ -1793,7 +1793,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "(the cascade fit and shadow cameras compared; the maps' target binds, viewports, clears and resets), 4096 the particle ops (CPU "
                        "quads), 8192 the strips (trails) and light streaks, 16384 the precipitation (rain / snow, the late list).",
         .type = Type::Int,
-        .defaultValue = 4095,
+        .defaultValue = 32767,
         .min = 0,
         .max = 32767,
         .flags = Flag::NoAB | Flag::Debug,

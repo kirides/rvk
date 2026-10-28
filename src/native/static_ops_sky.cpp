@@ -166,7 +166,9 @@ StaticOps::Skip StaticOps::skyObjectDraws(const std::uint8_t* object, const floa
     if (ptr(visual, 0x60) != nullptr) return Skip::VisualShader;
     // the billboards FillVertexBuffer writes
     std::vector<std::uint8_t> billboards(static_cast<std::size_t>(n) * sc::kSkyBillboardSize);
-    if (bb != nullptr) {
+    if (bb == nullptr && billboardsOverride_ != nullptr && billboardsOverride_->size() == billboards.size()) {
+        billboards = *billboardsOverride_;
+    } else if (bb != nullptr) {
         if (n != 1) return Skip::Unreadable;
         std::memcpy(billboards.data(), bb, sc::kSkyBillboardSize);
     } else {
