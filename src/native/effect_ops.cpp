@@ -63,7 +63,7 @@ constexpr std::uint32_t kParamCamera = 0x9ee480;     // VIEW .. FOCALRANGEFAR (N
 constexpr std::size_t kIllumSsao = 0x430, kIllumBlurSsao1 = 0x438, kIllumBlurSsao2 = 0x440, kIllumMask = 0x448, kIllumDepthCopy = 0x450,
                       kIllumBlur = 0x458, kIllumTerrain = 0x358;
 
-constexpr const char* kUnitNames[] = {"-", "chain", "mask", "terrain blur", "copy", "post", "gui"};
+constexpr const char* kUnitNames[] = {"-", "chain", "mask", "terrain blur", "copy", "post", "gui", "pssm"};
 
 }  // namespace
 
@@ -374,8 +374,8 @@ void EffectOps::maskBegin(void* illum) {
         plan_.push_back("VSSM");
         planCascade_.push_back(-1);
     }
-    // the packed point-light maps (+0x128, 0xb0 each, count +0x130) with cells (+0x70): the PSSM pass (not composed: its draws are
-    // counted as "outside the units")
+    // the packed point-light maps (+0x128, 0xb0 each, count +0x130) with cells (+0x70): the PSSM pass (N5.8: composed by
+    // packedVisual, effect_ops_pssm.cpp)
     if (U8* packed = ptr(mask, 0x128); packed != nullptr) {
         const std::int32_t maps = get<std::int32_t>(mask, 0x130);
         for (std::int32_t m = 0; m < maps; ++m) {
@@ -392,7 +392,7 @@ void EffectOps::maskBegin(void* illum) {
                     for (std::int32_t c = 0; c < cells && c < 12; ++c) {
                         flags += std::format("{}{:#x}", flags.empty() ? "" : " ", get<std::uint32_t>(cellArray + 0x120 * static_cast<std::size_t>(c), 0x11c));
                     }
-                    spdlog::info("native: effect draws: point-light shadow cells: map {} of {}^2, {} cells, flags {} (the PSSM pass: left to the engine)", m,
+                    spdlog::info("native: effect draws: point-light shadow cells: map {} of {}^2, {} cells, flags {} (the PSSM pass: composed at UpdatePackedShadowMapVisual)", m,
                                  get<std::int32_t>(map, 0xc), cells, flags);
                 }
                 break;
@@ -417,6 +417,7 @@ void EffectOps::maskBegin(void* illum) {
 void EffectOps::maskEnd() {
     inMask_ = false;
     if (unit_ != Unit::None) finishUnit();
+    if (leftUnit_ == ptr(illum_, kIllumMask)) leftUnit_ = nullptr;
 }
 
 bool EffectOps::maskStep(std::size_t step, std::string& technique) {
@@ -722,7 +723,9 @@ EffectOps::Skip EffectOps::composeEffect(const std::uint8_t* filter, const std::
         paramTextures[pi] = img != nullptr ? textureOfImage(img) : nullptr;
     }
     // the visual (+0xb0) and its quad
-    U8* visual = ptr(filter, 0xb0);
+    // (N5.8 the PSSM pass: the mask's packed visual +0x138, the pyramids of UpdatePackedShadowMapVisual)
+    const bool pssm = unit_ == Unit::Pssm;
+    U8* visual = ptr(filter, pssm ? 0x138 : 0xb0);
     const auto* prim = hal::vulkan::HalPrimitive::fromApi(ptr(visual, 0x10));
     if (visual == nullptr || prim == nullptr || ptr(visual, 0x60) != nullptr) return Skip::Visual;
     std::vector<const void*> shaders(e.shaders.size(), nullptr);
@@ -764,14 +767,25 @@ EffectOps::Skip EffectOps::composeEffect(const std::uint8_t* filter, const std::
     const fxc::Masters masters = hal_.visualMasters();
     const auto& passes = e.techniques[tech].passes;
     const auto& dc = prim->drawDesc();
-    for (std::size_t p = 0; p < passes.size(); ++p) {
-        if (draws_.size() <= p) draws_.push_back(std::make_unique<fxc::EffectDraw>());
-        fxc::EffectDraw& d = *draws_[p];
-        if (p > 0) d = *draws_[p - 1];
+    // the PSSM pass: per cell (base vertex 5 c) every pass, the stencil set before each ExecuteEffectPass, the visual's cull / depth
+    // func written per pass (fxc::pssmPass)
+    const std::size_t cells = pssm ? pssmIntersects_.size() : 1;
+    fxc::PssmState pstate;
+    for (std::size_t n = 0; n < cells * passes.size(); ++n) {
+        const std::size_t p = n % passes.size(), cell = n / passes.size();
+        if (draws_.size() <= n) draws_.push_back(std::make_unique<fxc::EffectDraw>());
+        fxc::EffectDraw& d = *draws_[n];
+        if (n > 0) d = *draws_[n - 1];
+        std::uint32_t cull = get<std::uint32_t>(visual, 0x1c), depthFunc = get<std::uint32_t>(visual, 0x20);
+        if (pssm) {
+            pstate = fxc::pssmPass(static_cast<int>(p), pssmIntersects_[cell] != 0, pstate);
+            fxc::applyPssmStencil(d, pstate);
+            cull = pstate.cull;
+            depthFunc = pstate.depthFunc;
+        }
         // eCGfxEffect::Execute (ExecuteEffectPass): skipped for the effect already active and not dirty while ms_bOptimize
         if (!post || !executeSkipped(ptr(filter, 0xa8))) fxc::applyPass(e, passes[p], values, paramTextures, shaders, d);
-        fxc::applyVisual(d, get<std::uint32_t>(visual, 0x18), get<std::uint32_t>(visual, 0x1c), get<std::uint32_t>(visual, 0x20),
-                         get<std::uint32_t>(visual, 0x24), masters);
+        fxc::applyVisual(d, get<std::uint32_t>(visual, 0x18), cull, depthFunc, get<std::uint32_t>(visual, 0x24), masters);
         // eCAPIPrimitive::Execute (HalPrimitive): enabled streams with data bound (their frequency set), the others unbound
         d.decl = prim->vertexDecl();
         for (std::uint32_t i = 0; i < 4; ++i) {
@@ -794,8 +808,12 @@ EffectOps::Skip EffectOps::composeEffect(const std::uint8_t* filter, const std::
             d.baseVertex = 0;
             d.minIndex = d.numVertices = d.startIndex = 0;
         }
+        if (pssm) {
+            // OnUpdateOutput: the record's base vertex reset to 0 before the loop, + 5 per cell
+            d.baseVertex = static_cast<std::int32_t>(fxc::kPssmVerticesPerCell * cell);
+        }
         if (d.unsupported) return Skip::Technique;
-        drawCount_ = p + 1;
+        drawCount_ = n + 1;
     }
     return Skip::None;
 }
@@ -827,6 +845,14 @@ void EffectOps::compareDraw(const fxc::EffectDraw& composed, const d3d9::DrawTap
         // N5.7: the sprite quads' vertex / index bytes against the buffers the draw reads
         std::string why;
         if (!spriteGeometryEqual(own ? issueIndex_ : engineDraws_ - 1, t, own, why)) {
+            diff.fields.set(static_cast<std::size_t>(fxc::Field::Geometry));
+            if (diff.first.empty()) diff.first = why;
+        }
+    }
+    if (unit_ == Unit::Pssm) {
+        // N5.8: the pyramid's vertex / index bytes against the buffers the draw reads
+        std::string why;
+        if (!pssmGeometryEqual(own ? issueIndex_ : engineDraws_ - 1, why)) {
             diff.fields.set(static_cast<std::size_t>(fxc::Field::Geometry));
             if (diff.first.empty()) diff.first = why;
         }

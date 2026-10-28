@@ -82,6 +82,21 @@ void applyPass(const fx::Effect& effect, const fx::Pass& pass, const fx::Paramet
 // eCGfxVisual::Execute's four states (visual +0x18 fill, +0x1c cull, +0x20 depth func, +0x24 depth write 2 = on)
 void applyVisual(EffectDraw& d, std::uint32_t fill, std::uint32_t cull, std::uint32_t depthFunc, std::uint32_t depthWrite, const Masters& m);
 
+// N5.8 the PSSM point-light pass (eCImageFilterShadowMask::OnUpdateOutput 0x668560's loop over a packed map's cells, README.md 16):
+// per cell the stencil data starts at fail / zfail / pass KEEP (1), func ALWAYS (8), ref 0, masks ~0; pass 0 INCR (7), pass 1 DECR (8)
+// into zfail when the cell frustum meets the camera's near sphere, else into pass; pass 2 ZERO (2) everywhere with NOTEQUAL (6).
+// The visual's cull / depth func per pass: 2 / 4, 3 / 4, 1 / 8 (later passes keep the last). SetMasterStencilTesting(2, data)
+// before each ExecuteEffectPass: STENCILENABLE 1 + the seven states.
+struct PssmState {
+    std::uint32_t fail = 1, zfail = 1, pass = 1, func = 8, cull = 2, depthFunc = 4;
+};
+// the state of pass `p` of a cell from the previous pass's (`prev`; p == 0: a fresh cell, its cull / depth the visual's)
+PssmState pssmPass(int p, bool cameraInside, const PssmState& prev);
+void applyPssmStencil(EffectDraw& d, const PssmState& s);
+// the pyramid's static indices (CreatePackedShadowMapVisual 0x66a120: 18 x u32, base (0, 1, 3), (3, 1, 2), sides to the apex 4)
+inline constexpr std::uint32_t kPssmIndices[18] = {0, 1, 3, 3, 1, 2, 4, 1, 0, 4, 2, 1, 4, 3, 2, 4, 0, 3};
+inline constexpr std::uint32_t kPssmVertex = 0x50, kPssmVerticesPerCell = 5, kPssmMaxCells = 48;
+
 // eTEffectParamTransposedMatrix<bCMatrix>::Apply 0x28a700: the transpose of the stored matrix
 void transpose(const float in[16], float out[16]);
 

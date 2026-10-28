@@ -44,6 +44,8 @@ U8* ptr(const void* p, std::size_t off) { return get<U8*>(p, off, nullptr); }
 
 constexpr std::uint32_t kCascadeVtable = 0x9a29e0;  // eCShadowMapDirectionalLight2Ex (README.md 12)
 constexpr std::uint32_t kTerrainVtable = 0x9a2848;  // eCShadowMapDirectionalLight2VS
+constexpr std::uint32_t kPackedVtable = 0x976738;   // eCPackedShadowMap (the point-light atlas, README.md 16)
+constexpr std::size_t kCellStride = 0x120;          // eCPackedShadowMap::eSShadowMapCell (AddCell 0x5a0400)
 constexpr std::uint32_t kPowf = 0x4ac030, kFmodf = 0x4ad148;  // the engine's CRT powf / fmodf (static CRT)
 constexpr std::uint32_t kRenderShadowMaps = 0x59f200, kUpdateCamera = 0x5a13e0;
 constexpr std::size_t kSplitStride = 0x168;
@@ -213,9 +215,15 @@ void EffectOps::shadowMapBegin(void* mapPtr) {
     if (setupVerified_ <= 0 || !setupOn()) return;
     auto* map = static_cast<U8*>(mapPtr);
     const auto vt = static_cast<std::uint32_t>(static_cast<U8*>(ptr(map, 0)) - engine_);
-    if (vt != kCascadeVtable && vt != kTerrainVtable) return;
+    if (vt != kCascadeVtable && vt != kTerrainVtable && vt != kPackedVtable) return;
     setupMap_ = map;
-    setupKind_ = vt == kCascadeVtable ? "cascade" : "terrain map";
+    setupKind_ = vt == kCascadeVtable ? "cascade" : vt == kTerrainVtable ? "terrain map" : "point-light atlas";
+    // N5.8: eCPackedShadowMap::RenderShadowMap 0x5a08f0: one SetRenderTarget (face 6) + ClearViewPort for the whole atlas, then
+    // per cell UpdateCamera 0x5a09b0 (no device call) and the scene (ExecuteShadowMap -> eCCameraBase::ExecuteGfxCamera 0x4f6ad0:
+    // the viewport = the camera's Screen rect = the cell's, z 0 .. 1), then ResetRenderTarget
+    packed_ = vt == kPackedVtable;
+    cell_ = 0;
+    cells_ = packed_ ? get<std::int32_t>(map, 0x70) : 0;
     setupStats_ = &setupWindow_[setupKind_];
     ++setupStats_->units;
     setupStep_ = 0;
@@ -264,6 +272,7 @@ void EffectOps::shadowMapBegin(void* mapPtr) {
     }
     setupComposed_ = true;
     ++setupStats_->composed;
+    if (packed_) return;  // the cells' cameras: at each scene's entry (shadowSceneBegin)
     // the cascade fit of this split (RenderShadowMaps ran it right before this call)
     if (vt == kCascadeVtable && fitFrame_ == dev_.stats().frames && fitCascade_ != nullptr) {
         U8* splits = ptr(fitCascade_, 0x30);
@@ -341,6 +350,10 @@ void EffectOps::shadowSceneBegin(void* mapPtr) {
     if (!setupComposed_) return;
     if (setupStep_ != 3) setupMiss(SetupField::Calls, std::format("the scene began at step {}", setupStep_));
     setupStep_ = 3;
+    if (packed_) {
+        packedCellScene();
+        return;
+    }
     // the camera UpdateCamera left (the map's eCCameraBase +0x58) and its texture matrix
     U8* cam = ptr(setupMap_, 0x58);
     ++setupStats_->cameras;
@@ -370,7 +383,56 @@ void EffectOps::shadowSceneBegin(void* mapPtr) {
 void EffectOps::shadowSceneEnd(void* mapPtr) {
     if (setupMap_ == nullptr || mapPtr != setupMap_) return;
     inScene_ = false;
+    if (packed_ && ++cell_ < cells_) {
+        setupStep_ = 3;  // the next cell's scene
+        return;
+    }
     setupStep_ = restoreTarget_ ? 4 : 5;
+}
+
+// the point-light atlas's cell `cell_`: the camera eCPackedShadowMap::UpdateCamera 0x5a09b0 left (Perspective off, ClipDepth cell
+// +0x114 / +0x118 (also db +0x1694), view cell +0x10, projection cell +0x50, Screen = the cell rect +0 x, y, +8 w, h as (x, y,
+// x + w, y + h)) and the viewport ExecuteGfxCamera sets from it inside the scene
+void EffectOps::packedCellScene() {
+    U8* cells = ptr(setupMap_, 0x68);
+    if (cell_ < 0 || cell_ >= cells_ || cells == nullptr) {
+        setupMiss(SetupField::Calls, std::format("a scene for cell {} of {}", cell_, cells_));
+        cellViewportValid_ = false;
+        return;
+    }
+    U8* cell = cells + kCellStride * static_cast<std::size_t>(cell_);
+    U8* cam = ptr(setupMap_, 0x58);
+    ++setupStats_->cameras;
+    alignas(16) float want[16], m[16];
+    bool equal = true;
+    if (!readAt(cell, 0x10, want) || !readAt(cam, 0x10, m) || !same(m, want, 64)) {
+        equal = false;
+        setupMiss(SetupField::Camera, std::format("cell {} view", cell_));
+    }
+    if (!readAt(cell, 0x50, want) || !readAt(cam, 0x50, m) || !same(m, want, 64)) {
+        equal = false;
+        setupMiss(SetupField::Camera, std::format("cell {} projection", cell_));
+    }
+    const float nearZ = get<float>(cell, 0x114), farZ = get<float>(cell, 0x118);
+    const float camNear = get<float>(cam, 0xbc, -1.0f), camFar = get<float>(cam, 0xc0), dbFar = get<float>(cam, 0x1694);
+    if (!same(&nearZ, &camNear, 4) || !same(&farZ, &camFar, 4) || !same(&farZ, &dbFar, 4) ||
+        get<std::uint8_t>(cam, 0xdc, 1) != 0) {
+        equal = false;
+        setupMiss(SetupField::Camera, std::format("cell {} clip {} .. {} vs engine {} .. {} (db {}), perspective {}", cell_, nearZ, farZ, get<float>(cam, 0xbc),
+                                                  get<float>(cam, 0xc0), get<float>(cam, 0x1694), get<std::uint8_t>(cam, 0xdc)));
+    }
+    const std::int32_t r[4] = {get<std::int32_t>(cell, 0), get<std::int32_t>(cell, 4), get<std::int32_t>(cell, 8), get<std::int32_t>(cell, 0xc)};
+    const std::int32_t screen[4] = {r[0], r[1], r[0] + r[2], r[1] + r[3]};
+    std::int32_t engScreen[4]{};
+    if (!readAt(cam, 0xc4, engScreen) || std::memcmp(engScreen, screen, sizeof(screen)) != 0) {
+        equal = false;
+        setupMiss(SetupField::Camera, std::format("cell {} screen ({} {} {} {}) vs engine ({} {} {} {})", cell_, screen[0], screen[1], screen[2], screen[3],
+                                                  engScreen[0], engScreen[1], engScreen[2], engScreen[3]));
+    }
+    if (equal) ++setupStats_->cleanCameras;
+    cellViewport_ = {static_cast<std::uint32_t>(r[0]), static_cast<std::uint32_t>(r[1]), static_cast<std::uint32_t>(r[2]), static_cast<std::uint32_t>(r[3]),
+                     0.0f, one_};
+    cellViewportValid_ = true;
 }
 
 void EffectOps::shadowMapEnd(void* mapPtr) {
@@ -401,6 +463,20 @@ void EffectOps::setupTarget(void*& rt, void*& depth) {
 }
 
 void EffectOps::setupViewport(fxc::Viewport& vp) {
+    if (setupMap_ != nullptr && inScene_ && packed_ && setupComposed_ && cellViewportValid_) {
+        // the cell's viewport (ExecuteGfxCamera at ExecuteShadowMap's start: once per cell)
+        cellViewportValid_ = false;
+        ++setupStats_->calls;
+        if (vp == cellViewport_) ++setupStats_->cleanCalls;
+        else setupMiss(SetupField::Viewport, std::format("cell {} viewport {} {} {}x{} z {}..{} vs engine {} {} {}x{} z {}..{}", cell_, cellViewport_.x,
+                                                         cellViewport_.y, cellViewport_.width, cellViewport_.height, cellViewport_.minZ, cellViewport_.maxZ,
+                                                         vp.x, vp.y, vp.width, vp.height, vp.minZ, vp.maxZ));
+        if (setupTake_) {
+            vp = cellViewport_;
+            ++setupStats_->taken;
+        }
+        return;
+    }
     if (setupMap_ == nullptr || inScene_ || !setupComposed_) return;
     ++setupStats_->calls;
     if (setupStep_ == 1 || setupStep_ == 5) {

@@ -86,6 +86,9 @@ public:
     virtual void postEnd(void* /*effect*/) {}
     virtual void spriteFlushBegin(void* /*sprite*/) {}
     virtual void spriteFlushEnd(void* /*sprite*/) {}
+    // N5.8: eCImageFilterShadowMask::UpdatePackedShadowMapVisual (0x669e00) returned `ok` for the packed map `map` (the PSSM pass of
+    // that map follows: BeginEffectTechnique, per cell 3 passes, EndEffectTechnique)
+    virtual void packedVisual(void* /*mask*/, void* /*map*/, bool /*ok*/) {}
 };
 void setEffectTap(EffectTap* tap);
 

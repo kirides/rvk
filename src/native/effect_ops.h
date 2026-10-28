@@ -79,6 +79,7 @@ public:
     void postEnd(void* effect) override;
     void spriteFlushBegin(void* sprite) override;
     void spriteFlushEnd(void* sprite) override;
+    void packedVisual(void* mask, void* map, bool ok) override;
     // engine/shadow_maps: eCCascadeShadowMap::RenderShadowMaps is about to fit and render the cascades
     void fitBegin(void* cascade);
     // the HAL's device calls inside a shadow map's setup / reset: compared with (and with take-over replaced by) the composition
@@ -98,7 +99,7 @@ public:
     void report();
 
 private:
-    enum class Unit : std::uint8_t { None, Chain, Mask, TerrainBlur, Copy, Post, Gui };
+    enum class Unit : std::uint8_t { None, Chain, Mask, TerrainBlur, Copy, Post, Gui, Pssm };
     enum class Skip : std::uint8_t {
         None, NoEffect, Technique, ParamClass, Semantic, Input, Image, Visual, Packed, Unreadable, Buffer, Sorted, Count
     };
@@ -176,6 +177,32 @@ private:
     using MatMulFn = void* (*)(const void* a, void* out, const void* b);
     MatMulFn matMul_ = nullptr;
 
+    // ---- N5.8 the PSSM point-light pass (effect_ops_pssm.cpp) ----
+    bool verifyPssm();
+    // the pyramids' vertices of UpdatePackedShadowMapVisual (5 per cell, 0x50 each) and the cells' camera-sphere test
+    bool pssmVertices(const std::uint8_t* map, std::int32_t cells);
+    bool pssmGeometryEqual(std::size_t k, std::string& why);
+    void issuePssm();
+    int pssmVerified_ = 0;
+    std::vector<std::uint8_t> pssmIntersects_;   // per cell: the cell frustum meets the camera's near sphere
+    std::vector<std::uint8_t> pssmVb_;           // the cells' vertices as composed
+    std::unique_ptr<d3d9::Buffer> pssmOwnVb_;    // take-over: our own vertex buffer
+    const float* pssmCorners_ = nullptr;         // the NDC far corners (Engine.dll data 0x9f1bc0 / 0x9f1d30 / 0x9f1c20)
+    float pssmCornerData_[12]{};
+    std::uint64_t pssmUnits_ = 0, pssmCells_ = 0, pssmInside_ = 0, pssmViewProjDiffers_ = 0;
+    using FrustumCtorFn = void* (*)(void* f);
+    using FrustumSetFn = void (*)(void* f, const void* m);
+    using FrustumSphereFn = bool (*)(const void* f, const void* sphere);
+    using VecTransformedFn = void* (*)(const void* v, void* out, const void* m);
+    using MatInvertedFn = void* (*)(const void* m, void* ret);
+    using CosFn = float (*)(float);
+    FrustumCtorFn frustumCtor_ = nullptr, frustumDtor_ = nullptr;
+    FrustumSetFn frustumSet_ = nullptr;
+    FrustumSphereFn frustumSphere_ = nullptr;
+    VecTransformedFn vecTransformed_ = nullptr;
+    MatInvertedFn matInverted_ = nullptr;
+    CosFn cosf_ = nullptr;
+
     // ---- N5.7 sprite batcher (effect_ops_gui.cpp) ----
     bool verifyGui();
     Skip composeSprite(const std::uint8_t* sprite);
@@ -242,6 +269,12 @@ private:
     float camView_[16]{}, camProj_[16]{}, texMatrix_[16]{};
     float camFar_ = 0.0f;
     bool setupComposed_ = false;
+    // N5.8: the point-light atlas (eCPackedShadowMap::RenderShadowMap): its cells' scenes, the cell's viewport inside the scene
+    bool packed_ = false;
+    std::int32_t cell_ = 0, cells_ = 0;
+    fxc::Viewport cellViewport_;
+    bool cellViewportValid_ = false;
+    void packedCellScene();
     std::map<std::string, SetupStats> setupWindow_, setupTotal_;
     std::uint32_t setupLogged_ = 0;
     // SharedBase / Engine functions of the fit and UpdateCamera

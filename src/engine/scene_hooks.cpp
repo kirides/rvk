@@ -215,6 +215,25 @@ bool detourShadowMapRender(void* map) {
     return r;
 }
 
+// N5.8: the point-light atlas's render (eCPackedShadowMap::RenderShadowMap 0x5a08f0: one target + clear, per cell UpdateCamera and
+// the scene, reset) and the mask's PSSM pyramids (eCImageFilterShadowMask::UpdatePackedShadowMapVisual 0x669e00)
+Hook<MapRenderFn> g_packedMapRender;
+bool detourPackedMapRender(void* map) {
+    EffectTap* tap = device() != nullptr ? g_effectTap.load(std::memory_order_relaxed) : nullptr;
+    if (tap != nullptr) tap->shadowMapBegin(map);
+    const bool r = g_packedMapRender.original(map);
+    if (tap != nullptr) tap->shadowMapEnd(map);
+    return r;
+}
+using PackedVisualFn = bool (*)(void* mask, void* map, const void* viewProj);
+Hook<PackedVisualFn> g_packedVisual;
+bool detourPackedVisual(void* mask, void* map, const void* viewProj) {
+    const bool r = g_packedVisual.original(mask, map, viewProj);
+    EffectTap* tap = device() != nullptr ? g_effectTap.load(std::memory_order_relaxed) : nullptr;
+    if (tap != nullptr) tap->packedVisual(mask, map, r);
+    return r;
+}
+
 using BeginZPassFn = bool (*)(void* admin, void* depthMap, bool a, bool b);
 Hook<BeginZPassFn> g_beginZPass;
 bool detourBeginZPass(void* admin, void* depthMap, bool a, bool b) {
@@ -785,6 +804,8 @@ int install() {
     add(g_executeEffect, "eCImageFilterEffect::ExecuteEffect", s.imageFilterExecuteEffect, &detourExecuteEffect);
     add(g_copyUpdate, "eCImageFilterCopy::OnUpdateOutput", s.imageFilterCopyUpdate, &detourCopyUpdate);
     add(g_shadowMapRender, "eCShadowMapBase::RenderShadowMap", s.shadowMapBaseRender, &detourShadowMapRender);
+    add(g_packedMapRender, "eCPackedShadowMap::RenderShadowMap", s.packedShadowMapRender, &detourPackedMapRender);
+    add(g_packedVisual, "eCImageFilterShadowMask::UpdatePackedShadowMapVisual", s.maskUpdatePackedVisual, &detourPackedVisual);
     add(g_beginRenderSolid, "eCModuleAdmin::DoBeginRenderSolid", s.moduleBeginRenderSolid, &detourBeginRenderSolid);
     add(g_beginRenderAlpha, "eCModuleAdmin::DoBeginRenderAlpha", s.moduleBeginRenderAlpha, &detourBeginRenderAlpha);
     add(g_endRenderAlpha, "eCModuleAdmin::DoEndRenderAlpha", s.moduleEndRenderAlpha, &detourEndRenderAlpha);

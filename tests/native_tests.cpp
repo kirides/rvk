@@ -1034,3 +1034,26 @@ TEST(native_coverage_counts_by_source_and_reason) {
     total.clear();
     CHECK(total.empty() && total.draws() == 0);
 }
+
+TEST(native_pssm_pass_states_follow_the_mask_loop) {
+    namespace fxc = native::fxc;
+    // a cell: passes 0 / 1 INCR / DECR into zfail (camera inside the cell frustum) or pass, pass 2 clears with NOTEQUAL
+    fxc::PssmState s{};
+    s.cull = 9;  // whatever the visual held
+    s = fxc::pssmPass(0, true, s);
+    CHECK(s.fail == 1 && s.zfail == 7 && s.pass == 1 && s.func == 8 && s.cull == 2 && s.depthFunc == 4);
+    s = fxc::pssmPass(1, true, s);
+    CHECK(s.zfail == 8 && s.pass == 1 && s.cull == 3 && s.depthFunc == 4);
+    s = fxc::pssmPass(2, true, s);
+    CHECK(s.fail == 2 && s.zfail == 2 && s.pass == 2 && s.func == 6 && s.cull == 1 && s.depthFunc == 8);
+    // the next cell starts fresh (camera outside: the pass slot)
+    s = fxc::pssmPass(0, false, s);
+    CHECK(s.fail == 1 && s.zfail == 1 && s.pass == 7 && s.func == 8 && s.cull == 2);
+    s = fxc::pssmPass(1, false, s);
+    CHECK(s.zfail == 1 && s.pass == 8);
+    fxc::EffectDraw d;
+    fxc::applyPssmStencil(d, s);
+    CHECK(d.rs[d3d9::RS_STENCILENABLE] == 1 && d.rs[d3d9::RS_STENCILPASS] == 8 && d.rs[d3d9::RS_STENCILFUNC] == 8 && d.rs[d3d9::RS_STENCILREF] == 0 &&
+          d.rs[d3d9::RS_STENCILMASK] == 0xffffffffu && d.rs[d3d9::RS_STENCILWRITEMASK] == 0xffffffffu);
+    CHECK(fxc::kPssmIndices[6] == 4 && fxc::kPssmIndices[17] == 3);
+}

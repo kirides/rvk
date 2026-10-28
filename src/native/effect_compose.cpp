@@ -156,6 +156,33 @@ void applyVisual(EffectDraw& d, std::uint32_t fill, std::uint32_t cull, std::uin
     if (!m.depthWrite) setState(d, d3d9::RS_ZWRITEENABLE, depthWrite == 2 ? 1u : 0u);
 }
 
+PssmState pssmPass(int p, bool cameraInside, const PssmState& prev) {
+    PssmState s = prev;
+    if (p == 0) s.fail = s.zfail = s.pass = 1, s.func = 8;
+    if (p == 0 || p == 1) {
+        (cameraInside ? s.zfail : s.pass) = p == 0 ? 7u : 8u;
+        s.cull = p == 0 ? 2u : 3u;
+        s.depthFunc = 4;
+    } else if (p == 2) {
+        s.fail = s.zfail = s.pass = 2;
+        s.func = 6;
+        s.cull = 1;
+        s.depthFunc = 8;
+    }
+    return s;
+}
+
+void applyPssmStencil(EffectDraw& d, const PssmState& s) {
+    setState(d, d3d9::RS_STENCILENABLE, 1);
+    setState(d, d3d9::RS_STENCILFAIL, s.fail);
+    setState(d, d3d9::RS_STENCILZFAIL, s.zfail);
+    setState(d, d3d9::RS_STENCILPASS, s.pass);
+    setState(d, d3d9::RS_STENCILFUNC, s.func);
+    setState(d, d3d9::RS_STENCILREF, 0);
+    setState(d, d3d9::RS_STENCILMASK, 0xffffffffu);
+    setState(d, d3d9::RS_STENCILWRITEMASK, 0xffffffffu);
+}
+
 void transpose(const float in[16], float out[16]) {
     for (int r = 0; r < 4; ++r)
         for (int c = 0; c < 4; ++c) out[c * 4 + r] = in[r * 4 + c];
