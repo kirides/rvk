@@ -484,3 +484,13 @@ holds (Full: 36 -> 8 MiB per frame, GPU allocations -96 MiB at the savegame, -12
 the stage constants of shaders that read none, `debug.constant_compare` (register writes that change nothing keep the block),
 `perf: stage constants` line (blocks per stage, KiB written, int / bool skipped, unchanged writes), optional
 shaderDrawParameters + drawIndirectCount. CPU effect small (Full 4.70 -> 4.66 ms savegame, 5.88 -> 5.60 jungle).
+
+## 18. Vulkanize V2 (2026-10-28)
+
+Split constants, details and numbers in vulkanize/plan.md section 6. A stage's float registers are four windows by register
+number (VS view / frame / object / material, PS view+fog / c5 / material / light); a window block goes to the ring only when
+dirty (`debug.split_constants`, default on; `debug.split_verify` checks the blocks against the register file), `perf: split
+constants` line. Ring traffic -60 to -65 % (Wrapper savegame 7,117 -> 2,789 KiB per frame, Full 8,126 -> 2,773), constant bytes
+written -33 % (Full 2,607 -> 1,728 KiB); GPU memory and GPU time unchanged. CPU no gain (Wrapper savegame 3.31 -> 3.33 ms,
+Full 4.67 -> 4.74 ms, +1.5 %: the always-on compare + window bookkeeping cancels the smaller copies): the CPU is in the per-draw
+composition (V3).

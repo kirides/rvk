@@ -56,7 +56,7 @@ Each stage: built, game-verified (the native compare `mismatches: none` with `na
 * Optional features `shaderDrawParameters` + `drawIndirectCount` enabled when present (needed by V4); check the overlay
   still draws (enabling DGC once hid it: performance.md 12).
 
-**V2: split constants** (Wrapper and Full)
+**V2: split constants** (Wrapper and Full; done 2026-10-28, section 6)
 * Translator: per-class block reads (above), `kTranslatorVersion` bump, ABI (abi.h + rvk_abi.glsl + the layout test) gets
   the record; `rvk_shadertool corpus` + `compare_disasm` stay 100 %; the shader equivalence tools re-run.
 * Device: per-class dirty tracking; a class block is uploaded only when its registers changed since its last upload, else
@@ -133,3 +133,83 @@ hold 40, `-Exe RisenTest.exe -Vsync off -Perf`, 3 runs each, last 6 `perf:` wind
   (+0.6 / +0.2; the previous build +0.4): night-spot noise.
 * **Honest finding**: V1 is a memory / traffic win (Full ring -78 %, memory -96 to -128 MiB), not a CPU win: CPU stays within
   ~1 - 5 % (best Full jungle). The CPU cost is in the per-draw composition and constant copies that V2 / V3 address.
+
+## 6. V2 result (2026-10-28)
+
+Built and verified; commit ae10596 "V2: split constants ...". Code: `src/shader/abi.h`, `glsl.cpp`, `d3d9/draw.cpp`
+(`uploadConstants` / `splitStage` / `verifySplit`), `d3d9/device.cpp` (setters). Measured as in section 5 (savegame
+Risen_Save_0009 `rvk_perfsave` hold 40, `-Exe RisenTest.exe -Vsync off -Perf`, 3 runs, last 6 `perf:` windows,
+`out/v2/summ` via `out/v1/summ.py`; jungle 1 run each); before = V1 build 7109548 (`build/V1base`), after = V2.
+
+**Design (confirmed)**
+* A stage's float registers are partitioned into 4 windows **by register number** (not by CTAB name): VS c0-11 view,
+  c12-30 frame (wind, app-camera rotation, fog), c31-231 object, c232-255 material; PS c0-4 view / fog, c5 (a new `vec4 psC5`
+  in the DrawBlock: xy view + w per-draw alpha ref; DrawBlock 192 -> 208 B), c6-13 material, c14-223 light.
+* Translated shaders read float `c[n]` through the macros `RVK_VSC` / `RVK_PSC` = `pc.vsw[win(n)].c[n]` / `pc.psw[..]`; push
+  constants 48 -> 112 B (`vsWin[4]`, `psWin[4]`). Window pointers are **biased** (block base - firstReg * 16), so register
+  numbers stay. Legacy draws set every window to the one full StageConsts, so one SPIR-V serves both paths.
+* Relative addressing: the translator marks the base register's whole window (generic `rvk_cRel` selects the window); windows
+  a shader does not read point to a zeroed 4 KiB ring block. `Reflection::windowEnd[4]` = highest read + 1 per window;
+  `splitConsts` is false for hand-made reflections and shaders reading `i#` / `b#`.
+* Device: register setters set per-window dirty bits (the memcmp compare now also runs on an already dirty stage when split is
+  on). A window block is written to the ring only when dirty, never uploaded, or uploaded shorter than the shader reads; extents
+  = what the shader reads (enhancement variants that read ambient c15..21 / indoor get window 3 extended). Ring memory is per
+  frame: all windows dirty at `beginFrame`.
+* The legacy full block stays for hand-written GLSL (water, ocean ..., they read `pc.vs` / `pc.ps`), the GLSL ubershader
+  (`debug.ubershader`), replacers with their own DrawBlock and `i#` / `b#` readers. `kTranslatorVersion` 3 -> 4; the variant
+  text `rvk_material_variant.glsl` reads `pc.psw[3]`; tools (shadereq, vktest) call `PushConstants::legacyWindows()`.
+* Consumers: the CPU register file is still filled by every setter, so water, rt_scene, gi, shadows, rt_material,
+  object_motion, rt_skin read it unchanged. Nothing reads the GPU StageConsts address (`draws::Record` vsConsts / psConsts now
+  hold the object / light window address of split draws, only logged); `prevVsConsts` in the push is a capture address, untouched.
+* Settings: `debug.split_constants` (Debug, default on; off = V1 upload behaviour incl. full blocks), `debug.split_verify`
+  (Debug, default off: after each split upload every window block the shader reads is compared with the CPU register file;
+  rvk.log `d3d9: split constants: ... differs`, `verify mismatches` in the perf line). Perf line `perf: split constants`
+  (blocks written + reused per frame: VS view / frame / object / material, PS view / material / light; draws split / legacy;
+  verify mismatches). The V1 counter `unchanged register writes` now also counts writes on dirty stages.
+
+**Numbers**
+
+| run | CPU ms before -> after | fps p50 | ring KiB / frame | constants written KiB / frame |
+|---|---|---|---|---|
+| Wrapper, savegame | 3.31 / 3.76 / 3.31 -> 3.33 / 3.35 / 3.38 (V1 mean ~3.46) | ~274 -> ~270 | 7,117 -> 2,789 | 2,488-2,516 -> 1,630-1,656 |
+| Full, savegame | 4.67 / 4.65 / 4.61 -> 4.74 / 4.72 / 4.71 (+0.07, +1.5 %) | 196.8 -> 192.0 | 8,126 -> 2,773 | 2,607 -> 1,728 |
+| Wrapper, jungle | 3.90 -> 3.94 | | 11,139 -> 3,772 | 4,138 -> 2,424 |
+| Full, jungle | 5.63 -> 5.67 | | 13,215 -> 4,148 | 4,344 -> 2,690 |
+
+GPU time unchanged (savegame 1.48 -> 1.49-1.50 ms). Blocks per frame (Full savegame, V2, written + reused): VS view 56 + 859,
+frame 6 + 482, object 777 + 110 (1,619 KiB = ~94 % of the VS bytes), material 164 + 11; PS view 22 + 618, material 191 + 262,
+light 478 + 47 (105 KiB). Draws split 916 / 916 on both stages.
+
+**Verification**
+* rvk_tests 182/182 (new `const_windows_match_glsl_macros`; the layout test extended), rvk_d3d9test, rvk_vktest + `--passes`
+  (PASS, 0 validation messages), shader corpus 2,483 OK, `compare_disasm` 100 % (2,483 of 2,483).
+* Game: Wrapper at the savegame and Full with `debug.split_verify=true`: 0 verify mismatches (1,000+ split draws per frame).
+  Full native compare (`native.scene_ops_compare`, `static_ops_compare`, `lean_check=10`, split_verify on): savegame, spots
+  pub_interior + jungle, 17-spot route, spells, point shadow (also under `-SyncValidation`), rare (`-Validation`), storm set,
+  focus, savegame under `-Validation`: `mismatches: none`, 0 differing own draws, 0 validation messages, 0 errors. One
+  transient `particles: vs instance c32+ 1` mismatch at the very start of one spots run (first 7 compared draws, "permutation
+  not compiled"), never in 9 later runs: judged a startup race (inferred).
+* Wrapper refcompare (6 spots vs `out/refcompare/20261022-093252`, DLL hash of the snapshot = deployed build): beach_rain,
+  jungle, gui_inventory PASS; hero_closeup, pub_interior WARN (pub_interior dluma -1.3..-1.5 also with
+  `debug.split_constants=false`: not from V2); harbour_night FAIL on dluma -4.2 (V1 failed it once too: night noise). Split on
+  vs off vs on vs on (noise floor) give the same differences (jungle ssim 0.89-0.91, hero_closeup bad32 1-2 % both): no
+  measurable image change.
+* Enhancements on (water + RT reflections + enhanced shadows with `shadows.rt=near` + GI), Wrapper pub_interior / jungle, split
+  on: screenshots correct (viewed), verify mismatches 0.
+* **Finding (pre-existing, not V2)**: the same enhancement combination at refcompare jungle ends in `VK_ERROR_DEVICE_LOST`
+  with split constants **off** and with the V1 build (2 of 2 runs each), while split on completed 2 of 2; cause not
+  investigated (the ring traffic cut may be involved), so there is no off / on image A/B for the enhancements. Open: a Full-mode
+  enhancement run was not done.
+
+**Honest result**: bytes and ring traffic -60 to -65 %, GPU memory unchanged, **CPU no gain** (within noise, ~+1 % in Full: the
+always-on memcmp compare + window bookkeeping about cancels the smaller copies). V1's conclusion stands: the CPU is in the
+per-draw composition (V3).
+
+**Dropped / not done**: persistent MATERIAL / LIGHT tables and OBJECT dedup (no CPU gain to expect before V3). The object
+window of relative-addressing shaders (instanced, skinned, SpeedTree) still uploads the whole c31..c231 window (3.2 KB);
+trimming needs the instance / bone count from the composition (V3).
+
+**What V3 can build on**: per-window blocks with dirty bits are the retained-block structure: a retained op keeps its object /
+material / light window blocks (persistent addresses) and the per-draw record can be the 8 window addresses + DrawBlock. The
+`psC5` trick shows how per-draw scalars of a shared window move into the DrawBlock. `debug.split_verify` is the check mode for
+retained blocks (recompose and compare against the register file); the Full compare / `lean_check` frames remain the parity proof.
