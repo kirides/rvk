@@ -365,8 +365,22 @@ void EffectOps::maskBegin(void* illum) {
     if (U8* packed = ptr(mask, 0x128); packed != nullptr) {
         const std::int32_t maps = get<std::int32_t>(mask, 0x130);
         for (std::int32_t m = 0; m < maps; ++m) {
-            if (get<std::int32_t>(packed + 0xb0 * static_cast<std::size_t>(m), 0x70) > 0) {
+            U8* map = packed + 0xb0 * static_cast<std::size_t>(m);
+            const std::int32_t cells = get<std::int32_t>(map, 0x70);
+            if (cells > 0) {
                 ++packedMasks_;
+                // the cells' colour flags (+0x11c of the 0x120-byte cells at +0x68): the PSSM pyramids' vertex colour is ~flags, the
+                // pass writes max(1 - lit, colour) through ZERO / SRCCOLOR, so a channel whose colour bit is 0 receives the shadow
+                if (packedLogged_ < 3) {
+                    ++packedLogged_;
+                    std::string flags;
+                    U8* cellArray = ptr(map, 0x68);
+                    for (std::int32_t c = 0; c < cells && c < 12; ++c) {
+                        flags += std::format("{}{:#x}", flags.empty() ? "" : " ", get<std::uint32_t>(cellArray + 0x120 * static_cast<std::size_t>(c), 0x11c));
+                    }
+                    spdlog::info("native: effect draws: point-light shadow cells: map {} of {}^2, {} cells, flags {} (the PSSM pass: left to the engine)", m,
+                                 get<std::int32_t>(map, 0xc), cells, flags);
+                }
                 break;
             }
         }

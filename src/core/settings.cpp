@@ -1792,7 +1792,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "SSAO, cascades, terrain term, blur; its depth copy; the terrain variance map's Blur7H / V), 2048 the shadow views' setup "
                        "(the cascade fit and shadow cameras compared; the maps' target binds, viewports, clears and resets).",
         .type = Type::Int,
-        .defaultValue = 1023,
+        .defaultValue = 4095,
         .min = 0,
         .max = 4095,
         .flags = Flag::NoAB | Flag::Debug,

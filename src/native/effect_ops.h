@@ -255,7 +255,7 @@ private:
     Stats* stats_ = nullptr;
     std::uint64_t outsideDraws_ = 0, outsideDrawsTotal_ = 0;  // engine draws inside UpdateShadowMask outside any unit (PSSM)
     std::uint64_t unusedParams_ = 0, masks_ = 0, packedMasks_ = 0, nativeParams_ = 0;
-    std::uint32_t mismatchLogged_ = 0, paramClassLogged_ = 0;
+    std::uint32_t mismatchLogged_ = 0, paramClassLogged_ = 0, packedLogged_ = 0;
     std::vector<std::string> firstMismatches_;
     std::unordered_map<const d3d9::Shader*, Live> live_;
 };

@@ -1,0 +1,6 @@
+id          = "rvk_pointshadow"
+name        = "Renderer point-light shadow check"
+version     = "1.0.0"
+author      = "risen-enhanced-graphics"
+description = "Spawns a light-spell point light with CastShadows set next to the hero at night, so the engine renders its packed point-light shadow atlas and the shadow mask's PSSM pass (scenario rvk_pointshadow, docs/research/engine-frame/README.md 13)."
+main        = "main.lua"
