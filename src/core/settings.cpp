@@ -1790,7 +1790,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "the tree billboards' ops, 256 the vegetation ops (grass batches), 512 the shadow maps' z ops (sun cascades, terrain "
                        "variance map, point-light atlas cells).",
         .type = Type::Int,
-        .defaultValue = 511,
+        .defaultValue = 1023,
         .min = 0,
         .max = 1023,
         .flags = Flag::NoAB | Flag::Debug,
