@@ -52,6 +52,15 @@ bool safeRead(const void* src, void* dst, std::size_t size) {
     }
 }
 
+bool safeWrite(void* dst, const void* src, std::size_t size) {
+    __try {
+        std::memcpy(dst, src, size);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 std::string readCString(const void* field) {
     const char* text = nullptr;
     if (!readAt(field, 0, text) || text == nullptr) return {};

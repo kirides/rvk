@@ -170,6 +170,8 @@ private:
     static constexpr std::size_t mirrorShaderCap_ = 8192;
     const void* mirrorGlobalSrc_ = nullptr;
     const void* mirrorLightingSrc_ = nullptr;
+    // the material admin the lightmap slots are read from (the last view's: a view's first ops run before composeView sets view_)
+    const std::uint8_t* poolAdmin_ = nullptr;
     // engine code we do not compose ran (an op left to the engine, a non-op unit not composed): the engine's pools as they were
     // before it; the registers it changed are merged into the mirror at the next use
     struct EngineSnap {
@@ -379,12 +381,16 @@ private:
         return leanFrameKind_ == sc::LeanFrame::Check;
     }
     int leanVerified_ = 0;  // the engine functions the lean path calls: 1 resolved, -1 not (never lean)
+    int leanAnimVerified_ = 0;  // O2b: the animated / simulated kinds' engine functions and sites (1 ok, -1: those groups not lean)
     bool leanFrame();       // lean on and this frame is not a check frame
-    static bool leanGroup(Group g);
+    bool leanGroup(Group g) const;
+    bool verifyLeanAnim();
     // the op being composed is a lean candidate: the side effects its engine code would have are collected while composing
     // (leanBegin) and run when its draws were issued by us (leanCommit: true = the engine's code is skipped)
     bool leanCollect_ = false;
-    enum LeanBlock : std::uint32_t { kBlockVideo = 1 };
+    // kBlockEdge: an engine path whose side effects the lean path does not reproduce (rare first-use / failure cases): the op keeps
+    // the engine's code
+    enum LeanBlock : std::uint32_t { kBlockVideo = 1, kBlockEdge = 2 };
     std::uint32_t leanBlock_ = 0;
     std::vector<const void*> leanTouches_, leanLightmaps_;
     struct LeanStream3 {
@@ -409,12 +415,65 @@ private:
     void leanBillboardsPost(const std::uint8_t* admin);
     void leanSortInstances(const std::uint8_t* res);
     void leanStream3(const std::uint8_t* res, bool on);
+    // ---- O2b: the animated / simulated kinds (opt-side-effects-anim.md; run where the engine's code runs them, before / while
+    // composing; the ones that would change what a fallback slot sees are deferred to the commit) ----
+    // eCAnimation_PS::Render: UpdateRenderMatrices(wrapper, frame id) (the palette + its stamp), then HardRenderActor2::Render's
+    // touches of the HRA resource and (cached) the LOD primitive's material
+    void leanActorPre(const std::uint8_t* wrapper, std::uint16_t primIdx);
+    // eCRenderContextSpeedTree::Render / RenderZPass: the queue sorted in place at the render buffer's first op + its stamp = 0
+    void leanTreeSort(const std::uint8_t* rb, bool zpass);
+    // RenderBranches / Fronds / Leafs (+ z passes): MaskReference = 80 with the property notifies (when it is not 80 yet)
+    void leanMaskRef(const std::uint8_t* shader);
+    // eCParticle_PS::Render's first steps (GetMasterInstance, the in-slot OnProcess, the inactivity timer): false = Render returns
+    bool leanParticlePre(const std::uint8_t* ps);
+    // ApplyRenderStates' creation / touches (CreateMaterial, RequestData, CreateImage + the sampler material's SetImage)
+    void leanParticleStates(const std::uint8_t* ps);
+    // committed with the op: the vegetation cursor, a particle target's in-place depth sort + our vertex cache, a class pool's
+    // registers (eCShaderParticle / eCShaderLightStreaks global pools: the engine's composition reads them per op)
+    struct LeanVeg {
+        const std::uint8_t* admin = nullptr;
+        std::uint32_t cursor = 0;
+    } leanVeg_;
+    const std::uint8_t* leanParticleTarget_ = nullptr;
+    struct LeanPool {
+        const std::uint8_t* var = nullptr;  // the class's ms_pGlobalShaderConstants (its pool +0x38 = the registers from +0x24)
+        std::uint32_t count = 0;
+        float regs[32][4]{};
+    } leanPool_;
+    void leanPoolFrom(const std::uint8_t* var, std::uint32_t count);  // fxPool_'s first `count` registers, written at the commit
+    // a particle target's vertices of this frame, made by us (the engine's UpdateVertices did not run: its +0x3b0 stays)
+    struct ParticleCache {
+        std::uint64_t frame = ~0ull;
+        std::uint32_t quads = 0;
+        std::vector<std::uint8_t> vb;
+    };
+    std::unordered_map<const void*, ParticleCache, PtrHash> particleCache_;
+    std::vector<std::uint8_t> leanParticleVb_;
+    std::uint32_t leanParticleQuads_ = 0;
+    // engine functions of the O2b path (resolved by verifyLeanAnim)
+    bool (*updateRenderMatrices_)(const void* wrapper, std::uint32_t frame) = nullptr;
+    void* (*particleModule_)() = nullptr;
+    void* (*getMasterInstance_)(void* module, const void* ps) = nullptr;
+    void (*depthSortParticles_)(const void* ps) = nullptr;
+    bool (*particleCreateVertices_)(const void* ps) = nullptr;
+    bool (*particleCreateMaterial_)(const void* ps) = nullptr;
+    bool (*particleCreateImage_)(const void* ps) = nullptr;
+    bool (*stripCreateVertices_)(const void* ps) = nullptr;
+    bool (*streaksCreateBuffers_)(const void* ps) = nullptr;
+    const void* maskRefProperty_ = nullptr;  // the MaskReference property the tree paths' notifies name (0x97bb98)
+    // O2b: on a lean frame the engine's global / lighting pools lag behind (the lean ops do not write them): before engine code
+    // runs, ours are copied into them (so it starts from what lean off would have, and its changes are found by the diff)
+    bool syncEnginePools();
     struct LeanStats {
         std::uint64_t frames = 0, checkFrames = 0;
         std::array<std::uint64_t, kGroups> skipped{}, kept{};
-        std::uint64_t blockedVideo = 0, touches = 0, touchCalls = 0, lightmaps = 0, stream3 = 0, instanceSorts = 0, queueResets = 0;
+        std::uint64_t blockedVideo = 0, blockedEdge = 0, touches = 0, touchCalls = 0, lightmaps = 0, stream3 = 0, instanceSorts = 0, queueResets = 0;
         std::uint64_t placeholderBinds = 0, skyWrites = 0, creates = 0;
         std::int32_t queueMax = 0;
+        // O2b
+        std::uint64_t palettes = 0, treeSorts = 0, maskRefs = 0, vegCursors = 0, poolWrites = 0, poolSyncs = 0;
+        std::uint64_t masters = 0, noMaster = 0, kicks = 0, kicksSpawned = 0, inactivity = 0, particleSorts = 0, particleCached = 0;
+        std::uint64_t particleCreates = 0, stripCreates = 0, streakCreates = 0;
     } leanWindow_, leanTotal_;
     std::vector<const void*> placeholderImages_;  // distinct resources bound as the placeholder in the window (bounded)
     std::vector<std::string> placeholderNames_;   // the first ones' names, read while bound (a load may free them before the report)

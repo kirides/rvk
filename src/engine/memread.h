@@ -12,6 +12,8 @@ namespace rvk::engine {
 
 // copies `size` bytes; false when the source is not readable
 bool safeRead(const void* src, void* dst, std::size_t size);
+// copies `size` bytes into engine memory; false when the destination is not writable (O2b: the lean path's pool / field stores)
+bool safeWrite(void* dst, const void* src, std::size_t size);
 // one guarded load of 1 / 2 / 4 / 8 bytes (no copy routine: the hot field reads of native/*; O1)
 bool safeLoad1(const void* src, std::uint8_t& out);
 bool safeLoad2(const void* src, std::uint16_t& out);

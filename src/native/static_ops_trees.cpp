@@ -190,6 +190,8 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
     if (res == nullptr) return Skip::None;
     U8* rb = ptr(res, 0x78);
     if (rb == nullptr) return Skip::Unreadable;
+    // O2b lean: the queue sorted in place at the render buffer's first op (before the type dispatch, as the slot does it)
+    if (leanCollect_) leanTreeSort(rb, zpass);
     const std::uint32_t type = zpass ? (op.raw.desc & 0xffffu) : op.raw.desc;
     if (type > 3) return Skip::None;
     ++st.types[type];
@@ -208,6 +210,7 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
     if (n == 0 || visual == nullptr || wrapper == nullptr) return Skip::None;
     if (n < 0 || n > 65536) return Skip::Unreadable;
     U8* material = ptr(rb, 0x80 + 8 * t);
+    if (leanCollect_) touchNow(material);  // O2b lean: RequestData(material, 1) before the shader is read
     U8* shader = ptr(material, 0x70);  // after RequestData(material, 1)
     if (shader == nullptr) return Skip::None;
     if (!shaderClassOk(shader)) {
@@ -221,6 +224,7 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
         ++st.wrongTransformation;
         return Skip::None;
     }
+    if (leanCollect_) leanMaskRef(shader);  // O2b lean: MaskReference = 80 (the RT material reads it) before any draw
     if (!viewAndMirror(shader)) return Skip::Unreadable;
     std::vector<std::uint8_t>& queue = scr_.treeQueue;
     queue.resize(static_cast<std::size_t>(n) * 0x18);
@@ -389,6 +393,7 @@ StaticOps::Skip StaticOps::composeTreeBillboard(const Op& op) {
     if (ps == nullptr) return Skip::None;
     U8* res = ptr(ps, 0x30);
     if (res == nullptr) return Skip::Unreadable;
+    if (leanCollect_) touchNow(res);  // O2b lean: Render / RenderZPass touch the billboard mesh first (inline RequestData)
     const std::uint32_t sub = op.raw.desc & 0xffu, cell = op.raw.desc >> 8;
     const std::int32_t subs = get<std::int32_t>(res, 0x60);
     if (sub == 0xff || static_cast<std::int32_t>(sub) >= subs) return Skip::Unreadable;
@@ -396,7 +401,9 @@ StaticOps::Skip StaticOps::composeTreeBillboard(const Op& op) {
     U8* material = ptr(subMesh, 0x38);
     U8* shader = ptr(material, 0x70);
     if (shader == nullptr) {
-        // UploadTexCoords and the mesh paths draw nothing without the sub-mesh's shader
+        // UploadTexCoords and the mesh paths draw nothing without the sub-mesh's shader (O2b lean: their side effects, BindLightmaps and
+        // the sub-mesh's touches, are left to the engine's code)
+        leanBlock_ |= kBlockEdge;
         return Skip::None;
     }
     if (!shaderClassOk(shader)) {
@@ -482,7 +489,9 @@ StaticOps::Skip StaticOps::composeVegetation(const Op& op) {
     if (cursor > sc::kGrassBufferInstances) return Skip::Unreadable;
     std::vector<sc::GrassDraw>& draws = scr_.grassDraws;
     draws.clear();
-    sc::planGrass(plan, cursor, zpass, draws);
+    const std::uint32_t cursorAfter = sc::planGrass(plan, cursor, zpass, draws);
+    // O2b lean: Render leaves the shared buffer's cursor where the op's locks moved it (no buffer: no lock, no move); written at the commit
+    if (leanCollect_ && vd != nullptr) leanVeg_ = {vadmin, cursorAfter};
     // the instance bytes, flattened in the nodes' order
     const bool wind = get<float>(typeObj, 0x2c) != 0.0f;
     const bool lift = get<std::int32_t>(typeObj, 0x20) != 0;
@@ -503,6 +512,12 @@ StaticOps::Skip StaticOps::composeVegetation(const Op& op) {
     }
     for (const sc::GrassDraw& d : draws) {
         if (d.bufferOffset + d.count == sc::kGrassBufferInstances) ++st.grassWraps;
+    }
+    // O2b lean: RenderMeshInstanced per drawn batch: the type's mesh touched (state 0: nothing); cached with its visual and the shared
+    // buffer: the first sub-mesh's material touched
+    if (leanCollect_ && !draws.empty() && mesh != nullptr) {
+        touchNow(mesh);
+        if (get<std::int32_t>(mesh, 0x38) == 3 && ptr(mesh, 0x88) != nullptr && vd != nullptr) touchNow(ptr(ptr(mesh, 0x58), 0x38));
     }
     // RenderMeshInstanced: the mesh cached with its visual, the shared buffer, the first sub-mesh's shader
     if (mesh == nullptr || get<std::int32_t>(mesh, 0x38) != 3 || ptr(mesh, 0x88) == nullptr || vd == nullptr) {

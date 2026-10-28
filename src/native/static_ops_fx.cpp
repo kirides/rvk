@@ -117,6 +117,17 @@ StaticOps::Skip StaticOps::composeStrip(const Op& op) {
     const std::int32_t segments = get<std::int32_t>(ps, 0xe8);
     if (segments < 2) return Skip::None;  // 0x701120: cmp [PS+0xe8], 1; jle
     ++fxWindow_.stripOps;
+    if (leanCollect_) {
+        // O2b lean: UpdateVertices' CreateVertices (CreateVisual: first use; false: no fill, RenderVertices draws the old buffer - left
+        // to the engine's code), RenderVertices' touch of the material (with the visual)
+        const bool had = ptr(ps, 0x118) != nullptr;
+        if (!stripCreateVertices_(ps)) {
+            leanBlock_ |= kBlockEdge;
+            return Skip::None;
+        }
+        if (!had && ptr(ps, 0x118) != nullptr) ++leanWindow_.stripCreates;
+        if (ptr(ps, 0x118) != nullptr) touchNow(ptr(ps, 0x120));
+    }
     // UpdateVertices: CreateVertices (CreateVisual: the visual +0x118; the vertex data +0x110 made once with capacity +0xec x 64)
     U8* visual = ptr(ps, 0x118);
     U8* vdata = ptr(ps, 0x110);
@@ -243,6 +254,13 @@ StaticOps::Skip StaticOps::composeStreaks(const Op& op) {
     U8* entity = ptr(ps, 0x10);
     U8* illumPs = ptr(entity, 0xf8);
     if (illumPs == nullptr) return Skip::None;
+    if (leanCollect_) {
+        // O2b lean: Render's CreateBuffers (static buffers, first use; false: return) and RequestData(material, 1)
+        const bool had = ptr(ps, 0x60) != nullptr && ptr(ps, 0x58) != nullptr;
+        if (!streaksCreateBuffers_(ps)) return Skip::None;
+        if (!had) ++leanWindow_.streakCreates;
+        touchNow(material);
+    }
     U8* visual = ptr(ps, 0x58);
     if (ptr(ps, 0x60) == nullptr || visual == nullptr) return Skip::NotCreated;  // CreateBuffers inside the slot (first frame)
     U8* shader = ptr(material, 0x70);
@@ -275,6 +293,7 @@ StaticOps::Skip StaticOps::composeStreaks(const Op& op) {
         fxPool_[k][2] = world[8 + k];
         fxPool_[k][3] = world[12 + k];
     }
+    leanPoolFrom(engine_ + kStreaksGlobalVar, 11);  // O2b lean: Render's world into the class pool
     std::int32_t v = std::min(get<std::int32_t>(view_.admin, 0x170), get<std::int32_t>(shader, 0x68));
     U8* version = ptr(shader, 0x258 + 8 * static_cast<std::size_t>(std::max(v, 0)));
     while (version == nullptr && v > 0) version = ptr(shader, 0x258 + 8 * static_cast<std::size_t>(--v));
@@ -734,6 +753,9 @@ StaticOps::Skip StaticOps::composeParticle(const Op& op) {
     U8* ps = ptr(op.raw.context, 0x18);
     ++fxWindow_.particleOps;
     if (get<const void*>(ps, 0) != engine_ + kParticleVtable) return Skip::ShaderClass;
+    // O2b lean: Render's first steps where the slot runs them (the master created, the in-slot simulation, the inactivity timer)
+    const bool lean = leanCollect_;
+    if (lean && !leanParticlePre(ps)) return Skip::None;
     // N5.8 Render: an instanced emitter (PS +0x29d) draws its master's vertices (eCParticleModule::GetMasterInstance 0x5d1290: one hidden
     // master PS per creator template, found here without creating one: the module (FUN_1801ac230's cache 0xc6e5d8, flag 0xc6e5d0 bit
     // 0), key = the entity's GetCreator (vtable +0x170: eCDynamicEntity 0x21cd10 = the resolved proxy +0x1d0's entity, eCEntity
@@ -766,25 +788,80 @@ StaticOps::Skip StaticOps::composeParticle(const Op& op) {
         U8* node = ptr(ptr(module, 0x58), 8 * static_cast<std::size_t>((k32 >> 4) % buckets));
         for (int guard = 0; node != nullptr && ptr(node, 0) != key && guard < 4096; ++guard) node = ptr(node, 0x30);
         U8* master = node != nullptr ? ptr(node, 8) : nullptr;
-        if (master == nullptr) return Skip::Instanced;  // created inside the slot (first frame)
+        if (master == nullptr) return Skip::Instanced;  // created inside the slot (first frame; lean: GetMasterInstance above made it)
         if (get<const void*>(master, 0) != engine_ + kParticleVtable || get<std::uint8_t>(master, 0x29d) != 0) return Skip::Instanced;
         if (get<std::uint8_t>(ps, 0x2b) == 0) return Skip::None;
         instance = ps;
         ps = master;
     }
-    // Render: no live particle -> the emitter is simulated inside the slot (vtable +0x248) before RenderVertices (not for instances)
+    // Render: no live particle -> the emitter is simulated inside the slot (vtable +0x248) before RenderVertices (not for instances);
+    // lean: that ran above, a still empty emitter builds no quad (UpdateVertices false: nothing drawn)
     const std::int32_t live = get<std::int32_t>(ps, 0x390);
-    if (live <= 0) return instance != nullptr ? Skip::Instanced : Skip::Simulated;
+    if (!lean && live <= 0) return instance != nullptr ? Skip::Instanced : Skip::Simulated;
     const std::int32_t coords = get<std::int32_t>(instance != nullptr ? instance : ps, 0xb0);
     if (coords != 0 && coords != 1) return Skip::Unreadable;  // RenderVertices: no world matrix
     if ((get<std::uint8_t>(ps, 0x18) & 0x10) != 0) return Skip::Unreadable;
     U8* entity = ptr(ps, 0x10);
     U8* lightEntity = instance != nullptr ? ptr(instance, 0x10) : entity;
+    // the vertex data: UpdateVertices(target) runs once per frame (eCTimer +0x50 vs PS +0x3b0): in a frame the engine already updated
+    // the target, its buffer holds this frame's quads (read back); else they are generated natively. Lean: the engine's UpdateVertices
+    // does not run (+0x3b0 stays); its stamp / sort / CreateVertices are ours, with our vertices kept for the target's next instance
+    U8* timer = static_cast<U8*>(g_vec.timer());
+    if (timer == nullptr) return Skip::Unreadable;
+    const bool engineFresh = get<std::int32_t>(ps, 0x3b0) == get<std::int32_t>(timer, 0x50);
+    const ParticleCache* cache = nullptr;
+    if (lean && !engineFresh) {
+        if (auto it = particleCache_.find(ps); it != particleCache_.end() && it->second.frame == dev_.stats().frames) cache = &it->second;
+    }
+    const sc::ParticleSource source = sc::particleSource(engineFresh, lean, cache != nullptr);
+    if (lean && source == sc::ParticleSource::Generate) {
+        // UpdateVertices: CreateVertices (the buffers / visual on first use; false: no quad, nothing drawn - left to the engine's code)
+        if (!particleCreateVertices_(ps)) {
+            leanBlock_ |= kBlockEdge;
+            return Skip::None;
+        }
+    }
     U8* visual = ptr(ps, 0x420);
     U8* vdata = ptr(ps, 0x428);
-    U8* material = ptr(ps, 0x450);
     if (entity == nullptr || visual == nullptr || vdata == nullptr || ptr(vdata, 0x20) == nullptr || ptr(ps, 0x430) == nullptr) return Skip::NotCreated;
-    if (material == nullptr) return Skip::NotCreated;  // CreateMaterial would make it inside the slot
+    const auto* prim = hal::vulkan::HalPrimitive::fromApi(ptr(visual, 0x10));
+    if (prim == nullptr || !prim->drawDesc().indexed) return Skip::Primitive;
+    std::vector<std::uint8_t> vb;
+    std::uint32_t quads = 0;
+    const auto& dd = prim->drawDesc();
+    if (source == sc::ParticleSource::Engine) {
+        quads = dd.primitiveCount / 2;
+        const auto sv = prim->streamView(0);
+        auto* buf = const_cast<d3d9::Buffer*>(static_cast<const d3d9::Buffer*>(sv.buffer));
+        vb.resize(static_cast<std::size_t>(quads) * 4 * kParticleVertex);
+        if (buf == nullptr || (!vb.empty() && !buf->readCpu(sv.offset, static_cast<std::uint32_t>(vb.size()), vb.data()))) return Skip::Unreadable;
+        ++fxWindow_.particleEngineBytes;
+    } else if (source == sc::ParticleSource::Cache) {
+        vb = cache->vb;
+        quads = cache->quads;
+        ++leanWindow_.particleCached;
+    } else {
+        if (live > get<std::int32_t>(ps, 0x394)) return Skip::Unreadable;  // more than the buffer holds (UpdateVertices has no check)
+        if (live > 0 && !particleVertices(ps, entity, vb, quads)) return Skip::Unreadable;
+        if (lean) {
+            // the commit sorts the live array in place (DepthSortParticles: the qsort particleVertices ran on its copy) and keeps these
+            leanParticleTarget_ = ps;
+            leanParticleVb_ = vb;
+            leanParticleQuads_ = quads;
+        }
+    }
+    fxWindow_.particleQuads += quads;
+    if (quads == 0) {
+        // UpdateVertices returns primitives != 0 (0x5d6e13): live particles but no quad built, nothing drawn (an already updated
+        // target with no quad would still get its states and passes: lean leaves that rare case to the engine)
+        ++fxWindow_.particleZeroQuads;
+        if (lean && !sc::particleNoQuadLean(source)) leanBlock_ |= kBlockEdge;
+        return Skip::None;
+    }
+    // O2b lean: ApplyRenderStates' creation and touches (UpdateVertices returned true)
+    if (lean) leanParticleStates(ps);
+    U8* material = ptr(ps, 0x450);
+    if (material == nullptr) return lean ? Skip::None : Skip::NotCreated;  // CreateMaterial would make it inside the slot
     U8* shader = ptr(material, 0x70);
     if (shader == nullptr) return Skip::None;  // ApplyRenderStates: no eCShaderParticle -> nothing drawn
     if (get<const void*>(shader, 0) != engine_ + kShaderParticleVtable) {
@@ -800,8 +877,6 @@ StaticOps::Skip StaticOps::composeParticle(const Op& op) {
     if (admin != view_.admin) return Skip::Unreadable;
     if (get<std::uint8_t>(shader, 0x2a8) == 1 || get<std::uint32_t>(view_.admin, 0x31c) != 0) return Skip::InvalidShader;
     if (ptr(visual, 0x60) != nullptr) return Skip::VisualShader;
-    const auto* prim = hal::vulkan::HalPrimitive::fromApi(ptr(visual, 0x10));
-    if (prim == nullptr || !prim->drawDesc().indexed) return Skip::Primitive;
     // RenderPasses 0x5d5570: lighting (PS +0x2b0 LightingStyle != 0) passes the entity's illumination (entity +0xf8 +0x78, null
     // without one) to GetPasses; the version's key and light constants 0x6d7020 follow it (N5.8, below)
     const bool lit = get<std::int32_t>(ps, 0x2b0) != 0;
@@ -815,31 +890,6 @@ StaticOps::Skip StaticOps::composeParticle(const Op& op) {
     ++fxWindow_.coords[static_cast<std::size_t>(coords)];
     if (get<std::uint8_t>(ps, 0x239) != 0) ++fxWindow_.frameBlend;
     initMirror();
-
-    // the vertex data: UpdateVertices runs once per timer tick (eCTimer +0x50 vs PS +0x3b0); in a tick already updated the engine's
-    // buffer holds this tick's quads (read back), else they are generated natively
-    std::vector<std::uint8_t> vb;
-    std::uint32_t quads = 0;
-    U8* timer = static_cast<U8*>(g_vec.timer());
-    if (timer == nullptr) return Skip::Unreadable;
-    const auto& dd = prim->drawDesc();
-    if (get<std::int32_t>(ps, 0x3b0) == get<std::int32_t>(timer, 0x50)) {
-        quads = dd.primitiveCount / 2;
-        const auto sv = prim->streamView(0);
-        auto* buf = const_cast<d3d9::Buffer*>(static_cast<const d3d9::Buffer*>(sv.buffer));
-        vb.resize(static_cast<std::size_t>(quads) * 4 * kParticleVertex);
-        if (buf == nullptr || (!vb.empty() && !buf->readCpu(sv.offset, static_cast<std::uint32_t>(vb.size()), vb.data()))) return Skip::Unreadable;
-        ++fxWindow_.particleEngineBytes;
-    } else {
-        if (live > get<std::int32_t>(ps, 0x394)) return Skip::Unreadable;  // more than the buffer holds (UpdateVertices has no check)
-        if (!particleVertices(ps, entity, vb, quads)) return Skip::Unreadable;
-    }
-    fxWindow_.particleQuads += quads;
-    if (quads == 0) {
-        // UpdateVertices returns primitives != 0 (0x5d6e13): live particles but no quad built, nothing drawn
-        ++fxWindow_.particleZeroQuads;
-        return Skip::None;
-    }
     if (vb.size() > kOwnVbBytes) return Skip::Unreadable;  // beyond our own CPU-geometry buffer
 
     // RenderVertices: the world = identity (world coordinates) or the entity's matrix; ApplyRenderStates 0x5d6e50
@@ -923,6 +973,7 @@ StaticOps::Skip StaticOps::composeParticle(const Op& op) {
         }
         fxPoolNativeLast_ = 60;
     }
+    leanPoolFrom(particleGlobalVar_, 30);  // O2b lean: the engine's composition of the next particle op reads this pool
     std::int32_t v = std::min(get<std::int32_t>(view_.admin, 0x170), get<std::int32_t>(shader, 0x68));
     U8* version = ptr(shader, 0x258 + 8 * static_cast<std::size_t>(std::max(v, 0)));
     while (version == nullptr && v > 0) version = ptr(shader, 0x258 + 8 * static_cast<std::size_t>(--v));

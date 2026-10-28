@@ -174,6 +174,8 @@ StaticOps::Skip StaticOps::composeActor(const Op& op) {
         variant = get<std::int32_t>(part, 0x20);
         ++st.bodyParts;
     }
+    // O2b lean: UpdateRenderMatrices + HardRenderActor2::Render's touches where the slot runs them (then the palette is the stored one)
+    if (leanCollect_) leanActorPre(wrapper, primIdx);
     U8* res = ptr(wrapper, 0x18);  // eCMotionActorResource2
     U8* hra = ptr(res, 0x98);      // eCAnimation_HardRenderActor2
     if (res == nullptr || hra == nullptr) return Skip::None;

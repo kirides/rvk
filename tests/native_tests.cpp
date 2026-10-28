@@ -409,6 +409,19 @@ TEST(static_lean_check_frames_and_touch_set) {
     CHECK(firsts == 1000);
 }
 
+TEST(static_lean_particle_vertex_source) {
+    using namespace rvk::native;
+    using PS = sc::ParticleSource;
+    // the engine updated the target this frame (an op left to it): its buffer, lean or not
+    CHECK(sc::particleSource(true, false, false) == PS::Engine && sc::particleSource(true, true, true) == PS::Engine);
+    // lean: an earlier lean op of the target (an instanced master) made this frame's vertices
+    CHECK(sc::particleSource(false, true, true) == PS::Cache);
+    // otherwise generated (a cache entry counts only with lean)
+    CHECK(sc::particleSource(false, true, false) == PS::Generate && sc::particleSource(false, false, true) == PS::Generate);
+    // no quad: only a fresh generation is UpdateVertices returning false (nothing else runs)
+    CHECK(sc::particleNoQuadLean(PS::Generate) && !sc::particleNoQuadLean(PS::Engine) && !sc::particleNoQuadLean(PS::Cache));
+}
+
 TEST(static_register_runs_merge_across_words) {
     std::vector<std::pair<std::uint32_t, std::uint32_t>> runs;
     const auto collect = [&](const std::array<std::uint64_t, 4>& m) {

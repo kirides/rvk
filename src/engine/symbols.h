@@ -276,6 +276,17 @@
     X(skyObjectSetBillboardRenderCount, L"Engine.dll", "?SetBillboardRenderCount@eCSkyObject@@QEAA_NK@Z", false)               \
     X(texScaleSetScale, L"Engine.dll", "?SetScale@eCTexCoordSrcScale@@QEAAXAEBVbCVector2@@@Z", false)                          \
     X(texScrollerSetDirection, L"Engine.dll", "?SetDirection@eCTexCoordSrcScroller@@QEAAXAEBVbCVector2@@@Z", false)            \
+    /* O2b lean ops (opt-side-effects-anim.md): the animated / simulated kinds' engine functions */                             \
+    X(actorUpdateRenderMatrices, L"Engine.dll", "?UpdateRenderMatrices@eCWrapper_emfx3ActorInstance@@QEAA_NK@Z", false)         \
+    X(particleModuleGetInstance, L"Engine.dll", "?GetInstance@eCParticleModule@@SAAEAV1@XZ", false)                             \
+    X(particleGetMasterInstance, L"Engine.dll", "?GetMasterInstance@eCParticleModule@@QEAAPEAVeCParticle_PS@@PEBV2@@Z", false)  \
+    X(particleDepthSort, L"Engine.dll", "?DepthSortParticles@eCParticle_PS@@IEAAXXZ", false)                                    \
+    X(particleCreateVertices, L"Engine.dll", "?CreateVertices@eCParticle_PS@@IEAA_NXZ", false)                                  \
+    X(particleCreateMaterial, L"Engine.dll", "?CreateMaterial@eCParticle_PS@@QEAA_NXZ", false)                                  \
+    X(particleCreateImage, L"Engine.dll", "?CreateImage@eCParticle_PS@@IEAA_NXZ", false)                                        \
+    X(particleOnProcess, L"Engine.dll", "?OnProcess@eCParticle_PS@@UEAAXXZ", false)                                             \
+    X(stripCreateVertices, L"Engine.dll", "?CreateVertices@eCStrip_PS@@IEAA_NXZ", false)                                        \
+    X(streaksCreateBuffers, L"Engine.dll", "?CreateBuffers@eCLightStreaks_PS@@IEAA_NXZ", false)                                 \
     X(sharedEpsilon, L"SharedBase.dll", "g_fEpsilon", false)
 
 namespace rvk::engine {

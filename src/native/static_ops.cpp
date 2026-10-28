@@ -287,6 +287,7 @@ void StaticOps::viewEnd() {
 bool StaticOps::composeView(const std::uint8_t* admin, const std::uint8_t* camera) {
     view_ = {};
     view_.admin = admin;
+    poolAdmin_ = admin;
     view_.gfx = ptr(admin, 0x38);
     U8* cam = camera != nullptr ? camera : ptr(ptr(db_, 0x14c0), 0x1738);
     if (cam == nullptr) return false;
@@ -470,17 +471,42 @@ bool StaticOps::readEnginePools(float (*global)[4], float (*lighting)[4], std::a
     U8* g = ptr(ptr(engine::sym().shaderDefaultGlobalConstants, 0), 0x38);
     U8* l = ptr(ptr(lightingPoolVar_, 0), 0x18);
     const bool ok = rd(g, 0, global, sizeof(float) * 4 * 201) && rd(l, 0, lighting, sizeof(float) * 4 * 24);
-    lightmaps = {ptr(view_.admin, 0x2e0), ptr(view_.admin, 0x308)};
+    const std::uint8_t* admin = view_.admin != nullptr ? view_.admin : poolAdmin_;
+    lightmaps = {ptr(admin, 0x2e0), ptr(admin, 0x308)};
     return ok;
 }
 
 // an op / unit whose engine code we do not compose is about to run: the engine's pools before it (the registers it changes are
-// merged into the mirror at its next use)
+// merged into the mirror at its next use). O2b: not tied to the view's admin any more (an op left to the engine before the view's
+// first composed op went unseen: its writes were lost from the mirror, the SpeedTree "instance c32+" carry-over of O1 / O2a)
 void StaticOps::markLeft() {
-    if (!mirrorValid_ || leftPending_ || mirrorMode_ != 0 || view_.admin == nullptr) return;
+    if (!mirrorValid_ || leftPending_ || mirrorMode_ != 0) return;
     ++mergedLeft_;
+    leanUpdateFrame();
+    if (lean_ && leanFrameOn_ && syncEnginePools()) {
+        // a lean frame: the engine's pools lag behind the lean ops; ours were copied into them, so the snapshot is the mirror
+        std::memcpy(leftSnap_.global, mirror_.global, sizeof(leftSnap_.global));
+        std::memcpy(leftSnap_.lighting, mirror_.lighting, sizeof(leftSnap_.lighting));
+        const std::uint8_t* admin = view_.admin != nullptr ? view_.admin : poolAdmin_;
+        leftSnap_.lightmapSlot = {ptr(admin, 0x2e0), ptr(admin, 0x308)};
+        leftPending_ = true;
+        return;
+    }
     leftPending_ = readEnginePools(leftSnap_.global, leftSnap_.lighting, leftSnap_.lightmapSlot);
     if (!leftPending_) mirrorValid_ = false;  // unreadable: read whole at the next use
+}
+
+bool StaticOps::syncEnginePools() {
+    U8* g = ptr(ptr(engine::sym().shaderDefaultGlobalConstants, 0), 0x38);
+    U8* l = ptr(ptr(lightingPoolVar_, 0), 0x18);
+    // (only into the pools the mirror was read from: a reallocated pool is read whole at the next use)
+    if (g == nullptr || l == nullptr || g != mirrorGlobalSrc_ || l != mirrorLightingSrc_) return false;
+    if (!engine::safeWrite(const_cast<std::uint8_t*>(g), mirror_.global, sizeof(mirror_.global)) ||
+        !engine::safeWrite(const_cast<std::uint8_t*>(l), mirror_.lighting, sizeof(mirror_.lighting))) {
+        return false;
+    }
+    ++leanWindow_.poolSyncs;
+    return true;
 }
 
 void StaticOps::initMirror() {

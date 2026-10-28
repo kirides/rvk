@@ -489,5 +489,17 @@ private:
     };
     std::array<Entry, N> e_{};
 };
+// O2b lean particles: where a particle op's quads come from. eCParticle_PS::UpdateVertices(target) 0x5d58b0 runs once per frame per
+// target (its stamp +0x3b0 = eCTimer +0x50): the engine's buffer when the engine updated the target this frame (an op left to it);
+// with lean, our vertices of this frame when an earlier lean op of the same target (an instanced master) made them; else generated
+// (and, with lean, the live array sorted in place at the commit)
+enum class ParticleSource : std::uint8_t { Engine, Cache, Generate };
+constexpr ParticleSource particleSource(bool engineStampThisFrame, bool lean, bool cachedThisFrame) {
+    if (engineStampThisFrame) return ParticleSource::Engine;
+    return lean && cachedThisFrame ? ParticleSource::Cache : ParticleSource::Generate;
+}
+// an op with no quad: a fresh generation is UpdateVertices returning false (nothing more runs: lean reproduces it); an already
+// updated target returns true and still runs ApplyRenderStates + its passes (lean leaves that case to the engine's code)
+constexpr bool particleNoQuadLean(ParticleSource s) { return s == ParticleSource::Generate; }
 
 }  // namespace rvk::native::sc

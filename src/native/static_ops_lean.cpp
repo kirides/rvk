@@ -67,7 +67,7 @@ void StaticOps::setLean(bool on, int check) {
     leanFrameNo_ = ~0ull;
 }
 
-bool StaticOps::leanGroup(Group g) {
+bool StaticOps::leanGroup(Group g) const {
     switch (g) {
         case Group::Static:
         case Group::Mesh:
@@ -75,8 +75,209 @@ bool StaticOps::leanGroup(Group g) {
         case Group::Sky:
         case Group::Billboards:
         case Group::SkyCube: return true;
-        default: return false;  // O2b / O2c: actors, trees, vegetation, shadow views, particles, strips, precipitation
+        // O2b: the animated / simulated kinds, in the main view and in the shadow maps' z lists
+        case Group::Actors:
+        case Group::Trees:
+        case Group::Vegetation:
+        case Group::ShadowViews:
+        case Group::Particles:
+        case Group::Strips:
+        case Group::Precipitation: return leanAnimVerified_ > 0;
+        default: return false;
     }
+}
+
+namespace {
+
+// instruction sites the O2b side effects stand for (e8 = call rel32 to `target`; else the bytes)
+struct LeanSite {
+    std::uint32_t rva;
+    std::array<std::uint8_t, 10> b;
+    std::uint32_t n;
+    std::uint32_t target;
+};
+constexpr LeanSite kLeanSites[] = {
+    {0x5e00ab, {0xe8}, 1, 0x5d1290},                                        // eCParticle_PS::Render: GetMasterInstance
+    {0x5e00d0, {0xff, 0x92, 0x48, 0x02, 0, 0}, 6, 0},                       // ... call [vtable + 0x248] (OnProcess, no live particle)
+    {0x5e00d9, {0xc7, 0x83, 0xac, 0x03, 0, 0, 0, 0, 0, 0}, 10, 0},          // ... mov dword [PS + 0x3ac], 0
+    {0x5d58e1, {0x89, 0x8f, 0xb0, 0x03, 0, 0}, 6, 0},                       // UpdateVertices: the stamp +0x3b0
+    {0x5d58ea, {0xe8}, 1, 0x5d8680},                                        // ... DepthSortParticles
+    {0x5d58f2, {0xe8}, 1, 0x5d7210},                                        // ... CreateVertices
+    {0x5d6eb3, {0xe8}, 1, 0x5dffc0},                                        // ApplyRenderStates: CreateMaterial
+    {0x5d6ecd, {0xe8}, 1, 0x684100},                                        // ... RequestData(+0x450, 1)
+    {0x5d6f1a, {0xe8}, 1, 0x5d75c0},                                        // ... CreateImage
+    {0x5d6f30, {0x41, 0xff, 0x10}, 3, 0},                                   // ... call [sampler material vtable] (SetImage)
+    {0x6fd978, {0xe8}, 1, 0x6fde70},                                        // eCStrip_PS::UpdateVertices: CreateVertices
+    {0x5c4b27, {0xe8}, 1, 0x5c2450},                                        // eCLightStreaks_PS::Render: CreateBuffers
+    {0x5c4b42, {0xe8}, 1, 0x684100},                                        // ... RequestData(+0x70, 1)
+    {0x6f1da2, {0x48, 0x8d, 0x15, 0xef, 0x9d, 0x28, 0}, 7, 0},              // RenderBranches: lea rdx, the MaskReference property
+    {0x6f1dd7, {0xc6, 0x47, 0x58, 0x50}, 4, 0},                             // ... mov byte [shader + 0x58], 0x50
+};
+
+}  // namespace
+
+bool StaticOps::verifyLeanAnim() {
+    const auto& s = engine::sym();
+    if (engine_ == nullptr) return false;
+    const std::pair<void*, std::uint32_t> fns[] = {
+        {s.actorUpdateRenderMatrices, 0x4dfee0}, {s.particleGetMasterInstance, 0x5d1290}, {s.particleDepthSort, 0x5d8680},
+        {s.particleCreateVertices, 0x5d7210},    {s.particleCreateMaterial, 0x5dffc0},    {s.particleCreateImage, 0x5d75c0},
+        {s.particleOnProcess, 0x5d94a0},         {s.stripCreateVertices, 0x6fde70},       {s.streaksCreateBuffers, 0x5c2450}};
+    for (const auto& [p, rva] : fns) {
+        if (p != engine_ + rva) {
+            spdlog::warn("native: lean ops: an engine function of the O2b side effects is not at RVA {:#x} ({}): actors, trees, vegetation, "
+                         "particles and the shadow views keep the engine's code",
+                         rva, p);
+            return false;
+        }
+    }
+    if (s.particleModuleGetInstance == nullptr) return false;
+    for (const LeanSite& x : kLeanSites) {
+        std::array<std::uint8_t, 10> got{};
+        const std::uint32_t n = x.target != 0 ? 5 : x.n;
+        bool ok = engine::safeRead(engine_ + x.rva, got.data(), n) && std::equal(got.begin(), got.begin() + x.n, x.b.begin());
+        if (ok && x.target != 0) {
+            std::int32_t rel = 0;
+            std::memcpy(&rel, got.data() + 1, 4);
+            ok = static_cast<std::int64_t>(x.rva) + 5 + rel == x.target;
+        }
+        if (!ok) {
+            spdlog::warn("native: lean ops: the code at RVA {:#x} differs: actors, trees, vegetation, particles and the shadow views keep the "
+                         "engine's code",
+                         x.rva);
+            return false;
+        }
+    }
+    // eCParticle_PS's vtable slot +0x248 (Render's in-slot simulation) is OnProcess
+    const void* onProcess = nullptr;
+    if (!readAt(engine_ + 0x9bbbd8, 0x248, onProcess) || onProcess != s.particleOnProcess) {
+        spdlog::warn("native: lean ops: eCParticle_PS vtable +0x248 is not OnProcess: the O2b groups keep the engine's code");
+        return false;
+    }
+    updateRenderMatrices_ = reinterpret_cast<bool (*)(const void*, std::uint32_t)>(s.actorUpdateRenderMatrices);
+    particleModule_ = reinterpret_cast<void* (*)()>(s.particleModuleGetInstance);
+    getMasterInstance_ = reinterpret_cast<void* (*)(void*, const void*)>(s.particleGetMasterInstance);
+    depthSortParticles_ = reinterpret_cast<void (*)(const void*)>(s.particleDepthSort);
+    particleCreateVertices_ = reinterpret_cast<bool (*)(const void*)>(s.particleCreateVertices);
+    particleCreateMaterial_ = reinterpret_cast<bool (*)(const void*)>(s.particleCreateMaterial);
+    particleCreateImage_ = reinterpret_cast<bool (*)(const void*)>(s.particleCreateImage);
+    stripCreateVertices_ = reinterpret_cast<bool (*)(const void*)>(s.stripCreateVertices);
+    streaksCreateBuffers_ = reinterpret_cast<bool (*)(const void*)>(s.streaksCreateBuffers);
+    maskRefProperty_ = engine_ + 0x97bb98;
+    spdlog::info("native: lean ops: O2b checks passed (UpdateRenderMatrices, the particle Render / UpdateVertices / ApplyRenderStates "
+                 "sites, the strip / light streak creation, the SpeedTree MaskReference store)");
+    return true;
+}
+
+// ---- O2b: the animated / simulated kinds -----------------------------------------------------------------------------------------
+
+void StaticOps::leanActorPre(const std::uint8_t* wrapper, std::uint16_t primIdx) {
+    // eCAnimation_PS::Render 0x4d6fe0: the wrapper's resource (+0x18) with a HardRenderActor2 (+0x98) -> UpdateRenderMatrices(wrapper,
+    // the frame id) 0x4dfee0 (rebuilds the palette +0x48 once per frame: its stamp +0x58); true -> HardRenderActor2::Render 0x4dd650:
+    // the touch of the HRA's resource (HRA +0; inline QueueData / CacheResource), cached (state 3): the touch of the LOD primitive's
+    // material (prim +0x10), then the draw
+    U8* res = ptr(wrapper, 0x18);
+    U8* hra = ptr(res, 0x98);
+    if (res == nullptr || hra == nullptr || frameAdmin_ == nullptr) return;
+    const std::uint32_t frame = get<std::uint32_t>(frameAdmin_(), 0x4c);
+    if (!updateRenderMatrices_(wrapper, frame)) return;
+    ++leanWindow_.palettes;
+    U8* hres = ptr(hra, 0);
+    touchNow(hres);
+    if (get<std::int32_t>(hres, 0x38) != 3) return;
+    const std::uint32_t lod = sc::actorLod(get<std::uint32_t>(ptr(wrapper, 8), 0x250));
+    const std::uint32_t primIndex = sc::actorPrimitive(get<std::uint16_t>(hra, 0x38 + 0x14 * static_cast<std::size_t>(lod)), primIdx);
+    U8* prims = ptr(hra, 0x90);
+    if (prims == nullptr) return;
+    touchNow(ptr(prims + 0x20 * static_cast<std::size_t>(primIndex), 0x10));
+}
+
+void StaticOps::leanTreeSort(const std::uint8_t* rb, bool zpass) {
+    // eCRenderContextSpeedTree::Render 0x6ee320 / RenderZPass 0x6ee3f0, before the type dispatch: a non-zero stamp (+0xe0 solid, +0xe4
+    // z: set by the request) -> qsort of the queue (+0xb8 / +0xd0, count +0xc0 / +0xd8, 0x18-byte entries) with SortInstances /
+    // SortInstancesZPass when it holds entries, then the stamp = 0
+    const std::size_t stamp = zpass ? 0xe4 : 0xe0;
+    if (get<std::int32_t>(rb, stamp) == 0) return;
+    const std::int32_t n = get<std::int32_t>(rb, zpass ? 0xd8 : 0xc0);
+    U8* queue = ptr(rb, zpass ? 0xd0 : 0xb8);
+    if (n > 0 && queue != nullptr) qsort_(const_cast<std::uint8_t*>(queue), static_cast<std::size_t>(n), 0x18, zpass ? treeCmpZ_ : treeCmp_);
+    store4(rb + stamp, 0);
+    ++leanWindow_.treeSorts;
+}
+
+void StaticOps::leanMaskRef(const std::uint8_t* shader) {
+    // RenderBranches 0x6f1d9f..0x6f1dde (and the other five): NotifyPropertyValueChangedEnterEx (vtable +0xb0), MaskReference
+    // (+0x58) = 0x50, NotifyPropertyValueChangedExitEx (+0xb8), the property 0x97bb98, 0; once 80 it stays (a reload resets it)
+    if (shader == nullptr || get<std::uint8_t>(shader, 0x58) == 0x50) return;
+    using NotifyFn = void (*)(const void* self, const void* property, int);
+    U8* vt = ptr(shader, 0);
+    const auto enter = reinterpret_cast<NotifyFn>(ptr(vt, 0xb0));
+    const auto exit = reinterpret_cast<NotifyFn>(ptr(vt, 0xb8));
+    if (enter == nullptr || exit == nullptr) return;
+    enter(shader, maskRefProperty_, 0);
+    const std::uint8_t v = 0x50;
+    engine::safeWrite(const_cast<std::uint8_t*>(shader) + 0x58, &v, 1);
+    exit(shader, maskRefProperty_, 0);
+    ++leanWindow_.maskRefs;
+}
+
+bool StaticOps::leanParticlePre(const std::uint8_t* ps) {
+    // eCParticle_PS::Render 0x5e0080: (1) an instanced emitter (+0x29d == 1): eCParticleModule::GetMasterInstance(module, PS) (creates
+    // the hidden master per creator template on first use); null -> return; (2) not instanced (+0x29d == 0) and no live particle
+    // (+0x390 == 0): the emitter's OnProcess (vtable +0x248: DoProcessV2, guarded by its own tick stamp); (3) the inactivity timer
+    // +0x3ac = 0; then RenderVertices
+    const std::uint8_t instanced = get<std::uint8_t>(ps, 0x29d);
+    if (instanced == 1) {
+        ++leanWindow_.masters;
+        if (getMasterInstance_(particleModule_(), ps) == nullptr) {
+            ++leanWindow_.noMaster;
+            return false;
+        }
+    } else if (instanced == 0) {
+        if (get<std::int32_t>(ps, 0x390) == 0) {
+            using OnProcessFn = void (*)(const void* self);
+            const auto onProcess = reinterpret_cast<OnProcessFn>(ptr(ptr(ps, 0), 0x248));
+            if (onProcess == nullptr) {
+                leanBlock_ |= kBlockEdge;
+                return true;
+            }
+            onProcess(ps);
+            ++leanWindow_.kicks;
+            if (get<std::int32_t>(ps, 0x390) != 0) ++leanWindow_.kicksSpawned;
+        }
+    } else {
+        // (+0x29d neither 0 nor 1: Render calls neither; the composition's instanced path tests != 0)
+        leanBlock_ |= kBlockEdge;
+    }
+    store4(ps + 0x3ac, 0);
+    ++leanWindow_.inactivity;
+    return true;
+}
+
+void StaticOps::leanParticleStates(const std::uint8_t* ps) {
+    // ApplyRenderStates 0x5d6e50 (after the gfx admin / vtable / entity / visual checks): CreateMaterial, the material (+0x450) or
+    // return, RequestData(material, 1), its shader cast to eCShaderParticle or return, with a sampler material (+0x448): CreateImage
+    // and the sampler material's SetImage(+0x440) (vtable +0); the rest is draw state (composed)
+    particleCreateMaterial_(ps);
+    U8* material = ptr(ps, 0x450);
+    if (material == nullptr) return;
+    touchNow(material);
+    U8* shader = ptr(material, 0x70);
+    if (shader == nullptr || get<const void*>(shader, 0) != engine_ + 0x9b6d38) return;  // ??_7eCShaderParticle (else: no state)
+    U8* sampMat = ptr(ps, 0x448);
+    if (sampMat == nullptr) return;
+    const bool had = ptr(ps, 0x440) != nullptr;
+    particleCreateImage_(ps);
+    using SetImageFn = void (*)(const void* self, const void* image);
+    if (const auto setImage = reinterpret_cast<SetImageFn>(ptr(ptr(sampMat, 0), 0)); setImage != nullptr) setImage(sampMat, ptr(ps, 0x440));
+    if (!had && ptr(ps, 0x440) != nullptr) ++leanWindow_.particleCreates;
+}
+
+void StaticOps::leanPoolFrom(const std::uint8_t* var, std::uint32_t count) {
+    if (!leanCollect_ || count == 0 || count > 32) return;
+    leanPool_.var = var;
+    leanPool_.count = count;
+    std::memcpy(leanPool_.regs, fxPool_, 16 * static_cast<std::size_t>(count));
 }
 
 void StaticOps::leanUpdateFrame() {
@@ -87,6 +288,7 @@ void StaticOps::leanUpdateFrame() {
     leanFrameOn_ = lean_ && leanFrameKind_ == sc::LeanFrame::Lean;
     ++leanWindow_.frames;
     if (leanFrameKind_ == sc::LeanFrame::Check) ++leanWindow_.checkFrames;
+    if (particleCache_.size() > 4096) particleCache_.clear();  // (dead emitters' entries: bounded; an entry lives one frame)
 }
 
 bool StaticOps::leanFrame() {
@@ -100,7 +302,12 @@ void StaticOps::leanBegin(Group g) {
     leanTouches_.clear();
     leanLightmaps_.clear();
     leanStream3_.clear();
-    if (!lean_ || g_ == nullptr || !g_->takeOver || !leanGroup(g)) return;
+    leanVeg_ = {};
+    leanParticleTarget_ = nullptr;
+    leanPool_.count = 0;
+    if (!lean_ || g_ == nullptr || !g_->takeOver) return;
+    if (leanAnimVerified_ == 0 && engine_ != nullptr) leanAnimVerified_ = verifyLeanAnim() ? 1 : -1;
+    if (!leanGroup(g)) return;
     if (leanVerified_ == 0) {
         const auto& s = engine::sym();
         const void* need[] = {s.resourceRequestData, s.meshBindLightmaps, s.meshSortRenderInstances, s.decalCreateBuffers,
@@ -122,9 +329,31 @@ bool StaticOps::leanCommit() {
     if (leanBlock_ != 0) {
         ++leanWindow_.kept[gi];
         if ((leanBlock_ & kBlockVideo) != 0) ++leanWindow_.blockedVideo;
+        if ((leanBlock_ & kBlockEdge) != 0) ++leanWindow_.blockedEdge;
         return false;
     }
     const auto& s = engine::sym();
+    // O2b, deferred to the commit (a fallback slot must find the engine's own state): the vegetation buffer cursor as Render leaves
+    // it; a particle target's in-place depth sort (UpdateVertices: the same qsort the composition ran on its copy) + our vertices of
+    // this frame for the target's next instance; a class pool's registers as the op's ApplyRenderStates / passes wrote them
+    if (leanVeg_.admin != nullptr) {
+        store4(leanVeg_.admin + 0x40, leanVeg_.cursor);
+        ++leanWindow_.vegCursors;
+    }
+    if (leanParticleTarget_ != nullptr) {
+        depthSortParticles_(leanParticleTarget_);
+        ParticleCache& c = particleCache_[leanParticleTarget_];
+        c.frame = dev_.stats().frames;
+        c.quads = leanParticleQuads_;
+        c.vb.swap(leanParticleVb_);
+        ++leanWindow_.particleSorts;
+    }
+    if (leanPool_.count != 0) {
+        if (U8* data = ptr(ptr(leanPool_.var, 0), 0x38); data != nullptr) {
+            engine::safeWrite(const_cast<std::uint8_t*>(data), leanPool_.regs, 16 * static_cast<std::size_t>(leanPool_.count));
+            ++leanWindow_.poolWrites;
+        }
+    }
     // eCMeshResource2::Render / ExecuteRenderInstances / RenderDecals: BindLightmaps(1) before the draws
     for (const void* res : leanLightmaps_) {
         reinterpret_cast<BindLightmapsFn>(s.meshBindLightmaps)(res, 1);
@@ -294,6 +523,23 @@ void StaticOps::leanReport() {
     t.skyWrites += w.skyWrites;
     t.creates += w.creates;
     t.queueMax = std::max(t.queueMax, w.queueMax);
+    t.blockedEdge += w.blockedEdge;
+    t.palettes += w.palettes;
+    t.treeSorts += w.treeSorts;
+    t.maskRefs += w.maskRefs;
+    t.vegCursors += w.vegCursors;
+    t.poolWrites += w.poolWrites;
+    t.poolSyncs += w.poolSyncs;
+    t.masters += w.masters;
+    t.noMaster += w.noMaster;
+    t.kicks += w.kicks;
+    t.kicksSpawned += w.kicksSpawned;
+    t.inactivity += w.inactivity;
+    t.particleSorts += w.particleSorts;
+    t.particleCached += w.particleCached;
+    t.particleCreates += w.particleCreates;
+    t.stripCreates += w.stripCreates;
+    t.streakCreates += w.streakCreates;
     if (active()) {
         std::string skipped, kept;
         for (std::size_t i = 0; i < kGroups; ++i) {
@@ -303,12 +549,19 @@ void StaticOps::leanReport() {
         }
         std::string names;
         for (const std::string& n : placeholderNames_) names += std::format("{}'{}'", names.empty() ? "" : ", ", n);
-        spdlog::info("native: lean (5 s): {}, {} frames ({} check frames); engine code skipped: {}; kept (video) {}; touches {} ({} RequestData "
-                     "calls), lightmaps {}, stream 3 {}, instance sorts {}, billboard queue resets {} (longest queue {}), sky {}, first-use creates "
-                     "{}; placeholder binds {} ({} images{}{})",
-                     lean_ ? "on" : "off", w.frames, w.checkFrames, skipped, kept.empty() ? "0" : kept, w.touches, w.touchCalls, w.lightmaps,
-                     w.stream3, w.instanceSorts, w.queueResets, w.queueMax, w.skyWrites, w.creates, w.placeholderBinds, placeholderImages_.size(),
-                     names.empty() ? "" : ": ", names);
+        spdlog::info("native: lean (5 s): {}, {} frames ({} check frames); engine code skipped: {}; kept {} (video {}, edge cases {}); touches {} "
+                     "({} RequestData calls), lightmaps {}, stream 3 {}, instance sorts {}, billboard queue resets {} (longest queue {}), sky {}, "
+                     "first-use creates {}; placeholder binds {} ({} images{}{})",
+                     lean_ ? "on" : "off", w.frames, w.checkFrames, skipped, kept.empty() ? "0" : kept, w.blockedVideo, w.blockedEdge, w.touches,
+                     w.touchCalls, w.lightmaps, w.stream3, w.instanceSorts, w.queueResets, w.queueMax, w.skyWrites, w.creates, w.placeholderBinds,
+                     placeholderImages_.size(), names.empty() ? "" : ": ", names);
+        if (leanAnimVerified_ > 0) {
+            spdlog::info("native: lean (5 s) O2b: palettes {}, tree queue sorts {}, MaskReference stores {}, vegetation cursors {}; particles: "
+                         "masters {} (none {}), in-slot simulations {} (spawned {}), inactivity resets {}, depth sorts {}, vertices reused {}, "
+                         "images created {}; strip creates {}, light streak creates {}; class pool writes {}, engine pool syncs {}",
+                         w.palettes, w.treeSorts, w.maskRefs, w.vegCursors, w.masters, w.noMaster, w.kicks, w.kicksSpawned, w.inactivity,
+                         w.particleSorts, w.particleCached, w.particleCreates, w.stripCreates, w.streakCreates, w.poolWrites, w.poolSyncs);
+        }
         if (leanSky_.valid) {
             // the cloud fields Render keeps in step with the weather (the scale nodes, the scroller, the dome shader's fields), as last written
             const SkySnap& k = leanSky_;
