@@ -1789,7 +1789,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "(eCRenderContextAnimation2: bones, morphs, body parts, overlays), 128 the SpeedTree ops (branches, fronds, leaves) and "
                        "the tree billboards' ops, 256 the vegetation ops (grass batches).",
         .type = Type::Int,
-        .defaultValue = 127,
+        .defaultValue = 511,
         .min = 0,
         .max = 511,
         .flags = Flag::NoAB | Flag::Debug,

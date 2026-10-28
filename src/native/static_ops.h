@@ -344,6 +344,12 @@ private:
     int (*decalCmp_)(const void*, const void*) = nullptr;
     float decalAlphaScale_ = 255.0f, one_ = 1.0f;  // DAT_1809f17b4, DAT_1809f1698
     std::unique_ptr<d3d9::Buffer> ownVb_, ownIb_;  // take-over: our own copies of the CPU-generated vertex / index data
+    // take-over: the vegetation's instance data, appended within a frame (one ring copy per frame instead of one per DISCARD)
+    static constexpr std::uint32_t kOwnInstBytes = 2u << 20;
+    std::unique_ptr<d3d9::Buffer> ownInstVb_;
+    std::uint32_t ownInstCursor_ = 0;
+    std::uint64_t ownInstFrame_ = ~0ull;
+    std::vector<std::uint32_t> ownOffset_;  // per issued draw: its instance data's offset in ownInstVb_
     std::vector<std::string> firstMismatches_;
     std::uint32_t mismatchLogged_ = 0;
     std::uint32_t fourLightsLogged_ = 0;

@@ -1335,7 +1335,12 @@ void StaticOps::ownDraw(const d3d9::DrawTapInfo& t) {
     const bool bytesOk = geometryBytesEqual(composed, *scratch_, why);
     // CPU-generated geometry is drawn from our own buffers (the same bytes at the same positions)
     const std::uint32_t cs = composed.cpuStream;
-    if (!composed.vertexBytes.empty() && scratch_->streams[cs].buffer == ownVb_.get()) scratch_->streams[cs].buffer = composed.streams[cs].buffer;
+    if (!composed.vertexBytes.empty() && cs == 0 && scratch_->streams[0].buffer == ownVb_.get()) scratch_->streams[0].buffer = composed.streams[0].buffer;
+    if (!composed.vertexBytes.empty() && cs != 0 && scratch_->streams[cs].buffer == ownInstVb_.get() && issueIndex_ < ownOffset_.size() &&
+        scratch_->streams[cs].offset == ownOffset_[issueIndex_]) {
+        scratch_->streams[cs].buffer = composed.streams[cs].buffer;
+        scratch_->streams[cs].offset = composed.streams[cs].offset;
+    }
     if (!composed.indexBytes.empty() && scratch_->indices == ownIb_.get()) scratch_->indices = composed.indices;
     sc::Diff diff = sc::compare(composed, *scratch_);
     if (!bytesOk) {
@@ -1463,31 +1468,47 @@ void StaticOps::issue() {
             if (s.buffer != nullptr) dev_.setStreamSourceFreq(i, s.freq);
         }
         dev_.setIndices(const_cast<Buffer*>(static_cast<const Buffer*>(d.indices)));
-        if (!d.vertexBytes.empty()) {
-            // CPU-generated geometry (decals, billboards, the sky's billboards): our own dynamic buffers, the composed bytes at
-            // the engine's positions
-            // CPU-generated geometry (decals 360,000 / 20,000 bytes, billboards 208,000 / 12,000, the sky's stars 0x80 / 12 bytes
-            // per star)
+        if (!d.vertexBytes.empty() && d.cpuStream != 0) {
+            // the vegetation's instance data (stream 1): appended to our own instance buffer within the frame (NOOVERWRITE: one
+            // ring copy per frame, patched), DISCARD at the frame's first write or when full; the stream points at our offset
+            if (!ownInstVb_) ownInstVb_ = dev_.createBuffer(kOwnInstBytes, USAGE_DYNAMIC | USAGE_WRITEONLY, POOL_DEFAULT, false, false);
+            const auto size = static_cast<std::uint32_t>(d.vertexBytes.size());
+            const std::uint64_t frame = dev_.stats().frames;
+            std::uint32_t flags = LOCK_NOOVERWRITE;
+            if (frame != ownInstFrame_ || ownInstCursor_ + size > ownInstVb_->size()) {
+                flags = LOCK_DISCARD;
+                ownInstCursor_ = 0;
+                ownInstFrame_ = frame;
+            }
+            if (size <= ownInstVb_->size()) {
+                if (void* p = ownInstVb_->lock(ownInstCursor_, size, flags)) {
+                    std::memcpy(p, d.vertexBytes.data(), size);
+                    ownInstVb_->unlock();
+                }
+                const std::uint32_t cs = d.cpuStream;
+                dev_.setStreamSource(cs, ownInstVb_.get(), ownInstCursor_, d.streams[cs].stride);
+                if (ownOffset_.size() < drawCount_) ownOffset_.resize(drawCount_);
+                ownOffset_[k] = ownInstCursor_;
+                ownInstCursor_ += (size + 15u) & ~15u;
+            }
+        } else if (!d.vertexBytes.empty()) {
+            // CPU-generated geometry on stream 0 (decals 360,000 / 20,000 bytes, billboards 208,000 / 12,000, the sky's stars 0x80 /
+            // 12 bytes per star): our own dynamic buffers, the composed bytes at the engine's positions
             if (!ownVb_) ownVb_ = dev_.createBuffer(512 * 1024, USAGE_DYNAMIC | USAGE_WRITEONLY, POOL_DEFAULT, false, false);
             if (!ownIb_) ownIb_ = dev_.createBuffer(64 * 1024, USAGE_DYNAMIC | USAGE_WRITEONLY, POOL_DEFAULT, true, false);
-            // stream 0 (decals, billboards, sky objects): the draw's vertex range + its indices; another stream (the vegetation's
-            // instance data on stream 1): the stream's bytes from its offset, the indices are the mesh's own
-            const std::uint32_t cs = d.cpuStream;
-            const std::uint32_t vOff = d.streams[cs].offset + (cs == 0 ? d.minIndex * d.vertexStride : 0u), iOff = d.startIndex * 2;
+            const std::uint32_t vOff = d.streams[0].offset + d.minIndex * d.vertexStride, iOff = d.startIndex * 2;
             if (vOff + d.vertexBytes.size() <= ownVb_->size() && iOff + d.indexBytes.size() <= ownIb_->size()) {
                 // DISCARD of just the range the draw reads: the fresh GPU copy takes only those bytes (BufferCopyState)
                 if (void* p = ownVb_->lock(vOff, static_cast<std::uint32_t>(d.vertexBytes.size()), LOCK_DISCARD)) {
                     std::memcpy(p, d.vertexBytes.data(), d.vertexBytes.size());
                     ownVb_->unlock();
                 }
-                if (!d.indexBytes.empty()) {
-                    if (void* p = ownIb_->lock(iOff, static_cast<std::uint32_t>(d.indexBytes.size()), LOCK_DISCARD)) {
-                        std::memcpy(p, d.indexBytes.data(), d.indexBytes.size());
-                        ownIb_->unlock();
-                    }
-                    dev_.setIndices(ownIb_.get());
+                if (void* p = ownIb_->lock(iOff, static_cast<std::uint32_t>(d.indexBytes.size()), LOCK_DISCARD)) {
+                    std::memcpy(p, d.indexBytes.data(), d.indexBytes.size());
+                    ownIb_->unlock();
                 }
-                dev_.setStreamSource(cs, ownVb_.get(), d.streams[cs].offset, d.streams[cs].stride);
+                dev_.setStreamSource(0, ownVb_.get(), d.streams[0].offset, d.streams[0].stride);
+                dev_.setIndices(ownIb_.get());
             }
         }
         for (std::uint32_t i = 0; i < sc::StOwnedCount; ++i) dev_.setRenderState(kRs[i], d.states[i]);
