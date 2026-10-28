@@ -107,7 +107,7 @@ Each stage behind a `native.*` setting (default off), A/B against the engine pat
 | N5.2 alpha / refracted / fading statics, decals, billboards, sky dome (+ sky cube faces) | the rest of the main view's mesh-like ops | | as above + water spots (done: sections 8, 9) |
 | N5.3 skinned actors | palette + morphs from the actor (D 1), body parts | | hero_idle / pub_idle (done: section 10) |
 | N5.4 SpeedTree, billboards, vegetation | global wind, batches, the 1000-instance grass ring | | jungle / forest spots (done: section 11) |
-| N5.5 shadows | the shadow views' z ops: cascades, terrain VSM, point-atlas cells (done: section 12); the `post_SSM` mask moved to a later stage | the engine's shadow-view draws | compare + same-frame switch (done) |
+| N5.5 shadows | the shadow views' z ops: cascades, terrain VSM, point-atlas cells (done: section 12); N5.5c the `post_SSM` mask chain (SSAO, cascades, VSSM, blur; the PSSM point-light pass stays the engine's), its depth copy, the terrain map's Blur7H / V, the shadow views' setup (fit + camera compared, target / viewport / clear / reset taken over) (done: section 13) | the engine's shadow-view and mask draws | compare + same-frame switch (done) |
 | N5.6 particles, strips, streaks, precipitation | CPU vertex data from the engine's buffers | | rain / fire spots |
 | N5.7 post + GUI | the 13 effect graphs in GLSL (DoF default), sprite batcher | effect runtime path | refcompare all spots |
 | then | own modes, one at a time: mirror-driven lists (the current N3.3 code), GPU culling, merged indirect draws, the ubershader, bindless materials, RT consumers from the native frame | | A/B against the copy |
@@ -115,7 +115,7 @@ Each stage behind a `native.*` setting (default off), A/B against the engine pat
 ## 5. Open across slices
 
 Request bit 0x200 (blended terrain layers in the solid list), the shader clock (game vs real time), masked materials when the z pre-pass
-is off, the PSSM channel mapping, actor LOD (`ActorInstance +0x250`) writer, SpeedTree instancing mode (`admin +0x320`: hardware in every run, section 11), which overlay
+is off, the PSSM channel mapping (dynamic CastShadows lights: green, section 13; static lights not met), actor LOD (`ActorInstance +0x250`) writer, SpeedTree instancing mode (`admin +0x320`: hardware in every run, section 11), which overlay
 effect makes the 1-draw `Post{Post(1)}`, module `Process` order (weather before illumination?); the slices' own section 6 / 7 lists.
 
 ## 6. N5.0 result: the op tap (2026-10-27)
@@ -978,5 +978,173 @@ atlas has no quality gate but needs lights with CastDynamicShadows / CastShadows
 then lists the `frame tap [point-light atlas]` views); the views' cameras / viewports / targets / clears and the cascade fit stay the
 engine's (read, not composed: the composition takes the shadow camera's matrices and the bound viewport; a native fit is an own-mode
 item); the terrain map's post_blur Blur7H / Blur7V passes (effect draws after ExecuteShadowMap) and the post_SSM mask stay the engine's
-(the mask is the next stage); the PSSM channel mapping (section 5) stays open (no atlas, no PSSM pass met); as before the engine's code
+(the mask is the next stage: section 13); the PSSM channel mapping (section 5) stays open (no atlas, no PSSM pass met; section 13 renders the atlas with a modded light and reads the mapping); as before the engine's code
 still runs for every taken-over op.
+
+## 13. N5.5c result: the shadow mask, the terrain map's blur, the shadow views' setup (2026-10-28)
+
+Groups **1024** (the effect draws around the shadows) and **2048** (the shadow views' setup) of `native.scene_ops_groups` (behind
+`native.scene_ops` / `native.scene_ops_compare` as in sections 8 - 12; default mask now 4095). Code: `src/native/effect_compose.*` (pure
+rules: the fx pass evaluation, the mask's parameter formulas, the setup rules, the draw description and its comparison; tests
+`native_effect_*`), `src/native/effect_ops.cpp` (the engine side of 1024), `src/native/effect_ops_setup.cpp` (2048), the detours in
+`engine/scene_hooks.cpp` (`EffectTap`: UpdateShadowMask, `eCImageFilterEffect::ExecuteEffect`, `eCImageFilterCopy::OnUpdateOutput`,
+`eCShadowMapBase::RenderShadowMap`, ExecuteShadowMap), the fit tap in `engine/shadow_maps.cpp`, the HAL taps (`HalTexture::
+CopyImageToCurrentRT`, `HalDevice::SetRenderTarget` / `SetViewport` / `ClearViewport`) and `hal::vulkan::EffectInfo` (our fx effect behind
+an engine API effect). All [C] unless marked; "checked" = held in the runs below. Dumps: `rvk_sunshadow_dump2.txt` (the mask's
+OnUpdateOutput), `frameF_dump2.txt` (the effect runtime), `imgparam_dump.txt` / `imgparam_dump2.txt` (the parameter classes), capstone
+disassembly of the test copy's Engine.dll (the fit's and UpdateCamera's call arguments).
+
+**The effect runtime, as data [C, checked]** (`eCImageFilterEffect`, F 2.1 extended; dumps frameF_dump2, imgparam_dump*):
+* `ExecuteEffect` 0x75af70 (vtable +0x1b8 of `eCImageFilterEffect` 0x9ee0b8 **and** `eCImageFilterShadowMask` 0x9c87b0: the mask
+  overrides neither it nor UpdateVisual / OnSetParams / the pass functions, only OnUpdateOutput 0x668560): BeginEffectTechnique (+0x198:
+  OnSetParams, the API effect's SetTechnique / BeginTechnique), per pass ExecuteEffectPass (+0x1a8: gfx effect +0x28 = pass,
+  `eCGfxEffect::Execute` 0x750210 -> API SetPassNumber, skipped when the same effect is active and not dirty) and ExecuteVisual
+  (`eCGfxVisual::Execute` 0x5069a0: SetRenderMode +0x18, SetCullingMode +0x1c, SetDepthTesting +0x20, SetDepthWrite +0x24, all
+  unconditional (the HAL's master flags make them no-ops), the visual's shader +0x60, the primitive), EndEffectTechnique.
+* Parameter objects (`eSImageEffectParam`, filter +0xe0, count +0xe8; base ctor 0x759b00: +0x08 name, +0x10 effect handle, +0x18
+  semantic, +0x20 class, +0x24 type, +0x28 / +0x2c rows / columns, +0x30 elements, +0x48 the owning filter, +0x50 the technique-used
+  mask): **every Apply is `SetParameter(handle, this + 0x58, N)`** (raw bytes; no SetFloatArray / SetMatrix), the column-major
+  `eTEffectParamTransposedMatrix<bCMatrix>` 0x9eddb8 transposes a copy first; arrays (`eTEffectParamArray<T>`) keep a heap buffer at
+  +0x58. Set (+0x70) copies N bytes into +0x58. Semantic classes (FUN_180759f00): NEARFAR = `Camera` 0x9ee480 kind 6 = the application
+  camera +0xbc (8 bytes); TEXTURESIZEn = `ImageSize` 0x9ee280: the input whose suffix (+0x58) matches, its output image's width / height
+  (+0x18 / +0x1c) as two floats. `eSImageEffectParamTexture` 0x9ee880: image +0x58 (mode +0x60: 0 own, 1 the refraction copy, 2 the depth
+  map), Apply = `AttachImmImageData` 0x74fef0 (the image's API texture +0x60 -> SetTexture / SetCubeMap / SetVolume), Reset = SetTexture
+  null. Inputs (+0xb8, 0x60 each: source filter +0, output +0x10, handle +0x20, suffix +0x58) are attached the same way from the source's
+  output image (`eCImageFilterRTBase` +0x70 in output mode 0; `eCImageFilterTexture` / `TextureRandom` by mode +0x38: +0x40, the
+  refraction copy `matAdmin +0x268`, the depth map `+0x290`).
+* So the draw is a function of engine data: every parameter object's value, the inputs' images, the technique's pass, the visual, the
+  bound target; the composition evaluates the fx pass with our own rules (`fxc::applyPass` = the HAL effect's order: pass states, then
+  each shader's CTAB constants + preshader and its samplers' `sampler_state` assignments) on the device state at the call.
+
+**The mask's own parameters [C, checked]** (OnUpdateOutput 0x668560, the constants read from Engine.dll: DAT_1809f1718 2.5,
+DAT_1809f184c -0.5, DAT_1809f1630 0.5, DAT_1809f15d4 0.2, DAT_1809f16f8 2, DAT_1809f1698 1): R = inv(V) *= inv(diag(P11, P22, 1)) *=
+SetToScaling(far) (SharedBase); per cascade DizzerKernelSize 2.5 / size, PCFFilterOffset (-0.5, -0.5, 0.5, 0.5) / size, PCFFilterScale
+(size, size), FadOut (far / (0.2 Max), -((Max - 0.2 Max) / (0.2 Max))) (the first cascade also sets them for the shared size and, with a
+terrain map, DepthToVarianceShadowMatrix = terrain +0xa0 *= R and VarianceShadowTexture = terrain +0x18), DepthToShadowMatrix = split
++0xa0 *= R, ZDistance = (f P33 + P43) / f (f = the next split's start, the last: Max), ShadowTexture = split +0x18; VSSM: the variance
+matrix again, ZDistance 1, the variance texture; techniques UpscaleSSAO (with SSAO), then per split SSM / DSSM (without a terrain map)
++ "_Low" without HighQuality, VSSM with a terrain map, PSSM per packed map with cells. **Parameters the current call has not set yet
+keep their last value**: the composition takes those from the parameter object (the carry-over), the ones the unit writes natively.
+
+**The 1/4 depth copy [C, checked]**: illum +0x450 is an `eCImageFilterCopy` (FUN_18014f410: vtable 0x9c61a0, R32F, size mode 1 x 0.25,
+input = the depth-map texture filter +0x460); OnUpdateOutput 0x665640 binds its target without depth, viewport (0, 0, w, h, 0, 1), and
+calls the input image's `CopyImageToCurrentRT(POINT, null, (0, 0, w, h))` (eCAPITexture +0x60; gated by gfx admin +0x5b8).
+
+**The terrain map's blur [C, checked]**: `eCShadowMapDirectionalLight2VS::RenderShadowMap` 0x5a1b40 after the base render: its post_blur
+filter (+0x110, output mode 1 = it draws into the bound target, no depth; input 0 = a texture filter +0x118) runs Blur7H with the map
+(+0x18) into the temp image (+0x108, G32R32F, created once), then Blur7V back into the map; `weights7` is an `eTEffectParamArray<float>`.
+
+**The shadow views' setup [C, checked]**:
+* The fit (RenderShadowMaps 0x59f200; capstone for the lost arguments): inv(V); a frustum from the box (-1, -1, 0) .. (1, 1, 1) inverse-
+  transformed by P and normalised; L = SetIdentity, LookAt(normalised light direction +0x10) **with the camera position (+0x90) as its
+  translation row**; splits `(((Max - 1) t + 1) - pow(Max, t)) lambda + pow(Max, t)`, t = i / n, with the engine's own CRT `powf` 0x4ac030
+  (Engine.dll links its CRT statically); per split a copy of the frustum with plane 0's d = -start, plane 1's d = the next start (Max),
+  its 8 vertices merged into a bCSphere (radius +0, centre +4), the centre through inv(V) then inv(L), `SetBox(centre, radius)`, min z =
+  -100000; the split stores L (+0x60), the box (+0xe0), the frustum transformed by inv(V) (+0x100) and its start (+0x160).
+* UpdateCamera 0x5a13e0: V = inv(L); P = SetToScaling(2 / dx, 2 / dy, 1 / dz) with translation ((min + max) x -0.5 x s) for x / y and
+  -(s.z min z); t = V's translation through P; **P's x / y translation minus fmodf(t, 2 / size)** (the engine's CRT `fmodf` 0x4ad148;
+  E 2.2's "2 / size" is right, a first reading of 0.5 / size was off by whole texels); ClipDepth 0 .. max z (camera +0xbc / +0xc0, db
+  +0x1694), Perspective off (+0xdc), view +0x10, projection +0x50; the texture matrix +0xa0 = bias (0.5, -0.5, 0.5 + 0.5 / size, -depth
+  bias) *= P *= V.
+* `eCShadowMapBase::RenderShadowMap` 0x5a1070: CreateRenderTarget, then (one pass with face 6 for 2D maps) eCDepthMap::SetRenderTarget
+  0x59fee0 (a depth format 3..6: the working colour buffer of the size, `GetShadowMapWorkingBuffer` 0x575830 = a hash map at illum +0x318
+  (buckets +0x320, count +0x328, `(size >> 4) % count`, nodes {key, image +8, next +0x18}), with the map as depth; a colour format: the map
+  with its own depth buffer +0x20 or the shared one illum +0x310), SetViewport (0, 0, size, size, +0x50, +0x54), ClearViewPort 0x59fe50 (z
+  + stencil for depth formats, else colour too; colour +0x28, z 1, stencil 0), UpdateCamera, the scene (ExecuteShadowMap), ResetRenderTarget
+  (the target saved by GetRenderTarget only when both were bound, then the saved viewport). The point-light atlas renders through
+  `eCPackedShadowMap::RenderShadowMap` 0x5a08f0 instead (one target for all cells): not part of this group.
+
+**Composition and take-over.** At `ExecuteEffect`'s entry (a mask-chain filter during UpdateShadowMask, identified by the illum
+admin's fields +0x430 / +0x438 / +0x440 / +0x448 / +0x458; the terrain map's +0x110 outside it) the unit's draws are composed: the
+technique (the mask's from its plan, built at UpdateShadowMask's entry from +0xfc / +0x114 / +0x118 / +0x120: UpscaleSSAO, SSM|DSSM[_Low]
+per split, VSSM; the blur's Blur7H then Blur7V; the chain's own +0xf0), the parameter values (the mask's own natively, accumulated over
+the plan; semantic ones from their sources; the rest from +0x58), the inputs' images, the pass (`fxc::applyPass`) and the visual
+(`fxc::applyVisual` with the HAL's master flags) on the device state at the call, the quad's record (HalPrimitive), the target (the
+filter's output image +0x70 with the depth bound at UpdateShadowMask's entry and viewport (0, 0, +0x80, +0x84, 0, 1); the blur: the
+bound image, no depth, the whole target). Compare = every field class of the draw: shaders, declaration, streams (incl. frequencies),
+indices, range, **all 210 render states** (depth, stencil, blend, colour write, raster, other), the pixel shader's sampled stages
+(texture + all 13 sampler states), every float register the shaders read (bytecode + CTAB), all bool / int registers, render target,
+depth surface, viewport. Take-over issues the composed draws at the call (only what differs is set; the device restored after) and drops
+the engine's at prepareDraw; the copy is made with `stretchRect` at the HAL call instead of the engine's; the setup's device calls get the
+composed arguments. The enhanced mask (`shadows.enabled`, a DrawReplacer on the ShadowMask pass) acts on our draws as on the engine's.
+rvk.log: `native: effect draws: <unit> <technique>: ...` (units, draws equal / compared, registers / stages / states compared, field
+mismatches, drawn by us, own draws vs their composition), `native: shadow setup [cascade|terrain map]: ...`.
+
+**Verification** (draws equal / compared, every field class; units = ExecuteEffect calls; the setup's fits / cameras / device calls; 0
+mismatches in every row; masks = UpdateShadowMask calls):
+
+| run | masks | effect draws (SSAO, BlurSSAO x2, UpscaleSSAO, SSM x3, VSSM, Blur + Blur7H / V) | depth copies | setup: cascade renders / fits / cameras / device calls | terrain map renders |
+|---|---|---|---|---|---|
+| compare, 8 spots (shadow_inland_a / _b / _high / _far, jungle, pub_interior, harbour_night, hero_idle), actors, stride 1 | 9,367 | 93,688 / 93,688 (1.08 M registers, 234 k stages, 17.7 M render states) incl. Blur7H / V 9 + 9 | 9,367 | 24,186 / 24,186 / 24,186 / 120,930 | 8 |
+| compare, savegame, enhanced mask + 4096² + 100 m + `shadows.debug=cascades`, stride 1 | 3,627 | 36,276 / 36,276 | 3,627 | 10,863 / 10,863 / 10,863 / 54,315 | 2 |
+| compare, shadow_inland_b + hero_idle (clock running), enhanced mask + `shadows.rt=near` | 3,826 | 38,266 / 38,266 | 3,826 | 5,751 / 5,751 / 5,751 / 28,755 | 2 |
+| compare, `rvk_pointshadow` (point-light atlas rendering) | 3,620 | 36,208 / 36,208 (+ the PSSM draws left to the engine) | 3,620 | 5,433 / 5,433 / 5,433 / 27,165 | 3 |
+| take-over + compare, 5 spots, actors, stride 1, **validation on** | 6,372 | 63,736 / 63,736; drawn by us 63,736, own draws vs composition 57,364 equal | 6,372 | 16,140 / 16,140 / 16,140 / 80,700 (all made by us) | 7 |
+| take-over + compare, `rvk_pointshadow`, groups 4095, **validation on** | 2,581 | 25,816 / 25,816 | 2,581 | 3,867 / ... / 19,335 | 2 |
+| take-over + compare, shadow_inland_a + jungle, stride 1, **sync validation** (no RT shadows) | 3,106 | 31,070 / 31,070 | 3,106 | 9,306 / ... / 46,530 | 4 |
+| take-over switched on mid-run: frozen spot (frame 4660), savegame with RT consumers (2400), savegame (2400) | 6,330 / 3,490 / 3,625 | 63,308 / 34,906 / 36,256, all equal | | all equal | |
+
+First builds: 0 mismatches in the mask chain at the first run; two fixes before the table: the live registers now include every register
+the bytecode reads (an effect shader's preshader outputs are not in its CTAB: the first count compared none for BlurSSAO), and the
+terrain blur's `weights7` is an `eTEffectParamArray<float>` (left to the engine until added). The setup's first run compared the fit,
+the device calls and the target equal and the camera different by whole texels in x / y: the snap divisor is 2 / size (above). The first
+frame of a session has no working colour buffer of the size yet (created by that very SetRenderTarget): 3 cascade + 1 terrain renders per
+run are left uncomposed ("with a buffer not created yet").
+
+**Images** (whole picture, mean |d| 8-bit / share of pixels with a channel |d| > 32; `water-compare.ps1`, water off; engine vs take-over
+of groups 3072 / engine vs engine = the noise floor; `out\water\20261028-043458` / `042405` / `043811`):
+
+| spot | take-over | noise | enhanced mask on both sides: take-over |
+|---|---|---|---|
+| shadow_inland_a | 7.19 / 7.14 % | 9.34 / 9.25 % | |
+| shadow_inland_b | 2.15 / 0.82 % | 1.89 / 0.40 % | 2.63 / 1.58 % |
+| shadow_inland_high | 1.15 / 0.49 % | 2.11 / 1.59 % | |
+| jungle | 1.99 / 0.54 % | 1.65 / 0.35 % | 2.27 / 1.06 % |
+
+`shot-reviewer` (amplified diff maps against the noise pair, `out/n55c/review`): nothing in the take-over pair outside the engine-vs-engine noise (river foam and splashes at shadow_inland_a, foliage speckle, the jungle's fire, palm sway); at shadow_inland_b a brighter dapple on the shallow water floor (x 880-1360, y 500-760) of the kind the noise pair shows elsewhere; with the enhanced mask the pair sits slightly above the engine-only noise floor (2.85 / 2.52 vs 2.0 / 1.8 luma). The same-frame switches settle both: **same-frame switch** (the run-to-run spread at these spots is the runs' history, section 12): rvkcompare shadow_inland_a held,
+take-over switched on at frame 4660, pictures 4600 / 4620 / 4640 / 4680 / 4700 / 4720: **mean |d| 0.000 across the switch** (all 22,400
+8x8 blocks static; before 0.002, after 0.000). Savegame (`-MaxFps 60`, switched at 2400, frames 2340 .. 2460): on the 4,112 blocks static
+in all four 20-frame same-mode pairs, the 40-frame pairs give 0.093 before, **0.078 across**, 0.073 after (blocks above 1.0: 40 / 63 /
+32); the enhanced mask at the frozen shadow_inland_b (switched at 4660; the enhanced mask itself varies a little frame to frame there:
+20,875 static blocks): 0.090 before, 0.090 / 0.095 across, 0.074 after (2-step pairs; 1-step across 0.051, same-mode 0.060 - 0.111); with the enhanced mask + RT shadows + `debug.rt_skin_verify` (4,159 static blocks): 0.115 before, 0.119 across, 0.108 after (50 / 81 /
+76): the moving NPCs, the hero's idle and the swaying RT shadows, as in the same-mode pairs.
+
+**Consumers** (savegame, enhanced mask + `shadows.rt=near` + `debug.rt_skin_verify`, switched at 2400): `rt: skin verify` max error
+0.0071 units before and 0.0071 - 0.0073 after (494 - 515 k vertices per second either way); `rt: scene: characters` 22 + 37 animated
+SpeedTrees, characters from this frame's pose 3,300 per window before and after; `enh: shadows.rt` ~300 traced frames per 5 s throughout.
+
+**Validation**: 0 messages in both validation runs (5 spots; the point-light scenario with every group taken over), 0 in the
+sync-validation run without RT shadows (no SYNC- hazard). The known device loss of sync validation + `shadows.rt=near` (section 12) was
+not re-run.
+
+**Cost** (savegame, `-Exe RisenTest.exe -Vsync off -Perf`, `rvk_perfsave` hold 40, scene ops taken over, groups 1023 vs 4095, the last
+four 5-s `perf:` windows; machine idle: no process above 5 % of a core, no ffmpeg / other game): GPU 1.51 vs 1.50 ms; CPU engine + HAL
+6.74 - 6.87 ms (p50 frame 6.98 - 7.58) vs 6.85 - 6.91 ms (p50 7.11 - 7.65): **about +0.1 ms** for ~11 effect draws, one copy and 3
+cascade setups per frame (the composition per ExecuteEffect evaluates the fx pass and the parameter objects; the engine's code still
+runs).
+
+**The point-light atlas and the PSSM channel mapping** (scenario `mods/rvk_pointshadow`: the light spell's item template
+`It_Cast_Light` (an eCPointLight_PS) with `CastShadows = true` and Range 800, spawned 1.5 m above the hero on the opening beach at night):
+the engine renders its packed atlas (6 cells of 1024², one per cube face, 6 `ExecuteShadowMap` per frame through
+`eCPackedShadowMap::RenderShadowMap`) and the mask's PSSM pass (18 draws per mask: 3 passes x 6 cells). The atlas views are composed and
+compared by group 512 (section 12): 190,386 + 42,642 + 42,693 Mesh / Animation / SpeedTree draws equal in the compare run, every tap
+window clean, and taken over in the validation run. **Channel mapping [checked]**: the cells' colour flags (+0x11c) are 0xff00 (a
+dynamic light with CastShadows); the pyramids' vertex colour is ~flags = 0xffff00ff (A 1, R 1, G 0, B 1), the pass writes max(1 - lit,
+colour) through ZERO / SRCCOLOR, so **the green channel receives a dynamic CastShadows light's shadow** (the light list's selector +0x68 =
+(0, 1, 0, 0) of E 3.2 selects .g: consistent); static lights' flags come from their ShadowMaskIndex (+0x60) [C], none met. **The PSSM
+pass is not composed**: its passes run outside ExecuteEffect (BeginEffectTechnique / ExecuteEffectPass / the packed visual directly,
+the stencil through the HAL's stencil call, a camera-sphere / cell-frustum test per cell, CPU pyramids built by
+`UpdatePackedShadowMapVisual` 0x669e00); its draws stay the engine's (counted: `engine draws outside the units`, 0 without point-light
+cells), and the atlas's own setup (`eCPackedShadowMap::RenderShadowMap` 0x5a08f0, one target for all cells) is not part of group 2048.
+
+Engine rules newly learned [C, checked]: image-filter parameters are pushed as raw bytes through one SetParameter slot (a column-major
+matrix transposed by its class), and parameters a call does not set keep their last value; TEXTURESIZEn is the matched input image's
+size as floats; the mask's filters share the ExecuteEffect / pass functions of eCImageFilterEffect; the 1/4 depth copy is a POINT
+CopyImageToCurrentRT; the terrain blur's temp target is created once and Blur7V writes back into the map; the cascade light view's
+translation row is the camera position; the shadow camera's x / y snap is fmodf by 2 / size with the engine's own CRT; the working colour
+buffer of depth maps is a per-size hash map of the illumination admin; a light with CastShadows renders the point-light atlas and its
+shadow lands in the mask's green channel.
+
+**Not yet / open**: the PSSM pass and the atlas's own target / clear / cell cameras (composed by nobody yet: they occur only with
+modded lights); the terrain map's fit (UpdateShadowMaps' re-aim: its light view / box are read, the camera from them is composed); the
+first frame's working-buffer creation; as before the engine's code still runs for every taken-over unit.
