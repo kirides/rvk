@@ -259,6 +259,8 @@ add_library(rvk_core STATIC
     src/native/effect_compose.h
     src/native/effect_ops.cpp
     src/native/effect_ops_setup.cpp
+    src/native/effect_ops_post.cpp
+    src/native/effect_ops_gui.cpp
     src/native/effect_ops.h
     src/native/frame_desc.cpp
     src/native/frame_desc.h

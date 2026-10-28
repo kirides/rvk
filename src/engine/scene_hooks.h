@@ -33,6 +33,10 @@ void appDrawLeave();
 // "Main/Solid": the current view and pass of the attached device (for log prefixes); "-" without one
 const char* currentLabel();
 
+// true inside eCImageFilterScene::OnUpdateOutput (the scene job of the image effect: the world incl. its off-screen pre-passes,
+// which run before Execute's Main view scope; N5.7 tells the post chain's filters from the terrain map's blur by it). Render thread.
+bool inSceneJob();
+
 // the attached device when called on its render thread, else null (engine detours that need the frame state)
 d3d9::Device* renderDevice();
 
@@ -76,6 +80,12 @@ public:
     virtual void shadowMapEnd(void* map) = 0;
     virtual void shadowSceneBegin(void* map) = 0;
     virtual void shadowSceneEnd(void* map) = 0;
+    // N5.7: eCImageEffect::Execute (0x662630: the scene effect, then the overlay effect; inside the Post view scope) begins /
+    // ends; eCSprite::Flush (0x757d10: the sprite batcher's queued records -> batches: GUI, fonts, cursor, videos) begins / ends
+    virtual void postBegin(void* /*effect*/) {}
+    virtual void postEnd(void* /*effect*/) {}
+    virtual void spriteFlushBegin(void* /*sprite*/) {}
+    virtual void spriteFlushEnd(void* /*sprite*/) {}
 };
 void setEffectTap(EffectTap* tap);
 

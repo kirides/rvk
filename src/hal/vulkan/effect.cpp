@@ -107,6 +107,15 @@ public:
         const Handle* h = handleOf(const_cast<void*>(handle));
         return h != nullptr && h->element == kNoElement ? h->param : fx::kNone;
     }
+    const fx::ParameterValues& currentValues() const override { return values_; }
+    const d3d9::Texture* currentTexture(std::uint32_t param) const override { return param < textures_.size() ? textures_[param] : nullptr; }
+    int currentTechnique() const override { return technique_; }
+    int techniqueOf(const void* handle) const override {
+        for (std::size_t i = 0; i < techniqueHandles_.size(); ++i) {
+            if (handle == &techniqueHandles_[i]) return static_cast<int>(i);
+        }
+        return -1;
+    }
 
     bEResult OnResetDevice() override { return bEResult_Ok; }
     bEResult OnLostDevice() override { return bEResult_Ok; }

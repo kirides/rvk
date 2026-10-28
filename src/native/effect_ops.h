@@ -11,6 +11,15 @@
 //  * the 1/4 depth copy (illum +0x450, eCImageFilterCopy: CopyImageToCurrentRT of the depth map into its R32F target);
 //  * the terrain variance map's post_blur Blur7H / Blur7V (eCShadowMapDirectionalLight2VS::RenderShadowMap 0x5a1b40, the map's
 //    blur filter +0x110: map -> temp +0x108 -> map).
+// N5.7 (README.md "15. N5.7 result"; group 32768): the post chain: every effect filter job of the image-effect graphs
+// eCImageEffect::Execute runs (the scene effect's jobs after the scene: luminance, bloom, streaks, tone map, DoF; the overlay
+// effect), composed the same way (semantic parameters natively from the timer, weather, image filter admin, camera and sky dome;
+// the inputs through the graph's links, incl. the scene filter's outputs and nested effects; texture-mode targets with the depth
+// bound at Execute's entry, screen-mode filters into what is bound). effect_ops_post.cpp.
+// N5.7 (group 65536): the sprite batcher's draws (eCSprite::Flush: GUI, text, cursor, videos): the batches of RenderBatches
+// re-done from the queued records (blend / texture / buffer-full breaks, SetBlend's states, the sprite effect's pass with the
+// world-view-projection composed, the mesh's ranges) with the vertex data generated natively; take-over draws from our own
+// vertex buffer. effect_ops_gui.cpp.
 // Take-over: the composed draws are issued at ExecuteEffect's entry (the device state saved and restored around them) and the
 // engine's draws of that call are dropped at prepareDraw; the copy is made by us at the HAL call and the engine's is skipped.
 // The engine's code still runs completely (parameter objects, effect state, render-target pool, the stencil it relies on is
@@ -48,7 +57,12 @@ public:
     void setSetupMode(bool takeOver, bool compare);
     bool maskOn() const { return takeOver_ || compare_; }
     bool setupOn() const { return setupTake_ || setupCompare_; }
-    bool active() const { return maskOn() || setupOn(); }
+    // N5.7: group 32768 the post chain, group 65536 the sprite batcher
+    void setPostMode(bool takeOver, bool compare);
+    void setGuiMode(bool takeOver, bool compare);
+    bool postOn() const { return postTake_ || postCompare_; }
+    bool guiOn() const { return guiTake_ || guiCompare_; }
+    bool active() const { return maskOn() || setupOn() || postOn() || guiOn(); }
 
     // engine::scene::EffectTap
     void maskBegin(void* illum) override;
@@ -61,6 +75,10 @@ public:
     void shadowMapEnd(void* map) override;
     void shadowSceneBegin(void* map) override;
     void shadowSceneEnd(void* map) override;
+    void postBegin(void* effect) override;
+    void postEnd(void* effect) override;
+    void spriteFlushBegin(void* sprite) override;
+    void spriteFlushEnd(void* sprite) override;
     // engine/shadow_maps: eCCascadeShadowMap::RenderShadowMaps is about to fit and render the cascades
     void fitBegin(void* cascade);
     // the HAL's device calls inside a shadow map's setup / reset: compared with (and with take-over replaced by) the composition
@@ -78,9 +96,9 @@ public:
     void report();
 
 private:
-    enum class Unit : std::uint8_t { None, Chain, Mask, TerrainBlur, Copy };
+    enum class Unit : std::uint8_t { None, Chain, Mask, TerrainBlur, Copy, Post, Gui };
     enum class Skip : std::uint8_t {
-        None, NoEffect, Technique, ParamClass, Semantic, Input, Image, Visual, Packed, Unreadable, Count
+        None, NoEffect, Technique, ParamClass, Semantic, Input, Image, Visual, Packed, Unreadable, Buffer, Sorted, Count
     };
     static const char* name(Skip s);
     struct Live {
@@ -112,6 +130,72 @@ private:
     void issue();
     void finishUnit();
     void compareDraw(const fxc::EffectDraw& composed, const d3d9::DrawTapInfo& t, bool own);
+
+    // ---- N5.7 post chain (effect_ops_post.cpp) ----
+    bool verifyPost();
+    // a parameter object of a semantic class: its value as the class's Set (+0x28) computes it; `set` false = the class sets
+    // nothing this call (the effect keeps its last value)
+    Skip semanticValue(const std::uint8_t* obj, std::uint32_t vtRva, const fx::Parameter& param, std::vector<std::uint8_t>& out, bool& set);
+    // the image of output `index` of any filter class of the graphs (scene, effect / copy (RTBase), texture, image, nested effect)
+    bool graphOutput(const std::uint8_t* filter, std::int32_t index, const void*& image, int depth = 0) const;
+    std::int32_t outputCount(const std::uint8_t* filter, int depth = 0) const;
+    const std::uint8_t* nestedEffect(const std::uint8_t* imageEffectFilter) const;
+    std::string graphName(const std::uint8_t* effect) const;
+    // eCGfxEffect::Execute 0x750210's skip (ms_bOptimize, the active effect, the object's dirty byte +0x2c, ms_bReset)
+    bool executeSkipped(const std::uint8_t* gfxEffect) const;
+    void reportPost();
+    bool postTake_ = false, postCompare_ = false;
+    int postVerified_ = 0;
+    int postDepth_ = 0;
+    const std::uint8_t* postEffect_ = nullptr;   // the eCImageEffect of the current Execute
+    std::string postGraph_;                      // "scene" / "overlay" / "other" + its filters' names
+    d3d9::Surface* postRt_ = nullptr;            // the target / depth / viewport bound at Execute's entry
+    d3d9::Surface* postDepthSurface_ = nullptr;
+    fxc::Viewport postViewport_;
+    std::map<const void*, std::string> graphsSeen_;
+    std::map<std::string, std::uint64_t> graphRuns_, graphRunsTotal_;
+    std::uint64_t postDrawsOutside_ = 0;         // engine draws of a Post view outside the composed units
+    void* (*filterAdmin_)() = nullptr;           // FUN_180095750 (eCImageFilterAdmin)
+    void* (*weatherAdmin_)() = nullptr;          // FUN_180275c30 (eCWeatherAdmin)
+    void* (*illumAdmin_)() = nullptr;            // FUN_18014f330 (eCIlluminationAdmin)
+    void* (*effectMapFind_)(void* map, const void* name) = nullptr;  // FUN_1801f2410 (the admin's effect map +0x68 by name)
+    void* (*getSkydome_)(void* illum) = nullptr;
+    void* (*timer_)() = nullptr;
+    float thousand_ = 1000.0f, minusOne_ = -1.0f;
+    float lumWeights_[3]{0.3f, 0.59f, 0.11f};
+    float overlayWeight_ = 0.0f;
+    std::uint64_t postCopies_ = 0;
+    const float* epsilon_ = nullptr;
+    const void* vtScene_ = nullptr;
+    const void* vtImageEffect_ = nullptr;
+    const void* vtImage_ = nullptr;
+    using VecMatFn2 = void (*)(void* v, const void* m);
+    VecMatFn2 vecTransformDirection_ = nullptr, vecMulAssign_ = nullptr;
+    using MatMulFn = void* (*)(const void* a, void* out, const void* b);
+    MatMulFn matMul_ = nullptr;
+
+    // ---- N5.7 sprite batcher (effect_ops_gui.cpp) ----
+    bool verifyGui();
+    Skip composeSprite(const std::uint8_t* sprite);
+    bool spriteGeometryEqual(std::size_t k, const d3d9::DrawTapInfo& t, bool own, std::string& why);
+    void issueSprite();
+    void reportGui();
+    bool guiTake_ = false, guiCompare_ = false;
+    int guiVerified_ = 0;
+    const std::uint8_t* spriteFlush_ = nullptr;  // the eCSprite of the current Flush
+    struct SpriteGeom {
+        std::uint32_t vbOffset = 0;              // bytes into the sprite mesh's vertex buffer
+        std::vector<std::uint8_t> vertices;      // count x 4 x 0x1c (the w lane of each position is not compared: decl FLOAT3)
+        std::vector<std::uint8_t> indices;       // count x 6 x 2 at the startIndex
+    };
+    std::vector<SpriteGeom> spriteGeom_;
+    std::unique_ptr<d3d9::Buffer> spriteVb_;     // take-over: our own vertex buffer (the engine's offsets)
+    std::unique_ptr<d3d9::Buffer> spriteIb_;     // ... and index buffer (the static quad indices, generated)
+    std::uint64_t spriteFlushes_ = 0, spriteRecords_ = 0, spriteQuads_ = 0, spriteBreaksBlend_ = 0, spriteBreaksTexture_ = 0,
+                  spriteBreaksFull_ = 0, spriteSkippedExecute_ = 0, spriteWLaneDiffers_ = 0, guiOutside_ = 0,
+                  spriteNullTechnique_ = 0;
+    std::uint32_t spriteLogged_ = 0;
+    bool loggedOptimize_ = false;
 
     // ---- the shadow views' setup (group 2048) ----
     enum class SetupField : std::uint8_t { Fit, Camera, TextureMatrix, Target, Viewport, Clear, Restore, Calls, Count };
@@ -191,6 +275,7 @@ private:
     hal::vulkan::HalDevice& hal_;
     d3d9::Device& dev_;
     bool takeOver_ = false, compare_ = false;
+    bool unitTake_ = false, unitCompare_ = false;  // the current unit's group switches (mask, post or GUI)
     int verified_ = 0;
     const std::uint8_t* engine_ = nullptr;
     // engine data (Engine.dll): constants of the mask's OnUpdateOutput, the classes' vtables

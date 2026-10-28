@@ -1791,11 +1791,13 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "variance map, point-light atlas cells), 1024 the effect draws around the shadows (the post_SSM shadow mask chain: "
                        "SSAO, cascades, terrain term, blur; its depth copy; the terrain variance map's Blur7H / V), 2048 the shadow views' setup "
                        "(the cascade fit and shadow cameras compared; the maps' target binds, viewports, clears and resets), 4096 the particle ops (CPU "
-                       "quads), 8192 the strips (trails) and light streaks, 16384 the precipitation (rain / snow, the late list).",
+                       "quads), 8192 the strips (trails) and light streaks, 16384 the precipitation (rain / snow, the late list), 32768 the post chain "
+                       "(the image-effect graphs' filters: luminance, bloom, streaks, tone map, DoF, overlay effects), 65536 the sprite batcher "
+                       "(GUI, text, cursor, loading screens, videos).",
         .type = Type::Int,
         .defaultValue = 32767,
         .min = 0,
-        .max = 32767,
+        .max = 131071,
         .flags = Flag::NoAB | Flag::Debug,
     });
     r.nativeDebug = &reg.add({

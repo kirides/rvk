@@ -1,5 +1,6 @@
 // The native frame's op tap (N5.0, docs/research/engine-frame/README.md): the engine's sort rules, op lookup, attribution.
 
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -916,4 +917,90 @@ TEST(native_effect_shadow_setup_rules) {
     fxc::shadowTextureBias(1024, 1e-4f, bias);
     CHECK(bias[0] == 0.5f && bias[5] == -0.5f && bias[10] == 1.0f && bias[15] == 1.0f && bias[12] == 0.5f / 1024.0f + 0.5f && bias[13] == bias[12] &&
           bias[14] == -1e-4f && bias[1] == 0.0f && bias[3] == 0.0f);
+}
+
+// N5.7: the post chain's semantic parameter rules (ColorMatrix 0x758980, Camera 0x289b10 kinds 10 / 11, SkyDome 0x289fc0 kinds 4 / 5)
+TEST(native_post_semantic_rules) {
+    namespace fxc = native::fxc;
+    const float tint[3] = {1.0f, 0.5f, 0.25f};
+    const float w[3] = {0.3f, 0.59f, 0.11f};
+    float m[9];
+    fxc::colorMatrix(2.0f, 1.0f, tint, 1.0f, w, m);  // saturation 1: a diagonal of E t
+    CHECK(m[0] == 2.0f && m[4] == 1.0f && m[8] == 0.5f && m[1] == 0.0f && m[3] == 0.0f && m[7] == 0.0f);
+    fxc::colorMatrix(1.0f, 0.0f, tint, 1.0f, w, m);  // saturation 0: every row the luminance weights x t_i
+    CHECK(m[0] == 0.3f && m[1] == 0.59f && m[2] == 0.11f && m[3] == 0.3f * 0.5f && m[8] == 0.11f * 0.25f);
+    float v[2];
+    fxc::focalRangeNear(0.0f, 1000.0f, 1e-5f, -1.0f, v);
+    CHECK(v[0] == 0.0f && v[1] == 0.0f);
+    fxc::focalRangeNear(250.0f, 1000.0f, 1e-5f, -1.0f, v);  // n = 0.25: (-4, 1): near CoC = sat(1 - d / n)
+    CHECK(v[0] == -4.0f && v[1] == 1.0f);
+    fxc::focalRangeFar(500.0f, 0.0f, 1000.0f, 1.0f, v);  // end <= start: the far plane; r = 0.5: (2, -1)
+    CHECK(v[0] == 2.0f && v[1] == -1.0f);
+    fxc::focalRangeFar(0.0f, 2000.0f, 1000.0f, 1.0f, v);  // r >= 1: off
+    CHECK(v[0] == 0.0f && v[1] == 0.0f);
+    float s[3] = {3.0f, -7.0f, 5.0f};
+    fxc::clampScreenVector(s, 1.0f, -1.0f);
+    CHECK(s[0] == 1.0f && s[1] == -1.0f && s[2] == 5.0f);
+    float nanv[3] = {std::nanf(""), std::nanf(""), 0.0f};
+    fxc::clampScreenVector(nanv, 1.0f, -1.0f);
+    CHECK(nanv[0] == 1.0f && nanv[1] == 1.0f);
+    CHECK(fxc::sunFlare(-0.5f) == 0.25f && fxc::sunFlare(0.5f) == 0.0f && fxc::sunFlare(0.0f) == 0.0f);
+}
+
+// N5.7: the sprite batcher (RenderBatches 0x757180 / DrawBatch 0x7570b0)
+TEST(native_sprite_batches_follow_render_batches) {
+    namespace fxc = native::fxc;
+    int a = 0, b = 0;
+    const fxc::SpriteKey recs[] = {{&a, 0}, {&a, 0}, {&b, 0}, {&b, 0x1000}, {&b, 0x1000}};
+    const fxc::SpritePlan p = fxc::planSprites(recs, 0x1000, 0, 0);
+    // a batch is closed by the next record's change (its `why`) and drawn with the state DrawBatch sets for it: the texture
+    // break before record 2 draws [0, 2) with image a; the blend break before record 3 draws [2, 3) with image b (the blend still
+    // 0: record 0's blend equals +0x98's initial 0, no SetBlend); the end draws [3, 5) after SetBlend(0x1000)
+    CHECK(p.batches.size() == 3);
+    CHECK(p.batches[0].why == fxc::SpriteBatch::Why::Texture && p.batches[0].setImage && p.batches[0].image == &a && !p.batches[0].setBlend &&
+          p.batches[0].start == 0 && p.batches[0].count == 2);
+    CHECK(p.batches[1].why == fxc::SpriteBatch::Why::Blend && p.batches[1].setImage && p.batches[1].image == &b && !p.batches[1].setBlend &&
+          p.batches[1].start == 2 && p.batches[1].count == 1 && p.batches[1].firstRecord == 2);
+    CHECK(p.batches[2].why == fxc::SpriteBatch::Why::End && p.batches[2].setBlend && p.batches[2].blend == 0x1000 && !p.batches[2].setImage &&
+          p.batches[2].count == 2 && p.batches[2].start == 3 && p.batches[2].firstRecord == 3);
+    CHECK(p.discard[0] && !p.discard[1] && p.quadOffset[4] == 4 * fxc::kSpriteQuad && p.endStart == 5 && p.endCount == 0);
+    // a full buffer: start + count == capacity -> draw, then from 0 (DISCARD)
+    const fxc::SpriteKey same[] = {{&a, 0}, {&a, 0}, {&a, 0}};
+    const fxc::SpritePlan f = fxc::planSprites(same, 3, 1, 0);
+    CHECK(f.batches.size() == 2 && f.batches[0].why == fxc::SpriteBatch::Why::Full && f.batches[0].start == 1 && f.batches[0].count == 2 &&
+          f.discard[2] && f.quadOffset[2] == 0 && f.batches[1].start == 0 && f.batches[1].count == 1);
+    // the quad: (p0, u0 v0), (p1, u1 v0), (p3, u1 v1), (p2, u0 v1)
+    std::uint8_t rec[fxc::kSpriteRecord]{};
+    const float corners[8] = {1, 2, 3, 4, 5, 6, 7, 8}, uv[4] = {0.1f, 0.2f, 0.3f, 0.4f}, z = 0.5f;
+    const std::uint32_t colour = 0x80ff00ffu;
+    std::memcpy(rec, corners, 32);
+    std::memcpy(rec + 0x20, uv, 16);
+    std::memcpy(rec + 0x30, &z, 4);
+    std::memcpy(rec + 0x40, &colour, 4);
+    std::uint8_t q[fxc::kSpriteQuad];
+    fxc::spriteQuad(rec, 1.0f, q);
+    const auto f32 = [&](int off) { float x; std::memcpy(&x, q + off, 4); return x; };
+    CHECK(f32(0) == 1 && f32(4) == 2 && f32(8) == 0.5f && f32(0x14) == 0.1f && f32(0x18) == 0.2f);
+    CHECK(f32(0x1c) == 3 && f32(0x20) == 4 && f32(0x30) == 0.3f && f32(0x34) == 0.2f);
+    CHECK(f32(0x38) == 7 && f32(0x3c) == 8 && f32(0x4c) == 0.3f && f32(0x50) == 0.4f);
+    CHECK(f32(0x54) == 5 && f32(0x58) == 6 && f32(0x68) == 0.1f && f32(0x6c) == 0.4f);
+    std::uint32_t c;
+    std::memcpy(&c, q + 0x10 + 3 * fxc::kSpriteVertex, 4);
+    CHECK(c == colour);
+    std::uint16_t idx[6];
+    fxc::spriteQuadIndices(3, idx);
+    CHECK(idx[0] == 12 && idx[1] == 14 && idx[2] == 15 && idx[3] == 12 && idx[4] == 13 && idx[5] == 14);
+    std::uint32_t en, src, dst;
+    CHECK(fxc::spriteBlend(0, en, src, dst) && en == 1 && src == 5 && dst == 6);
+    CHECK(fxc::spriteBlend(0x5000, en, src, dst) && en == 0 && src == 2 && dst == 1);
+    CHECK(fxc::spriteBlend(0x3000, en, src, dst) && src == 9 && dst == 1 && !fxc::spriteBlend(0x6000, en, src, dst));
+    // the w lane is not compared
+    std::uint8_t q2[fxc::kSpriteQuad];
+    std::memcpy(q2, q, sizeof(q));
+    q2[0x0c] ^= 0xff;
+    std::size_t at = 0;
+    std::uint64_t wl = 0;
+    CHECK(fxc::spriteBytesEqual(q, q2, at, wl) && wl == 1);
+    q2[0x10] ^= 1;
+    CHECK(!fxc::spriteBytesEqual(q, q2, at, wl) && at == 0x10);
 }

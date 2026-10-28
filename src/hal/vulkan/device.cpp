@@ -139,6 +139,9 @@ void HalDevice::applyStaticOps() {
     staticOps_->setMode(native::StaticOps::Group::Particles, sceneTake && (groups & 4096) != 0, sceneCompare && (groups & 4096) != 0);
     staticOps_->setMode(native::StaticOps::Group::Strips, sceneTake && (groups & 8192) != 0, sceneCompare && (groups & 8192) != 0);
     staticOps_->setMode(native::StaticOps::Group::Precipitation, sceneTake && (groups & 16384) != 0, sceneCompare && (groups & 16384) != 0);
+    // N5.7: 32768 the post chain (the image-effect graphs' effect filters), 65536 the sprite batcher (GUI, text, cursor, videos)
+    effectOps_->setPostMode(sceneTake && (groups & 32768) != 0, sceneCompare && (groups & 32768) != 0);
+    effectOps_->setGuiMode(sceneTake && (groups & 65536) != 0, sceneCompare && (groups & 65536) != 0);
     frameTap_->setStaticOpsActive(staticOps_->active());
     frameTap_->setEffectOpsActive(effectOps_->active());
 }

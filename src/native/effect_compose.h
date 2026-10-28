@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <span>
 #include <string>
+#include <vector>
 
 #include "fx/effect_binary.h"
 
@@ -110,11 +111,68 @@ void shadowProjection(const float box[6], float scale[3], float translation[3]);
 // ... the texture matrix's bias (identity, [0] 0.5, [5] -0.5, [12] = [13] = 0.5 + 0.5 / size, [14] = -bias), multiplied by P and V
 void shadowTextureBias(std::int32_t size, float depthBias, float out[16]);
 
+// ---- N5.7 post chain: the semantic parameter classes' value rules (the classes' Set, vtable +0x28) ----------------------------
+
+// eSImageEffectParamColorMatrix 0x758980 (COLORMATRIX, float3[3]): row i = E t_i (s e_i + (1 - s) w) with E = exposure (weather
+// +0x158), s = saturation (+0x170), t = tint (+0x180..+0x188), w = (wR, wG, wB) the luminance weights (Engine.dll data 0.3,
+// 0.59, 0.11); the engine's operation order
+void colorMatrix(float exposure, float saturation, const float tint[3], float one, const float weights[3], float out[9]);
+// eSImageEffectParamCamera 0x289b10 kind 10 (FOCALRANGENEAR): n = focal near (camera +0xe4); n <= epsilon: (0, 0); else n /= far,
+// (minusOne / n, -((minusOne / n) n))
+void focalRangeNear(float nearRange, float cameraFar, float epsilon, float minusOne, float out[2]);
+// kind 11 (FOCALRANGEFAR): s = far start (+0xe8), e = far end (+0xec, the far plane when e <= s), r = (e - s) / far; r >= 1: (0, 0);
+// else (1 / r, -((s / far) (1 / r)))
+void focalRangeFar(float farStart, float farEnd, float cameraFar, float one, float out[2]);
+// eSImageEffectParamSkyDome 0x289fc0 kind 4 (SUNLIGHTSCREENVECTOR): the clamp of x / y of the projected sun direction to [-1, 1]
+// (the engine's compare order: a NaN becomes 1)
+void clampScreenVector(float v[3], float one, float minusOne);
+// kind 5 (SUNFLAREINTENSITY): max(-z_view, 0)^2
+float sunFlare(float viewZ);
+
+// ---- N5.7 sprite batcher (eCSprite::Flush 0x757d10 -> RenderBatches 0x757180 -> DrawBatch 0x7570b0 -> eCSpriteMesh::Draw) ------
+
+inline constexpr std::uint32_t kSpriteRecord = 0x48;   // eCSprite +0xa8 records: corners 4 x (x, y), uv (u0, v0, u1, v1) +0x20, z +0x30, image +0x38, colour +0x40, blend +0x44
+inline constexpr std::uint32_t kSpriteVertex = 0x1c;   // FLOAT3 position (+ 4 unread bytes: the engine's w lane), D3DCOLOR +0x10, FLOAT2 uv +0x14
+inline constexpr std::uint32_t kSpriteQuad = 4 * kSpriteVertex;
+
+struct SpriteKey {
+    const void* image = nullptr;
+    std::uint32_t blend = 0;
+};
+// one DrawBatch call: the state it changes (SetBlend, the texture + eCGfxEffect::Execute) and the quads it draws (count 0: none)
+struct SpriteBatch {
+    bool setBlend = false;
+    std::uint32_t blend = 0;
+    bool setImage = false;
+    const void* image = nullptr;
+    std::uint32_t start = 0, count = 0;   // mesh quads [start, start + count)
+    std::uint32_t firstRecord = 0;        // the record of the batch's first quad
+    enum class Why : std::uint8_t { Blend, Texture, Full, End } why = Why::End;
+};
+struct SpritePlan {
+    std::vector<SpriteBatch> batches;
+    std::vector<std::uint32_t> quadOffset;  // per record: its quad's byte offset in the vertex buffer
+    std::vector<bool> discard;              // per record: locked with DISCARD (offset 0)
+    std::uint32_t endStart = 0, endCount = 0;
+};
+// RenderBatches: +0x88 = 0, +0x90 = record 0's image, +0x98 = 0, +0x9c = record 0's blend; per record a DrawBatch before it on a
+// blend change, a texture change or a full buffer (start + count == capacity: then start = count = 0); a final DrawBatch.
+// DrawBatch: SetBlend when +0x98 != +0x9c, the texture when +0x88 != +0x90, the mesh's draw when count != 0 (start += count).
+SpritePlan planSprites(std::span<const SpriteKey> records, std::uint32_t capacity, std::uint32_t start, std::uint32_t count);
+// one record's quad (RenderBatches' writes; the w lanes get `w`): (p0, u0 v0), (p1, u1 v0), (p3, u1 v1), (p2, u0 v1)
+void spriteQuad(const std::uint8_t* record, float w, std::uint8_t out[kSpriteQuad]);
+// eCSpriteMesh::CreateIndexBuffer 0x528a80: quad q -> 4q + (0, 2, 3, 0, 1, 2)
+void spriteQuadIndices(std::uint32_t q, std::uint16_t out[6]);
+// eCSprite::SetBlend 0x7568f0 (flags & 0x7000): alpha blending on / off + SetMasterBlending(src, dst); false: no change (unknown)
+bool spriteBlend(std::uint32_t flags, std::uint32_t& enable, std::uint32_t& src, std::uint32_t& dst);
+// the vertex bytes compared (not the w lane +0xc..+0xf of a vertex: the engine leaves stack data there, the FLOAT3 decl never reads it)
+bool spriteBytesEqual(std::span<const std::uint8_t> a, std::span<const std::uint8_t> b, std::size_t& firstDiff, std::uint64_t& wLanesDiffer);
+
 // ---- comparison -------------------------------------------------------------------------------------------------------------
 
 enum class Field : std::uint8_t {
     DrawCount, Vs, Ps, Decl, Streams, Indices, Range, Depth, Stencil, Blend, ColorWrite, Raster, OtherState, Texture, SamplerState,
-    VsConst, PsConst, BoolInt, Target, Viewport, Count
+    VsConst, PsConst, BoolInt, Target, Viewport, Geometry, Count
 };
 inline constexpr std::size_t kFieldCount = static_cast<std::size_t>(Field::Count);
 const char* name(Field f);

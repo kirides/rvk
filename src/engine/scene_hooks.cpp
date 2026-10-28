@@ -395,7 +395,20 @@ using EffectExecuteFn = bool (*)(void* effect);
 Hook<EffectExecuteFn> g_effectExecute;
 bool detourEffectExecute(void* effect) {
     ViewScope scope(View::Post, Pass::Post, "eCImageEffect::Execute");
-    return g_effectExecute.original(effect);
+    EffectTap* tap = scope.d != nullptr ? g_effectTap.load(std::memory_order_relaxed) : nullptr;
+    if (tap != nullptr) tap->postBegin(effect);
+    const bool r = g_effectExecute.original(effect);
+    if (tap != nullptr) tap->postEnd(effect);
+    return r;
+}
+
+// N5.7: the sprite batcher's flush (GUI, fonts, cursor, videos: native/effect_ops_gui.cpp)
+Hook<VoidThisFn> g_spriteFlush;
+void detourSpriteFlush(void* sprite) {
+    EffectTap* tap = device() != nullptr ? g_effectTap.load(std::memory_order_relaxed) : nullptr;
+    if (tap != nullptr) tap->spriteFlushBegin(sprite);
+    g_spriteFlush.original(sprite);
+    if (tap != nullptr) tap->spriteFlushEnd(sprite);
 }
 
 using CameraRenderFn = void (*)(void* camera, void* desc);
@@ -778,6 +791,7 @@ int install() {
     add(g_skyCube, "eCSkydome_PS::UpdateSkydomeEnvCubemap", s.skydomeUpdateEnvCubemap, &detourSkyCube);
     add(g_sceneUpdate, "eCImageFilterScene::OnUpdateOutput", s.imageFilterSceneUpdate, &detourSceneUpdate);
     add(g_effectExecute, "eCImageEffect::Execute", s.imageEffectExecute, &detourEffectExecute);
+    add(g_spriteFlush, "eCSprite::Flush", s.spriteFlush, &detourSpriteFlush);
     add(g_cameraRender, "eCCameraBase::Render", s.cameraBaseRender, &detourCameraRender);
     add(g_renderEntity, "eCRenderSystemAdmin::RenderEntity", s.renderSystemRenderEntity, &detourRenderEntity);
     // draw tags
@@ -794,6 +808,8 @@ int install() {
 }
 
 d3d9::Device* renderDevice() { return device(); }
+
+bool inSceneJob() { return g_inSceneFilter > 0; }
 
 void setOpTap(OpTap* tap) { g_opTap.store(tap, std::memory_order_release); }
 

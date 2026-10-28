@@ -287,6 +287,13 @@ public:
     // the top-level parameter index of a parameter handle the engine got from GetParameterDescription (fx::kNone: an element
     // handle or unknown)
     virtual std::uint32_t parameterOf(const void* handle) const = 0;
+    // the values / textures the effect holds now (what a parameter keeps when the engine does not set it: N5.7 carry-over)
+    virtual const fx::ParameterValues& currentValues() const = 0;
+    virtual const d3d9::Texture* currentTexture(std::uint32_t param) const = 0;
+    // the technique / pass last selected (SetTechnique / SetPassNumber; -1 none)
+    virtual int currentTechnique() const = 0;
+    // the technique index of a technique handle (GetTechniqueDescription's; -1 unknown)
+    virtual int techniqueOf(const void* handle) const = 0;
     static const EffectInfo* fromApi(const void* apiEffect);
 };
 
@@ -318,6 +325,8 @@ public:
     void unregisterCube(const void* api);
     d3d9::Texture* cubeOfApi(const void* api);
     const Options& options() const { return options_; }
+    // the view matrix the engine last set (SetViewMatrix, slot 0x288: the GUI's scale / offset; N5.7 sprite composition)
+    const bCMatrix& viewMatrix() const { return view_; }
 
     // render-state writes: `normal` setters respect the master flags; effects call setRenderState directly
     void setRenderState(std::uint32_t rs, std::uint32_t value);

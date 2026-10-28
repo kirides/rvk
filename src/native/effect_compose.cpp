@@ -1,5 +1,6 @@
 #include "native/effect_compose.h"
 
+#include <algorithm>
 #include <cstring>
 #include <format>
 
@@ -195,13 +196,193 @@ void shadowTextureBias(std::int32_t size, float depthBias, float out[16]) {
     out[14] = -depthBias;
 }
 
+// ---- N5.7 post chain ----------------------------------------------------------------------------------------------------------
+
+void colorMatrix(float exposure, float saturation, const float tint[3], float one, const float weights[3], float out[9]) {
+    // 0x758980 in its instruction order: f = 1 - s; t_i = E tint_i; a / b / c = f w_R / w_G / w_B
+    const float f = one - saturation;
+    const float t0 = exposure * tint[0], t1 = exposure * tint[1], t2 = exposure * tint[2];
+    const float a = f * weights[0], b = f * weights[1], c = f * weights[2];
+    out[0] = (a + saturation) * t0;
+    out[1] = b * t0;
+    out[2] = c * t0;
+    out[3] = a * t1;
+    out[4] = (b + saturation) * t1;
+    out[5] = c * t1;
+    out[6] = a * t2;
+    out[7] = b * t2;
+    out[8] = (c + saturation) * t2;
+}
+
+void focalRangeNear(float nearRange, float cameraFar, float epsilon, float minusOne, float out[2]) {
+    if (nearRange < epsilon || nearRange == epsilon) {
+        out[0] = out[1] = 0.0f;
+        return;
+    }
+    const float n = nearRange / cameraFar;
+    const float r = minusOne / n;
+    out[0] = r;
+    out[1] = -(r * n);
+}
+
+void focalRangeFar(float farStart, float farEnd, float cameraFar, float one, float out[2]) {
+    float e = farEnd;
+    if (farEnd <= farStart) e = cameraFar;
+    const float r = (e - farStart) / cameraFar;
+    if (one <= r) {
+        out[0] = out[1] = 0.0f;
+        return;
+    }
+    const float k = one / r;
+    out[0] = k;
+    out[1] = -((farStart / cameraFar) * k);
+}
+
+void clampScreenVector(float v[3], float one, float minusOne) {
+    float f = one;
+    if (v[0] <= one) f = v[0];
+    v[0] = f;
+    if (f < minusOne) v[0] = minusOne;
+    f = one;
+    if (v[1] <= one) f = v[1];
+    v[1] = minusOne;
+    if (minusOne <= f) v[1] = f;
+}
+
+float sunFlare(float viewZ) {
+    float v = -viewZ;
+    if (v <= 0.0f) v = 0.0f;
+    return v * v;
+}
+
+// ---- N5.7 sprite batcher ------------------------------------------------------------------------------------------------------
+
+SpritePlan planSprites(std::span<const SpriteKey> records, std::uint32_t capacity, std::uint32_t start, std::uint32_t count) {
+    SpritePlan p;
+    const std::size_t n = records.size();
+    p.quadOffset.assign(n, 0);
+    p.discard.assign(n, false);
+    if (n == 0) {
+        p.endStart = start;
+        p.endCount = count;
+        return p;
+    }
+    const void* bound = nullptr;              // +0x88
+    const void* pending = records[0].image;   // +0x90
+    std::uint32_t current = 0;                // +0x98
+    std::uint32_t wanted = records[0].blend;  // +0x9c
+    std::uint32_t firstRecord = 0;
+    const auto drawBatch = [&](SpriteBatch::Why why) {
+        SpriteBatch b;
+        b.why = why;
+        if (current != wanted) {
+            b.setBlend = true;
+            b.blend = wanted;
+            current = wanted;
+        }
+        if (bound != pending) {
+            b.setImage = true;
+            b.image = pending;
+            bound = pending;
+        }
+        if (count != 0) {
+            b.start = start;
+            b.count = count;
+            b.firstRecord = firstRecord;
+            start += count;
+            count = 0;
+        }
+        p.batches.push_back(b);
+    };
+    for (std::size_t i = 0; i < n;) {
+        if (records[i].blend != wanted) {
+            drawBatch(SpriteBatch::Why::Blend);
+            wanted = records[i].blend;
+            continue;
+        }
+        if (records[i].image != pending) {
+            drawBatch(SpriteBatch::Why::Texture);
+            pending = records[i].image;
+            continue;
+        }
+        if (capacity - (start + count) == 0) {  // `cmp (capacity - (start + count)), 1; jb`: full
+            drawBatch(SpriteBatch::Why::Full);
+            start = count = 0;
+            continue;
+        }
+        if (count == 0) firstRecord = static_cast<std::uint32_t>(i);
+        p.discard[i] = start + count == 0;
+        p.quadOffset[i] = (start + count) * kSpriteQuad;
+        ++count;
+        ++i;
+    }
+    drawBatch(SpriteBatch::Why::End);
+    p.endStart = start;
+    p.endCount = count;
+    return p;
+}
+
+void spriteQuad(const std::uint8_t* r, float w, std::uint8_t out[kSpriteQuad]) {
+    // RenderBatches 0x7572b5..0x75741a: x / y of the corner, z +0x30, the w lane, colour +0x40, u, v
+    static constexpr std::uint32_t kCorner[4] = {0x00, 0x08, 0x18, 0x10};
+    static constexpr std::uint32_t kU[4] = {0x20, 0x28, 0x28, 0x20};
+    static constexpr std::uint32_t kV[4] = {0x24, 0x24, 0x2c, 0x2c};
+    for (int k = 0; k < 4; ++k) {
+        std::uint8_t* v = out + k * kSpriteVertex;
+        std::memcpy(v + 0x00, r + kCorner[k], 4);
+        std::memcpy(v + 0x04, r + kCorner[k] + 4, 4);
+        std::memcpy(v + 0x08, r + 0x30, 4);
+        std::memcpy(v + 0x0c, &w, 4);
+        std::memcpy(v + 0x10, r + 0x40, 4);
+        std::memcpy(v + 0x14, r + kU[k], 4);
+        std::memcpy(v + 0x18, r + kV[k], 4);
+    }
+}
+
+void spriteQuadIndices(std::uint32_t q, std::uint16_t out[6]) {
+    static constexpr std::uint16_t kQuad[6] = {0, 2, 3, 0, 1, 2};
+    for (int i = 0; i < 6; ++i) out[i] = static_cast<std::uint16_t>(4u * q + kQuad[i]);
+}
+
+bool spriteBlend(std::uint32_t flags, std::uint32_t& enable, std::uint32_t& src, std::uint32_t& dst) {
+    // D3DBLEND: 1 ZERO, 2 ONE, 3 SRCCOLOR, 5 SRCALPHA, 6 INVSRCALPHA, 9 DESTCOLOR
+    switch (flags & 0x7000u) {
+    case 0x0000: enable = 1, src = 5, dst = 6; return true;
+    case 0x1000: enable = 1, src = 2, dst = 2; return true;
+    case 0x2000: enable = 1, src = 5, dst = 2; return true;
+    case 0x3000: enable = 1, src = 9, dst = 1; return true;
+    case 0x4000: enable = 1, src = 9, dst = 3; return true;
+    case 0x5000: enable = 0, src = 2, dst = 1; return true;
+    default: return false;
+    }
+}
+
+bool spriteBytesEqual(std::span<const std::uint8_t> a, std::span<const std::uint8_t> b, std::size_t& firstDiff, std::uint64_t& wLanesDiffer) {
+    firstDiff = 0;
+    if (a.size() != b.size()) return false;
+    for (std::size_t v = 0; v < a.size(); v += kSpriteVertex) {
+        const std::size_t n = std::min<std::size_t>(kSpriteVertex, a.size() - v);
+        for (std::size_t i = 0; i < n; ++i) {
+            if (a[v + i] == b[v + i]) continue;
+            if (i >= 0xc && i < 0x10) {
+                ++wLanesDiffer;
+                i = 0xf;  // one count per vertex
+                continue;
+            }
+            firstDiff = v + i;
+            return false;
+        }
+    }
+    return true;
+}
+
 // ---- comparison -------------------------------------------------------------------------------------------------------------
 
 const char* name(Field f) {
     static constexpr const char* kNames[] = {"draw count", "vs", "ps", "declaration", "streams", "indices", "range", "depth states",
                                              "stencil states", "blend states", "colour write", "raster states", "other states",
                                              "texture", "sampler state", "vs constants", "ps constants", "bool / int", "target",
-                                             "viewport"};
+                                             "viewport", "vertex / index data"};
     static_assert(std::size(kNames) == kFieldCount);
     return kNames[static_cast<std::size_t>(f)];
 }
