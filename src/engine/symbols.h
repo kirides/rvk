@@ -261,7 +261,21 @@
     X(illumGetSkydome, L"Engine.dll", "?GetSkydome@eCIlluminationAdmin@@QEAAPEAVeCSkydome_PS@@XZ", false)                         \
     X(gfxEffectOptimize, L"Engine.dll", "?ms_bOptimize@eCGfxEffect@@1_NA", false)                                                \
     X(gfxEffectReset, L"Engine.dll", "?ms_bReset@eCGfxEffect@@1_NA", false)                                                      \
-    X(gfxEffectActive, L"Engine.dll", "?ms_pActiveEffect@eCGfxEffect@@1PEAV1@EA", false)                                             /* O2a lean ops (native/static_ops_lean.cpp, opt-side-effects-mesh.md 7): the engine functions whose side effects the lean         path runs instead of the slots (all unique exports, none COMDAT-folded) */                                                     X(meshBindLightmaps, L"Engine.dll", "?BindLightmaps@eCMeshResource2@@QEAA?AW4eEShaderMaterialLightmapCombi@@W4eEResourceLoadMode@@@Z", false)     X(meshSortRenderInstances, L"Engine.dll", "?SortRenderInstances@eCMeshResource2@@QEAAXXZ", false)                              X(decalCreateBuffers, L"Engine.dll", "?CreateBuffers@eCDecalAdmin@@IEAA_NXZ", false)                                           X(decalCreateDefaultShader, L"Engine.dll", "?CreateDefaultShader@eCDecalAdmin@@IEAA_NXZ", false)                               X(billboardCreateBuffers, L"Engine.dll", "?CreateBuffers@eCBillboardAdmin@@IEAA_NXZ", false)                                   X(billboardCreateDefaultMaterial, L"Engine.dll", "?CreateDefaultMaterial@eCBillboardAdmin@@IEAA_NXZ", false)                   X(skydomeCreateBuffers, L"Engine.dll", "?CreateBuffers@eCSkydome_PS@@IEAA_NXZ", false)                                         X(skydomeCreateStars, L"Engine.dll", "?CreateStars@eCSkydome_PS@@IEAA_NXZ", false)                                             X(skydomeCreateMoon, L"Engine.dll", "?CreateMoon@eCSkydome_PS@@IEAA_NXZ", false)                                               X(skyObjectSetBillboardRenderCount, L"Engine.dll", "?SetBillboardRenderCount@eCSkyObject@@QEAA_NK@Z", false)                  X(texScaleSetScale, L"Engine.dll", "?SetScale@eCTexCoordSrcScale@@QEAAXAEBVbCVector2@@@Z", false)                             X(texScrollerSetDirection, L"Engine.dll", "?SetDirection@eCTexCoordSrcScroller@@QEAAXAEBVbCVector2@@@Z", false)          \
+    X(gfxEffectActive, L"Engine.dll", "?ms_pActiveEffect@eCGfxEffect@@1PEAV1@EA", false)                                       \
+    /* O2a lean ops (native/static_ops_lean.cpp, opt-side-effects-mesh.md 7): the engine functions whose side effects the lean \
+       path runs instead of the slots (all unique exports, none COMDAT-folded) */                                              \
+    X(meshBindLightmaps, L"Engine.dll", "?BindLightmaps@eCMeshResource2@@QEAA?AW4eEShaderMaterialLightmapCombi@@W4eEResourceLoadMode@@@Z", false) \
+    X(meshSortRenderInstances, L"Engine.dll", "?SortRenderInstances@eCMeshResource2@@QEAAXXZ", false)                          \
+    X(decalCreateBuffers, L"Engine.dll", "?CreateBuffers@eCDecalAdmin@@IEAA_NXZ", false)                                       \
+    X(decalCreateDefaultShader, L"Engine.dll", "?CreateDefaultShader@eCDecalAdmin@@IEAA_NXZ", false)                           \
+    X(billboardCreateBuffers, L"Engine.dll", "?CreateBuffers@eCBillboardAdmin@@IEAA_NXZ", false)                               \
+    X(billboardCreateDefaultMaterial, L"Engine.dll", "?CreateDefaultMaterial@eCBillboardAdmin@@IEAA_NXZ", false)               \
+    X(skydomeCreateBuffers, L"Engine.dll", "?CreateBuffers@eCSkydome_PS@@IEAA_NXZ", false)                                     \
+    X(skydomeCreateStars, L"Engine.dll", "?CreateStars@eCSkydome_PS@@IEAA_NXZ", false)                                         \
+    X(skydomeCreateMoon, L"Engine.dll", "?CreateMoon@eCSkydome_PS@@IEAA_NXZ", false)                                           \
+    X(skyObjectSetBillboardRenderCount, L"Engine.dll", "?SetBillboardRenderCount@eCSkyObject@@QEAA_NK@Z", false)               \
+    X(texScaleSetScale, L"Engine.dll", "?SetScale@eCTexCoordSrcScale@@QEAAXAEBVbCVector2@@@Z", false)                          \
+    X(texScrollerSetDirection, L"Engine.dll", "?SetDirection@eCTexCoordSrcScroller@@QEAAXAEBVbCVector2@@@Z", false)            \
     X(sharedEpsilon, L"SharedBase.dll", "g_fEpsilon", false)
 
 namespace rvk::engine {
