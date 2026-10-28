@@ -494,3 +494,9 @@ constants` line. Ring traffic -60 to -65 % (Wrapper savegame 7,117 -> 2,789 KiB 
 written -33 % (Full 2,607 -> 1,728 KiB); GPU memory and GPU time unchanged. CPU no gain (Wrapper savegame 3.31 -> 3.33 ms,
 Full 4.67 -> 4.74 ms, +1.5 %: the always-on compare + window bookkeeping cancels the smaller copies): the CPU is in the per-draw
 composition (V3).
+
+## 19. V3 retained composition: profile (2026-10-28)
+
+V3 (`native.retained`, default off) built and parity-proven but without CPU gain; the sampled profile (`-CpuProfile`, savegame
+`Risen_Save_0009` hold 40, Full, `tools/pcprofile.py`) shows the retainable part (`materialDraws`) is ~6.4 % = ~0.33 ms of the
+4.8 - 5.2 ms engine thread. Numbers, remaining time and the decision: vulkanize/plan.md 7.1.

@@ -229,4 +229,45 @@ Commit "V3: retained composition of sub-mesh draws". `native.retained` (Debug, *
   (worse: vegetation keys churn, 82k rebuilds / 5 s, hence excluded). Replay costs 0.46 ms/frame, i.e. nearly what the composition
   it replaces cost: validation + lighting + constants dominate. **No real gain; stays default off.**
 * NOT done: device-path replay without `prepareDraw`, persistent window blocks, validation runs (-Validation / -SyncValidation),
-  the other compare scenarios, enhancements-on runs / DEVICE_LOST investigation, screenshot A/B. CLAUDE.md / PLAN.md not updated.
+  the other compare scenarios, enhancements-on runs / DEVICE_LOST investigation, screenshot A/B.
+
+### 7.1 Profile and decision (2026-10-28)
+
+Measured (`out/v3p/`): savegame Risen_Save_0009 hold 40, Full, `RisenTest.exe`, `-Vsync off -Perf -CpuProfile`, lod 1x, one run
+each (Pon = `native.retained` on, Poff = off), aggregated with `tools/pcprofile.py`. Percentages are of the engine thread's
+samples; the thread takes ~4.8 - 5.2 ms per frame.
+
+* Module shares, Pon / Poff: d3d9 (ours) 43.8 / 47.4 %, Engine.dll 17.2 / 17.9, vcruntime140 12.4 / 9.4 (memcpy / memcmp),
+  ntdll 9.3 / 8.3, sharedbase 7.7 / 7.5, amdvlk64 4.6 / 4.5. Retention takes ~3.6 points out of d3d9 and puts ~3 points into
+  vcruntime (the replay's memcpy / memcmp / constant copies): net zero.
+* Inclusive (stack samples), same in both runs unless noted: detourSceneUpdate 60 %, detourExecute 41 % (Poff 46), opEnter 37 %
+  (composition + issue), issue() 16.7 %, drawIndexedPrimitive 14.7 %, prepareDraw 10.4 %, composeTree 5.9 %, materialDraws 6.4 %
+  (off; = materialDrawsImpl 6.3) vs 5.6 % retained on. The part retention can replace (the sub-mesh draw groups) is ~0.33 ms in
+  the unretained build; retained on it still costs 5.6 % (-0.8 points = ~0.04 ms).
+* Replay by its own timer: 0.43 ms per frame for ~754 hits (~0.57 us per hit, includes two `steady_clock::now` per hit under
+  `-Perf`); hit rate 100 %, built 0, invalid 0 once warm. Leaf costs (share of thread): validate + hashBytes ~1.0 % (~0.05 ms:
+  validation is cheap, a cheaper validation has nothing to give), key build + mix hash 0.56 %, `retained_` map find 0.41 %,
+  retainedRun 0.41 %, retReplay 0.31 %.
+* Leaf profile: our module's top 120 buckets are only 15.6 % (on) / 16.4 % (off) of the thread and flat: safeLoad8/4 1.4/0.7
+  (on) vs 1.9/0.9 (off), computeVertexInput ~1.0, prepareDraw 0.6, issue 0.6, sky billboard vertices 0.5, splitStage 0.26;
+  nothing above ~1.4 %. constantsInto + forEachRun ~0.27 %.
+* Reading: the V0 estimate "composition 1.43 ms" (opEnter minus issue) is mostly **not** the sub-mesh draw groups
+  (materialDraws is 0.33 ms); the rest is composeTree's other parts, actors / trees / shadow views / lean bookkeeping, spread
+  over many functions. Retaining materialDraws alone has a ceiling of ~0.3 ms, and replay costs about what composing cost,
+  because composition mostly consisted of the per-frame redo (switch writes, lighting, mask reference, constants, tag, touches),
+  not of the engine reads.
+* Remaining time per the profile: issue / device draw path ~0.8 ms (drawIndexedPrimitive 14.7 % incl. prepareDraw 10.4 %: flat,
+  many small items; a replay path skipping prepareDraw's classification could save perhaps 0.2 - 0.3 ms but must keep feeding
+  the RT scene sightings, object_motion, rt_skin, water / shadow replacers, G-buffer / material variants, tint, coverage:
+  V0-gpu-resident.md 7), engine + vcruntime memcpy (~0.5 - 0.6 ms), ntdll, driver 4.6 %.
+
+**Decision.** Step 2 (cheaper validation: ~0.05 ms) and step 3 (skip the per-frame redo: ~0.3 ms together with everything else in
+materialDraws, below the 0.15 ms gain bar once key / lookup / replay costs remain) were **not built**. Step 4 (replay without
+`prepareDraw`) is the only item with a possible gain (<= ~0.3 ms of 4.8, ~5 %) at high risk to the consumers: not done.
+`native.retained` stays default off; the layer is kept as the check-mode-proven foundation (stale 0 over 75,142 checked hits).
+
+Proposed instead: (a) a flat-profile attack on the device path (prepareDraw classification caches keyed on the DrawDesc:
+computeVertexInput, splitStage, internVi, prepareTextures); (b) find the memcpy / memcmp callers in vcruntime (12 % = ~0.55 ms;
+needs a profiler that symbolizes the CRT's callers, e.g. caller-of-memcpy sampling); (c) V4 merged indirect draws only if it
+removes per-draw CPU in prepareDraw, otherwise skip; (d) Wrapper / Full CPU is 4.8 ms vs GPU 1.5 ms: the engine's own code
+(17 % Engine.dll + 8 % sharedbase) is the other big block.
