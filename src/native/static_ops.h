@@ -420,7 +420,11 @@ private:
     std::vector<std::string> placeholderNames_;   // the first ones' names, read while bound (a load may free them before the report)
     std::uint32_t videoLogged_ = 0, placeholderLogged_ = 0;
     void leanReport();
-    const std::uint8_t* leanSky_ = nullptr;  // the last sky the lean path wrote (its cloud fields reported)
+    // the cloud fields as the lean path last wrote them (reported; the sky object itself may be gone by then: a load)
+    struct SkySnap {
+        bool valid = false;
+        float size[2]{}, scale[2][2]{}, dir[2]{}, scroller[2]{}, dome[4]{}, src[4]{};
+    } leanSky_;
     // per-op working storage of the compositions, kept across ops (O1: no heap traffic per op once warm)
     struct Scratch {
         std::vector<sc::Pass> passes;  // materialDraws

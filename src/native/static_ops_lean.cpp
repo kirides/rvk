@@ -229,7 +229,6 @@ void StaticOps::leanSkyPre(const std::uint8_t* sky) {
     // The draws are ours; their composition reads only what these write (stars, moon, sun record) or the dome's next notify
     if (!leanCollect_ || (get<std::uint8_t>(sky, 0x18) & 1) == 0) return;
     const auto& s = engine::sym();
-    leanSky_ = sky;
     if (!reinterpret_cast<BoolThisFn>(s.skydomeCreateBuffers)(sky)) return;
     reinterpret_cast<BoolThisFn>(s.skydomeCreateStars)(sky);
     if (ptr(sky, 0x138) != nullptr && s.skyObjectSetBillboardRenderCount != nullptr && get<std::int32_t>(sky, 0x188) == 1) {
@@ -251,6 +250,28 @@ void StaticOps::leanSkyPre(const std::uint8_t* sky) {
         for (const auto& [dst, src] : kFields) store4(dome + dst, get<std::uint32_t>(sky, src));
     }
     ++leanWindow_.skyWrites;
+    // (report: what was written, read back while the objects live)
+    SkySnap& k = leanSky_;
+    k.valid = true;
+    U8* s1 = ptr(sky, 0x110);
+    U8* s2 = ptr(sky, 0x118);
+    U8* sc = ptr(sky, 0x108);
+    U8* dome = ptr(sky, 0xf0);
+    k.size[0] = get<float>(sky, 0xb8);
+    k.size[1] = get<float>(sky, 0xbc);
+    k.scale[0][0] = get<float>(s1, 0x48);
+    k.scale[0][1] = get<float>(s1, 0x4c);
+    k.scale[1][0] = get<float>(s2, 0x48);
+    k.scale[1][1] = get<float>(s2, 0x4c);
+    k.dir[0] = get<float>(sky, 0xb0);
+    k.dir[1] = get<float>(sky, 0xb4);
+    k.scroller[0] = get<float>(sc, 0x50);
+    k.scroller[1] = get<float>(sc, 0x54);
+    static constexpr std::size_t kDome[4] = {0x300, 0x304, 0x308, 0x310}, kSrc[4] = {0xa0, 0xa4, 0xa8, 0x90};
+    for (std::size_t i = 0; i < 4; ++i) {
+        k.dome[i] = get<float>(dome, kDome[i]);
+        k.src[i] = get<float>(sky, kSrc[i]);
+    }
 }
 
 void StaticOps::leanReport() {
@@ -288,19 +309,13 @@ void StaticOps::leanReport() {
                      lean_ ? "on" : "off", w.frames, w.checkFrames, skipped, kept.empty() ? "0" : kept, w.touches, w.touchCalls, w.lightmaps,
                      w.stream3, w.instanceSorts, w.queueResets, w.queueMax, w.skyWrites, w.creates, w.placeholderBinds, placeholderImages_.size(),
                      names.empty() ? "" : ": ", names);
-        if (leanSky_ != nullptr) {
-            // the cloud fields Render keeps in step with the weather (the scale nodes, the scroller, the dome shader's fields)
-            U8* sky = leanSky_;
-            U8* s1 = ptr(sky, 0x110);
-            U8* s2 = ptr(sky, 0x118);
-            U8* sc = ptr(sky, 0x108);
-            U8* dome = ptr(sky, 0xf0);
+        if (leanSky_.valid) {
+            // the cloud fields Render keeps in step with the weather (the scale nodes, the scroller, the dome shader's fields), as last written
+            const SkySnap& k = leanSky_;
             spdlog::info("native: lean: sky clouds: size ({}, {}) -> scale nodes ({}, {}) ({}, {}); direction ({}, {}) -> scroller ({}, {}); "
                          "dome fields ({}, {}, {}, {}) from ({}, {}, {}, {})",
-                         get<float>(sky, 0xb8), get<float>(sky, 0xbc), get<float>(s1, 0x48), get<float>(s1, 0x4c), get<float>(s2, 0x48),
-                         get<float>(s2, 0x4c), get<float>(sky, 0xb0), get<float>(sky, 0xb4), get<float>(sc, 0x50), get<float>(sc, 0x54),
-                         get<float>(dome, 0x300), get<float>(dome, 0x304), get<float>(dome, 0x308), get<float>(dome, 0x310), get<float>(sky, 0xa0),
-                         get<float>(sky, 0xa4), get<float>(sky, 0xa8), get<float>(sky, 0x90));
+                         k.size[0], k.size[1], k.scale[0][0], k.scale[0][1], k.scale[1][0], k.scale[1][1], k.dir[0], k.dir[1], k.scroller[0],
+                         k.scroller[1], k.dome[0], k.dome[1], k.dome[2], k.dome[3], k.src[0], k.src[1], k.src[2], k.src[3]);
         }
     }
     placeholderImages_.clear();
