@@ -453,3 +453,11 @@ effects / GUI) and each stage's result: engine-frame/opt-plan.md. After O1 (2026
 Wrapper 3.33 ms, Full 5.48 ms (was 8.53). Switches for A/B: `native.mirror` (0 our register file, 1 / 2 the engine's pools re-read per
 view / per op), `native.coverage` (the per-draw coverage counter in plain Full runs). Recipe: `out/o1/batch.ps1` (wrapper / full,
 with and without `-CpuProfile`), `out/o1/table.py` (`RVK_DLL` = the DLL of the profiled run for symbols).
+
+O2a (2026-10-28, opt-plan.md "O2a result"): `native.lean` (Debug, default off) skips the engine's slot code of the composed mesh-like
+ops (static, alpha / refracted meshes, decals, sky, billboards, sky cube; ~150 slots per frame at the savegame) and runs their side
+effects itself; `native.lean_check=N` runs the engine every N-th frame (+ a warm-up frame) for the compare. Measured at the savegame:
+no unprofiled gain (Full 5.69 - 5.77 ms lean off vs 5.74 - 5.76 on; profiled Execute -0.16 ms): those slots are cheap, the engine's
+double work is in the SpeedTree / vegetation / shadow-view slots and the effect units (O2b / O2c / O3). The machine measured ~0.3 ms
+slower in that session than at O1 (the O1 DLL: 5.48 at O1, 5.82 in the O2a session): compare runs of one session only. Recipe:
+`out/o2a/batch.ps1`, `out/o2a/table.py`.

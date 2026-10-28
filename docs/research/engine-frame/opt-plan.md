@@ -119,3 +119,128 @@ memory, and why it stays right in O2:
 **Left for O2**: the engine's double work (~1.3 ms: its slot code, its HAL calls and dropped draws, the per-op save / restore that only
 exists for the engine's code after ours, the effect units' state capture); the two "to check" rows above; the double sort; then the
 remaining composition per draw (~1.4 us) and the effect units (~17 us each) as the next O1-like targets.
+
+## O2a result (2026-10-28): lean executor framework + the mesh-like groups
+
+Commits 073d57a (framework + side effects), 2a7ee69 (symbols.h layout), 63ed86a (report fix) on `feat/native-scene`. Settings
+`native.lean` (Debug | NoAB, default **off**; acts per op only where the op's group takes over, i.e. in Full or with the
+`native.static_ops` / `native.scene_ops` overrides) and `native.lean_check` (Debug, default 0). Code: `src/native/static_ops_lean.cpp`
+(+ the collection points in `static_ops.cpp`, `static_ops_nonop.cpp`, `static_ops_sky.cpp`), pure rules in `static_compose.h`
+(`sc::leanFrameKind`, `sc::TouchSet`; test `static_lean_check_frames_and_touch_set`). Logs, scripts: `out/o2a/` (`compare.ps1`,
+`behaviour.ps1`, `switch.ps1`, `batch.ps1`, `check.py`, `table.py`).
+
+### Design: per-slot lean thunks inside the engine's Execute (not a replacement executor)
+
+The engine's `eCFrustumDatabase::Execute` keeps running; only the slot calls of the ops we compose return early. Reasons:
+* Everything of Execute besides its slot loops is cheap and full of K duties (opt-side-effects-frame.md 4.1: camera / fog, the four
+  brackets with their state blocks and cache resets, the depth / shadow-mask / refraction holders, the refraction copy, the module
+  callbacks, the in-place qsorts); keeping it keeps every bracket, holder and the order for free, and the slots still receive
+  `&data[i]` of the engine's own sorted live arrays (a fallback slot runs exactly where the engine would run it).
+* The entry points already exist: the render-context vtable thunks (`contextSlot` / `dynamicSlot` / `opSlot` in
+  `engine/scene_hooks.cpp`) and the non-op detours (`RenderDecals`, `RenderBillboards`, `eCSkydome_PS::Render` for the cube faces).
+  `OpTap::opEnter` / `nonOpBegin` now return "skip"; the thunk then returns without calling the engine (the pass marker / draw tag
+  scopes around it stay). Not skipping = the O1 behaviour (the engine's code runs, its draws are dropped).
+* Per op: compose -> issue (as O1) -> if this is a lean frame, the group is one of O2a's and takes over, and every side effect is
+  covered: run the collected side effects, skip the engine's code. Otherwise (composition skipped: not compiled, invalid shader, ...;
+  a video texture bound; a check frame) the engine's code runs as before.
+* What a replacement executor would add (one sort, no copy of the lists) is small: the double sort is 0.02 ms (O1 item 7); the
+  tap's copy + resolve stays for now (it feeds the `Op` the composition reads; it could resolve lazily from the live op later).
+
+**The per-op save / restore stays in O2a** (decided after measuring). With it the device after a lean op holds the state the
+engine's last *run* code left, so every engine cache (`ms_pActiveShader`, the HLSL stage cache, the lighting pool's light list, the
+pools' uploaded ranges, `ms_pActiveImageData`) stays true for the engine code that still follows: fallback ops, the slots of the
+groups not yet lean (actors, trees, vegetation, particles, shadow views), the effect units' device capture, the brackets'
+`EndRenderStateBlock` (it only knows HAL-set states). Its cost in the lean profile is in the noise (`issue`'s restore lambdas <=
+0.02 ms per frame at the savegame); dropping it needs the cache invalidation of opt-side-effects-frame.md 9.1 (b) before every engine
+code run, which only pays once most slots are lean (O2b / O2c). Consequence, by design: after a lean op the device "lags" (it holds
+the last engine-run op's state, not the skipped op's). Our draws do not read it (own register file `native.mirror`; the bool / int
+registers and the inherited stages are not written by the skipped code); the dropped engine draws of non-lean ops do, through
+carry-over registers (below).
+
+**Compare under lean**: with `native.lean_check = N`, frame f runs the engine's code when f % N == 0 (check frame) or (f + 1) % N
+== 0 (warm-up frame); the static ops' compare (all StaticOps groups) runs only on check frames. Without the warm-up frame the first
+z op of a view (the hero's head, the first shadow-view op) mismatched in "instance c32+" (c42.x): the engine's check-frame draw read
+carry-over registers that the previous lean frame's instanced batches had not written into the engine's device (`l1_storm.log`: 330
+actor + 596 shadow-view draws of 0.64 M); with the warm-up frame 0 (`l2_storm.log`). For the same reason the compare of the non-lean
+groups is not meaningful on lean frames (their dropped engine draws see the lagging device).
+
+### Per group: the side effects run by us ([G] seen in game, [C] code / RE only)
+
+RE facts (re-lookup on the dumps + capstone, 2026-10-28): `eCResource2::RequestData(res, 1)` = QueueData(1) for state 1-2,
+CacheResource for 3, nothing for <= 0 / > 3 (ExecuteShaderConstants' inline touch is the same switch, only for the slots the PS
+samples, on a shader change or a dirty slot); RenderZPass disables stream 3 (`prim +0x60 = 0` / vtable +0x68) right after its
+`res +0x38 == 3 && visual` gate, before the sub-mesh loop; ExecuteRenderInstances returns at count 0, then BindLightmaps(1)
+unconditionally, the hardware path (`res +0xa0 != 0 && count >= 2 && combi != 1`) enables stream 3 once before its batch loop and
+touches the material per flush; `eCRenderContextMesh::Render` sorts (count > 1) and writes `+0xa4 = 0`; `eCMeshResource2::Render`
+returns at a null visual, else BindLightmaps(1) first; RenderDecals / RenderBillboards return false only when a Create failed,
+Execute ignores both results (0x66f195 / 0x66f1a2); the billboard queue reset sits inside the `count != 0` block;
+`eCSkydome_PS::Render`: all inside `+0x18 & 1`, CreateBuffers (false: return), the camera hack, CreateStars (stars drawn), the sun
+(`+0x138`: SetBillboardRenderCount(+0x170, 1), the one-billboard array), CreateMoon (moon drawn), the two "Scale" notify pairs
+inlined (+0x48 = +0x4c = 1.0f / CloudSize +0xb8 / +0xbc, what SetScale does), `SetDirection(+0x108, sky +0xb0)`, dome `+0x300 /
++0x304 / +0x308 / +0x310` = sky `+0xa0 / +0xa4 / +0xa8 / +0x90`, the restore, the dome draw. All functions called are unique
+exports (none COMDAT-folded).
+
+| group | side effects run at the op's place (before composing / after issuing) | verified |
+|---|---|---|
+| every composed draw | `RequestData(image, 1)` for every material sampler slot image the PS samples (once per frame per resource: `sc::TouchSet<8192>`); a bound image data with `+0x70` (a Bink video) keeps the engine's code | [G] 0.4 M touches / 0.13 M RequestData calls per 5 s at the savegame; placeholder binds as without lean (behaviour checks); no video image met ("kept (video) 0" in every run) |
+| static z ops (sub-mesh, whole mesh, nodes) | `EnableStream(3, false)` on the visual's HalPrimitive (`res +0x38 == 3` and a visual); image touches of the masked z PS | [G] compare on check frames |
+| static solid (sub-mesh, whole mesh, nodes, blended terrain layers) | `BindLightmaps(res, 1)` (the lightmaps' touches, admin s4 / s5, the material mode's stage bind), the sub-mesh material's touch, images | [G] |
+| instanced | before composing `SortRenderInstances(res)` + `res +0xa4 = 0` (the composition then reads the sorted list); BindLightmaps, `EnableStream(3, true)` on the hardware path, the material touch, images | [G] ~2 k sorts per 5 s |
+| alpha / refracted mesh ops | as solid (the refracted water through the enhanced water's replacer, unchanged) | [G] |
+| entity overlay passes (static / mesh) | `RequestData(overlay material, 1)` every frame while flagged, the overlay shader's images | [C] (static-mesh overlays not met; the actors' highlighted overlays are O2b's) |
+| decals | before composing `CreateBuffers` + `CreateDefaultShader` (early-out when made); every record's material touch (also without a shader), `BindLightmaps(lightmap mesh, 1)`, images; the original not called | [G] compare; first use [C] (the buffers existed before the first lean call in every run: "first-use creates 0") |
+| opaque billboards' queue | `CreateBuffers` + `CreateDefaultMaterial` first; the records' material touches, images; `admin +0x28 = 0` when the queue was not empty | [G] `rvk_rare`: one queue of 1 reset, every other window empty (bounded) |
+| blended billboard ops (alpha list) | `RequestData(material, 1)` (composed only when cached: else the engine's), images | [G] `rvk_rare` (832 ops per 5 s skipped, compare clean) |
+| sky dome op + cube faces | before composing (inside `+0x18 & 1`): CreateBuffers (stop when false), CreateStars, `SetBillboardRenderCount(+0x170, 1)` (the sun, when its array exists), CreateMoon, `SetScale(+0x110 / +0x118, (1 / size, 1 / size))`, `SetDirection(+0x108, +0xb0)`, the four dome fields; images | [G] `rvk_rtwalk` with `weather=Stormy_Rain`: the dome fields follow the blend and equal their sources (rvk.log `native: lean: sky clouds`), sky + cube compare clean on the check frames; the cloud size is (2, 0.2) in every weather met, so scale / direction were only seen constant |
+
+### Verification (lean on, `native.lean_check=10`, every group taken over + compared; `out/o2a/*.log`, `check.py`)
+
+| run | draws | result |
+|---|---|---|
+| pub_interior + jungle, actors shown (`l1_spots`) | 4.1 M | every group 0 mismatches, own draws = composition |
+| savegame Risen_Save_0009, hold 30 (`l1_save`) | 3.7 M | 0 mismatches |
+| `rvk_rare` with validation (`l1_rare`) | 9.9 M | 0 mismatches, validation 0 |
+| storm set (`l2_storm`) / `rvk_menufps` (`l2_menufps`) | 4.1 M / 4.1 M | 0 mismatches (with the warm-up frame), menufps PASS |
+| the rvkcompare route, all spots (`r1_route`) | 10.5 M | 0 mismatches |
+| `rvk_rtwalk`, new game, Stormy_Rain, 60 s (`w1_rtwalk`) | 6.4 M | 0 mismatches |
+| savegame `-Validation` (`v1_validation`), `rvk_pointshadow` `-SyncValidation` (`v1_pointshadow_sync`, RT shadows off) | 2.5 M / 2.7 M | 0 messages, no SYNC- hazard |
+
+Skipped per 5 s at the savegame: ~114 k static ops, 8 k alpha / refracted, 830 each decals / sky / billboards (~150 slots per frame).
+
+**Behaviour checks.** Placeholder binds (images bound while not loaded, rvk.log `placeholder binds`) on the route: lean on 264 (load),
+41, 59, 32, 13 after teleports, else 0; lean off 264, 33, 91, 32, 13, else 0: the same transients, settling to 0 in both (no eviction
+of bound images). Billboard queue bounded, clouds follow the weather (above); decals' first use [C] only.
+
+**Images.** Same-frame switch `native.lean` off -> on at frame 4660 (frozen holds, `out/o2a/switch.ps1`, `out/n56/switch6.py`):
+pub_interior (21,766 static blocks) 0.0217 before / **0.0195** across / 0.0244 after; sea_horizon (22,400) 0.0000 / **0.0000** /
+0.0000 (bit-identical). `shot-reviewer`: no placeholder / missing lightmap / decal / sky change, across within the noise.
+
+**Perf** (savegame, `-Exe RisenTest.exe -Vsync off -Perf`, hold 40, machine idle: `sysprobe` 2 % CPU, batch lines 0 %; last 6
+windows):
+
+| run | engine+HAL ms | GPU ms |
+|---|---|---|
+| Wrapper | 3.29 | 1.46 |
+| Full, lean off (3 runs) | 5.77 / 5.74 / 5.69 | 1.43 - 1.47 |
+| Full, lean on (3 runs) | 5.75 / 5.74 / 5.76 | 1.43 - 1.46 |
+| Full with the O1 DLL (42e6a12), same session | 5.82 | 1.49 |
+| profiled Full / lean | 6.25 / 6.27; `eCFrustumDatabase::Execute` incl 3.94 / **3.78**; Engine.dll self 1.21 / 1.18 | |
+
+The machine runs ~0.3 ms slower than at O1 (the O1 DLL: 5.48 then, 5.82 now), so Full - Wrapper is ~+2.4 ms here. **Lean O2a saves
+nothing measurable unprofiled** (within the +-0.05 spread; profiled -0.16 ms in Execute): the mesh-like groups' slot code is cheap
+(Engine.dll self -0.03 ms for ~150 skipped slots per frame, their HAL calls -0.02 ms of "draw calls"), and our side effects cost a
+comparable amount. The engine's double work measured in opt-profile.md sits in the SpeedTree / vegetation / shadow-view slots
+(contextSlot<7> 0.75, <8> 0.54 ms) and the effect units: O2b / O2c / O3. `native.lean` therefore stays default off; Full turns it
+on once O2b gives a gain.
+
+**Pre-existing (lean off)**: the route's lean-off run (`r0_route`) showed 20 SpeedTree draws of 2.77 M differing in "instance c32+"
+(c40.x of bark draws, `ST_Bark_07 / 08`): a carry-over case of the O1 register file for trees (O2b's group), not caused by lean.
+
+### Left for O2b / O2c / O3
+
+* O2b: skinned actors (the palette stamp of `UpdateRenderMatrices`, the overlay requests), SpeedTrees (the queue sort, the stamp
+  reset, MaskReference 80, the tree billboards' BindLightmaps), vegetation (the buffer cursor written back), particles (master
+  instance, the no-live-particle simulation, inactivity timer, in-place depth sort, first-use creation), strips / streaks (buffer
+  creation), precipitation; the SpeedTree c40 carry-over above; then dropping the per-op restore (cache invalidation before engine code).
+* O2c: the shadow views (their z ops lean inside ExecuteShadowMap), the mask / PSSM (`UpdatePackedShadowMapVisual` -> return false).
+* O3: the effect units / post chain and the sprite batcher without the engine's ExecuteEffect / Flush; the focus indicators' draws.
