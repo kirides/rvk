@@ -215,9 +215,150 @@ StaticOps::Skip StaticOps::composeStrip(const Op& op) {
 
 // static buffers (CreateBuffers 0x5c2450), eCShaderLightStreaks (its own version class 0x9d96f8: a directional pass + one per point
 // light): no light streak op occurred at any sampled place (N5.6), so they are left to the engine (counted, not composed)
-StaticOps::Skip StaticOps::composeStreaks(const Op&) {
+// ---- light streaks: the RenderAlpha slot 0x5c1840 -> eCLightStreaks_PS::Render 0x5c4ae0 (N5.8) ----------------------------------
+// Render: nothing without the material (PS +0x70), the entity's illumination (entity +0xf8, the entity PS +0x10 unless PS +0x18 & 0x10)
+// or the static buffers (CreateBuffers 0x5c2450 builds them once, with random lengths / phases: drawn from the engine's buffers);
+// the shader must be an eCShaderLightStreaks (0x9acd68): world = entity +0x60 into its global pool c31..c33 (FUN_180238390, no
+// SetGlobalAlpha), GetPasses(shader, 0, illum +0x78, 0, false, 0) -> the version (0x9d96f8) GetPasses 0x6d4bf0: flags = EnableFading
+// (+0x2b0 == 1) << 3; a directional pass when the light data P = *L has P +0 != 0, then one point pass (type 3) per P +0x34 light and
+// per L +0xd light (indices restarting at 0); Execute 0x6d4aa0: VS element +0x1b0 + 16 (((f >> 3) & 3) + 2 (f & 7)), PS +0x230,
+// directional c34..c36 = P +4 (48 bytes), point c37..c40 = idx < P +0x34 ? P +0x38 + 64 idx : L +0x10 + 64 (idx - P +0x34), the
+// sky dome's state function 0x6d9740 (alpha 1), eCShaderBase::ExecuteShaderConstants; the visual PS +0x58 (static indexed strip).
+namespace {
+constexpr std::uint32_t kShaderStreaksVtable = 0x9acd68;   // ??_7eCShaderLightStreaks@@6B@
+constexpr std::uint32_t kVersionStreaksVtable = 0x9d96f8;  // eCShaderVersionLightStreaks_2_0
+constexpr std::uint32_t kStreaksGlobalVar = 0xc62980;      // eCShaderLightStreaks::ms_pGlobalShaderConstants (ctor 0x6d3420)
+}  // namespace
+
+StaticOps::Skip StaticOps::composeStreaks(const Op& op) {
+    U8* ps = ptr(op.raw.context, 0x18);
     ++fxWindow_.streakOps;
-    return Skip::Kind;
+    U8* material = ptr(ps, 0x70);
+    if (material == nullptr) return Skip::None;
+    if ((get<std::uint8_t>(ps, 0x18) & 0x10) != 0) return Skip::None;  // no entity: no illumination, nothing drawn
+    U8* entity = ptr(ps, 0x10);
+    U8* illumPs = ptr(entity, 0xf8);
+    if (illumPs == nullptr) return Skip::None;
+    U8* visual = ptr(ps, 0x58);
+    if (ptr(ps, 0x60) == nullptr || visual == nullptr) return Skip::NotCreated;  // CreateBuffers inside the slot (first frame)
+    U8* shader = ptr(material, 0x70);
+    if (shader == nullptr) return Skip::NotCreated;
+    if (get<const void*>(shader, 0) != engine_ + kShaderStreaksVtable) {
+        skipShader_ = get<const void*>(shader, 0);
+        return Skip::ShaderClass;
+    }
+    U8* admin = ptr(shader, 0x220);
+    if (admin == nullptr) return Skip::Unreadable;
+    if (!view_.valid && !composeView(admin)) return Skip::Unreadable;
+    if (admin != view_.admin) return Skip::Unreadable;
+    if (get<std::uint8_t>(shader, 0x2a8) == 1 || get<std::uint32_t>(view_.admin, 0x31c) != 0) return Skip::InvalidShader;
+    if (ptr(visual, 0x60) != nullptr) return Skip::VisualShader;
+    initMirror();
+    U8* global = ptr(engine_ + kStreaksGlobalVar, 0);
+    if (global == nullptr || get<std::int32_t>(global, 0x24) != 31 || get<std::int32_t>(global, 0x28) != 11) return Skip::Unreadable;
+    fxPoolFirst_ = 31;
+    fxPoolCount_ = 11;
+    fxPoolNativeLast_ = 40;
+    if (!rd(ptr(global, 0x38), 0, fxPool_, 11 * 16)) {
+        fxPoolCount_ = 0;
+        return Skip::Unreadable;
+    }
+    float world[16];
+    if (!rd(entity, 0x60, world, 64)) return Skip::Unreadable;
+    for (std::uint32_t k = 0; k < 3; ++k) {
+        fxPool_[k][0] = world[k];
+        fxPool_[k][1] = world[4 + k];
+        fxPool_[k][2] = world[8 + k];
+        fxPool_[k][3] = world[12 + k];
+    }
+    std::int32_t v = std::min(get<std::int32_t>(view_.admin, 0x170), get<std::int32_t>(shader, 0x68));
+    U8* version = ptr(shader, 0x258 + 8 * static_cast<std::size_t>(std::max(v, 0)));
+    while (version == nullptr && v > 0) version = ptr(shader, 0x258 + 8 * static_cast<std::size_t>(--v));
+    if (version == nullptr) {
+        if (streakLogged_ < 6) {
+            ++streakLogged_;
+            std::string slots;
+            for (std::size_t k = 0; k < 4; ++k) slots += std::format(" {}", static_cast<const void*>(ptr(shader, 0x258 + 8 * k)));
+            spdlog::info("native: light streaks: no version object, no pass (admin +0x170 {}, shader +0x68 {}, versions{}; the shader's state +0x2a8 {}, "
+                         "material state +0x38 {}) in frame {}", get<std::int32_t>(view_.admin, 0x170), get<std::int32_t>(shader, 0x68), slots,
+                         get<std::uint8_t>(shader, 0x2a8), get<std::int32_t>(material, 0x38), dev_.stats().frames);
+        }
+        // eCShaderBase::OnGetPasses: no version at min(admin +0x170, MaxShaderVersion +0x68) or below -> no pass, nothing drawn (the
+        // vanilla streak material has MaxShaderVersion 0 and only a version-2 object: the engine never draws it; README.md 16)
+        return Skip::None;
+    }
+    if (get<const void*>(version, 0) != engine_ + kVersionStreaksVtable) return Skip::Version;
+    Geom g;
+    if (!geometryOfVisual(visual, g)) return Skip::Primitive;
+    const auto* prim = hal::vulkan::HalPrimitive::fromApi(ptr(visual, 0x10));
+    if (prim == nullptr || !prim->drawDesc().indexed) return Skip::Primitive;
+    const auto& dd = prim->drawDesc();
+    g.minIndex = dd.minVertexIndex;
+    g.numVertices = dd.numVertices;
+    g.startIndex = dd.startIndex;
+    g.primCount = dd.primitiveCount;
+    g.primType = static_cast<std::uint32_t>(dd.type);
+    g.baseVertex = dd.baseVertexIndex;
+    // the passes
+    U8* illum = illumPs + 0x78;
+    U8* light = ptr(illum, 0);
+    const std::uint32_t fading = get<std::uint8_t>(shader, 0x2b0) == 1 ? 8u : 0u;
+    struct Pass {
+        std::uint32_t flags, index;
+    };
+    std::vector<Pass> passes;
+    if (light != nullptr && get<std::uint8_t>(light, 0) != 0) passes.push_back({fading, 0});
+    const std::uint32_t shared = light != nullptr ? get<std::uint8_t>(light, 0x34) : 0u, own = get<std::uint8_t>(illum, 0xd);
+    for (std::uint32_t i = 0; i < shared; ++i) passes.push_back({fading | 3u, i});
+    for (std::uint32_t i = 0; i < own; ++i) passes.push_back({fading | 3u, i});
+    if (light == nullptr && !passes.empty()) return Skip::Unreadable;
+    U8* psElem = ptr(version, 0x230);
+    for (const Pass& pass : passes) {
+        Skip skip = Skip::None;
+        applySwitch(shader, 0, skip);
+        if (skip != Skip::None) return skip;
+        const std::uint32_t vsIdx = ((pass.flags >> 3) & 3u) + 2u * (pass.flags & 7u);
+        U8* vsElem = ptr(version, 0x1b0 + 16 * vsIdx);
+        if (vsElem == nullptr || psElem == nullptr) {
+            if (streakLogged_ < 6) {
+                ++streakLogged_;
+                std::string slots;
+                for (std::size_t k = 0; k < 8; ++k) slots += std::format(" {}", static_cast<const void*>(ptr(version, 0x1b0 + 16 * k)));
+                spdlog::info("native: light streaks: pass flags {:#x} of {} (directional {}, shared {}, own {}): vs {} not compiled; vs slots{}, ps {} "
+                             "(frame {})", pass.flags, passes.size(), light != nullptr ? get<std::uint8_t>(light, 0) : 0, shared, own, vsIdx, slots,
+                             static_cast<const void*>(psElem), dev_.stats().frames);
+            }
+            return Skip::NotCompiled;
+        }
+        d3d9::Shader* vs = shaderOfElement(vsElem);
+        d3d9::Shader* pxs = shaderOfElement(psElem);
+        if (vs == nullptr || pxs == nullptr) return Skip::NotCompiled;
+        if ((pass.flags & 7u) == 0) {
+            if (!rd(light, 4, fxPool_[3], 48)) return Skip::Unreadable;
+        } else {
+            const bool sharedLight = pass.index < shared;
+            if (!rd(sharedLight ? light : illum, sharedLight ? 0x38 + 64 * pass.index : 0x10 + 64 * (pass.index - shared), fxPool_[6], 64)) {
+                return Skip::Unreadable;
+            }
+        }
+        sc::BlendInputs b;
+        b.mode = blendModeOf(shader);
+        b.maskRef = maskRefOf(shader);
+        b.hasOpacity = false;  // eCShaderLightStreaks::HasOpacity 0x6d41e0: false
+        b.refracted = false;
+        b.tradeAlphaAsSolid = get<std::uint8_t>(shader, 0x79) != 0;
+        const sc::RenderStates rs = sc::skyDomeStates(b, one_);  // GetGlobalAlpha 0x6d33d0: 1
+        if (rs.alphaTest == 2) mirror_.adminPs[5][3] = static_cast<float>(rs.alphaRef) * (1.0f / 256.0f);
+        sc::DrawDesc& d = drawFrom(g);
+        d.drawClass = sc::DrawClass::NonOp;
+        d.vs = vs;
+        d.ps = pxs;
+        d.states = sc::deviceStates(rs, g.visual, get<std::uint32_t>(view_.admin, 0x340));
+        constantsInto(d, shader, shader, false);
+        if (const Skip s2 = materialSamplers(d, shader, psElem); s2 != Skip::None) return s2;
+        if (const Skip s2 = adminSamplers(d, shader, pxs); s2 != Skip::None) return s2;
+    }
+    return Skip::None;
 }
 
 // ---- particles: the RenderAlpha slot 0x5d3360 -> eCParticle_PS::Render 0x5e0080 -----------------------------------------------
@@ -250,6 +391,7 @@ struct VecFns {
     float (*sinf)(float) = nullptr;                                             // SharedBase g_sinf (eCPrecipitation_PS::Update's jitter)
     float (*cosf)(float) = nullptr;                                             // SharedBase g_cosf
     float (*magnitude2)(const float* self) = nullptr;                           // ?GetMagnitude@bCVector2@@QEBAMXZ
+    void (*scale4)(float* self, float f) = nullptr;                             // ?Scale@bCVector4@@QEAAXM@Z (the lit emitters' sky SH)
     bool ok() const {
         return zero && up && addAssign && scaledV && scaledF && transformDirection && isEqual && cross && inverted && mulMatrix &&
                mulMatrix3 && normalize && normalized && translated && invTranslated && matInvertedRef && matInverted && rotation && clamp &&
@@ -588,18 +730,52 @@ StaticOps::Skip StaticOps::composeParticle(const Op& op) {
     U8* ps = ptr(op.raw.context, 0x18);
     ++fxWindow_.particleOps;
     if (get<const void*>(ps, 0) != engine_ + kParticleVtable) return Skip::ShaderClass;
-    // Render: an instanced emitter draws its master's vertices (eCParticleModule::GetMasterInstance): left to the engine
+    // N5.8 Render: an instanced emitter (PS +0x29d) draws its master's vertices (eCParticleModule::GetMasterInstance 0x5d1290: one hidden
+    // master PS per creator template, found here without creating one: the module (FUN_1801ac230's cache 0xc6e5d8, flag 0xc6e5d0 bit
+    // 0), key = the entity's GetCreator (vtable +0x170: eCDynamicEntity 0x21cd10 = the resolved proxy +0x1d0's entity, eCEntity
+    // 0x6a4080 = null), bucket ((u32) key >> 4) % [module +0x60] of [module +0x58], nodes {key +0, master +8, next +0x30}); RenderVertices
+    // with the master: nothing when the instance's byte +0x2b is 0; UpdateVertices(master) (once per tick), the instance's world
+    // (space 0: identity rotation, translation = -(instance entity +0x90); space 1: the master entity's +0x60 with the instance
+    // entity's +0x90 as translation), the master's render states, RenderPasses(master, the instance entity's illumination)
+    U8* instance = nullptr;
     if (get<std::uint8_t>(ps, 0x29d) != 0) {
         ++fxWindow_.instancedEmitters;
-        return Skip::Instanced;
+        if ((get<std::uint8_t>(ps, 0x18) & 0x10) != 0) return Skip::Instanced;
+        U8* instEntity = ptr(ps, 0x10);
+        if (instEntity == nullptr) return Skip::None;  // GetMasterInstance: no entity -> no master, Render returns
+        const void* getCreator = ptr(ptr(instEntity, 0), 0x170);
+        U8* key = nullptr;
+        if (getCreator == engine_ + 0x21cd10) {
+            U8* proxy = instEntity + 0x1d0;
+            if (ptr(ptr(proxy, 0), 8) != engine_ + 0x6b1550) return Skip::Instanced;  // not eCEntityProxy::ResolveEntity
+            U8* resolved = ptr(proxy, 8);
+            key = resolved != nullptr ? ptr(resolved, 0) : nullptr;
+        } else if (getCreator != engine_ + 0x6a4080) {
+            return Skip::Instanced;
+        }
+        if (key == nullptr) return Skip::None;  // no creator: no master, nothing drawn
+        if ((get<std::uint32_t>(engine_, 0xc6e5d0) & 1u) == 0) return Skip::Instanced;
+        U8* module = ptr(engine_, 0xc6e5d8);
+        const std::uint32_t buckets = get<std::uint32_t>(module, 0x60);
+        if (module == nullptr || buckets == 0) return Skip::Instanced;
+        const auto k32 = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(key));
+        U8* node = ptr(ptr(module, 0x58), 8 * static_cast<std::size_t>((k32 >> 4) % buckets));
+        for (int guard = 0; node != nullptr && ptr(node, 0) != key && guard < 4096; ++guard) node = ptr(node, 0x30);
+        U8* master = node != nullptr ? ptr(node, 8) : nullptr;
+        if (master == nullptr) return Skip::Instanced;  // created inside the slot (first frame)
+        if (get<const void*>(master, 0) != engine_ + kParticleVtable || get<std::uint8_t>(master, 0x29d) != 0) return Skip::Instanced;
+        if (get<std::uint8_t>(ps, 0x2b) == 0) return Skip::None;
+        instance = ps;
+        ps = master;
     }
-    // Render: no live particle -> the emitter is simulated inside the slot (vtable +0x248) before RenderVertices
+    // Render: no live particle -> the emitter is simulated inside the slot (vtable +0x248) before RenderVertices (not for instances)
     const std::int32_t live = get<std::int32_t>(ps, 0x390);
-    if (live <= 0) return Skip::Simulated;
-    const std::int32_t coords = get<std::int32_t>(ps, 0xb0);
+    if (live <= 0) return instance != nullptr ? Skip::Instanced : Skip::Simulated;
+    const std::int32_t coords = get<std::int32_t>(instance != nullptr ? instance : ps, 0xb0);
     if (coords != 0 && coords != 1) return Skip::Unreadable;  // RenderVertices: no world matrix
     if ((get<std::uint8_t>(ps, 0x18) & 0x10) != 0) return Skip::Unreadable;
     U8* entity = ptr(ps, 0x10);
+    U8* lightEntity = instance != nullptr ? ptr(instance, 0x10) : entity;
     U8* visual = ptr(ps, 0x420);
     U8* vdata = ptr(ps, 0x428);
     U8* material = ptr(ps, 0x450);
@@ -622,10 +798,14 @@ StaticOps::Skip StaticOps::composeParticle(const Op& op) {
     if (ptr(visual, 0x60) != nullptr) return Skip::VisualShader;
     const auto* prim = hal::vulkan::HalPrimitive::fromApi(ptr(visual, 0x10));
     if (prim == nullptr || !prim->drawDesc().indexed) return Skip::Primitive;
-    // RenderPasses: lighting (PS +0x2b0) passes the entity's illumination; its light constants (0x6d7020) are not composed
-    if (get<std::int32_t>(ps, 0x2b0) != 0) {
+    // RenderPasses 0x5d5570: lighting (PS +0x2b0 LightingStyle != 0) passes the entity's illumination (entity +0xf8 +0x78, null
+    // without one) to GetPasses; the version's key and light constants 0x6d7020 follow it (N5.8, below)
+    const bool lit = get<std::int32_t>(ps, 0x2b0) != 0;
+    U8* illumPs = lit ? ptr(lightEntity, 0xf8) : nullptr;
+    U8* illum = illumPs != nullptr ? illumPs + 0x78 : nullptr;
+    if (lit) {
         ++fxWindow_.lit;
-        return Skip::PassKind;
+        if (g_vec.scale4 == nullptr) return Skip::PassKind;
     }
     ++fxWindow_.orient[static_cast<std::size_t>(std::clamp(get<std::int32_t>(ps, 0x170), 0, 5))];
     ++fxWindow_.coords[static_cast<std::size_t>(coords)];
@@ -662,6 +842,19 @@ StaticOps::Skip StaticOps::composeParticle(const Op& op) {
     float world[16];
     std::memcpy(world, kIdentity, 64);
     if (coords == 1 && !rd(entity, 0x60, world, 64)) return Skip::Unreadable;
+    if (instance != nullptr) {
+        float p[3];
+        if (!rd(lightEntity, 0x90, p, 12)) return Skip::Unreadable;
+        if (coords == 0) {
+            world[12] = -p[0];
+            world[13] = -p[1];
+            world[14] = -p[2];
+        } else {
+            world[12] = p[0];
+            world[13] = p[1];
+            world[14] = p[2];
+        }
+    }
     const float fade = op.raw.fade;
     // the material's samplers get the particle image (eCParticleMaterialSimple / BlendSubdivisions::SetImage: +0x10 (+0x18) ->
     // eCColorSrcSampler::SetImageResource)
@@ -704,7 +897,28 @@ StaticOps::Skip StaticOps::composeParticle(const Op& op) {
     }
     fxPool_[3][3] = fade;
     // eCShaderBase::OnGetPasses: the version min(admin +0x170, +0x68), falling back to a lower existing one; its GetPasses 0x6d6d50:
-    // one pass, key = EnableFog (no illumination)
+    // one pass, key = EnableFog | with an illumination L whose light data P = *L exists: ambient 2, sun 4 (P +0 != 0), lights
+    // min(4, P +0x34 + L +0xd) << 4; Execute's light constants 0x6d7020 then write (into the particle global pool, absolute
+    // registers): c35..c41 = the 7 sky SH rows P +0xb8 each bCVector4::Scale'd by L +8, c42..c44 = P +4 (48 bytes) when the sun bit
+    // is the direction bits' only one, c45 + 4 i = light i (L +0x10 + 64 i for i < L +0xd, else P +0x38 + 64 (i - L +0xd))
+    std::uint32_t key = fogOverride_ ? 1u : 0u;
+    U8* lightData = illum != nullptr ? ptr(illum, 0) : nullptr;
+    if (lightData != nullptr) {
+        const std::uint32_t own = get<std::uint8_t>(illum, 0xd), shared = get<std::uint8_t>(lightData, 0x34);
+        const std::uint32_t lights = std::min(4u, shared + own);
+        key |= (get<std::uint8_t>(lightData, 0) != 0 ? 6u : 2u) | (lights & 7u) << 4;
+        const float intensity = get<float>(illum, 8);
+        for (std::uint32_t r = 0; r < 7; ++r) {
+            if (!rd(lightData, 0xb8 + 16 * r, fxPool_[4 + r], 16)) return Skip::Unreadable;
+            g_vec.scale4(fxPool_[4 + r], intensity);
+        }
+        if ((key & 0xcu) == 4u && !rd(lightData, 4, fxPool_[11], 48)) return Skip::Unreadable;
+        for (std::uint32_t i = 0; i < lights; ++i) {
+            const bool ownLight = i < own;
+            if (!rd(ownLight ? illum : lightData, ownLight ? 0x10 + 64 * i : 0x38 + 64 * (i - own), fxPool_[14 + 4 * i], 64)) return Skip::Unreadable;
+        }
+        fxPoolNativeLast_ = 60;
+    }
     std::int32_t v = std::min(get<std::int32_t>(view_.admin, 0x170), get<std::int32_t>(shader, 0x68));
     U8* version = ptr(shader, 0x258 + 8 * static_cast<std::size_t>(std::max(v, 0)));
     while (version == nullptr && v > 0) version = ptr(shader, 0x258 + 8 * static_cast<std::size_t>(--v));
@@ -728,7 +942,7 @@ StaticOps::Skip StaticOps::composeParticle(const Op& op) {
             g.primType = static_cast<std::uint32_t>(dd.type);
             g.baseVertex = dd.baseVertexIndex;
             const std::size_t before = drawCount_;
-            result = particlePassDraw(shader, version, fogOverride_ ? 1u : 0u, g, fade);
+            result = particlePassDraw(shader, version, key, g, fade);
             for (std::size_t i = before; i < drawCount_ && result == Skip::None; ++i) {
                 sc::DrawDesc& x = *draws_[i];
                 x.vertexStride = kParticleVertex;
@@ -742,9 +956,9 @@ StaticOps::Skip StaticOps::composeParticle(const Op& op) {
         tagOverride_ = true;
         tagOverrideValue_ = {};
         tagOverrideValue_.source = d3d9::draws::Source::Particle;
-        tagOverrideValue_.context = ps;
+        tagOverrideValue_.context = instance != nullptr ? instance : ps;
         tagOverrideValue_.op = dev_.drawTag().op;
-        tagOverrideValue_.entity = entity;
+        tagOverrideValue_.entity = lightEntity;
     }
     return result;
 }
@@ -906,6 +1120,7 @@ bool StaticOps::verifyFx() {
     bindFn(sb, g_vec.zero, "?GetZero@bCVector@@SAAEBV1@XZ");
     bindFn(sb, g_vec.up, "?GetUp@bCVector@@SAAEBV1@XZ");
     bindFn(sb, g_vec.addAssign, "??YbCVector@@QEAAAEAV0@AEBV0@@Z");
+    bindFn(sb, g_vec.scale4, "?Scale@bCVector4@@QEAAXM@Z");
     bindFn(sb, g_vec.scaledV, "?GetScaled@bCVector@@QEBA?AV1@AEBV1@@Z");
     bindFn(sb, g_vec.scaledF, "?GetScaled@bCVector@@QEBA?AV1@M@Z");
     bindFn(sb, g_vec.transformDirection, "?TransformDirection@bCVector@@QEAAXAEBVbCMatrix@@@Z");

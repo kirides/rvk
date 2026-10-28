@@ -218,6 +218,11 @@ private:
     bool geometryBytesEqual(const sc::DrawDesc& c, const sc::DrawDesc& captured, std::string& why);
     // the opaque billboards' queue (static_ops_nonop.cpp)
     Skip composeBillboards(const std::uint8_t* admin);
+    // N5.8: a billboard set's alpha op (RenderAlpha 0x4f4c70 -> eCBillboardAdmin::RenderBillboard(..., alpha = true, fade) 0x4f0c00)
+    Skip composeBillboardAlpha(const Op& op);
+    const std::uint8_t* billboardAdmin_ = nullptr;  // the eCBillboardAdmin of the last RenderBillboards (RenderAlpha's admin)
+    std::uint64_t billboardAlphaOps_ = 0, billboardAlphaDraws_ = 0;
+    std::uint32_t streakLogged_ = 0;
     bool verifyBillboards();
     // the skinned actors' ops (static_ops_actors.cpp)
     bool verifyActors();

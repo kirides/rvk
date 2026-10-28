@@ -1,0 +1,6 @@
+id          = "rvk_rare"
+name        = "Renderer rare render paths"
+version     = "1.0.0"
+author      = "risen-enhanced-graphics"
+description = "Spawns the templates that carry the render paths the vanilla world never shows (light streaks, a static light with CastDynamicShadows, lit and instanced particle emitters, blended billboards, a moving strip) next to the hero and hits the hero for the OverlayHit image effect (scenario rvk_rare, docs/research/engine-frame/README.md 16)."
+main        = "main.lua"

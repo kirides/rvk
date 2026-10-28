@@ -382,6 +382,7 @@ void StaticOps::decalsBegin(void* admin, void* db) {
 }
 
 void StaticOps::billboardsBegin(void* admin) {
+    billboardAdmin_ = static_cast<U8*>(admin);
     if (!nonOpGroupBegin(Group::Billboards, admin)) return;
     if (billboardsVerified_ == 0) billboardsVerified_ = verifyBillboards() ? 1 : -1;
     if (billboardsVerified_ < 0) {
@@ -553,6 +554,92 @@ StaticOps::Skip StaticOps::composeBillboards(const std::uint8_t* admin) {
     }
     blendOverrideShader_ = nullptr;
     blendOverride_ = -1;
+    return Skip::None;
+}
+
+// N5.8: RenderAlpha 0x4f4c70 -> RenderBillboard(admin, bb = PS +0xc8, light set = [[entity +0xf8] +0x180] (entity = PS +0x10 unless
+// PS +0x18 & 0x10), blend PS +0x88, switch PS +0x90, alpha true, fade = op +0xc) 0x4f0c00: no queue / cycle: nothing for 0 quads; both
+// buffers DISCARD-locked at 0 for exactly this billboard (its prebuilt vertices bb +0x18, indices 4q + (0, 1, 3, 1, 2, 3)); the
+// record: start index 0, min vertex 0, 4 q vertices, base 0, 2 q primitives; the material (touched: not cached -> nothing) and its
+// shader, or (no material / a material without a shader) the default shader with BlendMode = blend and the image bb +8 when there
+// is one; SetGlobalAlpha(fade) (the queue path: 1), SetWorldMatrix(identity), the stack illumination, GetPasses(shader, switch, ...)
+StaticOps::Skip StaticOps::composeBillboardAlpha(const Op& op) {
+    U8* admin = billboardAdmin_;
+    U8* ps = ptr(op.raw.context, 0x18);
+    if (admin == nullptr || ps == nullptr) return Skip::Unreadable;
+    U8* bb = ps + 0xc8;
+    const std::int32_t quads = get<std::int32_t>(bb, 0x20);
+    ++billboardAlphaOps_;
+    if (quads == 0) return Skip::None;
+    if (quads < 0 || static_cast<std::uint32_t>(quads) > kBillboardMaxQuads) return Skip::Unreadable;
+    U8* defaultMaterial = ptr(admin, 0x30);
+    U8* sampler = ptr(admin, 0x38);
+    U8* visual = ptr(admin, 0x40);
+    U8* defaultShader = ptr(defaultMaterial, 0x70);
+    if (visual == nullptr || ptr(admin, 0x48) == nullptr || ptr(admin, 0x50) == nullptr || defaultShader == nullptr || sampler == nullptr) {
+        return Skip::NotCreated;
+    }
+    U8* material = ptr(bb, 0);
+    U8* shader = nullptr;
+    if (material != nullptr) {
+        if (get<std::int32_t>(material, 0x38) != 3) return Skip::NotCreated;  // RequestData(1) + not cached: no draw (the engine decides)
+        shader = ptr(material, 0x70);
+    }
+    blendOverrideShader_ = nullptr;
+    blendOverride_ = -1;
+    const bool useDefault = shader == nullptr;
+    if (useDefault) shader = defaultShader;
+    if (!view_.valid) {
+        U8* a = ptr(shader, 0x220);
+        if (a == nullptr || !composeView(a)) return Skip::Unreadable;
+    }
+    if (ptr(visual, 0x60) != nullptr) return Skip::VisualShader;
+    const auto* prim = hal::vulkan::HalPrimitive::fromApi(ptr(visual, 0x10));
+    if (prim == nullptr || !prim->drawDesc().indexed) return Skip::Primitive;
+    initMirror();  // before the default shader's sampler slot below (the mirror of its pools)
+    if (useDefault) {
+        blendOverrideShader_ = defaultShader;
+        blendOverride_ = get<std::int32_t>(ps, 0x88);
+        if (U8* image = ptr(bb, 8); image != nullptr) {
+            if (ptr(sampler, 0x90) != defaultShader + 0xf8) return Skip::Unreadable;
+            const std::int32_t slot = get<std::int32_t>(sampler, 0x98, -1);
+            if (slot < 0 || slot >= 16) return Skip::Unreadable;
+            poolsOf(defaultShader)->slotImage[static_cast<std::size_t>(slot)] = image;
+        }
+    }
+    Geom g;
+    if (!geometryOfVisual(visual, g)) return Skip::Primitive;
+    if (g.streams[0].buffer == nullptr || g.streams[0].stride != kBillboardStride) return Skip::Primitive;
+    const auto n = static_cast<std::uint32_t>(quads);
+    std::vector<std::uint8_t> vb(static_cast<std::size_t>(n) * 4 * kBillboardStride);
+    if (!safeRead(ptr(bb, 0x18), vb.data(), vb.size())) return Skip::Unreadable;
+    static constexpr float kIdentityM[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    writeAlpha(0, op.raw.fade);
+    writeWorld(0, kIdentityM);
+    alignas(16) std::uint8_t illum[0x120]{};
+    U8* entity = (get<std::uint8_t>(ps, 0x18) & 0x10) != 0 ? nullptr : ptr(ps, 0x10);
+    U8* illumPs = ptr(entity, 0xf8);
+    U8* lightSet = illumPs != nullptr ? ptr(illumPs, 0x180) : nullptr;
+    U8* list = lightSet != nullptr ? lightSet + 0x10 : nullptr;
+    const float one = 1.0f;
+    std::memcpy(illum, &list, 8);
+    std::memcpy(illum + 8, &one, 4);
+    g.minIndex = 0;
+    g.numVertices = n * 4;
+    g.startIndex = 0;
+    g.primCount = n * 2;
+    const std::size_t before = drawCount_;
+    if (const Skip k = nonOpPasses(shader, illum, 0, g, get<std::int32_t>(ps, 0x90)); k != Skip::None) return k;
+    std::vector<std::uint8_t> idx;
+    sc::billboardQuadIndices(0, n, idx);
+    for (std::size_t d = before; d < drawCount_; ++d) {
+        sc::DrawDesc& x = *draws_[d];
+        x.primType = static_cast<std::uint32_t>(prim->drawDesc().type);
+        x.vertexStride = kBillboardStride;
+        x.vertexBytes = vb;
+        x.indexBytes = idx;
+        ++billboardAlphaDraws_;
+    }
     return Skip::None;
 }
 

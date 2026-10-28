@@ -148,7 +148,7 @@ const char* StaticOps::name(Group g) {
         case Group::Mesh: return "scene ops [alpha / refracted meshes]";
         case Group::Decals: return "scene ops [decals]";
         case Group::Sky: return "scene ops [sky dome]";
-        case Group::Billboards: return "scene ops [opaque billboards]";
+        case Group::Billboards: return "scene ops [billboards]";
         case Group::SkyCube: return "scene ops [sky cube faces]";
         case Group::Actors: return "scene ops [skinned actors]";
         case Group::Trees: return "scene ops [SpeedTrees + tree billboards]";
@@ -179,7 +179,7 @@ void StaticOps::setMode(Group group, bool takeOver, bool compare) {
     static constexpr const char* kWhat[kGroups] = {"the main view's static mesh z / solid ops", "the main view's alpha / refracted mesh ops",
                                                    "the main view's decals (eCDecalAdmin::RenderDecals)",
                                                    "the main view's sky dome op (stars, sun, moon, dome)",
-                                                   "the main view's opaque billboards (eCBillboardAdmin::RenderBillboards)",
+                                                   "the main view's billboards (the opaque queue eCBillboardAdmin::RenderBillboards, the alpha ops RenderBillboard)",
                                                    "the sky environment cube's faces (eCSkydome_PS::Render, cube camera)",
                                                    "the main view's skinned actor ops (eCRenderContextAnimation2: z / solid / alpha / refracted)",
                                                    "the main view's SpeedTree ops (branches, fronds, leaves: batches, LODs) and tree billboard ops",
@@ -1155,6 +1155,12 @@ StaticOps::Skip StaticOps::composeOp(const Op& op) {
     if (op.kind == OpKind::SpeedTree) return composeTree(op);
     if (op.kind == OpKind::SpeedTreeBB) return composeTreeBillboard(op);
     if (op.kind == OpKind::Vegetation) return composeVegetation(op);
+    if (op.kind == OpKind::Billboard && op.list == List::Alpha) {
+        const Skip s = composeBillboardAlpha(op);
+        blendOverrideShader_ = nullptr;
+        blendOverride_ = -1;
+        return s;
+    }
     if (op.kind != OpKind::Mesh || op.list == List::Debug || op.list == List::Sky || op.list == List::Late) return Skip::Kind;
     if (!view_.valid) {
         // the admin from the op's shader (eCShaderBase +0x220): any material shader of the view
@@ -1200,7 +1206,17 @@ void StaticOps::opEnter(const Op& op) {
         leftWhy_ = {};
     } else {
         if (op_ == &op) leftCode_ = kLeftCompareOnly;
-        leftWhy_ = leftName(leftGroup_, leftCode_);
+        if (leftCode_ == kLeftNotCovered) {
+            // the op kind / list no group composes: named by both
+            const int key = 1000000 + static_cast<int>(op.kind) * 100 + static_cast<int>(op.list);
+            auto it = leftNames_.find(key);
+            if (it == leftNames_.end()) {
+                it = leftNames_.emplace(key, std::format("no group composes {} ops of the {} list", native::name(op.kind), native::name(op.list))).first;
+            }
+            leftWhy_ = it->second;
+        } else {
+            leftWhy_ = leftName(leftGroup_, leftCode_);
+        }
     }
 }
 
@@ -1224,8 +1240,15 @@ void StaticOps::opEnterImpl(const Op& op) {
     Group group = Group::Count;
     if (viewKind_ != ViewKind::Main) {
         // N5.5: a shadow map's z ops, whatever their kind (the main view's groups never act in a shadow view)
-        if (op.list != List::ZPass || !groups_[static_cast<std::size_t>(Group::ShadowViews)].active()) return;
-        if (op.kind != OpKind::Mesh && op.kind != OpKind::Animation && !treeKind) return;
+        if (op.list != List::ZPass || !groups_[static_cast<std::size_t>(Group::ShadowViews)].active()) {
+            leftGroup_ = Group::ShadowViews;
+            leftCode_ = kLeftGroupOff;
+            return;
+        }
+        if (op.kind != OpKind::Mesh && op.kind != OpKind::Animation && !treeKind) {
+            leftCode_ = kLeftNotCovered;
+            return;
+        }
         if (op.kind == OpKind::Animation) {
             if (actorsVerified_ == 0) actorsVerified_ = verifyActors() ? 1 : -1;
             if (actorsVerified_ < 0) return;
@@ -1296,7 +1319,15 @@ void StaticOps::opEnterImpl(const Op& op) {
             if (fxVerified_ == 0) fxVerified_ = verifyFx() ? 1 : -1;
             if (fxVerified_ < 0) return;
         }
+    } else if (op.kind == OpKind::Billboard && op.list == List::Alpha) {
+        // N5.8: a blended / fading billboard set's alpha op (RenderBillboard with alpha = true): beside the opaque queue (group 16)
+        group = Group::Billboards;
+        if (groups_[static_cast<std::size_t>(group)].active()) {
+            if (billboardsVerified_ == 0) billboardsVerified_ = verifyBillboards() ? 1 : -1;
+            if (billboardsVerified_ < 0) return;
+        }
     } else if (op.kind != OpKind::Mesh && op.kind != OpKind::Animation && !treeKind) {
+        leftCode_ = kLeftNotCovered;  // e.g. blended billboard ops of the alpha list, the debug list
         return;
     } else if (treeKind) {
         // N5.4: the SpeedTree / tree billboard / vegetation contexts' z (RenderZPass) and solid (Render) ops
