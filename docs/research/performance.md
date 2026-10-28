@@ -443,3 +443,13 @@ Scene and recipe as in section 14 (savegame, lod 2x, vsync off, `-PlayerDefaults
 | Device-generated commands for the opaque passes | no gain | removed (12) |
 | Record threads off vs on | on wins 5-6 fps at 2x | kept on |
 | GLSL material shaders (`debug.ubershader`) | equal image and GPU time, +0.05-0.1 ms CPU | kept as a base for visual improvements, default off |
+
+## 16. Full render mode (2026-10-28)
+
+`renderer.mode = full` (the native frame composes ~99.98 % of the draws from engine data while the engine's render code still runs,
+engine-frame/README.md 17) costs more CPU than Wrapper; GPU time is the same. Where it goes, measured with `-CpuProfile` and one
+group per run: engine-frame/opt-profile.md; the plan (O1 our own costs, O2 the lean executor without the engine's render code, O3
+effects / GUI) and each stage's result: engine-frame/opt-plan.md. After O1 (2026-10-28) at Risen_Save_0009 (uncapped, unprofiled):
+Wrapper 3.33 ms, Full 5.48 ms (was 8.53). Switches for A/B: `native.mirror` (0 our register file, 1 / 2 the engine's pools re-read per
+view / per op), `native.coverage` (the per-draw coverage counter in plain Full runs). Recipe: `out/o1/batch.ps1` (wrapper / full,
+with and without `-CpuProfile`), `out/o1/table.py` (`RVK_DLL` = the DLL of the profiled run for symbols).
