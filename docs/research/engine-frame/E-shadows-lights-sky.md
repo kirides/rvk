@@ -70,7 +70,7 @@ eCApplication::DoRender 0x4c0d40
 
 Inputs: main camera `C = ms_pApplication+0x38` (else +0xc8), view `C+0x10`, projection `C+0x50`, position `C+0x90`, far `C+0xc0`.
 * `MaxDistance +0x1c` < 1 -> set to camera far. Splits as shadows.md 3.1 (`start_i = ((Max-1) i/N + 1 - Max^(i/N)) * factor + Max^(i/N)`,
-  `FUN_1804ac030` = powf); split element i (0x168 bytes, an embedded eCShadowMapDirectionalLight2, vtable 0x9768d0) `+0x160` = start.
+  `FUN_1804ac030` = powf); split element i (0x168 bytes, an embedded eCShadowMapDirectionalLight2**Ex**, vtable 0x9a29e0: checked in game, README.md 12; 0x9768d0 is its base class) `+0x160` = start.
 * Per split: slice frustum = NDC unit box `[-1,1]^2 x [0,1]` inverse-transformed by the projection, near/far replaced by
   start_i / start_{i+1} (Max for the last), 8 corners merged into a `bCSphere` (incremental Merge, not minimal), centre to world
   (inverse view) then to light view (inverse of LookAt(dir)); light box = centre +- radius, **box.min.z = -100000** (an absolute

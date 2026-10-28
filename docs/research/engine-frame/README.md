@@ -78,6 +78,7 @@ SpeedTreeBillboard 128, Vegetation 105, InstancedMesh 97, Skinned 96.
 | alpha test of masked materials | D3D alpha test | never the hardware test: the z pass clips (ref / 256), solid draws at depth EQUAL [C, run] |
 | static mesh cull | per material | always CW; DoubleSided only flips the normal in the PS [C] |
 | point-light shadows | cube maps | one packed atlas (`eCPackedShadowMap`); the cube classes are unused [C] |
+| cascade split class (E 2.2) | `eCShadowMapDirectionalLight2`, vtable 0x9768d0 | `eCShadowMapDirectionalLight2Ex`, vtable 0x9a29e0 [checked, section 12] |
 | N3.3 (native-renderer.md 14) | image equals the engine's | not at `pub_interior` / `monastery_hall` (2026-10-27, water-compare: luma +19.9 / +10.2, holes in the pub): native-renderer.md 14 |
 
 ## 3. What a faithful copy needs (summary of the slices' section 5 / 6)
@@ -106,7 +107,7 @@ Each stage behind a `native.*` setting (default off), A/B against the engine pat
 | N5.2 alpha / refracted / fading statics, decals, billboards, sky dome (+ sky cube faces) | the rest of the main view's mesh-like ops | | as above + water spots (done: sections 8, 9) |
 | N5.3 skinned actors | palette + morphs from the actor (D 1), body parts | | hero_idle / pub_idle (done: section 10) |
 | N5.4 SpeedTree, billboards, vegetation | global wind, batches, the 1000-instance grass ring | | jungle / forest spots (done: section 11) |
-| N5.5 shadows | terrain VSM, cascades (engine fit E 2.2), point atlas, `post_SSM` mask | engine cascades + mask | shadow-compare |
+| N5.5 shadows | the shadow views' z ops: cascades, terrain VSM, point-atlas cells (done: section 12); the `post_SSM` mask moved to a later stage | the engine's shadow-view draws | compare + same-frame switch (done) |
 | N5.6 particles, strips, streaks, precipitation | CPU vertex data from the engine's buffers | | rain / fire spots |
 | N5.7 post + GUI | the 13 effect graphs in GLSL (DoF default), sprite batcher | effect runtime path | refcompare all spots |
 | then | own modes, one at a time: mirror-driven lists (the current N3.3 code), GPU culling, merged indirect draws, the ubershader, bindless materials, RT consumers from the native frame | | A/B against the copy |
@@ -864,3 +865,118 @@ the admin's Process.
 **Not yet / open**: the software instancing path (composed, never met); shadow-map tree ops (main view only here); the 0-draw Vegetation ops
 not reproduced (cause inferred); a billboard-heavy view for the billboard fades by eye; as before the engine's code still runs for every
 taken-over op (its CPU cost is the engine's plus ours).
+
+## 12. N5.5 result: the shadow views (2026-10-28)
+
+Group **512** of `native.scene_ops_groups` (behind `native.scene_ops` / `native.scene_ops_compare` as in sections 8 - 11; default mask
+now 1023): every op of every shadow map's z list. Code: `native/frame_tap.cpp` (`shadowExecuteBegin`, `shadowKind`, `treeState`'s
+shadow rules), `native/static_ops*.cpp` (the view kind, `ShadowStats`), `engine/scene_hooks.cpp` (the tap's calls in the
+ExecuteShadowMap detour), `engine/shadow_maps.*` (`cascadeObject()`). The **post_SSM shadow mask** (UpdateShadowMask, 9 draws per main
+view) is **not part of N5.5**: it is a later stage (no group bit). All [C] unless marked; "checked" = held in the runs below.
+
+**The tap in the shadow views [C, checked].** `eCFrustumDatabase::ExecuteShadowMap` 0x66f630 (disassembled): `ExecuteGfxCamera(db
++0x14c0)`, BeginScene, `qsort(+0x1520 data, +0x1528 count, 0x18, 0x66e670)` at +0x72 (`mov rcx, [rbx + 0x1520]; lea r9, [rip +
+cmp]; mov rdx, rax; mov r8d, 0x18; call 0x4a4aa0`: the main z pass's qsort and comparator, checked before use), `BeginZPass(map,
+true, false)`, every op's slot 3 (RenderZPass) with `&data[i]`, EndZPass, EndScene. No fog, no other list (a shadow database's caps
+say "no z pre-pass", its z list runs anyway). The tap snapshots the z list at the detour's entry, sorts the copy with the engine's
+qsort and attributes the view's draws (view Shadow, pass ShadowDepth) with the same order / byte / attribution checks as the main
+view; rvk.log `native: frame tap [cascade|terrain map|point-light atlas|other shadow map]: ...` per kind, `views by split index`.
+Views are classified by the `eCShadowMapBase`'s vtable:
+
+| view kind | class (vtable RVA) | when | ops seen |
+|---|---|---|---|
+| cascade | `eCShadowMapDirectionalLight2Ex` **0x9a29e0** (an element of the `eCCascadeShadowMap` split array +0x30, 0x168 bytes each: its index = the cascade) | 3 per frame (every frame with `debug.shadow_stride=1`, else every 2nd while still) | Mesh, Animation, SpeedTree |
+| terrain map | `eCShadowMapDirectionalLight2VS` 0x9a2848 (G32R32F, special pass 4) | only when re-aimed (teleports, the sun's 0.5 deg steps) | Mesh |
+| point-light atlas | `eCPackedShadowMap` 0x976738 (one ExecuteShadowMap per cell, the atlas object itself as the map) | never met | - |
+
+**Correction to E 2.2**: the cascade splits are `eCShadowMapDirectionalLight2Ex` (0x9a29e0), not `eCShadowMapDirectionalLight2`
+(0x9768d0, its base class) [checked: every cascade view's map has vtable 0x9a29e0]. No tree billboard or vegetation op occurred in
+any shadow view (their contexts request no shadow-map ops, D 3 / 4 [C]); no other context class appeared.
+
+**Composition differences of a shadow view [C, checked]** (everything else is the main view's z rules of sections 7, 10, 11, unchanged):
+* BeginZPass 0x6b9720 with the map: z colour writes = the map's eCDepthMap format (+8) is not a depth format (3..6 = D16 / D24S8 /
+  DF16 / DF24): off for the DF24 cascades, on for the G32R32F terrain map; the admin's special-pass type +0x314 = the map's vtable
+  +0xf8 (cascades 3, terrain map 4) picks the shaders as before.
+* No `eCGfxFog::Execute`: PS c3 / c4 and VS c30 as the admin's pools hold them. The camera c0..c11 and PS c0 / c1 come from the shadow
+  camera (db +0x14c0 = the shadow map's own eCCameraBase, its eCGfxCamera +0x1738) and the viewport ExecuteGfxCamera set; c11.w and
+  the obstacle PS c5.xy stay the application camera's (compared equal).
+* SpeedTree shadow-map ops (desc bit `0x10 << 16`, passed by RenderZPass 0x6ee3f0 to the z passes): branches as in the z pre-pass;
+  **fronds only when the leaf cards' vertex count (rb +0x3c) is <= the fronds' (rb +0x3a)** (RenderFrondsZPass 0x6f0cc0: else the op
+  draws nothing, not even RequestData); **leaves at the one LOD `min(tree +0x58 + 1, LODs - 1)` with global alpha 1** (RenderLeafsZPass
+  0x6f0860; the main z pass's two blended LODs and `80 / alpha` do not apply). The tap's draw condition (`treeState`) follows the same
+  rules, so every 0-draw tree op of the shadow views is "nothing to draw" (checked).
+* Skinned actors: unchanged (RenderZPass -> `ExecuteSpecialPass(false)`; the palette is usually composed here, since the cascades
+  render before the main view and `UpdateRenderMatrices` stamps it later in the same frame, section 10).
+
+**Verification** (compare = every field class of sections 7 - 11 incl. bool / int registers; draws equal / compared; skips =
+"permutation not compiled" at the world's first frame, which the engine compiles at that draw):
+
+| run | cascade draws Mesh / Animation / SpeedTree (views) | terrain map draws (views) | equal / compared | skips |
+|---|---|---|---|---|
+| compare, shadow_inland_a, jungle, pub_interior, harbour_night, `debug.shadow_stride=1` | 546,701 / 182,632 / 483,565 (14,418) | 1,732 (8) | 1,214,630 / 1,214,630 | 193 |
+| compare, savegame Risen_Save_0009, `shadows.enabled=true`, `shadows.map_size=4096`, `shadows.range=100`, stride 1 | 323,312 / 118,080 / 383,596 (10,146: split 0 / 1 / 2 = 400 each per window) | 950 (3) | 825,938 / 825,938 | 146 |
+| compare, shadow_inland_b / _high / _far, hero_idle (clock running: the sun moves, the terrain map re-aims), actors shown, `shadows.rt=near` | 184,944 / 76,718 / 229,213 (8,805) | 912 (5) | 491,787 / 491,787 | 125 |
+| take-over + compare, shadow_inland_a, jungle, hero_idle, harbour_night, actors shown, stride 1, **validation on** (0 messages) | 565,138 / 212,265 / 470,279 (16,749) | 1,927 (9) | 1,249,609 / 1,249,609; own draws 1,249,609 equal to their composition | 191 |
+| take-over + compare, savegame switched on at frame 2000 / 2400 (engine mask; enhanced mask + `shadows.rt=near` + `debug.rt_skin_verify`) | | | 224,208 + 380,343 equal (165,480 + 203,569 drawn by us) | 125 + 146 |
+| take-over + compare, enhanced mask + `shadows.debug` terrain / cascade term, shadow_inland_a / _b (2 runs) | 180,315 / 67,778 / 216,653 | 712 | all equal | 125 |
+| take-over + compare, shadow_inland_a + jungle, stride 1, **sync validation** (`-SyncValidation`) | 369,186 / 89,580 / 377,739 (8,739) with `shadows.rt=near`; 741,257 draws without | 1,141 (5) | 837,646 + 741,257 equal | 154 + 143 |
+
+Every tap window of every view kind was clean in every run (0 out of order, 0 byte differences, 0 unattributed draws, every 0-draw op
+explained by its read draw condition, every multi-draw op a whole-mesh z op or a tree batch).
+
+**The point-light atlas never rendered** (pub_interior's candles and torches, harbour_night, the savegame, the inland spots). Why
+[C, from the decompiles frameA_dump4 / rvk_shadow_dump2]: `eCPackedShadowMap` (illum +0x380) is created unconditionally
+(ApplyConfiguration 0x577a50: 1024², the directional format; no config key, no Shadow Quality gate), but a cell is only requested by
+`eCRenderContextPointLight::RequestPrePasses` 0x59e8c0 for an **`eCStaticPointLight_PS` with `CastDynamicShadows` (+0x68) set** (level
+`int((d - R) / R) + 1`; its AddShadowCells 0x59c800 needs level < 4 and baked per-face bytes +0xf8 + 0x44 i != 0xff) or an
+**`eCPointLight_PS` (dynamic) with `CastShadows` (+0xc0) set** (level + 2 < 6; AddShadowCells 0x598df0: 6 cube faces, near 10, far R),
+and only when a face survives `CullShadowCell` and finds a free quadtree cell; without a cell no pre-pass op exists and the atlas is
+never drawn. The game's lights at the sampled places have neither flag [I: inferred from the atlas never rendering; the light
+entities' flags were not dumped]. When it does render, each cell is one ExecuteShadowMap with the eCPackedShadowMap as the map [C],
+which the tap classifies as "point-light atlas" and group 512 composes (special pass type 2; not verified in game).
+
+**Images.** `water-compare.ps1` (water off, engine mask), engine vs take-over at shadow_inland_a / shadow_inland_b / shadow_inland_high /
+jungle (mean |d| 8-bit / share of pixels > 32): 13.53 / 18.8 %, 2.00 / 0.69 %, 1.73 / 1.14 %, 1.81 / 0.81 %; engine vs engine 6.38 /
+4.3 %, 1.92 / 0.60 %, 1.16 / 0.58 %, 1.02 / 0.09 % (`out\water\20261028-022314`, `022631`). `shot-reviewer` (out/n55/review): no acne,
+peter-panning, cascade seam, missing caster or shadow-shape difference at shadow_inland_b / _high / jungle; at shadow_inland_a the
+foreground river bed (x 700-1600, y 600-790, under the water surface) is brighter in the take-over picture. Six separate runs of that
+spot (3 engine, 3 take-over) put the bed's mean luma at 43.8 / 47.5 / 54.4 (engine) and 87.0 / 65.2 / 80.3 (take-over), pairwise mean
+|d| 6.4 - 13.5 in either mix: a strongly history-dependent area (the canopy's swaying leaf shadows over the water; the frozen wind phase
+is the sum of each run's clamped frame steps, section 9) [I]. **The same-frame switch at the frozen spot settles it**: rvkcompare
+shadow_inland_a held 3,000 frames, take-over switched on at frame 4660, pictures 4600 / 4620 / 4640 / 4680 / 4700 / 4720: mean |d|
+**0.000 across the switch** on the whole image (22,400 of 22,400 8x8 blocks static; 0.003 before, 0.000 after; bed luma 69.1 before
+and after). The take-over draws the identical image; the separate-run spread is the runs' history, not the shadow views. Savegame
+switched at frame 2000 (engine mask, `-MaxFps 60`): on the 3,458 8x8 blocks static in all four 20-frame same-mode pairs the 40-frame
+pairs give 0.071 before, **0.062 across the switch**, 0.037 after, 0 blocks above 1.0.
+
+**Consumers** (savegame, enhanced mask + `shadows.rt=near` + `debug.rt_skin_verify`, take-over switched on at frame 2400): `rt: skin
+verify` max error 0.0070 - 0.0073 units before and after (395 - 415 k vertices per second either way); `rt: scene: characters` 19 + 37
+animated SpeedTrees in the TLAS, refits from this frame's capture 2,850 - 2,869 per window before and after, characters from this
+frame's pose 2,850 - 2,869 (compute-skinned 2,808 - 2,848); `enh: shadows.rt` ~300 traced frames per 5 s throughout. The overrides
+(`shadows.map_size=4096`, `shadows.range=100`: 3 maps of 4096², splits 1347 / 2945 / 10000) and `debug.shadow_stride` 1 / 2 act before
+the views exist (the RenderShadowMaps pre-hook): every view composed equal with them.
+
+**Validation**: 0 messages in the validation run; the sync-validation take-over run without RT shadows: 0 messages. With
+`shadows.enabled=true` + `shadows.rt=near` the sync-validation run lost the device after ~1 min (`VK_ERROR_DEVICE_LOST` in
+vkQueueSubmit2, then the follow-up VUIDs), **and so did the same run without any native setting** (out/n55/sync_base_rvk.log): a
+pre-existing interaction of the synchronization validation layer with the RT shadows, not of N5.5 (no SYNC- hazard was reported before
+the loss in either run).
+
+**Cost** (savegame, `-Exe RisenTest.exe -Vsync off -Perf`, `rvk_perfsave` hold 40, scene ops taken over in both runs, groups 511 vs
+1023, the last four 5-s `perf:` windows; the machine idle before the runs (`sysprobe`: 0.7 % CPU, no other game / ffmpeg); out/n55/
+perf_off / perf_on_rvk.log): GPU unchanged (1.49 - 1.50 ms); CPU engine + HAL per frame 6.16 - 6.23 ms (p50 frame 6.49 - 6.55 ms) ->
+6.65 - 6.68 ms (p50 6.89 - 7.39 ms): **+0.45 ms** for ~70,000 shadow-view ops per 5 s (the cascades every 2nd frame while the camera
+is still, `debug.shadow_stride` 2). As before the engine's code still runs for every taken-over op (only its GPU work is ours).
+
+Engine rules newly learned [C]: ExecuteShadowMap sorts and runs the z list exactly like the main z pass (same qsort, comparator,
+RenderZPass slot), with no fog and BeginZPass's colour writes decided by the map's format; the cascade splits are
+eCShadowMapDirectionalLight2Ex; SpeedTree fronds cast no shadow when the tree's leaf cards have more vertices than its fronds, and leaves
+cast from one leaf LOD coarser than the visible one at alpha 1; tree billboards and vegetation cast no shadow-map ops; the point-light
+atlas has no quality gate but needs lights with CastDynamicShadows / CastShadows, which the sampled places do not have.
+
+**Not yet / open**: the point-light atlas (composed by the same rules, never met; a light with `CastShadows` would show it, `-LogFrame`
+then lists the `frame tap [point-light atlas]` views); the views' cameras / viewports / targets / clears and the cascade fit stay the
+engine's (read, not composed: the composition takes the shadow camera's matrices and the bound viewport; a native fit is an own-mode
+item); the terrain map's post_blur Blur7H / Blur7V passes (effect draws after ExecuteShadowMap) and the post_SSM mask stay the engine's
+(the mask is the next stage); the PSSM channel mapping (section 5) stays open (no atlas, no PSSM pass met); as before the engine's code
+still runs for every taken-over op.
