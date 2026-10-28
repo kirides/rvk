@@ -25,8 +25,10 @@
 
 #include <array>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -94,6 +96,9 @@ public:
     // was composed; with compare on)
     void ownDraw(const d3d9::DrawTapInfo& draw);
     void report();
+    // N5.8 coverage: why the engine's draws of `op` (null: of the non-op path running) stay the engine's (empty: no reason
+    // recorded, i.e. the op was not met by the composition)
+    std::string_view leftReason(const Op* op) const;
 
     enum class Skip : std::uint8_t {
         None, Kind, Overlay, ShaderClass, Version, InvalidShader, NotCompiled, Switch, Primitive, ImageOverride, Unreadable, PassKind,
@@ -282,6 +287,17 @@ private:
     d3d9::draws::Tag tagOverrideValue_{};
     void finishOp();
     void issue();
+    // N5.8 coverage: the last op met (or the non-op unit) and why it was left to the engine
+    void opEnterImpl(const Op& op);
+    enum : int { kLeftCompareOnly = 100, kLeftGroupOff, kLeftNotCovered, kLeftChecks };
+    std::string_view leftName(Group g, int code);
+    const Op* leftOp_ = nullptr;
+    Group leftGroup_ = Group::Count;
+    int leftCode_ = -1;  // a Skip, or kLeft*
+    std::string_view leftWhy_;
+    bool leftNonOp_ = false;
+    std::string_view leftNonOpWhy_;
+    std::map<int, std::string> leftNames_;
 
     hal::vulkan::HalDevice& hal_;
     d3d9::Device& dev_;

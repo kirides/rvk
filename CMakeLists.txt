@@ -255,6 +255,8 @@ add_library(rvk_core STATIC
     src/enh/rt_material.h
     src/scene/mirror.cpp
     src/scene/mirror.h
+    src/native/coverage.cpp
+    src/native/coverage.h
     src/native/effect_compose.cpp
     src/native/effect_compose.h
     src/native/effect_ops.cpp

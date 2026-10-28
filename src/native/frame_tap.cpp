@@ -680,26 +680,28 @@ void FrameTap::refractionCopy(const void* api) {
     }
 }
 
-bool FrameTap::onDraw(const d3d9::DrawTapInfo& d) {
+FrameTap::Route FrameTap::route(const d3d9::DrawTapInfo& d) {
     // the effect draws' own draws (N5.5c) are not the engine's; the engine's draws of their units go to them first
     bool dropEffect = false;
     if (effects_ != nullptr && effectsWanted_) {
         if (effects_->issuing()) {
             effects_->ownDraw(d);
-            return false;
+            return Route::Ours;
         }
         dropEffect = effects_->engineDraw(d);
     }
     // the static ops' own draws (N5.1) are not the engine's
     if (statics_ != nullptr && statics_->issuing()) {
         statics_->ownDraw(d);
-        return false;
+        return Route::Ours;
     }
     // a sky cube face's draws (N5.2c, outside Execute)
     if (statics_ != nullptr && staticsWanted_ && statics_->inSkyCube() && d.phase.view == d3d9::scene::View::SkyCube) {
-        return statics_->engineDraw(d, nullptr) || dropEffect;
+        return statics_->engineDraw(d, nullptr) || dropEffect ? Route::Dropped : Route::Engine;
     }
-    if (!executing_ || d.phase.view != (desc_.kind == ViewKind::Main ? d3d9::scene::View::Main : d3d9::scene::View::Shadow)) return dropEffect;
+    if (!executing_ || d.phase.view != (desc_.kind == ViewKind::Main ? d3d9::scene::View::Main : d3d9::scene::View::Shadow)) {
+        return dropEffect ? Route::Dropped : Route::Engine;
+    }
     DrawInfo info;
     info.index = d.index;
     info.pass = d.phase.pass;
@@ -718,9 +720,48 @@ bool FrameTap::onDraw(const d3d9::DrawTapInfo& d) {
     info.psHash = d.psHash;
     info.blend = d.blend;
     attr_.draw(info);
-    if (statics_ != nullptr && staticsWanted_ && statics_->engineDraw(d, d.tag != nullptr ? desc_.find(d.tag->op) : nullptr)) return true;
-    return dropEffect;
+    if (statics_ != nullptr && staticsWanted_ && statics_->engineDraw(d, d.tag != nullptr ? desc_.find(d.tag->op) : nullptr)) return Route::Dropped;
+    return dropEffect ? Route::Dropped : Route::Engine;
 }
+
+bool FrameTap::onDraw(const d3d9::DrawTapInfo& d) {
+    const Route r = route(d);
+    // N5.8 coverage: every draw of the device by who issued it (the -LogFrame frame's own counts apart)
+    const bool logFrame = hal::vulkan::logThisFrame();
+    if (!logFrame && !covFrame_.empty()) {
+        for (const std::string& line : covFrame_.lines(std::format(" (frame {})", covFrameIndex_))) spdlog::info("{}", line);
+        covFrame_.clear();
+    }
+    Coverage& c = logFrame ? covFrame_ : cov_;
+    if (logFrame) covFrameIndex_ = dev_.stats().frames + 1;  // the -LogFrame number (stats().frames counts the presents before)
+    const auto v = d.phase.view;
+    const auto p = d.phase.pass;
+    if (r == Route::Ours) {
+        c.ours(v, p, d.kind);
+    } else if (r == Route::Dropped) {
+        c.replaced(v, p, d.kind);
+    } else {
+        c.engine(v, p, d.kind, engineReason(d));
+    }
+    return r == Route::Dropped;
+}
+
+std::string_view FrameTap::engineReason(const d3d9::DrawTapInfo& d) const {
+    if (effects_ != nullptr && effectsWanted_) {
+        if (const std::string_view r = effects_->leftReason(d); !r.empty()) return r;
+    }
+    if (statics_ == nullptr || !staticsWanted_) {
+        return effectsWanted_ ? "outside every native unit (the op groups are off)" : "native units off (frame tap only)";
+    }
+    const Op* op = nullptr;
+    if (executing_ && d.tag != nullptr && d.tag->op != nullptr) op = desc_.find(d.tag->op);
+    if (const std::string_view r = statics_->leftReason(op); !r.empty()) return r;
+    if (op != nullptr) return "an op the composition did not meet";
+    if (executing_) return "a draw of the view outside every op / native unit";
+    return "outside every native unit";
+}
+
+
 
 void FrameTap::executeEnd(void* db) {
     if (!executing_) return;
@@ -793,6 +834,17 @@ void FrameTap::logOps() const {
 
 void FrameTap::report() {
     if (statics_ != nullptr) statics_->report();
+    if (on_ && !cov_.empty()) {
+        for (const std::string& line : cov_.lines(" (5 s)")) spdlog::info("{}", line);
+        covTotal_.add(cov_);
+        cov_.clear();
+        const std::uint64_t all = covTotal_.draws();
+        if (all != 0) {
+            spdlog::info("native: coverage (run): {} draws, ours {:.3f} %, engine {} ({:.3f} %)", all,
+                         100.0 * static_cast<double>(covTotal_.oursTotal()) / static_cast<double>(all), covTotal_.engineTotal(),
+                         100.0 * static_cast<double>(covTotal_.engineTotal()) / static_cast<double>(all));
+        }
+    }
     if (!on_ || !wanted_) return;
     if (verified_ < 0) {
         spdlog::info("native: frame tap: idle (Execute's sort sites did not verify)");

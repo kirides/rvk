@@ -94,6 +94,7 @@ void EffectOps::spriteFlushBegin(void* spritePtr) {
         ++stats_->skips[static_cast<std::size_t>(s)];
         drawCount_ = 0;
         unit_ = Unit::None;
+        leftUnit(sprite, s);
         return;
     }
     ++stats_->counts.unitsComposed;
@@ -107,6 +108,7 @@ void EffectOps::spriteFlushBegin(void* spritePtr) {
 
 void EffectOps::spriteFlushEnd(void* sprite) {
     if (unit_ == Unit::Gui && unitFilter_ == sprite) finishUnit();
+    if (sprite == leftUnit_) leftUnit_ = nullptr;
 }
 
 EffectOps::Skip EffectOps::composeSprite(const std::uint8_t* sp) {

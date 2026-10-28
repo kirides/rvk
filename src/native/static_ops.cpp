@@ -1174,7 +1174,37 @@ StaticOps::Skip StaticOps::composeOp(const Op& op) {
 
 // ---- per op -----------------------------------------------------------------------------------------------------------------
 
+std::string_view StaticOps::leftName(Group g, int code) {
+    const int key = static_cast<int>(g) * 1000 + code;
+    auto it = leftNames_.find(key);
+    if (it != leftNames_.end()) return it->second;
+    const char* what = code == kLeftCompareOnly ? "composed, compare only"
+                       : code == kLeftGroupOff  ? "group off"
+                       : code == kLeftNotCovered ? "kind / list not covered"
+                       : code == kLeftChecks     ? "engine checks failed / outside a view"
+                       : code >= 0 && code < static_cast<int>(Skip::Count) ? name(static_cast<Skip>(code)) : "?";
+    return leftNames_.emplace(key, std::format("{}: {}", g == Group::Count ? "static ops" : name(g), what)).first->second;
+}
+
+std::string_view StaticOps::leftReason(const Op* op) const {
+    if (op == nullptr) return leftNonOp_ ? leftNonOpWhy_ : std::string_view();
+    return op == leftOp_ ? leftWhy_ : std::string_view();
+}
+
 void StaticOps::opEnter(const Op& op) {
+    leftGroup_ = Group::Count;
+    leftCode_ = kLeftChecks;
+    opEnterImpl(op);
+    leftOp_ = &op;
+    if (op_ == &op && taken_) {
+        leftWhy_ = {};
+    } else {
+        if (op_ == &op) leftCode_ = kLeftCompareOnly;
+        leftWhy_ = leftName(leftGroup_, leftCode_);
+    }
+}
+
+void StaticOps::opEnterImpl(const Op& op) {
     finishOp();
     if (pendingVersion_ != nullptr) {
         // diagnostics: a special pass found uncompiled at the last op's entry, after the engine's slot ran
@@ -1208,7 +1238,10 @@ void StaticOps::opEnter(const Op& op) {
         ++shadowWindow_.ops[static_cast<std::size_t>(viewKind_)][static_cast<std::size_t>(op.kind)];
     } else if (op.kind == OpKind::Skydome && op.list == List::Sky) {
         GroupState& gs = groups_[static_cast<std::size_t>(Group::Sky)];
+        leftGroup_ = Group::Sky;
+        leftCode_ = kLeftGroupOff;
         if (!gs.active()) return;
+        leftCode_ = kLeftChecks;
         if (skyVerified_ == 0) skyVerified_ = verifySky() ? 1 : -1;
         if (skyVerified_ < 0) return;
         g_ = &gs;
@@ -1221,6 +1254,7 @@ void StaticOps::opEnter(const Op& op) {
         const Skip s = composeSky(op);
         blendOverrideShader_ = nullptr;
         blendOverride_ = -1;
+        leftCode_ = static_cast<int>(s);
         if (s != Skip::None) {
             ++g_->skips[static_cast<std::size_t>(s)];
             ++g_->window.opsNotComposed;
@@ -1283,7 +1317,10 @@ void StaticOps::opEnter(const Op& op) {
     } else if (op.list == List::Alpha || op.list == List::Refracted) {
         group = Group::Mesh;
     }
+    leftGroup_ = group;
+    leftCode_ = group == Group::Count ? kLeftNotCovered : kLeftGroupOff;
     if (group == Group::Count || !groups_[static_cast<std::size_t>(group)].active()) return;
+    leftCode_ = kLeftChecks;
     g_ = &groups_[static_cast<std::size_t>(group)];
     drawCount_ = 0;
     ++g_->window.ops;
@@ -1295,6 +1332,7 @@ void StaticOps::opEnter(const Op& op) {
     skipWhy_.clear();
     const Skip s = composeOp(op);
     maskRefShader_ = nullptr;
+    leftCode_ = static_cast<int>(s);
     if (s != Skip::None) {
         ++g_->skips[static_cast<std::size_t>(s)];
         if (s == Skip::Simulated) {

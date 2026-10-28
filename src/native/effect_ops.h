@@ -93,6 +93,8 @@ public:
     bool issuing() const { return issuing_; }
     void ownDraw(const d3d9::DrawTapInfo& draw);
     bool engineDraw(const d3d9::DrawTapInfo& draw);
+    // N5.8 coverage: why an engine draw that was not dropped stays the engine's (empty: no unit of ours claims it)
+    std::string_view leftReason(const d3d9::DrawTapInfo& draw) const;
     void report();
 
 private:
@@ -343,6 +345,10 @@ private:
     std::uint32_t mismatchLogged_ = 0, paramClassLogged_ = 0, packedLogged_ = 0;
     std::vector<std::string> firstMismatches_;
     std::unordered_map<const d3d9::Shader*, Live> live_;
+    // N5.8 coverage: the unit left to the engine (its filter / sprite until its end) and why
+    const void* leftUnit_ = nullptr;
+    std::string leftWhy_;
+    void leftUnit(const void* filter, Skip s);
 };
 
 }  // namespace rvk::native

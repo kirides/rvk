@@ -279,6 +279,10 @@ StaticOps::Skip StaticOps::composeSky(const Op& op) {
 void StaticOps::skyCubeBegin(void* skyPs) {
     finishOp();
     GroupState& gs = groups_[static_cast<std::size_t>(Group::SkyCube)];
+    if (!inView_ && !inSkyCube_) {
+        leftNonOp_ = true;
+        leftNonOpWhy_ = leftName(Group::SkyCube, gs.active() ? kLeftChecks : kLeftGroupOff);
+    }
     if (!gs.active() || inView_ || inSkyCube_) return;
     if (verified_ == 0) verified_ = verify() ? 1 : -1;
     if (verified_ < 0) return;

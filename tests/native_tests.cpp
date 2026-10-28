@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "native/coverage.h"
 #include "native/frame_desc.h"
 #include "test.h"
 
@@ -1003,4 +1004,33 @@ TEST(native_sprite_batches_follow_render_batches) {
     CHECK(fxc::spriteBytesEqual(q, q2, at, wl) && wl == 1);
     q2[0x10] ^= 1;
     CHECK(!fxc::spriteBytesEqual(q, q2, at, wl) && at == 0x10);
+}
+
+TEST(native_coverage_counts_by_source_and_reason) {
+    using V = d3d9::scene::View;
+    native::Coverage c;
+    c.ours(V::Main, Pass::Solid, Kind::StaticMesh);
+    c.ours(V::Main, Pass::Solid, Kind::StaticMesh);
+    c.replaced(V::Main, Pass::Solid, Kind::StaticMesh);
+    c.replaced(V::Main, Pass::Solid, Kind::StaticMesh);
+    std::string reason = "Particles: no live particle";
+    c.engine(V::Main, Pass::Alpha, Kind::Particle, reason);
+    reason = "Particles: other reason";  // same buffer, new content: a new reason
+    c.engine(V::Main, Pass::Alpha, Kind::Particle, reason);
+    c.engine(V::Main, Pass::Alpha, Kind::Particle, "Particles: other reason");
+    CHECK(c.oursTotal() == 2 && c.replacedTotal() == 2 && c.engineTotal() == 3 && c.draws() == 5);
+    const auto by = c.engineByReason();
+    CHECK(by.size() == 2 && by[0].first == "Particles: other reason" && by[0].second == 2 && by[1].second == 1);
+    native::Coverage total;
+    total.engine(V::Gui, Pass::Gui, Kind::Gui, "GUI: outside a sprite flush");
+    total.add(c);
+    total.add(c);
+    CHECK(total.oursTotal() == 4 && total.engineTotal() == 7);
+    const auto tb = total.engineByReason();
+    CHECK(tb.size() == 3 && tb[0].first == "Particles: other reason" && tb[0].second == 4);
+    const auto lines = total.lines(" (test)");
+    CHECK(lines.size() == 5);
+    CHECK(lines[0].find("11 draws") != std::string::npos);
+    total.clear();
+    CHECK(total.empty() && total.draws() == 0);
 }

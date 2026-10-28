@@ -541,6 +541,7 @@ void EffectOps::effectBegin(void* filterPtr) {
         ++stats_->skips[static_cast<std::size_t>(s)];
         drawCount_ = 0;
         unit_ = Unit::None;  // left to the engine
+        leftUnit(filter, s);
         return;
     }
     ++stats_->counts.unitsComposed;
@@ -554,6 +555,21 @@ void EffectOps::effectBegin(void* filterPtr) {
 
 void EffectOps::effectEnd(void* filter) {
     if (unit_ != Unit::None && filter == unitFilter_) finishUnit();
+    if (filter == leftUnit_) leftUnit_ = nullptr;
+}
+
+void EffectOps::leftUnit(const void* filter, Skip s) {
+    leftUnit_ = filter;
+    leftWhy_ = std::format("{}: {}", unitName_, name(s));
+}
+
+std::string_view EffectOps::leftReason(const d3d9::DrawTapInfo& t) const {
+    if (unit_ != Unit::None && unit_ != Unit::Copy) return taken_ ? std::string_view() : std::string_view("effect unit composed, compare only");
+    if (leftUnit_ != nullptr) return leftWhy_;
+    if (inMask_) return "shadow mask: outside the units (the PSSM point-light pass)";
+    if (postDepth_ > 0 && !engine::scene::inSceneJob() && t.phase.view == d3d9::scene::View::Post) return "post chain: outside the units";
+    if (guiOn() && t.phase.view == d3d9::scene::View::Gui) return "GUI: outside a sprite flush";
+    return {};
 }
 
 EffectOps::Skip EffectOps::composeEffect(const std::uint8_t* filter, const std::string& technique, const void* input0, const void* target,

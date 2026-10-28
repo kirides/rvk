@@ -328,6 +328,8 @@ StaticOps::Skip StaticOps::composeDecals(const std::uint8_t* admin, const std::u
 bool StaticOps::nonOpGroupBegin(Group group, void* admin) {
     finishOp();
     GroupState& gs = groups_[static_cast<std::size_t>(group)];
+    leftNonOp_ = true;
+    leftNonOpWhy_ = leftName(group, gs.active() ? kLeftChecks : kLeftGroupOff);
     if (!gs.active() || !inView_) return false;
     if (verified_ == 0) verified_ = verify() ? 1 : -1;
     if (verified_ < 0) return false;
@@ -348,6 +350,8 @@ void StaticOps::nonOpGroupComposed(Skip s) {
     blendOverride_ = -1;
     if (g_ == nullptr) return;
     ++g_->window.ops;
+    const auto group = static_cast<Group>(g_ - groups_.data());
+    leftNonOpWhy_ = leftName(group, s != Skip::None ? static_cast<int>(s) : g_->takeOver ? kLeftChecks : kLeftCompareOnly);
     if (s != Skip::None) {
         ++g_->skips[static_cast<std::size_t>(s)];
         ++g_->window.opsNotComposed;
@@ -388,6 +392,7 @@ void StaticOps::billboardsBegin(void* admin) {
 }
 
 void StaticOps::nonOpEnd() {
+    leftNonOp_ = false;
     if (!inNonOp_) return;
     finishOp();
     inNonOp_ = false;

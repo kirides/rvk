@@ -12,11 +12,13 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
 #include "d3d9/device.h"
 #include "engine/scene_hooks.h"
+#include "native/coverage.h"
 #include "native/frame_desc.h"
 
 namespace rvk::native {
@@ -64,6 +66,9 @@ private:
         std::array<signed char, 4> emptySlot{-1, -1, -1, -1};  // -1 = slot not prepared, 0 / 1 = the engine's function is empty
     };
 
+    enum class Route : std::uint8_t { Ours, Dropped, Engine };
+    Route route(const d3d9::DrawTapInfo& draw);
+    std::string_view engineReason(const d3d9::DrawTapInfo& draw) const;
     bool verifySortSites();
     bool verifyShadowSortSite();
     // a view's snapshot (main: the seven lists; shadow views: the z list) and the start of its attribution
@@ -104,7 +109,10 @@ private:
     std::array<TapCounts, kViewKindCount> last_{}, window_{};
     std::array<std::uint64_t, kViewKindCount> lastFrame_{};
     std::array<std::vector<std::string>, kViewKindCount> windowMismatches_{};
-    std::array<std::uint32_t, 4> cascadeViews_{};  // cascade views of the window by split index (0..2, 3 = other)
+    std::array<std::uint32_t, 4> cascadeViews_{};
+    // N5.8 coverage: the window since the last report, the run, the -LogFrame frame
+    Coverage cov_, covTotal_, covFrame_;
+    std::uint64_t covFrameIndex_ = 0;  // cascade views of the window by split index (0..2, 3 = other)
 };
 
 }  // namespace rvk::native
