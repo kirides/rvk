@@ -105,7 +105,7 @@ Each stage behind a `native.*` setting (default off), A/B against the engine pat
 | **N5.1 static ops** | z pre-pass + solid ops of static meshes (incl. terrain layers, masked, instanced) executed by our recorder with the engine's own translated shaders, constants / states composed natively; the engine's `RenderZPass` / `Render` of those ops skipped | the HAL path of those ops | pub_interior / monastery_hall / jungle / savegame equal to the engine |
 | N5.2 alpha / refracted / fading statics, decals, billboards, sky dome (+ sky cube faces) | the rest of the main view's mesh-like ops | | as above + water spots (done: sections 8, 9) |
 | N5.3 skinned actors | palette + morphs from the actor (D 1), body parts | | hero_idle / pub_idle (done: section 10) |
-| N5.4 SpeedTree, billboards, vegetation | global wind, batches, the 1000-instance grass ring | | jungle / forest spots |
+| N5.4 SpeedTree, billboards, vegetation | global wind, batches, the 1000-instance grass ring | | jungle / forest spots (done: section 11) |
 | N5.5 shadows | terrain VSM, cascades (engine fit E 2.2), point atlas, `post_SSM` mask | engine cascades + mask | shadow-compare |
 | N5.6 particles, strips, streaks, precipitation | CPU vertex data from the engine's buffers | | rain / fire spots |
 | N5.7 post + GUI | the 13 effect graphs in GLSL (DoF default), sprite batcher | effect runtime path | refcompare all spots |
@@ -114,7 +114,7 @@ Each stage behind a `native.*` setting (default off), A/B against the engine pat
 ## 5. Open across slices
 
 Request bit 0x200 (blended terrain layers in the solid list), the shader clock (game vs real time), masked materials when the z pre-pass
-is off, the PSSM channel mapping, actor LOD (`ActorInstance +0x250`) writer, SpeedTree instancing mode (`admin +0x320`), which overlay
+is off, the PSSM channel mapping, actor LOD (`ActorInstance +0x250`) writer, SpeedTree instancing mode (`admin +0x320`: hardware in every run, section 11), which overlay
 effect makes the 1-draw `Post{Post(1)}`, module `Process` order (weather before illumination?); the slices' own section 6 / 7 lists.
 
 ## 6. N5.0 result: the op tap (2026-10-27)
@@ -717,3 +717,150 @@ interaction focus and reaches the focused NPC's attachments.
 
 **Not yet / open**: burned / frozen overlays and refracted actor primitives never met (composed by the same rules); the 0-draw
 Animation ops not reproduced (cause inferred); the actor LOD writer; as before the engine's code still runs for every taken-over op.
+
+## 11. N5.4 result: SpeedTrees, tree billboards, vegetation (2026-10-28)
+
+Groups **128** (the SpeedTree ops + the tree billboards' ops) and **256** (the vegetation ops) of `native.scene_ops_groups` (behind
+`native.scene_ops` / `native.scene_ops_compare` as in sections 8 - 10; default mask now 511). Code: `src/native/static_ops_trees.cpp`, the
+pure rules in `static_compose.*` (`planTreeBatches`, `treeRange`, `planGrass`, `grassInstance`, `vegetationAlpha`, `billboardPassPairs`;
+tests `tree_*`, `grass_*`, `billboard_passes_pair_variants`, `native_attribution_tree_and_grass_zero_draws`), the draw conditions in
+`frame_tap.cpp` (`treeState`, `vegetationState`). Read in the decompiles `frameD_dump1..3.txt` (D-contexts.md 2 - 4) and the capstone
+disassembly of the test copy's Engine.dll (helpers in `B:\DevDrive\risen-ghidra\n54\`); the composition checks 13 code sites, the
+eCShaderDefault slots +0x220 / +0x228 / +0x238 and eCShaderLeafs' vtable at first use. All [C] unless marked; "checked" = held in the
+compare runs below.
+
+**SpeedTree ops [C, checked]** (`eCRenderContextSpeedTree::Render` 0x6ee320: desc = geometry type; `RenderZPass` 0x6ee3f0: desc = request
+mask << 16 | type, bit 0x10 of the mask = a shadow-map op, never in the main view):
+* The render buffer = PS +0x38 (the tree resource) +0x78. Queues: solid +0xb8 / count +0xc0, z +0xd0 / +0xd8 (0x18-byte entries {tree PS,
+  illumination, depth key}); the first Render / RenderZPass of a frame qsorts the queue (while the stamp +0xe0 / +0xe4 is non-zero) with the
+  engine's qsort 0x4a4aa0 + `SortInstances` 0x6f2180 / `SortInstancesZPass` 0x6f2120: the composition sorts a copy the same way (sites
+  checked).
+* `RenderBranches` 0x6f1cd0 / `RenderFronds` 0x6f1880 / `RenderLeafs` 0x6f1390 and the z passes 0x6f1030 / 0x6f0cc0 / 0x6f0860: material
+  `rb +0x80 + 8 t` (`RequestData(1)`), shader +0x70; for eCShaderDefault / eCShaderLeafs the TransformationType must be 3 / 4 / 5-6 (else a
+  log line, nothing drawn); **MaskReference forced to 80** every time (with the property notifies); branches (solid and z) and fronds (solid
+  only: `RenderFrondsZPass` has no SetGlobalAlpha) call `SetGlobalAlpha(1, 0)`.
+* Instances: branches / fronds take every queued tree whose LOD index (`tree +0x48` / `+0x50`) is >= 0, with strip length `rb +0x40 / +0x50
+  [lod]` and start index `rb +0xe8 / +0xf8 [lod]`; per slot `SetWorldMatrix(entity +0x60)` (c33 + 4 i) and `SetSpeedTreeInstanceData((tree
+  +0x6c, rb +0xa0 / +0xa4))` (c32 + 4 i .xy). Leaves: per leaf LOD L of `CSpeedTreeRT +0xf4` (index count `rb +0x40 + 0x10 t + 2 L`, start
+  `+0xa8` from there; a LOD with 0 indices ends the op) the trees with `tree +0x58 == L` (alpha `+0x60`) or else `+0x5c == L` (`+0x64`):
+  world, `SetGlobalAlpha(80 / alpha)` (c32 + 4 i .w), `SetSpeedTreeInstanceData(wrapper +0x34)`.
+* Batches (`sc::planTreeBatches`): a batch ends before an instance when its 8-bit count equals the limit `rb +0x128 + t`, when the strip
+  length differs (branches / fronds), and in the solid passes when the light **list** (illum +0) differs or the instance or the batch's last
+  one has static SH / lights (+0x90 / +0xd). A batch is drawn with its last instance's illumination and its first instance's start index;
+  **a fronds batch with strip length 0 is not drawn** (its slots are still written).
+* Draw: `GetPasses(shader, 0, illum, 0, instanced, 0)` + ExecutePass per pass (solid); z: `ExecuteSpecialPass(true)` = special pass `type *
+  2 + 1` in all three (`mov dl, 1` checked). **The instancing mode (section 5's open item `admin +0x320`) is hardware in every op of every
+  run** (1.3 M SpeedTree ops counted, 0 software): stream 0 frequency `n | 0x40000000`, one instance's counts (`strip - 2` primitives, leaves
+  `indices / 3`), **branches start at index 0**, fronds and leaves at their start index. The software path (`(strip + 2) n - 4` primitives,
+  `n * vertsPerInstance` vertices) is composed by `sc::treeRange` but never met.
+* Wind: c14..c22 = the 3x3 transposes of the three matrices at `eCSpeedTreeAdmin +0xac`, c23..c25 = that of the application camera's matrix
+  (`app +0x38` (else `+0xc8`) `+0x10`), c26..c29 = the rock / rustle angles at `+0x6c`, as `SetSpeedTreeData` 0x6b7df0 writes them during
+  the database's Request (nothing when no wind PS exists, `+0x58 == 0`; then the pool's values): composed natively (compare classes "vs wind
+  c12 c14-22" / "vs leaf angles c23-29"), never from a clock of ours (section 9).
+* The draws keep the slot's tag (SpeedTree, context, op, entity) and no sub-mesh tag.
+
+**Tree billboards [C, checked]** (`eCRenderContextSpeedTreeBB::Render` 0x6ee8d0, `RenderZPass` 0x6ee8e0; desc = cell << 8 | sub-mesh of the
+area's billboard mesh `PS +0x30`): `UploadTexCoords` 0x6ec150 writes c32..c36 = the 5 fixed vec4 at 0xbfcbd0 and c37 + j = the PS's vec4 list
+(+0x40) over the sub-mesh's range (+0x58: 0xc-byte entries, +4 first, +8 count); z = `eCMeshResource2::RenderZPass` with a null world twice,
+option false then true (special passes 0 / 1); solid = `eCMeshResource2::Render(null world, sub-mesh, cell, switch 0, entity +0xf8 +0x78, null
+fade)` -> `eCSubMesh::Render` (no world / alpha writes; the cell's range for cell != 0, cell 0 draws the whole sub-mesh) with
+**TransformationType 11's pass pairs**: `GetPasses` 0x6cc970 marks every pass of the shared array VS variant 1 (flags | 0x400) and appends the
+array again as variant 2 (| 0x800), i.e. `vsIdx` 4 / 5 (non-instanced, variant). The solid draws carry eCSubMesh::Render's sub-mesh tag.
+
+**Vegetation [C, checked]** (`eCRenderContextVegetation::Render` 0x70d4b0 / `RenderZPass` 0x70d4d0 -> `eCVegetation_PS::Render` 0x707800,
+desc = the grass type): the PS's visible grid nodes (+0x98, count +0xa0, 0x118-byte entries: +0 light set, +8 grid node, +0x10 the
+illumination, +0x1d / +0xa0 its static lights / SH flags) in order; per node its instances of the type (`grid node +0x30 [type]` = (start,
+count) into `+0x18`, 0x2c-byte entries) are copied into the vegetation admin's shared buffer (+0x38, 1000 instances, cursor +0x40: DISCARD
+at 0, NOOVERWRITE after; `Process` resets it each frame) as `[pos (+4), wind = type +0x2c != 0 ? 1 : 0, rotation (+0x10), scale (+0x20,
++0x24), lift = type +0x20 != 0 ? 0.8 : 0]` (`sc::grassInstance`). Draws (`sc::planGrass`): when the buffer is full (the cursor wraps to 0),
+in the solid pass before a node whose light set differs or when it or the previous node has the flags (a node without instances of the
+type still switches the illumination), the rest at the end. `RenderMeshInstanced` 0x707e40: the type's mesh (+0x58) cached with its visual,
+the admin's buffer attached as stream 1 (`AttachVertexData`: its stride, offset = slot x 0x2c, frequency 0x80000001), stream 0 `n |
+0x40000000`, cull `2 - two-sided (+0x30)`, the first sub-mesh's range (indexed list), `SetVegationAlpha(grid +0x50, +0x54)` = c31.xy (`-1 /
+R`, `(R + start) / R`, `R = (end - start) / (1 - maskRef / 256)`) and c32.w = 1, then `GetPasses(shader, 0, illum, 0, not instanced, 0)` or
+`ExecuteSpecialPass(false)`; frequencies reset and stream 1 detached afterwards. The instance bytes are compared with the engine's buffer
+at its draw (stream 1) and, in a take-over, drawn from our own instance buffer (appended within the frame: one ring copy per frame). c12
+(`eCVegetationAdmin::Process` 0x7016b0: game time / 1000, admin +0x44 / +0x50 / +0x54) is composed natively unless the clock moved between
+Process and the op (rvkcompare sets the game time at spot changes: 376 ops in the 8-spot run, 0 at the savegame), where the pool's copy is
+the shader's value.
+
+**0-draw ops, checked at run time.** The tap now reads the draw condition of SpeedTree and vegetation ops at the slot's entry (`Op::state`):
+SpeedTree bits 1 render buffer + visual + queue, 2 shader + TransformationType, 4 a queued tree with the type's geometry at its LOD (fronds:
+a non-zero strip); vegetation bits 1 instances in a visible node, 2 the type's mesh cached, 4 the shared buffer, 8 the first sub-mesh's
+shader. **Every 0-draw SpeedTree op in the runs below lacks bit 4** (all its queued trees at a LOD without that geometry; e.g. 34,602 of
+749,634 SpeedTree ops at 8 spots, 5,604 at the savegame; every tap window clean): section 6's tree-LOD rule is now checked. The 0-draw
+**Vegetation** ops of sections 8 / 10 (the sea_cliff -> harbour_mouth teleport) did not recur in the 13-spot run with the same teleports
+(31 tap windows, all clean); their logged sort ids (0x13b, 0x156: no additional sort id, where the vegetation ops carry 0x1a << 12) point to
+a type whose material had no shader yet at the request, i.e. a mesh / material still streaming in after the teleport [I]; a recurrence now
+names the missing bit.
+
+**Verification** (compare = every field class of sections 7 - 10 incl. bool / int registers, the vegetation's stream-1 bytes and the two
+new wind classes; draws equal / compared, 0 mismatches everywhere; skips = special passes / permutations not compiled at the world's first
+frame, which the engine compiles at that draw):
+
+| run | SpeedTree + tree billboards (z / solid) | vegetation (z / solid) | skips |
+|---|---|---|---|
+| compare, 8 spots (jungle, waterfall_jungle, lake_jungle, swamp_camp, swamp_pond, beach_sun, hero_idle (clock running), shadow_inland_a) | 2,952,509 / 2,952,509 (966,495 / 1,986,014) | 697,008 / 697,008 (188,046 / 508,962) | 34 / 13 |
+| compare, the 13 spots of section 8 (teleports), actors shown | 2,618,570 / 2,618,570 | 733,945 / 733,945 | 33 / 15 |
+| compare, savegame Risen_Save_0009 (`rvk_perfsave` hold 30) | 1,185,092 / 1,185,092 | 357,152 / 357,152 | 27 / 11 |
+| compare, savegame walk + turn (`rvk_rtwalk`), `lod.trees=3`, `lod.meshes=3`, `lod.view=1.5` | 828,483 / 828,483 | 202,076 / 202,076 | 30 / 16 |
+| take-over + compare, 4 spots, **validation on** (0 messages) | 1,947,391 / 1,947,391 | 395,701 / 395,701 | 33 / 16 |
+| take-over + compare, savegame switched 127 -> 511 at frame 2000, **validation on** (0 messages) | 511,497 / 511,497 | 162,288 / 162,288 | 0 |
+| take-over + compare, jungle + swamp_camp, own instance buffer (below), **validation on** (0 messages) | 1,702,957 / 1,702,957 | 310,385 / 310,385 | 34 / 9 |
+
+In the take-over runs every dropped engine draw equals ours and every own draw equals its composition at its own `prepareDraw`. Statistics of
+the 8-spot run: 749,634 SpeedTree ops (branches 205,088, fronds 236,998, leaf cards 222,346, leaf meshes 85,202) with 5.4 M instances in 2.4
+M batches (179,326 fronds batches at strip length 0, not drawn), 752,757 leaf LOD passes; 376,468 tree billboard ops; 336,390 vegetation ops
+with 45.8 M instances in 697,008 draws (41,658 buffer wraps). The first builds found four rule errors, all fixed before the counts above:
+`RenderFrondsZPass` writes no global alpha; the leaves' material class is eCShaderLeafs (vtable 0x9d7be8: eCShaderDefault's slots except
+GetObjectType / Create / GetEllementTypeName / GetShaderFileName); TransformationType 11 duplicates the passes; c12 lags the clock when a
+scenario sets the game time.
+
+**Consumers** (savegame hold, `shadows.rt=near`, `shadows.rt_wind`, `gi.enabled`, groups 127 -> 511 at frame 2400, `-MaxFps 60`;
+out/n54/consumers_rvk.log): `rt: scene: characters 19 + animated SpeedTrees 37`, tree draws 94,200 per 5 s (83,100 beyond the range, 11,100
+captured), BLAS refits from this frame's capture ~5,680 / the previous frame's ~11,130 in every window before and after the switch; GI 300
+updates and ~31,140 GI draws per second before and after. The lod detours act before Execute (the composition reads the LOD fields they
+produce): equal at `lod.* = 3 / 3 / 1.5`.
+
+**Images** (`water-compare.ps1`, water off on both sides, take-over groups 384 vs the plain engine, `-Burst 8 -Interval 1`;
+`out\water\20261028-013335` = engine A + take-over, `013815` = engine B; mean |d| 8-bit / share of pixels with a channel |d| > 32):
+
+| spot | A vs take-over | A vs B (noise) | B vs take-over |
+|---|---|---|---|
+| jungle | 1.96 / 0.519 % | 1.08 / 0.150 % | 1.99 / 0.554 % |
+| waterfall_jungle | 2.97 / 2.769 % | 1.96 / 1.194 % | 2.25 / 1.786 % |
+| swamp_camp | 1.46 / 0.040 % | 1.32 / 0.030 % | 0.86 / 0.006 % |
+| hero_idle (clock running) | 2.00 / 1.337 % | 3.19 / 2.269 % | 2.97 / 1.757 % |
+
+`shot-reviewer` (out/n54/review: crops, x8 diff maps against the noise pair): no hole, missing or extra geometry, texture, cut-out or lighting
+difference; at jungle and waterfall_jungle the take-over differs more than the noise pair only as a sway offset (leaf cards shifted by a
+fraction of a leaf, the blurred foreground fronds): the frozen spots' wind phase is the sum of clamped steps over each run's frame-time history
+(section 9), which the take-over's CPU cost shifts [I: no composed draw differs]; the 8-frame sequences are frozen (0.00 - 0.03 between
+frames) in all runs, hero_idle moves at the same rate in both. **Savegame switched inside one run** (127 -> 511 at frame 2000, frames 1940 /
+1960 / 1980 / 2020 / 2040 / 2060): on the 3,652 8x8 blocks static in all four 20-frame same-mode pairs the 40-frame pairs give 0.018 before,
+**0.026 across the switch**, 0.024 after (1 block above 1.0 across, 0 before / after); the reviewer (out/n54/review_switch) finds the switch
+pair's diff the same size and pattern as the same-mode pairs (wind on leaves and grass, the NPCs), no step in luma. The distant tree
+billboards are small in these views: they compare equal field by field, their fades were not judged by eye in a billboard-heavy view.
+
+**Cost** (savegame, `-Exe RisenTest.exe -Vsync off -Perf`, `rvk_perfsave` hold 40, scene ops taken over in both runs, groups 127 vs 511,
+the last four 5-s `perf:` windows; the machine idle before the runs (`sysprobe`: < 2 % CPU, no other game / ffmpeg); out/n54/perf_off /
+perf_on2_rvk.log): GPU unchanged (1.55 vs 1.50 - 1.51 ms); CPU engine + HAL per frame 4.03 - 4.12 ms (p50 frame 4.42 - 4.52 ms) -> 6.11 -
+6.20 ms (p50 6.41 - 6.50 ms): **+2.1 ms** for ~155 tree / billboard / vegetation ops and ~390 draws per frame (~13 us per op: the queue copy
+and sort, the per-instance slot writes into the mirror, the pool mirror, the vegetation's instance bytes, the state save / restore and the
+second set of setter calls; the engine's own code still runs for every op). The first take-over build drew the vegetation's instance data
+with a DISCARD per draw into the 512 KiB CPU-geometry buffer (a fresh ring copy of the whole buffer each time: ring 67.6 MiB per frame);
+it now appends to its own 2 MiB instance buffer within the frame (NOOVERWRITE, one ring copy per frame): ring 9.8 -> 12.4 MiB per frame.
+
+Engine rules newly learned [C]: one SpeedTree op draws every queued tree of its resource and type, sorted once per frame by the engine at
+its first Render; tree batches break on the light list (not the illumination), the light flags, an 8-bit count at the buffer's limit and
+(branches / fronds) the strip length, take the last instance's illumination and the first one's start index; the game runs hardware
+instancing (admin +0x320 != 0), with hardware branches drawn from index 0; MaskReference is forced to 80 on every tree material every frame;
+the SpeedTree z passes use special-pass option 1, the vegetation option 0, the tree billboards both (two RenderZPass calls); RenderFrondsZPass
+writes no global alpha; leaves use eCShaderLeafs; TransformationType 11 doubles the whole pass array (variants 1 / 2); billboard cell 0 draws
+the whole sub-mesh in the solid pass; the vegetation fills one 1000-instance buffer per frame across all its ops, draws when it is full and
+on light-set / flag changes, and a node without instances still switches the batch's illumination; the vegetation's c12 is the game time of
+the admin's Process.
+
+**Not yet / open**: the software instancing path (composed, never met); shadow-map tree ops (main view only here); the 0-draw Vegetation ops
+not reproduced (cause inferred); a billboard-heavy view for the billboard fades by eye; as before the engine's code still runs for every
+taken-over op (its CPU cost is the engine's plus ours).
