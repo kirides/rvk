@@ -354,14 +354,15 @@ AfterMainView (FSR `upscale.fsr` upscales the FP16 scene there, before the tone 
 
 ## 7. Open
 
-* Which overlay effect produces the 1-draw `Post{Post(1)}` seen in every refcompare spot (frame-phases.md 3): read
-  `admin+0x98`'s name in a run [?]; which names Game.dll (`gCEffectCommandStartImageEffect`) and Script.dll
+* Which overlay effect produces the 1-draw `Post{Post(1)}` seen in every refcompare spot (frame-phases.md 3): **answered**
+  (README.md 15): OverlayMovieStrips (technique OverlayMovieStripsAbs) at weight 1, invisible at 16:9; which names Game.dll (`gCEffectCommandStartImageEffect`) and Script.dll
   (`EffectSystem::StartImageEffect`) pass, and who activates RadialBlur / Wobble / Indicator / EdgeSmooth (`ActivateEffect`) [?].
 * FrameTime unit / eye adaptation speed and the luminance value at run time (read the 1x1 targets) [?]; BrightPass's 309 x 210
   at run time (`-LogFrame`) [I].
 * `eCImageFilterEffect::UpdateVisual` 0x75adf0 / `UpdateEffect` 0x75aec0 (visual render / cull / depth states of the quad,
   lazy compile) not dumped [?]; the macro at material admin `+0x178` == 4 [?].
-* Sprite ortho matrix arguments and any -0.5 pixel shift (`D3DXMatrixOrthoOffCenterLH` call in `Begin`) [?].
+* Sprite ortho matrix arguments and any -0.5 pixel shift (`D3DXMatrixOrthoOffCenterLH` call in `Begin`) [?] (N5.7 composes the
+  world-view-projection from the stored `+0x48`, so the arguments are not needed; README.md 15 has the batcher's other rules).
 * GUI2.dll's draw order inside `CFXGui +0x70` (cursor last?, clipping / scissor use) — GUI2.dll not opened [?].
 * Bink frame upload (`FUN_18070fbe0` / `FUN_18070fd00`: texture format, YUV conversion) [?].
 * Mixer gamma: exact config keys; who sets the effect gamma values (`SetEffect*`) [?]. (Vulkan mode stores and ignores the ramp,

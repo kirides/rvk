@@ -58,7 +58,7 @@ eCApplication::OnRun
      DoEndRenderAlpha; list +0x1548 (precipitation); EndMaterial                                                                 D 10
    post jobs of DoF (19): log-luminance 64² -> 32..2 -> adaptive 1² (persistent) -> copy; bright pass 309x210 (sky alpha);
      glow H; sun streaks; glow V blended onto last frame's bloom (persistent); tone map; 5 DoF stages at 1/4; DoF -> back buffer F 2.3
-  overlay effect (if any): 1 draw                                                                                                F 2.6
+  overlay effect (if any): 1 draw (OverlayMovieStrips at the refcompare spots: section 15)                                     F 2.6
  OnPostRender -> Draw: GUI (one eCSprite batcher: GUI, text, cursor, videos), snapshot, SwapScreen = present                     F 4
  eCTimer::Update
 ```
@@ -109,14 +109,14 @@ Each stage behind a `native.*` setting (default off), A/B against the engine pat
 | N5.4 SpeedTree, billboards, vegetation | global wind, batches, the 1000-instance grass ring | | jungle / forest spots (done: section 11) |
 | N5.5 shadows | the shadow views' z ops: cascades, terrain VSM, point-atlas cells (done: section 12); N5.5c the `post_SSM` mask chain (SSAO, cascades, VSSM, blur; the PSSM point-light pass stays the engine's), its depth copy, the terrain map's Blur7H / V, the shadow views' setup (fit + camera compared, target / viewport / clear / reset taken over) (done: section 13) | the engine's shadow-view and mask draws | compare + same-frame switch (done) |
 | N5.6 particles, strips, streaks, precipitation | the particle quads (UpdateVertices re-done natively), the strips' vertex fill, the rain's billboard records from the drops; light streaks never met (done: section 14) | the engine's particle / strip / rain draws | compare + same-frame switch at fire / rain / spell spots (done) |
-| N5.7 post + GUI | the 13 effect graphs in GLSL (DoF default), sprite batcher | effect runtime path | refcompare all spots |
+| N5.7 post + GUI | every effect filter job of the graphs that run (DoF 19 draws, HDRI 14, the OverlayMovieStrips overlay), composed with the semantic parameters natively; the sprite batcher's batches + vertex / index data (done: section 15) | the engine's post and GUI draws | compare + same-frame switch at spots, savegame, menus, loading, native AA / quality (done) |
 | then | own modes, one at a time: mirror-driven lists (the current N3.3 code), GPU culling, merged indirect draws, the ubershader, bindless materials, RT consumers from the native frame | | A/B against the copy |
 
 ## 5. Open across slices
 
 Request bit 0x200 (blended terrain layers in the solid list), the shader clock (game vs real time), masked materials when the z pre-pass
 is off, the PSSM channel mapping (dynamic CastShadows lights: green, section 13; static lights not met), actor LOD (`ActorInstance +0x250`) writer, SpeedTree instancing mode (`admin +0x320`: hardware in every run, section 11), which overlay
-effect makes the 1-draw `Post{Post(1)}`, module `Process` order (weather before illumination?); the slices' own section 6 / 7 lists.
+effect makes the 1-draw `Post{Post(1)}` (answered: OverlayMovieStrips, section 15; who starts it is open), module `Process` order (weather before illumination?); the slices' own section 6 / 7 lists.
 
 ## 6. N5.0 result: the op tap (2026-10-27)
 
@@ -1294,3 +1294,155 @@ emitters, blended billboard ops (alpha list) - all never met; the lightning flas
 before the engine's code still runs for every taken-over op. Main-view draws still made by the engine after N5.6: the post_SSM PSSM
 point-light pass (only with lights that cast shadows), the post-processing chain (DoF default: 19 jobs), the overlay effect, the GUI;
 plus ops left by rule (first frames, not-yet-compiled permutations, the kinds above that never occurred).
+
+## 15. N5.7 result: the post chain and the sprite batcher (2026-10-28)
+
+Groups **32768** (the post chain: every effect filter job of the image-effect graphs) and **65536** (the sprite batcher: GUI, text,
+cursor, loading screens, videos) of `native.scene_ops_groups` (behind `native.scene_ops` / `native.scene_ops_compare` as in sections
+8 - 14; default mask now 131071). Code: `src/native/effect_ops_post.cpp` (32768) and `src/native/effect_ops_gui.cpp` (65536), both
+part of `native::EffectOps` (the N5.5c machinery of section 13: the fx pass evaluation, the device capture / apply / issue, the
+field-class comparison), the pure rules in `effect_compose.*` (`colorMatrix`, `focalRangeNear` / `Far`, `clampScreenVector`, `sunFlare`,
+`planSprites`, `spriteQuad`, `spriteQuadIndices`, `spriteBlend`, `spriteBytesEqual`; tests `native_post_semantic_rules`,
+`native_sprite_batches_follow_render_batches`), the detours in `engine/scene_hooks.cpp` (`EffectTap::postBegin / postEnd` around
+`eCImageEffect::Execute`, `spriteFlushBegin / End` around `eCSprite::Flush` 0x757d10; `inSceneJob()`), `hal::vulkan::EffectInfo` (the
+effect's current values / textures / technique). Read in the decompiles `frameF_dump1..7.txt`, `imgparam_dump*.txt` and the capstone
+disassembly of the test copy's Engine.dll (`n56/edis.py`). All [C] unless marked; "checked" = held in the runs below.
+
+**Which graphs run [checked].** rvk.log `native: post: effect ... (scene|overlay): <filters>` names each `eCImageEffect` the first time
+it runs (filter name, fx file : technique index, screen mode, nested effects):
+* the scene effect (`eCImageFilterAdmin +0x90`) = `/Engine/Render/PostProcessing/DefaultEffect`: **DoF** (ConfigDefault / Performance
+  High / Normal; the test copy) = DownSampleCoC, HDRI (nested: AvgLuminance, Bloom, ToneMap), BlurH, BlurV, CalcNearCoc, SmallBlur,
+  DoF (screen), Bloom (nested): **19 effect draws per frame** (LogLuminance, Down32 / 16 / 8 / 4 / 2, AdaptiveLiminance, AvgLuminance
+  Copy, BrightPassAlphaMask, GlowH, Streak, GlowVAddBloom2, ToneMap, DoFDown, DoFBlurCocH / V, DoFNearCoc, DoFSmallBlur, DoF), F 2.3's
+  job list confirmed; **HDRI** (ConfigPerformanceLow; checked by editing the test copy's ConfigUser.xml) = HDRI (screen), AvgLuminance,
+  Bloom, ToneMap: 14 draws (the ToneMap job runs although only HDRI draws to the screen: it is a public filter the graph pulls);
+  **Bloom** (the code default when the key is missing) has **no Screen-output filter**, so Execute pulls no job at all: no world is
+  rendered (`Post{}` empty, 680 fps of GUI only) - a new engine rule; the shipped configs never select it.
+* the overlay effect (`+0x98`): **OverlayMovieStrips** (`overlay_color.fx` technique 5 OverlayMovieStripsAbs, screen) - **this is the
+  1-draw `Post{Post(1)}` of the refcompare spots** (open item of F 7 / section 5 resolved): weight (`+0xb0`) 1.0 at every rvkcompare
+  spot and during the new game's opening, 0.012 / 0.726 while fading, at the savegame's first ~160 frames; at a 16:9 screen with
+  `MovieStripAspect` 16/9 the clip leaves no bar, so it draws nothing visible. Its name is not in any DLL (it comes from game data:
+  effect commands / scripts) [I: the starter not identified].
+* never met: OverlayBlackScreen / WhiteScreen / OverlayHit (its `eCImageFilterCopy` without input = CopyCurrentRTToImage would stay the
+  engine's: rvk.log counts `copies in the post chain left to the engine`, 0 in every run), RadialBlur, Wobble, Indicator (Copy to the
+  screen), EdgeSmooth; AvgLuminance / RenderScene run only nested. **Underwater**: no effect switches (rvk_swim: the DoF graph
+  throughout, F 3's [C] that no underwater effect exists).
+
+**The post filters' composition [C, checked]** (at `eCImageFilterEffect::ExecuteEffect` 0x75af70 of an effect filter while
+`eCImageEffect::Execute` runs and outside the scene job `eCImageFilterScene::OnUpdateOutput`: the terrain map's Blur7H / V and the mask
+chain run inside it, in the Post view before Execute's Main scope - a first build took the terrain blur for a post job):
+* Parameters (OnSetParams 0x75c740: each parameter object whose technique bit `+0x50` is set, its class's Set at vtable +0x28; then
+  every input's AttachImmImageData). The values start from what the API effect holds (a class that sets nothing keeps the last value);
+  13 classes checked by their Set RVA: FrameTime 0x9ee500 (`eCTimer +0x2c`), Time 0x9ee580 (`+0xc / 1000`), SceneExposure 0x9ee680
+  (weather `+0x158`), BloomIntensity 0x9ee400 (`+0x15c / +0x158`), BloomThreshold 0x9ee780 (`+0x160`), BloomOffset 0x9ee700 (`+0x164`),
+  ColorMatrix 0x9ee600 (9 floats in 0x758980's order: f = 1 - s, t_i = E tint_i, (a, b, c) = f (0.3, 0.59, 0.11) from Engine.dll data;
+  rows ((a + s) t0, b t0, c t0), (a t1, (b + s) t1, c t1), (a t2, b t2, (c + s) t2)), OverlayBlendValue 0x9ee380 (image filter admin
+  `+0xb0`), Camera 0x9ee480 (kinds 0 / 1 / 3 / 4 / 6 - 11 composed; 7 SCREENSIZE = the rect +0xc4 as `float(right - left)`,
+  `float(bottom - top)`; 10 FOCALRANGENEAR: n = `+0xe4` <= SharedBase `g_fEpsilon` -> 0, else n /= far, (-1 / n, -((-1 / n) n)); 11
+  FOCALRANGEFAR: e = `+0xec` (far when <= s `+0xe8`), r = (e - s) / far, r >= 1 -> 0, else (1 / r, -((s / far) / r))), SkyDome 0x9ee300
+  (via `eCIlluminationAdmin::GetSkydome`; none = nothing set; kind 4 SUNLIGHTSCREENVECTOR = the light `+0xf0 +0x318` through
+  SharedBase `TransformDirection(view)`, x far, `bCVector::operator*=(projection)`, x / y clamped by the engine's compare order; kind 5
+  SUNFLAREINTENSITY = max(-z_view, 0)^2), Image 0x9ee900, Texture 0x9ee880 and ImageSize 0x9ee280 (section 13; no suffix match = nothing
+  set). The module getters the Set functions call (weather 0x275c30, image filter admin 0x95750, illumination 0x14f330: cached
+  FindModule lookups) are called by RVA after their call sites were checked. VIEWPROJ / INVVIEWPROJ (kinds 2 / 5) are not used by the
+  13 graphs (left to the engine if met).
+* Inputs through the graph: the source filter's output by class - eCImageFilterScene 0x9eec08 (`GetOutputAt` 0x75d770: 0 = FP16 `+0x38`
+  else `+0x40`, 1 = depth map `+0x48`), effect / copy filters (`+0x70` in texture mode), textures (mode `+0x38`), eCImageFilterImage
+  0x9c6560 (resource `+0x30 +0x70`), and nested effects eCImageFilterImageEffect 0x9c6910 (the admin's effect map `+0x68` by the name
+  `+0x30` through the engine's lookup 0x1f2410, then its Public filters' outputs in order, counts by class: scene 2, RTBase `+0x38 == 0`,
+  texture / image 1).
+* Target (`eCImageFilterRTBase::SetRenderTarget` 0x668370): texture mode = the output image `+0x70` with **the depth bound at Execute's
+  entry** (each job's ResetRenderTarget restores it) and (0, 0, `+0x80`, `+0x84`, 0, 1); screen mode (`+0x38 == 1`, no image) = the
+  target / depth / viewport bound at Execute's entry (the back buffer; with render scale the scene hook's full-rect viewport).
+* `eCGfxEffect::Execute` 0x750210 skips SetPassNumber for the active, clean effect while `ms_bOptimize`: modelled; **ms_bOptimize is
+  false** in the game (every Execute applies its pass).
+* Persistent targets (AdaptiveLiminance / AvgLuminance Copy, the Bloom accumulator) are the engine's images; GlowVAddBloom2's blend onto
+  last frame's bloom is the pass's states. The FSR scene substitute (upscaling.md 4) applies to our draws in the device as to the
+  engine's (the composed texture is the engine's scene image).
+
+**The sprite batcher [C, checked]** (`eCSprite::Flush` 0x757d10 -> RenderBatches 0x757180 -> DrawBatch 0x7570b0 -> eCSpriteMesh::Draw
+0x528650; call sites checked):
+* Records `+0xa8` (0x48: corners 4 x (x, y), uv rect `+0x20`, z `+0x30`, image `+0x38`, colour `+0x40`, blend `+0x44`), count `+0xb0`;
+  Flush sorts with qsort_s only for flags `0xe0` (never: GUI and videos Begin(0); left to the engine if met).
+* RenderBatches: bound image `+0x88` = 0, pending `+0x90` = record 0's image, blend `+0x98` = 0, wanted `+0x9c` = record 0's blend; per
+  record a DrawBatch first on a blend change, a texture change, or a full buffer (`capacity - (start + count) == 0`: then start = count
+  = 0); a quad = Lock((start + count) x 0x70, 0x70, DISCARD at 0 else NOOVERWRITE); a final DrawBatch. **A batch's `+0x98` starts at 0
+  every flush**, so a first record with blend 0 never calls SetBlend (the state of the previous flush / Begin's SetBlend(0) holds).
+* DrawBatch: SetBlend when `+0x98 != +0x9c` (alpha blending slot 0x1e0 + `eCGfxMixerAdmin::SetMasterBlending(src, dst)` = the HAL's
+  master blend: 0 SRCALPHA / INVSRCALPHA, 0x1000 ONE / ONE, 0x2000 SRCALPHA / ONE, 0x3000 DESTCOLOR / ZERO, 0x4000 DESTCOLOR / SRCCOLOR,
+  0x5000 ONE / ZERO with blending off); on a texture change DeAttach + AttachImmImageData(`+0xf8`, image) + eCGfxEffect::Execute (the
+  pass); the mesh draw when count != 0: indexed list, base 0, min vertex 4 start, 4 count vertices, start index 6 start, 2 count
+  primitives, then start += count.
+* The sprite effect (inline HLSL, D3DXCreateEffectCompiler): **its technique handle `+0x20` is null** (Create never sets it), the HAL
+  rejects SetTechnique(null) as D3DX does, the technique stays the first; `g_mWorldViewProj` = SharedBase `bCMatrix::operator*(sprite
+  +0x48, device view)` (Flush 0x757e15; the view = slot 0x290 GetViewMatrix = the GUI's scale / offset from BeginFrame).
+* Vertices: (p0, u0 v0), (p1, u1 v0), (p3, u1 v1), (p2, u0 v1), stride 0x1c; **the declaration is FLOAT3 position** (CreateDelcaration
+  0x528cf0: FLOAT3 @0, D3DCOLOR @0x10, FLOAT2 @0x14), so bytes 0xc..0xf of each vertex are never read - RenderBatches leaves stack data
+  there (the xmm lane of a stack temporary); those 4 bytes are excluded from the byte comparison (counted: `w lanes differing`, every
+  vertex) and written as 1.0 by us. Indices 4q + (0, 2, 3, 0, 1, 2).
+* Composed at Flush's entry: the batches (`fxc::planSprites`), each DrawBatch's state on the device state at the entry, the vertex /
+  index bytes; compared per draw over every field class + the bytes of the buffers the draw reads; take-over issues them from our own
+  dynamic vertex buffer (the engine's offsets, DISCARD of the range) and our own static index buffer (generated), and drops the engine's.
+
+**Verification** (draws equal / compared; post = the 19 + 1 effect draws per frame, all field classes of section 13: 210 render
+states, sampled stages + 13 sampler states, every register the shaders read, bool / int, target, depth, viewport; GUI the same + vertex
+/ index bytes; 0 mismatches in every row; "own" = our draws re-captured and compared with their composition):
+
+| run | post draws (registers / stages / states) | GUI draws (flushes) | own draws, differing |
+|---|---|---|---|
+| compare, `rvk_menufps` (world, ESC menu, character screen, 3 quick loads) | 79,854 (0.50 M / 124 k / 16.8 M) | 84,795 (8,316) | - |
+| compare, 6 spots (pub_interior, jungle, harbour_night, beach_night_storm, lava_cave, hero_idle (clock)) | 173,295 (1.07 M / 265 k / 36.4 M) | 21,593 (6,488) | - |
+| compare, savegame Risen_Save_0009 (`rvk_perfsave` hold 30) | 70,368 | 16,243 (4,529) | - |
+| compare, `rvk_swim` + `upscale.mode=native_aa` | 67,154 | 19,807 (4,711) | - |
+| take-over + compare, `rvk_menufps`, **validation** (0 messages) | 67,978 | 77,540 (7,084) | 145,518, 0 |
+| take-over + compare, 4 spots, `upscale.mode=quality` (1066x600 -> 1600x900), **validation** (only the FSR DLL's known `rw_luma_history` warning) | 120,438 | 19,309 | 139,747, 0 |
+| take-over + compare, DefaultEffect HDRI, 2 spots, `-Snapshots 1500,2500` | 46,867 (14 jobs) | 20,015 | 66,882, 0 |
+| take-over + compare, **every group** (131071), savegame, **validation** (0) | 51,911 | 10,726 | 62,637, 0 |
+| take-over + compare, every group, pub_interior + jungle, **sync validation** (0 messages, no SYNC-) | 49,302 | 10,681 | 59,983, 0 |
+
+GUI per screen (`rvk_menufps` take-over, 5-s windows by `engine: menu state`): world HUD ~1,000 - 2,800 draws, ESC menu 3,904, the
+character screen 31,500 (its many icons / text: ~50 draws per flush), loading screens (`gui sprites (view None)`: RenderEdit, outside
+DoRender) 2,637 - 3,504 per window; batch breaks counted by cause (texture >> blend, buffer-full never at 4096 quads).
+
+**Images.** Same-frame switches (`-Commands '<N>: set native.scene_ops true'` with compare on, groups 98304; `out/n57/switch_*`,
+`out/n56/switch6.py`: 40-frame pairs before / across / after on the 8x8 blocks static in all four 20-frame same-mode pairs):
+
+| place | static blocks | before | across | after |
+|---|---|---|---|---|
+| pub_interior frozen (bloom, DoF, tone map) | 22,400 of 22,400 | 0.0071 | **0.0073** | 0.0076 |
+| sea_horizon frozen (sky, sun) | 22,400 | 0.0000 | **0.0000** | 0.0000 |
+| ESC menu (GUI only: the world is not rendered in the menu state) | 22,400 | 0.0000 | **0.0000** | 0.0000 |
+| character screen over the world | 21,311 | 0.0003 | **0.0004** | 0.0004 |
+| savegame, HUD (`-MaxFps 60`, 2400) | 3,634 | 0.0234 | **0.0243** | 0.0219 |
+
+`shot-reviewer` (x8 diff maps, crops of the candles' bloom, the sky, the HUD bars / compass, the character screen's text and icons;
+`out/n57/review`): no visible difference across any switch beyond the same-mode pairs; the HUD bars 0.01 in both pairs, text and
+icons identical at 2x, no letterbox bar, no colour shift; the savegame's whole-image luma drift (45.1 -> 45.6) is the eye adaptation.
+
+**Consumers**: FSR native AA and quality (frames upscaled at the same rate, the GUI at output size), the reactive mask, the menu frame
+rate limit and the unpaced loading screens (`engine: menu state` changes as without the take-over: menu 60 fps, loading unpaced), the
+engine snapshot (`-Snapshots 1500,2500`: two 1600x900 BMPs after the GUI, the `rvk_screenshot` self-tests PASS), the ImGui overlay
+(drawn at present, after the GUI; untouched).
+
+**Cost** (savegame, `-Exe RisenTest.exe -Vsync off -Perf`, `rvk_perfsave` hold 40, scene ops taken over, groups 32767 vs 131071, the last
+four 5-s `perf:` windows; machine idle, 1 % CPU before the runs (`sysprobe`)): GPU 1.56 vs 1.55 - 1.56 ms; CPU engine + HAL 7.10 - 7.17 vs
+7.38 - 7.41 ms (p50 frame 7.88 - 7.98 vs 7.34 - 8.19): **about +0.25 ms** for 20 effect draws and ~3 sprite flushes per frame (the
+parameter objects / graph walk per job, the record read + quad generation per flush; the engine's code still runs).
+
+Engine rules newly learned [C, checked]: the post filters' semantic parameters are computed by their class's Set and pushed straight
+to the API effect (not stored); the depth bound at Execute's entry is every texture-mode filter's depth; the scene job's off-screen
+pre-passes (terrain blur, shadow mask) run inside the Post view; DefaultEffect "Bloom" renders no world; the 1-draw overlay is
+OverlayMovieStrips at weight 1 (invisible at 16:9); eCGfxEffect::ms_bOptimize is false; the sprite effect's technique handle is null;
+a flush's first batch never re-sets blend mode 0; the sprite vertices' w lane is uninitialised and unread.
+
+**Not yet / open**: the overlay effects other than OverlayMovieStrips, RadialBlur / Wobble / Indicator / EdgeSmooth and the post-chain
+copy filters never ran (composed by the same rules where they are effect filters; copies stay the engine's); sorted sprite flushes
+(flags 0xe0) and the Bink video frames' sprites not met (the intros are skipped in test runs); who starts OverlayMovieStrips; as before
+the engine's code still runs for every taken-over unit.
+
+**Draws still made by the engine after N5.7** (every group on): the post_SSM PSSM point-light pass (only with lights that cast
+shadows, section 13); the point-light atlas's own target / clear (not draws); ops left by rule: first frames (buffers not created),
+not-yet-compiled permutations (compiled by the engine at that draw), particle ops without a live particle at the entry, VIEWPROJ /
+INVVIEWPROJ parameters; and the kinds never met: light streaks, strips with a shader, lit / instanced particle emitters, blended billboard
+ops, the other overlay effects' copies, sorted sprite flushes, the debug list, the item / character preview view (`eCRenderSystemAdmin::
+RenderEntity`, View::Preview) [I: not measured in these runs].
