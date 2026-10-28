@@ -598,6 +598,7 @@ void StaticOps::writeLighting(const sc::Pass& pass) {
 
 // eCMeshResource2::BindLightmaps 0x764220 (the admin's s4 / s5 slots updated as SetLightmap does)
 std::uint32_t StaticOps::bindLightmaps(const std::uint8_t* res) {
+    if (leanCollect_ && res != nullptr) leanLightmaps_.push_back(res);  // O2a: the engine's BindLightmaps(1) at the lean commit
     std::uint32_t combi = 0;
     for (std::uint32_t i = 0; i < 2; ++i) {
         U8* lm = ptr(res, 0x90 + 8 * i);
@@ -807,6 +808,7 @@ StaticOps::Skip StaticOps::materialSamplers(sc::DrawDesc& d, const std::uint8_t*
         U8* data = nullptr;
         if (res != nullptr) {
             data = ptr(res, 0x70);
+            leanImage(res, data);  // O2a: ExecuteShaderConstants' touch of the slot's image (+ the video / placeholder checks)
             if (data == nullptr) {
                 U8* ph = ptr(placeholderTable_, 8 * stage);
                 if (ph != nullptr && ptr(ph, 0x60) != nullptr) data = ph;
@@ -968,6 +970,7 @@ StaticOps::Skip StaticOps::subMeshDraws(const std::uint8_t* res, const std::uint
     U8* material = ptr(sub, 0x38);
     U8* shader = ptr(material, 0x70);
     if (ptr(res, 0x88) == nullptr || material == nullptr || shader == nullptr) return Skip::None;
+    leanTouch(material);  // O2a: eCSubMesh::Render's QueueData / CacheResource of the material (also done at request time)
     if (!shaderClassOk(shader)) return Skip::ShaderClass;
     U8* admin = ptr(shader, 0x220);
     if (admin != view_.admin) return Skip::Unreadable;
@@ -1051,6 +1054,7 @@ StaticOps::Skip StaticOps::materialDraws(const std::uint8_t* shader, const std::
     for (const auto& [bit, off] : kOverlays) {
         if ((flags & bit) == 0) continue;
         U8* ovRes = ptr(shader, off);
+        leanTouch(ovRes);  // O2a: OnGetPasses' RequestData(overlay, 1), every frame while the flag is set
         U8* ov = ptr(ovRes, 0x70);  // RequestData(res, 1) first (the engine's; it does not wait), then the shader if there is one
         if (ovRes == nullptr || ov == nullptr) continue;
         if (!shaderClassOk(ov)) return Skip::OverlayShader;
@@ -1113,6 +1117,7 @@ StaticOps::Skip StaticOps::meshZDraws(const std::uint8_t* res, std::uint32_t sub
     if (get<std::int32_t>(res, 0x38) != 3 || ptr(res, 0x88) == nullptr) return Skip::None;
     Geom geometry;
     if (!geometryOf(res, geometry, 0)) return Skip::Primitive;
+    leanStream3(res, false);  // O2a: RenderZPass' EnableStream(3, false) before the sub-mesh loop
     U8* subs = ptr(res, 0x58);
     const std::int32_t count = get<std::int32_t>(res, 0x60);
     const auto shaderOfSub = [&](std::uint32_t i, bool needCached) -> U8* {
@@ -1196,6 +1201,7 @@ StaticOps::Skip StaticOps::composeSolid(const Op& op) {
     const std::int32_t count = get<std::int32_t>(res, 0x60);
     if (node == 0xffffffu) {
         // eCMeshResource2::ExecuteRenderInstances 0x7607b0 (instances sorted once per frame by Render)
+        leanSortInstances(res);  // O2a: Render's in-place sort + res +0xa4 = 0 (then the composition reads the sorted list)
         const std::int32_t n = get<std::int32_t>(res, 0xb8);
         if (n <= 0) return Skip::None;
         if (static_cast<std::int32_t>(sub) >= count) return Skip::Unreadable;
@@ -1219,6 +1225,8 @@ StaticOps::Skip StaticOps::composeSolid(const Op& op) {
             }
             return Skip::None;
         }
+        leanStream3(res, true);  // O2a: the hardware path's EnableStream(3, true) before its batch loop
+        leanTouch(material);     // (each batch flush touches the material: once per frame is the same for the cache)
         std::vector<sc::Instance>& list = scr_.list;
         list.assign(static_cast<std::size_t>(n), sc::Instance{});
         for (std::int32_t i = 0; i < n; ++i) {
@@ -1323,10 +1331,11 @@ std::string_view StaticOps::leftReason(const Op* op) const {
     return op == leftOp_ ? leftWhy_ : std::string_view();
 }
 
-void StaticOps::opEnter(const Op& op) {
+bool StaticOps::opEnter(const Op& op) {
     leftGroup_ = Group::Count;
     leftCode_ = kLeftChecks;
     opEnterImpl(op);
+    leanAbort();
     leftOp_ = &op;
     if (op_ != &op) markLeft();
     if (op_ == &op && taken_) {
@@ -1345,6 +1354,7 @@ void StaticOps::opEnter(const Op& op) {
             leftWhy_ = leftName(leftGroup_, leftCode_);
         }
     }
+    return op_ == &op && slotSkipped_;
 }
 
 void StaticOps::opEnterImpl(const Op& op) {
@@ -1401,11 +1411,13 @@ void StaticOps::opEnterImpl(const Op& op) {
         std::memcpy(entryPsB_.data(), dev_.psBoolConstants(), sizeof(entryPsB_));
         std::memcpy(entryVsI_, dev_.vsIntConstants(), sizeof(entryVsI_));
         std::memcpy(entryPsI_, dev_.psIntConstants(), sizeof(entryPsI_));
+        leanBegin(Group::Sky);
         const Skip s = composeSky(op);
         blendOverrideShader_ = nullptr;
         blendOverride_ = -1;
         leftCode_ = static_cast<int>(s);
         if (s != Skip::None) {
+            leanAbort();
             ++g_->skips[static_cast<std::size_t>(s)];
             ++g_->window.opsNotComposed;
             drawCount_ = 0;
@@ -1432,6 +1444,7 @@ void StaticOps::opEnterImpl(const Op& op) {
             tag = saved;
             taken_ = true;
         }
+        if (taken_) leanCommit();
         return;
     }
     const bool fxKind = op.kind == OpKind::Particle || op.kind == OpKind::Strip || op.kind == OpKind::LightStreaks || op.kind == OpKind::Precipitation;
@@ -1488,10 +1501,12 @@ void StaticOps::opEnterImpl(const Op& op) {
     std::memcpy(entryVsI_, dev_.vsIntConstants(), sizeof(entryVsI_));
     std::memcpy(entryPsI_, dev_.psIntConstants(), sizeof(entryPsI_));
     skipWhy_.clear();
+    leanBegin(group);
     const Skip s = composeOp(op);
     maskRefShader_ = nullptr;
     leftCode_ = static_cast<int>(s);
     if (s != Skip::None) {
+        leanAbort();
         ++g_->skips[static_cast<std::size_t>(s)];
         if (s == Skip::Simulated) {
             simulatedOp_ = &op;
@@ -1520,13 +1535,18 @@ void StaticOps::opEnterImpl(const Op& op) {
         issue();
         taken_ = true;
     }
+    if (taken_) leanCommit();
 }
 
 void StaticOps::finishOp() {
     ++opSerial_;
     tagOverride_ = false;
+    const bool skipped = slotSkipped_;
+    slotSkipped_ = false;
+    leanCollect_ = false;
     if (op_ == nullptr) return;
-    if (g_ != nullptr && g_->compare && engineDraws_ != drawCount_) {
+    // (a lean op: the engine's code did not run, it made no draws to compare)
+    if (!skipped && engineDraws_ != drawCount_ && comparing()) {
         ++g_->window.mismatches[static_cast<std::size_t>(sc::Field::DrawCount)];
         if (mismatchLogged_ < 24) {
             ++mismatchLogged_;
@@ -1636,7 +1656,7 @@ bool StaticOps::engineDraw(const d3d9::DrawTapInfo& t, const Op* op) {
     if (op_ == nullptr || op != op_ || issuing_ || g_ == nullptr) return false;
     const std::uint32_t k = engineDraws_++;
     sc::CompareCounts& w = g_->window;
-    if (g_->compare) {
+    if (comparing()) {
         ++w.draws;
         if (k >= drawCount_) {
             // counted once per op in finishOp
@@ -1861,6 +1881,7 @@ void StaticOps::report() {
         spdlog::info("native: static ops: idle (the engine checks failed)");
         return;
     }
+    leanReport();
     static constexpr const char* kListNames[] = {"z", "solid", "debug", "sky", "refracted", "alpha", "late", "non-op"};
     if (active()) {
         spdlog::info("native: register file: mode {} ({}), engine code left to the engine {} times, {} registers merged from it (total), {} shaders' pools held",

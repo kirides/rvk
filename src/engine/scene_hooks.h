@@ -47,12 +47,14 @@ public:
     virtual ~OpTap() = default;
     virtual void executeBegin(void* db, void* desc) = 0;
     virtual void executeEnd(void* db) = 0;
-    virtual void opEnter(const void* op) = 0;
+    // true = the engine's slot is not run (O2a lean ops: the op was composed, issued and its side effects done by the tap)
+    virtual bool opEnter(const void* op) = 0;
     // a main-view non-op path of Execute begins / ends (eCDecalAdmin::RenderDecals: admin, db; eCBillboardAdmin::
     // RenderBillboards: admin, no db; inside its draw tag)
     // eCSkydome_PS::Render of a sky cube face (outside Execute: the property set, no db)
+    // true = the original is not called (O2a lean: composed, issued and its side effects done; nonOpEnd still follows)
     enum class NonOp : std::uint8_t { Decals, Billboards, SkyCube };
-    virtual void nonOpBegin(NonOp /*which*/, void* /*admin*/, void* /*db*/) {}
+    virtual bool nonOpBegin(NonOp /*which*/, void* /*admin*/, void* /*db*/) { return false; }
     virtual void nonOpEnd(NonOp /*which*/) {}
     // N5.5: a shadow map's eCFrustumDatabase::ExecuteShadowMap (0x66f630) begins (inside its Shadow view scope, before the
     // original: its z list is not sorted yet) / ends

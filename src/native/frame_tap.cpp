@@ -621,8 +621,8 @@ void FrameTap::beginView(void* db, void* desc, ViewKind kind, void* shadowMap, s
     if (statics_ != nullptr && staticsWanted_) statics_->viewBegin(db, desc, desc_);
 }
 
-void FrameTap::opEnter(const void* op) {
-    if (!executing_) return;
+bool FrameTap::opEnter(const void* op) {
+    if (!executing_) return false;
     if (Op* o = desc_.find(op); o != nullptr && !o->emptySlot) {
         if (o->kind == OpKind::Animation) o->state = animationState(*o);
         // N5.4: the SpeedTree / vegetation ops' draw conditions (the 0-draw ops checked at run time)
@@ -642,21 +642,23 @@ void FrameTap::opEnter(const void* op) {
     RawOp live;
     attr_.enterOp(op, safeRead(op, &live, sizeof(live)) ? &live : nullptr);
     if (statics_ != nullptr && staticsWanted_) {
-        if (const Op* o = desc_.find(op)) statics_->opEnter(*o);
+        if (const Op* o = desc_.find(op)) return statics_->opEnter(*o);  // O2a: true = lean (the engine's slot skipped)
     }
+    return false;
 }
 
-void FrameTap::nonOpBegin(NonOp which, void* admin, void* db) {
+bool FrameTap::nonOpBegin(NonOp which, void* admin, void* db) {
     if (which == NonOp::SkyCube) {
         // outside Execute (eCIlluminationAdmin::Process -> UpdateSkydomeEnvCubemap)
-        if (!executing_ && statics_ != nullptr && staticsWanted_) statics_->skyCubeBegin(admin);
-        return;
+        if (!executing_ && statics_ != nullptr && staticsWanted_) return statics_->skyCubeBegin(admin);
+        return false;
     }
-    if (!executing_ || nested_ > 0 || statics_ == nullptr || !staticsWanted_) return;
-    if (desc_.kind != ViewKind::Main) return;
-    if (which == NonOp::Decals && db == db_) statics_->decalsBegin(admin, db);
+    if (!executing_ || nested_ > 0 || statics_ == nullptr || !staticsWanted_) return false;
+    if (desc_.kind != ViewKind::Main) return false;
+    if (which == NonOp::Decals && db == db_) return statics_->decalsBegin(admin, db);
     // RenderBillboards takes no database: it runs inside the main view's Execute (not a nested one)
-    if (which == NonOp::Billboards) statics_->billboardsBegin(admin);
+    if (which == NonOp::Billboards) return statics_->billboardsBegin(admin);
+    return false;
 }
 
 void FrameTap::nonOpEnd(NonOp which) {

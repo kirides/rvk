@@ -220,6 +220,7 @@ StaticOps::Skip StaticOps::composeDecals(const std::uint8_t* admin, const std::u
                 if (slot < 0 || slot >= 16) return Skip::Unreadable;
                 poolsOf(defaultShader)->slotImage[static_cast<std::size_t>(slot)] = r.image;
             } else {
+                leanTouch(r.material);  // O2a: every record's material is touched, also without a shader
                 shader = ptr(r.material, 0x70);
                 if (shader == nullptr) continue;
             }
@@ -356,6 +357,7 @@ void StaticOps::nonOpGroupComposed(Skip s) {
     const auto group = static_cast<Group>(g_ - groups_.data());
     leftNonOpWhy_ = leftName(group, s != Skip::None ? static_cast<int>(s) : g_->takeOver ? kLeftChecks : kLeftCompareOnly);
     if (s != Skip::None) {
+        leanAbort();
         markLeft();
         ++g_->skips[static_cast<std::size_t>(s)];
         ++g_->window.opsNotComposed;
@@ -373,27 +375,35 @@ void StaticOps::nonOpGroupComposed(Skip s) {
         issue();
         taken_ = true;
     }
+    if (taken_) leanCommit();
 }
 
-void StaticOps::decalsBegin(void* admin, void* db) {
-    if (!nonOpGroupBegin(Group::Decals, admin)) return;
+bool StaticOps::decalsBegin(void* admin, void* db) {
+    if (!nonOpGroupBegin(Group::Decals, admin)) return false;
     if (decalsVerified_ == 0) decalsVerified_ = verifyDecals() ? 1 : -1;
     if (decalsVerified_ < 0) {
         g_ = nullptr;
-        return;
+        return false;
     }
+    leanBegin(Group::Decals);
+    leanDecalsPre(static_cast<U8*>(admin));  // O2a: the first-use buffers / default shader (else made by the engine's first call)
     nonOpGroupComposed(composeDecals(static_cast<U8*>(admin), static_cast<U8*>(db)));
+    return slotSkipped_;
 }
 
-void StaticOps::billboardsBegin(void* admin) {
+bool StaticOps::billboardsBegin(void* admin) {
     billboardAdmin_ = static_cast<U8*>(admin);
-    if (!nonOpGroupBegin(Group::Billboards, admin)) return;
+    if (!nonOpGroupBegin(Group::Billboards, admin)) return false;
     if (billboardsVerified_ == 0) billboardsVerified_ = verifyBillboards() ? 1 : -1;
     if (billboardsVerified_ < 0) {
         g_ = nullptr;
-        return;
+        return false;
     }
+    leanBegin(Group::Billboards);
+    leanBillboardsPre(static_cast<U8*>(admin));
     nonOpGroupComposed(composeBillboards(static_cast<U8*>(admin)));
+    if (slotSkipped_) leanBillboardsPost(static_cast<U8*>(admin));  // the queue reset (+0x28 = 0) RenderBillboards ends with
+    return slotSkipped_;
 }
 
 void StaticOps::nonOpEnd() {
@@ -517,6 +527,7 @@ StaticOps::Skip StaticOps::composeBillboards(const std::uint8_t* admin) {
         blendOverrideShader_ = nullptr;
         blendOverride_ = -1;
         if (r.keys.material != nullptr) {
+            leanTouch(r.keys.material);  // O2a: the record's material touched (QueueData / CacheResource), also without a shader
             shader = ptr(r.keys.material, 0x70);
         } else if (r.keys.image != nullptr) {
             shader = defaultShader;
@@ -587,6 +598,7 @@ StaticOps::Skip StaticOps::composeBillboardAlpha(const Op& op) {
     U8* shader = nullptr;
     if (material != nullptr) {
         if (get<std::int32_t>(material, 0x38) != 3) return Skip::NotCreated;  // RequestData(1) + not cached: no draw (the engine decides)
+        leanTouch(material);  // O2a: RenderBillboard's RequestData(material, 1)
         shader = ptr(material, 0x70);
     }
     blendOverrideShader_ = nullptr;

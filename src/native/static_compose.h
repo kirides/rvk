@@ -456,4 +456,38 @@ struct CompareCounts {
 // listNames: the names of the list indices (null: no per-list part)
 std::string summary(const CompareCounts& c, const char* const* listNames = nullptr, std::size_t listCount = 0);
 
+// ---- O2a lean ops (static_ops_lean.cpp) ----
+// native.lean_check = interval N: frame f runs the engine's code as before when N > 0 and f % N == 0 (a check frame: the compare
+// active) or (f + 1) % N == 0 (its warm-up frame: the engine's state carried into the check frame, e.g. the registers the last ops
+// of a frame leave for the first ops of the next, is the engine's own again; compare off); every other frame is lean
+enum class LeanFrame : std::uint8_t { Lean, Warmup, Check };
+inline LeanFrame leanFrameKind(std::uint64_t frame, int interval) {
+    if (interval <= 0) return LeanFrame::Lean;
+    const auto n = static_cast<std::uint64_t>(interval);
+    if (frame % n == 0) return LeanFrame::Check;
+    if ((frame + 1) % n == 0) return LeanFrame::Warmup;
+    return LeanFrame::Lean;
+}
+// the resource touches of a frame, once per resource and frame (direct-mapped: a collision only costs a repeated touch, which the
+// resource cache does not mind; the engine touches a slot's image at every shader change / dirty slot)
+template <std::size_t N>
+class TouchSet {
+    static_assert((N & (N - 1)) == 0, "N must be a power of two");
+public:
+    // true = the first touch of `resource` in `frame` (the caller then calls RequestData)
+    bool first(const void* resource, std::uint64_t frame) {
+        const std::uint64_t x = (reinterpret_cast<std::uintptr_t>(resource) >> 3) * 0x9E3779B97F4A7C15ull;
+        Entry& e = e_[static_cast<std::size_t>(x ^ (x >> 29)) & (N - 1)];
+        if (e.resource == resource && e.frame == frame) return false;
+        e = {resource, frame};
+        return true;
+    }
+private:
+    struct Entry {
+        const void* resource = nullptr;
+        std::uint64_t frame = 0;
+    };
+    std::array<Entry, N> e_{};
+};
+
 }  // namespace rvk::native::sc

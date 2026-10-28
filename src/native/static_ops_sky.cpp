@@ -263,6 +263,7 @@ StaticOps::Skip StaticOps::skyDomeDraw(const std::uint8_t* shader, const std::ui
 StaticOps::Skip StaticOps::composeSky(const Op& op) {
     U8* sky = ptr(op.raw.context, 0x18);  // the context's slot 0x6e8a10: eCSkydome_PS (+0x18), else nothing
     if (sky == nullptr || (get<std::uint8_t>(sky, 0x18) & 1) == 0) return Skip::None;
+    leanSkyPre(sky);  // O2a: Render's first-use creation and the cloud fields, before composing (the engine's order)
     if (get<std::uint8_t>(sky, 0x3cc) != 0) return Skip::SkyCamera;  // the cube camera (only in UpdateSkydomeEnvCubemap)
     // the camera: eCGfxCamera::ms_pActiveCamera (the main view's after ExecuteGfxCamera); Execute would render through a master
     U8* cam = ptr(engine::sym().gfxActiveCamera, 0);
@@ -276,7 +277,7 @@ StaticOps::Skip StaticOps::composeSky(const Op& op) {
     return composeSkyDraws(sky, cam);
 }
 
-void StaticOps::skyCubeBegin(void* skyPs) {
+bool StaticOps::skyCubeBegin(void* skyPs) {
     finishOp();
     GroupState& gs = groups_[static_cast<std::size_t>(Group::SkyCube)];
     if (!inView_ && !inSkyCube_) {
@@ -285,12 +286,12 @@ void StaticOps::skyCubeBegin(void* skyPs) {
     }
     if (!gs.active() || inView_ || inSkyCube_) {
         if (!inView_ && !inSkyCube_) markLeft();
-        return;
+        return false;
     }
     if (verified_ == 0) verified_ = verify() ? 1 : -1;
-    if (verified_ < 0) return;
+    if (verified_ < 0) return false;
     if (skyVerified_ == 0) skyVerified_ = verifySky() ? 1 : -1;
-    if (skyVerified_ < 0) return;
+    if (skyVerified_ < 0) return false;
     if (mirrorMode_ != 2) ++mirrorEpoch_;  // outside a view: the admin / shader pools re-read for the face
     U8* sky = static_cast<U8*>(skyPs);
     g_ = &gs;
@@ -302,6 +303,8 @@ void StaticOps::skyCubeBegin(void* skyPs) {
     nonOp_ = {};
     nonOp_.raw.context = sky;
     nonOp_.list = List::Count;
+    leanBegin(Group::SkyCube);
+    leanSkyPre(sky);  // O2a: Render's first-use creation and the cloud fields, before composing (the engine's order)
     Skip s = Skip::None;
     // the cube face: Render with +0x3cc = 1 draws through the cube camera +0x3c0 (its view at the origin, 90 deg, near 1, far
     // 1000); no fog executed (PS c3 / c4 as the pools hold them); the face's viewport (128 x 128) set before
@@ -325,6 +328,7 @@ void StaticOps::skyCubeBegin(void* skyPs) {
     inSkyCube_ = true;
     nonOpGroupComposed(s);
     if (s != Skip::None) inSkyCube_ = false;
+    return slotSkipped_;
 }
 
 StaticOps::Skip StaticOps::composeSkyDraws(const std::uint8_t* sky, const std::uint8_t* cam) {

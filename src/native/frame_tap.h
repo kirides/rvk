@@ -54,8 +54,8 @@ public:
     // N5.5: a shadow map's ExecuteShadowMap (its z list, sorted by the same qsort / comparator as the main z pass)
     void shadowExecuteBegin(void* db, void* shadowMap) override;
     void shadowExecuteEnd(void* db) override { executeEnd(db); }
-    void opEnter(const void* op) override;
-    void nonOpBegin(NonOp which, void* admin, void* db) override;
+    bool opEnter(const void* op) override;
+    bool nonOpBegin(NonOp which, void* admin, void* db) override;
     void nonOpEnd(NonOp which) override;
     // d3d9::DrawTap
     bool onDraw(const d3d9::DrawTapInfo& draw) override;

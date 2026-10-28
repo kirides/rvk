@@ -553,12 +553,12 @@ void contextSlot(void* context, const void* op, void* db) {
     if constexpr (e.pass != Pass::None) {
         PassScope pass(e.pass, e.name);
         if (tag.d != nullptr) {
-            if (OpTap* t = g_opTap.load(std::memory_order_relaxed)) t->opEnter(op);
+            if (OpTap* t = g_opTap.load(std::memory_order_relaxed); t != nullptr && t->opEnter(op)) return;  // O2a: lean, the slot skipped
         }
         g_slotOriginal[I](context, op, db);
     } else {
         if (tag.d != nullptr) {
-            if (OpTap* t = g_opTap.load(std::memory_order_relaxed)) t->opEnter(op);
+            if (OpTap* t = g_opTap.load(std::memory_order_relaxed); t != nullptr && t->opEnter(op)) return;
         }
         g_slotOriginal[I](context, op, db);
     }
@@ -625,7 +625,7 @@ void dynamicSlot(void* context, const void* op, void* db) {
     const DynamicSlot& e = g_dynamic[I];
     TagScope tag(e.source, context, op, 0x10);
     if (tag.d != nullptr) {
-        if (OpTap* t = g_opTap.load(std::memory_order_relaxed)) t->opEnter(op);
+        if (OpTap* t = g_opTap.load(std::memory_order_relaxed); t != nullptr && t->opEnter(op)) return;  // O2a: lean
     }
     e.original.load(std::memory_order_acquire)(context, op, db);
 }
@@ -702,8 +702,8 @@ void opSlot(void* context, const void* op, void* db) {
     if (d == nullptr) return original(context, op, db);
     const void* saved = d->drawTag().op;
     d->drawTag().op = op;
-    if (OpTap* t = g_opTap.load(std::memory_order_relaxed)) t->opEnter(op);
-    original(context, op, db);
+    OpTap* t = g_opTap.load(std::memory_order_relaxed);
+    if (t == nullptr || !t->opEnter(op)) original(context, op, db);  // O2a: lean = the slot skipped
     d->drawTag().op = saved;
 }
 
@@ -743,8 +743,8 @@ void detourSkydomeRender(void* self) {
     TagScope tag(Source::Sky, self, nullptr, 0x10);
     // a sky cube face (UpdateSkydomeEnvCubemap's view): the N5.2c scene ops compose it like the main view's sky op
     OpTap* t = tag.d != nullptr && tag.d->phases().view() == View::SkyCube ? g_opTap.load(std::memory_order_relaxed) : nullptr;
-    if (t != nullptr) t->nonOpBegin(OpTap::NonOp::SkyCube, self, nullptr);
-    g_skydomeRender.original(self);
+    const bool skip = t != nullptr && t->nonOpBegin(OpTap::NonOp::SkyCube, self, nullptr);
+    if (!skip) g_skydomeRender.original(self);
     if (t != nullptr) t->nonOpEnd(OpTap::NonOp::SkyCube);
 }
 
@@ -766,8 +766,9 @@ Hook<DecalsFn> g_decalsRender;
 bool detourDecalsRender(void* admin, void* db) {
     TagScope tag(Source::Decal, admin, nullptr, 0);
     OpTap* t = tag.d != nullptr ? g_opTap.load(std::memory_order_relaxed) : nullptr;
-    if (t != nullptr) t->nonOpBegin(OpTap::NonOp::Decals, admin, db);
-    const bool r = g_decalsRender.original(admin, db);
+    // O2a lean: composed, issued and its side effects done (the original not called; Execute ignores the result)
+    const bool skip = t != nullptr && t->nonOpBegin(OpTap::NonOp::Decals, admin, db);
+    const bool r = skip ? true : g_decalsRender.original(admin, db);
     if (t != nullptr) t->nonOpEnd(OpTap::NonOp::Decals);
     return r;
 }
@@ -777,8 +778,8 @@ Hook<BillboardsFn> g_billboardsRender;
 bool detourBillboardsRender(void* admin) {
     TagScope tag(Source::Billboard, admin, nullptr, 0);
     OpTap* t = tag.d != nullptr ? g_opTap.load(std::memory_order_relaxed) : nullptr;
-    if (t != nullptr) t->nonOpBegin(OpTap::NonOp::Billboards, admin, nullptr);
-    const bool r = g_billboardsRender.original(admin);
+    const bool skip = t != nullptr && t->nonOpBegin(OpTap::NonOp::Billboards, admin, nullptr);
+    const bool r = skip ? true : g_billboardsRender.original(admin);
     if (t != nullptr) t->nonOpEnd(OpTap::NonOp::Billboards);
     return r;
 }

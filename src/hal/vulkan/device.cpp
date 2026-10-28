@@ -179,6 +179,8 @@ void HalDevice::applyStaticOps() {
     frameTap_->setEffectOpsActive(effectOps_->active());
     // O1: the register file's source; the coverage counter only where it is read (a compare, the tap's own report, or asked for)
     staticOps_->setMirrorMode(rs.nativeMirror != nullptr ? rs.nativeMirror->asInt() : 0);
+    // O2a: the engine's slot code skipped for the composed mesh-like ops (per op: only where the group takes over)
+    staticOps_->setLean(on(rs.nativeLean), rs.nativeLeanCheck != nullptr ? rs.nativeLeanCheck->asInt() : 0);
     frameTap_->setCoverage(on(rs.nativeCoverage) || on(rs.nativeFrameTap) || compare || sceneCompare);
 }
 
@@ -440,7 +442,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     effectOps_ = std::make_unique<native::EffectOps>(*this);
     frameTap_->setEffectOps(effectOps_.get());
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups,
-                                 rs.nativeMirror, rs.nativeCoverage, rs.nativeFrameTap}) {
+                                 rs.nativeMirror, rs.nativeCoverage, rs.nativeFrameTap, rs.nativeLean, rs.nativeLeanCheck}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
     // renderer.mode (Wrapper / Full): like the native.* settings applied by the registry's dispatch before a present, i.e. at a

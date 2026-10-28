@@ -88,14 +88,22 @@ public:
     // driven by the frame tap (native/frame_tap): a main view's Execute begins / ends; the engine enters an op's slot
     void viewBegin(void* db, void* desc, const FrameDesc& view);
     void viewEnd();
-    void opEnter(const Op& op);
+    // true = lean (O2a): the op was composed and issued and its side effects done, the engine's slot is not to be run
+    bool opEnter(const Op& op);
     // eCDecalAdmin::RenderDecals / eCBillboardAdmin::RenderBillboards of the main view begins (inside its draw tag, before the
-    // engine's code) / either ends
-    void decalsBegin(void* admin, void* db);
-    void billboardsBegin(void* admin);
+    // engine's code) / either ends; true = lean (the original not to be called)
+    bool decalsBegin(void* admin, void* db);
+    bool billboardsBegin(void* admin);
     // eCSkydome_PS::Render of a sky cube face (UpdateSkydomeEnvCubemap, outside Execute: the cube camera +0x3c0) begins; its
-    // draws (view SkyCube) go to cubeDraw; nonOpEnd ends it
-    void skyCubeBegin(void* sky);
+    // draws (view SkyCube) go to cubeDraw; nonOpEnd ends it; true = lean
+    bool skyCubeBegin(void* sky);
+    // O2a lean ops (native.lean, native.lean_check; docs/research/engine-frame/opt-plan.md "O2a result"): for an op of the
+    // mesh-like groups (static, alpha / refracted mesh, overlays, decals, sky, billboards, sky cube) that was composed and
+    // issued, the engine's slot / non-op code is not run; its non-drawing side effects are run here instead (resource touches,
+    // lightmaps, stream 3, the instance sort, the billboard queue reset, the sky's cloud fields and first-use creation:
+    // opt-side-effects-mesh.md 7). check = N: every N-th frame the engine's code runs as before (its draws dropped, the
+    // compare active), 0 never.
+    void setLean(bool on, int check);
     bool inSkyCube() const { return inSkyCube_; }
     void nonOpEnd();
     // an engine draw of the main view (op = the executing op, null: none); true = drop it (we drew the op ourselves)
@@ -355,6 +363,64 @@ private:
     d3d9::draws::Tag tagOverrideValue_{};
     void finishOp();
     void issue();
+    // ---- O2a lean ops (static_ops_lean.cpp) ----
+    bool lean_ = false;
+    int leanCheck_ = 0;
+    std::uint64_t leanFrameNo_ = ~0ull;
+    sc::LeanFrame leanFrameKind_ = sc::LeanFrame::Lean;
+    bool leanFrameOn_ = false;
+    void leanUpdateFrame();
+    // the compare runs (with lean on: only on check frames; on the other frames the engine's draws of the ops it still runs see
+    // the device the lean ops left, not the engine's own: opt-plan.md "O2a result")
+    bool comparing() {
+        if (g_ == nullptr || !g_->compare) return false;
+        if (!lean_) return true;
+        leanUpdateFrame();
+        return leanFrameKind_ == sc::LeanFrame::Check;
+    }
+    int leanVerified_ = 0;  // the engine functions the lean path calls: 1 resolved, -1 not (never lean)
+    bool leanFrame();       // lean on and this frame is not a check frame
+    static bool leanGroup(Group g);
+    // the op being composed is a lean candidate: the side effects its engine code would have are collected while composing
+    // (leanBegin) and run when its draws were issued by us (leanCommit: true = the engine's code is skipped)
+    bool leanCollect_ = false;
+    enum LeanBlock : std::uint32_t { kBlockVideo = 1 };
+    std::uint32_t leanBlock_ = 0;
+    std::vector<const void*> leanTouches_, leanLightmaps_;
+    struct LeanStream3 {
+        void* primitive;
+        bool on;
+    };
+    std::vector<LeanStream3> leanStream3_;
+    bool slotSkipped_ = false;  // the current op's / unit's engine code was skipped
+    void leanBegin(Group g);
+    bool leanCommit();
+    void leanAbort() { leanCollect_ = false; }
+    void leanTouch(const void* resource) {
+        if (leanCollect_ && resource != nullptr) leanTouches_.push_back(resource);
+    }
+    void leanImage(const void* resource, const void* imageData);  // a bound image: touch + video check + placeholder count
+    void touchNow(const void* resource);  // eCResource2::RequestData(resource, 1) once per frame
+    sc::TouchSet<8192> touched_;
+    // first use / the S writes the engine's code makes before its draws (run before composing)
+    void leanDecalsPre(const std::uint8_t* admin);
+    void leanBillboardsPre(const std::uint8_t* admin);
+    void leanSkyPre(const std::uint8_t* sky);
+    void leanBillboardsPost(const std::uint8_t* admin);
+    void leanSortInstances(const std::uint8_t* res);
+    void leanStream3(const std::uint8_t* res, bool on);
+    struct LeanStats {
+        std::uint64_t frames = 0, checkFrames = 0;
+        std::array<std::uint64_t, kGroups> skipped{}, kept{};
+        std::uint64_t blockedVideo = 0, touches = 0, touchCalls = 0, lightmaps = 0, stream3 = 0, instanceSorts = 0, queueResets = 0;
+        std::uint64_t placeholderBinds = 0, skyWrites = 0, creates = 0;
+        std::int32_t queueMax = 0;
+    } leanWindow_, leanTotal_;
+    std::vector<const void*> placeholderImages_;  // distinct resources bound as the placeholder in the window (bounded)
+    std::vector<std::string> placeholderNames_;   // the first ones' names, read while bound (a load may free them before the report)
+    std::uint32_t videoLogged_ = 0, placeholderLogged_ = 0;
+    void leanReport();
+    const std::uint8_t* leanSky_ = nullptr;  // the last sky the lean path wrote (its cloud fields reported)
     // per-op working storage of the compositions, kept across ops (O1: no heap traffic per op once warm)
     struct Scratch {
         std::vector<sc::Pass> passes;  // materialDraws

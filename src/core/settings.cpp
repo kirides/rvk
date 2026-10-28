@@ -1839,6 +1839,32 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 2,
         .flags = Flag::NoAB | Flag::Debug,
     });
+    r.nativeLean = &reg.add({
+        .key = "native.lean",
+        .label = "Native frame: lean ops",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "O2a (docs/research/engine-frame/opt-plan.md): for the composed ops of the mesh-like groups (static meshes, alpha / "
+                       "refracted meshes, overlays, decals, sky, billboards, sky cube faces) the engine's render code is not run at all; "
+                       "its side effects (texture / material touches, lightmaps, stream 3, the instance sort, the billboard queue reset, "
+                       "the sky's clouds and first-use creation) are run by the renderer. rvk.log `native: lean` every 5 s.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
+    r.nativeLeanCheck = &reg.add({
+        .key = "native.lean_check",
+        .label = "Native frame: lean check interval",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "With native.lean: every N-th frame the engine's code runs as before (its draws dropped), so that a compare setting "
+                       "proves the composition still equals the engine's on those frames; 0 = never.",
+        .type = Type::Int,
+        .defaultValue = 0,
+        .min = 0,
+        .max = 1000,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
     r.nativeCoverage = &reg.add({
         .key = "native.coverage",
         .label = "Native frame: coverage counter",

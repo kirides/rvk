@@ -384,6 +384,31 @@ TEST(static_switch_and_constants) {
     CHECK(out[0][3] == 0.25f * 0.5f + 1.5f && out[2][3] == 0.25f * 1.0f);
 }
 
+TEST(static_lean_check_frames_and_touch_set) {
+    using namespace rvk::native;
+    // native.lean_check: 0 = never a check frame; N = every N-th frame (frame 0 included), the frame before it a warm-up frame
+    using LF = sc::LeanFrame;
+    CHECK(sc::leanFrameKind(0, 0) == LF::Lean && sc::leanFrameKind(7, 0) == LF::Lean && sc::leanFrameKind(5, -3) == LF::Lean);
+    CHECK(sc::leanFrameKind(0, 10) == LF::Check && sc::leanFrameKind(30, 10) == LF::Check && sc::leanFrameKind(31, 10) == LF::Lean);
+    CHECK(sc::leanFrameKind(29, 10) == LF::Warmup && sc::leanFrameKind(28, 10) == LF::Lean);
+    CHECK(sc::leanFrameKind(5, 1) == LF::Check && sc::leanFrameKind(6, 1) == LF::Check);
+    CHECK(sc::leanFrameKind(4, 2) == LF::Check && sc::leanFrameKind(5, 2) == LF::Warmup);
+    // a resource is touched once per frame, again in the next frame
+    auto set = std::make_unique<sc::TouchSet<64>>();
+    int a = 0, b = 0;
+    CHECK(set->first(&a, 1));
+    CHECK(!set->first(&a, 1));
+    CHECK(set->first(&b, 1));
+    CHECK(!set->first(&b, 1));
+    CHECK(set->first(&a, 2));
+    CHECK(!set->first(&a, 2));
+    // many resources: each first touch reported (collisions may report a repeat, never miss a first one)
+    std::vector<int> many(1000);
+    int firsts = 0;
+    for (int& x : many) firsts += set->first(&x, 3) ? 1 : 0;
+    CHECK(firsts == 1000);
+}
+
 TEST(static_register_runs_merge_across_words) {
     std::vector<std::pair<std::uint32_t, std::uint32_t>> runs;
     const auto collect = [&](const std::array<std::uint64_t, 4>& m) {
