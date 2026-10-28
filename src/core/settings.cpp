@@ -1795,7 +1795,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "(the image-effect graphs' filters: luminance, bloom, streaks, tone map, DoF, overlay effects), 65536 the sprite batcher "
                        "(GUI, text, cursor, loading screens, videos).",
         .type = Type::Int,
-        .defaultValue = 32767,
+        .defaultValue = 131071,
         .min = 0,
         .max = 131071,
         .flags = Flag::NoAB | Flag::Debug,
