@@ -461,3 +461,11 @@ no unprofiled gain (Full 5.69 - 5.77 ms lean off vs 5.74 - 5.76 on; profiled Exe
 double work is in the SpeedTree / vegetation / shadow-view slots and the effect units (O2b / O2c / O3). The machine measured ~0.3 ms
 slower in that session than at O1 (the O1 DLL: 5.48 at O1, 5.82 in the O2a session): compare runs of one session only. Recipe:
 `out/o2a/batch.ps1`, `out/o2a/table.py`.
+
+O2b (2026-10-28, opt-plan.md "O2b result"): `native.lean` now also skips the actors', SpeedTrees', tree billboards', vegetation's,
+particles', strips', light streaks' and rain's slots and every shadow-view z op (~470 slots per frame at the savegame) and is **on by
+default in Full** (off with a compare unless `native.lean_check` is set). At the savegame (same session, 3 runs each): Wrapper 3.39 ms,
+Full lean off 5.66, lean on **4.97** (fps 169 -> 192); jungle spot 3.63 / 6.92 / **5.77**. Of the gain: the engine's slot code
+(Engine.dll self 1.17 -> 0.74 ms profiled), a device sampler cache that the per-op restore's state flip-flop defeated (now a two-entry
+memo per stage; `native.lean_restore=false` = the restore's A/B: +0.09 ms left), the frame tap's per-op `std::format` notes on lean
+frames (now formatted only while kept). Recipe: `out/o2b/batch.ps1` (`name|mode|settings|save or jungle`), `out/o2b/table.py`.

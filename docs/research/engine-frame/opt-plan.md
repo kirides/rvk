@@ -244,3 +244,106 @@ on once O2b gives a gain.
   creation), precipitation; the SpeedTree c40 carry-over above; then dropping the per-op restore (cache invalidation before engine code).
 * O2c: the shadow views (their z ops lean inside ExecuteShadowMap), the mask / PSSM (`UpdatePackedShadowMapVisual` -> return false).
 * O3: the effect units / post chain and the sprite batcher without the engine's ExecuteEffect / Flush; the focus indicators' draws.
+
+## O2b result (2026-10-28): lean animated groups + shadow views
+
+Commits 9e582c4 (the groups + the pool sync + the c40 fix), f932309 (lean on by default in Full, the sampler memo, lazy tap notes),
+f3056a2 (the tap's attribution of lean ops) on `feat/native-scene`. Logs, scripts, the DLL / PDB of every profiled run: `out/o2b/`
+(`compare.ps1` / `check.py` compare runs, `behaviour.ps1`, `extra.ps1` coverage / tap, `switch.ps1`, `batch.ps1` + `table.py` perf).
+
+**`native.lean` is now on by default** (Debug | NoAB; it acts only where a group takes over, i.e. Full; Wrapper unchanged). A compare
+(`native.static_ops_compare` / `native.scene_ops_compare`) without `native.lean_check` keeps it off (rvk.log `native: lean ops off: a
+compare is on ...`): the compare needs the engine's code. `native.lean_restore` (Debug, default on) is the A/B switch of the per-op
+device restore (below).
+
+### Per kind: the side effects run by us, at the slot's place ([G] seen in game, [C] code only)
+
+All in the main view **and** in the shadow maps' z lists (group 512: cascades, terrain map, atlas cells use the same slots inside
+ExecuteShadowMap; `leanGroup(ShadowViews)`), only for reached ops, in op order. The engine functions are bound by decorated name and
+checked against their RVAs and call sites at first use (`verifyLeanAnim`: 15 sites, eCParticle_PS vtable +0x248 = OnProcess); a failed
+check keeps those groups' engine code (O2a's groups stay lean).
+
+| kind | side effects (engine function / write) | where | verified |
+|---|---|---|---|
+| skinned actors | `UpdateRenderMatrices(wrapper, frame id)` 0x4dfee0 when the resource has a HardRenderActor2 (palette + stamp, self-guarded: the composition then always reads the stored palette); when it returns true: `RequestData(HRA +0, 1)`, cached: `RequestData(LOD primitive's material, 1)`; overlay materials (OnGetPasses) as O2a | before composing (immediate touches: the composition reads the states after them, as HRA::Render does) | [G] 13 k - 33 k palette calls per 5 s; `rt: skin verify` lean on / off the same error distribution (max 0.0079 / 0.0117 units, `rt1` / `rt0`) |
+| SpeedTree | the queue (`+0xb8` / `+0xd0`) sorted in place with the engine's qsort + SortInstances / SortInstancesZPass and the stamp `+0xe0` / `+0xe4` = 0 at the render buffer's first op (before the type dispatch, as the slot); the type material's `RequestData(1)` (after the queue / visual / wrapper checks, before the shader is read); MaskReference 80 with the two property notifies (vtable +0xb0 / +0xb8, property 0x97bb98) when the TransformationType check passes and the byte is not 80 yet; the shadow fronds rule (nothing) | in the composition (the sort replaces its copy sort; idempotent for a fallback slot: the stamp is 0) | [G] sorts 16 k - 28 k per 5 s; MaskReference: [G] 80 in every material met (0 stores: already 80 at the first lean op), the store path [C] |
+| tree billboards | `RequestData(billboard mesh, 1)`; then the static z / solid paths' O2a side effects (BindLightmaps, stream 3, sub-mesh touches); no sub-mesh shader: the engine's code (edge) | composition | [G] (68 edge ops in one `rvk_rare` window while loading) |
+| vegetation | the shared buffer's cursor `vegAdmin +0x40` = `planGrass`'s end cursor (only with the admin's buffer `+0x38`), written at the commit; per drawn op `RequestData(type mesh, 1)`, cached + visual + buffer: the first sub-mesh material's | composition / commit | [G] 7 k - 28 k cursor writes per 5 s, compare clean on the check frames (the batch splits depend on it) |
+| particles | Render's steps: `+0x29d == 1`: `GetMasterInstance(module, PS)` (creates the hidden master; null: done); `+0x29d == 0` and no live particle: the PS's OnProcess (vtable +0x248); `+0x3ac = 0`; UpdateVertices(target): `CreateVertices` before composing (false: the engine's code), the live array's `DepthSortParticles` at the commit (the same qsort the composition ran on its copy: identical order), our own per-target vertex cache for the frame (`+0x3b0` untouched: a fallback slot fills the engine's buffer itself); with quads: `CreateMaterial`, `RequestData(+0x450, 1)`, for an eCShaderParticle `CreateImage` + the sampler material's SetImage; the class pool c31..c60 as the op wrote it written back into `eCShaderParticle::ms_pGlobalShaderConstants` (the next op's composition reads it); an already updated target without quads: the engine's code (edge) | composition / commit | [G] 2 k - 12 k inactivity resets / depth sorts per 5 s, masters 611 per 5 s in `rvk_rare` (instanced emitters, compare clean), in-slot simulations up to 1,140 per 5 s (spawned 0: their own OnProcess had run that tick), images created [G], vertex reuse [C] (no master drawn twice in a frame met) |
+| strips | `CreateVertices` (false: engine's code), with the visual `RequestData(material, 1)` | composition | [G] strip creates 4 |
+| light streaks | with material + illumination: `CreateBuffers` (false: done), `RequestData(+0x70, 1)`; the world c31..c33 written back into eCShaderLightStreaks' pool | composition / commit | [C] (buffers already made by earlier engine frames in every run; the engine draws none) |
+| precipitation | nothing (FillVertexBuffer's dirty flag is read only by itself) | - | [G] |
+
+**The engine's pools on lean frames.** The lean ops do not write the engine's global (c31..c231) / lighting (c14..c37) pools, so they
+lag. Before engine code runs on a lean frame (an op / unit left to it: `markLeft`), the register file is copied into them (`syncEnginePools`,
+one 3.6 KB copy, ~1 per frame at the savegame) and becomes the snapshot: the engine code starts from what lean off would have had and
+every register it changes is merged back. The particle / light-streak class pools are written back per op instead (above).
+
+**The c40 carry-over (O1 / O2a, lean off).** `markLeft` returned early while `view_.admin` was null: `viewBegin` resets the view and
+`composeView` sets it at the view's first composed op, so an op left to the engine before that (after a teleport: a permutation not yet
+compiled) wrote the global pool unseen and its writes never reached the register file (`ST_Bark_07 / 08` c40.x = the instance slot 2
+carried from that op). Fixed: `markLeft` no longer needs the view; the lightmap slots come from the last view's admin (`poolAdmin_`).
+The lean-off route (`r0_route`, 10.1 M draws) now has 0 mismatches (O2a: 20 of 2.77 M SpeedTree draws).
+
+### The per-op save / restore: kept, its cost removed by a device cache
+
+`native.lean_restore=false` (no restore around a lean op's draws: the engine's caches then lie for the code that still runs; A/B only)
+measured 5.46 -> 5.24 ms at the savegame. Most of it was not the restore but its side effect: every op flipped each sampled stage
+between the engine's states and the composed ones, so the device's per-slot sampler cache missed every draw (`lookupSamplerStates`:
+hash + lock, 0.11 ms profiled). `d3d9::Device` now keeps the last two state rows per slot (`samplerMemo_`, a memcmp hit): restore on
+5.34, off 5.25 (the remaining ~0.09 ms are the setters). Dropping the restore safely needs the engine's state caches invalidated
+before every engine entry (fallback slots, brackets, effect units, HAL calls): not worth 0.09 ms; the restore stays.
+
+Also found by the profile: the frame tap's attribution formatted a `std::format` note for every lean op ("0 draws, not explained",
+~0.15 ms on lean frames; only the first 12 per view are kept): notes are now formatted only while kept, and a lean op is attributed
+as such (0 engine draws expected: `native: frame tap` windows clean with lean on).
+
+### Verification (lean on, `native.lean_check=10`, every group taken over + compared; `out/o2b/l1_*.log`, `check.py`)
+
+| run | draws | result |
+|---|---|---|
+| pub_interior + jungle, actors shown (`l1_spots`) | 4.1 M | every group 0 mismatches in every field class, own draws = composition |
+| savegame Risen_Save_0009 hold 30 (`l1_save`) | 4.7 M | 0 |
+| `rvk_spells` / `rvk_rare` (validation) / `rvk_pointshadow` | 4.3 M / 11.6 M / 4.9 M | 0; validation 0 |
+| storm set / `rvk_menufps` (PASS) | 4.1 M / 4.2 M | 0 |
+| the rvkcompare route, all spots (`l1_route`) | 10.5 M | 0 |
+| `rvk_rtwalk` / with RT shadows near + `debug.rt_skin_verify` lean on / off (`rt1` / `rt0`, Stormy_Rain, 60 s) | 2.2 M / 6.9 M / 6.1 M | 0; skin verify and `rt: scene:` tree captures equal |
+| lean off: the route (`r0_route`) | 10.1 M | 0 (the c40 fix) |
+| savegame `-Validation` / `rvk_pointshadow` `-SyncValidation` (no RT shadows; `v1_*`) | 2.6 M / 2.8 M | 0 messages, no SYNC- hazard |
+
+**Behaviour.** Placeholder binds on the route lean on: 265 (load), 41, 59, 32, 13 after teleports, else 0 (O2a lean / off: the same
+transients). Particles: `rvk_spells` lean on vs off (`l1_spells` / `s0_spells`): 84,678 / 82,210 particle ops, 16.7 / 16.4 quads per
+op, the orientation / space / frame-blend split proportional; the emitters with no live particle at entry are now composed (0 quads)
+instead of left. Same-frame switch lean off -> on at 4660 (frozen holds, `switch.ps1`): pub_interior static blocks 0.0062 before /
+**0.0061** across / 0.0059 after, jungle 0.0006 / **0.0000** / 0.0000; `shot-reviewer` (sbs `out/o2b/review/`): no texture, lightmap,
+tree / leaf / grass, shadow, candle or character change. Burst sequences lean off vs on at harbour_night / hero_idle / pub_idle
+(`out/water/20261028-135321`): torches, candles, NPCs, the hero the same (exposure / clock differences only). RT: skin verify and tree
+captures equal (above).
+
+**Coverage leftovers** (engine draws per run, `native.coverage`, `cov0_*` lean off / `cov1_*` lean on): savegame 778 -> 578, `rvk_rare`
+746 -> 699. Gone: particles "buffers not created yet" (25 / 57) and the "simulated inside the slot" / "master created in the slot" ops
+(0-draw ops before, now composed). Left: "permutation not compiled" (the engine compiles inside its slot: 211 static, 132 shadow
+views, 129 trees, 48 actors, 30 vegetation, 14 alpha at the savegame) and first-frame cases (sky / cube / particles "unreadable" 2 - 8).
+
+### Perf (savegame, `-Exe RisenTest.exe -Vsync off -Perf`, hold 40, machine idle: `sysprobe` 3 % / nothing else busy; last 6 windows)
+
+| run | engine+HAL ms | GPU ms |
+|---|---|---|
+| Wrapper (3 runs) | 3.41 / 3.29 / 3.46 | 1.49 - 1.63 |
+| Full, lean off (3 runs) | 5.61 / 5.64 / 5.74 | 1.49 - 1.53 |
+| Full, lean on (3 runs) | **4.83 / 5.10 / 4.98** | 1.49 - 1.55 |
+| profiled Full lean off / on | 6.09 / 5.27; Engine.dll self 1.17 / 0.74, ours 2.89 / 2.62 | |
+| jungle (rvkcompare spot hold, last 4 windows): Wrapper / Full lean off / lean on | 3.63 / 6.92 / **5.77** | 1.88 - 1.95 |
+
+Full lean on is 0.69 ms (12 %) cheaper than lean off at the savegame (fps 169 -> 192; Full - Wrapper +2.27 -> +1.58 ms) and 1.15 ms
+(17 %) in the jungle, where trees dominate. Steps (same session): O2b groups alone 5.69 -> 5.42; + sampler memo 5.34; + the tap's lazy
+notes 4.97. Per frame at the savegame ~470 slots are skipped (main view + shadow views: 152 trees, 109 shadow-view z ops, 137
+static, 22 actors, 28 vegetation, 12 particles, ...).
+
+### Left for O2c / O3
+
+* O2c: the shadow mask / PSSM (`UpdatePackedShadowMapVisual` -> return false: the engine's PSSM loop); the "permutation not compiled"
+  leftovers (drive the engine's compile of a missing permutation where ExecutePass does it, so the op can be lean in the same frame).
+* O3: the effect units / post chain (`effectBegin` 6.7 % of the profiled frame, the units' device capture) and the sprite batcher
+  without the engine's ExecuteEffect / Flush; the focus indicators' draws. With most engine code gone, then the restore (cache
+  invalidation at the engine's entries) and the tap's copy + resolve.
