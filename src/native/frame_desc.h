@@ -36,6 +36,17 @@ const char* name(List l);
 // the phase pass the list's draws happen in (frame-phases.md: the refracted ops mark their own pass)
 d3d9::scene::Pass listPass(List l);
 
+// N5.5: the view an op snapshot belongs to: the main camera's eCFrustumDatabase::Execute, or the z list of a shadow map's
+// eCFrustumDatabase::ExecuteShadowMap (0x66f630: qsort of +0x1518 with 0x66e670, then RenderZPass per op; E-shadows-lights-sky.md
+// 2.3), classified by the shadow map's vtable: a sun cascade split (eCShadowMapDirectionalLight2Ex 0x9a29e0, embedded in the
+// eCCascadeShadowMap's split array), the terrain variance map (eCShadowMapDirectionalLight2VS 0x9a2848), the point-light atlas
+// (eCPackedShadowMap 0x976738: one ExecuteShadowMap per cell), any other shadow map
+enum class ViewKind : std::uint8_t { Main, Cascade, Terrain, PointAtlas, OtherShadow, Count };
+inline constexpr std::size_t kViewKindCount = static_cast<std::size_t>(ViewKind::Count);
+const char* name(ViewKind k);
+// a shadow view's draws are in the Shadow view's ShadowDepth pass (engine/scene_hooks: ExecuteShadowMap's scope)
+d3d9::scene::Pass viewListPass(ViewKind view, List l);
+
 // the render context class of an op (from the context's vtable; D-contexts.md 0.1)
 enum class OpKind : std::uint8_t {
     Unknown,
@@ -149,8 +160,14 @@ bool cannotDraw(const Op& op);
 // the ops of one main-view Execute
 struct FrameDesc {
     std::uint64_t frame = 0;        // the device's present count when it was taken
-    std::uint32_t view = 0;         // n-th main view of the frame (1 = the first)
+    std::uint32_t view = 0;         // n-th view of its kind in the frame (1 = the first)
     const void* db = nullptr;       // eCFrustumDatabase*
+    ViewKind kind = ViewKind::Main;
+    // shadow views: the eCShadowMapBase ExecuteShadowMap renders, its cascade index (-1: not a cascade), its eCDepthMap format
+    // (+8: 3 D16, 4 D24S8, 5 DF16, 6 DF24 are depth formats; BeginZPass writes colour for the others) and size (+0xc)
+    const void* shadowMap = nullptr;
+    std::int32_t cascade = -1;
+    std::int32_t mapFormat = -1, mapSize = 0;
     bool zPrepass = true;           // caps 0x1590: Execute runs the z list
     bool valid = false;
     std::array<const std::uint8_t*, kListCount> liveData{};  // the engine's arrays at Execute's entry
@@ -267,6 +284,6 @@ bool explainedWithoutOp(d3d9::draws::Kind kind);
 std::string describe(const Op& op);
 // the report lines (rvk.log `native: frame tap: ...`)
 std::vector<std::string> reportLines(const TapCounts& last, std::uint64_t lastFrame, const TapCounts& window,
-                                     const std::vector<std::string>& mismatches);
+                                     const std::vector<std::string>& mismatches, ViewKind view = ViewKind::Main);
 
 }  // namespace rvk::native

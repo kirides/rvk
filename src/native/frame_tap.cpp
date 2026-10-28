@@ -9,6 +9,7 @@
 #include <spdlog/spdlog.h>
 
 #include "engine/memread.h"
+#include "engine/shadow_maps.h"
 #include "engine/symbols.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "native/static_ops.h"
@@ -41,6 +42,13 @@ constexpr SortSite kSortSites[] = {
     {0x66edbe - kExecuteRva, 0x66e6a0, List::Solid, {0x4c, 0x8b, 0x41, 0x10, 0x48, 0x8b, 0x4a, 0x10, 0x4c, 0x3b}},
     {0x66f306 - kExecuteRva, 0x66e600, List::Alpha, {0x44, 0x8b, 0x51, 0x14, 0x45, 0x8b, 0xca, 0x41, 0x81, 0xe1}},
 };
+// ExecuteShadowMap (0x66f630) sorts its z list the same way (disassembled): mov rcx, [rbx + 0x1520] (48 8b 8b) at +0x6b, the lea of
+// the z comparator 0x66e670 at +0x72, then mov rdx, rax; mov r8d, 0x18; call qsort
+constexpr std::uint32_t kExecuteShadowMapRva = 0x66f630;
+constexpr std::uint32_t kShadowSortLea = 0x66f6a2 - kExecuteShadowMapRva;
+// the shadow maps' vtables (Engine.dll exports ??_7eCShadowMapDirectionalLight2Ex (the cascade splits; checked in game: E 2.2's
+// "eCShadowMapDirectionalLight2 0x9768d0" is the base class) / ...2VS / eCPackedShadowMap)
+constexpr std::uint32_t kCascadeSplitVtable = 0x9a29e0, kTerrainMapVtable = 0x9a2848, kPackedMapVtable = 0x976738;
 // the CRT qsort statically linked into Engine.dll (Engine.dll imports no CRT): push r12, r13, r14; sub rsp, 0x450
 constexpr std::array<std::uint8_t, 13> kQsortPrologue{0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x48, 0x81, 0xec, 0x50, 0x04, 0x00, 0x00};
 
@@ -92,7 +100,8 @@ void FrameTap::update() {
         engine::scene::setOpTap(this);
         dev_.setDrawTap(this);
         window_ = {};
-        windowMismatches_.clear();
+        for (auto& m : windowMismatches_) m.clear();
+        cascadeViews_ = {};
         spdlog::info("native: frame tap on (the main view's render ops at Execute, attribution of its draws)");
     } else {
         engine::scene::setOpTap(nullptr);
@@ -290,11 +299,13 @@ static std::int32_t animationState(const Op& op) {
 // -> +0x78) with the type's visual (+0x18 + 8 t), the wrapper (+8) and a non-empty queue (solid +0xc0, z +0xd8), 2 the type's
 // material (+0x80 + 8 t) has its shader and (for eCShaderDefault) the matching TransformationType (+0x2b8: 3 / 4 / 5-6), 4 a queued
 // tree has geometry the op draws: branches a LOD index >= 0 (tree +0x48), fronds one whose strip length (+0x50 [lod]) is not 0
-// (RenderFronds 0x6f1b0f), leaves a tree at a leaf LOD (+0x58 / +0x5c) before the first LOD without indices; -1 = not read (a
-// shadow-map z op)
+// (RenderFronds 0x6f1b0f), leaves a tree at a leaf LOD (+0x58 / +0x5c) before the first LOD without indices. A shadow-map z op
+// (desc bit 0x10 << 16, N5.5; RenderZPass 0x6ee3f0 passes it to the z passes): fronds only when the leaf cards' vertex count (+0x3c)
+// is <= the fronds' (+0x3a) (RenderFrondsZPass 0x6f0cc0: else nothing, state 3), leaves at the one LOD min(+0x58 + 1, LODs - 1)
+// (RenderLeafsZPass 0x6f0860, alpha 1)
 static std::int32_t treeState(const Op& op, const void* shaderDefaultVtable) {
     const bool zpass = op.list == List::ZPass;
-    if (zpass && ((op.raw.desc >> 16) & 0x10u) != 0) return -1;
+    const bool shadow = zpass && ((op.raw.desc >> 16) & 0x10u) != 0;
     const std::uint8_t* ps = nullptr;
     const std::uint8_t* res = nullptr;
     const std::uint8_t* rb = nullptr;
@@ -320,6 +331,12 @@ static std::int32_t treeState(const Op& op, const void* shaderDefaultVtable) {
         readAt(shader, 0x2b8, tt);
         const bool ok = vt != shaderDefaultVtable || (type == 0 ? tt == 3 : type == 1 ? tt == 4 : (tt == 5 || tt == 6));
         if (ok) bits |= 2;
+    }
+    if (shadow && type == 1) {
+        std::uint16_t frondVerts = 0, cardVerts = 0;
+        readAt(rb, 0x3a, frondVerts);
+        readAt(rb, 0x3c, cardVerts);
+        if (cardVerts > frondVerts) return bits & ~4;
     }
     std::int32_t leafLods = 0, firstEmpty = 0;
     if (type >= 2) {
@@ -354,6 +371,10 @@ static std::int32_t treeState(const Op& op, const void* shaderDefaultVtable) {
         std::int32_t l0 = -1, l1 = -1;
         readAt(tree, 0x58, l0);
         readAt(tree, 0x5c, l1);
+        if (shadow) {
+            l0 = l0 < 0 ? -1 : std::min(l0 + 1, leafLods - 1);
+            l1 = -1;
+        }
         if ((l0 >= 0 && l0 < firstEmpty) || (l1 >= 0 && l1 < firstEmpty)) {
             bits |= 4;
             break;
@@ -457,22 +478,111 @@ void FrameTap::executeBegin(void* db, void* desc) {
     }
     if (verified_ == 0) verified_ = verifySortSites() ? 1 : -1;
     if (verified_ < 0 || db == nullptr) return;
+    beginView(db, desc, ViewKind::Main, nullptr, -1);
+}
+
+bool FrameTap::verifyShadowSortSite() {
+    const auto* fn = static_cast<const std::uint8_t*>(engine::sym().frustumDbExecuteShadowMap);
+    if (fn == nullptr || engineBase_ == nullptr || fn != engineBase_ + kExecuteShadowMapRva) {
+        spdlog::warn("native: frame tap: ExecuteShadowMap not at RVA {:#x}: the shadow views stay untapped", kExecuteShadowMapRva);
+        return false;
+    }
+    std::array<std::uint8_t, 7 + 21> b{};
+    if (!safeRead(fn + kShadowSortLea - 7, b.data(), b.size())) return false;
+    const bool loadOk = b[0] == 0x48 && b[1] == 0x8b && b[2] == 0x8b && static_cast<std::uint32_t>(rel32(&b[3])) == kListOffset[0] + 8;
+    const bool leaOk = b[7] == 0x4c && b[8] == 0x8d && b[9] == 0x0d;
+    const bool movOk = b[14] == 0x48 && b[15] == 0x8b && b[16] == 0xd0 && b[17] == 0x41 && b[18] == 0xb8 && b[19] == 0x18 && b[20] == 0 &&
+                       b[21] == 0 && b[22] == 0;
+    const std::uint8_t* cmp = fn + kShadowSortLea + 7 + rel32(&b[10]);
+    const std::uint8_t* q = fn + kShadowSortLea + 16 + 5 + rel32(&b[24]);
+    if (!loadOk || !leaOk || !movOk || b[23] != 0xe8 || reinterpret_cast<CompareFn>(const_cast<std::uint8_t*>(cmp)) != compare_[0] ||
+        reinterpret_cast<QsortFn>(const_cast<std::uint8_t*>(q)) != qsort_) {
+        spdlog::warn("native: frame tap: ExecuteShadowMap's sort site (+{:#x}) differs from the main z pass's: the shadow views stay untapped",
+                     kShadowSortLea);
+        return false;
+    }
+    kindVtables_[static_cast<std::size_t>(ViewKind::Cascade)] = engineBase_ + kCascadeSplitVtable;
+    kindVtables_[static_cast<std::size_t>(ViewKind::Terrain)] = engineBase_ + kTerrainMapVtable;
+    kindVtables_[static_cast<std::size_t>(ViewKind::PointAtlas)] = engineBase_ + kPackedMapVtable;
+    spdlog::info("native: frame tap: ExecuteShadowMap's sort verified (the main z pass's qsort and comparator): shadow views tapped");
+    return true;
+}
+
+ViewKind FrameTap::shadowKind(const void* shadowMap, std::int32_t& cascade) {
+    cascade = -1;
+    const void* vt = nullptr;
+    if (!readAt(shadowMap, 0, vt) || vt == nullptr) return ViewKind::OtherShadow;
+    for (std::size_t k = 1; k < kViewKindCount; ++k) {
+        if (vt != kindVtables_[k] || kindVtables_[k] == nullptr) continue;
+        const auto kind = static_cast<ViewKind>(k);
+        if (kind == ViewKind::Cascade) {
+            // the split's index in the cascade object's array (+0x30, 0x168 bytes per split, count +0x38)
+            const auto* cascades = static_cast<const std::uint8_t*>(engine::shadowmaps::cascadeObject());
+            const std::uint8_t* splits = nullptr;
+            std::int32_t count = 0;
+            const auto* m = static_cast<const std::uint8_t*>(shadowMap);
+            if (readAt(cascades, 0x30, splits) && readAt(cascades, 0x38, count) && splits != nullptr && m >= splits &&
+                (m - splits) % 0x168 == 0 && (m - splits) / 0x168 < count) {
+                cascade = static_cast<std::int32_t>((m - splits) / 0x168);
+            }
+        }
+        return kind;
+    }
+    for (const void*& logged : otherVtables_) {
+        if (logged == vt) break;
+        if (logged != nullptr) continue;
+        logged = vt;
+        spdlog::info("native: frame tap: a shadow map of vtable {} (RVA {:#x}): other shadow map", vt,
+                     static_cast<const std::uint8_t*>(vt) - engineBase_);
+        break;
+    }
+    return ViewKind::OtherShadow;
+}
+
+void FrameTap::shadowExecuteBegin(void* db, void* shadowMap) {
+    if (!on_) return;
+    if (executing_) {
+        ++nested_;  // a shadow map inside another view (not met: the shadow views are pre-passes of the main database)
+        return;
+    }
+    if (verified_ == 0) verified_ = verifySortSites() ? 1 : -1;
+    if (verified_ < 0 || db == nullptr || shadowMap == nullptr) return;
+    if (shadowVerified_ == 0) shadowVerified_ = verifyShadowSortSite() ? 1 : -1;
+    if (shadowVerified_ < 0) return;
+    std::int32_t cascade = -1;
+    const ViewKind kind = shadowKind(shadowMap, cascade);
+    if (kind == ViewKind::Cascade) ++cascadeViews_[cascade >= 0 && cascade < 3 ? static_cast<std::size_t>(cascade) : 3u];
+    beginView(db, nullptr, kind, shadowMap, cascade);
+}
+
+void FrameTap::beginView(void* db, void* desc, ViewKind kind, void* shadowMap, std::int32_t cascade) {
     const std::uint64_t frame = dev_.stats().frames + 1;  // the frame being recorded
     if (frame != viewFrame_) {
         viewFrame_ = frame;
-        viewsInFrame_ = 0;
+        viewsInFrame_ = {};
     }
+    const bool shadow = kind != ViewKind::Main;
     desc_.clear();
     desc_.frame = frame;
-    desc_.view = ++viewsInFrame_;
+    desc_.view = ++viewsInFrame_[static_cast<std::size_t>(kind)];
     desc_.db = db;
+    desc_.kind = kind;
+    desc_.shadowMap = shadowMap;
+    desc_.cascade = cascade;
+    if (shadow) {
+        readAt(shadowMap, 8, desc_.mapFormat);
+        readAt(shadowMap, 0xc, desc_.mapSize);
+    }
     std::uint8_t zPrepass = 1;
-    readAt(db, 0x1590, zPrepass);
+    // a shadow database's caps say no z pre-pass, but ExecuteShadowMap runs its z list unconditionally
+    if (!shadow) readAt(db, 0x1590, zPrepass);
     desc_.zPrepass = zPrepass != 0;
     for (std::size_t l = 0; l < kListCount; ++l) {
         const std::uint8_t* data = nullptr;
         std::int32_t count = 0;
         desc_.first[l] = static_cast<std::uint32_t>(desc_.ops.size());
+        // ExecuteShadowMap runs the z list only (the shadow request fills no other list it executes)
+        if (shadow && l != 0) continue;
         if (!readAt(db, kListOffset[l] + 8, data) || !readAt(db, kListOffset[l] + 0x10, count) || data == nullptr || count <= 0 ||
             static_cast<std::uint32_t>(count) > kMaxListOps) {
             continue;
@@ -501,7 +611,7 @@ void FrameTap::executeBegin(void* db, void* desc) {
     db_ = db;
     executing_ = true;
     attr_.begin(&desc_);
-    if (statics_ != nullptr && staticsWanted_) statics_->viewBegin(db, desc);
+    if (statics_ != nullptr && staticsWanted_) statics_->viewBegin(db, desc, desc_);
 }
 
 void FrameTap::opEnter(const void* op) {
@@ -536,6 +646,7 @@ void FrameTap::nonOpBegin(NonOp which, void* admin, void* db) {
         return;
     }
     if (!executing_ || nested_ > 0 || statics_ == nullptr || !staticsWanted_) return;
+    if (desc_.kind != ViewKind::Main) return;
     if (which == NonOp::Decals && db == db_) statics_->decalsBegin(admin, db);
     // RenderBillboards takes no database: it runs inside the main view's Execute (not a nested one)
     if (which == NonOp::Billboards) statics_->billboardsBegin(admin);
@@ -572,7 +683,7 @@ bool FrameTap::onDraw(const d3d9::DrawTapInfo& d) {
     if (statics_ != nullptr && staticsWanted_ && statics_->inSkyCube() && d.phase.view == d3d9::scene::View::SkyCube) {
         return statics_->engineDraw(d, nullptr);
     }
-    if (!executing_ || d.phase.view != d3d9::scene::View::Main) return false;
+    if (!executing_ || d.phase.view != (desc_.kind == ViewKind::Main ? d3d9::scene::View::Main : d3d9::scene::View::Shadow)) return false;
     DrawInfo info;
     info.index = d.index;
     info.pass = d.phase.pass;
@@ -606,6 +717,8 @@ void FrameTap::executeEnd(void* db) {
         std::int32_t count = 0;
         readAt(db_, kListOffset[l] + 0x10, count);
         liveCounts[l] = static_cast<std::uint32_t>(std::max(count, 0));
+        // a shadow view runs its z list only (the others are not snapshotted)
+        if (desc_.kind != ViewKind::Main && l != 0) liveCounts[l] = desc_.count[l];
     }
     // the draw conditions of the contexts that may draw nothing (read after their slots ran)
     for (Op& op : desc_.ops) {
@@ -636,25 +749,30 @@ void FrameTap::executeEnd(void* db) {
     if (statics_ != nullptr && staticsWanted_) statics_->viewEnd();
     attr_.end(liveCounts);
     executing_ = false;
-    last_ = attr_.counts();
-    lastFrame_ = desc_.frame;
-    window_.add(last_);
-    if (windowMismatches_.empty() && !attr_.mismatches().empty()) {
-        windowMismatches_.push_back(std::format("(first mismatches of the window, frame {} view {})", desc_.frame, desc_.view));
-        windowMismatches_.insert(windowMismatches_.end(), attr_.mismatches().begin(), attr_.mismatches().end());
+    const auto k = static_cast<std::size_t>(desc_.kind);
+    last_[k] = attr_.counts();
+    lastFrame_[k] = desc_.frame;
+    window_[k].add(last_[k]);
+    if (windowMismatches_[k].empty() && !attr_.mismatches().empty()) {
+        windowMismatches_[k].push_back(std::format("(first mismatches of the window, frame {} {} view {}{})", desc_.frame, name(desc_.kind), desc_.view,
+                                                   desc_.cascade >= 0 ? std::format(" = cascade {}", desc_.cascade) : std::string()));
+        windowMismatches_[k].insert(windowMismatches_[k].end(), attr_.mismatches().begin(), attr_.mismatches().end());
     }
     if (hal::vulkan::logThisFrame() && wanted_) logOps();
 }
 
 void FrameTap::logOps() const {
-    spdlog::info("native: frame tap: frame {} main view {}: {} ops (z pre-pass {}), in Execute's order:", desc_.frame, desc_.view, desc_.ops.size(),
-                 desc_.zPrepass ? "on" : "off");
+    spdlog::info("native: frame tap: frame {} {} view {}{}: {} ops (z pre-pass {}), in {}'s order:", desc_.frame, name(desc_.kind), desc_.view,
+                 desc_.cascade >= 0 ? std::format(" (cascade {}, map format {} size {})", desc_.cascade, desc_.mapFormat, desc_.mapSize)
+                 : desc_.kind != ViewKind::Main ? std::format(" (map format {} size {})", desc_.mapFormat, desc_.mapSize) : std::string(),
+                 desc_.ops.size(), desc_.zPrepass ? "on" : "off", desc_.kind == ViewKind::Main ? "Execute" : "ExecuteShadowMap");
     for (const Op& op : desc_.ops) {
         std::string material;
         if (op.material != nullptr) material = " '" + engine::readCString(static_cast<const std::uint8_t*>(op.material) + 0x40) + "'";
         spdlog::info("native:   {}{}", describe(op), material);
     }
-    for (const std::string& line : reportLines(last_, lastFrame_, last_, attr_.mismatches())) spdlog::info("{}", line);
+    const auto k = static_cast<std::size_t>(desc_.kind);
+    for (const std::string& line : reportLines(last_[k], lastFrame_[k], last_[k], attr_.mismatches(), desc_.kind)) spdlog::info("{}", line);
 }
 
 void FrameTap::report() {
@@ -664,13 +782,19 @@ void FrameTap::report() {
         spdlog::info("native: frame tap: idle (Execute's sort sites did not verify)");
         return;
     }
-    if (window_.views == 0) {
-        spdlog::info("native: frame tap: no main view since the last report");
-        return;
+    if (window_[0].views == 0) spdlog::info("native: frame tap: no main view since the last report");
+    for (std::size_t k = 0; k < kViewKindCount; ++k) {
+        if (window_[k].views == 0) continue;
+        const auto kind = static_cast<ViewKind>(k);
+        for (const std::string& line : reportLines(last_[k], lastFrame_[k], window_[k], windowMismatches_[k], kind)) spdlog::info("{}", line);
+        if (kind == ViewKind::Cascade) {
+            spdlog::info("native: frame tap [cascade]: views by split index: 0 {}, 1 {}, 2 {}, unknown {}", cascadeViews_[0], cascadeViews_[1],
+                         cascadeViews_[2], cascadeViews_[3]);
+        }
+        window_[k] = {};
+        windowMismatches_[k].clear();
     }
-    for (const std::string& line : reportLines(last_, lastFrame_, window_, windowMismatches_)) spdlog::info("{}", line);
-    window_ = {};
-    windowMismatches_.clear();
+    cascadeViews_ = {};
 }
 
 }  // namespace rvk::native

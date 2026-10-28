@@ -50,6 +50,10 @@ public:
     enum class NonOp : std::uint8_t { Decals, Billboards, SkyCube };
     virtual void nonOpBegin(NonOp /*which*/, void* /*admin*/, void* /*db*/) {}
     virtual void nonOpEnd(NonOp /*which*/) {}
+    // N5.5: a shadow map's eCFrustumDatabase::ExecuteShadowMap (0x66f630) begins (inside its Shadow view scope, before the
+    // original: its z list is not sorted yet) / ends
+    virtual void shadowExecuteBegin(void* /*db*/, void* /*shadowMap*/) {}
+    virtual void shadowExecuteEnd(void* /*db*/) {}
 };
 void setOpTap(OpTap* tap);
 

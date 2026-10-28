@@ -152,6 +152,7 @@ const char* StaticOps::name(Group g) {
         case Group::Actors: return "scene ops [skinned actors]";
         case Group::Trees: return "scene ops [SpeedTrees + tree billboards]";
         case Group::Vegetation: return "scene ops [vegetation]";
+        case Group::ShadowViews: return "scene ops [shadow views]";
         default: return "?";
     }
 }
@@ -178,7 +179,8 @@ void StaticOps::setMode(Group group, bool takeOver, bool compare) {
                                                    "the sky environment cube's faces (eCSkydome_PS::Render, cube camera)",
                                                    "the main view's skinned actor ops (eCRenderContextAnimation2: z / solid / alpha / refracted)",
                                                    "the main view's SpeedTree ops (branches, fronds, leaves: batches, LODs) and tree billboard ops",
-                                                   "the main view's vegetation ops (grass: instanced batches from the shared buffer)"};
+                                                   "the main view's vegetation ops (grass: instanced batches from the shared buffer)",
+                                                   "the shadow maps' z ops (sun cascades, terrain variance map, point-light atlas cells)"};
     spdlog::info("native: {}: {} ({}{}{})", name(group), g.active() ? "on" : "off", kWhat[static_cast<std::size_t>(group)],
                  takeOver ? ", drawn by the renderer" : "", compare ? ", compared with the engine's draws" : "");
 }
@@ -239,13 +241,32 @@ bool StaticOps::verify() {
 
 // ---- per view ---------------------------------------------------------------------------------------------------------------
 
-void StaticOps::viewBegin(void* db, void* desc) {
+void StaticOps::viewBegin(void* db, void* desc, const FrameDesc& view) {
     if (!hal::vulkan::logThisFrame()) frameLogged_ = 0;
     db_ = db;
     desc_ = desc;
     inView_ = true;
     view_ = {};
     op_ = nullptr;
+    viewKind_ = view.kind;
+    shadowMap_ = view.shadowMap;
+    shadowFormat_ = view.mapFormat;
+    cascade_ = view.cascade;
+    if (viewKind_ != ViewKind::Main && groups_[static_cast<std::size_t>(Group::ShadowViews)].active()) {
+        ++shadowWindow_.views[static_cast<std::size_t>(viewKind_)];
+    }
+}
+
+void StaticOps::ShadowStats::add(const ShadowStats& o) {
+    for (std::size_t v = 0; v < kViewKindCount; ++v) {
+        views[v] += o.views[v];
+        for (std::size_t k = 0; k < kOpKindCount; ++k) {
+            ops[v][k] += o.ops[v][k];
+            draws[v][k] += o.draws[v][k];
+            clean[v][k] += o.clean[v][k];
+            composed[v][k] += o.composed[v][k];
+        }
+    }
 }
 
 void StaticOps::viewEnd() {
@@ -292,17 +313,20 @@ bool StaticOps::composeView(const std::uint8_t* admin, const std::uint8_t* camer
     if (appCam == nullptr) return false;
     view_.camPos[3] = get<float>(appCam, 0xc0);
     sc::camObstacle(get<float>(appCam, 0xe4), view_.obstacleX, view_.obstacleY);
-    // eCGfxFog::Execute(db +0x14c8), unless eCGfxFog::ms_pMasterFog is set
+    // eCGfxFog::Execute(db +0x14c8), unless eCGfxFog::ms_pMasterFog is set; ExecuteShadowMap executes no fog (PS c3 / c4, VS c30 as
+    // the admin's pools hold them)
     U8* fog = engine::sym().gfxMasterFog != nullptr ? ptr(engine::sym().gfxMasterFog, 0) : nullptr;
     if (fog == nullptr && camera == nullptr) fog = ptr(db_, 0x14c8);
-    view_.fog = camera == nullptr;
+    view_.fog = camera == nullptr && viewKind_ == ViewKind::Main;
     if (view_.fog && fog != nullptr) {
         sc::fogConstants(get<std::uint8_t>(fog, 0x18) == 1, get<std::uint32_t>(fog, 0x1c), get<float>(fog, 0x28), get<float>(fog, 0x2c),
                          get<float>(fog, 0x30), view_.fogC3, view_.fogC4);
     }
-    // BeginZPass(NULL, true, h != 0): colour writes when the desc's depth image has an API texture (its render target)
+    // BeginZPass(NULL, true, h != 0): colour writes when the desc's depth image has an API texture (its render target); in a shadow
+    // map BeginZPass(map, true, false) 0x6b9720 decides by the map's format (+8): colour unless D16 / D24S8 / DF16 / DF24 (3..6)
     U8* depthImage = ptr(desc_, 8);
     view_.zColorWrite = depthImage != nullptr && ptr(depthImage, 0x60) != nullptr;
+    if (viewKind_ != ViewKind::Main) view_.zColorWrite = static_cast<std::uint32_t>(shadowFormat_ - 3) > 3u;
     view_.valid = true;
     return true;
 }
@@ -1149,7 +1173,23 @@ void StaticOps::opEnter(const Op& op) {
     if (!active() || !inView_) return;
     if (verified_ == 0) verified_ = verify() ? 1 : -1;
     if (verified_ < 0) return;
-    if (op.kind == OpKind::Skydome && op.list == List::Sky) {
+    const bool treeKind = op.kind == OpKind::SpeedTree || op.kind == OpKind::SpeedTreeBB || op.kind == OpKind::Vegetation;
+    Group group = Group::Count;
+    if (viewKind_ != ViewKind::Main) {
+        // N5.5: a shadow map's z ops, whatever their kind (the main view's groups never act in a shadow view)
+        if (op.list != List::ZPass || !groups_[static_cast<std::size_t>(Group::ShadowViews)].active()) return;
+        if (op.kind != OpKind::Mesh && op.kind != OpKind::Animation && !treeKind) return;
+        if (op.kind == OpKind::Animation) {
+            if (actorsVerified_ == 0) actorsVerified_ = verifyActors() ? 1 : -1;
+            if (actorsVerified_ < 0) return;
+        }
+        if (treeKind) {
+            if (treesVerified_ == 0) treesVerified_ = verifyTrees() ? 1 : -1;
+            if (treesVerified_ < 0) return;
+        }
+        group = Group::ShadowViews;
+        ++shadowWindow_.ops[static_cast<std::size_t>(viewKind_)][static_cast<std::size_t>(op.kind)];
+    } else if (op.kind == OpKind::Skydome && op.list == List::Sky) {
         GroupState& gs = groups_[static_cast<std::size_t>(Group::Sky)];
         if (!gs.active()) return;
         if (skyVerified_ == 0) skyVerified_ = verifySky() ? 1 : -1;
@@ -1193,10 +1233,11 @@ void StaticOps::opEnter(const Op& op) {
         }
         return;
     }
-    const bool treeKind = op.kind == OpKind::SpeedTree || op.kind == OpKind::SpeedTreeBB || op.kind == OpKind::Vegetation;
-    if (op.kind != OpKind::Mesh && op.kind != OpKind::Animation && !treeKind) return;
-    Group group = Group::Count;
-    if (treeKind) {
+    if (group != Group::Count) {
+        // (a shadow view's op: chosen above)
+    } else if (op.kind != OpKind::Mesh && op.kind != OpKind::Animation && !treeKind) {
+        return;
+    } else if (treeKind) {
         // N5.4: the SpeedTree / tree billboard / vegetation contexts' z (RenderZPass) and solid (Render) ops
         if (op.list == List::ZPass || op.list == List::Solid) group = op.kind == OpKind::Vegetation ? Group::Vegetation : Group::Trees;
         if (group != Group::Count && groups_[static_cast<std::size_t>(group)].active()) {
@@ -1229,7 +1270,7 @@ void StaticOps::opEnter(const Op& op) {
     maskRefShader_ = nullptr;
     if (s != Skip::None) {
         ++g_->skips[static_cast<std::size_t>(s)];
-        if ((group == Group::Trees || group == Group::Vegetation) && treeSkipsLogged_ < 24) {
+        if ((group == Group::Trees || group == Group::Vegetation || group == Group::ShadowViews) && treeSkipsLogged_ < 24) {
             ++treeSkipsLogged_;
             std::string mat;
             if (s == Skip::ShaderClass) skipWhy_ = std::format("shader class vtable RVA {:#x}", static_cast<const std::uint8_t*>(skipShader_) - engine_);
@@ -1242,6 +1283,7 @@ void StaticOps::opEnter(const Op& op) {
         return;
     }
     ++g_->window.opsComposed;
+    if (group == Group::ShadowViews) ++shadowWindow_.composed[static_cast<std::size_t>(viewKind_)][static_cast<std::size_t>(op.kind)];
     op_ = &op;
     engineDraws_ = 0;
     opDiffLogged_ = false;
@@ -1405,6 +1447,11 @@ bool StaticOps::engineDraw(const d3d9::DrawTapInfo& t, const Op* op) {
             const auto list = static_cast<std::size_t>(op->list);
             ++w.classDraws[cls];
             if (list < w.listDraws.size()) ++w.listDraws[list];
+            if (g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)]) {
+                const auto v = static_cast<std::size_t>(viewKind_), kk = static_cast<std::size_t>(op->kind);
+                ++shadowWindow_.draws[v][kk];
+                if (diff.fields.none()) ++shadowWindow_.clean[v][kk];
+            }
             if (diff.fields.none()) {
                 ++w.cleanDraws;
                 ++w.classClean[cls];
@@ -1618,14 +1665,35 @@ void StaticOps::report() {
         spdlog::info("native: skinned actors (total): {}", line(t));
         actorWindow_ = {};
     }
-    if (groups_[static_cast<std::size_t>(Group::Trees)].active() || groups_[static_cast<std::size_t>(Group::Vegetation)].active()) {
+    if (groups_[static_cast<std::size_t>(Group::ShadowViews)].active()) {
+        const auto line = [](const ShadowStats& a) {
+            std::string out;
+            for (std::size_t v = 1; v < kViewKindCount; ++v) {
+                if (a.views[v] == 0) continue;
+                std::string kinds;
+                for (std::size_t k = 0; k < kOpKindCount; ++k) {
+                    if (a.ops[v][k] == 0) continue;
+                    kinds += std::format("{}{} ops {} (composed {}) draws {} / {}", kinds.empty() ? "" : ", ", native::name(static_cast<OpKind>(k)), a.ops[v][k],
+                                         a.composed[v][k], a.clean[v][k], a.draws[v][k]);
+                }
+                out += std::format("{}{} {} views: {}", out.empty() ? "" : "; ", native::name(static_cast<ViewKind>(v)), a.views[v], kinds.empty() ? "no ops" : kinds);
+            }
+            return out.empty() ? std::string("no shadow view") : out;
+        };
+        shadowTotal_.add(shadowWindow_);
+        spdlog::info("native: shadow views (5 s): {} (draws equal / compared)", line(shadowWindow_));
+        spdlog::info("native: shadow views (total): {}", line(shadowTotal_));
+        shadowWindow_ = {};
+    }
+    if (groups_[static_cast<std::size_t>(Group::Trees)].active() || groups_[static_cast<std::size_t>(Group::Vegetation)].active() ||
+        groups_[static_cast<std::size_t>(Group::ShadowViews)].active()) {
         const auto line = [](const TreeStats& a) {
             return std::format("SpeedTree ops {} (branches {}, fronds {}, leaf cards {}, leaf meshes {}; 0 draws {}, wrong TransformationType {}), "
                                "instancing hardware {} / software {} ops, {} instances in {} batches ({} not drawn: strip length 0), {} leaf LOD "
-                               "passes, queue copies sorted {}; tree billboard ops {} ({} tex-coord uploads); vegetation ops {} (0 draws {}, mesh "
+                               "passes, queue copies sorted {}, shadow fronds skipped (leaf-card vertices > frond vertices) {}; tree billboard ops {} ({} tex-coord uploads); vegetation ops {} (0 draws {}, mesh "
                                "not cached {}), {} nodes, {} instances, {} draws, buffer wraps {}, c12 from the pool (the clock moved since Process) {}",
                                a.ops, a.types[0], a.types[1], a.types[2], a.types[3], a.zeroOps, a.wrongTransformation, a.hardware, a.software,
-                               a.instances, a.batches, a.undrawnBatches, a.leafLods, a.sortedCopies, a.billboardOps, a.billboardTexCoords, a.grassOps,
+                               a.instances, a.batches, a.undrawnBatches, a.leafLods, a.sortedCopies, a.shadowFrondsSkipped, a.billboardOps, a.billboardTexCoords, a.grassOps,
                                a.grassZeroOps, a.grassNotCached, a.grassNodes, a.grassInstances, a.grassDraws, a.grassWraps, a.grassClockMoved);
         };
         TreeStats& t = treeTotal_;
@@ -1640,6 +1708,7 @@ void StaticOps::report() {
         t.undrawnBatches += w.undrawnBatches;
         for (std::size_t i = 0; i < t.types.size(); ++i) t.types[i] += w.types[i];
         t.leafLods += w.leafLods;
+        t.shadowFrondsSkipped += w.shadowFrondsSkipped;
         t.wrongTransformation += w.wrongTransformation;
         t.billboardOps += w.billboardOps;
         t.billboardTexCoords += w.billboardTexCoords;

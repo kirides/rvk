@@ -31,6 +31,7 @@ std::atomic<float> g_sun[3]{};
 std::atomic<bool> g_sunKnown{false};
 std::atomic<float> g_trueSun[3]{};
 std::atomic<bool> g_trueSunKnown{false};
+std::atomic<const void*> g_cascadeObject{nullptr};
 
 // the throttle's memory (render thread): the camera (inverse view: rows 0..2 the axes, row 3 the position) of the last real update
 struct Throttle {
@@ -97,6 +98,7 @@ void detourLightUpdate(void* self) {
 
 bool detourRender(void* self) {
     if (self != nullptr) {
+        g_cascadeObject.store(self, std::memory_order_relaxed);
         for (int i = 0; i < 3; ++i) g_sun[i].store(field<float>(self, 0x10 + 4 * i), std::memory_order_relaxed);
         g_sunKnown.store(true, std::memory_order_relaxed);
         Tracked& t = g_tracked;
@@ -178,6 +180,8 @@ bool detourRender(void* self) {
 }
 
 }  // namespace
+
+const void* cascadeObject() { return g_cascadeObject.load(std::memory_order_relaxed); }
 
 void setEveryFrame(bool on) { g_everyFrame.store(on, std::memory_order_relaxed); }
 

@@ -193,7 +193,11 @@ void detourExecuteShadowMap(void* db, void* shadowMap) {
             }
         }
     }
+    // the N5.5 op tap: the shadow map's z list as ExecuteShadowMap will run it
+    OpTap* tap = scope.d != nullptr ? g_opTap.load(std::memory_order_relaxed) : nullptr;
+    if (tap != nullptr) tap->shadowExecuteBegin(db, shadowMap);
     g_executeShadowMap.original(db, shadowMap);
+    if (tap != nullptr) tap->shadowExecuteEnd(db);
 }
 
 using BeginZPassFn = bool (*)(void* admin, void* depthMap, bool a, bool b);

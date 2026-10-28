@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "native/frame_desc.h"
@@ -693,4 +694,29 @@ TEST(billboard_passes_pair_variants) {
     sc::billboardPassPairs(p);
     CHECK(p.size() == 4 && p[0].flags == 0x601 && p[1].flags == 0x645 && p[2].flags == 0xa01 && p[3].flags == 0xa45 && p[3].firstLight == 3);
     CHECK(sc::vsIndex(p[0].flags) == 4 && sc::vsIndex(p[2].flags) == 5);
+}
+
+// N5.5: a shadow map's z list (ExecuteShadowMap): its draws are in the Shadow view's ShadowDepth pass; a main-view pass is a mismatch
+TEST(native_attribution_shadow_view_pass) {
+    CHECK(native::viewListPass(native::ViewKind::Main, List::ZPass) == Pass::DepthPrepass);
+    CHECK(native::viewListPass(native::ViewKind::Cascade, List::ZPass) == Pass::ShadowDepth &&
+          native::viewListPass(native::ViewKind::PointAtlas, List::ZPass) == Pass::ShadowDepth);
+    CHECK(std::string(native::name(native::ViewKind::Terrain)) == "terrain map");
+    Fixture f;
+    f.live[static_cast<std::size_t>(List::ZPass)] = {raw(1, 0, 0), raw(2, 0, 0xff)};
+    f.build();
+    f.desc.kind = native::ViewKind::Cascade;
+    f.desc.cascade = 1;
+    Attribution a;
+    a.begin(&f.desc);
+    a.enterOp(f.at(List::ZPass, 0), f.at(List::ZPass, 0));
+    a.draw(drawOf(f.at(List::ZPass, 0), Pass::ShadowDepth, 0));
+    a.enterOp(f.at(List::ZPass, 1), f.at(List::ZPass, 1));
+    a.draw(drawOf(f.at(List::ZPass, 1), Pass::DepthPrepass, 1));  // not the shadow view's pass
+    a.end(f.counts());
+    CHECK(a.counts().passMismatch == 1 && !a.counts().clean());
+    const auto lines = native::reportLines(a.counts(), 3, a.counts(), a.mismatches(), native::ViewKind::Cascade);
+    CHECK(!lines.empty() && lines[0].find("frame tap [cascade]") != std::string::npos);
+    f.desc.clear();
+    CHECK(f.desc.kind == native::ViewKind::Main && f.desc.cascade == -1 && f.desc.shadowMap == nullptr);
 }

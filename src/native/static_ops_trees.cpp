@@ -183,7 +183,8 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
     ++st.ops;
     const bool zpass = op.list == List::ZPass;
     if (!zpass && op.list != List::Solid) return Skip::Kind;
-    if (zpass && ((op.raw.desc >> 16) & 0x10u) != 0) return Skip::Shadow;  // a shadow-map z op (never in the main view)
+    // a shadow-map z op (desc bit 0x10 << 16, the shadow views of N5.5): RenderZPass 0x6ee3f0 passes it to the z passes
+    const bool shadow = zpass && ((op.raw.desc >> 16) & 0x10u) != 0;
     U8* ps = ptr(op.raw.context, 0x18);
     U8* res = ptr(ps, 0x38);
     if (res == nullptr) return Skip::None;
@@ -193,6 +194,12 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
     if (type > 3) return Skip::None;
     ++st.types[type];
     const std::size_t t = type;
+    // RenderFrondsZPass 0x6f0cc0 in a shadow map: nothing unless the leaf cards' vertex count (+0x3c) is <= the fronds' (+0x3a)
+    if (shadow && type == 1 && get<std::uint16_t>(rb, 0x3c) > get<std::uint16_t>(rb, 0x3a)) {
+        ++st.shadowFrondsSkipped;
+        ++st.zeroOps;
+        return Skip::None;
+    }
     // the queue (solid +0xb8 / +0xc0, z +0xd0 / +0xd8; entries 0x18: tree PS, illumination, depth key), sorted at the first Render /
     // RenderZPass of the frame (the stamp +0xe0 / +0xe4 is non-zero until then)
     const std::int32_t n = get<std::int32_t>(rb, zpass ? 0xd8 : 0xc0);
@@ -323,7 +330,12 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
                 if (ptr(tree, 0x40) == nullptr) return Skip::Unreadable;
                 float a = 0.0f;
                 const std::int32_t l0 = get<std::int32_t>(tree, 0x58, -1), l1 = get<std::int32_t>(tree, 0x5c, -1);
-                if (l0 == lodi && l0 > -1) {
+                if (shadow) {
+                    // RenderLeafsZPass 0x6f0860 in a shadow map: the one leaf LOD min(+0x58 + 1, LODs - 1), global alpha 1
+                    const std::int32_t l = l0 < 0 ? -1 : std::min(l0 + 1, lods - 1);
+                    if (l != lodi) continue;
+                    a = one_;
+                } else if (l0 == lodi && l0 > -1) {
                     a = fixedRef / get<float>(tree, 0x60);
                 } else if (l1 == lodi && l1 > -1) {
                     a = fixedRef / get<float>(tree, 0x64);

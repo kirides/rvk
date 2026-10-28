@@ -58,6 +58,8 @@ public:
         Actors,      // N5.3: the skinned actors' ops (eCRenderContextAnimation2: z / solid / alpha / refracted lists; group bit 64)
         Trees,       // N5.4: SpeedTree ops (branches, fronds, leaf cards / meshes) + the tree billboards' ops (z / solid; group bit 128)
         Vegetation,  // N5.4: the grass / vegetation ops (eCRenderContextVegetation: z / solid; group bit 256)
+        ShadowViews, // N5.5: every op of the shadow maps' z lists (ExecuteShadowMap: sun cascades, terrain map, point-light atlas
+                     // cells; meshes, skinned actors, SpeedTrees, ...: group bit 512)
         Count
     };
     static constexpr std::size_t kGroups = static_cast<std::size_t>(Group::Count);
@@ -68,7 +70,7 @@ public:
     bool active() const;
 
     // driven by the frame tap (native/frame_tap): a main view's Execute begins / ends; the engine enters an op's slot
-    void viewBegin(void* db, void* desc);
+    void viewBegin(void* db, void* desc, const FrameDesc& view);
     void viewEnd();
     void opEnter(const Op& op);
     // eCDecalAdmin::RenderDecals / eCBillboardAdmin::RenderBillboards of the main view begins (inside its draw tag, before the
@@ -263,6 +265,16 @@ private:
     void* db_ = nullptr;
     void* desc_ = nullptr;
     bool inView_ = false;
+    // the view being executed (N5.5): the main view or a shadow map's ExecuteShadowMap (its eCShadowMapBase, eCDepthMap format +8)
+    ViewKind viewKind_ = ViewKind::Main;
+    const void* shadowMap_ = nullptr;
+    std::int32_t shadowFormat_ = -1, cascade_ = -1;
+    // the shadow views' compared / equal draws and ops per view kind x op kind (window, total)
+    struct ShadowStats {
+        std::array<std::array<std::uint64_t, kOpKindCount>, kViewKindCount> ops{}, draws{}, clean{}, composed{};
+        std::array<std::uint64_t, kViewKindCount> views{};
+        void add(const ShadowStats& o);
+    } shadowWindow_, shadowTotal_;
     View view_;
     Mirror mirror_;
     std::unique_ptr<sc::DrawDesc> scratch_;    // a capture
@@ -311,7 +323,7 @@ private:
     struct TreeStats {
         std::uint64_t ops = 0, zeroOps = 0, hardware = 0, software = 0, instances = 0, batches = 0, sortedCopies = 0, undrawnBatches = 0;
         std::array<std::uint64_t, 4> types{};  // branches, fronds, leaf cards, leaf meshes
-        std::uint64_t leafLods = 0, wrongTransformation = 0, billboardOps = 0, billboardTexCoords = 0;
+        std::uint64_t leafLods = 0, wrongTransformation = 0, billboardOps = 0, billboardTexCoords = 0, shadowFrondsSkipped = 0;
         std::uint64_t grassOps = 0, grassZeroOps = 0, grassNodes = 0, grassInstances = 0, grassDraws = 0, grassWraps = 0, grassNotCached = 0, grassClockMoved = 0;
     } treeWindow_, treeTotal_;
     // the skinned actors (static_ops_actors.cpp): the frame admin getter eCAnimation_PS::Render calls first (frame id at +0x4c), the

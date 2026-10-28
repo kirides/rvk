@@ -32,6 +32,10 @@ bool sunVector(float out[3]);
 // turned ~0.5 degree, so anything that wants the sun to move smoothly (RT shadows) reads this one; false before the first call
 bool trueSunVector(float out[3]);
 
+// The eCCascadeShadowMap of the last RenderShadowMaps call (null before the first one): its split array (+0x30, 0x168 bytes per
+// split, count +0x38) names a cascade view's index (native/frame_tap, N5.5). Render thread
+const void* cascadeObject();
+
 // Creates the detour (enabled with the others by hooks::enableAll); false when the symbols are missing
 bool install();
 

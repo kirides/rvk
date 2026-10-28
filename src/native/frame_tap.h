@@ -44,6 +44,9 @@ public:
     // engine::scene::OpTap
     void executeBegin(void* db, void* desc) override;
     void executeEnd(void* db) override;
+    // N5.5: a shadow map's ExecuteShadowMap (its z list, sorted by the same qsort / comparator as the main z pass)
+    void shadowExecuteBegin(void* db, void* shadowMap) override;
+    void shadowExecuteEnd(void* db) override { executeEnd(db); }
     void opEnter(const void* op) override;
     void nonOpBegin(NonOp which, void* admin, void* db) override;
     void nonOpEnd(NonOp which) override;
@@ -59,6 +62,10 @@ private:
     };
 
     bool verifySortSites();
+    bool verifyShadowSortSite();
+    // a view's snapshot (main: the seven lists; shadow views: the z list) and the start of its attribution
+    void beginView(void* db, void* desc, ViewKind kind, void* shadowMap, std::int32_t cascade);
+    ViewKind shadowKind(const void* shadowMap, std::int32_t& cascade);
     VtableInfo& vtableInfo(const void* vtable);
     void resolve(Op& op);
     void logOps() const;
@@ -70,6 +77,9 @@ private:
     bool staticsWanted_ = false;  // the static ops are active
     class StaticOps* statics_ = nullptr;
     int verified_ = 0;  // 0 not yet, 1 the sort sites are as expected, -1 not (the tap stays idle)
+    int shadowVerified_ = 0;  // ExecuteShadowMap's sort site (N5.5): 1 as expected, -1 not (shadow views stay untapped)
+    std::array<const void*, kViewKindCount> kindVtables_{};  // the shadow maps' vtables (Engine.dll RVAs 0x9a29e0 / 0x9a2848 / 0x976738)
+    std::array<const void*, 8> otherVtables_{};  // the other shadow maps' vtables, logged once each
     QsortFn qsort_ = nullptr;
     std::array<CompareFn, kListCount> compare_{};
     const std::uint8_t* engineBase_ = nullptr;
@@ -79,15 +89,17 @@ private:
     void* db_ = nullptr;
     std::uint32_t nested_ = 0;
     std::uint64_t viewFrame_ = 0;
-    std::uint32_t viewsInFrame_ = 0;
+    std::array<std::uint32_t, kViewKindCount> viewsInFrame_{};
     FrameDesc desc_;
     Attribution attr_;
     std::vector<RawOp> raw_;
     std::unordered_map<const void*, VtableInfo> vtables_;
 
-    TapCounts last_, window_;
-    std::uint64_t lastFrame_ = 0;
-    std::vector<std::string> windowMismatches_;  // the first view of the window with mismatches
+    // per view kind: the last view, the window since the last report, its first view with mismatches
+    std::array<TapCounts, kViewKindCount> last_{}, window_{};
+    std::array<std::uint64_t, kViewKindCount> lastFrame_{};
+    std::array<std::vector<std::string>, kViewKindCount> windowMismatches_{};
+    std::array<std::uint32_t, 4> cascadeViews_{};  // cascade views of the window by split index (0..2, 3 = other)
 };
 
 }  // namespace rvk::native

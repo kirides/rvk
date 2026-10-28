@@ -52,6 +52,20 @@ Pass listPass(List l) {
     return Pass::None;
 }
 
+const char* name(ViewKind k) {
+    switch (k) {
+        case ViewKind::Main: return "main";
+        case ViewKind::Cascade: return "cascade";
+        case ViewKind::Terrain: return "terrain map";
+        case ViewKind::PointAtlas: return "point-light atlas";
+        case ViewKind::OtherShadow: return "other shadow map";
+        case ViewKind::Count: break;
+    }
+    return "?";
+}
+
+Pass viewListPass(ViewKind view, List l) { return view == ViewKind::Main ? listPass(l) : Pass::ShadowDepth; }
+
 const char* name(OpKind k) {
     switch (k) {
         case OpKind::Unknown: return "Unknown";
@@ -150,6 +164,11 @@ void FrameDesc::clear() {
     frame = 0;
     view = 0;
     db = nullptr;
+    kind = ViewKind::Main;
+    shadowMap = nullptr;
+    cascade = -1;
+    mapFormat = -1;
+    mapSize = 0;
     zPrepass = true;
     valid = false;
     liveData.fill(nullptr);
@@ -329,7 +348,7 @@ void Attribution::draw(const DrawInfo& d) {
     if (d.instanced) ++op->instancedDraws;
     if (d.additive) ++op->additiveDraws;
     if (!d.colorWrite) ++op->noColorDraws;
-    if (d.pass != listPass(op->list)) {
+    if (d.pass != viewListPass(frame_->kind, op->list)) {
         ++counts_.passMismatch;
         note(std::format("draw #{} of {} in pass {}", d.index, where(*op), d3d9::scene::name(d.pass)));
     }
@@ -486,7 +505,8 @@ std::string describe(const Op& op) {
 }
 
 std::vector<std::string> reportLines(const TapCounts& last, std::uint64_t lastFrame, const TapCounts& window,
-                                     const std::vector<std::string>& mismatches) {
+                                     const std::vector<std::string>& mismatches, ViewKind view) {
+    const std::string tag = view == ViewKind::Main ? std::string("frame tap") : std::format("frame tap [{}]", name(view));
     std::vector<std::string> out;
     const auto passes = [](const TapCounts& c) {
         std::string s;
@@ -518,11 +538,11 @@ std::vector<std::string> reportLines(const TapCounts& last, std::uint64_t lastFr
     for (std::size_t l = 0; l < kListCount; ++l) {
         lists += std::format("{}{} {}", l == 0 ? "" : ", ", name(static_cast<List>(l)), last.ops[l]);
     }
-    out.push_back(std::format("native: frame tap: frame {}: ops {} = {}; draws {} ({}); matched {}, without op {} ({}); {} -> {}", lastFrame,
+    out.push_back(std::format("native: {}: frame {}: ops {} = {}; draws {} ({}); matched {}, without op {} ({}); {} -> {}", tag, lastFrame,
                               lists, last.opsTotal, last.draws, passes(last), last.matched, last.noOpTotal, noOps(last), checks(last),
                               last.clean() ? "clean" : "NOT clean"));
-    out.push_back(std::format("native: frame tap: window of {} main views: ops {}, entered {}, draws {} (matched {}, without op {}: {}); {} -> {}",
-                              window.views, window.opsTotal, window.entered, window.draws, window.matched, window.noOpTotal, noOps(window),
+    out.push_back(std::format("native: {}: window of {} {} views: ops {}, entered {}, draws {} (matched {}, without op {}: {}); {} -> {}", tag,
+                              window.views, name(view), window.opsTotal, window.entered, window.draws, window.matched, window.noOpTotal, noOps(window),
                               checks(window), window.clean() ? "clean" : "NOT clean"));
     // per list x kind of the last view: ops, draws, 0-draw and multi-draw ops with their reasons
     std::string buckets;
@@ -554,8 +574,8 @@ std::vector<std::string> reportLines(const TapCounts& last, std::uint64_t lastFr
                                    name(static_cast<OpKind>(k)), b.ops, b.draws, zero, multi);
         }
     }
-    out.push_back("native: frame tap: per list / kind: " + (buckets.empty() ? std::string("no ops") : buckets));
-    for (const std::string& m : mismatches) out.push_back("native: frame tap:   " + m);
+    out.push_back("native: " + tag + ": per list / kind: " + (buckets.empty() ? std::string("no ops") : buckets));
+    for (const std::string& m : mismatches) out.push_back("native: " + tag + ":   " + m);
     return out;
 }
 
