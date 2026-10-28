@@ -286,6 +286,11 @@ void StaticOps::leanUpdateFrame() {
     leanFrameNo_ = f;
     leanFrameKind_ = sc::leanFrameKind(f, leanCheck_);
     leanFrameOn_ = lean_ && leanFrameKind_ == sc::LeanFrame::Lean;
+    // O2c: the warm-up frame runs the engine's code from the pools the lean frames left behind; with every permutation compiled at the
+    // slot's place no op is left any more (no markLeft sync per frame), so a carry-over register no slot writes (an instance slot
+    // beyond a batch) would lag by many frames: the pools start the warm-up frame as the register file (the check frame then compares
+    // what the engine's code makes of the same state)
+    if (lean_ && leanFrameKind_ == sc::LeanFrame::Warmup && mirrorValid_ && mirrorMode_ == 0) syncEnginePools();
     ++leanWindow_.frames;
     if (leanFrameKind_ == sc::LeanFrame::Check) ++leanWindow_.checkFrames;
     if (particleCache_.size() > 4096) particleCache_.clear();  // (dead emitters' entries: bounded; an entry lives one frame)
@@ -367,6 +372,76 @@ bool StaticOps::leanCommit() {
     slotSkipped_ = true;
     ++leanWindow_.skipped[gi];
     return true;
+}
+
+// ---- O2c: on-demand permutation compiles (opt-plan.md "O2c / O3 result") ------------------------------------------------------
+
+namespace {
+std::uint32_t callTargetAt(U8* engine, std::uint32_t rva) {
+    std::uint8_t op = 0;
+    std::int32_t rel = 0;
+    if (!readAt(engine, rva, op) || op != 0xe8 || !readAt(engine, rva + 1, rel)) return 0;
+    return static_cast<std::uint32_t>(static_cast<std::int64_t>(rva) + 5 + rel);
+}
+using CompileVsFn = bool (*)(const void* version, int nonInstanced, int billboard);
+using CompilePsFn = bool (*)(const void* version, int sun, int lightmap, int kind, int pointLights);
+using CompileSpecialFn = bool (*)(const void* version, int kind, int instanced, int force);
+}  // namespace
+
+bool StaticOps::compileAllowed(const std::uint8_t* version) {
+    // only where the group takes over (its draws are ours) and the version is eCShaderVersionDefault_3_0 with the checked code
+    if (g_ == nullptr || !g_->takeOver || engine_ == nullptr) return false;
+    if (compileVerified_ == 0) {
+        U8* vt = engine_ + 0x9d7e40;  // eCShaderVersionDefault_3_0
+        const bool ok = get<const void*>(vt, 0x20) == engine_ + 0x6cc610 && get<const void*>(vt, 0x50) == engine_ + 0x6ca6c0 &&
+                        callTargetAt(engine_, 0x6cc6b4) == 0x6cc000 && callTargetAt(engine_, 0x6cc6eb) == 0x6cb8b0;
+        compileVerified_ = ok ? 1 : -1;
+        spdlog::info("native: on-demand compiles: {}", ok ? "the version Execute / ExecuteSpecialPass compile calls checked: missing permutations are "
+                                                             "compiled at the slot's place"
+                                                           : "the engine's code is not as expected: ops with a missing permutation stay the engine's");
+    }
+    return compileVerified_ > 0 && get<const void*>(version, 0) == engine_ + 0x9d7e40;
+}
+
+void StaticOps::invalidatePools(const std::uint8_t* shader, const std::uint8_t* version) {
+    // the compile's UpdateShaderConstants (vtable +0x140) re-fills the pools of the version's shader (+0x10)
+    for (const void* s : {static_cast<const void*>(shader), static_cast<const void*>(ptr(version, 0x10))}) {
+        if (auto it = mirror_.shaders.find(s); it != mirror_.shaders.end()) it->second.epoch = ~0ull;
+    }
+}
+
+bool StaticOps::compilePass(const std::uint8_t* shader, const std::uint8_t* version, std::uint32_t f) {
+    if (!compileAllowed(version)) return false;
+    // FUN_1806cc610 0x6cc69e: when either element of the pass is missing, VS (version, (f >> 9) & 1, (f >> 10) & 3) then PS (version,
+    // f & 3, (f >> 4) & 3, (f >> 6) & 7, (f >> 2) & 3); a failure returns false (ExecutePass: no draw; that failure path stays the
+    // engine's: the op is left to it)
+    const auto vs = reinterpret_cast<CompileVsFn>(const_cast<std::uint8_t*>(engine_) + 0x6cc000);
+    const auto ps = reinterpret_cast<CompilePsFn>(const_cast<std::uint8_t*>(engine_) + 0x6cb8b0);
+    const bool ok = vs(version, static_cast<int>(f >> 9 & 1u), static_cast<int>(f >> 10 & 3u)) &&
+                    ps(version, static_cast<int>(f & 3u), static_cast<int>(f >> 4 & 3u), static_cast<int>(f >> 6 & 7u), static_cast<int>(f >> 2 & 3u));
+    // the compile re-walks the shader's graph into its pools / sampler slots: our copy is read again
+    invalidatePools(shader, version);
+    ++leanWindow_.compiles;
+    if (!ok) ++leanWindow_.compileFailures;
+    return ok;
+}
+
+bool StaticOps::compileSpecial(const std::uint8_t* shader, const std::uint8_t* version, std::int32_t kind, bool instanced, bool& failed) {
+    failed = false;
+    if (!compileAllowed(version)) return false;
+    // ExecuteSpecialPass 0x6d1cd0: version vtable +0x50 (version, kind, instanced, 1); false: the flag byte 0, no draw
+    const auto fn = reinterpret_cast<CompileSpecialFn>(const_cast<std::uint8_t*>(engine_) + 0x6ca6c0);
+    const bool ok = fn(version, kind, instanced ? 1 : 0, 1);
+    invalidatePools(shader, version);
+    ++leanWindow_.specialCompiles;
+    if (!ok) {
+        const std::size_t idx = static_cast<std::size_t>(kind) * 2 + (instanced ? 1u : 0u);
+        const std::uint8_t zero = 0;
+        engine::safeWrite(const_cast<std::uint8_t*>(version) + 0x18 + idx, &zero, 1);
+        ++leanWindow_.compileFailures;
+        failed = true;
+    }
+    return ok;
 }
 
 void StaticOps::touchNow(const void* resource) {
@@ -551,10 +626,10 @@ void StaticOps::leanReport() {
         for (const std::string& n : placeholderNames_) names += std::format("{}'{}'", names.empty() ? "" : ", ", n);
         spdlog::info("native: lean (5 s): {}, {} frames ({} check frames); engine code skipped: {}; kept {} (video {}, edge cases {}); touches {} "
                      "({} RequestData calls), lightmaps {}, stream 3 {}, instance sorts {}, billboard queue resets {} (longest queue {}), sky {}, "
-                     "first-use creates {}; placeholder binds {} ({} images{}{})",
+                     "first-use creates {}; placeholder binds {} ({} images{}{}); permutations compiled at the slot's place {} + special {} (failed {})",
                      lean_ ? "on" : "off", w.frames, w.checkFrames, skipped, kept.empty() ? "0" : kept, w.blockedVideo, w.blockedEdge, w.touches,
                      w.touchCalls, w.lightmaps, w.stream3, w.instanceSorts, w.queueResets, w.queueMax, w.skyWrites, w.creates, w.placeholderBinds,
-                     placeholderImages_.size(), names.empty() ? "" : ": ", names);
+                     placeholderImages_.size(), names.empty() ? "" : ": ", names, w.compiles, w.specialCompiles, w.compileFailures);
         if (leanAnimVerified_ > 0) {
             spdlog::info("native: lean (5 s) O2b: palettes {}, tree queue sorts {}, MaskReference stores {}, vegetation cursors {}; particles: "
                          "masters {} (none {}), in-slot simulations {} (spawned {}), inactivity resets {}, depth sorts {}, vertices reused {}, "

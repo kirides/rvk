@@ -477,7 +477,16 @@ private:
         std::uint64_t palettes = 0, treeSorts = 0, maskRefs = 0, vegCursors = 0, poolWrites = 0, poolSyncs = 0;
         std::uint64_t masters = 0, noMaster = 0, kicks = 0, kicksSpawned = 0, inactivity = 0, particleSorts = 0, particleCached = 0;
         std::uint64_t particleCreates = 0, stripCreates = 0, streakCreates = 0;
+        std::uint64_t compiles = 0, specialCompiles = 0, compileFailures = 0;  // O2c: permutations compiled at the slot's place
     } leanWindow_, leanTotal_;
+    // O2c: a missing permutation compiled by the engine's own functions where its slot would (the version Execute 0x6cc610's VS
+    // 0x6cc000 / PS 0x6cb8b0 calls; ExecuteSpecialPass's version vtable +0x50 = 0x6ca6c0); true = compiled (the shader's pools
+    // re-walked: our copy re-read), false = not compiled / not ours to do (the op is left to the engine)
+    int compileVerified_ = 0;
+    bool compilePass(const std::uint8_t* shader, const std::uint8_t* version, std::uint32_t flags);
+    bool compileSpecial(const std::uint8_t* shader, const std::uint8_t* version, std::int32_t kind, bool instanced, bool& failed);
+    bool compileAllowed(const std::uint8_t* version);
+    void invalidatePools(const std::uint8_t* shader, const std::uint8_t* version);
     std::vector<const void*> placeholderImages_;  // distinct resources bound as the placeholder in the window (bounded)
     std::vector<std::string> placeholderNames_;   // the first ones' names, read while bound (a load may free them before the report)
     std::uint32_t videoLogged_ = 0, placeholderLogged_ = 0;

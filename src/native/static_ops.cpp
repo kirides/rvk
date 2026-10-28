@@ -874,6 +874,16 @@ StaticOps::Skip StaticOps::specialPassDraw(const std::uint8_t* shader, const Geo
     U8* vsElem = ptr(version, 0x30 + 16 * idx);
     U8* psElem = ptr(version, 0xf0 + 16 * idx);
     if (vsElem == nullptr || psElem == nullptr) {
+        // O2c: ExecuteSpecialPass's on-demand compile, here at the slot's place (a failure clears the flag byte: no draw, as the engine)
+        bool failed = false;
+        if (compileSpecial(shader, version, type, option, failed)) {
+            vsElem = ptr(version, 0x30 + 16 * idx);
+            psElem = ptr(version, 0xf0 + 16 * idx);
+        } else if (failed) {
+            return Skip::None;
+        }
+    }
+    if (vsElem == nullptr || psElem == nullptr) {
         skipWhy_ = std::format("special pass {} not compiled (vs {}, ps {}; flag {}, version {})", idx, static_cast<const void*>(vsElem),
                                static_cast<const void*>(psElem), get<std::uint8_t>(version, 0x18 + idx), static_cast<const void*>(version));
         pendingVersion_ = version;
@@ -906,12 +916,18 @@ StaticOps::Skip StaticOps::specialPassDraw(const std::uint8_t* shader, const Geo
 StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8_t* owner, const std::uint8_t* version, const sc::Pass& pass,
                                     const Geom& geometry, bool overlay) {
     U8* admin = view_.admin;
-    Skip skip = Skip::None;
-    applySwitch(shader, pass.switchValue, skip);
-    if (skip != Skip::None) return skip;
     const std::uint32_t vsIdx = sc::vsIndex(pass.flags), psIdx = sc::psIndex(pass.flags);
     U8* vsElem = ptr(version, 0x1b0 + 16 * vsIdx);
     U8* psElem = ptr(version, 0x210 + 16 * psIdx);
+    if ((vsElem == nullptr || psElem == nullptr) && compilePass(shader, version, pass.flags)) {
+        // O2c: the version Execute's on-demand compile, here at the slot's place; before the switch is applied to our copy of the
+        // pools (the compile's graph re-walk refills the engine's pools, which our copy is then read from again)
+        vsElem = ptr(version, 0x1b0 + 16 * vsIdx);
+        psElem = ptr(version, 0x210 + 16 * psIdx);
+    }
+    Skip skip = Skip::None;
+    applySwitch(shader, pass.switchValue, skip);
+    if (skip != Skip::None) return skip;
     if (vsElem == nullptr || psElem == nullptr) {
         skipWhy_ = std::format("pass flags {:#x}: vs {} ({}) / ps {} ({}) not compiled", pass.flags, vsIdx, static_cast<const void*>(vsElem), psIdx,
                                static_cast<const void*>(psElem));
