@@ -58,6 +58,7 @@ constexpr ParamClass kArrayClasses[] = {
 constexpr std::uint32_t kParamTexture = 0x9ee880;    // eSImageEffectParamTexture (+0x58 image, +0x60 mode)
 constexpr std::uint32_t kParamImageSize = 0x9ee280;  // TEXTURESIZEn (+0x58 the suffix)
 constexpr std::uint32_t kParamCamera = 0x9ee480;     // VIEW .. FOCALRANGEFAR (NEARFAR: camera +0xbc)
+constexpr std::uint32_t kParamImage = 0x9ee900;      // eSImageEffectParamImage (+0x58 a resource: its image +0x70)
 
 // illumination admin fields (E-shadows-lights-sky.md 2.5)
 constexpr std::size_t kIllumSsao = 0x430, kIllumBlurSsao1 = 0x438, kIllumBlurSsao2 = 0x440, kIllumMask = 0x448, kIllumDepthCopy = 0x450,
@@ -426,6 +427,7 @@ void EffectOps::maskBegin(void* illum) {
 }
 
 void EffectOps::maskEnd() {
+    if (afterPending_) checkAfter(true);
     inMask_ = false;
     if (unit_ != Unit::None) finishUnit();
     if (leftUnit_ == ptr(illum_, kIllumMask)) leftUnit_ = nullptr;
@@ -497,9 +499,10 @@ bool EffectOps::maskStep(std::size_t step, std::string& technique) {
     return true;
 }
 
-void EffectOps::effectBegin(void* filterPtr) {
-    if (verified_ <= 0 || !(maskOn() || postOn())) return;
+bool EffectOps::effectBegin(void* filterPtr) {
+    if (verified_ <= 0 || !(maskOn() || postOn())) return false;
     auto* filter = static_cast<U8*>(filterPtr);
+    if (afterPending_) checkAfter(true);  // (the PSSM pass's: its loop has no end hook)
     if (unit_ != Unit::None) finishUnit();
     Unit unit = Unit::None;
     std::string technique;
@@ -512,7 +515,7 @@ void EffectOps::effectBegin(void* filterPtr) {
         // N5.7: a job of the post chain (any effect filter eCImageEffect::Execute runs outside the scene job)
         unit = Unit::Post;
     } else if (!maskOn()) {
-        return;
+        return false;
     } else if (inMask_ && illum_ != nullptr) {
         if (filter == ptr(illum_, kIllumMask)) unit = Unit::Mask;
         else if (filter == ptr(illum_, kIllumSsao) || filter == ptr(illum_, kIllumBlurSsao1) || filter == ptr(illum_, kIllumBlurSsao2) ||
@@ -534,7 +537,7 @@ void EffectOps::effectBegin(void* filterPtr) {
         target = ptr(terrain, horizontal ? 0x108 : 0x18);
         screen = true;
     }
-    if (unit == Unit::None) return;
+    if (unit == Unit::None) return false;
     unit_ = unit;
     unitFilter_ = filter;
     unitTake_ = unit == Unit::Post ? postTake_ : takeOver_;
@@ -554,19 +557,34 @@ void EffectOps::effectBegin(void* filterPtr) {
         drawCount_ = 0;
         unit_ = Unit::None;  // left to the engine
         leftUnit(filter, s);
-        return;
+        return false;
     }
     ++stats_->counts.unitsComposed;
     engineDraws_ = 0;
     taken_ = false;
+    leanStats_ = &leanWindow_[unitName_];
     if (unitTake_) {
+        predictAfter(false);
+        if (leanUnit()) {
+            // O3 lean: the engine's ExecuteEffect is not run
+            issueLean();
+            adoptAfter();
+            taken_ = true;
+            leanSkipped_ = true;
+            return true;
+        }
         issue();
         taken_ = true;
+        afterPending_ = checkFrame_ && unitCompare_;
     }
+    return false;
 }
 
 void EffectOps::effectEnd(void* filter) {
-    if (unit_ != Unit::None && filter == unitFilter_) finishUnit();
+    if (unit_ != Unit::None && filter == unitFilter_) {
+        if (afterPending_) checkAfter(false);
+        finishUnit();
+    }
     if (filter == leftUnit_) leftUnit_ = nullptr;
 }
 
@@ -610,11 +628,11 @@ EffectOps::Skip EffectOps::composeEffect(const std::uint8_t* filter, const std::
     // the parameter values OnSetParams pushes: every parameter object used by the technique (+0x50 bit), its +0x58 bytes, the
     // overrides (the mask's), the semantic ones from their sources; then the inputs' images. The post chain starts from the values
     // the effect holds (a class that sets nothing this call leaves the last value: the carry-over)
-    fx::ParameterValues values = post ? info->currentValues() : fx::ParameterValues::defaults(e);
+    // (O3: every unit starts from the effect's values / textures, as the HAL's pass does: a parameter nobody sets keeps its last
+    // value; the mask's, defaults before O3, were all set by its parameter objects)
+    fx::ParameterValues values = info->currentValues();
     std::vector<const void*> paramTextures(e.parameters.size(), nullptr);
-    if (post) {
-        for (std::uint32_t i = 0; i < e.parameters.size(); ++i) paramTextures[i] = info->currentTexture(i);
-    }
+    for (std::uint32_t i = 0; i < e.parameters.size(); ++i) paramTextures[i] = info->currentTexture(i);
     const std::int32_t inputs = get<std::int32_t>(filter, 0xc0);
     U8* inputArray = ptr(filter, 0xb8);
     const auto inputImage = [&](std::int32_t k, const void*& img) {
@@ -628,6 +646,7 @@ EffectOps::Skip EffectOps::composeEffect(const std::uint8_t* filter, const std::
     };
     const std::int32_t params = get<std::int32_t>(filter, 0xe8);
     U8* paramArray = ptr(filter, 0xe0);
+    resetTextures_.clear();
     for (std::int32_t k = 0; k < params; ++k) {
         U8* obj = ptr(paramArray, 8 * static_cast<std::size_t>(k));
         if (obj == nullptr) continue;
@@ -640,6 +659,8 @@ EffectOps::Skip EffectOps::composeEffect(const std::uint8_t* filter, const std::
         auto& data = values.data[pi];
         const fx::Parameter& param = e.parameters[pi];
         const auto vt = static_cast<std::uint32_t>(static_cast<U8*>(ptr(obj, 0)) - engine_);
+        // O3: OnResetParams' Reset (+0x30) of eSImageEffectParamTexture 0x2897f0 / Image 0x2893d0: SetTexture(handle, null)
+        if (vt == kParamTexture || vt == kParamImage) resetTextures_.push_back(pi);
         const auto it = overrides_.find(param.name);
         const Override* ov = unitFilter_ == ptr(illum_, kIllumMask) && it != overrides_.end() ? &it->second : nullptr;
         const auto store = [&](const void* src, std::size_t n) { std::memcpy(data.data(), src, std::min(n, data.size())); };
@@ -745,6 +766,7 @@ EffectOps::Skip EffectOps::composeEffect(const std::uint8_t* filter, const std::
     if (draws_.empty()) draws_.push_back(std::make_unique<fxc::EffectDraw>());
     fxc::EffectDraw& base = *draws_[0];
     captureDevice(base);
+    entryRs_ = base.rs;
     if (post) {
         // eCImageFilterRTBase::SetRenderTarget 0x668370: a screen-mode filter (+0x38 == 1, no output image) draws into what is
         // bound (the target / depth / viewport at Execute's entry: the back buffer); a texture-mode one binds its output image with
@@ -793,6 +815,8 @@ EffectOps::Skip EffectOps::composeEffect(const std::uint8_t* filter, const std::
             fxc::applyPssmStencil(d, pstate);
             cull = pstate.cull;
             depthFunc = pstate.depthFunc;
+            pssmLastCull_ = cull;
+            pssmLastDepthFunc_ = depthFunc;
         }
         // eCGfxEffect::Execute (ExecuteEffectPass): skipped for the effect already active and not dirty while ms_bOptimize
         if (!post || !executeSkipped(ptr(filter, 0xa8))) fxc::applyPass(e, passes[p], values, paramTextures, shaders, d);
@@ -826,6 +850,19 @@ EffectOps::Skip EffectOps::composeEffect(const std::uint8_t* filter, const std::
         if (d.unsupported) return Skip::Technique;
         drawCount_ = n + 1;
     }
+    // O3: what the engine's code leaves in the effect (EffectOps::predictAfter): OnSetParams' values, the textures with
+    // OnResetParams' detaches (every input with a handle: SetTexture(handle, null)), the technique of SetTechnique(gfx effect +0x20)
+    for (std::int32_t k = 0; k < inputs; ++k) {
+        const std::uint32_t pi = info->parameterOf(ptr(inputArray + 0x60 * static_cast<std::size_t>(k), 0x20));
+        if (pi < paramTextures.size()) paramTextures[pi] = nullptr;
+    }
+    for (const std::uint32_t pi : resetTextures_) paramTextures[pi] = nullptr;
+    unitInfo_ = hal::vulkan::EffectInfo::fromApiMutable(ptr(ptr(filter, 0xa8), 0x18));
+    unitValues_ = std::move(values);
+    unitTextures_ = std::move(paramTextures);
+    const int handleTech = info->techniqueOf(ptr(ptr(filter, 0xa8), 0x20));
+    unitTech_ = handleTech >= 0 ? handleTech : info->currentTechnique();
+    unitPasses_ = static_cast<std::uint32_t>(passes.size());
     return Skip::None;
 }
 
@@ -914,7 +951,7 @@ bool EffectOps::engineDraw(const d3d9::DrawTapInfo& t) {
 }
 
 void EffectOps::finishUnit() {
-    if (unit_ != Unit::Copy && stats_ != nullptr && unitCompare_ && engineDraws_ != drawCount_) {
+    if (unit_ != Unit::Copy && stats_ != nullptr && unitCompare_ && !leanSkipped_ && engineDraws_ != drawCount_) {
         ++stats_->counts.mismatches[static_cast<std::size_t>(fxc::Field::DrawCount)];
         if (mismatchLogged_++ < 24) spdlog::info("native: effect draws: {}: {} engine draws, {} composed", unitName_, engineDraws_, drawCount_);
     }
@@ -922,6 +959,7 @@ void EffectOps::finishUnit() {
     unitFilter_ = nullptr;
     drawCount_ = 0;
     taken_ = false;
+    leanSkipped_ = false;
 }
 
 // ---- the 1/4 depth copy (eCImageFilterCopy::OnUpdateOutput 0x665640) -------------------------------------------------------------
@@ -1011,6 +1049,7 @@ void EffectOps::report() {
     }
     reportPost();
     reportGui();
+    reportLean();
     outsideDrawsTotal_ += outsideDraws_;
     if (maskOn()) spdlog::info("native: effect draws (5 s): {} shadow masks ({} with point-light cells), engine draws outside the units {} (total {}), "
                  "parameters not used by their technique {}, the mask's parameter values composed natively {}",

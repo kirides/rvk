@@ -186,6 +186,8 @@ void HalDevice::applyStaticOps() {
     const bool leanOn = leanWanted && !((compare || sceneCompare) && leanCheck <= 0);
     if (leanWanted && !leanOn) spdlog::info("native: lean ops off: a compare is on and native.lean_check is 0 (the compare needs the engine's code)");
     staticOps_->setLean(leanOn, leanCheck);
+    // O3: the effect units, sprite flushes and the PSSM pass (native.lean_effects: their A/B)
+    effectOps_->setLean(leanOn && (rs.nativeLeanEffects == nullptr || on(rs.nativeLeanEffects)), leanCheck);
     staticOps_->setLeanRestore(rs.nativeLeanRestore == nullptr || on(rs.nativeLeanRestore));
     frameTap_->setCoverage(on(rs.nativeCoverage) || on(rs.nativeFrameTap) || compare || sceneCompare);
 }
@@ -449,7 +451,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     frameTap_->setEffectOps(effectOps_.get());
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups,
                                  rs.nativeMirror, rs.nativeCoverage, rs.nativeFrameTap, rs.nativeLean, rs.nativeLeanCheck,
-                                 rs.nativeLeanRestore}) {
+                                 rs.nativeLeanRestore, rs.nativeLeanEffects}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
     // renderer.mode (Wrapper / Full): like the native.* settings applied by the registry's dispatch before a present, i.e. at a

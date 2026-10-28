@@ -70,8 +70,9 @@ public:
     // eCIlluminationAdmin::UpdateShadowMask (inside its ShadowMask pass marker) begins (before the original) / ends
     virtual void maskBegin(void* illum) = 0;
     virtual void maskEnd() = 0;
-    // eCImageFilterEffect::ExecuteEffect (0x75af70) of any effect filter begins / ends
-    virtual void effectBegin(void* filter) = 0;
+    // eCImageFilterEffect::ExecuteEffect (0x75af70) of any effect filter begins / ends; true = the original is not called (O3
+    // lean: composed, issued and its side effects done; effectEnd still follows)
+    virtual bool effectBegin(void* filter) = 0;
     virtual void effectEnd(void* filter) = 0;
     // eCImageFilterCopy::OnUpdateOutput (0x665640) begins / ends
     virtual void copyBegin(void* filter) = 0;
@@ -86,11 +87,13 @@ public:
     // ends; eCSprite::Flush (0x757d10: the sprite batcher's queued records -> batches: GUI, fonts, cursor, videos) begins / ends
     virtual void postBegin(void* /*effect*/) {}
     virtual void postEnd(void* /*effect*/) {}
-    virtual void spriteFlushBegin(void* /*sprite*/) {}
+    // (spriteFlushBegin true = the original Flush is not called: O3 lean; spriteFlushEnd still follows)
+    virtual bool spriteFlushBegin(void* /*sprite*/) { return false; }
     virtual void spriteFlushEnd(void* /*sprite*/) {}
     // N5.8: eCImageFilterShadowMask::UpdatePackedShadowMapVisual (0x669e00) returned `ok` for the packed map `map` (the PSSM pass of
-    // that map follows: BeginEffectTechnique, per cell 3 passes, EndEffectTechnique)
-    virtual void packedVisual(void* /*mask*/, void* /*map*/, bool /*ok*/) {}
+    // that map follows: BeginEffectTechnique, per cell 3 passes, EndEffectTechnique); true = the detour returns false (O3 lean: the
+    // pass was composed and issued, the engine skips its loop)
+    virtual bool packedVisual(void* /*mask*/, void* /*map*/, bool /*ok*/) { return false; }
 };
 void setEffectTap(EffectTap* tap);
 

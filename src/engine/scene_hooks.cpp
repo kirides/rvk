@@ -230,7 +230,8 @@ Hook<PackedVisualFn> g_packedVisual;
 bool detourPackedVisual(void* mask, void* map, const void* viewProj) {
     const bool r = g_packedVisual.original(mask, map, viewProj);
     EffectTap* tap = device() != nullptr ? g_effectTap.load(std::memory_order_relaxed) : nullptr;
-    if (tap != nullptr) tap->packedVisual(mask, map, r);
+    // O3 lean: the PSSM pass was composed and issued (and its side effects done): false = OnUpdateOutput skips its pass loop
+    if (tap != nullptr && tap->packedVisual(mask, map, r)) return false;
     return r;
 }
 
@@ -275,8 +276,9 @@ void detourUpdateShadowMask(void* self) {
 Hook<VoidThisFn> g_executeEffect;
 void detourExecuteEffect(void* filter) {
     EffectTap* tap = device() != nullptr ? g_effectTap.load(std::memory_order_relaxed) : nullptr;
-    if (tap != nullptr) tap->effectBegin(filter);
-    g_executeEffect.original(filter);
+    // O3 lean: true = composed, issued and its side effects done (the original not called)
+    const bool skip = tap != nullptr && tap->effectBegin(filter);
+    if (!skip) g_executeEffect.original(filter);
     if (tap != nullptr) tap->effectEnd(filter);
 }
 
@@ -425,8 +427,9 @@ bool detourEffectExecute(void* effect) {
 Hook<VoidThisFn> g_spriteFlush;
 void detourSpriteFlush(void* sprite) {
     EffectTap* tap = device() != nullptr ? g_effectTap.load(std::memory_order_relaxed) : nullptr;
-    if (tap != nullptr) tap->spriteFlushBegin(sprite);
-    g_spriteFlush.original(sprite);
+    // O3 lean: true = composed, issued and the records reset (the original not called)
+    const bool skip = tap != nullptr && tap->spriteFlushBegin(sprite);
+    if (!skip) g_spriteFlush.original(sprite);
     if (tap != nullptr) tap->spriteFlushEnd(sprite);
 }
 

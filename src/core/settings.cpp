@@ -1881,6 +1881,18 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
     });
+    r.nativeLeanEffects = &reg.add({
+        .key = "native.lean_effects",
+        .label = "Native frame: lean effect units",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "O3: with native.lean, the composed effect filters (shadow mask chain, terrain blur, post chain), sprite flushes "
+                       "and the PSSM pass skip the engine's code too (their side effects reproduced). Off = only the scene ops are lean "
+                       "(A/B switch).",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
     r.nativeCoverage = &reg.add({
         .key = "native.coverage",
         .label = "Native frame: coverage counter",

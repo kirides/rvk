@@ -133,9 +133,10 @@ bool EffectOps::pssmVertices(const std::uint8_t* map, std::int32_t cells) {
     return ok;
 }
 
-void EffectOps::packedVisual(void* maskPtr, void* mapPtr, bool ok) {
-    if (!ok || verified_ <= 0 || !maskOn() || !inMask_ || illum_ == nullptr || maskPtr != ptr(illum_, kIllumMask)) return;
+bool EffectOps::packedVisual(void* maskPtr, void* mapPtr, bool ok) {
+    if (!ok || verified_ <= 0 || !maskOn() || !inMask_ || illum_ == nullptr || maskPtr != ptr(illum_, kIllumMask)) return false;
     if (pssmVerified_ == 0) pssmVerified_ = verifyPssm() ? 1 : -1;
+    if (afterPending_) checkAfter(true);
     if (unit_ != Unit::None) finishUnit();
     auto* mask = static_cast<U8*>(maskPtr);
     auto* map = static_cast<U8*>(mapPtr);
@@ -197,15 +198,30 @@ void EffectOps::packedVisual(void* maskPtr, void* mapPtr, bool ok) {
         drawCount_ = 0;
         unit_ = Unit::None;
         leftUnit(mask, s);
-        return;
+        return false;
     }
     ++stats_->counts.unitsComposed;
     engineDraws_ = 0;
     taken_ = false;
+    leanStats_ = &leanWindow_[unitName_];
     if (unitTake_) {
+        predictAfter(false);
+        if (leanUnit()) {
+            // O3 lean: the engine's PSSM loop is skipped (the detour returns false); our draws read the pyramids the original
+            // UpdatePackedShadowMapVisual has just written into the engine's vertex buffer (the same bytes as ours: compared)
+            issueLean();
+            adoptAfter();
+            taken_ = true;
+            leanSkipped_ = true;
+            finishUnit();
+            return true;
+        }
         issuePssm();
         taken_ = true;
+        // (checked at the loop's EndEffectTechnique: techniqueEnded, from the HAL effect's EndTechnique)
+        afterPending_ = checkFrame_ && unitCompare_;
     }
+    return false;
 }
 
 bool EffectOps::pssmGeometryEqual(std::size_t k, std::string& why) {

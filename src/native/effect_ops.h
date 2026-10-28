@@ -23,7 +23,10 @@
 // Take-over: the composed draws are issued at ExecuteEffect's entry (the device state saved and restored around them) and the
 // engine's draws of that call are dropped at prepareDraw; the copy is made by us at the HAL call and the engine's is skipped.
 // The engine's code still runs completely (parameter objects, effect state, render-target pool, the stencil it relies on is
-// written by our draws as by its own). Off: nothing beyond the detours' null check. Render thread.
+// written by our draws as by its own) - except on O3 lean frames (native.lean + native.lean_effects, effect_ops_lean.cpp): there a
+// taken-over unit's ExecuteEffect / Flush / PSSM loop is skipped and what it leaves behind is reproduced (the thin graph walk,
+// UpdateEffect, the render-target pool, CFXGui and the GUI device's BeginFrame / EndFrame still run). Off: nothing beyond the
+// detours' null check. Render thread.
 
 #include <array>
 #include <bitset>
@@ -67,7 +70,7 @@ public:
     // engine::scene::EffectTap
     void maskBegin(void* illum) override;
     void maskEnd() override;
-    void effectBegin(void* filter) override;
+    bool effectBegin(void* filter) override;
     void effectEnd(void* filter) override;
     void copyBegin(void* filter) override;
     void copyEnd(void* filter) override;
@@ -77,9 +80,9 @@ public:
     void shadowSceneEnd(void* map) override;
     void postBegin(void* effect) override;
     void postEnd(void* effect) override;
-    void spriteFlushBegin(void* sprite) override;
+    bool spriteFlushBegin(void* sprite) override;
     void spriteFlushEnd(void* sprite) override;
-    void packedVisual(void* mask, void* map, bool ok) override;
+    bool packedVisual(void* mask, void* map, bool ok) override;
     // engine/shadow_maps: eCCascadeShadowMap::RenderShadowMaps is about to fit and render the cascades
     void fitBegin(void* cascade);
     // the HAL's device calls inside a shadow map's setup / reset: compared with (and with take-over replaced by) the composition
@@ -97,6 +100,15 @@ public:
     // N5.8 coverage: why an engine draw that was not dropped stays the engine's (empty: no unit of ours claims it)
     std::string_view leftReason(const d3d9::DrawTapInfo& draw) const;
     void report();
+    // O3 lean (effect_ops_lean.cpp; opt-plan.md "O2c / O3 result"): native.lean / native.lean_check as for the static ops. On a lean
+    // frame a composed, taken-over unit (effect filter, sprite flush, PSSM pass) skips the engine's code: the device is left as the
+    // engine's code leaves it, the effect's values / textures / technique are adopted, the engine fields written; on check frames
+    // the engine's code runs and that prediction is compared with what it left ("after" / "store" counts)
+    void setLean(bool on, int check);
+    // the HAL effect `info`'s EndTechnique ran (the PSSM pass loop's end: its prediction is checked there on check frames)
+    void techniqueEnded(const hal::vulkan::EffectInfo* info) {
+        if (afterPending_ && unit_ == Unit::Pssm && info == unitInfo_) checkAfter(false);
+    }
 
 private:
     enum class Unit : std::uint8_t { None, Chain, Mask, TerrainBlur, Copy, Post, Gui, Pssm };
@@ -207,7 +219,7 @@ private:
     bool verifyGui();
     Skip composeSprite(const std::uint8_t* sprite);
     bool spriteGeometryEqual(std::size_t k, const d3d9::DrawTapInfo& t, bool own, std::string& why);
-    void issueSprite();
+    void issueSprite(bool lean);
     void reportGui();
     bool guiTake_ = false, guiCompare_ = false;
     int guiVerified_ = 0;
@@ -378,6 +390,53 @@ private:
     std::uint32_t mismatchLogged_ = 0, paramClassLogged_ = 0, packedLogged_ = 0;
     std::vector<std::string> firstMismatches_;
     std::unordered_map<const d3d9::Shader*, Live> live_;
+    // ---- O3 lean (effect_ops_lean.cpp) ----
+    bool lean_ = false;
+    int leanCheck_ = 0;
+    std::uint64_t leanFrameNo_ = ~0ull;
+    bool leanFrameOn_ = false, checkFrame_ = false;
+    void leanUpdateFrame();
+    // the current unit may skip the engine's code (lean frame, taken over, no render-state block open)
+    bool leanUnit();
+    // issues the unit's draws and leaves the device as the engine's code would (render states: those at the entry, the HAL's
+    // technique block reverts every state the passes / visual set; the rest: the last draw's)
+    void issueLean();
+    // the engine state the unit's code would have left (effect store, engine fields), predicted at the unit's composition
+    void predictAfter(bool sprite);
+    void adoptAfter();
+    void checkAfter(bool late);
+    std::array<std::uint32_t, fxc::kRenderStates> entryRs_{};
+    bool leanSkipped_ = false;
+    bool afterPending_ = false;
+    std::unique_ptr<fxc::EffectDraw> after_, afterGot_;
+    std::uint32_t afterMasters_ = 0;  // the HAL's master flags as the unit's code leaves them (SetBlend: blend, PSSM: stencil)
+    hal::vulkan::EffectInfo* unitInfo_ = nullptr;
+    fx::ParameterValues unitValues_;                 // the values OnSetParams leaves in the API effect (the composition's)
+    std::vector<const void*> unitTextures_;          // ... and the textures (after OnResetParams' / the resets' nulls)
+    int unitTech_ = -1;
+    std::uint32_t unitPasses_ = 0;
+    int leanVerified_ = 0;
+    std::vector<std::uint32_t> resetTextures_;  // the technique's Texture / Image parameters (their Reset detaches them)
+    bool spriteExecuted_ = false, spriteBlendSet_ = false;   // the flush's batches attached an image / set a blend
+    std::uint32_t spriteEndStart_ = 0, spriteEndCount_ = 0;  // the mesh ring after the flush
+    std::uint32_t pssmLastCull_ = 0, pssmLastDepthFunc_ = 0;  // the PSSM loop's last visual states
+    // engine fields the unit's code writes (address, value, size 1 / 4 / 8), written by adoptAfter and checked on check frames
+    struct FieldWrite {
+        void* at = nullptr;
+        std::uint64_t value = 0;
+        std::uint32_t size = 0;
+    };
+    std::vector<FieldWrite> afterFields_;
+    struct LeanStats {
+        std::uint64_t skipped = 0, fallbackBlock = 0, afterChecked = 0, afterDiffer = 0, storeChecked = 0, storeDiffer = 0,
+                      fieldsChecked = 0, fieldsDiffer = 0, mastersDiffer = 0;
+        std::array<std::uint64_t, fxc::kFieldCount> afterFields{};
+        void add(const LeanStats& o);
+    };
+    std::map<std::string, LeanStats> leanWindow_, leanTotal_;
+    LeanStats* leanStats_ = nullptr;
+    std::uint32_t afterLogged_ = 0;
+    void reportLean();
     // N5.8 coverage: the unit left to the engine (its filter / sprite until its end) and why
     const void* leftUnit_ = nullptr;
     std::string leftWhy_;

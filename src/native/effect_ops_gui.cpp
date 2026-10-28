@@ -75,10 +75,10 @@ bool EffectOps::verifyGui() {
     return true;
 }
 
-void EffectOps::spriteFlushBegin(void* spritePtr) {
-    if (verified_ <= 0 || guiVerified_ <= 0 || !guiOn()) return;
+bool EffectOps::spriteFlushBegin(void* spritePtr) {
+    if (verified_ <= 0 || guiVerified_ <= 0 || !guiOn()) return false;
     auto* sprite = static_cast<U8*>(spritePtr);
-    if (get<std::int32_t>(sprite, 0xb0) == 0) return;  // Flush does nothing
+    if (get<std::int32_t>(sprite, 0xb0) == 0) return false;  // Flush does nothing
     if (unit_ != Unit::None) finishUnit();
     unit_ = Unit::Gui;
     unitFilter_ = sprite;
@@ -95,19 +95,35 @@ void EffectOps::spriteFlushBegin(void* spritePtr) {
         drawCount_ = 0;
         unit_ = Unit::None;
         leftUnit(sprite, s);
-        return;
+        return false;
     }
     ++stats_->counts.unitsComposed;
     engineDraws_ = 0;
     taken_ = false;
+    leanStats_ = &leanWindow_[unitName_];
     if (unitTake_) {
-        issueSprite();
+        predictAfter(true);
+        if (leanUnit()) {
+            // O3 lean: the engine's Flush is not run (no record holds a reference; the image the effect attaches is released by
+            // End / EndFrame only when attached: README.md 15, opt-plan.md "O2c / O3 result")
+            issueSprite(true);
+            adoptAfter();
+            taken_ = true;
+            leanSkipped_ = true;
+            return true;
+        }
+        issueSprite(false);
         taken_ = true;
+        afterPending_ = checkFrame_ && unitCompare_;
     }
+    return false;
 }
 
 void EffectOps::spriteFlushEnd(void* sprite) {
-    if (unit_ == Unit::Gui && unitFilter_ == sprite) finishUnit();
+    if (unit_ == Unit::Gui && unitFilter_ == sprite) {
+        if (afterPending_) checkAfter(false);
+        finishUnit();
+    }
     if (sprite == leftUnit_) leftUnit_ = nullptr;
 }
 
@@ -147,6 +163,7 @@ EffectOps::Skip EffectOps::composeSprite(const std::uint8_t* sp) {
     if (vdata == nullptr || ptr(vdata, 0x20) == nullptr || capacity == 0 || capacity > kMaxQuads) return Skip::Buffer;
     const auto sv = prim->streamView(0);
     if (sv.buffer == nullptr || sv.stride != fxc::kSpriteVertex) return Skip::Buffer;
+    spriteExecuted_ = spriteBlendSet_ = false;
     std::vector<std::uint8_t> records(static_cast<std::size_t>(n) * fxc::kSpriteRecord);
     if (!safeRead(recs, records.data(), records.size())) return Skip::Unreadable;
     std::vector<fxc::SpriteKey> keys(static_cast<std::size_t>(n));
@@ -180,6 +197,9 @@ EffectOps::Skip EffectOps::composeSprite(const std::uint8_t* sp) {
     const fxc::Masters masters = hal_.visualMasters();
     fxc::EffectDraw& state = *scratch_;
     captureDevice(state);
+    entryRs_ = state.rs;
+    spriteEndStart_ = plan.endStart;
+    spriteEndCount_ = plan.endCount;
     const auto& dc = prim->drawDesc();
     (void)dc;
     for (const fxc::SpriteBatch& b : plan.batches) {
@@ -190,6 +210,7 @@ EffectOps::Skip EffectOps::composeSprite(const std::uint8_t* sp) {
             // SetBlend: SetAlphaBlending (slot 0x1e0) + eCGfxMixerAdmin::SetMasterBlending(src, dst) -> the HAL's master blend
             std::uint32_t enable = 0, src = 0, dst = 0;
             if (fxc::spriteBlend(b.blend, enable, src, dst)) {
+                spriteBlendSet_ = true;
                 state.rs[d3d9::RS_ALPHABLENDENABLE] = enable;
                 state.rs[d3d9::RS_SRCBLEND] = src;
                 state.rs[d3d9::RS_DESTBLEND] = dst;
@@ -204,6 +225,7 @@ EffectOps::Skip EffectOps::composeSprite(const std::uint8_t* sp) {
             if (optimize && active == gfx && dirty == 0 && !reset) {
                 ++spriteSkippedExecute_;
             } else {
+                spriteExecuted_ = true;
                 fxc::applyPass(e, fxPass, values, paramTextures, shaders, state);
                 active = gfx;
                 dirty = 0;
@@ -251,6 +273,13 @@ EffectOps::Skip EffectOps::composeSprite(const std::uint8_t* sp) {
     }
     spriteRecords_ += static_cast<std::uint64_t>(n);
     spriteQuads_ += static_cast<std::uint64_t>(n);
+    // O3: what Flush leaves in the sprite effect (predictAfter): g_mWorldViewProj, the last attached image's texture, the technique
+    // (SetTechnique(null) is rejected: unchanged)
+    unitInfo_ = hal::vulkan::EffectInfo::fromApiMutable(ptr(gfx, 0x18));
+    unitValues_ = std::move(values);
+    unitTextures_ = std::move(paramTextures);
+    unitTech_ = info->currentTechnique();
+    unitPasses_ = 0;
     return Skip::None;
 }
 
@@ -283,7 +312,7 @@ bool EffectOps::spriteGeometryEqual(std::size_t k, const d3d9::DrawTapInfo& /*t*
     return true;
 }
 
-void EffectOps::issueSprite() {
+void EffectOps::issueSprite(bool lean) {
     if (drawCount_ == 0) return;
     if (!spriteVb_) spriteVb_ = dev_.createBuffer(kMaxQuads * fxc::kSpriteQuad, d3d9::USAGE_DYNAMIC | d3d9::USAGE_WRITEONLY, d3d9::POOL_DEFAULT, false, false);
     if (!spriteIb_) {
@@ -295,7 +324,7 @@ void EffectOps::issueSprite() {
             spriteIb_->unlock();
         }
     }
-    captureDevice(*saved_);
+    if (!lean) captureDevice(*saved_);
     d3d9::draws::Tag& tag = dev_.drawTag();
     const d3d9::draws::Tag savedTag = tag;
     issuing_ = true;
@@ -322,7 +351,16 @@ void EffectOps::issueSprite() {
     }
     issuing_ = false;
     tag = savedTag;
-    applyDevice(*saved_);
+    if (!lean) {
+        applyDevice(*saved_);
+        return;
+    }
+    // O3 lean: the device as the engine's Flush leaves it: the last batch's state with the engine's mesh buffers, the render states
+    // of the entry (EndTechnique's block)
+    applyDevice(*draws_[drawCount_ - 1]);
+    for (std::uint32_t rs = 0; rs < fxc::kRenderStates; ++rs) {
+        if (dev_.renderState(rs) != entryRs_[rs]) dev_.setRenderState(rs, entryRs_[rs]);
+    }
 }
 
 void EffectOps::reportGui() {

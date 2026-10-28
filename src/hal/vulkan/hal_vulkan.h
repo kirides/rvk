@@ -296,7 +296,14 @@ public:
     virtual int currentTechnique() const = 0;
     // the technique index of a technique handle (GetTechniqueDescription's; -1 unknown)
     virtual int techniqueOf(const void* handle) const = 0;
+    // O3 lean (native/effect_ops): what an ExecuteEffect / sprite Flush / PSSM pass of the engine would have left in the effect,
+    // written by the composition when the engine's code is not run: the values (swapped with `values`), a parameter's texture, the
+    // technique SetTechnique selected (the pass is -1 again after EndTechnique)
+    virtual void adoptValues(fx::ParameterValues& values) = 0;
+    virtual void adoptTexture(std::uint32_t param, const d3d9::Texture* texture) = 0;
+    virtual void adoptTechnique(int technique) = 0;
     static const EffectInfo* fromApi(const void* apiEffect);
+    static EffectInfo* fromApiMutable(const void* apiEffect) { return const_cast<EffectInfo*>(fromApi(apiEffect)); }
 };
 
 class HalDevice final : public StubDevice {
@@ -322,6 +329,19 @@ public:
     native::fxc::Masters visualMasters() const {
         return {master_[M_RENDERMODE], master_[M_CULL], master_[M_DEPTHFUNC], master_[M_DEPTHWRITE]};
     }
+    // O3 lean (native/effect_ops): every master flag as a bit mask (bit i = Master i: render mode, shade, cull, depth func, depth write,
+    // depth bias, stencil, blend, alpha test, fog), set back as a lean unit's engine code leaves them (the flags only: their render
+    // states revert at the technique's end), and
+    // whether a render-state block records (BeginRenderStateBlock .. EndRenderStateBlock: an effect technique, a bracket)
+    std::uint32_t masterBits() const {
+        std::uint32_t b = 0;
+        for (int i = 0; i < M_COUNT; ++i) b |= master_[i] ? 1u << i : 0u;
+        return b;
+    }
+    void setMasterBits(std::uint32_t bits) {
+        for (int i = 0; i < M_COUNT; ++i) master_[i] = (bits >> i & 1u) != 0;
+    }
+    bool stateBlockOpen() const { return blockRecording_; }
     // live HAL cube maps by the engine's eCAPICubeMap pointer (kept apart: textureOfApi's users expect 2D textures)
     void registerCube(const void* api, d3d9::Texture* texture);
     void unregisterCube(const void* api);

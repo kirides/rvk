@@ -14,6 +14,7 @@
 #include "core/exports.h"
 #include "fx/effect_binary.h"
 #include "hal/vulkan/hal_vulkan.h"
+#include "native/effect_ops.h"
 
 namespace rvk::hal::vulkan {
 
@@ -110,6 +111,16 @@ public:
     const fx::ParameterValues& currentValues() const override { return values_; }
     const d3d9::Texture* currentTexture(std::uint32_t param) const override { return param < textures_.size() ? textures_[param] : nullptr; }
     int currentTechnique() const override { return technique_; }
+    void adoptValues(fx::ParameterValues& values) override {
+        if (values.data.size() == values_.data.size()) std::swap(values_, values);
+    }
+    void adoptTexture(std::uint32_t param, const d3d9::Texture* texture) override {
+        if (param < textures_.size()) textures_[param] = const_cast<d3d9::Texture*>(texture);
+    }
+    void adoptTechnique(int technique) override {
+        if (technique >= 0 && static_cast<std::size_t>(technique) < fx_.techniques.size()) technique_ = technique;
+        pass_ = -1;
+    }
     int techniqueOf(const void* handle) const override {
         for (std::size_t i = 0; i < techniqueHandles_.size(); ++i) {
             if (handle == &techniqueHandles_[i]) return static_cast<int>(i);
@@ -258,6 +269,8 @@ public:
     bEResult EndTechnique() override {
         pass_ = -1;
         dev_.EndRenderStateBlock();
+        // O3 (native/effect_ops): the PSSM loop's end (no engine hook there): the check frames' comparison of the lean prediction
+        if (native::EffectOps* ops = dev_.effectOps()) ops->techniqueEnded(this);
         return bEResult_Ok;
     }
 
