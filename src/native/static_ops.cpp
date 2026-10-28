@@ -71,13 +71,22 @@ constexpr std::uint32_t kInstanceSortLea = 0x5c7162, kInstanceCmp = 0x75f690, kQ
 constexpr std::uint32_t kNoState = 0xABABABABu;  // a sampler slot value meaning "the gfx admin's default filter"
 
 inline bool rd(const void* p, std::size_t off, void* out, std::size_t n) {
-    return p != nullptr && safeRead(static_cast<U8*>(p) + off, out, n);
+    if (p == nullptr) return false;
+    const bool ok = safeRead(static_cast<U8*>(p) + off, out, n);
+    if (ret::gLog != nullptr) [[unlikely]] ret::logBlock(p, off, out, n, ok);  // V3: the composition's read log
+    return ok;
 }
 template <class T>
 inline T get(const void* p, std::size_t off, T fallback = T{}) {
     T v = fallback;
-    if (!readAt(p, off, v)) return fallback;
-    return v;
+    const bool ok = readAt(p, off, v);
+    if (ret::gLog != nullptr && p != nullptr) [[unlikely]] {
+        static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8);
+        std::uint64_t bits = 0;
+        if (ok) std::memcpy(&bits, &v, sizeof(T));
+        ret::logWord(p, off, sizeof(T), bits, ok);
+    }
+    return ok ? v : fallback;
 }
 inline U8* ptr(const void* p, std::size_t off) { return get<U8*>(p, off, nullptr); }
 
@@ -385,6 +394,17 @@ d3d9::Shader* StaticOps::shaderOfElement(const void* element) {
 
 d3d9::Texture* StaticOps::textureOfImageData(const void* imageData, bool& ok) {
     ok = false;
+    if (rec_ != nullptr) {
+        d3d9::Texture* t = nullptr;
+        {
+            const RetEntry* saved = rec_;
+            rec_ = nullptr;  // (the inner body is the same function: re-entered without recording once)
+            t = textureOfImageData(imageData, ok);
+            rec_ = const_cast<RetEntry*>(saved);
+        }
+        rec_->tex.push_back({imageData, t, ok});
+        return t;
+    }
     U8* api = ptr(imageData, 0x60);
     if (api == nullptr) return nullptr;
     // O1: the HAL's registry (a mutex + a hash map) behind a small cache, valid while the registry's generation holds
@@ -416,9 +436,29 @@ d3d9::Texture* StaticOps::textureOfImageData(const void* imageData, bool& ok) {
     return t;
 }
 
+sc::DrawDesc* StaticOps::takeDesc() {
+    if (!descFree_.empty()) {
+        sc::DrawDesc* d = descFree_.back();
+        descFree_.pop_back();
+        return d;
+    }
+    descStore_.push_back(std::make_unique<sc::DrawDesc>());
+    return descStore_.back().get();
+}
+
+void StaticOps::recycleTransient() {
+    for (sc::DrawDesc* d : transient_) descFree_.push_back(d);
+    transient_.clear();
+}
+
 sc::DrawDesc& StaticOps::newDraw() {
-    if (drawCount_ == draws_.size()) draws_.push_back(std::make_unique<sc::DrawDesc>());
-    sc::DrawDesc& d = *draws_[drawCount_++];
+    if (drawCount_ == 0) recycleTransient();
+    sc::DrawDesc* dp = takeDesc();
+    transient_.push_back(dp);
+    if (drawCount_ == draws_.size()) draws_.push_back(dp);
+    else draws_[drawCount_] = dp;
+    ++drawCount_;
+    sc::DrawDesc& d = *dp;
     d.vs = d.ps = d.decl = d.indices = d.subMesh = d.material = nullptr;
     d.indexed = true;
     d.streams = {};
@@ -451,6 +491,7 @@ StaticOps::Mirror::ShaderPools* StaticOps::poolsOf(const void* shader) {
     auto [it, inserted] = mirror_.shaders.try_emplace(shader);
     Mirror::ShaderPools& p = it->second;
     if (inserted || p.epoch != mirrorEpoch_) {
+        const ret::NoLog noLog;  // V3: the pools are values (or compared as the entry's pre-state), not the log's
         // (re-)read once per epoch: the engine writes these pools outside the slots (SetTime in eCShaderMaterialAdmin::Process,
         // property notifies); inside them only SetSwitch, which the composition applies to this copy per op
         p.epoch = mirrorEpoch_;
@@ -601,6 +642,7 @@ void StaticOps::writeTreeInstance(std::uint32_t slot, const float v[2]) {
 
 // FUN_1806cd1d0: the pass's lighting into the lighting pool (c14 .. c37)
 void StaticOps::writeLighting(const sc::Pass& pass) {
+    const ret::NoLog noLog;  // V3: values re-read at every replay
     U8* illum = static_cast<U8*>(pass.illum);
     U8* list = ptr(illum, 0);
     if (illum == nullptr || list == nullptr) return;
@@ -661,8 +703,22 @@ void StaticOps::applySwitch(const std::uint8_t* shader, std::int32_t s, Skip& sk
             if (pool == nullptr || reg < 0) continue;
             if (pool == shader + 0xc8 && static_cast<std::uint32_t>(reg) >= pools->psFirst && static_cast<std::uint32_t>(reg) - pools->psFirst < 16) {
                 std::memcpy(pools->ps[reg - pools->psFirst], v, 16);
+                if (rec_ != nullptr) {
+                    RetSwitchWrite w;
+                    w.kind = 1;
+                    w.idx = static_cast<std::uint32_t>(reg) - pools->psFirst;
+                    std::memcpy(w.v, v, 16);
+                    rec_->sw.push_back(w);
+                }
             } else if (pool == shader + 0x98 && static_cast<std::uint32_t>(reg) >= pools->vsFirst && static_cast<std::uint32_t>(reg) - pools->vsFirst < 32) {
                 std::memcpy(pools->vs[reg - pools->vsFirst], v, 16);
+                if (rec_ != nullptr) {
+                    RetSwitchWrite w;
+                    w.kind = 0;
+                    w.idx = static_cast<std::uint32_t>(reg) - pools->vsFirst;
+                    std::memcpy(w.v, v, 16);
+                    rec_->sw.push_back(w);
+                }
             } else {
                 skip = Skip::Switch;
                 return;
@@ -682,6 +738,13 @@ void StaticOps::applySwitch(const std::uint8_t* shader, std::int32_t s, Skip& sk
                 return;
             }
             pools->slotImage[static_cast<std::size_t>(slot)] = image;
+            if (rec_ != nullptr) {
+                RetSwitchWrite w;
+                w.kind = 2;
+                w.idx = static_cast<std::uint32_t>(slot);
+                w.image = image;
+                rec_->sw.push_back(w);
+            }
             continue;
         }
         skip = Skip::Switch;
@@ -803,11 +866,13 @@ void StaticOps::constantsInto(sc::DrawDesc& d, const std::uint8_t* shader, const
 
 const StaticOps::SamplerSnap& StaticOps::samplerSnap() {
     if (snap_.serial != opSerial_ || snap_.admin != view_.admin) {
+        const ret::NoLog noLog;
         snap_.serial = opSerial_;
         snap_.admin = view_.admin;
         if (view_.admin == nullptr || !engine::safeReadN<sizeof(snap_.block)>(view_.admin + 0x248, snap_.block)) std::memset(snap_.block, 0, sizeof(snap_.block));
         if (imageOverride_ == nullptr || !engine::safeReadN<sizeof(snap_.overrides)>(imageOverride_, snap_.overrides.data())) snap_.overrides = {};
         snap_.defFilter = get<std::uint32_t>(view_.gfx, 0x640);
+        snap_.hash = ret::hashBytes(snap_.block, sizeof(snap_.block)) * 31 + ret::hashBytes(snap_.overrides.data(), sizeof(snap_.overrides)) * 17 + snap_.defFilter;
     }
     return snap_;
 }
@@ -824,7 +889,9 @@ StaticOps::Skip StaticOps::materialSamplers(sc::DrawDesc& d, const std::uint8_t*
         if (stage >= sc::kStages || (mask >> stage & 1u) == 0) continue;
         // the slot's 0x28 bytes at once (unreadable: zeros, as the field reads' fallbacks)
         std::uint8_t slot[0x28];
-        if (!engine::safeReadN<sizeof(slot)>(shader + 0xf8 + 0x28 * k, slot)) std::memset(slot, 0, sizeof(slot));
+        const bool slotOk = engine::safeReadN<sizeof(slot)>(shader + 0xf8 + 0x28 * k, slot);
+        if (!slotOk) std::memset(slot, 0, sizeof(slot));
+        if (ret::gLog != nullptr) [[unlikely]] ret::logBlock(shader, 0xf8 + 0x28 * k, slot, sizeof(slot), slotOk);
         const auto field = [&](std::uint32_t off) {
             std::uint32_t v;
             std::memcpy(&v, slot + off, 4);
@@ -835,6 +902,7 @@ StaticOps::Skip StaticOps::materialSamplers(sc::DrawDesc& d, const std::uint8_t*
         if (res != nullptr) {
             data = ptr(res, 0x70);
             leanImage(res, data);  // O2a: ExecuteShaderConstants' touch of the slot's image (+ the video / placeholder checks)
+            if (rec_ != nullptr) rec_->imgs.push_back({res, data});
             if (data == nullptr) {
                 U8* ph = ptr(placeholderTable_, 8 * stage);
                 if (ph != nullptr && ptr(ph, 0x60) != nullptr) data = ph;
@@ -859,10 +927,16 @@ std::uint8_t StaticOps::maskRefOf(const std::uint8_t* owner) const {
     return owner == maskRefShader_ ? maskRefOverride_ : get<std::uint8_t>(owner, 0x58);
 }
 
-StaticOps::Skip StaticOps::specialPassDraw(const std::uint8_t* shader, const Geom& geometry, bool option) {
+StaticOps::Skip StaticOps::specialPassDrawImpl(const std::uint8_t* shader, const Geom& geometry, bool option) {
     U8* admin = view_.admin;
     // ExecuteSpecialPass 0x6d1cd0: the mask reference first (PS c5.w), then the version's special pass
-    if (get<std::int32_t>(shader, 0x50) == 1) mirror_.adminPs[5][3] = static_cast<float>(maskRefOf(shader)) * (1.0f / 256.0f);
+    bool recMask = false;
+    float recMaskValue = 0;
+    if (get<std::int32_t>(shader, 0x50) == 1) {
+        recMaskValue = static_cast<float>(maskRefOf(shader)) * (1.0f / 256.0f);
+        mirror_.adminPs[5][3] = recMaskValue;
+        recMask = true;
+    }
     const std::int32_t v = get<std::int32_t>(admin, 0x170);
     U8* version = ptr(shader, 0x258 + 8 * static_cast<std::size_t>(v));
     if (version == nullptr) return Skip::None;  // no draw
@@ -875,6 +949,7 @@ StaticOps::Skip StaticOps::specialPassDraw(const std::uint8_t* shader, const Geo
     U8* psElem = ptr(version, 0xf0 + 16 * idx);
     if (vsElem == nullptr || psElem == nullptr) {
         // O2c: ExecuteSpecialPass's on-demand compile, here at the slot's place (a failure clears the flag byte: no draw, as the engine)
+        if (rec_ != nullptr) rec_->noRetain = true;
         bool failed = false;
         if (compileSpecial(shader, version, type, option, failed)) {
             vsElem = ptr(version, 0x30 + 16 * idx);
@@ -901,8 +976,21 @@ StaticOps::Skip StaticOps::specialPassDraw(const std::uint8_t* shader, const Geo
     d.ps = ps;
     d.states = sc::deviceStates(sc::zPassStates(get<std::uint8_t>(admin, 0x313) != 0, view_.zColorWrite), vis, get<std::uint32_t>(admin, 0x340));
     constantsInto(d, shader);
+    const std::size_t im0 = rec_ != nullptr ? rec_->imgs.size() : 0;
     const Skip s = materialSamplers(d, shader, psElem);
     if (s != Skip::None) return s;
+    if (rec_ != nullptr) {
+        RetPass rp;
+        rp.owner = shader;
+        rp.bias = nullptr;
+        rp.desc = &d;
+        rp.special = true;
+        rp.setMask = recMask;
+        rp.mask = recMaskValue;
+        rp.im0 = static_cast<std::uint32_t>(im0);
+        rp.im1 = static_cast<std::uint32_t>(rec_->imgs.size());
+        rec_->passes.push_back(rp);
+    }
     // stages the z PS samples beyond the material's: whatever is bound (BeginMaterial has not run yet)
     for (std::uint32_t st = 0; st < sc::kStages; ++st) {
         if (ps->reflection.samplers[st] == shader::TextureType::Unknown) continue;
@@ -919,13 +1007,14 @@ StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8
     const std::uint32_t vsIdx = sc::vsIndex(pass.flags), psIdx = sc::psIndex(pass.flags);
     U8* vsElem = ptr(version, 0x1b0 + 16 * vsIdx);
     U8* psElem = ptr(version, 0x210 + 16 * psIdx);
-    if ((vsElem == nullptr || psElem == nullptr) && compilePass(shader, version, pass.flags)) {
+    if ((vsElem == nullptr || psElem == nullptr) && (rec_ == nullptr || (rec_->noRetain = true)) && compilePass(shader, version, pass.flags)) {
         // O2c: the version Execute's on-demand compile, here at the slot's place; before the switch is applied to our copy of the
         // pools (the compile's graph re-walk refills the engine's pools, which our copy is then read from again)
         vsElem = ptr(version, 0x1b0 + 16 * vsIdx);
         psElem = ptr(version, 0x210 + 16 * psIdx);
     }
     Skip skip = Skip::None;
+    const std::size_t sw0 = rec_ != nullptr ? rec_->sw.size() : 0;
     applySwitch(shader, pass.switchValue, skip);
     if (skip != Skip::None) return skip;
     if (vsElem == nullptr || psElem == nullptr) {
@@ -942,7 +1031,9 @@ StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8
     b.tradeAlphaAsSolid = get<std::uint8_t>(owner, 0x79) != 0;
     const sc::RenderStates rs = sc::passStates(pass.flags, b, mirror_.global[1][3]);
     if (!rs.valid) return Skip::PassKind;
-    if (rs.alphaTest == 2) mirror_.adminPs[5][3] = static_cast<float>(rs.alphaRef) * (1.0f / 256.0f);
+    const bool recMask = rs.alphaTest == 2;
+    const float recMaskValue = static_cast<float>(rs.alphaRef) * (1.0f / 256.0f);
+    if (recMask) mirror_.adminPs[5][3] = recMaskValue;
     d3d9::Shader* vs = shaderOfElement(vsElem);
     d3d9::Shader* ps = shaderOfElement(psElem);
     if (vs == nullptr || ps == nullptr) {
@@ -967,7 +1058,23 @@ StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8
     d.ps = ps;
     d.states = sc::deviceStates(rs, vis, get<std::uint32_t>(admin, 0x340));
     constantsInto(d, owner, shader);
+    const std::size_t im0 = rec_ != nullptr ? rec_->imgs.size() : 0;
     if (const Skip s = materialSamplers(d, owner, psElem); s != Skip::None) return s;
+    if (rec_ != nullptr) {
+        RetPass rp;
+        rp.owner = owner;
+        rp.bias = shader;
+        rp.pass = pass;
+        rp.desc = &d;
+        rp.sw0 = static_cast<std::uint32_t>(sw0);
+        rp.sw1 = static_cast<std::uint32_t>(rec_->sw.size());
+        rp.im0 = static_cast<std::uint32_t>(im0);
+        rp.im1 = static_cast<std::uint32_t>(rec_->imgs.size());
+        rp.hasTag = sc::passNonInstanced(pass.flags) && geometry.subMesh != nullptr;
+        rp.setMask = recMask;
+        rp.mask = recMaskValue;
+        rec_->passes.push_back(rp);
+    }
     return adminSamplers(d, owner, ps);
 }
 
@@ -1046,8 +1153,8 @@ StaticOps::Skip StaticOps::subMeshDraws(const std::uint8_t* res, const std::uint
 }
 
 // GetPasses 0x6d1ee0 -> OnGetPasses 0x6d3170 -> eCShaderVersionDefault_3_0::GetPasses 0x6cc970, ExecutePass per pass
-StaticOps::Skip StaticOps::materialDraws(const std::uint8_t* shader, const std::uint8_t* illum, std::uint32_t combi, bool instanced,
-                                         std::int32_t switchValue, std::uint8_t flags, const Geom& geometry, const float* world) {
+StaticOps::Skip StaticOps::materialDrawsImpl(const std::uint8_t* shader, const std::uint8_t* illum, std::uint32_t combi, bool instanced,
+                                             std::int32_t switchValue, std::uint8_t flags, const Geom& geometry, const float* world) {
     U8* admin = view_.admin;
     if (get<std::uint8_t>(shader, 0x2a8) == 1) return Skip::InvalidShader;
     if (get<std::uint32_t>(admin, 0x31c) != 0) return Skip::InvalidShader;
@@ -1066,6 +1173,7 @@ StaticOps::Skip StaticOps::materialDraws(const std::uint8_t* shader, const std::
     if (g_ != nullptr) {
         const std::uint32_t total = in.hasList ? std::min<std::uint32_t>(in.dynamicLights + in.staticLights, 4u) : 0u;
         ++g_->lights[total];
+        if (rec_ != nullptr) rec_->lightsTotal = total;
         if (total == 4 && fourLightsLogged_ < 16 && world != nullptr) {
             ++fourLightsLogged_;
             spdlog::info("native: lights: a sub-mesh with {} dynamic + {} static lights (an additive light pass) at ({:.0f}, {:.0f}, {:.0f}), "
@@ -1401,6 +1509,8 @@ bool StaticOps::opEnter(const Op& op) {
 
 void StaticOps::opEnterImpl(const Op& op) {
     finishOp();
+    recycleTransient();
+    retFrameBegin();
     if (pendingVersion_ != nullptr) {
         // diagnostics: a special pass found uncompiled at the last op's entry, after the engine's slot ran
         if (pendingLogged_ < 12) {
@@ -1926,6 +2036,7 @@ void StaticOps::report() {
         return;
     }
     leanReport();
+    retReport();
     static constexpr const char* kListNames[] = {"z", "solid", "debug", "sky", "refracted", "alpha", "late", "non-op"};
     if (active()) {
         spdlog::info("native: register file: mode {} ({}), engine code left to the engine {} times, {} registers merged from it (total), {} shaders' pools held",

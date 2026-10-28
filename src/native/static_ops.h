@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "d3d9/device.h"
+#include "native/static_ops_retained.h"
 #include "native/frame_desc.h"
 #include "native/static_compose.h"
 
@@ -106,6 +107,8 @@ public:
     void setLean(bool on, int check);
     // native.lean_restore (O2b measurement): false = no device save / restore around a lean op's draws
     void setLeanRestore(bool on) { leanRestore_ = on; }
+    // V3 retained composition (native.retained / native.retained_groups / native.retained_check)
+    void setRetained(bool on, int groups, bool check);
     bool inSkyCube() const { return inSkyCube_; }
     void nonOpEnd();
     // an engine draw of the main view (op = the executing op, null: none); true = drop it (we drew the op ourselves)
@@ -239,6 +242,8 @@ private:
     // + ExecutePass per pass over `geometry` (the sub-mesh draws, the skinned primitives); world: for the 4-light log only
     Skip materialDraws(const std::uint8_t* shader, const std::uint8_t* illum, std::uint32_t combi, bool instanced, std::int32_t switchValue,
                        std::uint8_t flags, const Geom& geometry, const float* world);
+    Skip materialDrawsImpl(const std::uint8_t* shader, const std::uint8_t* illum, std::uint32_t combi, bool instanced, std::int32_t switchValue,
+                           std::uint8_t flags, const Geom& geometry, const float* world);
     // eCShaderBase::OnGetPasses' version GetPasses for `owner` (the base shader, or an overlay shader) appended to `out`
     Skip shaderPasses(const std::uint8_t* owner, const sc::PassInputs& in, const std::uint8_t*& version, std::vector<sc::Pass>& out);
     // ExecutePass: `shader` = the base shader (SetSwitch, depth bias), `owner` = the pass's version owner (states, pools, samplers)
@@ -246,6 +251,7 @@ private:
                   const Geom& geometry, bool overlay);
     // ExecuteSpecialPass(option) 0x6d1cd0: the special pass type * 2 + option (SpeedTree z passes: option 1)
     Skip specialPassDraw(const std::uint8_t* shader, const Geom& geometry, bool option = false);
+    Skip specialPassDrawImpl(const std::uint8_t* shader, const Geom& geometry, bool option);
     // eCMeshResource2::RenderZPass 0x7603b0 (world null: no SetWorldMatrix / SetGlobalAlpha; sub 0xff: the whole mesh)
     Skip meshZDraws(const std::uint8_t* res, std::uint32_t sub, std::uint32_t node, const float* world, bool option);
     Skip adminSamplers(sc::DrawDesc& d, const std::uint8_t* owner, const d3d9::Shader* ps);
@@ -258,6 +264,7 @@ private:
         std::uint8_t block[0x108]{};  // admin +0x248 ..
         std::array<const void*, 16> overrides{};
         std::uint32_t defFilter = 0;
+        std::uint64_t hash = 0;  // V3: of the block, the overrides and the default filter (the retained draws' environment)
         template <class T>
         T at(std::uint32_t off) const {
             T v;
@@ -527,6 +534,71 @@ private:
     std::string_view leftNonOpWhy_;
     std::map<int, std::string> leftNames_;
 
+    // ---- V3 retained composition (static_ops_retained.cpp) ----
+    struct RetKey {
+        static constexpr std::size_t kWords = 44;
+        std::array<std::uint64_t, kWords> w{};
+        std::uint64_t hash = 0;
+        bool operator==(const RetKey& o) const { return w == o.w; }
+    };
+    struct RetSwitchWrite {
+        std::uint8_t kind = 0;  // 0 VS pool register, 1 PS pool register, 2 sampler slot image
+        std::uint32_t idx = 0;
+        float v[4]{};
+        const void* image = nullptr;
+    };
+    struct RetImage {
+        const void* res = nullptr;
+        const void* data = nullptr;
+    };
+    struct RetTex {
+        const void* imageData = nullptr;
+        const void* texture = nullptr;
+        bool ok = false;
+    };
+    struct RetPass {
+        const std::uint8_t* owner = nullptr;
+        const std::uint8_t* bias = nullptr;
+        sc::Pass pass;
+        sc::DrawDesc* desc = nullptr;
+        std::uint32_t sw0 = 0, sw1 = 0, im0 = 0, im1 = 0;
+        bool special = false, hasTag = false, setMask = false;
+        float mask = 0;
+    };
+    struct RetEntry {
+        RetKey key;
+        std::vector<ret::ReadRec> reads;
+        std::vector<RetPass> passes;
+        std::vector<RetSwitchWrite> sw;
+        std::vector<RetImage> imgs;
+        std::vector<RetTex> tex;
+        ret::ReadLog log;
+        const std::uint8_t* shader = nullptr;
+        std::uint32_t vsFirst = 0, psFirst = 0, vsCount = 0, psCount = 0, slots = 0, lightsTotal = 0;
+        std::array<const void*, 16> slotImage{};
+        std::uint64_t texGen = 0, usedSerial = ~0ull, lastFrame = 0;
+        std::uint8_t group = 0;
+        bool noRetain = false;
+    };
+    struct RetStats {
+        std::uint64_t hits = 0, built = 0, invalid = 0, busy = 0, skipped = 0, checks = 0, stale = 0, draws = 0, evicted = 0;
+        std::uint64_t replayNs = 0, recordNs = 0;
+    };
+    bool retain_ = false, retainCheck_ = false;
+    std::uint32_t retainGroups_ = 0x2ff;
+    RetEntry* rec_ = nullptr;  // the entry being recorded (null: not recording)
+    std::unordered_map<std::uint64_t, std::unique_ptr<RetEntry>> retained_;
+    std::array<RetStats, kGroups> retWindow_{}, retTotal_{};
+    std::uint64_t retFrame_ = ~0ull, retWindowFrames_ = 0, retTotalFrames_ = 0, retStaleLogged_ = 0;
+    bool retainOn(std::uint8_t flags) const;
+    template <class F>
+    Skip retainedRun(RetKey& key, const std::uint8_t* shader, bool special, F&& impl);
+    bool retValid(RetEntry& e);
+    void retReplay(RetEntry& e);
+    void retFree(std::unique_ptr<RetEntry> e);
+    void retFrameBegin();
+    void retReport();
+
     hal::vulkan::HalDevice& hal_;
     d3d9::Device& dev_;
     std::array<GroupState, kGroups> groups_;
@@ -562,7 +634,11 @@ private:
     View view_;
     Mirror mirror_;
     std::unique_ptr<sc::DrawDesc> scratch_;    // a capture
-    std::vector<std::unique_ptr<sc::DrawDesc>> draws_;  // the op's composed draws (reused storage)
+    std::vector<sc::DrawDesc*> draws_;  // the op's composed draws (not owning: transient ones from descStore_, or a retained entry's)
+    std::vector<std::unique_ptr<sc::DrawDesc>> descStore_;  // every DrawDesc made (owning)
+    std::vector<sc::DrawDesc*> descFree_, transient_;       // unused / handed out by newDraw for the current list
+    sc::DrawDesc* takeDesc();
+    void recycleTransient();
     std::size_t drawCount_ = 0;
     sc::DrawDesc& newDraw();
     const Op* op_ = nullptr;       // the op whose draws were composed (null: none / not composed)

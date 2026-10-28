@@ -1915,6 +1915,42 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
     });
+    r.nativeRetained = &reg.add({
+        .key = "native.retained",
+        .label = "Native frame: retained composition",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "V3 (docs/research/vulkanize/plan.md): the composed sub-mesh draws (passes, pipelines' shaders, states, samplers, "
+                       "geometry) of an op are kept across frames, keyed by their inputs and validated against the engine memory the "
+                       "composition read; per frame only the constants (world, lighting, bones, view) are refreshed. Off = every draw "
+                       "composed from scratch each frame (A/B). rvk.log `native: retained`.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
+    r.nativeRetainedCheck = &reg.add({
+        .key = "native.retained_check",
+        .label = "Native frame: retained composition check",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "With native.retained: every retained replay is also composed fresh and compared field by field (a difference = a "
+                       "missing invalidation key: rvk.log `native: retained ... stale`, must stay 0); the lean_check frames do it too.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
+    r.nativeRetainedGroups = &reg.add({
+        .key = "native.retained_groups",
+        .label = "Native frame: retained groups",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Bit mask of the StaticOps groups that retain their draws (0 static, 1 mesh, 6 actors, 7 trees, 8 vegetation, 9 shadow views).",
+        .type = Type::Int,
+        .defaultValue = 0x2ff,
+        .min = 0,
+        .max = 0xffff,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
     r.nativeLeanEffects = &reg.add({
         .key = "native.lean_effects",
         .label = "Native frame: lean effect units",
