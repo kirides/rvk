@@ -128,6 +128,7 @@ private:
         float global[201][4]{};   // ms_pGlobalShaderConstants VS pool c31..c231
         float lighting[24][4]{};  // the lighting pool c14..c37
         struct ShaderPools {
+            std::uint64_t epoch = 0;  // read in this mirror epoch (re-read when it differs)
             std::uint32_t vsFirst = 232, psFirst = 6, vsCount = 0, psCount = 0;
             float vs[32][4]{};
             float ps[16][4]{};
@@ -137,6 +138,32 @@ private:
         std::unordered_map<const void*, ShaderPools> shaders;
         std::array<const void*, 2> lightmapSlot{};  // admin s4 / s5 slot images (BindLightmaps)
     };
+    // O1: the mirror is our own register file, carried across ops, views and frames like the device's (the engine's pools are
+    // read once; then only the writes of engine code we do not compose are merged in: native.mirror, docs/research/engine-frame/
+    // opt-plan.md "O1 result"). Mode 0 persistent, 1 the engine's pools re-read per view, 2 per op (the N5.x behaviour).
+public:
+    void setMirrorMode(int mode) { mirrorMode_ = mode; }
+    // native.coverage: the per-draw bookkeeping beyond the compare (see FrameTap)
+private:
+    int mirrorMode_ = 0;
+    bool mirrorValid_ = false;      // global / lighting / lightmap slots read (else: read whole at the next use)
+    std::uint64_t mirrorEpoch_ = 1;  // the shaders' pools and the admin pools are re-read once per epoch (a view; mode 2: an op)
+    std::uint64_t adminEpoch_ = 0;
+    static constexpr std::size_t mirrorShaderCap_ = 8192;
+    const void* mirrorGlobalSrc_ = nullptr;
+    const void* mirrorLightingSrc_ = nullptr;
+    // engine code we do not compose ran (an op left to the engine, a non-op unit not composed): the engine's pools as they were
+    // before it; the registers it changed are merged into the mirror at the next use
+    struct EngineSnap {
+        float global[201][4]{};
+        float lighting[24][4]{};
+        std::array<const void*, 2> lightmapSlot{};
+    };
+    EngineSnap leftSnap_, leftNow_;
+    bool leftPending_ = false;
+    std::uint64_t mergedRegs_ = 0, mergedLeft_ = 0;  // diagnostics: registers merged / left units seen
+    void markLeft();
+    bool readEnginePools(float (*global)[4], float (*lighting)[4], std::array<const void*, 2>& lightmaps) const;
     // per main view, natively composed (camera, fog, viewport, obstacle)
     struct View {
         bool valid = false;

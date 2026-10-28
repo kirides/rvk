@@ -283,11 +283,15 @@ void StaticOps::skyCubeBegin(void* skyPs) {
         leftNonOp_ = true;
         leftNonOpWhy_ = leftName(Group::SkyCube, gs.active() ? kLeftChecks : kLeftGroupOff);
     }
-    if (!gs.active() || inView_ || inSkyCube_) return;
+    if (!gs.active() || inView_ || inSkyCube_) {
+        if (!inView_ && !inSkyCube_) markLeft();
+        return;
+    }
     if (verified_ == 0) verified_ = verify() ? 1 : -1;
     if (verified_ < 0) return;
     if (skyVerified_ == 0) skyVerified_ = verifySky() ? 1 : -1;
     if (skyVerified_ < 0) return;
+    if (mirrorMode_ != 2) ++mirrorEpoch_;  // outside a view: the admin / shader pools re-read for the face
     U8* sky = static_cast<U8*>(skyPs);
     g_ = &gs;
     drawCount_ = 0;

@@ -1824,6 +1824,32 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 131071,
         .flags = Flag::NoAB | Flag::Debug,
     });
+    r.nativeMirror = &reg.add({
+        .key = "native.mirror",
+        .label = "Native frame: register file",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Where the composition's constant registers come from (docs/research/engine-frame/opt-plan.md, O1 result): 0 our own register "
+                       "file, carried across ops and views like the device's (the engine's pools read once, then only the writes of engine "
+                       "code that is not composed are merged in), 1 the engine's pools re-read once per view, 2 re-read at every op (the N5.x "
+                       "behaviour, for A/B).",
+        .type = Type::Int,
+        .defaultValue = 0,
+        .min = 0,
+        .max = 2,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
+    r.nativeCoverage = &reg.add({
+        .key = "native.coverage",
+        .label = "Native frame: coverage counter",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Counts every draw by who issued it and why the engine's stay (rvk.log native: coverage, README section 16). Always on "
+                       "with native.frame_tap or a compare setting; this turns it on in plain Full runs too.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
     r.nativeDebug = &reg.add({
         .key = "native.debug",
         .label = "Native opaque debug view",

@@ -367,6 +367,8 @@ struct RendererSettings {
     Setting* nativeSceneOps = nullptr;         // native.scene_ops: the rest of the main view's mesh-like work drawn by the renderer (N5.2)
     Setting* nativeSceneOpsCompare = nullptr;  // native.scene_ops_compare: ... composed and diffed against the engine's draws
     Setting* nativeSceneOpsGroups = nullptr;   // native.scene_ops_groups: which N5.2 groups (bit mask, hidden)
+    Setting* nativeMirror = nullptr;           // native.mirror: the composition's register file (0 ours, 1 per view, 2 per op; O1)
+    Setting* nativeCoverage = nullptr;         // native.coverage: the per-draw coverage counter in plain Full runs (O1)
     Setting* rtSource = nullptr;          // rt.source: where the RT scene's static meshes come from (the engine's draws / the scene mirror)
     Setting* shadowStride = nullptr;      // debug.shadow_stride: the sun cascades redrawn every n-th frame (engine::shadowmaps::setUpdateStride)
     Setting* prefetchStride = nullptr;    // debug.prefetch_stride: the cache-in walk every n-th frame (engine::lod::setPrefetchStride)

@@ -255,6 +255,7 @@ void StaticOps::viewBegin(void* db, void* desc, const FrameDesc& view) {
     desc_ = desc;
     inView_ = true;
     view_ = {};
+    if (mirrorMode_ != 2) ++mirrorEpoch_;
     op_ = nullptr;
     viewKind_ = view.kind;
     shadowMap_ = view.shadowMap;
@@ -448,7 +449,10 @@ sc::DrawDesc& StaticOps::newDraw() {
 StaticOps::Mirror::ShaderPools* StaticOps::poolsOf(const void* shader) {
     auto [it, inserted] = mirror_.shaders.try_emplace(shader);
     Mirror::ShaderPools& p = it->second;
-    if (inserted) {
+    if (inserted || p.epoch != mirrorEpoch_) {
+        // (re-)read once per epoch: the engine writes these pools outside the slots (SetTime in eCShaderMaterialAdmin::Process,
+        // property notifies); inside them only SetSwitch, which the composition applies to this copy per op
+        p.epoch = mirrorEpoch_;
         p.vsFirst = get<std::uint32_t>(shader, 0x9c, 232);
         p.psFirst = get<std::uint32_t>(shader, 0xcc, 6);
         p.vsCount = std::min<std::uint32_t>(get<std::uint8_t>(shader, 0xc1), 32);
@@ -462,17 +466,74 @@ StaticOps::Mirror::ShaderPools* StaticOps::poolsOf(const void* shader) {
     return &p;
 }
 
+bool StaticOps::readEnginePools(float (*global)[4], float (*lighting)[4], std::array<const void*, 2>& lightmaps) const {
+    U8* g = ptr(ptr(engine::sym().shaderDefaultGlobalConstants, 0), 0x38);
+    U8* l = ptr(ptr(lightingPoolVar_, 0), 0x18);
+    const bool ok = rd(g, 0, global, sizeof(float) * 4 * 201) && rd(l, 0, lighting, sizeof(float) * 4 * 24);
+    lightmaps = {ptr(view_.admin, 0x2e0), ptr(view_.admin, 0x308)};
+    return ok;
+}
+
+// an op / unit whose engine code we do not compose is about to run: the engine's pools before it (the registers it changes are
+// merged into the mirror at its next use)
+void StaticOps::markLeft() {
+    if (!mirrorValid_ || leftPending_ || mirrorMode_ != 0 || view_.admin == nullptr) return;
+    ++mergedLeft_;
+    leftPending_ = readEnginePools(leftSnap_.global, leftSnap_.lighting, leftSnap_.lightmapSlot);
+    if (!leftPending_) mirrorValid_ = false;  // unreadable: read whole at the next use
+}
+
 void StaticOps::initMirror() {
-    mirror_.shaders.clear();
     nativeVs_ = 0xfffu | 1u << 30;  // c0..c11, c30 (the camera, fog)
     U8* admin = view_.admin;
-    rd(ptr(admin, 0x240), 0, mirror_.adminVs, sizeof(mirror_.adminVs));
-    rd(ptr(admin, 0x220), 0, mirror_.adminPs, sizeof(mirror_.adminPs));
-    U8* global = ptr(engine::sym().shaderDefaultGlobalConstants, 0);
-    rd(ptr(global, 0x38), 0, mirror_.global, sizeof(mirror_.global));
-    U8* lighting = ptr(lightingPoolVar_, 0);
-    rd(ptr(lighting, 0x18), 0, mirror_.lighting, sizeof(mirror_.lighting));
-    mirror_.lightmapSlot = {ptr(admin, 0x2e0), ptr(admin, 0x308)};
+    if (mirrorMode_ == 2) ++mirrorEpoch_;  // N5.x: every engine pool re-read at every op
+    if (mirror_.shaders.size() > mirrorShaderCap_) mirror_.shaders.clear();  // (dead shaders' entries: bounded)
+    // the global pool c31..c231, the lighting pool c14..c37 and the admin's lightmap slots: written by the slots only (world /
+    // fade / instance data, bones, lighting, BindLightmaps), i.e. by our composition: read whole once (mode 1: once per view,
+    // mode 2: per op) and after a reallocation
+    const void* gsrc = ptr(ptr(engine::sym().shaderDefaultGlobalConstants, 0), 0x38);
+    const void* lsrc = ptr(ptr(lightingPoolVar_, 0), 0x18);
+    const bool reread = !mirrorValid_ || gsrc != mirrorGlobalSrc_ || lsrc != mirrorLightingSrc_ || (mirrorMode_ != 0 && adminEpoch_ != mirrorEpoch_);
+    if (reread) {
+        mirrorValid_ = readEnginePools(mirror_.global, mirror_.lighting, mirror_.lightmapSlot);
+        mirrorGlobalSrc_ = gsrc;
+        mirrorLightingSrc_ = lsrc;
+        leftPending_ = false;
+    } else if (leftPending_) {
+        // merge what the engine code we left to it changed (register by register against the snapshot before it)
+        leftPending_ = false;
+        EngineSnap& now = leftNow_;
+        if (readEnginePools(now.global, now.lighting, now.lightmapSlot)) {
+            for (std::uint32_t r = 0; r < 201; ++r) {
+                if (std::memcmp(now.global[r], leftSnap_.global[r], 16) != 0) {
+                    std::memcpy(mirror_.global[r], now.global[r], 16);
+                    ++mergedRegs_;
+                }
+            }
+            for (std::uint32_t r = 0; r < 24; ++r) {
+                if (std::memcmp(now.lighting[r], leftSnap_.lighting[r], 16) != 0) {
+                    std::memcpy(mirror_.lighting[r], now.lighting[r], 16);
+                    ++mergedRegs_;
+                }
+            }
+            for (std::size_t i = 0; i < 2; ++i) {
+                if (now.lightmapSlot[i] != leftSnap_.lightmapSlot[i]) mirror_.lightmapSlot[i] = now.lightmapSlot[i];
+            }
+        } else {
+            mirrorValid_ = readEnginePools(mirror_.global, mirror_.lighting, mirror_.lightmapSlot);
+        }
+    }
+    // the admin VS / PS pools: written outside the slots (the brackets: camera, fog, obstacle distances; the database's Request:
+    // the SpeedTree wind; Process: the vegetation wind): re-read once per view; of the slot-written registers the mask reference
+    // (PS c5.w: ExecuteSpecialPass, the masked passes) stays ours
+    if (adminEpoch_ != mirrorEpoch_) {
+        const float maskRef = mirror_.adminPs[5][3];
+        const bool keepMask = mirrorMode_ == 0 && adminEpoch_ != 0;
+        rd(ptr(admin, 0x240), 0, mirror_.adminVs, sizeof(mirror_.adminVs));
+        rd(ptr(admin, 0x220), 0, mirror_.adminPs, sizeof(mirror_.adminPs));
+        if (keepMask) mirror_.adminPs[5][3] = maskRef;
+        adminEpoch_ = mirrorEpoch_;
+    }
     // the per-view constants, composed natively (the admin pools hold the engine's copies)
     for (std::uint32_t k = 0; k < 4; ++k) std::memcpy(mirror_.adminVs[4 + k], view_.invProj[k], 16);
     for (std::uint32_t k = 0; k < 3; ++k) std::memcpy(mirror_.adminVs[8 + k], view_.invView[k], 12);
@@ -1246,6 +1307,7 @@ void StaticOps::opEnter(const Op& op) {
     leftCode_ = kLeftChecks;
     opEnterImpl(op);
     leftOp_ = &op;
+    if (op_ != &op) markLeft();
     if (op_ == &op && taken_) {
         leftWhy_ = {};
     } else {
@@ -1778,6 +1840,11 @@ void StaticOps::report() {
         return;
     }
     static constexpr const char* kListNames[] = {"z", "solid", "debug", "sky", "refracted", "alpha", "late", "non-op"};
+    if (active()) {
+        spdlog::info("native: register file: mode {} ({}), engine code left to the engine {} times, {} registers merged from it (total), {} shaders' pools held",
+                     mirrorMode_, mirrorMode_ == 0 ? "ours" : mirrorMode_ == 1 ? "engine pools per view" : "engine pools per op", mergedLeft_, mergedRegs_,
+                     mirror_.shaders.size());
+    }
     for (std::size_t gi = 0; gi < kGroups; ++gi) {
         GroupState& g = groups_[gi];
         if (!g.active()) continue;

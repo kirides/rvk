@@ -726,6 +726,7 @@ FrameTap::Route FrameTap::route(const d3d9::DrawTapInfo& d) {
 
 bool FrameTap::onDraw(const d3d9::DrawTapInfo& d) {
     const Route r = route(d);
+    if (!coverage_) return r == Route::Dropped;
     // N5.8 coverage: every draw of the device by who issued it (the -LogFrame frame's own counts apart)
     const bool logFrame = hal::vulkan::logThisFrame();
     if (!logFrame && !covFrame_.empty()) {

@@ -38,6 +38,8 @@ public:
     // N5.5c: the effect draws (native/effect_ops) take the draws of their units first
     void setEffectOps(class EffectOps* ops) { effects_ = ops; }
     void setEffectOpsActive(bool on);
+    // N5.8 coverage counter (per draw; O1: off in plain Full runs, native.coverage)
+    void setCoverage(bool on) { coverage_ = on; }
     // the report (HalDevice, every 5 s): the last main view + the window since the last report
     void report();
     // the last main view's ops (valid until the next main view's Execute)
@@ -112,6 +114,7 @@ private:
     std::array<std::uint32_t, 4> cascadeViews_{};
     // N5.8 coverage: the window since the last report, the run, the -LogFrame frame
     Coverage cov_, covTotal_, covFrame_;
+    bool coverage_ = true;
     std::uint64_t covFrameIndex_ = 0;  // cascade views of the window by split index (0..2, 3 = other)
 };
 

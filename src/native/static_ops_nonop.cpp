@@ -330,7 +330,10 @@ bool StaticOps::nonOpGroupBegin(Group group, void* admin) {
     GroupState& gs = groups_[static_cast<std::size_t>(group)];
     leftNonOp_ = true;
     leftNonOpWhy_ = leftName(group, gs.active() ? kLeftChecks : kLeftGroupOff);
-    if (!gs.active() || !inView_) return false;
+    if (!gs.active() || !inView_) {
+        markLeft();
+        return false;
+    }
     if (verified_ == 0) verified_ = verify() ? 1 : -1;
     if (verified_ < 0) return false;
     g_ = &gs;
@@ -353,6 +356,7 @@ void StaticOps::nonOpGroupComposed(Skip s) {
     const auto group = static_cast<Group>(g_ - groups_.data());
     leftNonOpWhy_ = leftName(group, s != Skip::None ? static_cast<int>(s) : g_->takeOver ? kLeftChecks : kLeftCompareOnly);
     if (s != Skip::None) {
+        markLeft();
         ++g_->skips[static_cast<std::size_t>(s)];
         ++g_->window.opsNotComposed;
         drawCount_ = 0;
