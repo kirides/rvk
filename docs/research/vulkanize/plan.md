@@ -213,3 +213,20 @@ trimming needs the instance / bone count from the composition (V3).
 material / light window blocks (persistent addresses) and the per-draw record can be the 8 window addresses + DrawBlock. The
 `psC5` trick shows how per-draw scalars of a shared window move into the DrawBlock. `debug.split_verify` is the check mode for
 retained blocks (recompose and compare against the register file); the Full compare / `lean_check` frames remain the parity proof.
+
+## 7. V3 result (2026-10-28, partial)
+
+Commit "V3: retained composition of sub-mesh draws". `native.retained` (Debug, **default off**), `native.retained_check`,
+`native.retained_groups` (default 0x2ff: vegetation excluded). Code: `src/native/static_ops_retained.{h,cpp}`.
+
+* Design: `materialDraws` / `specialPassDraw` (shared by static meshes, alpha meshes, actors, trees, shadow views) are memoized
+  by key (arguments, geometry, fade alpha, lightmaps, view kind / cascade, sampler snapshot hash) + a **read log** of every
+  engine-memory read of the first composition (`get` / `rd`), validated each frame; replay redoes switch writes, lighting,
+  mask ref, `constantsInto`, water tag, image touches. No hand-written invalidation keys.
+* Parity: Full compare at the savegame with `retained_check` + `lean_check=10`: all groups `mismatches: none`, stale 0 over
+  75,142 checked replays.
+* Perf (savegame, 3 runs each, Full, retained on vs off): CPU 4.83 vs 4.87 ms (-1 %, noise level); jungle 6.27 vs 6.04 ms
+  (worse: vegetation keys churn, 82k rebuilds / 5 s, hence excluded). Replay costs 0.46 ms/frame, i.e. nearly what the composition
+  it replaces cost: validation + lighting + constants dominate. **No real gain; stays default off.**
+* NOT done: device-path replay without `prepareDraw`, persistent window blocks, validation runs (-Validation / -SyncValidation),
+  the other compare scenarios, enhancements-on runs / DEVICE_LOST investigation, screenshot A/B. CLAUDE.md / PLAN.md not updated.
