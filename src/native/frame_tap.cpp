@@ -642,7 +642,10 @@ bool FrameTap::opEnter(const void* op) {
     RawOp live;
     attr_.enterOp(op, safeRead(op, &live, sizeof(live)) ? &live : nullptr);
     if (statics_ != nullptr && staticsWanted_) {
-        if (const Op* o = desc_.find(op)) return statics_->opEnter(*o);  // O2a: true = lean (the engine's slot skipped)
+        if (Op* o = desc_.find(op)) {
+            o->lean = statics_->opEnter(*o);  // O2a: true = lean (the engine's slot skipped; the attribution expects no engine draw)
+            return o->lean;
+        }
     }
     return false;
 }

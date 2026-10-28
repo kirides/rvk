@@ -205,6 +205,7 @@ void TapCounts::add(const TapCounts& o) {
             b.zeroEmpty += c.zeroEmpty;
             b.zeroNothing += c.zeroNothing;
             b.zeroRule += c.zeroRule;
+            b.zeroLean += c.zeroLean;
             b.multiOverlay += c.multiOverlay;
             b.zeroOther += c.zeroOther;
             b.multiBillboard += c.multiBillboard;
@@ -406,6 +407,8 @@ void Attribution::end(const std::array<std::uint32_t, kListCount>& liveCounts) {
             if (op.emptySlot) {
                 op.notes |= NoteEmptySlot;
                 ++b.zeroEmpty;
+            } else if (op.lean) {
+                ++b.zeroLean;  // (its draws are the renderer's: the engine's code did not run)
             } else if (op.entered != 0 && nothingToDraw(op)) {
                 // a SpeedTree op whose trees are all at LODs without the type's geometry: the tree-LOD rule, checked
                 op.notes |= op.kind == OpKind::SpeedTree && (op.state & 3) == 3 ? NoteTreeLod : NoteNothingToDraw;
@@ -553,8 +556,8 @@ std::vector<std::string> reportLines(const TapCounts& last, std::uint64_t lastFr
             std::string zero, multi;
             if (b.zero != 0) {
                 zero = std::format(", 0 draws {}", b.zero);
-                zero += std::format(" (empty slot {}, nothing to draw {}, by rule {}, OTHER {})", b.zeroEmpty, b.zeroNothing, b.zeroRule,
-                                    b.zeroOther);
+                zero += std::format(" (empty slot {}, nothing to draw {}, by rule {}, lean {}, OTHER {})", b.zeroEmpty, b.zeroNothing, b.zeroRule,
+                                    b.zeroLean, b.zeroOther);
             }
             if (b.multi != 0) {
                 multi = std::format(", >1 draws {} (max {}:", b.multi, b.maxDraws);

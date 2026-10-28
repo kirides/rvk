@@ -126,6 +126,7 @@ struct Op {
     OpKind kind = OpKind::Unknown;
     List list = List::ZPass;
     bool emptySlot = false;          // the slot Execute calls for this list is an empty function
+    bool lean = false;               // O2b: drawn by the renderer, the engine's slot code skipped (native.lean): no engine draw
     std::uint32_t index = 0;         // position in its list (execution order)
     // attribution (Attribution)
     std::uint32_t entered = 0;       // times the engine called the op's slot
@@ -235,7 +236,7 @@ struct TapCounts {
     struct Bucket {
         std::uint32_t ops = 0, draws = 0, zero = 0, multi = 0, maxDraws = 0;
         // 0 draws: empty slot / nothing to draw (the engine's condition read) / by a decompiled rule (not checked at run time) / other
-        std::uint32_t zeroEmpty = 0, zeroNothing = 0, zeroRule = 0, zeroOther = 0;
+        std::uint32_t zeroEmpty = 0, zeroNothing = 0, zeroRule = 0, zeroOther = 0, zeroLean = 0;
         std::uint32_t multiInstanced = 0, multiTree = 0, multiLights = 0, multiWholeMesh = 0, multiSky = 0, multiBillboard = 0,
                       multiGrass = 0, multiZFill = 0, multiOverlay = 0, multiOther = 0;
     };
