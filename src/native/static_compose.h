@@ -6,6 +6,9 @@
 // engine actually made. No engine access, no Vulkan (unit tests: tests/native_tests.cpp); the engine side that feeds these
 // rules with engine data is native/static_ops.cpp.
 
+#include <intrin.h>
+
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <bitset>
@@ -358,6 +361,32 @@ struct DrawDesc {
     std::uint8_t cpuStream = 0;
 };
 
+// the lowest set bit of a non-zero word (bsf: an intrinsic, inlined in every build configuration)
+inline std::uint32_t lowBit(std::uint64_t x) {
+    unsigned long i = 0;
+    _BitScanForward64(&i, x);
+    return static_cast<std::uint32_t>(i);
+}
+using RegMask = std::array<std::uint64_t, 4>;
+// registers [first, first + count) of a 256-bit mask
+inline RegMask regRange(std::uint32_t first, std::uint32_t count) {
+    RegMask m{};
+    if (first >= 256) return m;
+    const auto end = static_cast<std::uint32_t>(std::min<std::uint64_t>(std::uint64_t{first} + count, 256));
+    for (std::uint32_t w = 0; w < 4; ++w) {
+        const std::uint32_t lo = std::max(first, w * 64), hi = std::min(end, w * 64 + 64);
+        if (lo >= hi) continue;
+        const std::uint32_t n = hi - lo, s = lo - w * 64;
+        m[w] = (n == 64 ? ~0ull : ((1ull << n) - 1)) << s;
+    }
+    return m;
+}
+inline RegMask andMask(const RegMask& a, const RegMask& b) { return {a[0] & b[0], a[1] & b[1], a[2] & b[2], a[3] & b[3]}; }
+inline RegMask andNot(const RegMask& a, const RegMask& b) { return {a[0] & ~b[0], a[1] & ~b[1], a[2] & ~b[2], a[3] & ~b[3]}; }
+inline void orInto(RegMask& a, const RegMask& b) {
+    for (std::size_t i = 0; i < 4; ++i) a[i] |= b[i];
+}
+
 // the runs of consecutive set bits of a 256-bit word mask (bit r of word r / 64), lowest first: f(first, count) per run (O1: the
 // composed constants are written / saved / restored as register ranges)
 template <class F>
@@ -367,8 +396,9 @@ inline void forEachRun(const std::array<std::uint64_t, 4>& mask, F&& f) {
     for (std::uint32_t w = 0; w < 4; ++w) {
         std::uint64_t bits = mask[w];
         while (bits != 0) {
-            const auto s = static_cast<std::uint32_t>(std::countr_zero(bits));
-            const auto len = static_cast<std::uint32_t>(std::countr_one(bits >> s));
+            const std::uint32_t s = lowBit(bits);
+            const std::uint64_t rest = ~(bits >> s);
+            const std::uint32_t len = rest == 0 ? 64 : lowBit(rest);
             const std::uint32_t first = w * 64 + s;
             if (open && first == runEnd) {
                 runEnd += len;

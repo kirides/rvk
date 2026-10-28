@@ -248,8 +248,9 @@ void EffectOps::captureDevice(fxc::EffectDraw& out) const {
     out.indices = d.indexBuffer();
     for (std::uint32_t rs = 0; rs < fxc::kRenderStates; ++rs) out.rs[rs] = d.renderState(rs);
     for (std::uint32_t st = 0; st < fxc::kStages; ++st) {
-        out.textures[st] = d.texture(st);
-        for (std::uint32_t s = 1; s < fxc::kSamplerStates; ++s) out.ss[st][s] = d.samplerState(st, s);
+        out.textures[st] = d.stageTexture(st);
+        const std::uint32_t* row = d.samplerStateRow(st);
+        for (std::uint32_t s = 1; s < fxc::kSamplerStates; ++s) out.ss[st][s] = row[s];
     }
     std::memcpy(out.vsF, d.vsConstants(), sizeof(out.vsF));
     std::memcpy(out.psF, d.psConstants(), sizeof(out.psF));
@@ -306,18 +307,28 @@ void EffectOps::applyDevice(const fxc::EffectDraw& d) {
     for (std::uint32_t rs = 0; rs < fxc::kRenderStates; ++rs) {
         if (dev_.renderState(rs) != d.rs[rs]) dev_.setRenderState(rs, d.rs[rs]);
     }
+    static constexpr std::uint32_t kAllSs[fxc::kSamplerStates - 1] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13};
     for (std::uint32_t st = 0; st < fxc::kStages; ++st) {
-        if (dev_.texture(st) != d.textures[st]) dev_.setTexture(st, const_cast<Texture*>(static_cast<const Texture*>(d.textures[st])));
-        for (std::uint32_t s = 1; s < fxc::kSamplerStates; ++s) {
-            if (dev_.samplerState(st, s) != d.ss[st][s]) dev_.setSamplerState(st, s, d.ss[st][s]);
+        if (dev_.stageTexture(st) != d.textures[st]) dev_.setStageTexture(st, const_cast<Texture*>(static_cast<const Texture*>(d.textures[st])));
+        // (one call per stage; it changes only the differing states)
+        dev_.setSamplerStates(st, kAllSs, d.ss[st].data() + 1, fxc::kSamplerStates - 1);
+    }
+    // the float registers that differ, written as ranges (O1)
+    const auto writeDiffering = [](const float (*cur)[4], const float (*want)[4], std::uint32_t count, auto&& set) {
+        std::uint32_t r = 0;
+        while (r < count) {
+            if (std::memcmp(cur[r], want[r], 16) == 0) {
+                ++r;
+                continue;
+            }
+            std::uint32_t e = r + 1;
+            while (e < count && std::memcmp(cur[e], want[e], 16) != 0) ++e;
+            set(r, e - r);
+            r = e;
         }
-    }
-    for (std::uint32_t r = 0; r < fxc::kVsRegs; ++r) {
-        if (std::memcmp(dev_.vsConstant(r), d.vsF[r], 16) != 0) dev_.setVertexShaderConstantF(r, d.vsF[r], 1);
-    }
-    for (std::uint32_t r = 0; r < fxc::kPsRegs; ++r) {
-        if (std::memcmp(dev_.psConstant(r), d.psF[r], 16) != 0) dev_.setPixelShaderConstantF(r, d.psF[r], 1);
-    }
+    };
+    writeDiffering(dev_.vsConstants(), d.vsF, fxc::kVsRegs, [&](std::uint32_t r, std::uint32_t n) { dev_.setVertexShaderConstantF(r, d.vsF[r], n); });
+    writeDiffering(dev_.psConstants(), d.psF, fxc::kPsRegs, [&](std::uint32_t r, std::uint32_t n) { dev_.setPixelShaderConstantF(r, d.psF[r], n); });
     if (std::memcmp(dev_.vsBoolConstants(), d.vsB.data(), sizeof(d.vsB)) != 0) {
         std::array<std::int32_t, 16> b{};
         for (std::size_t i = 0; i < 16; ++i) b[i] = static_cast<std::int32_t>(d.vsB[i]);

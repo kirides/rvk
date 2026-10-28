@@ -25,6 +25,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <string>
@@ -41,6 +42,15 @@ class HalDevice;
 }
 
 namespace rvk::native {
+
+// a pointer key's hash (multiplicative, high bits folded down: the map masks the low bits) instead of std::hash's FNV over its
+// 8 bytes (O1: the per-draw shader / pool lookups)
+struct PtrHash {
+    std::size_t operator()(const void* p) const noexcept {
+        const std::uint64_t x = (reinterpret_cast<std::uintptr_t>(p) >> 3) * 0x9E3779B97F4A7C15ull;
+        return static_cast<std::size_t>(x ^ (x >> 29));
+    }
+};
 
 class StaticOps {
 public:
@@ -135,7 +145,7 @@ private:
             std::array<const void*, 16> slotImage{};  // sampler pool slot images (switch samplers update them)
             std::uint32_t slots = 0;
         };
-        std::unordered_map<const void*, ShaderPools> shaders;
+        std::unordered_map<const void*, ShaderPools, PtrHash> shaders;
         std::array<const void*, 2> lightmapSlot{};  // admin s4 / s5 slot images (BindLightmaps)
     };
     // O1: the mirror is our own register file, carried across ops, views and frames like the device's (the engine's pools are
@@ -227,6 +237,24 @@ private:
     // eCMeshResource2::RenderZPass 0x7603b0 (world null: no SetWorldMatrix / SetGlobalAlpha; sub 0xff: the whole mesh)
     Skip meshZDraws(const std::uint8_t* res, std::uint32_t sub, std::uint32_t node, const float* world, bool option);
     Skip adminSamplers(sc::DrawDesc& d, const std::uint8_t* owner, const d3d9::Shader* ps);
+    // O1: the engine state the samplers of every draw of an op read, read once per op (the composition runs at the op's entry:
+    // nothing of the engine runs between its draws): the admin's sampler slots / images +0x248..+0x350, the per-stage override
+    // images, the gfx admin's default filter
+    struct SamplerSnap {
+        std::uint64_t serial = ~0ull;
+        const std::uint8_t* admin = nullptr;
+        std::uint8_t block[0x108]{};  // admin +0x248 ..
+        std::array<const void*, 16> overrides{};
+        std::uint32_t defFilter = 0;
+        template <class T>
+        T at(std::uint32_t off) const {
+            T v;
+            std::memcpy(&v, block + (off - 0x248), sizeof(T));
+            return v;
+        }
+    } snap_;
+    std::uint64_t opSerial_ = 0;  // bumped per op / unit (finishOp)
+    const SamplerSnap& samplerSnap();
     bool geometryOf(const std::uint8_t* res, Geom& g, int stream3);  // stream3: 0 off, 1 on, -1 as the record has it
     sc::DrawDesc& drawFrom(const Geom& g);
     // defaultClass: eCShaderDefault's register map (admin c0..c30, global c31..c231, the shader's pools from c232 / PS c6..c13,
@@ -402,8 +430,8 @@ private:
     bool issuing_ = false;
     bool opDiffLogged_ = false;
     std::uint32_t frameLogged_ = 0;  // -LogFrame: composed draws described
-    std::unordered_map<const d3d9::Shader*, Live> live_;
-    std::unordered_map<const void*, d3d9::Shader*> elementShader_;
+    std::unordered_map<const d3d9::Shader*, Live, PtrHash> live_;
+    std::unordered_map<const void*, d3d9::Shader*, PtrHash> elementShader_;
 
     std::size_t issueIndex_ = 0;
     std::vector<std::uint8_t> ownKind_;

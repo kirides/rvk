@@ -400,6 +400,19 @@ TEST(static_register_runs_merge_across_words) {
           runs[3] == std::make_pair(255u, 1u));
     collect({~0ull, ~0ull, ~0ull, ~0ull});
     CHECK(runs.size() == 1 && runs[0] == std::make_pair(0u, 256u));
+    // register ranges: across words, clipped at 256, empty
+    collect(sc::regRange(60, 8));
+    CHECK(runs.size() == 1 && runs[0] == std::make_pair(60u, 8u));
+    collect(sc::regRange(232, 32));
+    CHECK(runs.size() == 1 && runs[0] == std::make_pair(232u, 24u));
+    collect(sc::regRange(0, 64));
+    CHECK(runs.size() == 1 && runs[0] == std::make_pair(0u, 64u));
+    collect(sc::regRange(300, 4));
+    CHECK(runs.empty());
+    collect(sc::regRange(0xfffffff0u, 0x20));
+    CHECK(runs.empty());
+    collect(sc::andMask(sc::andNot(sc::regRange(0, 40), sc::regRange(0, 31)), sc::regRange(30, 100)));
+    CHECK(runs.size() == 1 && runs[0] == std::make_pair(31u, 9u));
 }
 
 TEST(static_compare_counts_fields) {

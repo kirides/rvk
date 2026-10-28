@@ -18,6 +18,17 @@ bool safeLoad2(const void* src, std::uint16_t& out);
 bool safeLoad4(const void* src, std::uint32_t& out);
 bool safeLoad8(const void* src, std::uint64_t& out);
 
+// a guarded copy of a fixed size (one SEH frame, the copy expanded inline; O1: an engine object's fields read at once)
+template <std::size_t N>
+bool safeReadN(const void* src, void* dst) {
+    __try {
+        std::memcpy(dst, src, N);
+        return true;
+    } __except (1 /* EXCEPTION_EXECUTE_HANDLER */) {
+        return false;
+    }
+}
+
 #pragma warning(push)
 #pragma warning(disable : 4723)  // (inlined into callers that divide by a field: their fallback-0 path, IEEE as before)
 template <class T>

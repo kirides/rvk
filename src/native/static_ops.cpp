@@ -714,59 +714,75 @@ void StaticOps::constantsInto(sc::DrawDesc& d, const std::uint8_t* shader, const
     const bool depthBias = get<std::uint8_t>(biasShader != nullptr ? biasShader : shader, 0x78) != 0;
     std::memcpy(mirror_.adminVs[0], depthBias ? view_.dbvp : view_.vp, 64);
     const Mirror::ShaderPools* pools = poolsOf(shader);
-    // the live registers word by word (set bits only)
-    for (std::uint32_t w = 0; w < 4; ++w) {
-        for (std::uint64_t bits = lv.words[w]; bits != 0; bits &= bits - 1) {
-            const std::uint32_t r = w * 64 + static_cast<std::uint32_t>(std::countr_zero(bits));
-            const float* v = nullptr;
-            sc::Src src = sc::Src::Pool;
-            if (!defaultClass && r >= pools->vsFirst && r - pools->vsFirst < pools->vsCount) {
-                v = pools->vs[r - pools->vsFirst];
-            } else if (r < 31) {
-                v = mirror_.adminVs[r];
-                if ((nativeVs_ >> r & 1u) != 0) src = sc::Src::Native;
-            } else if (!defaultClass) {
-                // eCShaderBase::GetGlobalShaderConstants is null: nothing else of the path writes these; a class with its own global
-                // pool (eCShaderParticle: c31..c60, world c31..c33 and alpha c34.w composed natively) flushes it before the shader's
-                if (fxPoolCount_ != 0 && r >= fxPoolFirst_ && r - fxPoolFirst_ < fxPoolCount_) {
-                    v = fxPool_[r - fxPoolFirst_];
-                    if (r <= fxPoolNativeLast_) src = sc::Src::Native;
-                }
-            } else if (r < 232) {
-                v = mirror_.global[r - 31];
-                if (r >= 32) src = sc::Src::Native;  // the instances' world rows and fade (.xyz of c32 + 4i: carry-over)
-            } else if (r >= pools->vsFirst && r - pools->vsFirst < pools->vsCount) {
-                v = pools->vs[r - pools->vsFirst];
+    // O1: the live registers by source region (masks), copied as runs; the sources (diagnostics of the compare) only with it
+    const bool trackSrc = g_ != nullptr && g_->compare;
+    const auto take = [&](const sc::RegMask& m, const float (*src)[4], std::uint32_t srcFirst, float (*dst)[4], sc::RegMask& set) {
+        sc::forEachRun(m, [&](std::uint32_t r, std::uint32_t n) { std::memcpy(dst[r], src[r - srcFirst], 16 * n); });
+        sc::orInto(set, m);
+    };
+    const auto mark = [](const sc::RegMask& m, sc::Src* out, auto&& srcOf) {
+        for (std::uint32_t w = 0; w < 4; ++w) {
+            for (std::uint64_t bits = m[w]; bits != 0; bits &= bits - 1) {
+                const std::uint32_t r = w * 64 + sc::lowBit(bits);
+                out[r] = srcOf(r);
             }
-            if (v == nullptr) continue;
-            std::memcpy(d.vsF[r], v, 16);
-            d.vsSrc[r] = src;
-            d.vsSet[w] |= bits & (~bits + 1);
+        }
+    };
+    static const sc::RegMask kAdminVs = sc::regRange(0, 31), kGlobal = sc::regRange(31, 201), kAdminPs = sc::regRange(0, 6),
+                             kLighting = sc::regRange(14, 24);
+    const sc::RegMask vsPool = sc::andMask(lv.words, sc::regRange(pools->vsFirst, pools->vsCount));
+    const auto adminSrc = [&](std::uint32_t r) { return (nativeVs_ >> r & 1u) != 0 ? sc::Src::Native : sc::Src::Pool; };
+    if (defaultClass) {
+        // eCShaderDefault: admin c0..c30, the global pool c31..c231, the shader's pools from c232
+        const sc::RegMask admin = sc::andMask(lv.words, kAdminVs), global = sc::andMask(lv.words, kGlobal), pool = sc::andNot(vsPool, sc::regRange(0, 232));
+        take(admin, mirror_.adminVs, 0, d.vsF, d.vsSet);
+        take(global, mirror_.global, 31, d.vsF, d.vsSet);
+        take(pool, pools->vs, pools->vsFirst, d.vsF, d.vsSet);
+        if (trackSrc) {
+            mark(admin, d.vsSrc.data(), adminSrc);
+            // the instances' world rows and fade are native (.xyz of c32 + 4i: carry-over)
+            mark(global, d.vsSrc.data(), [](std::uint32_t r) { return r >= 32 ? sc::Src::Native : sc::Src::Pool; });
+            mark(pool, d.vsSrc.data(), [](std::uint32_t) { return sc::Src::Pool; });
+        }
+    } else {
+        // eCShaderBase: the shader's pools where they are, admin c0..c30, a class's own global pool (eCShaderParticle: c31..c60,
+        // world c31..c33 and alpha c34.w composed natively, flushed before the shader's); GetGlobalShaderConstants is null
+        const sc::RegMask admin = sc::andNot(sc::andMask(lv.words, kAdminVs), vsPool);
+        const sc::RegMask fx = fxPoolCount_ != 0 ? sc::andNot(sc::andNot(sc::andMask(lv.words, sc::regRange(fxPoolFirst_, fxPoolCount_)), vsPool), kAdminVs) : sc::RegMask{};
+        take(vsPool, pools->vs, pools->vsFirst, d.vsF, d.vsSet);
+        take(admin, mirror_.adminVs, 0, d.vsF, d.vsSet);
+        if (fxPoolCount_ != 0) take(fx, fxPool_, fxPoolFirst_, d.vsF, d.vsSet);
+        if (trackSrc) {
+            mark(vsPool, d.vsSrc.data(), [](std::uint32_t) { return sc::Src::Pool; });
+            mark(admin, d.vsSrc.data(), adminSrc);
+            mark(fx, d.vsSrc.data(), [&](std::uint32_t r) { return r <= fxPoolNativeLast_ ? sc::Src::Native : sc::Src::Pool; });
         }
     }
-    for (std::uint32_t w = 0; w < 4; ++w) {
-        for (std::uint64_t bits = lp.words[w]; bits != 0; bits &= bits - 1) {
-            const std::uint32_t r = w * 64 + static_cast<std::uint32_t>(std::countr_zero(bits));
-            if (r >= sc::kPsRegs) break;
-            const float* v = nullptr;
-            sc::Src src = sc::Src::Pool;
-            if (r < 6) {
-                v = mirror_.adminPs[r];
-                if (r != 2) src = sc::Src::Native;
-            } else if (!defaultClass) {
-                if (r >= pools->psFirst && r - pools->psFirst < pools->psCount) v = pools->ps[r - pools->psFirst];
-            } else if (r < 14) {
-                if (r >= pools->psFirst && r - pools->psFirst < pools->psCount) v = pools->ps[r - pools->psFirst];
-            } else if (r < 38) {
-                v = mirror_.lighting[r - 14];
-                src = sc::Src::Native;
-            }
-            if (v == nullptr) continue;
-            std::memcpy(d.psF[r], v, 16);
-            d.psSrc[r] = src;
-            d.psSet[w] |= bits & (~bits + 1);
-        }
+    // PS: admin c0..c5 (c2 not native), the shader's pools (eCShaderDefault: within c6..c13), the lighting pool c14..c37
+    const sc::RegMask psLive = sc::andMask(lp.words, sc::regRange(0, sc::kPsRegs));
+    const sc::RegMask psAdmin = sc::andMask(psLive, kAdminPs);
+    const sc::RegMask psPool = sc::andMask(sc::andNot(sc::andMask(psLive, sc::regRange(pools->psFirst, pools->psCount)), kAdminPs),
+                                           defaultClass ? sc::regRange(6, 8) : sc::regRange(6, sc::kPsRegs - 6));
+    const sc::RegMask psLight = defaultClass ? sc::andMask(psLive, kLighting) : sc::RegMask{};
+    take(psAdmin, mirror_.adminPs, 0, d.psF, d.psSet);
+    take(psPool, pools->ps, pools->psFirst, d.psF, d.psSet);
+    take(psLight, mirror_.lighting, 14, d.psF, d.psSet);
+    if (trackSrc) {
+        mark(psAdmin, d.psSrc.data(), [](std::uint32_t r) { return r != 2 ? sc::Src::Native : sc::Src::Pool; });
+        mark(psPool, d.psSrc.data(), [](std::uint32_t) { return sc::Src::Pool; });
+        mark(psLight, d.psSrc.data(), [](std::uint32_t) { return sc::Src::Native; });
     }
+}
+
+const StaticOps::SamplerSnap& StaticOps::samplerSnap() {
+    if (snap_.serial != opSerial_ || snap_.admin != view_.admin) {
+        snap_.serial = opSerial_;
+        snap_.admin = view_.admin;
+        if (view_.admin == nullptr || !engine::safeReadN<sizeof(snap_.block)>(view_.admin + 0x248, snap_.block)) std::memset(snap_.block, 0, sizeof(snap_.block));
+        if (imageOverride_ == nullptr || !engine::safeReadN<sizeof(snap_.overrides)>(imageOverride_, snap_.overrides.data())) snap_.overrides = {};
+        snap_.defFilter = get<std::uint32_t>(view_.gfx, 0x640);
+    }
+    return snap_;
 }
 
 // eCShaderBase::ExecuteShaderConstants' material samplers (pool slot k -> stage base + k when the PS uses it)
@@ -774,12 +790,19 @@ StaticOps::Skip StaticOps::materialSamplers(sc::DrawDesc& d, const std::uint8_t*
     const std::uint16_t mask = get<std::uint16_t>(psElement, 0x38);
     const std::uint32_t base = get<std::uint8_t>(shader, 0x219);
     const Mirror::ShaderPools* pools = poolsOf(shader);
-    U8* gfx = view_.gfx;
-    const std::uint32_t defFilter = get<std::uint32_t>(gfx, 0x640);
+    const SamplerSnap& sn = samplerSnap();
+    const std::uint32_t defFilter = sn.defFilter;
     for (std::uint32_t k = 0; k < pools->slots; ++k) {
         const std::uint32_t stage = base + k;
         if (stage >= sc::kStages || (mask >> stage & 1u) == 0) continue;
-        U8* slot = shader + 0xf8 + 0x28 * k;
+        // the slot's 0x28 bytes at once (unreadable: zeros, as the field reads' fallbacks)
+        std::uint8_t slot[0x28];
+        if (!engine::safeReadN<sizeof(slot)>(shader + 0xf8 + 0x28 * k, slot)) std::memset(slot, 0, sizeof(slot));
+        const auto field = [&](std::uint32_t off) {
+            std::uint32_t v;
+            std::memcpy(&v, slot + off, 4);
+            return v;
+        };
         U8* res = static_cast<U8*>(pools->slotImage[k]);
         U8* data = nullptr;
         if (res != nullptr) {
@@ -789,16 +812,15 @@ StaticOps::Skip StaticOps::materialSamplers(sc::DrawDesc& d, const std::uint8_t*
                 if (ph != nullptr && ptr(ph, 0x60) != nullptr) data = ph;
             }
         }
-        if (data == nullptr) data = ptr(view_.admin, 0x348);  // the ErrorImage
-        if (ptr(imageOverride_, 8 * stage) != nullptr) return Skip::ImageOverride;
+        if (data == nullptr) data = sn.at<U8*>(0x348);  // the ErrorImage
+        if (sn.overrides[stage] != nullptr) return Skip::ImageOverride;
         bool ok = false;
         sc::DrawDesc::Sampler& s = d.samplers[stage];
         s.texture = textureOfImageData(data, ok);
         if (!ok) d.inheritMask |= static_cast<std::uint16_t>(1u << stage);
-        std::uint32_t raw[7] = {get<std::uint32_t>(slot, 0), get<std::uint32_t>(slot, 4), get<std::uint32_t>(slot, 0xc), get<std::uint32_t>(slot, 8),
-                                get<std::uint32_t>(slot, 0x10), get<std::uint32_t>(slot, 0x18), 0};
+        const std::uint32_t raw[6] = {field(0), field(4), field(0xc), field(8), field(0x10), field(0x18)};
         for (std::uint32_t i = 0; i < 6; ++i) s.ss[i] = raw[i] == kNoState ? defFilter : raw[i];
-        s.ss[6] = static_cast<std::uint32_t>(static_cast<std::int32_t>(get<std::int8_t>(slot, 0x14)));
+        s.ss[6] = static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int8_t>(slot[0x14])));
     }
     return Skip::None;
 }
@@ -908,26 +930,25 @@ StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8
 // the admin's samplers bound by BeginMaterial (s0 mask, s1 refraction, s2 depth map) and BindLightmaps (s4, s5); stages the PS
 // samples beyond those and the material's are inherited
 StaticOps::Skip StaticOps::adminSamplers(sc::DrawDesc& d, const std::uint8_t* owner, const d3d9::Shader* ps) {
-    U8* admin = view_.admin;
+    const SamplerSnap& sn = samplerSnap();
     struct AdminSlot {
         std::uint32_t stage, slot;
         const void* image;
     };
-    const AdminSlot slots[] = {{0, 0x298, ptr(admin, 0x2b8)}, {1, 0x248, ptr(admin, 0x268)}, {2, 0x270, ptr(admin, 0x290)},
+    const AdminSlot slots[] = {{0, 0x298, sn.at<const void*>(0x2b8)}, {1, 0x248, sn.at<const void*>(0x268)}, {2, 0x270, sn.at<const void*>(0x290)},
                                {4, 0x2c0, mirror_.lightmapSlot[0]}, {5, 0x2e8, mirror_.lightmapSlot[1]}};
-    const std::uint32_t defFilter = get<std::uint32_t>(view_.gfx, 0x640);
+    const std::uint32_t defFilter = sn.defFilter;
     for (const AdminSlot& a : slots) {
-        U8* slot = admin + a.slot;
-        const void* data = a.image != nullptr ? a.image : ptr(admin, 0x348);
-        if (ptr(imageOverride_, 8 * a.stage) != nullptr) return Skip::ImageOverride;
+        const void* data = a.image != nullptr ? a.image : sn.at<const void*>(0x348);
+        if (sn.overrides[a.stage] != nullptr) return Skip::ImageOverride;
         bool ok = false;
         sc::DrawDesc::Sampler& s = d.samplers[a.stage];
         s.texture = adminStagesUnbound_ ? nullptr : textureOfImageData(data, ok);
         if (!ok && !adminStagesUnbound_) d.inheritMask |= static_cast<std::uint16_t>(1u << a.stage);
-        std::uint32_t raw[6] = {get<std::uint32_t>(slot, 0), get<std::uint32_t>(slot, 4), get<std::uint32_t>(slot, 0xc), get<std::uint32_t>(slot, 8),
-                                get<std::uint32_t>(slot, 0x10), get<std::uint32_t>(slot, 0x18)};
+        const std::uint32_t raw[6] = {sn.at<std::uint32_t>(a.slot), sn.at<std::uint32_t>(a.slot + 4), sn.at<std::uint32_t>(a.slot + 0xc),
+                                      sn.at<std::uint32_t>(a.slot + 8), sn.at<std::uint32_t>(a.slot + 0x10), sn.at<std::uint32_t>(a.slot + 0x18)};
         for (std::uint32_t i = 0; i < 6; ++i) s.ss[i] = raw[i] == kNoState ? defFilter : raw[i];
-        s.ss[6] = static_cast<std::uint32_t>(static_cast<std::int32_t>(get<std::int8_t>(slot, 0x14)));
+        s.ss[6] = static_cast<std::uint32_t>(static_cast<std::int32_t>(sn.at<std::int8_t>(a.slot + 0x14)));
     }
     const std::uint32_t base = get<std::uint8_t>(owner, 0x219);
     for (std::uint32_t st = 0; st < sc::kStages; ++st) {
@@ -1502,6 +1523,7 @@ void StaticOps::opEnterImpl(const Op& op) {
 }
 
 void StaticOps::finishOp() {
+    ++opSerial_;
     tagOverride_ = false;
     if (op_ == nullptr) return;
     if (g_ != nullptr && g_->compare && engineDraws_ != drawCount_) {
@@ -1716,7 +1738,7 @@ void StaticOps::issue() {
     std::array<Texture*, sc::kStages> tex{};
     std::array<std::array<std::uint32_t, 7>, sc::kStages> ss{};
     for (std::uint32_t m = stagesU; m != 0; m &= m - 1) {
-        const auto st = static_cast<std::uint32_t>(std::countr_zero(m));
+        const auto st = sc::lowBit(m);
         tex[st] = dev_.stageTexture(st);
         const std::uint32_t* row = dev_.samplerStateRow(st);
         for (std::uint32_t i = 0; i < 7; ++i) ss[st][i] = row[kSs[i]];
@@ -1788,7 +1810,7 @@ void StaticOps::issue() {
         }
         for (std::uint32_t i = 0; i < sc::StOwnedCount; ++i) dev_.setRenderState(kRs[i], d.states[i]);
         for (std::uint32_t m = static_cast<std::uint32_t>(d.samplerMask & ~d.inheritMask); m != 0; m &= m - 1) {
-            const auto st = static_cast<std::uint32_t>(std::countr_zero(m));
+            const auto st = sc::lowBit(m);
             dev_.setStageTexture(st, const_cast<Texture*>(static_cast<const Texture*>(d.samplers[st].texture)));
             dev_.setSamplerStates(st, kSs, d.samplers[st].ss.data(), 7);
         }
@@ -1826,7 +1848,7 @@ void StaticOps::issue() {
     dev_.setIndices(ib);
     for (std::uint32_t i = 0; i < sc::StOwnedCount; ++i) dev_.setRenderState(kRs[i], rs[i]);
     for (std::uint32_t m = stagesU; m != 0; m &= m - 1) {
-        const auto st = static_cast<std::uint32_t>(std::countr_zero(m));
+        const auto st = sc::lowBit(m);
         dev_.setStageTexture(st, tex[st]);
         dev_.setSamplerStates(st, kSs, ss[st].data(), 7);
     }
