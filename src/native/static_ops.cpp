@@ -1,5 +1,6 @@
 #include "native/static_ops.h"
 
+#include <type_traits>
 #include <windows.h>
 
 #include <algorithm>
@@ -364,6 +365,7 @@ int StaticOps::blendModeOf(const std::uint8_t* owner) const {
 }
 
 const StaticOps::Live& StaticOps::liveOf(const d3d9::Shader* s) {
+    if (const Live** hit = liveMemo_.find(s); hit != nullptr && s != nullptr) return **hit;
     auto [it, inserted] = live_.try_emplace(s);
     if (inserted && s != nullptr) {
         const auto r = fx::parseConstantTable(s->bytecode);
@@ -381,14 +383,22 @@ const StaticOps::Live& StaticOps::liveOf(const d3d9::Shader* s) {
             }
         }
     }
+    if (s != nullptr) liveMemo_.put(s, &it->second);
     return it->second;
 }
 
 d3d9::Shader* StaticOps::shaderOfElement(const void* element) {
     if (element == nullptr) return nullptr;
-    if (const auto it = elementShader_.find(element); it != elementShader_.end()) return it->second;
+    if (d3d9::Shader** hit = elementMemo_.find(element)) return *hit;
+    if (const auto it = elementShader_.find(element); it != elementShader_.end()) {
+        elementMemo_.put(element, it->second);
+        return it->second;
+    }
     d3d9::Shader* s = hal::vulkan::HalHLSLShader::shaderOf(const_cast<std::uint8_t*>(ptr(ptr(element, 0x18), 0x18)));
-    if (s != nullptr) elementShader_[element] = s;  // pool elements live as long as the pool (the cache is never wrong)
+    if (s != nullptr) {
+        elementShader_[element] = s;  // pool elements live as long as the pool (the cache is never wrong)
+        elementMemo_.put(element, s);
+    }
     return s;
 }
 
@@ -461,15 +471,18 @@ sc::DrawDesc& StaticOps::newDraw() {
     sc::DrawDesc& d = *dp;
     d.vs = d.ps = d.decl = d.indices = d.subMesh = d.material = nullptr;
     d.indexed = true;
-    d.streams = {};
-    d.samplers = {};
+    // plain data, all-zero defaults (Src::None = 0): block clears instead of member-wise default initialisation (V4)
+    static_assert(std::is_trivially_copyable_v<sc::DrawDesc::Stream> && std::is_trivially_copyable_v<sc::DrawDesc::Sampler> && static_cast<int>(sc::Src::None) == 0);
+    std::memset(d.streams.data(), 0, sizeof(d.streams));
+    for (auto& st : d.streams) st.freq = 1;
+    std::memset(d.samplers.data(), 0, sizeof(d.samplers));
     d.samplerMask = d.inheritMask = 0;
     d.vsLive.reset();
     d.psLive.reset();
-    d.vsSrc.fill(sc::Src::None);
-    d.psSrc.fill(sc::Src::None);
-    d.vsSet = {};
-    d.psSet = {};
+    std::memset(d.vsSrc.data(), 0, sizeof(d.vsSrc));
+    std::memset(d.psSrc.data(), 0, sizeof(d.psSrc));
+    std::memset(d.vsSet.data(), 0, sizeof(d.vsSet));
+    std::memset(d.psSet.data(), 0, sizeof(d.psSet));
     d.passFlags = 0;
     d.zPass = false;
     d.tagWater = 0;
@@ -488,8 +501,10 @@ sc::DrawDesc& StaticOps::newDraw() {
 }
 
 StaticOps::Mirror::ShaderPools* StaticOps::poolsOf(const void* shader) {
+    if (Mirror::ShaderPools** hit = poolsMemo_.find(shader); hit != nullptr && (*hit)->epoch == mirrorEpoch_) return *hit;
     auto [it, inserted] = mirror_.shaders.try_emplace(shader);
     Mirror::ShaderPools& p = it->second;
+    poolsMemo_.put(shader, &p);
     if (inserted || p.epoch != mirrorEpoch_) {
         const ret::NoLog noLog;  // V3: the pools are values (or compared as the entry's pre-state), not the log's
         // (re-)read once per epoch: the engine writes these pools outside the slots (SetTime in eCShaderMaterialAdmin::Process,
@@ -554,7 +569,10 @@ void StaticOps::initMirror() {
     nativeVs_ = 0xfffu | 1u << 30;  // c0..c11, c30 (the camera, fog)
     U8* admin = view_.admin;
     if (mirrorMode_ == 2) ++mirrorEpoch_;  // N5.x: every engine pool re-read at every op
-    if (mirror_.shaders.size() > mirrorShaderCap_) mirror_.shaders.clear();  // (dead shaders' entries: bounded)
+    if (mirror_.shaders.size() > mirrorShaderCap_) {
+        mirror_.shaders.clear();  // (dead shaders' entries: bounded)
+        poolsMemo_.clear();
+    }
     // the global pool c31..c231, the lighting pool c14..c37 and the admin's lightmap slots: written by the slots only (world /
     // fade / instance data, bones, lighting, BindLightmaps), i.e. by our composition: read whole once (mode 1: once per view,
     // mode 2: per op) and after a reallocation
@@ -872,9 +890,18 @@ const StaticOps::SamplerSnap& StaticOps::samplerSnap() {
         if (view_.admin == nullptr || !engine::safeReadN<sizeof(snap_.block)>(view_.admin + 0x248, snap_.block)) std::memset(snap_.block, 0, sizeof(snap_.block));
         if (imageOverride_ == nullptr || !engine::safeReadN<sizeof(snap_.overrides)>(imageOverride_, snap_.overrides.data())) snap_.overrides = {};
         snap_.defFilter = get<std::uint32_t>(view_.gfx, 0x640);
-        snap_.hash = ret::hashBytes(snap_.block, sizeof(snap_.block)) * 31 + ret::hashBytes(snap_.overrides.data(), sizeof(snap_.overrides)) * 17 + snap_.defFilter;
+        snap_.hashValid = false;
     }
     return snap_;
+}
+
+std::uint64_t StaticOps::snapHash() {
+    const SamplerSnap& sn = samplerSnap();
+    if (!snap_.hashValid) {
+        snap_.hash = ret::hashBytes(sn.block, sizeof(sn.block)) * 31 + ret::hashBytes(sn.overrides.data(), sizeof(sn.overrides)) * 17 + sn.defFilter;
+        snap_.hashValid = true;
+    }
+    return snap_.hash;
 }
 
 // eCShaderBase::ExecuteShaderConstants' material samplers (pool slot k -> stage base + k when the PS uses it)

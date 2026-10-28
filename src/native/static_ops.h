@@ -265,6 +265,7 @@ private:
         std::array<const void*, 16> overrides{};
         std::uint32_t defFilter = 0;
         std::uint64_t hash = 0;  // V3: of the block, the overrides and the default filter (the retained draws' environment)
+        bool hashValid = false;  // V4: computed on first use (snapHash()): only the retained keys need it
         template <class T>
         T at(std::uint32_t off) const {
             T v;
@@ -274,6 +275,7 @@ private:
     } snap_;
     std::uint64_t opSerial_ = 0;  // bumped per op / unit (finishOp)
     const SamplerSnap& samplerSnap();
+    std::uint64_t snapHash();
     bool geometryOf(const std::uint8_t* res, Geom& g, int stream3);  // stream3: 0 off, 1 on, -1 as the record has it
     sc::DrawDesc& drawFrom(const Geom& g);
     // defaultClass: eCShaderDefault's register map (admin c0..c30, global c31..c231, the shader's pools from c232 / PS c6..c13,
@@ -649,6 +651,23 @@ private:
     std::uint32_t frameLogged_ = 0;  // -LogFrame: composed draws described
     std::unordered_map<const d3d9::Shader*, Live, PtrHash> live_;
     std::unordered_map<const void*, d3d9::Shader*, PtrHash> elementShader_;
+    // V4: direct-mapped memos in front of the three pointer-keyed maps above / the mirror's (a draw looks up the same few shaders;
+    // map nodes are stable, the pools memo is dropped where the map is cleared)
+    template <class V>
+    struct PtrMemo {
+        struct Entry {
+            const void* key = nullptr;
+            V value{};
+        };
+        std::array<Entry, 16> e{};
+        static std::size_t slot(const void* k) { return ((reinterpret_cast<std::uintptr_t>(k) >> 4) * 0x9E3779B97F4A7C15ull) >> 60; }
+        V* find(const void* k) { Entry& x = e[slot(k)]; return x.key == k ? &x.value : nullptr; }
+        void put(const void* k, V v) { e[slot(k)] = {k, v}; }
+        void clear() { e = {}; }
+    };
+    PtrMemo<const Live*> liveMemo_;
+    PtrMemo<d3d9::Shader*> elementMemo_;
+    PtrMemo<Mirror::ShaderPools*> poolsMemo_;
 
     std::size_t issueIndex_ = 0;
     std::vector<std::uint8_t> ownKind_;

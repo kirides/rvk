@@ -434,8 +434,7 @@ StaticOps::Skip StaticOps::materialDraws(const std::uint8_t* shader, const std::
         put(alphaBits | static_cast<std::uint64_t>(viewKind_) << 32 | static_cast<std::uint64_t>(static_cast<std::uint32_t>(cascade_) & 0xff) << 40);
         putp(mirror_.lightmapSlot[0]);
         putp(mirror_.lightmapSlot[1]);
-        const SamplerSnap& sn = samplerSnap();
-        put(sn.hash);
+        put(snapHash());
         putp(view_.admin);
         put((view_.zColorWrite ? 1u : 0u) | (overlays_ ? 2u : 0u) | (adminStagesUnbound_ ? 4u : 0u) | (g_->compare ? 8u : 0u) |
             static_cast<std::uint64_t>(mirrorMode_) << 8);
@@ -479,8 +478,7 @@ StaticOps::Skip StaticOps::specialPassDraw(const std::uint8_t* shader, const Geo
         put(static_cast<std::uint64_t>(viewKind_) << 32 | static_cast<std::uint64_t>(static_cast<std::uint32_t>(cascade_) & 0xff) << 40);
         putp(mirror_.lightmapSlot[0]);
         putp(mirror_.lightmapSlot[1]);
-        const SamplerSnap& sn = samplerSnap();
-        put(sn.hash);
+        put(snapHash());
         putp(view_.admin);
         put((view_.zColorWrite ? 1u : 0u) | (overlays_ ? 2u : 0u) | (adminStagesUnbound_ ? 4u : 0u) | (g_->compare ? 8u : 0u) |
             static_cast<std::uint64_t>(mirrorMode_) << 8);
