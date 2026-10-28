@@ -469,3 +469,10 @@ Full lean off 5.66, lean on **4.97** (fps 169 -> 192); jungle spot 3.63 / 6.92 /
 (Engine.dll self 1.17 -> 0.74 ms profiled), a device sampler cache that the per-op restore's state flip-flop defeated (now a two-entry
 memo per stage; `native.lean_restore=false` = the restore's A/B: +0.09 ms left), the frame tap's per-op `std::format` notes on lean
 frames (now formatted only while kept). Recipe: `out/o2b/batch.ps1` (`name|mode|settings|save or jungle`), `out/o2b/table.py`.
+
+O2c / O3 (2026-10-28, opt-plan.md "O2c / O3 result"): on lean frames the effect filters, sprite flushes and the PSSM loop skip the
+engine's code too (`native.lean_effects`, default on: their A/B), missing permutations are compiled at the slot's place (coverage
+leftovers ~15 draws per run). Same session, 3 runs each: savegame Wrapper 3.36 ms, Full before (O2b DLL) 4.85, after **4.76** (fps 196 ->
+200); jungle 3.71 / 5.79 / **5.69**. Profiled, Full 5.06 vs Wrapper 3.55: our DLL +1.48, memcpy +0.28, Engine.dll -0.27 (less than in
+Wrapper): the rest of Full - Wrapper is our own composition / recording per draw. `native.lean_restore=false` saves 0.07 ms (kept).
+Recipe: `out/o3/perf.ps1` (`batch.ps1` entries `name|mode|settings|save or jungle|config`, config `Before` = a DLL in `build\Before`).

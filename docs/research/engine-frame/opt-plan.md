@@ -347,3 +347,141 @@ static, 22 actors, 28 vegetation, 12 particles, ...).
 * O3: the effect units / post chain (`effectBegin` 6.7 % of the profiled frame, the units' device capture) and the sprite batcher
   without the engine's ExecuteEffect / Flush; the focus indicators' draws. With most engine code gone, then the restore (cache
   invalidation at the engine's entries) and the tap's copy + resolve.
+
+## O2c / O3 result (2026-10-28): lean effect units, sprite flushes, PSSM, on-demand compiles
+
+Commits 61f86ec (O3: effect units / sprite flushes / PSSM lean), 6f7aee4 (O2c: permutations compiled at the slot's place, warm-up
+pool sync), 3f46998 (rvk_d3d9test "load surface", below) on `feat/native-scene`. Logs, scripts, the DLL / PDB of the profiled run:
+`out/o3/` (`compare.ps1` + `check.py` compare runs incl. `focus` / `luma0|1`, `switch.ps1`, `batch.ps1` / `perf.ps1` + `out/o2b/table.py`,
+`luma.py`). RE: capstone on the test copy's Engine.dll (the Ghidra MCP had Risen.exe open), scratch in `B:\DevDrive\risen-ghidra\optframe\`.
+
+### What runs now on a lean frame
+
+`native.lean` (default on in Full) now also covers the effect units; `native.lean_effects` (Debug | NoAB, default on) is their A/B.
+Code: `src/native/effect_ops_lean.cpp` + the units' entries (`effectBegin`, `spriteFlushBegin`, `packedVisual` return "skip"; the
+detours in `engine/scene_hooks.cpp` then do not call the original; `UpdatePackedShadowMapVisual`'s detour returns false so
+`eCImageFilterShadowMask::OnUpdateOutput` skips its PSSM loop). Still run by the engine: the thin graph walk (`eCImageEffect::Execute`,
+AddJobs / ExecuteJobs, the render-target pool, UpdateColorOutput, UpdateVisual, UpdateEffect, Set / ResetRenderTarget), the mask's
+OnUpdateOutput around the units (parameter objects, ClearCells, the `+0x298` holder), CFXGui Draw, the GUI device's BeginFrame /
+EndFrame (+ Game.dll's entity renderer), `eCSprite::Begin` / `End`.
+
+What the skipped code leaves behind (RE [C], opt-side-effects-frame.md 6 / 7 / 5.5) and how it is reproduced:
+
+| skipped | side effect | reproduced |
+|---|---|---|
+| ExecuteEffect 0x75af70 (BeginEffectTechnique, passes, ExecuteVisual, EndEffectTechnique) | device: the HAL technique is a render-state block (every render state the passes and `eCGfxVisual::Execute`'s normal setters write reverts at EndTechnique); shaders, declaration, streams, indices, stage textures, sampler states, float / int / bool registers stay as the last pass set them | `issueLean`: our draws, then the render states of the unit's entry (no save / restore of the rest: our last draw's state is the engine's) |
+| OnSetParams 0x75c740 / OnResetParams 0x75c8a0 | the API effect's values (Set = SetParameter, pure reads of their sources), each input's AttachImmImageData (AddRef + SetTexture), at the end SetTexture(handle, null) + Release; the Texture / Image parameters' Reset (0x2897f0 / 0x2893d0) the same; every other class's Reset is `xor al, al; ret` | `EffectInfo::adoptValues / adoptTexture / adoptTechnique` (the HAL effect's store = the carry-over the next composition starts from; every unit now starts from it): the composed values, the textures with the inputs' and Texture / Image parameters' nulls, the technique of the effect's `+0x20` (PSSM: the handle UpdateEffect would write); refcounts balanced by skipping both halves |
+| `eCGfxEffect::Execute` 0x750210 | `ms_pActiveEffect` = the effect (always); `+0x2c = 0` and `ms_bReset = 0` **only while ms_bOptimize** (false in the game: the first build predicted them, the check frames showed `+0x2c` staying 1); the execute callback 0xc62af0 (none) | ms_pActiveEffect written; ms_bOptimize on or a callback = the unit keeps the engine's code |
+| ExecuteEffectPass 0x75b1a0 | gfx effect `+0x28` = the pass | written (the last pass) |
+| the PSSM loop (UpdateEffect, Begin, per cell ActivateStencilTesting + 3 passes, End) | the packed visual's `+0x1c` / `+0x20` (cull / depth func per pass), UpdateEffect's `+0x20` technique handle, the HAL's master stencil flag; UpdatePackedShadowMapVisual itself still runs (its vertex buffer is what our draws read) | written; master flags as predicted |
+| `eCSprite::Flush` 0x757d10 (RenderBatches, DrawBatch, eCSpriteMesh::Draw) | record count `+0xb0 = 0` (only Flush resets it); the mesh ring `+0xd8` / `+0xdc`; SetBlend's SetMasterBlending (the HAL's master blend flag; its render states revert with the technique); DrawBatch's attach (`+0x100`, one AddRef released by End / EndFrame only when attached: skipped = nothing held); g_mWorldViewProj and the texture in the effect; `+0x88..+0x9c` are re-initialised by every RenderBatches; no RequestData / glyph / atlas work, DrawQuad holds no reference | `+0xb0`, the ring, the master blend flag, the store; our draws from our own buffers, then the engine's mesh buffers bound as the engine leaves them |
+
+A unit keeps the engine's code when a render-state block is open (BeginTechnique would restart it: never met), ms_bOptimize is on or
+an execute callback is installed (never), and on check / warm-up frames.
+
+**Verification of the side effects**: on the check frames (`native.lean_check`) the engine's code runs and the prediction is compared
+with what it left: the whole device (every float register, all 16 stages, 210 render states, bool / int, target / depth / viewport),
+the HAL's master flags, the effect's store (values, textures, technique) and the written engine fields (the PSSM's at the HAL effect's
+EndTechnique: its loop has no engine hook). rvk.log `native: effect units lean (5 s): engine code skipped: <unit> N ...; check (total):
+after D / N differing (fields), store ..., fields ..., master flags differing M`. The first build's checks found the `+0x2c` /
+`ms_bReset` rule above and the PSSM's technique (read from `+0x20` before UpdateEffect had run); after the fixes 0 everywhere.
+
+### O2c: permutations compiled at the slot's place
+
+The "permutation not compiled" leftovers are gone: where the group takes over, the composition calls the engine's own compile at the
+point its slot would, with the slot's arguments (RE [C]): a pass with a missing element = the version Execute 0x6cc610's
+`FUN_1806cc000(version, (f >> 9) & 1, (f >> 10) & 3)` then `FUN_1806cb8b0(version, f & 3, (f >> 4) & 3, (f >> 6) & 7, (f >> 2) & 3)`
+(f = the pass flags; the same calls in the same order); a special pass = `ExecuteSpecialPass`'s version vtable +0x50 = 0x6ca6c0
+`(version, admin +0x314, instanced, 1)`, a failure clears `version +0x18 + idx` (as the engine; no draw). Only for
+eCShaderVersionDefault_3_0 with the vtable slots and call sites checked at first use (rvk.log `native: on-demand compiles: ...`). The
+compile re-walks the shader's graph into its pools (`UpdateShaderConstants`): our copy of the version's shader's pools is re-read, and
+the compile now runs before the op's constant switch is applied to that copy (the first build re-read after it and lost the switch:
+4 skinned-actor draws in `rvk_spells` differed in a material texture / c6-13). **No compile path calls `SaveShaderPool`** (0x6b6260 has
+no direct caller in Engine.dll): a pool miss compiles in memory and marks the user pool dirty, exactly as the engine's own call. The
+test copy's `Data/Compiled/Materials/ShaderMaterialPool_User.smp` does not exist before or after the runs of this stage (stat only).
+rvk.log `native: lean (5 s)` ends with `permutations compiled at the slot's place N + special M (failed K)` (savegame: 147 + 219 in the
+first world frames, then 0; never a failure). Particles (their own shader version) keep the engine's compile: 1 - 2 ops per run.
+
+With no op left to the engine, no lean frame syncs the engine's pools any more (O2b: `markLeft`, ~1 per frame), so a warm-up frame ran
+the engine's code from pools many frames old: a carry-over register no slot writes (an instance slot beyond a batch) made 870 route
+draws differ in "vs instance c32+" on the check frames (a compare artefact: lean frames never read those pools). The warm-up frame now
+starts with `syncEnginePools()`.
+
+**Coverage leftovers** (engine draws per run, `native.coverage`): savegame 578 (O2b) -> **13 - 16**, `rvk_rare` 699 -> **18 - 25**, route
+53; every run 99.999 - 100.000 % ours. Left: sky cube faces / particles / billboards "unreadable" in the first frames after a load,
+particles "buffers not created yet" (new emitters' first frame), particles "permutation not compiled".
+
+### Verification (lean on, `native.lean_check=10`, every group taken over + compared; `out/o3/c4_*`, `c5*_*`, `b1_*`)
+
+| run | result |
+|---|---|
+| savegame hold 30 / `-Validation` hold 20 | every group 0 mismatches, own draws = composition, effect draws equal (38 k / 21 k), after 0 / 15,425 and 0 / 8,222, store / fields / masters 0; validation 0 messages |
+| `rvk_menufps` (PASS: menu limit, loading pacing) | 0; after 0 / 10,540 (GUI flushes of the menus, character screen, loading screens) |
+| pub_interior + jungle (actors), + `upscale.mode=native_aa`, + `quality` (1066x600 -> 1600x900) | 0; after 0 / 9,808, 9,523, 9,693; FSR frames upscaled as before |
+| `rvk_pointshadow` / with `-SyncValidation` (no RT shadows) | 0 incl. the PSSM pass (after 0 / 11,280); sync validation 0 messages, no SYNC- |
+| `rvk_spells`, `rvk_rare` (validation), storm set, the 17-spot route | 0 (route 10.5 M draws, after 0 / 59,830) |
+| focus (`-Param focus=1`, pub_interior + harbour_night, the focus pinned on an NPC) | 0; GUI-view engine draws outside the flushes 0 |
+
+Not run: HDRI (DefaultEffect HDRI needs the copy's ConfigUser.xml edited; its jobs are the same filter classes).
+
+**Focus indicators**: in the focus runs, `rvk_spells` (spells drawn and shot), the route and every compare run the coverage counter met
+no engine draw outside the units (`gCFocusCrossHairIndicator2`'s mesh would count there); `gCFocusScreenPointIndicator2` draws through a
+sprite Flush (it sets the view matrix to identity first; our composition reads the HAL's view matrix at the Flush), so it is the GUI
+unit's. The crosshair indicator's mesh (ranged aiming) was not met; if it occurs it stays the engine's draw (counted, not composed).
+
+**Behaviour.** Same-frame switch `native.lean_effects` off -> on at 4660 (frozen holds, `switch.ps1`): pub_interior (bloom, DoF, tone
+map, SSAO / mask) static blocks 0.0213 before / **0.0218** across / 0.0164 after, jungle 0.0005 / **0.0001** / 0.0000; `shot-reviewer`
+(x8 diff maps, candle-bloom / sky / dark-corner / DoF crops, `out/o3/review/`): nothing changes across the switch beyond the same-mode
+pairs (max 2 levels; the pub's slow sub-level drift is the same before and after). Eye adaptation: the savegame luma traces
+lean_effects off / on (`luma.py b1_luma0 b1_luma1`) follow the same curve until the storm's first lightning (-0.45 per 20 frames in
+both, offset by the runs' 20-frame timing); the random lightning makes the rest not comparable. The adaptation is GPU-only and its
+draws are compared equal per frame (above). Menus / loading screens / HUD: `rvk_menufps` PASS with every GUI flush checked.
+
+### Perf (`-Exe RisenTest.exe -Vsync off -Perf`, test baseline 1600x900; savegame hold 40 last 6 windows, jungle spot last 4; one session, `sysprobe` before: 8.5 % CPU, nothing else busy; Full before = the O2b DLL f3056a2)
+
+| run | savegame engine+HAL ms | jungle ms | GPU ms |
+|---|---|---|---|
+| Wrapper (3 runs) | 3.35 / 3.35 / 3.38 | 3.71 / 3.69 / 3.72 | 1.47 / 1.83 |
+| Full before (O2b) | 4.82 / 4.85 / 4.87 | 5.83 / 5.75 / 5.80 | 1.48 / 1.83 |
+| Full after (O3) | **4.73 / 4.75 / 4.79** | **5.72 / 5.68 / 5.66** | 1.49 / 1.83 |
+| Full after, `native.lean_effects=false` | 4.90 / 4.93 | | |
+| Full after, `native.lean_restore=false` | 4.71 / 4.64 | | |
+
+O3 saves ~0.10 ms at the savegame and ~0.11 ms in the jungle (effects lean vs not, same DLL: 0.17 ms); fps 196 -> 200. Full - Wrapper:
+savegame **+1.40 ms** (+1.49 before, same session), jungle +1.98 (+2.08). Profiled (`A_prof` vs `W_prof`): Full 5.06 vs Wrapper 3.55 ms;
+by module ours (d3d9.dll) 2.38 vs 0.90 (+1.48), vcruntime (memcpy) 0.47 vs 0.19 (+0.28), **Engine.dll 0.93 vs 1.20 (-0.27: the engine
+now does less than in Wrapper)**, the rest equal. So **what is left of Full - Wrapper is our own per-draw cost**, not the engine's: the
+composition + issue of the static / scene ops (`StaticOps::opEnter` 2.54 incl, of which `issue` 1.15: the draws' recording) and the
+effect units (`effectBegin` 0.42 incl for ~25 units and their ~45 draws). The engine's ExecuteEffect cost less than its share of the
+O2b profile suggested.
+
+**The per-op restore** (`native.lean_restore=false`): 0.07 ms (4.68 vs 4.76). Dropping it needs the engine's state caches invalidated
+at every engine entry that still follows lean ops (fallback slots; the brackets' EndRenderStateBlock reverts only HAL-set states; the
+effect units' composition reads the inherited device state): not worth 0.07 ms, kept.
+
+### Full vs Wrapper per stage (savegame, engine+HAL ms, unprofiled; each row from its own session)
+
+| stage | Wrapper | Full | Full - Wrapper |
+|---|---|---|---|
+| O0 (c338059) | 3.36 | 8.53 | +5.17 |
+| O1 (42e6a12) | 3.33 | 5.42 - 5.48 | +2.15 |
+| O2a (lean on; a ~0.3 ms slower session) | 3.29 | 5.74 - 5.76 | +2.46 |
+| O2b (f3056a2, lean on by default) | 3.39 | 4.97 | +1.58 |
+| O2b in the O3 session | 3.36 | 4.85 | +1.49 |
+| **O3 (6f7aee4)** | **3.36** | **4.76** | **+1.40** |
+
+### rvk_d3d9test "load surface from surface" (3f46998)
+
+Pre-existing failure, root-caused in a worktree: `Device::loadSurfaceFromSurface` read a DXT1 source into a CPU texture by
+`vkCmdBlitImage` into a temporary render target; on this GPU / driver the blit of an 8x8 DXT1 level yields only a 2x2 patch of the first
+block (the source image itself reads back correct, validation clean, the code unchanged since the test passed in 9c468b6: a driver /
+environment change [I]). Fix in our device: DXT1-5 sources into a 32-bit BGRA CPU destination with a nearest filter (the sky absorption
+image's case) are decoded on the CPU from the read-back level, honouring both rects; other cases keep the blit. `rvk_d3d9test` PASS,
+`rvk_tests` 179 / 179.
+
+### Left
+
+* The remaining Full - Wrapper (+1.4 ms) is our own per-draw composition / recording: the "own modes" (retained composition across
+  frames, merged indirect draws) are the next lever, not more engine code removal.
+* The per-op restore (0.07 ms) and the tap's copy + resolve stay; particles' own permutation compile and first-frame cases stay the
+  engine's (13 - 25 draws per run); the crosshair indicator's mesh not met; HDRI not re-run under O3.
