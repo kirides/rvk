@@ -557,7 +557,7 @@ bool StaticOps::geometryBytesEqual(const sc::DrawDesc& c, const sc::DrawDesc& ca
     auto* vb = const_cast<d3d9::Buffer*>(static_cast<const d3d9::Buffer*>(captured.streams[cs].buffer));
     auto* ib = const_cast<d3d9::Buffer*>(static_cast<const d3d9::Buffer*>(captured.indices));
     std::vector<std::uint8_t> got(c.vertexBytes.size());
-    const std::uint32_t first = cs == 0 ? captured.minIndex : 0u;
+    const std::uint32_t first = cs == 0 ? (captured.indexed ? captured.minIndex : captured.startIndex) : 0u;
     if (vb == nullptr || !vb->readCpu(captured.streams[cs].offset + first * c.vertexStride, static_cast<std::uint32_t>(got.size()), got.data())) {
         why = std::format("vertex data of stream {} unreadable", cs);
         return false;

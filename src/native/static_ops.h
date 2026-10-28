@@ -60,6 +60,10 @@ public:
         Vegetation,  // N5.4: the grass / vegetation ops (eCRenderContextVegetation: z / solid; group bit 256)
         ShadowViews, // N5.5: every op of the shadow maps' z lists (ExecuteShadowMap: sun cascades, terrain map, point-light atlas
                      // cells; meshes, skinned actors, SpeedTrees, ...: group bit 512)
+        Particles,   // N5.6: the particle emitters' alpha ops (eCParticleRenderContext: CPU quads; group bit 4096)
+        Strips,      // N5.6: the strips' (trails) and light streaks' alpha ops (eCStripRenderContext, eCLightStreaksRenderContext;
+                     // group bit 8192)
+        Precipitation,  // N5.6: rain / snow (eCPrecipitationRenderContext, the late list +0x1548; group bit 16384)
         Count
     };
     static constexpr std::size_t kGroups = static_cast<std::size_t>(Group::Count);
@@ -93,7 +97,7 @@ public:
 
     enum class Skip : std::uint8_t {
         None, Kind, Overlay, ShaderClass, Version, InvalidShader, NotCompiled, Switch, Primitive, ImageOverride, Unreadable, PassKind,
-        Sort, Texture, OverlayShader, DecalProxy, NotCreated, VisualShader, SkyCamera, SkyRebuilt, Bones, Shadow, Count
+        Sort, Texture, OverlayShader, DecalProxy, NotCreated, VisualShader, SkyCamera, SkyRebuilt, Bones, Shadow, Simulated, Instanced, Count
     };
     static const char* name(Skip s);
 
@@ -240,6 +244,36 @@ private:
     Skip skyObjectDraws(const std::uint8_t* object, const float* world, const std::uint8_t* bb, std::uint32_t renderCount);
     Skip skyDomeDraw(const std::uint8_t* shader, const std::uint8_t* visual);
     int blendModeOf(const std::uint8_t* owner) const;
+    // N5.6 (static_ops_fx.cpp): particles, strips, light streaks, precipitation
+    bool verifyFx();
+    Skip composeFx(const Op& op);
+    Skip composeStrip(const Op& op);
+    Skip composeStreaks(const Op& op);
+    Skip composeParticle(const Op& op);
+    Skip composePrecipitation(const Op& op);
+    int fxVerified_ = 0;
+    // a shader class's own global pool (eCShaderParticle::ms_pGlobalShaderConstants +0x20): its registers as the op's path writes
+    // them; count 0 = none (constantsInto, non-default classes)
+    float fxPool_[32][4]{};
+    std::uint32_t fxPoolFirst_ = 31, fxPoolCount_ = 0, fxPoolNativeLast_ = 0;
+    const std::uint8_t* particleGlobalVar_ = nullptr;  // &eCShaderParticle::ms_pGlobalShaderConstants (decoded from 0x6d5fc2)
+    bool fogOverride_ = false;  // EnableFog (shader +0x2b0) as ApplyRenderStates writes it
+    Skip particlePassDraw(const std::uint8_t* shader, const std::uint8_t* version, std::uint32_t key, const Geom& geometry, float alpha);
+    bool particleVertices(const std::uint8_t* ps, const std::uint8_t* entity, std::vector<std::uint8_t>& out, std::uint32_t& quads);
+    struct FxStats {
+        std::uint64_t particleOps = 0, particleQuads = 0, particleSkipped = 0, particleEngineBytes = 0, particleZeroQuads = 0, particleSorted = 0;
+        std::array<std::uint64_t, 6> orient{};    // PS +0x170: 0..4, other
+        std::array<std::uint64_t, 2> coords{};    // PS +0xb0: world / entity-relative
+        std::uint64_t rotated = 0, frameBlend = 0, lit = 0, instancedEmitters = 0;
+        std::uint64_t stripOps = 0, stripSegments = 0, streakOps = 0, precipOps = 0, precipDrops = 0, precipOff = 0;
+        // particle ops left to the engine because no particle was alive at the entry, and those of them the engine then drew
+        std::uint64_t simulatedOps = 0, simulatedDrew = 0;
+    } fxWindow_, fxTotal_;
+    // a draw tag for the issued draws other than the slot's (particles: eCParticle_PS::Render's TagScope inside the slot)
+    bool tagOverride_ = false;
+    const Op* simulatedOp_ = nullptr;  // the last particle op skipped as Simulated (its engine draws are counted)
+    bool simulatedDrew_ = false;
+    d3d9::draws::Tag tagOverrideValue_{};
     void finishOp();
     void issue();
 
@@ -358,6 +392,8 @@ private:
     std::unique_ptr<d3d9::Buffer> ownVb_, ownIb_;  // take-over: our own copies of the CPU-generated vertex / index data
     // take-over: the vegetation's instance data, appended within a frame (one ring copy per frame instead of one per DISCARD)
     static constexpr std::uint32_t kOwnInstBytes = 2u << 20;
+    // take-over: our own dynamic VB for CPU-generated geometry on stream 0 (decals, billboards, sky objects, particles, strips, rain)
+    static constexpr std::uint32_t kOwnVbBytes = 4u << 20;
     std::unique_ptr<d3d9::Buffer> ownInstVb_;
     std::uint32_t ownInstCursor_ = 0;
     std::uint64_t ownInstFrame_ = ~0ull;

@@ -1790,11 +1790,12 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "the tree billboards' ops, 256 the vegetation ops (grass batches), 512 the shadow maps' z ops (sun cascades, terrain "
                        "variance map, point-light atlas cells), 1024 the effect draws around the shadows (the post_SSM shadow mask chain: "
                        "SSAO, cascades, terrain term, blur; its depth copy; the terrain variance map's Blur7H / V), 2048 the shadow views' setup "
-                       "(the cascade fit and shadow cameras compared; the maps' target binds, viewports, clears and resets).",
+                       "(the cascade fit and shadow cameras compared; the maps' target binds, viewports, clears and resets), 4096 the particle ops (CPU "
+                       "quads), 8192 the strips (trails) and light streaks, 16384 the precipitation (rain / snow, the late list).",
         .type = Type::Int,
         .defaultValue = 4095,
         .min = 0,
-        .max = 4095,
+        .max = 32767,
         .flags = Flag::NoAB | Flag::Debug,
     });
     r.nativeDebug = &reg.add({

@@ -138,6 +138,22 @@ inline constexpr std::uint32_t kSkyBillboardSize = 0x30, kSkyVertexStride = 0x20
 void skyBillboardVertices(std::span<const std::uint8_t> billboards, std::uint32_t count, std::vector<std::uint8_t>& out);
 // eCSkyObject::FillIndexBuffers 0x6e1940: billboard k -> 4k + (0, 1, 2, 0, 2, 3), 16-bit
 void skyQuadIndices(std::uint32_t count, std::vector<std::uint8_t>& out);
+
+// ---- N5.6: particles, strips (native/static_ops_fx.cpp) -------------------------------------------------------------------------
+
+// eCParticle_PS::ApplyRenderStates 0x5d6e50: the shader's BlendMode from the emitter's blend PS +0x220 (1 -> 2, 2 -> 3, 3 -> 5,
+// 4 -> 4, 5 -> 6, 6 -> 7, 7 -> 8; any other: AlphaBlend (2) while the fade (as a double) is below 0.9, else Normal (0))
+std::int32_t particleBlendMode(std::int32_t emitterBlend, float fade);
+// UpdateVertices 0x5d58b0: the sprite-sheet tile of frame k (tiles tx x ty = PS +0x228 + 1, +0x22c + 1): column / row (PS +0x23b:
+// k % tx, k / tx; else k / ty, k % ty, truncating division), uv = (col, col + 1) x 1 / tx, (row, row + 1) x 1 / ty
+struct ParticleTile {
+    float u0 = 0, u1 = 1, v0 = 0, v1 = 1;
+};
+ParticleTile particleTile(std::int32_t frame, std::int32_t tx, std::int32_t ty, bool rowMajor, float invTx, float invTy);
+// DepthSortParticles' comparator 0x5d8780: depth = ((ay y + ax x) + az z) + aw, descending (far first)
+int particleDepthOrder(const float axis[4], const float a[3], const float b[3]);
+// eCStrip_PS::RenderVertices 0x6fd800: fade x clamp(age / fade-in, 0, 1) unless the flag PS +0xa0 is set or the fade-in is not > 0
+float stripAlpha(float fade, bool noAgeFade, float fadeIn, float age);
 // eCShaderVersionSkyDome_2_0's states (0x6d9740): FillBlendingRenderStates (not additive, fade = GetGlobalAlpha(0) = 1), colour
 // write on, alpha write off, depth func LESSEQUAL, depth write off for IsBlended && !IsRefracted (else the visual's), render mode 0
 RenderStates skyDomeStates(const BlendInputs& b, float fade);
@@ -291,6 +307,7 @@ struct DrawDesc {
     };
     std::array<Stream, 4> streams{};
     const void* indices = nullptr;
+    bool indexed = true;  // false: DrawPrimitive (startIndex = the first vertex; minIndex / numVertices 0; indices not compared)
     std::uint32_t primType = 4;
     std::int32_t baseVertex = 0;
     std::uint32_t minIndex = 0, numVertices = 0, startIndex = 0, primCount = 0;

@@ -504,6 +504,25 @@ TEST(sky_billboard_vertices_follow_fill_vertex_buffer) {
     CHECK(idx.size() == 24 && q[0] == 0 && q[2] == 2 && q[3] == 0 && q[5] == 3 && q[6] == 4 && q[11] == 7);
 }
 
+TEST(particle_rules_follow_update_vertices) {
+    // blend: the emitter's 1..7 mapped, other values by the fade against the double 0.9 (0.9f = 0.8999999761... is below it)
+    CHECK(sc::particleBlendMode(1, 1.0f) == 2 && sc::particleBlendMode(3, 1.0f) == 5 && sc::particleBlendMode(7, 0.1f) == 8);
+    CHECK(sc::particleBlendMode(0, 0.89f) == 2 && sc::particleBlendMode(0, 0.9f) == 2 && sc::particleBlendMode(0, 0.91f) == 0 && sc::particleBlendMode(9, 0.5f) == 2);
+    // tiles 4 x 2, frame 5: column-major (5 / 2, 5 % 2) = (2, 1); row-major (5 % 4, 5 / 4) = (1, 1)
+    const sc::ParticleTile c = sc::particleTile(5, 4, 2, false, 0.25f, 0.5f);
+    CHECK(c.u0 == 0.5f && c.u1 == 0.75f && c.v0 == 0.5f && c.v1 == 1.0f);
+    const sc::ParticleTile r = sc::particleTile(5, 4, 2, true, 0.25f, 0.5f);
+    CHECK(r.u0 == 0.25f && r.u1 == 0.5f && r.v0 == 0.5f && r.v1 == 1.0f);
+    // depth sort: far first, ties 0
+    const float axis[4] = {0, 0, 1, 0}, nearP[3] = {0, 0, 1}, farP[3] = {0, 0, 5};
+    CHECK(sc::particleDepthOrder(axis, farP, nearP) == -1 && sc::particleDepthOrder(axis, nearP, farP) == 1 &&
+          sc::particleDepthOrder(axis, nearP, nearP) == 0);
+    // strips: the age fade-in
+    CHECK(sc::stripAlpha(0.8f, false, 2.0f, 1.0f) == 0.4f && sc::stripAlpha(0.8f, true, 2.0f, 1.0f) == 0.8f);
+    CHECK(sc::stripAlpha(0.8f, false, 0.0f, 1.0f) == 0.8f && sc::stripAlpha(0.8f, false, 2.0f, 5.0f) == 0.8f &&
+          sc::stripAlpha(0.8f, false, 2.0f, -1.0f) == 0.0f);
+}
+
 TEST(sky_dome_states) {
     // the dome's BlendMode 4 (One / InvSrcAlpha): blended, depth write off, colour without alpha, LESSEQUAL
     sc::BlendInputs b;

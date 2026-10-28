@@ -1,0 +1,6 @@
+id          = "rvk_spells"
+name        = "Renderer spell effect check"
+version     = "1.0.0"
+author      = "risen-enhanced-graphics"
+description = "The hero casts fireballs and frost bolts (and starts a few engine effects) at night on the opening beach in front of a fixed camera, so the particle / strip effects of spells are drawn (scenario rvk_spells, docs/research/engine-frame/README.md 14)."
+main        = "main.lua"

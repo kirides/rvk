@@ -135,6 +135,10 @@ void HalDevice::applyStaticOps() {
     effectOps_->setMode(sceneTake && (groups & 1024) != 0, sceneCompare && (groups & 1024) != 0);
     // 2048 the shadow views' setup: the cascade fit, the shadow camera, the maps' target / viewport / clear / reset
     effectOps_->setSetupMode(sceneTake && (groups & 2048) != 0, sceneCompare && (groups & 2048) != 0);
+    // N5.6: 4096 the particle ops, 8192 the strip + light streak ops, 16384 the precipitation op (late list)
+    staticOps_->setMode(native::StaticOps::Group::Particles, sceneTake && (groups & 4096) != 0, sceneCompare && (groups & 4096) != 0);
+    staticOps_->setMode(native::StaticOps::Group::Strips, sceneTake && (groups & 8192) != 0, sceneCompare && (groups & 8192) != 0);
+    staticOps_->setMode(native::StaticOps::Group::Precipitation, sceneTake && (groups & 16384) != 0, sceneCompare && (groups & 16384) != 0);
     frameTap_->setStaticOpsActive(staticOps_->active());
     frameTap_->setEffectOpsActive(effectOps_->active());
 }

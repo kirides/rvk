@@ -136,7 +136,8 @@ const char* StaticOps::name(Skip s) {
                                              "permutation not compiled", "switch element", "primitive", "image override", "unreadable",
                                              "pass kind", "instance sort", "texture", "overlay shader", "decal entity proxy",
                                              "buffers not created yet", "visual shader", "sky camera", "sky object rebuilt this frame",
-                                             "more than 66 bones / a bone outside the palette", "a shadow-map z op"};
+                                             "more than 66 bones / a bone outside the palette", "a shadow-map z op",
+                                             "simulated inside the slot (no live particle at the entry)", "an instanced emitter"};
     const auto i = static_cast<std::size_t>(s);
     return i < std::size(kNames) ? kNames[i] : "?";
 }
@@ -153,6 +154,9 @@ const char* StaticOps::name(Group g) {
         case Group::Trees: return "scene ops [SpeedTrees + tree billboards]";
         case Group::Vegetation: return "scene ops [vegetation]";
         case Group::ShadowViews: return "scene ops [shadow views]";
+        case Group::Particles: return "scene ops [particles]";
+        case Group::Strips: return "scene ops [strips + light streaks]";
+        case Group::Precipitation: return "scene ops [precipitation]";
         default: return "?";
     }
 }
@@ -180,7 +184,10 @@ void StaticOps::setMode(Group group, bool takeOver, bool compare) {
                                                    "the main view's skinned actor ops (eCRenderContextAnimation2: z / solid / alpha / refracted)",
                                                    "the main view's SpeedTree ops (branches, fronds, leaves: batches, LODs) and tree billboard ops",
                                                    "the main view's vegetation ops (grass: instanced batches from the shared buffer)",
-                                                   "the shadow maps' z ops (sun cascades, terrain variance map, point-light atlas cells)"};
+                                                   "the shadow maps' z ops (sun cascades, terrain variance map, point-light atlas cells)",
+                                                   "the main view's particle ops (eCParticle_PS: CPU quads)",
+                                                   "the main view's strip and light streak ops (eCStrip_PS trails, eCLightStreaks_PS)",
+                                                   "the main view's precipitation op (eCPrecipitation_PS: rain / snow, the late list)"};
     spdlog::info("native: {}: {} ({}{}{})", name(group), g.active() ? "on" : "off", kWhat[static_cast<std::size_t>(group)],
                  takeOver ? ", drawn by the renderer" : "", compare ? ", compared with the engine's draws" : "");
 }
@@ -271,6 +278,7 @@ void StaticOps::ShadowStats::add(const ShadowStats& o) {
 
 void StaticOps::viewEnd() {
     finishOp();
+    simulatedOp_ = nullptr;
     inView_ = false;
 }
 
@@ -382,6 +390,7 @@ sc::DrawDesc& StaticOps::newDraw() {
     if (drawCount_ == draws_.size()) draws_.push_back(std::make_unique<sc::DrawDesc>());
     sc::DrawDesc& d = *draws_[drawCount_++];
     d.vs = d.ps = d.decl = d.indices = d.subMesh = d.material = nullptr;
+    d.indexed = true;
     d.streams = {};
     d.samplers = {};
     d.samplerMask = d.inheritMask = 0;
@@ -624,7 +633,12 @@ void StaticOps::constantsInto(sc::DrawDesc& d, const std::uint8_t* shader, const
             v = mirror_.adminVs[r];
             if ((nativeVs_ >> r & 1u) != 0) src = sc::Src::Native;
         } else if (!defaultClass) {
-            // eCShaderBase::GetGlobalShaderConstants is null: nothing else of the path writes these
+            // eCShaderBase::GetGlobalShaderConstants is null: nothing else of the path writes these; a class with its own global
+            // pool (eCShaderParticle: c31..c60, world c31..c33 and alpha c34.w composed natively) flushes it before the shader's
+            if (fxPoolCount_ != 0 && r >= fxPoolFirst_ && r - fxPoolFirst_ < fxPoolCount_) {
+                v = fxPool_[r - fxPoolFirst_];
+                if (r <= fxPoolNativeLast_) src = sc::Src::Native;
+            }
         } else if (r < 232) {
             v = mirror_.global[r - 31];
             if (r >= 32) src = sc::Src::Native;  // the instances' world rows and fade (.xyz of c32 + 4i: carry-over)
@@ -1134,6 +1148,9 @@ StaticOps::Skip StaticOps::composeSolid(const Op& op) {
 }
 
 StaticOps::Skip StaticOps::composeOp(const Op& op) {
+    if (op.kind == OpKind::Particle || op.kind == OpKind::Strip || op.kind == OpKind::LightStreaks || op.kind == OpKind::Precipitation) {
+        return composeFx(op);
+    }
     if (op.kind == OpKind::Animation) return composeActor(op);
     if (op.kind == OpKind::SpeedTree) return composeTree(op);
     if (op.kind == OpKind::SpeedTreeBB) return composeTreeBillboard(op);
@@ -1233,8 +1250,18 @@ void StaticOps::opEnter(const Op& op) {
         }
         return;
     }
+    const bool fxKind = op.kind == OpKind::Particle || op.kind == OpKind::Strip || op.kind == OpKind::LightStreaks || op.kind == OpKind::Precipitation;
     if (group != Group::Count) {
         // (a shadow view's op: chosen above)
+    } else if (fxKind) {
+        // N5.6: the particle / strip / light streak ops of the alpha list, the precipitation op of the late list (+0x1548)
+        if (op.kind == OpKind::Precipitation ? op.list == List::Late : op.list == List::Alpha) {
+            group = op.kind == OpKind::Particle ? Group::Particles : op.kind == OpKind::Precipitation ? Group::Precipitation : Group::Strips;
+        }
+        if (group != Group::Count && groups_[static_cast<std::size_t>(group)].active()) {
+            if (fxVerified_ == 0) fxVerified_ = verifyFx() ? 1 : -1;
+            if (fxVerified_ < 0) return;
+        }
     } else if (op.kind != OpKind::Mesh && op.kind != OpKind::Animation && !treeKind) {
         return;
     } else if (treeKind) {
@@ -1270,6 +1297,11 @@ void StaticOps::opEnter(const Op& op) {
     maskRefShader_ = nullptr;
     if (s != Skip::None) {
         ++g_->skips[static_cast<std::size_t>(s)];
+        if (s == Skip::Simulated) {
+            simulatedOp_ = &op;
+            simulatedDrew_ = false;
+            ++fxWindow_.simulatedOps;
+        }
         if ((group == Group::Trees || group == Group::Vegetation || group == Group::ShadowViews) && treeSkipsLogged_ < 24) {
             ++treeSkipsLogged_;
             std::string mat;
@@ -1295,6 +1327,7 @@ void StaticOps::opEnter(const Op& op) {
 }
 
 void StaticOps::finishOp() {
+    tagOverride_ = false;
     if (op_ == nullptr) return;
     if (g_ != nullptr && g_->compare && engineDraws_ != drawCount_) {
         ++g_->window.mismatches[static_cast<std::size_t>(sc::Field::DrawCount)];
@@ -1328,6 +1361,7 @@ void StaticOps::capture(const d3d9::DrawTapInfo& t, sc::DrawDesc& out) {
     std::memcpy(out.psB.data(), d.psBoolConstants(), sizeof(out.psB));
     std::memcpy(out.vsI, d.vsIntConstants(), sizeof(out.vsI));
     std::memcpy(out.psI, d.psIntConstants(), sizeof(out.psI));
+    out.indexed = t.indexed;
     out.primType = t.primitiveType;
     out.baseVertex = t.baseVertex;
     out.minIndex = t.minIndex;
@@ -1399,6 +1433,10 @@ void StaticOps::ownDraw(const d3d9::DrawTapInfo& t) {
 }
 
 bool StaticOps::engineDraw(const d3d9::DrawTapInfo& t, const Op* op) {
+    if (op != nullptr && op == simulatedOp_ && !simulatedDrew_) {
+        simulatedDrew_ = true;
+        ++fxWindow_.simulatedDrew;
+    }
     if (op == nullptr && inNonOp_) op = op_;  // a non-op path's draws (decals) carry no op
     if (op_ == nullptr || op != op_ || issuing_ || g_ == nullptr) return false;
     const std::uint32_t k = engineDraws_++;
@@ -1541,21 +1579,24 @@ void StaticOps::issue() {
         } else if (!d.vertexBytes.empty()) {
             // CPU-generated geometry on stream 0 (decals 360,000 / 20,000 bytes, billboards 208,000 / 12,000, the sky's stars 0x80 /
             // 12 bytes per star): our own dynamic buffers, the composed bytes at the engine's positions
-            if (!ownVb_) ownVb_ = dev_.createBuffer(512 * 1024, USAGE_DYNAMIC | USAGE_WRITEONLY, POOL_DEFAULT, false, false);
+            if (!ownVb_) ownVb_ = dev_.createBuffer(kOwnVbBytes, USAGE_DYNAMIC | USAGE_WRITEONLY, POOL_DEFAULT, false, false);
             if (!ownIb_) ownIb_ = dev_.createBuffer(64 * 1024, USAGE_DYNAMIC | USAGE_WRITEONLY, POOL_DEFAULT, true, false);
-            const std::uint32_t vOff = d.streams[0].offset + d.minIndex * d.vertexStride, iOff = d.startIndex * 2;
+            // (a non-indexed draw: its vertices from the first vertex startIndex on, no index data)
+            const std::uint32_t vOff = d.streams[0].offset + (d.indexed ? d.minIndex : d.startIndex) * d.vertexStride, iOff = d.startIndex * 2;
             if (vOff + d.vertexBytes.size() <= ownVb_->size() && iOff + d.indexBytes.size() <= ownIb_->size()) {
                 // DISCARD of just the range the draw reads: the fresh GPU copy takes only those bytes (BufferCopyState)
                 if (void* p = ownVb_->lock(vOff, static_cast<std::uint32_t>(d.vertexBytes.size()), LOCK_DISCARD)) {
                     std::memcpy(p, d.vertexBytes.data(), d.vertexBytes.size());
                     ownVb_->unlock();
                 }
-                if (void* p = ownIb_->lock(iOff, static_cast<std::uint32_t>(d.indexBytes.size()), LOCK_DISCARD)) {
-                    std::memcpy(p, d.indexBytes.data(), d.indexBytes.size());
-                    ownIb_->unlock();
+                if (!d.indexBytes.empty()) {
+                    if (void* p = ownIb_->lock(iOff, static_cast<std::uint32_t>(d.indexBytes.size()), LOCK_DISCARD)) {
+                        std::memcpy(p, d.indexBytes.data(), d.indexBytes.size());
+                        ownIb_->unlock();
+                    }
+                    dev_.setIndices(ownIb_.get());
                 }
                 dev_.setStreamSource(0, ownVb_.get(), d.streams[0].offset, d.streams[0].stride);
-                dev_.setIndices(ownIb_.get());
             }
         }
         for (std::uint32_t i = 0; i < sc::StOwnedCount; ++i) dev_.setRenderState(kRs[i], d.states[i]);
@@ -1570,7 +1611,7 @@ void StaticOps::issue() {
         for (std::uint32_t r = 0; r < sc::kPsRegs; ++r) {
             if (d.psSrc[r] != sc::Src::None) dev_.setPixelShaderConstantF(r, d.psF[r], 1);
         }
-        tag = savedTag;
+        tag = tagOverride_ ? tagOverrideValue_ : savedTag;
         if (d.tagSubMesh != nullptr) {
             tag.subMesh = d.tagSubMesh;
             tag.material = d.tagMaterial;
@@ -1579,7 +1620,11 @@ void StaticOps::issue() {
             tag.materialName = d.tagMaterialName;
         }
         issueIndex_ = k;
-        dev_.drawIndexedPrimitive(d.primType, d.baseVertex, d.minIndex, d.numVertices, d.startIndex, d.primCount);
+        if (d.indexed) {
+            dev_.drawIndexedPrimitive(d.primType, d.baseVertex, d.minIndex, d.numVertices, d.startIndex, d.primCount);
+        } else {
+            dev_.drawPrimitive(d.primType, d.startIndex, d.primCount);
+        }
         ++g_->issuedDraws;
     }
     issuing_ = false;
@@ -1723,6 +1768,43 @@ void StaticOps::report() {
         spdlog::info("native: trees (5 s): {}", line(w));
         spdlog::info("native: trees (total): {}", line(t));
         treeWindow_ = {};
+    }
+    if (groups_[static_cast<std::size_t>(Group::Particles)].active() || groups_[static_cast<std::size_t>(Group::Strips)].active() ||
+        groups_[static_cast<std::size_t>(Group::Precipitation)].active()) {
+        const auto line = [](const FxStats& a) {
+            return std::format("particle ops {} ({} quads; 0 quads built {}; generated natively {} (sorted copies), the engine's bytes of this tick "
+                               "{}; orientation 0 {} / 1 {} / 2 {} / 3 {} / 4 {} / other {}; world {} / entity-relative {}; frame blending {}; lit "
+                               "{}, instanced emitters {}; no live particle at the entry {}, of them drawn by the engine {}), strip ops {} ({} segments), "
+                               "light streak ops {}, precipitation ops {} ({} drops; off {})",
+                               a.particleOps, a.particleQuads, a.particleZeroQuads, a.particleSorted, a.particleEngineBytes, a.orient[0], a.orient[1],
+                               a.orient[2], a.orient[3], a.orient[4], a.orient[5], a.coords[0], a.coords[1], a.frameBlend, a.lit, a.instancedEmitters,
+                               a.simulatedOps, a.simulatedDrew, a.stripOps, a.stripSegments, a.streakOps, a.precipOps, a.precipDrops, a.precipOff);
+        };
+        FxStats& t = fxTotal_;
+        const FxStats& w = fxWindow_;
+        t.particleOps += w.particleOps;
+        t.particleQuads += w.particleQuads;
+        t.particleSkipped += w.particleSkipped;
+        t.particleEngineBytes += w.particleEngineBytes;
+        t.particleZeroQuads += w.particleZeroQuads;
+        t.particleSorted += w.particleSorted;
+        for (std::size_t i = 0; i < t.orient.size(); ++i) t.orient[i] += w.orient[i];
+        for (std::size_t i = 0; i < t.coords.size(); ++i) t.coords[i] += w.coords[i];
+        t.rotated += w.rotated;
+        t.frameBlend += w.frameBlend;
+        t.lit += w.lit;
+        t.instancedEmitters += w.instancedEmitters;
+        t.stripOps += w.stripOps;
+        t.stripSegments += w.stripSegments;
+        t.streakOps += w.streakOps;
+        t.precipOps += w.precipOps;
+        t.precipDrops += w.precipDrops;
+        t.precipOff += w.precipOff;
+        t.simulatedOps += w.simulatedOps;
+        t.simulatedDrew += w.simulatedDrew;
+        spdlog::info("native: effects (5 s): {}", line(w));
+        spdlog::info("native: effects (total): {}", line(t));
+        fxWindow_ = {};
     }
 }
 

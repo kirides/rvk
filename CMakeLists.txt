@@ -266,6 +266,7 @@ add_library(rvk_core STATIC
     src/native/frame_tap.h
     src/native/static_compose.cpp
     src/native/static_ops_nonop.cpp
+    src/native/static_ops_fx.cpp
     src/native/static_ops_sky.cpp
     src/native/static_ops_actors.cpp
     src/native/static_ops_trees.cpp

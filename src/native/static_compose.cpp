@@ -456,7 +456,8 @@ Diff compare(const DrawDesc& a, const DrawDesc& e) {
                                             x.offset, x.stride, x.freq, y.buffer, y.offset, y.stride, y.freq));
         }
     }
-    if (a.indices != e.indices) bad(Field::Indices, std::format("indices {} vs engine {}", a.indices, e.indices));
+    if (a.indexed != e.indexed) bad(Field::Range, std::format("indexed {} vs engine {}", a.indexed, e.indexed));
+    if (e.indexed && a.indices != e.indices) bad(Field::Indices, std::format("indices {} vs engine {}", a.indices, e.indices));
     if (a.primType != e.primType || a.baseVertex != e.baseVertex || a.minIndex != e.minIndex || a.numVertices != e.numVertices ||
         a.startIndex != e.startIndex || a.primCount != e.primCount) {
         bad(Field::Range, std::format("range type {} base {} min {} n {} start {} prims {} vs engine {} {} {} {} {} {}", a.primType,
@@ -593,6 +594,51 @@ void skyBillboardVertices(std::span<const std::uint8_t> billboards, std::uint32_
             std::memcpy(v + 0x18, corner[k], 8);
         }
     }
+}
+
+std::int32_t particleBlendMode(std::int32_t b, float fade) {
+    switch (b) {
+        case 1: return 2;
+        case 2: return 3;
+        case 3: return 5;
+        case 4: return 4;
+        case 5: return 6;
+        case 6: return 7;
+        case 7: return 8;
+        default: return static_cast<double>(fade) < 0.9 ? 2 : 0;  // DAT_1809f16e0 (double 0.9)
+    }
+}
+
+ParticleTile particleTile(std::int32_t k, std::int32_t tx, std::int32_t ty, bool rowMajor, float invTx, float invTy) {
+    std::int32_t col = 0, row = 0;
+    if (rowMajor) {
+        col = k % tx;
+        row = k / tx;
+    } else {
+        col = k / ty;
+        row = k % ty;
+    }
+    ParticleTile t;
+    t.u0 = static_cast<float>(col) * invTx;
+    t.u1 = static_cast<float>(col + 1) * invTx;
+    t.v0 = static_cast<float>(row) * invTy;
+    t.v1 = static_cast<float>(row + 1) * invTy;
+    return t;
+}
+
+int particleDepthOrder(const float ax[4], const float a[3], const float b[3]) {
+    const float da = ((ax[1] * a[1] + ax[0] * a[0]) + ax[2] * a[2]) + ax[3];
+    const float db = ((ax[1] * b[1] + ax[0] * b[0]) + ax[2] * b[2]) + ax[3];
+    if (da > db) return -1;
+    return db > da ? 1 : 0;
+}
+
+float stripAlpha(float fade, bool noAgeFade, float fadeIn, float age) {
+    if (noAgeFade || !(0.0f < fadeIn)) return fade;
+    const float r = age / fadeIn;
+    const float m = 1.0f < r ? 1.0f : r;  // minss(1, r)
+    const float c = 0.0f > m ? 0.0f : m;
+    return fade * c;
 }
 
 void skyQuadIndices(std::uint32_t count, std::vector<std::uint8_t>& out) {
