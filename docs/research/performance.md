@@ -476,3 +476,11 @@ leftovers ~15 draws per run). Same session, 3 runs each: savegame Wrapper 3.36 m
 200); jungle 3.71 / 5.79 / **5.69**. Profiled, Full 5.06 vs Wrapper 3.55: our DLL +1.48, memcpy +0.28, Engine.dll -0.27 (less than in
 Wrapper): the rest of Full - Wrapper is our own composition / recording per draw. `native.lean_restore=false` saves 0.07 ms (kept).
 Recipe: `out/o3/perf.ps1` (`batch.ps1` entries `name|mode|settings|save or jungle|config`, config `Before` = a DLL in `build\Before`).
+
+## 17. Vulkanize V1 (2026-10-28)
+
+Cheap fixes, details and numbers in vulkanize/plan.md section 5. Ring blocks sized to what a dynamic buffer's frame copy
+holds (Full: 36 -> 8 MiB per frame, GPU allocations -96 MiB at the savegame, -128 MiB at the jungle spot), no int / bool part in
+the stage constants of shaders that read none, `debug.constant_compare` (register writes that change nothing keep the block),
+`perf: stage constants` line (blocks per stage, KiB written, int / bool skipped, unchanged writes), optional
+shaderDrawParameters + drawIndirectCount. CPU effect small (Full 4.70 -> 4.66 ms savegame, 5.88 -> 5.60 jungle).

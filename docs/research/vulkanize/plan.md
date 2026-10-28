@@ -97,3 +97,39 @@ the GPU, vertex pulling, the ubershader at run time (fewer pipelines), mesh shad
   check mode that recomposes and compares.
 * Wrapper stays the D3D9 model: V1 / V2 may make it faster, never different.
 * Floor unchanged (Vulkan 1.3 + push descriptor): new features optional with today's path as the fallback.
+
+## 5. V1 result (2026-10-28)
+
+Built and verified; commit "V1: ring blocks of only the bytes needed ...". Measured at savegame Risen_Save_0009 (`rvk_perfsave`
+hold 40, `-Exe RisenTest.exe -Vsync off -Perf`, 3 runs each, last 6 `perf:` windows, `out/v1/summ.py`) and the held `jungle` spot
+(1 run each); before = build of 4906cba, after = this change.
+
+| run | CPU ms before -> after | fps p50 | ring KiB / frame | GPU allocations MiB |
+|---|---|---|---|---|
+| Wrapper, savegame | 3.35 -> 3.31 | 270.9 -> 274.2 | 7,879 -> 7,120 | 600 -> 600 |
+| Full, savegame | 4.70 -> 4.66 | 194.5 -> 195.2 | 36,344 -> 8,131 | 695 / 663 / 695 -> 599 |
+| Wrapper, jungle | 3.91 -> 3.91 | 232.6 -> 233.1 | 11,435 -> 11,117 | 590 -> 590 |
+| Full, jungle | 5.88 -> 5.60 | 157.3 -> 163.2 | 124,763 -> 13,229 | 724 -> 596 |
+
+* **Ring reservation (kept)**: `d3d9::RingBlock` (identity.*): a dynamic buffer's frame copy is a ring block of the written
+  extent [lo, hi); a Patch outside it (NOOVERWRITE append) moves to a new block with the size doubled; `Frames::allocate`
+  got `minOffset` so the binding (block offset - lo) stays valid. Full: 36 -> 8 MiB per frame (jungle 125 -> 13), GPU
+  allocations -96 MiB / -128 MiB. Wrapper only -10 % (its dynamic buffers are small). `static_ops.cpp`'s own buffers already
+  lock DISCARD ranges, so they profit with no change there. Unit tests in `draws_tests`.
+* **Int / bool constants (kept)**: `Reflection::intBoolConstants` (the translator sets it when an `i#` / `b#` read without
+  defi / defb is emitted): no game shader does, so the 320-byte copy is skipped for every draw (`perf: stage constants`:
+  int / bool skipped in ~all blocks; ~1.4 - 2.6 MiB less copying per frame). Layout unchanged.
+* **Changed-only register writes (kept, `debug.constant_compare`, default on, Debug)**: on a clean stage the written range is
+  compared first; Full counts 724 - 1,975 unchanged writes per frame that no longer trigger a new block (Wrapper ~130).
+  CPU gain is small (Full jungle -0.3 ms, savegame -0.04 ms: within the 1 % run noise), kept because it is cheap and V2 needs
+  the same dirty tracking.
+* **shaderDrawParameters + drawIndirectCount**: enabled when the device has them; caps lines `Shader draw parameters` /
+  `Indirect draw count`, rvk.log `vulkan: device ... shaderDrawParameters=, drawIndirectCount=, multiDrawIndirect=`. The
+  ImGui overlay still draws (screenshot in `out/v1/overlay_2.png`).
+* **Verification**: rvk_tests 181/181, rvk_d3d9test, rvk_vktest, `--passes`, shader corpus 2,483 OK; Full compare (all groups,
+  `native.lean_check=10`) at savegame, spots, 17-spot route, spells, point shadow, rare, storm: `mismatches: none` everywhere,
+  0 differing own draws; `-Validation` (savegame, rare) and `-SyncValidation` (point shadow) 0 messages. Wrapper refcompare vs
+  `20261022-093252`: pub_interior, jungle, beach_rain PASS; harbour_night failed once (dluma -3.3) and passed twice on re-run
+  (+0.6 / +0.2; the previous build +0.4): night-spot noise.
+* **Honest finding**: V1 is a memory / traffic win (Full ring -78 %, memory -96 to -128 MiB), not a CPU win: CPU stays within
+  ~1 - 5 % (best Full jungle). The CPU cost is in the per-draw composition and constant copies that V2 / V3 address.

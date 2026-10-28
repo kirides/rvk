@@ -82,3 +82,5 @@ Each milestone ends verified (in the game where it touches the engine) and commi
 * Engine code bypassing the HAL in devirtualized branches (mitigated by own vtables, M1 tracing).
 * Pipeline explosion from D3D9 state combinations (dynamic state + cache; EDS3 when available).
 * The engine assumes at most 1 frame in flight (`BeginScene` waits on an event query): resource lifetime rules must match.
+
+| Vulkanize V1 | done (2026-10-28): cheap fixes (ring blocks of the written bytes: Full ring 36 -> 8 MiB per frame, -96 MiB GPU allocations; no int / bool constant upload; changed-only register writes `debug.constant_compare`; optional shaderDrawParameters + drawIndirectCount); V2 - V5 open: docs/research/vulkanize/plan.md 5 |
