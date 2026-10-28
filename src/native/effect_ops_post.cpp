@@ -28,12 +28,12 @@ using U8 = const std::uint8_t;
 using engine::readAt;
 
 template <class T>
-T get(const void* p, std::size_t off, T fallback = T{}) {
+inline T get(const void* p, std::size_t off, T fallback = T{}) {
     T v = fallback;
     if (!readAt(p, off, v)) return fallback;
     return v;
 }
-U8* ptr(const void* p, std::size_t off) { return get<U8*>(p, off, nullptr); }
+inline U8* ptr(const void* p, std::size_t off) { return get<U8*>(p, off, nullptr); }
 
 // the semantic parameter classes (eSImageEffectParam*, Engine.dll vtable RVAs) and their Set (+0x28) RVAs (README.md 15)
 constexpr std::uint32_t kFrameTime = 0x9ee500, kTime = 0x9ee580, kSceneExposure = 0x9ee680, kBloomIntensity = 0x9ee400,

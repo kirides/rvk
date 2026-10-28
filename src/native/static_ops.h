@@ -109,6 +109,7 @@ public:
 private:
     struct Live {
         std::bitset<sc::kVsRegs> f;  // float registers in the CTAB
+        std::array<std::uint64_t, 4> words{};  // the same as word masks (bit r of word r / 64)
         std::uint32_t boolInt = 0;   // bool / int registers in the CTAB
     };
     struct GroupState {
@@ -169,6 +170,13 @@ private:
     const Live& liveOf(const d3d9::Shader* s);
     d3d9::Shader* shaderOfElement(const void* element);
     d3d9::Texture* textureOfImageData(const void* imageData, bool& ok);
+    struct TexCacheEntry {
+        const void* api = nullptr;
+        d3d9::Texture* texture = nullptr;
+    };
+    static constexpr std::uint32_t kTexCacheBits = 12;
+    std::array<TexCacheEntry, 1u << kTexCacheBits> texCache_{};
+    std::uint64_t texCacheGen_ = ~0ull;
     Mirror::ShaderPools* poolsOf(const void* shader);
     void initMirror();
     // compose the op into ops_' draws; Skip::None on success
@@ -292,6 +300,25 @@ private:
     d3d9::draws::Tag tagOverrideValue_{};
     void finishOp();
     void issue();
+    // per-op working storage of the compositions, kept across ops (O1: no heap traffic per op once warm)
+    struct Scratch {
+        std::vector<sc::Pass> passes;  // materialDraws
+        std::vector<sc::ZSub> zs;      // meshZDraws
+        std::vector<sc::ZDraw> zplan;
+        std::vector<std::uint8_t> inst;  // composeSolid's instances
+        std::vector<sc::Instance> list;
+        std::vector<sc::Batch> batches;
+        std::vector<std::uint8_t> treeQueue;  // composeTree
+        std::vector<sc::TreeInstance> treeInst;
+        std::vector<sc::TreeBatch> treeBatches;
+        std::vector<float> treeAlpha;
+        std::vector<sc::GrassNode> grassPlan;  // composeVegetation
+        std::vector<const std::uint8_t*> grassSources;
+        std::vector<sc::GrassDraw> grassDraws;
+        std::vector<std::uint8_t> grassBytes, grassSrc;
+    } scr_;
+    // issue's saved device registers (only the ranges the op's draws write are saved and restored)
+    float savedVs_[sc::kVsRegs][4]{}, savedPs_[sc::kPsRegs][4]{};
     // N5.8 coverage: the last op met (or the non-op unit) and why it was left to the engine
     void opEnterImpl(const Op& op);
     enum : int { kLeftCompareOnly = 100, kLeftGroupOff, kLeftNotCovered, kLeftChecks };

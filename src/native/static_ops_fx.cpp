@@ -10,6 +10,10 @@
 
 #include <windows.h>
 
+// C4723: float divisions by an engine field whose guarded read (inlined since O1) has the fallback 0 on its failure path: the
+// result is the IEEE infinity the out-of-line read gave before (no trap)
+#pragma warning(disable : 4723)
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -32,13 +36,13 @@ using engine::safeRead;
 using U8 = const std::uint8_t;
 
 template <class T>
-T get(const void* p, std::size_t off, T fallback = T{}) {
+inline T get(const void* p, std::size_t off, T fallback = T{}) {
     T v = fallback;
     if (!readAt(p, off, v)) return fallback;
     return v;
 }
-U8* ptr(const void* p, std::size_t off) { return get<U8*>(p, off, nullptr); }
-bool rd(const void* p, std::size_t off, void* out, std::size_t n) { return p != nullptr && safeRead(static_cast<U8*>(p) + off, out, n); }
+inline U8* ptr(const void* p, std::size_t off) { return get<U8*>(p, off, nullptr); }
+inline bool rd(const void* p, std::size_t off, void* out, std::size_t n) { return p != nullptr && safeRead(static_cast<U8*>(p) + off, out, n); }
 
 constexpr float kIdentity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
 

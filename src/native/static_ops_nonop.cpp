@@ -37,12 +37,12 @@ constexpr std::uint32_t kDecalStride = 0x3c;           // the decal vertex (Crea
 constexpr std::int32_t kMaxVertices = 6000, kMaxIndices = 10000;
 
 template <class T>
-T get(const void* p, std::size_t off, T fallback = T{}) {
+inline T get(const void* p, std::size_t off, T fallback = T{}) {
     T v = fallback;
     if (!readAt(p, off, v)) return fallback;
     return v;
 }
-U8* ptr(const void* p, std::size_t off) { return get<U8*>(p, off, nullptr); }
+inline U8* ptr(const void* p, std::size_t off) { return get<U8*>(p, off, nullptr); }
 
 std::int32_t rel32(const std::uint8_t* p) {
     std::int32_t v = 0;

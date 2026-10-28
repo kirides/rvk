@@ -598,6 +598,25 @@ public:
     void setStreamSourceFreq(std::uint32_t stream, std::uint32_t setting);
     void setIndices(Buffer* buffer);
     void setVertexDecl(VertexDecl* decl);
+    // bulk paths of the native composition (native/static_ops, native/effect_ops; render thread): a pixel stage's sampler state
+    // row (SAMP_COUNT entries, index = D3DSAMPLERSTATETYPE) and several of its states at once, its texture without the slot map
+    const std::uint32_t* samplerStateRow(std::uint32_t stage) const { return samp_[stage < 16 ? stage : 0].data(); }
+    void setSamplerStates(std::uint32_t stage, const std::uint32_t* states, const std::uint32_t* values, std::uint32_t n) {
+        if (stage >= 16) return;
+        auto& row = samp_[stage];
+        bool changed = false;
+        for (std::uint32_t i = 0; i < n; ++i) {
+            if (states[i] < SAMP_COUNT && row[states[i]] != values[i]) {
+                row[states[i]] = values[i];
+                changed = true;
+            }
+        }
+        if (changed) samplerSlotCache_[stage] = UINT32_MAX;
+    }
+    Texture* stageTexture(std::uint32_t stage) const { return tex_[stage < 16 ? stage : 0]; }
+    void setStageTexture(std::uint32_t stage, Texture* texture) {
+        if (stage < 16) tex_[stage] = texture;
+    }
     void setVertexShader(const std::shared_ptr<Shader>& shader);
     void setPixelShader(const std::shared_ptr<Shader>& shader);
     // the sampler slots the bound shaders read: pixel samplers 0..15 from the pixel shader, vertex samplers 16.. from the vertex shader

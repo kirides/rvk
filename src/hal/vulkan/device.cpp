@@ -89,11 +89,13 @@ HalDevice::HalDevice() {
 void HalDevice::registerTexture(const void* api, d3d9::Texture* texture) {
     const std::lock_guard lock(apiTextureMutex_);
     apiTextures_[api] = texture;
+    apiTextureGeneration_.fetch_add(1, std::memory_order_release);
 }
 
 void HalDevice::unregisterTexture(const void* api) {
     const std::lock_guard lock(apiTextureMutex_);
     apiTextures_.erase(api);
+    apiTextureGeneration_.fetch_add(1, std::memory_order_release);
 }
 
 d3d9::Texture* HalDevice::textureOfApi(const void* api) {
@@ -180,11 +182,13 @@ void HalDevice::applyStaticOps() {
 void HalDevice::registerCube(const void* api, d3d9::Texture* texture) {
     const std::lock_guard lock(apiTextureMutex_);
     apiCubes_[api] = texture;
+    apiTextureGeneration_.fetch_add(1, std::memory_order_release);
 }
 
 void HalDevice::unregisterCube(const void* api) {
     const std::lock_guard lock(apiTextureMutex_);
     apiCubes_.erase(api);
+    apiTextureGeneration_.fetch_add(1, std::memory_order_release);
 }
 
 d3d9::Texture* HalDevice::cubeOfApi(const void* api) {

@@ -28,13 +28,13 @@ using engine::safeRead;
 using U8 = const std::uint8_t;
 
 template <class T>
-T get(const void* p, std::size_t off, T fallback = T{}) {
+inline T get(const void* p, std::size_t off, T fallback = T{}) {
     T v = fallback;
     if (!readAt(p, off, v)) return fallback;
     return v;
 }
-U8* ptr(const void* p, std::size_t off) { return get<U8*>(p, off, nullptr); }
-bool rd(const void* p, std::size_t off, void* out, std::size_t n) { return p != nullptr && safeRead(static_cast<U8*>(p) + off, out, n); }
+inline U8* ptr(const void* p, std::size_t off) { return get<U8*>(p, off, nullptr); }
+inline bool rd(const void* p, std::size_t off, void* out, std::size_t n) { return p != nullptr && safeRead(static_cast<U8*>(p) + off, out, n); }
 
 constexpr std::uint32_t kQsort = 0x4a4aa0;
 constexpr std::uint32_t kTreeAdmin = 0x25a6d0, kVegAdmin = 0x265df0;  // FUN_18025a6d0 / FUN_180265df0 (module singletons)
@@ -222,7 +222,8 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
         return Skip::None;
     }
     if (!viewAndMirror(shader)) return Skip::Unreadable;
-    std::vector<std::uint8_t> queue(static_cast<std::size_t>(n) * 0x18);
+    std::vector<std::uint8_t>& queue = scr_.treeQueue;
+    queue.resize(static_cast<std::size_t>(n) * 0x18);
     if (!rd(ptr(rb, zpass ? 0xd0 : 0xb8), 0, queue.data(), queue.size())) return Skip::Unreadable;
     if (get<std::int32_t>(rb, zpass ? 0xe4 : 0xe0) != 0 && n > 0) {
         qsort_(queue.data(), static_cast<std::size_t>(n), 0x18, zpass ? treeCmpZ_ : treeCmp_);
@@ -265,8 +266,10 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
         // GetPasses(shader, 0, illumination, 0, instanced, 0)
         return materialDraws(shader, illum, 0, true, 0, 0, gg, nullptr);
     };
-    std::vector<sc::TreeInstance> inst;
-    std::vector<sc::TreeBatch> batches;
+    std::vector<sc::TreeInstance>& inst = scr_.treeInst;
+    std::vector<sc::TreeBatch>& batches = scr_.treeBatches;
+    inst.clear();
+    batches.clear();
     if (type <= 1) {
         // branches / fronds: SetGlobalAlpha(1, 0) once (RenderBranches, RenderBranchesZPass, RenderFronds; RenderFrondsZPass does not);
         // per instance SetWorldMatrix + SetSpeedTreeInstanceData((tree +0x6c, rb +0xa0 / +0xa4))
@@ -324,7 +327,8 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
             if (indices == 0) break;
             ++st.leafLods;
             inst.clear();
-            std::vector<float> alpha;
+            std::vector<float>& alpha = scr_.treeAlpha;
+            alpha.clear();
             for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(n); ++i) {
                 U8* tree = treeOf(i);
                 if (ptr(tree, 0x40) == nullptr) return Skip::Unreadable;
@@ -454,8 +458,10 @@ StaticOps::Skip StaticOps::composeVegetation(const Op& op) {
     U8* vd = ptr(vadmin, 0x38);
     U8* nodes = ptr(ps, 0x98);
     // the nodes and the instance data in Render's order
-    std::vector<sc::GrassNode> plan(static_cast<std::size_t>(nodeCount));
-    std::vector<U8*> sources(static_cast<std::size_t>(nodeCount));
+    std::vector<sc::GrassNode>& plan = scr_.grassPlan;
+    std::vector<U8*>& sources = scr_.grassSources;
+    plan.assign(static_cast<std::size_t>(nodeCount), sc::GrassNode{});
+    sources.assign(static_cast<std::size_t>(nodeCount), nullptr);
     std::uint32_t total = 0;
     for (std::int32_t i = 0; i < nodeCount; ++i) {
         U8* e = nodes + 0x118 * static_cast<std::size_t>(i);
@@ -474,15 +480,17 @@ StaticOps::Skip StaticOps::composeVegetation(const Op& op) {
     st.grassInstances += total;
     const std::uint32_t cursor = get<std::uint32_t>(vadmin, 0x40);
     if (cursor > sc::kGrassBufferInstances) return Skip::Unreadable;
-    std::vector<sc::GrassDraw> draws;
+    std::vector<sc::GrassDraw>& draws = scr_.grassDraws;
+    draws.clear();
     sc::planGrass(plan, cursor, zpass, draws);
     // the instance bytes, flattened in the nodes' order
     const bool wind = get<float>(typeObj, 0x2c) != 0.0f;
     const bool lift = get<std::int32_t>(typeObj, 0x20) != 0;
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(total) * sc::kGrassInstanceSize);
+    std::vector<std::uint8_t>& bytes = scr_.grassBytes;
+    bytes.assign(static_cast<std::size_t>(total) * sc::kGrassInstanceSize, 0);
     {
         std::size_t at = 0;
-        std::vector<std::uint8_t> src;
+        std::vector<std::uint8_t>& src = scr_.grassSrc;
         for (std::int32_t i = 0; i < nodeCount; ++i) {
             const sc::GrassNode& gn = plan[static_cast<std::size_t>(i)];
             if (gn.count == 0) continue;

@@ -7,6 +7,42 @@
 
 namespace rvk::engine {
 
+bool safeLoad1(const void* src, std::uint8_t& out) {
+    __try {
+        out = *static_cast<const volatile std::uint8_t*>(src);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool safeLoad2(const void* src, std::uint16_t& out) {
+    __try {
+        out = *static_cast<const volatile std::uint16_t*>(src);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool safeLoad4(const void* src, std::uint32_t& out) {
+    __try {
+        out = *static_cast<const volatile std::uint32_t*>(src);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool safeLoad8(const void* src, std::uint64_t& out) {
+    __try {
+        out = *static_cast<const volatile std::uint64_t*>(src);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 bool safeRead(const void* src, void* dst, std::size_t size) {
     __try {
         std::memcpy(dst, src, size);

@@ -384,6 +384,24 @@ TEST(static_switch_and_constants) {
     CHECK(out[0][3] == 0.25f * 0.5f + 1.5f && out[2][3] == 0.25f * 1.0f);
 }
 
+TEST(static_register_runs_merge_across_words) {
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> runs;
+    const auto collect = [&](const std::array<std::uint64_t, 4>& m) {
+        runs.clear();
+        sc::forEachRun(m, [&](std::uint32_t first, std::uint32_t n) { runs.emplace_back(first, n); });
+    };
+    collect({});
+    CHECK(runs.empty());
+    // c0..c11, c30, c60..c67 (across words 0 / 1), c255
+    std::array<std::uint64_t, 4> m{};
+    for (std::uint32_t r : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u, 30u, 60u, 61u, 62u, 63u, 64u, 65u, 66u, 67u, 255u}) m[r >> 6] |= 1ull << (r & 63);
+    collect(m);
+    CHECK(runs.size() == 4 && runs[0] == std::make_pair(0u, 12u) && runs[1] == std::make_pair(30u, 1u) && runs[2] == std::make_pair(60u, 8u) &&
+          runs[3] == std::make_pair(255u, 1u));
+    collect({~0ull, ~0ull, ~0ull, ~0ull});
+    CHECK(runs.size() == 1 && runs[0] == std::make_pair(0u, 256u));
+}
+
 TEST(static_compare_counts_fields) {
     auto a = std::make_unique<sc::DrawDesc>();
     auto e = std::make_unique<sc::DrawDesc>();

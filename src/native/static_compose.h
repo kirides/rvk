@@ -7,6 +7,7 @@
 // rules with engine data is native/static_ops.cpp.
 
 #include <array>
+#include <bit>
 #include <bitset>
 #include <cstddef>
 #include <cstdint>
@@ -323,9 +324,11 @@ struct DrawDesc {
     float vsF[kVsRegs][4]{};  // float constants
     float psF[kPsRegs][4]{};
     std::bitset<kVsRegs> vsLive;
-    std::bitset<kPsRegs> psLive;
+    std::bitset<kVsRegs> psLive;  // (kVsRegs wide: copied whole from the shader's live set; bits >= kPsRegs stay clear)
     std::array<Src, kVsRegs> vsSrc{};
     std::array<Src, kPsRegs> psSrc{};
+    // the composed registers (src != None) as word masks (bit r of word r / 64): the issue path writes their runs (O1)
+    std::array<std::uint64_t, 4> vsSet{}, psSet{};
     // bool / int registers: the material path never writes them (HAL slots 104 / 105 / 114 / 115), so the composition is the
     // device's register file at the op's entry; every register is compared (the CTAB-live ones are counted)
     std::array<std::uint32_t, 16> vsB{}, psB{};
@@ -354,6 +357,32 @@ struct DrawDesc {
     // stream's bytes from its offset (the vegetation's instance data on stream 1; no index bytes)
     std::uint8_t cpuStream = 0;
 };
+
+// the runs of consecutive set bits of a 256-bit word mask (bit r of word r / 64), lowest first: f(first, count) per run (O1: the
+// composed constants are written / saved / restored as register ranges)
+template <class F>
+inline void forEachRun(const std::array<std::uint64_t, 4>& mask, F&& f) {
+    std::uint32_t runFirst = 0, runEnd = 0;
+    bool open = false;
+    for (std::uint32_t w = 0; w < 4; ++w) {
+        std::uint64_t bits = mask[w];
+        while (bits != 0) {
+            const auto s = static_cast<std::uint32_t>(std::countr_zero(bits));
+            const auto len = static_cast<std::uint32_t>(std::countr_one(bits >> s));
+            const std::uint32_t first = w * 64 + s;
+            if (open && first == runEnd) {
+                runEnd += len;
+            } else {
+                if (open) f(runFirst, runEnd - runFirst);
+                runFirst = first;
+                runEnd = first + len;
+                open = true;
+            }
+            bits = s + len >= 64 ? 0 : bits & (~0ull << (s + len));
+        }
+    }
+    if (open) f(runFirst, runEnd - runFirst);
+}
 
 // what the comparison counts (one class per field group; constants by register group)
 enum class Field : std::uint8_t {

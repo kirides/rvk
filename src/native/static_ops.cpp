@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstring>
 #include <format>
@@ -69,16 +70,16 @@ constexpr std::uint32_t kInstanceSortLea = 0x5c7162, kInstanceCmp = 0x75f690, kQ
 
 constexpr std::uint32_t kNoState = 0xABABABABu;  // a sampler slot value meaning "the gfx admin's default filter"
 
-bool rd(const void* p, std::size_t off, void* out, std::size_t n) {
+inline bool rd(const void* p, std::size_t off, void* out, std::size_t n) {
     return p != nullptr && safeRead(static_cast<U8*>(p) + off, out, n);
 }
 template <class T>
-T get(const void* p, std::size_t off, T fallback = T{}) {
+inline T get(const void* p, std::size_t off, T fallback = T{}) {
     T v = fallback;
     if (!readAt(p, off, v)) return fallback;
     return v;
 }
-U8* ptr(const void* p, std::size_t off) { return get<U8*>(p, off, nullptr); }
+inline U8* ptr(const void* p, std::size_t off) { return get<U8*>(p, off, nullptr); }
 
 // a register k of FUN_180225e30 / FUN_180238390: column k of the row-vector matrix
 void column(const float m[16], std::uint32_t k, float out[4]) {
@@ -358,7 +359,11 @@ const StaticOps::Live& StaticOps::liveOf(const d3d9::Shader* s) {
         if (r.ok()) {
             for (const fx::Constant& c : r.table.constants) {
                 if (c.registerSet == fx::RegisterSet::Float4) {
-                    for (std::uint32_t i = 0; i < c.registerCount && c.registerIndex + i < sc::kVsRegs; ++i) it->second.f.set(c.registerIndex + i);
+                    for (std::uint32_t i = 0; i < c.registerCount && c.registerIndex + i < sc::kVsRegs; ++i) {
+                        const std::uint32_t reg = c.registerIndex + i;
+                        it->second.f.set(reg);
+                        it->second.words[reg >> 6] |= 1ull << (reg & 63);
+                    }
                 } else if (c.registerSet != fx::RegisterSet::Sampler) {
                     it->second.boolInt += c.registerCount;
                 }
@@ -380,8 +385,31 @@ d3d9::Texture* StaticOps::textureOfImageData(const void* imageData, bool& ok) {
     ok = false;
     U8* api = ptr(imageData, 0x60);
     if (api == nullptr) return nullptr;
+    // O1: the HAL's registry (a mutex + a hash map) behind a small cache, valid while the registry's generation holds
+    if (const std::uint64_t gen = hal_.apiTextureGeneration(); gen != texCacheGen_) {
+        texCache_.fill({});
+        texCacheGen_ = gen;
+    }
+    const auto key = reinterpret_cast<std::uintptr_t>(api);
+    const std::size_t h = static_cast<std::size_t>(((key >> 4) * 0x9E3779B97F4A7C15ull) >> (64 - kTexCacheBits));
+    for (std::size_t i = 0; i < 4; ++i) {
+        const TexCacheEntry& e = texCache_[(h + i) & (texCache_.size() - 1)];
+        if (e.api == api) {
+            ok = e.texture != nullptr;
+            return e.texture;
+        }
+        if (e.api == nullptr) break;
+    }
     d3d9::Texture* t = hal_.textureOfApi(api);
     if (t == nullptr) t = hal_.cubeOfApi(api);
+    std::size_t slot = h;
+    for (std::size_t i = 0; i < 4; ++i) {
+        if (texCache_[(h + i) & (texCache_.size() - 1)].api == nullptr) {
+            slot = h + i;
+            break;
+        }
+    }
+    texCache_[slot & (texCache_.size() - 1)] = {api, t};
     ok = t != nullptr;
     return t;
 }
@@ -398,6 +426,8 @@ sc::DrawDesc& StaticOps::newDraw() {
     d.psLive.reset();
     d.vsSrc.fill(sc::Src::None);
     d.psSrc.fill(sc::Src::None);
+    d.vsSet = {};
+    d.psSet = {};
     d.passFlags = 0;
     d.zPass = false;
     d.tagWater = 0;
@@ -616,57 +646,65 @@ void StaticOps::constantsInto(sc::DrawDesc& d, const std::uint8_t* shader, const
     const auto* ps = static_cast<const d3d9::Shader*>(d.ps);
     const Live& lv = liveOf(vs);
     const Live& lp = liveOf(ps);
-    for (std::uint32_t r = 0; r < sc::kVsRegs; ++r) d.vsLive[r] = lv.f[r];
-    for (std::uint32_t r = 0; r < sc::kPsRegs; ++r) d.psLive[r] = lp.f[r];
+    d.vsLive = lv.f;
+    d.psLive = lp.f;
     // c0..c3: the view-projection, or the depth-bias one for UseDepthBias materials (ExecutePass / ExecuteSpecialPass)
     // (ExecutePass reads the base shader's flag, also for an overlay's passes)
     const bool depthBias = get<std::uint8_t>(biasShader != nullptr ? biasShader : shader, 0x78) != 0;
-    for (std::uint32_t k = 0; k < 4; ++k) std::memcpy(mirror_.adminVs[k], depthBias ? view_.dbvp[k] : view_.vp[k], 16);
+    std::memcpy(mirror_.adminVs[0], depthBias ? view_.dbvp : view_.vp, 64);
     const Mirror::ShaderPools* pools = poolsOf(shader);
-    for (std::uint32_t r = 0; r < sc::kVsRegs; ++r) {
-        if (!d.vsLive[r]) continue;
-        const float* v = nullptr;
-        sc::Src src = sc::Src::Pool;
-        if (!defaultClass && r >= pools->vsFirst && r - pools->vsFirst < pools->vsCount) {
-            v = pools->vs[r - pools->vsFirst];
-        } else if (r < 31) {
-            v = mirror_.adminVs[r];
-            if ((nativeVs_ >> r & 1u) != 0) src = sc::Src::Native;
-        } else if (!defaultClass) {
-            // eCShaderBase::GetGlobalShaderConstants is null: nothing else of the path writes these; a class with its own global
-            // pool (eCShaderParticle: c31..c60, world c31..c33 and alpha c34.w composed natively) flushes it before the shader's
-            if (fxPoolCount_ != 0 && r >= fxPoolFirst_ && r - fxPoolFirst_ < fxPoolCount_) {
-                v = fxPool_[r - fxPoolFirst_];
-                if (r <= fxPoolNativeLast_) src = sc::Src::Native;
+    // the live registers word by word (set bits only)
+    for (std::uint32_t w = 0; w < 4; ++w) {
+        for (std::uint64_t bits = lv.words[w]; bits != 0; bits &= bits - 1) {
+            const std::uint32_t r = w * 64 + static_cast<std::uint32_t>(std::countr_zero(bits));
+            const float* v = nullptr;
+            sc::Src src = sc::Src::Pool;
+            if (!defaultClass && r >= pools->vsFirst && r - pools->vsFirst < pools->vsCount) {
+                v = pools->vs[r - pools->vsFirst];
+            } else if (r < 31) {
+                v = mirror_.adminVs[r];
+                if ((nativeVs_ >> r & 1u) != 0) src = sc::Src::Native;
+            } else if (!defaultClass) {
+                // eCShaderBase::GetGlobalShaderConstants is null: nothing else of the path writes these; a class with its own global
+                // pool (eCShaderParticle: c31..c60, world c31..c33 and alpha c34.w composed natively) flushes it before the shader's
+                if (fxPoolCount_ != 0 && r >= fxPoolFirst_ && r - fxPoolFirst_ < fxPoolCount_) {
+                    v = fxPool_[r - fxPoolFirst_];
+                    if (r <= fxPoolNativeLast_) src = sc::Src::Native;
+                }
+            } else if (r < 232) {
+                v = mirror_.global[r - 31];
+                if (r >= 32) src = sc::Src::Native;  // the instances' world rows and fade (.xyz of c32 + 4i: carry-over)
+            } else if (r >= pools->vsFirst && r - pools->vsFirst < pools->vsCount) {
+                v = pools->vs[r - pools->vsFirst];
             }
-        } else if (r < 232) {
-            v = mirror_.global[r - 31];
-            if (r >= 32) src = sc::Src::Native;  // the instances' world rows and fade (.xyz of c32 + 4i: carry-over)
-        } else if (r >= pools->vsFirst && r - pools->vsFirst < pools->vsCount) {
-            v = pools->vs[r - pools->vsFirst];
+            if (v == nullptr) continue;
+            std::memcpy(d.vsF[r], v, 16);
+            d.vsSrc[r] = src;
+            d.vsSet[w] |= bits & (~bits + 1);
         }
-        if (v == nullptr) continue;
-        std::memcpy(d.vsF[r], v, 16);
-        d.vsSrc[r] = src;
     }
-    for (std::uint32_t r = 0; r < sc::kPsRegs; ++r) {
-        if (!d.psLive[r]) continue;
-        const float* v = nullptr;
-        sc::Src src = sc::Src::Pool;
-        if (r < 6) {
-            v = mirror_.adminPs[r];
-            if (r != 2) src = sc::Src::Native;
-        } else if (!defaultClass) {
-            if (r >= pools->psFirst && r - pools->psFirst < pools->psCount) v = pools->ps[r - pools->psFirst];
-        } else if (r < 14) {
-            if (r >= pools->psFirst && r - pools->psFirst < pools->psCount) v = pools->ps[r - pools->psFirst];
-        } else if (r < 38) {
-            v = mirror_.lighting[r - 14];
-            src = sc::Src::Native;
+    for (std::uint32_t w = 0; w < 4; ++w) {
+        for (std::uint64_t bits = lp.words[w]; bits != 0; bits &= bits - 1) {
+            const std::uint32_t r = w * 64 + static_cast<std::uint32_t>(std::countr_zero(bits));
+            if (r >= sc::kPsRegs) break;
+            const float* v = nullptr;
+            sc::Src src = sc::Src::Pool;
+            if (r < 6) {
+                v = mirror_.adminPs[r];
+                if (r != 2) src = sc::Src::Native;
+            } else if (!defaultClass) {
+                if (r >= pools->psFirst && r - pools->psFirst < pools->psCount) v = pools->ps[r - pools->psFirst];
+            } else if (r < 14) {
+                if (r >= pools->psFirst && r - pools->psFirst < pools->psCount) v = pools->ps[r - pools->psFirst];
+            } else if (r < 38) {
+                v = mirror_.lighting[r - 14];
+                src = sc::Src::Native;
+            }
+            if (v == nullptr) continue;
+            std::memcpy(d.psF[r], v, 16);
+            d.psSrc[r] = src;
+            d.psSet[w] |= bits & (~bits + 1);
         }
-        if (v == nullptr) continue;
-        std::memcpy(d.psF[r], v, 16);
-        d.psSrc[r] = src;
     }
 }
 
@@ -918,7 +956,8 @@ StaticOps::Skip StaticOps::materialDraws(const std::uint8_t* shader, const std::
     };
     std::array<Owner, 4> owners{};
     std::size_t ownerCount = 0;
-    std::vector<sc::Pass> passes;
+    std::vector<sc::Pass>& passes = scr_.passes;
+    passes.clear();
     {
         const std::uint8_t* version = nullptr;
         const std::size_t before = passes.size();
@@ -1000,7 +1039,8 @@ StaticOps::Skip StaticOps::meshZDraws(const std::uint8_t* res, std::uint32_t sub
         return ptr(m, 0x70);
     };
     if (sub == 0xff) {
-        std::vector<sc::ZSub> zs(static_cast<std::size_t>(std::max(count, 0)));
+        std::vector<sc::ZSub>& zs = scr_.zs;
+        zs.assign(static_cast<std::size_t>(std::max(count, 0)), sc::ZSub{});
         for (std::int32_t i = 0; i < count; ++i) {
             U8* s = subs + 0x48 * static_cast<std::size_t>(i);
             U8* shader = shaderOfSub(static_cast<std::uint32_t>(i), true);
@@ -1026,7 +1066,8 @@ StaticOps::Skip StaticOps::meshZDraws(const std::uint8_t* res, std::uint32_t sub
             writeWorld(0, world);
             writeAlpha(0, 1.0f);
         }
-        std::vector<sc::ZDraw> plan;
+        std::vector<sc::ZDraw>& plan = scr_.zplan;
+        plan.clear();
         sc::planWholeMeshZ(zs, plan);
         for (const sc::ZDraw& z : plan) {
             Geom g = geometry;
@@ -1082,7 +1123,8 @@ StaticOps::Skip StaticOps::composeSolid(const Op& op) {
         U8* shader = ptr(material, 0x70);
         if (material == nullptr || shader == nullptr) return Skip::None;
         if (!shaderClassOk(shader)) return Skip::ShaderClass;
-        std::vector<std::uint8_t> inst(static_cast<std::size_t>(n) * 0x58);
+        std::vector<std::uint8_t>& inst = scr_.inst;
+        inst.resize(static_cast<std::size_t>(n) * 0x58);
         if (!rd(ptr(res, 0xb0), 0, inst.data(), inst.size())) return Skip::Unreadable;
         if (get<std::int32_t>(res, 0xa4) != 0 && n > 1) qsort_(inst.data(), static_cast<std::size_t>(n), 0x58, instanceCmp_);
         const auto at = [&](std::int32_t i) { return inst.data() + 0x58 * static_cast<std::size_t>(i); };
@@ -1095,7 +1137,8 @@ StaticOps::Skip StaticOps::composeSolid(const Op& op) {
             }
             return Skip::None;
         }
-        std::vector<sc::Instance> list(static_cast<std::size_t>(n));
+        std::vector<sc::Instance>& list = scr_.list;
+        list.assign(static_cast<std::size_t>(n), sc::Instance{});
         for (std::int32_t i = 0; i < n; ++i) {
             U8* il = illumOf(i);
             sc::Instance& x = list[static_cast<std::size_t>(i)];
@@ -1105,7 +1148,8 @@ StaticOps::Skip StaticOps::composeSolid(const Op& op) {
             x.f = get<float>(il, 8);
             x.alone = get<std::uint8_t>(il, 0xd) != 0 || get<std::uint8_t>(il, 0x90) != 0;
         }
-        std::vector<sc::Batch> batches;
+        std::vector<sc::Batch>& batches = scr_.batches;
+        batches.clear();
         sc::planBatches(list, 50, batches);
         for (const sc::Batch& bt : batches) {
             for (std::uint32_t k = 0; k < bt.count; ++k) {
@@ -1462,14 +1506,12 @@ void StaticOps::capture(const d3d9::DrawTapInfo& t, sc::DrawDesc& out) {
     const Live& lv = liveOf(d.vertexShader());
     const Live& lp = liveOf(ps);
     out.biLive = lv.boolInt + lp.boolInt;
-    for (std::uint32_t r = 0; r < sc::kVsRegs; ++r) {
-        out.vsLive[r] = lv.f[r];
-        if (lv.f[r]) std::memcpy(out.vsF[r], d.vsConstant(r), 16);
-    }
-    for (std::uint32_t r = 0; r < sc::kPsRegs; ++r) {
-        out.psLive[r] = lp.f[r];
-        if (lp.f[r]) std::memcpy(out.psF[r], d.psConstant(r), 16);
-    }
+    out.vsLive = lv.f;
+    out.psLive = lp.f;
+    sc::forEachRun(lv.words, [&](std::uint32_t r, std::uint32_t n) { std::memcpy(out.vsF[r], d.vsConstants()[r], 16 * n); });
+    sc::forEachRun(lp.words, [&](std::uint32_t r, std::uint32_t n) {
+        if (r < sc::kPsRegs) std::memcpy(out.psF[r], d.psConstants()[r], 16 * std::min(n, sc::kPsRegs - r));
+    });
 }
 
 void StaticOps::ownDraw(const d3d9::DrawTapInfo& t) {
@@ -1590,7 +1632,18 @@ void StaticOps::issue() {
                                                             RS_COLORWRITEENABLE, RS_ALPHATESTENABLE, RS_CULLMODE, RS_FILLMODE, RS_FOGENABLE};
     static constexpr std::uint32_t kSs[7] = {SAMP_ADDRESSU, SAMP_ADDRESSV, SAMP_MAGFILTER, SAMP_MINFILTER, SAMP_MIPFILTER, SAMP_MIPMAPLODBIAS,
                                              SAMP_SRGBTEXTURE};
-    // save
+    // save (O1: only what the op's draws change: their constant registers and sampled stages; shaders, declaration, streams,
+    // indices and the ten owned render states are set by every draw)
+    std::array<std::uint64_t, 4> vsU{}, psU{};
+    std::uint32_t stagesU = 0;
+    for (std::size_t k = 0; k < drawCount_; ++k) {
+        const sc::DrawDesc& d = *draws_[k];
+        for (std::size_t w = 0; w < 4; ++w) {
+            vsU[w] |= d.vsSet[w];
+            psU[w] |= d.psSet[w];
+        }
+        stagesU |= static_cast<std::uint32_t>(d.samplerMask & ~d.inheritMask);
+    }
     const ShaderRef vs = dev_.vertexShaderRef(), ps = dev_.pixelShaderRef();
     VertexDecl* decl = dev_.vertexDecl();
     Buffer* ib = dev_.indexBuffer();
@@ -1600,13 +1653,16 @@ void StaticOps::issue() {
     for (std::uint32_t i = 0; i < sc::StOwnedCount; ++i) rs[i] = dev_.renderState(kRs[i]);
     std::array<Texture*, sc::kStages> tex{};
     std::array<std::array<std::uint32_t, 7>, sc::kStages> ss{};
-    for (std::uint32_t st = 0; st < sc::kStages; ++st) {
-        tex[st] = dev_.texture(st);
-        for (std::uint32_t i = 0; i < 7; ++i) ss[st][i] = dev_.samplerState(st, kSs[i]);
+    for (std::uint32_t m = stagesU; m != 0; m &= m - 1) {
+        const auto st = static_cast<std::uint32_t>(std::countr_zero(m));
+        tex[st] = dev_.stageTexture(st);
+        const std::uint32_t* row = dev_.samplerStateRow(st);
+        for (std::uint32_t i = 0; i < 7; ++i) ss[st][i] = row[kSs[i]];
     }
-    static float savedVs[sc::kVsRegs][4], savedPs[sc::kPsRegs][4];
-    dev_.getVertexShaderConstantF(0, &savedVs[0][0], sc::kVsRegs);
-    dev_.getPixelShaderConstantF(0, &savedPs[0][0], sc::kPsRegs);
+    const float (*devVs)[4] = dev_.vsConstants();
+    const float (*devPs)[4] = dev_.psConstants();
+    sc::forEachRun(vsU, [&](std::uint32_t r, std::uint32_t n) { std::memcpy(savedVs_[r], devVs[r], 16 * n); });
+    sc::forEachRun(psU, [&](std::uint32_t r, std::uint32_t n) { std::memcpy(savedPs_[r], devPs[r], 16 * n); });
     draws::Tag& tag = dev_.drawTag();
     const draws::Tag savedTag = tag;
 
@@ -1669,17 +1725,14 @@ void StaticOps::issue() {
             }
         }
         for (std::uint32_t i = 0; i < sc::StOwnedCount; ++i) dev_.setRenderState(kRs[i], d.states[i]);
-        for (std::uint32_t st = 0; st < sc::kStages; ++st) {
-            if ((d.samplerMask >> st & 1u) == 0 || (d.inheritMask >> st & 1u) != 0) continue;
-            dev_.setTexture(st, const_cast<Texture*>(static_cast<const Texture*>(d.samplers[st].texture)));
-            for (std::uint32_t i = 0; i < 7; ++i) dev_.setSamplerState(st, kSs[i], d.samplers[st].ss[i]);
+        for (std::uint32_t m = static_cast<std::uint32_t>(d.samplerMask & ~d.inheritMask); m != 0; m &= m - 1) {
+            const auto st = static_cast<std::uint32_t>(std::countr_zero(m));
+            dev_.setStageTexture(st, const_cast<Texture*>(static_cast<const Texture*>(d.samplers[st].texture)));
+            dev_.setSamplerStates(st, kSs, d.samplers[st].ss.data(), 7);
         }
-        for (std::uint32_t r = 0; r < sc::kVsRegs; ++r) {
-            if (d.vsSrc[r] != sc::Src::None) dev_.setVertexShaderConstantF(r, d.vsF[r], 1);
-        }
-        for (std::uint32_t r = 0; r < sc::kPsRegs; ++r) {
-            if (d.psSrc[r] != sc::Src::None) dev_.setPixelShaderConstantF(r, d.psF[r], 1);
-        }
+        // the composed registers as ranges (one copy per run of consecutive registers)
+        sc::forEachRun(d.vsSet, [&](std::uint32_t r, std::uint32_t n) { dev_.setVertexShaderConstantF(r, d.vsF[r], n); });
+        sc::forEachRun(d.psSet, [&](std::uint32_t r, std::uint32_t n) { dev_.setPixelShaderConstantF(r, d.psF[r], n); });
         tag = tagOverride_ ? tagOverrideValue_ : savedTag;
         if (d.tagSubMesh != nullptr) {
             tag.subMesh = d.tagSubMesh;
@@ -1710,12 +1763,13 @@ void StaticOps::issue() {
     }
     dev_.setIndices(ib);
     for (std::uint32_t i = 0; i < sc::StOwnedCount; ++i) dev_.setRenderState(kRs[i], rs[i]);
-    for (std::uint32_t st = 0; st < sc::kStages; ++st) {
-        dev_.setTexture(st, tex[st]);
-        for (std::uint32_t i = 0; i < 7; ++i) dev_.setSamplerState(st, kSs[i], ss[st][i]);
+    for (std::uint32_t m = stagesU; m != 0; m &= m - 1) {
+        const auto st = static_cast<std::uint32_t>(std::countr_zero(m));
+        dev_.setStageTexture(st, tex[st]);
+        dev_.setSamplerStates(st, kSs, ss[st].data(), 7);
     }
-    dev_.setVertexShaderConstantF(0, &savedVs[0][0], sc::kVsRegs);
-    dev_.setPixelShaderConstantF(0, &savedPs[0][0], sc::kPsRegs);
+    sc::forEachRun(vsU, [&](std::uint32_t r, std::uint32_t n) { dev_.setVertexShaderConstantF(r, savedVs_[r], n); });
+    sc::forEachRun(psU, [&](std::uint32_t r, std::uint32_t n) { dev_.setPixelShaderConstantF(r, savedPs_[r], n); });
 }
 
 void StaticOps::report() {

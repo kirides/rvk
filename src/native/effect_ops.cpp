@@ -23,12 +23,12 @@ using engine::readAt;
 using engine::safeRead;
 
 template <class T>
-T get(const void* p, std::size_t off, T fallback = T{}) {
+inline T get(const void* p, std::size_t off, T fallback = T{}) {
     T v = fallback;
     if (!readAt(p, off, v)) return fallback;
     return v;
 }
-U8* ptr(const void* p, std::size_t off) { return get<U8*>(p, off, nullptr); }
+inline U8* ptr(const void* p, std::size_t off) { return get<U8*>(p, off, nullptr); }
 
 // eTEffectParam<T> / eSImageEffectParam* vtables (Engine.dll RVAs; README.md 13): the value's byte count N of SetParameter(handle,
 // +0x58, N), -1 = transposed bCMatrix

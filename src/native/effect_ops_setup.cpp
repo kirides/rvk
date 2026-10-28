@@ -35,12 +35,12 @@ using engine::readAt;
 using engine::safeRead;
 
 template <class T>
-T get(const void* p, std::size_t off, T fallback = T{}) {
+inline T get(const void* p, std::size_t off, T fallback = T{}) {
     T v = fallback;
     if (!readAt(p, off, v)) return fallback;
     return v;
 }
-U8* ptr(const void* p, std::size_t off) { return get<U8*>(p, off, nullptr); }
+inline U8* ptr(const void* p, std::size_t off) { return get<U8*>(p, off, nullptr); }
 
 constexpr std::uint32_t kCascadeVtable = 0x9a29e0;  // eCShadowMapDirectionalLight2Ex (README.md 12)
 constexpr std::uint32_t kTerrainVtable = 0x9a2848;  // eCShadowMapDirectionalLight2VS

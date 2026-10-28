@@ -6,6 +6,7 @@
 // 16 texture stages. Slots without an override are the generated stubs (log once, neutral result).
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <memory>
@@ -325,6 +326,8 @@ public:
     void registerCube(const void* api, d3d9::Texture* texture);
     void unregisterCube(const void* api);
     d3d9::Texture* cubeOfApi(const void* api);
+    // bumped by every texture / cube (un)registration: caches of textureOfApi / cubeOfApi results are valid while it holds (O1)
+    std::uint64_t apiTextureGeneration() const { return apiTextureGeneration_.load(std::memory_order_acquire); }
     const Options& options() const { return options_; }
     // the view matrix the engine last set (SetViewMatrix, slot 0x288: the GUI's scale / offset; N5.7 sprite composition)
     const bCMatrix& viewMatrix() const { return view_; }
@@ -555,6 +558,7 @@ private:
     std::mutex apiTextureMutex_;
     std::unordered_map<const void*, d3d9::Texture*> apiTextures_;
     std::unordered_map<const void*, d3d9::Texture*> apiCubes_;
+    std::atomic<std::uint64_t> apiTextureGeneration_{0};
     std::unordered_map<void*, std::unique_ptr<d3d9::VertexDecl>> decls_;
     std::unordered_map<std::uint32_t, std::unique_ptr<d3d9::VertexDecl>> fvfDecls_;
     std::unordered_map<void*, std::unique_ptr<d3d9::Texture>> depthBuffers_;

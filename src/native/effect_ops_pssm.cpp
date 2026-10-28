@@ -14,6 +14,10 @@
 
 #include "native/effect_ops.h"
 
+// C4723: float divisions by an engine field whose guarded read (inlined since O1) has the fallback 0 on its failure path: the
+// result is the IEEE infinity the out-of-line read gave before (no trap)
+#pragma warning(disable : 4723)
+
 #include <windows.h>
 
 #include <cstring>
@@ -35,12 +39,12 @@ using engine::readAt;
 using engine::safeRead;
 
 template <class T>
-T get(const void* p, std::size_t off, T fallback = T{}) {
+inline T get(const void* p, std::size_t off, T fallback = T{}) {
     T v = fallback;
     if (!readAt(p, off, v)) return fallback;
     return v;
 }
-U8* ptr(const void* p, std::size_t off) { return get<U8*>(p, off, nullptr); }
+inline U8* ptr(const void* p, std::size_t off) { return get<U8*>(p, off, nullptr); }
 
 constexpr std::size_t kIllumMask = 0x448;
 constexpr std::size_t kCellStride = 0x120, kPackedStride = 0xb0;
