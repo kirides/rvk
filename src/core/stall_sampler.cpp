@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -314,8 +315,8 @@ void StallSampler::Impl::reportProfile(const std::map<std::vector<std::uint64_t>
         }
     };
     top(modules, 12, "module");
-    top(self, 30, "self");
-    top(incl, 45, "incl");
+    top(self, 160, "self");
+    top(incl, 120, "incl");
     // our module's leaf addresses (16-byte buckets): `llvm-symbolizer --obj=d3d9.dll --inlines 0x180000000+<rva>` gives lines
     std::unordered_map<std::uint32_t, std::uint32_t> pcs;
     for (const auto& [stack, count] : taken) {
@@ -324,8 +325,67 @@ void StallSampler::Impl::reportProfile(const std::map<std::vector<std::uint64_t>
     }
     std::vector<std::pair<std::uint32_t, std::uint32_t>> v(pcs.begin(), pcs.end());
     std::ranges::sort(v, [](const auto& a, const auto& b) { return a.second > b.second; });
-    for (std::size_t i = 0; i < std::min<std::size_t>(v.size(), 120); ++i) {
+    for (std::size_t i = 0; i < std::min<std::size_t>(v.size(), 800); ++i) {
         spdlog::info("diag: profile pc {:5.2f} % 0x{:x}", 100.0 * v[i].second / n, v[i].first);
+    }
+    // call sites: the first frame inside our module (the leaf pc itself, else the return address - 1) with everything below
+    // it (inclusive per source line; the leaf's module tells who we called: the CRT's memcpy / memcmp, ntdll, the driver)
+    std::map<std::pair<std::uint32_t, std::string>, std::uint32_t> sites;
+    // the CRT's callers: leaf in vcruntime140 / ucrtbase, the caller = the first frame outside them
+    std::map<std::pair<std::string, std::string>, std::uint32_t> crt;
+    // the caller of that function (the next frame of ours in another function): who reaches operator new / steady_clock::now
+    std::map<std::tuple<std::uint32_t, std::uint32_t, std::string>, std::uint32_t> sites2;
+    const auto funcStart = [](std::uint64_t pc) -> std::uint32_t {
+        DWORD64 base = 0;
+        const PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(pc, &base, nullptr);
+        return fe != nullptr ? fe->BeginAddress : 0;
+    };
+    for (const auto& [stack, count] : taken) {
+        if (stack.empty()) continue;
+        const std::string leafModule = sym.moduleName(stack[0]);
+        for (std::size_t i = 0; i < stack.size(); ++i) {
+            if (const std::uint32_t rva = sym.ownRva(stack[i]); rva != 0) {
+                sites[{i == 0 ? rva : rva - 1, i == 0 ? std::string("self") : leafModule}] += count;
+                const std::uint32_t f1 = funcStart(stack[i]);
+                for (std::size_t j = i + 1; j < stack.size(); ++j) {
+                    if (const std::uint32_t r2 = sym.ownRva(stack[j]); r2 != 0 && funcStart(stack[j]) != f1) {
+                        sites2[{r2 - 1, f1, leafModule}] += count;
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+        if (leafModule == "vcruntime140" || leafModule == "ucrtbase") {
+            for (std::size_t i = 1; i < stack.size(); ++i) {
+                const std::string m = sym.moduleName(stack[i]);
+                if (m == "vcruntime140" || m == "ucrtbase") continue;
+                crt[{sym.function(stack[0]), sym.function(stack[i])}] += count;
+                if (const std::uint32_t rva = sym.ownRva(stack[i]); rva != 0) {
+                    crt[{sym.function(stack[0]), std::format("site 0x{:x}", rva - 1)}] += count;
+                }
+                break;
+            }
+        }
+    }
+    std::vector<std::pair<std::uint32_t, const std::pair<std::uint32_t, std::string>*>> sv;
+    for (const auto& [k, c] : sites) sv.emplace_back(c, &k);
+    std::ranges::sort(sv, [](const auto& a, const auto& b) { return a.first > b.first; });
+    for (std::size_t i = 0; i < std::min<std::size_t>(sv.size(), 250); ++i) {
+        spdlog::info("diag: profile site {:5.2f} % 0x{:x} {}", 100.0 * sv[i].first / n, sv[i].second->first, sv[i].second->second);
+    }
+    std::vector<std::pair<std::uint32_t, const std::tuple<std::uint32_t, std::uint32_t, std::string>*>> s2v;
+    for (const auto& [k, c] : sites2) s2v.emplace_back(c, &k);
+    std::ranges::sort(s2v, [](const auto& a, const auto& b) { return a.first > b.first; });
+    for (std::size_t i = 0; i < std::min<std::size_t>(s2v.size(), 250); ++i) {
+        const auto& [r2, f1, lm] = *s2v[i].second;
+        spdlog::info("diag: profile site2 {:5.2f} % 0x{:x} 0x{:x} {}", 100.0 * s2v[i].first / n, r2, f1, lm);
+    }
+    std::vector<std::pair<std::uint32_t, const std::pair<std::string, std::string>*>> cv;
+    for (const auto& [k, c] : crt) cv.emplace_back(c, &k);
+    std::ranges::sort(cv, [](const auto& a, const auto& b) { return a.first > b.first; });
+    for (std::size_t i = 0; i < std::min<std::size_t>(cv.size(), 120); ++i) {
+        spdlog::info("diag: profile crt {:5.2f} % {} <- {}", 100.0 * cv[i].first / n, cv[i].second->first, cv[i].second->second);
     }
 }
 
