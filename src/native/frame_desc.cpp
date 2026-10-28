@@ -12,7 +12,7 @@ namespace {
 using d3d9::scene::Pass;
 using Kind = d3d9::draws::Kind;
 
-constexpr std::size_t kMaxMismatches = 12;
+constexpr std::size_t kMaxMismatches = 12;  // (= Attribution::noting)
 
 std::size_t idx(List l) { return static_cast<std::size_t>(l); }
 std::size_t idx(OpKind k) { return static_cast<std::size_t>(k); }
@@ -290,25 +290,25 @@ void Attribution::enterOp(const void* opPointer, const RawOp* live) {
     Op* op = frame_->find(opPointer);
     if (op == nullptr) {
         ++counts_.unknownOps;
-        note(std::format("slot entered with op {} outside the snapshot", opPointer));
+        if (noting()) note(std::format("slot entered with op {} outside the snapshot", opPointer));
         return;
     }
     const std::size_t g = static_cast<std::size_t>(op - frame_->ops.data());
     if (op->entered++ > 0) {
         ++counts_.repeated;
-        note(std::format("entered again: {}", where(*op)));
+        if (noting()) note(std::format("entered again: {}", where(*op)));
     } else {
         ++counts_.entered;
     }
     if (g != next_) {
         ++counts_.outOfOrder;
-        note(std::format("out of order: {} entered, expected {}", where(*op),
+        if (noting()) note(std::format("out of order: {} entered, expected {}", where(*op),
                          next_ < frame_->ops.size() ? where(frame_->ops[next_]) : std::string("the end")));
     }
     next_ = g + 1;
     if (live != nullptr && !sameBytes(*live, op->raw)) {
         ++counts_.contentMismatch;
-        note(std::format("content differs from the sorted copy: {} (live desc {:#x} key {:#x} sort {:#x} ctx {})", where(*op), live->desc,
+        if (noting()) note(std::format("content differs from the sorted copy: {} (live desc {:#x} key {:#x} sort {:#x} ctx {})", where(*op), live->desc,
                          live->key, live->sortId, live->context));
     }
     current_ = op;
@@ -322,7 +322,7 @@ void Attribution::draw(const DrawInfo& d) {
         ++counts_.noOp[static_cast<std::size_t>(d.kind)];
         ++counts_.noOpTotal;
         if (!explainedWithoutOp(d.kind)) {
-            note(std::format("draw #{} without an op: {} in {}, entity {}", d.index, d3d9::draws::name(d.kind), d3d9::scene::name(d.pass),
+            if (noting()) note(std::format("draw #{} without an op: {} in {}, entity {}", d.index, d3d9::draws::name(d.kind), d3d9::scene::name(d.pass),
                              d.entity));
         }
         return;
@@ -330,13 +330,13 @@ void Attribution::draw(const DrawInfo& d) {
     Op* op = frame_->find(d.op);
     if (op == nullptr) {
         ++counts_.unknownOpDraws;
-        note(std::format("draw #{} with op {} outside the snapshot ({})", d.index, d.op, d3d9::draws::name(d.kind)));
+        if (noting()) note(std::format("draw #{} with op {} outside the snapshot ({})", d.index, d.op, d3d9::draws::name(d.kind)));
         return;
     }
     ++counts_.matched;
     if (op != current_) {
         ++counts_.drawOrder;
-        note(std::format("draw #{} of {} while {} executes", d.index, where(*op), current_ != nullptr ? where(*current_) : std::string("no op")));
+        if (noting()) note(std::format("draw #{} of {} while {} executes", d.index, where(*op), current_ != nullptr ? where(*current_) : std::string("no op")));
     }
     if (op->draws++ == 0) {
         op->firstDraw = d.index;
@@ -350,19 +350,19 @@ void Attribution::draw(const DrawInfo& d) {
     if (!d.colorWrite) ++op->noColorDraws;
     if (d.pass != viewListPass(frame_->kind, op->list)) {
         ++counts_.passMismatch;
-        note(std::format("draw #{} of {} in pass {}", d.index, where(*op), d3d9::scene::name(d.pass)));
+        if (noting()) note(std::format("draw #{} of {} in pass {}", d.index, where(*op), d3d9::scene::name(d.pass)));
     }
     if (d.entity != nullptr && op->entity != nullptr && d.entity != op->entity) {
         ++counts_.entityMismatch;
-        note(std::format("draw #{} of {}: tag entity {}", d.index, where(*op), d.entity));
+        if (noting()) note(std::format("draw #{} of {}: tag entity {}", d.index, where(*op), d.entity));
     }
     if (d.material != nullptr && op->material != nullptr && d.material != op->material) {
         ++counts_.materialMismatch;
-        note(std::format("draw #{} of {}: material {} (op {})", d.index, where(*op), d.material, op->material));
+        if (noting()) note(std::format("draw #{} of {}: material {} (op {})", d.index, where(*op), d.material, op->material));
     }
     if (d.subMesh != nullptr && op->subMesh != nullptr && d.subMesh != op->subMesh) {
         ++counts_.subMeshMismatch;
-        note(std::format("draw #{} of {}: sub-mesh {} (op {})", d.index, where(*op), d.subMesh, op->subMesh));
+        if (noting()) note(std::format("draw #{} of {}: sub-mesh {} (op {})", d.index, where(*op), d.subMesh, op->subMesh));
     }
 }
 
@@ -374,13 +374,13 @@ void Attribution::end(const std::array<std::uint32_t, kListCount>& liveCounts) {
         ++counts_.refractionOk;
     } else if (r.image != nullptr || r.copies != 0 || r.other != 0) {
         ++counts_.refractionBad;
-        note(std::format("refraction copy: image {} (texture {}): {} copies into it, {} at the documented point, {} into other textures", r.image,
+        if (noting()) note(std::format("refraction copy: image {} (texture {}): {} copies into it, {} at the documented point, {} into other textures", r.image,
                          r.api, r.copies, r.inPlace, r.other));
     }
     for (std::size_t l = 0; l < kListCount; ++l) {
         if (liveCounts[l] != frame_->count[l]) {
             ++counts_.countMismatch;
-            note(std::format("list {} has {} ops at Execute's end, {} at its entry", name(static_cast<List>(l)), liveCounts[l], frame_->count[l]));
+            if (noting()) note(std::format("list {} has {} ops at Execute's end, {} at its entry", name(static_cast<List>(l)), liveCounts[l], frame_->count[l]));
         }
     }
     for (Op& op : frame_->ops) {
@@ -393,11 +393,11 @@ void Attribution::end(const std::array<std::uint32_t, kListCount>& liveCounts) {
         if (op.entered == 0) {
             ++counts_.notEntered;
             op.notes |= NoteNotEntered;
-            note(std::format("never entered: {}", where(op)));
+            if (noting()) note(std::format("never entered: {}", where(op)));
         }
         if (op.draws > 0 && cannotDraw(op)) {
             ++counts_.stateContradiction;
-            note(std::format("drew {} times although its draw condition {} says nothing: {}", op.draws, op.state, where(op)));
+            if (noting()) note(std::format("drew {} times although its draw condition {} says nothing: {}", op.draws, op.state, where(op)));
         }
         const std::uint32_t node = op.raw.desc >> 8;
         if (op.kind == OpKind::Mesh && node != 0 && node != 0xffffff) op.notes |= NoteHierarchy;
@@ -419,7 +419,7 @@ void Attribution::end(const std::array<std::uint32_t, kListCount>& liveCounts) {
             } else {
                 if (op.entered != 0) op.notes |= NoteZeroGeometry;
                 ++b.zeroOther;
-                note(std::format("0 draws, not explained: {} (state {:#x})", where(op), op.state));
+                if (noting()) note(std::format("0 draws, not explained: {} (state {:#x})", where(op), op.state));
             }
         } else if (op.draws > 1) {
             ++b.multi;
@@ -472,12 +472,12 @@ void Attribution::end(const std::array<std::uint32_t, kListCount>& liveCounts) {
             if (!explained) {
                 ++b.multiOther;
                 std::string draws;
-                for (std::size_t i = 0; i < std::min<std::size_t>(op.draws, op.brief.size()); ++i) {
+                for (std::size_t i = 0; noting() && i < std::min<std::size_t>(op.draws, op.brief.size()); ++i) {
                     const Op::Brief& br = op.brief[i];
                     draws += std::format(" [vs {:016x} ps {:016x} blend {} {}/{} zfunc {}{}]", br.vs, br.ps, br.blend & 1, (br.blend >> 8) & 0xff,
                                          (br.blend >> 16) & 0xff, br.blend >> 24, br.colorWrite ? "" : " no colour");
                 }
-                note(std::format("{} draws, not explained: {} (overlay {:#x}, {} instanced, {} additive, {} without colour, {} with another VS){}", op.draws,
+                if (noting()) note(std::format("{} draws, not explained: {} (overlay {:#x}, {} instanced, {} additive, {} without colour, {} with another VS){}", op.draws,
                                  where(op), op.overlay, op.instancedDraws, op.additiveDraws, op.noColorDraws, op.otherVsDraws, draws));
             }
         }

@@ -1884,6 +1884,8 @@ void StaticOps::issue() {
 
     // restore
     tag = savedTag;
+    // (native.lean_restore off, a lean op: the device keeps our last draw's state; measurement only)
+    if (!leanRestore_ && leanCollect_ && leanBlock_ == 0) return;
     dev_.setVertexShaderRef(vs);
     dev_.setPixelShaderRef(ps);
     dev_.setVertexDecl(decl);

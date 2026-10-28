@@ -331,6 +331,7 @@ bool Device::create(const DeviceOptions& options) {
         st.freq = 1;
     }
     samplerSlotCache_.fill(UINT32_MAX);
+    samplerMemo_ = {};
     created_ = true;
     beginFrame();
     if (!resize(options.width, options.height)) {
@@ -2169,8 +2170,20 @@ std::uint32_t Device::samplerIndex(std::uint32_t slot) {
     if (samplerSlotCache_[slot] != UINT32_MAX) {
         return samplerSlotCache_[slot];
     }
+    auto& memo = samplerMemo_[slot];
+    const std::uint32_t* row = samp_[slot].data();
+    for (std::size_t i = 0; i < memo.size(); ++i) {
+        if (memo[i].index != UINT32_MAX && std::memcmp(memo[i].states.data(), row, sizeof(memo[i].states)) == 0) {
+            samplerSlotCache_[slot] = memo[i].index;
+            if (i != 0) std::swap(memo[0], memo[i]);
+            return memo[0].index;
+        }
+    }
     const std::uint32_t index = lookupSampler(slot);
     samplerSlotCache_[slot] = index;
+    memo[1] = memo[0];
+    std::memcpy(memo[0].states.data(), row, sizeof(memo[0].states));
+    memo[0].index = index;
     return index;
 }
 

@@ -265,6 +265,8 @@ public:
 
 private:
     void note(std::string text);
+    // (a view keeps its first 12 mismatches: the text of later ones is not even formatted; O2b: lean frames met many per view)
+    bool noting() const { return mismatches_.size() < 12; }
     FrameDesc* frame_ = nullptr;
     std::size_t next_ = 0;            // global index of the op expected next
     const Op* current_ = nullptr;     // the op last entered

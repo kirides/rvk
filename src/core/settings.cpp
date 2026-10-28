@@ -1844,12 +1844,16 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .label = "Native frame: lean ops",
         .category = "Debug views",
         .tab = kTabDebug,
-        .description = "O2a (docs/research/engine-frame/opt-plan.md): for the composed ops of the mesh-like groups (static meshes, alpha / "
-                       "refracted meshes, overlays, decals, sky, billboards, sky cube faces) the engine's render code is not run at all; "
-                       "its side effects (texture / material touches, lightmaps, stream 3, the instance sort, the billboard queue reset, "
-                       "the sky's clouds and first-use creation) are run by the renderer. rvk.log `native: lean` every 5 s.",
+        .description = "O2a / O2b (docs/research/engine-frame/opt-plan.md; default on, acts where a group takes over: Full): for the "
+                       "composed ops (static / alpha / refracted meshes, overlays, decals, sky, billboards, sky cube faces, skinned actors, "
+                       "SpeedTrees, vegetation, the shadow maps' z ops, particles, strips, light streaks, rain) the engine's render code is "
+                       "not run at all; its side effects (texture / material touches, lightmaps, stream 3, the instance sort, the "
+                       "billboard queue reset, the sky's clouds, the actors' palettes, the tree queues' sort and MaskReference, the "
+                       "vegetation cursor, the particles' master / in-slot simulation / inactivity timer / depth sort / first-use "
+                       "creation) are run by the renderer. Off with a compare unless native.lean_check is set. rvk.log `native: lean` "
+                       "every 5 s.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
     });
     r.nativeLeanCheck = &reg.add({
@@ -1863,6 +1867,18 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .min = 0,
         .max = 1000,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
+    r.nativeLeanRestore = &reg.add({
+        .key = "native.lean_restore",
+        .label = "Native frame: device restore around lean ops",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "O2b measurement switch: off = the device state is not saved / restored around the draws of an op whose engine "
+                       "code is skipped (the engine's state caches then no longer match the device for the engine code that still "
+                       "runs: an A/B of the restore's cost only).",
+        .type = Type::Bool,
+        .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
     });
     r.nativeCoverage = &reg.add({

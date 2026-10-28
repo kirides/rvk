@@ -1420,6 +1420,13 @@ private:
     mutable float reverseK_ = 0.99f;  // the last k computed from a valid camera
     // bindless sampler index per slot (UINT32_MAX = look it up again after a SetSamplerState)
     std::array<std::uint32_t, kSamplerCount> samplerSlotCache_{};
+    // O2b: the last two state rows per slot and their samplers (the native composition's per-op device restore flips a stage
+    // between the engine's states and a composed draw's: both stay found without the hashed, locked lookup)
+    struct SamplerMemo {
+        std::array<std::uint32_t, SAMP_COUNT> states{};
+        std::uint32_t index = UINT32_MAX;
+    };
+    std::array<std::array<SamplerMemo, 2>, kSamplerCount> samplerMemo_{};
     std::uint32_t instanceCount_ = 1;
     FrameStats stats_;
 

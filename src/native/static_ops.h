@@ -104,6 +104,8 @@ public:
     // opt-side-effects-mesh.md 7). check = N: every N-th frame the engine's code runs as before (its draws dropped, the
     // compare active), 0 never.
     void setLean(bool on, int check);
+    // native.lean_restore (O2b measurement): false = no device save / restore around a lean op's draws
+    void setLeanRestore(bool on) { leanRestore_ = on; }
     bool inSkyCube() const { return inSkyCube_; }
     void nonOpEnd();
     // an engine draw of the main view (op = the executing op, null: none); true = drop it (we drew the op ourselves)
@@ -367,6 +369,7 @@ private:
     void issue();
     // ---- O2a lean ops (static_ops_lean.cpp) ----
     bool lean_ = false;
+    bool leanRestore_ = true;
     int leanCheck_ = 0;
     std::uint64_t leanFrameNo_ = ~0ull;
     sc::LeanFrame leanFrameKind_ = sc::LeanFrame::Lean;
