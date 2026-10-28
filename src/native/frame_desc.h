@@ -94,7 +94,8 @@ enum OpNote : std::uint16_t {
     NoteNothingToDraw = 1u << 12, // the context's own condition says nothing is drawn (strip < 2 segments, precipitation off,
                                   // particle emitter without live particles), read from the engine at Execute's end
     NoteTreeLod = 1u << 13,       // a SpeedTree op without a draw: every queued tree is at a LOD without geometry of the op's
-                                  // type (RenderFronds 0x6f1b0f: a batch whose strip length is 0 is not drawn)
+                                  // type (RenderFronds 0x6f1b0f: a batch whose strip length is 0 is not drawn); checked at the
+                                  // slot's entry (frame_tap treeState) since N5.4
     NoteNoQuads = 1u << 14,       // a particle op with live particles but no draw: eCParticle_PS::UpdateVertices returns
                                   // `primitives != 0` (0x5d6e13): the emitter built no quad this tick
     NoteOverlay = 1u << 15,       // the entity's overlay flags (+0x28: 0x400000 burned, 0x200000 frozen, 0x800000 highlighted)
@@ -133,7 +134,10 @@ struct Op {
                                      // PS+0x18 & 1 ? 1 + drops alive (PS+0xe0 - PS+0xc8) : 0; particle: live particles PS+0x390;
                                      // tree billboard: its resource cached at Execute's entry 1 / 0; mesh: bits 1 resource
                                      // cached, 2 visual, 4 materials cached, 8 shaders, at Execute's entry; skinned: bits 1 actor,
-                                     // 2 matrices, 4 resource cached, 8 shader, 16 passes, at the slot's entry); -1 = not read
+                                     // 2 matrices, 4 resource cached, 8 shader, 16 passes, at the slot's entry; SpeedTree: bits 1
+                                     // render buffer + queue, 2 shader + TransformationType, 4 a tree with the type's geometry at
+                                     // its LOD; vegetation: bits 1 instances in a visible node, 2 mesh cached, 4 the shared
+                                     // buffer, 8 the first sub-mesh's shader; both at the slot's entry); -1 = not read
     std::uint32_t overlay = 0;       // mesh / skinned ops: the entity's overlay flags (+0x28 & 0xe00000)
     std::uint16_t notes = 0;         // OpNote, set by Attribution::end for ops with 0 or > 1 draws
 };

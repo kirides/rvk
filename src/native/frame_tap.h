@@ -73,6 +73,7 @@ private:
     QsortFn qsort_ = nullptr;
     std::array<CompareFn, kListCount> compare_{};
     const std::uint8_t* engineBase_ = nullptr;
+    void* (*vegAdmin_)() = nullptr;  // eCVegetationAdmin's getter (FUN_180265df0), resolved at the first vegetation op
 
     bool executing_ = false;
     void* db_ = nullptr;

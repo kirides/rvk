@@ -56,6 +56,8 @@ public:
         Billboards,  // N5.2c: eCBillboardAdmin::RenderBillboards, the opaque billboards' queue (group bit 16)
         SkyCube,     // N5.2c: the sky environment cube's faces (eCSkydome_PS::Render with the cube camera; group bit 32)
         Actors,      // N5.3: the skinned actors' ops (eCRenderContextAnimation2: z / solid / alpha / refracted lists; group bit 64)
+        Trees,       // N5.4: SpeedTree ops (branches, fronds, leaf cards / meshes) + the tree billboards' ops (z / solid; group bit 128)
+        Vegetation,  // N5.4: the grass / vegetation ops (eCRenderContextVegetation: z / solid; group bit 256)
         Count
     };
     static constexpr std::size_t kGroups = static_cast<std::size_t>(Group::Count);
@@ -89,7 +91,7 @@ public:
 
     enum class Skip : std::uint8_t {
         None, Kind, Overlay, ShaderClass, Version, InvalidShader, NotCompiled, Switch, Primitive, ImageOverride, Unreadable, PassKind,
-        Sort, Texture, OverlayShader, DecalProxy, NotCreated, VisualShader, SkyCamera, SkyRebuilt, Bones, Count
+        Sort, Texture, OverlayShader, DecalProxy, NotCreated, VisualShader, SkyCamera, SkyRebuilt, Bones, Shadow, Count
     };
     static const char* name(Skip s);
 
@@ -174,7 +176,10 @@ private:
     // ExecutePass: `shader` = the base shader (SetSwitch, depth bias), `owner` = the pass's version owner (states, pools, samplers)
     Skip passDraw(const std::uint8_t* shader, const std::uint8_t* owner, const std::uint8_t* version, const sc::Pass& pass,
                   const Geom& geometry, bool overlay);
-    Skip specialPassDraw(const std::uint8_t* shader, const Geom& geometry);
+    // ExecuteSpecialPass(option) 0x6d1cd0: the special pass type * 2 + option (SpeedTree z passes: option 1)
+    Skip specialPassDraw(const std::uint8_t* shader, const Geom& geometry, bool option = false);
+    // eCMeshResource2::RenderZPass 0x7603b0 (world null: no SetWorldMatrix / SetGlobalAlpha; sub 0xff: the whole mesh)
+    Skip meshZDraws(const std::uint8_t* res, std::uint32_t sub, std::uint32_t node, const float* world, bool option);
     Skip adminSamplers(sc::DrawDesc& d, const std::uint8_t* owner, const d3d9::Shader* ps);
     bool geometryOf(const std::uint8_t* res, Geom& g, int stream3);  // stream3: 0 off, 1 on, -1 as the record has it
     sc::DrawDesc& drawFrom(const Geom& g);
@@ -185,6 +190,7 @@ private:
     void applySwitch(const std::uint8_t* shader, std::int32_t switchValue, Skip& skip);
     void writeWorld(std::uint32_t slot, const float* m);
     void writeAlpha(std::uint32_t slot, float a);
+    void writeTreeInstance(std::uint32_t slot, const float v[2]);  // SetSpeedTreeInstanceData 0x6c9eb0: c32 + 4 slot .xy
     void writeLighting(const sc::Pass& pass);
     std::uint32_t bindLightmaps(const std::uint8_t* res);
     void capture(const d3d9::DrawTapInfo& t, sc::DrawDesc& out);
@@ -209,6 +215,17 @@ private:
     // UpdateRenderMatrices will (X[i] *= W[i] with the engine's own affine product)
     bool paletteMatrix(const std::uint8_t* wrapper, std::uint32_t bone, float out[16]);
     void writeBone(std::uint32_t slot, const float* m);
+    // the SpeedTree / tree billboard / vegetation ops (static_ops_trees.cpp)
+    bool verifyTrees();
+    Skip composeTree(const Op& op);
+    Skip composeTreeBillboard(const Op& op);
+    Skip composeVegetation(const Op& op);
+    // the view from a material shader's admin (+0x220) + the mirror (false: another admin / not composable)
+    bool viewAndMirror(const std::uint8_t* shader);
+    // the wind registers of the admin's VS pool as their writers set them: c14..c29 (eCShaderMaterialAdmin::SetSpeedTreeData
+    // 0x6b7df0 from eCSpeedTreeAdmin +0xac / +0x6c and the application camera), c12 (eCVegetationAdmin::Process 0x7016b0)
+    void treeWind();
+    void grassWind();
     // the sky dome op (static_ops_sky.cpp)
     Skip composeSky(const Op& op);
     Skip composeSkyDraws(const std::uint8_t* sky, const std::uint8_t* camera);
@@ -270,7 +287,33 @@ private:
     // the sky cube's faces: UpdateSkydomeEnvCubemap's BeginMaterial binds the admin stages, then SetRenderTarget(face) unbinds all
     // 16 stages (eCDX9Device / HalDevice::SetRenderTarget): s0 / s1 / s2 / s4 / s5 are empty at the faces' draws
     bool adminStagesUnbound_ = false;
-    int decalsVerified_ = 0, billboardsVerified_ = 0, skyVerified_ = 0, actorsVerified_ = 0;
+    int decalsVerified_ = 0, billboardsVerified_ = 0, skyVerified_ = 0, actorsVerified_ = 0, treesVerified_ = 0;
+    // N5.4 (static_ops_trees.cpp): the admins' getters (FUN_18025a6d0 eCSpeedTreeAdmin, FUN_180265df0 eCVegetationAdmin), the queue
+    // comparators (SortInstances 0x6f2180, SortInstancesZPass 0x6f2120), the billboards' fixed tex-coord table (0xbfcbd0)
+    void* (*treeAdmin_)() = nullptr;
+    void* (*vegAdmin_)() = nullptr;
+    int (*treeCmp_)(const void*, const void*) = nullptr;
+    int (*treeCmpZ_)(const void*, const void*) = nullptr;
+    const std::uint8_t* bbTexCoords_ = nullptr;
+    // the MaskReference a path writes into a shader before its draws (SpeedTree: 80): null none
+    const std::uint8_t* maskRefShader_ = nullptr;
+    std::uint8_t maskRefOverride_ = 0;
+    std::uint8_t maskRefOf(const std::uint8_t* owner) const;
+    const void* leafsVtable_ = nullptr;  // ??_7eCShaderLeafs (0x9d7be8), accepted by shaderClassOk once verifyTrees checked its slots
+    std::string skipWhy_;                // the reason of the last skip (diagnostics)
+    const void* skipShader_ = nullptr;   // the vtable of the last ShaderClass skip's shader
+    std::uint32_t treeSkipsLogged_ = 0;
+    const std::uint8_t* pendingVersion_ = nullptr;  // diagnostics of uncompiled special passes
+    std::size_t pendingIdx_ = 0;
+    std::uint32_t pendingLogged_ = 0;
+    // admin VS registers c0..c30 composed natively in this op (bit r; c0..c11 and c30 always)
+    std::uint32_t nativeVs_ = 0;
+    struct TreeStats {
+        std::uint64_t ops = 0, zeroOps = 0, hardware = 0, software = 0, instances = 0, batches = 0, sortedCopies = 0, undrawnBatches = 0;
+        std::array<std::uint64_t, 4> types{};  // branches, fronds, leaf cards, leaf meshes
+        std::uint64_t leafLods = 0, wrongTransformation = 0, billboardOps = 0, billboardTexCoords = 0;
+        std::uint64_t grassOps = 0, grassZeroOps = 0, grassNodes = 0, grassInstances = 0, grassDraws = 0, grassWraps = 0, grassNotCached = 0, grassClockMoved = 0;
+    } treeWindow_, treeTotal_;
     // the skinned actors (static_ops_actors.cpp): the frame admin getter eCAnimation_PS::Render calls first (frame id at +0x4c), the
     // affine product of UpdateRenderMatrices (FUN_1800a2710: a *= b)
     void* (*frameAdmin_)() = nullptr;

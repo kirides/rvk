@@ -50,6 +50,16 @@ std::size_t buildPasses(const PassInputs& in, std::vector<Pass>& out) {
     return out.size() - before;
 }
 
+void billboardPassPairs(std::vector<Pass>& passes) {
+    const std::size_t n = passes.size();
+    for (Pass& p : passes) p.flags = (p.flags & 0xfffff7ffu) | 0x400u;
+    passes.resize(2 * n);
+    for (std::size_t i = 0; i < n; ++i) {
+        passes[n + i] = passes[i];
+        passes[n + i].flags = (passes[i].flags & 0xfffffbffu) | 0x800u;
+    }
+}
+
 // ---- states ---------------------------------------------------------------------------------------------------------------
 
 bool isBlended(const BlendInputs& b) {
@@ -371,7 +381,7 @@ const char* name(Field f) {
         "draw count", "draw tag", "vs", "ps", "declaration", "streams", "indices", "range", "vertex / index data", "zfunc", "zwrite", "blend", "colour write", "alpha test",
         "cull", "fill", "fog state", "texture", "sampler state", "vs bool", "vs int", "ps bool", "ps int",
         "vs camera c0-3", "vs inv proj c4-7", "vs inv view c8-10", "vs cam pos c11", "vs admin other", "vs fog c30", "vs instance c32+",
-        "vs global other", "vs material c232+",
+        "vs global other", "vs material c232+", "vs wind c12 c14-22", "vs leaf angles c23-29",
         "ps cam pos c0", "ps screen c1", "ps reserved", "ps fog colour c3", "ps fog c4", "ps obstacle c5.xy", "ps mask ref c5.w",
         "ps material c6-13", "ps indoor c14", "ps SH c15-21", "ps sun c22-24", "ps lights c25+", "unowned constant"};
     const auto i = static_cast<std::size_t>(f);
@@ -384,6 +394,8 @@ Field vsField(std::uint32_t reg, std::uint32_t c) {
     if (reg <= 10) return c == 3 ? Field::VsAdminOther : Field::VsInvView;
     if (reg == 11) return Field::VsCamPos;
     if (reg == 30) return Field::VsFog;
+    if (reg == 12 || (reg >= 14 && reg <= 22)) return Field::VsWind;
+    if (reg >= 23 && reg <= 29) return Field::VsLeaves;
     if (reg < 31) return Field::VsAdminOther;
     if (reg == 31) return Field::VsGlobalOther;
     if (reg < 232) return Field::VsInstance;
@@ -675,6 +687,120 @@ MorphPick pickMorphTargets(std::span<const float> weights) {
         }
     }
     return p;
+}
+
+}  // namespace rvk::native::sc
+
+// ---- N5.4: SpeedTree, vegetation (README.md "11. N5.4 result") ----------------------------------------------------------------
+
+namespace rvk::native::sc {
+
+void planTreeBatches(std::span<const TreeInstance> instances, std::uint8_t limit, bool byLight, bool byStrip, std::vector<TreeBatch>& out) {
+    out.clear();
+    // the engine's loop: count (8 bit), the previous instance's strip (0xffff before the first), light list and flags
+    std::uint8_t count = 0;
+    std::uint16_t prevStrip = 0xffff;
+    const void* prevList = nullptr;
+    bool prevAlone = false;
+    for (std::uint32_t i = 0; i < instances.size(); ++i) {
+        const TreeInstance& t = instances[i];
+        bool split = count == limit;
+        if (byStrip && t.strip != prevStrip) split = true;
+        if (byLight && (t.list != prevList || t.alone || prevAlone)) split = true;
+        if (split) {
+            // the batch so far is drawn (when it holds an instance); the next one starts with this instance's strip / start
+            count = 0;
+            prevStrip = t.strip;
+        }
+        if (out.empty() || (split && out.back().count != 0)) {
+            out.push_back({i, 0, t.strip, t.start});
+        } else if (split) {
+            out.back() = {i, 0, t.strip, t.start};
+        }
+        ++out.back().count;
+        prevList = t.list;
+        prevAlone = t.alone;
+        ++count;
+    }
+}
+
+TreeRange treeRange(TreeGeometry g, bool hardware, std::uint32_t count, std::uint16_t strip, std::uint16_t start, std::uint16_t vertsPerInstance,
+                    std::uint16_t leafIndices) {
+    TreeRange r;
+    if (g == TreeGeometry::Leaves) {
+        const std::uint32_t perInstance = leafIndices / 3u;
+        r.startIndex = start;
+        r.numVertices = hardware ? vertsPerInstance : count * vertsPerInstance;
+        r.primCount = hardware ? perInstance : count * perInstance;
+    } else if (hardware) {
+        r.numVertices = vertsPerInstance;
+        r.primCount = static_cast<std::uint32_t>(strip) - 2u;
+        r.startIndex = g == TreeGeometry::Branches ? 0u : start;
+    } else {
+        r.numVertices = count * vertsPerInstance;
+        r.startIndex = start;
+        r.primCount = (static_cast<std::uint32_t>(strip) + 2u) * count - 4u;
+    }
+    if (hardware) r.freq0 = count | 0x40000000u;
+    return r;
+}
+
+std::uint32_t planGrass(std::span<const GrassNode> nodes, std::uint32_t cursor, bool zpass, std::vector<GrassDraw>& out) {
+    out.clear();
+    std::uint32_t offset = cursor, count = 0, batchFirst = 0;
+    std::int32_t illum = -1;
+    const void* prevList = nullptr;
+    bool prevAlone = false;
+    const auto draw = [&] {
+        out.push_back({batchFirst, count, offset, illum});
+        batchFirst += count;
+        count = 0;
+    };
+    for (std::uint32_t i = 0; i < nodes.size(); ++i) {
+        const GrassNode& n = nodes[i];
+        if (!zpass && (n.lightSet != prevList || n.alone || prevAlone)) {
+            prevList = n.lightSet;
+            if (count != 0) {
+                draw();
+                offset = cursor;
+            }
+            illum = static_cast<std::int32_t>(i);
+            prevAlone = n.alone;
+        }
+        std::uint32_t k = 0;
+        if (n.count == 0) continue;
+        while (k < n.count) {
+            const std::uint32_t take = std::min(n.count - k, kGrassBufferInstances - cursor);
+            if (take == 0) break;
+            cursor += take;
+            count += take;
+            k += take;
+            if (cursor == kGrassBufferInstances) {
+                draw();
+                cursor = 0;
+                offset = 0;
+            }
+        }
+        if (k == 0) break;  // nothing could be written (the engine draws what it has and returns)
+    }
+    if (count != 0) draw();
+    return cursor;
+}
+
+void grassInstance(const std::uint8_t* entry, bool wind, bool lift, std::uint8_t* out) {
+    const float one = 1.0f, zero = 0.0f, lifted = 0.8f;
+    std::memcpy(out, entry + 4, 12);
+    std::memcpy(out + 0xc, wind ? &one : &zero, 4);
+    std::memcpy(out + 0x10, entry + 0x10, 16);
+    std::memcpy(out + 0x20, entry + 0x20, 8);
+    std::memcpy(out + 0x28, lift ? &lifted : &zero, 4);
+}
+
+void vegetationAlpha(float start, float end, std::uint8_t maskRef, float& x, float& y) {
+    // single precision throughout (movss / subss / divss in the engine): DAT_1809f1698 1.0, DAT_1809f1560 1/256, DAT_1809f1854 -1.0
+    const float r = (end - start) / (1.0f - static_cast<float>(maskRef) * (1.0f / 256.0f));
+    x = -1.0f / r;
+    y = (r + start) / r;
 }
 
 }  // namespace rvk::native::sc

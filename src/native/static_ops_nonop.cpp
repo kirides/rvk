@@ -553,19 +553,22 @@ StaticOps::Skip StaticOps::composeBillboards(const std::uint8_t* admin) {
 
 bool StaticOps::geometryBytesEqual(const sc::DrawDesc& c, const sc::DrawDesc& captured, std::string& why) {
     if (c.vertexBytes.empty()) return true;
-    auto* vb = const_cast<d3d9::Buffer*>(static_cast<const d3d9::Buffer*>(captured.streams[0].buffer));
+    const std::uint32_t cs = c.cpuStream;
+    auto* vb = const_cast<d3d9::Buffer*>(static_cast<const d3d9::Buffer*>(captured.streams[cs].buffer));
     auto* ib = const_cast<d3d9::Buffer*>(static_cast<const d3d9::Buffer*>(captured.indices));
     std::vector<std::uint8_t> got(c.vertexBytes.size());
-    if (vb == nullptr || !vb->readCpu(captured.streams[0].offset + captured.minIndex * c.vertexStride, static_cast<std::uint32_t>(got.size()), got.data())) {
-        why = "vertex data unreadable";
+    const std::uint32_t first = cs == 0 ? captured.minIndex : 0u;
+    if (vb == nullptr || !vb->readCpu(captured.streams[cs].offset + first * c.vertexStride, static_cast<std::uint32_t>(got.size()), got.data())) {
+        why = std::format("vertex data of stream {} unreadable", cs);
         return false;
     }
     if (got != c.vertexBytes) {
         std::size_t at = 0;
         while (at < got.size() && got[at] == c.vertexBytes[at]) ++at;
-        why = std::format("vertex data differs at vertex {} byte {:#x}", captured.minIndex + at / c.vertexStride, at % c.vertexStride);
+        why = std::format("vertex data of stream {} differs at vertex {} byte {:#x}", cs, first + at / c.vertexStride, at % c.vertexStride);
         return false;
     }
+    if (c.indexBytes.empty()) return true;
     got.resize(c.indexBytes.size());
     if (ib == nullptr || !ib->readCpu(captured.startIndex * 2, static_cast<std::uint32_t>(got.size()), got.data())) {
         why = "index data unreadable";

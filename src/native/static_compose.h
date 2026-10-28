@@ -76,6 +76,9 @@ struct BlendInputs {
 void fillBlending(RenderStates& rs, const BlendInputs& b, bool additive, float fade);
 // eCShaderBase::IsBlended 0x6d2ef0
 bool isBlended(const BlendInputs& b);
+// eCShaderVersionDefault_3_0::GetPasses 0x6cc970 for TransformationType 11 (SpeedTree billboards): every pass gets VS variant 1
+// (bits 10-11 = 1) and the array is appended again with variant 2
+void billboardPassPairs(std::vector<Pass>& passes);
 // the states FUN_1806cc610 hands to SetCurrentRenderStates for a pass; fade = the global alpha of instance 0 for
 // non-instanced default-VS passes (bit 9 set, bits 10-11 clear), else 1
 RenderStates passStates(std::uint32_t flags, const BlendInputs& b, float fade);
@@ -192,6 +195,64 @@ inline std::uint32_t primitiveBones(std::uint16_t start, std::uint16_t count) {
 // eCShaderDefault::SetBoneMatrix 0x6c9d80: bone b -> the global pool's c(3 (b + 11)) .. +2 (3x4 transpose)
 inline std::uint32_t boneRegister(std::uint32_t b) { return (b + 11) * 3; }
 
+// ---- SpeedTree (eCSpeedTreeRenderBuffer, README.md "11. N5.4 result") ------------------------------------------------------
+
+// an instance of the render queue (0x18-byte entries {tree property set, illumination, depth key}, sorted by the engine) that has
+// geometry of the op's type: branches / fronds with a LOD index >= 0 (tree +0x48 / +0x50), leaves at the leaf LOD being drawn
+// (tree +0x58 or +0x5c)
+struct TreeInstance {
+    std::uint32_t queueIndex = 0;  // its position in the queue
+    std::uint16_t strip = 0;       // branches / fronds: the LOD's strip length (render buffer +0x40 / +0x50 [lod]); leaves: 0
+    std::uint16_t start = 0;       // branches / fronds: the LOD's start index (+0xe8 / +0xf8 [lod]); leaves: 0
+    const void* list = nullptr;    // the illumination's light list (illum +0)
+    bool alone = false;            // the illumination has static SH (+0x90) or static lights (+0xd)
+};
+struct TreeBatch {
+    std::uint32_t first = 0, count = 0;  // instances [first, first + count) of the planned span; the last one's illumination draws it
+    std::uint16_t strip = 0, start = 0;  // of the batch's first instance
+};
+// RenderBranches 0x6f1cd0 / RenderFronds 0x6f1880 / RenderLeafs 0x6f1390 and their z passes (0x6f1030 / 0x6f0cc0 / 0x6f0860): a batch
+// ends before an instance when the batch is full (an 8-bit count equal to the render buffer's limit +0x128 + type), when its strip
+// length differs (byStrip: branches / fronds), or (byLight: the solid passes) when its light list differs or it or the batch's last
+// instance has the per-object light flags
+void planTreeBatches(std::span<const TreeInstance> instances, std::uint8_t limit, bool byLight, bool byStrip, std::vector<TreeBatch>& out);
+// the draw description a batch writes into the visual's record (the rest stays as the record has it)
+struct TreeRange {
+    std::uint32_t numVertices = 0, startIndex = 0, primCount = 0;
+    std::uint32_t freq0 = 0;  // hardware instancing: stream 0 frequency n | 0x40000000 (0: unchanged)
+};
+enum class TreeGeometry : std::uint8_t { Branches, Fronds, Leaves };
+// hardware: eCShaderMaterialAdmin +0x320 != 0 (one instance's counts, stream 0 INDEXEDDATA); software: the n copies of the geometry
+// (strips joined by degenerate links: (strip + 2) n - 4 primitives); branches in hardware mode start at index 0; leaves: the leaf
+// LOD's index count / 3 per instance from its start index
+TreeRange treeRange(TreeGeometry g, bool hardware, std::uint32_t count, std::uint16_t strip, std::uint16_t start, std::uint16_t vertsPerInstance,
+                    std::uint16_t leafIndices);
+
+// ---- vegetation (eCVegetation_PS::Render 0x707800, RenderMeshInstanced 0x707e40) -------------------------------------------------
+
+inline constexpr std::uint32_t kGrassInstanceSize = 0x2c, kGrassBufferInstances = 1000;
+// a visible grid node as Render walks it (the PS's node list +0x98, 0x118-byte entries in their sorted order)
+struct GrassNode {
+    const void* lightSet = nullptr;  // entry +0
+    bool alone = false;              // entry +0xa0 (illumination +0x90 static SH) or +0x1d (+0xd static lights)
+    std::uint32_t count = 0;         // instances of the op's type in the node (grid node +0x30 [type] .count)
+};
+struct GrassDraw {
+    std::uint32_t firstInstance = 0, count = 0;  // the flattened instances (nodes in order) it draws
+    std::uint32_t bufferOffset = 0;              // its first instance's slot in the shared buffer (bytes = slot x 0x2c)
+    std::int32_t illumNode = -1;                 // the node whose illumination (entry +0x10) draws it (-1: null)
+};
+// the shared buffer (1000 instances, cursor = eCVegetationAdmin +0x40 at the op's entry: DISCARD at 0, NOOVERWRITE after) is filled
+// node by node; a draw is made when the buffer is full (the cursor wraps to 0), and in the solid pass before a node whose light set
+// differs from the previous node's or when it or the previous node has the light flags; the rest at the end. Returns the cursor
+// after the op.
+std::uint32_t planGrass(std::span<const GrassNode> nodes, std::uint32_t cursor, bool zpass, std::vector<GrassDraw>& out);
+// one instance's 0x2c bytes from its grid entry (0x2c bytes): position (+4), the wind flag (the type's +0x2c != 0: 1, else 0), the
+// rotation (+0x10, 16 bytes), the scale (+0x20, +0x24), the lift (the type's +0x20 != 0: 0.8, else 0)
+void grassInstance(const std::uint8_t* entry, bool wind, bool lift, std::uint8_t* out);
+// eCShaderDefault::SetVegationAlpha 0x6c9f20: c31.xy = (-1 / R, (R + start) / R), R = (end - start) / (1 - maskRef / 256)
+void vegetationAlpha(float start, float end, std::uint8_t maskRef, float& x, float& y);
+
 // ---- constants ----------------------------------------------------------------------------------------------------------
 
 // eCShaderMaterialAdmin::SetFog 0x6b9fc0: PS c3 = colour, PS c4 = VS c30 = (-start k, k, density, 0), k = 1 / ((end - start) / density)
@@ -272,6 +333,9 @@ struct DrawDesc {
     // of [startIndex, startIndex + 3 primCount) as the engine writes them into its dynamic buffers; empty: static geometry
     std::uint32_t vertexStride = 0;
     std::vector<std::uint8_t> vertexBytes, indexBytes;
+    // the stream the vertex bytes are on: 0 = [minIndex, minIndex + numVertices) of stream 0 with the index bytes; else that
+    // stream's bytes from its offset (the vegetation's instance data on stream 1; no index bytes)
+    std::uint8_t cpuStream = 0;
 };
 
 // what the comparison counts (one class per field group; constants by register group)
@@ -279,6 +343,8 @@ enum class Field : std::uint8_t {
     DrawCount, Tag, Vs, Ps, Decl, Streams, Indices, Range, GeometryData, ZFunc, ZWrite, Blend, ColorWrite, AlphaTest, Cull, Fill, Fog, Texture, SamplerState,
     VsBool, VsInt, PsBool, PsInt,
     VsCamera, VsInvProj, VsInvView, VsCamPos, VsAdminOther, VsFog, VsInstance, VsGlobalOther, VsMaterial,
+    VsWind,   // c12 vegetation wind, c14..c22 the SpeedTree wind matrices (N5.4)
+    VsLeaves, // c23..c25 the leaf angle matrix (camera), c26..c29 the rock / rustle angles (N5.4)
     PsCamPos, PsScreen, PsReserved, PsFogColor, PsFog, PsObstacle, PsMaskRef, PsMaterial, PsIndoor, PsSh, PsSun, PsLights,
     UnownedConstant, Count
 };

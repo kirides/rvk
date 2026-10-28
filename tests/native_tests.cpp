@@ -575,3 +575,122 @@ TEST(native_attribution_skinned_zero_draws) {
     op.state = -1;
     CHECK(!native::nothingToDraw(op));
 }
+
+TEST(tree_batches_follow_render_branches) {
+    int l1 = 0, l2 = 0;
+    // solid branches: breaks on the strip length, the light list, the light flags (the instance's or the batch's last) and the limit
+    std::vector<sc::TreeInstance> in = {
+        {0, 100, 0, &l1, false}, {1, 100, 0, &l1, false}, {2, 60, 900, &l1, false},  // strip change
+        {3, 60, 900, &l2, false},                                                    // light list change
+        {4, 60, 900, &l2, true},                                                     // static lights: alone
+        {5, 60, 900, &l2, false},                                                    // after an alone one
+        {6, 60, 900, &l2, false}, {7, 60, 900, &l2, false},                         // limit 2
+    };
+    std::vector<sc::TreeBatch> b;
+    sc::planTreeBatches(in, 2, true, true, b);
+    CHECK(b.size() == 6);
+    CHECK(b[0].first == 0 && b[0].count == 2 && b[0].strip == 100 && b[0].start == 0);
+    CHECK(b[1].first == 2 && b[1].count == 1 && b[1].strip == 60 && b[1].start == 900);
+    CHECK(b[2].first == 3 && b[2].count == 1);
+    CHECK(b[3].first == 4 && b[3].count == 1);
+    CHECK(b[4].first == 5 && b[4].count == 2);
+    CHECK(b[5].first == 7 && b[5].count == 1);
+    // the z pass: strip and limit only (no light list)
+    sc::planTreeBatches(in, 50, false, true, b);
+    CHECK(b.size() == 2 && b[0].count == 2 && b[1].count == 6);
+    // leaves in the z pass: the limit only; a null light list never opens a batch by itself, the first instance always does
+    std::vector<sc::TreeInstance> leaves(5);
+    sc::planTreeBatches(leaves, 2, false, false, b);
+    CHECK(b.size() == 3 && b[0].count == 2 && b[1].count == 2 && b[2].count == 1 && b[2].first == 4);
+    sc::planTreeBatches(std::span<const sc::TreeInstance>{}, 50, true, true, b);
+    CHECK(b.empty());
+    // a batch starts with its first instance's start index even when a later one's differs (strips equal)
+    std::vector<sc::TreeInstance> same = {{0, 40, 10, nullptr, false}, {1, 40, 500, nullptr, false}};
+    sc::planTreeBatches(same, 50, false, true, b);
+    CHECK(b.size() == 1 && b[0].count == 2 && b[0].start == 10);
+}
+
+TEST(tree_ranges_software_and_hardware) {
+    // software: n copies, strips joined by degenerate links
+    sc::TreeRange r = sc::treeRange(sc::TreeGeometry::Branches, false, 3, 100, 700, 64, 0);
+    CHECK(r.numVertices == 192 && r.startIndex == 700 && r.primCount == 302 && r.freq0 == 0);
+    r = sc::treeRange(sc::TreeGeometry::Fronds, false, 1, 30, 5, 10, 0);
+    CHECK(r.numVertices == 10 && r.startIndex == 5 && r.primCount == 28);
+    r = sc::treeRange(sc::TreeGeometry::Leaves, false, 4, 0, 120, 16, 30);
+    CHECK(r.numVertices == 64 && r.startIndex == 120 && r.primCount == 40);
+    // hardware: one instance's counts, stream 0 INDEXEDDATA | n; branches from index 0
+    r = sc::treeRange(sc::TreeGeometry::Branches, true, 3, 100, 700, 64, 0);
+    CHECK(r.numVertices == 64 && r.startIndex == 0 && r.primCount == 98 && r.freq0 == (0x40000000u | 3));
+    r = sc::treeRange(sc::TreeGeometry::Fronds, true, 2, 30, 5, 10, 0);
+    CHECK(r.startIndex == 5 && r.primCount == 28 && r.freq0 == (0x40000000u | 2));
+    r = sc::treeRange(sc::TreeGeometry::Leaves, true, 7, 0, 120, 16, 30);
+    CHECK(r.numVertices == 16 && r.primCount == 10 && r.startIndex == 120);
+}
+
+TEST(grass_batches_follow_vegetation_render) {
+    int a = 0, b = 0;
+    std::vector<sc::GrassDraw> d;
+    // solid: a new light set closes the batch; nodes without instances still switch the illumination
+    std::vector<sc::GrassNode> nodes = {{&a, false, 10}, {&a, false, 5}, {&b, false, 0}, {&b, false, 7}, {&b, true, 3}, {&b, false, 2}};
+    std::uint32_t end = sc::planGrass(nodes, 100, false, d);
+    CHECK(end == 127);
+    CHECK(d.size() == 4);
+    CHECK(d[0].firstInstance == 0 && d[0].count == 15 && d[0].bufferOffset == 100 && d[0].illumNode == 0);
+    CHECK(d[1].firstInstance == 15 && d[1].count == 7 && d[1].bufferOffset == 115 && d[1].illumNode == 2);
+    CHECK(d[2].firstInstance == 22 && d[2].count == 3 && d[2].bufferOffset == 122 && d[2].illumNode == 4);
+    CHECK(d[3].firstInstance == 25 && d[3].count == 2 && d[3].bufferOffset == 125 && d[3].illumNode == 5);
+    // z pass: one batch until the buffer is full (1000): the draw, then DISCARD at 0
+    std::vector<sc::GrassNode> big = {{&a, false, 600}, {&b, false, 500}};
+    end = sc::planGrass(big, 300, true, d);
+    CHECK(end == 400);
+    CHECK(d.size() == 2 && d[0].count == 700 && d[0].bufferOffset == 300 && d[0].illumNode == -1 && d[1].count == 400 && d[1].bufferOffset == 0 &&
+          d[1].firstInstance == 700);
+    // a full buffer inside a node of the solid pass keeps the node's illumination for the rest
+    end = sc::planGrass(big, 990, false, d);
+    CHECK(d.size() == 4 && d[0].count == 10 && d[0].bufferOffset == 990 && d[0].illumNode == 0 && d[1].count == 590 && d[1].bufferOffset == 0 &&
+          d[1].illumNode == 0 && d[2].count == 410 && d[2].bufferOffset == 590 && d[2].illumNode == 1 && d[3].count == 90 &&
+          d[3].bufferOffset == 0 && d[3].firstInstance == 1010 && end == 90);
+    // a null first light set: no break, no illumination
+    std::vector<sc::GrassNode> dark = {{nullptr, false, 4}};
+    sc::planGrass(dark, 0, false, d);
+    CHECK(d.size() == 1 && d[0].illumNode == -1);
+    // the instance bytes and the fade constants
+    std::uint8_t entry[0x2c], out[0x2c];
+    for (std::size_t i = 0; i < sizeof(entry); ++i) entry[i] = static_cast<std::uint8_t>(i);
+    sc::grassInstance(entry, true, true, out);
+    float w = 0, l = 0;
+    std::memcpy(&w, out + 0xc, 4);
+    std::memcpy(&l, out + 0x28, 4);
+    CHECK(std::memcmp(out, entry + 4, 12) == 0 && w == 1.0f && std::memcmp(out + 0x10, entry + 0x10, 24) == 0 && l == 0.8f);
+    sc::grassInstance(entry, false, false, out);
+    std::memcpy(&w, out + 0xc, 4);
+    std::memcpy(&l, out + 0x28, 4);
+    CHECK(w == 0.0f && l == 0.0f);
+    float x = 0, y = 0;
+    sc::vegetationAlpha(1000.0f, 3000.0f, 128, x, y);
+    CHECK(x == -1.0f / 4000.0f && y == 5000.0f / 4000.0f);
+}
+
+TEST(native_attribution_tree_and_grass_zero_draws) {
+    Op op;
+    op.kind = OpKind::SpeedTree;
+    op.state = 7;
+    CHECK(!native::nothingToDraw(op));
+    op.state = 3;  // no queued tree with the type's geometry at its LOD
+    CHECK(native::nothingToDraw(op) && !native::cannotDraw(op));
+    op.kind = OpKind::Vegetation;
+    op.state = 0xf;
+    CHECK(!native::nothingToDraw(op));
+    op.state = 0xd;  // the mesh not cached
+    CHECK(native::nothingToDraw(op));
+    CHECK(native::sc::vsField(12, 0) == native::sc::Field::VsWind && native::sc::vsField(22, 3) == native::sc::Field::VsWind &&
+          native::sc::vsField(23, 0) == native::sc::Field::VsLeaves && native::sc::vsField(29, 1) == native::sc::Field::VsLeaves &&
+          native::sc::vsField(13, 0) == native::sc::Field::VsAdminOther);
+}
+
+TEST(billboard_passes_pair_variants) {
+    std::vector<sc::Pass> p = {{0x201, nullptr, 0, 0}, {0x245, nullptr, 3, 0}};
+    sc::billboardPassPairs(p);
+    CHECK(p.size() == 4 && p[0].flags == 0x601 && p[1].flags == 0x645 && p[2].flags == 0xa01 && p[3].flags == 0xa45 && p[3].firstLight == 3);
+    CHECK(sc::vsIndex(p[0].flags) == 4 && sc::vsIndex(p[2].flags) == 5);
+}

@@ -113,7 +113,7 @@ void HalDevice::applyStaticOps() {
     const bool compare = rs.nativeStaticOpsCompare != nullptr && rs.nativeStaticOpsCompare->asBool();
     staticOps_->setMode(native::StaticOps::Group::Static, takeOver, compare);
     // N5.2 scene ops (native.scene_ops*): groups 1 alpha / refracted mesh ops, 2 entity overlay passes, 4 decals, 8 sky, 16 billboards,
-    // 32 sky cube faces, 64 skinned actors
+    // 32 sky cube faces, 64 skinned actors, 128 SpeedTrees + tree billboards, 256 vegetation
     const bool sceneTake = rs.nativeSceneOps != nullptr && rs.nativeSceneOps->asBool();
     const bool sceneCompare = rs.nativeSceneOpsCompare != nullptr && rs.nativeSceneOpsCompare->asBool();
     const int groups = rs.nativeSceneOpsGroups != nullptr ? rs.nativeSceneOpsGroups->asInt() : 127;
@@ -126,6 +126,9 @@ void HalDevice::applyStaticOps() {
     staticOps_->setMode(native::StaticOps::Group::SkyCube, sceneTake && (groups & 32) != 0, sceneCompare && (groups & 32) != 0);
     // N5.3: 64 the skinned actors' ops
     staticOps_->setMode(native::StaticOps::Group::Actors, sceneTake && (groups & 64) != 0, sceneCompare && (groups & 64) != 0);
+    // N5.4: 128 the SpeedTree + tree billboard ops, 256 the vegetation ops
+    staticOps_->setMode(native::StaticOps::Group::Trees, sceneTake && (groups & 128) != 0, sceneCompare && (groups & 128) != 0);
+    staticOps_->setMode(native::StaticOps::Group::Vegetation, sceneTake && (groups & 256) != 0, sceneCompare && (groups & 256) != 0);
     frameTap_->setStaticOpsActive(staticOps_->active());
 }
 

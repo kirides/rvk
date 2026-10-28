@@ -80,6 +80,10 @@ bool nothingToDraw(const Op& op) {
                                                            // drops alive (GetNumParticlesAlive 0x71d1e0: PS+0xe0 - PS+0xc8)
         case OpKind::Particle: return op.state == 0;       // no live particle
         case OpKind::SpeedTreeBB: return op.state == 0;    // the billboard mesh resource is not cached (eCResource2 +0x38 != 3)
+        case OpKind::SpeedTree: return op.state != 7;      // render buffer / shader + TransformationType / a tree with the type's
+                                                           // geometry at its LOD (frame_tap treeState, read at the slot's entry)
+        case OpKind::Vegetation: return op.state != 0xf;   // instances in a visible node / the mesh cached / the shared buffer / the
+                                                           // first sub-mesh's shader (frame_tap vegetationState)
         case OpKind::Mesh: return op.state != 0xf;         // resource / visual / materials / shaders not all ready (meshState)
         case OpKind::Animation: return op.state != 0x1f;   // wrapper / matrices / resource / shader / passes not all there (frame_tap
                                                            // animationState, read at the slot's entry)
@@ -384,9 +388,10 @@ void Attribution::end(const std::array<std::uint32_t, kListCount>& liveCounts) {
                 op.notes |= NoteEmptySlot;
                 ++b.zeroEmpty;
             } else if (op.entered != 0 && nothingToDraw(op)) {
-                op.notes |= NoteNothingToDraw;
+                // a SpeedTree op whose trees are all at LODs without the type's geometry: the tree-LOD rule, checked
+                op.notes |= op.kind == OpKind::SpeedTree && (op.state & 3) == 3 ? NoteTreeLod : NoteNothingToDraw;
                 ++b.zeroNothing;
-            } else if (op.entered != 0 && op.kind == OpKind::SpeedTree) {
+            } else if (op.entered != 0 && op.kind == OpKind::SpeedTree && op.state < 0) {
                 op.notes |= NoteTreeLod;
                 ++b.zeroRule;
             } else if (op.entered != 0 && op.kind == OpKind::Particle) {

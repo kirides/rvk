@@ -136,7 +136,7 @@ const char* StaticOps::name(Skip s) {
                                              "permutation not compiled", "switch element", "primitive", "image override", "unreadable",
                                              "pass kind", "instance sort", "texture", "overlay shader", "decal entity proxy",
                                              "buffers not created yet", "visual shader", "sky camera", "sky object rebuilt this frame",
-                                             "more than 66 bones / a bone outside the palette"};
+                                             "more than 66 bones / a bone outside the palette", "a shadow-map z op"};
     const auto i = static_cast<std::size_t>(s);
     return i < std::size(kNames) ? kNames[i] : "?";
 }
@@ -150,6 +150,8 @@ const char* StaticOps::name(Group g) {
         case Group::Billboards: return "scene ops [opaque billboards]";
         case Group::SkyCube: return "scene ops [sky cube faces]";
         case Group::Actors: return "scene ops [skinned actors]";
+        case Group::Trees: return "scene ops [SpeedTrees + tree billboards]";
+        case Group::Vegetation: return "scene ops [vegetation]";
         default: return "?";
     }
 }
@@ -174,7 +176,9 @@ void StaticOps::setMode(Group group, bool takeOver, bool compare) {
                                                    "the main view's sky dome op (stars, sun, moon, dome)",
                                                    "the main view's opaque billboards (eCBillboardAdmin::RenderBillboards)",
                                                    "the sky environment cube's faces (eCSkydome_PS::Render, cube camera)",
-                                                   "the main view's skinned actor ops (eCRenderContextAnimation2: z / solid / alpha / refracted)"};
+                                                   "the main view's skinned actor ops (eCRenderContextAnimation2: z / solid / alpha / refracted)",
+                                                   "the main view's SpeedTree ops (branches, fronds, leaves: batches, LODs) and tree billboard ops",
+                                                   "the main view's vegetation ops (grass: instanced batches from the shared buffer)"};
     spdlog::info("native: {}: {} ({}{}{})", name(group), g.active() ? "on" : "off", kWhat[static_cast<std::size_t>(group)],
                  takeOver ? ", drawn by the renderer" : "", compare ? ", compared with the engine's draws" : "");
 }
@@ -305,7 +309,11 @@ bool StaticOps::composeView(const std::uint8_t* admin, const std::uint8_t* camer
 
 // ---- helpers ----------------------------------------------------------------------------------------------------------------
 
-bool StaticOps::shaderClassOk(const void* shader) { return get<const void*>(shader, 0) == engine_ + kShaderDefaultVtable; }
+bool StaticOps::shaderClassOk(const void* shader) {
+    const void* vt = get<const void*>(shader, 0);
+    // eCShaderLeafs (the SpeedTree leaves' class) shares every slot the composition relies on (checked in verifyTrees)
+    return vt == engine_ + kShaderDefaultVtable || (leafsVtable_ != nullptr && vt == leafsVtable_);
+}
 
 int StaticOps::blendModeOf(const std::uint8_t* owner) const {
     return owner == blendOverrideShader_ && blendOverride_ >= 0 ? blendOverride_ : get<std::int32_t>(owner, 0x50);
@@ -365,6 +373,7 @@ sc::DrawDesc& StaticOps::newDraw() {
     d.vertexStride = 0;
     d.vertexBytes.clear();
     d.indexBytes.clear();
+    d.cpuStream = 0;
     d.vsB = entryVsB_;
     d.psB = entryPsB_;
     std::memcpy(d.vsI, entryVsI_, sizeof(d.vsI));
@@ -392,6 +401,7 @@ StaticOps::Mirror::ShaderPools* StaticOps::poolsOf(const void* shader) {
 
 void StaticOps::initMirror() {
     mirror_.shaders.clear();
+    nativeVs_ = 0xfffu | 1u << 30;  // c0..c11, c30 (the camera, fog)
     U8* admin = view_.admin;
     rd(ptr(admin, 0x240), 0, mirror_.adminVs, sizeof(mirror_.adminVs));
     rd(ptr(admin, 0x220), 0, mirror_.adminPs, sizeof(mirror_.adminPs));
@@ -430,6 +440,13 @@ void StaticOps::writeWorld(std::uint32_t slot, const float* m) {
 void StaticOps::writeAlpha(std::uint32_t slot, float a) {
     const std::uint32_t r = 32 + 4 * slot - 31;
     if (r < 201) mirror_.global[r][3] = a;
+}
+
+void StaticOps::writeTreeInstance(std::uint32_t slot, const float v[2]) {
+    const std::uint32_t r = 32 + 4 * slot - 31;
+    if (r >= 201) return;
+    mirror_.global[r][0] = v[0];
+    mirror_.global[r][1] = v[1];
 }
 
 // FUN_1806cd1d0: the pass's lighting into the lighting pool (c14 .. c37)
@@ -581,7 +598,7 @@ void StaticOps::constantsInto(sc::DrawDesc& d, const std::uint8_t* shader, const
             v = pools->vs[r - pools->vsFirst];
         } else if (r < 31) {
             v = mirror_.adminVs[r];
-            if (r <= 11 || r == 30) src = sc::Src::Native;
+            if ((nativeVs_ >> r & 1u) != 0) src = sc::Src::Native;
         } else if (!defaultClass) {
             // eCShaderBase::GetGlobalShaderConstants is null: nothing else of the path writes these
         } else if (r < 232) {
@@ -651,21 +668,31 @@ StaticOps::Skip StaticOps::materialSamplers(sc::DrawDesc& d, const std::uint8_t*
 
 // ---- composition ------------------------------------------------------------------------------------------------------------
 
-StaticOps::Skip StaticOps::specialPassDraw(const std::uint8_t* shader, const Geom& geometry) {
+std::uint8_t StaticOps::maskRefOf(const std::uint8_t* owner) const {
+    return owner == maskRefShader_ ? maskRefOverride_ : get<std::uint8_t>(owner, 0x58);
+}
+
+StaticOps::Skip StaticOps::specialPassDraw(const std::uint8_t* shader, const Geom& geometry, bool option) {
     U8* admin = view_.admin;
     // ExecuteSpecialPass 0x6d1cd0: the mask reference first (PS c5.w), then the version's special pass
-    if (get<std::int32_t>(shader, 0x50) == 1) mirror_.adminPs[5][3] = static_cast<float>(get<std::uint8_t>(shader, 0x58)) * (1.0f / 256.0f);
+    if (get<std::int32_t>(shader, 0x50) == 1) mirror_.adminPs[5][3] = static_cast<float>(maskRefOf(shader)) * (1.0f / 256.0f);
     const std::int32_t v = get<std::int32_t>(admin, 0x170);
     U8* version = ptr(shader, 0x258 + 8 * static_cast<std::size_t>(v));
     if (version == nullptr) return Skip::None;  // no draw
     if (get<const void*>(version, 0) != engine_ + kVersionDefault3Vtable) return Skip::Version;
     const std::int32_t type = get<std::int32_t>(admin, 0x314, 6);
     if (type == 6) return Skip::None;
-    const std::size_t idx = static_cast<std::size_t>(type) * 2;
+    const std::size_t idx = static_cast<std::size_t>(type) * 2 + (option ? 1u : 0u);
     if (get<std::uint8_t>(version, 0x18 + idx) == 0) return Skip::None;
     U8* vsElem = ptr(version, 0x30 + 16 * idx);
     U8* psElem = ptr(version, 0xf0 + 16 * idx);
-    if (vsElem == nullptr || psElem == nullptr) return Skip::NotCompiled;
+    if (vsElem == nullptr || psElem == nullptr) {
+        skipWhy_ = std::format("special pass {} not compiled (vs {}, ps {}; flag {}, version {})", idx, static_cast<const void*>(vsElem),
+                               static_cast<const void*>(psElem), get<std::uint8_t>(version, 0x18 + idx), static_cast<const void*>(version));
+        pendingVersion_ = version;
+        pendingIdx_ = idx;
+        return Skip::NotCompiled;
+    }
     d3d9::Shader* vs = shaderOfElement(vsElem);
     d3d9::Shader* ps = shaderOfElement(psElem);
     if (vs == nullptr || ps == nullptr) return Skip::None;
@@ -698,11 +725,15 @@ StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8
     const std::uint32_t vsIdx = sc::vsIndex(pass.flags), psIdx = sc::psIndex(pass.flags);
     U8* vsElem = ptr(version, 0x1b0 + 16 * vsIdx);
     U8* psElem = ptr(version, 0x210 + 16 * psIdx);
-    if (vsElem == nullptr || psElem == nullptr) return Skip::NotCompiled;
+    if (vsElem == nullptr || psElem == nullptr) {
+        skipWhy_ = std::format("pass flags {:#x}: vs {} ({}) / ps {} ({}) not compiled", pass.flags, vsIdx, static_cast<const void*>(vsElem), psIdx,
+                               static_cast<const void*>(psElem));
+        return Skip::NotCompiled;
+    }
     writeLighting(pass);
     sc::BlendInputs b;
     b.mode = blendModeOf(owner);
-    b.maskRef = get<std::uint8_t>(owner, 0x58);
+    b.maskRef = maskRefOf(owner);
     b.hasOpacity = get<std::uint8_t>(owner, 0x330) != 0;
     b.refracted = get<std::uint8_t>(owner, 0x420) != 0;
     b.tradeAlphaAsSolid = get<std::uint8_t>(owner, 0x79) != 0;
@@ -711,7 +742,10 @@ StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8
     if (rs.alphaTest == 2) mirror_.adminPs[5][3] = static_cast<float>(rs.alphaRef) * (1.0f / 256.0f);
     d3d9::Shader* vs = shaderOfElement(vsElem);
     d3d9::Shader* ps = shaderOfElement(psElem);
-    if (vs == nullptr || ps == nullptr) return Skip::NotCompiled;
+    if (vs == nullptr || ps == nullptr) {
+        skipWhy_ = std::format("pass flags {:#x}: no translated shader for vs {} / ps {}", pass.flags, vsIdx, psIdx);
+        return Skip::NotCompiled;
+    }
     sc::DrawDesc& d = drawFrom(geometry);
     const sc::Visual& vis = geometry.visual;
     d.passFlags = pass.flags;
@@ -779,7 +813,8 @@ StaticOps::Skip StaticOps::subMeshDraws(const std::uint8_t* res, const std::uint
     if (!shaderClassOk(shader)) return Skip::ShaderClass;
     U8* admin = ptr(shader, 0x220);
     if (admin != view_.admin) return Skip::Unreadable;
-    if (!instanced) {
+    if (!instanced && world != nullptr) {
+        // eCSubMesh::Render: SetGlobalAlpha(*fade, 0) / SetWorldMatrix(world, 0) when given (the tree billboards pass neither)
         writeAlpha(0, fade);
         writeWorld(0, world);
     }
@@ -893,7 +928,14 @@ StaticOps::Skip StaticOps::shaderPasses(const std::uint8_t* owner, const sc::Pas
     b.tradeAlphaAsSolid = get<std::uint8_t>(owner, 0x79) != 0;
     sc::PassInputs in = base;
     in.zFill = get<std::uint8_t>(owner, 0x2d8) != 0 && sc::isBlended(b);
+    const std::size_t before = out.size();
     sc::buildPasses(in, out);
+    // TransformationType 11 (SpeedTree billboards, GetPasses 0x6cc970's end): every pass of the shared array becomes VS variant 1
+    // and is appended again as variant 2 (the array: only this shader's passes when it is the base shader)
+    if (get<std::int32_t>(owner, 0x2b8) == 11) {
+        if (before != 0) return Skip::Overlay;  // an overlay material of the billboards' class: the array holds the base's passes too
+        sc::billboardPassPairs(out);
+    }
     version = ver;
     return Skip::None;
 }
@@ -903,14 +945,17 @@ StaticOps::Skip StaticOps::composeZ(const Op& op) {
     U8* res = ptr(ctx, 0x28);
     U8* entity = ptr(ctx, 0x10);
     if (res == nullptr) return Skip::None;
-    if (get<std::int32_t>(res, 0x38) != 3 || ptr(res, 0x88) == nullptr) return Skip::None;
     float world[16];
     if (!rd(entity, 0x60, world, 64)) return Skip::Unreadable;
+    return meshZDraws(res, op.raw.desc & 0xffu, op.raw.desc >> 8, world, false);
+}
+
+StaticOps::Skip StaticOps::meshZDraws(const std::uint8_t* res, std::uint32_t sub, std::uint32_t node, const float* world, bool option) {
+    if (get<std::int32_t>(res, 0x38) != 3 || ptr(res, 0x88) == nullptr) return Skip::None;
     Geom geometry;
     if (!geometryOf(res, geometry, 0)) return Skip::Primitive;
     U8* subs = ptr(res, 0x58);
     const std::int32_t count = get<std::int32_t>(res, 0x60);
-    const std::uint32_t sub = op.raw.desc & 0xffu, node = op.raw.desc >> 8;
     const auto shaderOfSub = [&](std::uint32_t i, bool needCached) -> U8* {
         U8* m = ptr(subs + 0x48 * static_cast<std::size_t>(i), 0x38);
         if (m == nullptr || (needCached && get<std::int32_t>(m, 0x38) != 3)) return nullptr;
@@ -939,8 +984,10 @@ StaticOps::Skip StaticOps::composeZ(const Op& op) {
             z.indexCount = get<std::uint32_t>(s, 0x2c);
         }
         // SetWorldMatrix / SetGlobalAlpha(1, 0) for every ready sub-mesh: the same values
-        writeWorld(0, world);
-        writeAlpha(0, 1.0f);
+        if (world != nullptr) {
+            writeWorld(0, world);
+            writeAlpha(0, 1.0f);
+        }
         std::vector<sc::ZDraw> plan;
         sc::planWholeMeshZ(zs, plan);
         for (const sc::ZDraw& z : plan) {
@@ -951,7 +998,7 @@ StaticOps::Skip StaticOps::composeZ(const Op& op) {
             g.primCount = z.primCount;
             g.subMesh = subs + 0x48 * static_cast<std::size_t>(z.shaderOf);
             g.material = ptr(g.subMesh, 0x38);
-            if (const Skip s = specialPassDraw(shaderOfSub(z.shaderOf, true), g); s != Skip::None) return s;
+            if (const Skip s = specialPassDraw(shaderOfSub(z.shaderOf, true), g, option); s != Skip::None) return s;
         }
         return Skip::None;
     }
@@ -961,8 +1008,10 @@ StaticOps::Skip StaticOps::composeZ(const Op& op) {
     if (shader == nullptr) return Skip::None;
     if (!shaderClassOk(shader)) return Skip::ShaderClass;
     if (ptr(shader, 0x220) != view_.admin) return Skip::Unreadable;
-    writeWorld(0, world);
-    writeAlpha(0, 1.0f);
+    if (world != nullptr) {
+        writeWorld(0, world);
+        writeAlpha(0, 1.0f);
+    }
     U8* h = ptr(s, 0x40) + 0x28 * static_cast<std::size_t>(node);
     const std::int32_t first = get<std::int32_t>(h, 0x20);
     const std::int32_t end = get<std::int32_t>(ptr(h, 0), 0x20);
@@ -974,7 +1023,7 @@ StaticOps::Skip StaticOps::composeZ(const Op& op) {
     g.subMesh = s;
     g.material = ptr(s, 0x38);
     if (g.primCount == 0) return Skip::None;
-    return specialPassDraw(shader, g);
+    return specialPassDraw(shader, g, option);
 }
 
 StaticOps::Skip StaticOps::composeSolid(const Op& op) {
@@ -1062,6 +1111,9 @@ StaticOps::Skip StaticOps::composeSolid(const Op& op) {
 
 StaticOps::Skip StaticOps::composeOp(const Op& op) {
     if (op.kind == OpKind::Animation) return composeActor(op);
+    if (op.kind == OpKind::SpeedTree) return composeTree(op);
+    if (op.kind == OpKind::SpeedTreeBB) return composeTreeBillboard(op);
+    if (op.kind == OpKind::Vegetation) return composeVegetation(op);
     if (op.kind != OpKind::Mesh || op.list == List::Debug || op.list == List::Sky || op.list == List::Late) return Skip::Kind;
     if (!view_.valid) {
         // the admin from the op's shader (eCShaderBase +0x220): any material shader of the view
@@ -1083,6 +1135,17 @@ StaticOps::Skip StaticOps::composeOp(const Op& op) {
 
 void StaticOps::opEnter(const Op& op) {
     finishOp();
+    if (pendingVersion_ != nullptr) {
+        // diagnostics: a special pass found uncompiled at the last op's entry, after the engine's slot ran
+        if (pendingLogged_ < 12) {
+            ++pendingLogged_;
+            spdlog::info("native: special pass {} of version {} after the engine's slot (frame {}): vs {} ps {} flag {}", pendingIdx_,
+                         static_cast<const void*>(pendingVersion_), dev_.stats().frames,
+                         static_cast<const void*>(ptr(pendingVersion_, 0x30 + 16 * pendingIdx_)), static_cast<const void*>(ptr(pendingVersion_, 0xf0 + 16 * pendingIdx_)),
+                         get<std::uint8_t>(pendingVersion_, 0x18 + pendingIdx_));
+        }
+        pendingVersion_ = nullptr;
+    }
     if (!active() || !inView_) return;
     if (verified_ == 0) verified_ = verify() ? 1 : -1;
     if (verified_ < 0) return;
@@ -1130,9 +1193,17 @@ void StaticOps::opEnter(const Op& op) {
         }
         return;
     }
-    if (op.kind != OpKind::Mesh && op.kind != OpKind::Animation) return;
+    const bool treeKind = op.kind == OpKind::SpeedTree || op.kind == OpKind::SpeedTreeBB || op.kind == OpKind::Vegetation;
+    if (op.kind != OpKind::Mesh && op.kind != OpKind::Animation && !treeKind) return;
     Group group = Group::Count;
-    if (op.kind == OpKind::Animation) {
+    if (treeKind) {
+        // N5.4: the SpeedTree / tree billboard / vegetation contexts' z (RenderZPass) and solid (Render) ops
+        if (op.list == List::ZPass || op.list == List::Solid) group = op.kind == OpKind::Vegetation ? Group::Vegetation : Group::Trees;
+        if (group != Group::Count && groups_[static_cast<std::size_t>(group)].active()) {
+            if (treesVerified_ == 0) treesVerified_ = verifyTrees() ? 1 : -1;
+            if (treesVerified_ < 0) return;
+        }
+    } else if (op.kind == OpKind::Animation) {
         // eCRenderContextAnimation2: Render / RenderAlpha / RenderZPass (slots 0 / 1 / 3); its RenderRefracted is empty
         if (op.list == List::ZPass || op.list == List::Solid || op.list == List::Alpha || op.list == List::Refracted) group = Group::Actors;
         if (group != Group::Count && groups_[static_cast<std::size_t>(group)].active()) {
@@ -1153,9 +1224,18 @@ void StaticOps::opEnter(const Op& op) {
     std::memcpy(entryPsB_.data(), dev_.psBoolConstants(), sizeof(entryPsB_));
     std::memcpy(entryVsI_, dev_.vsIntConstants(), sizeof(entryVsI_));
     std::memcpy(entryPsI_, dev_.psIntConstants(), sizeof(entryPsI_));
+    skipWhy_.clear();
     const Skip s = composeOp(op);
+    maskRefShader_ = nullptr;
     if (s != Skip::None) {
         ++g_->skips[static_cast<std::size_t>(s)];
+        if ((group == Group::Trees || group == Group::Vegetation) && treeSkipsLogged_ < 24) {
+            ++treeSkipsLogged_;
+            std::string mat;
+            if (s == Skip::ShaderClass) skipWhy_ = std::format("shader class vtable RVA {:#x}", static_cast<const std::uint8_t*>(skipShader_) - engine_);
+            spdlog::info("native: {}: left to the engine ({}) in frame {}: {}{}{}", name(group), name(s), dev_.stats().frames, describe(op),
+                         skipWhy_.empty() ? "" : ": ", skipWhy_);
+        }
         ++g_->window.opsNotComposed;
         drawCount_ = 0;
         g_ = nullptr;
@@ -1254,8 +1334,9 @@ void StaticOps::ownDraw(const d3d9::DrawTapInfo& t) {
     std::string why;
     const bool bytesOk = geometryBytesEqual(composed, *scratch_, why);
     // CPU-generated geometry is drawn from our own buffers (the same bytes at the same positions)
-    if (!composed.vertexBytes.empty() && scratch_->streams[0].buffer == ownVb_.get()) scratch_->streams[0].buffer = composed.streams[0].buffer;
-    if (!composed.vertexBytes.empty() && scratch_->indices == ownIb_.get()) scratch_->indices = composed.indices;
+    const std::uint32_t cs = composed.cpuStream;
+    if (!composed.vertexBytes.empty() && scratch_->streams[cs].buffer == ownVb_.get()) scratch_->streams[cs].buffer = composed.streams[cs].buffer;
+    if (!composed.indexBytes.empty() && scratch_->indices == ownIb_.get()) scratch_->indices = composed.indices;
     sc::Diff diff = sc::compare(composed, *scratch_);
     if (!bytesOk) {
         diff.fields.set(static_cast<std::size_t>(sc::Field::GeometryData));
@@ -1389,19 +1470,24 @@ void StaticOps::issue() {
             // per star)
             if (!ownVb_) ownVb_ = dev_.createBuffer(512 * 1024, USAGE_DYNAMIC | USAGE_WRITEONLY, POOL_DEFAULT, false, false);
             if (!ownIb_) ownIb_ = dev_.createBuffer(64 * 1024, USAGE_DYNAMIC | USAGE_WRITEONLY, POOL_DEFAULT, true, false);
-            const std::uint32_t vOff = d.streams[0].offset + d.minIndex * d.vertexStride, iOff = d.startIndex * 2;
+            // stream 0 (decals, billboards, sky objects): the draw's vertex range + its indices; another stream (the vegetation's
+            // instance data on stream 1): the stream's bytes from its offset, the indices are the mesh's own
+            const std::uint32_t cs = d.cpuStream;
+            const std::uint32_t vOff = d.streams[cs].offset + (cs == 0 ? d.minIndex * d.vertexStride : 0u), iOff = d.startIndex * 2;
             if (vOff + d.vertexBytes.size() <= ownVb_->size() && iOff + d.indexBytes.size() <= ownIb_->size()) {
                 // DISCARD of just the range the draw reads: the fresh GPU copy takes only those bytes (BufferCopyState)
                 if (void* p = ownVb_->lock(vOff, static_cast<std::uint32_t>(d.vertexBytes.size()), LOCK_DISCARD)) {
                     std::memcpy(p, d.vertexBytes.data(), d.vertexBytes.size());
                     ownVb_->unlock();
                 }
-                if (void* p = ownIb_->lock(iOff, static_cast<std::uint32_t>(d.indexBytes.size()), LOCK_DISCARD)) {
-                    std::memcpy(p, d.indexBytes.data(), d.indexBytes.size());
-                    ownIb_->unlock();
+                if (!d.indexBytes.empty()) {
+                    if (void* p = ownIb_->lock(iOff, static_cast<std::uint32_t>(d.indexBytes.size()), LOCK_DISCARD)) {
+                        std::memcpy(p, d.indexBytes.data(), d.indexBytes.size());
+                        ownIb_->unlock();
+                    }
+                    dev_.setIndices(ownIb_.get());
                 }
-                dev_.setStreamSource(0, ownVb_.get(), d.streams[0].offset, d.streams[0].stride);
-                dev_.setIndices(ownIb_.get());
+                dev_.setStreamSource(cs, ownVb_.get(), d.streams[cs].offset, d.streams[cs].stride);
             }
         }
         for (std::uint32_t i = 0; i < sc::StOwnedCount; ++i) dev_.setRenderState(kRs[i], d.states[i]);
@@ -1510,6 +1596,43 @@ void StaticOps::report() {
         spdlog::info("native: skinned actors (5 s): {}", line(w));
         spdlog::info("native: skinned actors (total): {}", line(t));
         actorWindow_ = {};
+    }
+    if (groups_[static_cast<std::size_t>(Group::Trees)].active() || groups_[static_cast<std::size_t>(Group::Vegetation)].active()) {
+        const auto line = [](const TreeStats& a) {
+            return std::format("SpeedTree ops {} (branches {}, fronds {}, leaf cards {}, leaf meshes {}; 0 draws {}, wrong TransformationType {}), "
+                               "instancing hardware {} / software {} ops, {} instances in {} batches ({} not drawn: strip length 0), {} leaf LOD "
+                               "passes, queue copies sorted {}; tree billboard ops {} ({} tex-coord uploads); vegetation ops {} (0 draws {}, mesh "
+                               "not cached {}), {} nodes, {} instances, {} draws, buffer wraps {}, c12 from the pool (the clock moved since Process) {}",
+                               a.ops, a.types[0], a.types[1], a.types[2], a.types[3], a.zeroOps, a.wrongTransformation, a.hardware, a.software,
+                               a.instances, a.batches, a.undrawnBatches, a.leafLods, a.sortedCopies, a.billboardOps, a.billboardTexCoords, a.grassOps,
+                               a.grassZeroOps, a.grassNotCached, a.grassNodes, a.grassInstances, a.grassDraws, a.grassWraps, a.grassClockMoved);
+        };
+        TreeStats& t = treeTotal_;
+        const TreeStats& w = treeWindow_;
+        t.ops += w.ops;
+        t.zeroOps += w.zeroOps;
+        t.hardware += w.hardware;
+        t.software += w.software;
+        t.instances += w.instances;
+        t.batches += w.batches;
+        t.sortedCopies += w.sortedCopies;
+        t.undrawnBatches += w.undrawnBatches;
+        for (std::size_t i = 0; i < t.types.size(); ++i) t.types[i] += w.types[i];
+        t.leafLods += w.leafLods;
+        t.wrongTransformation += w.wrongTransformation;
+        t.billboardOps += w.billboardOps;
+        t.billboardTexCoords += w.billboardTexCoords;
+        t.grassOps += w.grassOps;
+        t.grassZeroOps += w.grassZeroOps;
+        t.grassNodes += w.grassNodes;
+        t.grassInstances += w.grassInstances;
+        t.grassDraws += w.grassDraws;
+        t.grassWraps += w.grassWraps;
+        t.grassNotCached += w.grassNotCached;
+        t.grassClockMoved += w.grassClockMoved;
+        spdlog::info("native: trees (5 s): {}", line(w));
+        spdlog::info("native: trees (total): {}", line(t));
+        treeWindow_ = {};
     }
 }
 

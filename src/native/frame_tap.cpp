@@ -285,6 +285,125 @@ static std::int32_t animationState(const Op& op) {
     return bits;
 }
 
+// What a SpeedTree op needs to draw (eCRenderContextSpeedTree::Render 0x6ee320 / RenderZPass 0x6ee3f0 -> eCSpeedTreeRenderBuffer::
+// RenderBranches / RenderFronds / RenderLeafs and their z passes), as bits read at the op's slot entry: 1 the render buffer (PS +0x38
+// -> +0x78) with the type's visual (+0x18 + 8 t), the wrapper (+8) and a non-empty queue (solid +0xc0, z +0xd8), 2 the type's
+// material (+0x80 + 8 t) has its shader and (for eCShaderDefault) the matching TransformationType (+0x2b8: 3 / 4 / 5-6), 4 a queued
+// tree has geometry the op draws: branches a LOD index >= 0 (tree +0x48), fronds one whose strip length (+0x50 [lod]) is not 0
+// (RenderFronds 0x6f1b0f), leaves a tree at a leaf LOD (+0x58 / +0x5c) before the first LOD without indices; -1 = not read (a
+// shadow-map z op)
+static std::int32_t treeState(const Op& op, const void* shaderDefaultVtable) {
+    const bool zpass = op.list == List::ZPass;
+    if (zpass && ((op.raw.desc >> 16) & 0x10u) != 0) return -1;
+    const std::uint8_t* ps = nullptr;
+    const std::uint8_t* res = nullptr;
+    const std::uint8_t* rb = nullptr;
+    if (!readAt(op.raw.context, 0x18, ps) || !readAt(ps, 0x38, res) || res == nullptr || !readAt(res, 0x78, rb) || rb == nullptr) return 0;
+    const std::uint32_t type = zpass ? (op.raw.desc & 0xffffu) : op.raw.desc;
+    if (type > 3) return 0;
+    std::int32_t n = 0;
+    const void* visual = nullptr;
+    const std::uint8_t* wrapper = nullptr;
+    const std::uint8_t* queue = nullptr;
+    readAt(rb, zpass ? 0xd8 : 0xc0, n);
+    readAt(rb, 0x18 + 8 * type, visual);
+    readAt(rb, 8, wrapper);
+    readAt(rb, zpass ? 0xd0 : 0xb8, queue);
+    if (n <= 0 || n > 65536 || visual == nullptr || wrapper == nullptr || queue == nullptr) return 0;
+    std::int32_t bits = 1;
+    const std::uint8_t* material = nullptr;
+    const std::uint8_t* shader = nullptr;
+    if (readAt(rb, 0x80 + 8 * type, material) && readAt(material, 0x70, shader) && shader != nullptr) {
+        const void* vt = nullptr;
+        std::int32_t tt = -1;
+        readAt(shader, 0, vt);
+        readAt(shader, 0x2b8, tt);
+        const bool ok = vt != shaderDefaultVtable || (type == 0 ? tt == 3 : type == 1 ? tt == 4 : (tt == 5 || tt == 6));
+        if (ok) bits |= 2;
+    }
+    std::int32_t leafLods = 0, firstEmpty = 0;
+    if (type >= 2) {
+        const std::uint8_t* rt = nullptr;
+        const std::uint8_t* rtData = nullptr;
+        if (readAt(wrapper, 0, rt) && readAt(rt, 8, rtData)) readAt(rtData, 0xf4, leafLods);
+        firstEmpty = std::max(leafLods, 0);
+        for (std::int32_t l = 0; l < leafLods && l < 64; ++l) {
+            std::uint16_t indices = 0;
+            readAt(rb, 0x40 + 0x10 * static_cast<std::size_t>(type) + 2 * static_cast<std::size_t>(l), indices);
+            if (indices == 0) {
+                firstEmpty = l;
+                break;
+            }
+        }
+    }
+    for (std::int32_t i = 0; i < n; ++i) {
+        const std::uint8_t* tree = nullptr;
+        if (!readAt(queue, 0x18 * static_cast<std::size_t>(i), tree) || tree == nullptr) continue;
+        if (type <= 1) {
+            std::int32_t lod = -1;
+            readAt(tree, type == 0 ? 0x48 : 0x50, lod);
+            if (lod < 0) continue;
+            if (type == 1) {
+                std::uint16_t strip = 0;
+                readAt(rb, 0x50 + 2 * static_cast<std::size_t>(lod), strip);
+                if (strip == 0) continue;
+            }
+            bits |= 4;
+            break;
+        }
+        std::int32_t l0 = -1, l1 = -1;
+        readAt(tree, 0x58, l0);
+        readAt(tree, 0x5c, l1);
+        if ((l0 >= 0 && l0 < firstEmpty) || (l1 >= 0 && l1 < firstEmpty)) {
+            bits |= 4;
+            break;
+        }
+    }
+    return bits;
+}
+
+// What a vegetation op needs to draw (eCRenderContextVegetation::Render 0x70d4b0 / RenderZPass 0x70d4d0 -> eCVegetation_PS::Render
+// 0x707800 -> RenderMeshInstanced 0x707e40), as bits read at the slot's entry: 1 a visible grid node (PS +0x98, count +0xa0) holds
+// instances of the op's type (grid node +0x30 [type] .count), 2 the type's mesh (PS +0x38 [type] +0x58) cached (+0x38 == 3) with its
+// visual (+0x88), 4 the vegetation admin's shared buffer (+0x38), 8 the mesh's first sub-mesh's material has its shader
+static std::int32_t vegetationState(const Op& op, void* (*vegAdmin)()) {
+    const std::uint8_t* ps = nullptr;
+    if (!readAt(op.raw.context, 0x18, ps) || ps == nullptr) return -1;
+    const auto type = static_cast<std::int32_t>(op.raw.desc);
+    std::int32_t bits = 0;
+    std::int32_t count = 0;
+    const std::uint8_t* nodes = nullptr;
+    readAt(ps, 0xa0, count);
+    readAt(ps, 0x98, nodes);
+    for (std::int32_t i = 0; i < count && i < 100000 && nodes != nullptr; ++i) {
+        const std::uint8_t* grid = nullptr;
+        const std::uint8_t* ranges = nullptr;
+        std::uint32_t n = 0;
+        if (readAt(nodes + 0x118 * static_cast<std::size_t>(i), 8, grid) && readAt(grid, 0x30, ranges) &&
+            readAt(ranges, 8 * static_cast<std::size_t>(static_cast<std::int64_t>(type)) + 4, n) && n != 0) {
+            bits |= 1;
+            break;
+        }
+    }
+    const std::uint8_t* types = nullptr;
+    const std::uint8_t* typeObj = nullptr;
+    const std::uint8_t* mesh = nullptr;
+    std::int32_t state = 0;
+    const void* visual = nullptr;
+    if (readAt(ps, 0x38, types) && readAt(types, 8 * static_cast<std::size_t>(static_cast<std::uint16_t>(type)), typeObj) && readAt(typeObj, 0x58, mesh) &&
+        readAt(mesh, 0x38, state) && state == 3 && readAt(mesh, 0x88, visual) && visual != nullptr) {
+        bits |= 2;
+    }
+    const std::uint8_t* admin = vegAdmin != nullptr ? static_cast<const std::uint8_t*>(vegAdmin()) : nullptr;
+    const void* vd = nullptr;
+    if (readAt(admin, 0x38, vd) && vd != nullptr) bits |= 4;
+    const std::uint8_t* sub0 = nullptr;
+    const std::uint8_t* material = nullptr;
+    const void* shader = nullptr;
+    if (readAt(mesh, 0x58, sub0) && readAt(sub0, 0x38, material) && readAt(material, 0x70, shader) && shader != nullptr) bits |= 8;
+    return bits;
+}
+
 void FrameTap::resolve(Op& op) {
     const void* ctx = op.raw.context;
     if (ctx == nullptr || !readAt(ctx, 0, op.vtable) || op.vtable == nullptr) return;
@@ -387,7 +506,22 @@ void FrameTap::executeBegin(void* db, void* desc) {
 
 void FrameTap::opEnter(const void* op) {
     if (!executing_) return;
-    if (Op* o = desc_.find(op); o != nullptr && o->kind == OpKind::Animation && !o->emptySlot) o->state = animationState(*o);
+    if (Op* o = desc_.find(op); o != nullptr && !o->emptySlot) {
+        if (o->kind == OpKind::Animation) o->state = animationState(*o);
+        // N5.4: the SpeedTree / vegetation ops' draw conditions (the 0-draw ops checked at run time)
+        if (o->kind == OpKind::SpeedTree && (o->list == List::ZPass || o->list == List::Solid)) o->state = treeState(*o, engine::sym().shaderDefaultVftable);
+        if (o->kind == OpKind::Vegetation && (o->list == List::ZPass || o->list == List::Solid)) {
+            if (vegAdmin_ == nullptr && engineBase_ != nullptr) {
+                // FUN_180265df0, the vegetation admin's getter: sub rsp, 0x38; cmp byte [eCApplication::ms_bInitialised], 1
+                static constexpr std::uint8_t kPrologue[6] = {0x48, 0x83, 0xec, 0x38, 0x80, 0x3d};
+                std::uint8_t b[6] = {};
+                if (safeRead(engineBase_ + 0x265df0, b, sizeof(b)) && std::memcmp(b, kPrologue, sizeof(b)) == 0) {
+                    vegAdmin_ = reinterpret_cast<void* (*)()>(const_cast<std::uint8_t*>(engineBase_ + 0x265df0));
+                }
+            }
+            o->state = vegetationState(*o, vegAdmin_);
+        }
+    }
     RawOp live;
     attr_.enterOp(op, safeRead(op, &live, sizeof(live)) ? &live : nullptr);
     if (statics_ != nullptr && staticsWanted_) {
