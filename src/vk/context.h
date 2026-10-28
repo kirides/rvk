@@ -8,6 +8,7 @@
 #include <string>
 
 #include "core/caps.h"
+#include "vk/debug_names.h"
 #include "vk/probe.h"
 #include "vk/vk.h"
 
@@ -97,7 +98,8 @@ public:
     std::uint32_t validationErrors() const { return validationErrors_.load(); }
     void noteValidationError() { ++validationErrors_; }
 
-    // debug names (no-op without VK_EXT_debug_utils)
+    // debug names (no-op without VK_EXT_debug_utils or with `debug.names` off: vk/debug_names.h)
+    bool namesEnabled() const;
     void setName(VkObjectType type, std::uint64_t handle, const char* name) const;
     template <class T>
     void setName(T handle, VkObjectType type, const char* name) const {

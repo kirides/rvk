@@ -1,6 +1,7 @@
 #include "vk/bindless.h"
 
 #include <cstring>
+#include <string>
 
 #include <spdlog/spdlog.h>
 
@@ -38,6 +39,7 @@ bool Bindless::create(Context& ctx, Frames& frames) {
         spdlog::error("vulkan: bindless descriptor set layout failed (descriptor limits?)");
         return false;
     }
+    names::object(ctx, layout_, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, "rvk bindless set layout");
     VkDescriptorPoolSize sizes[2] = {{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMax2D + kMaxCube + kMax3D},
                                      {VK_DESCRIPTOR_TYPE_SAMPLER, kMaxSamplers}};
     VkDescriptorPoolCreateInfo pci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -55,6 +57,9 @@ bool Bindless::create(Context& ctx, Frames& frames) {
     if (vkAllocateDescriptorSets(ctx.device(), &ai, &set_) != VK_SUCCESS) {
         return false;
     }
+    // sampled images by kind (the DrawBlock's tex[] entries index these arrays) and samplers
+    names::object(ctx, pool_, VK_OBJECT_TYPE_DESCRIPTOR_POOL, "rvk bindless pool");
+    names::object(ctx, set_, VK_OBJECT_TYPE_DESCRIPTOR_SET, "rvk bindless set (2D / cube / 3D textures + samplers)");
     VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(shader::abi::PushConstants)};
     VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     plci.setLayoutCount = 1;
@@ -64,6 +69,7 @@ bool Bindless::create(Context& ctx, Frames& frames) {
     if (vkCreatePipelineLayout(ctx.device(), &plci, nullptr, &pipelineLayout_) != VK_SUCCESS) {
         return false;
     }
+    names::object(ctx, pipelineLayout_, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "rvk bindless pipeline layout");
     return createDefaults();
 }
 
@@ -93,6 +99,11 @@ bool Bindless::createDefaults() {
         if (vkCreateImageView(ctx_->device(), &vci, nullptr, &defaultViews_[k]) != VK_SUCCESS) {
             return false;
         }
+        {
+            static constexpr const char* kKind[3] = {"2D", "cube", "3D"};
+            names::object(*ctx_, defaultImages_[k], VK_OBJECT_TYPE_IMAGE, std::string("bindless default ") + kKind[k] + " texture (slot 0)");
+            names::object(*ctx_, defaultViews_[k], VK_OBJECT_TYPE_IMAGE_VIEW, std::string("bindless default ") + kKind[k] + " texture (view)");
+        }
         write(static_cast<TextureKind>(k), 0, defaultViews_[k]);
     }
     VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
@@ -101,6 +112,7 @@ bool Bindless::createDefaults() {
     sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     sci.maxLod = VK_LOD_CLAMP_NONE;
     vkCreateSampler(ctx_->device(), &sci, nullptr, &defaultSampler_);
+    names::object(*ctx_, defaultSampler_, VK_OBJECT_TYPE_SAMPLER, "bindless default sampler (point, clamp)");
     addSampler(defaultSampler_);
 
     VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -113,6 +125,7 @@ bool Bindless::createDefaults() {
     if (vmaCreateBuffer(ctx_->allocator(), &bci, &aci, &defaultStaging_, &defaultStagingAlloc_, &info) != VK_SUCCESS) {
         return false;
     }
+    names::object(*ctx_, defaultStaging_, VK_OBJECT_TYPE_BUFFER, "bindless default texel staging");
     const std::uint8_t pixel[4] = {0, 0, 0, 255};
     std::memcpy(info.pMappedData, pixel, 4);
     return true;

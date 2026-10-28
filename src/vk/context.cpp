@@ -7,6 +7,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "vk/debug_names.h"
 #include "vk/probe.h"
 
 namespace rvk::vk {
@@ -607,8 +608,12 @@ caps::Report Context::capabilities(bool pipelineLibrariesInUse) const {
     return r;
 }
 
+bool Context::namesEnabled() const {
+    return debugUtils_ && device_ != VK_NULL_HANDLE && vkSetDebugUtilsObjectNameEXT != nullptr && names::enabled();
+}
+
 void Context::setName(VkObjectType type, std::uint64_t handle, const char* name) const {
-    if (!debugUtils_ || device_ == VK_NULL_HANDLE || vkSetDebugUtilsObjectNameEXT == nullptr) {
+    if (!namesEnabled()) {
         return;
     }
     VkDebugUtilsObjectNameInfoEXT info{VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT};

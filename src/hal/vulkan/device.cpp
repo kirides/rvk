@@ -30,6 +30,7 @@
 #include "engine/window_mode.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "res/dds.h"
+#include "vk/debug_names.h"
 #include "vk/formats.h"
 #include "vk/raytracing.h"
 
@@ -279,6 +280,8 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     o.logDraws = options.logDraws;
     // rt.allow is a restart setting: the value the session started with decides (its effective value waits for the report)
     o.allowRayTracing = rs.rtAllow == nullptr || rs.rtAllow->startValue() != 0.0;
+    // debug.names is a restart setting too: objects are named as they are created (vk/debug_names.h)
+    vk::names::setEnabled(rs.debugNames == nullptr || rs.debugNames->startValue() != 0.0);
     if (!dev_.create(o)) {
         return false;
     }

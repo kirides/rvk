@@ -14,11 +14,14 @@
 
 #include <spdlog/spdlog.h>
 
+#include "core/exports.h"
 #include "core/hooks.h"
 #include "d3d9/device.h"
 #include "engine/memread.h"
+#include "engine/shadow_maps.h"
 #include "engine/symbols.h"
 #include "hal/vulkan/hal_vulkan.h"
+#include "vk/debug_names.h"
 #include "vk/formats.h"
 
 namespace rvk::engine::scene {
@@ -149,6 +152,34 @@ d3d9::Texture* textureOf(d3d9::Surface* s, d3d9::Device& d) {
     return s->texture();
 }
 
+// Debug names of the shadow maps (vk/debug_names.h): which engine map an ExecuteShadowMap renders, from its vtable (Engine.dll RVAs
+// of native/effect_ops_setup.cpp) and, for a sun cascade, its index in the cascade object's split array (+0x30, 0x168 bytes each).
+// A null text = an unknown map (the role's default name).
+struct MapLabel {
+    const char* text = nullptr;
+    std::uint32_t index = ~0u;
+};
+
+MapLabel shadowMapLabel(const void* map) {
+    static const std::uintptr_t engineBase = exports::moduleBase(L"Engine.dll");
+    const void* vt = nullptr;
+    if (engineBase == 0 || !readAt(map, 0, vt)) return {};
+    switch (reinterpret_cast<std::uintptr_t>(vt) - engineBase) {
+    case 0x9a29e0: {  // eCShadowMapDirectionalLight2Ex: a sun cascade
+        MapLabel l{"cascade shadow map", ~0u};
+        const void* splits = nullptr;
+        if (const void* cascade = shadowmaps::cascadeObject(); cascade != nullptr && readAt(cascade, 0x30, splits) && splits != nullptr) {
+            const auto off = static_cast<const std::uint8_t*>(map) - static_cast<const std::uint8_t*>(splits);
+            if (off >= 0 && off % 0x168 == 0 && off / 0x168 < 16) l.index = static_cast<std::uint32_t>(off / 0x168);
+        }
+        return l;
+    }
+    case 0x9a2848: return {"terrain shadow map (variance)", ~0u};  // eCShadowMapDirectionalLight2VS
+    case 0x976738: return {"point-light shadow atlas", ~0u};      // eCPackedShadowMap
+    default: return {};
+    }
+}
+
 // ---- detours ------------------------------------------------------------------------------------------------------------
 
 using ExecuteFn = void (*)(void* db, void* desc);
@@ -163,6 +194,11 @@ void detourExecute(void* db, void* desc) {
         // the image effect's scene target is bound when its eCImageFilterScene calls Execute
         if (g_inSceneFilter > 0) {
             if (d3d9::Texture* t = textureOf(scope.d->renderTarget(0), *scope.d)) scope.d->tagImage(t, ImageRole::SceneHdr);
+            if (vk::names::enabled()) {
+                if (d3d9::Surface* ds = scope.d->depthStencil(); ds != nullptr && ds->texture() != nullptr) {
+                    ds->texture()->setDebugLabel("scene depth-stencil");
+                }
+            }
         }
         // the N5.0 op tap: the lists as Execute will run them (native/frame_tap)
         tap = g_opTap.load(std::memory_order_relaxed);
@@ -183,13 +219,15 @@ void detourExecuteShadowMap(void* db, void* shadowMap) {
     if (scope.d != nullptr) {
         // the shadow map's targets are bound before (eCShadowMapBase::RenderShadowMap, vtable +0x120): a colour map (R16F /
         // R32F, cubes for point lights) or the NULL colour target + a sampled DF24 / DF16 depth texture (sun cascades)
+        const MapLabel label = vk::names::enabled() ? shadowMapLabel(shadowMap) : MapLabel{};
         if (d3d9::Texture* t = textureOf(scope.d->renderTarget(0), *scope.d)) {
-            scope.d->tagImage(t, t->desc().type == d3d9::TextureType::Cube ? ImageRole::ShadowCube : ImageRole::ShadowMap);
+            scope.d->tagImage(t, t->desc().type == d3d9::TextureType::Cube ? ImageRole::ShadowCube : ImageRole::ShadowMap, label.text,
+                              label.index);
         }
         if (d3d9::Surface* ds = scope.d->depthStencil(); ds != nullptr && ds->texture() != nullptr) {
             const std::uint32_t f = ds->texture()->desc().format;
             if (f == vk::d3dfmt::DF24 || f == vk::d3dfmt::DF16) {
-                scope.d->tagImage(ds->texture(), ImageRole::ShadowMap);
+                scope.d->tagImage(ds->texture(), ImageRole::ShadowMap, label.text, label.index);
                 scope.d->countShadowDepthMap();
             }
         }

@@ -286,6 +286,7 @@ struct RendererSettings {
     Setting* drawRecords = nullptr;  // debug.draw_records: per-frame draw records (hidden; the histogram is always on)
     Setting* paceLoading = nullptr;  // debug.pace_loading: loading screens wait for the pacer (hidden; load-time A/B)
     Setting* debugRegions = nullptr;  // debug.regions: command buffer labels for graphics captures (d3d9::Device::setRegionsEnabled)
+    Setting* debugNames = nullptr;    // debug.names: VK_EXT_debug_utils object names (restart; vk/debug_names.h)
     Setting* recordThreads = nullptr;  // debug.record_threads: the opaque passes' draws recorded on worker threads (d3d9::Device::setRecordThreads)
     Setting* ubershaderSkip = nullptr;   // debug.ubershader_skip: classes of material shaders kept translated (bisecting)
     Setting* ubershader = nullptr;       // debug.ubershader: the GLSL material shader for the engine's material pixel shaders (d3d9::Device::setUbershader)

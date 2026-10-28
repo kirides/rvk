@@ -1,5 +1,8 @@
 #include "vk/passes.h"
 
+#include <format>
+#include <string>
+
 #include <spdlog/spdlog.h>
 
 #include "shader/abi.h"
@@ -50,6 +53,7 @@ bool PassLayout::create(Context& ctx, const Bindless& bindless, std::span<const 
         spdlog::error("vulkan: pass descriptor set layout failed");
         return false;
     }
+    names::object(ctx, set1_, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, "rvk pass push set layout (set 1)");
     const VkDescriptorSetLayout sets[2] = {bindless.setLayout(), set1_};
     const VkPushConstantRange pcr{kPassStages, 0, shader::abi::kPushConstantBudget};
     VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -62,6 +66,7 @@ bool PassLayout::create(Context& ctx, const Bindless& bindless, std::span<const 
         destroy(ctx);
         return false;
     }
+    names::object(ctx, layout_, VK_OBJECT_TYPE_PIPELINE_LAYOUT, "rvk pass pipeline layout");
     return true;
 }
 
@@ -246,7 +251,11 @@ Transients::Entry* Transients::get(std::string_view key, const TransientDesc& de
         images_.erase(pos);
         return nullptr;
     }
-    if ((desc.usage & VK_IMAGE_USAGE_SAMPLED_BIT) != 0) e.slot = bindless_->addTexture(TextureKind::Tex2D, e.image.view());
+    if ((desc.usage & VK_IMAGE_USAGE_SAMPLED_BIT) != 0) {
+        e.slot = bindless_->addTexture(TextureKind::Tex2D, e.image.view());
+        // the slot is what shaders sample it through: it joins the name (names::image on the image and its view)
+        if (ctx_->namesEnabled()) names::image(*ctx_, e.image, std::format("{} [slot {}]", e.name, e.slot));
+    }
     spdlog::info("vulkan: transient image {} {}x{} format {} (bindless slot {})", e.name, desc.extent.width, desc.extent.height,
                  static_cast<int>(desc.format), e.slot);
     return &e;

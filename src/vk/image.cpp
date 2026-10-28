@@ -3,6 +3,7 @@
 #include <spdlog/spdlog.h>
 
 #include "vk/context.h"
+#include "vk/debug_names.h"
 
 namespace rvk::vk {
 
@@ -100,7 +101,7 @@ bool Image::create(Context& ctx, const ImageDesc& desc) {
         return false;
     }
     if (desc.name != nullptr) {
-        ctx.setName(image_, VK_OBJECT_TYPE_IMAGE, desc.name);
+        names::image(ctx, *this, desc.name);  // the image and its view
     }
     layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     return true;

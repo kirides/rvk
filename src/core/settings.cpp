@@ -871,6 +871,18 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
     });
+    r.debugNames = &reg.add({
+        .key = "debug.names",
+        .label = "Capture resource names",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Names the renderer's images, buffers, shaders and pipelines (shadow maps, depth map, scene image, "
+                       "refraction copy, ...) for graphics captures (RenderDoc's resource inspector, validation messages). "
+                       "Objects are named when they are created: takes effect at the next start.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::NoAB | Flag::Debug | Flag::Restart,
+    });
     r.recordThreads = &reg.add({
         .key = "debug.record_threads",
         .label = "Record draws on worker threads",

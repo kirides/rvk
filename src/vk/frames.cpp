@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <format>
 
 #include <spdlog/spdlog.h>
 
@@ -32,6 +33,12 @@ bool Frames::create(Context& ctx) {
         ai.commandBufferCount = 1;
         vkAllocateCommandBuffers(ctx.device(), &ai, &s.cmd);
         vkAllocateCommandBuffers(ctx.device(), &ai, &s.upload);
+        if (ctx.namesEnabled()) {
+            const auto i = static_cast<std::size_t>(&s - slots_);
+            names::object(ctx, s.pool, VK_OBJECT_TYPE_COMMAND_POOL, std::format("rvk frame slot {} pool", i));
+            names::object(ctx, s.cmd, VK_OBJECT_TYPE_COMMAND_BUFFER, std::format("rvk frame slot {} commands", i));
+            names::object(ctx, s.upload, VK_OBJECT_TYPE_COMMAND_BUFFER, std::format("rvk frame slot {} uploads", i));
+        }
     }
     return newChunk(kChunkSize);
 }
@@ -209,7 +216,8 @@ bool Frames::newChunk(VkDeviceSize minSize) {
     VkBufferDeviceAddressInfo dai{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
     dai.buffer = c.buffer;
     c.address = vkGetBufferDeviceAddress(ctx_->device(), &dai);
-    ctx_->setName(c.buffer, VK_OBJECT_TYPE_BUFFER, "rvk upload ring");
+    // per-draw constant blocks, dynamic vertex / index data and the FrameBlock are sub-ranges of these chunks (not nameable)
+    names::object(*ctx_, c.buffer, VK_OBJECT_TYPE_BUFFER, std::format("rvk upload ring chunk {} ({} MiB)", chunks_.size(), c.size >> 20));
     chunks_.push_back(c);
     if (recording_) {
         currentChunk_ = chunks_.size() - 1;

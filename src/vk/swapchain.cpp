@@ -140,6 +140,7 @@ bool Swapchain::build(std::uint32_t width, std::uint32_t height) {
     images_.resize(n);
     vkGetSwapchainImagesKHR(ctx_->device(), swapchain_, &n, images_.data());
     views_.resize(n);
+    names::object(*ctx_, swapchain_, VK_OBJECT_TYPE_SWAPCHAIN_KHR, "rvk swapchain");
     for (std::uint32_t i = 0; i < n; ++i) {
         // the overlay renders into the swapchain image (src/overlay)
         VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
@@ -150,12 +151,17 @@ bool Swapchain::build(std::uint32_t width, std::uint32_t height) {
         if (vkCreateImageView(ctx_->device(), &vci, nullptr, &views_[i]) != VK_SUCCESS) {
             views_[i] = VK_NULL_HANDLE;
         }
+        if (ctx_->namesEnabled()) {
+            names::object(*ctx_, images_[i], VK_OBJECT_TYPE_IMAGE, std::format("swapchain image {}", i));
+            names::object(*ctx_, views_[i], VK_OBJECT_TYPE_IMAGE_VIEW, std::format("swapchain image {} (view)", i));
+        }
     }
     minImageCount_ = imageCount;
     rendered_.resize(n);
     for (auto& s : rendered_) {
         VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         vkCreateSemaphore(ctx_->device(), &si, nullptr, &s);
+        names::object(*ctx_, s, VK_OBJECT_TYPE_SEMAPHORE, "rvk swapchain rendered");
     }
     std::string offered;
     for (const auto m : modes) offered += std::format("{}{}", offered.empty() ? "" : ",", static_cast<int>(m));

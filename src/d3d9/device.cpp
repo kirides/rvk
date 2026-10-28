@@ -14,8 +14,10 @@
 #include <spdlog/spdlog.h>
 
 #include "d3d9/convert.h"
+#include "d3d9/target_names.h"
 #include "shader/sm_ir.h"
 #include "shader/spirv.h"
+#include "vk/debug_names.h"
 
 namespace rvk::d3d9 {
 namespace {
@@ -63,16 +65,20 @@ bool Device::setMainCamera(const scene::CameraInput& in) {
     return true;
 }
 
-void Device::tagImage(Texture* texture, scene::ImageRole role) {
+void Device::tagImage(Texture* texture, scene::ImageRole role, const char* label, std::uint32_t labelIndex) {
     if (texture == nullptr || role == scene::ImageRole::None) return;
     if (roles_[static_cast<std::size_t>(role)] != texture) frameAddr_ = 0;  // the frame block lists the role images
     roles_[static_cast<std::size_t>(role)] = texture;
-    if (texture->role_ == role) return;
+    if (texture->role_ == role) {
+        if (label != nullptr) texture->setDebugLabel(label, labelIndex);  // a finer name for the same role (no-op when unchanged)
+        return;
+    }
     const scene::ImageRole old = texture->role_;
     if (old != scene::ImageRole::None && roles_[static_cast<std::size_t>(old)] == texture) {
         roles_[static_cast<std::size_t>(old)] = nullptr;
     }
     texture->role_ = role;
+    texture->setDebugLabel(label != nullptr ? label : scene::name(role), label != nullptr ? labelIndex : ~0u);
     // logged when found; a pooled target that keeps changing roles would flood the log: the first 64 changes only
     if (roleLogs_ < 64) {
         ++roleLogs_;
@@ -300,6 +306,7 @@ bool Device::create(const DeviceOptions& options) {
     for (auto& s : acquireSemaphores_) {
         VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         vkCreateSemaphore(ctx_.device(), &sci, nullptr, &s);
+        vk::names::object(ctx_, s, VK_OBJECT_TYPE_SEMAPHORE, "rvk swapchain acquire");
     }
     {
         VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -312,6 +319,7 @@ bool Device::create(const DeviceOptions& options) {
         if (vmaCreateBuffer(ctx_.allocator(), &bci, &aci, &nullVertexBuffer_, &nullVertexAlloc_, &info) != VK_SUCCESS) {
             return false;
         }
+        vk::names::object(ctx_, nullVertexBuffer_, VK_OBJECT_TYPE_BUFFER, "rvk null vertex buffer (unbound streams)");
         const float v[4] = {0.0f, 0.0f, 0.0f, 1.0f};
         std::memcpy(info.pMappedData, v, sizeof(v));
     }
@@ -373,6 +381,8 @@ bool Device::resize(std::uint32_t width, std::uint32_t height) {
     }
     backBuffer_ = std::move(newBack);
     depthBuffer_ = std::move(newDepth);
+    backBuffer_->setDebugLabel("back buffer (D3D9 model)");
+    if (depthBuffer_) depthBuffer_->setDebugLabel("back buffer depth-stencil");
     backBufferSurface_ = backBuffer_->surface(0, 0);
     depthSurface_ = depthBuffer_ ? depthBuffer_->surface(0, 0) : nullptr;
     rt_ = {};
@@ -1167,6 +1177,14 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
     const std::size_t bytes = shader::byteLength(bytecode.data(), bytecode.size());
     if (bytes == 0) {
         spdlog::warn("d3d9: shader bytecode without END token");
+namespace {
+// the debug name of a translated shader's module (vk/debug_names.h): "vs|ps <hash> [<variant>]"; empty with names off
+std::string moduleLabel(const vk::Context& ctx, shader::Stage stage, std::uint64_t hash, std::string_view tag) {
+    if (!ctx.namesEnabled()) return {};
+    return std::format("{} {:016x}{}{}", stage == shader::Stage::Vertex ? "vs" : "ps", hash, tag.empty() ? "" : " ", tag);
+}
+}  // namespace
+
         return nullptr;
     }
     const std::span<const std::uint32_t> tokens = bytecode.first(bytes / 4);
@@ -1226,7 +1244,7 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
     }
     auto s = std::make_shared<Shader>();
     s->stage = dec.program.version.stage;
-    s->module = vk::createShaderModule(ctx_, spirv);
+    s->module = vk::createShaderModule(ctx_, spirv, moduleLabel(ctx_, s->stage, hash, {}));
     s->reflection = glsl.reflection;
     s->bytecode.assign(tokens.begin(), tokens.end());
     s->hash = hash;
@@ -1352,7 +1370,8 @@ VkShaderModule Device::uberModule(const Shader& s, const MaterialSource& src, co
     if (const std::uint64_t n = ++ubershadersBuilt_; n == 1 || n % 50 == 0) {
         spdlog::info("d3d9: GLSL material shaders: {} modules built, {} failed", n, ubershadersFailed_.load());
     }
-    return vk::createShaderModule(ctx_, spirv);
+    return vk::createShaderModule(ctx_, spirv,
+                                  ctx_.namesEnabled() ? moduleLabel(ctx_, s.stage, s.hash, std::format("{} {} {}", src.file, src.entry, tag)) : std::string());
 }
 
 VkShaderModule Device::variantModule(const Shader& s, const shader::GlslOptions& options, std::string_view tag) {
@@ -1394,7 +1413,7 @@ VkShaderModule Device::variantModule(const Shader& s, const shader::GlslOptions&
             out.write(reinterpret_cast<const char*>(spirv.data()), static_cast<std::streamsize>(spirv.size() * 4));
         }
     }
-    return vk::createShaderModule(ctx_, spirv);
+    return vk::createShaderModule(ctx_, spirv, moduleLabel(ctx_, s.stage, s.hash, tag));
 }
 
 // ---- thin G-buffer (enh/gbuffer) ----
@@ -1788,6 +1807,9 @@ void Device::setDepthStencil(Surface* surface) {
 }
 
 void Device::setViewport(const Viewport& vp) { viewport_ = vp; }
+    if (index == 0 && surface != nullptr && phases_.pass() == scene::Pass::ShadowMask && vk::names::enabled()) {
+        debugnames::onShadowMaskTarget(*this, surface);  // debug names of the mask chain's targets (d3d9/target_names.h)
+    }
 
 void Device::setScissorRect(std::int32_t left, std::int32_t top, std::int32_t right, std::int32_t bottom) {
     scissor_[0] = left;
@@ -2162,6 +2184,7 @@ bool Device::readImageLevel(vk::Image& img, std::uint32_t level, std::uint32_t l
 }
 
 bool Device::readBackBuffer(std::vector<std::uint8_t>& bgra, std::uint32_t& width, std::uint32_t& height) {
+    vk::names::object(ctx_, rb, VK_OBJECT_TYPE_BUFFER, "rvk image read-back");
     TextureDesc d;
     d.width = backBuffer_->desc().width;
     d.height = backBuffer_->desc().height;
@@ -2459,3 +2482,13 @@ std::uint32_t Device::lookupSamplerStates(const std::uint32_t* states) {
 }
 
 }  // namespace rvk::d3d9
+    if (ctx_.namesEnabled()) {
+        static constexpr const char* kFilter[] = {"none", "point", "linear", "aniso", "pyramid", "gauss"};
+        static constexpr const char* kAddress[] = {"?", "wrap", "mirror", "clamp", "border", "mirror-once"};
+        const auto f = [](const char* const* t, std::uint32_t v, std::uint32_t n) { return v < n ? t[v] : "?"; };
+        vk::names::object(ctx_, sampler, VK_OBJECT_TYPE_SAMPLER,
+                          std::format("sampler [slot {}] min {} mag {} mip {} | U {} V {} W {}{}", index, f(kFilter, s[SAMP_MINFILTER], 6),
+                                      f(kFilter, s[SAMP_MAGFILTER], 6), f(kFilter, s[SAMP_MIPFILTER], 6), f(kAddress, s[SAMP_ADDRESSU], 6),
+                                      f(kAddress, s[SAMP_ADDRESSV], 6), f(kAddress, s[SAMP_ADDRESSW], 6),
+                                      aniso ? std::format(" | aniso {}x", ci.maxAnisotropy) : std::string()));
+    }

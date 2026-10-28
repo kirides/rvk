@@ -1,6 +1,9 @@
 #include "vk/mesh_arena.h"
 
+#include <atomic>
+#include <format>
 #include <numeric>
+#include <string>
 
 #include <spdlog/spdlog.h>
 
@@ -55,6 +58,7 @@ bool MeshArena::newBlock() {
         return false;
     }
     b.address = addressOf(b.buffer);
+    names::object(*ctx_, b.buffer, VK_OBJECT_TYPE_BUFFER, "mesh arena block " + std::to_string(blocks_.size() + 1));
     blocks_.push_back(b);
     ++stats_.blocks;
     spdlog::info("vulkan: mesh arena: block {} ({} MiB)", blocks_.size(), kBlockSize >> 20);
@@ -93,6 +97,10 @@ MeshArena::Alloc MeshArena::allocate(VkDeviceSize size, std::uint32_t multiple) 
     aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
     if (vmaCreateBuffer(ctx_->allocator(), &bci, &aci, &a.buffer, &a.dedicated, nullptr) != VK_SUCCESS) return {};
     a.address = addressOf(a.buffer);
+    if (ctx_->namesEnabled()) {
+        static std::atomic<std::uint32_t> dedicated{0};  // numbered by creation, never reused
+        names::object(*ctx_, a.buffer, VK_OBJECT_TYPE_BUFFER, std::format("mesh arena dedicated buffer {} ({} KiB)", dedicated++, size >> 10));
+    }
     ++stats_.dedicated;
     stats_.used += size;
     return a;

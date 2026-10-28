@@ -116,6 +116,10 @@ public:
     scene::ImageRole role() const { return role_; }
     // persistent identity (d3d9/identity.h): the generation counts uploads of CPU data
     ResourceRef ref() const { return {id_, generation_.load(std::memory_order_relaxed)}; }
+    // the VK_EXT_debug_utils name of the image: "<label> #<index> | tex <id> WxH FORMAT [slot N]" (vk/debug_names.h). The label is
+    // the role the scene tracker found ("depth map", "cascade shadow map" #k, ...): a static string, renamed when it changes
+    // (Device::tagImage). Render thread
+    void setDebugLabel(const char* label, std::uint32_t index = ~0u);
 
     // bytes held in CPU copies of all textures (diagnostics)
     static std::uint64_t cpuBytesTotal();
@@ -159,6 +163,10 @@ private:
     bool reverseZ_ = false;  // a depth buffer holding reversed depth (Device::setReverseZ; set by its last clear)
     std::vector<std::unique_ptr<Surface>> surfaces_;
     scene::ImageRole role_ = scene::ImageRole::None;
+    const char* label_ = nullptr;  // setDebugLabel
+    std::uint32_t labelIndex_ = ~0u;
+    std::string debugName() const;
+    void applyDebugName();
     std::uint64_t id_ = newResourceId();
     std::atomic<std::uint32_t> generation_{0};
 };
@@ -795,7 +803,8 @@ public:
     // the first main view of a frame sets the camera; later ones are ignored (returns whether it was taken)
     bool setMainCamera(const scene::CameraInput& in);
     // give an engine image a role (logged when a texture gets a new role); the latest texture per role is queryable
-    void tagImage(Texture* texture, scene::ImageRole role);
+    // `label` (static string) / `labelIndex` refine the debug name of the image ("cascade shadow map" #k); default the role's name
+    void tagImage(Texture* texture, scene::ImageRole role, const char* label = nullptr, std::uint32_t labelIndex = ~0u);
     Texture* imageWithRole(scene::ImageRole role) const { return roles_[static_cast<std::size_t>(role)]; }
     void forgetImage(Texture* texture);  // a tagged texture dies
     // the sky environment cube (eCSkydome_PS::UpdateSkydomeEnvCubemap, docs/research/ocean.md 9.8): faces bound so far (the

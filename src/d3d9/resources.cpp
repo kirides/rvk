@@ -8,6 +8,7 @@
 #include <spdlog/spdlog.h>
 
 #include "d3d9/device.h"
+#include "vk/debug_names.h"
 
 namespace rvk::d3d9 {
 
@@ -50,12 +51,53 @@ Texture::Texture(Device& device, const TextureDesc& desc) : dev_(device), desc_(
         id.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     }
     id.swizzle = fmt_.swizzle;
-    id.name = isRenderTarget() || fmt_.depth ? "d3d9 render target" : "d3d9 texture";
     if (!image_.create(dev_.ctx(), id)) {
         return;
     }
     slot_ = dev_.bindless().addTexture(kind_, image_.view());
+    applyDebugName();  // after the slot: the name carries it
     valid_ = true;
+}
+
+// ---- debug names (vk/debug_names.h) ----
+
+std::string Texture::debugName() const {
+    vk::names::TextureInfo t;
+    t.label = label_;
+    t.labelIndex = labelIndex_;
+    t.id = id_;
+    t.width = desc_.width;
+    t.height = desc_.height;
+    t.depth = desc_.depth;
+    t.levels = desc_.levels;
+    t.format = vk::d3dFormatName(desc_.format);
+    t.cube = desc_.type == TextureType::Cube;
+    t.volume = desc_.type == TextureType::Volume;
+    t.renderTarget = isRenderTarget();
+    t.depthFormat = fmt_.depth;
+    t.dynamic = (desc_.usage & USAGE_DYNAMIC) != 0;
+    t.slot = slot_;
+    return vk::names::textureName(t);
+}
+
+void Texture::applyDebugName() {
+    vk::Context& ctx = dev_.ctx();
+    if (!image_.valid() || !ctx.namesEnabled()) return;
+    vk::names::image(ctx, image_, debugName());
+}
+
+void Texture::setDebugLabel(const char* label, std::uint32_t index) {
+    if (label == label_ && index == labelIndex_) return;  // static strings: the pointer says it
+    label_ = label;
+    labelIndex_ = index;
+    if (!image_.valid() || !dev_.ctx().namesEnabled()) return;
+    const std::string name = debugName();
+    vk::names::image(dev_.ctx(), image_, name);
+    // a pooled target that changes roles every frame would flood the log: the first 160 only
+    static std::atomic<int> logged{0};
+    if (label != nullptr && logged.fetch_add(1) < 160) {
+        spdlog::info("names: {} = image '{}' bindless slot {}", label, name, slot_);
+    }
 }
 
 Texture::~Texture() {

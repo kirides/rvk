@@ -13,6 +13,7 @@
 #include <map>
 #include <mutex>
 #include <span>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -192,6 +193,7 @@ private:
     std::vector<char> data();
 };
 
-VkShaderModule createShaderModule(Context& ctx, std::span<const std::uint32_t> spirv);
+// `name` (when not empty and names are on): the module's debug name; pipelines built from it are named after it
+VkShaderModule createShaderModule(Context& ctx, std::span<const std::uint32_t> spirv, std::string_view name = {});
 
 }  // namespace rvk::vk

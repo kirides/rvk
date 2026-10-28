@@ -233,6 +233,7 @@ VkPipeline PipelineCache::link(const PipelineDesc& d, bool optimize) {
         spdlog::error("vulkan: pipeline link{}: {}", optimize ? " (optimised)" : "", resultString(r));
         return VK_NULL_HANDLE;
     }
+    names::pipeline(*ctx_, p, d.vs, d.fs);
     return p;
 }
 

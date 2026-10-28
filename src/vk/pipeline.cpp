@@ -36,7 +36,7 @@ bool PipelineCache::Eq::operator()(const PipelineDesc& a, const PipelineDesc& b)
     return std::memcmp(&a, &b, sizeof(PipelineDesc)) == 0;
 }
 
-VkShaderModule createShaderModule(Context& ctx, std::span<const std::uint32_t> spirv) {
+VkShaderModule createShaderModule(Context& ctx, std::span<const std::uint32_t> spirv, std::string_view name) {
     VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     ci.codeSize = spirv.size_bytes();
     ci.pCode = spirv.data();
@@ -45,6 +45,7 @@ VkShaderModule createShaderModule(Context& ctx, std::span<const std::uint32_t> s
         spdlog::error("vulkan: vkCreateShaderModule: {}", resultString(r));
         return VK_NULL_HANDLE;
     }
+    if (!name.empty()) names::shaderModule(ctx, m, name);
     return m;
 }
 
@@ -367,6 +368,7 @@ VkPipeline PipelineCache::build(const PipelineDesc& d) {
         spdlog::error("vulkan: vkCreateGraphicsPipelines: {}", resultString(r));
         return VK_NULL_HANDLE;
     }
+    names::pipeline(*ctx_, p, d.vs, d.fs);
     return p;
 }
 

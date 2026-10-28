@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <format>
 
 #include <windows.h>
 #include <emmintrin.h>
@@ -58,6 +59,9 @@ void Device::startRecordThreads() {
             pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
             pci.queueFamilyIndex = ctx_.queueFamily();
             ok = vkCreateCommandPool(ctx_.device(), &pci, nullptr, &t->pools[s]) == VK_SUCCESS;
+            if (ok && ctx_.namesEnabled()) {
+                vk::names::object(ctx_, t->pools[s], VK_OBJECT_TYPE_COMMAND_POOL, std::format("rvk record worker {} slot {} pool", i, s));
+            }
         }
         if (!ok) {
             spdlog::warn("d3d9: record threads: command pool creation failed");
@@ -73,6 +77,7 @@ void Device::startRecordThreads() {
         pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
         pci.queueFamilyIndex = ctx_.queueFamily();
         if (vkCreateCommandPool(ctx_.device(), &pci, nullptr, &recordSelf_->pools[s]) != VK_SUCCESS) recordSelf_.reset();
+        else vk::names::object(ctx_, recordSelf_->pools[s], VK_OBJECT_TYPE_COMMAND_POOL, std::format("rvk record engine thread slot {} pool", s));
         if (!recordSelf_) break;
     }
     spdlog::info("d3d9: record threads: {} worker(s) + the engine thread, chunks of {} draws", recordThreads_.size(), kChunkPackets);
@@ -156,6 +161,7 @@ void Device::recordChunk(RecordThread& t, RecordChunk& c) {
         ai.commandBufferCount = 1;
         VkCommandBuffer cb = VK_NULL_HANDLE;
         if (vkAllocateCommandBuffers(ctx_.device(), &ai, &cb) != VK_SUCCESS) return;  // cmd stays null: the scope drops it
+        vk::names::object(ctx_, cb, VK_OBJECT_TYPE_COMMAND_BUFFER, std::format("rvk record secondary (slot {}) #{}", c.slot, bufs.size()));
         bufs.push_back(cb);
     }
     VkCommandBuffer cmd = bufs[t.used[c.slot]++];

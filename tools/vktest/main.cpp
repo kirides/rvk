@@ -15,6 +15,8 @@
 //   provider interface (UpdateFfxApiProvider), what it offers on this GPU is printed; no context is created
 //   rvk_vktest --skin: the character skinning compute pass of the ray tracing scene (shaders/rt/rt_skin.comp) against a CPU
 //   reference of the engine's skinned vertex shader (two jobs of different vertex layouts, one dispatch), under validation
+//   rvk_vktest --names: debug object names (vk/debug_names.h) reach the validation layer: a deliberate misuse of a named image
+//   (never executed) must be reported with the image's name; the texture name scheme is checked
 //   rvk_vktest --shader-stats: the driver's register / spill / instruction statistics of the water pixel shader (in a
 //   pipeline like the renderer's) and of the ray-traced reflections' compute pass (VK_KHR_pipeline_executable_properties)
 //
@@ -583,6 +585,98 @@ int rtTest() {
     return pass ? 0 : 1;
 }
 
+// --names: debug object names (vk/debug_names.h) reach the validation layer. Images / a view / a buffer get names, a deliberate
+// misuse (vkCmdClearColorImage on an image without TRANSFER_DST usage, never executed) makes the layer print the objects with their
+// names; a second messenger of this test collects the text. Also: names off (debug.names) produce no name.
+std::vector<std::string> g_namesMessages;
+VKAPI_ATTR VkBool32 VKAPI_CALL namesCollector(VkDebugUtilsMessageSeverityFlagBitsEXT, VkDebugUtilsMessageTypeFlagsEXT,
+                                              const VkDebugUtilsMessengerCallbackDataEXT* data, void*) {
+    std::string s = data->pMessage != nullptr ? data->pMessage : "";
+    for (uint32_t i = 0; i < data->objectCount; ++i) {
+        if (data->pObjects[i].pObjectName != nullptr) s += std::string(" | object name: ") + data->pObjects[i].pObjectName;
+    }
+    g_namesMessages.push_back(std::move(s));
+    return VK_FALSE;
+}
+
+int namesTest() {
+    int failures = 0;
+    vk::Context ctx;
+    if (!ctx.create({true, -1, "rvk_vktest names"})) {
+        return 2;
+    }
+    if (!ctx.debugUtilsAvailable()) {
+        std::printf("SKIP: VK_EXT_debug_utils not available\n");
+        return 0;
+    }
+    VkDebugUtilsMessengerEXT messenger = VK_NULL_HANDLE;
+    VkDebugUtilsMessengerCreateInfoEXT mci{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
+    mci.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT;
+    mci.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT;
+    mci.pfnUserCallback = namesCollector;
+    if (vkCreateDebugUtilsMessengerEXT(ctx.instance(), &mci, nullptr, &messenger) != VK_SUCCESS) {
+        std::printf("FAIL: no messenger\n");
+        return 1;
+    }
+    // a texture-like image named by the scheme the device uses, its slot in the name
+    vk::names::TextureInfo ti;
+    ti.label = "cascade shadow map";
+    ti.labelIndex = 1;
+    ti.id = 4711;
+    ti.width = ti.height = 1024;
+    ti.format = "DF24";
+    ti.renderTarget = true;
+    ti.slot = 123;
+    const std::string expected = vk::names::textureName(ti);
+    std::printf("texture name: %s\n", expected.c_str());
+    failures += expected == "cascade shadow map #1 | rt 4711 1024x1024 DF24 [slot 123]" ? 0 : 1;
+
+    vk::Image img;
+    // sampled only: no TRANSFER_DST, so clearing it is a validation error that names the image
+    img.create(ctx, {VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, {16, 16, 1}, 1, 1, false, VK_IMAGE_USAGE_SAMPLED_BIT, {}, nullptr});
+    vk::names::texture(ctx, img, ti);
+
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    pci.queueFamilyIndex = ctx.queueFamily();
+    vkCreateCommandPool(ctx.device(), &pci, nullptr, &pool);
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    ai.commandPool = pool;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+    vkAllocateCommandBuffers(ctx.device(), &ai, &cmd);
+    vk::names::object(ctx, cmd, VK_OBJECT_TYPE_COMMAND_BUFFER, "rvk names test commands");
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    vkBeginCommandBuffer(cmd, &bi);
+    const VkClearColorValue clear{};
+    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdClearColorImage(cmd, img.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1, &range);  // deliberate misuse
+    vkEndCommandBuffer(cmd);
+
+    bool sawImage = false, sawCmd = false;
+    for (const std::string& m : g_namesMessages) {
+        sawImage = sawImage || m.find("object name: " + expected) != std::string::npos || m.find("[" + expected + "]") != std::string::npos;
+        sawCmd = sawCmd || m.find("rvk names test commands") != std::string::npos;
+    }
+    std::printf("validation messages: %zu, naming the image: %s, naming the command buffer: %s\n", g_namesMessages.size(),
+                sawImage ? "yes" : "NO", sawCmd ? "yes" : "NO");
+    if (!sawImage && !g_namesMessages.empty()) std::printf("first message: %s\n", g_namesMessages[0].c_str());
+    failures += sawImage ? 0 : 1;
+
+    // names off: nothing is named (the image keeps no name; the call is a no-op)
+    vk::names::setEnabled(false);
+    failures += ctx.namesEnabled() ? 1 : 0;
+    vk::names::setEnabled(true);
+    failures += ctx.namesEnabled() ? 0 : 1;
+
+    vkDestroyCommandPool(ctx.device(), pool, nullptr);
+    img.destroy(ctx);
+    vkDestroyDebugUtilsMessengerEXT(ctx.instance(), messenger, nullptr);
+    std::printf("%s: names: %d failure(s)\n", failures == 0 ? "PASS" : "FAIL", failures);
+    return failures == 0 ? 0 : 1;
+}
+
 // --shader-stats: the driver's statistics (VK_KHR_pipeline_executable_properties: registers, spills, instructions) of the
 // embedded water pixel shader in a pipeline like the renderer's (the draw layout, the sea grid's vertex shader), and of
 // the ray-traced reflections' compute shader (occupancy / spill checks, docs/research/rt-reflections.md 3.3)
@@ -1062,6 +1156,8 @@ int main(int argc, char** argv) {
             if (i + 1 < argc && argv[i + 1][0] != '-') fsrDll = argv[++i];
         } else if (a == "--skin") {
             return skinTest();
+        } else if (a == "--names") {
+            return namesTest();
         } else if (a == "--shader-stats") {
             return shaderStats();
         } else {
