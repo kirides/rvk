@@ -720,3 +720,181 @@ TEST(native_attribution_shadow_view_pass) {
     f.desc.clear();
     CHECK(f.desc.kind == native::ViewKind::Main && f.desc.cascade == -1 && f.desc.shadowMap == nullptr);
 }
+
+// ---- N5.5c: the effect draws (native/effect_compose) ---------------------------------------------------------------------------
+
+#include <windows.h>
+
+#include <cstdio>
+#include <span>
+
+#include "d3d9/defs.h"
+#include "fx/effect_binary.h"
+#include "native/effect_compose.h"
+
+namespace {
+
+// .fx source -> fx_2_0 binary with d3dx9_39's effect compiler (ID3DXEffectCompiler::CompileEffect = vtable slot 59); empty: no D3DX
+std::vector<std::byte> compileFx(const char* src) {
+    struct Buf {
+        virtual long __stdcall QueryInterface(const void*, void**) = 0;
+        virtual unsigned long __stdcall AddRef() = 0;
+        virtual unsigned long __stdcall Release() = 0;
+        virtual void* __stdcall GetBufferPointer() = 0;
+        virtual unsigned long __stdcall GetBufferSize() = 0;
+    };
+    using CreateFn = long(__stdcall*)(const char*, UINT, const void*, void*, DWORD, void**, Buf**);
+    using CompileFn = long(__stdcall*)(void*, DWORD, Buf**, Buf**);
+    HMODULE m = LoadLibraryW(L"d3dx9_39.dll");
+    const auto create = m != nullptr ? reinterpret_cast<CreateFn>(GetProcAddress(m, "D3DXCreateEffectCompiler")) : nullptr;
+    if (create == nullptr) return {};
+    void* compiler = nullptr;
+    Buf* err = nullptr;
+    if (create(src, static_cast<UINT>(std::strlen(src)), nullptr, nullptr, 0, &compiler, &err) < 0 || compiler == nullptr) {
+        if (err != nullptr) {
+            std::printf("  fx: %s\n", static_cast<const char*>(err->GetBufferPointer()));
+            err->Release();
+        }
+        return {};
+    }
+    Buf* out = nullptr;
+    auto** vtbl = *reinterpret_cast<void***>(compiler);
+    const long hr = reinterpret_cast<CompileFn>(vtbl[59])(compiler, 0, &out, &err);
+    reinterpret_cast<Buf*>(compiler)->Release();
+    if (err != nullptr) err->Release();
+    if (hr < 0 || out == nullptr) return {};
+    const auto* p = static_cast<const std::byte*>(out->GetBufferPointer());
+    std::vector<std::byte> r(p, p + out->GetBufferSize());
+    out->Release();
+    return r;
+}
+
+// a technique like post_SSM's SSM: stencil states, colour mask, a texture sampler, a matrix, a preshader on a float
+constexpr const char* kMaskLikeFx = R"(
+float4x4 DepthToShadowMatrix;
+float ZDistance;
+float2 FadOut;
+texture ShadowTexture;
+sampler ShadowSampler = sampler_state { texture = <ShadowTexture>; AddressU = CLAMP; AddressV = BORDER; MinFilter = POINT; MagFilter = LINEAR; MipFilter = NONE; };
+float4 VS(float4 p : POSITION) : POSITION { return float4(p.xy, ZDistance, 1); }
+float4 PS(float2 uv : TEXCOORD0) : COLOR { return tex2D(ShadowSampler, mul(float4(uv, 0, 1), DepthToShadowMatrix).xy) * (FadOut.x * 2 + FadOut.y); }
+technique SSM {
+    pass p0 {
+        AlphaBlendEnable = false; ColorWriteEnable = 0x8; ZEnable = true;
+        StencilEnable = true; StencilPass = Incr; StencilFail = Incr; StencilZFail = Keep; StencilFunc = Equal; StencilRef = 0;
+        VertexShader = compile vs_3_0 VS();
+        PixelShader = compile ps_3_0 PS();
+    }
+}
+)";
+
+}  // namespace
+
+TEST(native_effect_pass_states_samplers_constants) {
+    namespace fxc = native::fxc;
+    const auto bin = compileFx(kMaskLikeFx);
+    if (bin.empty()) {
+        std::printf("  (skipped: d3dx9_39.dll not available)\n");
+        return;
+    }
+    const auto r = fx::parseEffect(bin);
+    CHECK(r.ok());
+    if (!r.ok()) return;
+    const fx::Effect& e = r.effect;
+    fx::ParameterValues v = fx::ParameterValues::defaults(e);
+    const float z = 0.75f, fad[2] = {40.0f, -4.0f};
+    v.setFloats(e, "ZDistance", std::span<const float>(&z, 1));
+    v.setFloats(e, "FadOut", std::span<const float>(fad, 2));
+    int texObject = 0, vsObject = 0, psObject = 0;
+    std::vector<const void*> textures(e.parameters.size(), nullptr);
+    textures[e.parameterIndex("ShadowTexture")] = &texObject;
+    std::vector<const void*> shaders(e.shaders.size(), nullptr);
+    for (std::size_t s = 0; s < e.shaders.size(); ++s) shaders[s] = e.shaders[s].stage == shader::Stage::Vertex ? &vsObject : &psObject;
+    auto d = std::make_unique<fxc::EffectDraw>();
+    d->rs[d3d9::RS_CULLMODE] = 3;  // inherited
+    d->rs[d3d9::RS_ZFUNC] = 4;
+    d->ss[0][d3d9::SAMP_SRGBTEXTURE] = 1;  // inherited: the sampler_state does not name it
+    fxc::applyPass(e, e.techniques[0].passes[0], v, textures, shaders, *d);
+    CHECK(!d->unsupported);
+    CHECK(d->vs == &vsObject && d->ps == &psObject);
+    CHECK(d->rs[d3d9::RS_STENCILENABLE] == 1 && d->rs[d3d9::RS_STENCILPASS] == 7 && d->rs[d3d9::RS_STENCILFAIL] == 7 &&
+          d->rs[d3d9::RS_STENCILZFAIL] == 1 && d->rs[d3d9::RS_STENCILFUNC] == 3 && d->rs[d3d9::RS_COLORWRITEENABLE] == 8 &&
+          d->rs[d3d9::RS_ALPHABLENDENABLE] == 0 && d->rs[d3d9::RS_ZENABLE] == 1);
+    CHECK(d->rsWritten.test(d3d9::RS_STENCILFUNC) && !d->rsWritten.test(d3d9::RS_CULLMODE) && d->rs[d3d9::RS_CULLMODE] == 3);
+    // the sampler register the PS CTAB assigns: texture + the sampler_state's states, the rest as it was
+    CHECK(d->textures[0] == &texObject && d->ss[0][d3d9::SAMP_ADDRESSU] == 3 && d->ss[0][d3d9::SAMP_ADDRESSV] == 4 &&
+          d->ss[0][d3d9::SAMP_MINFILTER] == 1 && d->ss[0][d3d9::SAMP_MAGFILTER] == 2 && d->ss[0][d3d9::SAMP_MIPFILTER] == 0 &&
+          d->ss[0][d3d9::SAMP_SRGBTEXTURE] == 1);
+    // the constants: ZDistance somewhere in the VS file, FadOut.x * 2 + FadOut.y (a preshader) or FadOut itself in the PS's
+    bool zFound = false;
+    for (std::uint32_t reg = 0; reg < d->vsRegsWritten; ++reg) zFound = zFound || d->vsF[reg][0] == z;
+    CHECK(zFound && d->vsRegsWritten > 0 && d->psRegsWritten > 0);
+    bool fadFound = false;
+    for (std::uint32_t reg = 0; reg < d->psRegsWritten; ++reg) {
+        for (int c = 0; c < 4; ++c) fadFound = fadFound || d->psF[reg][c] == 76.0f;
+        fadFound = fadFound || (d->psF[reg][0] == 40.0f && d->psF[reg][1] == -4.0f);
+    }
+    CHECK(fadFound);
+    // eCGfxVisual::Execute after the pass: its four states unless the HAL's master flag holds that state
+    fxc::applyVisual(*d, 3, 1, 5, 1, fxc::Masters{});
+    CHECK(d->rs[d3d9::RS_ZFUNC] == 5 && d->rs[d3d9::RS_CULLMODE] == 1 && d->rs[d3d9::RS_ZWRITEENABLE] == 0 && d->rs[d3d9::RS_FILLMODE] == 3);
+    fxc::Masters m;
+    m.depthFunc = true;
+    fxc::applyVisual(*d, 3, 1, 8, 2, m);
+    CHECK(d->rs[d3d9::RS_ZFUNC] == 5 && d->rs[d3d9::RS_ZWRITEENABLE] == 1);
+    // the comparison: equal to itself; one stencil state off -> the stencil class, the sampler state of a live stage -> its class
+    auto c = std::make_unique<fxc::EffectDraw>(*d);
+    fxc::Live live;
+    live.stages = 1;
+    live.ps.set(0);
+    fxc::Diff diff = fxc::compare(*d, *c, live);
+    CHECK(diff.fields.none() && diff.stages == 1 && diff.regs == 1 && diff.states == fxc::kRenderStates);
+    c->rs[d3d9::RS_STENCILREF] = 1;
+    c->ss[0][d3d9::SAMP_MIPMAPLODBIAS] = 7;
+    c->viewport.width = 3;
+    diff = fxc::compare(*d, *c, live);
+    CHECK(diff.fields.test(static_cast<std::size_t>(fxc::Field::Stencil)) && diff.fields.test(static_cast<std::size_t>(fxc::Field::SamplerState)) &&
+          diff.fields.test(static_cast<std::size_t>(fxc::Field::Viewport)) && diff.fields.count() == 3);
+    c->ss[0][d3d9::SAMP_MIPMAPLODBIAS] = d->ss[0][d3d9::SAMP_MIPMAPLODBIAS];
+    live.stages = 0;  // a stage the pixel shader does not sample is not compared
+    c->textures[0] = nullptr;
+    diff = fxc::compare(*d, *c, live);
+    CHECK(!diff.fields.test(static_cast<std::size_t>(fxc::Field::Texture)));
+}
+
+// the shadow mask's own parameter values (eCImageFilterShadowMask::OnUpdateOutput 0x668560) with the engine's constants
+TEST(native_effect_mask_parameters) {
+    namespace fxc = native::fxc;
+    const fxc::MaskConstants k;  // 2.5, -0.5, 0.5, 0.2, 2
+    float kernel = 0, offset[4], scale[2];
+    fxc::cascadeFilter(k, 1024, kernel, offset, scale);
+    CHECK(kernel == 2.5f / 1024.0f && offset[0] == -0.5f / 1024.0f && offset[1] == offset[0] && offset[2] == 0.5f / 1024.0f &&
+          offset[3] == offset[2] && scale[0] == 1024.0f && scale[1] == 1024.0f);
+    float fade[2];
+    fxc::fadeOut(k, 7500.0f, 60000.0f, fade);  // the recorded frame: (40, -4)
+    CHECK(fade[0] == 40.0f && fade[1] == -4.0f);
+    // ZDistance: the next split's start as a projected depth, (f P33 + P43) / f
+    CHECK(fxc::zDistance(100.0f, 1.0f, -10.0f) == 0.9f);
+    const float mat[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+    float t[16];
+    fxc::transpose(mat, t);
+    CHECK(t[1] == 5 && t[4] == 2 && t[15] == 16 && t[3] == 13);
+    CHECK(fxc::stateField(d3d9::RS_STENCILWRITEMASK) == fxc::Field::Stencil && fxc::stateField(d3d9::RS_ZFUNC) == fxc::Field::Depth &&
+          fxc::stateField(d3d9::RS_COLORWRITEENABLE) == fxc::Field::ColorWrite && fxc::stateField(d3d9::RS_FOGENABLE) == fxc::Field::OtherState);
+}
+
+// the shadow views' setup (eCDepthMap, UpdateCamera 0x5a13e0)
+TEST(native_effect_shadow_setup_rules) {
+    namespace fxc = native::fxc;
+    CHECK(fxc::isDepthFormat(6) && fxc::isDepthFormat(3) && !fxc::isDepthFormat(8) && !fxc::isDepthFormat(2));
+    CHECK(fxc::depthMapClearFlags(6) == 6 && fxc::depthMapClearFlags(8) == 7);
+    const float box[6] = {-100.0f, -50.0f, -100000.0f, 300.0f, 150.0f, 2000.0f};
+    float sc[3], tr[3];
+    fxc::shadowProjection(box, sc, tr);
+    CHECK(sc[0] == 2.0f / 400.0f && sc[1] == 2.0f / 200.0f && sc[2] == 1.0f / 102000.0f);
+    CHECK(tr[0] == 200.0f * -0.5f * sc[0] && tr[1] == 100.0f * -0.5f * sc[1] && tr[2] == -(sc[2] * -100000.0f));
+    float bias[16];
+    fxc::shadowTextureBias(1024, 1e-4f, bias);
+    CHECK(bias[0] == 0.5f && bias[5] == -0.5f && bias[10] == 1.0f && bias[15] == 1.0f && bias[12] == 0.5f / 1024.0f + 0.5f && bias[13] == bias[12] &&
+          bias[14] == -1e-4f && bias[1] == 0.0f && bias[3] == 0.0f);
+}

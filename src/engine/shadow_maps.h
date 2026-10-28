@@ -36,6 +36,10 @@ bool trueSunVector(float out[3]);
 // split, count +0x38) names a cascade view's index (native/frame_tap, N5.5). Render thread
 const void* cascadeObject();
 
+// N5.5c (native/effect_ops, group 2048): called on the render thread right before the engine's RenderShadowMaps runs the fit and
+// renders the cascades (after the overrides above were applied), with the eCCascadeShadowMap; null = none
+void setFitTap(void (*tap)(void* cascadeObject));
+
 // Creates the detour (enabled with the others by hooks::enableAll); false when the symbols are missing
 bool install();
 

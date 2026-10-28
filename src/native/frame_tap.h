@@ -33,6 +33,9 @@ public:
     bool enabled() const { return on_; }
     void setStaticOps(class StaticOps* ops) { statics_ = ops; }
     void setStaticOpsActive(bool on);
+    // N5.5c: the effect draws (native/effect_ops) take the draws of their units first
+    void setEffectOps(class EffectOps* ops) { effects_ = ops; }
+    void setEffectOpsActive(bool on);
     // the report (HalDevice, every 5 s): the last main view + the window since the last report
     void report();
     // the last main view's ops (valid until the next main view's Execute)
@@ -76,6 +79,8 @@ private:
     bool wanted_ = false;         // native.frame_tap
     bool staticsWanted_ = false;  // the static ops are active
     class StaticOps* statics_ = nullptr;
+    bool effectsWanted_ = false;  // the effect draws are active
+    class EffectOps* effects_ = nullptr;
     int verified_ = 0;  // 0 not yet, 1 the sort sites are as expected, -1 not (the tap stays idle)
     int shadowVerified_ = 0;  // ExecuteShadowMap's sort site (N5.5): 1 as expected, -1 not (shadow views stay untapped)
     std::array<const void*, kViewKindCount> kindVtables_{};  // the shadow maps' vtables (Engine.dll RVAs 0x9a29e0 / 0x9a2848 / 0x976738)

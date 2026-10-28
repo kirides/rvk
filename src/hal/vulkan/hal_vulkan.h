@@ -29,6 +29,7 @@
 #include "enh/rt_shadows.h"
 #include "enh/shadows.h"
 #include "enh/water.h"
+#include "native/effect_ops.h"
 #include "native/frame_tap.h"
 #include "native/static_ops.h"
 #include "overlay/overlay.h"
@@ -275,6 +276,20 @@ private:
     std::shared_ptr<d3d9::Shader> shader_;
 };
 
+// The fx effect behind an engine API effect that is one of ours (native/effect_ops, N5.5c: the composition evaluates its passes
+// itself from engine data; render thread)
+class EffectInfo {
+public:
+    virtual ~EffectInfo() = default;
+    virtual const fx::Effect& fxEffect() const = 0;
+    // our device shader of the effect's shader k (null: none)
+    virtual const d3d9::Shader* fxShader(std::uint32_t k) const = 0;
+    // the top-level parameter index of a parameter handle the engine got from GetParameterDescription (fx::kNone: an element
+    // handle or unknown)
+    virtual std::uint32_t parameterOf(const void* handle) const = 0;
+    static const EffectInfo* fromApi(const void* apiEffect);
+};
+
 class HalDevice final : public StubDevice {
 public:
     HalDevice();
@@ -292,6 +307,12 @@ public:
     d3d9::Texture* textureOfApi(const void* api);
     // the main view's refraction copy (HalTexture::CopyCurrentRTToImage) into the engine texture `api` (the op tap checks it)
     void refractionCopied(const void* api);
+    // N5.5c (native/effect_ops): the effect draws' composition (null when not created)
+    native::EffectOps* effectOps() const { return effectOps_.get(); }
+    // the master flags that make eCGfxVisual::Execute's setters no-ops (fill, cull, depth func, depth write)
+    native::fxc::Masters visualMasters() const {
+        return {master_[M_RENDERMODE], master_[M_CULL], master_[M_DEPTHFUNC], master_[M_DEPTHWRITE]};
+    }
     // live HAL cube maps by the engine's eCAPICubeMap pointer (kept apart: textureOfApi's users expect 2D textures)
     void registerCube(const void* api, d3d9::Texture* texture);
     void unregisterCube(const void* api);
@@ -551,6 +572,7 @@ private:
     std::unique_ptr<enh::NativeShadows> nativeShadows_;  // native.shadows (the native sun cascades)
     std::unique_ptr<native::FrameTap> frameTap_;          // native.frame_tap (N5.0: the main view's ops + draw attribution)
     std::unique_ptr<native::StaticOps> staticOps_;        // native.static_ops (N5.1: the static mesh ops composed / drawn by us)
+    std::unique_ptr<native::EffectOps> effectOps_;        // N5.5c: the shadow mask / terrain blur effect draws (scene_ops_groups 1024 / 2048)
     void applyStaticOps();
     std::unique_ptr<enh::NativeOpaque> nativeOpaque_;  // native.opaque (a draw replacer + a pass: the native renderer's static meshes)
     std::unique_ptr<enh::RtScene> rtScene_;      // the ray tracing scene (a draw observer + a pass; active while a consumer holds it)

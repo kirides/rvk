@@ -57,6 +57,28 @@ public:
 };
 void setOpTap(OpTap* tap);
 
+// N5.5c (native/effect_ops): the shadow mask's image filters and the terrain variance map's blur. Render thread; set / cleared on it.
+class EffectTap {
+public:
+    virtual ~EffectTap() = default;
+    // eCIlluminationAdmin::UpdateShadowMask (inside its ShadowMask pass marker) begins (before the original) / ends
+    virtual void maskBegin(void* illum) = 0;
+    virtual void maskEnd() = 0;
+    // eCImageFilterEffect::ExecuteEffect (0x75af70) of any effect filter begins / ends
+    virtual void effectBegin(void* filter) = 0;
+    virtual void effectEnd(void* filter) = 0;
+    // eCImageFilterCopy::OnUpdateOutput (0x665640) begins / ends
+    virtual void copyBegin(void* filter) = 0;
+    virtual void copyEnd(void* filter) = 0;
+    // eCShadowMapBase::RenderShadowMap (0x5a1070: target, clear, UpdateCamera, the scene, reset) begins / ends; its
+    // eCFrustumDatabase::ExecuteShadowMap (the scene, after UpdateCamera) begins / ends
+    virtual void shadowMapBegin(void* map) = 0;
+    virtual void shadowMapEnd(void* map) = 0;
+    virtual void shadowSceneBegin(void* map) = 0;
+    virtual void shadowSceneEnd(void* map) = 0;
+};
+void setEffectTap(EffectTap* tap);
+
 // Makes the entries of slot `slot` (0..3) of a render-context vtable reach the op tap and the draw tag's op: a slot that is
 // already ours stays; any other is replaced by a pass-through thunk (only the tag's op around the original). Returns false
 // when the slot cannot be patched (pool full, unreadable). `original` receives the engine's function of the slot.

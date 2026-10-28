@@ -113,7 +113,7 @@ void HalDevice::applyStaticOps() {
     const bool compare = rs.nativeStaticOpsCompare != nullptr && rs.nativeStaticOpsCompare->asBool();
     staticOps_->setMode(native::StaticOps::Group::Static, takeOver, compare);
     // N5.2 scene ops (native.scene_ops*): groups 1 alpha / refracted mesh ops, 2 entity overlay passes, 4 decals, 8 sky, 16 billboards,
-    // 32 sky cube faces, 64 skinned actors, 128 SpeedTrees + tree billboards, 256 vegetation, 512 shadow views
+    // 32 sky cube faces, 64 skinned actors, 128 SpeedTrees + tree billboards, 256 vegetation, 512 shadow views, 1024 effect draws
     const bool sceneTake = rs.nativeSceneOps != nullptr && rs.nativeSceneOps->asBool();
     const bool sceneCompare = rs.nativeSceneOpsCompare != nullptr && rs.nativeSceneOpsCompare->asBool();
     const int groups = rs.nativeSceneOpsGroups != nullptr ? rs.nativeSceneOpsGroups->asInt() : 1023;
@@ -131,7 +131,12 @@ void HalDevice::applyStaticOps() {
     staticOps_->setMode(native::StaticOps::Group::Vegetation, sceneTake && (groups & 256) != 0, sceneCompare && (groups & 256) != 0);
     // N5.5: 512 the shadow maps' z ops (the post_SSM shadow mask is a later stage)
     staticOps_->setMode(native::StaticOps::Group::ShadowViews, sceneTake && (groups & 512) != 0, sceneCompare && (groups & 512) != 0);
+    // N5.5c: 1024 the shadow mask chain (post_SSM), its 1/4 depth copy and the terrain variance map's blur (native/effect_ops)
+    effectOps_->setMode(sceneTake && (groups & 1024) != 0, sceneCompare && (groups & 1024) != 0);
+    // 2048 the shadow views' setup: the cascade fit, the shadow camera, the maps' target / viewport / clear / reset
+    effectOps_->setSetupMode(sceneTake && (groups & 2048) != 0, sceneCompare && (groups & 2048) != 0);
     frameTap_->setStaticOpsActive(staticOps_->active());
+    frameTap_->setEffectOpsActive(effectOps_->active());
 }
 
 void HalDevice::registerCube(const void* api, d3d9::Texture* texture) {
@@ -385,6 +390,8 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     // N5.1 static ops (native/static_ops.h): driven by the frame tap
     staticOps_ = std::make_unique<native::StaticOps>(*this);
     frameTap_->setStaticOps(staticOps_.get());
+    effectOps_ = std::make_unique<native::EffectOps>(*this);
+    frameTap_->setEffectOps(effectOps_.get());
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
@@ -1142,7 +1149,20 @@ bEResult HalDevice::IsDeviceNotReset(bool* a0) {
 
 bEResult HalDevice::Reset() { return bEResult_Ok; }
 
-bEResult HalDevice::SetViewport(eCGfxShared::eSGfxViewport const& a0) {
+bEResult HalDevice::SetViewport(eCGfxShared::eSGfxViewport const& in) {
+    // N5.5c: a shadow map's viewport (native/effect_ops_setup.cpp: compared, with take-over the composed one)
+    eCGfxShared::eSGfxViewport a0 = in;
+    if (effectOps_ && effectOps_->setupOn()) {
+        native::fxc::Viewport v{static_cast<std::uint32_t>(a0.left), static_cast<std::uint32_t>(a0.top), static_cast<std::uint32_t>(a0.right - a0.left),
+                                static_cast<std::uint32_t>(a0.bottom - a0.top), a0.minZ, a0.maxZ};
+        effectOps_->setupViewport(v);
+        a0.left = static_cast<std::int32_t>(v.x);
+        a0.top = static_cast<std::int32_t>(v.y);
+        a0.right = static_cast<std::int32_t>(v.x + v.width);
+        a0.bottom = static_cast<std::int32_t>(v.y + v.height);
+        a0.minZ = v.minZ;
+        a0.maxZ = v.maxZ;
+    }
     Viewport vp;
     vp.x = static_cast<std::uint32_t>(std::max(0, a0.left));
     vp.y = static_cast<std::uint32_t>(std::max(0, a0.top));
@@ -1168,7 +1188,9 @@ bEResult HalDevice::GetViewport(eCGfxShared::eSGfxViewport& a0) {
 
 bEResult HalDevice::ClearViewport(eCGfxShared::eEViewportClear a0, unsigned long a1, float a2, unsigned long a3) {
     HAL_LOG("hal> Clear flags {} color {:08x} z {}", static_cast<int>(a0), a1, a2);
-    dev_.clear(static_cast<std::uint32_t>(a0), static_cast<std::uint32_t>(a1), a2, static_cast<std::uint32_t>(a3));
+    auto flags = static_cast<std::uint32_t>(a0), colour = static_cast<std::uint32_t>(a1), stencil = static_cast<std::uint32_t>(a3);
+    if (effectOps_ && effectOps_->setupOn()) effectOps_->setupClear(flags, colour, a2, stencil);
+    dev_.clear(flags, colour, a2, stencil);
     return bEResult_Ok;
 }
 
@@ -1372,6 +1394,7 @@ void HalDevice::logFrameStats() {
         lastStatsFrame_ = s.frames;
         logFrameStructure();
         if (frameTap_) frameTap_->report();
+        if (effectOps_) effectOps_->report();
         spdlog::info("hal: frame {}: {} draws total, {} clears, {} render passes; skipped: {} no shader, {} no target, {} vertex "
                      "input, {} pipeline; HAL Draw calls {}; {} unimplemented slots seen; texture CPU copies {:.1f} MiB",
                      s.frames, s.totalDraws, s.totalClears, s.totalRenderPasses, s.skippedNoShader, s.skippedNoTarget,
@@ -2008,6 +2031,8 @@ bEResult HalDevice::SetVertexDataNULL(unsigned long a0) {
 // ---- render targets (hal-structs.md 2.2) -----------------------------------------------------------------------------
 
 bEResult HalDevice::SetRenderTarget(void* a0, void* a1) {
+    // N5.5c: a shadow map's target bind / reset (native/effect_ops_setup.cpp)
+    if (effectOps_ && effectOps_->setupOn()) effectOps_->setupTarget(a0, a1);
     auto* rt = static_cast<d3d9::Surface*>(a0);
     if (logThisFrame()) {
         const auto describe = [](const d3d9::Surface* s) {

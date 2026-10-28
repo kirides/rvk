@@ -1788,11 +1788,13 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "billboards (eCBillboardAdmin::RenderBillboards), 32 the sky environment cube's faces, 64 the skinned actors' ops "
                        "(eCRenderContextAnimation2: bones, morphs, body parts, overlays), 128 the SpeedTree ops (branches, fronds, leaves) and "
                        "the tree billboards' ops, 256 the vegetation ops (grass batches), 512 the shadow maps' z ops (sun cascades, terrain "
-                       "variance map, point-light atlas cells).",
+                       "variance map, point-light atlas cells), 1024 the effect draws around the shadows (the post_SSM shadow mask chain: "
+                       "SSAO, cascades, terrain term, blur; its depth copy; the terrain variance map's Blur7H / V), 2048 the shadow views' setup "
+                       "(the cascade fit and shadow cameras compared; the maps' target binds, viewports, clears and resets).",
         .type = Type::Int,
         .defaultValue = 1023,
         .min = 0,
-        .max = 1023,
+        .max = 4095,
         .flags = Flag::NoAB | Flag::Debug,
     });
     r.nativeDebug = &reg.add({

@@ -31,6 +31,7 @@ using d3d9::scene::View;
 
 std::atomic<d3d9::Device*> g_device{nullptr};
 std::atomic<OpTap*> g_opTap{nullptr};  // native/frame_tap (N5.0), null = off
+std::atomic<EffectTap*> g_effectTap{nullptr};  // native/effect_ops (N5.5c), null = off
 
 // call-nesting flags: which caller an eCFrustumDatabase::Execute belongs to (render thread only)
 int g_inSceneFilter = 0;   // eCImageFilterScene::OnUpdateOutput: the main camera into the image effect's scene target
@@ -195,9 +196,23 @@ void detourExecuteShadowMap(void* db, void* shadowMap) {
     }
     // the N5.5 op tap: the shadow map's z list as ExecuteShadowMap will run it
     OpTap* tap = scope.d != nullptr ? g_opTap.load(std::memory_order_relaxed) : nullptr;
+    EffectTap* effects = scope.d != nullptr ? g_effectTap.load(std::memory_order_relaxed) : nullptr;
+    if (effects != nullptr) effects->shadowSceneBegin(shadowMap);
     if (tap != nullptr) tap->shadowExecuteBegin(db, shadowMap);
     g_executeShadowMap.original(db, shadowMap);
     if (tap != nullptr) tap->shadowExecuteEnd(db);
+    if (effects != nullptr) effects->shadowSceneEnd(shadowMap);
+}
+
+// N5.5c: a shadow map's render (target, clear, camera, scene, reset: native/effect_ops_setup.cpp)
+using MapRenderFn = bool (*)(void* map);
+Hook<MapRenderFn> g_shadowMapRender;
+bool detourShadowMapRender(void* map) {
+    EffectTap* tap = device() != nullptr ? g_effectTap.load(std::memory_order_relaxed) : nullptr;
+    if (tap != nullptr) tap->shadowMapBegin(map);
+    const bool r = g_shadowMapRender.original(map);
+    if (tap != nullptr) tap->shadowMapEnd(map);
+    return r;
 }
 
 using BeginZPassFn = bool (*)(void* admin, void* depthMap, bool a, bool b);
@@ -231,7 +246,29 @@ using VoidThisFn = void (*)(void* self);
 Hook<VoidThisFn> g_updateShadowMask;
 void detourUpdateShadowMask(void* self) {
     PassScope scope(Pass::ShadowMask, "UpdateShadowMask");
+    EffectTap* tap = device() != nullptr ? g_effectTap.load(std::memory_order_relaxed) : nullptr;
+    if (tap != nullptr) tap->maskBegin(self);
     g_updateShadowMask.original(self);
+    if (tap != nullptr) tap->maskEnd();
+}
+
+// N5.5c: the image filters' effect draws and the 1/4 depth copy (native/effect_ops)
+Hook<VoidThisFn> g_executeEffect;
+void detourExecuteEffect(void* filter) {
+    EffectTap* tap = device() != nullptr ? g_effectTap.load(std::memory_order_relaxed) : nullptr;
+    if (tap != nullptr) tap->effectBegin(filter);
+    g_executeEffect.original(filter);
+    if (tap != nullptr) tap->effectEnd(filter);
+}
+
+using FilterUpdateFn = bool (*)(void* filter, int index);
+Hook<FilterUpdateFn> g_copyUpdate;
+bool detourCopyUpdate(void* filter, int index) {
+    EffectTap* tap = device() != nullptr ? g_effectTap.load(std::memory_order_relaxed) : nullptr;
+    if (tap != nullptr) tap->copyBegin(filter);
+    const bool r = g_copyUpdate.original(filter, index);
+    if (tap != nullptr) tap->copyEnd(filter);
+    return r;
 }
 
 Hook<VoidThisFn> g_beginRenderSolid;
@@ -732,6 +769,9 @@ int install() {
     add(g_beginZPass, "eCShaderMaterialAdmin::BeginZPass", s.materialBeginZPass, &detourBeginZPass);
     add(g_endZPass, "eCShaderMaterialAdmin::EndZPass", s.materialEndZPass, &detourEndZPass);
     add(g_updateShadowMask, "eCIlluminationAdmin::UpdateShadowMask", s.illumUpdateShadowMask, &detourUpdateShadowMask);
+    add(g_executeEffect, "eCImageFilterEffect::ExecuteEffect", s.imageFilterExecuteEffect, &detourExecuteEffect);
+    add(g_copyUpdate, "eCImageFilterCopy::OnUpdateOutput", s.imageFilterCopyUpdate, &detourCopyUpdate);
+    add(g_shadowMapRender, "eCShadowMapBase::RenderShadowMap", s.shadowMapBaseRender, &detourShadowMapRender);
     add(g_beginRenderSolid, "eCModuleAdmin::DoBeginRenderSolid", s.moduleBeginRenderSolid, &detourBeginRenderSolid);
     add(g_beginRenderAlpha, "eCModuleAdmin::DoBeginRenderAlpha", s.moduleBeginRenderAlpha, &detourBeginRenderAlpha);
     add(g_endRenderAlpha, "eCModuleAdmin::DoEndRenderAlpha", s.moduleEndRenderAlpha, &detourEndRenderAlpha);
@@ -756,6 +796,8 @@ int install() {
 d3d9::Device* renderDevice() { return device(); }
 
 void setOpTap(OpTap* tap) { g_opTap.store(tap, std::memory_order_release); }
+
+void setEffectTap(EffectTap* tap) { g_effectTap.store(tap, std::memory_order_release); }
 
 void subMeshWater(const void* material, const void* meshResource, draws::Water& water, const char*& name) {
     water = draws::Water::None;

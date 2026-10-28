@@ -6,6 +6,8 @@
 #include <windows.h>
 
 #include <cstring>
+#include <mutex>
+#include <unordered_map>
 
 #include <spdlog/spdlog.h>
 
@@ -68,11 +70,18 @@ std::vector<std::byte> compileEffectSource(const char* text, std::size_t size) {
     return bin;
 }
 
+std::mutex g_effectsMutex;
+std::unordered_map<const void*, const EffectInfo*> g_effects;  // live HalEffects by their eCAPIEffect pointer
+
 }  // namespace
 
-class HalEffect final : public StubEffect {
+class HalEffect final : public StubEffect, public EffectInfo {
 public:
     HalEffect(HalDevice& dev, fx::Effect effect) : dev_(dev), fx_(std::move(effect)) {
+        {
+            const std::lock_guard lock(g_effectsMutex);
+            g_effects[static_cast<const eCAPIEffect*>(this)] = this;
+        }
         values_ = fx::ParameterValues::defaults(fx_);
         params_.reserve(fx_.parameters.size() * 2);
         for (std::uint32_t i = 0; i < fx_.parameters.size(); ++i) {
@@ -84,6 +93,19 @@ public:
         for (const auto& s : fx_.shaders) {
             shaders_.push_back(dev_.dev().createShader(s.tokens));
         }
+    }
+
+    ~HalEffect() override {
+        const std::lock_guard lock(g_effectsMutex);
+        g_effects.erase(static_cast<const eCAPIEffect*>(this));
+    }
+
+    // EffectInfo (native/effect_ops)
+    const fx::Effect& fxEffect() const override { return fx_; }
+    const d3d9::Shader* fxShader(std::uint32_t k) const override { return k < shaders_.size() ? shaders_[k].get() : nullptr; }
+    std::uint32_t parameterOf(const void* handle) const override {
+        const Handle* h = handleOf(const_cast<void*>(handle));
+        return h != nullptr && h->element == kNoElement ? h->param : fx::kNone;
     }
 
     bEResult OnResetDevice() override { return bEResult_Ok; }
@@ -412,6 +434,13 @@ private:
     int technique_ = -1;
     int pass_ = -1;
 };
+
+const EffectInfo* EffectInfo::fromApi(const void* apiEffect) {
+    if (apiEffect == nullptr) return nullptr;
+    const std::lock_guard lock(g_effectsMutex);
+    const auto it = g_effects.find(apiEffect);
+    return it != g_effects.end() ? it->second : nullptr;
+}
 
 bEResult HalDevice::CreateEffect(void const* a0, unsigned int a1, eCAPIEffect** a2) {
     if (a0 == nullptr || a2 == nullptr) return bEResult_False;

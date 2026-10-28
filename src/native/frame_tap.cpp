@@ -1,5 +1,7 @@
 #include "native/frame_tap.h"
 
+#include "native/effect_ops.h"
+
 #include <windows.h>
 
 #include <algorithm>
@@ -92,8 +94,13 @@ void FrameTap::setStaticOpsActive(bool on) {
     update();
 }
 
+void FrameTap::setEffectOpsActive(bool on) {
+    effectsWanted_ = on;
+    update();
+}
+
 void FrameTap::update() {
-    const bool on = wanted_ || staticsWanted_;
+    const bool on = wanted_ || staticsWanted_ || effectsWanted_;
     if (on == on_) return;
     on_ = on;
     if (on) {
@@ -674,6 +681,15 @@ void FrameTap::refractionCopy(const void* api) {
 }
 
 bool FrameTap::onDraw(const d3d9::DrawTapInfo& d) {
+    // the effect draws' own draws (N5.5c) are not the engine's; the engine's draws of their units go to them first
+    bool dropEffect = false;
+    if (effects_ != nullptr && effectsWanted_) {
+        if (effects_->issuing()) {
+            effects_->ownDraw(d);
+            return false;
+        }
+        dropEffect = effects_->engineDraw(d);
+    }
     // the static ops' own draws (N5.1) are not the engine's
     if (statics_ != nullptr && statics_->issuing()) {
         statics_->ownDraw(d);
@@ -681,9 +697,9 @@ bool FrameTap::onDraw(const d3d9::DrawTapInfo& d) {
     }
     // a sky cube face's draws (N5.2c, outside Execute)
     if (statics_ != nullptr && staticsWanted_ && statics_->inSkyCube() && d.phase.view == d3d9::scene::View::SkyCube) {
-        return statics_->engineDraw(d, nullptr);
+        return statics_->engineDraw(d, nullptr) || dropEffect;
     }
-    if (!executing_ || d.phase.view != (desc_.kind == ViewKind::Main ? d3d9::scene::View::Main : d3d9::scene::View::Shadow)) return false;
+    if (!executing_ || d.phase.view != (desc_.kind == ViewKind::Main ? d3d9::scene::View::Main : d3d9::scene::View::Shadow)) return dropEffect;
     DrawInfo info;
     info.index = d.index;
     info.pass = d.phase.pass;
@@ -702,8 +718,8 @@ bool FrameTap::onDraw(const d3d9::DrawTapInfo& d) {
     info.psHash = d.psHash;
     info.blend = d.blend;
     attr_.draw(info);
-    if (statics_ != nullptr && staticsWanted_) return statics_->engineDraw(d, d.tag != nullptr ? desc_.find(d.tag->op) : nullptr);
-    return false;
+    if (statics_ != nullptr && staticsWanted_ && statics_->engineDraw(d, d.tag != nullptr ? desc_.find(d.tag->op) : nullptr)) return true;
+    return dropEffect;
 }
 
 void FrameTap::executeEnd(void* db) {

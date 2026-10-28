@@ -111,6 +111,12 @@ bEResult HalTexture::CopyCurrentRTToImage(eCGfxShared::eETexFilter a0, bCRect* a
 }
 
 bEResult HalTexture::CopyImageToCurrentRT(eCGfxShared::eETexFilter a0, bCRect* a1, bCRect* a2) {
+    // N5.5c: the shadow mask's 1/4 depth copy, compared / made by the composition (native/effect_ops)
+    if (native::EffectOps* ops = dev_.effectOps();
+        ops != nullptr && ops->copyCall(tex_.get(), reinterpret_cast<const std::int32_t*>(a1), reinterpret_cast<const std::int32_t*>(a2),
+                                        static_cast<std::uint32_t>(a0))) {
+        return bEResult_Ok;
+    }
     dev_.dev().stretchRect(tex_->surface(0, 0), reinterpret_cast<const std::int32_t*>(a1), dev_.dev().renderTarget(0),
                            reinterpret_cast<const std::int32_t*>(a2), linearFilter(a0));
     return bEResult_Ok;

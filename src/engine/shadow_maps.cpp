@@ -96,6 +96,8 @@ void detourLightUpdate(void* self) {
     g_lightUpdate.original(self);
 }
 
+std::atomic<void (*)(void*)> g_fitTap{nullptr};
+
 bool detourRender(void* self) {
     if (self != nullptr) {
         g_cascadeObject.store(self, std::memory_order_relaxed);
@@ -168,6 +170,7 @@ bool detourRender(void* self) {
             th.time = now;
             return true;
         }
+        if (auto* tap = g_fitTap.load(std::memory_order_relaxed); tap != nullptr && self != nullptr) tap(self);
         const bool r = g_render.original(self);
         th = Throttle{true, 0, static_cast<std::uint32_t>(std::max(field<int>(self, kSplitCount), 0)), {}, {}, {}, range, factor, size, now};
         std::memcpy(th.axes, axes, sizeof axes);
@@ -176,6 +179,7 @@ bool detourRender(void* self) {
         return r;
     }
     th.valid = false;
+    if (auto* tap = g_fitTap.load(std::memory_order_relaxed); tap != nullptr && self != nullptr) tap(self);
     return g_render.original(self);
 }
 
@@ -204,6 +208,8 @@ bool trueSunVector(float out[3]) {
     for (int i = 0; i < 3; ++i) out[i] = g_trueSun[i].load(std::memory_order_relaxed);
     return true;
 }
+
+void setFitTap(void (*tap)(void* cascadeObject)) { g_fitTap.store(tap, std::memory_order_release); }
 
 bool install() {
     const auto& s = sym();
