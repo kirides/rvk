@@ -1888,6 +1888,73 @@ bool Device::readRenderTarget(Surface* src, Texture* dst, std::uint32_t dstLevel
     return ok;
 }
 
+namespace {
+
+// One 4x4 block of BC1 / BC2 / BC3 (D3D9 DXT1 / DXT2-3 / DXT4-5) to 16 BGRA texels (A8R8G8B8 in memory: B, G, R, A).
+void decodeDxtBlock(const std::uint8_t* b, std::uint32_t d3dFormat, std::uint8_t out[16][4]) {
+    const std::uint8_t* c = d3dFormat == vk::d3dfmt::DXT1 ? b : b + 8;
+    std::uint16_t c0, c1;
+    std::memcpy(&c0, c, 2);
+    std::memcpy(&c1, c + 2, 2);
+    const auto expand = [](std::uint16_t v, std::uint8_t* rgb) {  // rgb = R, G, B
+        rgb[0] = static_cast<std::uint8_t>(((v >> 11) & 31) * 255 / 31);
+        rgb[1] = static_cast<std::uint8_t>(((v >> 5) & 63) * 255 / 63);
+        rgb[2] = static_cast<std::uint8_t>((v & 31) * 255 / 31);
+    };
+    std::uint8_t pal[4][4];  // R, G, B, A
+    expand(c0, pal[0]);
+    expand(c1, pal[1]);
+    pal[0][3] = pal[1][3] = pal[2][3] = 255;
+    pal[3][3] = 255;
+    const bool fourColours = d3dFormat != vk::d3dfmt::DXT1 || c0 > c1;
+    for (int i = 0; i < 3; ++i) {
+        if (fourColours) {
+            pal[2][i] = static_cast<std::uint8_t>((2 * pal[0][i] + pal[1][i]) / 3);
+            pal[3][i] = static_cast<std::uint8_t>((pal[0][i] + 2 * pal[1][i]) / 3);
+        } else {
+            pal[2][i] = static_cast<std::uint8_t>((pal[0][i] + pal[1][i]) / 2);
+            pal[3][i] = 0;
+        }
+    }
+    if (!fourColours) pal[3][3] = 0;  // DXT1 transparent black
+    std::uint32_t idx;
+    std::memcpy(&idx, c + 4, 4);
+    std::uint8_t alpha[16];
+    std::fill(alpha, alpha + 16, std::uint8_t{255});
+    if (d3dFormat == vk::d3dfmt::DXT2 || d3dFormat == vk::d3dfmt::DXT3) {
+        for (int i = 0; i < 16; ++i) {
+            const std::uint8_t n = (b[i / 2] >> ((i & 1) * 4)) & 15;
+            alpha[i] = static_cast<std::uint8_t>(n * 17);
+        }
+    } else if (d3dFormat == vk::d3dfmt::DXT4 || d3dFormat == vk::d3dfmt::DXT5) {
+        std::uint8_t a[8] = {b[0], b[1]};
+        for (int i = 1; i <= (a[0] > a[1] ? 6 : 4); ++i) {
+            a[i + 1] = a[0] > a[1] ? static_cast<std::uint8_t>(((7 - i) * a[0] + i * a[1]) / 7)
+                                   : static_cast<std::uint8_t>(((5 - i) * a[0] + i * a[1]) / 5);
+        }
+        if (a[0] <= a[1]) {
+            a[6] = 0;
+            a[7] = 255;
+        }
+        std::uint64_t bits = 0;
+        for (int i = 0; i < 6; ++i) bits |= static_cast<std::uint64_t>(b[2 + i]) << (8 * i);
+        for (int i = 0; i < 16; ++i) alpha[i] = a[(bits >> (3 * i)) & 7];
+    }
+    for (int i = 0; i < 16; ++i) {
+        const std::uint8_t* p = pal[(idx >> (2 * i)) & 3];
+        out[i][0] = p[2];
+        out[i][1] = p[1];
+        out[i][2] = p[0];
+        out[i][3] = d3dFormat == vk::d3dfmt::DXT1 ? p[3] : alpha[i];
+    }
+}
+
+bool isBlockDxt(std::uint32_t f) {
+    return f == vk::d3dfmt::DXT1 || f == vk::d3dfmt::DXT2 || f == vk::d3dfmt::DXT3 || f == vk::d3dfmt::DXT4 || f == vk::d3dfmt::DXT5;
+}
+
+}  // namespace
+
 bool Device::loadSurfaceFromSurface(Texture* dst, std::uint32_t dstLevel, const std::int32_t* dstRect, Texture* src,
                                     std::uint32_t srcLevel, const std::int32_t* srcRect, bool linear, std::string* why) {
     const auto fail = [&](const char* reason) {
@@ -1936,8 +2003,47 @@ bool Device::loadSurfaceFromSurface(Texture* dst, std::uint32_t dstLevel, const 
     if (dst->format().compressed || dst->format().convert != vk::Convert::None) {
         return fail("compressed / converted destination format");
     }
-    // a CPU-side destination: blit into a temporary render target of the destination's format, read it back into the rect
     const std::uint32_t w = static_cast<std::uint32_t>(r[2] - r[0]), h = static_cast<std::uint32_t>(r[3] - r[1]);
+    if (src->format().compressed && isBlockDxt(src->desc().format) && dst->format().format == VK_FORMAT_B8G8R8A8_UNORM && !linear) {
+        // A block-compressed source into 32-bit CPU texels (the sky absorption image: DXT1 -> A8R8G8B8): decoded on the CPU
+        // (nearest). vkCmdBlitImage from a BC source gave wrong texels here (only the first block row / column region of an
+        // 8x8 DXT1 level came out, the rest 0) although the source image and the blit parameters are right.
+        const std::uint32_t sLvlW = src->levelWidth(srcLevel), sLvlH = src->levelHeight(srcLevel);
+        const std::int32_t sr[4] = {srcRect != nullptr ? srcRect[0] : 0, srcRect != nullptr ? srcRect[1] : 0,
+                                    srcRect != nullptr ? srcRect[2] : static_cast<std::int32_t>(sLvlW),
+                                    srcRect != nullptr ? srcRect[3] : static_cast<std::int32_t>(sLvlH)};
+        if (sr[0] >= 0 && sr[1] >= 0 && sr[0] < sr[2] && sr[1] < sr[3] && sr[2] <= static_cast<std::int32_t>(sLvlW) &&
+            sr[3] <= static_cast<std::int32_t>(sLvlH)) {
+            std::vector<std::uint8_t> raw;
+            if (!readImageLevel(src->image(), srcLevel, 0, {sLvlW, sLvlH, 1}, vk::storageSize(src->format(), sLvlW, sLvlH), raw)) {
+                return fail("read-back of the source failed");
+            }
+            const std::uint32_t bw = (sLvlW + 3) / 4, blockBytes = src->format().blockBytes;
+            const std::uint32_t rw = static_cast<std::uint32_t>(sr[2] - sr[0]), rh = static_cast<std::uint32_t>(sr[3] - sr[1]);
+            Texture::Locked lk;
+            if (!dst->lock(dstLevel, 0, r, dstRect == nullptr ? LOCK_DISCARD : 0, lk)) {
+                return fail("destination lock failed");
+            }
+            std::uint8_t block[16][4];
+            std::uint32_t cachedBlock = ~0u;
+            for (std::uint32_t y = 0; y < h; ++y) {
+                const std::uint32_t sy = static_cast<std::uint32_t>(sr[1]) + (y * rh + rh / 2) / h;
+                auto* row = reinterpret_cast<std::uint32_t*>(static_cast<std::uint8_t*>(lk.bits) + static_cast<std::size_t>(y) * lk.rowPitch);
+                for (std::uint32_t x = 0; x < w; ++x) {
+                    const std::uint32_t sx = static_cast<std::uint32_t>(sr[0]) + (x * rw + rw / 2) / w;
+                    const std::uint32_t bi = (sy / 4) * bw + sx / 4;
+                    if (bi != cachedBlock) {
+                        decodeDxtBlock(raw.data() + static_cast<std::size_t>(bi) * blockBytes, src->desc().format, block);
+                        cachedBlock = bi;
+                    }
+                    std::memcpy(&row[x], block[(sy & 3) * 4 + (sx & 3)], 4);
+                }
+            }
+            dst->unlock(dstLevel, 0);
+            return true;
+        }
+    }
+    // a CPU-side destination: blit into a temporary render target of the destination's format, read it back into the rect
     TextureDesc td;
     td.width = w;
     td.height = h;
