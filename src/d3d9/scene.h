@@ -69,6 +69,8 @@ public:
     void pop();                       // leave it: the enclosing phase continues
     void setPass(Pass pass);          // inside the current scope
     Phase current() const { return cur_; }
+    // changes whenever the current phase, the open scopes or the per-frame view counts change (a cheap "same phase as before")
+    std::uint64_t generation() const { return generation_; }
     View view() const { return cur_.view; }
     Pass pass() const { return cur_.pass; }
     std::size_t depth() const { return stack_.size(); }
@@ -95,6 +97,7 @@ private:
     void open(bool enter);
 
     Phase cur_{};
+    std::uint64_t generation_ = 0;
     std::vector<Phase> stack_;  // the enclosing phases of the open scopes
     std::vector<Segment> segments_;
     std::vector<Segment> last_;

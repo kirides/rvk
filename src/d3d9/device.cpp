@@ -14,6 +14,7 @@
 #include <spdlog/spdlog.h>
 
 #include "d3d9/convert.h"
+#include "d3d9/memeq.h"
 #include "d3d9/target_names.h"
 #include "shader/sm_ir.h"
 #include "shader/spirv.h"
@@ -739,6 +740,7 @@ void Device::setRegionsEnabled(bool on) {
     const bool can = ctx_.debugUtilsAvailable() && vkCmdBeginDebugUtilsLabelEXT != nullptr && vkCmdEndDebugUtilsLabelEXT != nullptr;
     on = on && can && created_;
     if (on == regionsOn_) return;
+    phasesSeen_ = ~0ull;
     if (on) {
         regionsOn_ = true;
         regionsFrame_ = ~0ull;  // a fresh stack
@@ -760,6 +762,7 @@ void Device::regionsClose() {
 // a new command buffer: the frame's region (a new frame: a new one) and whatever was open at the submit
 void Device::regionsReopen() {
     if (!regionsOn_) return;
+    phasesSeen_ = ~0ull;
     VkCommandBuffer cmd = frames_.cmd();
     if (regionCount_ == 0 || regionsFrame_ != stats_.frames) {
         regionCount_ = 0;
@@ -775,6 +778,7 @@ void Device::regionsReopen() {
 // phase did not change (a key over the open scopes); the wanted path is built in a fixed array.
 void Device::syncPhaseRegions() {
     if (!regionsOn_ || injecting_ || regionCount_ == 0) return;
+    if (phasesSeen_ == phases_.generation()) return;  // V4: nothing moved since the last look (the key below would be the same)
     const scene::Phase cur = phases_.current();
     std::uint64_t key = 1469598103934665603ull;
     const auto mixKey = [&](std::uint64_t v) {
@@ -784,6 +788,7 @@ void Device::syncPhaseRegions() {
     for (const scene::Phase& e : phases_.enclosing()) mixKey((static_cast<std::uint64_t>(e.view) << 8) | static_cast<std::uint64_t>(e.pass));
     mixKey((static_cast<std::uint64_t>(cur.view) << 8) | static_cast<std::uint64_t>(cur.pass));
     mixKey(phases_.viewsEntered(cur.view));
+    phasesSeen_ = phases_.generation();
     if (key == phaseKey_) return;
     phaseKey_ = key;
     flushBatch();  // the batched draws belong to the regions they were issued in
@@ -1715,8 +1720,16 @@ void Device::setVertexShaderConstantF(std::uint32_t start, const float* data, st
     if (start >= kVsFloatConsts || data == nullptr) return;
     count = std::min(count, kVsFloatConsts - start);
     // split constants need the comparison also on a stage that is already dirty (the windows are tracked apart)
-    if (constCompare_ && (splitConstants_ || !vsConstDirty_) && std::memcmp(vsF_[start], data, count * 16) == 0) {
-        ++perf_.constSetsUnchanged;
+    if (constCompare_ && (splitConstants_ || !vsConstDirty_)) {
+        // V4: only the span from the first to the last register that differs is copied (and dirties its windows)
+        std::uint32_t first = 0, last = 0;
+        if (!diffRegisters(vsF_ + start, reinterpret_cast<const float(*)[4]>(data), count, first, last)) {
+            ++perf_.constSetsUnchanged;
+            return;
+        }
+        std::memcpy(vsF_[start + first], data + first * 4, (last - first + 1) * 16);
+        vsConstDirty_ = true;
+        constWinDirty_[0] |= constWindowMask(true, start + first, last - first + 1);
         return;
     }
     std::memcpy(vsF_[start], data, count * 16);
@@ -1727,8 +1740,15 @@ void Device::setVertexShaderConstantF(std::uint32_t start, const float* data, st
 void Device::setPixelShaderConstantF(std::uint32_t start, const float* data, std::uint32_t count) {
     if (start >= kPsFloatConsts || data == nullptr) return;
     count = std::min(count, kPsFloatConsts - start);
-    if (constCompare_ && (splitConstants_ || !psConstDirty_) && std::memcmp(psF_[start], data, count * 16) == 0) {
-        ++perf_.constSetsUnchanged;
+    if (constCompare_ && (splitConstants_ || !psConstDirty_)) {
+        std::uint32_t first = 0, last = 0;
+        if (!diffRegisters(psF_ + start, reinterpret_cast<const float(*)[4]>(data), count, first, last)) {
+            ++perf_.constSetsUnchanged;
+            return;
+        }
+        std::memcpy(psF_[start + first], data + first * 4, (last - first + 1) * 16);
+        psConstDirty_ = true;
+        constWinDirty_[1] |= constWindowMask(false, start + first, last - first + 1);
         return;
     }
     std::memcpy(psF_[start], data, count * 16);

@@ -15,6 +15,7 @@
 
 #include "d3d9/convert.h"
 #include "d3d9/device.h"
+#include "d3d9/memeq.h"
 #include "shader/abi.h"
 
 namespace rvk::d3d9 {
@@ -239,6 +240,17 @@ const Device::VertexPlan& Device::vertexPlan(const VertexDecl* decl, Shader& vs)
 
 // The draw's vertex buffers and layout (recorded by applyVertexInput). With dynamic vertex input the layout leaves `pd`
 // (the pipeline does not depend on it: a smaller pipeline key).
+// Two descriptions equal. With extended dynamic state 3 (blend is not in the description: it stays at its defaults) and dynamic
+// vertex input (bindings / attributes are cleared by computeVertexInput) everything after `blend` is the same in every
+// description, so only the 52 leading bytes are compared (the 512-byte compare ran for every draw, twice when the pipeline changed)
+bool Device::sameDesc(const vk::PipelineDesc& a, const vk::PipelineDesc& b) const {
+    if (ctx_.features().extendedDynamicState3 && ctx_.features().vertexInputDynamicState && a.bindingCount == 0 && a.attributeCount == 0 &&
+        b.bindingCount == 0 && b.attributeCount == 0) {
+        return memEqual(&a, &b, offsetof(vk::PipelineDesc, blend));
+    }
+    return memEqual(&a, &b, sizeof(a));
+}
+
 std::size_t Device::recentSlot(const vk::PipelineDesc& pd) {
     const std::uint64_t h = ((reinterpret_cast<std::uintptr_t>(pd.vs) >> 4) * 0x9E3779B97F4A7C15ull ^
                              (reinterpret_cast<std::uintptr_t>(pd.fs) >> 4) * 0xC2B2AE3D27D4EB4Full ^ pd.colorFormats[0] ^
@@ -250,7 +262,7 @@ std::size_t Device::recentSlot(const vk::PipelineDesc& pd) {
 // the pipeline of `d` when it exists (a direct-mapped cache of recent descriptions first: no 520-byte hash, no lock), never builds
 VkPipeline Device::findPipeline(const vk::PipelineDesc& d) {
     RecentPipeline& recent = recentPipelines_[recentSlot(d)];
-    if (recent.pipeline != VK_NULL_HANDLE && std::memcmp(&recent.desc, &d, sizeof(d)) == 0) return recent.pipeline;
+    if (recent.pipeline != VK_NULL_HANDLE && sameDesc(recent.desc, d)) return recent.pipeline;
     const VkPipeline p = pipelines_.find(d);
     if (p != VK_NULL_HANDLE) {
         recent.desc = d;
@@ -326,8 +338,17 @@ bool Device::computeVertexInput(vk::PipelineDesc& pd, VertexInputValues& out) {
         }
         if (count == 1) {
             const VkDeviceSize stride = pd.bindings[perVertex].stride;
-            if (out.offsets[perVertex] % stride == 0 && out.offsets[perVertex] / stride <= 0x3FFFFFFF) {
-                out.vertexShift = static_cast<std::int32_t>(out.offsets[perVertex] / stride);
+            const VkDeviceSize offset = out.offsets[perVertex];
+            if (offset <= UINT32_MAX) {
+                // (a 32-bit division: mesh arena blocks are far below 4 GiB; the 64-bit one was ~0.4 % of the engine thread)
+                const std::uint32_t o = static_cast<std::uint32_t>(offset), s = static_cast<std::uint32_t>(stride);
+                const std::uint32_t q = o / s;
+                if (o - q * s == 0 && q <= 0x3FFFFFFF) {
+                    out.vertexShift = static_cast<std::int32_t>(q);
+                    out.offsets[perVertex] = 0;
+                }
+            } else if (offset % stride == 0 && offset / stride <= 0x3FFFFFFF) {
+                out.vertexShift = static_cast<std::int32_t>(offset / stride);
                 out.offsets[perVertex] = 0;
             }
         }
@@ -685,6 +706,9 @@ void Device::verifySplit(bool vertex, const Shader& sh) {
 
 namespace {
 
+// the all-default pipeline description (padding zero), copied by prepareDraw
+constexpr vk::PipelineDesc kBlankPipelineDesc{};
+
 // the render states a replacement overrides (restored when prepareDraw returns)
 constexpr std::uint32_t kReplacedStates[] = {RS_ALPHABLENDENABLE, RS_SRCBLEND, RS_DESTBLEND, RS_BLENDOP, RS_SEPARATEALPHABLENDENABLE,
                                              RS_COLORWRITEENABLE, RS_CULLMODE, RS_ALPHATESTENABLE};
@@ -974,7 +998,9 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         fsVariant = variant(ps_, VariantSlot::Gi);
     }
 
-    vk::PipelineDesc pd{};
+    // a copy of the blank description: `vk::PipelineDesc pd{}` initialised the 520 bytes member by member (blend defaults are
+    // not zero; ~1.5 % of the engine thread in the V4 profile)
+    vk::PipelineDesc pd = kBlankPipelineDesc;
     pd.vs = vsModule;
     pd.fs = fs;
     pd.topology = topology(primitiveType);
@@ -1090,7 +1116,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     }
     // consecutive draws mostly keep their pipeline: compare with the last description before hashing
     VkPipeline pipeline = VK_NULL_HANDLE;
-    if (lastPipelineValid_ && std::memcmp(&pd, &lastPipelineDesc_, sizeof(pd)) == 0) {
+    if (lastPipelineValid_ && sameDesc(pd, lastPipelineDesc_)) {
         pipeline = lastPipeline_;
     } else {
         // a direct-mapped cache of recent descriptions in front of the pipeline map: no 520-byte hash, no lock, no node walk
@@ -1447,10 +1473,10 @@ const Device::VertexInputValues* Device::internVi(const VertexInputValues& v) {
     const auto same = [](const VertexInputValues& a, const VertexInputValues& b) {
         return a.bufferCount == b.bufferCount && a.dynamicLayout == b.dynamicLayout && a.bindingCount == b.bindingCount &&
                a.attributeCount == b.attributeCount && a.vertexShift == b.vertexShift &&
-               std::memcmp(a.buffers, b.buffers, sizeof(VkBuffer) * a.bufferCount) == 0 &&
-               std::memcmp(a.offsets, b.offsets, sizeof(VkDeviceSize) * a.bufferCount) == 0 &&
-               std::memcmp(a.bindings, b.bindings, sizeof(a.bindings[0]) * a.bindingCount) == 0 &&
-               std::memcmp(a.attributes, b.attributes, sizeof(a.attributes[0]) * a.attributeCount) == 0;
+               memEqual(a.buffers, b.buffers, sizeof(VkBuffer) * a.bufferCount) &&
+               memEqual(a.offsets, b.offsets, sizeof(VkDeviceSize) * a.bufferCount) &&
+               memEqual(a.bindings, b.bindings, sizeof(a.bindings[0]) * a.bindingCount) &&
+               memEqual(a.attributes, b.attributes, sizeof(a.attributes[0]) * a.attributeCount);
     };
     if (lastVi_ == nullptr || !same(*lastVi_, v)) lastVi_ = viArena_.push(v);
     return lastVi_;
@@ -1460,9 +1486,9 @@ const Device::DynamicStateValues* Device::internDyn(const DynamicStateValues& v)
     const auto same = [](const DynamicStateValues& a, const DynamicStateValues& b) {
         constexpr std::size_t prefix = offsetof(DynamicStateValues, blendEnable);
         const std::uint32_t n = a.colorCount;
-        return std::memcmp(&a, &b, prefix) == 0 && std::memcmp(a.blendEnable, b.blendEnable, sizeof(VkBool32) * n) == 0 &&
-               std::memcmp(a.blendEquation, b.blendEquation, sizeof(VkColorBlendEquationEXT) * n) == 0 &&
-               std::memcmp(a.writeMask, b.writeMask, sizeof(VkColorComponentFlags) * n) == 0;
+        return memEqual(&a, &b, prefix) && memEqual(a.blendEnable, b.blendEnable, sizeof(VkBool32) * n) &&
+               memEqual(a.blendEquation, b.blendEquation, sizeof(VkColorBlendEquationEXT) * n) &&
+               memEqual(a.writeMask, b.writeMask, sizeof(VkColorComponentFlags) * n);
     };
     if (lastDyn_ == nullptr || !same(*lastDyn_, v)) lastDyn_ = dynArena_.push(v);
     return lastDyn_;

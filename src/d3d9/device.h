@@ -1349,6 +1349,7 @@ private:
     std::array<RecentPipeline, 256> recentPipelines_{};
     static std::size_t recentSlot(const vk::PipelineDesc& pd);
     VkPipeline findPipeline(const vk::PipelineDesc& d);
+    bool sameDesc(const vk::PipelineDesc& a, const vk::PipelineDesc& b) const;
     RecordState rec_;
     // what a vertex shader's inputs read from a vertex declaration (computeVertexInput): fixed per (declaration, shader)
     struct VertexPlanInput {
@@ -1588,6 +1589,7 @@ private:
     std::uint32_t regionCount_ = 0;
     std::uint64_t regionsFrame_ = ~0ull;  // stats_.frames when regions_[0] began
     std::uint64_t phaseKey_ = 0;
+    std::uint64_t phasesSeen_ = ~0ull;  // PhaseTracker::generation() at the last syncPhaseRegions
     void syncPhaseRegions();
     void regionsClose();
     void regionsReopen();

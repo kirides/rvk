@@ -82,6 +82,7 @@ void PhaseTracker::push(View view, Pass pass) {
     }
     stack_.push_back(cur_);
     cur_ = Phase{view, pass};
+    ++generation_;
     ++entered_[static_cast<std::size_t>(view)];
     open(true);
 }
@@ -93,12 +94,14 @@ void PhaseTracker::pop() {
     }
     cur_ = stack_.back();
     stack_.pop_back();
+    ++generation_;
     open(false);
 }
 
 void PhaseTracker::setPass(Pass pass) {
     if (cur_.pass == pass) return;
     cur_.pass = pass;
+    ++generation_;
     if (!segments_.empty() && segments_.back().enter && segments_.back().draws == 0 && segments_.back().depth == stack_.size()) {
         segments_.back().phase = cur_;  // a view entered and its pass changed before any draw
         return;
@@ -113,6 +116,7 @@ void PhaseTracker::countDraw() {
 }
 
 void PhaseTracker::endFrame() {
+    ++generation_;
     last_.swap(segments_);
     segments_.clear();
     lastEntered_ = entered_;
