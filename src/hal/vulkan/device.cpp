@@ -363,6 +363,17 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
             spdlog::info("hal: settings: constant compare {}", s.asBool() ? "on" : "off");
         }, this);
     }
+    if (rs.splitConstants != nullptr) {
+        dev_.setSplitConstants(rs.splitConstants->asBool());
+        reg.onChange(*rs.splitConstants, [this](const settings::Setting& s) {
+            dev_.setSplitConstants(s.asBool());
+            spdlog::info("hal: settings: split constants {}", s.asBool() ? "on" : "off");
+        }, this);
+    }
+    if (rs.splitVerify != nullptr) {
+        dev_.setSplitVerify(rs.splitVerify->asBool());
+        reg.onChange(*rs.splitVerify, [this](const settings::Setting& s) { dev_.setSplitVerify(s.asBool()); }, this);
+    }
     if (rs.drawRecords != nullptr) {
         dev_.setDrawRecords(rs.drawRecords->asBool());
         reg.onChange(*rs.drawRecords, [this](const settings::Setting& s) {
@@ -1520,6 +1531,25 @@ void HalDevice::logPerf(d3d9::PerfStats p) {
                  static_cast<double>(p.constUploads[0]) / n, static_cast<double>(p.constUploads[1]) / n,
                  static_cast<double>(p.constBytes) / n / 1024.0, static_cast<double>(p.constIntBoolSkipped) / n,
                  static_cast<double>(p.constSetsUnchanged) / n);
+    {
+        // split constants (plan.md V2): per window the blocks written (and reused) per frame, KiB written; draws split / legacy
+        const char* vsNames[4] = {"view", "frame", "object", "material"};
+        const char* psNames[4] = {"view", "c5", "material", "light"};
+        std::string line;
+        for (std::uint32_t st = 0; st < 2; ++st) {
+            line += st == 0 ? " VS" : "; PS";
+            for (std::uint32_t w = 0; w < 4; ++w) {
+                if (st == 1 && w == 1) continue;
+                line += std::format(" {} {:.0f}+{:.0f} ({:.1f} KiB)", st == 0 ? vsNames[w] : psNames[w],
+                                    static_cast<double>(p.splitBlocks[st][w]) / n, static_cast<double>(p.splitReused[st][w]) / n,
+                                    static_cast<double>(p.splitBytes[st][w]) / n / 1024.0);
+            }
+        }
+        spdlog::info("perf: split constants (blocks written + reused per frame):{}; draws split {:.0f} / {:.0f}, legacy {:.0f} / {:.0f} "
+                     "(VS / PS), verify mismatches {}",
+                     line, static_cast<double>(p.splitDraws[0]) / n, static_cast<double>(p.splitDraws[1]) / n,
+                     static_cast<double>(p.legacyDraws[0]) / n, static_cast<double>(p.legacyDraws[1]) / n, p.splitMismatches);
+    }
     {
         std::string passes;
         for (const auto& [name, ms] : p.injectPassMs) passes += std::format(" {} {:.3f};", name, ms / n);

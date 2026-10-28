@@ -16,7 +16,7 @@ layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Rv
     uint b[16];
 };
 
-// Per-draw state (DrawBlock, 192 bytes): bindless texture / sampler indices of D3D9 samplers s0..s15 (pixel) and
+// Per-draw state (DrawBlock, 208 bytes): bindless texture / sampler indices of D3D9 samplers s0..s15 (pixel) and
 // 16..19 (vertex s0..s3), the half-pixel fix, the alpha test; pad0 = debug tint (RGBA8, 0 = none)
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer RvkDraw {
     uint tex[20];
@@ -26,6 +26,7 @@ layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Rv
     float alphaRef;
     uint pad0;
     uint pad1;
+    vec4 psC5;             // pixel shader c5 of the draw (split constants: the pixel window of register 5; abi.h)
 };
 
 // Per-frame block (FrameBlock, 976 bytes; Device::frameBlockAddress): the main view's camera (current + previous), depth
@@ -69,8 +70,10 @@ const uint RVK_FRAME_PREV_VALID = 4u;        // the prev* fields hold the frame 
 const uint RVK_FRAME_REVERSE_Z = 8u;         // the main view's hardware depth is reversed: near / view z, 0 = infinity (rvk_common.glsl)
 
 #ifndef RVK_PASS_SHADER
-// Push constants of draws (48 bytes, vertex + fragment). drawId: the draw's index in the frame (= its draw record's index);
-// flags: RVK_DRAW_* below. prevVs: last frame's vertex constants of the same geometry (0 = not tracked: use vs).
+// Push constants of draws (112 bytes, vertex + fragment). drawId: the draw's index in the frame (= its draw record's index);
+// flags: RVK_DRAW_* below. prevVs: a vertex capture address (draw variants; 0 = none). vs / ps: the draw's one full
+// StageConsts (legacy draws; 0 for split draws). vsw / psw: the float constants by register window (abi.h
+// kVsWindowFirst / kPsWindowFirst): c[n] of the window that owns register n, biased so the register number stays the index
 layout(push_constant, std430) uniform RvkPush {
     RvkStage vs;
     RvkStage ps;
@@ -79,7 +82,14 @@ layout(push_constant, std430) uniform RvkPush {
     RvkStage prevVs;
     uint drawId;
     uint flags;
+    RvkStage vsw[4];
+    RvkStage psw[4];
 } pc;
+// float constant register n of the vertex / pixel stage (n: an int / uint expression; a constant folds to one window)
+#define RVK_VS_WIN(n) ((uint(n)) < 12u ? 0 : (uint(n)) < 31u ? 1 : (uint(n)) < 232u ? 2 : 3)
+#define RVK_PS_WIN(n) ((uint(n)) < 5u ? 0 : (uint(n)) < 6u ? 1 : (uint(n)) < 14u ? 2 : 3)
+#define RVK_VSC(n) pc.vsw[RVK_VS_WIN(n)].c[n]
+#define RVK_PSC(n) pc.psw[RVK_PS_WIN(n)].c[n]
 #else
 // Pass shaders: push block (<= 128 bytes) = this header (16 bytes) + the pass's own fields
 #define RVK_PASS_PUSH_HEADER RvkFrame frame; uint passId; uint passFlags;

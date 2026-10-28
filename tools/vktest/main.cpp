@@ -1211,7 +1211,8 @@ int main(int argc, char** argv) {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     const VkDescriptorSet set = bindless.set();
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, bindless.pipelineLayout(), 0, 1, &set, 0, nullptr);
-    const shader::abi::PushConstants push{vsC.address, psC.address, db.address};
+    shader::abi::PushConstants push{vsC.address, psC.address, db.address};
+    push.legacyWindows();
     vkCmdPushConstants(cmd, bindless.pipelineLayout(), VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push),
                        &push);
     setDynamicState(cmd, ctx, kSize, kSize);

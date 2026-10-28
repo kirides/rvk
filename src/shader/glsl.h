@@ -31,6 +31,13 @@ struct Reflection {
     std::array<TextureType, abi::kSamplerSlots> samplers{};        // TextureType::Unknown = unused
     std::uint32_t floatConstCount = 0;                              // highest c# read + 1 (256 with relative addressing)
     bool relativeConstants = false;
+    // split constants (docs/research/vulkanize/plan.md V2): the translation reads its float registers through the window
+    // blocks of the push constants (abi.h kVsWindowFirst / kPsWindowFirst; RVK_VSC / RVK_PSC), so the device can upload only
+    // the windows that changed. windowEnd[w] = the highest register read in window w + 1 (a relative read: the base register's
+    // whole window; 0 = the window is not read). splitConsts is false for hand-made reflections (hand-written GLSL reads
+    // pc.vs / pc.ps, i.e. needs one full block) and for translations that read i# / b# (they come from the full block)
+    std::array<std::uint16_t, abi::kConstWindows> windowEnd{};
+    bool splitConsts = false;
     // the translation reads i# / b# from the stage block (an integer / bool constant without a defi / defb: loop / rep counts,
     // if / callnz conditions, any i# / b# operand). False: the upload skips the block's int / bool part (Device::uploadConstants;
     // no game shader reads them, docs/research/vulkanize/V0-constants.md 0). Hand-made reflections keep the default (copied)

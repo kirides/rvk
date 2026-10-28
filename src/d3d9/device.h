@@ -563,6 +563,14 @@ struct PerfStats {
     std::uint64_t constBytes = 0;          // bytes copied into them
     std::uint64_t constIntBoolSkipped = 0; // ... of the blocks, those without the int / bool part (the shader reads none)
     std::uint64_t constSetsUnchanged = 0;  // register setter calls that changed nothing on a clean stage (no upload follows)
+    // split constants (abi.h windows): per stage and window the blocks uploaded / reused from the last upload / bytes written,
+    // draws whose stage was split / legacy, mismatches found by debug.split_verify
+    std::uint64_t splitBlocks[2][4] = {};
+    std::uint64_t splitReused[2][4] = {};
+    std::uint64_t splitBytes[2][4] = {};
+    std::uint64_t splitDraws[2] = {};
+    std::uint64_t legacyDraws[2] = {};
+    std::uint64_t splitMismatches = 0;
     std::vector<float> frameIntervalsMs;   // present-to-present
     vk::FramePacer::Stats pacer;
     double pacerRate = 0.0;
@@ -703,6 +711,12 @@ public:
     // register setters compare a clean stage's registers first: a write that changes nothing keeps its constant block
     // (debug.constant_compare, vulkanize plan.md V1)
     void setConstantCompare(bool on) { constCompare_ = on; }
+    // split constants (debug.split_constants, plan.md V2): the draws' constants uploaded by register window
+    void setSplitConstants(bool on) {
+        splitConstants_ = on;
+        dirtyConstWindows();
+    }
+    void setSplitVerify(bool on) { splitVerify_ = on; }
     // Reversed infinite depth (debug.reverse_z, docs/research/reverse-z.md): a depth buffer cleared in a main view holds
     // near / view z (1 at the near plane, 0 at infinity and for the cleared sky) instead of the engine's D3D value. The engine's
     // vertex output is remapped in the shaders (DrawBlock::posFix.zw: z' = z (1 + zw.x) + zw.y w, = w - k z with k = 1 - near / far
@@ -1162,7 +1176,11 @@ private:
     std::uint32_t samplerIndex(std::uint32_t slot);
     std::uint32_t samplerIndexBiased(std::uint32_t slot, float bias);
     std::uint32_t lookupSampler(std::uint32_t slot);
-    void uploadConstants();
+    void uploadConstants(bool forceLegacyPs, std::uint32_t psMinEnd);
+    // the draw being prepared: split stages and the window addresses its push constants carry
+    bool drawSplit_[2] = {};
+    VkDeviceAddress drawWin_[2][shader::abi::kConstWindows]{};
+    std::uint32_t psWindowMinEnd_ = 0;
     void blit(vk::Image& src, std::uint32_t srcLevel, std::uint32_t srcLayer, const VkOffset3D srcBox[2], vk::Image& dst,
               std::uint32_t dstLevel, std::uint32_t dstLayer, const VkOffset3D dstBox[2], VkFilter filter);
     static std::uint32_t slotOf(std::uint32_t d3dSampler);
@@ -1289,6 +1307,27 @@ private:
     bool psConstDirty_ = true;
     VkDeviceAddress vsConstAddr_ = 0;
     VkDeviceAddress psConstAddr_ = 0;
+    // split constants: per stage and register window (abi.h) the last block written to the frame's ring (base address and host
+    // pointer, `extent` registers from the window's first one) and whether a register of the window changed since. All dirty
+    // at the start of a frame (ring memory belongs to its frame)
+    struct ConstWindow {
+        VkDeviceAddress address = 0;
+        const std::uint8_t* ptr = nullptr;
+        std::uint32_t extent = 0;
+    };
+    ConstWindow constWin_[2][shader::abi::kConstWindows]{};
+    std::uint32_t constWinDirty_[2] = {0xF, 0xF};
+    VkDeviceAddress zeroBlock_ = 0;  // a zeroed ring block for the windows a shader does not read
+    void dirtyConstWindows() {
+        constWinDirty_[0] = constWinDirty_[1] = 0xF;
+        zeroBlock_ = 0;
+        for (auto& stage : constWin_) {
+            for (auto& w : stage) w = {};
+        }
+    }
+    static std::uint32_t constWindowMask(bool vertex, std::uint32_t start, std::uint32_t count);
+    void splitStage(bool vertex, const Shader& sh, VkDeviceAddress (&windows)[shader::abi::kConstWindows]);
+    void verifySplit(bool vertex, const Shader& sh);
     // redundant-command filters, valid within one command buffer (reset by beginFrame)
     vk::PipelineDesc lastPipelineDesc_{};
     VkPipeline lastPipeline_ = VK_NULL_HANDLE;
@@ -1426,6 +1465,8 @@ private:
     std::vector<std::uint64_t> batchKeys_;   // flushBatch: (rank << 32 | draw index), sorted
     bool batching_ = true;  // debug.batch_draws
     bool constCompare_ = true;  // debug.constant_compare
+    bool splitConstants_ = true;  // debug.split_constants
+    bool splitVerify_ = false;    // debug.split_verify
     bool reverseZ_ = true;  // debug.reverse_z
     mutable float reverseK_ = 0.99f;  // the last k computed from a valid camera
     // bindless sampler index per slot (UINT32_MAX = look it up again after a SetSamplerState)

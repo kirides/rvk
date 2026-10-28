@@ -953,6 +953,29 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 1,
         .flags = Flag::Debug,
     });
+    r.splitConstants = &reg.add({
+        .key = "debug.split_constants",
+        .label = "Split shader constants",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Uploads a draw's shader constants per register window (view, frame, object, material, light), only the "
+                       "windows that changed since their last upload and only the registers the shader reads, instead of one "
+                       "full block per stage per draw. Off = the full blocks, to compare.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::Debug,
+    });
+    r.splitVerify = &reg.add({
+        .key = "debug.split_verify",
+        .label = "Verify split constants",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Checks, for every draw with split constants, that the window blocks its shaders read hold the engine's "
+                       "register values (a mismatch is logged and counted; costs CPU time).",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::Debug,
+    });
     r.injectView = &reg.add({
         .key = "debug.inject_view",
         .label = "Injection test view",

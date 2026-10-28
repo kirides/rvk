@@ -85,13 +85,13 @@ TEST(abi_glsl_layout_matches_cpp) {
     checkOffsets(m.at("RvkPush"),
                  {{"vs", offsetof(PC, vsConsts)}, {"ps", offsetof(PC, psConsts)}, {"draw", offsetof(PC, draw)},
                   {"frame", offsetof(PC, frame)}, {"prevVs", offsetof(PC, prevVsConsts)}, {"drawId", offsetof(PC, drawId)},
-                  {"flags", offsetof(PC, flags)}},
+                  {"flags", offsetof(PC, flags)}, {"vsw", offsetof(PC, vsWin)}, {"psw", offsetof(PC, psWin)}},
                  "RvkPush");
     using DB = abi::DrawBlock;
     checkOffsets(m.at("RvkDraw"),
                  {{"tex", offsetof(DB, tex)}, {"smp", offsetof(DB, smp)}, {"posFix", offsetof(DB, posFix)},
                   {"alphaFunc", offsetof(DB, alphaFunc)}, {"alphaRef", offsetof(DB, alphaRef)}, {"pad0", offsetof(DB, pad)},
-                  {"pad1", offsetof(DB, pad) + 4}},
+                  {"pad1", offsetof(DB, pad) + 4}, {"psC5", offsetof(DB, psC5)}},
                  "RvkDraw");
     checkOffsets(m.at("RvkStage"), {{"c", 0}, {"i", abi::kStageConstsIntOffset}, {"b", abi::kStageConstsBoolOffset}}, "RvkStage");
     using FB = abi::FrameBlock;
@@ -173,6 +173,26 @@ TEST(embedded_shaders) {
     CHECK(!text.starts_with("#version") && text.find("\n#version") == std::string_view::npos);  // the translator writes its own
 }
 
+// the constant register windows: abi.h's tables and rvk_abi.glsl's RVK_VS_WIN / RVK_PS_WIN macros name the same boundaries
+TEST(const_windows_match_glsl_macros) {
+    using namespace shader::abi;
+    CHECK(constWindow(true, 0) == 0 && constWindow(true, 11) == 0 && constWindow(true, 12) == 1 && constWindow(true, 30) == 1 &&
+          constWindow(true, 31) == 2 && constWindow(true, 231) == 2 && constWindow(true, 232) == 3 && constWindow(true, 255) == 3);
+    CHECK(constWindow(false, 4) == 0 && constWindow(false, 5) == 1 && constWindow(false, 6) == 2 && constWindow(false, 13) == 2 &&
+          constWindow(false, 14) == 3 && constWindow(false, 223) == 3);
+    const std::string text(shader::embedded::abiGlsl());
+    for (const char* which : {"VS", "PS"}) {
+        const std::size_t at = text.find(std::string("#define RVK_") + which + "_WIN(n)");
+        CHECK(at != std::string::npos);
+        if (at == std::string::npos) continue;
+        const std::string line = text.substr(at, text.find('\n', at) - at);
+        const std::uint32_t* f = which[0] == 'V' ? kVsWindowFirst : kPsWindowFirst;
+        for (std::uint32_t w = 1; w < kConstWindows; ++w) {
+            CHECK_MSG(line.find(std::format("< {}u ? {}", f[w], w - 1)) != std::string::npos, line);
+        }
+    }
+}
+
 // ---- the translator: the shared header, variant hooks ---------------------------------------------------------------------
 
 TEST(glsl_abi_header_and_hooks) {
@@ -185,14 +205,16 @@ TEST(glsl_abi_header_and_hooks) {
     const auto plain = shader::toGlsl(dec.program);
     CHECK(plain.ok());
     CHECK(plain.glsl.find(shader::embedded::abiGlsl()) != std::string::npos);  // verbatim
-    CHECK(plain.glsl.find("pc.ps.c[15]") != std::string::npos);
+    CHECK(plain.glsl.find("RVK_PSC(15)") != std::string::npos);  // through the pixel window of c15 (abi.h)
     const auto plainSpv = shader::compileGlsl(shader::Stage::Pixel, plain.glsl);
     CHECK_MSG(plainSpv.ok(), plainSpv.log);
-    // the push block of a translated shader is the 48-byte one
+    // the push block of a translated shader is the 112-byte one (the windows after flags); split constants are on
     if (plainSpv.ok()) {
         const auto m = memberOffsets(plainSpv.words);
-        CHECK(m.contains("RvkPush") && m.at("RvkPush").size() == 7 && m.at("RvkPush").at("flags") == 44);
+        CHECK(m.contains("RvkPush") && m.at("RvkPush").size() == 9 && m.at("RvkPush").at("flags") == 44 &&
+              m.at("RvkPush").at("vsw") == 48 && m.at("RvkPush").at("psw") == 80);
     }
+    CHECK(plain.reflection.splitConsts && plain.reflection.windowEnd[3] == 16 && plain.reflection.windowEnd[0] == 0);
     // all hooks empty = identical output
     CHECK(shader::toGlsl(dec.program, shader::GlslOptions{}).glsl == plain.glsl);
 
@@ -202,7 +224,7 @@ TEST(glsl_abi_header_and_hooks) {
     o.constOverrides[15] = "$c * 0.5 + pc.frame.params[0]";
     const auto hooked = shader::toGlsl(dec.program, o);
     CHECK(hooked.ok());
-    CHECK(hooked.glsl.find("(pc.ps.c[15] * 0.5 + pc.frame.params[0])") != std::string::npos);
+    CHECK(hooked.glsl.find("(RVK_PSC(15) * 0.5 + pc.frame.params[0])") != std::string::npos);
     CHECK(hooked.glsl.find("case 15: return") != std::string::npos);  // relative reads too
     CHECK(hooked.glsl.find("rvk_extra = vec4(float(pc.drawId)") < hooked.glsl.find("rvk_oC0 = oC0"));
     const auto hookedSpv = shader::compileGlsl(shader::Stage::Pixel, hooked.glsl);

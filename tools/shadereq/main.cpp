@@ -218,7 +218,8 @@ int vsTest(const std::string& vsA, const std::string& vsB, const AttrMap& mapA, 
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline[i]);
             const VkDescriptorSet set = bindless.set();
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, bindless.pipelineLayout(), 0, 1, &set, 0, nullptr);
-            const shader::abi::PushConstants push{vsC.address, out[i].address, db.address, 0, 0, 0, 0};
+            shader::abi::PushConstants push{vsC.address, out[i].address, db.address, 0, 0, 0, 0};
+            push.legacyWindows();
             vkCmdPushConstants(cmd, bindless.pipelineLayout(), VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push),
                                &push);
             setDynamicState(cmd, ctx, kProbeSize, kProbeSize);
@@ -463,7 +464,9 @@ int main(int argc, char** argv) {
         block.alphaFunc = 8;  // always
         std::memcpy(db.ptr, &block, sizeof(block));
 
-        const shader::abi::PushConstants push{vsC.address, psC.address, db.address, 0, 0, 0, 0};
+        shader::abi::PushConstants push{vsC.address, psC.address, db.address, 0, 0, 0, 0};
+
+        push.legacyWindows();
         for (int i = 0; i < 2; ++i) {
             rt[i].transition(cmd, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
             VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};

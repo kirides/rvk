@@ -557,7 +557,7 @@ void Device::applyDynamicState(RecordState& rs, VkCommandBuffer cmd, const Dynam
     c.valid = true;
 }
 
-void Device::uploadConstants() {
+void Device::uploadConstants(bool forceLegacyPs, std::uint32_t psMinEnd) {
     // per dirty stage a StageConsts block (shader/abi.h) from the ring: the floats up to the shader's highest read register, the
     // int / bool part only for shaders that read it (Reflection::intBoolConstants; the layout stays, the bytes are left as they are)
     const auto upload = [&](const Shader& sh, const float (*f)[4], std::uint32_t maxFloats, const std::int32_t (*i)[4],
@@ -578,13 +578,108 @@ void Device::uploadConstants() {
         perf_.constBytes += bytes;
         addr = a.address;
     };
-    if (vsConstDirty_ || vsConstAddr_ == 0) {
-        upload(*vs_, vsF_, kVsFloatConsts, vsI_, vsB_, vsConstAddr_, 0);
-        vsConstDirty_ = false;
+    // split constants (abi.h windows, plan.md V2): a shader that reads its floats through the window blocks gets only those
+    // windows, each uploaded when a register of it changed since its last upload (or when it was uploaded shorter than this
+    // shader reads). Everything else (hand-written shaders, effects that read i# / b#, the GLSL material shader, replaced
+    // draws with their own DrawBlock) keeps the one full block per stage
+    const bool uber = ubershader_.load(std::memory_order_relaxed);
+    drawSplit_[0] = splitConstants_ && vs_->reflection.splitConsts && !uber;
+    drawSplit_[1] = splitConstants_ && ps_->reflection.splitConsts && !forceLegacyPs && !uber;
+    psWindowMinEnd_ = psMinEnd;
+    if (drawSplit_[0]) {
+        splitStage(true, *vs_, drawWin_[0]);
+        ++perf_.splitDraws[0];
+    } else {
+        ++perf_.legacyDraws[0];
+        if (vsConstDirty_ || vsConstAddr_ == 0) {
+            upload(*vs_, vsF_, kVsFloatConsts, vsI_, vsB_, vsConstAddr_, 0);
+            vsConstDirty_ = false;
+        }
+        for (auto& w : drawWin_[0]) w = vsConstAddr_;
     }
-    if (psConstDirty_ || psConstAddr_ == 0) {
-        upload(*ps_, psF_, kPsFloatConsts, psI_, psB_, psConstAddr_, 1);
-        psConstDirty_ = false;
+    if (drawSplit_[1]) {
+        splitStage(false, *ps_, drawWin_[1]);
+        ++perf_.splitDraws[1];
+    } else {
+        ++perf_.legacyDraws[1];
+        if (psConstDirty_ || psConstAddr_ == 0) {
+            upload(*ps_, psF_, kPsFloatConsts, psI_, psB_, psConstAddr_, 1);
+            psConstDirty_ = false;
+        }
+        for (auto& w : drawWin_[1]) w = psConstAddr_;
+    }
+}
+
+// The window blocks of a split stage: windows[w] = the biased base address (block base - first register * 16, so c[n] keeps
+// the D3D9 register number). Pixel window 1 (c5) is the DrawBlock's psC5, patched in by prepareDraw
+void Device::splitStage(bool vertex, const Shader& sh, VkDeviceAddress (&windows)[shader::abi::kConstWindows]) {
+    const std::uint32_t stage = vertex ? 0 : 1;
+    const std::uint32_t* first = vertex ? shader::abi::kVsWindowFirst : shader::abi::kPsWindowFirst;
+    const float (*regs)[4] = vertex ? vsF_ : psF_;
+    for (std::uint32_t w = 0; w < shader::abi::kConstWindows; ++w) {
+        if (!vertex && w == 1) {
+            windows[w] = 0;
+            continue;
+        }
+        std::uint32_t end = sh.reflection.windowEnd[w];
+        if (!vertex && w == 3) end = std::max(end, psWindowMinEnd_);  // an enhancement variant's extra reads (ambient)
+        const std::uint32_t need = end > first[w] ? end - first[w] : 0;
+        if (need == 0) {
+            if (zeroBlock_ == 0) {
+                vk::RingAlloc z = frames_.allocate(4096, 16);
+                std::memset(z.ptr, 0, 4096);
+                zeroBlock_ = z.address;
+            }
+            windows[w] = zeroBlock_ - static_cast<VkDeviceAddress>(first[w]) * 16;
+            continue;
+        }
+        ConstWindow& cw = constWin_[stage][w];
+        if ((constWinDirty_[stage] >> w & 1u) != 0 || cw.address == 0 || cw.extent < need) {
+            vk::RingAlloc a = frames_.allocate(static_cast<VkDeviceSize>(need) * 16, 16);
+            std::memcpy(a.ptr, regs[first[w]], static_cast<std::size_t>(need) * 16);
+            cw.address = a.address;
+            cw.ptr = static_cast<const std::uint8_t*>(a.ptr);
+            cw.extent = need;
+            constWinDirty_[stage] &= ~(1u << w);
+            ++perf_.splitBlocks[stage][w];
+            perf_.splitBytes[stage][w] += static_cast<std::uint64_t>(need) * 16;
+            perf_.constBytes += static_cast<std::uint64_t>(need) * 16;
+        } else {
+            ++perf_.splitReused[stage][w];
+        }
+        windows[w] = cw.address - static_cast<VkDeviceAddress>(first[w]) * 16;
+    }
+    if (splitVerify_) verifySplit(vertex, sh);
+}
+
+// debug.split_verify: every window block this shader reads equals the register file now (dirty tracking, extents)
+void Device::verifySplit(bool vertex, const Shader& sh) {
+    const std::uint32_t stage = vertex ? 0 : 1;
+    const std::uint32_t* first = vertex ? shader::abi::kVsWindowFirst : shader::abi::kPsWindowFirst;
+    const float (*regs)[4] = vertex ? vsF_ : psF_;
+    for (std::uint32_t w = 0; w < shader::abi::kConstWindows; ++w) {
+        if (!vertex && w == 1) continue;
+        std::uint32_t end = sh.reflection.windowEnd[w];
+        if (!vertex && w == 3) end = std::max(end, psWindowMinEnd_);
+        const std::uint32_t need = end > first[w] ? end - first[w] : 0;
+        if (need == 0) continue;
+        const ConstWindow& cw = constWin_[stage][w];
+        bool bad = cw.ptr == nullptr || cw.extent < need;
+        std::uint32_t reg = first[w];
+        if (!bad) {
+            for (std::uint32_t i = 0; i < need; ++i) {
+                if (std::memcmp(cw.ptr + static_cast<std::size_t>(i) * 16, regs[first[w] + i], 16) != 0) {
+                    bad = true;
+                    reg = first[w] + i;
+                    break;
+                }
+            }
+        }
+        if (bad && perf_.splitMismatches++ < 24) {
+            spdlog::error("d3d9: split constants: {} window {} (shader {:016x}) differs from the register file at c{} "
+                          "(need {} registers, block has {})",
+                          vertex ? "VS" : "PS", w, sh.hash, reg, need, cw.extent);
+        }
     }
 }
 
@@ -1025,7 +1120,19 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     }
     packet_.pipeline = pipeline;
     computeDynamicState(primitiveType, workDyn_);
-    uploadConstants();
+    {
+        // the pixel window of an enhancement variant that reads the ambient registers the base shader may not (enh/material_variant)
+        std::uint32_t minEnd = 0;
+        if (giDraw || gbufWrite_) {
+            const auto& amb = ps_->semantics[Semantic::AmbientLight];
+            if (amb.present() && amb.count >= 7) {
+                minEnd = static_cast<std::uint32_t>(amb.reg + 7);
+                const auto& ind = ps_->semantics[Semantic::IndoorAmbient];
+                if (ind.present()) minEnd = std::max(minEnd, static_cast<std::uint32_t>(ind.reg + 1));
+            }
+        }
+        uploadConstants(rep.block != 0 && replaced, minEnd);
+    }
 
     shader::abi::DrawBlock block{};
     float jitterX = 0.0f, jitterY = 0.0f;
@@ -1052,6 +1159,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     block.alphaFunc = rs_[RS_ALPHATESTENABLE] != 0 ? rs_[RS_ALPHAFUNC] : static_cast<std::uint32_t>(CMP_ALWAYS);
     block.alphaRef = static_cast<float>(rs_[RS_ALPHAREF] & 0xFF);
     block.pad[0] = tint;
+    std::memcpy(block.psC5, psF_[5], sizeof(block.psC5));  // pixel window 1 of split draws (abi.h)
     if (giDraw) {
         ++giDrawCount_;
         if (giDraws_.on && giDraws_.replaceLightmaps) {
@@ -1091,8 +1199,16 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         shader::abi::drawFlags(static_cast<std::uint32_t>(kind), static_cast<std::uint32_t>(phase.pass), static_cast<std::uint32_t>(phase.view)) |
         (tint != 0 ? shader::abi::kDrawFlagTinted : 0u);
     const VkDeviceAddress drawBlock = rep.block != 0 && replaced ? rep.block : db.address;
-    packet_.push = shader::abi::PushConstants{vsConstAddr_, psConstAddr_, drawBlock, frameBlockAddress(), captureDraw ? captureRequest_ : 0,
+    packet_.push = shader::abi::PushConstants{drawSplit_[0] ? 0 : vsConstAddr_, drawSplit_[1] ? 0 : psConstAddr_, drawBlock, frameBlockAddress(), captureDraw ? captureRequest_ : 0,
                                               stats_.draws, flags};
+    for (std::uint32_t w = 0; w < shader::abi::kConstWindows; ++w) {
+        packet_.push.vsWin[w] = drawWin_[0][w];
+        packet_.push.psWin[w] = drawWin_[1][w];
+    }
+    if (drawSplit_[1]) {
+        // c5 = the DrawBlock's psC5 (this draw's alpha reference): biased like the other windows
+        packet_.push.psWin[1] = db.address + offsetof(shader::abi::DrawBlock, psC5) - 5 * 16;
+    }
     // the opaque passes' draws may be recorded later, grouped by pipeline (flushBatch): their order only matters for surfaces
     // at exactly the same depth (docs/research/performance.md 12)
     {
@@ -1151,8 +1267,8 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         r->psHash = ps_->hash;
         r->vsFlags = vs_->semantics.flags;
         r->psFlags = ps_->semantics.flags;
-        r->vsConsts = vsConstAddr_;
-        r->psConsts = psConstAddr_;
+        r->vsConsts = drawSplit_[0] ? drawWin_[0][2] : vsConstAddr_;  // split draws: the object window (biased)
+        r->psConsts = drawSplit_[1] ? drawWin_[1][3] : psConstAddr_;
         r->drawBlock = drawBlock;
         for (std::uint32_t mask = ps_->samplerMask & 0xFFFFu; mask != 0; mask &= mask - 1) {
             const std::uint32_t slot = static_cast<std::uint32_t>(std::countr_zero(mask));

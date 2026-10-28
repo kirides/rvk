@@ -102,14 +102,27 @@ public:
         res.reflection = reflection_;
         res.reflection.version = p_.version;
         res.reflection.intBoolConstants = readsIntBool_;
+        res.reflection.splitConsts = !readsIntBool_;
         return res;
     }
 
 private:
     // ---- pass 1: what the shader uses -------------------------------------------------------------------------------
 
+    // the stage's number of float registers (the window table ends there)
+    std::uint32_t regLimit() const { return vs_ ? abi::kVsWindowFirst[abi::kConstWindows] : abi::kPsWindowFirst[abi::kConstWindows]; }
+
+    // split constants: register `reg` (and, for a relative read, its whole window) is read
+    void noteWindow(std::uint32_t reg, bool wholeWindow) {
+        if (reg >= regLimit()) return;
+        const std::uint32_t w = abi::constWindow(vs_, reg);
+        const std::uint32_t end = wholeWindow ? (vs_ ? abi::kVsWindowFirst[w + 1] : abi::kPsWindowFirst[w + 1]) : reg + 1;
+        reflection_.windowEnd[w] = static_cast<std::uint16_t>(std::max<std::uint32_t>(reflection_.windowEnd[w], end));
+    }
+
     void noteRead(const Register& r, const RelAddr& rel) {
         if (r.type == RegType::Const) {
+            noteWindow(r.index, rel.present);
             if (rel.present) {
                 reflection_.relativeConstants = true;
                 reflection_.floatConstCount = abi::kFloatConsts;
@@ -170,6 +183,7 @@ private:
             const int rows = matrixRows(ins.op);
             if (rows > 0 && ins.src.size() >= 2 && ins.src[1].reg.type == RegType::Const && !ins.src[1].rel.present) {
                 reflection_.floatConstCount = std::max(reflection_.floatConstCount, ins.src[1].reg.index + rows);
+                for (int k = 0; k < rows; ++k) noteWindow(ins.src[1].reg.index + static_cast<std::uint32_t>(k), false);
             }
             if (rows > 0 && ins.src.size() >= 2 &&
                 (ins.src[1].reg.type == RegType::Temp || ins.src[1].reg.type == RegType::TempFloat16)) {
@@ -262,6 +276,9 @@ private:
         return std::format("a0.{}", kComp[rel.component]);
     }
 
+    // a float constant register read: through the window block that owns it (abi.h; rvk_abi.glsl RVK_VSC / RVK_PSC)
+    std::string constRead(std::uint32_t n) const { return std::format("{}({})", vs_ ? "RVK_VSC" : "RVK_PSC", n); }
+
     std::string regExpr(const Register& r, const RelAddr& rel) {
         const auto n = r.index;
         switch (r.type) {
@@ -276,9 +293,9 @@ private:
                 return std::format("c{}_def", n);
             }
             if (auto it = opt_.constOverrides.find(n); it != opt_.constOverrides.end()) {
-                return overrideExpr(it->second, std::format("{}.c[{}]", consts_, n));
+                return overrideExpr(it->second, constRead(n));
             }
-            return std::format("{}.c[{}]", consts_, n);
+            return constRead(n);
         case RegType::Addr: return vs_ ? "vec4(a0)" : std::format("t{}", n);
         case RegType::RastOut: return n == 0 ? "oPos" : n == 1 ? "oFog" : "oPts";
         case RegType::AttrOut: return std::format("oD{}", n);
@@ -883,16 +900,19 @@ private:
             g += std::format("{}vec4 c{}_def = {};\n", isConstant ? "const " : "", n, v);
         }
         // helpers
-        if (opt_.constOverrides.empty()) {
-            g += std::format("\nvec4 rvk_cRel(int i) {{ return uint(i) < 256u ? {}.c[i] : vec4(0.0); }}\n", consts_);
-        } else {
-            g += "\nvec4 rvk_cRel(int i) {\n    switch (i) {\n";
-            for (const auto& [n, expr] : opt_.constOverrides) {
-                if (n < abi::kFloatConsts) {
-                    g += std::format("    case {}: return {};\n", n, overrideExpr(expr, std::format("{}.c[{}]", consts_, n)));
+        {
+            const std::string rel = std::format("pc.{}w[{}(i)].c[i]", vs_ ? "vs" : "ps", vs_ ? "RVK_VS_WIN" : "RVK_PS_WIN");
+            if (opt_.constOverrides.empty()) {
+                g += std::format("\nvec4 rvk_cRel(int i) {{ return uint(i) < {}u ? {} : vec4(0.0); }}\n", regLimit(), rel);
+            } else {
+                g += "\nvec4 rvk_cRel(int i) {\n    switch (i) {\n";
+                for (const auto& [n, expr] : opt_.constOverrides) {
+                    if (n < regLimit()) {
+                        g += std::format("    case {}: return {};\n", n, overrideExpr(expr, constRead(n)));
+                    }
                 }
+                g += std::format("    default: return uint(i) < {}u ? {} : vec4(0.0);\n    }}\n}}\n", regLimit(), rel);
             }
-            g += std::format("    default: return uint(i) < 256u ? {}.c[i] : vec4(0.0);\n    }}\n}}\n", consts_);
         }
         g += "vec4 rvk_lit(vec4 s) {\n"
              "    float y = max(s.x, 0.0);\n"

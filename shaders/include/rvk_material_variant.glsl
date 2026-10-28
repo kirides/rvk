@@ -178,9 +178,9 @@ void rvkMvAo(vec3 P) {
 
 void rvkMvPrologue(vec4 vertexNormal) {
 #ifdef RVK_MV_AMBIENT
-    for (int i = 0; i < 7; ++i) rvk_gi[1 + i] = pc.ps.c[RVK_MV_AMB_REG + i];
+    for (int i = 0; i < 7; ++i) rvk_gi[1 + i] = pc.psw[3].c[RVK_MV_AMB_REG + i];  /* c14..c223 = window 3 (abi.h) */
 #ifdef RVK_MV_HAS_IND
-    rvk_gi[0] = pc.ps.c[RVK_MV_IND_REG];
+    rvk_gi[0] = pc.psw[3].c[RVK_MV_IND_REG];
 #else
     rvk_gi[0] = vec4(0.0);
 #endif

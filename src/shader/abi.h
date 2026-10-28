@@ -5,7 +5,7 @@
 // change both together. rvk_tests (abi_glsl_layout_matches_cpp) compares the offsets of every block below with that file's
 // SPIR-V. Design: docs/research/injection.md.
 //
-// Push constants of draws (48 bytes of the 128 every device has, vertex + fragment):
+// Push constants of draws (112 bytes of the 128 every device has, vertex + fragment):
 //   uint64 vsConsts      device address of the vertex shader's StageConsts
 //   uint64 psConsts      device address of the pixel shader's StageConsts
 //   uint64 draw          device address of the DrawBlock
@@ -13,6 +13,13 @@
 //   uint64 prevVsConsts  last frame's StageConsts of the same geometry (motion vectors, VS capture); 0 = not tracked (yet)
 //   uint32 drawId        the draw's index in the frame (= its draws::Record index)
 //   uint32 flags         bits 0-7 draws::Kind, 8-11 scene::Pass, 12-15 scene::View, 16.. feature bits (kDrawFlag*)
+//   uint64 vsWin[4]      the vertex shader's float constants by register window (kVsWindowFirst): translated shaders read c[n]
+//   uint64 psWin[4]      through the window that owns register n (RVK_VSC / RVK_PSC), a StageConsts-shaped block whose c[] is
+//                        BIASED so that c[n] keeps the D3D9 register number: the address is the block's base minus first * 16
+//                        (only registers of the window are ever read). Legacy draws (split constants off, effects, hand-written
+//                        shaders reading pc.vs / pc.ps): every window = the draw's one full StageConsts (vsConsts / psConsts).
+//                        Split draws: vsConsts / psConsts are 0 and a window block holds only the registers its shader reads
+//                        (docs/research/vulkanize/plan.md V2)
 //
 // StageConsts (std430): vec4 c[256]; ivec4 i[16]; uint b[16]          -> c at 0, i at 4096, b at 4352, 4416 bytes
 // DrawBlock (std430):   uint tex[20]; uint smp[20]; vec4 posFix; uint alphaFunc; float alphaRef; uint pad[2]
@@ -26,6 +33,8 @@
 //                       alphaFunc: D3DCMPFUNC (1 never .. 8 always), alphaRef: 0..1
 //                       pad[0]: debug tint, RGBA8 (unpackUnorm4x8; 0 = none), read only by the tint variant of a pixel
 //                       shader (GlslOptions::tintEpilogue, the "tint draws" debug view); pad[1] unused
+//                       psC5: pixel shader constant c5 of this draw (xy the camera obstacle fade, w the alpha reference: the
+//                       register is half per-draw data), the pixel window kPsWindowFirst[1] of split draws
 // FrameBlock (std430, 976 bytes): the main camera (current + previous), depth conventions, target size, jitter, time, frame
 //                       index + flags, bindless slots of the tagged engine images, 16 vec4 feature parameters (below), the
 //                       ray tracing scene (TLAS + geometry record addresses, RtGeometryRecord below), the GI volume (enh/gi)
@@ -70,8 +79,24 @@ struct DrawBlock {
     std::uint32_t alphaFunc;
     float alphaRef;
     std::uint32_t pad[2];
+    float psC5[4];
 };
-static_assert(sizeof(DrawBlock) == 192);
+static_assert(sizeof(DrawBlock) == 208);
+
+// Constant register windows (split constants, docs/research/vulkanize/V0-constants.md): a stage's float registers are
+// partitioned by the engine's pools, each window has its own block (dirty tracking, upload) per draw.
+//   VS: 0 c0..c11 (view), 1 c12..c30 (frame: wind, application camera rotation; fog), 2 c31..c231 (object: world, fade, bones,
+//       instances, the particle / sky pools), 3 c232..c255 (material)
+//   PS: 0 c0..c4 (view, fog), 1 c5 (view xy + alpha reference w: the DrawBlock's psC5), 2 c6..c13 (material), 3 c14..c223 (lights)
+inline constexpr std::uint32_t kConstWindows = 4;
+inline constexpr std::uint32_t kVsWindowFirst[kConstWindows + 1] = {0, 12, 31, 232, 256};
+inline constexpr std::uint32_t kPsWindowFirst[kConstWindows + 1] = {0, 5, 6, 14, 224};
+constexpr std::uint32_t constWindow(bool vertex, std::uint32_t reg) {
+    const std::uint32_t* f = vertex ? kVsWindowFirst : kPsWindowFirst;
+    std::uint32_t w = 0;
+    while (w + 1 < kConstWindows && reg >= f[w + 1]) ++w;
+    return w;
+}
 
 struct PushConstants {
     std::uint64_t vsConsts;
@@ -81,8 +106,17 @@ struct PushConstants {
     std::uint64_t prevVsConsts;
     std::uint32_t drawId;
     std::uint32_t flags;
+    std::uint64_t vsWin[kConstWindows];
+    std::uint64_t psWin[kConstWindows];
+    // every window = the stage's one full block (split constants off, hand-written shaders)
+    void legacyWindows() {
+        for (std::uint32_t i = 0; i < kConstWindows; ++i) {
+            vsWin[i] = vsConsts;
+            psWin[i] = psConsts;
+        }
+    }
 };
-static_assert(sizeof(PushConstants) == 48);
+static_assert(sizeof(PushConstants) == 112);
 // every Vulkan device has at least 128 bytes of push constants: the rest is reserved for later fields
 inline constexpr std::uint32_t kPushConstantBudget = 128;
 static_assert(sizeof(PushConstants) <= kPushConstantBudget);

@@ -22,7 +22,7 @@ namespace {
 
 // bump when the translator's output changes: invalidates the SPIR-V disk cache
 // 2: the ABI declarations come from shaders/include/rvk_abi.glsl (48-byte push block, FrameBlock)
-constexpr std::uint32_t kTranslatorVersion = 3;
+constexpr std::uint32_t kTranslatorVersion = 4;
 // bump when the tint epilogue (GlslOptions::tintEpilogue) changes: the tint variants' cache files
 constexpr std::uint32_t kTintVersion = 2;
 // bump when the billboard fade variant (Device::lodModule) changes
@@ -658,6 +658,7 @@ void Device::beginFrame() {
     rec_.reset();
     lastPipelineValid_ = false;
     vsConstDirty_ = psConstDirty_ = true;
+    dirtyConstWindows();  // the window blocks live in the frame's ring
     frameAddr_ = 0;  // ring memory of the frame block belongs to a submission
     passIndex_ = 0;
     const VkDescriptorSet set = bindless_.set();
@@ -1681,16 +1682,39 @@ bool writeRegisters(T* dst, const T* src, std::size_t bytes, bool& dirty, bool c
 }
 }  // namespace
 
+// the register windows (abi.h) a write of [start, start + count) touches
+std::uint32_t Device::constWindowMask(bool vertex, std::uint32_t start, std::uint32_t count) {
+    const std::uint32_t* f = vertex ? shader::abi::kVsWindowFirst : shader::abi::kPsWindowFirst;
+    std::uint32_t mask = 0;
+    for (std::uint32_t w = 0; w < shader::abi::kConstWindows; ++w) {
+        if (start < f[w + 1] && start + count > f[w]) mask |= 1u << w;
+    }
+    return mask;
+}
+
 void Device::setVertexShaderConstantF(std::uint32_t start, const float* data, std::uint32_t count) {
     if (start >= kVsFloatConsts || data == nullptr) return;
     count = std::min(count, kVsFloatConsts - start);
-    writeRegisters(vsF_[start], data, count * 16, vsConstDirty_, constCompare_, perf_.constSetsUnchanged);
+    // split constants need the comparison also on a stage that is already dirty (the windows are tracked apart)
+    if (constCompare_ && (splitConstants_ || !vsConstDirty_) && std::memcmp(vsF_[start], data, count * 16) == 0) {
+        ++perf_.constSetsUnchanged;
+        return;
+    }
+    std::memcpy(vsF_[start], data, count * 16);
+    vsConstDirty_ = true;
+    constWinDirty_[0] |= constWindowMask(true, start, count);
 }
 
 void Device::setPixelShaderConstantF(std::uint32_t start, const float* data, std::uint32_t count) {
     if (start >= kPsFloatConsts || data == nullptr) return;
     count = std::min(count, kPsFloatConsts - start);
-    writeRegisters(psF_[start], data, count * 16, psConstDirty_, constCompare_, perf_.constSetsUnchanged);
+    if (constCompare_ && (splitConstants_ || !psConstDirty_) && std::memcmp(psF_[start], data, count * 16) == 0) {
+        ++perf_.constSetsUnchanged;
+        return;
+    }
+    std::memcpy(psF_[start], data, count * 16);
+    psConstDirty_ = true;
+    constWinDirty_[1] |= constWindowMask(false, start, count);
 }
 
 void Device::setVertexShaderConstantI(std::uint32_t start, const std::int32_t* data, std::uint32_t count) {

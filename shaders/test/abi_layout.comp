@@ -11,6 +11,6 @@ layout(set = 1, binding = 0, r32ui) uniform writeonly uimage2D sink;
 void main() {
     RvkFrame f = pc.frame;
     uint v = floatBitsToUint(pc.vs.c[0].x) + uint(pc.ps.i[0].x) + pc.prevVs.b[0] + pc.draw.tex[0] + pc.draw.pad1 + pc.drawId +
-             pc.flags + floatBitsToUint(f.params[0].x) + f.images.x + f.frameInfo.x + f.rtScene.x + f.rtInfo.x;
+             pc.flags + floatBitsToUint(RVK_VSC(40).x) + floatBitsToUint(RVK_PSC(20).x) + floatBitsToUint(pc.draw.psC5.w) + floatBitsToUint(f.params[0].x) + f.images.x + f.frameInfo.x + f.rtScene.x + f.rtInfo.x;
     imageStore(sink, ivec2(0), uvec4(v));
 }

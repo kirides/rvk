@@ -293,6 +293,8 @@ struct RendererSettings {
     Setting* reverseZ = nullptr;     // debug.reverse_z: reversed infinite depth in the main view (d3d9::Device::setReverseZ)
     Setting* batchDraws = nullptr;   // debug.batch_draws: the opaque passes' draws grouped by pipeline (d3d9::Device::setBatching)
     Setting* constantCompare = nullptr;  // debug.constant_compare: register setters dirty a stage only on a change (d3d9::Device::setConstantCompare)
+    Setting* splitConstants = nullptr;   // debug.split_constants: a draw's constants uploaded by register window, only what changed (d3d9::Device::setSplitConstants)
+    Setting* splitVerify = nullptr;      // debug.split_verify: check every split draw's window blocks against the register file (d3d9::Device::setSplitVerify)
     Setting* injectView = nullptr;   // debug.inject_view: "off", "depth", "tint" (enh/debug_view.h, an injected pass)
     Setting* rtAllow = nullptr;      // rt.allow: enable the ray tracing extensions at device creation (restart)
     Setting* rtReflections = nullptr; // rt.reflections: "off", "low", "medium", "high" (the water's ray-traced reflections, needs RayQuery)
