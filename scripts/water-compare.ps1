@@ -15,6 +15,9 @@ param(
     # the left run's player settings instead of the engine's water (water.enabled=false): e.g. SSR vs ray-traced reflections
     # -EngineSetting 'water.enabled=true','rt.reflections=off' -Setting 'rt.reflections=medium'
     [string[]]$EngineSetting = @(),
+    # render mode of both runs (run.ps1 -Mode): wrapper (default; old name vulkan) or full; Wrapper vs Full side by side:
+    # -EngineSetting 'renderer.mode=wrapper' -Setting 'renderer.mode=full' (the player setting, with -Mode wrapper)
+    [ValidateSet('wrapper', 'full', 'vulkan')][string]$Mode = 'wrapper',
     [string]$GameDir = 'B:\DevDrive\risen-test-vk',
     # risen-spass instance id (run.ps1 -Instance): needed to run beside another Risen
     [int]$Instance = 0,
@@ -43,7 +46,7 @@ $spotParam = 'spots=' + ($Spots -replace ',', ';')
 
 function Invoke-Run([string]$tag, [string[]]$settings, [int]$burstCount = 1) {
     if (Test-Path $shots) { Get-ChildItem $shots -Filter "${tag}_*" | Remove-Item -Force }
-    $runArgs = @{ Mode = 'vulkan'; GameDir = $GameDir; Instance = $Instance; Mods = @('rvkcompare'); Scenario = 'rvkcompare'; WaitForResult = $true; Seconds = 1200
+    $runArgs = @{ Mode = $Mode; GameDir = $GameDir; Instance = $Instance; Mods = @('rvkcompare'); Scenario = 'rvkcompare'; WaitForResult = $true; Seconds = 1200
                   Param = @("tag=$tag", $spotParam, "burst=$burstCount", "interval=$Interval") + $Param; Setting = $settings; RvkFilter = 'enh: water: (first|wet|material .* none)|\[error\]' }
     if ($Validation) { $runArgs.Validation = $true }
     if ($Perf) { $runArgs.Perf = $true }

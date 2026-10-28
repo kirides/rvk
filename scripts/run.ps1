@@ -12,9 +12,15 @@
 .EXAMPLE
     .\scripts\run.ps1 -Mods testdemo -Scenario testdemo -WaitForResult -Seconds 240
     .\scripts\run.ps1 -Mode trace -Mods testdemo -Scenario testdemo -WaitForResult
+    .\scripts\run.ps1 -Mode full -Mods testdemo -Scenario testdemo -WaitForResult -Validation
 #>
 param(
-    [ValidateSet('passthrough', 'trace', 'vulkan')][string]$Mode = 'passthrough',
+    # [renderer] mode: the render modes original (the game's D3D9 forwarded), wrapper (the D3D9 model on Vulkan + the
+    # enhancements), full (the native frame takes over every draw); the old names passthrough (= original) and vulkan
+    # (= wrapper); trace (developer: D3D9 behind the tracing HAL). original / full lock the player setting renderer.mode for
+    # the run; wrapper / vulkan leave it to settings.toml (the baseline: wrapper; -Setting 'renderer.mode=full' or the
+    # command 'set renderer.mode full' switch at run time)
+    [ValidateSet('original', 'wrapper', 'full', 'passthrough', 'trace', 'vulkan')][string]$Mode = 'original',
     [switch]$NoRenderer,
     [switch]$Validation,
     # [vulkan] sync_validation: the validation layer's synchronization validation too (implies -Validation; slow)
@@ -96,7 +102,7 @@ param(
     [string]$QuickSave = '',
     [string]$Filter = '\[error\]|\[warn\]|\[test\] (FAIL|finished|deadline)',
     # regex of rvk.log lines to print after the run ('' = none, '.' = all)
-    [string]$RvkFilter = '\[(warning|error|critical)\]|probe|  \[|missing|InitializeAdmin|ms_pAPI|Direct3DCreate9|hooks|mode =|selftest|snapshot|overlay|settings|caps:|ray tracing|diag:|environment:'
+    [string]$RvkFilter = '\[(warning|error|critical)\]|probe|  \[|missing|InitializeAdmin|ms_pAPI|Direct3DCreate9|hooks|mode =|renderer: mode|selftest|snapshot|overlay|settings|caps:|ray tracing|diag:|environment:'
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot

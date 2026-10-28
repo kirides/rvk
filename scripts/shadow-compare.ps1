@@ -14,6 +14,8 @@ param(
     [string[]]$Setting = @(),
     # extra player settings of the engine run too (e.g. the shadow map size / range, which apply to both)
     [string[]]$EngineSetting = @(),
+    # render mode of both runs (run.ps1 -Mode): wrapper (default; old name vulkan) or full
+    [ValidateSet('wrapper', 'full', 'vulkan')][string]$Mode = 'wrapper',
     [string]$GameDir = 'B:\DevDrive\risen-test-vk',
     # risen-spass instance id (run.ps1 -Instance): needed to run beside another Risen
     [int]$Instance = 0,
@@ -34,7 +36,7 @@ $spotParam = 'spots=' + ($Spots -replace ',', ';')
 
 function Invoke-Run([string]$tag, [string[]]$settings) {
     if (Test-Path $shots) { Get-ChildItem $shots -Filter "${tag}_*" | Remove-Item -Force }
-    $runArgs = @{ Mode = 'vulkan'; GameDir = $GameDir; Instance = $Instance; Mods = @('rvkcompare'); Scenario = 'rvkcompare'; WaitForResult = $true; Seconds = 1200
+    $runArgs = @{ Mode = $Mode; GameDir = $GameDir; Instance = $Instance; Mods = @('rvkcompare'); Scenario = 'rvkcompare'; WaitForResult = $true; Seconds = 1200
                   Param = @("tag=$tag", $spotParam, 'burst=1') + $Param; Setting = $settings; RvkFilter = 'enh: shadows|\[error\]|VUID' }
     if ($Validation) { $runArgs.Validation = $true }
     if ($Perf) { $runArgs.Perf = $true }

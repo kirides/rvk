@@ -81,6 +81,10 @@ struct Spec {
     // parity path); the player's value itself is kept (file, API) and applies again when the capability is there.
     caps::Mask requirements = 0;
     std::optional<double> unmetValue;
+    // Enum without Flag::Restart: a restart group per option (same order as `options`). Switching between options of one
+    // group applies at once; between groups only at the next start (restartPending, "restart needed" in the overlay), e.g.
+    // renderer.mode: original {0} | wrapper, full {1}. Empty = no such rule.
+    std::vector<std::uint8_t> restartGroups;
 };
 
 class Registry;
@@ -112,11 +116,18 @@ public:
     bool locked() const { return locked_.load(std::memory_order_relaxed); }
     // the value the session started with (Restart settings run with it)
     double startValue() const { return start_; }
-    bool restartPending() const { return restart() && value() != start_; }
+    bool restartPending() const {
+        if (restart()) return value() != start_;
+        return !spec_.restartGroups.empty() && restartGroup(value()) != restartGroup(start_);
+    }
 
 private:
     friend class Registry;
     explicit Setting(Spec spec) : spec_(std::move(spec)) {}
+    int restartGroup(double v) const {
+        const auto i = static_cast<std::size_t>(v);
+        return i < spec_.restartGroups.size() ? spec_.restartGroups[i] : -1;
+    }
     Spec spec_;
     std::atomic<double> value_{0.0};
     std::atomic<bool> locked_{false};
@@ -257,6 +268,8 @@ Registry& registry();
 
 // ---- the renderer's own settings (registered by registerRendererSettings) ----
 struct RendererSettings {
+    // renderer.mode: "original", "wrapper", "full" (core/config.h RenderMode; original <-> the others after a restart)
+    Setting* rendererMode = nullptr;
     Setting* vsync = nullptr;        // vulkan.vsync: "engine" (the game's option), "on", "off"
     Setting* maxFps = nullptr;       // vulkan.max_fps: 0 = no cap beyond vsync
     Setting* menuFps = nullptr;      // vulkan.menu_fps: cap while a menu page is open (engine/menu_state.h); 0 = none

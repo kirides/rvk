@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "core/config.h"
 #include "d3d9/device.h"
 #include "d3d9/ffshader.h"
 #include "enh/debug_view.h"
@@ -583,6 +584,11 @@ private:
     std::unique_ptr<native::StaticOps> staticOps_;        // native.static_ops (N5.1: the static mesh ops composed / drawn by us)
     std::unique_ptr<native::EffectOps> effectOps_;        // N5.5c: the shadow mask / terrain blur effect draws (scene_ops_groups 1024 / 2048)
     void applyStaticOps();
+    // renderer.mode (core/config.h): Wrapper / Full at a frame boundary, logged on each change
+    RenderMode renderMode() const;
+    void applyRenderMode();
+    RenderMode loggedMode_ = RenderMode::Original;     // the last logged mode (Original = none yet: a Vulkan session never runs it)
+    RenderMode loggedRequest_ = RenderMode::Original;
     std::unique_ptr<enh::NativeOpaque> nativeOpaque_;  // native.opaque (a draw replacer + a pass: the native renderer's static meshes)
     std::unique_ptr<enh::RtScene> rtScene_;      // the ray tracing scene (a draw observer + a pass; active while a consumer holds it)
     std::unique_ptr<enh::RtDebug> rtDebug_;      // rt.debug (a consumer of rtScene_)

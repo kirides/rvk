@@ -14,7 +14,7 @@ TEST(settings_api_info_get_set) {
     settings::Registry reg;
     settings::registerRendererSettings(reg);
     const std::uint32_t n = api::settingCount(reg);
-    CHECK(n == 96);  // 28 (incl. overlay.debug_mode, overlay.show_advanced, vulkan.fullscreen, vulkan.exclusive_acquire, vulkan.menu_fps, debug.pace_loading, debug.batch_draws, debug.record_threads, debug.prefetch_stride, debug.material_sources, debug.ubershader, debug.ubershader_skip, debug.shadow_stride, rt.reflections, rt.reflection_tweaks, rt.debug, rt.scene_views) + the 11 water.* + the 15 shadows.* + the 11 gi.* + the 5 ao.* / gbuffer.* + the 3 lod.* settings + debug.rt_shadow_sync + debug.rt_skin + debug.rt_skin_verify + compat.high_fps + debug.regions + upscale.mode + upscale.object_motion + upscale.reactive + upscale.reactive_cutoff + upscale.reactive_scale + upscale.sharpness + upscale.jitter_flip + native.opaque + native.debug + native.shadows + native.frame_tap + native.static_ops + native.static_ops_compare + native.scene_ops + native.scene_ops_compare + native.scene_ops_groups + rt.source + debug.reverse_z
+    CHECK(n == 97);  // 29 (incl. renderer.mode, overlay.debug_mode, overlay.show_advanced, vulkan.fullscreen, vulkan.exclusive_acquire, vulkan.menu_fps, debug.pace_loading, debug.batch_draws, debug.record_threads, debug.prefetch_stride, debug.material_sources, debug.ubershader, debug.ubershader_skip, debug.shadow_stride, rt.reflections, rt.reflection_tweaks, rt.debug, rt.scene_views) + the 11 water.* + the 15 shadows.* + the 11 gi.* + the 5 ao.* / gbuffer.* + the 3 lod.* settings + debug.rt_shadow_sync + debug.rt_skin + debug.rt_skin_verify + compat.high_fps + debug.regions + upscale.mode + upscale.object_motion + upscale.reactive + upscale.reactive_cutoff + upscale.reactive_scale + upscale.sharpness + upscale.jitter_flip + native.opaque + native.debug + native.shadows + native.frame_tap + native.static_ops + native.static_ops_compare + native.scene_ops + native.scene_ops_compare + native.scene_ops_groups + rt.source + debug.reverse_z
     struct rvk_setting_info info{};
     CHECK(api::settingInfo(reg, 0, &info, sizeof(info)) == 80);
     CHECK(info.size == 80);
@@ -44,10 +44,10 @@ TEST(settings_api_info_get_set) {
     CHECK(api::settingSet(reg, nullptr, "on", 0) == RVK_SETTING_BAD_ARGUMENT);
     reg.lock(*reg.find("vulkan.adapter"), 0, "test");
     CHECK(api::settingSet(reg, "vulkan.adapter", "1", 0) == RVK_SETTING_LOCKED);
-    CHECK(api::settingInfo(reg, 8, &info, sizeof(info)) == 80);  // vulkan.adapter (System tab, after the menu settings)
+    CHECK(api::settingInfo(reg, 9, &info, sizeof(info)) == 80);  // vulkan.adapter (System tab, after renderer.mode and the menu settings)
     CHECK((info.flags & (RVK_SETTING_RESTART | RVK_SETTING_IS_LOCKED)) == (RVK_SETTING_RESTART | RVK_SETTING_IS_LOCKED));
     // capability resolution: rt.allow needs ray tracing hardware; this registry has no device report
-    CHECK(api::settingInfo(reg, 10, &info, sizeof(info)) == 80);
+    CHECK(api::settingInfo(reg, 11, &info, sizeof(info)) == 80);
     CHECK(std::string(info.key) == "rt.allow");
     CHECK((info.flags & RVK_SETTING_UNAVAILABLE) != 0);
     CHECK(api::settingGet(reg, "rt.allow", buf, sizeof(buf)) == 4);  // the request ("true") is kept

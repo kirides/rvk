@@ -107,16 +107,47 @@ void HalDevice::refractionCopied(const void* api) {
     if (frameTap_) frameTap_->refractionCopy(api);
 }
 
+// The render mode of this Vulkan session (renderer.mode; core/config.h): Full = the native frame takes over every draw,
+// Wrapper = the engine's draws through the HAL. "original" (requested for the next start) renders as Wrapper until then.
+RenderMode HalDevice::renderMode() const {
+    const auto& rs = settings::renderer();
+    const auto requested = rs.rendererMode != nullptr ? static_cast<RenderMode>(rs.rendererMode->asInt()) : kDefaultRenderMode;
+    return vulkanSessionMode(requested);
+}
+
+void HalDevice::applyRenderMode() {
+    const auto& rs = settings::renderer();
+    const auto requested = rs.rendererMode != nullptr ? static_cast<RenderMode>(rs.rendererMode->asInt()) : kDefaultRenderMode;
+    const RenderMode mode = vulkanSessionMode(requested);
+    if (mode != loggedMode_ || requested != loggedRequest_) {
+        if (requested == RenderMode::Original) {
+            spdlog::info("renderer: mode original requested (the game's D3D9 renderer after a restart); this session renders as {}",
+                         toString(mode));
+        } else {
+            spdlog::info("renderer: mode {} ({})", toString(mode),
+                         mode == RenderMode::Full ? "the native frame draws everything from engine data" : "the engine's draws through the D3D9 model on Vulkan");
+        }
+        loggedMode_ = mode;
+        loggedRequest_ = requested;
+    }
+    applyStaticOps();
+}
+
 void HalDevice::applyStaticOps() {
     const auto& rs = settings::renderer();
-    const bool takeOver = rs.nativeStaticOps != nullptr && rs.nativeStaticOps->asBool();
-    const bool compare = rs.nativeStaticOpsCompare != nullptr && rs.nativeStaticOpsCompare->asBool();
+    const auto on = [](const settings::Setting* s) { return s != nullptr && s->asBool(); };
+    // Full turns the static and scene ops on; the Debug overrides native.static_ops / native.scene_ops do so in Wrapper too
+    const NativePlan plan = nativePlan(renderMode(), on(rs.nativeStaticOps), on(rs.nativeStaticOpsCompare), on(rs.nativeSceneOps),
+                                       on(rs.nativeSceneOpsCompare),
+                                       rs.nativeSceneOpsGroups != nullptr ? rs.nativeSceneOpsGroups->asInt() : static_cast<int>(kAllSceneOpGroups));
+    const bool takeOver = plan.staticTake;
+    const bool compare = plan.staticCompare;
     staticOps_->setMode(native::StaticOps::Group::Static, takeOver, compare);
     // N5.2 scene ops (native.scene_ops*): groups 1 alpha / refracted mesh ops, 2 entity overlay passes, 4 decals, 8 sky, 16 billboards,
     // 32 sky cube faces, 64 skinned actors, 128 SpeedTrees + tree billboards, 256 vegetation, 512 shadow views, 1024 effect draws
-    const bool sceneTake = rs.nativeSceneOps != nullptr && rs.nativeSceneOps->asBool();
-    const bool sceneCompare = rs.nativeSceneOpsCompare != nullptr && rs.nativeSceneOpsCompare->asBool();
-    const int groups = rs.nativeSceneOpsGroups != nullptr ? rs.nativeSceneOpsGroups->asInt() : 131071;
+    const bool sceneTake = plan.sceneTake;
+    const bool sceneCompare = plan.sceneCompare;
+    const int groups = static_cast<int>(plan.groups);
     staticOps_->setMode(native::StaticOps::Group::Mesh, sceneTake && (groups & 1) != 0, sceneCompare && (groups & 1) != 0);
     staticOps_->setOverlays((sceneTake || sceneCompare) && (groups & 2) != 0);
     staticOps_->setMode(native::StaticOps::Group::Decals, sceneTake && (groups & 4) != 0, sceneCompare && (groups & 4) != 0);
@@ -244,7 +275,9 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     // capability report (core/caps.h, docs/research/raytracing.md 3): logged once, the overlay's "Capabilities", and the
     // resolution of settings with requirements (greyed + parity fallback when unmet)
     {
-        const caps::Report report = dev_.ctx().capabilities(options.pipelineLibraries);
+        caps::Report report = dev_.ctx().capabilities(options.pipelineLibraries);
+        // the session's render mode (renderer.mode): the overlay's System tab "Graphics card" and the caps lines
+        report.properties.emplace_back("render mode", std::format("{} at start (Vulkan; Wrapper / Full switch at run time)", toString(renderMode())));
         for (const auto& line : report.lines()) spdlog::info("caps: {}", line);
         caps::setCurrent(report);
         reg.setCapabilities(report);
@@ -402,7 +435,10 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
-    applyStaticOps();
+    // renderer.mode (Wrapper / Full): like the native.* settings applied by the registry's dispatch before a present, i.e. at a
+    // frame boundary (no frame starts with one mode and ends with the other)
+    if (rs.rendererMode != nullptr) reg.onChange(*rs.rendererMode, [this](const settings::Setting&) { applyRenderMode(); }, this);
+    applyRenderMode();
     if (rs.rtSource != nullptr && rtScene_) {
         const auto applyRtSource = [this](const settings::Setting& s) { rtScene_->setMirrorSource(s.asInt() == 1 ? nativeParts_.get() : nullptr); };
         reg.onChange(*rs.rtSource, applyRtSource, this);

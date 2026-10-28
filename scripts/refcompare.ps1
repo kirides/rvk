@@ -10,7 +10,7 @@
          graphics block is pinned before every run (same resolution and quality for both renderers)
       3. run A: run.ps1 -NoRenderer (the game's D3D9), tag d3d9 -> out\refcompare\<stamp>\d3d9\
          (optional -Baseline: a second D3D9 run, tag d3d9 -> ...\d3d9_b\: known-noise masks + thresholds from A vs A')
-      4. run B: run.ps1 -Mode vulkan, tag vk -> ...\vk\ (+ rvk.log)
+      4. run B: run.ps1 -Mode wrapper (-Mode full: the native frame), tag vk -> ...\vk\ (+ rvk.log)
       5. python tools\refcompare.py compare d3d9 vk -o report [--baseline d3d9_b | --thresholds <reference>\thresholds.json]
     Each run directory gets the PNG bursts (<tag>_<spot>_b<k>.png), meta.json (the RVKCMP lines of spass.log as a JSON list),
     spass.log, test-result.json. Exit code: refcompare.py's (0 all PASS/WARN, 1 any FAIL, 2 any INVALID), 3 when a game run
@@ -53,6 +53,8 @@ param(
     [double]$MaxFps = 0,
     # Vulkan run: player settings (run.ps1 -Setting), e.g. 'rt.allow=false'
     [string[]]$Setting = @(),
+    # Vulkan run: render mode (run.ps1 -Mode): wrapper (default; old name vulkan) or full (the native frame takes over)
+    [ValidateSet('wrapper', 'full', 'vulkan')][string]$Mode = 'wrapper',
     [switch]$NoImages
 )
 $ErrorActionPreference = 'Stop'
@@ -157,8 +159,8 @@ function Invoke-GameRun([string]$tag, [string]$dir, [bool]$d3d9) {
         GameDir = $GameDir; Instance = $Instance; Mods = @('rvkcompare'); Scenario = 'rvkcompare'; WaitForResult = $true
         Seconds = $Seconds; Param = $p; WindowSize = $WindowSize; Config = $snapConfig
     }
-    if ($d3d9) { $runArgs.NoRenderer = $true } else { $runArgs.Mode = 'vulkan'; $runArgs.MaxFps = $MaxFps; if ($Validation) { $runArgs.Validation = $true }; if ($Setting) { $runArgs.Setting = $Setting } }
-    Write-Host "==== run $tag ($(if ($d3d9) { 'game D3D9' } else { 'Vulkan' })) -> $dir"
+    if ($d3d9) { $runArgs.NoRenderer = $true } else { $runArgs.Mode = $Mode; $runArgs.MaxFps = $MaxFps; if ($Validation) { $runArgs.Validation = $true }; if ($Setting) { $runArgs.Setting = $Setting } }
+    Write-Host "==== run $tag ($(if ($d3d9) { 'game D3D9' } else { "Vulkan, $Mode" })) -> $dir"
     $t0 = Get-Date
     & (Join-Path $PSScriptRoot 'run.ps1') @runArgs | Out-Host
     $code = $LASTEXITCODE

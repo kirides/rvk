@@ -20,7 +20,10 @@ int& failures() {
 
 TEST(config_defaults) {
     const rvk::Config c = rvk::parseConfig("");
-    CHECK(c.mode == rvk::Mode::Passthrough);
+    // no [renderer] mode: the player's renderer.mode decides (default wrapper, a Vulkan backend)
+    CHECK(c.mode == rvk::Mode::Vulkan);
+    CHECK(!c.renderMode.has_value());
+    CHECK(!rvk::configModeLock(c).has_value());
     CHECK(c.logLevel == "info");
     CHECK(!c.validation);
     CHECK(c.probe);
@@ -42,6 +45,7 @@ adapter = 1
                                            &err);
     CHECK(err.empty());
     CHECK(c.mode == rvk::Mode::Vulkan);
+    CHECK(c.renderMode == rvk::RenderMode::Wrapper);  // "vulkan" = the old name of wrapper
     CHECK(c.logLevel == "debug");
     CHECK(c.validation);
     CHECK(!c.probe);
@@ -63,11 +67,79 @@ TEST(config_errors) {
     std::string err;
     rvk::Config c = rvk::parseConfig("[renderer]\nmode = \"dx12\"\n", &err);
     CHECK(!err.empty());
-    CHECK(c.mode == rvk::Mode::Passthrough);
+    CHECK(c.mode == rvk::Mode::Passthrough);  // unknown: the safe mode, locked
+    CHECK(rvk::configModeLock(c) == rvk::RenderMode::Original);
     err.clear();
     c = rvk::parseConfig("this is not toml", &err);
     CHECK(!err.empty());
     CHECK(c.mode == rvk::Mode::Passthrough);
+    CHECK(rvk::configModeLock(c) == rvk::RenderMode::Original);
+}
+
+TEST(config_render_modes) {
+    using rvk::Mode;
+    using rvk::RenderMode;
+    struct Case {
+        const char* text;
+        RenderMode mode;
+        Mode backend;
+        bool locks;  // a non-default value locks renderer.mode for the session
+    };
+    const Case cases[] = {
+        {"original", RenderMode::Original, Mode::Passthrough, true}, {"passthrough", RenderMode::Original, Mode::Passthrough, true},
+        {"d3d9", RenderMode::Original, Mode::Passthrough, true},     {"wrapper", RenderMode::Wrapper, Mode::Vulkan, false},
+        {"vulkan", RenderMode::Wrapper, Mode::Vulkan, false},        {"full", RenderMode::Full, Mode::Vulkan, true},
+    };
+    for (const Case& k : cases) {
+        std::string err;
+        const rvk::Config c = rvk::parseConfig(std::string("[renderer]\nmode = \"") + k.text + "\"\n", &err);
+        CHECK_MSG(err.empty() && c.renderMode == k.mode && c.mode == k.backend, k.text);
+        CHECK_MSG(rvk::configModeLock(c).has_value() == k.locks, k.text);
+        if (k.locks) CHECK_MSG(*rvk::configModeLock(c) == k.mode, k.text);
+        CHECK(rvk::parseRenderMode(k.text) == k.mode);
+    }
+    CHECK(!rvk::parseRenderMode("Full").has_value());
+    CHECK(!rvk::parseRenderMode("trace").has_value());
+    CHECK(rvk::toString(RenderMode::Original) == "original" && rvk::toString(RenderMode::Wrapper) == "wrapper" &&
+          rvk::toString(RenderMode::Full) == "full");
+    // the backend of a session: the started render mode, trace stays trace
+    const rvk::Config plain = rvk::parseConfig("");
+    CHECK(rvk::sessionBackend(plain, RenderMode::Original) == Mode::Passthrough);
+    CHECK(rvk::sessionBackend(plain, RenderMode::Wrapper) == Mode::Vulkan);
+    CHECK(rvk::sessionBackend(plain, RenderMode::Full) == Mode::Vulkan);
+    const rvk::Config trace = rvk::parseConfig("[renderer]\nmode = \"trace\"\n");
+    CHECK(rvk::configModeLock(trace) == RenderMode::Original);
+    CHECK(rvk::sessionBackend(trace, RenderMode::Original) == Mode::Trace);
+    // restarts: only between backends
+    CHECK(!rvk::needsRestart(RenderMode::Wrapper, RenderMode::Full) && !rvk::needsRestart(RenderMode::Full, RenderMode::Wrapper));
+    CHECK(rvk::needsRestart(RenderMode::Wrapper, RenderMode::Original) && rvk::needsRestart(RenderMode::Original, RenderMode::Full));
+    CHECK(rvk::vulkanSessionMode(RenderMode::Original) == RenderMode::Wrapper);
+    CHECK(rvk::vulkanSessionMode(RenderMode::Full) == RenderMode::Full);
+}
+
+TEST(render_mode_native_plan) {
+    using rvk::RenderMode;
+    const int all = static_cast<int>(rvk::kAllSceneOpGroups);
+    // Wrapper: no take-over
+    auto p = rvk::nativePlan(RenderMode::Wrapper, false, false, false, false, all);
+    CHECK(!p.staticTake && !p.sceneTake && !p.any());
+    // Full: static + scene ops, every group, no compare
+    p = rvk::nativePlan(RenderMode::Full, false, false, false, false, all);
+    CHECK(p.staticTake && p.sceneTake && !p.staticCompare && !p.sceneCompare && p.groups == rvk::kAllSceneOpGroups);
+    // Full with the groups mask (bisecting) and compare on top
+    p = rvk::nativePlan(RenderMode::Full, false, true, false, true, 64 | 128);
+    CHECK(p.staticTake && p.sceneTake && p.staticCompare && p.sceneCompare && p.groups == (64u | 128u));
+    // Wrapper with the Debug overrides: one stage at a time
+    p = rvk::nativePlan(RenderMode::Wrapper, true, false, false, false, all);
+    CHECK(p.staticTake && !p.sceneTake);
+    p = rvk::nativePlan(RenderMode::Wrapper, false, false, true, false, 1);
+    CHECK(!p.staticTake && p.sceneTake && p.groups == 1);
+    // compare alone in Wrapper (observe, nothing dropped)
+    p = rvk::nativePlan(RenderMode::Wrapper, false, true, false, false, 0);
+    CHECK(!p.staticTake && p.staticCompare && p.any());
+    // Original never reaches a Vulkan session: it renders as Wrapper there
+    p = rvk::nativePlan(rvk::vulkanSessionMode(RenderMode::Original), false, false, false, false, all);
+    CHECK(!p.any());
 }
 
 TEST(config_trace) {

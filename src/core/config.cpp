@@ -17,6 +17,43 @@ std::string_view toString(Mode mode) {
     return "?";
 }
 
+std::string_view toString(RenderMode mode) {
+    switch (mode) {
+    case RenderMode::Original: return "original";
+    case RenderMode::Wrapper: return "wrapper";
+    case RenderMode::Full: return "full";
+    }
+    return "?";
+}
+
+std::optional<RenderMode> parseRenderMode(std::string_view text) {
+    if (text == "original" || text == "passthrough" || text == "d3d9") return RenderMode::Original;
+    if (text == "wrapper" || text == "vulkan") return RenderMode::Wrapper;
+    if (text == "full") return RenderMode::Full;
+    return std::nullopt;
+}
+
+std::optional<RenderMode> configModeLock(const Config& cfg) {
+    if (cfg.mode == Mode::Trace) return RenderMode::Original;
+    if (cfg.renderMode && *cfg.renderMode != kDefaultRenderMode) return cfg.renderMode;
+    return std::nullopt;
+}
+
+Mode sessionBackend(const Config& cfg, RenderMode started) {
+    return cfg.mode == Mode::Trace ? Mode::Trace : backendOf(started);
+}
+
+NativePlan nativePlan(RenderMode mode, bool staticOverride, bool staticCompare, bool sceneOverride, bool sceneCompare, int groups) {
+    const bool full = mode == RenderMode::Full;
+    NativePlan p;
+    p.staticTake = full || staticOverride;
+    p.staticCompare = staticCompare;
+    p.sceneTake = full || sceneOverride;
+    p.sceneCompare = sceneCompare;
+    p.groups = static_cast<std::uint32_t>(groups) & kAllSceneOpGroups;
+    return p;
+}
+
 Config parseConfig(std::string_view text, std::string* error) {
     Config cfg;
     toml::table tbl;
@@ -28,20 +65,23 @@ Config parseConfig(std::string_view text, std::string* error) {
             os << e.description() << " (line " << e.source().begin.line << ")";
             *error = os.str();
         }
+        // a broken file: the safe mode (the game's own renderer), locked like an explicit "original"
+        cfg.renderMode = RenderMode::Original;
+        cfg.mode = Mode::Passthrough;
         return cfg;
     }
 
     if (auto mode = tbl["renderer"]["mode"].value<std::string>()) {
-        if (*mode == "passthrough" || *mode == "d3d9") {
-            cfg.mode = Mode::Passthrough;
-        } else if (*mode == "trace") {
+        if (*mode == "trace") {
             cfg.mode = Mode::Trace;
-        } else if (*mode == "vulkan") {
-            cfg.mode = Mode::Vulkan;
-        } else if (error != nullptr) {
-            *error = "renderer.mode: unknown value '" + *mode + "'";
+        } else if (const auto m = parseRenderMode(*mode)) {
+            cfg.renderMode = *m;
+        } else {
+            cfg.renderMode = RenderMode::Original;
+            if (error != nullptr) *error = "renderer.mode: unknown value '" + *mode + "' (original, wrapper, full): original";
         }
     }
+    if (cfg.mode != Mode::Trace) cfg.mode = backendOf(cfg.renderMode.value_or(kDefaultRenderMode));
     cfg.logLevel = tbl["log"]["level"].value_or(cfg.logLevel);
     cfg.validation = tbl["vulkan"]["validation"].value_or(cfg.validation);
     cfg.syncValidation = tbl["vulkan"]["sync_validation"].value_or(cfg.syncValidation);
@@ -99,7 +139,7 @@ Config parseConfig(std::string_view text, std::string* error) {
 Config loadConfig(const std::filesystem::path& file, std::string* error) {
     std::ifstream in(file, std::ios::binary);
     if (!in) {
-        return {};
+        return parseConfig("", nullptr);
     }
     std::ostringstream ss;
     ss << in.rdbuf();

@@ -2,9 +2,13 @@
 # Player settings live in settings.toml next to this file: change them in the game's F11 overlay.
 
 [renderer]
-# vulkan      = the Vulkan renderer
-# passthrough = the game's own D3D9 renderer (the renderer stays inactive)
-mode = "vulkan"
+# The render mode. Normally chosen in the F11 overlay (System tab, "Render mode"; stored in settings.toml):
+#   wrapper  = the game's own rendering translated to Vulkan, with the enhancements (the default)
+#   full     = Vulkan, the renderer draws the whole frame itself from the game's data (experimental)
+#   original = the game's own Direct3D 9 renderer: no Vulkan, no enhancements, no overlay
+# "wrapper" here leaves the choice to the overlay; "full" or "original" here override it for every start.
+# (Older names: "vulkan" = wrapper, "passthrough" = original.)
+mode = "wrapper"
 
 [log]
 # rvk.log next to this file: error | warn | info | debug | trace

@@ -141,7 +141,7 @@ int detourEnumAdapterDesc(unsigned long adapter, void* desc) {
             return 1;  // bEResult_Ok, as the original always returns
         }
         spdlog::error("eCGfxAdmin::sEnumAdapterDesc: no usable Vulkan device: the game's D3D9 renderer runs this session "
-                      "(mode = passthrough)");
+                      "(renderer: mode original)");
         g_config.mode = Mode::Passthrough;
         api::setMode(Mode::Passthrough);
     }
@@ -381,9 +381,21 @@ void loadSettings() {
     if (g_config.vsync >= 0) reg.lock(*rs.vsync, g_config.vsync != 0 ? 1.0 : 2.0, "config.toml [vulkan] vsync");
     if (g_config.maxFps > 0.0) reg.lock(*rs.maxFps, g_config.maxFps, "config.toml [vulkan] max_fps");
     if (g_config.adapter >= 0) reg.lock(*rs.adapter, g_config.adapter, "config.toml [vulkan] adapter");
+    // the render mode (core/config.h): settings.toml's renderer.mode, unless config.toml's [renderer] mode is not the default
+    // (wrapper; also "trace" -> original): then that one, locked for the session
+    const auto modeLock = configModeLock(g_config);
+    if (modeLock) {
+        reg.lock(*rs.rendererMode, static_cast<double>(*modeLock),
+                 g_config.mode == Mode::Trace ? "config.toml [renderer] mode = trace" : "config.toml [renderer] mode");
+    }
     reg.markStarted();
     reg.dispatch();
     g_config.adapter = rs.adapter->asInt();
+    const auto started = static_cast<RenderMode>(rs.rendererMode->startValue());
+    g_config.mode = sessionBackend(g_config, started);
+    spdlog::info("renderer: mode {} at start ({}; backend {})", g_config.mode == Mode::Trace ? std::string_view("trace") : toString(started),
+                 modeLock ? "config.toml [renderer] mode" : rs.rendererMode->isDefault() ? "default" : "settings.toml renderer.mode",
+                 toString(g_config.mode));
     std::string values;
     for (const settings::Setting* s : reg.all()) {
         if (!s->isDefault()) values += std::format("{}{} = {}{}", values.empty() ? "" : ", ", s->key(), reg.text(*s),
@@ -399,8 +411,12 @@ void onProcessAttach(void* module) {
     std::string cfgError;
     g_config = loadConfig(paths::dataDir() / L"config.toml", &cfgError);
     log::init(paths::dataDir() / L"rvk.log", g_config.logLevel);
-    spdlog::info("risen-enhanced-graphics 0.1.0 ({}), mode = {}, {:.2f} s after process start",
-                 modulePathOf(static_cast<HMODULE>(module)), toString(g_config.mode), processUptime());
+    spdlog::info("risen-enhanced-graphics 0.1.0 ({}), config.toml mode = {}, {:.2f} s after process start",
+                 modulePathOf(static_cast<HMODULE>(module)),
+                 g_config.mode == Mode::Trace ? std::string_view("trace")
+                 : g_config.renderMode      ? toString(*g_config.renderMode)
+                                            : std::string_view("(not set)"),
+                 processUptime());
     if (!cfgError.empty()) {
         spdlog::warn("config.toml: {}", cfgError);
     }
@@ -426,7 +442,7 @@ void onProcessAttach(void* module) {
         return;
     }
     if (g_config.mode != Mode::Passthrough && !hal::initEngineAllocator()) {
-        spdlog::error("bCMemoryAdmin (SharedBase.dll) not found: the game's D3D9 renderer stays");
+        spdlog::error("bCMemoryAdmin (SharedBase.dll) not found: the game's D3D9 renderer stays (renderer: mode original)");
         g_config.mode = Mode::Passthrough;
     }
     if (!hooks::initialize()) {

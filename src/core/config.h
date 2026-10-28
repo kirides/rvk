@@ -2,21 +2,35 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace rvk {
 
-// What the proxy does with the game's graphics.
+// What the proxy does with the game's graphics (the backend of the session).
 enum class Mode {
-    Passthrough,  // the game's own D3D9 renderer, untouched (we only log and probe)
-    Trace,        // the D3D9 renderer behind our tracing HAL wrappers (M1)
-    Vulkan,       // our Vulkan HAL (M3+)
+    Passthrough,  // the game's own D3D9 renderer, untouched (we only log and probe): render mode Original
+    Trace,        // the D3D9 renderer behind our tracing HAL wrappers (M1; a developer mode outside the three render modes)
+    Vulkan,       // our Vulkan HAL (M3+): render modes Wrapper and Full
 };
 
+// The player's three render modes (setting renderer.mode, docs/PLAN.md decisions; option order = the setting's index):
+//   Original: the system d3d9 forwarded, no Vulkan, no enhancements, no overlay (backend Passthrough)
+//   Wrapper:  the D3D9 model on Vulkan + the enhancements, the engine draws the frame through the HAL (backend Vulkan)
+//   Full:     Vulkan with the native frame taking over every draw (native.static_ops + native.scene_ops, all groups)
+// Original <-> Wrapper / Full needs a restart (another backend); Wrapper <-> Full switches at a frame boundary.
+enum class RenderMode : std::uint8_t { Original = 0, Wrapper = 1, Full = 2 };
+inline constexpr RenderMode kDefaultRenderMode = RenderMode::Wrapper;  // the shipped default
+
 struct Config {
-    Mode mode = Mode::Passthrough;
+    // the session's backend: parseConfig derives it from renderMode (absent: the default's); bootstrap resolves it again
+    // from the player's renderer.mode at start (resolveStartMode)
+    Mode mode = Mode::Vulkan;
+    // [renderer] mode as written ("original" | "wrapper" | "full"; aliases "passthrough" / "d3d9" -> original, "vulkan" ->
+    // wrapper; an unknown value or a broken file -> original, the safe one); nullopt = not set, or "trace"
+    std::optional<RenderMode> renderMode;
     std::string logLevel = "info";
 
     // [vulkan]
@@ -75,5 +89,36 @@ Config parseConfig(std::string_view toml, std::string* error = nullptr);
 Config loadConfig(const std::filesystem::path& file, std::string* error = nullptr);
 
 std::string_view toString(Mode mode);
+std::string_view toString(RenderMode mode);
+// "original" / "wrapper" / "full" and the aliases ("passthrough", "d3d9", "vulkan"), case-sensitive like the TOML keys
+std::optional<RenderMode> parseRenderMode(std::string_view text);
+// the backend a render mode runs on
+constexpr Mode backendOf(RenderMode m) { return m == RenderMode::Original ? Mode::Passthrough : Mode::Vulkan; }
+// Original <-> Wrapper / Full needs a restart: they run on different backends
+constexpr bool needsRestart(RenderMode started, RenderMode requested) { return backendOf(started) != backendOf(requested); }
+
+// The start-time decision (bootstrap, after settings.toml is loaded). The player's renderer.mode (settings.toml) is the
+// source of truth; config.toml's [renderer] mode is a developer override when it is not the default (wrapper): it locks the
+// setting for the session, like [vulkan] vsync. "trace" locks it to Original (a D3D9 session).
+// configModeLock: the value config.toml forces onto renderer.mode (nullopt = the player's value applies)
+std::optional<RenderMode> configModeLock(const Config& cfg);
+// the session's backend for the render mode it starts with (trace stays trace)
+Mode sessionBackend(const Config& cfg, RenderMode started);
+// the render mode a Vulkan session applies for a requested one: Original (pending a restart) renders as Wrapper
+constexpr RenderMode vulkanSessionMode(RenderMode requested) {
+    return requested == RenderMode::Full ? RenderMode::Full : RenderMode::Wrapper;
+}
+
+// What a Vulkan session takes over natively (HalDevice::applyStaticOps): Full turns the static and the scene ops on; the
+// Debug overrides native.static_ops / native.scene_ops turn a stage on in Wrapper too (bisecting), native.scene_ops_groups
+// masks the scene ops' groups in either mode, the compare settings work on top of both.
+struct NativePlan {
+    bool staticTake = false, staticCompare = false;
+    bool sceneTake = false, sceneCompare = false;
+    std::uint32_t groups = 0;  // native.scene_ops_groups (the scene ops' group bits)
+    bool any() const { return staticTake || staticCompare || sceneTake || sceneCompare; }
+};
+inline constexpr std::uint32_t kAllSceneOpGroups = 131071;
+NativePlan nativePlan(RenderMode mode, bool staticOverride, bool staticCompare, bool sceneOverride, bool sceneCompare, int groups);
 
 }  // namespace rvk

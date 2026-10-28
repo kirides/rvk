@@ -389,3 +389,53 @@ commands = ["450: overlay open", "600: set vulkan.max_fps 30"]
     CHECK(c.commands.size() == 2);
     CHECK(c.commands[1] == "600: set vulkan.max_fps 30");
 }
+
+// renderer.mode (core/config.h RenderMode): Wrapper <-> Full live, Original <-> the others after a restart; A/B flips it;
+// config.toml's non-default mode locks it
+TEST(settings_renderer_mode) {
+    Registry reg;
+    const RendererSettings r = registerRendererSettings(reg);
+    Setting& m = *r.rendererMode;
+    CHECK(m.key() == "renderer.mode" && m.spec().tab == kTabSystem && !m.restart());
+    CHECK(m.asEnum() == "wrapper" && static_cast<RenderMode>(m.asInt()) == kDefaultRenderMode);
+    CHECK(m.spec().options.size() == 3 && m.spec().options[0] == "original" && m.spec().options[2] == "full");
+    reg.markStarted();
+    // wrapper -> full: no restart, A/B eligible
+    CHECK(reg.setText("renderer.mode", "full") == Result::Ok);
+    CHECK(m.asEnum() == "full" && !m.restartPending() && m.abEligible());
+    // -> original: restart pending (another backend); back to full / wrapper: none
+    CHECK(reg.setText("renderer.mode", "original") == Result::Ok);
+    CHECK(m.restartPending());
+    CHECK(reg.setText("renderer.mode", "wrapper") == Result::Ok);
+    CHECK(!m.restartPending());
+    // a session that started in Original: either Vulkan mode needs a restart
+    CHECK(reg.setText("renderer.mode", "original") == Result::Ok);
+    reg.markStarted();
+    CHECK(!m.restartPending());
+    CHECK(reg.setText("renderer.mode", "full") == Result::Ok && m.restartPending());
+    CHECK(reg.setText("renderer.mode", "wrapper") == Result::Ok && m.restartPending());
+    // A/B: side B = full flips with F10
+    CHECK(reg.setText("renderer.mode", "wrapper") == Result::Ok);
+    reg.markStarted();
+    reg.flipAB();
+    CHECK(reg.setText("renderer.mode", "full") == Result::Ok);
+    reg.flipAB();
+    CHECK(m.asEnum() == "wrapper");
+    reg.flipAB();
+    CHECK(m.asEnum() == "full");
+    reg.flipAB();
+    // settings.toml round trip
+    CHECK(reg.fromToml("[renderer]\nmode = \"full\"\n") && m.asEnum() == "full");
+    CHECK(reg.toToml().find("[renderer]\nmode = \"full\"") != std::string::npos);
+    // config.toml's lock (bootstrap: configModeLock): fixed, not part of A/B
+    const Config cfg = parseConfig("[renderer]\nmode = \"original\"\n");
+    const auto lock = configModeLock(cfg);
+    CHECK(lock == RenderMode::Original);
+    reg.lock(m, static_cast<double>(*lock), "config.toml [renderer] mode");
+    CHECK(m.locked() && m.asEnum() == "original" && !m.abEligible());
+    CHECK(reg.setText("renderer.mode", "wrapper") == Result::Locked);
+    reg.markStarted();
+    CHECK(sessionBackend(cfg, static_cast<RenderMode>(m.startValue())) == Mode::Passthrough);
+    // the player's own value is what settings.toml keeps
+    CHECK(reg.toToml().find("mode = \"full\"") != std::string::npos);
+}

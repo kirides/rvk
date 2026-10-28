@@ -1,5 +1,7 @@
 #include "core/settings.h"
 
+#include "core/config.h"
+
 #include <windows.h>
 
 #include <algorithm>
@@ -683,6 +685,25 @@ RendererSettings registerRendererSettings(Registry& reg) {
     });
 
     // ---- System tab ----
+    // the render mode (core/config.h RenderMode; docs/research/overlay.md 3): settings.toml is its source of truth,
+    // config.toml's [renderer] mode locks it when not the default (bootstrap). Wrapper <-> Full apply at the next frame
+    // boundary (HalDevice::applyStaticOps); Original runs on another backend: after a restart (restartGroups).
+    r.rendererMode = &reg.add({
+        .key = "renderer.mode",
+        .label = "Render mode",
+        .category = "Renderer",
+        .tab = kTabSystem,
+        .description = "Wrapper: the game's own rendering translated to Vulkan, with the enhancements (recommended). Full: the "
+                       "renderer draws the whole frame itself from the game's data (experimental; costs some processor time "
+                       "for now). Original: the game's own Direct3D 9 renderer, without Vulkan, enhancements or this menu; "
+                       "it applies after a restart. To come back from Original, delete the [renderer] lines in "
+                       "rvk\\settings.toml.",
+        .type = Type::Enum,
+        .defaultValue = static_cast<double>(kDefaultRenderMode),
+        .options = {"original", "wrapper", "full"},
+        .optionLabels = {"Original (Direct3D 9)", "Wrapper (Vulkan)", "Full (Vulkan, experimental)"},
+        .restartGroups = {0, 1, 1},
+    });
     r.toggleKey = &reg.add({
         .key = "overlay.toggle_key",
         .label = "Settings menu key",
@@ -1689,7 +1710,8 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .category = "Debug views",
         .tab = kTabDebug,
         .description = "The renderer draws the world's static meshes itself (its own shaders, the engine's buffers and material textures) "
-                       "instead of replaying the engine's solid draws. Experimental: first light of the native renderer.",
+                       "instead of replaying the engine's solid draws. Experimental: first light of the native renderer (N3, scene mirror "
+                       "driven); kept as the basis of a later optimized mode, independent of renderer.mode.",
         .type = Type::Bool,
         .defaultValue = 0,
         .flags = Flag::Debug,
@@ -1714,7 +1736,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .category = "Debug views",
         .tab = kTabDebug,
         .description = "The native opaque pass takes the sun's shadow from the renderer's own cascades, drawn from the scene mirror's static "
-                       "mesh parts (also the ones off screen), instead of the engine's shadow mask. Experimental.",
+                       "mesh parts (also the ones off screen), instead of the engine's shadow mask. Experimental (N3 path, see native.opaque).",
         .type = Type::Bool,
         .defaultValue = 0,
         .flags = Flag::Debug,
@@ -1738,7 +1760,8 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .tab = kTabDebug,
         .description = "The main view's z pre-pass and solid draws of static meshes are drawn by the renderer itself from engine data "
                        "(the engine's own shaders, constants and states composed natively); the engine's draws of those ops are dropped. "
-                       "rvk.log `native: static ops:` every 5 s.",
+                       "rvk.log `native: static ops:` every 5 s. renderer.mode = full turns it on; this override turns it on in "
+                       "Wrapper too (bisecting).",
         .type = Type::Bool,
         .defaultValue = 0,
         .flags = Flag::NoAB | Flag::Debug,
@@ -1762,7 +1785,8 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .tab = kTabDebug,
         .description = "The rest of the main view's mesh-like work (alpha and refracted mesh ops, entity overlay passes, decals, the sky, skinned actors) is drawn by the "
                        "renderer itself from engine data; the engine's draws of those ops are dropped. Groups: native.scene_ops_groups. "
-                       "rvk.log `native: scene ops` every 5 s.",
+                       "rvk.log `native: scene ops` every 5 s. renderer.mode = full turns it on; this override turns it on in Wrapper "
+                       "too (bisecting).",
         .type = Type::Bool,
         .defaultValue = 0,
         .flags = Flag::NoAB | Flag::Debug,
@@ -1783,7 +1807,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .label = "Native frame: scene op groups",
         .category = "Debug views",
         .tab = kTabDebug,
-        .description = "Bit mask of the scene ops' groups: 1 alpha / refracted mesh ops, 2 entity overlay passes (also of the static ops "
+        .description = "Bit mask of the scene ops' groups (in Full mode and with native.scene_ops): 1 alpha / refracted mesh ops, 2 entity overlay passes (also of the static ops "
                        "while scene ops are on), 4 decals (eCDecalAdmin::RenderDecals), 8 the sky dome op (stars, sun, moon, dome), 16 the opaque "
                        "billboards (eCBillboardAdmin::RenderBillboards), 32 the sky environment cube's faces, 64 the skinned actors' ops "
                        "(eCRenderContextAnimation2: bones, morphs, body parts, overlays), 128 the SpeedTree ops (branches, fronds, leaves) and "

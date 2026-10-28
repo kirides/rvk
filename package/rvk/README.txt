@@ -20,7 +20,10 @@ QUIRKS
   - Ray tracing options need a GPU with ray tracing support; otherwise they are greyed out.
   - The first start (and the first visit to a coast with the enhanced ocean) can take longer: caches are built
     in rvk\cache.
-  - To play with the game's own D3D9 renderer, set mode = "passthrough" in rvk\config.toml.
+  - Render mode (System tab): Wrapper (default: the game's rendering on Vulkan + the enhancements), Full
+    (experimental: the renderer draws the whole frame itself; costs some processor time for now) or Original
+    (the game's own D3D9 renderer, no enhancements, no F11 menu; after a restart). To leave Original, delete
+    the [renderer] lines in rvk\settings.toml (or set mode = "wrapper" there).
 
 CREDITS
   High fps gameplay fixes (falling, climbing, thunder; System tab, "High Fps compatibility (Vaana)"):
