@@ -386,6 +386,9 @@ TEXCOORD6 f2 @0x34 (lightmap uv).
 
 ## 10. Precipitation (rain, snow: `eCPrecipitation_PS`)
 
+(Corrected by README.md 14 [C, checked]: the object at `PS+0x108` is an `eCSkyObject` (vtable 0x989f28) whose billboard records
+`Update` writes from the drops; it draws only while records exist.)
+
 [C] `RequestRenderOps` 0x719b40: on `mask & 4` an op on the **post-alpha list `+0x1548`** (after `DoEndRenderAlpha`), desc 0,
 fade 1, key 0. RenderAlpha 0x719b00 (= `eCPrecipitation_PS::RenderAlpha` 0x71d1a0 inlined): if `PS+0x18 & 1` [I: enabled],
 the embedded dynamic primitive `PS+0x108` (vtable `+0x10` = render with a matrix; created in `Create` 0x719e20 as

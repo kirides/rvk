@@ -108,7 +108,7 @@ Each stage behind a `native.*` setting (default off), A/B against the engine pat
 | N5.3 skinned actors | palette + morphs from the actor (D 1), body parts | | hero_idle / pub_idle (done: section 10) |
 | N5.4 SpeedTree, billboards, vegetation | global wind, batches, the 1000-instance grass ring | | jungle / forest spots (done: section 11) |
 | N5.5 shadows | the shadow views' z ops: cascades, terrain VSM, point-atlas cells (done: section 12); N5.5c the `post_SSM` mask chain (SSAO, cascades, VSSM, blur; the PSSM point-light pass stays the engine's), its depth copy, the terrain map's Blur7H / V, the shadow views' setup (fit + camera compared, target / viewport / clear / reset taken over) (done: section 13) | the engine's shadow-view and mask draws | compare + same-frame switch (done) |
-| N5.6 particles, strips, streaks, precipitation | CPU vertex data from the engine's buffers | | rain / fire spots |
+| N5.6 particles, strips, streaks, precipitation | the particle quads (UpdateVertices re-done natively), the strips' vertex fill, the rain's billboard records from the drops; light streaks never met (done: section 14) | the engine's particle / strip / rain draws | compare + same-frame switch at fire / rain / spell spots (done) |
 | N5.7 post + GUI | the 13 effect graphs in GLSL (DoF default), sprite batcher | effect runtime path | refcompare all spots |
 | then | own modes, one at a time: mirror-driven lists (the current N3.3 code), GPU culling, merged indirect draws, the ubershader, bindless materials, RT consumers from the native frame | | A/B against the copy |
 
@@ -1148,3 +1148,149 @@ shadow lands in the mask's green channel.
 **Not yet / open**: the PSSM pass and the atlas's own target / clear / cell cameras (composed by nobody yet: they occur only with
 modded lights); the terrain map's fit (UpdateShadowMaps' re-aim: its light view / box are read, the camera from them is composed); the
 first frame's working-buffer creation; as before the engine's code still runs for every taken-over unit.
+
+## 14. N5.6 result: particles, strips, light streaks, precipitation (2026-10-28)
+
+Groups **4096** (particle ops), **8192** (strip + light streak ops) and **16384** (the precipitation op of the late list +0x1548) of
+`native.scene_ops_groups` (behind `native.scene_ops` / `native.scene_ops_compare` as in sections 8 - 13; default mask now 32767).
+Code: `src/native/static_ops_fx.cpp` (+ the shared draw path of `static_ops.cpp`: non-indexed draws, the particle shader's global pool in
+`constantsInto`, a draw-tag override), the pure rules in `static_compose.*` (`particleBlendMode`, `particleTile`, `particleDepthOrder`,
+`stripAlpha`; test `particle_rules_follow_update_vertices`), the spell scenario `mods/rvk_spells`. Read in the capstone disassembly of the
+test copy's Engine.dll (helper `B:\DevDrive\risen-ghidra\n56\edis.py`: exports + IAT names) and the dumps frameD_dump1..3. All [C] unless
+marked; "checked" = held in the compare runs below. **Every kind's CPU vertex data is generated natively** (particles from the particle
+array, strips from the segments, rain from the drop records) and compared byte for byte with the engine's dynamic buffer at its draw.
+
+**Which kinds the alpha / late lists hold** (op tap, 13 spot visits + the savegame): Alpha/Mesh, Alpha/Animation, Alpha/Particle (10 - 37
+ops per view), Alpha/Strip (always 0 draws, below), Late/Precipitation, Late/Skydome (the empty RenderAlpha). No LightStreaks and no
+blended Billboard op occurred anywhere. After N5.6 every op kind of the main view's lists is composed; light streaks and blended
+billboards are composed by nobody (never met).
+
+**Particles [C, checked]** (`eCParticleRenderContext` slot 0x5d3360 -> `eCParticle_PS::Render` 0x5e0080 -> `RenderVertices` 0x5d56a0):
+* Render: an instanced emitter (`PS +0x29d`) draws its master's vertices (`eCParticleModule::GetMasterInstance`); with no live particle
+  (`PS +0x390 == 0`) the emitter is simulated inside the slot (vtable +0x248) first. Both are left to the engine (counted): instanced
+  emitters never occurred; the "no live particle" ops never drew in any run (counted per op: 0 of ~23 k).
+* `UpdateVertices` 0x5d58b0, once per timer tick (`eCTimer +0x50` vs `PS +0x3b0`; the tick advanced every frame in every run, so the
+  "already updated" path that reads the engine's bytes back was never taken): `DepthSortParticles` 0x5d8680 (axis = column 2 of the
+  application camera's matrix +0x10, times the entity matrix for entity-relative emitters; the engine's qsort 0x4a4aa0 with the
+  comparator 0x5d8780 = `((ay y + ax x) + az z) + aw`, far first), `CreateVertices` (VB `capacity +0x394 x 0xc0` once, static IB),
+  lock DISCARD, per particle (0xd0 bytes) unless `+0xb8 > +0xbc`, `+0xc8 & 1`, or FUN_1801accf0 (alpha `+0x90` / `+0xb0` <= 0, size
+  `+0x60` or tint scale `+0x6c` zero): the basis by orientation `PS +0x170` (0 camera rows of `ms_pActiveCamera +0x20` inverted; 1
+  velocity `+0x18 x +0x24` crossed with the look row; 2 / 4 a fixed axis `+0x178` / the velocity with R = (-L.z, 0, L.x) or (0, -L.z,
+  L.y) when L equals GetUp; 3 the negated axis), `+0x198` axis in entity space, entity-relative (`PS +0xb0 == 1`) through the inverted
+  entity matrix without translation, the half sizes `((s.y +0x70) +0x418)` / `((s.x +0x6c) +0x418)` with pivots `+0x184 / +0x188`,
+  three rotations (`+0x48` about R, `+0x4c` about U, `+0x50` about L) applied to corners, normals and L, the facing flip of L
+  (`((Lw.y n.y + Lw.x n.x) + Lw.z n.z) < 0`), normal modes `+0x2b0` (0 / 1 all = L, 2 corner + L, 3 position - emitter), pinned corners
+  2 / 3 (`+0x200`), sprite frames (tiles `+0x228 + 1` x `+0x22c + 1`, `+0x23b` row-major, `+0x239` blending two frames, the first frame's
+  u0 / v0 plus a full texel `1 / image +0x58 / +0x5c`), COLOR0 = (age ratio, |dot|, max(dot, 0), 1 - frame fraction) unclamped,
+  COLOR1 = colour x tint clamped (SharedBase's `bCFloatAlphaColor::Clamp`, `bCByteAlphaColor`, `GetColor_ARGB_8888`); the primitive
+  count 2 x quads, `return primitives != 0`. Re-done natively with the same SharedBase vector / matrix functions the engine calls
+  (`GetScaled`, `SetCrossProduct`, `Normalize`, `TransformDirection`, `bCMatrix3::SetToRotation`, ...; 22 bound by decorated name) and
+  the inline float arithmetic in the disassembly's order: **bit-equal in every compared draw**.
+* `ApplyRenderStates` 0x5d6e50: shader = material `+0x450` `+0x70` when it is an `eCShaderParticle` (vtable 0x9b6d38); the particle
+  material's samplers (`+0x448`: `eCParticleMaterialSimple` 0x9b7160 / `BlendSubdivisions` 0x9b7170, SetImage -> `SetImageResource`
+  of `+0x10` (+ `+0x18`)) get the image `+0x440`; BlendMode from `+0x220` (1 -> 2, 2 -> 3, 3 -> 5, 4 -> 4, 5 -> 6, 6 -> 7, 7 -> 8, else
+  AlphaBlend while the fade as a double is < 0.9: 0.9f itself is below it), MaskReference `+0x299 ? +0x29a : 0`, EnableFog
+  (shader `+0x2b0`) = `!PS +0x298`, the visual solid / no culling / depth test `+0x29b ? LessEqual : Always` / write `+0x29c`,
+  SetGlobalAlpha(fade) = particle pool c34.w, SetWorldMatrix = c31..c33 (identity for world emitters, the entity's matrix for
+  entity-relative ones); for blend modes other than 1 `eCDX9Device::SetMasterFogging(1)` (FOGENABLE 0).
+* `eCShaderParticle` [C, checked]: eCShaderBase's SetSwitch / ExecutePass / OnGetPasses / ExecuteShaderConstants, HasOpacity and
+  IsRefracted false, its own global pool `ms_pGlobalShaderConstants` (decoded from SetGlobalAlpha 0x6d5fc2: c31..c60), VS pool c57..c76,
+  PS c6..c13, samplers from s9; one version object (v 2 only, vtable 0x9d99f0): GetPasses 0x6d6d50 = one pass, key = EnableFog (+ with an
+  illumination: ambient 2, sun 4, lights << 4), Execute 0x6d6c30 = VS element `+0x1b0 + 16 ((dir + 2 ambient) 5 + lights)`, PS `+0x2f0
+  + 16 fog`, the light constants 0x6d7020 (nothing without illumination), the shared state function 0x6d9740 (= the sky dome's,
+  `sc::skyDomeStates` with GetGlobalAlpha). Lit emitters (`+0x2b0 != 0`: RenderPasses passes the entity's illumination) never occurred
+  (the light constants are not composed: left to the engine if met).
+* Draw tag: eCParticle_PS::Render's (TagScope Particle, the property set, the executing op, entity `PS +0x10`), set on our draws.
+
+**Strips [C]** (`eCStripRenderContext` slot 0x701120 = `UpdateVertices` 0x6fd960 + `RenderVertices` 0x6fd800 when `PS +0xe8 >= 2`
+segments; not through `eCStrip_PS::Render`, so the draws keep the slot's tag): 2 vertices (0x20) per segment (0x24: positions `+0` /
+`+0xc`, uv steps `+0x18 / PS +0x108`, `+0x1c / PS +0x10c` accumulated after use, alpha `+0x20`), colours lerped from `PS +0x20 / +0x38`
+to `+0x40 / +0x58` through SharedBase's bCFloatAlphaColor functions; alpha = fade x clamp(age `+0x134` / fade-in `+0xa8`) unless `+0xa0`;
+world identity, `GetPasses(shader, PS +0xa4, null, 0, false, 0)`, a **non-indexed** triangle strip of 2 n - 2 primitives (the draw path
+now supports non-indexed draws). Composed natively, **never drawn by the engine** at any sampled place: every strip with >= 2 segments
+had a material without a shader (`+0x120 +0x70` null; the tap's "nothing to draw"), so the generator is unverified in game.
+
+**Light streaks [C]** (`eCLightStreaks_PS::Render` 0x5c4ae0: static VB / IB from CreateBuffers, `eCShaderLightStreaks` 0x9acd68 with
+its own version 0x9d96f8: a directional pass + one per point light, global pool 0xc62980, time c38.y): never met; left to the engine.
+
+**Precipitation [C, checked]** (slot 0x719b00 = `eCPrecipitation_PS::RenderAlpha` 0x71d1a0 inlined): when `PS +0x18 & 1`, the embedded
+object at `PS +0x108` is an **`eCSkyObject`** (vtable 0x989f28, created with dynamic 1, LessEqual, write off) rendered with the identity
+world: the sky objects' Render / FillVertexBuffer of N5.2c (corrects D 10's "dynamic primitive (1, 4, 1, 0)" and "every frame even when
+dry": the draw needs records). Its billboard array (sky +0x10) is written by `eCPrecipitation_PS::Update` 0x71a4d0 in OnProcess, before
+the frame's rendering: per live drop (0x34 at `PS +0xd8`, count `+0xe0`, dead byte `+0x1d`) in order, D = the direction `+0x34` through
+the application camera's matrix normalised, k = `|D.xy| x +0x54 + 1`, Rt = (0, 0, 1) x D, V = (0, 0, 1) x Rt (normalised), record =
+(position jittered by SharedBase `g_sinf` / `g_cosf` when `+0x68` and `+0x6c` > 0, size.x Rt.xy, size.y V.xy (x k while falling: timer
+`+0x28 == 0`), 0xffffffff, tile uv + 1 / tiles `+0x58 / +0x5c`); the fill covers the drops counted at Update's start (spawned drops
+are appended), primitive count = 2 x records. The composition re-does the records from the drops at the slot's entry (**equal to the
+engine's array in 4,698 of 4,698 ops**) and expands them with `sc::skyBillboardVertices`. Shader = the code-built eCShaderDefault
+(BlendMode 2, TransformationType 7, DisableLighting). Drawn only while records exist (0 draws when dry or with the clock frozen).
+
+**0-draw ops, checked at run time**: particle ops with live particles but no quad built (UpdateVertices returns primitives != 0):
+composed as 0 draws, the engine drew none (81 + 10 + 25 + 22 + 71 ops in the runs below); particle ops without a live particle at the
+entry: left to the engine, it drew none of them; strips: no shader; precipitation: no records.
+
+**Verification** (compare = every field class of sections 7 - 13 incl. the CPU vertex bytes and bool / int registers; draws equal /
+compared, 0 mismatches everywhere; "left" = left to the engine: buffers not created yet (an emitter's first frame), no live particle at the
+entry, a precipitation permutation not compiled at the world's first frame):
+
+| run | particle draws | precipitation draws | other |
+|---|---|---|---|
+| compare, 8 spots (pub_interior, harbour_night, lava_cave, monastery_hall, beach_rain, waterfall_jungle, hero_idle, pub_idle) | 111,030 / 111,030 | 3,835 / 3,835 | strips 16,442 ops composed, 0 drawn; left 668 + 5,303 / 1 |
+| compare, beach_night_storm + beach_rain (clock running at the storm) | 38,855 / 38,855 | 4,696 / 4,696 | |
+| compare, savegame Risen_Save_0009 (`rvk_perfsave` hold 30) | 6,977 / 6,977 | 565 / 565 | |
+| compare, `rvk_spells` (fireball / frost magic balls, shots, impacts, effects at night) | 80,565 / 80,565 | 2,830 / 2,830 | orientation 3 only here (3,261 ops) |
+| compare, the storm + rain spots with the native rain records | 37,849 / 37,849 | 4,698 / 4,698 | records 4,698 / 4,698 equal |
+| take-over + compare, 7 spots (incl. beach_night_storm, hero_idle), **validation on** (0 messages) | 107,044 / 107,044; own 107,044 equal | 3,470 / 3,470; own 3,470 equal | |
+| take-over + compare, pub_interior + beach_night_storm + lava_cave, **sync validation** (0 messages, no SYNC- hazard) | 34,560 / 34,560 | 2,669 / 2,669 | |
+| take-over + compare, every group (default mask 32767), beach_night_storm / beach_rain / pub_interior / hero_idle, **validation on** (0) | 47,930 / 47,930; own equal | 3,933 / 3,933; own equal; records 3,933 / 3,933 | all groups of sections 8 - 13 equal (e.g. trees 969,484, shadow views 300,366) |
+| take-over + compare, every group, savegame, **validation on** (0) | 6,221 / 6,221; own equal | 247 / 247; records 247 / 247 | all groups equal |
+
+Statistics (the 8-spot run): 112,970 particle ops, 1.16 M quads, orientation 0 43,251 / 1 25,304 / 2 38,491 / 3 0 / 4 0, world 44,409 /
+entity-relative 62,637, frame blending 25,553, lit 0, instanced emitters 0; 10.8 M rain drops in 5,531 precipitation ops.
+
+**Images** (`water-compare.ps1`, water off; mean |d| 8-bit / share of pixels with a channel |d| > 32; engine A + take-over
+`out\water\20261028-053004`, engine B `20261028-053421`):
+
+| spot | A vs take-over | A vs B (noise) | B vs take-over |
+|---|---|---|---|
+| pub_interior (frozen) | 0.71 / 0.003 % | 0.47 / 0.003 % | 0.70 / 0.001 % |
+| lava_cave (frozen) | 1.96 / 0.554 % | 2.32 / 0.647 % | 0.84 / 0.017 % |
+| harbour_night (frozen) | 0.83 / 0.072 % | 0.57 / 0.037 % | 0.60 / 0.058 % |
+| beach_night_storm (rain, clock running) | 2.03 / 0.938 % | 1.91 / 0.701 % | 1.90 / 0.940 % |
+| hero_idle (clock running) | 2.95 / 2.270 % | 2.63 / 1.570 % | 2.83 / 1.627 % |
+
+`shot-reviewer` (x8 diff maps, crops of flames / torches / rain, `out/n56/review`): no missing, extra, stretched or mis-sorted sprite,
+no blend, colour or sprite-frame difference; the candle and torch flames differ in shape between all three runs (the engine's flame
+animation: A vs B differs the same way), the rain streaks match in density, angle and brightness, the storm's splash mist moves between
+runs; small whole-image offsets (storm +4 %, hero_idle -1.5 levels) not attributable to particles (the next run's native-AA pair at the
+storm went the other way). **Motion** (8 frames 1 apart): at the frozen spots the particles stand still (pub_interior and harbour_night
+0.00 between consecutive frames in both runs: the particle simulation runs on the game time), lava_cave's first frames settle the same
+way in both (1.84 -> 0.43 vs 1.86 -> 0.34), the rain moves 0.34 - 0.55 per frame in both, hero_idle 0.26 - 0.42 in both; no flicker or
+popping. **Same-frame switch** (take-over on at frame 4660 at the frozen pub_interior, pictures 4600 / 4620 / 4640 / 4680 / 4700 / 4720):
+all 22,400 8x8 blocks static; mean |d| 0.016 before, **0.016 across**, 0.017 after. Savegame switched at 2400 (`-MaxFps 60`): on the 3,529
+blocks static in all four 20-frame same-mode pairs 0.065 before, **0.046 across**, 0.055 after, 0 blocks above 1.0.
+
+**Consumers**: `upscale.mode=native_aa` + `upscale.reactive` (FSR's reactive mask from the scene copied at BeforeAlpha: our particle and
+rain draws keep the engine's position, so the copy is taken at the same point) + `upscale.object_motion=characters`, savegame switched
+at 2400: frames upscaled at the same rate before and after (~300 per 5 s), object motion 22 tracked draws and ~13 k captures per 10 s
+throughout; native-AA engine vs take-over at beach_night_storm / lava_cave: 1.50 / 0.495 %, 1.38 / 0.116 % (below the non-AA engine noise
+there). The draw kinds stay Particle / Precipitation (compared as the Tag class).
+
+**Cost** (savegame, `-Exe RisenTest.exe -Vsync off -Perf`, `rvk_perfsave` hold 40, scene ops taken over, groups 4095 vs 32767, machine
+idle: no process above 10 % of a core): GPU 1.50 - 1.51 vs 1.47 ms; CPU engine + HAL 6.90 - 6.93 vs 7.01 - 7.02 ms (p50 frame 7.60 - 7.70 vs
+7.76 - 7.77 ms): **about +0.1 ms** for ~35 particle ops per frame (the copy + sort of the particle array and the SharedBase calls per
+particle; the engine's own UpdateVertices still runs).
+
+Engine rules newly learned [C, checked]: particle vertices are built once per timer tick inside the render slot, sorted in place by an
+axis from the application camera; the frame blend's second uv set stays (0, 0, 1, 1) without blending, only u0 / v0 get the texel
+offset; COLOR0 carries age, facing and frame fraction for the shader, COLOR1 the clamped colour; the 0.9 fade threshold is a double
+compare; particles use eCShaderParticle with one version (v 2), its own c31..c60 pool and the sky dome's state function, and switch the
+device's fog off for every blend mode but Masked; emitters with no live particle simulate inside the render slot; the strip slot calls
+UpdateVertices / RenderVertices directly (strips are untagged) and strips draw non-indexed; the rain is an eCSkyObject whose records
+Update writes from the drops in OnProcess, drawn only while records exist; at frozen game time particles and rain stand still.
+
+**Not yet / open**: strips (composed, the engine drew none: no strip with a shader met), light streaks, lit and instanced particle
+emitters, blended billboard ops (alpha list) - all never met; the lightning flash's look in the take-over not judged (no flash in its bursts); as
+before the engine's code still runs for every taken-over op. Main-view draws still made by the engine after N5.6: the post_SSM PSSM
+point-light pass (only with lights that cast shadows), the post-processing chain (DoF default: 19 jobs), the overlay effect, the GUI;
+plus ops left by rule (first frames, not-yet-compiled permutations, the kinds above that never occurred).
