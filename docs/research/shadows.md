@@ -123,6 +123,12 @@ term alone).
 Tooling: `scripts/shadow-compare.ps1` (engine vs enhanced at rvkcompare spots; the explicit spots `shadow_inland_*` walk from
 the beach towards the cliff), rvk.log `enh: shadows: ...`, `engine: shadow cascades: ...`.
 
+**Regression and fix (2026-10-28 / 29, docs/research/engine-frame/shadow-bug.md):** from d120038 (reversed depth) the mask
+triangle's vertex shader read `pc.draw.posFix.zw` from the `ShadowBlock` (a replaced draw's block, not a DrawBlock), the triangle was
+clipped and the mask drew nothing = no enhanced sun shadows. Fixed by a `depthRemap` field in `ShadowBlock` (shared GLSL declaration
+`shaders/shadows/shadow_block.glsl`; rvk_tests `shadows_block_glsl_matches_cpp`). A replacer's own block must carry everything its
+shaders read from `pc.draw`.
+
 ## 5. Results (2026-10-22, 1600x900, AMD test machine)
 
 * Splits and texels as computed (rvk.log `enh: shadows: mask pass ...`): game 1012 / 2230 / 7500, 3.6 / 7.9 / 26.7;
