@@ -110,13 +110,14 @@ Each stage behind a `native.*` setting (default off), A/B against the engine pat
 | N5.5 shadows | the shadow views' z ops: cascades, terrain VSM, point-atlas cells (done: section 12); N5.5c the `post_SSM` mask chain (SSAO, cascades, VSSM, blur; the PSSM point-light pass stays the engine's), its depth copy, the terrain map's Blur7H / V, the shadow views' setup (fit + camera compared, target / viewport / clear / reset taken over) (done: section 13) | the engine's shadow-view and mask draws | compare + same-frame switch (done) |
 | N5.6 particles, strips, streaks, precipitation | the particle quads (UpdateVertices re-done natively), the strips' vertex fill, the rain's billboard records from the drops; light streaks never met (done: section 14) | the engine's particle / strip / rain draws | compare + same-frame switch at fire / rain / spell spots (done) |
 | N5.7 post + GUI | every effect filter job of the graphs that run (DoF 19 draws, HDRI 14, the OverlayMovieStrips overlay), composed with the semantic parameters natively; the sprite batcher's batches + vertex / index data (done: section 15) | the engine's post and GUI draws | compare + same-frame switch at spots, savegame, menus, loading, native AA / quality (done) |
+| N5.8 leftovers + completeness proof | a coverage counter for every device draw (who issued it, the reason it stayed), the PSSM point-light pass and the point-light atlas's setup, the never-met kinds forced by a scenario (lit / instanced emitters, alpha billboards, strips, light streaks), the unreachable ones named (done: sections 16, 17) | the last engine draws of the main frame | coverage 99.96 - 99.99 % ours in every run, compare + same-frame switches, validation (done) |
 | then | own modes, one at a time: mirror-driven lists (the current N3.3 code), GPU culling, merged indirect draws, the ubershader, bindless materials, RT consumers from the native frame | | A/B against the copy |
 
 ## 5. Open across slices
 
 Request bit 0x200 (blended terrain layers in the solid list), the shader clock (game vs real time), masked materials when the z pre-pass
-is off, the PSSM channel mapping (dynamic CastShadows lights: green, section 13; static lights not met), actor LOD (`ActorInstance +0x250`) writer, SpeedTree instancing mode (`admin +0x320`: hardware in every run, section 11), which overlay
-effect makes the 1-draw `Post{Post(1)}` (answered: OverlayMovieStrips, section 15; who starts it is open), module `Process` order (weather before illumination?); the slices' own section 6 / 7 lists.
+is off, the PSSM channel mapping (dynamic CastShadows lights: green, section 13; static lights met in N5.8: `Default_CrystalLight_Blue` / `_Red`, 10 cells per mask composed and equal, their colour flags from ShadowMaskIndex, section 16; the point-light atlas met, its setup composed), actor LOD (`ActorInstance +0x250`) writer, SpeedTree instancing mode (`admin +0x320`: hardware in every run, section 11), which overlay
+effect makes the 1-draw `Post{Post(1)}` (answered: OverlayMovieStrips, section 15; who starts it is open), module `Process` order (weather before illumination?); after N5.8 also: the "after a dropped draw" issue model for permutations the engine compiles inside the draw (section 16), OverlayHit's trigger, the debug list; the slices' own section 6 / 7 lists.
 
 ## 6. N5.0 result: the op tap (2026-10-27)
 
@@ -1445,4 +1446,210 @@ shadows, section 13); the point-light atlas's own target / clear (not draws); op
 not-yet-compiled permutations (compiled by the engine at that draw), particle ops without a live particle at the entry, VIEWPROJ /
 INVVIEWPROJ parameters; and the kinds never met: light streaks, strips with a shader, lit / instanced particle emitters, blended billboard
 ops, the other overlay effects' copies, sorted sprite flushes, the debug list, the item / character preview view (`eCRenderSystemAdmin::
-RenderEntity`, View::Preview) [I: not measured in these runs].
+RenderEntity`, View::Preview) [I: not measured in these runs]. **Superseded by N5.8**: the PSSM pass and the atlas's setup are taken over,
+the never-met kinds were met or proven unreachable, and the leftovers are counted per reason: sections 16 (result) and 17 (status of every
+frame element).
+
+## 16. N5.8 result: copy leftovers and the completeness proof (2026-10-28)
+
+Three slices (commits 892766b N5.8a coverage, 33075eb N5.8b PSSM + atlas setup, 33fab94 N5.8c rare kinds + `rvk_rare`): a counter that
+accounts for every draw the device sees, the two engine passes N5.7 left (group 1024's PSSM point-light pass, group 2048's point-light
+atlas setup), and the kinds no earlier run met, forced by the new scenario `rvk_rare` or shown unreachable. All [C] unless marked;
+"checked" = held in the runs below (`out/n58/*.log`).
+
+**The coverage counter [checked].** `src/native/coverage.{h,cpp}` = `native::Coverage` (pure; test
+`native_coverage_counts_by_source_and_reason`). Every draw that reaches the device (the frame tap's `d3d9::DrawTap`, start of
+`prepareDraw`; the tap is on whenever any native setting is) is counted by who issued it: **ours** (a native unit's own draw),
+**replaced** (an engine draw dropped for ours: not a draw of the frame) or **the engine's** with the reason it stayed; keyed view x pass
+x draw kind x reason. StaticOps / EffectOps report why an op / unit was left (`leftReason`): "<group>: group off", "<group>: composed,
+compare only", "<group>: <skip reason>" (permutation not compiled, buffers not created yet, an instanced emitter, ...), "no group
+composes <kind> ops of the <list> list", effect units "<unit>: <skip>", and for draws outside any unit "shadow mask: outside the units",
+"post chain: outside the units", "GUI: outside a sprite flush", "a draw of the view outside every op / native unit", "outside every
+native unit". rvk.log: `native: coverage (5 s): N draws: ours a (x %), engine b (y %); engine draws replaced by ours r`, a `by
+view/pass (ours / engine)` line and one `engine, <reason>: n (%): view/pass/kind ...` line per reason; `native: coverage (run)` at the
+end; with `-LogFrame N` the same for that frame (`native: coverage (frame N)`). In every take-over run below ours == replaced in every
+window (each own draw replaces exactly one engine draw).
+
+**Coverage per run [checked]** (every group taken over: `native.static_ops=true`, `native.scene_ops=true`, groups default 131071):
+
+| run | draws | ours | engine draws | engine reasons |
+|---|---|---|---|---|
+| 4 rvkcompare spots (pub_interior, jungle, harbour_night, lava_cave; actors) | 5,379,290 | 99.979 % | 1,129 | permutations not compiled (static, trees, shadow views, actors, vegetation, alpha meshes, decals, precipitation), particle buffers not created yet, sky cube buffers not created yet, 1 billboard queue "unreadable" |
+| savegame Risen_Save_0009 (`rvk_perfsave` hold 30) | 2,917,901 | 99.976 % | 688 | same classes; the last windows 0 / 1 / 0 engine draws per 5 s (frame 2600: 999 of 999 ours) |
+| `rvk_menufps` (world, ESC menu, character screen, 3 quick loads) | 4,106,114 | 99.981 % | 779 | same; ESC menu windows 100.000 %, character screen 99.999 % / 100.000 % (GUI 31,494 draws ours) |
+| `rvk_spells` | 4,306,599 | 99.983 % | 721 | same + particle buffers not created yet 20 (new emitters' first frame) |
+| rvkcompare beach_night_storm, beach_rain, hero_idle, pub_interior (actors) | 4,033,359 | 99.984 % | 634 | same |
+| `rvk_pointshadow` + sync validation | 1,973,796 | 99.960 % | 790 | same |
+| `rvk_rare` (every rare kind), validation | 7,360,691 | 99.990 % | 753 | same |
+
+The engine's share is the first world window after a load (the largest 5-s counts are identical in every run: static 180, trees 129,
+shadow views 126, actors 40, vegetation 28): the permutations the engine compiles on demand at that draw; after it 0 - 20 per 5 s (new
+emitters' first frame, the sky cube's first face, streaming meshes).
+
+**The leftovers and why they stay.**
+
+| leftover | why |
+|---|---|
+| permutation not compiled (all op groups) | the engine compiles the shader permutation inside that very draw (the eCShaderVersion element is missing at the op's entry and created by ExecutePass); composing it ourselves would mean triggering the engine's compile (a shader pool miss writes `ShaderMaterialPool_User.smp`: hard rule 1) or composing after the engine's own code ran (the device state / pools would no longer be the op entry's). The next frame composes it. **A sound alternative identified, not built**: compose at the engine's first draw of such an op (everything exists then) and issue ours right after the dropped draw (needs a Device hook "after a dropped draw"); deferred, it changes the issue model of every group |
+| buffers not created yet (particles, sky cube / dome first face, strip first frame) | the emitter's VB is created by UpdateVertices inside the slot; the composition takes the engine's buffer / visual for the draw it compares, created inside the very slot |
+| no live particle at the entry (`Simulated`) | the emitter is simulated inside the slot (vtable +0x248) before its draw; re-doing it would disturb the engine's random generator state; in every run the engine drew none of those ops (counted per op: 0 drew) |
+| instanced emitter before its master exists | 36 ops in `rvk_rare`: GetMasterInstance creates the master inside the slot |
+| billboard queue "unreadable" | 1 per run: one queue read of one frame (as in section 9), not investigated |
+| copies, not draws | the post chain's eCImageFilterCopy without input (OverlayRadialBlur's copy, CopyCurrentRTToImage) stays the engine's HAL copy (`copies in the post chain left to the engine`: 15 / 32 per 5 s while RadialBlur ran) |
+
+**The PSSM point-light pass (group 1024) [C, checked].** `eCImageFilterShadowMask::OnUpdateOutput` 0x668560, after its ExecuteEffect
+units: if the mask's packed maps exist (`+0x128`), SetTechinque("PSSM", with "_Low" without HighQuality `+0x114`) at 0x669341 (string
+0x8f9074); ViewProj = the app camera's P (`+0x50`) `*=` V (`+0x10`); TexViewProj = identity with _11 0.5, _22 -0.5, _33 1, _41 / _42 =
+0.5 / w + 0.5, 0.5 / h + 0.5 (the viewport GetViewport returns = the mask's target), _43 0, `*=` ViewProj. Per packed map (0xb0 each, count
+`+0x130`) with cells (`+0x68`, 0x120 each, count `+0x70`): DizzerKernelSize = 2 (0x9f16f8) / size (`+0xc`), ShadowTexture = map `+0x18`,
+PCFFilterOffset = (-0.5, -0.5, 0.5, 0.5) / size, PCFFilterScale = (size, size).
+* `UpdatePackedShadowMapVisual` 0x669e00 (<= 48 cells; the visual `+0x138`: VB 240 x 0x50 dynamic, declaration POSITION f3, COLOR0,
+  TEXCOORD0..3 f4; one DISCARD lock): per cell 5 vertices = the NDC far corners (-1,1,1) (1,1,1) (1,-1,1) (-1,-1,1) (Engine.dll data
+  0x9f1bc0 / 0x9f1d30 / 0x9f1c20) through `bCVector::GetTransformed` of the inverted cell `+0x90`, the apex = GetInverted(cell `+0x10`)
+  row 3 (the light), COLOR0 = `~`cell `+0x11c`, TEXCOORD0..3 = cell `+0xd0` `*=` the depth-to-world matrix (inv(V) inv(diag(P11, P22,
+  1)) scale(far)). Static IB 18 x u32: (0,1,3) (3,1,2) (4,1,0) (4,2,1) (4,3,2) (4,0,3); record: indexed list, 6 primitives, cells x 5
+  vertices, base 0.
+* The loop: UpdateEffect (`+0x180`), BeginEffectTechnique (`+0x198`: OnSetParams); per cell `bCFrustum::SetFrustum(cell +0x90)` +
+  Intersects of the camera's near sphere (radius cam `+0xbc` / g_cosf(cam `+0xd4`), centre cam `+0x90`); per pass SetMasterStencilTesting(2,
+  data) (fail / zfail / pass KEEP, func ALWAYS, ref 0, masks `~0` per cell; pass 0 INCR, pass 1 DECR into zfail when the sphere meets
+  the frustum, else into pass; pass 2 ZERO everywhere with NOTEQUAL), ExecuteEffectPass, the visual's cull / depth func (2 / 4, 3 / 4, 1 / 8),
+  the primitive with base vertex 5 c (reset to 0 before the loop); EndEffectTechnique. **3 passes x cells draws.**
+* Composed at UpdatePackedShadowMapVisual's return (new detour; `effect_ops_pssm.cpp`; pure rules `fxc::pssmPass`,
+  `fxc::applyPssmStencil`, `fxc::kPssmIndices`; test `native_pssm_pass_states_follow_the_mask_loop`); vertex / index bytes compared (field
+  class Geometry); the take-over draws come from our own VB.
+* Static lights with CastDynamicShadows (`Default_CrystalLight_Blue` / `_Red`, spawned by `rvk_rare`; no world layer places them, the
+  placed ones are in the Testlevel world): 10 cells per mask (30 PSSM draws), all equal: static-light point shadows (ShadowMaskIndex) met
+  and composed.
+
+**The point-light atlas's setup (group 2048) [C, checked].** `eCPackedShadowMap::RenderShadowMap` 0x5a08f0 (new detour):
+CreateRenderTarget (`+0x118` = eCDepthMap 0x59fd00), SetRenderTarget(face 6 = no cube face) (`+0x128` = 0x59fee0: the working colour
+buffer for depth formats + the map as depth, saves the bound target, SetViewport(0, 0, size, size, `+0x50`, `+0x54`)), ClearViewPort
+(`+0x120` = 0x59fe50: flags 6 for depth formats, colour `+0x28`, z 1, stencil 0) once for the whole atlas; per cell UpdateCamera
+(`+0x180` = 0x5a09b0, no device call: Perspective off, ClipDepth cell `+0x114` / `+0x118` (db `+0x1694` = far), ViewMatrix cell `+0x10`,
+ProjectionMatrix cell `+0x50`, Screen = (x, y, x + w, y + h) from the cell rect `+0..+0xc`), then `eCCameraBase::RenderShadowMap` 0x4f71c0
+-> ExecuteShadowMap, whose ExecuteGfxCamera 0x4f6ad0 sets the viewport = the Screen rect, z 0..1; then ResetRenderTarget (`+0x130` =
+0x5a00e0).
+* Cell layout (AddCell 0x5a0400): `+0` x, y, w, h (ints), `+0x10` view, `+0x50` projection (border-shrunk (w - 6) / w), `+0x90` the cell
+  view-projection, `+0xd0` texture matrix, `+0x110` bias, `+0x114` / `+0x118` near / far, `+0x11c` colour flags. The cells are cleared by
+  `eCPackedShadowMap::ClearCells` 0x5a0730 at the end of UpdateShadowMask.
+* Composed: target / viewport / clear / restore (as group 2048's other maps), per cell the camera (view, projection, clip, perspective,
+  screen rect) and the cell viewport inside the scene. Compare: 7,320 / 7,320 cell cameras, 13,420 / 13,420 device calls (11 per render
+  with 6 cells); take-over: the device calls made by the renderer (2,024 per 5 s), 0 mismatches. The first render of a session has no
+  working buffer yet (1 left).
+
+**PSSM verification [checked]:** compare (`rvk_pointshadow`) 21,978 / 21,978 draws equal; take-over + compare + validation (0 messages),
+mid-run switch: 14,598 own draws = their composition; switch runs 2 / 3: 31,122 and 68,868 own draws equal; sync validation run
+(`shadows.rt=off`): 8,370 / 8,370, 0 messages; `rvk_rare`: 102,228 / 102,228 including the static lights' cells.
+Images: the light (It_Cast_Light spawned 1.2 m up) drifts during the hold and at some point a bright patch floods the foreground in every
+run - it appeared BEFORE the switch in the first switch run (frame 3980 of a switch at 4000) and not in a control run up to frame 6400: a
+scene event of that spot, not the take-over. Static 8x8 blocks across the switch: settled run 0.0347 vs 0.041 before / 0.092 after (1
+block > 1.0); PSSM-only switch 0.069 vs 0.062 / 0.061 (11 blocks: the hero's point-light shadow moving with the light, the same drift in
+the control). `shot-reviewer` (`out/n58/review_pssm`): the hero's point-light shadow present with the same shape / darkness / softness
+before and after and as in the control; no doubling, inversion, blockiness, cell seams or leaks.
+
+**The never-met kinds: triggers and results [checked].** Scenario `rvk_rare` (`-Param 'steps=streaks,crystal,fog,fire,billboards,strip,hit',
+'time=22','spacing=600','shots=<prefix>'`) spawns the templates in front of the hero:
+
+| kind | trigger | result |
+|---|---|---|
+| light streaks (eCLightStreaks_PS) | one template only, `Obj_Streak_Window_Curch_01` (placed in no world layer: dead content); spawned by `rvk_rare` | ops every frame; **the engine draws nothing**: the streak material's MaxShaderVersion (`+0x68`) is 0 and the shader has only a version-2 object (`+0x268`), so OnGetPasses finds no version (min(admin `+0x170` = 3, 0) and below) -> 0 passes. Composed (recipe below) and counted as 0 draws (draw count compared: 1,650 ops, 0 draws, equal) |
+| strips with a shader | `VFX_EMT_Titan_Strip_01` (material Special_Weapontrails_01, eCShaderDefault) moved on a circle by `rvk_rare`; weapons' trails need a swing (65 templates carry eCStrip_PS) | 597 / 597 draws equal (the N5.6 generator verified for the first time), taken over |
+| lit particle emitters (LightingStyle `+0x2b0`: 1 Flat, 2 Particle, 3 System) | `VFX_EMT_Fog_Ground_01`, `VFX_EMT_Fog_Pollon` (world: OutMain_VFX 21, Druid 11, Old Mine 9, ...) | composed: key ambient 2 / sun 4 / min(4, lights) << 4 from the entity's illumination (`+0xf8 +0x78`; L `+0` = P), light constants 0x6d7020 into the particle global pool: c35..c41 = P `+0xb8` rows x `bCVector4::Scale(L +8)`, c42..c44 = P `+4` (sun only), c45 + 4 i = light i (L `+0x10` + 64 i for i < L `+0xd`, else P `+0x38` + 64 (i - L `+0xd`)); the normals by style were already in N5.6's generator; 3,052 lit ops, all equal |
+| instanced particle emitters (`+0x29d`) | `VFX_EMT_Magic_FireInferno_Burn_02` / `_03`, `VFX_EMT_Magic_Inferno_PerSmoke` | composed: the master found without creating one (GetCreator key: eCDynamicEntity 0x21cd10 = the resolved proxy `+0x1d0`'s entity; module cache 0xc6e5d8 / flag 0xc6e5d0; bucket ((u32) key >> 4) % [`+0x60`] of [`+0x58`], node {key `+0`, master `+8`, next `+0x30`}); the instance's byte `+0x2b`, world (space 0: translation -(instance entity `+0x90`); space 1: the master entity's `+0x60` with the instance position), illumination and tag; 5,332 instanced ops equal, 36 left (master created inside the slot) |
+| blended billboard ops (alpha list) | `Obj_LS_Crystal_AntiMagic` (BlendMode 7; Monastery / waterfall / volcano dungeons), `Decal_Glow`, `VFX_BB_Ice_01` | composed (group 16, renamed `scene ops [billboards]`): RenderAlpha 0x4f4c70 -> RenderBillboard 0x4f0c00 alpha path: bb = PS `+0xc8`, light set [[entity `+0xf8`] `+0x180`], blend PS `+0x88`, switch PS `+0x90`, fade = op `+0xc`; one billboard per draw, both buffers DISCARD at 0 for exactly its quads, record (0, 0, 4q, 0, 2q), SetGlobalAlpha(fade), a material without a shader falls to the default shader (image bb `+8`, BlendMode); 4,703 / 4,703 equal. First build: 2,334 texture mismatches (the composition's mirror reset after writing the default shader's sampler slot): fixed |
+| static point lights with CastDynamicShadows | `Default_CrystalLight_Blue` / `_Red` | the atlas renders 10 cells per frame, PSSM 30 draws per mask, all composed and equal (above) |
+| OverlayHit | Script_Game `DoDamage` 0xd8060: victim = player and damage > GetTotal(victim, 0) / 4 (Script.dll EffectSystem::StartImageEffect) | not started in `rvk_rare` (DoDamage with an NPC attacker returned true but no OverlayHit graph ran) [I: the condition's damage / HP terms not met]; instead **OverlayRadialBlur** ran on the hits (`overlay_color.fx` technique 2 + a copy filter): 47 / 48 effect draws equal, taken over; its copy (CopyCurrentRTToImage, not a draw) stays the engine's |
+| OverlayBlackScreen / WhiteScreen | camera types' `OverlayImageEffect` property (Game.dll 0x7b4270 on camera switches; gCCameraAdmin::UpdateOverlayImageEffect 0x7abcb0) | not triggered (no camera-type switch scripted) |
+| RadialBlur / Wobble / EdgeSmooth / Indicator | effect data (gCEffectCommandStartImageEffect 0x828550) / F4 debug key (Indicator: never press F4) | RadialBlur met (above); the others not |
+| sorted sprite flushes (flags 0xe0) | `eCSprite::Begin` 0x757ff0 is called with 0 by every caller (eCGuiDevice2::BeginFrame, PlayVideo); Game.dll does not import Begin | **dead code in the shipped game**: cannot occur |
+| item / character preview (`eCRenderSystemAdmin::RenderEntity`) | only caller `eCCameraBase::RenderEntity` 0x4f7150, imported by no DLL | **editor / tool code**: the inventory and character screens use the main view; cannot occur |
+| debug list (`+0x1560`) | `eCRenderContextDebug::RequestRenderOps` 0x67f4f0 on request mask 0x100 = db caps `+0x15a4`, from eSRenderOptions (config `/Engine/Render/RenderDebug`, false in the shipped configs) | not triggered (needs a config change + restart); the debug ops would be "no group composes" |
+| light streak passes | n/a | recipe composed (passes: directional when P `+0` != 0, a point pass per P `+0x34` and per L `+0xd` light; VS `+0x1b0` + 16 ((f >> 3 & 3) + 2 (f & 7)), PS `+0x230`; c31..c33 world, c34..c36 directional P `+4`, c37..c40 point; states 0x6d9740 alpha 1; static buffers drawn from the engine's) but **never exercised** (no version) |
+
+**Same-frame switches of the rare kinds [checked]** (`out/n58/rare_switch`, `rare_switch2`; static 8x8 blocks, 40-frame pairs before /
+across / after): lit fog step (on at 3800) 0.0007 / 0.0011 / 0.0009 (22,387 static blocks, 0 > 1.0); fog step (off at 4300) 0.0009 /
+0.0009 / 0.0008; instanced fire step (on at 4900) 0.0010 / 0.0013 / 0.0014 (0 > 1.0); billboards step (off at 5800) 0.0002 / 0.0002 /
+0.0001; moving strip step (on at 6800) 0.0112 / 0.0315 / 0.0187 (3 blocks > 1.0: the strip moves every tick). `shot-reviewer`
+(`out/n58/review_rare`, `review_rare_ab`): the billboards (the crystal's translucency / glow / facets) and the strip (colour, fade,
+occlusion by the crystal and bush) are the same across the switch and engine vs take-over; the fog / pollen / fire sprites are too small /
+dark in the spawned framing to judge by eye (their draws are field-equal including vertex bytes).
+
+**Validation [checked].** Validation: `rvk_pointshadow` switch run 0 messages, `rvk_rare` take-over runs x3 0 each. Sync validation
+without RT shadows: `rvk_pointshadow`, every group taken over + compare: 0 messages, no SYNC- hazard.
+
+**Cost** (savegame Risen_Save_0009, `-Exe RisenTest.exe -Vsync off -Perf`, `rvk_perfsave` hold 40, the last four 5-s `perf:` windows;
+machine idle before (`sysprobe`: ~6 % of 16 cores, no game / ffmpeg); `out/n58/perf_off_rvk.log`, `perf_on_rvk.log`):
+
+| | GPU | CPU engine + HAL | p50 frame | draws per frame | ring per frame |
+|---|---|---|---|---|---|
+| native off | 1.50 ms | 3.28 - 3.35 ms | 3.63 - 3.71 ms (~270 fps) | 908 | 7.8 MiB |
+| every group taken over (coverage counting included) | 1.52 ms | 8.60 - 8.74 ms | 9.39 - 9.48 ms (~106 fps) | 916 | 35 - 39 MiB (our own CPU-geometry / instance buffers) |
+
+So the whole copy costs about **+5.4 ms CPU per frame** at the savegame (the engine's code still runs for every unit, plus the
+composition, the state save / restore and a second set of setter calls); GPU unchanged. N5.7's last measurement (another session, groups
+131071) was 7.38 - 7.41 ms: this run is ~1.2 ms higher [I: not a same-session pair; part may be the coverage counter (one hash-map
+increment per draw and per dropped draw, ~1,800 per frame) and the reason strings; not separated].
+
+Engine rules newly learned [C]:
+* The PSSM pass is a hand-driven effect technique: OnUpdateOutput sets its parameters, UpdatePackedShadowMapVisual builds the pyramids
+  with one DISCARD lock, and the loop drives stencil (master), passes and the visual itself; the camera's near sphere decides zfail vs pass
+  counting per cell.
+* The point-light atlas sets one target / clear for all cells; each cell's viewport comes from its camera's Screen rect through
+  ExecuteGfxCamera.
+* Static crystal lights with CastDynamicShadows render 10 cells (two lights) per frame; their PSSM colour flags come from ShadowMaskIndex.
+* The vanilla light streaks never draw (MaxShaderVersion 0, only a version-2 object); the only streak template is placed nowhere.
+* Lit particle emitters write the sky SH (scaled by the illumination's intensity), the sun and up to 4 lights into the particle global
+  pool in the version's Execute; the style only changes the CPU normals.
+* Instanced emitters share one hidden master per creator template (found by a hash map keyed by GetCreator), drawn per instance with the
+  instance's world / illumination; GetCreator of plain entities is null (no instancing).
+* Alpha billboards are drawn one per draw with SetGlobalAlpha(fade); a material without a shader falls back to the admin's default shader.
+* Sorted sprite flushes and `eCRenderSystemAdmin::RenderEntity` are unreachable in the shipped game.
+* Damage on the hero started OverlayRadialBlur (an overlay graph with a copy filter), not OverlayHit, in the scripted hits.
+
+**Not yet / open**: the "after a dropped draw" issue model for permutations the engine compiles inside the draw (the first world window
+after a load keeps ~0.02 % of draws); particle ops without a live particle at the entry and instanced emitters before their master exists
+(by rule); OverlayHit's trigger, OverlayBlackScreen / WhiteScreen, Wobble, EdgeSmooth, Indicator never ran; light streaks composed but
+never exercised (the engine draws none); the debug list; the 1 "unreadable" billboard queue per run; the CPU cost (+5.4 ms at the
+savegame: the engine's code still runs for every unit; removing it is the "then" row of section 4).
+
+## 17. The copy: status
+
+Every element of the engine's frame, who draws it with every group on (`native.static_ops` + `native.scene_ops`, groups 131071), its
+`native.scene_ops_groups` bit and where it is verified. "us" = our own draw replaces the engine's (after the first frame of a unit that
+needs buffers / a compiled permutation: section 16's leftovers); "the engine" = stays the engine's; "never met" = composed or not, no
+run produced it; "unreachable" = cannot occur in the shipped game.
+
+| frame element | drawn by | group | verification |
+|---|---|---|---|
+| z pre-pass static meshes | us | `native.static_ops` | section 7; every spot + savegame equal to the engine, section 16 coverage 99.96 - 99.99 % |
+| solid static meshes, terrain layers, instanced | us | `native.static_ops` | section 7 |
+| alpha + refracted meshes, z-fill, overlay passes | us (overlay passes: group 2) | 1 (overlay passes 2) | section 8 |
+| decals | us | 4 | section 8 |
+| sky dome | us | 8 | section 9 |
+| sky cube faces | us (first face of a session: the engine's, buffers not created yet) | 32 | section 9; section 16 leftovers |
+| opaque billboard queue | us (1 "unreadable" queue read per run: the engine's) | 16 | section 9 |
+| blended billboard ops (alpha list) | us | 16 (renamed `scene ops [billboards]`) | section 16: 4,703 / 4,703 equal; switch 0.0002 / 0.0002 / 0.0001 |
+| skinned actors | us | 64 | section 10 |
+| SpeedTrees + tree billboards | us | 128 | section 11 |
+| vegetation | us | 256 | section 11 |
+| sun cascades / terrain map / point-light atlas z ops | us | 512 | section 12 |
+| shadow views' setup: cascades, terrain map, point-light atlas | us (target / viewport / clear / reset; the atlas per cell camera) | 2048 | section 13; atlas section 16: 7,320 / 7,320 cell cameras, 13,420 / 13,420 device calls |
+| shadow mask chain: SSAO, SSM / DSSM, VSSM, blur, depth copy | us | 1024 | section 13 |
+| PSSM point-light pass | us | 1024 | section 16: 21,978 / 21,978 draws equal; 10 cells per mask for the static crystal lights |
+| terrain map blur (Blur7H / V) | us | 1024 | section 13 |
+| particles: plain | us | 4096 | section 14 |
+| particles: lit (LightingStyle 1 / 2 / 3) | us | 4096 | section 16: 3,052 lit ops equal |
+| particles: instanced | us (36 ops with the master created inside the slot: the engine's) | 4096 | section 16: 5,332 ops equal |
+| strips | us | 8192 | section 14 generator; section 16: with a shader 597 / 597 draws equal |
+| light streaks | never exercised: the engine draws 0 (MaxShaderVersion 0); recipe composed | 8192 | section 16: 1,650 ops, 0 draws, equal |
+| precipitation | us | 16384 | section 14 |
+| post chain: DoF / HDRI | us | 32768 | section 15: 19 / 14 draws per frame; sections 15 tables |
+| overlay effects: OverlayMovieStrips | us | 32768 | section 15 |
+| overlay effects: OverlayRadialBlur | us (its copy: the engine's) | 32768 | section 16: 47 / 48 effect draws equal |
+| overlay effects: OverlayHit / BlackScreen / WhiteScreen / Wobble / EdgeSmooth | never met | 32768 | section 16 (triggers listed) |
+| post-chain copy filters (no input) | the engine (HAL copies, not draws) | - | section 16: counted `copies in the post chain left to the engine` |
+| GUI sprite batcher | us | 65536 | section 15; character screen 31,494 draws ours, section 16 |
+| loading screens (view None sprites) | us | 65536 | section 15 |
+| sorted sprite flushes (flags 0xe0) | unreachable (dead code) | - | section 16 |
+| item / character preview (RenderEntity) | unreachable (editor / tool code) | - | section 16 |
+| debug list | never met (needs `/Engine/Render/RenderDebug` + restart) | - | section 16 |
