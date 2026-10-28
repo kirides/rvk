@@ -127,8 +127,11 @@ DeviceReport inspectImpl(VkPhysicalDevice pd) {
     if (r.api13) {
         VkPhysicalDeviceVulkan13Features f13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
         VkPhysicalDeviceVulkan12Features f12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, &f13};
-        VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &f12};
+        VkPhysicalDeviceVulkan11Features f11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, &f12};
+        VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &f11};
         vkGetPhysicalDeviceFeatures2(pd, &f2);
+        r.shaderDrawParameters = f11.shaderDrawParameters == VK_TRUE;
+        r.drawIndirectCount = f12.drawIndirectCount == VK_TRUE;
         r.dynamicRendering = f13.dynamicRendering == VK_TRUE;
         r.synchronization2 = f13.synchronization2 == VK_TRUE;
         r.extendedDynamicState = true;  // EDS1 and EDS2 (without the optional sub-features) are core in 1.3

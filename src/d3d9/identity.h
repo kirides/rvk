@@ -56,6 +56,20 @@ private:
     std::uint32_t generation_ = 0;
 };
 
+// The ring block behind a dynamic buffer's frame copy (Buffer::gpu; docs/research/vulkanize/plan.md V1). A block holds the
+// buffer bytes [lo, hi) only, not the whole buffer: a NewCopy reserves the plan's range (after a DISCARD: what was written
+// since, e.g. one draw's vertices of our 4 MiB native vertex buffer); a Patch inside the current block [curLo, curHi) is copied
+// in place; a Patch outside it (NOOVERWRITE appends past the written range, or below it) moves the copy to a new block over
+// both, with the block size doubled (appends grow it O(log n) times). Draws recorded before keep the old block; the new one is
+// filled from the CPU copy, which holds every byte. lo is 16-aligned: the binding offset (block offset - lo) keeps the ring's
+// 16-byte alignment (index buffers, vertex shifts).
+struct RingBlock {
+    bool fresh = false;                     // a new block of the extent [lo, hi)
+    std::uint32_t lo = 0, hi = 0;           // the block's extent in buffer bytes
+    std::uint32_t copyLo = 0, copyHi = 0;   // the CPU copy's bytes to copy into it (empty = nothing)
+};
+RingBlock ringBlock(const BufferCopyState::Plan& plan, std::uint32_t curLo, std::uint32_t curHi, std::uint32_t bufferSize);
+
 // What a D3D9 texture lock (LOCK_* flags) adds to the level's next upload. D3D9's managed / system-memory pools keep a level
 // dirty as a whole from creation until its first upload, so the data written under a READONLY lock of a fresh level reaches
 // the GPU: eCGfxImageData::OnRead fills the savegame thumbnails that way (docs/research/savegame-thumbnails.md). Once the GPU

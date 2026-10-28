@@ -79,6 +79,34 @@ void BufferCopyState::committed(const Plan& plan, bool ring, std::uint64_t frame
     }
 }
 
+RingBlock ringBlock(const BufferCopyState::Plan& plan, std::uint32_t curLo, std::uint32_t curHi, std::uint32_t bufferSize) {
+    using Op = BufferCopyState::Plan::Op;
+    RingBlock b;
+    if (plan.op == Op::NewCopy) {
+        b.fresh = true;
+        b.lo = plan.lo & ~15u;
+        b.hi = std::max(plan.hi, b.lo);
+        b.copyLo = plan.lo;
+        b.copyHi = std::max(plan.hi, plan.lo);
+    } else if (plan.op == Op::Patch) {
+        if (plan.lo >= curLo && plan.hi <= curHi) {
+            b.lo = curLo;
+            b.hi = curHi;
+            b.copyLo = plan.lo;
+            b.copyHi = plan.hi;
+        } else {
+            b.fresh = true;
+            b.lo = std::min(curLo, plan.lo & ~15u);
+            const std::uint32_t need = std::max(curHi, plan.hi);
+            const std::uint64_t cap = std::max<std::uint64_t>(need - b.lo, 2ull * (curHi - curLo));
+            b.hi = static_cast<std::uint32_t>(std::min<std::uint64_t>(bufferSize, b.lo + cap));
+            b.copyLo = b.lo;
+            b.copyHi = need;
+        }
+    }
+    return b;
+}
+
 LockDirty textureLockDirty(std::uint32_t flags, bool levelHoldsGpuData) {
     if ((flags & LOCK_READONLY) == 0) {
         return LockDirty::Locked;

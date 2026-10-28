@@ -942,6 +942,17 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 1,
         .flags = Flag::Debug,
     });
+    r.constantCompare = &reg.add({
+        .key = "debug.constant_compare",
+        .label = "Upload only changed constants",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "A shader constant write that changes nothing leaves the draw's constant block as it is (no new upload). "
+                       "Off = every write uploads a new block at the next draw, to compare.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::Debug,
+    });
     r.injectView = &reg.add({
         .key = "debug.inject_view",
         .label = "Injection test view",

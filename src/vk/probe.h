@@ -34,6 +34,8 @@ struct DeviceReport {
     bool deviceFault = false;
     bool memoryBudget = false;
     bool robustness2 = false;
+    bool shaderDrawParameters = false;  // Vulkan 1.1 feature (gl_DrawID)
+    bool drawIndirectCount = false;     // Vulkan 1.2 feature
 
     // ray tracing (optional tier, docs/research/raytracing.md): extension present AND its feature bit set
     struct RayTracing {

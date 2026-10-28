@@ -50,6 +50,8 @@ struct DeviceFeatures {
     bool storageImageExtendedFormats = false;  // RG16F / R16F ... storage images (the G-buffer's motion)
     bool indirectDraws = false;   // multiDrawIndirect + drawIndirectFirstInstance: one vkCmdDrawIndexedIndirect for many draws, the item index as firstInstance (enh/native_opaque)
     bool vertexStores = false;    // vertexPipelineStoresAndAtomics: vertex shaders write buffers (enh/gi: skinned positions)
+    bool shaderDrawParameters = false;  // gl_DrawID / gl_BaseInstance in shaders (Vulkan 1.1 feature, optional in 1.3)
+    bool drawIndirectCount = false;     // vkCmdDraw*IndirectCount (Vulkan 1.2 feature): a GPU-written draw count
     float maxAnisotropy = 1.0f;
     bool hostQueryReset = false;  // vkResetQueryPool from the host (GPU timestamps of [debug] perf)
     float timestampPeriod = 0.0f; // ns per timestamp tick; 0 = the queue cannot write timestamps

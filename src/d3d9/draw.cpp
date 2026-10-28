@@ -558,24 +558,32 @@ void Device::applyDynamicState(RecordState& rs, VkCommandBuffer cmd, const Dynam
 }
 
 void Device::uploadConstants() {
-    if (vsConstDirty_ || vsConstAddr_ == 0) {
+    // per dirty stage a StageConsts block (shader/abi.h) from the ring: the floats up to the shader's highest read register, the
+    // int / bool part only for shaders that read it (Reflection::intBoolConstants; the layout stays, the bytes are left as they are)
+    const auto upload = [&](const Shader& sh, const float (*f)[4], std::uint32_t maxFloats, const std::int32_t (*i)[4],
+                            const std::uint32_t* b, VkDeviceAddress& addr, std::uint32_t stage) {
         vk::RingAlloc a = frames_.allocate(shader::abi::kStageConstsSize, 16);
-        const std::uint32_t n = std::min(vs_->reflection.floatConstCount, kVsFloatConsts);
-        std::memcpy(a.ptr, vsF_, n * 16);
-        auto* base = static_cast<std::uint8_t*>(a.ptr);
-        std::memcpy(base + shader::abi::kStageConstsIntOffset, vsI_, sizeof(vsI_));
-        std::memcpy(base + shader::abi::kStageConstsBoolOffset, vsB_, sizeof(vsB_));
-        vsConstAddr_ = a.address;
+        const std::uint32_t n = std::min(sh.reflection.floatConstCount, maxFloats);
+        std::memcpy(a.ptr, f, n * 16);
+        std::uint32_t bytes = n * 16;
+        if (sh.reflection.intBoolConstants) {
+            auto* base = static_cast<std::uint8_t*>(a.ptr);
+            std::memcpy(base + shader::abi::kStageConstsIntOffset, i, 16 * 16);
+            std::memcpy(base + shader::abi::kStageConstsBoolOffset, b, 16 * 4);
+            bytes += 16 * 16 + 16 * 4;
+        } else {
+            ++perf_.constIntBoolSkipped;
+        }
+        ++perf_.constUploads[stage];
+        perf_.constBytes += bytes;
+        addr = a.address;
+    };
+    if (vsConstDirty_ || vsConstAddr_ == 0) {
+        upload(*vs_, vsF_, kVsFloatConsts, vsI_, vsB_, vsConstAddr_, 0);
         vsConstDirty_ = false;
     }
     if (psConstDirty_ || psConstAddr_ == 0) {
-        vk::RingAlloc a = frames_.allocate(shader::abi::kStageConstsSize, 16);
-        const std::uint32_t n = std::min(ps_->reflection.floatConstCount, kPsFloatConsts);
-        std::memcpy(a.ptr, psF_, n * 16);
-        auto* base = static_cast<std::uint8_t*>(a.ptr);
-        std::memcpy(base + shader::abi::kStageConstsIntOffset, psI_, sizeof(psI_));
-        std::memcpy(base + shader::abi::kStageConstsBoolOffset, psB_, sizeof(psB_));
-        psConstAddr_ = a.address;
+        upload(*ps_, psF_, kPsFloatConsts, psI_, psB_, psConstAddr_, 1);
         psConstDirty_ = false;
     }
 }

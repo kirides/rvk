@@ -101,6 +101,7 @@ public:
                    mainFunction();
         res.reflection = reflection_;
         res.reflection.version = p_.version;
+        res.reflection.intBoolConstants = readsIntBool_;
         return res;
     }
 
@@ -316,6 +317,7 @@ private:
                                static_cast<std::int32_t>(it->second[1]), static_cast<std::int32_t>(it->second[2]),
                                static_cast<std::int32_t>(it->second[3]));
         }
+        readsIntBool_ = true;
         return std::format("{}.i[{}]", consts_, n);
     }
 
@@ -323,6 +325,7 @@ private:
         if (auto it = defB_.find(n); it != defB_.end()) {
             return it->second ? "true" : "false";
         }
+        readsIntBool_ = true;
         return std::format("({}.b[{}] != 0u)", consts_, n);
     }
 
@@ -1006,6 +1009,7 @@ private:
     const bool vs_;
     const int major_;
     const std::string consts_;
+    mutable bool readsIntBool_ = false;  // intExpr / boolConst emitted a stage-block read (Reflection::intBoolConstants)
     Reflection reflection_;
     std::string error_;
 

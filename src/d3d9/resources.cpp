@@ -424,21 +424,24 @@ Buffer::Binding Buffer::gpu(std::uint32_t strideHint) {
     const BufferCopyState::Plan plan = copies_.plan(ring, frame, size_, static_.valid());
     using Op = BufferCopyState::Plan::Op;
     if (ring) {
-        // ring copy per frame (identity.h: BufferCopyState::plan)
-        if (plan.op == Op::NewCopy) {
-            vk::RingAlloc a = dev_.frames().allocate(size_, 16);
+        // ring copy per frame (identity.h: BufferCopyState::plan), in a block of only the bytes it needs (identity.h: RingBlock;
+        // a DISCARD of a few KiB of our 4 MiB native vertex buffer reserves those KiB, not 4 MiB)
+        const RingBlock blk = ringBlock(plan, ringLo_, ringHi_, size_);
+        if (blk.fresh) {
+            const VkDeviceSize bytes = std::max<VkDeviceSize>(blk.hi - blk.lo, 16);
+            // at least lo into its chunk: the binding (block offset - lo) addresses buffer byte 0 and stays >= 0
+            vk::RingAlloc a = dev_.frames().allocate(bytes, 16, blk.lo);
             if (a.ptr == nullptr) {
                 return {};
             }
-            if (plan.hi > plan.lo) {
-                std::memcpy(static_cast<std::uint8_t*>(a.ptr) + plan.lo, cpu_.data() + plan.lo, plan.hi - plan.lo);
-                dev_.countUpload(false, plan.hi - plan.lo);
-            }
-            binding_ = {a.buffer, a.offset};
-            boundPtr_ = static_cast<std::uint8_t*>(a.ptr);
-        } else if (plan.op == Op::Patch) {
-            std::memcpy(boundPtr_ + plan.lo, cpu_.data() + plan.lo, plan.hi - plan.lo);
-            dev_.countUpload(false, plan.hi - plan.lo);
+            ringPtr_ = static_cast<std::uint8_t*>(a.ptr);
+            ringLo_ = blk.lo;
+            ringHi_ = blk.hi;
+            binding_ = {a.buffer, a.offset - blk.lo};
+        }
+        if (blk.copyHi > blk.copyLo) {
+            std::memcpy(ringPtr_ + (blk.copyLo - ringLo_), cpu_.data() + blk.copyLo, blk.copyHi - blk.copyLo);
+            dev_.countUpload(false, blk.copyHi - blk.copyLo);
         }
         copies_.committed(plan, true, frame);
         return binding_;

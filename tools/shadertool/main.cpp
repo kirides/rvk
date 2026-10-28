@@ -60,6 +60,7 @@ struct Outcome {
     std::string message;
     std::string disasm;
     std::string glsl;
+    bool intBool = false;  // Reflection::intBoolConstants
 };
 
 Outcome translate(const std::vector<std::uint32_t>& tokens, spvtools::SpirvTools& tools, const GlslOptions& options = {}) {
@@ -78,6 +79,7 @@ Outcome translate(const std::vector<std::uint32_t>& tokens, spvtools::SpirvTools
         return o;
     }
     o.glsl = g.glsl;
+    o.intBool = g.reflection.intBoolConstants;
     const SpirvResult s = compileGlsl(dec.program.version.stage, g.glsl);
     if (!s.ok()) {
         o.stage = "compile";
@@ -102,6 +104,7 @@ int cmdCorpus(const fs::path& dir, const fs::path& out, int maxErrors, const Gls
     std::map<std::string, int> ok, failed;
     std::map<std::string, int> failuresByMessage;
     int printed = 0;
+    int intBool = 0;
     const auto t0 = std::chrono::steady_clock::now();
     std::vector<fs::path> files;
     for (const auto& e : fs::directory_iterator(dir)) {
@@ -129,6 +132,7 @@ int cmdCorpus(const fs::path& dir, const fs::path& out, int maxErrors, const Gls
             }
         }
         const Outcome o = translate(tokens, tools, options);
+        intBool += o.intBool ? 1 : 0;
         if (o.stage.empty()) {
             ++ok[kind];
             continue;
@@ -161,7 +165,8 @@ int cmdCorpus(const fs::path& dir, const fs::path& out, int maxErrors, const Gls
             std::printf("%6d  %s\n", n, m.c_str());
         }
     }
-    std::printf("\n%zu shaders in %.1f s (%d without the variant: skipped)\n", files.size(), secs, skipped);
+    std::printf("\n%zu shaders in %.1f s (%d without the variant: skipped); %d read int / bool constants\n", files.size(), secs,
+                skipped, intBool);
     return totalFailed == 0 ? 0 : 1;
 }
 

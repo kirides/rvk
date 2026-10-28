@@ -292,6 +292,7 @@ struct RendererSettings {
     Setting* materialSources = nullptr;  // debug.material_sources: the engine's request of each material shader (engine::matsrc)
     Setting* reverseZ = nullptr;     // debug.reverse_z: reversed infinite depth in the main view (d3d9::Device::setReverseZ)
     Setting* batchDraws = nullptr;   // debug.batch_draws: the opaque passes' draws grouped by pipeline (d3d9::Device::setBatching)
+    Setting* constantCompare = nullptr;  // debug.constant_compare: register setters dirty a stage only on a change (d3d9::Device::setConstantCompare)
     Setting* injectView = nullptr;   // debug.inject_view: "off", "depth", "tint" (enh/debug_view.h, an injected pass)
     Setting* rtAllow = nullptr;      // rt.allow: enable the ray tracing extensions at device creation (restart)
     Setting* rtReflections = nullptr; // rt.reflections: "off", "low", "medium", "high" (the water's ray-traced reflections, needs RayQuery)

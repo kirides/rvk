@@ -24,6 +24,8 @@ constexpr std::array<Names, kCount> kNames = {{
     {"device_fault", "Device fault reports"},
     {"sampler_anisotropy", "Anisotropic filtering"},
     {"full_screen_exclusive", "Exclusive fullscreen"},
+    {"shader_draw_parameters", "Shader draw parameters"},
+    {"draw_indirect_count", "Indirect draw count"},
 }};
 
 std::mutex g_mutex;

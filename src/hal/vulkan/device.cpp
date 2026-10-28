@@ -356,6 +356,13 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
             spdlog::info("hal: settings: batch opaque draws {}", s.asBool() ? "on" : "off");
         }, this);
     }
+    if (rs.constantCompare != nullptr) {
+        dev_.setConstantCompare(rs.constantCompare->asBool());
+        reg.onChange(*rs.constantCompare, [this](const settings::Setting& s) {
+            dev_.setConstantCompare(s.asBool());
+            spdlog::info("hal: settings: constant compare {}", s.asBool() ? "on" : "off");
+        }, this);
+    }
     if (rs.drawRecords != nullptr) {
         dev_.setDrawRecords(rs.drawRecords->asBool());
         reg.onChange(*rs.drawRecords, [this](const settings::Setting& s) {
@@ -1506,6 +1513,13 @@ void HalDevice::logPerf(d3d9::PerfStats p) {
     // enhancement plumbing (docs/research/injection.md): FrameBlock uploads, injection points that ran passes, their CPU time
     spdlog::info("perf: frame blocks {:.2f} per frame; injected passes: {:.2f} points per frame, {:.3f} ms per frame (CPU recording)",
                  static_cast<double>(p.frameBlocks) / n, static_cast<double>(p.injections) / n, p.injectMs / n);
+    // stage constants (vulkanize plan.md V1): blocks per stage, bytes written into the ring, blocks without the int / bool part,
+    // setter calls that changed nothing on a clean stage
+    spdlog::info("perf: stage constants: VS {:.0f} / PS {:.0f} blocks per frame, {:.0f} KiB written, int / bool skipped in {:.0f}, "
+                 "{:.0f} unchanged register writes",
+                 static_cast<double>(p.constUploads[0]) / n, static_cast<double>(p.constUploads[1]) / n,
+                 static_cast<double>(p.constBytes) / n / 1024.0, static_cast<double>(p.constIntBoolSkipped) / n,
+                 static_cast<double>(p.constSetsUnchanged) / n);
     {
         std::string passes;
         for (const auto& [name, ms] : p.injectPassMs) passes += std::format(" {} {:.3f};", name, ms / n);

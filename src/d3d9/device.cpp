@@ -1663,46 +1663,70 @@ void Device::setPixelShader(const std::shared_ptr<Shader>& shader) {
     }
 }
 
+// The register setters mark the stage dirty (a new StageConsts block at its next draw) only when they change a register: on a
+// clean stage the written range is compared first (equal = nothing to do). Once dirty they just copy. The native frame
+// re-sets every live register of every composed draw, mostly with the values already there (vulkanize plan.md V1)
+namespace {
+template <class T>
+bool writeRegisters(T* dst, const T* src, std::size_t bytes, bool& dirty, bool compare, std::uint64_t& unchanged) {
+    if (!dirty && compare) {
+        if (std::memcmp(dst, src, bytes) == 0) {
+            ++unchanged;
+            return false;
+        }
+        dirty = true;
+    }
+    std::memcpy(dst, src, bytes);
+    return true;
+}
+}  // namespace
+
 void Device::setVertexShaderConstantF(std::uint32_t start, const float* data, std::uint32_t count) {
     if (start >= kVsFloatConsts || data == nullptr) return;
     count = std::min(count, kVsFloatConsts - start);
-    std::memcpy(vsF_[start], data, count * 16);
-    vsConstDirty_ = true;
+    writeRegisters(vsF_[start], data, count * 16, vsConstDirty_, constCompare_, perf_.constSetsUnchanged);
 }
 
 void Device::setPixelShaderConstantF(std::uint32_t start, const float* data, std::uint32_t count) {
     if (start >= kPsFloatConsts || data == nullptr) return;
     count = std::min(count, kPsFloatConsts - start);
-    std::memcpy(psF_[start], data, count * 16);
-    psConstDirty_ = true;
+    writeRegisters(psF_[start], data, count * 16, psConstDirty_, constCompare_, perf_.constSetsUnchanged);
 }
 
 void Device::setVertexShaderConstantI(std::uint32_t start, const std::int32_t* data, std::uint32_t count) {
     if (start >= 16 || data == nullptr) return;
     count = std::min(count, 16 - start);
-    std::memcpy(vsI_[start], data, count * 16);
-    vsConstDirty_ = true;
+    writeRegisters(vsI_[start], data, count * 16, vsConstDirty_, constCompare_, perf_.constSetsUnchanged);
 }
 
 void Device::setPixelShaderConstantI(std::uint32_t start, const std::int32_t* data, std::uint32_t count) {
     if (start >= 16 || data == nullptr) return;
     count = std::min(count, 16 - start);
-    std::memcpy(psI_[start], data, count * 16);
-    psConstDirty_ = true;
+    writeRegisters(psI_[start], data, count * 16, psConstDirty_, constCompare_, perf_.constSetsUnchanged);
 }
 
 void Device::setVertexShaderConstantB(std::uint32_t start, const std::int32_t* data, std::uint32_t count) {
     if (start >= 16 || data == nullptr) return;
     count = std::min(count, 16 - start);
-    for (std::uint32_t i = 0; i < count; ++i) vsB_[start + i] = data[i] != 0 ? 1u : 0u;
-    vsConstDirty_ = true;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const std::uint32_t v = data[i] != 0 ? 1u : 0u;
+        if (vsB_[start + i] != v || !constCompare_) {
+            vsB_[start + i] = v;
+            vsConstDirty_ = true;
+        }
+    }
 }
 
 void Device::setPixelShaderConstantB(std::uint32_t start, const std::int32_t* data, std::uint32_t count) {
     if (start >= 16 || data == nullptr) return;
     count = std::min(count, 16 - start);
-    for (std::uint32_t i = 0; i < count; ++i) psB_[start + i] = data[i] != 0 ? 1u : 0u;
-    psConstDirty_ = true;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const std::uint32_t v = data[i] != 0 ? 1u : 0u;
+        if (psB_[start + i] != v || !constCompare_) {
+            psB_[start + i] = v;
+            psConstDirty_ = true;
+        }
+    }
 }
 
 void Device::getVertexShaderConstantF(std::uint32_t start, float* data, std::uint32_t count) const {

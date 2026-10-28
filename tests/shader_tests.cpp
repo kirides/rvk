@@ -269,6 +269,38 @@ mov oDepth, c0.z
     CHECK(contains(glsl, "rvk_alphaTest(oC0.a)"));
 }
 
+// Reflection::intBoolConstants: set exactly when the GLSL reads the stage block's i# / b# (the upload skips them otherwise)
+TEST(shader_int_bool_reflection) {
+    if (!D3DX::get().available()) {
+        std::printf("  (skipped: d3dx9_39.dll not available)\n");
+        return;
+    }
+    const auto reflect = [](const char* name, const char* source) {
+        std::string errors;
+        const auto tokens = assemble(source, errors);
+        CHECK_MSG(!tokens.empty(), std::string(name) + ": D3DXAssembleShader failed: " + errors);
+        const DecodeResult dec = decode(tokens);
+        CHECK_MSG(dec.ok(), std::string(name) + ": decode: " + dec.error);
+        const GlslResult g = toGlsl(dec.program);
+        CHECK_MSG(g.ok(), std::string(name) + ": glsl: " + g.error);
+        const bool reads = g.glsl.find("pc.vs.i[") != std::string::npos || g.glsl.find("pc.vs.b[") != std::string::npos ||
+                           g.glsl.find("pc.ps.i[") != std::string::npos || g.glsl.find("pc.ps.b[") != std::string::npos;
+        CHECK_MSG(reads == g.reflection.intBoolConstants, std::string(name) + ": reflection disagrees with the GLSL");
+        return g.reflection.intBoolConstants;
+    };
+    // floats only
+    CHECK(!reflect("floats", "vs_3_0\ndcl_position v0\ndcl_position o0\nmov o0, v0\nadd o0, v0, c4\n"));
+    // defi / defb literals: no block read
+    CHECK(!reflect("literals", "vs_3_0\ndcl_position v0\ndcl_position o0\ndefi i0, 4, 0, 1, 0\ndefb b1, true\nmov r0, v0\n"
+                               "rep i0\nadd r0, r0, c1\nendrep\nif b1\nadd r0, r0, c2\nendif\nmov o0, r0\n"));
+    // rep / loop with an integer register from the block
+    CHECK(reflect("rep", "vs_3_0\ndcl_position v0\ndcl_position o0\nmov r0, v0\nrep i2\nadd r0, r0, c1\nendrep\nmov o0, r0\n"));
+    CHECK(reflect("loop", "vs_3_0\ndcl_position v0\ndcl_position o0\nmov r0, v0\nloop aL, i1\nadd r0, r0, c1[aL]\nendloop\nmov o0, r0\n"));
+    // if b# / callnz b# from the block
+    CHECK(reflect("if", "ps_3_0\ndef c0, 0, 1, 0, 0\nmov r0, c0.x\nif b3\nmov r0, c0.y\nendif\nmov oC0, r0\n"));
+    CHECK(reflect("callnz", "ps_3_0\ndef c0, 0, 1, 0, 0\nmov r0, c0.x\ncallnz l1, b0\nmov oC0, r0\nret\nlabel l1\nmov r0, c0.y\nret\n"));
+}
+
 TEST(shader_sm2) {
     if (!D3DX::get().available()) {
         std::printf("  (skipped: d3dx9_39.dll not available)\n");

@@ -31,6 +31,10 @@ struct Reflection {
     std::array<TextureType, abi::kSamplerSlots> samplers{};        // TextureType::Unknown = unused
     std::uint32_t floatConstCount = 0;                              // highest c# read + 1 (256 with relative addressing)
     bool relativeConstants = false;
+    // the translation reads i# / b# from the stage block (an integer / bool constant without a defi / defb: loop / rep counts,
+    // if / callnz conditions, any i# / b# operand). False: the upload skips the block's int / bool part (Device::uploadConstants;
+    // no game shader reads them, docs/research/vulkanize/V0-constants.md 0). Hand-made reflections keep the default (copied)
+    bool intBoolConstants = true;
     bool writesDepth = false;
     bool discards = false;                                          // texkill
     std::uint32_t colorOutputs = 0;                                 // oC# written (bit mask)

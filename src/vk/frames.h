@@ -58,8 +58,9 @@ public:
     // destroy `fn` once the frame being recorded (or the last submitted one, between frames) has completed; thread-safe
     void retire(std::function<void()> fn);
 
-    // transient memory for the frame being recorded (render thread); alignment must be a power of two
-    RingAlloc allocate(VkDeviceSize size, VkDeviceSize alignment = 256);
+    // transient memory for the frame being recorded (render thread); alignment must be a power of two. minOffset: the block
+    // starts at least that far into its chunk (a dynamic buffer's block of bytes [lo, hi) is bound at offset - lo: d3d9::RingBlock)
+    RingAlloc allocate(VkDeviceSize size, VkDeviceSize alignment = 256, VkDeviceSize minOffset = 0);
 
 private:
     struct Chunk {

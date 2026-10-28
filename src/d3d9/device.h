@@ -229,7 +229,9 @@ private:
     // gpu()'s fast path (most draws): a static copy that no lock touched since it was made; binding_ is final then.
     // Cleared under mutex_ by lock() / orphan(), set by gpu() after a static copy
     std::atomic<bool> cleanStatic_{false};
-    std::uint8_t* boundPtr_ = nullptr;  // CPU address of the frame's ring copy (dynamic buffers)
+    // dynamic buffers: the frame's ring copy holds the bytes [ringLo_, ringHi_) at ringPtr_ (d3d9::RingBlock)
+    std::uint8_t* ringPtr_ = nullptr;
+    std::uint32_t ringLo_ = 0, ringHi_ = 0;
     vk::MeshArena::Alloc static_;  // the static GPU copy, in the device's mesh arena
     friend class Device;
     void orphan();           // as Texture::orphan
@@ -557,6 +559,10 @@ struct PerfStats {
     double injectMs = 0.0;                 // CPU time recording them
     std::map<std::string, double> injectPassMs;  // ... per pass (name at point; [debug] perf only)
     std::uint64_t frameBlocks = 0;         // FrameBlock uploads
+    std::uint64_t constUploads[2] = {};    // StageConsts blocks uploaded (VS, PS): one per draw whose stage was dirty
+    std::uint64_t constBytes = 0;          // bytes copied into them
+    std::uint64_t constIntBoolSkipped = 0; // ... of the blocks, those without the int / bool part (the shader reads none)
+    std::uint64_t constSetsUnchanged = 0;  // register setter calls that changed nothing on a clean stage (no upload follows)
     std::vector<float> frameIntervalsMs;   // present-to-present
     vk::FramePacer::Stats pacer;
     double pacerRate = 0.0;
@@ -694,6 +700,9 @@ public:
     // the opaque passes' draws recorded on worker threads (debug.record_threads); applies from the next rendering scope
     void setRecordThreads(bool on) { recordThreadsWanted_ = on; }
     bool batching() const { return batching_; }
+    // register setters compare a clean stage's registers first: a write that changes nothing keeps its constant block
+    // (debug.constant_compare, vulkanize plan.md V1)
+    void setConstantCompare(bool on) { constCompare_ = on; }
     // Reversed infinite depth (debug.reverse_z, docs/research/reverse-z.md): a depth buffer cleared in a main view holds
     // near / view z (1 at the near plane, 0 at infinity and for the cleared sky) instead of the engine's D3D value. The engine's
     // vertex output is remapped in the shaders (DrawBlock::posFix.zw: z' = z (1 + zw.x) + zw.y w, = w - k z with k = 1 - near / far
@@ -1416,6 +1425,7 @@ private:
     std::vector<RankEntry> rankTable_;       // flushBatch: pipeline -> index of its first draw
     std::vector<std::uint64_t> batchKeys_;   // flushBatch: (rank << 32 | draw index), sorted
     bool batching_ = true;  // debug.batch_draws
+    bool constCompare_ = true;  // debug.constant_compare
     bool reverseZ_ = true;  // debug.reverse_z
     mutable float reverseK_ = 0.99f;  // the last k computed from a valid camera
     // bindless sampler index per slot (UINT32_MAX = look it up again after a SetSamplerState)

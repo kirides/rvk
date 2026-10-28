@@ -113,9 +113,11 @@ bool Context::create(const ContextOptions& options) {
     } else {
         spdlog::info("vulkan: ray tracing off: {}", rt.reason);
     }
-    spdlog::info("vulkan: device '{}' ready (api {}, eds3={}, vertexInputDynamic={}, gpl={}, anisotropy={})", deviceName_,
-                 versionString(props_.apiVersion), features_.extendedDynamicState3, features_.vertexInputDynamicState,
-                 features_.graphicsPipelineLibrary, features_.maxAnisotropy);
+    spdlog::info("vulkan: device '{}' ready (api {}, eds3={}, vertexInputDynamic={}, gpl={}, anisotropy={}, shaderDrawParameters={}, "
+                 "drawIndirectCount={}, multiDrawIndirect={})",
+                 deviceName_, versionString(props_.apiVersion), features_.extendedDynamicState3, features_.vertexInputDynamicState,
+                 features_.graphicsPipelineLibrary, features_.maxAnisotropy, features_.shaderDrawParameters,
+                 features_.drawIndirectCount, features_.indirectDraws);
     return true;
 }
 
@@ -299,7 +301,8 @@ bool Context::createDevice(bool withRayTracing) {
 
     // supported core features
     VkPhysicalDeviceVulkan12Features sup12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
-    VkPhysicalDeviceFeatures2 sup2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &sup12};
+    VkPhysicalDeviceVulkan11Features sup11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, &sup12};
+    VkPhysicalDeviceFeatures2 sup2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &sup11};
     vkGetPhysicalDeviceFeatures2(physical_, &sup2);
 
     VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
@@ -336,6 +339,9 @@ bool Context::createDevice(bool withRayTracing) {
     f12.scalarBlockLayout = VK_TRUE;
     f12.hostQueryReset = sup12.hostQueryReset;
     f12.shaderFloat16 = sup12.shaderFloat16;
+    // merged indirect draws (vulkanize plan.md V4): a GPU-written draw count; optional, the per-draw loop is the fallback
+    f12.drawIndirectCount = sup12.drawIndirectCount;
+    features_.drawIndirectCount = sup12.drawIndirectCount == VK_TRUE;
     features_.shaderFloat16Int16 = sup12.shaderFloat16 == VK_TRUE && sup2.features.shaderInt16 == VK_TRUE;
     features_.hostQueryReset = sup12.hostQueryReset == VK_TRUE;
     VkPhysicalDeviceVulkan13Features f13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
@@ -345,7 +351,13 @@ bool Context::createDevice(bool withRayTracing) {
     // glslang emits GLSL `discard` as OpDemoteToHelperInvocation for SPIR-V 1.6 (D3D9 texkill keeps derivatives working too)
     f13.shaderDemoteToHelperInvocation = VK_TRUE;
     f13.shaderTerminateInvocation = VK_TRUE;
-    f2.pNext = &f12;
+    // gl_DrawID / gl_BaseInstance (shaderDrawParameters, optional in 1.3): the draw's record inside a merged indirect draw
+    // whose instance-rate streams take firstInstance (vulkanize plan.md V4)
+    VkPhysicalDeviceVulkan11Features f11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+    f11.shaderDrawParameters = sup11.shaderDrawParameters;
+    features_.shaderDrawParameters = sup11.shaderDrawParameters == VK_TRUE;
+    f2.pNext = &f11;
+    f11.pNext = &f12;
     f12.pNext = &f13;
     void** tail = &f13.pNext;
 
@@ -579,6 +591,8 @@ caps::Report Context::capabilities(bool pipelineLibrariesInUse) const {
         : !surfaceCaps2_            ? "the Vulkan loader has no VK_KHR_get_surface_capabilities2"
                                     : "",
         "VK_EXT_full_screen_exclusive + VK_KHR_get_surface_capabilities2");
+    set(Cap::ShaderDrawParameters, report_.shaderDrawParameters, features_.shaderDrawParameters, "", "gl_DrawID / gl_BaseInstance");
+    set(Cap::DrawIndirectCount, report_.drawIndirectCount, features_.drawIndirectCount, "", "vkCmdDrawIndexedIndirectCount");
     set(Cap::SamplerAnisotropy, features_.samplerAnisotropy, features_.samplerAnisotropy, "",
         features_.samplerAnisotropy ? std::format("max {:.0f}x", features_.maxAnisotropy) : "");
     if (prt.accelerationStructure) {

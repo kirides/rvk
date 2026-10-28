@@ -175,6 +175,47 @@ TEST(identity_ring_buffer_generations) {
     CHECK(p.op == Op::Patch && p.lo == 1000 && p.hi == 1024);
 }
 
+TEST(identity_ring_block_sizes) {
+    using P = BufferCopyState::Plan;
+    // a whole copy (new frame, no DISCARD): the whole buffer
+    RingBlock b = ringBlock(P{Op::NewCopy, 0, 4096}, 0, 0, 4096);
+    CHECK(b.fresh && b.lo == 0 && b.hi == 4096 && b.copyLo == 0 && b.copyHi == 4096);
+    // after a DISCARD of a range: only that range, lo aligned down to 16
+    b = ringBlock(P{Op::NewCopy, 1000, 1600}, 0, 0, 4 << 20);
+    CHECK(b.fresh && b.lo == 992 && b.hi == 1600 && b.copyLo == 1000 && b.copyHi == 1600);
+    // a NOOVERWRITE patch inside the block: in place
+    b = ringBlock(P{Op::Patch, 1200, 1300}, 992, 1600, 4 << 20);
+    CHECK(!b.fresh && b.copyLo == 1200 && b.copyHi == 1300 && b.lo == 992 && b.hi == 1600);
+    // an append past the block: a new block over both, doubled, filled from the CPU copy
+    b = ringBlock(P{Op::Patch, 1600, 1700}, 992, 1600, 4 << 20);
+    CHECK(b.fresh && b.lo == 992 && b.hi == 992 + 2 * 608 && b.copyLo == 992 && b.copyHi == 1700);
+    // a big append: as large as needed
+    b = ringBlock(P{Op::Patch, 1600, 9000}, 992, 1600, 4 << 20);
+    CHECK(b.fresh && b.lo == 992 && b.hi == 9000 && b.copyHi == 9000);
+    // the doubling stops at the buffer's end
+    b = ringBlock(P{Op::Patch, 3000, 3100}, 0, 3000, 4096);
+    CHECK(b.fresh && b.lo == 0 && b.hi == 4096 && b.copyHi == 3100);
+    // a write below the block: the new block starts there
+    b = ringBlock(P{Op::Patch, 100, 200}, 992, 1600, 4 << 20);
+    CHECK(b.fresh && b.lo == 96 && b.hi >= 1600 && b.copyLo == 96 && b.copyHi == 1600);
+    // nothing to do
+    b = ringBlock(P{}, 992, 1600, 4 << 20);
+    CHECK(!b.fresh && b.copyHi == b.copyLo);
+    // the sequence of BufferCopyState: DISCARD a range, append twice in the frame
+    BufferCopyState st;
+    st.committed(st.plan(true, 1, 8192, false), true, 1);
+    st.lock(256, 100, LOCK_DISCARD, 8192);
+    P p = st.plan(true, 1, 8192, false);
+    b = ringBlock(p, 0, 8192, 8192);
+    CHECK(b.fresh && b.lo == 256 && b.hi == 356);
+    st.committed(p, true, 1);
+    st.lock(356, 100, LOCK_NOOVERWRITE, 8192);
+    p = st.plan(true, 1, 8192, false);
+    CHECK(p.op == Op::Patch);
+    const RingBlock g = ringBlock(p, b.lo, b.hi, 8192);
+    CHECK(g.fresh && g.lo == 256 && g.hi == 456 && g.copyLo == 256 && g.copyHi == 456);
+}
+
 TEST(identity_texture_lock_dirty) {
     // a write lock uploads the locked rect, whether or not the level was uploaded before
     CHECK(textureLockDirty(0, false) == LockDirty::Locked);
