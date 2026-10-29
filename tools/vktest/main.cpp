@@ -1005,7 +1005,9 @@ int ffxDriverProbe(const std::string& dllArg, bool validation) {
     return 0;
 }
 
-// FSR 3.1 native AA through the FFX API DLL on a constant image: every pixel of the output must keep the input colour.
+// FSR native AA through the FFX API DLLs (loader + upscaler) on a constant image: every pixel of the output must keep the input
+// colour. Run for the FSR 3.1 provider (must pass) and, when the API offers it on this GPU, the ML upscaler (FSR 4: reported,
+// failures only noted).
 int fsrTest(const std::string& dllArg, bool validation) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // a crash inside the DLL must not swallow the output
     AddVectoredExceptionHandler(1, crashReport);
@@ -1022,16 +1024,32 @@ int fsrTest(const std::string& dllArg, bool validation) {
 
     vk::Fsr fsr;
     int failures = 0;
+    bool soft = false;  // the ML pass: failures are noted, not counted
+    std::uint32_t fsr3Errors = 0;  // validation errors after the FSR 3 pass: the ML upscaler's shaders add their own (see below)
     auto check = [&](bool ok, const char* what) {
         if (!ok) {
-            std::printf("FAIL: %s\n", what);
-            ++failures;
+            std::printf("%s: %s%s\n", soft ? "NOTE" : "FAIL", soft ? "(ML) " : "", what);
+            if (!soft) ++failures;
         }
         return ok;
     };
     if (check(fsr.load(dll), "load the DLL")) {
         std::printf("versions: %s\n", fsr.versions(ctx).c_str());
+        const std::vector<vk::FsrVersion> offered = fsr.versionList(ctx);
+        for (const vk::FsrVersion& v : offered) {
+            std::printf("  version 0x%llx '%s' (%d.%d.%d%s)\n", static_cast<unsigned long long>(v.id), v.name.c_str(), v.major,
+                        v.minor, v.patch, v.fromDriver ? ", driver" : "");
+        }
+        for (int pass = 0; pass < 2; ++pass) {
+        const bool ml = pass == 1;
+        soft = ml;
+        if (ml && vk::Fsr::pick(offered, true) == nullptr) {
+            std::printf("ML (FSR 4) upscaler: not offered on this device\n");
+            continue;
+        }
+        std::printf("--- %s ---\n", ml ? "ML upscaler (FSR 4)" : "FSR 3 upscaler");
         vk::FsrCreateInfo ci;
+        ci.ml = ml;
         ci.maxRenderSize = ci.maxUpscaleSize = {kW, kH};
         ci.hdr = true;
         ci.debugChecking = true;
@@ -1121,13 +1139,20 @@ int fsrTest(const std::string& dllArg, bool validation) {
             motion.destroy(ctx);
             output.destroy(ctx);
         }
+        fsr.destroyContext();
+        if (pass == 0) fsr3Errors = ctx.validationErrors();
+        }
+        soft = false;
         fsr.destroy();
     }
     frames.destroy();
     const std::uint32_t verrors = ctx.validationErrors();
     ctx.destroy();
-    if (verrors != 0) ++failures;
-    std::printf("%s: fsr: %d failure(s), %u validation error(s)\n", failures == 0 ? "PASS" : "FAIL", failures, verrors);
+    // the ML upscaler (FSR 4) writes a 3-component texel into RGBA16F storage images in its own shaders (OpImageWrite
+    // validation error): AMD's code, reported but not counted
+    if (verrors != fsr3Errors) std::printf("NOTE: ML upscaler: %u validation error(s) from inside AMD's shaders\n", verrors - fsr3Errors);
+    if (fsr3Errors != 0) ++failures;
+    std::printf("%s: fsr: %d failure(s), %u validation error(s) (FSR 3 pass)\n", failures == 0 ? "PASS" : "FAIL", failures, fsr3Errors);
     return failures == 0 ? 0 : 1;
 }
 

@@ -1594,7 +1594,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .key = "upscale.mode",
         .label = "Anti-aliasing / upscaling",
         .category = "Image",
-        .description = "AMD FidelityFX Super Resolution 3.1: a temporal filter that removes jagged edges and shimmer. Native AA "
+        .description = "AMD FidelityFX Super Resolution: a temporal filter that removes jagged edges and shimmer. Native AA "
                        "renders at the screen's resolution; Quality to Ultra performance render the 3D scene at 1/1.5 .. 1/3 of "
                        "it per dimension (faster) and upscale it; the menus and the HUD stay sharp. \"Jitter only\" shakes "
                        "the camera without the filter (developer test).",
@@ -1605,6 +1605,19 @@ RendererSettings registerRendererSettings(Registry& reg) {
                          "Ultra performance (3x)", "Jitter only (test)"},
     });
 
+    r.upscaleProvider = &reg.add({
+        .key = "upscale.provider",
+        .label = "Upscaler",
+        .category = "Image",
+        .description = "Which AMD FidelityFX upscaler runs: \"FSR 3.1\" (the analytic filter, the default) or \"FSR 4\" (a neural "
+                       "network: sharper and steadier in motion, costs more GPU time; needs a Radeon RX 6000 series or newer, "
+                       "and the GPU driver's AMD DLL support; experimental). Falls back to FSR 3.1 when the GPU is not supported.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"fsr3", "fsr4"},
+        .optionLabels = {"FSR 3.1", "FSR 4 (neural, experimental)"},
+        .flags = Flag::Advanced,
+    });
     r.upscaleObjectMotion = &reg.add({
         .key = "upscale.object_motion",
         .label = "Motion of characters and objects",

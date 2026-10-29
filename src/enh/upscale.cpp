@@ -138,7 +138,13 @@ void Upscale::apply(UpscaleMode mode, unsigned flip) {
     dev_.setGeometryLodBias(upscaleLodBias(1, 1));
     dev_.addPass(d3d9::inject::Point::BeforeAlpha, "upscale.opaque", [this](d3d9::PassContext& ctx) { recordOpaque(ctx); }, this);
     dev_.addPass(d3d9::inject::Point::AfterMainView, "upscale.fsr", [this](d3d9::PassContext& ctx) { record(ctx); }, this, 100);
-    spdlog::info("enh: upscale: FSR 3.1 at 1/{:.2f} of the output, jitter {} phases", ratio, phases_.load());
+    spdlog::info("enh: upscale: FSR at 1/{:.2f} of the output, jitter {} phases", ratio, phases_.load());
+}
+
+void Upscale::setMl(bool on) {
+    if (on == ml_) return;
+    ml_ = on;
+    if (usesFsr(mode_)) dropFsr();  // ensureFsr builds the other provider's context with the next frame
 }
 
 void Upscale::dropFsr() {
@@ -156,13 +162,21 @@ bool Upscale::ensureFsr(VkExtent2D render, VkExtent2D display) {
     }
     dropFsr();
     auto f = std::make_shared<vk::Fsr>();
-    const std::filesystem::path dll = paths::dataDir() / "amd_fidelityfx_vk.dll";
+    const std::filesystem::path dll = paths::dataDir() / "amd_fidelityfx_loader_vk.dll";
     vk::FsrCreateInfo ci;
     ci.maxRenderSize = render;
     ci.maxUpscaleSize = display;
     ci.hdr = true;  // the scene HDR target: linear, before the post chain's tonemapping
     ci.autoExposure = true;
-    if (!f->load(dll) || !f->createContext(dev_.ctx(), ci)) {
+    ci.ml = ml_;
+    bool ok = f->load(dll) && f->createContext(dev_.ctx(), ci);
+    if (!ok && ml_ && f->loaded()) {
+        spdlog::warn("enh: upscale: the FSR 4 (ML) upscaler is not available on this GPU: FSR 3.1");
+        ci.ml = false;
+        ok = f->createContext(dev_.ctx(), ci);
+    }
+    mlActive_ = ok && ci.ml;
+    if (!ok) {
         spdlog::error("enh: upscale: FSR is not available ({}): it stays off this session", dll.string());
         failed_ = true;
         dev_.setRenderRatio(1.0f);

@@ -1,6 +1,8 @@
 #include "vk/fsr.h"
 
 #include <format>
+#include <tuple>
+#include <vector>
 
 #include <spdlog/spdlog.h>
 
@@ -12,10 +14,10 @@
 #endif
 #include <windows.h>
 
-#include <ffx_api/ffx_api.h>
-#include <ffx_api/ffx_api_loader.h>
-#include <ffx_api/ffx_upscale.h>
-#include <ffx_api/vk/ffx_api_vk.h>
+#include <ffx_api.h>
+#include <ffx_api_loader.h>
+#include <ffx_upscale.h>
+#include <vk/ffx_api_vk.h>
 
 #include "vk/context.h"
 
@@ -94,16 +96,39 @@ bool Fsr::load(const std::filesystem::path& dll) {
     return true;
 }
 
-static void* createRaw(const ffxFunctions& api, Context& ctx, const FsrCreateInfo& info, std::uint32_t& flagsOut) {
+namespace {
+
+VkDeviceContext deviceContextOf(Context& ctx) {
+    VkDeviceContext dc{};
+    dc.vkDevice = ctx.device();
+    dc.vkPhysicalDevice = ctx.physicalDevice();
+    dc.vkDeviceProcAddr = vkGetDeviceProcAddr;
+    return dc;
+}
+
+}  // namespace
+
+// `versionId` 0 = no override (the newest version the API finds, driver provided ones included); else the id of a version
+// returned by the version query (ffxOverrideVersion switches the automatic choice off)
+static void* createRaw(const ffxFunctions& api, Context& ctx, const FsrCreateInfo& info, std::uint64_t versionId, std::uint32_t& flagsOut) {
     ffxCreateBackendVKDesc backend{};
     backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
-    backend.vkDevice = ctx.device();
-    backend.vkPhysicalDevice = ctx.physicalDevice();
-    backend.vkDeviceProcAddr = vkGetDeviceProcAddr;
+    backend.deviceContext = deviceContextOf(ctx);
+
+    // SDK 2.1+: the version of the headers this was built against (the API refuses contexts without it)
+    ffxCreateContextDescUpscaleVersion apiVersion{};
+    apiVersion.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE_VERSION;
+    apiVersion.header.pNext = &backend.header;
+    apiVersion.version = FFX_UPSCALER_VERSION;
+
+    ffxOverrideVersion ovr{};
+    ovr.header.type = FFX_API_DESC_TYPE_OVERRIDE_VERSION;
+    ovr.header.pNext = &apiVersion.header;
+    ovr.versionId = versionId;
 
     ffxCreateContextDescUpscale create{};
     create.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
-    create.header.pNext = &backend.header;
+    create.header.pNext = versionId != 0 ? &ovr.header : &apiVersion.header;
     create.flags = (info.hdr ? FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE : 0) |
                    (info.motionJitterCancelled ? FFX_UPSCALE_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION : 0) |
                    (info.invertedDepth ? FFX_UPSCALE_ENABLE_DEPTH_INVERTED : 0) |
@@ -128,19 +153,27 @@ static void* createRaw(const ffxFunctions& api, Context& ctx, const FsrCreateInf
 bool Fsr::createContext(Context& ctx, const FsrCreateInfo& info) {
     if (module_ == nullptr) return false;
     destroyContext();
+    const std::vector<FsrVersion> list = versionList(ctx);
+    const FsrVersion* v = pick(list, info.ml);
+    if (v == nullptr) {
+        spdlog::error("fsr: the API offers no {} upscaler on this device ({} version(s))", info.ml ? "ML (FSR 4)" : "FSR 3", list.size());
+        return false;
+    }
+    const FsrVersion* v3 = pick(list, false);
     std::uint32_t flags = 0;
-    ffxContext c = createRaw(fn_->api, ctx, info, flags);
+    ffxContext c = createRaw(fn_->api, ctx, info, v->id, flags);
     if (c == nullptr) return false;
     context_ = c;
     ctx_ = &ctx;
     info_ = info;
+    reactiveVersion_ = v3 != nullptr ? v3->id : 0;
 
     ffxQueryGetProviderVersion q{};
     q.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
     provider_.clear();
     if (fn_->api.Query(&c, &q.header) == FFX_API_RETURN_OK && q.versionName != nullptr) provider_ = q.versionName;
-    spdlog::info("fsr: context {}x{} -> {}x{} flags 0x{:x}, provider '{}'", info.maxRenderSize.width, info.maxRenderSize.height,
-                 info.maxUpscaleSize.width, info.maxUpscaleSize.height, flags, provider_);
+    spdlog::info("fsr: context {}x{} -> {}x{} flags 0x{:x}, provider '{}' (version id 0x{:x})", info.maxRenderSize.width,
+                 info.maxRenderSize.height, info.maxUpscaleSize.width, info.maxUpscaleSize.height, flags, provider_, v->id);
     return true;
 }
 
@@ -221,8 +254,10 @@ bool Fsr::generateReactiveMask(VkCommandBuffer cmd, Image& opaque, Image& color,
     if (reactiveContext_ == nullptr) {
         FsrCreateInfo tiny = info_;
         tiny.maxRenderSize = tiny.maxUpscaleSize = {32, 32};  // the mask pass reads its size from the dispatch
+        tiny.ml = false;
+        if (reactiveVersion_ == 0) return false;  // no FSR 3 provider: the auto mask is an FSR 3 feature
         std::uint32_t flags = 0;
-        reactiveContext_ = createRaw(fn_->api, *ctx_, tiny, flags);
+        reactiveContext_ = createRaw(fn_->api, *ctx_, tiny, reactiveVersion_, flags);
         if (reactiveContext_ == nullptr) return false;
         spdlog::info("fsr: reactive mask context (32x32: only its own pipeline is used)");
     }
@@ -288,24 +323,54 @@ bool Fsr::renderSizeForMode(VkExtent2D display, std::uint32_t mode, VkExtent2D& 
     return fn_->api.Query(&c, &q.header) == FFX_API_RETURN_OK;
 }
 
-std::string Fsr::versions(Context& ctx) {
-    if (module_ == nullptr) return {};
+std::vector<FsrVersion> Fsr::versionList(Context& ctx) {
+    std::vector<FsrVersion> out;
+    if (module_ == nullptr) return out;
+    VkDeviceContext dc = deviceContextOf(ctx);
     std::uint64_t count = 0;
     ffxQueryDescGetVersions q{};
     q.header.type = FFX_API_QUERY_DESC_TYPE_GET_VERSIONS;
     q.createDescType = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
-    q.device = ctx.device();
+    q.device = &dc;
     q.outputCount = &count;
-    if (fn_->api.Query(nullptr, &q.header) != FFX_API_RETURN_OK || count == 0) return {};
+    if (fn_->api.Query(nullptr, &q.header) != FFX_API_RETURN_OK || count == 0) return out;
     std::vector<std::uint64_t> ids(count);
     std::vector<const char*> names(count);
     q.outputCount = &count;
     q.versionIds = ids.data();
     q.versionNames = names.data();
-    if (fn_->api.Query(nullptr, &q.header) != FFX_API_RETURN_OK) return {};
+    if (fn_->api.Query(nullptr, &q.header) != FFX_API_RETURN_OK) return out;
+    for (std::uint64_t i = 0; i < count && i < ids.size(); ++i) {
+        FsrVersion v;
+        v.id = ids[i];
+        v.name = names[i] != nullptr ? names[i] : "";  // copied now: the API may overwrite the strings by a later query
+        v.fromDriver = (v.id & 0x80000000ull) != 0 || (v.name.size() >= 2 && v.name.ends_with(" *"));
+        const char* p = v.name.c_str();
+        while (*p != 0 && (*p < '0' || *p > '9')) ++p;
+        int* parts[3] = {&v.major, &v.minor, &v.patch};
+        for (int* part : parts) {
+            if (*p < '0' || *p > '9') break;
+            while (*p >= '0' && *p <= '9') *part = *part * 10 + (*p++ - '0');
+            if (*p == '.') ++p;
+        }
+        out.push_back(std::move(v));
+    }
+    return out;
+}
+
+const FsrVersion* Fsr::pick(const std::vector<FsrVersion>& list, bool ml) {
+    const FsrVersion* best = nullptr;
+    for (const FsrVersion& v : list) {
+        if (ml ? v.major < 4 : v.major != 3) continue;
+        if (best == nullptr || std::tie(v.major, v.minor, v.patch) > std::tie(best->major, best->minor, best->patch)) best = &v;
+    }
+    return best;
+}
+
+std::string Fsr::versions(Context& ctx) {
     std::string s;
-    for (std::uint64_t i = 0; i < count; ++i) {
-        s += std::format("{}{}: {}", i == 0 ? "" : ", ", ids[i], names[i] != nullptr ? names[i] : "?");
+    for (const FsrVersion& v : versionList(ctx)) {
+        s += std::format("{}0x{:x}: {}", s.empty() ? "" : ", ", v.id, v.name);
     }
     return s;
 }

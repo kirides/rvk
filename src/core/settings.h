@@ -350,6 +350,7 @@ struct RendererSettings {
     Setting* gbufferDebug = nullptr;      // gbuffer.debug: "off", "normals", "motion", "ao"
     // upscaling / anti-aliasing (enh/upscale.h, docs/research/upscaling.md)
     Setting* upscaleObjectMotion = nullptr;  // upscale.object_motion: motion vectors of characters and moving objects (enh/object_motion)
+    Setting* upscaleProvider = nullptr;   // upscale.provider: "fsr3" (FSR 3.1, default) or "fsr4" (the ML upscaler of the FSR SDK 2.4)
     Setting* upscaleReactive = nullptr;   // upscale.reactive: FSR's automatic reactive mask (particles, rain, spells)
     Setting* upscaleReactiveCutoff = nullptr;  // upscale.reactive_cutoff: advanced, the difference above which a pixel is reactive
     Setting* upscaleReactiveScale = nullptr;   // upscale.reactive_scale: advanced, multiplies the mask

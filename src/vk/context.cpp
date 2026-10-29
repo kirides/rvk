@@ -340,6 +340,9 @@ bool Context::createDevice(bool withRayTracing) {
     f12.scalarBlockLayout = VK_TRUE;
     f12.hostQueryReset = sup12.hostQueryReset;
     f12.shaderFloat16 = sup12.shaderFloat16;
+    // the FSR SDK 2.4 upscalers (FSR 3.1.6 and the FSR 4 ML upscaler) declare these in their SPIR-V; all optional: without them
+    // the DLL's shaders fail validation / pipelines and the ML upscaler stays unusable (docs/research/upscaling.md 15)
+    f12.shaderInt8 = sup12.shaderInt8;
     // merged indirect draws (vulkanize plan.md V4): a GPU-written draw count; optional, the per-draw loop is the fallback
     f12.drawIndirectCount = sup12.drawIndirectCount;
     features_.drawIndirectCount = sup12.drawIndirectCount == VK_TRUE;
@@ -352,6 +355,14 @@ bool Context::createDevice(bool withRayTracing) {
     // glslang emits GLSL `discard` as OpDemoteToHelperInvocation for SPIR-V 1.6 (D3D9 texkill keeps derivatives working too)
     f13.shaderDemoteToHelperInvocation = VK_TRUE;
     f13.shaderTerminateInvocation = VK_TRUE;
+    VkPhysicalDeviceVulkan13Features sup13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+    {
+        VkPhysicalDeviceFeatures2 q13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &sup13};
+        vkGetPhysicalDeviceFeatures2(physical_, &q13);
+    }
+    f13.shaderIntegerDotProduct = sup13.shaderIntegerDotProduct;
+    f13.subgroupSizeControl = sup13.subgroupSizeControl;
+    f13.computeFullSubgroups = sup13.computeFullSubgroups;
     // gl_DrawID / gl_BaseInstance (shaderDrawParameters, optional in 1.3): the draw's record inside a merged indirect draw
     // whose instance-rate streams take firstInstance (vulkanize plan.md V4)
     VkPhysicalDeviceVulkan11Features f11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
@@ -401,6 +412,19 @@ bool Context::createDevice(bool withRayTracing) {
             tail = &gpl.pNext;
         } else {
             features_.graphicsPipelineLibrary = false;
+        }
+    }
+    VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR csd{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR};
+    if (hasExtension(exts, VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME)) {
+        VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR q{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR};
+        VkPhysicalDeviceFeatures2 qf{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &q};
+        vkGetPhysicalDeviceFeatures2(physical_, &qf);
+        if (q.computeDerivativeGroupLinear || q.computeDerivativeGroupQuads) {
+            csd.computeDerivativeGroupLinear = q.computeDerivativeGroupLinear;
+            csd.computeDerivativeGroupQuads = q.computeDerivativeGroupQuads;
+            enabled.push_back(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
+            *tail = &csd;
+            tail = &csd.pNext;
         }
     }
     VkPhysicalDeviceRobustness2FeaturesEXT rob2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};

@@ -132,8 +132,11 @@ if ($NoRenderer) {
     $pdb = [IO.Path]::ChangeExtension($dll, '.pdb')
     if (Test-Path $pdb) { Copy-Item $pdb $bin -Force }
     New-Item -ItemType Directory -Force $rvkDir | Out-Null
-    # FSR 3.1 (enh/upscale): AMD's signed FidelityFX DLL, loaded from bin\rvk
-    Copy-Item (Join-Path $repo 'third_party\amd_fidelityfx\presigned_dll\amd_fidelityfx_vk.dll') $rvkDir -Force
+    # FSR (enh/upscale): AMD's signed FSR SDK 2.4.0 DLLs (loader + upscaler), loaded from bin\rvk
+    foreach ($f in 'amd_fidelityfx_loader_vk.dll', 'amd_fidelityfx_upscaler_vk.dll') {
+        Copy-Item (Join-Path $repo "third_party\amd_fidelityfx\signedbin\$f") $rvkDir -Force
+    }
+    Remove-Item (Join-Path $rvkDir 'amd_fidelityfx_vk.dll') -Force -ErrorAction SilentlyContinue  # the SDK 1.1.4 DLL
     $cfg = @(
         '# written by scripts/run.ps1',
         '[renderer]', "mode = `"$Mode`"",

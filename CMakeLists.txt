@@ -432,8 +432,8 @@ add_library(rvk_core STATIC
 target_include_directories(rvk_core PUBLIC src include)
 target_include_directories(rvk_core PRIVATE ${RVK_GENERATED_DIR})
 target_include_directories(rvk_core PRIVATE ${STB_INCLUDE_DIR} third_party/imgui_vulkan)
-# AMD FidelityFX API headers (MIT); the signed DLL is loaded at run time, never linked (third_party/amd_fidelityfx)
-target_include_directories(rvk_core PRIVATE third_party/amd_fidelityfx/ffx-api/include)
+# AMD FSR SDK 2.4.0 API headers (MIT); the signed DLLs are loaded at run time, never linked (third_party/amd_fidelityfx)
+target_include_directories(rvk_core PRIVATE third_party/amd_fidelityfx/api/include third_party/amd_fidelityfx/upscalers/include)
 # volk is compiled here (not vcpkg's volk.lib): it needs VK_USE_PLATFORM_WIN32_KHR for the Win32 surface entry points
 target_compile_definitions(rvk_core PUBLIC VK_NO_PROTOTYPES VK_USE_PLATFORM_WIN32_KHR VMA_STATIC_VULKAN_FUNCTIONS=0 VMA_DYNAMIC_VULKAN_FUNCTIONS=0)
 target_link_libraries(rvk_core PUBLIC
@@ -496,7 +496,7 @@ rvk_warnings(rvk_shadertool)
 add_executable(rvk_vktest tools/vktest/main.cpp tools/common/d3dx.h)
 target_include_directories(rvk_vktest PRIVATE tools ${STB_INCLUDE_DIR})
 target_link_libraries(rvk_vktest PRIVATE rvk_core)
-target_compile_definitions(rvk_vktest PRIVATE RVK_FFX_DLL="${CMAKE_SOURCE_DIR}/third_party/amd_fidelityfx/presigned_dll/amd_fidelityfx_vk.dll")
+target_compile_definitions(rvk_vktest PRIVATE RVK_FFX_DLL="${CMAKE_SOURCE_DIR}/third_party/amd_fidelityfx/signedbin/amd_fidelityfx_loader_vk.dll")
 rvk_warnings(rvk_vktest)
 
 # rvk_shadereq: two pixel shaders on the GPU with identical random inputs, outputs compared (translated game shader vs the GLSL port)

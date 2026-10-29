@@ -1,6 +1,6 @@
 // This file is part of the FidelityFX SDK.
 //
-// Copyright (C) 2024 Advanced Micro Devices, Inc.
+// Copyright (C) 2026 Advanced Micro Devices, Inc.
 // 
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files(the "Software"), to deal
@@ -21,30 +21,19 @@
 // THE SOFTWARE.
 
 #pragma once
-#include "ffx_provider.h"
 
-class ffxProvider_FSR2: public ffxProvider
+#include "../ffx_api.hpp"
+#include "ffx_api_vk.h"
+
+// Helper types for header initialization. Api definition is in .h file.
+
+namespace ffx
 {
-public:
-    ffxProvider_FSR2() = default;
-    virtual ~ffxProvider_FSR2() = default;
-
-    virtual bool CanProvide(uint64_t type) const override;
-
-    virtual uint64_t GetId() const override;
-
-    virtual const char* GetVersionName() const override;
-
-    virtual ffxReturnCode_t CreateContext(ffxContext* context, ffxCreateContextDescHeader* desc, Allocator& alloc) const override;
-
-    virtual ffxReturnCode_t DestroyContext(ffxContext* context, Allocator& alloc) const override;
-
-    virtual ffxReturnCode_t Configure(ffxContext* context, const ffxConfigureDescHeader* desc) const override;
-
-    virtual ffxReturnCode_t Query(ffxContext* context, ffxQueryDescHeader* desc) const override;
-
-    virtual ffxReturnCode_t Dispatch(ffxContext* context, const ffxDispatchDescHeader* desc) const override;
-
-    static ffxProvider_FSR2 Instance;
+    template<>
+    struct struct_type<ffxCreateBackendVKDesc> : std::integral_constant<uint64_t, FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK> {};
+    struct CreateBackendVKDesc : public InitHelper<ffxCreateBackendVKDesc> {};
     
-};
+    template<>
+    struct struct_type<ffxCreateBackendVKAllocationCallbacksDesc> : std::integral_constant<uint64_t, FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK_ALLOCATION_CALLBACKS> {};
+    struct CreateBackendVKAllocationCallbacksDesc : public InitHelper<ffxCreateBackendVKAllocationCallbacksDesc> {};
+}

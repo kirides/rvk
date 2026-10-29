@@ -18,6 +18,8 @@ IN GAME
 QUIRKS
   - Fullscreen is a borderless window over the monitor. Real exclusive fullscreen: overlay, Display section.
   - Ray tracing options need a GPU with ray tracing support; otherwise they are greyed out.
+  - Anti-aliasing / upscaling (Image): AMD FSR 3.1. With "Show advanced settings", Upscaler can be set to FSR 4 (a neural
+    upscaler from AMD's FSR SDK 2.4; needs a Radeon RX 6000 series or newer, otherwise FSR 3.1 stays; experimental).
   - The first start (and the first visit to a coast with the enhanced ocean) can take longer: caches are built
     in rvk\cache.
   - Render mode (System tab): Wrapper (default: the game's rendering on Vulkan + the enhancements), Full

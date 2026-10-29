@@ -22,8 +22,16 @@ try {
     New-Item -ItemType Directory -Force "$stage\rvk" | Out-Null
     Copy-Item $dll $stage
     Copy-Item package\rvk\config.toml "$stage\rvk"
-    # FSR 3.1 (upscale.mode): AMD's signed FidelityFX DLL
-    Copy-Item third_party\amd_fidelityfx\presigned_dll\amd_fidelityfx_vk.dll "$stage\rvk"
+    # FSR (upscale.mode): AMD's signed FSR SDK 2.4.0 DLLs (loader + upscaler: FSR 3.1 and FSR 4) and the licence notice their
+    # licence asks to be reproduced with the software (the part before the list of source files)
+    foreach ($f in 'amd_fidelityfx_loader_vk.dll', 'amd_fidelityfx_upscaler_vk.dll') {
+        Copy-Item "third_party\amd_fidelityfx\signedbin\$f" "$stage\rvk"
+    }
+    $lic = @(Get-Content third_party\amd_fidelityfx\LICENSE.md)
+    $end = ($lic | Select-String -Pattern '^These source files' | Select-Object -First 1).LineNumber - 1
+    if ($end -lt 10) { throw 'amd_fidelityfx\LICENSE.md: end of the notice not found' }
+    $notice = @('AMD FSR SDK 2.4.0 (amd_fidelityfx_loader_vk.dll, amd_fidelityfx_upscaler_vk.dll): https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK', '') + $lic[0..($end - 1)]
+    [IO.File]::WriteAllText("$stage\rvk\amd_fidelityfx_LICENSE.txt", ($notice -join "`r`n") + "`r`n")
 
     # README.txt + the build it belongs to (bug reports), CRLF for Notepad
     $sha = git rev-parse --short HEAD

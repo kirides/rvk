@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include "vk/image.h"
 #include "vk/vk.h"
@@ -20,7 +21,16 @@ namespace rvk::vk {
 
 class Context;
 
+// one upscaler provider the FFX API offers (ffxQueryDescGetVersions)
+struct FsrVersion {
+    std::uint64_t id = 0;
+    std::string name;       // "4.1.2", "3.1.6 *" (a trailing " *" = provided by the display driver)
+    int major = 0, minor = 0, patch = 0;  // parsed from the first digits of the name (0 = none)
+    bool fromDriver = false;
+};
+
 struct FsrCreateInfo {
+    bool ml = false;                   // the ML upscaler (FSR 4.x); false = the newest FSR 3.x
     VkExtent2D maxRenderSize{1, 1};
     VkExtent2D maxUpscaleSize{1, 1};
     bool hdr = false;                  // the colour input is linear HDR (else display-referred)
@@ -62,6 +72,7 @@ public:
     ~Fsr() { destroy(); }
 
     // loads `dll` (full path) and binds the entry points; false (logged) when it is missing or not an FFX API DLL
+    // (the loader DLL, amd_fidelityfx_loader_vk.dll; the effect DLL is looked up next to it)
     bool load(const std::filesystem::path& dll);
     bool loaded() const { return module_ != nullptr; }
     bool createContext(Context& ctx, const FsrCreateInfo& info);
@@ -85,8 +96,12 @@ public:
     bool jitterOffset(int index, int phaseCount, float& x, float& y);
     // the render size for a quality mode (FfxApiUpscaleQualityMode: 0 = native AA .. 4 = ultra performance)
     bool renderSizeForMode(VkExtent2D display, std::uint32_t mode, VkExtent2D& render);
-    // every provider version the DLL offers for the upscaler, "id: name" (the first is the newest / the driver's choice)
+    // every provider version the API offers for the upscaler on this device (empty without a module)
+    std::vector<FsrVersion> versionList(Context& ctx);
+    // the same as one line, "id: name, ..."
     std::string versions(Context& ctx);
+    // the newest version of the family (ml: major >= 4, else major 3), nullptr when there is none
+    static const FsrVersion* pick(const std::vector<FsrVersion>& list, bool ml);
 
 private:
     void* module_ = nullptr;  // HMODULE
@@ -95,6 +110,7 @@ private:
     // slot it enters: two dispatches per frame on one context (reactive mask + upscale) cycle it faster than our frames in flight
     // finish (validation: vkDestroyImageView in use). The reactive mask runs on its own, tiny context (a dispatch per frame each).
     void* reactiveContext_ = nullptr;
+    std::uint64_t reactiveVersion_ = 0;  // the FSR 3 version id the reactive mask context is pinned to
     Context* ctx_ = nullptr;
     FsrCreateInfo info_{};
     struct Functions;

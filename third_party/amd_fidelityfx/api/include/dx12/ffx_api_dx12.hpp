@@ -1,6 +1,6 @@
 // This file is part of the FidelityFX SDK.
 //
-// Copyright (C) 2024 Advanced Micro Devices, Inc.
+// Copyright (C) 2026 Advanced Micro Devices, Inc.
 // 
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files(the "Software"), to deal
@@ -21,18 +21,23 @@
 // THE SOFTWARE.
 
 #pragma once
-#include "ffx_provider.h"
-#include <ffx_api/ffx_api.hpp>
-#include <FidelityFx/host/ffx_interface.h>
 
-ffxReturnCode_t CreateBackend(const ffxCreateContextDescHeader* desc, bool& backendFound, FfxInterface* iface, size_t contexts, Allocator& alloc);
+#include "../ffx_api.hpp"
+#include "ffx_api_dx12.h"
 
-inline ffxReturnCode_t MustCreateBackend(const ffxCreateContextDescHeader* desc, FfxInterface* iface, size_t contexts, Allocator& alloc)
+// Helper types for header initialization. Api definition is in .h file.
+
+namespace ffx
 {
-    bool backendFound = false;
-    TRY(CreateBackend(desc, backendFound, iface, contexts, alloc));
-    VERIFY(backendFound, FFX_API_RETURN_ERROR);
-    return FFX_API_RETURN_OK;
-}
 
-void* GetDevice(const ffxApiHeader* desc);
+template<>
+struct struct_type<ffxCreateBackendDX12Desc> : std::integral_constant<uint64_t, FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12> {};
+
+struct CreateBackendDX12Desc : public InitHelper<ffxCreateBackendDX12Desc> {};
+
+template<>
+struct struct_type<ffxCreateBackendDX12AllocationCallbacksDesc> : std::integral_constant<uint64_t, FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12_ALLOCATION_CALLBACKS> {};
+
+struct CreateBackendDX12AllocationCallbacksDesc : public InitHelper<ffxCreateBackendDX12AllocationCallbacksDesc> {};
+
+}

@@ -1,6 +1,7 @@
 #pragma once
 
-// Temporal anti-aliasing / upscaling with AMD FidelityFX Super Resolution 3.1 (docs/research/upscaling.md).
+// Temporal anti-aliasing / upscaling with AMD FidelityFX Super Resolution (FSR 3.1.x, optionally the FSR 4 ML upscaler; SDK 2.4.0;
+// docs/research/upscaling.md).
 //
 // * Camera jitter: `upscale.mode` != off hands the device a jitter source; each frame's first main view shifts the scene's
 //   geometry by FSR's Halton sub-pixel offset (d3d9::Device::geometryJitter -> DrawBlock::posFix, FrameBlock::jitter); the
@@ -53,6 +54,10 @@ public:
     UpscaleMode mode() const { return mode_; }
     void setSharpness(float s) { sharpness_ = s < 0.0f ? 0.0f : s > 1.0f ? 1.0f : s; }
     void setReactive(bool on) { reactive_ = on; }
+    // upscale.provider: the ML upscaler (FSR 4) instead of FSR 3.1; the context is rebuilt when it changes. Falls back to FSR 3.1
+    // (logged) when the FFX API does not offer an ML upscaler on this GPU.
+    void setMl(bool on);
+    bool mlActive() const { return mlActive_; }
     void setReactiveTuning(float cutoff, float scale) { reactiveCutoff_ = cutoff; reactiveScale_ = scale; }
 
 private:
@@ -66,6 +71,8 @@ private:
     unsigned flip_ = 0;
     float sharpness_ = 0.4f;
     bool reactive_ = true;
+    bool ml_ = false;        // upscale.provider = fsr4
+    bool mlActive_ = false;  // the current context is the ML upscaler
     float reactiveCutoff_ = 0.08f, reactiveScale_ = 1.0f;
     bool opaqueValid_ = false;  // this frame's BeforeAlpha snapshot (the scene without translucent effects) was taken
     std::atomic<int> phases_{8};  // the jitter sequence's length (the jitter source runs on the render thread; set from the sizes)

@@ -1,6 +1,6 @@
 // This file is part of the FidelityFX SDK.
 //
-// Copyright (C) 2024 Advanced Micro Devices, Inc.
+// Copyright (C) 2026 Advanced Micro Devices, Inc.
 // 
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files(the "Software"), to deal
@@ -21,30 +21,18 @@
 // THE SOFTWARE.
 
 #pragma once
-#include "ffx_provider.h"
 
-class ffxProvider_FSR3Upscale: public ffxProvider
+#include "ffx_api_matrix_helpers.h"
+
+/// Converts a matrix from any layout/convention to the FFX canonical format.
+/// The FFX canonical format is row-major layout with row-vector convention.
+///
+/// @param srcMatrix     Pointer to 16 floats representing the source matrix
+/// @param srcLayout     Memory layout of the source matrix
+/// @param srcVectorConv Vector convention of the source matrix
+/// @return              Matrix converted to FFX canonical format
+template<FfxApiMatrixLayout SrcMatrixLayout, FfxApiMatrixVectorConvention SrcMatrixVectorConvention>
+static inline FfxApiMatrix4x4 ffxConvertToMatrix4x4(const float* srcMatrix)
 {
-public:
-    ffxProvider_FSR3Upscale()    = default;
-    virtual ~ffxProvider_FSR3Upscale() = default;
-
-    virtual bool CanProvide(uint64_t type) const override;
-
-    virtual uint64_t GetId() const override;
-
-    virtual const char* GetVersionName() const override;
-
-    virtual ffxReturnCode_t CreateContext(ffxContext* context, ffxCreateContextDescHeader* desc, Allocator& alloc) const override;
-
-    virtual ffxReturnCode_t DestroyContext(ffxContext* context, Allocator& alloc) const override;
-
-    virtual ffxReturnCode_t Configure(ffxContext* context, const ffxConfigureDescHeader* desc) const override;
-
-    virtual ffxReturnCode_t Query(ffxContext* context, ffxQueryDescHeader* desc) const override;
-
-    virtual ffxReturnCode_t Dispatch(ffxContext* context, const ffxDispatchDescHeader* desc) const override;
-
-    static ffxProvider_FSR3Upscale Instance;
-    
-};
+    return ffxConvertToMatrix4x4(srcMatrix, SrcMatrixLayout, SrcMatrixVectorConvention);
+}
