@@ -75,7 +75,7 @@ std::string textureName(const TextureInfo& t) {
     if (t.volume) s += " vol";
     if (t.levels > 1) s += std::format(" L{}", t.levels);
     if (t.dynamic) s += " dynamic";
-    if (t.slot != 0) s += std::format(" [slot {}]", t.slot);
+    if (t.slot != 0) s += std::format(" [{}slot {}]", t.cube ? "cube " : t.volume ? "3d " : "", t.slot);  // slots index the array of the texture kind
     return s;
 }
 

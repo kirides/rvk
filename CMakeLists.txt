@@ -238,9 +238,9 @@ add_library(rvk_core STATIC
     src/d3d9/scene.h
     src/d3d9/semantics.cpp
     src/d3d9/semantics.h
-    src/enh/debug_view.cpp
     src/d3d9/target_names.cpp
     src/d3d9/target_names.h
+    src/enh/debug_view.cpp
     src/enh/debug_view.h
     src/enh/gi.cpp
     src/enh/gi.h
@@ -393,9 +393,9 @@ add_library(rvk_core STATIC
     src/vk/bindless.h
     src/vk/context.cpp
     src/vk/context.h
-    src/vk/formats.cpp
     src/vk/debug_names.cpp
     src/vk/debug_names.h
+    src/vk/formats.cpp
     src/vk/formats.h
     src/vk/frames.cpp
     src/vk/fsr.cpp

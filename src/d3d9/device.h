@@ -120,6 +120,7 @@ public:
     // the role the scene tracker found ("depth map", "cascade shadow map" #k, ...): a static string, renamed when it changes
     // (Device::tagImage). Render thread
     void setDebugLabel(const char* label, std::uint32_t index = ~0u);
+    const char* debugLabel() const { return label_; }
 
     // bytes held in CPU copies of all textures (diagnostics)
     static std::uint64_t cpuBytesTotal();

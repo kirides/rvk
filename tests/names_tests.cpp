@@ -46,6 +46,8 @@ TEST(names_cube_volume_dynamic) {
     t.cube = true;
     t.dynamic = true;
     CHECK(vk::names::textureName(t) == "tex 17 512x256 DXT1 cube dynamic");
+    t.slot = 3;
+    CHECK(vk::names::textureName(t) == "tex 17 512x256 DXT1 cube dynamic [cube slot 3]");
     t = base();
     t.volume = true;
     t.depth = 32;

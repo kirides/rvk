@@ -31,7 +31,8 @@ bool contains(const std::array<Texture*, N>& a, std::uint32_t count, const Textu
 void onShadowMaskTarget(Device& device, Surface* surface) {
     if (surface == nullptr || surface == device.backBuffer()) return;
     Texture* t = surface->texture();
-    if (t == nullptr || t->isNull() || t->isDepth()) return;
+    // targets with a role (the scene image, the depth map) are bound here too: they keep their names
+    if (t == nullptr || t->isNull() || t->isDepth() || t->role() != scene::ImageRole::None) return;
     FrameState& s = g_state;
     if (s.frame != device.stats().frames) {
         s = FrameState{};
@@ -45,6 +46,7 @@ void onShadowMaskTarget(Device& device, Surface* surface) {
         }
         return;
     }
+    if (d.format != vk::d3dfmt::A8R8G8B8) return;  // the mask chain's buffers are A8R8G8B8
     // "scene-sized": the scene target's size when known (the mask is allocated at the scene size, the SSAO buffers at half)
     const Texture* hdr = device.imageWithRole(scene::ImageRole::SceneHdr);
     const bool full = hdr == nullptr || d.width * 4 > hdr->desc().width * 3;
@@ -60,7 +62,13 @@ void onShadowMaskTarget(Device& device, Surface* surface) {
         // rebound (the blur reads the mask, then writes the next one): the newest target stays the final mask
         return;
     }
+    // the targets come from the engine's pool and repeat every frame: a first target is called the mask only until a second one
+    // shows up (then it is the pre-blur one, and keeps that name: no renaming per frame)
     if (s.fullCount > 0) s.full[s.fullCount - 1]->setDebugLabel("shadow mask: before blur");
+    else if (t->debugLabel() != nullptr) {
+        s.full[s.fullCount++] = t;
+        return;
+    }
     s.full[s.fullCount++] = t;
     t->setDebugLabel("shadow mask");
 }

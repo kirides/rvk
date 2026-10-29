@@ -1178,10 +1178,6 @@ std::unique_ptr<VertexDecl> Device::createVertexDecl(std::span<const VertexEleme
     return std::make_unique<VertexDecl>(elements);
 }
 
-std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> bytecode) {
-    const std::size_t bytes = shader::byteLength(bytecode.data(), bytecode.size());
-    if (bytes == 0) {
-        spdlog::warn("d3d9: shader bytecode without END token");
 namespace {
 // the debug name of a translated shader's module (vk/debug_names.h): "vs|ps <hash> [<variant>]"; empty with names off
 std::string moduleLabel(const vk::Context& ctx, shader::Stage stage, std::uint64_t hash, std::string_view tag) {
@@ -1190,6 +1186,10 @@ std::string moduleLabel(const vk::Context& ctx, shader::Stage stage, std::uint64
 }
 }  // namespace
 
+std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> bytecode) {
+    const std::size_t bytes = shader::byteLength(bytecode.data(), bytecode.size());
+    if (bytes == 0) {
+        spdlog::warn("d3d9: shader bytecode without END token");
         return nullptr;
     }
     const std::span<const std::uint32_t> tokens = bytecode.first(bytes / 4);
@@ -1808,6 +1808,9 @@ void Device::setRenderTarget(std::uint32_t index, Surface* surface) {
     }
     endRendering();
     rt_[index] = surface;
+    if (index == 0 && surface != nullptr && phases_.pass() == scene::Pass::ShadowMask && vk::names::enabled()) {
+        debugnames::onShadowMaskTarget(*this, surface);  // debug names of the mask chain's targets (d3d9/target_names.h)
+    }
     if (index == 0 && surface != nullptr) {
         // D3D9 resets the viewport and the scissor rect to the new render target
         viewport_ = {0, 0, surface->width(), surface->height(), 0.0f, 1.0f};
@@ -1827,9 +1830,6 @@ void Device::setDepthStencil(Surface* surface) {
 }
 
 void Device::setViewport(const Viewport& vp) { viewport_ = vp; }
-    if (index == 0 && surface != nullptr && phases_.pass() == scene::Pass::ShadowMask && vk::names::enabled()) {
-        debugnames::onShadowMaskTarget(*this, surface);  // debug names of the mask chain's targets (d3d9/target_names.h)
-    }
 
 void Device::setScissorRect(std::int32_t left, std::int32_t top, std::int32_t right, std::int32_t bottom) {
     scissor_[0] = left;
@@ -2185,6 +2185,7 @@ bool Device::readImageLevel(vk::Image& img, std::uint32_t level, std::uint32_t l
     if (vmaCreateBuffer(ctx_.allocator(), &bci, &aci, &rb, &ra, &info) != VK_SUCCESS) {
         return false;
     }
+    vk::names::object(ctx_, rb, VK_OBJECT_TYPE_BUFFER, "rvk image read-back");
     img.transition(frames_.cmd(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     VkBufferImageCopy region{};
     region.imageSubresource = {img.aspect() & ~VkImageAspectFlags(VK_IMAGE_ASPECT_STENCIL_BIT), level, layer, 1};
@@ -2204,7 +2205,6 @@ bool Device::readImageLevel(vk::Image& img, std::uint32_t level, std::uint32_t l
 }
 
 bool Device::readBackBuffer(std::vector<std::uint8_t>& bgra, std::uint32_t& width, std::uint32_t& height) {
-    vk::names::object(ctx_, rb, VK_OBJECT_TYPE_BUFFER, "rvk image read-back");
     TextureDesc d;
     d.width = backBuffer_->desc().width;
     d.height = backBuffer_->desc().height;
@@ -2497,11 +2497,6 @@ std::uint32_t Device::lookupSamplerStates(const std::uint32_t* states) {
     }
     samplerObjects_.push_back(sampler);
     const std::uint32_t index = bindless_.addSampler(sampler);
-    samplers_.emplace(key, index);
-    return index;
-}
-
-}  // namespace rvk::d3d9
     if (ctx_.namesEnabled()) {
         static constexpr const char* kFilter[] = {"none", "point", "linear", "aniso", "pyramid", "gauss"};
         static constexpr const char* kAddress[] = {"?", "wrap", "mirror", "clamp", "border", "mirror-once"};
@@ -2512,3 +2507,8 @@ std::uint32_t Device::lookupSamplerStates(const std::uint32_t* states) {
                                       f(kAddress, s[SAMP_ADDRESSV], 6), f(kAddress, s[SAMP_ADDRESSW], 6),
                                       aniso ? std::format(" | aniso {}x", ci.maxAnisotropy) : std::string()));
     }
+    samplers_.emplace(key, index);
+    return index;
+}
+
+}  // namespace rvk::d3d9
