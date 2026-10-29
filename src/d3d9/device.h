@@ -929,6 +929,9 @@ public:
     float renderRatio() const { return renderRatio_; }
     void setDisplaySize(std::uint32_t width, std::uint32_t height) { displaySize_ = {width, height}; }
     std::array<std::uint32_t, 2> displaySize() const { return displaySize_; }
+    // render scale: the post chain sizes its scene-relative images (and TEXTURESIZE) at the display size (engine/scene_hooks)
+    void setPostAtDisplaySize(bool on) { postAtDisplaySize_ = on; }
+    bool postAtDisplaySize() const { return postAtDisplaySize_; }
     // the post chain's input: until the frame ends, draws that sample `from` get the bindless slot `slot` instead (the upscaled
     // scene, which has a different size than the engine's scene target; the engine samples both by uv)
     void setSceneSubstitute(const Texture* from, std::uint32_t slot) { substituteFrom_ = from; substituteSlot_ = slot; }
@@ -1664,6 +1667,7 @@ private:
     void regionsReopen();
     float renderRatio_ = 1.0f;
     std::array<std::uint32_t, 2> displaySize_{};
+    bool postAtDisplaySize_ = true;
     vk::Image* generated_ = nullptr;
     double baseIntervalMs_ = 0.0;  // smoothed present-to-present interval
     const Texture* substituteFrom_ = nullptr;

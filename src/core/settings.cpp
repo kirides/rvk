@@ -1740,6 +1740,18 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"None", "X", "Y", "X and Y"},
         .flags = Flag::NoAB | Flag::Debug,
     });
+    r.upscalePostFullSize = &reg.add({
+        .key = "upscale.post_full_size",
+        .label = "Post effects at output size",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "With a render scale below 1 the game's post effects (tone mapping, depth of field) size their images from the "
+                       "scene image. On: they are told the output size, so FSR's upscaled picture reaches the screen as it is. Off = "
+                       "the old behaviour (tone mapped at the render size and stretched again), to compare.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::Debug,
+    });
 
     // ---- Graphics tab: frame generation (enh/framegen.h; docs/research/frame-generation.md). AMD's frame generation swapchain presents
     // the frames and paces them; the manual path (framegen.manual) is the developer view of the same generator.

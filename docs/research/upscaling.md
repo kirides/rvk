@@ -90,8 +90,9 @@ cached by `eCCameraBase::Update(2)` and unaffected; the image effects' SCREENSIZ
 
 Our hook is the existing detour of `eCImageFilterScene::OnUpdateOutput` (0x75cf10, vtable 0x9eec08 slot +0x138): shrink right /
 bottom (floor(size / ratio)) around the original call, restore, then `Device::setViewport` to the full rect (the original leaves
-the scaled viewport for the last post filter, which draws into the back buffer). The post filters take the scene image by uv, so
-a smaller scene image just works; their intermediate targets derive from its (smaller) size.
+the scaled viewport for the last post filter, which draws into the back buffer). The post filters take the scene image by uv;
+**their scene-relative targets must not follow its (smaller) size** (ToneMap would resample FSR's output down to the render
+size: section 16), so while the post chain runs the scene image reports the display size.
 
 **Device side.** `Device::setRenderRatio` / `displaySize` (set by the hook from the real rect) / `setSceneSubstitute`. The
 hardware depth (auto depth stencil) stays back-buffer sized and larger than the scene target (allowed; passes read the top-left
@@ -116,8 +117,8 @@ sharp.
 **Known limits.** Before the G-buffer is armed (first ~200 frames after a load, pipelines building) and in frames without a
 G-buffer the FSR pass is skipped: those frames show the engine's own bilinear upscale of the small scene image (the menus' 3D
 backdrop right after start). The render ratio is not dropped back to 1 for them (avoids target re-creation churn). The image
-effects (bloom / DoF intermediates) run at render size. Unchecked: the SCREENSIZE vs TEXTURESIZE mismatch in the post filters
-(per .fx), `Camera::Update(void)` frustum code reading the scaled rect during the scene pass, `WorldToScreen` users during the
+effects run at the output size since section 16 (before: at the render size, the cause of the blocky Quality and below).
+Unchecked: `Camera::Update(void)` frustum code reading the scaled rect during the scene pass, `WorldToScreen` users during the
 scene pass.
 
 ## 8. Reactive mask (translucent effects)
@@ -475,3 +476,41 @@ effect (unverified against the previous DLL; look at it with `upscale.mode=off` 
 **Packaging**: the zip carries `rvk\amd_fidelityfx_loader_vk.dll` (39 KB) + `rvk\amd_fidelityfx_upscaler_vk.dll` (36 MB, ~32 MB
 zipped) + the licence notice: the release zip grows from about 10 MB to about 40 MB. `run.ps1` copies both and deletes the stale
 1.1.4 `amd_fidelityfx_vk.dll`; CI needs nothing (the DLLs are in the repo, `package.ps1` copies them).
+
+## 16. The post chain at the output size (blocky Quality and below) [C, 2026-10-29]
+
+**User report.** FSR 3 and FSR 4 looked "comically bad" at every ratio but native AA: blockier the lower the render size, full of
+artefacts in motion, thin objects (ship ropes) flickering, unlike GD3D11's FSR 3, which holds up even at Performance.
+
+**Cause [C, `-LogFrame`, Quality 1066x600 -> 1600x900].** FSR runs before the engine's post chain and its display-size output
+replaces the scene image in the post draws (section 4). But the post filters size their targets from their input: a "relative"
+filter whose input is the scene filter takes `eCGfxImageData +0x18 / +0x1c` of the scene image (`eCImageFilterScene::GetOutputAt`
+0x75d770 -> eSOutput size; `eCImageFilterRTBase::UpdateColorOutput` 0x6667f0: ceil(size x scale +0x50 / +0x54), stored at +0x80 /
++0x84, `AllocRenderTarget(admin, format, &this->+0x80)` 0x663950; an RTBase input gives its stored +0x80 / +0x84). So in the
+default DoF graph **ToneMap (Rel 1) was a 1066x600 A8R8G8B8 target**: it resampled FSR's 1600x900 image down to the render size,
+DoFDown / blurs followed at 267x150, and the screen pass DoF stretched the 1066x600 ToneMap bilinearly to the back buffer. FSR's
+reconstruction never reached the screen (native AA was unaffected: render = display). The post VS's half-texel offset was off
+too: TEXTURESIZE (ImageSize, the same image fields) gave `vs c0 = 0.5 / 1066, 0.5 / 600` for a 1600x900 texture.
+
+**Fix** (`engine/scene_hooks.cpp`, `showSceneImageAtDisplaySize` / `restoreSceneImageSize`). After the scene job
+(`detourSceneUpdate`, render scale on) the HDR scene image (scene filter +0x38) reports the display size in its +0x18 / +0x1c;
+the real size is written back when the outermost `eCImageEffect::Execute` returns and before every scene job (UpdateRenderTargets
+compares it; only if the fields still hold our value). The depth output (+0x48) keeps its real (render) size. `eCImageFilterCopy`
+takes its rect from the viewport, not the image size (decompile). Debug setting `upscale.post_full_size` (default on; off = the
+old behaviour for A/B). rvk.log `scene: render scale: the post chain sees the scene image (WxH) at the output size WxH`.
+
+**Result [C].** Quality: ToneMap 1600x900, DoFDown 400x225, DoF samples ColorTexture 1600x900, `vs c0 = 0.0003125 0.000556`; no
+errors / warnings, 0 unimplemented slots. `-Mode full -Validation` (Quality, `native.scene_ops_compare` + `lean_check=10`): every post filter incl. ToneMap composed equal (0 mismatches), lean effect checks 0 differing, only the known FSR format-mismatch warnings. Performance (800x450 -> 1600x900), frozen spots, 8 burst frames, old (`post_full_size
+=false`, `out\water\20261029-103302`) vs new (`-102926`), crops `out\fsrpost\crop_*.png`, script `out\fsrpost\temporal.py`:
+
+| spot | Laplacian variance old -> new | temporal std mean old -> new |
+|---|---|---|
+| jungle | 22.9 -> 60.9 | 0.097 -> 0.109 |
+| pub_interior | 8.1 -> 19.2 | 0.055 -> 0.067 |
+| harbour_docks | 25.9 -> 31.1 | 0.098 -> 0.092 |
+| net8_s (net region) | 3038 -> 1167 (old: block edges) | 3.90 -> 4.49 |
+
+Crops: jungle leaves crisp instead of smeared, the ship's ropes continuous anti-aliased lines instead of broken stair steps, the
+net a regular weave instead of a blocky pattern. **Still open:** the net stays temporally unstable (strands thinner than a render
+pixel: section 12); motion was not measured (frozen spots; the user's in-motion judgement is the check). Post cost rises to the
+native AA level (ToneMap / DoF intermediates at the output size).

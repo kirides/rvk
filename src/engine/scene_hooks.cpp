@@ -413,7 +413,50 @@ std::int32_t* mainCameraRect() {
     return reinterpret_cast<std::int32_t*>(static_cast<char*>(camera) + kCameraRect);
 }
 
+// The post chain under a render scale (docs/research/upscaling.md 7): a post filter of size mode "relative" whose input is the
+// scene filter takes its size from the scene image's own eCGfxImageData size (+0x18 / +0x1c, read by
+// eCImageFilterScene::GetOutputAt 0x75d770 into the eSOutput; eCImageFilterRTBase::UpdateColorOutput 0x6667f0 then ceil(size x
+// scale)), and its TEXTURESIZE constants (ImageSize::Apply) read the same fields. FSR's output (display size) replaces the scene
+// image in the post draws, so ToneMap (Rel 1) was allocated at the render size: the upscaled picture was resampled down to it and
+// stretched again by the DoF / HDRI screen pass. While the post chain runs the HDR scene image (+0x38) reports the display size;
+// its real size is put back when the scene effect's Execute returns and before every scene job (UpdateRenderTargets compares it).
+constexpr std::size_t kSceneHdrImage = 0x38, kImageSize = 0x18;
+struct SceneSizeOverride {
+    void* image = nullptr;
+    std::uint32_t real[2]{}, shown[2]{};
+};
+SceneSizeOverride g_sceneSize;
+int g_effectDepth = 0;
+
+void restoreSceneImageSize() {
+    SceneSizeOverride& o = g_sceneSize;
+    if (o.image == nullptr) return;
+    std::uint32_t now[2];
+    // only if nothing re-created the image's layers meanwhile (they would carry the size of the new texture)
+    if (readAt(o.image, kImageSize, now) && now[0] == o.shown[0] && now[1] == o.shown[1]) {
+        safeWrite(static_cast<char*>(o.image) + kImageSize, o.real, sizeof(o.real));
+    }
+    o = {};
+}
+
+void showSceneImageAtDisplaySize(void* filter, std::uint32_t width, std::uint32_t height) {
+    void* image = nullptr;
+    std::uint32_t real[2];
+    if (!readAt(filter, kSceneHdrImage, image) || image == nullptr || !readAt(image, kImageSize, real)) return;
+    if (real[0] >= width && real[1] >= height) return;  // not scaled
+    const std::uint32_t shown[2] = {width, height};
+    if (!safeWrite(static_cast<char*>(image) + kImageSize, shown, sizeof(shown))) return;
+    g_sceneSize = {image, {real[0], real[1]}, {width, height}};
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        spdlog::info("scene: render scale: the post chain sees the scene image ({}x{}) at the output size {}x{}", real[0], real[1], width,
+                     height);
+    }
+}
+
 bool detourSceneUpdate(void* filter, int index) {
+    restoreSceneImageSize();
     ++g_inSceneFilter;
     d3d9::Device* d = device();
     std::int32_t* rect = d != nullptr ? mainCameraRect() : nullptr;
@@ -445,6 +488,9 @@ bool detourSceneUpdate(void* filter, int index) {
             spdlog::info("scene: render scale: the main camera's rect {}x{} is rendered at 1/{:.2f} while the scene image is built",
                          saved[2] - saved[0], saved[3] - saved[1], d->renderRatio());
         }
+        if (d->postAtDisplaySize() && g_effectDepth > 0) {
+            showSceneImageAtDisplaySize(filter, static_cast<std::uint32_t>(saved[2] - saved[0]), static_cast<std::uint32_t>(saved[3] - saved[1]));
+        }
     }
     --g_inSceneFilter;
     return r;
@@ -456,7 +502,9 @@ bool detourEffectExecute(void* effect) {
     ViewScope scope(View::Post, Pass::Post, "eCImageEffect::Execute");
     EffectTap* tap = scope.d != nullptr ? g_effectTap.load(std::memory_order_relaxed) : nullptr;
     if (tap != nullptr) tap->postBegin(effect);
+    ++g_effectDepth;
     const bool r = g_effectExecute.original(effect);
+    if (--g_effectDepth == 0) restoreSceneImageSize();  // the post chain is done: the scene image's real size again
     if (tap != nullptr) tap->postEnd(effect);
     return r;
 }

@@ -506,7 +506,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     objectMotion_ = std::make_unique<enh::ObjectMotion>(dev_, rtScene_.get());
     if (rs.upscaleMode != nullptr) {
         for (settings::Setting* s : {rs.upscaleMode, rs.upscaleProvider, rs.upscaleObjectMotion, rs.upscaleReactive, rs.upscaleReactiveCutoff, rs.upscaleReactiveScale, rs.upscaleSharpness,
-                                     rs.upscaleJitterFlip}) {
+                                     rs.upscaleJitterFlip, rs.upscalePostFullSize}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyUpscale(); }, this);
         }
         applyUpscale();
@@ -679,6 +679,7 @@ void HalDevice::applyUpscale() {
     if (!upscale_ || rs.upscaleMode == nullptr) return;
     const std::string_view m = rs.upscaleMode->asEnum();
     if (rs.upscaleSharpness != nullptr) upscale_->setSharpness(rs.upscaleSharpness->asFloat());
+    dev_.setPostAtDisplaySize(rs.upscalePostFullSize == nullptr || rs.upscalePostFullSize->asBool());
     if (rs.upscaleReactive != nullptr) upscale_->setReactive(rs.upscaleReactive->asBool());
     if (rs.upscaleProvider != nullptr) upscale_->setMl(rs.upscaleProvider->asEnum() == "fsr4");
     if (rs.upscaleReactiveCutoff != nullptr && rs.upscaleReactiveScale != nullptr) {
