@@ -308,7 +308,7 @@ private:
         VkDeviceSize sizeAs = 0, sizeBuildScratch = 0, sizeUpdateScratch = 0;
     };
     std::unordered_set<const void*> dynamicConsumers_;
-    std::unordered_set<const void*> animConsumers_;
+    std::unordered_map<const void*, float> animConsumers_;  // consumer -> its range; the largest one counts
     bool animated_ = false;
     float animRange_ = 4500.0f;                        // units from the camera
     std::uint32_t dynTrees_ = 0;                       // this frame's tree captures

@@ -702,8 +702,28 @@ game's art direction and it crushes detail (lake_jungle's lower right).
 **Open**: telling indoor from outdoor shade (the sun cascades' coverage, the zone's indoor flag) would let the fill apply outdoors only;
 grass / leaf cards in the TLAS and a second bounce would put real light back into the shade instead of an artificial floor.
 
-**With the shipped defaults** [C] (`out\water61029-161846`, `-Validation` clean, no VUID / SYNC lines; shaded luma GI - engine, p25 GI / engine):
+**With the shipped defaults** [C] (`out\water\20261029-161846`, `-Validation` clean, no VUID / SYNC lines; shaded luma GI - engine, p25 GI / engine):
 beach_sun -6.2 (44.4 / 51.6), lake_jungle -3.8 (18.8 / 25.9), shadow_inland_a -0.4 (23.1 / 29.3), jungle -1.6, swamp_camp -3.1, harbour_docks -2.6,
 monastery_hall -0.4, pub_interior -1.5; crystal_cave +3.4 (dark share 0.215 against the engine's 0.361: the floor's side effect). Before
 (solid foliage, no fill): beach -6.7, lake -5.2 (p25 16.1), shadow_inland_a -5.4 (p25 18.4), cave 0.0.
+
+
+## 22. Leaf cards in the traced light: a negative result (2026-10-29)
+
+([C] = measured.) The RT scene holds SpeedTree branches / fronds in their rest pose and **no leaf cards** unless a consumer asks for the
+wind-animated trees (`RtScene::setAnimated`: the vertex-shader capture refits one BLAS per tree from the previous frame, rt-shadows.md 6).
+`gi.foliage` (off | near 40 m | far 80 m; `Gi` is now a consumer next to the RT shadows; `setAnimated` keeps a range per consumer and uses
+the largest) puts the leaves into the rays of the GI. Hypothesis: leaf cards occlude and bounce, so the forest shade is truer.
+
+Result [C] (`out\water\20261029-162812` off / `-163020` near, validation clean / `-163236` far; shaded luma GI - engine, dark share):
+beach_sun -5.8 / -5.9 / -4.0; jungle -1.7 / -1.6 / -1.3; lake_jungle -4.3 / -4.4 / -4.6 (dark 0.103 / 0.105 / 0.106); shadow_inland_a
+-3.7 / -4.0 / -3.8; swamp_camp -3.4 / -3.5 / -3.5: no measurable change, and a side by side of lake_jungle with leaves off / far is indistinguishable
+(the frond canopy and the bushes already carry the occlusion; the cut-outs now tested let the sky through either way). Cost (quicksave,
+1600 x 900): GPU per frame 3.03 / 3.46 / 3.62 ms, `gi` + `gi.screen` 1.53 / 1.89 / 2.00 ms, CPU interval p50 4.34 / 4.50 / 4.66 ms,
+fps 235.8 / 224.3 / 219.2 (CPU-bound: -5 / -7 %); 69 / 160 captured trees. So the default is **off**; the setting stays for scenes with
+dense canopies (a later cheaper capture would make it worthwhile). Grass was not tried: its vertex shader class (Vegetation) writes new rows
+every frame (volatile ranges, rt-shadows.md 5), and the leaves' result says foliage detail is not what makes the shade deep.
+
+The deeper shade therefore comes from what is *missing as light* (the ground's weak single bounce, the sky term's occlusion by the
+large geometry), not from missing occluders: section 21's fill is the right knob for now.
 

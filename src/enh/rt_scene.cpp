@@ -1380,11 +1380,13 @@ void RtScene::rollDyn(std::uint64_t frame) {
 
 void RtScene::setAnimated(const void* consumer, bool on, float rangeUnits) {
     if (on) {
-        animConsumers_.insert(consumer);
-        animRange_ = rangeUnits;
+        animConsumers_[consumer] = rangeUnits;
     } else {
         animConsumers_.erase(consumer);
     }
+    // every consumer's trees are captured: the range of the one that wants the most (RT shadows and GI ask for their own)
+    animRange_ = 0.0f;
+    for (const auto& [c, r] : animConsumers_) animRange_ = std::max(animRange_, r);
     const bool want = !animConsumers_.empty() && dynamic_;
     if (want != animated_) spdlog::info("rt: scene: animated SpeedTrees {} (within {:.0f} m)", want ? "on" : "off", animRange_ / 100.0f);
     animated_ = want;

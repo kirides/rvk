@@ -1567,6 +1567,20 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::Advanced,
         .requirements = caps::bit(caps::Cap::RayQuery),
     });
+    r.giFoliage = &reg.add({
+        .key = "gi.foliage",
+        .label = "Leaves in the traced light",
+        .category = "Lighting",
+        .description = "Trees near you cast their real leaves into the traced light (shade under a canopy follows the leaves "
+                       "and the wind, sunlit leaves tint the light they bounce). Off: branches and fronds only. Costs a little "
+                       "CPU and GPU time per tree.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "near", "far"},
+        .optionLabels = {"Off", "Near", "Far"},
+        .flags = Flag::Advanced,
+        .requirements = caps::bit(caps::Cap::RayQuery),
+    });
     r.giFill = &reg.add({
         .key = "gi.shadow_fill",
         .label = "Shadow fill",

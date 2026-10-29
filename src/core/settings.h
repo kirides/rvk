@@ -360,6 +360,7 @@ struct RendererSettings {
     Setting* giCharacters = nullptr;      // gi.characters: skinned draws in the RT scene (enh/rt_scene)
     Setting* giScreen = nullptr;          // gi.screen: "off", "low", "medium", "high" (stage C screen probes, needs the G-buffer)
     Setting* giBleed = nullptr;           // gi.bleed: 0..1 colour bleeding of the screen probes (chroma ratio)
+    Setting* giFoliage = nullptr;         // gi.foliage: "off" / "near" / "far": leaf cards in the ray-traced scene (rtgi.md 22)
     Setting* giFill = nullptr;            // gi.shadow_fill: 0..1 share of the engine's ambient kept as a floor in shade (rtgi.md 21)
     Setting* giCutouts = nullptr;         // gi.cutouts (debug): "solid" / "tested": how the probe rays treat alpha-tested foliage (rtgi.md 21)
     Setting* giDirectional = nullptr;     // gi.directional: 0..1 the screen probes' correction of the light's direction (rtgi.md 20)

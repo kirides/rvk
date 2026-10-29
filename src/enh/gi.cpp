@@ -134,8 +134,11 @@ void Gi::apply(const Settings& s) {
     const bool want = s.enabled && available();
     if (want && !on_) enable();
     if (!want && on_) disable();
+    s_.foliage = std::clamp(s_.foliage, 0, 2);
     if (on_) {
-        scene_->setDynamic(this, s_.characters);
+        scene_->setDynamic(this, s_.characters || s_.foliage > 0);
+        // the wind-animated SpeedTrees (leaf cards included) within 40 / 80 m: the canopy shades and bounces (rtgi.md 22)
+        scene_->setAnimated(this, s_.foliage > 0, s_.foliage == 2 ? 8000.0f : 4000.0f);
         dev_.setGiDraws({true, s_.replaceLightmaps});
     }
     if (!on_ || s_.screen == 0) {
@@ -178,6 +181,7 @@ void Gi::disable() {
     dev_.removePasses(this);
     passId_ = 0;
     haveLast_ = false;
+    scene_->setAnimated(this, false, 0.0f);
     scene_->setDynamic(this, false);
     scene_->release(this);
     destroyResources();

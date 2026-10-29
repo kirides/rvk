@@ -97,6 +97,7 @@ public:
         bool characters = true;   // skinned draws in the RT scene
         int debug = 0;            // 1 irradiance, 2 cascades
         float bleed = 0.5f;       // colour bleeding of the screen probes (rtgi.md 15): 0 luminance only .. 1 full chroma ratio
+        int foliage = 0;          // gi.foliage: leaf cards of the trees in the ray-traced scene: 0 off (default), 1 near (40 m), 2 far (80 m)
         float shadowFill = 0.25f;  // gi.shadow_fill: the floor of the ambient in shade as a share of the engine's (rtgi.md 21)
         bool cutoutsTested = true;   // gi.cutouts: the probe rays alpha-test foliage instead of treating it as solid (rtgi.md 21)
         float directional = 0.5f; // directional correction of the screen probes (gi.directional, rtgi.md 20): 0 off .. 1 full
