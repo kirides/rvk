@@ -292,3 +292,39 @@ has no fresh matrices to read anywhere (calling it ourselves would need the acto
 weights (faces speaking, 7 % of the draws) keep the capture; the motion vectors still come from the main-view capture; the engine's
 own draws still skin in their vertex shaders (sharing the result with them needs a replacement vertex shader for every skinned
 material: not built, no frame-time gain expected since the draw calls stay).
+
+## 11. VK_ERROR_DEVICE_LOST after a teleport: the TLAS built over stale instances (2026-10-29)
+
+**Symptom** [C]: with `shadows.rt` near / extended the game lost the device (`VK_ERROR_DEVICE_LOST`, 5,000+ error lines) ~50 s into
+an rvkcompare run (pub_interior, jungle, harbour_docks; Wrapper and Full; also before V4; `vulkanize/plan.md` 8.3), 3 of 3 runs of
+the reproduction below. Without `shadows.rt` the same enhancements ran clean.
+
+**Reproduction**: `run.ps1 -Mode wrapper -Mods rvkcompare -Scenario rvkcompare -Param 'spots=pub_interior','freeze_wait=6000'
+-Setting 'shadows.enabled=true','shadows.rt=near'`: the loss comes ~35 s after the first RT shadow frame, at the scenario's first
+teleport (the camera jumps from the start place to the spot; the scene mirror reports hundreds of entities added / removed in
+that second, the TLAS drops from ~590 to ~100 instances).
+
+**Diagnosis** [C]:
+* `VK_EXT_device_fault` (now logged on the first loss, `Context::reportDeviceLost`) says only "Device lost detected" with 0 address
+  infos and 0 vendor infos: not a page fault, a hang (ring timeout).
+* The AMD driver has no `VK_AMD_buffer_marker`; `debug.crash_markers` (new, Debug, needs `debug.regions`) writes event numbers with
+  `vkCmdFillBuffer` behind full barriers at the start / end of every capture region, and the log after the loss names the regions
+  the GPU had not finished. Result: region `rt.scene` (frame N), after sub-regions were added (`rt.compact`, `rt.blas builds`,
+  `rt.dynamic`, `rt.dynamic builds`, `rt.tlas build`): **the hang is in `rt.tlas build`**, the TLAS build over the frame's instances.
+
+**Cause** [C]: `RtScene::record` counts the instances first (`n = worldCount + dynCount`, `dynCount` = the dynamic draws marked
+built), writes the world instances and then the characters / animated SpeedTrees into the frame ring's instance array. The dynamic
+loop can `continue` without writing an entry (an animated tree whose registry instance has aged out or been dropped: `registry_.find`
+null, or its BLAS gone) but the TLAS was built over `n` instances, so the tail of the array held stale ring memory: instances of
+earlier frames with `accelerationStructureReference` of BLASes that were refitted, rebuilt or destroyed since. The build over such
+references hangs the GPU. It needs the animated trees (`shadows.rt_wind`, only the RT shadows turn them on) and a frame in which many
+of them vanish at once, i.e. a teleport / big cache-out. After the fix the same teleport logs `rt: scene: TLAS built over fewer
+instances than counted in 1 frames of the interval (40 dynamic instances dropped out ...)`: 40 at `near`, 160 at `extended`
+(`kMaxAnimatedTrees`), exactly the animated trees of the old place, in every run.
+
+**Fix**: the TLAS build range, `setRtScene` and `lastInstances_` use the number of instances actually written (`used`). **Verified**:
+Wrapper / Full x near / extended, pub_interior + jungle + harbour_docks in one run each (~233 s): no loss, the hole line appears once
+per run; see the commit message for the validation runs.
+
+**Diagnostics kept**: `Context::reportDeviceLost` (device fault report + vendor binary `bin/rvk/devicefault.bin` when the driver gives
+one, and the crash markers' report), `debug.crash_markers`, the `rt.*` sub-regions (also useful in captures).

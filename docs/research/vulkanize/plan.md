@@ -372,6 +372,10 @@ reduces memcpy" clause: Wrapper vcruntime -2.3 points).
   final} at pub_interior / jungle and {V4base, final} at harbour_docks lose the device within ~50 s (5,400 error lines each); without
   `shadows.rt` the same combination runs clean in both modes. (This explains the V2 note: the loss followed the RT shadows, not split
   constants.) Not investigated further (the shadow-fix agent has the reproduction: out/shadowfix/rvk_vwrt*.log).
+* **Resolved (2026-10-29)**: the device loss is a GPU hang in the TLAS build, not V-work related: `RtScene::record` built the TLAS
+  over `n` counted instances while the animated trees / characters that dropped out after a teleport had left the tail of the
+  instance array stale (references to destroyed BLASes). Fixed by building over the instances actually written; details,
+  diagnostics (`VK_EXT_device_fault` report, `debug.crash_markers`) and verification: rt-shadows.md 11.
 
 ### 8.4 Merged indirect draws: not built
 
