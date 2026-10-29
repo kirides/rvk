@@ -15,10 +15,21 @@ struct Entry {
     std::span<const std::uint32_t> spirv;
 };
 
-// every embedded shader
+// every embedded (GLSL) shader
 std::span<const Entry> all();
-// the SPIR-V of one (empty when unknown)
+// the SPIR-V of one (empty when unknown): an HLSL shader (hlslSource(name + ".hlsl"), compiled on first use by shader/dxc with the
+// entry point of the stage: .comp CSMain, .vert VSMain, .frag PSMain; thread-safe, the span stays valid for the process lifetime),
+// else the build-time GLSL one. docs/research/hlsl-rhi.md 3 (the migration)
 std::span<const std::uint32_t> spirv(std::string_view name);
+
+// HLSL sources embedded from shaders/** (*.hlsl, *.hlsli); name = path below shaders/ with '/' ("include/rvk_abi.hlsli")
+struct SourceFile {
+    std::string_view name;
+    std::string_view text;
+};
+std::span<const SourceFile> hlslSources();
+// the text of one (empty when unknown)
+std::string_view hlslSource(std::string_view name);
 // shaders/include/rvk_abi.glsl (the ABI declarations; shader/abi.h is its C++ mirror)
 std::string_view abiGlsl();
 // shaders/include/rvk_gi.glsl (the GI probe lookup; enh/gi pastes it into the material pixel shaders' GI variants)

@@ -60,6 +60,13 @@ target_link_libraries(rvk_glslc PRIVATE glslang::glslang glslang::SPIRV glslang:
 rvk_warnings(rvk_glslc)
 set_target_properties(rvk_glslc PROPERTIES FOLDER tools)
 
+# HLSL (docs/research/hlsl-rhi.md): shaders/**/*.hlsl(i) are embedded as text and compiled at run time by shader/dxc (dxcompiler.dll from
+# the vcpkg directx-dxc port, loaded dynamically: only its headers are used here)
+find_path(RVK_DXC_INCLUDE_DIR directx-dxc/dxcapi.h REQUIRED)
+find_program(RVK_DXC_EXE dxc PATHS ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/tools/directx-dxc NO_DEFAULT_PATH)
+find_file(RVK_DXC_DLL dxcompiler.dll PATHS ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/tools/directx-dxc ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin NO_DEFAULT_PATH)
+find_file(RVK_DXIL_DLL dxil.dll PATHS ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/tools/directx-dxc ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin NO_DEFAULT_PATH)
+
 set(RVK_SHADER_DIR ${CMAKE_SOURCE_DIR}/shaders)
 set(RVK_GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)
 # new shaders go here (path below shaders/ = the name shader::embedded::spirv() finds them by)
@@ -177,6 +184,24 @@ foreach(utext ge_default.glsl ge_default.frag)
         COMMENT "GLSL material text shaders/material/${utext}"
         VERBATIM)
     list(APPEND RVK_SHADER_OUTPUTS ${RVK_GENERATED_DIR}/shaders/uber_${uident}.h)
+endforeach()
+# HLSL sources as text (name = path below shaders/)
+file(GLOB_RECURSE RVK_HLSL_FILES CONFIGURE_DEPENDS RELATIVE ${RVK_SHADER_DIR} ${RVK_SHADER_DIR}/*.hlsl ${RVK_SHADER_DIR}/*.hlsli)
+set(RVK_HLSL_INCLUDES "")
+set(RVK_HLSL_TABLE "")
+foreach(hlsl ${RVK_HLSL_FILES})
+    string(MAKE_C_IDENTIFIER "hlsl_${hlsl}" hident)
+    add_custom_command(
+        OUTPUT ${RVK_GENERATED_DIR}/shaders/${hident}.h
+        COMMAND rvk_glslc text ${RVK_SHADER_DIR}/${hlsl} -o ${RVK_GENERATED_DIR}/shaders/${hident}.h --name ${hident}
+        DEPENDS rvk_glslc ${RVK_SHADER_DIR}/${hlsl}
+        COMMENT "HLSL text shaders/${hlsl}"
+        VERBATIM)
+    list(APPEND RVK_SHADER_OUTPUTS ${RVK_GENERATED_DIR}/shaders/${hident}.h)
+    string(APPEND RVK_HLSL_INCLUDES "#include \"shaders/${hident}.h\"
+")
+    string(APPEND RVK_HLSL_TABLE "    {\"${hlsl}\", std::string_view(data::${hident}, sizeof(data::${hident}) - 1)},
+")
 endforeach()
 configure_file(src/shader/embedded.cpp.in ${RVK_GENERATED_DIR}/embedded_shaders.cpp @ONLY)
 file(GLOB RVK_SHADER_SOURCES CONFIGURE_DEPENDS ${RVK_SHADER_DIR}/*/*.glsl ${RVK_SHADER_DIR}/*/*.vert ${RVK_SHADER_DIR}/*/*.frag ${RVK_SHADER_DIR}/*/*.comp)
@@ -357,6 +382,8 @@ add_library(rvk_core STATIC
     src/res/dds.cpp
     src/res/dds.h
     src/shader/abi.h
+    src/shader/dxc.cpp
+    src/shader/dxc.h
     src/shader/embedded.cpp.in
     src/shader/embedded.h
     src/shader/glsl.cpp
@@ -419,7 +446,7 @@ add_library(rvk_core STATIC
     ${RVK_SHADER_SOURCES}
 )
 target_include_directories(rvk_core PUBLIC src include)
-target_include_directories(rvk_core PRIVATE ${RVK_GENERATED_DIR})
+target_include_directories(rvk_core PRIVATE ${RVK_GENERATED_DIR} ${RVK_DXC_INCLUDE_DIR})
 target_include_directories(rvk_core PRIVATE ${STB_INCLUDE_DIR} third_party/imgui_vulkan)
 # AMD FSR SDK 2.4.0 API headers (MIT); the signed DLLs are loaded at run time, never linked (third_party/amd_fidelityfx)
 target_include_directories(rvk_core PRIVATE third_party/amd_fidelityfx/api/include third_party/amd_fidelityfx/upscalers/include third_party/amd_fidelityfx/framegeneration/include)
@@ -468,7 +495,17 @@ add_library(rvk_d3d9 SHARED
     src/bootstrap.cpp
     src/bootstrap.h
 )
+# dxcompiler.dll (+ dxil.dll for DXIL) next to every binary that compiles HLSL: the runtime compiler loads it from its own directory
+function(rvk_deploy_dxc target)
+    if(RVK_DXC_DLL)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RVK_DXC_DLL} ${RVK_DXIL_DLL} $<TARGET_FILE_DIR:${target}>
+            COMMENT "dxcompiler.dll -> $<TARGET_FILE_DIR:${target}>"
+            VERBATIM)
+    endif()
+endfunction()
 set_target_properties(rvk_d3d9 PROPERTIES OUTPUT_NAME d3d9)
+rvk_deploy_dxc(rvk_d3d9)
 target_link_libraries(rvk_d3d9 PRIVATE rvk_core)
 rvk_warnings(rvk_d3d9)
 
@@ -510,9 +547,10 @@ rvk_warnings(rvk_d3d9test)
 # tests
 # ---------------------------------------------------------------------------------------------
 if(RVK_BUILD_TESTS)
-    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp tests/api_tests.cpp tests/fvf_tests.cpp tests/settings_tests.cpp tests/settings_api_tests.cpp tests/scene_tests.cpp tests/draws_tests.cpp tests/inject_tests.cpp tests/caps_tests.cpp tests/water_tests.cpp tests/ocean_tests.cpp tests/shadows_tests.cpp tests/lod_tests.cpp tests/high_fps_tests.cpp tests/rt_tests.cpp tests/shader_eval_tests.cpp tests/window_mode_tests.cpp tests/keys_tests.cpp tests/upscale_tests.cpp tests/native_tests.cpp tests/names_tests.cpp tests/framegen_tests.cpp)
+    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp tests/api_tests.cpp tests/fvf_tests.cpp tests/settings_tests.cpp tests/settings_api_tests.cpp tests/scene_tests.cpp tests/draws_tests.cpp tests/inject_tests.cpp tests/caps_tests.cpp tests/water_tests.cpp tests/ocean_tests.cpp tests/shadows_tests.cpp tests/lod_tests.cpp tests/high_fps_tests.cpp tests/rt_tests.cpp tests/shader_eval_tests.cpp tests/window_mode_tests.cpp tests/keys_tests.cpp tests/upscale_tests.cpp tests/native_tests.cpp tests/names_tests.cpp tests/framegen_tests.cpp tests/dxc_tests.cpp)
     target_link_libraries(rvk_tests PRIVATE rvk_core SPIRV-Tools-static)
     rvk_warnings(rvk_tests)
+    rvk_deploy_dxc(rvk_tests)
     add_test(NAME rvk_tests COMMAND rvk_tests)
     # needs a Vulkan 1.3 GPU (and d3dx9_39.dll): ctest -L gpu
     add_test(NAME rvk_vktest COMMAND rvk_vktest ${CMAKE_BINARY_DIR}/vktest.png)

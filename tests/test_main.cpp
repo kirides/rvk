@@ -188,6 +188,7 @@ int main() {
         const int before = rvk::test::failures();
         t.fn();
         std::printf("%s %s\n", rvk::test::failures() == before ? "ok  " : "FAIL", t.name);
+        std::fflush(stdout);  // a crash in the next test must not swallow this line
     }
     std::printf("%zu tests, %d failure(s)\n", rvk::test::registry().size(), rvk::test::failures());
     return rvk::test::failures() == 0 ? 0 : 1;

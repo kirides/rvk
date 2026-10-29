@@ -5,6 +5,7 @@
   "description": "Pure Vulkan renderer for Risen (Enhanced, x64)",
   "builtin-baseline": "6f6324d69cc4d5229804bee9f72737fe2ef08087",
   "dependencies": [
+    "directx-dxc",
     "glslang",
     {
       "name": "imgui",
