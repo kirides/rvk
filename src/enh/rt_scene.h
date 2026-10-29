@@ -39,7 +39,6 @@
 #include <vector>
 
 #include "d3d9/device.h"
-#include "enh/native_parts.h"
 #include "enh/rt_material.h"
 #include "enh/rt_registry.h"
 #include "shader/abi.h"
@@ -91,14 +90,6 @@ public:
     bool capturingCharacters() const { return active_ && dynamic_; }
     // the GLSL options of a vertex shader's capture variant (d3d9::VariantSlot::Capture); public for rvk_shadertool --capture
     static bool captureOptions(const d3d9::Shader& s, shader::GlslOptions& o);
-
-    // The scene mirror as a source (docs/research/native-renderer.md N2, setting rt.source = mirror): every cached-in entity whose mesh parts are all
-    // drawable opaquely (NativeParts) gets its BLASes and instances from the mirror, with stable identity (no quantised-transform keys, no aging, no owner
-    // guesses: an instance lives exactly as long as the mirror's entity and mesh), and the engine's draws of such entities are no longer observed.
-    // Entities with a part the native passes cannot take (blended terrain layers, water), instanced batches without an entity, skinned characters and
-    // SpeedTrees stay on the draw observation. nullptr = off (the draws feed everything).
-    void setMirrorSource(NativeParts* parts);
-    bool mirrorSource() const { return mirrorParts_ != nullptr; }
 
     // d3d9::DrawObserver
     bool observes(d3d9::draws::Kind kind, d3d9::scene::Phase phase) const override;
@@ -214,9 +205,6 @@ private:
 
     void activate();
     void deactivate();
-    // the mirror source: rebuilds the pinned instances when the mirror, the resolved parts or the interval say so (called from record())
-    void feedMirror(std::uint64_t frame, double now, const float camera[3]);
-    Blas* mirrorBlas(const NativePart& part);
     void record(d3d9::PassContext& ctx);
     bool ensureResources();
     void destroyResources();
@@ -408,13 +396,6 @@ private:
     std::unordered_set<std::uint64_t> blendLogged_;
     std::unordered_set<const char*> speedTreeLogged_;  // reasons (string literals)
     std::unordered_set<std::uint32_t> reasonsLogged_;
-    // mirror source
-    NativeParts* mirrorParts_ = nullptr;
-    std::unordered_set<const void*> mirrorEntities_;  // entities fully fed by the mirror (their draws are not observed)
-    std::vector<std::uint32_t> mirrorMaterials_;      // RtMaterials references held by the mirror's instances
-    std::uint64_t mirrorVersion_ = 0, mirrorGeneration_ = 0, mirrorFrame_ = 0;
-    std::uint64_t mirrorRebuilds_ = 0, mirrorSkippedDraws_ = 0, mirrorLayerParts_ = 0, mirrorSkippedParts_ = 0;
-    std::uint64_t mirrorEntityCount_ = 0, mirrorPartCount_ = 0, mirrorPartiallyRejected_ = 0, mirrorRejectMaterial_ = 0, mirrorRejectBuffers_ = 0, mirrorRejectDecl_ = 0;
     bool instanceIndexChecked_ = false;
     std::uint64_t indexDeviations_ = 0;
 };

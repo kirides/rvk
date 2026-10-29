@@ -488,6 +488,12 @@ std::string Registry::toToml() const {
     return out;
 }
 
+namespace {
+// settings of earlier builds that were taken out (the early native prototypes: native-renderer.md N3 / N4); an old settings.toml that
+// still has them loads, with one warning per key, and the next save leaves them out
+constexpr std::string_view kRemovedSettings[] = {"native.opaque", "native.shadows", "native.debug", "rt.source"};
+}  // namespace
+
 bool Registry::fromToml(std::string_view text, std::vector<std::string>* warnings) {
     const auto warn = [&](std::string w) {
         if (warnings != nullptr) warnings->push_back(std::move(w));
@@ -503,6 +509,7 @@ bool Registry::fromToml(std::string_view text, std::vector<std::string>* warning
     collectLeaves(tbl, "", leaves);
     const std::lock_guard lock(mutex_);
     const bool b = bActive();
+    std::vector<std::string> removedSeen;
     for (const auto& leaf : leaves) {
         const bool sideB = leaf.starts_with("ab.");
         const std::string key = sideB ? leaf.substr(3) : leaf;
@@ -511,7 +518,15 @@ bool Registry::fromToml(std::string_view text, std::vector<std::string>* warning
             if (x->spec_.key == key) s = x.get();
         }
         if (s == nullptr) {
-            warn(std::format("unknown setting '{}' ignored", leaf));
+            // a setting of an earlier build that no longer exists: one line per key (also its [ab.*] twin), dropped at the next save
+            if (std::ranges::find(kRemovedSettings, key) != std::end(kRemovedSettings)) {
+                if (std::ranges::find(removedSeen, key) == removedSeen.end()) {
+                    removedSeen.push_back(key);
+                    warn(std::format("'{}' was removed, ignoring", key));
+                }
+            } else {
+                warn(std::format("unknown setting '{}' ignored", leaf));
+            }
             continue;
         }
         double v = 0.0;
@@ -1775,43 +1790,6 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .flags = Flag::Debug,
     });
-    r.nativeOpaque = &reg.add({
-        .key = "native.opaque",
-        .label = "Native opaque pass (static meshes)",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "The renderer draws the world's static meshes itself (its own shaders, the engine's buffers and material textures) "
-                       "instead of replaying the engine's solid draws. Experimental: first light of the native renderer (N3, scene mirror "
-                       "driven); kept as the basis of a later optimized mode, independent of renderer.mode.",
-        .type = Type::Bool,
-        .defaultValue = 0,
-        .flags = Flag::Debug,
-    });
-    r.rtSource = &reg.add({
-        .key = "rt.source",
-        .label = "Ray tracing scene: static mesh source",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "Where the ray tracing scene (shadows, reflections, GI) takes the world's static meshes from: the engine's draws "
-                       "(observed, instances guessed from their transforms), or the scene mirror (stable identity per entity and part, no ghosts, "
-                       "off-screen entities included). Entities with blended or water parts, characters and trees stay on the draws.",
-        .type = Type::Enum,
-        .defaultValue = 0,
-        .options = {"draws", "mirror"},
-        .optionLabels = {"Engine's draws", "Scene mirror"},
-        .flags = Flag::NoAB | Flag::Debug,
-    });
-    r.nativeShadows = &reg.add({
-        .key = "native.shadows",
-        .label = "Native sun shadows",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "The native opaque pass takes the sun's shadow from the renderer's own cascades, drawn from the scene mirror's static "
-                       "mesh parts (also the ones off screen), instead of the engine's shadow mask. Experimental (N3 path, see native.opaque).",
-        .type = Type::Bool,
-        .defaultValue = 0,
-        .flags = Flag::Debug,
-    });
     r.nativeFrameTap = &reg.add({
         .key = "native.frame_tap",
         .label = "Native frame: op tap",
@@ -2009,20 +1987,6 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "with native.frame_tap or a compare setting; this turns it on in plain Full runs too.",
         .type = Type::Bool,
         .defaultValue = 0,
-        .flags = Flag::NoAB | Flag::Debug,
-    });
-    r.nativeDebug = &reg.add({
-        .key = "native.debug",
-        .label = "Native opaque debug view",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "One term of the native opaque pass's shading as the colour: the diffuse texture, the world normal, the shadow "
-                       "mask's channels, the ambient, lightmap or sun term alone, the draw's feature flags.",
-        .type = Type::Enum,
-        .defaultValue = 0,
-        .options = {"off", "albedo", "normal", "mask_shadow", "mask_ao", "ambient", "lightmap", "sun", "flags", "albedo_depth", "albedo_cull", "shadow", "no_normal_map", "tangent_normal", "item_id"},
-        .optionLabels = {"Off", "Diffuse texture", "Normal", "Shadow mask (sun)", "Shadow mask (occlusion)", "Ambient only", "Lightmap only",
-                         "Sun only", "Feature flags", "Diffuse (depth test only)", "Diffuse (culling only)", "Sun shadow", "Lit without the normal map", "Tangent-space normal", "Item id colour"},
         .flags = Flag::NoAB | Flag::Debug,
     });
     r.prefetchStride = &reg.add({

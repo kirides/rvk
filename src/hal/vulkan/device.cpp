@@ -22,7 +22,6 @@
 #include "engine/scene_hooks.h"
 #include "engine/lod.h"
 #include "engine/memread.h"
-#include "engine/scene_mirror.h"
 #include "engine/material_source.h"
 #include "engine/menu_state.h"
 #include "engine/shadow_maps.h"
@@ -450,20 +449,6 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         }
         applyShadows();  // also the engine's cascade overrides (shadows.map_size / range: "auto" follows shadows.enabled)
     }
-    // the native renderer's opaque pass (enh/native_opaque.h, docs/research/native-renderer.md N3)
-    nativeParts_ = std::make_unique<enh::NativeParts>(dev_, [this](const void* object) { return findDecl(object); });
-    nativeShadows_ = std::make_unique<enh::NativeShadows>(dev_, *nativeParts_);
-    nativeOpaque_ = std::make_unique<enh::NativeOpaque>(dev_);
-    nativeOpaque_->setShadows(nativeShadows_.get());
-    if (rs.nativeShadows != nullptr) {
-        reg.onChange(*rs.nativeShadows, [this](const settings::Setting& s) { nativeShadows_->apply(s.asBool()); }, this);
-        nativeShadows_->apply(rs.nativeShadows->asBool());
-    }
-    if (rs.nativeOpaque != nullptr) {
-        reg.onChange(*rs.nativeOpaque, [this](const settings::Setting& s) { nativeOpaque_->apply(s.asBool()); }, this);
-        nativeOpaque_->apply(rs.nativeOpaque->asBool());
-    }
-    nativeOpaque_->setParts(nativeParts_.get());
     // the native frame's op tap (native/frame_tap.h, docs/research/engine-frame/README.md N5.0)
     frameTap_ = std::make_unique<native::FrameTap>(dev_);
     if (rs.nativeFrameTap != nullptr) {
@@ -484,15 +469,6 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     // frame boundary (no frame starts with one mode and ends with the other)
     if (rs.rendererMode != nullptr) reg.onChange(*rs.rendererMode, [this](const settings::Setting&) { applyRenderMode(); }, this);
     applyRenderMode();
-    if (rs.rtSource != nullptr && rtScene_) {
-        const auto applyRtSource = [this](const settings::Setting& s) { rtScene_->setMirrorSource(s.asInt() == 1 ? nativeParts_.get() : nullptr); };
-        reg.onChange(*rs.rtSource, applyRtSource, this);
-        applyRtSource(*rs.rtSource);
-    }
-    if (rs.nativeDebug != nullptr) {
-        reg.onChange(*rs.nativeDebug, [this](const settings::Setting& s) { nativeOpaque_->setDebug(static_cast<std::uint32_t>(s.asInt())); }, this);
-        nativeOpaque_->setDebug(static_cast<std::uint32_t>(rs.nativeDebug->asInt()));
-    }
     // ray-traced global illumination (enh/gi.h, docs/research/rtgi.md): probes + the material shaders' GI variants
     gi_ = std::make_unique<enh::Gi>(dev_, rtScene_.get());
     if (rs.giEnabled != nullptr) {
@@ -774,24 +750,6 @@ void HalDevice::unbindTextures() {
 }
 
 d3d9::VertexDecl* HalDevice::declFromHandle(void* handle) { return static_cast<d3d9::VertexDecl*>(handle); }
-
-d3d9::VertexDecl* HalDevice::findDecl(const void* object) {
-    if (object == nullptr) return nullptr;
-    const std::lock_guard lock(handleMutex_);
-    const auto known = [&](const void* p) -> d3d9::VertexDecl* {
-        const auto it = decls_.find(const_cast<void*>(p));
-        return it != decls_.end() ? it->second.get() : nullptr;
-    };
-    if (d3d9::VertexDecl* d = known(object)) return d;
-    const void* words[16]{};
-    if (!engine::safeRead(object, words, sizeof(words))) return nullptr;
-    for (const void* w : words) {
-        if (w != nullptr) {
-            if (d3d9::VertexDecl* d = known(w)) return d;
-        }
-    }
-    return nullptr;
-}
 
 // ---- resources ------------------------------------------------------------------------------------------------------
 
@@ -1321,7 +1279,6 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
     updateMenuPacing();
     engine::matsrc::onPresent();
     engine::lod::onPresent();  // a changed object draw distance: the world's cache-in spheres (engine thread)
-    engine::mirror::onPresent();  // the native scene mirror: snapshot refresh + report (native-renderer.md N0)
     dev_.present();
     const auto& s = dev_.stats();
     api::publishPresent(s.frames, api::FrameNumbers{
@@ -1372,28 +1329,6 @@ void HalDevice::logFrameStructure() {
                  dr.lastDropped() != 0 ? std::format(", {} dropped", dr.lastDropped()) : std::string(),
                  dr.lastHistogram().tinted != 0 ? std::format(", {} tinted", dr.lastHistogram().tinted) : std::string(),
                  dr.lastHistogram().summary());
-    {
-        // the native scene mirror against the draws' entity tags (native-renderer.md N0)
-        std::vector<engine::mirror::DrawProbe> probes;
-        probes.reserve(dr.last().size());
-        for (const auto& r : dr.last()) {
-            engine::mirror::DrawProbe p;
-            p.entity = r.entity;
-            p.subMesh = r.subMesh;
-            p.meshResource = r.meshResource;
-            p.vertexBufferId = r.vertexBuffer.id;
-            p.indexBufferId = r.indexBuffer.id;
-            p.first = r.first;
-            p.primitives = r.primitives;
-            p.baseVertex = r.baseVertex;
-            p.vertexOffset = r.vertexOffset;
-            p.vertexStride = r.vertexStride;
-            p.plainIndexedMesh = r.kind == draws::Kind::StaticMesh && (r.flags & draws::Record::Indexed) != 0 &&
-                                 (r.flags & (draws::Record::Instanced | draws::Record::UserPointer)) == 0 && r.primitiveType == 4;
-            probes.push_back(p);
-        }
-        engine::mirror::crossCheck(probes);
-    }
     // untagged draws of camera views: a draw path without a hook (first three of the frame)
     int unknown = 0;
     for (const auto& r : dr.last()) {

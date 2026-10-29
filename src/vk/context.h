@@ -51,7 +51,7 @@ struct DeviceFeatures {
     bool samplerAnisotropy = false;
     bool shaderFloat16Int16 = false;  // shaderFloat16 + shaderInt16 enabled (the FidelityFX upscaler's fp16 shaders)
     bool storageImageExtendedFormats = false;  // RG16F / R16F ... storage images (the G-buffer's motion)
-    bool indirectDraws = false;   // multiDrawIndirect + drawIndirectFirstInstance: one vkCmdDrawIndexedIndirect for many draws, the item index as firstInstance (enh/native_opaque)
+    bool indirectDraws = false;   // multiDrawIndirect + drawIndirectFirstInstance: one vkCmdDrawIndexedIndirect for many draws, the item index as firstInstance (no user at the moment: the removed native opaque prototype used it, see git history)
     bool vertexStores = false;    // vertexPipelineStoresAndAtomics: vertex shaders write buffers (enh/gi: skinned positions)
     bool shaderDrawParameters = false;  // gl_DrawID / gl_BaseInstance in shaders (Vulkan 1.1 feature, optional in 1.3)
     bool drawIndirectCount = false;     // vkCmdDraw*IndirectCount (Vulkan 1.2 feature): a GPU-written draw count

@@ -187,10 +187,6 @@ std::size_t Registry::age(const float camera[3], std::uint64_t frame, double tim
     std::size_t dropped = 0;
     for (std::size_t i = 0; i < list_.size();) {
         Instance& in = list_[i];
-        if (in.pinned) {
-            ++i;
-            continue;
-        }
         const bool stale = frame > in.lastFrame + limits.unseenFrames && time > in.lastTime + limits.unseenSeconds;
         bool tooFar = false;
         if (!stale && camera != nullptr && limits.radius > 0.0f) {
@@ -215,7 +211,7 @@ std::size_t Registry::age(const float camera[3], std::uint64_t frame, double tim
         std::vector<std::pair<std::uint64_t, std::uint64_t>> byAge;  // last frame, key
         byAge.reserve(list_.size());
         for (const Instance& in : list_) {
-            if (!in.pinned) byAge.emplace_back(in.lastFrame, in.key);
+            byAge.emplace_back(in.lastFrame, in.key);
         }
         const std::size_t excess = std::min(list_.size() - limits.maxRegistered, byAge.size());
         std::nth_element(byAge.begin(), byAge.begin() + static_cast<std::ptrdiff_t>(excess), byAge.end());

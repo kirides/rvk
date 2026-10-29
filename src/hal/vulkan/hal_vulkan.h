@@ -23,9 +23,6 @@
 #include "enh/object_motion.h"
 #include "enh/upscale.h"
 #include "enh/gi.h"
-#include "enh/native_opaque.h"
-#include "enh/native_parts.h"
-#include "enh/native_shadows.h"
 #include "enh/rt_debug.h"
 #include "enh/rt_scene.h"
 #include "enh/rt_shadows.h"
@@ -357,9 +354,6 @@ public:
     // 16-stage unbind done on every render-target change (eCDX9Device::SetRenderTarget)
     void unbindTextures();
     d3d9::VertexDecl* declFromHandle(void* handle);
-    // the declaration the engine's object `object` stands for: the value itself when it is one of our live handles, else the first of its first 16
-    // words that is (the engine wraps the HAL's handle in an eCGfxVertexDeclaration-like object); null when none is
-    d3d9::VertexDecl* findDecl(const void* object);
     // the declaration equivalent to an FVF (cached per FVF; nullptr for an invalid FVF)
     d3d9::VertexDecl* fvfDecl(std::uint32_t fvf);
 
@@ -602,8 +596,6 @@ private:
     std::unique_ptr<enh::Water> water_;          // water.* (a draw replacer)
     std::unique_ptr<enh::RtShadows> rtShadows_;  // shadows.rt* (ray-traced sun shadows near the camera; the mask takes them)
     std::unique_ptr<enh::Shadows> shadows_;      // shadows.* (a draw replacer: the sun's shadow mask)
-    std::unique_ptr<enh::NativeParts> nativeParts_;      // the scene mirror's parts as draw data (native passes)
-    std::unique_ptr<enh::NativeShadows> nativeShadows_;  // native.shadows (the native sun cascades)
     std::unique_ptr<native::FrameTap> frameTap_;          // native.frame_tap (N5.0: the main view's ops + draw attribution)
     std::unique_ptr<native::StaticOps> staticOps_;        // native.static_ops (N5.1: the static mesh ops composed / drawn by us)
     std::unique_ptr<native::EffectOps> effectOps_;        // N5.5c: the shadow mask / terrain blur effect draws (scene_ops_groups 1024 / 2048)
@@ -613,7 +605,6 @@ private:
     void applyRenderMode();
     RenderMode loggedMode_ = RenderMode::Original;     // the last logged mode (Original = none yet: a Vulkan session never runs it)
     RenderMode loggedRequest_ = RenderMode::Original;
-    std::unique_ptr<enh::NativeOpaque> nativeOpaque_;  // native.opaque (a draw replacer + a pass: the native renderer's static meshes)
     std::unique_ptr<enh::RtScene> rtScene_;      // the ray tracing scene (a draw observer + a pass; active while a consumer holds it)
     std::unique_ptr<enh::RtDebug> rtDebug_;      // rt.debug (a consumer of rtScene_)
     std::unique_ptr<enh::Gi> gi_;                // gi.* (a draw observer + passes, a consumer of rtScene_)

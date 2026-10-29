@@ -14,7 +14,7 @@ TEST(settings_api_info_get_set) {
     settings::Registry reg;
     settings::registerRendererSettings(reg);
     const std::uint32_t n = api::settingCount(reg);
-    CHECK(n == 112);  // 32 (debug.split_constants + debug.split_verify, debug.constant_compare, incl. renderer.mode, overlay.debug_mode, overlay.show_advanced, vulkan.fullscreen, vulkan.exclusive_acquire, vulkan.menu_fps, debug.pace_loading, debug.batch_draws, debug.record_threads, debug.prefetch_stride, debug.material_sources, debug.ubershader, debug.ubershader_skip, debug.shadow_stride, rt.reflections, rt.reflection_tweaks, rt.debug, rt.scene_views) + the 11 water.* + the 15 shadows.* + the 11 gi.* + the 5 ao.* / gbuffer.* + the 3 lod.* settings + debug.rt_shadow_sync + debug.rt_skin + debug.rt_skin_verify + compat.high_fps + debug.regions + upscale.mode + upscale.provider + upscale.object_motion + upscale.reactive + upscale.reactive_cutoff + upscale.reactive_scale + upscale.sharpness + upscale.jitter_flip + native.opaque + native.debug + native.shadows + native.frame_tap + native.static_ops + native.static_ops_compare + native.scene_ops + native.scene_ops_compare + native.scene_ops_groups + native.mirror + native.coverage + native.lean + native.lean_check + native.lean_restore + rt.source + debug.reverse_z + debug.names + debug.crash_markers
+    CHECK(n == 108);  // 32 (debug.split_constants + debug.split_verify, debug.constant_compare, incl. renderer.mode, overlay.debug_mode, overlay.show_advanced, vulkan.fullscreen, vulkan.exclusive_acquire, vulkan.menu_fps, debug.pace_loading, debug.batch_draws, debug.record_threads, debug.prefetch_stride, debug.material_sources, debug.ubershader, debug.ubershader_skip, debug.shadow_stride, rt.reflections, rt.reflection_tweaks, rt.debug, rt.scene_views) + the 11 water.* + the 15 shadows.* + the 11 gi.* + the 5 ao.* / gbuffer.* + the 3 lod.* settings + debug.rt_shadow_sync + debug.rt_skin + debug.rt_skin_verify + compat.high_fps + debug.regions + upscale.mode + upscale.provider + upscale.object_motion + upscale.reactive + upscale.reactive_cutoff + upscale.reactive_scale + upscale.sharpness + upscale.jitter_flip + native.frame_tap + native.static_ops + native.static_ops_compare + native.scene_ops + native.scene_ops_compare + native.scene_ops_groups + native.mirror + native.coverage + native.lean + native.lean_check + native.lean_restore + debug.reverse_z + debug.names + debug.crash_markers
     struct rvk_setting_info info{};
     CHECK(api::settingInfo(reg, 0, &info, sizeof(info)) == 80);
     CHECK(info.size == 80);
@@ -71,4 +71,47 @@ TEST(settings_api_ab) {
     CHECK(api::ab(reg, RVK_AB_RESET) == 0);
     CHECK(reg.abDifferences().size() == 1);
     CHECK(api::ab(reg, 99) == RVK_SETTING_BAD_ARGUMENT);
+}
+
+// settings of earlier builds that were removed (native.opaque / native.shadows / native.debug, rt.source: the early native prototypes):
+// an old settings.toml loads, one warning per key (also for the A/B twin), the rest of the file applies, the next save leaves them out
+TEST(settings_removed_keys_load_and_drop) {
+    settings::Registry reg;
+    settings::registerRendererSettings(reg);
+    std::vector<std::string> warnings;
+    CHECK(reg.fromToml(R"(
+[native]
+opaque = true
+shadows = true
+debug = "albedo"
+[rt]
+source = "mirror"
+reflections = "high"
+[ab.native]
+opaque = true
+[ab.rt]
+source = "draws"
+[vulkan]
+max_fps = 75
+)",
+                       &warnings));
+    int removed = 0;
+    for (const auto& w : warnings) {
+        if (w.find("was removed, ignoring") != std::string::npos) ++removed;
+        else CHECK_MSG(false, w);
+    }
+    CHECK_MSG(removed == 4, std::to_string(removed));
+    CHECK(warnings.size() == 4);
+    for (const char* key : {"native.opaque", "native.shadows", "native.debug", "rt.source"}) {
+        CHECK(reg.find(key) == nullptr);
+        bool named = false;
+        for (const auto& w : warnings) named = named || w.find(std::string("'") + key + "'") != std::string::npos;
+        CHECK_MSG(named, key);
+    }
+    CHECK(reg.find("vulkan.max_fps") != nullptr && reg.find("vulkan.max_fps")->value() == 75.0);
+    const std::string saved = reg.toToml();
+    CHECK(saved.find("opaque") == std::string::npos && saved.find("mirror") == std::string::npos && saved.find("[ab.native]") == std::string::npos);
+    CHECK(saved.find("max_fps = 75") != std::string::npos);
+    std::vector<std::string> again;
+    CHECK(reg.fromToml(saved, &again) && again.empty());
 }

@@ -71,12 +71,6 @@ set(RVK_SHADERS
     gi/gi_trace.comp
     gi/sp_resolve.comp
     gi/sp_trace.comp
-    native/shadow_mesh.frag
-    native/shadow_mesh.vert
-    native/static_mesh.frag
-    native/static_mesh.vert
-    native/static_prepass.frag
-    native/static_prepass.vert
     gbuffer/ao_white.frag
     gbuffer/gbuffer_debug.frag
     gbuffer/gtao.comp
@@ -109,9 +103,6 @@ set(RVK_SHADERS
 # variants: "<name>=<source>:<DEFINE>[,<DEFINE>[=<value>]]..." (the source compiled again with these defines, embedded under
 # <name>; rvk_glslc -D); none at the moment
 set(RVK_SHADER_VARIANTS
-    "native/static_mesh_opaque.frag=native/static_mesh.frag:NATIVE_NO_CLIP"
-    "native/static_prepass_masked.frag=native/static_prepass.frag:NATIVE_PREPASS_MASKED"
-    "native/static_prepass_masked.vert=native/static_prepass.vert:NATIVE_PREPASS_MASKED"
 )
 set(RVK_SHADER_OUTPUTS)
 set(RVK_SHADER_INCLUDES "")
@@ -256,8 +247,6 @@ add_library(rvk_core STATIC
     src/enh/rt_debug.h
     src/enh/rt_material.cpp
     src/enh/rt_material.h
-    src/scene/mirror.cpp
-    src/scene/mirror.h
     src/native/coverage.cpp
     src/native/coverage.h
     src/native/effect_compose.cpp
@@ -284,19 +273,9 @@ add_library(rvk_core STATIC
     src/native/static_compose.h
     src/native/static_ops.cpp
     src/native/static_ops.h
-    src/enh/native_opaque.cpp
-    src/enh/native_index_arena.cpp
-    src/enh/native_index_arena.h
-    src/enh/native_opaque_list.cpp
-    src/enh/native_opaque.h
-    src/enh/native_parts.cpp
-    src/enh/native_parts.h
-    src/enh/native_shadows.cpp
-    src/enh/native_shadows.h
     src/enh/rt_registry.cpp
     src/enh/rt_registry.h
     src/enh/rt_scene.cpp
-    src/enh/rt_scene_mirror.cpp
     src/enh/rt_scene.h
     src/enh/rt_shadows.cpp
     src/enh/rt_shadows.h
@@ -329,8 +308,6 @@ add_library(rvk_core STATIC
     src/engine/material_source.cpp
     src/engine/material_source.h
     src/engine/lights.cpp
-    src/engine/scene_mirror.cpp
-    src/engine/scene_mirror.h
     src/engine/lights.h
     src/engine/lod.h
     src/engine/menu_state.cpp
@@ -523,7 +500,7 @@ rvk_warnings(rvk_d3d9test)
 # tests
 # ---------------------------------------------------------------------------------------------
 if(RVK_BUILD_TESTS)
-    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp tests/api_tests.cpp tests/fvf_tests.cpp tests/settings_tests.cpp tests/settings_api_tests.cpp tests/scene_tests.cpp tests/draws_tests.cpp tests/inject_tests.cpp tests/caps_tests.cpp tests/water_tests.cpp tests/ocean_tests.cpp tests/shadows_tests.cpp tests/lod_tests.cpp tests/high_fps_tests.cpp tests/rt_tests.cpp tests/mirror_tests.cpp tests/shader_eval_tests.cpp tests/window_mode_tests.cpp tests/keys_tests.cpp tests/upscale_tests.cpp tests/native_tests.cpp tests/names_tests.cpp)
+    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp tests/api_tests.cpp tests/fvf_tests.cpp tests/settings_tests.cpp tests/settings_api_tests.cpp tests/scene_tests.cpp tests/draws_tests.cpp tests/inject_tests.cpp tests/caps_tests.cpp tests/water_tests.cpp tests/ocean_tests.cpp tests/shadows_tests.cpp tests/lod_tests.cpp tests/high_fps_tests.cpp tests/rt_tests.cpp tests/shader_eval_tests.cpp tests/window_mode_tests.cpp tests/keys_tests.cpp tests/upscale_tests.cpp tests/native_tests.cpp tests/names_tests.cpp)
     target_link_libraries(rvk_tests PRIVATE rvk_core SPIRV-Tools-static)
     rvk_warnings(rvk_tests)
     add_test(NAME rvk_tests COMMAND rvk_tests)

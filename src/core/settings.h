@@ -364,9 +364,6 @@ struct RendererSettings {
     Setting* rtShadowSync = nullptr;      // debug.rt_shadow_sync: cascades every frame while the RT shadows are on
     Setting* rtSkin = nullptr;            // debug.rt_skin: characters skinned by compute for the RT scene
     Setting* rtSkinVerify = nullptr;      // debug.rt_skin_verify: compare it with the vertex shader capture
-    Setting* nativeOpaque = nullptr;      // native.opaque: the static meshes drawn by our own pass (native-renderer.md N3)
-    Setting* nativeDebug = nullptr;       // native.debug: one term of the native shading as the colour
-    Setting* nativeShadows = nullptr;     // native.shadows: the native sun cascades (native-renderer.md N4)
     Setting* nativeFrameTap = nullptr;    // native.frame_tap: the main view's render ops + draw attribution (engine-frame N5.0)
     Setting* nativeStaticOps = nullptr;   // native.static_ops: the static mesh z / solid ops drawn by the renderer (engine-frame N5.1)
     Setting* nativeStaticOpsCompare = nullptr;  // native.static_ops_compare: their composed draws diffed against the engine's
@@ -382,7 +379,6 @@ struct RendererSettings {
     Setting* nativeRetained = nullptr;         // native.retained: V3 retained composition of the sub-mesh draws (A/B)
     Setting* nativeRetainedCheck = nullptr;    // native.retained_check: every replay recomposed fresh and compared
     Setting* nativeRetainedGroups = nullptr;   // native.retained_groups: bit mask of the groups that retain (bit = StaticOps::Group)
-    Setting* rtSource = nullptr;          // rt.source: where the RT scene's static meshes come from (the engine's draws / the scene mirror)
     Setting* shadowStride = nullptr;      // debug.shadow_stride: the sun cascades redrawn every n-th frame (engine::shadowmaps::setUpdateStride)
     Setting* prefetchStride = nullptr;    // debug.prefetch_stride: the cache-in walk every n-th frame (engine::lod::setPrefetchStride)
     Setting* lodView = nullptr;           // lod.view: the view range of objects (eCFrustumDatabase view range factor)

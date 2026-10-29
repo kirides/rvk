@@ -58,7 +58,7 @@ struct PassGraphicsDesc {
     VkFormat color = VK_FORMAT_UNDEFINED;
     BlendAttachment blend{};
     const char* name = nullptr;
-    // optional depth (+ stencil) attachment of a geometry pass (enh/native_opaque); none: no depth state
+    // optional depth (+ stencil) attachment of a geometry pass; none: no depth state
     VkFormat depth = VK_FORMAT_UNDEFINED;
     VkFormat stencil = VK_FORMAT_UNDEFINED;
     bool depthTest = false;

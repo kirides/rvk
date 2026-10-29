@@ -129,10 +129,6 @@ void RtScene::deactivate() {
     passId_ = passId2_ = 0;
     logStats(true);
     registry_.clear();
-    for (std::uint32_t id : mirrorMaterials_) materials_.release(id);
-    mirrorMaterials_.clear();
-    mirrorEntities_.clear();
-    mirrorVersion_ = mirrorGeneration_ = 0;
     dropDynamic(true, 0);
     destroySkin();
     std::vector<std::uint64_t> ids;
@@ -358,13 +354,6 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     } timer{*this, timed, t0};
     ++iv_.observed;
     const auto skip = [&] { ++iv_.skipped; };
-    // an entity the scene mirror feeds: its draws add nothing (the mirror's instances stand for them)
-    if (mirrorParts_ != nullptr && q.tag != nullptr && q.tag->entity != nullptr && (q.kind == Kind::StaticMesh || q.kind == Kind::InstancedMesh) &&
-        mirrorEntities_.contains(q.tag->entity)) {
-        ++mirrorSkippedDraws_;
-        return;
-    }
-
     const bool speedTree = q.kind == Kind::SpeedTree;
     // SpeedTree branches / fronds: the first rejection of each kind is logged (diagnostics)
     const auto reject = [&](const char* why) {
@@ -2041,7 +2030,6 @@ void RtScene::record(d3d9::PassContext& ctx) {
     // the camera of this frame's main view
     const auto& cam = dev_.camera().valid ? dev_.camera() : dev_.lastCamera();
     const float camera[3] = {cam.position[0], cam.position[1], cam.position[2]};
-    feedMirror(frame, now, camera);
     registry_.age(camera, frame, now, limits_, [this](std::uint64_t id) -> const rt::Aabb* {
         const Blas* b = findBlas(id);
         return b != nullptr && b->bounds.valid() ? &b->bounds : nullptr;
