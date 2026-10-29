@@ -271,3 +271,124 @@ computeVertexInput, splitStage, internVi, prepareTextures); (b) find the memcpy 
 needs a profiler that symbolizes the CRT's callers, e.g. caller-of-memcpy sampling); (c) V4 merged indirect draws only if it
 removes per-draw CPU in prepareDraw, otherwise skip; (d) Wrapper / Full CPU is 4.8 ms vs GPU 1.5 ms: the engine's own code
 (17 % Engine.dll + 8 % sharedbase) is the other big block.
+
+## 8. V4 result: per-draw device path (2026-10-29)
+
+Commits: 09be2c5 (profiler), c8e1f86 (composition), e00d888 (device path), 6442f98 (effect passes), 9de3a21 (lod diagnostics). No new
+switches (every change is behaviour-neutral; the compare tools are the check). Merged indirect draws (the old V4 idea) were **not built**:
+see 8.4. Tools: the sampler's new `diag: profile site / site2 / crt` lines and `tools/pcsites.py` (call sites inclusive of the CRT /
+ntdll / driver calls they make, CRT callers, own functions symbolized with llvm-symbolizer; `tools/pcprofile.py` for the line-level
+self time). Logs, scripts and numbers: `out/v4/` (git-ignored).
+
+### 8.1 Profile (base = 38c4081 + profiler, `build/V4base`)
+
+Savegame `Risen_Save_0009`, `rvk_perfsave` hold 40, `-Exe RisenTest.exe -Vsync off -Perf -CpuProfile`, 9 windows of 5 s, shares of the
+engine thread (Full ~5.0, Wrapper ~3.5 ms per frame; 1 % = ~0.05 ms). Still flat: no item above ~2.4 %.
+
+| module | Full | Wrapper |
+|---|---|---|
+| d3d9.dll (ours) | 45.4 | 23.8 |
+| Engine.dll | 18.2 | 33.5 |
+| ntdll | 10.0 (1.5 of it `RtlQueryPerformanceCounter` = the `-Perf` timers) | 13.5 |
+| vcruntime140 (memcpy / memcmp / memmove) | 9.1 | 5.4 |
+| sharedbase | 7.5 | 10.9 |
+| amdvlk64 | 4.5 | 6.0 |
+
+**memcpy / memcmp callers** (first frame outside the CRT; % of the thread; the profiler could not name them before):
+
+| caller | Full | Wrapper |
+|---|---|---|
+| `safeRead` (engine reads: vegetation instance sources, tree `rd`, HAL primitive) | 1.16 | - |
+| `setVertexShaderConstantF` (compare + copy, 2 call sites) / PS | 1.05 / 0.34 | 0.37 / 0.31 |
+| `constantsInto` run copies (mirror -> DrawDesc) | 0.88 | - |
+| `splitStage` (window blocks into the ring) | 0.59 | 0.80 |
+| `Buffer::gpu` (dynamic buffer ring copy: real data) | 0.56 | 0.71 |
+| `prepareDraw` (pipeline description compare / copy, 512 B) | 0.47 | 0.80 |
+| `internDyn` / `internVi` / `findPipeline` / `computeVertexInput` | 0.44 / 0.13 / 0.14 / 0.23 | 0.63 / 0.27 / 0.18 / 0.46 |
+| `issue` save / restore runs | 0.41 + 0.31 + 0.17 | - |
+| vector<byte> copies / zeroing (`std::copy`, `_Zero_range`) | 0.37 + 0.27 | - |
+| `newDraw` clears | 0.20 | - |
+| total | ~8.8 (0.43 ms) | ~5.3 |
+
+**Line level in the device path** (`tools/pcprofile.py`, self): `vk::PipelineDesc pd{}` in `prepareDraw` (pipeline.h:65 +
+draw.cpp:977) 1.41 % Full / 2.1 % Wrapper (member-wise initialisation of 512 bytes with non-zero blend defaults, plus
+`__builtin_array_init_helper` 0.25); `computeVertexInput` line 330 (the 64-bit `%` and `/` of the stream shift) 0.4; `internVi`
+compare 0.26 / 0.37; `prepareTextures` 0.23; `wantSecondaryScope` 0.21; `setRenderState` 0.17; `Frames::allocate` 0.15;
+`syncPhaseRegions` 0.25. Composition (Full only): `safeLoad8/4/1/2` 3.1 % self (cache misses on engine memory; one SEH call
+each), `hashBytes` 0.6 (retained keys while `native.retained` is off), the three pointer-keyed maps 0.9, `newDraw` + array
+inits 0.9, `textureOfImageData` 0.7, `skyBillboardVertices` 0.6. Allocation: operator new 1.1 % + malloc / free ~1.1 % in Full
+(`vector<vector<byte>>` = `ParameterValues` copies of the effect units, `vector<float>` = effect constants, the LOD
+diagnostics' `std::set::emplace`), sync: `std::mutex` in `closeChunk` 0.7 % (worker contention), `NtAlertThreadByThreadId` 0.7
+(worker wake-ups), the engine thread's own `vkCmd*` through `applyPacket` for the non-batched passes ~2.3 % (amdvlk64 4.5 % in all).
+
+### 8.2 Fixes (each a commit; kept = measured or profile-proven)
+
+| fix | evidence | |
+|---|---|---|
+| blank `PipelineDesc` copy (`kBlankPipelineDesc`) instead of `pd{}` | 1.4 / 2.1 % self | kept |
+| `sameDesc`: 52-byte compare when EDS3 + dynamic vertex input make the tail constant; inline SSE2 `memEqual` in `internVi` / `internDyn` / `findPipeline` (`d3d9/memeq.h`) | CRT calls of these 1.0 / 2.1 % | kept |
+| VS / PS constant setters: first / last differing register inline (`diffRegisters`), copy and window-dirty only that span | setters 1.4 % CRT in Full | kept |
+| 32-bit stream-shift division | 0.4 % | kept |
+| `syncPhaseRegions` early exit on `PhaseTracker::generation()` | 0.25 % | kept |
+| composition: `snapHash` lazy (retained keys only), 16-entry pointer memos in front of `poolsOf` / `liveOf` / `shaderOfElement`, `newDraw` memsets | 0.6 + 0.9 + 0.9 % | kept |
+| effect passes: `Constant::paramIndexCache` (string compare per constant per pass), VM / constant registers and `ParameterValues` copies reuse capacity | allocation ~2 % in Full; Wrapper vcruntime 5.4 -> 3.1 % | kept |
+| LOD diagnostics: find before emplace, per-thread seen list (no node, no mutex per call) | small | kept |
+
+**Numbers** (savegame hold 40, `-Exe RisenTest.exe -Vsync off -Perf`, 3 interleaved runs each; jungle = held `rvkcompare` spot,
+1 run; base `build/V4base` vs the final build `build/S5` = HEAD 9de3a21; the machine drifts between batches by up to 0.15 ms, only
+interleaved pairs are comparable):
+
+| run | CPU ms before -> after | fps p50 | GPU ms |
+|---|---|---|---|
+| Full, savegame | 5.03 -> 4.95 (runs 5.02 / 5.04 / 5.02 -> 4.91 / 4.88 / 5.06; median -0.11) | 182.9 -> 184.4 | 1.52 -> 1.52 |
+| Wrapper, savegame | 3.45 -> 3.38 (3.44 / 3.46 / 3.44 -> 3.36 / 3.40 / 3.38) | 263.1 -> 268.4 | 1.50 -> 1.49 |
+| Full, jungle | 6.05 -> 5.92 | 148.6 -> 152.8 | 1.82 -> 1.88 |
+| Wrapper, jungle | 4.08 -> 3.95 | 226.0 -> 231.1 | 1.82 -> 1.85 |
+
+Earlier batches of the same series (all vs V4base, interleaved): S1 (pipeline copy, memEqual, setters, maps, `snapHash`, `newDraw`)
+Full 4.90 -> 4.81, Wrapper 3.37 -> 3.34, jungle 6.05 -> 5.97 / 3.94 -> 3.92; S3 (+ division, phase generation, `sameDesc`)
+Full 4.81, Wrapper 3.30, jungle Full 5.80; S4 (+ effects, lod) vs V4base in one batch Full 5.16 -> 4.95, Wrapper 3.52 -> 3.47.
+Profile after (S5 vs base): vcruntime140 9.1 -> 7.5 % (Full), 5.4 -> 3.1 % (Wrapper). **Total: ~2 % of the engine-thread CPU**
+(-0.08 ms Full, -0.07 ms Wrapper, -0.13 ms at the jungle in both): real but small, as the flat profile predicted; individual fixes are
+below the +-0.05 ms noise, so they were measured in groups and are justified by their profile shares (the instructions' "clearly
+reduces memcpy" clause: Wrapper vcruntime -2.3 points).
+
+### 8.3 Verification
+
+* rvk_tests 187/187 (HEAD), rvk_d3d9test, `rvk_vktest --passes` (0 validation errors).
+* Full compare (`native.scene_ops_compare`, `static_ops_compare`, `lean_check=10`, `debug.split_verify`) on the final build
+  (`out/v4/c3_*`): spots pub_interior + jungle, spells, point shadow, rare (`-Validation`), storm set, focus, menufps, savegame
+  under `-Validation`, point shadow under `-SyncValidation`, the 17-spot route (22 checks PASS, 7.8 M draws, 3.06 M own draws
+  checked): every group `mismatches: none`, 0 differing own draws, 0 validation messages, effect draws (31 unit kinds,
+  117,312 compared on the route) `mismatches: none`, `split_verify` 0 mismatches. (The first route run under the 890 s scenario
+  deadline stopped at lava_cave; the later one ran with a 2,700 s deadline.)
+* Wrapper refcompare, 6 spots vs `out/refcompare/20261022-093252` (snapshot DLL hash = the build): beach_rain, jungle PASS;
+  pub_interior WARN dluma -1.05 (V4base -1.00; V2 saw -1.3 .. -1.5 too: not from V4), gui_inventory WARN (ssim 0.978),
+  hero_closeup WARN bad32 0.23 % (V4base FAIL bad32 1.84 % in its run: varies run to run, as in V2), harbour_night FAIL dluma -3.4 once
+  and PASS twice on re-run (+0.48 / +0.23; V4base +0.58): night noise as in V1 / V2. No measurable image change.
+* Enhancements on (`water.enabled`, `water.reflections=ssr`, `rt.reflections=medium`, `shadows.enabled`, `gi.enabled`; spots
+  pub_interior + jungle, screenshots viewed): Wrapper and Full on the final build, no device loss, correct pictures.
+* **`shadows.rt=near` -> `VK_ERROR_DEVICE_LOST` is pre-existing, not V4**: with it, all of {Wrapper V4base, Wrapper final, Full
+  final} at pub_interior / jungle and {V4base, final} at harbour_docks lose the device within ~50 s (5,400 error lines each); without
+  `shadows.rt` the same combination runs clean in both modes. (This explains the V2 note: the loss followed the RT shadows, not split
+  constants.) Not investigated further (the shadow-fix agent has the reproduction: out/shadowfix/rvk_vwrt*.log).
+
+### 8.4 Merged indirect draws: not built
+
+The engine thread's driver time is amdvlk64 4.5 % (Full) / 6.0 % (Wrapper) = 0.2 ms: the inline `vkCmd*` of the non-batched passes
+(applyPacket 2.3 %: alpha, post, GUI, sky, mask draws, which merging would not cover: their state changes between draws), clears 0.6,
+image transitions 0.55, `beginRendering` 0.34, blits 0.2. The batchable passes' ~94 % of the packets are recorded on the two record
+threads, off the engine thread; the engine thread only builds the packets (`prepareDraw`, now ~0.7 us per draw) and notifies
+(`closeChunk` 0.7 % mutex + 0.7 % wake-ups = ~0.07 ms). Indirect draws would not remove `prepareDraw`'s per-draw work (the record
+needs its pipeline, push block and dynamic state first), so the engine-thread gain would be below the noise; GPU time is 1.5 ms vs 4.9
+ms CPU. Not worth building.
+
+### 8.5 Left (each below ~0.05 ms of the thread)
+
+`closeChunk` mutex contention with the workers (~0.035 ms; a lock-free chunk queue), SEH-guarded engine reads (`safeLoad8/4/1/2` 3 %:
+the cost is cache misses on engine memory, fewer reads need composition-level caching = V3's result), `textureOfImageData` 0.7 %,
+`skyBillboardVertices` 0.6 %, `computeVertexInput` stream checks (~1.3 % self), `prepareTextures` + the DrawBlock texture loop
+(0.4 + 0.3 %: two walks over the same Texture objects), `Frames::allocate` (0.4 %, ~6 per draw), the draw record (`Record::Record`),
+`-Perf`'s own `steady_clock` calls (1.5 - 2 % of the thread under `-Perf`, absent in normal play). A draw-state fingerprint fast path
+(skip pipeline / dynamic-state building when nothing but constants changed since the previous draw) is the one structural idea left
+for the device path: projected <= ~0.1 ms for a change with many invalidation sources (every setter), not attempted.

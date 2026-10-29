@@ -500,3 +500,17 @@ composition (V3).
 V3 (`native.retained`, default off) built and parity-proven but without CPU gain; the sampled profile (`-CpuProfile`, savegame
 `Risen_Save_0009` hold 40, Full, `tools/pcprofile.py`) shows the retainable part (`materialDraws`) is ~6.4 % = ~0.33 ms of the
 4.8 - 5.2 ms engine thread. Numbers, remaining time and the decision: vulkanize/plan.md 7.1.
+
+## 20. Vulkanize V4: the per-draw device path (2026-10-29)
+
+Flat-profile attack on the device path, both modes (numbers: vulkanize/plan.md 8). The sampler learned to name the callers of the
+CRT's memcpy / memcmp and to attribute stacks to our own source lines inclusive of what they call (`diag: profile site / site2 /
+crt`, `tools/pcsites.py`; 1 % of the thread = ~0.05 ms). What the profile showed: `vk::PipelineDesc pd{}` (member-wise init of 512
+bytes) 1.4 % Full / 2.1 % Wrapper, CRT calls in the setters / `internVi` / `internDyn` / `prepareDraw` compares 3 - 4 %, allocation
+from the effect passes ~2 % in Full, hash-map lookups of the composition 0.9 %, the 64-bit division of the stream shift 0.4 %.
+Fixed: blank-description copy, 52-byte description compare (EDS3 + dynamic vertex input), inline SSE2 compares (`d3d9/memeq.h`),
+changed-span register writes, 32-bit division, phase-generation early exit, pointer memos, lazy snapshot hash, effect-pass
+buffers reused, LOD diagnostics without per-call allocation. Result: Full 5.03 -> 4.95 ms, Wrapper 3.45 -> 3.38 ms savegame, jungle
+-0.13 ms in both (~2 %); vcruntime140 share Full 9.1 -> 7.5 %, Wrapper 5.4 -> 3.1 %. No item above ~1 % of the thread is left in
+the device path; merged indirect draws would not touch the engine thread (plan.md 8.4). Remaining engine-thread time is the
+engine itself (Engine.dll 18 % / 33 %, sharedbase 8 / 11 %), SEH-guarded engine reads (3 %) and the driver's inline `vkCmd*` (4.5 %).
