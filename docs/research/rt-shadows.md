@@ -301,7 +301,7 @@ the reproduction below. Without `shadows.rt` the same enhancements ran clean.
 
 **Reproduction**: `run.ps1 -Mode wrapper -Mods rvkcompare -Scenario rvkcompare -Param 'spots=pub_interior','freeze_wait=6000'
 -Setting 'shadows.enabled=true','shadows.rt=near'`: the loss comes ~35 s after the first RT shadow frame, at the scenario's first
-teleport (the camera jumps from the start place to the spot; the scene mirror reports hundreds of entities added / removed in
+teleport (the camera jumps from the start place to the spot; the scene mirror (removed in 23d60f2) reported hundreds of entities added / removed in
 that second, the TLAS drops from ~590 to ~100 instances).
 
 **Diagnosis** [C]:

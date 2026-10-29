@@ -1,6 +1,6 @@
 # Native renderer: our own scene, our own frame (the GD3D11 way)
 
-Status: design, 2026-10-25 (user decision). [C] = confirmed in the engine / game, [I] = inferred, [?] = open.
+Status: design, 2026-10-25 (user decision). **N0 - N4 as built (the scene mirror, the mirror-fed RT scene source, the native opaque pass, the native sun cascades) were removed on 2026-10-29 (commit 23d60f2; `git show 23d60f2^:<path>` is the archive)**: the settings `native.opaque` / `native.shadows` / `native.debug` / `rt.source`, `src/enh/native_{opaque,opaque_list,shadows,parts,index_arena}.*`, `src/enh/rt_scene_mirror.cpp`, `src/engine/scene_mirror.*`, `src/scene/mirror.*`, `shaders/native/*`. The engine findings (sections 3, 8, 10) stay; the stage that replaced them is N5 (engine-frame/README.md, `src/native/*`). Reusable from history: the indirect-draw plumbing (ring item commands, the `indirectDraws` fallback loop in `native_opaque.cpp`), the u32 index arena (`native_index_arena.*`), the instanced cascade casters (`native_shadows.cpp`). [C] = confirmed in the engine / game, [I] = inferred, [?] = open.
 
 ## 1. Why
 
@@ -164,6 +164,8 @@ property-set type ids (use the context vtable as the kind instead); the `bool` o
 
 ## 9. N3 first light: the native opaque pass (2026-10-25, `native.opaque`, default off) [C]
 
+> **Removed (23d60f2, 2026-10-29, user decision 2026-10-28: the early hand-written prototypes were misleading and broken).** This section describes an implementation that no longer exists in the tree (code references below are historical: `git show 23d60f2^:<path>`); its engine findings remain valid. Section 10 (where the engine's lighting comes from) is kept in full.
+
 `src/enh/native_opaque.*`, `shaders/native/static_mesh.{glsl,vert,frag}`. A draw replacer skips the engine's main-view solid draws of plain
 indexed static meshes (kind StaticMesh, triangle lists from static buffers, not blended; alpha-tested ones included) and records them; a pass
 at `AfterOpaque` draws them into the scene HDR target + the hardware depth: vertices pulled from the engine's buffers by device address (one
@@ -225,6 +227,8 @@ So a native pass can build the pixel shader constants without the engine's draw:
 
 ## 11. N4: native sun shadow cascades (2026-10-25, `native.shadows`, default off) [C]
 
+> **Removed (23d60f2, 2026-10-29, user decision 2026-10-28: the early hand-written prototypes were misleading and broken).** This section describes an implementation that no longer exists in the tree (code references below are historical: `git show 23d60f2^:<path>`); its engine findings remain valid.
+
 `src/enh/native_shadows.*`, `src/enh/native_parts.*`, `shaders/native/shadow_mesh.*`. Three sphere-fitted, texel-snapped cascades (2048², splits 1500 / 4000 /
 10000 units, light = `engine::shadowmaps::trueSunVector`) rendered at `AfterDepthPrepass` into transient D32 images from **the scene mirror's static mesh parts**
 (every cached-in entity within reach of the cascades, off-screen casters included, masked parts alpha-tested through the material graph's diffuse),
@@ -244,6 +248,8 @@ cascade fading into the engine's mask) in place of the mask's `.a`.
   carries their shadows beyond / besides ours. Next: skinned characters from the compute skinning (rt-shadows.md 10), SpeedTree.
 
 ## 12. N3.2: the opaque pass driven by the scene mirror (2026-10-25, `native.list = mirror`, default `engine`) [C]
+
+> **Removed (23d60f2, 2026-10-29, user decision 2026-10-28: the early hand-written prototypes were misleading and broken).** This section describes an implementation that no longer exists in the tree (code references below are historical: `git show 23d60f2^:<path>`); its engine findings remain valid.
 
 `src/enh/native_opaque_list.cpp`, `native_parts.*`. At `AfterDepthPrepass` the pass builds its list from the mirror: the engine's own entity rules (`flags & 0x8026 == 0x8026`,
 not killed), a frustum test on the entity sphere, the fade rule (alpha < 1 or beyond 0.9 x ViewRange x `lod.view` = a blended op: left to the engine), the lighting composed
@@ -267,6 +273,8 @@ of listed parts are skipped (and compared with what was composed: rvk.log `light
   next thing to cache / instance.
 
 ## 13. Instanced static meshes and the RT scene from the mirror (2026-10-25) [C]
+
+> **Removed (23d60f2, 2026-10-29, user decision 2026-10-28: the early hand-written prototypes were misleading and broken).** This section describes an implementation that no longer exists in the tree (code references below are historical: `git show 23d60f2^:<path>`); its engine findings remain valid.
 
 **Instancing** (`native_shadows.*`, `shaders/native/shadow_mesh.*`). The cascades' casters are grouped by identical geometry + masked-diffuse (vertex / index address,
 first index, count): one draw per group per cascade, the per-instance transforms in a ring array read by `gl_InstanceIndex`, the instances culled per cascade (the
@@ -300,6 +308,8 @@ Only a part without buffers / declaration keeps an entity on the draws. Measured
 overlay), 0 closer, 0 missed. Per-material classification log: rvk.log `native parts: material '...' is a terrain layer / never opaque`.
 
 ## 14. N3.3: depth pre-pass + colour pass, one indirect call per class (2026-10-25) [C]
+
+> **Removed (23d60f2, 2026-10-29, user decision 2026-10-28: the early hand-written prototypes were misleading and broken).** This section describes an implementation that no longer exists in the tree (code references below are historical: `git show 23d60f2^:<path>`); its engine findings remain valid.
 
 `native.opaque` (default off) now replaces the engine's z pass and solid pass draws of the mirror's static parts (`enh/native_opaque.*`, `native_opaque_list.cpp`,
 `native_index_arena.*`, `shaders/native/static_*`). The old "engine list" mode is gone; `native.list` was removed.

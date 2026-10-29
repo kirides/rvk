@@ -163,8 +163,8 @@ UINT32 (draw.cpp:1250-1256). The PSSM uses 32-bit. Everything natively generated
 An MDI group needs a single index type. The options:
 * Split groups by type (cheap).
 * Widen to u32 once into an index arena. `enh/native_index_arena.*` did exactly that for N3.3: a 64 MiB device-local u32 buffer,
-  widened from the CPU copies, cached by (buffer id, generation, first, count). It still exists and is compiled
-  (CMakeLists.txt:283-291), but is only used by `native.opaque` (Debug, default off).
+  widened from the CPU copies, cached by (buffer id, generation, first, count). It was removed together with
+  `native.opaque` (23d60f2, 2026-10-29); `git show 23d60f2^:src/enh/native_index_arena.cpp`.
 
 ## 3. Pipelines and state
 
@@ -407,7 +407,7 @@ precondition for skipping `prepareDraw`. Wrapper keeps the draw-level path.
 | 6 | Consumers from the op stream (RT scene / object motion / GI / tint / jitter per pass), the compare / coverage expansion on check frames | the Full path without the draw-level hooks; Wrapper unchanged | step 5 |
 | 7 | (optional) GPU culling with `drawIndirectCount`, vertex pulling, meshlets | GPU-side gains only; the GPU is at 1.5 ms vs CPU 4.7 ms at the savegame [M]: low priority | steps 5-6 |
 
-Reusable from the existing code:
+Reusable from the existing code (the two `native_*` files below were removed in 23d60f2, 2026-10-29: `git show 23d60f2^:<path>`):
 * `enh/native_opaque.*`: the indirect plumbing, i.e. ring commands, the `indirectDraws` fallback loop (native_opaque.cpp:196,
   286) and memory barriers around the scopes.
 * `native_index_arena.*`: the u32 widening.

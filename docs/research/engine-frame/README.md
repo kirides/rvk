@@ -242,7 +242,7 @@ In take-over runs our own draws are captured at their own `prepareDraw` as well 
 = what was composed): every one equal (1,300,511 and 1,273,444). Ops left to the engine: a permutation not compiled yet (the engine
 compiles it on demand at that draw; the next frame composes it) and 3 "unreadable" (the admin / sub-mesh index checks). The first build
 already compared at 0 mismatches (the rules above were read before the code was written); one difference outside the compared fields was
-found by the scene mirror's cross-check (z merges tagged with a sub-mesh, which the engine's hooks never do) and fixed; the tag is now a
+found by the scene mirror's cross-check (the mirror was removed later, 23d60f2; z merges tagged with a sub-mesh, which the engine's hooks never do) and fixed; the tag is now a
 compared field.
 
 Images (`water-compare.ps1 -Spots pub_interior,monastery_hall,jungle`, water off on both sides; mean |d| 8-bit / share of pixels with a

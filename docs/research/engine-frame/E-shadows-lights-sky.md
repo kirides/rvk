@@ -290,7 +290,7 @@ pass-throughs, the weather state getters. Missing for a full takeover: a pre-hoo
 (`RenderShadowMaps` returning true without rendering, or the RenderPrePass 0x59e840 / vtable slot of 0x9a98b0 `+0x28`), and the
 skydome render context's slot (`0x9ddd90 +0x00`) to replace the sky draw at its list position.
 
-Our native cascades (`enh/native_shadows.*`, native-renderer.md 11) vs the engine:
+Our early native cascades (`enh/native_shadows.*`, native-renderer.md 11, removed in 23d60f2, 2026-10-29: `git show 23d60f2^:<path>`) vs the engine:
 
 | aspect | engine | native |
 |---|---|---|

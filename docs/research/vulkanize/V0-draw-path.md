@@ -286,7 +286,7 @@ its device path: **~2.5-3.0 ms engine+HAL** at the savegame (Wrapper 3.36, Full 
 
 Related facts for the design:
 
-* `enh/native_opaque.*` (setting `native.opaque`, default off; native-renderer.md 9 / 12 / 14) already draws the mirror's static parts
+* `enh/native_opaque.*` (setting `native.opaque`, removed in 23d60f2, 2026-10-29; was default off; native-renderer.md 9 / 12 / 14) already draws the mirror's static parts
   with one `vkCmdDrawIndexedIndirect` per class from `NativeIndexArena` + a `NativeItemBlock` (928 B) per part; it uses hand-written
   shaders and was not visually equal to the engine (native-renderer.md 14, "Not verified at every spot"). Earlier measurement of
   device-generated commands: no gain over direct recording of push constant + draw (performance.md 12).

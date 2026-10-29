@@ -153,8 +153,8 @@ optimization). Code: `core/config.h` (`RenderMode`, `parseRenderMode`, `configMo
   `[renderer]` lines of settings.toml (README.txt says so).
 * **A/B**: the setting is A/B-eligible (no Restart flag), so in debug mode F10 flips Wrapper vs Full (side B = full).
 * **Debug overrides**: `native.static_ops` / `native.scene_ops` (Debug) turn a stage on in Wrapper too; in Full
-  `native.scene_ops_groups` masks groups; `native.*_compare` work on top of either mode. `native.opaque` / `native.shadows`
-  / `native.debug` (the N3 mirror-driven path) stay Debug-only as the basis of a later optimized mode.
+  `native.scene_ops_groups` masks groups; `native.*_compare` work on top of either mode. (`native.opaque` / `native.shadows` / `native.debug`, the early N3 / N4
+  prototypes, were removed in 23d60f2; settings.toml lines for them are ignored with one warning each.)
 * rvk.log: `renderer: mode <m> at start (<default | settings.toml renderer.mode | config.toml [renderer] mode>; backend
   <passthrough | vulkan | trace>)`, then in a Vulkan session `renderer: mode wrapper|full (...)` at the device and on every
   change (`mode original requested ...` for a pending restart). The capability report (`caps:` lines, the System tab's

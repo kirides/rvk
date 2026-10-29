@@ -393,7 +393,7 @@ A native list builder that replaces the engine's must reproduce, per view (main,
    stamp `entity+0xe4` (decals), resource-cache touches of mesh resources and materials, SpeedTree wind matrices, the render-instance
    arrays, the pre-passes (dynamic lights, point-light shadow cells).
 
-**Deviations of `src/enh/native_opaque_list.cpp` (`NativeOpaque::buildList`) from the engine** (main view, z pass + solid only):
+**Deviations of `src/enh/native_opaque_list.cpp` (`NativeOpaque::buildList`) (removed in 23d60f2, 2026-10-29: `git show 23d60f2^:<path>`) from the engine** (main view, z pass + solid only):
 
 | # | engine | native | effect |
 |---|---|---|---|
@@ -410,7 +410,7 @@ A native list builder that replaces the engine's must reproduce, per view (main,
 | 11 | LOD from the db camera at Request; shadow dbs re-pick from the shadow camera first (same `ctx+0x28`) | live `ctx+0x28` checked against the mirror's copy | the mirror's copy can hold the shadow camera's choice (taken mid-frame) -> `listStale` parts left to the engine [I] |
 | 12 | `caps 0x15a9` (ignore view range) honoured | not read | none in game (0) |
 
-Native shadows (`native_shadows.cpp`, not reviewed in detail): the engine's casters additionally require fade == 1 (fading entities
+Native shadows (`native_shadows.cpp` (removed in 23d60f2, 2026-10-29: `git show 23d60f2^:<path>`), not reviewed in detail): the engine's casters additionally require fade == 1 (fading entities
 cast nothing), the caster-type callbacks of 2.7, and use LODs chosen from the shadow camera.
 
 ## 6. Open

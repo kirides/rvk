@@ -2,7 +2,7 @@
 
 Reverse-engineering spec of how Risen Enhanced (x64) draws a static mesh with an `eCShaderDefault` material in every pass of the
 main view: call sequence, render / sampler states, every VS / PS constant register and its source, the shader permutation rules,
-the data structures, and what our native passes (`enh/native_opaque*`, `shaders/native/static_*`) reproduce. Headless Ghidra on
+the data structures, and what our early native passes (`enh/native_opaque*`, `shaders/native/static_*`, removed in 23d60f2, 2026-10-29: `git show 23d60f2^:<path>`) reproduced and the N5 static ops (`src/native/static_ops*`) reproduce. Headless Ghidra on
 Engine.dll (clone `clones/EngineC`), 2026-10-27; dumps `B:\DevDrive\risen-ghidra\frameC_dump1..6.txt`, `frameC_vt1.txt`, disassembly
 helper `frameC_dis.py` (reads the test copy's Engine.dll). RVAs are Engine.dll (image base 0x180000000).
 
@@ -463,7 +463,7 @@ instance index).
 
 ## 6. For a native implementation
 
-### 6.1 What `enh/native_opaque*` + `shaders/native/static_*` reproduce already (native-renderer.md 9-14) [C]
+### 6.1 What `enh/native_opaque*` + `shaders/native/static_*` reproduced already (removed in 23d60f2, 2026-10-29: `git show 23d60f2^:<path>`) (native-renderer.md 9-14) [C]
 
 * Part selection by the engine's rules (entity flags, frustum, fade < 1 and the view-range fade left to the engine), opaque and
   masked classes, front-to-back; the z pre-pass into hardware depth + linear depth map; colour pass after `BeginSolid`.
