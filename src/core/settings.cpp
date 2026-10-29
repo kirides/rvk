@@ -1587,9 +1587,10 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .category = "Lighting",
         .description = "How dark the traced shade may get compared with the game's own flat ambient light: 0 lets shaded places "
                        "fall as dark as the traced light says, higher keeps a share of the game's ambient there (softer, lighter "
-                       "shadows under trees and cliffs).",
+                       "shadows under trees and cliffs). Interiors and caves are not lifted: the share is of the ambient the game "
+                       "really shows at each surface (its baked indoor factor).",
         .type = Type::Float,
-        .defaultValue = 0.25,
+        .defaultValue = 0.5,
         .min = 0,
         .max = 1,
         .format = "%.2f",
@@ -1630,11 +1631,12 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .tab = kTabDebug,
         .description = "Developer view of the ray-traced lighting: \"Irradiance\" shows the probes' light on a white surface "
                        "(geometric normal), \"Cascades\" the probe cascade each pixel uses (red, green, blue; dark red = no "
-                       "probes: the game's ambient).",
+                       "probes: the game's ambient), \"Vertex AO\" the level's baked indoor factor (white = open air, black = the "
+                       "game's indoor ambient).",
         .type = Type::Enum,
         .defaultValue = 0,
-        .options = {"off", "irradiance", "cascades"},
-        .optionLabels = {"Off", "Irradiance", "Cascades"},
+        .options = {"off", "irradiance", "cascades", "vertex_ao"},
+        .optionLabels = {"Off", "Irradiance", "Cascades", "Vertex AO"},
         .flags = Flag::NoAB | Flag::Debug,
         .requirements = caps::bit(caps::Cap::RayQuery),
     });

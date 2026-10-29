@@ -699,7 +699,7 @@ game's art direction and it crushes detail (lake_jungle's lower right).
   (the engine's ambient and its sky factor are alike there, section 13 / 18). Default 0.25 is the compromise; 0 = the deep traced shade.
   (The pub rows of that run are not comparable: its eye adaptation differs by 10 luma between runs.)
 
-**Open**: telling indoor from outdoor shade (the sun cascades' coverage, the zone's indoor flag) would let the fill apply outdoors only;
+**Open (solved in section 24: the vertex AO; the default is now 0.5)**: telling indoor from outdoor shade (the sun cascades' coverage, the zone's indoor flag) would let the fill apply outdoors only;
 grass / leaf cards in the TLAS and a second bounce would put real light back into the shade instead of an artificial floor.
 
 **With the shipped defaults** [C] (`out\water\20261029-161846`, `-Validation` clean, no VUID / SYNC lines; shaded luma GI - engine, p25 GI / engine):
@@ -727,3 +727,52 @@ every frame (volatile ranges, rt-shadows.md 5), and the leaves' result says foli
 The deeper shade therefore comes from what is *missing as light* (the ground's weak single bounce, the sky term's occlusion by the
 large geometry), not from missing occluders: section 21's fill is the right knob for now.
 
+
+## 24. Indoor / outdoor signal for the shadow fill: the vertex AO (2026-10-29)
+
+([C] = measured in the game, [I] = inferred.) Problem: `gi.shadow_fill` (section 21) lifted interiors whose engine ambient is bright (crystal_cave
+shaded +3.4 .. +9 above the engine's, dark share 0.361 -> 0.215): the material shader cannot tell cave from forest shade.
+
+**What the engine knows, and what does not work** [C]
+* The weather is not an indoor signal: the pub, the monastery and the crystal cave run in a Sunny weather zone (rvkcompare's calibrated
+  weights: pub Sunny_Half_02 0.87, cave Sunny_Full 0.67, monastery Sunny_Full); only the lava cave is `Dungeon_Blue6_Big` (sky L0 0.046, indoor
+  0.30). `engine::weatherStates()` therefore only flags dungeon zones; sky L0 / indoor colour are weather values (0.33 in the pub, 0.68 in the
+  cave, 0.14 in rain), not a class.
+* The per-draw outdoor factor `f` (portal-room openings, section 1 / 17) is not visible to the shader except through the registers, and the
+  cave is not a portal room: of the crystal cave's draws 71 sit at f(L0) = f(L1) = 1.00 with the full sunny sky (0.67), 8 at 0.8, 4 at ~0.16;
+  the monastery hall has 12 of 37 at 0.13 (portal-room objects). Exact `f` would need the `FUN_1806b5bb0` RVA hook (section 17): not done.
+* **The signal is in the shader itself** [C]: `ge_default_phong.fx` line 217, `colAmbient = lerp(g_IndoorAmbientColor, colAmbient,
+  PassData.m_fVertexAmbientOcclusion)`: the ambient the engine really shows is `lerp(c14, SH(N), AO_v)`, and `AO_v` is the vertex colour alpha
+  (TEXCOORD4.w, `vNormalAndAO`), baked by the level designers. `gi.debug=vertex_ao` shows it (white = 1): level meshes of caves, the pub
+  and the monastery are black / dark grey (AO_v 0 .. 0.5, smooth gradients on the walls, brighter near windows), the beach sand is 1, rocks and
+  shaded terrain mid grey, vegetation 1; dynamic objects (furniture, barrels, crystals, candelabras) are 1 (they are lit by the SH x f path).
+
+**Change** [C] (`rvkMvGi`, `rvk_mvVao` set by the prologue from `vertexNormal.w`): the fill is a share of the ambient *shown at this pixel*:
+`shown = mix(c14, le, AO_v)` (c14 before the GI override; without `RVK_MV_HAS_IND` or TEXCOORD4: `le`), `want = max(min(le, 0.15) * 0.6, shown * fill)`.
+So caves / interiors (AO_v ~ 0) keep their old dim floor (the engine shows its indoor colour 0.04 .. 0.12 there), open terrain gets the fill, and
+doorways / cave mouths are continuous because the baked vertex data is (no per-frame state, nothing to flicker). Objects with AO_v = 1 in a
+cave still get `le * fill` (as the engine lights them with the sky SH). The default became 0.5 (0.25 was the compromise for the side effect).
+
+**Results** [C] (`out\water\20261029-1704xx .. 1724xx`, engine pictures `engmerge`; shaded luma GI - engine, dark share, p25; fill 0 / 0.25 / 0.4 / 0.5 / 0.7):
+
+| spot | dSh | dark | p25 (engine) |
+|---|---|---|---|
+| crystal_cave | -0.0 / -0.0 / 0.0 / -0.1 / 0.1 (old build 0.25: +3.4) | 0.356 / 0.361 / 0.360 / 0.361 / 0.355 (engine 0.361; old 0.215) | 9.9 / 9.8 / 9.9 / 9.8 / 10.0 (9.6) |
+| pub_interior | 3.8 / 3.7 / 3.6 / 3.3 / 2.9 (eye adaptation, same at fill 0) | 0.075 / 0.073 / 0.076 / 0.081 / 0.077 (0.102) | 18.1 / 18.1 / 18.1 / 17.9 / 17.9 (14.8) |
+| monastery_hall | -0.8 / -0.1 / -0.6 / -0.6 / -0.3 | 0.218 / 0.213 / 0.205 / 0.197 / 0.182 (0.167) | 14.8 / 15.2 / 15.9 / 16.4 / 17.5 (18.7) |
+| lava_cave | engine run: -0.8 at the default | 0.274 (engine 0.211; 0.269 at fill 0, 0.271 at 0.5: lava flicker, not the fill) | 11.5 (12.8) |
+| lake_jungle | -4.8 / -4.5 / -3.5 / -2.5 / -1.1 | 0.167 / 0.108 / 0.076 / 0.063 / 0.044 (0.034) | 16.7 / 18.5 / 20.6 / 21.8 / 24.2 (25.9) |
+| beach_sun | -6.1 / -5.8 / -4.5 / -4.4 / -2.4 | 0.021 / 0.022 / 0.019 / 0.018 / 0.013 (0.012) | 44.3 / 44.5 / 46.1 / 46.6 / 48.6 (51.6) |
+| shadow_inland_a | -2.6 / -3.6 / -2.4 / -1.6 / -0.8 (its whole-image luma drifts 64 .. 83) | 0.082 / 0.088 / 0.063 / 0.056 / 0.043 (0.048) | 21.8 / 21.0 / 24.2 / 25.8 / 26.8 (29.3) |
+| jungle | -0.9 / -1.4 / -0.8 / -0.8 / +0.3 | 0 | 28.6 / 28.6 / 29.1 / 29.3 / 30.5 (30.6) |
+
+Interiors are independent of the fill (crystal cave, monastery, pub identical within the run noise at every value), outdoors the
+default 0.5 beats the old default 0.25 / the old 0.3 rows (lake_jungle p25 21.8 against 18.8, dark 0.063 against 0.103; shadow_inland_a p25 27.3).
+Final run with the shipped default and `-Validation` (`-172125`): beach -4.5, crystal_cave -0.1 (dark 0.364), harbour_docks -1.3, jungle -1.3,
+lake_jungle -2.7, monastery -0.6, shadow_inland_a -0.4, swamp_camp -2.0; no VUID / SYNC line. (Its pub row, dark 0.209, is the engine
+reference being from another session: eye adaptation / camera, the side by side looks the same; same-session fill runs above are flat.)
+`rvk_tests` 192 / 192, corpus `--gbuf / --gi / --gbuf-motion` 0 failures.
+
+**Open / limits** [I]: dynamic objects in caves (AO_v 1) get the full-sky fill; outdoor pixels under a canopy only get a fill as large as the
+baked AO lets them (terrain under trees is mid grey, so there the fill is lower than 0.5 of the sky: the reason 0.5 is needed where 0.25 of the sky
+was); a doorway walk (rvk_rtwalk) was not run: the signal is static vertex data, and the monastery debug view shows the smooth gradient at windows.

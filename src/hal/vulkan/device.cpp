@@ -620,7 +620,7 @@ void HalDevice::applyGi() {
     if (rs.giLightCount != nullptr) s.lightCount = rs.giLightCount->asInt();
     if (rs.giLights != nullptr) s.lights = rs.giLights->asEnum() == "world" ? 1 : 0;
     const std::string_view d = rs.giDebug->asEnum();
-    s.debug = d == "irradiance" ? 1 : d == "cascades" ? 2 : 0;
+    s.debug = d == "irradiance" ? 1 : d == "cascades" ? 2 : d == "vertex_ao" ? 3 : 0;
     if (rs.giScreen != nullptr) {
         const std::string_view sc = rs.giScreen->asEnum();
         s.screen = sc == "low" ? 1 : sc == "medium" ? 2 : sc == "high" ? 3 : 0;

@@ -33,6 +33,7 @@ vec4 rvk_gbN = vec4(0.0);            // the shaded normal (dot capture / interpo
 float rvk_mvAo = 1.0;                // the reprojected ambient occlusion applied (debug)
 vec3 rvk_mvSgi = vec3(1.0);
           // the screen probes' factor applied (debug)
+float rvk_mvVao = 1.0;               // the vertex ambient occlusion / indoor factor (TEXCOORD4.w): the engine's ambient = lerp(c14, SH, it)
 
 #ifdef RVK_MV_GBUFFER
 layout(location = 1) out vec4 rvk_gbNormal;  // A2B10G10R10: xy octahedral world normal (rvkGiOctEncode), z 0, w id / 3
@@ -157,7 +158,14 @@ void rvkMvGi(vec3 P, vec3 n, vec3 V) {
         // the shadow fill (gi.shadow_fill, rtgi.md 21): a share of the engine's whole ambient as a floor, anywhere (the traced
         // shade under trees / cliffs measured 5 - 40 % darker than the engine's flat ambient); bits 8-15 of info.x
         float fill = float((v.info.x >> 8) & 0xFFu) * (1.0 / 255.0);
-        vec3 want = max(min(le, vec3(RVK_MV_FLOOR_MAX)) * RVK_MV_INDOOR_FLOOR, le * fill);
+        // of the ambient the engine really shows at this pixel (rtgi.md 24): lerp(c14, SH, vertex AO), the level's baked indoor
+        // factor (0 in caves / interiors: there the engine's ambient is its dim indoor colour, not the sky's)
+#ifdef RVK_MV_HAS_IND
+        vec3 shown = mix(max(rvk_gi[0].rgb, vec3(0.0)), le, rvk_mvVao);
+#else
+        vec3 shown = le;
+#endif
+        vec3 want = max(min(le, vec3(RVK_MV_FLOOR_MAX)) * RVK_MV_INDOOR_FLOOR, shown * fill);
         vec3 have = max(rvkGiAverage(regs), vec3(0.0));
         vec3 add = max(want - have, vec3(0.0));
         regs[0].w += add.x;
@@ -217,6 +225,9 @@ void rvkMvPrologue(vec4 vertexNormal) {
 #ifdef RVK_MV_VNORMAL
     rvk_gbN = vec4(vertexNormal.xyz, 0.0);
 #endif
+#ifdef RVK_MV_VNORMAL
+    rvk_mvVao = clamp(vertexNormal.w, 0.0, 1.0);
+#endif
 #ifdef RVK_MV_AMBIENT
     rvkMvGi(P, n, V);
 #ifdef RVK_MV_GBUFFER
@@ -249,6 +260,8 @@ void rvkMvEpilogue(inout vec4 c0) {
             vec4 r[7];
             for (int i = 0; i < 7; ++i) r[i] = rvk_gi[1 + i];
             c0 = vec4(pow(max(rvkGiEvalRegs(r, rvk_giN), vec3(0.0)), vec3(0.45)), c0.a);
+        } else if (dbg == 3u) {
+            c0 = vec4(vec3(rvk_mvVao), c0.a);
         } else if (dbg == 2u) {
             vec3 col = rvk_giCascade == 0u ? vec3(1.0, 0.25, 0.25)
                      : rvk_giCascade == 1u ? vec3(0.25, 1.0, 0.25)

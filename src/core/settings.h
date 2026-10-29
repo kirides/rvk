@@ -364,7 +364,7 @@ struct RendererSettings {
     Setting* giFill = nullptr;            // gi.shadow_fill: 0..1 share of the engine's ambient kept as a floor in shade (rtgi.md 21)
     Setting* giCutouts = nullptr;         // gi.cutouts (debug): "solid" / "tested": how the probe rays treat alpha-tested foliage (rtgi.md 21)
     Setting* giDirectional = nullptr;     // gi.directional: 0..1 the screen probes' correction of the light's direction (rtgi.md 20)
-    Setting* giDebug = nullptr;           // gi.debug: "off", "irradiance", "cascades"
+    Setting* giDebug = nullptr;           // gi.debug: "off", "irradiance", "cascades", "vertex_ao"
     // G-buffer / motion vectors / GTAO (enh/gbuffer.h, docs/research/rtgi.md 10)
     Setting* aoEnabled = nullptr;         // ao.enabled: GTAO on the ambient light
     Setting* giLights = nullptr;          // gi.lights: "nearby" (the drawn objects' lights) or "world" (engine/lights: every loaded light)
