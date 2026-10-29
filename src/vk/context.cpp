@@ -66,6 +66,8 @@ Context::~Context() { destroy(); }
 
 bool Context::create(const ContextOptions& options) {
     wantPipelineStatistics_ = options.pipelineStatistics;
+    wantFrameGenQueues_ = options.frameGenQueues;
+    fgQueues_.requested = options.frameGenQueues;
     if (volkInitialize() != VK_SUCCESS) {
         spdlog::error("vulkan: no Vulkan loader");
         return false;
@@ -271,12 +273,34 @@ bool Context::pickPhysicalDevice(const ContextOptions& options) {
     for (std::uint32_t i = 0; i < qn; ++i) {
         if ((qf[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0 && vkGetPhysicalDeviceWin32PresentationSupportKHR(physical_, i)) {
             queueFamily_ = i;
+            queueFamilyCount_ = qf[i].queueCount;
             features_.timestampPeriod = qf[i].timestampValidBits != 0 ? props_.limits.timestampPeriod : 0.0f;
+            planFrameGenQueues(qf);
             return true;
         }
     }
     spdlog::error("vulkan: no graphics queue family that can present");
     return false;
+}
+
+// The frame generation swapchain wants four distinct queues (game, present, image acquire, async compute): what this GPU can give.
+// The game queue is queue 0 of the graphics family; present and acquire are queues 1 and 2 of it; the async compute queue is the
+// first queue of a compute-only family, else queue 3 of the graphics family. Fewer than three graphics queues: no swapchain
+// (the manual frame generation does not need any).
+void Context::planFrameGenQueues(const std::vector<VkQueueFamilyProperties>& families) {
+    computeFamily_ = ~0u;
+    computeFamilyCount_ = 0;
+    for (std::uint32_t i = 0; i < families.size(); ++i) {
+        const VkQueueFlags f = families[i].queueFlags;
+        if ((f & VK_QUEUE_COMPUTE_BIT) != 0 && (f & VK_QUEUE_GRAPHICS_BIT) == 0 && families[i].queueCount > 0) {
+            computeFamily_ = i;
+            computeFamilyCount_ = families[i].queueCount;
+            break;
+        }
+    }
+    if (queueFamilyCount_ < 3) {
+        fgQueues_.reason = std::format("the graphics queue family offers {} queue(s), the frame generation swapchain needs 3", queueFamilyCount_);
+    }
 }
 
 bool Context::createDevice(bool withRayTracing) {
@@ -506,14 +530,31 @@ bool Context::createDevice(bool withRayTracing) {
         }
     }
 
-    const float priority = 1.0f;
-    VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
-    qci.queueFamilyIndex = queueFamily_;
-    qci.queueCount = 1;
-    qci.pQueuePriorities = &priority;
+    // the floor: one queue. With frame generation (framegen.mode != off at start): the swapchain's present + acquire queues in the
+    // game queue's family and an async compute queue (compute-only family, else a fourth queue of the game family)
+    const float priorities[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    std::vector<VkDeviceQueueCreateInfo> qcis(1, VkDeviceQueueCreateInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO});
+    qcis[0].queueFamilyIndex = queueFamily_;
+    qcis[0].queueCount = 1;
+    qcis[0].pQueuePriorities = priorities;
+    bool extraAsyncInGraphics = false, extraAsyncInCompute = false;
+    if (wantFrameGenQueues_ && queueFamilyCount_ >= 3) {
+        qcis[0].queueCount = 3;
+        if (computeFamily_ != ~0u) {
+            VkDeviceQueueCreateInfo c{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+            c.queueFamilyIndex = computeFamily_;
+            c.queueCount = 1;
+            c.pQueuePriorities = priorities;
+            qcis.push_back(c);
+            extraAsyncInCompute = true;
+        } else if (queueFamilyCount_ >= 4) {
+            qcis[0].queueCount = 4;
+            extraAsyncInGraphics = true;
+        }
+    }
     VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &f2};
-    dci.queueCreateInfoCount = 1;
-    dci.pQueueCreateInfos = &qci;
+    dci.queueCreateInfoCount = static_cast<std::uint32_t>(qcis.size());
+    dci.pQueueCreateInfos = qcis.data();
     dci.enabledExtensionCount = static_cast<std::uint32_t>(enabled.size());
     dci.ppEnabledExtensionNames = enabled.data();
     if (const VkResult r = vkCreateDevice(physical_, &dci, nullptr, &device_); r != VK_SUCCESS) {
@@ -522,6 +563,26 @@ bool Context::createDevice(bool withRayTracing) {
     }
     volkLoadDevice(device_);
     vkGetDeviceQueue(device_, queueFamily_, 0, &queue_);
+    if (wantFrameGenQueues_ && queueFamilyCount_ >= 3) {
+        fgQueues_.presentFamily = fgQueues_.acquireFamily = queueFamily_;
+        vkGetDeviceQueue(device_, queueFamily_, 1, &fgQueues_.present);
+        vkGetDeviceQueue(device_, queueFamily_, 2, &fgQueues_.acquire);
+        if (extraAsyncInCompute) {
+            fgQueues_.asyncFamily = computeFamily_;
+            vkGetDeviceQueue(device_, computeFamily_, 0, &fgQueues_.async);
+        } else if (extraAsyncInGraphics) {
+            fgQueues_.asyncFamily = queueFamily_;
+            vkGetDeviceQueue(device_, queueFamily_, 3, &fgQueues_.async);
+        }
+        fgQueues_.created = true;
+        fgQueues_.reason.clear();
+        spdlog::info("vulkan: frame generation queues: game {}:0, present {}:1, acquire {}:2, async compute {}", queueFamily_, queueFamily_,
+                     queueFamily_,
+                     fgQueues_.async != VK_NULL_HANDLE ? std::format("{}:{}", fgQueues_.asyncFamily, extraAsyncInCompute ? 0 : 3)
+                                                       : std::string("none"));
+    } else if (wantFrameGenQueues_) {
+        spdlog::info("vulkan: frame generation queues not created: {}", fgQueues_.reason);
+    }
     return true;
 }
 
@@ -693,6 +754,19 @@ caps::Report Context::capabilities(bool pipelineLibrariesInUse) const {
         "VK_EXT_full_screen_exclusive + VK_KHR_get_surface_capabilities2");
     set(Cap::ShaderDrawParameters, report_.shaderDrawParameters, features_.shaderDrawParameters, "", "gl_DrawID / gl_BaseInstance");
     set(Cap::DrawIndirectCount, report_.drawIndirectCount, features_.drawIndirectCount, "", "vkCmdDrawIndexedIndirectCount");
+    // frame generation (vk/framegen.h): the manual model needs the effect DLL and a provider; the swapchain (stage F3) the queues
+    const char* const kNoDll = "amd_fidelityfx_framegeneration_vk.dll is not installed (the separate frame generation download, folder rvk)";
+    set(Cap::FrameGeneration, fgReport_.dllPresent, fgReport_.fsr3,
+        !fgReport_.dllPresent ? kNoDll : !fgReport_.probed ? "not probed" : fgReport_.reason, fgReport_.versions);
+    set(Cap::FrameGenerationMl, fgReport_.dllPresent, fgReport_.ml,
+        !fgReport_.dllPresent ? kNoDll
+        : fgReport_.probed    ? "the graphics driver offers no FSR 4 frame generation for this GPU (it needs a Radeon RX 9000 series)"
+                              : "not probed",
+        fgReport_.versions);
+    set(Cap::FrameGenerationQueues, queueFamilyCount_ >= 3, fgQueues_.created,
+        fgQueues_.requested ? fgQueues_.reason : "not requested: the extra queues are created when frame generation is on at startup",
+        std::format("graphics queue family {} x{}, compute-only family {}", queueFamily_, queueFamilyCount_,
+                    computeFamily_ != ~0u ? std::format("{} x{}", computeFamily_, computeFamilyCount_) : std::string("none")));
     set(Cap::SamplerAnisotropy, features_.samplerAnisotropy, features_.samplerAnisotropy, "",
         features_.samplerAnisotropy ? std::format("max {:.0f}x", features_.maxAnisotropy) : "");
     if (prt.accelerationStructure) {

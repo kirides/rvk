@@ -497,6 +497,7 @@ struct DeviceOptions {
     bool pipelineLibraries = false;  // [vulkan] pipeline_libraries (off: AMD driver crash, vk/pipeline_library.cpp)
     std::uint32_t perfFrame = 0;     // [debug] perf_frame: log the GPU time of every pass of this frame
     bool allowRayTracing = true;     // rt.allow: enable the ray tracing tier when the GPU has it (vk::ContextOptions)
+    bool frameGenQueues = false;     // framegen.mode != off at start: the extra queues of the frame generation swapchain
 };
 
 struct Viewport {

@@ -7,6 +7,7 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "core/caps.h"
 #include "vk/debug_names.h"
@@ -25,6 +26,33 @@ struct ContextOptions {
     bool allowRayTracing = true;
     // VK_KHR_pipeline_executable_properties when the driver has it (shader statistics: rvk_vktest --shader-stats)
     bool pipelineStatistics = false;
+    // request the extra queues AMD's frame generation swapchain needs (docs/research/frame-generation.md 2.1: four distinct
+    // VkQueues): only when frame generation may be used (framegen.mode != off at startup); with false the device has the one
+    // queue of the floor, exactly as before
+    bool frameGenQueues = false;
+};
+
+// The extra queues of the frame generation swapchain (stage F3). `present` and `acquire` are distinct queues of the game queue's
+// family (present: also transfer; acquire: any), `async` a compute queue (a compute-only family, else another queue of the game
+// family; null = none, the swapchain's async compute is optional). The game queue is Context::queue(). Access to the extra
+// queues is the swapchain's (the FFX DLL submits and presents on them from its own threads).
+struct FrameGenQueues {
+    bool requested = false;   // ContextOptions::frameGenQueues
+    bool created = false;     // the queues exist
+    VkQueue present = VK_NULL_HANDLE, acquire = VK_NULL_HANDLE, async = VK_NULL_HANDLE;
+    std::uint32_t presentFamily = 0, acquireFamily = 0, asyncFamily = 0;
+    std::string reason;       // why not created (when requested or not)
+};
+
+// What the frame generation setup found (enh / hal side), reported with the capabilities (caps: lines, the System tab)
+struct FrameGenReport {
+    bool probed = false;      // the effect DLL was queried
+    bool dllPresent = false;  // amd_fidelityfx_framegeneration_vk.dll sits next to the loader
+    bool fsr3 = false;        // the API offers an FSR 3 frame generation provider on this device
+    bool ml = false;          // ... an FSR 4 (ML) provider
+    std::string versions;     // "id: name, ..." of the frame generation providers
+    std::string swapchain;    // the swapchain providers and the one that would be pinned
+    std::string reason;       // why frame generation is unavailable (empty when fsr3)
 };
 
 // The optional ray tracing tier of the device (docs/research/raytracing.md 1).
@@ -86,6 +114,10 @@ public:
     // the queue lock itself, for queue access by foreign code (ImGui's texture uploads submit and wait on the queue)
     std::unique_lock<std::mutex> queueLock() { return std::unique_lock<std::mutex>(queueMutex_); }
     std::uint32_t queueFamily() const { return queueFamily_; }
+    const FrameGenQueues& frameGenQueues() const { return fgQueues_; }
+    // set by the frame generation setup before capabilities() is built
+    void setFrameGenReport(FrameGenReport report) { fgReport_ = std::move(report); }
+    const FrameGenReport& frameGenReport() const { return fgReport_; }
     VmaAllocator allocator() const { return allocator_; }
     const VkPhysicalDeviceProperties& properties() const { return props_; }
     const DeviceFeatures& features() const { return features_; }
@@ -117,6 +149,7 @@ private:
     bool createInstance(const ContextOptions& options);
     bool pickPhysicalDevice(const ContextOptions& options);
     bool createDevice(bool withRayTracing);
+    void planFrameGenQueues(const std::vector<VkQueueFamilyProperties>& families);
     bool wantPipelineStatistics_ = false;
     bool createAllocator();
 
@@ -126,6 +159,12 @@ private:
     VkDevice device_ = VK_NULL_HANDLE;
     VkQueue queue_ = VK_NULL_HANDLE;
     std::uint32_t queueFamily_ = 0;
+    std::uint32_t queueFamilyCount_ = 1;       // queues the game queue's family offers
+    std::uint32_t computeFamily_ = ~0u;        // a compute-only family (no graphics), ~0 = none
+    std::uint32_t computeFamilyCount_ = 0;
+    bool wantFrameGenQueues_ = false;
+    FrameGenQueues fgQueues_;
+    FrameGenReport fgReport_;
     VmaAllocator allocator_ = VK_NULL_HANDLE;
     VkPhysicalDeviceProperties props_{};
     DeviceFeatures features_;

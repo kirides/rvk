@@ -16,6 +16,7 @@
 #include "api/capture.h"
 #include "core/caps.h"
 #include "core/exports.h"
+#include "core/paths.h"
 #include "core/settings.h"
 #include "core/stall_sampler.h"
 #include "d3d9/fvf.h"
@@ -31,6 +32,7 @@
 #include "res/dds.h"
 #include "vk/debug_names.h"
 #include "vk/formats.h"
+#include "vk/framegen.h"
 #include "vk/raytracing.h"
 
 namespace rvk::hal::vulkan {
@@ -279,6 +281,9 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     o.logDraws = options.logDraws;
     // rt.allow is a restart setting: the value the session started with decides (its effective value waits for the report)
     o.allowRayTracing = rs.rtAllow == nullptr || rs.rtAllow->startValue() != 0.0;
+    // framegen.mode decides at start whether the frame generation swapchain's extra queues are requested (it is not a restart
+    // setting: the manual generation needs no extra queue); with it off at start the device is exactly the floor's
+    o.frameGenQueues = rs.framegenMode != nullptr && rs.framegenMode->startValue() != 0.0;
     // debug.names is a restart setting too: objects are named as they are created (vk/debug_names.h)
     vk::names::setEnabled(rs.debugNames == nullptr || rs.debugNames->startValue() != 0.0);
     if (!dev_.create(o)) {
@@ -292,6 +297,8 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
                  o.vsync, vk::d3dFormatName(o.depthFormat));
     engine::scene::attach(&dev_);  // the frame phase markers (no-ops when they are not installed)
     auto& reg = settings::registry();
+    // frame generation providers (vk/framegen.h): which of FSR 3 / FSR 4 this device can run, for the capability report
+    dev_.ctx().setFrameGenReport(vk::probeFrameGeneration(dev_.ctx(), paths::dataDir() / "amd_fidelityfx_loader_vk.dll"));
     // capability report (core/caps.h, docs/research/raytracing.md 3): logged once, the overlay's "Capabilities", and the
     // resolution of settings with requirements (greyed + parity fallback when unmet)
     {

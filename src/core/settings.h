@@ -81,6 +81,10 @@ struct Spec {
     // parity path); the player's value itself is kept (file, API) and applies again when the capability is there.
     caps::Mask requirements = 0;
     std::optional<double> unmetValue;
+    // Enum: the capabilities an option needs (same order as `options`; missing / 0 = none). An option whose requirements are unmet
+    // is greyed in the overlay and, when it is the player's value, applies as the next lower option that is available
+    // (options are ordered by what they need); the player's choice is kept. E.g. framegen.mode: "fsr4" needs the FSR 4 frame generation provider.
+    std::vector<caps::Mask> optionRequirements;
     // Enum without Flag::Restart: a restart group per option (same order as `options`). Switching between options of one
     // group applies at once; between groups only at the next start (restartPending, "restart needed" in the overlay), e.g.
     // renderer.mode: original {0} | wrapper, full {1}. Empty = no such rule.
@@ -104,7 +108,19 @@ public:
     // Flag::Debug outside debug mode: applies as the default
     bool gated() const { return gated_.load(std::memory_order_relaxed); }
     // the value that applies: value(), the spec's unmetValue while unavailable, the default while gated. Features read these:
-    double effective() const { return !available() ? fallback_ : gated() ? spec_.defaultValue : value(); }
+    double effective() const {
+        if (!available()) return fallback_;
+        if (gated()) return spec_.defaultValue;
+        double v = value();
+        // an option with unmet requirements applies as the next lower option that is available
+        while (v > 0.0 && !optionAvailable(v)) v -= 1.0;
+        return v;
+    }
+    // Enum: whether the option at index `v` has its capability requirements (Spec::optionRequirements)
+    bool optionAvailable(double v) const {
+        const auto i = static_cast<std::size_t>(v);
+        return i >= 32 || ((optionUnmet_.load(std::memory_order_relaxed) >> i) & 1u) == 0;
+    }
     bool asBool() const { return effective() != 0.0; }
     int asInt() const { return static_cast<int>(effective()); }
     float asFloat() const { return static_cast<float>(effective()); }
@@ -132,6 +148,8 @@ private:
     std::atomic<double> value_{0.0};
     std::atomic<bool> locked_{false};
     std::atomic<bool> unmet_{false};
+    std::atomic<std::uint32_t> optionUnmet_{0};  // bit i: option i's requirements are unmet
+    std::vector<std::string> optionReasons_;     // per option: why (empty = met)
     std::atomic<bool> gated_{false};
     double fallback_ = 0.0;  // effective value while unmet (Spec::unmetValue or the default)
     std::string unmetReason_;
@@ -194,6 +212,8 @@ public:
     caps::Report capabilities() const;
     // why `s` is unavailable ("" when available)
     std::string unavailableReason(const Setting& s) const;
+    // why option `index` of an Enum setting is unavailable ("" when it is available)
+    std::string optionUnavailableReason(const Setting& s, std::size_t index) const;
     // the requirements of a spec against a report: "" when met (pure; also what setCapabilities applies)
     static std::string resolve(const Spec& spec, const caps::Report& report);
 
@@ -251,6 +271,7 @@ private:
     void changedLocked(Setting& s);              // mutex_ held
 
     void resolveLocked(Setting& s);              // mutex_ held
+    static void resolveOptions(Setting& s, const caps::Report& report);
     void gateLocked();                           // mutex_ held: Flag::Debug settings follow the debug switch
     void flipLocked();                           // mutex_ held
 
@@ -357,6 +378,10 @@ struct RendererSettings {
     Setting* upscaleReactiveScale = nullptr;   // upscale.reactive_scale: advanced, multiplies the mask
     Setting* upscaleSharpness = nullptr;  // upscale.sharpness: 0..1, FSR's RCAS sharpening pass
     Setting* upscaleJitterFlip = nullptr; // upscale.jitter_flip: debug, "none", "x", "y", "xy" (the geometry jitter's sign)
+    // frame generation (enh/framegen.h, docs/research/frame-generation.md)
+    Setting* framegenMode = nullptr;      // framegen.mode: "off", "fsr3" (FSR 3 frame generation), "fsr4" (the ML provider, where offered)
+    Setting* framegenManual = nullptr;    // framegen.manual: debug, generated frames presented by us (stage F2; the AMD swapchain is F3)
+    Setting* framegenDebug = nullptr;     // framegen.debug: debug view of the inputs / the generated frame
     Setting* upscaleMode = nullptr;       // upscale.mode: "off", "jitter_only" (debug), "native_aa" (FSR 3.1 at the output size)
     // detail distances (engine/lod.h, docs/research/lod.md): multipliers, 1 = the game's
     Setting* lodTrees = nullptr;          // lod.trees: SpeedTree LOD + billboard fade distances

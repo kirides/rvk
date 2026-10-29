@@ -590,7 +590,14 @@ void drawSetting(settings::Registry& reg, settings::Setting& s, bool debug) {
         const auto cur = static_cast<std::size_t>(s.effective());
         if (ImGui::BeginCombo(sp.label.c_str(), label(cur))) {
             for (std::size_t i = 0; i < sp.options.size(); ++i) {
+                // an option whose capability is missing (Spec::optionRequirements) is shown greyed, with the reason
+                const bool optionOk = s.optionAvailable(static_cast<double>(i));
+                if (!optionOk) ImGui::BeginDisabled();
                 if (ImGui::Selectable(label(i), i == cur)) reg.set(s, static_cast<double>(i));
+                if (!optionOk) ImGui::EndDisabled();
+                if (!optionOk && ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled)) {
+                    wrappedTooltip("Unavailable: " + reg.optionUnavailableReason(s, i));
+                }
             }
             ImGui::EndCombo();
         }

@@ -158,9 +158,10 @@ Setting& Registry::add(Spec spec) {
     s->stored_ = def;
     s->other_ = def;
     s->fallback_ = fallback;
-    if (s->spec_.requirements != 0) {
+    if (s->spec_.requirements != 0 || !s->spec_.optionRequirements.empty()) {
         s->unmetReason_ = resolve(s->spec_, caps_);
         s->unmet_ = !s->unmetReason_.empty();
+        resolveOptions(*s, caps_);
     }
     s->gated_ = (s->spec_.flags & Flag::Debug) != 0 && debugSwitch_ != nullptr && debugSwitch_->value() == 0.0;
     settings_.push_back(std::move(s));
@@ -287,10 +288,28 @@ std::string Registry::lockReason(const Setting& s) const {
 
 std::string Registry::resolve(const Spec& spec, const caps::Report& report) { return report.unmetReason(spec.requirements); }
 
+void Registry::resolveOptions(Setting& s, const caps::Report& report) {
+    std::uint32_t mask = 0;
+    s.optionReasons_.assign(s.spec_.options.size(), std::string());
+    for (std::size_t i = 0; i < s.spec_.optionRequirements.size() && i < s.spec_.options.size() && i < 32; ++i) {
+        std::string reason = report.unmetReason(s.spec_.optionRequirements[i]);
+        if (reason.empty()) continue;
+        mask |= 1u << i;
+        s.optionReasons_[i] = std::move(reason);
+    }
+    s.optionUnmet_ = mask;
+}
+
+std::string Registry::optionUnavailableReason(const Setting& s, std::size_t index) const {
+    const std::lock_guard lock(mutex_);
+    return index < s.optionReasons_.size() ? s.optionReasons_[index] : std::string();
+}
+
 void Registry::resolveLocked(Setting& s) {
     const double before = s.effective();
     s.unmetReason_ = resolve(s.spec_, caps_);
     s.unmet_ = !s.unmetReason_.empty();
+    resolveOptions(s, caps_);
     if (s.effective() != before) changedLocked(s);
 }
 
@@ -300,8 +319,13 @@ void Registry::setCapabilities(const caps::Report& report) {
         const std::lock_guard lock(mutex_);
         caps_ = report;
         for (auto& s : settings_) {
-            if (s->spec_.requirements == 0) continue;
+            if (s->spec_.requirements == 0 && s->spec_.optionRequirements.empty()) continue;
             resolveLocked(*s);
+            if (s->spec_.type == Type::Enum && s->available() && !s->optionAvailable(s->value())) {
+                notes.push_back(std::format("settings: {} = {} requested, applies as {}: {}", s->spec_.key,
+                                            formatValue(s->spec_, s->value()), formatValue(s->spec_, s->effective()),
+                                            s->optionReasons_[static_cast<std::size_t>(s->value())]));
+            }
             if (!s->available() && s->value() != s->fallback_) {
                 notes.push_back(std::format("settings: {} = {} requested, applies as {}: {}", s->spec_.key,
                                             formatValue(s->spec_, s->value()), formatValue(s->spec_, s->fallback_),
@@ -1713,6 +1737,56 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .options = {"none", "x", "y", "xy"},
         .optionLabels = {"None", "X", "Y", "X and Y"},
+        .flags = Flag::NoAB | Flag::Debug,
+    });
+
+    // ---- Graphics tab: frame generation (enh/framegen.h; docs/research/frame-generation.md). Debug until the AMD frame generation
+    // swapchain (stage F3) presents the generated frames: the manual path (framegen.manual) is the developer view of the same
+    // generator. Outside debug mode the settings apply as their defaults (off).
+    r.framegenMode = &reg.add({
+        .key = "framegen.mode",
+        .label = "Frame generation",
+        .category = "Frame generation",
+        .tab = kTabDebug,
+        .description = "AMD FidelityFX frame generation: an extra frame is computed between every two rendered frames, so the picture "
+                       "is shown at twice the rate the game renders at. FSR 3 works on any recent graphics card (it needs the separate "
+                       "frame generation download in the rvk folder); FSR 4 (neural) only on a Radeon RX 9000 series, it is greyed "
+                       "out otherwise. The game itself still runs at the lower rate; best from about 60 rendered frames per second. "
+                       "Not shown in menus and loading screens. Developer setting until the presentation is finished.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "fsr3", "fsr4"},
+        .optionLabels = {"Off", "FSR 3", "FSR 4 (neural)"},
+        .flags = Flag::Debug,
+        .requirements = caps::bit(caps::Cap::FrameGeneration),
+        .unmetValue = 0,
+        .optionRequirements = {0, 0, caps::bit(caps::Cap::FrameGenerationMl)},
+    });
+    r.framegenManual = &reg.add({
+        .key = "framegen.manual",
+        .label = "Present generated frames ourselves (test)",
+        .category = "Frame generation",
+        .tab = kTabDebug,
+        .description = "Developer test: the generated frame is computed after the upscaler, shown first and the real frame half a "
+                       "frame later, both through the normal swapchain (simple timed spacing, not the final pacing). Generated frames "
+                       "can be captured (screenshots frame_<n>_gen.png).",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::Debug,
+        .requirements = caps::bit(caps::Cap::FrameGeneration),
+        .unmetValue = 0,
+    });
+    r.framegenDebug = &reg.add({
+        .key = "framegen.debug",
+        .label = "Frame generation view",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Developer: shows an input of the frame generation instead of the frame: the motion vectors (hue = direction, "
+                       "brightness = length), the depth, the copy of the frame without the HUD, or the generated frame itself.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "motion", "depth", "hudless", "generated"},
+        .optionLabels = {"Off", "Motion vectors", "Depth", "HUD-less copy", "Generated frame"},
         .flags = Flag::NoAB | Flag::Debug,
     });
 

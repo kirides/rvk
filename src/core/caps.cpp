@@ -26,6 +26,9 @@ constexpr std::array<Names, kCount> kNames = {{
     {"full_screen_exclusive", "Exclusive fullscreen"},
     {"shader_draw_parameters", "Shader draw parameters"},
     {"draw_indirect_count", "Indirect draw count"},
+    {"frame_generation", "Frame generation (FSR 3)"},
+    {"frame_generation_ml", "Frame generation (FSR 4)"},
+    {"frame_generation_queues", "Frame generation queues"},
 }};
 
 std::mutex g_mutex;

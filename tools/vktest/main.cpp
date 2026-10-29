@@ -9,6 +9,8 @@
 //   purpose (two copies into one buffer) and passes when synchronization validation reports it (proves the check is live)
 //   rvk_vktest --rt: the optional ray tracing tier: BLAS -> TLAS -> GL_EXT_ray_query compute (shaders/test/rt_query.comp),
 //   pixels checked; and a device with rt.allow off (docs/research/raytracing.md). SKIP (exit 0) on a GPU without it
+//   rvk_vktest --fg [dll]: AMD frame generation through the FFX API DLLs (vk/framegen.h): create the context, generate the midpoint frame
+//     of a moving rectangle (the manual model, no swapchain) and check its position; SKIP without the DLLs
 //   rvk_vktest --fsr [dll]: FSR 3.1 through the signed FFX API DLL (third_party/amd_fidelityfx): load, create a native AA
 //   context, dispatch the jitter sequence on a constant image under validation, output checked; SKIP (exit 0) without the DLL
 //   rvk_vktest --ffx-driver [dll]: the AMD driver's FidelityFX provider library (amdvkffx64.dll): loaded and asked for its
@@ -33,6 +35,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <chrono>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -54,6 +57,7 @@
 #include "vk/bindless.h"
 #include "vk/context.h"
 #include "vk/frames.h"
+#include "vk/framegen.h"
 #include "vk/fsr.h"
 #include "vk/image.h"
 #include "vk/passes.h"
@@ -216,6 +220,17 @@ float halfToFloat(std::uint16_t h) {
     float v = exp == 0 ? std::ldexp(static_cast<float>(mant), -24)
                        : exp == 31 ? INFINITY : std::ldexp(static_cast<float>(mant | 0x400u), static_cast<int>(exp) - 25);
     return sign != 0 ? -v : v;
+}
+
+std::uint16_t floatToHalf(float f) {
+    std::uint32_t x;
+    std::memcpy(&x, &f, 4);
+    const std::uint32_t sign = (x >> 16) & 0x8000u;
+    const int e = static_cast<int>((x >> 23) & 0xff) - 127 + 15;
+    const std::uint32_t m = x & 0x7fffffu;
+    if (e <= 0) return static_cast<std::uint16_t>(sign);
+    if (e >= 31) return static_cast<std::uint16_t>(sign | 0x7c00u);
+    return static_cast<std::uint16_t>(sign | (static_cast<std::uint32_t>(e) << 10) | (m >> 13));
 }
 
 // the debug injection view's two passes on a 64x64 "scene" (cleared to 0.5): compute (tint mode, strength 1, time 0) into a
@@ -1156,11 +1171,217 @@ int fsrTest(const std::string& dllArg, bool validation) {
     return failures == 0 ? 0 : 1;
 }
 
+// Frame generation (the manual model of vk/framegen.h, the probe of docs/research/frame-generation.md 5.2 productised): a bright
+// rectangle moves 40 px per frame over a noisy background; the frames' depth is constant and the motion vectors say "-40 px" where
+// the rectangle is. The generated frame between two real frames must show the rectangle at the midpoint. FSR 3 must pass; the
+// ML provider (FSR 4) is only tried where the API offers it (not on RDNA 3): its failures are noted, not counted.
+int fgTest(const std::string& dllArg, bool validation) {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    AddVectoredExceptionHandler(1, crashReport);
+    constexpr std::uint32_t kW = 1280, kH = 720;
+    const std::filesystem::path dll = dllArg.empty() ? std::filesystem::path(RVK_FFX_DLL) : std::filesystem::path(dllArg);
+    if (!std::filesystem::exists(dll) || !std::filesystem::exists(dll.parent_path() / "amd_fidelityfx_framegeneration_vk.dll")) {
+        std::printf("SKIP: %s or amd_fidelityfx_framegeneration_vk.dll not found\n", dll.string().c_str());
+        return 0;
+    }
+    vk::Context ctx;
+    if (!ctx.create({validation, -1, "rvk_vktest"})) return 2;
+    vk::Frames frames;
+    if (!frames.create(ctx)) return 2;
+
+    int failures = 0;
+    bool soft = false;
+    std::uint32_t fsr3Errors = 0;
+    auto check = [&](bool ok, const char* what) {
+        if (!ok) {
+            std::printf("%s: %s%s\n", soft ? "NOTE" : "FAIL", soft ? "(ML) " : "", what);
+            if (!soft) ++failures;
+        }
+        return ok;
+    };
+    vk::FrameGen fg;
+    if (check(fg.load(dll), "load the DLL")) {
+        const std::vector<vk::FrameGenVersion> offered = fg.versionList(ctx);
+        const std::vector<vk::FrameGenVersion> swapchain = fg.swapchainVersionList(ctx);
+        std::printf("frame generation providers: %s\n", vk::describeVersions(offered).c_str());
+        std::printf("swapchain providers: %s\n", vk::describeVersions(swapchain).c_str());
+        const vk::FrameGenVersion* pinned = vk::pickSwapchainProvider(swapchain);
+        std::printf("swapchain provider to pin: %s\n", pinned != nullptr ? pinned->name.c_str() : "none");
+        check(vk::pickFrameGenProvider(offered, false) != nullptr, "the API offers an FSR 3 frame generation provider");
+        check(pinned == nullptr || !pinned->fromDriver, "the pinned swapchain provider is not driver-provided");
+        for (int pass = 0; pass < 2; ++pass) {
+            const bool ml = pass == 1;
+            soft = ml;
+            if (ml && vk::pickFrameGenProvider(offered, true) == nullptr) {
+                std::printf("ML (FSR 4) frame generation: not offered on this device\n");
+                continue;
+            }
+            std::printf("--- %s ---\n", ml ? "ML frame generation (FSR 4)" : "FSR 3 frame generation");
+            vk::FrameGenCreateInfo ci;
+            ci.ml = ml;
+            ci.displaySize = ci.maxRenderSize = {kW, kH};
+            ci.hudlessFormat = VK_FORMAT_B8G8R8A8_UNORM;
+            ci.debugChecking = true;
+            if (!check(fg.createContext(ctx, ci), "ffxCreateContext")) continue;
+            std::printf("provider: %s, %llu MiB\n", fg.providerName().c_str(), static_cast<unsigned long long>(fg.memoryBytes() >> 20));
+
+            const VkImageUsageFlags colorUse = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                               VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+            const VkImageUsageFlags inUse = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+            vk::Image color, hudless, depth, motion, output;
+            color.create(ctx, {VK_IMAGE_TYPE_2D, VK_FORMAT_B8G8R8A8_UNORM, {kW, kH, 1}, 1, 1, false, colorUse, {}, "fg color"});
+            hudless.create(ctx, {VK_IMAGE_TYPE_2D, VK_FORMAT_B8G8R8A8_UNORM, {kW, kH, 1}, 1, 1, false, colorUse, {}, "fg hudless"});
+            depth.create(ctx, {VK_IMAGE_TYPE_2D, VK_FORMAT_R32_SFLOAT, {kW, kH, 1}, 1, 1, false, inUse, {}, "fg depth"});
+            motion.create(ctx, {VK_IMAGE_TYPE_2D, VK_FORMAT_R16G16_SFLOAT, {kW, kH, 1}, 1, 1, false, inUse, {}, "fg motion"});
+            output.create(ctx, {VK_IMAGE_TYPE_2D, VK_FORMAT_B8G8R8A8_UNORM, {kW, kH, 1}, 1, 1, false, colorUse, {}, "fg output"});
+
+            // one host-visible buffer: colour | depth | motion (upload) and the read-back
+            const VkDeviceSize planeBytes = static_cast<VkDeviceSize>(kW) * kH * 4;
+            VkBuffer buf = VK_NULL_HANDLE, back = VK_NULL_HANDLE;
+            VmaAllocation bufAlloc = VK_NULL_HANDLE, backAlloc = VK_NULL_HANDLE;
+            VmaAllocationInfo bufInfo{}, backInfo{};
+            for (int k = 0; k < 2; ++k) {
+                VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+                bci.size = k == 0 ? planeBytes * 3 : planeBytes;
+                bci.usage = k == 0 ? VK_BUFFER_USAGE_TRANSFER_SRC_BIT : VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                VmaAllocationCreateInfo aci{};
+                aci.usage = VMA_MEMORY_USAGE_AUTO;
+                aci.flags = (k == 0 ? VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT : VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT) |
+                            VMA_ALLOCATION_CREATE_MAPPED_BIT;
+                vmaCreateBuffer(ctx.allocator(), &bci, &aci, k == 0 ? &buf : &back, k == 0 ? &bufAlloc : &backAlloc,
+                                k == 0 ? &bufInfo : &backInfo);
+            }
+            auto* stage = static_cast<std::uint8_t*>(bufInfo.pMappedData);
+            const int rw = static_cast<int>(kW / 12), rh = static_cast<int>(kH / 9), y0 = static_cast<int>(kH / 2) - rh / 2;
+            constexpr int kDx = 40;
+            const int xStart = static_cast<int>(kW / 4);
+            const auto rectX = [&](int n) { return xStart + n * kDx; };
+            const auto fill = [&](int n) {
+                std::uint8_t* c = stage;
+                auto* d = reinterpret_cast<float*>(stage + planeBytes);
+                auto* m = reinterpret_cast<std::uint16_t*>(stage + planeBytes * 2);
+                for (std::uint32_t y = 0; y < kH; ++y) {
+                    for (std::uint32_t x = 0; x < kW; ++x) {
+                        std::uint32_t h = (x * 73856093u) ^ (y * 19349663u);
+                        h ^= h >> 13;
+                        h *= 0x5bd1e995u;
+                        h ^= h >> 15;
+                        const auto v = static_cast<std::uint8_t>(40 + (h & 31));
+                        const bool in = static_cast<int>(x) >= rectX(n) && static_cast<int>(x) < rectX(n) + rw && static_cast<int>(y) >= y0 &&
+                                        static_cast<int>(y) < y0 + rh;
+                        std::uint8_t* px = c + (static_cast<std::size_t>(y) * kW + x) * 4;
+                        px[0] = in ? 255 : v;
+                        px[1] = in ? 255 : static_cast<std::uint8_t>(v + 10);
+                        px[2] = in ? 255 : v;
+                        px[3] = 255;
+                        d[static_cast<std::size_t>(y) * kW + x] = 0.5f;
+                        m[(static_cast<std::size_t>(y) * kW + x) * 2 + 0] = in ? floatToHalf(-static_cast<float>(kDx)) : 0;  // previous - current, pixels
+                        m[(static_cast<std::size_t>(y) * kW + x) * 2 + 1] = 0;
+                    }
+                }
+            };
+            constexpr int kFrames = 6;
+            double wallMs = 0.0;
+            for (int n = 0; n < kFrames; ++n) {
+                fill(n);
+                frames.begin();
+                VkCommandBuffer cmd = frames.cmd();
+                const auto upload = [&](vk::Image& img, VkDeviceSize offset) {
+                    img.transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+                    VkBufferImageCopy bc{};
+                    bc.bufferOffset = offset;
+                    bc.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                    bc.imageExtent = {kW, kH, 1};
+                    vkCmdCopyBufferToImage(cmd, buf, img.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bc);
+                };
+                upload(color, 0);
+                upload(hudless, 0);
+                upload(depth, planeBytes);
+                upload(motion, planeBytes * 2);
+                const auto t0 = std::chrono::steady_clock::now();
+                vk::FrameGenConfigure cfg;
+                cfg.hudless = &hudless;
+                cfg.frameId = static_cast<std::uint64_t>(n);
+                check(fg.configure(cfg), "ffxConfigure");
+                vk::FrameGenPrepare pr;
+                pr.cmd = cmd;
+                pr.frameId = cfg.frameId;
+                pr.renderSize = {kW, kH};
+                pr.reset = n == 0;
+                pr.cameraNear = 10.0f;
+                pr.cameraFar = 100000.0f;
+                pr.cameraFovY = 1.0f;
+                pr.viewSpaceToMeters = 0.01f;
+                pr.depth = &depth;
+                pr.motion = &motion;
+                hudless.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                check(fg.prepare(pr), "ffxDispatch(prepare)");
+                vk::FrameGenDispatch dp;
+                dp.cmd = cmd;
+                dp.frameId = cfg.frameId;
+                dp.color = &color;
+                dp.output = &output;
+                dp.reset = n == 0;
+                check(fg.dispatch(dp), "ffxDispatch(frame generation)");
+                output.transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+                VkBufferImageCopy rb{};
+                rb.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                rb.imageExtent = {kW, kH, 1};
+                vkCmdCopyImageToBuffer(cmd, output.image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, back, 1, &rb);
+                frames.submit(VK_NULL_HANDLE, VK_NULL_HANDLE);
+                frames.waitIdle();
+                wallMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                // the bright run on the middle row of the generated frame
+                const auto* p = static_cast<const std::uint8_t*>(backInfo.pMappedData);
+                const std::size_t row = static_cast<std::size_t>(kH / 2) * kW;
+                int lo = -1, hi = -1;
+                for (std::uint32_t x = 0; x < kW; ++x) {
+                    if (p[(row + x) * 4] > 200) {
+                        if (lo < 0) lo = static_cast<int>(x);
+                        hi = static_cast<int>(x);
+                    }
+                }
+                const double centre = lo >= 0 ? (lo + hi) / 2.0 : -1.0;
+                if (n == 0) {
+                    std::printf("frame 0 (reset): generated bright run %d..%d (the frame passes through: real rectangle at %d..%d)\n", lo, hi,
+                                rectX(0), rectX(0) + rw - 1);
+                } else {
+                    const double want = (rectX(n - 1) + rectX(n)) / 2.0 + rw / 2.0 - 0.5;
+                    std::printf("frame %d: generated rectangle centre %.1f, midpoint of the real ones %.1f\n", n, centre, want);
+                    check(lo >= 0 && std::fabs(centre - want) <= 3.0, "the generated rectangle is at the midpoint (+-3 px)");
+                }
+            }
+            std::printf("%d frames (upload + prepare + dispatch + read-back, wall clock, includes the first-use pipeline builds): %.1f ms\n",
+                        kFrames, wallMs);
+            vmaDestroyBuffer(ctx.allocator(), buf, bufAlloc);
+            vmaDestroyBuffer(ctx.allocator(), back, backAlloc);
+            fg.destroyContext();
+            for (vk::Image* i : {&color, &hudless, &depth, &motion, &output}) i->destroy(ctx);
+            if (pass == 0) fsr3Errors = ctx.validationErrors();
+        }
+        soft = false;
+        fg.destroy();
+    }
+    frames.destroy();
+    const std::uint32_t verrors = ctx.validationErrors();
+    ctx.destroy();
+    // AMD's shaders declare storage image formats that differ from the images' (R32UI as R8, Rg32f as R16G16: the same class as the
+    // upscaler's, docs/research/frame-generation.md 5.2): validation reports them, they are not ours
+    if (fsr3Errors != 0) {
+        std::printf("NOTE: %u validation error(s) in the FSR 3 pass (messages from inside AMD's shaders are expected: storage image format "
+                    "mismatches; see the log above)\n",
+                    fsr3Errors);
+    }
+    if (verrors != fsr3Errors) std::printf("NOTE: ML frame generation: %u validation error(s)\n", verrors - fsr3Errors);
+    std::printf("%s: fg: %d failure(s)\n", failures == 0 ? "PASS" : "FAIL", failures);
+    return failures == 0 ? 0 : 1;
+}
+
 int main(int argc, char** argv) {
     std::string out = "vktest.png";
     bool validation = true;
     std::string gplDir;
-    bool passes = false, hazard = false, rtMode = false, fsrMode = false;
+    bool passes = false, hazard = false, rtMode = false, fsrMode = false, fgMode = false;
     std::string fsrDll;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -1178,6 +1399,9 @@ int main(int argc, char** argv) {
             return ffxDriverProbe(i + 1 < argc ? argv[i + 1] : "", validation);
         } else if (a == "--fsr") {
             fsrMode = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') fsrDll = argv[++i];
+        } else if (a == "--fg") {
+            fgMode = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') fsrDll = argv[++i];
         } else if (a == "--skin") {
             return skinTest();
@@ -1200,6 +1424,9 @@ int main(int argc, char** argv) {
     }
     if (fsrMode) {
         return fsrTest(fsrDll, validation);
+    }
+    if (fgMode) {
+        return fgTest(fsrDll, validation);
     }
     if (!devtools::D3DX::get().available()) {
         std::printf("d3dx9_39.dll not available\n");

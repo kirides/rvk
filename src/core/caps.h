@@ -31,6 +31,9 @@ enum class Cap : std::uint8_t {
     FullScreenExclusive,  // VK_EXT_full_screen_exclusive + VK_KHR_get_surface_capabilities2 (vulkan.fullscreen = exclusive)
     ShaderDrawParameters,  // shaderDrawParameters (gl_DrawID): merged indirect draws (vulkanize plan.md V4)
     DrawIndirectCount,     // drawIndirectCount: GPU-written draw counts (vulkanize plan.md V4)
+    FrameGeneration,       // AMD frame generation (FSR 3): the effect DLL is installed and the API offers a provider on this device
+    FrameGenerationMl,     // ... the ML provider (FSR 4 frame generation: Radeon RX 9000 and newer)
+    FrameGenerationQueues, // the extra queues for the frame generation swapchain were created (framegen.mode != off at start)
     Count
 };
 inline constexpr std::size_t kCount = static_cast<std::size_t>(Cap::Count);

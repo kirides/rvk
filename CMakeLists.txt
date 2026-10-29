@@ -377,6 +377,8 @@ add_library(rvk_core STATIC
     src/vk/formats.cpp
     src/vk/formats.h
     src/vk/frames.cpp
+    src/vk/framegen.cpp
+    src/vk/framegen.h
     src/vk/fsr.cpp
     src/vk/fsr.h
     src/vk/frames.h
@@ -412,7 +414,7 @@ target_include_directories(rvk_core PUBLIC src include)
 target_include_directories(rvk_core PRIVATE ${RVK_GENERATED_DIR})
 target_include_directories(rvk_core PRIVATE ${STB_INCLUDE_DIR} third_party/imgui_vulkan)
 # AMD FSR SDK 2.4.0 API headers (MIT); the signed DLLs are loaded at run time, never linked (third_party/amd_fidelityfx)
-target_include_directories(rvk_core PRIVATE third_party/amd_fidelityfx/api/include third_party/amd_fidelityfx/upscalers/include)
+target_include_directories(rvk_core PRIVATE third_party/amd_fidelityfx/api/include third_party/amd_fidelityfx/upscalers/include third_party/amd_fidelityfx/framegeneration/include)
 # volk is compiled here (not vcpkg's volk.lib): it needs VK_USE_PLATFORM_WIN32_KHR for the Win32 surface entry points
 target_compile_definitions(rvk_core PUBLIC VK_NO_PROTOTYPES VK_USE_PLATFORM_WIN32_KHR VMA_STATIC_VULKAN_FUNCTIONS=0 VMA_DYNAMIC_VULKAN_FUNCTIONS=0)
 target_link_libraries(rvk_core PUBLIC
@@ -500,7 +502,7 @@ rvk_warnings(rvk_d3d9test)
 # tests
 # ---------------------------------------------------------------------------------------------
 if(RVK_BUILD_TESTS)
-    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp tests/api_tests.cpp tests/fvf_tests.cpp tests/settings_tests.cpp tests/settings_api_tests.cpp tests/scene_tests.cpp tests/draws_tests.cpp tests/inject_tests.cpp tests/caps_tests.cpp tests/water_tests.cpp tests/ocean_tests.cpp tests/shadows_tests.cpp tests/lod_tests.cpp tests/high_fps_tests.cpp tests/rt_tests.cpp tests/shader_eval_tests.cpp tests/window_mode_tests.cpp tests/keys_tests.cpp tests/upscale_tests.cpp tests/native_tests.cpp tests/names_tests.cpp)
+    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp tests/api_tests.cpp tests/fvf_tests.cpp tests/settings_tests.cpp tests/settings_api_tests.cpp tests/scene_tests.cpp tests/draws_tests.cpp tests/inject_tests.cpp tests/caps_tests.cpp tests/water_tests.cpp tests/ocean_tests.cpp tests/shadows_tests.cpp tests/lod_tests.cpp tests/high_fps_tests.cpp tests/rt_tests.cpp tests/shader_eval_tests.cpp tests/window_mode_tests.cpp tests/keys_tests.cpp tests/upscale_tests.cpp tests/native_tests.cpp tests/names_tests.cpp tests/framegen_tests.cpp)
     target_link_libraries(rvk_tests PRIVATE rvk_core SPIRV-Tools-static)
     rvk_warnings(rvk_tests)
     add_test(NAME rvk_tests COMMAND rvk_tests)
@@ -513,6 +515,8 @@ if(RVK_BUILD_TESTS)
     set_tests_properties(rvk_vktest_rt PROPERTIES LABELS gpu)
     add_test(NAME rvk_vktest_fsr COMMAND rvk_vktest --fsr)
     set_tests_properties(rvk_vktest_fsr PROPERTIES LABELS gpu)
+    add_test(NAME rvk_vktest_fg COMMAND rvk_vktest --fg)
+    set_tests_properties(rvk_vktest_fg PROPERTIES LABELS gpu)
     add_test(NAME rvk_d3d9test COMMAND rvk_d3d9test)
     set_tests_properties(rvk_d3d9test PROPERTIES LABELS gpu)
 endif()
