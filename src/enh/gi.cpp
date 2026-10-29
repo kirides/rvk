@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <format>
 #include <string>
@@ -690,6 +691,15 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
     p.screen4[0] = 4000.0f;  // ray reach (world units); a ray that runs out takes the probe volume's light at its end
     p.screen4[1] = 2.0f;     // ratio cap
     p.screen4[2] = 0.95f;    // history weight
+    {
+        // diagnostics (-Environment 'RVK_GI_HISTORY=0'): scale of the screen probes' history weight; 0 = every frame stands alone
+        // (the per-frame noise of the sampling and the spatial filter, tools/gi_noise.py; docs/research/rtgi.md 20)
+        static const float scale = [] {
+            char buf[16] = {};
+            return GetEnvironmentVariableA("RVK_GI_HISTORY", buf, sizeof(buf)) > 0 ? std::clamp(static_cast<float>(std::atof(buf)), 0.0f, 1.0f) : 1.0f;
+        }();
+        p.screen4[2] *= scale;
+    }
     p.screen4[3] = s_.bleed;  // colour bleeding
     std::memcpy(pa.ptr, &p, sizeof(p));
     GiPush push{};
