@@ -383,6 +383,7 @@ private:
 
     // stats (interval since the last log line)
     struct Interval {
+        std::uint64_t holeFrames = 0, holes = 0;  // frames whose dynamic instances fell short of the count (TLAS built over fewer), and by how many
         std::uint64_t treeDraws = 0, treeFar = 0, treeCaptured = 0;  // observeTree: calls, beyond the range, captures requested
         std::uint64_t solidWithSkin = 0, solidNoSkin = 0;
         std::uint64_t skinIneligible = 0, skinDraws = 0;  // skinned draws of the cascades / pre-pass the skinning pass could not take (morph targets, dynamic buffer) / took

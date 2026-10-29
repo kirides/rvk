@@ -1804,7 +1804,10 @@ void RtScene::buildDynamic(VkCommandBuffer cmd, std::uint64_t frame) {
             VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_2_SHADER_READ_BIT);
     std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> pr(ranges.size());
     for (std::size_t k = 0; k < ranges.size(); ++k) pr[k] = &ranges[k];
-    vkCmdBuildAccelerationStructuresKHR(cmd, static_cast<std::uint32_t>(infos.size()), infos.data(), pr.data());
+    {
+        d3d9::RegionScope r(dev_, "rt.dynamic builds");
+        vkCmdBuildAccelerationStructuresKHR(cmd, static_cast<std::uint32_t>(infos.size()), infos.data(), pr.data());
+    }
     for (std::size_t i : which) {
         dynUse_[i].built = true;
         dynBlas_[dynUse_[i].key].built = true;
@@ -2052,9 +2055,18 @@ void RtScene::record(d3d9::PassContext& ctx) {
             return true;
         });
     }
-    processCompactions(cmd, slot);
-    buildPending(cmd, slot);
-    buildDynamic(cmd, frame);
+    {
+        d3d9::RegionScope r(dev_, "rt.compact");
+        processCompactions(cmd, slot);
+    }
+    {
+        d3d9::RegionScope r(dev_, "rt.blas builds");
+        buildPending(cmd, slot);
+    }
+    {
+        d3d9::RegionScope r(dev_, "rt.dynamic");
+        buildDynamic(cmd, frame);
+    }
     // BLAS builds / compaction copies -> the TLAS build
     barrier(cmd, asStages, VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
             VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR);
@@ -2192,6 +2204,10 @@ void RtScene::record(d3d9::PassContext& ctx) {
     }
 
     // the characters: world-space vertices (identity transform), no normals, the draw's diffuse material
+    // `used`: the instances written (an animated tree or character can drop out below: its registry instance or BLAS is gone, so
+    // fewer than the n counted above). The TLAS must be built from exactly these: the ring's tail would hold the instances of
+    // earlier frames, with references to acceleration structures that may be destroyed by now (a GPU hang in the TLAS build).
+    std::uint32_t used = worldCount;
     {
         std::uint32_t k = worldCount;
         std::uint32_t treesNow = 0;
@@ -2272,6 +2288,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
         }
         iv_.dynamic = k - worldCount;
         iv_.animatedTrees = treesNow;
+        used = k;
     }
 
     // the segment table (after the records: their addresses)
@@ -2305,9 +2322,12 @@ void RtScene::record(d3d9::PassContext& ctx) {
     info.pGeometries = &g;
     info.dstAccelerationStructure = t.as.handle;
     info.scratchData.deviceAddress = scratch_.address;
-    const VkAccelerationStructureBuildRangeInfoKHR range{n, 0, 0, 0};
+    const VkAccelerationStructureBuildRangeInfoKHR range{used, 0, 0, 0};
     const VkAccelerationStructureBuildRangeInfoKHR* pr = &range;
-    vkCmdBuildAccelerationStructuresKHR(cmd, 1, &info, &pr);
+    {
+        d3d9::RegionScope r(dev_, "rt.tlas build");
+        vkCmdBuildAccelerationStructuresKHR(cmd, 1, &info, &pr);
+    }
     // the TLAS -> ray queries in fragment / compute shaders of this submission
     barrier(cmd, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR, rayStages,
             VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
@@ -2315,9 +2335,15 @@ void RtScene::record(d3d9::PassContext& ctx) {
         vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, timePool_, slot * 2 + 1);
         timeWritten_[slot] = true;
     }
-    dev_.setRtScene({t.as.address, ra.address, n, n, frame});
+    if (used < n) {
+        // (see `used`) counted for the log; before this was fixed the TLAS was built over n instances, the tail of them stale
+        // ring memory: VK_ERROR_DEVICE_LOST after a teleport with shadows.rt on (docs/research/rt-shadows.md 9)
+        ++iv_.holeFrames;
+        iv_.holes += n - used;
+    }
+    dev_.setRtScene({t.as.address, ra.address, used, used, frame});
 
-    lastInstances_ = n;
+    lastInstances_ = used;
     lastTriangles_ = triangles;
     iv_.textured = textured;
     iv_.untextured = untextured;
@@ -2376,6 +2402,10 @@ void RtScene::logStats(bool force) {
                      iv_.dynamic - iv_.animatedTrees, iv_.animatedTrees, dynBlas_.size(), dynBuilt_, dynRefit_, iv_.volatileBlas, iv_.treeDraws, iv_.treeFar, iv_.treeCaptured, iv_.capCurrent, iv_.capPrevious,
                      iv_.charCurrent, iv_.charSkinned, iv_.charPrevious, iv_.skinDraws, iv_.skinIneligible, iv_.solidWithSkin, iv_.solidNoSkin, dev_.ctx().features().vertexStores ? "yes" : "no");
         dynBuilt_ = dynRefit_ = 0;
+    }
+    if (iv_.holes > 0) {
+        spdlog::info("rt: scene: TLAS built over fewer instances than counted in {} frames of the interval ({} dynamic instances dropped out: their registry instance or BLAS was gone)",
+                     iv_.holeFrames, iv_.holes);
     }
     iv_ = {};
     lastLog_ = now;
