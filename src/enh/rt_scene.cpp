@@ -59,6 +59,17 @@ void split(VkDeviceAddress a, std::uint32_t (&out)[2]) {
     out[1] = static_cast<std::uint32_t>(a >> 32);
 }
 
+// The alpha test of a geometry record (func | ref << 8, D3DCMP_*). SpeedTrees: the engine's cut-out is GREATER against the
+// shader's MaskReference, 80 for every SpeedTree material (rt-albedo-facts.md 2); it is done by `texkill` in the z / shadow
+// passes, so a draw's own alpha-test state (the last sighting's, any pass) says nothing about it. Others: the draw's state,
+// else the masked material's own (GREATER MaskReference), else D3DCMP_ALWAYS.
+constexpr std::uint32_t kSpeedTreeAlpha = 5u | (80u << 8);
+std::uint32_t recordAlpha(std::uint32_t flags, std::uint32_t data, const RtMaterial* m) {
+    if ((flags & abi::kRtRecordSpeedTree) != 0 && (flags & abi::kRtRecordAlphaTested) != 0) return kSpeedTreeAlpha;
+    if ((data & 0xFFFFu) != 0) return data & 0xFFFFu;
+    return m != nullptr && m->alpha != 0 ? m->alpha : 8u;
+}
+
 bool createAs(vk::Context& ctx, VkAccelerationStructureTypeKHR type, VkDeviceSize size, vk::rt::AccelerationStructure& out,
               const char* name) {
     if (!out.storage.create(ctx, size, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false, 256, name)) return false;
@@ -539,7 +550,8 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         const float dx = s.c[0] - camBlock.position[0], dy = s.c[1] - camBlock.position[1], dz = s.c[2] - camBlock.position[2];
         return std::sqrt(dx * dx + dy * dy + dz * dz) - s.r > limits_.radius;
     };
-    const bool alphaTested = q.alphaTest || (speedTree && q.tag->opDesc == 1);
+    // SpeedTree fronds (op 1), leaf cards and leaf meshes (op > 1) are cut-outs; branches (op 0) are not unless the draw says so
+    const bool alphaTested = q.alphaTest || (speedTree && q.tag->opDesc >= 1);
     const std::uint32_t flags = (key.index32 != 0 ? abi::kRtRecordIndex32 : 0u) | (alphaTested ? abi::kRtRecordAlphaTested : 0u) |
                                 (q.depthBias && q.phase.view == View::Main ? abi::kRtRecordDepthBias : 0u) |
                                 (speedTree ? abi::kRtRecordSpeedTree : 0u) | (q.instanced ? abi::kRtRecordInstanced : 0u) |
@@ -2153,8 +2165,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
         r.texcoord6 = b.layout.texcoord6;
         r.color0 = b.layout.color0;
         r.instanceId = in.id;
-        // the draw's alpha test, else the masked material's own (GREATER MaskReference), else D3DCMP_ALWAYS
-        r.alpha = (in.data & 0xFFFFu) != 0 ? (in.data & 0xFFFFu) : (m != nullptr && m->alpha != 0) ? m->alpha : 8u;
+        r.alpha = recordAlpha(in.flags, in.data, m);
         r.albedoTex = mf.albedoTex;
         r.albedoSampler = mf.albedoSampler;
         r.uvSet = mf.uvSet;
@@ -2239,7 +2250,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
                 r.texcoord6 = abi::kRtAttribAbsent;
                 r.color0 = abi::kRtAttribAbsent;
                 r.instanceId = in->id;
-                r.alpha = (in->data & 0xFFFFu) != 0 ? (in->data & 0xFFFFu) : (m != nullptr && m->alpha != 0) ? m->alpha : 8u;
+                r.alpha = recordAlpha(in->flags, in->data, m);
                 r.albedoTex = mf.albedoTex;
                 r.albedoSampler = mf.albedoSampler;
                 r.uvSet = mf.uvSet;

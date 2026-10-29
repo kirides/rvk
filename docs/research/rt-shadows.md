@@ -328,3 +328,16 @@ per run; see the commit message for the validation runs.
 
 **Diagnostics kept**: `Context::reportDeviceLost` (device fault report + vendor binary `bin/rvk/devicefault.bin` when the driver gives
 one, and the crash markers' report), `debug.crash_markers`, the `rt.*` sub-regions (also useful in captures).
+
+## 12. SpeedTree cut-outs traced as solid cards (2026-10-29)
+
+Reported: with `shadows.rt` the palms' and bushes' shadows were one solid blob, the cascades' (enhanced shadows) fine fronds. Not the
+ray cone (5789add already zeroed it) and not `native.lean` (it only made it stronger): the records' alpha test. The engine cuts SpeedTrees
+out with `texkill` (GREATER, MaskReference 80 for every SpeedTree material: rt-albedo-facts.md 2), so no draw's alpha-test *state*
+carries it; `RtScene` took `alphaFunc / alphaRef` of the instance's latest sighting and, when that was empty, the material's (the
+SpeedTree materials have no graph: none) and finally `D3DCMP_ALWAYS` = every candidate passes = a solid card. Leaf cards / meshes
+(op > 1) were not even flagged alpha-tested. Now `recordAlpha`: every alpha-tested SpeedTree record tests GREATER 80, fronds and leaves
+(op >= 1) are flagged. [C] `shadow_inland_a`, blob region (x 840..960, y 350..385 of 1600x900), mean luma: old Wrapper 25.6 /
+Full lean 26.6 (solid), fixed 40.2 / 42.7, RT off 36.6; spot b 54 -> 72.5 (RT off 74.6). Pictures `out/rtleaf/crop_fix_compare.png`.
+Not re-checked at the Harbour Town smithy's palms (the report's place). Open: an instance with no resolved material at all is still
+opaque (`materialFields(nullptr)`).
