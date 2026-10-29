@@ -866,4 +866,19 @@ reference being from another session: eye adaptation / camera, the side by side 
 
 **Open / limits** [I]: dynamic objects in caves (AO_v 1) get the full-sky fill; outdoor pixels under a canopy only get a fill as large as the
 baked AO lets them (terrain under trees is mid grey, so there the fill is lower than 0.5 of the sky: the reason 0.5 is needed where 0.25 of the sky
-was); a doorway walk (rvk_rtwalk) was not run: the signal is static vertex data, and the monastery debug view shows the smooth gradient at windows.
+was); a doorway walk (rvk_rtwalk) was not run: the signal is static vertex data, and the monastery debug view shows the smooth gradient at windows.
+
+## 25. Combined verification of 23 + 24 (2026-10-29)
+
+([C] = measured; merged build b1a708c, `-Validation` clean, rvk_tests 192/192, corpus `--gbuf / --gi / --gbuf-motion` 0 failures.)
+Runs `out\water\20261029-175925` (shipped defaults, `gi.shadow_fill` 0.5), `-180220` (0.25), `-180511` (0). Shaded luma GI - engine / dark
+share / p25 (engine) at the defaults: beach_sun -3.1 / 0.018 / 48.7 (51.6), lake_jungle -2.1 / 0.055 / 23.6 (25.9; dark 0.034), shadow_inland_a
+-0.1 / 0.033 / 26.8 (29.3), jungle -0.8, swamp_camp -1.5, harbour_docks -1.2; crystal_cave +0.2 / 0.359 (0.361), monastery_hall -0.4 / 0.197
+(0.167); the pub (eye adaptation moves it by ~10 luma between runs) -2.8. Before 23 + 24 (section 21): lake -3.8, shadow_inland_a -0.4 at fill
+0.25 but cave +3.4. The fill now matters less (lake dark share 0.093 at fill 0, 0.055 at 0.5) because the far field supplies the open sky;
+0.5 stays (interiors are unaffected, section 24).
+
+Noise [C] (`tools/gi_noise.py`, 4 spots): history on 0.064 (before section 23: 0.057 - 0.061), history off 0.225 (before: 0.126 - 0.147): the
+sky-contrasty far field is noisier per frame; the walking capture (`out\gi\20261029-181400-merged-motion`) shows no grain / ghosting. If
+disocclusion grain is reported, the first knob is a wider spatial filter for fresh pixels (`sp_resolve.comp` ring) or a lerp of the far
+field towards its irradiance form.
