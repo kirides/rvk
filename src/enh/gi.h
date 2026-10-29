@@ -181,6 +181,12 @@ private:
     bool sgiValid_ = false;
     std::uint64_t screenFrames_ = 0, screenSkipped_ = 0;
     vk::rt::AddressBuffer probes_, depth_, rays_;
+    // diagnostics (RVK_GI_DIAG, rtgi.md 23): the screen probes' light terms summed by the GPU (wrapping fixed-point counters,
+    // two sun classes), read every frame as deltas into 64-bit sums, logged every 5 s
+    vk::rt::AddressBuffer diag_;
+    std::uint32_t diagLast_[64]{};
+    double diagSum_[64]{};
+    void logDiag();
     bool cleared_ = false;
     std::array<Cascade, kGiCascades> cascades_;
     std::mt19937 rng_{0x9E3779B9u};

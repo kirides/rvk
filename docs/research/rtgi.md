@@ -727,3 +727,94 @@ every frame (volatile ranges, rt-shadows.md 5), and the leaves' result says foli
 The deeper shade therefore comes from what is *missing as light* (the ground's weak single bounce, the sky term's occlusion by the
 large geometry), not from missing occluders: section 21's fill is the right knob for now.
 
+
+
+## 23. Shade deficit: diagnosis, the far-field fix (2026-10-29)
+
+([C] = measured, [I] = inferred.) Problem: with `gi.enabled` the shade under trees / cliffs / beside walls outdoors is darker than the engine's
+flat ambient (section 21); the fill is a floor, not light. Hypotheses tested here: a per-pixel bounce / AO pass would help (not built: see
+"What the numbers say"), missing foliage light, an energy loss in the hit shading.
+
+**Diagnostic** [C]: hidden `RVK_GI_DIAG=1` (process environment; `water-compare.ps1` passes it on). `sp_trace.comp` adds per probe the averages
+over its rays into a host-visible counter buffer (fixed point, wrapping `uint`s read as deltas each frame, `Gi::logDiag`, rvk.log
+`enh: gi diag [shaded|sun-lit] ...` every 5 s), in two classes: the probe's surface is *shaded* (N.L <= 0.05 or its sun shadow ray is blocked)
+or *sun-lit*. Per class: the engine's ambient at the probe's normal (`rvkGiEvalRegs(sky, N)`, the hemisphere), the DDGI's, the traced
+irradiance (acc units, the cosine-weighted ray average), and what the rays carry: far-field rays (no hit within 40 m), hit rays split
+into sun / point / bounce (DDGI at the hit) / emission, albedo^2.2, back faces, near-hit shares, and "all rays as the engine's sky" (the
+no-occluder reference: = the engine's ambient, a check of the units). `python -I tools/gi_diag.py <water-compare dir>` matches the 5 s windows
+to the spots' capture times. Same `gi.shadow_fill=0`, spots of the water-compare set.
+
+**Finding 1: the far field was wrong** [C]. A screen-probe ray that runs out (40 m) took the DDGI volume's irradiance **towards -dir** at its
+end (`rvkGiEvalRegs(regs, -dir)`): the light of a surface facing us, i.e. for a ray into the open sky the dim ground light, and always a
+cosine-blurred value instead of the radiance coming along the ray. Measured at `beach_sun` (probes on the open beach, sun-lit class):
+91 % of the rays escape and carry 0.140 where the engine's sky on the same rays is 0.647; the traced irradiance is **21 %** of the engine's
+ambient (0.151 vs 0.718). The fix: the radiance arriving along `dir` = the far probe's SH with the cosine convolution undone
+(`rvkGiSkyRadiance(regs, dir)`, the same operation the engine's own sky gets as radiance): 0.574 vs 0.647 (89 %), traced **82 %**.
+
+| screen-probe light, % of the engine's ambient (traced / engine) | before | after |
+|---|---|---|
+| beach_sun, sun-lit / shaded | 21 / 26 | 82 / 39 |
+| lake_jungle, sun-lit / shaded | 28 / 18 | 64 / 31 |
+| swamp_camp, sun-lit / shaded | 18 / 12 | 51 / 28 |
+| jungle, sun-lit / shaded | 45 / 36 | 68 / 55 |
+| harbour_docks, sun-lit / shaded | 45 / 18 | 63 / 27 |
+| crystal_cave shaded (its engine ambient is a floor / indoor fill) | 4 | 15 |
+| pub_interior / monastery_hall shaded (97 - 99 % of the rays hit walls) | 6 / 7 | 6 / 9 |
+
+The whole-image luma hides most of this (sun-lit pixels are dominated by the sun term, the ambient only shows in shade and through the
+`pow(acc, 0.45)` the engine applies); shaded luma at `gi.shadow_fill=0`, GI - engine (`tools/gi_shade_stats.py`; run-to-run spread of one spot
+is +-1.5 (eye adaptation, waves; the pub's engine reference differs by ~9 luma and is not comparable)):
+
+| spot | before: dL / dark / p25 | after: dL / dark / p25 | engine dark / p25 |
+|---|---|---|---|
+| beach_sun | -5.9 / 0.020 / 44.2 | -3.4 / 0.017 / 48.1 (other runs -1.2 .. -2.2) | 0.012 / 51.6 |
+| lake_jungle | -5.0 / 0.165 / 16.8 | -2.5 / 0.094 / 21.5 | 0.034 / 25.9 |
+| shadow_inland_a | -1.4 / 0.087 / 21.7 | -0.6 / 0.063 / 24.1 (other runs -2.3 .. -4.1) | 0.048 / 29.3 |
+| jungle | -1.4 / 0.000 / 28.5 | -1.2 / 0.000 / 28.8 | 0 / 30.6 |
+| swamp_camp | -3.1 / 0.000 / 30.3 | -1.7 / 0.000 / 31.8 | 0 / 34.1 |
+| harbour_docks | -1.8 / 0.001 / 32.2 | -1.5 / 0.001 / 32.4 | 0 / 33.8 |
+| crystal_cave | 0.0 / 0.360 / 9.8 | +0.1 / 0.358 / 9.8 | 0.361 / 9.6 |
+| monastery_hall | -0.5 / 0.215 / 15.0 | -0.4 / 0.214 / 15.1 | 0.167 / 18.7 |
+
+With the default fill 0.25 (`out\water\20261029-161846` before, `-173249` after): beach -6.2 -> -3.4, lake -3.8 -> -2.8 (p25 18.8 -> 21.6, dark
+0.103 -> 0.081), swamp -3.1 -> -2.0, harbour -2.6 -> -1.7, jungle -1.6 -> -1.2, shadow_inland_a -0.4 -> +1.2, monastery -0.4 -> +0.2; crystal_cave
++3.4 -> +3.6 (the fill's side effect, unchanged). Caves / interiors are not brighter than before (the fix only changes rays that escape; the
+pub and monastery shade has 1 - 2 % escaping rays).
+
+**Finding 2: back faces** [C]: 5 - 10 % of the screen-probe rays in shade (beach 5 %, lake 9 %, swamp 5 - 7 %) hit a back face and returned black (the
+DDGI probes' "the ray started inside geometry" test, meant for probes in the air). A screen probe starts on a visible surface, so
+`gGiTwoSided` (set by `sp_trace.comp`) shades them like any two-sided surface (the hit surface normals are oriented against the ray already).
+Effect small (shaded luma ~+0.5, within the noise); principled, kept. The DDGI probes keep the inside test.
+
+**What the numbers say about the rest** [C / I]: after the fix the remaining difference is the sky seen *through* the occluders. Lake_jungle's
+shaded probes: 34 % of the rays escape (far field 0.194 vs the engine's sky on them 0.249: 78 %), 57 % hit something (<2 m 18 %, <10 m 37 %);
+the hits carry 0.035 in total (mean radiance 0.06 per hit ray: albedo^2.2 0.05 x E ~1.2), where the engine's flat ambient gives those
+directions the sky's 0.73. The traced irradiance of the shade is **31 %** of the engine's, which the `pow(acc, 0.45)` shows as ~0.6 x the
+brightness: the engine lights a shaded surface as if it saw the whole sky; no ray-traced estimate can supply light that is not there
+(albedos of Risen's ground / bark / leaves are 0.04 - 0.07 linear: a sunlit neighbour reflects 0.2 - 0.3, the sky's 0.73). Tested and **rejected**
+(each measured with the diag and the picture stats, far-field fix on, fill 0):
+* *Foliage transmission* (a leaf card seen from below lit by the sun and sky on its far side, `transmit` 0.5 x the opposite side's light, a shadow
+  ray): foliage is 8 - 13 % of the shaded rays at jungle / lake and carries 0.002 - 0.007 of the 0.13 - 0.23 traced: lake dL -2.7 vs -2.4 (no change).
+  Leaf cards in the RT scene (section 22) change as little.
+* *Hit albedo x2* (a stand-in for the low-mip Jensen loss, `pow(mean)` vs `mean(pow)` ~ +20 % at most): lake shaded 32 -> 36 % of the engine's, luma
+  unchanged (-2.4).
+* *Near hits blended to the engine's sky* (hits < 1.5 m fade to the unoccluded ambient: contact shade is the engine's SSAO's job): beach -2.0, lake
+  -2.6, jungle -0.9: no change (the loss is large-scale occlusion, not contact).
+* *A per-pixel short-range bounce / AO pass*: not built. `gi.screen=high` already gives 16 rays per 8 x 8 tile; the diag shows that where the light
+  is lost is in what the rays hit (dark, shaded hits) and in the far field (now fixed), not in the ray density or placement.
+* far field towards +dir as *irradiance* (without the deconvolution): 68 % of the engine's sky on the beach rays (vs 89 % as radiance).
+
+**Verdict** [C / I]: the GI now supplies what it was losing by a bug (ambient on open ground 21 % -> 82 %; shaded luma of the open spots +2 .. +3;
+p25 / dark share of lake_jungle and beach_sun half-way to the engine's). The rest of the engine-vs-GI difference is physical occlusion of an
+art-directed flat ambient, and not recoverable by the GI itself. What would be calibrated: (a) `gi.shadow_fill` as a floor, which needs an indoor /
+outdoor gate to keep caves untouched (separate work); (b) a signal the probes have for free: the share of rays that escape (shaded: lake 34 %,
+swamp 44 %, jungle 50 %, harbour 46 %, beach 38 % vs crystal_cave 18 %, pub 1 %, monastery 2 %) separates canopy shade (sky visible
+through gaps) from enclosed spaces better than the engine's ambient does; a lift of the traced light towards the engine's weighted by it is the
+candidate for a gain [I, untested].
+
+**Cost and noise** [C]: `gi.screen` at AfterDepthPrepass, lake_jungle 1920 x 1080 `-PerfFrame 4300` (24 frames): legacy far field 1.124 / 1.125 ms vs
+fixed 1.156 / 1.105 ms (pairs of runs); `gi` at AfterOpaque 0.634 / 0.611 vs 0.591 / 0.627 ms: no measurable cost. Noise (`tools/gi_noise.py`, pub / monastery /
+jungle / harbour, 8 pictures 1 frame apart): history on 0.064 (section 20: 0.057 - 0.061); history off (`RVK_GI_HISTORY=0`) 0.185 against 0.126 - 0.147
+before (jungle 0.357 against 0.105 - 0.144): radiance from the far field has more contrast than the blurred irradiance had, so the unfiltered
+per-frame sampling is noisier; with the temporal history on the converged picture is as steady as before. Validation (`-Validation`, nine
+spots): no VUID / SYNC lines. `rvk_tests` 192 / 192; corpus `--gi` 2246 PS ok, `--gbuf` / `--gbuf-motion` 0 failures.
