@@ -27,6 +27,9 @@ try {
     foreach ($f in 'amd_fidelityfx_loader_vk.dll', 'amd_fidelityfx_upscaler_vk.dll', 'amd_fidelityfx_framegeneration_vk.dll') {
         Copy-Item "third_party\amd_fidelityfx\signedbin\$f" "$stage\rvk"
     }
+    # the runtime HLSL compiler (shader/dxc) and its licence (LLVM Apache-2.0 with LLVM exceptions: a binary redistribution reproduces it)
+    Copy-Item (Join-Path $BinDir 'dxcompiler.dll') "$stage\rvk"
+    Copy-Item (Join-Path $BinDir 'copyright') "$stage\rvk\dxc_LICENSE.txt"
     $lic = @(Get-Content third_party\amd_fidelityfx\LICENSE.md)
     $end = ($lic | Select-String -Pattern '^These source files' | Select-Object -First 1).LineNumber - 1
     if ($end -lt 10) { throw 'amd_fidelityfx\LICENSE.md: end of the notice not found' }

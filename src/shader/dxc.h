@@ -67,6 +67,6 @@ Result compile(const Request& request);
 std::vector<std::string> arguments(const Request& request);
 
 // Bump when the argument set or the cache layout changes (part of every cache key)
-inline constexpr std::uint32_t kArgsRevision = 1;
+inline constexpr std::uint32_t kArgsRevision = 3;
 
 }  // namespace rvk::shader::dxc

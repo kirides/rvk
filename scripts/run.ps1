@@ -138,6 +138,8 @@ if ($NoRenderer) {
         Copy-Item (Join-Path $repo "third_party\amd_fidelityfx\signedbin\$f") $rvkDir -Force
     }
     Remove-Item (Join-Path $rvkDir 'amd_fidelityfx_vk.dll') -Force -ErrorAction SilentlyContinue  # the SDK 1.1.4 DLL
+    # the runtime HLSL compiler (shader/dxc): the vcpkg directx-dxc port's dxcompiler.dll, copied next to d3d9.dll by the build
+    Copy-Item (Join-Path $repo "build\$Config\dxcompiler.dll") $rvkDir -Force
     $cfg = @(
         '# written by scripts/run.ps1',
         '[renderer]', "mode = `"$Mode`"",

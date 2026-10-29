@@ -387,7 +387,8 @@ std::vector<std::string> arguments(const Request& r) {
     if (r.target == Target::Spirv) {
         // GD3D11's set (gd3d11.md 3.7) for a floor without VK_EXT_mutable_descriptor_type: the typed bindless arrays need
         // no -fvk-bind-resource-heap; storage images carry [[vk::image_format]] instead of -fspv-use-unknown-image-format
-        a.insert(a.end(), {"-spirv", "-fspv-target-env=vulkan1.3", "-fvk-support-nonzero-base-instance",
+        // (-fspv-entrypoint-name: every pipeline create call of the renderer names the entry point "main")
+        a.insert(a.end(), {"-spirv", "-fspv-target-env=vulkan1.3", "-fspv-entrypoint-name=main", "-fvk-support-nonzero-base-instance",
                            "-fspv-extension=SPV_KHR_ray_query", "-fspv-extension=SPV_EXT_descriptor_indexing",
                            "-fspv-extension=SPV_KHR_physical_storage_buffer", "-fspv-extension=SPV_KHR_shader_draw_parameters"});
     }

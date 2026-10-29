@@ -3,14 +3,20 @@
 
 #include <windows.h>
 
+#include <cstddef>
 #include <cstdio>
+#include <format>
+#include <map>
 #include <filesystem>
 #include <string>
 
 #include <spirv-tools/libspirv.hpp>
 
+#include "enh/debug_view.h"
+#include "shader/abi.h"
 #include "shader/dxc.h"
 #include "shader/embedded.h"
+#include "spirv_offsets.h"
 #include "test.h"
 
 using namespace rvk::shader;
@@ -114,4 +120,42 @@ TEST(dxc_debug_info_variant) {
     if (!dbg.ok()) return;
     std::string message;
     CHECK_MSG(validSpirv(dbg.words, &message), message.c_str());
+}
+
+// The HLSL ABI (shaders/include/rvk_abi.hlsli) against abi.h and the debug view's C++ push block: offsets from the compiled SPIR-V
+TEST(abi_hlsl_layout_matches_cpp) {
+    if (!dxc::available()) return;
+    const auto words = embedded::spirv("test/abi_frame_layout.comp");
+    CHECK(!words.empty());
+    if (words.empty()) return;
+    const auto m = rvk::test::memberOffsets(words);
+    CHECK(m.contains("RvkFrameData") && m.contains("type.PushConstant.DebugViewPush"));
+    if (!m.contains("RvkFrameData") || !m.contains("type.PushConstant.DebugViewPush")) return;
+    const auto check = [](const std::map<std::string, std::uint32_t>& got, const std::map<std::string, std::size_t>& want, const char* what) {
+        CHECK_MSG(got.size() == want.size(), std::format("{}: {} members in HLSL, {} in C++", what, got.size(), want.size()).c_str());
+        for (const auto& [name, off] : want) {
+            const auto it = got.find(name);
+            CHECK_MSG(it != got.end() && it->second == off,
+                      std::format("{}.{}: C++ offset {}, HLSL {}", what, name, off, it != got.end() ? std::to_string(it->second) : "missing").c_str());
+        }
+    };
+    using FB = abi::FrameBlock;
+    check(m.at("RvkFrameData"),
+          {{"viewProj", offsetof(FB, viewProj)}, {"invViewProj", offsetof(FB, invViewProj)}, {"view", offsetof(FB, view)},
+           {"proj", offsetof(FB, proj)}, {"invView", offsetof(FB, invView)}, {"invProj", offsetof(FB, invProj)},
+           {"prevViewProj", offsetof(FB, prevViewProj)}, {"prevInvViewProj", offsetof(FB, prevInvViewProj)},
+           {"cameraPos", offsetof(FB, cameraPos)}, {"prevCameraPos", offsetof(FB, prevCameraPos)},
+           {"depthParams", offsetof(FB, depthParams)}, {"viewport", offsetof(FB, viewport)}, {"jitter", offsetof(FB, jitter)},
+           {"time", offsetof(FB, time)}, {"frameInfo", offsetof(FB, frameInfo)}, {"images", offsetof(FB, images)},
+           {"params", offsetof(FB, params)}, {"rtScene", offsetof(FB, rtScene)}, {"rtInfo", offsetof(FB, rtInfo)},
+           {"gi", offsetof(FB, gi)}, {"ao", offsetof(FB, ao)}, {"sgi", offsetof(FB, sgi)}},
+          "RvkFrameData");
+    using P = rvk::enh::DebugViewPush;
+    check(m.at("type.PushConstant.DebugViewPush"),
+          {{"frame", offsetof(P, h) + offsetof(abi::PassPushHeader, frame)},
+           {"passId", offsetof(P, h) + offsetof(abi::PassPushHeader, passId)},
+           {"passFlags", offsetof(P, h) + offsetof(abi::PassPushHeader, passFlags)}, {"depthTex", offsetof(P, depthTex)},
+           {"width", offsetof(P, width)}, {"height", offsetof(P, height)}, {"srcTex", offsetof(P, srcTex)},
+           {"srcSampler", offsetof(P, srcSampler)}, {"pad", offsetof(P, pad)}},
+          "DebugViewPush");
 }

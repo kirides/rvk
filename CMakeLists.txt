@@ -65,15 +65,13 @@ set_target_properties(rvk_glslc PROPERTIES FOLDER tools)
 find_path(RVK_DXC_INCLUDE_DIR directx-dxc/dxcapi.h REQUIRED)
 find_program(RVK_DXC_EXE dxc PATHS ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/tools/directx-dxc NO_DEFAULT_PATH)
 find_file(RVK_DXC_DLL dxcompiler.dll PATHS ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/tools/directx-dxc ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin NO_DEFAULT_PATH)
+find_file(RVK_DXC_LICENSE copyright PATHS ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share/directx-dxc NO_DEFAULT_PATH)
 find_file(RVK_DXIL_DLL dxil.dll PATHS ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/tools/directx-dxc ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin NO_DEFAULT_PATH)
 
 set(RVK_SHADER_DIR ${CMAKE_SOURCE_DIR}/shaders)
 set(RVK_GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)
 # new shaders go here (path below shaders/ = the name shader::embedded::spirv() finds them by)
 set(RVK_SHADERS
-    debug/fullscreen.vert
-    debug/inject_view.comp
-    debug/inject_view.frag
     gi/gi_blend.comp
     gi/gi_trace.comp
     gi/sp_resolve.comp
@@ -86,7 +84,6 @@ set(RVK_SHADERS
     framegen/debug.frag
     gbuffer/gtao_filter.comp
     test/abi_layout.comp
-    test/abi_pass_layout.comp
     test/abi_rt_layout.comp
     test/shadow_layout.comp
     test/rt_query.comp
@@ -499,7 +496,7 @@ add_library(rvk_d3d9 SHARED
 function(rvk_deploy_dxc target)
     if(RVK_DXC_DLL)
         add_custom_command(TARGET ${target} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RVK_DXC_DLL} ${RVK_DXIL_DLL} $<TARGET_FILE_DIR:${target}>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RVK_DXC_DLL} ${RVK_DXIL_DLL} ${RVK_DXC_LICENSE} $<TARGET_FILE_DIR:${target}>
             COMMENT "dxcompiler.dll -> $<TARGET_FILE_DIR:${target}>"
             VERBATIM)
     endif()
@@ -514,6 +511,7 @@ rvk_warnings(rvk_d3d9)
 # ---------------------------------------------------------------------------------------------
 add_executable(rvk_shadertool tools/shadertool/main.cpp)
 target_link_libraries(rvk_shadertool PRIVATE rvk_core SPIRV-Tools-static)
+rvk_deploy_dxc(rvk_shadertool)
 rvk_warnings(rvk_shadertool)
 
 # ---------------------------------------------------------------------------------------------
@@ -522,6 +520,7 @@ rvk_warnings(rvk_shadertool)
 add_executable(rvk_vktest tools/vktest/main.cpp tools/common/d3dx.h)
 target_include_directories(rvk_vktest PRIVATE tools ${STB_INCLUDE_DIR})
 target_link_libraries(rvk_vktest PRIVATE rvk_core)
+rvk_deploy_dxc(rvk_vktest)
 target_compile_definitions(rvk_vktest PRIVATE RVK_FFX_DLL="${CMAKE_SOURCE_DIR}/third_party/amd_fidelityfx/signedbin/amd_fidelityfx_loader_vk.dll")
 rvk_warnings(rvk_vktest)
 

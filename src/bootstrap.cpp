@@ -31,6 +31,7 @@
 #include "engine/material_source.h"
 #include "engine/shadow_maps.h"
 #include "engine/symbols.h"
+#include "shader/dxc.h"
 #include "shader/spirv.h"
 #include "engine/vfs.h"
 #include "engine/window_mode.h"
@@ -178,6 +179,9 @@ void detourInitializeAdmin(void* self, int apiType) {
         vo.perf = g_config.perf || g_config.perfFrame != 0;
         vo.perfFrame = g_config.perfFrame;
         vo.cacheDir = paths::dataDir() / L"cache";
+        // the runtime HLSL compiler (docs/research/hlsl-rhi.md 2): dxcompiler.dll next to config.toml, compiled shaders cached beside the others
+        shader::dxc::setLibraryDirectory(paths::dataDir());
+        shader::dxc::setCacheDirectory(paths::dataDir() / L"cache" / L"hlsl");
         vo.screenshotFrames = g_config.screenshotFrames;
         vo.logDraws = g_config.logDraws;
         vo.logFrame = g_config.logFrame;

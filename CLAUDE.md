@@ -262,20 +262,23 @@ rvk_tests `abi_glsl_layout_matches_cpp` compares the offsets; bump `kTranslatorV
 translated GLSL changes). **The game's material shaders are one HLSL ubershader with `XFX_*` defines** (docs/research/shader-permutations.md): the GLSL port is `shaders/material/ge_default.{glsl,frag,vert}` (same defines, `-D...`; the engine's `XFX_PS_*` expressions are valid GLSL as they are). `python tools/shader_equiv.py [--vs]` proves it against the translated game shaders on the GPU (`rvk_shadereq`; needs `out/hlsl-fx` = `python tools/hlsl_infer.py <shadermaterial dir> --make-fx out/hlsl-fx`; the pool was compiled with `d3dx9_29.dll`, flags 0, `half3 vecWorldEye`); `tools/hlsl_match.py` reproduces a corpus shader from HLSL + defines instruction for instruction.
 **GLSL material shader at run time** (shader-permutations.md 8-10): `-Setting 'debug.material_sources=true'` writes the engine's request per material shader (`bin/rvk/cache/materials/sources.jsonl`; copy to `out/matsrc/`); `python tools/ubershader_check.py out/matsrc/*.jsonl` checks the GLSL material shader against the translated game shaders on the GPU for every captured pixel shader (needs `game-shaders` from `rvk_shadertool export corpus game-shaders`); `-Setting 'debug.ubershader=true'` (default off; `debug.ubershader_skip` = bit mask of classes kept translated) uses it at run time.
 
-## Hand-written shaders (GLSL only)
+## Hand-written shaders (HLSL, compiled at run time by DXC)
 
-Enhancement / pass shaders are **GLSL 4.60 in `shaders/`** (no HLSL, PLAN.md). `rvk_glslc` (`tools/glslc`, built from the
-vcpkg glslang + SPIRV-Tools: no Vulkan SDK needed) compiles each to SPIR-V 1.6 at build time, runs spirv-val, writes
-`build/generated/shaders/<path>.h` + a depfile (editing an include rebuilds its users); they are embedded into `d3d9.dll`
-(`shader::embedded::spirv("debug/inject_view.comp")`). **A new shader goes into `RVK_SHADERS` in `CMakeLists.txt`** (then
-`cmake --preset default`). `#include "rvk_abi.glsl"` (push constants, buffer references, FrameBlock, bindless set; pass
-shaders `#define RVK_PASS_SHADER` first and start their push block with `RVK_PASS_PUSH_HEADER`) and `rvk_common.glsl`
-(sampling, depth -> world helpers). Passes plug in at injection points (`Device::addPass(inject::Point::AfterOpaque, ...)`,
-`vk/passes.h`: pass layout, compute / fullscreen pipelines, transient images): docs/research/injection.md. A feature that
-takes over engine draws registers a `d3d9::DrawReplacer` (`Device::setDrawReplacer`: skip / other shaders on the engine's
-geometry / procedural geometry, at the draw's own place; `registerReplacement` builds its pipelines in the background):
+Enhancement / pass shaders are **HLSL (SM 6.6) in `shaders/`** (docs/research/hlsl-rhi.md; user decision 2026-10-29, GD3D11's scheme: the
+vcpkg `directx-dxc` port's `dxcompiler.dll` is loaded at run time by `shader/dxc.*`, next to `d3d9.dll` in `bin\rvk`, with a disk cache under
+`bin\rvk\cache\hlsl`). `<name>.hlsl` beats a GLSL file of the same name: `shader::embedded::spirv("water/water.frag")` compiles
+`water/water.frag.hlsl` (entries `CSMain` / `VSMain` / `PSMain` by stage extension; SPIR-V entry renamed `main`); the not yet ported shaders are still
+GLSL 4.60 compiled at build time by `rvk_glslc` (glslang + spirv-val; `RVK_SHADERS` in CMakeLists.txt). HLSL files are picked up by a glob (re-run
+`cmake --preset default` after adding one); they are embedded as text. `#include "rvk_common.hlsli"` (-> `rvk_abi.hlsli`: push constants
+`RVK_PUSH`, pointers `RVK_REF`, `RvkFrame`, the bindless arrays `g_t2D / g_tCube / g_t3D / g_samp`, `rvkSample2D...`); pass shaders start their push
+block with `RVK_PASS_PUSH_HEADER`; pass resources are `register(u<binding>, space<set>)` with the C++ layout's numbers. ABI structs are float4 / uint4
+only; matrices are rows (`mul(float4(world, 1), f.viewProj)`). New shader: add `foo.comp.hlsl` (no CMake list), `cmake --preset default`.
+`RVK_SHADER_DIR=<repo>\shaders` (`run.ps1 -Environment`) reads sources from disk (no rebuild). Checks: `rvk_tests` (`dxc_*`, `abi_hlsl_layout_matches_cpp`),
+`rvk_vktest --passes`; offline with the port's `dxc.exe` (`build\vcpkg_installed\x64-windows-static-md\tools\directx-dxc`) and `spirv-val`.
+Passes plug in at injection points (`Device::addPass(inject::Point::AfterOpaque, ...)`, `vk/passes.h`: pass layout, compute / fullscreen pipelines,
+transient images): docs/research/injection.md. A feature that takes over engine draws registers a `d3d9::DrawReplacer` (`Device::setDrawReplacer`: skip /
+other shaders on the engine's geometry / procedural geometry, at the draw's own place; `registerReplacement` builds its pipelines in the background):
 docs/research/water.md 4.1.
-`rvk_vktest --passes` checks the pass building blocks on the GPU with synchronization validation (`--hazard`: proves it is live).
 
 ## Architecture (src/)
 
