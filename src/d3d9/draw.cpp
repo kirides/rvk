@@ -1184,6 +1184,30 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     depthRemap(block.posFix[2], block.posFix[3]);
     block.alphaFunc = rs_[RS_ALPHATESTENABLE] != 0 ? rs_[RS_ALPHAFUNC] : static_cast<std::uint32_t>(CMP_ALWAYS);
     block.alphaRef = static_cast<float>(rs_[RS_ALPHAREF] & 0xFF);
+    // scaled with the render scale: none at native AA (strands are wide enough), half at 1.5x, full from 2x on
+    const float thicken = cutoutThicken_ * std::clamp(renderRatio_ - 1.0f, 0.0f, 1.0f);
+    if (thicken > 0.0f && (jitterX != 0.0f || jitterY != 0.0f)) {
+        // the shader decides: its texkill (the z pre-pass cut-outs) and a GREATER / GREATEREQUAL alpha test (abi.h)
+        block.alphaFunc |= shader::abi::kAlphaThicken | (static_cast<std::uint32_t>(thicken * 255.0f + 0.5f) << 24);
+    }
+    if (alphaDither_ && (jitterX != 0.0f || jitterY != 0.0f)) {
+        // the shader decides: its texkill (the z pre-pass cut-outs) and a GREATER / GREATEREQUAL alpha test hash (abi.h)
+        block.alphaFunc |= shader::abi::kAlphaHashed | static_cast<std::uint32_t>((stats_.frames & 63u) << 16);
+        const std::uint32_t func = block.alphaFunc & 0xffu;
+        const bool cuts = (ps_ && ps_->reflection.discards) || func == static_cast<std::uint32_t>(CMP_GREATER) ||
+                          func == static_cast<std::uint32_t>(CMP_GREATEREQUAL);
+        if (cuts && tag_.materialName != nullptr && hashedMaterials_.size() < 64 && hashedMaterials_.insert(tag_.material).second) {
+            spdlog::trace("d3d9: hashed alpha test on material '{}' ({}/{}, {}, func {} ref {})", tag_.materialName,
+                          scene::name(phases_.current().view), scene::name(phases_.current().pass),
+                          ps_ && ps_->reflection.discards ? "texkill" : "alpha test", func, block.alphaRef);
+        }
+        if (cuts && !hashedAlphaLogged_) {
+            hashedAlphaLogged_ = true;
+            spdlog::info("d3d9: hashed alpha test (upscale.alpha_dither): first draw in {}/{}, func {} ref {}", scene::name(phases_.current().view), scene::name(phases_.current().pass),
+                         block.alphaFunc & 0xffu, block.alphaRef);
+        }
+    }
+    logTracedMaterial(kind, jitterX != 0.0f || jitterY != 0.0f);
     block.pad[0] = tint;
     std::memcpy(block.psC5, psF_[5], sizeof(block.psC5));  // pixel window 1 of split draws (abi.h)
     if (giDraw) {

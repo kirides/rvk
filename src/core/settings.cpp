@@ -1752,6 +1752,32 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 1,
         .flags = Flag::Debug,
     });
+    r.upscaleCutoutThicken = &reg.add({
+        .key = "upscale.cutout_thicken",
+        .label = "Steadier thin cut-outs",
+        .category = "Image",
+        .description = "Below native resolution, cut-out textures with strands thinner than a pixel (fishing nets, fine leaves) "
+                       "flicker under FSR. This keeps such strands about a pixel wide: steadier, but they look heavier and less "
+                       "see-through. Scaled with the render scale (nothing at native AA). 0 = off; 0.15 to 0.25 is a mild setting.",
+        .type = Type::Float,
+        .defaultValue = 0,
+        .min = 0,
+        .max = 0.5,
+        .format = "%.2f",
+        .flags = Flag::Advanced,
+    });
+    r.upscaleAlphaDither = &reg.add({
+        .key = "upscale.alpha_dither",
+        .label = "Hashed alpha test",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Experiment for thin cut-out textures (fishing nets) under FSR: the cut-out of the jittered scene draws (the "
+                       "z pre-pass texkill, the alpha test) passes with the texture's coverage of the pixel against noise that "
+                       "changes every frame, instead of a fixed threshold. About 20 % less flicker on nets, but softer.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::Debug,
+    });
 
     // ---- Graphics tab: frame generation (enh/framegen.h; docs/research/frame-generation.md). AMD's frame generation swapchain presents
     // the frames and paces them; the manual path (framegen.manual) is the developer view of the same generator.

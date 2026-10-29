@@ -922,6 +922,11 @@ public:
     // texture LOD bias added to the samplers of the draws the jitter applies to (FSR: log2(render / display) - 1, so the
     // temporal filter has the detail to accumulate); 0 = none
     void setGeometryLodBias(float bias) { geometryLodBias_ = bias; }
+    // hashed alpha test on the jittered draws (upscale.alpha_dither: abi.h kAlphaHashed; docs/research/upscaling.md 17)
+    void setAlphaDither(bool on) { alphaDither_ = on; }
+    // cut-out strands of the jittered draws kept about a render pixel wide (upscale.cutout_thicken: abi.h kAlphaThicken, 0 = off;
+    // docs/research/upscaling.md 19)
+    void setCutoutThicken(float strength) { cutoutThicken_ = strength < 0.0f ? 0.0f : strength > 1.0f ? 1.0f : strength; }
     // Render scale (enh/upscale): while the engine renders the main view, engine/scene_hooks shrinks the main camera's screen
     // rect by this ratio (>= 1; 1 = off), so the scene target, depth map, viewports and masks are all that much smaller; the
     // rect's real size (the display / output size) is reported back through setDisplaySize
@@ -1134,6 +1139,9 @@ private:
     void variantWorker();
     void stopVariantWorker();
     void logWaterDraw(draws::Kind kind);
+    // diagnostics: RVK_TRACE_MATERIAL = a substring of material names: every draw state of the matching materials, once per
+    // material x view x pass x shaders (names are resolved in the opaque passes only with -RvkLogLevel trace)
+    void logTracedMaterial(draws::Kind kind, bool jittered);
     VkShaderModule tintModule(Shader& ps);  // the tint variant of a pixel shader (null when it fails to build)
     VkShaderModule lodModule(Shader& vs);   // the billboard fade variant of a vertex shader (null when it fails to build)
     VkShaderModule variantModule(const Shader& s, const shader::GlslOptions& options, std::string_view tag);
@@ -1647,6 +1655,12 @@ private:
     VkDeviceAddress frameAddr_ = 0;  // 0 = upload before the next use
     JitterSource jitterSource_;
     float geometryLodBias_ = 0.0f;
+    bool alphaDither_ = false;
+    float cutoutThicken_ = 0.0f;
+    bool hashedAlphaLogged_ = false;
+    std::unordered_set<const void*> hashedMaterials_;  // -RvkLogLevel trace: the materials drawn with the hashed test (64 at most)
+    std::unordered_set<std::uint64_t> tracedMaterialDraws_;  // RVK_TRACE_MATERIAL (logTracedMaterial)
+    std::unordered_set<const void*> tracedEntities_;
     bool regionsOn_ = false;
     vk::CrashMarkers crashMarkers_;
     bool markersOn_ = false;

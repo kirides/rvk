@@ -724,15 +724,20 @@ private:
         case Op::TexLdl:
         case Op::TexLdd: emitTex(ins); break;
         case Op::TexKill: {
+            // rvk_kill: x < 0, or the hashed cut-out of jittered draws (header); every component is evaluated (its fwidth)
             const std::string r = paren(regExpr(ins.dst.reg, ins.dst.rel));
             std::string cond;
+            int n = 0;
             for (int c = 0; c < 4; ++c) {
                 if ((ins.dst.writeMask & (1 << c)) != 0) {
-                    cond += std::format("{}{}.{} < 0.0", cond.empty() ? "" : " || ", r, kComp[c]);
+                    cond += std::format("{}rvk_kill({}.{})", cond.empty() ? "" : ", ", r, kComp[c]);
+                    ++n;
                 }
             }
-            if (!cond.empty()) {
+            if (n == 1) {
                 line(std::format("if ({}) discard;", cond));
+            } else if (n > 1) {
+                line(std::format("if (any(bvec{}({}))) discard;", n, cond));
             }
             break;
         }
@@ -920,10 +925,28 @@ private:
              "    return vec4(1.0, y, z, 1.0);\n}\n";
         g += "vec4 rvk_nrm(vec4 s) {\n    float l = dot(s.xyz, s.xyz);\n    return l > 0.0 ? s * inversesqrt(l) : vec4(0.0);\n}\n";
         if (!vs_) {
-            g += "bool rvk_alphaTest(float a) {\n"
+            // the cut-outs of jittered draws (abi.h alphaFunc flags; docs/research/upscaling.md 17 / 19). The engine's materials
+            // cut out in the z pre-pass (texkill of alpha - c5.w; the colour pass then matches its depth), a few draws with the
+            // render-state alpha test (GREATER / GREATEREQUAL). kAlphaThicken: where the value changes fast across pixels
+            // (strands finer than a render pixel) the threshold drops by strength x min(fwidth, 1), so they stay about a pixel
+            // wide; kAlphaHashed: the coverage around the threshold against per-pixel noise that changes every frame
+            g += "float rvk_alphaNoise() {\n"
+                 "    vec2 p = gl_FragCoord.xy + 5.588238 * float((pc.draw.alphaFunc >> 16u) & 63u);\n"
+                 "    return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));\n}\n"
+                 "bool rvk_kill(float x) {\n"
+                 "    float w = max(fwidth(x), 1.0 / 255.0);\n"
+                 "    uint f = pc.draw.alphaFunc;\n"
+                 "    if ((f & 0x400u) != 0u) x += float(f >> 24u) * (1.0 / 255.0) * min(w, 1.0);\n"
+                 "    if ((f & 0x100u) == 0u) return x < 0.0;\n"
+                 "    return clamp(x / w + 0.5, 0.0, 1.0) <= rvk_alphaNoise();\n}\n"
+                 "bool rvk_alphaTest(float a) {\n"
                  "    float q = round(clamp(a, 0.0, 1.0) * 255.0);\n"
                  "    float r = pc.draw.alphaRef;\n"
-                 "    switch (pc.draw.alphaFunc) {\n"
+                 "    uint f = pc.draw.alphaFunc & 0xffu;\n"
+                 "    if ((f == 5u || f == 7u) && (pc.draw.alphaFunc & 0x500u) != 0u) {\n"
+                 "        return !rvk_kill(a - (f == 5u ? r + 0.5 : r - 0.5) / 255.0);\n"
+                 "    }\n"
+                 "    switch (f) {\n"
                  "    case 1u: return false;\n    case 2u: return q < r;\n    case 3u: return q == r;\n"
                  "    case 4u: return q <= r;\n    case 5u: return q > r;\n    case 6u: return q != r;\n"
                  "    case 7u: return q >= r;\n    default: return true;\n    }\n}\n";

@@ -30,7 +30,10 @@
 //                       posFix.zw: reversed depth (debug.reverse_z): z' = z (1 + zw.x) + zw.y w; (0, 0) = none. Reversed: (-k - 1, 1),
 //                       z' = w - k z with k = 1 - near / far, i.e. depth = near / view z (1 near, 0 at infinity); fragment depth
 //                       written by a pixel shader: d' = d (1 + zw.x) + zw.y
-//                       alphaFunc: D3DCMPFUNC (1 never .. 8 always), alphaRef: 0..1
+//                       alphaFunc: D3DCMPFUNC (1 never .. 8 always) in bits 0..7; flags of jittered draws for the cut-outs
+//                       (texkill; the alpha test if GREATER / GREATEREQUAL): kAlphaHashed (bit 8) the hashed cut-out, bits
+//                       16..21 its noise's frame phase; kAlphaThicken (bit 10) the cut-out threshold lowered by
+//                       (bits 24..31 / 255) x min(fwidth, 1); alphaRef: 0..255
 //                       pad[0]: debug tint, RGBA8 (unpackUnorm4x8; 0 = none), read only by the tint variant of a pixel
 //                       shader (GlslOptions::tintEpilogue, the "tint draws" debug view); pad[1] unused
 //                       psC5: pixel shader constant c5 of this draw (xy the camera obstacle fade, w the alpha reference: the
@@ -82,6 +85,9 @@ struct DrawBlock {
     float psC5[4];
 };
 static_assert(sizeof(DrawBlock) == 208);
+// DrawBlock::alphaFunc flags (docs/research/upscaling.md 17 / 19)
+inline constexpr std::uint32_t kAlphaHashed = 0x100u;   // upscale.alpha_dither
+inline constexpr std::uint32_t kAlphaThicken = 0x400u;  // upscale.cutout_thicken (strength in bits 24..31)
 
 // Constant register windows (split constants, docs/research/vulkanize/V0-constants.md): a stage's float registers are
 // partitioned by the engine's pools, each window has its own block (dirty tracking, upload) per draw.

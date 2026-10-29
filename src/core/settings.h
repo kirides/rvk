@@ -379,6 +379,8 @@ struct RendererSettings {
     Setting* upscaleSharpness = nullptr;  // upscale.sharpness: 0..1, FSR's RCAS sharpening pass
     Setting* upscaleJitterFlip = nullptr; // upscale.jitter_flip: debug, "none", "x", "y", "xy" (the geometry jitter's sign)
     Setting* upscalePostFullSize = nullptr;  // upscale.post_full_size: debug, the post chain at the output size (default on)
+    Setting* upscaleCutoutThicken = nullptr;  // upscale.cutout_thicken: advanced, cut-out strands kept about a render pixel wide (0 = off)
+    Setting* upscaleAlphaDither = nullptr;   // upscale.alpha_dither: debug, hashed alpha test on the jittered draws (thin cut-outs)
     // frame generation (enh/framegen.h, docs/research/frame-generation.md)
     Setting* framegenMode = nullptr;      // framegen.mode: "off", "fsr3" (FSR 3 frame generation), "fsr4" (the ML provider, where offered)
     Setting* framegenManual = nullptr;    // framegen.manual: debug, generated frames presented by us (stage F2; the AMD swapchain is F3)

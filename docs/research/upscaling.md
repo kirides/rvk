@@ -514,3 +514,86 @@ Crops: jungle leaves crisp instead of smeared, the ship's ropes continuous anti-
 net a regular weave instead of a blocky pattern. **Still open:** the net stays temporally unstable (strands thinner than a render
 pixel: section 12); motion was not measured (frozen spots; the user's in-motion judgement is the check). Post cost rises to the
 native AA level (ToneMap / DoF intermediates at the output size).
+
+## 17. Thin cut-outs under FSR: the hashed cut-out (`upscale.alpha_dither`) [C, 2026-10-29]
+
+**Why FSR's masks do not help** (`ffx_upscale.h`, FSR docs): the reactive mask and the transparency & composition mask both
+*lower* the history's weight (T&C also turns FSR 3's thin-feature locks off); there is no input that makes FSR keep more history.
+The tuning keys were tried in section 12. The net flickers because its strands are thinner than a render pixel and the cut-out is
+binary: every jittered frame hits another subset, FSR sees a real change and rejects the history.
+
+**Where the engine cuts out [C].** Not with the render-state alpha test: the material colour shaders run with ALPHAFUNC ALWAYS
+(a hook on GREATER / GREATEREQUAL draws fired for no draw at the net spot). The cut-out is in the **z pre-pass**: its pixel
+shaders (40 of 2330 ps_3_0 in the corpus) do `mad r0, alpha, v2.w, -c5.w; texkill r0` (c5.w = `g_CamObstacleAndMaskReference`,
+the alpha reference) and write the depth map; the colour pass then draws where the depth matches. The net's material
+`Arch_Fabrics_Net_01_Diffuse_01` (mesh `Obj_Dec_Net_Hanged_01`) is also seen in the Alpha pass (section 18).
+
+**Built (Debug setting `upscale.alpha_dither`, default off).** `DrawBlock::alphaFunc` bit 8 (`abi::kAlphaHashed`) + the frame
+phase (bits 16..21) on every jittered draw; the translator emits `texkill` as `rvk_kill(x)` per component: `x < 0` normally,
+hashed `clamp(x / max(fwidth(x), 1/255) + 0.5, 0, 1) <= noise` (interleaved gradient noise, 64 frame phases) with the flag; the
+render-state alpha test hashes too for GREATER / GREATEREQUAL. `kTranslatorVersion` 6. Corpus / `--gbuf` / `--gi` all pass.
+rvk.log `d3d9: hashed alpha test (upscale.alpha_dither): first draw in Main/DepthPrepass ...`; with `-RvkLogLevel trace`
+`d3d9: hashed alpha test on material '...'` (materials of the opaque passes are named only at trace level).
+
+**Result** (Performance 800x450 -> 1600x900, frozen spots, 8 burst frames; `out\water\20261029-113444` off, `-115153` hashed;
+`out\fsrpost\crop_net_hashed.png` = native AA / off / hashed):
+
+| spot | temporal std off -> hashed | Laplacian variance off -> hashed |
+|---|---|---|
+| net8_s (net region) | 4.68 (p99 25.8) -> 3.70 (p99 22.5) | 1418 -> 855 |
+| net8_e (foliage) | 0.261 -> 0.276 | 404 -> 322 |
+| jungle | 0.103 -> 0.118 | 59.7 -> 53.7 |
+| harbour_docks | 0.092 -> 0.096 | 31.1 -> 30.5 |
+
+About 20 % less flicker on the net, paid for with a softer net and slightly noisier foliage: the per-frame coverage is still
+binary (a Bernoulli trial with the same variance as the jittered threshold; only its spatial correlation changes). **Not a fix;
+stays a Debug experiment, default off.** Native AA reference: the net's std is 0.49 with or without it (`-113712`).
+(An earlier attempt hashed only the render-state alpha test: it never fired; `-113102` is therefore identical to off.)
+
+## 18. What the net8_s net is, and blended-draw experiments [C, 2026-10-29]
+
+* **The large net of `net8_s` is an InstancedMesh cut-out in the Solid pass** (`debug.tint_draws=kind`: cyan; `=pass`: grey;
+  `out\water\20261029-123309` / `-123432`, crop `out\fsrpost\crop_tint.png`): z pre-pass `texkill` + the colour pass on the
+  matching depth. Its opaque-pass draws carry no material name (not drawn through the sub-mesh tag path). Only the hashed
+  cut-out (section 17) reaches it.
+* `Arch_Fabrics_Net_01_Diffuse_01` (`Obj_Dec_Net_Hanged_01`) is a *different*, alpha-blended net in the same view: Main/Alpha,
+  SRCALPHA / INVSRCALPHA, z write on, LESSEQUAL, no alpha test, ps `f14cf0a850927c05` (`oC0.a = tex(s9).a * v2.w`, lighting x
+  `s0` = the render-sized shadow mask), s9 512x512 DXT1. Same entity: `Arch_Obj_MixSet_01_Diffuse_01` (blended too).
+* Diagnostics: environment variable `RVK_TRACE_MATERIAL=<substring>` (`-Environment`) logs every draw state of matching materials
+  (+ every draw of their entities) once per material x pass x shaders x pixel shader module (`d3d9: material trace ...`); the
+  opaque passes' names need `-RvkLogLevel trace`.
+* Built for blended draws, **no effect on net8_s** (the net there is not blended): Debug `upscale.blend_lod_bias` (share of FSR's
+  LOD bias for alpha-blended draws; 0 measured: std 4.71 vs 4.68) and Debug `upscale.blend_supersample=off|alpha|all` +
+  `upscale.blend_supersample_size` (VariantSlot::AlphaSupersample, `GlslOptions::alphaSupersample`: plain 2D texld = centre
+  sample + 8-tap footprint average of alpha / all channels; footprint in DrawBlock pad1; `rvk_shadertool corpus --alpha-ss`
+  passes; rvk.log `d3d9: first draw with supersampled alpha: ...`). Runs `-120042`, `-120814`, `-121415`, `-121544`,
+  `-122531`, `-122711`.
+
+## 19. Thin cut-outs: thickening (`upscale.cutout_thicken`) [C, 2026-10-29]
+
+**Built.** `DrawBlock::alphaFunc` flag `abi::kAlphaThicken` (bit 10) + strength in bits 24..31 on the jittered draws: the
+translated `texkill` (`rvk_kill`) and the GREATER / GREATEREQUAL alpha test add `strength x min(fwidth(x), 1)` to the cut-out
+value `x` (alpha - reference) before the test: where the value jumps from pixel to pixel (strands finer than a render pixel)
+the threshold drops and the strands stay about a render pixel wide; where the texture is smooth or magnified (`fwidth` tiny)
+nothing changes. The strength is scaled with the render scale: `setting x clamp(ratio - 1, 0, 1)` (0 at native AA, half at
+Quality 1.5x, full from Performance 2x). Advanced Image setting `upscale.cutout_thicken` 0..0.5, **default 0 (off)**.
+`kTranslatorVersion` 7; corpus / `--gbuf` / `--gi` pass.
+
+**Measured** (frozen spots, 8 burst frames; net region of net8_s; luma = the net region's mean, native AA 66.0):
+
+| mode | setting | net temporal std (> 3) | net luma | net8_e / jungle std |
+|---|---|---|---|---|
+| Performance | off | 4.68 (46 %) | 64.3 | 0.253 / 0.103 |
+| Performance | 0.15 | 3.99 (39 %) | 56.8 | 0.256 / 0.101 |
+| Performance | 0.25 | 3.40 (33 %) | 51.4 | 0.238 / 0.109 |
+| Performance | 0.5 | 2.71 (26 %) | 46.7 | 0.252 / 0.111 |
+| Quality | off | 4.74 (39 %) | 63.3 | 0.238 / 0.097 |
+| Quality | 0.15 | 5.04 (42 %) | 62.0 | 0.234 / 0.098 |
+| Quality | 0.3 | 4.48 (37 %) | 59.8 | 0.239 / 0.097 |
+
+(0.25 / 0.5 at Performance were measured before the render-scale factor, which is 1 at 2x anyway.) Dirs `out\water\20261029-124953`
+(off), `-125330`, `-124544`, `-124757`, `-125656`, `-125513`, `-125833`; crops `out\fsrpost\crop_net_thicken.png`,
+`crop_net_thicken2.png`. **It is a dial, not a fix:** flicker falls in step with the net getting darker, heavier and less
+see-through (0.5 = a nearly opaque sheet); foliage and the docks are unaffected. Default off; the in-motion judgement is the
+player's. A real fix would need the cut-out drawn with fractional coverage (deferred, alpha-blended with supersampled alpha:
+no depth-map entry, the background's shadow mask, sorting between cut-outs; not built).

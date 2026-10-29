@@ -437,7 +437,16 @@ sPassData InitPassData() {
 bool rvk_alphaTest(float a) {
     float q = round(clamp(a, 0.0, 1.0) * 255.0);
     float r = pc.draw.alphaRef;
-    switch (pc.draw.alphaFunc) {
+    uint f = pc.draw.alphaFunc & 0xffu;
+    float w = max(fwidth(a), 1.0 / 255.0);
+    if ((f == 5u || f == 7u) && (pc.draw.alphaFunc & 0x500u) != 0u) {  // abi.h kAlphaHashed / kAlphaThicken
+        float x = a - (f == 5u ? r + 0.5 : r - 0.5) / 255.0;
+        if ((pc.draw.alphaFunc & 0x400u) != 0u) x += float(pc.draw.alphaFunc >> 24u) * (1.0 / 255.0) * min(w, 1.0);
+        if ((pc.draw.alphaFunc & 0x100u) == 0u) return x >= 0.0;
+        vec2 p = gl_FragCoord.xy + 5.588238 * float((pc.draw.alphaFunc >> 16u) & 63u);
+        return clamp(x / w + 0.5, 0.0, 1.0) > fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+    }
+    switch (f) {
     case 1u: return false;
     case 2u: return q < r;
     case 3u: return q == r;

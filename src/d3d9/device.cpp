@@ -26,7 +26,7 @@ namespace {
 
 // bump when the translator's output changes: invalidates the SPIR-V disk cache
 // 2: the ABI declarations come from shaders/include/rvk_abi.glsl (48-byte push block, FrameBlock)
-constexpr std::uint32_t kTranslatorVersion = 4;
+constexpr std::uint32_t kTranslatorVersion = 7;
 // bump when the tint epilogue (GlslOptions::tintEpilogue) changes: the tint variants' cache files
 constexpr std::uint32_t kTintVersion = 2;
 // bump when the billboard fade variant (Device::lodModule) changes
@@ -2724,6 +2724,38 @@ std::uint32_t Device::lookupSamplerStates(const std::uint32_t* states) {
     }
     samplers_.emplace(key, index);
     return index;
+}
+
+void Device::logTracedMaterial(draws::Kind kind, bool jittered) {
+    static const std::string filter = [] {
+        char e[128];  // the Win32 environment (the proxy sets it from DllMain; the CRT's copy is stale)
+        const DWORD n = GetEnvironmentVariableA("RVK_TRACE_MATERIAL", e, sizeof e);
+        return n > 0 && n < sizeof e ? std::string(e, n) : std::string();
+    }();
+    if (filter.empty()) return;
+    // a matching material, or any draw of an entity a matching material was drawn for (its other passes: z pre-pass, shadows)
+    const bool named = tag_.materialName != nullptr && std::strstr(tag_.materialName, filter.c_str()) != nullptr;
+    if (named && tag_.entity != nullptr && tracedEntities_.size() < 64) tracedEntities_.insert(tag_.entity);
+    if (!named && (tag_.entity == nullptr || !tracedEntities_.contains(tag_.entity))) return;
+    const scene::Phase ph = phases_.current();
+    const std::uint64_t key = (reinterpret_cast<std::uintptr_t>(tag_.material) * 31u) ^ (static_cast<std::uint64_t>(ph.view) << 56) ^
+                              (static_cast<std::uint64_t>(ph.pass) << 48) ^ (ps_ ? ps_->hash : 0u) ^ ((vs_ ? vs_->hash : 0u) << 1);
+    if (tracedMaterialDraws_.size() >= 256 || !tracedMaterialDraws_.insert(key).second) return;
+    std::string tex;
+    for (std::uint32_t slot = 0; slot < 16; ++slot) {
+        if (!ps_ || ps_->reflection.samplers[slot] == shader::TextureType::Unknown) continue;
+        const Texture* t = tex_[slot];
+        tex += t != nullptr ? std::format(" s{}={}x{} {}", slot, t->desc().width, t->desc().height, vk::d3dFormatName(t->desc().format))
+                            : std::format(" s{}=-", slot);
+    }
+    spdlog::info("d3d9: material trace '{}' (entity {}) {}/{} kind {}: vs {:016x} ps {:016x} (texkill {}), blend {} {}/{} op {}, "
+                 "z {} write {} func {}, alpha test {} func {} ref {}, colour write 0x{:x}, cull {}, stencil {}, jittered {}, "
+                 "ps c5 ({:.3g} {:.3g} {:.3g} {:.3g}), samplers [{} ]",
+                 tag_.materialName != nullptr ? tag_.materialName : "(entity match)", tag_.entity, scene::name(ph.view), scene::name(ph.pass), draws::name(kind), vs_ ? vs_->hash : 0u,
+                 ps_ ? ps_->hash : 0u, ps_ && ps_->reflection.discards, rs_[RS_ALPHABLENDENABLE], rs_[RS_SRCBLEND], rs_[RS_DESTBLEND],
+                 rs_[RS_BLENDOP], rs_[RS_ZENABLE], rs_[RS_ZWRITEENABLE], rs_[RS_ZFUNC], rs_[RS_ALPHATESTENABLE], rs_[RS_ALPHAFUNC],
+                 rs_[RS_ALPHAREF], rs_[RS_COLORWRITEENABLE], rs_[RS_CULLMODE], rs_[RS_STENCILENABLE], jittered, psF_[5][0], psF_[5][1],
+                 psF_[5][2], psF_[5][3], tex);
 }
 
 }  // namespace rvk::d3d9
