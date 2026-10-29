@@ -1,26 +1,26 @@
 # Upscaling / temporal AA (FSR)
 
 Build and measurements of 2026-10-23 (RX 7900 XTX). Legend: [C] confirmed (measured), [I] inferred.
-Built: **native AA** (FSR 3.1 at render size = display size) and **render scale / quality modes** (section 7) through AMD's
+Built: **native AA** (FSR 3.1.6 at render size = display size; SDK 2.4.0 since 2026-10-29, section 15) and **render scale / quality modes** (section 7) through AMD's
 signed FFX API DLL, with an **automatic reactive mask** for translucent effects (section 8). Open: explicit / water masks,
-FSR 4 (section 13), thin alpha-tested geometry such as nets (section 12), uncapped GPU cost (section 11). Per-object motion for characters / moving rigid draws: section 9. Jitter-aware depth
+FSR 4 as default (built as an option, section 15), thin alpha-tested geometry such as nets (section 12), uncapped GPU cost (section 11). Per-object motion for characters / moving rigid draws: section 9. Jitter-aware depth
 reconstruction (positions rebuilt from the jittered depth): section 10.
 
 ## 1. Code
 
 | Part | Role |
 |---|---|
-| `src/vk/fsr.{h,cpp}` | wraps AMD's signed FFX API DLL `third_party/amd_fidelityfx/presigned_dll/amd_fidelityfx_vk.dll` (SDK 1.1.4, headers `third_party/amd_fidelityfx/ffx-api/include`); loaded from `bin\rvk` at run time (`run.ps1` / `package.ps1` copy it) |
+| `src/vk/fsr.{h,cpp}` | wraps AMD's signed FFX API DLLs `third_party/amd_fidelityfx/signedbin/amd_fidelityfx_loader_vk.dll` + `amd_fidelityfx_upscaler_vk.dll` (FSR SDK 2.4.0, section 15; headers `third_party/amd_fidelityfx/api/include`, `upscalers/include`); loaded from `bin\rvk` at run time (`run.ps1` / `package.ps1` copy them) |
 | `src/enh/upscale.{h,cpp}`, `shaders/upscale/prep.comp` | the pass `upscale.fsr`, settings, jitter source, depth prep |
 | `d3d9/device.*`, `d3d9/draw.cpp`, `enh/water.cpp` | `Device::setJitterSource` / `geometryJitter` / `jitter()` / `setGeometryLodBias` |
 | `rvk_vktest --fsr` | self-test: load, versions, context, 12 jittered dispatches on a constant image (output within 0.0005), compares our jitter sequence with the DLL's; SKIP without the DLL |
 
 Settings: `upscale.mode off|native_aa|quality|balanced|performance|ultra_performance|jitter_only` (Image category), `upscale.sharpness` 0..1 (default 0.4, main page, not
-Advanced), `upscale.reactive` (default on) + advanced `upscale.reactive_cutoff` (0.08) / `upscale.reactive_scale` (1) (section 8), debug `upscale.jitter_flip none|x|y|xy`.
+Advanced), `upscale.reactive` (default on) + advanced `upscale.reactive_cutoff` (0.08) / `upscale.reactive_scale` (1) (section 8), debug `upscale.jitter_flip none|x|y|xy`; advanced `upscale.provider fsr3|fsr4` (default fsr3; the ML upscaler, section 15).
 
 ## 2. DLL findings [C]
 
-* Providers on the RX 7900 XTX: FSR 3.1.4 (and 2.3.3). **No FSR 4 provider** is listed (RDNA3).
+* Providers on the RX 7900 XTX with the SDK 1.1.4 DLL: FSR 3.1.4 (and 2.3.3), **no FSR 4 provider** (RDNA3). With the SDK 2.4.0 DLLs the list is 4.1.2 (ML), 3.1.6, 2.3.4 (section 15).
 * `ffxCreateContext` crashed (null call inside the DLL) until the device enabled `VK_KHR_get_memory_requirements2` +
   `VK_KHR_dedicated_allocation` (the DLL fetches `vkGetBufferMemoryRequirements2KHR` by name). It also needs `shaderFloat16` +
   `shaderInt16` (its fp16 shaders; validation errors otherwise).
@@ -367,9 +367,9 @@ test executable with struct versions 1-4, sizes 0x40-0x70, with / without the op
 
 **Plan [I, from the user]:** recent drivers support FSR 4.1 on RDNA2 / 3 natively (no spoofing needed). AMD's release page: FSR
 SDK v2.3.0 (24 Jun), Upscaling 4.1.1 "adds RX 7000 discrete GPU support"; v2.x splits effects into a loader DLL + per-effect
-DLLs. The v2.3.0 prebuilt does not contain Vulkan DLLs yet; v2.4.0 is expected to ship prebuilt Vulkan DLLs. The plan is to
-adopt v2.4.0's signed Vulkan loader + upscaler DLLs (new headers, loader flow, version query / override) and keep the 1.1.4
-DLL as the fallback; until then FSR 3.1.4 only. Status: waiting for SDK 2.4.0.
+DLLs. The v2.3.0 prebuilt did not contain Vulkan DLLs; v2.4.0 does (loader + upscaler + frame generation). **Done 2026-10-29:
+section 15** (the 1.1.4 DLL is gone; the provider source `ffx-api/src` that this section cites is in the git history before
+commit d910736).
 
 ## 14. Open
 
@@ -391,11 +391,87 @@ DLL as the fallback; until then FSR 3.1.4 only. Status: waiting for SDK 2.4.0.
   (acceleration structures, ray query): treat captures with `rt.allow=true` as unsupported; for RenderDoc use `rt.allow=false`
   (restart setting, floor only).
 * Exposure input (auto now).
-* FSR 4: untested until an RDNA4 card (no provider on RDNA3, section 2); the driver's provider is not reachable from a Vulkan
-  process with the 1.1.4 DLL (section 13), waiting for FSR SDK 2.4.0's signed Vulkan DLLs.
+* FSR 4 (section 15): works on this RDNA3 card through the SDK 2.4.0 DLLs as an option (`upscale.provider=fsr4`); open: it looks
+  softer than FSR 3 at native AA (sharpness path?), no motion judgement, 1.3 ms more per frame, validation errors inside AMD's
+  shaders, not tested on RDNA2 / RDNA4 / other vendors (fallback to FSR 3 when no major-4 version is offered), no capability
+  entry in the settings (the option is always shown, it falls back at run time), the reactive mask still comes from FSR 3.
+* Frame Generation (Vulkan DLL exists, 4.0.2) and Ray Regeneration: not wired.
 * The engine's DoF / post at render size (section 7).
 * Jitter: depth reconstruction is corrected (section 10), except the engine's own `post_SSM.fx` cascade shadow draws
   (`shadows.enabled` off: needs the quad's input positions shifted by `-J` or jittered engine camera matrices); forward
   lookups into jittered buffers (water SSR, history reprojection) keep a sub-pixel mismatch (accepted).
 * GPU cost (section 11); loading / menu transitions rely on the reset.
 * Refcompare with upscale off must stay identical to before (not run yet).
+
+## 15. FSR SDK 2.4.0: loader + upscaler DLLs, FSR 3.1.6, the FSR 4 ML upscaler [C, 2026-10-29]
+
+**Vendored** (`third_party/amd_fidelityfx/VERSION.md`: tag `v2.4.0`, commit `7539ae8b6568ad29ed78a753404351daf3b5cca7`, released
+2026-10-28; sparse clone of the official repo, nothing executed): `signedbin/amd_fidelityfx_loader_vk.dll` (39 KB, 1.0.2.4555) +
+`signedbin/amd_fidelityfx_upscaler_vk.dll` (36 MB, 4.1.2.4555), both Authenticode `Valid`, signer Advanced Micro Devices (cert to
+2027-04-27, DigiCert timestamp), SHA-256 in VERSION.md; headers `api/include`, `upscalers/include`. The SDK's Vulkan DLLs are
+`loader_vk`, `upscaler_vk`, `framegeneration_vk` (36.8 MB: FSR Frame Generation 4.0.2 + Swapchain, FSR 3.1.6 frame generation;
+not vendored); denoiser (Ray Regeneration 1.2.1) and radiance cache are DX12 only. The loader resolves the effect DLL by name:
+already loaded, the executable's folder, **or the loader's own folder** (new in 2.4.0), so both DLLs sit in `bin\rvk`. The licence
+(`LICENSE.md`): binary redistribution allowed, no reverse engineering (so no disassembly; only exports / strings / behaviour were
+looked at), notice reproduced in the zip as `rvk\amd_fidelityfx_LICENSE.txt`.
+
+**Release notes in short**: Upscaling 4.1.2 (FSR 4.1 now also on RX 6000 / Ryzen AI Max / Ryzen AI 300 / 400 / Z2 with INT8 models),
+FSR 3.1.6 (accumulate pass precision), Frame Generation 4.0.2 / Swapchain 4.0.0 (driver assisted frame pacing needs an RX 9000 +
+driver 26.10.1; Vulkan at parity with DX12), Ray Regeneration 1.2.1, API: shader blob decompression (Vulkan), SDK-driver
+communication, effect DLL lookup next to the loader, `ffxConfigureDescGlobalDebug1` deprecated.
+
+**API changes we adapted** (`vk/fsr.cpp`): (1) `ffxCreateBackendVKDesc` now carries a `VkDeviceContext {device, physical device,
+vkGetDeviceProcAddr}` and its type is `FFX_API_BACKEND_ID_VK | 3` (0x01000003; the 1.1.4 form is `..._DEPRECATED`); (2) SDK 2.1+
+requires `ffxCreateContextDescUpscaleVersion {version = FFX_UPSCALER_VERSION}` chained into the create call; (3)
+`ffxQueryDescGetVersions.device` is a `VkDeviceContext*` (was the `VkDevice`); (4) headers moved (`<ffx_api.h>`,
+`<ffx_upscale.h>`, `<vk/ffx_api_vk.h>`); `ffxOverrideVersion` chosen from the query pins a provider. Unchanged: dispatch /
+query / reactive-mask structs, jitter queries, resource states.
+
+**Providers on the RX 7900 XTX** (`rvk_vktest --fsr`): the version query lists `4.1.2` (id 0xf5a5ca1e01001002), `3.1.6`
+(0xf5a5ca1e00c01006) and `2.3.4` (0xf5a5ca1e00803004); none is marked as the driver's (the driver's own `amdvkffx64.dll`, section
+13, offers nothing newer than the DLL's 4.1.2, so the API's "newest, driver preferred only if strictly higher" rule keeps the
+DLL's). **Without an override the API picks 4.1.2 (the ML upscaler)**, so `vk::Fsr` always passes an override: FSR 3 (the newest
+major-3 version, default) or, with `FsrCreateInfo::ml`, the newest major >= 4. **The FSR 4 ML upscaler creates its context and
+dispatches through Vulkan on this RDNA3 GPU** (INT8 model; the earlier E_INVALIDARG of the driver probe, section 13, was the
+gate for non-AMD callers: the signed DLL is the supported path). The constant-image self test keeps the colour (error 0.001); the
+jitter phase count / offsets equal ours (Halton, 8 * ratio^2).
+
+**Device features the 2.4 shaders declare** (validation errors until enabled, `vk/context.cpp`, all optional / queried):
+`shaderInt8`, `shaderIntegerDotProduct`, `subgroupSizeControl` + `computeFullSubgroups` (required subgroup size pipelines),
+`VK_KHR_compute_shader_derivatives` (`computeDerivativeGroupLinear` / `Quads`; FSR 3.1.6 needs it too). With them
+`rvk_vktest --fsr` FSR 3 pass: 0 errors; warnings left (format-mismatch warnings of `rw_spd_mip*`, `rw_current_luma`,
+`rw_farthest_depth`, `rw_dilated_motion_vectors`: AMD's shader declares Rg32f / R32f on R16 views; they are benign and were there
+with 3.1.4 too, section 2). The ML upscaler adds 10 validation **errors from inside AMD's shaders** (`OpImageWrite` of a
+3-component texel into the RGBA16F storage images `rw_reprojected_color` / `rw_history_color` / `rw_mlsr_output_color`): reported
+by `rvk_vktest --fsr` as a NOTE, not counted.
+
+**Setting** `upscale.provider` = `fsr3` (default) | `fsr4` (Image, advanced): `enh/upscale.cpp` rebuilds the context when it
+changes; `fsr4` falls back to 3.1 (rvk.log `the FSR 4 (ML) upscaler is not available on this GPU`) when the API does not offer
+a major-4 version on the device. rvk.log: `fsr: context ... provider '4.1.2' (version id ...)`, `enh: upscale: FSR provider
+'4.1.2': ...`. The reactive mask (`upscale.reactive`) still comes from an FSR 3 context (the auto-mask dispatch is an FSR 3
+feature) and is handed to FSR 4 as its optional input; FSR 4 does not need it (docs: no reactive / T&C masks required).
+Whether FSR 4 honours `upscale.sharpness` is unproven (see below).
+
+**Measured** (7900 XTX, jungle spot held, Quality 1.5x to 1920x1080, `-Perf`, `-PerfFrame 8000` + `RVK_PERF_FRAMES=24`; logs
+`out/perf/fsr/`): pass `upscale.fsr` GPU **0.405 ms (FSR 3.1.6)** vs **1.71 ms (FSR 4.1.2 ML, 1.33 - 2.14 per frame)**; frame GPU
+2.07 vs 2.78 - 3.08 ms (fps unchanged at the 80 fps Chill cap / 195 - 215 fps uncapped); CPU of the pass 0.078 vs 0.139 ms. AMD's
+numbers: Full INT8 3070 us at 4K on this card.
+
+**Images** (rvkcompare, pub_interior / jungle, `out/water/20261029-002714` quality, `-014741` native AA; shot review): FSR 3.1.6
+at Quality has no regression visible (no ghosting, no halos, bursts stable: mean abs difference 0.1 / 255; the jungle's foreground
+bush is smeared equally under both, from the engine's DoF). FSR 4.1.2: at Quality very close to FSR 3 (slightly cleaner foliage,
+slightly smoother wood grain); **at native AA clearly softer** (Laplacian variance 112 vs 236 pub_interior, 128 vs 284 jungle:
+leaves merge, table grain washed out; no artefacts otherwise). Suspects: the RCAS sharpness (`upscale.sharpness` 0.4) is not
+applied by the ML path, or the model is simply soft; not investigated. No FSR 4 run in motion was judged (stills only).
+Old DLL (3.1.4) vs new (3.1.6) was not compared pixel for pixel (the old build is gone); `-Mode full` + FSR 3 Quality runs
+clean (validation warnings as above, 0 mismatches in the native compares), but the Full capture of pub_interior is **darker than
+the Wrapper capture** (floor -41 %, left wall -26 %, mean luma 26.6 vs 28.0): a Full-mode lighting difference, not an upscaler
+effect (unverified against the previous DLL; look at it with `upscale.mode=off` in both modes).
+
+**Frame generation / Ray Regeneration**: documented only. Frame Generation 4.0.2 + Swapchain 4.0.0 now have Vulkan DLLs
+(`amd_fidelityfx_framegeneration_vk.dll`, FG swapchain replaces the VkSwapchain; driver frame pacing needs RX 9000 + driver
+26.10.1); Ray Regeneration has no Vulkan DLL. Not wired.
+
+**Packaging**: the zip carries `rvk\amd_fidelityfx_loader_vk.dll` (39 KB) + `rvk\amd_fidelityfx_upscaler_vk.dll` (36 MB, ~32 MB
+zipped) + the licence notice: the release zip grows from about 10 MB to about 40 MB. `run.ps1` copies both and deletes the stale
+1.1.4 `amd_fidelityfx_vk.dll`; CI needs nothing (the DLLs are in the repo, `package.ps1` copies them).
