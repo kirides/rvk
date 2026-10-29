@@ -45,6 +45,8 @@ public:
     bool vblankLocked() const { return vblank_; }
     // sleeps until the next frame slot
     void wait();
+    // sleeps `ms` from now (timer + final spin as wait(); independent of the cadence)
+    void sleepFor(double ms);
 
     struct Stats {
         std::uint32_t waits = 0;    // frames that waited

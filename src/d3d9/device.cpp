@@ -995,6 +995,11 @@ void Device::present() {
         perf_.cpuFrameMs += cpu;
         live_.cpuMs = static_cast<float>(cpu);
     }
+    if (stats_.frames > 1) {
+        // the base frame interval (present to present), smoothed: the manual frame generation shows its frame half of it before the real one
+        const double interval = std::chrono::duration<double, std::milli>(presentStart_ - lastPresentStart_).count();
+        if (interval > 0.0 && interval < 250.0) baseIntervalMs_ = baseIntervalMs_ <= 0.0 ? interval : baseIntervalMs_ * 0.9 + interval * 0.1;
+    }
     struct PresentEnd {
         Device& d;
         ~PresentEnd() {
@@ -1059,16 +1064,28 @@ void Device::present() {
         }
         loadingShown_ = now;
     }
-    const std::uint32_t slot = static_cast<std::uint32_t>(frames_.currentValue() % vk::Frames::kInFlight);
-    VkSemaphore acquired = acquireSemaphores_[slot];
-    std::uint32_t imageIndex = 0;
     updatePacer();
     const auto tw = std::chrono::steady_clock::now();
     if (!unpaced_) {
         pacer_.wait();  // after an unpaced stretch the slot is long past: the pacer restarts its cadence
     }
+    stats_.pacerMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tw).count();
+    // Manual frame generation (enh/framegen, docs/research/frame-generation.md 2.1 (ii)): the interpolated frame is shown first, the
+    // real frame half a base interval later, both through this swapchain (simple timed spacing; the pacing of the AMD swapchain is stage F3)
+    vk::Image* generated = generated_;
+    generated_ = nullptr;
+    const bool twoFrames = generated != nullptr && generated->valid() && !unpaced_;
+    std::chrono::steady_clock::time_point generatedAt{};
+    for (int stage = 0; stage < (twoFrames ? 2 : 1); ++stage) {
+    const bool showGenerated = twoFrames && stage == 0;
+    if (twoFrames && stage == 1) {
+        const double left = 0.5 * baseIntervalMs_ - std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - generatedAt).count();
+        if (left > 0.05) pacer_.sleepFor(left);
+    }
+    const std::uint32_t slot = static_cast<std::uint32_t>(frames_.currentValue() % vk::Frames::kInFlight);
+    VkSemaphore acquired = acquireSemaphores_[slot];
+    std::uint32_t imageIndex = 0;
     const auto tq = std::chrono::steady_clock::now();
-    stats_.pacerMs += std::chrono::duration<double, std::milli>(tq - tw).count();
     // the swapchain is the present thread's until its present returned
     const VkResult previous = presenter_.waitIdle();
     stats_.presentMs += presenter_.takePresentMs();
@@ -1100,9 +1117,12 @@ void Device::present() {
         return;
     }
     std::optional<RegionScope> presentRegion;
-    presentRegion.emplace(*this, "Present");
+    presentRegion.emplace(*this, showGenerated ? "Present (generated)" : "Present");
     VkCommandBuffer cmd = frames_.cmd();
-    vk::Image& bb = backBuffer_->image();
+    // the frame shown: the engine's back buffer, or (first of the two) the generated frame
+    vk::Image& bb = showGenerated ? *generated : backBuffer_->image();
+    const VkExtent3D srcExtent = showGenerated ? generated->desc().extent
+                                               : VkExtent3D{backBuffer_->desc().width, backBuffer_->desc().height, 1};
     bb.transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
     b.srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
@@ -1119,7 +1139,7 @@ void Device::present() {
     const VkExtent2D ext = swapchain_.extent();
     VkImageBlit2 region{VK_STRUCTURE_TYPE_IMAGE_BLIT_2};
     region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    region.srcOffsets[1] = {static_cast<std::int32_t>(backBuffer_->desc().width), static_cast<std::int32_t>(backBuffer_->desc().height), 1};
+    region.srcOffsets[1] = {static_cast<std::int32_t>(srcExtent.width), static_cast<std::int32_t>(srcExtent.height), 1};
     region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     region.dstOffsets[1] = {static_cast<std::int32_t>(ext.width), static_cast<std::int32_t>(ext.height), 1};
     VkBlitImageInfo2 bi{VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2};
@@ -1169,6 +1189,10 @@ void Device::present() {
     submitFrame(acquired, swapchain_.renderedSemaphore(imageIndex));
     presenter_.present(imageIndex);
     ++stats_.presentsQueued;
+    if (showGenerated) {
+        ++stats_.generatedPresented;
+        generatedAt = std::chrono::steady_clock::now();
+    }
     // persist new pipelines every 10 s (the game is usually killed, not shut down)
     if (presentStart_ - pipelinesSaved_ > std::chrono::seconds(10)) {
         pipelinesSaved_ = presentStart_;
@@ -1176,6 +1200,7 @@ void Device::present() {
         savePipelineKeys();
     }
     beginFrame();
+    }  // for (stage)
 }
 
 // render thread, the present thread idle

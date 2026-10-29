@@ -19,6 +19,7 @@
 #include "d3d9/device.h"
 #include "d3d9/ffshader.h"
 #include "enh/debug_view.h"
+#include "enh/framegen.h"
 #include "enh/gbuffer.h"
 #include "enh/object_motion.h"
 #include "enh/upscale.h"
@@ -610,11 +611,13 @@ private:
     std::unique_ptr<enh::Gi> gi_;                // gi.* (a draw observer + passes, a consumer of rtScene_)
     std::unique_ptr<enh::ObjectMotion> objectMotion_;  // per-object motion vectors of characters / moving rigid draws (FSR)
     std::unique_ptr<enh::Upscale> upscale_;     // upscale.mode (camera jitter, FSR)
+    std::unique_ptr<enh::FrameGeneration> framegen_;  // framegen.mode (FSR 3 / FSR 4 frame generation; the manual model)
     std::unique_ptr<enh::Gbuffer> gbuffer_;      // ao.* / gbuffer.debug (the G-buffer attachments + passes)
     void applyWater();
     void applyGi();
     void applyGbuffer();
     void applyUpscale();
+    void applyFramegen();
     void applyShadows();
     void applyLod();
     std::chrono::steady_clock::time_point settingsDirtySince_{};

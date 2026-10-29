@@ -15,6 +15,7 @@ local weather = T.param("weather", "")             -- e.g. Sunny_Full
 local burst = tonumber(T.param("burst", "0")) or 0     -- pictures taken during the walk (risen.debug.screenshot: <name>_b<k>.png in bin\spass\screenshots)
 local interval = tonumber(T.param("interval", "6")) or 6  -- frames between them
 local name = T.param("name", "walk")
+local burst_at = tonumber(T.param("burst_at", "1")) or 1  -- seconds after the walk starts (the hero stands in his start animation for ~4 s of a new game)
 local keys = {}
 for k in T.param("keys", "MoveForward"):gmatch("[^,]+") do keys[#keys + 1] = k end
 local function press(on) for _, k in ipairs(keys) do risen.input.simulate(k, on) end end
@@ -68,7 +69,7 @@ T.run(function()
         local started = false
         while T.elapsed() - t0 < seconds do
             wait_s(0.5)
-            if burst > 0 and not started and T.elapsed() - t0 >= 1 then
+            if burst > 0 and not started and T.elapsed() - t0 >= burst_at then
                 started = true
                 local ok, why = risen.debug.screenshot(name, { burst = burst, interval = interval, wait_frames = 1 })
                 risen.log.info(("rvk_rtwalk: burst %d x %d frames from frame %d: %s %s"):format(burst, interval, frames, tostring(ok), tostring(why)))

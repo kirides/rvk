@@ -402,6 +402,7 @@ TEST(inject_firings) {
     d3d9::inject::Firings f;
     CHECK(!f.take(Point::AfterOpaque, false));  // main-view points outside a main view
     CHECK(f.take(Point::BeforeGui, false) && f.take(Point::BeforeGui, false));
+    CHECK(f.take(Point::BeforePresent, false) && !d3d9::inject::inMainView(Point::BeforePresent));  // the frame's end: no main view
     f.beginMainView();
     CHECK(f.mainViews() == 1);
     CHECK(f.take(Point::AfterOpaque, true));      // the refraction copy
@@ -412,4 +413,5 @@ TEST(inject_firings) {
     f.endFrame();
     CHECK(f.mainViews() == 0);
     CHECK(std::string(d3d9::inject::name(Point::AfterMainView)) == "AfterMainView");
+    CHECK(std::string(d3d9::inject::name(Point::BeforePresent)) == "BeforePresent");
 }

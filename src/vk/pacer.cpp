@@ -154,6 +154,11 @@ void FramePacer::sleepUntil(std::int64_t t) {
     stats_.spunMs += static_cast<double>(now - spin0) / freq_;
 }
 
+void FramePacer::sleepFor(double ms) {
+    if (ms <= 0.0 || freq_ <= 0.0) return;
+    sleepUntil(qpc() + static_cast<std::int64_t>(ms * freq_));
+}
+
 void FramePacer::wait() {
     if (interval_ <= 0.0) {
         return;

@@ -235,6 +235,7 @@ HalDevice::~HalDevice() {
     // the RT scene's consumers (rt.debug, the water's traced reflections) release it in their destructors: before it
     rtDebug_.reset();    // releases the RT scene
     objectMotion_.reset();  // unregisters its observer
+    framegen_.reset();   // removes its passes, retires the generator
     upscale_.reset();    // clears the device's jitter source
     gbuffer_.reset();    // removes its passes, the G-buffer attachments
     gi_.reset();         // unregisters its observer / pass, releases the RT scene
@@ -505,6 +506,14 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         }
         applyUpscale();
     }
+    // frame generation (enh/framegen.h, docs/research/frame-generation.md)
+    framegen_ = std::make_unique<enh::FrameGeneration>(dev_);
+    if (rs.framegenMode != nullptr) {
+        for (settings::Setting* s : {rs.framegenMode, rs.framegenManual, rs.framegenDebug}) {
+            if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyFramegen(); }, this);
+        }
+        applyFramegen();
+    }
     // detail distances (engine/lod.h, docs/research/lod.md)
     for (settings::Setting* s : {rs.lodTrees, rs.lodMeshes, rs.lodView}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyLod(); }, this);
@@ -621,7 +630,26 @@ void HalDevice::applyGbuffer() {
     s.forced = rs.giEnabled != nullptr && rs.giEnabled->asBool() && rs.giScreen != nullptr && rs.giScreen->asEnum() != "off";
     // FSR (enh/upscale) reads the motion vectors
     s.forced = s.forced || (upscale_ && enh::usesFsr(upscale_->mode()));
+    // frame generation (enh/framegen) reads them too
+    s.forced = s.forced || (framegen_ && framegen_->wantsGbuffer());
     gbuffer_->apply(s);
+}
+
+void HalDevice::applyFramegen() {
+    const auto& rs = settings::renderer();
+    if (!framegen_ || rs.framegenMode == nullptr) return;
+    enh::FrameGeneration::Settings s;
+    const std::string_view m = rs.framegenMode->asEnum();  // the effective value: fsr4 applies as fsr3 where it is not offered
+    s.mode = m == "fsr3" ? enh::FrameGenMode::Fsr3 : m == "fsr4" ? enh::FrameGenMode::Fsr4 : enh::FrameGenMode::Off;
+    s.manual = rs.framegenManual != nullptr && rs.framegenManual->asBool();
+    const std::string_view v = rs.framegenDebug != nullptr ? rs.framegenDebug->asEnum() : std::string_view("off");
+    s.view = v == "motion" ? enh::FrameGenView::Motion
+             : v == "depth" ? enh::FrameGenView::Depth
+             : v == "hudless" ? enh::FrameGenView::Hudless
+             : v == "generated" ? enh::FrameGenView::Generated
+                                : enh::FrameGenView::Off;
+    framegen_->apply(s);
+    applyGbuffer();  // the motion vectors
 }
 
 void HalDevice::applyUpscale() {
@@ -1262,6 +1290,10 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
         // [debug] overlay_in_screenshots: into the back buffer, before the captures read it
         dev_.drawOverlayIntoBackBuffer();
     }
+    // the menu / loading / pause state of this present: frame generation runs in the world only (and the pacer follows it below)
+    updateMenuPacing();
+    // frame generation: the interpolated frame of this present is computed now, so that captures can read it too
+    dev_.inject(d3d9::inject::Point::BeforePresent);
     auto& captures = api::captures();
     // [debug] screenshot_frames: a request of the tool API's queue, due at this present
     if (std::ranges::find(options_.screenshotFrames, static_cast<std::uint32_t>(frame)) != options_.screenshotFrames.end()) {
@@ -1270,6 +1302,8 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
     // rvk_screenshot: the finished back buffer (scene + post + GUI) before it is shown, as D3D9's Present hook / DoSnapshot see it
     captures.onPresent(frame, [this](std::vector<std::uint8_t>& bgra, std::uint32_t& w, std::uint32_t& h) {
         return dev_.readBackBuffer(bgra, w, h);
+    }, [this](std::vector<std::uint8_t>& bgra, std::uint32_t& w, std::uint32_t& h) {
+        return framegen_ && framegen_->readGenerated(bgra, w, h);  // the manual frame generation's frame_<n>_gen.png
     });
     HAL_LOG("hal> SwapScreen");
     // borderless / exclusive fullscreen: a pending window placement / mode correction, the window kept on its monitor,
@@ -1283,7 +1317,6 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
     if (!dev_.setFullScreenExclusive(acquire ? wp.exclusiveMonitor : nullptr, acquire && wp.holdExclusive) && wp.resized) {
         dev_.windowResized();
     }
-    updateMenuPacing();
     engine::matsrc::onPresent();
     engine::lod::onPresent();  // a changed object draw distance: the world's cache-in spheres (engine thread)
     dev_.present();
@@ -1314,6 +1347,8 @@ void HalDevice::updateMenuPacing() {
     const auto* menuFps = rs.menuFps;
     const bool paceLoading = rs.paceLoading != nullptr && rs.paceLoading->asBool();
     dev_.setUnpaced(st.state == engine::menu::State::Loading && !paceLoading);
+    // frame generation: the world only (Unknown = the GUI is not up yet: the world), not paused (app state 1)
+    if (framegen_) framegen_->setGameState(st.state == engine::menu::State::Game || st.state == engine::menu::State::Unknown, st.appState == 1);
     dev_.setMenuCap(st.state == engine::menu::State::Menu && menuFps != nullptr ? menuFps->value() : 0.0);
     if (static_cast<int>(st.state) != menuState_) {
         menuState_ = static_cast<int>(st.state);

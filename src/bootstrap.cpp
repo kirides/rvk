@@ -395,6 +395,11 @@ void loadSettings() {
     spdlog::info("renderer: mode {} at start ({}; backend {})", g_config.mode == Mode::Trace ? std::string_view("trace") : toString(started),
                  modeLock ? "config.toml [renderer] mode" : rs.rendererMode->isDefault() ? "default" : "settings.toml renderer.mode",
                  toString(g_config.mode));
+    // frame generation needs our Vulkan renderer (the interpolation runs on its frame): say why it is off in the other modes
+    if (g_config.mode != Mode::Vulkan && rs.framegenMode != nullptr && rs.framegenMode->value() != 0.0) {
+        spdlog::info("framegen: off: the session's backend is {} (frame generation runs in the Vulkan renderer: Wrapper / Full modes)",
+                     toString(g_config.mode));
+    }
     std::string values;
     for (const settings::Setting* s : reg.all()) {
         if (!s->isDefault()) values += std::format("{}{} = {}{}", values.empty() ? "" : ", ", s->key(), reg.text(*s),

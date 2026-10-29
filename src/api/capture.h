@@ -73,7 +73,9 @@ public:
     // 0 pending, 1 done, -1 failed / unknown ticket
     int status(std::uint32_t ticket, std::string* msg) const;
     // render thread, before the present of frame `frame` (1-based): captures the requests that are due, counts the others down
-    void onPresent(std::uint64_t frame, const ReadBack& read);
+    // `generated` (optional): the manual frame generation's interpolated frame of this present; every capture that is due is also
+    // written as "<name>_gen.<ext>" (no ticket of its own) when it returns true
+    void onPresent(std::uint64_t frame, const ReadBack& read, const ReadBack& generated = {});
     // fails every request not captured yet (the renderer is gone)
     void failWaiting(std::string_view reason);
     std::uint32_t pending() const;

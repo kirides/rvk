@@ -75,6 +75,7 @@ set(RVK_SHADERS
     gbuffer/gbuffer_debug.frag
     gbuffer/gtao.comp
     upscale/prep.comp
+    framegen/debug.frag
     gbuffer/gtao_filter.comp
     test/abi_layout.comp
     test/abi_pass_layout.comp
@@ -235,6 +236,8 @@ add_library(rvk_core STATIC
     src/enh/debug_view.h
     src/enh/gi.cpp
     src/enh/gi.h
+    src/enh/framegen.cpp
+    src/enh/framegen.h
     src/enh/gbuffer.cpp
     src/enh/gbuffer.h
     src/enh/object_motion.cpp

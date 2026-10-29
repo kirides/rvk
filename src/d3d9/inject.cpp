@@ -14,6 +14,7 @@ const char* name(Point p) {
         case Point::BeforeAlpha: return "BeforeAlpha";
         case Point::AfterMainView: return "AfterMainView";
         case Point::BeforeGui: return "BeforeGui";
+        case Point::BeforePresent: return "BeforePresent";
         case Point::Count: break;
     }
     return "?";

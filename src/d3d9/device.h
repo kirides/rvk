@@ -516,6 +516,7 @@ struct FrameStats {
     std::uint64_t acquireFailures = 0;
     std::uint64_t loadingFramesDropped = 0;  // loading-screen frames rendered but not shown (setUnpaced)
     std::uint64_t presentsQueued = 0;
+    std::uint64_t generatedPresented = 0;  // generated frames shown by the manual frame generation (included in presentsQueued)
     std::uint64_t presentSuboptimal = 0;
     std::uint64_t swapchainRecreates = 0;
     double acquireMs = 0.0;  // summed time in vkAcquireNextImageKHR / vkQueuePresentKHR (per stats interval)
@@ -780,6 +781,10 @@ public:
     };
     const LiveFrame& liveFrame() const { return live_; }
     Surface* backBuffer() { return backBufferSurface_; }
+    // Manual frame generation (enh/framegen.h): set from the BeforePresent pass with the interpolated frame (display size, same
+    // format family as the back buffer, usable as a transfer source); present() shows it first and the real frame half a base
+    // interval later, then forgets it. Cleared when the frame is not presented.
+    void setGeneratedFrame(vk::Image* image) { generated_ = image; }
     Surface* autoDepthStencil() { return depthSurface_; }
     const FrameStats& stats() const { return stats_; }
     // [debug] perf: the numbers since the last call (zeroed afterwards)
@@ -1604,6 +1609,8 @@ private:
     void regionsReopen();
     float renderRatio_ = 1.0f;
     std::array<std::uint32_t, 2> displaySize_{};
+    vk::Image* generated_ = nullptr;
+    double baseIntervalMs_ = 0.0;  // smoothed present-to-present interval
     const Texture* substituteFrom_ = nullptr;
     std::uint32_t substituteSlot_ = 0;
     std::array<float, 4> jitter_{};  // this frame's jitter (pixels, xy), the previous frame's (zw)

@@ -274,7 +274,7 @@ void CaptureQueue::finishLocked(std::uint32_t ticket, int state, std::string msg
     }
 }
 
-void CaptureQueue::onPresent(std::uint64_t frame, const ReadBack& read) {
+void CaptureQueue::onPresent(std::uint64_t frame, const ReadBack& read, const ReadBack& generated) {
     std::vector<Job> due;
     {
         const std::lock_guard lock(mutex_);
@@ -299,6 +299,12 @@ void CaptureQueue::onPresent(std::uint64_t frame, const ReadBack& read) {
     auto pixels = std::make_shared<std::vector<std::uint8_t>>();
     std::uint32_t w = 0, h = 0;
     const bool ok = read(*pixels, w, h) && w > 0 && h > 0 && pixels->size() >= static_cast<std::size_t>(w) * h * 4;
+    std::shared_ptr<std::vector<std::uint8_t>> genPixels;
+    std::uint32_t gw = 0, gh = 0;
+    if (ok && generated) {
+        genPixels = std::make_shared<std::vector<std::uint8_t>>();
+        if (!generated(*genPixels, gw, gh) || gw == 0 || gh == 0 || genPixels->size() < static_cast<std::size_t>(gw) * gh * 4) genPixels.reset();
+    }
     {
         const std::lock_guard lock(mutex_);
         writing_ -= static_cast<std::uint32_t>(due.size());
@@ -306,6 +312,12 @@ void CaptureQueue::onPresent(std::uint64_t frame, const ReadBack& read) {
             if (!ok) {
                 finishLocked(job.ticket, -1, "back-buffer read-back failed");
             } else {
+                if (genPixels) {
+                    Job g = job;
+                    g.ticket = 0;  // not tracked: the generated frame rides along with its real frame
+                    g.file.replace_filename(job.file.stem().wstring() + L"_gen" + job.file.extension().wstring());
+                    writes_.push_back(Write{std::move(g), frame, genPixels, gw, gh});
+                }
                 writes_.push_back(Write{std::move(job), frame, pixels, w, h});
             }
         }
@@ -338,8 +350,10 @@ void CaptureQueue::writerLoop() {
         }
         lock.lock();
         --writing_;
-        finishLocked(w.job.ticket, ok ? 1 : -1,
-                     ok ? std::format("frame {}, waited {} presents, {}x{}", w.frame, w.job.waited, w.width, w.height) : error);
+        if (w.job.ticket != 0) {
+            finishLocked(w.job.ticket, ok ? 1 : -1,
+                         ok ? std::format("frame {}, waited {} presents, {}x{}", w.frame, w.job.waited, w.width, w.height) : error);
+        }
         idle_.notify_all();
     }
 }

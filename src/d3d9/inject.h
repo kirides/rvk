@@ -35,12 +35,14 @@ enum class Point : std::uint8_t {
     AfterMainView,        // the main view's eCFrustumDatabase::Execute returns: the scene HDR target is complete (incl. water,
                           // alpha), the image-effect post chain (eye adaptation, tonemapping, DoF) has not run yet
     BeforeGui,            // eCApplication::Draw: the post chain is done (the back buffer holds the tonemapped frame), no GUI yet
+    BeforePresent,        // SwapScreen, just before the frame is presented: the back buffer holds the finished frame (GUI included); the
+                          // engine's snapshot / rvk_screenshot captures read it after this point (frame generation, docs/research/frame-generation.md)
     Count
 };
 inline constexpr std::size_t kPointCount = static_cast<std::size_t>(Point::Count);
 const char* name(Point p);
 // whether a point belongs to the main view (fired at most once per main view)
-constexpr bool inMainView(Point p) { return p != Point::BeforeGui; }
+constexpr bool inMainView(Point p) { return p != Point::BeforeGui && p != Point::BeforePresent; }
 
 using PassFn = std::function<void(PassContext&)>;
 

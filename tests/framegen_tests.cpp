@@ -1,6 +1,7 @@
 // Frame generation (src/vk/framegen.*, the framegen.* settings; docs/research/frame-generation.md): provider selection from the
 // FFX API's version list, the capability requirements of framegen.mode and its fsr4 option.
 
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -113,4 +114,91 @@ TEST(framegen_caps_names) {
     CHECK(caps::name(Cap::FrameGenerationMl) == "frame_generation_ml");
     CHECK(caps::name(Cap::FrameGenerationQueues) == "frame_generation_queues");
     CHECK(caps::kCount <= 32);  // Mask is 32 bits
+}
+
+// ---- enh/framegen: the rules --------------------------------------------------------------------------------------------
+
+#include "enh/framegen.h"
+
+TEST(framegen_blocker_priority) {
+    using enh::FrameGenBlock;
+    enh::FrameGenFacts f;
+    CHECK(enh::frameGenBlocker(f) == FrameGenBlock::None);
+    f.inputs = false;
+    CHECK(enh::frameGenBlocker(f) == FrameGenBlock::NoInputs);
+    f.mainView = false;
+    CHECK(enh::frameGenBlocker(f) == FrameGenBlock::NoMainView);
+    f.paused = true;
+    CHECK(enh::frameGenBlocker(f) == FrameGenBlock::Paused);
+    f.gameplay = false;
+    CHECK(enh::frameGenBlocker(f) == FrameGenBlock::Menu);
+    f.unpaced = true;
+    CHECK(enh::frameGenBlocker(f) == FrameGenBlock::Loading);  // a loading frame is also "not gameplay": the more specific reason wins
+    f.providerReady = false;
+    CHECK(enh::frameGenBlocker(f) == FrameGenBlock::NoProvider);
+    enh::FrameGenFacts g;
+    g.sizeOk = false;
+    CHECK(enh::frameGenBlocker(g) == FrameGenBlock::Size);
+    for (const auto b : {FrameGenBlock::None, FrameGenBlock::NoProvider, FrameGenBlock::Menu, FrameGenBlock::Loading, FrameGenBlock::Paused,
+                         FrameGenBlock::NoMainView, FrameGenBlock::NoInputs, FrameGenBlock::Size}) {
+        CHECK(std::string(enh::frameGenBlockName(b)).size() > 3);
+    }
+}
+
+TEST(framegen_camera_cut_rules) {
+    enh::FrameGenPose a;
+    a.valid = true;
+    a.position = {1000.0f, 200.0f, -300.0f};
+    a.forward = {0.0f, 0.0f, 1.0f};
+    a.fovY = 1.0f;
+    enh::FrameGenPose b = a;
+    CHECK(!enh::frameGenCameraCut(a, b));
+    b.position[0] += 12.0f;                                   // the hero runs: 12 cm per frame
+    CHECK(!enh::frameGenCameraCut(a, b));
+    b.forward = {std::sin(0.2f), 0.0f, std::cos(0.2f)};        // a quick turn (11 degrees)
+    CHECK(!enh::frameGenCameraCut(a, b));
+    b.forward = {std::sin(1.3f), 0.0f, std::cos(1.3f)};        // 74 degrees in one frame: a cut
+    CHECK(enh::frameGenCameraCut(a, b));
+    enh::FrameGenPose c = a;
+    c.position[2] += 6000.0f;                                  // 60 m in one frame: a teleport
+    CHECK(enh::frameGenCameraCut(a, c));
+    enh::FrameGenPose d = a;
+    d.fovY = 1.5f;                                             // zoom into a dialogue
+    CHECK(enh::frameGenCameraCut(a, d));
+    d.fovY = 1.1f;
+    CHECK(!enh::frameGenCameraCut(a, d));
+    enh::FrameGenPose none;
+    CHECK(enh::frameGenCameraCut(none, a) && enh::frameGenCameraCut(a, none));  // no camera on one side: no interpolation across it
+    enh::FrameGenCutLimits tight;
+    tight.teleport = 5.0f;
+    CHECK(enh::frameGenCameraCut(a, [&] { auto e = a; e.position[0] += 12.0f; return e; }(), tight));
+}
+
+TEST(framegen_state_reset_rules) {
+    using enh::FrameGenBlock;
+    enh::FrameGenState st;
+    // blocked: nothing, no frame id
+    auto s = st.advance(FrameGenBlock::Menu, false);
+    CHECK(!s.active && !s.show && s.frameId == 0);
+    // the first active frame resets and shows nothing (the provider passes it through); the next interpolates
+    s = st.advance(FrameGenBlock::None, false);
+    CHECK(s.active && s.reset && !s.show && s.frameId == 1);
+    s = st.advance(FrameGenBlock::None, false);
+    CHECK(s.active && !s.reset && s.show && s.frameId == 2);
+    // a camera cut resets that frame
+    s = st.advance(FrameGenBlock::None, true);
+    CHECK(s.active && s.reset && !s.show && s.frameId == 3);
+    s = st.advance(FrameGenBlock::None, false);
+    CHECK(s.show && !s.reset && s.frameId == 4);
+    // an interruption (loading screen, menu) starts over; the frame id goes on by exactly one per active frame
+    s = st.advance(FrameGenBlock::Loading, false);
+    CHECK(!s.active);
+    s = st.advance(FrameGenBlock::None, false);
+    CHECK(s.reset && !s.show && s.frameId == 5);
+    // a context change (resize, provider switch) resets too
+    st.advance(FrameGenBlock::None, false);
+    st.invalidate();
+    s = st.advance(FrameGenBlock::None, false);
+    CHECK(s.reset && s.frameId == 7);
+    CHECK(st.activeFrames() == 7);
 }
