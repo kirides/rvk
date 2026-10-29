@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -62,7 +63,8 @@ void logTreeLimits(const void* self) {
         return;
     }
     const float factor = field<float>(self, kTreeFactor);
-    if (g_treeLimits.emplace(nearDist, farDist, factor).second) {
+    // (find first: emplace allocates its node before it looks, and this runs for every tree update until 24 distinct are seen)
+    if (const auto key = std::make_tuple(nearDist, farDist, factor); g_treeLimits.find(key) == g_treeLimits.end() && g_treeLimits.insert(key).second) {
         spdlog::info("engine: lod: tree LOD limits near {:.0f}, far {:.0f}, factor {:.2f} (= {:.1f} .. {:.1f} m)", nearDist, farDist, factor,
                      nearDist * factor / 100.0f, farDist * factor / 100.0f);
     }
@@ -105,8 +107,8 @@ void detourMeshUpdate(void* self, void* frustum) {
     const int count = bytes[kMeshLodCount];
     if (count < 2 || count > kMaxMeshLods) return g_meshUpdate.original(self, frustum);
     auto* ranges = reinterpret_cast<float*>(bytes + kMeshRanges);
-    if (g_meshRanges.size() < kLogDistinct &&
-        g_meshRanges.emplace(count, ranges[0], count > 2 ? ranges[1] : 0.0f, count > 3 ? ranges[2] : 0.0f).second) {
+    const auto rangeKey = std::make_tuple(count, ranges[0], count > 2 ? ranges[1] : 0.0f, count > 3 ? ranges[2] : 0.0f);
+    if (g_meshRanges.size() < kLogDistinct && g_meshRanges.find(rangeKey) == g_meshRanges.end() && g_meshRanges.insert(rangeKey).second) {
         spdlog::info("engine: lod: mesh with {} LODs, ranges {:.0f} {:.0f} {:.0f}", count, ranges[0], count > 2 ? ranges[1] : 0.0f,
                      count > 3 ? ranges[2] : 0.0f);
     }
@@ -152,7 +154,13 @@ bool detourPrefetchSphere(void* self, void* entity, float* sphere) {
     g_prefetchAdmin.store(self, std::memory_order_relaxed);
     const float viewRange = field<float>(entity, kEntityViewRange);
     const float cacheIn = field<float>(entity, kEntityCacheInRange);
-    if (g_entityRangesLogged.load(std::memory_order_relaxed) < kLogDistinct) {
+    // (a per-thread list of the pairs already looked at keeps the mutex and the set's node allocation off the common path)
+    thread_local std::array<std::pair<float, float>, kLogDistinct> seenRanges;
+    thread_local std::size_t seenRangeCount = 0;
+    bool seen = false;
+    for (std::size_t i = 0; i < seenRangeCount && !seen; ++i) seen = seenRanges[i].first == viewRange && seenRanges[i].second == cacheIn;
+    if (!seen && g_entityRangesLogged.load(std::memory_order_relaxed) < kLogDistinct) {
+        if (seenRangeCount < seenRanges.size()) seenRanges[seenRangeCount++] = {viewRange, cacheIn};
         const std::lock_guard lock(g_rangeLogMutex);
         if (g_entityRanges.size() < kLogDistinct && g_entityRanges.emplace(viewRange, cacheIn).second) {
             g_entityRangesLogged.store(g_entityRanges.size(), std::memory_order_relaxed);
