@@ -20,8 +20,7 @@ QUIRKS
   - Ray tracing options need a GPU with ray tracing support; otherwise they are greyed out.
   - Anti-aliasing / upscaling (Image): AMD FSR 3.1. With "Show advanced settings", Upscaler can be set to FSR 4 (a neural
     upscaler from AMD's FSR SDK 2.4; needs a Radeon RX 6000 series or newer, otherwise FSR 3.1 stays; experimental).
-  - Frame generation (AMD FSR 3, developer setting for now, System > Debug mode): needs the separate download
-    risen-enhanced-graphics-framegen.zip; unpack it into <Risen>\bin as well (it adds rvk\amd_fidelityfx_framegeneration_vk.dll).
+  - Frame generation (AMD FSR 3 / FSR 4, developer setting for now, System > Debug mode): the DLL is in this zip (rvk folder).
   - The first start (and the first visit to a coast with the enhanced ocean) can take longer: caches are built
     in rvk\cache.
   - Render mode (System tab): Wrapper (default: the game's rendering on Vulkan + the enhancements), Full

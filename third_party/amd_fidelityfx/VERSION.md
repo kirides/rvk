@@ -11,7 +11,7 @@ commit `7539ae8b6568ad29ed78a753404351daf3b5cca7`. The release has no assets; th
 | `framegeneration/include/ffx_framegeneration.h`, `ffx_framegeneration_api_types.h`, `vk/ffx_api_framegeneration_vk.h` | `Kits/FidelityFX/framegeneration/include/` (MIT) |
 | `signedbin/amd_fidelityfx_loader_vk.dll` | `Kits/FidelityFX/signedbin/` |
 | `signedbin/amd_fidelityfx_upscaler_vk.dll` | `Kits/FidelityFX/signedbin/` |
-| `signedbin/amd_fidelityfx_framegeneration_vk.dll` | `Kits/FidelityFX/signedbin/` (FSR 3.1.6 frame generation, FSR Frame Generation 4.0.2 (ML), the frame generation swapchain 3.1.7; shipped as the separate optional asset `risen-enhanced-graphics-framegen.zip`, not in the main zip) |
+| `signedbin/amd_fidelityfx_framegeneration_vk.dll` | `Kits/FidelityFX/signedbin/` (FSR 3.1.6 frame generation, FSR Frame Generation 4.0.2 (ML), the frame generation swapchain 3.1.7) |
 | `LICENSE.md` | `Kits/FidelityFX/docs/license.md` (the binaries: redistribution in binary form only, no reverse engineering,
   notice reproduced: `scripts/package.ps1` puts the notice into the zip as `rvk\amd_fidelityfx_LICENSE.txt`) |
 
@@ -35,6 +35,6 @@ history before the commit that introduced this file).
 The application loads `amd_fidelityfx_loader_vk.dll`; the loader finds `amd_fidelityfx_upscaler_vk.dll` and
 `amd_fidelityfx_framegeneration_vk.dll` in the executable's folder or next to itself (new in 2.4.0), so they all go to `bin\rvk`.
 The frame generation DLL was re-checked (Authenticode Valid, signer as above, SHA-256 as in the table) on 2026-10-29 when it was
-vendored; `scripts/package.ps1` puts it, with the licence notice, into the separate `risen-enhanced-graphics-framegen.zip`.
+vendored; `scripts/package.ps1` puts it, with the other FFX DLLs and the licence notice, into the main zip.
 
 To update: clone the new tag into an empty directory, verify the signatures, replace the files, update this file.
