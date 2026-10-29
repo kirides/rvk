@@ -20,7 +20,13 @@ QUIRKS
   - Ray tracing options need a GPU with ray tracing support; otherwise they are greyed out.
   - Anti-aliasing / upscaling (Image): AMD FSR 3.1. With "Show advanced settings", Upscaler can be set to FSR 4 (a neural
     upscaler from AMD's FSR SDK 2.4; needs a Radeon RX 6000 series or newer, otherwise FSR 3.1 stays; experimental).
-  - Frame generation (AMD FSR 3 / FSR 4, developer setting for now, System > Debug mode): the DLL is in this zip (rvk folder).
+  - Frame generation (Graphics tab, Image: AMD FSR 3, FSR 4 on a Radeon RX 9000 series): a generated frame is shown between
+    every two rendered frames, so 60 rendered frames per second are shown as 120. The game itself runs at the lower rate
+    (best from about 60 rendered), input shows about one rendered frame later. The "Frame rate limit" (Display) then limits the
+    frames shown (120 = 60 rendered). Needs the borderless window: exclusive fullscreen is switched off while it is on. Off in
+    menus and loading screens. Fast camera turns with a character close to the camera can show a smeared character. If you use
+    AMD Radeon Chill or another driver frame limiter for Risen.exe, switch it off for the game: it counts the generated
+    frames too. The frame generation DLL is in this zip (rvk folder).
   - The first start (and the first visit to a coast with the enhanced ocean) can take longer: caches are built
     in rvk\cache.
   - Render mode (System tab): Wrapper (default: the game's rendering on Vulkan + the enhancements), Full

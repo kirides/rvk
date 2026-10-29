@@ -1,7 +1,7 @@
 # Frame generation (FSR 3 / FSR 4) - design and feasibility
 
 Research of 2026-10-29 (RX 7900 XTX, Adrenalin 26.10.1 "AMD proprietary driver", Windows 11 26300). Request: "Add frame generation. FSR 3 and FSR 4
-frame generation. Ensure proper setup and pacing." **Stages F1 and F2 are built (section 9)**; the rest of this document is the design plus the measurements of a
+frame generation. Ensure proper setup and pacing." **Stages F1, F2 and F3 are built (sections 9 and 10)**; the rest of this document is the design plus the measurements of a
 throwaway probe (`out/fg/`, git-ignored, section 6). Legend: [SDK] read in the SDK 2.4.0 headers / docs / sample source (clone
 `B:\DevDrive\ffx-sdk-2.4.0-dl\src`, tag `v2.4.0`, paths are relative to `Kits/FidelityFX/` unless they start with `Samples/` or `docs/`), [C] code of
 this repo, [M] measured with the probe, [E] estimate, [?] open: needs a prototype in the game.
@@ -364,6 +364,71 @@ callback model, the fps panel**. Commits: `7c4fcc6` (F1), `7d22e8b` + `a35d2fc` 
 5. `rvkcompare` spots freeze game time and the camera: generated = real there (checks the HUD / overlay / path only); the moving checks use `rvk_rtwalk` (`-Param 'load=0','burst=6','interval=1','name=fgwalk','seconds=12','burst_at=8','keys=MoveForward,TurnRight'` + `-Setting 'vulkan.max_fps=30'`).
 6. FSR 4 (ML) frame generation: **cannot be tested here** (not offered on RDNA 3). The code path is the same calls with `ci.ml`; the camera vectors (sign / handedness) are unverified; selectable only where the query lists a 4.x provider.
 
-### 9.5 What F3 needs
+### 9.5 What F3 needs (done: section 10)
 
 The swapchain backend in `vk::Swapchain` (`ffxCreateContext` swapchain VK with `Context::frameGenQueues()`, replacement functions, pinned 3.1.7), `Device::present` through `pOutQueuePresentKHR`, the present callback (blit + overlay moved into it, HUDless in Configure), `frameID` per presented frame, `Configure(enabled=false)` states for menus / loading, pacer rate = output / 2, `framegen.pacing`, the fps panel and the `framegen:` pacing statistics, exclusive fullscreen off while on, the ring-slot rule (9.4 1), removal of the debug flags of `framegen.mode`, and the Radeon Chill note in the README. Open from F2: tuning the cut thresholds with teleports (`rvk_perfsave`), HUD wobble at low contrast backgrounds (UI texture mode, F4), water / particle artefacts review (checklist 3.2) with motion sequences, async compute A/B.
+
+## 10. F3 result (2026-10-29): AMD swapchain presentation + pacing
+
+Built and verified in the game (RX 7900 XTX, 1600x900 windowed and a short borderless 2560x1440 @ 120 Hz run, `RisenTest.exe`, Wrapper and Full).
+`framegen.mode = fsr3` presents through **AMD's frame generation swapchain** (provider pinned 3.1.7, never the driver's `4.0.0 *`); the
+manual model of F2 stays for captures (`framegen.manual`) and as the fallback when the swapchain cannot be created (logged reason).
+
+### 10.1 What is where
+
+| piece | where | notes |
+|---|---|---|
+| swapchain wrapper | `src/vk/fg_swapchain.*` | `FgSwapchain`: `ffxCreateContext(FGSWAPCHAIN_VK)` with the game queue (`Context::queue()`, submits through `Context::queueSubmit(count, VkSubmitInfo*, fence)` = the queue lock, as the queue info's `submitFunc`) + `Context::frameGenQueues()`; `recreate` = `pOutCreateSwapchainFFXAPI` in place; `destroy` = WaitForPresents, DestroyContext(swapchain), `pOutDestroySwapchainFFXAPI`; present callback (`FfxApiPresentCallbackFunc`): copy of `currentBackBuffer` into the real image (states from `fgLayoutOfState`, unit-tested), then the UI hook (overlay) in a dynamic rendering scope, barriers back to the reported states |
+| backend switch | `vk::Swapchain::setFrameGen`, `Device::setFrameGenSwapchain` | the next build creates AMD's swapchain instead of ours (our own is destroyed first: one swapchain per surface); `frameGenActive()`; fall back to a normal swapchain on failure; exclusive fullscreen off; `Swapchain::present` calls `pOutQueuePresentKHR` under `FgSwapchain::contextMutex()`, then signals a timeline semaphore (`fgDone_`) on the game queue: everything the present queued (interpolation) is before it |
+| generator | `vk::FrameGen` (`FrameGenCreateInfo::swapchain`), `enh/framegen.*` `recordSwapchain` | callback model: per frame `ffxConfigure` (swapchain handle, present callback, `frameGenerationCallback` = our thunk that ORs the camera-cut reset into the swapchain's and calls `ffxDispatch`, `HUDLessColor`, `frameID`, enabled) + Prepare (depth, motion, camera) recorded into our command buffer; the context exists from the start (disabled in menus) because the present callback is registered through its configure; `frameID` +1 per active frame |
+| rules | | before Configure / Prepare: `Device::waitFrameGenPresent` (the previous present returned and its GPU work, the interpolation, is done: the F2 view-ring rule of 9.4 1, and the generator's internal images are free), then the context mutex (the present thread holds it inside `pOutQueuePresentKHR`: the interpolation dispatch runs there, on the present thread, not on AMD's threads); the HUD-less copy alternates between two images (`framegen.hudless.0/1`: the interpolation of the previous frame may still read the other one); the back buffer must be the swapchain's size (`FrameGenBlock::PresentSize`), else the generator is disabled; the replacement image goes to the API in `SHADER_READ_ONLY_OPTIMAL` (the layout it expects: the probe left `PRESENT_SRC`, which only worked by luck); the swapchain's images may be RGBA while the back buffer is BGRA: the context gets the swapchain format as `backBufferFormat` and the back buffer's as `hudlessFormat` |
+| overlay | `Overlay::prepare` / `recordPrepared` / `hasPrepared` | the UI is built on the render thread (NewFrame .. Render, texture uploads under the queue lock) and its draw lists are cloned (`ImDrawList::CloneOutput`); the present callback draws the latest snapshot into the real image of every presented frame (`present callbacks N (M generated, N with the overlay)`); a mutex serialises ImGui and the backend's per-frame buffers (8 of them: the callback draws twice per rendered frame); never in screenshots (they read the engine's back buffer) unless `-OverlayInScreenshots` |
+| teardown / changes | `FrameGeneration::swapchainWillChange`, `dropContext`, `shutdown` | a re-creation of the swapchain (resize, `window` commands, vsync toggle, minimise / restore, mode off / manual) first drops the generator's context synchronously (if this frame's commands use it: `Device::flushFrameAndWait`); shutdown order: generator -> AMD swapchain -> overlay -> device. `windowResized` at an unchanged size does nothing with the AMD swapchain |
+| pacer | `Device::updatePacer`, `setFrameGenRunning` | while the generator runs the rates (monitor refresh with vsync, `vulkan.max_fps`) are the OUTPUT rate and the pacer's base is half of it (log: `frame pacing at 60.000 fps (max_fps), frame generation: base = output 120.000 fps / 2`); the menu cap is not halved (nothing is generated in menus); the loading-screen rule is untouched (unpaced, at most 30 frames/s shown); high_fps fixes see base frames only |
+| settings | `core/settings.cpp` | `framegen.mode` moved to the Image category (player setting, off by default, text: latency, borderless, Radeon Chill, rate limit semantics; `FSR 4 (neural)` greyed where no ML provider is offered: checked in the overlay), `vulkan.max_fps` text says "output rate with frame generation"; `framegen.manual` / `framegen.debug` stay Debug. The extra queues are requested whenever the DLL is installed (no restart), exclusive fullscreen is refused while the swapchain is wanted (`hal: exclusive fullscreen is not available with frame generation`) |
+| statistics | `HalDevice::logFrameGen`, `Device::takeFrameGenReport`, `LiveFrame::baseFps / outputFps` | 5 s line `framegen: swapchain: base 60.0 fps -> output 120.0 fps (602 real presents in 5.0 s = 2.00 per rendered frame); present callbacks ...`; with `-Perf` also the gap statistics of the real presents (`perf: framegen present gaps`, a thread spinning on `pOutGetLastPresentCountFFXAPI`; `RVK_FG_NO_SAMPLER=1` turns it off); overlay: the fps counter reads `60 -> 120 fps`, the performance panel `Frame generation: 60 rendered -> 120 shown fps (... about +17 ms input delay)` |
+| diagnostics | `diag::startHangWatchdog` (`-Perf`) | no frame for 8 s -> every thread's stack in rvk.log (`diag: hang:`) |
+| tests | `tests/framegen_tests.cpp` | 192 tests: blocker `PresentSize`, `fgLayoutOfState`, `fgGapStats` |
+
+### 10.2 Pacing numbers (RisenTest.exe, wrapper, savegame hold; `-Perf` with the sampler thread: it takes a core and adds noise)
+
+Real presents counted from the swapchain's own counter (`pOutGetLastPresentCountFFXAPI`), gaps from the sampler (5 s windows, 3 shown, ms):
+
+| `vulkan.max_fps` / vsync | base -> output fps | presents per rendered frame | gap mean | gap stddev | p99 | every other gap |
+|---|---|---|---|---|---|---|
+| 60, off | 30 -> 60 | 2.00 | 16.67 | 0.84 - 1.08 | 17.5 - 23 | 16.47 / 16.87 |
+| 90, off | 45 -> 90 | 2.00 | 11.11 | 0.26 - 0.80 | 11.9 - 14.5 | 10.93 / 11.30 |
+| 120, off | 60 -> 120 | 2.00 | 8.33 | 0.21 - 0.73 | 8.9 - 9.9 | 8.19 / 8.47 |
+| none, off | 185 - 235 -> 370 - 470 | 2.00 | 2.1 - 2.7 | 0.9 - 1.2 | 4 - 6.4 | - |
+| 60 (vsync on, 120 Hz) | 30 -> 60 | 2.00 | 16.6 - 16.8 | 0.24 - 2.3 | 17 - 26 | 16.57 / 16.60 .. |
+| borderless 2560x1440 @ 120 Hz | 60 -> 120 | 2.00 | 8.33 | - (not sampled) | - | 2.00 per frame |
+
+* The alternating gaps (generated -> real shorter than real -> generated by 0.2 - 0.4 ms) are AMD's pacing; stddev stays below 1 ms at 60 Hz output in the typical window, single outliers (one 15 - 33 ms gap in some windows, `max`) come with the sampler's own CPU load and window changes. Windowed 1600x900; DWM's refresh rate on this machine drops from 120 to 60 Hz at times ("DWM composition clock 60.002 Hz": dynamic refresh), which shows in vsync runs (base 30 instead of 60: that is the display's rate, not the pacer).
+* Uncapped: the base runs at about half the FG-off rate (the swapchain throttles to its own pacing: 133 vs 267 base fps with the savegame): FG is for capped / display-rate play.
+* Loading screens: quick-load 2.14 / 2.08 / 2.12 s with FG on (vsync on) vs 2.17 / 2.22 / 2.15 s off (`rvk_menufps`); ESC menu / character screen 60.0 fps (`vulkan.menu_fps`) with 1.01 presents per rendered frame (generator idle, the swapchain presents one-for-one).
+* `rvk_highfps` (walk, 4 jumps, drop, ledge) at base 60: FG on (`max_fps` 120) vs off (`max_fps` 60): identical walk speed / ticks, jump rise 175.4 / 143.4 / 203.5 / 142.9 vs 175.4 / 143.3 / 203.3 / 143.2, drop 1.74 vs 1.75 s: the engine sees base frames only.
+* CPU (savegame, base 60, `-Perf`, no sampler): engine+HAL 3.4 - 3.5 ms off, 3.7 - 4.3 ms on; the passes themselves are 0.05 - 0.17 ms CPU, the waits for the previous present 0 - 40 ms per 5 s. The rest (0.2 - 0.8 ms) was not attributed (a `-CpuProfile` of both gives no FG-specific hotspot; AMD's present threads run at THREAD_PRIORITY_HIGHEST and spin: SMT / cache interference is the likely cause). Uncapped, the render thread waits in `waitFrameGenPresent` for the previous present and its GPU work (3 - 5 ms per frame): that wait is the swapchain's pacing, not CPU work.
+* GPU: `framegen.generate` 0.42 ms at 1600x900 (F2); the callback's copy + overlay record 0.011 ms CPU each.
+* Latency: not measured (no photodiode / PresentMon here). From the present timing: the generated frame (midpoint of N-1 and N) is shown when frame N is complete, the real frame N half a period later: +0.5 base frame for N itself, a content lag of up to 1 base frame (8 - 17 ms at 60 base; 17 - 33 ms at 30 base) plus the swapchain's own latency control (its present waits for the previous frame's interpolation + composition).
+
+### 10.3 Verification list
+
+* Validation: only AMD's `VUID-vkCmdDispatch-OpImageWrite-08795` (`rw_output` float3 into B8G8R8A8, 10 reported) and format-mismatch warnings from its shaders; none from our code; **synchronization validation clean** (same one VUID). `rvk_tests` (192), `rvk_d3d9test`, `rvk_vktest --fg` / `--passes`: PASS. CI preset (`public-release -DRVK_PCH=OFF`, ninja, vcvars): d3d9.dll 7.3 MB, 192 tests pass; `package.ps1` zip 52.3 MB (d3d9.dll, loader 39 KB, upscaler 36.1 MB, framegeneration 36.8 MB DLL, config.toml, README, licence notice).
+* Full mode with FG: `native.static_ops_compare` + `native.scene_ops_compare`: 234 compare lines `mismatches: none`, 0 mismatches (FG off: same).
+* Window changes (validation on): `window 1280x720` / `1600x900`, `window fullscreen` (borderless 2560x1440 @ 120 Hz), `window minimize` / `restore`, `set vulkan.vsync on|off`, `set framegen.mode off|fsr3`, `framegen.manual true|false`: every one re-created the swapchain / generator and went on at 2.00 presents per rendered frame. `vulkan.fullscreen=exclusive` with the mode on: logged, borderless.
+* Overlay on generated frames: `present callbacks 570 (285 generated, 570 with the overlay)`; screenshots through `scripts/capture-window.ps1` show the settings window and the `60 -> 120 fps` counter; the Image section lists `Frame generation` with `FSR 4 (neural)` greyed on this GPU (`out/f3/ov_combo.png`).
+* HUD: the engine's GUI stays in the interpolated frame with the HUD-less guidance: the health / mana bars and the compass are crisp in the generated frames, no wobble seen in 4 bursts (`out/f3/hud_bar_*.png`); the premultiplied UI-texture mode was not needed.
+
+### 10.4 Artefacts (shot-reviewer + own look, manual model captures, jungle / pub / docks, `rvk_rtwalk` with TurnRight: a fast yaw)
+
+* **Hero close to the camera while the camera turns fast** (jungle, in front of a large trunk): the generated frame shows a semi-transparent multi-copy smear of the hero (offset 30 - 60 px, broken head); with `upscale.object_motion = all` and `upscale.mode = native_aa` it is still there. Pub: faint doubled head in a dark scene. Docks (hero and camera almost still): clean. The same effect is not visible at normal turning speed; F4 candidate (motion for the hero, the generation rect, disabling generation while the hero fills the view).
+* Tree crowns / foliage are softer in generated frames; small warped fragments at thin branch tips against the sky; a hard-edged sliver at the left edge where a foreground leaf disoccludes (zoomed only). The fishing net in the pub is intact.
+* Not checked: FSR 4 (no RDNA 4), HDR, water / particle spots under the swapchain (the generator and its inputs are the F2 ones).
+
+### 10.5 Issues and open items
+
+1. **A hang once**: the first enable after a new game start (`running again at present 4772`, one of ~20 runs; the user killed the game). Not reproduced in 8 further runs; `-Perf` now enables the hang watchdog (`diag: hang:` stacks) to catch it. Suspects: the first `Configure(enabled = true)` (it calls `waitForPresents`: `vkQueueWaitIdle` on the game queue without our queue lock) racing another queue user, or the present thread blocked in the submit hook on the queue lock while the render thread holds it waiting for the GPU (`Context::waitIdle`, ImGui's texture upload under `queueLock()`).
+2. **Two in-place re-creations in a row** (an engine mode change calling `Device::resize` and `windowResized` with the same extent) crashed once inside the swapchain DLL (`queuePresent` on the present thread, a read through a bad object pointer, right after the second recreate); `windowResized` at an unchanged size is now skipped with the AMD swapchain, which removed it. The root cause is not known (an in-place recreate with an unchanged extent after a changed one).
+3. The driver-provided `4.0.0 *` swapchain stays unused (crashes in its destroy). FSR 4 (ML) frame generation + the 3.1.7 swapchain is untested.
+4. The sampler thread and the AMD present threads spin: expect ~0.5 - 1 core extra while frame generation runs; Radeon Chill on `Risen.exe` caps the total presents (README note).
+5. Not done: async compute (`allowAsyncWorkloads`), AMD's pacing tuning keys, Anti-Lag, the UI-texture composition (not needed), RenderDoc (use FG off).

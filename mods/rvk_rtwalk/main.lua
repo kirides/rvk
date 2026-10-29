@@ -15,6 +15,7 @@ local weather = T.param("weather", "")             -- e.g. Sunny_Full
 local burst = tonumber(T.param("burst", "0")) or 0     -- pictures taken during the walk (risen.debug.screenshot: <name>_b<k>.png in bin\spass\screenshots)
 local interval = tonumber(T.param("interval", "6")) or 6  -- frames between them
 local name = T.param("name", "walk")
+local show_hud = T.param("hud", "0") ~= "0"          -- 1: the HUD stays (frame generation: HUD wobble checks)
 local burst_at = tonumber(T.param("burst_at", "1")) or 1  -- seconds after the walk starts (the hero stands in his start animation for ~4 s of a new game)
 local keys = {}
 for k in T.param("keys", "MoveForward"):gmatch("[^,]+") do keys[#keys + 1] = k end
@@ -44,7 +45,7 @@ T.run(function()
     end
     wait_s(5)
     pcall(risen.debug.console, "god")
-    risen.hud.set_visible(false)
+    if not show_hud then risen.hud.set_visible(false) end
     local p = risen.entity.player()
     if pose ~= "" then
         local px, py, pz, pyaw = pose:match("([%-%d%.]+);([%-%d%.]+);([%-%d%.]+);([%-%d%.]+)")
