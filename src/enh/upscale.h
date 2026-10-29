@@ -28,7 +28,7 @@
 
 namespace rvk::enh {
 
-enum class UpscaleMode : std::uint8_t { Off, JitterOnly, NativeAa, Quality, Balanced, Performance, UltraPerformance };
+enum class UpscaleMode : std::uint8_t { Off, JitterOnly, NativeAa, HighQuality, Quality, Balanced, Performance, UltraPerformance };
 
 constexpr bool usesFsr(UpscaleMode m) { return m >= UpscaleMode::NativeAa; }
 // the per-dimension ratio output / render of an FSR mode (FfxApiUpscaleQualityMode); 1 for the others

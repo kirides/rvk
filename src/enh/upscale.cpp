@@ -45,6 +45,8 @@ constexpr VkImageUsageFlags kOpaqueUsage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE
 
 float upscaleRatio(UpscaleMode m) {
     switch (m) {
+        // AMD's presets (FfxApiUpscaleQualityMode) + High quality, GD3D11's 83 % step (not an AMD preset)
+        case UpscaleMode::HighQuality: return 100.0f / 83.0f;
         case UpscaleMode::Quality: return 1.5f;
         case UpscaleMode::Balanced: return 1.7f;
         case UpscaleMode::Performance: return 2.0f;

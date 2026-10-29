@@ -694,6 +694,7 @@ void HalDevice::applyUpscale() {
     }
     enh::UpscaleMode mode = enh::UpscaleMode::Off;
     if (m == "native_aa") mode = enh::UpscaleMode::NativeAa;
+    else if (m == "high_quality") mode = enh::UpscaleMode::HighQuality;
     else if (m == "quality") mode = enh::UpscaleMode::Quality;
     else if (m == "balanced") mode = enh::UpscaleMode::Balanced;
     else if (m == "performance") mode = enh::UpscaleMode::Performance;

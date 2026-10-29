@@ -1647,13 +1647,13 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .label = "Anti-aliasing / upscaling",
         .category = "Image",
         .description = "AMD FidelityFX Super Resolution: a temporal filter that removes jagged edges and shimmer. Native AA "
-                       "renders at the screen's resolution; Quality to Ultra performance render the 3D scene at 1/1.5 .. 1/3 of "
+                       "renders at the screen's resolution; High quality to Ultra performance render the 3D scene at 1/1.2 .. 1/3 of "
                        "it per dimension (faster) and upscale it; the menus and the HUD stay sharp. \"Jitter only\" shakes "
                        "the camera without the filter (developer test).",
         .type = Type::Enum,
         .defaultValue = 0,
-        .options = {"off", "native_aa", "quality", "balanced", "performance", "ultra_performance", "jitter_only"},
-        .optionLabels = {"Off", "Native AA (FSR)", "Quality (1.5x)", "Balanced (1.7x)", "Performance (2x)",
+        .options = {"off", "native_aa", "high_quality", "quality", "balanced", "performance", "ultra_performance", "jitter_only"},
+        .optionLabels = {"Off", "Native AA (FSR)", "High quality (1.2x)", "Quality (1.5x)", "Balanced (1.7x)", "Performance (2x)",
                          "Ultra performance (3x)", "Jitter only (test)"},
     });
 
