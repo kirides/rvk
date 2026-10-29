@@ -360,6 +360,7 @@ struct RendererSettings {
     Setting* giCharacters = nullptr;      // gi.characters: skinned draws in the RT scene (enh/rt_scene)
     Setting* giScreen = nullptr;          // gi.screen: "off", "low", "medium", "high" (stage C screen probes, needs the G-buffer)
     Setting* giBleed = nullptr;           // gi.bleed: 0..1 colour bleeding of the screen probes (chroma ratio)
+    Setting* giDirectional = nullptr;     // gi.directional: 0..1 the screen probes' correction of the light's direction (rtgi.md 20)
     Setting* giDebug = nullptr;           // gi.debug: "off", "irradiance", "cascades"
     // G-buffer / motion vectors / GTAO (enh/gbuffer.h, docs/research/rtgi.md 10)
     Setting* aoEnabled = nullptr;         // ao.enabled: GTAO on the ambient light

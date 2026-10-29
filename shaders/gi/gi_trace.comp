@@ -30,7 +30,9 @@ void main() {
     ivec3 dims = ivec3(v.dims.xyz);
     ivec3 cell = rvkGiCellOfSlot(dims, v.cascade[c].origin.xyz, slot);
     vec3 P = vec3(cell) * v.cascade[c].spacing.x;
-    float u = float(giHash(item * 64u + ray + p.volume.w * 7919u) & 0xFFFFFFu) / 16777216.0;
+    // the point-light pick of the hit (giPointLights): stratified over the probe's rays (a golden-ratio sequence from a random
+    // per-probe, per-frame start) instead of independent draws: the rays together sample the lights evenly (rtgi.md 20)
+    float u = fract(float(ray) * 0.6180339887 + float(giHash(item * 2654435761u + p.volume.w * 7919u) & 0xFFFFFFu) / 16777216.0);
     // the lights this probe sees (their direct light enters the probe in gi_blend.comp: rtgi.md 19): light j by invocation
     // j % 64, one visibility ray each
     if ((p.flags.z & 1u) != 0u) {

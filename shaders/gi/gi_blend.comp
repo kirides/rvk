@@ -112,8 +112,23 @@ void main() {
             regs[6][ch] = 0.546274 * a22;
         }
         regs[6].w = 0.0;
-        float alpha = fresh ? 1.0 : max(1.0 - p.blend.x, 1.0 / float(count + 1u));
         GiProbesRW probes = GiProbesRW(v.data.xy);
+        // adaptive history (rtgi.md 20): the long hysteresis (a steady probe averages many updates: little grain) gives way to
+        // a fast blend where the light really changed (a door opened, the sun came out, a lamp lit): the relative change of
+        // the probe's average luminance, beyond what 64 rays' noise explains, raises the new rays' weight
+        float alpha = 1.0;
+        if (!fresh) {
+            const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+            vec3 oldL0, newL0;
+            for (uint ch = 0u; ch < 3u; ++ch) {
+                oldL0[ch] = probes.p[index].reg[ch].w + probes.p[index].reg[3u + ch].z / 3.0;
+                newL0[ch] = regs[ch].w + regs[3u + ch].z / 3.0;
+            }
+            float lo = dot(max(oldL0, vec3(0.0)), lw), ln = dot(max(newL0, vec3(0.0)), lw);
+            float rel = abs(ln - lo) / (max(ln, lo) + 0.03);
+            alpha = mix(1.0 - p.blend.x, 0.15, smoothstep(0.45, 0.9, rel));
+            alpha = max(alpha, 1.0 / float(count + 1u));
+        }
         for (int k = 0; k < 7; ++k) {
             vec4 old = fresh ? regs[k] : probes.p[index].reg[k];
             probes.p[index].reg[k] = mix(old, regs[k], alpha);

@@ -1,10 +1,17 @@
 #version 460
-// Screen probe resolve (M10 stage C P8, src/enh/gi.cpp, docs/research/rtgi.md 11): per pixel the 2 x 2 nearest tile probes,
-// weighted bilinearly x depth x normal similarity (the probes' own pixels in the G-buffer), then temporal accumulation with
-// the previous frame's result at the motion-reprojected position, clamped to the probes' range. rgb = the GI ratio the
-// material shaders of this frame read at their own pixel, a = the pixel's view depth (0 = no probe covered it): a draw whose
-// depth differs (not in the z pre-pass: characters, alpha) leaves it alone. Normals and motion from the depth (after the z
-// pre-pass, before the G-buffer).
+// Screen probe resolve (M10 stage C P8, src/enh/gi.cpp, docs/research/rtgi.md 11, 20): per pixel the nearby tile probes,
+// weighted by a Gaussian of the distance to each tile's centre x depth-plane x normal similarity (the probes' own surface
+// from the geometry image), then temporal accumulation with the previous frame's result at the motion-reprojected position.
+//
+// The history is validated per tap (the stored view depth against the reprojected one: a disoccluded pixel starts again
+// instead of blending in another surface), counted (the weight of a new frame is 1 / (count + 1) down to the history
+// limit: a pixel that just appeared converges at once, a settled one averages many frames) and clamped to the probes'
+// range. While the count is small the spatial filter widens to a 5 x 5 probes (the first frames of a pixel are the noisy
+// ones). Outputs:
+//   outResolved rgb = the GI ratio the material shaders of this frame read at their own pixel, a = the pixel's view depth
+//               (0 = no probe covered it): a draw whose depth differs (not in the z pre-pass: characters, alpha) leaves it alone
+//   outStats    rgb = the directional correction (gi.directional), a = frames accumulated
+// Normals and motion from the depth (after the z pre-pass, before the G-buffer).
 
 #define RVK_PASS_SHADER 1
 #include "rvk_abi.glsl"
@@ -15,6 +22,7 @@
 
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D outResolved;
+layout(set = 1, binding = 1, rgba16f) uniform writeonly image2D outStats;
 
 void main() {
     GiPassParams p = GiPassParams(pc.params);
@@ -27,41 +35,82 @@ void main() {
     float viewZ = spViewDepth(f, zpx);
     if (viewZ <= 0.0) {
         imageStore(outResolved, px, vec4(1.0, 1.0, 1.0, 0.0));
+        imageStore(outStats, px, vec4(0.0));
         return;
     }
     vec3 N = spDepthNormal(f, px, size, p.screen.x);
     vec3 P = spWorldPos(f, px, size, zpx);
+    const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+
+    // ---- the history: the 2 x 2 texels around the reprojected position, each valid when its stored view depth is the one
+    // this surface had in the previous frame (the weights of the valid ones renormalised)
+    vec3 hist = vec3(0.0), histG = vec3(0.0);
+    float histN = 0.0, histW = 0.0;
+    if (p.screen3.y != 0u) {
+        vec4 q = f.prevViewProj * vec4(P, 1.0);
+        if (q.w > 1e-3) {
+            vec2 pprev = (q.xy / q.w) * vec2(0.5, -0.5) + 0.5;
+            pprev = pprev * size - 0.5;
+            ivec2 i0 = ivec2(floor(pprev));
+            vec2 fr = pprev - vec2(i0);
+            float tol = max(q.w * 0.03, 6.0);
+            for (int i = 0; i < 4; ++i) {
+                ivec2 o = ivec2(i & 1, i >> 1);
+                ivec2 t = i0 + o;
+                if (any(lessThan(t, ivec2(0))) || any(greaterThanEqual(t, sizeI))) continue;
+                vec4 h = rvkFetch2D(p.screen3.y, t);
+                if (h.a <= 0.0 || abs(h.a - q.w) > tol) continue;
+                vec4 g = rvkFetch2D(p.screen3.z, t);
+                float w = (o.x == 0 ? 1.0 - fr.x : fr.x) * (o.y == 0 ? 1.0 - fr.y : fr.y);
+                hist += h.rgb * w;
+                histG += g.rgb * w;
+                histN += g.a * w;
+                histW += w;
+            }
+        }
+    }
+    bool haveHist = histW > 0.3;
+    float count = 0.0;
+    if (haveHist) {
+        hist /= histW;
+        histG /= histW;
+        // partly covered taps (an edge): the count shrinks with the missing share, the next frames weigh the pixel in faster
+        count = (histN / histW) * smoothstep(0.3, 0.9, histW);
+    }
+
+    // ---- the spatial filter over the tile probes: 3 x 3, widening to 5 x 5 (and a wider Gaussian) while the history is short
     float tsize = float(max(p.screen2.x, 1u));
     ivec2 grid = ivec2(p.screen.zw);
     ivec2 centre = clamp(ivec2((vec2(px) + 0.5) / tsize), ivec2(0), grid - 1);
-    float sum = 0.0, lo = 1e9, hi = -1e9;
-    float wsum = 0.0;
-    // the chroma ratio (colour bleeding): a wider Gaussian (sigma two tiles) over the same 3 x 3 probes, a longer history
-    vec2 csum = vec2(0.0);
+    float ring = clamp((16.0 - count) / 12.0, 0.0, 1.0);  // 1 for a fresh pixel .. 0 once it has 16 frames
+    float sigma = 1.0 + 0.6 * ring;
+    float sum = 0.0, lo = 1e9, hi = -1e9, wsum = 0.0;
+    vec3 gsum = vec3(0.0);
+    vec2 csum = vec2(0.0);  // the chroma ratio (colour bleeding): a wider Gaussian (sigma two tiles), always the 5 x 5 probes
     float cwsum = 0.0;
-    const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
-    // the 3 x 3 probes around the pixel's tile: a Gaussian of the distance to each tile's centre (sigma = one tile) x the
-    // surface weights (a spatial filter over 9 probes: less grain than the bilinear 2 x 2)
-    for (int i = 0; i < 9; ++i) {
-        ivec2 tile = clamp(centre + ivec2(i % 3 - 1, i / 3 - 1), ivec2(0), grid - 1);
+    for (int i = 0; i < 25; ++i) {
+        ivec2 d = ivec2(i % 5 - 2, i / 5 - 2);
+        bool outer = max(abs(d.x), abs(d.y)) == 2;
+        ivec2 tile = clamp(centre + d, ivec2(0), grid - 1);
         vec4 pr = rvkFetch2D(p.screen3.x, tile);
         if (pr.a <= 0.0) continue;
+        vec4 geo = rvkFetch2D(p.screen.y, tile);
         // the distance to the tile's centre (stable from frame to frame; the probe's own pixel is jittered per frame: as the
         // weight it made the filter flicker, measured)
-        vec2 dpx = ((vec2(tile) + 0.5) * tsize - (vec2(px) + 0.5)) / tsize;
-        float w = exp(-0.5 * dot(dpx, dpx)) + 1e-3;
-        float wc = exp(-0.125 * dot(dpx, dpx)) + 1e-3;
+        vec2 dpx = ((vec2(centre + d) + 0.5) * tsize - (vec2(px) + 0.5)) / tsize;
+        float d2 = dot(dpx, dpx);
         // the probe's distance to this pixel's tangent plane (slanted surfaces keep their neighbours) and normal similarity
-        ivec2 ppx = spProbePixel(p, tile);
-        vec3 pp = spWorldPos(f, ppx, size, rvkHwDepthToD3D(f, rvkFetch2D(p.screen.x, ppx).r));
-        float plane = abs(dot(pp - P, N));
-        vec3 pn = spDepthNormal(f, ppx, size, p.screen.x);
-        float surf = exp(-plane / max(viewZ * 0.01, 2.0)) * pow(max(dot(pn, N), 0.0), 4.0);
-        w *= surf;
+        float plane = abs(dot(geo.xyz - P, N));
+        float surf = exp(-plane / max(viewZ * 0.01, 2.0)) * pow(max(dot(spUnpackNormal(geo.w), N), 0.0), 4.0);
+        float wc = (exp(-0.125 * d2) + 1e-3) * surf;
+        csum += pr.gb * wc;
+        cwsum += wc;
+        float w = (exp(-0.5 * d2 / (sigma * sigma)) + 1e-3) * surf;
+        if (outer) w *= ring;
+        if (w <= 0.0) continue;
         sum += pr.r * w;
+        gsum += rvkFetch2D(p.screen5.x, tile).rgb * w;
         wsum += w;
-        csum += pr.gb * (wc * surf);
-        cwsum += wc * surf;
         lo = min(lo, pr.r);
         hi = max(hi, pr.r);
     }
@@ -71,28 +120,33 @@ void main() {
         chroma = vec3(c.x, (1.0 - lw.r * c.x - lw.b * c.y) / lw.g, c.y);
     }
     vec4 result = vec4(1.0, 1.0, 1.0, 0.0);
+    vec4 stats = vec4(0.0);
     bool covered = wsum > 1e-4;
-    if (covered) result = vec4(vec3(sum / wsum) * chroma, viewZ);
-    // temporal accumulation: the luminance ratio at p.screen4.z, the chroma ratio at a longer history (colour noise is the
-    // visible kind); the history's luminance is its ratio, its colour / luminance the chroma (the probes' chroma has unit luminance)
-    if (p.screen3.y != 0u) {
-        vec2 uv = (vec2(px) + 0.5) / size;
-        vec2 prev = uv + spCameraMotion(f, P);
-        if (all(greaterThanEqual(prev, vec2(0.0))) && all(lessThanEqual(prev, vec2(1.0)))) {
-            vec4 h = rvkSample2DLod(p.screen3.y, p.screen3.w, prev, 0.0);
-            if (h.a > 0.0) {
-                float hl = dot(h.rgb, lw);
-                vec3 hchroma = hl > 1e-3 ? clamp(h.rgb / hl, vec3(0.6), vec3(1.6)) : vec3(1.0);
-                if (covered) {
-                    float hk = clamp(hl, lo - 0.25, hi + 0.25);
-                    float k = mix(sum / wsum, hk, p.screen4.z);
-                    vec3 c = mix(chroma, hchroma, 1.0 - (1.0 - p.screen4.z) * 0.3);
-                    result.rgb = vec3(k) * c;
-                } else {
-                    result = vec4(h.rgb, viewZ);
-                }
-            }
+    if (covered) {
+        float kNow = sum / wsum;
+        vec3 gNow = gsum / wsum * p.screen6.x;
+        float n1 = min(count + 1.0, 255.0);
+        if (haveHist) {
+            // the new frame's weight: 1 / (count + 1), not below the history limit (screen4.z); the chroma keeps a longer history
+            // (colour noise is the visible kind)
+            float limit = 1.0 - p.screen4.z;
+            float a = max(1.0 / n1, limit);
+            float ac = max(1.0 / n1, limit * 0.3);
+            float hl = dot(hist, lw);
+            vec3 hchroma = hl > 1e-3 ? clamp(hist / hl, vec3(0.6), vec3(1.6)) : vec3(1.0);
+            float hk = clamp(hl, lo - 0.25, hi + 0.25);
+            float k = mix(hk, kNow, a);
+            vec3 c = mix(hchroma, chroma, ac);
+            result = vec4(vec3(k) * c, viewZ);
+            stats = vec4(mix(histG, gNow, a), n1);
+        } else {
+            result = vec4(vec3(kNow) * chroma, viewZ);
+            stats = vec4(gNow, 1.0);
         }
+    } else if (haveHist) {
+        result = vec4(hist, viewZ);
+        stats = vec4(histG, min(count + 1.0, 255.0));
     }
     imageStore(outResolved, px, result);
+    imageStore(outStats, px, stats);
 }

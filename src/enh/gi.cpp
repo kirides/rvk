@@ -86,8 +86,12 @@ Gi::Gi(d3d9::Device& device, RtScene* scene) : dev_(device), scene_(scene) {
     });
     dev_.setVariantProvider(d3d9::VariantSlot::Gi, {materialVariantTag("gi"), variantOptions});
     // the screen probes' passes (stage C)
-    const VkDescriptorSetLayoutBinding out{0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-    if (screenLayout_.create(dev_.ctx(), dev_.bindless(), {&out, 1})) {
+    // three storage images: the trace writes the probes' ratio / correction / geometry images, the resolve the first two
+    // (resolved ratio, correction + count) of them
+    const VkDescriptorSetLayoutBinding outs[3] = {{0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+                                                  {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+                                                  {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}};
+    if (screenLayout_.create(dev_.ctx(), dev_.bindless(), {outs, 3})) {
         const VkPipelineLayout sl = screenLayout_.layout();
         spTraceBuild_ = std::async(std::launch::async, [ctx, sl]() {
             return vk::createComputePipeline(*ctx, sl, shader::embedded::spirv("gi/sp_trace.comp"), "gi.screen trace");
@@ -125,6 +129,7 @@ void Gi::apply(const Settings& s) {
     s_.quality = std::clamp(s_.quality, 0, 2);
     s_.strength = std::clamp(s_.strength, 0.0f, 1.0f);
     s_.bleed = std::clamp(s_.bleed, 0.0f, 1.0f);
+    s_.directional = std::clamp(s_.directional, 0.0f, 1.0f);
     const bool want = s.enabled && available();
     if (want && !on_) enable();
     if (!want && on_) disable();
@@ -566,7 +571,7 @@ void Gi::record(d3d9::PassContext& ctx) {
         }
     }
     for (std::uint32_t c = 0; c < kGiCascades; ++c) p.reach[c] = kReach[c];
-    p.blend[0] = 0.97f;  // irradiance hysteresis
+    p.blend[0] = 0.98f;  // irradiance hysteresis of a steady probe (the shader raises the weight of new rays where the light changed)
     p.blend[1] = 0.95f;  // depth hysteresis
     p.blend[2] = 10.0f;  // depth lobe sharpness
     p.blend[3] = 0.25f;  // back-face share: inside geometry
@@ -662,12 +667,18 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
     const std::uint32_t rays = s_.screen == 1 ? 8u : 16u;
     const std::uint32_t gw = (w + tile - 1) / tile, gh = (h + tile - 1) / tile;
     vk::Transients::Entry* probes = dev_.transients().get("sgi.probes", {VK_FORMAT_R16G16B16A16_SFLOAT, {gw, gh}});
+    vk::Transients::Entry* probes2 = dev_.transients().get("sgi.probes2", {VK_FORMAT_R16G16B16A16_SFLOAT, {gw, gh}});
+    vk::Transients::Entry* geom = dev_.transients().get("sgi.geometry", {VK_FORMAT_R32G32B32A32_SFLOAT, {gw, gh}});
     const std::uint32_t cur = sgiHistory_ ^ 1u;
     vk::Transients::Entry* res[2] = {dev_.transients().get("sgi.resolved0", {VK_FORMAT_R16G16B16A16_SFLOAT, {sw, sh}}),
                                      dev_.transients().get("sgi.resolved1", {VK_FORMAT_R16G16B16A16_SFLOAT, {sw, sh}})};
+    // the per-pixel correction + history count, ping-pong like the resolved ratio
+    vk::Transients::Entry* stats[2] = {dev_.transients().get("sgi.stats0", {VK_FORMAT_R16G16B16A16_SFLOAT, {sw, sh}}),
+                                       dev_.transients().get("sgi.stats1", {VK_FORMAT_R16G16B16A16_SFLOAT, {sw, sh}})};
     const vk::RingAlloc pa = dev_.frames().allocate(sizeof(GiPassParams), 16);
     const vk::RingAlloc ha = dev_.frames().allocate(sizeof(GiVolumeHeader), 16);
-    if (probes == nullptr || res[0] == nullptr || res[1] == nullptr || pa.ptr == nullptr || ha.ptr == nullptr) {
+    if (probes == nullptr || probes2 == nullptr || geom == nullptr || res[0] == nullptr || res[1] == nullptr || stats[0] == nullptr ||
+        stats[1] == nullptr || pa.ptr == nullptr || ha.ptr == nullptr) {
         ++screenSkipped_;
         return;
     }
@@ -677,7 +688,7 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
     split(ha.address, &p.volume[0]);
     p.volume[3] = static_cast<std::uint32_t>(dev_.frameValue());
     p.screen[0] = ds->texture()->bindlessSlot();
-    p.screen[1] = 0;
+    p.screen[1] = geom->slot;
     p.screen[2] = gw;
     p.screen[3] = gh;
     p.screen2[0] = tile;
@@ -686,7 +697,7 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
     p.screen2[3] = h;
     p.screen3[0] = probes->slot;
     p.screen3[1] = sgiValid_ ? res[sgiHistory_]->slot : 0u;
-    p.screen3[2] = 0;
+    p.screen3[2] = sgiValid_ ? stats[sgiHistory_]->slot : 0u;
     p.screen3[3] = dev_.samplerFor(true, true);
     p.screen4[0] = 4000.0f;  // ray reach (world units); a ray that runs out takes the probe volume's light at its end
     p.screen4[1] = 2.0f;     // ratio cap
@@ -701,6 +712,8 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
         p.screen4[2] *= scale;
     }
     p.screen4[3] = s_.bleed;  // colour bleeding
+    p.screen5[0] = probes2->slot;
+    p.screen6[0] = s_.directional;
     std::memcpy(pa.ptr, &p, sizeof(p));
     GiPush push{};
     push.h.frame = ctx.frameBlock;
@@ -709,25 +722,38 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
 
     // the DDGI probes (last frame's update) -> these reads: ordered by the update's own end barrier
     probes->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
+    probes2->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
+    geom->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, spTrace_);
     screenLayout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, dev_.bindless());
-    screenLayout_.pushStorageImage(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, 0, probes->image.view());
+    {
+        const VkImageView views[3] = {probes->image.view(), probes2->image.view(), geom->image.view()};
+        screenLayout_.pushStorageImages(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, views);
+    }
     screenLayout_.push(cmd, &push, sizeof(push));
     const std::uint32_t perGroup = 64u / rays;  // one ray per invocation
     vkCmdDispatch(cmd, (gw * gh + perGroup - 1) / perGroup, 1, 1);
     // resolve + temporal into this frame's image
     probes->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    probes2->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    geom->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     res[sgiHistory_]->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    stats[sgiHistory_]->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     res[cur]->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
+    stats[cur]->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, spResolve_);
-    screenLayout_.pushStorageImage(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, 0, res[cur]->image.view());
+    {
+        const VkImageView views[2] = {res[cur]->image.view(), stats[cur]->image.view()};
+        screenLayout_.pushStorageImages(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, views);
+    }
     screenLayout_.push(cmd, &push, sizeof(push));
     vkCmdDispatch(cmd, (w + 7) / 8, (h + 7) / 8, 1);
     res[cur]->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    stats[cur]->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     sgiHistory_ = cur;
     sgiValid_ = true;
     // -> this frame's material shaders (Gbuffer variants: the factor on their DDGI lookup at their pixel)
-    dev_.setFrameSgi({res[cur]->slot, dev_.samplerFor(true, true), shader::abi::kFrameSgiValid, 0u});
+    dev_.setFrameSgi({res[cur]->slot, dev_.samplerFor(true, true), shader::abi::kFrameSgiValid, stats[cur]->slot});
     if (screenFrames_++ == 0) {
         spdlog::info("enh: gi: screen probes: {}x{} probes ({} px tiles, {} rays each) over {}x{}", gw, gh, tile, rays, w, h);
     }

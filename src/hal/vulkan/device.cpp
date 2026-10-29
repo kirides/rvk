@@ -485,7 +485,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     // ray-traced global illumination (enh/gi.h, docs/research/rtgi.md): probes + the material shaders' GI variants
     gi_ = std::make_unique<enh::Gi>(dev_, rtScene_.get());
     if (rs.giEnabled != nullptr) {
-        for (settings::Setting* s : {rs.giEnabled, rs.giQuality, rs.giStrength, rs.giLightmaps, rs.giCharacters, rs.giScreen, rs.giBleed, rs.giLights, rs.giLightCount, rs.giEmissive, rs.giDebug}) {
+        for (settings::Setting* s : {rs.giEnabled, rs.giQuality, rs.giStrength, rs.giLightmaps, rs.giCharacters, rs.giScreen, rs.giBleed, rs.giDirectional, rs.giLights, rs.giLightCount, rs.giEmissive, rs.giDebug}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) {
                 applyGi();
                 applyGbuffer();  // the screen probes need the G-buffer
@@ -609,6 +609,7 @@ void HalDevice::applyGi() {
     s.replaceLightmaps = rs.giLightmaps->asEnum() == "replace";
     s.characters = rs.giCharacters->asBool();
     if (rs.giBleed != nullptr) s.bleed = rs.giBleed->asFloat();
+    if (rs.giDirectional != nullptr) s.directional = rs.giDirectional->asFloat();
     if (rs.giEmissive != nullptr) s.emissive = rs.giEmissive->asFloat();
     if (rs.giLightCount != nullptr) s.lightCount = rs.giLightCount->asInt();
     if (rs.giLights != nullptr) s.lights = rs.giLights->asEnum() == "world" ? 1 : 0;

@@ -611,3 +611,55 @@ objects' own lists are the only source); dynamic `eCPointLight_PS` lights are un
 emissive surfaces other than lava / magma (lamp glass, fire meshes) need a name list or a self-illumination evaluation; the emission
 uses the diffuse colour, not the self-illumination texture; the probes' direct term and the engine's per-pixel lights overlap near lamps
 in replace mode.
+
+## 20. Steadier probes, a spatio-temporal resolve, directional correction (2026-10-29)
+
+([C] = measured / read in code, [I] = inferred.)
+
+**Why / what is not possible** [C]: AMD's FSR Ray Regeneration and Radiance Caching are DX12-only in FSR SDK 2.4 (no Vulkan DLL; the
+older FidelityFX Denoiser covered shadows / reflections only; `third_party/amd_fidelityfx/VERSION.md`). They also target a noisy
+per-pixel signal; our GI is a probe cache. The work stays in our own passes.
+
+**Measurement** [C]: `tools/gi_noise.py <dir>` = per-pixel temporal std of luma over a burst of a still view (rvkcompare spots freeze
+the game time), mean over pixels (`tstd`). Still views converge, so the number is small (baseline 0.057 of 255 over pub / monastery /
+jungle / harbour); the diagnostic `-Environment 'RVK_GI_HISTORY=0'` (scale of the screen probes' history weight) shows the per-frame
+quality of the sampling + spatial filter, which is what a moving camera sees after every disocclusion.
+
+**Changes**
+* *Steadier sampling* [C] (`gi_trace.comp`, `sp_trace.comp`): the screen probes' hemisphere directions are a rank-1 lattice shifted per
+  tile (interleaved gradient noise: neighbouring probes unrelated) and per frame (R2 step); the point-light pick of a hit is
+  stratified over the rays of a probe (golden-ratio sequence) instead of independent draws; a per-ray firefly cap at `10 x DDGI
+  luminance + 0.3`. DDGI: adaptive history in `gi_blend.comp`: the base hysteresis rose 0.97 -> 0.98, the new rays' weight jumps to
+  0.15 where the probe's average luminance changed by more than ~45-90 % (a lit lamp, the sun coming out), floor 1 / (count + 1).
+* *Spatio-temporal resolve* [C] (`sp_resolve.comp`): per tap validated history (stored view depth vs the reprojected one, 3 %),
+  per-pixel frame count (second image `sgi.stats`), weight of the new frame max(1 / (count + 1), 1 - history); a disoccluded
+  pixel restarts instead of blending another surface; the spatial filter widens from 3 x 3 to 5 x 5 probes (sigma 1 -> 1.6 tiles) while
+  the count is below 16; the probes' geometry (position + packed normal) is a tile image (`sgi.geometry`), the resolve no longer re-derives
+  9 depth normals per pixel.
+* *Directional correction* [C] (`gi.directional`, default 0.5): `sp_trace` also estimates the tangential gradient of the traced
+  irradiance (cosine-weighted flow, 1 / cos kept >= 0.3) and subtracts the DDGI's own gradient (`spGradRegs`, scaled by the ratio);
+  the resolve filters / accumulates it (`sgi.stats` rgb), the material variant adds it to the registers' L1 vector and moves the constant
+  term so the irradiance at the geometric normal is unchanged (`rvkMvGi`). `FrameBlock::sgi.w` = the second image's slot.
+
+**Results** [C] (spots pub_interior / monastery_hall / jungle / harbour_docks, `gi.screen` medium, 8 pictures 1 frame apart; the pub's
+absolute luma differs between runs: eye adaptation, its rows are not comparable):
+
+| tstd mean | history on | history off |
+|---|---|---|
+| before (HEAD) | 0.057 | 0.138 |
+| steadier sampling + resolve, `gi.directional` 0 | 0.059 | 0.126 |
+| + directional 1 | 0.061 | 0.147 |
+
+monastery_hall, history off: 0.255 -> 0.149 (-42 %); jungle 0.103 -> 0.105, harbour 0.171 -> 0.172 (unchanged); jungle with the directional
+term: 0.013 -> 0.054 (history on), 0.105 -> 0.144 (off). Validation clean (`-Validation`, sync layer not run), `rvk_tests`, corpus
+`--gbuf / --gi / --gbuf-motion` 0 failures. Visually (same-build A/B, `gi.directional` 0 vs 1): leaf-scale shading differences in the
+jungle canopy, a slightly darker / more contrasty shaded wall beside the monastery's candelabra [I: near a lamp the traced flow is
+strongly one-sided; the engine's per-pixel lights already give that light direction]. Subtle in both: hence the default 0.5.
+
+**Honest verdict** [I]: in still views the old pipeline was already steady (the history converges); the gains are in the first frames
+after a disocclusion / camera cut and at the monastery's candle-lit interiors, not in the converged image. The directional correction
+adds a little noise for a subtle gain; it is a setting, default 0.5.
+
+**Open**: moving-camera noise needs a metric that survives motion (a reference render with the history converged vs a single frame of
+the same pose after a cut); ring-2 spatial widening could also use the `variance` of the probes; the firefly cap near lamps may darken
+legitimately bright near-field light (the DDGI is coarse there): raising `10 x` is the knob.

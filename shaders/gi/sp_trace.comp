@@ -23,9 +23,12 @@
 #include "screen_common.glsl"
 
 layout(local_size_x = 64) in;
-layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D outProbes;
+layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D outProbes;  // luminance ratio, chroma red / blue, view depth
+layout(set = 1, binding = 1, rgba16f) uniform writeonly image2D outProbes2; // directional correction (xyz)
+layout(set = 1, binding = 2, rgba32f) uniform writeonly image2D outGeom;    // position, packed normal
 
 shared vec3 sRad[64];
+shared vec3 sDir[64];
 
 void main() {
     GiPassParams p = GiPassParams(pc.params);
@@ -60,16 +63,25 @@ void main() {
     }
     RvkGiVolume v = RvkGiVolume(p.volume.xy);
     vec3 radiance = vec3(0.0);
+    vec3 dirOut = N;
     if (valid) {
-        // cosine-weighted (stratified, rotated per probe and frame): E / pi = mean of the radiance
+        // cosine-weighted directions from a rank-1 lattice (u1 stratified, u2 a golden-ratio sequence) shifted per probe and frame:
+        // the shift is interleaved-gradient noise of the tile (neighbouring probes get unrelated sets: the resolve's filter over
+        // their 3 x 3 averages the error) plus an R2 step per frame (the frames together cover the hemisphere evenly)
         vec3 t = normalize(abs(N.y) < 0.99 ? cross(N, vec3(0.0, 1.0, 0.0)) : cross(N, vec3(1.0, 0.0, 0.0)));
         vec3 b = cross(N, t);
-        uint seed = giHash(uint(tile.x) * 9781u + uint(tile.y) * 6271u + p.volume.w * 26699u);
-        float u1 = (float(ray) + float(giHash(seed + ray * 747796405u) & 0xFFFFu) / 65536.0) / float(rays);
-        float u2 = fract(float(ray) * 0.618034 + float(seed & 0xFFFFu) / 65536.0);
+        vec2 tf = vec2(tile);
+        float fr = float(p.volume.w & 4095u);
+        vec2 shift = fract(vec2(fract(52.9829189 * fract(dot(tf, vec2(0.06711056, 0.00583715)))),
+                                fract(52.9829189 * fract(dot(tf + 41.0, vec2(0.00583715, 0.06711056))))) +
+                           fr * vec2(0.7548776662, 0.5698402909));
+        float u1 = fract((float(ray) + 0.5) / float(rays) + shift.x);
+        float u2 = fract(float(ray) * 0.6180339887 + shift.y);
         float r = sqrt(u1), phi = 6.2831853 * u2;
         vec3 dir = normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + N * sqrt(max(0.0, 1.0 - u1)));
-        float u = float(giHash(seed ^ (ray * 2654435761u)) & 0xFFFFFFu) / 16777216.0;
+        // the point-light pick of the hit: stratified over the probe's rays as well (rtgi.md 20)
+        float u = fract(float(ray) * 0.5698402909 + float(giHash(uint(tile.x) * 9781u + uint(tile.y) * 6271u + p.volume.w * 26699u) & 0xFFFFFFu) / 16777216.0);
+        dirOut = dir;
         vec4 hit = giShadeRay(p, f, v, P + N * 3.0 + V * 2.0, dir, p.screen4.x, u);
         radiance = hit.rgb;
         // a ray that ran out of reach without a hit: the probe volume's light at its end (the far field) instead of the sky
@@ -79,27 +91,51 @@ void main() {
         }
     }
     sRad[lane] = radiance;
+    sDir[lane] = dirOut;
     barrier();
     if (!inRange || ray != 0u) return;
     if (!valid) {
         imageStore(outProbes, tile, vec4(1.0, 1.0, 1.0, 0.0));
+        imageStore(outProbes2, tile, vec4(0.0));
+        imageStore(outGeom, tile, vec4(0.0));
         return;
     }
-    vec3 traced = vec3(0.0);
-    for (uint i = 0u; i < rays; ++i) traced += sRad[local * rays + i];
-    traced /= float(rays);
+    imageStore(outGeom, tile, vec4(P, spPackNormal(N)));
     // the DDGI's irradiance here (the denominator)
     vec4 regs[7];
     uint hc;
     if (!rvkGiLookupVolume(v, P, N, V, regs, hc)) {
         imageStore(outProbes, tile, vec4(1.0, 1.0, 1.0, 0.0));
+        imageStore(outProbes2, tile, vec4(0.0));
         return;
     }
     vec3 ddgi = max(rvkGiEvalRegs(regs, N), vec3(0.0));
-    // a luminance ratio (per colour channel the noise of few rays turns into colour noise: measured, grain 3.7 -> 4.3); where
-    // the DDGI has almost nothing (deep interiors) it is meaningless: neutral
     const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
     float dl = dot(ddgi, lw);
+    // fireflies (rtgi.md 20): a ray's radiance is capped relative to the DDGI's light here (a sunlit wall seen from shade is
+    // a few times the ambient; far beyond that is one lucky light sample or a bright cut-out, which the average would carry
+    // for the next frames)
+    float cap = 10.0 * dl + 0.3;
+    vec3 traced = vec3(0.0);
+    // the tangential gradient of the traced irradiance (the cosine-weighted estimate of (1/pi) integral L w_tangent dw, the
+    // weight 1 / cos kept at cos >= 0.3: a little biased towards no correction, never wild near the horizon)
+    vec3 flow = vec3(0.0);
+    for (uint i = 0u; i < rays; ++i) {
+        vec3 rad = sRad[local * rays + i];
+        float rl = dot(rad, lw);
+        if (rl > cap) {
+            rad *= cap / rl;
+            rl = cap;
+        }
+        traced += rad;
+        vec3 d = sDir[local * rays + i];
+        float c = dot(d, N);
+        flow += rl * (d - N * c) / max(c, 0.3);
+    }
+    traced /= float(rays);
+    flow /= float(rays);
+    // a luminance ratio (per colour channel the noise of few rays turns into colour noise: measured, grain 3.7 -> 4.3); where
+    // the DDGI has almost nothing (deep interiors) it is meaningless: neutral
     float tl = dot(traced, lw);
     float k = dl > 2e-3 ? clamp(tl / dl, 0.0, p.screen4.y) : 1.0;
     if (isnan(k) || isinf(k)) k = 1.0;
@@ -113,4 +149,19 @@ void main() {
     }
     // rgb = (luminance ratio, chroma red, chroma blue); green follows from the unit luminance
     imageStore(outProbes, tile, vec4(k, chroma.r, chroma.b, viewZ));
+    // directional correction (rtgi.md 20): how the traced irradiance changes with a tilt of the normal minus how the DDGI's
+    // (scaled by the ratio) does; the material shaders add this slope to their DDGI registers, so normal-mapped surfaces and
+    // curved ones follow the traced light's direction. A magnitude beyond 0.6 x the irradiance is noise
+    vec3 corr = vec3(0.0);
+    if (dl > 2e-3) {
+        vec3 gd = vec3(0.0);
+        for (int ch = 0; ch < 3; ++ch) gd += lw[ch] * spGradRegs(regs, N, ch);
+        gd -= N * dot(gd, N);
+        corr = flow - k * gd;
+        float lim = 0.6 * max(tl, 0.0);
+        float len = length(corr);
+        if (len > lim && len > 1e-6) corr *= lim / len;
+        if (any(isnan(corr)) || any(isinf(corr))) corr = vec3(0.0);
+    }
+    imageStore(outProbes2, tile, vec4(corr, 1.0));
 }

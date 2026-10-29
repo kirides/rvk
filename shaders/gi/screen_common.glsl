@@ -43,6 +43,24 @@ vec3 spDepthNormal(RvkFrame f, ivec2 px, vec2 size, uint depthTex) {
     return n;
 }
 
+// the gradient (d / dn of the unconstrained polynomial) of one colour channel of the engine's irradiance polynomial at n
+// (rvkGiEvalRegs): how the ambient changes when a pixel's normal tilts away from the surface's (directional correction, rtgi.md 20)
+vec3 spGradRegs(vec4 r[7], vec3 n, int ch) {
+    vec4 a = r[ch], b = r[3 + ch];
+    return a.xyz + vec3(b.x * n.y + b.w * n.z, b.x * n.x + b.y * n.z, b.y * n.y + 2.0 * b.z * n.z + b.w * n.x) +
+           r[6][ch] * vec3(2.0 * n.x, -2.0 * n.y, 0.0);
+}
+
+// a normal in one float of the probe geometry image (octahedral, 11 bits per axis: exact in a float)
+float spPackNormal(vec3 n) {
+    vec2 o = rvkGiOctEncode(n);
+    return floor(o.x * 2047.0 + 0.5) * 2048.0 + floor(o.y * 2047.0 + 0.5);
+}
+vec3 spUnpackNormal(float w) {
+    float ix = floor(w / 2048.0);
+    return rvkGiOctDecode(vec2(ix, w - ix * 2048.0) / 2047.0);
+}
+
 // previous uv - this uv of a world point (the camera's motion)
 vec2 spCameraMotion(RvkFrame f, vec3 P) {
     vec4 c = f.viewProj * vec4(P, 1.0);

@@ -1526,6 +1526,20 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::Advanced,
         .requirements = caps::bit(caps::Cap::RayQuery),
     });
+    r.giDirectional = &reg.add({
+        .key = "gi.directional",
+        .label = "Light direction detail",
+        .category = "Lighting",
+        .description = "How closely the bounced light follows where it really comes from at each surface: bumpy and curved "
+                       "surfaces are lit more from the side the light arrives from. Needs Lighting detail.",
+        .type = Type::Float,
+        .defaultValue = 0.5,
+        .min = 0,
+        .max = 1,
+        .format = "%.2f",
+        .flags = Flag::Advanced,
+        .requirements = caps::bit(caps::Cap::RayQuery),
+    });
     r.giLights = &reg.add({
         .key = "gi.lights",
         .label = "Light sources",

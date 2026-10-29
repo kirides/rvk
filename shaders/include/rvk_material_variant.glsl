@@ -101,6 +101,7 @@ void rvkMvGi(vec3 P, vec3 n, vec3 V) {
         float myZ = rvkMvViewDepth();
         {
             bool hit = s.a > 0.0 && abs(s.a - myZ) < max(myZ * 0.02, 4.0);
+            bool direct = hit;
             if (!hit) {
                 vec4 g = rvkMvGather(sg.x, myZ, false);
                 s = vec4(mix(vec3(1.0), g.rgb, g.w), 1.0);
@@ -114,6 +115,19 @@ void rvkMvGi(vec3 P, vec3 n, vec3 V) {
                     regs[3 + c] *= k[c];
                 }
                 regs[6].rgb *= k;
+                // directional correction (gi.directional, rtgi.md 20): the screen probes' slope of the traced irradiance with
+                // the normal minus the DDGI's (their luminance, in world space, from the resolve's second image): added to
+                // the registers' L1 vector, with the constant term moved so the irradiance at the geometric normal stays
+                // what the ratio made it: normal-mapped and curved surfaces then follow the direction the light comes from
+                if (direct && sg.w != 0u) {
+                    vec3 dg = texelFetch(t2D[sg.w], ivec2(gl_FragCoord.xy), 0).rgb;
+                    float lum = dot(k, vec3(0.2126, 0.7152, 0.0722));
+                    for (int c = 0; c < 3; ++c) {
+                        vec3 dc = dg * (lum > 1e-3 ? k[c] / lum : 1.0);
+                        regs[c].xyz += dc;
+                        regs[c].w -= dot(dc, rvk_giN);
+                    }
+                }
             }
         }
     }

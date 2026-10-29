@@ -70,12 +70,14 @@ struct GiPassParams {
     float sunDir[4];
     float sky[7][4];
     float lights[kGiMaxLights * 2][4];
-    std::uint32_t screen[4];   // screen probes: depth, G-buffer normal, grid width, height
+    std::uint32_t screen[4];   // screen probes: depth, probe geometry image, grid width, height
     std::uint32_t screen2[4];  // tile size, rays per probe, scene width, height
-    std::uint32_t screen3[4];  // probes image, previous resolve, G-buffer motion, linear sampler
+    std::uint32_t screen3[4];  // probes image, previous resolve, previous second resolve, linear sampler
     float screen4[4];          // ray reach, ratio cap, history blend, colour bleeding
+    std::uint32_t screen5[4];  // probes' second image (directional correction), 0, 0, 0
+    float screen6[4];          // directional correction strength, 0, 0, 0
 };
-static_assert(sizeof(GiPassParams) == 16 * (3 + 3 + 1 + 1 + 1 + 1 + 1 + 7 + kGiMaxLights * 2 + 4));
+static_assert(sizeof(GiPassParams) == 16 * (3 + 3 + 1 + 1 + 1 + 1 + 1 + 7 + kGiMaxLights * 2 + 6));
 
 // mirror of gi_common.glsl GiPush
 struct GiPush {
@@ -95,6 +97,7 @@ public:
         bool characters = true;   // skinned draws in the RT scene
         int debug = 0;            // 1 irradiance, 2 cascades
         float bleed = 0.5f;       // colour bleeding of the screen probes (rtgi.md 15): 0 luminance only .. 1 full chroma ratio
+        float directional = 0.5f; // directional correction of the screen probes (gi.directional, rtgi.md 20): 0 off .. 1 full
         float emissive = 1.0f;    // gain of self-illuminated surfaces as light sources (gi.emissive, rtgi.md 19)
         int lights = 1;           // point lights the rays see (rtgi.md 19): 0 the drawn objects' (nearby), 1 the world's (engine/lights)
         int lightCount = 128;     // the most lights per frame (gi.light_count, debug)
@@ -164,7 +167,7 @@ private:
     vk::PassLayout layout_;
     VkPipeline trace_ = VK_NULL_HANDLE, blend_ = VK_NULL_HANDLE;
     std::future<VkPipeline> traceBuild_, blendBuild_;
-    // the screen probes (set 1: one storage image)
+    // the screen probes (set 1: three storage images)
     vk::PassLayout screenLayout_;
     VkPipeline spTrace_ = VK_NULL_HANDLE, spResolve_ = VK_NULL_HANDLE;
     std::future<VkPipeline> spTraceBuild_, spResolveBuild_;

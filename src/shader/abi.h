@@ -168,7 +168,8 @@ struct FrameBlock {
     // variant reprojects it with the previous camera and scales the ambient by it
     std::uint32_t ao[4];
     // the screen probes' GI ratio of the previous frame (enh/gi, rtgi.md 11): bindless t2D slot (RGBA16F at the scene size:
-    // rgb the factor on the DDGI irradiance, a = covered), bindless sampler, kFrameSgi* flags, 0; reprojected like ao
+    // rgb the factor on the DDGI irradiance, a = covered), bindless sampler, kFrameSgi* flags, the slot of the second image (RGBA16F: rgb
+    // the directional correction, a = history count; 0 = none); this frame's, computed after the z pre-pass
     std::uint32_t sgi[4];
 };
 static_assert(sizeof(FrameBlock) == 976);

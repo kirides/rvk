@@ -22,11 +22,13 @@ layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Gi
     vec4 sky[7];        // the engine's outdoor ambient c15..c21 (rays that miss)
     vec4 lights[GI_MAX_LIGHTS * 2];  // position + 1 / R^2, colour
     // the screen probes (sp_trace.comp, sp_resolve.comp; rtgi.md 11)
-    uvec4 screen;     // x the main view's hardware depth (t2D), y G-buffer normal (t2D), z probe grid width, w height
+    uvec4 screen;     // x the main view's hardware depth (t2D), y the probes' geometry image (t2D, rgba32f: position, packed octahedral normal), z probe grid width, w height
     uvec4 screen2;    // x tile size (pixels), y rays per probe, z scene width, w scene height
     uvec4 screen3;    // x the probes image (t2D, the resolve's input), y the previous frame's resolved image (t2D, 0 = none),
-                      // z G-buffer motion (t2D), w linear clamp sampler
+                      // z the previous frame's second resolved image (directional correction + history count), w linear clamp sampler
     vec4 screen4;     // x ray reach, y ratio cap, z history blend, w colour bleeding (0..1)
+    uvec4 screen5;    // x the probes' second image (t2D: directional correction), y,z,w 0
+    vec4 screen6;     // x directional correction strength (gi.directional, 0..1), y,z,w 0
 };
 // (cascade << 24) | slot of each probe to update
 layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer GiList {
