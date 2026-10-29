@@ -75,6 +75,7 @@ set(RVK_SHADERS
     gbuffer/gbuffer_debug.frag
     gbuffer/gtao.comp
     upscale/prep.comp
+    upscale/exposure.comp
     framegen/debug.frag
     gbuffer/gtao_filter.comp
     test/abi_layout.comp
@@ -303,6 +304,8 @@ add_library(rvk_core STATIC
     src/engine/memread.h
     src/engine/scene_hooks.cpp
     src/engine/scene_hooks.h
+    src/engine/exposure.cpp
+    src/engine/exposure.h
     src/engine/hemisphere.cpp
     src/engine/hemisphere.h
     src/engine/high_fps.cpp

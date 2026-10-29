@@ -1,0 +1,27 @@
+#version 460
+// FSR exposure input (src/enh/upscale.cpp, docs/research/upscaling.md 18): the 1x1 R32F image FSR takes, from the engine's adapted
+// luminance (the persistent image its ToneMap divides by, F-post-water-gui.md 2.4: the geometric mean scene luminance, smoothed over
+// time). FSR's convention is exposure = 1 / (9.6 x Lavg) (its automatic exposure); `factor` = 1 / 9.6.
+
+#define RVK_PASS_SHADER 1
+#include "rvk_abi.glsl"
+#include "rvk_common.glsl"
+
+layout(push_constant, std430) uniform ExposurePush {
+    RVK_PASS_PUSH_HEADER
+    uint lumTex;     // the engine's adapted luminance (bindless t2D, 1x1 R32F)
+    float factor;    // 1 / 9.6 (engine/exposure.h kFsrExposureKey)
+    float lumMin;    // sanity range of the luminance (the engine clamps it to AvgLumClamp itself)
+    float lumMax;
+} pc;
+
+layout(local_size_x = 1) in;
+layout(set = 1, binding = 0, r32f) uniform writeonly image2D outExposure;
+
+void main() {
+    float avg = rvkFetch2D(pc.lumTex, ivec2(0)).r;
+    // a fresh image holds zero (or NaN until the first adaptation step): the engine itself falls back to the clamp's lower bound
+    if (!(avg > 0.0)) avg = pc.lumMin;
+    avg = clamp(avg, pc.lumMin, pc.lumMax);
+    imageStore(outExposure, ivec2(0), vec4(pc.factor / avg, 0.0, 0.0, 0.0));
+}

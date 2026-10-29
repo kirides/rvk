@@ -505,7 +505,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     upscale_ = std::make_unique<enh::Upscale>(dev_);
     objectMotion_ = std::make_unique<enh::ObjectMotion>(dev_, rtScene_.get());
     if (rs.upscaleMode != nullptr) {
-        for (settings::Setting* s : {rs.upscaleMode, rs.upscaleProvider, rs.upscaleObjectMotion, rs.upscaleReactive, rs.upscaleReactiveCutoff, rs.upscaleReactiveScale, rs.upscaleSharpness,
+        for (settings::Setting* s : {rs.upscaleMode, rs.upscaleProvider, rs.upscaleObjectMotion, rs.upscaleReactive, rs.upscaleReactiveCutoff, rs.upscaleReactiveScale, rs.upscaleSharpness, rs.upscaleExposure,
                                      rs.upscaleJitterFlip, rs.upscalePostFullSize, rs.upscaleAlphaDither, rs.upscaleCutoutThicken}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyUpscale(); }, this);
         }
@@ -684,6 +684,7 @@ void HalDevice::applyUpscale() {
     dev_.setCutoutThicken(rs.upscaleCutoutThicken != nullptr ? rs.upscaleCutoutThicken->asFloat() : 0.0f);
     if (rs.upscaleReactive != nullptr) upscale_->setReactive(rs.upscaleReactive->asBool());
     if (rs.upscaleProvider != nullptr) upscale_->setMl(rs.upscaleProvider->asEnum() == "fsr4");
+    if (rs.upscaleExposure != nullptr) upscale_->setEngineExposure(rs.upscaleExposure->asEnum() == "engine");
     if (rs.upscaleReactiveCutoff != nullptr && rs.upscaleReactiveScale != nullptr) {
         upscale_->setReactiveTuning(rs.upscaleReactiveCutoff->asFloat(), rs.upscaleReactiveScale->asFloat());
     }

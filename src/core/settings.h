@@ -377,6 +377,7 @@ struct RendererSettings {
     Setting* upscaleReactiveCutoff = nullptr;  // upscale.reactive_cutoff: advanced, the difference above which a pixel is reactive
     Setting* upscaleReactiveScale = nullptr;   // upscale.reactive_scale: advanced, multiplies the mask
     Setting* upscaleSharpness = nullptr;  // upscale.sharpness: 0..1, FSR's RCAS sharpening pass
+    Setting* upscaleExposure = nullptr;   // upscale.exposure: advanced, "engine" (the game's tone map exposure, default) or "auto" (FSR's own)
     Setting* upscaleJitterFlip = nullptr; // upscale.jitter_flip: debug, "none", "x", "y", "xy" (the geometry jitter's sign)
     Setting* upscalePostFullSize = nullptr;  // upscale.post_full_size: debug, the post chain at the output size (default on)
     Setting* upscaleCutoutThicken = nullptr;  // upscale.cutout_thicken: advanced, cut-out strands kept about a render pixel wide (0 = off)

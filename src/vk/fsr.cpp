@@ -174,6 +174,19 @@ bool Fsr::createContext(Context& ctx, const FsrCreateInfo& info) {
     if (fn_->api.Query(&c, &q.header) == FFX_API_RETURN_OK && q.versionName != nullptr) provider_ = q.versionName;
     spdlog::info("fsr: context {}x{} -> {}x{} flags 0x{:x}, provider '{}' (version id 0x{:x})", info.maxRenderSize.width,
                  info.maxRenderSize.height, info.maxUpscaleSize.width, info.maxUpscaleSize.height, flags, provider_, v->id);
+
+    // which inputs the provider needs / takes (FSR 4 needs no reactive or transparency mask; older providers may not know the query)
+    ffxQueryDescUpscaleGetResourceRequirements rq{};
+    rq.header.type = FFX_API_QUERY_DESC_TYPE_UPSCALE_GET_RESOURCE_REQUIREMENTS;
+    requirementsKnown_ = fn_->api.Query(&c, &rq.header) == FFX_API_RETURN_OK;
+    requiredResources_ = requirementsKnown_ ? rq.required_resources : 0;
+    optionalResources_ = requirementsKnown_ ? rq.optional_resources : 0;
+    if (requirementsKnown_) {
+        spdlog::info("fsr: resources required 0x{:x}, optional 0x{:x} (reactive mask {}, transparency mask {})", requiredResources_,
+                     optionalResources_, consumesReactiveMask() ? "used" : "not used", (optionalResources_ | requiredResources_) & (1u << 5) ? "used" : "not used");
+    } else {
+        spdlog::info("fsr: the provider does not answer the resource requirements query: every mask is built");
+    }
     return true;
 }
 
@@ -189,6 +202,8 @@ void Fsr::destroyContext() {
     }
     context_ = nullptr;
     provider_.clear();
+    requirementsKnown_ = false;
+    requiredResources_ = optionalResources_ = 0;
 }
 
 void Fsr::destroy() {
@@ -205,7 +220,7 @@ bool Fsr::dispatch(const FsrDispatch& d) {
     if (context_ == nullptr || d.color == nullptr || d.depth == nullptr || d.motion == nullptr || d.output == nullptr) return false;
     constexpr std::uint32_t kRead = FFX_API_RESOURCE_STATE_COMPUTE_READ;
     constexpr std::uint32_t kWrite = FFX_API_RESOURCE_STATE_UNORDERED_ACCESS;
-    for (Image* in : {d.color, d.depth, d.motion, d.reactive, d.transparency}) {
+    for (Image* in : {d.color, d.depth, d.motion, d.exposure, d.reactive, d.transparency}) {
         if (in != nullptr) in->transition(d.cmd, layoutOf(kRead));
     }
     d.output->transition(d.cmd, layoutOf(kWrite));
@@ -216,6 +231,7 @@ bool Fsr::dispatch(const FsrDispatch& d) {
     u.color = resource(d.color, kRead);
     u.depth = resource(d.depth, kRead);
     u.motionVectors = resource(d.motion, kRead);
+    u.exposure = resource(d.exposure, kRead);
     u.reactive = resource(d.reactive, kRead);
     u.transparencyAndComposition = resource(d.transparency, kRead);
     u.output = resource(d.output, kWrite);
@@ -237,7 +253,7 @@ bool Fsr::dispatch(const FsrDispatch& d) {
     ffxContext c = context_;
     const ffxReturnCode_t rc = fn_->api.Dispatch(&c, &u.header);
     // the DLL's backend leaves every resource in the state it was given
-    for (Image* in : {d.color, d.depth, d.motion, d.reactive, d.transparency}) {
+    for (Image* in : {d.color, d.depth, d.motion, d.exposure, d.reactive, d.transparency}) {
         if (in != nullptr) in->setTrackedLayout(layoutOf(kRead));
     }
     d.output->setTrackedLayout(layoutOf(kWrite));

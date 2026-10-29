@@ -1728,6 +1728,18 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 1,
         .format = "%.2f",
     });
+    r.upscaleExposure = &reg.add({
+        .key = "upscale.exposure",
+        .label = "Exposure",
+        .category = "Image",
+        .description = "Which brightness FSR weighs bright and dark pixels with: \"Game\" gives it the exposure the game's own tone "
+                       "mapping uses (steady, and what you actually see); \"Automatic\" lets FSR estimate it from every frame.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"engine", "auto"},
+        .optionLabels = {"Game", "Automatic (FSR)"},
+        .flags = Flag::Advanced,
+    });
     r.upscaleJitterFlip = &reg.add({
         .key = "upscale.jitter_flip",
         .label = "Jitter sign (test)",

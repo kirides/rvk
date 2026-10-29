@@ -21,6 +21,8 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
+#include <vector>
 
 #include "d3d9/device.h"
 #include "vk/fsr.h"
@@ -34,7 +36,7 @@ constexpr bool usesFsr(UpscaleMode m) { return m >= UpscaleMode::NativeAa; }
 // the per-dimension ratio output / render of an FSR mode (FfxApiUpscaleQualityMode); 1 for the others
 float upscaleRatio(UpscaleMode m);
 
-// FSR's jitter sequence: phase count = ceil(8 * (display width / render width)^2), offset = Halton(index % phases + 1; 2, 3) - 0.5
+// FSR's jitter sequence (the local fallback; with a context the DLL's own queries are used, Upscale::refreshJitterTable): phase count = ceil(8 * (display width / render width)^2), offset = Halton(index % phases + 1; 2, 3) - 0.5
 // (the FFX API's ffxQueryDescUpscaleGetJitterPhaseCount / GetJitterOffset compute the same; rvk_vktest --fsr compares them)
 int upscaleJitterPhases(std::uint32_t renderWidth, std::uint32_t displayWidth);
 std::array<float, 2> upscaleJitter(std::uint64_t frameIndex, int phases);
@@ -59,11 +61,18 @@ public:
     void setMl(bool on);
     bool mlActive() const { return mlActive_; }
     void setReactiveTuning(float cutoff, float scale) { reactiveCutoff_ = cutoff; reactiveScale_ = scale; }
+    // upscale.exposure: FSR gets the engine's own scene exposure (ToneMapFactor / adapted luminance, engine/exposure.h) instead of
+    // deriving one itself; the context is rebuilt when it changes. Falls back to FSR's automatic exposure (logged) when the engine's
+    // luminance image is not found.
+    void setEngineExposure(bool on);
+    bool engineExposureActive() const { return exposureActive_; }
 
 private:
     void record(d3d9::PassContext& ctx);
     void recordOpaque(d3d9::PassContext& ctx);
-    bool ensureFsr(VkExtent2D render, VkExtent2D display);
+    bool ensureFsr(VkExtent2D render, VkExtent2D display, bool autoExposure);
+    bool recordExposure(d3d9::PassContext& ctx, d3d9::Texture& luminance, vk::Transients::Entry& out);
+    void releaseExposureReadback();
     void dropFsr();
 
     d3d9::Device& dev_;
@@ -71,11 +80,28 @@ private:
     unsigned flip_ = 0;
     float sharpness_ = 0.4f;
     bool reactive_ = true;
+    bool engineExposure_ = true;  // upscale.exposure = engine
+    bool exposureActive_ = false;  // the current context takes the engine's exposure
+    int exposureWait_ = 0;  // frames skipped while the engine's luminance image does not exist yet (its first post chain has not run)
+    bool exposureGaveUp_ = false;  // the image never appeared: automatic exposure this session
+    bool fsrAutoExposure_ = true;  // the current context's flag
+    float exposureValue_ = 0.0f;  // the last value read back (log only)
+    VkBuffer exposureRb_ = VK_NULL_HANDLE;  // host-visible 4 bytes: the exposure image copied in the last second before a log line
+    VmaAllocation exposureRbAlloc_ = VK_NULL_HANDLE;
+    const float* exposureRbPtr_ = nullptr;
+    bool exposureRbWritten_ = false;
+    VkPipeline exposurePipe_ = VK_NULL_HANDLE;
     bool ml_ = false;        // upscale.provider = fsr4
     bool mlActive_ = false;  // the current context is the ML upscaler
     float reactiveCutoff_ = 0.08f, reactiveScale_ = 1.0f;
     bool opaqueValid_ = false;  // this frame's BeforeAlpha snapshot (the scene without translucent effects) was taken
     std::atomic<int> phases_{8};  // the jitter sequence's length (the jitter source runs on the render thread; set from the sizes)
+    // the DLL's own offsets (ffxQueryDescUpscaleGetJitterOffset) for index 0..phases-1, read when the context or the sizes change;
+    // empty = the local Halton sequence (jitter only, FSR unavailable). Guarded: the jitter source may run on another thread.
+    void refreshJitterTable(VkExtent2D render, VkExtent2D display);
+    std::mutex jitterMutex_;
+    const vk::Fsr* fsrTableFor_ = nullptr;  // the context the table was read from (guarded by jitterMutex_)
+    std::vector<std::array<float, 2>> jitterTable_;
     bool failed_ = false;  // the DLL / the context / the pipeline is not available: FSR stays off this session
     vk::PassLayout layout_;  // set 1: one storage image (the R32F depth)
     VkPipeline prep_ = VK_NULL_HANDLE;

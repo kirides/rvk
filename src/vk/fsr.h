@@ -47,6 +47,7 @@ struct FsrDispatch {
     Image* color = nullptr;
     Image* depth = nullptr;
     Image* motion = nullptr;     // previous - current position in pixels of the render size (scaled by motionScale)
+    Image* exposure = nullptr;   // optional 1x1 R32F: the scene exposure (colour x exposure = what is displayed); only read by a context made without autoExposure
     Image* reactive = nullptr;   // optional
     Image* transparency = nullptr;  // optional
     Image* output = nullptr;
@@ -91,6 +92,12 @@ public:
 
     // the provider behind the context ("3.1.x" / "4.x"), empty without a context
     const std::string& providerName() const { return provider_; }
+    // ffxQueryDescUpscaleGetResourceRequirements of the context (FfxApiQueryResourceIdentifiers bitmaps, read at creation): FSR 4
+    // needs no reactive / transparency mask, so the work to build them is only done when the provider consumes them
+    bool consumesReactiveMask() const { return !requirementsKnown_ || ((requiredResources_ | optionalResources_) & kResourceReactiveMask) != 0; }
+    std::uint64_t requiredResources() const { return requiredResources_; }
+    std::uint64_t optionalResources() const { return optionalResources_; }
+    static constexpr std::uint64_t kResourceReactiveMask = 1u << 4;  // FFX_API_QUERY_RESOURCE_INPUT_REACTIVEMASK
     // the jitter sequence for a render / display width (FSR 3.1: 8 * (display / render)^2 phases), and its offset at `index`
     int jitterPhaseCount(std::uint32_t renderWidth, std::uint32_t displayWidth);
     bool jitterOffset(int index, int phaseCount, float& x, float& y);
@@ -116,6 +123,8 @@ private:
     struct Functions;
     Functions* fn_ = nullptr;
     std::string provider_;
+    bool requirementsKnown_ = false;  // the DLL answered the resource requirements query (else: assume every mask is used)
+    std::uint64_t requiredResources_ = 0, optionalResources_ = 0;
 };
 
 }  // namespace rvk::vk
