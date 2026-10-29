@@ -7,6 +7,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "core/paths.h"
 #include "vk/debug_names.h"
 #include "vk/probe.h"
 
@@ -446,9 +447,20 @@ bool Context::createDevice(bool withRayTracing) {
     VkPhysicalDeviceFaultFeaturesEXT fault{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
     if (features_.deviceFault) {
         fault.deviceFault = VK_TRUE;
+        VkPhysicalDeviceFaultFeaturesEXT supported{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
+        VkPhysicalDeviceFeatures2 query{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+        query.pNext = &supported;
+        vkGetPhysicalDeviceFeatures2(physical_, &query);
+        fault.deviceFaultVendorBinary = supported.deviceFaultVendorBinary;  // the Radeon GPU Detective binary
         enabled.push_back(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
         *tail = &fault;
         tail = &fault.pNext;
+    }
+    // AMD buffer markers (debug.crash_markers): GPU writes a value into host-visible memory when the command processor reaches
+    // a command / when earlier work finished; read after a device loss to see how far the GPU got
+    if (hasExtension(exts, VK_AMD_BUFFER_MARKER_EXTENSION_NAME)) {
+        enabled.push_back(VK_AMD_BUFFER_MARKER_EXTENSION_NAME);
+        features_.bufferMarker = true;
     }
     VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR pexe{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR};
     if (wantPipelineStatistics_ && hasExtension(exts, VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME)) {
@@ -537,13 +549,76 @@ bool Context::createAllocator() {
 }
 
 VkResult Context::queueSubmit(const VkSubmitInfo2& submit, VkFence fence) {
-    const std::lock_guard lock(queueMutex_);
-    return vkQueueSubmit2(queue_, 1, &submit, fence);
+    VkResult r;
+    {
+        const std::lock_guard lock(queueMutex_);
+        r = vkQueueSubmit2(queue_, 1, &submit, fence);
+    }
+    if (r == VK_ERROR_DEVICE_LOST) reportDeviceLost("vkQueueSubmit2");
+    return r;
 }
 
 VkResult Context::queuePresent(const VkPresentInfoKHR& present) {
-    const std::lock_guard lock(queueMutex_);
-    return vkQueuePresentKHR(queue_, &present);
+    VkResult r;
+    {
+        const std::lock_guard lock(queueMutex_);
+        r = vkQueuePresentKHR(queue_, &present);
+    }
+    if (r == VK_ERROR_DEVICE_LOST) reportDeviceLost("vkQueuePresentKHR");
+    return r;
+}
+
+// VK_EXT_device_fault: what the driver knows about the loss (AMD: the faulting page / address ranges of a GPU page fault, the
+// vendor binary for Radeon GPU Detective). Logged once, at the first DEVICE_LOST any queue operation returns.
+void Context::reportDeviceLost(const char* where) {
+    if (lostReported_.exchange(true)) return;
+    spdlog::error("vulkan: DEVICE LOST at {} (validation errors so far: {})", where, validationErrors_.load());
+    if (lostReporter_) {
+        const std::string text = lostReporter_();
+        if (!text.empty()) spdlog::error("vulkan: {}", text);
+    }
+    if (!features_.deviceFault || vkGetDeviceFaultInfoEXT == nullptr) {
+        spdlog::error("vulkan: device fault: the driver offers no VK_EXT_device_fault");
+        return;
+    }
+    VkDeviceFaultCountsEXT counts{VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
+    VkResult r = vkGetDeviceFaultInfoEXT(device_, &counts, nullptr);
+    if (r != VK_SUCCESS && r != VK_INCOMPLETE) {
+        spdlog::error("vulkan: device fault: vkGetDeviceFaultInfoEXT counts: {}", resultString(r));
+        return;
+    }
+    std::vector<VkDeviceFaultAddressInfoEXT> addrs(counts.addressInfoCount);
+    std::vector<VkDeviceFaultVendorInfoEXT> vendors(counts.vendorInfoCount);
+    std::vector<std::uint8_t> binary(static_cast<std::size_t>(counts.vendorBinarySize));
+    VkDeviceFaultInfoEXT info{VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT};
+    info.pAddressInfos = addrs.empty() ? nullptr : addrs.data();
+    info.pVendorInfos = vendors.empty() ? nullptr : vendors.data();
+    info.pVendorBinaryData = binary.empty() ? nullptr : binary.data();
+    r = vkGetDeviceFaultInfoEXT(device_, &counts, &info);
+    spdlog::error("vulkan: device fault: {} (result {}), {} address info(s), {} vendor info(s), vendor binary {} bytes", info.description,
+                  resultString(r), counts.addressInfoCount, counts.vendorInfoCount, counts.vendorBinarySize);
+    static constexpr const char* kAddrType[] = {"none", "read invalid", "write invalid", "execute invalid", "instruction pointer unknown",
+                                                "instruction pointer invalid", "instruction pointer (fault)"};
+    for (std::uint32_t i = 0; i < counts.addressInfoCount && i < addrs.size(); ++i) {
+        const auto t = static_cast<std::uint32_t>(addrs[i].addressType);
+        spdlog::error("vulkan: device fault: address {} 0x{:x} (precision {} bytes): {}", i, static_cast<std::uint64_t>(addrs[i].reportedAddress),
+                      static_cast<std::uint64_t>(addrs[i].addressPrecision), t < std::size(kAddrType) ? kAddrType[t] : "?");
+    }
+    for (std::uint32_t i = 0; i < counts.vendorInfoCount && i < vendors.size(); ++i) {
+        spdlog::error("vulkan: device fault: vendor {}: {} (code 0x{:x}, data 0x{:x})", i, vendors[i].description,
+                      static_cast<std::uint64_t>(vendors[i].vendorFaultCode), static_cast<std::uint64_t>(vendors[i].vendorFaultData));
+    }
+    if (!binary.empty()) {
+        try {
+            const auto file = paths::dataDir() / "devicefault.bin";
+            if (std::FILE* f = _wfopen(file.c_str(), L"wb")) {
+                std::fwrite(binary.data(), 1, binary.size(), f);
+                std::fclose(f);
+                spdlog::error("vulkan: device fault: vendor binary written to {}", file.string());
+            }
+        } catch (...) {
+        }
+    }
 }
 
 void Context::waitIdle() {

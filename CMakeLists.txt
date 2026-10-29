@@ -393,6 +393,8 @@ add_library(rvk_core STATIC
     src/vk/bindless.h
     src/vk/context.cpp
     src/vk/context.h
+    src/vk/crash_markers.cpp
+    src/vk/crash_markers.h
     src/vk/debug_names.cpp
     src/vk/debug_names.h
     src/vk/formats.cpp

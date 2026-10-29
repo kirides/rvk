@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 
@@ -46,6 +47,7 @@ struct DeviceFeatures {
     bool robustness2NullDescriptor = false;
     bool memoryBudget = false;
     bool deviceFault = false;
+    bool bufferMarker = false;    // VK_AMD_buffer_marker enabled (debug.crash_markers: vk/crash_markers.h)
     bool samplerAnisotropy = false;
     bool shaderFloat16Int16 = false;  // shaderFloat16 + shaderInt16 enabled (the FidelityFX upscaler's fp16 shaders)
     bool storageImageExtendedFormats = false;  // RG16F / R16F ... storage images (the G-buffer's motion)
@@ -97,6 +99,11 @@ public:
     // validation messages of severity error seen so far (tests assert 0)
     std::uint32_t validationErrors() const { return validationErrors_.load(); }
     void noteValidationError() { ++validationErrors_; }
+    // The first VK_ERROR_DEVICE_LOST of a queue operation: logs VK_EXT_device_fault's report (description, faulting addresses,
+    // vendor infos; the vendor binary goes to bin\rvk\devicefault.bin) once; later calls do nothing. `where` names the operation.
+    void reportDeviceLost(const char* where);
+    // called by reportDeviceLost after the fault report: its text is logged too (the crash markers' unfinished regions)
+    void setLostReporter(std::function<std::string()> fn) { lostReporter_ = std::move(fn); }
 
     // debug names (no-op without VK_EXT_debug_utils or with `debug.names` off: vk/debug_names.h)
     bool namesEnabled() const;
@@ -129,6 +136,8 @@ private:
     bool fullScreenExclusiveDevice_ = false; // the device offers VK_EXT_full_screen_exclusive
     std::mutex queueMutex_;
     std::atomic<std::uint32_t> validationErrors_{0};
+    std::atomic<bool> lostReported_{false};
+    std::function<std::string()> lostReporter_;
 };
 
 // VkResult -> "VK_ERROR_DEVICE_LOST" etc.

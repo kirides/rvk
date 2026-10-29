@@ -41,6 +41,7 @@
 #include "vk/context.h"
 #include "vk/formats.h"
 #include "vk/frames.h"
+#include "vk/crash_markers.h"
 #include "vk/gputimer.h"
 #include "vk/image.h"
 #include "vk/mesh_arena.h"
@@ -860,6 +861,9 @@ public:
     // c_str() both do), RegionScope below is the RAII way: `RegionScope r(device, "Name");` or `RegionScope r(device, "Shadow", 2)`
     // for "Shadow #2". Not for threads other than the render thread.
     void setRegionsEnabled(bool on);
+    // debug.crash_markers (vk/crash_markers.h): AMD buffer markers at every region's start / end in the primary command buffer; the
+    // unfinished regions are logged with the device fault report after a loss
+    void setCrashMarkers(bool on);
     bool regionsEnabled() const { return regionsOn_; }
     static constexpr std::uint32_t kNoRegionIndex = ~0u;
     void regionBegin(const char* name, std::uint32_t index = kNoRegionIndex);
@@ -1580,10 +1584,13 @@ private:
     JitterSource jitterSource_;
     float geometryLodBias_ = 0.0f;
     bool regionsOn_ = false;
+    vk::CrashMarkers crashMarkers_;
+    bool markersOn_ = false;
     struct OpenRegion {
         const char* base = nullptr;  // the name as given (identity of literals: the phase names; compared with `index`)
         std::uint32_t index = kNoRegionIndex;
         char text[48] = {};  // the label: base [+ " #index"]
+        bool marked = false;  // a crash marker was written at its start
     };
     static constexpr std::uint32_t kMaxRegions = 32;
     std::array<OpenRegion, kMaxRegions> regions_{};  // the labels open in the current command buffer (outermost first; [0] = the frame)

@@ -285,6 +285,7 @@ struct RendererSettings {
     Setting* tintDraws = nullptr;    // debug.tint_draws: "off", "kind", "pass" (d3d9/draws.h TintMode)
     Setting* drawRecords = nullptr;  // debug.draw_records: per-frame draw records (hidden; the histogram is always on)
     Setting* paceLoading = nullptr;  // debug.pace_loading: loading screens wait for the pacer (hidden; load-time A/B)
+    Setting* debugCrashMarkers = nullptr;  // debug.crash_markers: VK_AMD_buffer_marker events around the regions, logged after a device loss
     Setting* debugRegions = nullptr;  // debug.regions: command buffer labels for graphics captures (d3d9::Device::setRegionsEnabled)
     Setting* debugNames = nullptr;    // debug.names: VK_EXT_debug_utils object names (restart; vk/debug_names.h)
     Setting* recordThreads = nullptr;  // debug.record_threads: the opaque passes' draws recorded on worker threads (d3d9::Device::setRecordThreads)

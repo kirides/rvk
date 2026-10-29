@@ -860,6 +860,18 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .flags = Flag::NoAB | Flag::Hidden,
     });
+    r.debugCrashMarkers = &reg.add({
+        .key = "debug.crash_markers",
+        .label = "Crash markers",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "After a GPU hang / device loss the log names the regions (views, passes, injected passes) the GPU had not "
+                       "finished (AMD buffer markers around every capture region; needs Capture regions). Costs a few GPU writes "
+                       "per region.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
     r.debugRegions = &reg.add({
         .key = "debug.regions",
         .label = "Capture regions",

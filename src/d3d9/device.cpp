@@ -619,6 +619,9 @@ void Device::destroy() {
     frames_.destroy();
     meshArena_.destroy();  // after frames_: its retired frees go into the arena
     bindless_.destroy();
+    ctx_.setLostReporter(nullptr);
+    crashMarkers_.destroy();
+    markersOn_ = false;
     ctx_.destroy();
     created_ = false;
 }
@@ -719,10 +722,15 @@ void Device::regionBegin(const char* name, std::uint32_t index) {
     r.base = name;
     r.index = index;
     formatLabel(r.text, name, index);
+    r.marked = false;
     if (rendering_ && scopeSecondary_) {
         scopeLabel(true, r.text);  // in order with the scope's chunks
     } else {
         beginLabel(frames_.cmd(), r.text);
+        if (markersOn_ && !rendering_) {
+            crashMarkers_.begin(frames_.cmd(), frameValue(), r.text);
+            r.marked = true;
+        }
     }
 }
 
@@ -733,7 +741,21 @@ void Device::regionEnd() {
         scopeLabel(false, nullptr);
     } else {
         vkCmdEndDebugUtilsLabelEXT(frames_.cmd());
+        if (regions_[regionCount_].marked && markersOn_ && !rendering_) crashMarkers_.end(frames_.cmd(), frameValue(), regions_[regionCount_].text);
     }
+}
+
+void Device::setCrashMarkers(bool on) {
+    if (on == markersOn_) return;
+    if (!on) {
+        markersOn_ = false;
+        ctx_.setLostReporter(nullptr);
+        return;
+    }
+    if (!created_ || !crashMarkers_.create(ctx_)) return;
+    markersOn_ = true;
+    ctx_.setLostReporter([this]() { return crashMarkers_.report(); });
+    if (!regionsOn_) spdlog::warn("vulkan: crash markers: they follow the capture regions (debug.regions is off)");
 }
 
 void Device::setRegionsEnabled(bool on) {
