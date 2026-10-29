@@ -1660,3 +1660,31 @@ table stay Debug overrides (a stage in Wrapper, `native.scene_ops_groups` masks 
 | sorted sprite flushes (flags 0xe0) | unreachable (dead code) | - | section 16 |
 | item / character preview (RenderEntity) | unreachable (editor / tool code) | - | section 16 |
 | debug list | never met (needs `/Engine/Render/RenderDebug` + restart) | - | section 16 |
+
+## 18. Full vs Wrapper brightness (2026-10-29, investigation: no renderer difference)
+
+Report to check: at `pub_interior` with `upscale.mode=native_aa / quality` the Full capture was darker than Wrapper (floor -41 %, left
+wall -26 %, mean luma 26.6 vs 28.0). **Not reproduced; no renderer difference found, no code change.** Method: `rvkcompare` bursts
+(mean luma of the median burst frame; tools `out/fvw/*`, git-ignored), Wrapper vs Full vs Original (system D3D9), same settings, bursts
+of one capture agree to 0.03 luma, so everything below is a run-to-run state difference of the engine, not frame noise.
+
+* **In one run the modes are identical.** `-Commands 'set renderer.mode full' / 'wrapper'` alternating every 500 frames inside a
+  spot hold (back-buffer shots between the switches; monastery_hall, pub_interior with player defaults + `upscale.mode=quality`, start
+  mode Wrapper or Full, test baseline): the mean luma moves monotonically with the engine's slow drift (28.65 -> 28.86), the
+  switches add nothing (mean |difference| of consecutive shots 0.08 - 0.13 luma, max 2.8 = the drift). Full's native compare over
+  jungle + pub_interior: 0 mismatches (static ops 115,562 draws, every scene-op group equal; `lean_check=10`).
+* **Across runs the pub differs by the engine's light / adaptation state, in both directions.** Pub alone (no preceding spot,
+  `freeze_wait=3000`): Wrapper 28.1 / 28.1, Full 28.1 / 28.4, Original D3D9 28.2 / 28.3 (wall 102 - 106, floor 12.0 - 12.5). With a bright
+  spot before it (`beach_sun;harbour_docks;pub_interior`, `beach_sun;pub_interior`, `jungle;pub_interior;monastery_hall`): Wrapper 25.3 /
+  25.5 (25.5 with player defaults + quality), Full 26.8 / 26.9 (26.4), **Original 26.7**: Full = Original, Wrapper 5 % darker. The
+  difference sits on the candle-lit walls (wall +8 %, floor +2 %), not a global gain. Wrapper vs the D3D9 original in this carry-over
+  case is therefore the open point (not a Full regression); `jungle;pub_interior` with the short default hold: Wrapper 28.7 / 29.2,
+  Full 29.3 / 29.3. In no combination was Full darker than Wrapper (player defaults, the test baseline, `upscale.mode=quality`, the
+  Full switches `native.lean=false`, `native.scene_ops_groups=0`: 27.9 - 28.1 pure-pub runs, all within the state spread above).
+* Not the cause (Wrapper stays at 25.1 - 26.0 after the beach with any of them): `debug.prefetch_stride=1`, `debug.shadow_stride=1`,
+  `debug.record_threads=false`, `debug.batch_draws=false`. Frame rate is the Chill cap (80 fps) in all modes, so the engine's
+  `FrameTime`-weighted eye adaptation sees the same time.
+* The earlier side-by-sides `out/water/20261029-002714` / `-014741` are two Wrapper runs (rvk.log `renderer: mode wrapper`), the
+  second with `upscale.provider=fsr4` (softer, upscaling.md 15), not Full captures.
+* For A/B work at the pub: use a spot of its own (no preceding bright spot), `freeze_wait=3000`, and compare against Original;
+  mean luma differences below ~6 % between separate runs are the engine's state, not the renderer.
