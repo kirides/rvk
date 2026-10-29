@@ -22,6 +22,10 @@ constexpr std::uint32_t kRigidMaxSlots = 200000;
 // the vertex shader constants that hold a static mesh's placement (g_vInstanceMisc c31, g_vInstanceData c32..)
 constexpr std::uint32_t kRigidFirstReg = 31, kRigidRegs = 7;
 
+// rigid draws: static meshes, and the "instanced mesh" op kind (held weapons / shields, nets, barrels: one placement per draw
+// unless q.instanced, which is rejected)
+bool isRigid(Kind k) { return k == Kind::StaticMesh || k == Kind::InstancedMesh; }
+
 std::uint64_t mix(std::uint64_t h, std::uint64_t v) {
     h ^= v;
     return h * 1099511628211ull;
@@ -57,8 +61,11 @@ void ObjectMotion::apply(bool skinned, bool rigid) {
 
 bool ObjectMotion::observes(Kind kind, d3d9::scene::Phase phase) const {
     if (phase.view != View::Main || phase.pass != Pass::Solid) return false;
-    if (kind == Kind::Skinned) return skinned_ && !(rt_ != nullptr && rt_->capturingCharacters());
-    return kind == Kind::StaticMesh && rigid_;
+    // (trace level: also the draws the RT scene captures, to log them in observe())
+    if (kind == Kind::Skinned) {
+        return skinned_ && (!(rt_ != nullptr && rt_->capturingCharacters()) || spdlog::should_log(spdlog::level::trace));
+    }
+    return (kind == Kind::StaticMesh || kind == Kind::InstancedMesh) && rigid_;
 }
 
 void ObjectMotion::bufferChanged(std::uint64_t bufferId) {
@@ -67,7 +74,7 @@ void ObjectMotion::bufferChanged(std::uint64_t bufferId) {
 
 void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     // diagnostics: why rigid draws are not captured (logged with the capture stats)
-    if (q.kind == Kind::StaticMesh) {
+    if (isRigid(q.kind)) {
         ++diagRigid_;
         if (q.tag == nullptr || q.tag->entity == nullptr) ++diagNoEntity_;
         if (q.instanced) ++diagInstanced_;
@@ -77,8 +84,30 @@ void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         const double t = dev.secondsSinceCreate();
         if (t - diagLog_ > 10.0) {
             diagLog_ = t;
-            spdlog::info("enh: object motion: rigid draws seen {} (no entity {}, instanced {}, ring-copied {}), moving {}", diagRigid_,
-                         diagNoEntity_, diagInstanced_, diagRing_, rigidMoving_);
+            spdlog::info("enh: object motion: rigid draws seen {} (no entity {}, instanced {}, ring-copied {}), moving {}, capture cap hit {}x", diagRigid_,
+                         diagNoEntity_, diagInstanced_, diagRing_, rigidMoving_, diagCapped_);
+        }
+    }
+    if (q.kind == Kind::Skinned) {
+        // skinned draws rejected before they are tracked (a held weapon / shield may be drawn from a dynamic buffer, as strips, ...)
+        ++diagSkin_;
+        const bool noBuf = q.vertexBuffer == nullptr || q.indexBuffer == nullptr;
+        if (q.primitiveType != 4) ++diagSkinType_;
+        if (noBuf || q.primitives == 0) ++diagSkinNoBuf_;
+        if (q.instanced) ++diagSkinInst_;
+        if (!noBuf && (q.indexBuffer->ringCopied() || q.vertexBuffer->ringCopied())) {
+            ++diagSkinRing_;
+            if (diagSkinRing_ <= 40 && spdlog::should_log(spdlog::level::trace)) {
+                spdlog::trace("enh: object motion: skinned draw from a ring-copied buffer: entity {} prims {} vb {} ib {}",
+                              static_cast<const void*>(q.tag != nullptr ? q.tag->entity : nullptr), q.primitives,
+                              q.vertexBuffer->ringCopied(), q.indexBuffer->ringCopied());
+            }
+        }
+        const double t = dev.secondsSinceCreate();
+        if (t - diagSkinLog_ > 10.0) {
+            diagSkinLog_ = t;
+            spdlog::info("enh: object motion: skinned draws seen {} (not triangle lists {}, no buffers {}, instanced {}, ring-copied {})", diagSkin_,
+                         diagSkinType_, diagSkinNoBuf_, diagSkinInst_, diagSkinRing_);
         }
     }
     if (q.primitiveType != 4 || q.vertexBuffer == nullptr || q.indexBuffer == nullptr || q.primitives == 0 || q.instanced ||
@@ -91,11 +120,14 @@ void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         perFrame_ = 0;
         if (frame % 300 == 0) std::erase_if(states_, [&](const auto& kv) { return kv.second.seenFrame + 600 < frame; });
     }
-    if (perFrame_ >= kMaxCapturesPerFrame) return;
+    if (perFrame_ >= kMaxCapturesPerFrame) {
+        ++diagCapped_;
+        return;
+    }
 
     // a rigid draw without its entity cannot be told apart from the other objects sharing its mesh: they would feed each
     // other their previous positions (wrong, large motion on buildings)
-    if (q.kind == Kind::StaticMesh && (q.tag == nullptr || q.tag->entity == nullptr)) return;
+    if (isRigid(q.kind) && (q.tag == nullptr || q.tag->entity == nullptr)) return;
     const d3d9::ResourceRef vr = q.vertexBuffer->ref(), ir = q.indexBuffer->ref();
     std::uint64_t key = 1469598103934665603ull;
     key = mix(key, reinterpret_cast<std::uintptr_t>(q.tag != nullptr ? q.tag->entity : nullptr));
@@ -109,6 +141,15 @@ void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     key = mix(key, q.vertexOffset);
     State& s = states_[key];
     if (s.seenFrame == frame) return;  // the later passes of a draw: the first one counts
+    if (s.seenFrame == 0 && spdlog::should_log(spdlog::level::trace)) {
+        spdlog::trace("enh: object motion: new draw: kind {} entity {} material '{}' prims {}", d3d9::draws::name(q.kind),
+                      static_cast<const void*>(q.tag != nullptr ? q.tag->entity : nullptr),
+                      q.tag != nullptr && q.tag->materialName != nullptr ? q.tag->materialName : "?", q.primitives);
+    }
+    if (q.kind == Kind::Skinned && rt_ != nullptr && rt_->capturingCharacters()) {
+        s.seenFrame = frame;  // the RT scene captures it (trace only: the log above)
+        return;
+    }
     s.seenFrame = frame;
     s.vb = vr.id;
     s.ib = ir.id;
@@ -123,7 +164,7 @@ void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         s.pending = 0;
     }
 
-    if (q.kind == Kind::StaticMesh) {
+    if (isRigid(q.kind)) {
         // a rigid draw is captured while its placement changes (and a few frames after)
         std::uint64_t h = 1469598103934665603ull;
         for (std::uint32_t r = 0; r < kRigidRegs; ++r) {
@@ -133,7 +174,14 @@ void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
             for (std::uint32_t b : bits) h = mix(h, b);
         }
         if (s.haveHash && h != s.hash) {
-            if (s.moving == 0) ++rigidMoving_;
+            if (s.moving == 0) {
+                ++rigidMoving_;
+                if (spdlog::should_log(spdlog::level::trace)) {
+                    spdlog::trace("enh: object motion: rigid draw starts moving: entity {} material '{}' prims {}",
+                                  static_cast<const void*>(q.tag->entity), q.tag->materialName != nullptr ? q.tag->materialName : "?",
+                                  q.primitives);
+                }
+            }
             s.moving = 4;
         } else if (s.moving > 0) {
             --s.moving;
@@ -161,7 +209,7 @@ void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         }
     }
     const std::uint32_t slots = s.maxIndex + 1;
-    if (s.maxIndex == 0 || slots > (q.kind == Kind::StaticMesh ? kRigidMaxSlots : kMaxSlots)) return;
+    if (s.maxIndex == 0 || slots > (isRigid(q.kind) ? kRigidMaxSlots : kMaxSlots)) return;
     const vk::RingAlloc a = dev.frames().allocate(16 + static_cast<VkDeviceSize>(slots) * 32, 16);
     if (a.ptr == nullptr) return;
     // header: slots, the previous frame's capture of this draw (its vertex shader reads the previous positions)

@@ -61,8 +61,9 @@ private:
     std::uint32_t perFrame_ = 0;
     std::uint64_t captures_ = 0, rigidMoving_ = 0;
     double lastLog_ = -1e9;
-    std::uint64_t diagRigid_ = 0, diagNoEntity_ = 0, diagInstanced_ = 0, diagRing_ = 0;
-    double diagLog_ = -1e9;
+    std::uint64_t diagRigid_ = 0, diagNoEntity_ = 0, diagInstanced_ = 0, diagRing_ = 0, diagCapped_ = 0;
+    double diagLog_ = -1e9, diagSkinLog_ = -1e9;
+    std::uint64_t diagSkin_ = 0, diagSkinType_ = 0, diagSkinNoBuf_ = 0, diagSkinInst_ = 0, diagSkinRing_ = 0;
 };
 
 }  // namespace rvk::enh
