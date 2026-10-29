@@ -128,7 +128,7 @@ Bloom / Streaks 309x210 (follow BrightPass). The Absolute 309x210 of BrightPass 
 | 1 | RenderScene | scene `+0x38` FP16, `+0x40` copy, `+0x48` R32F | - | the world (A-frame.md 2.7-2.9) |
 | 2 | Down64x64 LogLuminance | 64² R32F | scene colour (point) | `log(1e-5 + dot(avg of 4 taps, (0.3, 0.59, 0.11)))`; the 4 taps are adjacent full-res texels: sparse |
 | 3-7 | Down32 .. Down2 DownSample | 32² .. 2² R32F | previous | 2x2 box |
-| 8 | AdaptiveLiminance | 1² R32F persist | Down2 (Src), AvgLum8 (ToneMap = last frame) | `L = exp(avg4)`; `L = old + (L - old)(1 - 0.98^(EyeAdapt x FrameTime))`, clamp to AvgLumClamp (0.4, 0.8); NaN -> old / clamp.x |
+| 8 | AdaptiveLiminance | 1² R32F persist | Down2 (Src), AvgLum8 (ToneMap = last frame) | `L = exp(avg4)`; `L = old + (L - old)(1 - 0.98^(EyeAdapt x FrameTime))`, clamp to AvgLumClamp (0.4, 0.8) (stored value measured lower than the .fx default 0.4 .. 0.8: 0.24 .. 0.32 observed in the 1x1 output, 2026-10-29, upscaling.md 20); NaN -> old / clamp.x |
 | 9 | AvgLuminance Copy | 1² R32F persist | Adaptive | copy for this frame's consumers and next frame's Adaptive |
 | 10 | BrightPass BrightPassAlphaMask | 309x210 | scene colour, avg lum, depth (`TEXTURE3`) | 4 adjacent taps x ToneMapFactor 0.6 / avgLum; `c *= 1 + c / WhitePoint(1)`; `max(c - BLOOMTHRESHOLD, 0)`, `/= (c + BLOOMOFFSET)`; **a = 1 where depth >= 1 (sky), else 0** |
 | 11 | GlowH | 309x210 | BrightPass | 14-tap horizontal Gaussian (weights 0.266 .. 0.0175, taps at 0.5 + 2i texels) |

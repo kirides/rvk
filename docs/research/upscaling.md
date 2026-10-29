@@ -11,12 +11,13 @@ reconstruction (positions rebuilt from the jittered depth): section 10.
 | Part | Role |
 |---|---|
 | `src/vk/fsr.{h,cpp}` | wraps AMD's signed FFX API DLLs `third_party/amd_fidelityfx/signedbin/amd_fidelityfx_loader_vk.dll` + `amd_fidelityfx_upscaler_vk.dll` (FSR SDK 2.4.0, section 15; headers `third_party/amd_fidelityfx/api/include`, `upscalers/include`); loaded from `bin\rvk` at run time (`run.ps1` / `package.ps1` copy them) |
-| `src/enh/upscale.{h,cpp}`, `shaders/upscale/prep.comp` | the pass `upscale.fsr`, settings, jitter source, depth prep |
+| `src/enh/upscale.{h,cpp}`, `shaders/upscale/prep.comp`, `shaders/upscale/exposure.comp` | the pass `upscale.fsr`, settings, jitter source, depth prep, the exposure image (`Upscale::recordExposure`, section 20) |
+| `src/engine/exposure.{h,cpp}` | finds the engine's adapted-luminance image (`adaptedLuminanceApi()`, section 20) |
 | `d3d9/device.*`, `d3d9/draw.cpp`, `enh/water.cpp` | `Device::setJitterSource` / `geometryJitter` / `jitter()` / `setGeometryLodBias` |
 | `rvk_vktest --fsr` | self-test: load, versions, context, 12 jittered dispatches on a constant image (output within 0.0005), compares our jitter sequence with the DLL's; SKIP without the DLL |
 
 Settings: `upscale.mode off|native_aa|quality|balanced|performance|ultra_performance|jitter_only` (Image category), `upscale.sharpness` 0..1 (default 0.4, main page, not
-Advanced), `upscale.reactive` (default on) + advanced `upscale.reactive_cutoff` (0.08) / `upscale.reactive_scale` (1) (section 8), debug `upscale.jitter_flip none|x|y|xy`; advanced `upscale.provider fsr3|fsr4` (default fsr3; the ML upscaler, section 15).
+Advanced), `upscale.reactive` (default on) + advanced `upscale.reactive_cutoff` (0.08) / `upscale.reactive_scale` (1) (section 8), debug `upscale.jitter_flip none|x|y|xy`; advanced `upscale.provider fsr3|fsr4` (default fsr3; the ML upscaler, section 15); advanced `upscale.exposure engine|auto` (default engine, section 20).
 
 ## 2. DLL findings [C]
 
@@ -45,7 +46,8 @@ convention is right.
 
 `upscale.fsr` at AfterMainView (the scene HDR target is complete, linear A16B16G16R16F, before the post chain). `prep.comp`
 copies the main view's hardware depth (D24S8 / D32S8; the DLL needs 32-bit) into an R32F transient. FSR gets {scene HDR, that
-depth, the G-buffer's motion (uv units, `motionVectorScale` = render W,H), auto exposure, HDR flag, near / far / fov from the
+depth, the G-buffer's motion (uv units, `motionVectorScale` = render W,H), exposure (the engine's adapted luminance as a 1x1
+R32F image, `upscale.exposure=engine`, section 20; FSR's own auto exposure with `auto`), HDR flag, near / far / fov from the
 camera block, `viewSpaceToMeters` 0.01}. The output is an **output-sized transient** (display size); there is no copy back:
 `Device::setSceneSubstitute(from, bindless slot)` makes draws sampling the scene HDR texture (the post chain) get the FSR
 image's slot until the frame ends (`d3d9/draw.cpp`), section 7.
@@ -391,7 +393,7 @@ commit d910736).
   all, GTAO, water RT): no crash, no validation errors. RenderDoc only partly supports the ray tracing extensions
   (acceleration structures, ray query): treat captures with `rt.allow=true` as unsupported; for RenderDoc use `rt.allow=false`
   (restart setting, floor only).
-* Exposure input (auto now).
+* ~~Exposure input (auto now).~~ Done 2026-10-29: the engine's adapted luminance (section 20); open there: per-frame adaptation in motion, FSR 4.
 * FSR 4 (section 15): works on this RDNA3 card through the SDK 2.4.0 DLLs as an option (`upscale.provider=fsr4`); open: it looks
   softer than FSR 3 at native AA (sharpness path?), no motion judgement, 1.3 ms more per frame, validation errors inside AMD's
   shaders, not tested on RDNA2 / RDNA4 / other vendors (fallback to FSR 3 when no major-4 version is offered), no capability
@@ -597,3 +599,49 @@ Quality 1.5x, full from Performance 2x). Advanced Image setting `upscale.cutout_
 see-through (0.5 = a nearly opaque sheet); foliage and the docks are unaffected. Default off; the in-motion judgement is the
 player's. A real fix would need the cut-out drawn with fractional coverage (deferred, alpha-blended with supersampled alpha:
 no depth-map entry, the background's shadow mask, sorting between cut-outs; not built).
+
+## 20. FSR exposure from the engine's adapted luminance [C, 2026-10-29]
+
+(Numbered 20: sections 18 and 19 already exist.) Advanced Image setting `upscale.exposure` = `engine` (default) | `auto`. FSR used
+to get `FFX_UPSCALE_ENABLE_AUTO_EXPOSURE`; now the context is created without that flag and each dispatch gets a **1x1 R32F
+exposure image** built by `shaders/upscale/exposure.comp` (a pass inside `Upscale::record`, `Upscale::recordExposure`, transient
+`upscale.exposure`) from the engine's adapted luminance. Changing the setting recreates the FSR context (the flag). The post
+chain's order is unchanged and already matches AMD's recommendation (before FSR: SSR, SSAO, denoisers, exposure (optional);
+after: film grain, chromatic aberration, vignette, tone mapping, bloom, DoF, motion blur); exposure was the one input that
+stayed automatic.
+
+**Source [C]**: the persistent 1x1 R32F output of the filter named "AvgLuminance" (class `eCImageFilterEffect`, output mode `+0x38`
+== 0, `+0x90` == 0; filter 8 of the AvgLuminance effect = the one ToneMap / HDRI read as the average luminance; ShareTexture false,
+image at `+0x70`, api image at imagedata `+0x60`). `engine/exposure.{h,cpp}` (`adaptedLuminanceApi()`) walks the scene effect
+(eCImageFilterAdmin `+0x90`, admin via `0x95750`, nested effects through the effect map `0x1f2410` by the nested filter's name
+`+0x30`), verified by the call sites `0x666209` / `0x666216` and the nested effect vtable `0x9c6910`, cached per scene effect,
+and is resolved to a texture with `Device::engineTexture`. The image is allocated by the first post chain: the first world
+frames wait (FSR frames skipped, ~160 - 330 in a run); after 240 frames it falls back to auto exposure with a warning. ToneMap
+(`post_hdr.fx`) computes `r0.x = ToneMapFactor(c3.x) / avgLum` with no clamp; the clamp (`max` / `min` c0 = AvgLumClamp) is in
+the AdaptiveLiminance shader (filter 8): its stored value is not the .fx default (0.4, 0.8): 0.24 - 0.32 observed
+(engine-frame/F-post-water-gui.md).
+
+**Scale [C]**: FSR's convention is `exposure = 1 / Lmax` with `Lmax = (78 / (0.65 x 100)) x 2^log2(Lavg x 100 / 12.5) = 9.6 x Lavg`
+(its own auto exposure, FSR2 `ComputeAutoExposureFromLavg`): the luminance treated as saturated, not the middle-grey key. Lavg is
+the scene's geometric-mean luminance = what the engine's LogLuminance chain adapts. So `exposure = (1 / 9.6) / avgLum`
+(`engine::exposure::kFsrExposureKey`): 0.354 at the lake_jungle hold (adapted luminance 0.293), 0.40 at the start (0.26).
+The first attempt fed `ToneMapFactor(0.6) / avgLum` (the tone-map multiplier, 2.05 there): the picture became ~27 % softer
+(Laplacian variance 0.73 of the auto-exposure picture, mean luma 38.32 vs 38.80), and RCAS did not fix it (sharpness 0.6: 0.75,
+0.8: 0.83). With 1/9.6: Laplacian variance 1.01 of the auto-exposure picture, mean |diff| 1.7 of 255 (p99 24), temporal std of 3
+burst frames 0.129 vs 0.132 (frozen scene: no motion judgement). So at a frozen spot the engine exposure = parity with FSR's
+auto exposure; the point is that FSR now weighs with the exposure the engine has adapted to (smoothed over time by the engine's
+eye adaptation, includes weather and the game's clamp) instead of its own per-frame estimate. Whether that is steadier in
+motion is **not measured** (the player's judgement; `upscale.exposure=auto` = the old behaviour for A/B).
+
+**Verified [C]**: rvkcompare `lake_jungle` hold (`run.ps1 -Mode wrapper|full -Mods rvkcompare -Scenario rvkcompare -Param
+'spots=lake_jungle','freeze_wait=4800' -WindowSize 1920x1080 -Perf [-Validation]`, Quality 1280x720 -> 1920x1080, FSR 3.1.6),
+wrapper and full: 0 validation errors, 0 SYNC, only the known 10 FSR format-mismatch warnings, 0 unimplemented slots; GPU per
+frame unchanged (2.1 ms; the exposure pass is one 1x1 dispatch). Full mode: 0 mismatches in `native: effect draws: post`, but
+`native.lean_check` was 0 (no compare frames ran), so those counts test nothing. rvk.log: `engine: exposure: adapted luminance =
+filter ...`, `enh: upscale: FSR provider ..., the engine's exposure`, and the 5 s `enh: upscale:` line ends with `exposure engine
+<value> (adapted luminance <L>)` (read back from a host buffer copied in the last second before the line; `exposure automatic`
+with `auto`). The `testdemo` scenario ends 1.5 s after the world appears: too short (use rvkcompare / rvk_perfsave). Artefacts
+in `out/fsrexposure` (git-ignored). rvk_tests: settings count 115.
+
+**Open**: adaptation in motion (the scene was frozen), the FSR 4 (ML) provider with the engine exposure, only wrapper + full at
+Quality 1.5x run.
