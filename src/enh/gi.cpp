@@ -493,6 +493,11 @@ void Gi::destroyResources() {
         });
     }
     for (Cascade& c : cascades_) c.valid = false;
+    if (diag_.buffer != VK_NULL_HANDLE) {
+        vk::rt::AddressBuffer b = diag_;
+        diag_ = {};
+        dev_.frames().retire([ctx, b]() mutable { b.destroy(*ctx); });
+    }
 }
 
 void Gi::record(d3d9::PassContext& ctx) {
@@ -719,6 +724,29 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
     }
     p.screen4[3] = s_.bleed;  // colour bleeding
     p.screen5[0] = probes2->slot;
+    {
+        static const bool diag = [] {
+            char buf[8] = {};
+            return GetEnvironmentVariableA("RVK_GI_DIAG", buf, sizeof(buf)) > 0 && buf[0] != '0';
+        }();
+        if (diag) {
+            if (diag_.buffer == VK_NULL_HANDLE) {
+                diag_.create(dev_.ctx(), 64 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, 16, "gi diag");
+                if (diag_.mapped != nullptr) std::memset(diag_.mapped, 0, 64 * 4);
+            }
+            if (diag_.mapped != nullptr) {
+                vmaInvalidateAllocation(dev_.ctx().allocator(), diag_.allocation, 0, VK_WHOLE_SIZE);
+                const auto* dcur = static_cast<const volatile std::uint32_t*>(diag_.mapped);
+                for (int i = 0; i < 64; ++i) {
+                    const std::uint32_t c = dcur[i];
+                    diagSum_[i] += static_cast<double>(static_cast<std::uint32_t>(c - diagLast_[i]));
+                    diagLast_[i] = c;
+                }
+                split(diag_.address, &p.screen5[1]);
+                p.screen5[3] = 1;
+            }
+        }
+    }
     p.screen6[0] = s_.directional;
     std::memcpy(pa.ptr, &p, sizeof(p));
     GiPush push{};
@@ -765,9 +793,29 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
     }
 }
 
+void Gi::logDiag() {
+    if (diag_.buffer == VK_NULL_HANDLE) return;
+    for (int cls = 0; cls < 2; ++cls) {
+        const double* d = &diagSum_[cls * 32];
+        const double n = d[0] / 1024.0;
+        if (n < 1.0) continue;
+        const auto m = [&](int i) { return d[i] / 1024.0 / n; };
+        const double hits = std::max(m(11), 1e-9);
+        spdlog::info("enh: gi diag [{}] {} probes: engine ambient {:.3f}, ddgi {:.3f}, traced {:.3f} (uncapped {:.3f}) = {:.0f}% of the engine's; "
+                     "far field {:.3f} ({:.0f}% of rays; the engine's sky on them {:.3f}, far field towards +dir {:.3f}, as radiance {:.3f}); hits {:.0f}% of rays: sun {:.3f} "
+                     "point {:.3f} bounce {:.3f} emissive {:.3f} (hit rays' mean radiance {:.3f}, mean albedo^2.2 {:.3f}); back faces {:.0f}%; hits "
+                     "< 2 m {:.0f}%, < 10 m {:.0f}%; all rays as the engine's sky {:.3f}",
+                     cls == 0 ? "shaded" : "sun-lit", static_cast<long long>(n), m(1), m(2), m(3), m(4), m(1) > 1e-6 ? 100.0 * m(3) / m(1) : 0.0, m(5),
+                     100.0 * m(10), m(15), m(16), m(20), 100.0 * m(11), m(6), m(7), m(8), m(9), m(19) / hits,
+                     m(18) / hits, 100.0 * m(12), 100.0 * m(13), 100.0 * m(14), m(17));
+    }
+    std::fill(std::begin(diagSum_), std::end(diagSum_), 0.0);
+}
+
 void Gi::logStats(std::uint32_t probes) {
     const double now = dev_.secondsSinceCreate();
     if (now - lastLog_ < 5.0) return;
+    logDiag();
     const double span = lastLog_ < 0.0 ? 0.0 : now - lastLog_;
     lastLog_ = now;
     const std::uint64_t draws = dev_.giDrawsThisInterval();

@@ -45,9 +45,16 @@ vec3 giPointLights(GiPassParams p, RvkFrame f, vec3 P, vec3 N, vec3 G, float u) 
     return vec3(0.0);
 }
 
+// set by the screen probes (rtgi.md 23): they start on visible surfaces, so a hit's back face is a surface seen from behind,
+// not "the origin is inside geometry" (the DDGI probes' test): shade it like any two-sided surface instead of returning black
+bool gGiTwoSided = false;
+// diagnostics (RVK_GI_DIAG, rtgi.md 23): the last giShadeRay's terms (already multiplied by the hit's albedo)
+vec3 gDiagSun = vec3(0.0), gDiagPoint = vec3(0.0), gDiagBounce = vec3(0.0), gDiagEmis = vec3(0.0), gDiagLin = vec3(0.0);
+
 // radiance (rgb, acc units) arriving at `origin` from `dir` and the hit distance (w; tMax for a miss, negative for a back face)
 vec4 giShadeRay(GiPassParams p, RvkFrame f, RvkGiVolume v, vec3 origin, vec3 dir, float tMax, float u) {
     vec4 result = vec4(0.0, 0.0, 0.0, tMax);
+    gDiagSun = gDiagPoint = gDiagBounce = gDiagEmis = gDiagLin = vec3(0.0);
     if (!rvkRtValid(f)) {
         result.rgb = rvkGiSkyRadiance(p.sky, dir);
         return result;
@@ -61,7 +68,7 @@ vec4 giShadeRay(GiPassParams p, RvkFrame f, RvkGiVolume v, vec3 origin, vec3 dir
     RvkRtRecord r = rvkRtRecord(f, h.record);
     // inside geometry: the hit's own (interpolated) normal faces away from the origin; foliage and characters are two-sided
     // / have no normals: never back faces
-    if ((r.flags & (RVK_RT_ALPHA_TESTED | RVK_RT_SPEEDTREE | RVK_RT_DYNAMIC)) == 0u && r.normal != RVK_RT_ABSENT) {
+    if (!gGiTwoSided && (r.flags & (RVK_RT_ALPHA_TESTED | RVK_RT_SPEEDTREE | RVK_RT_DYNAMIC)) == 0u && r.normal != RVK_RT_ABSENT) {
         RvkRtSurface raw = rvkRtSurface(r, h.primitive, h.bary);
         if (dot(raw.normal, raw.normal) > 1e-12 && dot(rvkRtWorldNormal(h.worldToObject, raw.normal), dir) > 0.0) {
             return vec4(0.0, 0.0, 0.0, -0.2 * h.t);
@@ -76,27 +83,37 @@ vec4 giShadeRay(GiPassParams p, RvkFrame f, RvkGiVolume v, vec3 origin, vec3 dir
     vec3 lin = pow(clamp(albedo, vec3(0.0), vec3(1.0)), vec3(2.2)) * p.shade.y;
     vec3 N = normalize(s.normal), G = s.geometricNormal;
     vec3 E = vec3(0.0);
+    vec3 Esun = vec3(0.0), Epoint = vec3(0.0);
     vec3 L = p.sunDir.xyz;
     float nl = clamp(dot(L, N), 0.0, 1.0) * clamp(dot(L, G) * 4.0, 0.0, 1.0);
     if (nl > 0.0 && dot(p.sunColor.rgb, vec3(1.0)) > 1e-3) {
         float vis = rvkRtVisibility(f, s.position + G * 2.0, L, 1.0, p.shade.z, 0.0, 0.0, RVK_RT_TRACE_OPAQUE);
         E += p.sunColor.rgb * (nl * vis);
+        Esun = p.sunColor.rgb * (nl * vis);
     }
-    E += giPointLights(p, f, s.position, N, G, u);
+    Epoint = giPointLights(p, f, s.position, N, G, u);
+    E += Epoint;
     // the probes' irradiance at the hit (last frames': multi-bounce); where no probe covers the hit, the engine's outdoor
     // ambient
     vec4 regs[7];
+    vec3 Ebounce;
     if (rvkGiLookupHit(v, s.position + N * 4.0, N, regs)) {
-        E += max(rvkGiEvalRegs(regs, N), vec3(0.0)) * p.shade.x;
+        Ebounce = max(rvkGiEvalRegs(regs, N), vec3(0.0)) * p.shade.x;
     } else {
-        E += max(rvkGiEvalRegs(p.sky, N), vec3(0.0)) * p.shade.x;
+        Ebounce = max(rvkGiEvalRegs(p.sky, N), vec3(0.0)) * p.shade.x;
     }
+    E += Ebounce;
     // self-illuminated surfaces (lava, lamp glass: rtgi.md 19) emit their diffuse colour; the engine adds the self-illumination
     // after the pow, so its acc-unit equivalent is the colour ^ 2.2; flags.w = the gain (gi.emissive)
     vec3 emission = vec3(0.0);
     float gain = uintBitsToFloat(p.flags.w);
     if ((s.uvSet & RVK_RT_UV_EMISSIVE) != 0u && gain > 0.0) emission = pow(clamp(albedo, vec3(0.0), vec3(1.0)), vec3(2.2)) * gain;
     result = vec4(lin * E + emission, h.t);
+    gDiagSun = lin * Esun;
+    gDiagPoint = lin * Epoint;
+    gDiagBounce = lin * Ebounce;
+    gDiagEmis = emission;
+    gDiagLin = lin;
     if (any(isnan(result)) || any(isinf(result))) result = vec4(0.0, 0.0, 0.0, tMax);
     return result;
 }

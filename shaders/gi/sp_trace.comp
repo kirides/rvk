@@ -30,6 +30,14 @@ layout(set = 1, binding = 2, rgba32f) uniform writeonly image2D outGeom;    // p
 shared vec3 sRad[64];
 shared vec3 sDir[64];
 
+// diagnostics (RVK_GI_DIAG, rtgi.md 23): fixed-point sums of the probes' light terms, per sun class (0 shaded, 1 lit)
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer GiDiag {
+    uint v[];
+};
+shared vec4 sD0[64];  // luminance of: hit sun, hit point, hit bounce, hit emission
+shared vec4 sD1[64];  // ray type (0 far / sky, 1 hit, 2 back face), hit distance, albedo (linear) luminance, the engine's sky radiance along the ray
+shared vec4 sD2[64];  // far field towards +dir, 0, 0, 0
+
 void main() {
     GiPassParams p = GiPassParams(pc.params);
     RvkFrame f = pc.frame;
@@ -82,13 +90,29 @@ void main() {
         // the point-light pick of the hit: stratified over the probe's rays as well (rtgi.md 20)
         float u = fract(float(ray) * 0.5698402909 + float(giHash(uint(tile.x) * 9781u + uint(tile.y) * 6271u + p.volume.w * 26699u) & 0xFFFFFFu) / 16777216.0);
         dirOut = dir;
+        gGiTwoSided = true;  // the probe starts on a visible surface: a back face is a surface seen from behind (rtgi.md 23)
         vec4 hit = giShadeRay(p, f, v, P + N * 3.0 + V * 2.0, dir, p.screen4.x, u);
         radiance = hit.rgb;
+        const vec3 lw0 = vec3(0.2126, 0.7152, 0.0722);
+        vec4 d2 = vec4(0.0);
+        vec4 d1 = vec4(hit.w < 0.0 ? 2.0 : 1.0, hit.w, dot(gDiagLin, lw0), dot(rvkGiSkyRadiance(p.sky, dir), lw0));
         // a ray that ran out of reach without a hit: the probe volume's light at its end (the far field) instead of the sky
         if (hit.w >= p.screen4.x) {
             vec4 regs[7];
-            if (rvkGiLookupFast(v, P + dir * p.screen4.x, regs)) radiance = max(rvkGiEvalRegs(regs, -dir), vec3(0.0));
+            d1.x = 0.0;
+            if (rvkGiLookupFast(v, P + dir * p.screen4.x, regs)) {
+                d2.x = dot(max(rvkGiEvalRegs(regs, dir), vec3(0.0)), lw0);
+                vec3 deconv = rvkGiSkyRadiance(regs, dir);
+                d2.y = dot(deconv, lw0);
+                // the radiance arriving from beyond the reach is what the probe at the ray's end sees looking along `dir`: the
+                // probe's irradiance SH with the cosine convolution undone (as for the engine's sky), not its irradiance towards
+                // -dir (the light of a surface facing us: for a ray into the open sky the dim ground light). rtgi.md 23
+                radiance = deconv;
+            }
         }
+        sD0[lane] = vec4(dot(gDiagSun, lw0), dot(gDiagPoint, lw0), dot(gDiagBounce, lw0), dot(gDiagEmis, lw0));
+        sD1[lane] = d1;
+        sD2[lane] = d2;
     }
     sRad[lane] = radiance;
     sDir[lane] = dirOut;
@@ -134,6 +158,64 @@ void main() {
     }
     traced /= float(rays);
     flow /= float(rays);
+    if (p.screen5.w != 0u) {
+        // diagnostics: per probe the averages over its rays, into the class of the probe's sun term (shaded: the sun's shadow ray
+        // is blocked or the surface faces away). Fixed point 1 / 1024, wrapping counters read as deltas by the host
+        GiDiag dg = GiDiag(p.screen5.yz);
+        float vis = 0.0;
+        float nlp = dot(N, p.sunDir.xyz);
+        if (nlp > 0.05 && dot(p.sunColor.rgb, vec3(1.0)) > 1e-3) vis = rvkRtVisibility(f, P + N * 3.0, p.sunDir.xyz, 1.0, p.shade.z, 0.0, 0.0, RVK_RT_TRACE_OPAQUE);
+        uint b = vis > 0.5 ? 32u : 0u;
+        float inv = 1.0 / float(rays);
+        vec4 a0 = vec4(0.0), a1 = vec4(0.0);
+        float raw = 0.0, nFar = 0.0, nHit = 0.0, nBack = 0.0, nNear = 0.0, nMid = 0.0, alb = 0.0, skyAll = 0.0, hitRad = 0.0, farRad = 0.0;
+        for (uint i = 0u; i < rays; ++i) {
+            vec4 q0 = sD0[local * rays + i], q1 = sD1[local * rays + i], q2 = sD2[local * rays + i];
+            float rl = dot(sRad[local * rays + i], lw);
+            raw += rl;
+            skyAll += q1.w;
+            if (q1.x < 0.5) {
+                nFar += 1.0;
+                farRad += rl;     // far field used
+                a1.y += q1.w;     // the engine's sky along the same rays
+                a1.z += q2.x;     // far field evaluated towards +dir
+                a1.w += q2.y;     // far field as radiance (the SH's cosine convolution undone) towards +dir
+            } else if (q1.x < 1.5) {
+                nHit += 1.0;
+                a0 += q0;
+                alb += q1.z;
+                hitRad += rl;
+                if (q1.y < 200.0) nNear += 1.0;
+                if (q1.y < 1000.0) nMid += 1.0;
+            } else {
+                nBack += 1.0;
+            }
+        }
+        const float S = 1024.0 * inv;
+        float val[21];
+        val[20] = a1.w * S;
+        val[0] = 1024.0;
+        val[1] = dot(max(rvkGiEvalRegs(p.sky, N), vec3(0.0)), lw) * 1024.0;
+        val[2] = dl * 1024.0;
+        val[3] = dot(traced, lw) * 1024.0;
+        val[4] = raw * S;
+        val[5] = farRad * S;
+        val[6] = a0.x * S;
+        val[7] = a0.y * S;
+        val[8] = a0.z * S;
+        val[9] = a0.w * S;
+        val[10] = nFar * S;
+        val[11] = nHit * S;
+        val[12] = nBack * S;
+        val[13] = nNear * S;
+        val[14] = nMid * S;
+        val[15] = a1.y * S;
+        val[16] = a1.z * S;
+        val[17] = skyAll * S;
+        val[18] = alb * S;
+        val[19] = hitRad * S;
+        for (uint i = 0u; i < 21u; ++i) atomicAdd(dg.v[b + i], uint(clamp(val[i], 0.0, 4.0e6)));
+    }
     // a luminance ratio (per colour channel the noise of few rays turns into colour noise: measured, grain 3.7 -> 4.3); where
     // the DDGI has almost nothing (deep interiors) it is meaningless: neutral
     float tl = dot(traced, lw);
