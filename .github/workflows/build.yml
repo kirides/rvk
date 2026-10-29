@@ -68,6 +68,12 @@ jobs:
         with:
           path: dist/risen-enhanced-graphics.zip
           archive: false
+      # the optional frame generation DLL (37 MB), a separate asset so the main zip stays small
+      - name: Upload risen-enhanced-graphics-framegen.zip
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/risen-enhanced-graphics-framegen.zip
+          archive: false
       # symbols for crash dumps of a nightly (not part of the player zip)
       - name: Upload d3d9.pdb
         uses: actions/upload-artifact@v7
@@ -91,6 +97,11 @@ jobs:
           skip-decompress: true
       - uses: actions/download-artifact@v8
         with:
+          name: risen-enhanced-graphics-framegen.zip
+          path: nightly
+          skip-decompress: true
+      - uses: actions/download-artifact@v8
+        with:
           name: d3d9.pdb
           path: nightly
           skip-decompress: true
@@ -104,6 +115,7 @@ jobs:
           notes="Automated build of ${GITHUB_SHA} ($(date -u '+%Y-%m-%d %H:%M') UTC).
 
           - **risen-enhanced-graphics.zip**: unpack into <Risen>\\bin (d3d9.dll next to Risen.exe, plus rvk\\config.toml and rvk\\README.txt). In game, F11 opens the settings overlay.
+          - **risen-enhanced-graphics-framegen.zip**: optional, for AMD frame generation (developer setting for now): unpack it into <Risen>\\bin as well (adds rvk\\amd_fidelityfx_framegeneration_vk.dll, 37 MB).
           - **d3d9.pdb**: debug symbols (only for crash analysis)"
-          gh release create nightly nightly/risen-enhanced-graphics.zip nightly/d3d9.pdb \
+          gh release create nightly nightly/risen-enhanced-graphics.zip nightly/risen-enhanced-graphics-framegen.zip nightly/d3d9.pdb \
               --target "$GITHUB_SHA" --prerelease --title "Nightly (${GITHUB_SHA::7})" --notes "$notes"
