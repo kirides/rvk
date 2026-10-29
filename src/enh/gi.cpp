@@ -130,6 +130,7 @@ void Gi::apply(const Settings& s) {
     s_.strength = std::clamp(s_.strength, 0.0f, 1.0f);
     s_.bleed = std::clamp(s_.bleed, 0.0f, 1.0f);
     s_.directional = std::clamp(s_.directional, 0.0f, 1.0f);
+    s_.shadowFill = std::clamp(s_.shadowFill, 0.0f, 1.0f);
     const bool want = s.enabled && available();
     if (want && !on_) enable();
     if (!want && on_) disable();
@@ -524,7 +525,8 @@ void Gi::record(d3d9::PassContext& ctx) {
     hd.params[1] = 0.1f;  // normal bias (cells)
     hd.params[2] = 0.3f;  // view bias (cells)
     hd.params[3] = 2.0f;  // cascade blend band (cells)
-    hd.info[0] = s_.replaceLightmaps ? 0u : 1u;  // RVK_GI_FLAG_KEEP_STATIC: gi.lightmaps = keep
+    hd.info[0] = (s_.replaceLightmaps ? 0u : 1u) |  // RVK_GI_FLAG_KEEP_STATIC: gi.lightmaps = keep
+                 (static_cast<std::uint32_t>(std::clamp(s_.shadowFill, 0.0f, 1.0f) * 255.0f + 0.5f) << 8);  // bits 8-15: gi.shadow_fill
     std::memcpy(hd.sky, sky_, sizeof(hd.sky));
     hd.info[1] = static_cast<std::uint32_t>(s_.debug);
     hd.info[2] = kProbesPerCascade;
@@ -552,7 +554,7 @@ void Gi::record(d3d9::PassContext& ctx) {
     p.volume[2] = n;
     p.volume[3] = static_cast<std::uint32_t>(frame);
     // cut-outs solid (cheap); characters only with gi.characters (the scene holds them for the other consumers too)
-    p.flags[0] = 1u | (s_.characters ? 0u : 4u);
+    p.flags[0] = (s_.cutoutsTested ? 0u : 1u) | (s_.characters ? 0u : 4u);
     p.flags[1] = static_cast<std::uint32_t>(frameLights_.size());
     std::memcpy(&p.flags[3], &s_.emissive, sizeof(float));
     // the lights' direct light enters the probes where the baked lighting that carried it is replaced (rtgi.md 19)

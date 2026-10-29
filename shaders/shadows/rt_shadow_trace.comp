@@ -28,9 +28,6 @@ void main() {
         vec3 o = P + N * (p.range.z + vz * 0.0006);
         vec3 T = normalize(cross(L, abs(L.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
         vec3 B = cross(L, T);
-        float pixelAngle = 2.0 / max(abs(f.proj[1][1]) * f.viewport.y, 1.0);
-        float width0 = pixelAngle * vz;
-        float spread = max(p.sun.w, pixelAngle);
         uint rays = max(p.info.z, 1u);
         if (rays > 1u) {
             // the second ray is for pixels still in doubt: a settled history (long, fully lit or fully blocked, no variance) is
@@ -54,7 +51,10 @@ void main() {
                 sum += 1.0;
                 continue;
             }
-            sum += rvkRtVisibility(f, o, dir, 0.25, p.range.y, width0, spread, p.info.w);
+            // the ray cone is zero: the sun disc is sampled by the ray direction (the penumbra), so adding its angle (and the
+            // pixel's) to the cone as well read a leaf's opacity 5-7 mips down, where the cut-out averages to a solid card and
+            // every canopy cast a black blob; the cut-out is tested at its own resolution, the temporal pass averages the noise
+            sum += rvkRtVisibility(f, o, dir, 0.25, p.range.y, 0.0, 0.0, p.info.w);
         }
         vis = sum / float(rays);
     }

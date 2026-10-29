@@ -40,7 +40,7 @@ struct RvkGiCascade {
     ivec4 origin;   // the cell of the grid's minimum corner (probe positions: cell * spacing)
     vec4 spacing;   // x spacing (world units), y 1 / spacing, z depth cap (cells), w unused
 };
-const uint RVK_GI_FLAG_KEEP_STATIC = 1u;  // RvkGiVolume.info.x: the draws' own ambient beyond the outdoor sky stays (indoor colour, static lights)
+const uint RVK_GI_FLAG_KEEP_STATIC = 1u;  // RvkGiVolume.info.x bit 0: the draws' own ambient beyond the outdoor sky stays (indoor colour, static lights); bits 8-15 = gi.shadow_fill x 255
 
 // the per-frame header (enh::GiVolumeHeader, 304 bytes)
 layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer RvkGiVolume {

@@ -663,3 +663,47 @@ adds a little noise for a subtle gain; it is a setting, default 0.5.
 **Open**: moving-camera noise needs a metric that survives motion (a reference render with the history converged vs a single frame of
 the same pose after a cut); ring-2 spatial widening could also use the `variance` of the probes; the firefly cap near lamps may darken
 legitimately bright near-field light (the DDGI is coarse there): raising `10 x` is the knob.
+
+## 21. Deeper shadows than the engine: measured, foliage rays, shadow fill (2026-10-29)
+
+([C] = measured, [I] = inferred.) User observation: with the ray-traced lighting the shadows are much deeper / darker.
+
+**Measured** [C] (`tools/gi_shade_stats.py`; `water-compare.ps1 -EngineSetting 'water.enabled=true','gi.enabled=false' -Setting
+'gi.enabled=true'`, engine pictures reused; luma of the shaded pixels = engine luma < 60, dark = share below luma 12, p25 of the whole
+image; engine -> GI with solid foliage):
+
+| spot | shaded luma dL | dark share | p25 |
+|---|---|---|---|
+| beach_sun | -6.7 | 0.012 -> 0.019 | 51.6 -> 43.1 |
+| lake_jungle | -5.2 | 0.034 -> 0.172 | 25.9 -> 16.1 |
+| shadow_inland_a | -5.4 | 0.048 -> 0.129 | 29.3 -> 18.4 |
+| harbour_docks / jungle / swamp_camp | -2.6 / -2.3 / -3.2 | ~0 -> ~0 | -2.4 / -3.2 / -4.1 |
+| crystal_cave | 0.0 | 0.361 -> 0.362 | 9.6 -> 9.6 |
+
+So yes: the shade under trees, cliffs and in the lee of the beach is 5 - 40 % darker than the engine's, the caves are equal (the whole-
+image luma stays within +-3 because the lit parts are unchanged). The engine's ambient is a flat sky SH that every shaded point
+receives in full (plus its screen-space AO); the traced light is occluded by what is really there and bounces little (one bounce off
+dark ground, no grass / leaf cards in the TLAS, [I] part of why the forest floor loses most). Physically defensible, but deeper than the
+game's art direction and it crushes detail (lake_jungle's lower right).
+
+**Changes** [C]
+* `gi.cutouts` (Debug, default **tested**): the probe rays alpha-test foliage instead of treating each leaf card / frond as solid
+  (dense canopies blocked the sky through their transparent texels). lake_jungle dark 0.172 -> 0.157, shadow_inland_a 0.129 -> 0.084.
+  Cost (quicksave, 1600 x 900, `-PerfFrame` 24 frames): `gi.screen` 0.60 -> 0.98 ms, `gi` 0.44 -> 0.55 ms, frame GPU 2.64 -> 3.14 ms; fps
+  unchanged (CPU-bound, 232).
+* `gi.shadow_fill` (Lighting, Advanced, default **0.25**): the ambient never falls below this share of the engine's ambient
+  (`rvkMvGi`: `want = max(floor, le x fill)`, before the AO, so contact shade still darkens it). Tested 0.3 / 0.5 with tested foliage:
+  lake_jungle dark 0.157 -> 0.088 / 0.051 (engine 0.034), p25 17.4 -> 19.4 / 22.0 (engine 25.9); beach_sun shaded -7.1 -> -6.1 / -2.9;
+  shadow_inland_a p25 21.6 -> 23.7 / 25.1. **Side effect**: the same floor lifts interiors whose engine ambient is bright: crystal_cave
+  shaded +4.9 / +9.1 above the engine (dark 0.361 -> 0.181 / 0.128), because the material shader cannot tell cave from forest shade
+  (the engine's ambient and its sky factor are alike there, section 13 / 18). Default 0.25 is the compromise; 0 = the deep traced shade.
+  (The pub rows of that run are not comparable: its eye adaptation differs by 10 luma between runs.)
+
+**Open**: telling indoor from outdoor shade (the sun cascades' coverage, the zone's indoor flag) would let the fill apply outdoors only;
+grass / leaf cards in the TLAS and a second bounce would put real light back into the shade instead of an artificial floor.
+
+**With the shipped defaults** [C] (`out\water61029-161846`, `-Validation` clean, no VUID / SYNC lines; shaded luma GI - engine, p25 GI / engine):
+beach_sun -6.2 (44.4 / 51.6), lake_jungle -3.8 (18.8 / 25.9), shadow_inland_a -0.4 (23.1 / 29.3), jungle -1.6, swamp_camp -3.1, harbour_docks -2.6,
+monastery_hall -0.4, pub_interior -1.5; crystal_cave +3.4 (dark share 0.215 against the engine's 0.361: the floor's side effect). Before
+(solid foliage, no fill): beach -6.7, lake -5.2 (p25 16.1), shadow_inland_a -5.4 (p25 18.4), cave 0.0.
+

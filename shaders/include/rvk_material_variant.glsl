@@ -154,7 +154,10 @@ void rvkMvGi(vec3 P, vec3 n, vec3 V) {
     // lifted to a share (0.6) of the engine's, capped at a dim level: never lifts canopy or
     // contact shade of bright ambient, only deep darks (a fade by engine L0 cannot tell the cave from the sunny outdoors: rtgi.md 18)
     {
-        vec3 want = min(le, vec3(RVK_MV_FLOOR_MAX)) * RVK_MV_INDOOR_FLOOR;
+        // the shadow fill (gi.shadow_fill, rtgi.md 21): a share of the engine's whole ambient as a floor, anywhere (the traced
+        // shade under trees / cliffs measured 5 - 40 % darker than the engine's flat ambient); bits 8-15 of info.x
+        float fill = float((v.info.x >> 8) & 0xFFu) * (1.0 / 255.0);
+        vec3 want = max(min(le, vec3(RVK_MV_FLOOR_MAX)) * RVK_MV_INDOOR_FLOOR, le * fill);
         vec3 have = max(rvkGiAverage(regs), vec3(0.0));
         vec3 add = max(want - have, vec3(0.0));
         regs[0].w += add.x;

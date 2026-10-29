@@ -1567,6 +1567,35 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::Advanced,
         .requirements = caps::bit(caps::Cap::RayQuery),
     });
+    r.giFill = &reg.add({
+        .key = "gi.shadow_fill",
+        .label = "Shadow fill",
+        .category = "Lighting",
+        .description = "How dark the traced shade may get compared with the game's own flat ambient light: 0 lets shaded places "
+                       "fall as dark as the traced light says, higher keeps a share of the game's ambient there (softer, lighter "
+                       "shadows under trees and cliffs).",
+        .type = Type::Float,
+        .defaultValue = 0.25,
+        .min = 0,
+        .max = 1,
+        .format = "%.2f",
+        .flags = Flag::Advanced,
+        .requirements = caps::bit(caps::Cap::RayQuery),
+    });
+    r.giCutouts = &reg.add({
+        .key = "gi.cutouts",
+        .label = "GI foliage rays",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "How the traced light treats leaf cards and fronds. Solid: the whole card blocks (cheap, denser shade "
+                       "under trees). Tested: only the opaque part of the leaf texture blocks (the sky shows through).",
+        .type = Type::Enum,
+        .defaultValue = 1,
+        .options = {"solid", "tested"},
+        .optionLabels = {"Solid", "Tested"},
+        .flags = Flag::Debug | Flag::NoAB,
+        .requirements = caps::bit(caps::Cap::RayQuery),
+    });
     r.giLightCount = &reg.add({
         .key = "gi.light_count",
         .label = "GI light sources (most)",
