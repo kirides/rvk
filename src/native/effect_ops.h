@@ -411,6 +411,7 @@ private:
     std::unique_ptr<fxc::EffectDraw> after_, afterGot_;
     std::uint32_t afterMasters_ = 0;  // the HAL's master flags as the unit's code leaves them (SetBlend: blend, PSSM: stencil)
     hal::vulkan::EffectInfo* unitInfo_ = nullptr;
+    fx::ParameterValues valuesScratch_;              // composeEffect / the sprite batch: the working copy of the effect's values (capacity reused)
     fx::ParameterValues unitValues_;                 // the values OnSetParams leaves in the API effect (the composition's)
     std::vector<const void*> unitTextures_;          // ... and the textures (after OnResetParams' / the resets' nulls)
     int unitTech_ = -1;

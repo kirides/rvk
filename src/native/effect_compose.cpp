@@ -75,7 +75,8 @@ void applySamplers(const fx::Effect& e, const fx::Shader& shader, std::uint32_t 
 
 // HalEffect::applyConstants: the registers from c0 (float, int, bool)
 void applyConstants(const fx::Effect& e, const fx::Shader& shader, bool vertex, const fx::ParameterValues& values, EffectDraw& d) {
-    const fx::ConstantRegisters regs = fx::evaluateShaderConstants(e, shader, values);
+    static thread_local fx::ConstantRegisters regs;
+    fx::evaluateShaderConstants(e, shader, values, regs);
     const auto nf = static_cast<std::uint32_t>(regs.f.size() / 4);
     const auto ni = static_cast<std::uint32_t>(regs.i.size() / 4);
     const auto nb = static_cast<std::uint32_t>(regs.b.size());

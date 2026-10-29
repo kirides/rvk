@@ -1785,7 +1785,11 @@ bool setConstant(const Constant& c, const Parameter& param, std::span<const std:
 
 void fillConstants(const ConstantTable& table, const Effect& e, const ParameterValues& values, ConstantRegisters& regs) {
     for (const Constant& c : table.constants) {
-        const std::uint32_t idx = e.parameterIndex(c.name);
+        std::uint32_t idx = c.paramIndexCache;
+        if (idx == Constant::kUnresolved) {
+            idx = e.parameterIndex(c.name);
+            c.paramIndexCache = idx;
+        }
         if (idx == kNone || idx >= values.data.size()) {
             continue;
         }
@@ -1796,9 +1800,12 @@ void fillConstants(const ConstantTable& table, const Effect& e, const ParameterV
 namespace {
 
 void runWithInputs(const Effect& e, const Preshader& p, const ParameterValues& values, PresRegisters& pr) {
-    ConstantRegisters in;
+    static thread_local ConstantRegisters in;
+    in.f.clear();
+    in.i.clear();
+    in.b.clear();
     fillConstants(p.inputs, e, values, in);
-    pr.input = std::move(in.f);
+    pr.input.swap(in.f);
     runPreshader(p, pr);
 }
 
@@ -1806,12 +1813,24 @@ void runWithInputs(const Effect& e, const Preshader& p, const ParameterValues& v
 
 ConstantRegisters evaluateShaderConstants(const Effect& e, const Shader& s, const ParameterValues& values) {
     ConstantRegisters regs;
+    evaluateShaderConstants(e, s, values, regs);
+    return regs;
+}
+
+void evaluateShaderConstants(const Effect& e, const Shader& s, const ParameterValues& values, ConstantRegisters& regs) {
+    regs.f.clear();
+    regs.i.clear();
+    regs.b.clear();
     fillConstants(s.constants, e, values, regs);
     if (s.preshader == kNone || s.preshader >= e.preshaders.size()) {
-        return regs;
+        return;
     }
     const Preshader& p = e.preshaders[s.preshader];
-    PresRegisters pr;
+    static thread_local PresRegisters pr;
+    pr.output.clear();
+    pr.outInt.clear();
+    pr.outBool.clear();
+    pr.vinput.clear();
     runWithInputs(e, p, values, pr);
     // copy the registers the preshader writes (whole registers, like D3DX's upload)
     for (const PresInstruction& ins : p.code) {
@@ -1840,7 +1859,6 @@ ConstantRegisters evaluateShaderConstants(const Effect& e, const Shader& s, cons
             }
         }
     }
-    return regs;
 }
 
 std::vector<std::uint32_t> evaluateExpression(const Effect& e, const Preshader& p, const ParameterValues& values,

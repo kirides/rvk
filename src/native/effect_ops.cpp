@@ -630,7 +630,9 @@ EffectOps::Skip EffectOps::composeEffect(const std::uint8_t* filter, const std::
     // the effect holds (a class that sets nothing this call leaves the last value: the carry-over)
     // (O3: every unit starts from the effect's values / textures, as the HAL's pass does: a parameter nobody sets keeps its last
     // value; the mask's, defaults before O3, were all set by its parameter objects)
-    fx::ParameterValues values = info->currentValues();
+    // (V4: copy-assigned into a scratch kept across units: the by-value copy allocated one vector per parameter, ~25 units a frame)
+    fx::ParameterValues& values = valuesScratch_;
+    values = info->currentValues();
     std::vector<const void*> paramTextures(e.parameters.size(), nullptr);
     for (std::uint32_t i = 0; i < e.parameters.size(); ++i) paramTextures[i] = info->currentTexture(i);
     const std::int32_t inputs = get<std::int32_t>(filter, 0xc0);
@@ -858,7 +860,7 @@ EffectOps::Skip EffectOps::composeEffect(const std::uint8_t* filter, const std::
     }
     for (const std::uint32_t pi : resetTextures_) paramTextures[pi] = nullptr;
     unitInfo_ = hal::vulkan::EffectInfo::fromApiMutable(ptr(ptr(filter, 0xa8), 0x18));
-    unitValues_ = std::move(values);
+    unitValues_ = values;
     unitTextures_ = std::move(paramTextures);
     const int handleTech = info->techniqueOf(ptr(ptr(filter, 0xa8), 0x20));
     unitTech_ = handleTech >= 0 ? handleTech : info->currentTechnique();

@@ -177,7 +177,8 @@ EffectOps::Skip EffectOps::composeSprite(const std::uint8_t* sp) {
     if (!readAt(sp, 0x48, proj)) return Skip::Unreadable;
     const auto view = hal_.viewMatrix();
     matMul_(proj, wvp, &view);
-    fx::ParameterValues values = info->currentValues();
+    fx::ParameterValues& values = valuesScratch_;  // (V4: see EffectOps::composeEffect)
+    values = info->currentValues();
     std::memcpy(values.data[wvpParam].data(), wvp, std::min<std::size_t>(64, values.data[wvpParam].size()));
     std::vector<const void*> paramTextures(e.parameters.size(), nullptr);
     for (std::uint32_t i = 0; i < e.parameters.size(); ++i) paramTextures[i] = info->currentTexture(i);
@@ -276,7 +277,7 @@ EffectOps::Skip EffectOps::composeSprite(const std::uint8_t* sp) {
     // O3: what Flush leaves in the sprite effect (predictAfter): g_mWorldViewProj, the last attached image's texture, the technique
     // (SetTechnique(null) is rejected: unchanged)
     unitInfo_ = hal::vulkan::EffectInfo::fromApiMutable(ptr(gfx, 0x18));
-    unitValues_ = std::move(values);
+    unitValues_ = values;
     unitTextures_ = std::move(paramTextures);
     unitTech_ = info->currentTechnique();
     unitPasses_ = 0;

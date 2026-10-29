@@ -380,7 +380,8 @@ private:
     }
 
     void applyConstants(const fx::Shader& shader, bool vertex) {
-        const fx::ConstantRegisters regs = fx::evaluateShaderConstants(fx_, shader, values_);
+        static thread_local fx::ConstantRegisters regs;  // (V4: reused: the evaluation allocated its registers per pass)
+        fx::evaluateShaderConstants(fx_, shader, values_, regs);
         d3d9::Device& d = dev_.dev();
         const auto nf = static_cast<std::uint32_t>(regs.f.size() / 4);
         const auto ni = static_cast<std::uint32_t>(regs.i.size() / 4);

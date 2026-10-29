@@ -96,6 +96,10 @@ struct Constant {
     std::uint32_t bytes = 0;     // 4 * elements * rows * columns (D3DX's Bytes)
     std::vector<std::uint32_t> defaultValue;  // register-layout default (registerCount * 4 dwords, Bool: count), or empty
     std::vector<Constant> members;
+    // fillConstants: the owning effect's top-level parameter of this name (kUnresolved until the first lookup; V4: the name lookup
+    // was a string comparison per constant per pass)
+    static constexpr std::uint32_t kUnresolved = 0xFFFFFFFEu;
+    mutable std::uint32_t paramIndexCache = kUnresolved;
 };
 
 struct ConstantTable {
@@ -361,6 +365,8 @@ void fillConstants(const ConstantTable& table, const Effect& e, const ParameterV
 // All constants of a shader: CTAB constants from the parameters, then its preshader (if any) evaluated into the
 // float/int/bool registers it writes.
 ConstantRegisters evaluateShaderConstants(const Effect& e, const Shader& s, const ParameterValues& values);
+// the same into `out` (cleared first; its capacity is reused: the per-pass evaluation allocated three vectors plus the VM's registers)
+void evaluateShaderConstants(const Effect& e, const Shader& s, const ParameterValues& values, ConstantRegisters& out);
 
 // Value of an Expression state (or the index of an ArraySelector) as 32-bit components of the state value's type
 // (float bits / int / BOOL), D3DX conversion rules.
