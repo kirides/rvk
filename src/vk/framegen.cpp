@@ -288,7 +288,26 @@ bool FrameGen::createContext(Context& ctx, const FrameGenCreateInfo& info) {
     return true;
 }
 
+bool FrameGen::detachFromSwapchain() {
+    if (context_ == nullptr || !info_.swapchain || cfgSwapchain_ == VK_NULL_HANDLE) return true;
+    ffxConfigureDescFrameGeneration c{};
+    c.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
+    c.swapChain = reinterpret_cast<void*>(cfgSwapchain_);
+    c.presentCallback = reinterpret_cast<FfxApiPresentCallbackFunc>(const_cast<void*>(cfgPresent_));
+    c.presentCallbackUserContext = cfgPresentUser_;
+    c.frameGenerationCallback = nullptr;
+    c.frameGenerationCallbackUserContext = nullptr;
+    c.frameGenerationEnabled = false;
+    c.HUDLessColor = {};
+    ffxContext ctx = context_;
+    const ffxReturnCode_t rc = fn_->api.Configure(&ctx, &c.header);
+    cfgSwapchain_ = VK_NULL_HANDLE;
+    if (rc != FFX_API_RETURN_OK) spdlog::warn("framegen: detaching from the swapchain failed ({})", rc);
+    return rc == FFX_API_RETURN_OK;
+}
+
 void FrameGen::destroyContext() {
+    detachFromSwapchain();
     if (context_ != nullptr && fn_ != nullptr) {
         ffxContext c = context_;
         fn_->api.DestroyContext(&c, nullptr);
@@ -321,10 +340,24 @@ bool FrameGen::configure(const FrameGenConfigure& cfg) {
     if (context_ == nullptr) return false;
     ffxConfigureDescFrameGeneration c{};
     c.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
-    c.swapChain = nullptr;  // the manual model: no swapchain, the provider only interpolates
     c.frameGenerationEnabled = cfg.enabled;
     c.allowAsyncWorkloads = info_.asyncCompute;
-    c.flags = FFX_FRAMEGENERATION_FLAG_NO_SWAPCHAIN_CONTEXT_NOTIFY | cfg.debugFlags;
+    if (info_.swapchain) {
+        // the callback model: the swapchain interpolates inside its present (our callback runs the dispatch) and composes the UI
+        c.swapChain = reinterpret_cast<void*>(cfg.swapchain);
+        c.presentCallback = reinterpret_cast<FfxApiPresentCallbackFunc>(const_cast<void*>(cfg.presentCallback));
+        c.presentCallbackUserContext = cfg.presentUser;
+        c.frameGenerationCallback = reinterpret_cast<FfxApiFrameGenerationDispatchFunc>(&FrameGen::frameGenCallback);
+        c.frameGenerationCallbackUserContext = this;
+        c.flags = cfg.debugFlags;
+        resetFrame_.store(cfg.reset ? cfg.frameId : 0);
+        cfgSwapchain_ = cfg.swapchain;
+        cfgPresent_ = cfg.presentCallback;
+        cfgPresentUser_ = cfg.presentUser;
+    } else {
+        c.swapChain = nullptr;  // the manual model: no swapchain, the provider only interpolates
+        c.flags = FFX_FRAMEGENERATION_FLAG_NO_SWAPCHAIN_CONTEXT_NOTIFY | cfg.debugFlags;
+    }
     const VkExtent2D rect = cfg.rect.width != 0 ? cfg.rect : info_.displaySize;
     c.generationRect = {0, 0, static_cast<std::int32_t>(rect.width), static_cast<std::int32_t>(rect.height)};
     c.frameID = cfg.frameId;
@@ -345,7 +378,7 @@ bool FrameGen::prepare(const FrameGenPrepare& p) {
     ffxDispatchDescFrameGenerationPrepareV2 d{};
     d.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE_V2;
     d.frameID = p.frameId;
-    d.flags = FFX_FRAMEGENERATION_FLAG_NO_SWAPCHAIN_CONTEXT_NOTIFY;
+    d.flags = info_.swapchain ? 0 : FFX_FRAMEGENERATION_FLAG_NO_SWAPCHAIN_CONTEXT_NOTIFY;
     d.commandList = p.cmd;
     d.renderSize = {p.renderSize.width, p.renderSize.height};
     d.jitterOffset = {p.jitterX, p.jitterY};
@@ -371,6 +404,19 @@ bool FrameGen::prepare(const FrameGenPrepare& p) {
         return false;
     }
     return true;
+}
+
+// the swapchain's interpolation, inside its present (FgSwapchain::present holds the context mutex): the camera-cut reset of the
+// frame is OR-ed into the swapchain's own (it sets it for the first frame after the generator was enabled)
+long FrameGen::frameGenCallback(void* params, void* user) { return static_cast<FrameGen*>(user)->onFrameGeneration(params); }
+
+long FrameGen::onFrameGeneration(void* paramsPtr) {
+    auto* p = static_cast<ffxDispatchDescFrameGeneration*>(paramsPtr);
+    if (context_ == nullptr || fn_ == nullptr) return FFX_API_RETURN_ERROR_PARAMETER;
+    const std::uint64_t resetFrame = resetFrame_.load();
+    if (resetFrame != 0 && resetFrame == p->frameID) p->reset = true;
+    ffxContext c = context_;
+    return static_cast<long>(fn_->api.Dispatch(&c, &p->header));
 }
 
 bool FrameGen::dispatch(const FrameGenDispatch& d) {

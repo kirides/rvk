@@ -1,26 +1,34 @@
 #pragma once
 
-// Frame generation with AMD FidelityFX (FSR 3 frame generation; the ML provider of FSR 4 where the API offers it): stage F2 of
-// docs/research/frame-generation.md, the manual model. The AMD swapchain that presents the frames with AMD's pacing is stage F3.
+// Frame generation with AMD FidelityFX (FSR 3 frame generation; the ML provider of FSR 4 where the API offers it): stages F2 / F3
+// of docs/research/frame-generation.md. Two ways to show the frames:
+//   * the AMD frame generation swapchain (default, F3): vk::Swapchain creates AMD's swapchain (vk/fg_swapchain.h), the generator's
+//     context is configured with its callbacks, the interpolation runs inside the swapchain's present and AMD paces the generated
+//     and the real frame; the overlay is drawn by the present callback on both. This file records the Prepare (depth, motion,
+//     camera) and configures the generator every frame;
+//   * the manual model (framegen.manual, also the fallback when the swapchain cannot be created): the generated frame is computed
+//     into an image of ours, Device::present shows it first and the real frame half a base interval later.
 //
 // Per rendered frame (a frame is only generated while the game is in its gameplay state):
 //   AfterMainView   framegen.depth     the main view's hardware depth -> an R32F image in the D3D convention 0 (near) .. 1 (far)
 //                                      (shaders/upscale/prep.comp, the upscaler's own conversion: reversed-Z handled there)
 //   BeforeGui       framegen.hudless   a copy of the back buffer before the GUI is drawn (FG's HUDLessColor)
-//   BeforePresent   framegen.generate  a copy of the finished frame (the interpolation's colour input), ffxConfigure + Prepare
-//                                      (depth, the G-buffer's motion vectors, the camera, jitter, frame time, reset) + the
-//                                      interpolation into an image of ours: the frame between the previous real frame and this one
+//   BeforePresent   framegen.generate  swapchain model: ffxConfigure (frame id, HUDLessColor, callbacks, enabled) + Prepare (depth, the
+//                                      G-buffer's motion vectors, the camera, jitter, frame time, reset); the swapchain interpolates
+//                                      manual model: a copy of the finished frame (the interpolation's colour input), the same
+//                                      Configure + Prepare and the interpolation into an image of ours
 //                   framegen.debug     framegen.debug = motion | depth | hudless | generated replaces the shown frame by an input
 //
-// Device::present() then shows the generated frame first and the real frame half a base interval later (timed spacing of the
-// presenting thread; not the final pacing). HalDevice::SwapScreen captures the generated frame next to the real one
-// (screenshots frame_<n>_gen.png). Nothing exists (no passes, no transients, no DLL) while framegen.mode is off.
+// Manual model: Device::present() shows the generated frame first and the real frame half a base interval later. HalDevice::SwapScreen
+// captures the generated frame next to the real one (screenshots frame_<n>_gen.png; swapchain model: real frames only). Nothing
+// exists (no passes, no transients, no DLL) while framegen.mode is off.
 //
 // Motion vectors, depth and colour are the ones the upscaler uses: the G-buffer's motion (uv units, previous - current, jitter
 // free; camera motion everywhere, per-object motion for characters with upscale.object_motion) and the hardware depth. The G-buffer
 // is forced on while frame generation is (like FSR does). With the upscaler on, the camera jitter is the one FSR was given.
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 
@@ -42,10 +50,11 @@ struct FrameGenFacts {
     bool paused = false;         // the game is paused (identical frames)
     bool mainView = true;        // the frame had a main view (the camera is valid)
     bool inputs = true;          // depth prepared and G-buffer motion written for this frame
-    bool sizeOk = true;          // the back buffer has the size the context was made for
+    bool sizeOk = true;          // the render size fits the display
+    bool presentSizeOk = true;   // swapchain model: the back buffer is the swapchain's size (the generator interpolates the swapchain's images)
     bool unpaced = false;        // a loading-screen frame
 };
-enum class FrameGenBlock : std::uint8_t { None, NoProvider, Menu, Loading, Paused, NoMainView, NoInputs, Size };
+enum class FrameGenBlock : std::uint8_t { None, NoProvider, Menu, Loading, Paused, NoMainView, NoInputs, Size, PresentSize };
 FrameGenBlock frameGenBlocker(const FrameGenFacts& f);
 const char* frameGenBlockName(FrameGenBlock b);
 
@@ -86,7 +95,7 @@ private:
 
 // ---- the feature ----------------------------------------------------------------------------------------------------------
 
-class FrameGeneration {
+class FrameGeneration final : public d3d9::Device::FrameGenClient {
 public:
     struct Settings {
         FrameGenMode mode = FrameGenMode::Off;
@@ -95,11 +104,24 @@ public:
     };
 
     explicit FrameGeneration(d3d9::Device& device);
-    ~FrameGeneration();
+    ~FrameGeneration() override;
     FrameGeneration(const FrameGeneration&) = delete;
     FrameGeneration& operator=(const FrameGeneration&) = delete;
 
     void apply(const Settings& s);
+    // the generator's context goes (synchronously) and the swapchain backend is released: before the overlay and the device are torn down
+    void shutdown();
+    // frame generation is meant to present through AMD's swapchain (mode on, not manual, not failed): the HAL keeps exclusive
+    // fullscreen off then
+    bool active() const { return on_ && !failed_; }
+    bool wantsSwapchain() const { return on_ && !failed_ && !manualEffective(); }
+    // the swapchain is about to be re-created or destroyed (d3d9::Device::FrameGenClient)
+    void swapchainWillChange() override;
+    // base / output numbers for the log lines (frames generated / shown, resets ...)
+    struct Counters {
+        std::uint64_t generated = 0, shown = 0, resets = 0, cuts = 0, blocked = 0;
+    };
+    Counters counters() const { return {frames_, shown_, resets_, cuts_, blocked_}; }
     // frame generation needs the G-buffer's motion vectors
     bool wantsGbuffer() const { return s_.mode != FrameGenMode::Off && !failed_; }
     // once per present, before the passes of that frame run (engine thread): the engine's menu / loading / pause state
@@ -112,9 +134,13 @@ private:
     void recordHudless(d3d9::PassContext& ctx);
     void recordGenerate(d3d9::PassContext& ctx);
     void recordDebug(d3d9::PassContext& ctx);
-    bool ensureContext(VkExtent2D display, VkFormat format);
+    bool ensureContext(VkExtent2D display, VkFormat format, bool swapchain, VkFormat hudlessFormat);
     bool ensurePipelines(VkFormat target);
     void dropContext();
+    bool manualEffective() const { return s_.manual || fallbackManual_; }
+    void updateBackend();           // the swapchain backend follows the mode (create / release; fall back to the manual model)
+    void recordSwapchain(d3d9::PassContext& ctx, FrameGenBlock blocker, bool cut, const FrameGenPose& pose, VkExtent2D display);
+    const char* hudlessKey() const { return hudlessIndex_ == 0 ? "framegen.hudless.0" : "framegen.hudless.1"; }
     void enable();
     void disable();
     void logBlock(FrameGenBlock b);
@@ -145,6 +171,13 @@ private:
     // log state
     FrameGenBlock lastBlock_ = FrameGenBlock::None;
     bool manualNoticed_ = false;
+    bool fallbackManual_ = false;       // the swapchain could not be created: the manual model instead
+    std::chrono::steady_clock::time_point retryAt_{};  // swapchain model pending (minimised window ...): next attempt
+    int hudlessIndex_ = 0;              // the HUD-less copy alternates: the swapchain's interpolation reads the previous one meanwhile
+    bool configured_ = false;           // swapchain model: the generator is configured (callbacks attached)
+    bool lastEnabled_ = false;
+    std::uint64_t lastFrameId_ = 0;
+    std::uint64_t lastLogSwapchain_ = 0;
     std::uint64_t frames_ = 0, shown_ = 0, resets_ = 0, cuts_ = 0, blocked_ = 0, ringWaits_ = 0;
     double ringWaitMs_ = 0.0;
     double lastLog_ = -1e9;

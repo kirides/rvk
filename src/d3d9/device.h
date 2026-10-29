@@ -42,6 +42,7 @@
 #include "vk/formats.h"
 #include "vk/frames.h"
 #include "vk/crash_markers.h"
+#include "vk/fg_swapchain.h"
 #include "vk/gputimer.h"
 #include "vk/image.h"
 #include "vk/mesh_arena.h"
@@ -463,6 +464,12 @@ public:
     // records draws inside a dynamic rendering scope of one colour attachment of `extent` (LOAD / STORE; viewport, scissor,
     // pipeline and descriptor sets are the overlay's own)
     virtual void record(VkCommandBuffer cmd, VkExtent2D extent) = 0;
+    // The AMD frame generation swapchain draws the overlay in its present callback (another thread, on the generated and the real
+    // frame): prepare builds the UI on the render thread and keeps its draw lists (true: there is something to draw), recordPrepared
+    // draws the latest ones into the scope (any thread; the same contract as record)
+    virtual bool prepare(VkExtent2D /*extent*/) { return false; }
+    virtual void recordPrepared(VkCommandBuffer /*cmd*/, VkExtent2D /*extent*/) {}
+    virtual bool hasPrepared() { return false; }
 };
 
 // What an injected pass gets (Device::inject, d3d9/inject.h; render thread). `cmd` is the frame's command buffer outside any
@@ -712,6 +719,40 @@ public:
     void windowResized();
     void setVsync(bool vsync);
     bool vsync() const { return options_.vsync; }
+    // ---- AMD frame generation swapchain (vk/fg_swapchain.h, enh/framegen.h) ----
+    // Switches the presentation to AMD's swapchain (or back to ours). Render thread, between frames: waits for the GPU and
+    // re-creates the swapchain. `loaderDll` = the FidelityFX loader. True when the swapchain is the requested kind afterwards;
+    // false: the reason is swapchain().frameGenReason() (ours is in use; a minimised window is retried by the caller).
+    bool setFrameGenSwapchain(bool want, const std::filesystem::path& loaderDll);
+    bool frameGenSwapchainActive() const { return swapchain_.frameGenActive(); }
+    // shutdown: the generator's context goes (FrameGenClient), then AMD's swapchain, without building another
+    void shutdownFrameGenSwapchain();
+    vk::FgSwapchain* frameGenSwapchain() { return swapchain_.frameGen(); }
+    // The generator's owner: told (render thread, presenter idle) before the swapchain is re-created or destroyed so that it
+    // drops what refers to it (the generator context must go before the swapchain's)
+    struct FrameGenClient {
+        virtual ~FrameGenClient() = default;
+        virtual void swapchainWillChange() = 0;
+    };
+    void setFrameGenClient(FrameGenClient* client) { fgClient_ = client; }
+    // the generator runs for this present (set from its BeforePresent pass): the pacer holds the base rate at half the output rate
+    void setFrameGenRunning(bool on);
+    bool frameGenRunning() const { return fgRunning_; }
+    // frame generation swapchain: until the previous present returned and the GPU work it queued (interpolation) is done (the
+    // generator's calls are recorded afterwards: its view ring, frame-generation.md 9.4)
+    bool waitFrameGenPresent();
+    // numbers since the last call, for the 5 s log lines
+    struct FrameGenReport {
+        bool swapchain = false;
+        double seconds = 0.0;
+        std::uint64_t basePresents = 0;     // our presents (rendered frames shown)
+        std::uint64_t realPresents = 0;     // the swapchain's presents to the display (generated frames included)
+        std::uint64_t callbacks = 0, generated = 0, uiFrames = 0;
+        double callbackMs = 0.0;
+        std::vector<double> gapsMs;         // the real presents' gaps (the sampler, [debug] perf only)
+        std::vector<double> times;          // ... and their times (seconds)
+    };
+    FrameGenReport takeFrameGenReport();
     // present-rate cap (0 = the refresh rate with vsync, none without); applies at the next present
     void setMaxFps(double fps);
     // the opaque passes' draws grouped by pipeline (vulkan.batch_draws, docs/research/performance.md 12); applies from the next
@@ -778,6 +819,8 @@ public:
         float intervalMs = 0.0f;  // present to present
         float cpuMs = 0.0f;       // engine + HAL: end of one present() to the start of the next
         float gpuMs = -1.0f;      // GPU time of the latest measured submission (-1: no GPU timer)
+        float baseFps = 0.0f;     // frame generation: rendered frames per second (last second); 0 = no frame generation
+        float outputFps = 0.0f;   // ... and frames shown per second (generated ones included)
     };
     const LiveFrame& liveFrame() const { return live_; }
     Surface* backBuffer() { return backBufferSurface_; }
@@ -1215,6 +1258,16 @@ private:
     vk::Presenter presenter_;
     void recreateSwapchain();
     vk::FramePacer pacer_;
+    FrameGenClient* fgClient_ = nullptr;
+    bool fgRunning_ = false;
+    bool fgUiInstalled_ = false;
+    // live output / base rate (once a second) and the report window
+    std::chrono::steady_clock::time_point fgTick_{};
+    std::uint64_t fgTickBase_ = 0, fgTickReal_ = 0, fgTickGen_ = 0;
+    std::chrono::steady_clock::time_point fgReportAt_{};
+    std::uint64_t fgReportBase_ = 0, fgReportReal_ = 0;
+    void fgStatsTick(std::chrono::steady_clock::time_point now);
+    void rebuildSwapchain(std::uint32_t width, std::uint32_t height);
     std::chrono::steady_clock::time_point pacerChecked_{};
     void* pacerMonitor_ = nullptr;
     double pacerMonitorRate_ = 0.0;

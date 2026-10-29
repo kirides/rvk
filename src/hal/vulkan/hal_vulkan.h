@@ -618,6 +618,9 @@ private:
     void applyGbuffer();
     void applyUpscale();
     void applyFramegen();
+    void applyFullscreen();
+    void logFrameGen(double secs);
+    bool exclusiveBlockedLogged_ = false;
     void applyShadows();
     void applyLod();
     std::chrono::steady_clock::time_point settingsDirtySince_{};

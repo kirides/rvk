@@ -34,6 +34,8 @@ public:
     // render thread: until the queued present has returned; then the swapchain may be used. Returns the latest present's
     // result since the last call (VK_SUCCESS when none).
     VkResult waitIdle();
+    // render thread: until the queued present has returned, without collecting its result (waitIdle still reports it)
+    void waitDone();
 
     // statistics: summed ms inside vkQueuePresentKHR (present thread); taken and zeroed
     double takePresentMs();

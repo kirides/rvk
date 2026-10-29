@@ -619,6 +619,16 @@ VkResult Context::queueSubmit(const VkSubmitInfo2& submit, VkFence fence) {
     return r;
 }
 
+VkResult Context::queueSubmit(std::uint32_t submitCount, const VkSubmitInfo* submits, VkFence fence) {
+    VkResult r;
+    {
+        const std::lock_guard lock(queueMutex_);
+        r = vkQueueSubmit(queue_, submitCount, submits, fence);
+    }
+    if (r == VK_ERROR_DEVICE_LOST) reportDeviceLost("vkQueueSubmit");
+    return r;
+}
+
 VkResult Context::queuePresent(const VkPresentInfoKHR& present) {
     VkResult r;
     {

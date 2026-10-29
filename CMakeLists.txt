@@ -382,6 +382,8 @@ add_library(rvk_core STATIC
     src/vk/frames.cpp
     src/vk/framegen.cpp
     src/vk/framegen.h
+    src/vk/fg_swapchain.cpp
+    src/vk/fg_swapchain.h
     src/vk/fsr.cpp
     src/vk/fsr.h
     src/vk/frames.h

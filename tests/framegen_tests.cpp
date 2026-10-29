@@ -8,6 +8,7 @@
 #include "core/caps.h"
 #include "core/settings.h"
 #include "test.h"
+#include "vk/fg_swapchain.h"
 #include "vk/framegen.h"
 
 using namespace rvk;
@@ -139,6 +140,13 @@ TEST(framegen_blocker_priority) {
     enh::FrameGenFacts g;
     g.sizeOk = false;
     CHECK(enh::frameGenBlocker(g) == FrameGenBlock::Size);
+    // the swapchain model interpolates the swapchain's images: a back buffer of another size cannot be generated from
+    enh::FrameGenFacts h;
+    h.presentSizeOk = false;
+    CHECK(enh::frameGenBlocker(h) == FrameGenBlock::PresentSize);
+    h.inputs = false;
+    CHECK(enh::frameGenBlocker(h) == FrameGenBlock::NoInputs);
+    CHECK(std::string(enh::frameGenBlockName(FrameGenBlock::PresentSize)).find("swapchain") != std::string::npos);
     for (const auto b : {FrameGenBlock::None, FrameGenBlock::NoProvider, FrameGenBlock::Menu, FrameGenBlock::Loading, FrameGenBlock::Paused,
                          FrameGenBlock::NoMainView, FrameGenBlock::NoInputs, FrameGenBlock::Size}) {
         CHECK(std::string(enh::frameGenBlockName(b)).size() > 3);
@@ -201,4 +209,36 @@ TEST(framegen_state_reset_rules) {
     s = st.advance(FrameGenBlock::None, false);
     CHECK(s.reset && s.frameId == 7);
     CHECK(st.activeFrames() == 7);
+}
+
+// ---- the AMD swapchain's helpers (vk/fg_swapchain.h) ---------------------------------------------------------------------------
+
+TEST(framegen_swapchain_layouts_of_ffx_states) {
+    // FfxApiResourceState bit values (ffx_api_types.h): the layouts the present callback transitions from / back to
+    CHECK(vk::fgLayoutOfState(1u << 1) == VK_IMAGE_LAYOUT_GENERAL);                      // UNORDERED_ACCESS: the interpolation output
+    CHECK(vk::fgLayoutOfState((1u << 3) | (1u << 2)) == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);  // PIXEL_COMPUTE_READ: the replacement image
+    CHECK(vk::fgLayoutOfState(1u << 2) == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    CHECK(vk::fgLayoutOfState(1u << 4) == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);         // COPY_SRC: the composition output
+    CHECK(vk::fgLayoutOfState(1u << 5) == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    CHECK(vk::fgLayoutOfState(1u << 7) == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);              // PRESENT: the real swapchain image
+    CHECK(vk::fgLayoutOfState(1u << 8) == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    CHECK(vk::fgLayoutOfState(1u << 0) == VK_IMAGE_LAYOUT_GENERAL);
+}
+
+TEST(framegen_gap_statistics) {
+    // 120 Hz output from 60 fps rendered: the generated -> real gap a little shorter than the real -> generated one
+    std::vector<double> gaps;
+    for (int i = 0; i < 200; ++i) gaps.push_back(i % 2 == 0 ? 8.2 : 8.46);
+    const vk::FgGapStats g = vk::fgGapStats(gaps);
+    CHECK(g.n == 200 && g.stalls == 0);
+    CHECK(std::abs(g.mean - 8.33) < 1e-9);
+    CHECK(std::abs(g.stddev - 0.13) < 1e-9);
+    CHECK(std::abs(g.evenMean - 8.2) < 1e-9 && std::abs(g.oddMean - 8.46) < 1e-9);
+    CHECK(g.evenStd < 1e-9 && g.oddStd < 1e-9);
+    CHECK(g.p50 >= 8.2 && g.p99 <= 8.46 && g.max == 8.46);
+    // a stall is counted and kept out of the moments
+    gaps.push_back(480.0);
+    const vk::FgGapStats h = vk::fgGapStats(gaps);
+    CHECK(h.n == 200 && h.stalls == 1 && std::abs(h.mean - 8.33) < 1e-9);
+    CHECK(vk::fgGapStats({}).n == 0);
 }

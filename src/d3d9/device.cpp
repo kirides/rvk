@@ -403,7 +403,7 @@ bool Device::resize(std::uint32_t width, std::uint32_t height) {
     options_.height = height;
     if (swapchain_.valid() && (swapchain_.extent().width != width || swapchain_.extent().height != height)) {
         presenter_.waitIdle();
-        swapchain_.recreate(width, height);
+        rebuildSwapchain(width, height);
     }
     return true;
 }
@@ -426,8 +426,123 @@ void Device::setVsync(bool vsync) {
     presenter_.waitIdle();
     swapchain_.setVsync(vsync);
     if (swapchain_.valid()) {
-        swapchain_.recreate(swapchain_.extent().width, swapchain_.extent().height);
+        rebuildSwapchain(swapchain_.extent().width, swapchain_.extent().height);
     }
+}
+
+// every re-creation of the swapchain: the generator's context (frame generation swapchain) goes first, it belongs to the old one
+void Device::rebuildSwapchain(std::uint32_t width, std::uint32_t height) {
+    if (swapchain_.frameGenActive() && fgClient_ != nullptr) fgClient_->swapchainWillChange();
+    swapchain_.recreate(width, height);
+}
+
+bool Device::setFrameGenSwapchain(bool want, const std::filesystem::path& loaderDll) {
+    if (options_.offscreen || !swapchain_.valid()) return false;
+    if (want == swapchain_.frameGenActive()) return true;
+    presenter_.waitIdle();
+    if (fgClient_ != nullptr && swapchain_.frameGenActive()) fgClient_->swapchainWillChange();
+    if (!want) {
+        if (auto* fg = swapchain_.frameGen()) fg->setUi({});
+        fgUiInstalled_ = false;
+    }
+    swapchain_.setFrameGen(want, loaderDll);
+    recreateSwapchain();
+    if (want && swapchain_.frameGenActive() && !fgUiInstalled_) {
+        // the overlay in the swapchain's present callback (on AMD's threads): the UI built on the render thread at present
+        vk::FgUiHook hook;
+        hook.wants = [this] { return overlay_ != nullptr && !overlayIntoBackBuffer_ && overlay_->hasPrepared(); };
+        hook.record = [this](VkCommandBuffer cmd, VkImageView, VkExtent2D extent) {
+            if (overlay_ != nullptr) overlay_->recordPrepared(cmd, extent);
+        };
+        swapchain_.frameGen()->setUi(std::move(hook));
+        fgUiInstalled_ = true;
+        if (options_.perf) swapchain_.frameGen()->startSampler();  // the real presents' times (a spinning thread: [debug] perf only)
+    }
+    pacerChecked_ = {};
+    pacerRequested_ = -1.0;
+    fgTick_ = {};
+    return swapchain_.frameGenActive() == want;
+}
+
+void Device::shutdownFrameGenSwapchain() {
+    swapchain_.setFrameGen(false);
+    if (!swapchain_.frameGenActive()) return;
+    presenter_.waitIdle();
+    if (fgClient_ != nullptr) fgClient_->swapchainWillChange();
+    if (auto* fg = swapchain_.frameGen()) fg->setUi({});
+    fgUiInstalled_ = false;
+    swapchain_.releaseFrameGen();
+}
+
+void Device::setFrameGenRunning(bool on) {
+    if (on == fgRunning_) return;
+    fgRunning_ = on;
+    pacerChecked_ = {};  // the base rate is half the output rate while frames are generated
+}
+
+// once a second: the live base / output rates for the overlay (frame generation only; zero otherwise)
+void Device::fgStatsTick(std::chrono::steady_clock::time_point now) {
+    vk::FgSwapchain* fg = swapchain_.frameGen();
+    if (fgTick_ == std::chrono::steady_clock::time_point{}) {
+        fgTick_ = now;
+        fgTickBase_ = stats_.presentsQueued;
+        fgTickGen_ = stats_.generatedPresented;
+        fgTickReal_ = fg != nullptr ? fg->realPresentCount() : 0;
+        return;
+    }
+    const double dt = std::chrono::duration<double>(now - fgTick_).count();
+    if (dt < 1.0) return;
+    const std::uint64_t base = stats_.presentsQueued - fgTickBase_;
+    const std::uint64_t gen = stats_.generatedPresented - fgTickGen_;
+    if (!fgRunning_) {
+        live_.baseFps = live_.outputFps = 0.0f;
+    } else if (fg != nullptr) {
+        const std::uint64_t real = fg->realPresentCount();
+        live_.baseFps = static_cast<float>(static_cast<double>(base) / dt);
+        live_.outputFps = static_cast<float>(static_cast<double>(real - fgTickReal_) / dt);
+        fgTickReal_ = real;
+    } else {
+        live_.baseFps = static_cast<float>(static_cast<double>(base - gen) / dt);
+        live_.outputFps = static_cast<float>(static_cast<double>(base) / dt);
+    }
+    if (fg != nullptr) fgTickReal_ = fg->realPresentCount();
+    fgTick_ = now;
+    fgTickBase_ = stats_.presentsQueued;
+    fgTickGen_ = stats_.generatedPresented;
+}
+
+Device::FrameGenReport Device::takeFrameGenReport() {
+    FrameGenReport r;
+    vk::FgSwapchain* fg = swapchain_.frameGen();
+    const auto now = std::chrono::steady_clock::now();
+    if (fgReportAt_ == std::chrono::steady_clock::time_point{}) fgReportAt_ = now;
+    r.seconds = std::chrono::duration<double>(now - fgReportAt_).count();
+    r.swapchain = fg != nullptr;
+    r.basePresents = stats_.presentsQueued - fgReportBase_;
+    fgReportBase_ = stats_.presentsQueued;
+    fgReportAt_ = now;
+    if (fg != nullptr) {
+        const std::uint64_t real = fg->realPresentCount();
+        r.realPresents = real - fgReportReal_;
+        fgReportReal_ = real;
+        const vk::FgSwapchain::Counters c = fg->takeCounters();
+        r.callbacks = c.callbacks;
+        r.generated = c.generatedFrames;
+        r.uiFrames = c.uiFrames;
+        r.callbackMs = c.callbackMs;
+        const std::vector<vk::FgPresentSample> samples = fg->takeSamples();
+        for (std::size_t i = 0; i < samples.size(); ++i) {
+            r.times.push_back(samples[i].seconds);
+            if (i > 0) r.gapsMs.push_back((samples[i].seconds - samples[i - 1].seconds) * 1000.0 / static_cast<double>(std::max<std::uint64_t>(1, samples[i].count - samples[i - 1].count)));
+        }
+    }
+    return r;
+}
+
+bool Device::waitFrameGenPresent() {
+    if (!swapchain_.frameGenActive()) return true;
+    presenter_.waitDone();
+    return swapchain_.waitFrameGenDone(swapchain_.frameGenPresentsQueued(), 2'000'000'000ull);
 }
 
 void Device::resetPacer() {
@@ -448,7 +563,7 @@ void Device::setRefreshCap(double hz) {
 
 bool Device::setFullScreenExclusive(void* monitor, bool hold) {
     if (options_.offscreen || !swapchain_.valid()) return false;
-    if (!ctx_.features().fullScreenExclusive) monitor = nullptr;
+    if (!ctx_.features().fullScreenExclusive || swapchain_.frameGenWanted()) monitor = nullptr;  // not with AMD's swapchain
     bool recreated = false;
     if (monitor != fseMonitor_) {
         recreated = true;
@@ -964,6 +1079,13 @@ void Device::updatePacer() {
     if (menuCapped) {
         rate = menuCap_;
     }
+    // Frame generation: the rates above are the OUTPUT rate (the monitor's refresh, vulkan.max_fps); every rendered frame is shown
+    // with a generated one, so the engine's base cadence is half of it (docs/research/frame-generation.md 4.1). The menu cap is
+    // not halved: nothing is generated in menus.
+    const bool halved = fgRunning_ && !menuCapped && rate > 0.0;
+    if (halved) {
+        rate *= 0.5;
+    }
     // an unlocked vsync pacer retries the lock (DWM's measured period strays under load)
     vk::VblankClock probe;
     const double vblanks = rate > 0.0 ? std::round(refresh / rate) : 0.0;
@@ -977,12 +1099,14 @@ void Device::updatePacer() {
         vk::VblankClock clock;
         const bool dwm = vk::dwmVblankClock(clock);
         spdlog::info("vulkan: DWM composition clock {}", dwm ? std::format("{:.3f} Hz", clock.rate()) : std::string("unavailable"));
-        spdlog::info("vulkan: frame pacing at {:.3f} fps{}{}", pacer_.rate(),
+        const double outRate = halved ? rate * 2.0 : rate;
+        spdlog::info("vulkan: frame pacing at {:.3f} fps{}{}{}", pacer_.rate(),
                      menuCapped                                       ? " (menu)"
-                     : options_.maxFps > 0.0 && rate == options_.maxFps ? " (max_fps)"
-                     : refreshCapped && rate == refreshCap_           ? " (vsync, the game's refresh rate)"
+                     : options_.maxFps > 0.0 && outRate == options_.maxFps ? " (max_fps)"
+                     : refreshCapped && outRate == refreshCap_           ? " (vsync, the game's refresh rate)"
                      : options_.vsync                                 ? " (vsync)"
                                                                       : "",
+                     halved ? std::format(", frame generation: base = output {:.3f} fps / 2", outRate) : std::string(),
                      pacer_.vblankLocked() ? ", locked to DWM's vblank" : "");
     }
 }
@@ -1089,7 +1213,9 @@ void Device::present() {
     // the swapchain is the present thread's until its present returned
     const VkResult previous = presenter_.waitIdle();
     stats_.presentMs += presenter_.takePresentMs();
-    if (previous == VK_ERROR_OUT_OF_DATE_KHR || previous == VK_SUBOPTIMAL_KHR) {
+    if (previous == VK_SUBOPTIMAL_KHR && swapchain_.frameGenActive()) {
+        ++stats_.presentSuboptimal;  // AMD's swapchain: a hint, not worth re-creating the whole frame generation setup
+    } else if (previous == VK_ERROR_OUT_OF_DATE_KHR || previous == VK_SUBOPTIMAL_KHR) {
         ++stats_.presentSuboptimal;
         ++stats_.swapchainRecreates;
         recreateSwapchain();
@@ -1112,10 +1238,11 @@ void Device::present() {
         // serviceFullScreenExclusive re-acquires it)
         ++stats_.acquireFailures;
         submitFrame(VK_NULL_HANDLE, VK_NULL_HANDLE);
-        if (!swapchain_.exclusiveLost()) recreateSwapchain();
+        if (!swapchain_.exclusiveLost() && !swapchain_.acquireNotReady()) recreateSwapchain();
         beginFrame();
         return;
     }
+    const bool fgSc = swapchain_.frameGenActive();  // AMD's swapchain: the replacement image, its callback draws the overlay
     std::optional<RegionScope> presentRegion;
     presentRegion.emplace(*this, showGenerated ? "Present (generated)" : "Present");
     VkCommandBuffer cmd = frames_.cmd();
@@ -1156,7 +1283,10 @@ void Device::present() {
     b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     // the overlay (src/overlay) on top of the copied frame: only in the swapchain image, never in the back buffer that
     // captures read
-    if (overlay_ != nullptr && !overlayIntoBackBuffer_ && swapchain_.view(imageIndex) != VK_NULL_HANDLE && overlay_->active()) {
+    if (fgSc) {
+        // built here (the render thread), drawn by the swapchain's present callback on every frame it shows
+        if (overlay_ != nullptr && !overlayIntoBackBuffer_ && overlay_->active()) overlay_->prepare(ext);
+    } else if (overlay_ != nullptr && !overlayIntoBackBuffer_ && swapchain_.view(imageIndex) != VK_NULL_HANDLE && overlay_->active()) {
         b.dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
         b.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
         b.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -1181,14 +1311,22 @@ void Device::present() {
         b.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
         b.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     }
-    b.dstStageMask = VK_PIPELINE_STAGE_2_NONE;
-    b.dstAccessMask = VK_ACCESS_2_NONE;
-    b.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    if (fgSc) {
+        // the replacement image goes to the API in the layout it reads (frame-generation.md F3: ReplacementBufferTransferState)
+        b.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        b.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT;
+        b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    } else {
+        b.dstStageMask = VK_PIPELINE_STAGE_2_NONE;
+        b.dstAccessMask = VK_ACCESS_2_NONE;
+        b.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    }
     vkCmdPipelineBarrier2(cmd, &di);
     presentRegion.reset();
     submitFrame(acquired, swapchain_.renderedSemaphore(imageIndex));
     presenter_.present(imageIndex);
     ++stats_.presentsQueued;
+    fgStatsTick(std::chrono::steady_clock::now());
     if (showGenerated) {
         ++stats_.generatedPresented;
         generatedAt = std::chrono::steady_clock::now();
@@ -1208,7 +1346,7 @@ void Device::recreateSwapchain() {
     RECT rc{};
     GetClientRect(options_.window, &rc);
     if (rc.right > 0 && rc.bottom > 0) {
-        swapchain_.recreate(static_cast<std::uint32_t>(rc.right), static_cast<std::uint32_t>(rc.bottom));
+        rebuildSwapchain(static_cast<std::uint32_t>(rc.right), static_cast<std::uint32_t>(rc.bottom));
     }
 }
 

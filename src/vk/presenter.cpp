@@ -49,6 +49,11 @@ VkResult Presenter::waitIdle() {
     return r;
 }
 
+void Presenter::waitDone() {
+    std::unique_lock lock(mutex_);
+    cv_.wait(lock, [&] { return !pending_; });
+}
+
 double Presenter::takePresentMs() {
     const std::lock_guard lock(mutex_);
     const double ms = presentMs_;

@@ -59,6 +59,7 @@ FrameGenBlock frameGenBlocker(const FrameGenFacts& f) {
     if (!f.mainView) return FrameGenBlock::NoMainView;
     if (!f.inputs) return FrameGenBlock::NoInputs;
     if (!f.sizeOk) return FrameGenBlock::Size;
+    if (!f.presentSizeOk) return FrameGenBlock::PresentSize;
     return FrameGenBlock::None;
 }
 
@@ -72,6 +73,7 @@ const char* frameGenBlockName(FrameGenBlock b) {
         case FrameGenBlock::NoMainView: return "the frame has no world view";
         case FrameGenBlock::NoInputs: return "no depth / motion vectors for this frame";
         case FrameGenBlock::Size: return "the render size is larger than the display";
+        case FrameGenBlock::PresentSize: return "the back buffer is not the swapchain's size";
     }
     return "?";
 }
@@ -110,10 +112,11 @@ FrameGenState::Step FrameGenState::advance(FrameGenBlock blocker, bool cameraCut
 
 // ---- the feature ----------------------------------------------------------------------------------------------------------
 
-FrameGeneration::FrameGeneration(d3d9::Device& device) : dev_(device) {}
+FrameGeneration::FrameGeneration(d3d9::Device& device) : dev_(device) { dev_.setFrameGenClient(this); }
 
 FrameGeneration::~FrameGeneration() {
-    disable();
+    shutdown();
+    dev_.setFrameGenClient(nullptr);
     vk::Context* ctx = &dev_.ctx();
     const VkPipeline prep = prep_, debug = debug_;
     vk::PassLayout layout = layout_, debugLayout = debugLayout_;
@@ -129,19 +132,49 @@ void FrameGeneration::apply(const Settings& s) {
     const bool wasOn = on_;
     const bool wantOn = s.mode != FrameGenMode::Off && !failed_;
     const bool modeChanged = s.mode != s_.mode;
+    const bool manualChanged = s.manual != s_.manual;
     s_ = s;
-    if (modeChanged && fg_) {
-        dropContext();  // the other provider's context is built with the next frame
+    if ((modeChanged || manualChanged) && fg_) {
+        dropContext();  // the other provider's / model's context is built with the next frame
     }
     if (wantOn && !wasOn) {
         enable();
     } else if (!wantOn && wasOn) {
         disable();
     }
-    if (wantOn && !s.manual && !manualNoticed_) {
+    if (manualChanged) fallbackManual_ = false;
+    if (on_) updateBackend();
+}
+
+// The presentation follows the mode: the AMD swapchain (default), released again when the mode goes off / the manual model is wanted.
+// A swapchain that cannot be created (no DLL, queues, version) leaves the manual model with a logged reason.
+void FrameGeneration::updateBackend() {
+    const bool want = on_ && !failed_ && !manualEffective();
+    if (want && !dev_.frameGenSwapchainActive()) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now < retryAt_) return;
+        if (dev_.setFrameGenSwapchain(true, paths::dataDir() / "amd_fidelityfx_loader_vk.dll")) {
+            state_.invalidate();
+            configured_ = false;
+            lastEnabled_ = false;
+            manualNoticed_ = false;
+            spdlog::info("enh: framegen: presenting through AMD's frame generation swapchain ('{}')",
+                         dev_.frameGenSwapchain() != nullptr ? dev_.frameGenSwapchain()->providerName() : std::string());
+        } else if (!dev_.swapchain().frameGenWanted()) {
+            fallbackManual_ = true;
+            spdlog::warn("enh: framegen: AMD's frame generation swapchain is not available ({}): the manual model instead (the generated "
+                         "frame is timed by us, no AMD pacing)", dev_.swapchain().frameGenReason());
+        } else {
+            retryAt_ = now + std::chrono::seconds(2);  // the window cannot be presented to now (minimised): later
+        }
+    } else if (!want && dev_.frameGenSwapchainActive()) {
+        dropContext();  // the generator's context goes before the swapchain's
+        dev_.setFrameGenSwapchain(false, {});
+        spdlog::info("enh: framegen: AMD's frame generation swapchain released");
+    }
+    if (on_ && manualEffective() && !s_.manual && !manualNoticed_) {
         manualNoticed_ = true;
-        spdlog::info("enh: framegen: nothing is presented yet: the AMD swapchain (stage F3) is not implemented; framegen.manual = true "
-                     "generates and shows the frames through our own swapchain (test)");
+        spdlog::info("enh: framegen: presenting the generated frames ourselves (the manual model)");
     }
 }
 
@@ -173,33 +206,78 @@ void FrameGeneration::disable() {
     on_ = false;
     dev_.removePasses(this);
     dev_.setGeneratedFrame(nullptr);
+    dev_.setFrameGenRunning(false);
     generated_ = nullptr;
     dropContext();
-    for (const char* k : {"framegen.depth", "framegen.hudless", "framegen.color", "framegen.out"}) dev_.transients().release(k);
+    if (dev_.frameGenSwapchainActive()) {
+        dev_.setFrameGenSwapchain(false, {});
+        spdlog::info("enh: framegen: AMD's frame generation swapchain released");
+    }
+    for (const char* k : {"framegen.depth", "framegen.hudless.0", "framegen.hudless.1", "framegen.color", "framegen.out"}) dev_.transients().release(k);
     depthFrame_ = 0;
     hudlessFrame_ = false;
     lastPose_ = {};
     spdlog::info("enh: framegen: off ({} frames generated, {} shown)", frames_, shown_);
 }
 
+// before the overlay and the device go: the generator's context and AMD's swapchain are torn down in their order
+void FrameGeneration::shutdown() {
+    if (on_) {
+        disable();
+    } else {
+        dropContext();
+    }
+    dev_.shutdownFrameGenSwapchain();
+}
+
+void FrameGeneration::swapchainWillChange() {
+    dropContext();
+    configured_ = false;
+    lastEnabled_ = false;
+}
+
 void FrameGeneration::dropContext() {
     if (!fg_) return;
-    // the context's internal images may still be in use by frames in flight
-    dev_.frames().retire([f = std::move(fg_)]() mutable { f->destroy(); });
-    fg_.reset();
+    configured_ = false;
+    lastEnabled_ = false;
+    if (fg_->swapchainModel()) {
+        // the callback model: the context goes (synchronously) before the swapchain does, the swapchain's threads and the GPU done
+        // with it. Its mutex covers the destroy against a present of the present thread.
+        vk::FgSwapchain* swp = dev_.frameGenSwapchain();
+        if (swp != nullptr) {
+            swp->waitForPresents();
+            const std::lock_guard lock(swp->contextMutex());
+            fg_->destroy();
+        } else {
+            fg_->destroy();
+        }
+        fg_.reset();
+    } else {
+        // the context's internal images may still be in use by frames in flight
+        dev_.frames().retire([f = std::move(fg_)]() mutable { f->destroy(); });
+        fg_.reset();
+    }
     ctxDisplay_ = {};
     state_.invalidate();
 }
 
-bool FrameGeneration::ensureContext(VkExtent2D display, VkFormat format) {
-    if (fg_ && fg_->hasContext() && ctxDisplay_.width == display.width && ctxDisplay_.height == display.height) return true;
+bool FrameGeneration::ensureContext(VkExtent2D display, VkFormat format, bool swapchain, VkFormat hudlessFormat) {
+    if (fg_ && fg_->hasContext() && ctxDisplay_.width == display.width && ctxDisplay_.height == display.height &&
+        fg_->swapchainModel() == swapchain) {
+        return true;
+    }
     dropContext();
     auto f = std::make_shared<vk::FrameGen>();
     const std::filesystem::path dll = paths::dataDir() / "amd_fidelityfx_loader_vk.dll";
     vk::FrameGenCreateInfo ci;
     ci.ml = s_.mode == FrameGenMode::Fsr4;
     ci.displaySize = ci.maxRenderSize = display;
-    ci.backBufferFormat = ci.hudlessFormat = format;
+    ci.backBufferFormat = format;
+    ci.hudlessFormat = hudlessFormat != VK_FORMAT_UNDEFINED ? hudlessFormat : format;  // the swapchain's images may be RGBA, the engine's back buffer BGRA
+    ci.swapchain = swapchain;
+    vk::FgSwapchain* swp = swapchain ? dev_.frameGenSwapchain() : nullptr;
+    std::unique_lock<std::mutex> lock;
+    if (swp != nullptr) lock = std::unique_lock<std::mutex>(swp->contextMutex());
     bool ok = f->load(dll) && f->createContext(dev_.ctx(), ci);
     if (!ok && ci.ml && f->loaded()) {
         spdlog::warn("enh: framegen: the FSR 4 (ML) frame generation is not available on this GPU: FSR 3");
@@ -215,7 +293,8 @@ bool FrameGeneration::ensureContext(VkExtent2D display, VkFormat format) {
     fg_ = std::move(f);
     ctxDisplay_ = display;
     state_.invalidate();
-    spdlog::info("enh: framegen: provider '{}' for {}x{}", fg_->providerName(), display.width, display.height);
+    spdlog::info("enh: framegen: provider '{}' for {}x{}{}", fg_->providerName(), display.width, display.height,
+                 swapchain ? " (callback model: AMD's swapchain interpolates in its present)" : "");
     return true;
 }
 
@@ -253,12 +332,15 @@ void FrameGeneration::recordDepth(d3d9::PassContext& ctx) {
 
 void FrameGeneration::recordHudless(d3d9::PassContext& ctx) {
     hudlessFrame_ = false;
-    if (!on_ || failed_ || !((s_.manual && gameplay_ && !paused_) || s_.view == FrameGenView::Hudless)) return;
+    const bool generating = manualEffective() || dev_.frameGenSwapchainActive();
+    if (!on_ || failed_ || !((generating && gameplay_ && !paused_) || s_.view == FrameGenView::Hudless)) return;
     d3d9::Surface* bb = dev_.backBuffer();
     if (bb == nullptr || bb->texture() == nullptr) return;
     vk::Image& src = bb->texture()->image();
     const VkExtent2D size{bb->width(), bb->height()};
-    vk::Transients::Entry* h = dev_.transients().get("framegen.hudless", {src.format(), size, kColorUsage});
+    // two copies in turn: the swapchain's interpolation of the previous frame may still be reading the other one
+    hudlessIndex_ ^= 1;
+    vk::Transients::Entry* h = dev_.transients().get(hudlessKey(), {src.format(), size, kColorUsage});
     if (h == nullptr) return;
     copyImage(ctx.cmd, src, h->image, size);
     h->image.transition(ctx.cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -277,16 +359,52 @@ void FrameGeneration::logBlock(FrameGenBlock b) {
     }
 }
 
+// The camera of this frame as the generator's inputs: also the cut detection's pose
+namespace {
+
+void fillPrepare(vk::FrameGenPrepare& p, d3d9::Device& dev, const d3d9::scene::CameraBlock& cam, const d3d9::scene::CameraBlock& last,
+                 const FrameGenPose& pose, VkExtent2D renderSize) {
+    p.renderSize = renderSize;
+    const std::array<float, 2> j = dev.jitter();  // what the upscaler was told (its jitter_flip is a test switch of the geometry only)
+    p.jitterX = j[0];
+    p.jitterY = j[1];
+    p.motionScaleX = static_cast<float>(renderSize.width);  // the G-buffer's motion is in uv (previous - current)
+    p.motionScaleY = static_cast<float>(renderSize.height);
+    p.frameTimeMs = cam.valid && last.valid ? static_cast<float>(std::clamp((cam.time - last.time) * 1000.0, 1.0, 100.0)) : 16.6f;
+    p.cameraNear = cam.nearZ > 0.0f ? cam.nearZ : 10.0f;
+    p.cameraFar = cam.farZ > p.cameraNear ? cam.farZ : 100000.0f;
+    p.cameraFovY = pose.fovY;
+    p.viewSpaceToMeters = 0.01f;  // the engine's units are centimetres
+    for (int i = 0; i < 3; ++i) {
+        p.position[i] = cam.position[static_cast<std::size_t>(i)];
+        p.right[i] = cam.inverseView.at(0, i);  // the inverse view's rows are the camera's axes (D3D row vectors)
+        p.up[i] = cam.inverseView.at(1, i);
+        p.forward[i] = cam.inverseView.at(2, i);
+    }
+}
+
+}  // namespace
+
 void FrameGeneration::recordGenerate(d3d9::PassContext& ctx) {
     generated_ = nullptr;
     generatedShown_ = false;
-    if (!on_ || failed_ || !s_.manual) return;
+    if (!on_ || failed_) {
+        dev_.setFrameGenRunning(false);
+        return;
+    }
+    if (wantsSwapchain() && !dev_.frameGenSwapchainActive()) updateBackend();  // pending (minimised window ...)
+    if (failed_) return;
+    const bool sc = dev_.frameGenSwapchainActive() && !manualEffective();
+    if (!sc && !manualEffective()) {
+        dev_.setFrameGenRunning(false);
+        return;  // the swapchain is not in place (yet): nothing is generated
+    }
     d3d9::Surface* bb = dev_.backBuffer();
     if (bb == nullptr || bb->texture() == nullptr) return;
     vk::Image& real = bb->texture()->image();
-    const VkExtent2D display{bb->width(), bb->height()};
+    const VkExtent2D backSize{bb->width(), bb->height()};
+    const VkExtent2D display = sc ? dev_.swapchain().extent() : backSize;
     const d3d9::scene::CameraBlock& cam = dev_.camera();
-    const d3d9::scene::CameraBlock& last = dev_.lastCamera();
 
     FrameGenFacts facts;
     facts.providerReady = !failed_;
@@ -296,6 +414,7 @@ void FrameGeneration::recordGenerate(d3d9::PassContext& ctx) {
     facts.mainView = cam.valid;
     facts.inputs = depthFrame_ == dev_.stats().frames + 1;
     facts.sizeOk = renderSize_.width <= display.width && renderSize_.height <= display.height;
+    facts.presentSizeOk = !sc || (backSize.width == display.width && backSize.height == display.height);
 
     // the camera of this frame against the last one (cut detection); kept up to date through blocked frames too
     FrameGenPose pose;
@@ -309,9 +428,15 @@ void FrameGeneration::recordGenerate(d3d9::PassContext& ctx) {
     lastPose_ = pose;
 
     FrameGenBlock blocker = frameGenBlocker(facts);
-    if (blocker == FrameGenBlock::None && !ensureContext(display, real.format())) blocker = FrameGenBlock::NoProvider;
+    if (sc) {
+        recordSwapchain(ctx, blocker, cut, pose, display);
+        return;
+    }
+    const d3d9::scene::CameraBlock& last = dev_.lastCamera();
+    if (blocker == FrameGenBlock::None && !ensureContext(display, real.format(), false, VK_FORMAT_UNDEFINED)) blocker = FrameGenBlock::NoProvider;
     const FrameGenState::Step step = state_.advance(blocker, cut);
     logBlock(blocker);
+    dev_.setFrameGenRunning(step.active);
     if (!step.active) {
         ++blocked_;
         return;
@@ -340,7 +465,7 @@ void FrameGeneration::recordGenerate(d3d9::PassContext& ctx) {
     vk::Transients::Entry* motion =
         dev_.transients().get("gbuffer.motion", {kGbufferMotionFormat, {renderSize_.width, renderSize_.height}, kGbufferMotionUsage});
     vk::Transients::Entry* hudless =
-        hudlessFrame_ ? dev_.transients().get("framegen.hudless", {fmt, display, kColorUsage}) : nullptr;
+        hudlessFrame_ ? dev_.transients().get(hudlessKey(), {fmt, display, kColorUsage}) : nullptr;
     if (color == nullptr || out == nullptr || depth == nullptr || motion == nullptr) return;
 
     // the finished frame (GUI included): the colour the interpolation reads and keeps for the next frame
@@ -356,26 +481,10 @@ void FrameGeneration::recordGenerate(d3d9::PassContext& ctx) {
     vk::FrameGenPrepare p;
     p.cmd = cmd;
     p.frameId = step.frameId;
-    p.renderSize = renderSize_;
-    const std::array<float, 2> j = dev_.jitter();  // what the upscaler was told (its jitter_flip is a test switch of the geometry only)
-    p.jitterX = j[0];
-    p.jitterY = j[1];
-    p.motionScaleX = static_cast<float>(renderSize_.width);  // the G-buffer's motion is in uv (previous - current)
-    p.motionScaleY = static_cast<float>(renderSize_.height);
     p.reset = step.reset;
-    p.frameTimeMs = cam.valid && last.valid ? static_cast<float>(std::clamp((cam.time - last.time) * 1000.0, 1.0, 100.0)) : 16.6f;
-    p.cameraNear = cam.nearZ > 0.0f ? cam.nearZ : 10.0f;
-    p.cameraFar = cam.farZ > p.cameraNear ? cam.farZ : 100000.0f;
-    p.cameraFovY = pose.fovY;
-    p.viewSpaceToMeters = 0.01f;  // the engine's units are centimetres
     p.depth = &depth->image;
     p.motion = &motion->image;
-    for (int i = 0; i < 3; ++i) {
-        p.position[i] = cam.position[static_cast<std::size_t>(i)];
-        p.right[i] = cam.inverseView.at(0, i);  // the inverse view's rows are the camera's axes (D3D row vectors)
-        p.up[i] = cam.inverseView.at(1, i);
-        p.forward[i] = cam.inverseView.at(2, i);
-    }
+    fillPrepare(p, dev_, cam, last, pose, renderSize_);
     ok = ok && fg_->prepare(p);
 
     vk::FrameGenDispatch d;
@@ -389,6 +498,7 @@ void FrameGeneration::recordGenerate(d3d9::PassContext& ctx) {
         spdlog::error("enh: framegen: a call of the generator failed: frame generation stays off this session");
         failed_ = true;
         dev_.setGeneratedFrame(nullptr);
+        dev_.setFrameGenRunning(false);
         return;
     }
     ++frames_;
@@ -407,6 +517,102 @@ void FrameGeneration::recordGenerate(d3d9::PassContext& ctx) {
                      "{}x{} (render {}x{}), jitter ({:.3f}, {:.3f}) px, frame time {:.1f} ms, generated frames presented {}, previous-frame waits {} ({:.1f} ms)",
                      frames_, shown_, resets_, cuts_, blocked_, fg_->providerName(), display.width, display.height, renderSize_.width,
                      renderSize_.height, p.jitterX, p.jitterY, p.frameTimeMs, dev_.stats().generatedPresented, ringWaits_, ringWaitMs_);
+    }
+}
+
+// The swapchain model: the swapchain interpolates and presents; per frame we configure the generator (enabled or not, the frame id,
+// the HUD-less copy, the callbacks) and record Prepare. Disabled in menus / loading screens / pauses: the swapchain then presents the
+// real frames one for one (its present callback still draws the overlay).
+void FrameGeneration::recordSwapchain(d3d9::PassContext& ctx, FrameGenBlock blocker, bool cut, const FrameGenPose& pose, VkExtent2D display) {
+    vk::FgSwapchain* swp = dev_.frameGenSwapchain();
+    if (swp == nullptr) return;
+    const VkFormat fmt = dev_.swapchain().format();
+    d3d9::Surface* backSurface = dev_.backBuffer();
+    const VkFormat hudFmt = backSurface != nullptr && backSurface->texture() != nullptr ? backSurface->texture()->image().format() : fmt;
+    // The generator's context exists (disabled) from the start so that its configuration carries the present callback (overlay)
+    if (!fg_ && !ensureContext(display, fmt, true, hudFmt)) {
+        dev_.setFrameGenRunning(false);
+        updateBackend();  // failed_: release the swapchain
+        return;
+    }
+    if (blocker == FrameGenBlock::None && !ensureContext(display, fmt, true, hudFmt)) blocker = FrameGenBlock::NoProvider;
+    const FrameGenState::Step step = state_.advance(blocker, cut);
+    logBlock(blocker);
+    dev_.setFrameGenRunning(step.active);
+
+    // The previous present has returned and the GPU is done with what it queued (the interpolation): the generator's view ring
+    // (frame-generation.md 9.4) and its internal images are free for this frame's calls
+    {
+        const auto w0 = std::chrono::steady_clock::now();
+        dev_.waitFrameGenPresent();
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - w0).count();
+        if (ms > 0.5) {
+            ++ringWaits_;
+            ringWaitMs_ += ms;
+        }
+    }
+    vk::FrameGenConfigure cfg;
+    cfg.swapchain = swp->handle();
+    cfg.presentCallback = swp->presentCallback();
+    cfg.presentUser = swp->presentUser();
+    if (!step.active) {
+        ++blocked_;
+        if (!configured_ || lastEnabled_) {
+            const std::lock_guard lock(swp->contextMutex());
+            cfg.enabled = false;
+            cfg.frameId = lastFrameId_;
+            if (fg_->configure(cfg)) {
+                configured_ = true;
+                lastEnabled_ = false;
+            }
+        }
+        return;
+    }
+    if (cut) ++cuts_;
+    if (step.reset) ++resets_;
+
+    vk::Transients::Entry* depth = dev_.transients().get("framegen.depth", {kDepthFormat, renderSize_, kDepthUsage});
+    vk::Transients::Entry* motion =
+        dev_.transients().get("gbuffer.motion", {kGbufferMotionFormat, {renderSize_.width, renderSize_.height}, kGbufferMotionUsage});
+    vk::Transients::Entry* hudless = hudlessFrame_ ? dev_.transients().get(hudlessKey(), {hudFmt, display, kColorUsage}) : nullptr;
+    if (depth == nullptr || motion == nullptr) return;
+    if (hudless != nullptr) hudless->image.transition(ctx.cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    cfg.enabled = true;
+    cfg.hudless = hudless != nullptr ? &hudless->image : nullptr;
+    cfg.frameId = step.frameId;
+    cfg.reset = step.reset;
+    vk::FrameGenPrepare p;
+    p.cmd = ctx.cmd;
+    p.frameId = step.frameId;
+    p.reset = step.reset;
+    p.depth = &depth->image;
+    p.motion = &motion->image;
+    fillPrepare(p, dev_, dev_.camera(), dev_.lastCamera(), pose, renderSize_);
+    bool ok;
+    {
+        const std::lock_guard lock(swp->contextMutex());
+        ok = fg_->configure(cfg) && fg_->prepare(p);
+    }
+    if (!ok) {
+        spdlog::error("enh: framegen: a call of the generator failed: frame generation stays off this session");
+        failed_ = true;
+        dev_.setFrameGenRunning(false);
+        updateBackend();
+        return;
+    }
+    configured_ = true;
+    lastEnabled_ = true;
+    lastFrameId_ = step.frameId;
+    ++frames_;
+    if (step.show) ++shown_;
+    const double now = dev_.secondsSinceCreate();
+    if (now - lastLog_ > 5.0) {
+        lastLog_ = now;
+        spdlog::info("enh: framegen: {} frames prepared ({} shown, {} resets, {} camera cuts, {} frames without generation), provider '{}', "
+                     "{}x{} (render {}x{}), jitter ({:.3f}, {:.3f}) px, frame time {:.1f} ms, waits for the previous present {} ({:.1f} ms)",
+                     frames_, shown_, resets_, cuts_, blocked_, fg_->providerName(), display.width, display.height, renderSize_.width,
+                     renderSize_.height, p.jitterX, p.jitterY, p.frameTimeMs, ringWaits_, ringWaitMs_);
     }
 }
 
@@ -454,7 +660,7 @@ void FrameGeneration::recordDebug(d3d9::PassContext& ctx) {
             mode = 2;
             break;
         case FrameGenView::Hudless:
-            if (hudlessFrame_) src = dev_.transients().get("framegen.hudless", {target.format(), size, kColorUsage});
+            if (hudlessFrame_) src = dev_.transients().get(hudlessKey(), {target.format(), size, kColorUsage});
             break;
         case FrameGenView::Generated:
             if (generated_ != nullptr) src = dev_.transients().get("framegen.out", {target.format(), size, kColorUsage});

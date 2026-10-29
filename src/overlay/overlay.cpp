@@ -99,6 +99,29 @@ const char* sideName(bool b) { return b ? "B" : "A"; }
 
 Overlay* Overlay::instance() { return g_instance.load(); }
 
+// A copy of the frame's draw lists (the clones are ours; the textures stay the atlas's): drawn later, once per frame the swapchain shows
+struct Overlay::Snapshot {
+    ImDrawData data;
+    std::vector<ImDrawList*> lists;
+    void clear() {
+        for (ImDrawList* l : lists) IM_DELETE(l);
+        lists.clear();
+        data.Clear();
+    }
+    void take(const ImDrawData& dd) {
+        clear();
+        data = dd;
+        for (int i = 0; i < data.CmdLists.Size; ++i) {
+            ImDrawList* c = data.CmdLists[i]->CloneOutput();
+            lists.push_back(c);
+            data.CmdLists[i] = c;
+        }
+        data.Textures = nullptr;
+    }
+    ~Snapshot() { clear(); }
+};
+
+Overlay::Overlay() = default;
 Overlay::~Overlay() { shutdown(); }
 
 bool Overlay::init(d3d9::Device& device, HWND__* window, const Options& options) {
@@ -162,7 +185,7 @@ bool Overlay::init(d3d9::Device& device, HWND__* window, const Options& options)
     ii.Queue = ctx.queue();
     ii.DescriptorPoolSize = IMGUI_IMPL_VULKAN_MINIMUM_SAMPLED_IMAGE_POOL_SIZE + 8;
     ii.MinImageCount = std::max(2u, device.swapchain().minImageCount());
-    ii.ImageCount = std::max(ii.MinImageCount, std::max(device.swapchain().imageCount(), static_cast<std::uint32_t>(vk::Frames::kInFlight) + 1));
+    ii.ImageCount = std::max(ii.MinImageCount, std::max(device.swapchain().imageCount(), 8u));  // frame generation draws it for generated frames too
     ii.UseDynamicRendering = true;
     ii.PipelineInfoMain.PipelineRenderingCreateInfo = {VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
     ii.PipelineInfoMain.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
@@ -203,6 +226,11 @@ bool Overlay::init(d3d9::Device& device, HWND__* window, const Options& options)
 }
 
 void Overlay::shutdown() {
+    {
+        const std::lock_guard lock(drawMutex_);
+        prepared_.store(false, std::memory_order_release);
+        if (imguiVulkan_) snap_.reset();  // the clones belong to ImGui's allocator, while its context lives
+    }
     if (initialised_ && window_ != nullptr && IsWindow(window_)) {
         // remove the subclass if nobody subclassed on top of us; otherwise our procedure stays (it forwards when g_instance is null)
         const auto current = g_unicode ? GetWindowLongPtrW(window_, GWLP_WNDPROC) : GetWindowLongPtrA(window_, GWLP_WNDPROC);
@@ -405,8 +433,8 @@ bool Overlay::active() {
            (b && r.abBadge != nullptr && r.abBadge->asBool());
 }
 
-void Overlay::record(VkCommandBuffer cmd, VkExtent2D extent) {
-    if (!initialised_) return;
+ImDrawData* Overlay::buildFrame(VkExtent2D extent) {
+    if (!initialised_) return nullptr;
     ImGuiIO& io = ImGui::GetIO();
     const bool open = isOpen();
     if (!threadsLogged_ && wndProcThread_.load() != 0) {
@@ -459,7 +487,32 @@ void Overlay::record(VkCommandBuffer cmd, VkExtent2D extent) {
         }
         dd->Textures = nullptr;
     }
-    ImGui_ImplVulkan_RenderDrawData(dd, cmd);
+    return dd;
+}
+
+void Overlay::record(VkCommandBuffer cmd, VkExtent2D extent) {
+    const std::lock_guard lock(drawMutex_);
+    ImDrawData* dd = buildFrame(extent);
+    if (dd != nullptr) ImGui_ImplVulkan_RenderDrawData(dd, cmd);
+}
+
+bool Overlay::prepare(VkExtent2D extent) {
+    const std::lock_guard lock(drawMutex_);
+    if (!snap_) snap_ = std::make_unique<Snapshot>();
+    ImDrawData* dd = buildFrame(extent);
+    if (dd == nullptr) {
+        prepared_.store(false, std::memory_order_release);
+        return false;
+    }
+    snap_->take(*dd);
+    prepared_.store(true, std::memory_order_release);
+    return true;
+}
+
+void Overlay::recordPrepared(VkCommandBuffer cmd, VkExtent2D) {
+    const std::lock_guard lock(drawMutex_);
+    if (!initialised_ || !snap_ || !snap_->data.Valid) return;
+    ImGui_ImplVulkan_RenderDrawData(&snap_->data, cmd);
 }
 
 void Overlay::buildUi() {
@@ -505,7 +558,12 @@ void Overlay::buildBadges() {
         ImGui::SetNextWindowBgAlpha(0.4f);
         if (ImGui::Begin("##rvk_fps", nullptr, badge)) {
             ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.4f);
-            ImGui::Text("%.0f fps", n > 0 && sum > 0.0f ? 1000.0f * static_cast<float>(n) / sum : 0.0f);
+            const d3d9::Device::LiveFrame& lf = device_->liveFrame();
+            if (lf.outputFps > 0.0f) {
+                ImGui::Text("%.0f -> %.0f fps", lf.baseFps, lf.outputFps);  // frame generation: rendered -> shown
+            } else {
+                ImGui::Text("%.0f fps", n > 0 && sum > 0.0f ? 1000.0f * static_cast<float>(n) / sum : 0.0f);
+            }
             ImGui::PopFont();
         }
         ImGui::End();
@@ -872,6 +930,13 @@ void Overlay::buildPerformancePanel(bool debug) {
     }
     const float avg = n > 0 ? sum / static_cast<float>(n) : 0.0f;
     ImGui::Text("%.1f fps   frame %.2f ms (worst %.2f ms over %zu frames)", avg > 0.0f ? 1000.0f / avg : 0.0f, avg, worst, n);
+    {
+        const d3d9::Device::LiveFrame& lf = device_->liveFrame();
+        if (lf.outputFps > 0.0f) {
+            ImGui::Text("Frame generation: %.0f rendered -> %.0f shown fps (the frame time below is the rendered one; about +%.0f ms input delay)",
+                        lf.baseFps, lf.outputFps, lf.baseFps > 0.0f ? 1000.0f / lf.baseFps : 0.0f);
+        }
+    }
     ImGui::Text("CPU (engine + renderer) %.2f ms", n > 0 ? cpuSum / static_cast<float>(n) : 0.0f);
     if (gpuN > 0) {
         ImGui::Text("GPU %.2f ms", gpuSum / static_cast<float>(gpuN));

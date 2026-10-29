@@ -109,6 +109,8 @@ public:
     // The queue is used by the render thread (submits) and the present thread (vkQueuePresentKHR): every queue operation,
     // and vkDeviceWaitIdle (it accesses all queues), goes through these, which hold the queue lock.
     VkResult queueSubmit(const VkSubmitInfo2& submit, VkFence fence = VK_NULL_HANDLE);
+    // vkQueueSubmit on the game queue for foreign code (the frame generation swapchain's submit hook, vk/fg_swapchain.h)
+    VkResult queueSubmit(std::uint32_t submitCount, const VkSubmitInfo* submits, VkFence fence);
     VkResult queuePresent(const VkPresentInfoKHR& present);
     void waitIdle();
     // the queue lock itself, for queue access by foreign code (ImGui's texture uploads submit and wait on the queue)

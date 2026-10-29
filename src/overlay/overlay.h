@@ -14,6 +14,7 @@
 #include <chrono>
 #include <filesystem>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -23,6 +24,7 @@
 #include "overlay/keys.h"
 
 struct HWND__;
+struct ImDrawData;
 
 namespace rvk::overlay {
 
@@ -34,7 +36,7 @@ struct Options {
 
 class Overlay final : public d3d9::PresentOverlay {
 public:
-    Overlay() = default;
+    Overlay();
     ~Overlay() override;
     Overlay(const Overlay&) = delete;
     Overlay& operator=(const Overlay&) = delete;
@@ -56,6 +58,11 @@ public:
     // d3d9::PresentOverlay
     bool active() override;
     void record(VkCommandBuffer cmd, VkExtent2D extent) override;
+    // the AMD frame generation swapchain's present callback draws the overlay (another thread, on generated and real frames): the UI is
+    // built on the render thread by prepare() and its draw lists are kept; recordPrepared() draws the latest ones
+    bool prepare(VkExtent2D extent) override;
+    void recordPrepared(VkCommandBuffer cmd, VkExtent2D extent) override;
+    bool hasPrepared() override { return prepared_.load(std::memory_order_acquire); }
 
     // the process's overlay (rvk_overlay), null when none
     static Overlay* instance();
@@ -69,6 +76,8 @@ private:
     static std::intptr_t __stdcall wndProc(HWND__* hwnd, unsigned msg, std::uintptr_t wparam, std::intptr_t lparam);
     std::intptr_t handleMessage(HWND__* hwnd, unsigned msg, std::uintptr_t wparam, std::intptr_t lparam);
     std::intptr_t callGame(HWND__* hwnd, unsigned msg, std::uintptr_t wparam, std::intptr_t lparam);
+    // the UI of one frame (input, ImGui::NewFrame .. Render, texture uploads); null when not initialised. drawMutex_ held.
+    ImDrawData* buildFrame(VkExtent2D extent);
     void buildUi();
     void buildSettingsWindow();
     void buildAbPanel();                 // Debug tab
@@ -76,6 +85,11 @@ private:
     void buildPerformancePanel(bool debug);  // System tab; debug: + diagnostics
     void buildFramePanel();              // Debug tab
     void buildBadges();
+
+    struct Snapshot;
+    std::unique_ptr<Snapshot> snap_;        // prepare(): a copy of the draw lists for the present callback
+    std::mutex drawMutex_;                  // ImGui and the backend's per-frame buffers: one thread at a time
+    std::atomic<bool> prepared_{false};
 
     d3d9::Device* device_ = nullptr;
     HWND__* window_ = nullptr;

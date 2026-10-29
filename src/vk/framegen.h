@@ -15,8 +15,10 @@
 // image. Resource states: the DLL's backend transitions each resource from the state given in the call and leaves it there
 // (COMPUTE_READ = SHADER_READ_ONLY_OPTIMAL, UNORDERED_ACCESS = GENERAL), so the images' tracked layouts are set to those.
 //
-// Not thread safe (the FFX contexts are not): the render thread only.
+// Not thread safe (the FFX contexts are not): the render thread only. In the callback model the swapchain's present (another
+// thread) dispatches the interpolation: FgSwapchain::contextMutex() covers configure / prepare / create / destroy as well as the present.
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -32,7 +34,7 @@ class Context;
 struct FrameGenReport;
 
 // Startup probe: loads the loader + (through it) the frame generation effect DLL, lists the providers for this device and unloads
-// again. `loaderDll` = binvkmd_fidelityfx_loader_vk.dll. A missing effect DLL is not an error (frame generation is a separate
+// again. `loaderDll` = amd_fidelityfx_loader_vk.dll. A missing effect DLL is not an error (frame generation is a separate
 // download): the report says why it is unavailable. Takes a few tens of ms when the DLL is there, nothing when it is not.
 FrameGenReport probeFrameGeneration(Context& ctx, const std::filesystem::path& loaderDll);
 
@@ -64,6 +66,8 @@ struct FrameGenCreateInfo {
     bool depthInfinite = false;
     bool asyncCompute = false;
     bool debugChecking = false;            // the DLL validates its inputs and reports through the log
+    bool swapchain = false;                // the callback model: the AMD swapchain (vk/fg_swapchain.h) dispatches the interpolation
+                                           // inside its present; configure / prepare then do not carry the NO_SWAPCHAIN flag
 };
 
 // ffxConfigure (per frame)
@@ -73,6 +77,12 @@ struct FrameGenConfigure {
     std::uint64_t frameId = 0;
     VkExtent2D rect{0, 0};     // the area of the colour image that is interpolated (0 = the display size)
     std::uint32_t debugFlags = 0;  // FFX_FRAMEGENERATION_FLAG_DRAW_DEBUG_*
+    // the callback model (FrameGenCreateInfo::swapchain): the swapchain's handle, its present callback + user (FgSwapchain), and
+    // whether the interpolation of this frame must reset (a camera cut: OR-ed into the swapchain's own reset in the dispatch callback)
+    VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+    const void* presentCallback = nullptr;
+    void* presentUser = nullptr;
+    bool reset = false;
 };
 
 // ffxDispatch(PrepareV2): the frame's depth + motion vectors + camera
@@ -126,6 +136,9 @@ public:
     void destroyContext();
     void destroy();  // context + module
 
+    // callback model: configure the swapchain without frame generation and without our dispatch callback (the context is about to go)
+    bool detachFromSwapchain();
+
     // the three calls of one frame, recorded into `cmd` (prepare, dispatch) in this order; the images' tracked layouts are set to
     // the states the DLL leaves them in
     bool configure(const FrameGenConfigure& c);
@@ -134,12 +147,20 @@ public:
 
     // the provider behind the context ("3.1.6" / "4.x"), empty without a context
     const std::string& providerName() const { return provider_; }
+    bool swapchainModel() const { return info_.swapchain; }
     // GPU memory of the context (ffxQuery on the context), 0 when unknown
     std::uint64_t memoryBytes();
 
 private:
+    static long frameGenCallback(void* params, void* user);
+    long onFrameGeneration(void* params);
+
     void* module_ = nullptr;   // HMODULE
     void* context_ = nullptr;  // ffxContext
+    std::atomic<std::uint64_t> resetFrame_{0};  // the frame whose interpolation resets (callback model), 0 = none
+    VkSwapchainKHR cfgSwapchain_ = VK_NULL_HANDLE;  // callback model: what the last configure attached (destroyContext detaches it)
+    const void* cfgPresent_ = nullptr;
+    void* cfgPresentUser_ = nullptr;
     struct Functions;
     Functions* fn_ = nullptr;
     FrameGenCreateInfo info_{};

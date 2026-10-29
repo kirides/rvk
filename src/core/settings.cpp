@@ -684,7 +684,8 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .tab = kTabDisplay,
         .description = "The highest frame rate the game runs at. A limit saves power and keeps the graphics card cooler. With "
                        "vertical sync on, a limit below the monitor's refresh rate keeps frames in step with the monitor "
-                       "(e.g. 60 on a 120 Hz monitor). Loading screens are never limited, so loading stays fast.",
+                       "(e.g. 60 on a 120 Hz monitor). With frame generation on, this is the limit of the frames shown: the game "
+                       "renders half as many (120 = 60 rendered). Loading screens are never limited, so loading stays fast.",
         .type = Type::Float,
         .defaultValue = 0,
         .min = 0,
@@ -1740,24 +1741,24 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB | Flag::Debug,
     });
 
-    // ---- Graphics tab: frame generation (enh/framegen.h; docs/research/frame-generation.md). Debug until the AMD frame generation
-    // swapchain (stage F3) presents the generated frames: the manual path (framegen.manual) is the developer view of the same
-    // generator. Outside debug mode the settings apply as their defaults (off).
+    // ---- Graphics tab: frame generation (enh/framegen.h; docs/research/frame-generation.md). AMD's frame generation swapchain presents
+    // the frames and paces them; the manual path (framegen.manual) is the developer view of the same generator.
     r.framegenMode = &reg.add({
         .key = "framegen.mode",
         .label = "Frame generation",
-        .category = "Frame generation",
-        .tab = kTabDebug,
+        .category = "Image",
         .description = "AMD FidelityFX frame generation: an extra frame is computed between every two rendered frames, so the picture "
-                       "is shown at twice the rate the game renders at. FSR 3 works on any recent graphics card (it needs the separate "
-                       "frame generation download in the rvk folder); FSR 4 (neural) only on a Radeon RX 9000 series, it is greyed "
-                       "out otherwise. The game itself still runs at the lower rate; best from about 60 rendered frames per second. "
-                       "Not shown in menus and loading screens. Developer setting until the presentation is finished.",
+                       "is shown at twice the rate the game renders at (60 rendered = 120 shown). The game itself still runs at the "
+                       "lower rate and your input shows about one rendered frame later; best from about 60 rendered frames per second. "
+                       "FSR 3 works on any recent graphics card (it needs the separate frame generation download in the rvk "
+                       "folder); FSR 4 (neural) only on a Radeon RX 9000 series, it is greyed out otherwise. Needs the borderless "
+                       "window (exclusive fullscreen is switched off while it is on). The frame rate limit in Display then limits the "
+                       "frames shown, the game renders half as many. Not used in menus and loading screens. A driver frame limiter "
+                       "for the game (AMD Radeon Chill) counts the generated frames too: switch it off for Risen.exe.",
         .type = Type::Enum,
         .defaultValue = 0,
         .options = {"off", "fsr3", "fsr4"},
         .optionLabels = {"Off", "FSR 3", "FSR 4 (neural)"},
-        .flags = Flag::Debug,
         .requirements = caps::bit(caps::Cap::FrameGeneration),
         .unmetValue = 0,
         .optionRequirements = {0, 0, caps::bit(caps::Cap::FrameGenerationMl)},
@@ -1767,9 +1768,10 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .label = "Present generated frames ourselves (test)",
         .category = "Frame generation",
         .tab = kTabDebug,
-        .description = "Developer test: the generated frame is computed after the upscaler, shown first and the real frame half a "
-                       "frame later, both through the normal swapchain (simple timed spacing, not the final pacing). Generated frames "
-                       "can be captured (screenshots frame_<n>_gen.png).",
+        .description = "Developer test (also the fallback when AMD's frame generation swapchain cannot be created): the generated frame "
+                       "is computed after the upscaler, shown first and the real frame half a frame later, both through our own "
+                       "swapchain (simple timed spacing, not AMD's pacing). Generated frames can be captured (screenshots "
+                       "frame_<n>_gen.png).",
         .type = Type::Bool,
         .defaultValue = 0,
         .flags = Flag::Debug,

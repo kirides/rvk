@@ -222,6 +222,7 @@ HalDevice::~HalDevice() {
     spdlog::info("hal: device released by the engine: shutting down");
     engine::scene::detach(&dev_);
     settings::registry().removeCallbacks(this);
+    if (framegen_) framegen_->shutdown();  // AMD's swapchain calls into the overlay from its threads: it goes first
     if (overlay_) {
         dev_.setOverlay(nullptr, false);
         // ImGui's shutdown waits for the device (vkDeviceWaitIdle touches the queue the present thread uses)
@@ -282,9 +283,14 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     o.logDraws = options.logDraws;
     // rt.allow is a restart setting: the value the session started with decides (its effective value waits for the report)
     o.allowRayTracing = rs.rtAllow == nullptr || rs.rtAllow->startValue() != 0.0;
-    // framegen.mode decides at start whether the frame generation swapchain's extra queues are requested (it is not a restart
-    // setting: the manual generation needs no extra queue); with it off at start the device is exactly the floor's
-    o.frameGenQueues = rs.framegenMode != nullptr && rs.framegenMode->startValue() != 0.0;
+    // the frame generation swapchain needs three more queues than the floor's one (vk/fg_swapchain.h): requested whenever the frame
+    // generation DLL is installed, so that framegen.mode can be switched at run time (queues nobody uses cost nothing)
+    {
+        std::error_code ec;
+        o.frameGenQueues = rs.framegenMode != nullptr &&
+                           std::filesystem::exists(paths::dataDir() / "amd_fidelityfx_framegeneration_vk.dll", ec) &&
+                           std::filesystem::exists(paths::dataDir() / "amd_fidelityfx_loader_vk.dll", ec);
+    }
     // debug.names is a restart setting too: objects are named as they are created (vk/debug_names.h)
     vk::names::setEnabled(rs.debugNames == nullptr || rs.debugNames->startValue() != 0.0);
     if (!dev_.create(o)) {
@@ -322,9 +328,8 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     if (rs.vsync != nullptr) reg.onChange(*rs.vsync, [this](const settings::Setting&) { applyVsync(); }, this);
     if (rs.fullscreen != nullptr) {
         // exclusive fullscreen (docs/research/window-mode.md 8): the effective value (borderless without the capability)
-        const auto applyFullscreen = [](const settings::Setting& s) { engine::window::setExclusive(s.asEnum() == "exclusive"); };
-        applyFullscreen(*rs.fullscreen);
-        reg.onChange(*rs.fullscreen, applyFullscreen, this);
+        reg.onChange(*rs.fullscreen, [this](const settings::Setting&) { applyFullscreen(); }, this);
+        applyFullscreen();
     }
     if (rs.maxFps != nullptr) {
         reg.onChange(*rs.maxFps, [this](const settings::Setting& s) {
@@ -635,6 +640,22 @@ void HalDevice::applyGbuffer() {
     gbuffer_->apply(s);
 }
 
+// exclusive fullscreen is the player's choice unless AMD's frame generation swapchain presents (its real swapchain is private: no
+// application controlled exclusive mode): borderless then, with a log line
+void HalDevice::applyFullscreen() {
+    const auto& rs = settings::renderer();
+    if (rs.fullscreen == nullptr) return;
+    bool exclusive = rs.fullscreen->asEnum() == "exclusive";
+    if (exclusive && framegen_ && framegen_->wantsSwapchain()) {
+        exclusive = false;
+        if (!exclusiveBlockedLogged_) {
+            exclusiveBlockedLogged_ = true;
+            spdlog::info("hal: exclusive fullscreen is not available with frame generation (AMD's swapchain): borderless window");
+        }
+    }
+    engine::window::setExclusive(exclusive);
+}
+
 void HalDevice::applyFramegen() {
     const auto& rs = settings::renderer();
     if (!framegen_ || rs.framegenMode == nullptr) return;
@@ -650,6 +671,7 @@ void HalDevice::applyFramegen() {
                                 : enh::FrameGenView::Off;
     framegen_->apply(s);
     applyGbuffer();  // the motion vectors
+    applyFullscreen();
 }
 
 void HalDevice::applyUpscale() {
@@ -1453,6 +1475,7 @@ void HalDevice::logFrameStats() {
                      s.presentSuboptimal, s.acquireMs / frames, s.presentMs / frames, s.presentWaitMs / frames, s.pacerMs / frames,
                      s.loadingFramesDropped);
         dev_.resetTimings();
+        logFrameGen(secs);
         if (dev_.perfEnabled()) {
             logPerf(dev_.takePerf());
         }
@@ -1466,6 +1489,33 @@ void HalDevice::logFrameStats() {
                      s.frames, s.totalDraws, s.totalClears, s.totalRenderPasses, s.skippedNoShader, s.skippedNoTarget,
                      s.skippedVertexInput, s.skippedPipeline, halDraws_, unimplementedCount(),
                      static_cast<double>(d3d9::Texture::cpuBytesTotal()) / (1024.0 * 1024.0));
+    }
+}
+
+// frame generation: the rates and the pacing of the last stats interval (the gap statistics come from the sampler thread of [debug] perf)
+void HalDevice::logFrameGen(double secs) {
+    if (!framegen_ || !framegen_->active()) return;
+    const d3d9::Device::FrameGenReport r = dev_.takeFrameGenReport();
+    if (r.seconds <= 0.0) return;
+    const double base = static_cast<double>(r.basePresents) / r.seconds;
+    if (!r.swapchain) {
+        spdlog::info("framegen: manual model: {:.1f} rendered frames/s, {:.1f} shown/s ({} generated presented in total)", base,
+                     static_cast<double>(r.basePresents) / r.seconds + (dev_.stats().generatedPresented > 0 ? base : 0.0),
+                     dev_.stats().generatedPresented);
+        return;
+    }
+    const double out = static_cast<double>(r.realPresents) / r.seconds;
+    spdlog::info("framegen: swapchain: base {:.1f} fps -> output {:.1f} fps ({} real presents in {:.1f} s = {:.2f} per rendered frame); "
+                 "present callbacks {} ({} generated, {} with the overlay, {:.3f} ms each); generator {}",
+                 base, out, r.realPresents, r.seconds, r.basePresents > 0 ? static_cast<double>(r.realPresents) / static_cast<double>(r.basePresents) : 0.0,
+                 r.callbacks, r.generated, r.uiFrames, r.callbacks > 0 ? r.callbackMs / static_cast<double>(r.callbacks) : 0.0,
+                 dev_.frameGenRunning() ? "running" : "idle (menu / loading / pause)");
+    (void)secs;
+    if (!r.gapsMs.empty()) {
+        const vk::FgGapStats g = vk::fgGapStats(r.gapsMs);
+        spdlog::info("perf: framegen present gaps (ms): n {} mean {:.3f} stddev {:.3f} p1 {:.3f} p50 {:.3f} p99 {:.3f} max {:.3f}; every other gap: "
+                     "{:.3f} +- {:.3f} / {:.3f} +- {:.3f}; {} stalls (> 100 ms) left out",
+                     g.n, g.mean, g.stddev, g.p1, g.p50, g.p99, g.max, g.evenMean, g.evenStd, g.oddMean, g.oddStd, g.stalls);
     }
 }
 

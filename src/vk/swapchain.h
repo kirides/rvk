@@ -1,6 +1,10 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
+#include <filesystem>
+#include <memory>
+#include <string>
 #include <vector>
 
 #include "vk/vk.h"
@@ -10,11 +14,14 @@ struct HWND__;
 namespace rvk::vk {
 
 class Context;
+class FgSwapchain;
 
 // Swapchain on the game's window. The renderer draws into its own back buffer and copies it into the acquired image at
 // present (Swapchain::recordCopy), so swapchain recreation never touches engine-visible resources.
 class Swapchain {
 public:
+    Swapchain();
+    ~Swapchain();
     bool create(Context& ctx, HWND__* window, std::uint32_t width, std::uint32_t height, bool vsync);
     void destroy();
     bool recreate(std::uint32_t width, std::uint32_t height);
@@ -40,6 +47,27 @@ public:
         fseLost_ = false;
         return r;
     }
+    // Frame generation (vk/fg_swapchain.h, docs/research/frame-generation.md F3): the next build creates AMD's frame generation
+    // swapchain instead of ours (a normal swapchain when `on` is false). Exclusive fullscreen is not possible with it. The caller
+    // recreates (Device::setFrameGenSwapchain); a build that cannot create it falls back to a normal swapchain (frameGenReason()).
+    // `loaderDll` = the FidelityFX loader.
+    void setFrameGen(bool on, const std::filesystem::path& loaderDll = {}) {
+        fgWanted_ = on;
+        if (on) fgLoader_ = loaderDll;
+    }
+    bool frameGenWanted() const { return fgWanted_; }
+    // tears the frame generation swapchain down without building another (shutdown): the generator's context must be gone
+    void releaseFrameGen();
+    bool frameGenActive() const { return fg_ != nullptr && fgActive_; }
+    FgSwapchain* frameGen() { return fgActive_ ? fg_.get() : nullptr; }
+    const std::string& frameGenReason() const { return fgReason_; }
+    VkSwapchainKHR handle() const { return swapchain_; }  // the proxy handle in frame generation mode
+    // the last acquire returned VK_NOT_READY (frame generation: too many images acquired): drop the frame, no recreation
+    bool acquireNotReady() const { return acquireNotReady_; }
+    // frame generation: the present thread finished presenting `n` frames, and so did the GPU work (interpolation) they queued
+    std::uint64_t frameGenPresentsDone() const;
+    bool waitFrameGenDone(std::uint64_t n, std::uint64_t timeoutNs);
+    std::uint64_t frameGenPresentsQueued() const { return fgPresents_.load(); }
     VkPresentModeKHR presentMode() const { return presentMode_; }
     // present: waits on the per-image "rendered" semaphore (renderedSemaphore(imageIndex)). Thread-safe against submits, but
     // not against the other swapchain functions (Presenter::waitIdle before those)
@@ -58,6 +86,8 @@ public:
 private:
     bool build(std::uint32_t width, std::uint32_t height);
     void destroySwapchain();
+    void destroyImageObjects();  // views and semaphores over the current images
+    bool collectImages(std::vector<VkImage> images);
 
     Context* ctx_ = nullptr;
     HWND__* window_ = nullptr;
@@ -75,6 +105,16 @@ private:
     std::vector<VkImageView> views_;
     std::uint32_t minImageCount_ = 2;
     std::vector<VkSemaphore> rendered_;  // one per image (present may hold it until the image is re-acquired)
+
+    // frame generation backend
+    std::unique_ptr<FgSwapchain> fg_;
+    bool fgWanted_ = false;
+    bool fgActive_ = false;       // swapchain_ is the frame generation swapchain's proxy handle
+    std::filesystem::path fgLoader_;
+    std::string fgReason_;
+    bool acquireNotReady_ = false;
+    std::atomic<std::uint64_t> fgPresents_{0};  // presents handed to the API (present thread)
+    VkSemaphore fgDone_ = VK_NULL_HANDLE; // timeline: signalled after each present returned (everything it queued is done)
 };
 
 }  // namespace rvk::vk
