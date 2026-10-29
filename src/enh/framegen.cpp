@@ -243,6 +243,7 @@ void FrameGeneration::dropContext() {
     if (fg_->swapchainModel()) {
         // the callback model: the context goes (synchronously) before the swapchain does, the swapchain's threads and the GPU done
         // with it. Its mutex covers the destroy against a present of the present thread.
+        if (preparedValue_ == dev_.frames().currentValue()) dev_.flushFrameAndWait();  // this frame's commands use the context's images
         vk::FgSwapchain* swp = dev_.frameGenSwapchain();
         if (swp != nullptr) {
             swp->waitForPresents();
@@ -604,6 +605,7 @@ void FrameGeneration::recordSwapchain(d3d9::PassContext& ctx, FrameGenBlock bloc
     configured_ = true;
     lastEnabled_ = true;
     lastFrameId_ = step.frameId;
+    preparedValue_ = dev_.frames().currentValue();
     ++frames_;
     if (step.show) ++shown_;
     const double now = dev_.secondsSinceCreate();

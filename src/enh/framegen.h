@@ -174,6 +174,7 @@ private:
     bool fallbackManual_ = false;       // the swapchain could not be created: the manual model instead
     std::chrono::steady_clock::time_point retryAt_{};  // swapchain model pending (minimised window ...): next attempt
     int hudlessIndex_ = 0;              // the HUD-less copy alternates: the swapchain's interpolation reads the previous one meanwhile
+    std::uint64_t preparedValue_ = 0;   // the frame (command buffer) whose commands carry the generator's Prepare
     bool configured_ = false;           // swapchain model: the generator is configured (callbacks attached)
     bool lastEnabled_ = false;
     std::uint64_t lastFrameId_ = 0;

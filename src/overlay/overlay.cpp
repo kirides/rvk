@@ -374,6 +374,12 @@ bool Overlay::runCommand(std::string_view command, std::string* out) {
         selectTab_ = std::string(w[2]);
         return ok("tab " + selectTab_);
     }
+    if (w[0] == "overlay" && w.size() == 3 && w[1] == "scroll") {
+        // scrolls the settings window to a fraction of its height (0 .. 1) for a few frames (screenshots of a tab's lower part)
+        scrollFrac_ = std::strtof(std::string(w[2]).c_str(), nullptr);
+        scrollFrames_ = 4;
+        return ok("scroll " + std::string(w[2]));
+    }
     if (w[0] == "overlay" && w.size() == 2) {
         if (w[1] == "open") setOpen(true);
         else if (w[1] == "close") setOpen(false);
@@ -781,6 +787,10 @@ void Overlay::buildSettingsWindow() {
 
         // ---- Graphics: presets + the enhancements ----
         if (ImGui::BeginTabItem(settings::kTabGraphics, nullptr, tabFlags(settings::kTabGraphics))) {
+            if (scrollFrames_ > 0) {
+                --scrollFrames_;
+                ImGui::SetScrollY(scrollFrac_ * ImGui::GetScrollMaxY());
+            }
             const auto& presets = settings::graphicsPresets();
             const int current = settings::matchPreset(reg);
             ImGui::SeparatorText("Preset");

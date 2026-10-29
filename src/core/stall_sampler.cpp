@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <dbghelp.h>
 #include <psapi.h>
+#include <tlhelp32.h>
 
 #include <algorithm>
 #include <atomic>
@@ -252,6 +253,65 @@ bool isSystemModule(std::string_view name) {
 }  // namespace
 
 StallSampler* presentSampler() { return g_present.get(); }
+
+void startHangWatchdog(double seconds, std::uint64_t (*progress)(void*), void* user) {
+    static std::atomic<bool> started{false};
+    if (started.exchange(true)) return;
+    std::thread([seconds, progress, user] {
+        SetThreadDescription(GetCurrentThread(), L"rvk hang watchdog");
+        std::uint64_t last = progress(user);
+        auto since = std::chrono::steady_clock::now();
+        int reports = 0;
+        Symbolizer sym;
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            const std::uint64_t now = progress(user);
+            const auto t = std::chrono::steady_clock::now();
+            if (now != last || now == 0) {  // nothing before the first present: the engine is still starting
+                last = now;
+                since = t;
+                reports = 0;
+                continue;
+            }
+            if (std::chrono::duration<double>(t - since).count() < seconds + 5.0 * reports || reports >= 3) continue;
+            ++reports;
+            spdlog::error("diag: hang: no progress for {:.1f} s: the stacks of every thread follow", std::chrono::duration<double>(t - since).count());
+            const DWORD self = GetCurrentThreadId();
+            HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            std::vector<DWORD> ids;
+            if (snap != INVALID_HANDLE_VALUE) {
+                THREADENTRY32 te{};
+                te.dwSize = sizeof(te);
+                for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+                    if (te.th32OwnerProcessID == GetCurrentProcessId() && te.th32ThreadID != self) ids.push_back(te.th32ThreadID);
+                }
+                CloseHandle(snap);
+            }
+            struct Taken {
+                DWORD id;
+                int n;
+                std::uint64_t pcs[kMaxFrames];
+            };
+            std::vector<Taken> taken;
+            for (const DWORD id : ids) {
+                HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, id);
+                if (h == nullptr) continue;
+                Taken tk{id, 0, {}};
+                if (SuspendThread(h) != static_cast<DWORD>(-1)) {
+                    tk.n = sampleThread(h, tk.pcs, kMaxFrames);  // nothing allocates while it is suspended
+                    ResumeThread(h);
+                }
+                CloseHandle(h);
+                taken.push_back(tk);
+            }
+            for (const Taken& tk : taken) {
+                std::string line;
+                for (int i = 0; i < tk.n; ++i) line += (i == 0 ? "" : " < ") + sym.name(tk.pcs[i]);
+                spdlog::error("diag: hang: thread {}: {}", tk.id, line);
+            }
+        }
+    }).detach();
+}
 
 void enablePresentSampler(const char* what, double thresholdMs) {
     if (g_present == nullptr) g_present = std::make_unique<StallSampler>(what, thresholdMs);

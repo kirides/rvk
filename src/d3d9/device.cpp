@@ -1,6 +1,7 @@
 // d3d9::Device: creation, frames, resources, state setters, clears, copies. Draw preparation is in draw.cpp.
 
 #include "d3d9/device.h"
+#include "core/stall_sampler.h"
 #include "shader/uber.h"
 
 #include <windows.h>
@@ -305,6 +306,11 @@ bool Device::create(const DeviceOptions& options) {
     if (swapchain_.valid()) {
         presenter_.start(swapchain_);
     }
+    if (options.perf) {
+        // [debug] perf: a frame that does not come within 8 s logs every thread's stack (a deadlock between the render thread, the
+        // present thread and AMD's frame generation threads)
+        diag::startHangWatchdog(8.0, [](void* d) { return static_cast<Device*>(d)->stats_.frames; }, this);
+    }
     if (options.perf && gpuTimer_.create(ctx_, vk::Frames::kInFlight)) {
         spdlog::info("d3d9: [debug] perf: GPU timestamps on{}",
                      options.perfFrame != 0 ? std::format(", pass timings of frame {}", options.perfFrame) : std::string());
@@ -413,6 +419,14 @@ void Device::windowResized() {
         return;
     }
     presenter_.waitIdle();
+    if (swapchain_.frameGenActive()) {
+        // AMD's swapchain follows the window by its size only: a re-creation at the same size would only cost the generator's context
+        RECT rc{};
+        GetClientRect(options_.window, &rc);
+        if (static_cast<std::uint32_t>(rc.right) == swapchain_.extent().width && static_cast<std::uint32_t>(rc.bottom) == swapchain_.extent().height) {
+            return;
+        }
+    }
     recreateSwapchain();
 }
 
@@ -456,11 +470,15 @@ bool Device::setFrameGenSwapchain(bool want, const std::filesystem::path& loader
         };
         swapchain_.frameGen()->setUi(std::move(hook));
         fgUiInstalled_ = true;
-        if (options_.perf) swapchain_.frameGen()->startSampler();  // the real presents' times (a spinning thread: [debug] perf only)
+        // the real presents' times (a thread spinning on the API's present counter: [debug] perf only; RVK_FG_NO_SAMPLER=1 leaves it
+        // out, e.g. for CPU measurements)
+        if (options_.perf && GetEnvironmentVariableA("RVK_FG_NO_SAMPLER", nullptr, 0) == 0) swapchain_.frameGen()->startSampler();
     }
     pacerChecked_ = {};
     pacerRequested_ = -1.0;
     fgTick_ = {};
+    fgReportAt_ = {};  // a new swapchain counts its presents from zero
+    fgReportReal_ = 0;
     return swapchain_.frameGenActive() == want;
 }
 
@@ -537,6 +555,13 @@ Device::FrameGenReport Device::takeFrameGenReport() {
         }
     }
     return r;
+}
+
+void Device::flushFrameAndWait() {
+    endRendering();
+    submitFrame(VK_NULL_HANDLE, VK_NULL_HANDLE);
+    frames_.waitFor(frames_.currentValue() - 1);
+    beginFrame();
 }
 
 bool Device::waitFrameGenPresent() {

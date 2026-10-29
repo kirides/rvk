@@ -127,6 +127,8 @@ private:
         std::string text;
     };
     std::vector<Command> commands_;
+    float scrollFrac_ = 0.0f;  // [debug] command "overlay scroll <0..1>"
+    int scrollFrames_ = 0;
     std::string selectTab_;  // [debug] command "overlay tab <name>": selected at the next build of the settings window
     keys::Poster keyPoster_;  // key / keydown / keyup / type
 };

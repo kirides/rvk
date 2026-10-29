@@ -741,6 +741,8 @@ public:
     // frame generation swapchain: until the previous present returned and the GPU work it queued (interpolation) is done (the
     // generator's calls are recorded afterwards: its view ring, frame-generation.md 9.4)
     bool waitFrameGenPresent();
+    // submits the frame's recorded commands now, waits for the GPU and starts a new command buffer (what a read-back does)
+    void flushFrameAndWait();
     // numbers since the last call, for the 5 s log lines
     struct FrameGenReport {
         bool swapchain = false;
