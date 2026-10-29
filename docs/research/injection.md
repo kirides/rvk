@@ -130,6 +130,7 @@ attachments change the pipeline keys and the draw path), the per-geometry previo
 | `BeforeAlpha` | `Device::prepareDraw` at the first draw of the Main view's Alpha or AlphaLate pass (refracted ops draw before the alpha list) | scene HDR = sky + solid + decals + refracted (water), no translucent effect (particles are in Alpha, precipitation in AlphaLate); once per main view; used by `upscale.opaque` (upscaling.md 8) |
 | `AfterMainView` | the main view's `eCFrustumDatabase::Execute` returns | scene HDR complete; the post chain (eye adaptation, tonemap, DoF) not yet |
 | `BeforeGui` | `eCApplication::Draw` entry | the back buffer holds the post-processed frame; no GUI yet |
+| `BeforePresent` | `HalDevice::SwapScreen`, before the captures and `Device::present` | the back buffer holds the finished frame (GUI included); frame generation records here (frame-generation.md 9) |
 
 Main-view points fire once per main view (`inject::Firings`; `PassContext::mainView` = 1 for the frame's first). A frame
 without a main view (loading screens) fires only `BeforeGui`.

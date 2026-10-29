@@ -1,7 +1,7 @@
 # Frame generation (FSR 3 / FSR 4) - design and feasibility
 
 Research of 2026-10-29 (RX 7900 XTX, Adrenalin 26.10.1 "AMD proprietary driver", Windows 11 26300). Request: "Add frame generation. FSR 3 and FSR 4
-frame generation. Ensure proper setup and pacing." **Nothing is built in the renderer**; this document is the design plus the measurements of a
+frame generation. Ensure proper setup and pacing." **Stages F1 and F2 are built (section 9)**; the rest of this document is the design plus the measurements of a
 throwaway probe (`out/fg/`, git-ignored, section 6). Legend: [SDK] read in the SDK 2.4.0 headers / docs / sample source (clone
 `B:\DevDrive\ffx-sdk-2.4.0-dl\src`, tag `v2.4.0`, paths are relative to `Kits/FidelityFX/` unless they start with `Samples/` or `docs/`), [C] code of
 this repo, [M] measured with the probe, [E] estimate, [?] open: needs a prototype in the game.
@@ -312,3 +312,58 @@ target (`target_output = 2 x base`); `-PresentStalls` samples the presenting thr
 * FSR 4 FG anything (no RDNA 4 here), the ML provider's camera vector conventions, driver-assisted pacing.
 * Why the driver-provided swapchain 4.0.0 crashes at destroy (ours or theirs; reproduced with the SDK-documented order).
 * RDNA 2 / NVIDIA / Intel behaviour of FG 3.1.6 and of the queue requirement (the SDK states no vendor restriction for 3.1.x).
+
+## 9. F1 / F2 result (2026-10-29)
+
+Built: the FFX wrapper, the queues, the settings and capabilities, the self-test (F1) and the inputs + the manual generation path
+(F2). **Not built (F3): the AMD swapchain presentation, pacing, the present callback, `frameID` / Configure per presented frame in the
+callback model, the fps panel**. Commits: `7c4fcc6` (F1), `7d22e8b` + `a35d2fc` (vendoring / packaging), the F2 commit after them.
+
+### 9.1 What is there
+
+| piece | where | notes |
+|---|---|---|
+| wrapper | `src/vk/framegen.*` | `vk::FrameGen`: load the loader, `versionList` / `swapchainVersionList` (ffxQuery), `createContext` (always pinned with `ffxOverrideVersion`: FSR 3 = the newest 3.x, ML = the newest 4.x, **only if the query offers it**), `configure` / `prepare` (PrepareV2) / `dispatch` with `FFX_FRAMEGENERATION_FLAG_NO_SWAPCHAIN_CONTEXT_NOTIFY`, tracked layouts as in `vk::Fsr`. Pure helpers `parseFrameGenVersion`, `pickFrameGenProvider`, `pickSwapchainProvider` (never a driver-provided version: the crashing `4.0.0 *`), `probeFrameGeneration` (startup probe, ~150 ms when the DLL is installed, nothing otherwise) |
+| queues | `vk/context.*` | `ContextOptions::frameGenQueues` (set from `framegen.mode` != off **at start**): graphics family queues 1 and 2 (present, acquire) + a compute-only family queue (async) or a fourth graphics queue; rvk.log `vulkan: frame generation queues: game 0:0, present 0:1, acquire 0:2, async compute 1:0`; with the mode off at start the device has its one queue as before; `Context::frameGenQueues()` is what F3 passes to the swapchain context. Validation: 0 errors with the 4 queues |
+| capabilities | `core/caps.*` | `FrameGeneration` (DLL installed + an FSR 3 provider offered), `FrameGenerationMl` (a 4.x provider offered: **RDNA 3: not offered**), `FrameGenerationQueues` (information); rvk.log `caps:   Frame generation (FSR 3) enabled [...]`, the System tab's "Graphics card" report |
+| settings | `core/settings.*` | `framegen.mode = off | fsr3 | fsr4` (debug tab until F3, default off), `framegen.manual` (debug, A/B eligible), `framegen.debug = off | motion | depth | hudless | generated`. New generic mechanism **`Spec::optionRequirements`**: an enum option whose capability is unmet is greyed in the overlay (with the reason) and applies as the next lower available option (`fsr4` -> `fsr3` where no ML provider is offered; unit-tested) |
+| feature | `src/enh/framegen.*` | passes `framegen.depth` (AfterMainView: the hardware depth -> R32F in the D3D convention with the upscaler's shader `upscale/prep.comp`), `framegen.hudless` (BeforeGui: back buffer copy), `framegen.generate` + `framegen.debug` at the **new injection point `BeforePresent`** (fired from `HalDevice::SwapScreen` after the GUI and before the captures: the engine's snapshot and `rvk_screenshot` read the back buffer after it) |
+| presenting | `Device::present` | the generated frame is blitted + overlaid + presented first, the real frame half a smoothed base interval later (`FramePacer::sleepFor`, timer + spin); two acquires / submits / presents per base frame; skipped on a reset frame, loading frames, unpaced frames |
+| captures | `api/capture.*`, `HalDevice::SwapScreen` | every capture that is due (`-Screenshots`, rvk_screenshot bursts of the scenario mods) also writes `<name>_gen.png` (no ticket of its own) when a generated frame exists |
+| self-test | `rvk_vktest --fg` | the probe productised: 1280x720, a rectangle moving 40 px / frame, FSR 3 provider 3.1.6 (46 MiB), generated centre = midpoint exactly in frames 1 - 5, frame 0 (reset) passes the real frame through, swapchain pin = 3.1.7, ML: "not offered on this device"; PASS; SKIP without the DLLs. ctest `rvk_vktest_fg` |
+| unit tests | `tests/framegen_tests.cpp` | version parsing / picking, the swapchain pin, option requirements + capabilities, the blocker priority, camera cut rules, the state / reset machine (190 tests) |
+
+### 9.2 Inputs and rules (confirmed in the game)
+
+* **Colour**: `framegen.color` = a copy of the finished back buffer (GUI included) at BeforePresent; **HUDLessColor** = the back buffer at BeforeGui. Both B8G8R8A8 at the back buffer's size (display size; the swapchain blit scales both frames the same way).
+* **Depth**: R32F, D3D convention 0 (near) .. 1 (far), no `DEPTH_INVERTED` / `DEPTH_INFINITE` (the reversed hardware depth is converted in `prep.comp`), at the **render** size; **motion**: the G-buffer's RG16F (`gbuffer.motion`, uv units, previous - current, jitter free), `motionVectorScale` = render size, `MOTION_VECTORS_JITTER_CANCELLATION` off. The G-buffer is forced on while frame generation is on (`HalDevice::applyGbuffer`). The debug views confirm both: `framegen.debug=depth` is a clean distance ramp, `=motion` shows the camera's flow and the hero's own (object-motion) vectors.
+* **Camera**: `CameraBlock` near / far / vertical FOV (from the projection), position, right / up / forward = rows 0 / 1 / 2 of the inverse view (the engine's D3D row-vector axes; **only the ML provider reads them: sign convention untested**), `viewSpaceToMeters` 0.01, frame time = the camera's time delta clamped to 1 .. 100 ms, jitter = `Device::jitter()` (the sequence FSR was given; `upscale.jitter_flip` is a test switch of the geometry only and is not mirrored).
+* **When it runs** (`frameGenBlocker`, logged on every change as `enh: framegen: not generating at present N: <reason>`): in the world only (`engine::menu` Game / Unknown, not Menu, not Loading, not paused (app state 1)), a main view exists, depth + motion were prepared for this frame, `render <= display`. Anything else = the generator skips the frame; the next active frame resets.
+* **Reset**: the first active frame after any interruption, a context (re)creation (size change, provider switch), and **camera cuts** (`frameGenCameraCut`: a move of more than 50 m in one frame, a view turn of more than 60 degrees, a FOV ratio above 1.25, no previous camera). A reset frame is passed through by the provider and is **not shown** as a generated frame (`shown` counter). `frameID` grows by exactly 1 per active frame.
+* **Modes**: works in Wrapper and Full (Full compare with it on: 260 compare lines `mismatches: none`, 0 mismatches; off: 234 / 0), with the upscaler off, at native AA (jitter), and at Quality (render 1066x600 -> 1600x900). Original mode: no Vulkan, `framegen: off: the session's backend is passthrough` is logged at start and the settings are unavailable ("no Vulkan device"). Without `framegen.manual` and with mode on, **nothing is generated** before F3 (logged once).
+
+### 9.3 Measurements (RX 7900 XTX, 1600x900, RisenTest.exe, wrapper)
+
+| item | value |
+|---|---|
+| generation GPU time (`-PerfFrame`, pass `framegen.generate` = colour copy + configure + prepare + interpolation) | **0.42 ms** (+ `framegen.depth` 0.010, `framegen.hudless` 0.013) |
+| CPU of the pass | 0.21 - 0.24 ms per frame in a plain run, 0.5 ms on the perfsave savegame (`perf:` injected pass CPU); engine+HAL 5.5 - 5.7 ms vs 4.9 - 5.0 ms with the mode off (savegame, uncapped) |
+| memory | context 80 MiB at 1600x900 (46 MiB at 1280x720), plus our colour / hudless / output / depth images |
+| generated frames | `enh: framegen:` 5 s line: at a 40 fps base cap 200 frames / 5 s, generated frames presented = frames - 1 (the reset frame), 0 stalls; uncapped 110 - 150 base fps |
+| quality, small motion (pub, standing / slow walk) | PSNR of the generated frame against the mean of its neighbours 57 - 64 dB (copying a neighbour: 43 - 46) |
+| quality, fast camera turn (30 fps base, ~50 px per frame) | the mean of the neighbours is not ground truth there (PSNR 20 dB for both); by eye the generated frame sits at the midpoint (cliff edge 1378 between 1415 and 1340), the HUD text (quest line, "Press ... to take the item") is as crisp as in the real frames, no doubling |
+| screenshots | `frame_<n>_gen.png` in `-Screenshots`, `<spot>_b<k>_gen.png` in the bursts of `rvkcompare` / `rvk_rtwalk` (new param `burst_at`) |
+| `framegen.debug` views | motion, depth, hudless and generated verified in game (frame_N.png = the view) |
+
+### 9.4 Issues found
+
+1. **FFX ring slots (the same as the upscaler's, `vk/fsr.h`)**: with validation, two `vkDestroyImageView ... in use` errors appeared in a Quality + frame generation run (configure / prepare / dispatch of one frame use the DLL's ring of dynamic view slots up). Fix: before recording the generator the previous submitted frame must be complete (`Frames::waitFor(current - 1)`, counted as `previous-frame waits` in the 5 s line: 0 at a 30 - 40 fps cap, 14 - 450 waits per ~2,500 frames uncapped, 0.7 s in total on the perfsave). **F3 must keep this** for the Prepare dispatch (or give prepare its own context like the reactive mask).
+2. **Validation messages from inside AMD's shaders (accepted like the upscaler's)**: `rw_output` is a `float3` write into the B8G8R8A8 output (VUID-vkCmdDispatch-OpImageWrite-08795, **error** severity, 10 reported then silenced: our `-Validation` runs show them), warnings `rw_dilated_motion_vectors` (Rg32f vs R16G16), `rw_optical_flow_input[_level_n]` (R32ui vs R8), `rw_optical_flow` (Rg32i vs R16G16_SINT), `rw_farthest_depth`, `rw_current_luma`, `rw_spd_mip*` (R32f / Rg32f declared). Nothing else: 0 validation messages from our code in Wrapper / Full + Quality + frame generation.
+3. The first generated frame after a reset is the real frame (a duplicate): not presented as a generated one.
+4. With frame generation on at an uncapped base the half-interval wait runs on the render thread: the output is 2x the base presents, the base is not capped by it (F3's pacing replaces it).
+5. `rvkcompare` spots freeze game time and the camera: generated = real there (checks the HUD / overlay / path only); the moving checks use `rvk_rtwalk` (`-Param 'load=0','burst=6','interval=1','name=fgwalk','seconds=12','burst_at=8','keys=MoveForward,TurnRight'` + `-Setting 'vulkan.max_fps=30'`).
+6. FSR 4 (ML) frame generation: **cannot be tested here** (not offered on RDNA 3). The code path is the same calls with `ci.ml`; the camera vectors (sign / handedness) are unverified; selectable only where the query lists a 4.x provider.
+
+### 9.5 What F3 needs
+
+The swapchain backend in `vk::Swapchain` (`ffxCreateContext` swapchain VK with `Context::frameGenQueues()`, replacement functions, pinned 3.1.7), `Device::present` through `pOutQueuePresentKHR`, the present callback (blit + overlay moved into it, HUDless in Configure), `frameID` per presented frame, `Configure(enabled=false)` states for menus / loading, pacer rate = output / 2, `framegen.pacing`, the fps panel and the `framegen:` pacing statistics, exclusive fullscreen off while on, the ring-slot rule (9.4 1), removal of the debug flags of `framegen.mode`, and the Radeon Chill note in the README. Open from F2: tuning the cut thresholds with teleports (`rvk_perfsave`), HUD wobble at low contrast backgrounds (UI texture mode, F4), water / particle artefacts review (checklist 3.2) with motion sequences, async compute A/B.
