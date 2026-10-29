@@ -66,6 +66,21 @@ void ObjectMotion::bufferChanged(std::uint64_t bufferId) {
 }
 
 void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
+    // diagnostics: why rigid draws are not captured (logged with the capture stats)
+    if (q.kind == Kind::StaticMesh) {
+        ++diagRigid_;
+        if (q.tag == nullptr || q.tag->entity == nullptr) ++diagNoEntity_;
+        if (q.instanced) ++diagInstanced_;
+        if ((q.indexBuffer != nullptr && q.indexBuffer->ringCopied()) || (q.vertexBuffer != nullptr && q.vertexBuffer->ringCopied())) {
+            ++diagRing_;
+        }
+        const double t = dev.secondsSinceCreate();
+        if (t - diagLog_ > 10.0) {
+            diagLog_ = t;
+            spdlog::info("enh: object motion: rigid draws seen {} (no entity {}, instanced {}, ring-copied {}), moving {}", diagRigid_,
+                         diagNoEntity_, diagInstanced_, diagRing_, rigidMoving_);
+        }
+    }
     if (q.primitiveType != 4 || q.vertexBuffer == nullptr || q.indexBuffer == nullptr || q.primitives == 0 || q.instanced ||
         q.indexBuffer->ringCopied() || q.vertexBuffer->ringCopied()) {
         return;
