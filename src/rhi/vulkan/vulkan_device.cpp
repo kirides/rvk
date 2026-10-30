@@ -49,12 +49,21 @@ public:
     }
     // (the same address for read and write access)
     std::array<std::uint32_t, 2> shaderRefRw(std::uint64_t offset) const override { return shaderRef(offset); }
+    std::uint64_t gpuAddress() const override { return address_; }
     VkBuffer buffer() const { return buffer_; }
     std::uint64_t address() const { return address_; }
+    // a buffer owned elsewhere (rhi::vulkan::wrapBuffer): not destroyed here
+    void wrapExternal(VkBuffer buffer, std::uint64_t address, void* mapped) {
+        buffer_ = buffer;
+        address_ = address;
+        mapped_ = mapped;
+        external_ = true;
+    }
 
 private:
     VkDeviceImpl& dev_;
     BufferDesc desc_;
+    bool external_ = false;
     VkBuffer buffer_ = VK_NULL_HANDLE;
     VmaAllocation alloc_ = VK_NULL_HANDLE;
     void* mapped_ = nullptr;
@@ -144,36 +153,59 @@ private:
     VkPipelineBindPoint bindPoint_;
 };
 
-// A BLAS or TLAS: the acceleration structure object, its storage (a buffer with a device address) and the build scratch, all sized when it is created
-// from vkGetAccelerationStructureBuildSizesKHR and kept for rebuilds.
+// A BLAS or TLAS: the acceleration structure object and its storage (a buffer with a device address), sized from
+// vkGetAccelerationStructureBuildSizesKHR when it is created. A TLAS also keeps its build scratch for rebuilds; BLAS builds take their scratch from the
+// device's shared pool (VkDeviceImpl::ensureScratch), so thousands of BLASes do not each hold one.
 class VkAccelImpl final : public AccelerationStructure {
 public:
     VkAccelImpl(VkDeviceImpl& dev, bool tlas) : dev_(dev), tlas_(tlas) {}
     ~VkAccelImpl() override;
-    bool createBlas(std::span<const TriangleGeometry> geometries);
-    bool createTlas(std::uint32_t maxInstances);
+    bool createBlas(const BlasDesc& desc);
+    bool createTlas(const TlasDesc& desc);
+    bool createStorage(std::uint64_t bytes, const char* name);
     bool isTlas() const override { return tlas_; }
     std::uint64_t address() const override { return address_; }
     std::uint32_t tlasSlot() const override { return slot_; }
-    void recordBuildBlas(VkCommandBuffer cmd);
+    std::uint64_t storageBytes() const override { return storage_.size; }
+    VkAccelerationStructureKHR handle() const { return handle_; }
+    const std::vector<TriangleGeometry>& geometries() const { return geometries_; }
+    bool allowUpdate() const { return allowUpdate_; }
+    VkBuildAccelerationStructureFlagsKHR flags() const { return flags_; }
+    VkDeviceSize scratchNeed(bool update) const { return update ? updateScratch_ : buildScratch_; }
     void recordBuildTlas(VkCommandBuffer cmd, VkDeviceAddress instances, std::uint32_t count);
 
 private:
-    // the geometry / ranges of the BLAS's build info
-    void blasGeometries(std::vector<VkAccelerationStructureGeometryKHR>& geoms, std::vector<VkAccelerationStructureBuildRangeInfoKHR>& ranges,
-                        std::vector<std::uint32_t>& counts) const;
-    bool allocate(const VkAccelerationStructureBuildGeometryInfoKHR& info, const std::uint32_t* maxPrimitives, const char* what);
-    void barrierAfterBuild(VkCommandBuffer cmd) const;
+    bool allocate(const VkAccelerationStructureBuildGeometryInfoKHR& info, const std::uint32_t* maxPrimitives, const char* what, bool scratch);
+    bool createHandle(VkAccelerationStructureTypeKHR type, VkDeviceSize size, const char* what);
 
     VkDeviceImpl& dev_;
     bool tlas_;
     std::vector<TriangleGeometry> geometries_;  // BLAS: the buffers are referenced, not owned
     std::uint32_t maxInstances_ = 0;
-    vk::rt::AddressBuffer storage_, scratch_;
+    VkBuildAccelerationStructureFlagsKHR flags_ = 0;
+    bool allowUpdate_ = false;
+    VkDeviceSize buildScratch_ = 0, updateScratch_ = 0;
+    vk::rt::AddressBuffer storage_, scratch_;  // (scratch_: TLAS only)
     VkAccelerationStructureKHR handle_ = VK_NULL_HANDLE;
     VkDeviceAddress address_ = 0;
     std::uint32_t slot_ = 0;
     bool hasSlot_ = false;  // a TLAS holds a slot of the shared bindless array (0 is a valid one)
+};
+
+// compacted sizes of built BLASes: a query pool
+class VkSizeQueryImpl final : public SizeQuery {
+public:
+    VkSizeQueryImpl(VkDeviceImpl& dev, std::uint32_t capacity) : dev_(dev), capacity_(capacity) {}
+    ~VkSizeQueryImpl() override;
+    bool create();
+    std::uint32_t capacity() const override { return capacity_; }
+    bool read(std::uint32_t first, std::uint32_t count, std::uint64_t* sizes) override;
+    VkQueryPool pool() const { return pool_; }
+
+private:
+    VkDeviceImpl& dev_;
+    std::uint32_t capacity_;
+    VkQueryPool pool_ = VK_NULL_HANDLE;
 };
 
 class VkCommandListImpl final : public CommandList {
@@ -185,6 +217,17 @@ public:
     void transitions(std::span<const TextureTransition> list) override;
     void bufferBarrier(Buffer&, BufferAccess) override;
     void computeBarrier() override;
+    void memoryBarrier(VkPipelineStageFlags2 srcStages, VkAccessFlags2 srcAccess, VkPipelineStageFlags2 dstStages, VkAccessFlags2 dstAccess) override {
+        VkMemoryBarrier2 b{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        b.srcStageMask = srcStages;
+        b.srcAccessMask = srcAccess;
+        b.dstStageMask = dstStages;
+        b.dstAccessMask = dstAccess;
+        VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        di.memoryBarrierCount = 1;
+        di.pMemoryBarriers = &b;
+        vkCmdPipelineBarrier2(cmd_, &di);
+    }
     void setPushConstants(const void* data, std::uint32_t size) override;
     void setConstantBuffer(Buffer& buffer, std::uint64_t offset, std::uint64_t size) override {
         cb_ = {static_cast<VkBufferImpl&>(buffer).buffer(), offset, size};
@@ -236,15 +279,27 @@ public:
         const VkBufferCopy c{srcOffset, dstOffset, size};
         vkCmdCopyBuffer(cmd_, static_cast<VkBufferImpl&>(src).buffer(), static_cast<VkBufferImpl&>(dst).buffer(), 1, &c);
     }
+    void fillBuffer(Buffer& dst, std::uint64_t offset, std::uint64_t size, std::uint32_t value) override {
+        vkCmdFillBuffer(cmd_, static_cast<VkBufferImpl&>(dst).buffer(), offset, size, value);
+    }
     void copyBufferToTexture(Texture& dst, Buffer& src, std::uint64_t srcOffset, Subresource sub) override;
     void copyTextureToBuffer(Buffer& dst, std::uint64_t dstOffset, Texture& src, Subresource sub) override;
     void clearTexture(Texture& texture, const VkClearColorValue& value, std::uint32_t baseMip, std::uint32_t mipCount) override;
     void copyTexture(Texture& dst, Texture& src, std::span<const TextureCopy> regions) override;
     bool blitTexture(Texture& dst, Texture& src, std::span<const TextureBlit> regions, VkFilter filter) override;
-    void buildBlas(AccelerationStructure& blas) override { static_cast<VkAccelImpl&>(blas).recordBuildBlas(cmd_); }
+    void buildBlas(AccelerationStructure& blas) override {
+        const BlasBuild b{&blas, {}, false};
+        buildBlases(std::span<const BlasBuild>(&b, 1));
+    }
     void buildTlas(AccelerationStructure& tlas, Buffer& instances, std::uint64_t instanceOffset, std::uint32_t count) override {
         static_cast<VkAccelImpl&>(tlas).recordBuildTlas(cmd_, static_cast<VkBufferImpl&>(instances).address() + instanceOffset, count);
     }
+    void buildTlasAt(AccelerationStructure& tlas, std::uint64_t instancesAddress, std::uint32_t count) override {
+        static_cast<VkAccelImpl&>(tlas).recordBuildTlas(cmd_, instancesAddress, count);
+    }
+    void buildBlases(std::span<const BlasBuild> builds) override;
+    void queryCompactedSizes(SizeQuery& query, std::uint32_t first, std::span<AccelerationStructure* const> blases) override;
+    void compactBlas(AccelerationStructure& dst, AccelerationStructure& src) override;
     void beginRegion(std::string_view) override {}
     void endRegion() override {}
 
@@ -276,13 +331,17 @@ public:
             vk::Context* ctx = &ctx_;
             vk::PassLayout layout = layout_;
             std::vector<VkSampler> samplers = std::move(samplers_);
-            frames_.retire([ctx, layout, samplers]() mutable {
+            vk::rt::AddressBuffer scratch = scratch_;
+            frames_.retire([ctx, layout, samplers, scratch]() mutable {
                 for (VkSampler s : samplers) vkDestroySampler(ctx->device(), s, nullptr);
                 layout.destroy(*ctx);
+                scratch.destroy(*ctx);
             });
             return;
         }
         if (ctx_.device() != VK_NULL_HANDLE) ctx_.waitIdle();
+        scratch_.destroy(ctx_);
+        for (vk::rt::AddressBuffer& g : graveyard_) g.destroy(ctx_);
         for (VkSampler s : samplers_) vkDestroySampler(ctx_.device(), s, nullptr);
         layout_.destroy(ctx_);
         frames_.destroy();  // (runs the retired slot releases of the textures: the bindless set must still exist)
@@ -407,17 +466,53 @@ public:
         return std::make_unique<VkPipelineImpl>(*this, p, VK_PIPELINE_BIND_POINT_GRAPHICS);
     }
 
-    std::unique_ptr<AccelerationStructure> createBlas(std::span<const TriangleGeometry> geometries) override {
+    std::unique_ptr<AccelerationStructure> createBlas(const BlasDesc& desc) override {
         if (!caps_.rayQuery) return nullptr;
         auto a = std::make_unique<VkAccelImpl>(*this, false);
-        if (!a->createBlas(geometries)) return nullptr;
+        if (!a->createBlas(desc)) return nullptr;
         return a;
     }
-    std::unique_ptr<AccelerationStructure> createTlas(std::uint32_t maxInstances) override {
+    std::unique_ptr<AccelerationStructure> createTlas(const TlasDesc& desc) override {
         if (!caps_.rayQuery) return nullptr;
         auto a = std::make_unique<VkAccelImpl>(*this, true);
-        if (!a->createTlas(maxInstances)) return nullptr;
+        if (!a->createTlas(desc)) return nullptr;
         return a;
+    }
+    std::unique_ptr<AccelerationStructure> createBlasStorage(std::uint64_t bytes, const char* name) override {
+        if (!caps_.rayQuery) return nullptr;
+        auto a = std::make_unique<VkAccelImpl>(*this, false);
+        if (!a->createStorage(bytes, name != nullptr ? name : "rhi blas (compacted)")) return nullptr;
+        return a;
+    }
+    std::unique_ptr<SizeQuery> createSizeQuery(std::uint32_t capacity) override {
+        if (!caps_.rayQuery) return nullptr;
+        auto q = std::make_unique<VkSizeQueryImpl>(*this, capacity);
+        if (!q->create()) return nullptr;
+        return q;
+    }
+    std::uint64_t buildScratchBytes() const override { return scratch_.size; }
+
+    // The shared scratch pool of BLAS builds: at least `bytes` (grown by replacing it; the old one goes through the device's deferred destruction, the
+    // builds already recorded keep using it). Offsets handed out are multiples of scratchAlign().
+    bool ensureScratch(VkDeviceSize bytes) {
+        if (scratch_.buffer != VK_NULL_HANDLE && scratch_.size >= bytes) return true;
+        if (scratch_.buffer != VK_NULL_HANDLE) {
+            retireBuffer(scratch_);
+            scratch_ = {};
+        }
+        const VkDeviceSize minimum = external_ ? (32ull << 20) : (1ull << 20);
+        return scratch_.create(ctx_, std::max(bytes, minimum), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false, scratchAlign(), "rhi build scratch");
+    }
+    VkDeviceSize scratchAlign() const { return std::max<VkDeviceSize>(ctx_.features().rayTracing.minScratchOffsetAlignment, 16); }
+    const vk::rt::AddressBuffer& scratch() const { return scratch_; }
+    // a buffer the GPU may still use: destroyed with the frame being recorded (wrapped) / with the device (owning: nothing waits mid-recording)
+    void retireBuffer(vk::rt::AddressBuffer buf) {
+        if (external_) {
+            vk::Context* c = &ctx_;
+            frames_.retire([c, buf]() mutable { buf.destroy(*c); });
+        } else {
+            graveyard_.push_back(buf);
+        }
     }
 
     void submitAndWait(const std::function<void(CommandList&)>& record) override {
@@ -485,6 +580,8 @@ private:
     DeviceCaps caps_;
     bool bindlessInit_ = false;
     std::vector<VkSampler> samplers_;
+    vk::rt::AddressBuffer scratch_;               // the BLAS build scratch pool
+    std::vector<vk::rt::AddressBuffer> graveyard_;  // replaced pools of an owning device
 };
 
 // ---- swapchain --------------------------------------------------------------------------------------------------------------
@@ -542,7 +639,11 @@ bool VkBufferImpl::create() {
         aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
     }
     VmaAllocationInfo info{};
-    if (vmaCreateBuffer(dev_.ctx().allocator(), &bci, &aci, &buffer_, &alloc_, &info) != VK_SUCCESS) return false;
+    // acceleration structure inputs (instance records: 16 bytes) and scratch want aligned addresses; with ray tracing every buffer starts on 256 bytes
+    const VkResult r = dev_.ctx().features().rayTracing.enabled
+                           ? vmaCreateBufferWithAlignment(dev_.ctx().allocator(), &bci, &aci, 256, &buffer_, &alloc_, &info)
+                           : vmaCreateBuffer(dev_.ctx().allocator(), &bci, &aci, &buffer_, &alloc_, &info);
+    if (r != VK_SUCCESS) return false;
     mapped_ = info.pMappedData;
     VkBufferDeviceAddressInfo ai{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
     ai.buffer = buffer_;
@@ -559,7 +660,7 @@ void VkBufferImpl::flush() {
 }
 
 VkBufferImpl::~VkBufferImpl() {
-    if (buffer_ == VK_NULL_HANDLE) return;
+    if (buffer_ == VK_NULL_HANDLE || external_) return;
     VmaAllocator allocator = dev_.ctx().allocator();
     const VkBuffer buffer = buffer_;
     const VmaAllocation alloc = alloc_;
@@ -680,98 +781,38 @@ VkAccelImpl::~VkAccelImpl() {
     });
 }
 
-void VkAccelImpl::blasGeometries(std::vector<VkAccelerationStructureGeometryKHR>& geoms, std::vector<VkAccelerationStructureBuildRangeInfoKHR>& ranges,
-                                 std::vector<std::uint32_t>& counts) const {
-    for (const TriangleGeometry& t : geometries_) {
+namespace {
+
+// the geometry / ranges of a BLAS build info
+void blasGeometries(std::span<const TriangleGeometry> list, std::vector<VkAccelerationStructureGeometryKHR>& geoms,
+                    std::vector<VkAccelerationStructureBuildRangeInfoKHR>& ranges, std::vector<std::uint32_t>* counts) {
+    for (const TriangleGeometry& t : list) {
         VkAccelerationStructureGeometryKHR g{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
         g.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
         g.flags = t.opaque ? VK_GEOMETRY_OPAQUE_BIT_KHR : 0;
         auto& tri = g.geometry.triangles;
         tri.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
         tri.vertexFormat = t.vertexFormat;
-        tri.vertexData.deviceAddress = static_cast<VkBufferImpl*>(t.vertices)->address() + t.vertexOffset;
+        tri.vertexData.deviceAddress =
+            t.vertexAddress != 0 ? t.vertexAddress : (t.vertices != nullptr ? static_cast<VkBufferImpl*>(t.vertices)->address() + t.vertexOffset : 0);
         tri.vertexStride = t.vertexStride;
         tri.maxVertex = t.vertexCount > 0 ? t.vertexCount - 1 : 0;
-        if (t.indices != nullptr) {
+        if (t.indexed()) {
             tri.indexType = t.indexType;
-            tri.indexData.deviceAddress = static_cast<VkBufferImpl*>(t.indices)->address() + t.indexOffset;
+            tri.indexData.deviceAddress =
+                t.indexAddress != 0 ? t.indexAddress : static_cast<VkBufferImpl*>(t.indices)->address() + t.indexOffset;
         } else {
             tri.indexType = VK_INDEX_TYPE_NONE_KHR;
         }
         geoms.push_back(g);
-        const std::uint32_t triangles = (t.indices != nullptr ? t.indexCount : t.vertexCount) / 3;
+        const std::uint32_t triangles = t.triangleCount();
         ranges.push_back({triangles, 0, 0, 0});
-        counts.push_back(triangles);
+        if (counts != nullptr) counts->push_back(triangles);
     }
-}
-
-// sizes -> storage buffer + the acceleration structure object + scratch (the build happens in record*)
-bool VkAccelImpl::allocate(const VkAccelerationStructureBuildGeometryInfoKHR& info, const std::uint32_t* maxPrimitives, const char* what) {
-    vk::Context& ctx = dev_.ctx();
-    VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-    vkGetAccelerationStructureBuildSizesKHR(ctx.device(), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &info, maxPrimitives, &sizes);
-    if (!storage_.create(ctx, sizes.accelerationStructureSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false, 256, what)) return false;
-    VkAccelerationStructureCreateInfoKHR ci{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
-    ci.buffer = storage_.buffer;
-    ci.size = sizes.accelerationStructureSize;
-    ci.type = info.type;
-    if (vkCreateAccelerationStructureKHR(ctx.device(), &ci, nullptr, &handle_) != VK_SUCCESS) {
-        spdlog::error("rhi: vkCreateAccelerationStructureKHR ({}) failed", what);
-        return false;
-    }
-    ctx.setName(handle_, VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR, what);
-    const VkDeviceSize align = std::max<VkDeviceSize>(ctx.features().rayTracing.minScratchOffsetAlignment, 16);
-    if (!scratch_.create(ctx, std::max<VkDeviceSize>(sizes.buildScratchSize, 4), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false, align, "rhi build scratch")) {
-        return false;
-    }
-    VkAccelerationStructureDeviceAddressInfoKHR ai{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
-    ai.accelerationStructure = handle_;
-    address_ = vkGetAccelerationStructureDeviceAddressKHR(ctx.device(), &ai);
-    return true;
-}
-
-bool VkAccelImpl::createBlas(std::span<const TriangleGeometry> geometries) {
-    geometries_.assign(geometries.begin(), geometries.end());
-    for (const TriangleGeometry& t : geometries_) {
-        if (t.vertices == nullptr) return false;
-    }
-    std::vector<VkAccelerationStructureGeometryKHR> geoms;
-    std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges;
-    std::vector<std::uint32_t> counts;
-    blasGeometries(geoms, ranges, counts);
-    VkAccelerationStructureBuildGeometryInfoKHR info{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
-    info.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-    info.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
-    info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
-    info.geometryCount = static_cast<std::uint32_t>(geoms.size());
-    info.pGeometries = geoms.data();
-    return allocate(info, counts.data(), "rhi blas");
-}
-
-bool VkAccelImpl::createTlas(std::uint32_t maxInstances) {
-    maxInstances_ = maxInstances;
-    slot_ = dev_.allocTlasSlot();
-    if (slot_ >= shader::abi::kMaxTlas) {
-        spdlog::error("rhi: no free TLAS slot ({} in the bindless array)", shader::abi::kMaxTlas);
-        slot_ = 0;
-        return false;
-    }
-    hasSlot_ = true;
-    VkAccelerationStructureGeometryKHR g{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
-    g.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
-    g.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
-    VkAccelerationStructureBuildGeometryInfoKHR info{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
-    info.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-    info.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
-    info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
-    info.geometryCount = 1;
-    info.pGeometries = &g;
-    if (!allocate(info, &maxInstances, "rhi tlas")) return false;
-    return dev_.bindless().setTlas(slot_, handle_);
 }
 
 // build writes -> later builds (a TLAS over a freshly built BLAS) and ray queries in any shader stage
-void VkAccelImpl::barrierAfterBuild(VkCommandBuffer cmd) const {
+void barrierAfterBuild(VkCommandBuffer cmd) {
     VkMemoryBarrier2 b{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
     b.srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
     b.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
@@ -784,25 +825,100 @@ void VkAccelImpl::barrierAfterBuild(VkCommandBuffer cmd) const {
     vkCmdPipelineBarrier2(cmd, &di);
 }
 
-void VkAccelImpl::recordBuildBlas(VkCommandBuffer cmd) {
+// Before a build: earlier builds / compaction copies (the scratch is reused, a TLAS reads BLASes) and the ray queries that still read what is
+// rewritten (the previous use of a TLAS) are done.
+void barrierBeforeBuild(VkCommandBuffer cmd, bool copyStage) {
+    const VkPipelineStageFlags2 asStages =
+        VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | (copyStage ? VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_COPY_BIT_KHR : 0);
+    VkMemoryBarrier2 b{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    b.srcStageMask = asStages | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    b.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR | VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    b.dstStageMask = asStages;
+    b.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    di.memoryBarrierCount = 1;
+    di.pMemoryBarriers = &b;
+    vkCmdPipelineBarrier2(cmd, &di);
+}
+
+}  // namespace
+
+bool VkAccelImpl::createHandle(VkAccelerationStructureTypeKHR type, VkDeviceSize size, const char* what) {
+    vk::Context& ctx = dev_.ctx();
+    if (!storage_.create(ctx, size, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false, 256, what)) return false;
+    VkAccelerationStructureCreateInfoKHR ci{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
+    ci.buffer = storage_.buffer;
+    ci.size = size;
+    ci.type = type;
+    if (vkCreateAccelerationStructureKHR(ctx.device(), &ci, nullptr, &handle_) != VK_SUCCESS) {
+        spdlog::error("rhi: vkCreateAccelerationStructureKHR ({}) failed", what);
+        return false;
+    }
+    ctx.setName(handle_, VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR, what);
+    VkAccelerationStructureDeviceAddressInfoKHR ai{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
+    ai.accelerationStructure = handle_;
+    address_ = vkGetAccelerationStructureDeviceAddressKHR(ctx.device(), &ai);
+    return true;
+}
+
+// sizes -> storage + the acceleration structure object (+ scratch for a TLAS; the build happens in record*)
+bool VkAccelImpl::allocate(const VkAccelerationStructureBuildGeometryInfoKHR& info, const std::uint32_t* maxPrimitives, const char* what, bool scratch) {
+    vk::Context& ctx = dev_.ctx();
+    VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+    vkGetAccelerationStructureBuildSizesKHR(ctx.device(), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &info, maxPrimitives, &sizes);
+    buildScratch_ = std::max<VkDeviceSize>(sizes.buildScratchSize, 4);
+    updateScratch_ = std::max<VkDeviceSize>(sizes.updateScratchSize, 4);
+    if (!createHandle(info.type, sizes.accelerationStructureSize, what)) return false;
+    if (scratch && !scratch_.create(ctx, buildScratch_, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false, dev_.scratchAlign(), "rhi build scratch")) return false;
+    return true;
+}
+
+bool VkAccelImpl::createBlas(const BlasDesc& desc) {
+    geometries_.assign(desc.geometries.begin(), desc.geometries.end());
+    allowUpdate_ = desc.allowUpdate;
+    flags_ = (desc.preferFastBuild ? VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR : VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR) |
+             (desc.allowUpdate ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR : 0) |
+             (desc.allowCompaction ? VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR : 0);
     std::vector<VkAccelerationStructureGeometryKHR> geoms;
     std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges;
     std::vector<std::uint32_t> counts;
-    blasGeometries(geoms, ranges, counts);
+    blasGeometries(geometries_, geoms, ranges, &counts);
     VkAccelerationStructureBuildGeometryInfoKHR info{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
     info.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-    info.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    info.flags = flags_;
     info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     info.geometryCount = static_cast<std::uint32_t>(geoms.size());
     info.pGeometries = geoms.data();
-    info.dstAccelerationStructure = handle_;
-    info.scratchData.deviceAddress = scratch_.address;
-    const VkAccelerationStructureBuildRangeInfoKHR* pRanges = ranges.data();
-    vkCmdBuildAccelerationStructuresKHR(cmd, 1, &info, &pRanges);
-    barrierAfterBuild(cmd);
+    return allocate(info, counts.data(), desc.name != nullptr ? desc.name : "rhi blas", false);
+}
+
+bool VkAccelImpl::createStorage(std::uint64_t bytes, const char* name) { return createHandle(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, bytes, name); }
+
+bool VkAccelImpl::createTlas(const TlasDesc& desc) {
+    maxInstances_ = desc.maxInstances;
+    flags_ = desc.preferFastBuild ? VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR : VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    slot_ = dev_.allocTlasSlot();
+    if (slot_ >= shader::abi::kMaxTlas) {
+        spdlog::error("rhi: no free TLAS slot ({} in the bindless array)", shader::abi::kMaxTlas);
+        slot_ = 0;
+        return false;
+    }
+    hasSlot_ = true;
+    VkAccelerationStructureGeometryKHR g{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+    g.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    g.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+    VkAccelerationStructureBuildGeometryInfoKHR info{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+    info.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    info.flags = flags_;
+    info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    info.geometryCount = 1;
+    info.pGeometries = &g;
+    if (!allocate(info, &maxInstances_, desc.name != nullptr ? desc.name : "rhi tlas", true)) return false;
+    return dev_.bindless().setTlas(slot_, handle_);
 }
 
 void VkAccelImpl::recordBuildTlas(VkCommandBuffer cmd, VkDeviceAddress instances, std::uint32_t count) {
+    barrierBeforeBuild(cmd, dev_.ctx().features().rayTracing.maintenance1);
     VkAccelerationStructureGeometryKHR g{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
     g.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
     g.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
@@ -810,7 +926,7 @@ void VkAccelImpl::recordBuildTlas(VkCommandBuffer cmd, VkDeviceAddress instances
     g.geometry.instances.data.deviceAddress = instances;
     VkAccelerationStructureBuildGeometryInfoKHR info{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
     info.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-    info.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    info.flags = flags_;
     info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     info.geometryCount = 1;
     info.pGeometries = &g;
@@ -820,6 +936,33 @@ void VkAccelImpl::recordBuildTlas(VkCommandBuffer cmd, VkDeviceAddress instances
     const VkAccelerationStructureBuildRangeInfoKHR* pRange = &range;
     vkCmdBuildAccelerationStructuresKHR(cmd, 1, &info, &pRange);
     barrierAfterBuild(cmd);
+}
+
+VkSizeQueryImpl::~VkSizeQueryImpl() {
+    if (pool_ == VK_NULL_HANDLE) return;
+    vk::Context* ctx = &dev_.ctx();
+    const VkQueryPool pool = pool_;
+    dev_.defer([ctx, pool] { vkDestroyQueryPool(ctx->device(), pool, nullptr); });
+}
+
+bool VkSizeQueryImpl::create() {
+    VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+    qi.queryType = VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR;
+    qi.queryCount = capacity_;
+    return vkCreateQueryPool(dev_.ctx().device(), &qi, nullptr, &pool_) == VK_SUCCESS;
+}
+
+bool VkSizeQueryImpl::read(std::uint32_t first, std::uint32_t count, std::uint64_t* sizes) {
+    if (count == 0) return true;
+    std::vector<std::uint64_t> r(static_cast<std::size_t>(count) * 2, 0);
+    vkGetQueryPoolResults(dev_.ctx().device(), pool_, first, count, r.size() * sizeof(std::uint64_t), r.data(), 2 * sizeof(std::uint64_t),
+                          VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+    bool all = true;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        sizes[i] = r[i * 2 + 1] != 0 ? r[i * 2] : 0;
+        all = all && r[i * 2 + 1] != 0;
+    }
+    return all;
 }
 
 // ---- command list -----------------------------------------------------------------------------------------------------------
@@ -1041,6 +1184,99 @@ bool VkCommandListImpl::blitTexture(Texture& dst, Texture& src, std::span<const 
     return true;
 }
 
+void VkCommandListImpl::buildBlases(std::span<const BlasBuild> builds) {
+    if (builds.empty()) return;
+    vk::Context& ctx = dev_.ctx();
+    const VkDeviceSize align = dev_.scratchAlign();
+    const auto aligned = [&](VkDeviceSize v) { return (v + align - 1) & ~(align - 1); };
+    // the pool holds the largest single build; the batch is cut into runs when it holds not all of them at once
+    VkDeviceSize largest = 0;
+    std::size_t geomTotal = 0;
+    for (const BlasBuild& b : builds) {
+        VkAccelImpl& a = static_cast<VkAccelImpl&>(*b.blas);
+        largest = std::max(largest, aligned(a.scratchNeed(b.update && a.allowUpdate())));
+        geomTotal += b.geometries.empty() ? a.geometries().size() : b.geometries.size();
+    }
+    if (!dev_.ensureScratch(largest)) {
+        spdlog::error("rhi: the BLAS build scratch ({} bytes) could not be allocated", largest);
+        return;
+    }
+    barrierBeforeBuild(cmd_, ctx.features().rayTracing.maintenance1);
+    std::vector<VkAccelerationStructureGeometryKHR> geoms;
+    std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges;
+    geoms.reserve(geomTotal);
+    ranges.reserve(geomTotal);
+    std::vector<VkAccelerationStructureBuildGeometryInfoKHR> infos;
+    std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> pr;
+    infos.reserve(builds.size());
+    pr.reserve(builds.size());
+    VkDeviceSize used = 0;
+    const auto flushRun = [&] {
+        if (infos.empty()) return;
+        vkCmdBuildAccelerationStructuresKHR(cmd_, static_cast<std::uint32_t>(infos.size()), infos.data(), pr.data());
+        infos.clear();
+        pr.clear();
+    };
+    for (const BlasBuild& b : builds) {
+        VkAccelImpl& a = static_cast<VkAccelImpl&>(*b.blas);
+        const bool update = b.update && a.allowUpdate();
+        const VkDeviceSize need = aligned(a.scratchNeed(update));
+        if (used + need > dev_.scratch().size) {
+            // the pool is full: record what we have, wait for it (scratch reuse), continue at its start
+            flushRun();
+            barrierBeforeBuild(cmd_, ctx.features().rayTracing.maintenance1);
+            used = 0;
+        }
+        const std::size_t g0 = geoms.size();
+        blasGeometries(b.geometries.empty() ? std::span<const TriangleGeometry>(a.geometries()) : b.geometries, geoms, ranges, nullptr);
+        VkAccelerationStructureBuildGeometryInfoKHR info{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+        info.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+        info.flags = a.flags();
+        info.mode = update ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+        info.srcAccelerationStructure = update ? a.handle() : VK_NULL_HANDLE;
+        info.dstAccelerationStructure = a.handle();
+        info.geometryCount = static_cast<std::uint32_t>(geoms.size() - g0);
+        info.pGeometries = geoms.data() + g0;
+        info.scratchData.deviceAddress = dev_.scratch().address + used;
+        used += need;
+        infos.push_back(info);
+        pr.push_back(ranges.data() + g0);
+    }
+    flushRun();
+    barrierAfterBuild(cmd_);
+}
+
+void VkCommandListImpl::queryCompactedSizes(SizeQuery& query, std::uint32_t first, std::span<AccelerationStructure* const> blases) {
+    if (blases.empty()) return;
+    VkSizeQueryImpl& q = static_cast<VkSizeQueryImpl&>(query);
+    std::vector<VkAccelerationStructureKHR> handles;
+    handles.reserve(blases.size());
+    for (AccelerationStructure* b : blases) handles.push_back(static_cast<VkAccelImpl*>(b)->handle());
+    // the builds -> the size queries
+    VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    mb.srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+    mb.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    mb.dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                      (dev_.ctx().features().rayTracing.maintenance1 ? VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_COPY_BIT_KHR : 0);
+    mb.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    di.memoryBarrierCount = 1;
+    di.pMemoryBarriers = &mb;
+    vkCmdPipelineBarrier2(cmd_, &di);
+    vkCmdResetQueryPool(cmd_, q.pool(), first, static_cast<std::uint32_t>(handles.size()));
+    vkCmdWriteAccelerationStructuresPropertiesKHR(cmd_, static_cast<std::uint32_t>(handles.size()), handles.data(),
+                                                  VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR, q.pool(), first);
+}
+
+void VkCommandListImpl::compactBlas(AccelerationStructure& dst, AccelerationStructure& src) {
+    barrierBeforeBuild(cmd_, dev_.ctx().features().rayTracing.maintenance1);  // (the builds that made `src`, and queries that still read the structures)
+    VkCopyAccelerationStructureInfoKHR ci{VK_STRUCTURE_TYPE_COPY_ACCELERATION_STRUCTURE_INFO_KHR};
+    ci.src = static_cast<VkAccelImpl&>(src).handle();
+    ci.dst = static_cast<VkAccelImpl&>(dst).handle();
+    ci.mode = VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR;
+    vkCmdCopyAccelerationStructureKHR(cmd_, &ci);
+}
+
 }  // namespace
 
 std::unique_ptr<Device> createVulkanDevice(const DeviceDesc& desc) {
@@ -1074,6 +1310,15 @@ std::unique_ptr<Texture> wrapImage(Device& device, vk::Image& image, std::uint32
     auto t = std::make_unique<VkTextureImpl>(dev, td);
     t->wrap(image, sampledSlot);
     return t;
+}
+
+std::unique_ptr<Buffer> wrapBuffer(Device& device, VkBuffer buffer, std::uint64_t address, std::uint64_t size, void* mapped, const char* name) {
+    BufferDesc d;
+    d.size = size;
+    d.name = name;
+    auto b = std::make_unique<VkBufferImpl>(static_cast<VkDeviceImpl&>(device), d);
+    b->wrapExternal(buffer, address, mapped);
+    return b;
 }
 
 std::unique_ptr<CommandList> wrapCommandBuffer(Device& device, VkCommandBuffer cmd) {

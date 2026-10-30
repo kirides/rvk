@@ -197,7 +197,7 @@ public:
     std::array<std::uint32_t, 2> shaderRef(std::uint64_t offset) const override { return {slot_, static_cast<std::uint32_t>(offset)}; }
     std::array<std::uint32_t, 2> shaderRefRw(std::uint64_t offset) const override { return {slotRw_, static_cast<std::uint32_t>(offset)}; }
     ID3D12Resource* resource() const { return resource_.Get(); }
-    D3D12_GPU_VIRTUAL_ADDRESS gpuAddress() const { return resource_->GetGPUVirtualAddress(); }
+    std::uint64_t gpuAddress() const override { return resource_->GetGPUVirtualAddress(); }
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
 
 private:
@@ -243,32 +243,69 @@ public:
     D3D_PRIMITIVE_TOPOLOGY topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 };
 
-// A BLAS or TLAS: the structure's storage (always in RAYTRACING_ACCELERATION_STRUCTURE state: such a resource cannot change state) and the build scratch
-// (UNORDERED_ACCESS), sized from the prebuild info when the object is created and kept for rebuilds. A TLAS also owns a heap SRV (tlasSlot()).
+// A BLAS or TLAS: the structure's storage (always in RAYTRACING_ACCELERATION_STRUCTURE state: such a resource cannot change state). A TLAS also owns its
+// build scratch (UNORDERED_ACCESS) and a heap SRV (tlasSlot()); BLAS builds take their scratch from the device's shared pool.
 class D3DAccel final : public AccelerationStructure {
 public:
     D3DAccel(D3D12DeviceImpl& dev, bool tlas) : dev_(dev), tlas_(tlas) {}
     ~D3DAccel() override;
-    bool createBlas(std::span<const TriangleGeometry> geometries);
-    bool createTlas(std::uint32_t maxInstances);
+    bool createBlas(const BlasDesc& desc);
+    bool createTlas(const TlasDesc& desc);
+    bool createStorage(std::uint64_t bytes, const char* name);
     bool isTlas() const override { return tlas_; }
     std::uint64_t address() const override { return storage_->GetGPUVirtualAddress(); }
     std::uint32_t tlasSlot() const override { return slot_; }
+    std::uint64_t storageBytes() const override { return storageBytes_; }
     std::uint64_t scratchAddress() const { return scratch_->GetGPUVirtualAddress(); }
     const std::vector<TriangleGeometry>& geometries() const { return geometries_; }
     std::uint32_t maxInstances() const { return maxInstances_; }
-    // D3D12_RAYTRACING_GEOMETRY_DESCs of the BLAS (from the buffers' current addresses)
-    void geometryDescs(std::vector<D3D12_RAYTRACING_GEOMETRY_DESC>& out) const;
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS flags() const { return flags_; }
+    bool allowUpdate() const { return allowUpdate_; }
+    std::uint64_t scratchNeed(bool update) const { return update ? updateScratch_ : buildScratch_; }
 
 private:
-    bool allocate(const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& inputs);
+    bool allocate(const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& inputs, bool scratch);
 
     D3D12DeviceImpl& dev_;
     bool tlas_;
     std::vector<TriangleGeometry> geometries_;
     std::uint32_t maxInstances_ = 0;
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS flags_ = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE;
+    bool allowUpdate_ = false;
+    std::uint64_t buildScratch_ = 0, updateScratch_ = 0, storageBytes_ = 0;
     ComPtr<ID3D12Resource> storage_, scratch_;
     std::uint32_t slot_ = 0;
+};
+
+// compacted sizes: UINT64s written by EmitRaytracingAccelerationStructurePostbuildInfo into a UAV buffer, copied to a readback buffer
+class D3DSizeQuery final : public SizeQuery {
+public:
+    D3DSizeQuery(D3D12DeviceImpl& dev, std::uint32_t capacity) : dev_(dev), capacity_(capacity), written_(capacity, false) {}
+    bool create();
+    std::uint32_t capacity() const override { return capacity_; }
+    bool read(std::uint32_t first, std::uint32_t count, std::uint64_t* sizes) override {
+        bool all = true;
+        const auto* p = static_cast<const std::uint64_t*>(readback_->map());
+        for (std::uint32_t i = 0; i < count; ++i) {
+            const std::uint32_t e = first + i;
+            sizes[i] = e < capacity_ && written_[e] ? p[e] : 0;
+            all = all && e < capacity_ && written_[e];
+        }
+        return all;
+    }
+    ID3D12Resource* gpu() const { return gpu_.Get(); }
+    D3DBuffer& readbackBuffer() { return static_cast<D3DBuffer&>(*readback_); }
+    bool inUav = false;  // moved to UNORDERED_ACCESS (where it stays between uses)
+    void markWritten(std::uint32_t first, std::uint32_t count) {
+        for (std::uint32_t i = 0; i < count && first + i < capacity_; ++i) written_[first + i] = true;
+    }
+
+private:
+    D3D12DeviceImpl& dev_;
+    std::uint32_t capacity_;
+    std::vector<bool> written_;
+    ComPtr<ID3D12Resource> gpu_;
+    std::unique_ptr<Buffer> readback_;
 };
 
 class D3DCommandList;
@@ -525,18 +562,46 @@ public:
         return p;
     }
 
-    std::unique_ptr<AccelerationStructure> createBlas(std::span<const TriangleGeometry> geometries) override {
+    std::unique_ptr<AccelerationStructure> createBlas(const BlasDesc& desc) override {
         if (!caps_.rayQuery) return nullptr;
         auto a = std::make_unique<D3DAccel>(*this, false);
-        if (!a->createBlas(geometries)) return nullptr;
+        if (!a->createBlas(desc)) return nullptr;
         return a;
     }
-    std::unique_ptr<AccelerationStructure> createTlas(std::uint32_t maxInstances) override {
+    std::unique_ptr<AccelerationStructure> createTlas(const TlasDesc& desc) override {
         if (!caps_.rayQuery) return nullptr;
         auto a = std::make_unique<D3DAccel>(*this, true);
-        if (!a->createTlas(maxInstances)) return nullptr;
+        if (!a->createTlas(desc)) return nullptr;
         return a;
     }
+    std::unique_ptr<AccelerationStructure> createBlasStorage(std::uint64_t bytes, const char*) override {
+        if (!caps_.rayQuery) return nullptr;
+        auto a = std::make_unique<D3DAccel>(*this, false);
+        if (!a->createStorage(bytes, "rhi blas (compacted)")) return nullptr;
+        return a;
+    }
+    std::unique_ptr<SizeQuery> createSizeQuery(std::uint32_t capacity) override {
+        if (!caps_.rayQuery) return nullptr;
+        auto q = std::make_unique<D3DSizeQuery>(*this, capacity);
+        if (!q->create()) return nullptr;
+        return q;
+    }
+    std::uint64_t buildScratchBytes() const override { return scratchSize_; }
+    // The shared scratch pool of BLAS builds: at least `bytes`. A replaced pool is kept until the device dies (lists recorded earlier may name it).
+    bool ensureScratch(std::uint64_t bytes) {
+        if (scratch_ && scratchSize_ >= bytes) return true;
+        if (scratch_) scratchGraveyard_.push_back(std::move(scratch_));
+        scratchSize_ = alignUp(std::max<std::uint64_t>(bytes, 4ull << 20), 256);
+        scratch_ = createDefaultBuffer(scratchSize_, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+        if (!scratch_) {
+            scratchSize_ = 0;
+            return false;
+        }
+        scratch_->SetName(L"rhi build scratch pool");
+        return true;
+    }
+    std::uint64_t scratchAddress() const { return scratch_->GetGPUVirtualAddress(); }
+    std::uint64_t scratchSize() const { return scratchSize_; }
 
     void submitAndWait(const std::function<void(CommandList&)>& record) override;
     std::unique_ptr<Swapchain> createSwapchain(const SwapchainDesc& desc) override;
@@ -581,6 +646,9 @@ public:
         return kHeapSize - kUavRing + t * rhi::kStorageImages;
     }
     ID3D12Device5* device5() { return device5_.Get(); }
+    ComPtr<ID3D12Resource> scratch_;
+    std::vector<ComPtr<ID3D12Resource>> scratchGraveyard_;
+    std::uint64_t scratchSize_ = 0;
     // a committed buffer in a default heap (acceleration structure storage, scratch)
     ComPtr<ID3D12Resource> createDefaultBuffer(std::uint64_t size, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES state) {
         D3D12_HEAP_PROPERTIES hp{};
@@ -817,66 +885,87 @@ D3DAccel::~D3DAccel() {
     dev_.srvAlloc().release(slot_);
 }
 
-void D3DAccel::geometryDescs(std::vector<D3D12_RAYTRACING_GEOMETRY_DESC>& out) const {
-    for (const TriangleGeometry& t : geometries_) {
+namespace {
+
+void geometryDescs(std::span<const TriangleGeometry> list, std::vector<D3D12_RAYTRACING_GEOMETRY_DESC>& out) {
+    for (const TriangleGeometry& t : list) {
         D3D12_RAYTRACING_GEOMETRY_DESC g{};
         g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
         g.Flags = t.opaque ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
         g.Triangles.VertexFormat = toDxgi(t.vertexFormat);
         g.Triangles.VertexCount = t.vertexCount;
-        g.Triangles.VertexBuffer.StartAddress = static_cast<D3DBuffer*>(t.vertices)->gpuAddress() + t.vertexOffset;
+        g.Triangles.VertexBuffer.StartAddress =
+            t.vertexAddress != 0 ? t.vertexAddress : (t.vertices != nullptr ? static_cast<D3DBuffer*>(t.vertices)->gpuAddress() + t.vertexOffset : 0);
         g.Triangles.VertexBuffer.StrideInBytes = t.vertexStride;
-        if (t.indices != nullptr) {
+        if (t.indexed()) {
             g.Triangles.IndexFormat = t.indexType == VK_INDEX_TYPE_UINT16 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT;
             g.Triangles.IndexCount = t.indexCount;
-            g.Triangles.IndexBuffer = static_cast<D3DBuffer*>(t.indices)->gpuAddress() + t.indexOffset;
+            g.Triangles.IndexBuffer = t.indexAddress != 0 ? t.indexAddress : static_cast<D3DBuffer*>(t.indices)->gpuAddress() + t.indexOffset;
         }
         out.push_back(g);
     }
 }
 
-// prebuild info -> storage + scratch. The storage is created in RAYTRACING_ACCELERATION_STRUCTURE state (it stays there: such a resource cannot be
-// transitioned) with UAV access for the builds; both sizes are rounded up to the 256 byte alignment DXR wants.
-bool D3DAccel::allocate(const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& inputs) {
+}  // namespace
+
+// prebuild info -> storage (+ scratch for a TLAS). The storage is created in RAYTRACING_ACCELERATION_STRUCTURE state (it stays there: such a resource
+// cannot be transitioned) with UAV access for the builds; sizes are rounded up to the 256 byte alignment DXR wants.
+bool D3DAccel::allocate(const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& inputs, bool scratch) {
     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};
     dev_.device5()->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &info);
     if (info.ResultDataMaxSizeInBytes == 0) return false;
-    storage_ = dev_.createDefaultBuffer(alignUp(info.ResultDataMaxSizeInBytes, 256), D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-                                        D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
-    // (the scratch is created in COMMON, which is what a buffer starts in whatever is asked for; the build promotes it to UNORDERED_ACCESS implicitly
-    // and it decays back when the command list has executed)
-    scratch_ = dev_.createDefaultBuffer(alignUp(std::max<std::uint64_t>(info.ScratchDataSizeInBytes, 256), 256), D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-                                        D3D12_RESOURCE_STATE_COMMON);
-    if (!storage_ || !scratch_) return false;
+    buildScratch_ = alignUp(std::max<std::uint64_t>(info.ScratchDataSizeInBytes, 256), 256);
+    updateScratch_ = alignUp(std::max<std::uint64_t>(info.UpdateScratchDataSizeInBytes, 256), 256);
+    storageBytes_ = alignUp(info.ResultDataMaxSizeInBytes, 256);
+    storage_ = dev_.createDefaultBuffer(storageBytes_, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+    if (!storage_) return false;
     storage_->SetName(tlas_ ? L"rhi tlas" : L"rhi blas");
-    scratch_->SetName(L"rhi build scratch");
+    if (scratch) {
+        // (the scratch is created in COMMON, which is what a buffer starts in whatever is asked for; the build promotes it to UNORDERED_ACCESS implicitly
+        // and it decays back when the command list has executed)
+        scratch_ = dev_.createDefaultBuffer(buildScratch_, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+        if (!scratch_) return false;
+        scratch_->SetName(L"rhi build scratch");
+    }
     return true;
 }
 
-bool D3DAccel::createBlas(std::span<const TriangleGeometry> geometries) {
-    geometries_.assign(geometries.begin(), geometries.end());
-    for (const TriangleGeometry& t : geometries_) {
-        if (t.vertices == nullptr) return false;
-    }
+bool D3DAccel::createBlas(const BlasDesc& desc) {
+    geometries_.assign(desc.geometries.begin(), desc.geometries.end());
+    allowUpdate_ = desc.allowUpdate;
+    flags_ = (desc.preferFastBuild ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD
+                                   : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE) |
+             (desc.allowUpdate ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE) |
+             (desc.allowCompaction ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE);
     std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> descs;
-    geometryDescs(descs);
+    geometryDescs(geometries_, descs);
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
     in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
-    in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    in.Flags = flags_;
     in.NumDescs = static_cast<UINT>(descs.size());
     in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
     in.pGeometryDescs = descs.data();
-    return allocate(in);
+    return allocate(in, false);
 }
 
-bool D3DAccel::createTlas(std::uint32_t maxInstances) {
-    maxInstances_ = maxInstances;
+bool D3DAccel::createStorage(std::uint64_t bytes, const char* name) {
+    storageBytes_ = alignUp(bytes, 256);
+    storage_ = dev_.createDefaultBuffer(storageBytes_, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+    if (!storage_) return false;
+    storage_->SetName(widen(name).c_str());
+    return true;
+}
+
+bool D3DAccel::createTlas(const TlasDesc& desc) {
+    maxInstances_ = desc.maxInstances;
+    flags_ = desc.preferFastBuild ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD
+                                  : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
     in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
-    in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
-    in.NumDescs = maxInstances;
+    in.Flags = flags_;
+    in.NumDescs = desc.maxInstances;
     in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-    if (!allocate(in)) return false;
+    if (!allocate(in, true)) return false;
     // the heap entry shaders reach the TLAS through (RVK_TLAS)
     slot_ = dev_.srvAlloc().alloc();
     if (slot_ == 0) return false;
@@ -886,6 +975,20 @@ bool D3DAccel::createTlas(std::uint32_t maxInstances) {
     sd.RaytracingAccelerationStructure.Location = storage_->GetGPUVirtualAddress();
     dev_.device()->CreateShaderResourceView(nullptr, &sd, dev_.srvCpu(slot_));
     return true;
+}
+
+bool D3DSizeQuery::create() {
+    gpu_ = dev_.createDefaultBuffer(alignUp(static_cast<std::uint64_t>(capacity_) * 8, 256), D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                    D3D12_RESOURCE_STATE_COMMON);  // (buffers always start in COMMON)
+    if (!gpu_) return false;
+    gpu_->SetName(L"rhi compacted sizes");
+    BufferDesc bd;
+    bd.size = alignUp(static_cast<std::uint64_t>(capacity_) * 8, 256);
+    bd.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bd.memory = Memory::Readback;
+    bd.name = "rhi compacted sizes readback";
+    readback_ = dev_.createBuffer(bd);
+    return readback_ != nullptr;
 }
 
 // ---- command list -----------------------------------------------------------------------------------------------------------
@@ -1200,37 +1303,117 @@ public:
     // (a TLAS over this BLAS) and the ray queries of later dispatches read the finished structure; the scratch buffer (promoted from COMMON to
     // UNORDERED_ACCESS by the build) is covered by the same barrier when the next build in this list reuses it.
     void buildBlas(AccelerationStructure& as) override {
-        D3DAccel& a = static_cast<D3DAccel&>(as);
-        for (const TriangleGeometry& t : a.geometries()) {
-            bufferState(*static_cast<D3DBuffer*>(t.vertices), D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
-            if (t.indices != nullptr) bufferState(*static_cast<D3DBuffer*>(t.indices), D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        const BlasBuild b{&as, {}, false};
+        buildBlases(std::span<const BlasBuild>(&b, 1));
+    }
+    void buildBlases(std::span<const BlasBuild> builds) override {
+        if (builds.empty()) return;
+        std::uint64_t largest = 0;
+        for (const BlasBuild& b : builds) {
+            D3DAccel& a = static_cast<D3DAccel&>(*b.blas);
+            largest = std::max(largest, a.scratchNeed(b.update && a.allowUpdate()));
         }
-        std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> descs;
-        a.geometryDescs(descs);
-        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
-        bd.DestAccelerationStructureData = a.address();
-        bd.ScratchAccelerationStructureData = a.scratchAddress();
-        bd.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
-        bd.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
-        bd.Inputs.NumDescs = static_cast<UINT>(descs.size());
-        bd.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-        bd.Inputs.pGeometryDescs = descs.data();
-        list4()->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+        if (!dev_.ensureScratch(largest)) {
+            spdlog::error("d3d12: the BLAS build scratch ({} bytes) could not be allocated", largest);
+            return;
+        }
+        std::uint64_t used = 0;
+        for (const BlasBuild& b : builds) {
+            D3DAccel& a = static_cast<D3DAccel&>(*b.blas);
+            const bool update = b.update && a.allowUpdate();
+            const std::uint64_t need = a.scratchNeed(update);
+            if (used + need > dev_.scratchSize()) {
+                uavBarrier();  // the pool is full: the builds so far finish before it is reused
+                used = 0;
+            }
+            const std::span<const TriangleGeometry> geometries = b.geometries.empty() ? std::span<const TriangleGeometry>(a.geometries()) : b.geometries;
+            for (const TriangleGeometry& t : geometries) {
+                if (t.vertexAddress == 0 && t.vertices != nullptr) bufferState(*static_cast<D3DBuffer*>(t.vertices), D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+                if (t.indexAddress == 0 && t.indices != nullptr) bufferState(*static_cast<D3DBuffer*>(t.indices), D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+            }
+            std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> descs;
+            geometryDescs(geometries, descs);
+            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
+            bd.DestAccelerationStructureData = a.address();
+            bd.ScratchAccelerationStructureData = dev_.scratchAddress() + used;
+            bd.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+            bd.Inputs.Flags = a.flags() | (update ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE);
+            bd.Inputs.NumDescs = static_cast<UINT>(descs.size());
+            bd.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+            bd.Inputs.pGeometryDescs = descs.data();
+            if (update) bd.SourceAccelerationStructureData = a.address();
+            used += need;
+            list4()->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+        }
         uavBarrier();
     }
     void buildTlas(AccelerationStructure& as, Buffer& instances, std::uint64_t instanceOffset, std::uint32_t count) override {
-        D3DAccel& a = static_cast<D3DAccel&>(as);
         D3DBuffer& ib = static_cast<D3DBuffer&>(instances);
         bufferState(ib, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        buildTlasAt(as, ib.gpuAddress() + instanceOffset, count);
+    }
+    void buildTlasAt(AccelerationStructure& as, std::uint64_t instancesAddress, std::uint32_t count) override {
+        D3DAccel& a = static_cast<D3DAccel&>(as);
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
         bd.DestAccelerationStructureData = a.address();
         bd.ScratchAccelerationStructureData = a.scratchAddress();
         bd.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
-        bd.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        bd.Inputs.Flags = a.flags();
         bd.Inputs.NumDescs = std::min(count, a.maxInstances());
         bd.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
-        bd.Inputs.InstanceDescs = ib.gpuAddress() + instanceOffset;
+        bd.Inputs.InstanceDescs = instancesAddress;
+        uavBarrier();
         list4()->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+        uavBarrier();
+    }
+    void queryCompactedSizes(SizeQuery& query, std::uint32_t first, std::span<AccelerationStructure* const> blases) override {
+        if (blases.empty()) return;
+        D3DSizeQuery& q = static_cast<D3DSizeQuery&>(query);
+        std::vector<D3D12_GPU_VIRTUAL_ADDRESS> sources;
+        for (AccelerationStructure* b : blases) sources.push_back(b->address());
+        const std::uint32_t n = static_cast<std::uint32_t>(sources.size());
+        uavBarrier();
+        if (!q.inUav) {
+            D3D12_RESOURCE_BARRIER tb{};
+            tb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            tb.Transition = {q.gpu(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+            list_->ResourceBarrier(1, &tb);
+            q.inUav = true;
+        }
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC pd{};
+        pd.DestBuffer = q.gpu()->GetGPUVirtualAddress() + static_cast<std::uint64_t>(first) * 8;
+        pd.InfoType = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_COMPACTED_SIZE;
+        list4()->EmitRaytracingAccelerationStructurePostbuildInfo(&pd, n, sources.data());
+        // the sizes -> the readback buffer
+        D3D12_RESOURCE_BARRIER rb{};
+        rb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        rb.Transition = {q.gpu(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE};
+        list_->ResourceBarrier(1, &rb);
+        list_->CopyBufferRegion(q.readbackBuffer().resource(), static_cast<std::uint64_t>(first) * 8, q.gpu(), static_cast<std::uint64_t>(first) * 8,
+                                static_cast<std::uint64_t>(n) * 8);
+        rb.Transition = {q.gpu(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+        list_->ResourceBarrier(1, &rb);
+        q.markWritten(first, n);
+    }
+    void compactBlas(AccelerationStructure& dst, AccelerationStructure& src) override {
+        uavBarrier();
+        list4()->CopyRaytracingAccelerationStructure(dst.address(), src.address(), D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_COMPACT);
+        uavBarrier();
+    }
+    void memoryBarrier(VkPipelineStageFlags2, VkAccessFlags2, VkPipelineStageFlags2, VkAccessFlags2) override { uavBarrier(); }
+    void fillBuffer(Buffer& dst, std::uint64_t offset, std::uint64_t size, std::uint32_t value) override {
+        D3DBuffer& b = static_cast<D3DBuffer&>(dst);
+        bufferState(b, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+        ud.Format = DXGI_FORMAT_R32_UINT;
+        ud.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        ud.Buffer.FirstElement = offset / 4;
+        ud.Buffer.NumElements = static_cast<UINT>(size / 4);
+        const std::uint32_t slot = dev_.nextUavTable();
+        dev_.device()->CreateUnorderedAccessView(b.resource(), nullptr, &ud, dev_.srvCpu(slot));
+        dev_.device()->CreateUnorderedAccessView(b.resource(), nullptr, &ud, dev_.uavClearCpu());
+        const UINT v[4] = {value, value, value, value};
+        list_->ClearUnorderedAccessViewUint(dev_.srvGpu(slot), dev_.uavClearCpu(), b.resource(), v, 0, nullptr);
         uavBarrier();
     }
 

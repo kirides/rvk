@@ -432,13 +432,17 @@ bool Gi::pipelinesReady() {
 }
 
 bool Gi::ensureResources(VkCommandBuffer cmd) {
-    if (probes_.buffer != VK_NULL_HANDLE) return true;
-    vk::Context& ctx = dev_.ctx();
+    if (probes_ != nullptr) return true;
+    rhi::Device* rd = dev_.rhi();
     const VkDeviceSize probes = static_cast<VkDeviceSize>(kGiCascades) * kProbesPerCascade;
     const VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-    bool ok = probes_.create(ctx, probes * 128, usage, false, 0, "gi probes");
-    ok = ok && depth_.create(ctx, probes * kGiDepthTexels * 8, usage, false, 0, "gi depth moments");
-    ok = ok && rays_.create(ctx, static_cast<VkDeviceSize>(kBudget[2]) * (kGiRays + 1) * 16, usage, false, 0, "gi rays");
+    bool ok = rd != nullptr;
+    if (ok) {
+        probes_ = rd->createBuffer({probes * 128, usage, rhi::Memory::Device, "gi probes"});
+        depth_ = rd->createBuffer({probes * kGiDepthTexels * 8, usage, rhi::Memory::Device, "gi depth moments"});
+        rays_ = rd->createBuffer({static_cast<VkDeviceSize>(kBudget[2]) * (kGiRays + 1) * 16, usage, rhi::Memory::Device, "gi rays"});
+        ok = probes_ != nullptr && depth_ != nullptr && rays_ != nullptr;
+    }
     if (!ok) {
         spdlog::error("enh: gi: GPU buffers failed: GI stays off this session");
         destroyResources();
@@ -446,40 +450,28 @@ bool Gi::ensureResources(VkCommandBuffer cmd) {
         return false;
     }
     // zero keys: every probe invalid until traced
-    vkCmdFillBuffer(cmd, probes_.buffer, 0, VK_WHOLE_SIZE, 0);
-    vkCmdFillBuffer(cmd, depth_.buffer, 0, VK_WHOLE_SIZE, 0);
-    VkMemoryBarrier2 b{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-    b.srcStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;
-    b.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-    b.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
-    b.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-    VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-    di.memoryBarrierCount = 1;
-    di.pMemoryBarriers = &b;
-    vkCmdPipelineBarrier2(cmd, &di);
+    {
+        RhiScope rs(dev_, cmd);
+        if (!rs) return false;
+        rs.cl().fillBuffer(*probes_, 0, probes_->desc().size, 0);
+        rs.cl().fillBuffer(*depth_, 0, depth_->desc().size, 0);
+        rs.cl().memoryBarrier(VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                              VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                              VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+    }
     spdlog::info("enh: gi: {} cascades x {} x {} x {} probes ({:.0f} / {:.0f} / {:.0f} units apart), {:.1f} MiB", kGiCascades, kDims[0], kDims[1],
                  kDims[2], kSpacing[0], kSpacing[1], kSpacing[2],
-                 static_cast<double>(probes_.size + depth_.size + rays_.size) / 1048576.0);
+                 static_cast<double>(probes_->desc().size + depth_->desc().size + rays_->desc().size) / 1048576.0);
     return true;
 }
 
 void Gi::destroyResources() {
-    vk::Context* ctx = &dev_.ctx();
-    vk::rt::AddressBuffer p = probes_, d = depth_, r = rays_;
-    probes_ = depth_ = rays_ = {};
-    if (p.buffer != VK_NULL_HANDLE || d.buffer != VK_NULL_HANDLE || r.buffer != VK_NULL_HANDLE) {
-        dev_.frames().retire([ctx, p, d, r]() mutable {
-            p.destroy(*ctx);
-            d.destroy(*ctx);
-            r.destroy(*ctx);
-        });
-    }
+    // (the RHI buffers are destroyed with the frame being recorded: the GPU may still use them)
+    probes_.reset();
+    depth_.reset();
+    rays_.reset();
     for (Cascade& c : cascades_) c.valid = false;
-    if (diag_.buffer != VK_NULL_HANDLE) {
-        vk::rt::AddressBuffer b = diag_;
-        diag_ = {};
-        dev_.frames().retire([ctx, b]() mutable { b.destroy(*ctx); });
-    }
+    diag_.reset();
 }
 
 void Gi::record(d3d9::PassContext& ctx) {
@@ -510,8 +502,8 @@ void Gi::record(d3d9::PassContext& ctx) {
     hd.dims[1] = kDims[1];
     hd.dims[2] = kDims[2];
     hd.dims[3] = kGiCascades;
-    split(probes_.address, &hd.data[0]);
-    split(depth_.address, &hd.data[2]);
+    split(probes_->gpuAddress(), &hd.data[0]);
+    split(depth_->gpuAddress(), &hd.data[2]);
     hd.params[0] = s_.strength;
     hd.params[1] = 0.1f;  // normal bias (cells)
     hd.params[2] = 0.3f;  // view bias (cells)
@@ -540,7 +532,7 @@ void Gi::record(d3d9::PassContext& ctx) {
 
     GiPassParams p{};
     split(la.address, &p.lists[0]);
-    split(rays_.address, &p.lists[2]);
+    split(rays_->gpuAddress(), &p.lists[2]);
     split(ha.address, &p.volume[0]);
     p.volume[2] = n;
     p.volume[3] = static_cast<std::uint32_t>(frame);
@@ -700,19 +692,19 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
             return GetEnvironmentVariableA("RVK_GI_DIAG", buf, sizeof(buf)) > 0 && buf[0] != '0';
         }();
         if (diag) {
-            if (diag_.buffer == VK_NULL_HANDLE) {
-                diag_.create(dev_.ctx(), 64 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, 16, "gi diag");
-                if (diag_.mapped != nullptr) std::memset(diag_.mapped, 0, 64 * 4);
+            if (diag_ == nullptr && dev_.rhi() != nullptr) {
+                diag_ = dev_.rhi()->createBuffer({64 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Readback, "gi diag"});
+                if (diag_ != nullptr) std::memset(diag_->map(), 0, 64 * 4);
             }
-            if (diag_.mapped != nullptr) {
-                vmaInvalidateAllocation(dev_.ctx().allocator(), diag_.allocation, 0, VK_WHOLE_SIZE);
-                const auto* dcur = static_cast<const volatile std::uint32_t*>(diag_.mapped);
+            if (diag_ != nullptr) {
+                diag_->invalidate();
+                const auto* dcur = static_cast<const volatile std::uint32_t*>(diag_->map());
                 for (int i = 0; i < 64; ++i) {
                     const std::uint32_t c = dcur[i];
                     diagSum_[i] += static_cast<double>(static_cast<std::uint32_t>(c - diagLast_[i]));
                     diagLast_[i] = c;
                 }
-                split(diag_.address, &p.screen5[1]);
+                split(diag_->gpuAddress(), &p.screen5[1]);
                 p.screen5[3] = 1;
             }
         }
@@ -773,7 +765,7 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
 }
 
 void Gi::logDiag() {
-    if (diag_.buffer == VK_NULL_HANDLE) return;
+    if (diag_ == nullptr) return;
     for (int cls = 0; cls < 2; ++cls) {
         const double* d = &diagSum_[cls * 32];
         const double n = d[0] / 1024.0;

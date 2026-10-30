@@ -43,7 +43,6 @@
 #include "enh/rt_registry.h"
 #include "rhi/rhi.h"
 #include "shader/abi.h"
-#include "vk/raytracing.h"
 
 namespace rvk::enh {
 
@@ -129,12 +128,12 @@ private:
         VkDeviceAddress vbAddress = 0, ibAddress = 0;  // the buffers' starts (records add the offsets)
         Layout layout;               // merged over the draws that showed it (the shadow pass's declaration may be shorter)
         BlasState state = BlasState::Pending;
-        vk::rt::AccelerationStructure as;
+        std::unique_ptr<rhi::AccelerationStructure> as;
         rt::Aabb bounds;             // object space, from the CPU copy at build time
         std::uint32_t maxVertex = 0;
         // a triangle strip (SpeedTree branches / fronds): its indices converted to a list at build time (degenerate
         // triangles dropped), in a buffer of its own that the BLAS and the records read; triangles = the list's count
-        vk::rt::AddressBuffer listIndices;
+        std::unique_ptr<rhi::Buffer> listIndices;
         std::vector<std::uint8_t> listData;  // the converted indices until the build copies them (CPU, prepareInputs)
         std::uint32_t triangles = 0;
         std::uint32_t refs = 0;      // registry instances
@@ -200,7 +199,7 @@ private:
         std::uint32_t query = 0;
     };
     struct Tlas {
-        vk::rt::AccelerationStructure as;
+        std::unique_ptr<rhi::AccelerationStructure> as;
         std::uint32_t capacity = 0;
         std::uint32_t slot = 0;  // its slot in the bindless acceleration structure array (vk::Bindless::allocTlasSlot)
     };
@@ -231,13 +230,12 @@ private:
     static constexpr std::size_t kMaterialSlots = 8;
     // CPU side of a build: index range scan (max vertex, bounds); false = unusable (logged once per reason)
     bool prepareInputs(Blas& b);
-    void processCompactions(VkCommandBuffer cmd, std::uint32_t slot);
-    void buildPending(VkCommandBuffer cmd, std::uint32_t slot);
+    void processCompactions(rhi::CommandList& cl, std::uint32_t slot);
+    void buildPending(rhi::CommandList& cl, std::uint32_t slot);
     void evictOverBudget();
     void noteNewInstance(Blas& b, std::uint64_t frame);
-    void barrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess, VkPipelineStageFlags2 dstStage,
+    void barrier(rhi::CommandList& cl, VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess, VkPipelineStageFlags2 dstStage,
                  VkAccessFlags2 dstAccess);
-    bool ensureScratch(VkDeviceSize bytes);
     void logStats(bool force);
     std::uint8_t viewBit(d3d9::scene::View v) const;
     // characters (setDynamic)
@@ -249,7 +247,7 @@ private:
     };
     void observeTree(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& b, const rt::Registry::Instance& in, const rt::Rows& rows, TreeBatch& batch,
                      std::uint32_t index, std::uint32_t count);
-    void buildDynamic(VkCommandBuffer cmd, std::uint64_t frame);
+    void buildDynamic(rhi::CommandList& cl, std::uint64_t frame);
     void dropDynamic(bool all, std::uint64_t frame);
     struct DynDraw {
         std::uint64_t key = 0;
@@ -274,7 +272,7 @@ private:
         std::uint32_t slots = 0, stride = 0, offsets = 0;
     };
     bool skinReady();
-    void recordSkin(VkCommandBuffer cmd);
+    void recordSkin(rhi::CommandList& cl);
     bool skinEligible(const d3d9::ReplaceQuery& q, const float* morphWeights, std::uint32_t& offsets) const;
     void destroySkin();
     std::vector<SkinJob> skinJobs_;
@@ -282,13 +280,13 @@ private:
     bool skinWanted_ = false, skinVerify_ = false, skinReady_ = false, skinFailed_ = false, skinStarted_ = false;
     std::future<std::unique_ptr<rhi::Pipeline>> skinBuild_;  // (built on a worker: Device::createComputePipeline is thread-safe)
     std::unique_ptr<rhi::Pipeline> skinPipe_;
-    vk::rt::AddressBuffer skinErr_;    // verify: 16 bytes per frame slot (max error bits, compared, missing)
+    std::unique_ptr<rhi::Buffer> skinErr_;    // verify: 16 bytes per frame slot (max error bits, compared, missing)
     double skinVerifyAt_ = 0.0, skinLogAt_ = 0.0;
     std::uint64_t skinVerifyCompared_ = 0, skinVerifyMissing_ = 0;
     float skinVerifyMax_ = 0.0f;
     std::uint64_t skinJobsTotal_ = 0, skinVerticesTotal_ = 0;
     struct DynBlas {
-        vk::rt::AccelerationStructure as;
+        std::unique_ptr<rhi::AccelerationStructure> as;
         std::uint32_t slots = 0, triangles = 0;
         VkDeviceAddress indices = 0;
         std::uint64_t lastFrame = 0;
@@ -302,11 +300,9 @@ private:
         VkDeviceAddress lastCapture = 0;  // the last capture that ran (the next frame's vertex shader reads it: motion)
         std::uint32_t lastSlots = 0;
         std::uint64_t lastCaptureFrame = 0;
-        // vkGetAccelerationStructureBuildSizesKHR of the geometry below: it only depends on the counts and the index type, so it is
-        // asked again only when they change (the call costs microseconds per character / tree per frame)
+        // the counts the structure was created for (it is sized by them and the index type only: created again when they change)
         std::uint32_t sizeTriangles = 0, sizeSlots = 0;
         bool sizeIndex32 = false;
-        VkDeviceSize sizeAs = 0, sizeBuildScratch = 0, sizeUpdateScratch = 0;
     };
     std::unordered_set<const void*> dynamicConsumers_;
     std::unordered_map<const void*, float> animConsumers_;  // consumer -> its range; the largest one counts
@@ -322,7 +318,6 @@ private:
     void rollDyn(std::uint64_t frame);
     std::uint64_t dynFrame_ = 0;
     std::unordered_map<std::uint64_t, DynBlas> dynBlas_;
-    vk::rt::AddressBuffer dynScratch_;
     std::uint32_t nextDynId_ = 1u << 30;
     std::uint64_t dynBuilt_ = 0, dynRefit_ = 0;  // interval counters
 
@@ -360,15 +355,10 @@ private:
     std::unordered_map<rt::BlasKey, Layer, rt::BlasKeyHash> layers_;
 
     // GPU resources (while active)
-    vk::rt::AddressBuffer scratch_;
-    VkDeviceSize scratchAlign_ = 256;
     Tlas tlas_[vk::Frames::kInFlight];
-    VkDeviceSize tlasScratchSize_ = 0;
-    VkQueryPool compactPool_ = VK_NULL_HANDLE;
+    std::unique_ptr<rhi::SizeQuery> compactQuery_;  // compacted sizes of each slot's builds
     static constexpr std::uint32_t kQueriesPerSlot = 64;  // >= buildsPerFrame
     std::vector<Compaction> compactions_[vk::Frames::kInFlight];
-    VkQueryPool timePool_ = VK_NULL_HANDLE;  // [debug] perf: begin / end of the pass per slot
-    bool timeWritten_[vk::Frames::kInFlight]{};
 
     // stats (interval since the last log line)
     struct Interval {

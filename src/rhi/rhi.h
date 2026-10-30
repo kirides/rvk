@@ -73,6 +73,9 @@ public:
     // What shaders use for read-write access (rvk_abi.hlsli RVK_BUF_LOAD / RVK_BUF_STORE / RVK_BUF_ADD take it as a uint2): Vulkan: the same
     // device address as shaderRef, DX12: {heapIndexRw() (a UAV), offset}. The buffer must be in the write state (bufferBarrier(.., ShaderWrite)).
     virtual std::array<std::uint32_t, 2> shaderRefRw(std::uint64_t offset = 0) const = 0;
+    // The raw GPU address (Vulkan: the buffer's device address, D3D12: the GPU virtual address): what acceleration structure builds take as
+    // TriangleGeometry::vertexAddress / indexAddress and buildTlasAt. Not a shader reference (use shaderRef for those: on DX12 it is a heap index).
+    virtual std::uint64_t gpuAddress() const = 0;
 };
 
 struct TextureDesc {
@@ -182,21 +185,47 @@ struct GraphicsPipelineDesc {
 class Buffer;
 
 // One triangle geometry of a BLAS. The backends add the build-input usage to their buffers themselves; on DX12 device-memory buffers are moved to a
-// shader-read state by buildBlas. Positions are float3 (R32G32B32_SFLOAT).
+// shader-read state by the builds. Positions are float3 (R32G32B32_SFLOAT).
 struct TriangleGeometry {
     Buffer* vertices = nullptr;
     std::uint64_t vertexOffset = 0;
     std::uint32_t vertexStride = 12;
     VkFormat vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
     std::uint32_t vertexCount = 0;
-    Buffer* indices = nullptr;  // null = a triangle list of vertexCount vertices
+    Buffer* indices = nullptr;  // null (and no indexAddress) = a triangle list of vertexCount vertices
     std::uint64_t indexOffset = 0;
     VkIndexType indexType = VK_INDEX_TYPE_UINT32;
     std::uint32_t indexCount = 0;
     bool opaque = true;  // false: ray queries see the triangles as non-opaque candidates (an alpha test in the shader)
+    // Raw GPU addresses instead of buffer + offset (the renderer's own memory: mesh arena, the frame ring, captures written by shaders). When non-zero
+    // they replace `vertices` + `vertexOffset` / `indices` + `indexOffset`. On DX12 the memory must be readable by the build (an upload heap or a buffer
+    // in a shader-read state): the builds cannot transition what they only know by address.
+    std::uint64_t vertexAddress = 0;
+    std::uint64_t indexAddress = 0;
+    bool indexed() const { return indices != nullptr || indexAddress != 0; }
+    // triangles of this geometry
+    std::uint32_t triangleCount() const { return (indexed() ? indexCount : vertexCount) / 3; }
 };
 
-// A bottom- or top-level acceleration structure. Memory for the structure and the build scratch (kept for rebuilds) belong to the object.
+// What a BLAS is made for (Device::createBlas). `geometries` only fix the sizes (formats, vertex / index counts): a build may bring other buffers
+// or addresses of the same shape (BlasBuild::geometries).
+struct BlasDesc {
+    std::span<const TriangleGeometry> geometries;
+    bool allowUpdate = false;      // BlasBuild::update (refit in place: same counts, new vertex positions)
+    bool allowCompaction = false;  // CommandList::queryCompactedSizes / compactBlas
+    bool preferFastBuild = false;  // else fast trace
+    const char* name = nullptr;
+};
+
+// TLAS: room for `maxInstances` records; preferFastBuild = rebuilt every frame (else fast trace)
+struct TlasDesc {
+    std::uint32_t maxInstances = 0;
+    bool preferFastBuild = false;
+    const char* name = nullptr;
+};
+
+// A bottom- or top-level acceleration structure. Memory for the structure belongs to the object (a TLAS also keeps its build scratch for rebuilds; BLAS
+// builds take their scratch from the device's shared pool, see CommandList::buildBlases).
 class AccelerationStructure {
 public:
     virtual ~AccelerationStructure() = default;
@@ -206,6 +235,25 @@ public:
     virtual std::uint64_t address() const = 0;
     // TLAS: the slot shaders pass to RVK_TLAS (Vulkan: the bindless acceleration structure array of the renderer's set, shared with its RT scene: slot 0 is valid there; DX12: the CBV/SRV/UAV heap); 0 for a BLAS
     virtual std::uint32_t tlasSlot() const = 0;
+    // bytes of the structure's storage
+    virtual std::uint64_t storageBytes() const = 0;
+};
+
+// One BLAS of a batch (CommandList::buildBlases)
+struct BlasBuild {
+    AccelerationStructure* blas = nullptr;
+    std::span<const TriangleGeometry> geometries{};  // empty = the ones it was created with
+    bool update = false;                             // refit the structure in place (BlasDesc::allowUpdate; the previous build had the same counts)
+};
+
+// Compacted sizes of built BLASes (CommandList::queryCompactedSizes), read back by the CPU
+class SizeQuery {
+public:
+    virtual ~SizeQuery() = default;
+    virtual std::uint32_t capacity() const = 0;
+    // The sizes of entries [first, first + count) once the GPU executed the command list that wrote them; false if (some of) them are not available
+    // yet (always true on DX12 after submitAndWait). Entries that are not available read as 0.
+    virtual bool read(std::uint32_t first, std::uint32_t count, std::uint64_t* sizes) = 0;
 };
 
 // ---- swapchain --------------------------------------------------------------------------------------------------------------
@@ -289,6 +337,9 @@ public:
     // the dispatches, draws and copies that follow (Vulkan: a compute / fragment / transfer memory barrier; DX12: a UAV barrier on all resources). It does
     // not change layouts: a texture that is sampled next still needs its transition.
     virtual void computeBarrier() = 0;
+    // A global memory barrier by Vulkan stages / accesses (one VkMemoryBarrier2; DX12: a UAV barrier on all resources, states are not involved): for memory
+    // the RHI does not track, shader writes into raw-address buffers read by acceleration structure builds, copies, ...
+    virtual void memoryBarrier(VkPipelineStageFlags2 srcStages, VkAccessFlags2 srcAccess, VkPipelineStageFlags2 dstStages, VkAccessFlags2 dstAccess) = 0;
 
     // bindings (valid for the next draws / dispatches; both backends bind the bindless heap themselves)
     virtual void setPushConstants(const void* data, std::uint32_t size) = 0;
@@ -330,6 +381,9 @@ public:
     // `bufferRowPitch(format, mip width)` bytes apart (see copyBytes). The texture must be in TRANSFER_DST_OPTIMAL (upload) /
     // TRANSFER_SRC_OPTIMAL (readback) layout. DX12 needs the buffer offset of a texture copy to be a multiple of 512.
     virtual void copyBuffer(Buffer& dst, std::uint64_t dstOffset, Buffer& src, std::uint64_t srcOffset, std::uint64_t size) = 0;
+    // Fills `size` bytes (a multiple of 4) at `offset` with the 32-bit `value`. Device memory buffers with STORAGE usage (DX12: through the UAV). Later
+    // reads or writes of the range want a bufferBarrier (Vulkan: a transfer write).
+    virtual void fillBuffer(Buffer& dst, std::uint64_t offset, std::uint64_t size, std::uint32_t value) = 0;
     virtual void copyBufferToTexture(Texture& dst, Buffer& src, std::uint64_t srcOffset, Subresource sub = {}) = 0;
     virtual void copyTextureToBuffer(Buffer& dst, std::uint64_t dstOffset, Texture& src, Subresource sub = {}) = 0;
     // Clears mip levels [baseMip, baseMip + mipCount) of all layers (colour textures with STORAGE usage, which must be in GENERAL layout; integer
@@ -346,6 +400,16 @@ public:
     // and the ray queries of later dispatches see the result. Build the BLASes a TLAS refers to before the TLAS (the same command list is fine).
     virtual void buildBlas(AccelerationStructure& blas) = 0;
     virtual void buildTlas(AccelerationStructure& tlas, Buffer& instances, std::uint64_t instanceOffset, std::uint32_t count) = 0;
+    // The same TLAS build from raw memory at `instancesAddress` (16-byte aligned; see TriangleGeometry::vertexAddress for the DX12 condition).
+    virtual void buildTlasAt(AccelerationStructure& tlas, std::uint64_t instancesAddress, std::uint32_t count) = 0;
+    // A batch of BLAS builds / refits in one call. Their build scratch is sub-allocated from the device's shared pool (grown on demand); a batch that
+    // outgrows the pool is cut into runs with a barrier between them. A barrier precedes the batch (earlier builds, whose scratch it reuses) and
+    // follows it (later builds and ray queries). Vertex / index data written by earlier commands of this list needs its own memoryBarrier first.
+    virtual void buildBlases(std::span<const BlasBuild> builds) = 0;
+    // Writes the compacted size of each (built, allowCompaction) BLAS into entries first.. of `query` (barrier from the builds included), resetting them.
+    virtual void queryCompactedSizes(SizeQuery& query, std::uint32_t first, std::span<AccelerationStructure* const> blases) = 0;
+    // Copies `src` (built, sized by queryCompactedSizes: dst was created by Device::createBlasStorage of that many bytes) compacted into `dst`.
+    virtual void compactBlas(AccelerationStructure& dst, AccelerationStructure& src) = 0;
 
     virtual void beginRegion(std::string_view name) = 0;
     virtual void endRegion() = 0;
@@ -385,8 +449,24 @@ public:
     virtual std::unique_ptr<Pipeline> createComputePipeline(const ComputePipelineDesc& desc) = 0;
     virtual std::unique_ptr<Pipeline> createGraphicsPipeline(const GraphicsPipelineDesc& desc) = 0;
     // null without DeviceCaps::rayQuery. The structure is allocated here (sized for the geometry / `maxInstances`), built by CommandList::buildBlas / buildTlas.
-    virtual std::unique_ptr<AccelerationStructure> createBlas(std::span<const TriangleGeometry> geometries) = 0;
-    virtual std::unique_ptr<AccelerationStructure> createTlas(std::uint32_t maxInstances) = 0;
+    virtual std::unique_ptr<AccelerationStructure> createBlas(const BlasDesc& desc) = 0;
+    virtual std::unique_ptr<AccelerationStructure> createTlas(const TlasDesc& desc) = 0;
+    std::unique_ptr<AccelerationStructure> createBlas(std::span<const TriangleGeometry> geometries) {
+        BlasDesc d;
+        d.geometries = geometries;
+        return createBlas(d);
+    }
+    std::unique_ptr<AccelerationStructure> createTlas(std::uint32_t maxInstances) {
+        TlasDesc d;
+        d.maxInstances = maxInstances;
+        return createTlas(d);
+    }
+    // An empty BLAS of `bytes` (the compaction target of CommandList::compactBlas); address() is valid at once, ray queries see it once compacted into.
+    virtual std::unique_ptr<AccelerationStructure> createBlasStorage(std::uint64_t bytes, const char* name = nullptr) = 0;
+    // room for `capacity` compacted sizes (CommandList::queryCompactedSizes)
+    virtual std::unique_ptr<SizeQuery> createSizeQuery(std::uint32_t capacity) = 0;
+    // bytes of the shared BLAS build scratch pool right now (0 before the first build)
+    virtual std::uint64_t buildScratchBytes() const = 0;
 
     // records into the returned list, executes it on the graphics queue and waits for the GPU (tools, tests, one-off work: the frame loop of the
     // renderer keeps its own submission machinery on top of the backend)

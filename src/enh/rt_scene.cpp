@@ -13,6 +13,7 @@
 #include "enh/rhi_scope.h"
 #include "shader/embedded.h"
 #include "engine/memread.h"
+#include "rhi/vulkan/wrap.h"
 #include "vk/context.h"
 #include "vk/frames.h"
 
@@ -35,9 +36,6 @@ constexpr std::uint64_t kVolatileKeep = 3;   // frames a volatile range's instan
 constexpr std::uint32_t kMaxAnimatedTrees = 160;  // SpeedTree draws captured per frame (their captures take 32 bytes per vertex of the frame's ring)
 constexpr std::uint64_t kOpaqueRecent = 600;               // frames: "the main view draws this range opaque"
 constexpr std::uint64_t kMaterialRefresh = 64;             // frames: a BLAS's material is resolved again (animated uv maps)
-// the TLAS is rebuilt every frame
-constexpr VkBuildAccelerationStructureFlagsKHR kTlasFlags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
-
 // why a draw was not taken (logged once each)
 enum Reason : std::uint32_t {
     kReasonDeclaration = 1,
@@ -69,24 +67,6 @@ std::uint32_t recordAlpha(std::uint32_t flags, std::uint32_t data, const RtMater
     if ((flags & abi::kRtRecordSpeedTree) != 0 && (flags & abi::kRtRecordAlphaTested) != 0) return kSpeedTreeAlpha;
     if ((data & 0xFFFFu) != 0) return data & 0xFFFFu;
     return m != nullptr && m->alpha != 0 ? m->alpha : 8u;
-}
-
-bool createAs(vk::Context& ctx, VkAccelerationStructureTypeKHR type, VkDeviceSize size, vk::rt::AccelerationStructure& out,
-              const char* name) {
-    if (!out.storage.create(ctx, size, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false, 256, name)) return false;
-    VkAccelerationStructureCreateInfoKHR ci{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
-    ci.buffer = out.storage.buffer;
-    ci.size = size;
-    ci.type = type;
-    if (const VkResult r = vkCreateAccelerationStructureKHR(ctx.device(), &ci, nullptr, &out.handle); r != VK_SUCCESS) {
-        spdlog::error("rt: scene: vkCreateAccelerationStructureKHR ({}, {} bytes): {}", name, size, vk::resultString(r));
-        out.destroy(ctx);
-        return false;
-    }
-    VkAccelerationStructureDeviceAddressInfoKHR ai{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
-    ai.accelerationStructure = out.handle;
-    out.address = vkGetAccelerationStructureDeviceAddressKHR(ctx.device(), &ai);
-    return true;
 }
 
 }  // namespace
@@ -879,17 +859,14 @@ void RtScene::dropBlas(std::uint64_t id, bool countEvicted) {
             it = it->second == id ? blasByBuffer_.erase(it) : std::next(it);
         }
     }
-    if (b->as.handle != VK_NULL_HANDLE || b->as.storage.buffer != VK_NULL_HANDLE) {
-        blasBytes_ -= std::min(blasBytes_, static_cast<std::uint64_t>(b->as.storage.size));
-        vk::Context* ctx = &dev_.ctx();
-        vk::rt::AccelerationStructure old = b->as;
-        dev_.frames().retire([ctx, old]() mutable { old.destroy(*ctx); });
+    // (the RHI objects are destroyed with the frame being recorded: the GPU may still use them)
+    if (b->as != nullptr) {
+        blasBytes_ -= std::min(blasBytes_, b->as->storageBytes());
+        b->as.reset();
     }
-    if (b->listIndices.buffer != VK_NULL_HANDLE) {
-        blasBytes_ -= std::min(blasBytes_, static_cast<std::uint64_t>(b->listIndices.size));
-        vk::Context* ctx = &dev_.ctx();
-        vk::rt::AddressBuffer old = b->listIndices;
-        dev_.frames().retire([ctx, old]() mutable { old.destroy(*ctx); });
+    if (b->listIndices != nullptr) {
+        blasBytes_ -= std::min(blasBytes_, b->listIndices->desc().size);
+        b->listIndices.reset();
     }
     if (countEvicted) ++iv_.evicted;
     blas_.erase(id);
@@ -897,60 +874,31 @@ void RtScene::dropBlas(std::uint64_t id, bool countEvicted) {
 
 // ---- GPU resources --------------------------------------------------------------------------------------------------------
 
-bool RtScene::ensureScratch(VkDeviceSize bytes) {
-    if (scratch_.buffer != VK_NULL_HANDLE && scratch_.size >= bytes) return true;
-    vk::Context& ctx = dev_.ctx();
-    if (scratch_.buffer != VK_NULL_HANDLE) {
-        vk::Context* c = &ctx;
-        vk::rt::AddressBuffer old = scratch_;
-        dev_.frames().retire([c, old]() mutable { old.destroy(*c); });
-        scratch_ = {};
-    }
-    const VkDeviceSize size = std::max<VkDeviceSize>(bytes, 32ull << 20);
-    return scratch_.create(ctx, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false, scratchAlign_, "rt scene scratch");
-}
-
 bool RtScene::ensureResources() {
-    if (tlas_[0].as.handle != VK_NULL_HANDLE) return true;
-    vk::Context& ctx = dev_.ctx();
-    scratchAlign_ = std::max<VkDeviceSize>(ctx.features().rayTracing.minScratchOffsetAlignment, 16);
-    // the TLAS of each frame slot, sized for the cap
-    VkAccelerationStructureGeometryKHR g{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
-    g.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
-    g.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
-    VkAccelerationStructureBuildGeometryInfoKHR info{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
-    info.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-    info.flags = kTlasFlags;
-    info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
-    info.geometryCount = 1;
-    info.pGeometries = &g;
-    VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+    if (tlas_[0].as != nullptr) return true;
+    rhi::Device* rd = dev_.rhi();
+    bool ok = rd != nullptr && rd->caps().rayQuery;
     const std::uint32_t cap = limits_.maxInstances;
-    vkGetAccelerationStructureBuildSizesKHR(ctx.device(), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &info, &cap, &sizes);
-    bool ok = true;
+    // the TLAS of each frame slot, sized for the cap (the HLSL ray queries reach it through the bindless acceleration structure array; its slot is the
+    // RHI object's, allocated from the renderer's set)
+    std::uint64_t tlasBytes = 0;
     for (Tlas& t : tlas_) {
-        ok = ok && createAs(ctx, VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, sizes.accelerationStructureSize, t.as, "rt scene tlas");
+        if (!ok) break;
+        rhi::TlasDesc td;
+        td.maxInstances = cap;
+        td.preferFastBuild = true;  // rebuilt every frame
+        td.name = "rt scene tlas";
+        t.as = rd->createTlas(td);
+        ok = t.as != nullptr;
         t.capacity = cap;
-        // the HLSL ray queries reach the TLAS through the bindless acceleration structure array (abi.h kBindingTlas); the slots are shared with the
-        // RHI's TLASes (vk::Bindless::allocTlasSlot)
-        t.slot = dev_.bindless().allocTlasSlot();
-        ok = ok && t.slot < shader::abi::kMaxTlas;
-        if (ok) dev_.bindless().setTlas(t.slot, t.as.handle);
+        t.slot = ok ? t.as->tlasSlot() : 0;
+        tlasBytes = ok ? t.as->storageBytes() : 0;
     }
-    tlasScratchSize_ = (sizes.buildScratchSize + scratchAlign_ - 1) & ~(scratchAlign_ - 1);
-    ok = ok && ensureScratch(tlasScratchSize_);
     // compaction-size queries of each slot's builds
-    VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
-    qi.queryType = VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR;
-    qi.queryCount = kQueriesPerSlot * vk::Frames::kInFlight;
-    ok = ok && vkCreateQueryPool(ctx.device(), &qi, nullptr, &compactPool_) == VK_SUCCESS;
-    if (ok && dev_.perfEnabled() && ctx.features().timestampPeriod > 0.0f) {
-        VkQueryPoolCreateInfo ti{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
-        ti.queryType = VK_QUERY_TYPE_TIMESTAMP;
-        ti.queryCount = 2 * vk::Frames::kInFlight;
-        if (vkCreateQueryPool(ctx.device(), &ti, nullptr, &timePool_) != VK_SUCCESS) timePool_ = VK_NULL_HANDLE;
+    if (ok) {
+        compactQuery_ = rd->createSizeQuery(kQueriesPerSlot * vk::Frames::kInFlight);
+        ok = compactQuery_ != nullptr;
     }
-    for (auto& w : timeWritten_) w = false;
     for (auto& c : compactions_) c.clear();
     if (!ok) {
         spdlog::error("rt: scene: GPU resources failed, the RT scene stays off this session");
@@ -958,47 +906,21 @@ bool RtScene::ensureResources() {
         destroyResources();
         return false;
     }
-    spdlog::info("rt: scene: TLAS {} instances = {:.1f} MiB x {}, build scratch {:.1f} MiB", cap,
-                 static_cast<double>(sizes.accelerationStructureSize) / 1048576.0, vk::Frames::kInFlight,
-                 static_cast<double>(scratch_.size) / 1048576.0);
+    spdlog::info("rt: scene: TLAS {} instances = {:.1f} MiB x {}, BLAS build scratch from the RHI's shared pool (grows on demand)", cap,
+                 static_cast<double>(tlasBytes) / 1048576.0, vk::Frames::kInFlight);
     return true;
 }
 
+// (the RHI objects are destroyed with the frame being recorded: the GPU may still use them; a TLAS gives its slot back)
 void RtScene::destroyResources() {
-    vk::Context* ctx = &dev_.ctx();
-    std::vector<vk::rt::AccelerationStructure> tl;
-    std::vector<std::uint32_t> slots;
-    for (Tlas& t : tlas_) {
-        tl.push_back(t.as);
-        if (t.as.handle != VK_NULL_HANDLE) slots.push_back(t.slot);
-        t = {};
-    }
-    vk::Bindless* bindless = &dev_.bindless();
-    vk::rt::AddressBuffer scratch = scratch_;
-    scratch_ = {};
-    const VkQueryPool cp = compactPool_, tp = timePool_;
-    compactPool_ = timePool_ = VK_NULL_HANDLE;
+    for (Tlas& t : tlas_) t = {};
+    compactQuery_.reset();
     for (auto& c : compactions_) c.clear();
-    dev_.frames().retire([ctx, tl, slots, bindless, scratch, cp, tp]() mutable {
-        for (auto& t : tl) t.destroy(*ctx);
-        for (std::uint32_t s : slots) bindless->freeTlasSlot(s);
-        scratch.destroy(*ctx);
-        if (cp != VK_NULL_HANDLE) vkDestroyQueryPool(ctx->device(), cp, nullptr);
-        if (tp != VK_NULL_HANDLE) vkDestroyQueryPool(ctx->device(), tp, nullptr);
-    });
 }
 
-void RtScene::barrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess, VkPipelineStageFlags2 dstStage,
+void RtScene::barrier(rhi::CommandList& cl, VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess, VkPipelineStageFlags2 dstStage,
                       VkAccessFlags2 dstAccess) {
-    VkMemoryBarrier2 b{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-    b.srcStageMask = srcStage;
-    b.srcAccessMask = srcAccess;
-    b.dstStageMask = dstStage;
-    b.dstAccessMask = dstAccess;
-    VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-    di.memoryBarrierCount = 1;
-    di.pMemoryBarriers = &b;
-    vkCmdPipelineBarrier2(cmd, &di);
+    cl.memoryBarrier(srcStage, srcAccess, dstStage, dstAccess);
 }
 
 // ---- builds ---------------------------------------------------------------------------------------------------------------
@@ -1082,76 +1004,46 @@ bool RtScene::prepareInputs(Blas& b) {
     return true;
 }
 
-void RtScene::processCompactions(VkCommandBuffer cmd, std::uint32_t slot) {
+void RtScene::processCompactions(rhi::CommandList& cl, std::uint32_t slot) {
     auto& list = compactions_[slot];
     if (list.empty()) return;
-    vk::Context& ctx = dev_.ctx();
-    std::vector<std::uint64_t> results(list.size() * 2, 0);
-    vkGetQueryPoolResults(ctx.device(), compactPool_, slot * kQueriesPerSlot, static_cast<std::uint32_t>(list.size()),
-                          results.size() * sizeof(std::uint64_t), results.data(), 2 * sizeof(std::uint64_t),
-                          VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+    rhi::Device* rd = dev_.rhi();
+    std::vector<std::uint64_t> sizes(list.size(), 0);
+    // (an entry that is not available reads 0: the slot's earlier submission completed, so none should be missing)
+    compactQuery_->read(slot * kQueriesPerSlot, static_cast<std::uint32_t>(list.size()), sizes.data());
     for (std::size_t i = 0; i < list.size(); ++i) {
         const Compaction& c = list[i];
-        if (results[i * 2 + 1] == 0) continue;  // not available (should not happen: the slot's earlier submission completed)
+        if (sizes[i] == 0) continue;
         Blas* b = findBlas(c.blas);
-        if (b == nullptr || b->serial != c.serial || b->state != BlasState::Built || b->compacted) continue;
+        if (b == nullptr || b->serial != c.serial || b->state != BlasState::Built || b->compacted || b->as == nullptr) continue;
         b->compacted = true;
-        const VkDeviceSize size = results[i * 2];
-        if (size == 0 || static_cast<double>(size) > 0.9 * static_cast<double>(b->as.storage.size)) continue;
-        vk::rt::AccelerationStructure dst;
-        if (!createAs(ctx, VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, size, dst, "rt scene blas (compacted)")) continue;
-        VkCopyAccelerationStructureInfoKHR ci{VK_STRUCTURE_TYPE_COPY_ACCELERATION_STRUCTURE_INFO_KHR};
-        ci.src = b->as.handle;
-        ci.dst = dst.handle;
-        ci.mode = VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR;
-        vkCmdCopyAccelerationStructureKHR(cmd, &ci);
-        vk::Context* pc = &ctx;
-        vk::rt::AccelerationStructure old = b->as;
-        dev_.frames().retire([pc, old]() mutable { old.destroy(*pc); });
-        iv_.compactSaved += old.storage.size - dst.storage.size;
-        blasBytes_ = blasBytes_ - std::min(blasBytes_, static_cast<std::uint64_t>(old.storage.size)) + dst.storage.size;
-        b->as = dst;
+        const std::uint64_t size = sizes[i];
+        if (static_cast<double>(size) > 0.9 * static_cast<double>(b->as->storageBytes())) continue;
+        std::unique_ptr<rhi::AccelerationStructure> dst = rd->createBlasStorage(size, "rt scene blas (compacted)");
+        if (dst == nullptr) continue;
+        cl.compactBlas(*dst, *b->as);
+        // the old structure goes with the frame being recorded (the copy reads it)
+        const std::uint64_t oldBytes = b->as->storageBytes();
+        iv_.compactSaved += oldBytes - dst->storageBytes();
+        blasBytes_ = blasBytes_ - std::min(blasBytes_, oldBytes) + dst->storageBytes();
+        b->as = std::move(dst);
         ++iv_.compacted;
     }
     list.clear();
 }
 
-void RtScene::buildPending(VkCommandBuffer cmd, std::uint32_t slot) {
+void RtScene::buildPending(rhi::CommandList& cl, std::uint32_t slot) {
     if (pending_.empty()) return;
-    vk::Context& ctx = dev_.ctx();
+    rhi::Device* rd = dev_.rhi();
     rt::BuildBudget budget(limits_.buildsPerFrame, limits_.trianglesPerFrame);
     const std::size_t maxBuilds = std::min<std::size_t>(limits_.buildsPerFrame, kQueriesPerSlot);
-    std::vector<VkAccelerationStructureGeometryKHR> geoms;
-    std::vector<VkAccelerationStructureBuildGeometryInfoKHR> infos;
-    std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges;
+    // (the builds hold spans into `geoms`: no reallocation)
+    std::vector<rhi::TriangleGeometry> geoms;
+    std::vector<rhi::BlasBuild> builds;
     geoms.reserve(maxBuilds);
-    infos.reserve(maxBuilds);
-    ranges.reserve(maxBuilds);
+    builds.reserve(maxBuilds);
     std::vector<std::uint64_t> built;
-    VkDeviceSize scratchUsed = 0;
-    const VkPipelineStageFlags2 asStages =
-        VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
-        (ctx.features().rayTracing.maintenance1 ? VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_COPY_BIT_KHR : 0);
     bool copied = false;  // strip conversions copied into their index buffers: visible to the builds (and the shaders) first
-    const auto flush = [&] {
-        if (infos.empty()) return;
-        if (copied) {
-            barrier(cmd, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                    VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
-                        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                    VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
-            copied = false;
-        }
-        std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> pr(ranges.size());
-        for (std::size_t i = 0; i < ranges.size(); ++i) {
-            infos[i].pGeometries = &geoms[i];
-            pr[i] = &ranges[i];
-        }
-        vkCmdBuildAccelerationStructuresKHR(cmd, static_cast<std::uint32_t>(infos.size()), infos.data(), pr.data());
-        geoms.clear();
-        infos.clear();
-        ranges.clear();
-    };
     while (!pending_.empty() && built.size() < maxBuilds) {
         Blas* b = findBlas(pending_.front());
         if (b == nullptr || b->state != BlasState::Pending) {
@@ -1162,10 +1054,13 @@ void RtScene::buildPending(VkCommandBuffer cmd, std::uint32_t slot) {
         pending_.pop_front();
         const auto c0 = std::chrono::steady_clock::now();
         const rt::BlasKey& k = b->key;
-        if (!prepareInputs(*b)) {
+        const auto failBuild = [&] {
             b->state = BlasState::Failed;
             ++iv_.failed;
             registry_.removeBlas(b->id);
+        };
+        if (!prepareInputs(*b)) {
+            failBuild();
             continue;
         }
         const std::uint32_t isize = k.index32 != 0 ? 4u : 2u;
@@ -1173,99 +1068,70 @@ void RtScene::buildPending(VkCommandBuffer cmd, std::uint32_t slot) {
             // the converted list into a device buffer of its own (through the frame's ring)
             const VkDeviceSize bytes = b->listData.size();
             const vk::RingAlloc up = dev_.frames().allocate(bytes, 16);
-            if (up.ptr == nullptr ||
-                !b->listIndices.create(ctx, bytes,
-                                       VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                                           VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                       false, 16, "rt scene strip indices")) {
-                b->state = BlasState::Failed;
-                ++iv_.failed;
-                registry_.removeBlas(b->id);
+            if (up.ptr != nullptr) {
+                b->listIndices = rd->createBuffer({bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Device,
+                                                   "rt scene strip indices"});
+            }
+            if (up.ptr == nullptr || b->listIndices == nullptr) {
+                failBuild();
                 continue;
             }
             std::memcpy(up.ptr, b->listData.data(), bytes);
-            const VkBufferCopy region{up.offset, 0, bytes};
-            vkCmdCopyBuffer(cmd, up.buffer, b->listIndices.buffer, 1, &region);
+            const std::unique_ptr<rhi::Buffer> ring = rhi::vulkan::wrapBuffer(*rd, up.buffer, up.address - up.offset, up.offset + bytes);
+            cl.copyBuffer(*b->listIndices, 0, *ring, up.offset, bytes);
             b->listData.clear();
             b->listData.shrink_to_fit();
             blasBytes_ += bytes;
             copied = true;
         }
-        VkAccelerationStructureGeometryKHR g{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
-        g.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-        g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;  // alpha-tested instances: FORCE_NO_OPAQUE on the instance
-        auto& tri = g.geometry.triangles;
-        tri.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
-        tri.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
-        tri.vertexData.deviceAddress = b->vbAddress + k.vertexOffset + static_cast<VkDeviceSize>(k.baseVertex) * k.stride;
-        tri.vertexStride = k.stride;
-        tri.maxVertex = b->maxVertex;
-        tri.indexType = k.index32 != 0 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
-        tri.indexData.deviceAddress = k.strip != 0 ? b->listIndices.address : b->ibAddress + static_cast<VkDeviceSize>(k.first) * isize;
-        VkAccelerationStructureBuildGeometryInfoKHR info{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
-        info.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-        info.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
-        info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
-        info.geometryCount = 1;
-        info.pGeometries = &g;
-        VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-        vkGetAccelerationStructureBuildSizesKHR(ctx.device(), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &info, &b->triangles, &sizes);
-        const VkDeviceSize need = (std::max<VkDeviceSize>(sizes.buildScratchSize, 4) + scratchAlign_ - 1) & ~(scratchAlign_ - 1);
-        if (scratchUsed + need > scratch_.size) {
-            // the scratch is full: record what we have, wait for it (scratch reuse), continue at its start
-            flush();
-            barrier(cmd, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
-                    VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                    VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR);
-            scratchUsed = 0;
-            if (need > scratch_.size && !ensureScratch(need)) {
-                if (reasonsLogged_.insert(kReasonScratch).second) spdlog::warn("rt: scene: build scratch of {} bytes failed", need);
-                b->state = BlasState::Failed;
-                ++iv_.failed;
-                registry_.removeBlas(b->id);
-                continue;
-            }
-        }
-        if (!createAs(ctx, VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, sizes.accelerationStructureSize, b->as, "rt scene blas")) {
-            if (reasonsLogged_.insert(kReasonAsCreate).second) spdlog::warn("rt: scene: BLAS of {} bytes could not be created", sizes.accelerationStructureSize);
-            b->state = BlasState::Failed;
-            ++iv_.failed;
-            registry_.removeBlas(b->id);
+        rhi::TriangleGeometry g;
+        g.vertexAddress = b->vbAddress + k.vertexOffset + static_cast<VkDeviceSize>(k.baseVertex) * k.stride;
+        g.vertexStride = k.stride;
+        g.vertexCount = b->maxVertex + 1;
+        g.indexType = k.index32 != 0 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
+        g.indexAddress = k.strip != 0 ? b->listIndices->gpuAddress() : b->ibAddress + static_cast<VkDeviceSize>(k.first) * isize;
+        g.indexCount = b->triangles * 3;
+        g.opaque = true;  // alpha-tested instances: FORCE_NO_OPAQUE on the instance
+        rhi::BlasDesc desc;
+        desc.geometries = std::span<const rhi::TriangleGeometry>(&g, 1);
+        desc.allowCompaction = true;  // (not allowUpdate: a BLAS that is both did not compact into a traceable structure on the AMD driver, hlsl-rhi.md 6c)
+        desc.name = "rt scene blas";
+        std::unique_ptr<rhi::AccelerationStructure> as = rd->createBlas(desc);
+        if (as == nullptr) {
+            if (reasonsLogged_.insert(kReasonAsCreate).second) spdlog::warn("rt: scene: a BLAS of {} triangles could not be created", b->triangles);
+            failBuild();
             continue;
         }
-        info.dstAccelerationStructure = b->as.handle;
-        info.scratchData.deviceAddress = scratch_.address + scratchUsed;
-        scratchUsed += need;
+        b->as = std::move(as);
         geoms.push_back(g);
-        infos.push_back(info);
-        ranges.push_back({b->triangles, 0, 0, 0});
+        builds.push_back({b->as.get(), std::span<const rhi::TriangleGeometry>(&geoms.back(), 1), false});
         b->state = BlasState::Built;
         ++b->serial;
-        blasBytes_ += b->as.storage.size;
+        blasBytes_ += b->as->storageBytes();
         built.push_back(b->id);
         ++iv_.built;
         iv_.builtTriangles += b->triangles;
         iv_.buildCpuMs += msSince(c0);
     }
-    flush();
-    if (built.empty()) return;
+    if (builds.empty()) return;
+    if (copied) {
+        cl.memoryBarrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                         VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                         VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+    }
+    cl.buildBlases(builds);
     // the builds -> their compacted-size queries (and the TLAS build after them)
-    barrier(cmd, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR, asStages,
-            VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR);
-    std::vector<VkAccelerationStructureKHR> handles;
+    std::vector<rhi::AccelerationStructure*> handles;
     auto& list = compactions_[slot];
     list.clear();
     for (std::uint64_t id : built) {
         const Blas* b = findBlas(id);
         if (b == nullptr) continue;
         list.push_back({id, b->serial, static_cast<std::uint32_t>(handles.size())});
-        handles.push_back(b->as.handle);
+        handles.push_back(b->as.get());
     }
     if (handles.empty()) return;
-    vkCmdResetQueryPool(cmd, compactPool_, slot * kQueriesPerSlot, static_cast<std::uint32_t>(handles.size()));
-    vkCmdWriteAccelerationStructuresPropertiesKHR(cmd, static_cast<std::uint32_t>(handles.size()), handles.data(),
-                                                  VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR, compactPool_,
-                                                  slot * kQueriesPerSlot);
+    cl.queryCompactedSizes(*compactQuery_, slot * kQueriesPerSlot, handles);
 }
 
 void RtScene::evictOverBudget() {
@@ -1433,7 +1299,7 @@ void RtScene::observeTree(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& 
         if (d.key == in.key && d.main) return;
     }
     const bool index32 = b.key.index32 != 0;
-    const VkDeviceAddress indices = b.key.strip != 0 ? b.listIndices.address
+    const VkDeviceAddress indices = b.key.strip != 0 ? b.listIndices->gpuAddress()
                                                      : b.ibAddress + static_cast<VkDeviceAddress>(b.key.first) * (index32 ? 4u : 2u);
     if (indices == 0) return;
     const std::uint32_t slots = b.maxVertex + 1;
@@ -1643,7 +1509,7 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
 }
 
 // the frame's captured characters -> one BLAS each: refit while the topology holds (30 times), else a full build
-void RtScene::buildDynamic(VkCommandBuffer cmd, std::uint64_t frame) {
+void RtScene::buildDynamic(rhi::CommandList& cl, std::uint64_t frame) {
     animatedKeys_.clear();
     if (frame % 120 == 0) dropDynamic(false, frame);
     // Per key the newest capture that ran: this frame's (the cascades' views before the main view, all of them at AfterOpaque),
@@ -1651,7 +1517,7 @@ void RtScene::buildDynamic(VkCommandBuffer cmd, std::uint64_t frame) {
     dynUse_.clear();
     if (!dynamic_) return;
     if (dynFrame_ != frame) rollDyn(frame);
-    recordSkin(cmd);
+    recordSkin(cl);
     {
         std::unordered_set<std::uint64_t> taken;
         for (const DynDraw& d : dyn_) {
@@ -1699,55 +1565,27 @@ void RtScene::buildDynamic(VkCommandBuffer cmd, std::uint64_t frame) {
         }
     }
     if (dynUse_.empty()) return;
-    vk::Context& ctx = dev_.ctx();
-    constexpr VkBuildAccelerationStructureFlagsKHR kFlags =
-        VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
-    std::vector<VkAccelerationStructureGeometryKHR> geoms;
-    std::vector<VkAccelerationStructureBuildGeometryInfoKHR> infos;
-    std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges;
-    std::vector<VkDeviceSize> scratchOffsets;
+    rhi::Device* rd = dev_.rhi();
+    // (the builds hold spans into `geoms`: no reallocation)
+    std::vector<rhi::TriangleGeometry> geoms;
+    std::vector<rhi::BlasBuild> builds;
     std::vector<std::size_t> which;
     std::vector<std::size_t> skippedRefits;
     geoms.reserve(dynUse_.size());
-    infos.reserve(dynUse_.size());
-    ranges.reserve(dynUse_.size());
-    VkDeviceSize scratchTotal = 0;
+    builds.reserve(dynUse_.size());
     for (std::size_t i = 0; i < dynUse_.size(); ++i) {
         DynDraw& d = dynUse_[i];
         DynBlas& b = dynBlas_[d.key];
-        VkAccelerationStructureGeometryKHR g{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
-        g.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-        g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
-        auto& t = g.geometry.triangles;
-        t.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
-        t.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
-        t.vertexData.deviceAddress = d.capture + 16;
-        t.vertexStride = 32;
-        t.maxVertex = d.slots - 1;
-        t.indexType = d.index32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
-        t.indexData.deviceAddress = d.indices;
-        VkAccelerationStructureBuildGeometryInfoKHR info{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
-        info.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-        info.flags = kFlags;
-        info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
-        info.geometryCount = 1;
-        info.pGeometries = &g;
-        if (b.sizeTriangles != d.triangles || b.sizeSlots != d.slots || b.sizeIndex32 != d.index32 || b.sizeAs == 0) {
-            VkAccelerationStructureBuildSizesInfoKHR asked{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-            vkGetAccelerationStructureBuildSizesKHR(ctx.device(), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &info, &d.triangles, &asked);
-            b.sizeTriangles = d.triangles;
-            b.sizeSlots = d.slots;
-            b.sizeIndex32 = d.index32;
-            b.sizeAs = asked.accelerationStructureSize;
-            b.sizeBuildScratch = asked.buildScratchSize;
-            b.sizeUpdateScratch = asked.updateScratchSize;
-        }
-        VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
-        sizes.accelerationStructureSize = b.sizeAs;
-        sizes.buildScratchSize = b.sizeBuildScratch;
-        sizes.updateScratchSize = b.sizeUpdateScratch;
-        const bool update = b.built && b.slots == d.slots && b.triangles == d.triangles && b.indices == d.indices && b.updates < 30 &&
-                            b.as.handle != VK_NULL_HANDLE;
+        rhi::TriangleGeometry g;
+        g.vertexAddress = d.capture + 16;
+        g.vertexStride = 32;
+        g.vertexCount = d.slots;
+        g.indexType = d.index32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
+        g.indexAddress = d.indices;
+        g.indexCount = d.triangles * 3;
+        g.opaque = true;
+        const bool sameShape = b.as != nullptr && b.sizeTriangles == d.triangles && b.sizeSlots == d.slots && b.sizeIndex32 == d.index32;
+        const bool update = b.built && sameShape && b.indices == d.indices && b.updates < 30;
         // the wind moves slowly: a tree's BLAS is refitted every other frame (staggered by its key), the BLAS of the frame before
         // stands in (its instance still takes the capture of this frame for the materials' vertex reads); a refit costs the
         // driver about a microsecond of command recording each, 100 trees in range are the bulk of the pass
@@ -1755,33 +1593,27 @@ void RtScene::buildDynamic(VkCommandBuffer cmd, std::uint64_t frame) {
             skippedRefits.push_back(i);
             continue;
         }
+        if (!sameShape) {
+            // the structure is sized by the counts only: created again when they change (the old one goes with the frame being recorded)
+            rhi::BlasDesc desc;
+            desc.geometries = std::span<const rhi::TriangleGeometry>(&g, 1);
+            desc.allowUpdate = true;
+            desc.preferFastBuild = true;
+            desc.name = "rt scene character";
+            b.as = rd->createBlas(desc);
+            b.built = false;
+            if (b.as == nullptr) continue;
+            b.sizeTriangles = d.triangles;
+            b.sizeSlots = d.slots;
+            b.sizeIndex32 = d.index32;
+        }
         if (!update) {
-            if (b.as.handle == VK_NULL_HANDLE || b.as.storage.size < sizes.accelerationStructureSize) {
-                if (b.as.handle != VK_NULL_HANDLE || b.as.storage.buffer != VK_NULL_HANDLE) {
-                    vk::Context* c = &ctx;
-                    vk::rt::AccelerationStructure old = b.as;
-                    dev_.frames().retire([c, old]() mutable { old.destroy(*c); });
-                    b.as = {};
-                }
-                if (!createAs(ctx, VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, sizes.accelerationStructureSize, b.as, "rt scene character")) {
-                    b.built = false;
-                    continue;
-                }
-            }
             b.updates = 0;
         } else {
             ++b.updates;
         }
-        info.mode = update ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
-        info.srcAccelerationStructure = update ? b.as.handle : VK_NULL_HANDLE;
-        info.dstAccelerationStructure = b.as.handle;
-        const VkDeviceSize need = update ? sizes.updateScratchSize : sizes.buildScratchSize;
-        scratchOffsets.push_back(scratchTotal);
-        scratchTotal += (need + scratchAlign_ - 1) & ~(scratchAlign_ - 1);
         geoms.push_back(g);
-        info.pGeometries = &geoms.back();
-        infos.push_back(info);
-        ranges.push_back({d.triangles, 0, 0, 0});
+        builds.push_back({b.as.get(), std::span<const rhi::TriangleGeometry>(&geoms.back(), 1), update});
         which.push_back(i);
         b.slots = d.slots;
         b.triangles = d.triangles;
@@ -1793,29 +1625,13 @@ void RtScene::buildDynamic(VkCommandBuffer cmd, std::uint64_t frame) {
         dynUse_[i].built = true;
         animatedKeys_.insert(dynUse_[i].key);
     }
-    if (infos.empty()) return;
-    if (dynScratch_.buffer == VK_NULL_HANDLE || dynScratch_.size < scratchTotal) {
-        if (dynScratch_.buffer != VK_NULL_HANDLE) {
-            vk::Context* c = &ctx;
-            vk::rt::AddressBuffer old = dynScratch_;
-            dev_.frames().retire([c, old]() mutable { old.destroy(*c); });
-            dynScratch_ = {};
-        }
-        if (!dynScratch_.create(ctx, std::max<VkDeviceSize>(scratchTotal * 2, 4ull << 20), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false, scratchAlign_,
-                                "rt scene character scratch")) {
-            for (std::size_t i : which) dynBlas_[dynUse_[i].key].built = false;
-            return;
-        }
-    }
-    for (std::size_t k = 0; k < infos.size(); ++k) infos[k].scratchData.deviceAddress = dynScratch_.address + scratchOffsets[k];
+    if (builds.empty()) return;
     // the vertex shaders' captures (the cascades' and the solid pass's draws) and the skinning pass's output -> the builds
-    barrier(cmd, VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+    barrier(cl, VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
             VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_2_SHADER_READ_BIT);
-    std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> pr(ranges.size());
-    for (std::size_t k = 0; k < ranges.size(); ++k) pr[k] = &ranges[k];
     {
         d3d9::RegionScope r(dev_, "rt.dynamic builds");
-        vkCmdBuildAccelerationStructuresKHR(cmd, static_cast<std::uint32_t>(infos.size()), infos.data(), pr.data());
+        cl.buildBlases(builds);
     }
     for (std::size_t i : which) {
         dynUse_[i].built = true;
@@ -1865,17 +1681,14 @@ bool RtScene::skinReady() {
 
 void RtScene::destroySkin() {
     skinJobs_.clear();
-    vk::Context* ctx = &dev_.ctx();
     if (skinBuild_.valid()) skinBuild_.get();  // (a pipeline still being built is waited for; the RHI retires it with the device's frames)
-    vk::rt::AddressBuffer err = skinErr_;
-    if (err.buffer != VK_NULL_HANDLE) dev_.frames().retire([ctx, err]() mutable { err.destroy(*ctx); });
     skinPipe_.reset();
-    skinErr_ = {};
+    skinErr_.reset();
     skinReady_ = skinStarted_ = false;
 }
 
 // one dispatch for all of the frame's jobs (the frame's first skinned draws: z pre-pass and cascades), before the BLAS builds
-void RtScene::recordSkin(VkCommandBuffer cmd) {
+void RtScene::recordSkin(rhi::CommandList& cl) {
     if (skinJobs_.empty()) return;
     if (!skinReady()) {
         skinJobs_.clear();
@@ -1892,11 +1705,18 @@ void RtScene::recordSkin(VkCommandBuffer cmd) {
     VkDeviceAddress errAddress = 0;
     const std::uint32_t slot = dev_.frames().currentSlot();
     if (skinVerify_) {
-        if (skinErr_.buffer == VK_NULL_HANDLE &&
-            !skinErr_.create(dev_.ctx(), 16ull * vk::Frames::kInFlight, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, 16, "rt skin verify")) {
+        if (skinErr_ == nullptr) {
+            rhi::Device* rd = dev_.rhi();
+            if (rd != nullptr) {
+                skinErr_ = rd->createBuffer({16ull * vk::Frames::kInFlight, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Readback, "rt skin verify"});
+            }
+            if (skinErr_ != nullptr) std::memset(skinErr_->map(), 0, 16ull * vk::Frames::kInFlight);
+        }
+        if (skinErr_ == nullptr) {
             skinVerify_ = false;
-        } else if (skinErr_.mapped != nullptr) {
-            auto* e = reinterpret_cast<std::uint32_t*>(static_cast<std::uint8_t*>(skinErr_.mapped) + 16ull * slot);
+        } else if (skinErr_->map() != nullptr) {
+            skinErr_->invalidate();
+            auto* e = reinterpret_cast<std::uint32_t*>(static_cast<std::uint8_t*>(skinErr_->map()) + 16ull * slot);
             // this slot's previous frame has completed (Frames::begin waited for it)
             if (e[1] != 0 || e[2] != 0) {
                 float maxErr = 0.0f;
@@ -1914,7 +1734,8 @@ void RtScene::recordSkin(VkCommandBuffer cmd) {
                 }
             }
             e[0] = e[1] = e[2] = e[3] = 0;
-            errAddress = skinErr_.address + 16ull * slot;
+            skinErr_->flush();
+            errAddress = skinErr_->gpuAddress() + 16ull * slot;
         }
     }
     auto* head = static_cast<std::uint32_t*>(t.ptr);
@@ -1947,11 +1768,9 @@ void RtScene::recordSkin(VkCommandBuffer cmd) {
     {
         d3d9::RegionScope r(dev_, "rt.skin");
         // a reference capture written by a cascade's vertex shader (verify) before the compute reads it
-        barrier(cmd, VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+        barrier(cl, VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-        RhiScope rs(dev_, cmd);
-        if (!rs) return;
-        rs.cl().bindPipeline(*skinPipe_);
+        cl.bindPipeline(*skinPipe_);
         struct Push {
             abi::PassPushHeader h;
             std::uint32_t table[2];
@@ -1960,8 +1779,8 @@ void RtScene::recordSkin(VkCommandBuffer cmd) {
         push.h.frame = 0;
         push.table[0] = static_cast<std::uint32_t>(t.address);
         push.table[1] = static_cast<std::uint32_t>(t.address >> 32);
-        rs.cl().setPushConstants(&push, sizeof(push));
-        rs.cl().dispatch(chunks, 1, 1);
+        cl.setPushConstants(&push, sizeof(push));
+        cl.dispatch(chunks, 1, 1);
     }
     for (std::uint32_t i = 0; i < n; ++i) dev_.markVertexCaptured(skinJobs_[i].out);
     skinJobsTotal_ += n;
@@ -1975,7 +1794,6 @@ void RtScene::recordSkin(VkCommandBuffer cmd) {
 
 // characters not seen for 2 s (all: off / deactivated): BLAS + material released
 void RtScene::dropDynamic(bool all, std::uint64_t frame) {
-    vk::Context* ctx = &dev_.ctx();
     for (auto it = dynBlas_.begin(); it != dynBlas_.end();) {
         DynBlas& b = it->second;
         if (!all && b.lastFrame + 120 >= frame) {
@@ -1983,21 +1801,12 @@ void RtScene::dropDynamic(bool all, std::uint64_t frame) {
             continue;
         }
         if (b.material != 0) materials_.release(b.material);
-        if (b.as.handle != VK_NULL_HANDLE || b.as.storage.buffer != VK_NULL_HANDLE) {
-            vk::rt::AccelerationStructure old = b.as;
-            dev_.frames().retire([ctx, old]() mutable { old.destroy(*ctx); });
-        }
-        it = dynBlas_.erase(it);
+        it = dynBlas_.erase(it);  // (its structure goes with the frame being recorded)
     }
     if (all) {
         dyn_.clear();
         dynPrev_.clear();
         dynUse_.clear();
-        if (dynScratch_.buffer != VK_NULL_HANDLE) {
-            vk::rt::AddressBuffer old = dynScratch_;
-            dev_.frames().retire([ctx, old]() mutable { old.destroy(*ctx); });
-            dynScratch_ = {};
-        }
     }
 }
 
@@ -2009,34 +1818,15 @@ void RtScene::record(d3d9::PassContext& ctx) {
     builtFrame_ = dev_.frameValue();
     if (!ensureResources()) return;
     const auto t0 = std::chrono::steady_clock::now();
-    vk::Context& vctx = dev_.ctx();
     vk::Frames& frames = dev_.frames();
     const std::uint32_t slot = frames.currentSlot();
     const std::uint64_t frame = dev_.frameValue();
     const double now = dev_.secondsSinceCreate();
-    VkCommandBuffer cmd = ctx.cmd;
-    const VkPipelineStageFlags2 asStages =
-        VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
-        (vctx.features().rayTracing.maintenance1 ? VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_COPY_BIT_KHR : 0);
-    const VkPipelineStageFlags2 rayStages = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-
-    // GPU time of the pass ([debug] perf): this slot's previous one has completed (Frames::begin waited for it)
-    if (timePool_ != VK_NULL_HANDLE) {
-        if (timeWritten_[slot]) {
-            std::uint64_t t[2]{};
-            if (vkGetQueryPoolResults(vctx.device(), timePool_, slot * 2, 2, sizeof(t), t, sizeof(std::uint64_t), VK_QUERY_RESULT_64_BIT) ==
-                VK_SUCCESS && t[1] >= t[0]) {
-                iv_.gpuMs += static_cast<double>(t[1] - t[0]) * vctx.features().timestampPeriod * 1e-6;
-                ++iv_.gpuSamples;
-            }
-        }
-        vkCmdResetQueryPool(cmd, timePool_, slot * 2, 2);
-        vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, timePool_, slot * 2);
-    }
-
-    // earlier submissions' builds (the shared scratch) and ray queries of this slot's TLAS before this frame's writes
-    barrier(cmd, asStages | rayStages, VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR, asStages,
-            VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR);
+    RhiScope rs(dev_, ctx.cmd);
+    if (!rs) return;
+    rhi::CommandList& cl = rs.cl();
+    // (the barriers before every build and after it, also the one that protects the scratch pool and the TLAS of this slot from earlier
+    // submissions' builds and ray queries, are the RHI's: CommandList::buildBlases / buildTlasAt)
 
     // the camera of this frame's main view
     const auto& cam = dev_.camera().valid ? dev_.camera() : dev_.lastCamera();
@@ -2056,19 +1846,16 @@ void RtScene::record(d3d9::PassContext& ctx) {
     }
     {
         d3d9::RegionScope r(dev_, "rt.compact");
-        processCompactions(cmd, slot);
+        processCompactions(cl, slot);
     }
     {
         d3d9::RegionScope r(dev_, "rt.blas builds");
-        buildPending(cmd, slot);
+        buildPending(cl, slot);
     }
     {
         d3d9::RegionScope r(dev_, "rt.dynamic");
-        buildDynamic(cmd, frame);
+        buildDynamic(cl, frame);
     }
-    // BLAS builds / compaction copies -> the TLAS build
-    barrier(cmd, asStages, VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-            VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR);
 
     // characters built this frame (setDynamic) after the world's instances
     std::uint32_t dynCount = 0;
@@ -2146,12 +1933,12 @@ void RtScene::record(d3d9::PassContext& ctx) {
         vi.instanceShaderBindingTableRecordOffset = 0;
         vi.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR |
                    (alpha ? VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR : VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR);
-        vi.accelerationStructureReference = b.as.address;
+        vi.accelerationStructureReference = b.as->address();
         insts[k] = vi;
         abi::RtGeometryRecord r{};
         const rt::BlasKey& key = b.key;
         split(b.vbAddress + key.vertexOffset + static_cast<VkDeviceSize>(key.baseVertex) * key.stride, r.vertices);
-        split(key.strip != 0 ? b.listIndices.address : b.ibAddress + static_cast<VkDeviceSize>(key.first) * (key.index32 != 0 ? 4u : 2u),
+        split(key.strip != 0 ? b.listIndices->gpuAddress() : b.ibAddress + static_cast<VkDeviceSize>(key.first) * (key.index32 != 0 ? 4u : 2u),
               r.indices);
         r.stride = key.stride;
         r.flags = (in.flags & ~abi::kRtRecordAlphaTested) | (alpha ? abi::kRtRecordAlphaTested : 0u) |
@@ -2220,7 +2007,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
             vi.instanceCustomIndex = k;
             vi.mask = abi::kRtMaskDynamic;
             vi.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR | VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
-            vi.accelerationStructureReference = b.as.address;
+            vi.accelerationStructureReference = b.as->address();
             if (d.tree) {
                 // an animated SpeedTree: the rest-pose instance's record (its material, alpha test, flags) with the captured
                 // world-space vertices; a world instance for the masks (not a character)
@@ -2307,31 +2094,9 @@ void RtScene::record(d3d9::PassContext& ctx) {
     iv_.segments = segs.size();
 
     Tlas& t = tlas_[slot];
-    VkAccelerationStructureGeometryKHR g{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
-    g.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
-    g.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
-    g.geometry.instances.arrayOfPointers = VK_FALSE;
-    g.geometry.instances.data.deviceAddress = ia.address;
-    VkAccelerationStructureBuildGeometryInfoKHR info{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
-    info.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-    info.flags = kTlasFlags;
-    info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
-    info.geometryCount = 1;
-    info.pGeometries = &g;
-    info.dstAccelerationStructure = t.as.handle;
-    info.scratchData.deviceAddress = scratch_.address;
-    const VkAccelerationStructureBuildRangeInfoKHR range{used, 0, 0, 0};
-    const VkAccelerationStructureBuildRangeInfoKHR* pr = &range;
     {
         d3d9::RegionScope r(dev_, "rt.tlas build");
-        vkCmdBuildAccelerationStructuresKHR(cmd, 1, &info, &pr);
-    }
-    // the TLAS -> ray queries in fragment / compute shaders of this submission
-    barrier(cmd, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR, rayStages,
-            VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
-    if (timePool_ != VK_NULL_HANDLE) {
-        vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, timePool_, slot * 2 + 1);
-        timeWritten_[slot] = true;
+        cl.buildTlasAt(*t.as, ia.address, used);  // (ends with the barrier to the ray queries of this submission)
     }
     if (used < n) {
         // (see `used`) counted for the log; before this was fixed the TLAS was built over n instances, the tail of them stale
@@ -2339,7 +2104,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
         ++iv_.holeFrames;
         iv_.holes += n - used;
     }
-    dev_.setRtScene({t.as.address, ra.address, t.slot, used, used, frame});
+    dev_.setRtScene({t.as->address(), ra.address, t.slot, used, used, frame});
 
     lastInstances_ = used;
     lastTriangles_ = triangles;
@@ -2368,9 +2133,9 @@ void RtScene::logStats(bool force) {
         pendingCount += b.state == BlasState::Pending ? 1 : 0;
         failed += b.state == BlasState::Failed ? 1 : 0;
     }
-    const double tlasMiB = static_cast<double>(tlas_[0].as.storage.size * vk::Frames::kInFlight) / 1048576.0;
+    const double tlasMiB = tlas_[0].as != nullptr ? static_cast<double>(tlas_[0].as->storageBytes() * vk::Frames::kInFlight) / 1048576.0 : 0.0;
     const double blasMiB = static_cast<double>(blasBytes_) / 1048576.0;
-    const double scratchMiB = static_cast<double>(scratch_.size) / 1048576.0;
+    const double scratchMiB = dev_.rhi() != nullptr ? static_cast<double>(dev_.rhi()->buildScratchBytes()) / 1048576.0 : 0.0;
     if (iv_.frames % 30 == 1 || due || force) {
         dev_.setStatus("rt.scene", std::format("RT scene: {} instances, {} BLAS, {:.1f}M triangles, {:.0f} MiB", lastInstances_, built,
                                                static_cast<double>(lastTriangles_) / 1e6, blasMiB + tlasMiB + scratchMiB));
@@ -2386,7 +2151,7 @@ void RtScene::logStats(bool force) {
                  iv_.builtTriangles / 1000, pendingCount, failed, iv_.compacted, static_cast<double>(iv_.compactSaved) / 1048576.0, iv_.evicted,
                  lastTriangles_, blasMiB + tlasMiB + scratchMiB, blasMiB, tlasMiB, scratchMiB, iv_.observeMs / f,
                  static_cast<double>(iv_.observed) / f, static_cast<double>(iv_.skipped) / f, static_cast<double>(iv_.sightings) / f, iv_.buildCpuMs / f, iv_.passCpuMs / f,
-                 iv_.gpuSamples > 0 ? std::format("{:.3f} ms", iv_.gpuMs / static_cast<double>(iv_.gpuSamples)) : std::string("n/a ([debug] perf)"));
+                 std::string("-PerfFrame: pass rt.scene"));
     const RtMaterials::Counters mc = materials_.takeCounters();
     spdlog::info("rt: scene: materials {} (per frame: {:.1f} resolves, {:.3f} ms; interval: {} uv evaluations, graph {} (pool image {}) / bytecode s9 {} / "
                  "no texture {}, approximate {}, failed {}, active shader != material's {}); records: textured {}, untextured {}, cut-out {}, segmented {} ({} segments; "

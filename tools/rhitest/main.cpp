@@ -518,16 +518,16 @@ void testVertex(rhi::Device& dev, const Shaders& sh) {
 }
 
 // the pixel of src/vk/raytracing.cpp selfTest's scene (rt_query.comp's encoding); `ambiguous`: on a triangle edge (either result is valid)
-std::uint32_t expectedRay(std::uint32_t px, std::uint32_t py, std::uint32_t size, bool& ambiguous) {
+std::uint32_t expectedRay(std::uint32_t px, std::uint32_t py, std::uint32_t size, bool& ambiguous, float dz = 0.0f) {
     constexpr std::uint32_t kIndexA = 7, kIndexB = 9;
     const float x = (static_cast<float>(px) + 0.5f) / static_cast<float>(size) * 2.0f - 1.0f;
     const float y = (static_cast<float>(py) + 0.5f) / static_cast<float>(size) * 2.0f - 1.0f;
     const auto onEdge = [](float a, float b) { return std::abs(a - b) < 1e-3f; };
     ambiguous = onEdge(x + y, 0.0f) || onEdge(std::abs(x), 0.8f) || onEdge(std::abs(y), 0.8f) || onEdge(x, 0.0f);
     // instance A: identity, z = 0 (t = 10), the triangle (-0.8,-0.8) (0.8,-0.8) (-0.8,0.8), opaque
-    if (x >= -0.8f && y >= -0.8f && x + y <= 0.0f) return (1u << 31) | (40u << 8) | (kIndexA + 1);
+    if (x >= -0.8f && y >= -0.8f && x + y <= 0.0f) return (1u << 31) | (static_cast<std::uint32_t>(40.0f + 4.0f * dz) << 8) | (kIndexA + 1);
     // instance B: rotated 180 degrees about z, z = 1 (t = 11), non-opaque: the shader accepts barycentric u < 0.5, i.e. object x = -x < 0
-    if (x <= 0.8f && y <= 0.8f && x + y >= 0.0f && x > 0.0f) return (1u << 31) | (44u << 8) | (kIndexB + 1);
+    if (x <= 0.8f && y <= 0.8f && x + y >= 0.0f && x > 0.0f) return (1u << 31) | (static_cast<std::uint32_t>(44.0f + 4.0f * dz) << 8) | (kIndexB + 1);
     return 0;
 }
 
@@ -630,6 +630,196 @@ void testRayQuery(rhi::Device& dev, const Shaders& sh) {
     check(bad == 0 && hitsA > 0 && hitsB > 0 && misses > 0,
           std::format("{} wrong pixel(s) {}; {} opaque hits, {} alpha-tested hits, {} misses, {} edge pixels skipped", bad, first, hitsA, hitsB, misses, skipped));
     report(dev, "ray query", before);
+}
+
+
+// Gap 6 (rt_scene's needs, hlsl-rhi.md 8): BLAS builds by raw addresses in a batch with pooled scratch, a refit (update), compacted sizes + compaction, a
+// TLAS built from a raw address, buffer fills and memory barriers.
+void testAccelOps(rhi::Device& dev, const Shaders& sh) {
+    const int before = failures;
+    if (!dev.caps().rayQuery) {
+        skip(dev, "acceleration structure ops", "no ray query");
+        return;
+    }
+    if (!sh.rt.ok) {
+        check(false, "ray query shader did not compile");
+        report(dev, "acceleration structure ops", before);
+        return;
+    }
+    constexpr std::uint32_t kRtSize = 64;
+    constexpr std::uint32_t kIndexA = 7, kIndexB = 9;
+    constexpr std::uint32_t kBytes = kRtSize * kRtSize * 4;
+    float verts[9] = {-0.8f, -0.8f, 0.0f, 0.8f, -0.8f, 0.0f, -0.8f, 0.8f, 0.0f};
+    const std::uint32_t idx[3] = {0, 1, 2};
+    const float verts2[9] = {-0.2f, -0.2f, 3.0f, 0.2f, -0.2f, 3.0f, -0.2f, 0.2f, 3.0f};  // a second BLAS in the batch (not traced)
+    auto vertices = dev.createBuffer({sizeof(verts), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, rhi::Memory::Upload, "rhi accel vertices"});
+    auto vertices2 = dev.createBuffer({sizeof(verts2), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, rhi::Memory::Upload, "rhi accel vertices 2"});
+    auto indices = dev.createBuffer({sizeof(idx), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, rhi::Memory::Upload, "rhi accel indices"});
+    auto instances = dev.createBuffer({2 * sizeof(VkAccelerationStructureInstanceKHR), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi accel instances"});
+    auto output = dev.createBuffer({kBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, rhi::Memory::Device, "rhi accel output"});
+    auto readback = dev.createBuffer({kBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "rhi accel readback"});
+    auto pipeline = dev.createComputePipeline({sh.rt.shader(), "rhi accel ray query"});
+    auto query = dev.createSizeQuery(4);
+    if (!vertices || !vertices2 || !indices || !instances || !output || !readback || !pipeline || !query) {
+        check(false, "acceleration structure ops: resource / pipeline creation");
+        report(dev, "acceleration structure ops", before);
+        return;
+    }
+    std::memcpy(vertices->map(), verts, sizeof(verts));
+    std::memcpy(vertices2->map(), verts2, sizeof(verts2));
+    std::memcpy(indices->map(), idx, sizeof(idx));
+    // raw addresses (the geometry of a BLAS in the renderer's own memory) and the second BLAS's geometry brought by the build
+    rhi::TriangleGeometry tri;
+    tri.vertexAddress = vertices->gpuAddress();
+    tri.vertexCount = 3;
+    tri.indexAddress = indices->gpuAddress();
+    tri.indexCount = 3;
+    tri.indexType = VK_INDEX_TYPE_UINT32;
+    tri.opaque = true;
+    rhi::TriangleGeometry tri2 = tri;
+    tri2.vertexAddress = vertices2->gpuAddress();
+    rhi::BlasDesc bd;
+    bd.geometries = std::span<const rhi::TriangleGeometry>(&tri, 1);
+    bd.allowCompaction = true;
+    bd.name = "rhi accel blas";
+    auto blas = dev.createBlas(bd);
+    auto blas2 = dev.createBlas(bd);
+    rhi::BlasDesc bu = bd;
+    bu.allowCompaction = false;
+    bu.allowUpdate = true;
+    bu.name = "rhi accel blas (refit)";
+    auto blasU = dev.createBlas(bu);
+    rhi::TlasDesc td;
+    td.maxInstances = 2;
+    td.preferFastBuild = true;
+    td.name = "rhi accel tlas";
+    auto tlas = dev.createTlas(td);
+    if (!blas || !blas2 || !blasU || !tlas) {
+        check(false, "acceleration structure ops: creation");
+        report(dev, "acceleration structure ops", before);
+        return;
+    }
+    check(blas->storageBytes() > 0 && tlas->storageBytes() > 0, "storageBytes");
+    const auto writeInstances = [&](std::uint64_t blasAddress) {
+        VkAccelerationStructureInstanceKHR inst[2]{};
+        inst[0].transform = {{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}};
+        inst[0].instanceCustomIndex = kIndexA;
+        inst[0].mask = 0xFF;
+        inst[0].flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+        inst[0].accelerationStructureReference = blasAddress;
+        inst[1] = inst[0];
+        inst[1].transform = {{{-1, 0, 0, 0}, {0, -1, 0, 0}, {0, 0, 1, 1}}};
+        inst[1].instanceCustomIndex = kIndexB;
+        inst[1].flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR | VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR;
+        std::memcpy(instances->map(), inst, sizeof(inst));
+    };
+    struct RtPush {
+        std::uint32_t out[2], tlas, width, height, pad[3];
+    } push{};
+    const auto o = output->shaderRefRw(0);
+    push.out[0] = o[0];
+    push.out[1] = o[1];
+    push.tlas = tlas->tlasSlot();
+    push.width = push.height = kRtSize;
+    // trace + compare with the analytic result (`dz`: how far the geometry moved along the ray)
+    const auto trace = [&](const char* what, float dz) {
+        const auto* px = static_cast<const std::uint32_t*>(readback->map());
+        int bad = 0, hits = 0;
+        std::string first;
+        for (std::uint32_t y = 0; y < kRtSize; ++y) {
+            for (std::uint32_t x = 0; x < kRtSize; ++x) {
+                bool ambiguous = false;
+                const std::uint32_t want = expectedRay(x, y, kRtSize, ambiguous, dz);
+                if (ambiguous) continue;
+                const std::uint32_t got = px[y * kRtSize + x];
+                if (got != want) {
+                    if (bad++ == 0) first = std::format("pixel ({}, {}) = 0x{:08x}, expected 0x{:08x}", x, y, got, want);
+                } else if (got != 0) {
+                    ++hits;
+                }
+            }
+        }
+        check(bad == 0 && hits > 0, std::format("{}: {} wrong pixel(s) {}; {} hits", what, bad, first, hits));
+    };
+    const auto dispatchAndRead = [&](rhi::CommandList& cl) {
+        cl.bufferBarrier(*output, rhi::BufferAccess::ShaderWrite);
+        cl.bindPipeline(*pipeline);
+        cl.setPushConstants(&push, sizeof(push));
+        cl.dispatch(kRtSize / 8, kRtSize / 8, 1);
+        cl.bufferBarrier(*output);
+        cl.copyBuffer(*readback, 0, *output, 0, kBytes);
+    };
+
+    // 1. batch of two BLASes (the second with geometry of its own) + sizes + a TLAS from a raw address; the output buffer is filled first
+    writeInstances(blas->address());
+    dev.submitAndWait([&](rhi::CommandList& cl) {
+        cl.fillBuffer(*output, 0, kBytes, 0xDEADBEEFu);
+        cl.memoryBarrier(VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                         VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+        const rhi::BlasBuild builds[3] = {{blas.get(), {}, false}, {blas2.get(), std::span<const rhi::TriangleGeometry>(&tri2, 1), false}, {blasU.get(), {}, false}};
+        cl.buildBlases(builds);
+        rhi::AccelerationStructure* list[2] = {blas.get(), blas2.get()};
+        cl.queryCompactedSizes(*query, 0, list);
+        cl.buildTlasAt(*tlas, instances->gpuAddress(), 2);
+        dispatchAndRead(cl);
+    });
+    trace("batched builds, raw addresses", 0.0f);
+    std::uint64_t sizes[2]{};
+    check(query->read(0, 2, sizes) && sizes[0] > 0 && sizes[1] > 0 && sizes[0] <= blas->storageBytes(),
+          std::format("compacted sizes {} / {} bytes of {}", sizes[0], sizes[1], blas->storageBytes()));
+
+    // 2. compaction: copy into a structure of the queried size, point the instances at it
+    auto compacted = dev.createBlasStorage(sizes[0], "rhi accel blas compacted");
+    if (!compacted) {
+        check(false, "createBlasStorage");
+        report(dev, "acceleration structure ops", before);
+        return;
+    }
+    writeInstances(compacted->address());
+    dev.submitAndWait([&](rhi::CommandList& cl) {
+        cl.compactBlas(*compacted, *blas);
+        cl.buildTlasAt(*tlas, instances->gpuAddress(), 2);
+        dispatchAndRead(cl);
+    });
+    trace(std::format("compacted ({} -> {} bytes)", blas->storageBytes(), compacted->storageBytes()).c_str(), 0.0f);
+
+    // 3. refit: the vertices move 5 units along the ray, the update-capable BLAS is refitted in place
+    writeInstances(blasU->address());
+    dev.submitAndWait([&](rhi::CommandList& cl) {
+        cl.buildTlasAt(*tlas, instances->gpuAddress(), 2);
+        dispatchAndRead(cl);
+    });
+    trace("update-capable BLAS, first build", 0.0f);
+    for (int i = 0; i < 3; ++i) verts[i * 3 + 2] = 5.0f;
+    std::memcpy(vertices->map(), verts, sizeof(verts));
+    vertices->flush();
+    dev.submitAndWait([&](rhi::CommandList& cl) {
+        const rhi::BlasBuild b = {blasU.get(), {}, true};
+        cl.buildBlases(std::span<const rhi::BlasBuild>(&b, 1));
+        cl.buildTlasAt(*tlas, instances->gpuAddress(), 2);
+        dispatchAndRead(cl);
+    });
+    trace("refit (update)", 5.0f);
+
+    // 4. fillBuffer of a range
+    auto fb = dev.createBuffer({256, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, rhi::Memory::Device, "rhi fill"});
+    auto fbRead = dev.createBuffer({256, VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "rhi fill readback"});
+    if (fb && fbRead) {
+        dev.submitAndWait([&](rhi::CommandList& cl) {
+            cl.fillBuffer(*fb, 0, 256, 0u);
+            cl.bufferBarrier(*fb);
+            cl.fillBuffer(*fb, 64, 128, 0x01020304u);
+            cl.bufferBarrier(*fb);
+            cl.copyBuffer(*fbRead, 0, *fb, 0, 256);
+        });
+        const auto* w = static_cast<const std::uint32_t*>(fbRead->map());
+        int bad = 0;
+        for (int i = 0; i < 64; ++i) bad += w[i] != (i >= 16 && i < 48 ? 0x01020304u : 0u) ? 1 : 0;
+        check(bad == 0, std::format("fillBuffer: {} wrong words", bad));
+    } else {
+        check(false, "fillBuffer resources");
+    }
+    report(dev, "acceleration structure ops", before);
 }
 
 // Gap 5 (the pass migration's needs, hlsl-rhi.md 8): eight storage images in one dispatch (u0..u7), clears of mip levels, per-mip layout transitions,
@@ -962,6 +1152,7 @@ bool runBackend(rhi::Backend backend, bool validation, const Shaders& sh) {
     testBuffers(*dev, sh);
     testVertex(*dev, sh);
     testRayQuery(*dev, sh);
+    testAccelOps(*dev, sh);
     testTextureOps(*dev, sh);
     check(dev->validationErrors() == 0, std::format("{} validation error(s)", dev->validationErrors()));
     std::printf("[%s] %s\n", rhi::backendName(backend), failures == before ? "PASS" : "FAIL");

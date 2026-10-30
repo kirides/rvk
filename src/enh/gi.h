@@ -33,7 +33,6 @@
 #include "rhi/rhi.h"
 #include "shader/abi.h"
 #include "vk/passes.h"
-#include "vk/raytracing.h"
 
 namespace rvk::enh {
 
@@ -180,10 +179,10 @@ private:
     bool haveLast_ = false;
     bool sgiValid_ = false;
     std::uint64_t screenFrames_ = 0, screenSkipped_ = 0;
-    vk::rt::AddressBuffer probes_, depth_, rays_;
+    std::unique_ptr<rhi::Buffer> probes_, depth_, rays_;
     // diagnostics (RVK_GI_DIAG, rtgi.md 23): the screen probes' light terms summed by the GPU (wrapping fixed-point counters,
     // two sun classes), read every frame as deltas into 64-bit sums, logged every 5 s
-    vk::rt::AddressBuffer diag_;
+    std::unique_ptr<rhi::Buffer> diag_;
     std::uint32_t diagLast_[64]{};
     double diagSum_[64]{};
     void logDiag();

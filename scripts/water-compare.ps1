@@ -19,6 +19,8 @@ param(
     # -EngineSetting 'renderer.mode=wrapper' -Setting 'renderer.mode=full' (the player setting, with -Mode wrapper)
     [ValidateSet('wrapper', 'full', 'vulkan')][string]$Mode = 'wrapper',
     [string]$GameDir = 'B:\DevDrive\risen-test-vk',
+    # build configuration folder (build\<Config>\d3d9.dll) deployed by run.ps1
+    [string]$Config = 'RelWithDebInfo',
     # risen-spass instance id (run.ps1 -Instance): needed to run beside another Risen
     [int]$Instance = 0,
     [string[]]$Param = @(),
@@ -47,7 +49,7 @@ $spotParam = 'spots=' + ($Spots -replace ',', ';')
 
 function Invoke-Run([string]$tag, [string[]]$settings, [int]$burstCount = 1) {
     if (Test-Path $shots) { Get-ChildItem $shots -Filter "${tag}_*" | Remove-Item -Force }
-    $runArgs = @{ Mode = $Mode; GameDir = $GameDir; Instance = $Instance; Mods = @('rvkcompare'); Scenario = 'rvkcompare'; WaitForResult = $true; Seconds = 1200
+    $runArgs = @{ Config = $Config; Mode = $Mode; GameDir = $GameDir; Instance = $Instance; Mods = @('rvkcompare'); Scenario = 'rvkcompare'; WaitForResult = $true; Seconds = 1200
                   Param = @("tag=$tag", $spotParam, "burst=$burstCount", "interval=$Interval") + $Param; Setting = $settings; RvkFilter = 'enh: water: (first|wet|material .* none)|\[error\]' }
     if ($Validation) { $runArgs.Validation = $true }
     if ($SyncValidation) { $runArgs.SyncValidation = $true }

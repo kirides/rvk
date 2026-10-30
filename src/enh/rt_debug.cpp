@@ -33,11 +33,11 @@ RtDebug::~RtDebug() {
 }
 
 void RtDebug::readProbes(std::uint32_t slot) {
-    if (probeFrame_[slot] == 0 || probes_[slot].mapped == nullptr) return;
+    if (probeFrame_[slot] == 0 || probes_[slot] == nullptr) return;
     const std::uint64_t frame = probeFrame_[slot];
     probeFrame_[slot] = 0;
-    vmaInvalidateAllocation(dev_.ctx().allocator(), probes_[slot].allocation, 0, VK_WHOLE_SIZE);
-    const auto* r = static_cast<const RtDebugProbe*>(probes_[slot].mapped);
+    probes_[slot]->invalidate();
+    const auto* r = static_cast<const RtDebugProbe*>(probes_[slot]->map());
     const auto now = std::chrono::steady_clock::now();
     // the material views every second (the probe pixels of a capture's frozen frames get logged)
     const bool materialView = mode_ == Mode::Albedo || mode_ == Mode::Uv;
@@ -56,7 +56,7 @@ void RtDebug::readProbes(std::uint32_t slot) {
                          r[k].t, r[k].rasterT, r[k].record != 0 ? "; " + scene_.describe(frame, r[k].record - 1) : std::string());
         }
     }
-    std::memset(probes_[slot].mapped, 0, sizeof(RtDebugProbe) * kRtDebugProbes);
+    std::memset(probes_[slot]->map(), 0, sizeof(RtDebugProbe) * kRtDebugProbes);
 }
 
 void RtDebug::setMode(Mode mode, std::uint32_t flags) {
@@ -71,12 +71,9 @@ void RtDebug::setMode(Mode mode, std::uint32_t flags) {
         dev_.transients().release("rt.debug.depth");
         scene_.keepContents(false);
         scene_.release(this);
-        vk::Context* ctx = &dev_.ctx();
         for (std::uint32_t i = 0; i < vk::Frames::kInFlight; ++i) {
-            vk::rt::AddressBuffer b = probes_[i];
-            probes_[i] = {};
+            probes_[i].reset();  // (destroyed with the frame being recorded)
             probeFrame_[i] = 0;
-            if (b.buffer != VK_NULL_HANDLE) dev_.frames().retire([ctx, b]() mutable { b.destroy(*ctx); });
         }
         return;
     }
@@ -221,14 +218,16 @@ void RtDebug::record(d3d9::PassContext& ctx) {
     // probe results: the slot's previous ones are complete (Frames::begin waited for that submission)
     const std::uint32_t slot = dev_.frames().currentSlot();
     readProbes(slot);
-    if (probes_[slot].buffer == VK_NULL_HANDLE) {
-        probes_[slot].create(dev_.ctx(), sizeof(RtDebugProbe) * kRtDebugProbes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, 16, "rt.debug probes");
-        if (probes_[slot].mapped != nullptr) std::memset(probes_[slot].mapped, 0, sizeof(RtDebugProbe) * kRtDebugProbes);
+    if (probes_[slot] == nullptr && dev_.rhi() != nullptr) {
+        probes_[slot] = dev_.rhi()->createBuffer(
+            {sizeof(RtDebugProbe) * kRtDebugProbes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Readback, "rt.debug probes"});
+        if (probes_[slot] != nullptr) std::memset(probes_[slot]->map(), 0, sizeof(RtDebugProbe) * kRtDebugProbes);
     }
-    if (probes_[slot].mapped != nullptr) {
-        vmaFlushAllocation(dev_.ctx().allocator(), probes_[slot].allocation, 0, VK_WHOLE_SIZE);
-        push.probes[0] = static_cast<std::uint32_t>(probes_[slot].address);
-        push.probes[1] = static_cast<std::uint32_t>(probes_[slot].address >> 32);
+    if (probes_[slot] != nullptr) {
+        probes_[slot]->flush();
+        const auto ref = probes_[slot]->shaderRefRw(0);
+        push.probes[0] = ref[0];
+        push.probes[1] = ref[1];
         probeFrame_[slot] = dev_.frameValue();
     }
 

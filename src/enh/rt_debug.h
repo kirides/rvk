@@ -19,7 +19,6 @@
 #include "rhi/rhi.h"
 #include "shader/abi.h"
 #include "vk/passes.h"
-#include "vk/raytracing.h"
 
 namespace rvk::enh {
 
@@ -81,7 +80,7 @@ private:
     std::uint64_t depthFrame_ = 0;  // frame value of the last depth capture
     VkExtent2D depthExtent_{1, 1};  // its size
     std::uint64_t fallbacks_ = 0;   // frames without a capture
-    vk::rt::AddressBuffer probes_[vk::Frames::kInFlight];  // host-visible probe results per frame slot
+    std::unique_ptr<rhi::Buffer> probes_[vk::Frames::kInFlight];  // host-visible probe results per frame slot
     std::uint64_t probeFrame_[vk::Frames::kInFlight]{};     // frame value whose results a slot holds (0 = none)
     std::chrono::steady_clock::time_point probeLogged_{};
     std::unique_ptr<rhi::Pipeline> compute_, depthCompute_, composite_;

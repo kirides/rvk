@@ -30,5 +30,9 @@ std::unique_ptr<Device> wrap(vk::Context& ctx, vk::Frames& frames, vk::Bindless&
 // `device` must come from wrap(). `name` = debug name (default: the image's).
 std::unique_ptr<Texture> wrapImage(Device& device, vk::Image& image, std::uint32_t sampledSlot = 0, const char* name = nullptr);
 std::unique_ptr<CommandList> wrapCommandBuffer(Device& device, VkCommandBuffer cmd);
+// A non-owning rhi::Buffer over a VkBuffer owned elsewhere (the frame ring, an engine arena): `address` = the buffer's device address (offset 0),
+// `mapped` its host pointer or null. Used as the source / destination of copies and as a build input; the usage the buffer was created with is the
+// caller's business. `device` must come from wrap().
+std::unique_ptr<Buffer> wrapBuffer(Device& device, VkBuffer buffer, std::uint64_t address, std::uint64_t size, void* mapped = nullptr, const char* name = nullptr);
 
 }  // namespace rvk::rhi::vulkan

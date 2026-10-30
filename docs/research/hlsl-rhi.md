@@ -15,7 +15,7 @@ Status legend: **built** = in the tree and verified, **design** = decided, not b
 | P1b | HLSL ABI (`shaders/include/rvk_abi.hlsli`, `rvk_common.hlsli`, `rvk_draw.hlsli`), the debug-view shaders ported, layout tests against `abi.h` | **built**, GPU `--passes` PASS, in-game check see 7 |
 | P1c | the other hand-written shaders (gbuffer, upscale, gi, rt, shadows, water, framegen, test) ported; GLSL stays until the A/B passes (`RVK_FORCE_GLSL=1` runs the originals); tools: `rvk_shadertool hlsl <name>`, `tools/port_check.py`, test `dxc_every_embedded_shader_compiles` | **built**, in-game A/B pending (7) |
 | P1d | translator HLSL emitter (`shader/hlsl.cpp` next to `glsl.cpp`; `toHlsl` + `compileHlsl`, `kTranslatorVersion` 8): the whole corpus (2483 shaders) passes DXC + spirv-val (`rvk_shadertool corpus corpus --hlsl`), the D3D9 assembly unit tests too; the device uses it for base shaders, the LOD variant and the RT capture variant; material variants + ubershader (`ge_default.*`, back to HLSL: it comes from the engine's own HLSL) | **built** (hooks of the material variants: see 7) |
-| P2 | slim RHI (section 5: dynamic rendering + descriptor indexing + constant buffers + push constants, Vulkan structs as the baseline): interface `src/rhi/rhi.h`, Vulkan backend over the existing `vk::` classes (`src/rhi/vulkan`); the migration of the renderer's own pass code onto it is done for every compute / fullscreen pass of the enhancements (section 8: 2026-10-30 second round); what still calls Vulkan directly: the draw replacers, the D3D9 device model, the RT scene's BLAS / TLAS builds, buffers shared by device address | **interface + Vulkan backend built**, migration started |
+| P2 | slim RHI (section 5: dynamic rendering + descriptor indexing + constant buffers + push constants, Vulkan structs as the baseline): interface `src/rhi/rhi.h`, Vulkan backend over the existing `vk::` classes (`src/rhi/vulkan`); the migration of the renderer's own pass code onto it is done for every compute / fullscreen pass of the enhancements (section 8: 2026-10-30 second round); what still calls Vulkan directly: the D3D9 device model (`src/d3d9`, `vk/pipeline*`) and what it owns; the draw replacers have no Vulkan of their own (section 8, third round) | **interface + Vulkan backend built**, migration started |
 | P3 | DX12 backend slice (section 6; SM 6.6 bindless required): `src/rhi/d3d12` (library `rvk_rhi_d3d12`), the same HLSL compiled to DXIL, fixed root signature, bindless heaps; `rvk_rhitest` runs one test on both backends (compute with constant buffer + bindless texture + RVK_REF + push constants + storage image, graphics with dynamic rendering), validation layers on | **built** incl. a swapchain on a hidden window, PASS on both |
 | P4 | GLSL gone: shaders/*.comp|vert|frag|glsl, `glsl.cpp`, `compileGlsl`, glslang (vcpkg), `rvk_glslc` (replaced by `rvk_embed`, a text embedder) removed 2026-10-30 after the in-game A/B of the ports (GLSL vs HLSL: no errors, within noise); `tools/shader_equiv.py` retired (its pixel check lives on as `tools/ubershader_check.py` through DXC: 183 / 183 captured PS requests EQUAL on the GPU), the vertex ubershader check is gone with it | **built** |
 
@@ -180,6 +180,28 @@ Order of work (P2): (a) interface headers + a Vulkan backend over the existing `
   through the RHI (gbuffer, gi, water.rt, shadows.rt, rt skin); the future is joined in the destructor, the pipeline object is retired with the device's frames.
 - Pass-side helper `enh/rhi_scope.h` (`RhiScope`): the frame's command buffer as an `rhi::CommandList` + `wrapImage` over transients / engine textures, released at the end of the pass call.
 
+### 6c. Acceleration structure batches (third round, 2026-10-30, both backends, `rvk_rhitest` check "acceleration structure ops")
+
+What the RT scene (`enh/rt_scene.cpp`) needed, built generally:
+- `Buffer::gpuAddress()` (Vulkan device address, D3D12 GPU virtual address; not a shader reference), `TriangleGeometry::vertexAddress / indexAddress` (raw addresses for the renderer's own memory: mesh arena, frame ring, shader-written
+  captures; DX12: the memory must be readable by the build, builds cannot transition what they know only by address), `BlasDesc{geometries, allowUpdate, allowCompaction, preferFastBuild, name}` (the geometries only fix the sizes),
+  `TlasDesc{maxInstances, preferFastBuild, name}`, `AccelerationStructure::storageBytes()`.
+- `CommandList::buildBlases(span<BlasBuild{blas, geometries, update}>)`: a batch of builds or refits in one call (one `vkCmdBuildAccelerationStructuresKHR`; DX12 one `BuildRaytracingAccelerationStructure` each). Scratch comes
+  from a **device-wide pool** (grown on demand: `Device::buildScratchBytes()`; wrapped device 32 MiB minimum; a replaced pool lives until the frame completes / the device dies); a batch larger than the pool is cut into runs with a barrier
+  between them; a barrier precedes every batch (earlier builds reuse the scratch, ray queries still read) and follows it. BLASes no longer own scratch (TLAS keep theirs: they are rebuilt every frame, three of them).
+  `buildBlas(blas)` is a batch of one. `buildTlasAt(tlas, rawAddress, count)` (the instance records in the frame ring) next to `buildTlas(tlas, Buffer, offset, count)`.
+- Compaction: `Device::createSizeQuery(capacity)` (`SizeQuery::read(first, count, sizes*)`, 0 = not available), `CommandList::queryCompactedSizes(query, first, span<AS*>)` (Vulkan: a query pool of
+  `ACCELERATION_STRUCTURE_COMPACTED_SIZE`; DX12: `EmitRaytracingAccelerationStructurePostbuildInfo` into a UAV buffer copied to a readback buffer, `read` valid after `submitAndWait`), `Device::createBlasStorage(bytes)` +
+  `CommandList::compactBlas(dst, src)` (`VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR` / `D3D12_..._COPY_MODE_COMPACT`).
+  **Finding (AMD RX 7900 XTX, Vulkan and D3D12 alike): a BLAS built with both ALLOW_UPDATE and ALLOW_COMPACTION did not compact into a traceable structure (every ray missed, no validation message; the same BLAS traced fine
+  uncompacted).** The RT scene never combines them (static BLASes: compaction only, characters / trees: update only); `rvk_rhitest` uses two BLASes for the two operations.
+- `CommandList::memoryBarrier(srcStages, srcAccess, dstStages, dstAccess)` (one `VkMemoryBarrier2`; DX12 a UAV barrier): shader writes into raw-address memory that builds read; `fillBuffer(buffer, offset, size, value)` (Vulkan
+  `vkCmdFillBuffer`, DX12 `ClearUnorderedAccessViewUint` through an R32_UINT view; later use wants a `bufferBarrier`); `rhi::vulkan::wrapBuffer(device, VkBuffer, address, size, mapped)` = a non-owning buffer over the frame ring
+  (copy source). Vulkan RHI buffers start on 256 bytes when the RT tier is on (instance records need 16: a 128-byte VMA sub-allocation had a 4-byte aligned address and tripped VUID-03715 in the test).
+- GPU timestamps were **not** added: the RT scene's own two-timestamp query only fed a debug number in its 5 s log line; `-PerfFrame` already lists `pass rt.scene` (the log now says so).
+- Verification: `rvk_rhitest --validation`: Vulkan and D3D12 PASS, 0 validation errors (batch of three BLASes with raw addresses and per-build geometry, pooled scratch, compacted sizes read back, compaction, refit moving the
+  geometry 5 units, TLAS from a raw address, buffer fills).
+
 ## 6b. Decisions after the first runs
 
 - **No tiered compilation** (user, 2026-10-30): DXC costs ~40-60 ms per translated shader (the corpus of 2483 takes ~2.5 min at -O1; -O0 ~1.5 min; -O1 and -O3 cost the
@@ -265,13 +287,53 @@ shadows.rt trace 0.959 -> 0.961, gi.screen 1.361 -> 1.337, water.rt 0.820 -> 0.8
 8. `enh/water_rt.*`, `enh/rt_shadows.*` (trace / temporal / spatial), `enh/rt_debug.*` (compute + composite; the probe buffer stays an `AddressBuffer`), `water.wet_shore` (fullscreen blend), the RT skinning compute of `enh/rt_scene.cpp`.
 9. Wrapped acceleration structures (section 6a): TLAS slots shared with `vk::Bindless`.
 
-**Still raw Vulkan (and why):**
-- `enh/rt_scene.cpp` BLAS / TLAS builds: batched `vkCmdBuildAccelerationStructuresKHR` of many BLASes per frame, compaction (`vkCmdCopyAccelerationStructureKHR`, query pool), per-frame TLAS slots, build-time timestamps, instance / record
-  buffers ring-allocated from `Frames`: `rhi::CommandList::buildBlas / buildTlas` build one structure at a time and own their scratch, so the RT scene cannot use it as it is (it would need batched builds, compaction, a
-  timestamp / query API and ring buffers in the RHI). `rt_registry.*` has no Vulkan calls.
-- `enh/water.*` (draw replacer: the sea grid, lakes, rivers; the sea-floor field bake), `enh/shadows.*` (draw replacer: the mask pass), `enh/material_variant.*`, `d3d9/*`: draws inside the engine's own rendering scope with the D3D9
-  state's descriptors need the draw-side vertex / index / state model first.
-- `gi.cpp` / `rt_scene.cpp` / `rt_debug.cpp` buffers (`vk::rt::AddressBuffer`: device-address buffers shared across modules and with the TLAS instance records), `vk/fsr.*`, `vk/framegen.*` (AMD's DLLs record into the command buffer).
+**Migrated, third round (2026-10-30): the RT scene and the buffers shared by device address** (RHI additions: section 6c):
+10. `enh/rt_scene.*`: every BLAS (static: `allowCompaction`; characters / animated trees: `allowUpdate` + `preferFastBuild`, refitted up to 30 times) and the three per-frame TLASes are `rhi::AccelerationStructure`s; the builds are
+    `CommandList::buildBlases` batches (pending BLASes, the characters' refits) and `buildTlasAt` (instance records in the frame ring), compaction = `queryCompactedSizes` / `createBlasStorage` / `compactBlas`, the strip index
+    buffers `rhi::Buffer`s filled from the ring through `wrapBuffer`, the skinning verify buffer a readback `rhi::Buffer`. The renderer's own scratch buffers (static 32 MiB, characters 4 MiB), the query pools, the TLAS slot
+    bookkeeping and the hand-written barriers are gone (the RHI puts the barriers before / after every build; the ones for shader writes -> builds are `memoryBarrier`). The pass's own two GPU timestamps are dropped (see 6c).
+11. `enh/gi.*` (probe / depth / ray buffers: device-memory `rhi::Buffer`s, zeroed with `fillBuffer` + `memoryBarrier`; the diagnostics buffer a readback buffer) and `enh/rt_debug.*` (probe results: readback buffers).
+    `vk::rt::AddressBuffer` is now used by `vk/raytracing.*` (the self-test, `rvk_vktest`) and the Vulkan backend's own acceleration structure storage only.
+
+**Verification of the third round (2026-10-30, RX 7900 XTX, committed build 7f75fda = reference, copy `build\Ref3`).** `rvk_rhitest --validation` PASS on Vulkan and D3D12 (0 validation errors; new check "acceleration structure ops"),
+`rvk_tests` 198 / 198, `rvk_vktest --passes --rhi`, `--rt`, `--skin` PASS. In the game (windowed, `-Validation -SyncValidation`, settings water.ocean=fft, rt.reflections=medium, shadows.enabled + shadows.rt=near, ao, gi; spots sea_cliff /
+beach_sun / lake_jungle / pub_interior / shadow_inland_a; wrapper AND full mode; references of the committed build `out\rhi-migrate\ref3_wrap`, `ref3_full`): no VUID / SYNC / [error] message in either mode, every feature's first-frame line present,
+pictures equal within the run-to-run noise (mean abs difference 0.3 - 7.0 of 255 against 3.1 / 6.4 / 7.8 between two runs of the committed build at beach_sun / sea_cliff / shadow_inland_a; the shadow_inland spot's sky and water
+move between runs). RT scene numbers at the savegame (`rvk_perfsave`, 5 s windows of the hold, `cpuavg.py`): the first-build interval of sea_cliff (not comparable one to one: 278 BLASes / 454k triangles in the new run, 192 / 431k in the first
+interval of the reference): build CPU 7.5 ms per frame against 20.9 ms; steady state pass CPU 0.33 ms (reference 0.34), GPU `pass rt.scene` 0.126 ms (0.131, `-PerfFrame` 24 frames, sea_cliff), CPU per frame at the savegame (lod 2x, 1,500 draws)
+6.5 ms (6.9) without and 7.2 ms (7.8) with shadows.rt + rt.reflections + gi (the windows' spread is +-1 ms: no difference beyond noise); fps at the savegame unchanged.
+
+**Assessment of `src/d3d9` and the replacers (third round, written before any change; the question was what can move onto the RHI without a CPU regression of the hottest path of the renderer).**
+`src/d3d9` is not a pass: it is the D3D9 device model *implemented* on Vulkan, and its Vulkan use is the point of it. What it does per frame at the savegame (lod 2x): ~1,520 draws, 448 pipeline binds, 39 render passes, 3.3 MiB of
+ring, 6.5 ms CPU of which ~2 ms are the draw calls, recorded by two worker threads into secondary command buffers. Per part:
+- **Pipeline creation + cache (`vk::PipelineCache`, `vk/pipeline*.cpp`)** - not movable as it is. It builds pipelines from `VkShaderModule`s that outlive many pipelines (the engine's 2,500 shaders x state combinations: `rhi::Pipeline` takes
+  SPIR-V per pipeline), with per-attachment blend, a stencil format, `VK_EXT_extended_dynamic_state3` blend / write mask, dynamic vertex input, the persistent `VkPipelineCache` file, prewarm threads (`prewarm / prewarmOnce`), a byte-image key
+  and optional graphics pipeline libraries (fast link, optimise in the background; off by default). An RHI version would need a shader-module object, a pipeline description with all of that, a cache / library service and background
+  builds in the interface: all Vulkan-shaped (a D3D12 backend would use `ID3D12PipelineLibrary` and gain none of the dynamic state), a second implementation does not exist and is not planned for the game's draws. It would be an
+  interface with one implementation wrapping the existing class: no gain, a risk to the start-up path (pipelines are built on first use). **Not migrated.**
+- **Draw recording (`draw.cpp` packets, `record.cpp` record threads)** - `rhi::CommandList` is a stateful pass recorder (it binds set 0 at every `bindPipeline`, writes push descriptors lazily, has no secondary command buffers, no
+  indirect state caching). The packets are applied from worker threads into secondary command buffers with their own state tracking (`RecordState`, dynamic state compared per packet, vertex input interned); 448 pipeline binds x one
+  extra `vkCmdBindDescriptorSets` and a second state layer on ~1,500 draws is the cost side, the DX12 equivalent (bundles / parallel lists) does not map. **Not migrated.**
+- **`MeshArena`, the upload ring (`vk::Frames::allocate`), `resources.cpp` uploads** - sub-allocators over one 64 MiB buffer / the frame ring with device addresses handed to shaders and to the RT scene; as `rhi::Buffer` they would be
+  the same single buffers plus a wrapper per access. They are the *frame loop* the RHI defers to (`rhi::vulkan::wrap` takes `vk::Frames`); a backend-neutral ring would be a new RHI feature without a user. **Not migrated.**
+- **Small transfer helpers in `device.cpp` / `resources.cpp`** (the `StretchRect` blit, the `GetRenderTargetData` read-back, texture / buffer uploads): expressible as `blitTexture` / `copyTextureToBuffer` / `copyBuffer` on wrapped objects, but
+  each needs a wrapper per call on a path that is hot on loading screens (texture uploads), for no change in behaviour. Not measured, not migrated: no benefit to weigh against even a small cost.
+- **The draw replacers (`enh/water`, `enh/shadows`, `enh/gbuffer`'s SSAO replacement, `enh/material_variant`)** have **no Vulkan of their own**: they describe a `DrawReplacement` (other shaders, constants, procedural geometry from the
+  frame ring) that the D3D9 model's pipeline cache and packet path execute at the draw's place. The only Vulkan calls left in them are `vk::createShaderModule` / `vkDestroyShaderModule` for their `d3d9::Shader` objects (the
+  model's shader handle), so they move together with the model's pipeline creation or not at all. Nothing of the original item (b) was left to migrate on their own.
+Decision: stop at the assessment (the instruction was to stop where a step is not clean). `src/d3d9`, `vk/pipeline*`, `vk/mesh_arena`, `vk/frames` are the Vulkan-specific implementation of the D3D9 model; the RHI is what the
+renderer's *own* work (passes, acceleration structures, buffers) goes through. A D3D12 renderer for the game's draws would be a second implementation of the D3D9 model next to it, not a change to it.
+
+**Status per source file (2026-10-30, after the third round)**
+
+| files | state |
+|---|---|
+| `enh/debug_view`, `upscale` (prep / exposure / copies), `framegen` (depth / debug / copies), `ocean`, `gbuffer` (GTAO + filter + composite), `gi`, `water_rt`, `rt_shadows`, `rt_debug`, `water.cpp` wet shore, `rt_scene` | migrated (pipelines, recording, buffers, acceleration structures) |
+| `enh/gbuffer` SSAO replacement, `enh/water`, `enh/shadows`, `enh/material_variant` | draw replacers: no Vulkan of their own except the `d3d9::Shader` module handle (follows `d3d9`) |
+| `vk/fsr.*`, `vk/framegen.*`, `vk/fg_swapchain.*` | raw by necessity: AMD's DLLs record into the command buffer / own the swapchain |
+| `vk/raytracing.*` | the self-test (`rvk_vktest`) and the helpers the backend's acceleration structures use |
+| `d3d9/*`, `vk/pipeline*`, `vk/mesh_arena`, `vk/frames`, `vk/swapchain`, `vk/context`, `vk/bindless`, `vk/passes` | the Vulkan implementation of the D3D9 model and the backend's internals (assessment above) |
+| `hal/vulkan/instance.cpp`, `device.cpp` (2 + 6 calls) | capability / format queries, not recording |
 
 - `vk/passes.*` (`PassLayout`, `Transients`) stay as the backend's internals; `Transients::Entry` is still handed out as `vk::Image + slot` and wrapped per pass call (two small allocations;
   cache the wrapper next to the Entry when a pass wraps many images).
