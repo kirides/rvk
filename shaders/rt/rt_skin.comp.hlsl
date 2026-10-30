@@ -32,14 +32,14 @@ struct SkinErr {
 // job[4 j + 3] = (offsets: position | blend weight << 8 | blend indices << 16 | texcoord0 << 24, 0, 0, 0)
 static const uint BONE_COUNT = 66;  // c33 .. c230: 3 b + 3 <= 199 constants after c32
 
-uint4 jobWord(uint64_t table, uint i) { return vk::RawBufferLoad<uint4>(table + 16ull + uint64_t(i) * 16ull, 16); }
+uint4 jobWord(RvkAddr table, uint i) { return rvkRawLoad<uint4, 16>(rvkAddrAdd(table, 16u + i * 16u)); }
 
-float vfloat(uint64_t v, uint byteOffset) { return asfloat(vk::RawBufferLoad<uint>(v + uint64_t(byteOffset), 4)); }
+float vfloat(RvkAddr v, uint byteOffset) { return asfloat(rvkRawLoad<uint, 4>(rvkAddrAdd(v, byteOffset))); }
 
 [numthreads(64, 1, 1)]
 void CSMain(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
-    uint64_t table = rvkAddr(pc.table);
-    uint4 head = vk::RawBufferLoad<uint4>(table, 16);
+    RvkAddr table = rvkAddr(pc.table);
+    uint4 head = rvkRawLoad<uint4, 16>(table);
     uint jobs = head.x;
     uint g = gid.x;
     // the job: the last one whose first chunk is <= g
@@ -52,12 +52,12 @@ void CSMain(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
     uint slot = (g - j2.x) * 64u + lid.x;
     uint slots = j1.z;
     if (slot >= slots) return;
-    uint64_t v = rvkAddr(j0.xy) + uint64_t(slot) * uint64_t(j1.w);
+    RvkAddr v = rvkAddrAdd(rvkAddr(j0.xy), slot * j1.w);
     uint oPos = j3.x & 0xFFu, oBw = (j3.x >> 8) & 0xFFu, oBi = (j3.x >> 16) & 0xFFu, oTc = (j3.x >> 24) & 0xFFu;
     float4 p = float4(vfloat(v, oPos), vfloat(v, oPos + 4u), vfloat(v, oPos + 8u), 1.0);
     float4 bw = float4(vfloat(v, oBw), vfloat(v, oBw + 4u), vfloat(v, oBw + 8u), vfloat(v, oBw + 12u));
-    uint bi = vk::RawBufferLoad<uint>(v + uint64_t(oBi), 4);
-    uint64_t bones = rvkAddr(j0.zw);
+    uint bi = rvkRawLoad<uint, 4>(rvkAddrAdd(v, oBi));
+    RvkAddr bones = rvkAddr(j0.zw);
     // rows of the blended 3x4 matrix (the VS blends c33 / c34 / c35 [3 b])
     float4 r0 = float4(0.0, 0.0, 0.0, 0.0), r1 = float4(0.0, 0.0, 0.0, 0.0), r2 = float4(0.0, 0.0, 0.0, 0.0);
     for (uint k = 0u; k < 4u; ++k) {
@@ -65,29 +65,27 @@ void CSMain(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
         float w = bw[k];
         if (b >= BONE_COUNT || w == 0.0) continue;
         uint c = 1u + 3u * b;  // c33 + 3 b, relative to c32
-        r0 += vk::RawBufferLoad<float4>(bones + uint64_t(c) * 16ull, 16) * w;
-        r1 += vk::RawBufferLoad<float4>(bones + uint64_t(c + 1u) * 16ull, 16) * w;
-        r2 += vk::RawBufferLoad<float4>(bones + uint64_t(c + 2u) * 16ull, 16) * w;
+        r0 += rvkRawLoad<float4, 16>(rvkAddrAdd(bones, c * 16u)) * w;
+        r1 += rvkRawLoad<float4, 16>(rvkAddrAdd(bones, (c + 1u) * 16u)) * w;
+        r2 += rvkRawLoad<float4, 16>(rvkAddrAdd(bones, (c + 2u) * 16u)) * w;
     }
     float3 world = float3(dot(p, r0), dot(p, r1), dot(p, r2));
-    uint64_t o = rvkAddr(j1.xy);  // the capture: a 16-byte header, then float4 v[]
+    RvkAddr o = rvkAddr(j1.xy);  // the capture: a 16-byte header, then float4 v[]
     float4 tc = float4(vfloat(v, oTc), vfloat(v, oTc + 4u), 0.0, 1.0);
     uint2 refAddr = j2.zw;
     if (any(refAddr != uint2(0u, 0u)) && any(head.zw != uint2(0u, 0u))) {
         // verification (debug.rt_skin_verify): against the vertex shader's own result of this draw, where it wrote this slot
-        uint64_t r = rvkAddr(refAddr);
-        float4 rp = vk::RawBufferLoad<float4>(r + 16ull + uint64_t(slot) * 32ull, 16);
-        vk::BufferPointer<SkinErr, 4> e = rvkPtr<SkinErr, 4>(head.zw);
+        RvkAddr r = rvkAddr(refAddr);
+        float4 rp = rvkRwLoad<float4, 16>(rvkAddrAdd(r, 16u + slot * 32u));  // (the capture buffers are written by the vertex shaders: writable views)
+        RvkAddr e = rvkAddr(head.zw);  // SkinErr: maxBits +0, compared +4, missing +8
         if (rp.w == 1.0) {
             float err = length(rp.xyz - world);
-            uint old;
-            InterlockedMax(e.Get().maxBits, asuint(err), old);
-            InterlockedAdd(e.Get().compared, 1u, old);
+            rvkRwAtomicMax(e, asuint(err));
+            rvkRwAtomicAdd(rvkAddrAdd(e, 4u), 1u);
         } else {
-            uint old;
-            InterlockedAdd(e.Get().missing, 1u, old);
+            rvkRwAtomicAdd(rvkAddrAdd(e, 8u), 1u);
         }
     }
-    vk::RawBufferStore<float4>(o + 16ull + uint64_t(slot) * 32ull, float4(world, 1.0), 16);
-    vk::RawBufferStore<float4>(o + 16ull + uint64_t(slot) * 32ull + 16ull, tc, 16);
+    rvkRwStore<float4, 16>(rvkAddrAdd(o, 16u + slot * 32u), float4(world, 1.0));
+    rvkRwStore<float4, 16>(rvkAddrAdd(o, 16u + slot * 32u + 16u), tc);
 }

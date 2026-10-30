@@ -180,9 +180,21 @@ VkPipeline createPassGraphicsPipeline(Context& ctx, VkPipelineLayout layout, con
         ba.dstAlphaBlendFactor = desc.blend.dstAlpha;
         ba.alphaBlendOp = desc.blend.alphaOp;
         ba.colorWriteMask = desc.blend.writeMask;
+        // colour attachments: `color`, then the leading defined entries of `moreColors` (the same blend state on each)
+        VkFormat colors[1 + PassGraphicsDesc::kMoreColors];
+        std::uint32_t colorCount = 0;
+        if (desc.color != VK_FORMAT_UNDEFINED) {
+            colors[colorCount++] = desc.color;
+            for (VkFormat f : desc.moreColors) {
+                if (f == VK_FORMAT_UNDEFINED) break;
+                colors[colorCount++] = f;
+            }
+        }
+        VkPipelineColorBlendAttachmentState blends[1 + PassGraphicsDesc::kMoreColors];
+        for (auto& b : blends) b = ba;
         VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-        cb.attachmentCount = desc.color != VK_FORMAT_UNDEFINED ? 1u : 0u;
-        cb.pAttachments = &ba;
+        cb.attachmentCount = colorCount;
+        cb.pAttachments = blends;
         VkDynamicState dyn[4] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
         VkPipelineDynamicStateCreateInfo dy{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
         dy.dynamicStateCount = 2;
@@ -190,8 +202,8 @@ VkPipeline createPassGraphicsPipeline(Context& ctx, VkPipelineLayout layout, con
         if (desc.dynamicVertexStride) dyn[dy.dynamicStateCount++] = VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE;
         dy.pDynamicStates = dyn;
         VkPipelineRenderingCreateInfo ri{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
-        ri.colorAttachmentCount = desc.color != VK_FORMAT_UNDEFINED ? 1u : 0u;
-        ri.pColorAttachmentFormats = &desc.color;
+        ri.colorAttachmentCount = colorCount;
+        ri.pColorAttachmentFormats = colors;
         ri.depthAttachmentFormat = desc.depth;
         ri.stencilAttachmentFormat = desc.stencil;
         VkGraphicsPipelineCreateInfo ci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &ri};

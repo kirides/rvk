@@ -40,6 +40,7 @@ struct Result {
     std::vector<std::uint8_t> bytes;   // DXIL container (Target::Dxil)
     std::string log;                   // compiler messages (errors on failure, warnings otherwise)
     bool fromCache = false;
+    bool dxilSigned = false;           // Target::Dxil: the container carries a non-zero validator digest (dxil.dll signed it)
     bool ok() const { return !words.empty() || !bytes.empty(); }
 };
 
@@ -68,6 +69,13 @@ Result compile(const Request& request);
 // The argument list compile() hands DXC for a request (after the source file name): the shared set both backends and the offline
 // checks use; exposed for tools/tests (rvk_shadertool dxc, the dxc.exe cross check).
 std::vector<std::string> arguments(const Request& request);
+
+// The resource contract of the DX12 backend's fixed root signature (rhi/d3d12): a compiled DXIL module may bind only b0 space0 (the push constants,
+// <= 128 bytes = the root constants), b8 space1 (the root CBV) and u0..u7 space1 (the storage image table); every other resource must come from the
+// bindless heaps (ResourceDescriptorHeap / SamplerDescriptorHeap). Returns a description of every violation, empty when the module fits.
+std::string dxilContractViolation(std::span<const std::uint8_t> dxil);
+// the size in bytes of the push constant block (the constant buffer at b0 space0) of a DXIL module, 0 without one
+std::uint32_t dxilPushBytes(std::span<const std::uint8_t> dxil);
 
 // Bump when the argument set or the cache layout changes (part of every cache key)
 inline constexpr std::uint32_t kArgsRevision = 4;

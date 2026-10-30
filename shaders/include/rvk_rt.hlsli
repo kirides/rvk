@@ -94,7 +94,7 @@ bool rvkRtValid(RvkFrame f) { return (f.rtInfo.z & RVK_FRAME_RT_VALID) != 0u && 
 #define rvkRtTlas(f) RVK_TLAS((f).rtInfo.w)
 
 RvkRtRecord rvkRtRecord(RvkFrame f, uint index) {
-    RvkRtRecordData d = vk::BufferPointer<RvkRtRecordData, 16>(rvkAddr(f.rtScene.zw) + uint64_t(index) * 112ull).Get();
+    RvkRtRecordData d = rvkPtr<RvkRtRecordData, 16>(rvkPairAdd(f.rtScene.zw, index * 112u)).Get();
     RvkRtRecord r;
     r.vertices = d.w0.xy;
     r.indices = d.w0.zw;
@@ -118,22 +118,22 @@ RvkRtRecord rvkRtRecord(RvkFrame f, uint index) {
 }
 
 // 4-byte aligned word at a device address
-uint rvkLoadWord(uint64_t a) { return vk::RawBufferLoad<uint>(a, 4); }
+uint rvkLoadWord(RvkAddr a) { return rvkRawLoad<uint, 4>(a); }
 // a 16-bit value at a 2-byte aligned address
-uint rvkLoadHalfWord(uint64_t a) {
-    uint w = rvkLoadWord(a & ~3ull);
-    return (a & 2ull) != 0ull ? w >> 16 : w & 0xFFFFu;
+uint rvkLoadHalfWord(RvkAddr a) {
+    uint w = rvkLoadWord(rvkAddrAlign4(a));
+    return (rvkAddrLow(a) & 2u) != 0u ? w >> 16 : w & 0xFFFFu;
 }
 
 // the three vertex indices of a triangle of the record's draw (triangle list)
 uint3 rvkRtTriangle(RvkRtRecord r, uint primitive) {
-    uint64_t base = rvkAddr(r.indices);
+    RvkAddr base = rvkAddr(r.indices);
     if ((r.flags & RVK_RT_INDEX32) != 0u) {
-        uint64_t a = base + uint64_t(primitive) * 12ull;
-        return uint3(rvkLoadWord(a), rvkLoadWord(a + 4ull), rvkLoadWord(a + 8ull));
+        RvkAddr a = rvkAddrAdd(base, primitive * 12u);
+        return uint3(rvkLoadWord(a), rvkLoadWord(rvkAddrAdd(a, 4u)), rvkLoadWord(rvkAddrAdd(a, 8u)));
     }
-    uint64_t a = base + uint64_t(primitive) * 6ull;
-    return uint3(rvkLoadHalfWord(a), rvkLoadHalfWord(a + 2ull), rvkLoadHalfWord(a + 4ull));
+    RvkAddr a = rvkAddrAdd(base, primitive * 6u);
+    return uint3(rvkLoadHalfWord(a), rvkLoadHalfWord(rvkAddrAdd(a, 2u)), rvkLoadHalfWord(rvkAddrAdd(a, 4u)));
 }
 
 float rvkSignExtend16(uint v) { return float(int(v << 16) >> 16); }
@@ -146,28 +146,28 @@ float2 rvkUnpackHalf2x16(uint w) { return float2(f16tof32(w & 0xFFFFu), f16tof32
 float4 rvkRtAttribute(RvkRtRecord r, uint vertex, uint attribWord) {
     if (attribWord == RVK_RT_ABSENT) return float4(0.0, 0.0, 0.0, 1.0);
     uint type = attribWord >> 16;
-    uint64_t a = rvkAddr(r.vertices) + uint64_t(vertex) * uint64_t(r.stride) + uint64_t(attribWord & 0xFFFFu);
+    RvkAddr a = rvkAddrAdd(rvkAddr(r.vertices), vertex * r.stride + (attribWord & 0xFFFFu));
     uint w0 = rvkLoadWord(a);
     switch (type) {
     case RVK_DECL_FLOAT1: return float4(asfloat(w0), 0.0, 0.0, 1.0);
-    case RVK_DECL_FLOAT2: return float4(asfloat(w0), asfloat(rvkLoadWord(a + 4ull)), 0.0, 1.0);
-    case RVK_DECL_FLOAT3: return float4(asfloat(w0), asfloat(rvkLoadWord(a + 4ull)), asfloat(rvkLoadWord(a + 8ull)), 1.0);
+    case RVK_DECL_FLOAT2: return float4(asfloat(w0), asfloat(rvkLoadWord(rvkAddrAdd(a, 4u))), 0.0, 1.0);
+    case RVK_DECL_FLOAT3: return float4(asfloat(w0), asfloat(rvkLoadWord(rvkAddrAdd(a, 4u))), asfloat(rvkLoadWord(rvkAddrAdd(a, 8u))), 1.0);
     case RVK_DECL_FLOAT4:
-        return float4(asfloat(w0), asfloat(rvkLoadWord(a + 4ull)), asfloat(rvkLoadWord(a + 8ull)), asfloat(rvkLoadWord(a + 12ull)));
+        return float4(asfloat(w0), asfloat(rvkLoadWord(rvkAddrAdd(a, 4u))), asfloat(rvkLoadWord(rvkAddrAdd(a, 8u))), asfloat(rvkLoadWord(rvkAddrAdd(a, 12u))));
     case RVK_DECL_D3DCOLOR: return rvkUnpackUnorm4x8(w0).zyxw;  // BGRA bytes -> RGBA
     case RVK_DECL_UBYTE4: return float4(uint4(w0, w0 >> 8, w0 >> 16, w0 >> 24) & 0xFFu);
     case RVK_DECL_SHORT2: return float4(rvkSignExtend16(w0), rvkSignExtend16(w0 >> 16), 0.0, 1.0);
     case RVK_DECL_SHORT4: {
-        uint w1 = rvkLoadWord(a + 4ull);
+        uint w1 = rvkLoadWord(rvkAddrAdd(a, 4u));
         return float4(rvkSignExtend16(w0), rvkSignExtend16(w0 >> 16), rvkSignExtend16(w1), rvkSignExtend16(w1 >> 16));
     }
     case RVK_DECL_UBYTE4N: return rvkUnpackUnorm4x8(w0);
     case RVK_DECL_SHORT2N: return float4(rvkUnpackSnorm2x16(w0), 0.0, 1.0);
-    case RVK_DECL_SHORT4N: return float4(rvkUnpackSnorm2x16(w0), rvkUnpackSnorm2x16(rvkLoadWord(a + 4ull)));
+    case RVK_DECL_SHORT4N: return float4(rvkUnpackSnorm2x16(w0), rvkUnpackSnorm2x16(rvkLoadWord(rvkAddrAdd(a, 4u))));
     case RVK_DECL_USHORT2N: return float4(rvkUnpackUnorm2x16(w0), 0.0, 1.0);
-    case RVK_DECL_USHORT4N: return float4(rvkUnpackUnorm2x16(w0), rvkUnpackUnorm2x16(rvkLoadWord(a + 4ull)));
+    case RVK_DECL_USHORT4N: return float4(rvkUnpackUnorm2x16(w0), rvkUnpackUnorm2x16(rvkLoadWord(rvkAddrAdd(a, 4u))));
     case RVK_DECL_FLOAT16_2: return float4(rvkUnpackHalf2x16(w0), 0.0, 1.0);
-    case RVK_DECL_FLOAT16_4: return float4(rvkUnpackHalf2x16(w0), rvkUnpackHalf2x16(rvkLoadWord(a + 4ull)));
+    case RVK_DECL_FLOAT16_4: return float4(rvkUnpackHalf2x16(w0), rvkUnpackHalf2x16(rvkLoadWord(rvkAddrAdd(a, 4u))));
     default: return float4(0.0, 0.0, 0.0, 1.0);
     }
 }
@@ -216,11 +216,10 @@ float3 rvkRtWorldPosition(float3x4 objectToWorld, float3 p) { return mul(objectT
 // a segmented record (a cascade's merged range of a level mesh): the material of the segment holding `primitive`
 void rvkRtApplySegment(inout RvkRtRecord r, uint primitive) {
     if ((r.flags & RVK_RT_SEGMENTED) == 0u || r.segmentCount == 0u) return;
-    uint64_t table = rvkAddr(r.segments);
     uint lo = 0u, hi = r.segmentCount;
     for (int i = 0; i < 16 && lo < hi; ++i) {
         uint mid = (lo + hi) >> 1;
-        RvkRtSegmentData s = vk::BufferPointer<RvkRtSegmentData, 16>(table + uint64_t(mid) * 64ull).Get();
+        RvkRtSegmentData s = rvkPtr<RvkRtSegmentData, 16>(rvkPairAdd(r.segments, mid * 64u)).Get();
         uint firstPrimitive = s.w0.x, primitiveCount = s.w0.y;
         if (primitive < firstPrimitive) {
             hi = mid;

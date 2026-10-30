@@ -25,6 +25,6 @@ struct ShadowBlock {
                          // reversed-depth remap Device::depthRemap (z' = z + x + y at z = w = 1; 0 when the depth is not reversed)
 };
 
-typedef vk::BufferPointer<ShadowBlock, 16> ShadowPtr;
+typedef RVK_REF(ShadowBlock) ShadowPtr;
 
 ShadowPtr rvkShadowBlock() { return rvkPtr<ShadowBlock, 16>(pc.draw); }

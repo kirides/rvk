@@ -536,7 +536,7 @@ public:
         dsvInc_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
         srvAlloc_.limit = kHeapSize - kUavRing;
         samplerAlloc_.limit = kSamplerHeapSize;
-        // entry 0 of the texture heap: a null SRV that reads (0, 0, 0, 1) (the Vulkan side's 1x1 default texture)
+        // entry 0 of the texture heap: a null SRV until the default texture below exists
         {
             D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
             sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -551,6 +551,29 @@ public:
             device_->CreateSampler(&sm0, samplerCpu(0));
         }
         if (!createRootSignature()) return false;
+        // Entry 0 must READ (0, 0, 0, 1) like the Vulkan side's 1x1 default texture: a null descriptor does not (AMD returns (0, 0, 0, 0) whatever the component
+        // mapping says: a shadow mask sampled from "no texture" shadowed everything). So entry 0 becomes a copy of the SRV of a real 1x1 opaque black texture.
+        {
+            defaultTexture_ = createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, {1, 1, 1}, 1, 1, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, "rhi default texture"});
+            auto texel = createBuffer({512, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, Memory::Upload, "rhi default texel"});
+            if (!defaultTexture_ || !texel) {
+                spdlog::error("d3d12: default texture");
+                return false;
+            }
+            const std::uint8_t black[4] = {0, 0, 0, 255};
+            std::memcpy(texel->map(), black, 4);
+            submitAndWait([&](CommandList& cl) {
+                cl.transition(*defaultTexture_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+                cl.copyBufferToTexture(*defaultTexture_, *texel, 0);
+                cl.transition(*defaultTexture_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            });
+            D3D12_SHADER_RESOURCE_VIEW_DESC sd{};  // (the shader-visible heap is write only: no CopyDescriptors from it, a view of its own)
+            sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sd.Texture2D.MipLevels = 1;
+            device_->CreateShaderResourceView(static_cast<D3DTexture&>(*defaultTexture_).resource(), &sd, srvCpu(0));
+        }
         caps_.backend = Backend::D3D12;
         caps_.bindless = true;
         caps_.heapSize = kHeapSize;
@@ -857,6 +880,7 @@ private:
     std::uint32_t rtvNext_ = 0, dsvNext_ = 0, uavTable_ = 0;
     DeviceCaps caps_;
     std::atomic<std::uint32_t> errors_{0};
+    std::unique_ptr<Texture> defaultTexture_;  // the texture behind heap entry 0 (declared last: released first)
 };
 
 // ---- resources --------------------------------------------------------------------------------------------------------------

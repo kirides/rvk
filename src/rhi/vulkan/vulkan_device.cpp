@@ -442,6 +442,7 @@ public:
         g.vs = desc.vs.spirv;
         g.fs = desc.ps.spirv;
         g.color = desc.colorFormats[0];
+        for (std::size_t i = 0; i < g.moreColors.size(); ++i) g.moreColors[i] = desc.colorFormats[i + 1];
         g.blend.enable = desc.blend.blendEnable;
         g.blend.srcColor = desc.blend.srcColorBlendFactor;
         g.blend.dstColor = desc.blend.dstColorBlendFactor;

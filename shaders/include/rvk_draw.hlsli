@@ -26,18 +26,30 @@ struct RvkDrawData {
 // Push constants of draws (112 bytes, vertex + fragment). drawId: the draw's index in the frame; flags: RVK_DRAW_* below. prevVs: a vertex
 // capture address (draw variants; 0 = none). vs / ps: the draw's one full StageConsts (legacy draws; 0 for split draws). vsw / psw: the float
 // constants by register window (abi.h kVsWindowFirst / kPsWindowFirst)
+// (pointers are uint2 pairs: a struct member of a DX12 root-constant block would start on a 16-byte boundary, and so would the elements of an array
+// of uint2: the windows are four members each; rvkPtr<T, A>(pair) / rvkLoadFrame(pc.frame) make the references)
 struct RvkDrawPush {
     uint2 vs;
     uint2 ps;
     uint2 draw;   // a replacer's own block (water, shadow mask) can live here instead of a DrawBlock
-    RVK_REF(RvkFrameData) frame;
+    uint2 frame;  // the FrameBlock (RvkFrameData)
     uint2 prevVs;
     uint drawId;
     uint flags;
-    uint2 vsw[4];
-    uint2 psw[4];
+    uint2 vsw0;
+    uint2 vsw1;
+    uint2 vsw2;
+    uint2 vsw3;
+    uint2 psw0;
+    uint2 psw1;
+    uint2 psw2;
+    uint2 psw3;
 };
 RVK_PUSH(RvkDrawPush, pc);
+
+// the window block of window index w (a constant after folding in every shader that reads a constant register)
+uint2 rvkVsWin(uint w) { return w == 0u ? pc.vsw0 : w == 1u ? pc.vsw1 : w == 2u ? pc.vsw2 : pc.vsw3; }
+uint2 rvkPsWin(uint w) { return w == 0u ? pc.psw0 : w == 1u ? pc.psw1 : w == 2u ? pc.psw2 : pc.psw3; }
 
 // RvkDrawPush.flags: bits 0-7 the draw kind (d3d9/draws.h Kind), 8-11 the pass (scene.h Pass), 12-15 the view (scene.h View), 16.. feature bits
 static const uint RVK_DRAW_KIND_MASK = 0xffu;
@@ -45,14 +57,12 @@ static const uint RVK_DRAW_PASS_SHIFT = 8u;
 static const uint RVK_DRAW_VIEW_SHIFT = 12u;
 static const uint RVK_DRAW_TINTED = 0x10000u;
 
-typedef vk::BufferPointer<RvkStageData, 16> RvkStagePtr;
-typedef vk::BufferPointer<RvkDrawData, 16> RvkDrawPtr;
-
 // float constant register n of the vertex / pixel stage (n: an int / uint expression; a constant folds to one window)
 #define RVK_VS_WIN(n) ((uint(n)) < 12u ? 0 : (uint(n)) < 31u ? 1 : (uint(n)) < 232u ? 2 : 3)
 #define RVK_PS_WIN(n) ((uint(n)) < 5u ? 0 : (uint(n)) < 6u ? 1 : (uint(n)) < 14u ? 2 : 3)
-#define RVK_VSC(n) rvkPtr<RvkStageData, 16>(pc.vsw[RVK_VS_WIN(n)]).Get().c[n]
-#define RVK_PSC(n) rvkPtr<RvkStageData, 16>(pc.psw[RVK_PS_WIN(n)]).Get().c[n]
+// (offset of c[n] in StageConsts = n * 16: a float4 load from the window's block)
+#define RVK_VSC(n) rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvkVsWin(RVK_VS_WIN(n))), uint(n) * 16u))
+#define RVK_PSC(n) rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvkPsWin(RVK_PS_WIN(n))), uint(n) * 16u))
 
 // the draw's DrawBlock (not for replacers that put their own block in pc.draw)
 RvkDrawData rvkLoadDraw() { return rvkPtr<RvkDrawData, 16>(pc.draw).Get(); }

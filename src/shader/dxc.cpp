@@ -21,6 +21,7 @@
 #include <wrl/client.h>
 
 #include <directx-dxc/dxcapi.h>
+#include <directx-dxc/d3d12shader.h>
 
 #include "shader/embedded.h"
 
@@ -393,6 +394,10 @@ std::vector<std::string> arguments(const Request& r) {
                            "-fspv-extension=SPV_KHR_ray_query", "-fspv-extension=SPV_EXT_descriptor_indexing",
                            "-fspv-extension=SPV_KHR_physical_storage_buffer", "-fspv-extension=SPV_KHR_shader_draw_parameters"});
     }
+    if (r.target == Target::Dxil) {
+        // the sources carry [[vk::...]] attributes (locations, bindings, image formats, push constants): meaningless for DXIL, DXC ignores them
+        a.push_back("-Wno-ignored-attributes");
+    }
     if (r.debugInfo) {
         a.insert(a.end(), {"-Zi", "-Od"});
         if (r.target == Target::Spirv) a.insert(a.end(), {"-fspv-debug=file", "-fspv-debug=source", "-fspv-debug=line"});
@@ -433,6 +438,9 @@ Result compile(const Request& request) {
                 std::memcpy(result.words.data(), payload.data(), result.words.size() * 4);
             } else {
                 result.bytes = std::move(payload);
+                if (result.bytes.size() >= 20 && std::memcmp(result.bytes.data(), "DXBC", 4) == 0) {
+                    for (int i = 4; i < 20; ++i) result.dxilSigned = result.dxilSigned || result.bytes[static_cast<std::size_t>(i)] != 0;
+                }
             }
             result.fromCache = result.ok();
             if (result.fromCache) return result;
@@ -487,9 +495,86 @@ Result compile(const Request& request) {
         std::memcpy(result.words.data(), data, size);
     } else {
         result.bytes.assign(data, data + size);
+        // DXBC container: 'DXBC', 16 bytes of digest (all zero = not signed: dxil.dll was not found next to dxcompiler.dll)
+        if (size >= 20 && std::memcmp(data, "DXBC", 4) == 0) {
+            for (int i = 4; i < 20; ++i) result.dxilSigned = result.dxilSigned || data[i] != 0;
+        }
     }
     if (!cacheFile.empty()) storeCache(cacheFile, handler->includes(), data, size);
     return result;
+}
+
+std::uint32_t dxilPushBytes(std::span<const std::uint8_t> dxil) {
+    Library& lib = library();
+    if (!lib.ok) return 0;
+    ComPtr<IDxcUtils> utils;
+    ComPtr<IDxcContainerReflection> refl;
+    ComPtr<IDxcBlobEncoding> blob;
+    UINT32 part = 0;
+    ComPtr<ID3D12ShaderReflection> sr;
+    if (FAILED(lib.create(CLSID_DxcUtils, IID_PPV_ARGS(&utils))) || FAILED(lib.create(CLSID_DxcContainerReflection, IID_PPV_ARGS(&refl))) ||
+        FAILED(utils->CreateBlob(dxil.data(), static_cast<UINT32>(dxil.size()), DXC_CP_ACP, &blob)) || FAILED(refl->Load(blob.Get())) ||
+        FAILED(refl->FindFirstPartKind(DXC_PART_DXIL, &part)) || FAILED(refl->GetPartReflection(part, IID_PPV_ARGS(&sr)))) {
+        return 0;
+    }
+    D3D12_SHADER_DESC desc{};
+    sr->GetDesc(&desc);
+    for (UINT i = 0; i < desc.BoundResources; ++i) {
+        D3D12_SHADER_INPUT_BIND_DESC b{};
+        sr->GetResourceBindingDesc(i, &b);
+        if (b.Type == D3D_SIT_CBUFFER && b.BindPoint == 0 && b.Space == 0) {
+            D3D12_SHADER_BUFFER_DESC cd{};
+            if (ID3D12ShaderReflectionConstantBuffer* cb = sr->GetConstantBufferByName(b.Name); cb != nullptr && SUCCEEDED(cb->GetDesc(&cd))) return cd.Size;
+        }
+    }
+    return 0;
+}
+
+std::string dxilContractViolation(std::span<const std::uint8_t> dxil) {
+    Library& lib = library();
+    if (!lib.ok) return "DXC unavailable";
+    ComPtr<IDxcUtils> utils;
+    ComPtr<IDxcContainerReflection> refl;
+    if (FAILED(lib.create(CLSID_DxcUtils, IID_PPV_ARGS(&utils))) || FAILED(lib.create(CLSID_DxcContainerReflection, IID_PPV_ARGS(&refl)))) {
+        return "DxcContainerReflection unavailable";
+    }
+    ComPtr<IDxcBlobEncoding> blob;
+    if (FAILED(utils->CreateBlob(dxil.data(), static_cast<UINT32>(dxil.size()), DXC_CP_ACP, &blob))) return "cannot wrap the DXIL";
+    if (FAILED(refl->Load(blob.Get()))) return "not a DXIL container";
+    UINT32 part = 0;
+    if (FAILED(refl->FindFirstPartKind(DXC_PART_DXIL, &part))) return "no DXIL part";
+    ComPtr<ID3D12ShaderReflection> sr;
+    if (FAILED(refl->GetPartReflection(part, IID_PPV_ARGS(&sr)))) return "no shader reflection";
+    D3D12_SHADER_DESC desc{};
+    sr->GetDesc(&desc);
+    std::string out;
+    for (UINT i = 0; i < desc.BoundResources; ++i) {
+        D3D12_SHADER_INPUT_BIND_DESC b{};
+        sr->GetResourceBindingDesc(i, &b);
+        const std::string what = std::format("{} (type {}) at register {} space {}", b.Name ? b.Name : "?", static_cast<int>(b.Type), b.BindPoint, b.Space);
+        bool ok = false;
+        switch (b.Type) {
+        case D3D_SIT_CBUFFER:
+            if (b.BindPoint == 0 && b.Space == 0) {  // the push constants = the root constants (32 DWORDs)
+                ID3D12ShaderReflectionConstantBuffer* cb = sr->GetConstantBufferByName(b.Name);
+                D3D12_SHADER_BUFFER_DESC cd{};
+                if (cb && SUCCEEDED(cb->GetDesc(&cd)) && cd.Size > 128) {
+                    out += std::format("push constants of {} bytes (root constants hold 128); ", cd.Size);
+                    continue;
+                }
+                ok = std::string_view(b.Name ? b.Name : "") != "$Globals";
+            } else {
+                ok = b.BindPoint == 8 && b.Space == 1;  // the root CBV
+            }
+            break;
+        case D3D_SIT_UAV_RWTYPED:
+            ok = b.BindPoint < 8 && b.Space == 1;  // the storage image table u0..u7
+            break;
+        default: break;  // everything else comes from the heaps (SM 6.6 ResourceDescriptorHeap): a bound SRV / sampler / buffer UAV has no root parameter
+        }
+        if (!ok) out += what + "; ";
+    }
+    return out;
 }
 
 }  // namespace rvk::shader::dxc

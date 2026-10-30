@@ -9,6 +9,8 @@
 //   textures   cube + 3D + mip chain + array layers sampled through the heap (SampleLevel / Load), per-mip / per-layer storage and render target views
 //   buffers    read-write buffer references (RVK_BUF_LOAD / STORE / ADD), atomics from 1000 threads
 //   vertex     vertex + index buffers (two bindings, one per instance), drawIndexed, drawIndexedIndirectCount with a count smaller than maxDraws
+//   parity     production shaders through the RHI (tools/rhitest/parity.cpp): a translated D3D9 draw, ubershader draws, the GI lookup + RT record fetch, compared with
+//              the CPU and between the two backends (docs/research/hlsl-rhi.md "DXIL parity (S1)")
 //   ray query  a BLAS + a two-instance TLAS, inline ray queries (the scene and the expected pixels of src/vk/raytracing.cpp selfTest)
 // A check SKIPs (with the reason) where a backend lacks the capability (DeviceCaps::drawIndirectCount / rayQuery); SKIP when a backend is
 // unavailable (a DX12 device without SM 6.6 bindless); exit 1 on any mismatch.
@@ -37,6 +39,10 @@
 #include "rhi/rhi.h"
 #include "shader/abi.h"
 #include "shader/dxc.h"
+
+namespace rvk::parity {
+int run(rhi::Device& dev);  // tools/rhitest/parity.cpp
+}
 
 using namespace rvk;
 
@@ -1160,6 +1166,7 @@ bool runBackend(rhi::Backend backend, bool validation, const Shaders& sh) {
     testRayQuery(*dev, sh);
     testAccelOps(*dev, sh);
     testTextureOps(*dev, sh);
+    failures += parity::run(*dev);
     check(dev->validationErrors() == 0, std::format("{} validation error(s)", dev->validationErrors()));
     std::printf("[%s] %s\n", rhi::backendName(backend), failures == before ? "PASS" : "FAIL");
     return failures == before;

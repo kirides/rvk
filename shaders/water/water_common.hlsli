@@ -76,7 +76,7 @@ static const uint WATER_MODEL_SWAMP = 3u;  // Special_Water_Swamp: 2 normal maps
 static const uint WATER_MODEL_RIVER = 4u;  // Special_Water_River: 2 normal maps, whitewater diffuse blend, sky cube
 
 // a pointer to the block (GLSL: the WaterBlock buffer reference); read members through w.Get().member
-typedef vk::BufferPointer<WaterBlockData, 16> WaterBlock;
+typedef RVK_REF(WaterBlockData) WaterBlock;
 
 WaterBlock waterBlock() { return rvkPtr<WaterBlockData, 16>(pc.draw); }
 
@@ -86,10 +86,10 @@ uint waterSmpSlot(WaterBlock w, uint s) { return w.Get().smp[s >> 2][s & 3u]; }
 
 // the cube map sampled through the bindless heap (GLSL: texture(samplerCube(tCube[nonuniformEXT(t)], samp[nonuniformEXT(s)]), d))
 float4 waterSampleCube(uint tex, uint smp, float3 d) {
-    return g_tCube[NonUniformResourceIndex(tex)].Sample(g_samp[NonUniformResourceIndex(smp)], d);
+    return RVK_TEXCUBE(tex).Sample(RVK_SAMP(smp), d);
 }
 float4 waterSampleCubeLod(uint tex, uint smp, float3 d, float lod) {
-    return g_tCube[NonUniformResourceIndex(tex)].SampleLevel(g_samp[NonUniformResourceIndex(smp)], d, lod);
+    return RVK_TEXCUBE(tex).SampleLevel(RVK_SAMP(smp), d, lod);
 }
 
 // ---- the open sea's waves (Gerstner sum; FFT cascades are M8) ------------------------------------------------------------

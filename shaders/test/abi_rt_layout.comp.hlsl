@@ -8,8 +8,8 @@
 [numthreads(1, 1, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
     RvkFrame f = rvkLoadFrame(pc.frame);
-    RvkRtRecordData d = vk::BufferPointer<RvkRtRecordData, 16>(rvkAddr(f.rtScene.zw)).Get();
-    RvkRtSegmentData s = vk::BufferPointer<RvkRtSegmentData, 16>(rvkAddr(d.w6.xy)).Get();
+    RvkRtRecordData d = rvkPtr<RvkRtRecordData, 16>(f.rtScene.zw).Get();
+    RvkRtSegmentData s = rvkPtr<RvkRtSegmentData, 16>(d.w6.xy).Get();
     uint v = pc.passId + pc.passFlags + pc.depthTex + pc.width + pc.height + pc.srcTex + pc.srcSampler + pc.mode + pc.probes.x +
              d.w0.x + d.w1.x + d.w2.x + d.w3.x + d.uvMap0.x + d.uvMap1.w + d.w6.x +
              s.w0.x + s.w1.x + s.uvMap0.x + s.uvMap1.w + f.rtScene.x + f.rtInfo.y;

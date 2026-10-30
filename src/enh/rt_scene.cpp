@@ -1190,9 +1190,9 @@ bool RtScene::captureOptions(const d3d9::Shader& s, shader::TranslateOptions& o)
         "    {{\n"
         "        uint2 rvk_capAddr = pc.prevVs;\n"
         "        if (any(rvk_capAddr != uint2(0u, 0u))) {{\n"
-        "            uint64_t rvk_cap = rvkAddr(rvk_capAddr);\n"
+        "            RvkAddr rvk_cap = rvkAddr(rvk_capAddr);\n"
         "            int rvk_slot = int(rvk_in.rvk_vertexId) - int(rvk_draw.alpha.w);\n"
-        "            uint4 rvk_info = vk::RawBufferLoad<uint4>(rvk_cap, 16);\n"
+        "            uint4 rvk_info = rvkRwLoad<uint4, 16>(rvk_cap);\n"
         "            uint rvk_slots = rvk_info.x & 0x7FFFFFFFu;\n"
         "            // the main view: the clip position back to the world; a cascade's view (bit 31 of the header's slots): the operand the\n"
         "            // shader multiplied with its view-projection\n"
@@ -1200,11 +1200,11 @@ bool RtScene::captureOptions(const d3d9::Shader& s, shader::TranslateOptions& o)
         "            if (rvk_slot >= 0 && uint(rvk_slot) < rvk_slots && abs(rvk_w.w) > 1e-20) {{\n"
         "                float3 rvk_world = rvk_w.xyz / rvk_w.w;\n"
         "                uint rvk_at = rvk_in.rvk_instanceId * rvk_slots + uint(rvk_slot);  // instanced draws: one run of slots per instance\n"
-        "                vk::RawBufferStore<float4>(rvk_cap + 16ull + uint64_t(rvk_at * 2u) * 16ull, float4(rvk_world, 1.0), 16);\n"
-        "                vk::RawBufferStore<float4>(rvk_cap + 16ull + uint64_t(rvk_at * 2u + 1u) * 16ull, {}, 16);\n"
+        "                rvkRwStore<float4, 16>(rvkAddrAdd(rvk_cap, 16u + rvk_at * 32u), float4(rvk_world, 1.0));\n"
+        "                rvkRwStore<float4, 16>(rvkAddrAdd(rvk_cap, 16u + rvk_at * 32u + 16u), {});\n"
         "                rvk_out.rvk_prevWorld = float4(rvk_world, 0.0);\n"
         "                if (any(rvk_info.yz != uint2(0u, 0u)) && uint(rvk_slot) < rvk_info.w) {{\n"
-        "                    float4 rvk_prev = vk::RawBufferLoad<float4>(rvkAddr(rvk_info.yz) + 16ull + uint64_t(rvk_slot * 2) * 16ull, 16);\n"
+        "                    float4 rvk_prev = rvkRwLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvk_info.yz), 16u + uint(rvk_slot) * 32u));\n"
         "                    if (rvk_prev.w == 1.0) rvk_out.rvk_prevWorld = float4(rvk_prev.xyz, 1.0);\n"
         "                }}\n"
         "            }}\n"
@@ -1237,7 +1237,7 @@ void RtScene::setDynamic(const void* consumer, bool on) {
     dynamic_ = want;
     if (want) {
         if (!captureRegistered_) {
-            dev_.setVariantProvider(d3d9::VariantSlot::Capture, {"cap5", captureOptions});
+            dev_.setVariantProvider(d3d9::VariantSlot::Capture, {"cap6", captureOptions});
             captureRegistered_ = true;
         }
         spdlog::info("rt: scene: characters on (skinned solid draws captured each frame)");

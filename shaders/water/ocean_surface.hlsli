@@ -110,8 +110,8 @@ FftSample fftSamplePixel(WaterBlock w, float2 xz, float4 wt, out float lostVar, 
             float4 der = rvkSample2D(w.Get().fftDeriv[c], w.Get().fftInfo.z, uv);
             float4 disp = rvkSample2D(w.Get().fftDisp[c], w.Get().fftInfo.z, uv);
             // textureQueryLod(...).y: the unclamped level of detail
-            float lod = g_t2D[NonUniformResourceIndex(w.Get().fftDeriv[c])].CalculateLevelOfDetailUnclamped(
-                g_samp[NonUniformResourceIndex(w.Get().fftInfo.z)], uv);
+            float lod = RVK_TEX2D(w.Get().fftDeriv[c]).CalculateLevelOfDetailUnclamped(
+                RVK_SAMP(w.Get().fftInfo.z), uv);
             lostVar += w.Get().fftSlopeVar[c] * wt[c] * wt[c] * clamp(lod / octaves, 0.0, 1.0);
             dv += der * wt[c];
             if (c < 3u) s.foam = max(s.foam, disp.w * wt[c]);

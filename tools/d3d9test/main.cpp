@@ -104,7 +104,9 @@ std::shared_ptr<Shader> shaderFrom(Device& dev, const char* src) {
         std::printf("assemble failed: %s\n", err.c_str());
         return nullptr;
     }
-    return dev.createShader(tokens);
+    auto sh = dev.createShader(tokens);
+    if (sh) sh->wait();  // (the module is compiled on the shader workers; a draw whose shader has none yet is skipped)
+    return sh;
 }
 
 // a quad in D3D9 clip space covering [x0,x1] x [y0,y1] (y up), as a triangle list in clockwise screen order

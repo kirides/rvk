@@ -18,6 +18,11 @@ std::span<const std::uint32_t> spirv(std::string_view name);
 // the same with preprocessor defines ("NAME=VALUE;NAME2=VALUE2"): shaders that are one module per size / mode (the ocean FFT). Cached by (name, defines).
 std::span<const std::uint32_t> spirvVariant(std::string_view name, std::string_view defines);
 
+// The DXIL (SM 6.6, signed by dxil.dll next to dxcompiler.dll) of the same HLSL text for the DX12 backend: same names, defines and caching (shader/dxc disk cache, the process's map;
+// the spans stay valid for the process lifetime). Every shader of the renderer compiles to both (docs/research/hlsl-rhi.md "DXIL parity (S1)"; rvk_shadertool dxil-check).
+std::span<const std::uint8_t> dxil(std::string_view name);
+std::span<const std::uint8_t> dxilVariant(std::string_view name, std::string_view defines);
+
 // HLSL sources embedded from shaders/** (*.hlsl, *.hlsli); name = path below shaders/ with '/' ("include/rvk_abi.hlsli")
 struct SourceFile {
     std::string_view name;

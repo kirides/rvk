@@ -85,7 +85,7 @@ TEST(hlsl_abi_header_and_hooks) {
     if (plainSpv.ok()) {
         const auto m = rvk::test::memberOffsets(plainSpv.words);
         const std::string name = "type.PushConstant.RvkDrawPush";
-        CHECK(m.contains(name) && m.at(name).size() == 9 && m.at(name).at("flags") == 44 && m.at(name).at("vsw") == 48 && m.at(name).at("psw") == 80);
+        CHECK(m.contains(name) && m.at(name).size() == 15 && m.at(name).at("flags") == 44 && m.at(name).at("vsw0") == 48 && m.at(name).at("vsw3") == 72 && m.at(name).at("psw0") == 80);
     }
     CHECK(plain.reflection.splitConsts && plain.reflection.windowEnd[3] == 16 && plain.reflection.windowEnd[0] == 0);
     // all hooks empty = identical output
@@ -94,14 +94,26 @@ TEST(hlsl_abi_header_and_hooks) {
     shader::TranslateOptions o;
     o.extraOutputs = "    float4 rvk_extra : SV_Target1;";
     o.epilogue = "    rvk_out.rvk_extra = float4(float(pc.drawId), 0.0, 0.0, 1.0);";
-    o.constOverrides[15] = "$c * 0.5 + pc.frame.Get().params[0]";
+    o.constOverrides[15] = "$c * 0.5 + rvkPtr<RvkFrameData, 16>(pc.frame).Get().params[0]";
     const auto hooked = shader::toHlsl(dec.program, o);
     CHECK(hooked.ok());
-    CHECK(hooked.hlsl.find("(RVK_PSC(15) * 0.5 + pc.frame.Get().params[0])") != std::string::npos);
+    CHECK(hooked.hlsl.find("(RVK_PSC(15) * 0.5 + rvkPtr<RvkFrameData, 16>(pc.frame).Get().params[0])") != std::string::npos);
     CHECK(hooked.hlsl.find("case 15: return") != std::string::npos);  // relative reads too
     CHECK(hooked.hlsl.find("rvk_out.rvk_extra = float4(float(pc.drawId)") < hooked.hlsl.find("rvk_out.oC0 = oC0"));
     const auto hookedSpv = shader::compileHlsl(shader::Stage::Pixel, hooked.hlsl);
     CHECK_MSG(hookedSpv.ok(), hookedSpv.log + "\n" + hooked.hlsl);
+    {  // the same text compiles to signed DXIL (the DX12 backend)
+        shader::dxc::Request dr;
+        dr.file = "hooked.hlsl";
+        dr.source = hooked.hlsl;
+        dr.entry = "PSMain";
+        dr.profile = "ps_6_6";
+        dr.target = shader::dxc::Target::Dxil;
+        dr.optLevel = 1;
+        dr.cache = false;
+        const auto d = shader::dxc::compile(dr);
+        CHECK_MSG(d.ok() && d.dxilSigned && shader::dxc::dxilContractViolation(d.bytes).empty(), d.log + "\n" + shader::dxc::dxilContractViolation(d.bytes));
+    }
 
     // vertex shader epilogue: after rvk_pos, before the half-pixel fix
     const std::vector<std::uint32_t> vs{0xFFFE0300u, 0x0200001Fu, 0x80000000u, 0x900F0000u, 0x0200001Fu, 0x80000000u, 0xE00F0000u,
@@ -119,12 +131,24 @@ TEST(hlsl_abi_header_and_hooks) {
         CHECK_MSG(vspv.ok(), vspv.log);
         // input override: v# assigned from the expression (with the attribute as rvk_in.v#) before the body runs
         shader::TranslateOptions io;
-        io.inputOverrides.push_back({shader::Usage::Position, 0, "float4($v.xy * pc.frame.Get().params[1].x, $v.zw)"});
+        io.inputOverrides.push_back({shader::Usage::Position, 0, "float4($v.xy * rvkPtr<RvkFrameData, 16>(pc.frame).Get().params[1].x, $v.zw)"});
         const auto iv = shader::toHlsl(vdec.program, io);
         CHECK(iv.ok());
-        CHECK(iv.hlsl.find("    v0 = (float4(rvk_in.v0.xy * pc.frame.Get().params[1].x, rvk_in.v0.zw));") < iv.hlsl.find("    rvk_main();"));
+        CHECK(iv.hlsl.find("    v0 = (float4(rvk_in.v0.xy * rvkPtr<RvkFrameData, 16>(pc.frame).Get().params[1].x, rvk_in.v0.zw));") < iv.hlsl.find("    rvk_main();"));
         const auto ispv = shader::compileHlsl(shader::Stage::Vertex, iv.hlsl);
         CHECK_MSG(ispv.ok(), ispv.log + "\n" + iv.hlsl);
+        {
+            shader::dxc::Request dr;
+            dr.file = "override.hlsl";
+            dr.source = iv.hlsl;
+            dr.entry = "VSMain";
+            dr.profile = "vs_6_6";
+            dr.target = shader::dxc::Target::Dxil;
+            dr.optLevel = 1;
+            dr.cache = false;
+            const auto d = shader::dxc::compile(dr);
+            CHECK_MSG(d.ok() && d.dxilSigned && shader::dxc::dxilContractViolation(d.bytes).empty(), d.log + "\n" + shader::dxc::dxilContractViolation(d.bytes));
+        }
         // an override of a semantic the shader does not declare changes nothing
         shader::TranslateOptions none;
         none.inputOverrides.push_back({shader::Usage::BlendWeight, 1, "$v * 2.0"});

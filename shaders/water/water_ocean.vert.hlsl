@@ -14,14 +14,14 @@
 
 struct WaterVsOut {
     float4 position : SV_Position;
-    [[vk::location(0)]] float4 oTc0 : TEXCOORD0;
-    [[vk::location(1)]] float4 oTc1 : TEXCOORD1;
-    [[vk::location(3)]] float4 oTc3 : TEXCOORD3;   // world position, w global alpha
-    [[vk::location(4)]] float4 oTc4 : TEXCOORD4;   // wave normal, w outdoor factor
-    [[vk::location(5)]] float4 oTc5 : TEXCOORD5;   // tangent (recomputed in the PS), w wave amplitude (FFT: height over the mean / Hs/2)
-    [[vk::location(6)]] float4 oTc6 : TEXCOORD6;   // binormal (recomputed in the PS), w crest steepness
-    [[vk::location(7)]] float4 oTc7 : TEXCOORD7;   // undisplaced xz, distance to the coast (FFT: signed, to the waterline), shore-wave weight
-    [[vk::location(16)]] float4 oCol0 : COLOR0;
+    [[vk::location(0)]] float4 oTc0 : VARY0;
+    [[vk::location(1)]] float4 oTc1 : VARY1;
+    [[vk::location(3)]] float4 oTc3 : VARY3;   // world position, w global alpha
+    [[vk::location(4)]] float4 oTc4 : VARY4;   // wave normal, w outdoor factor
+    [[vk::location(5)]] float4 oTc5 : VARY5;   // tangent (recomputed in the PS), w wave amplitude (FFT: height over the mean / Hs/2)
+    [[vk::location(6)]] float4 oTc6 : VARY6;   // binormal (recomputed in the PS), w crest steepness
+    [[vk::location(7)]] float4 oTc7 : VARY7;   // undisplaced xz, distance to the coast (FFT: signed, to the waterline), shore-wave weight
+    [[vk::location(16)]] float4 oCol0 : VARY16;
 };
 
 static const int2 CORNERS[6] = {int2(0, 0), int2(1, 0), int2(0, 1), int2(1, 0), int2(1, 1), int2(0, 1)};

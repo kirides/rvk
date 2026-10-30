@@ -211,9 +211,9 @@ void rvkMvPrologue(float4 fragCoord, float4 vertexNormal) {
     rvk_mvFrag = fragCoord;
     RvkFrame f = rvkLoadFrame(pc.frame);
 #ifdef RVK_MV_AMBIENT
-    for (int i = 0; i < 7; ++i) rvk_gi[1 + i] = rvkPtr<RvkStageData, 16>(pc.psw[3]).Get().c[RVK_MV_AMB_REG + i];  /* c14..c223 = window 3 (abi.h) */
+    for (int i = 0; i < 7; ++i) rvk_gi[1 + i] = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(pc.psw3), uint(RVK_MV_AMB_REG + i) * 16u));  /* c14..c223 = window 3 (abi.h) */
 #ifdef RVK_MV_HAS_IND
-    rvk_gi[0] = rvkPtr<RvkStageData, 16>(pc.psw[3]).Get().c[RVK_MV_IND_REG];
+    rvk_gi[0] = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(pc.psw3), uint(RVK_MV_IND_REG) * 16u));
 #else
     rvk_gi[0] = float4(0.0, 0.0, 0.0, 0.0);
 #endif

@@ -61,7 +61,7 @@ float4 PSMain(float4 position : SV_Position, float2 inUv : TEXCOORD0) : SV_Targe
             float nv = clamp(V.y, 0.0, 1.0);
             float F = 0.02 + 0.98 * pow(1.0 - nv, 5.0);
             float3 R = float3(-V.x, V.y, -V.z);
-            float3 skyC = pc.sky.x != 0u ? g_tCube[NonUniformResourceIndex(pc.sky.x)].SampleLevel(g_samp[NonUniformResourceIndex(pc.sky.y)], R, 0.0).rgb
+            float3 skyC = pc.sky.x != 0u ? RVK_TEXCUBE(pc.sky.x).SampleLevel(RVK_SAMP(pc.sky.y), R, 0.0).rgb
                                          : float3(0.0, 0.0, 0.0);
             sheen = clamp(skyC, 0.0, 1.0) * F * film * 0.85;
             // the film darkens the sand further (the light goes into the wet grains) and dims what the sheen reflects

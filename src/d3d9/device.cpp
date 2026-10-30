@@ -27,7 +27,7 @@ namespace {
 
 // bump when the translator's output changes: invalidates the SPIR-V disk cache
 // 2: the ABI declarations come from shaders/include/rvk_abi.glsl (48-byte push block, FrameBlock)
-constexpr std::uint32_t kTranslatorVersion = 8;  // 8: HLSL (shader/hlsl.cpp) through DXC
+constexpr std::uint32_t kTranslatorVersion = 9;  // 9: DXIL parity (rvk_draw.hlsli: uint2 frame, window members, address helpers); 8: HLSL (shader/hlsl.cpp) through DXC
 // bump when the tint epilogue (TranslateOptions::tintEpilogue) changes: the tint variants' cache files
 constexpr std::uint32_t kTintVersion = 2;
 // bump when the billboard fade variant (Device::lodModule) changes
@@ -1601,7 +1601,7 @@ VkShaderModule Device::lodModule(Shader& vs) {
         vs.lodFailed = true;
         shader::TranslateOptions o;
         o.inputOverrides.push_back(
-            {shader::Usage::BlendWeight, 1, std::format("float4($v.xy * pc.frame.Get().params[{}].x, $v.zw)", shader::abi::kFrameParamLod)});
+            {shader::Usage::BlendWeight, 1, std::format("float4($v.xy * rvkPtr<RvkFrameData, 16>(pc.frame).Get().params[{}].x, $v.zw)", shader::abi::kFrameParamLod)});
         vs.lodModule = variantModule(vs, o, std::format("lod{}_t{}", kLodVariantVersion, kTranslatorVersion));
         vs.lodFailed = vs.lodModule == VK_NULL_HANDLE;
         spdlog::info("d3d9: billboard fade variant of vertex shader {:016x}: {}", vs.hash, vs.lodFailed ? "FAILED" : "built");

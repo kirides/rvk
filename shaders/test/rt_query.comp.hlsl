@@ -2,6 +2,8 @@
 // through a TLAS (a push descriptor: set 0 binding 0); non-opaque candidates pass a stand-in alpha test (barycentric u < 0.5).
 // Output per pixel: 0 = miss, else bit 31 | primitive << 16 | round(t * 4) << 8 | (custom index + 1).
 
+#include "rvk_abi.hlsli"
+
 [[vk::binding(0, 0)]] RaytracingAccelerationStructure tlas : register(t0, space0);
 
 struct Push {
@@ -9,7 +11,7 @@ struct Push {
     uint width;
     uint height;
 };
-[[vk::push_constant]] Push pc;
+RVK_PUSH(Push, pc);
 
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
@@ -36,6 +38,5 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         const uint prim = rq.CommittedPrimitiveIndex();
         r = (1u << 31) | (prim << 16) | (t4 << 8) | (idx + 1u);
     }
-    const uint64_t base = uint64_t(pc.outBuf.x) | (uint64_t(pc.outBuf.y) << 32);
-    vk::RawBufferStore<uint>(base + uint64_t(id.y * pc.width + id.x) * 4ull, r, 4);
+    rvkRwStore<uint, 4>(rvkAddrAdd(rvkAddr(pc.outBuf), (id.y * pc.width + id.x) * 4u), r);
 }

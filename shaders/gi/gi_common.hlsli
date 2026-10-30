@@ -32,15 +32,15 @@ struct GiPassParamsData {
     float4 screen6;   // x directional correction strength (gi.directional, 0..1), y,z,w 0
 };
 // a reference to the parameters in memory: members are read through `.Get()`
-typedef vk::BufferPointer<GiPassParamsData, 16> GiPassParams;
+typedef RVK_REF(GiPassParamsData) GiPassParams;
 
 // (cascade << 24) | slot of each probe to update: uint e[] at pc.params' lists.xy
-uint giListEntry(GiPassParams p, uint item) { return vk::RawBufferLoad<uint>(rvkAddr(p.Get().lists.xy) + uint64_t(item) * 4ull, 4); }
+uint giListEntry(GiPassParams p, uint item) { return rvkRawLoad<uint, 4>(rvkAddrAdd(rvkAddr(p.Get().lists.xy), item * 4u)); }
 // per probe x ray: radiance (rgb, acc units) + hit distance (w; negative = a back face, -0.2 t); after GI_MAX_PROBE_ITEMS x
 // GI_RAYS entries one uint4 (as float bits) per probe: the lights it sees (bit j = light j is visible from the probe).
 // float4 r[] at lists.zw, element i:
-float4 giRayLoad(GiPassParams p, uint i) { return vk::RawBufferLoad<float4>(rvkAddr(p.Get().lists.zw) + uint64_t(i) * 16ull, 16); }
-void giRayStore(GiPassParams p, uint i, float4 v) { vk::RawBufferStore<float4>(rvkAddr(p.Get().lists.zw) + uint64_t(i) * 16ull, v, 16); }
+float4 giRayLoad(GiPassParams p, uint i) { return rvkRwLoad<float4, 16>(rvkAddrAdd(rvkAddr(p.Get().lists.zw), i * 16u)); }
+void giRayStore(GiPassParams p, uint i, float4 v) { rvkRwStore<float4, 16>(rvkAddrAdd(rvkAddr(p.Get().lists.zw), i * 16u), v); }
 
 struct GiPush {
     RVK_PASS_PUSH_HEADER

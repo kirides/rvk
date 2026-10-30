@@ -4,6 +4,7 @@
 // fullscreen pipelines from embedded SPIR-V (shader/embedded.h), and transient images. No render graph: a pass records its
 // own sync2 barriers through vk::Image::transition (the image's tracked layout decides the source scope).
 
+#include <array>
 #include <cstdint>
 #include <span>
 #include <string>
@@ -56,6 +57,9 @@ struct PassGraphicsDesc {
     std::span<const std::uint32_t> vs;
     std::span<const std::uint32_t> fs;
     VkFormat color = VK_FORMAT_UNDEFINED;
+    // further colour attachments after `color` (multiple render targets; the same blend state): the leading entries that are not VK_FORMAT_UNDEFINED
+    static constexpr std::size_t kMoreColors = 3;
+    std::array<VkFormat, kMoreColors> moreColors{VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED};
     BlendAttachment blend{};
     const char* name = nullptr;
     // optional depth (+ stencil) attachment of a geometry pass; none: no depth state

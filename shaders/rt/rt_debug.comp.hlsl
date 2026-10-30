@@ -46,7 +46,7 @@ int probeIndex(uint2 p) {
 void probe(uint2 p, uint record, float t, float rasterT, uint code) {
     if (all(pc.probes == uint2(0u, 0u))) return;
     int k = probeIndex(p);
-    if (k >= 0) vk::RawBufferStore<uint4>(rvkAddr(pc.probes) + uint64_t(k) * 16ull, uint4(record, asuint(t), asuint(rasterT), code), 16);
+    if (k >= 0) rvkRwStore<uint4, 16>(rvkAddrAdd(rvkAddr(pc.probes), uint(k) * 16u), uint4(record, asuint(t), asuint(rasterT), code));
 }
 
 [numthreads(8, 8, 1)]

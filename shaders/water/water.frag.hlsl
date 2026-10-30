@@ -247,14 +247,14 @@ struct Surface {
 
 // The inputs are the engine water VS's outputs (see enh/water.cpp), at their GLSL locations
 float4 PSMain(float4 position : SV_Position,
-              [[vk::location(0)]] float4 tc0 : TEXCOORD0,    // TEXCOORD0..6: the engine water VS's outputs
-              [[vk::location(1)]] float4 tc1 : TEXCOORD1,
-              [[vk::location(3)]] float4 tc3 : TEXCOORD3,    // world position, w global alpha (c32.w)
-              [[vk::location(4)]] float4 tc4 : TEXCOORD4,    // world normal, w outdoor factor (COLOR1.w)
-              [[vk::location(5)]] float4 tc5 : TEXCOORD5,    // tangent (grid: w wave amplitude)
-              [[vk::location(6)]] float4 tc6 : TEXCOORD6,    // binormal (grid: w crest steepness)
-              [[vk::location(7)]] float4 tc7 : TEXCOORD7,    // grid only: undisplaced xz, distance to the coast, shore-wave weight
-              [[vk::location(16)]] float4 col0 : COLOR0      // COLOR0 (river: alpha = the mesh's edge fade)
+              [[vk::location(0)]] float4 tc0 : VARY0,    // TEXCOORD0..6: the engine water VS's outputs
+              [[vk::location(1)]] float4 tc1 : VARY1,
+              [[vk::location(3)]] float4 tc3 : VARY3,    // world position, w global alpha (c32.w)
+              [[vk::location(4)]] float4 tc4 : VARY4,    // world normal, w outdoor factor (COLOR1.w)
+              [[vk::location(5)]] float4 tc5 : VARY5,    // tangent (grid: w wave amplitude)
+              [[vk::location(6)]] float4 tc6 : VARY6,    // binormal (grid: w crest steepness)
+              [[vk::location(7)]] float4 tc7 : VARY7,    // grid only: undisplaced xz, distance to the coast, shore-wave weight
+              [[vk::location(16)]] float4 col0 : VARY16      // COLOR0 (river: alpha = the mesh's edge fade)
               ) : SV_Target0 {
     WaterBlock w = waterBlock();
     RvkFrame f = rvkLoadFrame(pc.frame);

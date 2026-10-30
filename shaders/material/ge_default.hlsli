@@ -193,10 +193,10 @@ static const int smpLightMap2 = 5;
 static const int g_SamplerData[7] = {9, 10, 11, 12, 13, 14, 15};
 
 float4 tex2D(int slot, float2 uv) {
-    return g_t2D[NonUniformResourceIndex(rvkDrawTex(rvk_draw, uint(slot)))].Sample(g_samp[NonUniformResourceIndex(rvkDrawSmp(rvk_draw, uint(slot)))], uv);
+    return RVK_TEX2D(rvkDrawTex(rvk_draw, uint(slot))).Sample(RVK_SAMP(rvkDrawSmp(rvk_draw, uint(slot))), uv);
 }
 float4 texCUBE(int slot, float3 dir) {
-    return g_tCube[NonUniformResourceIndex(rvkDrawTex(rvk_draw, uint(slot)))].Sample(g_samp[NonUniformResourceIndex(rvkDrawSmp(rvk_draw, uint(slot)))], dir);
+    return RVK_TEXCUBE(rvkDrawTex(rvk_draw, uint(slot))).Sample(RVK_SAMP(rvkDrawSmp(rvk_draw, uint(slot))), dir);
 }
 
 #define g_CamPosAndFar RVK_PSC(0)

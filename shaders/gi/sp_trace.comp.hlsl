@@ -155,7 +155,7 @@ void CSMain(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
     if (p.Get().screen5.w != 0u) {
         // diagnostics: per probe the averages over its rays, into the class of the probe's sun term (shaded: the sun's shadow ray
         // is blocked or the surface faces away). Fixed point 1 / 1024, wrapping counters read as deltas by the host
-        uint64_t dg = rvkAddr(p.Get().screen5.yz);
+        RvkAddr dg = rvkAddr(p.Get().screen5.yz);
         float vis = 0.0;
         float nlp = dot(N, p.Get().sunDir.xyz);
         if (nlp > 0.05 && dot(p.Get().sunColor.rgb, float3(1.0, 1.0, 1.0)) > 1e-3) vis = rvkRtVisibility(f, P + N * 3.0, p.Get().sunDir.xyz, 1.0, p.Get().shade.z, 0.0, 0.0, RVK_RT_TRACE_OPAQUE);
@@ -209,9 +209,7 @@ void CSMain(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
         val[18] = alb * S;
         val[19] = hitRad * S;
         for (uint i = 0u; i < 21u; ++i) {
-            vk::BufferPointer<uint, 4> counter = vk::BufferPointer<uint, 4>(dg + uint64_t(b + i) * 4ull);
-            uint orig;
-            InterlockedAdd(counter.Get(), uint(clamp(val[i], 0.0, 4.0e6)), orig);
+            rvkRwAtomicAdd(rvkAddrAdd(dg, (b + i) * 4u), uint(clamp(val[i], 0.0, 4.0e6)));
         }
     }
     // a luminance ratio (per colour channel the noise of few rays turns into colour noise: measured, grain 3.7 -> 4.3); where

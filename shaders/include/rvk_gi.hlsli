@@ -27,14 +27,20 @@ struct RvkGiProbe {
     int4 key;
     float4 reg[7];
 };
-typedef vk::BufferPointer<RvkGiProbe, 16> RvkGiProbeRef;
-// probe `index` of the array at `a` (GLSL: RvkGiProbes(a).p[index])
-RvkGiProbeRef rvkGiProbeAt(uint2 a, uint index) { return RvkGiProbeRef(rvkAddr(a) + uint64_t(index) * 128ull); }
+typedef RVK_REF(RvkGiProbe) RvkGiProbeRef;
+// probe `index` of the array at `a` (GLSL: RvkGiProbes(a).p[index]); read only (the lookups)
+RvkGiProbeRef rvkGiProbeAt(uint2 a, uint index) { return rvkPtr<RvkGiProbe, 16>(rvkPairAdd(a, index * 128u)); }
+// the probes' writer (gi_blend.comp) reaches the array through the pass's own writable pair (shaderRefRw on DX12)
+int4 rvkGiProbeKeyRw(uint2 a, uint index) { return rvkRwLoad<int4, 16>(rvkAddrAdd(rvkAddr(a), index * 128u)); }
+float4 rvkGiProbeRegRw(uint2 a, uint index, uint k) { return rvkRwLoad<float4, 16>(rvkAddrAdd(rvkAddr(a), index * 128u + 16u + k * 16u)); }
+void rvkGiProbeStoreKey(uint2 a, uint index, int4 key) { rvkRwStore<int4, 16>(rvkAddrAdd(rvkAddr(a), index * 128u), key); }
+void rvkGiProbeStoreReg(uint2 a, uint index, uint k, float4 v) { rvkRwStore<float4, 16>(rvkAddrAdd(rvkAddr(a), index * 128u + 16u + k * 16u), v); }
 
 // the depth moments (mean, mean^2 of the ray distance, in cells of the probe's cascade, per octahedral texel): float2 m[] at an
 // address, element i (GLSL: RvkGiDepth(a).m[i])
-float2 rvkGiLoadMoment(uint64_t depth, uint i) { return vk::RawBufferLoad<float2>(depth + uint64_t(i) * 8ull, 8); }
-void rvkGiStoreMoment(uint64_t depth, uint i, float2 m) { vk::RawBufferStore<float2>(depth + uint64_t(i) * 8ull, m, 8); }
+float2 rvkGiLoadMoment(RvkAddr depth, uint i) { return rvkRawLoad<float2, 8>(rvkAddrAdd(depth, i * 8u)); }
+float2 rvkGiLoadMomentRw(RvkAddr depth, uint i) { return rvkRwLoad<float2, 8>(rvkAddrAdd(depth, i * 8u)); }
+void rvkGiStoreMoment(RvkAddr depth, uint i, float2 m) { rvkRwStore<float2, 8>(rvkAddrAdd(depth, i * 8u), m); }
 
 struct RvkGiCascade {
     int4 origin;   // the cell of the grid's minimum corner (probe positions: cell * spacing)
@@ -52,7 +58,7 @@ struct RvkGiVolumeData {
     float4 sky[7];  // the frame's outdoor ambient (g_AmbientLight of the outdoor draws): what the probes' sky stands for
 };
 // a reference to the header in memory: members are read through `.Get()`
-typedef vk::BufferPointer<RvkGiVolumeData, 16> RvkGiVolume;
+typedef RVK_REF(RvkGiVolumeData) RvkGiVolume;
 
 bool rvkGiValid(RvkFrame f) { return (f.gi.z & RVK_FRAME_GI_VALID) != 0u && any(f.gi.xy != uint2(0u, 0u)); }
 RvkGiVolume rvkGiVolume(RvkFrame f) { return rvkPtr<RvkGiVolumeData, 16>(f.gi.xy); }
@@ -95,7 +101,7 @@ float3 rvkGiSkyRadiance(float4 r[7], float3 d) {
 }
 
 // depth moments of a probe towards dir (bilinear inside the octahedral square, clamped at its edges); `depth` = the moments' address
-float2 rvkGiDepthMoments(uint64_t depth, uint probe, float3 dir) {
+float2 rvkGiDepthMoments(RvkAddr depth, uint probe, float3 dir) {
     float2 uv = rvkGiOctEncode(dir) * float(RVK_GI_DEPTH_RES) - 0.5;
     float2 f = frac(uv);
     int hiTexel = int(RVK_GI_DEPTH_RES) - 1;
@@ -127,7 +133,7 @@ float rvkGiCascadeSample(RvkGiVolume v, uint c, float3 P, float3 N, float3 V, ou
     edge = min(toEdge.x, min(toEdge.y, toEdge.z));
     float3 a = local - float3(base);
     uint2 probesAddr = v.Get().data.xy;
-    uint64_t depth = rvkAddr(v.Get().data.zw);
+    RvkAddr depth = rvkAddr(v.Get().data.zw);
     uint first = c * v.Get().info.z;
     float wsum = 0.0;
     for (int i = 0; i < 8; ++i) {

@@ -26,6 +26,10 @@ struct Compiled {
 };
 std::mutex g_compiledMutex;
 std::map<std::string, Compiled, std::less<>> g_compiled;
+struct CompiledDxil {
+    std::vector<std::uint8_t> bytes;
+};
+std::map<std::string, CompiledDxil, std::less<>> g_compiledDxil;
 
 bool hlslProfile(std::string_view name, std::string& entry, std::string& profile) {
     const auto dot = name.rfind('.');
@@ -47,18 +51,15 @@ std::string_view hlslSource(std::string_view name) {
     return {};
 }
 
-std::span<const std::uint32_t> spirvVariant(std::string_view name, std::string_view defines) {
+// the request of the embedded shader `name` with "NAME=VALUE;NAME2=VALUE2" defines (false: unknown name / no stage extension)
+static bool makeRequest(std::string_view name, std::string_view defines, dxc::Request& request) {
     const std::string hlslName = std::string(name) + ".hlsl";
-    if (hlslSource(hlslName).empty()) return {};
-    const std::string key = std::string(name) + "?" + std::string(defines) + (debugInfo() ? "?debug" : "");
-    const std::lock_guard lock(g_compiledMutex);  // (compiles serialize: the disk cache makes them rare)
-    if (auto it = g_compiled.find(key); it != g_compiled.end()) return it->second.words;
-    dxc::Request request;
+    if (hlslSource(hlslName).empty()) return false;
     request.file = hlslName;
     request.debugInfo = debugInfo();
     if (!hlslProfile(name, request.entry, request.profile)) {
         spdlog::error("shader {}: no HLSL stage for this extension", name);
-        return {};
+        return false;
     }
     for (std::size_t pos = 0; pos < defines.size();) {
         const auto end = std::min(defines.find(';', pos), defines.size());
@@ -69,6 +70,15 @@ std::span<const std::uint32_t> spirvVariant(std::string_view name, std::string_v
         }
         pos = end + 1;
     }
+    return true;
+}
+
+std::span<const std::uint32_t> spirvVariant(std::string_view name, std::string_view defines) {
+    const std::string key = std::string(name) + "?" + std::string(defines) + (debugInfo() ? "?debug" : "");
+    const std::lock_guard lock(g_compiledMutex);  // (compiles serialize: the disk cache makes them rare)
+    if (auto it = g_compiled.find(key); it != g_compiled.end()) return it->second.words;
+    dxc::Request request;
+    if (!makeRequest(name, defines, request)) return {};
     dxc::Result r = dxc::compile(request);
     if (!r.ok()) {
         spdlog::error("shader {} [{}]: HLSL compile failed: {}", name, defines, r.log);
@@ -78,6 +88,23 @@ std::span<const std::uint32_t> spirvVariant(std::string_view name, std::string_v
     return g_compiled.emplace(key, Compiled{std::move(r.words)}).first->second.words;
 }
 
+std::span<const std::uint8_t> dxilVariant(std::string_view name, std::string_view defines) {
+    const std::string key = std::string(name) + "?" + std::string(defines) + (debugInfo() ? "?debug" : "");
+    const std::lock_guard lock(g_compiledMutex);
+    if (auto it = g_compiledDxil.find(key); it != g_compiledDxil.end()) return it->second.bytes;
+    dxc::Request request;
+    if (!makeRequest(name, defines, request)) return {};
+    request.target = dxc::Target::Dxil;
+    dxc::Result r = dxc::compile(request);
+    if (!r.ok()) {
+        spdlog::error("shader {} [{}]: HLSL compile to DXIL failed: {}", name, defines, r.log);
+        return {};
+    }
+    if (!r.dxilSigned) spdlog::warn("shader {} [{}]: the DXIL is not signed (dxil.dll next to dxcompiler.dll?)", name, defines);
+    return g_compiledDxil.emplace(key, CompiledDxil{std::move(r.bytes)}).first->second.bytes;
+}
+
 std::span<const std::uint32_t> spirv(std::string_view name) { return spirvVariant(name, {}); }
+std::span<const std::uint8_t> dxil(std::string_view name) { return dxilVariant(name, {}); }
 
 }  // namespace rvk::shader::embedded

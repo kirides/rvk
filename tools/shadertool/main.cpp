@@ -10,6 +10,8 @@
 //   rvk_shadertool export <corpus dir> <out dir>                 write every shader as plain HLSL (<name>.vs.hlsl / .ps.hlsl): the translator's
 //                                                                exact output, the D3D9 listing + CTAB register names in a comment; out/include/
 //                                                                gets the ABI headers; dxc -I <out>/include -E VSMain|PSMain compiles each file
+//   rvk_shadertool dxil-check embedded [--filter S] | corpus <dir> [--tint|--gi|--gbuf|--gbuf-motion|--capture] | uber <jsonl>... [--limit N]
+//                                                                SPIR-V + signed DXIL (SM 6.6) per shader; see docs/research/hlsl-rhi.md "DXIL parity (S1)"
 //   rvk_shadertool refdisasm <file>                              D3DXDisassembleShader (d3dx9_39.dll) as the reference listing
 //   rvk_shadertool evalcheck <dir>                               the CPU evaluator (shader/sm_eval.h) on every SM 3.0 shader of a
 //                                                                corpus: failures by reason, pixel shaders sampling s9, slices
@@ -19,7 +21,10 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <chrono>
+#include <thread>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -43,6 +48,7 @@
 #include "shader/sm_eval.h"
 #include "shader/sm_ir.h"
 #include "shader/spirv.h"
+#include "shader/uber.h"
 
 namespace fs = std::filesystem;
 using namespace rvk::shader;
@@ -397,12 +403,16 @@ int cmdHlsl(int argc, char** argv) {
         const auto dx = rvk::shader::dxc::compile(r);
         if (!dx.log.empty()) std::printf("%s\n", dx.log.c_str());
         if (!dx.ok()) return 1;
+        std::printf("DXIL %s, %s\n", dx.dxilSigned ? "signed" : "NOT SIGNED", rvk::shader::dxc::dxilContractViolation(dx.bytes).empty() ? "fits the fixed root signature" : "root signature violation");
+        if (const std::string v = rvk::shader::dxc::dxilContractViolation(dx.bytes); !v.empty()) std::printf("  %s\n", v.c_str());
         std::ofstream f(dxilOut, std::ios::binary);
         f.write(reinterpret_cast<const char*>(dx.bytes.data()), static_cast<std::streamsize>(dx.bytes.size()));
     }
     std::printf("ok %s (%zu words%s)\n", name.c_str(), res.words.size(), res.fromCache ? ", cached" : "");
     return 0;
 }
+
+#include "dxil_check.inl"
 
 }  // namespace
 
@@ -450,6 +460,7 @@ int main(int argc, char** argv) {
         }
         return cmdExport(argv[2], argv[3]);
     }
+    if (cmd == "dxil-check") return cmdDxilCheck(argc, argv);
     if (cmd == "hlsl") return cmdHlsl(argc, argv);
     if (cmd == "show") return cmdShow(argv[2]);
     if (cmd == "refdisasm") return cmdRefDisasm(argv[2]);

@@ -15,7 +15,7 @@
 float pcfTap(uint map, uint smp, float2 uv, float size, float z) {
     float2 base = uv * size - 0.5;
     float2 f = frac(base);
-    float4 d = g_t2D[NonUniformResourceIndex(map)].GatherRed(g_samp[NonUniformResourceIndex(smp)], (floor(base) + 1.0) / size);
+    float4 d = RVK_TEX2D(map).GatherRed(RVK_SAMP(smp), (floor(base) + 1.0) / size);
     float4 lit = step(float4(z, z, z, z), d);  // the engine's compare: lit where z < the stored depth
     // gather order: x (u0, v1), y (u1, v1), z (u1, v0), w (u0, v0)
     return lerp(lerp(lit.w, lit.z, f.x), lerp(lit.x, lit.y, f.x), f.y);

@@ -17,6 +17,7 @@ Status legend: **built** = in the tree and verified, **design** = decided, not b
 | P1d | translator HLSL emitter (`shader/hlsl.cpp` next to `glsl.cpp`; `toHlsl` + `compileHlsl`, `kTranslatorVersion` 8): the whole corpus (2483 shaders) passes DXC + spirv-val (`rvk_shadertool corpus corpus --hlsl`), the D3D9 assembly unit tests too; the device uses it for base shaders, the LOD variant and the RT capture variant; material variants + ubershader (`ge_default.*`, back to HLSL: it comes from the engine's own HLSL) | **built** (hooks of the material variants: see 7) |
 | P2 | slim RHI (section 5: dynamic rendering + descriptor indexing + constant buffers + push constants, Vulkan structs as the baseline): interface `src/rhi/rhi.h`, Vulkan backend over the existing `vk::` classes (`src/rhi/vulkan`); the migration of the renderer's own pass code onto it is done for every compute / fullscreen pass of the enhancements (section 8: 2026-10-30 second round); what still calls Vulkan directly: the D3D9 device model (`src/d3d9`, `vk/pipeline*`) and what it owns; the draw replacers have no Vulkan of their own (section 8, third round) | **interface + Vulkan backend built**, migration started |
 | P3 | DX12 backend slice (section 6; SM 6.6 bindless required): `src/rhi/d3d12` (library `rvk_rhi_d3d12`), the same HLSL compiled to DXIL, fixed root signature, bindless heaps; `rvk_rhitest` runs one test on both backends (compute with constant buffer + bindless texture + RVK_REF + push constants + storage image, graphics with dynamic rendering), validation layers on | **built** incl. a swapchain on a hidden window, PASS on both |
+| S1 | DXIL parity: every shader compiles to signed DXIL from the same HLSL and fits the fixed root signature; `rvk_shadertool dxil-check`; GPU equivalence tests (section 9) | **built** |
 | P4 | GLSL gone: shaders/*.comp|vert|frag|glsl, `glsl.cpp`, `compileGlsl`, glslang (vcpkg), `rvk_glslc` (replaced by `rvk_embed`, a text embedder) removed 2026-10-30 after the in-game A/B of the ports (GLSL vs HLSL: no errors, within noise); `tools/shader_equiv.py` retired (its pixel check lives on as `tools/ubershader_check.py` through DXC: 183 / 183 captured PS requests EQUAL on the GPU), the vertex ubershader check is gone with it | **built** |
 
 ## 2. Compile scheme (GD3D11's, adapted) - built
@@ -123,8 +124,8 @@ Order of work (P2): (a) interface headers + a Vulkan backend over the existing `
 
 `src/rhi/d3d12/d3d12_device.cpp` (library `rvk_rhi_d3d12`, linked only by tools / the renderer when it picks the backend: d3d9.dll does not import d3d12.dll).
 - Requirements checked at device creation (no fallback below them): Shader Model 6.6 (dynamic resources), Resource Binding Tier 3, feature level 12_0.
-- Same HLSL compiled `-T *_6_6` to DXIL (`dxil.dll` next to `dxcompiler.dll` signs it). `rvk_abi.hlsli`'s DXIL branch: `RVK_REF(T)` = `RvkBufRef {slot, offset}` (a
-  ByteAddressBuffer in the heap; `RVK_LOAD(T, ref)`), `RVK_PUSH` = `ConstantBuffer<T> : register(b0, space0)` (root constants), `RVK_TEX2D(i)` etc. read
+- Same HLSL compiled `-T *_6_6` to DXIL (`dxil.dll` next to `dxcompiler.dll` signs it). `rvk_abi.hlsli`'s DXIL branch (reworked in section 9): `RVK_REF(T)` = `RvkRef<T> {slot, offset}` (a
+  ByteAddressBuffer in the heap; `.Get()` / `RVK_LOAD(T, ref)`), `RVK_PUSH` = `ConstantBuffer<T> : register(b0, space0)` (root constants), `RVK_TEX2D(i)` etc. read
   `ResourceDescriptorHeap` / `SamplerDescriptorHeap` through typed locals (**DXC 1.9.2602 crashes with an internal compiler error on a cast of a heap
   access followed by a method call**: `((Texture2D)ResourceDescriptorHeap[i]).Load(..)`; assigning to a local first works).
 - Fixed root signature: 32 root constants (b0 space0), root CBV (b8 space1), table of 8 UAVs (u0..u7 space1, `rhi::kStorageImages`; was 4), both heaps directly indexed. Heaps: one shader-visible
@@ -369,3 +370,119 @@ renderer's *own* work (passes, acceleration structures, buffers) goes through. A
 - `vk/passes.*` (`PassLayout`, `Transients`) stay as the backend's internals; `Transients::Entry` is still handed out as `vk::Image + slot` and wrapped per pass call (two small allocations;
   cache the wrapper next to the Entry when a pass wraps many images).
 - No run-time A/B for the migrated passes: the old raw-Vulkan code is only in git history (the layouts are identical, so a dual path would have kept the whole `PassLayout` plumbing alive).
+
+## 9. DXIL parity (S1) - 2026-10-30
+
+Goal (stage S1 of the DX12 port, docs/research/dx12-game-port.md WP1): **every shader of the renderer compiles to valid, signed DXIL SM 6.6 from the same HLSL text as the SPIR-V, fits
+the DX12 backend's fixed root signature, and behaves the same.** Before this stage only the test shaders were exercised on DX12; the production headers used Vulkan-only constructs
+(`vk::BufferPointer`, `vk::RawBufferLoad / Store`, `[[vk::push_constant]]` arrays, the typed bindless arrays `g_t2D[]`, ...).
+
+### 9.1 The checker: `rvk_shadertool dxil-check`
+
+```
+rvk_shadertool dxil-check embedded [--filter S] [--jobs N] [--quiet]       every embedded shader with a stage extension (ocean_fft once per FFT size), SPIR-V + spirv-val + DXIL
+rvk_shadertool dxil-check corpus <dir> [--tint|--gi|--gbuf|--gbuf-motion|--capture] [--jobs N] [--max-errors N]
+                                                                          the translated D3D9 shaders of a capture corpus (as `corpus`) and each enhancement variant
+rvk_shadertool dxil-check uber <jsonl>... [--limit N]                      the HLSL ubershader for every captured engine request (out/matsrc/*.jsonl): plain, gbuffer, gbuffer+motion, gi hooks
+```
+Compiles run on `hardware threads - 2` workers (the whole corpus in ~40 s; the gi / gbuffer variants ~2 min). Every item must pass all four criteria or it is listed with its first error:
+SPIR-V compiles and passes spirv-val; DXIL compiles (DXC runs `dxil.dll`'s validator inside the compile); the container is **signed** (`dxc::Result::dxilSigned`: the DXBC digest is not
+zero; an unsigned module means `dxil.dll` was not next to `dxcompiler.dll`); and the module **fits the fixed root signature** (`dxc::dxilContractViolation`, DXC's container reflection):
+the only bound resources may be the push constants (`b0 space0`, <= 128 bytes = 32 root constants), the root CBV (`b8 space1`) and the storage image table (`u0..u7 space1`); a bound SRV /
+sampler / buffer UAV / `$Globals` / an acceleration structure at a register has no root parameter on DX12 (everything else comes from the heaps). The summary prints the largest push constant block (112 bytes: the draw ABI; the root signature holds 128). Exit code 1 on any failure.
+`rvk_shadertool hlsl <name|file.cs.hlsl> --dxil out.dxil` prints the same verdicts for one shader. `shader::embedded::dxil(name)` / `dxilVariant(name, defines)` (new) are what the DX12
+renderer asks for the embedded shaders (same names, defines and disk cache as `spirv`). Unit tests: `dxil_every_embedded_shader_compiles_signed`, the hooked translated shaders in
+`hlsl_abi_header_and_hooks`.
+
+### 9.2 Results
+
+| family | before (DXIL ok / total) | after |
+|---|---|---|
+| embedded shaders (`dxil-check embedded`; ocean_fft x3 counted) | 29 / 53 (failing: gi 4, rt 4, shadows 5, material 2, water 4, test 5) | **54 / 54** (+ `test/parity_refs.comp`) |
+| translated corpus, plain (vs20 3, vs30 146, ps20 4, ps30 2330) | 0 / 2483 (`use of undeclared identifier 'vk'`: every translated shader includes `rvk_draw.hlsli`) | **2483 / 2483** |
+| `--tint` | (same cause) | **2483 / 2483** |
+| `--gi` | (same) | **2246 / 2246** (237 shaders have no GI variant) |
+| `--gbuf`, `--gbuf-motion` | (same) | **2325 / 2325** each (158 without) |
+| `--capture` (vertex shaders) | (same) | **149 / 149** |
+| ubershader, 183 captured PS_Default / PS_DefaultZPass requests x 4 variants | `ge_default.frag` did not compile (same include) | **732 / 732** |
+
+SPIR-V stayed valid everywhere: `rvk_shadertool corpus corpus` 2483 / 2483 spirv-val clean; `rvk_tests` 199 / 199; `rvk_vktest` (plain, `--passes`, `--passes --rhi`, `--rt`, `--skin`) PASS with 0
+validation errors; `rvk_d3d9test` 20 / 20 (it needed `Shader::wait()` after `createShader`: the shader workers compile asynchronously and a draw without its module is skipped; the test had been
+failing for that reason since the async change); `tools/ubershader_check.py`: 183 / 183 captured requests EQUAL against the translated game shaders on the GPU (unchanged).
+Exceptions: **one** root-signature exemption, `test/rt_query.comp` (the Vulkan floor's ray query self-test binds its TLAS as a push descriptor of its own layout; its DX12 counterpart is
+`test/rhi_rt.comp`). Nothing else is excluded (frame generation debug, the FFT, the GI / RT passes, all water / shadow / debug shaders compile to signed DXIL).
+
+### 9.3 The ABI on the DXIL side (`shaders/include/rvk_abi.hlsli` section 1 / 1b / 5, `rvk_draw.hlsli`)
+
+All backend differences live in the ABI headers (+ the three generated texts below); pass shaders stay clean. Addresses are `uint2` pairs in blocks, records and push constants: Vulkan = the
+64-bit device address (low, high), DX12 = **(heap slot of a ByteAddressBuffer / RWByteAddressBuffer, byte offset)** = `rhi::Buffer::shaderRef()` / `shaderRefRw()`. No 64-bit integers on the DXIL
+side. The helpers (same names, both backends):
+
+| helper | Vulkan | DXIL |
+|---|---|---|
+| `RVK_REF(T)` (first member of a push block: `RVK_PASS_PUSH_HEADER`), `.Get()` | `vk::BufferPointer<T, 16>` | `RvkRef<T>{slot, offset}`; `Get()` = `ByteAddressBuffer.Load<T>` of the whole struct by value (DXC keeps only the used loads, dynamically indexed array members too: 2 `rawBufferLoad` for `lights[i] + a[j]` of a 4 KB struct, checked) |
+| `rvkPtr<T, A>(uint2)` | `BufferPointer<T, A>` | `RvkRef<T>` (a read-only view: SRV) |
+| `RvkAddr`, `rvkAddr(uint2)`, `rvkAddrAdd(a, bytes)`, `rvkPairAdd(pair, bytes)`, `rvkAddrLow`, `rvkAddrAlign4` | `uint64_t` | `{slot, offset}` (32-bit offset arithmetic) |
+| `rvkRawLoad<T, align>(a)` | `vk::RawBufferLoad<T>` | `ByteAddressBuffer.Load<T>` |
+| `rvkRwLoad / rvkRwStore<T, align>`, `rvkRwAtomicAdd / Max(a, v)` (new) | `RawBufferLoad / Store`, `InterlockedAdd / Max` on a `BufferPointer<uint>` | `RWByteAddressBuffer` `Load<T> / Store<T> / InterlockedAdd / Max` |
+| `RVK_BUF_LOAD / STORE / ADD` (section 5) | same, now thin wrappers of the Rw helpers | same |
+| `RVK_TEX2D / TEXCUBE / TEX3D / SAMP (i)` and (new) `..._UNI(i)` for a draw-uniform index | `g_t2D[NonUniformResourceIndex(i)]`, `_UNI`: `g_t2D[i]` | heap access through a typed local, `_UNI` without `NonUniformResourceIndex` |
+
+Rules the DXIL side forced (all verified with the checker):
+- **Read vs write buffers.** DX12 needs the descriptor type to match the access: a buffer a shader WRITES (GI probes + depth moments in `gi_blend`, the GI ray buffer, `rt_skin` outputs / reference
+  captures / error accumulators, the vertex-shader capture buffers of the RT scene / object motion, `rt_debug`'s probes, the screen-probe diagnostics) is reached through the `Rw` helpers with a
+  `shaderRefRw` pair; everything the shaders only read (frame block, draw / stage blocks, geometry records, the engine's vertex / index buffers, the GI header and probes in the lookups) through
+  `rvkPtr / rvkRawLoad` with a `shaderRef` (SRV) pair. The DX12 host therefore keeps **two descriptors per such buffer** and fills the pair that matches: the volume header the `gi_blend` pass reads carries
+  the probes' / moments' UAV pair in `data.xy / data.zw` (its own copy of the header), the frame block's header the SRV pair. `rvk_gi.hlsli`: `rvkGiProbeKeyRw / RegRw / StoreKey / StoreReg`,
+  `rvkGiLoadMomentRw`, `rvkGiStoreMoment`; `gi_common.hlsli`: the ray list is Rw.
+- **Struct members of a root-constant block start on a 16-byte boundary** and **arrays of anything smaller than a float4 have a stride of 16** (cbuffer packing). So `RvkDrawPush` is 15 plain members
+  (112 bytes, offsets identical to `abi::PushConstants`): `uint2 frame` instead of a `RVK_REF` member (`rvkLoadFrame(pc.frame)` takes the pair; old hook text `pc.frame.Get()` is now
+  `rvkPtr<RvkFrameData, 16>(pc.frame).Get()`), and `vsw0..vsw3 / psw0..psw3` instead of `vsw[4] / psw[4]` (`rvkVsWin(w)` / `rvkPsWin(w)` select; folded for constant registers). A `RVK_REF` is
+  only allowed as the **first** member of a push block. `RVK_VSC(n) / RVK_PSC(n)` are now a single `float4` raw load at `window + 16 n`.
+- **Semantics.** Stage interfaces are matched by semantic name on D3D12 (by location on Vulkan): the engine water draws pair the translated VS (`VARYn`) with `water.frag` and `water_ocean.vert` is
+  paired with it too, so those use `VARYn` (`TEXCOORDn / COLOR0` before). The pass shaders' own pairs (fullscreen vertex shader + `TEXCOORD0` pixel shaders) were already consistent.
+  `[[vk::...]]` attributes are ignored by DXC for DXIL (`-Wno-ignored-attributes` is added to the DXIL argument set); `[[vk::builtin("PointSize")]]` on translated vertex shaders is dropped
+  (D3D12 has no point size: point lists are the host's problem, dx12-game-port.md).
+- **SV_InstanceID / SV_VertexID.** `SV_VertexID` = index + base vertex on both APIs (Vulkan `gl_VertexIndex`, D3D12 includes `BaseVertexLocation`): the capture variants' `vertexId - DrawBlock.alpha.w`
+  holds. `SV_InstanceID` is 0-based per draw on D3D12 and `gl_InstanceIndex` (includes `firstInstance`) with this DXC's default SPIR-V mapping (`-fvk-support-nonzero-base-instance` would subtract
+  `gl_BaseInstance` but needs the optional `shaderDrawParameters`): the D3D9 model's draws always have `firstInstance = 0` (`d3d9/draw.cpp`), so the capture variant's instance run
+  `instanceId * slots + slot` is the same on both. A future draw with `firstInstance != 0` must pass it explicitly.
+- Generated texts changed accordingly (`kTranslatorVersion` 9, capture variant tag `cap6`): the translator's texture / sampler objects (`RVK_TEX2D_UNI(rvk_draw.tex[..])`), the relative constant read
+  (`RVK_VSC(i)`), the capture epilogue (`rvkRwLoad / rvkRwStore` on the capture buffer; `rt_scene.cpp`), the billboard fade input override (`device.cpp`).
+- Limits checked by the contract test, not by the compiler: push constants <= 128 bytes (the draw ABI's 112 bytes is the largest), no bound SRV / sampler / buffer UAV, storage images
+  only in `space1` (`test/dxc_probe.comp` moved from `space0` for that reason).
+
+### 9.4 Findings in the backends (found by the equivalence tests)
+
+- **A null SRV does not read (0, 0, 0, 1) on AMD** (it returned (0, 0, 0, 0) whatever `Shader4ComponentMapping` says): the engine's "no texture" index 0 sampled as a shadow mask shadowed everything
+  (`m_fShadow = mask.a`). The DX12 backend's heap entry 0 is now a view of a real 1x1 (0, 0, 0, 255) texture (`D3D12DeviceImpl::create`, `defaultTexture_`); the shader-visible heap is write only, so
+  the view is created, not copied. Cube / 3D "none" slots (Vulkan has per-kind defaults at slot 0) are still the 2D entry: a D3D9 draw with an unbound cube sampler needs a per-type default bound by
+  the host (dx12-game-port.md WP3/WP4).
+- **`rhi::GraphicsPipelineDesc::colorFormats[1..3]` were ignored by the Vulkan backend** (one attachment only): `vk::PassGraphicsDesc::moreColors` (same blend state on each) fixes it; the G-buffer
+  variant (three render targets) now draws identically on both.
+
+### 9.5 Equivalence on the GPU: `rvk_rhitest` (`tools/rhitest/parity.cpp`, `parity_water.inl`, `shaders/test/parity_refs.comp.hlsl`)
+
+Each case draws / dispatches **production shader code** through the RHI on both backends from one HLSL text; images / words of the first backend (Vulkan) are stored and the second (D3D12) is compared to
+them (tolerance in the table), and where the CPU can compute the answer it is checked on each backend as well. RX 7900 XTX, `--validation` (Vulkan layer + D3D12 debug layer + GPU based validation), 0 errors:
+
+| case | what runs | CPU check | Vulkan vs D3D12 (worst difference) |
+|---|---|---|---|
+| translated draw | a D3DX-assembled `vs_3_0` + `ps_3_0` translated by `toHlsl`, the real 112-byte push block (stage constants through the windows, DrawBlock with bindless texture / sampler, the FrameBlock reached by reference from a vertex input override and a pixel epilogue), vertex input locations -> `ATTRn`, varyings `VARYn` | 4 quadrant probes (texel x vertex colour x c0 x frame time) +-2 / 255 | 0 of 255 (64 x 64 x 4 bytes, strict +-2) |
+| ubershader, lit diffuse | `ge_default.frag.hlsl` built by `uberPixelHlsl` from a captured request (ambient simple, directional light + shadow mask, diffuse x vertex colour x `g_ShaderData`) | non-trivial picture | 0 (tolerance 4, 0.4 % of values) |
+| ubershader, material | a captured request with normal map, specular + power, lightmap, directional + complex ambient light: 7 material samplers + lightmaps + shadow mask / depth map slots, dependent texture reads | non-trivial picture | 0 |
+| ubershader + hooks | the same with the `gbuffer + gi` hooks (`RVK_UBER_HOOKS`: frame block by reference, derivatives, **three render targets** RGBA8 + A2B10G10R10 + RG16F) | - | 0 (colour), 0 (normals), 0 (motion) |
+| water pixel shader | `water/water.frag.hlsl` (lake model): the WaterBlock in `pc.draw`, three normal maps + two masks + a sky **cube** by engine slot, SSR through a depth-map texture by heap index, the refraction copy, the engine lighting; fed by an assembled VS writing the engine's interpolators | non-trivial picture | 0 |
+| pipelines | every embedded compute shader (ocean_fft per size; 35) and the 8 vertex + pixel pairs the renderer builds, as `rhi` pipelines on this backend (Vulkan pass layout / D3D12 fixed root signature, debug layers on) | - | all created on both |
+| references | `parity_refs.comp`: `rvkGiLookup` (frame block -> volume header -> probe array + depth moments, 32 probes, trilinear x visibility) and the RT record fetch (`rvkRtRecord`, 16-bit indices at a 2-byte offset and 32-bit indices, `rvkRtAttribute` of FLOAT3 / FLOAT2 / SHORT2N / absent, `rvkRtApplySegment` binary search through a segment table), results through `RVK_BUF_STORE` | position / normal / uv0 / uv1 / triangle / material segment of 32 invocations (1e-4) | 4.8e-7 (floats), 0 (ids) |
+
+`RVK_PARITY_EXTRA="XFX_DIRLIGHTSHADOWS=0;..."` (macros added to the ubershader requests) and `RVK_PARITY_ONLY=<text>` bisect a difference (that is how the null SRV was found: shadows off made the two backends equal).
+
+### 9.6 What S1 does not cover (hand-over to the DX12 renderer)
+
+- The host fills the pairs (frame block `rtScene / gi / ao / sgi`, record `vertices / indices / segments`, `PushConstants` pointers, `GiPassParams.lists`, the capture addresses) with `shaderRef /
+  shaderRefRw`; the engine's vertex / index buffers need raw SRVs, capture and GI buffers need both descriptors (rules above). `rhi::Buffer::shaderRef(offset)` offsets are 32-bit.
+- `[[vk::image_format]]` storage images are untyped-format `RWTexture2D<float4/float2/float>` on DXIL: loads of RGBA16F / RGBA32F / RG16F / RGBA8 UAVs need the typed UAV load formats
+  (`D3D12_FEATURE_DATA_D3D12_OPTIONS.TypedUAVLoadAdditionalFormats`; present on every FL 12_0+ GPU in practice, to be added to the backend's requirements check).
+- The translated `[[vk::builtin("PointSize")]]` output, vertex fans, scaled vertex formats and the default texture per kind are D3D9-model matters (dx12-game-port.md).
+- Shader permutations are compiled twice by the checker; at run time only the active backend's target is built (`embedded::dxil`, `device.cpp` follows with the backend seam).

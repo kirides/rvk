@@ -55,7 +55,7 @@ void CSMain(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
     sDir[t] = float4(giRayDir(p, t), dc);
     if (t == 0u) {
         sBack = 0u;
-        sKey = rvkGiProbeAt(v.Get().data.xy, index).Get().key;
+        sKey = rvkGiProbeKeyRw(v.Get().data.xy, index);
     }
     GroupMemoryBarrierWithGroupSync();
     if (ray.w < 0.0) {
@@ -106,7 +106,7 @@ void CSMain(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
             regs[6][ch] = 0.546274 * a22;
         }
         regs[6].w = 0.0;
-        RvkGiProbeRef probe = rvkGiProbeAt(v.Get().data.xy, index);
+        const uint2 probes = v.Get().data.xy;  // (the pass's own copy of the header holds writable pairs)
         // adaptive history (rtgi.md 20): the long hysteresis (a steady probe averages many updates: little grain) gives way to
         // a fast blend where the light really changed (a door opened, the sun came out, a lamp lit): the relative change of
         // the probe's average luminance, beyond what 64 rays' noise explains, raises the new rays' weight
@@ -115,7 +115,7 @@ void CSMain(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
             const float3 lw = float3(0.2126, 0.7152, 0.0722);
             float3 oldL0, newL0;
             for (uint ch = 0u; ch < 3u; ++ch) {
-                oldL0[ch] = probe.Get().reg[ch].w + probe.Get().reg[3u + ch].z / 3.0;
+                oldL0[ch] = rvkGiProbeRegRw(probes, index, ch).w + rvkGiProbeRegRw(probes, index, 3u + ch).z / 3.0;
                 newL0[ch] = regs[ch].w + regs[3u + ch].z / 3.0;
             }
             float lo = dot(max(oldL0, float3(0.0, 0.0, 0.0)), lw), ln = dot(max(newL0, float3(0.0, 0.0, 0.0)), lw);
@@ -124,8 +124,8 @@ void CSMain(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
             alpha = max(alpha, 1.0 / float(count + 1u));
         }
         for (int k = 0; k < 7; ++k) {
-            float4 old = fresh ? regs[k] : probe.Get().reg[k];
-            probe.Get().reg[k] = lerp(old, regs[k], alpha);
+            float4 old = fresh ? regs[k] : rvkGiProbeRegRw(probes, index, uint(k));
+            rvkGiProbeStoreReg(probes, index, uint(k), lerp(old, regs[k], alpha));
         }
         // inside geometry: the back-face share smoothed over the updates (bits 16-23, 0..255) with hysteresis: a probe near
         // a wall whose share hovers around the threshold does not flip between used and ignored with each ray rotation
@@ -137,7 +137,7 @@ void CSMain(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
         int flags = int(RVK_GI_PROBE_VALID) | (inside ? int(RVK_GI_PROBE_INSIDE) : 0) |
                     int(min(count + 1u, 255u) << RVK_GI_PROBE_COUNT_SHIFT) |
                     int(uint(clamp(smoothed, 0.0, 1.0) * 255.0 + 0.5) << 16);
-        probe.Get().key = int4(cell, flags);
+        rvkGiProbeStoreKey(probes, index, int4(cell, flags));
     }
 
     // depth moments: invocation t = texel t of the 8 x 8 octahedral map
@@ -150,10 +150,10 @@ void CSMain(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
         m1 += w * d;
         m2 += w * d * d;
     }
-    uint64_t depth = rvkAddr(v.Get().data.zw);
+    RvkAddr depth = rvkAddr(v.Get().data.zw);
     uint di = index * RVK_GI_DEPTH_RES * RVK_GI_DEPTH_RES + t;
     float2 moments = wsum > 1e-5 ? float2(m1, m2) / wsum : float2(cap, cap * cap);
     float alphaD = fresh ? 1.0 : max(1.0 - p.Get().blend.y, 1.0 / float(count + 1u));
-    float2 old = fresh ? moments : rvkGiLoadMoment(depth, di);
+    float2 old = fresh ? moments : rvkGiLoadMomentRw(depth, di);
     rvkGiStoreMoment(depth, di, lerp(old, moments, alphaD));
 }

@@ -2,7 +2,7 @@
 // rvk_vktest; the include proves the embedded include resolution.
 #include "include/rvk_probe.hlsli"
 
-[[vk::image_format("r32f")]] RWTexture2D<float> g_out : register(u0, space0);
+[[vk::image_format("r32f")]] RWTexture2D<float> g_out : register(u0, space1);
 
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {

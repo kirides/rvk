@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <format>
 #include <map>
 #include <filesystem>
@@ -187,7 +188,8 @@ TEST(abi_hlsl_draw_layout_matches_cpp) {
     checkHlsl(m.at("type.PushConstant.RvkDrawPush"),
               {{"vs", offsetof(PC, vsConsts)}, {"ps", offsetof(PC, psConsts)}, {"draw", offsetof(PC, draw)}, {"frame", offsetof(PC, frame)},
                {"prevVs", offsetof(PC, prevVsConsts)}, {"drawId", offsetof(PC, drawId)}, {"flags", offsetof(PC, flags)},
-               {"vsw", offsetof(PC, vsWin)}, {"psw", offsetof(PC, psWin)}},
+               {"vsw0", offsetof(PC, vsWin)}, {"vsw1", offsetof(PC, vsWin) + 8}, {"vsw2", offsetof(PC, vsWin) + 16}, {"vsw3", offsetof(PC, vsWin) + 24},
+               {"psw0", offsetof(PC, psWin)}, {"psw1", offsetof(PC, psWin) + 8}, {"psw2", offsetof(PC, psWin) + 16}, {"psw3", offsetof(PC, psWin) + 24}},
               "RvkDrawPush");
     checkHlsl(m.at("RvkStageData"), {{"c", 0}, {"i", abi::kStageConstsIntOffset}, {"b", abi::kStageConstsBoolOffset}}, "RvkStageData");
     using DB = abi::DrawBlock;
@@ -275,3 +277,27 @@ TEST(dxc_every_embedded_shader_compiles) {
     }
     CHECK(n >= 30);
 }
+
+// DXIL parity (docs/research/hlsl-rhi.md "DXIL parity (S1)"): every embedded shader compiles to DXIL SM 6.6 signed by dxil.dll and fits the DX12 backend's fixed
+// root signature (push constants <= 128 bytes at b0, the root CBV at b8 space1, storage images u0..u7 space1; everything else from the heaps). rt_query is the
+// Vulkan floor's ray query self-test with its own descriptor layout (rvk_shadertool dxil-check lists the same exemption).
+TEST(dxil_every_embedded_shader_compiles_signed) {
+    if (!dxc::available()) return;
+    std::size_t n = 0;
+    for (const auto& f : embedded::hlslSources()) {
+        std::string_view name = f.name;
+        if (!name.ends_with(".hlsl")) continue;
+        name.remove_suffix(5);
+        if (!(name.ends_with(".comp") || name.ends_with(".vert") || name.ends_with(".frag"))) continue;
+        ++n;
+        const auto bytes = embedded::dxil(name);
+        CHECK_MSG(!bytes.empty(), std::string(name).c_str());
+        if (bytes.empty()) continue;
+        CHECK_MSG(bytes.size() > 20 && std::memcmp(bytes.data(), "DXBC", 4) == 0, std::string(name).c_str());
+        if (name == "test/rt_query.comp") continue;
+        const std::string violation = dxc::dxilContractViolation(bytes);
+        CHECK_MSG(violation.empty(), (std::string(name) + ": " + violation).c_str());
+    }
+    CHECK(n >= 30);
+}
+

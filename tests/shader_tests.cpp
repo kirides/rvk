@@ -217,7 +217,7 @@ ret
     CHECK(contains(glsl, "void l1()"));
     CHECK(contains(glsl, "if (p0.x) r1.x"));
     CHECK(contains(glsl, "if (!p0.y) r1.y"));
-    CHECK(contains(glsl, "g_t2D[rvk_draw.tex[4][0]].SampleLevel("));  // vertex sampler s0 -> slot 16
+    CHECK(contains(glsl, "RVK_TEX2D_UNI(rvk_draw.tex[4][0]).SampleLevel("));  // vertex sampler s0 -> slot 16
     CHECK(contains(glsl, "rvk_out.rvk_out1 = o2;"));                               // TEXCOORD1 and TEXCOORD2 packed in o2
     CHECK(contains(glsl, "rvk_out.rvk_out2 = o2;"));
 }
@@ -260,9 +260,9 @@ mov oC0, r0
 mov oC1, v1
 mov oDepth, c0.z
 )");
-    CHECK(contains(glsl, "g_t2D[rvk_draw.tex[0][0]].Sample("));
-    CHECK(contains(glsl, "g_tCube[rvk_draw.tex[0][1]]"));
-    CHECK(contains(glsl, "g_t3D[rvk_draw.tex[0][2]]"));
+    CHECK(contains(glsl, "RVK_TEX2D_UNI(rvk_draw.tex[0][0]).Sample("));
+    CHECK(contains(glsl, "RVK_TEXCUBE_UNI(rvk_draw.tex[0][1])"));
+    CHECK(contains(glsl, "RVK_TEX3D_UNI(rvk_draw.tex[0][2])"));
     CHECK(contains(glsl, ".SampleGrad("));
     CHECK(contains(glsl, "rvk_fragCoord.xy - 0.5"));
     CHECK(contains(glsl, "rvk_front"));

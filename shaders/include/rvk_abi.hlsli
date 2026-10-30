@@ -9,6 +9,11 @@
 #pragma once
 
 // ---- 1. references and push constants ---------------------------------------------------------------------------------------
+// One HLSL text for both backends (docs/research/hlsl-rhi.md "DXIL parity (S1)"). The addresses of the ABI are `uint2` pairs in blocks, records
+// and push constants; what they mean differs: Vulkan = the 64-bit device address (low, high), DX12 = (heap index of a ByteAddressBuffer /
+// RWByteAddressBuffer in the bindless heap, byte offset) = rhi::Buffer::shaderRef() / shaderRefRw(). Shaders reach the data only through
+// the helpers below: rvkPtr<T, A>(pair).Get() (a typed block, read), rvkAddr / rvkAddrAdd / rvkRawLoad (raw words, vectors),
+// the Rw variants (a buffer a shader writes: shaderRefRw), RVK_BUF_* (section 5). 64-bit integers do not exist on the DX12 side.
 #ifdef __spirv__
 // a pointer to a block in GPU memory (Vulkan: the buffer's device address; a push-constant member of 8 bytes)
 #define RVK_REF(T) vk::BufferPointer<T, 16>
@@ -18,22 +23,119 @@
 // every other resource uses register(<class><binding>, space<set>), which DXC maps onto the same binding and set
 #define RVK_VK_BINDING(slot, space) [[vk::binding(slot, space)]]
 #else
-// DX12 (SM 6.6 bindless, docs/research/hlsl-rhi.md 6): a reference is (heap index of a ByteAddressBuffer SRV, byte offset) in the same 8 bytes the
-// Vulkan side keeps a device address in (rhi::Buffer::shaderRef fills either); push constants are the root constants of the fixed root
-// signature (32 DWORDs at b0, space0); pass resources keep their (register, space) = (binding, set) numbers (rhi/d3d12)
-struct RvkBufRef {
+// DX12 (SM 6.6 bindless): push constants are the root constants of the fixed root signature (32 DWORDs at b0, space0; 128 bytes); pass resources keep
+// their (register, space) = (binding, set) numbers (rhi/d3d12). A struct member of a ConstantBuffer starts on a 16-byte boundary in HLSL: a push
+// block therefore holds RVK_REF only as its FIRST member (RVK_PASS_PUSH_HEADER) and plain uint2 pairs elsewhere (rvkPtr<T, A>(pair)); arrays
+// of anything smaller than a float4 are not used in push blocks (stride 16)
+template<typename T>
+struct RvkRef {
+    uint slot;
+    uint offset;
+    // (a heap access is assigned to a typed local first: a cast followed by a method call crashes DXC 1.9.2602's DXIL back end). The whole struct
+    // is loaded by value; DXC keeps only the loads of the members (and the array elements, also dynamically indexed ones) that are used
+    T Get() {
+        ByteAddressBuffer b = ResourceDescriptorHeap[NonUniformResourceIndex(slot)];
+        return b.Load<T>(offset);
+    }
+};
+#define RVK_REF(T) RvkRef<T>
+#define RVK_LOAD(T, ref) (ref).Get()
+#define RVK_PUSH(T, name) ConstantBuffer<T> name : register(b0, space0)
+#define RVK_VK_BINDING(slot, space)
+#endif
+
+// ---- 1b. addresses (Vulkan: needs shaderInt64) ----------------------------------------------------------------------------------
+// GPU addresses travel as (low, high) uint pairs in the frame block, in records and in push constants; rvkPtr<T, align>(pair) is a
+// typed pointer to the data there (`.Get().member`: a read; the whole block is loaded by value, DXC / the driver drop what is not used).
+// rvkAddr(pair) + rvkAddrAdd + rvkRawLoad<T, align> is the same for untyped data (vertex / index buffers of the engine, word tables).
+// A buffer a shader WRITES is reached through the Rw family (rvkRwLoad / rvkRwStore / rvkRwAtomic*) with a pair from shaderRefRw().
+#ifdef __spirv__
+template<typename T, uint A>
+vk::BufferPointer<T, A> rvkPtr(uint2 a) {
+    return vk::BufferPointer<T, A>(uint64_t(a.x) | (uint64_t(a.y) << 32));
+}
+typedef uint64_t RvkAddr;
+RvkAddr rvkAddr(uint2 a) { return uint64_t(a.x) | (uint64_t(a.y) << 32); }
+// the pair `bytes` further on (the element `i` of an array of blocks: rvkPairAdd(a, i * sizeof))
+uint2 rvkPairAdd(uint2 a, uint bytes) {
+    const uint64_t v = (uint64_t(a.x) | (uint64_t(a.y) << 32)) + uint64_t(bytes);
+    return uint2(uint(v), uint(v >> 32));
+}
+RvkAddr rvkAddrAdd(RvkAddr a, uint bytes) { return a + uint64_t(bytes); }
+uint rvkAddrLow(RvkAddr a) { return uint(a); }                // the low 32 bits (its 4-byte alignment: bits 0-1)
+RvkAddr rvkAddrAlign4(RvkAddr a) { return a & ~3ull; }       // rounded down to a word
+// (the raw loads / stores need an alignment the address really has: 4 for words, 16 for float4 ...)
+template<typename T, uint A>
+T rvkRawLoad(RvkAddr a) { return vk::RawBufferLoad<T>(a, A); }
+template<typename T, uint A>
+T rvkRwLoad(RvkAddr a) { return vk::RawBufferLoad<T>(a, A); }
+template<typename T, uint A>
+void rvkRwStore(RvkAddr a, T v) { vk::RawBufferStore<T>(a, v, A); }
+// atomics on a word of a written buffer; each returns the previous value
+uint rvkRwAtomicAdd(RvkAddr a, uint v) {
+    uint orig;
+    vk::BufferPointer<uint, 4> p = vk::BufferPointer<uint, 4>(a);
+    InterlockedAdd(p.Get(), v, orig);
+    return orig;
+}
+uint rvkRwAtomicMax(RvkAddr a, uint v) {
+    uint orig;
+    vk::BufferPointer<uint, 4> p = vk::BufferPointer<uint, 4>(a);
+    InterlockedMax(p.Get(), v, orig);
+    return orig;
+}
+#else
+template<typename T, uint A>
+RvkRef<T> rvkPtr(uint2 a) {
+    RvkRef<T> r;
+    r.slot = a.x;
+    r.offset = a.y;
+    return r;
+}
+struct RvkAddr {
     uint slot;
     uint offset;
 };
-#define RVK_REF(T) RvkBufRef
-// (a heap access is assigned to a typed local first: a cast followed by a method call crashes DXC 1.9.2602's DXIL back end)
+RvkAddr rvkAddr(uint2 a) {
+    RvkAddr r;
+    r.slot = a.x;
+    r.offset = a.y;
+    return r;
+}
+uint2 rvkPairAdd(uint2 a, uint bytes) { return uint2(a.x, a.y + bytes); }
+RvkAddr rvkAddrAdd(RvkAddr a, uint bytes) {
+    a.offset += bytes;
+    return a;
+}
+uint rvkAddrLow(RvkAddr a) { return a.offset; }
+RvkAddr rvkAddrAlign4(RvkAddr a) {
+    a.offset &= ~3u;
+    return a;
+}
 ByteAddressBuffer rvkHeapBuffer(uint slot) {
     ByteAddressBuffer b = ResourceDescriptorHeap[NonUniformResourceIndex(slot)];
     return b;
 }
-#define RVK_LOAD(T, ref) (rvkHeapBuffer((ref).slot).Load<T>((ref).offset))
-#define RVK_PUSH(T, name) ConstantBuffer<T> name : register(b0, space0)
-#define RVK_VK_BINDING(slot, space)
+RWByteAddressBuffer rvkHeapRwBuffer(uint slot) {
+    RWByteAddressBuffer b = ResourceDescriptorHeap[NonUniformResourceIndex(slot)];
+    return b;
+}
+template<typename T, uint A>
+T rvkRawLoad(RvkAddr a) { return rvkHeapBuffer(a.slot).Load<T>(a.offset); }
+template<typename T, uint A>
+T rvkRwLoad(RvkAddr a) { return rvkHeapRwBuffer(a.slot).Load<T>(a.offset); }
+template<typename T, uint A>
+void rvkRwStore(RvkAddr a, T v) { rvkHeapRwBuffer(a.slot).Store<T>(a.offset, v); }
+uint rvkRwAtomicAdd(RvkAddr a, uint v) {
+    uint orig;
+    rvkHeapRwBuffer(a.slot).InterlockedAdd(a.offset, v, orig);
+    return orig;
+}
+uint rvkRwAtomicMax(RvkAddr a, uint v) {
+    uint orig;
+    rvkHeapRwBuffer(a.slot).InterlockedMax(a.offset, v, orig);
+    return orig;
+}
 #endif
 
 // ---- 2. the per-frame block (FrameBlock, 976 bytes; Device::frameBlockAddress) -----------------------------------------------
@@ -118,18 +220,9 @@ RvkFrame rvkLoadFrame(RVK_REF(RvkFrameData) p) {
     f.sgi = d.sgi;
     return f;
 }
-
-// ---- 1b. pointers from stored addresses (Vulkan: needs shaderInt64) -----------------------------------------------------------
-// GPU addresses travel as (low, high) uint pairs in the frame block, in records and in push constants; rvkPtr<T, align>(pair) is a
-// typed pointer to the data there (`.Get().member`, atomics through it: InterlockedAdd(rvkPtr<Counters, 4>(a).Get().n, 1)).
-#ifdef __spirv__  // (device addresses do not exist in shaders on DX12: references are (heap slot, offset) pairs, RvkBufRef)
-template<typename T, uint A>
-vk::BufferPointer<T, A> rvkPtr(uint2 a) {
-    return vk::BufferPointer<T, A>(uint64_t(a.x) | (uint64_t(a.y) << 32));
-}
-// the uint64 of such a pair (address arithmetic: vk::RawBufferLoad<T>(rvkAddr(a) + offset))
-uint64_t rvkAddr(uint2 a) { return uint64_t(a.x) | (uint64_t(a.y) << 32); }
-#endif
+// the frame block of a (low, high) / (slot, offset) pair stored in a push block (RvkDrawPush.frame: a RVK_REF member would not sit at the offset
+// the C++ struct has on DX12)
+RvkFrame rvkLoadFrame(uint2 p) { return rvkLoadFrame(rvkPtr<RvkFrameData, 16>(p)); }
 
 // GLSL's mod(): x - y * floor(x / y) (HLSL's fmod truncates, so differs for negative x)
 float rvkMod(float x, float y) { return x - y * floor(x / y); }
@@ -164,6 +257,11 @@ RVK_VK_BINDING(3, 0) SamplerState g_samp[] : register(s0, space103);
 #define RVK_TEXCUBE(i) g_tCube[NonUniformResourceIndex(i)]
 #define RVK_TEX3D(i) g_t3D[NonUniformResourceIndex(i)]
 #define RVK_SAMP(i) g_samp[NonUniformResourceIndex(i)]
+// the same for an index that is uniform across the draw (the translated shaders' sampler slots: read from the draw's block)
+#define RVK_TEX2D_UNI(i) g_t2D[i]
+#define RVK_TEXCUBE_UNI(i) g_tCube[i]
+#define RVK_TEX3D_UNI(i) g_t3D[i]
+#define RVK_SAMP_UNI(i) g_samp[i]
 #else
 // DX12: one shader-visible heap for textures / buffers (the index space is the heap's: rhi::Texture::heapSampled), one for samplers
 Texture2D<float4> rvkHeapTex2D(uint i) {
@@ -182,37 +280,38 @@ SamplerState rvkHeapSampler(uint i) {
     SamplerState s = SamplerDescriptorHeap[NonUniformResourceIndex(i)];
     return s;
 }
+Texture2D<float4> rvkHeapTex2DUni(uint i) {
+    Texture2D<float4> t = ResourceDescriptorHeap[i];
+    return t;
+}
+TextureCube<float4> rvkHeapTexCubeUni(uint i) {
+    TextureCube<float4> t = ResourceDescriptorHeap[i];
+    return t;
+}
+Texture3D<float4> rvkHeapTex3DUni(uint i) {
+    Texture3D<float4> t = ResourceDescriptorHeap[i];
+    return t;
+}
+SamplerState rvkHeapSamplerUni(uint i) {
+    SamplerState s = SamplerDescriptorHeap[i];
+    return s;
+}
 #define RVK_TEX2D(i) rvkHeapTex2D(i)
 #define RVK_TEXCUBE(i) rvkHeapTexCube(i)
 #define RVK_TEX3D(i) rvkHeapTex3D(i)
 #define RVK_SAMP(i) rvkHeapSampler(i)
+#define RVK_TEX2D_UNI(i) rvkHeapTex2DUni(i)
+#define RVK_TEXCUBE_UNI(i) rvkHeapTexCubeUni(i)
+#define RVK_TEX3D_UNI(i) rvkHeapTex3DUni(i)
+#define RVK_SAMP_UNI(i) rvkHeapSamplerUni(i)
 #endif
 
 // ---- 5. buffers the shader writes (rhi::Buffer::shaderRefRw), atomics ---------------------------------------------------------------
 // `ref` is the uint2 of Buffer::shaderRefRw(offset): Vulkan the buffer's device address (low, high), DX12 (heap index of the RWByteAddressBuffer, byte
 // offset); `off` is a byte offset from it (a multiple of 4). Words only: structs are written field by field. Atomics return the previous value.
-#ifdef __spirv__
-uint rvkBufLoad(uint2 ref, uint off) { return vk::RawBufferLoad<uint>(rvkAddr(ref) + uint64_t(off), 4); }
-void rvkBufStore(uint2 ref, uint off, uint v) { vk::RawBufferStore<uint>(rvkAddr(ref) + uint64_t(off), v, 4); }
-uint rvkBufAdd(uint2 ref, uint off, uint v) {
-    uint orig;
-    vk::BufferPointer<uint, 4> p = vk::BufferPointer<uint, 4>(rvkAddr(ref) + uint64_t(off));
-    InterlockedAdd(p.Get(), v, orig);
-    return orig;
-}
-#else
-RWByteAddressBuffer rvkHeapRwBuffer(uint slot) {
-    RWByteAddressBuffer b = ResourceDescriptorHeap[NonUniformResourceIndex(slot)];
-    return b;
-}
-uint rvkBufLoad(uint2 ref, uint off) { return rvkHeapRwBuffer(ref.x).Load(ref.y + off); }
-void rvkBufStore(uint2 ref, uint off, uint v) { rvkHeapRwBuffer(ref.x).Store(ref.y + off, v); }
-uint rvkBufAdd(uint2 ref, uint off, uint v) {
-    uint orig;
-    rvkHeapRwBuffer(ref.x).InterlockedAdd(ref.y + off, v, orig);
-    return orig;
-}
-#endif
+uint rvkBufLoad(uint2 ref, uint off) { return rvkRwLoad<uint, 4>(rvkAddrAdd(rvkAddr(ref), off)); }
+void rvkBufStore(uint2 ref, uint off, uint v) { rvkRwStore<uint, 4>(rvkAddrAdd(rvkAddr(ref), off), v); }
+uint rvkBufAdd(uint2 ref, uint off, uint v) { return rvkRwAtomicAdd(rvkAddrAdd(rvkAddr(ref), off), v); }
 #define RVK_BUF_LOAD(ref, off) rvkBufLoad(ref, off)
 #define RVK_BUF_STORE(ref, off, v) rvkBufStore(ref, off, v)
 #define RVK_BUF_ADD(ref, off, v) rvkBufAdd(ref, off, v)

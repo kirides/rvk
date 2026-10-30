@@ -447,10 +447,10 @@ private:
     // the texture object and the sampler of a D3D9 sampler slot of the draw (bindless: rvk_draw.hlsli)
     std::string textureObject(std::uint32_t slot) const {
         const TextureType t = reflection_.samplers[slot];
-        const char* arr = t == TextureType::Cube ? "g_tCube" : t == TextureType::Volume ? "g_t3D" : "g_t2D";
-        return std::format("{}[rvk_draw.tex[{}][{}]]", arr, slot >> 2, slot & 3);
+        const char* arr = t == TextureType::Cube ? "RVK_TEXCUBE_UNI" : t == TextureType::Volume ? "RVK_TEX3D_UNI" : "RVK_TEX2D_UNI";
+        return std::format("{}(rvk_draw.tex[{}][{}])", arr, slot >> 2, slot & 3);
     }
-    std::string samplerObject(std::uint32_t slot) const { return std::format("g_samp[rvk_draw.smp[{}][{}]]", slot >> 2, slot & 3); }
+    std::string samplerObject(std::uint32_t slot) const { return std::format("RVK_SAMP_UNI(rvk_draw.smp[{}][{}])", slot >> 2, slot & 3); }
 
     std::string coord(std::uint32_t samplerIndex, const std::string& v) {
         const std::uint32_t slot = vs_ ? abi::kVertexSamplerBase + samplerIndex : samplerIndex;
@@ -918,7 +918,7 @@ private:
         }
         // helpers
         {
-            const std::string rel = std::format("rvkPtr<RvkStageData, 16>(pc.{}w[{}(i)]).Get().c[i]", vs_ ? "vs" : "ps", vs_ ? "RVK_VS_WIN" : "RVK_PS_WIN");
+            const std::string rel = vs_ ? "RVK_VSC(i)" : "RVK_PSC(i)";
             if (opt_.constOverrides.empty()) {
                 g += std::format("\nfloat4 rvk_cRel(int i) {{ return uint(i) < {}u ? {} : float4(0.0, 0.0, 0.0, 0.0); }}\n", regLimit(), rel);
             } else {
