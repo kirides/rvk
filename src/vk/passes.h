@@ -68,6 +68,12 @@ struct PassGraphicsDesc {
     VkFrontFace frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     float depthBiasConstant = 0.0f, depthBiasSlope = 0.0f;  // a rasterizer depth bias (0 / 0 = off)
     bool dynamicCullMode = false;  // the cull mode is set per draw (vkCmdSetCullMode), `cull` is the pipeline's default
+    VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    // vertex input (the slim RHI's geometry pipelines; none for fullscreen passes). With dynamicVertexStride the binding strides are set per draw
+    // (vkCmdBindVertexBuffers2) and the strides in vertexBindings are ignored.
+    std::span<const VkVertexInputBindingDescription> vertexBindings{};
+    std::span<const VkVertexInputAttributeDescription> vertexAttributes{};
+    bool dynamicVertexStride = false;
 };
 VkPipeline createPassGraphicsPipeline(Context& ctx, VkPipelineLayout layout, const PassGraphicsDesc& desc);
 

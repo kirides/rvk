@@ -133,11 +133,32 @@ Order of work (P2): (a) interface headers + a Vulkan backend over the existing `
 - Resource states: textures track their state (`VkImageLayout` -> `D3D12_RESOURCE_STATES`), transitioning to the same GENERAL layout is a UAV barrier; device-heap buffers
   move between copy and shader states in the copy helpers / `bufferBarrier`; upload / readback heaps keep theirs.
 - Swapchain: `Device::createSwapchain` / `renderAndPresent` (DXGI flip model with 3 buffers; the Vulkan side wraps `vk::Swapchain`, its images adopted as RHI textures); resize tested.
-- Not built yet: ray queries (DXR inline: `RaytracingAccelerationStructure` from the heap), indirect draws, capture regions (PIX events
-  need WinPixEventRuntime), buffer UAVs, mip / array views, cube / 3D textures, the renderer's own passes through the RHI (P2 migration).
+- Gaps closed 2026-10-30 (both backends, one HLSL source and one test each in `rvk_rhitest`):
+  - **Textures**: `TextureDesc::cube` (6 layers = faces), 3D textures (`VK_IMAGE_TYPE_3D`), mip chains, array layers. `heapSampled()` is the whole-resource view of the kind (Texture2D / TextureCube / Texture3D;
+    Vulkan `vk::Bindless` kinds Cube / Volume, DX12 TEXTURECUBE / TEXTURE3D, mip count = all levels); a 2D array has no whole-array kind in the bindless set, so `heapSampled()` = layer 0 and
+    `heapSampledLayer(n)` gives a Texture2D view per layer (DX12: a TEXTURE2DARRAY view of one slice read as `Texture2D`: accepted by the debug layer + GPU based validation). `Subresource{mip, layer}` on
+    `copyBufferToTexture / copyTextureToBuffer` (`mipExtent`, `copyBytes`; DX12 needs buffer offsets of texture copies to be multiples of 512), `StorageView{texture, mip, layer}` for
+    `setStorageViews` (3D view for volumes = `RWTexture3D`, a one-slice array view when the texture has layers = `RWTexture2DArray` with z = 0, else 2D), `RenderingInfo::Attachment::mip / layer`.
+  - **Buffer UAVs**: `Buffer::heapIndexRw()` (a raw `RWByteAddressBuffer` UAV in the heap; device-memory STORAGE buffers), `Buffer::shaderRefRw()` (Vulkan: the device address, DX12: {UAV slot, offset}),
+    `bufferBarrier(buffer, BufferAccess::ShaderRead | ShaderWrite)` (DX12: transition to ALL_SHADER_RESOURCE / UNORDERED_ACCESS, a UAV -> UAV step is a UAV barrier; Vulkan: the global barrier as before).
+    Shader side (`rvk_abi.hlsli` section 5): `RVK_BUF_LOAD / RVK_BUF_STORE / RVK_BUF_ADD(ref, byte offset, ...)` over the `uint2` of `shaderRefRw` (Vulkan `vk::RawBufferLoad / Store` + `InterlockedAdd`
+    on a `BufferPointer`, DXIL `RWByteAddressBuffer` from the heap through a typed local). Atomics checked with 1000 threads on one address.
+  - **Vertex / index / indirect**: `GraphicsPipelineDesc::vertexBindings / vertexAttributes / topology` (Vulkan structs; location N = semantic `ATTR<N>` on DX12; Vulkan strides are dynamic state
+    `VERTEX_INPUT_BINDING_STRIDE`, supplied by `setVertexBuffers`), `setVertexBuffers`, `setIndexBuffer`, `drawIndexed`, `drawIndexedIndirectCount` (Vulkan `vkCmdDrawIndexedIndirectCount`, DX12
+    `ExecuteIndirect` with a DRAW_INDEXED signature per stride; `D3D12_DRAW_INDEXED_ARGUMENTS` = `VkDrawIndexedIndirectCommand`, 20 bytes). `DeviceCaps::drawIndirectCount`. DX12 moves device-memory
+    buffers into VERTEX_AND_CONSTANT_BUFFER / INDEX_BUFFER / INDIRECT_ARGUMENT in those calls.
+  - **Ray queries**: `DeviceDesc::rayTracing`, `DeviceCaps::rayQuery` (Vulkan: ray query + acceleration structures + the bindless TLAS array; DX12: DXR tier 1.1), `Device::createBlas(span<TriangleGeometry>)`
+    / `createTlas(maxInstances)`, `CommandList::buildBlas / buildTlas(instanceBuffer, offset, count)`, `AccelerationStructure::address() / tlasSlot()`. Instance records are
+    `VkAccelerationStructureInstanceKHR` = `D3D12_RAYTRACING_INSTANCE_DESC` (64 bytes; the BLAS reference is `address()`). Scratch is owned by the object (kept for rebuilds). DX12: storage in
+    RAYTRACING_ACCELERATION_STRUCTURE state for good, scratch promoted from COMMON, a UAV barrier after each build, the TLAS as a RAYTRACING_ACCELERATION_STRUCTURE SRV in the heap. Vulkan TLAS slots
+    are 1..7 of `g_tlas[]`. HLSL: `RVK_DECLARE_TLAS` once at file scope + `RVK_TLAS(slot)` as the argument of `TraceRayInline` (a macro: DXIL needs the cast of the heap access inside the call,
+    SPIR-V cannot return an acceleration structure from a function); `rvk_rt.hlsli` uses them too.
+- Still not built: capture regions on DX12 (PIX events need WinPixEventRuntime; `beginRegion / endRegion` are no-ops on both backends), device timestamps, `drawIndirect` without a count and
+  compute-generated argument buffers beyond the copy path (the ExecuteIndirect plumbing is the same), the renderer's own passes through the RHI (P2 migration), host-cache flush / invalidate of
+  non-coherent upload / readback memory on Vulkan (coherent on the tested GPU).
 - Verification: `rvk_rhitest [--vulkan] [--d3d12] [--validation]`: one test, both backends, 64x64 compare of a compute pass and a graphics pass with the CPU's expected values;
   `--validation` = Vulkan validation layer + D3D12 debug layer with GPU based validation (messages routed to the log and counted: `Device::validationErrors`).
-  2026-10-30: PASS on both (RX 7900 XTX), 0 validation errors.
+  2026-10-30: PASS on both (RX 7900 XTX), 0 validation errors. The gap checks (textures, buffer UAVs, vertex / index / indirect draws, ray query) print their own PASS / SKIP line per backend.
 
 ## 6b. Decisions after the first runs
 
@@ -164,3 +185,6 @@ Order of work (P2): (a) interface headers + a Vulkan backend over the existing `
   HLSL path; `rvk_vktest` (translated shaders on the GPU) and `--passes` / `--rt` PASS. Ubershader: 778 captured requests compile (with and without hooks); on the GPU
   `tools/ubershader_check.py` = 183 / 183 EQUAL against the translated game shaders. RHI: `rvk_rhitest --validation` PASS on Vulkan and D3D12 (0 validation errors).
   Unit tests 198 / 198 after the GLSL removal.
+- 2026-10-30: DX12 gaps closed (section 6): `rvk_rhitest --validation` PASS on Vulkan and D3D12 with textures (cube, 3D, mips, array layers, per-mip / per-layer storage and render target views),
+  buffer UAVs + atomics, vertex / index buffers with an indirect-count draw, and DXR 1.1 / Vulkan ray queries on the selfTest scene; 0 validation errors (Vulkan layer; D3D12 debug layer + GPU based
+  validation, only the "clear values do not match" warning of ClearRenderTargetView). `rvk_tests` 198 / 198, `rvk_vktest --passes` and `--rt` PASS.

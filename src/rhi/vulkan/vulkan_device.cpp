@@ -1,7 +1,9 @@
 // The Vulkan backend of the slim RHI (rhi/rhi.h): a thin layer over the renderer's own vk:: classes (Context, Frames, Bindless, PassLayout,
-// Image, pass pipelines). Nothing here is new Vulkan code: it is the pass machinery of vk/passes.h behind the interface.
+// Image, pass pipelines). Nothing here is new Vulkan code: it is the pass machinery of vk/passes.h behind the interface, plus the pieces the
+// interface adds on top (texture subresource views, vertex / index / indirect draws, acceleration structures).
 
 #include <array>
+#include <map>
 #include <vector>
 
 #include <spdlog/spdlog.h>
@@ -13,6 +15,7 @@
 #include "vk/frames.h"
 #include "vk/image.h"
 #include "vk/passes.h"
+#include "vk/raytracing.h"
 #include "vk/swapchain.h"
 
 namespace rvk::rhi {
@@ -30,12 +33,16 @@ public:
     bool create();
     const BufferDesc& desc() const override { return desc_; }
     void* map() override { return mapped_; }
-    std::uint32_t heapIndex() const override { return 0; }  // Vulkan reaches buffers by address (RVK_REF)
+    std::uint32_t heapIndex() const override { return 0; }    // Vulkan reaches buffers by address (RVK_REF)
+    std::uint32_t heapIndexRw() const override { return 0; }
     std::array<std::uint32_t, 2> shaderRef(std::uint64_t offset) const override {
         const std::uint64_t a = address_ + offset;
         return {static_cast<std::uint32_t>(a), static_cast<std::uint32_t>(a >> 32)};
     }
+    // (the same address for read and write access)
+    std::array<std::uint32_t, 2> shaderRefRw(std::uint64_t offset) const override { return shaderRef(offset); }
     VkBuffer buffer() const { return buffer_; }
+    std::uint64_t address() const { return address_; }
 
 private:
     VkDeviceImpl& dev_;
@@ -53,6 +60,7 @@ public:
     bool create();
     const TextureDesc& desc() const override { return desc_; }
     std::uint32_t heapSampled() const override { return slot_; }
+    std::uint32_t heapSampledLayer(std::uint32_t layer) override;
     vk::Image& image() { return image_; }
     // a swapchain image (owned by the swapchain)
     void adopt(VkImage image, VkImageView view) {
@@ -62,12 +70,27 @@ public:
         d.usage = desc_.usage;
         image_.adopt(image, view, d);
     }
+    // 2D view of one mip level / layer as a render target
+    VkImageView attachmentView(std::uint32_t mip, std::uint32_t layer);
+    // the storage image view of one mip level / layer (rhi.h StorageView: 3D, 2D array of one layer, or 2D)
+    VkImageView storageView(std::uint32_t mip, std::uint32_t layer);
 
 private:
+    bool isArray() const { return !desc_.cube && desc_.type == VK_IMAGE_TYPE_2D && desc_.layers > 1; }
+    vk::TextureKind kind() const {
+        return desc_.cube ? vk::TextureKind::Cube : desc_.type == VK_IMAGE_TYPE_3D ? vk::TextureKind::Volume : vk::TextureKind::Tex2D;
+    }
+    bool plain2D() const { return desc_.type == VK_IMAGE_TYPE_2D && !desc_.cube && desc_.layers == 1 && desc_.mips == 1; }
+    // a view of a subresource range, cached (destroyed with the texture)
+    VkImageView view(VkImageViewType type, VkImageAspectFlags aspect, std::uint32_t baseMip, std::uint32_t mipCount, std::uint32_t baseLayer,
+                     std::uint32_t layerCount);
+
     VkDeviceImpl& dev_;
     TextureDesc desc_;
     vk::Image image_;
     std::uint32_t slot_ = 0;
+    std::vector<std::uint32_t> layerSlots_;  // 2D arrays: the Texture2D slot of each layer, created on demand
+    std::map<std::array<std::uint32_t, 6>, VkImageView> views_;
 };
 
 class VkSwapchainImpl final : public Swapchain {
@@ -106,21 +129,52 @@ private:
     VkPipelineBindPoint bindPoint_;
 };
 
+// A BLAS or TLAS: the acceleration structure object, its storage (a buffer with a device address) and the build scratch, all sized when it is created
+// from vkGetAccelerationStructureBuildSizesKHR and kept for rebuilds.
+class VkAccelImpl final : public AccelerationStructure {
+public:
+    VkAccelImpl(VkDeviceImpl& dev, bool tlas) : dev_(dev), tlas_(tlas) {}
+    ~VkAccelImpl() override;
+    bool createBlas(std::span<const TriangleGeometry> geometries);
+    bool createTlas(std::uint32_t maxInstances);
+    bool isTlas() const override { return tlas_; }
+    std::uint64_t address() const override { return address_; }
+    std::uint32_t tlasSlot() const override { return slot_; }
+    void recordBuildBlas(VkCommandBuffer cmd);
+    void recordBuildTlas(VkCommandBuffer cmd, VkDeviceAddress instances, std::uint32_t count);
+
+private:
+    // the geometry / ranges of the BLAS's build info
+    void blasGeometries(std::vector<VkAccelerationStructureGeometryKHR>& geoms, std::vector<VkAccelerationStructureBuildRangeInfoKHR>& ranges,
+                        std::vector<std::uint32_t>& counts) const;
+    bool allocate(const VkAccelerationStructureBuildGeometryInfoKHR& info, const std::uint32_t* maxPrimitives, const char* what);
+    void barrierAfterBuild(VkCommandBuffer cmd) const;
+
+    VkDeviceImpl& dev_;
+    bool tlas_;
+    std::vector<TriangleGeometry> geometries_;  // BLAS: the buffers are referenced, not owned
+    std::uint32_t maxInstances_ = 0;
+    vk::rt::AddressBuffer storage_, scratch_;
+    VkAccelerationStructureKHR handle_ = VK_NULL_HANDLE;
+    VkDeviceAddress address_ = 0;
+    std::uint32_t slot_ = 0;
+};
+
 class VkCommandListImpl final : public CommandList {
 public:
     VkCommandListImpl(VkDeviceImpl& dev, VkCommandBuffer cmd) : dev_(dev), cmd_(cmd) {}
 
     void transition(Texture& texture, VkImageLayout layout) override;
-    void bufferBarrier(Buffer&) override;
+    void bufferBarrier(Buffer&, BufferAccess) override;
     void setPushConstants(const void* data, std::uint32_t size) override;
     void setConstantBuffer(Buffer& buffer, std::uint64_t offset, std::uint64_t size) override {
         cb_ = {static_cast<VkBufferImpl&>(buffer).buffer(), offset, size};
         dirty_ = true;
     }
-    void setStorageTextures(std::span<Texture* const> textures) override {
+    void setStorageViews(std::span<const StorageView> views) override {
         views_.fill(VK_NULL_HANDLE);
-        for (std::size_t i = 0; i < textures.size() && i < views_.size(); ++i) {
-            if (textures[i] != nullptr) views_[i] = static_cast<VkTextureImpl*>(textures[i])->image().view();
+        for (std::size_t i = 0; i < views.size() && i < views_.size(); ++i) {
+            if (views[i].texture != nullptr) views_[i] = static_cast<VkTextureImpl*>(views[i].texture)->storageView(views[i].mip, views[i].layer);
         }
         dirty_ = true;
     }
@@ -143,12 +197,32 @@ public:
         flush();
         vkCmdDraw(cmd_, vertexCount, instanceCount, firstVertex, firstInstance);
     }
+    void setVertexBuffers(std::uint32_t first, std::span<Buffer* const> buffers, std::span<const std::uint64_t> offsets,
+                          std::span<const std::uint32_t> strides) override;
+    void setIndexBuffer(Buffer& buffer, std::uint64_t offset, VkIndexType type) override {
+        vkCmdBindIndexBuffer(cmd_, static_cast<VkBufferImpl&>(buffer).buffer(), offset, type);
+    }
+    void drawIndexed(std::uint32_t indexCount, std::uint32_t instanceCount, std::uint32_t firstIndex, std::int32_t vertexOffset,
+                     std::uint32_t firstInstance) override {
+        flush();
+        vkCmdDrawIndexed(cmd_, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+    }
+    void drawIndexedIndirectCount(Buffer& args, std::uint64_t argsOffset, Buffer& countBuffer, std::uint64_t countOffset, std::uint32_t maxDraws,
+                                  std::uint32_t stride) override {
+        flush();
+        vkCmdDrawIndexedIndirectCount(cmd_, static_cast<VkBufferImpl&>(args).buffer(), argsOffset, static_cast<VkBufferImpl&>(countBuffer).buffer(),
+                                      countOffset, maxDraws, stride);
+    }
     void copyBuffer(Buffer& dst, std::uint64_t dstOffset, Buffer& src, std::uint64_t srcOffset, std::uint64_t size) override {
         const VkBufferCopy c{srcOffset, dstOffset, size};
         vkCmdCopyBuffer(cmd_, static_cast<VkBufferImpl&>(src).buffer(), static_cast<VkBufferImpl&>(dst).buffer(), 1, &c);
     }
-    void copyBufferToTexture(Texture& dst, Buffer& src, std::uint64_t srcOffset) override;
-    void copyTextureToBuffer(Buffer& dst, std::uint64_t dstOffset, Texture& src) override;
+    void copyBufferToTexture(Texture& dst, Buffer& src, std::uint64_t srcOffset, Subresource sub) override;
+    void copyTextureToBuffer(Buffer& dst, std::uint64_t dstOffset, Texture& src, Subresource sub) override;
+    void buildBlas(AccelerationStructure& blas) override { static_cast<VkAccelImpl&>(blas).recordBuildBlas(cmd_); }
+    void buildTlas(AccelerationStructure& tlas, Buffer& instances, std::uint64_t instanceOffset, std::uint32_t count) override {
+        static_cast<VkAccelImpl&>(tlas).recordBuildTlas(cmd_, static_cast<VkBufferImpl&>(instances).address() + instanceOffset, count);
+    }
     void beginRegion(std::string_view) override {}
     void endRegion() override {}
 
@@ -183,7 +257,7 @@ public:
         o.validation = desc.validation;
         o.adapter = desc.adapter;
         o.appName = desc.name;
-        o.allowRayTracing = false;
+        o.allowRayTracing = desc.rayTracing;
         if (!ctx_.create(o)) return false;
         if (!frames_.create(ctx_) || !bindless_.create(ctx_, frames_)) return false;
         VkDescriptorSetLayoutBinding b[kStorageImages + 1]{};
@@ -195,6 +269,9 @@ public:
         caps_.backend = Backend::Vulkan;
         caps_.bindless = true;
         caps_.heapSize = vk::Bindless::kMax2D;
+        caps_.drawIndirectCount = ctx_.features().drawIndirectCount;
+        // ray queries need the acceleration structure array in the bindless set (descriptor binding update after bind)
+        caps_.rayQuery = ctx_.features().rayTracing.enabled && ctx_.features().rayTracing.tlasDescriptors;
         return true;
     }
 
@@ -246,10 +323,27 @@ public:
         g.depthOp = desc.depthOp;
         g.cull = desc.cull;
         g.frontFace = desc.frontFace;
+        g.topology = desc.topology;
+        g.vertexBindings = desc.vertexBindings;
+        g.vertexAttributes = desc.vertexAttributes;
+        g.dynamicVertexStride = !desc.vertexBindings.empty();  // CommandList::setVertexBuffers supplies the strides
         g.name = desc.name != nullptr ? desc.name : "rhi graphics";
         VkPipeline p = vk::createPassGraphicsPipeline(ctx_, layout_.layout(), g);
         if (p == VK_NULL_HANDLE) return nullptr;
         return std::make_unique<VkPipelineImpl>(ctx_, p, VK_PIPELINE_BIND_POINT_GRAPHICS);
+    }
+
+    std::unique_ptr<AccelerationStructure> createBlas(std::span<const TriangleGeometry> geometries) override {
+        if (!caps_.rayQuery) return nullptr;
+        auto a = std::make_unique<VkAccelImpl>(*this, false);
+        if (!a->createBlas(geometries)) return nullptr;
+        return a;
+    }
+    std::unique_ptr<AccelerationStructure> createTlas(std::uint32_t maxInstances) override {
+        if (!caps_.rayQuery) return nullptr;
+        auto a = std::make_unique<VkAccelImpl>(*this, true);
+        if (!a->createTlas(maxInstances)) return nullptr;
+        return a;
     }
 
     void submitAndWait(const std::function<void(CommandList&)>& record) override {
@@ -294,6 +388,17 @@ public:
     vk::Context& ctx() { return ctx_; }
     vk::Bindless& bindless() { return bindless_; }
     vk::PassLayout& layout() { return layout_; }
+    // slots 1 .. kMaxTlas - 1 of the bindless acceleration structure array (0 stays free: tlasSlot() == 0 means "no TLAS"); 0 = none left
+    std::uint32_t allocTlasSlot() {
+        for (std::uint32_t i = 1; i < shader::abi::kMaxTlas; ++i) {
+            if ((tlasUsed_ & (1u << i)) == 0) {
+                tlasUsed_ |= 1u << i;
+                return i;
+            }
+        }
+        return 0;
+    }
+    void freeTlasSlot(std::uint32_t slot) { tlasUsed_ &= ~(1u << slot); }
 
 private:
     vk::Context ctx_;
@@ -302,6 +407,7 @@ private:
     vk::PassLayout layout_;
     DeviceCaps caps_;
     bool bindlessInit_ = false;
+    std::uint32_t tlasUsed_ = 0;
     std::vector<VkSampler> samplers_;
 };
 
@@ -350,6 +456,8 @@ bool VkBufferImpl::create() {
     VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bci.size = desc_.size;
     bci.usage = desc_.usage | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    // vertex, index and instance data of acceleration structure builds (DeviceDesc::rayTracing)
+    if (dev_.ctx().features().rayTracing.enabled) bci.usage |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
     VmaAllocationCreateInfo aci{};
     aci.usage = VMA_MEMORY_USAGE_AUTO;
     if (desc_.memory == Memory::Upload) {
@@ -371,25 +479,231 @@ VkBufferImpl::~VkBufferImpl() {
 }
 
 bool VkTextureImpl::create() {
+    if (desc_.cube) {  // a cube map is a 2D image of 6 layers (the faces)
+        desc_.type = VK_IMAGE_TYPE_2D;
+        desc_.layers = 6;
+        desc_.extent.depth = 1;
+    }
     vk::ImageDesc d;
     d.type = desc_.type;
     d.format = desc_.format;
     d.extent = desc_.extent;
     d.mips = desc_.mips;
     d.layers = desc_.layers;
+    d.cube = desc_.cube;
     d.usage = desc_.usage | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     d.name = desc_.name;
     if (!image_.create(dev_.ctx(), d)) return false;
-    if ((desc_.usage & VK_IMAGE_USAGE_SAMPLED_BIT) != 0) slot_ = dev_.bindless().addTexture(vk::TextureKind::Tex2D, image_.view());
+    if ((desc_.usage & VK_IMAGE_USAGE_SAMPLED_BIT) != 0) {
+        // (an array has no whole-array kind in the bindless set: heapSampled is the view of layer 0)
+        slot_ = isArray() ? heapSampledLayer(0) : dev_.bindless().addTexture(kind(), image_.view());
+    }
     return true;
 }
 
+VkImageView VkTextureImpl::view(VkImageViewType type, VkImageAspectFlags aspect, std::uint32_t baseMip, std::uint32_t mipCount, std::uint32_t baseLayer,
+                                std::uint32_t layerCount) {
+    const std::array<std::uint32_t, 6> key{static_cast<std::uint32_t>(type), aspect, baseMip, mipCount, baseLayer, layerCount};
+    auto it = views_.find(key);
+    if (it != views_.end()) return it->second;
+    VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vci.image = image_.image();
+    vci.viewType = type;
+    vci.format = desc_.format;
+    vci.subresourceRange = {aspect, baseMip, mipCount, baseLayer, layerCount};
+    VkImageView v = VK_NULL_HANDLE;
+    if (vkCreateImageView(dev_.ctx().device(), &vci, nullptr, &v) != VK_SUCCESS) {
+        spdlog::error("rhi: vkCreateImageView failed for '{}'", desc_.name != nullptr ? desc_.name : "?");
+        return VK_NULL_HANDLE;
+    }
+    views_[key] = v;
+    return v;
+}
+
+std::uint32_t VkTextureImpl::heapSampledLayer(std::uint32_t layer) {
+    if ((desc_.usage & VK_IMAGE_USAGE_SAMPLED_BIT) == 0 || layer >= desc_.layers) return 0;
+    if (!isArray()) return layer == 0 ? slot_ : 0;
+    if (layerSlots_.empty()) layerSlots_.assign(desc_.layers, 0);
+    if (layerSlots_[layer] == 0) {
+        VkImageView v = view(VK_IMAGE_VIEW_TYPE_2D, vk::isDepthFormat(desc_.format) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT, 0, desc_.mips,
+                             layer, 1);
+        if (v != VK_NULL_HANDLE) layerSlots_[layer] = dev_.bindless().addTexture(vk::TextureKind::Tex2D, v);
+    }
+    return layerSlots_[layer];
+}
+
+VkImageView VkTextureImpl::attachmentView(std::uint32_t mip, std::uint32_t layer) {
+    if (plain2D() || (mip == 0 && layer == 0 && desc_.mips == 1 && desc_.layers == 1)) return image_.view();
+    return view(VK_IMAGE_VIEW_TYPE_2D, image_.aspect(), mip, 1, layer, 1);
+}
+
+VkImageView VkTextureImpl::storageView(std::uint32_t mip, std::uint32_t layer) {
+    if (desc_.type == VK_IMAGE_TYPE_3D) return view(VK_IMAGE_VIEW_TYPE_3D, VK_IMAGE_ASPECT_COLOR_BIT, mip, 1, 0, 1);
+    if (desc_.layers > 1) return view(VK_IMAGE_VIEW_TYPE_2D_ARRAY, VK_IMAGE_ASPECT_COLOR_BIT, mip, 1, layer, 1);
+    if (plain2D()) return image_.view();
+    return view(VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT, mip, 1, 0, 1);
+}
+
 VkTextureImpl::~VkTextureImpl() {
-    if (slot_ != 0) dev_.bindless().releaseTexture(vk::TextureKind::Tex2D, slot_);
+    if (slot_ != 0 && !isArray()) dev_.bindless().releaseTexture(kind(), slot_);
+    for (std::uint32_t s : layerSlots_) {
+        if (s != 0) dev_.bindless().releaseTexture(vk::TextureKind::Tex2D, s);
+    }
     if (image_.valid()) {
         dev_.ctx().waitIdle();  // (tools / tests: no frames in flight reference it)
+        for (auto& [key, v] : views_) vkDestroyImageView(dev_.ctx().device(), v, nullptr);
         image_.destroy(dev_.ctx());
     }
+}
+
+// ---- acceleration structures ------------------------------------------------------------------------------------------------
+
+VkAccelImpl::~VkAccelImpl() {
+    dev_.ctx().waitIdle();  // (tools / tests: nothing in flight uses it)
+    if (slot_ != 0) dev_.freeTlasSlot(slot_);
+    if (handle_ != VK_NULL_HANDLE) vkDestroyAccelerationStructureKHR(dev_.ctx().device(), handle_, nullptr);
+    storage_.destroy(dev_.ctx());
+    scratch_.destroy(dev_.ctx());
+}
+
+void VkAccelImpl::blasGeometries(std::vector<VkAccelerationStructureGeometryKHR>& geoms, std::vector<VkAccelerationStructureBuildRangeInfoKHR>& ranges,
+                                 std::vector<std::uint32_t>& counts) const {
+    for (const TriangleGeometry& t : geometries_) {
+        VkAccelerationStructureGeometryKHR g{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+        g.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+        g.flags = t.opaque ? VK_GEOMETRY_OPAQUE_BIT_KHR : 0;
+        auto& tri = g.geometry.triangles;
+        tri.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+        tri.vertexFormat = t.vertexFormat;
+        tri.vertexData.deviceAddress = static_cast<VkBufferImpl*>(t.vertices)->address() + t.vertexOffset;
+        tri.vertexStride = t.vertexStride;
+        tri.maxVertex = t.vertexCount > 0 ? t.vertexCount - 1 : 0;
+        if (t.indices != nullptr) {
+            tri.indexType = t.indexType;
+            tri.indexData.deviceAddress = static_cast<VkBufferImpl*>(t.indices)->address() + t.indexOffset;
+        } else {
+            tri.indexType = VK_INDEX_TYPE_NONE_KHR;
+        }
+        geoms.push_back(g);
+        const std::uint32_t triangles = (t.indices != nullptr ? t.indexCount : t.vertexCount) / 3;
+        ranges.push_back({triangles, 0, 0, 0});
+        counts.push_back(triangles);
+    }
+}
+
+// sizes -> storage buffer + the acceleration structure object + scratch (the build happens in record*)
+bool VkAccelImpl::allocate(const VkAccelerationStructureBuildGeometryInfoKHR& info, const std::uint32_t* maxPrimitives, const char* what) {
+    vk::Context& ctx = dev_.ctx();
+    VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+    vkGetAccelerationStructureBuildSizesKHR(ctx.device(), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &info, maxPrimitives, &sizes);
+    if (!storage_.create(ctx, sizes.accelerationStructureSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, false, 256, what)) return false;
+    VkAccelerationStructureCreateInfoKHR ci{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
+    ci.buffer = storage_.buffer;
+    ci.size = sizes.accelerationStructureSize;
+    ci.type = info.type;
+    if (vkCreateAccelerationStructureKHR(ctx.device(), &ci, nullptr, &handle_) != VK_SUCCESS) {
+        spdlog::error("rhi: vkCreateAccelerationStructureKHR ({}) failed", what);
+        return false;
+    }
+    ctx.setName(handle_, VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR, what);
+    const VkDeviceSize align = std::max<VkDeviceSize>(ctx.features().rayTracing.minScratchOffsetAlignment, 16);
+    if (!scratch_.create(ctx, std::max<VkDeviceSize>(sizes.buildScratchSize, 4), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, false, align, "rhi build scratch")) {
+        return false;
+    }
+    VkAccelerationStructureDeviceAddressInfoKHR ai{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
+    ai.accelerationStructure = handle_;
+    address_ = vkGetAccelerationStructureDeviceAddressKHR(ctx.device(), &ai);
+    return true;
+}
+
+bool VkAccelImpl::createBlas(std::span<const TriangleGeometry> geometries) {
+    geometries_.assign(geometries.begin(), geometries.end());
+    for (const TriangleGeometry& t : geometries_) {
+        if (t.vertices == nullptr) return false;
+    }
+    std::vector<VkAccelerationStructureGeometryKHR> geoms;
+    std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges;
+    std::vector<std::uint32_t> counts;
+    blasGeometries(geoms, ranges, counts);
+    VkAccelerationStructureBuildGeometryInfoKHR info{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+    info.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    info.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    info.geometryCount = static_cast<std::uint32_t>(geoms.size());
+    info.pGeometries = geoms.data();
+    return allocate(info, counts.data(), "rhi blas");
+}
+
+bool VkAccelImpl::createTlas(std::uint32_t maxInstances) {
+    maxInstances_ = maxInstances;
+    slot_ = dev_.allocTlasSlot();
+    if (slot_ == 0) {
+        spdlog::error("rhi: no free TLAS slot ({} of the bindless array)", shader::abi::kMaxTlas - 1);
+        return false;
+    }
+    VkAccelerationStructureGeometryKHR g{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+    g.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    g.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+    VkAccelerationStructureBuildGeometryInfoKHR info{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+    info.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    info.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    info.geometryCount = 1;
+    info.pGeometries = &g;
+    if (!allocate(info, &maxInstances, "rhi tlas")) return false;
+    return dev_.bindless().setTlas(slot_, handle_);
+}
+
+// build writes -> later builds (a TLAS over a freshly built BLAS) and ray queries in any shader stage
+void VkAccelImpl::barrierAfterBuild(VkCommandBuffer cmd) const {
+    VkMemoryBarrier2 b{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    b.srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+    b.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    b.dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT;
+    b.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    di.memoryBarrierCount = 1;
+    di.pMemoryBarriers = &b;
+    vkCmdPipelineBarrier2(cmd, &di);
+}
+
+void VkAccelImpl::recordBuildBlas(VkCommandBuffer cmd) {
+    std::vector<VkAccelerationStructureGeometryKHR> geoms;
+    std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges;
+    std::vector<std::uint32_t> counts;
+    blasGeometries(geoms, ranges, counts);
+    VkAccelerationStructureBuildGeometryInfoKHR info{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+    info.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    info.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    info.geometryCount = static_cast<std::uint32_t>(geoms.size());
+    info.pGeometries = geoms.data();
+    info.dstAccelerationStructure = handle_;
+    info.scratchData.deviceAddress = scratch_.address;
+    const VkAccelerationStructureBuildRangeInfoKHR* pRanges = ranges.data();
+    vkCmdBuildAccelerationStructuresKHR(cmd, 1, &info, &pRanges);
+    barrierAfterBuild(cmd);
+}
+
+void VkAccelImpl::recordBuildTlas(VkCommandBuffer cmd, VkDeviceAddress instances, std::uint32_t count) {
+    VkAccelerationStructureGeometryKHR g{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+    g.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    g.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+    g.geometry.instances.arrayOfPointers = VK_FALSE;
+    g.geometry.instances.data.deviceAddress = instances;
+    VkAccelerationStructureBuildGeometryInfoKHR info{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+    info.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    info.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    info.geometryCount = 1;
+    info.pGeometries = &g;
+    info.dstAccelerationStructure = handle_;
+    info.scratchData.deviceAddress = scratch_.address;
+    const VkAccelerationStructureBuildRangeInfoKHR range{std::min(count, maxInstances_), 0, 0, 0};
+    const VkAccelerationStructureBuildRangeInfoKHR* pRange = &range;
+    vkCmdBuildAccelerationStructuresKHR(cmd, 1, &info, &pRange);
+    barrierAfterBuild(cmd);
 }
 
 // ---- command list -----------------------------------------------------------------------------------------------------------
@@ -403,7 +717,8 @@ void VkCommandListImpl::transition(Texture& texture, VkImageLayout layout) {
     img.transition(cmd_, layout, true);  // the same layout again = a barrier (writes become visible)
 }
 
-void VkCommandListImpl::bufferBarrier(Buffer&) {
+// (one barrier for every access kind: it also covers the buffer as a vertex / index / indirect source, a copy source and acceleration structure build input)
+void VkCommandListImpl::bufferBarrier(Buffer&, BufferAccess) {
     VkMemoryBarrier2 b{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
     b.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
     b.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
@@ -459,7 +774,7 @@ void VkCommandListImpl::beginRendering(const RenderingInfo& info) {
     for (std::uint32_t i = 0; i < info.colorCount; ++i) {
         const auto& a = info.color[i];
         colors[i] = {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-        colors[i].imageView = static_cast<VkTextureImpl*>(a.texture)->image().view();
+        colors[i].imageView = static_cast<VkTextureImpl*>(a.texture)->attachmentView(a.mip, a.layer);
         colors[i].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         colors[i].loadOp = a.load;
         colors[i].storeOp = a.store;
@@ -472,7 +787,7 @@ void VkCommandListImpl::beginRendering(const RenderingInfo& info) {
     ri.colorAttachmentCount = info.colorCount;
     ri.pColorAttachments = colors.data();
     if (info.depth.texture != nullptr) {
-        depth.imageView = static_cast<VkTextureImpl*>(info.depth.texture)->image().view();
+        depth.imageView = static_cast<VkTextureImpl*>(info.depth.texture)->attachmentView(info.depth.mip, info.depth.layer);
         depth.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
         depth.loadOp = info.depth.load;
         depth.storeOp = info.depth.store;
@@ -484,23 +799,40 @@ void VkCommandListImpl::beginRendering(const RenderingInfo& info) {
     setScissor(0, 0, info.width, info.height);
 }
 
-void VkCommandListImpl::copyBufferToTexture(Texture& dst, Buffer& src, std::uint64_t srcOffset) {
+// (the pipelines have the vertex input binding stride as dynamic state, so the strides of the call apply)
+void VkCommandListImpl::setVertexBuffers(std::uint32_t first, std::span<Buffer* const> buffers, std::span<const std::uint64_t> offsets,
+                                         std::span<const std::uint32_t> strides) {
+    std::array<VkBuffer, 8> bufs{};
+    std::array<VkDeviceSize, 8> offs{};
+    std::array<VkDeviceSize, 8> strs{};
+    const std::uint32_t n = static_cast<std::uint32_t>(std::min<std::size_t>(buffers.size(), bufs.size()));
+    for (std::uint32_t i = 0; i < n; ++i) {
+        bufs[i] = static_cast<VkBufferImpl*>(buffers[i])->buffer();
+        offs[i] = i < offsets.size() ? offsets[i] : 0;
+        strs[i] = i < strides.size() ? strides[i] : 0;
+    }
+    vkCmdBindVertexBuffers2(cmd_, first, n, bufs.data(), offs.data(), nullptr, strs.data());
+}
+
+void VkCommandListImpl::copyBufferToTexture(Texture& dst, Buffer& src, std::uint64_t srcOffset, Subresource sub) {
     VkTextureImpl& t = static_cast<VkTextureImpl&>(dst);
     VkBufferImageCopy c{};
     c.bufferOffset = srcOffset;
-    c.bufferRowLength = bufferRowPitch(t.desc().format, t.desc().extent.width) / formatBytes(t.desc().format);
-    c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    c.imageExtent = t.desc().extent;
+    const VkExtent3D e = mipExtent(t.desc(), sub.mip);
+    c.bufferRowLength = bufferRowPitch(t.desc().format, e.width) / formatBytes(t.desc().format);
+    c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, sub.mip, sub.layer, 1};
+    c.imageExtent = e;
     vkCmdCopyBufferToImage(cmd_, static_cast<VkBufferImpl&>(src).buffer(), t.image().image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
 }
 
-void VkCommandListImpl::copyTextureToBuffer(Buffer& dst, std::uint64_t dstOffset, Texture& src) {
+void VkCommandListImpl::copyTextureToBuffer(Buffer& dst, std::uint64_t dstOffset, Texture& src, Subresource sub) {
     VkTextureImpl& t = static_cast<VkTextureImpl&>(src);
     VkBufferImageCopy c{};
     c.bufferOffset = dstOffset;
-    c.bufferRowLength = bufferRowPitch(t.desc().format, t.desc().extent.width) / formatBytes(t.desc().format);
-    c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    c.imageExtent = t.desc().extent;
+    const VkExtent3D e = mipExtent(t.desc(), sub.mip);
+    c.bufferRowLength = bufferRowPitch(t.desc().format, e.width) / formatBytes(t.desc().format);
+    c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, sub.mip, sub.layer, 1};
+    c.imageExtent = e;
     vkCmdCopyImageToBuffer(cmd_, t.image().image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, static_cast<VkBufferImpl&>(dst).buffer(), 1, &c);
 }
 

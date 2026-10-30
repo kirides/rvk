@@ -4,8 +4,14 @@
 //
 // Per backend: a compute pass that reads a constant buffer (b8), a bindless texture + sampler (indices in the constant buffer), a RVK_REF block
 // (the frame block: Buffer::shaderRef) and the push constants, writing a storage image that is read back and compared with the CPU; a graphics
-// pass (dynamic rendering, fullscreen triangle, constant buffer) into a render target that is read back. SKIP when a backend is unavailable
-// (a DX12 device without SM 6.6 bindless); exit 1 on any mismatch.
+// pass (dynamic rendering, fullscreen triangle, constant buffer) into a render target that is read back; a swapchain on a hidden window. Then the
+// gap checks, each on both backends from one HLSL source (docs/research/hlsl-rhi.md 6):
+//   textures   cube + 3D + mip chain + array layers sampled through the heap (SampleLevel / Load), per-mip / per-layer storage and render target views
+//   buffers    read-write buffer references (RVK_BUF_LOAD / STORE / ADD), atomics from 1000 threads
+//   vertex     vertex + index buffers (two bindings, one per instance), drawIndexed, drawIndexedIndirectCount with a count smaller than maxDraws
+//   ray query  a BLAS + a two-instance TLAS, inline ray queries (the scene and the expected pixels of src/vk/raytracing.cpp selfTest)
+// A check SKIPs (with the reason) where a backend lacks the capability (DeviceCaps::drawIndirectCount / rayQuery); SKIP when a backend is
+// unavailable (a DX12 device without SM 6.6 bindless); exit 1 on any mismatch.
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -16,6 +22,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -38,7 +45,14 @@ namespace {
 struct Blobs {
     std::vector<std::uint32_t> spirv;
     std::vector<std::uint8_t> dxil;
+    bool ok = false;
     rhi::Shader shader() const { return {spirv, dxil}; }
+};
+
+// the shaders of all checks (compiled once, to SPIR-V and DXIL)
+struct Shaders {
+    Blobs cs, vs, ps;                      // the basic check
+    Blobs tex, texStore, buf, vtxVs, vtxPs, rt;  // the gap checks
 };
 
 bool compileBoth(const std::string& file, const char* entry, const char* profile, Blobs& out) {
@@ -56,6 +70,7 @@ bool compileBoth(const std::string& file, const char* entry, const char* profile
     }
     out.spirv = std::move(a.words);
     out.dxil = std::move(b.bytes);
+    out.ok = true;
     return true;
 }
 
@@ -85,11 +100,544 @@ float halfToFloat(std::uint16_t h) {
     return s ? -f : f;
 }
 
-bool runBackend(rhi::Backend backend, bool validation, const Blobs& cs, const Blobs& vs, const Blobs& ps) {
+// ---- the gap checks ---------------------------------------------------------------------------------------------------------
+
+std::string tag(rhi::Device& dev) { return std::string("[") + rhi::backendName(dev.caps().backend) + "] "; }
+
+// "[Vulkan] name: PASS / FAIL / SKIP"
+void report(rhi::Device& dev, const char* name, int before) { std::printf("%s%s: %s\n", tag(dev).c_str(), name, failures == before ? "PASS" : "FAIL"); }
+void skip(rhi::Device& dev, const char* name, const char* why) { std::printf("%s%s: SKIP (%s)\n", tag(dev).c_str(), name, why); }
+
+using Rgba = std::array<std::uint8_t, 4>;
+
+// writes colour(x, y, z) into a w x h x d block of RGBA8 texels at `base` (rows bufferRowPitch apart)
+template <typename F>
+void fillTexels(std::uint8_t* base, std::uint32_t w, std::uint32_t h, std::uint32_t d, F colour) {
+    const std::uint32_t pitch = rhi::bufferRowPitch(VK_FORMAT_R8G8B8A8_UNORM, w);
+    for (std::uint32_t z = 0; z < d; ++z) {
+        for (std::uint32_t y = 0; y < h; ++y) {
+            for (std::uint32_t x = 0; x < w; ++x) {
+                const Rgba c = colour(x, y, z);
+                std::memcpy(base + (static_cast<std::size_t>(z) * h + y) * pitch + x * 4, c.data(), 4);
+            }
+        }
+    }
+}
+
+bool nearTo(const float* got, const float* want, float tolerance = 2e-3f) {
+    for (int c = 0; c < 4; ++c) {
+        if (std::fabs(got[c] - want[c]) > tolerance) return false;
+    }
+    return true;
+}
+
+// Gap 1: textures. A cube, a 3D texture, a mip chain and a 2D array are filled through copies of single subresources and sampled by one compute
+// shader through the bindless heap; storage views of one mip / layer are written by another; render target views of a mip / layer are cleared.
+void testTextures(rhi::Device& dev, const Shaders& sh) {
+    const int before = failures;
+    if (!sh.tex.ok || !sh.texStore.ok) {
+        check(false, "texture shaders did not compile");
+        report(dev, "textures", before);
+        return;
+    }
+    constexpr VkImageUsageFlags kSampled = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    // (a cube's layers are forced to 6)
+    auto cube = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, {4, 4, 1}, 1, 1, kSampled, "rhi cube", true});
+    auto volume = dev.createTexture({VK_IMAGE_TYPE_3D, VK_FORMAT_R8G8B8A8_UNORM, {4, 4, 4}, 1, 1, kSampled, "rhi volume"});
+    auto mips = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, {8, 8, 1}, 4, 1, kSampled, "rhi mips"});
+    auto array = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, {4, 4, 1}, 1, 3, kSampled, "rhi array"});
+    auto out = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R32G32B32A32_SFLOAT, {16, 1, 1}, 1, 1, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                                  "rhi tex out"});
+    auto upload = dev.createBuffer({32768, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, rhi::Memory::Upload, "rhi tex upload"});
+    auto readback = dev.createBuffer({4096, VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "rhi tex readback"});
+    const rhi::SamplerIndex point = dev.createSampler({VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE});
+    auto sample = dev.createComputePipeline({sh.tex.shader(), "rhi tex sample"});
+    if (!cube || !volume || !mips || !array || !out || !upload || !readback || point == 0 || !sample) {
+        check(false, "texture resource / pipeline creation");
+        report(dev, "textures", before);
+        return;
+    }
+    check(cube->desc().layers == 6 && cube->heapSampled() != 0 && volume->heapSampled() != 0 && mips->heapSampled() != 0 &&
+              array->heapSampled() != 0 && array->heapSampledLayer(1) != 0 && array->heapSampledLayer(2) != 0 && array->heapSampledLayer(3) == 0,
+          "heap indices of the texture kinds");
+    check(array->heapSampledLayer(0) == array->heapSampled() && array->heapSampledLayer(1) != array->heapSampledLayer(2), "array layer heap indices");
+
+    // contents: upload offsets are multiples of 512 (the DX12 placement alignment)
+    const auto faceColour = [](std::uint32_t f) { return Rgba{static_cast<std::uint8_t>(f * 40 + 10), static_cast<std::uint8_t>(255 - f * 30), static_cast<std::uint8_t>(20 + f * 10), 255}; };
+    const auto voxelColour = [](std::uint32_t x, std::uint32_t y, std::uint32_t z) {
+        return Rgba{static_cast<std::uint8_t>(x * 60 + 10), static_cast<std::uint8_t>(y * 60 + 10), static_cast<std::uint8_t>(z * 60 + 10), 255};
+    };
+    const auto mipColour = [](std::uint32_t m) { return Rgba{static_cast<std::uint8_t>(m * 50 + 10), static_cast<std::uint8_t>(200 - m * 40), static_cast<std::uint8_t>(100 + m * 10), 255}; };
+    const auto layerColour = [](std::uint32_t l) { return Rgba{static_cast<std::uint8_t>(30 + l * 70), 90, static_cast<std::uint8_t>(220 - l * 60), 255}; };
+    auto* up = static_cast<std::uint8_t*>(upload->map());
+    std::memset(up, 0, 32768);
+    constexpr std::uint64_t kFaceOffset = 0, kVolumeOffset = 6144, kMipOffset = 10240, kLayerOffset = 14336;
+    std::array<std::uint64_t, 4> mipOffsets{};
+    {
+        std::uint64_t o = kMipOffset;
+        for (std::uint32_t m = 0; m < 4; ++m) {
+            mipOffsets[m] = o;
+            o += (rhi::copyBytes(mips->desc(), m) + 511) / 512 * 512;
+        }
+    }
+    check(mipOffsets[3] + 256 <= kLayerOffset, "upload layout");
+    for (std::uint32_t f = 0; f < 6; ++f) fillTexels(up + kFaceOffset + f * 1024, 4, 4, 1, [&](auto, auto, auto) { return faceColour(f); });
+    fillTexels(up + kVolumeOffset, 4, 4, 4, [&](std::uint32_t x, std::uint32_t y, std::uint32_t z) { return voxelColour(x, y, z); });
+    for (std::uint32_t m = 0; m < 4; ++m) {
+        const std::uint32_t e = std::max(8u >> m, 1u);
+        fillTexels(up + mipOffsets[m], e, e, 1, [&](auto, auto, auto) { return mipColour(m); });
+    }
+    for (std::uint32_t l = 0; l < 3; ++l) fillTexels(up + kLayerOffset + l * 1024, 4, 4, 1, [&](auto, auto, auto) { return layerColour(l); });
+
+    struct TexPush {
+        std::uint32_t cube, volume, mips, sampler;
+        std::uint32_t layers[4];
+    } push{cube->heapSampled(), volume->heapSampled(), mips->heapSampled(), point, {array->heapSampledLayer(0), array->heapSampledLayer(1), array->heapSampledLayer(2), 0}};
+
+    dev.submitAndWait([&](rhi::CommandList& cl) {
+        for (rhi::Texture* t : {cube.get(), volume.get(), mips.get(), array.get()}) cl.transition(*t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        for (std::uint32_t f = 0; f < 6; ++f) cl.copyBufferToTexture(*cube, *upload, kFaceOffset + f * 1024, {0, f});
+        cl.copyBufferToTexture(*volume, *upload, kVolumeOffset);
+        for (std::uint32_t m = 0; m < 4; ++m) cl.copyBufferToTexture(*mips, *upload, mipOffsets[m], {m, 0});
+        for (std::uint32_t l = 0; l < 3; ++l) cl.copyBufferToTexture(*array, *upload, kLayerOffset + l * 1024, {0, l});
+        for (rhi::Texture* t : {cube.get(), volume.get(), mips.get(), array.get()}) cl.transition(*t, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        cl.transition(*out, VK_IMAGE_LAYOUT_GENERAL);
+        cl.bindPipeline(*sample);
+        cl.setPushConstants(&push, sizeof(push));
+        rhi::Texture* storage[1] = {out.get()};
+        cl.setStorageTextures(storage);
+        cl.dispatch(1, 1, 1);
+        cl.transition(*out, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        cl.copyTextureToBuffer(*readback, 0, *out);
+    });
+    {
+        const auto* r = static_cast<const float*>(readback->map());
+        const auto unorm = [](Rgba c) { return std::array<float, 4>{c[0] / 255.0f, c[1] / 255.0f, c[2] / 255.0f, c[3] / 255.0f}; };
+        std::array<std::array<float, 4>, 16> want{};
+        for (std::uint32_t f = 0; f < 6; ++f) want[f] = unorm(faceColour(f));
+        want[6] = unorm(voxelColour(1, 2, 3));
+        want[7] = unorm(voxelColour(3, 0, 2));
+        want[8] = unorm(mipColour(1));
+        want[9] = unorm(mipColour(2));
+        want[10] = unorm(mipColour(3));
+        want[11] = unorm(mipColour(2));
+        for (std::uint32_t l = 0; l < 3; ++l) want[12 + l] = unorm(layerColour(l));
+        want[15] = {-1.0f, -1.0f, -1.0f, -1.0f};
+        static const char* names[16] = {"cube +X", "cube -X", "cube +Y", "cube -Y", "cube +Z", "cube -Z", "volume (1,2,3)", "volume (3,0,2)",
+                                        "mip 1",   "mip 2",   "mip 3",   "mip 2 load", "layer 0",  "layer 1", "layer 2",        "untouched"};
+        for (int i = 0; i < 16; ++i) {
+            check(nearTo(r + i * 4, want[i].data()), std::format("{}: got ({:.3f}, {:.3f}, {:.3f}, {:.3f}) want ({:.3f}, {:.3f}, {:.3f}, {:.3f})", names[i],
+                                                                 r[i * 4], r[i * 4 + 1], r[i * 4 + 2], r[i * 4 + 3], want[i][0], want[i][1], want[i][2], want[i][3]));
+        }
+    }
+
+    // storage views of a mip level / a layer / a volume's mip level
+    constexpr VkImageUsageFlags kStore = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    auto mipStore = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R32G32B32A32_SFLOAT, {8, 8, 1}, 2, 1, kStore, "rhi mip store"});
+    auto layerStore = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R32G32B32A32_SFLOAT, {4, 4, 1}, 1, 3, kStore, "rhi layer store"});
+    auto volumeStore = dev.createTexture({VK_IMAGE_TYPE_3D, VK_FORMAT_R32G32B32A32_SFLOAT, {4, 4, 4}, 2, 1, kStore, "rhi volume store"});
+    auto store = dev.createComputePipeline({sh.texStore.shader(), "rhi tex store"});
+    auto readStore = dev.createBuffer({4096, VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "rhi store readback"});
+    if (!mipStore || !layerStore || !volumeStore || !store || !readStore) {
+        check(false, "storage view resource / pipeline creation");
+        report(dev, "textures", before);
+        return;
+    }
+    dev.submitAndWait([&](rhi::CommandList& cl) {
+        for (rhi::Texture* t : {mipStore.get(), layerStore.get(), volumeStore.get()}) cl.transition(*t, VK_IMAGE_LAYOUT_GENERAL);
+        cl.bindPipeline(*store);
+        const rhi::StorageView views[3] = {{mipStore.get(), 1, 0}, {layerStore.get(), 0, 2}, {volumeStore.get(), 1, 0}};
+        cl.setStorageViews(views);
+        cl.dispatch(1, 1, 1);
+        for (rhi::Texture* t : {mipStore.get(), layerStore.get(), volumeStore.get()}) cl.transition(*t, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        cl.copyTextureToBuffer(*readStore, 0, *mipStore, {1, 0});
+        cl.copyTextureToBuffer(*readStore, 1024, *layerStore, {0, 2});
+        cl.copyTextureToBuffer(*readStore, 2048, *volumeStore, {1, 0});
+    });
+    {
+        const auto* base = static_cast<const std::uint8_t*>(readStore->map());
+        const auto texel = [&](std::uint64_t offset, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint32_t h) {
+            return reinterpret_cast<const float*>(base + offset + (static_cast<std::size_t>(z) * h + y) * 256 + x * 16);
+        };
+        int bad = 0;
+        for (std::uint32_t y = 0; y < 4; ++y) {
+            for (std::uint32_t x = 0; x < 4; ++x) {
+                const float wantMip[4] = {x / 4.0f, y / 4.0f, 0.5f, 1.0f};
+                const float wantLayer[4] = {0.25f, static_cast<float>(x), static_cast<float>(y), 1.0f};
+                if (!nearTo(texel(0, x, y, 0, 4), wantMip) || !nearTo(texel(1024, x, y, 0, 4), wantLayer)) ++bad;
+            }
+        }
+        check(bad == 0, std::format("storage view of mip 1 / layer 2: {} bad texel(s)", bad));
+        int badVol = 0;
+        for (std::uint32_t z = 0; z < 2; ++z) {
+            for (std::uint32_t y = 0; y < 2; ++y) {
+                for (std::uint32_t x = 0; x < 2; ++x) {
+                    const float want[4] = {static_cast<float>(x), static_cast<float>(y), static_cast<float>(z), 0.5f};
+                    if (!nearTo(texel(2048, x, y, z, 2), want)) ++badVol;
+                }
+            }
+        }
+        check(badVol == 0, std::format("storage view of the volume's mip 1: {} bad texel(s)", badVol));
+    }
+
+    // render target views of a mip level / a layer
+    auto target = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, {8, 8, 1}, 2, 3, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                                     "rhi layered target"});
+    auto readTarget = dev.createBuffer({4096, VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "rhi target readback"});
+    if (!target || !readTarget) {
+        check(false, "render target view resource creation");
+        report(dev, "textures", before);
+        return;
+    }
+    dev.submitAndWait([&](rhi::CommandList& cl) {
+        cl.transition(*target, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        for (int pass = 0; pass < 2; ++pass) {
+            rhi::RenderingInfo ri;
+            ri.colorCount = 1;
+            ri.color[0].texture = target.get();
+            ri.color[0].load = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            ri.color[0].mip = pass == 0 ? 0 : 1;
+            ri.color[0].layer = pass == 0 ? 1 : 2;
+            ri.color[0].clear.float32[pass == 0 ? 0 : 2] = 1.0f;
+            ri.color[0].clear.float32[3] = 1.0f;
+            ri.width = ri.height = pass == 0 ? 8 : 4;
+            cl.beginRendering(ri);
+            cl.endRendering();
+        }
+        cl.transition(*target, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        cl.copyTextureToBuffer(*readTarget, 0, *target, {0, 1});
+        cl.copyTextureToBuffer(*readTarget, 2048, *target, {1, 2});
+    });
+    {
+        const auto* base = static_cast<const std::uint8_t*>(readTarget->map());
+        int bad = 0;
+        for (std::uint32_t y = 0; y < 8; ++y) {
+            for (std::uint32_t x = 0; x < 8; ++x) {
+                const std::uint8_t* p = base + y * 256 + x * 4;
+                if (p[0] != 255 || p[1] != 0 || p[2] != 0 || p[3] != 255) ++bad;
+            }
+        }
+        for (std::uint32_t y = 0; y < 4; ++y) {
+            for (std::uint32_t x = 0; x < 4; ++x) {
+                const std::uint8_t* p = base + 2048 + y * 256 + x * 4;
+                if (p[0] != 0 || p[1] != 0 || p[2] != 255 || p[3] != 255) ++bad;
+            }
+        }
+        check(bad == 0, std::format("render target views of (mip 0, layer 1) / (mip 1, layer 2): {} bad texel(s)", bad));
+    }
+    report(dev, "textures", before);
+}
+
+// Gap 2: buffers the shaders write, atomics.
+void testBuffers(rhi::Device& dev, const Shaders& sh) {
+    const int before = failures;
+    if (!sh.buf.ok) {
+        check(false, "buffer shader did not compile");
+        report(dev, "buffer UAVs", before);
+        return;
+    }
+    constexpr std::uint32_t kThreads = 1000;
+    constexpr VkBufferUsageFlags kUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    auto data = dev.createBuffer({kThreads * 2 * 4, kUsage, rhi::Memory::Device, "rhi rw data"});
+    auto counters = dev.createBuffer({64, kUsage, rhi::Memory::Device, "rhi rw counters"});
+    auto zeros = dev.createBuffer({64, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, rhi::Memory::Upload, "rhi zeros"});
+    auto readData = dev.createBuffer({kThreads * 2 * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "rhi rw data readback"});
+    auto readCounters = dev.createBuffer({64, VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "rhi rw counters readback"});
+    auto pipeline = dev.createComputePipeline({sh.buf.shader(), "rhi buf"});
+    if (!data || !counters || !zeros || !readData || !readCounters || !pipeline) {
+        check(false, "buffer resource / pipeline creation");
+        report(dev, "buffer UAVs", before);
+        return;
+    }
+    check(dev.caps().backend == rhi::Backend::Vulkan || (data->heapIndexRw() != 0 && data->heapIndexRw() != data->heapIndex()), "heapIndexRw on DX12");
+    std::memset(zeros->map(), 0, 64);
+    struct BufPush {
+        std::uint32_t data[2], counters[2], count, pad[3];
+    } push{};
+    const auto d = data->shaderRefRw(0), c = counters->shaderRefRw(0);
+    push.data[0] = d[0];
+    push.data[1] = d[1];
+    push.counters[0] = c[0];
+    push.counters[1] = c[1];
+    push.count = kThreads;
+    dev.submitAndWait([&](rhi::CommandList& cl) {
+        cl.copyBuffer(*counters, 0, *zeros, 0, 64);
+        cl.bufferBarrier(*counters, rhi::BufferAccess::ShaderWrite);
+        cl.bufferBarrier(*data, rhi::BufferAccess::ShaderWrite);
+        cl.bindPipeline(*pipeline);
+        cl.setPushConstants(&push, sizeof(push));
+        cl.dispatch((kThreads + 63) / 64, 1, 1);
+        cl.bufferBarrier(*data);  // writes -> the copies out (DX12: UAV -> shader read state, then the copy state)
+        cl.bufferBarrier(*counters);
+        cl.copyBuffer(*readData, 0, *data, 0, kThreads * 2 * 4);
+        cl.copyBuffer(*readCounters, 0, *counters, 0, 64);
+    });
+    const auto* w = static_cast<const std::uint32_t*>(readData->map());
+    int bad = 0;
+    for (std::uint32_t i = 0; i < kThreads; ++i) {
+        if (w[i] != 2 * i + 1 || w[kThreads + i] != 2 * i + 2) ++bad;
+    }
+    check(bad == 0, std::format("data words: {} bad", bad));
+    const auto* k = static_cast<const std::uint32_t*>(readCounters->map());
+    std::uint32_t buckets[8] = {};
+    for (std::uint32_t i = 0; i < kThreads; ++i) buckets[i & 7] += i;
+    check(k[0] == kThreads, std::format("atomic counter {} (want {})", k[0], kThreads));
+    check(k[1] == kThreads * (kThreads - 1) / 2, std::format("sum of the atomic's returned values {} (want {})", k[1], kThreads * (kThreads - 1) / 2));
+    for (int b = 0; b < 8; ++b) check(k[2 + b] == buckets[b], std::format("bucket {}: {} (want {})", b, k[2 + b], buckets[b]));
+    report(dev, "buffer UAVs", before);
+}
+
+// Gap 3: vertex input (two bindings, one per instance), index buffer, drawIndexed, indirect draws with a count
+void testVertex(rhi::Device& dev, const Shaders& sh) {
+    const int before = failures;
+    if (!sh.vtxVs.ok || !sh.vtxPs.ok) {
+        check(false, "vertex shaders did not compile");
+        report(dev, "vertex / index / indirect draws", before);
+        return;
+    }
+    struct Vtx {
+        float x, y;
+        std::uint8_t r, g, b, a;
+    };
+    // triangle k around (cx, cy): the base positions; shifts are applied per instance
+    struct Tri {
+        float cx, cy;
+        Rgba colour;
+    };
+    const Tri tris[5] = {{-0.5f, 0.5f, {255, 0, 0, 255}},   {0.5f, 0.9f, {0, 255, 0, 255}}, {-0.5f, -0.1f, {0, 0, 255, 255}},
+                         {0.5f, -0.1f, {255, 255, 0, 255}}, {0.0f, 0.0f, {255, 255, 255, 255}}};
+    std::array<Vtx, 16> verts{};  // [0] is junk: the binding starts at offset 12
+    verts[0] = {9.0f, 9.0f, 1, 2, 3, 4};
+    for (int k = 0; k < 5; ++k) {
+        const Tri& t = tris[k];
+        verts[1 + 3 * k + 0] = {t.cx - 0.2f, t.cy - 0.2f, t.colour[0], t.colour[1], t.colour[2], t.colour[3]};
+        verts[1 + 3 * k + 1] = {t.cx + 0.2f, t.cy - 0.2f, t.colour[0], t.colour[1], t.colour[2], t.colour[3]};
+        verts[1 + 3 * k + 2] = {t.cx, t.cy + 0.2f, t.colour[0], t.colour[1], t.colour[2], t.colour[3]};
+    }
+    const float shifts[4][2] = {{0.0f, 0.0f}, {0.0f, -0.4f}, {0.0f, -0.4f}, {0.0f, 0.0f}};
+    const std::uint16_t indices[10] = {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0, 1, 2, 1, 2, 0};  // the first 8 bytes are junk
+    // draw records, 32 bytes apart: tri2 once from instance 2; tri3 twice from instance 0; tri4 (not drawn: the count says 2)
+    struct Cmd {
+        std::uint32_t indexCount, instanceCount, firstIndex;
+        std::int32_t vertexOffset;
+        std::uint32_t firstInstance, pad[3];
+    };
+    const Cmd cmds[3] = {{3, 1, 0, 6, 2, {}}, {3, 2, 0, 9, 0, {}}, {3, 1, 0, 12, 0, {}}};
+    static_assert(sizeof(Cmd) == 32);
+
+    constexpr std::uint32_t kTarget = 64;
+    auto vb = dev.createBuffer({sizeof(verts), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, rhi::Memory::Upload, "rhi vertices"});
+    auto ib = dev.createBuffer({sizeof(indices), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, rhi::Memory::Upload, "rhi indices"});
+    auto instances = dev.createBuffer({sizeof(shifts), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, rhi::Memory::Upload, "rhi instances"});
+    auto staging = dev.createBuffer({256, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, rhi::Memory::Upload, "rhi indirect staging"});
+    constexpr VkBufferUsageFlags kIndirect = VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    auto args = dev.createBuffer({sizeof(cmds), kIndirect, rhi::Memory::Device, "rhi draw args"});
+    auto countBuffer = dev.createBuffer({64, kIndirect, rhi::Memory::Device, "rhi draw count"});
+    const std::uint32_t pitch = rhi::bufferRowPitch(VK_FORMAT_R8G8B8A8_UNORM, kTarget);
+    auto target = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, {kTarget, kTarget, 1}, 1, 1,
+                                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, "rhi vertex target"});
+    auto readback = dev.createBuffer({static_cast<std::uint64_t>(pitch) * kTarget, VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "rhi vertex readback"});
+    if (!vb || !ib || !instances || !staging || !args || !countBuffer || !target || !readback) {
+        check(false, "vertex resource creation");
+        report(dev, "vertex / index / indirect draws", before);
+        return;
+    }
+    std::memcpy(vb->map(), verts.data(), sizeof(verts));
+    std::memcpy(ib->map(), indices, sizeof(indices));
+    std::memcpy(instances->map(), shifts, sizeof(shifts));
+    std::memcpy(staging->map(), cmds, sizeof(cmds));
+    *reinterpret_cast<std::uint32_t*>(static_cast<std::uint8_t*>(staging->map()) + 128 + 16) = 2;  // the count, at countOffset 16 of the count buffer
+
+    const VkVertexInputBindingDescription bindings[2] = {{0, sizeof(Vtx), VK_VERTEX_INPUT_RATE_VERTEX}, {1, 8, VK_VERTEX_INPUT_RATE_INSTANCE}};
+    const VkVertexInputAttributeDescription attributes[3] = {{0, 0, VK_FORMAT_R32G32_SFLOAT, 0}, {1, 0, VK_FORMAT_R8G8B8A8_UNORM, 8}, {2, 1, VK_FORMAT_R32G32_SFLOAT, 0}};
+    rhi::GraphicsPipelineDesc gd;
+    gd.vs = sh.vtxVs.shader();
+    gd.ps = sh.vtxPs.shader();
+    gd.colorFormats[0] = VK_FORMAT_R8G8B8A8_UNORM;
+    gd.vertexBindings = bindings;
+    gd.vertexAttributes = attributes;
+    gd.name = "rhi vertex";
+    auto pipeline = dev.createGraphicsPipeline(gd);
+    if (!pipeline) {
+        check(false, "vertex pipeline creation");
+        report(dev, "vertex / index / indirect draws", before);
+        return;
+    }
+    const bool indirect = dev.caps().drawIndirectCount;
+    dev.submitAndWait([&](rhi::CommandList& cl) {
+        if (indirect) {
+            cl.copyBuffer(*args, 0, *staging, 0, sizeof(cmds));
+            cl.copyBuffer(*countBuffer, 0, *staging, 128, 64);
+            cl.bufferBarrier(*args);  // (Vulkan: the transfer writes before the indirect reads; DX12 transitions in the draw)
+            cl.bufferBarrier(*countBuffer);
+        }
+        cl.transition(*target, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        rhi::RenderingInfo ri;
+        ri.colorCount = 1;
+        ri.color[0].texture = target.get();
+        ri.color[0].load = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        ri.color[0].clear.float32[3] = 1.0f;
+        ri.width = ri.height = kTarget;
+        cl.beginRendering(ri);
+        cl.bindPipeline(*pipeline);
+        rhi::Buffer* buffers[2] = {vb.get(), instances.get()};
+        const std::uint64_t offsets[2] = {sizeof(Vtx), 0};  // skip the junk vertex
+        const std::uint32_t strides[2] = {sizeof(Vtx), 8};
+        cl.setVertexBuffers(0, buffers, offsets, strides);
+        cl.setIndexBuffer(*ib, 8, VK_INDEX_TYPE_UINT16);  // skip the junk indices
+        cl.drawIndexed(3, 1, 0, 0, 0);                    // triangle 0, shift 0
+        cl.drawIndexed(3, 1, 3, 3, 1);                    // triangle 1 (indices 1 2 0 + vertex offset 3), shift 1
+        if (indirect) cl.drawIndexedIndirectCount(*args, 0, *countBuffer, 16, 3, sizeof(Cmd));
+        cl.endRendering();
+        cl.transition(*target, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        cl.copyTextureToBuffer(*readback, 0, *target);
+    });
+    // probes at the triangles' centroids after the shifts
+    const auto* px = static_cast<const std::uint8_t*>(readback->map());
+    const auto probe = [&](float cx, float cy, Rgba want, const char* what) {
+        const std::uint32_t x = static_cast<std::uint32_t>((cx * 0.5f + 0.5f) * kTarget);
+        const std::uint32_t y = static_cast<std::uint32_t>((0.5f - (cy - 0.2f / 3.0f) * 0.5f) * kTarget);
+        const std::uint8_t* p = px + y * pitch + x * 4;
+        check(p[0] == want[0] && p[1] == want[1] && p[2] == want[2] && p[3] == want[3],
+              std::format("{} at pixel ({}, {}): ({}, {}, {}, {}) want ({}, {}, {}, {})", what, x, y, p[0], p[1], p[2], p[3], want[0], want[1], want[2], want[3]));
+    };
+    const Rgba black{0, 0, 0, 255};
+    probe(-0.5f, 0.5f, tris[0].colour, "direct draw, triangle 0");
+    probe(0.5f, 0.5f, tris[1].colour, "direct draw, triangle 1 (firstInstance 1, vertex offset, first index)");
+    if (indirect) {
+        probe(-0.5f, -0.5f, tris[2].colour, "indirect record 0 (firstInstance 2)");
+        probe(0.5f, -0.1f, tris[3].colour, "indirect record 1, instance 0");
+        probe(0.5f, -0.5f, tris[3].colour, "indirect record 1, instance 1");
+        probe(0.0f, 0.0f, black, "indirect record 2 (beyond the count)");
+    } else {
+        probe(-0.5f, -0.5f, black, "triangle 2 (no indirect draws)");
+    }
+    probe(-0.9f, -0.9f, black, "background");
+    report(dev, indirect ? "vertex / index / indirect draws" : "vertex / index / direct draws", before);
+    if (!indirect) skip(dev, "indirect draws with a count", "no drawIndirectCount");
+}
+
+// the pixel of src/vk/raytracing.cpp selfTest's scene (rt_query.comp's encoding); `ambiguous`: on a triangle edge (either result is valid)
+std::uint32_t expectedRay(std::uint32_t px, std::uint32_t py, std::uint32_t size, bool& ambiguous) {
+    constexpr std::uint32_t kIndexA = 7, kIndexB = 9;
+    const float x = (static_cast<float>(px) + 0.5f) / static_cast<float>(size) * 2.0f - 1.0f;
+    const float y = (static_cast<float>(py) + 0.5f) / static_cast<float>(size) * 2.0f - 1.0f;
+    const auto onEdge = [](float a, float b) { return std::abs(a - b) < 1e-3f; };
+    ambiguous = onEdge(x + y, 0.0f) || onEdge(std::abs(x), 0.8f) || onEdge(std::abs(y), 0.8f) || onEdge(x, 0.0f);
+    // instance A: identity, z = 0 (t = 10), the triangle (-0.8,-0.8) (0.8,-0.8) (-0.8,0.8), opaque
+    if (x >= -0.8f && y >= -0.8f && x + y <= 0.0f) return (1u << 31) | (40u << 8) | (kIndexA + 1);
+    // instance B: rotated 180 degrees about z, z = 1 (t = 11), non-opaque: the shader accepts barycentric u < 0.5, i.e. object x = -x < 0
+    if (x <= 0.8f && y <= 0.8f && x + y >= 0.0f && x > 0.0f) return (1u << 31) | (44u << 8) | (kIndexB + 1);
+    return 0;
+}
+
+// Gap 4: ray queries
+void testRayQuery(rhi::Device& dev, const Shaders& sh) {
+    const int before = failures;
+    if (!dev.caps().rayQuery) {
+        skip(dev, "ray query", dev.caps().backend == rhi::Backend::Vulkan ? "no ray query / acceleration structure with a bindless TLAS array" : "no DXR tier 1.1");
+        return;
+    }
+    if (!sh.rt.ok) {
+        check(false, "ray query shader did not compile");
+        report(dev, "ray query", before);
+        return;
+    }
+    constexpr std::uint32_t kRtSize = 64;
+    constexpr std::uint32_t kIndexA = 7, kIndexB = 9;
+    const float verts[9] = {-0.8f, -0.8f, 0.0f, 0.8f, -0.8f, 0.0f, -0.8f, 0.8f, 0.0f};
+    const std::uint32_t idx[3] = {0, 1, 2};
+    auto vertices = dev.createBuffer({sizeof(verts), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, rhi::Memory::Upload, "rhi rt vertices"});
+    auto indices = dev.createBuffer({sizeof(idx), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, rhi::Memory::Upload, "rhi rt indices"});
+    auto instances = dev.createBuffer({2 * sizeof(VkAccelerationStructureInstanceKHR), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi rt instances"});
+    constexpr std::uint32_t kBytes = kRtSize * kRtSize * 4;
+    auto output = dev.createBuffer({kBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, rhi::Memory::Device, "rhi rt output"});
+    auto readback = dev.createBuffer({kBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "rhi rt readback"});
+    auto pipeline = dev.createComputePipeline({sh.rt.shader(), "rhi ray query"});
+    if (!vertices || !indices || !instances || !output || !readback || !pipeline) {
+        check(false, "ray query resource / pipeline creation");
+        report(dev, "ray query", before);
+        return;
+    }
+    std::memcpy(vertices->map(), verts, sizeof(verts));
+    std::memcpy(indices->map(), idx, sizeof(idx));
+    rhi::TriangleGeometry tri;
+    tri.vertices = vertices.get();
+    tri.vertexCount = 3;
+    tri.indices = indices.get();
+    tri.indexCount = 3;
+    tri.indexType = VK_INDEX_TYPE_UINT32;
+    tri.opaque = true;
+    auto blas = dev.createBlas({&tri, 1});
+    auto tlas = dev.createTlas(2);
+    if (!blas || !tlas) {
+        check(false, "acceleration structure creation");
+        report(dev, "ray query", before);
+        return;
+    }
+    check(!blas->isTlas() && tlas->isTlas() && blas->address() != 0 && tlas->tlasSlot() != 0, "acceleration structure properties");
+    // two instances of the BLAS: A as it is (opaque), B rotated 180 degrees about z, 1 further away, forced non-opaque. The record is the same 64
+    // bytes on both APIs (VkAccelerationStructureInstanceKHR = D3D12_RAYTRACING_INSTANCE_DESC)
+    VkAccelerationStructureInstanceKHR inst[2]{};
+    inst[0].transform = {{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}};
+    inst[0].instanceCustomIndex = kIndexA;
+    inst[0].mask = 0xFF;
+    inst[0].flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+    inst[0].accelerationStructureReference = blas->address();
+    inst[1] = inst[0];
+    inst[1].transform = {{{-1, 0, 0, 0}, {0, -1, 0, 0}, {0, 0, 1, 1}}};
+    inst[1].instanceCustomIndex = kIndexB;
+    inst[1].flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR | VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR;
+    static_assert(sizeof(inst) == 128);
+    std::memcpy(instances->map(), inst, sizeof(inst));
+    struct RtPush {
+        std::uint32_t out[2], tlas, width, height, pad[3];
+    } push{};
+    const auto o = output->shaderRefRw(0);
+    push.out[0] = o[0];
+    push.out[1] = o[1];
+    push.tlas = tlas->tlasSlot();
+    push.width = push.height = kRtSize;
+    dev.submitAndWait([&](rhi::CommandList& cl) {
+        cl.bufferBarrier(*output, rhi::BufferAccess::ShaderWrite);
+        cl.buildBlas(*blas);
+        cl.buildTlas(*tlas, *instances, 0, 2);
+        cl.bindPipeline(*pipeline);
+        cl.setPushConstants(&push, sizeof(push));
+        cl.dispatch(kRtSize / 8, kRtSize / 8, 1);
+        cl.bufferBarrier(*output);
+        cl.copyBuffer(*readback, 0, *output, 0, kBytes);
+    });
+    const auto* px = static_cast<const std::uint32_t*>(readback->map());
+    int bad = 0, hitsA = 0, hitsB = 0, misses = 0, skipped = 0;
+    std::string first;
+    for (std::uint32_t y = 0; y < kRtSize; ++y) {
+        for (std::uint32_t x = 0; x < kRtSize; ++x) {
+            bool ambiguous = false;
+            const std::uint32_t want = expectedRay(x, y, kRtSize, ambiguous);
+            const std::uint32_t got = px[y * kRtSize + x];
+            if (ambiguous) {
+                ++skipped;
+                continue;
+            }
+            if (got != want) {
+                if (bad++ == 0) first = std::format("pixel ({}, {}) = 0x{:08x}, expected 0x{:08x}", x, y, got, want);
+                continue;
+            }
+            (got == 0 ? misses : (got & 0xFF) == kIndexA + 1 ? hitsA : hitsB)++;
+        }
+    }
+    check(bad == 0 && hitsA > 0 && hitsB > 0 && misses > 0,
+          std::format("{} wrong pixel(s) {}; {} opaque hits, {} alpha-tested hits, {} misses, {} edge pixels skipped", bad, first, hitsA, hitsB, misses, skipped));
+    report(dev, "ray query", before);
+}
+
+bool runBackend(rhi::Backend backend, bool validation, const Shaders& sh) {
     rhi::DeviceDesc dd;
     dd.backend = backend;
     dd.validation = validation;
     dd.name = "rvk_rhitest";
+    dd.rayTracing = true;
     auto dev = backend == rhi::Backend::Vulkan ? rhi::createVulkanDevice(dd) : rhi::createD3D12Device(dd);
     if (!dev) {
         std::printf("[%s] SKIP: no device meeting the floor\n", rhi::backendName(backend));
@@ -139,10 +687,10 @@ bool runBackend(rhi::Backend backend, bool validation, const Blobs& cs, const Bl
     auto* cb = static_cast<CbData*>(cbuf->map());
     *cb = {{0.5f, 2.0f, 1.0f, 0.25f}, {input->heapSampled(), sampler, 0, 0}};
 
-    std::unique_ptr<rhi::Pipeline> compute = dev->createComputePipeline({cs.shader(), "rhi compute"});
+    std::unique_ptr<rhi::Pipeline> compute = dev->createComputePipeline({sh.cs.shader(), "rhi compute"});
     rhi::GraphicsPipelineDesc gd;
-    gd.vs = vs.shader();
-    gd.ps = ps.shader();
+    gd.vs = sh.vs.shader();
+    gd.ps = sh.ps.shader();
     gd.colorFormats[0] = VK_FORMAT_R8G8B8A8_UNORM;
     gd.name = "rhi graphics";
     std::unique_ptr<rhi::Pipeline> graphics = dev->createGraphicsPipeline(gd);
@@ -260,6 +808,10 @@ bool runBackend(rhi::Backend backend, bool validation, const Blobs& cs, const Bl
         sc.reset();
         if (hwnd != nullptr) DestroyWindow(hwnd);
     }
+    testTextures(*dev, sh);
+    testBuffers(*dev, sh);
+    testVertex(*dev, sh);
+    testRayQuery(*dev, sh);
     check(dev->validationErrors() == 0, std::format("{} validation error(s)", dev->validationErrors()));
     std::printf("[%s] %s\n", rhi::backendName(backend), failures == before ? "PASS" : "FAIL");
     return failures == before;
@@ -281,13 +833,20 @@ int main(int argc, char** argv) {
         std::printf("SKIP: %s\n", std::string(shader::dxc::unavailableReason()).c_str());
         return 0;
     }
-    Blobs cs, vs, ps;
-    if (!compileBoth("test/rhi_cb.comp.hlsl", "CSMain", "cs_6_6", cs) || !compileBoth("debug/fullscreen.vert.hlsl", "VSMain", "vs_6_6", vs) ||
-        !compileBoth("test/rhi_cb.frag.hlsl", "PSMain", "ps_6_6", ps)) {
+    Shaders sh;
+    // the basic check's shaders must compile; a failing gap shader fails only its own check (the compile errors are printed)
+    if (!compileBoth("test/rhi_cb.comp.hlsl", "CSMain", "cs_6_6", sh.cs) || !compileBoth("debug/fullscreen.vert.hlsl", "VSMain", "vs_6_6", sh.vs) ||
+        !compileBoth("test/rhi_cb.frag.hlsl", "PSMain", "ps_6_6", sh.ps)) {
         return 1;
     }
-    if (vulkan) runBackend(rhi::Backend::Vulkan, validation, cs, vs, ps);
-    if (d3d12) runBackend(rhi::Backend::D3D12, validation, cs, vs, ps);
+    compileBoth("test/rhi_tex.comp.hlsl", "CSMain", "cs_6_6", sh.tex);
+    compileBoth("test/rhi_texstore.comp.hlsl", "CSMain", "cs_6_6", sh.texStore);
+    compileBoth("test/rhi_buf.comp.hlsl", "CSMain", "cs_6_6", sh.buf);
+    compileBoth("test/rhi_vtx.vert.hlsl", "VSMain", "vs_6_6", sh.vtxVs);
+    compileBoth("test/rhi_vtx.frag.hlsl", "PSMain", "ps_6_6", sh.vtxPs);
+    compileBoth("test/rhi_rt.comp.hlsl", "CSMain", "cs_6_6", sh.rt);
+    if (vulkan) runBackend(rhi::Backend::Vulkan, validation, sh);
+    if (d3d12) runBackend(rhi::Backend::D3D12, validation, sh);
     std::printf("%s: %d failure(s)\n", failures == 0 ? "PASS" : "FAIL", failures);
     return failures == 0 ? 0 : 1;
 }

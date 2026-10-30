@@ -10,10 +10,13 @@
 //   bindless heap    sampled textures (rhi::Texture::heapSampled), samplers (heapSampler), storage buffers (Buffer::heapIndex), reached by index
 //                    from push constants / blocks: Vulkan set 0 (typed arrays), DX12 ResourceDescriptorHeap / SamplerDescriptorHeap (SM 6.6)
 //   constant buffer  one per command list state, b8 space1 (setConstantBuffer): Vulkan push descriptor set 1 binding 8, DX12 a root CBV
-//   storage images   u0..u3 space1 (setStorageTextures): Vulkan push descriptor set 1 bindings 0..3, DX12 a descriptor table
+//   storage images   u0..u3 space1 (setStorageViews): Vulkan push descriptor set 1 bindings 0..3, DX12 a descriptor table
 //   references       an 8-byte value in blocks / push constants that shaders read as RVK_REF: Buffer::shaderRef (device address on Vulkan,
-//                    {heap index, offset} on DX12)
+//                    {heap index, offset} on DX12); the read-write twin is Buffer::shaderRefRw (RVK_BUF_LOAD / STORE / ADD of rvk_abi.hlsli)
+//   acceleration     the TLAS of a ray query shader: AccelerationStructure::tlasSlot() in the push constants / blocks, RVK_TLAS(slot) in HLSL
+//   structures       (Vulkan: the bindless acceleration structure array, DX12: a RAYTRACING_ACCELERATION_STRUCTURE SRV in the heap)
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -39,7 +42,10 @@ enum class Memory {
 
 struct BufferDesc {
     std::uint64_t size = 0;
-    VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;  // STORAGE: heapIndex() / shaderRef(); UNIFORM: setConstantBuffer; TRANSFER_*: copies
+    // STORAGE: heapIndex() / shaderRef() (read) and, in Device memory, heapIndexRw() / shaderRefRw() (read-write); UNIFORM: setConstantBuffer;
+    // VERTEX / INDEX / INDIRECT: setVertexBuffers / setIndexBuffer / drawIndexedIndirectCount; TRANSFER_*: copies. (Vulkan checks the flags, DX12 does not:
+    // set them honestly.)
+    VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
     Memory memory = Memory::Device;
     const char* name = nullptr;
 };
@@ -50,10 +56,16 @@ public:
     virtual const BufferDesc& desc() const = 0;
     // the persistent mapping (Upload / Readback), null for Device memory
     virtual void* map() = 0;
-    // index of the buffer as a ByteAddressBuffer in the bindless heap (STORAGE usage; 0 = none)
+    // index of the buffer as a ByteAddressBuffer in the bindless heap (STORAGE usage; 0 = none; always 0 on Vulkan: buffers are reached by address)
     virtual std::uint32_t heapIndex() const = 0;
-    // what shaders read as RVK_REF to this buffer at `offset`
+    // index of the buffer as a RWByteAddressBuffer (a UAV) in the bindless heap (STORAGE usage and Memory::Device; 0 = none; always 0 on Vulkan)
+    virtual std::uint32_t heapIndexRw() const = 0;
+    // What shaders read as RVK_REF to this buffer at `offset` (read-only access: RVK_LOAD). Vulkan: the buffer's device address (low, high).
+    // DX12: {heapIndex() (an SRV), offset}. The two words are opaque to the application: copy them into a push constant / block.
     virtual std::array<std::uint32_t, 2> shaderRef(std::uint64_t offset = 0) const = 0;
+    // What shaders use for read-write access (rvk_abi.hlsli RVK_BUF_LOAD / RVK_BUF_STORE / RVK_BUF_ADD take it as a uint2): Vulkan: the same
+    // device address as shaderRef, DX12: {heapIndexRw() (a UAV), offset}. The buffer must be in the write state (bufferBarrier(.., ShaderWrite)).
+    virtual std::array<std::uint32_t, 2> shaderRefRw(std::uint64_t offset = 0) const = 0;
 };
 
 struct TextureDesc {
@@ -62,16 +74,34 @@ struct TextureDesc {
     VkExtent3D extent{1, 1, 1};
     std::uint32_t mips = 1;
     std::uint32_t layers = 1;
-    VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT;  // SAMPLED: heapSampled; STORAGE: setStorageTextures; COLOR/DEPTH_STENCIL_ATTACHMENT: rendering
+    VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT;  // SAMPLED: heapSampled; STORAGE: setStorageViews; COLOR/DEPTH_STENCIL_ATTACHMENT: rendering
     const char* name = nullptr;
+    // A cube map (layers is forced to 6, extent.depth 1; the layers are the faces +X -X +Y -Y +Z -Z). 3D textures: type VK_IMAGE_TYPE_3D (layers 1).
+    bool cube = false;
 };
+
+// One mip level of one array layer (cube face); copies address textures with it. 3D textures have layer 0 only.
+struct Subresource {
+    std::uint32_t mip = 0;
+    std::uint32_t layer = 0;
+};
+
+// the extent of mip level `mip` (each dimension halves, at least 1)
+VkExtent3D mipExtent(const TextureDesc& desc, std::uint32_t mip);
+// the bytes a buffer <-> texture copy of one mip level occupies in the buffer: rows are bufferRowPitch(format, mip width) apart, 3D slices follow each
+// other (height rows each). On DX12 the buffer offset of a copy must be a multiple of 512.
+std::uint64_t copyBytes(const TextureDesc& desc, std::uint32_t mip);
 
 class Texture {
 public:
     virtual ~Texture() = default;
     virtual const TextureDesc& desc() const = 0;
-    // index in the bindless heap of the sampled view (SAMPLED usage; 0 = none)
+    // Index in the bindless heap of the sampled view (SAMPLED usage; 0 = none): all mips of a 2D texture (Texture2D), a cube (TextureCube) or a
+    // volume (Texture3D) as the HLSL types of RVK_TEX2D / RVK_TEXCUBE / RVK_TEX3D. A 2D array texture (layers > 1, not cube) has no whole-array
+    // view (the bindless set has no array kind): this is layer 0, the other layers come from heapSampledLayer.
     virtual std::uint32_t heapSampled() const = 0;
+    // A Texture2D view (all mips) of one layer of a 2D array texture, created on first use (0 = none: not an array / SAMPLED missing)
+    virtual std::uint32_t heapSampledLayer(std::uint32_t layer) = 0;
 };
 
 struct SamplerDesc {
@@ -106,11 +136,48 @@ struct GraphicsPipelineDesc {
     VkPipelineColorBlendAttachmentState blend{};  // for every colour attachment (blendEnable VK_FALSE = none, colorWriteMask 0 = all)
     VkCullModeFlags cull = VK_CULL_MODE_NONE;
     VkFrontFace frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-    VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;  // lists and strips of triangles / lines / points
     bool depthTest = false;
     bool depthWrite = false;
     VkCompareOp depthOp = VK_COMPARE_OP_LESS_OR_EQUAL;
     const char* name = nullptr;
+    // Vertex input (empty = none: the vertex shader pulls or generates its data). Locations follow the HLSL convention of the translator
+    // (`[[vk::location(N)]] float4 vN : ATTRN`): attribute location N is semantic ATTR<N> on DX12. The binding strides are supplied per draw by
+    // setVertexBuffers (dynamic state on Vulkan: the stride in vertexBindings is ignored); inputRate selects per vertex / per instance data.
+    // Only read while the pipeline is created.
+    std::span<const VkVertexInputBindingDescription> vertexBindings{};
+    std::span<const VkVertexInputAttributeDescription> vertexAttributes{};
+};
+
+// ---- acceleration structures (optional: DeviceCaps::rayQuery) -----------------------------------------------------------------
+
+class Buffer;
+
+// One triangle geometry of a BLAS. The backends add the build-input usage to their buffers themselves; on DX12 device-memory buffers are moved to a
+// shader-read state by buildBlas. Positions are float3 (R32G32B32_SFLOAT).
+struct TriangleGeometry {
+    Buffer* vertices = nullptr;
+    std::uint64_t vertexOffset = 0;
+    std::uint32_t vertexStride = 12;
+    VkFormat vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+    std::uint32_t vertexCount = 0;
+    Buffer* indices = nullptr;  // null = a triangle list of vertexCount vertices
+    std::uint64_t indexOffset = 0;
+    VkIndexType indexType = VK_INDEX_TYPE_UINT32;
+    std::uint32_t indexCount = 0;
+    bool opaque = true;  // false: ray queries see the triangles as non-opaque candidates (an alpha test in the shader)
+};
+
+// A bottom- or top-level acceleration structure. Memory for the structure and the build scratch (kept for rebuilds) belong to the object.
+class AccelerationStructure {
+public:
+    virtual ~AccelerationStructure() = default;
+    virtual bool isTlas() const = 0;
+    // The GPU address instance records name: VkAccelerationStructureInstanceKHR::accelerationStructureReference (which is byte-compatible with
+    // D3D12_RAYTRACING_INSTANCE_DESC, 64 bytes: transform 3x4, custom index / mask, flags, reference) takes the BLAS's address().
+    virtual std::uint64_t address() const = 0;
+    // TLAS: the slot shaders pass to RVK_TLAS (Vulkan: the bindless acceleration structure array, DX12: the CBV/SRV/UAV heap); 0 for a BLAS
+    virtual std::uint32_t tlasSlot() const = 0;
 };
 
 // ---- swapchain --------------------------------------------------------------------------------------------------------------
@@ -138,6 +205,10 @@ struct RenderingInfo {
         VkAttachmentLoadOp load = VK_ATTACHMENT_LOAD_OP_LOAD;
         VkAttachmentStoreOp store = VK_ATTACHMENT_STORE_OP_STORE;
         VkClearColorValue clear{};
+        // the mip level / array layer (cube face) rendered to: a 2D view of that subresource (3D textures cannot be attachments); `width` / `height`
+        // of the RenderingInfo must be that level's size
+        std::uint32_t mip = 0;
+        std::uint32_t layer = 0;
     };
     std::array<Attachment, 4> color{};
     std::uint32_t colorCount = 0;
@@ -146,20 +217,42 @@ struct RenderingInfo {
     std::uint32_t width = 0, height = 0;
 };
 
+// How the shaders that follow use a buffer (CommandList::bufferBarrier)
+enum class BufferAccess {
+    ShaderRead,   // read through shaderRef / heapIndex (a ByteAddressBuffer), vertex / index / constant data
+    ShaderWrite,  // read and write through shaderRefRw / heapIndexRw (a RWByteAddressBuffer, atomics)
+};
+
+// A storage image binding: one mip level of one layer. The view is a 3D view for volumes (RWTexture3D), an array view of a single layer when the
+// texture has layers (RWTexture2DArray, the layer is z = 0), else a plain 2D view (RWTexture2D).
+struct StorageView {
+    Texture* texture = nullptr;
+    std::uint32_t mip = 0;
+    std::uint32_t layer = 0;
+};
+
 class CommandList {
 public:
     virtual ~CommandList() = default;
 
     // whole-resource transition to `layout` (the old layout is tracked per texture; UNDEFINED discards the contents)
     virtual void transition(Texture& texture, VkImageLayout layout) = 0;
-    // makes the shader / transfer writes of a buffer visible to later reads (a whole-buffer barrier)
-    virtual void bufferBarrier(Buffer& buffer) = 0;
+    // Makes the shader / transfer writes of a buffer visible to later accesses and moves it to the state `next` needs: call it between a write
+    // (copy, dispatch) and the next use by shaders, as a vertex / index / indirect source (Vulkan; DX12 transitions in the binding calls) or before
+    // copies out of it. A whole-buffer barrier on Vulkan; on DX12 a transition (device memory) or, for ShaderWrite -> ShaderWrite, a UAV barrier.
+    virtual void bufferBarrier(Buffer& buffer, BufferAccess next = BufferAccess::ShaderRead) = 0;
 
     // bindings (valid for the next draws / dispatches; both backends bind the bindless heap themselves)
     virtual void setPushConstants(const void* data, std::uint32_t size) = 0;
     virtual void setConstantBuffer(Buffer& buffer, std::uint64_t offset, std::uint64_t size) = 0;
-    // storage images u0.. (textures in GENERAL layout); a null entry is left unbound
-    virtual void setStorageTextures(std::span<Texture* const> textures) = 0;
+    // storage images u0..u3 (textures in GENERAL layout); a null texture is left unbound
+    virtual void setStorageViews(std::span<const StorageView> views) = 0;
+    // mip 0, layer 0 of each texture
+    void setStorageTextures(std::span<Texture* const> textures) {
+        std::array<StorageView, 4> v{};
+        for (std::size_t i = 0; i < textures.size() && i < v.size(); ++i) v[i].texture = textures[i];
+        setStorageViews(std::span<const StorageView>(v.data(), std::min<std::size_t>(textures.size(), v.size())));
+    }
 
     virtual void bindPipeline(Pipeline& pipeline) = 0;
     virtual void dispatch(std::uint32_t x, std::uint32_t y, std::uint32_t z) = 0;
@@ -171,11 +264,32 @@ public:
     virtual void setScissor(std::int32_t x, std::int32_t y, std::uint32_t w, std::uint32_t h) = 0;
     virtual void draw(std::uint32_t vertexCount, std::uint32_t instanceCount, std::uint32_t firstVertex, std::uint32_t firstInstance) = 0;
 
-    // copies: buffer <-> buffer, buffer -> texture (mip 0, layer 0, the whole extent, rows `bufferRowPitch(format, width)` bytes apart),
-    // texture -> buffer likewise. The texture must be in TRANSFER_DST_OPTIMAL (upload) / TRANSFER_SRC_OPTIMAL (readback) layout.
+    // vertex input: `buffers[i]` becomes binding first + i (VK_BUFFER_USAGE_VERTEX_BUFFER_BIT), `offsets` in bytes, `strides` the distance of two
+    // elements. The bindings are those of GraphicsPipelineDesc::vertexBindings.
+    virtual void setVertexBuffers(std::uint32_t first, std::span<Buffer* const> buffers, std::span<const std::uint64_t> offsets,
+                                  std::span<const std::uint32_t> strides) = 0;
+    // VK_BUFFER_USAGE_INDEX_BUFFER_BIT; `offset` in bytes (a multiple of the index size)
+    virtual void setIndexBuffer(Buffer& buffer, std::uint64_t offset, VkIndexType type) = 0;
+    virtual void drawIndexed(std::uint32_t indexCount, std::uint32_t instanceCount, std::uint32_t firstIndex, std::int32_t vertexOffset,
+                             std::uint32_t firstInstance) = 0;
+    // Up to `maxDraws` indexed draws from `args` (VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT; records of VkDrawIndexedIndirectCommand = D3D12_DRAW_INDEXED_ARGUMENTS:
+    // indexCount, instanceCount, firstIndex, vertexOffset, firstInstance; `stride` bytes apart, >= 20, a multiple of 4); min(maxDraws, the uint32 at
+    // countBuffer + countOffset) of them run. Needs DeviceCaps::drawIndirectCount.
+    virtual void drawIndexedIndirectCount(Buffer& args, std::uint64_t argsOffset, Buffer& countBuffer, std::uint64_t countOffset, std::uint32_t maxDraws,
+                                          std::uint32_t stride) = 0;
+
+    // copies: buffer <-> buffer, buffer -> texture and texture -> buffer of one subresource (default mip 0, layer 0): the whole mip level, rows
+    // `bufferRowPitch(format, mip width)` bytes apart (see copyBytes). The texture must be in TRANSFER_DST_OPTIMAL (upload) /
+    // TRANSFER_SRC_OPTIMAL (readback) layout. DX12 needs the buffer offset of a texture copy to be a multiple of 512.
     virtual void copyBuffer(Buffer& dst, std::uint64_t dstOffset, Buffer& src, std::uint64_t srcOffset, std::uint64_t size) = 0;
-    virtual void copyBufferToTexture(Texture& dst, Buffer& src, std::uint64_t srcOffset) = 0;
-    virtual void copyTextureToBuffer(Buffer& dst, std::uint64_t dstOffset, Texture& src) = 0;
+    virtual void copyBufferToTexture(Texture& dst, Buffer& src, std::uint64_t srcOffset, Subresource sub = {}) = 0;
+    virtual void copyTextureToBuffer(Buffer& dst, std::uint64_t dstOffset, Texture& src, Subresource sub = {}) = 0;
+
+    // (Re)builds a BLAS from the geometries it was created with (the buffers must hold the data now), or a TLAS from `count` instance records
+    // (VkAccelerationStructureInstanceKHR, 64 bytes each, at `instanceOffset`, a multiple of 16) in `instances`. Both end with a barrier: later builds
+    // and the ray queries of later dispatches see the result. Build the BLASes a TLAS refers to before the TLAS (the same command list is fine).
+    virtual void buildBlas(AccelerationStructure& blas) = 0;
+    virtual void buildTlas(AccelerationStructure& tlas, Buffer& instances, std::uint64_t instanceOffset, std::uint32_t count) = 0;
 
     virtual void beginRegion(std::string_view name) = 0;
     virtual void endRegion() = 0;
@@ -188,6 +302,7 @@ struct DeviceDesc {
     bool validation = false;  // Vulkan validation layer / D3D12 debug layer (+ GPU based validation)
     int adapter = -1;         // -1 = the high performance adapter
     const char* name = "rvk";
+    bool rayTracing = false;  // enable acceleration structures + ray queries when the device has them (DeviceCaps::rayQuery)
 };
 
 struct DeviceCaps {
@@ -196,6 +311,8 @@ struct DeviceCaps {
     bool bindless = false;          // descriptor indexing / SM 6.6 dynamic resources: required, creation fails without
     std::uint32_t maxPushBytes = 128;
     std::uint32_t heapSize = 0;     // entries of the texture / buffer heap
+    bool drawIndirectCount = false;  // CommandList::drawIndexedIndirectCount (Vulkan 1.2 drawIndirectCount, always on DX12)
+    bool rayQuery = false;           // createBlas / createTlas + inline ray queries (Vulkan ray query with a bindless TLAS array, DXR tier 1.1); needs DeviceDesc::rayTracing
 };
 
 class Device {
@@ -210,6 +327,9 @@ public:
     virtual SamplerIndex createSampler(const SamplerDesc& desc) = 0;
     virtual std::unique_ptr<Pipeline> createComputePipeline(const ComputePipelineDesc& desc) = 0;
     virtual std::unique_ptr<Pipeline> createGraphicsPipeline(const GraphicsPipelineDesc& desc) = 0;
+    // null without DeviceCaps::rayQuery. The structure is allocated here (sized for the geometry / `maxInstances`), built by CommandList::buildBlas / buildTlas.
+    virtual std::unique_ptr<AccelerationStructure> createBlas(std::span<const TriangleGeometry> geometries) = 0;
+    virtual std::unique_ptr<AccelerationStructure> createTlas(std::uint32_t maxInstances) = 0;
 
     // records into the returned list, executes it on the graphics queue and waits for the GPU (tools, tests, one-off work: the frame loop of the
     // renderer keeps its own submission machinery on top of the backend)

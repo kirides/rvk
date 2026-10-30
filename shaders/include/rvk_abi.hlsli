@@ -187,3 +187,44 @@ SamplerState rvkHeapSampler(uint i) {
 #define RVK_TEX3D(i) rvkHeapTex3D(i)
 #define RVK_SAMP(i) rvkHeapSampler(i)
 #endif
+
+// ---- 5. buffers the shader writes (rhi::Buffer::shaderRefRw), atomics ---------------------------------------------------------------
+// `ref` is the uint2 of Buffer::shaderRefRw(offset): Vulkan the buffer's device address (low, high), DX12 (heap index of the RWByteAddressBuffer, byte
+// offset); `off` is a byte offset from it (a multiple of 4). Words only: structs are written field by field. Atomics return the previous value.
+#ifdef __spirv__
+uint rvkBufLoad(uint2 ref, uint off) { return vk::RawBufferLoad<uint>(rvkAddr(ref) + uint64_t(off), 4); }
+void rvkBufStore(uint2 ref, uint off, uint v) { vk::RawBufferStore<uint>(rvkAddr(ref) + uint64_t(off), v, 4); }
+uint rvkBufAdd(uint2 ref, uint off, uint v) {
+    uint orig;
+    vk::BufferPointer<uint, 4> p = vk::BufferPointer<uint, 4>(rvkAddr(ref) + uint64_t(off));
+    InterlockedAdd(p.Get(), v, orig);
+    return orig;
+}
+#else
+RWByteAddressBuffer rvkHeapRwBuffer(uint slot) {
+    RWByteAddressBuffer b = ResourceDescriptorHeap[NonUniformResourceIndex(slot)];
+    return b;
+}
+uint rvkBufLoad(uint2 ref, uint off) { return rvkHeapRwBuffer(ref.x).Load(ref.y + off); }
+void rvkBufStore(uint2 ref, uint off, uint v) { rvkHeapRwBuffer(ref.x).Store(ref.y + off, v); }
+uint rvkBufAdd(uint2 ref, uint off, uint v) {
+    uint orig;
+    rvkHeapRwBuffer(ref.x).InterlockedAdd(ref.y + off, v, orig);
+    return orig;
+}
+#endif
+#define RVK_BUF_LOAD(ref, off) rvkBufLoad(ref, off)
+#define RVK_BUF_STORE(ref, off, v) rvkBufStore(ref, off, v)
+#define RVK_BUF_ADD(ref, off, v) rvkBufAdd(ref, off, v)
+
+// ---- 6. acceleration structures (rhi::AccelerationStructure::tlasSlot) ----------------------------------------------------------------
+// RVK_DECLARE_TLAS once at file scope in a shader that traces rays (it declares the Vulkan array; nothing on DX12), then
+// `rq.TraceRayInline(RVK_TLAS(slot), flags, mask, ray)`. A macro: DXC cannot return an acceleration structure from a function (SPIR-V), and the heap
+// access has to be an argument of the call (DXIL).
+#ifdef __spirv__
+#define RVK_DECLARE_TLAS RVK_VK_BINDING(4, 0) RaytracingAccelerationStructure g_tlas[] : register(t0, space104);
+#define RVK_TLAS(slot) g_tlas[NonUniformResourceIndex(slot)]
+#else
+#define RVK_DECLARE_TLAS
+#define RVK_TLAS(slot) ((RaytracingAccelerationStructure)ResourceDescriptorHeap[NonUniformResourceIndex(slot)])
+#endif

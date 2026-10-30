@@ -23,11 +23,22 @@ std::uint32_t formatBytes(VkFormat f) {
     case VK_FORMAT_D32_SFLOAT: return 4;
     case VK_FORMAT_R16G16B16A16_SFLOAT:
     case VK_FORMAT_R32G32_SFLOAT: return 8;
+    case VK_FORMAT_R32G32B32_SFLOAT: return 12;
     case VK_FORMAT_R32G32B32A32_SFLOAT: return 16;
     default: return 0;
     }
 }
 
 std::uint32_t bufferRowPitch(VkFormat format, std::uint32_t width) { return (formatBytes(format) * width + 255u) & ~255u; }
+
+VkExtent3D mipExtent(const TextureDesc& desc, std::uint32_t mip) {
+    return {std::max(desc.extent.width >> mip, 1u), std::max(desc.extent.height >> mip, 1u),
+            desc.type == VK_IMAGE_TYPE_3D ? std::max(desc.extent.depth >> mip, 1u) : 1u};
+}
+
+std::uint64_t copyBytes(const TextureDesc& desc, std::uint32_t mip) {
+    const VkExtent3D e = mipExtent(desc, mip);
+    return static_cast<std::uint64_t>(bufferRowPitch(desc.format, e.width)) * e.height * e.depth;
+}
 
 }  // namespace rvk::rhi

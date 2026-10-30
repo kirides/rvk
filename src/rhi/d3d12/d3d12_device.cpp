@@ -1,7 +1,9 @@
 // The DX12 backend of the slim RHI (rhi/rhi.h). Requirements (no fallback below them): Shader Model 6.6 (dynamic resources: the HLSL reaches textures,
 // samplers and buffers through ResourceDescriptorHeap / SamplerDescriptorHeap) and Resource Binding Tier 3. The root signature is fixed (the RHI's
 // binding model, rhi.h): 32 root constants (b0 space0), one root CBV (b8 space1), a table of 4 UAVs (u0..u3 space1), both heaps directly indexed.
-// Vulkan structs are the interface's vocabulary and are translated here: formats, image layouts -> resource states, blend / cull / compare enums.
+// Vulkan structs are the interface's vocabulary and are translated here: formats, image layouts -> resource states, blend / cull / compare enums,
+// vertex input -> input layout (semantic ATTR<location>), VkDrawIndexedIndirectCommand -> D3D12_DRAW_INDEXED_ARGUMENTS (same 20 bytes),
+// VkAccelerationStructureInstanceKHR -> D3D12_RAYTRACING_INSTANCE_DESC (same 64 bytes).
 
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -12,6 +14,7 @@
 #include <atomic>
 #include <cstring>
 #include <format>
+#include <map>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -59,6 +62,7 @@ DXGI_FORMAT toDxgi(VkFormat f) {
     case VK_FORMAT_D32_SFLOAT: return DXGI_FORMAT_D32_FLOAT;
     case VK_FORMAT_R16G16B16A16_SFLOAT: return DXGI_FORMAT_R16G16B16A16_FLOAT;
     case VK_FORMAT_R32G32_SFLOAT: return DXGI_FORMAT_R32G32_FLOAT;
+    case VK_FORMAT_R32G32B32_SFLOAT: return DXGI_FORMAT_R32G32B32_FLOAT;
     case VK_FORMAT_R32G32B32A32_SFLOAT: return DXGI_FORMAT_R32G32B32A32_FLOAT;
     default: return DXGI_FORMAT_UNKNOWN;
     }
@@ -128,6 +132,27 @@ D3D12_COMPARISON_FUNC toCompare(VkCompareOp o) {
     }
 }
 
+D3D_PRIMITIVE_TOPOLOGY toTopology(VkPrimitiveTopology t) {
+    switch (t) {
+    case VK_PRIMITIVE_TOPOLOGY_POINT_LIST: return D3D_PRIMITIVE_TOPOLOGY_POINTLIST;
+    case VK_PRIMITIVE_TOPOLOGY_LINE_LIST: return D3D_PRIMITIVE_TOPOLOGY_LINELIST;
+    case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP: return D3D_PRIMITIVE_TOPOLOGY_LINESTRIP;
+    case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP: return D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
+    default: return D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+    }
+}
+
+D3D12_PRIMITIVE_TOPOLOGY_TYPE toTopologyType(VkPrimitiveTopology t) {
+    switch (t) {
+    case VK_PRIMITIVE_TOPOLOGY_POINT_LIST: return D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
+    case VK_PRIMITIVE_TOPOLOGY_LINE_LIST:
+    case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP: return D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
+    default: return D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    }
+}
+
+std::uint64_t alignUp(std::uint64_t v, std::uint64_t a) { return (v + a - 1) / a * a; }
+
 std::wstring widen(const char* s) {
     if (s == nullptr) return {};
     std::wstring w;
@@ -167,7 +192,9 @@ public:
     const BufferDesc& desc() const override { return desc_; }
     void* map() override { return mapped_; }
     std::uint32_t heapIndex() const override { return slot_; }
+    std::uint32_t heapIndexRw() const override { return slotRw_; }
     std::array<std::uint32_t, 2> shaderRef(std::uint64_t offset) const override { return {slot_, static_cast<std::uint32_t>(offset)}; }
+    std::array<std::uint32_t, 2> shaderRefRw(std::uint64_t offset) const override { return {slotRw_, static_cast<std::uint32_t>(offset)}; }
     ID3D12Resource* resource() const { return resource_.Get(); }
     D3D12_GPU_VIRTUAL_ADDRESS gpuAddress() const { return resource_->GetGPUVirtualAddress(); }
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
@@ -177,7 +204,8 @@ private:
     BufferDesc desc_;
     ComPtr<ID3D12Resource> resource_;
     void* mapped_ = nullptr;
-    std::uint32_t slot_ = 0;
+    std::uint32_t slot_ = 0;    // the ByteAddressBuffer SRV
+    std::uint32_t slotRw_ = 0;  // the RWByteAddressBuffer UAV (device memory)
 };
 
 class D3DTexture final : public Texture {
@@ -187,22 +215,56 @@ public:
     bool create();
     const TextureDesc& desc() const override { return desc_; }
     std::uint32_t heapSampled() const override { return slot_; }
+    std::uint32_t heapSampledLayer(std::uint32_t layer) override;
     ID3D12Resource* resource() const { return resource_.Get(); }
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
     // a swapchain back buffer (owned by the swapchain; no SRV)
     void adopt(ComPtr<ID3D12Resource> r) { resource_ = std::move(r); }
+    bool isArray() const { return !desc_.cube && desc_.type == VK_IMAGE_TYPE_2D && desc_.layers > 1; }
+    // D3D12 subresource index of (mip, layer)
+    UINT subresource(Subresource s) const { return s.mip + s.layer * desc_.mips; }
 
 private:
     D3D12DeviceImpl& dev_;
     TextureDesc desc_;
     ComPtr<ID3D12Resource> resource_;
     std::uint32_t slot_ = 0;
+    std::vector<std::uint32_t> layerSlots_;  // 2D arrays: the Texture2D SRV of each layer, created on demand
 };
 
 class D3DPipeline final : public Pipeline {
 public:
     ComPtr<ID3D12PipelineState> pso;
     bool compute = false;
+    D3D_PRIMITIVE_TOPOLOGY topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+};
+
+// A BLAS or TLAS: the structure's storage (always in RAYTRACING_ACCELERATION_STRUCTURE state: such a resource cannot change state) and the build scratch
+// (UNORDERED_ACCESS), sized from the prebuild info when the object is created and kept for rebuilds. A TLAS also owns a heap SRV (tlasSlot()).
+class D3DAccel final : public AccelerationStructure {
+public:
+    D3DAccel(D3D12DeviceImpl& dev, bool tlas) : dev_(dev), tlas_(tlas) {}
+    ~D3DAccel() override;
+    bool createBlas(std::span<const TriangleGeometry> geometries);
+    bool createTlas(std::uint32_t maxInstances);
+    bool isTlas() const override { return tlas_; }
+    std::uint64_t address() const override { return storage_->GetGPUVirtualAddress(); }
+    std::uint32_t tlasSlot() const override { return slot_; }
+    std::uint64_t scratchAddress() const { return scratch_->GetGPUVirtualAddress(); }
+    const std::vector<TriangleGeometry>& geometries() const { return geometries_; }
+    std::uint32_t maxInstances() const { return maxInstances_; }
+    // D3D12_RAYTRACING_GEOMETRY_DESCs of the BLAS (from the buffers' current addresses)
+    void geometryDescs(std::vector<D3D12_RAYTRACING_GEOMETRY_DESC>& out) const;
+
+private:
+    bool allocate(const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& inputs);
+
+    D3D12DeviceImpl& dev_;
+    bool tlas_;
+    std::vector<TriangleGeometry> geometries_;
+    std::uint32_t maxInstances_ = 0;
+    ComPtr<ID3D12Resource> storage_, scratch_;
+    std::uint32_t slot_ = 0;
 };
 
 class D3DCommandList;
@@ -286,6 +348,12 @@ public:
             spdlog::error("d3d12: '{}' offers resource binding tier {} (3 is required)", caps_.adapterName, static_cast<int>(o.ResourceBindingTier));
             return false;
         }
+        // inline ray queries (DXR tier 1.1) when asked for
+        D3D12_FEATURE_DATA_D3D12_OPTIONS5 o5{};
+        if (desc.rayTracing && SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &o5, sizeof(o5))) &&
+            o5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_1 && SUCCEEDED(device_.As(&device5_))) {
+            caps_.rayQuery = true;
+        }
         D3D12_COMMAND_QUEUE_DESC qd{D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_QUEUE_PRIORITY_NORMAL, D3D12_COMMAND_QUEUE_FLAG_NONE, 0};
         RVK_HR(device_->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue_)), "CreateCommandQueue");
         RVK_HR(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator_)), "CreateCommandAllocator");
@@ -328,6 +396,7 @@ public:
         caps_.backend = Backend::D3D12;
         caps_.bindless = true;
         caps_.heapSize = kHeapSize;
+        caps_.drawIndirectCount = true;  // ExecuteIndirect with a count buffer
         return true;
     }
 
@@ -393,7 +462,24 @@ public:
         pd.PS = {desc.ps.dxil.data(), desc.ps.dxil.size()};
         pd.SampleMask = 0xFFFFFFFFu;
         pd.SampleDesc = {1, 0};
-        pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        pd.PrimitiveTopologyType = toTopologyType(desc.topology);
+        // vertex input: attribute location N is the semantic ATTR<N> (the translator's convention); per-instance bindings step once per instance
+        std::vector<D3D12_INPUT_ELEMENT_DESC> elements;
+        for (const VkVertexInputAttributeDescription& a : desc.vertexAttributes) {
+            const bool perInstance = std::any_of(desc.vertexBindings.begin(), desc.vertexBindings.end(), [&](const VkVertexInputBindingDescription& b) {
+                return b.binding == a.binding && b.inputRate == VK_VERTEX_INPUT_RATE_INSTANCE;
+            });
+            D3D12_INPUT_ELEMENT_DESC e{};
+            e.SemanticName = "ATTR";
+            e.SemanticIndex = a.location;
+            e.Format = toDxgi(a.format);
+            e.InputSlot = a.binding;
+            e.AlignedByteOffset = a.offset;
+            e.InputSlotClass = perInstance ? D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA : D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+            e.InstanceDataStepRate = perInstance ? 1 : 0;
+            elements.push_back(e);
+        }
+        pd.InputLayout = {elements.data(), static_cast<UINT>(elements.size())};
         for (std::uint32_t i = 0; i < desc.colorFormats.size(); ++i) {
             if (desc.colorFormats[i] == VK_FORMAT_UNDEFINED) continue;
             pd.RTVFormats[i] = toDxgi(desc.colorFormats[i]);
@@ -419,6 +505,7 @@ public:
         pd.DepthStencilState.DepthFunc = toCompare(desc.depthOp);
         pd.DSVFormat = toDxgi(desc.depthFormat);
         auto p = std::make_unique<D3DPipeline>();
+        p->topology = toTopology(desc.topology);
         const HRESULT hr = device_->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&p->pso));
         if (FAILED(hr)) {
             spdlog::error("d3d12: CreateGraphicsPipelineState '{}' failed (0x{:08x})", desc.name != nullptr ? desc.name : "", static_cast<unsigned>(hr));
@@ -426,6 +513,19 @@ public:
         }
         if (desc.name != nullptr) p->pso->SetName(widen(desc.name).c_str());
         return p;
+    }
+
+    std::unique_ptr<AccelerationStructure> createBlas(std::span<const TriangleGeometry> geometries) override {
+        if (!caps_.rayQuery) return nullptr;
+        auto a = std::make_unique<D3DAccel>(*this, false);
+        if (!a->createBlas(geometries)) return nullptr;
+        return a;
+    }
+    std::unique_ptr<AccelerationStructure> createTlas(std::uint32_t maxInstances) override {
+        if (!caps_.rayQuery) return nullptr;
+        auto a = std::make_unique<D3DAccel>(*this, true);
+        if (!a->createTlas(maxInstances)) return nullptr;
+        return a;
     }
 
     void submitAndWait(const std::function<void(CommandList&)>& record) override;
@@ -470,6 +570,33 @@ public:
         const std::uint32_t t = uavTable_++ % (kUavRing / kStorageImages);
         return kHeapSize - kUavRing + t * kStorageImages;
     }
+    ID3D12Device5* device5() { return device5_.Get(); }
+    // a committed buffer in a default heap (acceleration structure storage, scratch)
+    ComPtr<ID3D12Resource> createDefaultBuffer(std::uint64_t size, D3D12_RESOURCE_FLAGS flags, D3D12_RESOURCE_STATES state) {
+        D3D12_HEAP_PROPERTIES hp{};
+        hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = size;
+        rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+        rd.SampleDesc = {1, 0};
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        rd.Flags = flags;
+        ComPtr<ID3D12Resource> r;
+        if (FAILED(device_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, state, nullptr, IID_PPV_ARGS(&r)))) return nullptr;
+        return r;
+    }
+    // the ExecuteIndirect signature of indexed draws `stride` bytes apart (one D3D12_DRAW_INDEXED_ARGUMENTS each; no root arguments)
+    ID3D12CommandSignature* drawIndexedSignature(std::uint32_t stride) {
+        auto it = drawSignatures_.find(stride);
+        if (it != drawSignatures_.end()) return it->second.Get();
+        D3D12_INDIRECT_ARGUMENT_DESC arg{};
+        arg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
+        D3D12_COMMAND_SIGNATURE_DESC cd{stride, 1, &arg, 0};
+        ComPtr<ID3D12CommandSignature> sig;
+        if (FAILED(device_->CreateCommandSignature(&cd, nullptr, IID_PPV_ARGS(&sig)))) return nullptr;
+        return (drawSignatures_[stride] = std::move(sig)).Get();
+    }
     ID3D12DescriptorHeap* srvHeap() { return srvHeap_.Get(); }
     ID3D12DescriptorHeap* samplerHeap() { return samplerHeap_.Get(); }
 
@@ -503,7 +630,8 @@ private:
         D3D12_ROOT_SIGNATURE_DESC rd{};
         rd.NumParameters = 3;
         rd.pParameters = params;
-        rd.Flags = D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED | D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED;
+        rd.Flags = D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED | D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED |
+                   D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
         ComPtr<ID3DBlob> blob, error;
         const HRESULT hr = D3D12SerializeRootSignature(&rd, D3D_ROOT_SIGNATURE_VERSION_1_0, &blob, &error);
         if (FAILED(hr)) {
@@ -518,6 +646,8 @@ private:
 
     ComPtr<IDXGIFactory2> factory_;
     ComPtr<ID3D12Device> device_;
+    ComPtr<ID3D12Device5> device5_;  // DXR (null without DeviceDesc::rayTracing / tier 1.1)
+    std::map<std::uint32_t, ComPtr<ID3D12CommandSignature>> drawSignatures_;
     ComPtr<ID3D12CommandQueue> queue_;
     ComPtr<ID3D12CommandAllocator> allocator_;
     ComPtr<ID3D12GraphicsCommandList> list_;
@@ -540,10 +670,13 @@ bool D3DBuffer::create() {
     hp.Type = desc_.memory == Memory::Upload ? D3D12_HEAP_TYPE_UPLOAD : desc_.memory == Memory::Readback ? D3D12_HEAP_TYPE_READBACK : D3D12_HEAP_TYPE_DEFAULT;
     D3D12_RESOURCE_DESC rd{};
     rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    rd.Width = std::max<std::uint64_t>(desc_.size, 4);
+    rd.Width = alignUp(std::max<std::uint64_t>(desc_.size, 4), 4);
     rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
     rd.SampleDesc = {1, 0};
     rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    // shader-writable (RWByteAddressBuffer, atomics): device memory only (upload / readback heaps cannot have UAVs)
+    const bool writable = (desc_.usage & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) != 0 && hp.Type == D3D12_HEAP_TYPE_DEFAULT;
+    if (writable) rd.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     state = hp.Type == D3D12_HEAP_TYPE_UPLOAD ? D3D12_RESOURCE_STATE_GENERIC_READ : hp.Type == D3D12_HEAP_TYPE_READBACK ? D3D12_RESOURCE_STATE_COPY_DEST : D3D12_RESOURCE_STATE_COMMON;
     if (FAILED(dev_.device()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, state, nullptr, IID_PPV_ARGS(&resource_)))) return false;
     if (desc_.name != nullptr) resource_->SetName(widen(desc_.name).c_str());
@@ -561,12 +694,22 @@ bool D3DBuffer::create() {
         sd.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
         dev_.device()->CreateShaderResourceView(resource_.Get(), &sd, dev_.srvCpu(slot_));
     }
+    if (writable) {
+        slotRw_ = dev_.srvAlloc().alloc();
+        D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+        ud.Format = DXGI_FORMAT_R32_TYPELESS;
+        ud.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        ud.Buffer.NumElements = static_cast<UINT>(rd.Width / 4);
+        ud.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+        dev_.device()->CreateUnorderedAccessView(resource_.Get(), nullptr, &ud, dev_.srvCpu(slotRw_));
+    }
     return true;
 }
 
 D3DBuffer::~D3DBuffer() {
     dev_.waitIdle();
     dev_.srvAlloc().release(slot_);
+    dev_.srvAlloc().release(slotRw_);
 }
 
 bool D3DTexture::create() {
@@ -574,13 +717,19 @@ bool D3DTexture::create() {
         spdlog::error("d3d12: texture format {} is not supported by the RHI", static_cast<int>(desc_.format));
         return false;
     }
+    if (desc_.cube) {  // a cube map is a 2D resource of 6 slices (the faces)
+        desc_.type = VK_IMAGE_TYPE_2D;
+        desc_.layers = 6;
+        desc_.extent.depth = 1;
+    }
+    const bool volume = desc_.type == VK_IMAGE_TYPE_3D;
     D3D12_HEAP_PROPERTIES hp{};
     hp.Type = D3D12_HEAP_TYPE_DEFAULT;
     D3D12_RESOURCE_DESC rd{};
-    rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    rd.Dimension = volume ? D3D12_RESOURCE_DIMENSION_TEXTURE3D : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     rd.Width = desc_.extent.width;
     rd.Height = desc_.extent.height;
-    rd.DepthOrArraySize = static_cast<UINT16>(desc_.layers);
+    rd.DepthOrArraySize = static_cast<UINT16>(volume ? desc_.extent.depth : desc_.layers);
     rd.MipLevels = static_cast<UINT16>(desc_.mips);
     rd.Format = resourceFormat(desc_.format, (desc_.usage & VK_IMAGE_USAGE_SAMPLED_BIT) != 0);
     rd.SampleDesc = {1, 0};
@@ -598,20 +747,133 @@ bool D3DTexture::create() {
     if (FAILED(dev_.device()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COMMON, target ? &cv : nullptr, IID_PPV_ARGS(&resource_)))) return false;
     if (desc_.name != nullptr) resource_->SetName(widen(desc_.name).c_str());
     if ((desc_.usage & VK_IMAGE_USAGE_SAMPLED_BIT) != 0) {
-        slot_ = dev_.srvAlloc().alloc();
-        D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
-        sd.Format = srvFormat(desc_.format);
-        sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        sd.Texture2D.MipLevels = desc_.mips;
-        dev_.device()->CreateShaderResourceView(resource_.Get(), &sd, dev_.srvCpu(slot_));
+        if (isArray()) {  // (no whole-array view: heapSampled is layer 0, see rhi.h)
+            slot_ = heapSampledLayer(0);
+        } else {
+            slot_ = dev_.srvAlloc().alloc();
+            D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+            sd.Format = srvFormat(desc_.format);
+            sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            if (desc_.cube) {
+                sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+                sd.TextureCube.MipLevels = desc_.mips;
+            } else if (volume) {
+                sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+                sd.Texture3D.MipLevels = desc_.mips;
+            } else {
+                sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                sd.Texture2D.MipLevels = desc_.mips;
+            }
+            dev_.device()->CreateShaderResourceView(resource_.Get(), &sd, dev_.srvCpu(slot_));
+        }
     }
     return true;
 }
 
+// A Texture2D view of one layer of an array resource. The shader declares Texture2D, but a plain TEXTURE2D view always sees array slice 0 (D3D12 has
+// no slice offset in it), so every layer is a 2D-array view of one slice. Whether the runtime accepts that for Texture2D accesses is checked by the
+// debug layer / GPU based validation in rvk_rhitest.
+std::uint32_t D3DTexture::heapSampledLayer(std::uint32_t layer) {
+    if ((desc_.usage & VK_IMAGE_USAGE_SAMPLED_BIT) == 0 || layer >= desc_.layers) return 0;
+    if (!isArray()) return layer == 0 ? slot_ : 0;
+    if (layerSlots_.empty()) layerSlots_.assign(desc_.layers, 0);
+    if (layerSlots_[layer] == 0) {
+        const std::uint32_t slot = dev_.srvAlloc().alloc();
+        D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format = srvFormat(desc_.format);
+        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        sd.Texture2DArray.MipLevels = desc_.mips;
+        sd.Texture2DArray.FirstArraySlice = layer;
+        sd.Texture2DArray.ArraySize = 1;
+        dev_.device()->CreateShaderResourceView(resource_.Get(), &sd, dev_.srvCpu(slot));
+        layerSlots_[layer] = slot;
+    }
+    return layerSlots_[layer];
+}
+
 D3DTexture::~D3DTexture() {
     dev_.waitIdle();
+    if (!isArray()) dev_.srvAlloc().release(slot_);
+    for (std::uint32_t s : layerSlots_) dev_.srvAlloc().release(s);
+}
+
+// ---- acceleration structures (DXR 1.1) ---------------------------------------------------------------------------------------
+
+D3DAccel::~D3DAccel() {
+    dev_.waitIdle();
     dev_.srvAlloc().release(slot_);
+}
+
+void D3DAccel::geometryDescs(std::vector<D3D12_RAYTRACING_GEOMETRY_DESC>& out) const {
+    for (const TriangleGeometry& t : geometries_) {
+        D3D12_RAYTRACING_GEOMETRY_DESC g{};
+        g.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+        g.Flags = t.opaque ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
+        g.Triangles.VertexFormat = toDxgi(t.vertexFormat);
+        g.Triangles.VertexCount = t.vertexCount;
+        g.Triangles.VertexBuffer.StartAddress = static_cast<D3DBuffer*>(t.vertices)->gpuAddress() + t.vertexOffset;
+        g.Triangles.VertexBuffer.StrideInBytes = t.vertexStride;
+        if (t.indices != nullptr) {
+            g.Triangles.IndexFormat = t.indexType == VK_INDEX_TYPE_UINT16 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT;
+            g.Triangles.IndexCount = t.indexCount;
+            g.Triangles.IndexBuffer = static_cast<D3DBuffer*>(t.indices)->gpuAddress() + t.indexOffset;
+        }
+        out.push_back(g);
+    }
+}
+
+// prebuild info -> storage + scratch. The storage is created in RAYTRACING_ACCELERATION_STRUCTURE state (it stays there: such a resource cannot be
+// transitioned) with UAV access for the builds; both sizes are rounded up to the 256 byte alignment DXR wants.
+bool D3DAccel::allocate(const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& inputs) {
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};
+    dev_.device5()->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &info);
+    if (info.ResultDataMaxSizeInBytes == 0) return false;
+    storage_ = dev_.createDefaultBuffer(alignUp(info.ResultDataMaxSizeInBytes, 256), D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                        D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE);
+    // (the scratch is created in COMMON, which is what a buffer starts in whatever is asked for; the build promotes it to UNORDERED_ACCESS implicitly
+    // and it decays back when the command list has executed)
+    scratch_ = dev_.createDefaultBuffer(alignUp(std::max<std::uint64_t>(info.ScratchDataSizeInBytes, 256), 256), D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                        D3D12_RESOURCE_STATE_COMMON);
+    if (!storage_ || !scratch_) return false;
+    storage_->SetName(tlas_ ? L"rhi tlas" : L"rhi blas");
+    scratch_->SetName(L"rhi build scratch");
+    return true;
+}
+
+bool D3DAccel::createBlas(std::span<const TriangleGeometry> geometries) {
+    geometries_.assign(geometries.begin(), geometries.end());
+    for (const TriangleGeometry& t : geometries_) {
+        if (t.vertices == nullptr) return false;
+    }
+    std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> descs;
+    geometryDescs(descs);
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
+    in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+    in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    in.NumDescs = static_cast<UINT>(descs.size());
+    in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    in.pGeometryDescs = descs.data();
+    return allocate(in);
+}
+
+bool D3DAccel::createTlas(std::uint32_t maxInstances) {
+    maxInstances_ = maxInstances;
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
+    in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+    in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    in.NumDescs = maxInstances;
+    in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+    if (!allocate(in)) return false;
+    // the heap entry shaders reach the TLAS through (RVK_TLAS)
+    slot_ = dev_.srvAlloc().alloc();
+    if (slot_ == 0) return false;
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
+    sd.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+    sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sd.RaytracingAccelerationStructure.Location = storage_->GetGPUVirtualAddress();
+    dev_.device()->CreateShaderResourceView(nullptr, &sd, dev_.srvCpu(slot_));
+    return true;
 }
 
 // ---- command list -----------------------------------------------------------------------------------------------------------
@@ -640,15 +902,22 @@ public:
         list_->ResourceBarrier(1, &b);
     }
 
-    void bufferBarrier(Buffer& buffer) override {
+    // ShaderRead -> ALL_SHADER_RESOURCE (the state of an SRV), ShaderWrite -> UNORDERED_ACCESS; an UAV -> UAV step is a UAV barrier (the writes of the
+    // previous dispatch become visible); a transition out of UNORDERED_ACCESS flushes the writes by itself
+    void bufferBarrier(Buffer& buffer, BufferAccess next) override {
         D3DBuffer& b = static_cast<D3DBuffer&>(buffer);
         if (b.desc().memory != Memory::Device) return;  // upload / readback heaps keep their one state
-        const D3D12_RESOURCE_STATES to = D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;
-        if (b.state == to) return;
+        const D3D12_RESOURCE_STATES to = next == BufferAccess::ShaderWrite ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;
         D3D12_RESOURCE_BARRIER rb{};
-        rb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        rb.Transition = {b.resource(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, b.state, to};
-        b.state = to;
+        if (b.state == to) {
+            if (to != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) return;
+            rb.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+            rb.UAV.pResource = b.resource();
+        } else {
+            rb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            rb.Transition = {b.resource(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, b.state, to};
+            b.state = to;
+        }
         list_->ResourceBarrier(1, &rb);
     }
 
@@ -662,16 +931,31 @@ public:
         cbAddress_ = static_cast<D3DBuffer&>(buffer).gpuAddress() + offset;
         dirtyCb_ = true;
     }
-    void setStorageTextures(std::span<Texture* const> textures) override {
+    // One UAV per slot in a fresh table of the ring; the view dimension follows the texture (rhi.h StorageView): 3D, 2D array of one slice, or 2D.
+    void setStorageViews(std::span<const StorageView> views) override {
         tableFirst_ = dev_.nextUavTable();
         for (std::uint32_t i = 0; i < kStorageImages; ++i) {
             D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
             ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
             ID3D12Resource* res = nullptr;
-            if (i < textures.size() && textures[i] != nullptr) {
-                D3DTexture* t = static_cast<D3DTexture*>(textures[i]);
+            if (i < views.size() && views[i].texture != nullptr) {
+                D3DTexture* t = static_cast<D3DTexture*>(views[i].texture);
+                const TextureDesc& d = t->desc();
                 res = t->resource();
-                ud.Format = toDxgi(t->desc().format);
+                ud.Format = toDxgi(d.format);
+                if (d.type == VK_IMAGE_TYPE_3D) {
+                    ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
+                    ud.Texture3D.MipSlice = views[i].mip;
+                    ud.Texture3D.FirstWSlice = 0;
+                    ud.Texture3D.WSize = std::max(d.extent.depth >> views[i].mip, 1u);
+                } else if (d.layers > 1) {
+                    ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+                    ud.Texture2DArray.MipSlice = views[i].mip;
+                    ud.Texture2DArray.FirstArraySlice = views[i].layer;
+                    ud.Texture2DArray.ArraySize = 1;
+                } else {
+                    ud.Texture2D.MipSlice = views[i].mip;
+                }
             } else {
                 ud.Format = DXGI_FORMAT_R8G8B8A8_UNORM;  // a null descriptor
             }
@@ -686,7 +970,7 @@ public:
             list_->SetComputeRootSignature(dev_.rootSignature());
         } else {
             list_->SetGraphicsRootSignature(dev_.rootSignature());
-            list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            list_->IASetPrimitiveTopology(pipeline_->topology);
         }
         list_->SetPipelineState(pipeline_->pso.Get());
         dirtyConstants_ = dirtyCb_ = dirtyTable_ = true;
@@ -697,13 +981,25 @@ public:
         list_->Dispatch(x, y, z);
     }
 
+    // (render target / depth views of the subresource are made per call into rings, like the UAV tables)
     void beginRendering(const RenderingInfo& info) override {
         std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 4> rtv{};
         for (std::uint32_t i = 0; i < info.colorCount; ++i) {
             const auto& a = info.color[i];
             D3DTexture* t = static_cast<D3DTexture*>(a.texture);
             rtv[i] = dev_.rtvCpu(dev_.nextRtv());
-            dev_.device()->CreateRenderTargetView(t->resource(), nullptr, rtv[i]);
+            D3D12_RENDER_TARGET_VIEW_DESC rv{};
+            rv.Format = toDxgi(t->desc().format);
+            if (t->desc().layers > 1) {
+                rv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+                rv.Texture2DArray.MipSlice = a.mip;
+                rv.Texture2DArray.FirstArraySlice = a.layer;
+                rv.Texture2DArray.ArraySize = 1;
+            } else {
+                rv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+                rv.Texture2D.MipSlice = a.mip;
+            }
+            dev_.device()->CreateRenderTargetView(t->resource(), &rv, rtv[i]);
             if (a.load == VK_ATTACHMENT_LOAD_OP_CLEAR) {
                 const float c[4] = {a.clear.float32[0], a.clear.float32[1], a.clear.float32[2], a.clear.float32[3]};
                 list_->ClearRenderTargetView(rtv[i], c, 0, nullptr);
@@ -715,7 +1011,15 @@ public:
             dsv = dev_.dsvCpu(dev_.nextDsv());
             D3D12_DEPTH_STENCIL_VIEW_DESC dd{};
             dd.Format = toDxgi(t->desc().format);
-            dd.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+            if (t->desc().layers > 1) {
+                dd.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
+                dd.Texture2DArray.MipSlice = info.depth.mip;
+                dd.Texture2DArray.FirstArraySlice = info.depth.layer;
+                dd.Texture2DArray.ArraySize = 1;
+            } else {
+                dd.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+                dd.Texture2D.MipSlice = info.depth.mip;
+            }
             dev_.device()->CreateDepthStencilView(t->resource(), &dd, dsv);
             if (info.depth.load == VK_ATTACHMENT_LOAD_OP_CLEAR) {
                 list_->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, info.depthClear.depth, static_cast<UINT8>(info.depthClear.stencil), 0, nullptr);
@@ -739,6 +1043,46 @@ public:
         list_->DrawInstanced(vertexCount, instanceCount, firstVertex, firstInstance);
     }
 
+    // vertex / index / indirect sources move to their read state here (device memory; upload heaps are GENERIC_READ already)
+    void setVertexBuffers(std::uint32_t first, std::span<Buffer* const> buffers, std::span<const std::uint64_t> offsets,
+                          std::span<const std::uint32_t> strides) override {
+        std::array<D3D12_VERTEX_BUFFER_VIEW, 8> views{};
+        const std::uint32_t n = static_cast<std::uint32_t>(std::min<std::size_t>(buffers.size(), views.size()));
+        for (std::uint32_t i = 0; i < n; ++i) {
+            D3DBuffer& b = *static_cast<D3DBuffer*>(buffers[i]);
+            bufferState(b, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+            const std::uint64_t off = i < offsets.size() ? offsets[i] : 0;
+            views[i].BufferLocation = b.gpuAddress() + off;
+            views[i].SizeInBytes = static_cast<UINT>(b.desc().size - off);
+            views[i].StrideInBytes = i < strides.size() ? strides[i] : 0;
+        }
+        list_->IASetVertexBuffers(first, n, views.data());
+    }
+    void setIndexBuffer(Buffer& buffer, std::uint64_t offset, VkIndexType type) override {
+        D3DBuffer& b = static_cast<D3DBuffer&>(buffer);
+        bufferState(b, D3D12_RESOURCE_STATE_INDEX_BUFFER);
+        D3D12_INDEX_BUFFER_VIEW v{};
+        v.BufferLocation = b.gpuAddress() + offset;
+        v.SizeInBytes = static_cast<UINT>(b.desc().size - offset);
+        v.Format = type == VK_INDEX_TYPE_UINT16 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT;
+        list_->IASetIndexBuffer(&v);
+    }
+    void drawIndexed(std::uint32_t indexCount, std::uint32_t instanceCount, std::uint32_t firstIndex, std::int32_t vertexOffset,
+                     std::uint32_t firstInstance) override {
+        flush();
+        list_->DrawIndexedInstanced(indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+    }
+    // ExecuteIndirect with a DRAW_INDEXED signature: D3D12_DRAW_INDEXED_ARGUMENTS is byte-identical to VkDrawIndexedIndirectCommand
+    void drawIndexedIndirectCount(Buffer& args, std::uint64_t argsOffset, Buffer& countBuffer, std::uint64_t countOffset, std::uint32_t maxDraws,
+                                  std::uint32_t stride) override {
+        D3DBuffer& a = static_cast<D3DBuffer&>(args);
+        D3DBuffer& c = static_cast<D3DBuffer&>(countBuffer);
+        bufferState(a, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        bufferState(c, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        flush();
+        list_->ExecuteIndirect(dev_.drawIndexedSignature(stride), maxDraws, a.resource(), argsOffset, c.resource(), countOffset);
+    }
+
     void copyBuffer(Buffer& dst, std::uint64_t dstOffset, Buffer& src, std::uint64_t srcOffset, std::uint64_t size) override {
         D3DBuffer& d = static_cast<D3DBuffer&>(dst);
         D3DBuffer& s = static_cast<D3DBuffer&>(src);
@@ -746,35 +1090,77 @@ public:
         bufferState(s, D3D12_RESOURCE_STATE_COPY_SOURCE);
         list_->CopyBufferRegion(d.resource(), dstOffset, s.resource(), srcOffset, size);
     }
-    void copyBufferToTexture(Texture& dst, Buffer& src, std::uint64_t srcOffset) override {
+    void copyBufferToTexture(Texture& dst, Buffer& src, std::uint64_t srcOffset, Subresource sub) override {
         D3DTexture& t = static_cast<D3DTexture&>(dst);
         D3DBuffer& b = static_cast<D3DBuffer&>(src);
         bufferState(b, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        const VkExtent3D e = mipExtent(t.desc(), sub.mip);
         D3D12_TEXTURE_COPY_LOCATION dl{};
         dl.pResource = t.resource();
         dl.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dl.SubresourceIndex = t.subresource(sub);
         D3D12_TEXTURE_COPY_LOCATION sl{};
         sl.pResource = b.resource();
         sl.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         sl.PlacedFootprint.Offset = srcOffset;
-        sl.PlacedFootprint.Footprint = {toDxgi(t.desc().format), t.desc().extent.width, t.desc().extent.height, 1,
-                                        bufferRowPitch(t.desc().format, t.desc().extent.width)};
+        sl.PlacedFootprint.Footprint = {toDxgi(t.desc().format), e.width, e.height, e.depth, bufferRowPitch(t.desc().format, e.width)};
         list_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
     }
-    void copyTextureToBuffer(Buffer& dst, std::uint64_t dstOffset, Texture& src) override {
+    void copyTextureToBuffer(Buffer& dst, std::uint64_t dstOffset, Texture& src, Subresource sub) override {
         D3DTexture& t = static_cast<D3DTexture&>(src);
         D3DBuffer& b = static_cast<D3DBuffer&>(dst);
         bufferState(b, D3D12_RESOURCE_STATE_COPY_DEST);
+        const VkExtent3D e = mipExtent(t.desc(), sub.mip);
         D3D12_TEXTURE_COPY_LOCATION dl{};
         dl.pResource = b.resource();
         dl.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         dl.PlacedFootprint.Offset = dstOffset;
-        dl.PlacedFootprint.Footprint = {toDxgi(t.desc().format), t.desc().extent.width, t.desc().extent.height, 1,
-                                        bufferRowPitch(t.desc().format, t.desc().extent.width)};
+        dl.PlacedFootprint.Footprint = {toDxgi(t.desc().format), e.width, e.height, e.depth, bufferRowPitch(t.desc().format, e.width)};
         D3D12_TEXTURE_COPY_LOCATION sl{};
         sl.pResource = t.resource();
         sl.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        sl.SubresourceIndex = t.subresource(sub);
         list_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
+    }
+
+    // Acceleration structure builds (ID3D12GraphicsCommandList4). The inputs (vertex / index / instance buffers) must be in a shader read state: device
+    // memory buffers are moved to ALL_SHADER_RESOURCE here (upload heaps are GENERIC_READ). The structures themselves live in
+    // RAYTRACING_ACCELERATION_STRUCTURE state for good; each build ends with a UAV barrier on all UAV resources (null resource) so that the next build
+    // (a TLAS over this BLAS) and the ray queries of later dispatches read the finished structure; the scratch buffer (promoted from COMMON to
+    // UNORDERED_ACCESS by the build) is covered by the same barrier when the next build in this list reuses it.
+    void buildBlas(AccelerationStructure& as) override {
+        D3DAccel& a = static_cast<D3DAccel&>(as);
+        for (const TriangleGeometry& t : a.geometries()) {
+            bufferState(*static_cast<D3DBuffer*>(t.vertices), D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+            if (t.indices != nullptr) bufferState(*static_cast<D3DBuffer*>(t.indices), D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        }
+        std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> descs;
+        a.geometryDescs(descs);
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
+        bd.DestAccelerationStructureData = a.address();
+        bd.ScratchAccelerationStructureData = a.scratchAddress();
+        bd.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        bd.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        bd.Inputs.NumDescs = static_cast<UINT>(descs.size());
+        bd.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        bd.Inputs.pGeometryDescs = descs.data();
+        list4()->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+        uavBarrier();
+    }
+    void buildTlas(AccelerationStructure& as, Buffer& instances, std::uint64_t instanceOffset, std::uint32_t count) override {
+        D3DAccel& a = static_cast<D3DAccel&>(as);
+        D3DBuffer& ib = static_cast<D3DBuffer&>(instances);
+        bufferState(ib, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
+        bd.DestAccelerationStructureData = a.address();
+        bd.ScratchAccelerationStructureData = a.scratchAddress();
+        bd.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+        bd.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        bd.Inputs.NumDescs = std::min(count, a.maxInstances());
+        bd.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        bd.Inputs.InstanceDescs = ib.gpuAddress() + instanceOffset;
+        list4()->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+        uavBarrier();
     }
 
     // (capture regions: PIX events need WinPixEventRuntime; the raw BeginEvent API is flagged by the debug layer)
@@ -782,7 +1168,7 @@ public:
     void endRegion() override {}
 
 private:
-    // device-heap buffers move between copy and shader states; upload / readback heaps keep theirs
+    // device-heap buffers move between their states (copy, shader, vertex / index / indirect source); upload / readback heaps keep theirs
     void bufferState(D3DBuffer& b, D3D12_RESOURCE_STATES to) {
         if (b.desc().memory != Memory::Device || b.state == to) return;
         D3D12_RESOURCE_BARRIER rb{};
@@ -790,6 +1176,16 @@ private:
         rb.Transition = {b.resource(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, b.state, to};
         b.state = to;
         list_->ResourceBarrier(1, &rb);
+    }
+    void uavBarrier() {
+        D3D12_RESOURCE_BARRIER rb{};
+        rb.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        rb.UAV.pResource = nullptr;
+        list_->ResourceBarrier(1, &rb);
+    }
+    ID3D12GraphicsCommandList4* list4() {
+        if (!list4_) list_->QueryInterface(IID_PPV_ARGS(&list4_));
+        return list4_.Get();
     }
 
     // the root parameters for the bound pipeline's type
@@ -812,6 +1208,7 @@ private:
 
     D3D12DeviceImpl& dev_;
     ID3D12GraphicsCommandList* list_;
+    ComPtr<ID3D12GraphicsCommandList4> list4_;
     D3DPipeline* pipeline_ = nullptr;
     std::array<std::uint32_t, 32> constants_{};
     std::uint32_t constantCount_ = 0;

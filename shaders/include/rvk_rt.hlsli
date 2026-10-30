@@ -12,7 +12,7 @@
 
 #include "rvk_common.hlsli"
 
-RVK_VK_BINDING(4, 0) RaytracingAccelerationStructure g_tlas[] : register(t0, space104);
+RVK_DECLARE_TLAS
 
 // D3DDECLTYPE of an attribute word (offset | type << 16; RVK_RT_ABSENT = the declaration has no such element)
 static const uint RVK_RT_ABSENT = 0xFFFFFFFFu;
@@ -91,7 +91,7 @@ struct RvkRtSegmentData {
 
 bool rvkRtValid(RvkFrame f) { return (f.rtInfo.z & RVK_FRAME_RT_VALID) != 0u && any(f.rtScene.xy != uint2(0u, 0u)); }
 // (a macro: DXC cannot return an acceleration structure from a function)
-#define rvkRtTlas(f) g_tlas[NonUniformResourceIndex((f).rtInfo.w)]
+#define rvkRtTlas(f) RVK_TLAS((f).rtInfo.w)
 
 RvkRtRecord rvkRtRecord(RvkFrame f, uint index) {
     RvkRtRecordData d = vk::BufferPointer<RvkRtRecordData, 16>(rvkAddr(f.rtScene.zw) + uint64_t(index) * 112ull).Get();

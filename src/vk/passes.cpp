@@ -148,8 +148,12 @@ VkPipeline createPassGraphicsPipeline(Context& ctx, VkPipelineLayout layout, con
         stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vs, "main", nullptr};
         stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fs, "main", nullptr};
         VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        vi.vertexBindingDescriptionCount = static_cast<std::uint32_t>(desc.vertexBindings.size());
+        vi.pVertexBindingDescriptions = desc.vertexBindings.data();
+        vi.vertexAttributeDescriptionCount = static_cast<std::uint32_t>(desc.vertexAttributes.size());
+        vi.pVertexAttributeDescriptions = desc.vertexAttributes.data();
         VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        ia.topology = desc.topology;
         VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
         vp.viewportCount = 1;
         vp.scissorCount = 1;
@@ -179,9 +183,11 @@ VkPipeline createPassGraphicsPipeline(Context& ctx, VkPipelineLayout layout, con
         VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
         cb.attachmentCount = desc.color != VK_FORMAT_UNDEFINED ? 1u : 0u;
         cb.pAttachments = &ba;
-        const VkDynamicState dyn[3] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_CULL_MODE};
+        VkDynamicState dyn[4] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
         VkPipelineDynamicStateCreateInfo dy{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-        dy.dynamicStateCount = desc.dynamicCullMode ? 3u : 2u;
+        dy.dynamicStateCount = 2;
+        if (desc.dynamicCullMode) dyn[dy.dynamicStateCount++] = VK_DYNAMIC_STATE_CULL_MODE;
+        if (desc.dynamicVertexStride) dyn[dy.dynamicStateCount++] = VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE;
         dy.pDynamicStates = dyn;
         VkPipelineRenderingCreateInfo ri{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
         ri.colorAttachmentCount = desc.color != VK_FORMAT_UNDEFINED ? 1u : 0u;

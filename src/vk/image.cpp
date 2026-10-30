@@ -90,7 +90,10 @@ bool Image::create(Context& ctx, const ImageDesc& desc) {
     }
     VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     vci.image = image_;
-    vci.viewType = desc.cube ? VK_IMAGE_VIEW_TYPE_CUBE : desc.type == VK_IMAGE_TYPE_3D ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_2D;
+    vci.viewType = desc.cube                       ? VK_IMAGE_VIEW_TYPE_CUBE
+                   : desc.type == VK_IMAGE_TYPE_3D ? VK_IMAGE_VIEW_TYPE_3D
+                   : desc.layers > 1               ? VK_IMAGE_VIEW_TYPE_2D_ARRAY  // (was an invalid 2D view of several layers)
+                                                   : VK_IMAGE_VIEW_TYPE_2D;
     vci.format = desc.format;
     vci.components = desc.swizzle;
     // a sampled view of a depth/stencil image may only have one aspect
