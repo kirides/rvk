@@ -108,6 +108,16 @@ bool Image::create(Context& ctx, const ImageDesc& desc) {
 }
 
 void Image::destroy(Context& ctx) {
+    if (adopted_) {
+        for (auto& v : attachmentViews_) {
+            if (v != VK_NULL_HANDLE) vkDestroyImageView(ctx.device(), v, nullptr);
+            v = VK_NULL_HANDLE;
+        }
+        image_ = VK_NULL_HANDLE;
+        view_ = VK_NULL_HANDLE;
+        adopted_ = false;
+        return;
+    }
     for (auto& v : attachmentViews_) {
         if (v != VK_NULL_HANDLE) {
             vkDestroyImageView(ctx.device(), v, nullptr);

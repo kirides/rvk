@@ -35,7 +35,7 @@
 //                       16..21 its noise's frame phase; kAlphaThicken (bit 10) the cut-out threshold lowered by
 //                       (bits 24..31 / 255) x min(fwidth, 1); alphaRef: 0..255
 //                       pad[0]: debug tint, RGBA8 (unpackUnorm4x8; 0 = none), read only by the tint variant of a pixel
-//                       shader (GlslOptions::tintEpilogue, the "tint draws" debug view); pad[1] unused
+//                       shader (TranslateOptions::tintEpilogue, the "tint draws" debug view); pad[1] unused
 //                       psC5: pixel shader constant c5 of this draw (xy the camera obstacle fade, w the alpha reference: the
 //                       register is half per-draw data), the pixel window kPsWindowFirst[1] of split draws
 // FrameBlock (std430, 976 bytes): the main camera (current + previous), depth conventions, target size, jitter, time, frame
@@ -62,6 +62,10 @@ inline constexpr std::uint32_t kBindingTex2D = 0;
 inline constexpr std::uint32_t kBindingTexCube = 1;
 inline constexpr std::uint32_t kBindingTex3D = 2;
 inline constexpr std::uint32_t kBindingSamplers = 3;
+// the ray tracing scene's TLAS (RT tier only): an array of acceleration structures, indexed by FrameBlock::rtInfo[3] (HLSL cannot
+// make a ray query from an address); frames in flight use different slots
+inline constexpr std::uint32_t kBindingTlas = 4;
+inline constexpr std::uint32_t kMaxTlas = 8;
 
 inline constexpr std::uint32_t kFloatConsts = 256;
 inline constexpr std::uint32_t kIntConsts = 16;
@@ -159,7 +163,7 @@ struct FrameBlock {
     // the ray tracing scene (enh/rt_scene, docs/research/rt-reflections.md 3; zero while there is none this submission):
     // TLAS device address (low, high: GLSL accelerationStructureEXT(uvec2) needs no shaderInt64), geometry records address
     std::uint32_t rtScene[4];
-    std::uint32_t rtInfo[4];    // instances in the TLAS, records, kFrameRt* flags, 0
+    std::uint32_t rtInfo[4];    // instances in the TLAS, records, kFrameRt* flags, the TLAS slot in the bindless array (kBindingTlas)
     // the GI probe volume (enh/gi, docs/research/rtgi.md 5; GLSL shaders/include/rvk_gi.glsl): its header's device address
     // (low, high), kFrameGi* flags, 0
     std::uint32_t gi[4];
@@ -253,7 +257,7 @@ inline constexpr std::uint32_t kRtMaskOpaque = 0x01u;
 inline constexpr std::uint32_t kRtMaskAlphaTested = 0x02u;
 inline constexpr std::uint32_t kRtMaskDynamic = 0x04u;  // characters (skinned draws captured per frame)
 
-// Specialisation-constant ids reserved for variant hooks (GlslOptions::extraGlobals: one SPIR-V module, the variant chosen
+// Specialisation-constant ids reserved for variant hooks (TranslateOptions::extraGlobals: one SPIR-V module, the variant chosen
 // per pipeline). The default translation declares none; the first enhancement that adds an extra output takes these.
 inline constexpr std::uint32_t kSpecMotionOutput = 0;  // bool: write screen-space motion to an extra colour output
 inline constexpr std::uint32_t kSpecNormalOutput = 1;  // bool: write the interpolated world normal to an extra output

@@ -12,7 +12,7 @@ using d3d9::Semantic;
 
 std::string materialVariantTag(std::string_view base) {
     std::uint64_t h = 1469598103934665603ull;
-    for (const std::string_view t : {shader::embedded::giGlsl(), shader::embedded::materialVariantGlsl()}) {
+    for (const std::string_view t : {shader::embedded::hlslSource("include/rvk_gi.hlsli"), shader::embedded::hlslSource("include/rvk_material_variant.hlsli")}) {
         for (const char c : t) {
             h ^= static_cast<std::uint8_t>(c);
             h *= 1099511628211ull;
@@ -21,7 +21,7 @@ std::string materialVariantTag(std::string_view base) {
     return std::format("{}{:08x}", base, static_cast<std::uint32_t>(h ^ (h >> 32)));
 }
 
-bool materialVariantOptions(const d3d9::Shader& s, MaterialVariant kind, shader::GlslOptions& o) {
+bool materialVariantOptions(const d3d9::Shader& s, MaterialVariant kind, shader::TranslateOptions& o) {
     if (s.stage != shader::Stage::Pixel || (s.reflection.colorOutputs & 1u) == 0) return false;
     const auto& amb = s.semantics[Semantic::AmbientLight];
     const bool ambient = amb.present() && amb.count >= 7;
@@ -40,18 +40,30 @@ bool materialVariantOptions(const d3d9::Shader& s, MaterialVariant kind, shader:
     if (kind == MaterialVariant::GbufferMotion) defines += "#define RVK_MV_MOTION 1\n";
     defines += std::format("#define RVK_MV_KIND_SKINNED {}\n", static_cast<unsigned>(d3d9::draws::Kind::Skinned));
     // the interpolated world normal (TEXCOORD4 of the material vertex shader: vNormalAndAO)
-    std::string vertexNormal = "vec4(0.0)";
+    const std::string kNoNormal = "float4(0.0, 0.0, 0.0, 0.0)";
+    std::string vertexNormal = kNoNormal;
     for (const auto& in : s.reflection.pixelInputs) {
         if (in.location == shader::abi::varyingLocation(shader::Usage::TexCoord, 4)) vertexNormal = in.name;
     }
-    if (vertexNormal != "vec4(0.0)") defines += "#define RVK_MV_VNORMAL 1\n";
+    if (vertexNormal != kNoNormal) defines += "#define RVK_MV_VNORMAL 1\n";
 
-    o.uber = true;  // built from the GLSL material shader when the device uses it (d3d9::Device::setUbershader)
+    o.uber = true;  // built from the HLSL material shader when the device uses it (d3d9::Device::setUbershader)
     o.uberDefines = defines;
-    o.prelude = "// enhancement variant (enh/material_variant)\n" + defines + std::string(shader::embedded::giGlsl()) + "\n" +
-                std::string(shader::embedded::materialVariantGlsl());
-    o.prologue = std::format("    rvkMvPrologue({});", vertexNormal);
+    // HLSL hooks (docs/research/hlsl-rhi.md 1, P1d): the prelude includes the GI lookup and the variant code; the prologue / epilogue pass the pixel
+    // position and write the extra G-buffer targets of the entry's output struct; the previous world position of the motion variant is an extra
+    // varying input of the entry (location kPrevWorldLocation)
+    o.prelude = "// enhancement variant (enh/material_variant)\n" + defines + "#include \"rvk_gi.hlsli\"\n#include \"rvk_material_variant.hlsli\"\n";
+    if (kind == MaterialVariant::GbufferMotion) {
+        o.extraInputs = std::format("    [[vk::location({})]] float4 rvk_prevWorld : VARY{};", kPrevWorldLocation, kPrevWorldLocation);
+        o.prologue = "    rvk_prevWorld = rvk_in.rvk_prevWorld;\n";
+    }
+    o.prologue += std::format("    rvkMvPrologue(rvk_fragCoord, {});", vertexNormal);
     o.epilogue = "    rvkMvEpilogue(oC0);";
+    if (gbuffer) {
+        // (no [[vk::location]] on pixel outputs: DXC rejects a partial explicit assignment next to oC0 : SV_Target0)
+        o.extraOutputs = "    float4 rvk_gbNormal : SV_Target1;\n    float2 rvk_gbMotion : SV_Target2;";
+        o.epilogue += "\n    rvk_out.rvk_gbNormal = rvk_mvNormalOut;\n    rvk_out.rvk_gbMotion = rvk_mvMotionOut;";
+    }
     if (ambient) {
         for (int i = 0; i < 7; ++i) o.constOverrides[static_cast<std::uint32_t>(amb.reg + i)] = std::format("rvk_gi[{}]", 1 + i);
         if (ind.present()) o.constOverrides[static_cast<std::uint32_t>(ind.reg)] = "rvk_gi[0]";

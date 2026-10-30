@@ -12,11 +12,11 @@ Status legend: **built** = in the tree and verified, **design** = decided, not b
 | Phase | Content | Status |
 |---|---|---|
 | P1a | runtime DXC service (`shader/dxc.*`), embedded HLSL sources, `embedded::spirv()` falls through to `<name>.hlsl`, disk cache, tests | **built** (e01b9f9) |
-| P1b | HLSL ABI (`shaders/include/rvk_abi.hlsli`, `rvk_common.hlsli`), the debug-view shaders ported, layout test against `abi.h` | **built**, GPU `--passes` PASS, in-game check see 7 |
-| P1c | port the other hand-written shaders (50 files, ~6.5k lines: gbuffer, upscale, gi, rt, shadows, water, framegen) one directory at a time, each verified on the GPU / in the game against the GLSL baseline | design |
-| P1d | translator HLSL emitter (`shader/hlsl.cpp` next to `glsl.cpp`), `kTranslatorVersion` bump, corpus must pass DXC + `spirv-val` and the D3DX disasm diff stays 100 %; ubershader (`ge_default.*`) back to HLSL (it comes from the engine's own HLSL) | design |
-| P2 | slim RHI (section 5: dynamic rendering + descriptor indexing + constant buffers + push constants, Vulkan structs as the baseline) under the pass / resource code, Vulkan first; pass resources move into the bindless heap (4.3) | design |
-| P3 | DX12 backend slice (section 6; SM 6.6 bindless required) | design |
+| P1b | HLSL ABI (`shaders/include/rvk_abi.hlsli`, `rvk_common.hlsli`, `rvk_draw.hlsli`), the debug-view shaders ported, layout tests against `abi.h` | **built**, GPU `--passes` PASS, in-game check see 7 |
+| P1c | the other hand-written shaders (gbuffer, upscale, gi, rt, shadows, water, framegen, test) ported; GLSL stays until the A/B passes (`RVK_FORCE_GLSL=1` runs the originals); tools: `rvk_shadertool hlsl <name>`, `tools/port_check.py`, test `dxc_every_embedded_shader_compiles` | **built**, in-game A/B pending (7) |
+| P1d | translator HLSL emitter (`shader/hlsl.cpp` next to `glsl.cpp`; `toHlsl` + `compileHlsl`, `kTranslatorVersion` 8): the whole corpus (2483 shaders) passes DXC + spirv-val (`rvk_shadertool corpus corpus --hlsl`), the D3D9 assembly unit tests too; the device uses it for base shaders, the LOD variant and the RT capture variant; material variants + ubershader (`ge_default.*`, back to HLSL: it comes from the engine's own HLSL) | **built** (hooks of the material variants: see 7) |
+| P2 | slim RHI (section 5: dynamic rendering + descriptor indexing + constant buffers + push constants, Vulkan structs as the baseline): interface `src/rhi/rhi.h`, Vulkan backend over the existing `vk::` classes (`src/rhi/vulkan`); the migration of the renderer's own pass / resource code onto it is open (35 files call Vulkan directly) | **interface + Vulkan backend built**, migration open |
+| P3 | DX12 backend slice (section 6; SM 6.6 bindless required): `src/rhi/d3d12` (library `rvk_rhi_d3d12`), the same HLSL compiled to DXIL, fixed root signature, bindless heaps; `rvk_rhitest` runs one test on both backends (compute with constant buffer + bindless texture + RVK_REF + push constants + storage image, graphics with dynamic rendering), validation layers on | **built** incl. a swapchain on a hidden window, PASS on both |
 | P4 | remove rvk_glslc / glslang from the shipped build, GLSL gone | design |
 
 ## 2. Compile scheme (GD3D11's, adapted) - built
@@ -119,24 +119,25 @@ Order of work (P2): (a) interface headers + a Vulkan backend over the existing `
 (`vk/passes`, `enh/*`) one feature at a time, `d3d9::Device` last, (c) build the Vulkan backend with `d3d12.h` absent to prove the layering.
 35 source files call Vulkan directly today (`grep -E "vk[A-Z]\w+\("`): that list is the migration checklist.
 
-## 6. DX12 backend - design (user, 2026-10-29: **Shader Model 6.6 bindless is required**)
+## 6. DX12 backend - built (slice), SM 6.6 bindless required (user, 2026-10-29)
 
-- Requirements checked at device creation (no fallback below them): Shader Model 6.6 (dynamic resources: `ResourceDescriptorHeap[]` /
-  `SamplerDescriptorHeap[]`), Resource Binding Tier 3, enhanced barriers where present; otherwise the Vulkan backend is used.
-- Same HLSL compiled `-T *_6_6` to DXIL (`dxil.dll` next to `dxcompiler.dll` signs it; the build already deploys both). On DX12 the
-  bindless helpers of `rvk_abi.hlsli` use the SM 6.6 heaps directly: `rvkSample2D(tex, smp, uv)` =
-  `((Texture2D)ResourceDescriptorHeap[tex]).Sample((SamplerState)SamplerDescriptorHeap[smp], uv)`; the Vulkan side keeps its typed unbounded
-  arrays (no mutable-descriptor extension, gd3d11.md): the shader text calls only the `rvk*` helpers, never the arrays.
-- `RVK_PUSH` = root constants (`ConstantBuffer<T> pc : register(b0)`, <= 32 DWORDs); constant-buffer blocks = root CBVs or heap CBVs;
-  `RVK_REF(T)` (4.2) for blocks reached by pointer = a heap index + offset into a `ByteAddressBuffer` from `ResourceDescriptorHeap`
-  (Vulkan keeps `vk::BufferPointer`); the push header of a pass carries that pair instead of a 64-bit address.
-- Root signature is **fixed** (the binding model above): root constants, two root CBVs (frame, draw), the heap flags
-  `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED | SAMPLER_HEAP_DIRECTLY_INDEXED`. No per-pass tables: pass inputs / outputs are heap indices too.
-- Swapchain: DXGI flip model; ray query via DXR 1.1 inline (`RaytracingAccelerationStructure` from the heap); FSR / frame generation through
-  AMD's DX12 DLLs later.
-- Slice done when `rvk_dx12test` clears, runs the debug view's compute + composite through the heap, presents, and the D3D12 debug layer +
-  GPU-based validation are clean.
-
+`src/rhi/d3d12/d3d12_device.cpp` (library `rvk_rhi_d3d12`, linked only by tools / the renderer when it picks the backend: d3d9.dll does not import d3d12.dll).
+- Requirements checked at device creation (no fallback below them): Shader Model 6.6 (dynamic resources), Resource Binding Tier 3, feature level 12_0.
+- Same HLSL compiled `-T *_6_6` to DXIL (`dxil.dll` next to `dxcompiler.dll` signs it). `rvk_abi.hlsli`'s DXIL branch: `RVK_REF(T)` = `RvkBufRef {slot, offset}` (a
+  ByteAddressBuffer in the heap; `RVK_LOAD(T, ref)`), `RVK_PUSH` = `ConstantBuffer<T> : register(b0, space0)` (root constants), `RVK_TEX2D(i)` etc. read
+  `ResourceDescriptorHeap` / `SamplerDescriptorHeap` through typed locals (**DXC 1.9.2602 crashes with an internal compiler error on a cast of a heap
+  access followed by a method call**: `((Texture2D)ResourceDescriptorHeap[i]).Load(..)`; assigning to a local first works).
+- Fixed root signature: 32 root constants (b0 space0), root CBV (b8 space1), table of 4 UAVs (u0..u3 space1), both heaps directly indexed. Heaps: one shader-visible
+  CBV/SRV/UAV heap of 65,536 (entry 0 = a null SRV that reads (0, 0, 0, 1)), a sampler heap of 2,048 (entry 0 = linear clamp), RTV / DSV rings. The last 64 entries of the
+  big heap are the ring of UAV tables (written per `setStorageTextures`).
+- Resource states: textures track their state (`VkImageLayout` -> `D3D12_RESOURCE_STATES`), transitioning to the same GENERAL layout is a UAV barrier; device-heap buffers
+  move between copy and shader states in the copy helpers / `bufferBarrier`; upload / readback heaps keep theirs.
+- Swapchain: `Device::createSwapchain` / `renderAndPresent` (DXGI flip model with 3 buffers; the Vulkan side wraps `vk::Swapchain`, its images adopted as RHI textures); resize tested.
+- Not built yet: ray queries (DXR inline: `RaytracingAccelerationStructure` from the heap), indirect draws, capture regions (PIX events
+  need WinPixEventRuntime), buffer UAVs, mip / array views, cube / 3D textures, the renderer's own passes through the RHI (P2 migration).
+- Verification: `rvk_rhitest [--vulkan] [--d3d12] [--validation]`: one test, both backends, 64x64 compare of a compute pass and a graphics pass with the CPU's expected values;
+  `--validation` = Vulkan validation layer + D3D12 debug layer with GPU based validation (messages routed to the log and counted: `Device::validationErrors`).
+  2026-10-30: PASS on both (RX 7900 XTX), 0 validation errors.
 
 ## 7. Verification log
 

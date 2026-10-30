@@ -80,7 +80,7 @@ const char* cmpFunc(Cmp c) {
 
 class Generator {
 public:
-    Generator(const Program& p, const GlslOptions& o)
+    Generator(const Program& p, const TranslateOptions& o)
         : p_(p), opt_(o), vs_(p.version.stage == Stage::Vertex), major_(p.version.major), consts_(vs_ ? "pc.vs" : "pc.ps") {}
 
     GlslResult run() {
@@ -314,7 +314,7 @@ private:
         }
     }
 
-    // GlslOptions::constOverrides / inputOverrides: the expression with `$c` (`$v`) replaced by the original read
+    // TranslateOptions::constOverrides / inputOverrides: the expression with `$c` (`$v`) replaced by the original read
     static std::string overrideExpr(const std::string& expr, const std::string& original, std::string_view placeholder = "$c") {
         std::string out = "(";
         for (std::size_t i = 0; i < expr.size(); ++i) {
@@ -559,7 +559,7 @@ private:
         closeFunction();
     }
 
-    // GlslOptions::dotCaptures (first match each)
+    // TranslateOptions::dotCaptures (first match each)
     void emitCaptures(const Instruction& ins) {
         if (opt_.dotCaptures.empty() || (ins.op != Op::Dp3 && ins.op != Op::Dp4) || ins.src.size() < 2) return;
         for (std::size_t c = 0; c < opt_.dotCaptures.size(); ++c) {
@@ -838,7 +838,7 @@ private:
         for (const auto& d : p_.inputs) {
             if (vs_) {
                 if (d.reg.type == RegType::Input) {
-                    if (inputOverride(d) != nullptr) {  // GlslOptions::inputOverrides: v# is assigned at the start of main()
+                    if (inputOverride(d) != nullptr) {  // TranslateOptions::inputOverrides: v# is assigned at the start of main()
                         g += std::format("layout(location = {}) in vec4 rvk_in{};\nvec4 v{};\n", d.reg.index, d.reg.index, d.reg.index);
                     } else {
                         g += std::format("layout(location = {}) in vec4 v{};\n", d.reg.index, d.reg.index);
@@ -959,7 +959,7 @@ private:
         return g;
     }
 
-    const GlslOptions::InputOverride* inputOverride(const Declaration& d) const {
+    const TranslateOptions::InputOverride* inputOverride(const Declaration& d) const {
         for (const auto& o : opt_.inputOverrides) {
             if (o.usage == d.usage && o.usageIndex == d.usageIndex) return &o;
         }
@@ -1048,7 +1048,7 @@ private:
     }
 
     const Program& p_;
-    const GlslOptions opt_;
+    const TranslateOptions opt_;
     const bool vs_;
     const int major_;
     const std::string consts_;
@@ -1057,7 +1057,7 @@ private:
     std::string error_;
 
     std::set<std::uint32_t> temps_, rastOut_, attrOut_, outputs_, labels_;
-    std::set<std::size_t> capturesDone_;  // GlslOptions::dotCaptures emitted
+    std::set<std::size_t> capturesDone_;  // TranslateOptions::dotCaptures emitted
     std::map<std::uint32_t, std::array<std::uint32_t, 4>> defF_, defI_;
     std::map<std::uint32_t, bool> defB_;
 
@@ -1072,6 +1072,6 @@ private:
 
 }  // namespace
 
-GlslResult toGlsl(const Program& program, const GlslOptions& options) { return Generator(program, options).run(); }
+GlslResult toGlsl(const Program& program, const TranslateOptions& options) { return Generator(program, options).run(); }
 
 }  // namespace rvk::shader

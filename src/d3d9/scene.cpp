@@ -401,6 +401,7 @@ void fillFrameBlock(shader::abi::FrameBlock& out, const CameraBlock& cur, const 
         out.rtScene[3] = static_cast<std::uint32_t>(x.rtRecords >> 32);
         out.rtInfo[0] = x.rtInstances;
         out.rtInfo[1] = x.rtRecordCount;
+        out.rtInfo[3] = x.rtTlasSlot;
         out.rtInfo[2] = abi::kFrameRtValid;
     }
     if (x.gi != 0) {

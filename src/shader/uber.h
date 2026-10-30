@@ -22,6 +22,12 @@ bool uberSupports(std::string_view effectFile, std::string_view entry);
 // ABI declarations, the enhancement code when there are hooks, then the shader. Empty when the macro list has an invalid name.
 std::string uberPixelGlsl(std::string_view entry, const MacroList& macros, std::string_view hookDefines);
 
+// The same as HLSL (shaders/material/ge_default.frag.hlsl, entry PSMain): the macros as #defines (XFX_PASS = 1 for PS_DefaultZPass), the hook
+// defines, then `#include "material/ge_default.frag.hlsl"` (resolved from the embedded sources by shader::dxc). Empty on an invalid macro name.
+std::string uberPixelHlsl(std::string_view entry, const MacroList& macros, std::string_view hookDefines);
+// a hash of the HLSL texts of the ubershader (and what it includes): cache names of compiled variants change when they do
+std::uint64_t uberHlslHash();
+
 // A bit per class of request (debug.ubershader_skip: classes kept on the translated shader, to bisect differences):
 // 1 z pass, 2 masked, 4 alpha blend, 8 lightmap, 16 normal map, 32 specular, 64 distortion, 128 anything else (plain)
 std::uint32_t uberClassMask(std::string_view entry, const MacroList& macros);

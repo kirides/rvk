@@ -60,6 +60,7 @@ struct RayTracingFeatures {
     bool available = false;  // the device offers the tier (acceleration structures + ray query + deferred host operations)
     bool enabled = false;    // enabled on this device: buffers get the BLAS-input usage, ray query shaders may be created
     bool positionFetch = false;    // VK_KHR_ray_tracing_position_fetch enabled
+    bool tlasDescriptors = false;  // acceleration structures in the bindless set (update after bind): the HLSL ray query shaders need it
     bool opacityMicromap = false;  // VK_EXT_opacity_micromap enabled
     bool maintenance1 = false;     // VK_KHR_ray_tracing_maintenance1 enabled
     std::string reason;            // why not enabled (empty when enabled)
@@ -77,6 +78,7 @@ struct DeviceFeatures {
     bool deviceFault = false;
     bool bufferMarker = false;    // VK_AMD_buffer_marker enabled (debug.crash_markers: vk/crash_markers.h)
     bool samplerAnisotropy = false;
+    bool shaderInt64 = false;         // shaderInt64 enabled (HLSL shaders: pointers from 64-bit addresses)
     bool shaderFloat16Int16 = false;  // shaderFloat16 + shaderInt16 enabled (the FidelityFX upscaler's fp16 shaders)
     bool storageImageExtendedFormats = false;  // RG16F / R16F ... storage images (the G-buffer's motion)
     bool indirectDraws = false;   // multiDrawIndirect + drawIndirectFirstInstance: one vkCmdDrawIndexedIndirect for many draws, the item index as firstInstance (no user at the moment: the removed native opaque prototype used it, see git history)

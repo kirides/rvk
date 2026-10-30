@@ -52,6 +52,7 @@
 #include "shader/abi.h"
 #include "shader/embedded.h"
 #include "shader/glsl.h"
+#include "shader/hlsl.h"
 #include "shader/sm_ir.h"
 #include "shader/spirv.h"
 #include "vk/bindless.h"
@@ -100,14 +101,14 @@ VkShaderModule translate(vk::Context& ctx, const char* src) {
         spdlog::error("decode: {}", dec.error);
         return VK_NULL_HANDLE;
     }
-    const auto g = shader::toGlsl(dec.program);
+    const auto g = shader::toHlsl(dec.program);
     if (!g.ok()) {
-        spdlog::error("glsl: {}", g.error);
+        spdlog::error("hlsl: {}", g.error);
         return VK_NULL_HANDLE;
     }
-    const auto s = shader::compileGlsl(dec.program.version.stage, g.glsl);
+    const auto s = shader::compileHlsl(dec.program.version.stage, g.hlsl);
     if (!s.ok()) {
-        spdlog::error("glslang: {}", s.log);
+        spdlog::error("dxc: {}", s.log);
         return VK_NULL_HANDLE;
     }
     return vk::createShaderModule(ctx, s.words);

@@ -37,6 +37,7 @@
 #include "d3d9/semantics.h"
 #include "shader/abi.h"
 #include "shader/glsl.h"
+#include "shader/hlsl.h"
 #include "vk/bindless.h"
 #include "vk/context.h"
 #include "vk/formats.h"
@@ -283,7 +284,7 @@ public:
     std::array<PlanSlot, 4> planSlots{};
     std::uint32_t planNext = 0;
     std::uint32_t samplerMask = 0;  // bit s: reflection.samplers[s] is used (per-draw loops visit only these)
-    // pixel shaders: the tint debug view's variant (GlslOptions::tintEpilogue), built on first use (render thread)
+    // pixel shaders: the tint debug view's variant (TranslateOptions::tintEpilogue), built on first use (render thread)
     VkShaderModule tintModule = VK_NULL_HANDLE;
     bool tintFailed = false;
     // vertex shaders of SpeedTree billboards: the fade distance variant (Device::lodModule, engine/lod.h)
@@ -326,7 +327,7 @@ enum class VariantSlot : std::uint8_t {
 struct VariantProvider {
     std::string tag;  // part of the SPIR-V cache name (bump it when the variant's GLSL changes)
     // the options of a shader's variant; false = not applicable (the draw keeps the engine's module). Any thread
-    std::function<bool(const Shader&, shader::GlslOptions&)> options;
+    std::function<bool(const Shader&, shader::TranslateOptions&)> options;
 };
 
 // ---- device -------------------------------------------------------------------------------------------------------
@@ -448,6 +449,7 @@ public:
 struct RtSceneRef {
     VkDeviceAddress tlas = 0;
     VkDeviceAddress records = 0;
+    std::uint32_t tlasSlot = 0;  // the TLAS in the bindless acceleration structure array (HLSL ray queries; abi.h kBindingTlas)
     std::uint32_t instances = 0;
     std::uint32_t recordCount = 0;
     std::uint64_t frame = 0;
@@ -1144,8 +1146,8 @@ private:
     void logTracedMaterial(draws::Kind kind, bool jittered);
     VkShaderModule tintModule(Shader& ps);  // the tint variant of a pixel shader (null when it fails to build)
     VkShaderModule lodModule(Shader& vs);   // the billboard fade variant of a vertex shader (null when it fails to build)
-    VkShaderModule variantModule(const Shader& s, const shader::GlslOptions& options, std::string_view tag);
-    VkShaderModule uberModule(const Shader& s, const MaterialSource& src, const shader::GlslOptions& options, std::string_view tag);
+    VkShaderModule variantModule(const Shader& s, const shader::TranslateOptions& options, std::string_view tag);
+    VkShaderModule uberModule(const Shader& s, const MaterialSource& src, const shader::TranslateOptions& options, std::string_view tag);
     std::atomic<bool> ubershader_{false};
     std::atomic<std::uint64_t> ubershadersBuilt_{0}, ubershadersFailed_{0};
     // A draw's recording state, computed by prepareDraw / the draw call and recorded by applyPacket: now, or later in a

@@ -132,11 +132,10 @@ bool Ocean::createPipelines() {
             spdlog::info("enh: ocean: FFT size {} not supported by this GPU (limits)", n);
             continue;
         }
-        const std::int32_t data[3] = {n, log2i(n), n / 2};
-        const VkSpecializationMapEntry e[3] = {{0, 0, 4}, {1, 4, 4}, {2, 8, 4}};
-        VkSpecializationInfo si{3, e, sizeof(data), data};
+        // one module per size (HLSL has no specialisation constants for numthreads / groupshared sizes): OCEAN_N / OCEAN_LOG2N defines
+        const std::string defines = std::format("OCEAN_N={};OCEAN_LOG2N={}", n, log2i(n));
         fft_[static_cast<std::size_t>(i)] =
-            vk::createComputePipeline(ctx, layout_.layout(), shader::embedded::spirv("water/ocean_fft.comp"), "ocean.fft", &si);
+            vk::createComputePipeline(ctx, layout_.layout(), shader::embedded::spirvVariant("water/ocean_fft.comp", defines), "ocean.fft");
     }
     // trilinear (+ anisotropic), wrapping: the tiles repeat
     VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};

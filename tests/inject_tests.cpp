@@ -47,7 +47,7 @@ void checkOffsets(const std::map<std::string, std::uint32_t>& glsl, const std::m
 // ---- the GLSL ABI header against the C++ structs --------------------------------------------------------------------------
 
 TEST(abi_glsl_layout_matches_cpp) {
-    const auto words = shader::embedded::spirv("test/abi_layout.comp");
+    const auto words = shader::embedded::glslSpirv("test/abi_layout.comp");
     CHECK(!words.empty());
     const auto m = memberOffsets(words);
     CHECK(m.contains("RvkPush") && m.contains("RvkFrame") && m.contains("RvkDraw") && m.contains("RvkStage"));
@@ -80,7 +80,7 @@ TEST(abi_glsl_layout_matches_cpp) {
 
 // the RT scene's geometry record (shaders/include/rvk_rt.glsl) and the RT debug view's push block (shaders/rt/rt_debug.glsl)
 TEST(abi_glsl_rt_layout_matches_cpp) {
-    const auto m = memberOffsets(shader::embedded::spirv("test/abi_rt_layout.comp"));
+    const auto m = memberOffsets(shader::embedded::glslSpirv("test/abi_rt_layout.comp"));
     CHECK(m.contains("RvkRtRecord") && m.contains("RtDebugPush"));
     if (!m.contains("RvkRtRecord") || !m.contains("RtDebugPush")) return;
     using R = abi::RtGeometryRecord;
@@ -116,7 +116,7 @@ TEST(abi_glsl_rt_layout_matches_cpp) {
 // the shadow mask's block (shaders/shadows/shadow_block.glsl, shared by its vertex and fragment shader) against enh::ShadowBlock:
 // the vertex shader reads depthRemap from the block that replaces the draw's DrawBlock (docs/research/engine-frame/shadow-bug.md)
 TEST(shadows_block_glsl_matches_cpp) {
-    const auto m = memberOffsets(shader::embedded::spirv("test/shadow_layout.comp"));
+    const auto m = memberOffsets(shader::embedded::glslSpirv("test/shadow_layout.comp"));
     CHECK(m.contains("ShadowBlock"));
     if (!m.contains("ShadowBlock")) return;
     using B = enh::ShadowBlock;
@@ -192,9 +192,9 @@ TEST(glsl_abi_header_and_hooks) {
     }
     CHECK(plain.reflection.splitConsts && plain.reflection.windowEnd[3] == 16 && plain.reflection.windowEnd[0] == 0);
     // all hooks empty = identical output
-    CHECK(shader::toGlsl(dec.program, shader::GlslOptions{}).glsl == plain.glsl);
+    CHECK(shader::toGlsl(dec.program, shader::TranslateOptions{}).glsl == plain.glsl);
 
-    shader::GlslOptions o;
+    shader::TranslateOptions o;
     o.extraGlobals = "layout(location = 1) out vec4 rvk_extra;";
     o.epilogue = "    rvk_extra = vec4(float(pc.drawId), 0.0, 0.0, 1.0);";
     o.constOverrides[15] = "$c * 0.5 + pc.frame.params[0]";
@@ -212,7 +212,7 @@ TEST(glsl_abi_header_and_hooks) {
     const auto vdec = shader::decode(vs);
     CHECK(vdec.ok());
     if (vdec.ok()) {
-        shader::GlslOptions vo;
+        shader::TranslateOptions vo;
         vo.extraGlobals = "layout(location = 30) out vec4 rvk_clip;";
         vo.epilogue = "    rvk_clip = rvk_pos;";
         const auto v = shader::toGlsl(vdec.program, vo);
@@ -221,7 +221,7 @@ TEST(glsl_abi_header_and_hooks) {
         const auto vspv = shader::compileGlsl(shader::Stage::Vertex, v.glsl);
         CHECK_MSG(vspv.ok(), vspv.log);
         // input override: the attribute is fetched as rvk_in#, v# assigned from the expression before the body runs
-        shader::GlslOptions io;
+        shader::TranslateOptions io;
         io.inputOverrides.push_back({shader::Usage::Position, 0, "vec4($v.xy * pc.frame.params[1].x, $v.zw)"});
         const auto iv = shader::toGlsl(vdec.program, io);
         CHECK(iv.ok());
@@ -230,7 +230,7 @@ TEST(glsl_abi_header_and_hooks) {
         const auto ispv = shader::compileGlsl(shader::Stage::Vertex, iv.glsl);
         CHECK_MSG(ispv.ok(), ispv.log + "\n" + iv.glsl);
         // an override of a semantic the shader does not declare changes nothing
-        shader::GlslOptions none;
+        shader::TranslateOptions none;
         none.inputOverrides.push_back({shader::Usage::BlendWeight, 1, "$v * 2.0"});
         CHECK(shader::toGlsl(vdec.program, none).glsl == shader::toGlsl(vdec.program).glsl);
     }

@@ -21,7 +21,7 @@ namespace rvk::enh {
 enum class MaterialVariant : std::uint8_t { Gi, Gbuffer, GbufferMotion };
 
 // the variant's options for a pixel shader; false = not applicable (Gi: no ambient constants; all: no colour output 0)
-bool materialVariantOptions(const d3d9::Shader& s, MaterialVariant kind, shader::GlslOptions& o);
+bool materialVariantOptions(const d3d9::Shader& s, MaterialVariant kind, shader::TranslateOptions& o);
 
 // the SPIR-V cache tag of a variant: `base` + a hash of the embedded GLSL it pastes (an edit of rvk_gi.glsl /
 // rvk_material_variant.glsl never reuses a stale cached variant)

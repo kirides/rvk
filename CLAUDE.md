@@ -253,6 +253,16 @@ at InitializeAdmin" line lists uptime, D3D/Vulkan/overlay modules and the proces
 
 ## Shader translator
 
+**The renderer translates to HLSL now** (`src/shader/hlsl.cpp`, `toHlsl` + `compileHlsl` -> DXC; docs/research/hlsl-rhi.md 1 P1d, `kTranslatorVersion` 8): the generated text is
+`#include "rvk_draw.hlsli"` + structs `RvkVsIn / RvkVsOut / RvkPsIn / RvkPsOut` (explicit `[[vk::location]]` for varyings, `SV_Target<n>` for pixel outputs: no
+explicit location there, DXC rejects a partial assignment) + static register globals + `VSMain` / `PSMain`; the variant hooks (`GlslOptions::prelude / prologue /
+epilogue / extraGlobals / constOverrides / inputOverrides / dotCaptures`, plus the HLSL-only `extraOutputs` / `extraInputs` = members of `rvk_out` / `rvk_in`) are **HLSL
+text** now (enh/material_variant, enh/rt_scene captureOptions, Device::lodModule). `rvk_shadertool corpus <dir> --hlsl [--gbuf | --gbuf-motion | --gi | --capture | --tint]` =
+the whole corpus through the HLSL path (translate, DXC at `RVK_DXC_OPT` -O level (default 1), spirv-val; ~2.5 min for 2483 shaders: DXC costs ~40-60 ms per
+shader, so a cold SPIR-V cache makes the first run's shader creation slower; the device's cache `bin\rvk\cache\spirv` is keyed by bytecode + translator version + the hash of the
+embedded ABI headers); `rvk_shadertool hlsl <name> [-D X=Y] [-o out.spv] [--dxil out.dxil]` compiles one embedded / `RVK_SHADER_DIR` shader like the renderer. The GLSL translator
+(`glsl.cpp`, `toGlsl`) and its text below are the old path until it is deleted (P4).
+
 `rvk_shadertool corpus <dir>` translates + validates every captured shader (corpus from `mode = "trace"`:
 `<test copy>/bin/rvk/corpus`, copy it to `<repo>/corpus`, git-ignored: game-derived). `show <file>` prints listing + GLSL,
 `refdisasm <file>` the D3DX reference listing. `python tools/compare_disasm.py corpus` diffs our listing against D3DX for the

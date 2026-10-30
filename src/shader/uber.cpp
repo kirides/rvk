@@ -89,6 +89,50 @@ std::string uberPixelGlsl(std::string_view entry, const MacroList& macros, std::
     return out;
 }
 
+std::string uberPixelHlsl(std::string_view entry, const MacroList& macros, std::string_view hookDefines) {
+    std::string out = "// HLSL material shader (shaders/material) built from the engine's macros\n";
+    for (const auto& [name, value] : macros) {
+        if (!validName(name)) return {};
+        std::string v;
+        if (value == "true") v = "1";
+        else if (value == "false") v = "0";
+        else {
+            // a macro body on one line, blanks collapsed
+            bool blank = false;
+            for (const char c : value) {
+                if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+                    blank = true;
+                    continue;
+                }
+                if (blank && !v.empty()) v.push_back(' ');
+                blank = false;
+                v.push_back(c);
+            }
+        }
+        out += std::format("#define {} {}\n", name, v);
+    }
+    if (entry.ends_with("ZPass")) out += "#define XFX_PASS 1\n";
+    if (!hookDefines.empty()) {
+        out += "#define RVK_UBER_HOOKS 1\n";
+        out += hookDefines;
+        out += "\n";
+    }
+    out += "#include \"material/ge_default.frag.hlsl\"\n";
+    return out;
+}
+
+std::uint64_t uberHlslHash() {
+    std::uint64_t h = 1469598103934665603ull;
+    for (const char* name : {"material/ge_default.frag.hlsl", "material/ge_default.hlsli", "include/rvk_material_variant.hlsli", "include/rvk_gi.hlsli",
+                             "include/rvk_draw.hlsli", "include/rvk_abi.hlsli", "include/rvk_common.hlsli", "include/rvk_oct.hlsli"}) {
+        for (const char c : embedded::hlslSource(name)) {
+            h ^= static_cast<std::uint8_t>(c);
+            h *= 1099511628211ull;
+        }
+    }
+    return h;
+}
+
 std::uint32_t uberClassMask(std::string_view entry, const MacroList& macros) {
     std::uint32_t m = entry.ends_with("ZPass") ? 1u : 0u;
     const auto on = [&](std::string_view name) {

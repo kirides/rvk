@@ -37,6 +37,11 @@ public:
 
     std::uint32_t addSampler(VkSampler sampler);
 
+    // the ray tracing scene's TLAS in slot (< abi::kMaxTlas) of the acceleration structure array (abi.h kBindingTlas); false without the
+    // RT tier. Thread-safe against texture updates; the slot may be re-pointed while earlier frames still use their own slot.
+    bool setTlas(std::uint32_t slot, VkAccelerationStructureKHR tlas);
+    bool hasTlasBinding() const { return tlasBinding_; }
+
     VkDescriptorSetLayout setLayout() const { return layout_; }
     VkDescriptorSet set() const { return set_; }
     VkPipelineLayout pipelineLayout() const { return pipelineLayout_; }
@@ -64,6 +69,7 @@ private:
     std::mutex mutex_;
     Array arrays_[3];
     std::uint32_t nextSampler_ = 0;
+    bool tlasBinding_ = false;
 
     // defaults
     VkImage defaultImages_[3]{};

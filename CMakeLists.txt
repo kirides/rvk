@@ -379,11 +379,17 @@ add_library(rvk_core STATIC
     src/res/dds.cpp
     src/res/dds.h
     src/shader/abi.h
+    src/rhi/rhi.cpp
+    src/rhi/rhi.h
+    src/rhi/vulkan/vulkan_device.cpp
     src/shader/dxc.cpp
     src/shader/dxc.h
     src/shader/embedded.cpp.in
     src/shader/embedded.h
     src/shader/glsl.cpp
+    src/shader/translate.h
+    src/shader/hlsl.cpp
+    src/shader/hlsl.h
     src/shader/glsl.h
     src/shader/sm_decode.cpp
     src/shader/sm_disasm.cpp
@@ -513,6 +519,23 @@ add_executable(rvk_shadertool tools/shadertool/main.cpp)
 target_link_libraries(rvk_shadertool PRIVATE rvk_core SPIRV-Tools-static)
 rvk_deploy_dxc(rvk_shadertool)
 rvk_warnings(rvk_shadertool)
+
+# ---------------------------------------------------------------------------------------------
+# The slim RHI's DX12 backend (src/rhi/d3d12, docs/research/hlsl-rhi.md 5, 6) and its test: a separate library so that d3d9.dll does not import
+# d3d12.dll / dxgi.dll until the renderer uses the backend. rvk_rhitest runs the same code on both backends.
+# ---------------------------------------------------------------------------------------------
+add_library(rvk_rhi_d3d12 STATIC src/rhi/d3d12/d3d12_device.cpp)
+target_include_directories(rvk_rhi_d3d12 PUBLIC src include)
+target_link_libraries(rvk_rhi_d3d12 PUBLIC rvk_core d3d12 dxgi dxguid)
+rvk_warnings(rvk_rhi_d3d12)
+add_executable(rvk_rhitest tools/rhitest/main.cpp)
+target_link_libraries(rvk_rhitest PRIVATE rvk_core rvk_rhi_d3d12)
+rvk_deploy_dxc(rvk_rhitest)
+rvk_warnings(rvk_rhitest)
+set_target_properties(rvk_rhi_d3d12 rvk_rhitest PROPERTIES FOLDER tools)
+if(BUILD_TESTING)
+    add_test(NAME rvk_rhitest COMMAND rvk_rhitest)
+endif()
 
 # ---------------------------------------------------------------------------------------------
 # rvk_vktest: GPU smoke test of the Vulkan core + shader contract (off-screen, validation on)

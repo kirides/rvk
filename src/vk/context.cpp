@@ -349,6 +349,9 @@ bool Context::createDevice(bool withRayTracing) {
     features_.storageImageExtendedFormats = sup2.features.shaderStorageImageExtendedFormats == VK_TRUE;
     // 16-bit arithmetic: the FidelityFX DLL's shader variants (fp16 path) when the GPU has it (vk/fsr.h)
     f2.features.shaderInt16 = sup2.features.shaderInt16;
+    // 64-bit integers: the HLSL shaders build pointers from the (low, high) addresses in the FrameBlock / records (rvk_abi.hlsli rvkPtr)
+    f2.features.shaderInt64 = sup2.features.shaderInt64;
+    features_.shaderInt64 = sup2.features.shaderInt64 == VK_TRUE;
     features_.samplerAnisotropy = sup2.features.samplerAnisotropy == VK_TRUE;
     features_.maxAnisotropy = features_.samplerAnisotropy ? props_.limits.maxSamplerAnisotropy : 1.0f;
 
@@ -506,6 +509,13 @@ bool Context::createDevice(bool withRayTracing) {
         enabled.push_back(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
         enabled.push_back(VK_KHR_RAY_QUERY_EXTENSION_NAME);
         as.accelerationStructure = VK_TRUE;
+        {  // the TLAS lives in the bindless set (abi.h kBindingTlas), re-pointed per frame
+            VkPhysicalDeviceAccelerationStructureFeaturesKHR supAs{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
+            VkPhysicalDeviceFeatures2 q{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &supAs};
+            vkGetPhysicalDeviceFeatures2(physical_, &q);
+            as.descriptorBindingAccelerationStructureUpdateAfterBind = supAs.descriptorBindingAccelerationStructureUpdateAfterBind;
+            features_.rayTracing.tlasDescriptors = supAs.descriptorBindingAccelerationStructureUpdateAfterBind == VK_TRUE;
+        }
         rq.rayQuery = VK_TRUE;
         *tail = &as;
         as.pNext = &rq;

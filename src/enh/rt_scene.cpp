@@ -927,9 +927,13 @@ bool RtScene::ensureResources() {
     const std::uint32_t cap = limits_.maxInstances;
     vkGetAccelerationStructureBuildSizesKHR(ctx.device(), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &info, &cap, &sizes);
     bool ok = true;
+    std::uint32_t tlasSlot = 0;
     for (Tlas& t : tlas_) {
         ok = ok && createAs(ctx, VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, sizes.accelerationStructureSize, t.as, "rt scene tlas");
         t.capacity = cap;
+        // the HLSL ray queries reach the TLAS through the bindless acceleration structure array (abi.h kBindingTlas)
+        if (ok) dev_.bindless().setTlas(tlasSlot, t.as.handle);
+        ++tlasSlot;
     }
     tlasScratchSize_ = (sizes.buildScratchSize + scratchAlign_ - 1) & ~(scratchAlign_ - 1);
     ok = ok && ensureScratch(tlasScratchSize_);
@@ -1293,47 +1297,43 @@ void RtScene::evictOverBudget() {
 // main view's inverse view-projection; the skinned draws use its camera) and the TEXCOORD0 input go to the push constant
 // prevVs's buffer (16-byte header: slots) at the vertex's index-buffer value (gl_VertexIndex - the draw's vertexOffset,
 // DrawBlock pad1)
-bool RtScene::captureOptions(const d3d9::Shader& s, shader::GlslOptions& o) {
+bool RtScene::captureOptions(const d3d9::Shader& s, shader::TranslateOptions& o) {
     if (s.stage != shader::Stage::Vertex) return false;
-    std::string tc = "vec4(0.0)";
+    std::string tc = "float4(0.0, 0.0, 0.0, 0.0)";
     for (const auto& in : s.reflection.vertexInputs) {
         if (in.usage == shader::Usage::TexCoord && in.usageIndex == 0) tc = std::format("v{}", in.location);
     }
+    // the previous frame's world position of the vertex (w = 1; 0 = unknown): per-object motion (enh/gbuffer), an extra varying
+    o.extraOutputs = std::format("    [[vk::location({})]] float4 rvk_prevWorld : VARY{};", kPrevWorldLocation, kPrevWorldLocation);
     o.prelude = std::format(
-        "#extension GL_EXT_buffer_reference_uvec2 : require\n"
-        "layout(buffer_reference, std430, buffer_reference_align = 16) buffer RvkCapture {{\n"
-        "    uvec4 info;  // x slots, yz the previous frame's capture of the draw (0 = none), w its slots\n"
-        "    vec4 v[];    // per slot: world position (w = 1), TEXCOORD0\n"
-        "}};\n"
-        "// the previous frame's world position of the vertex (w = 1; 0 = unknown): per-object motion (enh/gbuffer)\n"
-        "layout(location = {}) out vec4 rvk_prevWorld;\n"
-        "// the operand the shader multiplies with its view-projection: the world position, in any view (GlslOptions::dotCaptures)\n"
-        "vec4 rvk_capW = vec4(0.0);\n",
-        kPrevWorldLocation);
+        "// the capture buffer (RvkCapture): a 16-byte header (uint4: x slots, yz the previous frame's capture of the draw (0 = none), w its slots), then per slot two\n"
+        "// float4: the world position (w = 1) and TEXCOORD0; read / written by address (vertex shader stores)\n"
+        "// the operand the shader multiplies with its view-projection: the world position, in any view (TranslateOptions::dotCaptures)\n"
+        "static float4 rvk_capW = float4(0.0, 0.0, 0.0, 0.0);\n");
     if (const auto& vp = s.semantics[d3d9::Semantic::ViewProjection]; vp.present()) {
         o.dotCaptures.push_back({static_cast<std::uint32_t>(vp.reg), "rvk_capW"});
     }
     o.epilogue = std::format(
-        "    rvk_prevWorld = vec4(0.0);\n"
+        "    rvk_out.rvk_prevWorld = float4(0.0, 0.0, 0.0, 0.0);\n"
         "    {{\n"
-        "        uvec2 rvk_capAddr = uvec2(pc.prevVs);\n"
-        "        if (rvk_capAddr != uvec2(0u)) {{\n"
-        "            RvkCapture rvk_cap = RvkCapture(rvk_capAddr);\n"
-        "            int rvk_slot = gl_VertexIndex - int(pc.draw.pad1);\n"
-        "            uvec4 rvk_info = rvk_cap.info;\n"
+        "        uint2 rvk_capAddr = pc.prevVs;\n"
+        "        if (any(rvk_capAddr != uint2(0u, 0u))) {{\n"
+        "            uint64_t rvk_cap = rvkAddr(rvk_capAddr);\n"
+        "            int rvk_slot = int(rvk_in.rvk_vertexId) - int(rvk_draw.alpha.w);\n"
+        "            uint4 rvk_info = vk::RawBufferLoad<uint4>(rvk_cap, 16);\n"
         "            uint rvk_slots = rvk_info.x & 0x7FFFFFFFu;\n"
         "            // the main view: the clip position back to the world; a cascade's view (bit 31 of the header's slots): the operand the\n"
         "            // shader multiplied with its view-projection\n"
-        "            vec4 rvk_w = (rvk_info.x & 0x80000000u) != 0u ? rvk_capW : pc.frame.invViewProj * rvk_pos;\n"
+        "            float4 rvk_w = (rvk_info.x & 0x80000000u) != 0u ? rvk_capW : mul(rvk_pos, rvkLoadFrame(pc.frame).invViewProj);\n"
         "            if (rvk_slot >= 0 && uint(rvk_slot) < rvk_slots && abs(rvk_w.w) > 1e-20) {{\n"
-        "                vec3 rvk_world = rvk_w.xyz / rvk_w.w;\n"
-        "                uint rvk_at = uint(gl_InstanceIndex) * rvk_slots + uint(rvk_slot);  // instanced draws: one run of slots per instance\n"
-        "                rvk_cap.v[rvk_at * 2] = vec4(rvk_world, 1.0);\n"
-        "                rvk_cap.v[rvk_at * 2 + 1] = {};\n"
-        "                rvk_prevWorld = vec4(rvk_world, 0.0);\n"
-        "                if (rvk_info.yz != uvec2(0u) && uint(rvk_slot) < rvk_info.w) {{\n"
-        "                    vec4 rvk_prev = RvkCapture(rvk_info.yz).v[rvk_slot * 2];\n"
-        "                    if (rvk_prev.w == 1.0) rvk_prevWorld = vec4(rvk_prev.xyz, 1.0);\n"
+        "                float3 rvk_world = rvk_w.xyz / rvk_w.w;\n"
+        "                uint rvk_at = rvk_in.rvk_instanceId * rvk_slots + uint(rvk_slot);  // instanced draws: one run of slots per instance\n"
+        "                vk::RawBufferStore<float4>(rvk_cap + 16ull + uint64_t(rvk_at * 2u) * 16ull, float4(rvk_world, 1.0), 16);\n"
+        "                vk::RawBufferStore<float4>(rvk_cap + 16ull + uint64_t(rvk_at * 2u + 1u) * 16ull, {}, 16);\n"
+        "                rvk_out.rvk_prevWorld = float4(rvk_world, 0.0);\n"
+        "                if (any(rvk_info.yz != uint2(0u, 0u)) && uint(rvk_slot) < rvk_info.w) {{\n"
+        "                    float4 rvk_prev = vk::RawBufferLoad<float4>(rvkAddr(rvk_info.yz) + 16ull + uint64_t(rvk_slot * 2) * 16ull, 16);\n"
+        "                    if (rvk_prev.w == 1.0) rvk_out.rvk_prevWorld = float4(rvk_prev.xyz, 1.0);\n"
         "                }}\n"
         "            }}\n"
         "        }}\n"
@@ -2342,7 +2342,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
         ++iv_.holeFrames;
         iv_.holes += n - used;
     }
-    dev_.setRtScene({t.as.address, ra.address, used, used, frame});
+    dev_.setRtScene({t.as.address, ra.address, static_cast<std::uint32_t>(slot), used, used, frame});
 
     lastInstances_ = used;
     lastTriangles_ = triangles;

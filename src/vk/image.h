@@ -36,6 +36,14 @@ public:
     VkImageAspectFlags aspect() const { return aspect_; }
     VkImageLayout layout() const { return layout_; }
     bool valid() const { return image_ != VK_NULL_HANDLE; }
+    // wraps an image owned elsewhere (a swapchain image: its view too); destroy() only forgets it
+    void adopt(VkImage image, VkImageView view, const ImageDesc& desc, VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED) {
+        image_ = image;
+        view_ = view;
+        desc_ = desc;
+        layout_ = layout;
+        adopted_ = true;
+    }
 
     // records a barrier to `layout` (no-op if already there unless `force`); the source stage/access derive from the current
     // layout, so writes in the old layout are made visible
@@ -56,6 +64,7 @@ private:
     VkImageView attachmentViews_[16 * 6]{};  // [mip * 6 + layer] for mip < 16
     VkImageAspectFlags aspect_ = VK_IMAGE_ASPECT_COLOR_BIT;
     VkImageLayout layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    bool adopted_ = false;
 };
 
 bool isDepthFormat(VkFormat f);

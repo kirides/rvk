@@ -25,10 +25,13 @@ struct Define {
 
 struct Request {
     std::string file;       // path below shaders/, e.g. "debug/inject_view.hlsl" (also the name in diagnostics and cache keys)
+    std::string source;     // the text itself (generated shaders: the D3D9 translator); empty = read `file` through the source reader. #includes still resolve
     std::string entry;      // "CSMain"
     std::string profile;    // "cs_6_6", "vs_6_6", "ps_6_6"
     std::vector<Define> defines;
     Target target = Target::Spirv;
+    int optLevel = 3;        // -O<n> (0..3) without debug info; generated shaders use 1: the driver compiles them again anyway
+    bool cache = true;       // use the disk cache (generated shaders have their own: the device's SPIR-V cache keyed by the bytecode)
     bool debugInfo = false;  // -Zi -Od + SPIR-V debug info (RenderDoc / PIX show names and source); part of the cache key
 };
 
@@ -67,6 +70,6 @@ Result compile(const Request& request);
 std::vector<std::string> arguments(const Request& request);
 
 // Bump when the argument set or the cache layout changes (part of every cache key)
-inline constexpr std::uint32_t kArgsRevision = 3;
+inline constexpr std::uint32_t kArgsRevision = 4;
 
 }  // namespace rvk::shader::dxc

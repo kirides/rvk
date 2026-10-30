@@ -183,7 +183,7 @@ struct FrameExtras {
     std::array<std::uint32_t, 4> images{};  // bindless slots: scene HDR, refraction copy, depth map (t2D), sky cube (tCube)
     const std::array<std::array<float, 4>, 16>* params = nullptr;  // feature parameters (null = zeros)
     std::uint64_t rtTlas = 0, rtRecords = 0;  // the ray tracing scene of this submission (0 = none)
-    std::uint32_t rtInstances = 0, rtRecordCount = 0;
+    std::uint32_t rtInstances = 0, rtRecordCount = 0, rtTlasSlot = 0;  // rtTlasSlot: the TLAS in the bindless array (HLSL)
     std::uint64_t gi = 0;  // the GI volume header of this frame (0 = none)
     std::array<std::uint32_t, 4> ao{};  // FrameBlock::ao (slot 0 = none)
     std::array<std::uint32_t, 4> sgi{};  // FrameBlock::sgi (slot 0 = none)

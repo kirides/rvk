@@ -373,7 +373,7 @@ TEST(draws_tint_epilogue) {
     CHECK(dec.ok());
     if (!dec.ok()) return;
     const auto plain = rvk::shader::toGlsl(dec.program);
-    const auto tinted = rvk::shader::toGlsl(dec.program, rvk::shader::GlslOptions{.tintEpilogue = true});
+    const auto tinted = rvk::shader::toGlsl(dec.program, rvk::shader::TranslateOptions{.tintEpilogue = true});
     CHECK(plain.ok() && tinted.ok());
     CHECK(plain.glsl.find("unpackUnorm4x8") == std::string::npos);
     CHECK(tinted.glsl.find("pc.draw.pad0 != 0u") != std::string::npos);

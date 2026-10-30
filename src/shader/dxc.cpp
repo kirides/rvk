@@ -8,6 +8,7 @@
 #endif
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -388,7 +389,7 @@ std::vector<std::string> arguments(const Request& r) {
         // GD3D11's set (gd3d11.md 3.7) for a floor without VK_EXT_mutable_descriptor_type: the typed bindless arrays need
         // no -fvk-bind-resource-heap; storage images carry [[vk::image_format]] instead of -fspv-use-unknown-image-format
         // (-fspv-entrypoint-name: every pipeline create call of the renderer names the entry point "main")
-        a.insert(a.end(), {"-spirv", "-fspv-target-env=vulkan1.3", "-fspv-entrypoint-name=main", "-fvk-support-nonzero-base-instance",
+        a.insert(a.end(), {"-spirv", "-fspv-target-env=vulkan1.3", "-fspv-entrypoint-name=main",
                            "-fspv-extension=SPV_KHR_ray_query", "-fspv-extension=SPV_EXT_descriptor_indexing",
                            "-fspv-extension=SPV_KHR_physical_storage_buffer", "-fspv-extension=SPV_KHR_shader_draw_parameters"});
     }
@@ -396,7 +397,7 @@ std::vector<std::string> arguments(const Request& r) {
         a.insert(a.end(), {"-Zi", "-Od"});
         if (r.target == Target::Spirv) a.insert(a.end(), {"-fspv-debug=file", "-fspv-debug=source", "-fspv-debug=line"});
     } else {
-        a.push_back("-O3");
+        a.push_back(std::format("-O{}", std::clamp(r.optLevel, 0, 3)));
     }
     return a;
 }
@@ -410,7 +411,9 @@ Result compile(const Request& request) {
     }
     const SourceReader reader = currentReader();
     std::string source;
-    if (!reader(request.file, source)) {
+    if (!request.source.empty()) {
+        source = request.source;
+    } else if (!reader(request.file, source)) {
         result.log = std::format("{}: no such shader source", request.file);
         return result;
     }
@@ -421,7 +424,7 @@ Result compile(const Request& request) {
         cacheDir = g_cacheDir;
     }
     fs::path cacheFile;
-    if (!cacheDir.empty()) {
+    if (!cacheDir.empty() && request.cache) {
         cacheFile = cacheDir / std::format("{:016x}.dxo", requestKey(request, source, args));
         std::vector<std::uint8_t> payload;
         if (loadCache(cacheFile, reader, request, payload)) {

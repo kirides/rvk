@@ -4,18 +4,17 @@
 #include "rvk_abi.hlsli"
 
 // bindless sampling
-float4 rvkSample2D(uint tex, uint smp, float2 uv) {
-    return g_t2D[NonUniformResourceIndex(tex)].Sample(g_samp[NonUniformResourceIndex(smp)], uv);
-}
-float4 rvkSample2DLod(uint tex, uint smp, float2 uv, float lod) {
-    return g_t2D[NonUniformResourceIndex(tex)].SampleLevel(g_samp[NonUniformResourceIndex(smp)], uv, lod);
-}
-float4 rvkFetch2D(uint tex, int2 p) { return g_t2D[NonUniformResourceIndex(tex)].Load(int3(p, 0)); }
+float4 rvkSample2D(uint tex, uint smp, float2 uv) { return RVK_TEX2D(tex).Sample(RVK_SAMP(smp), uv); }
+float4 rvkSample2DLod(uint tex, uint smp, float2 uv, float lod) { return RVK_TEX2D(tex).SampleLevel(RVK_SAMP(smp), uv, lod); }
+float4 rvkFetch2D(uint tex, int2 p) { return RVK_TEX2D(tex).Load(int3(p, 0)); }
 int2 rvkSize2D(uint tex) {
     uint w, h;
-    g_t2D[NonUniformResourceIndex(tex)].GetDimensions(w, h);
+    RVK_TEX2D(tex).GetDimensions(w, h);
     return int2(w, h);
 }
+
+// GLSL's unpackUnorm4x8: byte 0 is x
+float4 rvkUnpackUnorm4x8(uint w) { return float4(w & 0xFFu, (w >> 8) & 0xFFu, (w >> 16) & 0xFFu, w >> 24) / 255.0; }
 
 // Texture coordinates (0,0 = top left, D3D9 / Vulkan image order) -> D3D NDC (y up)
 float2 rvkUvToNdc(float2 uv) { return float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0); }

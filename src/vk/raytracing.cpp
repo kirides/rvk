@@ -198,6 +198,7 @@ SelfTestResult selfTest(Context& ctx) {
     AddressBuffer vertices, indices, instances, output, blasScratch, tlasScratch;
     AccelerationStructure blas, tlas;
     VkPipelineLayout layout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
     VkPipeline pipeline = VK_NULL_HANDLE;
     VkCommandPool pool = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
@@ -206,6 +207,7 @@ SelfTestResult selfTest(Context& ctx) {
         if (pool != VK_NULL_HANDLE) vkDestroyCommandPool(ctx.device(), pool, nullptr);
         if (pipeline != VK_NULL_HANDLE) vkDestroyPipeline(ctx.device(), pipeline, nullptr);
         if (layout != VK_NULL_HANDLE) vkDestroyPipelineLayout(ctx.device(), layout, nullptr);
+        if (setLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(ctx.device(), setLayout, nullptr);
         tlas.destroy(ctx);
         blas.destroy(ctx);
         for (AddressBuffer* b : {&vertices, &indices, &instances, &output, &blasScratch, &tlasScratch}) b->destroy(ctx);
@@ -229,14 +231,21 @@ SelfTestResult selfTest(Context& ctx) {
     std::memcpy(indices.mapped, idx, sizeof(idx));
     std::memset(output.mapped, 0xCD, kSize * kSize * 4);
 
-    // pipeline: push constants only (TLAS address, output address, size)
+    // pipeline: the TLAS as a push descriptor (HLSL ray queries need a descriptor, not an address), push constants = output address, size
     struct Push {
-        std::uint64_t tlas;
         std::uint64_t out;
         std::uint32_t width, height;
     };
+    const VkDescriptorSetLayoutBinding tlasBinding{0, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+    VkDescriptorSetLayoutCreateInfo sci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    sci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT;
+    sci.bindingCount = 1;
+    sci.pBindings = &tlasBinding;
+    if (vkCreateDescriptorSetLayout(ctx.device(), &sci, nullptr, &setLayout) != VK_SUCCESS) return fail("descriptor set layout");
     const VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Push)};
     VkPipelineLayoutCreateInfo lci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    lci.setLayoutCount = 1;
+    lci.pSetLayouts = &setLayout;
     lci.pushConstantRangeCount = 1;
     lci.pPushConstantRanges = &range;
     if (vkCreatePipelineLayout(ctx.device(), &lci, nullptr, &layout) != VK_SUCCESS) return fail("pipeline layout");
@@ -285,8 +294,16 @@ SelfTestResult selfTest(Context& ctx) {
         return fail("TLAS build");
     }
     buildBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
-    const Push push{tlas.address, output.address, kSize, kSize};
+    const Push push{output.address, kSize, kSize};
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    VkWriteDescriptorSetAccelerationStructureKHR asWrite{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
+    asWrite.accelerationStructureCount = 1;
+    asWrite.pAccelerationStructures = &tlas.handle;
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, &asWrite};
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &write);
     vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
     vkCmdDispatch(cmd, kSize / 8, kSize / 8, 1);
     VkMemoryBarrier2 toHost{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};

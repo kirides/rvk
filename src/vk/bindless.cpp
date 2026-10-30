@@ -20,32 +20,38 @@ bool Bindless::create(Context& ctx, Frames& frames) {
 
     // compute too: injected passes (vk/passes.h) bind this set in their own layouts
     const VkShaderStageFlags stages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
-    VkDescriptorSetLayoutBinding b[4]{};
+    VkDescriptorSetLayoutBinding b[5]{};
+    tlasBinding_ = ctx.features().rayTracing.enabled && ctx.features().rayTracing.tlasDescriptors;
     b[0] = {shader::abi::kBindingTex2D, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMax2D, stages, nullptr};
     b[1] = {shader::abi::kBindingTexCube, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxCube, stages, nullptr};
     b[2] = {shader::abi::kBindingTex3D, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMax3D, stages, nullptr};
     b[3] = {shader::abi::kBindingSamplers, VK_DESCRIPTOR_TYPE_SAMPLER, kMaxSamplers, stages, nullptr};
     const VkDescriptorBindingFlags flag = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
                                           VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT;
-    VkDescriptorBindingFlags flags[4] = {flag, flag, flag, flag};
+    VkDescriptorBindingFlags flags[5] = {flag, flag, flag, flag, flag};
+    if (tlasBinding_) {
+        b[4] = {shader::abi::kBindingTlas, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, shader::abi::kMaxTlas, stages, nullptr};
+    }
+    const std::uint32_t bindingCount = tlasBinding_ ? 5 : 4;
     VkDescriptorSetLayoutBindingFlagsCreateInfo bfi{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
-    bfi.bindingCount = 4;
+    bfi.bindingCount = bindingCount;
     bfi.pBindingFlags = flags;
     VkDescriptorSetLayoutCreateInfo lci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, &bfi};
     lci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
-    lci.bindingCount = 4;
+    lci.bindingCount = bindingCount;
     lci.pBindings = b;
     if (vkCreateDescriptorSetLayout(ctx.device(), &lci, nullptr, &layout_) != VK_SUCCESS) {
         spdlog::error("vulkan: bindless descriptor set layout failed (descriptor limits?)");
         return false;
     }
     names::object(ctx, layout_, VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, "rvk bindless set layout");
-    VkDescriptorPoolSize sizes[2] = {{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMax2D + kMaxCube + kMax3D},
-                                     {VK_DESCRIPTOR_TYPE_SAMPLER, kMaxSamplers}};
+    VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMax2D + kMaxCube + kMax3D},
+                                     {VK_DESCRIPTOR_TYPE_SAMPLER, kMaxSamplers},
+                                     {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, shader::abi::kMaxTlas}};
     VkDescriptorPoolCreateInfo pci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pci.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
     pci.maxSets = 1;
-    pci.poolSizeCount = 2;
+    pci.poolSizeCount = tlasBinding_ ? 3 : 2;
     pci.pPoolSizes = sizes;
     if (vkCreateDescriptorPool(ctx.device(), &pci, nullptr, &pool_) != VK_SUCCESS) {
         return false;
@@ -251,6 +257,22 @@ std::uint32_t Bindless::addSampler(VkSampler sampler) {
     w.pImageInfo = &ii;
     vkUpdateDescriptorSets(ctx_->device(), 1, &w, 0, nullptr);
     return slot;
+}
+
+bool Bindless::setTlas(std::uint32_t slot, VkAccelerationStructureKHR tlas) {
+    if (!tlasBinding_ || slot >= shader::abi::kMaxTlas || tlas == VK_NULL_HANDLE) return false;
+    VkWriteDescriptorSetAccelerationStructureKHR as{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
+    as.accelerationStructureCount = 1;
+    as.pAccelerationStructures = &tlas;
+    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, &as};
+    w.dstSet = set_;
+    w.dstBinding = shader::abi::kBindingTlas;
+    w.dstArrayElement = slot;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    const std::lock_guard lock(mutex_);
+    vkUpdateDescriptorSets(ctx_->device(), 1, &w, 0, nullptr);
+    return true;
 }
 
 }  // namespace rvk::vk

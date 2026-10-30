@@ -23,8 +23,8 @@ constexpr VkFormat kMotionFormat = kGbufferMotionFormat;
 constexpr VkImageUsageFlags kNormalUsage = kGbufferNormalUsage;
 constexpr VkImageUsageFlags kMotionUsage = kGbufferMotionUsage;
 
-bool gbufferVariant(const d3d9::Shader& s, shader::GlslOptions& o) { return materialVariantOptions(s, MaterialVariant::Gbuffer, o); }
-bool gbufferMotionVariant(const d3d9::Shader& s, shader::GlslOptions& o) {
+bool gbufferVariant(const d3d9::Shader& s, shader::TranslateOptions& o) { return materialVariantOptions(s, MaterialVariant::Gbuffer, o); }
+bool gbufferMotionVariant(const d3d9::Shader& s, shader::TranslateOptions& o) {
     return materialVariantOptions(s, MaterialVariant::GbufferMotion, o);
 }
 

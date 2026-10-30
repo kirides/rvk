@@ -189,7 +189,7 @@ void Gi::disable() {
 
 // ---- P2: the material pixel shaders' GI variant -----------------------------------------------------------------------------
 
-bool Gi::variantOptions(const d3d9::Shader& s, shader::GlslOptions& o) { return materialVariantOptions(s, MaterialVariant::Gi, o); }
+bool Gi::variantOptions(const d3d9::Shader& s, shader::TranslateOptions& o) { return materialVariantOptions(s, MaterialVariant::Gi, o); }
 
 // ---- P0: the frame's light ----------------------------------------------------------------------------------------------------
 

@@ -15,7 +15,9 @@
 #include <spirv-tools/libspirv.hpp>
 
 #include "d3d9/ffshader.h"
+#include "shader/dxc.h"
 #include "shader/glsl.h"
+#include "shader/hlsl.h"
 #include "shader/sm_ir.h"
 #include "shader/spirv.h"
 #include "test.h"
@@ -146,6 +148,20 @@ std::string roundTripTokens(const char* name, const std::vector<std::uint32_t>& 
     std::string vlog;
     tools.SetMessageConsumer([&](spv_message_level_t, const char*, const spv_position_t&, const char* m) { vlog += m; });
     CHECK_MSG(tools.Validate(s.words), std::string(name) + ": spirv-val: " + vlog);
+    // the same shader through the HLSL translator + DXC (skipped without dxcompiler.dll)
+    if (rvk::shader::dxc::available()) {
+        const HlslResult h = toHlsl(dec.program);
+        CHECK_MSG(h.ok(), std::string(name) + ": hlsl: " + h.error);
+        if (h.ok()) {
+            const SpirvResult hs = compileHlsl(dec.program.version.stage, h.hlsl, name);
+            CHECK_MSG(hs.ok(), std::string(name) + ": dxc:\n" + hs.log + "\n" + h.hlsl);
+            if (hs.ok()) {
+                std::string hlog;
+                tools.SetMessageConsumer([&](spv_message_level_t, const char*, const spv_position_t&, const char* m) { hlog += m; });
+                CHECK_MSG(tools.Validate(hs.words), std::string(name) + ": spirv-val (hlsl): " + hlog);
+            }
+        }
+    }
     return g.glsl;
 }
 

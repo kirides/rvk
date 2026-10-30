@@ -36,8 +36,10 @@
 #include "enh/gi.h"
 #include "enh/material_variant.h"
 #include "enh/rt_scene.h"
+#include "shader/dxc.h"
 #include "shader/embedded.h"
 #include "shader/glsl.h"
+#include "shader/hlsl.h"
 #include "shader/sm_eval.h"
 #include "shader/sm_ir.h"
 #include "shader/spirv.h"
@@ -63,7 +65,9 @@ struct Outcome {
     bool intBool = false;  // Reflection::intBoolConstants
 };
 
-Outcome translate(const std::vector<std::uint32_t>& tokens, spvtools::SpirvTools& tools, const GlslOptions& options = {}) {
+bool g_hlsl = false;  // corpus --hlsl: translate to HLSL and compile it with DXC instead of GLSL + glslang
+
+Outcome translate(const std::vector<std::uint32_t>& tokens, spvtools::SpirvTools& tools, const TranslateOptions& options = {}) {
     Outcome o;
     const DecodeResult dec = decode(tokens);
     if (!dec.ok()) {
@@ -72,6 +76,37 @@ Outcome translate(const std::vector<std::uint32_t>& tokens, spvtools::SpirvTools
         return o;
     }
     o.disasm = disassemble(dec.program);
+    if (g_hlsl) {
+        const HlslResult h = toHlsl(dec.program, options);
+        if (!h.ok()) {
+            o.stage = "hlsl";
+            o.message = h.error;
+            return o;
+        }
+        o.glsl = h.hlsl;
+        o.intBool = h.reflection.intBoolConstants;
+        rvk::shader::dxc::Request r;
+        r.file = "translated.hlsl";
+        r.source = h.hlsl;
+        const bool vs = dec.program.version.stage == Stage::Vertex;
+        r.entry = vs ? "VSMain" : "PSMain";
+        r.profile = vs ? "vs_6_6" : "ps_6_6";
+        r.optLevel = std::getenv("RVK_DXC_OPT") != nullptr ? std::atoi(std::getenv("RVK_DXC_OPT")) : 1;  // as shader::compileHlsl (the renderer)
+        r.cache = false;
+        const auto c = rvk::shader::dxc::compile(r);
+        if (!c.ok()) {
+            o.stage = "compile";
+            o.message = c.log;
+            return o;
+        }
+        std::string vlog2;
+        tools.SetMessageConsumer([&](spv_message_level_t, const char*, const spv_position_t&, const char* m) { vlog2 += m; vlog2 += '\n'; });
+        if (!tools.Validate(c.words)) {
+            o.stage = "validate";
+            o.message = vlog2;
+        }
+        return o;
+    }
     const GlslResult g = toGlsl(dec.program, options);
     if (!g.ok()) {
         o.stage = "glsl";
@@ -96,9 +131,9 @@ Outcome translate(const std::vector<std::uint32_t>& tokens, spvtools::SpirvTools
 }
 
 // a variant's options for one shader (null = the plain options)
-using VariantFn = bool (*)(const rvk::d3d9::Shader&, GlslOptions&);
+using VariantFn = bool (*)(const rvk::d3d9::Shader&, TranslateOptions&);
 
-int cmdCorpus(const fs::path& dir, const fs::path& out, int maxErrors, const GlslOptions& baseOptions, VariantFn variant) {
+int cmdCorpus(const fs::path& dir, const fs::path& out, int maxErrors, const TranslateOptions& baseOptions, VariantFn variant) {
     int skipped = 0;
     spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
     std::map<std::string, int> ok, failed;
@@ -117,7 +152,7 @@ int cmdCorpus(const fs::path& dir, const fs::path& out, int maxErrors, const Gls
     for (const auto& f : files) {
         const std::string kind = f.filename().string().substr(0, f.filename().string().find('_'));
         const std::vector<std::uint32_t> tokens = readTokens(f);
-        GlslOptions options = baseOptions;
+        TranslateOptions options = baseOptions;
         if (variant != nullptr) {
             // the shader as the device sees it: stage, reflection, CTAB semantics
             const DecodeResult dec = decode(tokens);
@@ -341,6 +376,57 @@ int cmdEvalCheck(const fs::path& dir) {
     return ok == total ? 0 : 1;
 }
 
+// rvk_shadertool hlsl <name> [-o out.spv] [-D NAME[=VALUE]]... [--debug] [--dxil out.dxil]: compiles the embedded (or RVK_SHADER_DIR) HLSL source
+// shaders/<name>.hlsl exactly as the renderer does (entry by the stage extension of <name>), validates the SPIR-V
+int cmdHlsl(int argc, char** argv) {
+    const std::string name = argv[2];
+    std::string out;
+    std::string dxilOut;
+    rvk::shader::dxc::Request r;
+    r.file = name + ".hlsl";
+    const auto dot = name.rfind('.');
+    const std::string ext = dot == std::string::npos ? std::string() : name.substr(dot);
+    if (ext == ".comp") { r.entry = "CSMain"; r.profile = "cs_6_6"; }
+    else if (ext == ".vert") { r.entry = "VSMain"; r.profile = "vs_6_6"; }
+    else if (ext == ".frag") { r.entry = "PSMain"; r.profile = "ps_6_6"; }
+    else { std::printf("unknown stage extension of %s\n", name.c_str()); return 2; }
+    for (int i = 3; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == "-o" && i + 1 < argc) out = argv[++i];
+        else if (a == "--dxil" && i + 1 < argc) dxilOut = argv[++i];
+        else if (a == "--debug") r.debugInfo = true;
+        else if (a == "-D" && i + 1 < argc) {
+            const std::string d = argv[++i];
+            const auto eq = d.find('=');
+            r.defines.push_back({d.substr(0, eq), eq == std::string::npos ? std::string() : d.substr(eq + 1)});
+        }
+    }
+    if (!rvk::shader::dxc::available()) {
+        std::printf("DXC unavailable: %s\n", std::string(rvk::shader::dxc::unavailableReason()).c_str());
+        return 2;
+    }
+    const auto res = rvk::shader::dxc::compile(r);
+    if (!res.log.empty()) std::printf("%s\n", res.log.c_str());
+    if (!res.ok()) return 1;
+    spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
+    tools.SetMessageConsumer([](spv_message_level_t, const char*, const spv_position_t&, const char* m) { std::printf("spirv-val: %s\n", m); });
+    if (!tools.Validate(res.words)) return 1;
+    if (!out.empty()) {
+        std::ofstream f(out, std::ios::binary);
+        f.write(reinterpret_cast<const char*>(res.words.data()), static_cast<std::streamsize>(res.words.size() * 4));
+    }
+    if (!dxilOut.empty()) {
+        r.target = rvk::shader::dxc::Target::Dxil;
+        const auto dx = rvk::shader::dxc::compile(r);
+        if (!dx.log.empty()) std::printf("%s\n", dx.log.c_str());
+        if (!dx.ok()) return 1;
+        std::ofstream f(dxilOut, std::ios::binary);
+        f.write(reinterpret_cast<const char*>(dx.bytes.data()), static_cast<std::streamsize>(dx.bytes.size()));
+    }
+    std::printf("ok %s (%zu words%s)\n", name.c_str(), res.words.size(), res.fromCache ? ", cached" : "");
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -352,22 +438,24 @@ int main(int argc, char** argv) {
     if (cmd == "corpus") {
         fs::path out;
         int maxErrors = 20;
-        GlslOptions options;
+        TranslateOptions options;
         VariantFn variant = nullptr;
         for (int i = 3; i < argc; ++i) {
             const std::string a = argv[i];
             if (a == "--gi") {
                 variant = &rvk::enh::Gi::variantOptions;
             } else if (a == "--gbuf") {
-                variant = [](const rvk::d3d9::Shader& sh, GlslOptions& o) {
+                variant = [](const rvk::d3d9::Shader& sh, TranslateOptions& o) {
                     return rvk::enh::materialVariantOptions(sh, rvk::enh::MaterialVariant::Gbuffer, o);
                 };
             } else if (a == "--gbuf-motion") {
-                variant = [](const rvk::d3d9::Shader& sh, GlslOptions& o) {
+                variant = [](const rvk::d3d9::Shader& sh, TranslateOptions& o) {
                     return rvk::enh::materialVariantOptions(sh, rvk::enh::MaterialVariant::GbufferMotion, o);
                 };
             } else if (a == "--capture") {
                 variant = &rvk::enh::RtScene::captureOptions;
+            } else if (a == "--hlsl") {
+                g_hlsl = true;
             } else if (a == "--tint") {
                 options.tintEpilogue = true;
             } else if (i + 1 < argc && a == "--out") {
@@ -385,6 +473,7 @@ int main(int argc, char** argv) {
         }
         return cmdExport(argv[2], argv[3]);
     }
+    if (cmd == "hlsl") return cmdHlsl(argc, argv);
     if (cmd == "show") return cmdShow(argv[2]);
     if (cmd == "refdisasm") return cmdRefDisasm(argv[2]);
     if (cmd == "evalcheck") return cmdEvalCheck(argv[2]);

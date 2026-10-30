@@ -13,6 +13,8 @@
 #include <spirv-tools/libspirv.hpp>
 
 #include "enh/debug_view.h"
+#include "enh/rt_debug.h"
+#include "enh/shadows.h"
 #include "shader/abi.h"
 #include "shader/dxc.h"
 #include "shader/embedded.h"
@@ -158,4 +160,116 @@ TEST(abi_hlsl_layout_matches_cpp) {
            {"width", offsetof(P, width)}, {"height", offsetof(P, height)}, {"srcTex", offsetof(P, srcTex)},
            {"srcSampler", offsetof(P, srcSampler)}, {"pad", offsetof(P, pad)}},
           "DebugViewPush");
+}
+
+namespace {
+// the same comparison for every HLSL layout test below
+void checkHlsl(const std::map<std::string, std::uint32_t>& got, const std::map<std::string, std::size_t>& want, const char* what) {
+    CHECK_MSG(got.size() == want.size(), std::format("{}: {} members in HLSL, {} in C++", what, got.size(), want.size()).c_str());
+    for (const auto& [name, off] : want) {
+        const auto it = got.find(name);
+        CHECK_MSG(it != got.end() && it->second == off,
+                  std::format("{}.{}: C++ offset {}, HLSL {}", what, name, off, it != got.end() ? std::to_string(it->second) : "missing").c_str());
+    }
+}
+}  // namespace
+
+// the draw ABI (shaders/include/rvk_draw.hlsli: push block, StageConsts, DrawBlock)
+TEST(abi_hlsl_draw_layout_matches_cpp) {
+    if (!dxc::available()) return;
+    const auto words = embedded::spirv("test/abi_layout.comp");
+    CHECK(!words.empty());
+    if (words.empty()) return;
+    const auto m = rvk::test::memberOffsets(words);
+    CHECK(m.contains("type.PushConstant.RvkDrawPush") && m.contains("RvkStageData") && m.contains("RvkDrawData"));
+    if (!m.contains("type.PushConstant.RvkDrawPush") || !m.contains("RvkStageData") || !m.contains("RvkDrawData")) return;
+    using PC = abi::PushConstants;
+    checkHlsl(m.at("type.PushConstant.RvkDrawPush"),
+              {{"vs", offsetof(PC, vsConsts)}, {"ps", offsetof(PC, psConsts)}, {"draw", offsetof(PC, draw)}, {"frame", offsetof(PC, frame)},
+               {"prevVs", offsetof(PC, prevVsConsts)}, {"drawId", offsetof(PC, drawId)}, {"flags", offsetof(PC, flags)},
+               {"vsw", offsetof(PC, vsWin)}, {"psw", offsetof(PC, psWin)}},
+              "RvkDrawPush");
+    checkHlsl(m.at("RvkStageData"), {{"c", 0}, {"i", abi::kStageConstsIntOffset}, {"b", abi::kStageConstsBoolOffset}}, "RvkStageData");
+    using DB = abi::DrawBlock;
+    // alpha = {alphaFunc, alphaRef, pad0, pad1}
+    CHECK(offsetof(DB, alphaRef) == offsetof(DB, alphaFunc) + 4 && offsetof(DB, pad) == offsetof(DB, alphaFunc) + 8);
+    checkHlsl(m.at("RvkDrawData"),
+              {{"tex", offsetof(DB, tex)}, {"smp", offsetof(DB, smp)}, {"posFix", offsetof(DB, posFix)}, {"alpha", offsetof(DB, alphaFunc)},
+               {"psC5", offsetof(DB, psC5)}},
+              "RvkDrawData");
+}
+
+// the RT scene's geometry record (shaders/include/rvk_rt.hlsli: seven uint4) and the RT debug view's push block
+TEST(abi_hlsl_rt_layout_matches_cpp) {
+    if (!dxc::available()) return;
+    const auto words = embedded::spirv("test/abi_rt_layout.comp");
+    CHECK(!words.empty());
+    if (words.empty()) return;
+    const auto m = rvk::test::memberOffsets(words);
+    CHECK(m.contains("RvkRtRecordData") && m.contains("RvkRtSegmentData") && m.contains("type.PushConstant.RtDebugPush"));
+    if (!m.contains("RvkRtRecordData") || !m.contains("RvkRtSegmentData") || !m.contains("type.PushConstant.RtDebugPush")) return;
+    using R = abi::RtGeometryRecord;
+    // the HLSL record is w0..w6 = the C++ record's 16-byte rows; inside a row the C++ fields must follow in the order the shader unpacks
+    CHECK(offsetof(R, indices) == offsetof(R, vertices) + 8 && offsetof(R, flags) == offsetof(R, stride) + 4 &&
+          offsetof(R, normal) == offsetof(R, stride) + 8 && offsetof(R, texcoord0) == offsetof(R, stride) + 12 &&
+          offsetof(R, texcoord6) == offsetof(R, texcoord1) + 4 && offsetof(R, color0) == offsetof(R, texcoord1) + 8 &&
+          offsetof(R, instanceId) == offsetof(R, texcoord1) + 12 && offsetof(R, albedoSampler) == offsetof(R, albedoTex) + 4 &&
+          offsetof(R, alpha) == offsetof(R, albedoTex) + 8 && offsetof(R, uvSet) == offsetof(R, albedoTex) + 12 &&
+          offsetof(R, segmentCount) == offsetof(R, segments) + 8);
+    checkHlsl(m.at("RvkRtRecordData"),
+              {{"w0", offsetof(R, vertices)}, {"w1", offsetof(R, stride)}, {"w2", offsetof(R, texcoord1)}, {"w3", offsetof(R, albedoTex)},
+               {"uvMap0", offsetof(R, uvMap)}, {"uvMap1", offsetof(R, uvMap) + 16}, {"w6", offsetof(R, segments)}},
+              "RvkRtRecordData");
+    using S = abi::RtMaterialSegment;
+    CHECK(offsetof(S, primitiveCount) == offsetof(S, firstPrimitive) + 4 && offsetof(S, albedoTex) == offsetof(S, firstPrimitive) + 8 &&
+          offsetof(S, albedoSampler) == offsetof(S, firstPrimitive) + 12 && offsetof(S, uvSet) == offsetof(S, alpha) + 4);
+    checkHlsl(m.at("RvkRtSegmentData"),
+              {{"w0", offsetof(S, firstPrimitive)}, {"w1", offsetof(S, alpha)}, {"uvMap0", offsetof(S, uvMap)}, {"uvMap1", offsetof(S, uvMap) + 16}},
+              "RvkRtSegmentData");
+    using P = rvk::enh::RtDebugPush;
+    checkHlsl(m.at("type.PushConstant.RtDebugPush"),
+              {{"frame", offsetof(P, h) + offsetof(abi::PassPushHeader, frame)},
+               {"passId", offsetof(P, h) + offsetof(abi::PassPushHeader, passId)},
+               {"passFlags", offsetof(P, h) + offsetof(abi::PassPushHeader, passFlags)}, {"depthTex", offsetof(P, depthTex)},
+               {"width", offsetof(P, width)}, {"height", offsetof(P, height)}, {"srcTex", offsetof(P, srcTex)},
+               {"srcSampler", offsetof(P, srcSampler)}, {"mode", offsetof(P, mode)}, {"probes", offsetof(P, probes)}},
+              "RtDebugPush");
+}
+
+// the shadow mask's block (shaders/shadows/shadow_block.hlsli) against enh::ShadowBlock
+TEST(shadows_block_hlsl_matches_cpp) {
+    if (!dxc::available()) return;
+    const auto words = embedded::spirv("test/shadow_layout.comp");
+    CHECK(!words.empty());
+    if (words.empty()) return;
+    const auto m = rvk::test::memberOffsets(words);
+    CHECK(m.contains("ShadowBlock"));
+    if (!m.contains("ShadowBlock")) return;
+    using B = rvk::enh::ShadowBlock;
+    checkHlsl(m.at("ShadowBlock"),
+              {{"cascade", offsetof(B, cascade)}, {"split", offsetof(B, split)}, {"texel", offsetof(B, texel)},
+               {"maps", offsetof(B, maps)}, {"res", offsetof(B, res)}, {"vsm", offsetof(B, vsm)},
+               {"vsmParams", offsetof(B, vsmParams)}, {"params", offsetof(B, params)}, {"target", offsetof(B, target)},
+               {"mode", offsetof(B, mode)}, {"rt", offsetof(B, rt)}, {"rtParams", offsetof(B, rtParams)},
+               {"depthRemap", offsetof(B, depthRemap)}},
+              "ShadowBlock");
+}
+
+// every embedded HLSL shader (a name with a stage extension) compiles and validates: the CI guard of the port
+TEST(dxc_every_embedded_shader_compiles) {
+    if (!dxc::available()) return;
+    std::size_t n = 0;
+    for (const auto& f : embedded::hlslSources()) {
+        std::string_view name = f.name;
+        if (!name.ends_with(".hlsl")) continue;
+        name.remove_suffix(5);
+        if (!(name.ends_with(".comp") || name.ends_with(".vert") || name.ends_with(".frag"))) continue;
+        ++n;
+        const auto words = embedded::spirv(name);
+        CHECK_MSG(!words.empty(), std::string(name).c_str());
+        if (words.empty()) continue;
+        spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
+        CHECK_MSG(tools.Validate(words.data(), words.size()), std::string(name).c_str());
+    }
+    CHECK(n >= 30);
 }

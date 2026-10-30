@@ -3,6 +3,8 @@
 #include <atomic>
 #include <mutex>
 
+#include "shader/dxc.h"
+
 #include <glslang/Public/ResourceLimits.h>
 #include <glslang/Public/ShaderLang.h>
 #include <glslang/SPIRV/GlslangToSpv.h>
@@ -51,6 +53,22 @@ SpirvResult compileGlsl(Stage stage, std::string_view glsl) {
     spv::SpvBuildLogger logger;
     glslang::GlslangToSpv(*program.getIntermediate(lang), result.words, &logger, &options);
     result.log = logger.getAllMessages();
+    return result;
+}
+
+SpirvResult compileHlsl(Stage stage, std::string_view hlsl, std::string_view name) {
+    SpirvResult result;
+    dxc::Request r;
+    r.file = std::string(name);
+    r.source = std::string(hlsl);
+    r.entry = stage == Stage::Vertex ? "VSMain" : "PSMain";
+    r.profile = stage == Stage::Vertex ? "vs_6_6" : "ps_6_6";
+    r.optLevel = 1;
+    r.cache = false;
+    r.debugInfo = debugInfo();
+    dxc::Result c = dxc::compile(r);
+    result.words = std::move(c.words);
+    result.log = std::move(c.log);
     return result;
 }
 

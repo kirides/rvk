@@ -12,13 +12,28 @@
 #ifdef __spirv__
 // a pointer to a block in GPU memory (Vulkan: the buffer's device address; a push-constant member of 8 bytes)
 #define RVK_REF(T) vk::BufferPointer<T, 16>
-#define RVK_DEREF(ref) (ref).Get()
+#define RVK_LOAD(T, ref) (ref).Get()
 #define RVK_PUSH(T, name) [[vk::push_constant]] T name
 // explicit Vulkan (binding, set) for the resources whose D3D register space differs from the set (the bindless heap below);
 // every other resource uses register(<class><binding>, space<set>), which DXC maps onto the same binding and set
 #define RVK_VK_BINDING(slot, space) [[vk::binding(slot, space)]]
 #else
-#error "DXIL backend: RVK_REF / RVK_PUSH are not implemented yet (docs/research/hlsl-rhi.md 6)"
+// DX12 (SM 6.6 bindless, docs/research/hlsl-rhi.md 6): a reference is (heap index of a ByteAddressBuffer SRV, byte offset) in the same 8 bytes the
+// Vulkan side keeps a device address in (rhi::Buffer::shaderRef fills either); push constants are the root constants of the fixed root
+// signature (32 DWORDs at b0, space0); pass resources keep their (register, space) = (binding, set) numbers (rhi/d3d12)
+struct RvkBufRef {
+    uint slot;
+    uint offset;
+};
+#define RVK_REF(T) RvkBufRef
+// (a heap access is assigned to a typed local first: a cast followed by a method call crashes DXC 1.9.2602's DXIL back end)
+ByteAddressBuffer rvkHeapBuffer(uint slot) {
+    ByteAddressBuffer b = ResourceDescriptorHeap[NonUniformResourceIndex(slot)];
+    return b;
+}
+#define RVK_LOAD(T, ref) (rvkHeapBuffer((ref).slot).Load<T>((ref).offset))
+#define RVK_PUSH(T, name) ConstantBuffer<T> name : register(b0, space0)
+#define RVK_VK_BINDING(slot, space)
 #endif
 
 // ---- 2. the per-frame block (FrameBlock, 976 bytes; Device::frameBlockAddress) -----------------------------------------------
@@ -77,7 +92,7 @@ float4x4 rvkRows(float4 r[4]) { return float4x4(r[0], r[1], r[2], r[3]); }
 
 // Unused fields cost nothing: the loads are plain and the compiler drops the dead ones
 RvkFrame rvkLoadFrame(RVK_REF(RvkFrameData) p) {
-    RvkFrameData d = RVK_DEREF(p);
+    RvkFrameData d = RVK_LOAD(RvkFrameData, p);
     RvkFrame f;
     f.viewProj = rvkRows(d.viewProj);
     f.invViewProj = rvkRows(d.invViewProj);
@@ -104,6 +119,24 @@ RvkFrame rvkLoadFrame(RVK_REF(RvkFrameData) p) {
     return f;
 }
 
+// ---- 1b. pointers from stored addresses (Vulkan: needs shaderInt64) -----------------------------------------------------------
+// GPU addresses travel as (low, high) uint pairs in the frame block, in records and in push constants; rvkPtr<T, align>(pair) is a
+// typed pointer to the data there (`.Get().member`, atomics through it: InterlockedAdd(rvkPtr<Counters, 4>(a).Get().n, 1)).
+#ifdef __spirv__  // (device addresses do not exist in shaders on DX12: references are (heap slot, offset) pairs, RvkBufRef)
+template<typename T, uint A>
+vk::BufferPointer<T, A> rvkPtr(uint2 a) {
+    return vk::BufferPointer<T, A>(uint64_t(a.x) | (uint64_t(a.y) << 32));
+}
+// the uint64 of such a pair (address arithmetic: vk::RawBufferLoad<T>(rvkAddr(a) + offset))
+uint64_t rvkAddr(uint2 a) { return uint64_t(a.x) | (uint64_t(a.y) << 32); }
+#endif
+
+// GLSL's mod(): x - y * floor(x / y) (HLSL's fmod truncates, so differs for negative x)
+float rvkMod(float x, float y) { return x - y * floor(x / y); }
+float2 rvkMod(float2 x, float2 y) { return x - y * floor(x / y); }
+float3 rvkMod(float3 x, float3 y) { return x - y * floor(x / y); }
+float4 rvkMod(float4 x, float4 y) { return x - y * floor(x / y); }
+
 static const uint RVK_FRAME_RT_VALID = 1u;
 static const uint RVK_FRAME_GI_VALID = 1u;
 static const uint RVK_FRAME_AO_VALID = 1u;
@@ -122,7 +155,35 @@ static const uint RVK_FRAME_REVERSE_Z = 8u;         // the main view's hardware 
 // ---- 4. the bindless heap: set 0 on Vulkan ------------------------------------------------------------------------------------
 // One unbounded array per resource type, each in its own register space (a D3D12 root signature needs that); the Vulkan build binds
 // them to set 0's bindings 0..3 (abi.h kBinding*). Index 0 of every texture array is a 1x1 (0,0,0,1) texture.
+#ifdef __spirv__
 RVK_VK_BINDING(0, 0) Texture2D<float4> g_t2D[] : register(t0, space100);
 RVK_VK_BINDING(1, 0) TextureCube<float4> g_tCube[] : register(t0, space101);
 RVK_VK_BINDING(2, 0) Texture3D<float4> g_t3D[] : register(t0, space102);
 RVK_VK_BINDING(3, 0) SamplerState g_samp[] : register(s0, space103);
+#define RVK_TEX2D(i) g_t2D[NonUniformResourceIndex(i)]
+#define RVK_TEXCUBE(i) g_tCube[NonUniformResourceIndex(i)]
+#define RVK_TEX3D(i) g_t3D[NonUniformResourceIndex(i)]
+#define RVK_SAMP(i) g_samp[NonUniformResourceIndex(i)]
+#else
+// DX12: one shader-visible heap for textures / buffers (the index space is the heap's: rhi::Texture::heapSampled), one for samplers
+Texture2D<float4> rvkHeapTex2D(uint i) {
+    Texture2D<float4> t = ResourceDescriptorHeap[NonUniformResourceIndex(i)];
+    return t;
+}
+TextureCube<float4> rvkHeapTexCube(uint i) {
+    TextureCube<float4> t = ResourceDescriptorHeap[NonUniformResourceIndex(i)];
+    return t;
+}
+Texture3D<float4> rvkHeapTex3D(uint i) {
+    Texture3D<float4> t = ResourceDescriptorHeap[NonUniformResourceIndex(i)];
+    return t;
+}
+SamplerState rvkHeapSampler(uint i) {
+    SamplerState s = SamplerDescriptorHeap[NonUniformResourceIndex(i)];
+    return s;
+}
+#define RVK_TEX2D(i) rvkHeapTex2D(i)
+#define RVK_TEXCUBE(i) rvkHeapTexCube(i)
+#define RVK_TEX3D(i) rvkHeapTex3D(i)
+#define RVK_SAMP(i) rvkHeapSampler(i)
+#endif

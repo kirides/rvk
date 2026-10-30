@@ -2,6 +2,7 @@
 
 #include "shader/embedded.h"
 
+#include <cstdlib>
 #include <deque>
 #include <map>
 #include <mutex>
@@ -33,6 +34,18 @@ struct Compiled {
 std::mutex g_compiledMutex;
 std::map<std::string, Compiled, std::less<>> g_compiled;
 
+// RVK_FORCE_GLSL=1 (run.ps1 -Environment): the build-time GLSL of a shader that has an HLSL port too (A/B of a port in the game)
+bool forceGlsl() {
+    static const bool force = [] {
+        char* e = nullptr;
+        std::size_t n = 0;
+        const bool on = _dupenv_s(&e, &n, "RVK_FORCE_GLSL") == 0 && e && e[0] == '1';
+        std::free(e);
+        return on;
+    }();
+    return force;
+}
+
 bool hlslProfile(std::string_view name, std::string& entry, std::string& profile) {
     const auto dot = name.rfind('.');
     const std::string_view ext = dot == std::string_view::npos ? std::string_view{} : name.substr(dot);
@@ -55,9 +68,34 @@ std::string_view hlslSource(std::string_view name) {
 
 std::span<const Entry> all() { return kEntries; }
 
+std::span<const std::uint32_t> spirvVariant(std::string_view name, std::string_view defines) {
+    const std::string hlslName = std::string(name) + ".hlsl";
+    const std::string key = std::string(name) + "?" + std::string(defines);
+    const std::lock_guard lock(g_compiledMutex);
+    if (auto it = g_compiled.find(key); it != g_compiled.end()) return it->second.words;
+    dxc::Request request;
+    request.file = hlslName;
+    if (!hlslProfile(name, request.entry, request.profile)) return {};
+    for (std::size_t pos = 0; pos < defines.size();) {
+        const auto end = std::min(defines.find(';', pos), defines.size());
+        const std::string_view d = defines.substr(pos, end - pos);
+        if (!d.empty()) {
+            const auto eq = d.find('=');
+            request.defines.push_back({std::string(d.substr(0, eq)), eq == std::string_view::npos ? std::string() : std::string(d.substr(eq + 1))});
+        }
+        pos = end + 1;
+    }
+    dxc::Result r = dxc::compile(request);
+    if (!r.ok()) {
+        spdlog::error("shader {} [{}]: HLSL compile failed: {}", name, defines, r.log);
+        return {};
+    }
+    return g_compiled.emplace(key, Compiled{std::move(r.words)}).first->second.words;
+}
+
 std::span<const std::uint32_t> spirv(std::string_view name) {
     const std::string hlslName = std::string(name) + ".hlsl";
-    if (!hlslSource(hlslName).empty()) {
+    if (!forceGlsl() && !hlslSource(hlslName).empty()) {
         const std::lock_guard lock(g_compiledMutex);  // (compiles serialize: the disk cache makes them rare)
         if (auto it = g_compiled.find(name); it != g_compiled.end()) return it->second.words;
         dxc::Request request;
@@ -75,6 +113,10 @@ std::span<const std::uint32_t> spirv(std::string_view name) {
         if (!r.log.empty()) spdlog::debug("shader {}: {}", name, r.log);
         return g_compiled.emplace(std::string(name), Compiled{std::move(r.words)}).first->second.words;
     }
+    return glslSpirv(name);
+}
+
+std::span<const std::uint32_t> glslSpirv(std::string_view name) {
     for (const Entry& e : kEntries) {
         if (e.name == name) return e.spirv;
     }

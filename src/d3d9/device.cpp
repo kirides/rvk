@@ -26,8 +26,8 @@ namespace {
 
 // bump when the translator's output changes: invalidates the SPIR-V disk cache
 // 2: the ABI declarations come from shaders/include/rvk_abi.glsl (48-byte push block, FrameBlock)
-constexpr std::uint32_t kTranslatorVersion = 7;
-// bump when the tint epilogue (GlslOptions::tintEpilogue) changes: the tint variants' cache files
+constexpr std::uint32_t kTranslatorVersion = 8;  // 8: HLSL (shader/hlsl.cpp) through DXC
+// bump when the tint epilogue (TranslateOptions::tintEpilogue) changes: the tint variants' cache files
 constexpr std::uint32_t kTintVersion = 2;
 // bump when the billboard fade variant (Device::lodModule) changes
 constexpr std::uint32_t kLodVariantVersion = 1;
@@ -129,6 +129,7 @@ VkDeviceAddress Device::frameBlockAddress() {
         x.rtRecords = rtScene_.records;
         x.rtInstances = rtScene_.instances;
         x.rtRecordCount = rtScene_.recordCount;
+        x.rtTlasSlot = rtScene_.tlasSlot;
     }
     if (!giHeader_.empty()) {
         const vk::RingAlloc g = frames_.allocate(giHeader_.size(), 16);
@@ -1409,7 +1410,8 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
     }
     const std::span<const std::uint32_t> tokens = bytecode.first(bytes / 4);
     const std::uint32_t hashSeed = kTranslatorVersion | (shader::debugInfo() ? 0x80000000u : 0u);  // debug-info SPIR-V is cached apart
-    const std::uint64_t hash = fnv1a(tokens.data(), tokens.size_bytes(), fnv1a(&hashSeed, sizeof(hashSeed)));
+    const std::uint64_t includesHash = shader::hlslIncludesHash();  // an edited ABI header recompiles the cached modules
+    const std::uint64_t hash = fnv1a(tokens.data(), tokens.size_bytes(), fnv1a(&includesHash, sizeof(includesHash), fnv1a(&hashSeed, sizeof(hashSeed))));
     {
         const std::lock_guard lock(shaderMutex_);
         if (auto it = shaders_.find(hash); it != shaders_.end()) {
@@ -1430,7 +1432,7 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
         spdlog::warn("d3d9: shader {:016x}: {}", hash, dec.error);
         return nullptr;
     }
-    const auto glsl = shader::toGlsl(dec.program);
+    const auto glsl = shader::toHlsl(dec.program);
     if (!glsl.ok()) {
         spdlog::warn("d3d9: shader {:016x}: {}", hash, glsl.error);
         return nullptr;
@@ -1449,7 +1451,7 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
     }
     if (spirv.empty()) {
         ++shadersCompiled_;
-        auto compiled = shader::compileGlsl(dec.program.version.stage, glsl.glsl);
+        auto compiled = shader::compileHlsl(dec.program.version.stage, glsl.hlsl);
         if (!compiled.ok()) {
             spdlog::error("d3d9: shader {:016x} does not compile:\n{}", hash, compiled.log);
             return nullptr;
@@ -1490,13 +1492,13 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
     return s;
 }
 
-// The tint debug view's variant of a pixel shader (GlslOptions::tintEpilogue): translated and compiled on its first tinted
+// The tint debug view's variant of a pixel shader (TranslateOptions::tintEpilogue): translated and compiled on its first tinted
 // draw (render thread; a short hitch when the view is switched on), cached on the shader and in the SPIR-V disk cache. The
 // normal module is never touched, so with the view off every draw renders exactly as before.
 VkShaderModule Device::tintModule(Shader& ps) {
     if (ps.tintModule == VK_NULL_HANDLE && !ps.tintFailed) {
         ps.tintFailed = true;  // until it succeeds: one attempt per shader
-        ps.tintModule = variantModule(ps, shader::GlslOptions{.tintEpilogue = true}, std::format("tint{}", kTintVersion));
+        ps.tintModule = variantModule(ps, shader::TranslateOptions{.tintEpilogue = true}, std::format("tint{}", kTintVersion));
         ps.tintFailed = ps.tintModule == VK_NULL_HANDLE;
     }
     return ps.tintModule;
@@ -1507,9 +1509,9 @@ VkShaderModule Device::tintModule(Shader& ps) {
 VkShaderModule Device::lodModule(Shader& vs) {
     if (vs.lodModule == VK_NULL_HANDLE && !vs.lodFailed) {
         vs.lodFailed = true;
-        shader::GlslOptions o;
+        shader::TranslateOptions o;
         o.inputOverrides.push_back(
-            {shader::Usage::BlendWeight, 1, std::format("vec4($v.xy * pc.frame.params[{}].x, $v.zw)", shader::abi::kFrameParamLod)});
+            {shader::Usage::BlendWeight, 1, std::format("float4($v.xy * pc.frame.Get().params[{}].x, $v.zw)", shader::abi::kFrameParamLod)});
         vs.lodModule = variantModule(vs, o, std::format("lod{}_t{}", kLodVariantVersion, kTranslatorVersion));
         vs.lodFailed = vs.lodModule == VK_NULL_HANDLE;
         spdlog::info("d3d9: billboard fade variant of vertex shader {:016x}: {}", vs.hash, vs.lodFailed ? "FAILED" : "built");
@@ -1534,7 +1536,7 @@ bool uberCovers(const MaterialSource& src) {
            (shader::uberClassMask(src.entry, src.macros) & g_uberSkip.load(std::memory_order_relaxed)) == 0;
 }
 
-bool uberBaseOptions(const Shader& s, shader::GlslOptions& o) {
+bool uberBaseOptions(const Shader& s, shader::TranslateOptions& o) {
     const MaterialSource* src = s.source.load(std::memory_order_acquire);
     if (s.stage != shader::Stage::Pixel || src == nullptr || !uberCovers(*src)) return false;
     o.uber = true;
@@ -1553,15 +1555,15 @@ void Device::setUbershader(bool on) {
 
 // A material pixel shader built from the GLSL material shader with its request's macros (+ the enhancement hooks of
 // options.uberDefines); null when it does not build (the draw keeps the translated shader)
-VkShaderModule Device::uberModule(const Shader& s, const MaterialSource& src, const shader::GlslOptions& options, std::string_view tag) {
-    const std::string glsl = shader::uberPixelGlsl(src.entry, src.macros, options.uberDefines);
+VkShaderModule Device::uberModule(const Shader& s, const MaterialSource& src, const shader::TranslateOptions& options, std::string_view tag) {
+    const std::string glsl = shader::uberPixelHlsl(src.entry, src.macros, options.uberDefines);
     if (glsl.empty()) return VK_NULL_HANDLE;
     std::vector<std::uint32_t> spirv;
     const auto cacheFile =
         options_.cacheDir.empty()
             ? std::filesystem::path()
             : options_.cacheDir / "spirv" /
-                  std::format("{:016x}_{}_u{:08x}.spv", s.hash, tag, static_cast<std::uint32_t>(shader::uberSourceHash() ^ (shader::uberSourceHash() >> 32)));
+                  std::format("{:016x}_{}_u{:08x}.spv", s.hash, tag, static_cast<std::uint32_t>(shader::uberHlslHash() ^ (shader::uberHlslHash() >> 32)));
     if (!cacheFile.empty()) {
         std::ifstream in(cacheFile, std::ios::binary | std::ios::ate);
         if (in) {
@@ -1571,7 +1573,7 @@ VkShaderModule Device::uberModule(const Shader& s, const MaterialSource& src, co
         }
     }
     if (spirv.empty()) {
-        auto compiled = shader::compileGlsl(shader::Stage::Pixel, glsl);
+        auto compiled = shader::compileHlsl(shader::Stage::Pixel, glsl, "uber.hlsl");
         if (!compiled.ok()) {
             if (ubershadersFailed_.fetch_add(1) < 12) {
                 spdlog::warn("d3d9: GLSL material shader of {:016x} ({} {} variant {}) does not compile: {}", s.hash, src.file, src.entry, tag,
@@ -1594,7 +1596,7 @@ VkShaderModule Device::uberModule(const Shader& s, const MaterialSource& src, co
                                   ctx_.namesEnabled() ? moduleLabel(ctx_, s.stage, s.hash, std::format("{} {} {}", src.file, src.entry, tag)) : std::string());
 }
 
-VkShaderModule Device::variantModule(const Shader& s, const shader::GlslOptions& options, std::string_view tag) {
+VkShaderModule Device::variantModule(const Shader& s, const shader::TranslateOptions& options, std::string_view tag) {
     if (options.uber && ubershader_.load(std::memory_order_relaxed) && s.stage == shader::Stage::Pixel) {
         const MaterialSource* src = s.source.load(std::memory_order_acquire);
         if (src != nullptr && uberCovers(*src)) return uberModule(s, *src, options, tag);
@@ -1603,14 +1605,14 @@ VkShaderModule Device::variantModule(const Shader& s, const shader::GlslOptions&
     if (!dec.ok()) {
         return VK_NULL_HANDLE;
     }
-    const auto glsl = shader::toGlsl(dec.program, options);
+    const auto glsl = shader::toHlsl(dec.program, options);
     if (!glsl.ok()) {
         spdlog::warn("d3d9: {} variant of shader {:016x}: {}", tag, s.hash, glsl.error);
         return VK_NULL_HANDLE;
     }
     std::vector<std::uint32_t> spirv;
     const auto cacheFile = options_.cacheDir.empty() ? std::filesystem::path()
-                                                     : options_.cacheDir / "spirv" / std::format("{:016x}_{}.spv", s.hash, tag);
+                                                     : options_.cacheDir / "spirv" / std::format("{:016x}_{}_h{:08x}.spv", s.hash, tag, static_cast<std::uint32_t>(shader::hlslIncludesHash() ^ (shader::hlslIncludesHash() >> 32)));
     if (!cacheFile.empty()) {
         std::ifstream in(cacheFile, std::ios::binary | std::ios::ate);
         if (in) {
@@ -1620,7 +1622,7 @@ VkShaderModule Device::variantModule(const Shader& s, const shader::GlslOptions&
         }
     }
     if (spirv.empty()) {
-        auto compiled = shader::compileGlsl(dec.program.version.stage, glsl.glsl);
+        auto compiled = shader::compileHlsl(dec.program.version.stage, glsl.hlsl);
         if (!compiled.ok()) {
             spdlog::error("d3d9: {} variant of shader {:016x} does not compile:\n{}", tag, s.hash, compiled.log);
             return VK_NULL_HANDLE;
@@ -1709,7 +1711,7 @@ void Device::variantWorker() {
             provider = variantProviders_[static_cast<std::size_t>(job.slot)];
         }
         const std::size_t i = static_cast<std::size_t>(job.slot);
-        shader::GlslOptions o;
+        shader::TranslateOptions o;
         if (!provider.options || !provider.options(*job.shader, o)) {
             job.shader->variantState[i].store(3, std::memory_order_release);
             continue;

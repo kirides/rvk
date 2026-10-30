@@ -8,7 +8,7 @@
 [numthreads(1, 1, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
     RVK_REF(RvkFrameData) fp = pc.frame;
-    RvkFrameData d = RVK_DEREF(fp);
+    RvkFrameData d = RVK_LOAD(RvkFrameData, fp);
     float acc = d.viewProj[1].x + d.invViewProj[1].x + d.view[1].x + d.proj[1].x + d.invView[1].x + d.invProj[1].x + d.prevViewProj[1].x +
                 d.prevInvViewProj[1].x + d.cameraPos.x + d.prevCameraPos.x + d.depthParams.x + d.viewport.x + d.jitter.x + d.time.x +
                 d.params[3].x;

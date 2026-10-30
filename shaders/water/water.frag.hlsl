@@ -1,0 +1,757 @@
+// Enhanced water shading (src/enh/water.cpp, docs/research/water.md 4), linear HDR into the engine's FP16 scene target,
+// drawn opaque in the engine's Refracted pass (right after the refraction copy). Port of water.frag (GLSL).
+//
+// "The same water, just better": the colour and brightness come from the engine's own material. Each Risen water material
+// has its own ge_default pixel shader (ocean, lake, river, swamp); `engineSurface` evaluates the one of this draw, ported
+// instruction by instruction from the D3D9 bytecode (docs/research/water.md 2.3): its normal maps, diffuse textures,
+// constants (g_ShaderData c6..c13), its 9-coefficient ambient + sun lighting, Fresnel, specular, depth fade and refraction
+// offset. The interpolators are the engine vertex shader's own (translated, it runs unchanged on the engine's meshes), so
+// texture scrolling and river flow are the engine's; the sea's wave grid (water_ocean.vert) produces the same
+// interpolators. What is better:
+//   reflection  wherever the engine reflects its sky cube, the reflection ray is traced in screen space first (rocks, ships,
+//               trees, cliffs are reflected; GD3D11's D3D12 Water.hlsl TraceWaterSSR ported, by kirides, the author of this
+//               project); a miss keeps the engine's sky cube; the swamp, which has no reflection, gets a dim one
+//   waves       the open sea: Gerstner waves + waves turning towards the coast (geometry and normal), the engine's normal
+//               maps on top; a lower, moving waterline instead of the painted shore
+//   volume      the sea's light path through the water tints what is seen through it (Beer-Lambert along the refracted
+//               path), before the engine's own depth fade
+//   foam        the sea only: surf lines, contact foam at the waterline and at walls, wave crests; never brighter than the
+//               lit sand
+//   fog         the engine's radial fog as the engine applies it
+
+//   rt          (setting rt.reflections) the reflection comes from the world's ray tracing scene instead of the screen: a
+//               reflection image traced before the water is drawn (water_rt.comp, docs/research/rt-reflections.md 3.3),
+//               looked up like a planar reflection bent by the waves and ripples; SSR where it has nothing
+
+#define WATER_FRAGMENT
+#include "water_common.hlsli"
+
+// ---- inputs ---------------------------------------------------------------------------------------------------------------
+
+float4 mtex(WaterBlock w, uint s, float2 uv) { return rvkSample2D(waterTexSlot(w, s), waterSmpSlot(w, s), uv); }
+float4 mcube(WaterBlock w, uint s, float3 d) { return waterSampleCube(waterTexSlot(w, s), waterSmpSlot(w, s), d); }
+float sceneViewDepth(WaterBlock w, RvkFrame f, float2 uv) { return rvkSample2DLod(w.Get().res2.w, w.Get().smpOurs.z, uv, 0.0).r * f.cameraPos.w; }
+float3 refractionColor(WaterBlock w, float2 uv) { return rvkSample2DLod(w.Get().res2.z, w.Get().smpOurs.x, uv, 0.0).rgb; }
+
+bool projectToUv(RvkFrame f, float3 p, out float2 uv, out float viewZ) {
+    float4 c = mul(float4(p, 1.0), f.viewProj);
+    viewZ = c.w;
+    uv = float2(c.x / c.w * 0.5 + 0.5, 0.5 - c.y / c.w * 0.5);
+    return c.w > 1.0;
+}
+
+// D3D9 pow (log2 / exp2 of |x|)
+float dpow(float x, float y) { return x == 0.0 ? 0.0 : exp2(y * log2(abs(x))); }
+
+// ---- screen-space reflection; conf 0 = miss (the engine's sky cube stays) -------------------------------------------------
+
+float3 traceSSR(WaterBlock w, RvkFrame f, float3 origin, float3 dir, float2 jitter, out float conf) {
+    conf = 0.0;
+    uint steps = w.Get().res2.y;
+    if (steps == 0u) return float3(0.0, 0.0, 0.0);
+    float maxDist = w.Get().misc.z;
+    float far = f.cameraPos.w;
+    float startBias = 8.0;
+    float3 prev = origin + dir * startBias;
+    float2 prevUv;
+    float prevZ;
+    projectToUv(f, prev, prevUv, prevZ);
+    for (uint i = 1u; i <= steps; ++i) {
+        float s = float(i) / float(steps);
+        float travelled = startBias + maxDist * s * s;
+        float3 cur = origin + dir * travelled;
+        float2 uv;
+        float rayZ;
+        if (!projectToUv(f, cur, uv, rayZ)) break;
+        if (any(uv < float2(0.0, 0.0)) || any(uv > float2(1.0, 1.0))) break;
+        float sceneZ = sceneViewDepth(w, f, uv);
+        if (sceneZ >= far * 0.995) {  // over the sky: keep marching (something may still be in front further on)
+            prev = cur;
+            prevZ = rayZ;
+            continue;
+        }
+        float thickness = 60.0 + travelled * 0.05;
+        if (rayZ >= sceneZ && sceneZ >= prevZ - thickness) {
+            float3 lo = prev, hi = cur;
+            float2 hitUv = uv;
+            float gap = rayZ - sceneZ;
+            for (int j = 0; j < 4; ++j) {
+                float3 mid = 0.5 * (lo + hi);
+                float2 muv;
+                float mz;
+                if (!projectToUv(f, mid, muv, mz)) break;
+                float ms = sceneViewDepth(w, f, muv);
+                if (mz >= ms && ms >= prevZ - thickness) {
+                    hi = mid;
+                    hitUv = muv;
+                    gap = mz - ms;
+                } else {
+                    lo = mid;
+                }
+            }
+            if (gap < thickness) {
+                float2 edge = smoothstep(float2(0.0, 0.0), float2(0.06, 0.06), hitUv) * smoothstep(float2(0.0, 0.0), float2(0.06, 0.06), float2(1.0, 1.0) - hitUv);
+                conf = edge.x * edge.y * clamp(1.0 - travelled / maxDist, 0.0, 1.0);
+                // the detail normal's ripples break the reflected image up (the ray itself follows the calmer normal)
+                float2 juv = clamp(hitUv + jitter, float2(0.0, 0.0), float2(1.0, 1.0));
+                if (sceneViewDepth(w, f, juv) < far * 0.995) hitUv = juv;
+                float3 c = refractionColor(w, hitUv);
+                if (any(isnan(c)) || any(isinf(c))) {
+                    conf = 0.0;
+                    return float3(0.0, 0.0, 0.0);
+                }
+                return c;
+            }
+        }
+        prev = cur;
+        prevZ = rayZ;
+    }
+    return float3(0.0, 0.0, 0.0);  // a miss (off screen, through the sky): the engine's sky cube
+}
+
+// ---- the engine's lighting of its water (all four shaders): ambient (9 coefficients, indoor blend) + sun, then ^0.45 ------
+
+// + the engine's point lights (shaders with g_PointLights: falloff 1 - saturate(d^2 / range^2), the point-light shadow mask
+// s0 by channel), added before the curve as the engine does
+// (wrap > 0: the sun's light wrapped around the normal, as through a scattering layer; ambK / sunK scale the ambient and the
+// sun before the curve: foam)
+float3 engineLightEx(WaterBlock w, float3 N, float3 Ngeo, float outdoor, float3 P, float2 uv, float wrap, float ambK, float sunK) {
+    float4 n1 = float4(N, 1.0);
+    float4 n2 = N.yzzx * N.xyzz;
+    float3 sh = float3(dot(w.Get().sh[0], n1) + dot(w.Get().sh[3], n2), dot(w.Get().sh[1], n1) + dot(w.Get().sh[4], n2), dot(w.Get().sh[2], n1) + dot(w.Get().sh[5], n2)) +
+                w.Get().sh[6].rgb * (N.x * N.x - N.y * N.y);
+    float3 amb = lerp(w.Get().indoor.rgb, sh, outdoor) * ambK;
+    float3 L = w.Get().sunDir.xyz;
+    float nl = clamp((dot(L, N) + wrap) / (1.0 + wrap), 0.0, 1.0);
+    float up = clamp(dot(L, Ngeo) * 4.0, 0.0, 1.0);
+    float3 l = amb + w.Get().sunColor.rgb * nl * up * sunK;
+    uint nLights = w.Get().lightInfo.x;
+    if (nLights > 0u) {
+        float4 mask = waterTexSlot(w, 0u) != 0u ? rvkSample2DLod(waterTexSlot(w, 0u), w.Get().smpOurs.x, uv, 0.0) : float4(0.0, 0.0, 0.0, 0.0);
+        for (uint i = 0u; i < nLights; ++i) {
+            float4 lp = w.Get().lights[i * 3u];
+            float3 lv = lp.xyz - P;
+            float d2 = dot(lv, lv);
+            float3 ld = lv * rsqrt(max(d2, 1e-6));
+            float att = (1.0 - clamp(d2 * lp.w, 0.0, 1.0)) * (1.0 - dot(w.Get().lights[i * 3u + 2u], mask));
+            float lup = clamp(dot(ld, Ngeo) * 4.0, 0.0, 1.0);
+            l += w.Get().lights[i * 3u + 1u].rgb * clamp(dot(ld, N), 0.0, 1.0) * lup * att;
+        }
+    }
+    return float3(dpow(l.r, 0.45), dpow(l.g, 0.45), dpow(l.b, 0.45));
+}
+
+float3 engineLight(WaterBlock w, float3 N, float3 Ngeo, float outdoor, float3 P, float2 uv) { return engineLightEx(w, N, Ngeo, outdoor, P, uv, 0.0, 1.0, 1.0); }
+
+float2 nmap(float4 t) { return t.wy; }  // DXT5 normal maps: x in alpha, y in green
+
+// the engine's normal: tangent-space xy (0..1 per channel before the *2-1), the frame from the VS (not normalised, as the
+// engine)
+float3 frameNormal(float2 n01, float3 T, float3 B, float3 Ngeo, out float2 nxy) {
+    nxy = n01 * 2.0 - 1.0;
+    float z = sqrt(max(1.0 - dot(nxy, nxy), 0.0));
+    return nxy.x * T + nxy.y * B + z * Ngeo;
+}
+
+// the traced reflection follows a calmer normal than the shading (the detail maps' ripples would scatter the rays into noise;
+// they still shape the sky cube's reflection and the specular)
+float3 ssrDir(float3 N, float3 Ngeo, float3 V) {
+    float3 n = normalize(lerp(normalize(Ngeo), normalize(N), 0.35));
+    float3 R = reflect(-V, n);
+    R.y = max(R.y, 0.01);
+    return normalize(R);
+}
+
+// the traced reflection over the engine's sky cube. Risen's water art relies on the cube's bright sky (also in caves and
+// under trees, where it reads as the light's glitter on the water): a traced dark wall may dim it, never erase it (lakes
+// and rivers keep more of it: their cube is masked into glitter by the material's textures)
+float3 keepSky(float3 cube, float3 ssr, float conf, float floorK) { return max(lerp(cube, ssr, conf), cube * floorK); }
+
+float2 ssrJitter(float3 N, float3 Ngeo, float dist) {
+    float3 n = normalize(N), g = normalize(Ngeo);
+    return (n.xz - g.xz) * float2(0.12, -0.12) / (1.0 + dist / 4000.0);
+}
+
+// ---- the traced reflection: screen space, or ray traced (rt.reflections) -------------------------------------------------
+
+static const uint REFL_SKY = 0u, REFL_SCREEN = 1u, REFL_SHADED = 2u, REFL_SSR = 3u;
+struct Refl {
+    float3 c;     // the reflected colour (linear HDR, as the scene target)
+    float conf;   // its coverage over the engine's sky cube (0 = the cube)
+    uint src;     // REFL_*: where it came from (water.debug = reflection_source)
+};
+
+// The reflection along the calmer normal (Nray: the geometric / macro normal; N: the shading normal whose ripples break it
+// up). Screen space: GD3D11's TraceWaterSSR (traceSSR). Ray traced (rt.reflections, w.rtRefl.x = this frame's reflection
+// image of water_rt.comp: the mirror ray of the body's surface plane against the TLAS, premultiplied colour + coverage):
+// looked up where the reflected ray of this pixel leans away from the plane's mirror ray (the waves' macro tilt and the
+// ripples' share of ssrDir, the same kind of screen offset the SSR's jitter takes): a planar reflection bent by the waves,
+// broken up by the ripples, without stochastic noise. Where it has nothing (a miss: leaf cards, grass and characters are
+// not in the scene yet) the screen-space trace (medium / high), then the sky cube. `weight`: how much of the reflection
+// reaches the picture (Fresnel / masks, fog): no screen-space fallback below 2 %.
+Refl traceReflection(WaterBlock w, RvkFrame f, float3 P, float3 N, float3 Nray, float3 V, float2 uv, float dist, float weight) {
+    Refl r;
+    r.c = float3(0.0, 0.0, 0.0);
+    r.conf = 0.0;
+    r.src = REFL_SKY;
+    float3 dir = ssrDir(N, Nray, V);
+    float2 jitter = ssrJitter(N, Nray, dist);
+    float rtA = 0.0;
+    if (w.Get().rtRefl.x != 0u) {
+        float3 nr = normalize(lerp(normalize(Nray), normalize(N), 0.35));
+        float2 bend = nr.xz * float2(0.12, -0.12) / (1.0 + dist / 4000.0) + jitter;
+        float4 rt0 = rvkSample2DLod(w.Get().rtRefl.x, w.Get().smpOurs.x, uv, 0.0);
+        float4 rt = rvkSample2DLod(w.Get().rtRefl.x, w.Get().smpOurs.x, clamp(uv + bend, float2(0.0, 0.0), float2(1.0, 1.0)), 0.0);
+        // bent off the water (a shore, a hull in front): the pixel's own
+        if (abs(rt.a) < 0.5 * abs(rt0.a)) rt = rt0;
+        rtA = clamp(abs(rt.a), 0.0, 1.0);
+        if (rtA > 1e-3) {
+            r.c = rt.rgb / max(abs(rt.a), 1e-3);
+            r.conf = rtA;
+            r.src = rt.a < 0.0 ? REFL_SHADED : REFL_SCREEN;
+        }
+        if (rtA >= 0.99 || (w.Get().rtRefl.y & 1u) == 0u || weight < 0.02) return r;
+    }
+    float conf;
+    float3 ssr = traceSSR(w, f, P, dir, jitter, conf);
+    if (rtA > 1e-3) {
+        // the screen-space trace under the traced image's partial coverage (its fade, a shore)
+        float c = rtA + conf * (1.0 - rtA);
+        r.c = (r.c * rtA + ssr * conf * (1.0 - rtA)) / max(c, 1e-3);
+        r.conf = c;
+        return r;
+    }
+    r.c = ssr;
+    r.conf = conf;
+    r.src = conf > 0.0 ? REFL_SSR : REFL_SKY;
+    return r;
+}
+
+// the floor under the traced reflection over the cube (keepSky): SSR's as before; a ray-traced hit takes less of the cube
+// (it is the world where the screen had nothing)
+// (indoors, by the water's outdoor factor, less: a cave's ceiling is no bright sky, its pool must not glow)
+float reflFloor(Refl r, float ssrFloor, float rtFloor, float outdoor) {
+    return r.src == REFL_SCREEN || r.src == REFL_SHADED ? rtFloor * lerp(0.35, 1.0, clamp(outdoor, 0.0, 1.0)) : ssrFloor;
+}
+
+struct Surface {
+    float3 colour;    // the engine's surface colour (before fog)
+    float alpha;      // its opacity over what is seen through it
+    float2 distort;   // refraction offset scale (screen uv per unit of nxy, per axis)
+    float3 N;         // the shading normal
+    float2 nxy;       // tangent-space normal xy (refraction offset direction)
+    float3 refl;      // the reflection used (debug view)
+};
+
+// ---- main ---------------------------------------------------------------------------------------------------------------
+
+// The inputs are the engine water VS's outputs (see enh/water.cpp), at their GLSL locations
+float4 PSMain(float4 position : SV_Position,
+              [[vk::location(0)]] float4 tc0 : TEXCOORD0,    // TEXCOORD0..6: the engine water VS's outputs
+              [[vk::location(1)]] float4 tc1 : TEXCOORD1,
+              [[vk::location(3)]] float4 tc3 : TEXCOORD3,    // world position, w global alpha (c32.w)
+              [[vk::location(4)]] float4 tc4 : TEXCOORD4,    // world normal, w outdoor factor (COLOR1.w)
+              [[vk::location(5)]] float4 tc5 : TEXCOORD5,    // tangent (grid: w wave amplitude)
+              [[vk::location(6)]] float4 tc6 : TEXCOORD6,    // binormal (grid: w crest steepness)
+              [[vk::location(7)]] float4 tc7 : TEXCOORD7,    // grid only: undisplaced xz, distance to the coast, shore-wave weight
+              [[vk::location(16)]] float4 col0 : COLOR0      // COLOR0 (river: alpha = the mesh's edge fade)
+              ) : SV_Target0 {
+    WaterBlock w = waterBlock();
+    RvkFrame f = rvkLoadFrame(pc.frame);
+    uint flags = w.Get().res.z;
+    uint model = w.Get().res2.x;
+    bool grid = (flags & WATER_OCEAN_GRID) != 0u;
+    bool sea = (flags & WATER_SEA) != 0u;
+    float2 uv = position.xy * f.viewport.zw;
+    float3 P = tc3.xyz;
+    float3 toCam = f.cameraPos.xyz - P;
+    float dist = length(toCam);
+    float3 V = toCam / max(dist, 1e-3);
+    float t = w.Get().grid.w;
+    float far = f.cameraPos.w;
+    float viewW = 1.0 / position.w;  // the water point's view depth (the engine's v2.w)
+    float sceneZ0 = sceneViewDepth(w, f, uv);
+    float thick0 = sceneZ0 - viewW;  // the view ray's way through the water (the engine's depth fade input)
+    // the vertical depth over the ground without the refraction offset (smooth: foam, the thin water at the waterline and
+    // the soft edge follow it)
+    bool sky0 = sceneZ0 >= far * 0.995;
+    float vdepth0 = sky0 ? 1e6 : max(P.y - rvkWorldFromViewDepth(f, uv, sceneZ0).y, 0.0);
+    // the soft edge where the water meets the ground: at least a few pixels wide (no hard line, no stair steps)
+    float edgeD = min(vdepth0 * 2.0, thick0);
+    float softEdgeW = clamp(2.0 * fwidth(edgeD), 12.0, 30.0);
+
+    float3 Ngeo = tc4.xyz;
+    float3 T = tc5.xyz;
+    float3 B = tc6.xyz;
+    bool fft = grid && fftMode(w);
+    SeaFloor fl;
+    ShoreTrain st;
+    FftSample fs;
+    float lostVar = 0.0;
+    float4 fftWt = float4(0.0, 0.0, 0.0, 0.0);
+    float3 Nmacro = float3(0.0, 1.0, 0.0);
+    float3 Nfres = float3(0.0, 1.0, 0.0);
+    if (fft) {
+        // per pixel: the FFT cascades' slopes (filtered by the screen footprint) with the same attenuation as the geometry,
+        // + the waves rolling in; the slope variance the filtering removed becomes specular roughness
+        fl = seaFloor(w, tc7.xy);
+        float cap = nearCameraCap(w, tc7.xy, RVK_VSC(11).xyz);
+        // the cap flattens the geometry near the camera; the short waves' normals stay (their displacement is small anyway)
+        fftWt = cascadeWeights(w, fl) * float4(cap, cap, 1.0, 1.0);
+        float4 macro;
+        fs = fftSamplePixel(w, tc7.xy, fftWt, lostVar, macro);
+        st = shoreTrain(w, fl, t);
+        float2 slope = fs.slope + st.slope * cap;
+        Nmacro = normalize(float3(-(macro.z + st.slope.x * cap), 1.0, -(macro.w + st.slope.y * cap)));
+        // the Fresnel weight's surface: the long swell nearly at its full tilt (its slopes are gentle, and they make the swell
+        // read as light and dark bands towards the horizon), the shorter macro waves and the train damped to 40 % (at grazing
+        // views their faces turned away hide behind the crests: the eye sees the sky's reflection over most of the sea)
+        float2 fsl = macro.xy * 0.85 + (macro.zw - macro.xy) * 0.4 + st.slope * cap * 0.4;
+        Nfres = normalize(float3(-fsl.x, 1.0, -fsl.y));
+        // sheltered water (harbour basins, coves) is calm, not dead: gusts ruffle it into short, drifting wind ripples
+        // (the spectrum's short waves are weak on a calm day; the basin keeps them while the swell is gone)
+        // (a little everywhere: the open sea's short chop between the spectrum's waves; they also break up the traced
+        // reflections of walls and hulls, which follow the calmer macro surface)
+        float shelteredN = 1.0 - smoothstep(0.2, 0.8, fl.exposure);
+        float gust = 0.6 + 0.4 * smoothstep(-0.3, 0.5, waterNoise(tc7.xy / 2500.0 + float2(t * 0.02, -t * 0.013)));
+        slope += rippleSlope(tc7.xy, t, 170.0, 3) * ((0.04 + 0.14 * shelteredN) * gust / (1.0 + dist / 4000.0));
+        Ngeo = normalize(float3(-slope.x, 1.0, -slope.y));
+        T = normalize(w.Get().meshFrame.xyz - Ngeo * dot(Ngeo, w.Get().meshFrame.xyz));
+        B = cross(Ngeo, T) * w.Get().meshFrame.w;
+    } else if (grid) {
+        // the waves' frame (the sea mesh's tangent, re-orthogonalised on the wave normal)
+        Ngeo = normalize(Ngeo);
+        // wind ripples between the waves (faded with distance against glitter), under the engine's normal maps
+        // choppier inside the engine's coast overlay (harbours, coves: the water the engine painted moving)
+        float chop = 1.0 + 1.5 * (1.0 - smoothstep(100.0, 600.0, tc7.z));
+        float2 rs = rippleSlope(P.xz, t, 420.0, 3) * (0.06 * chop / (1.0 + dist / 5000.0));
+        Ngeo = normalize(Ngeo + float3(-rs.x, 0.0, -rs.y));
+        T = normalize(w.Get().meshFrame.xyz - Ngeo * dot(Ngeo, w.Get().meshFrame.xyz));
+        B = cross(Ngeo, T) * w.Get().meshFrame.w;
+    }
+    float outdoor = tc4.w;
+    float fogK = 1.0 - clamp(min(dist * w.Get().fogParams.y + w.Get().fogParams.x, w.Get().fogParams.z), 0.0, 1.0);  // what the fog leaves
+    bool underside = (flags & WATER_UNDERSIDE) != 0u || (!grid && dot(V, Ngeo) < 0.0);
+
+    // the engine's shadow mask (s0, screen space, the sea only)
+    float shadow = 1.0;
+    if (model == WATER_MODEL_OCEAN && waterTexSlot(w, 0u) != 0u) shadow = rvkSample2DLod(waterTexSlot(w, 0u), w.Get().smpOurs.x, uv, 0.0).x;
+
+    Surface s;
+    s.refl = float3(0.0, 0.0, 0.0);
+    float fresW = 0.0;              // the ocean model's Fresnel weight (FFT: the body / transmitted split)
+    float3 bodyD = float3(0.0, 0.0, 0.0);         // the ocean model's body colour (its diffuse textures)
+    float3 seaTint = w.Get().mat[0].rgb;  // the material's water colour (ocean: its diffuse textures)
+    float3 L = w.Get().sunDir.xyz;
+    float4 c6 = w.Get().mat[0], c7 = w.Get().mat[1], c8 = w.Get().mat[2], c9 = w.Get().mat[3], c10 = w.Get().mat[4], c11 = w.Get().mat[5], c12 = w.Get().mat[6];
+    float reflK = w.Get().look.x;  // water.reflection_strength
+    Refl rfl;  // the traced reflection of this pixel (debug view)
+    rfl.c = float3(0.0, 0.0, 0.0);
+    rfl.conf = 0.0;
+    rfl.src = REFL_SKY;
+
+    if (model == WATER_MODEL_OCEAN) {
+        // ps 6e22a01a6cf0ac0a: s14 / s13 normal maps blended by the mask s9, s11 * s10 diffuse, s12 sky cube
+        float4 mask = mtex(w, 9u, tc1.zw);
+        float2 n01 = lerp(nmap(mtex(w, 13u, tc1.xy)), nmap(mtex(w, 14u, tc0.xy)), mask.wy);
+        // the FFT's own small waves carry the detail: the material's normal maps weaker on top where they are (its look stays;
+        // full strength in sheltered water)
+        // (further away the FFT's short waves are filtered out, the material's maps carry the texture again)
+        // and at grazing views, where the material's sparkle on the sky reflection is the engine's look)
+        if (fft) {
+            float damp = 0.3 * clamp(max(fftWt.y, fftWt.z), 0.0, 1.0) * (1.0 - smoothstep(1500.0, 6000.0, dist)) *
+                         smoothstep(0.08, 0.35, dot(Ngeo, V));
+            n01 = lerp(float2(0.5, 0.5), n01, 1.0 - damp);
+        }
+        s.N = frameNormal(n01, T, B, Ngeo, s.nxy);
+        float3 lit = engineLight(w, s.N, Ngeo, outdoor, P, uv) * shadow;
+        float3 R = 2.0 * dot(V, s.N) * s.N - V;
+        // on wave slopes facing away at grazing views the mirror direction dips below the horizon: it would meet the
+        // next wave, which reflects the sky near the horizon, not the cube's dark lower half
+        if (fft) R = normalize(float3(R.x, max(R.y, 0.04), R.z));
+        float nv = dot(s.N, V);
+        float nl = clamp(dot(L, s.N), 0.0, 1.0);
+        float up = clamp(dot(L, Ngeo) * 4.0, 0.0, 1.0);
+        float3 cube = mcube(w, 12u, R).rgb;
+        float rl = clamp(dot(R, L), 0.0, 1.0);
+        float specPow = c8.w * 128.0;
+        float specNorm = 1.0;
+        if (fft) {
+            // the waves smaller than a pixel widen the highlight instead of sparkling (Toksvig-like: the filtered slope
+            // variance added to the lobe's), energy kept
+            float p2 = specPow / (1.0 + specPow * 2.0 * lostVar);
+            specNorm = max((p2 + 2.0) / (specPow + 2.0), 0.6);
+            specPow = p2;
+        }
+        float3 spec = clamp(dpow(rl, specPow) * specNorm * nl / max(nv, 1e-5), 0.0, 1.0) * w.Get().sunSpec.rgb * up * clamp(cube * c8.x, 0.0, 1.0);
+        // FFT: the Fresnel weight of a calmer surface than the shading normal: at grazing views the wave faces turned away
+        // are hidden behind the crests and the eye sees the sky's reflection over most of the sea (as the engine's flat
+        // sea does); the short waves still bend the reflected ray and the specular
+        float nvF = fft ? dot(Nfres, V) : nv;
+        float fres = (c9.y * dpow(1.0 - nvF, c9.z) + c9.x) * reflK;
+        if (fft) {
+            // the thin water at the waterline (the swash's last centimetres over the sand) is a broken, rough film rather
+            // than a mirror: less of the sky, the sand shows through (no grey band along the beach)
+            float thinW = lerp(0.3, 1.0, smoothstep(3.0, 35.0, vdepth0));
+            fres *= thinW;
+            spec *= thinW;
+        }
+        float3 diffuse = mtex(w, 10u, tc0.zw).rgb * mtex(w, 11u, tc1.xy).rgb * c8.y;
+        seaTint = diffuse;
+        float3 refl = cube;
+        if (!underside) {
+            // FFT: the traced ray follows the macro surface (the short waves would scatter it into the dark rocks / sea)
+            float3 Nssr = fft ? Nmacro : Ngeo;
+            rfl = traceReflection(w, f, P, s.N, Nssr, V, uv, dist, clamp(fres, 0.0, 1.0) * fogK);
+            refl = keepSky(cube, min(rfl.c, float3(1.5, 1.5, 1.5)), rfl.conf, reflFloor(rfl, 0.55, 0.3, outdoor));
+            // the sun's glint is the sun's reflection: none where the traced ray meets the world (ray traced only: SSR's
+            // look stays as it was)
+            if (rfl.src == REFL_SCREEN || rfl.src == REFL_SHADED) spec *= 1.0 - 0.85 * rfl.conf;
+        }
+        s.refl = refl;
+        s.colour = c6.rgb * lit + spec + clamp(lerp(diffuse, refl, clamp(fres, 0.0, 1.0)), 0.0, 1.5);
+        fresW = clamp(fres, 0.0, 1.0);
+        bodyD = diffuse;
+        if (fft && !underside) {
+            // light through the thin crests (subsurface scattering): backlit by the sun when looking towards it, in the
+            // material's own turquoise; a little sky light in every crest
+            float crestH = clamp(tc5.w, 0.0, 1.0);
+            float back = dpow(clamp(dot(-V, L) * 0.5 + 0.5, 0.0, 1.0), 4.0);
+            float thin = 1.0 - clamp(nv, 0.0, 1.0);
+            float3 sssCol = diffuse * 1.4;
+            float3 amb = engineLight(w, float3(0.0, 1.0, 0.0), float3(0.0, 1.0, 0.0), outdoor, P, uv);
+            s.colour += sssCol * (w.Get().sunColor.rgb * shadow * back * (0.35 + 0.65 * thin) * 0.22 + amb * 0.10) * crestH;
+        }
+        float fade = dpow(thick0 * c7.x + c7.y, c7.z);
+        float3 a3 = clamp(fade * max(float3(mask.x, mask.x, mask.y), float3(fade, fade, fade)), 0.0, 1.0);
+        s.alpha = a3.x * tc3.w;
+        s.distort = clamp(a3.yz * c6.w, 0.0, 1.0);
+    } else if (model == WATER_MODEL_LAKE) {
+        // ps 912d3cc09d934354: s12 / s13 / s14 normal maps, s9 sky cube masked by s10 / s11 (sampled by R.xy)
+        float2 n01 = lerp(nmap(mtex(w, 12u, tc0.zw)), nmap(mtex(w, 13u, tc1.xy)), c11.w);
+        n01 = clamp(lerp(n01, nmap(mtex(w, 14u, tc0.xy)), c11.z), 0.0, 1.0);
+        s.N = frameNormal(n01, T, B, Ngeo, s.nxy);
+        float3 lit = engineLight(w, s.N, Ngeo, outdoor, P, uv);
+        float3 R = 2.0 * dot(V, s.N) * s.N - V;
+        float nv = dot(s.N, V);
+        float3 cube = clamp(mcube(w, 9u, R).rgb, 0.0, 1.0);
+        float2 rm = R.xy * 0.5 + 0.5;
+        float m10 = clamp(mtex(w, 10u, rm).y, 0.0, 1.0);
+        float m11 = mtex(w, 11u, rm).y;
+        float fresR = (c8.y * dpow(1.0 - nv, c8.z) + c8.x) * reflK;
+        float3 refl = cube;
+        if (!underside) {
+            float wt = clamp(m10 * fresR * c7.y * (m11 * c7.z) * c6.w, 0.0, 1.0) * c7.x * 2.0 * fogK;
+            rfl = traceReflection(w, f, P, s.N, Ngeo, V, uv, dist, wt);
+            refl = keepSky(cube, min(rfl.c, float3(1.0, 1.0, 1.0)), rfl.conf, reflFloor(rfl, 0.85, 0.75, outdoor));
+        }
+        s.refl = refl;
+        float3 r = clamp(refl * m10 * fresR * c7.y * (m11 * c7.z) * c6.w, 0.0, 1.0);
+        float3 base = (r + c6.rgb) * c7.x;
+        s.colour = base * lit + base;
+        float fade = clamp(dpow(thick0 * c9.x + c9.y, c9.z), 0.0, 1.0);
+        float alphaF = c10.y * dpow(1.0 - nv, c10.z) + c10.x;
+        s.alpha = clamp(min(alphaF, fade), 0.0, 1.0) * tc3.w;
+        s.distort = float2(fade * c12.w, fade * c12.w);
+    } else if (model == WATER_MODEL_SWAMP) {
+        // ps 2cd5ceec7eb11593: s9 / s10 normal maps, colour + specular; the engine reflects nothing: a dim reflection here
+        float2 n01 = lerp(nmap(mtex(w, 9u, tc1.xy)), nmap(mtex(w, 10u, tc0.xy)), c9.w);
+        s.N = frameNormal(n01, T, B, Ngeo, s.nxy);
+        float3 lit = engineLight(w, s.N, Ngeo, outdoor, P, uv);
+        float3 R = 2.0 * dot(V, s.N) * s.N - V;
+        float nv = dot(s.N, V);
+        float nl = clamp(dot(L, s.N), 0.0, 1.0);
+        float up = clamp(dot(L, Ngeo) * 4.0, 0.0, 1.0);
+        float rl = clamp(dot(R, L), 0.0, 1.0);
+        float3 spec = clamp(dpow(rl, 128.0 * c10.w) * nl / max(nv, 1e-5), 0.0, 1.0) * w.Get().sunSpec.rgb * up * c9.rgb;
+        s.colour = c6.rgb * lit + spec;
+        if (!underside && w.Get().look.z > 0.0) {
+            // still dark water mirrors the trees around it, a little: Schlick Fresnel x look.z over the murky colour
+            float F = (0.02 + 0.98 * dpow(1.0 - clamp(nv, 0.0, 1.0), 5.0)) * w.Get().look.z * reflK;
+            rfl = traceReflection(w, f, P, s.N, Ngeo, V, uv, dist, clamp(F, 0.0, 1.0) * fogK);
+            float3 cube = w.Get().res.x != 0u ? clamp(waterSampleCubeLod(w.Get().res.x, w.Get().smpOurs.x, R, 0.0).rgb, 0.0, 1.0)
+                                              : s.colour;
+            float3 refl = lerp(cube * 0.6, min(rfl.c, float3(1.0, 1.0, 1.0)), rfl.conf);
+            if (rfl.src == REFL_SCREEN || rfl.src == REFL_SHADED) s.colour -= spec * 0.85 * rfl.conf;  // no glint behind the world
+            s.refl = refl;
+            s.colour = lerp(s.colour, refl, clamp(F, 0.0, 1.0));
+        }
+        float fade = dpow(thick0 * c7.x + c7.y, c7.z);
+        float alphaF = c8.y * dpow(1.0 - nv, c8.z) + c8.x;
+        s.alpha = clamp(min(alphaF, fade), 0.0, 1.0) * tc3.w;
+        s.distort = float2(fade * c6.w, fade * c6.w);
+    } else {
+        // WATER_MODEL_RIVER, ps 11b69f874dfbacdb: s14 / s15 normal maps, whitewater s10 / s11 blended by s12, s13 sky cube,
+        // s9 (by R.xy) scales the whitewater
+        float2 n01 = lerp(nmap(mtex(w, 14u, tc1.xy)), nmap(mtex(w, 15u, tc0.xy)), c7.x);
+        s.N = frameNormal(n01, T, B, Ngeo, s.nxy);
+        float3 lit = engineLight(w, s.N, Ngeo, outdoor, P, uv);
+        float3 diff = lerp(mtex(w, 10u, tc1.xy).rgb, mtex(w, 11u, tc0.xy).rgb, mtex(w, 12u, tc0.xy).rgb);
+        float3 R = 2.0 * dot(V, s.N) * s.N - V;
+        float nv = dot(s.N, V);
+        float3 cube = clamp(mcube(w, 13u, R).rgb, 0.0, 1.0);
+        float fres = (c8.y * dpow(1.0 - nv, c8.z) + c8.x) * reflK;
+        float3 refl = cube;
+        if (!underside) {
+            rfl = traceReflection(w, f, P, s.N, Ngeo, V, uv, dist, clamp(fres, 0.0, 1.0) * c6.w * 2.0 * fogK);
+            refl = keepSky(cube, min(rfl.c, float3(1.0, 1.0, 1.0)), rfl.conf, reflFloor(rfl, 0.85, 0.75, outdoor));
+        }
+        s.refl = refl;
+        float k = mtex(w, 9u, R.xy * 0.5 + 0.5).y * c7.w;
+        float3 base = clamp(k * diff + c6.rgb, 0.0, 1.0);
+        float3 c = clamp(lerp(base, refl, fres) * c6.w, 0.0, 1.0);
+        s.colour = c * lit + c;
+        float fade = dpow(thick0 * c9.x + c9.y, c9.z);
+        s.alpha = clamp(min(fade, col0.w), 0.0, 1.0) * tc3.w;
+        float dv = clamp(fade * c7.y, 0.0, 1.0);
+        s.distort = float2(dv, dv);
+    }
+
+    // ---- refraction (as the engine: offset by the normal map's xy, rejected where the offset sample lies in front) ----
+    float2 off = s.distort * s.nxy;
+    float2 ruv = clamp(uv + off, float2(0.0, 0.0), float2(1.0, 1.0));
+    float sceneZ = sceneViewDepth(w, f, ruv);
+    if (sceneZ - viewW < 0.0) {
+        ruv = uv;
+        sceneZ = sceneZ0;
+    }
+    float3 refr = refractionColor(w, ruv);
+    bool skyBehind = sceneZ >= far * 0.995;
+    float3 G = rvkWorldFromViewDepth(f, ruv, sceneZ);
+    float vdepth = skyBehind ? 1e6 : max(P.y - G.y, 0.0);  // vertical depth over the ground
+
+    // ---- volume (the sea): what lies under the water loses red, then green, along the light's way through it ----
+    float path = 1e6;
+    if (sea && !skyBehind && !underside) {
+        float nv = clamp(dot(normalize(Ngeo), V), 0.0, 1.0);
+        float sinT = sqrt(max(1.0 - nv * nv, 0.0)) / 1.333;
+        float cosT = sqrt(max(1.0 - sinT * sinT, 0.0));
+        path = vdepth / max(cosT, 0.25) + vdepth;  // down to the ground and back up to the eye
+        refr *= exp(-float3(0.0016, 0.0007, 0.0005) * w.Get().misc.w * path);
+    }
+    if (fft && model == WATER_MODEL_OCEAN && !underside) {
+        // FFT ocean: the water's transparency follows the light's real way through it (refracted down to the floor and
+        // back), not the view ray's length (the engine's depth fade, which turns even 1 m of water opaque at grazing views):
+        // what is not reflected (1 - Fresnel) shows the lit sea floor through the water where it is shallow (turquoise over
+        // the sand of the shelf) and the water's own body colour where it is deep. Deep water: the engine's model as is
+        float T = exp(-0.0011 * w.Get().misc.w * path);
+        s.colour += (1.0 - fresW) * T * (refr - bodyD);
+        s.alpha = tc3.w;
+    }
+
+    // ---- foam (the sea only): surf lines, contact with the beach and walls, wave crests ----
+    float foam = 0.0;
+    float milk = 0.0;  // aerated, sandy water of the surf zone (FFT ocean)
+    float4 foamTerms = float4(0.0, 0.0, 0.0, 0.0);
+    float foamH = 0.0;          // FFT ocean: the foam's thickness (0..1), its gradient (world units^-1), freshness
+    float2 foamGrad = float2(0.0, 0.0);
+    float foamFresh = 0.0;
+    float foamFoot = 1.0;       // world units per pixel
+    if (fft && w.Get().look.y > 0.0 && !underside) {
+        // FFT ocean foam (docs/research/ocean.md 4.4): coverages (0..1) turned into foam by one pattern attached to the water
+        // (the undisplaced position): low coverage = lace with round holes, high = dense white water.
+        //   whitecaps  where the simulated surface folds (Jacobian, accumulated over time in the tiles)
+        //   white      a crest plunging where it breaks, the bores rolling on across the surf zone
+        //   residual   what the white water leaves behind, drifting towards the beach and dissolving into lace
+        //   contact    walls, rocks, hulls (sloshing), the swash's edge on the beach (a bright front running up, a thin lace
+        //              as it drains back)
+        // white / residual / contact come from the foam buffer (ocean_foam.comp: accumulated per cell over time, advected)
+        // near the camera; further out from the same terms evaluated in place.
+        float2 xz0 = tc7.xy;
+        float fineFade = 1.0 / (1.0 + dist / 3000.0);
+        float2 dX = ddx(xz0), dY = ddy(xz0);  // world units per pixel (the foam's soft edges follow the screen)
+        float footprint = max(max(length(dX), length(dY)), 0.01);
+        float fpMin = max(min(length(dX), length(dY)), 0.01);
+        Surf su = surfAt(w.Get().shoreWave, fl, st, xz0, t);
+        float wetHere = smoothstep(3.0, 12.0, vdepth0);  // a rock or a swimmer just under the surface is not surf
+        float cCap = clamp(fs.foam * 1.3, 0.0, 1.0) * 0.8;
+        float cWhite = max(su.breakW * su.front, su.surfZone * su.front * lerp(0.25, 0.6, su.patchy) * lerp(0.5, 1.0, st.breaking));
+        float cRes = su.surfZone * (0.06 + 0.2 * su.trail) * lerp(0.4, 1.0, su.patchy);
+        float cCon = 0.0;
+        if (w.Get().foamTex.x != 0u) {
+            float2 rel = (xz0 - w.Get().foamMap.xy) * w.Get().foamMap.w;
+            float inBuf = smoothstep(0.0, 0.06, min(min(rel.x, rel.y), min(1.0 - rel.x, 1.0 - rel.y)));
+            if (inBuf > 0.0) {
+                float4 fb = rvkSample2DLod(w.Get().foamTex.x, w.Get().foamTex.y, xz0 * w.Get().foamMap.w, 0.0);
+                cWhite = lerp(cWhite, fb.r, inBuf);
+                cRes = lerp(cRes, fb.g, inBuf);
+                cCon = fb.b * inBuf;
+            }
+        }
+        cWhite *= wetHere;
+        cRes *= wetHere;
+        // the swash zone (the last metre of water before the beach): always broken water (by the sea floor's depth)
+        float swashZone = wetHere * (1.0 - smoothstep(35.0, 110.0, max(fl.depth, 0.0))) * (1.0 - smoothstep(600.0, 1500.0, fl.overlay));
+        cRes = max(cRes, swashZone * (0.12 + 0.18 * su.patchy));
+        // sheltered water (harbour basins, coves, where the engine painted its moving foam): faint streaks of old foam and
+        // scum drifting on the calm water, lines along the wind
+        float sheltered = (1.0 - smoothstep(0.2, 0.7, fl.exposure)) * (1.0 - smoothstep(300.0, 1500.0, fl.overlay));
+        float streak = smoothstep(0.3, 0.8, 0.5 + 0.5 * waterNoise(xz0 / float2(620.0, 140.0) + float2(t * 0.012, -t * 0.03)));
+        float cStreak = sheltered * 0.3 * streak;
+        // the swash's edge: the water's last centimetres on the beach (vertical depth) or at a wall (the view ray's short way
+        // through the water); wider and denser while the swash runs up, a thin lace while it drains back
+        float swPhase = 6.2831853 / max(w.Get().shoreWave.x, 2.0) * t + waterNoised(xz0 * 0.00035).x * 0.8;
+        float uprush = smoothstep(-0.2, 0.7, cos(swPhase));
+        float contactD = min(vdepth0 * 1.5, thick0);
+        float edgeW = lerp(5.0, 15.0, uprush);
+        float contactW = (1.0 - smoothstep(1.0, edgeW, contactD)) * smoothstep(1.0, 3.0, contactD + 2.0);
+        cCon = max(cCon * 0.75, contactW * lerp(0.4, 0.9, uprush));
+        // one coverage (the union of the terms) and its freshness (dense white water and the swash's rim vs old lace)
+        float cAll = 1.0 - (1.0 - cWhite * (0.55 + 0.45 * cWhite)) * (1.0 - cRes * 0.7) * (1.0 - cCap) * (1.0 - cCon * 0.85) * (1.0 - cStreak * 0.4);
+        if (cAll > 0.004) {
+            foamFresh = clamp((cWhite + 0.8 * cCon + 0.6 * cCap) / max(cAll, 1e-3), 0.0, 1.0);
+            // the pattern drifts with the water as the foam buffer advects the coverage (towards the beach, faster in the
+            // surf zone): two phases of a flow map, switched region by region at different moments (no global pulse)
+            float coh = length(fl.dir);
+            float2 vel = (coh > 1e-4 ? fl.dir / coh : float2(0.0, 0.0)) * (smoothstep(0.05, 0.2, coh) * (20.0 + 90.0 * su.surfZone));
+            const float FT = 6.0;
+            float a0 = frac(t / FT);
+            float m = smoothstep(0.42, 0.58, 1.0 - abs(2.0 * a0 - 1.0) + 0.4 * waterNoise(xz0 / 420.0 + float2(4.1, 8.3)));
+            float2 g0 = float2(0.0, 0.0), g1 = float2(0.0, 0.0);
+            float h0 = 0.0, h1 = 0.0;
+            if (m > 0.0) {
+                FoamField ff = foamField(xz0 - vel * ((a0 - 0.5) * FT), fpMin, footprint);
+                h0 = foamDensity(ff, cAll, foamFresh, dX, dY, g0);
+            }
+            if (m < 1.0) {
+                float a1 = frac(a0 + 0.5);
+                FoamField ff = foamField(xz0 - vel * ((a1 - 0.5) * FT) + float2(731.0, -419.0), fpMin, footprint);
+                h1 = foamDensity(ff, cAll, foamFresh, dX, dY, g1);
+            }
+            foamH = clamp(lerp(h1, h0, m) * w.Get().look.y, 0.0, 1.0);
+            foamGrad = lerp(g1, g0, m) * w.Get().look.y;
+        }
+        foamFoot = footprint;
+        foamTerms = float4(cCap, cWhite, cRes, cCon);
+        // the broken water is full of bubbles and stirred-up sand: milky turquoise rather than clear
+        // (most right behind the breaking crests, clearing between the bores)
+        milk = clamp(su.surfZone * wetHere * (0.12 + 0.3 * su.trail) + 0.5 * cWhite + 0.3 * cRes, 0.0, 1.0) * fineFade;
+        milk = max(milk, swashZone * 0.4 * fineFade);
+    } else if (sea && grid && w.Get().look.y > 0.0 && !underside) {
+        float coastDist = tc7.z;
+        float fineFade = 1.0 / (1.0 + dist / 1500.0);
+        float foamNoise = 0.5 + 0.5 * waterNoised(P.xz / 180.0 + float2(t * 0.11, -t * 0.07)).x +
+                          0.25 * fineFade * waterNoised(P.xz / 45.0 + float2(-t * 0.05, t * 0.08)).x;
+        // surf: breakers rolling in over the shallows near the coast. The phase runs over the distance to the coast and the
+        // depth (both grow seaward; inside the engine's overlay strip the field distance is ~0), so the lines lie parallel
+        // to the beach and move towards it; each line has a sharp front and a fading trail of foam behind it
+        float surfCoord = coastDist + 6.0 * vdepth0;
+        float arg = surfCoord / 650.0 + t * 0.16 + foamNoise * 0.35;
+        float saw = frac(arg);
+        float lineV = smoothstep(0.0, 0.1, saw) * exp(-saw * 2.5);
+        float breakZone = (1.0 - smoothstep(40.0, 180.0, vdepth0)) * (1.0 - smoothstep(900.0, 1800.0, coastDist)) *
+                          smoothstep(0.0, 8.0, vdepth0);
+        float surf = breakZone * lineV * smoothstep(0.0, 0.7, foamNoise) * 0.9;
+        // the broken water of the surf zone between the lines: streaky foam over the shallows next to the beach
+        float shallow = smoothstep(3.0, 14.0, vdepth0) * (1.0 - smoothstep(35.0, 110.0, vdepth0)) * (1.0 - smoothstep(600.0, 1200.0, coastDist));
+        float streak = 0.5 + 0.5 * waterNoised(P.xz / float2(260.0, 90.0) + float2(t * 0.05, -t * 0.12)).x;
+        float lace = 0.5 + 0.5 * waterNoised(P.xz / float2(55.0, 22.0) + float2(t * 0.07, -t * 0.25)).x;
+        surf = max(surf, shallow * smoothstep(0.5, 0.85, streak * 0.4 + lace * 0.35 + foamNoise * 0.25) * 0.45);
+        // deeper water inside the engine's coast overlay (harbour basins, rocky coves): churned water, faint streaks where
+        // the engine painted its moving foam
+        float churn = (1.0 - smoothstep(60.0, 300.0, coastDist)) * smoothstep(60.0, 160.0, vdepth0);
+        float fine = 0.5 + 0.5 * waterNoised(P.xz / float2(70.0, 28.0) + float2(-t * 0.09, t * 0.21)).x;
+        surf = max(surf, churn * smoothstep(0.5, 0.85, streak * 0.45 + fine * 0.35 + foamNoise * 0.2) * 0.4 / (1.0 + dist / 3000.0));
+        // contact: a lace where the water meets the beach (follows the swash) or a wall (short view-ray thickness)
+        float contactD = min(vdepth0 * 1.5, thick0);
+        float contact = (1.0 - smoothstep(1.0, 7.0, contactD)) * smoothstep(1.0, 3.0, contactD + 2.0) * smoothstep(0.35, 0.95, foamNoise) * 0.35;
+        // crests of the larger waves offshore and of the waves rolling in
+        float crest = smoothstep(0.55, 0.9, tc6.w) * smoothstep(0.4, 0.85, foamNoise) * 0.75;
+        foam = clamp(max(max(surf, contact), crest) * w.Get().look.y, 0.0, 1.0);
+    }
+    // whitewater below waterfalls (lakes: the river material has its own whitewater art)
+    if (model == WATER_MODEL_LAKE && !underside) {
+        float white = 0.0;
+        for (int i = 0; i < 4; ++i) {
+            float4 fl = w.Get().falls[i];
+            if (fl.z <= 0.0) continue;
+            float d = length(P.xz - fl.xy) / fl.z;
+            float n = 0.5 + 0.5 * waterNoised(P.xz / 70.0 + float2(0.0, -t * 0.9)).x + 0.35 * waterNoised(P.xz / 22.0 - t * 0.5).x;
+            white = max(white, (1.0 - smoothstep(0.25, 1.0, d)) * step(abs(P.y - fl.w), 400.0) * smoothstep(0.4, 0.95, n));
+        }
+        foam = max(foam, white * 0.5);
+    }
+
+    // ---- compose as the engine does: lerp(refraction, lerp(surface, fog colour, fog), alpha) ----
+    float fog = clamp(min(dist * w.Get().fogParams.y + w.Get().fogParams.x, w.Get().fogParams.z), 0.0, 1.0);
+    float3 color = lerp(refr, lerp(s.colour, w.Get().fogColor.rgb, fog), s.alpha);
+    float alpha = s.alpha;
+    if (milk > 0.0) {
+        // the surf zone's aerated water: the light scattered back by bubbles and sand, in the sea's own tint
+        float3 lit = engineLight(w, Ngeo, Ngeo, outdoor, P, uv) * shadow;
+        float lum = dot(lit, float3(0.2126, 0.7152, 0.0722));
+        float3 milkCol = lerp(float3(0.55 * lum, 0.55 * lum, 0.55 * lum), clamp(seaTint, 0.0, 1.0) * lum * 1.3, 0.55);
+        // it lightens what lies under the surface; it never darkens the sky's reflection on top of it
+        color = max(color, lerp(color, lerp(milkCol, w.Get().fogColor.rgb, fog), milk * 0.45));
+    }
+    if (foam > 0.0) {
+        // foam lies on top of the water: white-ish, lit like the beach (the engine's diffuse lighting curve, albedo ~0.7),
+        // fogged like the surface; never glowing
+        float3 lit = engineLight(w, Ngeo, Ngeo, outdoor, P, uv) * shadow;
+        // white: the light's brightness, a little of the sky's tint (the sun's warm colour made it look like sand)
+        float lum = dot(lit, float3(0.2126, 0.7152, 0.0722));
+        // a little mottling (bubbles of different sizes)
+        float mottle = 0.88 + 0.12 * waterNoise(tc7.xy / 23.0 + float2(t * 0.05, 0.0));
+        float3 foamCol = 0.58 * mottle * float3(lum, lum, lum);
+        color = lerp(color, lerp(foamCol, w.Get().fogColor.rgb, fog), foam);
+        alpha = max(alpha, foam);
+    }
+    if (foamH > 0.0) {
+        // FFT ocean foam: a layer of bubbles on the water, lit by the sun and the sky (the engine's light and curve) on its
+        // own relief (thick lumps brighter on the sun's side, their lee and the hollows between them darker), the light
+        // scattered through it (wrapped), thin foam translucent and tinted by the water under it; never flat white
+        float h = foamH;
+        float reliefK = 9.0 / (1.0 + foamFoot / 4.0);  // the relief fades where the pattern gets small on screen
+        float2 relief = foamGrad * reliefK;
+        relief *= min(1.0, 0.7 / max(length(relief), 1e-4));  // gentle lumps, never a face turned away from the light
+        float3 Nf = normalize(normalize(Ngeo) + float3(-relief.x, 0.0, -relief.y));
+        float ao = lerp(0.72, 1.0, smoothstep(0.1, 0.8, h));
+        float3 lf = engineLightEx(w, Nf, Ngeo, outdoor, P, uv, 0.45, ao, lerp(0.75, 1.0, h) * shadow);
+        float lum = dot(lf, float3(0.2126, 0.7152, 0.0722));
+        float3 base = float3(lum, lum, lum);  // neutral (the sun's warm colour made it read as sand)
+        float albedo = lerp(0.5, 0.78, smoothstep(0.1, 0.9, h));
+        float tl = dot(seaTint, float3(0.2126, 0.7152, 0.0722));
+        float3 thinTint = lerp(float3(1.0, 1.0, 1.0), clamp(seaTint / max(tl, 1e-3), float3(0.0, 0.0, 0.0), float3(1.4, 1.4, 1.4)), 0.12);
+        float3 fc = base * albedo * lerp(thinTint, float3(1.0, 1.0, 1.0), smoothstep(0.2, 0.8, h));
+        // matte foam is brighter than the water it lies on (at grazing views the water mirrors the bright sky, in a storm the
+        // light is dim: foam darker than the water read as dirt)
+        fc *= max(1.0, 1.3 * dot(color, float3(0.2126, 0.7152, 0.0722)) / max(dot(fc, float3(0.2126, 0.7152, 0.0722)), 1e-4));
+        // a shoulder on the foam's brightness: under a strong sun the lit foam would clip to flat white (the scene target
+        // is shown without a tone curve); its shading stays, compressed towards ~0.9
+        float fl0 = dot(fc, float3(0.2126, 0.7152, 0.0722));
+        if (fl0 > 0.55) fc *= (0.55 + 0.35 * (1.0 - exp(-(fl0 - 0.55) / 0.35))) / fl0;
+        // (dense where thick, a translucent veil where thin)
+        float alphaF = 1.0 - exp(-3.2 * h);
+        color = lerp(color, lerp(fc, w.Get().fogColor.rgb, fog), alphaF);
+        alpha = max(alpha, alphaF);
+    }
+    // a soft edge where the water gets very thin (no seam on the beach)
+    // (FFT ocean: a wider fade, at least a few pixels: the swash spreads the waterline over the flat beaches)
+    float edgeK = smoothstep(0.0, fft ? softEdgeW : 5.0, edgeD);
+    if (!sky0) color = lerp(refractionColor(w, uv), color, edgeK);
+    if ((flags & WATER_BLENDED) != 0u) {
+        // the engine draws this body blended (SRCALPHA / INVSRCALPHA) over the scene: the same, drawn opaque here
+        color = lerp(refractionColor(w, uv), color, alpha);
+    }
+    if (underside) {
+        float k = 1.0 - exp(-dist / 1500.0);
+        color = lerp(refr, w.Get().mat[0].rgb * engineLight(w, float3(0.0, 1.0, 0.0), float3(0.0, 1.0, 0.0), outdoor, P, uv), k);
+    }
+
+    // debug views (water.debug): 1 shore field distance, 2 depth, 3 normals, 4 reflection only, 5 foam / surf zone / depth
+    uint dbg = w.Get().res.w;
+    if (dbg == 1u) color = float3(frac(tc7.z / 1000.0), clamp(tc7.z / 30000.0, 0.0, 1.0), sea ? 1.0 : 0.0);
+    else if (dbg == 2u) color = float3(clamp(vdepth / 500.0, 0.0, 1.0), clamp(thick0 / 3000.0, 0.0, 1.0), s.alpha);
+    else if (dbg == 3u) color = normalize(s.N) * 0.5 + 0.5;
+    else if (dbg == 4u || dbg == 9u) color = s.refl;
+    else if (dbg == 5u && fft) color = foamTerms.xyz + float3(foamTerms.w * 0.5, foamTerms.w * 0.5, foamTerms.w * 0.5) + (any(isnan(foamTerms)) ? float3(1.0, 1.0, 0.0) : float3(0.0, 0.0, 0.0));
+    else if (dbg == 5u) color = float3(foam, (1.0 - smoothstep(0.0, 450.0, tc7.z)), clamp(vdepth / 200.0, 0.0, 1.0));
+    else if (dbg == 6u && fft) color = float3(clamp(fl.depth / 1000.0, 0.0, 1.0), fl.exposure, (0.5 + 0.5 * sin(st.phase)) * st.weight);
+    else if (dbg == 7u && fft) color = float3(fftWt.x, fftWt.y, fftWt.z) * 0.8 + float3(st.breaking * st.weight * 0.2, st.breaking * st.weight * 0.2, st.breaking * st.weight * 0.2);
+    else if (dbg == 8u) {
+        // where the reflection came from: green the screen (RT hit reused), blue a shaded RT hit, yellow SSR, black the cube
+        static const float3 kSrc[4] = {float3(0.0, 0.0, 0.0), float3(0.1, 0.9, 0.1), float3(0.15, 0.3, 1.0), float3(1.0, 0.85, 0.1)};
+        color = kSrc[min(rfl.src, 3u)] * (0.25 + 0.75 * rfl.conf);
+    }
+    return float4(max(color, float3(0.0, 0.0, 0.0)), 1.0);
+}

@@ -118,7 +118,7 @@ public:
 
     // the GLSL options of a material pixel shader's GI variant (d3d9::VariantSlot::Gi); false = not a lit material shader.
     // Public for rvk_shadertool corpus --gi
-    static bool variantOptions(const d3d9::Shader& s, shader::GlslOptions& o);
+    static bool variantOptions(const d3d9::Shader& s, shader::TranslateOptions& o);
 
     // d3d9::DrawObserver: the frame's light constants (P0)
     bool observes(d3d9::draws::Kind kind, d3d9::scene::Phase phase) const override;

@@ -22,6 +22,13 @@ std::span<const Entry> all();
 // else the build-time GLSL one. docs/research/hlsl-rhi.md 3 (the migration)
 std::span<const std::uint32_t> spirv(std::string_view name);
 
+// the same with preprocessor defines ("NAME=VALUE;NAME2=VALUE2"): HLSL shaders that are one module per size / mode (the ocean FFT). Cached by
+// (name, defines) like spirv(); the HLSL source only (no GLSL variant exists)
+std::span<const std::uint32_t> spirvVariant(std::string_view name, std::string_view defines);
+
+// the build-time GLSL SPIR-V of a shader only (no HLSL fall-through: tests of the GLSL ABI and A/B tools); empty when unknown
+std::span<const std::uint32_t> glslSpirv(std::string_view name);
+
 // HLSL sources embedded from shaders/** (*.hlsl, *.hlsli); name = path below shaders/ with '/' ("include/rvk_abi.hlsli")
 struct SourceFile {
     std::string_view name;
