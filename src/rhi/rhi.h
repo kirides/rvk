@@ -423,6 +423,10 @@ struct DeviceDesc {
     int adapter = -1;         // -1 = the high performance adapter
     const char* name = "rvk";
     bool rayTracing = false;  // enable acceleration structures + ray queries when the device has them (DeviceCaps::rayQuery)
+    // DX12 only: the directory holding the Agility SDK's D3D12Core.dll (+ d3d12SDKLayers.dll), with or without a trailing backslash. null = the environment
+    // variable RVK_D3D12_SDK_DIR, else "d3d12\" next to the module this code is linked into (d3d9.dll in bin\rvk, or the tool's exe). The SDK is activated
+    // once per process: the first device decides; a missing / unusable SDK falls back to the system runtime (DeviceCaps::agilitySdkVersion == 0).
+    const char* d3d12SdkDir = nullptr;
 };
 
 struct DeviceCaps {
@@ -434,6 +438,7 @@ struct DeviceCaps {
     bool drawIndirectCount = false;  // CommandList::drawIndexedIndirectCount (Vulkan 1.2 drawIndirectCount, always on DX12)
     bool textureBlit = false;        // CommandList::blitTexture (Vulkan only: the DX12 backend has no scaling copy)
     bool rayQuery = false;           // createBlas / createTlas + inline ray queries (Vulkan ray query with a bindless TLAS array, DXR tier 1.1); needs DeviceDesc::rayTracing
+    std::uint32_t agilitySdkVersion = 0;  // DX12: the D3D12SDKVersion of the Agility SDK the device was created from (0 = the system runtime; always 0 on Vulkan)
 };
 
 class Device {

@@ -140,6 +140,12 @@ if ($NoRenderer) {
     Remove-Item (Join-Path $rvkDir 'amd_fidelityfx_vk.dll') -Force -ErrorAction SilentlyContinue  # the SDK 1.1.4 DLL
     # the runtime HLSL compiler (shader/dxc): the vcpkg directx-dxc port's dxcompiler.dll, copied next to d3d9.dll by the build
     Copy-Item (Join-Path $repo "build\$Config\dxcompiler.dll") $rvkDir -Force
+    # the DX12 backend's Agility SDK (D3D12Core.dll + the debug layer; rhi/d3d12 looks in "d3d12" next to d3d9.dll; the game does not use the backend yet)
+    $agility = Join-Path $repo "build\$Config\d3d12"
+    if (Test-Path $agility) {
+        New-Item -ItemType Directory -Force (Join-Path $rvkDir 'd3d12') | Out-Null
+        Copy-Item (Join-Path $agility '*.dll') (Join-Path $rvkDir 'd3d12') -Force
+    }
     $cfg = @(
         '# written by scripts/run.ps1',
         '[renderer]', "mode = `"$Mode`"",

@@ -58,6 +58,12 @@ find_file(RVK_DXC_DLL dxcompiler.dll PATHS ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET
 find_file(RVK_DXC_LICENSE copyright PATHS ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share/directx-dxc NO_DEFAULT_PATH)
 find_file(RVK_DXIL_DLL dxil.dll PATHS ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/tools/directx-dxc ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin NO_DEFAULT_PATH)
 
+# The DirectX 12 Agility SDK (vcpkg directx12-agility; docs/research/hlsl-rhi.md "Agility SDK"): the DX12 backend activates D3D12Core.dll from a "d3d12" directory
+# next to the exe / d3d9.dll at run time (no link to it); headers + GUIDs come from the directx-headers port (the Windows SDK's d3d12.h is older)
+find_package(directx-headers CONFIG REQUIRED)
+find_file(RVK_D3D12CORE_DLL D3D12Core.dll PATHS ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin NO_DEFAULT_PATH)
+find_file(RVK_D3D12LAYERS_DLL d3d12SDKLayers.dll PATHS ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/debug/bin NO_DEFAULT_PATH)
+
 set(RVK_SHADER_DIR ${CMAKE_SOURCE_DIR}/shaders)
 set(RVK_GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)
 set(RVK_SHADER_OUTPUTS)
@@ -383,8 +389,20 @@ function(rvk_deploy_dxc target)
             VERBATIM)
     endif()
 endfunction()
+# D3D12Core.dll (+ the debug layer d3d12SDKLayers.dll) into <target dir>\d3d12\: scripts/run.ps1 copies that folder to bin\rvk\d3d12 (package.ps1 does not
+# ship it yet: the game does not use the DX12 backend)
+function(rvk_deploy_agility target)
+    if(RVK_D3D12CORE_DLL)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:${target}>/d3d12
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RVK_D3D12CORE_DLL} ${RVK_D3D12LAYERS_DLL} $<TARGET_FILE_DIR:${target}>/d3d12
+            COMMENT "D3D12Core.dll -> $<TARGET_FILE_DIR:${target}>/d3d12"
+            VERBATIM)
+    endif()
+endfunction()
 set_target_properties(rvk_d3d9 PROPERTIES OUTPUT_NAME d3d9)
 rvk_deploy_dxc(rvk_d3d9)
+rvk_deploy_agility(rvk_d3d9)
 target_link_libraries(rvk_d3d9 PRIVATE rvk_core)
 rvk_warnings(rvk_d3d9)
 
@@ -402,11 +420,12 @@ rvk_warnings(rvk_shadertool)
 # ---------------------------------------------------------------------------------------------
 add_library(rvk_rhi_d3d12 STATIC src/rhi/d3d12/d3d12_device.cpp)
 target_include_directories(rvk_rhi_d3d12 PUBLIC src include)
-target_link_libraries(rvk_rhi_d3d12 PUBLIC rvk_core d3d12 dxgi dxguid)
+target_link_libraries(rvk_rhi_d3d12 PUBLIC rvk_core Microsoft::DirectX-Guids d3d12 dxgi dxguid)
 rvk_warnings(rvk_rhi_d3d12)
 add_executable(rvk_rhitest tools/rhitest/main.cpp)
 target_link_libraries(rvk_rhitest PRIVATE rvk_core rvk_rhi_d3d12)
 rvk_deploy_dxc(rvk_rhitest)
+rvk_deploy_agility(rvk_rhitest)
 rvk_warnings(rvk_rhitest)
 set_target_properties(rvk_rhi_d3d12 rvk_rhitest PROPERTIES FOLDER tools)
 if(BUILD_TESTING)

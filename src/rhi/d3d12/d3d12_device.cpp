@@ -5,7 +5,8 @@
 // vertex input -> input layout (semantic ATTR<location>), VkDrawIndexedIndirectCommand -> D3D12_DRAW_INDEXED_ARGUMENTS (same 20 bytes),
 // VkAccelerationStructureInstanceKHR -> D3D12_RAYTRACING_INSTANCE_DESC (same 64 bytes).
 
-#include <d3d12.h>
+// the vcpkg directx-headers port's headers (Agility SDK 1.619: ID3D12DeviceFactory, ...), which must win over the Windows SDK's older d3d12.h
+#include <directx/d3d12.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 
@@ -157,6 +158,85 @@ std::wstring widen(const char* s) {
     std::wstring w;
     for (; *s != '\0'; ++s) w += static_cast<wchar_t>(static_cast<unsigned char>(*s));
     return w;
+}
+
+// ---- the Agility SDK (docs/research/hlsl-rhi.md "Agility SDK"; GD3D11's scheme) ------------------------------------------------------------------
+// A mod / plugin DLL cannot export D3D12SDKVersion / D3D12SDKPath from the exe, so the SDK's D3D12Core.dll is activated at run time instead:
+// D3D12GetInterface(CLSID_D3D12SDKConfiguration) -> ID3D12SDKConfiguration1::CreateDeviceFactory(version, dir) -> devices made through that factory run on the
+// SDK's runtime. Without the DLL (or when the factory cannot be made) the system runtime is used.
+
+struct AgilityRuntime {
+    ComPtr<ID3D12DeviceFactory> factory;  // null = the system runtime
+    std::uint32_t version = 0;            // the D3D12SDKVersion of the loaded core (0 = none)
+    std::string dir;                      // the directory that was tried (with a trailing backslash)
+};
+
+std::string withTrailingSlash(std::string s) {
+    if (!s.empty() && s.back() != '\\' && s.back() != '/') s += '\\';
+    return s;
+}
+
+// "<directory of the module this code lives in>\d3d12\": the exe for the tools, d3d9.dll (bin\rvk) in the game
+std::string defaultAgilityDir() {
+    HMODULE self = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(&defaultAgilityDir), &self);
+    char path[MAX_PATH]{};
+    const DWORD n = GetModuleFileNameA(self, path, MAX_PATH);
+    std::string s(path, n < MAX_PATH ? n : 0);
+    const auto slash = s.find_last_of("\\/");
+    s.erase(slash == std::string::npos ? 0 : slash + 1);
+    return s + "d3d12\\";
+}
+
+// D3D12SDKVersion, exported by D3D12Core.dll (loaded only to read it); 0 = no usable DLL there
+std::uint32_t coreSdkVersion(const std::string& dir) {
+    HMODULE core = LoadLibraryExA((dir + "D3D12Core.dll").c_str(), nullptr, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    if (core == nullptr) return 0;
+    const auto* v = reinterpret_cast<const UINT*>(GetProcAddress(core, "D3D12SDKVersion"));
+    const std::uint32_t version = v != nullptr ? *v : 0;
+    FreeLibrary(core);
+    return version;
+}
+
+// once per process (a second factory would leak the first one; ApplyToGlobalState fails once a device exists): the first device's desc decides
+const AgilityRuntime& agility(const DeviceDesc& desc) {
+    static const AgilityRuntime runtime = [&desc] {
+        AgilityRuntime r;
+        char env[MAX_PATH]{};
+        const DWORD envLen = GetEnvironmentVariableA("RVK_D3D12_SDK_DIR", env, MAX_PATH);
+        r.dir = desc.d3d12SdkDir != nullptr && desc.d3d12SdkDir[0] != '\0' ? std::string(desc.d3d12SdkDir)
+                : envLen > 0 && envLen < MAX_PATH                           ? std::string(env, envLen)
+                                                                            : defaultAgilityDir();
+        r.dir = withTrailingSlash(r.dir);
+        const std::uint32_t version = coreSdkVersion(r.dir);
+        if (version == 0) {
+            spdlog::info("d3d12: system runtime (no Agility SDK in {})", r.dir);
+            return r;
+        }
+        PFN_D3D12_GET_INTERFACE getInterface = nullptr;
+        if (HMODULE d3d12 = LoadLibraryA("d3d12.dll")) getInterface = reinterpret_cast<PFN_D3D12_GET_INTERFACE>(GetProcAddress(d3d12, "D3D12GetInterface"));
+        ComPtr<ID3D12SDKConfiguration1> config;
+        if (getInterface == nullptr || FAILED(getInterface(CLSID_D3D12SDKConfiguration, IID_PPV_ARGS(&config)))) {
+            spdlog::warn("d3d12: system runtime (the Agility SDK {} in {} needs ID3D12SDKConfiguration1: Windows 10 1809+ with a current d3d12.dll)", version, r.dir);
+            return r;
+        }
+        ComPtr<ID3D12DeviceFactory> factory;
+        const HRESULT hr = config->CreateDeviceFactory(version, r.dir.c_str(), IID_PPV_ARGS(&factory));
+        if (FAILED(hr)) {
+            spdlog::warn("d3d12: system runtime (CreateDeviceFactory({}, {}) failed 0x{:08x})", version, r.dir, static_cast<unsigned>(hr));
+            return r;
+        }
+        // CreateDeviceFactory only redirects the devices made through the factory; the process-global runtime (and with it the exported free functions,
+        // D3D12SerializeRootSignature among them) stays on the system's d3d12.dll, whose serializer may reject the SM 6.6 root signature flags
+        // (CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED). ApplyToGlobalState points the global state at the loaded core. Must happen before any device exists.
+        const HRESULT apply = factory->ApplyToGlobalState();
+        if (FAILED(apply)) spdlog::warn("d3d12: ApplyToGlobalState failed (0x{:08x}): the root signature serializer stays on the system runtime", static_cast<unsigned>(apply));
+        r.factory = std::move(factory);
+        r.version = version;
+        spdlog::info("d3d12: Agility SDK {} from {}", version, r.dir);
+        return r;
+    }();
+    return runtime;
 }
 
 class D3D12DeviceImpl;
@@ -320,16 +400,49 @@ public:
     }
 
     bool create(const DeviceDesc& desc) {
+        const AgilityRuntime& sdk = agility(desc);
+        // the debug layer, GPU based validation and DRED are configured before the device exists: through the factory's configuration interfaces when
+        // there is one (a factory-made device ignores the global D3D12GetDebugInterface state), else through the global ones
+        auto config = [&sdk](REFCLSID clsid, REFIID iid, void** out) -> HRESULT {
+            if (sdk.factory) return sdk.factory->GetConfigurationInterface(clsid, iid, out);
+            return D3D12GetDebugInterface(iid, out);  // (the global state answers the debug and the DRED interface by IID)
+        };
         UINT factoryFlags = 0;
         if (desc.validation) {
             ComPtr<ID3D12Debug> debug;
-            if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug)))) {
+            if (SUCCEEDED(config(CLSID_D3D12Debug, IID_PPV_ARGS(&debug)))) {
                 debug->EnableDebugLayer();
                 factoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
                 ComPtr<ID3D12Debug1> debug1;
                 if (SUCCEEDED(debug.As(&debug1))) debug1->SetEnableGPUBasedValidation(TRUE);
+#if D3D12_SDK_VERSION >= 620
+                // messages the driver reports itself (Agility SDK 1.620+) arrive through the info queue's callback below
+                ComPtr<ID3D12Debug7> debug7;
+                if (SUCCEEDED(debug.As(&debug7))) debug7->SetEnableDriverReportedMessages(TRUE);
+#endif
+            } else {
+                spdlog::warn("d3d12: the debug layer is not available (d3d12SDKLayers.dll missing{})", sdk.factory ? " from the Agility SDK directory" : "");
+            }
+            // DRED: breadcrumbs + page fault data for a device removal
+            ComPtr<ID3D12DeviceRemovedExtendedDataSettings1> dred;
+            if (SUCCEEDED(config(CLSID_D3D12DeviceRemovedExtendedData, IID_PPV_ARGS(&dred)))) {
+                dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                dred->SetBreadcrumbContextEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
             }
         }
+        // (creates through the Agility factory when there is one, else the system runtime; falls back to the latter if the factory refuses)
+        auto makeDevice = [&](IUnknown* adapter, REFIID iid, void** out, bool* viaFactory) -> HRESULT {
+            if (sdk.factory) {
+                const HRESULT hr = sdk.factory->CreateDevice(adapter, D3D_FEATURE_LEVEL_12_0, iid, out);
+                if (SUCCEEDED(hr)) {
+                    if (viaFactory != nullptr) *viaFactory = true;
+                    return hr;
+                }
+            }
+            if (viaFactory != nullptr) *viaFactory = false;
+            return D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_12_0, iid, out);
+        };
         RVK_HR(CreateDXGIFactory2(factoryFlags, IID_PPV_ARGS(&factory_)), "CreateDXGIFactory2");
         ComPtr<IDXGIFactory6> f6;
         factory_.As(&f6);
@@ -343,7 +456,7 @@ public:
             a->GetDesc1(&ad);
             if ((ad.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0) continue;
             if (desc.adapter >= 0 && static_cast<UINT>(desc.adapter) != i) continue;
-            if (SUCCEEDED(D3D12CreateDevice(a.Get(), D3D_FEATURE_LEVEL_12_0, __uuidof(ID3D12Device), nullptr))) {
+            if (SUCCEEDED(makeDevice(a.Get(), __uuidof(ID3D12Device), nullptr, nullptr))) {
                 adapter = a;
                 break;
             }
@@ -359,7 +472,10 @@ public:
             for (const wchar_t* c = ad.Description; *c != L'\0'; ++c) name += static_cast<char>(*c < 128 ? *c : '?');
             caps_.adapterName = name;
         }
-        RVK_HR(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device_)), "D3D12CreateDevice");
+        bool viaFactory = false;
+        RVK_HR(makeDevice(adapter.Get(), IID_PPV_ARGS(&device_), &viaFactory), "D3D12CreateDevice");
+        caps_.agilitySdkVersion = viaFactory ? sdk.version : 0;
+        spdlog::info("d3d12: device from {}", viaFactory ? std::format("the Agility SDK {} factory", sdk.version) : std::string("the system runtime"));
         if (desc.validation) {
             // the debug layer's messages go to the log and count as errors (a debugger's output window is not needed)
             ComPtr<ID3D12InfoQueue1> iq;

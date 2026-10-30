@@ -202,6 +202,35 @@ What the RT scene (`enh/rt_scene.cpp`) needed, built generally:
 - Verification: `rvk_rhitest --validation`: Vulkan and D3D12 PASS, 0 validation errors (batch of three BLASes with raw addresses and per-build geometry, pooled scratch, compacted sizes read back, compaction, refit moving the
   geometry 5 units, TLAS from a raw address, buffer fills).
 
+## 6d. Agility SDK (2026-10-30; GD3D11's scheme, `rhi/d3d12/d3d12_device.cpp` `agility()`)
+
+The retail OS runtime of d3d12.dll is older than SM 6.6 root signature flags / the newer DXR and debug features; an exe picks the Agility SDK by exporting `D3D12SDKVersion` /
+`D3D12SDKPath`, which a plugin DLL (d3d9.dll in the game, the tools' exe here) cannot do. The way around, once per process before the first device:
+`D3D12GetInterface(CLSID_D3D12SDKConfiguration)` -> `ID3D12SDKConfiguration1::CreateDeviceFactory(D3D12SDKVersion of D3D12Core.dll, dir)` -> `ID3D12DeviceFactory::ApplyToGlobalState()`
+(without it only factory-made devices use the SDK; the exported free functions, `D3D12SerializeRootSignature` for one, stay on the system runtime and reject the
+`CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED` flag on an OS runtime that predates SM 6.6). Devices are created with `factory->CreateDevice` (falls back to `D3D12CreateDevice`); the debug layer, GPU based
+validation and DRED (`DeviceDesc::validation` only) are enabled through `factory->GetConfigurationInterface` (a factory-made device ignores the global `D3D12GetDebugInterface` state).
+
+- **Layout**: `<dir>\D3D12Core.dll` (+ `d3d12SDKLayers.dll` for `validation`). `<dir>` = `DeviceDesc::d3d12SdkDir`, else the environment variable `RVK_D3D12_SDK_DIR`, else `d3d12\` next
+  to the module the backend is linked into (`build\<config>\d3d12\` for the tools, `bin\rvk\d3d12\` for the game's d3d9.dll). The version is read from the DLL's `D3D12SDKVersion` export. Missing DLL,
+  an OS without `ID3D12SDKConfiguration1` or a refused factory = the system runtime (logged, no failure). Absolute paths only (a relative one is relative to the exe for the factory but not for the version probe).
+- **Build**: vcpkg `directx12-agility` (1.619.5; NuGet `Microsoft.Direct3D.D3D12`; pulls `directx-headers`). The backend includes `<directx/d3d12.h>` (the Windows SDK 10.0.26100 headers
+  only know SDK 616 and lack some of the newer interfaces) and links `Microsoft::DirectX-Guids`. CMake `rvk_deploy_agility(<target>)` copies D3D12Core.dll + d3d12SDKLayers.dll to
+  `$<TARGET_FILE_DIR>/d3d12` (rvk_rhitest, d3d9); `scripts/run.ps1` copies that folder to the test copy's `bin\rvk\d3d12`. **`scripts/package.ps1` does not ship it** (the game does not use the
+  DX12 backend yet; when it does, add `D3D12Core.dll` to `rvk\d3d12` of the zip, plus the redistribution licence from the port's `share/directx12-agility/copyright`, and not the layers).
+  A union-api-style scanner of game-folder DLLs (GD3D11's `PreloadGameFolderDlls`) is not a concern for Risen; if D3D12Core.dll should be loaded early, load it by full path at start-up.
+- **Log / caps**: `d3d12: Agility SDK 619 from <dir>` + `d3d12: device from the Agility SDK 619 factory`, or `d3d12: system runtime (...)` / `device from the system runtime`;
+  `DeviceCaps::agilitySdkVersion` (0 = system runtime), printed by `rvk_rhitest` (`[D3D12] adapter '...', Agility SDK 619`).
+- **Versions**: 1.619.5 is what the port has (headers = SDK 619). Retail 1.620 / preview 1.722 (blog "Agility SDK 1.620 retail and 1.722 preview"; the port has to update first, then the version
+  in `vcpkg.json`'s baseline moves; the code needs no change, the guarded `ID3D12Debug7` call below turns on with 1.620 headers). The preview runtime needs Windows developer mode (preview SDKs
+  are refused otherwise) and a driver that supports it; use retail for anything that ships.
+- **Usable later** (none built; the Vulkan side has no counterparts of the batched calls, so they stay DX12 only optimizations): 1.620: *Driver Reported Messages*
+  (`ID3D12Debug7::SetEnableDriverReportedMessages`, messages arrive through the info queue callback we already route; prepared in `create()` behind `D3D12_SDK_VERSION >= 620`), *batched async commands*
+  (`CopyBufferRegions`, `ClearTextureSubresources`, `FillBuffers`, bound RTV / DSV clears: fewer calls for the RHI's `copyBuffer` / `clear*` / `fillBuffer` on AMD RX 7000+, RTX, Intel),
+  *extended PIX markers*, *DirectX dump files*, `CheckFeatureSupport1`, castable format query (typeless depth / sRGB views). 1.722 preview: *DXR clustered geometry*, *partitioned TLAS* and *indirect
+  acceleration structure builds* (the RT scene's per-frame TLAS rebuild and BLAS batches: GPU-driven instance lists; AMD RX 9000, Intel B-series, RTX only), *GPU timeline CopyDescriptors* (Resource
+  Binding Tier 4, AMD RX 7000+).
+
 ## 6b. Decisions after the first runs
 
 - **No tiered compilation** (user, 2026-10-30): DXC costs ~40-60 ms per translated shader (the corpus of 2483 takes ~2.5 min at -O1; -O0 ~1.5 min; -O1 and -O3 cost the
@@ -230,6 +259,8 @@ What the RT scene (`enh/rt_scene.cpp`) needed, built generally:
 - 2026-10-30: DX12 gaps closed (section 6): `rvk_rhitest --validation` PASS on Vulkan and D3D12 with textures (cube, 3D, mips, array layers, per-mip / per-layer storage and render target views),
   buffer UAVs + atomics, vertex / index buffers with an indirect-count draw, and DXR 1.1 / Vulkan ray queries on the selfTest scene; 0 validation errors (Vulkan layer; D3D12 debug layer + GPU based
   validation, only the "clear values do not match" warning of ClearRenderTargetView). `rvk_tests` 198 / 198, `rvk_vktest --passes` and `--rt` PASS.
+- 2026-10-30: Agility SDK (section 6d): `rvk_rhitest --validation` PASS on Vulkan and D3D12 with `d3d12\` deployed (`d3d12: Agility SDK 619 ..., device from the Agility SDK 619 factory`, debug layer through the
+  factory) and with the folder absent (`d3d12: system runtime ...`); `RVK_D3D12_SDK_DIR` override checked; `rvk_tests` 198 / 198, d3d9.dll builds.
 
 ## 8. Pass migration (P2) - started 2026-10-30
 

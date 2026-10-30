@@ -6,6 +6,7 @@
   "builtin-baseline": "6f6324d69cc4d5229804bee9f72737fe2ef08087",
   "dependencies": [
     "directx-dxc",
+    "directx12-agility",
     {
       "name": "imgui",
       "features": [

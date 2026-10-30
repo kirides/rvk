@@ -983,7 +983,13 @@ bool runBackend(rhi::Backend backend, bool validation, const Shaders& sh) {
         std::printf("[%s] SKIP: no device meeting the floor\n", rhi::backendName(backend));
         return true;
     }
-    std::printf("[%s] adapter '%s'\n", rhi::backendName(backend), dev->caps().adapterName.c_str());
+    std::printf("[%s] adapter '%s'", rhi::backendName(backend), dev->caps().adapterName.c_str());
+    if (backend == rhi::Backend::D3D12) {
+        const std::uint32_t agility = dev->caps().agilitySdkVersion;
+        std::printf(", %s\n", agility != 0 ? ("Agility SDK " + std::to_string(agility)).c_str() : "system D3D12 runtime");
+    } else {
+        std::printf("\n");
+    }
     const int before = failures;
 
     // resources
