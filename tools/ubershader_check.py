@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Does the GLSL material shader (shaders/material/ge_default.frag), built from the macros the engine asked for, equal the game's
+"""Does the HLSL material shader (shaders/material/ge_default.frag.hlsl), built from the macros the engine asked for, equal the game's
 precompiled pixel shader? (docs/research/shader-permutations.md 8)
 
-    python tools/ubershader_check.py out/matsrc/*.jsonl [--corpus-glsl game-shaders] [--jobs 6] [--trials 16] [--only HASH]
+    python tools/ubershader_check.py out/matsrc/*.jsonl [--corpus game-shaders] [--jobs 6] [--trials 16] [--only HASH]
                                      [--limit N] [-o out/ubershader]
 
 Input: the JSON lines of `-Setting debug.material_sources=true` runs (bin/rvk/cache/materials/sources.jsonl: one line per
 shader with its effect, entry function and the final macro list). For every pixel shader of ge_default_phong.fx (PS_Default /
-PS_DefaultZPass) the translated game shader (game-shaders/ps30_<corpus>.frag from `rvk_shadertool export corpus game-shaders`)
+PS_DefaultZPass) the translated game shader (game-shaders/ps30_<corpus>.ps.hlsl from `rvk_shadertool export corpus game-shaders`)
 and the ubershader with the same macros as -D defines run on the GPU with identical random constants / varyings / textures
-(rvk_shadereq, the check of tools/shader_equiv.py) and the colours are compared.
+(rvk_shadereq; both shaders go through DXC: rvk_shadertool hlsl) and the colours are compared.
 
-Result per shader: EQUAL, DIFF (colours differ), NO-GLSL (the shader is not in the corpus export), UNSUPPORTED (other effect /
+Result per shader: EQUAL, DIFF (colours differ), NO-HLSL (the shader is not in the corpus export), UNSUPPORTED (other effect /
 entry), PORT-ERR (the ubershader does not compile with these macros: stderr kept), TRANSLATED-ERR. Writes <out>/report.json and
 prints a summary.
 """
@@ -20,13 +20,14 @@ import argparse, concurrent.futures as cf, glob, json, os, subprocess, sys, temp
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 BIN = os.path.join(ROOT, 'build', 'RelWithDebInfo')
-GLSLC = os.path.join(os.environ.get('VULKAN_SDK', r'C:\VulkanSDK\1.4.363.0'), 'Bin', 'glslc.exe')
+TOOL = os.path.join(BIN, 'rvk_shadertool.exe')
+ENV = dict(os.environ, RVK_SHADER_DIR=os.path.join(ROOT, 'shaders'))
 INC = os.path.join(ROOT, 'shaders', 'include')
 MAT = os.path.join(ROOT, 'shaders', 'material')
 
 
 def run(cmd, **kw):
-    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+    return subprocess.run(cmd, capture_output=True, text=True, env=ENV, **kw)
 
 
 def defines(macros, entry):
@@ -34,34 +35,33 @@ def defines(macros, entry):
     for name, value in macros:
         value = {'true': '1', 'false': '0'}.get(value, value)
         value = ' '.join(value.split())  # a macro body on one line
-        out.append('-D%s=%s' % (name, value))
+        out += ['-D', '%s=%s' % (name, value)]
     if entry.endswith('ZPass'):
-        out.append('-DXFX_PASS=1')
+        out += ['-D', 'XFX_PASS=1']
     return out
 
 
-def check(entry, tmp, glsl_dir, vs_spv, trials, keep=False):
+def check(entry, tmp, corpus_dir, vs_spv, trials, keep=False):
     h = entry['corpus']
     res = {'hash': entry['hash'], 'corpus': h, 'entry': entry['entry'], 'file': entry['file']}
     if entry['file'] != 'ge_default_phong.fx' or entry['entry'] not in ('PS_Default', 'PS_DefaultZPass'):
         res['status'] = 'UNSUPPORTED'
         return res
-    src = os.path.join(glsl_dir, 'ps30_%s.frag' % h)
+    src = os.path.join(corpus_dir, 'ps30_%s.ps.hlsl' % h)
     if not os.path.isfile(src):
-        res['status'] = 'NO-GLSL'
+        res['status'] = 'NO-HLSL'
         return res
     a_spv = os.path.join(tmp, 'a_%s.spv' % h)
     b_spv = os.path.join(tmp, 'b_%s.spv' % h)
-    r = run([GLSLC, '--target-env=vulkan1.3', '-I', os.path.join(glsl_dir, 'include'), src, '-o', a_spv])
+    r = run([TOOL, 'hlsl', src, '-o', a_spv])
     if r.returncode:
         res['status'] = 'TRANSLATED-ERR'
-        res['log'] = r.stderr.strip()[:400]
+        res['log'] = (r.stdout + r.stderr).strip()[:400]
         return res
-    r = run([GLSLC, '--target-env=vulkan1.3', '-I', INC, '-I', MAT, '-fshader-stage=frag', os.path.join(MAT, 'ge_default.frag'),
-             '-o', b_spv] + defines(entry['macros'], entry['entry']))
+    r = run([TOOL, 'hlsl', 'material/ge_default.frag', '-o', b_spv] + defines(entry['macros'], entry['entry']))
     if r.returncode:
         res['status'] = 'PORT-ERR'
-        res['log'] = r.stderr.strip()[:600]
+        res['log'] = (r.stdout + r.stderr).strip()[:600]
         return res
     r = run([os.path.join(BIN, 'rvk_shadereq.exe'), '--vs', vs_spv, '--fs', a_spv, b_spv, '--trials', str(trials)])
     tail = r.stdout.strip().splitlines()
@@ -80,7 +80,7 @@ def check(entry, tmp, glsl_dir, vs_spv, trials, keep=False):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('db', nargs='+', help='sources.jsonl files (globs ok); the union by shader hash is checked')
-    ap.add_argument('--corpus-glsl', default=os.path.join(ROOT, 'game-shaders'))
+    ap.add_argument('--corpus', default=os.path.join(ROOT, 'game-shaders'))
     ap.add_argument('--jobs', type=int, default=6)
     ap.add_argument('--trials', type=int, default=16)
     ap.add_argument('--only', default='')
@@ -104,14 +104,14 @@ def main():
     os.makedirs(a.out, exist_ok=True)
     tmp = tempfile.mkdtemp(prefix='ubershader_')
     vs_spv = os.path.join(tmp, 'eq_varyings.spv')
-    r = run([GLSLC, '--target-env=vulkan1.3', '-I', INC, os.path.join(ROOT, 'shaders', 'test', 'eq_varyings.vert'), '-o', vs_spv])
+    r = run([TOOL, 'hlsl', 'test/eq_varyings.vert', '-o', vs_spv])
     if r.returncode:
         print(r.stderr)
         return 2
     t0 = time.time()
     results = []
     with cf.ThreadPoolExecutor(max_workers=a.jobs) as ex:
-        futs = [ex.submit(check, e, tmp, a.corpus_glsl, vs_spv, a.trials, a.keep) for e in todo]
+        futs = [ex.submit(check, e, tmp, a.corpus, vs_spv, a.trials, a.keep) for e in todo]
         for i, f in enumerate(cf.as_completed(futs)):
             results.append(f.result())
             if (i + 1) % 25 == 0:

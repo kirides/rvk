@@ -1,15 +1,15 @@
 // rvk_shadertool: offline driver of the D3D9 -> SPIR-V shader translator.
 //
-//   rvk_shadertool corpus <dir> [--out <dir>] [--max-errors N] [--tint | --gi | --gbuf | --gbuf-motion | --capture]
+//   rvk_shadertool corpus <dir> [--out <dir>] [--max-errors N] [--tint | --gi | --gbuf | --gbuf-motion | --capture]  (HLSL through DXC)
 //                                                                translate + validate every vs*/ps* file of a capture corpus
 //                                                                (--tint: the pixel shaders' tint debug-view variant; --gi: the
 //                                                                material pixel shaders' GI variant, enh/gi; --capture: the vertex
 //                                                                shaders' capture variant, enh/rt_scene; shaders without one skipped)
-//   rvk_shadertool show <file>                                   disassembly, GLSL, compiler log of one shader
-//   rvk_shadertool export <corpus dir> <out dir>                 write every shader as plain GLSL 4.60 source (<name>.vert / .frag): the
-//                                                                translator's exact output, the ABI block replaced by an #include,
-//                                                                the D3D9 listing + CTAB register names in a comment; out/include/
-//                                                                gets rvk_abi.glsl; glslc -I <out>/include compiles each file
+//   rvk_shadertool show <file>                                   disassembly, HLSL, compiler log of one shader
+//   rvk_shadertool hlsl <name> [-D X=Y] [-o out.spv] [--dxil out.dxil]   compile one embedded / RVK_SHADER_DIR shader like the renderer
+//   rvk_shadertool export <corpus dir> <out dir>                 write every shader as plain HLSL (<name>.vs.hlsl / .ps.hlsl): the translator's
+//                                                                exact output, the D3D9 listing + CTAB register names in a comment; out/include/
+//                                                                gets the ABI headers; dxc -I <out>/include -E VSMain|PSMain compiles each file
 //   rvk_shadertool refdisasm <file>                              D3DXDisassembleShader (d3dx9_39.dll) as the reference listing
 //   rvk_shadertool evalcheck <dir>                               the CPU evaluator (shader/sm_eval.h) on every SM 3.0 shader of a
 //                                                                corpus: failures by reason, pixel shaders sampling s9, slices
@@ -24,6 +24,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <format>
 #include <map>
 #include <string>
@@ -38,7 +39,6 @@
 #include "enh/rt_scene.h"
 #include "shader/dxc.h"
 #include "shader/embedded.h"
-#include "shader/glsl.h"
 #include "shader/hlsl.h"
 #include "shader/sm_eval.h"
 #include "shader/sm_ir.h"
@@ -58,14 +58,12 @@ std::vector<std::uint32_t> readTokens(const fs::path& p) {
 }
 
 struct Outcome {
-    std::string stage;  // "decode", "glsl", "compile", "validate", "" = ok
+    std::string stage;  // "decode", "hlsl", "compile", "validate", "" = ok
     std::string message;
     std::string disasm;
-    std::string glsl;
+    std::string glsl;  // the translated text (HLSL)
     bool intBool = false;  // Reflection::intBoolConstants
 };
-
-bool g_hlsl = false;  // corpus --hlsl: translate to HLSL and compile it with DXC instead of GLSL + glslang
 
 Outcome translate(const std::vector<std::uint32_t>& tokens, spvtools::SpirvTools& tools, const TranslateOptions& options = {}) {
     Outcome o;
@@ -76,54 +74,31 @@ Outcome translate(const std::vector<std::uint32_t>& tokens, spvtools::SpirvTools
         return o;
     }
     o.disasm = disassemble(dec.program);
-    if (g_hlsl) {
-        const HlslResult h = toHlsl(dec.program, options);
-        if (!h.ok()) {
-            o.stage = "hlsl";
-            o.message = h.error;
-            return o;
-        }
-        o.glsl = h.hlsl;
-        o.intBool = h.reflection.intBoolConstants;
-        rvk::shader::dxc::Request r;
-        r.file = "translated.hlsl";
-        r.source = h.hlsl;
-        const bool vs = dec.program.version.stage == Stage::Vertex;
-        r.entry = vs ? "VSMain" : "PSMain";
-        r.profile = vs ? "vs_6_6" : "ps_6_6";
-        r.optLevel = std::getenv("RVK_DXC_OPT") != nullptr ? std::atoi(std::getenv("RVK_DXC_OPT")) : 1;  // as shader::compileHlsl (the renderer)
-        r.cache = false;
-        const auto c = rvk::shader::dxc::compile(r);
-        if (!c.ok()) {
-            o.stage = "compile";
-            o.message = c.log;
-            return o;
-        }
-        std::string vlog2;
-        tools.SetMessageConsumer([&](spv_message_level_t, const char*, const spv_position_t&, const char* m) { vlog2 += m; vlog2 += '\n'; });
-        if (!tools.Validate(c.words)) {
-            o.stage = "validate";
-            o.message = vlog2;
-        }
+    const HlslResult h = toHlsl(dec.program, options);
+    if (!h.ok()) {
+        o.stage = "hlsl";
+        o.message = h.error;
         return o;
     }
-    const GlslResult g = toGlsl(dec.program, options);
-    if (!g.ok()) {
-        o.stage = "glsl";
-        o.message = g.error;
-        return o;
-    }
-    o.glsl = g.glsl;
-    o.intBool = g.reflection.intBoolConstants;
-    const SpirvResult s = compileGlsl(dec.program.version.stage, g.glsl);
-    if (!s.ok()) {
+    o.glsl = h.hlsl;
+    o.intBool = h.reflection.intBoolConstants;
+    rvk::shader::dxc::Request r;
+    r.file = "translated.hlsl";
+    r.source = h.hlsl;
+    const bool vs = dec.program.version.stage == Stage::Vertex;
+    r.entry = vs ? "VSMain" : "PSMain";
+    r.profile = vs ? "vs_6_6" : "ps_6_6";
+    r.optLevel = std::getenv("RVK_DXC_OPT") != nullptr ? std::atoi(std::getenv("RVK_DXC_OPT")) : 1;  // as shader::compileHlsl (the renderer)
+    r.cache = false;
+    const auto c = rvk::shader::dxc::compile(r);
+    if (!c.ok()) {
         o.stage = "compile";
-        o.message = s.log;
+        o.message = c.log;
         return o;
     }
     std::string vlog;
-    tools.SetMessageConsumer([&](spv_message_level_t, const char*, const spv_position_t&, const char* m) { vlog += m; vlog += "\n"; });
-    if (!tools.Validate(s.words)) {
+    tools.SetMessageConsumer([&](spv_message_level_t, const char*, const spv_position_t&, const char* m) { vlog += m; vlog += '\n'; });
+    if (!tools.Validate(c.words)) {
         o.stage = "validate";
         o.message = vlog;
     }
@@ -156,7 +131,7 @@ int cmdCorpus(const fs::path& dir, const fs::path& out, int maxErrors, const Tra
         if (variant != nullptr) {
             // the shader as the device sees it: stage, reflection, CTAB semantics
             const DecodeResult dec = decode(tokens);
-            const GlslResult plain = dec.ok() ? toGlsl(dec.program) : GlslResult{};
+            const HlslResult plain = dec.ok() ? toHlsl(dec.program) : HlslResult{};
             rvk::d3d9::Shader sh;
             sh.stage = dec.ok() ? dec.program.version.stage : Stage::Vertex;
             sh.reflection = plain.reflection;
@@ -246,8 +221,9 @@ std::string ctabComment(const std::vector<std::uint32_t>& tokens) {
 
 int cmdExport(const fs::path& dir, const fs::path& out) {
     fs::create_directories(out / "include");
-    const std::string_view abi = embedded::abiGlsl();
-    std::ofstream(out / "include" / "rvk_abi.glsl", std::ios::binary) << abi;
+    for (const char* inc : {"rvk_draw.hlsli", "rvk_abi.hlsli", "rvk_common.hlsli", "rvk_oct.hlsli"}) {
+        std::ofstream(out / "include" / inc, std::ios::binary) << embedded::hlslSource(std::string("include/") + inc);
+    }
     std::vector<fs::path> files;
     for (const auto& e : fs::directory_iterator(dir)) {
         const auto name = e.path().filename().string();
@@ -259,25 +235,17 @@ int cmdExport(const fs::path& dir, const fs::path& out) {
     for (const auto& f : files) {
         const auto tokens = readTokens(f);
         const DecodeResult dec = decode(tokens);
-        const GlslResult g = dec.ok() ? toGlsl(dec.program) : GlslResult{};
+        const HlslResult g = dec.ok() ? toHlsl(dec.program) : HlslResult{};
         if (!dec.ok() || !g.ok()) {
             ++failed;
             std::printf("FAIL %s: %s\n", f.filename().string().c_str(), dec.ok() ? g.error.c_str() : dec.error.c_str());
             continue;
         }
-        std::string text = g.glsl;
-        const std::size_t at = text.find(abi);
-        if (at == std::string::npos) {
-            ++failed;
-            std::printf("FAIL %s: ABI block not found\n", f.filename().string().c_str());
-            continue;
-        }
-        text.replace(at, abi.size(), "#extension GL_GOOGLE_include_directive : require\n#include \"rvk_abi.glsl\"\n");
         const bool vertex = dec.program.version.stage == Stage::Vertex;
-        const std::string head = std::format("// {} : the game's {} shader, as translated at run time (src/shader/glsl.cpp).\n"
-                                             "// Constant registers (pc.{}->c[n]) by the shader's own constant table:\n{}"
+        const std::string head = std::format("// {} : the game's {} shader, as translated at run time (src/shader/hlsl.cpp).\n"
+                                             "// Constant registers (RVK_{}C(n)) by the shader's own constant table:\n{}"
                                              "// ---- D3D9 listing\n",
-                                             f.stem().string(), vertex ? "vertex" : "pixel", vertex ? "vs" : "ps", ctabComment(tokens));
+                                             f.stem().string(), vertex ? "vertex" : "pixel", vertex ? "VS" : "PS", ctabComment(tokens));
         const std::string listing = disassemble(dec.program);
         std::string commented;
         for (std::size_t p = 0; p < listing.size();) {
@@ -286,9 +254,8 @@ int cmdExport(const fs::path& dir, const fs::path& out) {
             if (e > p) commented += "// " + listing.substr(p, e - p) + "\n";
             p = e + 1;
         }
-        // #version stays the first line: the comment goes right after it
-        text.insert(text.find('\n') + 1, head + commented + "\n");
-        const std::string ext = vertex ? ".vert" : ".frag";
+        const std::string text = head + commented + "\n" + g.hlsl;
+        const std::string ext = vertex ? ".vs.hlsl" : ".ps.hlsl";
         std::ofstream(out / (f.stem().string() + ext), std::ios::binary) << text;
         index << f.stem().string() << ext << "\n";
         ++exported;
@@ -300,7 +267,7 @@ int cmdExport(const fs::path& dir, const fs::path& out) {
 int cmdShow(const fs::path& file) {
     spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
     const Outcome o = translate(readTokens(file), tools);
-    std::printf("%s\n---- glsl\n%s\n", o.disasm.c_str(), o.glsl.c_str());
+    std::printf("%s\n---- hlsl\n%s\n", o.disasm.c_str(), o.glsl.c_str());
     if (!o.stage.empty()) {
         std::printf("---- FAILED at %s\n%s\n", o.stage.c_str(), o.message.c_str());
         return 1;
@@ -383,13 +350,23 @@ int cmdHlsl(int argc, char** argv) {
     std::string out;
     std::string dxilOut;
     rvk::shader::dxc::Request r;
-    r.file = name + ".hlsl";
-    const auto dot = name.rfind('.');
-    const std::string ext = dot == std::string::npos ? std::string() : name.substr(dot);
+    // a file on disk (the corpus export: <name>.vs.hlsl / .ps.hlsl, #includes from the embedded sources) or an embedded name (<name>.hlsl)
+    const bool onDisk = name.ends_with(".hlsl") && fs::exists(name);
+    std::string ext;
+    if (onDisk) {
+        std::ifstream in(name, std::ios::binary);
+        r.source.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        r.file = fs::path(name).filename().string();
+        ext = name.ends_with(".vs.hlsl") ? ".vert" : name.ends_with(".ps.hlsl") ? ".frag" : name.ends_with(".cs.hlsl") ? ".comp" : "";
+    } else {
+        r.file = name + ".hlsl";
+        const auto dot = name.rfind('.');
+        ext = dot == std::string::npos ? std::string() : name.substr(dot);
+    }
     if (ext == ".comp") { r.entry = "CSMain"; r.profile = "cs_6_6"; }
     else if (ext == ".vert") { r.entry = "VSMain"; r.profile = "vs_6_6"; }
     else if (ext == ".frag") { r.entry = "PSMain"; r.profile = "ps_6_6"; }
-    else { std::printf("unknown stage extension of %s\n", name.c_str()); return 2; }
+    else { std::printf("unknown stage extension of %s\n", name.c_str()); return 2; }
     for (int i = 3; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "-o" && i + 1 < argc) out = argv[++i];
@@ -455,7 +432,7 @@ int main(int argc, char** argv) {
             } else if (a == "--capture") {
                 variant = &rvk::enh::RtScene::captureOptions;
             } else if (a == "--hlsl") {
-                g_hlsl = true;
+                // (always HLSL now; the flag is kept for old command lines)
             } else if (a == "--tint") {
                 options.tintEpilogue = true;
             } else if (i + 1 < argc && a == "--out") {

@@ -10,7 +10,8 @@
 #include "d3d9/identity.h"
 #include "d3d9/semantics.h"
 #include "fx/effect_binary.h"
-#include "shader/glsl.h"
+#include "shader/dxc.h"
+#include "shader/hlsl.h"
 #include "shader/sm_ir.h"
 #include "shader/spirv.h"
 #include "test.h"
@@ -367,25 +368,26 @@ TEST(draws_tint) {
 
 // the tint variant of a pixel shader: only with the option, and it compiles
 TEST(draws_tint_epilogue) {
+    if (!rvk::shader::dxc::available()) return;
     // ps_3_0: mov oC0, c0
     const std::vector<std::uint32_t> tokens{0xFFFF0300u, 0x02000001u, 0x800F0800u, 0xA0E40000u, 0x0000FFFFu};
     const auto dec = rvk::shader::decode(tokens);
     CHECK(dec.ok());
     if (!dec.ok()) return;
-    const auto plain = rvk::shader::toGlsl(dec.program);
-    const auto tinted = rvk::shader::toGlsl(dec.program, rvk::shader::TranslateOptions{.tintEpilogue = true});
+    const auto plain = rvk::shader::toHlsl(dec.program);
+    const auto tinted = rvk::shader::toHlsl(dec.program, rvk::shader::TranslateOptions{.tintEpilogue = true});
     CHECK(plain.ok() && tinted.ok());
-    CHECK(plain.glsl.find("unpackUnorm4x8") == std::string::npos);
-    CHECK(tinted.glsl.find("pc.draw.pad0 != 0u") != std::string::npos);
-    CHECK(rvk::shader::compileGlsl(rvk::shader::Stage::Pixel, plain.glsl).ok());
-    CHECK(rvk::shader::compileGlsl(rvk::shader::Stage::Pixel, tinted.glsl).ok());
+    CHECK(plain.hlsl.find("rvkUnpackUnorm4x8") == std::string::npos);
+    CHECK(tinted.hlsl.find("rvk_draw.alpha.z != 0u") != std::string::npos);
+    CHECK(rvk::shader::compileHlsl(rvk::shader::Stage::Pixel, plain.hlsl).ok());
+    CHECK(rvk::shader::compileHlsl(rvk::shader::Stage::Pixel, tinted.hlsl).ok());
     // a vertex shader ignores the option
     const std::vector<std::uint32_t> vs{0xFFFE0300u, 0x0200001Fu, 0x80000000u, 0x900F0000u, 0x0200001Fu, 0x80000000u, 0xE00F0000u,
                                         0x02000001u, 0xE00F0000u, 0x90E40000u, 0x0000FFFFu};
     const auto vdec = rvk::shader::decode(vs);
     CHECK(vdec.ok());
     if (vdec.ok()) {
-        CHECK(rvk::shader::toGlsl(vdec.program).glsl == rvk::shader::toGlsl(vdec.program, {.tintEpilogue = true}).glsl);
+        CHECK(rvk::shader::toHlsl(vdec.program).hlsl == rvk::shader::toHlsl(vdec.program, {.tintEpilogue = true}).hlsl);
     }
 }
 

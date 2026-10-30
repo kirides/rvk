@@ -17,7 +17,7 @@ Status legend: **built** = in the tree and verified, **design** = decided, not b
 | P1d | translator HLSL emitter (`shader/hlsl.cpp` next to `glsl.cpp`; `toHlsl` + `compileHlsl`, `kTranslatorVersion` 8): the whole corpus (2483 shaders) passes DXC + spirv-val (`rvk_shadertool corpus corpus --hlsl`), the D3D9 assembly unit tests too; the device uses it for base shaders, the LOD variant and the RT capture variant; material variants + ubershader (`ge_default.*`, back to HLSL: it comes from the engine's own HLSL) | **built** (hooks of the material variants: see 7) |
 | P2 | slim RHI (section 5: dynamic rendering + descriptor indexing + constant buffers + push constants, Vulkan structs as the baseline): interface `src/rhi/rhi.h`, Vulkan backend over the existing `vk::` classes (`src/rhi/vulkan`); the migration of the renderer's own pass / resource code onto it is open (35 files call Vulkan directly) | **interface + Vulkan backend built**, migration open |
 | P3 | DX12 backend slice (section 6; SM 6.6 bindless required): `src/rhi/d3d12` (library `rvk_rhi_d3d12`), the same HLSL compiled to DXIL, fixed root signature, bindless heaps; `rvk_rhitest` runs one test on both backends (compute with constant buffer + bindless texture + RVK_REF + push constants + storage image, graphics with dynamic rendering), validation layers on | **built** incl. a swapchain on a hidden window, PASS on both |
-| P4 | remove rvk_glslc / glslang from the shipped build, GLSL gone | design |
+| P4 | GLSL gone: shaders/*.comp|vert|frag|glsl, `glsl.cpp`, `compileGlsl`, glslang (vcpkg), `rvk_glslc` (replaced by `rvk_embed`, a text embedder) removed 2026-10-30 after the in-game A/B of the ports (GLSL vs HLSL: no errors, within noise); `tools/shader_equiv.py` retired (its pixel check lives on as `tools/ubershader_check.py` through DXC: 183 / 183 captured PS requests EQUAL on the GPU), the vertex ubershader check is gone with it | **built** |
 
 ## 2. Compile scheme (GD3D11's, adapted) - built
 
@@ -139,8 +139,21 @@ Order of work (P2): (a) interface headers + a Vulkan backend over the existing `
   `--validation` = Vulkan validation layer + D3D12 debug layer with GPU based validation (messages routed to the log and counted: `Device::validationErrors`).
   2026-10-30: PASS on both (RX 7900 XTX), 0 validation errors.
 
+## 6b. Decisions after the first runs
+
+- **No tiered compilation** (user, 2026-10-30): DXC costs ~40-60 ms per translated shader (the corpus of 2483 takes ~2.5 min at -O1; -O0 ~1.5 min; -O1 and -O3 cost the
+  same), paid once into the disk caches (`bin\rvk\cache\spirv` for translated shaders, `bin\rvk\cache\hlsl` for the embedded ones). A background re-optimize would need a
+  pipeline rebuild per module swap and buys nothing the driver's own compiler does not do; translated shaders stay at `-O1`.
+
 ## 7. Verification log
 
 - 2026-10-29: `rvk_tests` 197 / 197 (dxc_* tests: embedded sources, valid SPIR-V, error reporting, cache invalidation through an include,
   debug info; `abi_hlsl_layout_matches_cpp`), `rvk_vktest --passes` PASS (0 bad values, 0 validation errors, sync validation on) with
   `debug/fullscreen.vert`, `inject_view.comp` / `.frag` compiled from HLSL by the running DXC.
+- 2026-10-30: the hand-written ports in the game (GLSL originals vs HLSL, `RVK_FORCE_GLSL=1`, 13 validation runs incl. sync validation and the debug views, then 10 spots x
+  3 runs with the full feature set: water + FFT ocean + RT reflections, RT sun shadows, GTAO, GI + screen probes, FSR quality): no errors from our code, no VUID / SYNC
+  messages, differences within the GLSL-vs-GLSL noise (the camera jitter phase explains the one spot pair that looked worse). Translator: 2483 / 2483 corpus shaders and
+  every variant corpus (`--gbuf` 2321, `--gbuf-motion` 2321, `--gi` 2246, `--capture` 149, `--tint` 2483) through DXC + spirv-val; the D3D9 assembly unit tests through the
+  HLSL path; `rvk_vktest` (translated shaders on the GPU) and `--passes` / `--rt` PASS. Ubershader: 778 captured requests compile (with and without hooks); on the GPU
+  `tools/ubershader_check.py` = 183 / 183 EQUAL against the translated game shaders. RHI: `rvk_rhitest --validation` PASS on Vulkan and D3D12 (0 validation errors).
+  Unit tests 198 / 198 after the GLSL removal.

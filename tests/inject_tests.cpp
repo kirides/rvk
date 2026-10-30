@@ -20,7 +20,8 @@
 #include "enh/shadows.h"
 #include "shader/abi.h"
 #include "shader/embedded.h"
-#include "shader/glsl.h"
+#include "shader/dxc.h"
+#include "shader/hlsl.h"
 #include "shader/sm_ir.h"
 #include "shader/spirv.h"
 #include "spirv_offsets.h"
@@ -33,130 +34,25 @@ namespace {
 
 using rvk::test::memberOffsets;
 
-void checkOffsets(const std::map<std::string, std::uint32_t>& glsl, const std::map<std::string, std::size_t>& cpp, const char* what) {
-    CHECK_MSG(glsl.size() == cpp.size(), std::format("{}: {} members in GLSL, {} in C++", what, glsl.size(), cpp.size()));
-    for (const auto& [name, off] : cpp) {
-        const auto it = glsl.find(name);
-        CHECK_MSG(it != glsl.end() && it->second == off,
-                  std::format("{}.{}: C++ offset {}, GLSL {}", what, name, off, it != glsl.end() ? std::to_string(it->second) : "missing"));
-    }
-}
-
 }  // namespace
 
-// ---- the GLSL ABI header against the C++ structs --------------------------------------------------------------------------
-
-TEST(abi_glsl_layout_matches_cpp) {
-    const auto words = shader::embedded::glslSpirv("test/abi_layout.comp");
-    CHECK(!words.empty());
-    const auto m = memberOffsets(words);
-    CHECK(m.contains("RvkPush") && m.contains("RvkFrame") && m.contains("RvkDraw") && m.contains("RvkStage"));
-    if (!m.contains("RvkPush") || !m.contains("RvkFrame") || !m.contains("RvkDraw") || !m.contains("RvkStage")) return;
-    using PC = abi::PushConstants;
-    checkOffsets(m.at("RvkPush"),
-                 {{"vs", offsetof(PC, vsConsts)}, {"ps", offsetof(PC, psConsts)}, {"draw", offsetof(PC, draw)},
-                  {"frame", offsetof(PC, frame)}, {"prevVs", offsetof(PC, prevVsConsts)}, {"drawId", offsetof(PC, drawId)},
-                  {"flags", offsetof(PC, flags)}, {"vsw", offsetof(PC, vsWin)}, {"psw", offsetof(PC, psWin)}},
-                 "RvkPush");
-    using DB = abi::DrawBlock;
-    checkOffsets(m.at("RvkDraw"),
-                 {{"tex", offsetof(DB, tex)}, {"smp", offsetof(DB, smp)}, {"posFix", offsetof(DB, posFix)},
-                  {"alphaFunc", offsetof(DB, alphaFunc)}, {"alphaRef", offsetof(DB, alphaRef)}, {"pad0", offsetof(DB, pad)},
-                  {"pad1", offsetof(DB, pad) + 4}, {"psC5", offsetof(DB, psC5)}},
-                 "RvkDraw");
-    checkOffsets(m.at("RvkStage"), {{"c", 0}, {"i", abi::kStageConstsIntOffset}, {"b", abi::kStageConstsBoolOffset}}, "RvkStage");
-    using FB = abi::FrameBlock;
-    checkOffsets(m.at("RvkFrame"),
-                 {{"viewProj", offsetof(FB, viewProj)}, {"invViewProj", offsetof(FB, invViewProj)}, {"view", offsetof(FB, view)},
-                  {"proj", offsetof(FB, proj)}, {"invView", offsetof(FB, invView)}, {"invProj", offsetof(FB, invProj)},
-                  {"prevViewProj", offsetof(FB, prevViewProj)}, {"prevInvViewProj", offsetof(FB, prevInvViewProj)},
-                  {"cameraPos", offsetof(FB, cameraPos)}, {"prevCameraPos", offsetof(FB, prevCameraPos)},
-                  {"depthParams", offsetof(FB, depthParams)}, {"viewport", offsetof(FB, viewport)}, {"jitter", offsetof(FB, jitter)},
-                  {"time", offsetof(FB, time)}, {"frameInfo", offsetof(FB, frameInfo)}, {"images", offsetof(FB, images)},
-                  {"params", offsetof(FB, params)}, {"rtScene", offsetof(FB, rtScene)}, {"rtInfo", offsetof(FB, rtInfo)},
-                  {"gi", offsetof(FB, gi)}, {"ao", offsetof(FB, ao)}, {"sgi", offsetof(FB, sgi)}},
-                 "RvkFrame");
-}
-
-// the RT scene's geometry record (shaders/include/rvk_rt.glsl) and the RT debug view's push block (shaders/rt/rt_debug.glsl)
-TEST(abi_glsl_rt_layout_matches_cpp) {
-    const auto m = memberOffsets(shader::embedded::glslSpirv("test/abi_rt_layout.comp"));
-    CHECK(m.contains("RvkRtRecord") && m.contains("RtDebugPush"));
-    if (!m.contains("RvkRtRecord") || !m.contains("RtDebugPush")) return;
-    using R = abi::RtGeometryRecord;
-    checkOffsets(m.at("RvkRtRecord"),
-                 {{"vertices", offsetof(R, vertices)}, {"indices", offsetof(R, indices)}, {"stride", offsetof(R, stride)},
-                  {"flags", offsetof(R, flags)}, {"normal", offsetof(R, normal)}, {"texcoord0", offsetof(R, texcoord0)},
-                  {"texcoord1", offsetof(R, texcoord1)}, {"texcoord6", offsetof(R, texcoord6)}, {"color0", offsetof(R, color0)},
-                  {"instanceId", offsetof(R, instanceId)}, {"albedoTex", offsetof(R, albedoTex)},
-                  {"albedoSampler", offsetof(R, albedoSampler)}, {"alpha", offsetof(R, alpha)}, {"uvSet", offsetof(R, uvSet)},
-                  {"uvMap0", offsetof(R, uvMap)}, {"uvMap1", offsetof(R, uvMap) + 16}, {"segments", offsetof(R, segments)},
-                  {"segmentCount", offsetof(R, segmentCount)}, {"pad", offsetof(R, pad)}},
-                 "RvkRtRecord");
-    CHECK(m.contains("RvkRtSegment"));
-    if (m.contains("RvkRtSegment")) {
-        using S = abi::RtMaterialSegment;
-        checkOffsets(m.at("RvkRtSegment"),
-                     {{"firstPrimitive", offsetof(S, firstPrimitive)}, {"primitiveCount", offsetof(S, primitiveCount)},
-                      {"albedoTex", offsetof(S, albedoTex)}, {"albedoSampler", offsetof(S, albedoSampler)}, {"alpha", offsetof(S, alpha)},
-                      {"uvSet", offsetof(S, uvSet)}, {"pad0", offsetof(S, pad)}, {"pad1", offsetof(S, pad) + 4},
-                      {"uvMap0", offsetof(S, uvMap)}, {"uvMap1", offsetof(S, uvMap) + 16}},
-                     "RvkRtSegment");
-    }
-    using P = enh::RtDebugPush;
-    checkOffsets(m.at("RtDebugPush"),
-                 {{"frame", offsetof(P, h) + offsetof(abi::PassPushHeader, frame)},
-                  {"passId", offsetof(P, h) + offsetof(abi::PassPushHeader, passId)},
-                  {"passFlags", offsetof(P, h) + offsetof(abi::PassPushHeader, passFlags)}, {"depthTex", offsetof(P, depthTex)},
-                  {"width", offsetof(P, width)}, {"height", offsetof(P, height)}, {"srcTex", offsetof(P, srcTex)},
-                  {"srcSampler", offsetof(P, srcSampler)}, {"mode", offsetof(P, mode)}, {"probes", offsetof(P, probes)}},
-                 "RtDebugPush");
-}
-
-// the shadow mask's block (shaders/shadows/shadow_block.glsl, shared by its vertex and fragment shader) against enh::ShadowBlock:
-// the vertex shader reads depthRemap from the block that replaces the draw's DrawBlock (docs/research/engine-frame/shadow-bug.md)
-TEST(shadows_block_glsl_matches_cpp) {
-    const auto m = memberOffsets(shader::embedded::glslSpirv("test/shadow_layout.comp"));
-    CHECK(m.contains("ShadowBlock"));
-    if (!m.contains("ShadowBlock")) return;
-    using B = enh::ShadowBlock;
-    checkOffsets(m.at("ShadowBlock"),
-                 {{"cascade", offsetof(B, cascade)}, {"split", offsetof(B, split)}, {"texel", offsetof(B, texel)},
-                  {"maps", offsetof(B, maps)}, {"res", offsetof(B, res)}, {"vsm", offsetof(B, vsm)},
-                  {"vsmParams", offsetof(B, vsmParams)}, {"params", offsetof(B, params)}, {"target", offsetof(B, target)},
-                  {"mode", offsetof(B, mode)}, {"rt", offsetof(B, rt)}, {"rtParams", offsetof(B, rtParams)},
-                  {"depthRemap", offsetof(B, depthRemap)}},
-                 "ShadowBlock");
-    // the old bug: the vertex shader read RvkDraw.posFix from this block; a ShadowBlock member must never sit where a DrawBlock's
-    // posFix does unless it is the remap itself
-    CHECK(offsetof(B, depthRemap) != offsetof(abi::DrawBlock, posFix));
-}
-
-// every embedded shader is there and valid SPIR-V for Vulkan 1.3; the ABI text is the header translated shaders get
+// every embedded shader is there and valid SPIR-V for Vulkan 1.3 (dxc_every_embedded_shader_compiles covers the whole set; the unknown ones are empty)
 TEST(embedded_shaders) {
-    spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
-    std::size_t n = 0;
-    for (const auto& e : shader::embedded::all()) {
-        ++n;
-        CHECK_MSG(!e.spirv.empty() && e.spirv[0] == 0x07230203u, std::string(e.name));
-        CHECK_MSG(tools.Validate(e.spirv.data(), e.spirv.size()), std::string(e.name));
-    }
-    CHECK(n >= 5);
+    if (!shader::dxc::available()) return;
     CHECK(!shader::embedded::spirv("debug/inject_view.comp").empty());
     CHECK(shader::embedded::spirv("no/such.comp").empty());
-    const std::string_view text = shader::embedded::abiGlsl();
-    CHECK(text.find("uniform RvkPush") != std::string_view::npos);
-    CHECK(!text.starts_with("#version") && text.find("\n#version") == std::string_view::npos);  // the translator writes its own
+    const std::string_view text = shader::embedded::hlslSource("include/rvk_draw.hlsli");
+    CHECK(text.find("RVK_PUSH(RvkDrawPush, pc)") != std::string_view::npos);
 }
 
-// the constant register windows: abi.h's tables and rvk_abi.glsl's RVK_VS_WIN / RVK_PS_WIN macros name the same boundaries
-TEST(const_windows_match_glsl_macros) {
+// the constant register windows: abi.h's tables and rvk_draw.hlsli's RVK_VS_WIN / RVK_PS_WIN macros name the same boundaries
+TEST(const_windows_match_hlsl_macros) {
     using namespace shader::abi;
     CHECK(constWindow(true, 0) == 0 && constWindow(true, 11) == 0 && constWindow(true, 12) == 1 && constWindow(true, 30) == 1 &&
           constWindow(true, 31) == 2 && constWindow(true, 231) == 2 && constWindow(true, 232) == 3 && constWindow(true, 255) == 3);
     CHECK(constWindow(false, 4) == 0 && constWindow(false, 5) == 1 && constWindow(false, 6) == 2 && constWindow(false, 13) == 2 &&
           constWindow(false, 14) == 3 && constWindow(false, 223) == 3);
-    const std::string text(shader::embedded::abiGlsl());
+    const std::string text(shader::embedded::hlslSource("include/rvk_draw.hlsli"));
     for (const char* which : {"VS", "PS"}) {
         const std::size_t at = text.find(std::string("#define RVK_") + which + "_WIN(n)");
         CHECK(at != std::string::npos);
@@ -171,40 +67,41 @@ TEST(const_windows_match_glsl_macros) {
 
 // ---- the translator: the shared header, variant hooks ---------------------------------------------------------------------
 
-TEST(glsl_abi_header_and_hooks) {
+TEST(hlsl_abi_header_and_hooks) {
+    if (!shader::dxc::available()) return;
     // ps_3_0: mov r0, c15; mov oC0, r0
     const std::vector<std::uint32_t> ps{0xFFFF0300u, 0x02000001u, 0x800F0000u, 0xA0E4000Fu, 0x02000001u, 0x800F0800u, 0x80E40000u,
                                         0x0000FFFFu};
     const auto dec = shader::decode(ps);
     CHECK(dec.ok());
     if (!dec.ok()) return;
-    const auto plain = shader::toGlsl(dec.program);
+    const auto plain = shader::toHlsl(dec.program);
     CHECK(plain.ok());
-    CHECK(plain.glsl.find(shader::embedded::abiGlsl()) != std::string::npos);  // verbatim
-    CHECK(plain.glsl.find("RVK_PSC(15)") != std::string::npos);  // through the pixel window of c15 (abi.h)
-    const auto plainSpv = shader::compileGlsl(shader::Stage::Pixel, plain.glsl);
+    CHECK(plain.hlsl.find("#include \"rvk_draw.hlsli\"") != std::string::npos);
+    CHECK(plain.hlsl.find("RVK_PSC(15)") != std::string::npos);  // through the pixel window of c15 (abi.h)
+    const auto plainSpv = shader::compileHlsl(shader::Stage::Pixel, plain.hlsl);
     CHECK_MSG(plainSpv.ok(), plainSpv.log);
     // the push block of a translated shader is the 112-byte one (the windows after flags); split constants are on
     if (plainSpv.ok()) {
-        const auto m = memberOffsets(plainSpv.words);
-        CHECK(m.contains("RvkPush") && m.at("RvkPush").size() == 9 && m.at("RvkPush").at("flags") == 44 &&
-              m.at("RvkPush").at("vsw") == 48 && m.at("RvkPush").at("psw") == 80);
+        const auto m = rvk::test::memberOffsets(plainSpv.words);
+        const std::string name = "type.PushConstant.RvkDrawPush";
+        CHECK(m.contains(name) && m.at(name).size() == 9 && m.at(name).at("flags") == 44 && m.at(name).at("vsw") == 48 && m.at(name).at("psw") == 80);
     }
     CHECK(plain.reflection.splitConsts && plain.reflection.windowEnd[3] == 16 && plain.reflection.windowEnd[0] == 0);
     // all hooks empty = identical output
-    CHECK(shader::toGlsl(dec.program, shader::TranslateOptions{}).glsl == plain.glsl);
+    CHECK(shader::toHlsl(dec.program, shader::TranslateOptions{}).hlsl == plain.hlsl);
 
     shader::TranslateOptions o;
-    o.extraGlobals = "layout(location = 1) out vec4 rvk_extra;";
-    o.epilogue = "    rvk_extra = vec4(float(pc.drawId), 0.0, 0.0, 1.0);";
-    o.constOverrides[15] = "$c * 0.5 + pc.frame.params[0]";
-    const auto hooked = shader::toGlsl(dec.program, o);
+    o.extraOutputs = "    float4 rvk_extra : SV_Target1;";
+    o.epilogue = "    rvk_out.rvk_extra = float4(float(pc.drawId), 0.0, 0.0, 1.0);";
+    o.constOverrides[15] = "$c * 0.5 + pc.frame.Get().params[0]";
+    const auto hooked = shader::toHlsl(dec.program, o);
     CHECK(hooked.ok());
-    CHECK(hooked.glsl.find("(RVK_PSC(15) * 0.5 + pc.frame.params[0])") != std::string::npos);
-    CHECK(hooked.glsl.find("case 15: return") != std::string::npos);  // relative reads too
-    CHECK(hooked.glsl.find("rvk_extra = vec4(float(pc.drawId)") < hooked.glsl.find("rvk_oC0 = oC0"));
-    const auto hookedSpv = shader::compileGlsl(shader::Stage::Pixel, hooked.glsl);
-    CHECK_MSG(hookedSpv.ok(), hookedSpv.log + "\n" + hooked.glsl);
+    CHECK(hooked.hlsl.find("(RVK_PSC(15) * 0.5 + pc.frame.Get().params[0])") != std::string::npos);
+    CHECK(hooked.hlsl.find("case 15: return") != std::string::npos);  // relative reads too
+    CHECK(hooked.hlsl.find("rvk_out.rvk_extra = float4(float(pc.drawId)") < hooked.hlsl.find("rvk_out.oC0 = oC0"));
+    const auto hookedSpv = shader::compileHlsl(shader::Stage::Pixel, hooked.hlsl);
+    CHECK_MSG(hookedSpv.ok(), hookedSpv.log + "\n" + hooked.hlsl);
 
     // vertex shader epilogue: after rvk_pos, before the half-pixel fix
     const std::vector<std::uint32_t> vs{0xFFFE0300u, 0x0200001Fu, 0x80000000u, 0x900F0000u, 0x0200001Fu, 0x80000000u, 0xE00F0000u,
@@ -213,26 +110,25 @@ TEST(glsl_abi_header_and_hooks) {
     CHECK(vdec.ok());
     if (vdec.ok()) {
         shader::TranslateOptions vo;
-        vo.extraGlobals = "layout(location = 30) out vec4 rvk_clip;";
-        vo.epilogue = "    rvk_clip = rvk_pos;";
-        const auto v = shader::toGlsl(vdec.program, vo);
+        vo.extraOutputs = "    [[vk::location(30)]] float4 rvk_clip : VARY30;";
+        vo.epilogue = "    rvk_out.rvk_clip = rvk_pos;";
+        const auto v = shader::toHlsl(vdec.program, vo);
         CHECK(v.ok());
-        CHECK(v.glsl.find("rvk_clip = rvk_pos;") < v.glsl.find("rvk_pos.xy += pc.draw.posFix.xy"));
-        const auto vspv = shader::compileGlsl(shader::Stage::Vertex, v.glsl);
+        CHECK(v.hlsl.find("rvk_out.rvk_clip = rvk_pos;") < v.hlsl.find("rvk_pos.xy += rvk_draw.posFix.xy"));
+        const auto vspv = shader::compileHlsl(shader::Stage::Vertex, v.hlsl);
         CHECK_MSG(vspv.ok(), vspv.log);
-        // input override: the attribute is fetched as rvk_in#, v# assigned from the expression before the body runs
+        // input override: v# assigned from the expression (with the attribute as rvk_in.v#) before the body runs
         shader::TranslateOptions io;
-        io.inputOverrides.push_back({shader::Usage::Position, 0, "vec4($v.xy * pc.frame.params[1].x, $v.zw)"});
-        const auto iv = shader::toGlsl(vdec.program, io);
+        io.inputOverrides.push_back({shader::Usage::Position, 0, "float4($v.xy * pc.frame.Get().params[1].x, $v.zw)"});
+        const auto iv = shader::toHlsl(vdec.program, io);
         CHECK(iv.ok());
-        CHECK(iv.glsl.find("in vec4 rvk_in0;") != std::string::npos);
-        CHECK(iv.glsl.find("    v0 = (vec4(rvk_in0.xy * pc.frame.params[1].x, rvk_in0.zw));") < iv.glsl.find("    rvk_main();"));
-        const auto ispv = shader::compileGlsl(shader::Stage::Vertex, iv.glsl);
-        CHECK_MSG(ispv.ok(), ispv.log + "\n" + iv.glsl);
+        CHECK(iv.hlsl.find("    v0 = (float4(rvk_in.v0.xy * pc.frame.Get().params[1].x, rvk_in.v0.zw));") < iv.hlsl.find("    rvk_main();"));
+        const auto ispv = shader::compileHlsl(shader::Stage::Vertex, iv.hlsl);
+        CHECK_MSG(ispv.ok(), ispv.log + "\n" + iv.hlsl);
         // an override of a semantic the shader does not declare changes nothing
         shader::TranslateOptions none;
         none.inputOverrides.push_back({shader::Usage::BlendWeight, 1, "$v * 2.0"});
-        CHECK(shader::toGlsl(vdec.program, none).glsl == shader::toGlsl(vdec.program).glsl);
+        CHECK(shader::toHlsl(vdec.program, none).hlsl == shader::toHlsl(vdec.program).hlsl);
     }
 }
 

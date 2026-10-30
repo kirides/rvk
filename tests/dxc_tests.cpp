@@ -253,6 +253,8 @@ TEST(shadows_block_hlsl_matches_cpp) {
                {"mode", offsetof(B, mode)}, {"rt", offsetof(B, rt)}, {"rtParams", offsetof(B, rtParams)},
                {"depthRemap", offsetof(B, depthRemap)}},
               "ShadowBlock");
+    // the old bug: the vertex shader read DrawBlock.posFix from this block; a ShadowBlock member must never sit where a DrawBlock's posFix does unless it is the remap itself
+    CHECK(offsetof(B, depthRemap) != offsetof(abi::DrawBlock, posFix));
 }
 
 // every embedded HLSL shader (a name with a stage extension) compiles and validates: the CI guard of the port

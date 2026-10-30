@@ -36,7 +36,7 @@
 #include "d3d9/scene.h"
 #include "d3d9/semantics.h"
 #include "shader/abi.h"
-#include "shader/glsl.h"
+#include "shader/translate.h"
 #include "shader/hlsl.h"
 #include "vk/bindless.h"
 #include "vk/context.h"

@@ -16,7 +16,6 @@
 
 #include "d3d9/ffshader.h"
 #include "shader/dxc.h"
-#include "shader/glsl.h"
 #include "shader/hlsl.h"
 #include "shader/sm_ir.h"
 #include "shader/spirv.h"
@@ -134,13 +133,15 @@ std::string roundTripTokens(const char* name, const std::vector<std::uint32_t>& 
         }
         CHECK_MSG(false, std::string(name) + ": listing differs from D3DX:\n" + diff);
     }
-    const GlslResult g = toGlsl(dec.program);
-    CHECK_MSG(g.ok(), std::string(name) + ": glsl: " + g.error);
-    if (!g.ok()) {
+    // the translator: HLSL through DXC, validated (skipped without dxcompiler.dll)
+    if (!rvk::shader::dxc::available()) return {};
+    const HlslResult h = toHlsl(dec.program);
+    CHECK_MSG(h.ok(), std::string(name) + ": hlsl: " + h.error);
+    if (!h.ok()) {
         return {};
     }
-    const SpirvResult s = compileGlsl(dec.program.version.stage, g.glsl);
-    CHECK_MSG(s.ok(), std::string(name) + ": glslang:\n" + s.log + "\n" + g.glsl);
+    const SpirvResult s = compileHlsl(dec.program.version.stage, h.hlsl, name);
+    CHECK_MSG(s.ok(), std::string(name) + ": dxc:\n" + s.log + "\n" + h.hlsl);
     if (!s.ok()) {
         return {};
     }
@@ -148,21 +149,7 @@ std::string roundTripTokens(const char* name, const std::vector<std::uint32_t>& 
     std::string vlog;
     tools.SetMessageConsumer([&](spv_message_level_t, const char*, const spv_position_t&, const char* m) { vlog += m; });
     CHECK_MSG(tools.Validate(s.words), std::string(name) + ": spirv-val: " + vlog);
-    // the same shader through the HLSL translator + DXC (skipped without dxcompiler.dll)
-    if (rvk::shader::dxc::available()) {
-        const HlslResult h = toHlsl(dec.program);
-        CHECK_MSG(h.ok(), std::string(name) + ": hlsl: " + h.error);
-        if (h.ok()) {
-            const SpirvResult hs = compileHlsl(dec.program.version.stage, h.hlsl, name);
-            CHECK_MSG(hs.ok(), std::string(name) + ": dxc:\n" + hs.log + "\n" + h.hlsl);
-            if (hs.ok()) {
-                std::string hlog;
-                tools.SetMessageConsumer([&](spv_message_level_t, const char*, const spv_position_t&, const char* m) { hlog += m; });
-                CHECK_MSG(tools.Validate(hs.words), std::string(name) + ": spirv-val (hlsl): " + hlog);
-            }
-        }
-    }
-    return g.glsl;
+    return h.hlsl;
 }
 
 bool contains(const std::string& s, const char* what) { return s.find(what) != std::string::npos; }
@@ -230,9 +217,9 @@ ret
     CHECK(contains(glsl, "void l1()"));
     CHECK(contains(glsl, "if (p0.x) r1.x"));
     CHECK(contains(glsl, "if (!p0.y) r1.y"));
-    CHECK(contains(glsl, "textureLod(sampler2D(t2D[pc.draw.tex[16]]"));  // vertex sampler s0 -> slot 16
-    CHECK(contains(glsl, "rvk_out1 = o2;"));                               // TEXCOORD1 and TEXCOORD2 packed in o2
-    CHECK(contains(glsl, "rvk_out2 = o2;"));
+    CHECK(contains(glsl, "g_t2D[rvk_draw.tex[4][0]].SampleLevel("));  // vertex sampler s0 -> slot 16
+    CHECK(contains(glsl, "rvk_out.rvk_out1 = o2;"));                               // TEXCOORD1 and TEXCOORD2 packed in o2
+    CHECK(contains(glsl, "rvk_out.rvk_out2 = o2;"));
 }
 
 TEST(shader_ps3_textures) {
@@ -273,15 +260,15 @@ mov oC0, r0
 mov oC1, v1
 mov oDepth, c0.z
 )");
-    CHECK(contains(glsl, "textureProj(sampler2D"));
-    CHECK(contains(glsl, "samplerCube(tCube[pc.draw.tex[1]]"));
-    CHECK(contains(glsl, "sampler3D(t3D[pc.draw.tex[2]]"));
-    CHECK(contains(glsl, "textureGrad("));
-    CHECK(contains(glsl, "gl_FragCoord.xy - vec2(0.5)"));
-    CHECK(contains(glsl, "gl_FrontFacing"));
+    CHECK(contains(glsl, "g_t2D[rvk_draw.tex[0][0]].Sample("));
+    CHECK(contains(glsl, "g_tCube[rvk_draw.tex[0][1]]"));
+    CHECK(contains(glsl, "g_t3D[rvk_draw.tex[0][2]]"));
+    CHECK(contains(glsl, ".SampleGrad("));
+    CHECK(contains(glsl, "rvk_fragCoord.xy - 0.5"));
+    CHECK(contains(glsl, "rvk_front"));
     CHECK(contains(glsl, "discard;"));
-    CHECK(contains(glsl, "gl_FragDepth"));
-    CHECK(contains(glsl, "layout(location = 1) out vec4 rvk_oC1;"));
+    CHECK(contains(glsl, "rvk_out.rvk_depth"));
+    CHECK(contains(glsl, "float4 oC1 : SV_Target1;"));
     CHECK(contains(glsl, "rvk_alphaTest(oC0.a)"));
 }
 
@@ -297,11 +284,10 @@ TEST(shader_int_bool_reflection) {
         CHECK_MSG(!tokens.empty(), std::string(name) + ": D3DXAssembleShader failed: " + errors);
         const DecodeResult dec = decode(tokens);
         CHECK_MSG(dec.ok(), std::string(name) + ": decode: " + dec.error);
-        const GlslResult g = toGlsl(dec.program);
-        CHECK_MSG(g.ok(), std::string(name) + ": glsl: " + g.error);
-        const bool reads = g.glsl.find("pc.vs.i[") != std::string::npos || g.glsl.find("pc.vs.b[") != std::string::npos ||
-                           g.glsl.find("pc.ps.i[") != std::string::npos || g.glsl.find("pc.ps.b[") != std::string::npos;
-        CHECK_MSG(reads == g.reflection.intBoolConstants, std::string(name) + ": reflection disagrees with the GLSL");
+        const HlslResult g = toHlsl(dec.program);
+        CHECK_MSG(g.ok(), std::string(name) + ": hlsl: " + g.error);
+        const bool reads = g.hlsl.find(".Get().i[") != std::string::npos || g.hlsl.find(".Get().b[") != std::string::npos;
+        CHECK_MSG(reads == g.reflection.intBoolConstants, std::string(name) + ": reflection disagrees with the HLSL");
         return g.reflection.intBoolConstants;
     };
     // floats only
@@ -331,9 +317,9 @@ mov oT0, v1
 mov oD0, c4
 mov oFog, c5.x
 )");
-    CHECK(contains(vs, "layout(location = 0) out vec4 rvk_out0;"));   // oT0 -> TEXCOORD0
-    CHECK(contains(vs, "layout(location = 16) out vec4 rvk_out16;")); // oD0 -> COLOR0
-    CHECK(contains(vs, "layout(location = 18) out vec4 rvk_out18;")); // oFog -> FOG
+    CHECK(contains(vs, "[[vk::location(0)]] float4 rvk_out0 : VARY0;"));   // oT0 -> TEXCOORD0
+    CHECK(contains(vs, "[[vk::location(16)]] float4 rvk_out16 : VARY16;")); // oD0 -> COLOR0
+    CHECK(contains(vs, "[[vk::location(18)]] float4 rvk_out18 : VARY18;")); // oFog -> FOG
     const std::string ps = roundTrip("ps2", R"(
 ps_2_0
 dcl t0.xy
@@ -343,8 +329,8 @@ texld r0, t0, s0
 mul r0, r0, v0
 mov oC0, r0
 )");
-    CHECK(contains(ps, "layout(location = 0) in vec4 t0;"));
-    CHECK(contains(ps, "layout(location = 16) in vec4 v0;"));
+    CHECK(contains(ps, "[[vk::location(0)]] float4 t0 : VARY0;"));
+    CHECK(contains(ps, "[[vk::location(16)]] float4 v0 : VARY16;"));
 }
 
 TEST(shader_decode_errors) {

@@ -8,13 +8,6 @@ if(NOT (WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8))
 endif()
 
 option(RVK_BUILD_TESTS "Build the unit tests" ON)
-# the embedded GLSL shaders (shaders/**) with debug info: names, source lines, the source text, optimizer off (RenderDoc / PIX show readable shaders).
-# The translated D3D9 / material shaders compiled at run time use run.ps1 -ShaderDebug / config.toml [debug] shader_debug_info instead
-option(RVK_SHADER_DEBUG "Embedded shaders with debug info" OFF)
-set(RVK_GLSLC_DEBUG_ARGS)
-if(RVK_SHADER_DEBUG)
-    set(RVK_GLSLC_DEBUG_ARGS --debug)
-endif()
 if(RVK_BUILD_TESTS)
     enable_testing()
 endif()
@@ -41,7 +34,6 @@ find_package(tomlplusplus CONFIG REQUIRED)
 find_package(volk CONFIG REQUIRED)
 find_package(VulkanHeaders CONFIG REQUIRED)
 find_package(VulkanMemoryAllocator CONFIG REQUIRED)
-find_package(glslang CONFIG REQUIRED)
 find_package(SPIRV-Tools CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
 find_path(STB_INCLUDE_DIR stb_image_write.h REQUIRED)
@@ -51,14 +43,12 @@ function(rvk_warnings target)
 endfunction()
 
 # ---------------------------------------------------------------------------------------------
-# Hand-written GLSL shaders (shaders/**, docs/research/injection.md 2): GLSL 4.60 -> SPIR-V 1.6 at build time by rvk_glslc
-# (vcpkg glslang + SPIRV-Tools' validator: nothing beyond vcpkg needed), embedded into rvk_core as generated headers. Each
-# command writes a depfile of the files it included, so editing shaders/include/*.glsl rebuilds what uses it.
+# Shaders (docs/research/hlsl-rhi.md): shaders/**/*.hlsl(i) are embedded as text by rvk_embed and compiled at run time by shader/dxc;
+# nothing is compiled at build time
 # ---------------------------------------------------------------------------------------------
-add_executable(rvk_glslc tools/glslc/main.cpp)
-target_link_libraries(rvk_glslc PRIVATE glslang::glslang glslang::SPIRV glslang::glslang-default-resource-limits SPIRV-Tools-static)
-rvk_warnings(rvk_glslc)
-set_target_properties(rvk_glslc PROPERTIES FOLDER tools)
+add_executable(rvk_embed tools/embed/main.cpp)
+rvk_warnings(rvk_embed)
+set_target_properties(rvk_embed PROPERTIES FOLDER tools)
 
 # HLSL (docs/research/hlsl-rhi.md): shaders/**/*.hlsl(i) are embedded as text and compiled at run time by shader/dxc (dxcompiler.dll from
 # the vcpkg directx-dxc port, loaded dynamically: only its headers are used here)
@@ -70,118 +60,7 @@ find_file(RVK_DXIL_DLL dxil.dll PATHS ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIP
 
 set(RVK_SHADER_DIR ${CMAKE_SOURCE_DIR}/shaders)
 set(RVK_GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)
-# new shaders go here (path below shaders/ = the name shader::embedded::spirv() finds them by)
-set(RVK_SHADERS
-    gi/gi_blend.comp
-    gi/gi_trace.comp
-    gi/sp_resolve.comp
-    gi/sp_trace.comp
-    gbuffer/ao_white.frag
-    gbuffer/gbuffer_debug.frag
-    gbuffer/gtao.comp
-    upscale/prep.comp
-    upscale/exposure.comp
-    framegen/debug.frag
-    gbuffer/gtao_filter.comp
-    test/abi_layout.comp
-    test/abi_rt_layout.comp
-    test/shadow_layout.comp
-    test/rt_query.comp
-    rt/rt_debug.comp
-    rt/rt_debug_depth.comp
-    rt/rt_debug.frag
-    rt/rt_skin.comp
-    shadows/rt_shadow_spatial.comp
-    shadows/rt_shadow_temporal.comp
-    shadows/rt_shadow_trace.comp
-    shadows/shadow_mask.frag
-    shadows/shadow_mask.vert
-    water/ocean_evolve.comp
-    water/ocean_fft.comp
-    water/ocean_foam.comp
-    water/ocean_resolve.comp
-    water/ocean_spectrum.comp
-    water/water.frag
-    water/water_ocean.vert
-    water/water_rt.comp
-    water/wet_shore.frag
-)
-# variants: "<name>=<source>:<DEFINE>[,<DEFINE>[=<value>]]..." (the source compiled again with these defines, embedded under
-# <name>; rvk_glslc -D); none at the moment
-set(RVK_SHADER_VARIANTS
-)
 set(RVK_SHADER_OUTPUTS)
-set(RVK_SHADER_INCLUDES "")
-set(RVK_SHADER_TABLE "")
-foreach(shader ${RVK_SHADERS})
-    string(MAKE_C_IDENTIFIER ${shader} ident)
-    set(out ${RVK_GENERATED_DIR}/shaders/${shader}.h)
-    add_custom_command(
-        OUTPUT ${out}
-        COMMAND rvk_glslc compile ${RVK_SHADER_DIR}/${shader} -o ${out} --name ${ident} -I ${RVK_SHADER_DIR}/include --depfile ${out}.d ${RVK_GLSLC_DEBUG_ARGS}
-        DEPENDS rvk_glslc ${RVK_SHADER_DIR}/${shader}
-        DEPFILE ${out}.d
-        COMMENT "GLSL shaders/${shader}"
-        VERBATIM)
-    list(APPEND RVK_SHADER_OUTPUTS ${out})
-    string(APPEND RVK_SHADER_INCLUDES "#include \"shaders/${shader}.h\"\n")
-    string(APPEND RVK_SHADER_TABLE "    {\"${shader}\", data::${ident}},\n")
-endforeach()
-foreach(variant ${RVK_SHADER_VARIANTS})
-    string(REGEX MATCH "^([^=]+)=([^:]+):(.+)$" _ ${variant})
-    set(vname ${CMAKE_MATCH_1})
-    set(vsrc ${CMAKE_MATCH_2})
-    string(REPLACE "," ";" vdefs ${CMAKE_MATCH_3})
-    set(vdefargs)
-    foreach(d ${vdefs})
-        list(APPEND vdefargs -D ${d})
-    endforeach()
-    string(MAKE_C_IDENTIFIER ${vname} ident)
-    set(out ${RVK_GENERATED_DIR}/shaders/${vname}.h)
-    add_custom_command(
-        OUTPUT ${out}
-        COMMAND rvk_glslc compile ${RVK_SHADER_DIR}/${vsrc} -o ${out} --name ${ident} -I ${RVK_SHADER_DIR}/include --depfile ${out}.d ${vdefargs} ${RVK_GLSLC_DEBUG_ARGS}
-        DEPENDS rvk_glslc ${RVK_SHADER_DIR}/${vsrc}
-        DEPFILE ${out}.d
-        COMMENT "GLSL shaders/${vsrc} (${vdefs}) -> ${vname}"
-        VERBATIM)
-    list(APPEND RVK_SHADER_OUTPUTS ${out})
-    string(APPEND RVK_SHADER_INCLUDES "#include \"shaders/${vname}.h\"\n")
-    string(APPEND RVK_SHADER_TABLE "    {\"${vname}\", data::${ident}},\n")
-endforeach()
-# the ABI header as text: the D3D9 translator puts it into every translated shader
-add_custom_command(
-    OUTPUT ${RVK_GENERATED_DIR}/shaders/rvk_abi_glsl.h
-    COMMAND rvk_glslc text ${RVK_SHADER_DIR}/include/rvk_abi.glsl -o ${RVK_GENERATED_DIR}/shaders/rvk_abi_glsl.h --name rvk_abi_glsl
-    DEPENDS rvk_glslc ${RVK_SHADER_DIR}/include/rvk_abi.glsl
-    COMMENT "GLSL ABI text shaders/include/rvk_abi.glsl"
-    VERBATIM)
-list(APPEND RVK_SHADER_OUTPUTS ${RVK_GENERATED_DIR}/shaders/rvk_abi_glsl.h)
-add_custom_command(
-    OUTPUT ${RVK_GENERATED_DIR}/shaders/rvk_gi_glsl.h
-    COMMAND rvk_glslc text ${RVK_SHADER_DIR}/include/rvk_gi.glsl -o ${RVK_GENERATED_DIR}/shaders/rvk_gi_glsl.h --name rvk_gi_glsl
-    DEPENDS rvk_glslc ${RVK_SHADER_DIR}/include/rvk_gi.glsl
-    COMMENT "GLSL GI lookup text shaders/include/rvk_gi.glsl"
-    VERBATIM)
-list(APPEND RVK_SHADER_OUTPUTS ${RVK_GENERATED_DIR}/shaders/rvk_gi_glsl.h)
-add_custom_command(
-    OUTPUT ${RVK_GENERATED_DIR}/shaders/rvk_material_variant_glsl.h
-    COMMAND rvk_glslc text ${RVK_SHADER_DIR}/include/rvk_material_variant.glsl -o ${RVK_GENERATED_DIR}/shaders/rvk_material_variant_glsl.h --name rvk_material_variant_glsl
-    DEPENDS rvk_glslc ${RVK_SHADER_DIR}/include/rvk_material_variant.glsl
-    COMMENT "GLSL material variant text shaders/include/rvk_material_variant.glsl"
-    VERBATIM)
-list(APPEND RVK_SHADER_OUTPUTS ${RVK_GENERATED_DIR}/shaders/rvk_material_variant_glsl.h)
-# the GLSL material shader as text: the renderer assembles it with the engine's macros at run time (src/shader/uber.cpp)
-foreach(utext ge_default.glsl ge_default.frag)
-    string(MAKE_C_IDENTIFIER "${utext}" uident)
-    add_custom_command(
-        OUTPUT ${RVK_GENERATED_DIR}/shaders/uber_${uident}.h
-        COMMAND rvk_glslc text ${RVK_SHADER_DIR}/material/${utext} -o ${RVK_GENERATED_DIR}/shaders/uber_${uident}.h --name uber_${uident}
-        DEPENDS rvk_glslc ${RVK_SHADER_DIR}/material/${utext}
-        COMMENT "GLSL material text shaders/material/${utext}"
-        VERBATIM)
-    list(APPEND RVK_SHADER_OUTPUTS ${RVK_GENERATED_DIR}/shaders/uber_${uident}.h)
-endforeach()
 # HLSL sources as text (name = path below shaders/)
 file(GLOB_RECURSE RVK_HLSL_FILES CONFIGURE_DEPENDS RELATIVE ${RVK_SHADER_DIR} ${RVK_SHADER_DIR}/*.hlsl ${RVK_SHADER_DIR}/*.hlsli)
 set(RVK_HLSL_INCLUDES "")
@@ -190,8 +69,8 @@ foreach(hlsl ${RVK_HLSL_FILES})
     string(MAKE_C_IDENTIFIER "hlsl_${hlsl}" hident)
     add_custom_command(
         OUTPUT ${RVK_GENERATED_DIR}/shaders/${hident}.h
-        COMMAND rvk_glslc text ${RVK_SHADER_DIR}/${hlsl} -o ${RVK_GENERATED_DIR}/shaders/${hident}.h --name ${hident}
-        DEPENDS rvk_glslc ${RVK_SHADER_DIR}/${hlsl}
+        COMMAND rvk_embed ${RVK_SHADER_DIR}/${hlsl} -o ${RVK_GENERATED_DIR}/shaders/${hident}.h --name ${hident}
+        DEPENDS rvk_embed ${RVK_SHADER_DIR}/${hlsl}
         COMMENT "HLSL text shaders/${hlsl}"
         VERBATIM)
     list(APPEND RVK_SHADER_OUTPUTS ${RVK_GENERATED_DIR}/shaders/${hident}.h)
@@ -201,8 +80,9 @@ foreach(hlsl ${RVK_HLSL_FILES})
 ")
 endforeach()
 configure_file(src/shader/embedded.cpp.in ${RVK_GENERATED_DIR}/embedded_shaders.cpp @ONLY)
-file(GLOB RVK_SHADER_SOURCES CONFIGURE_DEPENDS ${RVK_SHADER_DIR}/*/*.glsl ${RVK_SHADER_DIR}/*/*.vert ${RVK_SHADER_DIR}/*/*.frag ${RVK_SHADER_DIR}/*/*.comp)
-source_group(TREE ${RVK_SHADER_DIR} PREFIX shaders FILES ${RVK_SHADER_SOURCES})
+set(RVK_HLSL_SOURCES_ABS ${RVK_HLSL_FILES})
+list(TRANSFORM RVK_HLSL_SOURCES_ABS PREPEND "${RVK_SHADER_DIR}/")
+source_group(TREE ${RVK_SHADER_DIR} PREFIX shaders FILES ${RVK_HLSL_SOURCES_ABS})
 
 # ---------------------------------------------------------------------------------------------
 # rvk_core: everything except the DLL entry points (linked into the DLL and the tests)
@@ -386,11 +266,9 @@ add_library(rvk_core STATIC
     src/shader/dxc.h
     src/shader/embedded.cpp.in
     src/shader/embedded.h
-    src/shader/glsl.cpp
     src/shader/translate.h
     src/shader/hlsl.cpp
     src/shader/hlsl.h
-    src/shader/glsl.h
     src/shader/sm_decode.cpp
     src/shader/sm_disasm.cpp
     src/shader/sm_eval.cpp
@@ -462,9 +340,6 @@ target_link_libraries(rvk_core PUBLIC
     volk::volk_headers
     Vulkan::Headers
     GPUOpen::VulkanMemoryAllocator
-    glslang::glslang
-    glslang::SPIRV
-    glslang::glslang-default-resource-limits
     imgui::imgui
 )
 rvk_warnings(rvk_core)

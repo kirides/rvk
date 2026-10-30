@@ -36,7 +36,7 @@ take `git -C E:\git\github\vcpkg log -1 --format=%H`). Triplet `x64-windows-stat
 volk is compiled in `src/vk/volk_impl.c` (`VK_NO_PROTOTYPES`, `VK_USE_PLATFORM_WIN32_KHR`), not vcpkg's `volk.lib`.
 The editor's clang diagnostics ("file not found", "undeclared identifier std") are noise: only the MSBuild result counts.
 `rvk_core` has a private PCH (std + spdlog): files outside it (the DLL target, tests) must include what they use.
-The Vulkan SDK (`C:\VulkanSDK\1.4.363.0`, `VULKAN_SDK`) provides validation layers, `spirv-val`, `glslc`, `dxc`.
+The Vulkan SDK (`C:\VulkanSDK\1.4.363.0`, `VULKAN_SDK`) provides validation layers, `spirv-val`, `dxc`; the vcpkg `directx-dxc` port provides the `dxcompiler.dll` the renderer loads.
 CI (`.github/workflows/build.yml`, setup as in risen-spass): `cmake --preset public-release -DRVK_PCH=OFF` + ccache (rvk_core's
 PCH headers force-included instead; preset "Public Release" = `ninja` into `build-release` linked with `/INCREMENTAL:NO
 /OPT:REF /OPT:ICF`: the shipped d3d9.dll / d3d9.pdb; the local VS build stays incremental), d3d9.dll + rvk_tests; the nightly release (tag `nightly`, 03:00 UTC or manual dispatch on
@@ -138,7 +138,7 @@ FFT ocean (docs/research/ocean.md, M8; `water.ocean=fft`): compute passes at Aft
 `-PerfFrame`), the sea floor field from the main view's static meshes (`DrawReplacer::observeOpaque`), baked on a worker
 and cached in `bin\rvk\cache\ocean\floor_v1.bin` (delete it to re-learn the coast); rvk.log `enh: ocean: ...` (cascades,
 sea state / Hs, weather -> sea state, `sea floor field ... ms`, `foam buffer`, `player position`). The surf's foam: a
-camera-centred buffer (`ocean_foam.comp`, ocean.md 4.4) + the pattern in `shaders/water/water_noise.glsl`; tune foam
+camera-centred buffer (`ocean_foam.comp`, ocean.md 4.4) + the pattern in `shaders/water/water_noise.hlsli`; tune foam
 patterns offline first (a numpy port of the noise renders coverage ramps to PNG in seconds; game runs take minutes);
 `water.debug=foam` shows the terms (green white water, blue residual, red whitecaps, grey contact). Judge foam in-game at
 the spots' grazing views (crops of 2-5x, consecutive frames: `-Burst 4 -Interval 1`): the pattern is filtered per pixel
@@ -172,7 +172,7 @@ Ray tracing tier (docs/research/raytracing.md): optional, enabled at device crea
 traces it with ray query at device creation ("rt selftest: PASS"). Settings needing a capability declare
 `Spec::requirements` (greyed + parity fallback when unmet; features read `asX()` = the effective value).
 RT scene (M9, docs/research/rt-reflections.md 3): `enh/rt_scene` builds a TLAS of the world every frame at AfterOpaque while a
-consumer holds it (FrameBlock `rtScene` / `rtInfo`, GLSL `shaders/include/rvk_rt.glsl`: records, vertex fetch). Debug view
+consumer holds it (FrameBlock `rtScene` / `rtInfo`, HLSL `shaders/include/rvk_rt.hlsli`: records, vertex fetch). Debug view
 `-Setting 'rt.debug=depth'` (or `instances`, `normals`; green = traced = raster from the hardware depth, red = geometry the
 RT scene lacks, magenta = extra / misplaced, blue = missed; a white square top left = hardware depth used) + rvk.log
 `enh: rt.debug probes` (5 x 5 probe pixels, mismatches named: instance, BLAS, entity, op); stats `rt: scene: instances ...`
@@ -181,7 +181,7 @@ Materials at hits (M9 P2, rt-reflections.md 3.2): `-Setting 'rt.debug=albedo'` (
 half only, `albedo_opaque` cut-outs solid, `uv` the diffuse coordinate); in these views the probes log every second with
 each hit's material and the BLAS's material slots; rvk.log `rt: material '<name>' (...)` once per material x pixel shader
 (graph slots, pool images, bound textures, evaluated uv map), `rt: scene: materials ...` stats. Consumers trace with
-`shaders/include/rvk_rt_trace.glsl` (`rvkRtTraceClosest` + `rvkRtHitSurface`, `rvkRtVisibility`). `rvk_shadertool evalcheck corpus` checks
+`shaders/include/rvk_rt_trace.hlsli` (`rvkRtTraceClosest` + `rvkRtHitSurface`, `rvkRtVisibility`). `rvk_shadertool evalcheck corpus` checks
 the CPU shader evaluator (`shader/sm_eval`) on every captured shader.
 Ray-traced water reflections (M9 P3, rt-reflections.md 3.3): `-Setting 'rt.reflections=low|medium|high'` (default medium,
 acts with `water.enabled` + `water.reflections=ssr`; off = SSR): compute pass `water.rt` at AfterRefractionCopy
@@ -253,36 +253,40 @@ at InitializeAdmin" line lists uptime, D3D/Vulkan/overlay modules and the proces
 
 ## Shader translator
 
-**The renderer translates to HLSL now** (`src/shader/hlsl.cpp`, `toHlsl` + `compileHlsl` -> DXC; docs/research/hlsl-rhi.md 1 P1d, `kTranslatorVersion` 8): the generated text is
-`#include "rvk_draw.hlsli"` + structs `RvkVsIn / RvkVsOut / RvkPsIn / RvkPsOut` (explicit `[[vk::location]]` for varyings, `SV_Target<n>` for pixel outputs: no
-explicit location there, DXC rejects a partial assignment) + static register globals + `VSMain` / `PSMain`; the variant hooks (`GlslOptions::prelude / prologue /
-epilogue / extraGlobals / constOverrides / inputOverrides / dotCaptures`, plus the HLSL-only `extraOutputs` / `extraInputs` = members of `rvk_out` / `rvk_in`) are **HLSL
-text** now (enh/material_variant, enh/rt_scene captureOptions, Device::lodModule). `rvk_shadertool corpus <dir> --hlsl [--gbuf | --gbuf-motion | --gi | --capture | --tint]` =
-the whole corpus through the HLSL path (translate, DXC at `RVK_DXC_OPT` -O level (default 1), spirv-val; ~2.5 min for 2483 shaders: DXC costs ~40-60 ms per
-shader, so a cold SPIR-V cache makes the first run's shader creation slower; the device's cache `bin\rvk\cache\spirv` is keyed by bytecode + translator version + the hash of the
-embedded ABI headers); `rvk_shadertool hlsl <name> [-D X=Y] [-o out.spv] [--dxil out.dxil]` compiles one embedded / `RVK_SHADER_DIR` shader like the renderer. The GLSL translator
-(`glsl.cpp`, `toGlsl`) and its text below are the old path until it is deleted (P4).
-
-`rvk_shadertool corpus <dir>` translates + validates every captured shader (corpus from `mode = "trace"`:
-`<test copy>/bin/rvk/corpus`, copy it to `<repo>/corpus`, git-ignored: game-derived). `show <file>` prints listing + GLSL,
-`refdisasm <file>` the D3DX reference listing. `python tools/compare_disasm.py corpus` diffs our listing against D3DX for the
-whole corpus (must stay 100 %). `rvk_shadertool export corpus game-shaders` writes the game's shaders as plain GLSL 4.60 sources (`<name>.vert/.frag`: the translator's exact output, ABI as `#include`, D3D9 listing + CTAB names in comments; `glslc -I game-shaders/include`; git-ignored, game-derived). The contract between translated shaders and the renderer is `src/shader/abi.h`; its GLSL
-side is `shaders/include/rvk_abi.glsl`, which the translator pastes into every translated shader (change both together;
-rvk_tests `abi_glsl_layout_matches_cpp` compares the offsets; bump `kTranslatorVersion` in `d3d9/device.cpp` when the
-translated GLSL changes). **The game's material shaders are one HLSL ubershader with `XFX_*` defines** (docs/research/shader-permutations.md): the GLSL port is `shaders/material/ge_default.{glsl,frag,vert}` (same defines, `-D...`; the engine's `XFX_PS_*` expressions are valid GLSL as they are). `python tools/shader_equiv.py [--vs]` proves it against the translated game shaders on the GPU (`rvk_shadereq`; needs `out/hlsl-fx` = `python tools/hlsl_infer.py <shadermaterial dir> --make-fx out/hlsl-fx`; the pool was compiled with `d3dx9_29.dll`, flags 0, `half3 vecWorldEye`); `tools/hlsl_match.py` reproduces a corpus shader from HLSL + defines instruction for instruction.
-**GLSL material shader at run time** (shader-permutations.md 8-10): `-Setting 'debug.material_sources=true'` writes the engine's request per material shader (`bin/rvk/cache/materials/sources.jsonl`; copy to `out/matsrc/`); `python tools/ubershader_check.py out/matsrc/*.jsonl` checks the GLSL material shader against the translated game shaders on the GPU for every captured pixel shader (needs `game-shaders` from `rvk_shadertool export corpus game-shaders`); `-Setting 'debug.ubershader=true'` (default off; `debug.ubershader_skip` = bit mask of classes kept translated) uses it at run time.
+The renderer translates D3D9 bytecode to **HLSL** (`src/shader/hlsl.cpp`, `toHlsl` + `compileHlsl` -> DXC; docs/research/hlsl-rhi.md; `kTranslatorVersion` in `d3d9/device.cpp`
+must be bumped when the generated text changes): the output is `#include "rvk_draw.hlsli"` + structs `RvkVsIn / RvkVsOut / RvkPsIn / RvkPsOut` (explicit `[[vk::location]]` for
+varyings, `SV_Target<n>` for pixel outputs: no explicit location there, DXC rejects a partial assignment) + static register globals + `VSMain` / `PSMain`. The variant hooks
+(`TranslateOptions::prelude / prologue / epilogue / extraGlobals / constOverrides / inputOverrides / dotCaptures`, the HLSL-only `extraOutputs` / `extraInputs` = members of
+`rvk_out` / `rvk_in`; `shader/translate.h`) are HLSL text (enh/material_variant, enh/rt_scene captureOptions, Device::lodModule).
+`rvk_shadertool corpus <dir>` translates + compiles (DXC, `RVK_DXC_OPT` -O level, default 1) + `spirv-val`s every captured shader (corpus from `mode = "trace"`:
+`<test copy>/bin/rvk/corpus`, copy it to `<repo>/corpus`, git-ignored: game-derived; ~2.5 min for 2483 shaders: DXC costs ~40-60 ms per shader, so a cold SPIR-V cache makes
+the first run's shader creation slower; the device's cache `bin\rvk\cache\spirv` is keyed by bytecode + translator version + the hash of the embedded ABI headers), with
+`--tint | --gi | --gbuf | --gbuf-motion | --capture` the enhancement variants. `show <file>` prints listing + HLSL, `refdisasm <file>` the D3DX reference listing,
+`hlsl <name> [-D X=Y] [-o out.spv] [--dxil out.dxil]` compiles one embedded / `RVK_SHADER_DIR` shader (or an exported file on disk) like the renderer.
+`python tools/compare_disasm.py corpus` diffs our listing against D3DX for the whole corpus (must stay 100 %). `rvk_shadertool export corpus game-shaders` writes the game's
+shaders as plain HLSL (`<name>.vs.hlsl` / `.ps.hlsl`: the translator's exact output, D3D9 listing + CTAB names in comments, `include/` = the ABI headers; git-ignored,
+game-derived). The contract between translated shaders and the renderer is `src/shader/abi.h`; its HLSL side is `shaders/include/rvk_abi.hlsli` / `rvk_draw.hlsli` (change both
+together; rvk_tests `abi_hlsl_*_matches_cpp` compare the offsets of the compiled SPIR-V). **The game's material shaders are one HLSL ubershader with `XFX_*` defines**
+(docs/research/shader-permutations.md): `shaders/material/ge_default.{hlsli,frag.hlsl,vert.hlsl}` is the engine's own HLSL ported to this ABI (same defines; the engine's `XFX_PS_*`
+expressions are valid HLSL as they are). `python tools/ubershader_check.py out/matsrc/*.jsonl` proves the pixel shader against the translated game shaders on the GPU
+(`rvk_shadereq`; needs `game-shaders` from the export above: 183 of 183 captured PS_Default / PS_DefaultZPass requests EQUAL);
+`tools/hlsl_infer.py` / `tools/hlsl_match.py` reproduce a corpus shader from the engine's HLSL + defines instruction for instruction (`out/hlsl-fx`, the pool was compiled with
+`d3dx9_29.dll`, flags 0, `half3 vecWorldEye`). **HLSL material shader at run time** (shader-permutations.md 8-10): `-Setting 'debug.material_sources=true'` writes the engine's
+request per material shader (`bin/rvk/cache/materials/sources.jsonl`; copy to `out/matsrc/`); `-Setting 'debug.ubershader=true'` (default off; `debug.ubershader_skip` = bit mask of
+classes kept translated) uses it at run time.
 
 ## Hand-written shaders (HLSL, compiled at run time by DXC)
 
 Enhancement / pass shaders are **HLSL (SM 6.6) in `shaders/`** (docs/research/hlsl-rhi.md; user decision 2026-10-29, GD3D11's scheme: the
 vcpkg `directx-dxc` port's `dxcompiler.dll` is loaded at run time by `shader/dxc.*`, next to `d3d9.dll` in `bin\rvk`, with a disk cache under
-`bin\rvk\cache\hlsl`). `<name>.hlsl` beats a GLSL file of the same name: `shader::embedded::spirv("water/water.frag")` compiles
-`water/water.frag.hlsl` (entries `CSMain` / `VSMain` / `PSMain` by stage extension; SPIR-V entry renamed `main`); the not yet ported shaders are still
-GLSL 4.60 compiled at build time by `rvk_glslc` (glslang + spirv-val; `RVK_SHADERS` in CMakeLists.txt). HLSL files are picked up by a glob (re-run
-`cmake --preset default` after adding one); they are embedded as text. `#include "rvk_common.hlsli"` (-> `rvk_abi.hlsli`: push constants
-`RVK_PUSH`, pointers `RVK_REF`, `RvkFrame`, the bindless arrays `g_t2D / g_tCube / g_t3D / g_samp`, `rvkSample2D...`); pass shaders start their push
-block with `RVK_PASS_PUSH_HEADER`; pass resources are `register(u<binding>, space<set>)` with the C++ layout's numbers. ABI structs are float4 / uint4
-only; matrices are rows (`mul(float4(world, 1), f.viewProj)`). New shader: add `foo.comp.hlsl` (no CMake list), `cmake --preset default`.
+`bin\rvk\cache\hlsl`). `shader::embedded::spirv("water/water.frag")` compiles `water/water.frag.hlsl` (entries `CSMain` / `VSMain` / `PSMain` by stage extension; SPIR-V entry renamed `main`;
+`spirvVariant(name, "A=1;B=2")` for one module per size / mode). There is no GLSL in the repo any more (removed once the in-game A/B of the ports, GLSL vs HLSL, matched within the
+GLSL-vs-GLSL noise: git history has the originals). HLSL files are picked up by a glob (re-run `cmake --preset default` after adding one); `rvk_embed` embeds them as text,
+`dxcompiler.dll` compiles them on first use (`-Zi -Od` + names with `[debug] shader_debug_info` / `run.ps1 -ShaderDebug`). `#include "rvk_common.hlsli"` (-> `rvk_abi.hlsli`: push constants
+`RVK_PUSH`, pointers `RVK_REF`, `RvkFrame`, the bindless helpers `rvkSample2D...` over `RVK_TEX2D / RVK_SAMP`); pass shaders start their push block with `RVK_PASS_PUSH_HEADER`; pass
+resources are `register(u<binding>, space<set>)` with the C++ layout's numbers. ABI structs are float4 / uint4 only; matrices are rows (`mul(float4(world, 1), f.viewProj)`).
+New shader: add `foo.comp.hlsl` (no CMake list), `cmake --preset default`. Porting rules and pitfalls: docs/research/hlsl-porting-guide.md; `tools/port_check.py` compares an HLSL
+shader's interface with a reference SPIR-V.
 `RVK_SHADER_DIR=<repo>\shaders` (`run.ps1 -Environment`) reads sources from disk (no rebuild). Checks: `rvk_tests` (`dxc_*`, `abi_hlsl_layout_matches_cpp`),
 `rvk_vktest --passes`; offline with the port's `dxc.exe` (`build\vcpkg_installed\x64-windows-static-md\tools\directx-dxc`) and `spirv-val`.
 Passes plug in at injection points (`Device::addPass(inject::Point::AfterOpaque, ...)`, `vk/passes.h`: pass layout, compute / fullscreen pipelines,
@@ -306,7 +310,7 @@ docs/research/water.md 4.1.
 | `engine/hemisphere.*` | post-hook of `eCHemisphere_PS::AddToLightList`: the engine's weather-driven sky SH (7 registers) + indoor colour = the GI sky and the water RT hit light (docs/research/rtgi.md 17) |
 | `engine/menu_state.*` | game / menu / loading from the GUI's page predicates (Script.dll `GUI2::IsLoading` / `GetMode` / `IsVisible`): the menu frame rate limit and the unpaced loading screen (docs/research/menu-fps.md) |
 | `engine/material_source.*` | hook on `CompileShaderPoolEllement`: the engine's request (file, entry, macros) per material shader attached to the `d3d9::Shader`; `debug.material_sources` JSON lines (shader-permutations.md 8) |
-| `shader/uber.*` | assembles the GLSL material shader (`shaders/material/ge_default.*`) from a request's macros + variant hooks; `debug.ubershader` (shader-permutations.md 10) |
+| `shader/uber.*` | assembles the HLSL material shader (`shaders/material/ge_default.*`) from a request's macros + variant hooks; `debug.ubershader` (shader-permutations.md 10) |
 | `engine/exposure.*` | the engine's adapted-luminance image (`adaptedLuminanceApi()`: the 1x1 R32F output of the "AvgLuminance" filter, found through the scene effect's nested effects) for FSR's exposure (`upscale.exposure`; docs/research/upscaling.md 20) |
 | `engine/lod.*` | the `CacheEntities` stride hook (`debug.prefetch_stride`); detail distances (SpeedTree / mesh LOD and the view range factor scaled in detours; the billboard fade variant: docs/research/lod.md) |
 | `d3d9/record.cpp` | record threads: draw-packet chunks recorded into secondary command buffers by worker threads (`debug.record_threads`; performance.md 14) |
@@ -319,7 +323,7 @@ docs/research/water.md 4.1.
 | `fx/` | fx_2_0 effect binaries: parser, constant tables, preshaders (`rvk_fxtool`) |
 | `res/` | DDS parsing |
 | `hal/` | generated HAL interfaces (`tools/gen_hal.py` -> `api_generated.h`, `trace_generated.h`), engine allocator, trace mode |
-| `shader/` | D3D9 bytecode decoder, listing, CPU evaluator + backward slice (`sm_eval.*`), GLSL generator (`abi.h` = shader/renderer contract; variant hooks `GlslOptions`), glslang wrapper, `embedded.h` (build-time shaders) |
+| `shader/` | D3D9 bytecode decoder, listing, CPU evaluator + backward slice (`sm_eval.*`), HLSL generator (`hlsl.cpp`; `abi.h` = shader/renderer contract; variant hooks `TranslateOptions`, `translate.h`), the DXC wrapper (`dxc.*`: runtime compile + disk cache), `embedded.h` (the embedded HLSL sources) |
 | `enh/` | enhancements: `debug_view.*` = `debug.inject_view` (an injected pass, docs/research/injection.md 5); `water.*` = the enhanced water (a `d3d9::DrawReplacer`: engine water draws drawn with `shaders/water/*`, the sea's wave grid), `shore_field.*` (coast distance field bake), `water_profile.*` (look per body of water), `water_rt.*` (rt.reflections: the reflection image's compute pass): docs/research/water.md; `shadows.*` = the enhanced sun shadow mask (a `d3d9::DrawReplacer` for the shadow-mask pass, `shaders/shadows/*`): docs/research/shadows.md; `rt_scene.*` / `rt_registry.*` = the RT scene (a `d3d9::DrawObserver` + a pass: BLAS cache, instance registry, TLAS, geometry records), `rt_material.*` = its materials (albedo slot, uv map by CPU shader evaluation, opacity), `rt_debug.*` = `rt.debug`: docs/research/rt-reflections.md; `gi.*` = RT GI (DDGI probes as the engine's ambient constants, a DrawObserver + passes, `shaders/gi/*`, `rvk_gi.glsl`): rtgi.md 9; `gbuffer.*` = G-buffer / motion / GTAO (rtgi.md 10), `material_variant.*` = the material pixel shaders' enhancement variants; `upscale.*` = `upscale.mode` / `upscale.sharpness`: camera jitter source, depth prep (`shaders/upscale/prep.comp`, exposure image `shaders/upscale/exposure.comp`), the `upscale.fsr` pass (upscaling.md); `object_motion.*` = per-object motion for FSR (a `d3d9::DrawObserver`: vertex-position captures of skinned + moving rigid draws, upscaling.md 9) |
 
 ## Tooling gotchas

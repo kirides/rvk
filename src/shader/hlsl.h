@@ -1,6 +1,6 @@
 #pragma once
 
-// D3D9 SM 1.x-3.0 bytecode -> HLSL (SM 6.6; docs/research/hlsl-rhi.md 1, P1d): the successor of shader/glsl.h. Same contract (shader/abi.h),
+// D3D9 SM 1.x-3.0 bytecode -> HLSL (SM 6.6; docs/research/hlsl-rhi.md 1, P1d): replaced the GLSL translator. Same contract (shader/abi.h),
 // same Reflection, same variant hooks; the hook strings (TranslateOptions::prelude / prologue / epilogue / extraGlobals / constOverrides /
 // inputOverrides / dotCaptures) are HLSL here. The text goes to shader::dxc (entry VSMain / PSMain, profile vs_6_6 / ps_6_6) with
 // `#include "rvk_draw.hlsli"` resolved from the embedded sources.

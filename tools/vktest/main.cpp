@@ -51,7 +51,6 @@
 #include "enh/upscale.h"
 #include "shader/abi.h"
 #include "shader/embedded.h"
-#include "shader/glsl.h"
 #include "shader/hlsl.h"
 #include "shader/sm_ir.h"
 #include "shader/spirv.h"

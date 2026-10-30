@@ -1,6 +1,6 @@
 #pragma once
 
-// What the D3D9 bytecode translators (shader/hlsl.h; the old GLSL one shader/glsl.h) share: the reflection of a translated shader and the variant
+// What the D3D9 bytecode translators (shader/hlsl.h) share: the reflection of a translated shader and the variant
 // hooks of the enhancements (docs/research/injection.md 4). The hook strings are HLSL (toHlsl).
 
 #include <array>
