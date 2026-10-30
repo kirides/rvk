@@ -15,8 +15,7 @@
 
 #include "engine/window_mode.h"
 #include "hal/vulkan/hal_vulkan.h"
-#include "vk/probe.h"
-#include "vk/vk.h"
+#include "rhi/game_device.h"
 
 namespace rvk::hal::vulkan {
 namespace {
@@ -30,45 +29,26 @@ struct AdapterInfo {
 
 AdapterInfo queryAdapter(int preferred) {
     AdapterInfo info;
-    if (volkInitialize() != VK_SUCCESS) return info;
-    VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-    app.apiVersion = VK_API_VERSION_1_3;
-    VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
-    ici.pApplicationInfo = &app;
-    VkInstance instance = VK_NULL_HANDLE;
-    if (vkCreateInstance(&ici, nullptr, &instance) != VK_SUCCESS) return info;
-    volkLoadInstanceOnly(instance);
-    std::uint32_t n = 0;
-    vkEnumeratePhysicalDevices(instance, &n, nullptr);
-    std::vector<VkPhysicalDevice> pds(n);
-    vkEnumeratePhysicalDevices(instance, &n, pds.data());
+    const std::vector<rhi::AdapterInfo> adapters = rhi::enumerateAdapters(rhi::Backend::Vulkan);
     int pick = -1;
-    for (int i = 0; i < static_cast<int>(n); ++i) {
-        const vk::DeviceReport r = vk::inspectDevice(pds[static_cast<std::size_t>(i)]);
-        if (!r.usable()) continue;
+    for (int i = 0; i < static_cast<int>(adapters.size()); ++i) {
+        const rhi::AdapterInfo& r = adapters[static_cast<std::size_t>(i)];
+        if (!r.usable) continue;
         if (i == preferred) {
             pick = i;
             break;
         }
-        if (pick < 0 || (r.discrete && !vk::inspectDevice(pds[static_cast<std::size_t>(pick)]).discrete)) pick = i;
+        if (pick < 0 || (r.discrete && !adapters[static_cast<std::size_t>(pick)].discrete)) pick = i;
     }
     if (pick >= 0) {
+        const rhi::AdapterInfo& a = adapters[static_cast<std::size_t>(pick)];
         info.usable = true;
-        VkPhysicalDeviceProperties p{};
-        vkGetPhysicalDeviceProperties(pds[static_cast<std::size_t>(pick)], &p);
-        info.name = std::string(p.deviceName) + " (Vulkan)";
-        info.vendorId = p.vendorID;
-        info.deviceId = p.deviceID;
-        info.driverVersion = p.driverVersion;
-        VkPhysicalDeviceMemoryProperties mp{};
-        vkGetPhysicalDeviceMemoryProperties(pds[static_cast<std::size_t>(pick)], &mp);
-        for (std::uint32_t h = 0; h < mp.memoryHeapCount; ++h) {
-            if ((mp.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) {
-                info.vramMB = std::max<std::uint64_t>(info.vramMB, mp.memoryHeaps[h].size >> 20);
-            }
-        }
+        info.name = a.name + " (Vulkan)";
+        info.vendorId = a.vendorId;
+        info.deviceId = a.deviceId;
+        info.driverVersion = a.driverVersion;
+        info.vramMB = a.vramMB;
     }
-    vkDestroyInstance(instance, nullptr);
     return info;
 }
 

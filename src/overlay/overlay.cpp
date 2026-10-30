@@ -20,8 +20,6 @@
 #include "core/settings.h"
 #include "overlay/keys.h"
 #include "engine/window_mode.h"
-#define IMGUI_IMPL_VULKAN_USE_VOLK
-#include "imgui_impl_vulkan.h"
 
 // declared inside "#if 0" in imgui_impl_win32.h (the backend leaves the declaration to the user)
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -89,9 +87,6 @@ std::vector<std::string_view> words(std::string_view s) {
     }
 }
 
-void checkVk(VkResult r) {
-    if (r < 0) spdlog::error("overlay: imgui_impl_vulkan: {}", vk::resultString(r));
-}
 
 const char* sideName(bool b) { return b ? "B" : "A"; }
 
@@ -173,26 +168,15 @@ bool Overlay::init(d3d9::Device& device, HWND__* window, const Options& options)
         ImGui::DestroyContext();
         return false;
     }
-    vk::Context& ctx = device.ctx();
-    static VkFormat colorFormat;  // only read inside ImGui_ImplVulkan_Init
-    colorFormat = device.overlayFormat();
-    ImGui_ImplVulkan_InitInfo ii{};
-    ii.ApiVersion = VK_API_VERSION_1_3;
-    ii.Instance = ctx.instance();
-    ii.PhysicalDevice = ctx.physicalDevice();
-    ii.Device = ctx.device();
-    ii.QueueFamily = ctx.queueFamily();
-    ii.Queue = ctx.queue();
-    ii.DescriptorPoolSize = IMGUI_IMPL_VULKAN_MINIMUM_SAMPLED_IMAGE_POOL_SIZE + 8;
-    ii.MinImageCount = std::max(2u, device.swapchain().minImageCount());
-    ii.ImageCount = std::max(ii.MinImageCount, std::max(device.swapchain().imageCount(), 8u));  // frame generation draws it for generated frames too
-    ii.UseDynamicRendering = true;
-    ii.PipelineInfoMain.PipelineRenderingCreateInfo = {VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
-    ii.PipelineInfoMain.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
-    ii.PipelineInfoMain.PipelineRenderingCreateInfo.pColorAttachmentFormats = &colorFormat;
-    ii.CheckVkResultFn = &checkVk;
-    if (!ImGui_ImplVulkan_Init(&ii)) {
-        spdlog::error("overlay: ImGui_ImplVulkan_Init failed");
+    const VkFormat colorFormat = device.overlayFormat();
+    rhi::ImGuiBackendDesc bd;
+    bd.colorFormat = colorFormat;
+    bd.minImageCount = std::max(2u, device.presentMinImageCount());
+    bd.imageCount = std::max(bd.minImageCount, std::max(device.presentImageCount(), 8u));  // frame generation draws it for generated frames too
+    backend_ = device.game().createImGuiBackend();
+    if (!backend_ || !backend_->init(bd)) {
+        spdlog::error("overlay: the UI renderer backend failed to initialise");
+        backend_.reset();
         ImGui_ImplWin32_Shutdown();
         ImGui::DestroyContext();
         return false;
@@ -245,7 +229,8 @@ void Overlay::shutdown() {
     Overlay* self = this;
     g_instance.compare_exchange_strong(self, nullptr);
     if (imguiVulkan_) {
-        ImGui_ImplVulkan_Shutdown();
+        if (backend_) backend_->shutdown();
+        backend_.reset();
         ImGui_ImplWin32_Shutdown();
         ImGui::DestroyContext();
         imguiVulkan_ = false;
@@ -472,7 +457,7 @@ ImDrawData* Overlay::buildFrame(VkExtent2D extent) {
     io.MouseDrawCursor = open;
     ImGui::GetStyle().FontScaleMain = std::clamp(static_cast<float>(extent.height) / 1000.0f, 0.85f, 2.0f);
 
-    ImGui_ImplVulkan_NewFrame();
+    backend_->newFrame();
     ImGui_ImplWin32_NewFrame();
     io.DisplaySize = ImVec2(static_cast<float>(extent.width), static_cast<float>(extent.height));
     io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
@@ -481,25 +466,20 @@ ImDrawData* Overlay::buildFrame(VkExtent2D extent) {
     buildUi();
     ImGui::Render();
     ImDrawData* dd = ImGui::GetDrawData();
-    // texture uploads submit to the queue and wait for it: under the queue lock (the present thread presents meanwhile)
+    // texture uploads submit to the queue and wait for it (the backend holds the queue lock meanwhile: the present thread presents)
     if (dd->Textures != nullptr) {
-        bool pending = false;
-        for (ImTextureData* t : *dd->Textures) pending |= t->Status != ImTextureStatus_OK;
-        if (pending) {
-            auto lock = device_->ctx().queueLock();
-            for (ImTextureData* t : *dd->Textures) {
-                if (t->Status != ImTextureStatus_OK) ImGui_ImplVulkan_UpdateTexture(t);
-            }
+        for (ImTextureData* t : *dd->Textures) {
+            if (t->Status != ImTextureStatus_OK) backend_->updateTexture(t);
         }
         dd->Textures = nullptr;
     }
     return dd;
 }
 
-void Overlay::record(VkCommandBuffer cmd, VkExtent2D extent) {
+void Overlay::record(rhi::CommandList& cmd, VkExtent2D extent) {
     const std::lock_guard lock(drawMutex_);
     ImDrawData* dd = buildFrame(extent);
-    if (dd != nullptr) ImGui_ImplVulkan_RenderDrawData(dd, cmd);
+    if (dd != nullptr) backend_->renderDrawData(dd, cmd);
 }
 
 bool Overlay::prepare(VkExtent2D extent) {
@@ -515,10 +495,10 @@ bool Overlay::prepare(VkExtent2D extent) {
     return true;
 }
 
-void Overlay::recordPrepared(VkCommandBuffer cmd, VkExtent2D) {
+void Overlay::recordPrepared(rhi::CommandList& cmd, VkExtent2D) {
     const std::lock_guard lock(drawMutex_);
     if (!initialised_ || !snap_ || !snap_->data.Valid) return;
-    ImGui_ImplVulkan_RenderDrawData(&snap_->data, cmd);
+    backend_->renderDrawData(&snap_->data, cmd);
 }
 
 void Overlay::buildUi() {

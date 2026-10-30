@@ -19,8 +19,6 @@
 #include "enh/rhi_scope.h"
 #include "enh/rt_scene.h"
 #include "shader/embedded.h"
-#include "vk/context.h"
-#include "vk/frames.h"
 
 namespace rvk::enh {
 
@@ -163,7 +161,7 @@ void Gi::disable() {
     dev_.setGiHeader({});
     dev_.setFrameSgi({});
     sgiValid_ = false;
-    for (const char* k : {"sgi.probes", "sgi.resolved0", "sgi.resolved1"}) dev_.transients().release(k);
+    for (const char* k : {"sgi.probes", "sgi.resolved0", "sgi.resolved1"}) dev_.releaseTransient(k);
     dev_.removeDrawObserver(this);
     dev_.removePasses(this);
     passId_ = 0;
@@ -436,16 +434,16 @@ bool Gi::pipelinesReady() {
     return true;
 }
 
-bool Gi::ensureResources(VkCommandBuffer cmd) {
+bool Gi::ensureResources(rhi::CommandList& cmd) {
     if (probes_ != nullptr) return true;
     rhi::Device* rd = dev_.rhi();
-    const VkDeviceSize probes = static_cast<VkDeviceSize>(kGiCascades) * kProbesPerCascade;
+    const std::uint64_t probes = static_cast<std::uint64_t>(kGiCascades) * kProbesPerCascade;
     const VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     bool ok = rd != nullptr;
     if (ok) {
         probes_ = rd->createBuffer({probes * 128, usage, rhi::Memory::Device, "gi probes"});
         depth_ = rd->createBuffer({probes * kGiDepthTexels * 8, usage, rhi::Memory::Device, "gi depth moments"});
-        rays_ = rd->createBuffer({static_cast<VkDeviceSize>(kBudget[2]) * (kGiRays + 1) * 16, usage, rhi::Memory::Device, "gi rays"});
+        rays_ = rd->createBuffer({static_cast<std::uint64_t>(kBudget[2]) * (kGiRays + 1) * 16, usage, rhi::Memory::Device, "gi rays"});
         ok = probes_ != nullptr && depth_ != nullptr && rays_ != nullptr;
     }
     if (!ok) {
@@ -486,7 +484,7 @@ void Gi::record(d3d9::PassContext& ctx) {
         ++skipped_;
         return;
     }
-    VkCommandBuffer cmd = ctx.cmd;
+    rhi::CommandList& cmd = ctx.cmd;
     if (!ensureResources(cmd)) return;
     pickLight();
     if (!haveSky_) {
@@ -498,7 +496,7 @@ void Gi::record(d3d9::PassContext& ctx) {
     std::vector<std::uint32_t> list;
     selectProbes(list, kBudget[s_.quality]);
     const std::uint32_t n = static_cast<std::uint32_t>(list.size());
-    vk::Frames& frames = dev_.frames();
+    d3d9::Device& frames = dev_;
     const std::uint64_t frame = dev_.frameValue();
 
     // this frame's header (the trace / blend passes and, from now on, every FrameBlock: the material shaders' lookups)
@@ -525,9 +523,9 @@ void Gi::record(d3d9::PassContext& ctx) {
         hd.cascade[c].spacing[1] = 1.0f / kSpacing[c];
         hd.cascade[c].spacing[2] = kDepthCap;
     }
-    const rhi::RingAlloc ha = frames.allocate(sizeof(hd), 16);
-    const rhi::RingAlloc la = frames.allocate(std::max<VkDeviceSize>(n, 1) * 4, 16);
-    const rhi::RingAlloc pa = frames.allocate(sizeof(GiPassParams), 16);
+    const rhi::RingAlloc ha = frames.ring(sizeof(hd), 16);
+    const rhi::RingAlloc la = frames.ring(std::max<std::uint64_t>(n, 1) * 4, 16);
+    const rhi::RingAlloc pa = frames.ring(sizeof(GiPassParams), 16);
     if (ha.ptr == nullptr || la.ptr == nullptr || pa.ptr == nullptr) {
         ++skipped_;
         return;
@@ -631,7 +629,7 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
         }
     }
     d3d9::Surface* ds = dev_.depthStencil();
-    VkCommandBuffer cmd = ctx.cmd;
+    rhi::CommandList& cmd = ctx.cmd;
     if (ctx.sceneHdr == nullptr || ds == nullptr || ds->texture() == nullptr || !dev_.rtSceneValid() || !dev_.readable(ds->texture(), cmd)) {
         ++screenSkipped_;
         dev_.setFrameSgi({});
@@ -644,17 +642,17 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
     const std::uint32_t tile = s_.screen == 3 ? 8u : 16u;
     const std::uint32_t rays = s_.screen == 1 ? 8u : 16u;
     const std::uint32_t gw = (w + tile - 1) / tile, gh = (h + tile - 1) / tile;
-    vk::Transients::Entry* probes = dev_.transients().get("sgi.probes", {VK_FORMAT_R16G16B16A16_SFLOAT, {gw, gh}});
-    vk::Transients::Entry* probes2 = dev_.transients().get("sgi.probes2", {VK_FORMAT_R16G16B16A16_SFLOAT, {gw, gh}});
-    vk::Transients::Entry* geom = dev_.transients().get("sgi.geometry", {VK_FORMAT_R32G32B32A32_SFLOAT, {gw, gh}});
+    rhi::Texture* probes = dev_.transient("sgi.probes", {VK_FORMAT_R16G16B16A16_SFLOAT, {gw, gh}});
+    rhi::Texture* probes2 = dev_.transient("sgi.probes2", {VK_FORMAT_R16G16B16A16_SFLOAT, {gw, gh}});
+    rhi::Texture* geom = dev_.transient("sgi.geometry", {VK_FORMAT_R32G32B32A32_SFLOAT, {gw, gh}});
     const std::uint32_t cur = sgiHistory_ ^ 1u;
-    vk::Transients::Entry* res[2] = {dev_.transients().get("sgi.resolved0", {VK_FORMAT_R16G16B16A16_SFLOAT, {sw, sh}}),
-                                     dev_.transients().get("sgi.resolved1", {VK_FORMAT_R16G16B16A16_SFLOAT, {sw, sh}})};
+    rhi::Texture* res[2] = {dev_.transient("sgi.resolved0", {VK_FORMAT_R16G16B16A16_SFLOAT, {sw, sh}}),
+                                     dev_.transient("sgi.resolved1", {VK_FORMAT_R16G16B16A16_SFLOAT, {sw, sh}})};
     // the per-pixel correction + history count, ping-pong like the resolved ratio
-    vk::Transients::Entry* stats[2] = {dev_.transients().get("sgi.stats0", {VK_FORMAT_R16G16B16A16_SFLOAT, {sw, sh}}),
-                                       dev_.transients().get("sgi.stats1", {VK_FORMAT_R16G16B16A16_SFLOAT, {sw, sh}})};
-    const rhi::RingAlloc pa = dev_.frames().allocate(sizeof(GiPassParams), 16);
-    const rhi::RingAlloc ha = dev_.frames().allocate(sizeof(GiVolumeHeader), 16);
+    rhi::Texture* stats[2] = {dev_.transient("sgi.stats0", {VK_FORMAT_R16G16B16A16_SFLOAT, {sw, sh}}),
+                                       dev_.transient("sgi.stats1", {VK_FORMAT_R16G16B16A16_SFLOAT, {sw, sh}})};
+    const rhi::RingAlloc pa = dev_.ring(sizeof(GiPassParams), 16);
+    const rhi::RingAlloc ha = dev_.ring(sizeof(GiVolumeHeader), 16);
     if (probes == nullptr || probes2 == nullptr || geom == nullptr || res[0] == nullptr || res[1] == nullptr || stats[0] == nullptr ||
         stats[1] == nullptr || pa.ptr == nullptr || ha.ptr == nullptr) {
         ++screenSkipped_;
@@ -666,16 +664,16 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
     split(ha.ref, &p.volume[0]);
     p.volume[3] = static_cast<std::uint32_t>(dev_.frameValue());
     p.screen[0] = ds->texture()->bindlessSlot();
-    p.screen[1] = geom->slot;
+    p.screen[1] = geom->heapSampled();
     p.screen[2] = gw;
     p.screen[3] = gh;
     p.screen2[0] = tile;
     p.screen2[1] = rays;
     p.screen2[2] = w;
     p.screen2[3] = h;
-    p.screen3[0] = probes->slot;
-    p.screen3[1] = sgiValid_ ? res[sgiHistory_]->slot : 0u;
-    p.screen3[2] = sgiValid_ ? stats[sgiHistory_]->slot : 0u;
+    p.screen3[0] = probes->heapSampled();
+    p.screen3[1] = sgiValid_ ? res[sgiHistory_]->heapSampled() : 0u;
+    p.screen3[2] = sgiValid_ ? stats[sgiHistory_]->heapSampled() : 0u;
     p.screen3[3] = dev_.samplerFor(true, true);
     p.screen4[0] = 4000.0f;  // ray reach (world units); a ray that runs out takes the probe volume's light at its end
     p.screen4[1] = 2.0f;     // ratio cap
@@ -690,7 +688,7 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
         p.screen4[2] *= scale;
     }
     p.screen4[3] = s_.bleed;  // colour bleeding
-    p.screen5[0] = probes2->slot;
+    p.screen5[0] = probes2->heapSampled();
     {
         static const bool diag = [] {
             char buf[8] = {};
@@ -763,7 +761,7 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
     sgiHistory_ = cur;
     sgiValid_ = true;
     // -> this frame's material shaders (Gbuffer variants: the factor on their DDGI lookup at their pixel)
-    dev_.setFrameSgi({res[cur]->slot, dev_.samplerFor(true, true), shader::abi::kFrameSgiValid, stats[cur]->slot});
+    dev_.setFrameSgi({res[cur]->heapSampled(), dev_.samplerFor(true, true), shader::abi::kFrameSgiValid, stats[cur]->heapSampled()});
     if (screenFrames_++ == 0) {
         spdlog::info("enh: gi: screen probes: {}x{} probes ({} px tiles, {} rays each) over {}x{}", gw, gh, tile, rays, w, h);
     }

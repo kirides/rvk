@@ -15,10 +15,8 @@
 #include "engine/weather.h"
 #include "enh/rhi_scope.h"
 #include "enh/rt_scene.h"
-#include "rhi/vulkan/wrap.h"
 #include "shader/embedded.h"
 #include "vk/formats.h"
-#include "vk/pipeline.h"
 
 namespace rvk::enh {
 
@@ -488,7 +486,7 @@ void Water::serviceBake(d3d9::Device& device) {
 
 rhi::GpuRef Water::fillBlock(d3d9::Device& device, const d3d9::ReplaceQuery& q, draws::Water kind, WaterModel model, bool grid,
                                  const Body& b, std::array<d3d9::Texture*, 16>& sampled) {
-    const rhi::RingAlloc a = device.frames().allocate(sizeof(WaterBlock), 16);
+    const rhi::RingAlloc a = device.ring(sizeof(WaterBlock), 16);
     if (a.ptr == nullptr) return {};
     WaterBlock w{};
     // the DrawBlock part: the engine draw's textures and samplers by slot (water.frag samples the material through them)
@@ -498,7 +496,7 @@ rhi::GpuRef Water::fillBlock(d3d9::Device& device, const d3d9::ReplaceQuery& q, 
         if (er.samplers[slot] == shader::TextureType::Unknown) continue;
         d3d9::Texture* t = q.textures[slot];
         if (t == nullptr || t->isNull()) continue;
-        const bool cube = t->kind() == vk::TextureKind::Cube;
+        const bool cube = t->desc().type == d3d9::TextureType::Cube;
         if (cube != (er.samplers[slot] == shader::TextureType::Cube)) continue;  // a mismatching bind: the default texture
         w.tex[slot] = t->bindlessSlot();
         w.smp[slot] = device.samplerOfSlot(slot);
@@ -555,7 +553,7 @@ rhi::GpuRef Water::fillBlock(d3d9::Device& device, const d3d9::ReplaceQuery& q, 
     w.misc[3] = p.murkiness;
     // the sky cube (the swamp's dim reflection: its shader binds none) and the shore field
     d3d9::Texture* sky = device.imageWithRole(d3d9::scene::ImageRole::SkyEnvCube);
-    if (sky != nullptr && !sky->isNull() && sky->kind() == vk::TextureKind::Cube) {
+    if (sky != nullptr && !sky->isNull() && sky->desc().type == d3d9::TextureType::Cube) {
         w.res[0] = sky->bindlessSlot();
         sampled[4] = sky;
     }
@@ -793,8 +791,7 @@ void Water::recordOcean(d3d9::PassContext& ctx) {
     updateSea(seconds);
     rhi::Device* rdev = dev_.rhi();
     if (rdev == nullptr) return;
-    const std::unique_ptr<rhi::CommandList> cl = rhi::vulkan::wrapCommandBuffer(*rdev, ctx.cmd);
-    ocean_->record(*cl, ctx.frameBlock, seconds);
+    ocean_->record(ctx.cmd, ctx.frameBlock, seconds);
     lastSimFrame_ = frame;
     // the player (the near-water wave cap follows him)
     player_[3] = 0.0f;
@@ -822,7 +819,7 @@ void Water::recordOcean(d3d9::PassContext& ctx) {
         for (int i = 0; i < 3; ++i) in.shoreWave[i] = sw[static_cast<std::size_t>(i)];
         in.shoreWave[3] = static_cast<float>(std::fmod(seconds, 16384.0));
         in.seconds = seconds;
-        ocean_->recordFoam(*cl, ctx.frameBlock, in);
+        ocean_->recordFoam(ctx.cmd, ctx.frameBlock, in);
     }
 }
 
@@ -1154,9 +1151,9 @@ void Water::recordWet(d3d9::PassContext& ctx) {
     if (ctx.mainView != 1 || scene == nullptr || ctx.target != scene || ctx.depthMap == nullptr || !field_) return;
     const std::uint64_t frame = dev_.stats().frames;
     if (lastGridFrame_ == 0 || frame > lastGridFrame_ + 2) return;
-    vk::Image& target = scene->image();
-    if (!ensureWetPipeline(target.format())) return;
-    VkCommandBuffer cmd = ctx.cmd;
+    rhi::Texture& target = scene->rhi();
+    if (!ensureWetPipeline(target.desc().format)) return;
+    rhi::CommandList& cmd = ctx.cmd;
     if (!dev_.readable(ctx.depthMap, cmd) || !dev_.readable(field_.get(), cmd)) return;
     const std::uint32_t w = scene->desc().width, h = scene->desc().height;
     WetShorePush push{};
@@ -1178,7 +1175,7 @@ void Water::recordWet(d3d9::PassContext& ctx) {
     if (fftWanted() && ocean_ && ocean_->ready()) {
         push.params[3] = shoreWave()[0];
         d3d9::Texture* sky = dev_.imageWithRole(d3d9::scene::ImageRole::SkyEnvCube);
-        if (sky != nullptr && !sky->isNull() && sky->kind() == vk::TextureKind::Cube && dev_.readable(sky, cmd)) {
+        if (sky != nullptr && !sky->isNull() && sky->desc().type == d3d9::TextureType::Cube && dev_.readable(sky, cmd)) {
             push.sky[0] = sky->bindlessSlot();
             push.sky[1] = dev_.samplerFor(true, true);
         }

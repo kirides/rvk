@@ -397,6 +397,27 @@ void testStretchRect(Fixture& f) {
     f.dev.release(std::move(rt));
 }
 
+// the engine's mip chain generation: StretchRect between the levels of one texture (a blit onto itself, GENERAL layout), then sampled
+void testMipChainStretchRect(Fixture& f) {
+    TextureDesc d;
+    d.width = d.height = 64;
+    d.levels = 3;
+    d.format = vk::d3dfmt::A8R8G8B8;
+    d.usage = USAGE_RENDERTARGET;
+    d.pool = POOL_DEFAULT;
+    auto tex = f.dev.createTexture(d);
+    f.reset();
+    f.dev.setRenderTarget(0, tex->surface(0, 0));
+    f.dev.setDepthStencil(nullptr);
+    f.dev.clear(CLEAR_TARGET, 0xFF336699, 1.0f, 0);
+    f.dev.setRenderTarget(0, f.dev.backBuffer());
+    f.dev.stretchRect(tex->surface(0, 0), nullptr, tex->surface(1, 0), nullptr, true);
+    f.dev.stretchRect(tex->surface(1, 0), nullptr, tex->surface(2, 0), nullptr, true);
+    const Pixels p = capture(f.dev, "mipchain");  // (presents: the validation layer sees the recorded blits)
+    (void)p;
+    f.dev.release(std::move(tex));
+}
+
 void testDynamicBuffer(Fixture& f) {
     // DISCARD then NOOVERWRITE appends within one frame: every draw sees its own data
     f.reset();
@@ -797,7 +818,7 @@ int main(int argc, char** argv) {
         {"depth", testDepth},         {"blend", testBlend},              {"alpha test", testAlphaTest},
         {"stencil", testStencil},     {"render to texture", testRenderToTexture}, {"dxt1", testDxt1},
         {"instancing", testInstancing}, {"UP + scissor", testUpAndScissor}, {"stretch rect", testStretchRect},
-        {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
+        {"mip chain stretch rect", testMipChainStretchRect}, {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
         {"read-only lock of a fresh texture", testReadOnlyLockOfFreshTexture},
         {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
@@ -814,7 +835,7 @@ int main(int argc, char** argv) {
     f.vsInst.reset();
     f.psColor.reset();
     f.psTexture.reset();
-    const std::uint32_t verrors = dev.ctx().validationErrors();
+    const std::uint32_t verrors = dev.game().validationErrors();
     dev.destroy();
     std::printf("%s: %d failure(s), %u validation error(s)\n", g_failures == 0 && verrors == 0 ? "PASS" : "FAIL", g_failures, verrors);
     return g_failures == 0 && verrors == 0 ? 0 : 1;

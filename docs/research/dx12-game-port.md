@@ -75,11 +75,51 @@ Built on 2774402. New: `src/rhi/game_device.h` (comment block there = the seam's
   `ctx_.features()` queries, `moduleLabel(ctx_...)`, `vk::names::*`; `shader::abi::PushConstants` is still 8 x uint64 (RvkDrawPush as 7 x uint4 for DXIL comes with WP1 / WP4); raw `rhi::Buffer::gpuAddress()` users with shader
   writes into Readback memory (`gi` diag, the skin verify buffer) need the capture pool on D3D12 (WP6).
 
+### WP2b (2026-10-30, Vulkan only, no behaviour change) - built, verified
+Built on 7540a9a (uncommitted tree when written). Resources, passes and the optional modules are behind `rhi::GameDevice`; what is left raw in d3d9 is the frame loop / draw path (WP2c).
+- **RHI additions** (`rhi.h`, both backends; D3D12 implements them too: `rvk_rhitest` PASS): `TextureDesc::swizzle` (the sampled view's channel mapping: L8 -> rrr1), `Texture::layout()` (the tracked layout, MAX_ENUM while mips
+  differ; Vulkan = `vk::Image`'s tracker, the one source of truth; D3D12 = the layout of the last transition) + `Texture::setDebugName`, `CommandList::copyBufferToTextureBox(dst, src, BufferTextureCopy{bufferOffset, rowPitch (0 = tight),
+  sub, offset, extent})` (the dirty-box upload), `TextureBlit::srcOffset / dstOffset` (StretchRect boxes), `rhi::FormatBlock formatBlock(VkFormat)` + `formatBytes` / `bufferRowPitch` / `copyBytes` for every D3D9 storage
+  format incl. BC1-5 and 16-bit packed (read-backs). A texture blitted onto itself that lies in GENERAL stays in GENERAL (the engine's mip chains; found by the first in-game run: VUID-vkCmdBlitImage2-srcImageLayout).
+- **`rhi::GameDevice`** (`game_device.h`) grew: `gameCaps()` (`GameCaps`: rayTracing, vertexStores, storageImageExtendedFormats, compute limits, `uploadRowAlign` 1 / `uploadOffsetAlign` 16 on Vulkan: D3D12 will say 256 / 512 and
+  `Texture::upload` pads its staging rows to it), `formatSupport(VkFormat, VkImageUsageFlags, blend)`, `frameCommands()` / `uploadCommands()` / `passCommands()` (persistent `rhi::CommandList` wrappers over the frame's command
+  buffers; `passCommands` also resets the bound state: what an injected pass records into), `nativeCommandBuffer(CommandList&)` (the Vulkan-only escape hatch: `void*`; used by nobody outside the backend yet because the modules take
+  `CommandList*`), `allocRing(size, align, minOffset)` + `ringBuffer(RingAlloc)` (the chunk as an `rhi::Buffer`), `allocCapture(size, align)` (vertex-store captures: rt skin outputs, object motion; Vulkan = the ring),
+  `frameValue / frameSlot / completedFrame / waitFrame / retire`, `allocMesh / freeMesh` (`MeshAlloc{Buffer* buffer, native, offset, GpuAddr addr, backend[3]}`: the arena behind `d3d9::Buffer`), `transient(key, TransientDesc)` /
+  `releaseTransient` / `transientBytes` (the passes' images are `rhi::Texture`s now; `vk::Transients` stays for `rvk_vktest` only), start-up diagnostics (`probeFrameGeneration`, `capabilityReport`, `runRaytracingSelfTest`,
+  `logMemoryStats`), `createUpscaler / createFrameGenerator / createImGuiBackend`; free functions `rhi::enumerateAdapters(Backend)` (`AdapterInfo`), `setDebugNames / debugNamesEnabled`, `rhi::kFramesInFlight`.
+- **Optional modules** (`src/rhi/modules.h`; Vulkan adapters in `src/rhi/vulkan/modules.cpp` over `vk/fsr.*`, `vk/framegen.*`, `vk/fg_swapchain.*`, which stay where they are): `rhi::Upscaler` (load, create / destroy context,
+  `dispatch(UpscalerDispatch)` with `Texture*` + `CommandList*`, `generateReactiveMask`, provider / jitter / version queries), `rhi::FrameGenerator` (`configure / prepare / dispatch`, `FrameGeneratorConfigure::present` names the
+  `PresentWrapper`), `rhi::PresentWrapper` (AMD's frame generation swapchain: `contextMutex`, `setUi(PresentUi{wants, record(CommandList&, extent)})`, counters, sampler, `realPresentCount`), `rhi::ImGuiBackend`
+  (`src/rhi/vulkan/imgui_backend.cpp`; the vendored ImGui Vulkan backend moved to `rhi/vulkan/imgui_vulkan_impl.cpp`; its texture upload and shutdown hold the queue lock themselves), `rhi::presentGapStats`.
+  `rhi/vulkan/wrap.h` gained `imageOf / commandBufferOf / contextOf` (the backend's own users), `wrapFgSwapchain`, `wrapGame(..., MeshArena*)`.
+- **d3d9**: `Texture` owns an `rhi::Texture` (`rhi()`; the slot is `heapSampled()`, the layout `rhi().layout()`; `image()` is the one remaining bridge to the Vulkan image for the not yet moved draw path: scope attachments / packet
+  application / present), `Buffer` holds a `rhi::MeshAlloc` (`Binding.buffer` is the opaque backend handle), `prepareForSampling / upload / readable / readImageLevel / blit / StretchRect / loadSurfaceFromSurface` run on
+  `rhi::CommandList`s (`Device::frameList() / uploadList()`; read-backs through an `rhi::Buffer` in Readback memory, repacked to tight rows), the upload ring + dirty-box logic call `GameDevice::allocRing / ringBuffer`,
+  `PassContext::cmd` is `rhi::CommandList&`, `PresentOverlay::record(rhi::CommandList&, extent)`, `GbufferTargets` / `setGeneratedFrame` take `rhi::Texture*`, `Device::transient / releaseTransient / ring / frameSlot / retire`,
+  `presentWrapper()`; the public `ctx() / frames() / transients() / swapchain()` accessors are gone. `enh/rhi_scope.h` is a 20-line facade (`wrap(Texture)` identity). hal: `CheckDeviceFormat` -> `formatSupport`, adapter query ->
+  `enumerateAdapters`, caps report / RT self test / memory stats / FG probe -> `GameDevice`.
+- Counts before -> after (`vk::` mentions / any `Vk*`-`VK_*` token (mostly RHI vocabulary: VkFormat, VK_IMAGE_LAYOUT_*, VkExtent2D; overlay: Win32 `VK_F1`..) / lines naming a Vulkan object or call (VkCommandBuffer, VkImage, vkCmd*..)
+  / `#include "vk/..."`): d3d9 182 / 501 / 155 / 18 -> 153 / 473 / 138 / 18 (the rest is the draw path, record threads, frame loop, pipelines, present: WP2c; `resources.cpp` has none but the format table `vk::formatInfo` / `d3dfmt`),
+  enh 106 / 258 / 20 / 38 -> 9 / 228 / 0 / 2 (left: `vk::d3dFormatName`, the HLSL attribute text `[[vk::location]]`, `vk/formats.h`), overlay 2 / 50 / 4 / 0 -> 0 / 47 / 0 / 0, hal/vulkan 25 / 19 / 8 / 7 -> 17 / 3 / 0 / 2 (`vk/formats.h`),
+  native 0, engine 3 / 1 / 0 / 2 -> 1 / 1 / 0 / 1 (`vk/formats.h`).
+- Verification (RX 7900 XTX): rvk_tests 207 / 207, rvk_d3d9test --validation 21 / 21 (new: mip chain StretchRect, the engine's blit-onto-itself) 0 validation errors, rvk_rhitest --validation PASS (Vulkan + D3D12), rvk_vktest plain /
+  `--passes` / `--passes --rhi` / `--rt` / `--skin` / `--fsr` / `--fg` / `--names` PASS. In game (windowed, `-Validation -SyncValidation`, water.ocean=fft, rt.reflections=medium, shadows.rt=near, ao, gi; sea_cliff / beach_sun /
+  lake_jungle / pub_interior / shadow_inland_a; references = HEAD build `build\Ref5`, pictures in `out\rhi-migrate\wp2b_*`): wrapper and full 0 VUID / SYNC / warnings, every feature's first-frame line present; with
+  `upscale.mode=native_aa` + `framegen.mode=fsr3` only AMD's accepted `rw_*` format messages; overlay open (graphics tab, scrolled) clean in the back buffer (`out/wp2b/overlay2`) and through the frame generation swapchain's
+  present callback (402 of 402 callbacks with the overlay, `overlay3`). Pictures: mean abs difference new vs reference 1.1 - 4.4 of 255 (shadow_inland_a 8.7 - 15.4); two runs of the reference differ by 1.9 - 4.3 / 14.1 - 15.3
+  (the sky / water of that spot move between runs). CPU at the savegame (`rvk_perfsave`, lod 2x, ~1,510 draws, 14 windows per run, 5 interleaved runs each): wrapper CPU per frame ref 8.33 / 8.25 / 8.15 / 8.41 / 9.85 ms,
+  new 8.31 / 8.12 / 8.31 / 7.79 / 8.60; draw calls 2.44 vs 2.37 ms; pipeline binds 404.6 vs 405.9; full mode (2 runs each) 13.70 / 14.77 vs 13.47 / 13.51 ms (the machine ran hotter than during WP2a: 6.5 ms then).
+  `-PerfFrame 4200` (24 frames averaged, 1920x1080, three runs each, sea_cliff / lake_jungle): the GPU time per pass swung by up to 3x from run to run in BOTH builds this evening (e.g. water.rt at sea_cliff ref 0.21 / 1.23 / 0.47 ms, new 1.01 / 0.28 / 0.39; gi.screen at lake_jungle ref 2.05 / 3.02 / 3.13, new 3.41 / 1.78 / 1.94; shadows.rt trace ref 1.69 / 1.85 / 1.93, new 1.85 / 1.07 / 0.93), the ranges overlap everywhere: no difference beyond noise can be read from them (WP2a measured within 5 % on a quiet machine). Raw logs `out/rhi-migrate/perf/wp2b_*`.
+- Left for WP2c: `Frames` / `MeshArena` / `Bindless` / `PipelineCache` / `Swapchain` / `Presenter` / `GpuTimer` / `FgSwapchain` are still members of `d3d9::Device`; `RecordState` / packet application / record threads, scope
+  attachments (`Texture::image()`), `pipelineFor` (`GamePipeline`), the present path (blit to the swapchain, the overlay's rendering scope), `submitFrame / beginFrame` (read-backs flush the frame through them), `ctx_.features()`
+  queries, `moduleLabel(ctx_...)`; `bootstrap.cpp`'s `vk::probe()`. `GameCaps::uploadRowAlign / uploadOffsetAlign` are untested above 1 / 16 (the padded-row staging path in `Texture::upload` is compiled but never taken on Vulkan).
+
 ## Next steps (written 2026-10-30, at the break; user order: "make dx12 work, do everything necessary, do not report back until it works")
 
 Done and committed: S1 = WP1 (2774402: every shader to signed DXIL, uint2-pair address ABI, parity tests, checker `rvk_shadertool dxil-check`; the helpers are `RvkRef` / `rvkPtr` / `rvkRw*`, not the `RVK_PTR_*` macros
 the plan sketched), WP2a (7540a9a: `rhi::GameDevice`, `GpuRef` / `GpuAddr` / `RingAlloc`, `ShaderModule`). Earlier: Agility SDK setup (2db438a), RHI feature gaps, passes + RT scene on the RHI (957dc08 .. 49372b1).
-In progress when this was written: **WP2b** (agent a2d5e1e2346396237, uncommitted tree: textures / surfaces / buffers as RHI objects, `PassContext::cmd` -> `rhi::CommandList&`, `Upscaler` / `FrameGenerator` /
+WP2b was in progress when this was written and is now committed (see Status): **WP2b** (agent a2d5e1e2346396237, uncommitted tree: textures / surfaces / buffers as RHI objects, `PassContext::cmd` -> `rhi::CommandList&`, `Upscaler` / `FrameGenerator` /
 `PresentWrapper` modules in src/rhi/modules.h, capture pool, `formatSupport`, adapter enumeration). When it reports: rebuild, run rvk_tests / rvk_d3d9test --validation / rvk_rhitest --validation, check its in-game numbers, commit.
 
 Remaining, in order (each one agent with a brief like the previous ones: read CLAUDE.md + this doc + hlsl-rhi.md, gates = offline suites + in-game Vulkan wrapper / full with -Validation -SyncValidation + pictures vs a reference build +
@@ -101,3 +141,5 @@ savegame CPU A/B within about 0.15 ms, no commit by the agent, docs Status secti
    Vulkan-only build runs without d3d12.dll, unit tests (PSO key, GpuRef, format table).
 Orchestration notes: one agent at a time in the tree (shared build dir + GPU lock); verify and commit between agents; Vulkan stays default and must not regress; only the RX 7900 XTX can be validated (document NVIDIA / Intel
 as untested; the backend falls back to Vulkan with a log line when SM 6.6 / binding tier 3 / required features are missing). Open question for later: ship `vulkan.api=d3d12` as experimental after WP6, or after all packages.
+
+**Update (break, after WP2b):** WP2b is committed. Next agent = WP2c (open items listed in its Status section: Frames / MeshArena / Bindless / PipelineCache / Swapchain / Presenter / GpuTimer / FgSwapchain still members of d3d9::Device, RecordState + packet application, pipelineFor, present path, submitFrame/beginFrame, `ctx_.features()`, bootstrap `vk::probe()`; the padded-row texture upload path and D3D12 `copyBufferToTextureBox` are compiled but untested in game; `-PerfFrame` pass times were too noisy in WP2b: rerun on a quiet machine).

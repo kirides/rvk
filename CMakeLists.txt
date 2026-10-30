@@ -257,7 +257,6 @@ add_library(rvk_core STATIC
     src/hal/vulkan/hal_vulkan.h
     src/hal/vulkan/instance.cpp
     src/hal/vulkan/resources.cpp
-    src/overlay/imgui_vulkan.cpp
     src/overlay/keys.cpp
     src/overlay/keys.h
     src/overlay/overlay.cpp
@@ -268,6 +267,11 @@ add_library(rvk_core STATIC
     src/rhi/game_device.h
     src/rhi/rhi.cpp
     src/rhi/rhi.h
+    src/rhi/modules.h
+    src/rhi/vulkan/adapters.cpp
+    src/rhi/vulkan/imgui_backend.cpp
+    src/rhi/vulkan/imgui_vulkan_impl.cpp
+    src/rhi/vulkan/modules.cpp
     src/rhi/vulkan/vulkan_device.cpp
     src/rhi/vulkan/wrap.h
     src/shader/dxc.cpp
@@ -368,7 +372,7 @@ else()
 endif()
 set_source_files_properties(src/vk/volk_impl.c PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 # Dear ImGui's Vulkan backend, vendored from the imgui release vcpkg installs (third_party/imgui_vulkan: why there)
-set_source_files_properties(src/overlay/imgui_vulkan.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON COMPILE_OPTIONS "/W3")
+set_source_files_properties(src/rhi/vulkan/imgui_vulkan_impl.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON COMPILE_OPTIONS "/W3")
 
 # ---------------------------------------------------------------------------------------------
 # d3d9.dll: the proxy the game loads (Engine.dll imports d3d9.dll!Direct3DCreate9)

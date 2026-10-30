@@ -57,11 +57,11 @@ public:
 
     // d3d9::PresentOverlay
     bool active() override;
-    void record(VkCommandBuffer cmd, VkExtent2D extent) override;
+    void record(rhi::CommandList& cmd, VkExtent2D extent) override;
     // the AMD frame generation swapchain's present callback draws the overlay (another thread, on generated and real frames): the UI is
     // built on the render thread by prepare() and its draw lists are kept; recordPrepared() draws the latest ones
     bool prepare(VkExtent2D extent) override;
-    void recordPrepared(VkCommandBuffer cmd, VkExtent2D extent) override;
+    void recordPrepared(rhi::CommandList& cmd, VkExtent2D extent) override;
     bool hasPrepared() override { return prepared_.load(std::memory_order_acquire); }
 
     // the process's overlay (rvk_overlay), null when none
@@ -95,7 +95,8 @@ private:
     HWND__* window_ = nullptr;
     Options options_;
     bool initialised_ = false;
-    bool imguiVulkan_ = false;
+    bool imguiVulkan_ = false;  // ImGui context + platform backend set up (the renderer backend: backend_)
+    std::unique_ptr<rhi::ImGuiBackend> backend_;
     bool unicode_ = true;
     void* originalProc_ = nullptr;
 

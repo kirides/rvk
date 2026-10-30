@@ -18,7 +18,6 @@
 #include "d3d9/device.h"
 #include "rhi/rhi.h"
 #include "shader/abi.h"
-#include "vk/passes.h"
 
 namespace rvk::enh {
 
@@ -80,8 +79,8 @@ private:
     std::uint64_t depthFrame_ = 0;  // frame value of the last depth capture
     VkExtent2D depthExtent_{1, 1};  // its size
     std::uint64_t fallbacks_ = 0;   // frames without a capture
-    std::unique_ptr<rhi::Buffer> probes_[vk::Frames::kInFlight];  // host-visible probe results per frame slot
-    std::uint64_t probeFrame_[vk::Frames::kInFlight]{};     // frame value whose results a slot holds (0 = none)
+    std::unique_ptr<rhi::Buffer> probes_[rhi::kFramesInFlight];  // host-visible probe results per frame slot
+    std::uint64_t probeFrame_[rhi::kFramesInFlight]{};     // frame value whose results a slot holds (0 = none)
     std::chrono::steady_clock::time_point probeLogged_{};
     std::unique_ptr<rhi::Pipeline> compute_, depthCompute_, composite_;
     VkFormat compositeFormat_ = VK_FORMAT_UNDEFINED;

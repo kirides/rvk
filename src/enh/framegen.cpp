@@ -11,10 +11,7 @@
 #include "core/paths.h"
 #include "enh/gbuffer.h"
 #include "enh/rhi_scope.h"
-#include "rhi/vulkan/wrap.h"
 #include "shader/embedded.h"
-#include "vk/context.h"
-#include "vk/frames.h"
 
 namespace rvk::enh {
 
@@ -41,17 +38,12 @@ constexpr VkImageUsageFlags kDepthUsage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_
 constexpr VkImageUsageFlags kColorUsage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
                                           VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 
-bool copyImage(d3d9::Device& dev, VkCommandBuffer cmd, vk::Image& src, vk::Image& dst, VkExtent2D size) {
-    RhiScope rs(dev, cmd);
-    if (!rs) return false;
-    rhi::CommandList& cl = rs.cl();
-    rhi::Texture* srcT = rs.wrap(src);
-    rhi::Texture* dstT = rs.wrap(dst);
-    cl.transition(*srcT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    cl.transition(*dstT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+bool copyImage(rhi::CommandList& cl, rhi::Texture& src, rhi::Texture& dst, VkExtent2D size) {
+    cl.transition(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    cl.transition(dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     rhi::TextureCopy region;
     region.extent = {size.width, size.height, 1};
-    cl.copyTexture(*dstT, *srcT, std::span<const rhi::TextureCopy>(&region, 1));
+    cl.copyTexture(dst, src, std::span<const rhi::TextureCopy>(&region, 1));
     return true;
 }
 
@@ -161,10 +153,10 @@ void FrameGeneration::updateBackend() {
             manualNoticed_ = false;
             spdlog::info("enh: framegen: presenting through AMD's frame generation swapchain ('{}')",
                          dev_.frameGenSwapchain() != nullptr ? dev_.frameGenSwapchain()->providerName() : std::string());
-        } else if (!dev_.swapchain().frameGenWanted()) {
+        } else if (!dev_.frameGenWanted()) {
             fallbackManual_ = true;
             spdlog::warn("enh: framegen: AMD's frame generation swapchain is not available ({}): the manual model instead (the generated "
-                         "frame is timed by us, no AMD pacing)", dev_.swapchain().frameGenReason());
+                         "frame is timed by us, no AMD pacing)", dev_.frameGenReason());
         } else {
             retryAt_ = now + std::chrono::seconds(2);  // the window cannot be presented to now (minimised): later
         }
@@ -215,7 +207,7 @@ void FrameGeneration::disable() {
         dev_.setFrameGenSwapchain(false, {});
         spdlog::info("enh: framegen: AMD's frame generation swapchain released");
     }
-    for (const char* k : {"framegen.depth", "framegen.hudless.0", "framegen.hudless.1", "framegen.color", "framegen.out"}) dev_.transients().release(k);
+    for (const char* k : {"framegen.depth", "framegen.hudless.0", "framegen.hudless.1", "framegen.color", "framegen.out"}) dev_.releaseTransient(k);
     depthFrame_ = 0;
     hudlessFrame_ = false;
     lastPose_ = {};
@@ -245,8 +237,8 @@ void FrameGeneration::dropContext() {
     if (fg_->swapchainModel()) {
         // the callback model: the context goes (synchronously) before the swapchain does, the swapchain's threads and the GPU done
         // with it. Its mutex covers the destroy against a present of the present thread.
-        if (preparedValue_ == dev_.frames().currentValue()) dev_.flushFrameAndWait();  // this frame's commands use the context's images
-        vk::FgSwapchain* swp = dev_.frameGenSwapchain();
+        if (preparedValue_ == dev_.frameValue()) dev_.flushFrameAndWait();  // this frame's commands use the context's images
+        rhi::PresentWrapper* swp = dev_.frameGenSwapchain();
         if (swp != nullptr) {
             swp->waitForPresents();
             const std::lock_guard lock(swp->contextMutex());
@@ -257,7 +249,7 @@ void FrameGeneration::dropContext() {
         fg_.reset();
     } else {
         // the context's internal images may still be in use by frames in flight
-        dev_.frames().retire([f = std::move(fg_)]() mutable { f->destroy(); });
+        dev_.retire([f = std::move(fg_)]() mutable { f->destroy(); });
         fg_.reset();
     }
     ctxDisplay_ = {};
@@ -270,22 +262,22 @@ bool FrameGeneration::ensureContext(VkExtent2D display, VkFormat format, bool sw
         return true;
     }
     dropContext();
-    auto f = std::make_shared<vk::FrameGen>();
+    std::shared_ptr<rhi::FrameGenerator> f = dev_.game().createFrameGenerator();
     const std::filesystem::path dll = paths::dataDir() / "amd_fidelityfx_loader_vk.dll";
-    vk::FrameGenCreateInfo ci;
+    rhi::FrameGeneratorCreateInfo ci;
     ci.ml = s_.mode == FrameGenMode::Fsr4;
     ci.displaySize = ci.maxRenderSize = display;
     ci.backBufferFormat = format;
     ci.hudlessFormat = hudlessFormat != VK_FORMAT_UNDEFINED ? hudlessFormat : format;  // the swapchain's images may be RGBA, the engine's back buffer BGRA
     ci.swapchain = swapchain;
-    vk::FgSwapchain* swp = swapchain ? dev_.frameGenSwapchain() : nullptr;
+    rhi::PresentWrapper* swp = swapchain ? dev_.frameGenSwapchain() : nullptr;
     std::unique_lock<std::mutex> lock;
     if (swp != nullptr) lock = std::unique_lock<std::mutex>(swp->contextMutex());
-    bool ok = f->load(dll) && f->createContext(dev_.ctx(), ci);
-    if (!ok && ci.ml && f->loaded()) {
+    bool ok = f && f->load(dll) && f->createContext(ci);
+    if (!ok && ci.ml && f && f->loaded()) {
         spdlog::warn("enh: framegen: the FSR 4 (ML) frame generation is not available on this GPU: FSR 3");
         ci.ml = false;
-        ok = f->createContext(dev_.ctx(), ci);
+        ok = f->createContext(ci);
     }
     if (!ok) {
         spdlog::error("enh: framegen: frame generation is not available ({}): it stays off this session", dll.string());
@@ -308,13 +300,13 @@ void FrameGeneration::recordDepth(d3d9::PassContext& ctx) {
     depthFrame_ = 0;
     d3d9::Surface* ds = dev_.depthStencil();
     d3d9::Texture* hdr = ctx.sceneHdr;
-    VkCommandBuffer cmd = ctx.cmd;
+    rhi::CommandList& cmd = ctx.cmd;
     if (hdr == nullptr || ds == nullptr || ds->texture() == nullptr || !dev_.gbufferWritten()) return;
     const VkExtent2D render{hdr->desc().width, hdr->desc().height};
     if (ds->width() < render.width || ds->height() < render.height) return;
-    vk::Transients::Entry* depth = dev_.transients().get("framegen.depth", {kDepthFormat, render, kDepthUsage});
-    vk::Transients::Entry* motion =
-        dev_.transients().get("gbuffer.motion", {kGbufferMotionFormat, {render.width, render.height}, kGbufferMotionUsage});
+    rhi::Texture* depth = dev_.transient("framegen.depth", {kDepthFormat, render, kDepthUsage});
+    rhi::Texture* motion =
+        dev_.transient("gbuffer.motion", {kGbufferMotionFormat, {render.width, render.height}, kGbufferMotionUsage});
     if (depth == nullptr || motion == nullptr || !dev_.readable(ds->texture(), cmd)) return;
     PrepPush push{};
     push.h.frame = ctx.frameBlock.bits;
@@ -324,11 +316,10 @@ void FrameGeneration::recordDepth(d3d9::PassContext& ctx) {
     rhi::Device* rdev = dev_.rhi();
     if (rdev == nullptr || !prep_) return;
     {
-        const auto depthTex = rhi::vulkan::wrapImage(*rdev, depth->image, depth->slot, "framegen.depth");
-        const auto cl = rhi::vulkan::wrapCommandBuffer(*rdev, cmd);
-        cl->transition(*depthTex, VK_IMAGE_LAYOUT_GENERAL);
+        rhi::CommandList* const cl = &cmd;
+        cl->transition(*depth, VK_IMAGE_LAYOUT_GENERAL);
         cl->bindPipeline(*prep_);
-        rhi::Texture* const storage[] = {depthTex.get()};
+        rhi::Texture* const storage[] = {depth};
         cl->setStorageTextures(storage);
         cl->setPushConstants(&push, sizeof(push));
         cl->dispatch((render.width + 7) / 8, (render.height + 7) / 8, 1);
@@ -345,14 +336,14 @@ void FrameGeneration::recordHudless(d3d9::PassContext& ctx) {
     if (!on_ || failed_ || !((generating && gameplay_ && !paused_) || s_.view == FrameGenView::Hudless)) return;
     d3d9::Surface* bb = dev_.backBuffer();
     if (bb == nullptr || bb->texture() == nullptr) return;
-    vk::Image& src = bb->texture()->image();
+    rhi::Texture& src = bb->texture()->rhi();
     const VkExtent2D size{bb->width(), bb->height()};
     // two copies in turn: the swapchain's interpolation of the previous frame may still be reading the other one
     hudlessIndex_ ^= 1;
-    vk::Transients::Entry* h = dev_.transients().get(hudlessKey(), {src.format(), size, kColorUsage});
+    rhi::Texture* h = dev_.transient(hudlessKey(), {src.desc().format, size, kColorUsage});
     if (h == nullptr) return;
-    if (!copyImage(dev_, ctx.cmd, src, h->image, size)) return;
-    h->image.transition(ctx.cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (!copyImage(ctx.cmd, src, *h, size)) return;
+    if (h->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) ctx.cmd.transition(*h, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     hudlessFrame_ = true;
 }
 
@@ -371,7 +362,7 @@ void FrameGeneration::logBlock(FrameGenBlock b) {
 // The camera of this frame as the generator's inputs: also the cut detection's pose
 namespace {
 
-void fillPrepare(vk::FrameGenPrepare& p, d3d9::Device& dev, const d3d9::scene::CameraBlock& cam, const d3d9::scene::CameraBlock& last,
+void fillPrepare(rhi::FrameGeneratorPrepare& p, d3d9::Device& dev, const d3d9::scene::CameraBlock& cam, const d3d9::scene::CameraBlock& last,
                  const FrameGenPose& pose, VkExtent2D renderSize) {
     p.renderSize = renderSize;
     const std::array<float, 2> j = dev.jitter();  // what the upscaler was told (its jitter_flip is a test switch of the geometry only)
@@ -410,9 +401,9 @@ void FrameGeneration::recordGenerate(d3d9::PassContext& ctx) {
     }
     d3d9::Surface* bb = dev_.backBuffer();
     if (bb == nullptr || bb->texture() == nullptr) return;
-    vk::Image& real = bb->texture()->image();
+    rhi::Texture& real = bb->texture()->rhi();
     const VkExtent2D backSize{bb->width(), bb->height()};
-    const VkExtent2D display = sc ? dev_.swapchain().extent() : backSize;
+    const VkExtent2D display = sc ? dev_.presentExtent() : backSize;
     const d3d9::scene::CameraBlock& cam = dev_.camera();
 
     FrameGenFacts facts;
@@ -442,7 +433,7 @@ void FrameGeneration::recordGenerate(d3d9::PassContext& ctx) {
         return;
     }
     const d3d9::scene::CameraBlock& last = dev_.lastCamera();
-    if (blocker == FrameGenBlock::None && !ensureContext(display, real.format(), false, VK_FORMAT_UNDEFINED)) blocker = FrameGenBlock::NoProvider;
+    if (blocker == FrameGenBlock::None && !ensureContext(display, real.desc().format, false, VK_FORMAT_UNDEFINED)) blocker = FrameGenBlock::NoProvider;
     const FrameGenState::Step step = state_.advance(blocker, cut);
     logBlock(blocker);
     dev_.setFrameGenRunning(step.active);
@@ -453,54 +444,54 @@ void FrameGeneration::recordGenerate(d3d9::PassContext& ctx) {
     if (cut) ++cuts_;
     if (step.reset) ++resets_;
 
-    VkCommandBuffer cmd = ctx.cmd;
+    rhi::CommandList& cmd = ctx.cmd;
     // The DLL's Vulkan backend advances a small ring of resource-view slots per ffxDispatch and destroys the views of the slot it
     // enters (the same as the upscaler's, see vk/fsr.h): configure / prepare / dispatch of one frame use the ring up, so the previous
     // frame's commands must have finished before this frame's are recorded (validation: vkDestroyImageView in use). Cheap while the
     // GPU keeps up; a wait (counted in the 5 s line) when it does not.
     {
-        const std::uint64_t previous = dev_.frames().currentValue() - 1;
-        if (previous > 0 && dev_.frames().completedValue() < previous) {
+        const std::uint64_t previous = dev_.frameValue() - 1;
+        if (previous > 0 && dev_.completedFrame() < previous) {
             const auto w0 = std::chrono::steady_clock::now();
-            dev_.frames().waitFor(previous);
+            dev_.game().waitFrame(previous);
             ++ringWaits_;
             ringWaitMs_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - w0).count();
         }
     }
-    const VkFormat fmt = real.format();
-    vk::Transients::Entry* color = dev_.transients().get("framegen.color", {fmt, display, kColorUsage});
-    vk::Transients::Entry* out = dev_.transients().get("framegen.out", {fmt, display, kColorUsage});
-    vk::Transients::Entry* depth = dev_.transients().get("framegen.depth", {kDepthFormat, renderSize_, kDepthUsage});
-    vk::Transients::Entry* motion =
-        dev_.transients().get("gbuffer.motion", {kGbufferMotionFormat, {renderSize_.width, renderSize_.height}, kGbufferMotionUsage});
-    vk::Transients::Entry* hudless =
-        hudlessFrame_ ? dev_.transients().get(hudlessKey(), {fmt, display, kColorUsage}) : nullptr;
+    const VkFormat fmt = real.desc().format;
+    rhi::Texture* color = dev_.transient("framegen.color", {fmt, display, kColorUsage});
+    rhi::Texture* out = dev_.transient("framegen.out", {fmt, display, kColorUsage});
+    rhi::Texture* depth = dev_.transient("framegen.depth", {kDepthFormat, renderSize_, kDepthUsage});
+    rhi::Texture* motion =
+        dev_.transient("gbuffer.motion", {kGbufferMotionFormat, {renderSize_.width, renderSize_.height}, kGbufferMotionUsage});
+    rhi::Texture* hudless =
+        hudlessFrame_ ? dev_.transient(hudlessKey(), {fmt, display, kColorUsage}) : nullptr;
     if (color == nullptr || out == nullptr || depth == nullptr || motion == nullptr) return;
 
     // the finished frame (GUI included): the colour the interpolation reads and keeps for the next frame
-    if (!copyImage(dev_, cmd, real, color->image, display)) return;
+    if (!copyImage(cmd, real, *color, display)) return;
 
-    vk::FrameGenConfigure cfg;
+    rhi::FrameGeneratorConfigure cfg;
     cfg.enabled = true;
-    cfg.hudless = hudless != nullptr ? &hudless->image : nullptr;
+    cfg.hudless = hudless;
     cfg.frameId = step.frameId;
-    if (hudless != nullptr) hudless->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (hudless != nullptr && hudless->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) cmd.transition(*hudless, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     bool ok = fg_->configure(cfg);
 
-    vk::FrameGenPrepare p;
-    p.cmd = cmd;
+    rhi::FrameGeneratorPrepare p;
+    p.cmd = &cmd;
     p.frameId = step.frameId;
     p.reset = step.reset;
-    p.depth = &depth->image;
-    p.motion = &motion->image;
+    p.depth = depth;
+    p.motion = motion;
     fillPrepare(p, dev_, cam, last, pose, renderSize_);
     ok = ok && fg_->prepare(p);
 
-    vk::FrameGenDispatch d;
-    d.cmd = cmd;
+    rhi::FrameGeneratorDispatch d;
+    d.cmd = &cmd;
     d.frameId = step.frameId;
-    d.color = &color->image;
-    d.output = &out->image;
+    d.color = color;
+    d.output = out;
     d.reset = step.reset;
     ok = ok && fg_->dispatch(d);
     if (!ok) {
@@ -511,13 +502,13 @@ void FrameGeneration::recordGenerate(d3d9::PassContext& ctx) {
         return;
     }
     ++frames_;
-    generated_ = &out->image;
+    generated_ = out;
     generatedShown_ = step.show;
     generatedWidth_ = display.width;
     generatedHeight_ = display.height;
     if (step.show) {
         ++shown_;
-        dev_.setGeneratedFrame(&out->image);
+        dev_.setGeneratedFrame(out);
     }
     const double now = dev_.secondsSinceCreate();
     if (now - lastLog_ > 5.0) {
@@ -533,11 +524,11 @@ void FrameGeneration::recordGenerate(d3d9::PassContext& ctx) {
 // the HUD-less copy, the callbacks) and record Prepare. Disabled in menus / loading screens / pauses: the swapchain then presents the
 // real frames one for one (its present callback still draws the overlay).
 void FrameGeneration::recordSwapchain(d3d9::PassContext& ctx, FrameGenBlock blocker, bool cut, const FrameGenPose& pose, VkExtent2D display) {
-    vk::FgSwapchain* swp = dev_.frameGenSwapchain();
+    rhi::PresentWrapper* swp = dev_.frameGenSwapchain();
     if (swp == nullptr) return;
-    const VkFormat fmt = dev_.swapchain().format();
+    const VkFormat fmt = dev_.presentFormat();
     d3d9::Surface* backSurface = dev_.backBuffer();
-    const VkFormat hudFmt = backSurface != nullptr && backSurface->texture() != nullptr ? backSurface->texture()->image().format() : fmt;
+    const VkFormat hudFmt = backSurface != nullptr && backSurface->texture() != nullptr ? backSurface->texture()->rhi().desc().format : fmt;
     // The generator's context exists (disabled) from the start so that its configuration carries the present callback (overlay)
     if (!fg_ && !ensureContext(display, fmt, true, hudFmt)) {
         dev_.setFrameGenRunning(false);
@@ -560,10 +551,8 @@ void FrameGeneration::recordSwapchain(d3d9::PassContext& ctx, FrameGenBlock bloc
             ringWaitMs_ += ms;
         }
     }
-    vk::FrameGenConfigure cfg;
-    cfg.swapchain = swp->handle();
-    cfg.presentCallback = swp->presentCallback();
-    cfg.presentUser = swp->presentUser();
+    rhi::FrameGeneratorConfigure cfg;
+    cfg.present = swp;
     if (!step.active) {
         ++blocked_;
         if (!configured_ || lastEnabled_) {
@@ -580,23 +569,23 @@ void FrameGeneration::recordSwapchain(d3d9::PassContext& ctx, FrameGenBlock bloc
     if (cut) ++cuts_;
     if (step.reset) ++resets_;
 
-    vk::Transients::Entry* depth = dev_.transients().get("framegen.depth", {kDepthFormat, renderSize_, kDepthUsage});
-    vk::Transients::Entry* motion =
-        dev_.transients().get("gbuffer.motion", {kGbufferMotionFormat, {renderSize_.width, renderSize_.height}, kGbufferMotionUsage});
-    vk::Transients::Entry* hudless = hudlessFrame_ ? dev_.transients().get(hudlessKey(), {hudFmt, display, kColorUsage}) : nullptr;
+    rhi::Texture* depth = dev_.transient("framegen.depth", {kDepthFormat, renderSize_, kDepthUsage});
+    rhi::Texture* motion =
+        dev_.transient("gbuffer.motion", {kGbufferMotionFormat, {renderSize_.width, renderSize_.height}, kGbufferMotionUsage});
+    rhi::Texture* hudless = hudlessFrame_ ? dev_.transient(hudlessKey(), {hudFmt, display, kColorUsage}) : nullptr;
     if (depth == nullptr || motion == nullptr) return;
-    if (hudless != nullptr) hudless->image.transition(ctx.cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (hudless != nullptr && hudless->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) ctx.cmd.transition(*hudless, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     cfg.enabled = true;
-    cfg.hudless = hudless != nullptr ? &hudless->image : nullptr;
+    cfg.hudless = hudless;
     cfg.frameId = step.frameId;
     cfg.reset = step.reset;
-    vk::FrameGenPrepare p;
-    p.cmd = ctx.cmd;
+    rhi::FrameGeneratorPrepare p;
+    p.cmd = &ctx.cmd;
     p.frameId = step.frameId;
     p.reset = step.reset;
-    p.depth = &depth->image;
-    p.motion = &motion->image;
+    p.depth = depth;
+    p.motion = motion;
     fillPrepare(p, dev_, dev_.camera(), dev_.lastCamera(), pose, renderSize_);
     bool ok;
     {
@@ -613,7 +602,7 @@ void FrameGeneration::recordSwapchain(d3d9::PassContext& ctx, FrameGenBlock bloc
     configured_ = true;
     lastEnabled_ = true;
     lastFrameId_ = step.frameId;
-    preparedValue_ = dev_.frames().currentValue();
+    preparedValue_ = dev_.frameValue();
     ++frames_;
     if (step.show) ++shown_;
     const double now = dev_.secondsSinceCreate();
@@ -646,48 +635,47 @@ void FrameGeneration::recordDebug(d3d9::PassContext& ctx) {
     if (!on_ || failed_ || s_.view == FrameGenView::Off) return;
     d3d9::Surface* bb = dev_.backBuffer();
     if (bb == nullptr || bb->texture() == nullptr) return;
-    vk::Image& target = bb->texture()->image();
+    rhi::Texture& target = bb->texture()->rhi();
     const VkExtent2D size{bb->width(), bb->height()};
     const std::uint64_t frame = dev_.stats().frames + 1;
-    vk::Transients::Entry* src = nullptr;
+    rhi::Texture* src = nullptr;
     std::uint32_t mode = 3;
     switch (s_.view) {
         case FrameGenView::Motion:
             if (depthFrame_ == frame) {
-                src = dev_.transients().get("gbuffer.motion", {kGbufferMotionFormat, {renderSize_.width, renderSize_.height}, kGbufferMotionUsage});
+                src = dev_.transient("gbuffer.motion", {kGbufferMotionFormat, {renderSize_.width, renderSize_.height}, kGbufferMotionUsage});
             }
             mode = 1;
             break;
         case FrameGenView::Depth:
-            if (depthFrame_ == frame) src = dev_.transients().get("framegen.depth", {kDepthFormat, renderSize_, kDepthUsage});
+            if (depthFrame_ == frame) src = dev_.transient("framegen.depth", {kDepthFormat, renderSize_, kDepthUsage});
             mode = 2;
             break;
         case FrameGenView::Hudless:
-            if (hudlessFrame_) src = dev_.transients().get(hudlessKey(), {target.format(), size, kColorUsage});
+            if (hudlessFrame_) src = dev_.transient(hudlessKey(), {target.desc().format, size, kColorUsage});
             break;
         case FrameGenView::Generated:
-            if (generated_ != nullptr) src = dev_.transients().get("framegen.out", {target.format(), size, kColorUsage});
+            if (generated_ != nullptr) src = dev_.transient("framegen.out", {target.desc().format, size, kColorUsage});
             break;
         case FrameGenView::Off: break;
     }
     rhi::Device* rdev = dev_.rhi();
-    if (src == nullptr || rdev == nullptr || !ensurePipelines(*rdev, target.format())) return;
-    VkCommandBuffer cmd = ctx.cmd;
-    src->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (src == nullptr || rdev == nullptr || !ensurePipelines(*rdev, target.desc().format)) return;
+    rhi::CommandList& cmd = ctx.cmd;
+    if (src->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) cmd.transition(*src, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     DebugPush push{};
     push.h.frame = ctx.frameBlock.bits;
     push.h.passId = 4;
-    push.srcTex = src->slot;
+    push.srcTex = src->heapSampled();
     push.sampler0 = dev_.samplerFor(mode == 3, true);  // data views: point; colour: linear
     push.mode = mode;
     const d3d9::scene::CameraBlock& cam = dev_.camera();
     push.nearZ = cam.nearZ > 0.0f ? cam.nearZ : 10.0f;
     push.farZ = cam.farZ > push.nearZ ? cam.farZ : 100000.0f;
-    const auto targetTex = rhi::vulkan::wrapImage(*rdev, target, 0, "framegen.debug target");
-    const auto cl = rhi::vulkan::wrapCommandBuffer(*rdev, cmd);
-    cl->transition(*targetTex, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    rhi::CommandList* const cl = &cmd;
+    cl->transition(target, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     rhi::RenderingInfo ri;
-    ri.color[0].texture = targetTex.get();
+    ri.color[0].texture = &target;
     ri.color[0].load = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     ri.color[0].store = VK_ATTACHMENT_STORE_OP_STORE;
     ri.colorCount = 1;
@@ -704,7 +692,7 @@ bool FrameGeneration::readGenerated(std::vector<std::uint8_t>& bgra, std::uint32
     if (generated_ == nullptr || !generatedShown_) return false;
     width = generatedWidth_;
     height = generatedHeight_;
-    const VkDeviceSize size = static_cast<VkDeviceSize>(width) * height * 4;
+    const std::uint64_t size = static_cast<std::uint64_t>(width) * height * 4;
     return dev_.readImageLevel(*generated_, 0, 0, {width, height, 1}, size, bgra);
 }
 

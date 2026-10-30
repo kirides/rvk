@@ -10,7 +10,6 @@
 
 #include "enh/rt_shadows.h"
 #include "shader/embedded.h"
-#include "vk/pipeline.h"
 
 namespace rvk::enh {
 
@@ -226,7 +225,7 @@ void Shadows::drawMask(d3d9::Device& device, const d3d9::ReplaceQuery& q, int va
         }
     }
 
-    const rhi::RingAlloc a = device.frames().allocate(sizeof(b), 16);
+    const rhi::RingAlloc a = device.ring(sizeof(b), 16);
     std::memcpy(a.ptr, &b, sizeof(b));
     out.action = d3d9::DrawReplacement::Action::Procedural;
     out.vs = vs_;

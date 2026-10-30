@@ -31,7 +31,6 @@
 #include "enh/water_profile.h"
 #include "enh/water_rt.h"
 #include "shader/abi.h"
-#include "vk/passes.h"
 
 namespace rvk::enh {
 

@@ -32,7 +32,6 @@
 #include "engine/lights.h"
 #include "rhi/rhi.h"
 #include "shader/abi.h"
-#include "vk/passes.h"
 
 namespace rvk::enh {
 
@@ -151,7 +150,7 @@ private:
     void disable();
     void record(d3d9::PassContext& ctx);
     bool pipelinesReady();
-    bool ensureResources(VkCommandBuffer cmd);
+    bool ensureResources(rhi::CommandList& cmd);
     void destroyResources();
     void updateCascades(const float camera[3]);
     void queue(Cascade& c, std::uint32_t slot);

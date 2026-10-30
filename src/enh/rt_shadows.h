@@ -19,7 +19,6 @@
 #include "d3d9/device.h"
 #include "rhi/rhi.h"
 #include "shader/abi.h"
-#include "vk/passes.h"
 
 namespace rvk::enh {
 
@@ -95,8 +94,8 @@ private:
         int next = 0;
         RtShadowPush push{};
         std::uint32_t gx = 0, gy = 0;
-        vk::Transients::Entry* hist = nullptr;
-        vk::Transients::Entry* fin = nullptr;
+        rhi::Texture* hist = nullptr;
+        rhi::Texture* fin = nullptr;
         std::uint32_t cur = 0, w = 0, h = 0;
         float range = 0.0f;
     };

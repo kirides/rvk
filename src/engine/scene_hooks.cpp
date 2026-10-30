@@ -21,7 +21,7 @@
 #include "engine/shadow_maps.h"
 #include "engine/symbols.h"
 #include "hal/vulkan/hal_vulkan.h"
-#include "vk/debug_names.h"
+#include "rhi/game_device.h"
 #include "vk/formats.h"
 
 namespace rvk::engine::scene {
@@ -194,7 +194,7 @@ void detourExecute(void* db, void* desc) {
         // the image effect's scene target is bound when its eCImageFilterScene calls Execute
         if (g_inSceneFilter > 0) {
             if (d3d9::Texture* t = textureOf(scope.d->renderTarget(0), *scope.d)) scope.d->tagImage(t, ImageRole::SceneHdr);
-            if (vk::names::enabled()) {
+            if (rhi::debugNamesEnabled()) {
                 if (d3d9::Surface* ds = scope.d->depthStencil(); ds != nullptr && ds->texture() != nullptr) {
                     ds->texture()->setDebugLabel("scene depth-stencil");
                 }
@@ -219,7 +219,7 @@ void detourExecuteShadowMap(void* db, void* shadowMap) {
     if (scope.d != nullptr) {
         // the shadow map's targets are bound before (eCShadowMapBase::RenderShadowMap, vtable +0x120): a colour map (R16F /
         // R32F, cubes for point lights) or the NULL colour target + a sampled DF24 / DF16 depth texture (sun cascades)
-        const MapLabel label = vk::names::enabled() ? shadowMapLabel(shadowMap) : MapLabel{};
+        const MapLabel label = rhi::debugNamesEnabled() ? shadowMapLabel(shadowMap) : MapLabel{};
         if (d3d9::Texture* t = textureOf(scope.d->renderTarget(0), *scope.d)) {
             scope.d->tagImage(t, t->desc().type == d3d9::TextureType::Cube ? ImageRole::ShadowCube : ImageRole::ShadowMap, label.text,
                               label.index);

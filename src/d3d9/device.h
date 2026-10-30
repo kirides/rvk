@@ -115,15 +115,18 @@ public:
     Surface* surface(std::uint32_t level, std::uint32_t face);
 
     // render thread
-    vk::Image& image() { return image_; }
+    // the RHI texture behind it (the image and its layout tracking: rhi::Texture::layout / CommandList::transition)
+    rhi::Texture& rhi() { return *tex_; }
+    // the Vulkan image behind the RHI texture: only for the draw path that has not moved behind the backend seam yet (WP2c: scope attachments, packet
+    // application); everything else uses rhi() / bindlessSlot()
+    vk::Image& image() { return *vkImage_; }
     std::uint32_t bindlessSlot() const { return slot_; }
-    vk::TextureKind kind() const { return kind_; }
-    bool prepareForSampling(VkCommandBuffer cmd);  // uploads pending data, transitions to shader-read; false if nothing to sample
+    bool prepareForSampling(rhi::CommandList& cl);  // uploads pending data, transitions to shader-read; false if nothing to sample
     // what the engine uses the image for (Device::tagImage; render thread)
     scene::ImageRole role() const { return role_; }
     // persistent identity (d3d9/identity.h): the generation counts uploads of CPU data
     ResourceRef ref() const { return {id_, generation_.load(std::memory_order_relaxed)}; }
-    // the VK_EXT_debug_utils name of the image: "<label> #<index> | tex <id> WxH FORMAT [slot N]" (vk/debug_names.h). The label is
+    // the debug name of the image: "<label> #<index> | tex <id> WxH FORMAT [slot N]" (vk/debug_names.h). The label is
     // the role the scene tracker found ("depth map", "cascade shadow map" #k, ...): a static string, renamed when it changes
     // (Device::tagImage). Render thread
     void setDebugLabel(const char* label, std::uint32_t index = ~0u);
@@ -151,16 +154,17 @@ private:
     void markDirty(Level& l, std::uint32_t level, const std::int32_t* rect);
     void freeLevel(Level& l);
     bool restoreLevel(std::uint32_t level, std::uint32_t face);  // read a dropped level back from the image; mutex_ not held
-    void upload(VkCommandBuffer cmd);
+    void upload(rhi::CommandList& cl);
 
     Device& dev_;
     TextureDesc desc_;
     vk::FormatInfo fmt_{};
     bool valid_ = false;
     bool isNull_ = false;
-    vk::Image image_;
-    vk::TextureKind kind_ = vk::TextureKind::Tex2D;
-    std::uint32_t slot_ = 0;
+    std::unique_ptr<rhi::Texture> tex_;  // the backend's image + its tracked layout + the bindless slot (owned: destroyed through the device's retirement)
+    vk::Image* vkImage_ = &nullImage();  // tex_'s Vulkan image (Texture::image(): the not yet moved draw path); an empty image for the NULL target
+    static vk::Image& nullImage();
+    std::uint32_t slot_ = 0;             // tex_->heapSampled()
     std::mutex mutex_;
     std::vector<Level> cpu_;            // [face * levels + level], allocated on demand
     std::atomic<bool> pending_{false};  // some level is dirty
@@ -219,8 +223,8 @@ public:
 
     // render thread: the GPU copy for a draw (uploads / renames as needed)
     struct Binding {
-        VkBuffer buffer = VK_NULL_HANDLE;
-        VkDeviceSize offset = 0;
+        std::uint64_t buffer = 0;  // the backend's buffer handle (rhi::RingAlloc::buffer / MeshAlloc::native; Vulkan: the VkBuffer), 0 = none
+        std::uint64_t offset = 0;
     };
     // strideHint: the first use's vertex stride / index size: a new static copy starts at a multiple of it in the mesh arena,
     // so a draw can bind the arena at offset 0 and pass the offset as vertexOffset / firstIndex (0 = no hint)
@@ -248,7 +252,7 @@ private:
     // dynamic buffers: the frame's ring copy holds the bytes [ringLo_, ringHi_) at ringPtr_ (d3d9::RingBlock)
     std::uint8_t* ringPtr_ = nullptr;
     std::uint32_t ringLo_ = 0, ringHi_ = 0;
-    vk::MeshArena::Alloc static_;  // the static GPU copy, in the device's mesh arena
+    rhi::MeshAlloc static_;  // the static GPU copy, in the device's mesh arena
     friend class Device;
     void orphan();           // as Texture::orphan
     bool orphaned_ = false;  // under Device::liveMutex_
@@ -478,21 +482,21 @@ public:
     virtual bool active() = 0;
     // records draws inside a dynamic rendering scope of one colour attachment of `extent` (LOAD / STORE; viewport, scissor,
     // pipeline and descriptor sets are the overlay's own)
-    virtual void record(VkCommandBuffer cmd, VkExtent2D extent) = 0;
+    virtual void record(rhi::CommandList& cmd, VkExtent2D extent) = 0;
     // The AMD frame generation swapchain draws the overlay in its present callback (another thread, on the generated and the real
     // frame): prepare builds the UI on the render thread and keeps its draw lists (true: there is something to draw), recordPrepared
     // draws the latest ones into the scope (any thread; the same contract as record)
     virtual bool prepare(VkExtent2D /*extent*/) { return false; }
-    virtual void recordPrepared(VkCommandBuffer /*cmd*/, VkExtent2D /*extent*/) {}
+    virtual void recordPrepared(rhi::CommandList& /*cmd*/, VkExtent2D /*extent*/) {}
     virtual bool hasPrepared() { return false; }
 };
 
-// What an injected pass gets (Device::inject, d3d9/inject.h; render thread). `cmd` is the frame's command buffer outside any
-// rendering scope; the pass records its own barriers (vk::Image::transition, Device::readable), binds its own pipeline,
-// descriptor sets and push constants, and may begin / end its own rendering scopes. It must not change the D3D9 state.
+// What an injected pass gets (Device::inject, d3d9/inject.h; render thread). `cmd` is the frame's command list outside any
+// rendering scope (with nothing bound: GameDevice::passCommands); the pass records its own barriers (CommandList::transition, Device::readable), binds
+// its own pipeline and push constants, and may begin / end its own rendering scopes. It must not change the D3D9 state.
 struct PassContext {
     Device& device;
-    VkCommandBuffer cmd;
+    rhi::CommandList& cmd;
     inject::Point point;
     std::uint32_t mainView = 0;      // 1 = the frame's first main view, 2 = the second, ...; 0 for BeforeGui
     rhi::GpuRef frameBlock;          // shader::abi::FrameBlock of this frame (RVK_PASS_PUSH_HEADER's frame)
@@ -723,7 +727,7 @@ public:
     bool loadSurfaceFromSurface(Texture* dst, std::uint32_t dstLevel, const std::int32_t* dstRect, Texture* src,
                                 std::uint32_t srcLevel, const std::int32_t* srcRect, bool linear, std::string* why = nullptr);
     // copy one level / layer of an image into `out` (storage layout, tightly packed; waits for the GPU)
-    bool readImageLevel(vk::Image& img, std::uint32_t level, std::uint32_t layer, VkExtent3D extent, VkDeviceSize size,
+    bool readImageLevel(rhi::Texture& tex, std::uint32_t level, std::uint32_t layer, VkExtent3D extent, std::uint64_t size,
                         std::vector<std::uint8_t>& out);
     // read the back buffer as tightly packed BGRA8 (waits for the GPU)
     bool readBackBuffer(std::vector<std::uint8_t>& bgra, std::uint32_t& width, std::uint32_t& height);
@@ -738,12 +742,14 @@ public:
     // ---- AMD frame generation swapchain (vk/fg_swapchain.h, enh/framegen.h) ----
     // Switches the presentation to AMD's swapchain (or back to ours). Render thread, between frames: waits for the GPU and
     // re-creates the swapchain. `loaderDll` = the FidelityFX loader. True when the swapchain is the requested kind afterwards;
-    // false: the reason is swapchain().frameGenReason() (ours is in use; a minimised window is retried by the caller).
+    // false: the reason is frameGenReason() (ours is in use; a minimised window is retried by the caller).
     bool setFrameGenSwapchain(bool want, const std::filesystem::path& loaderDll);
     bool frameGenSwapchainActive() const { return swapchain_.frameGenActive(); }
     // shutdown: the generator's context goes (FrameGenClient), then AMD's swapchain, without building another
     void shutdownFrameGenSwapchain();
-    vk::FgSwapchain* frameGenSwapchain() { return swapchain_.frameGen(); }
+    rhi::PresentWrapper* frameGenSwapchain() { return presentWrapper(); }
+    // the AMD swapchain as the RHI's PresentWrapper (null while it is not in use)
+    rhi::PresentWrapper* presentWrapper();
     // The generator's owner: told (render thread, presenter idle) before the swapchain is re-created or destroyed so that it
     // drops what refers to it (the generator context must go before the swapchain's)
     struct FrameGenClient {
@@ -831,7 +837,15 @@ public:
     void drawOverlayIntoBackBuffer();
     // colour format the overlay renders to (the swapchain's, or the back buffer's with intoBackBuffer)
     VkFormat overlayFormat() const;
-    const vk::Swapchain& swapchain() const { return swapchain_; }
+    bool presentValid() const { return swapchain_.valid(); }  // (the presentation itself has not moved behind the seam yet: WP2c)
+    // what the presentation offers the enhancements (the swapchain's size / format, why AMD's swapchain was not used)
+    VkExtent2D presentExtent() const { return swapchain_.extent(); }
+    VkFormat presentFormat() const { return swapchain_.format(); }
+    bool frameGenWanted() const { return swapchain_.frameGenWanted(); }
+    const std::string& frameGenReason() const { return swapchain_.frameGenReason(); }
+    // the swapchain's image counts (the overlay's UI backend buffers its resources for them)
+    std::uint32_t presentMinImageCount() const { return swapchain_.minImageCount(); }
+    std::uint32_t presentImageCount() const { return swapchain_.imageCount(); }
     // the last frame's numbers for the overlay's performance panel (cheap, always on; GPU only with [debug] perf)
     struct LiveFrame {
         float intervalMs = 0.0f;  // present to present
@@ -845,7 +859,7 @@ public:
     // Manual frame generation (enh/framegen.h): set from the BeforePresent pass with the interpolated frame (display size, same
     // format family as the back buffer, usable as a transfer source); present() shows it first and the real frame half a base
     // interval later, then forgets it. Cleared when the frame is not presented.
-    void setGeneratedFrame(vk::Image* image) { generated_ = image; }
+    void setGeneratedFrame(rhi::Texture* image) { generated_ = image; }
     Surface* autoDepthStencil() { return depthSurface_; }
     const FrameStats& stats() const { return stats_; }
     // [debug] perf: the numbers since the last call (zeroed afterwards)
@@ -958,7 +972,6 @@ public:
     void setSceneSubstitute(const Texture* from, std::uint32_t slot) { substituteFrom_ = from; substituteSlot_ = slot; }
     // this frame's jitter in pixels of the scene target (0, 0 = none)
     std::array<float, 2> jitter() const { return {jitter_[0], jitter_[1]}; }
-    vk::Transients& transients() { return transients_; }
     // draw replacement (enh/water, enh/shadows): a replacer must outlive its registration; adding twice is a no-op
     void addDrawReplacer(DrawReplacer* replacer);
     void removeDrawReplacer(DrawReplacer* replacer);
@@ -1012,8 +1025,8 @@ public:
     // builds them in the background (prewarm, the frame's solid draws as the template) and arms the attachments once a
     // frame's solid pass found all of them (or after 10 s). Render thread; normal == null = off.
     struct GbufferTargets {
-        vk::Image* normal = nullptr;
-        vk::Image* motion = nullptr;
+        rhi::Texture* normal = nullptr;
+        rhi::Texture* motion = nullptr;
         std::uint32_t width = 0, height = 0;
     };
     void setGbuffer(const GbufferTargets& g);
@@ -1100,11 +1113,21 @@ public:
     bool prebuildReplacement(const Shader& vs, const Shader& ps, bool procedural);
     bool replacementReady(const Shader& vs, const Shader& ps, bool procedural) const;
     // a texture ready for sampling (vertex / fragment / compute) in a pass: pending uploads + layout; false if not sampleable
-    bool readable(Texture* texture, VkCommandBuffer cmd);
+    bool readable(Texture* texture, rhi::CommandList& cmd);
 
     // internals used by resources
-    vk::Context& ctx() { return ctx_; }
-    vk::Frames& frames() { return frames_; }
+    // (the backend seam below replaces the old public ctx() / frames() for everything outside the not yet moved frame loop)
+    // the transient images of the passes (GameDevice::transient): created on first use, recreated when the description changes
+    rhi::Texture* transient(std::string_view key, const rhi::TransientDesc& desc) { return game_->transient(key, desc); }
+    void releaseTransient(std::string_view key) { game_->releaseTransient(key); }
+    // frame ring / frame state (GameDevice)
+    rhi::RingAlloc ring(std::uint64_t size, std::uint64_t alignment = 256) { return game_->allocRing(size, alignment); }
+    std::uint32_t frameSlot() const { return game_->frameSlot(); }
+    std::uint64_t completedFrame() const { return game_->completedFrame(); }
+    void retire(std::function<void()> fn) { game_->retire(std::move(fn)); }
+    // the Vulkan image of an RHI texture of this device (Texture::image(): the draw path that has not moved behind the seam yet)
+    vk::Image& vkImage(rhi::Texture& texture);
+    bool namesEnabled() const;
     // the slim RHI over this device's Vulkan objects (rhi/vulkan/wrap.h): the backend seam `game()` as an rhi::Device (passes, textures, acceleration structures)
     rhi::Device* rhi() { return game_.get(); }
     rhi::GameDevice& game() { return *game_; }  // valid between create() and destroy()
@@ -1115,6 +1138,10 @@ public:
     bool recordingThread() const;
     // the frame's upload command buffer (submitted before the frame's draws); render thread
     VkCommandBuffer uploadCommands();
+    // the same as an RHI list, ordered after the earlier work (the barrier of the first use in a frame is recorded here); render thread
+    rhi::CommandList& uploadList();
+    // the frame's main command list (GameDevice::frameCommands)
+    rhi::CommandList& frameList() { return game_->frameCommands(); }
 
 private:
     struct Stream {
@@ -1283,7 +1310,7 @@ private:
     bool drawSplit_[2] = {};
     rhi::GpuRef drawWin_[2][shader::abi::kConstWindows]{};
     std::uint32_t psWindowMinEnd_ = 0;
-    void blit(vk::Image& src, std::uint32_t srcLevel, std::uint32_t srcLayer, const VkOffset3D srcBox[2], vk::Image& dst,
+    void blit(rhi::Texture& src, std::uint32_t srcLevel, std::uint32_t srcLayer, const VkOffset3D srcBox[2], rhi::Texture& dst,
               std::uint32_t dstLevel, std::uint32_t dstLayer, const VkOffset3D dstBox[2], VkFilter filter);
     static std::uint32_t slotOf(std::uint32_t d3dSampler);
 
@@ -1298,6 +1325,8 @@ private:
     void recreateSwapchain();
     vk::FramePacer pacer_;
     FrameGenClient* fgClient_ = nullptr;
+    std::unique_ptr<rhi::PresentWrapper> fgWrapper_;  // presentWrapper(): over swapchain_'s AMD swapchain
+    const vk::FgSwapchain* fgWrapperFor_ = nullptr;
     bool fgRunning_ = false;
     bool fgUiInstalled_ = false;
     // live output / base rate (once a second) and the report window
@@ -1652,6 +1681,7 @@ private:
     // enhancements
     std::vector<std::uint8_t> giHeader_;
     GbufferTargets gbuf_;
+    vk::Image* gbufImage_[2]{};  // gbuf_'s images (the scope's attachments)
     bool gbufArmed_ = false;
     bool scopeGbuf_ = false;                // the open rendering scope has the G-buffer attachments
     std::uint32_t engineColorCount_ = 0;    // the engine's colour attachments of the open scope (the G-buffer's come after)
@@ -1717,7 +1747,7 @@ private:
     float renderRatio_ = 1.0f;
     std::array<std::uint32_t, 2> displaySize_{};
     bool postAtDisplaySize_ = true;
-    vk::Image* generated_ = nullptr;
+    rhi::Texture* generated_ = nullptr;
     double baseIntervalMs_ = 0.0;  // smoothed present-to-present interval
     const Texture* substituteFrom_ = nullptr;
     std::uint32_t substituteSlot_ = 0;
@@ -1726,7 +1756,6 @@ private:
     inject::Registry passes_;
     inject::Firings firings_;
     bool injecting_ = false;
-    vk::Transients transients_;
     std::unique_ptr<rhi::GameDevice> game_;  // the backend seam (created with the context; rhi()): destroyed before frames_ (its retirements run there)
 
     // overlay

@@ -26,8 +26,7 @@
 
 #include "d3d9/device.h"
 #include "rhi/rhi.h"
-#include "vk/fsr.h"
-#include "vk/passes.h"
+#include "rhi/modules.h"
 
 namespace rvk::enh {
 
@@ -72,7 +71,7 @@ private:
     void record(d3d9::PassContext& ctx);
     void recordOpaque(d3d9::PassContext& ctx);
     bool ensureFsr(VkExtent2D render, VkExtent2D display, bool autoExposure);
-    bool recordExposure(d3d9::PassContext& ctx, d3d9::Texture& luminance, vk::Transients::Entry& out);
+    bool recordExposure(d3d9::PassContext& ctx, d3d9::Texture& luminance, rhi::Texture& out);
     void releaseExposureReadback();
     void dropFsr();
 
@@ -100,11 +99,11 @@ private:
     // empty = the local Halton sequence (jitter only, FSR unavailable). Guarded: the jitter source may run on another thread.
     void refreshJitterTable(VkExtent2D render, VkExtent2D display);
     std::mutex jitterMutex_;
-    const vk::Fsr* fsrTableFor_ = nullptr;  // the context the table was read from (guarded by jitterMutex_)
+    const rhi::Upscaler* fsrTableFor_ = nullptr;  // the context the table was read from (guarded by jitterMutex_)
     std::vector<std::array<float, 2>> jitterTable_;
     bool failed_ = false;  // the DLL / the context / the pipeline is not available: FSR stays off this session
     std::unique_ptr<rhi::Pipeline> prep_;  // hardware depth -> R32F (storage image u0)
-    std::shared_ptr<vk::Fsr> fsr_;  // retired with the frame that last used it
+    std::shared_ptr<rhi::Upscaler> fsr_;  // retired with the frame that last used it
     VkExtent2D fsrRender_{}, fsrDisplay_{};
     bool needReset_ = true;  // the next dispatch drops the history (first frame, size change, skipped frames)
     std::uint64_t frames_ = 0, skipped_ = 0;

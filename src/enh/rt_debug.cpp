@@ -8,7 +8,6 @@
 #include "enh/rhi_scope.h"
 #include "enh/rt_scene.h"
 #include "shader/embedded.h"
-#include "vk/context.h"
 
 namespace rvk::enh {
 
@@ -67,11 +66,11 @@ void RtDebug::setMode(Mode mode, std::uint32_t flags) {
         if (passId_ != 0) dev_.removePass(passId_);
         if (depthPassId_ != 0) dev_.removePass(depthPassId_);
         passId_ = depthPassId_ = 0;
-        dev_.transients().release("rt.debug");
-        dev_.transients().release("rt.debug.depth");
+        dev_.releaseTransient("rt.debug");
+        dev_.releaseTransient("rt.debug.depth");
         scene_.keepContents(false);
         scene_.release(this);
-        for (std::uint32_t i = 0; i < vk::Frames::kInFlight; ++i) {
+        for (std::uint32_t i = 0; i < rhi::kFramesInFlight; ++i) {
             probes_[i].reset();  // (destroyed with the frame being recorded)
             probeFrame_[i] = 0;
         }
@@ -93,7 +92,7 @@ void RtDebug::setMode(Mode mode, std::uint32_t flags) {
     } else if (mode != Mode::Depth && depthPassId_ != 0) {
         dev_.removePass(depthPassId_);
         depthPassId_ = 0;
-        dev_.transients().release("rt.debug.depth");
+        dev_.releaseTransient("rt.debug.depth");
     }
     frames_ = 0;
 }
@@ -155,9 +154,9 @@ void RtDebug::captureDepth(d3d9::PassContext& ctx) {
     d3d9::Texture* scene = ctx.sceneHdr;
     if (ds == nullptr || ds->texture() == nullptr || scene == nullptr || ctx.target != scene) return;
     d3d9::Surface* bb = dev_.backBuffer();
-    if (bb == nullptr || !ensurePipelines(bb->texture()->image().format())) return;
+    if (bb == nullptr || !ensurePipelines(bb->texture()->rhi().desc().format)) return;
     const std::uint32_t w = std::min(scene->desc().width, ds->width()), h = std::min(scene->desc().height, ds->height());
-    vk::Transients::Entry* out = dev_.transients().get("rt.debug.depth", {VK_FORMAT_R32_SFLOAT, {w, h}});
+    rhi::Texture* out = dev_.transient("rt.debug.depth", {VK_FORMAT_R32_SFLOAT, {w, h}});
     if (out == nullptr || !dev_.readable(ds->texture(), ctx.cmd)) return;
     RtDebugPush push{};
     push.h.frame = ctx.frameBlock.bits;
@@ -186,12 +185,12 @@ void RtDebug::record(d3d9::PassContext& ctx) {
     d3d9::Surface* bb = dev_.backBuffer();
     if (bb == nullptr || bb->texture() == nullptr) return;
     d3d9::Texture* targetTex = bb->texture();
-    vk::Image& target = targetTex->image();
-    if (!ensurePipelines(target.format())) return;
+    rhi::Texture& target = targetTex->rhi();
+    if (!ensurePipelines(target.desc().format)) return;
     const std::uint32_t w = bb->width(), h = bb->height();
-    vk::Transients::Entry* color = dev_.transients().get("rt.debug", {VK_FORMAT_R16G16B16A16_SFLOAT, {w, h}});
+    rhi::Texture* color = dev_.transient("rt.debug", {VK_FORMAT_R16G16B16A16_SFLOAT, {w, h}});
     if (color == nullptr) return;
-    VkCommandBuffer cmd = ctx.cmd;
+    rhi::CommandList& cmd = ctx.cmd;
 
     RtDebugPush push{};
     push.h.frame = ctx.frameBlock.bits;
@@ -200,11 +199,11 @@ void RtDebug::record(d3d9::PassContext& ctx) {
     push.height = h;
     push.mode = static_cast<std::uint32_t>(mode_) | flags_;
     // the raster's depth: this frame's hardware depth capture (depth mode), else the engine's linear depth map (z-pass only)
-    vk::Transients::Entry* captured = mode_ == Mode::Depth && depthFrame_ == dev_.frameValue()
-                                          ? dev_.transients().get("rt.debug.depth", {VK_FORMAT_R32_SFLOAT, depthExtent_})
+    rhi::Texture* captured = mode_ == Mode::Depth && depthFrame_ == dev_.frameValue()
+                                          ? dev_.transient("rt.debug.depth", {VK_FORMAT_R32_SFLOAT, depthExtent_})
                                           : nullptr;
     if (captured != nullptr) {
-        push.depthTex = captured->slot;
+        push.depthTex = captured->heapSampled();
         push.mode |= kRtDebugLinearDepth;
     } else if (ctx.depthMap != nullptr && dev_.readable(ctx.depthMap, cmd)) {
         push.depthTex = ctx.depthMap->bindlessSlot();
@@ -213,10 +212,10 @@ void RtDebug::record(d3d9::PassContext& ctx) {
                          "reference ({} frames so far)", fallbacks_);
         }
     }
-    push.srcTex = color->slot;
+    push.srcTex = color->heapSampled();
     push.srcSampler = 0;  // point / clamp (same size: one texel per pixel)
     // probe results: the slot's previous ones are complete (Frames::begin waited for that submission)
-    const std::uint32_t slot = dev_.frames().currentSlot();
+    const std::uint32_t slot = dev_.frameSlot();
     readProbes(slot);
     if (probes_[slot] == nullptr && dev_.rhi() != nullptr) {
         probes_[slot] = dev_.rhi()->createBuffer(

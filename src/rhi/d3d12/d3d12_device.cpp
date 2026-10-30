@@ -298,6 +298,8 @@ public:
     std::uint32_t heapSampled() const override { return slot_; }
     std::uint32_t heapSampledLayer(std::uint32_t layer) override;
     ID3D12Resource* resource() const { return resource_.Get(); }
+    VkImageLayout layout() const override { return split ? VK_IMAGE_LAYOUT_MAX_ENUM : lastLayout; }
+    VkImageLayout lastLayout = VK_IMAGE_LAYOUT_UNDEFINED;  // the layout of the last transition (the RHI's vocabulary for `state`)
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
     // the state per mip level (all layers alike) while the levels differ (CommandList::transitionMips); `state` is the whole texture's otherwise
     std::array<D3D12_RESOURCE_STATES, 16> mipStates{};
@@ -1142,14 +1144,17 @@ public:
         if (layout == VK_IMAGE_LAYOUT_UNDEFINED) {
             t.state = D3D12_RESOURCE_STATE_COMMON;  // the contents are discarded: no barrier, the next one starts from COMMON
             t.split = false;
+            t.lastLayout = VK_IMAGE_LAYOUT_UNDEFINED;
             return;
         }
         transitionRange(t, toState(layout), 0, t.desc().mips);
+        t.lastLayout = layout;
     }
     void transitionMips(Texture& texture, VkImageLayout layout, std::uint32_t baseMip, std::uint32_t mipCount) override {
         if (layout == VK_IMAGE_LAYOUT_UNDEFINED) return;
         D3DTexture& t = static_cast<D3DTexture&>(texture);
         transitionRange(t, toState(layout), baseMip, mipCount);
+        t.lastLayout = layout;
     }
 
     // ShaderRead -> ALL_SHADER_RESOURCE (the state of an SRV), ShaderWrite -> UNORDERED_ACCESS; an UAV -> UAV step is a UAV barrier (the writes of the
@@ -1173,7 +1178,10 @@ public:
 
     void transitions(std::span<const TextureTransition> list) override {
         for (const TextureTransition& t : list) {
-            if (t.layout != VK_IMAGE_LAYOUT_UNDEFINED) transitionRange(*static_cast<D3DTexture*>(t.texture), toState(t.layout), t.baseMip, t.mipCount);
+            if (t.layout != VK_IMAGE_LAYOUT_UNDEFINED) {
+                transitionRange(*static_cast<D3DTexture*>(t.texture), toState(t.layout), t.baseMip, t.mipCount);
+                static_cast<D3DTexture*>(t.texture)->lastLayout = t.layout;
+            }
         }
     }
     void computeBarrier() override { uavBarrier(); }
@@ -1362,6 +1370,22 @@ public:
         sl.PlacedFootprint.Offset = srcOffset;
         sl.PlacedFootprint.Footprint = {toDxgi(t.desc().format), e.width, e.height, e.depth, bufferRowPitch(t.desc().format, e.width)};
         list_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
+    }
+    void copyBufferToTextureBox(Texture& dst, Buffer& src, const BufferTextureCopy& c) override {
+        D3DTexture& t = static_cast<D3DTexture&>(dst);
+        D3DBuffer& b = static_cast<D3DBuffer&>(src);
+        bufferState(b, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        D3D12_TEXTURE_COPY_LOCATION dl{};
+        dl.pResource = t.resource();
+        dl.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dl.SubresourceIndex = t.subresource(c.sub);
+        D3D12_TEXTURE_COPY_LOCATION sl{};
+        sl.pResource = b.resource();
+        sl.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        sl.PlacedFootprint.Offset = c.bufferOffset;
+        const std::uint32_t pitch = c.rowPitch != 0 ? c.rowPitch : bufferRowPitch(t.desc().format, c.extent.width);
+        sl.PlacedFootprint.Footprint = {toDxgi(t.desc().format), c.extent.width, c.extent.height, c.extent.depth, pitch};
+        list_->CopyTextureRegion(&dl, static_cast<UINT>(c.offset.x), static_cast<UINT>(c.offset.y), static_cast<UINT>(c.offset.z), &sl, nullptr);
     }
     void copyTextureToBuffer(Buffer& dst, std::uint64_t dstOffset, Texture& src, Subresource sub) override {
         D3DTexture& t = static_cast<D3DTexture&>(src);

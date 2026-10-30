@@ -2,7 +2,6 @@
 
 #include <spdlog/spdlog.h>
 
-#include "rhi/vulkan/wrap.h"
 #include "shader/abi.h"
 #include "shader/embedded.h"
 
@@ -35,7 +34,7 @@ void DebugView::setMode(Mode mode) {
         if (passId_ != 0) dev_.removePass(passId_);
         passId_ = 0;
         dev_.setFrameParam(abi::kFrameParamDebugView, {0.0f, 0.0f, 0.0f, 0.0f});
-        dev_.transients().release("debug.inject_view");
+        dev_.releaseTransient("debug.inject_view");
         return;
     }
     dev_.setFrameParam(abi::kFrameParamDebugView, {mode == Mode::Depth ? 1.0f : 2.0f, kStrength, kGridSpacing, 0.0f});
@@ -93,12 +92,12 @@ void DebugView::record(d3d9::PassContext& ctx) {
     if (ctx.mainView != 1 || scene == nullptr || ctx.target != scene) return;
     rhi::Device* rdev = dev_.rhi();
     if (rdev == nullptr) return;
-    vk::Image& target = scene->image();
-    if (!ensurePipelines(*rdev, target.format())) return;
+    rhi::Texture& target = scene->rhi();
+    if (!ensurePipelines(*rdev, target.desc().format)) return;
     const std::uint32_t w = scene->desc().width, h = scene->desc().height;
-    vk::Transients::Entry* factor = dev_.transients().get("debug.inject_view", {VK_FORMAT_R16G16B16A16_SFLOAT, {w, h}});
+    rhi::Texture* factor = dev_.transient("debug.inject_view", {VK_FORMAT_R16G16B16A16_SFLOAT, {w, h}});
     if (factor == nullptr) return;
-    VkCommandBuffer cmd = ctx.cmd;
+    rhi::CommandList& cmd = ctx.cmd;
 
     DebugViewPush push{};
     push.h.frame = ctx.frameBlock.bits;
@@ -108,18 +107,17 @@ void DebugView::record(d3d9::PassContext& ctx) {
     if (mode_ == Mode::Depth && ctx.depthMap != nullptr && dev_.readable(ctx.depthMap, cmd)) {
         push.depthTex = ctx.depthMap->bindlessSlot();
     }
-    push.srcTex = factor->slot;
+    push.srcTex = factor->heapSampled();
     push.srcSampler = 0;  // the bindless heap's point / clamp sampler (same size: one texel per pixel)
 
-    // the RHI's views of the pass's images (the vk::Images keep the tracked layouts) and of the frame's command buffer
-    const std::unique_ptr<rhi::Texture> factorTex = rhi::vulkan::wrapImage(*rdev, factor->image, factor->slot, "debug.inject_view");
-    const std::unique_ptr<rhi::Texture> targetTex = rhi::vulkan::wrapImage(*rdev, target);
-    const std::unique_ptr<rhi::CommandList> cl = rhi::vulkan::wrapCommandBuffer(*rdev, cmd);
+    rhi::Texture* const factorTex = factor;
+    rhi::Texture* const targetTex = &target;
+    rhi::CommandList* const cl = &cmd;
 
     // compute: the factor image (its previous use was last frame's composite read: the tracked layout orders the write)
     cl->transition(*factorTex, VK_IMAGE_LAYOUT_GENERAL);
     cl->bindPipeline(*compute_);
-    rhi::Texture* const storage[] = {factorTex.get()};
+    rhi::Texture* const storage[] = {factorTex};
     cl->setStorageTextures(storage);
     cl->setPushConstants(&push, sizeof(push));
     cl->dispatch((w + 7) / 8, (h + 7) / 8, 1);
@@ -128,7 +126,7 @@ void DebugView::record(d3d9::PassContext& ctx) {
     cl->transition(*factorTex, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     cl->transition(*targetTex, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     rhi::RenderingInfo ri;
-    ri.color[0].texture = targetTex.get();
+    ri.color[0].texture = targetTex;
     ri.color[0].load = VK_ATTACHMENT_LOAD_OP_LOAD;
     ri.color[0].store = VK_ATTACHMENT_STORE_OP_STORE;
     ri.colorCount = 1;

@@ -8,7 +8,11 @@
 // Frames::retire (VkDeviceImpl::defer).
 
 #include <array>
+#include <format>
 #include <map>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <spdlog/spdlog.h>
@@ -19,14 +23,18 @@
 #include "shader/abi.h"
 #include "vk/bindless.h"
 #include "vk/context.h"
+#include "vk/debug_names.h"
 #include "vk/frames.h"
+#include "vk/framegen.h"
 #include "vk/image.h"
+#include "vk/mesh_arena.h"
 #include "vk/passes.h"
 #include "vk/pipeline.h"
 #include "vk/raytracing.h"
 #include "vk/swapchain.h"
 
 namespace rvk::rhi {
+static_assert(kFramesInFlight == vk::Frames::kInFlight);
 namespace {
 
 constexpr std::uint32_t kConstantBufferBinding = 8;  // b8 space1: set 1 binding 8
@@ -80,6 +88,8 @@ public:
     const TextureDesc& desc() const override { return desc_; }
     std::uint32_t heapSampled() const override { return slot_; }
     std::uint32_t heapSampledLayer(std::uint32_t layer) override;
+    VkImageLayout layout() const override { return image_->layout(); }
+    void setDebugName(const std::string& name) override;
     vk::Image& image() { return *image_; }
     // the texture is a view of an image owned elsewhere (rhi::vulkan::wrapImage): its tracked layout (vk::Image) stays the one source of truth, `sampledSlot`
     // (bindless 2D slot, 0 = none) is not released here
@@ -213,6 +223,16 @@ private:
 class VkCommandListImpl final : public CommandList {
 public:
     VkCommandListImpl(VkDeviceImpl& dev, VkCommandBuffer cmd) : dev_(dev), cmd_(cmd) {}
+    VkCommandBuffer cmd() const { return cmd_; }
+    // records into another command buffer from now on, with no pipeline / bindings bound (the device's persistent frame lists)
+    void rebind(VkCommandBuffer cmd) {
+        cmd_ = cmd;
+        pipeline_ = nullptr;
+        cb_ = {};
+        views_.fill(VK_NULL_HANDLE);
+        dirty_ = true;
+        pipelineBound_ = false;
+    }
 
     void transition(Texture& texture, VkImageLayout layout) override;
     void transitionMips(Texture& texture, VkImageLayout layout, std::uint32_t baseMip, std::uint32_t mipCount) override;
@@ -286,6 +306,7 @@ public:
     }
     void copyBufferToTexture(Texture& dst, Buffer& src, std::uint64_t srcOffset, Subresource sub) override;
     void copyTextureToBuffer(Buffer& dst, std::uint64_t dstOffset, Texture& src, Subresource sub) override;
+    void copyBufferToTextureBox(Texture& dst, Buffer& src, const BufferTextureCopy& copy) override;
     void clearTexture(Texture& texture, const VkClearColorValue& value, std::uint32_t baseMip, std::uint32_t mipCount) override;
     void copyTexture(Texture& dst, Texture& src, std::span<const TextureCopy> regions) override;
     bool blitTexture(Texture& dst, Texture& src, std::span<const TextureBlit> regions, VkFilter filter) override;
@@ -324,8 +345,8 @@ class VkDeviceImpl final : public GameDevice {
 public:
     VkDeviceImpl() : ctx_(ownCtx_), frames_(ownFrames_), bindless_(ownBindless_) {}
     // over the renderer's objects (rhi::vulkan::wrap)
-    VkDeviceImpl(vk::Context& ctx, vk::Frames& frames, vk::Bindless& bindless)
-        : ctx_(ctx), frames_(frames), bindless_(bindless), external_(true) {}
+    VkDeviceImpl(vk::Context& ctx, vk::Frames& frames, vk::Bindless& bindless, vk::MeshArena* arena)
+        : ctx_(ctx), frames_(frames), bindless_(bindless), external_(true), arena_(arena) {}
 
     ~VkDeviceImpl() override {
         if (external_) {
@@ -369,6 +390,7 @@ public:
         caps_.textureBlit = true;
         // ray queries need the acceleration structure array in the bindless set (descriptor binding update after bind)
         caps_.rayQuery = ctx_.features().rayTracing.enabled && ctx_.features().rayTracing.tlasDescriptors;
+        fillGameCaps();
         return true;
     }
 
@@ -385,7 +407,21 @@ public:
         caps_.textureBlit = true;
         // acceleration structures of the wrapped device: TLAS slots from the renderer's bindless set (shared with the RT scene)
         caps_.rayQuery = ctx_.features().rayTracing.enabled && ctx_.features().rayTracing.tlasDescriptors;
+        fillGameCaps();
         return true;
+    }
+
+    void fillGameCaps() {
+        const vk::DeviceFeatures& f = ctx_.features();
+        const VkPhysicalDeviceLimits& lim = ctx_.properties().limits;
+        gameCaps_.rayTracing = f.rayTracing.enabled;
+        gameCaps_.vertexStores = f.vertexStores;
+        gameCaps_.storageImageExtendedFormats = f.storageImageExtendedFormats;
+        gameCaps_.maxComputeWorkGroupInvocations = lim.maxComputeWorkGroupInvocations;
+        gameCaps_.maxComputeWorkGroupSizeX = lim.maxComputeWorkGroupSize[0];
+        gameCaps_.maxComputeSharedMemory = lim.maxComputeSharedMemorySize;
+        gameCaps_.uploadRowAlign = 1;      // tightly packed rows
+        gameCaps_.uploadOffsetAlign = 16;  // the ring's own alignment
     }
 
     bool createLayout() {
@@ -427,6 +463,90 @@ public:
             vkDestroyShaderModule(ctx_.device(), m, nullptr);
         }
     }
+
+    // ---- GameDevice: capabilities, command lists, rings, meshes, transients (rhi/game_device.h) ----
+    const GameCaps& gameCaps() const override { return gameCaps_; }
+    bool formatSupport(VkFormat format, VkImageUsageFlags usage, bool blend) const override {
+        VkFormatProperties fp{};
+        vkGetPhysicalDeviceFormatProperties(ctx_.physicalDevice(), format, &fp);
+        VkFormatFeatureFlags need = 0;
+        if ((usage & VK_IMAGE_USAGE_SAMPLED_BIT) != 0) need |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+        if ((usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0) need |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+        if (blend) need |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT;
+        if ((usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0) need |= VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        if ((usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0) need |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+        if ((usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0) need |= VK_FORMAT_FEATURE_BLIT_SRC_BIT;
+        return (fp.optimalTilingFeatures & need) == need;
+    }
+
+    CommandList& frameCommands() override { return listFor(mainList_, frames_.cmd(), false); }
+    CommandList& passCommands() override { return listFor(mainList_, frames_.cmd(), true); }
+    CommandList& uploadCommands() override { return listFor(uploadList_, frames_.uploadCmd(), false); }
+    void* nativeCommandBuffer(CommandList& list) override;
+
+    RingAlloc allocRing(std::uint64_t size, std::uint64_t alignment, std::uint64_t minOffset) override {
+        return frames_.allocate(size, alignment, minOffset);
+    }
+    RingAlloc allocCapture(std::uint64_t size, std::uint64_t alignment) override { return frames_.allocate(size, alignment, 0); }
+    Buffer& ringBuffer(const RingAlloc& alloc) override;
+    std::uint64_t frameValue() const override { return frames_.currentValue(); }
+    std::uint32_t frameSlot() const override { return frames_.currentSlot(); }
+    std::uint64_t completedFrame() const override { return frames_.completedValue(); }
+    void waitFrame(std::uint64_t value) override { frames_.waitFor(value); }
+    void retire(std::function<void()> fn) override { frames_.retire(std::move(fn)); }
+
+    MeshAlloc allocMesh(std::uint64_t size, std::uint32_t multiple) override;
+    void freeMesh(const MeshAlloc& alloc, bool deferred) override;
+
+    Texture* transient(std::string_view key, const TransientDesc& desc) override;
+    void releaseTransient(std::string_view key) override {
+        auto it = transients_.find(std::string(key));
+        if (it != transients_.end()) transients_.erase(it);  // (the texture's destructor defers the destruction)
+    }
+    std::uint64_t transientBytes() const override {
+        std::uint64_t n = 0;
+        for (const auto& [k, e] : transients_) n += std::uint64_t{e.desc.extent.width} * e.desc.extent.height * std::max(1u, formatBytes(e.desc.format));
+        return n;
+    }
+
+    void probeFrameGeneration(const std::filesystem::path& loaderDll) override { ctx_.setFrameGenReport(vk::probeFrameGeneration(ctx_, loaderDll)); }
+    caps::Report capabilityReport(bool pipelineLibraries) override { return ctx_.capabilities(pipelineLibraries); }
+    void runRaytracingSelfTest() override {
+        const vk::rt::SelfTestResult t = vk::rt::selfTest(ctx_);
+        if (!t.ran) {
+            spdlog::info("rt selftest: skipped: {}", t.detail);
+        } else {
+            spdlog::log(t.pass ? spdlog::level::info : spdlog::level::err, "rt selftest: {} ({:.1f} ms): {}", t.pass ? "PASS" : "FAIL", t.milliseconds,
+                        t.detail);
+        }
+    }
+    void logMemoryStats() override {
+        const VkPhysicalDeviceMemoryProperties* mp = nullptr;
+        vmaGetMemoryProperties(ctx_.allocator(), &mp);
+        VmaBudget budgets[VK_MAX_MEMORY_HEAPS]{};
+        vmaGetHeapBudgets(ctx_.allocator(), budgets);
+        std::uint64_t blocks = 0, allocs = 0, count = 0, local = 0;
+        for (std::uint32_t h = 0; h < mp->memoryHeapCount; ++h) {
+            blocks += budgets[h].statistics.blockBytes;
+            allocs += budgets[h].statistics.allocationBytes;
+            count += budgets[h].statistics.allocationCount;
+            if ((mp->memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) local += budgets[h].statistics.blockBytes;
+        }
+        spdlog::info("perf: GPU memory {:.1f} MiB in blocks ({:.1f} MiB device-local), {:.1f} MiB in {} allocations; ray tracing tier {}",
+                     static_cast<double>(blocks) / 1048576.0, static_cast<double>(local) / 1048576.0, static_cast<double>(allocs) / 1048576.0, count,
+                     ctx_.features().rayTracing.enabled ? "on" : "off");
+        if (arena_ != nullptr) {
+            const vk::MeshArena::Stats a = arena_->stats();
+            spdlog::info("perf: mesh arena {} blocks of {} MiB + {} dedicated buffers, {:.1f} MiB used", a.blocks, vk::MeshArena::kBlockSize >> 20,
+                         a.dedicated, static_cast<double>(a.used) / 1048576.0);
+        }
+    }
+
+    std::unique_ptr<Upscaler> createUpscaler() override { return vulkan::createUpscaler(*this); }
+    std::unique_ptr<FrameGenerator> createFrameGenerator() override { return vulkan::createFrameGenerator(*this); }
+    std::unique_ptr<ImGuiBackend> createImGuiBackend() override { return vulkan::createImGuiBackend(*this); }
+
+    vk::MeshArena* arena() { return arena_; }
 
     std::unique_ptr<Buffer> createBuffer(const BufferDesc& desc) override {
         auto b = std::make_unique<VkBufferImpl>(*this, desc);
@@ -601,6 +721,26 @@ private:
     vk::PassLayout layout_;
     DeviceCaps caps_;
     bool bindlessInit_ = false;
+    GameCaps gameCaps_;
+    vk::MeshArena* arena_ = nullptr;
+    std::unique_ptr<VkCommandListImpl> mainList_, uploadList_;  // the frame's persistent lists (frameCommands / uploadCommands)
+    CommandList& listFor(std::unique_ptr<VkCommandListImpl>& slot, VkCommandBuffer cmd, bool reset) {
+        if (!slot) {
+            slot = std::make_unique<VkCommandListImpl>(*this, cmd);
+        } else if (slot->cmd() != cmd || reset) {
+            slot->rebind(cmd);
+        }
+        return *slot;
+    }
+    // wrappers of buffers the renderer owns: the ring's chunks (never freed before the frames) and the mesh arena's buffers (blocks live as long as the arena;
+    // a dedicated buffer's wrapper is re-initialised when its handle comes back)
+    std::mutex wrapMutex_;
+    std::unordered_map<std::uint64_t, std::unique_ptr<VkBufferImpl>> ringBuffers_, meshBuffers_;
+    struct TransientEntry {
+        std::unique_ptr<VkTextureImpl> tex;
+        TransientDesc desc;
+    };
+    std::unordered_map<std::string, TransientEntry> transients_;
     std::vector<VkSampler> samplers_;
     vk::rt::AddressBuffer scratch_;               // the BLAS build scratch pool
     std::vector<vk::rt::AddressBuffer> graveyard_;  // replaced pools of an owning device
@@ -710,6 +850,7 @@ bool VkTextureImpl::create() {
     d.layers = desc_.layers;
     d.cube = desc_.cube;
     d.usage = desc_.usage | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    d.swizzle = desc_.swizzle;
     d.name = desc_.name;
     if (!image_->create(dev_.ctx(), d)) return false;
     if ((desc_.usage & VK_IMAGE_USAGE_SAMPLED_BIT) != 0) {
@@ -748,6 +889,11 @@ std::uint32_t VkTextureImpl::heapSampledLayer(std::uint32_t layer) {
         if (v != VK_NULL_HANDLE) layerSlots_[layer] = dev_.bindless().addTexture(vk::TextureKind::Tex2D, v);
     }
     return layerSlots_[layer];
+}
+
+void VkTextureImpl::setDebugName(const std::string& name) {
+    if (!image_->valid() || !dev_.ctx().namesEnabled()) return;
+    vk::names::image(dev_.ctx(), *image_, name);
 }
 
 VkImageView VkTextureImpl::attachmentView(std::uint32_t mip, std::uint32_t layer) {
@@ -1132,7 +1278,8 @@ void VkCommandListImpl::copyBufferToTexture(Texture& dst, Buffer& src, std::uint
     VkBufferImageCopy c{};
     c.bufferOffset = srcOffset;
     const VkExtent3D e = mipExtent(t.desc(), sub.mip);
-    c.bufferRowLength = bufferRowPitch(t.desc().format, e.width) / formatBytes(t.desc().format);
+    const FormatBlock fb = formatBlock(t.desc().format);
+    c.bufferRowLength = bufferRowPitch(t.desc().format, e.width) / fb.bytes * fb.width;
     c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, sub.mip, sub.layer, 1};
     c.imageExtent = e;
     vkCmdCopyBufferToImage(cmd_, static_cast<VkBufferImpl&>(src).buffer(), t.image().image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
@@ -1143,10 +1290,23 @@ void VkCommandListImpl::copyTextureToBuffer(Buffer& dst, std::uint64_t dstOffset
     VkBufferImageCopy c{};
     c.bufferOffset = dstOffset;
     const VkExtent3D e = mipExtent(t.desc(), sub.mip);
-    c.bufferRowLength = bufferRowPitch(t.desc().format, e.width) / formatBytes(t.desc().format);
-    c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, sub.mip, sub.layer, 1};
+    const FormatBlock fb = formatBlock(t.desc().format);
+    c.bufferRowLength = bufferRowPitch(t.desc().format, e.width) / fb.bytes * fb.width;
+    c.imageSubresource = {t.image().aspect() & ~VkImageAspectFlags(VK_IMAGE_ASPECT_STENCIL_BIT), sub.mip, sub.layer, 1};
     c.imageExtent = e;
     vkCmdCopyImageToBuffer(cmd_, t.image().image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, static_cast<VkBufferImpl&>(dst).buffer(), 1, &c);
+}
+
+void VkCommandListImpl::copyBufferToTextureBox(Texture& dst, Buffer& src, const BufferTextureCopy& copy) {
+    VkTextureImpl& t = static_cast<VkTextureImpl&>(dst);
+    VkBufferImageCopy c{};
+    c.bufferOffset = copy.bufferOffset;
+    const FormatBlock fb = formatBlock(t.desc().format);
+    c.bufferRowLength = copy.rowPitch != 0 ? copy.rowPitch / fb.bytes * fb.width : 0;  // 0 = tightly packed
+    c.imageSubresource = {t.image().aspect() & ~VkImageAspectFlags(VK_IMAGE_ASPECT_STENCIL_BIT), copy.sub.mip, copy.sub.layer, 1};
+    c.imageOffset = copy.offset;
+    c.imageExtent = copy.extent;
+    vkCmdCopyBufferToImage(cmd_, static_cast<VkBufferImpl&>(src).buffer(), t.image().image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
 }
 
 void VkCommandListImpl::clearTexture(Texture& texture, const VkClearColorValue& value, std::uint32_t baseMip, std::uint32_t mipCount) {
@@ -1191,14 +1351,20 @@ bool VkCommandListImpl::blitTexture(Texture& dst, Texture& src, std::span<const 
         rs[i] = {VK_STRUCTURE_TYPE_IMAGE_BLIT_2};
         rs[i].srcSubresource = {s.image().aspect(), b.src.mip, b.src.layer, 1};
         rs[i].dstSubresource = {d.image().aspect(), b.dst.mip, b.dst.layer, 1};
-        rs[i].srcOffsets[1] = {static_cast<std::int32_t>(se.width), static_cast<std::int32_t>(se.height), static_cast<std::int32_t>(se.depth)};
-        rs[i].dstOffsets[1] = {static_cast<std::int32_t>(de.width), static_cast<std::int32_t>(de.height), static_cast<std::int32_t>(de.depth)};
+        rs[i].srcOffsets[0] = b.srcOffset;
+        rs[i].dstOffsets[0] = b.dstOffset;
+        rs[i].srcOffsets[1] = {b.srcOffset.x + static_cast<std::int32_t>(se.width), b.srcOffset.y + static_cast<std::int32_t>(se.height),
+                               b.srcOffset.z + static_cast<std::int32_t>(se.depth)};
+        rs[i].dstOffsets[1] = {b.dstOffset.x + static_cast<std::int32_t>(de.width), b.dstOffset.y + static_cast<std::int32_t>(de.height),
+                               b.dstOffset.z + static_cast<std::int32_t>(de.depth)};
     }
     VkBlitImageInfo2 bi{VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2};
+    // a texture blitted onto itself that lies in GENERAL as a whole (mip chains: the one layout both sides can have) keeps it; else the transfer layouts
+    const bool general = &s == &d && s.image().layout() == VK_IMAGE_LAYOUT_GENERAL;
     bi.srcImage = s.image().image();
-    bi.srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    bi.srcImageLayout = general ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     bi.dstImage = d.image().image();
-    bi.dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    bi.dstImageLayout = general ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     bi.regionCount = static_cast<std::uint32_t>(rs.size());
     bi.pRegions = rs.data();
     bi.filter = filter;
@@ -1299,6 +1465,93 @@ void VkCommandListImpl::compactBlas(AccelerationStructure& dst, AccelerationStru
     vkCmdCopyAccelerationStructureKHR(cmd_, &ci);
 }
 
+void* VkDeviceImpl::nativeCommandBuffer(CommandList& list) { return static_cast<VkCommandListImpl&>(list).cmd(); }
+
+Buffer& VkDeviceImpl::ringBuffer(const RingAlloc& alloc) {
+    const std::lock_guard lock(wrapMutex_);
+    auto& slot = ringBuffers_[alloc.buffer];
+    if (!slot) {
+        BufferDesc d;
+        d.name = "rvk upload ring chunk";
+        slot = std::make_unique<VkBufferImpl>(*this, d);
+        slot->wrapExternal(reinterpret_cast<VkBuffer>(alloc.buffer), alloc.gpuVa - alloc.offset,
+                           alloc.ptr != nullptr ? static_cast<std::uint8_t*>(alloc.ptr) - alloc.offset : nullptr);
+    }
+    return *slot;
+}
+
+MeshAlloc VkDeviceImpl::allocMesh(std::uint64_t size, std::uint32_t multiple) {
+    if (arena_ == nullptr) return {};
+    const vk::MeshArena::Alloc a = arena_->allocate(size, multiple);
+    if (!a.valid()) return {};
+    MeshAlloc m;
+    m.native = reinterpret_cast<std::uint64_t>(a.buffer);
+    m.offset = a.offset;
+    m.addr = a.addr;
+    m.backend[0] = a.block;
+    m.backend[1] = reinterpret_cast<std::uint64_t>(a.virt);
+    m.backend[2] = reinterpret_cast<std::uint64_t>(a.dedicated);
+    {
+        const std::lock_guard lock(wrapMutex_);
+        auto& slot = meshBuffers_[m.native];
+        if (!slot) {
+            BufferDesc d;
+            d.name = "rvk mesh arena";
+            slot = std::make_unique<VkBufferImpl>(*this, d);
+        }
+        slot->wrapExternal(a.buffer, a.addr.va != 0 ? a.addr.va - a.offset : 0, nullptr);
+        m.buffer = slot.get();
+    }
+    return m;
+}
+
+void VkDeviceImpl::freeMesh(const MeshAlloc& alloc, bool deferred) {
+    if (arena_ == nullptr || !alloc.valid()) return;
+    vk::MeshArena::Alloc a;
+    a.buffer = reinterpret_cast<VkBuffer>(alloc.native);
+    a.offset = alloc.offset;
+    a.addr = alloc.addr;
+    a.block = static_cast<std::uint32_t>(alloc.backend[0]);
+    a.virt = reinterpret_cast<VmaVirtualAllocation>(alloc.backend[1]);
+    a.dedicated = reinterpret_cast<VmaAllocation>(alloc.backend[2]);
+    vk::MeshArena* arena = arena_;
+    if (deferred) {
+        frames_.retire([arena, a] { arena->free(a); });
+    } else {
+        arena->free(a);
+    }
+}
+
+Texture* VkDeviceImpl::transient(std::string_view key, const TransientDesc& desc) {
+    const std::string k(key);
+    auto it = transients_.find(k);
+    if (it != transients_.end()) {
+        if (it->second.desc == desc && it->second.tex) return it->second.tex.get();
+        transients_.erase(it);  // the texture's destructor defers the GPU resources
+    }
+    // the entry first: its name (a node of the map, stable) is the image's debug name
+    auto [pos, inserted] = transients_.emplace(k, TransientEntry{});
+    TransientEntry& e = pos->second;
+    e.desc = desc;
+    TextureDesc td;
+    td.format = desc.format;
+    td.extent = {std::max(1u, desc.extent.width), std::max(1u, desc.extent.height), 1};
+    td.usage = desc.usage;
+    td.name = pos->first.c_str();
+    auto t = std::make_unique<VkTextureImpl>(*this, td);
+    if (!t->create()) {
+        spdlog::error("vulkan: transient image {} ({}x{}) failed", k, desc.extent.width, desc.extent.height);
+        transients_.erase(pos);
+        return nullptr;
+    }
+    // the slot is what shaders sample it through: it joins the name
+    if ((desc.usage & VK_IMAGE_USAGE_SAMPLED_BIT) != 0) t->setDebugName(std::format("{} [slot {}]", k, t->heapSampled()));
+    spdlog::info("vulkan: transient image {} {}x{} format {} (bindless slot {})", k, desc.extent.width, desc.extent.height,
+                 static_cast<int>(desc.format), t->heapSampled());
+    e.tex = std::move(t);
+    return e.tex.get();
+}
+
 }  // namespace
 
 std::unique_ptr<Device> createVulkanDevice(const DeviceDesc& desc) {
@@ -1311,13 +1564,17 @@ std::unique_ptr<Device> createVulkanDevice(const DeviceDesc& desc) {
 
 namespace vulkan {
 
-std::unique_ptr<GameDevice> wrapGame(vk::Context& ctx, vk::Frames& frames, vk::Bindless& bindless) {
-    auto d = std::make_unique<VkDeviceImpl>(ctx, frames, bindless);
+std::unique_ptr<GameDevice> wrapGame(vk::Context& ctx, vk::Frames& frames, vk::Bindless& bindless, vk::MeshArena* arena) {
+    auto d = std::make_unique<VkDeviceImpl>(ctx, frames, bindless, arena);
     if (!d->createWrapped()) return nullptr;
     return d;
 }
 
-std::unique_ptr<Device> wrap(vk::Context& ctx, vk::Frames& frames, vk::Bindless& bindless) { return wrapGame(ctx, frames, bindless); }
+std::unique_ptr<Device> wrap(vk::Context& ctx, vk::Frames& frames, vk::Bindless& bindless) { return wrapGame(ctx, frames, bindless, nullptr); }
+
+vk::Image& imageOf(Texture& texture) { return static_cast<VkTextureImpl&>(texture).image(); }
+VkCommandBuffer commandBufferOf(CommandList& list) { return static_cast<VkCommandListImpl&>(list).cmd(); }
+vk::Context& contextOf(Device& device) { return static_cast<VkDeviceImpl&>(device).ctx(); }
 
 std::unique_ptr<Texture> wrapImage(Device& device, vk::Image& image, std::uint32_t sampledSlot, const char* name) {
     VkDeviceImpl& dev = static_cast<VkDeviceImpl&>(device);

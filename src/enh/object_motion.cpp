@@ -6,7 +6,6 @@
 #include <spdlog/spdlog.h>
 
 #include "enh/rt_scene.h"
-#include "vk/frames.h"
 
 namespace rvk::enh {
 
@@ -40,7 +39,7 @@ ObjectMotion::~ObjectMotion() { apply(false, false); }
 void ObjectMotion::apply(bool skinned, bool rigid) {
     skinned_ = skinned;
     rigid_ = rigid;
-    const bool want = (skinned || rigid) && dev_.ctx().features().vertexStores;
+    const bool want = (skinned || rigid) && dev_.game().gameCaps().vertexStores;
     if (want == registered_) return;
     registered_ = want;
     if (want) {
@@ -51,7 +50,7 @@ void ObjectMotion::apply(bool skinned, bool rigid) {
     } else {
         dev_.removeDrawObserver(this);
         states_.clear();
-        if ((skinned || rigid) && !dev_.ctx().features().vertexStores) {
+        if ((skinned || rigid) && !dev_.game().gameCaps().vertexStores) {
             spdlog::warn("enh: object motion: the GPU's vertex shaders cannot write buffers: no per-object motion vectors");
         } else {
             spdlog::info("enh: object motion: off ({} captures, {} rigid draws seen moving)", captures_, rigidMoving_);
@@ -210,7 +209,7 @@ void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     }
     const std::uint32_t slots = s.maxIndex + 1;
     if (s.maxIndex == 0 || slots > (isRigid(q.kind) ? kRigidMaxSlots : kMaxSlots)) return;
-    const rhi::RingAlloc a = dev.frames().allocate(16 + static_cast<VkDeviceSize>(slots) * 32, 16);
+    const rhi::RingAlloc a = dev.game().allocCapture(16 + static_cast<std::uint64_t>(slots) * 32, 16);
     if (a.ptr == nullptr) return;
     // header: slots, the previous frame's capture of this draw (its vertex shader reads the previous positions)
     std::uint32_t header[4] = {slots, 0, 0, 0};

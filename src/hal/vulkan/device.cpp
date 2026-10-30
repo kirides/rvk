@@ -30,10 +30,7 @@
 #include "engine/window_mode.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "res/dds.h"
-#include "vk/debug_names.h"
 #include "vk/formats.h"
-#include "vk/framegen.h"
-#include "vk/raytracing.h"
 
 namespace rvk::hal::vulkan {
 
@@ -225,9 +222,7 @@ HalDevice::~HalDevice() {
     if (framegen_) framegen_->shutdown();  // AMD's swapchain calls into the overlay from its threads: it goes first
     if (overlay_) {
         dev_.setOverlay(nullptr, false);
-        // ImGui's shutdown waits for the device (vkDeviceWaitIdle touches the queue the present thread uses)
-        auto lock = dev_.ctx().queueLock();
-        overlay_.reset();
+        overlay_.reset();  // (the UI backend's shutdown waits for the device under the queue lock)
     }
     if (settings::registry().dirty() && !options_.settingsFile.empty()) {
         settings::registry().save(options_.settingsFile);
@@ -292,7 +287,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
                            std::filesystem::exists(paths::dataDir() / "amd_fidelityfx_loader_vk.dll", ec);
     }
     // debug.names is a restart setting too: objects are named as they are created (vk/debug_names.h)
-    vk::names::setEnabled(rs.debugNames == nullptr || rs.debugNames->startValue() != 0.0);
+    rhi::setDebugNames(rs.debugNames == nullptr || rs.debugNames->startValue() != 0.0);
     if (!dev_.create(o)) {
         return false;
     }
@@ -305,26 +300,18 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     engine::scene::attach(&dev_);  // the frame phase markers (no-ops when they are not installed)
     auto& reg = settings::registry();
     // frame generation providers (vk/framegen.h): which of FSR 3 / FSR 4 this device can run, for the capability report
-    dev_.ctx().setFrameGenReport(vk::probeFrameGeneration(dev_.ctx(), paths::dataDir() / "amd_fidelityfx_loader_vk.dll"));
+    dev_.game().probeFrameGeneration(paths::dataDir() / "amd_fidelityfx_loader_vk.dll");
     // capability report (core/caps.h, docs/research/raytracing.md 3): logged once, the overlay's "Capabilities", and the
     // resolution of settings with requirements (greyed + parity fallback when unmet)
     {
-        caps::Report report = dev_.ctx().capabilities(options.pipelineLibraries);
+        caps::Report report = dev_.game().capabilityReport(options.pipelineLibraries);
         // the session's render mode (renderer.mode): the overlay's System tab "Graphics card" and the caps lines
         report.properties.emplace_back("render mode", std::format("{} at start (Vulkan; Wrapper / Full switch at run time)", toString(renderMode())));
         for (const auto& line : report.lines()) spdlog::info("caps: {}", line);
         caps::setCurrent(report);
         reg.setCapabilities(report);
     }
-    if (options.rtSelfTest) {
-        const vk::rt::SelfTestResult t = vk::rt::selfTest(dev_.ctx());
-        if (!t.ran) {
-            spdlog::info("rt selftest: skipped: {}", t.detail);
-        } else {
-            spdlog::log(t.pass ? spdlog::level::info : spdlog::level::err, "rt selftest: {} ({:.1f} ms): {}", t.pass ? "PASS" : "FAIL",
-                        t.milliseconds, t.detail);
-        }
-    }
+    if (options.rtSelfTest) dev_.game().runRaytracingSelfTest();
     if (rs.vsync != nullptr) reg.onChange(*rs.vsync, [this](const settings::Setting&) { applyVsync(); }, this);
     if (rs.fullscreen != nullptr) {
         // exclusive fullscreen (docs/research/window-mode.md 8): the effective value (borderless without the capability)
@@ -549,7 +536,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         engine::lod::setPrefetchStride(static_cast<int>(rs.prefetchStride->asInt()));
         reg.onChange(*rs.prefetchStride, [](const settings::Setting& s) { engine::lod::setPrefetchStride(static_cast<int>(s.asInt())); }, this);
     }
-    if (options.overlay && dev_.swapchain().valid()) {
+    if (options.overlay && dev_.presentValid()) {
         overlay_ = std::make_unique<overlay::Overlay>();
         overlay::Options oo;
         oo.intoBackBuffer = options.overlayInScreenshots;
@@ -1148,10 +1135,8 @@ bEResult HalDevice::checkFormat(eCGfxShared::eSGfxLayersDesc const& a0, bool a1)
         }
         const auto info = vk::formatInfo(f, dev_.d24s8Format());
         if (!info) return bEResult_False;
-        VkFormatProperties fp{};
-        vkGetPhysicalDeviceFormatProperties(dev_.ctx().physicalDevice(), info->format, &fp);
-        const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
-        return (fp.optimalTilingFeatures & need) == need ? bEResult_Ok : bEResult_False;
+        return dev_.game().formatSupport(info->format, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) ? bEResult_Ok
+                                                                                                                                   : bEResult_False;
     }
     if (f == INTZ || (a0.usage & USAGE_DEPTHSTENCIL) != 0) {
         return bEResult_False;
@@ -1160,14 +1145,9 @@ bEResult HalDevice::checkFormat(eCGfxShared::eSGfxLayersDesc const& a0, bool a1)
     if (!info || info->depth) {
         return bEResult_False;
     }
-    VkFormatProperties fp{};
-    vkGetPhysicalDeviceFormatProperties(dev_.ctx().physicalDevice(), info->format, &fp);
-    VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
-    if ((a0.usage & USAGE_RENDERTARGET) != 0) {
-        need |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
-        if (a1) need |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT;
-    }
-    return (fp.optimalTilingFeatures & need) == need ? bEResult_Ok : bEResult_False;
+    VkImageUsageFlags need = VK_IMAGE_USAGE_SAMPLED_BIT;
+    if ((a0.usage & USAGE_RENDERTARGET) != 0) need |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    return dev_.game().formatSupport(info->format, need, (a0.usage & USAGE_RENDERTARGET) != 0 && a1) ? bEResult_Ok : bEResult_False;
 }
 
 bEResult HalDevice::CreateVertexDeclaration(eCGfxShared::eSGfxDclElement const* a0, void** a1) {
@@ -1524,7 +1504,7 @@ void HalDevice::logFrameGen(double secs) {
                  dev_.frameGenRunning() ? "running" : "idle (menu / loading / pause)");
     (void)secs;
     if (!r.gapsMs.empty()) {
-        const vk::FgGapStats g = vk::fgGapStats(r.gapsMs);
+        const rhi::PresentGapStats g = rhi::presentGapStats(r.gapsMs);
         spdlog::info("perf: framegen present gaps (ms): n {} mean {:.3f} stddev {:.3f} p1 {:.3f} p50 {:.3f} p99 {:.3f} max {:.3f}; every other gap: "
                      "{:.3f} +- {:.3f} / {:.3f} +- {:.3f}; {} stalls (> 100 ms) left out",
                      g.n, g.mean, g.stddev, g.p1, g.p50, g.p99, g.max, g.evenMean, g.evenStd, g.oddMean, g.oddStd, g.stalls);
@@ -1548,25 +1528,7 @@ void HalDevice::logPerf(d3d9::PerfStats p) {
                  p.readbackMs / n, static_cast<double>(p.readbacks) / n, other / n, p.presentMs / n, p.submitMs / n, p.slotWaitMs / n,
                  p.gpuSubmits > 0 ? p.gpuMs / n : 0.0, p.gpuSubmits > 0 ? p.gpuUploadMs / n : 0.0, static_cast<double>(p.gpuSubmits) / n);
     // GPU memory of the renderer (VMA's heap statistics: cheap); the ray tracing tier's buffer usage flags show up here
-    {
-        const VkPhysicalDeviceMemoryProperties* mp = nullptr;
-        vmaGetMemoryProperties(dev_.ctx().allocator(), &mp);
-        VmaBudget budgets[VK_MAX_MEMORY_HEAPS]{};
-        vmaGetHeapBudgets(dev_.ctx().allocator(), budgets);
-        std::uint64_t blocks = 0, allocs = 0, count = 0, local = 0;
-        for (std::uint32_t h = 0; h < mp->memoryHeapCount; ++h) {
-            blocks += budgets[h].statistics.blockBytes;
-            allocs += budgets[h].statistics.allocationBytes;
-            count += budgets[h].statistics.allocationCount;
-            if ((mp->memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) local += budgets[h].statistics.blockBytes;
-        }
-        spdlog::info("perf: GPU memory {:.1f} MiB in blocks ({:.1f} MiB device-local), {:.1f} MiB in {} allocations; ray tracing tier {}",
-                     static_cast<double>(blocks) / 1048576.0, static_cast<double>(local) / 1048576.0,
-                     static_cast<double>(allocs) / 1048576.0, count, dev_.ctx().features().rayTracing.enabled ? "on" : "off");
-        const vk::MeshArena::Stats a = dev_.meshArena().stats();
-        spdlog::info("perf: mesh arena {} blocks of {} MiB + {} dedicated buffers, {:.1f} MiB used", a.blocks,
-                     vk::MeshArena::kBlockSize >> 20, a.dedicated, static_cast<double>(a.used) / 1048576.0);
-    }
+    dev_.game().logMemoryStats();
     spdlog::info("perf: draw tags + records {:.3f} ms per frame ({:.0f} ns per draw)", p.drawRecordMs / n,
                  p.draws > 0 ? p.drawRecordMs * 1e6 / static_cast<double>(p.draws) : 0.0);
     // enhancement plumbing (docs/research/injection.md): FrameBlock uploads, injection points that ran passes, their CPU time

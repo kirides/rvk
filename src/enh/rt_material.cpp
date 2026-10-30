@@ -369,7 +369,7 @@ std::uint32_t RtMaterials::resolve(d3d9::Device& dev, const d3d9::ReplaceQuery& 
     }
     if (slot >= 0) {
         d3d9::Texture* t = slot < 16 ? q.textures[slot] : nullptr;
-        const auto usable = [](const d3d9::Texture* x) { return x != nullptr && !x->isNull() && x->kind() == vk::TextureKind::Tex2D; };
+        const auto usable = [](const d3d9::Texture* x) { return x != nullptr && !x->isNull() && x->desc().type == d3d9::TextureType::Tex2D; };
         d3d9::Texture* pool = nullptr;
         if (!usable(t) || samplers[static_cast<std::size_t>(slot)] != shader::TextureType::Tex2D) {
             // the pixel shader does not sample the slot (a depth / shadow pass): the material's pool image, unmapped uv
@@ -416,7 +416,7 @@ std::uint32_t RtMaterials::resolve(d3d9::Device& dev, const d3d9::ReplaceQuery& 
             channel = o.swizzle >= 2 && o.swizzle <= 5 ? static_cast<std::uint32_t>(o.swizzle - 2) : 3u;
             if (os != slot) {
                 d3d9::Texture* t = os < 16 ? q.textures[os] : nullptr;
-                if (t != nullptr && !t->isNull() && t->kind() == vk::TextureKind::Tex2D) {
+                if (t != nullptr && !t->isNull() && t->desc().type == d3d9::TextureType::Tex2D) {
                     m.opacity = t;
                     m.uvSet |= abi::kRtUvOpacityTexture;
                 } else {

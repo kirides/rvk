@@ -226,7 +226,7 @@ void Device::inject(inject::Point point) {
     VkCommandBuffer cmd = frames_.cmd();
     gpuMark("before injection");
     Surface* rt0 = rt_[0];
-    PassContext ctx{*this, cmd, point};
+    PassContext ctx{*this, game_->passCommands(), point};
     ctx.mainView = inject::inMainView(point) ? firings_.mainViews() : 0;
     ctx.frameBlock = frameBlockAddress();
     ctx.sceneHdr = imageWithRole(scene::ImageRole::SceneHdr);
@@ -237,6 +237,7 @@ void Device::inject(inject::Point point) {
     const auto& list = passes_.passes(point);
     for (std::size_t i = 0; i < list.size(); ++i) {
         ctx.frameBlock = frameBlockAddress();  // an earlier pass may have changed it (e.g. the RT scene's TLAS)
+        game_->passCommands();                 // (the list again, with nothing bound: a pass sees no state of the one before)
         {
             RegionScope region(*this, list[i].name.c_str());
             const auto p0 = options_.perf ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
@@ -258,11 +259,20 @@ void Device::inject(inject::Point point) {
     perf_.injectMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
 
-bool Device::readable(Texture* texture, VkCommandBuffer cmd) {
+bool Device::readable(Texture* texture, rhi::CommandList& cmd) {
     if (texture == nullptr || texture->isNull()) return false;
     texture->prepareForSampling(cmd);
     texture->lastUseFrame_ = frameValue();
-    return texture->image().layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    return texture->rhi().layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+}
+
+vk::Image& Device::vkImage(rhi::Texture& texture) { return rhi::vulkan::imageOf(texture); }
+
+bool Device::namesEnabled() const { return ctx_.namesEnabled(); }
+
+rhi::CommandList& Device::uploadList() {
+    uploadCommands();  // (begins the upload buffer and orders it after the earlier work on the first use of a frame)
+    return game_->uploadCommands();
 }
 
 bool Device::create(const DeviceOptions& options) {
@@ -277,20 +287,18 @@ bool Device::create(const DeviceOptions& options) {
     if (!ctx_.create(co)) {
         return false;
     }
-    // D24S8 depth is optional in Vulkan (AMD has none): fall back to D32S8
-    VkFormatProperties fp{};
-    vkGetPhysicalDeviceFormatProperties(ctx_.physicalDevice(), VK_FORMAT_D24_UNORM_S8_UINT, &fp);
-    const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
-    d24s8_ = (fp.optimalTilingFeatures & need) == need ? VK_FORMAT_D24_UNORM_S8_UINT : VK_FORMAT_D32_SFLOAT_S8_UINT;
-
     if (!frames_.create(ctx_) || !bindless_.create(ctx_, frames_)) {
         return false;
     }
-    game_ = rhi::vulkan::wrapGame(ctx_, frames_, bindless_);  // the backend seam over these objects (rhi/game_device.h)
+    game_ = rhi::vulkan::wrapGame(ctx_, frames_, bindless_, &meshArena_);  // the backend seam over these objects (rhi/game_device.h)
     if (!game_) {
         spdlog::error("d3d9: the RHI over the device could not be created");
         return false;
     }
+    // D24S8 depth is optional in Vulkan (AMD has none): fall back to D32S8
+    d24s8_ = game_->formatSupport(VK_FORMAT_D24_UNORM_S8_UINT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)
+                 ? VK_FORMAT_D24_UNORM_S8_UINT
+                 : VK_FORMAT_D32_SFLOAT_S8_UINT;
     {
         // the static vertex / index buffers' arena (vk/mesh_arena.h); with the ray tracing tier also BLAS build inputs that
         // shaders read through their addresses (docs/research/raytracing.md 2)
@@ -301,7 +309,6 @@ bool Device::create(const DeviceOptions& options) {
         }
         meshArena_.create(ctx_, usage);
     }
-    transients_.init(ctx_, frames_, bindless_);
     const auto pipelineFile = options.cacheDir.empty() ? std::filesystem::path() : options.cacheDir / "pipelines.bin";
     if (!pipelines_.create(ctx_, bindless_.pipelineLayout(), pipelineFile, options.pipelineLibraries)) {
         return false;
@@ -463,23 +470,23 @@ bool Device::setFrameGenSwapchain(bool want, const std::filesystem::path& loader
     presenter_.waitIdle();
     if (fgClient_ != nullptr && swapchain_.frameGenActive()) fgClient_->swapchainWillChange();
     if (!want) {
-        if (auto* fg = swapchain_.frameGen()) fg->setUi({});
+        if (auto* fg = presentWrapper()) fg->setUi({});
         fgUiInstalled_ = false;
     }
     swapchain_.setFrameGen(want, loaderDll);
     recreateSwapchain();
     if (want && swapchain_.frameGenActive() && !fgUiInstalled_) {
         // the overlay in the swapchain's present callback (on AMD's threads): the UI built on the render thread at present
-        vk::FgUiHook hook;
+        rhi::PresentUi hook;
         hook.wants = [this] { return overlay_ != nullptr && !overlayIntoBackBuffer_ && overlay_->hasPrepared(); };
-        hook.record = [this](VkCommandBuffer cmd, VkImageView, VkExtent2D extent) {
+        hook.record = [this](rhi::CommandList& cmd, VkExtent2D extent) {
             if (overlay_ != nullptr) overlay_->recordPrepared(cmd, extent);
         };
-        swapchain_.frameGen()->setUi(std::move(hook));
+        presentWrapper()->setUi(std::move(hook));
         fgUiInstalled_ = true;
         // the real presents' times (a thread spinning on the API's present counter: [debug] perf only; RVK_FG_NO_SAMPLER=1 leaves it
         // out, e.g. for CPU measurements)
-        if (options_.perf && GetEnvironmentVariableA("RVK_FG_NO_SAMPLER", nullptr, 0) == 0) swapchain_.frameGen()->startSampler();
+        if (options_.perf && GetEnvironmentVariableA("RVK_FG_NO_SAMPLER", nullptr, 0) == 0) presentWrapper()->startSampler();
     }
     pacerChecked_ = {};
     pacerRequested_ = -1.0;
@@ -494,9 +501,24 @@ void Device::shutdownFrameGenSwapchain() {
     if (!swapchain_.frameGenActive()) return;
     presenter_.waitIdle();
     if (fgClient_ != nullptr) fgClient_->swapchainWillChange();
-    if (auto* fg = swapchain_.frameGen()) fg->setUi({});
+    if (auto* fg = presentWrapper()) fg->setUi({});
     fgUiInstalled_ = false;
+    fgWrapper_.reset();
     swapchain_.releaseFrameGen();
+}
+
+// AMD's swapchain as the RHI's PresentWrapper (made on first use, dropped when the swapchain goes)
+rhi::PresentWrapper* Device::presentWrapper() {
+    vk::FgSwapchain* fg = swapchain_.frameGen();
+    if (fg == nullptr) {
+        fgWrapper_.reset();
+        return nullptr;
+    }
+    if (!fgWrapper_ || fgWrapperFor_ != fg) {
+        fgWrapper_ = rhi::vulkan::wrapFgSwapchain(*game_, *fg);
+        fgWrapperFor_ = fg;
+    }
+    return fgWrapper_.get();
 }
 
 void Device::setFrameGenRunning(bool on) {
@@ -507,7 +529,7 @@ void Device::setFrameGenRunning(bool on) {
 
 // once a second: the live base / output rates for the overlay (frame generation only; zero otherwise)
 void Device::fgStatsTick(std::chrono::steady_clock::time_point now) {
-    vk::FgSwapchain* fg = swapchain_.frameGen();
+    rhi::PresentWrapper* fg = presentWrapper();
     if (fgTick_ == std::chrono::steady_clock::time_point{}) {
         fgTick_ = now;
         fgTickBase_ = stats_.presentsQueued;
@@ -538,7 +560,7 @@ void Device::fgStatsTick(std::chrono::steady_clock::time_point now) {
 
 Device::FrameGenReport Device::takeFrameGenReport() {
     FrameGenReport r;
-    vk::FgSwapchain* fg = swapchain_.frameGen();
+    rhi::PresentWrapper* fg = presentWrapper();
     const auto now = std::chrono::steady_clock::now();
     if (fgReportAt_ == std::chrono::steady_clock::time_point{}) fgReportAt_ = now;
     r.seconds = std::chrono::duration<double>(now - fgReportAt_).count();
@@ -550,12 +572,12 @@ Device::FrameGenReport Device::takeFrameGenReport() {
         const std::uint64_t real = fg->realPresentCount();
         r.realPresents = real - fgReportReal_;
         fgReportReal_ = real;
-        const vk::FgSwapchain::Counters c = fg->takeCounters();
+        const rhi::PresentWrapper::Counters c = fg->takeCounters();
         r.callbacks = c.callbacks;
         r.generated = c.generatedFrames;
         r.uiFrames = c.uiFrames;
         r.callbackMs = c.callbackMs;
-        const std::vector<vk::FgPresentSample> samples = fg->takeSamples();
+        const std::vector<rhi::PresentSample> samples = fg->takeSamples();
         for (std::size_t i = 0; i < samples.size(); ++i) {
             r.times.push_back(samples[i].seconds);
             if (i > 0) r.gapsMs.push_back((samples[i].seconds - samples[i - 1].seconds) * 1000.0 / static_cast<double>(std::max<std::uint64_t>(1, samples[i].count - samples[i - 1].count)));
@@ -702,7 +724,7 @@ void Device::drawOverlayIntoBackBuffer() {
     ri.colorAttachmentCount = 1;
     ri.pColorAttachments = &att;
     vkCmdBeginRendering(cmd, &ri);
-    overlay_->record(cmd, extent);
+    overlay_->record(game_->frameCommands(), extent);
     vkCmdEndRendering(cmd);
     invalidateRecordingState();
 }
@@ -767,8 +789,8 @@ void Device::destroy() {
     gpuTimer_.destroy();
     pipelines_.destroy();
     passes_ = inject::Registry{};
-    game_.reset();          // retires its samplers / pass layout
-    transients_.destroy();  // retired: frames_ destroys them
+    fgWrapper_.reset();
+    game_.reset();          // retires its samplers / pass layout / transient images
     // frames_ runs the retired destructors (images, bindless slot releases): before the bindless heap goes away
     frames_.destroy();
     meshArena_.destroy();  // after frames_: its retired frees go into the arena
@@ -1230,9 +1252,9 @@ void Device::present() {
     stats_.pacerMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tw).count();
     // Manual frame generation (enh/framegen, docs/research/frame-generation.md 2.1 (ii)): the interpolated frame is shown first, the
     // real frame half a base interval later, both through this swapchain (simple timed spacing; the pacing of the AMD swapchain is stage F3)
-    vk::Image* generated = generated_;
+    rhi::Texture* generated = generated_;
     generated_ = nullptr;
-    const bool twoFrames = generated != nullptr && generated->valid() && !unpaced_;
+    const bool twoFrames = generated != nullptr && !unpaced_;
     std::chrono::steady_clock::time_point generatedAt{};
     for (int stage = 0; stage < (twoFrames ? 2 : 1); ++stage) {
     const bool showGenerated = twoFrames && stage == 0;
@@ -1281,7 +1303,7 @@ void Device::present() {
     presentRegion.emplace(*this, showGenerated ? "Present (generated)" : "Present");
     VkCommandBuffer cmd = frames_.cmd();
     // the frame shown: the engine's back buffer, or (first of the two) the generated frame
-    vk::Image& bb = showGenerated ? *generated : backBuffer_->image();
+    vk::Image& bb = showGenerated ? vkImage(*generated) : backBuffer_->image();
     const VkExtent3D srcExtent = showGenerated ? generated->desc().extent
                                                : VkExtent3D{backBuffer_->desc().width, backBuffer_->desc().height, 1};
     bb.transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -1338,7 +1360,7 @@ void Device::present() {
         vkCmdBeginRendering(cmd, &ri);
         {
             RegionScope overlayRegion(*this, "Overlay");
-            overlay_->record(cmd, ext);
+            overlay_->record(game_->frameCommands(), ext);
         }
         vkCmdEndRendering(cmd);
         b.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -1730,6 +1752,8 @@ rhi::ShaderModule Device::variantModule(const Shader& s, const shader::Translate
 void Device::setGbuffer(const GbufferTargets& g) {
     const bool was = gbuf_.normal != nullptr;
     gbuf_ = g;
+    gbufImage_[0] = g.normal != nullptr ? &vkImage(*g.normal) : nullptr;  // (the solid pass's scope attachments are still raw Vulkan)
+    gbufImage_[1] = g.motion != nullptr ? &vkImage(*g.motion) : nullptr;
     if (g.normal == nullptr) {
         if (was) spdlog::info("d3d9: g-buffer off");
         gbufArmed_ = false;
@@ -2206,32 +2230,28 @@ void Device::clear(std::uint32_t flags, std::uint32_t color, float z, std::uint3
     }
 }
 
-void Device::blit(vk::Image& src, std::uint32_t srcLevel, std::uint32_t srcLayer, const VkOffset3D srcBox[2], vk::Image& dst,
+void Device::blit(rhi::Texture& src, std::uint32_t srcLevel, std::uint32_t srcLayer, const VkOffset3D srcBox[2], rhi::Texture& dst,
                   std::uint32_t dstLevel, std::uint32_t dstLayer, const VkOffset3D dstBox[2], VkFilter filter) {
-    VkCommandBuffer cmd = frames_.cmd();
+    rhi::CommandList& cl = game_->frameCommands();
     const bool same = &src == &dst;
     if (same) {
-        src.transition(cmd, VK_IMAGE_LAYOUT_GENERAL, true);  // forced: orders this blit after the previous mip's
+        cl.transition(src, VK_IMAGE_LAYOUT_GENERAL);  // (always recorded: orders this blit after the previous mip's)
     } else {
-        src.transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-        dst.transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        if (src.layout() != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) cl.transition(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        if (dst.layout() != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) cl.transition(dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     }
-    VkImageBlit2 region{VK_STRUCTURE_TYPE_IMAGE_BLIT_2};
-    region.srcSubresource = {src.aspect(), srcLevel, srcLayer, 1};
-    region.srcOffsets[0] = srcBox[0];
-    region.srcOffsets[1] = srcBox[1];
-    region.dstSubresource = {dst.aspect(), dstLevel, dstLayer, 1};
-    region.dstOffsets[0] = dstBox[0];
-    region.dstOffsets[1] = dstBox[1];
-    VkBlitImageInfo2 bi{VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2};
-    bi.srcImage = src.image();
-    bi.srcImageLayout = same ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    bi.dstImage = dst.image();
-    bi.dstImageLayout = same ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    bi.regionCount = 1;
-    bi.pRegions = &region;
-    bi.filter = vk::isDepthFormat(src.format()) ? VK_FILTER_NEAREST : filter;
-    vkCmdBlitImage2(cmd, &bi);
+    const auto extent = [](const VkOffset3D box[2]) {
+        return VkExtent3D{static_cast<std::uint32_t>(std::max(1, box[1].x - box[0].x)), static_cast<std::uint32_t>(std::max(1, box[1].y - box[0].y)),
+                          static_cast<std::uint32_t>(std::max(1, box[1].z - box[0].z))};
+    };
+    rhi::TextureBlit region;
+    region.src = {srcLevel, srcLayer};
+    region.dst = {dstLevel, dstLayer};
+    region.srcOffset = srcBox[0];
+    region.dstOffset = dstBox[0];
+    region.srcExtent = extent(srcBox);
+    region.dstExtent = extent(dstBox);
+    cl.blitTexture(dst, src, std::span<const rhi::TextureBlit>(&region, 1), vk::isDepthFormat(src.desc().format) ? VK_FILTER_NEAREST : filter);
 }
 
 void Device::stretchRect(Surface* src, const std::int32_t* srcRect, Surface* dst, const std::int32_t* dstRect, bool linear) {
@@ -2251,7 +2271,7 @@ void Device::stretchRect(Surface* src, const std::int32_t* srcRect, Surface* dst
     VkOffset3D sb[2], db[2];
     box(srcRect, src, sb);
     box(dstRect, dst, db);
-    blit(src->texture()->image(), src->level(), src->face(), sb, dst->texture()->image(), dst->level(), dst->face(), db,
+    blit(src->texture()->rhi(), src->level(), src->face(), sb, dst->texture()->rhi(), dst->level(), dst->face(), db,
          linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
     src->texture()->lastUseFrame_ = frameValue();
     dst->texture()->lastUseFrame_ = frameValue();
@@ -2265,8 +2285,8 @@ bool Device::readRenderTarget(Surface* src, Texture* dst, std::uint32_t dstLevel
     std::vector<std::uint8_t> pixels;
     const std::uint32_t w = src->width(), h = src->height();
     const vk::FormatInfo& f = src->texture()->format();
-    const VkDeviceSize size = vk::storageSize(f, w, h);
-    if (!readImageLevel(src->texture()->image(), src->level(), src->face(), {w, h, 1}, size, pixels)) {
+    const std::uint64_t size = vk::storageSize(f, w, h);
+    if (!readImageLevel(src->texture()->rhi(), src->level(), src->face(), {w, h, 1}, size, pixels)) {
         return false;
     }
     Texture::Locked lk;
@@ -2371,9 +2391,7 @@ bool Device::loadSurfaceFromSurface(Texture* dst, std::uint32_t dstLevel, const 
         !identity(sw.b, VK_COMPONENT_SWIZZLE_B) || !identity(sw.a, VK_COMPONENT_SWIZZLE_A) || src->isDepth()) {
         return fail("source format needs a swizzle / is depth");
     }
-    VkFormatProperties fp{};
-    vkGetPhysicalDeviceFormatProperties(ctx_.physicalDevice(), src->format().format, &fp);
-    if ((fp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) == 0) {
+    if (!game_->formatSupport(src->format().format, VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
         return fail("the source format cannot be blitted");
     }
     const std::uint32_t lw = dst->levelWidth(dstLevel), lh = dst->levelHeight(dstLevel);
@@ -2388,7 +2406,7 @@ bool Device::loadSurfaceFromSurface(Texture* dst, std::uint32_t dstLevel, const 
         }
     }
     endRendering();
-    src->prepareForSampling(frames_.cmd());  // pending file data first
+    src->prepareForSampling(game_->frameCommands());  // pending file data first
     Surface* srcSurface = src->surface(srcLevel, 0);
     if (dst->isRenderTarget()) {
         stretchRect(srcSurface, srcRect, dst->surface(dstLevel, 0), r, linear);
@@ -2409,7 +2427,7 @@ bool Device::loadSurfaceFromSurface(Texture* dst, std::uint32_t dstLevel, const 
         if (sr[0] >= 0 && sr[1] >= 0 && sr[0] < sr[2] && sr[1] < sr[3] && sr[2] <= static_cast<std::int32_t>(sLvlW) &&
             sr[3] <= static_cast<std::int32_t>(sLvlH)) {
             std::vector<std::uint8_t> raw;
-            if (!readImageLevel(src->image(), srcLevel, 0, {sLvlW, sLvlH, 1}, vk::storageSize(src->format(), sLvlW, sLvlH), raw)) {
+            if (!readImageLevel(src->rhi(), srcLevel, 0, {sLvlW, sLvlH, 1}, vk::storageSize(src->format(), sLvlW, sLvlH), raw)) {
                 return fail("read-back of the source failed");
             }
             const std::uint32_t bw = (sLvlW + 3) / 4, blockBytes = src->format().blockBytes;
@@ -2451,8 +2469,8 @@ bool Device::loadSurfaceFromSurface(Texture* dst, std::uint32_t dstLevel, const 
     }
     stretchRect(srcSurface, srcRect, tmp->surface(0, 0), nullptr, linear);
     std::vector<std::uint8_t> pixels;
-    const VkDeviceSize size = vk::storageSize(tmp->format(), w, h);
-    const bool read = readImageLevel(tmp->image(), 0, 0, {w, h, 1}, size, pixels);
+    const std::uint64_t size = vk::storageSize(tmp->format(), w, h);
+    const bool read = readImageLevel(tmp->rhi(), 0, 0, {w, h, 1}, size, pixels);
     release(std::move(tmp));
     if (!read) {
         return fail("read-back failed");
@@ -2470,39 +2488,51 @@ bool Device::loadSurfaceFromSurface(Texture* dst, std::uint32_t dstLevel, const 
     return true;
 }
 
-bool Device::readImageLevel(vk::Image& img, std::uint32_t level, std::uint32_t layer, VkExtent3D extent, VkDeviceSize size,
+bool Device::readImageLevel(rhi::Texture& tex, std::uint32_t level, std::uint32_t layer, VkExtent3D extent, std::uint64_t size,
                             std::vector<std::uint8_t>& out) {
-    if (!img.valid() || size == 0) {
+    if (size == 0) {
         return false;
     }
     const auto t0 = std::chrono::steady_clock::now();
     endRendering();
-    VkBuffer rb = VK_NULL_HANDLE;
-    VmaAllocation ra = VK_NULL_HANDLE;
-    VmaAllocationInfo info{};
-    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    bci.size = size;
-    bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-    VmaAllocationCreateInfo aci{};
-    aci.usage = VMA_MEMORY_USAGE_AUTO;
-    aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
-    if (vmaCreateBuffer(ctx_.allocator(), &bci, &aci, &rb, &ra, &info) != VK_SUCCESS) {
+    // whole levels only: the buffer holds the level's rows `bufferRowPitch` apart (rhi::copyBytes), the result is repacked tightly below
+    const rhi::TextureDesc& td = tex.desc();
+    const VkExtent3D full = rhi::mipExtent(td, level);
+    const rhi::FormatBlock fb = rhi::formatBlock(td.format);
+    if (fb.bytes == 0 || extent.width != full.width || extent.height != full.height || extent.depth != full.depth) {
+        spdlog::warn("d3d9: image read-back of {}x{}x{} (level {} is {}x{}x{}, format {}): not a whole level of a known format", extent.width, extent.height,
+                     extent.depth, level, full.width, full.height, full.depth, static_cast<int>(td.format));
         return false;
     }
-    vk::names::object(ctx_, rb, VK_OBJECT_TYPE_BUFFER, "rvk image read-back");
-    img.transition(frames_.cmd(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    VkBufferImageCopy region{};
-    region.imageSubresource = {img.aspect() & ~VkImageAspectFlags(VK_IMAGE_ASPECT_STENCIL_BIT), level, layer, 1};
-    region.imageExtent = extent;
-    vkCmdCopyImageToBuffer(frames_.cmd(), img.image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rb, 1, &region);
+    rhi::BufferDesc bd;
+    bd.size = rhi::copyBytes(td, level);
+    bd.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bd.memory = rhi::Memory::Readback;
+    bd.name = "rvk image read-back";
+    const std::unique_ptr<rhi::Buffer> rb = game_->createBuffer(bd);
+    if (!rb) {
+        return false;
+    }
+    rhi::CommandList& cl = game_->frameCommands();
+    if (tex.layout() != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) cl.transition(tex, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    cl.copyTextureToBuffer(*rb, 0, tex, {level, layer});
     // the copy must finish before the CPU reads: end the frame's work here and start a new command buffer
     submitFrame(VK_NULL_HANDLE, VK_NULL_HANDLE);
     frames_.waitFor(frames_.currentValue() - 1);
     beginFrame();
-    vmaInvalidateAllocation(ctx_.allocator(), ra, 0, VK_WHOLE_SIZE);
-    const auto* p = static_cast<const std::uint8_t*>(info.pMappedData);
-    out.assign(p, p + size);
-    vmaDestroyBuffer(ctx_.allocator(), rb, ra);
+    rb->invalidate();
+    const auto* p = static_cast<const std::uint8_t*>(rb->map());
+    const std::uint32_t rowBytes = ((full.width + fb.width - 1) / fb.width) * fb.bytes;
+    const std::uint32_t blockRows = (full.height + fb.height - 1) / fb.height;
+    const std::uint32_t pitch = rhi::bufferRowPitch(td.format, full.width);
+    out.resize(static_cast<std::size_t>(rowBytes) * blockRows * full.depth);
+    for (std::uint32_t z = 0; z < full.depth; ++z) {
+        for (std::uint32_t r = 0; r < blockRows; ++r) {
+            std::memcpy(out.data() + (static_cast<std::size_t>(z) * blockRows + r) * rowBytes,
+                        p + (static_cast<std::size_t>(z) * blockRows + r) * pitch, rowBytes);
+        }
+    }
+    if (out.size() > size) out.resize(static_cast<std::size_t>(size));
     ++perf_.readbacks;
     perf_.readbackMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     return true;

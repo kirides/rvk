@@ -8,7 +8,6 @@
 
 #include "d3d9/device.h"
 #include "shader/embedded.h"
-#include "vk/context.h"
 
 namespace rvk::enh {
 
@@ -64,13 +63,13 @@ bool Ocean::createPipelines() {
     spectrum_ = compute(shader::embedded::spirv("water/ocean_spectrum.comp"), "ocean.spectrum");
     evolve_ = compute(shader::embedded::spirv("water/ocean_evolve.comp"), "ocean.evolve");
     resolve_ = compute(shader::embedded::spirv("water/ocean_resolve.comp"), "ocean.resolve");
-    const VkPhysicalDeviceLimits& lim = dev_.ctx().properties().limits;
+    const rhi::GameCaps& lim = dev_.game().gameCaps();
     for (int i = 0; i < 3; ++i) {
         const std::int32_t n = 128 << i;
         // one workgroup of N / 2 threads per line, 2 x N x 16 bytes of shared memory
         if (static_cast<std::uint32_t>(n / 2) > lim.maxComputeWorkGroupInvocations ||
-            static_cast<std::uint32_t>(n / 2) > lim.maxComputeWorkGroupSize[0] ||
-            static_cast<std::uint32_t>(n) * 32u > lim.maxComputeSharedMemorySize) {
+            static_cast<std::uint32_t>(n / 2) > lim.maxComputeWorkGroupSizeX ||
+            static_cast<std::uint32_t>(n) * 32u > lim.maxComputeSharedMemory) {
             spdlog::info("enh: ocean: FFT size {} not supported by this GPU (limits)", n);
             continue;
         }

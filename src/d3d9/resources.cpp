@@ -8,7 +8,7 @@
 #include <spdlog/spdlog.h>
 
 #include "d3d9/device.h"
-#include "vk/debug_names.h"
+#include "vk/debug_names.h"  // (the pure name formatter: textureName)
 
 namespace rvk::d3d9 {
 
@@ -35,26 +35,26 @@ Texture::Texture(Device& device, const TextureDesc& desc) : dev_(device), desc_(
         return;
     }
     fmt_ = *fmt;
-    kind_ = desc_.type == TextureType::Cube ? vk::TextureKind::Cube : desc_.type == TextureType::Volume ? vk::TextureKind::Volume
-                                                                                                       : vk::TextureKind::Tex2D;
-    vk::ImageDesc id;
-    id.type = desc_.type == TextureType::Volume ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
-    id.format = fmt_.format;
-    id.extent = {desc_.width, desc_.height, desc_.depth};
-    id.mips = desc_.levels;
-    id.layers = faces();
-    id.cube = desc_.type == TextureType::Cube;
-    id.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    rhi::TextureDesc td;
+    td.type = desc_.type == TextureType::Volume ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
+    td.format = fmt_.format;
+    td.extent = {desc_.width, desc_.height, desc_.depth};
+    td.mips = desc_.levels;
+    td.layers = faces();
+    td.cube = desc_.type == TextureType::Cube;
+    td.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     if (fmt_.depth) {
-        id.usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        td.usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     } else if (isRenderTarget()) {
-        id.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        td.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     }
-    id.swizzle = fmt_.swizzle;
-    if (!image_.create(dev_.ctx(), id)) {
+    td.swizzle = fmt_.swizzle;
+    tex_ = dev_.game().createTexture(td);
+    if (!tex_) {
         return;
     }
-    slot_ = dev_.bindless().addTexture(kind_, image_.view());
+    vkImage_ = &dev_.vkImage(*tex_);
+    slot_ = tex_->heapSampled();
     applyDebugName();  // after the slot: the name carries it
     valid_ = true;
 }
@@ -81,23 +81,27 @@ std::string Texture::debugName() const {
 }
 
 void Texture::applyDebugName() {
-    vk::Context& ctx = dev_.ctx();
-    if (!image_.valid() || !ctx.namesEnabled()) return;
-    vk::names::image(ctx, image_, debugName());
+    if (!tex_ || !dev_.namesEnabled()) return;
+    tex_->setDebugName(debugName());
 }
 
 void Texture::setDebugLabel(const char* label, std::uint32_t index) {
     if (label == label_ && index == labelIndex_) return;  // static strings: the pointer says it
     label_ = label;
     labelIndex_ = index;
-    if (!image_.valid() || !dev_.ctx().namesEnabled()) return;
+    if (!tex_ || !dev_.namesEnabled()) return;
     const std::string name = debugName();
-    vk::names::image(dev_.ctx(), image_, name);
+    tex_->setDebugName(name);
     // a pooled target that changes roles every frame would flood the log: the first 160 only
     static std::atomic<int> logged{0};
     if (label != nullptr && logged.fetch_add(1) < 160) {
         spdlog::info("names: {} = image '{}' bindless slot {}", label, name, slot_);
     }
+}
+
+vk::Image& Texture::nullImage() {
+    static vk::Image image;  // (never created: valid() is false, layout UNDEFINED)
+    return image;
 }
 
 Texture::~Texture() {
@@ -114,15 +118,7 @@ Texture::~Texture() {
     for (Level& l : cpu_) {
         freeLevel(l);
     }
-    if (slot_ != 0) {
-        dev_.bindless().releaseTexture(kind_, slot_);
-    }
-    if (image_.valid()) {
-        // the GPU may still use it in frames in flight
-        auto* ctx = &dev_.ctx();
-        auto img = std::make_shared<vk::Image>(std::move(image_));
-        dev_.frames().retire([ctx, img] { img->destroy(*ctx); });
-    }
+    tex_.reset();  // (releases the bindless slot; the GPU may still use the image in frames in flight: the device retires it)
 }
 
 namespace {
@@ -145,15 +141,9 @@ Texture::Level& Texture::cpuLevel(std::uint32_t level, std::uint32_t face) {
 
 void Texture::orphan() {
     // Device::destroy (frames idle): what the destructor would hand to the device, now; the frames run the retired work
-    if (slot_ != 0) {
-        dev_.bindless().releaseTexture(kind_, slot_);
-        slot_ = 0;
-    }
-    if (image_.valid()) {
-        auto* ctx = &dev_.ctx();
-        auto img = std::make_shared<vk::Image>(std::move(image_));
-        dev_.frames().retire([ctx, img] { img->destroy(*ctx); });
-    }
+    tex_.reset();
+    slot_ = 0;
+    vkImage_ = &nullImage();
     role_ = scene::ImageRole::None;
     orphaned_ = true;
 }
@@ -211,7 +201,7 @@ bool Texture::restoreLevel(std::uint32_t level, std::uint32_t face) {
     std::vector<std::uint8_t> bytes;
     if (why == nullptr) {
         const VkDeviceSize size = vk::storageSize(fmt_, w, h) * d;
-        if (!dev_.readImageLevel(image_, level, desc_.type == TextureType::Cube ? face : 0u, {w, h, d}, size, bytes)) {
+        if (!dev_.readImageLevel(*tex_, level, desc_.type == TextureType::Cube ? face : 0u, {w, h, d}, size, bytes)) {
             why = "read-back failed";
         }
     }
@@ -330,12 +320,14 @@ Surface* Texture::surface(std::uint32_t level, std::uint32_t face) {
     return surfaces_.back().get();
 }
 
-void Texture::upload(VkCommandBuffer cmd) {
+void Texture::upload(rhi::CommandList& cl) {
     const std::lock_guard lock(mutex_);
     pending_ = false;
     bool any = false;
     bool copied = false;
     lastUseFrame_ = dev_.frameValue();
+    rhi::GameDevice& game = dev_.game();
+    const rhi::GameCaps& caps = game.gameCaps();
     for (std::uint32_t face = 0; face < faces() && !cpu_.empty(); ++face) {
         for (std::uint32_t level = 0; level < desc_.levels; ++level) {
             Level& l = cpu_[face * desc_.levels + level];
@@ -343,7 +335,7 @@ void Texture::upload(VkCommandBuffer cmd) {
                 continue;
             }
             if (!any) {
-                image_.transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+                if (tex_->layout() != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) cl.transition(*tex_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
                 any = true;
             }
             // only the dirty region: the rest of the image keeps what earlier uploads put there (the first upload is whole:
@@ -357,8 +349,14 @@ void Texture::upload(VkCommandBuffer cmd) {
             }
             const std::uint32_t x0 = l.box[0], y0 = l.box[1], z0 = l.box[2];
             const std::uint32_t w = l.box[3] - x0, h = l.box[4] - y0, d = l.box[5] - z0;
-            const std::uint64_t sliceBytes = vk::storageSize(fmt_, w, h);
-            rhi::RingAlloc staging = dev_.frames().allocate(sliceBytes * d, 16);
+            // staging rows: tightly packed (rowBytes), or `rowPitch` apart where the backend wants an alignment (GameCaps::uploadRowAlign)
+            const std::uint64_t tight = vk::storageSize(fmt_, w, h);
+            const std::uint32_t rowBytes = static_cast<std::uint32_t>(vk::storageSize(fmt_, w, 1));
+            const std::uint32_t align = std::max(1u, caps.uploadRowAlign);
+            const std::uint32_t rowPitch = (rowBytes + align - 1) / align * align;
+            const std::uint32_t blockRows = fmt_.compressed ? (h + 3) / 4 : h;
+            const std::uint64_t sliceBytes = rowPitch == rowBytes ? tight : static_cast<std::uint64_t>(rowPitch) * blockRows;
+            rhi::RingAlloc staging = game.allocRing(sliceBytes * d, std::max<std::uint32_t>(16, caps.uploadOffsetAlign));
             if (staging.ptr == nullptr) {
                 continue;
             }
@@ -366,16 +364,26 @@ void Texture::upload(VkCommandBuffer cmd) {
                 fmt_.compressed ? static_cast<std::size_t>(y0 / 4) * l.rowPitch + static_cast<std::size_t>(x0 / 4) * fmt_.blockBytes
                                 : static_cast<std::size_t>(y0) * l.rowPitch + static_cast<std::size_t>(x0) * fmt_.srcBlockBytes;
             for (std::uint32_t z = 0; z < d; ++z) {
-                vk::convertLevel(fmt_, l.data.data() + static_cast<std::size_t>(z0 + z) * l.slicePitch + srcOffset, l.rowPitch,
-                                 static_cast<std::uint8_t*>(staging.ptr) + z * sliceBytes, w, h);
+                const std::uint8_t* src = l.data.data() + static_cast<std::size_t>(z0 + z) * l.slicePitch + srcOffset;
+                std::uint8_t* dst = static_cast<std::uint8_t*>(staging.ptr) + z * sliceBytes;
+                if (rowPitch == rowBytes) {
+                    vk::convertLevel(fmt_, src, l.rowPitch, dst, w, h);
+                } else {
+                    // aligned rows: one row of blocks at a time into its place
+                    const std::uint32_t step = fmt_.compressed ? 4 : 1;
+                    for (std::uint32_t row = 0, br = 0; row < h; row += step, ++br) {
+                        vk::convertLevel(fmt_, src + static_cast<std::size_t>(br) * l.rowPitch, l.rowPitch, dst + static_cast<std::size_t>(br) * rowPitch, w,
+                                         std::min(step, h - row));
+                    }
+                }
             }
-            VkBufferImageCopy region{};
-            region.bufferOffset = staging.offset;
-            region.imageSubresource = {image_.aspect() & ~VkImageAspectFlags(VK_IMAGE_ASPECT_STENCIL_BIT), level,
-                                       desc_.type == TextureType::Cube ? face : 0u, 1};
-            region.imageOffset = {static_cast<std::int32_t>(x0), static_cast<std::int32_t>(y0), static_cast<std::int32_t>(z0)};
-            region.imageExtent = {w, h, d};
-            vkCmdCopyBufferToImage(cmd, vk::vkBuffer(staging), image_.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+            rhi::BufferTextureCopy copy;
+            copy.bufferOffset = staging.offset;
+            copy.rowPitch = rowPitch == rowBytes ? 0 : rowPitch;
+            copy.sub = {level, desc_.type == TextureType::Cube ? face : 0u};
+            copy.offset = {static_cast<std::int32_t>(x0), static_cast<std::int32_t>(y0), static_cast<std::int32_t>(z0)};
+            copy.extent = {w, h, d};
+            cl.copyBufferToTextureBox(*tex_, game.ringBuffer(staging), copy);
             dev_.countUpload(true, sliceBytes * d);
             l.dirty = false;
             copied = true;
@@ -392,14 +400,14 @@ void Texture::upload(VkCommandBuffer cmd) {
     }
 }
 
-bool Texture::prepareForSampling(VkCommandBuffer cmd) {
+bool Texture::prepareForSampling(rhi::CommandList& cl) {
     if (!valid_ || isNull_) {
         return false;
     }
     if (pending_) {
-        upload(cmd);
+        upload(cl);
     }
-    image_.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (tex_->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) cl.transition(*tex_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     return true;
 }
 
@@ -423,17 +431,13 @@ Buffer::Buffer(Device& device, std::uint32_t size, std::uint32_t usage, std::uin
 
 Buffer::~Buffer() {
     if (!dev_.untrackLive(this)) return;  // orphaned by Device::destroy
-    if (static_.valid()) {
-        auto* arena = &dev_.meshArena();
-        dev_.frames().retire([arena, a = static_] { arena->free(a); });
-    }
+    if (static_.valid()) dev_.game().freeMesh(static_, true);
 }
 
 void Buffer::orphan() {
     cleanStatic_.store(false, std::memory_order_release);
     if (static_.valid()) {
-        auto* arena = &dev_.meshArena();
-        dev_.frames().retire([arena, a = static_] { arena->free(a); });
+        dev_.game().freeMesh(static_, true);
         static_ = {};
     }
     orphaned_ = true;
@@ -470,16 +474,16 @@ Buffer::Binding Buffer::gpu(std::uint32_t strideHint) {
         // a DISCARD of a few KiB of our 4 MiB native vertex buffer reserves those KiB, not 4 MiB)
         const RingBlock blk = ringBlock(plan, ringLo_, ringHi_, size_);
         if (blk.fresh) {
-            const VkDeviceSize bytes = std::max<VkDeviceSize>(blk.hi - blk.lo, 16);
+            const std::uint64_t bytes = std::max<std::uint64_t>(blk.hi - blk.lo, 16);
             // at least lo into its chunk: the binding (block offset - lo) addresses buffer byte 0 and stays >= 0
-            rhi::RingAlloc a = dev_.frames().allocate(bytes, 16, blk.lo);
+            rhi::RingAlloc a = dev_.game().allocRing(bytes, 16, blk.lo);
             if (a.ptr == nullptr) {
                 return {};
             }
             ringPtr_ = static_cast<std::uint8_t*>(a.ptr);
             ringLo_ = blk.lo;
             ringHi_ = blk.hi;
-            binding_ = {vk::vkBuffer(a), a.offset - blk.lo};
+            binding_ = {a.buffer, a.offset - blk.lo};
         }
         if (blk.copyHi > blk.copyLo) {
             std::memcpy(ringPtr_ + (blk.copyLo - ringLo_), cpu_.data() + blk.copyLo, blk.copyHi - blk.copyLo);
@@ -493,27 +497,23 @@ Buffer::Binding Buffer::gpu(std::uint32_t strideHint) {
         // contents; it starts at a multiple of the first use's stride / index size (draws fold the offset into the draw).
         // With the ray tracing tier the arena is also a BLAS build input that shaders read through its address
         // (docs/research/raytracing.md 2)
-        const vk::MeshArena::Alloc na = dev_.meshArena().allocate(size_, strideHint != 0 ? strideHint : (index32_ ? 4u : 2u));
+        rhi::GameDevice& game = dev_.game();
+        const rhi::MeshAlloc na = game.allocMesh(size_, strideHint != 0 ? strideHint : (index32_ ? 4u : 2u));
         if (!na.valid()) {
             return {};
         }
-        rhi::RingAlloc staging = dev_.frames().allocate(size_, 16);
+        rhi::RingAlloc staging = game.allocRing(size_, 16);
         if (staging.ptr == nullptr) {
-            dev_.meshArena().free(na);
+            game.freeMesh(na, false);
             return {};
         }
         std::memcpy(staging.ptr, cpu_.data(), size_);
         dev_.countUpload(false, size_);
-        VkCommandBuffer cmd = dev_.uploadCommands();
-        const VkBufferCopy copy{staging.offset, na.offset, size_};
-        vkCmdCopyBuffer(cmd, vk::vkBuffer(staging), na.buffer, 1, &copy);
+        dev_.uploadList().copyBuffer(*na.buffer, na.offset, game.ringBuffer(staging), staging.offset, size_);
         const bool renamed = static_.valid();
-        if (renamed) {
-            auto* arena = &dev_.meshArena();
-            dev_.frames().retire([arena, a = static_] { arena->free(a); });
-        }
+        if (renamed) game.freeMesh(static_, true);
         static_ = na;
-        binding_ = {na.buffer, na.offset};
+        binding_ = {na.native, na.offset};
         copies_.committed(plan, false, frame);
         // observers (enh/rt_scene) forget what they built from the old copy (its address dies with it)
         if (renamed) dev_.notifyBufferChanged(id_);
@@ -524,7 +524,7 @@ Buffer::Binding Buffer::gpu(std::uint32_t strideHint) {
 
 rhi::GpuAddr Buffer::gpuAddress() {
     const std::lock_guard lock(mutex_);
-    if (!static_.valid() || dynamic() || pool_ == POOL_SYSTEMMEM || !dev_.ctx().features().rayTracing.enabled) return {};
+    if (!static_.valid() || dynamic() || pool_ == POOL_SYSTEMMEM || !dev_.game().gameCaps().rayTracing) return {};
     return static_.addr;
 }
 

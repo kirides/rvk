@@ -355,10 +355,10 @@ private:
     std::unordered_map<rt::BlasKey, Layer, rt::BlasKeyHash> layers_;
 
     // GPU resources (while active)
-    Tlas tlas_[vk::Frames::kInFlight];
+    Tlas tlas_[rhi::kFramesInFlight];
     std::unique_ptr<rhi::SizeQuery> compactQuery_;  // compacted sizes of each slot's builds
     static constexpr std::uint32_t kQueriesPerSlot = 64;  // >= buildsPerFrame
-    std::vector<Compaction> compactions_[vk::Frames::kInFlight];
+    std::vector<Compaction> compactions_[rhi::kFramesInFlight];
 
     // stats (interval since the last log line)
     struct Interval {

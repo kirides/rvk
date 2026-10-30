@@ -13,9 +13,6 @@
 #include "enh/rhi_scope.h"
 #include "shader/embedded.h"
 #include "engine/memread.h"
-#include "rhi/vulkan/wrap.h"
-#include "vk/context.h"
-#include "vk/frames.h"
 
 namespace rvk::enh {
 
@@ -91,7 +88,7 @@ RtScene::~RtScene() {
     deactivate();
 }
 
-bool RtScene::supported() const { return dev_.ctx().features().rayTracing.enabled; }
+bool RtScene::supported() const { return dev_.game().gameCaps().rayTracing; }
 
 void RtScene::acquire(const void* consumer) {
     consumers_.insert(consumer);
@@ -902,7 +899,7 @@ bool RtScene::ensureResources() {
     }
     // compaction-size queries of each slot's builds
     if (ok) {
-        compactQuery_ = rd->createSizeQuery(kQueriesPerSlot * vk::Frames::kInFlight);
+        compactQuery_ = rd->createSizeQuery(kQueriesPerSlot * rhi::kFramesInFlight);
         ok = compactQuery_ != nullptr;
     }
     for (auto& c : compactions_) c.clear();
@@ -913,7 +910,7 @@ bool RtScene::ensureResources() {
         return false;
     }
     spdlog::info("rt: scene: TLAS {} instances = {:.1f} MiB x {}, BLAS build scratch from the RHI's shared pool (grows on demand)", cap,
-                 static_cast<double>(tlasBytes) / 1048576.0, vk::Frames::kInFlight);
+                 static_cast<double>(tlasBytes) / 1048576.0, rhi::kFramesInFlight);
     return true;
 }
 
@@ -1072,8 +1069,8 @@ void RtScene::buildPending(rhi::CommandList& cl, std::uint32_t slot) {
         const std::uint32_t isize = k.index32 != 0 ? 4u : 2u;
         if (k.strip != 0) {
             // the converted list into a device buffer of its own (through the frame's ring)
-            const VkDeviceSize bytes = b->listData.size();
-            const rhi::RingAlloc up = dev_.frames().allocate(bytes, 16);
+            const std::uint64_t bytes = b->listData.size();
+            const rhi::RingAlloc up = dev_.ring(bytes, 16);
             if (up.ptr != nullptr) {
                 b->listIndices = rd->createBuffer({bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Device,
                                                    "rt scene strip indices"});
@@ -1083,8 +1080,7 @@ void RtScene::buildPending(rhi::CommandList& cl, std::uint32_t slot) {
                 continue;
             }
             std::memcpy(up.ptr, b->listData.data(), bytes);
-            const std::unique_ptr<rhi::Buffer> ring = rhi::vulkan::wrapBuffer(*rd, vk::vkBuffer(up), up.gpuVa - up.offset, up.offset + bytes);
-            cl.copyBuffer(*b->listIndices, 0, *ring, up.offset, bytes);
+            cl.copyBuffer(*b->listIndices, 0, dev_.game().ringBuffer(up), up.offset, bytes);
             b->listData.clear();
             b->listData.shrink_to_fit();
             blasBytes_ += bytes;
@@ -1220,7 +1216,7 @@ bool RtScene::captureOptions(const d3d9::Shader& s, shader::TranslateOptions& o)
     return true;
 }
 
-bool RtScene::dynamicSupported() const { return supported() && dev_.ctx().features().vertexStores; }
+bool RtScene::dynamicSupported() const { return supported() && dev_.game().gameCaps().vertexStores; }
 
 void RtScene::setDynamic(const void* consumer, bool on) {
     struct Sync {
@@ -1311,7 +1307,7 @@ void RtScene::observeTree(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& 
     if (batch.base.null()) {
         // the draw's capture buffer: a header + `count` runs of `slots` vertices (an instanced batch's instances, whether or
         // not they are all close enough: instance k always writes run k)
-        const rhi::RingAlloc a = dev.frames().allocate(16 + static_cast<VkDeviceSize>(slots) * 32 * count, 16);
+        const rhi::RingAlloc a = dev.game().allocCapture(16 + static_cast<std::uint64_t>(slots) * 32 * count, 16);
         if (a.ptr == nullptr) {
             batch.failed = true;
             return;
@@ -1459,7 +1455,7 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     }
     const bool useSkin = skin && !vertexAddress.null();
     if (mainView && !solid && !useSkin) return;
-    const rhi::RingAlloc a = dev.frames().allocate(16 + static_cast<VkDeviceSize>(slots) * 32, 16);
+    const rhi::RingAlloc a = dev.game().allocCapture(16 + static_cast<std::uint64_t>(slots) * 32, 16);
     if (a.ptr == nullptr) return;
     // header: slots, the previous frame's capture of this draw (its vertex shader reads the previous positions: motion)
     // (bit 31 of the slots: a cascade's view, whose vertex shader's world position operand is captured instead of the clip position)
@@ -1478,13 +1474,13 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         j.stride = q.vertexStride;
         j.offsets = skinOffsets;
         // the bone matrices: c32 .. c231 of this draw's vertex shader constants
-        const rhi::RingAlloc bones = dev.frames().allocate(200u * 16u, 16);
+        const rhi::RingAlloc bones = dev.ring(200u * 16u, 16);
         if (bones.ptr == nullptr) return;
         std::memcpy(bones.ptr, dev.vsConstant(kInstanceDataBase), 200u * 16u);
         j.bones = bones.ref;
         if (skinVerify_) {
             // the vertex shader's own result for the same draw (the cascade view's capture variant), zeroed: slots it did not write have w = 0
-            const rhi::RingAlloc ref = dev.frames().allocate(16 + static_cast<VkDeviceSize>(slots) * 32, 16);
+            const rhi::RingAlloc ref = dev.game().allocCapture(16 + static_cast<std::uint64_t>(slots) * 32, 16);
             if (ref.ptr != nullptr) {
                 std::uint32_t rh[4] = {slots | 0x80000000u, 0, 0, 0};
                 std::memcpy(ref.ptr, rh, 16);
@@ -1702,20 +1698,20 @@ void RtScene::recordSkin(rhi::CommandList& cl) {
     const std::uint32_t n = static_cast<std::uint32_t>(std::min<std::size_t>(skinJobs_.size(), 512));
     std::uint32_t chunks = 0;
     for (std::uint32_t i = 0; i < n; ++i) chunks += (skinJobs_[i].slots + 63) / 64;
-    const rhi::RingAlloc t = dev_.frames().allocate(16 + 64ull * n, 16);
+    const rhi::RingAlloc t = dev_.ring(16 + 64ull * n, 16);
     if (t.ptr == nullptr) {
         skinJobs_.clear();
         return;
     }
     rhi::GpuRef errAddress;
-    const std::uint32_t slot = dev_.frames().currentSlot();
+    const std::uint32_t slot = dev_.frameSlot();
     if (skinVerify_) {
         if (skinErr_ == nullptr) {
             rhi::Device* rd = dev_.rhi();
             if (rd != nullptr) {
-                skinErr_ = rd->createBuffer({16ull * vk::Frames::kInFlight, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Readback, "rt skin verify"});
+                skinErr_ = rd->createBuffer({16ull * rhi::kFramesInFlight, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Readback, "rt skin verify"});
             }
-            if (skinErr_ != nullptr) std::memset(skinErr_->map(), 0, 16ull * vk::Frames::kInFlight);
+            if (skinErr_ != nullptr) std::memset(skinErr_->map(), 0, 16ull * rhi::kFramesInFlight);
         }
         if (skinErr_ == nullptr) {
             skinVerify_ = false;
@@ -1824,8 +1820,8 @@ void RtScene::record(d3d9::PassContext& ctx) {
     builtFrame_ = dev_.frameValue();
     if (!ensureResources()) return;
     const auto t0 = std::chrono::steady_clock::now();
-    vk::Frames& frames = dev_.frames();
-    const std::uint32_t slot = frames.currentSlot();
+    d3d9::Device& frames = dev_;
+    const std::uint32_t slot = frames.frameSlot();
     const std::uint64_t frame = dev_.frameValue();
     const double now = dev_.secondsSinceCreate();
     RhiScope rs(dev_, ctx.cmd);
@@ -1897,8 +1893,8 @@ void RtScene::record(d3d9::PassContext& ctx) {
     });
     const std::uint32_t worldCount = std::min<std::uint32_t>(static_cast<std::uint32_t>(chosen.size()), tlas_[slot].capacity - dynCount);
     const std::uint32_t n = worldCount + dynCount;
-    const rhi::RingAlloc ia = frames.allocate(std::max<VkDeviceSize>(n, 1) * sizeof(VkAccelerationStructureInstanceKHR), 16);
-    const rhi::RingAlloc ra = frames.allocate(std::max<VkDeviceSize>(n, 1) * sizeof(abi::RtGeometryRecord), 16);
+    const rhi::RingAlloc ia = frames.ring(std::max<std::uint64_t>(n, 1) * sizeof(VkAccelerationStructureInstanceKHR), 16);
+    const rhi::RingAlloc ra = frames.ring(std::max<std::uint64_t>(n, 1) * sizeof(abi::RtGeometryRecord), 16);
     if (ia.ptr == nullptr || ra.ptr == nullptr) {
         dev_.setRtScene({});
         return;
@@ -2084,7 +2080,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
 
     // the segment table (after the records: their addresses)
     if (!segs.empty()) {
-        const rhi::RingAlloc sa = frames.allocate(segs.size() * sizeof(abi::RtMaterialSegment), 16);
+        const rhi::RingAlloc sa = frames.ring(segs.size() * sizeof(abi::RtMaterialSegment), 16);
         if (sa.ptr != nullptr) {
             std::memcpy(sa.ptr, segs.data(), segs.size() * sizeof(abi::RtMaterialSegment));
             for (const auto& [rec, first] : segRecords) split(sa.ref.plus(static_cast<std::int64_t>(first) * sizeof(abi::RtMaterialSegment)), recs[rec].segments);
@@ -2139,7 +2135,7 @@ void RtScene::logStats(bool force) {
         pendingCount += b.state == BlasState::Pending ? 1 : 0;
         failed += b.state == BlasState::Failed ? 1 : 0;
     }
-    const double tlasMiB = tlas_[0].as != nullptr ? static_cast<double>(tlas_[0].as->storageBytes() * vk::Frames::kInFlight) / 1048576.0 : 0.0;
+    const double tlasMiB = tlas_[0].as != nullptr ? static_cast<double>(tlas_[0].as->storageBytes() * rhi::kFramesInFlight) / 1048576.0 : 0.0;
     const double blasMiB = static_cast<double>(blasBytes_) / 1048576.0;
     const double scratchMiB = dev_.rhi() != nullptr ? static_cast<double>(dev_.rhi()->buildScratchBytes()) / 1048576.0 : 0.0;
     if (iv_.frames % 30 == 1 || due || force) {
@@ -2169,7 +2165,7 @@ void RtScene::logStats(bool force) {
         spdlog::info("rt: scene: characters {} + animated SpeedTrees {} in the last TLAS ({} tracked, interval: {} BLAS builds, {} refits; "
                      "volatile ranges {}; tree draws {} ({} beyond the range, {} captured); BLAS refits from this frame's capture {} / the previous frame's {}; characters: {} from this frame's pose ({} skinned by compute) / {} from the previous frame's (skinning pass: {} draws taken, {} not eligible; solid-pass draws {} with / {} without a job); capture variant needs vertexPipelineStoresAndAtomics: {})",
                      iv_.dynamic - iv_.animatedTrees, iv_.animatedTrees, dynBlas_.size(), dynBuilt_, dynRefit_, iv_.volatileBlas, iv_.treeDraws, iv_.treeFar, iv_.treeCaptured, iv_.capCurrent, iv_.capPrevious,
-                     iv_.charCurrent, iv_.charSkinned, iv_.charPrevious, iv_.skinDraws, iv_.skinIneligible, iv_.solidWithSkin, iv_.solidNoSkin, dev_.ctx().features().vertexStores ? "yes" : "no");
+                     iv_.charCurrent, iv_.charSkinned, iv_.charPrevious, iv_.skinDraws, iv_.skinIneligible, iv_.solidWithSkin, iv_.solidNoSkin, dev_.game().gameCaps().vertexStores ? "yes" : "no");
         dynBuilt_ = dynRefit_ = 0;
     }
     if (iv_.holes > 0) {

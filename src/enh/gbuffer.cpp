@@ -12,8 +12,6 @@
 #include "enh/rhi_scope.h"
 #include "enh/rt_scene.h"
 #include "shader/embedded.h"
-#include "vk/context.h"
-#include "vk/frames.h"
 
 namespace rvk::enh {
 
@@ -78,7 +76,7 @@ void Gbuffer::apply(const Settings& s) {
     s_ = s;
     s_.aoStrength = std::clamp(s_.aoStrength, 0.0f, 1.0f);
     s_.aoRadius = std::clamp(s_.aoRadius, 10.0f, 1000.0f);
-    if (s.ao && !dev_.ctx().features().storageImageExtendedFormats && !failed_) {
+    if (s.ao && !dev_.game().gameCaps().storageImageExtendedFormats && !failed_) {
         spdlog::warn("enh: gbuffer: the GPU lacks shaderStorageImageExtendedFormats (RG16F storage images): AO is not available");
         failed_ = true;
     }
@@ -116,7 +114,7 @@ void Gbuffer::disable() {
     dev_.setGbuffer({});
     dev_.setFrameAo({});
     if (scene_ != nullptr) scene_->setDynamic(this, false);
-    for (const char* k : {"gbuffer.normal", "gbuffer.motion", "gtao.raw", "gtao.history0", "gtao.history1"}) dev_.transients().release(k);
+    for (const char* k : {"gbuffer.normal", "gbuffer.motion", "gtao.raw", "gtao.history0", "gtao.history1"}) dev_.releaseTransient(k);
     historyValid_ = false;
 }
 
@@ -152,13 +150,13 @@ void Gbuffer::replace(d3d9::Device& device, const d3d9::ReplaceQuery&, d3d9::Dra
 bool Gbuffer::ensureTargets(d3d9::PassContext& ctx) {
     if (ctx.mainView != 1 || ctx.sceneHdr == nullptr) return false;
     const std::uint32_t w = ctx.sceneHdr->desc().width, h = ctx.sceneHdr->desc().height;
-    vk::Transients::Entry* n = dev_.transients().get("gbuffer.normal", {kNormalFormat, {w, h}, kNormalUsage});
-    vk::Transients::Entry* m = dev_.transients().get("gbuffer.motion", {kMotionFormat, {w, h}, kMotionUsage});
+    rhi::Texture* n = dev_.transient("gbuffer.normal", {kNormalFormat, {w, h}, kNormalUsage});
+    rhi::Texture* m = dev_.transient("gbuffer.motion", {kMotionFormat, {w, h}, kMotionUsage});
     if (n == nullptr || m == nullptr) {
         dev_.setGbuffer({});
         return false;
     }
-    dev_.setGbuffer({&n->image, &m->image, w, h});
+    dev_.setGbuffer({n, m, w, h});
     return true;
 }
 
@@ -183,21 +181,21 @@ void Gbuffer::recordMotionFill(d3d9::PassContext& ctx) {
     if (ctx.mainView != 1 || !on_) return;
     ensureTargets(ctx);  // for the next frame's solid pass (the z pre-pass point may not fire)
     d3d9::Surface* ds = dev_.depthStencil();
-    VkCommandBuffer cmd = ctx.cmd;
+    rhi::CommandList& cmd = ctx.cmd;
     if (!dev_.gbufferWritten() || ds == nullptr || ds->texture() == nullptr || ctx.sceneHdr == nullptr || !pipelinesReady() ||
         !dev_.readable(ds->texture(), cmd)) {
         return;
     }
     const std::uint32_t w = ctx.sceneHdr->desc().width, h = ctx.sceneHdr->desc().height;
-    vk::Transients::Entry* normal = dev_.transients().get("gbuffer.normal", {kNormalFormat, {w, h}, kNormalUsage});
-    vk::Transients::Entry* motion = dev_.transients().get("gbuffer.motion", {kMotionFormat, {w, h}, kMotionUsage});
-    vk::Transients::Entry* raw = dev_.transients().get("gtao.raw", {VK_FORMAT_R32_SFLOAT, {w, h}});
+    rhi::Texture* normal = dev_.transient("gbuffer.normal", {kNormalFormat, {w, h}, kNormalUsage});
+    rhi::Texture* motion = dev_.transient("gbuffer.motion", {kMotionFormat, {w, h}, kMotionUsage});
+    rhi::Texture* raw = dev_.transient("gtao.raw", {VK_FORMAT_R32_SFLOAT, {w, h}});
     if (normal == nullptr || motion == nullptr || raw == nullptr) return;
     GbufferPush push{};
     push.h.frame = ctx.frameBlock.bits;
     push.h.passId = 2;
     push.depthTex = ds->texture()->bindlessSlot();
-    push.normalTex = normal->slot;
+    push.normalTex = normal->heapSampled();
     push.width = std::min(w, ds->width());
     push.height = std::min(h, ds->height());
     push.flags = 2u;  // gtao.comp: the motion fill only
@@ -224,7 +222,7 @@ void Gbuffer::recordAo(d3d9::PassContext& ctx) {
     ensureTargets(ctx);
     if (!s_.ao) return;
     d3d9::Surface* ds = dev_.depthStencil();
-    VkCommandBuffer cmd = ctx.cmd;
+    rhi::CommandList& cmd = ctx.cmd;
     if (ds == nullptr || ds->texture() == nullptr || ctx.sceneHdr == nullptr || !pipelinesReady() ||
         !dev_.readable(ds->texture(), cmd)) {
         ++skipped_;
@@ -233,12 +231,12 @@ void Gbuffer::recordAo(d3d9::PassContext& ctx) {
         return;
     }
     const std::uint32_t w = ctx.sceneHdr->desc().width, h = ctx.sceneHdr->desc().height;
-    vk::Transients::Entry* normal = dev_.transients().get("gbuffer.normal", {kNormalFormat, {w, h}, kNormalUsage});
-    vk::Transients::Entry* motion = dev_.transients().get("gbuffer.motion", {kMotionFormat, {w, h}, kMotionUsage});
-    vk::Transients::Entry* raw = dev_.transients().get("gtao.raw", {VK_FORMAT_R32_SFLOAT, {w, h}});
+    rhi::Texture* normal = dev_.transient("gbuffer.normal", {kNormalFormat, {w, h}, kNormalUsage});
+    rhi::Texture* motion = dev_.transient("gbuffer.motion", {kMotionFormat, {w, h}, kMotionUsage});
+    rhi::Texture* raw = dev_.transient("gtao.raw", {VK_FORMAT_R32_SFLOAT, {w, h}});
     const std::uint32_t cur = history_ ^ 1u;
-    vk::Transients::Entry* hist[2] = {dev_.transients().get("gtao.history0", {VK_FORMAT_R16G16_SFLOAT, {w, h}}),
-                                      dev_.transients().get("gtao.history1", {VK_FORMAT_R16G16_SFLOAT, {w, h}})};
+    rhi::Texture* hist[2] = {dev_.transient("gtao.history0", {VK_FORMAT_R16G16_SFLOAT, {w, h}}),
+                                      dev_.transient("gtao.history1", {VK_FORMAT_R16G16_SFLOAT, {w, h}})};
     if (normal == nullptr || motion == nullptr || raw == nullptr || hist[0] == nullptr || hist[1] == nullptr) {
         ++skipped_;
         return;
@@ -247,8 +245,8 @@ void Gbuffer::recordAo(d3d9::PassContext& ctx) {
     push.h.frame = ctx.frameBlock.bits;
     push.h.passId = 1;
     push.depthTex = ds->texture()->bindlessSlot();
-    push.normalTex = normal->slot;
-    push.motionTex = motion->slot;
+    push.normalTex = normal->heapSampled();
+    push.motionTex = motion->heapSampled();
     push.linearSampler = dev_.samplerFor(true, true);
     push.width = std::min(w, ds->width());
     push.height = std::min(h, ds->height());
@@ -280,8 +278,8 @@ void Gbuffer::recordAo(d3d9::PassContext& ctx) {
     cl.transition(*rawT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     cl.transition(*histRead, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     cl.transition(*histWrite, VK_IMAGE_LAYOUT_GENERAL);
-    push.aoTex = raw->slot;
-    push.historyTex = historyValid_ ? hist[history_]->slot : 0u;
+    push.aoTex = raw->heapSampled();
+    push.historyTex = historyValid_ ? hist[history_]->heapSampled() : 0u;
     cl.bindPipeline(*filter_);
     rhi::Texture* const storage2[] = {histWrite};
     cl.setStorageTextures(storage2);
@@ -291,7 +289,7 @@ void Gbuffer::recordAo(d3d9::PassContext& ctx) {
     history_ = cur;
     historyValid_ = true;
     // -> this frame's material shaders (Gbuffer variants: the AO at their pixel scales their ambient)
-    dev_.setFrameAo({hist[cur]->slot, dev_.samplerFor(true, true), shader::abi::kFrameAoValid, std::bit_cast<std::uint32_t>(s_.aoStrength)});
+    dev_.setFrameAo({hist[cur]->heapSampled(), dev_.samplerFor(true, true), shader::abi::kFrameAoValid, std::bit_cast<std::uint32_t>(s_.aoStrength)});
     if (aoFrames_++ == 0) {
         spdlog::info("enh: gbuffer: first AO frame {}x{} (radius {:.0f}, strength {:.2f})", push.width, push.height, s_.aoRadius, s_.aoStrength);
     }
@@ -307,26 +305,26 @@ void Gbuffer::recordDebug(d3d9::PassContext& ctx) {
     if (s_.debug == 0 || !dev_.gbufferWritten()) return;
     d3d9::Surface* bb = dev_.backBuffer();
     if (bb == nullptr || bb->texture() == nullptr) return;
-    vk::Image& target = bb->texture()->image();
+    rhi::Texture& target = bb->texture()->rhi();
     RhiScope rs(dev_, ctx.cmd);
     if (!rs) return;
-    if (debug_ && debugFormat_ != target.format()) debug_.reset();
+    if (debug_ && debugFormat_ != target.desc().format) debug_.reset();
     if (!debug_) {
         rhi::GraphicsPipelineDesc gd;
         gd.vs.spirv = shader::embedded::spirv("debug/fullscreen_rhi.vert");
         gd.ps.spirv = shader::embedded::spirv("gbuffer/gbuffer_debug.frag");
-        gd.colorFormats[0] = target.format();
+        gd.colorFormats[0] = target.desc().format;
         gd.name = "gbuffer.debug";
         debug_ = rs.device().createGraphicsPipeline(gd);
-        debugFormat_ = target.format();
+        debugFormat_ = target.desc().format;
         if (!debug_) return;
     }
-    vk::Transients::Entry* normal = nullptr;
-    vk::Transients::Entry* motion = nullptr;
+    rhi::Texture* normal = nullptr;
+    rhi::Texture* motion = nullptr;
     if (ctx.sceneHdr != nullptr) {
         const std::uint32_t w = ctx.sceneHdr->desc().width, h = ctx.sceneHdr->desc().height;
-        normal = dev_.transients().get("gbuffer.normal", {kNormalFormat, {w, h}, kNormalUsage});
-        motion = dev_.transients().get("gbuffer.motion", {kMotionFormat, {w, h}, kMotionUsage});
+        normal = dev_.transient("gbuffer.normal", {kNormalFormat, {w, h}, kNormalUsage});
+        motion = dev_.transient("gbuffer.motion", {kMotionFormat, {w, h}, kMotionUsage});
     }
     if (normal == nullptr || motion == nullptr) return;
     rhi::CommandList& cl = rs.cl();
@@ -335,15 +333,15 @@ void Gbuffer::recordDebug(d3d9::PassContext& ctx) {
     GbufferPush push{};
     push.h.frame = ctx.frameBlock.bits;
     push.h.passId = 3;
-    push.normalTex = normal->slot;
-    push.motionTex = motion->slot;
+    push.normalTex = normal->heapSampled();
+    push.motionTex = motion->heapSampled();
     push.linearSampler = dev_.samplerFor(false, true);
     push.mode = static_cast<std::uint32_t>(s_.debug);
     if (s_.debug == 4) push.aoTex = dev_.frameSgi()[0];  // the screen probes' factor (enh/gi)
     if (s_.debug != 4 && s_.ao && historyValid_) {
-        vk::Transients::Entry* hst = dev_.transients().get(history_ == 0 ? "gtao.history0" : "gtao.history1",
-                                                           {VK_FORMAT_R16G16_SFLOAT, normal->desc.extent});
-        if (hst != nullptr) push.aoTex = hst->slot;
+        rhi::Texture* hst = dev_.transient(history_ == 0 ? "gtao.history0" : "gtao.history1",
+                                                           {VK_FORMAT_R16G16_SFLOAT, {normal->desc().extent.width, normal->desc().extent.height}});
+        if (hst != nullptr) push.aoTex = hst->heapSampled();
     }
     const std::uint32_t w = bb->width(), h = bb->height();
     rhi::Texture* targetT = rs.wrap(target);

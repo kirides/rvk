@@ -33,8 +33,7 @@
 #include <memory>
 
 #include "d3d9/device.h"
-#include "vk/framegen.h"
-#include "vk/passes.h"
+#include "rhi/modules.h"
 
 namespace rvk::enh {
 
@@ -150,7 +149,7 @@ private:
     bool on_ = false;          // passes registered
     bool failed_ = false;      // the DLL / the context / a pipeline is not available: off for the session
     bool gameplay_ = true, paused_ = false;
-    std::shared_ptr<vk::FrameGen> fg_;  // retired with the frame that last used it
+    std::shared_ptr<rhi::FrameGenerator> fg_;  // retired with the frame that last used it
     VkExtent2D ctxDisplay_{};
     bool mlActive_ = false;
     // RHI pipelines (rhi::Device over the renderer's objects; the passes record through rhi::CommandList, hlsl-rhi.md 8)
@@ -162,7 +161,7 @@ private:
     std::uint64_t depthFrame_ = 0;      // the frame (device frame value) whose depth was prepared
     VkExtent2D renderSize_{};
     bool hudlessFrame_ = false;         // a hudless copy of this frame exists
-    vk::Image* generated_ = nullptr;    // the interpolated frame of this frame (null: none), valid until the next BeforePresent
+    rhi::Texture* generated_ = nullptr;    // the interpolated frame of this frame (null: none), valid until the next BeforePresent
     bool generatedShown_ = false;       // ... a usable one
     std::uint32_t generatedWidth_ = 0, generatedHeight_ = 0;
     // the previous frame's camera (cut detection)

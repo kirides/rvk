@@ -12,11 +12,7 @@
 #include "enh/gbuffer.h"
 #include "engine/exposure.h"
 #include "enh/rhi_scope.h"
-#include "rhi/vulkan/wrap.h"
 #include "shader/embedded.h"
-#include "vk/context.h"
-#include "vk/frames.h"
-#include "vk/debug_names.h"
 
 namespace rvk::enh {
 
@@ -101,7 +97,7 @@ Upscale::~Upscale() {
     releaseExposureReadback();
     prep_.reset();  // (RHI pipelines retire themselves through the frames)
     exposurePipe_.reset();
-    for (const char* k : {"upscale.depth", "upscale.out", "upscale.opaque", "upscale.reactive", "upscale.exposure"}) dev_.transients().release(k);
+    for (const char* k : {"upscale.depth", "upscale.out", "upscale.opaque", "upscale.reactive", "upscale.exposure"}) dev_.releaseTransient(k);
 }
 
 void Upscale::apply(UpscaleMode mode, unsigned flip) {
@@ -113,7 +109,7 @@ void Upscale::apply(UpscaleMode mode, unsigned flip) {
         dev_.setGeometryLodBias(0.0f);
         dev_.removePasses(this);
         dropFsr();
-        for (const char* k : {"upscale.depth", "upscale.out", "upscale.opaque", "upscale.reactive", "upscale.exposure"}) dev_.transients().release(k);
+        for (const char* k : {"upscale.depth", "upscale.out", "upscale.opaque", "upscale.reactive", "upscale.exposure"}) dev_.releaseTransient(k);
     }
     // the render scale (the scene hook shrinks the camera rect by it from the next frame on; the scene image follows)
     dev_.setRenderRatio(usesFsr(mode) && !failed_ ? upscaleRatio(mode) : 1.0f);
@@ -190,8 +186,8 @@ void Upscale::releaseExposureReadback() {
 
 // the engine's exposure (ToneMapFactor / adapted luminance) into the 1x1 image FSR takes; the engine's luminance image is the one
 // its ToneMap filter reads, as the previous frame's post chain left it
-bool Upscale::recordExposure(d3d9::PassContext& ctx, d3d9::Texture& luminance, vk::Transients::Entry& out) {
-    VkCommandBuffer cmd = ctx.cmd;
+bool Upscale::recordExposure(d3d9::PassContext& ctx, d3d9::Texture& luminance, rhi::Texture& out) {
+    rhi::CommandList& cmd = ctx.cmd;
     if (!dev_.readable(&luminance, cmd)) return false;
     ExposurePush push{};
     push.h.frame = ctx.frameBlock.bits;
@@ -201,11 +197,11 @@ bool Upscale::recordExposure(d3d9::PassContext& ctx, d3d9::Texture& luminance, v
     push.lumMax = kLuminanceMax;
     rhi::Device* rdev = dev_.rhi();
     if (rdev == nullptr || !exposurePipe_) return false;
-    const auto outTex = rhi::vulkan::wrapImage(*rdev, out.image, out.slot, "upscale.exposure");
-    const auto cl = rhi::vulkan::wrapCommandBuffer(*rdev, cmd);
+    rhi::Texture* const outTex = &out;
+    rhi::CommandList* const cl = &cmd;
     cl->transition(*outTex, VK_IMAGE_LAYOUT_GENERAL);
     cl->bindPipeline(*exposurePipe_);
-    rhi::Texture* const storage[] = {outTex.get()};
+    rhi::Texture* const storage[] = {outTex};
     cl->setStorageTextures(storage);
     cl->setPushConstants(&push, sizeof(push));
     cl->dispatch(1, 1, 1);
@@ -236,7 +232,7 @@ void Upscale::dropFsr() {
         fsrTableFor_ = nullptr;
     }
     // the context's internal images may still be in use by frames in flight
-    dev_.frames().retire([f = std::move(fsr_)]() mutable { f->destroy(); });
+    dev_.retire([f = std::move(fsr_)]() mutable { f->destroy(); });
     fsr_.reset();
     fsrRender_ = fsrDisplay_ = {};
 }
@@ -247,19 +243,19 @@ bool Upscale::ensureFsr(VkExtent2D render, VkExtent2D display, bool autoExposure
         return true;
     }
     dropFsr();
-    auto f = std::make_shared<vk::Fsr>();
+    std::shared_ptr<rhi::Upscaler> f = dev_.game().createUpscaler();
     const std::filesystem::path dll = paths::dataDir() / "amd_fidelityfx_loader_vk.dll";
-    vk::FsrCreateInfo ci;
+    rhi::UpscalerCreateInfo ci;
     ci.maxRenderSize = render;
     ci.maxUpscaleSize = display;
     ci.hdr = true;  // the scene HDR target: linear, before the post chain's tonemapping
     ci.autoExposure = autoExposure;  // false: the dispatch gets the engine's exposure image
     ci.ml = ml_;
-    bool ok = f->load(dll) && f->createContext(dev_.ctx(), ci);
-    if (!ok && ml_ && f->loaded()) {
+    bool ok = f && f->load(dll) && f->createContext(ci);
+    if (!ok && ml_ && f && f->loaded()) {
         spdlog::warn("enh: upscale: the FSR 4 (ML) upscaler is not available on this GPU: FSR 3.1");
         ci.ml = false;
-        ok = f->createContext(dev_.ctx(), ci);
+        ok = f->createContext(ci);
     }
     mlActive_ = ok && ci.ml;
     if (!ok) {
@@ -304,9 +300,9 @@ void Upscale::recordOpaque(d3d9::PassContext& ctx) {
     if (fsr_ && !fsr_->consumesReactiveMask()) return;  // FSR 4 needs no reactive mask (resource requirements query)
     d3d9::Texture* hdr = ctx.sceneHdr;
     const VkExtent2D render{hdr->desc().width, hdr->desc().height};
-    vk::Transients::Entry* opaque = dev_.transients().get("upscale.opaque", {kOutputFormat, render, kOpaqueUsage});
-    if (opaque == nullptr || hdr->image().format() != kOutputFormat) return;
-    VkCommandBuffer cmd = ctx.cmd;
+    rhi::Texture* opaque = dev_.transient("upscale.opaque", {kOutputFormat, render, kOpaqueUsage});
+    if (opaque == nullptr || hdr->rhi().desc().format != kOutputFormat) return;
+    rhi::CommandList& cmd = ctx.cmd;
     RhiScope rs(dev_, cmd);
     if (!rs) return;
     rhi::CommandList& cl = rs.cl();
@@ -325,7 +321,7 @@ void Upscale::record(d3d9::PassContext& ctx) {
     if (ctx.mainView != 1 || !usesFsr(mode_) || failed_) return;
     d3d9::Surface* ds = dev_.depthStencil();
     d3d9::Texture* hdr = ctx.sceneHdr;
-    VkCommandBuffer cmd = ctx.cmd;
+    rhi::CommandList& cmd = ctx.cmd;
     if (hdr == nullptr || ds == nullptr || ds->texture() == nullptr || !dev_.gbufferWritten()) {
         ++skipped_;
         needReset_ = true;
@@ -360,10 +356,10 @@ void Upscale::record(d3d9::PassContext& ctx) {
     // the jitter sequence and the texture bias follow the actual sizes (the next frame's geometry)
     refreshJitterTable(render, display);
     dev_.setGeometryLodBias(upscaleLodBias(render.width, display.width));
-    vk::Transients::Entry* motion =
-        dev_.transients().get("gbuffer.motion", {kGbufferMotionFormat, {render.width, render.height}, kGbufferMotionUsage});
-    vk::Transients::Entry* depth = dev_.transients().get("upscale.depth", {kDepthFormat, render, kDepthUsage});
-    vk::Transients::Entry* out = dev_.transients().get("upscale.out", {kOutputFormat, display, kOutputUsage});
+    rhi::Texture* motion =
+        dev_.transient("gbuffer.motion", {kGbufferMotionFormat, {render.width, render.height}, kGbufferMotionUsage});
+    rhi::Texture* depth = dev_.transient("upscale.depth", {kDepthFormat, render, kDepthUsage});
+    rhi::Texture* out = dev_.transient("upscale.out", {kOutputFormat, display, kOutputUsage});
     if (motion == nullptr || depth == nullptr || out == nullptr || !dev_.readable(ds->texture(), cmd) || !dev_.readable(hdr, cmd)) {
         ++skipped_;
         needReset_ = true;
@@ -383,30 +379,29 @@ void Upscale::record(d3d9::PassContext& ctx) {
             needReset_ = true;
             return;
         }
-        const auto depthTex = rhi::vulkan::wrapImage(*rdev, depth->image, depth->slot, "upscale.depth");
-        const auto cl = rhi::vulkan::wrapCommandBuffer(*rdev, cmd);
-        cl->transition(*depthTex, VK_IMAGE_LAYOUT_GENERAL);
+        rhi::CommandList* const cl = &cmd;
+        cl->transition(*depth, VK_IMAGE_LAYOUT_GENERAL);
         cl->bindPipeline(*prep_);
-        rhi::Texture* const storage[] = {depthTex.get()};
+        rhi::Texture* const storage[] = {depth};
         cl->setStorageTextures(storage);
         cl->setPushConstants(&push, sizeof(push));
         cl->dispatch((render.width + 7) / 8, (render.height + 7) / 8, 1);
     }
 
     // the automatic reactive mask: translucent effects (particles, rain, spells, spray) drawn after the BeforeAlpha snapshot
-    vk::Transients::Entry* reactive = nullptr;
+    rhi::Texture* reactive = nullptr;
     if (reactive_ && opaqueValid_ && fsr_->consumesReactiveMask()) {
-        vk::Transients::Entry* opaque = dev_.transients().get("upscale.opaque", {kOutputFormat, render, kOpaqueUsage});
-        reactive = dev_.transients().get("upscale.reactive", {kReactiveFormat, render, kReactiveUsage});
-        if (opaque != nullptr && reactive != nullptr && !fsr_->generateReactiveMask(cmd, opaque->image, hdr->image(), reactive->image, render, reactiveScale_, reactiveCutoff_)) {
+        rhi::Texture* opaque = dev_.transient("upscale.opaque", {kOutputFormat, render, kOpaqueUsage});
+        reactive = dev_.transient("upscale.reactive", {kReactiveFormat, render, kReactiveUsage});
+        if (opaque != nullptr && reactive != nullptr && !fsr_->generateReactiveMask(cmd, *opaque, hdr->rhi(), *reactive, render, reactiveScale_, reactiveCutoff_)) {
             reactive = nullptr;
         }
     }
     opaqueValid_ = false;
 
-    vk::Transients::Entry* exposure = nullptr;
+    rhi::Texture* exposure = nullptr;
     if (luminance != nullptr) {
-        exposure = dev_.transients().get("upscale.exposure", {kExposureFormat, {1, 1}, kExposureUsage});
+        exposure = dev_.transient("upscale.exposure", {kExposureFormat, {1, 1}, kExposureUsage});
         if (exposure == nullptr || !recordExposure(ctx, *luminance, *exposure)) {
             ++skipped_;
             needReset_ = true;
@@ -416,14 +411,14 @@ void Upscale::record(d3d9::PassContext& ctx) {
 
     const d3d9::scene::CameraBlock& cam = dev_.camera();
     const d3d9::scene::CameraBlock& last = dev_.lastCamera();
-    vk::FsrDispatch d;
-    d.reactive = reactive != nullptr ? &reactive->image : nullptr;
-    d.exposure = exposure != nullptr ? &exposure->image : nullptr;
-    d.cmd = cmd;
-    d.color = &hdr->image();
-    d.depth = &depth->image;
-    d.motion = &motion->image;
-    d.output = &out->image;
+    rhi::UpscalerDispatch d;
+    d.reactive = reactive;
+    d.exposure = exposure;
+    d.cmd = &cmd;
+    d.color = &hdr->rhi();
+    d.depth = depth;
+    d.motion = motion;
+    d.output = out;
     d.renderSize = render;
     d.upscaleSize = display;
     const std::array<float, 2> j = dev_.jitter();
@@ -450,8 +445,8 @@ void Upscale::record(d3d9::PassContext& ctx) {
     exposureActive_ = exposure != nullptr;
 
     // the post chain samples the upscaled image where it would sample the engine's scene image (both by uv)
-    out->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    dev_.setSceneSubstitute(hdr, out->slot);
+    if (out->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) cmd.transition(*out, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    dev_.setSceneSubstitute(hdr, out->heapSampled());
     ++frames_;
     const double now = dev_.secondsSinceCreate();
     if (now - lastLog_ > 5.0) {

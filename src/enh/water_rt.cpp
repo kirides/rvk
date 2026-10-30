@@ -11,7 +11,6 @@
 #include "enh/rhi_scope.h"
 #include "enh/rt_scene.h"
 #include "shader/embedded.h"
-#include "vk/context.h"
 
 namespace rvk::enh {
 
@@ -70,7 +69,7 @@ void WaterRt::configure(int tier, int tweaks, int debug) {
         passId_ = 0;
         scene_->release(this);
         held_ = false;
-        dev_.transients().release("water.rt");
+        dev_.releaseTransient("water.rt");
         imageFrame_ = ~0ull;
         imageSlot_ = 0;
     }
@@ -124,7 +123,7 @@ void WaterRt::record(d3d9::PassContext& ctx) {
         return;
     }
     std::sort(list.begin(), list.end(), [](const auto& l, const auto& r) { return l.first < r.first; });
-    VkCommandBuffer cmd = ctx.cmd;
+    rhi::CommandList& cmd = ctx.cmd;
     if (!dev_.readable(ctx.depthMap, cmd) || !dev_.readable(ctx.refraction, cmd)) {
         ++skipped_;
         return;
@@ -132,8 +131,8 @@ void WaterRt::record(d3d9::PassContext& ctx) {
     const Tier& t = kTiers[tier_ - 1];
     const std::uint32_t sw = ctx.sceneHdr->desc().width, sh = ctx.sceneHdr->desc().height;
     const std::uint32_t w = (sw + t.scale - 1) / t.scale, h = (sh + t.scale - 1) / t.scale;
-    vk::Transients::Entry* out = dev_.transients().get("water.rt", {VK_FORMAT_R16G16B16A16_SFLOAT, {w, h}});
-    const rhi::RingAlloc pa = dev_.frames().allocate(sizeof(WaterRtParams), 16);
+    rhi::Texture* out = dev_.transient("water.rt", {VK_FORMAT_R16G16B16A16_SFLOAT, {w, h}});
+    const rhi::RingAlloc pa = dev_.ring(sizeof(WaterRtParams), 16);
     if (out == nullptr || pa.ptr == nullptr) {
         ++skipped_;
         return;
@@ -192,7 +191,7 @@ void WaterRt::record(d3d9::PassContext& ctx) {
     // -> the water draws' pixel shaders
     cl.transition(*outT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     imageFrame_ = frame;
-    imageSlot_ = out->slot;
+    imageSlot_ = out->heapSampled();
     lastBodies_ = n;
     lastWidth_ = w;
     lastHeight_ = h;

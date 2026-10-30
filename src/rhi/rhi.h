@@ -88,6 +88,8 @@ struct TextureDesc {
     const char* name = nullptr;
     // A cube map (layers is forced to 6, extent.depth 1; the layers are the faces +X -X +Y -Y +Z -Z). 3D textures: type VK_IMAGE_TYPE_3D (layers 1).
     bool cube = false;
+    // How shaders see the channels of the sampled view (L8 -> r r r 1 ...; all IDENTITY = as stored). Storage views and attachments ignore it.
+    VkComponentMapping swizzle{};
 };
 
 // One mip level of one array layer (cube face); copies address textures with it. 3D textures have layer 0 only.
@@ -112,8 +114,21 @@ struct TextureCopy {
 struct TextureBlit {
     Subresource src{};
     Subresource dst{};
+    VkOffset3D srcOffset{};  // the box of each side starts here; an extent of 0 in every field = the whole mip level (offset 0)
+    VkOffset3D dstOffset{};
     VkExtent3D srcExtent{0, 0, 0};
     VkExtent3D dstExtent{0, 0, 0};
+};
+
+// A buffer -> texture box copy (CommandList::copyBufferToTextureBox): the box `extent` at `offset` of one subresource, read from the buffer at
+// `bufferOffset` with rows `rowPitch` bytes apart (0 = tightly packed; DX12: a multiple of 256, offset a multiple of 512) and slices after each
+// other. For block compressed formats rows / extents count blocks of 4x4 texels (offset and extent a multiple of 4 unless the box ends at the level edge).
+struct BufferTextureCopy {
+    std::uint64_t bufferOffset = 0;
+    std::uint32_t rowPitch = 0;
+    Subresource sub{};
+    VkOffset3D offset{};
+    VkExtent3D extent{1, 1, 1};
 };
 
 // the extent of mip level `mip` (each dimension halves, at least 1)
@@ -132,6 +147,12 @@ public:
     virtual std::uint32_t heapSampled() const = 0;
     // A Texture2D view (all mips) of one layer of a 2D array texture, created on first use (0 = none: not an array / SAMPLED missing)
     virtual std::uint32_t heapSampledLayer(std::uint32_t layer) = 0;
+    // The layout every subresource of the texture is in after the commands recorded so far (the RHI tracks it: transitions through CommandList and
+    // the backend's own barriers keep it; a texture created by the device starts UNDEFINED), VK_IMAGE_LAYOUT_MAX_ENUM while the mip levels differ
+    // (CommandList::transitionMips). Lets callers skip a transition they would only repeat (CommandList::transition always records one).
+    virtual VkImageLayout layout() const = 0;
+    // a debug name (graphics debugger, validation messages); the creation name stays the one in desc() (null / empty = ignored)
+    virtual void setDebugName(const std::string& /*name*/) {}
 };
 
 struct SamplerDesc {
@@ -386,12 +407,14 @@ public:
     virtual void fillBuffer(Buffer& dst, std::uint64_t offset, std::uint64_t size, std::uint32_t value) = 0;
     virtual void copyBufferToTexture(Texture& dst, Buffer& src, std::uint64_t srcOffset, Subresource sub = {}) = 0;
     virtual void copyTextureToBuffer(Buffer& dst, std::uint64_t dstOffset, Texture& src, Subresource sub = {}) = 0;
+    // a box of one subresource from a buffer (texture upload of a dirty region; the texture in TRANSFER_DST_OPTIMAL)
+    virtual void copyBufferToTextureBox(Texture& dst, Buffer& src, const BufferTextureCopy& copy) = 0;
     // Clears mip levels [baseMip, baseMip + mipCount) of all layers (colour textures with STORAGE usage, which must be in GENERAL layout; integer
     // formats take clear.uint32, the others clear.float32). Later shader access wants a transition to GENERAL (same layout = barrier).
     virtual void clearTexture(Texture& texture, const VkClearColorValue& value, std::uint32_t baseMip = 0, std::uint32_t mipCount = 1) = 0;
     // texture -> texture copies (same format; `src` in TRANSFER_SRC_OPTIMAL, `dst` in TRANSFER_DST_OPTIMAL, or both in one texture's different mip levels)
     virtual void copyTexture(Texture& dst, Texture& src, std::span<const TextureCopy> regions) = 0;
-    // Scaled copies with a filter (mip chain generation): layouts as copyTexture, a texture may blit between its own mip levels. False (nothing
+    // Scaled copies with a filter (mip chain generation): layouts as copyTexture, a texture may blit between its own mip levels (Vulkan: a texture blitted onto itself that is in GENERAL as a whole stays there). False (nothing
     // recorded, logged) without DeviceCaps::textureBlit.
     virtual bool blitTexture(Texture& dst, Texture& src, std::span<const TextureBlit> regions, VkFilter filter) = 0;
 
@@ -489,9 +512,14 @@ std::unique_ptr<Device> createD3D12Device(const DeviceDesc& desc);
 
 // ---- formats (both backends) ------------------------------------------------------------------------------------------------
 
-// bytes per pixel of the uncompressed colour formats the RHI knows (0 = unknown)
+// bytes per pixel of the uncompressed formats the RHI knows (0 = unknown or block compressed)
 std::uint32_t formatBytes(VkFormat format);
-// the row pitch of a buffer <-> texture copy: width * formatBytes rounded up to 256 (D3D12's alignment, used on Vulkan too)
+// the texel block of a format: 1x1 for the uncompressed ones, 4x4 for BC1 - BC5; bytes = one block (0 = unknown format)
+struct FormatBlock {
+    std::uint32_t width = 1, height = 1, bytes = 0;
+};
+FormatBlock formatBlock(VkFormat format);
+// the row pitch of a buffer <-> texture copy: a row of `width` texels (blocks) rounded up to 256 (D3D12's alignment, used on Vulkan too)
 std::uint32_t bufferRowPitch(VkFormat format, std::uint32_t width);
 
 }  // namespace rvk::rhi

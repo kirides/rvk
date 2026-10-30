@@ -11,7 +11,6 @@
 #include "enh/rt_scene.h"
 #include "engine/shadow_maps.h"
 #include "shader/embedded.h"
-#include "vk/context.h"
 
 namespace rvk::enh {
 
@@ -80,7 +79,7 @@ void RtShadows::apply(const Settings& s) {
         scene_->setDynamic(this, false);
         scene_->release(this);
         held_ = false;
-        for (const char* k : {"shadows.rt raw", "shadows.rt history0", "shadows.rt history1", "shadows.rt final"}) dev_.transients().release(k);
+        for (const char* k : {"shadows.rt raw", "shadows.rt history0", "shadows.rt history1", "shadows.rt final"}) dev_.releaseTransient(k);
         frame_ = ~0ull;
         info_ = Frame{};
         historyValid_ = false;
@@ -123,9 +122,9 @@ void RtShadows::record(d3d9::PassContext& ctx, int stage) {
     if (stage > 0) {
         // the temporal and spatial passes of a frame the trace pass prepared
         if (pending_.frame != frame || pending_.next != stage) return;
-        VkCommandBuffer c = ctx.cmd;
+        rhi::CommandList& c = ctx.cmd;
         d3d9::RegionScope r(dev_, kNames[stage]);
-        vk::Transients::Entry* out = stage == 1 ? pending_.hist : pending_.fin;
+        rhi::Texture* out = stage == 1 ? pending_.hist : pending_.fin;
         RhiScope rs(dev_, c);
         if (!rs) return;
         rhi::CommandList& cl = rs.cl();
@@ -142,7 +141,7 @@ void RtShadows::record(d3d9::PassContext& ctx, int stage) {
             history_ = pending_.cur;
             historyValid_ = true;
             frame_ = frame;
-            info_ = {pending_.fin->slot, pending_.w, pending_.h, pending_.range};
+            info_ = {pending_.fin->heapSampled(), pending_.w, pending_.h, pending_.range};
         }
         return;
     }
@@ -157,7 +156,7 @@ void RtShadows::record(d3d9::PassContext& ctx, int stage) {
         historyValid_ = false;
         return;
     }
-    VkCommandBuffer cmd = ctx.cmd;
+    rhi::CommandList& cmd = ctx.cmd;
     if (!dev_.readable(ctx.depthMap, cmd)) {
         ++skipped_;
         historyValid_ = false;
@@ -165,11 +164,11 @@ void RtShadows::record(d3d9::PassContext& ctx, int stage) {
     }
     const std::uint32_t w = ctx.depthMap->desc().width, h = ctx.depthMap->desc().height;
     if (w != lastWidth_ || h != lastHeight_) historyValid_ = false;  // new images: no history
-    vk::Transients::Entry* raw = dev_.transients().get("shadows.rt raw", {VK_FORMAT_R8G8B8A8_UNORM, {w, h}});
-    vk::Transients::Entry* fin = dev_.transients().get("shadows.rt final", {VK_FORMAT_R8G8B8A8_UNORM, {w, h}});
-    vk::Transients::Entry* hist[2] = {dev_.transients().get("shadows.rt history0", {VK_FORMAT_R16G16B16A16_SFLOAT, {w, h}}),
-                                      dev_.transients().get("shadows.rt history1", {VK_FORMAT_R16G16B16A16_SFLOAT, {w, h}})};
-    const rhi::RingAlloc pa = dev_.frames().allocate(sizeof(RtShadowParams), 16);
+    rhi::Texture* raw = dev_.transient("shadows.rt raw", {VK_FORMAT_R8G8B8A8_UNORM, {w, h}});
+    rhi::Texture* fin = dev_.transient("shadows.rt final", {VK_FORMAT_R8G8B8A8_UNORM, {w, h}});
+    rhi::Texture* hist[2] = {dev_.transient("shadows.rt history0", {VK_FORMAT_R16G16B16A16_SFLOAT, {w, h}}),
+                                      dev_.transient("shadows.rt history1", {VK_FORMAT_R16G16B16A16_SFLOAT, {w, h}})};
+    const rhi::RingAlloc pa = dev_.ring(sizeof(RtShadowParams), 16);
     if (raw == nullptr || fin == nullptr || hist[0] == nullptr || hist[1] == nullptr || pa.ptr == nullptr) {
         ++skipped_;
         return;
@@ -192,9 +191,9 @@ void RtShadows::record(d3d9::PassContext& ctx, int stage) {
     const std::uint32_t cur = history_ ^ 1u;
     RtShadowParams p{};
     p.tex[0] = ctx.depthMap->bindlessSlot();
-    p.tex[1] = raw->slot;
-    p.tex[2] = hist[history_]->slot;
-    p.tex[3] = hist[cur]->slot;
+    p.tex[1] = raw->heapSampled();
+    p.tex[2] = hist[history_]->heapSampled();
+    p.tex[3] = hist[cur]->heapSampled();
     p.info[0] = w;
     p.info[1] = h;
     p.info[2] = settings_.quality >= 3 ? 2u : 1u;

@@ -21,8 +21,10 @@
 namespace rvk::vk {
 class Bindless;
 class Context;
+class FgSwapchain;
 class Frames;
 class Image;
+class MeshArena;
 }  // namespace rvk::vk
 
 namespace rvk::rhi::vulkan {
@@ -30,7 +32,8 @@ namespace rvk::rhi::vulkan {
 std::unique_ptr<Device> wrap(vk::Context& ctx, vk::Frames& frames, vk::Bindless& bindless);
 // The same device as a GameDevice (rhi/game_device.h): what d3d9::Device holds (shader modules of the game's pipelines, the GpuRef shift, ...). `device`
 // arguments of the functions below accept it.
-std::unique_ptr<GameDevice> wrapGame(vk::Context& ctx, vk::Frames& frames, vk::Bindless& bindless);
+// `arena` = the renderer's mesh arena (GameDevice::allocMesh; null: none)
+std::unique_ptr<GameDevice> wrapGame(vk::Context& ctx, vk::Frames& frames, vk::Bindless& bindless, vk::MeshArena* arena = nullptr);
 // `device` must come from wrap(). `name` = debug name (default: the image's).
 std::unique_ptr<Texture> wrapImage(Device& device, vk::Image& image, std::uint32_t sampledSlot = 0, const char* name = nullptr);
 std::unique_ptr<CommandList> wrapCommandBuffer(Device& device, VkCommandBuffer cmd);
@@ -38,5 +41,20 @@ std::unique_ptr<CommandList> wrapCommandBuffer(Device& device, VkCommandBuffer c
 // `mapped` its host pointer or null. Used as the source / destination of copies and as a build input; the usage the buffer was created with is the
 // caller's business. `device` must come from wrap().
 std::unique_ptr<Buffer> wrapBuffer(Device& device, VkBuffer buffer, std::uint64_t address, std::uint64_t size, void* mapped = nullptr, const char* name = nullptr);
+
+
+// ---- the Vulkan objects behind the RHI's (the backend's own users: the vendor modules, the renderer's not yet moved recording code) ----
+// The texture / list must come from this backend.
+vk::Image& imageOf(Texture& texture);
+VkCommandBuffer commandBufferOf(CommandList& list);
+vk::Context& contextOf(Device& device);
+
+// ---- the optional modules (rhi/modules.h) over the vendor's Vulkan DLL wrappers (vk/fsr.h, vk/framegen.h, vk/fg_swapchain.h) and ImGui's Vulkan backend ----
+std::unique_ptr<Upscaler> createUpscaler(GameDevice& device);
+std::unique_ptr<FrameGenerator> createFrameGenerator(GameDevice& device);
+std::unique_ptr<ImGuiBackend> createImGuiBackend(GameDevice& device);
+// The frame generation swapchain `swapchain` as a PresentWrapper (non-owning; the swapchain outlives it). The wrapper's UI hook records into a list on the
+// swapchain's present command buffer.
+std::unique_ptr<PresentWrapper> wrapFgSwapchain(GameDevice& device, vk::FgSwapchain& swapchain);
 
 }  // namespace rvk::rhi::vulkan

@@ -491,3 +491,7 @@ them (tolerance in the table), and where the CPU can compute the answer it is ch
 `rhi::GameDevice : rhi::Device` (`src/rhi/game_device.h`; docs/research/dx12-game-port.md "Status") is what `d3d9::Device` holds: the Vulkan implementation is the wrapped `VkDeviceImpl` (`rhi::vulkan::wrapGame`). It adds the
 shader-visible address types of the RHI: `GpuRef` (one 64-bit value: Vulkan = device address, D3D12 = slot | offset << 32, `plus` by `refShift`), `GpuAddr` (reference + raw VA for builds), `RingAlloc`, and the opaque
 `ShaderModule` of the game's pipelines. `rhi::Buffer::shaderRef / shaderRefRw` are the way to a `GpuRef` of an RHI buffer (`GpuRef::fromWords`).
+
+WP2b (2026-10-30) put the game's textures, buffers, transient images, upload ring / mesh arena fronts, command lists (`frameCommands / uploadCommands / passCommands`) and the optional modules behind it: `rhi::Upscaler`,
+`rhi::FrameGenerator`, `rhi::PresentWrapper`, `rhi::ImGuiBackend` (`src/rhi/modules.h`; Vulkan adapters over `vk/fsr`, `vk/framegen`, `vk/fg_swapchain` in `src/rhi/vulkan/modules.cpp`), `rhi::enumerateAdapters`,
+`GameCaps`, `formatSupport`. `PassContext::cmd` is an `rhi::CommandList&`; `enh/rhi_scope.h` is only a facade now. Details and counts: dx12-game-port.md "WP2b".

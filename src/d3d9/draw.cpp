@@ -91,7 +91,7 @@ bool Device::beginRendering() {
     scopeGbuf_ = false;
     if (colorCount_ == 1 && gbufferScope()) {
         const bool first = gbufWrittenFrame_ != frameValue();
-        for (vk::Image* img : {gbuf_.normal, gbuf_.motion}) {
+        for (vk::Image* img : {gbufImage_[0], gbufImage_[1]}) {
             img->transition(cmd, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
             VkRenderingAttachmentInfo& a = colors[colorCount_];
             a.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
@@ -179,10 +179,10 @@ bool Device::prepareTextures() {
             continue;
         }
         if (t->lastUseFrame_ != frame && !t->isRenderTarget() && !t->isDepth()) {
-            t->prepareForSampling(uploadCommands());
+            t->prepareForSampling(uploadList());
         } else {
             endRendering();
-            t->prepareForSampling(frames_.cmd());
+            t->prepareForSampling(frameList());
         }
         t->lastUseFrame_ = frame;
     }
@@ -296,11 +296,11 @@ bool Device::computeVertexInput(vk::PipelineDesc& pd, VertexInputValues& out) {
                     out.offsets[b] = up_.offset;
                 } else {
                     const Buffer::Binding g = st.buffer->gpu(st.stride);
-                    if (g.buffer == VK_NULL_HANDLE) {
+                    if (g.buffer == 0) {
                         return false;
                     }
                     pd.bindings[b] = {st.stride, (st.freq & STREAMSOURCE_INSTANCEDATA) != 0 ? 1u : 0u};
-                    out.buffers[b] = g.buffer;
+                    out.buffers[b] = reinterpret_cast<VkBuffer>(g.buffer);
                     out.offsets[b] = g.offset + st.offset;
                 }
             }
@@ -951,7 +951,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
             if (t == nullptr || t->isNull()) continue;
             if (t->pending_ || t->image().layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
                 endRendering();
-                t->prepareForSampling(frames_.cmd());
+                t->prepareForSampling(frameList());
             }
             t->lastUseFrame_ = frameValue();
         }
@@ -1081,8 +1081,8 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         ++gbufSolid_;
         vk::PipelineDesc md = pd;
         md.colorCount = 3;
-        md.colorFormats[1] = gbuf_.normal->format();
-        md.colorFormats[2] = gbuf_.motion->format();
+        md.colorFormats[1] = gbuf_.normal->desc().format;
+        md.colorFormats[2] = gbuf_.motion->desc().format;
         bool writes = false;
         if (gbufMaterial) {
             const VariantSlot slot = captureDraw ? VariantSlot::GbufferMotion : VariantSlot::Gbuffer;
@@ -1179,8 +1179,8 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         const shader::Reflection& r = slot < 16 ? ps_->reflection : vs_->reflection;
         Texture* t = tex_[slot];
         const bool kindMatches = t != nullptr &&
-                                 ((r.samplers[slot] == shader::TextureType::Cube) == (t->kind() == vk::TextureKind::Cube)) &&
-                                 ((r.samplers[slot] == shader::TextureType::Volume) == (t->kind() == vk::TextureKind::Volume));
+                                 ((r.samplers[slot] == shader::TextureType::Cube) == (t->desc().type == TextureType::Cube)) &&
+                                 ((r.samplers[slot] == shader::TextureType::Volume) == (t->desc().type == TextureType::Volume));
         const bool usable = t != nullptr && !t->isNull() && kindMatches &&
                             t->image().layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         block.tex[slot] = !usable ? 0 : (t == substituteFrom_ && substituteSlot_ != 0) ? substituteSlot_ : t->bindlessSlot();
@@ -1462,12 +1462,12 @@ void Device::drawIndexedPrimitive(std::uint32_t type, std::int32_t baseVertex, s
     if (lastRecord_ != nullptr) {
         lastRecord_->indexBuffer = indices_->ref();
     }
-    if (ib.buffer == VK_NULL_HANDLE) {
+    if (ib.buffer == 0) {
         return;
     }
     packet_.op = DrawPacket::Op::DrawIndexed;
     packet_.index32 = index32;
-    packet_.indexBuffer = ib.buffer;
+    packet_.indexBuffer = reinterpret_cast<VkBuffer>(ib.buffer);
     packet_.first = foldIndexOffset(ib.offset, index32, startIndex, packet_.indexOffset);
     packet_.count = vertexCount(type, primitiveCount);
     packet_.instances = instanceCount_;
