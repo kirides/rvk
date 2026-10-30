@@ -46,14 +46,6 @@ std::uint64_t fnv1a(const void* data, std::size_t size, std::uint64_t h = 0xcbf2
 Device::Device() = default;
 Device::~Device() { destroy(); }
 
-rhi::Device* Device::rhi() {
-    if (!rhi_) {
-        rhi_ = rhi::vulkan::wrap(ctx_, frames_, bindless_);
-        if (!rhi_) spdlog::error("d3d9: the RHI over the device could not be created");
-    }
-    return rhi_.get();
-}
-
 std::uint32_t Device::slotOf(std::uint32_t d3dSampler) {
     if (d3dSampler >= kVertexSamplerD3D && d3dSampler < kVertexSamplerD3D + 4) {
         return 16 + (d3dSampler - kVertexSamplerD3D);
@@ -72,13 +64,13 @@ double Device::secondsSinceCreate() const {
 bool Device::setMainCamera(const scene::CameraInput& in) {
     if (camera_.valid) return false;
     camera_.set(in, stats_.frames + 1, secondsSinceCreate());
-    frameAddr_ = 0;  // the frame block gets the camera
+    frameAddr_ = {};  // the frame block gets the camera
     return true;
 }
 
 void Device::tagImage(Texture* texture, scene::ImageRole role, const char* label, std::uint32_t labelIndex) {
     if (texture == nullptr || role == scene::ImageRole::None) return;
-    if (roles_[static_cast<std::size_t>(role)] != texture) frameAddr_ = 0;  // the frame block lists the role images
+    if (roles_[static_cast<std::size_t>(role)] != texture) frameAddr_ = {};  // the frame block lists the role images
     roles_[static_cast<std::size_t>(role)] = texture;
     if (texture->role_ == role) {
         if (label != nullptr) texture->setDebugLabel(label, labelIndex);  // a finer name for the same role (no-op when unchanged)
@@ -105,15 +97,15 @@ void Device::forgetImage(Texture* texture) {
     for (auto& r : roles_) {
         if (r == texture) {
             r = nullptr;
-            frameAddr_ = 0;
+            frameAddr_ = {};
         }
     }
 }
 
 // ---- enhancements (d3d9/inject.h, docs/research/injection.md) ----------------------------------------------------------------
 
-VkDeviceAddress Device::frameBlockAddress() {
-    if (frameAddr_ != 0) return frameAddr_;
+rhi::GpuRef Device::frameBlockAddress() {
+    if (!frameAddr_.null()) return frameAddr_;
     scene::FrameExtras x;
     x.frameIndex = stats_.frames + 1;
     x.now = secondsSinceCreate();
@@ -135,24 +127,24 @@ VkDeviceAddress Device::frameBlockAddress() {
     x.reverseZ = reverseZ_;
     if (rtSceneValid()) {
         x.rtTlas = rtScene_.tlas;
-        x.rtRecords = rtScene_.records;
+        x.rtRecords = rtScene_.records.bits;
         x.rtInstances = rtScene_.instances;
         x.rtRecordCount = rtScene_.recordCount;
         x.rtTlasSlot = rtScene_.tlasSlot;
     }
     if (!giHeader_.empty()) {
-        const vk::RingAlloc g = frames_.allocate(giHeader_.size(), 16);
+        const rhi::RingAlloc g = frames_.allocate(giHeader_.size(), 16);
         if (g.ptr != nullptr) {
             std::memcpy(g.ptr, giHeader_.data(), giHeader_.size());
-            x.gi = g.address;
+            x.gi = g.ref.bits;
         }
     }
     x.ao = ao_;
     x.sgi = sgi_;
     x.jitter = jitter_;
-    const vk::RingAlloc a = frames_.allocate(sizeof(shader::abi::FrameBlock), 16);
+    const rhi::RingAlloc a = frames_.allocate(sizeof(shader::abi::FrameBlock), 16);
     scene::fillFrameBlock(*static_cast<shader::abi::FrameBlock*>(a.ptr), camera_, lastCamera_, x);
-    frameAddr_ = a.address;
+    frameAddr_ = a.ref;
     ++perf_.frameBlocks;
     return frameAddr_;
 }
@@ -160,7 +152,7 @@ VkDeviceAddress Device::frameBlockAddress() {
 void Device::setFrameParam(std::uint32_t index, const std::array<float, 4>& value) {
     if (index >= frameParams_.size() || frameParams_[index] == value) return;
     frameParams_[index] = value;
-    frameAddr_ = 0;
+    frameAddr_ = {};
 }
 
 std::uint32_t Device::addPass(inject::Point point, std::string name, inject::PassFn fn, const void* owner, int order) {
@@ -196,7 +188,7 @@ void Device::beginMainView() {
     }
     if (j != jitter_) {
         jitter_ = j;
-        frameAddr_ = 0;
+        frameAddr_ = {};
     }
 }
 
@@ -204,7 +196,7 @@ void Device::setJitterSource(JitterSource source) {
     jitterSource_ = std::move(source);
     if (!jitterSource_ && jitter_ != std::array<float, 4>{}) {
         jitter_ = {};
-        frameAddr_ = 0;
+        frameAddr_ = {};
     }
 }
 
@@ -292,6 +284,11 @@ bool Device::create(const DeviceOptions& options) {
     d24s8_ = (fp.optimalTilingFeatures & need) == need ? VK_FORMAT_D24_UNORM_S8_UINT : VK_FORMAT_D32_SFLOAT_S8_UINT;
 
     if (!frames_.create(ctx_) || !bindless_.create(ctx_, frames_)) {
+        return false;
+    }
+    game_ = rhi::vulkan::wrapGame(ctx_, frames_, bindless_);  // the backend seam over these objects (rhi/game_device.h)
+    if (!game_) {
+        spdlog::error("d3d9: the RHI over the device could not be created");
         return false;
     }
     {
@@ -725,18 +722,18 @@ void Device::destroy() {
     {
         const std::lock_guard lock(shaderMutex_);
         for (auto& [h, s] : shaders_) {
-            if (s->module != VK_NULL_HANDLE) {
-                vkDestroyShaderModule(ctx_.device(), s->module, nullptr);
-                s->module = VK_NULL_HANDLE;
+            if (s->module != rhi::ShaderModule::None) {
+                game_->destroyShaderModule(s->module, false);
+                s->module = rhi::ShaderModule::None;
             }
-            for (VkShaderModule* m : {&s->tintModule, &s->lodModule}) {
-                if (*m != VK_NULL_HANDLE) {
-                    vkDestroyShaderModule(ctx_.device(), *m, nullptr);
-                    *m = VK_NULL_HANDLE;
+            for (rhi::ShaderModule* m : {&s->tintModule, &s->lodModule}) {
+                if (*m != rhi::ShaderModule::None) {
+                    game_->destroyShaderModule(*m, false);
+                    *m = rhi::ShaderModule::None;
                 }
             }
             for (auto& m : s->variants) {
-                if (const VkShaderModule v = m.exchange(VK_NULL_HANDLE); v != VK_NULL_HANDLE) vkDestroyShaderModule(ctx_.device(), v, nullptr);
+                if (const rhi::ShaderModule v = m.exchange(rhi::ShaderModule::None); v != rhi::ShaderModule::None) game_->destroyShaderModule(v, false);
             }
         }
         shaders_.clear();
@@ -770,7 +767,7 @@ void Device::destroy() {
     gpuTimer_.destroy();
     pipelines_.destroy();
     passes_ = inject::Registry{};
-    rhi_.reset();           // retires its samplers / pass layout
+    game_.reset();          // retires its samplers / pass layout
     transients_.destroy();  // retired: frames_ destroys them
     // frames_ runs the retired destructors (images, bindless slot releases): before the bindless heap goes away
     frames_.destroy();
@@ -830,7 +827,7 @@ void Device::beginFrame() {
     lastPipelineValid_ = false;
     vsConstDirty_ = psConstDirty_ = true;
     dirtyConstWindows();  // the window blocks live in the frame's ring
-    frameAddr_ = 0;  // ring memory of the frame block belongs to a submission
+    frameAddr_ = {};  // ring memory of the frame block belongs to a submission
     passIndex_ = 0;
     const VkDescriptorSet set = bindless_.set();
     vkCmdBindDescriptorSets(frames_.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS, bindless_.pipelineLayout(), 0, 1, &set, 0, nullptr);
@@ -1504,8 +1501,8 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
                 std::filesystem::rename(tmp, cacheFile, ec);  // (a half-written file is never a hit)
             }
         }
-        const VkShaderModule module = vk::createShaderModule(ctx_, spirv, moduleLabel(ctx_, s->stage, hash, {}));
-        if (module != VK_NULL_HANDLE) {
+        const rhi::ShaderModule module = game_->createShaderModule({.spirv = spirv}, moduleLabel(ctx_, s->stage, hash, {}).c_str());
+        if (module != rhi::ShaderModule::None) {
             {
                 const std::lock_guard lock(shaderMutex_);
                 moduleHashes_.emplace(module, hash);
@@ -1514,7 +1511,7 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
         }
         s->compiling.store(false, std::memory_order_release);
         done->set_value();
-        if (module != VK_NULL_HANDLE) {
+        if (module != rhi::ShaderModule::None) {
             prewarmPipelines(hash);
             // with pipeline libraries the shader's compilation happens here (a worker thread), not at its first draw
             pipelines_.prepareShader(module, s->stage == shader::Stage::Vertex ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT);
@@ -1585,25 +1582,25 @@ void Device::stopShaderWorkers() {
 // The tint debug view's variant of a pixel shader (TranslateOptions::tintEpilogue): translated and compiled on its first tinted
 // draw (render thread; a short hitch when the view is switched on), cached on the shader and in the SPIR-V disk cache. The
 // normal module is never touched, so with the view off every draw renders exactly as before.
-VkShaderModule Device::tintModule(Shader& ps) {
-    if (ps.tintModule == VK_NULL_HANDLE && !ps.tintFailed) {
+rhi::ShaderModule Device::tintModule(Shader& ps) {
+    if (ps.tintModule == rhi::ShaderModule::None && !ps.tintFailed) {
         ps.tintFailed = true;  // until it succeeds: one attempt per shader
         ps.tintModule = variantModule(ps, shader::TranslateOptions{.tintEpilogue = true}, std::format("tint{}", kTintVersion));
-        ps.tintFailed = ps.tintModule == VK_NULL_HANDLE;
+        ps.tintFailed = ps.tintModule == rhi::ShaderModule::None;
     }
     return ps.tintModule;
 }
 
 // The SpeedTree billboards' vertex shader with the baked fade-in distances (BLENDWEIGHT1.xy: start, range; engine/lod.h)
 // scaled by FrameBlock params[kFrameParamLod].x: used for billboard draws while lod.trees is not 1, built as tintModule
-VkShaderModule Device::lodModule(Shader& vs) {
-    if (vs.lodModule == VK_NULL_HANDLE && !vs.lodFailed) {
+rhi::ShaderModule Device::lodModule(Shader& vs) {
+    if (vs.lodModule == rhi::ShaderModule::None && !vs.lodFailed) {
         vs.lodFailed = true;
         shader::TranslateOptions o;
         o.inputOverrides.push_back(
             {shader::Usage::BlendWeight, 1, std::format("float4($v.xy * rvkPtr<RvkFrameData, 16>(pc.frame).Get().params[{}].x, $v.zw)", shader::abi::kFrameParamLod)});
         vs.lodModule = variantModule(vs, o, std::format("lod{}_t{}", kLodVariantVersion, kTranslatorVersion));
-        vs.lodFailed = vs.lodModule == VK_NULL_HANDLE;
+        vs.lodFailed = vs.lodModule == rhi::ShaderModule::None;
         spdlog::info("d3d9: billboard fade variant of vertex shader {:016x}: {}", vs.hash, vs.lodFailed ? "FAILED" : "built");
     }
     return vs.lodModule;
@@ -1645,9 +1642,9 @@ void Device::setUbershader(bool on) {
 
 // A material pixel shader built from the GLSL material shader with its request's macros (+ the enhancement hooks of
 // options.uberDefines); null when it does not build (the draw keeps the translated shader)
-VkShaderModule Device::uberModule(const Shader& s, const MaterialSource& src, const shader::TranslateOptions& options, std::string_view tag) {
+rhi::ShaderModule Device::uberModule(const Shader& s, const MaterialSource& src, const shader::TranslateOptions& options, std::string_view tag) {
     const std::string glsl = shader::uberPixelHlsl(src.entry, src.macros, options.uberDefines);
-    if (glsl.empty()) return VK_NULL_HANDLE;
+    if (glsl.empty()) return rhi::ShaderModule::None;
     std::vector<std::uint32_t> spirv;
     const auto cacheFile =
         options_.cacheDir.empty()
@@ -1669,7 +1666,7 @@ VkShaderModule Device::uberModule(const Shader& s, const MaterialSource& src, co
                 spdlog::warn("d3d9: GLSL material shader of {:016x} ({} {} variant {}) does not compile: {}", s.hash, src.file, src.entry, tag,
                              compiled.log.substr(0, 600));
             }
-            return VK_NULL_HANDLE;
+            return rhi::ShaderModule::None;
         }
         spirv = std::move(compiled.words);
         if (!cacheFile.empty()) {
@@ -1682,23 +1679,23 @@ VkShaderModule Device::uberModule(const Shader& s, const MaterialSource& src, co
     if (const std::uint64_t n = ++ubershadersBuilt_; n == 1 || n % 50 == 0) {
         spdlog::info("d3d9: GLSL material shaders: {} modules built, {} failed", n, ubershadersFailed_.load());
     }
-    return vk::createShaderModule(ctx_, spirv,
-                                  ctx_.namesEnabled() ? moduleLabel(ctx_, s.stage, s.hash, std::format("{} {} {}", src.file, src.entry, tag)) : std::string());
+    return game_->createShaderModule(
+        {.spirv = spirv}, ctx_.namesEnabled() ? moduleLabel(ctx_, s.stage, s.hash, std::format("{} {} {}", src.file, src.entry, tag)).c_str() : nullptr);
 }
 
-VkShaderModule Device::variantModule(const Shader& s, const shader::TranslateOptions& options, std::string_view tag) {
+rhi::ShaderModule Device::variantModule(const Shader& s, const shader::TranslateOptions& options, std::string_view tag) {
     if (options.uber && ubershader_.load(std::memory_order_relaxed) && s.stage == shader::Stage::Pixel) {
         const MaterialSource* src = s.source.load(std::memory_order_acquire);
         if (src != nullptr && uberCovers(*src)) return uberModule(s, *src, options, tag);
     }
     const auto dec = shader::decode(s.bytecode);
     if (!dec.ok()) {
-        return VK_NULL_HANDLE;
+        return rhi::ShaderModule::None;
     }
     const auto glsl = shader::toHlsl(dec.program, options);
     if (!glsl.ok()) {
         spdlog::warn("d3d9: {} variant of shader {:016x}: {}", tag, s.hash, glsl.error);
-        return VK_NULL_HANDLE;
+        return rhi::ShaderModule::None;
     }
     std::vector<std::uint32_t> spirv;
     const auto cacheFile = options_.cacheDir.empty() ? std::filesystem::path()
@@ -1715,7 +1712,7 @@ VkShaderModule Device::variantModule(const Shader& s, const shader::TranslateOpt
         auto compiled = shader::compileHlsl(dec.program.version.stage, glsl.hlsl);
         if (!compiled.ok()) {
             spdlog::error("d3d9: {} variant of shader {:016x} does not compile:\n{}", tag, s.hash, compiled.log);
-            return VK_NULL_HANDLE;
+            return rhi::ShaderModule::None;
         }
         spirv = std::move(compiled.words);
         if (!cacheFile.empty()) {
@@ -1725,7 +1722,7 @@ VkShaderModule Device::variantModule(const Shader& s, const shader::TranslateOpt
             out.write(reinterpret_cast<const char*>(spirv.data()), static_cast<std::streamsize>(spirv.size() * 4));
         }
     }
-    return vk::createShaderModule(ctx_, spirv, moduleLabel(ctx_, s.stage, s.hash, tag));
+    return game_->createShaderModule({.spirv = spirv}, moduleLabel(ctx_, s.stage, s.hash, tag).c_str());
 }
 
 // ---- thin G-buffer (enh/gbuffer) ----
@@ -1759,22 +1756,22 @@ std::shared_ptr<Shader> Device::shaderOwner(const Shader* s) {
     return it != shaders_.end() && it->second.get() == s ? it->second : nullptr;
 }
 
-VkShaderModule Device::variant(const ShaderRef& s, VariantSlot slot) {
+rhi::ShaderModule Device::variant(const ShaderRef& s, VariantSlot slot) {
     const std::size_t i = static_cast<std::size_t>(slot);
     const std::uint8_t state = s->variantState[i].load(std::memory_order_acquire);
     if (state == 2) return s->variants[i].load(std::memory_order_acquire);
-    if (state != 0) return VK_NULL_HANDLE;
+    if (state != 0) return rhi::ShaderModule::None;
     s->variantState[i].store(1, std::memory_order_release);
     {
         const std::lock_guard lock(variantMutex_);
         if (!variantProviders_[i].options) {
             s->variantState[i].store(3);
-            return VK_NULL_HANDLE;
+            return rhi::ShaderModule::None;
         }
         std::shared_ptr<Shader> owner = shaderOwner(s.get());
         if (!owner) {
             s->variantState[i].store(3);
-            return VK_NULL_HANDLE;
+            return rhi::ShaderModule::None;
         }
         variantJobs_.push_back({std::move(owner), slot});
         if (variantThreads_.empty()) {
@@ -1783,7 +1780,7 @@ VkShaderModule Device::variant(const ShaderRef& s, VariantSlot slot) {
         }
     }
     variantCv_.notify_one();
-    return VK_NULL_HANDLE;
+    return rhi::ShaderModule::None;
 }
 
 // translates + compiles the queued variants (SPIR-V disk cache as variantModule), in request order
@@ -1806,8 +1803,8 @@ void Device::variantWorker() {
             job.shader->variantState[i].store(3, std::memory_order_release);
             continue;
         }
-        const VkShaderModule m = variantModule(*job.shader, o, std::format("{}_t{}", provider.tag, kTranslatorVersion));
-        if (m == VK_NULL_HANDLE) {
+        const rhi::ShaderModule m = variantModule(*job.shader, o, std::format("{}_t{}", provider.tag, kTranslatorVersion));
+        if (m == rhi::ShaderModule::None) {
             ++variantsFailed_;
             spdlog::warn("d3d9: {} variant of shader {:016x} failed (the draws keep the engine's shader)", provider.tag, job.shader->hash);
             job.shader->variantState[i].store(3, std::memory_order_release);
@@ -2615,8 +2612,8 @@ void Device::recordPipelineKey(const vk::PipelineDesc& pd) {
         k.ps = p->second;
     }
     std::memcpy(&k.desc, &pd, sizeof(pd));
-    k.desc.vs = VK_NULL_HANDLE;
-    k.desc.fs = VK_NULL_HANDLE;
+    k.desc.vs = rhi::ShaderModule::None;
+    k.desc.fs = rhi::ShaderModule::None;
     const std::lock_guard lock(keysMutex_);
     if (keySet_.emplace(reinterpret_cast<const char*>(&k), sizeof(k)).second) {
         keys_.push_back(k);
@@ -2657,7 +2654,7 @@ void Device::prewarmPipelines(std::uint64_t shaderHash) {
             }
             k.desc.vs = v->second->module;
             k.desc.fs = p->second->module;
-            if (k.desc.vs == VK_NULL_HANDLE || k.desc.fs == VK_NULL_HANDLE) continue;  // not compiled yet: its own completion prewarms
+            if (k.desc.vs == rhi::ShaderModule::None || k.desc.fs == rhi::ShaderModule::None) continue;  // not compiled yet: its own completion prewarms
         }
         pipelines_.prewarm(k.desc);
     }
@@ -2747,7 +2744,7 @@ bool Device::replacementReady(const Shader& vs, const Shader& ps, bool procedura
 }
 
 bool Device::replacementDesc(const Shader& vs, const Shader& ps, bool procedural, vk::PipelineDesc& out) const {
-    if (!waterTemplateValid_ || vs.module == VK_NULL_HANDLE || ps.module == VK_NULL_HANDLE) return false;
+    if (!waterTemplateValid_ || vs.module == rhi::ShaderModule::None || ps.module == rhi::ShaderModule::None) return false;
     vk::PipelineDesc pd = waterTemplate_;
     pd.vs = vs.module;
     pd.fs = ps.module;

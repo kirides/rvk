@@ -14,18 +14,15 @@
 #include <mutex>
 #include <vector>
 
+#include "rhi/game_device.h"
 #include "vk/vk.h"
 
 namespace rvk::vk {
 
 class Context;
 
-struct RingAlloc {
-    VkBuffer buffer = VK_NULL_HANDLE;
-    VkDeviceSize offset = 0;
-    void* ptr = nullptr;
-    VkDeviceAddress address = 0;
-};
+// the ring block's VkBuffer (rhi::RingAlloc::buffer is the opaque backend handle)
+inline VkBuffer vkBuffer(const rhi::RingAlloc& a) { return reinterpret_cast<VkBuffer>(a.buffer); }
 
 class Frames {
 public:
@@ -60,7 +57,7 @@ public:
 
     // transient memory for the frame being recorded (render thread); alignment must be a power of two. minOffset: the block
     // starts at least that far into its chunk (a dynamic buffer's block of bytes [lo, hi) is bound at offset - lo: d3d9::RingBlock)
-    RingAlloc allocate(VkDeviceSize size, VkDeviceSize alignment = 256, VkDeviceSize minOffset = 0);
+    rhi::RingAlloc allocate(VkDeviceSize size, VkDeviceSize alignment = 256, VkDeviceSize minOffset = 0);
 
 private:
     struct Chunk {
@@ -78,6 +75,7 @@ private:
         bool uploadBegun = false;
         std::vector<std::size_t> chunks;  // indices into chunks_ used by this slot
     };
+    static rhi::RingAlloc makeAlloc(const Chunk& c, VkDeviceSize offset);
     std::uint32_t slot() const { return static_cast<std::uint32_t>(frameValue_ % kInFlight); }
     bool newChunk(VkDeviceSize minSize);
     void runRetired(std::uint64_t completed);

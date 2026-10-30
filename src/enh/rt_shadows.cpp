@@ -169,7 +169,7 @@ void RtShadows::record(d3d9::PassContext& ctx, int stage) {
     vk::Transients::Entry* fin = dev_.transients().get("shadows.rt final", {VK_FORMAT_R8G8B8A8_UNORM, {w, h}});
     vk::Transients::Entry* hist[2] = {dev_.transients().get("shadows.rt history0", {VK_FORMAT_R16G16B16A16_SFLOAT, {w, h}}),
                                       dev_.transients().get("shadows.rt history1", {VK_FORMAT_R16G16B16A16_SFLOAT, {w, h}})};
-    const vk::RingAlloc pa = dev_.frames().allocate(sizeof(RtShadowParams), 16);
+    const rhi::RingAlloc pa = dev_.frames().allocate(sizeof(RtShadowParams), 16);
     if (raw == nullptr || fin == nullptr || hist[0] == nullptr || hist[1] == nullptr || pa.ptr == nullptr) {
         ++skipped_;
         return;
@@ -210,10 +210,10 @@ void RtShadows::record(d3d9::PassContext& ctx, int stage) {
     p.range[3] = settings_.filter;
     std::memcpy(pa.ptr, &p, sizeof(p));
     RtShadowPush push{};
-    push.h.frame = ctx.frameBlock;
+    push.h.frame = ctx.frameBlock.bits;
     push.h.passId = 0;
-    push.params[0] = static_cast<std::uint32_t>(pa.address);
-    push.params[1] = static_cast<std::uint32_t>(pa.address >> 32);
+    push.params[0] = pa.ref.low();
+    push.params[1] = pa.ref.high();
     const std::uint32_t gx = (w + 7) / 8, gy = (h + 7) / 8;
     {
         d3d9::RegionScope r(dev_, kNames[0]);

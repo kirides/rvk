@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <memory>
 
+#include "rhi/game_device.h"
 #include "rhi/rhi.h"
 
 namespace rvk::vk {
@@ -27,6 +28,9 @@ class Image;
 namespace rvk::rhi::vulkan {
 
 std::unique_ptr<Device> wrap(vk::Context& ctx, vk::Frames& frames, vk::Bindless& bindless);
+// The same device as a GameDevice (rhi/game_device.h): what d3d9::Device holds (shader modules of the game's pipelines, the GpuRef shift, ...). `device`
+// arguments of the functions below accept it.
+std::unique_ptr<GameDevice> wrapGame(vk::Context& ctx, vk::Frames& frames, vk::Bindless& bindless);
 // `device` must come from wrap(). `name` = debug name (default: the image's).
 std::unique_ptr<Texture> wrapImage(Device& device, vk::Image& image, std::uint32_t sampledSlot = 0, const char* name = nullptr);
 std::unique_ptr<CommandList> wrapCommandBuffer(Device& device, VkCommandBuffer cmd);

@@ -53,9 +53,15 @@ double msSince(std::chrono::steady_clock::time_point t0) {
 
 std::uint32_t word(const d3d9::VertexElement& e) { return static_cast<std::uint32_t>(e.offset) | (static_cast<std::uint32_t>(e.type) << 16); }
 
-void split(VkDeviceAddress a, std::uint32_t (&out)[2]) {
-    out[0] = static_cast<std::uint32_t>(a);
-    out[1] = static_cast<std::uint32_t>(a >> 32);
+void split(rhi::GpuRef a, std::uint32_t (&out)[2]) {
+    out[0] = a.low();
+    out[1] = a.high();
+}
+
+// a buffer's location in both forms: the shader reference (records, push data) and the raw address (acceleration structure geometry)
+rhi::GpuAddr addrOf(const rhi::Buffer& b, std::uint64_t offset = 0) {
+    const std::array<std::uint32_t, 2> r = b.shaderRef(offset);
+    return {rhi::GpuRef::fromWords(r[0], r[1]), b.gpuAddress() + offset};
 }
 
 // The alpha test of a geometry record (func | ref << 8, D3DCMP_*). SpeedTrees: the engine's cut-out is GREATER against the
@@ -456,8 +462,8 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     // (the stride / index size hints as the draw's own binding gives them: the first use places the copy in the mesh arena)
     vb->gpu(q.vertexStride);
     ib->gpu(ib->index32() ? 4 : 2);
-    const VkDeviceAddress vbAddress = vb->deviceAddress(), ibAddress = ib->deviceAddress();
-    if (vbAddress == 0 || ibAddress == 0) return skip();
+    const rhi::GpuAddr vbAddress = vb->gpuAddress(), ibAddress = ib->gpuAddress();
+    if (vbAddress.null() || ibAddress.null()) return skip();
     const d3d9::ResourceRef vr = vb->ref(), ir = ib->ref();
     const rt::BlasKey key = keyOf(q);
 
@@ -1067,7 +1073,7 @@ void RtScene::buildPending(rhi::CommandList& cl, std::uint32_t slot) {
         if (k.strip != 0) {
             // the converted list into a device buffer of its own (through the frame's ring)
             const VkDeviceSize bytes = b->listData.size();
-            const vk::RingAlloc up = dev_.frames().allocate(bytes, 16);
+            const rhi::RingAlloc up = dev_.frames().allocate(bytes, 16);
             if (up.ptr != nullptr) {
                 b->listIndices = rd->createBuffer({bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Device,
                                                    "rt scene strip indices"});
@@ -1077,7 +1083,7 @@ void RtScene::buildPending(rhi::CommandList& cl, std::uint32_t slot) {
                 continue;
             }
             std::memcpy(up.ptr, b->listData.data(), bytes);
-            const std::unique_ptr<rhi::Buffer> ring = rhi::vulkan::wrapBuffer(*rd, up.buffer, up.address - up.offset, up.offset + bytes);
+            const std::unique_ptr<rhi::Buffer> ring = rhi::vulkan::wrapBuffer(*rd, vk::vkBuffer(up), up.gpuVa - up.offset, up.offset + bytes);
             cl.copyBuffer(*b->listIndices, 0, *ring, up.offset, bytes);
             b->listData.clear();
             b->listData.shrink_to_fit();
@@ -1085,11 +1091,11 @@ void RtScene::buildPending(rhi::CommandList& cl, std::uint32_t slot) {
             copied = true;
         }
         rhi::TriangleGeometry g;
-        g.vertexAddress = b->vbAddress + k.vertexOffset + static_cast<VkDeviceSize>(k.baseVertex) * k.stride;
+        g.vertexAddress = b->vbAddress.plus(static_cast<std::int64_t>(k.vertexOffset) + static_cast<std::int64_t>(k.baseVertex) * k.stride).va;
         g.vertexStride = k.stride;
         g.vertexCount = b->maxVertex + 1;
         g.indexType = k.index32 != 0 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
-        g.indexAddress = k.strip != 0 ? b->listIndices->gpuAddress() : b->ibAddress + static_cast<VkDeviceSize>(k.first) * isize;
+        g.indexAddress = k.strip != 0 ? b->listIndices->gpuAddress() : b->ibAddress.plus(static_cast<std::int64_t>(k.first) * isize).va;
         g.indexCount = b->triangles * 3;
         g.opaque = true;  // alpha-tested instances: FORCE_NO_OPAQUE on the instance
         rhi::BlasDesc desc;
@@ -1299,23 +1305,22 @@ void RtScene::observeTree(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& 
         if (d.key == in.key && d.main) return;
     }
     const bool index32 = b.key.index32 != 0;
-    const VkDeviceAddress indices = b.key.strip != 0 ? b.listIndices->gpuAddress()
-                                                     : b.ibAddress + static_cast<VkDeviceAddress>(b.key.first) * (index32 ? 4u : 2u);
-    if (indices == 0) return;
+    const rhi::GpuAddr indices = b.key.strip != 0 ? addrOf(*b.listIndices) : b.ibAddress.plus(static_cast<std::int64_t>(b.key.first) * (index32 ? 4u : 2u));
+    if (indices.null()) return;
     const std::uint32_t slots = b.maxVertex + 1;
-    if (batch.base == 0) {
+    if (batch.base.null()) {
         // the draw's capture buffer: a header + `count` runs of `slots` vertices (an instanced batch's instances, whether or
         // not they are all close enough: instance k always writes run k)
-        const vk::RingAlloc a = dev.frames().allocate(16 + static_cast<VkDeviceSize>(slots) * 32 * count, 16);
+        const rhi::RingAlloc a = dev.frames().allocate(16 + static_cast<VkDeviceSize>(slots) * 32 * count, 16);
         if (a.ptr == nullptr) {
             batch.failed = true;
             return;
         }
         const std::uint32_t header[4] = {slots, 0, 0, 0};
         std::memcpy(a.ptr, header, 16);
-        batch.base = a.address;
+        batch.base = a.addr();
         batch.slots = slots;
-        dev.requestVertexCapture(a.address, q.instanced);
+        dev.requestVertexCapture(a.ref, q.instanced);
     }
     if (batch.slots != slots) return;
     DynBlas& db = dynBlas_[in.key];
@@ -1323,7 +1328,7 @@ void RtScene::observeTree(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& 
         db.id = nextDynId_++;
         db.updates = static_cast<std::uint32_t>((in.key >> 8) % 30);  // refits / rebuilds of the trees do not all fall in one frame
     }
-    DynDraw d{in.key, batch.base + static_cast<VkDeviceAddress>(index) * slots * 32, indices, slots, b.triangles, index32, false, true, b.id, batch.base};
+    DynDraw d{in.key, batch.base.plus(static_cast<std::int64_t>(index) * slots * 32), indices, slots, b.triangles, index32, false, true, b.id, batch.base.ref};
     dyn_.push_back(d);
     ++dynTrees_;
     ++iv_.treeCaptured;
@@ -1442,55 +1447,55 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     if (b.maxIndex == 0 || b.maxIndex >= (1u << 20)) return;
     const std::uint32_t slots = b.maxIndex + 1;
     ib->gpu(isize);
-    const VkDeviceAddress ibAddress = ib->deviceAddress();
-    if (ibAddress == 0) return;
+    const rhi::GpuAddr ibAddress = ib->gpuAddress();
+    if (ibAddress.null()) return;
     // the skinning pass reads the draw's static vertex buffer by address
-    VkDeviceAddress vertexAddress = 0;
+    rhi::GpuAddr vertexAddress;
     if (skin) {
         q.vertexBuffer->gpu(q.vertexStride);
-        const VkDeviceAddress vb = q.vertexBuffer->deviceAddress();
+        const rhi::GpuAddr vb = q.vertexBuffer->gpuAddress();
         const std::int64_t at = static_cast<std::int64_t>(q.vertexOffset) + static_cast<std::int64_t>(q.baseVertex) * q.vertexStride;
-        if (vb != 0 && at >= 0) vertexAddress = vb + static_cast<VkDeviceAddress>(at);
+        if (!vb.null() && at >= 0) vertexAddress = vb.plus(at);
     }
-    const bool useSkin = skin && vertexAddress != 0;
+    const bool useSkin = skin && !vertexAddress.null();
     if (mainView && !solid && !useSkin) return;
-    const vk::RingAlloc a = dev.frames().allocate(16 + static_cast<VkDeviceSize>(slots) * 32, 16);
+    const rhi::RingAlloc a = dev.frames().allocate(16 + static_cast<VkDeviceSize>(slots) * 32, 16);
     if (a.ptr == nullptr) return;
     // header: slots, the previous frame's capture of this draw (its vertex shader reads the previous positions: motion)
     // (bit 31 of the slots: a cascade's view, whose vertex shader's world position operand is captured instead of the clip position)
     std::uint32_t header[4] = {slots | ((mainView || useSkin) ? 0u : 0x80000000u), 0, 0, 0};
-    if (mainView && !useSkin && b.lastCapture != 0 && b.lastCaptureFrame + 1 == frame) {
-        header[1] = static_cast<std::uint32_t>(b.lastCapture);
-        header[2] = static_cast<std::uint32_t>(b.lastCapture >> 32);
+    if (mainView && !useSkin && !b.lastCapture.null() && b.lastCaptureFrame + 1 == frame) {
+        header[1] = b.lastCapture.low();
+        header[2] = b.lastCapture.high();
         header[3] = b.lastSlots;
     }
     std::memcpy(a.ptr, header, 16);
     if (useSkin) {
         SkinJob j;
-        j.vertices = vertexAddress;
-        j.out = a.address;
+        j.vertices = vertexAddress.ref;
+        j.out = a.ref;
         j.slots = slots;
         j.stride = q.vertexStride;
         j.offsets = skinOffsets;
         // the bone matrices: c32 .. c231 of this draw's vertex shader constants
-        const vk::RingAlloc bones = dev.frames().allocate(200u * 16u, 16);
+        const rhi::RingAlloc bones = dev.frames().allocate(200u * 16u, 16);
         if (bones.ptr == nullptr) return;
         std::memcpy(bones.ptr, dev.vsConstant(kInstanceDataBase), 200u * 16u);
-        j.bones = bones.address;
+        j.bones = bones.ref;
         if (skinVerify_) {
             // the vertex shader's own result for the same draw (the cascade view's capture variant), zeroed: slots it did not write have w = 0
-            const vk::RingAlloc ref = dev.frames().allocate(16 + static_cast<VkDeviceSize>(slots) * 32, 16);
+            const rhi::RingAlloc ref = dev.frames().allocate(16 + static_cast<VkDeviceSize>(slots) * 32, 16);
             if (ref.ptr != nullptr) {
                 std::uint32_t rh[4] = {slots | 0x80000000u, 0, 0, 0};
                 std::memcpy(ref.ptr, rh, 16);
                 std::memset(static_cast<std::uint8_t*>(ref.ptr) + 16, 0, static_cast<std::size_t>(slots) * 32);
-                dev.requestVertexCapture(ref.address);
-                j.ref = ref.address;
+                dev.requestVertexCapture(ref.ref);
+                j.ref = ref.ref;
             }
         }
         skinJobs_.push_back(j);
     } else {
-        dev.requestVertexCapture(a.address);
+        dev.requestVertexCapture(a.ref);
     }
     // the draw's material (diffuse + uv map), resolved again when it changes (the solid pass's draws carry it)
     const std::uint64_t sig = RtMaterials::signature(q);
@@ -1502,7 +1507,7 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
             b.resolved = frame;
         }
     }
-    DynDraw d{key, a.address, ibAddress + static_cast<VkDeviceAddress>(q.first) * isize, slots, q.primitives, index32, false};
+    DynDraw d{key, a.addr(), ibAddress.plus(static_cast<std::int64_t>(q.first) * isize), slots, q.primitives, index32, false};
     d.main = mainView && !useSkin;
     d.skin = useSkin;
     dyn_.push_back(d);
@@ -1522,7 +1527,7 @@ void RtScene::buildDynamic(rhi::CommandList& cl, std::uint64_t frame) {
         std::unordered_set<std::uint64_t> taken;
         for (const DynDraw& d : dyn_) {
             if (taken.contains(d.key)) continue;
-            const VkDeviceAddress asked = d.requested != 0 ? d.requested : d.capture;
+            const rhi::GpuRef asked = !d.requested.null() ? d.requested : d.capture.ref;
             if (!dev_.vertexCaptured(asked)) continue;
             taken.insert(d.key);
             dynUse_.push_back(d);
@@ -1535,7 +1540,7 @@ void RtScene::buildDynamic(rhi::CommandList& cl, std::uint64_t frame) {
         }
         for (const DynDraw& d : dynPrev_) {
             if (taken.contains(d.key)) continue;
-            const VkDeviceAddress asked = d.requested != 0 ? d.requested : d.capture;
+            const rhi::GpuRef asked = !d.requested.null() ? d.requested : d.capture.ref;
             if (!dev_.vertexCapturedPrev(asked)) continue;
             taken.insert(d.key);
             dynUse_.push_back(d);
@@ -1546,20 +1551,20 @@ void RtScene::buildDynamic(rhi::CommandList& cl, std::uint64_t frame) {
         // the motion chain (the main view's vertex shader reads the previous main-view capture of the draw)
         for (const DynDraw& d : dyn_) {
             if (!d.main || d.tree) continue;
-            const VkDeviceAddress asked = d.requested != 0 ? d.requested : d.capture;
+            const rhi::GpuRef asked = !d.requested.null() ? d.requested : d.capture.ref;
             if (!dev_.vertexCaptured(asked)) continue;
             DynBlas& b = dynBlas_[d.key];
-            b.lastCapture = d.capture;
+            b.lastCapture = d.capture.ref;
             b.lastSlots = d.slots;
             b.lastCaptureFrame = frame;
         }
         for (const DynDraw& d : dynPrev_) {
             if (!d.main || d.tree) continue;
             DynBlas& b = dynBlas_[d.key];
-            if (b.lastCaptureFrame >= frame - 1 && b.lastCapture != 0) continue;
-            const VkDeviceAddress asked = d.requested != 0 ? d.requested : d.capture;
+            if (b.lastCaptureFrame >= frame - 1 && !b.lastCapture.null()) continue;
+            const rhi::GpuRef asked = !d.requested.null() ? d.requested : d.capture.ref;
             if (!dev_.vertexCapturedPrev(asked)) continue;
-            b.lastCapture = d.capture;
+            b.lastCapture = d.capture.ref;
             b.lastSlots = d.slots;
             b.lastCaptureFrame = frame - 1;
         }
@@ -1577,11 +1582,11 @@ void RtScene::buildDynamic(rhi::CommandList& cl, std::uint64_t frame) {
         DynDraw& d = dynUse_[i];
         DynBlas& b = dynBlas_[d.key];
         rhi::TriangleGeometry g;
-        g.vertexAddress = d.capture + 16;
+        g.vertexAddress = d.capture.plus(16).va;
         g.vertexStride = 32;
         g.vertexCount = d.slots;
         g.indexType = d.index32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
-        g.indexAddress = d.indices;
+        g.indexAddress = d.indices.va;
         g.indexCount = d.triangles * 3;
         g.opaque = true;
         const bool sameShape = b.as != nullptr && b.sizeTriangles == d.triangles && b.sizeSlots == d.slots && b.sizeIndex32 == d.index32;
@@ -1697,12 +1702,12 @@ void RtScene::recordSkin(rhi::CommandList& cl) {
     const std::uint32_t n = static_cast<std::uint32_t>(std::min<std::size_t>(skinJobs_.size(), 512));
     std::uint32_t chunks = 0;
     for (std::uint32_t i = 0; i < n; ++i) chunks += (skinJobs_[i].slots + 63) / 64;
-    const vk::RingAlloc t = dev_.frames().allocate(16 + 64ull * n, 16);
+    const rhi::RingAlloc t = dev_.frames().allocate(16 + 64ull * n, 16);
     if (t.ptr == nullptr) {
         skinJobs_.clear();
         return;
     }
-    VkDeviceAddress errAddress = 0;
+    rhi::GpuRef errAddress;
     const std::uint32_t slot = dev_.frames().currentSlot();
     if (skinVerify_) {
         if (skinErr_ == nullptr) {
@@ -1735,31 +1740,32 @@ void RtScene::recordSkin(rhi::CommandList& cl) {
             }
             e[0] = e[1] = e[2] = e[3] = 0;
             skinErr_->flush();
-            errAddress = skinErr_->gpuAddress() + 16ull * slot;
+            const std::array<std::uint32_t, 2> er = skinErr_->shaderRef(16ull * slot);
+            errAddress = rhi::GpuRef::fromWords(er[0], er[1]);
         }
     }
     auto* head = static_cast<std::uint32_t*>(t.ptr);
     head[0] = n;
     head[1] = chunks;
-    head[2] = static_cast<std::uint32_t>(errAddress);
-    head[3] = static_cast<std::uint32_t>(errAddress >> 32);
+    head[2] = errAddress.low();
+    head[3] = errAddress.high();
     std::uint32_t* jobs = head + 4;
     std::uint32_t chunk = 0;
     for (std::uint32_t i = 0; i < n; ++i) {
         const SkinJob& j = skinJobs_[i];
         std::uint32_t* w = jobs + 16ull * i;
-        w[0] = static_cast<std::uint32_t>(j.vertices);
-        w[1] = static_cast<std::uint32_t>(j.vertices >> 32);
-        w[2] = static_cast<std::uint32_t>(j.bones);
-        w[3] = static_cast<std::uint32_t>(j.bones >> 32);
-        w[4] = static_cast<std::uint32_t>(j.out);
-        w[5] = static_cast<std::uint32_t>(j.out >> 32);
+        w[0] = j.vertices.low();
+        w[1] = j.vertices.high();
+        w[2] = j.bones.low();
+        w[3] = j.bones.high();
+        w[4] = j.out.low();
+        w[5] = j.out.high();
         w[6] = j.slots;
         w[7] = j.stride;
         w[8] = chunk;
         w[9] = 0;
-        w[10] = static_cast<std::uint32_t>(j.ref);
-        w[11] = static_cast<std::uint32_t>(j.ref >> 32);
+        w[10] = j.ref.low();
+        w[11] = j.ref.high();
         w[12] = j.offsets;
         w[13] = w[14] = w[15] = 0;
         chunk += (j.slots + 63) / 64;
@@ -1777,8 +1783,8 @@ void RtScene::recordSkin(rhi::CommandList& cl) {
             std::uint32_t pad[2];
         } push{};
         push.h.frame = 0;
-        push.table[0] = static_cast<std::uint32_t>(t.address);
-        push.table[1] = static_cast<std::uint32_t>(t.address >> 32);
+        push.table[0] = t.ref.low();
+        push.table[1] = t.ref.high();
         cl.setPushConstants(&push, sizeof(push));
         cl.dispatch(chunks, 1, 1);
     }
@@ -1891,8 +1897,8 @@ void RtScene::record(d3d9::PassContext& ctx) {
     });
     const std::uint32_t worldCount = std::min<std::uint32_t>(static_cast<std::uint32_t>(chosen.size()), tlas_[slot].capacity - dynCount);
     const std::uint32_t n = worldCount + dynCount;
-    const vk::RingAlloc ia = frames.allocate(std::max<VkDeviceSize>(n, 1) * sizeof(VkAccelerationStructureInstanceKHR), 16);
-    const vk::RingAlloc ra = frames.allocate(std::max<VkDeviceSize>(n, 1) * sizeof(abi::RtGeometryRecord), 16);
+    const rhi::RingAlloc ia = frames.allocate(std::max<VkDeviceSize>(n, 1) * sizeof(VkAccelerationStructureInstanceKHR), 16);
+    const rhi::RingAlloc ra = frames.allocate(std::max<VkDeviceSize>(n, 1) * sizeof(abi::RtGeometryRecord), 16);
     if (ia.ptr == nullptr || ra.ptr == nullptr) {
         dev_.setRtScene({});
         return;
@@ -1937,8 +1943,8 @@ void RtScene::record(d3d9::PassContext& ctx) {
         insts[k] = vi;
         abi::RtGeometryRecord r{};
         const rt::BlasKey& key = b.key;
-        split(b.vbAddress + key.vertexOffset + static_cast<VkDeviceSize>(key.baseVertex) * key.stride, r.vertices);
-        split(key.strip != 0 ? b.listIndices->gpuAddress() : b.ibAddress + static_cast<VkDeviceSize>(key.first) * (key.index32 != 0 ? 4u : 2u),
+        split(b.vbAddress.plus(static_cast<std::int64_t>(key.vertexOffset) + static_cast<std::int64_t>(key.baseVertex) * key.stride).ref, r.vertices);
+        split(key.strip != 0 ? addrOf(*b.listIndices).ref : b.ibAddress.plus(static_cast<std::int64_t>(key.first) * (key.index32 != 0 ? 4u : 2u)).ref,
               r.indices);
         r.stride = key.stride;
         r.flags = (in.flags & ~abi::kRtRecordAlphaTested) | (alpha ? abi::kRtRecordAlphaTested : 0u) |
@@ -2024,8 +2030,8 @@ void RtScene::record(d3d9::PassContext& ctx) {
                            (alpha ? VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR : VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR);
                 insts[k] = vi;
                 abi::RtGeometryRecord r{};
-                split(d.capture + 16, r.vertices);
-                split(d.indices, r.indices);
+                split(d.capture.plus(16).ref, r.vertices);
+                split(d.indices.ref, r.indices);
                 r.stride = 32;
                 r.flags = (in->flags & ~abi::kRtRecordAlphaTested) | (alpha ? abi::kRtRecordAlphaTested : 0u) | (((in->data >> 16) & 0xFFu) << abi::kRtRecordKindShift);
                 r.normal = abi::kRtAttribAbsent;
@@ -2048,8 +2054,8 @@ void RtScene::record(d3d9::PassContext& ctx) {
             }
             insts[k] = vi;
             abi::RtGeometryRecord r{};
-            split(d.capture + 16, r.vertices);
-            split(d.indices, r.indices);
+            split(d.capture.plus(16).ref, r.vertices);
+            split(d.indices.ref, r.indices);
             r.stride = 32;
             r.flags = (d.index32 ? abi::kRtRecordIndex32 : 0u) | abi::kRtRecordDynamic | (static_cast<std::uint32_t>(Kind::Skinned) << abi::kRtRecordKindShift) |
                       (1u << abi::kRtRecordViewShift);
@@ -2078,10 +2084,10 @@ void RtScene::record(d3d9::PassContext& ctx) {
 
     // the segment table (after the records: their addresses)
     if (!segs.empty()) {
-        const vk::RingAlloc sa = frames.allocate(segs.size() * sizeof(abi::RtMaterialSegment), 16);
+        const rhi::RingAlloc sa = frames.allocate(segs.size() * sizeof(abi::RtMaterialSegment), 16);
         if (sa.ptr != nullptr) {
             std::memcpy(sa.ptr, segs.data(), segs.size() * sizeof(abi::RtMaterialSegment));
-            for (const auto& [rec, first] : segRecords) split(sa.address + static_cast<VkDeviceSize>(first) * sizeof(abi::RtMaterialSegment), recs[rec].segments);
+            for (const auto& [rec, first] : segRecords) split(sa.ref.plus(static_cast<std::int64_t>(first) * sizeof(abi::RtMaterialSegment)), recs[rec].segments);
         } else {
             for (const auto& [rec, first] : segRecords) {
                 recs[rec].segmentCount = 0;
@@ -2096,7 +2102,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
     Tlas& t = tlas_[slot];
     {
         d3d9::RegionScope r(dev_, "rt.tlas build");
-        cl.buildTlasAt(*t.as, ia.address, used);  // (ends with the barrier to the ray queries of this submission)
+        cl.buildTlasAt(*t.as, ia.gpuVa, used);  // (ends with the barrier to the ray queries of this submission)
     }
     if (used < n) {
         // (see `used`) counted for the log; before this was fixed the TLAS was built over n instances, the tail of them stale
@@ -2104,7 +2110,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
         ++iv_.holeFrames;
         iv_.holes += n - used;
     }
-    dev_.setRtScene({t.as->address(), ra.address, t.slot, used, used, frame});
+    dev_.setRtScene({t.as->address(), ra.ref, t.slot, used, used, frame});
 
     lastInstances_ = used;
     lastTriangles_ = triangles;

@@ -133,7 +133,7 @@ void WaterRt::record(d3d9::PassContext& ctx) {
     const std::uint32_t sw = ctx.sceneHdr->desc().width, sh = ctx.sceneHdr->desc().height;
     const std::uint32_t w = (sw + t.scale - 1) / t.scale, h = (sh + t.scale - 1) / t.scale;
     vk::Transients::Entry* out = dev_.transients().get("water.rt", {VK_FORMAT_R16G16B16A16_SFLOAT, {w, h}});
-    const vk::RingAlloc pa = dev_.frames().allocate(sizeof(WaterRtParams), 16);
+    const rhi::RingAlloc pa = dev_.frames().allocate(sizeof(WaterRtParams), 16);
     if (out == nullptr || pa.ptr == nullptr) {
         ++skipped_;
         return;
@@ -171,10 +171,10 @@ void WaterRt::record(d3d9::PassContext& ctx) {
     }
     std::memcpy(pa.ptr, &p, sizeof(p));
     WaterRtPush push{};
-    push.h.frame = ctx.frameBlock;
+    push.h.frame = ctx.frameBlock.bits;
     push.h.passId = passId_;
-    push.params[0] = static_cast<std::uint32_t>(pa.address);
-    push.params[1] = static_cast<std::uint32_t>(pa.address >> 32);
+    push.params[0] = pa.ref.low();
+    push.params[1] = pa.ref.high();
 
     RhiScope rs(dev_, cmd);
     if (!rs) {

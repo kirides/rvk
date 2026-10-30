@@ -137,12 +137,8 @@ Water::~Water() {
 }
 
 void Water::destroyShaders() {
-    vk::Context* ctx = &dev_.ctx();
     for (auto* s : {&oceanVs_, &ps_}) {
-        if (*s && (*s)->module != VK_NULL_HANDLE) {
-            const VkShaderModule m = (*s)->module;
-            dev_.frames().retire([ctx, m] { vkDestroyShaderModule(ctx->device(), m, nullptr); });
-        }
+        if (*s && (*s)->module != rhi::ShaderModule::None) dev_.game().destroyShaderModule((*s)->module, true);
         s->reset();
     }
 }
@@ -153,7 +149,7 @@ bool Water::ensureShaders() {
     const auto make = [&](const char* name, shader::Stage stage) {
         auto s = std::make_shared<d3d9::Shader>();
         s->stage = stage;
-        s->module = vk::createShaderModule(dev_.ctx(), shader::embedded::spirv(name));
+        s->module = dev_.game().createShaderModule({.spirv = shader::embedded::spirv(name)});
         s->hash = nameHash(name);
         return s;
     };
@@ -164,7 +160,7 @@ bool Water::ensureShaders() {
     ps_ = make("water/water.frag", shader::Stage::Pixel);
     ps_->reflection.floatConstCount = 1;
     ps_->reflection.colorOutputs = 1;
-    if (oceanVs_->module == VK_NULL_HANDLE || ps_->module == VK_NULL_HANDLE) {
+    if (oceanVs_->module == rhi::ShaderModule::None || ps_->module == rhi::ShaderModule::None) {
         spdlog::error("enh: water: shader modules failed, enhanced water stays off this session");
         failed_ = true;
         destroyShaders();
@@ -490,10 +486,10 @@ void Water::serviceBake(d3d9::Device& device) {
     }
 }
 
-VkDeviceAddress Water::fillBlock(d3d9::Device& device, const d3d9::ReplaceQuery& q, draws::Water kind, WaterModel model, bool grid,
+rhi::GpuRef Water::fillBlock(d3d9::Device& device, const d3d9::ReplaceQuery& q, draws::Water kind, WaterModel model, bool grid,
                                  const Body& b, std::array<d3d9::Texture*, 16>& sampled) {
-    const vk::RingAlloc a = device.frames().allocate(sizeof(WaterBlock), 16);
-    if (a.ptr == nullptr) return 0;
+    const rhi::RingAlloc a = device.frames().allocate(sizeof(WaterBlock), 16);
+    if (a.ptr == nullptr) return {};
     WaterBlock w{};
     // the DrawBlock part: the engine draw's textures and samplers by slot (water.frag samples the material through them)
     const shader::Reflection& er = q.enginePs->reflection;
@@ -672,7 +668,7 @@ VkDeviceAddress Water::fillBlock(d3d9::Device& device, const d3d9::ReplaceQuery&
         rtRefl_->setLight(l);
     }
     std::memcpy(a.ptr, &w, sizeof(w));
-    return a.address;
+    return a.ref;
 }
 
 // ---- the FFT ocean: simulation pass, sea state ------------------------------------------------------------------------------
@@ -1062,8 +1058,8 @@ void Water::replace(d3d9::Device& device, const d3d9::ReplaceQuery& q, DrawRepla
         if (!device.replacementReady(*q.engineVs, *ps_, false)) return;
     }
     std::array<d3d9::Texture*, 16> sampled{};
-    const VkDeviceAddress block = fillBlock(device, q, kind, model, grid, b, sampled);
-    if (block == 0) return;
+    const rhi::GpuRef block = fillBlock(device, q, kind, model, grid, b, sampled);
+    if (block.null()) return;
     if (grid) {
         gridFrame_ = frame;
         gridMainView_ = q.mainView;
@@ -1164,7 +1160,7 @@ void Water::recordWet(d3d9::PassContext& ctx) {
     if (!dev_.readable(ctx.depthMap, cmd) || !dev_.readable(field_.get(), cmd)) return;
     const std::uint32_t w = scene->desc().width, h = scene->desc().height;
     WetShorePush push{};
-    push.h.frame = ctx.frameBlock;
+    push.h.frame = ctx.frameBlock.bits;
     push.h.passId = wetPassId_;
     push.depthTex = ctx.depthMap->bindlessSlot();
     push.fieldTex = field_->bindlessSlot();

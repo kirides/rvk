@@ -155,7 +155,7 @@ void setDynamicState(VkCommandBuffer cmd, const vk::Context& ctx, std::uint32_t 
 // left in a bad state afterwards)
 bool prepareGuarded(vk::PipelineCache& pipes, VkShaderModule m, VkShaderStageFlagBits stage) {
     __try {
-        pipes.prepareShader(m, stage);
+        pipes.prepareShader(vk::rhiModule(m), stage);
         return true;
     } __except (1) {
         return false;
@@ -327,7 +327,7 @@ int passTest(bool hazard, bool viaRhi) {
     x.width = kSize;
     x.height = kSize;
     x.params = &params;
-    vk::RingAlloc fb = frames.allocate(sizeof(shader::abi::FrameBlock), 16);
+    rhi::RingAlloc fb = frames.allocate(sizeof(shader::abi::FrameBlock), 16);
     d3d9::scene::fillFrameBlock(*static_cast<shader::abi::FrameBlock*>(fb.ptr), {}, {}, x);
 
     // the scene: cleared to 0.5
@@ -354,7 +354,7 @@ int passTest(bool hazard, bool viaRhi) {
     if (factor == nullptr) {
         return 2;
     }
-    push.h.frame = fb.address;
+    push.h.frame = fb.ref.bits;
     push.width = kSize;
     push.height = kSize;
     push.srcTex = factor->slot;
@@ -1579,7 +1579,7 @@ int main(int argc, char** argv) {
     bindless.recordInit(cmd);
 
     // gradient: r = 4x, g = 4y, b = 255, a = 255
-    vk::RingAlloc staging = frames.allocate(kSize * kSize * 4, 16);
+    rhi::RingAlloc staging = frames.allocate(kSize * kSize * 4, 16);
     auto* px = static_cast<std::uint8_t*>(staging.ptr);
     for (std::uint32_t y = 0; y < kSize; ++y) {
         for (std::uint32_t x = 0; x < kSize; ++x) {
@@ -1595,12 +1595,12 @@ int main(int argc, char** argv) {
     region.bufferOffset = staging.offset;
     region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     region.imageExtent = {kSize, kSize, 1};
-    vkCmdCopyBufferToImage(cmd, staging.buffer, tex.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    vkCmdCopyBufferToImage(cmd, vk::vkBuffer(staging), tex.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
     tex.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     // constants: VS c0..c3 = identity (m4x4), PS c0 = tint (1, 1, 0.5, 1)
-    vk::RingAlloc vsC = frames.allocate(shader::abi::kStageConstsSize, 16);
-    vk::RingAlloc psC = frames.allocate(shader::abi::kStageConstsSize, 16);
+    rhi::RingAlloc vsC = frames.allocate(shader::abi::kStageConstsSize, 16);
+    rhi::RingAlloc psC = frames.allocate(shader::abi::kStageConstsSize, 16);
     std::memset(vsC.ptr, 0, shader::abi::kStageConstsSize);
     std::memset(psC.ptr, 0, shader::abi::kStageConstsSize);
     auto* vc = static_cast<float*>(vsC.ptr);
@@ -1609,7 +1609,7 @@ int main(int argc, char** argv) {
     }
     const float tint[4] = {1.0f, 1.0f, 0.5f, 1.0f};
     std::memcpy(psC.ptr, tint, sizeof(tint));
-    vk::RingAlloc db = frames.allocate(sizeof(shader::abi::DrawBlock), 16);
+    rhi::RingAlloc db = frames.allocate(sizeof(shader::abi::DrawBlock), 16);
     shader::abi::DrawBlock block{};
     block.tex[0] = texSlot;
     block.smp[0] = samplerSlot;
@@ -1624,12 +1624,12 @@ int main(int argc, char** argv) {
     };
     const Vertex quad[6] = {{-1, 1, 0, 1, 0, 0}, {1, 1, 0, 1, 1, 0}, {-1, -1, 0, 1, 0, 1},
                             {1, 1, 0, 1, 1, 0},  {1, -1, 0, 1, 1, 1}, {-1, -1, 0, 1, 0, 1}};
-    vk::RingAlloc vb = frames.allocate(sizeof(quad), 16);
+    rhi::RingAlloc vb = frames.allocate(sizeof(quad), 16);
     std::memcpy(vb.ptr, quad, sizeof(quad));
 
     vk::PipelineDesc pd{};
-    pd.vs = vs;
-    pd.fs = fs;
+    pd.vs = vk::rhiModule(vs);
+    pd.fs = vk::rhiModule(fs);
     pd.colorCount = 1;
     pd.colorFormats[0] = VK_FORMAT_R8G8B8A8_UNORM;
     pd.bindingCount = 1;
@@ -1658,7 +1658,7 @@ int main(int argc, char** argv) {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     const VkDescriptorSet set = bindless.set();
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, bindless.pipelineLayout(), 0, 1, &set, 0, nullptr);
-    shader::abi::PushConstants push{vsC.address, psC.address, db.address};
+    shader::abi::PushConstants push{vsC.ref.bits, psC.ref.bits, db.ref.bits};
     push.legacyWindows();
     vkCmdPushConstants(cmd, bindless.pipelineLayout(), VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push),
                        &push);
@@ -1671,7 +1671,8 @@ int main(int argc, char** argv) {
             {VK_STRUCTURE_TYPE_VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT, nullptr, 1, 0, VK_FORMAT_R32G32_SFLOAT, 16}};
         vkCmdSetVertexInputEXT(cmd, 1, &b, 2, a);
     }
-    vkCmdBindVertexBuffers(cmd, 0, 1, &vb.buffer, &vb.offset);
+    const VkBuffer vbBuffer = vk::vkBuffer(vb);
+    vkCmdBindVertexBuffers(cmd, 0, 1, &vbBuffer, &vb.offset);
     vkCmdDraw(cmd, 6, 1, 0, 0);
     vkCmdEndRendering(cmd);
 

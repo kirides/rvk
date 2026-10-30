@@ -132,8 +132,8 @@ int vsTest(const std::string& vsA, const std::string& vsB, const AttrMap& mapA, 
     vk::PipelineDesc pd[2]{};
     VkPipeline pipeline[2] = {};
     for (int i = 0; i < 2; ++i) {
-        pd[i].vs = vs[i];
-        pd[i].fs = probe;
+        pd[i].vs = vk::rhiModule(vs[i]);
+        pd[i].fs = vk::rhiModule(probe);
         pd[i].colorCount = 1;
         pd[i].colorFormats[0] = VK_FORMAT_R8G8B8A8_UNORM;
         pd[i].bindingCount = 1;
@@ -158,18 +158,18 @@ int vsTest(const std::string& vsA, const std::string& vsB, const AttrMap& mapA, 
         frames.begin();
         VkCommandBuffer cmd = frames.cmd();
         if (trial == 0) bindless.recordInit(cmd);
-        vk::RingAlloc vsC = frames.allocate(shader::abi::kStageConstsSize, 16);
+        rhi::RingAlloc vsC = frames.allocate(shader::abi::kStageConstsSize, 16);
         std::memset(vsC.ptr, 0, shader::abi::kStageConstsSize);
         auto* vc = static_cast<float*>(vsC.ptr);
         for (int i = 0; i < 256 * 4; ++i) vc[i] = uni(rng);
         if (billboardValid) vc[32 * 4 + 2] = 6.2831853f;  // c_f2PI
-        vk::RingAlloc db = frames.allocate(sizeof(shader::abi::DrawBlock), 16);
+        rhi::RingAlloc db = frames.allocate(sizeof(shader::abi::DrawBlock), 16);
         shader::abi::DrawBlock block{};
         block.alphaFunc = 8;
         std::memcpy(db.ptr, &block, sizeof(block));
 
         // 3 vertices x kSlots vec4: slot 0 position (w = corner index 0..3), 9 instance index, 18 blend indices (0..2), the rest uniform
-        vk::RingAlloc vb = frames.allocate(3 * kSlots * 16, 16);
+        rhi::RingAlloc vb = frames.allocate(3 * kSlots * 16, 16);
         auto* vd = static_cast<float*>(vb.ptr);
         for (std::uint32_t v = 0; v < 3; ++v) {
             for (std::uint32_t sl = 0; sl < kSlots; ++sl) {
@@ -188,7 +188,7 @@ int vsTest(const std::string& vsA, const std::string& vsB, const AttrMap& mapA, 
                 }
             }
         }
-        vk::RingAlloc out[2] = {frames.allocate(probeBytes, 16), frames.allocate(probeBytes, 16)};
+        rhi::RingAlloc out[2] = {frames.allocate(probeBytes, 16), frames.allocate(probeBytes, 16)};
         if (const char* dump = std::getenv("RVK_EQ_DUMP"); dump != nullptr && std::atoi(dump) == trial) {
             for (std::uint32_t v = 0; v < 3; ++v) {
                 std::printf("vertex %u:", v);
@@ -218,7 +218,7 @@ int vsTest(const std::string& vsA, const std::string& vsB, const AttrMap& mapA, 
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline[i]);
             const VkDescriptorSet set = bindless.set();
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, bindless.pipelineLayout(), 0, 1, &set, 0, nullptr);
-            shader::abi::PushConstants push{vsC.address, out[i].address, db.address, 0, 0, 0, 0};
+            shader::abi::PushConstants push{vsC.ref.bits, out[i].ref.bits, db.ref.bits, 0, 0, 0, 0};
             push.legacyWindows();
             vkCmdPushConstants(cmd, bindless.pipelineLayout(), VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push),
                                &push);
@@ -232,7 +232,8 @@ int vsTest(const std::string& vsA, const std::string& vsB, const AttrMap& mapA, 
                 }
                 vkCmdSetVertexInputEXT(cmd, 1, &b, static_cast<std::uint32_t>(at.size()), at.data());
             }
-            vkCmdBindVertexBuffers(cmd, 0, 1, &vb.buffer, &vb.offset);
+            const VkBuffer vbBuffer = vk::vkBuffer(vb);
+            vkCmdBindVertexBuffers(cmd, 0, 1, &vbBuffer, &vb.offset);
             vkCmdDraw(cmd, 3, 1, 0, 0);
             vkCmdEndRendering(cmd);
         }
@@ -412,8 +413,8 @@ int main(int argc, char** argv) {
     VkPipeline pipeline[2] = {};
     const VkShaderModule fs[2] = {fa, fb};
     for (int i = 0; i < 2; ++i) {
-        pd[i].vs = vs;
-        pd[i].fs = fs[i];
+        pd[i].vs = vk::rhiModule(vs);
+        pd[i].fs = vk::rhiModule(fs[i]);
         pd[i].colorCount = 1;
         pd[i].colorFormats[0] = VK_FORMAT_R32G32B32A32_SFLOAT;
         pipeline[i] = pipes.get(pd[i]);
@@ -431,7 +432,7 @@ int main(int argc, char** argv) {
         if (trial == 0) {
             bindless.recordInit(cmd);
             for (auto& t : tex) {
-                vk::RingAlloc staging = frames.allocate(kTexSize * kTexSize * 4, 16);
+                rhi::RingAlloc staging = frames.allocate(kTexSize * kTexSize * 4, 16);
                 auto* px = static_cast<std::uint8_t*>(staging.ptr);
                 for (std::uint32_t i = 0; i < kTexSize * kTexSize * 4; ++i) {
                     px[i] = static_cast<std::uint8_t>(rng() & 0xff);
@@ -441,12 +442,12 @@ int main(int argc, char** argv) {
                 region.bufferOffset = staging.offset;
                 region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
                 region.imageExtent = {kTexSize, kTexSize, 1};
-                vkCmdCopyBufferToImage(cmd, staging.buffer, t.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+                vkCmdCopyBufferToImage(cmd, vk::vkBuffer(staging), t.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
                 t.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             }
         }
-        vk::RingAlloc vsC = frames.allocate(shader::abi::kStageConstsSize, 16);
-        vk::RingAlloc psC = frames.allocate(shader::abi::kStageConstsSize, 16);
+        rhi::RingAlloc vsC = frames.allocate(shader::abi::kStageConstsSize, 16);
+        rhi::RingAlloc psC = frames.allocate(shader::abi::kStageConstsSize, 16);
         std::memset(vsC.ptr, 0, shader::abi::kStageConstsSize);
         std::memset(psC.ptr, 0, shader::abi::kStageConstsSize);
         auto* vc = static_cast<float*>(vsC.ptr);
@@ -455,7 +456,7 @@ int main(int argc, char** argv) {
             vc[i] = uni(rng);
             pc[i] = uni(rng);
         }
-        vk::RingAlloc db = frames.allocate(sizeof(shader::abi::DrawBlock), 16);
+        rhi::RingAlloc db = frames.allocate(sizeof(shader::abi::DrawBlock), 16);
         shader::abi::DrawBlock block{};
         for (std::uint32_t s = 0; s < shader::abi::kSamplerSlots; ++s) {
             block.tex[s] = texSlot[s % kTextures];
@@ -464,7 +465,7 @@ int main(int argc, char** argv) {
         block.alphaFunc = 8;  // always
         std::memcpy(db.ptr, &block, sizeof(block));
 
-        shader::abi::PushConstants push{vsC.address, psC.address, db.address, 0, 0, 0, 0};
+        shader::abi::PushConstants push{vsC.ref.bits, psC.ref.bits, db.ref.bits, 0, 0, 0, 0};
 
         push.legacyWindows();
         for (int i = 0; i < 2; ++i) {

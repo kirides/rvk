@@ -62,9 +62,14 @@ std::uint64_t hashFloats(const float* v, std::size_t n) {
     return h;
 }
 
-void split(VkDeviceAddress a, std::uint32_t* out) {
-    out[0] = static_cast<std::uint32_t>(a);
-    out[1] = static_cast<std::uint32_t>(a >> 32);
+void split(rhi::GpuRef a, std::uint32_t* out) {
+    out[0] = a.low();
+    out[1] = a.high();
+}
+// the shader reference of an rhi::Buffer (Buffer::shaderRef: the device address on Vulkan, {heap index, offset} on D3D12)
+void split(const std::array<std::uint32_t, 2>& a, std::uint32_t* out) {
+    out[0] = a[0];
+    out[1] = a[1];
 }
 
 }  // namespace
@@ -502,8 +507,8 @@ void Gi::record(d3d9::PassContext& ctx) {
     hd.dims[1] = kDims[1];
     hd.dims[2] = kDims[2];
     hd.dims[3] = kGiCascades;
-    split(probes_->gpuAddress(), &hd.data[0]);
-    split(depth_->gpuAddress(), &hd.data[2]);
+    split(probes_->shaderRefRw(), &hd.data[0]);
+    split(depth_->shaderRefRw(), &hd.data[2]);
     hd.params[0] = s_.strength;
     hd.params[1] = 0.1f;  // normal bias (cells)
     hd.params[2] = 0.3f;  // view bias (cells)
@@ -520,9 +525,9 @@ void Gi::record(d3d9::PassContext& ctx) {
         hd.cascade[c].spacing[1] = 1.0f / kSpacing[c];
         hd.cascade[c].spacing[2] = kDepthCap;
     }
-    const vk::RingAlloc ha = frames.allocate(sizeof(hd), 16);
-    const vk::RingAlloc la = frames.allocate(std::max<VkDeviceSize>(n, 1) * 4, 16);
-    const vk::RingAlloc pa = frames.allocate(sizeof(GiPassParams), 16);
+    const rhi::RingAlloc ha = frames.allocate(sizeof(hd), 16);
+    const rhi::RingAlloc la = frames.allocate(std::max<VkDeviceSize>(n, 1) * 4, 16);
+    const rhi::RingAlloc pa = frames.allocate(sizeof(GiPassParams), 16);
     if (ha.ptr == nullptr || la.ptr == nullptr || pa.ptr == nullptr) {
         ++skipped_;
         return;
@@ -531,9 +536,9 @@ void Gi::record(d3d9::PassContext& ctx) {
     std::memcpy(la.ptr, list.data(), static_cast<std::size_t>(n) * 4);
 
     GiPassParams p{};
-    split(la.address, &p.lists[0]);
-    split(rays_->gpuAddress(), &p.lists[2]);
-    split(ha.address, &p.volume[0]);
+    split(la.ref, &p.lists[0]);
+    split(rays_->shaderRefRw(), &p.lists[2]);
+    split(ha.ref, &p.volume[0]);
     p.volume[2] = n;
     p.volume[3] = static_cast<std::uint32_t>(frame);
     // cut-outs solid (cheap); characters only with gi.characters (the scene holds them for the other consumers too)
@@ -573,9 +578,9 @@ void Gi::record(d3d9::PassContext& ctx) {
     }
     std::memcpy(pa.ptr, &p, sizeof(p));
     GiPush push{};
-    push.h.frame = ctx.frameBlock;
+    push.h.frame = ctx.frameBlock.bits;
     push.h.passId = passId_;
-    split(pa.address, push.params);
+    split(pa.ref, push.params);
 
     if (n > 0) {
         RhiScope rs(dev_, cmd);
@@ -648,8 +653,8 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
     // the per-pixel correction + history count, ping-pong like the resolved ratio
     vk::Transients::Entry* stats[2] = {dev_.transients().get("sgi.stats0", {VK_FORMAT_R16G16B16A16_SFLOAT, {sw, sh}}),
                                        dev_.transients().get("sgi.stats1", {VK_FORMAT_R16G16B16A16_SFLOAT, {sw, sh}})};
-    const vk::RingAlloc pa = dev_.frames().allocate(sizeof(GiPassParams), 16);
-    const vk::RingAlloc ha = dev_.frames().allocate(sizeof(GiVolumeHeader), 16);
+    const rhi::RingAlloc pa = dev_.frames().allocate(sizeof(GiPassParams), 16);
+    const rhi::RingAlloc ha = dev_.frames().allocate(sizeof(GiVolumeHeader), 16);
     if (probes == nullptr || probes2 == nullptr || geom == nullptr || res[0] == nullptr || res[1] == nullptr || stats[0] == nullptr ||
         stats[1] == nullptr || pa.ptr == nullptr || ha.ptr == nullptr) {
         ++screenSkipped_;
@@ -658,7 +663,7 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
     // the last update's light and volume header (a copy in this frame's ring)
     std::memcpy(ha.ptr, &lastHeader_, sizeof(lastHeader_));
     GiPassParams p = lastParams_;
-    split(ha.address, &p.volume[0]);
+    split(ha.ref, &p.volume[0]);
     p.volume[3] = static_cast<std::uint32_t>(dev_.frameValue());
     p.screen[0] = ds->texture()->bindlessSlot();
     p.screen[1] = geom->slot;
@@ -704,7 +709,7 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
                     diagSum_[i] += static_cast<double>(static_cast<std::uint32_t>(c - diagLast_[i]));
                     diagLast_[i] = c;
                 }
-                split(diag_->gpuAddress(), &p.screen5[1]);
+                split(diag_->shaderRef(), &p.screen5[1]);
                 p.screen5[3] = 1;
             }
         }
@@ -712,9 +717,9 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
     p.screen6[0] = s_.directional;
     std::memcpy(pa.ptr, &p, sizeof(p));
     GiPush push{};
-    push.h.frame = ctx.frameBlock;
+    push.h.frame = ctx.frameBlock.bits;
     push.h.passId = passId_;
-    split(pa.address, push.params);
+    split(pa.ref, push.params);
 
     // the DDGI probes (last frame's update) -> these reads: ordered by the update's own end barrier
     RhiScope rs(dev_, cmd);

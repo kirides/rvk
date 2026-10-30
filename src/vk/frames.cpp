@@ -228,7 +228,13 @@ bool Frames::newChunk(VkDeviceSize minSize) {
     return true;
 }
 
-RingAlloc Frames::allocate(VkDeviceSize size, VkDeviceSize alignment, VkDeviceSize minOffset) {
+// Vulkan: the shader reference is the device address
+rhi::RingAlloc Frames::makeAlloc(const Chunk& c, VkDeviceSize offset) {
+    const VkDeviceAddress a = c.address + offset;
+    return {reinterpret_cast<std::uint64_t>(c.buffer), offset, c.ptr + offset, rhi::GpuRef{a}, a};
+}
+
+rhi::RingAlloc Frames::allocate(VkDeviceSize size, VkDeviceSize alignment, VkDeviceSize minOffset) {
     ringBytes_ += size;
     const VkDeviceSize first = (minOffset + alignment - 1) & ~(alignment - 1);
     if (currentChunk_ != SIZE_MAX) {
@@ -236,7 +242,7 @@ RingAlloc Frames::allocate(VkDeviceSize size, VkDeviceSize alignment, VkDeviceSi
         const VkDeviceSize offset = std::max((c.used + alignment - 1) & ~(alignment - 1), first);
         if (offset + size <= c.size) {
             c.used = offset + size;
-            return {c.buffer, offset, c.ptr + offset, c.address + offset};
+            return makeAlloc(c, offset);
         }
     }
     if (!newChunk(first + size)) {
@@ -244,7 +250,7 @@ RingAlloc Frames::allocate(VkDeviceSize size, VkDeviceSize alignment, VkDeviceSi
     }
     Chunk& c = chunks_[currentChunk_];
     c.used = first + size;
-    return {c.buffer, first, c.ptr + first, c.address + first};
+    return makeAlloc(c, first);
 }
 
 }  // namespace rvk::vk

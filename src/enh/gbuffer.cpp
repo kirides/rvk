@@ -52,7 +52,7 @@ Gbuffer::Gbuffer(d3d9::Device& device, RtScene* scene) : dev_(device), scene_(sc
     const auto make = [&](const char* name, shader::Stage stage) {
         auto s = std::make_shared<d3d9::Shader>();
         s->stage = stage;
-        s->module = vk::createShaderModule(dev_.ctx(), shader::embedded::spirv(name));
+        s->module = dev_.game().createShaderModule({.spirv = shader::embedded::spirv(name)});
         return s;
     };
     whiteVs_ = make("debug/fullscreen.vert", shader::Stage::Vertex);
@@ -64,12 +64,8 @@ Gbuffer::Gbuffer(d3d9::Device& device, RtScene* scene) : dev_(device), scene_(sc
 Gbuffer::~Gbuffer() {
     disable();
     if (replacing_) dev_.removeDrawReplacer(this);
-    vk::Context* ctx = &dev_.ctx();
     for (auto* s : {&whiteVs_, &whitePs_}) {
-        if (*s && (*s)->module != VK_NULL_HANDLE) {
-            const VkShaderModule m = (*s)->module;
-            dev_.frames().retire([ctx, m] { vkDestroyShaderModule(ctx->device(), m, nullptr); });
-        }
+        if (*s && (*s)->module != rhi::ShaderModule::None) dev_.game().destroyShaderModule((*s)->module, true);
         s->reset();
     }
     // (a pipeline still being built is waited for, then retired with the others)
@@ -91,8 +87,8 @@ void Gbuffer::apply(const Settings& s) {
     if (!want && on_) disable();
     if (on_ && !s_.ao) dev_.setFrameAo({});
     // the game's SSAO off while ours replaces it
-    const bool replace = on_ && s_.ao && s_.replaceEngineSsao && whiteVs_ && whitePs_ && whiteVs_->module != VK_NULL_HANDLE &&
-                         whitePs_->module != VK_NULL_HANDLE;
+    const bool replace = on_ && s_.ao && s_.replaceEngineSsao && whiteVs_ && whitePs_ && whiteVs_->module != rhi::ShaderModule::None &&
+                         whitePs_->module != rhi::ShaderModule::None;
     if (replace && !replacing_) dev_.addDrawReplacer(this);
     if (!replace && replacing_) dev_.removeDrawReplacer(this);
     replacing_ = replace;
@@ -198,7 +194,7 @@ void Gbuffer::recordMotionFill(d3d9::PassContext& ctx) {
     vk::Transients::Entry* raw = dev_.transients().get("gtao.raw", {VK_FORMAT_R32_SFLOAT, {w, h}});
     if (normal == nullptr || motion == nullptr || raw == nullptr) return;
     GbufferPush push{};
-    push.h.frame = ctx.frameBlock;
+    push.h.frame = ctx.frameBlock.bits;
     push.h.passId = 2;
     push.depthTex = ds->texture()->bindlessSlot();
     push.normalTex = normal->slot;
@@ -248,7 +244,7 @@ void Gbuffer::recordAo(d3d9::PassContext& ctx) {
         return;
     }
     GbufferPush push{};
-    push.h.frame = ctx.frameBlock;
+    push.h.frame = ctx.frameBlock.bits;
     push.h.passId = 1;
     push.depthTex = ds->texture()->bindlessSlot();
     push.normalTex = normal->slot;
@@ -337,7 +333,7 @@ void Gbuffer::recordDebug(d3d9::PassContext& ctx) {
     cl.transition(*rs.wrap(*normal), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     cl.transition(*rs.wrap(*motion), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     GbufferPush push{};
-    push.h.frame = ctx.frameBlock;
+    push.h.frame = ctx.frameBlock.bits;
     push.h.passId = 3;
     push.normalTex = normal->slot;
     push.motionTex = motion->slot;

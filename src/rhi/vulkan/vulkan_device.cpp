@@ -13,6 +13,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "rhi/game_device.h"
 #include "rhi/rhi.h"
 #include "rhi/vulkan/wrap.h"
 #include "shader/abi.h"
@@ -21,6 +22,7 @@
 #include "vk/frames.h"
 #include "vk/image.h"
 #include "vk/passes.h"
+#include "vk/pipeline.h"
 #include "vk/raytracing.h"
 #include "vk/swapchain.h"
 
@@ -318,7 +320,7 @@ private:
     bool pipelineBound_ = false;
 };
 
-class VkDeviceImpl final : public Device {
+class VkDeviceImpl final : public GameDevice {
 public:
     VkDeviceImpl() : ctx_(ownCtx_), frames_(ownFrames_), bindless_(ownBindless_) {}
     // over the renderer's objects (rhi::vulkan::wrap)
@@ -358,6 +360,7 @@ public:
         if (!ctx_.create(o)) return false;
         if (!frames_.create(ctx_) || !bindless_.create(ctx_, frames_)) return false;
         if (!createLayout()) return false;
+        setRefShift(refShift());
         caps_.adapterName = ctx_.deviceName();
         caps_.backend = Backend::Vulkan;
         caps_.bindless = true;
@@ -373,6 +376,7 @@ public:
     // TLAS slots are not shared with allocTlasSlot yet), no swapchain, no submission.
     bool createWrapped() {
         if (!createLayout()) return false;
+        setRefShift(refShift());
         caps_.adapterName = ctx_.deviceName();
         caps_.backend = Backend::Vulkan;
         caps_.bindless = true;
@@ -406,6 +410,23 @@ public:
 
     const DeviceCaps& caps() const override { return caps_; }
     std::uint32_t validationErrors() const override { return ctx_.validationErrors(); }
+
+    // ---- GameDevice (rhi/game_device.h) ----
+    std::uint32_t refShift() const override { return 0; }  // a GpuRef is the buffer device address
+    ShaderModule createShaderModule(const Shader& code, const char* name) override {
+        if (code.spirv.empty()) return ShaderModule::None;
+        return vk::rhiModule(vk::createShaderModule(ctx_, code.spirv, name != nullptr ? std::string_view(name) : std::string_view()));
+    }
+    void destroyShaderModule(ShaderModule module, bool deferred) override {
+        const VkShaderModule m = vk::vkModule(module);
+        if (m == VK_NULL_HANDLE) return;
+        if (deferred) {
+            vk::Context* ctx = &ctx_;
+            defer([ctx, m] { vkDestroyShaderModule(ctx->device(), m, nullptr); });
+        } else {
+            vkDestroyShaderModule(ctx_.device(), m, nullptr);
+        }
+    }
 
     std::unique_ptr<Buffer> createBuffer(const BufferDesc& desc) override {
         auto b = std::make_unique<VkBufferImpl>(*this, desc);
@@ -1290,11 +1311,13 @@ std::unique_ptr<Device> createVulkanDevice(const DeviceDesc& desc) {
 
 namespace vulkan {
 
-std::unique_ptr<Device> wrap(vk::Context& ctx, vk::Frames& frames, vk::Bindless& bindless) {
+std::unique_ptr<GameDevice> wrapGame(vk::Context& ctx, vk::Frames& frames, vk::Bindless& bindless) {
     auto d = std::make_unique<VkDeviceImpl>(ctx, frames, bindless);
     if (!d->createWrapped()) return nullptr;
     return d;
 }
+
+std::unique_ptr<Device> wrap(vk::Context& ctx, vk::Frames& frames, vk::Bindless& bindless) { return wrapGame(ctx, frames, bindless); }
 
 std::unique_ptr<Texture> wrapImage(Device& device, vk::Image& image, std::uint32_t sampledSlot, const char* name) {
     VkDeviceImpl& dev = static_cast<VkDeviceImpl&>(device);

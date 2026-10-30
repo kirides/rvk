@@ -37,6 +37,7 @@
 #include "d3d9/material_source.h"
 #include "d3d9/scene.h"
 #include "d3d9/semantics.h"
+#include "rhi/game_device.h"
 #include "rhi/rhi.h"
 #include "shader/abi.h"
 #include "shader/translate.h"
@@ -224,10 +225,10 @@ public:
     // strideHint: the first use's vertex stride / index size: a new static copy starts at a multiple of it in the mesh arena,
     // so a draw can bind the arena at offset 0 and pass the offset as vertexOffset / firstIndex (0 = no hint)
     Binding gpu(std::uint32_t strideHint = 0);
-    // render thread, after gpu(): the device address of the static GPU copy (ray tracing tier only: BLAS inputs, vertex
+    // render thread, after gpu(): the GPU address (shader reference + raw address) of the static GPU copy (ray tracing tier only: BLAS inputs, vertex
     // fetches of RT hit shaders; docs/research/rt-reflections.md 3); 0 for ring-copied buffers or without the tier. Valid
     // until the next generation (Device::notifyBufferChanged tells the observers)
-    VkDeviceAddress deviceAddress();
+    rhi::GpuAddr gpuAddress();
 
 private:
     Device& dev_;
@@ -273,11 +274,11 @@ public:
     shader::Stage stage = shader::Stage::Vertex;
     // the SPIR-V module: set by the shader workers (Device::createShader), null while compiling and when the compile failed; read it with wait() where the
     // draw needs it, directly where a missing module only means "not yet" (the prewarm of pipelines)
-    std::atomic<VkShaderModule> module{VK_NULL_HANDLE};
+    std::atomic<rhi::ShaderModule> module{rhi::ShaderModule::None};
     std::shared_future<void> ready;  // valid for shaders compiled by the workers
     std::atomic<bool> compiling{false};  // queued / being compiled by the workers: a draw that needs it is skipped meanwhile (Device::prioritizeShader)
     std::atomic<bool> promoted{false};   // moved to the front of the compile queue by a draw
-    VkShaderModule wait() const {
+    rhi::ShaderModule wait() const {
         if (ready.valid()) ready.wait();
         return module.load(std::memory_order_acquire);
     }
@@ -297,13 +298,13 @@ public:
     std::uint32_t planNext = 0;
     std::uint32_t samplerMask = 0;  // bit s: reflection.samplers[s] is used (per-draw loops visit only these)
     // pixel shaders: the tint debug view's variant (TranslateOptions::tintEpilogue), built on first use (render thread)
-    VkShaderModule tintModule = VK_NULL_HANDLE;
+    rhi::ShaderModule tintModule = rhi::ShaderModule::None;
     bool tintFailed = false;
     // vertex shaders of SpeedTree billboards: the fade distance variant (Device::lodModule, engine/lod.h)
-    VkShaderModule lodModule = VK_NULL_HANDLE;
+    rhi::ShaderModule lodModule = rhi::ShaderModule::None;
     bool lodFailed = false;
     // variants of enhancements built in the background (Device::variant, VariantSlot): the module once ready
-    std::array<std::atomic<VkShaderModule>, 5> variants{};
+    std::array<std::atomic<rhi::ShaderModule>, 5> variants{};
     std::array<std::atomic<std::uint8_t>, 5> variantState{};  // 0 not requested, 1 queued, 2 ready, 3 failed / not applicable
 };
 
@@ -388,7 +389,7 @@ struct DrawReplacement {
     };
     Action action = Action::Engine;
     std::shared_ptr<Shader> vs, ps;     // reflections decide vertex inputs and constant uploads (all of c# when 256)
-    VkDeviceAddress block = 0;          // replaces the DrawBlock address (push constant `draw`); 0 = keep
+    rhi::GpuRef block;                  // replaces the DrawBlock reference (push constant `draw`); null = keep
     std::uint32_t vertices = 0;         // Procedural
     bool cullNone = false;              // override the cull mode
     bool opaque = true;                 // blending off, all channels written
@@ -459,8 +460,8 @@ public:
 // The ray tracing scene of the frame, for the FrameBlock (shader/abi.h FrameBlock::rtScene / rtInfo): valid only in the
 // submission that built it (`frame` = Device::frameValue() at the build; a mid-frame flush starts another one)
 struct RtSceneRef {
-    VkDeviceAddress tlas = 0;
-    VkDeviceAddress records = 0;
+    std::uint64_t tlas = 0;  // the TLAS's raw address (vkGetAccelerationStructureDeviceAddressKHR; the D3D12 form is tlasSlot)
+    rhi::GpuRef records;
     std::uint32_t tlasSlot = 0;  // the TLAS in the bindless acceleration structure array (HLSL ray queries; abi.h kBindingTlas)
     std::uint32_t instances = 0;
     std::uint32_t recordCount = 0;
@@ -494,7 +495,7 @@ struct PassContext {
     VkCommandBuffer cmd;
     inject::Point point;
     std::uint32_t mainView = 0;      // 1 = the frame's first main view, 2 = the second, ...; 0 for BeforeGui
-    VkDeviceAddress frameBlock = 0;  // shader::abi::FrameBlock of this frame (RVK_PASS_PUSH_HEADER's frame)
+    rhi::GpuRef frameBlock;          // shader::abi::FrameBlock of this frame (RVK_PASS_PUSH_HEADER's frame)
     Texture* sceneHdr = nullptr;     // tagged images (scene::ImageRole), null when the engine has not revealed them
     Texture* depthMap = nullptr;
     Texture* refraction = nullptr;
@@ -898,7 +899,7 @@ public:
     // ---- enhancements: frame block, injection points, transient images (docs/research/injection.md; render thread) ----
     // the FrameBlock of the frame being recorded (shader/abi.h): uploaded into the frame's ring on first use and again after
     // the camera, an image role or a feature parameter changed; every draw's push constants carry it
-    VkDeviceAddress frameBlockAddress();
+    rhi::GpuRef frameBlockAddress();
     // FrameBlock params[index] (abi::kFrameParam*); applies from the next upload
     void setFrameParam(std::uint32_t index, const std::array<float, 4>& value);
     // passes at injection points (d3d9/inject.h): add returns the pass id; add / remove not from inside a pass
@@ -984,7 +985,7 @@ public:
     // submission that built it is recorded
     void setRtScene(const RtSceneRef& scene) {
         rtScene_ = scene;
-        frameAddr_ = 0;
+        frameAddr_ = {};
     }
     const RtSceneRef& rtScene() const { return rtScene_; }
     bool rtSceneValid() const { return rtScene_.tlas != 0 && rtScene_.frame == frameValue(); }
@@ -993,7 +994,7 @@ public:
     // on (FrameBlock::gi); empty = none
     void setGiHeader(std::span<const std::uint8_t> header) {
         giHeader_.assign(header.begin(), header.end());
-        frameAddr_ = 0;
+        frameAddr_ = {};
     }
     // which draws take the pixel shader's GI variant (VariantSlot::Gi): the main view's lit material draws (a first pass with
     // the engine's ambient constants set) while `on`; replaceLightmaps: their lightmap samplers read the black texture
@@ -1023,13 +1024,13 @@ public:
     void setFrameAo(const std::array<std::uint32_t, 4>& ao) {
         if (ao_ == ao) return;
         ao_ = ao;
-        frameAddr_ = 0;
+        frameAddr_ = {};
     }
     // FrameBlock::sgi: last frame's screen probe GI ratio (enh/gi)
     void setFrameSgi(const std::array<std::uint32_t, 4>& sgi) {
         if (sgi_ == sgi) return;
         sgi_ = sgi;
-        frameAddr_ = 0;
+        frameAddr_ = {};
     }
     const std::array<std::uint32_t, 4>& frameSgi() const { return sgi_; }
     // ---- shader variants of enhancements (render thread) ----
@@ -1041,7 +1042,7 @@ public:
     void setUbershaderSkip(std::uint32_t mask);  // classes of material shader that stay translated (shader::uberClassMask)
     bool ubershader() const { return ubershader_.load(std::memory_order_relaxed); }
     // the slot's variant of `s` when it is built (queues its build on the first call); null until then / when not applicable
-    VkShaderModule variant(const ShaderRef& s, VariantSlot slot);
+    rhi::ShaderModule variant(const ShaderRef& s, VariantSlot slot);
     // the owning pointer of a device shader (its entry in the shader cache), null for a shader that is not cached
     std::shared_ptr<Shader> shaderOwner(const Shader* s);
     // ---- vertex capture (enh/rt_scene: skinned draws in the RT scene) ----
@@ -1050,17 +1051,17 @@ public:
     // its pipeline are ready); vertexCaptured tells whether it ran this frame (render thread)
     // `instances`: an instanced draw may be captured too: instance k writes its vertices at `buffer` + 16 + 32 (k x slots + i),
     // slots = the header's first word (the buffer holds instances x slots x 32 bytes)
-    void requestVertexCapture(VkDeviceAddress buffer, bool instances = false) {
+    void requestVertexCapture(rhi::GpuRef buffer, bool instances = false) {
         captureRequest_ = buffer;
         captureInstances_ = instances;
     }
     // a buffer written by a compute pass counts as captured this frame (enh/rt_scene's skinning pass)
-    void markVertexCaptured(VkDeviceAddress buffer) { captured_.push_back(buffer); }
-    bool vertexCaptured(VkDeviceAddress buffer) const {
+    void markVertexCaptured(rhi::GpuRef buffer) { captured_.push_back(buffer); }
+    bool vertexCaptured(rhi::GpuRef buffer) const {
         return std::find(captured_.begin(), captured_.end(), buffer) != captured_.end();
     }
     // ... ran in the previous frame (the RT scene built after the z pre-pass uses the previous frame's captures)
-    bool vertexCapturedPrev(VkDeviceAddress buffer) const {
+    bool vertexCapturedPrev(rhi::GpuRef buffer) const {
         return std::find(capturedPrev_.begin(), capturedPrev_.end(), buffer) != capturedPrev_.end();
     }
     // one-line status texts of enhancements for the overlay's performance panel (key -> text; empty text removes it)
@@ -1104,8 +1105,9 @@ public:
     // internals used by resources
     vk::Context& ctx() { return ctx_; }
     vk::Frames& frames() { return frames_; }
-    // the slim RHI over this device's Vulkan objects (rhi/vulkan/wrap.h), created on first use; null when it cannot be created. Render thread.
-    rhi::Device* rhi();
+    // the slim RHI over this device's Vulkan objects (rhi/vulkan/wrap.h): the backend seam `game()` as an rhi::Device (passes, textures, acceleration structures)
+    rhi::Device* rhi() { return game_.get(); }
+    rhi::GameDevice& game() { return *game_; }  // valid between create() and destroy()
     vk::MeshArena& meshArena() { return meshArena_; }
     vk::Bindless& bindless() { return bindless_; }
     std::uint64_t frameValue() const { return frames_.currentValue(); }
@@ -1166,10 +1168,10 @@ private:
     // diagnostics: RVK_TRACE_MATERIAL = a substring of material names: every draw state of the matching materials, once per
     // material x view x pass x shaders (names are resolved in the opaque passes only with -RvkLogLevel trace)
     void logTracedMaterial(draws::Kind kind, bool jittered);
-    VkShaderModule tintModule(Shader& ps);  // the tint variant of a pixel shader (null when it fails to build)
-    VkShaderModule lodModule(Shader& vs);   // the billboard fade variant of a vertex shader (null when it fails to build)
-    VkShaderModule variantModule(const Shader& s, const shader::TranslateOptions& options, std::string_view tag);
-    VkShaderModule uberModule(const Shader& s, const MaterialSource& src, const shader::TranslateOptions& options, std::string_view tag);
+    rhi::ShaderModule tintModule(Shader& ps);  // the tint variant of a pixel shader (None when it fails to build)
+    rhi::ShaderModule lodModule(Shader& vs);   // the billboard fade variant of a vertex shader (None when it fails to build)
+    rhi::ShaderModule variantModule(const Shader& s, const shader::TranslateOptions& options, std::string_view tag);
+    rhi::ShaderModule uberModule(const Shader& s, const MaterialSource& src, const shader::TranslateOptions& options, std::string_view tag);
     std::atomic<bool> ubershader_{false};
     std::atomic<std::uint64_t> ubershadersBuilt_{0}, ubershadersFailed_{0};
     // A draw's recording state, computed by prepareDraw / the draw call and recorded by applyPacket: now, or later in a
@@ -1279,7 +1281,7 @@ private:
     void uploadConstants(bool forceLegacyPs, std::uint32_t psMinEnd);
     // the draw being prepared: split stages and the window addresses its push constants carry
     bool drawSplit_[2] = {};
-    VkDeviceAddress drawWin_[2][shader::abi::kConstWindows]{};
+    rhi::GpuRef drawWin_[2][shader::abi::kConstWindows]{};
     std::uint32_t psWindowMinEnd_ = 0;
     void blit(vk::Image& src, std::uint32_t srcLevel, std::uint32_t srcLayer, const VkOffset3D srcBox[2], vk::Image& dst,
               std::uint32_t dstLevel, std::uint32_t dstLayer, const VkOffset3D dstBox[2], VkFilter filter);
@@ -1332,7 +1334,7 @@ private:
     // shader cache
     std::mutex shaderMutex_;
     std::unordered_map<std::uint64_t, std::shared_ptr<Shader>, IdHash> shaders_;
-    std::unordered_map<VkShaderModule, std::uint64_t> moduleHashes_;
+    std::unordered_map<rhi::ShaderModule, std::uint64_t> moduleHashes_;
 
     // Pipelines of earlier runs (<cacheDir>/pipelines.keys): the shader hashes + the rest of the description. When both
     // shaders of a known pipeline exist (they are created while the game loads), it is built in the background, so its
@@ -1415,28 +1417,28 @@ private:
     std::uint32_t targetHeight_ = 0;
     bool vsConstDirty_ = true;
     bool psConstDirty_ = true;
-    VkDeviceAddress vsConstAddr_ = 0;
-    VkDeviceAddress psConstAddr_ = 0;
+    rhi::GpuRef vsConstAddr_;
+    rhi::GpuRef psConstAddr_;
     // split constants: per stage and register window (abi.h) the last block written to the frame's ring (base address and host
     // pointer, `extent` registers from the window's first one) and whether a register of the window changed since. All dirty
     // at the start of a frame (ring memory belongs to its frame)
     struct ConstWindow {
-        VkDeviceAddress address = 0;
+        rhi::GpuRef address;
         const std::uint8_t* ptr = nullptr;
         std::uint32_t extent = 0;
     };
     ConstWindow constWin_[2][shader::abi::kConstWindows]{};
     std::uint32_t constWinDirty_[2] = {0xF, 0xF};
-    VkDeviceAddress zeroBlock_ = 0;  // a zeroed ring block for the windows a shader does not read
+    rhi::GpuRef zeroBlock_;  // a zeroed ring block for the windows a shader does not read
     void dirtyConstWindows() {
         constWinDirty_[0] = constWinDirty_[1] = 0xF;
-        zeroBlock_ = 0;
+        zeroBlock_ = {};
         for (auto& stage : constWin_) {
             for (auto& w : stage) w = {};
         }
     }
     static std::uint32_t constWindowMask(bool vertex, std::uint32_t start, std::uint32_t count);
-    void splitStage(bool vertex, const Shader& sh, VkDeviceAddress (&windows)[shader::abi::kConstWindows]);
+    void splitStage(bool vertex, const Shader& sh, rhi::GpuRef (&windows)[shader::abi::kConstWindows]);
     void verifySplit(bool vertex, const Shader& sh);
     // redundant-command filters, valid within one command buffer (reset by beginFrame)
     vk::PipelineDesc lastPipelineDesc_{};
@@ -1662,9 +1664,9 @@ private:
     GiDraws giDraws_;
     std::uint64_t giDrawCount_ = 0;
     bool captureInstances_ = false;         // the request covers an instanced draw (requestVertexCapture)
-    VkDeviceAddress captureRequest_ = 0;    // the draw being prepared (DrawObserver::observe)
-    std::vector<VkDeviceAddress> captured_;  // this frame's captures that ran
-    std::vector<VkDeviceAddress> capturedPrev_;  // the previous frame's
+    rhi::GpuRef captureRequest_;            // the draw being prepared (DrawObserver::observe)
+    std::vector<rhi::GpuRef> captured_;     // this frame's captures that ran
+    std::vector<rhi::GpuRef> capturedPrev_;  // the previous frame's
     std::array<VariantProvider, static_cast<std::size_t>(VariantSlot::Count)> variantProviders_;
     struct VariantJob {
         std::shared_ptr<Shader> shader;
@@ -1685,7 +1687,7 @@ private:
     bool shaderStop_ = false;
     bool variantStop_ = false;
     std::atomic<std::uint64_t> variantsBuilt_{0}, variantsFailed_{0};
-    VkDeviceAddress frameAddr_ = 0;  // 0 = upload before the next use
+    rhi::GpuRef frameAddr_;  // null = upload before the next use
     JitterSource jitterSource_;
     float geometryLodBias_ = 0.0f;
     bool alphaDither_ = false;
@@ -1725,7 +1727,7 @@ private:
     inject::Firings firings_;
     bool injecting_ = false;
     vk::Transients transients_;
-    std::unique_ptr<rhi::Device> rhi_;  // rhi(): destroyed before frames_ (its retirements run there)
+    std::unique_ptr<rhi::GameDevice> game_;  // the backend seam (created with the context; rhi()): destroyed before frames_ (its retirements run there)
 
     // overlay
     PresentOverlay* overlay_ = nullptr;

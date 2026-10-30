@@ -252,8 +252,8 @@ bool Device::sameDesc(const vk::PipelineDesc& a, const vk::PipelineDesc& b) cons
 }
 
 std::size_t Device::recentSlot(const vk::PipelineDesc& pd) {
-    const std::uint64_t h = ((reinterpret_cast<std::uintptr_t>(pd.vs) >> 4) * 0x9E3779B97F4A7C15ull ^
-                             (reinterpret_cast<std::uintptr_t>(pd.fs) >> 4) * 0xC2B2AE3D27D4EB4Full ^ pd.colorFormats[0] ^
+    const std::uint64_t h = ((static_cast<std::uint64_t>(pd.vs) >> 4) * 0x9E3779B97F4A7C15ull ^
+                             (static_cast<std::uint64_t>(pd.fs) >> 4) * 0xC2B2AE3D27D4EB4Full ^ pd.colorFormats[0] ^
                              (static_cast<std::uint64_t>(pd.depthFormat) << 8) ^ (static_cast<std::uint64_t>(pd.colorCount) << 16)) >>
                             40;
     return static_cast<std::size_t>(h % 256);
@@ -582,8 +582,8 @@ void Device::uploadConstants(bool forceLegacyPs, std::uint32_t psMinEnd) {
     // per dirty stage a StageConsts block (shader/abi.h) from the ring: the floats up to the shader's highest read register, the
     // int / bool part only for shaders that read it (Reflection::intBoolConstants; the layout stays, the bytes are left as they are)
     const auto upload = [&](const Shader& sh, const float (*f)[4], std::uint32_t maxFloats, const std::int32_t (*i)[4],
-                            const std::uint32_t* b, VkDeviceAddress& addr, std::uint32_t stage) {
-        vk::RingAlloc a = frames_.allocate(shader::abi::kStageConstsSize, 16);
+                            const std::uint32_t* b, rhi::GpuRef& addr, std::uint32_t stage) {
+        rhi::RingAlloc a = frames_.allocate(shader::abi::kStageConstsSize, 16);
         const std::uint32_t n = std::min(sh.reflection.floatConstCount, maxFloats);
         std::memcpy(a.ptr, f, n * 16);
         std::uint32_t bytes = n * 16;
@@ -597,7 +597,7 @@ void Device::uploadConstants(bool forceLegacyPs, std::uint32_t psMinEnd) {
         }
         ++perf_.constUploads[stage];
         perf_.constBytes += bytes;
-        addr = a.address;
+        addr = a.ref;
     };
     // split constants (abi.h windows, plan.md V2): a shader that reads its floats through the window blocks gets only those
     // windows, each uploaded when a register of it changed since its last upload (or when it was uploaded shorter than this
@@ -612,7 +612,7 @@ void Device::uploadConstants(bool forceLegacyPs, std::uint32_t psMinEnd) {
         ++perf_.splitDraws[0];
     } else {
         ++perf_.legacyDraws[0];
-        if (vsConstDirty_ || vsConstAddr_ == 0) {
+        if (vsConstDirty_ || vsConstAddr_.null()) {
             upload(*vs_, vsF_, kVsFloatConsts, vsI_, vsB_, vsConstAddr_, 0);
             vsConstDirty_ = false;
         }
@@ -623,7 +623,7 @@ void Device::uploadConstants(bool forceLegacyPs, std::uint32_t psMinEnd) {
         ++perf_.splitDraws[1];
     } else {
         ++perf_.legacyDraws[1];
-        if (psConstDirty_ || psConstAddr_ == 0) {
+        if (psConstDirty_ || psConstAddr_.null()) {
             upload(*ps_, psF_, kPsFloatConsts, psI_, psB_, psConstAddr_, 1);
             psConstDirty_ = false;
         }
@@ -633,32 +633,32 @@ void Device::uploadConstants(bool forceLegacyPs, std::uint32_t psMinEnd) {
 
 // The window blocks of a split stage: windows[w] = the biased base address (block base - first register * 16, so c[n] keeps
 // the D3D9 register number). Pixel window 1 (c5) is the DrawBlock's psC5, patched in by prepareDraw
-void Device::splitStage(bool vertex, const Shader& sh, VkDeviceAddress (&windows)[shader::abi::kConstWindows]) {
+void Device::splitStage(bool vertex, const Shader& sh, rhi::GpuRef (&windows)[shader::abi::kConstWindows]) {
     const std::uint32_t stage = vertex ? 0 : 1;
     const std::uint32_t* first = vertex ? shader::abi::kVsWindowFirst : shader::abi::kPsWindowFirst;
     const float (*regs)[4] = vertex ? vsF_ : psF_;
     for (std::uint32_t w = 0; w < shader::abi::kConstWindows; ++w) {
         if (!vertex && w == 1) {
-            windows[w] = 0;
+            windows[w] = {};
             continue;
         }
         std::uint32_t end = sh.reflection.windowEnd[w];
         if (!vertex && w == 3) end = std::max(end, psWindowMinEnd_);  // an enhancement variant's extra reads (ambient)
         const std::uint32_t need = end > first[w] ? end - first[w] : 0;
         if (need == 0) {
-            if (zeroBlock_ == 0) {
-                vk::RingAlloc z = frames_.allocate(4096, 16);
+            if (zeroBlock_.null()) {
+                rhi::RingAlloc z = frames_.allocate(4096, 16);
                 std::memset(z.ptr, 0, 4096);
-                zeroBlock_ = z.address;
+                zeroBlock_ = z.ref;
             }
-            windows[w] = zeroBlock_ - static_cast<VkDeviceAddress>(first[w]) * 16;
+            windows[w] = zeroBlock_.plus(-static_cast<std::int64_t>(first[w]) * 16);
             continue;
         }
         ConstWindow& cw = constWin_[stage][w];
-        if ((constWinDirty_[stage] >> w & 1u) != 0 || cw.address == 0 || cw.extent < need) {
-            vk::RingAlloc a = frames_.allocate(static_cast<VkDeviceSize>(need) * 16, 16);
+        if ((constWinDirty_[stage] >> w & 1u) != 0 || cw.address.null() || cw.extent < need) {
+            rhi::RingAlloc a = frames_.allocate(static_cast<VkDeviceSize>(need) * 16, 16);
             std::memcpy(a.ptr, regs[first[w]], static_cast<std::size_t>(need) * 16);
-            cw.address = a.address;
+            cw.address = a.ref;
             cw.ptr = static_cast<const std::uint8_t*>(a.ptr);
             cw.extent = need;
             constWinDirty_[stage] &= ~(1u << w);
@@ -668,7 +668,7 @@ void Device::splitStage(bool vertex, const Shader& sh, VkDeviceAddress (&windows
         } else {
             ++perf_.splitReused[stage][w];
         }
-        windows[w] = cw.address - static_cast<VkDeviceAddress>(first[w]) * 16;
+        windows[w] = cw.address.plus(-static_cast<std::int64_t>(first[w]) * 16);
     }
     if (splitVerify_) verifySplit(vertex, sh);
 }
@@ -792,13 +792,13 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
             return false;
         }
     }
-    if (!vs_ || !ps_ || vs_->module == VK_NULL_HANDLE || ps_->module == VK_NULL_HANDLE) {
+    if (!vs_ || !ps_ || vs_->module == rhi::ShaderModule::None || ps_->module == rhi::ShaderModule::None) {
         ++stats_.drawsSkipped;
         // a shader still compiling on the workers (a cold shader cache): the draw is left out, its shader goes to the front of the queue (the start menu's
         // UI first, the world while the save loads); no module and nothing compiling = fixed-function draws are not emulated / the compile failed
         bool compiling = false;
         for (Shader* sh : {vs_.get(), ps_.get()}) {
-            if (sh != nullptr && sh->module == VK_NULL_HANDLE && sh->compiling.load(std::memory_order_acquire)) {
+            if (sh != nullptr && sh->module == rhi::ShaderModule::None && sh->compiling.load(std::memory_order_acquire)) {
                 prioritizeShader(*sh);
                 compiling = true;
             }
@@ -855,7 +855,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         q.depthBias = rs_[RS_DEPTHBIAS] != 0 || rs_[RS_SLOPESCALEDEPTHBIAS] != 0;
     };
     // draw observers (enh/rt_scene, enh/gi): indexed draws from buffers of the kinds / phases they ask for
-    captureRequest_ = 0;
+    captureRequest_ = {};
     captureInstances_ = false;
     if (!observers_.empty() && geom.indexed && !geom.userPointer) {
         for (DrawObserver* o : observers_) {
@@ -881,7 +881,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         query(q);
         r->replace(*this, q, rep);
         if ((rep.action == DrawReplacement::Action::Shaders || rep.action == DrawReplacement::Action::Procedural) &&
-            (!rep.vs || !rep.ps || rep.vs->module == VK_NULL_HANDLE || rep.ps->module == VK_NULL_HANDLE)) {
+            (!rep.vs || !rep.ps || rep.vs->module == rhi::ShaderModule::None || rep.ps->module == rhi::ShaderModule::None)) {
             rep.action = DrawReplacement::Action::Engine;
         }
         // the first replacer that takes the draw decides it; one that leaves it to the engine lets the next one look
@@ -968,42 +968,42 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
 
     // the tint debug view swaps in the pixel shader's tint variant
     std::uint32_t tint = 0;
-    VkShaderModule fs = ps_->module;
+    rhi::ShaderModule fs = ps_->module;
     if (!replaced && tint_ != draws::TintMode::Off && (ps_->reflection.colorOutputs & 1u) != 0) {
         tint = draws::tintColor(tint_, kind, phase.view, phase.pass);
         if (tint != 0) {
-            const VkShaderModule t = tintModule(*ps_);
-            fs = t != VK_NULL_HANDLE ? t : fs;
-            tint = t != VK_NULL_HANDLE ? tint : 0;
+            const rhi::ShaderModule t = tintModule(*ps_);
+            fs = t != rhi::ShaderModule::None ? t : fs;
+            tint = t != rhi::ShaderModule::None ? tint : 0;
         }
     }
 
     // the GLSL material shader (Device::setUbershader): the plain module of a material pixel shader whose request is known
-    VkShaderModule uberBase = VK_NULL_HANDLE;
+    rhi::ShaderModule uberBase = rhi::ShaderModule::None;
     if (!replaced && tint == 0 && ubershader_.load(std::memory_order_relaxed) && ps_->source.load(std::memory_order_acquire) != nullptr) {
         uberBase = variant(ps_, VariantSlot::Base);
     }
 
     // detail distances (lod.trees): the billboards' baked fade-in distances scaled with the trees' LOD
-    VkShaderModule vsModule = vs_->module;
+    rhi::ShaderModule vsModule = vs_->module;
     if (!replaced && kind == draws::Kind::SpeedTreeBillboard && billboardFadeScale_ != 1.0f) {
-        const VkShaderModule m = lodModule(*vs_);
-        vsModule = m != VK_NULL_HANDLE ? m : vsModule;
+        const rhi::ShaderModule m = lodModule(*vs_);
+        vsModule = m != rhi::ShaderModule::None ? m : vsModule;
     }
     // enhancement variants (built in the background; the engine's modules until they and their pipeline exist): GI reads the
     // probe volume instead of the engine's ambient constants (enh/gi), the vertex capture writes a skinned draw's world
     // positions for the RT scene (enh/rt_scene), the G-buffer variants write the thin G-buffer (enh/gbuffer)
     gbufWrite_ = false;
-    VkShaderModule fsVariant = VK_NULL_HANDLE, vsVariant = VK_NULL_HANDLE, fsPlain = VK_NULL_HANDLE;
+    rhi::ShaderModule fsVariant = rhi::ShaderModule::None, vsVariant = rhi::ShaderModule::None, fsPlain = rhi::ShaderModule::None;
     const bool notInstanced = (streams_[0].freq & STREAMSOURCE_INDEXEDDATA) == 0;
-    if (!replaced && captureRequest_ != 0 && geom.indexed && (notInstanced || captureInstances_) && vsModule == vs_->module) {
+    if (!replaced && !captureRequest_.null() && geom.indexed && (notInstanced || captureInstances_) && vsModule == vs_->module) {
         vsVariant = variant(vs_, VariantSlot::Capture);
     }
     const bool gbufMaterial = !replaced && tint == 0 && gbuf_.normal != nullptr && gbufferEligible(phase, kind);
     if (gbufMaterial && scopeGbuf_) {
         fsPlain = variant(ps_, VariantSlot::Gbuffer);
-        const VkShaderModule motion = vsVariant != VK_NULL_HANDLE ? variant(ps_, VariantSlot::GbufferMotion) : VK_NULL_HANDLE;
-        fsVariant = motion != VK_NULL_HANDLE ? motion : fsPlain;
+        const rhi::ShaderModule motion = vsVariant != rhi::ShaderModule::None ? variant(ps_, VariantSlot::GbufferMotion) : rhi::ShaderModule::None;
+        fsVariant = motion != rhi::ShaderModule::None ? motion : fsPlain;
     } else if (!replaced && tint == 0 && giDraws_.on && giEligible(phase)) {
         fsVariant = variant(ps_, VariantSlot::Gi);
     }
@@ -1040,10 +1040,10 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     const bool eds3 = ctx_.features().extendedDynamicState3;
     // a variant combination whose pipeline exists is taken; a missing one is built in the background (this draw keeps
     // the engine's shaders). `writes`: the pixel shader writes the G-buffer (without EDS3 its write mask is in the pipeline)
-    const auto tryVariant = [&](VkShaderModule vsM, VkShaderModule fsM, bool writes) {
+    const auto tryVariant = [&](rhi::ShaderModule vsM, rhi::ShaderModule fsM, bool writes) {
         vk::PipelineDesc vd = pd;
-        if (vsM != VK_NULL_HANDLE) vd.vs = vsM;
-        if (fsM != VK_NULL_HANDLE) vd.fs = fsM;
+        if (vsM != rhi::ShaderModule::None) vd.vs = vsM;
+        if (fsM != rhi::ShaderModule::None) vd.fs = fsM;
         if (writes && !eds3) {
             for (std::uint32_t i = engineColorCount_; i < colorCount_; ++i) vd.blend[i].writeMask = 0xF;
         }
@@ -1056,22 +1056,22 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     };
     if (gbufMaterial && scopeGbuf_) {
         // the G-buffer material pass: capture VS + motion PS, else the plain G-buffer PS, else at least the capture
-        if (vsVariant != VK_NULL_HANDLE && fsVariant != VK_NULL_HANDLE && tryVariant(vsVariant, fsVariant, true)) {
+        if (vsVariant != rhi::ShaderModule::None && fsVariant != rhi::ShaderModule::None && tryVariant(vsVariant, fsVariant, true)) {
             captureDraw = gbufWrite_ = true;
-        } else if (fsPlain != VK_NULL_HANDLE && tryVariant(VK_NULL_HANDLE, fsPlain, true)) {
+        } else if (fsPlain != rhi::ShaderModule::None && tryVariant(rhi::ShaderModule::None, fsPlain, true)) {
             gbufWrite_ = true;
-        } else if (vsVariant != VK_NULL_HANDLE && tryVariant(vsVariant, VK_NULL_HANDLE, false)) {
+        } else if (vsVariant != rhi::ShaderModule::None && tryVariant(vsVariant, rhi::ShaderModule::None, false)) {
             captureDraw = true;
         }
         giDraw = gbufWrite_ && giDraws_.on && ps_->semantics[Semantic::AmbientLight].present();
-    } else if (fsVariant != VK_NULL_HANDLE || vsVariant != VK_NULL_HANDLE) {
+    } else if (fsVariant != rhi::ShaderModule::None || vsVariant != rhi::ShaderModule::None) {
         if (tryVariant(vsVariant, fsVariant, false)) {
-            giDraw = fsVariant != VK_NULL_HANDLE;
-            captureDraw = vsVariant != VK_NULL_HANDLE;
-        } else if (vsVariant != VK_NULL_HANDLE && fsVariant != VK_NULL_HANDLE) {
-            if (tryVariant(vsVariant, VK_NULL_HANDLE, false)) {
+            giDraw = fsVariant != rhi::ShaderModule::None;
+            captureDraw = vsVariant != rhi::ShaderModule::None;
+        } else if (vsVariant != rhi::ShaderModule::None && fsVariant != rhi::ShaderModule::None) {
+            if (tryVariant(vsVariant, rhi::ShaderModule::None, false)) {
                 captureDraw = true;
-            } else if (tryVariant(VK_NULL_HANDLE, fsVariant, false)) {
+            } else if (tryVariant(rhi::ShaderModule::None, fsVariant, false)) {
                 giDraw = true;
             }
         }
@@ -1086,8 +1086,8 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         bool writes = false;
         if (gbufMaterial) {
             const VariantSlot slot = captureDraw ? VariantSlot::GbufferMotion : VariantSlot::Gbuffer;
-            const VkShaderModule m = variant(ps_, slot);
-            if (m != VK_NULL_HANDLE) {
+            const rhi::ShaderModule m = variant(ps_, slot);
+            if (m != rhi::ShaderModule::None) {
                 md.fs = m;
                 writes = true;
             } else if (ps_->variantState[static_cast<std::size_t>(slot)].load() != 3) {
@@ -1115,7 +1115,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         }
     }
     // no enhancement variant took the draw: the GLSL material shader when it and its pipeline exist (else the translated one)
-    if (uberBase != VK_NULL_HANDLE && pd.fs == fs) {
+    if (uberBase != rhi::ShaderModule::None && pd.fs == fs) {
         vk::PipelineDesc ud = pd;
         ud.fs = uberBase;
         if (findPipeline(ud) != VK_NULL_HANDLE) {
@@ -1167,7 +1167,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
                 if (ind.present()) minEnd = std::max(minEnd, static_cast<std::uint32_t>(ind.reg + 1));
             }
         }
-        uploadConstants(rep.block != 0 && replaced, minEnd);
+        uploadConstants(!rep.block.null() && replaced, minEnd);
     }
 
     shader::abi::DrawBlock block{};
@@ -1234,7 +1234,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         block.pad[1] = static_cast<std::uint32_t>(geom.baseVertex + vertexShift_);
         captured_.push_back(captureRequest_);
     }
-    vk::RingAlloc db = frames_.allocate(sizeof(block), 16);
+    rhi::RingAlloc db = frames_.allocate(sizeof(block), 16);
     std::memcpy(db.ptr, &block, sizeof(block));
 
     if (stats_.totalDraws < options_.logDraws) {
@@ -1258,16 +1258,16 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     const std::uint32_t flags =
         shader::abi::drawFlags(static_cast<std::uint32_t>(kind), static_cast<std::uint32_t>(phase.pass), static_cast<std::uint32_t>(phase.view)) |
         (tint != 0 ? shader::abi::kDrawFlagTinted : 0u);
-    const VkDeviceAddress drawBlock = rep.block != 0 && replaced ? rep.block : db.address;
-    packet_.push = shader::abi::PushConstants{drawSplit_[0] ? 0 : vsConstAddr_, drawSplit_[1] ? 0 : psConstAddr_, drawBlock, frameBlockAddress(), captureDraw ? captureRequest_ : 0,
-                                              stats_.draws, flags};
+    const rhi::GpuRef drawBlock = !rep.block.null() && replaced ? rep.block : db.ref;
+    packet_.push = shader::abi::PushConstants{drawSplit_[0] ? 0 : vsConstAddr_.bits, drawSplit_[1] ? 0 : psConstAddr_.bits, drawBlock.bits, frameBlockAddress().bits,
+                                              captureDraw ? captureRequest_.bits : 0, stats_.draws, flags};
     for (std::uint32_t w = 0; w < shader::abi::kConstWindows; ++w) {
-        packet_.push.vsWin[w] = drawWin_[0][w];
-        packet_.push.psWin[w] = drawWin_[1][w];
+        packet_.push.vsWin[w] = drawWin_[0][w].bits;
+        packet_.push.psWin[w] = drawWin_[1][w].bits;
     }
     if (drawSplit_[1]) {
         // c5 = the DrawBlock's psC5 (this draw's alpha reference): biased like the other windows
-        packet_.push.psWin[1] = db.address + offsetof(shader::abi::DrawBlock, psC5) - 5 * 16;
+        packet_.push.psWin[1] = db.ref.plus(static_cast<std::int64_t>(offsetof(shader::abi::DrawBlock, psC5)) - 5 * 16).bits;
     }
     // the opaque passes' draws may be recorded later, grouped by pipeline (flushBatch): their order only matters for surfaces
     // at exactly the same depth (docs/research/performance.md 12)
@@ -1327,9 +1327,9 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         r->psHash = ps_->hash;
         r->vsFlags = vs_->semantics.flags;
         r->psFlags = ps_->semantics.flags;
-        r->vsConsts = drawSplit_[0] ? drawWin_[0][2] : vsConstAddr_;  // split draws: the object window (biased)
-        r->psConsts = drawSplit_[1] ? drawWin_[1][3] : psConstAddr_;
-        r->drawBlock = drawBlock;
+        r->vsConsts = drawSplit_[0] ? drawWin_[0][2].bits : vsConstAddr_.bits;  // split draws: the object window (biased)
+        r->psConsts = drawSplit_[1] ? drawWin_[1][3].bits : psConstAddr_.bits;
+        r->drawBlock = drawBlock.bits;
         for (std::uint32_t mask = ps_->samplerMask & 0xFFFFu; mask != 0; mask &= mask - 1) {
             const std::uint32_t slot = static_cast<std::uint32_t>(std::countr_zero(mask));
             if (tex_[slot] != nullptr) r->textures[slot] = tex_[slot]->ref().id;
@@ -1620,13 +1620,13 @@ void Device::drawPrimitiveUP(std::uint32_t type, std::uint32_t primitiveCount, c
         return;
     }
     const std::uint32_t vertices = vertexCount(type, primitiveCount);
-    vk::RingAlloc a = frames_.allocate(static_cast<VkDeviceSize>(vertices) * stride, 16);
+    rhi::RingAlloc a = frames_.allocate(static_cast<VkDeviceSize>(vertices) * stride, 16);
     if (a.ptr == nullptr) {
         upAllocFailed(static_cast<std::uint64_t>(vertices) * stride);
         return;
     }
     std::memcpy(a.ptr, data, static_cast<std::size_t>(vertices) * stride);
-    up_ = {true, a.buffer, a.offset, stride};
+    up_ = {true, vk::vkBuffer(a), a.offset, stride};
     if (prepareDraw(type, DrawGeom{.userPointer = true, .primitives = primitiveCount})) {
         packet_.op = DrawPacket::Op::Draw;
         packet_.count = vertices;
@@ -1648,20 +1648,20 @@ void Device::drawIndexedPrimitiveUP(std::uint32_t type, std::uint32_t minIndex, 
     }
     const std::uint32_t count = vertexCount(type, primitiveCount);
     const std::uint32_t isize = index32 ? 4 : 2;
-    vk::RingAlloc ia = frames_.allocate(static_cast<VkDeviceSize>(count) * isize, 16);
+    rhi::RingAlloc ia = frames_.allocate(static_cast<VkDeviceSize>(count) * isize, 16);
     const std::uint32_t vcount = minIndex + numVertices;
-    vk::RingAlloc va = frames_.allocate(static_cast<VkDeviceSize>(vcount) * stride, 16);
+    rhi::RingAlloc va = frames_.allocate(static_cast<VkDeviceSize>(vcount) * stride, 16);
     if (ia.ptr == nullptr || va.ptr == nullptr) {
         upAllocFailed(static_cast<std::uint64_t>(count) * isize + static_cast<std::uint64_t>(vcount) * stride);
         return;
     }
     std::memcpy(ia.ptr, indices, static_cast<std::size_t>(count) * isize);
     std::memcpy(va.ptr, vertices, static_cast<std::size_t>(vcount) * stride);
-    up_ = {true, va.buffer, va.offset, stride};
+    up_ = {true, vk::vkBuffer(va), va.offset, stride};
     if (prepareDraw(type, DrawGeom{.indexed = true, .userPointer = true, .primitives = primitiveCount})) {
         packet_.op = DrawPacket::Op::DrawIndexed;
         packet_.index32 = index32;
-        packet_.indexBuffer = ia.buffer;
+        packet_.indexBuffer = vk::vkBuffer(ia);
         packet_.first = foldIndexOffset(ia.offset, index32, 0, packet_.indexOffset);
         packet_.count = count;
         packet_.instances = 1;

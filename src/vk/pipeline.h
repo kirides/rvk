@@ -19,11 +19,16 @@
 #include <unordered_set>
 #include <vector>
 
+#include "rhi/game_device.h"
 #include "vk/vk.h"
 
 namespace rvk::vk {
 
 class Context;
+
+// rhi::ShaderModule <-> VkShaderModule (the Vulkan game device creates the modules; the handle value is the VkShaderModule)
+inline VkShaderModule vkModule(rhi::ShaderModule m) { return reinterpret_cast<VkShaderModule>(static_cast<std::uint64_t>(m)); }
+inline rhi::ShaderModule rhiModule(VkShaderModule m) { return static_cast<rhi::ShaderModule>(reinterpret_cast<std::uint64_t>(m)); }
 
 struct BlendAttachment {
     std::uint32_t enable = 0;
@@ -54,8 +59,8 @@ inline constexpr std::uint32_t kMaxVertexAttributes = 16;
 
 // Plain data, compared and hashed bytewise: always value-initialise (PipelineDesc d{}) so padding is zero.
 struct PipelineDesc {
-    VkShaderModule vs = VK_NULL_HANDLE;
-    VkShaderModule fs = VK_NULL_HANDLE;
+    rhi::ShaderModule vs = rhi::ShaderModule::None;
+    rhi::ShaderModule fs = rhi::ShaderModule::None;
     VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;  // only its class matters (topology is dynamic)
     VkPolygonMode polygonMode = VK_POLYGON_MODE_FILL;                     // ignored with EDS3 polygon mode
     std::uint32_t colorCount = 0;
@@ -86,7 +91,7 @@ public:
     // description is queued once
     void prewarmOnce(const PipelineDesc& desc);
     // with libraries: compiles the shader's library now (pre-rasterization or fragment shader state); thread-safe
-    void prepareShader(VkShaderModule module, VkShaderStageFlagBits stage);
+    void prepareShader(rhi::ShaderModule module, VkShaderStageFlagBits stage);
     // writes the VkPipelineCache blob (at shutdown)
     void save();
     // the same while running, when pipelines were built since the last save: the blob is read on the calling thread, the

@@ -47,12 +47,8 @@ Shadows::~Shadows() {
 }
 
 void Shadows::destroyShaders() {
-    vk::Context* ctx = &dev_.ctx();
     for (auto* s : {&vs_, &ps_}) {
-        if (*s && (*s)->module != VK_NULL_HANDLE) {
-            const VkShaderModule m = (*s)->module;
-            dev_.frames().retire([ctx, m] { vkDestroyShaderModule(ctx->device(), m, nullptr); });
-        }
+        if (*s && (*s)->module != rhi::ShaderModule::None) dev_.game().destroyShaderModule((*s)->module, true);
         s->reset();
     }
 }
@@ -63,14 +59,14 @@ bool Shadows::ensureShaders() {
     const auto make = [&](const char* name, shader::Stage stage) {
         auto s = std::make_shared<d3d9::Shader>();
         s->stage = stage;
-        s->module = vk::createShaderModule(dev_.ctx(), shader::embedded::spirv(name));
+        s->module = dev_.game().createShaderModule({.spirv = shader::embedded::spirv(name)});
         s->hash = nameHash(name);
         return s;
     };
     vs_ = make("shadows/shadow_mask.vert", shader::Stage::Vertex);
     ps_ = make("shadows/shadow_mask.frag", shader::Stage::Pixel);
     ps_->reflection.colorOutputs = 1;
-    if (vs_->module == VK_NULL_HANDLE || ps_->module == VK_NULL_HANDLE) {
+    if (vs_->module == rhi::ShaderModule::None || ps_->module == rhi::ShaderModule::None) {
         spdlog::error("enh: shadows: shader modules failed, enhanced shadows stay off this session");
         failed_ = true;
         destroyShaders();
@@ -230,13 +226,13 @@ void Shadows::drawMask(d3d9::Device& device, const d3d9::ReplaceQuery& q, int va
         }
     }
 
-    const vk::RingAlloc a = device.frames().allocate(sizeof(b), 16);
+    const rhi::RingAlloc a = device.frames().allocate(sizeof(b), 16);
     std::memcpy(a.ptr, &b, sizeof(b));
     out.action = d3d9::DrawReplacement::Action::Procedural;
     out.vs = vs_;
     out.ps = ps_;
     out.vertices = 3;
-    out.block = a.address;
+    out.block = a.ref;
     out.cullNone = true;
     out.opaque = false;  // the engine's states: alpha writes only, its stencil and depth test
 

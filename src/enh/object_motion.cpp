@@ -155,13 +155,13 @@ void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     s.ib = ir.id;
 
     // what the last request became: it ran (the capture variant and its pipeline were ready), or it did not
-    if (s.pending != 0) {
+    if (!s.pending.null()) {
         if (s.pendingFrame + 1 == frame && dev.vertexCapturedPrev(s.pending)) {
             s.last = s.pending;
             s.lastSlots = s.pendingSlots;
             s.lastFrame = s.pendingFrame;
         }
-        s.pending = 0;
+        s.pending = {};
     }
 
     if (isRigid(q.kind)) {
@@ -210,18 +210,18 @@ void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     }
     const std::uint32_t slots = s.maxIndex + 1;
     if (s.maxIndex == 0 || slots > (isRigid(q.kind) ? kRigidMaxSlots : kMaxSlots)) return;
-    const vk::RingAlloc a = dev.frames().allocate(16 + static_cast<VkDeviceSize>(slots) * 32, 16);
+    const rhi::RingAlloc a = dev.frames().allocate(16 + static_cast<VkDeviceSize>(slots) * 32, 16);
     if (a.ptr == nullptr) return;
     // header: slots, the previous frame's capture of this draw (its vertex shader reads the previous positions)
     std::uint32_t header[4] = {slots, 0, 0, 0};
-    if (s.last != 0 && s.lastFrame + 1 == frame) {
-        header[1] = static_cast<std::uint32_t>(s.last);
-        header[2] = static_cast<std::uint32_t>(s.last >> 32);
+    if (!s.last.null() && s.lastFrame + 1 == frame) {
+        header[1] = s.last.low();
+        header[2] = s.last.high();
         header[3] = s.lastSlots;
     }
     std::memcpy(a.ptr, header, 16);
-    dev.requestVertexCapture(a.address);
-    s.pending = a.address;
+    dev.requestVertexCapture(a.ref);
+    s.pending = a.ref;
     s.pendingSlots = slots;
     s.pendingFrame = frame;
     ++perFrame_;

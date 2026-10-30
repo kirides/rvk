@@ -305,8 +305,8 @@ VkPipeline PipelineCache::build(const PipelineDesc& d) {
     const bool dynVertexInput = ctx_->features().vertexInputDynamicState;
 
     VkPipelineShaderStageCreateInfo stages[2]{};
-    stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, d.vs, "main", nullptr};
-    stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, d.fs, "main", nullptr};
+    stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vkModule(d.vs), "main", nullptr};
+    stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, vkModule(d.fs), "main", nullptr};
 
     VkVertexInputBindingDescription bindings[kMaxVertexBindings]{};
     VkVertexInputAttributeDescription attrs[kMaxVertexAttributes]{};
@@ -368,7 +368,7 @@ VkPipeline PipelineCache::build(const PipelineDesc& d) {
         spdlog::error("vulkan: vkCreateGraphicsPipelines: {}", resultString(r));
         return VK_NULL_HANDLE;
     }
-    names::pipeline(*ctx_, p, d.vs, d.fs);
+    names::pipeline(*ctx_, p, vkModule(d.vs), vkModule(d.fs));
     return p;
 }
 

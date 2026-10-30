@@ -101,7 +101,7 @@ void DebugView::record(d3d9::PassContext& ctx) {
     VkCommandBuffer cmd = ctx.cmd;
 
     DebugViewPush push{};
-    push.h.frame = ctx.frameBlock;
+    push.h.frame = ctx.frameBlock.bits;
     push.h.passId = 1;
     push.width = w;
     push.height = h;

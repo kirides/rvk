@@ -44,10 +44,10 @@ private:
         std::uint64_t hash = 0;
         bool haveHash = false;
         int moving = 0;  // frames left of capturing a rigid draw after its constants changed
-        VkDeviceAddress pending = 0;  // requested last time: used when it ran
+        rhi::GpuRef pending;  // requested last time: used when it ran
         std::uint32_t pendingSlots = 0;
         std::uint64_t pendingFrame = 0;
-        VkDeviceAddress last = 0;  // the last capture that ran (its ring memory lives one frame more)
+        rhi::GpuRef last;  // the last capture that ran (its ring memory lives one frame more)
         std::uint32_t lastSlots = 0;
         std::uint64_t lastFrame = 0;
         std::uint64_t seenFrame = 0;

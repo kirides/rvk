@@ -178,7 +178,7 @@ private:
     void serviceBake(d3d9::Device& device);
     void prebuild();
     bool worldRows(d3d9::Device& device, const d3d9::ReplaceQuery& q, float rows[3][4]) const;
-    VkDeviceAddress fillBlock(d3d9::Device& device, const d3d9::ReplaceQuery& q, d3d9::draws::Water kind, WaterModel model, bool grid,
+    rhi::GpuRef fillBlock(d3d9::Device& device, const d3d9::ReplaceQuery& q, d3d9::draws::Water kind, WaterModel model, bool grid,
                               const Body& b, std::array<d3d9::Texture*, 16>& sampled);
     void measureMapping(const d3d9::ReplaceQuery& q, const float rows[3][4], const std::uint8_t* data, std::uint32_t count, Body& b);
     static void fitPlane(const float rows[3][4], const std::uint8_t* data, std::uint32_t count, std::uint32_t stride, Body& b);

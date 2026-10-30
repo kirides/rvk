@@ -36,6 +36,11 @@ void MeshArena::destroy() {
     stats_ = {};
 }
 
+namespace {
+// Vulkan: the shader reference is the device address
+rhi::GpuAddr gpuAddr(VkDeviceAddress a) { return {rhi::GpuRef{a}, a}; }
+}  // namespace
+
 VkDeviceAddress MeshArena::addressOf(VkBuffer b) const {
     if ((usage_ & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) == 0) return 0;
     VkBufferDeviceAddressInfo ai{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
@@ -81,7 +86,7 @@ MeshArena::Alloc MeshArena::allocate(VkDeviceSize size, std::uint32_t multiple) 
                 a.block = i;
                 a.buffer = blocks_[i].buffer;
                 a.offset = (off + m - 1) / m * m;
-                a.address = blocks_[i].address != 0 ? blocks_[i].address + a.offset : 0;
+                if (blocks_[i].address != 0) a.addr = gpuAddr(blocks_[i].address + a.offset);
                 stats_.used += vai.size;
                 return a;
             }
@@ -96,7 +101,7 @@ MeshArena::Alloc MeshArena::allocate(VkDeviceSize size, std::uint32_t multiple) 
     VmaAllocationCreateInfo aci{};
     aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
     if (vmaCreateBuffer(ctx_->allocator(), &bci, &aci, &a.buffer, &a.dedicated, nullptr) != VK_SUCCESS) return {};
-    a.address = addressOf(a.buffer);
+    a.addr = gpuAddr(addressOf(a.buffer));
     if (ctx_->namesEnabled()) {
         static std::atomic<std::uint32_t> dedicated{0};  // numbered by creation, never reused
         names::object(*ctx_, a.buffer, VK_OBJECT_TYPE_BUFFER, std::format("mesh arena dedicated buffer {} ({} KiB)", dedicated++, size >> 10));

@@ -160,7 +160,7 @@ void RtDebug::captureDepth(d3d9::PassContext& ctx) {
     vk::Transients::Entry* out = dev_.transients().get("rt.debug.depth", {VK_FORMAT_R32_SFLOAT, {w, h}});
     if (out == nullptr || !dev_.readable(ds->texture(), ctx.cmd)) return;
     RtDebugPush push{};
-    push.h.frame = ctx.frameBlock;
+    push.h.frame = ctx.frameBlock.bits;
     push.h.passId = 2;
     push.depthTex = ds->texture()->bindlessSlot();
     push.width = w;
@@ -194,7 +194,7 @@ void RtDebug::record(d3d9::PassContext& ctx) {
     VkCommandBuffer cmd = ctx.cmd;
 
     RtDebugPush push{};
-    push.h.frame = ctx.frameBlock;
+    push.h.frame = ctx.frameBlock.bits;
     push.h.passId = 1;
     push.width = w;
     push.height = h;

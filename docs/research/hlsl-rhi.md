@@ -486,3 +486,8 @@ them (tolerance in the table), and where the CPU can compute the answer it is ch
   (`D3D12_FEATURE_DATA_D3D12_OPTIONS.TypedUAVLoadAdditionalFormats`; present on every FL 12_0+ GPU in practice, to be added to the backend's requirements check).
 - The translated `[[vk::builtin("PointSize")]]` output, vertex fans, scaled vertex formats and the default texture per kind are D3D9-model matters (dx12-game-port.md).
 - Shader permutations are compiled twice by the checker; at run time only the active backend's target is built (`embedded::dxil`, `device.cpp` follows with the backend seam).
+
+## 10. The game seam (WP2a, 2026-10-30)
+`rhi::GameDevice : rhi::Device` (`src/rhi/game_device.h`; docs/research/dx12-game-port.md "Status") is what `d3d9::Device` holds: the Vulkan implementation is the wrapped `VkDeviceImpl` (`rhi::vulkan::wrapGame`). It adds the
+shader-visible address types of the RHI: `GpuRef` (one 64-bit value: Vulkan = device address, D3D12 = slot | offset << 32, `plus` by `refShift`), `GpuAddr` (reference + raw VA for builds), `RingAlloc`, and the opaque
+`ShaderModule` of the game's pipelines. `rhi::Buffer::shaderRef / shaderRefRw` are the way to a `GpuRef` of an RHI buffer (`GpuRef::fromWords`).

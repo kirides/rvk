@@ -186,9 +186,9 @@ VkPipeline PipelineCache::shaderLibrary(VkShaderModule module, bool vertex, VkPo
     return it->second;
 }
 
-void PipelineCache::prepareShader(VkShaderModule module, VkShaderStageFlagBits stage) {
-    if (useLibraries_ && module != VK_NULL_HANDLE) {
-        shaderLibrary(module, stage == VK_SHADER_STAGE_VERTEX_BIT, VK_POLYGON_MODE_FILL);
+void PipelineCache::prepareShader(rhi::ShaderModule module, VkShaderStageFlagBits stage) {
+    if (useLibraries_ && module != rhi::ShaderModule::None) {
+        shaderLibrary(vkModule(module), stage == VK_SHADER_STAGE_VERTEX_BIT, VK_POLYGON_MODE_FILL);
     }
 }
 
@@ -215,8 +215,8 @@ VkPipeline PipelineCache::link(const PipelineDesc& d, bool optimize) {
         }
         libs[3] = out;
     }
-    libs[1] = shaderLibrary(d.vs, true, d.polygonMode);
-    libs[2] = shaderLibrary(d.fs, false, VK_POLYGON_MODE_FILL);
+    libs[1] = shaderLibrary(vkModule(d.vs), true, d.polygonMode);
+    libs[2] = shaderLibrary(vkModule(d.fs), false, VK_POLYGON_MODE_FILL);
     for (VkPipeline l : libs) {
         if (l == VK_NULL_HANDLE) {
             return VK_NULL_HANDLE;
@@ -233,7 +233,7 @@ VkPipeline PipelineCache::link(const PipelineDesc& d, bool optimize) {
         spdlog::error("vulkan: pipeline link{}: {}", optimize ? " (optimised)" : "", resultString(r));
         return VK_NULL_HANDLE;
     }
-    names::pipeline(*ctx_, p, d.vs, d.fs);
+    names::pipeline(*ctx_, p, vkModule(d.vs), vkModule(d.fs));
     return p;
 }
 

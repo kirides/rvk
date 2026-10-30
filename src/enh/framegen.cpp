@@ -317,7 +317,7 @@ void FrameGeneration::recordDepth(d3d9::PassContext& ctx) {
         dev_.transients().get("gbuffer.motion", {kGbufferMotionFormat, {render.width, render.height}, kGbufferMotionUsage});
     if (depth == nullptr || motion == nullptr || !dev_.readable(ds->texture(), cmd)) return;
     PrepPush push{};
-    push.h.frame = ctx.frameBlock;
+    push.h.frame = ctx.frameBlock.bits;
     push.depthTex = ds->texture()->bindlessSlot();
     push.width = render.width;
     push.height = render.height;
@@ -675,7 +675,7 @@ void FrameGeneration::recordDebug(d3d9::PassContext& ctx) {
     VkCommandBuffer cmd = ctx.cmd;
     src->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     DebugPush push{};
-    push.h.frame = ctx.frameBlock;
+    push.h.frame = ctx.frameBlock.bits;
     push.h.passId = 4;
     push.srcTex = src->slot;
     push.sampler0 = dev_.samplerFor(mode == 3, true);  // data views: point; colour: linear

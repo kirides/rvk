@@ -168,7 +168,7 @@ std::array<float, 4> Ocean::foamMap() const {
     return {static_cast<float>(foamFirst_[0]) * kFoamCell, static_cast<float>(foamFirst_[1]) * kFoamCell, extent, 1.0f / extent};
 }
 
-void Ocean::recordFoam(rhi::CommandList& cl, VkDeviceAddress frameBlock, const OceanFoamInputs& in) {
+void Ocean::recordFoam(rhi::CommandList& cl, rhi::GpuRef frameBlock, const OceanFoamInputs& in) {
     if (failed_ || foamFailed_ || !foam_ || quality_ < 0 || in.floorA == 0 || in.floorB == 0) {
         foamValid_ = false;
         return;
@@ -202,7 +202,7 @@ void Ocean::recordFoam(rhi::CommandList& cl, VkDeviceAddress frameBlock, const O
 }
 
 // one step of the foam buffer at the water's time t (s) after dt (0: no history), the history's window prevFirst
-void Ocean::foamStep(rhi::CommandList& cl, VkDeviceAddress frameBlock, const OceanFoamInputs& in, double t, float dt, const int prevFirst[2]) {
+void Ocean::foamStep(rhi::CommandList& cl, rhi::GpuRef frameBlock, const OceanFoamInputs& in, double t, float dt, const int prevFirst[2]) {
     const bool history = foamValid_ && dt > 0.0f;
     const int cur = foamValid_ ? 1 - foamCur_ : 0;
     const int prev = 1 - cur;
@@ -214,7 +214,7 @@ void Ocean::foamStep(rhi::CommandList& cl, VkDeviceAddress frameBlock, const Oce
     // the first step: the history image gets a defined layout (never read: prev.w = 0)
     if (!foamValid_) cl.transition(hist, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     OceanFoamPush p{};
-    p.h.frame = frameBlock;
+    p.h.frame = frameBlock.bits;
     p.window[0] = static_cast<float>(foamFirst_[0]);
     p.window[1] = static_cast<float>(foamFirst_[1]);
     p.window[2] = kFoamCell;
@@ -304,10 +304,10 @@ void Ocean::setSea(const ocean::SeaState& sea) {
     spectrumDirty_ = true;
 }
 
-void Ocean::push(rhi::CommandList& cl, VkDeviceAddress frameBlock, int cascade, float t, float dt, float direction) {
+void Ocean::push(rhi::CommandList& cl, rhi::GpuRef frameBlock, int cascade, float t, float dt, float direction) {
     const ocean::Cascade& c = cascades_.c[static_cast<std::size_t>(cascade)];
     OceanPush p{};
-    p.h.frame = frameBlock;
+    p.h.frame = frameBlock.bits;
     p.tile[0] = c.length;
     p.tile[1] = c.kLow;
     p.tile[2] = c.kHigh;
@@ -341,7 +341,7 @@ void Ocean::bindImages(rhi::CommandList& cl, Tile& tile) {
     cl.setStorageViews(views);
 }
 
-void Ocean::record(rhi::CommandList& cl, VkDeviceAddress frameBlock, double seconds) {
+void Ocean::record(rhi::CommandList& cl, rhi::GpuRef frameBlock, double seconds) {
     if (failed_ || quality_ < 0 || !tiles_[0].disp) return;
     rhi::Pipeline* fft = fft_[static_cast<std::size_t>(quality_)].get();
     if (fft == nullptr) return;

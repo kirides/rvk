@@ -125,7 +125,7 @@ private:
         rt::BlasKey key;
         d3d9::Buffer* vb = nullptr;  // valid while the entry lives (bufferChanged drops it first)
         d3d9::Buffer* ib = nullptr;
-        VkDeviceAddress vbAddress = 0, ibAddress = 0;  // the buffers' starts (records add the offsets)
+        rhi::GpuAddr vbAddress, ibAddress;  // the buffers' starts (records add the offsets)
         Layout layout;               // merged over the draws that showed it (the shadow pass's declaration may be shorter)
         BlasState state = BlasState::Pending;
         std::unique_ptr<rhi::AccelerationStructure> as;
@@ -241,7 +241,7 @@ private:
     // characters (setDynamic)
     void observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q);
     struct TreeBatch {  // the capture buffer of one draw (a plain draw or an instanced batch of trees)
-        VkDeviceAddress base = 0;
+        rhi::GpuAddr base;
         std::uint32_t slots = 0;
         bool failed = false;
     };
@@ -251,24 +251,24 @@ private:
     void dropDynamic(bool all, std::uint64_t frame);
     struct DynDraw {
         std::uint64_t key = 0;
-        VkDeviceAddress capture = 0;   // the ring allocation: uvec4 header (slots) + 2 x vec4 per vertex index
-        VkDeviceAddress indices = 0;   // the draw's first index
+        rhi::GpuAddr capture;          // the ring allocation: uvec4 header (slots) + 2 x vec4 per vertex index
+        rhi::GpuAddr indices;          // the draw's first index
         std::uint32_t slots = 0;       // highest index + 1
         std::uint32_t triangles = 0;
         bool index32 = false;
         bool built = false;            // its BLAS was built / refit this frame
         bool tree = false;             // an animated SpeedTree (key = the registry instance of its rest pose, blas = its BLAS)
         std::uint64_t blas = 0;
-        VkDeviceAddress requested = 0; // the address the draw's capture was requested with, when `capture` lies inside it (instanced batches)
+        rhi::GpuRef requested;        // the reference the draw's capture was requested with, when `capture` lies inside it (instanced batches)
         bool main = true;              // requested for the main view's solid pass (else for a sun cascade's view: this frame's pose before the main view)
         bool skin = false;             // written by the skinning compute pass (`capture` = its output; no vertex shader capture)
     };
     // characters skinned by compute (setGpuSkinning)
     struct SkinJob {
-        VkDeviceAddress vertices = 0;  // vertex 0 of the draw's index range's slot 0 (base vertex and stream offset applied)
-        VkDeviceAddress bones = 0;     // c32.. of the draw's vertex shader constants (200 vec4, copied into the ring)
-        VkDeviceAddress out = 0;       // the capture-layout buffer
-        VkDeviceAddress ref = 0;       // verify: the vertex shader capture of the same draw
+        rhi::GpuRef vertices;      // vertex 0 of the draw's index range's slot 0 (base vertex and stream offset applied)
+        rhi::GpuRef bones;         // c32.. of the draw's vertex shader constants (200 vec4, copied into the ring)
+        rhi::GpuRef out;           // the capture-layout buffer
+        rhi::GpuRef ref;           // verify: the vertex shader capture of the same draw
         std::uint32_t slots = 0, stride = 0, offsets = 0;
     };
     bool skinReady();
@@ -288,7 +288,7 @@ private:
     struct DynBlas {
         std::unique_ptr<rhi::AccelerationStructure> as;
         std::uint32_t slots = 0, triangles = 0;
-        VkDeviceAddress indices = 0;
+        rhi::GpuAddr indices;
         std::uint64_t lastFrame = 0;
         std::uint32_t updates = 0;     // refits since the last full build
         bool built = false;
@@ -297,7 +297,7 @@ private:
         std::uint32_t id = 0;          // instance id (records, debug colours)
         std::uint32_t maxIndex = 0;    // scanned once from the index buffer's CPU copy
         bool scanned = false;
-        VkDeviceAddress lastCapture = 0;  // the last capture that ran (the next frame's vertex shader reads it: motion)
+        rhi::GpuRef lastCapture;  // the last capture that ran (the next frame's vertex shader reads it: motion)
         std::uint32_t lastSlots = 0;
         std::uint64_t lastCaptureFrame = 0;
         // the counts the structure was created for (it is sized by them and the index type only: created again when they change)

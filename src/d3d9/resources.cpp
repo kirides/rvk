@@ -358,7 +358,7 @@ void Texture::upload(VkCommandBuffer cmd) {
             const std::uint32_t x0 = l.box[0], y0 = l.box[1], z0 = l.box[2];
             const std::uint32_t w = l.box[3] - x0, h = l.box[4] - y0, d = l.box[5] - z0;
             const std::uint64_t sliceBytes = vk::storageSize(fmt_, w, h);
-            vk::RingAlloc staging = dev_.frames().allocate(sliceBytes * d, 16);
+            rhi::RingAlloc staging = dev_.frames().allocate(sliceBytes * d, 16);
             if (staging.ptr == nullptr) {
                 continue;
             }
@@ -375,7 +375,7 @@ void Texture::upload(VkCommandBuffer cmd) {
                                        desc_.type == TextureType::Cube ? face : 0u, 1};
             region.imageOffset = {static_cast<std::int32_t>(x0), static_cast<std::int32_t>(y0), static_cast<std::int32_t>(z0)};
             region.imageExtent = {w, h, d};
-            vkCmdCopyBufferToImage(cmd, staging.buffer, image_.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+            vkCmdCopyBufferToImage(cmd, vk::vkBuffer(staging), image_.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
             dev_.countUpload(true, sliceBytes * d);
             l.dirty = false;
             copied = true;
@@ -472,14 +472,14 @@ Buffer::Binding Buffer::gpu(std::uint32_t strideHint) {
         if (blk.fresh) {
             const VkDeviceSize bytes = std::max<VkDeviceSize>(blk.hi - blk.lo, 16);
             // at least lo into its chunk: the binding (block offset - lo) addresses buffer byte 0 and stays >= 0
-            vk::RingAlloc a = dev_.frames().allocate(bytes, 16, blk.lo);
+            rhi::RingAlloc a = dev_.frames().allocate(bytes, 16, blk.lo);
             if (a.ptr == nullptr) {
                 return {};
             }
             ringPtr_ = static_cast<std::uint8_t*>(a.ptr);
             ringLo_ = blk.lo;
             ringHi_ = blk.hi;
-            binding_ = {a.buffer, a.offset - blk.lo};
+            binding_ = {vk::vkBuffer(a), a.offset - blk.lo};
         }
         if (blk.copyHi > blk.copyLo) {
             std::memcpy(ringPtr_ + (blk.copyLo - ringLo_), cpu_.data() + blk.copyLo, blk.copyHi - blk.copyLo);
@@ -497,7 +497,7 @@ Buffer::Binding Buffer::gpu(std::uint32_t strideHint) {
         if (!na.valid()) {
             return {};
         }
-        vk::RingAlloc staging = dev_.frames().allocate(size_, 16);
+        rhi::RingAlloc staging = dev_.frames().allocate(size_, 16);
         if (staging.ptr == nullptr) {
             dev_.meshArena().free(na);
             return {};
@@ -506,7 +506,7 @@ Buffer::Binding Buffer::gpu(std::uint32_t strideHint) {
         dev_.countUpload(false, size_);
         VkCommandBuffer cmd = dev_.uploadCommands();
         const VkBufferCopy copy{staging.offset, na.offset, size_};
-        vkCmdCopyBuffer(cmd, staging.buffer, na.buffer, 1, &copy);
+        vkCmdCopyBuffer(cmd, vk::vkBuffer(staging), na.buffer, 1, &copy);
         const bool renamed = static_.valid();
         if (renamed) {
             auto* arena = &dev_.meshArena();
@@ -522,10 +522,10 @@ Buffer::Binding Buffer::gpu(std::uint32_t strideHint) {
     return binding_;
 }
 
-VkDeviceAddress Buffer::deviceAddress() {
+rhi::GpuAddr Buffer::gpuAddress() {
     const std::lock_guard lock(mutex_);
-    if (!static_.valid() || dynamic() || pool_ == POOL_SYSTEMMEM || !dev_.ctx().features().rayTracing.enabled) return 0;
-    return static_.address;
+    if (!static_.valid() || dynamic() || pool_ == POOL_SYSTEMMEM || !dev_.ctx().features().rayTracing.enabled) return {};
+    return static_.addr;
 }
 
 // ---- VertexDecl ------------------------------------------------------------------------------------------------------

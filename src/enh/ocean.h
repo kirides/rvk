@@ -12,6 +12,7 @@
 #include <memory>
 
 #include "enh/ocean_spectrum.h"
+#include "rhi/game_device.h"
 #include "rhi/rhi.h"
 #include "shader/abi.h"
 
@@ -68,10 +69,10 @@ public:
     // the sea to simulate (re-runs the spectrum pass when it changed noticeably)
     void setSea(const ocean::SeaState& sea);
     // records the simulation of this frame (outside a rendering scope); t in seconds (any epoch)
-    void record(rhi::CommandList& cl, VkDeviceAddress frameBlock, double seconds);
+    void record(rhi::CommandList& cl, rhi::GpuRef frameBlock, double seconds);
     // the surf's foam coverage around the camera (ocean_foam.comp, docs/research/ocean.md 4.4): records this frame's step
     // (outside a rendering scope, after record); the image is then readable by the vertex / fragment stages
-    void recordFoam(rhi::CommandList& cl, VkDeviceAddress frameBlock, const OceanFoamInputs& in);
+    void recordFoam(rhi::CommandList& cl, rhi::GpuRef frameBlock, const OceanFoamInputs& in);
     bool foamReady() const { return foamValid_; }
     // the tiles' temporal foam (whitecaps) and the foam buffer start over (a jump of the water's clock: their history is of
     // another moment)
@@ -101,9 +102,9 @@ private:
     bool createTiles();
     void destroyTiles();
     bool createFoam();
-    void foamStep(rhi::CommandList& cl, VkDeviceAddress frameBlock, const OceanFoamInputs& in, double t, float dt, const int prevFirst[2]);
+    void foamStep(rhi::CommandList& cl, rhi::GpuRef frameBlock, const OceanFoamInputs& in, double t, float dt, const int prevFirst[2]);
     void destroyFoam();
-    void push(rhi::CommandList& cl, VkDeviceAddress frameBlock, int cascade, float t, float dt, float direction);
+    void push(rhi::CommandList& cl, rhi::GpuRef frameBlock, int cascade, float t, float dt, float direction);
     void bindImages(rhi::CommandList& cl, Tile& tile);
 
     d3d9::Device& dev_;

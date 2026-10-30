@@ -194,7 +194,7 @@ bool Upscale::recordExposure(d3d9::PassContext& ctx, d3d9::Texture& luminance, v
     VkCommandBuffer cmd = ctx.cmd;
     if (!dev_.readable(&luminance, cmd)) return false;
     ExposurePush push{};
-    push.h.frame = ctx.frameBlock;
+    push.h.frame = ctx.frameBlock.bits;
     push.lumTex = luminance.bindlessSlot();
     push.factor = engine::exposure::kFsrExposureKey;
     push.lumMin = kLuminanceMin;
@@ -372,7 +372,7 @@ void Upscale::record(d3d9::PassContext& ctx) {
 
     // hardware depth -> R32F
     PrepPush push{};
-    push.h.frame = ctx.frameBlock;
+    push.h.frame = ctx.frameBlock.bits;
     push.depthTex = ds->texture()->bindlessSlot();
     push.width = render.width;
     push.height = render.height;

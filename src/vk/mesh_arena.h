@@ -10,6 +10,7 @@
 #include <mutex>
 #include <vector>
 
+#include "rhi/game_device.h"
 #include "vk/vk.h"
 
 namespace rvk::vk {
@@ -24,7 +25,7 @@ public:
     struct Alloc {
         VkBuffer buffer = VK_NULL_HANDLE;
         VkDeviceSize offset = 0;        // of the data in buffer (a multiple of the requested multiple)
-        VkDeviceAddress address = 0;    // of the data (0 without device addresses)
+        rhi::GpuAddr addr;              // of the data (null without device addresses)
         std::uint32_t block = UINT32_MAX;            // UINT32_MAX = dedicated
         VmaVirtualAllocation virt = VK_NULL_HANDLE;  // in the block
         VmaAllocation dedicated = VK_NULL_HANDLE;
