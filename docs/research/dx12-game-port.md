@@ -74,3 +74,30 @@ Built on 2774402. New: `src/rhi/game_device.h` (comment block there = the seam's
   allocator is still `vk::Frames::allocate` (needs a non-virtual neutral front: it is called several times per draw); `RecordState` / packet application / record threads, `pipelineFor` (`GamePipeline`), `StretchRect`, read-backs,
   `ctx_.features()` queries, `moduleLabel(ctx_...)`, `vk::names::*`; `shader::abi::PushConstants` is still 8 x uint64 (RvkDrawPush as 7 x uint4 for DXIL comes with WP1 / WP4); raw `rhi::Buffer::gpuAddress()` users with shader
   writes into Readback memory (`gi` diag, the skin verify buffer) need the capture pool on D3D12 (WP6).
+
+## Next steps (written 2026-10-30, at the break; user order: "make dx12 work, do everything necessary, do not report back until it works")
+
+Done and committed: S1 = WP1 (2774402: every shader to signed DXIL, uint2-pair address ABI, parity tests, checker `rvk_shadertool dxil-check`; the helpers are `RvkRef` / `rvkPtr` / `rvkRw*`, not the `RVK_PTR_*` macros
+the plan sketched), WP2a (7540a9a: `rhi::GameDevice`, `GpuRef` / `GpuAddr` / `RingAlloc`, `ShaderModule`). Earlier: Agility SDK setup (2db438a), RHI feature gaps, passes + RT scene on the RHI (957dc08 .. 49372b1).
+In progress when this was written: **WP2b** (agent a2d5e1e2346396237, uncommitted tree: textures / surfaces / buffers as RHI objects, `PassContext::cmd` -> `rhi::CommandList&`, `Upscaler` / `FrameGenerator` /
+`PresentWrapper` modules in src/rhi/modules.h, capture pool, `formatSupport`, adapter enumeration). When it reports: rebuild, run rvk_tests / rvk_d3d9test --validation / rvk_rhitest --validation, check its in-game numbers, commit.
+
+Remaining, in order (each one agent with a brief like the previous ones: read CLAUDE.md + this doc + hlsl-rhi.md, gates = offline suites + in-game Vulkan wrapper / full with -Validation -SyncValidation + pictures vs a reference build +
+savegame CPU A/B within about 0.15 ms, no commit by the agent, docs Status section updated):
+1. **WP2c** (Vulkan only): `RecordState` / packet application / record threads behind `recordChunk / executeChunks / beginScope / endScope`; `pipelineFor` + pipeline cache + prewarm + `StaticRasterKey`; `StretchRect`, read-backs,
+   timestamps, regions behind the seam; `Frames` / `MeshArena` / `Bindless` / `PipelineCache` / `Swapchain` / `Presenter` / `GpuTimer` / `Transients` / `FgSwapchain` owned by the backend (inline neutral ring front end: it is
+   called several times per draw); `rvk_d3d9test --backend vulkan|d3d12`. After it d3d9 / enh / overlay / hal / native contain no Vulkan.
+2. **WP0 spike** (small, can run any time before WP3/4): distinct PSO keys at testdemo + perf savegame, point-list and triangle-fan draws, exotic decl types (UBYTE4, SHORT*, UDEC3, DEC3N), capture-variant draw counts.
+3. **WP3** D3D12 core: queue + fence timeline, 2 frames in flight, retire(), ring chunks (GPU_UPLOAD heap if available), D3D12MA, mesh arena, full format table (BC, depth, swizzles), texture upload alignment,
+   samplers, DXIL modules, readbacks, `vulkan.api` setting (+ config.toml, `run.ps1 -Api d3d12`), DXGI adapter enumeration, delay-load of d3d12 / dxgi, `TypedUAVLoadAdditionalFormats` in the requirements check, a default
+   texture per kind at heap slot 0 (cube / 3D), SRV + UAV pairs for GI / capture buffers and raw SRVs for the engine's vertex / index buffers (hlsl-rhi.md 9 host contracts).
+4. **WP4** D3D12 draw path: PSO factory (async, skip while pending, `ID3D12PipelineLibrary`), state mapping, packet application (28 root DWORDs), chunk command lists on the 2 record threads, clears, triangle fans, vertex format
+   fixups, point size, blit; verify `rvk_d3d9test --backend d3d12` 20/20, then in game wrapper + full to the world, `refcompare` Vulkan vs D3D12.
+5. **WP5** present: DXGI flip swapchain, dedicated present queue, Presenter thread, waitable object, tearing, resize / minimise / exclusive fullscreen.
+6. **WP6** enhancements + RT on D3D12 (capture pool, `registerAddressRange`, RT records, TLAS slots; never ALLOW_UPDATE + ALLOW_COMPACTION on one BLAS), verified with water-compare, shadow-compare, rvk_rtwalk, perfsave, -PerfFrame.
+7. **WP7** FSR + frame generation on DX12 (vendor loader / upscaler / framegeneration `_dx12` DLLs + the dx12 headers from upstream v2.4.0 `Kits/FidelityFX/signedbin`, ~87 MB, signature-checked per VERSION.md; user approved).
+8. **WP8** overlay on ImGui DX12 (vcpkg imgui `dx12-binding`), UI resource for the FG swapchain.
+9. **WP9** hardening: GPU timers, PIX events, DRED / crash markers, memory budget, PSO prewarm, CPU A/B (D3D12 <= Vulkan + 5 %), package.ps1 (D3D12Core.dll + licence, FFX DX12 DLLs), CLAUDE.md + hlsl-rhi.md, CI proving the
+   Vulkan-only build runs without d3d12.dll, unit tests (PSO key, GpuRef, format table).
+Orchestration notes: one agent at a time in the tree (shared build dir + GPU lock); verify and commit between agents; Vulkan stays default and must not regress; only the RX 7900 XTX can be validated (document NVIDIA / Intel
+as untested; the backend falls back to Vulkan with a log line when SM 6.6 / binding tier 3 / required features are missing). Open question for later: ship `vulkan.api=d3d12` as experimental after WP6, or after all packages.
