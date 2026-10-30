@@ -706,6 +706,7 @@ void Device::destroy() {
         return;
     }
     stopVariantWorker();
+    stopShaderWorkers();
     frames_.waitIdle();
     stopRecordThreads();
     processReleases();
@@ -1432,64 +1433,125 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
         spdlog::warn("d3d9: shader {:016x}: {}", hash, dec.error);
         return nullptr;
     }
-    const auto glsl = shader::toHlsl(dec.program);
-    if (!glsl.ok()) {
-        spdlog::warn("d3d9: shader {:016x}: {}", hash, glsl.error);
+    auto hlsl = shader::toHlsl(dec.program);
+    if (!hlsl.ok()) {
+        spdlog::warn("d3d9: shader {:016x}: {}", hash, hlsl.error);
         return nullptr;
     }
-    std::vector<std::uint32_t> spirv;
-    const auto cacheFile = options_.cacheDir.empty() ? std::filesystem::path()
-                                                     : options_.cacheDir / "spirv" / std::format("{:016x}.spv", hash);
-    if (!cacheFile.empty()) {
-        std::ifstream in(cacheFile, std::ios::binary | std::ios::ate);
-        if (in) {
-            const auto size = static_cast<std::size_t>(in.tellg());
-            spirv.resize(size / 4);
-            in.seekg(0);
-            in.read(reinterpret_cast<char*>(spirv.data()), static_cast<std::streamsize>(spirv.size() * 4));
-        }
-    }
-    if (spirv.empty()) {
-        ++shadersCompiled_;
-        auto compiled = shader::compileHlsl(dec.program.version.stage, glsl.hlsl);
-        if (!compiled.ok()) {
-            spdlog::error("d3d9: shader {:016x} does not compile:\n{}", hash, compiled.log);
-            return nullptr;
-        }
-        spirv = std::move(compiled.words);
-        if (!cacheFile.empty()) {
-            std::error_code ec;
-            std::filesystem::create_directories(cacheFile.parent_path(), ec);
-            std::ofstream out(cacheFile, std::ios::binary);
-            out.write(reinterpret_cast<const char*>(spirv.data()), static_cast<std::streamsize>(spirv.size() * 4));
-        }
-    }
+    // The shader object is complete at once (reflection, semantics, sampler mask: what the engine's effect code asks for right after the
+    // call); its SPIR-V module comes from the disk cache or from DXC on the shader workers (a cold cache costs ~60 ms per shader, ~2800
+    // shaders at the engine's start-up: sequentially that was 170 s). Whoever needs the module first (a draw, Shader::wait()) waits for it.
     auto s = std::make_shared<Shader>();
     s->stage = dec.program.version.stage;
-    s->module = vk::createShaderModule(ctx_, spirv, moduleLabel(ctx_, s->stage, hash, {}));
-    s->reflection = glsl.reflection;
+    s->reflection = hlsl.reflection;
     s->bytecode.assign(tokens.begin(), tokens.end());
     s->hash = hash;
     s->semantics = shaderSemantics(tokens, s->reflection);
     for (std::uint32_t slot = 0; slot < kSamplerCount; ++slot) {
         if (s->reflection.samplers[slot] != shader::TextureType::Unknown) s->samplerMask |= 1u << slot;
     }
-    if (s->module == VK_NULL_HANDLE) {
-        return nullptr;
-    }
     {
         const std::lock_guard lock(shaderMutex_);
         auto [it, inserted] = shaders_.emplace(hash, s);
         if (!inserted) {  // another thread was faster
-            vkDestroyShaderModule(ctx_.device(), s->module, nullptr);
             return it->second;
         }
-        moduleHashes_.emplace(s->module, hash);
     }
-    prewarmPipelines(hash);
-    // with pipeline libraries the shader's compilation happens here (often a loader thread), not at its first draw
-    pipelines_.prepareShader(s->module, s->stage == shader::Stage::Vertex ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT);
+    auto done = std::make_shared<std::promise<void>>();
+    s->ready = done->get_future().share();
+    const auto cacheFile = options_.cacheDir.empty() ? std::filesystem::path()
+                                                     : options_.cacheDir / "spirv" / std::format("{:016x}.spv", hash);
+    enqueueShaderJob([this, s, done, text = std::move(hlsl.hlsl), cacheFile, hash] {
+        std::vector<std::uint32_t> spirv;
+        if (!cacheFile.empty()) {
+            std::ifstream in(cacheFile, std::ios::binary | std::ios::ate);
+            if (in) {
+                const auto size = static_cast<std::size_t>(in.tellg());
+                spirv.resize(size / 4);
+                in.seekg(0);
+                in.read(reinterpret_cast<char*>(spirv.data()), static_cast<std::streamsize>(spirv.size() * 4));
+            }
+        }
+        if (spirv.empty()) {
+            ++shadersCompiled_;
+            auto compiled = shader::compileHlsl(s->stage, text);
+            if (!compiled.ok()) {
+                spdlog::error("d3d9: shader {:016x} does not compile:\n{}", hash, compiled.log);
+                done->set_value();  // the module stays null: draws with this shader are skipped
+                return;
+            }
+            spirv = std::move(compiled.words);
+            if (!cacheFile.empty()) {
+                std::error_code ec;
+                std::filesystem::create_directories(cacheFile.parent_path(), ec);
+                const auto tmp = std::filesystem::path(cacheFile).concat(".tmp");
+                {
+                    std::ofstream out(tmp, std::ios::binary);
+                    out.write(reinterpret_cast<const char*>(spirv.data()), static_cast<std::streamsize>(spirv.size() * 4));
+                }
+                std::filesystem::rename(tmp, cacheFile, ec);  // (a half-written file is never a hit)
+            }
+        }
+        const VkShaderModule module = vk::createShaderModule(ctx_, spirv, moduleLabel(ctx_, s->stage, hash, {}));
+        if (module != VK_NULL_HANDLE) {
+            {
+                const std::lock_guard lock(shaderMutex_);
+                moduleHashes_.emplace(module, hash);
+            }
+            s->module.store(module, std::memory_order_release);
+        }
+        done->set_value();
+        if (module != VK_NULL_HANDLE) {
+            prewarmPipelines(hash);
+            // with pipeline libraries the shader's compilation happens here (a worker thread), not at its first draw
+            pipelines_.prepareShader(module, s->stage == shader::Stage::Vertex ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT);
+        }
+    });
     return s;
+}
+
+void Device::enqueueShaderJob(std::function<void()> job) {
+    {
+        const std::lock_guard lock(shaderJobMutex_);
+        shaderJobs_.push_back(std::move(job));
+        if (shaderThreads_.empty()) {
+            shaderStop_ = false;
+            // all but two hardware threads (the engine thread and the render thread keep running), at least two
+            const unsigned hw = std::thread::hardware_concurrency();
+            const unsigned n = std::clamp(hw > 3 ? hw - 2 : 2u, 2u, 12u);
+            for (unsigned i = 0; i < n; ++i) shaderThreads_.emplace_back([this] { shaderWorker(); });
+        }
+    }
+    shaderJobCv_.notify_one();
+}
+
+void Device::shaderWorker() {
+    SetThreadDescription(GetCurrentThread(), L"rvk shader compile");
+    for (;;) {
+        std::function<void()> job;
+        {
+            std::unique_lock lock(shaderJobMutex_);
+            shaderJobCv_.wait(lock, [this] { return shaderStop_ || !shaderJobs_.empty(); });
+            if (shaderStop_) return;
+            job = std::move(shaderJobs_.front());
+            shaderJobs_.pop_front();
+        }
+        job();
+    }
+}
+
+// drops the queued shader compiles and stops the workers (a compile in progress finishes)
+void Device::stopShaderWorkers() {
+    {
+        const std::lock_guard lock(shaderJobMutex_);
+        shaderJobs_.clear();  // (their promises break: a waiting draw wakes up and sees no module)
+        shaderStop_ = true;
+    }
+    shaderJobCv_.notify_all();
+    for (std::thread& t : shaderThreads_) {
+        if (t.joinable()) t.join();
+    }
+    shaderThreads_.clear();
 }
 
 // The tint debug view's variant of a pixel shader (TranslateOptions::tintEpilogue): translated and compiled on its first tinted
@@ -2567,6 +2629,7 @@ void Device::prewarmPipelines(std::uint64_t shaderHash) {
             }
             k.desc.vs = v->second->module;
             k.desc.fs = p->second->module;
+            if (k.desc.vs == VK_NULL_HANDLE || k.desc.fs == VK_NULL_HANDLE) continue;  // not compiled yet: its own completion prewarms
         }
         pipelines_.prewarm(k.desc);
     }

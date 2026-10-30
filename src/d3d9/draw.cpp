@@ -792,7 +792,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
             return false;
         }
     }
-    if (!vs_ || !ps_ || vs_->module == VK_NULL_HANDLE || ps_->module == VK_NULL_HANDLE) {
+    if (!vs_ || !ps_ || vs_->wait() == VK_NULL_HANDLE || ps_->wait() == VK_NULL_HANDLE) {
         ++stats_.drawsSkipped;  // fixed-function draws are not emulated
         ++stats_.skippedNoShader;
         return false;
@@ -871,7 +871,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         query(q);
         r->replace(*this, q, rep);
         if ((rep.action == DrawReplacement::Action::Shaders || rep.action == DrawReplacement::Action::Procedural) &&
-            (!rep.vs || !rep.ps || rep.vs->module == VK_NULL_HANDLE || rep.ps->module == VK_NULL_HANDLE)) {
+            (!rep.vs || !rep.ps || rep.vs->wait() == VK_NULL_HANDLE || rep.ps->wait() == VK_NULL_HANDLE)) {
             rep.action = DrawReplacement::Action::Engine;
         }
         // the first replacer that takes the draw decides it; one that leaves it to the engine lets the next one look

@@ -19,6 +19,8 @@
 #include <memory>
 #include <condition_variable>
 #include <deque>
+#include <functional>
+#include <future>
 #include <mutex>
 #include <span>
 #include <string>
@@ -268,7 +270,14 @@ private:
 class Shader {
 public:
     shader::Stage stage = shader::Stage::Vertex;
-    VkShaderModule module = VK_NULL_HANDLE;
+    // the SPIR-V module: set by the shader workers (Device::createShader), null while compiling and when the compile failed; read it with wait() where the
+    // draw needs it, directly where a missing module only means "not yet" (the prewarm of pipelines)
+    std::atomic<VkShaderModule> module{VK_NULL_HANDLE};
+    std::shared_future<void> ready;  // valid for shaders compiled by the workers
+    VkShaderModule wait() const {
+        if (ready.valid()) ready.wait();
+        return module.load(std::memory_order_acquire);
+    }
     shader::Reflection reflection;
     std::vector<std::uint32_t> bytecode;  // the D3D9 tokens (kept for GetFunctionData)
     std::uint64_t hash = 0;
@@ -1140,6 +1149,9 @@ private:
     vk::BlendAttachment attachmentBlend(std::uint32_t index) const;
     void variantWorker();
     void stopVariantWorker();
+    void enqueueShaderJob(std::function<void()> job);  // the compile of a translated shader (createShader)
+    void shaderWorker();
+    void stopShaderWorkers();
     void logWaterDraw(draws::Kind kind);
     // diagnostics: RVK_TRACE_MATERIAL = a substring of material names: every draw state of the matching materials, once per
     // material x view x pass x shaders (names are resolved in the opaque passes only with -RvkLogLevel trace)
@@ -1652,6 +1664,11 @@ private:
     std::condition_variable variantCv_;
     std::deque<VariantJob> variantJobs_;
     std::vector<std::thread> variantThreads_;  // 3 workers, started by the first request
+    std::mutex shaderJobMutex_;
+    std::condition_variable shaderJobCv_;
+    std::deque<std::function<void()>> shaderJobs_;
+    std::vector<std::thread> shaderThreads_;  // the compile workers of translated shaders (started by the first one)
+    bool shaderStop_ = false;
     bool variantStop_ = false;
     std::atomic<std::uint64_t> variantsBuilt_{0}, variantsFailed_{0};
     VkDeviceAddress frameAddr_ = 0;  // 0 = upload before the next use
