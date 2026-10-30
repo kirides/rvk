@@ -1359,7 +1359,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
                                       .drawsLastFrame = s.lastFrameDraws,
                                       .unimplementedSlots = static_cast<std::uint32_t>(unimplementedCount()),
                                       .drawsTotal = s.totalDraws,
-                                      .drawsSkippedTotal = s.skippedNoShader + s.skippedNoTarget + s.skippedVertexInput +
+                                      .drawsSkippedTotal = s.skippedNoShader + s.skippedCompiling + s.skippedNoTarget + s.skippedVertexInput +
                                                            s.skippedPipeline,
                                       .textureCpuBytes = d3d9::Texture::cpuBytesTotal(),
                                   });
@@ -1496,9 +1496,9 @@ void HalDevice::logFrameStats() {
         logFrameStructure();
         if (frameTap_) frameTap_->report();
         if (effectOps_) effectOps_->report();
-        spdlog::info("hal: frame {}: {} draws total, {} clears, {} render passes; skipped: {} no shader, {} no target, {} vertex "
+        spdlog::info("hal: frame {}: {} draws total, {} clears, {} render passes; skipped: {} no shader, {} compiling, {} no target, {} vertex "
                      "input, {} pipeline; HAL Draw calls {}; {} unimplemented slots seen; texture CPU copies {:.1f} MiB",
-                     s.frames, s.totalDraws, s.totalClears, s.totalRenderPasses, s.skippedNoShader, s.skippedNoTarget,
+                     s.frames, s.totalDraws, s.totalClears, s.totalRenderPasses, s.skippedNoShader, s.skippedCompiling, s.skippedNoTarget,
                      s.skippedVertexInput, s.skippedPipeline, halDraws_, unimplementedCount(),
                      static_cast<double>(d3d9::Texture::cpuBytesTotal()) / (1024.0 * 1024.0));
     }

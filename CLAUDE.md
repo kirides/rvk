@@ -259,8 +259,8 @@ varyings, `SV_Target<n>` for pixel outputs: no explicit location there, DXC reje
 (`TranslateOptions::prelude / prologue / epilogue / extraGlobals / constOverrides / inputOverrides / dotCaptures`, the HLSL-only `extraOutputs` / `extraInputs` = members of
 `rvk_out` / `rvk_in`; `shader/translate.h`) are HLSL text (enh/material_variant, enh/rt_scene captureOptions, Device::lodModule).
 `rvk_shadertool corpus <dir>` translates + compiles (DXC, `RVK_DXC_OPT` -O level, default 1) + `spirv-val`s every captured shader (corpus from `mode = "trace"`:
-`<test copy>/bin/rvk/corpus`, copy it to `<repo>/corpus`, git-ignored: game-derived; ~2.5 min for 2483 shaders: DXC costs ~40-60 ms per shader, so a cold SPIR-V cache makes
-the first run's shader creation slower; the device's cache `bin\rvk\cache\spirv` is keyed by bytecode + translator version + the hash of the embedded ABI headers), with
+`<test copy>/bin/rvk/corpus`, copy it to `<repo>/corpus`, git-ignored: game-derived; ~2.5 min for 2483 shaders: DXC costs ~40-60 ms per shader, so a cold SPIR-V cache costs ~3 CPU minutes on the first run: `Device::createShader` returns at once, the
+compile runs on a worker pool (hardware threads - 2), a draw whose shader still compiles is skipped and promotes it in the queue (`hal: frame` field `compiling`); the device's cache `bin\rvk\cache\spirv` is keyed by bytecode + translator version + the hash of the embedded ABI headers), with
 `--tint | --gi | --gbuf | --gbuf-motion | --capture` the enhancement variants. `show <file>` prints listing + HLSL, `refdisasm <file>` the D3DX reference listing,
 `hlsl <name> [-D X=Y] [-o out.spv] [--dxil out.dxil]` compiles one embedded / `RVK_SHADER_DIR` shader (or an exported file on disk) like the renderer.
 `python tools/compare_disasm.py corpus` diffs our listing against D3DX for the whole corpus (must stay 100 %). `rvk_shadertool export corpus game-shaders` writes the game's

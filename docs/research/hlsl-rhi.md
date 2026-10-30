@@ -144,6 +144,13 @@ Order of work (P2): (a) interface headers + a Vulkan backend over the existing `
 - **No tiered compilation** (user, 2026-10-30): DXC costs ~40-60 ms per translated shader (the corpus of 2483 takes ~2.5 min at -O1; -O0 ~1.5 min; -O1 and -O3 cost the
   same), paid once into the disk caches (`bin\rvk\cache\spirv` for translated shaders, `bin\rvk\cache\hlsl` for the embedded ones). A background re-optimize would need a
   pipeline rebuild per module swap and buys nothing the driver's own compiler does not do; translated shaders stay at `-O1`.
+- **Translated shaders compile on a worker pool, draws skip while theirs compiles** (2026-10-30). Measured: the synchronous compile on the engine thread made the cold
+  start 169 s to Lua (GLSL: 35 s) and tripped the 90 s stall watchdog of the test harness. `Device::createShader` now returns at once (translation, reflection, semantics on the
+  calling thread), `enqueueShaderJob` hands the DXC compile + module creation to hardware threads - 2 (2..12); with the pool the cold start is 19 s to Lua, 84 s to the first
+  world screenshot (GLSL 91 s). A draw whose vertex / pixel shader has no module yet is **skipped** (`Stats::skippedCompiling`, the `compiling` field of the `hal: frame` line)
+  and its shader is moved to the front of the queue (`Device::prioritizeShader`, once per shader): the start menu's UI shaders compile first, the world's while the save
+  loads, the rest in the background. `Shader::wait()` (blocking) exists for tools but no draw path uses it. Cost on a cold first run: transient holes in the first world frames
+  on a CPU with few cores.
 
 ## 7. Verification log
 

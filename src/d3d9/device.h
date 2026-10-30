@@ -274,6 +274,8 @@ public:
     // draw needs it, directly where a missing module only means "not yet" (the prewarm of pipelines)
     std::atomic<VkShaderModule> module{VK_NULL_HANDLE};
     std::shared_future<void> ready;  // valid for shaders compiled by the workers
+    std::atomic<bool> compiling{false};  // queued / being compiled by the workers: a draw that needs it is skipped meanwhile (Device::prioritizeShader)
+    std::atomic<bool> promoted{false};   // moved to the front of the compile queue by a draw
     VkShaderModule wait() const {
         if (ready.valid()) ready.wait();
         return module.load(std::memory_order_acquire);
@@ -544,6 +546,7 @@ struct FrameStats {
     // cumulative since creation
     std::uint64_t totalDraws = 0;
     std::uint64_t skippedNoShader = 0;
+    std::uint64_t skippedCompiling = 0;  // a shader of the draw was still compiling on the workers
     std::uint64_t skippedNoTarget = 0;
     std::uint64_t skippedVertexInput = 0;
     std::uint64_t skippedPipeline = 0;
@@ -1149,7 +1152,11 @@ private:
     vk::BlendAttachment attachmentBlend(std::uint32_t index) const;
     void variantWorker();
     void stopVariantWorker();
-    void enqueueShaderJob(std::function<void()> job);  // the compile of a translated shader (createShader)
+    void enqueueShaderJob(Shader* shader, std::function<void()> job);  // the compile of a translated shader (createShader)
+public:
+    // a draw needs `s` now: its compile goes to the front of the queue (once per shader); the draw itself is skipped until the module exists
+    void prioritizeShader(Shader& s);
+private:
     void shaderWorker();
     void stopShaderWorkers();
     void logWaterDraw(draws::Kind kind);
@@ -1666,7 +1673,11 @@ private:
     std::vector<std::thread> variantThreads_;  // 3 workers, started by the first request
     std::mutex shaderJobMutex_;
     std::condition_variable shaderJobCv_;
-    std::deque<std::function<void()>> shaderJobs_;
+    struct ShaderJob {
+        Shader* shader = nullptr;
+        std::function<void()> run;
+    };
+    std::deque<ShaderJob> shaderJobs_;
     std::vector<std::thread> shaderThreads_;  // the compile workers of translated shaders (started by the first one)
     bool shaderStop_ = false;
     bool variantStop_ = false;

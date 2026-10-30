@@ -792,9 +792,19 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
             return false;
         }
     }
-    if (!vs_ || !ps_ || vs_->wait() == VK_NULL_HANDLE || ps_->wait() == VK_NULL_HANDLE) {
-        ++stats_.drawsSkipped;  // fixed-function draws are not emulated
-        ++stats_.skippedNoShader;
+    if (!vs_ || !ps_ || vs_->module == VK_NULL_HANDLE || ps_->module == VK_NULL_HANDLE) {
+        ++stats_.drawsSkipped;
+        // a shader still compiling on the workers (a cold shader cache): the draw is left out, its shader goes to the front of the queue (the start menu's
+        // UI first, the world while the save loads); no module and nothing compiling = fixed-function draws are not emulated / the compile failed
+        bool compiling = false;
+        for (Shader* sh : {vs_.get(), ps_.get()}) {
+            if (sh != nullptr && sh->module == VK_NULL_HANDLE && sh->compiling.load(std::memory_order_acquire)) {
+                prioritizeShader(*sh);
+                compiling = true;
+            }
+        }
+        if (compiling) ++stats_.skippedCompiling;
+        else ++stats_.skippedNoShader;
         return false;
     }
     // what the draw is (the engine hooks' tag + the phase)
@@ -871,7 +881,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         query(q);
         r->replace(*this, q, rep);
         if ((rep.action == DrawReplacement::Action::Shaders || rep.action == DrawReplacement::Action::Procedural) &&
-            (!rep.vs || !rep.ps || rep.vs->wait() == VK_NULL_HANDLE || rep.ps->wait() == VK_NULL_HANDLE)) {
+            (!rep.vs || !rep.ps || rep.vs->module == VK_NULL_HANDLE || rep.ps->module == VK_NULL_HANDLE)) {
             rep.action = DrawReplacement::Action::Engine;
         }
         // the first replacer that takes the draw decides it; one that leaves it to the engine lets the next one look

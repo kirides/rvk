@@ -1459,9 +1459,10 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
     }
     auto done = std::make_shared<std::promise<void>>();
     s->ready = done->get_future().share();
+    s->compiling.store(true, std::memory_order_release);
     const auto cacheFile = options_.cacheDir.empty() ? std::filesystem::path()
                                                      : options_.cacheDir / "spirv" / std::format("{:016x}.spv", hash);
-    enqueueShaderJob([this, s, done, text = std::move(hlsl.hlsl), cacheFile, hash] {
+    enqueueShaderJob(s.get(), [this, s, done, text = std::move(hlsl.hlsl), cacheFile, hash] {
         std::vector<std::uint32_t> spirv;
         if (!cacheFile.empty()) {
             std::ifstream in(cacheFile, std::ios::binary | std::ios::ate);
@@ -1477,6 +1478,7 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
             auto compiled = shader::compileHlsl(s->stage, text);
             if (!compiled.ok()) {
                 spdlog::error("d3d9: shader {:016x} does not compile:\n{}", hash, compiled.log);
+                s->compiling.store(false, std::memory_order_release);
                 done->set_value();  // the module stays null: draws with this shader are skipped
                 return;
             }
@@ -1500,6 +1502,7 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
             }
             s->module.store(module, std::memory_order_release);
         }
+        s->compiling.store(false, std::memory_order_release);
         done->set_value();
         if (module != VK_NULL_HANDLE) {
             prewarmPipelines(hash);
@@ -1510,10 +1513,10 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
     return s;
 }
 
-void Device::enqueueShaderJob(std::function<void()> job) {
+void Device::enqueueShaderJob(Shader* shader, std::function<void()> job) {
     {
         const std::lock_guard lock(shaderJobMutex_);
-        shaderJobs_.push_back(std::move(job));
+        shaderJobs_.push_back({shader, std::move(job)});
         if (shaderThreads_.empty()) {
             shaderStop_ = false;
             // all but two hardware threads (the engine thread and the render thread keep running), at least two
@@ -1528,7 +1531,7 @@ void Device::enqueueShaderJob(std::function<void()> job) {
 void Device::shaderWorker() {
     SetThreadDescription(GetCurrentThread(), L"rvk shader compile");
     for (;;) {
-        std::function<void()> job;
+        ShaderJob job;
         {
             std::unique_lock lock(shaderJobMutex_);
             shaderJobCv_.wait(lock, [this] { return shaderStop_ || !shaderJobs_.empty(); });
@@ -1536,7 +1539,22 @@ void Device::shaderWorker() {
             job = std::move(shaderJobs_.front());
             shaderJobs_.pop_front();
         }
-        job();
+        job.run();
+    }
+}
+
+void Device::prioritizeShader(Shader& s) {
+    if (s.promoted.exchange(true, std::memory_order_acq_rel)) return;
+    const std::lock_guard lock(shaderJobMutex_);
+    for (auto it = shaderJobs_.begin(); it != shaderJobs_.end(); ++it) {
+        if (it->shader == &s) {
+            if (it != shaderJobs_.begin()) {
+                ShaderJob j = std::move(*it);
+                shaderJobs_.erase(it);
+                shaderJobs_.push_front(std::move(j));
+            }
+            return;
+        }
     }
 }
 
