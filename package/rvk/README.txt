@@ -4,6 +4,8 @@ Nightly build, work in progress. https://github.com/kirides/rvk
 INSTALL
   Unpack the zip into <Risen>\bin (d3d9.dll goes next to Risen.exe).
   Needs a GPU + driver with Vulkan 1.3.
+  The shaders are compiled on the first start (rvk\dxcompiler.dll, Microsoft's DirectX Shader Compiler, licence in
+  rvk\dxc_LICENSE.txt): loading takes noticeably longer once; the results are cached in rvk\cache.
   Uninstall: delete <Risen>\bin\d3d9.dll and the <Risen>\bin\rvk folder.
 
 IN GAME
