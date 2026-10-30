@@ -135,7 +135,7 @@ private:
     void recordGenerate(d3d9::PassContext& ctx);
     void recordDebug(d3d9::PassContext& ctx);
     bool ensureContext(VkExtent2D display, VkFormat format, bool swapchain, VkFormat hudlessFormat);
-    bool ensurePipelines(VkFormat target);
+    bool ensurePipelines(rhi::Device& rdev, VkFormat target);
     void dropContext();
     bool manualEffective() const { return s_.manual || fallbackManual_; }
     void updateBackend();           // the swapchain backend follows the mode (create / release; fall back to the manual model)
@@ -153,10 +153,9 @@ private:
     std::shared_ptr<vk::FrameGen> fg_;  // retired with the frame that last used it
     VkExtent2D ctxDisplay_{};
     bool mlActive_ = false;
-    vk::PassLayout layout_;             // set 1: one storage image (the R32F depth)
-    VkPipeline prep_ = VK_NULL_HANDLE;  // shaders/upscale/prep.comp
-    vk::PassLayout debugLayout_;        // no set 1 bindings
-    VkPipeline debug_ = VK_NULL_HANDLE;
+    // RHI pipelines (rhi::Device over the renderer's objects; the passes record through rhi::CommandList, hlsl-rhi.md 8)
+    std::unique_ptr<rhi::Pipeline> prep_;   // shaders/upscale/prep.comp (storage image u0: the R32F depth)
+    std::unique_ptr<rhi::Pipeline> debug_;  // framegen.debug: a fullscreen draw into the back buffer
     VkFormat debugFormat_ = VK_FORMAT_UNDEFINED;
     FrameGenState state_;
     // this frame

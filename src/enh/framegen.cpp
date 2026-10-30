@@ -10,6 +10,7 @@
 
 #include "core/paths.h"
 #include "enh/gbuffer.h"
+#include "rhi/vulkan/wrap.h"
 #include "shader/embedded.h"
 #include "vk/context.h"
 #include "vk/frames.h"
@@ -117,15 +118,8 @@ FrameGeneration::FrameGeneration(d3d9::Device& device) : dev_(device) { dev_.set
 FrameGeneration::~FrameGeneration() {
     shutdown();
     dev_.setFrameGenClient(nullptr);
-    vk::Context* ctx = &dev_.ctx();
-    const VkPipeline prep = prep_, debug = debug_;
-    vk::PassLayout layout = layout_, debugLayout = debugLayout_;
-    dev_.frames().retire([ctx, prep, debug, layout, debugLayout]() mutable {
-        if (prep != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), prep, nullptr);
-        if (debug != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), debug, nullptr);
-        if (layout.valid()) layout.destroy(*ctx);
-        if (debugLayout.valid()) debugLayout.destroy(*ctx);
-    });
+    prep_.reset();  // (RHI pipelines retire themselves through the frames)
+    debug_.reset();
 }
 
 void FrameGeneration::apply(const Settings& s) {
@@ -180,14 +174,15 @@ void FrameGeneration::updateBackend() {
 
 void FrameGeneration::enable() {
     if (on_) return;
-    if (!layout_.valid()) {
-        const VkDescriptorSetLayoutBinding bind{0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-        if (!layout_.create(dev_.ctx(), dev_.bindless(), {&bind, 1})) {
-            failed_ = true;
-            return;
+    if (!prep_) {
+        rhi::Device* rdev = dev_.rhi();
+        if (rdev != nullptr) {
+            rhi::ComputePipelineDesc cd;
+            cd.cs.spirv = shader::embedded::spirv("upscale/prep.comp");
+            cd.name = "framegen.depth";
+            prep_ = rdev->createComputePipeline(cd);
         }
-        prep_ = vk::createComputePipeline(dev_.ctx(), layout_.layout(), shader::embedded::spirv("upscale/prep.comp"), "framegen.depth");
-        if (prep_ == VK_NULL_HANDLE) {
+        if (!prep_) {
             failed_ = true;
             return;
         }
@@ -319,12 +314,18 @@ void FrameGeneration::recordDepth(d3d9::PassContext& ctx) {
     push.depthTex = ds->texture()->bindlessSlot();
     push.width = render.width;
     push.height = render.height;
-    depth->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, prep_);
-    layout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, dev_.bindless());
-    layout_.pushStorageImage(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, 0, depth->image.view());
-    layout_.push(cmd, &push, sizeof(push));
-    vkCmdDispatch(cmd, (render.width + 7) / 8, (render.height + 7) / 8, 1);
+    rhi::Device* rdev = dev_.rhi();
+    if (rdev == nullptr || !prep_) return;
+    {
+        const auto depthTex = rhi::vulkan::wrapImage(*rdev, depth->image, depth->slot, "framegen.depth");
+        const auto cl = rhi::vulkan::wrapCommandBuffer(*rdev, cmd);
+        cl->transition(*depthTex, VK_IMAGE_LAYOUT_GENERAL);
+        cl->bindPipeline(*prep_);
+        rhi::Texture* const storage[] = {depthTex.get()};
+        cl->setStorageTextures(storage);
+        cl->setPushConstants(&push, sizeof(push));
+        cl->dispatch((render.width + 7) / 8, (render.height + 7) / 8, 1);
+    }
     depthFrame_ = dev_.stats().frames + 1;
     renderSize_ = render;
 }
@@ -620,25 +621,18 @@ void FrameGeneration::recordSwapchain(d3d9::PassContext& ctx, FrameGenBlock bloc
 
 // ---- BeforePresent: the debug view -------------------------------------------------------------------------------------------
 
-bool FrameGeneration::ensurePipelines(VkFormat target) {
-    vk::Context& vctx = dev_.ctx();
-    if (!debugLayout_.valid() && !debugLayout_.create(vctx, dev_.bindless(), {})) return false;
-    if (debug_ != VK_NULL_HANDLE && debugFormat_ != target) {
-        const VkPipeline old = debug_;
-        vk::Context* c = &vctx;
-        dev_.frames().retire([c, old] { vkDestroyPipeline(c->device(), old, nullptr); });
-        debug_ = VK_NULL_HANDLE;
-    }
-    if (debug_ == VK_NULL_HANDLE) {
-        vk::PassGraphicsDesc gd;
-        gd.vs = shader::embedded::spirv("debug/fullscreen.vert");
-        gd.fs = shader::embedded::spirv("framegen/debug.frag");
-        gd.color = target;
+bool FrameGeneration::ensurePipelines(rhi::Device& rdev, VkFormat target) {
+    if (debug_ && debugFormat_ != target) debug_.reset();
+    if (!debug_) {
+        rhi::GraphicsPipelineDesc gd;
+        gd.vs.spirv = shader::embedded::spirv("debug/fullscreen_rhi.vert");
+        gd.ps.spirv = shader::embedded::spirv("framegen/debug.frag");
+        gd.colorFormats[0] = target;
         gd.name = "framegen.debug";
-        debug_ = vk::createPassGraphicsPipeline(vctx, debugLayout_.layout(), gd);
+        debug_ = rdev.createGraphicsPipeline(gd);
         debugFormat_ = target;
     }
-    return debug_ != VK_NULL_HANDLE;
+    return debug_ != nullptr;
 }
 
 void FrameGeneration::recordDebug(d3d9::PassContext& ctx) {
@@ -669,7 +663,8 @@ void FrameGeneration::recordDebug(d3d9::PassContext& ctx) {
             break;
         case FrameGenView::Off: break;
     }
-    if (src == nullptr || !ensurePipelines(target.format())) return;
+    rhi::Device* rdev = dev_.rhi();
+    if (src == nullptr || rdev == nullptr || !ensurePipelines(*rdev, target.format())) return;
     VkCommandBuffer cmd = ctx.cmd;
     src->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     DebugPush push{};
@@ -681,27 +676,21 @@ void FrameGeneration::recordDebug(d3d9::PassContext& ctx) {
     const d3d9::scene::CameraBlock& cam = dev_.camera();
     push.nearZ = cam.nearZ > 0.0f ? cam.nearZ : 10.0f;
     push.farZ = cam.farZ > push.nearZ ? cam.farZ : 100000.0f;
-    target.transition(cmd, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    VkRenderingAttachmentInfo att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    att.imageView = target.attachmentView(dev_.ctx(), 0, 0);
-    att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    att.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
-    ri.renderArea = {{0, 0}, size};
-    ri.layerCount = 1;
-    ri.colorAttachmentCount = 1;
-    ri.pColorAttachments = &att;
-    vkCmdBeginRendering(cmd, &ri);
-    const VkViewport vp{0.0f, 0.0f, static_cast<float>(size.width), static_cast<float>(size.height), 0.0f, 1.0f};
-    const VkRect2D sc{{0, 0}, size};
-    vkCmdSetViewport(cmd, 0, 1, &vp);
-    vkCmdSetScissor(cmd, 0, 1, &sc);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, debug_);
-    debugLayout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, dev_.bindless());
-    debugLayout_.push(cmd, &push, sizeof(push));
-    vkCmdDraw(cmd, 3, 1, 0, 0);
-    vkCmdEndRendering(cmd);
+    const auto targetTex = rhi::vulkan::wrapImage(*rdev, target, 0, "framegen.debug target");
+    const auto cl = rhi::vulkan::wrapCommandBuffer(*rdev, cmd);
+    cl->transition(*targetTex, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    rhi::RenderingInfo ri;
+    ri.color[0].texture = targetTex.get();
+    ri.color[0].load = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    ri.color[0].store = VK_ATTACHMENT_STORE_OP_STORE;
+    ri.colorCount = 1;
+    ri.width = size.width;
+    ri.height = size.height;
+    cl->beginRendering(ri);
+    cl->bindPipeline(*debug_);
+    cl->setPushConstants(&push, sizeof(push));
+    cl->draw(3, 1, 0, 0);
+    cl->endRendering();
 }
 
 bool FrameGeneration::readGenerated(std::vector<std::uint8_t>& bgra, std::uint32_t& width, std::uint32_t& height) {

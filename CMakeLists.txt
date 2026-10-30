@@ -262,6 +262,7 @@ add_library(rvk_core STATIC
     src/rhi/rhi.cpp
     src/rhi/rhi.h
     src/rhi/vulkan/vulkan_device.cpp
+    src/rhi/vulkan/wrap.h
     src/shader/dxc.cpp
     src/shader/dxc.h
     src/shader/embedded.cpp.in
@@ -454,6 +455,8 @@ if(RVK_BUILD_TESTS)
     set_tests_properties(rvk_vktest PROPERTIES LABELS gpu)
     add_test(NAME rvk_vktest_passes COMMAND rvk_vktest --passes)
     set_tests_properties(rvk_vktest_passes PROPERTIES LABELS gpu)
+    add_test(NAME rvk_vktest_passes_rhi COMMAND rvk_vktest --passes --rhi)
+    set_tests_properties(rvk_vktest_passes_rhi PROPERTIES LABELS gpu)
     add_test(NAME rvk_vktest_rt COMMAND rvk_vktest --rt)
     set_tests_properties(rvk_vktest_rt PROPERTIES LABELS gpu)
     add_test(NAME rvk_vktest_fsr COMMAND rvk_vktest --fsr)

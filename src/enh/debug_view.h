@@ -1,8 +1,9 @@
 #pragma once
 
 // The first (debug) enhancement, setting debug.inject_view (docs/research/injection.md 5): proof of the enhancement plumbing
-// end to end. At the injection point AfterOpaque of the frame's first main view, a GLSL compute shader
-// (shaders/debug/inject_view.comp, embedded at build time) writes a factor per pixel into a transient image: in "depth" mode
+// end to end. At the injection point AfterOpaque of the frame's first main view, an HLSL compute shader
+// (shaders/debug/inject_view.comp.hlsl, compiled by DXC at run time; the pass is recorded through the slim RHI, hlsl-rhi.md 8)
+// writes a factor per pixel into a transient image: in "depth" mode
 // distance bands + a world-space grid from the engine's depth map and the FrameBlock camera (the lines must stay put while the
 // camera moves), in "tint" mode a colour cycled by the FrameBlock time. A fullscreen pass (inject_view.frag) multiplies the
 // scene HDR target by it, before the refraction copy, water, alpha and the post chain. Its mode / strength travel in the
@@ -13,6 +14,7 @@
 
 #include "d3d9/device.h"
 #include "shader/abi.h"
+#include "rhi/rhi.h"
 #include "vk/passes.h"
 
 namespace rvk::enh {
@@ -44,16 +46,16 @@ public:
     Mode mode() const { return mode_; }
 
 private:
-    bool ensurePipelines(VkFormat target);
+    bool ensurePipelines(rhi::Device& rdev, VkFormat target);
     void record(d3d9::PassContext& ctx);
     void destroyPipelines();
 
     d3d9::Device& dev_;
     Mode mode_ = Mode::Off;
     std::uint32_t passId_ = 0;
-    vk::PassLayout layout_;
-    VkPipeline compute_ = VK_NULL_HANDLE;
-    VkPipeline composite_ = VK_NULL_HANDLE;
+    // RHI pipelines (rhi::Device over the renderer's Vulkan objects: d3d9::Device::rhi())
+    std::unique_ptr<rhi::Pipeline> compute_;
+    std::unique_ptr<rhi::Pipeline> composite_;
     VkFormat compositeFormat_ = VK_FORMAT_UNDEFINED;
     bool failed_ = false;
     std::uint64_t frames_ = 0;  // frames drawn (logged at the first)

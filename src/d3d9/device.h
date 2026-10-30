@@ -37,6 +37,7 @@
 #include "d3d9/material_source.h"
 #include "d3d9/scene.h"
 #include "d3d9/semantics.h"
+#include "rhi/rhi.h"
 #include "shader/abi.h"
 #include "shader/translate.h"
 #include "shader/hlsl.h"
@@ -1103,6 +1104,8 @@ public:
     // internals used by resources
     vk::Context& ctx() { return ctx_; }
     vk::Frames& frames() { return frames_; }
+    // the slim RHI over this device's Vulkan objects (rhi/vulkan/wrap.h), created on first use; null when it cannot be created. Render thread.
+    rhi::Device* rhi();
     vk::MeshArena& meshArena() { return meshArena_; }
     vk::Bindless& bindless() { return bindless_; }
     std::uint64_t frameValue() const { return frames_.currentValue(); }
@@ -1722,6 +1725,7 @@ private:
     inject::Firings firings_;
     bool injecting_ = false;
     vk::Transients transients_;
+    std::unique_ptr<rhi::Device> rhi_;  // rhi(): destroyed before frames_ (its retirements run there)
 
     // overlay
     PresentOverlay* overlay_ = nullptr;

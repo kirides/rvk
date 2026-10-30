@@ -90,7 +90,7 @@ private:
     VmaAllocation exposureRbAlloc_ = VK_NULL_HANDLE;
     const float* exposureRbPtr_ = nullptr;
     bool exposureRbWritten_ = false;
-    VkPipeline exposurePipe_ = VK_NULL_HANDLE;
+    std::unique_ptr<rhi::Pipeline> exposurePipe_;  // (RHI pipelines: the passes record through rhi::CommandList, hlsl-rhi.md 8)
     bool ml_ = false;        // upscale.provider = fsr4
     bool mlActive_ = false;  // the current context is the ML upscaler
     float reactiveCutoff_ = 0.08f, reactiveScale_ = 1.0f;
@@ -103,8 +103,7 @@ private:
     const vk::Fsr* fsrTableFor_ = nullptr;  // the context the table was read from (guarded by jitterMutex_)
     std::vector<std::array<float, 2>> jitterTable_;
     bool failed_ = false;  // the DLL / the context / the pipeline is not available: FSR stays off this session
-    vk::PassLayout layout_;  // set 1: one storage image (the R32F depth)
-    VkPipeline prep_ = VK_NULL_HANDLE;
+    std::unique_ptr<rhi::Pipeline> prep_;  // hardware depth -> R32F (storage image u0)
     std::shared_ptr<vk::Fsr> fsr_;  // retired with the frame that last used it
     VkExtent2D fsrRender_{}, fsrDisplay_{};
     bool needReset_ = true;  // the next dispatch drops the history (first frame, size change, skipped frames)

@@ -2,6 +2,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "rhi/vulkan/wrap.h"
 #include "shader/abi.h"
 #include "shader/embedded.h"
 
@@ -45,58 +46,40 @@ void DebugView::setMode(Mode mode) {
     frames_ = 0;
 }
 
+// (the pipelines are RHI objects: their destruction goes through Frames::retire, the GPU may still use them)
 void DebugView::destroyPipelines() {
-    vk::Context* ctx = &dev_.ctx();
-    const VkPipeline c = compute_, g = composite_;
-    vk::PassLayout layout = layout_;
-    if (c != VK_NULL_HANDLE || g != VK_NULL_HANDLE || layout.valid()) {
-        dev_.frames().retire([ctx, c, g, layout]() mutable {
-            if (c != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), c, nullptr);
-            if (g != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), g, nullptr);
-            layout.destroy(*ctx);
-        });
-    }
-    compute_ = composite_ = VK_NULL_HANDLE;
-    layout_ = vk::PassLayout{};
+    compute_.reset();
+    composite_.reset();
     compositeFormat_ = VK_FORMAT_UNDEFINED;
 }
 
-bool DebugView::ensurePipelines(VkFormat target) {
+bool DebugView::ensurePipelines(rhi::Device& rdev, VkFormat target) {
     if (failed_) return false;
-    vk::Context& ctx = dev_.ctx();
-    if (!layout_.valid()) {
-        const VkDescriptorSetLayoutBinding out{0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-        if (!layout_.create(ctx, dev_.bindless(), {&out, 1})) {
-            failed_ = true;
-            return false;
-        }
+    if (!compute_) {
+        rhi::ComputePipelineDesc cd;
+        cd.cs.spirv = shader::embedded::spirv("debug/inject_view.comp");
+        cd.name = "debug.inject_view compute";
+        compute_ = rdev.createComputePipeline(cd);
     }
-    if (compute_ == VK_NULL_HANDLE) {
-        compute_ = vk::createComputePipeline(ctx, layout_.layout(), shader::embedded::spirv("debug/inject_view.comp"),
-                                             "debug.inject_view compute");
-    }
-    if (composite_ != VK_NULL_HANDLE && compositeFormat_ != target) {
-        const VkPipeline old = composite_;
-        vk::Context* c = &ctx;
-        dev_.frames().retire([c, old] { vkDestroyPipeline(c->device(), old, nullptr); });
-        composite_ = VK_NULL_HANDLE;
-    }
-    if (composite_ == VK_NULL_HANDLE) {
-        vk::PassGraphicsDesc gd;
-        gd.vs = shader::embedded::spirv("debug/fullscreen.vert");
-        gd.fs = shader::embedded::spirv("debug/inject_view.frag");
-        gd.color = target;
+    if (composite_ && compositeFormat_ != target) composite_.reset();
+    if (!composite_) {
+        rhi::GraphicsPipelineDesc gd;
+        gd.vs.spirv = shader::embedded::spirv("debug/fullscreen_rhi.vert");
+        gd.ps.spirv = shader::embedded::spirv("debug/inject_view.frag");
+        gd.colorFormats[0] = target;
         // dst * src: the factor image multiplies the scene (keeps the engine's exposure); alpha kept
-        gd.blend.enable = 1;
-        gd.blend.srcColor = VK_BLEND_FACTOR_DST_COLOR;
-        gd.blend.dstColor = VK_BLEND_FACTOR_ZERO;
-        gd.blend.srcAlpha = VK_BLEND_FACTOR_ZERO;
-        gd.blend.dstAlpha = VK_BLEND_FACTOR_ONE;
+        gd.blend.blendEnable = VK_TRUE;
+        gd.blend.srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR;
+        gd.blend.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+        gd.blend.colorBlendOp = VK_BLEND_OP_ADD;
+        gd.blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        gd.blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        gd.blend.alphaBlendOp = VK_BLEND_OP_ADD;
         gd.name = "debug.inject_view composite";
-        composite_ = vk::createPassGraphicsPipeline(ctx, layout_.layout(), gd);
+        composite_ = rdev.createGraphicsPipeline(gd);
         compositeFormat_ = target;
     }
-    if (compute_ == VK_NULL_HANDLE || composite_ == VK_NULL_HANDLE) {
+    if (!compute_ || !composite_) {
         spdlog::error("enh: debug.inject_view: pipelines failed, the view stays off this session");
         failed_ = true;
         return false;
@@ -108,8 +91,10 @@ void DebugView::record(d3d9::PassContext& ctx) {
     d3d9::Texture* scene = ctx.sceneHdr;
     // the frame's first main view only, and only when it renders into the image effect's scene target
     if (ctx.mainView != 1 || scene == nullptr || ctx.target != scene) return;
+    rhi::Device* rdev = dev_.rhi();
+    if (rdev == nullptr) return;
     vk::Image& target = scene->image();
-    if (!ensurePipelines(target.format())) return;
+    if (!ensurePipelines(*rdev, target.format())) return;
     const std::uint32_t w = scene->desc().width, h = scene->desc().height;
     vk::Transients::Entry* factor = dev_.transients().get("debug.inject_view", {VK_FORMAT_R16G16B16A16_SFLOAT, {w, h}});
     if (factor == nullptr) return;
@@ -126,37 +111,34 @@ void DebugView::record(d3d9::PassContext& ctx) {
     push.srcTex = factor->slot;
     push.srcSampler = 0;  // the bindless heap's point / clamp sampler (same size: one texel per pixel)
 
+    // the RHI's views of the pass's images (the vk::Images keep the tracked layouts) and of the frame's command buffer
+    const std::unique_ptr<rhi::Texture> factorTex = rhi::vulkan::wrapImage(*rdev, factor->image, factor->slot, "debug.inject_view");
+    const std::unique_ptr<rhi::Texture> targetTex = rhi::vulkan::wrapImage(*rdev, target);
+    const std::unique_ptr<rhi::CommandList> cl = rhi::vulkan::wrapCommandBuffer(*rdev, cmd);
+
     // compute: the factor image (its previous use was last frame's composite read: the tracked layout orders the write)
-    factor->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_);
-    layout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, dev_.bindless());
-    layout_.pushStorageImage(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, 0, factor->image.view());
-    layout_.push(cmd, &push, sizeof(push));
-    vkCmdDispatch(cmd, (w + 7) / 8, (h + 7) / 8, 1);
+    cl->transition(*factorTex, VK_IMAGE_LAYOUT_GENERAL);
+    cl->bindPipeline(*compute_);
+    rhi::Texture* const storage[] = {factorTex.get()};
+    cl->setStorageTextures(storage);
+    cl->setPushConstants(&push, sizeof(push));
+    cl->dispatch((w + 7) / 8, (h + 7) / 8, 1);
 
     // composite: the scene HDR target *= factor
-    factor->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    target.transition(cmd, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    VkRenderingAttachmentInfo att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    att.imageView = target.attachmentView(dev_.ctx(), 0, 0);
-    att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
-    ri.renderArea = {{0, 0}, {w, h}};
-    ri.layerCount = 1;
-    ri.colorAttachmentCount = 1;
-    ri.pColorAttachments = &att;
-    vkCmdBeginRendering(cmd, &ri);
-    const VkViewport vp{0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h), 0.0f, 1.0f};
-    const VkRect2D sc{{0, 0}, {w, h}};
-    vkCmdSetViewport(cmd, 0, 1, &vp);
-    vkCmdSetScissor(cmd, 0, 1, &sc);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, composite_);
-    layout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, dev_.bindless());
-    layout_.push(cmd, &push, sizeof(push));
-    vkCmdDraw(cmd, 3, 1, 0, 0);
-    vkCmdEndRendering(cmd);
+    cl->transition(*factorTex, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    cl->transition(*targetTex, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    rhi::RenderingInfo ri;
+    ri.color[0].texture = targetTex.get();
+    ri.color[0].load = VK_ATTACHMENT_LOAD_OP_LOAD;
+    ri.color[0].store = VK_ATTACHMENT_STORE_OP_STORE;
+    ri.colorCount = 1;
+    ri.width = w;
+    ri.height = h;
+    cl->beginRendering(ri);
+    cl->bindPipeline(*composite_);
+    cl->setPushConstants(&push, sizeof(push));
+    cl->draw(3, 1, 0, 0);
+    cl->endRendering();
     if (frames_++ == 0) {
         spdlog::info("enh: debug.inject_view {} at {}: {}x{}, depth map {}", mode_ == Mode::Depth ? "depth" : "tint",
                      d3d9::inject::name(ctx.point), w, h, push.depthTex != 0 ? "slot " + std::to_string(push.depthTex) : "none");

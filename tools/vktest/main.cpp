@@ -3,10 +3,11 @@
 //   rvk_vktest [out.png] [--no-validation]
 //   rvk_vktest --gpl-corpus <dir with *.spv> [--no-validation]: compiles every SPIR-V module as a graphics pipeline
 //   library (pre-rasterization / fragment shader), as the renderer does at shader creation (driver robustness check)
-//   rvk_vktest --passes [--hazard]: the injected-pass building blocks (docs/research/injection.md) with synchronization
+//   rvk_vktest --passes [--hazard] [--rhi]: the injected-pass building blocks (docs/research/injection.md) with synchronization
 //   validation: the debug view's GLSL compute shader (embedded at build time) reads a FrameBlock and writes a transient
 //   image, its fullscreen composite multiplies a render target by it; pixels checked. --hazard leaves a barrier out on
-//   purpose (two copies into one buffer) and passes when synchronization validation reports it (proves the check is live)
+//   purpose (two copies into one buffer) and passes when synchronization validation reports it (proves the check is live).
+//   --rhi records the same passes through the slim RHI over these objects (rhi/vulkan/wrap.h, hlsl-rhi.md 8)
 //   rvk_vktest --rt: the optional ray tracing tier: BLAS -> TLAS -> GL_EXT_ray_query compute (shaders/test/rt_query.comp),
 //   pixels checked; and a device with rt.allow off (docs/research/raytracing.md). SKIP (exit 0) on a GPU without it
 //   rvk_vktest --fg [dll]: AMD frame generation through the FFX API DLLs (vk/framegen.h): create the context, generate the midpoint frame
@@ -60,6 +61,7 @@
 #include "vk/framegen.h"
 #include "vk/fsr.h"
 #include "vk/image.h"
+#include "rhi/vulkan/wrap.h"
 #include "vk/passes.h"
 #include "vk/pipeline.h"
 #include "vk/raytracing.h"
@@ -235,8 +237,9 @@ std::uint16_t floatToHalf(float f) {
 
 // the debug injection view's two passes on a 64x64 "scene" (cleared to 0.5): compute (tint mode, strength 1, time 0) into a
 // transient factor image, composite scene *= factor. Synchronization validation must stay silent (or, with `hazard`, report
-// the missing barrier between two copies into the read-back buffer).
-int passTest(bool hazard) {
+// the missing barrier between two copies into the read-back buffer). viaRhi: the same passes created and recorded through the slim RHI over these
+// objects (rhi::vulkan::wrap, wrapImage, wrapCommandBuffer: the pass migration's adapter, docs/research/hlsl-rhi.md 8).
+int passTest(bool hazard, bool viaRhi) {
     vk::Context ctx;
     if (!ctx.create({true, -1, "rvk_vktest passes", true})) {
         return 2;
@@ -254,7 +257,33 @@ int passTest(bool hazard) {
         return 2;
     }
     const VkFormat fmt = VK_FORMAT_R16G16B16A16_SFLOAT;
-    VkPipeline compute = vk::createComputePipeline(ctx, layout.layout(), shader::embedded::spirv("debug/inject_view.comp"), "test compute");
+    VkPipeline compute = VK_NULL_HANDLE, composite = VK_NULL_HANDLE;
+    std::unique_ptr<rhi::Device> rdev;
+    std::unique_ptr<rhi::Pipeline> rCompute, rComposite;
+    if (viaRhi) {
+        rdev = rhi::vulkan::wrap(ctx, frames, bindless);
+        if (!rdev) return 2;
+        rhi::ComputePipelineDesc cd;
+        cd.cs.spirv = shader::embedded::spirv("debug/inject_view.comp");
+        cd.name = "test rhi compute";
+        rCompute = rdev->createComputePipeline(cd);
+        rhi::GraphicsPipelineDesc rg;
+        rg.vs.spirv = shader::embedded::spirv("debug/fullscreen_rhi.vert");
+        rg.ps.spirv = shader::embedded::spirv("debug/inject_view.frag");
+        rg.colorFormats[0] = fmt;
+        rg.blend.blendEnable = VK_TRUE;
+        rg.blend.srcColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR;
+        rg.blend.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+        rg.blend.colorBlendOp = VK_BLEND_OP_ADD;
+        rg.blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        rg.blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        rg.blend.alphaBlendOp = VK_BLEND_OP_ADD;
+        rg.name = "test rhi composite";
+        rComposite = rdev->createGraphicsPipeline(rg);
+        if (!rCompute || !rComposite) return 2;
+    } else {
+        compute = vk::createComputePipeline(ctx, layout.layout(), shader::embedded::spirv("debug/inject_view.comp"), "test compute");
+    }
     vk::PassGraphicsDesc gd;
     gd.vs = shader::embedded::spirv("debug/fullscreen.vert");
     gd.fs = shader::embedded::spirv("debug/inject_view.frag");
@@ -265,9 +294,11 @@ int passTest(bool hazard) {
     gd.blend.srcAlpha = VK_BLEND_FACTOR_ZERO;
     gd.blend.dstAlpha = VK_BLEND_FACTOR_ONE;
     gd.name = "test composite";
-    VkPipeline composite = vk::createPassGraphicsPipeline(ctx, layout.layout(), gd);
-    if (compute == VK_NULL_HANDLE || composite == VK_NULL_HANDLE) {
-        return 2;
+    if (!viaRhi) {
+        composite = vk::createPassGraphicsPipeline(ctx, layout.layout(), gd);
+        if (compute == VK_NULL_HANDLE || composite == VK_NULL_HANDLE) {
+            return 2;
+        }
     }
     vk::Image scene;
     scene.create(ctx, {VK_IMAGE_TYPE_2D, fmt, {kSize, kSize, 1}, 1, 1, false,
@@ -328,7 +359,31 @@ int passTest(bool hazard) {
     push.height = kSize;
     push.srcTex = factor->slot;
     // two frames: the second one's compute write must be ordered after the first one's composite read
-    for (int frame = 0; frame < 2; ++frame) {
+    for (int frame = 0; frame < 2 && viaRhi; ++frame) {
+        // through the RHI: the tracked layouts of the vk::Images are the source of truth, the wrapper's transitions call them
+        const auto factorTex = rhi::vulkan::wrapImage(*rdev, factor->image, factor->slot, "test factor");
+        const auto sceneTex = rhi::vulkan::wrapImage(*rdev, scene, 0, "test scene");
+        const auto cl = rhi::vulkan::wrapCommandBuffer(*rdev, cmd);
+        cl->transition(*factorTex, VK_IMAGE_LAYOUT_GENERAL);
+        cl->bindPipeline(*rCompute);
+        rhi::Texture* const storage[] = {factorTex.get()};
+        cl->setStorageTextures(storage);
+        cl->setPushConstants(&push, sizeof(push));
+        cl->dispatch(kSize / 8, kSize / 8, 1);
+        cl->transition(*factorTex, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        if (frame == 1) break;
+        cl->transition(*sceneTex, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        rhi::RenderingInfo rinfo;
+        rinfo.color[0].texture = sceneTex.get();
+        rinfo.colorCount = 1;
+        rinfo.width = rinfo.height = kSize;
+        cl->beginRendering(rinfo);
+        cl->bindPipeline(*rComposite);
+        cl->setPushConstants(&push, sizeof(push));
+        cl->draw(3, 1, 0, 0);
+        cl->endRendering();
+    }
+    for (int frame = 0; frame < 2 && !viaRhi; ++frame) {
         factor->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute);
         layout.bindSet0(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, bindless);
@@ -381,16 +436,19 @@ int passTest(bool hazard) {
     transients.destroy();
     frames.waitIdle();
     scene.destroy(ctx);
-    vkDestroyPipeline(ctx.device(), compute, nullptr);
-    vkDestroyPipeline(ctx.device(), composite, nullptr);
+    if (compute != VK_NULL_HANDLE) vkDestroyPipeline(ctx.device(), compute, nullptr);
+    if (composite != VK_NULL_HANDLE) vkDestroyPipeline(ctx.device(), composite, nullptr);
+    rCompute.reset();  // (retired: the frames run them below)
+    rComposite.reset();
+    rdev.reset();
     layout.destroy(ctx);
     frames.destroy();  // runs the retired destructors (the transient image, its bindless slot) before the heap goes
     bindless.destroy();
     const std::uint32_t verrors = ctx.validationErrors();
     ctx.destroy();
     const bool pass = bad == 0 && (hazard ? verrors > 0 : verrors == 0);
-    std::printf("%s: passes: %d bad value(s), %u validation error(s)%s\n", pass ? "PASS" : "FAIL", bad, verrors,
-                hazard ? " (a hazard was expected)" : "");
+    std::printf("%s: passes%s: %d bad value(s), %u validation error(s)%s\n", pass ? "PASS" : "FAIL", viaRhi ? " (through the RHI wrapper)" : "", bad,
+                verrors, hazard ? " (a hazard was expected)" : "");
     return pass ? 0 : 1;
 }
 
@@ -1381,7 +1439,7 @@ int main(int argc, char** argv) {
     std::string out = "vktest.png";
     bool validation = true;
     std::string gplDir;
-    bool passes = false, hazard = false, rtMode = false, fsrMode = false, fgMode = false;
+    bool passes = false, hazard = false, rhiWrap = false, rtMode = false, fsrMode = false, fgMode = false;
     std::string fsrDll;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -1393,6 +1451,8 @@ int main(int argc, char** argv) {
             passes = true;
         } else if (a == "--hazard") {
             hazard = true;
+        } else if (a == "--rhi") {
+            rhiWrap = true;
         } else if (a == "--rt") {
             rtMode = true;
         } else if (a == "--ffx-driver") {
@@ -1417,7 +1477,7 @@ int main(int argc, char** argv) {
         return gplCorpus(gplDir, validation);
     }
     if (passes) {
-        return passTest(hazard);
+        return passTest(hazard, rhiWrap);
     }
     if (rtMode) {
         return rtTest();

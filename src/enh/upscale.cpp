@@ -11,6 +11,7 @@
 #include "core/paths.h"
 #include "enh/gbuffer.h"
 #include "engine/exposure.h"
+#include "rhi/vulkan/wrap.h"
 #include "shader/embedded.h"
 #include "vk/context.h"
 #include "vk/frames.h"
@@ -96,15 +97,9 @@ Upscale::~Upscale() {
     dev_.removePasses(this);
     dev_.setJitterSource(nullptr);
     dropFsr();
-    vk::Context* ctx = &dev_.ctx();
-    const VkPipeline prep = prep_, exposurePipe = exposurePipe_;
-    vk::PassLayout layout = layout_;
     releaseExposureReadback();
-    dev_.frames().retire([ctx, prep, exposurePipe, layout]() mutable {
-        if (prep != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), prep, nullptr);
-        if (exposurePipe != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), exposurePipe, nullptr);
-        if (layout.valid()) layout.destroy(*ctx);
-    });
+    prep_.reset();  // (RHI pipelines retire themselves through the frames)
+    exposurePipe_.reset();
     for (const char* k : {"upscale.depth", "upscale.out", "upscale.opaque", "upscale.reactive", "upscale.exposure"}) dev_.transients().release(k);
 }
 
@@ -145,21 +140,24 @@ void Upscale::apply(UpscaleMode mode, unsigned flip) {
         spdlog::warn("enh: upscale: FSR is not available this session (see earlier messages): jitter only");
         return;
     }
-    if (!layout_.valid()) {
-        const VkDescriptorSetLayoutBinding bind{0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-        if (!layout_.create(dev_.ctx(), dev_.bindless(), {&bind, 1})) {
-            failed_ = true;
-            dev_.setRenderRatio(1.0f);
-            return;
+    if (!prep_) {
+        rhi::Device* rdev = dev_.rhi();
+        if (rdev != nullptr) {
+            rhi::ComputePipelineDesc cd;
+            cd.cs.spirv = shader::embedded::spirv("upscale/prep.comp");
+            cd.name = "upscale.prep";
+            prep_ = rdev->createComputePipeline(cd);
         }
-        prep_ = vk::createComputePipeline(dev_.ctx(), layout_.layout(), shader::embedded::spirv("upscale/prep.comp"), "upscale.prep");
-        if (prep_ == VK_NULL_HANDLE) {
+        if (!prep_) {
             failed_ = true;
             dev_.setRenderRatio(1.0f);
             return;
         }
         // (without it FSR derives the exposure itself)
-        exposurePipe_ = vk::createComputePipeline(dev_.ctx(), layout_.layout(), shader::embedded::spirv("upscale/exposure.comp"), "upscale.exposure");
+        rhi::ComputePipelineDesc ed;
+        ed.cs.spirv = shader::embedded::spirv("upscale/exposure.comp");
+        ed.name = "upscale.exposure";
+        exposurePipe_ = rdev->createComputePipeline(ed);
     }
     needReset_ = true;
     // FSR's texture LOD bias for the geometry it accumulates (set from the actual sizes every frame in record())
@@ -206,12 +204,18 @@ bool Upscale::recordExposure(d3d9::PassContext& ctx, d3d9::Texture& luminance, v
     push.factor = engine::exposure::kFsrExposureKey;
     push.lumMin = kLuminanceMin;
     push.lumMax = kLuminanceMax;
-    out.image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, exposurePipe_);
-    layout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, dev_.bindless());
-    layout_.pushStorageImage(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, 0, out.image.view());
-    layout_.push(cmd, &push, sizeof(push));
-    vkCmdDispatch(cmd, 1, 1, 1);
+    rhi::Device* rdev = dev_.rhi();
+    if (rdev == nullptr || !exposurePipe_) return false;
+    {
+        const auto outTex = rhi::vulkan::wrapImage(*rdev, out.image, out.slot, "upscale.exposure");
+        const auto cl = rhi::vulkan::wrapCommandBuffer(*rdev, cmd);
+        cl->transition(*outTex, VK_IMAGE_LAYOUT_GENERAL);
+        cl->bindPipeline(*exposurePipe_);
+        rhi::Texture* const storage[] = {outTex.get()};
+        cl->setStorageTextures(storage);
+        cl->setPushConstants(&push, sizeof(push));
+        cl->dispatch(1, 1, 1);
+    }
     // for the log line: in the last second before it the value is copied to a host-visible buffer (4 bytes)
     if (dev_.secondsSinceCreate() - lastLog_ > 4.0) {
         if (exposureRb_ == VK_NULL_HANDLE) {
@@ -346,7 +350,7 @@ void Upscale::record(d3d9::PassContext& ctx) {
     // the exposure FSR is given: the engine's own (ToneMapFactor / its adapted luminance image, engine/exposure.h) or FSR's estimate.
     // The luminance image is allocated by the first post chain, so the very first frame waits for it
     d3d9::Texture* luminance = nullptr;
-    if (engineExposure_ && !exposureGaveUp_ && exposurePipe_ != VK_NULL_HANDLE) {
+    if (engineExposure_ && !exposureGaveUp_ && exposurePipe_) {
         const void* api = engine::exposure::adaptedLuminanceApi();
         luminance = api != nullptr ? dev_.engineTexture(api) : nullptr;
         if (luminance != nullptr) {
@@ -384,12 +388,22 @@ void Upscale::record(d3d9::PassContext& ctx) {
     push.depthTex = ds->texture()->bindlessSlot();
     push.width = render.width;
     push.height = render.height;
-    depth->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, prep_);
-    layout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, dev_.bindless());
-    layout_.pushStorageImage(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, 0, depth->image.view());
-    layout_.push(cmd, &push, sizeof(push));
-    vkCmdDispatch(cmd, (render.width + 7) / 8, (render.height + 7) / 8, 1);
+    {
+        rhi::Device* rdev = dev_.rhi();
+        if (rdev == nullptr || !prep_) {
+            ++skipped_;
+            needReset_ = true;
+            return;
+        }
+        const auto depthTex = rhi::vulkan::wrapImage(*rdev, depth->image, depth->slot, "upscale.depth");
+        const auto cl = rhi::vulkan::wrapCommandBuffer(*rdev, cmd);
+        cl->transition(*depthTex, VK_IMAGE_LAYOUT_GENERAL);
+        cl->bindPipeline(*prep_);
+        rhi::Texture* const storage[] = {depthTex.get()};
+        cl->setStorageTextures(storage);
+        cl->setPushConstants(&push, sizeof(push));
+        cl->dispatch((render.width + 7) / 8, (render.height + 7) / 8, 1);
+    }
 
     // the automatic reactive mask: translucent effects (particles, rain, spells, spray) drawn after the BeforeAlpha snapshot
     vk::Transients::Entry* reactive = nullptr;

@@ -17,6 +17,7 @@
 #include "d3d9/convert.h"
 #include "d3d9/memeq.h"
 #include "d3d9/target_names.h"
+#include "rhi/vulkan/wrap.h"
 #include "shader/sm_ir.h"
 #include "shader/spirv.h"
 #include "vk/debug_names.h"
@@ -44,6 +45,14 @@ std::uint64_t fnv1a(const void* data, std::size_t size, std::uint64_t h = 0xcbf2
 
 Device::Device() = default;
 Device::~Device() { destroy(); }
+
+rhi::Device* Device::rhi() {
+    if (!rhi_) {
+        rhi_ = rhi::vulkan::wrap(ctx_, frames_, bindless_);
+        if (!rhi_) spdlog::error("d3d9: the RHI over the device could not be created");
+    }
+    return rhi_.get();
+}
 
 std::uint32_t Device::slotOf(std::uint32_t d3dSampler) {
     if (d3dSampler >= kVertexSamplerD3D && d3dSampler < kVertexSamplerD3D + 4) {
@@ -761,6 +770,7 @@ void Device::destroy() {
     gpuTimer_.destroy();
     pipelines_.destroy();
     passes_ = inject::Registry{};
+    rhi_.reset();           // retires its samplers / pass layout
     transients_.destroy();  // retired: frames_ destroys them
     // frames_ runs the retired destructors (images, bindless slot releases): before the bindless heap goes away
     frames_.destroy();

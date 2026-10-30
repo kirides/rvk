@@ -1,6 +1,11 @@
 // The Vulkan backend of the slim RHI (rhi/rhi.h): a thin layer over the renderer's own vk:: classes (Context, Frames, Bindless, PassLayout,
 // Image, pass pipelines). Nothing here is new Vulkan code: it is the pass machinery of vk/passes.h behind the interface, plus the pieces the
 // interface adds on top (texture subresource views, vertex / index / indirect draws, acceleration structures).
+//
+// Two ways to get a Device: createVulkanDevice (owns its own vk::Context / Frames / Bindless: tools, tests) and rhi::vulkan::wrap (rhi/vulkan/wrap.h:
+// the same implementation over the renderer's own objects, with non-owning textures / command lists over its images / frame command buffer: the
+// pass migration, docs/research/hlsl-rhi.md 8). In the wrapped mode nothing is destroyed with a GPU wait: objects are retired through
+// Frames::retire (VkDeviceImpl::defer).
 
 #include <array>
 #include <map>
@@ -9,6 +14,7 @@
 #include <spdlog/spdlog.h>
 
 #include "rhi/rhi.h"
+#include "rhi/vulkan/wrap.h"
 #include "shader/abi.h"
 #include "vk/bindless.h"
 #include "vk/context.h"
@@ -61,14 +67,21 @@ public:
     const TextureDesc& desc() const override { return desc_; }
     std::uint32_t heapSampled() const override { return slot_; }
     std::uint32_t heapSampledLayer(std::uint32_t layer) override;
-    vk::Image& image() { return image_; }
+    vk::Image& image() { return *image_; }
+    // the texture is a view of an image owned elsewhere (rhi::vulkan::wrapImage): its tracked layout (vk::Image) stays the one source of truth, `sampledSlot`
+    // (bindless 2D slot, 0 = none) is not released here
+    void wrap(vk::Image& image, std::uint32_t sampledSlot) {
+        image_ = &image;
+        external_ = true;
+        slot_ = sampledSlot;
+    }
     // a swapchain image (owned by the swapchain)
     void adopt(VkImage image, VkImageView view) {
         vk::ImageDesc d;
         d.format = desc_.format;
         d.extent = desc_.extent;
         d.usage = desc_.usage;
-        image_.adopt(image, view, d);
+        own_.adopt(image, view, d);
     }
     // 2D view of one mip level / layer as a render target
     VkImageView attachmentView(std::uint32_t mip, std::uint32_t layer);
@@ -87,7 +100,9 @@ private:
 
     VkDeviceImpl& dev_;
     TextureDesc desc_;
-    vk::Image image_;
+    vk::Image own_;
+    vk::Image* image_ = &own_;
+    bool external_ = false;
     std::uint32_t slot_ = 0;
     std::vector<std::uint32_t> layerSlots_;  // 2D arrays: the Texture2D slot of each layer, created on demand
     std::map<std::array<std::uint32_t, 6>, VkImageView> views_;
@@ -116,15 +131,13 @@ private:
 
 class VkPipelineImpl final : public Pipeline {
 public:
-    VkPipelineImpl(vk::Context& ctx, VkPipeline p, VkPipelineBindPoint bp) : ctx_(ctx), pipeline_(p), bindPoint_(bp) {}
-    ~VkPipelineImpl() override {
-        if (pipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(ctx_.device(), pipeline_, nullptr);
-    }
+    VkPipelineImpl(VkDeviceImpl& dev, VkPipeline p, VkPipelineBindPoint bp) : dev_(dev), pipeline_(p), bindPoint_(bp) {}
+    ~VkPipelineImpl() override;
     VkPipeline pipeline() const { return pipeline_; }
     VkPipelineBindPoint bindPoint() const { return bindPoint_; }
 
 private:
-    vk::Context& ctx_;
+    VkDeviceImpl& dev_;
     VkPipeline pipeline_;
     VkPipelineBindPoint bindPoint_;
 };
@@ -243,7 +256,23 @@ private:
 
 class VkDeviceImpl final : public Device {
 public:
+    VkDeviceImpl() : ctx_(ownCtx_), frames_(ownFrames_), bindless_(ownBindless_) {}
+    // over the renderer's objects (rhi::vulkan::wrap)
+    VkDeviceImpl(vk::Context& ctx, vk::Frames& frames, vk::Bindless& bindless)
+        : ctx_(ctx), frames_(frames), bindless_(bindless), external_(true) {}
+
     ~VkDeviceImpl() override {
+        if (external_) {
+            // the renderer's objects outlive us: what we made (samplers, pass layout) goes through the frame retirement
+            vk::Context* ctx = &ctx_;
+            vk::PassLayout layout = layout_;
+            std::vector<VkSampler> samplers = std::move(samplers_);
+            frames_.retire([ctx, layout, samplers]() mutable {
+                for (VkSampler s : samplers) vkDestroySampler(ctx->device(), s, nullptr);
+                layout.destroy(*ctx);
+            });
+            return;
+        }
         if (ctx_.device() != VK_NULL_HANDLE) ctx_.waitIdle();
         for (VkSampler s : samplers_) vkDestroySampler(ctx_.device(), s, nullptr);
         layout_.destroy(ctx_);
@@ -260,11 +289,7 @@ public:
         o.allowRayTracing = desc.rayTracing;
         if (!ctx_.create(o)) return false;
         if (!frames_.create(ctx_) || !bindless_.create(ctx_, frames_)) return false;
-        VkDescriptorSetLayoutBinding b[kStorageImages + 1]{};
-        const VkShaderStageFlags stages = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT;
-        for (std::uint32_t i = 0; i < kStorageImages; ++i) b[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, stages, nullptr};
-        b[kStorageImages] = {kConstantBufferBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, stages, nullptr};
-        if (!layout_.create(ctx_, bindless_, b)) return false;
+        if (!createLayout()) return false;
         caps_.adapterName = ctx_.deviceName();
         caps_.backend = Backend::Vulkan;
         caps_.bindless = true;
@@ -273,6 +298,39 @@ public:
         // ray queries need the acceleration structure array in the bindless set (descriptor binding update after bind)
         caps_.rayQuery = ctx_.features().rayTracing.enabled && ctx_.features().rayTracing.tlasDescriptors;
         return true;
+    }
+
+    // over existing objects: the pass layout of the fixed binding model is the only thing created. No acceleration structures (the renderer's own
+    // TLAS slots are not shared with allocTlasSlot yet), no swapchain, no submission.
+    bool createWrapped() {
+        if (!createLayout()) return false;
+        caps_.adapterName = ctx_.deviceName();
+        caps_.backend = Backend::Vulkan;
+        caps_.bindless = true;
+        caps_.heapSize = vk::Bindless::kMax2D;
+        caps_.drawIndirectCount = ctx_.features().drawIndirectCount;
+        caps_.rayQuery = false;
+        return true;
+    }
+
+    bool createLayout() {
+        VkDescriptorSetLayoutBinding b[kStorageImages + 1]{};
+        const VkShaderStageFlags stages = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT;
+        for (std::uint32_t i = 0; i < kStorageImages; ++i) b[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, stages, nullptr};
+        b[kStorageImages] = {kConstantBufferBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, stages, nullptr};
+        return layout_.create(ctx_, bindless_, b);
+    }
+
+    bool external() const { return external_; }
+    // Runs `fn` when the GPU no longer uses what it destroys: after the frame being recorded has completed (Frames::retire) on a wrapped device,
+    // after a full wait on an owning one (tools, tests: no frames in flight).
+    void defer(std::function<void()> fn) {
+        if (external_) {
+            frames_.retire(std::move(fn));
+        } else {
+            ctx_.waitIdle();
+            fn();
+        }
     }
 
     const DeviceCaps& caps() const override { return caps_; }
@@ -302,7 +360,7 @@ public:
     std::unique_ptr<Pipeline> createComputePipeline(const ComputePipelineDesc& desc) override {
         VkPipeline p = vk::createComputePipeline(ctx_, layout_.layout(), desc.cs.spirv, desc.name != nullptr ? desc.name : "rhi compute");
         if (p == VK_NULL_HANDLE) return nullptr;
-        return std::make_unique<VkPipelineImpl>(ctx_, p, VK_PIPELINE_BIND_POINT_COMPUTE);
+        return std::make_unique<VkPipelineImpl>(*this, p, VK_PIPELINE_BIND_POINT_COMPUTE);
     }
     std::unique_ptr<Pipeline> createGraphicsPipeline(const GraphicsPipelineDesc& desc) override {
         vk::PassGraphicsDesc g;
@@ -330,7 +388,7 @@ public:
         g.name = desc.name != nullptr ? desc.name : "rhi graphics";
         VkPipeline p = vk::createPassGraphicsPipeline(ctx_, layout_.layout(), g);
         if (p == VK_NULL_HANDLE) return nullptr;
-        return std::make_unique<VkPipelineImpl>(ctx_, p, VK_PIPELINE_BIND_POINT_GRAPHICS);
+        return std::make_unique<VkPipelineImpl>(*this, p, VK_PIPELINE_BIND_POINT_GRAPHICS);
     }
 
     std::unique_ptr<AccelerationStructure> createBlas(std::span<const TriangleGeometry> geometries) override {
@@ -347,6 +405,10 @@ public:
     }
 
     void submitAndWait(const std::function<void(CommandList&)>& record) override {
+        if (external_) {
+            spdlog::error("rhi: submitAndWait is not available on a wrapped device (the renderer submits its frames)");
+            return;
+        }
         frames_.begin();
         VkCommandBuffer cmd = frames_.cmd();
         if (!bindlessInit_) {
@@ -360,11 +422,13 @@ public:
     }
 
     std::unique_ptr<Swapchain> createSwapchain(const SwapchainDesc& desc) override {
+        if (external_) return nullptr;  // the renderer owns its swapchain
         auto s = std::make_unique<VkSwapchainImpl>(*this);
         if (!s->create(desc)) return nullptr;
         return s;
     }
     bool renderAndPresent(Swapchain& swapchain, const std::function<void(CommandList&, Texture&)>& record) override {
+        if (external_) return false;
         auto& sw = static_cast<VkSwapchainImpl&>(swapchain);
         std::uint32_t index = 0;
         if (!sw.swapchain().acquire(sw.acquired(), index)) return false;
@@ -401,9 +465,13 @@ public:
     void freeTlasSlot(std::uint32_t slot) { tlasUsed_ &= ~(1u << slot); }
 
 private:
-    vk::Context ctx_;
-    vk::Frames frames_;
-    vk::Bindless bindless_;
+    vk::Context ownCtx_;  // (unused when wrapped)
+    vk::Frames ownFrames_;
+    vk::Bindless ownBindless_;
+    vk::Context& ctx_;
+    vk::Frames& frames_;
+    vk::Bindless& bindless_;
+    bool external_ = false;
     vk::PassLayout layout_;
     DeviceCaps caps_;
     bool bindlessInit_ = false;
@@ -475,7 +543,18 @@ bool VkBufferImpl::create() {
 }
 
 VkBufferImpl::~VkBufferImpl() {
-    if (buffer_ != VK_NULL_HANDLE) vmaDestroyBuffer(dev_.ctx().allocator(), buffer_, alloc_);
+    if (buffer_ == VK_NULL_HANDLE) return;
+    VmaAllocator allocator = dev_.ctx().allocator();
+    const VkBuffer buffer = buffer_;
+    const VmaAllocation alloc = alloc_;
+    dev_.defer([allocator, buffer, alloc] { vmaDestroyBuffer(allocator, buffer, alloc); });
+}
+
+VkPipelineImpl::~VkPipelineImpl() {
+    if (pipeline_ == VK_NULL_HANDLE) return;
+    VkDevice device = dev_.ctx().device();
+    const VkPipeline p = pipeline_;
+    dev_.defer([device, p] { vkDestroyPipeline(device, p, nullptr); });
 }
 
 bool VkTextureImpl::create() {
@@ -493,10 +572,10 @@ bool VkTextureImpl::create() {
     d.cube = desc_.cube;
     d.usage = desc_.usage | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     d.name = desc_.name;
-    if (!image_.create(dev_.ctx(), d)) return false;
+    if (!image_->create(dev_.ctx(), d)) return false;
     if ((desc_.usage & VK_IMAGE_USAGE_SAMPLED_BIT) != 0) {
         // (an array has no whole-array kind in the bindless set: heapSampled is the view of layer 0)
-        slot_ = isArray() ? heapSampledLayer(0) : dev_.bindless().addTexture(kind(), image_.view());
+        slot_ = isArray() ? heapSampledLayer(0) : dev_.bindless().addTexture(kind(), image_->view());
     }
     return true;
 }
@@ -507,7 +586,7 @@ VkImageView VkTextureImpl::view(VkImageViewType type, VkImageAspectFlags aspect,
     auto it = views_.find(key);
     if (it != views_.end()) return it->second;
     VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-    vci.image = image_.image();
+    vci.image = image_->image();
     vci.viewType = type;
     vci.format = desc_.format;
     vci.subresourceRange = {aspect, baseMip, mipCount, baseLayer, layerCount};
@@ -533,27 +612,38 @@ std::uint32_t VkTextureImpl::heapSampledLayer(std::uint32_t layer) {
 }
 
 VkImageView VkTextureImpl::attachmentView(std::uint32_t mip, std::uint32_t layer) {
-    if (plain2D() || (mip == 0 && layer == 0 && desc_.mips == 1 && desc_.layers == 1)) return image_.view();
-    return view(VK_IMAGE_VIEW_TYPE_2D, image_.aspect(), mip, 1, layer, 1);
+    // a wrapped image: the image's own attachment views (identity swizzle, created once)
+    if (external_) return image_->attachmentView(dev_.ctx(), mip, layer);
+    if (plain2D() || (mip == 0 && layer == 0 && desc_.mips == 1 && desc_.layers == 1)) return image_->view();
+    return view(VK_IMAGE_VIEW_TYPE_2D, image_->aspect(), mip, 1, layer, 1);
 }
 
 VkImageView VkTextureImpl::storageView(std::uint32_t mip, std::uint32_t layer) {
     if (desc_.type == VK_IMAGE_TYPE_3D) return view(VK_IMAGE_VIEW_TYPE_3D, VK_IMAGE_ASPECT_COLOR_BIT, mip, 1, 0, 1);
     if (desc_.layers > 1) return view(VK_IMAGE_VIEW_TYPE_2D_ARRAY, VK_IMAGE_ASPECT_COLOR_BIT, mip, 1, layer, 1);
-    if (plain2D()) return image_.view();
+    const VkComponentMapping& sw = image_->desc().swizzle;
+    const bool identity = sw.r == VK_COMPONENT_SWIZZLE_IDENTITY && sw.g == VK_COMPONENT_SWIZZLE_IDENTITY && sw.b == VK_COMPONENT_SWIZZLE_IDENTITY &&
+                          sw.a == VK_COMPONENT_SWIZZLE_IDENTITY;
+    if (plain2D() && (identity || !external_)) return image_->view();
     return view(VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_ASPECT_COLOR_BIT, mip, 1, 0, 1);
 }
 
 VkTextureImpl::~VkTextureImpl() {
-    if (slot_ != 0 && !isArray()) dev_.bindless().releaseTexture(kind(), slot_);
+    if (slot_ != 0 && !isArray() && !external_) dev_.bindless().releaseTexture(kind(), slot_);
     for (std::uint32_t s : layerSlots_) {
         if (s != 0) dev_.bindless().releaseTexture(vk::TextureKind::Tex2D, s);
     }
-    if (image_.valid()) {
-        dev_.ctx().waitIdle();  // (tools / tests: no frames in flight reference it)
-        for (auto& [key, v] : views_) vkDestroyImageView(dev_.ctx().device(), v, nullptr);
-        image_.destroy(dev_.ctx());
-    }
+    if (!image_->valid() || (external_ && views_.empty())) return;
+    // the GPU may still use the image and the views: destroyed when it is done (a wait on an owning device, the frame retirement on a wrapped one)
+    vk::Context* ctx = &dev_.ctx();
+    std::vector<VkImageView> views;
+    for (auto& [key, v] : views_) views.push_back(v);
+    vk::Image img = *image_;  // (raw handles; destroy() frees them)
+    const bool owned = !external_;
+    dev_.defer([ctx, views = std::move(views), img, owned]() mutable {
+        for (VkImageView v : views) vkDestroyImageView(ctx->device(), v, nullptr);
+        if (owned) img.destroy(*ctx);
+    });
 }
 
 // ---- acceleration structures ------------------------------------------------------------------------------------------------
@@ -843,5 +933,38 @@ std::unique_ptr<Device> createVulkanDevice(const DeviceDesc& desc) {
     if (!d->create(desc)) return nullptr;
     return d;
 }
+
+// ---- over the renderer's objects (rhi/vulkan/wrap.h) -------------------------------------------------------------------------
+
+namespace vulkan {
+
+std::unique_ptr<Device> wrap(vk::Context& ctx, vk::Frames& frames, vk::Bindless& bindless) {
+    auto d = std::make_unique<VkDeviceImpl>(ctx, frames, bindless);
+    if (!d->createWrapped()) return nullptr;
+    return d;
+}
+
+std::unique_ptr<Texture> wrapImage(Device& device, vk::Image& image, std::uint32_t sampledSlot, const char* name) {
+    VkDeviceImpl& dev = static_cast<VkDeviceImpl&>(device);
+    const vk::ImageDesc& id = image.desc();
+    TextureDesc td;
+    td.type = id.type;
+    td.format = id.format;
+    td.extent = id.extent;
+    td.mips = id.mips;
+    td.layers = id.layers;
+    td.cube = id.cube;
+    td.usage = id.usage;
+    td.name = name != nullptr ? name : id.name;
+    auto t = std::make_unique<VkTextureImpl>(dev, td);
+    t->wrap(image, sampledSlot);
+    return t;
+}
+
+std::unique_ptr<CommandList> wrapCommandBuffer(Device& device, VkCommandBuffer cmd) {
+    return std::make_unique<VkCommandListImpl>(static_cast<VkDeviceImpl&>(device), cmd);
+}
+
+}  // namespace vulkan
 
 }  // namespace rvk::rhi
