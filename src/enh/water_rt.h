@@ -20,6 +20,7 @@
 #include <unordered_map>
 
 #include "d3d9/device.h"
+#include "rhi/rhi.h"
 #include "shader/abi.h"
 #include "vk/passes.h"
 
@@ -97,9 +98,8 @@ private:
     int tier_ = 0, tweaks_ = 0, debug_ = 0;
     bool held_ = false, failed_ = false;
     std::uint32_t passId_ = 0;
-    vk::PassLayout layout_;
-    VkPipeline pipeline_ = VK_NULL_HANDLE;
-    std::future<VkPipeline> building_;  // the compute pipeline, built in the background (no hitch when the tier is turned on)
+    std::unique_ptr<rhi::Pipeline> pipeline_;
+    std::future<std::unique_ptr<rhi::Pipeline>> building_;  // the compute pipeline, built in the background (no hitch when the tier is turned on)
     struct Seen {
         Body body;
         std::uint64_t frame = 0;

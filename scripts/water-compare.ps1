@@ -23,6 +23,7 @@ param(
     [int]$Instance = 0,
     [string[]]$Param = @(),
     [switch]$Validation,
+    [switch]$SyncValidation,
     [switch]$Perf,
     [switch]$SkipEngine,
     # reuse the engine pictures of an earlier run (out\water\<stamp>)
@@ -49,6 +50,7 @@ function Invoke-Run([string]$tag, [string[]]$settings, [int]$burstCount = 1) {
     $runArgs = @{ Mode = $Mode; GameDir = $GameDir; Instance = $Instance; Mods = @('rvkcompare'); Scenario = 'rvkcompare'; WaitForResult = $true; Seconds = 1200
                   Param = @("tag=$tag", $spotParam, "burst=$burstCount", "interval=$Interval") + $Param; Setting = $settings; RvkFilter = 'enh: water: (first|wet|material .* none)|\[error\]' }
     if ($Validation) { $runArgs.Validation = $true }
+    if ($SyncValidation) { $runArgs.SyncValidation = $true }
     if ($Perf) { $runArgs.Perf = $true }
     & (Join-Path $PSScriptRoot 'run.ps1') @runArgs | Out-Host
     $dir = Join-Path $out $tag

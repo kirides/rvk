@@ -9,6 +9,7 @@
 #include <spdlog/spdlog.h>
 
 #include "enh/material_variant.h"
+#include "enh/rhi_scope.h"
 #include "enh/rt_scene.h"
 #include "shader/embedded.h"
 #include "vk/context.h"
@@ -31,22 +32,21 @@ bool gbufferMotionVariant(const d3d9::Shader& s, shader::TranslateOptions& o) {
 }  // namespace
 
 Gbuffer::Gbuffer(d3d9::Device& device, RtScene* scene) : dev_(device), scene_(scene) {
-    const VkDescriptorSetLayoutBinding binds[2] = {
-        {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-    };
-    if (!layout_.create(dev_.ctx(), dev_.bindless(), binds)) {
+    rhi::Device* rdev = dev_.rhi();
+    if (rdev == nullptr) {
         failed_ = true;
         return;
     }
-    vk::Context* ctx = &dev_.ctx();
-    const VkPipelineLayout layout = layout_.layout();
-    gtaoBuild_ = std::async(std::launch::async, [ctx, layout]() {
-        return vk::createComputePipeline(*ctx, layout, shader::embedded::spirv("gbuffer/gtao.comp"), "gbuffer.gtao");
-    });
-    filterBuild_ = std::async(std::launch::async, [ctx, layout]() {
-        return vk::createComputePipeline(*ctx, layout, shader::embedded::spirv("gbuffer/gtao_filter.comp"), "gbuffer.gtao filter");
-    });
+    const auto build = [rdev](const char* file, const char* name) {
+        return [rdev, file, name]() {
+            rhi::ComputePipelineDesc d;
+            d.cs.spirv = shader::embedded::spirv(file);
+            d.name = name;
+            return rdev->createComputePipeline(d);
+        };
+    };
+    gtaoBuild_ = std::async(std::launch::async, build("gbuffer/gtao.comp", "gbuffer.gtao"));
+    filterBuild_ = std::async(std::launch::async, build("gbuffer/gtao_filter.comp", "gbuffer.gtao filter"));
     dev_.setVariantProvider(d3d9::VariantSlot::Gbuffer, {materialVariantTag("gbuf"), gbufferVariant});
     // the replacement of the game's SSAO draws (ao.mode = replace)
     const auto make = [&](const char* name, shader::Stage stage) {
@@ -72,20 +72,10 @@ Gbuffer::~Gbuffer() {
         }
         s->reset();
     }
-    for (std::future<VkPipeline>* f : {&gtaoBuild_, &filterBuild_}) {
-        if (f->valid()) {
-            const VkPipeline p = f->get();
-            if (p != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), p, nullptr);
-        }
+    // (a pipeline still being built is waited for, then retired with the others)
+    for (std::future<std::unique_ptr<rhi::Pipeline>>* f : {&gtaoBuild_, &filterBuild_}) {
+        if (f->valid()) f->get();
     }
-    const VkPipeline a = gtao_, b = filter_, c = debug_;
-    vk::PassLayout layout = layout_;
-    dev_.frames().retire([ctx, a, b, c, layout]() mutable {
-        for (VkPipeline p : {a, b, c}) {
-            if (p != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), p, nullptr);
-        }
-        if (layout.valid()) layout.destroy(*ctx);
-    });
 }
 
 void Gbuffer::apply(const Settings& s) {
@@ -177,13 +167,13 @@ bool Gbuffer::ensureTargets(d3d9::PassContext& ctx) {
 }
 
 bool Gbuffer::pipelinesReady() {
-    if (gtao_ != VK_NULL_HANDLE && filter_ != VK_NULL_HANDLE) return true;
+    if (gtao_ && filter_) return true;
     if (failed_) return false;
     for (auto [future, out] : {std::pair{&gtaoBuild_, &gtao_}, std::pair{&filterBuild_, &filter_}}) {
-        if (*out != VK_NULL_HANDLE) continue;
+        if (*out) continue;
         if (!future->valid() || future->wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
         *out = future->get();
-        if (*out == VK_NULL_HANDLE) {
+        if (!*out) {
             spdlog::error("enh: gbuffer: a compute pipeline failed: AO stays off this session");
             failed_ = true;
             return false;
@@ -215,16 +205,21 @@ void Gbuffer::recordMotionFill(d3d9::PassContext& ctx) {
     push.width = std::min(w, ds->width());
     push.height = std::min(h, ds->height());
     push.flags = 2u;  // gtao.comp: the motion fill only
-    normal->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    motion->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
-    raw->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
-    const VkImageView views[2] = {raw->image.view(), motion->image.view()};
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gtao_);
-    layout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, dev_.bindless());
-    layout_.pushStorageImages(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, views);
-    layout_.push(cmd, &push, sizeof(push));
-    vkCmdDispatch(cmd, (push.width + 7) / 8, (push.height + 7) / 8, 1);
-    motion->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    RhiScope rs(dev_, cmd);
+    if (!rs) return;
+    rhi::CommandList& cl = rs.cl();
+    rhi::Texture* normalT = rs.wrap(*normal);
+    rhi::Texture* motionT = rs.wrap(*motion);
+    rhi::Texture* rawT = rs.wrap(*raw);
+    cl.transition(*normalT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    cl.transition(*motionT, VK_IMAGE_LAYOUT_GENERAL);
+    cl.transition(*rawT, VK_IMAGE_LAYOUT_GENERAL);
+    cl.bindPipeline(*gtao_);
+    rhi::Texture* const storage[] = {rawT, motionT};
+    cl.setStorageTextures(storage);
+    cl.setPushConstants(&push, sizeof(push));
+    cl.dispatch((push.width + 7) / 8, (push.height + 7) / 8, 1);
+    cl.transition(*motionT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
 // the AO of this frame from the depth after the z pre-pass (the material shaders of the solid pass read it at their pixel)
@@ -268,28 +263,35 @@ void Gbuffer::recordAo(d3d9::PassContext& ctx) {
     push.frameIndex = static_cast<std::uint32_t>(dev_.frameValue());
     push.flags = 1u;  // gtao.comp: the AO
 
+    RhiScope rs(dev_, cmd);
+    if (!rs) return;
+    rhi::CommandList& cl = rs.cl();
+    rhi::Texture* motionT = rs.wrap(*motion);
+    rhi::Texture* rawT = rs.wrap(*raw);
+    rhi::Texture* histRead = rs.wrap(*hist[history_]);
+    rhi::Texture* histWrite = rs.wrap(*hist[cur]);
+
     // the raw AO (the motion image is bound but not written in this mode)
-    motion->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
-    raw->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
-    const VkImageView views1[2] = {raw->image.view(), motion->image.view()};
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gtao_);
-    layout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, dev_.bindless());
-    layout_.pushStorageImages(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, views1);
-    layout_.push(cmd, &push, sizeof(push));
-    vkCmdDispatch(cmd, (push.width + 7) / 8, (push.height + 7) / 8, 1);
+    cl.transition(*motionT, VK_IMAGE_LAYOUT_GENERAL);
+    cl.transition(*rawT, VK_IMAGE_LAYOUT_GENERAL);
+    cl.bindPipeline(*gtao_);
+    rhi::Texture* const storage1[] = {rawT, motionT};
+    cl.setStorageTextures(storage1);
+    cl.setPushConstants(&push, sizeof(push));
+    cl.dispatch((push.width + 7) / 8, (push.height + 7) / 8, 1);
 
     // filter + temporal into this frame's history
-    raw->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    hist[history_]->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    hist[cur]->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
+    cl.transition(*rawT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    cl.transition(*histRead, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    cl.transition(*histWrite, VK_IMAGE_LAYOUT_GENERAL);
     push.aoTex = raw->slot;
     push.historyTex = historyValid_ ? hist[history_]->slot : 0u;
-    const VkImageView views2[2] = {hist[cur]->image.view(), VK_NULL_HANDLE};
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, filter_);
-    layout_.pushStorageImages(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, {views2, 1});
-    layout_.push(cmd, &push, sizeof(push));
-    vkCmdDispatch(cmd, (push.width + 7) / 8, (push.height + 7) / 8, 1);
-    hist[cur]->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    cl.bindPipeline(*filter_);
+    rhi::Texture* const storage2[] = {histWrite};
+    cl.setStorageTextures(storage2);
+    cl.setPushConstants(&push, sizeof(push));
+    cl.dispatch((push.width + 7) / 8, (push.height + 7) / 8, 1);
+    cl.transition(*histWrite, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     history_ = cur;
     historyValid_ = true;
     // -> this frame's material shaders (Gbuffer variants: the AO at their pixel scales their ambient)
@@ -310,22 +312,18 @@ void Gbuffer::recordDebug(d3d9::PassContext& ctx) {
     d3d9::Surface* bb = dev_.backBuffer();
     if (bb == nullptr || bb->texture() == nullptr) return;
     vk::Image& target = bb->texture()->image();
-    vk::Context& vctx = dev_.ctx();
-    if (debug_ != VK_NULL_HANDLE && debugFormat_ != target.format()) {
-        const VkPipeline old = debug_;
-        vk::Context* c = &vctx;
-        dev_.frames().retire([c, old] { vkDestroyPipeline(c->device(), old, nullptr); });
-        debug_ = VK_NULL_HANDLE;
-    }
-    if (debug_ == VK_NULL_HANDLE) {
-        vk::PassGraphicsDesc gd;
-        gd.vs = shader::embedded::spirv("debug/fullscreen.vert");
-        gd.fs = shader::embedded::spirv("gbuffer/gbuffer_debug.frag");
-        gd.color = target.format();
+    RhiScope rs(dev_, ctx.cmd);
+    if (!rs) return;
+    if (debug_ && debugFormat_ != target.format()) debug_.reset();
+    if (!debug_) {
+        rhi::GraphicsPipelineDesc gd;
+        gd.vs.spirv = shader::embedded::spirv("debug/fullscreen_rhi.vert");
+        gd.ps.spirv = shader::embedded::spirv("gbuffer/gbuffer_debug.frag");
+        gd.colorFormats[0] = target.format();
         gd.name = "gbuffer.debug";
-        debug_ = vk::createPassGraphicsPipeline(vctx, layout_.layout(), gd);
+        debug_ = rs.device().createGraphicsPipeline(gd);
         debugFormat_ = target.format();
-        if (debug_ == VK_NULL_HANDLE) return;
+        if (!debug_) return;
     }
     vk::Transients::Entry* normal = nullptr;
     vk::Transients::Entry* motion = nullptr;
@@ -335,9 +333,9 @@ void Gbuffer::recordDebug(d3d9::PassContext& ctx) {
         motion = dev_.transients().get("gbuffer.motion", {kMotionFormat, {w, h}, kMotionUsage});
     }
     if (normal == nullptr || motion == nullptr) return;
-    VkCommandBuffer cmd = ctx.cmd;
-    normal->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    motion->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    rhi::CommandList& cl = rs.cl();
+    cl.transition(*rs.wrap(*normal), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    cl.transition(*rs.wrap(*motion), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     GbufferPush push{};
     push.h.frame = ctx.frameBlock;
     push.h.passId = 3;
@@ -352,27 +350,20 @@ void Gbuffer::recordDebug(d3d9::PassContext& ctx) {
         if (hst != nullptr) push.aoTex = hst->slot;
     }
     const std::uint32_t w = bb->width(), h = bb->height();
-    target.transition(cmd, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    VkRenderingAttachmentInfo att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    att.imageView = target.attachmentView(vctx, 0, 0);
-    att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
-    ri.renderArea = {{0, 0}, {w, h}};
-    ri.layerCount = 1;
-    ri.colorAttachmentCount = 1;
-    ri.pColorAttachments = &att;
-    vkCmdBeginRendering(cmd, &ri);
-    const VkViewport vp{0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h), 0.0f, 1.0f};
-    const VkRect2D sc{{0, 0}, {w, h}};
-    vkCmdSetViewport(cmd, 0, 1, &vp);
-    vkCmdSetScissor(cmd, 0, 1, &sc);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, debug_);
-    layout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, dev_.bindless());
-    layout_.push(cmd, &push, sizeof(push));
-    vkCmdDraw(cmd, 3, 1, 0, 0);
-    vkCmdEndRendering(cmd);
+    rhi::Texture* targetT = rs.wrap(target);
+    cl.transition(*targetT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    rhi::RenderingInfo ri;
+    ri.color[0].texture = targetT;
+    ri.color[0].load = VK_ATTACHMENT_LOAD_OP_LOAD;
+    ri.color[0].store = VK_ATTACHMENT_STORE_OP_STORE;
+    ri.colorCount = 1;
+    ri.width = w;
+    ri.height = h;
+    cl.beginRendering(ri);
+    cl.bindPipeline(*debug_);
+    cl.setPushConstants(&push, sizeof(push));
+    cl.draw(3, 1, 0, 0);
+    cl.endRendering();
     if (debugFrames_++ == 0) spdlog::info("enh: gbuffer: debug view {} ({}x{})", s_.debug, w, h);
 }
 

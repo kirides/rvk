@@ -405,6 +405,40 @@ int passTest(bool hazard, bool viaRhi) {
         vkCmdDraw(cmd, 3, 1, 0, 0);
         vkCmdEndRendering(cmd);
     }
+    // the wrapped device's acceleration structures (RT tier): a BLAS + a TLAS built into this frame's command buffer; the TLAS takes its slot from the
+    // renderer's bindless array (vk::Bindless::allocTlasSlot, shared with the RT scene)
+    std::unique_ptr<rhi::AccelerationStructure> rBlas, rTlas;
+    std::unique_ptr<rhi::Buffer> rVertices, rInstances;
+    std::uint32_t reservedSlot = shader::abi::kMaxTlas;
+    bool rtOk = true;
+    if (viaRhi && rdev->caps().rayQuery) {
+        reservedSlot = bindless.allocTlasSlot();  // (what the RT scene's first TLAS holds)
+        rVertices = rdev->createBuffer({256, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "test rhi vertices"});
+        rInstances = rdev->createBuffer({256, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "test rhi instances"});
+        rtOk = rVertices && rInstances;
+        if (rtOk) {
+            const float tri[9] = {0, 0, 0, 1, 0, 0, 0, 1, 0};
+            std::memcpy(rVertices->map(), tri, sizeof(tri));
+            rhi::TriangleGeometry g;
+            g.vertices = rVertices.get();
+            g.vertexCount = 3;
+            rBlas = rdev->createBlas(std::span<const rhi::TriangleGeometry>(&g, 1));
+            rTlas = rdev->createTlas(4);
+            rtOk = rBlas && rTlas && rTlas->tlasSlot() != reservedSlot && rTlas->tlasSlot() < shader::abi::kMaxTlas;
+        }
+        if (rtOk) {
+            VkAccelerationStructureInstanceKHR inst{};
+            inst.transform.matrix[0][0] = inst.transform.matrix[1][1] = inst.transform.matrix[2][2] = 1.0f;
+            inst.mask = 0xFF;
+            inst.accelerationStructureReference = rBlas->address();
+            std::memcpy(rInstances->map(), &inst, sizeof(inst));
+            const auto cl = rhi::vulkan::wrapCommandBuffer(*rdev, cmd);
+            cl->buildBlas(*rBlas);
+            cl->buildTlas(*rTlas, *rInstances, 0, 1);
+        }
+        std::printf("wrapped acceleration structures: %s (TLAS slot %u, the renderer's reserved slot %u)\n", rtOk ? "built" : "FAILED",
+                    rTlas ? rTlas->tlasSlot() : 99u, reservedSlot);
+    }
     scene.transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     VkBufferImageCopy back{};
     back.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -438,6 +472,11 @@ int passTest(bool hazard, bool viaRhi) {
     scene.destroy(ctx);
     if (compute != VK_NULL_HANDLE) vkDestroyPipeline(ctx.device(), compute, nullptr);
     if (composite != VK_NULL_HANDLE) vkDestroyPipeline(ctx.device(), composite, nullptr);
+    rTlas.reset();  // (retired with the frame)
+    rBlas.reset();
+    rVertices.reset();
+    rInstances.reset();
+    if (reservedSlot < shader::abi::kMaxTlas) bindless.freeTlasSlot(reservedSlot);
     rCompute.reset();  // (retired: the frames run them below)
     rComposite.reset();
     rdev.reset();
@@ -446,7 +485,7 @@ int passTest(bool hazard, bool viaRhi) {
     bindless.destroy();
     const std::uint32_t verrors = ctx.validationErrors();
     ctx.destroy();
-    const bool pass = bad == 0 && (hazard ? verrors > 0 : verrors == 0);
+    const bool pass = bad == 0 && rtOk && (hazard ? verrors > 0 : verrors == 0);
     std::printf("%s: passes%s: %d bad value(s), %u validation error(s)%s\n", pass ? "PASS" : "FAIL", viaRhi ? " (through the RHI wrapper)" : "", bad,
                 verrors, hazard ? " (a hazard was expected)" : "");
     return pass ? 0 : 1;

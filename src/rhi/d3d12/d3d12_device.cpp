@@ -29,9 +29,8 @@ namespace {
 using Microsoft::WRL::ComPtr;
 
 constexpr std::uint32_t kHeapSize = 65536;      // shader-visible CBV / SRV / UAV heap (the Vulkan side's bindless arrays together are smaller)
-constexpr std::uint32_t kUavRing = 64;          // the last entries of that heap: tables of 4 UAVs written per setStorageTextures
+constexpr std::uint32_t kUavRing = 256;         // the last entries of that heap: tables of kStorageImages UAVs written per setStorageViews
 constexpr std::uint32_t kSamplerHeapSize = 2048;
-constexpr std::uint32_t kStorageImages = 4;
 constexpr std::uint32_t kRtvCount = 128, kDsvCount = 32;
 
 #define RVK_HR(expr, what)                                                                                          \
@@ -191,6 +190,8 @@ public:
     bool create();
     const BufferDesc& desc() const override { return desc_; }
     void* map() override { return mapped_; }
+    void invalidate() override {}  // (upload / readback heaps are coherent)
+    void flush() override {}
     std::uint32_t heapIndex() const override { return slot_; }
     std::uint32_t heapIndexRw() const override { return slotRw_; }
     std::array<std::uint32_t, 2> shaderRef(std::uint64_t offset) const override { return {slot_, static_cast<std::uint32_t>(offset)}; }
@@ -218,6 +219,9 @@ public:
     std::uint32_t heapSampledLayer(std::uint32_t layer) override;
     ID3D12Resource* resource() const { return resource_.Get(); }
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
+    // the state per mip level (all layers alike) while the levels differ (CommandList::transitionMips); `state` is the whole texture's otherwise
+    std::array<D3D12_RESOURCE_STATES, 16> mipStates{};
+    bool split = false;
     // a swapchain back buffer (owned by the swapchain; no SRV)
     void adopt(ComPtr<ID3D12Resource> r) { resource_ = std::move(r); }
     bool isArray() const { return !desc_.cube && desc_.type == VK_IMAGE_TYPE_2D && desc_.layers > 1; }
@@ -368,7 +372,8 @@ public:
         };
         if (!makeHeap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kHeapSize, true, srvHeap_) ||
             !makeHeap(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, kSamplerHeapSize, true, samplerHeap_) ||
-            !makeHeap(D3D12_DESCRIPTOR_HEAP_TYPE_RTV, kRtvCount, false, rtvHeap_) || !makeHeap(D3D12_DESCRIPTOR_HEAP_TYPE_DSV, kDsvCount, false, dsvHeap_)) {
+            !makeHeap(D3D12_DESCRIPTOR_HEAP_TYPE_RTV, kRtvCount, false, rtvHeap_) || !makeHeap(D3D12_DESCRIPTOR_HEAP_TYPE_DSV, kDsvCount, false, dsvHeap_) ||
+            !makeHeap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1, false, uavClearHeap_)) {
             spdlog::error("d3d12: descriptor heaps");
             return false;
         }
@@ -397,6 +402,7 @@ public:
         caps_.bindless = true;
         caps_.heapSize = kHeapSize;
         caps_.drawIndirectCount = true;  // ExecuteIndirect with a count buffer
+        caps_.textureBlit = false;       // no scaling copy (a mip chain would need a compute / graphics pass of the backend's own)
         return true;
     }
 
@@ -428,6 +434,10 @@ public:
         sd.AddressU = sd.AddressV = sd.AddressW = mode(desc.address);
         sd.MaxLOD = D3D12_FLOAT32_MAX;
         sd.MaxAnisotropy = 1;
+        if (desc.maxAnisotropy > 1.0f && desc.filter == VK_FILTER_LINEAR) {
+            sd.Filter = D3D12_FILTER_ANISOTROPIC;
+            sd.MaxAnisotropy = static_cast<UINT>(std::min(desc.maxAnisotropy, 16.0f));
+        }
         device_->CreateSampler(&sd, samplerCpu(i));
         return i;
     }
@@ -567,8 +577,8 @@ public:
     std::uint32_t nextDsv() { return dsvNext_++ % kDsvCount; }
     // a table of kStorageImages UAV descriptors in the ring at the end of the heap: its first index
     std::uint32_t nextUavTable() {
-        const std::uint32_t t = uavTable_++ % (kUavRing / kStorageImages);
-        return kHeapSize - kUavRing + t * kStorageImages;
+        const std::uint32_t t = uavTable_++ % (kUavRing / rhi::kStorageImages);
+        return kHeapSize - kUavRing + t * rhi::kStorageImages;
     }
     ID3D12Device5* device5() { return device5_.Get(); }
     // a committed buffer in a default heap (acceleration structure storage, scratch)
@@ -597,6 +607,7 @@ public:
         if (FAILED(device_->CreateCommandSignature(&cd, nullptr, IID_PPV_ARGS(&sig)))) return nullptr;
         return (drawSignatures_[stride] = std::move(sig)).Get();
     }
+    D3D12_CPU_DESCRIPTOR_HANDLE uavClearCpu() const { return uavClearHeap_->GetCPUDescriptorHandleForHeapStart(); }
     ID3D12DescriptorHeap* srvHeap() { return srvHeap_.Get(); }
     ID3D12DescriptorHeap* samplerHeap() { return samplerHeap_.Get(); }
 
@@ -620,8 +631,8 @@ private:
         params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
         D3D12_DESCRIPTOR_RANGE uav{};
         uav.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-        uav.NumDescriptors = kStorageImages;
-        uav.BaseShaderRegister = 0;  // u0..u3
+        uav.NumDescriptors = rhi::kStorageImages;
+        uav.BaseShaderRegister = 0;  // u0..u7
         uav.RegisterSpace = 1;
         uav.OffsetInDescriptorsFromTableStart = 0;
         params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -656,6 +667,7 @@ private:
     std::uint64_t fenceValue_ = 0;
     ComPtr<ID3D12RootSignature> rootSignature_;
     ComPtr<ID3D12DescriptorHeap> srvHeap_, samplerHeap_, rtvHeap_, dsvHeap_;
+    ComPtr<ID3D12DescriptorHeap> uavClearHeap_;  // one CPU-only UAV descriptor: the source of ClearUnorderedAccessView*
     UINT srvInc_ = 0, samplerInc_ = 0, rtvInc_ = 0, dsvInc_ = 0;
     HeapAllocator srvAlloc_, samplerAlloc_;
     std::uint32_t rtvNext_ = 0, dsvNext_ = 0, uavTable_ = 0;
@@ -886,20 +898,15 @@ public:
         D3DTexture& t = static_cast<D3DTexture&>(texture);
         if (layout == VK_IMAGE_LAYOUT_UNDEFINED) {
             t.state = D3D12_RESOURCE_STATE_COMMON;  // the contents are discarded: no barrier, the next one starts from COMMON
+            t.split = false;
             return;
         }
-        const D3D12_RESOURCE_STATES to = toState(layout);
-        D3D12_RESOURCE_BARRIER b{};
-        if (t.state == to) {
-            if (to != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) return;
-            b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;  // GENERAL again: the writes become visible
-            b.UAV.pResource = t.resource();
-        } else {
-            b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            b.Transition = {t.resource(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, t.state, to};
-            t.state = to;
-        }
-        list_->ResourceBarrier(1, &b);
+        transitionRange(t, toState(layout), 0, t.desc().mips);
+    }
+    void transitionMips(Texture& texture, VkImageLayout layout, std::uint32_t baseMip, std::uint32_t mipCount) override {
+        if (layout == VK_IMAGE_LAYOUT_UNDEFINED) return;
+        D3DTexture& t = static_cast<D3DTexture&>(texture);
+        transitionRange(t, toState(layout), baseMip, mipCount);
     }
 
     // ShaderRead -> ALL_SHADER_RESOURCE (the state of an SRV), ShaderWrite -> UNORDERED_ACCESS; an UAV -> UAV step is a UAV barrier (the writes of the
@@ -921,6 +928,13 @@ public:
         list_->ResourceBarrier(1, &rb);
     }
 
+    void transitions(std::span<const TextureTransition> list) override {
+        for (const TextureTransition& t : list) {
+            if (t.layout != VK_IMAGE_LAYOUT_UNDEFINED) transitionRange(*static_cast<D3DTexture*>(t.texture), toState(t.layout), t.baseMip, t.mipCount);
+        }
+    }
+    void computeBarrier() override { uavBarrier(); }
+
     void setPushConstants(const void* data, std::uint32_t size) override {
         std::memset(constants_.data(), 0, sizeof(constants_));
         std::memcpy(constants_.data(), data, std::min<std::size_t>(size, sizeof(constants_)));
@@ -934,7 +948,7 @@ public:
     // One UAV per slot in a fresh table of the ring; the view dimension follows the texture (rhi.h StorageView): 3D, 2D array of one slice, or 2D.
     void setStorageViews(std::span<const StorageView> views) override {
         tableFirst_ = dev_.nextUavTable();
-        for (std::uint32_t i = 0; i < kStorageImages; ++i) {
+        for (std::uint32_t i = 0; i < rhi::kStorageImages; ++i) {
             D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
             ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
             ID3D12Resource* res = nullptr;
@@ -1123,6 +1137,63 @@ public:
         list_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
     }
 
+    // Clears use a UAV of the level in the ring (the GPU handle) and the same view in the CPU-only heap (the handle ClearUnorderedAccessView* reads).
+    void clearTexture(Texture& texture, const VkClearColorValue& value, std::uint32_t baseMip, std::uint32_t mipCount) override {
+        D3DTexture& t = static_cast<D3DTexture&>(texture);
+        const TextureDesc& d = t.desc();
+        const bool uintFormat = d.format == VK_FORMAT_R8_UINT || d.format == VK_FORMAT_R16_UINT || d.format == VK_FORMAT_R32_UINT;
+        mipCount = std::min(mipCount, d.mips - std::min(baseMip, d.mips));
+        for (std::uint32_t m = baseMip; m < baseMip + mipCount; ++m) {
+            D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
+            ud.Format = toDxgi(d.format);
+            if (d.type == VK_IMAGE_TYPE_3D) {
+                ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
+                ud.Texture3D.MipSlice = m;
+                ud.Texture3D.WSize = std::max(d.extent.depth >> m, 1u);
+            } else if (d.layers > 1) {
+                ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+                ud.Texture2DArray.MipSlice = m;
+                ud.Texture2DArray.ArraySize = d.layers;
+            } else {
+                ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+                ud.Texture2D.MipSlice = m;
+            }
+            const std::uint32_t slot = dev_.nextUavTable();
+            dev_.device()->CreateUnorderedAccessView(t.resource(), nullptr, &ud, dev_.srvCpu(slot));
+            dev_.device()->CreateUnorderedAccessView(t.resource(), nullptr, &ud, dev_.uavClearCpu());
+            if (uintFormat) list_->ClearUnorderedAccessViewUint(dev_.srvGpu(slot), dev_.uavClearCpu(), t.resource(), value.uint32, 0, nullptr);
+            else list_->ClearUnorderedAccessViewFloat(dev_.srvGpu(slot), dev_.uavClearCpu(), t.resource(), value.float32, 0, nullptr);
+        }
+    }
+    void copyTexture(Texture& dst, Texture& src, std::span<const TextureCopy> regions) override {
+        D3DTexture& d = static_cast<D3DTexture&>(dst);
+        D3DTexture& s = static_cast<D3DTexture&>(src);
+        for (const TextureCopy& c : regions) {
+            const bool whole = c.extent.width == 0 && c.extent.height == 0 && c.extent.depth == 0;
+            const VkExtent3D e = whole ? mipExtent(s.desc(), c.src.mip) : c.extent;
+            const D3D12_BOX box{static_cast<UINT>(c.srcOffset.x), static_cast<UINT>(c.srcOffset.y), static_cast<UINT>(c.srcOffset.z),
+                                static_cast<UINT>(c.srcOffset.x) + e.width, static_cast<UINT>(c.srcOffset.y) + e.height,
+                                static_cast<UINT>(c.srcOffset.z) + e.depth};
+            const bool boxed = !whole || c.srcOffset.x != 0 || c.srcOffset.y != 0 || c.srcOffset.z != 0;
+            for (std::uint32_t l = 0; l < c.layerCount; ++l) {
+                D3D12_TEXTURE_COPY_LOCATION dl{};
+                dl.pResource = d.resource();
+                dl.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                dl.SubresourceIndex = d.subresource({c.dst.mip, c.dst.layer + l});
+                D3D12_TEXTURE_COPY_LOCATION sl{};
+                sl.pResource = s.resource();
+                sl.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                sl.SubresourceIndex = s.subresource({c.src.mip, c.src.layer + l});
+                list_->CopyTextureRegion(&dl, static_cast<UINT>(c.dstOffset.x), static_cast<UINT>(c.dstOffset.y), static_cast<UINT>(c.dstOffset.z), &sl,
+                                         boxed ? &box : nullptr);
+            }
+        }
+    }
+    bool blitTexture(Texture&, Texture&, std::span<const TextureBlit>, VkFilter) override {
+        spdlog::error("d3d12: blitTexture is not implemented (DeviceCaps::textureBlit)");
+        return false;
+    }
+
     // Acceleration structure builds (ID3D12GraphicsCommandList4). The inputs (vertex / index / instance buffers) must be in a shader read state: device
     // memory buffers are moved to ALL_SHADER_RESOURCE here (upload heaps are GENERIC_READ). The structures themselves live in
     // RAYTRACING_ACCELERATION_STRUCTURE state for good; each build ends with a UAV barrier on all UAV resources (null resource) so that the next build
@@ -1168,6 +1239,59 @@ public:
     void endRegion() override {}
 
 private:
+    // mip levels [base, base + count) (all layers) to state `to`; a whole texture keeps one state, levels that differ are tracked in mipStates. The
+    // same state again is a UAV barrier for UNORDERED_ACCESS (the writes become visible), nothing otherwise.
+    void transitionRange(D3DTexture& t, D3D12_RESOURCE_STATES to, std::uint32_t base, std::uint32_t count) {
+        const std::uint32_t mips = std::min(t.desc().mips, 16u);
+        if (base >= mips || count == 0) return;
+        count = std::min(count, mips - base);
+        D3D12_RESOURCE_BARRIER b{};
+        if (!t.split && base == 0 && count >= t.desc().mips) {
+            if (t.state == to) {
+                if (to != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) return;
+                b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;  // GENERAL again: the writes become visible
+                b.UAV.pResource = t.resource();
+            } else {
+                b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                b.Transition = {t.resource(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, t.state, to};
+                t.state = to;
+            }
+            list_->ResourceBarrier(1, &b);
+            return;
+        }
+        if (!t.split) {
+            t.mipStates.fill(t.state);
+            t.split = true;
+        }
+        std::vector<D3D12_RESOURCE_BARRIER> bs;
+        bool uav = false;
+        for (std::uint32_t m = base; m < base + count; ++m) {
+            if (t.mipStates[m] == to) {
+                uav = uav || to == D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                continue;
+            }
+            for (std::uint32_t l = 0; l < t.desc().layers; ++l) {
+                D3D12_RESOURCE_BARRIER tb{};
+                tb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                tb.Transition = {t.resource(), m + l * t.desc().mips, t.mipStates[m], to};
+                bs.push_back(tb);
+            }
+            t.mipStates[m] = to;
+        }
+        if (uav) {
+            D3D12_RESOURCE_BARRIER ub{};
+            ub.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+            ub.UAV.pResource = t.resource();
+            bs.push_back(ub);
+        }
+        if (!bs.empty()) list_->ResourceBarrier(static_cast<UINT>(bs.size()), bs.data());
+        bool same = true;
+        for (std::uint32_t m = 1; m < mips; ++m) same = same && t.mipStates[m] == t.mipStates[0];
+        if (same) {
+            t.state = t.mipStates[0];
+            t.split = false;
+        }
+    }
     // device-heap buffers move between their states (copy, shader, vertex / index / indirect source); upload / readback heaps keep theirs
     void bufferState(D3DBuffer& b, D3D12_RESOURCE_STATES to) {
         if (b.desc().memory != Memory::Device || b.state == to) return;

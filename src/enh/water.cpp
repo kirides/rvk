@@ -13,7 +13,9 @@
 #include "core/paths.h"
 #include "engine/hemisphere.h"
 #include "engine/weather.h"
+#include "enh/rhi_scope.h"
 #include "enh/rt_scene.h"
+#include "rhi/vulkan/wrap.h"
 #include "shader/embedded.h"
 #include "vk/formats.h"
 #include "vk/pipeline.h"
@@ -793,7 +795,10 @@ void Water::recordOcean(d3d9::PassContext& ctx) {
     const double seconds = seaClock();
     if (clockJumped_) ocean_->resetHistory();
     updateSea(seconds);
-    ocean_->record(ctx.cmd, ctx.frameBlock, seconds);
+    rhi::Device* rdev = dev_.rhi();
+    if (rdev == nullptr) return;
+    const std::unique_ptr<rhi::CommandList> cl = rhi::vulkan::wrapCommandBuffer(*rdev, ctx.cmd);
+    ocean_->record(*cl, ctx.frameBlock, seconds);
     lastSimFrame_ = frame;
     // the player (the near-water wave cap follows him)
     player_[3] = 0.0f;
@@ -821,7 +826,7 @@ void Water::recordOcean(d3d9::PassContext& ctx) {
         for (int i = 0; i < 3; ++i) in.shoreWave[i] = sw[static_cast<std::size_t>(i)];
         in.shoreWave[3] = static_cast<float>(std::fmod(seconds, 16384.0));
         in.seconds = seconds;
-        ocean_->recordFoam(ctx.cmd, ctx.frameBlock, in);
+        ocean_->recordFoam(*cl, ctx.frameBlock, in);
     }
 }
 
@@ -1111,48 +1116,35 @@ void Water::updateWetPass() {
 }
 
 void Water::destroyWetPipeline() {
-    vk::Context* ctx = &dev_.ctx();
-    const VkPipeline p = wetPipeline_;
-    vk::PassLayout layout = wetLayout_;
-    if (p != VK_NULL_HANDLE || layout.valid()) {
-        dev_.frames().retire([ctx, p, layout]() mutable {
-            if (p != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), p, nullptr);
-            layout.destroy(*ctx);
-        });
-    }
-    wetPipeline_ = VK_NULL_HANDLE;
-    wetLayout_ = vk::PassLayout{};
+    wetPipeline_.reset();  // (retired with the device's frames)
     wetFormat_ = VK_FORMAT_UNDEFINED;
 }
 
 bool Water::ensureWetPipeline(VkFormat target) {
     if (wetFailed_) return false;
-    vk::Context& ctx = dev_.ctx();
-    if (!wetLayout_.valid() && !wetLayout_.create(ctx, dev_.bindless(), {})) {
+    if (wetPipeline_ && wetFormat_ == target) return true;
+    rhi::Device* rdev = dev_.rhi();
+    if (rdev == nullptr) {
         wetFailed_ = true;
         return false;
     }
-    if (wetPipeline_ != VK_NULL_HANDLE && wetFormat_ == target) return true;
-    if (wetPipeline_ != VK_NULL_HANDLE) {
-        const VkPipeline old = wetPipeline_;
-        vk::Context* c = &ctx;
-        dev_.frames().retire([c, old] { vkDestroyPipeline(c->device(), old, nullptr); });
-        wetPipeline_ = VK_NULL_HANDLE;
-    }
-    vk::PassGraphicsDesc gd;
-    gd.vs = shader::embedded::spirv("debug/fullscreen.vert");
-    gd.fs = shader::embedded::spirv("water/wet_shore.frag");
-    gd.color = target;
+    wetPipeline_.reset();
+    rhi::GraphicsPipelineDesc gd;
+    gd.vs.spirv = shader::embedded::spirv("debug/fullscreen_rhi.vert");
+    gd.ps.spirv = shader::embedded::spirv("water/wet_shore.frag");
+    gd.colorFormats[0] = target;
     // dst * src.a + src.rgb: darkens the scene (keeps the engine's exposure), adds the wet film's sheen; alpha kept
-    gd.blend.enable = 1;
-    gd.blend.srcColor = VK_BLEND_FACTOR_ONE;
-    gd.blend.dstColor = VK_BLEND_FACTOR_SRC_ALPHA;
-    gd.blend.srcAlpha = VK_BLEND_FACTOR_ZERO;
-    gd.blend.dstAlpha = VK_BLEND_FACTOR_ONE;
+    gd.blend.blendEnable = VK_TRUE;
+    gd.blend.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+    gd.blend.dstColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    gd.blend.colorBlendOp = VK_BLEND_OP_ADD;
+    gd.blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+    gd.blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    gd.blend.alphaBlendOp = VK_BLEND_OP_ADD;
     gd.name = "water.wet_shore";
-    wetPipeline_ = vk::createPassGraphicsPipeline(ctx, wetLayout_.layout(), gd);
+    wetPipeline_ = rdev->createGraphicsPipeline(gd);
     wetFormat_ = target;
-    if (wetPipeline_ == VK_NULL_HANDLE) {
+    if (!wetPipeline_) {
         spdlog::error("enh: water: wet shore pipeline failed, the beach stays dry this session");
         wetFailed_ = true;
         return false;
@@ -1196,27 +1188,23 @@ void Water::recordWet(d3d9::PassContext& ctx) {
         }
     }
 
-    target.transition(cmd, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    VkRenderingAttachmentInfo att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    att.imageView = target.attachmentView(dev_.ctx(), 0, 0);
-    att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
-    ri.renderArea = {{0, 0}, {w, h}};
-    ri.layerCount = 1;
-    ri.colorAttachmentCount = 1;
-    ri.pColorAttachments = &att;
-    vkCmdBeginRendering(cmd, &ri);
-    const VkViewport vp{0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h), 0.0f, 1.0f};
-    const VkRect2D sc{{0, 0}, {w, h}};
-    vkCmdSetViewport(cmd, 0, 1, &vp);
-    vkCmdSetScissor(cmd, 0, 1, &sc);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, wetPipeline_);
-    wetLayout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, dev_.bindless());
-    wetLayout_.push(cmd, &push, sizeof(push));
-    vkCmdDraw(cmd, 3, 1, 0, 0);
-    vkCmdEndRendering(cmd);
+    RhiScope rs(dev_, cmd);
+    if (!rs) return;
+    rhi::CommandList& cl = rs.cl();
+    rhi::Texture* targetT = rs.wrap(target);
+    cl.transition(*targetT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    rhi::RenderingInfo ri;
+    ri.color[0].texture = targetT;
+    ri.color[0].load = VK_ATTACHMENT_LOAD_OP_LOAD;
+    ri.color[0].store = VK_ATTACHMENT_STORE_OP_STORE;
+    ri.colorCount = 1;
+    ri.width = w;
+    ri.height = h;
+    cl.beginRendering(ri);
+    cl.bindPipeline(*wetPipeline_);
+    cl.setPushConstants(&push, sizeof(push));
+    cl.draw(3, 1, 0, 0);
+    cl.endRendering();
     if (wetFrames_++ == 0) spdlog::info("enh: water: wet shore pass at {}: {}x{}", d3d9::inject::name(ctx.point), w, h);
 }
 

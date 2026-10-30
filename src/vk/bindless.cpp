@@ -259,6 +259,23 @@ std::uint32_t Bindless::addSampler(VkSampler sampler) {
     return slot;
 }
 
+std::uint32_t Bindless::allocTlasSlot() {
+    const std::lock_guard lock(mutex_);
+    for (std::uint32_t i = 0; i < shader::abi::kMaxTlas; ++i) {
+        if ((tlasUsed_ & (1u << i)) == 0) {
+            tlasUsed_ |= 1u << i;
+            return i;
+        }
+    }
+    return shader::abi::kMaxTlas;
+}
+
+void Bindless::freeTlasSlot(std::uint32_t slot) {
+    if (slot >= shader::abi::kMaxTlas) return;
+    const std::lock_guard lock(mutex_);
+    tlasUsed_ &= ~(1u << slot);
+}
+
 bool Bindless::setTlas(std::uint32_t slot, VkAccelerationStructureKHR tlas) {
     if (!tlasBinding_ || slot >= shader::abi::kMaxTlas || tlas == VK_NULL_HANDLE) return false;
     VkWriteDescriptorSetAccelerationStructureKHR as{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};

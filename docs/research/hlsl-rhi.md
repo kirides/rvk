@@ -15,7 +15,7 @@ Status legend: **built** = in the tree and verified, **design** = decided, not b
 | P1b | HLSL ABI (`shaders/include/rvk_abi.hlsli`, `rvk_common.hlsli`, `rvk_draw.hlsli`), the debug-view shaders ported, layout tests against `abi.h` | **built**, GPU `--passes` PASS, in-game check see 7 |
 | P1c | the other hand-written shaders (gbuffer, upscale, gi, rt, shadows, water, framegen, test) ported; GLSL stays until the A/B passes (`RVK_FORCE_GLSL=1` runs the originals); tools: `rvk_shadertool hlsl <name>`, `tools/port_check.py`, test `dxc_every_embedded_shader_compiles` | **built**, in-game A/B pending (7) |
 | P1d | translator HLSL emitter (`shader/hlsl.cpp` next to `glsl.cpp`; `toHlsl` + `compileHlsl`, `kTranslatorVersion` 8): the whole corpus (2483 shaders) passes DXC + spirv-val (`rvk_shadertool corpus corpus --hlsl`), the D3D9 assembly unit tests too; the device uses it for base shaders, the LOD variant and the RT capture variant; material variants + ubershader (`ge_default.*`, back to HLSL: it comes from the engine's own HLSL) | **built** (hooks of the material variants: see 7) |
-| P2 | slim RHI (section 5: dynamic rendering + descriptor indexing + constant buffers + push constants, Vulkan structs as the baseline): interface `src/rhi/rhi.h`, Vulkan backend over the existing `vk::` classes (`src/rhi/vulkan`); the migration of the renderer's own pass / resource code onto it is under way (section 8: adapter built, debug view / upscale prep + exposure / framegen depth + debug moved; 35 files call Vulkan directly) | **interface + Vulkan backend built**, migration started |
+| P2 | slim RHI (section 5: dynamic rendering + descriptor indexing + constant buffers + push constants, Vulkan structs as the baseline): interface `src/rhi/rhi.h`, Vulkan backend over the existing `vk::` classes (`src/rhi/vulkan`); the migration of the renderer's own pass code onto it is done for every compute / fullscreen pass of the enhancements (section 8: 2026-10-30 second round); what still calls Vulkan directly: the draw replacers, the D3D9 device model, the RT scene's BLAS / TLAS builds, buffers shared by device address | **interface + Vulkan backend built**, migration started |
 | P3 | DX12 backend slice (section 6; SM 6.6 bindless required): `src/rhi/d3d12` (library `rvk_rhi_d3d12`), the same HLSL compiled to DXIL, fixed root signature, bindless heaps; `rvk_rhitest` runs one test on both backends (compute with constant buffer + bindless texture + RVK_REF + push constants + storage image, graphics with dynamic rendering), validation layers on | **built** incl. a swapchain on a hidden window, PASS on both |
 | P4 | GLSL gone: shaders/*.comp|vert|frag|glsl, `glsl.cpp`, `compileGlsl`, glslang (vcpkg), `rvk_glslc` (replaced by `rvk_embed`, a text embedder) removed 2026-10-30 after the in-game A/B of the ports (GLSL vs HLSL: no errors, within noise); `tools/shader_equiv.py` retired (its pixel check lives on as `tools/ubershader_check.py` through DXC: 183 / 183 captured PS requests EQUAL on the GPU), the vertex ubershader check is gone with it | **built** |
 
@@ -127,9 +127,9 @@ Order of work (P2): (a) interface headers + a Vulkan backend over the existing `
   ByteAddressBuffer in the heap; `RVK_LOAD(T, ref)`), `RVK_PUSH` = `ConstantBuffer<T> : register(b0, space0)` (root constants), `RVK_TEX2D(i)` etc. read
   `ResourceDescriptorHeap` / `SamplerDescriptorHeap` through typed locals (**DXC 1.9.2602 crashes with an internal compiler error on a cast of a heap
   access followed by a method call**: `((Texture2D)ResourceDescriptorHeap[i]).Load(..)`; assigning to a local first works).
-- Fixed root signature: 32 root constants (b0 space0), root CBV (b8 space1), table of 4 UAVs (u0..u3 space1), both heaps directly indexed. Heaps: one shader-visible
-  CBV/SRV/UAV heap of 65,536 (entry 0 = a null SRV that reads (0, 0, 0, 1)), a sampler heap of 2,048 (entry 0 = linear clamp), RTV / DSV rings. The last 64 entries of the
-  big heap are the ring of UAV tables (written per `setStorageTextures`).
+- Fixed root signature: 32 root constants (b0 space0), root CBV (b8 space1), table of 8 UAVs (u0..u7 space1, `rhi::kStorageImages`; was 4), both heaps directly indexed. Heaps: one shader-visible
+  CBV/SRV/UAV heap of 65,536 (entry 0 = a null SRV that reads (0, 0, 0, 1)), a sampler heap of 2,048 (entry 0 = linear clamp), RTV / DSV rings, a one-entry CPU-only UAV heap (the source of the clears). The last 256 entries of the
+  big heap are the ring of UAV tables (32 tables of 8, written per `setStorageViews` / `clearTexture`).
 - Resource states: textures track their state (`VkImageLayout` -> `D3D12_RESOURCE_STATES`), transitioning to the same GENERAL layout is a UAV barrier; device-heap buffers
   move between copy and shader states in the copy helpers / `bufferBarrier`; upload / readback heaps keep theirs.
 - Swapchain: `Device::createSwapchain` / `renderAndPresent` (DXGI flip model with 3 buffers; the Vulkan side wraps `vk::Swapchain`, its images adopted as RHI textures); resize tested.
@@ -159,6 +159,26 @@ Order of work (P2): (a) interface headers + a Vulkan backend over the existing `
 - Verification: `rvk_rhitest [--vulkan] [--d3d12] [--validation]`: one test, both backends, 64x64 compare of a compute pass and a graphics pass with the CPU's expected values;
   `--validation` = Vulkan validation layer + D3D12 debug layer with GPU based validation (messages routed to the log and counted: `Device::validationErrors`).
   2026-10-30: PASS on both (RX 7900 XTX), 0 validation errors. The gap checks (textures, buffer UAVs, vertex / index / indirect draws, ray query) print their own PASS / SKIP line per backend.
+
+### 6a. Additions of the pass migration (2026-10-30, both backends, `rvk_rhitest` check "texture ops")
+
+- **Storage images u0..u7** (`rhi::kStorageImages` = 8): Vulkan push descriptor set 1 bindings 0..7, DX12 a table of 8 UAVs. One dispatch of `test/rhi_store8.comp.hlsl` writes all eight.
+- **Per-mip layouts**: `CommandList::transitionMips(texture, layout, baseMip, mipCount)` (all layers; layers are tracked as one). `vk::Image` keeps one layout for the image or, after a `transitionMips`, one per
+  mip level (`Image::transitionMips`, `mipLayout(m)`, `layout()` = `VK_IMAGE_LAYOUT_MAX_ENUM` while split; any whole-image `transition` / `setTrackedLayout` / `discard` brings the levels together again), so wrapped textures keep
+  the game's bookkeeping as the one source of truth. DX12: `D3DTexture::mipStates` (same rule, one barrier per level and layer).
+- **Clears / copies / blits**: `clearTexture(texture, VkClearColorValue, baseMip, mipCount)` (STORAGE colour textures in GENERAL; Vulkan `vkCmdClearColorImage`, DX12 `ClearUnorderedAccessView{Float,Uint}` through a view
+  in the ring + the CPU-only heap), `copyTexture(dst, src, span<TextureCopy>)` (`TextureCopy{src, dst, layerCount, srcOffset, dstOffset, extent}`, extent 0 = the whole mip; `vkCmdCopyImage2` / `CopyTextureRegion` with a box),
+  `blitTexture(dst, src, span<TextureBlit>, filter)` (`TextureBlit{src, dst, srcExtent, dstExtent}`; Vulkan `vkCmdBlitImage2`, mip chains blit between the levels of one texture). **DX12 has no scaling copy**:
+  `DeviceCaps::textureBlit` is false there, `blitTexture` logs and returns false, `rvk_rhitest` prints SKIP for it.
+- `CommandList::computeBarrier()`: the global barrier between dispatches (Vulkan: compute / fragment / transfer storage + transfer writes -> compute / fragment / vertex / transfer reads and writes; DX12: a UAV barrier on all
+  resources). It replaces the passes' `VkMemoryBarrier2` compute -> compute barriers and does not change layouts.
+- `SamplerDesc::maxAnisotropy` (Vulkan `samplerAnisotropy`, DX12 `D3D12_FILTER_ANISOTROPIC`), `Buffer::invalidate()` / `flush()` (readback / upload memory on Vulkan: `vmaInvalidateAllocation` / `vmaFlushAllocation`, no-ops on DX12).
+- **Acceleration structures on the wrapped device**: `DeviceCaps::rayQuery` is on for `rhi::vulkan::wrap` when the renderer's RT tier is. The TLAS slots are the renderer's: `vk::Bindless::allocTlasSlot()` / `freeTlasSlot()` (a mask,
+  thread-safe; slot 0 is valid) serve both `enh::RtScene` (its 3 per-frame TLASes now allocate theirs, `Tlas::slot` is what `Device::setRtScene` publishes) and the RHI's `createTlas`. Destruction of a wrapped acceleration structure is
+  deferred through `Frames::retire` (it also frees the slot). Checked by `rvk_vktest --passes --rhi` (BLAS + TLAS built into the frame's command buffer, the TLAS slot differs from one the "renderer" holds, sync validation clean).
+- Threading: `createComputePipeline` / `createGraphicsPipeline` of the wrapped device only read the pass layout and call `vkCreate*Pipelines` without a cache, so the passes that build pipelines on a worker (`std::async`) keep doing so
+  through the RHI (gbuffer, gi, water.rt, shadows.rt, rt skin); the future is joined in the destructor, the pipeline object is retired with the device's frames.
+- Pass-side helper `enh/rhi_scope.h` (`RhiScope`): the frame's command buffer as an `rhi::CommandList` + `wrapImage` over transients / engine textures, released at the end of the pass call.
 
 ## 6b. Decisions after the first runs
 
@@ -195,9 +215,9 @@ Order of work (P2): (a) interface headers + a Vulkan backend over the existing `
 second `VkDevice` (what `rhi::createVulkanDevice` makes) cannot share images, bindless slots or the queue. So the Vulkan backend got a second constructor and an adapter,
 `src/rhi/vulkan/wrap.h` (implemented at the end of `vulkan_device.cpp`, next to the classes it needs; `rhi.h` is untouched and backend neutral):
 - `rhi::vulkan::wrap(ctx, frames, bindless)` -> an `rhi::Device` over those objects (`VkDeviceImpl` holds references; the owning mode binds them to its own members). It creates only the
-  fixed binding model's pass layout (set 0 = the game's bindless set, set 1 = push descriptors u0..u3 + b8, 128 B push constants). `d3d9::Device::rhi()` creates it on first use and
+  fixed binding model's pass layout (set 0 = the game's bindless set, set 1 = push descriptors u0..u7 + b8, 128 B push constants). `d3d9::Device::rhi()` creates it on first use and
   resets it before `frames_`. Nothing in a wrapped device waits for the GPU: pipelines, buffers, textures and the device's samplers / layout are destroyed through `Frames::retire`
-  (`VkDeviceImpl::defer`; an owning device keeps `waitIdle` + destroy). No swapchain / `submitAndWait` (the renderer owns submission), no acceleration structures yet (its TLAS slots are not shared).
+  (`VkDeviceImpl::defer`; an owning device keeps `waitIdle` + destroy). No swapchain / `submitAndWait` (the renderer owns submission), acceleration structures since the second round (6a: TLAS slots shared with `vk::Bindless`).
 - `rhi::vulkan::wrapImage(dev, vk::Image&, sampledSlot, name)` -> a non-owning `rhi::Texture` (VkTextureImpl with `image_` pointing at the external `vk::Image`; the bindless slot is the
   caller's and is not released). **The layout bookkeeping is `vk::Image`'s own**: `CommandList::transition` on the wrapper calls `vk::Image::transition(.., force)`, so the renderer's barriers
   (`Device::readable`, the engine draws) and the pass's agree: one source of truth. Render attachments use the image's own `attachmentView` (identity swizzle, cached); storage views
@@ -223,14 +243,36 @@ water / rain animate; orientation of the distance bands identical), no validatio
 (adapted luminance 0.245)` = (1/9.6) / avgLum as before, clean picture, only AMD's own `rw_*` format warnings; `framegen.mode=fsr3` + `framegen.debug=depth`: the depth view is right side up and correct,
 only AMD's accepted `rw_output` OpImageWrite messages, none of ours.
 
-**Not migrated yet / blockers** (35 files call Vulkan directly; these are the passes left):
-- `enh/ocean.*`: five storage images per pass (the RHI binds u0..u3; raising it to 8 is ~10 lines in each backend: `kStorageImages`, the descriptor table / push set), a per-mip barrier helper
-  (`setTrackedLayout`, subresource barriers: the RHI only transitions whole textures), `vkCmdClearColorImage` and `vkCmdBlitImage2` (mip generation): needs `CommandList::clearTexture`,
-  `blitTexture` / `copyTexture` and a per-subresource `transition` (about 150 lines with the DX12 side).
-- `enh/gbuffer.*` (2 storage images + translated-shader variants, reads/writes engine targets), `enh/gi.*` (3 storage images, async pipeline builds on a worker: `createComputePipeline` is
-  synchronous; the RHI calls `vk::createComputePipeline`, which is thread-safe, but the pass layout is per RHI device), `enh/water_rt.*`, `enh/rt_shadows.*`, `enh/rt_debug.*`, `enh/rt_scene.*`
-  (TLAS / BLAS: the wrapped device refuses `createBlas / createTlas` until `allocTlasSlot` is shared with `vk::Bindless`), `enh/water.*`, `enh/shadows.*` (DrawReplacers: draws inside the
-  engine's own rendering scope with the D3D9 state's descriptors; they need the draw-side vertex / index / state model first), `enh/material_variant.*`, `d3d9/*` (the device, draws, resources).
+**Verification of the second round (2026-10-30, RX 7900 XTX).** `rvk_rhitest --validation` PASS on Vulkan and D3D12 (0 validation errors; "texture ops" = eight storage images, clears, per-mip transitions, batched
+transitions, box copy; the blit check is SKIP on D3D12), `rvk_tests` 198 / 198, `rvk_vktest --passes`, `--passes --rhi` (now with a BLAS + TLAS on the wrapped device), `--rt`, `--skin` PASS, `--passes --rhi --hazard` still
+reports the hazard. In the game (windowed, `-SyncValidation`, `water-compare.ps1 -SkipEngine`, settings water.ocean=fft, rt.reflections=medium, shadows.enabled + shadows.rt=near, ao, gi; spots sea_cliff / beach_sun /
+lake_jungle / pub_interior; reference pictures of the committed build 957dc08 in `out/rhi-migrate/ref_all`): same pictures (mean abs difference 1.6 - 3.8 of 255, the sea's breakers / splashes / butterflies differ between
+any two runs; two runs of the new build differ by 0.6 - 4.8), every feature's first-frame log line present (`enh: ocean`, `gbuffer: first AO`, `gi: first update`, `gi: screen probes`, `shadows.rt: first frame`, `water.rt: first`,
+`water: wet shore pass`), no VUID / SYNC message. Upscaling + frame generation + characters (`upscale.mode=native_aa`, `framegen.mode=fsr3`, `rvkcompare hero_idle`): FSR 3.1.6 ran 3,324 frames with
+`exposure engine 0.317 (adapted luminance 0.329)`, the AMD frame generation swapchain produced 240 generated of 481 presents per 5 s, `rt: skin` skinned 55,933 draws by compute; only AMD's accepted `rw_*` format messages.
+GPU time per pass (`-PerfFrame 4200`, 24 frames averaged, 1920x1080, committed build vs this one; `out/rhi-migrate/perf`): sea_cliff water.ocean 0.312 -> 0.323 ms (a first version with one barrier per image measured 0.409:
+per-image barriers cost ~0.1 ms, hence `CommandList::transitions` / `computeBarrier`), gi 1.079 -> 1.065, gi.screen 0.727 -> 0.730, gbuffer.ao 0.465 -> 0.468, water.rt 0.291 -> 0.297; lake_jungle water.ocean 0.123 -> 0.127,
+shadows.rt trace 0.959 -> 0.961, gi.screen 1.361 -> 1.337, water.rt 0.820 -> 0.830, gi 0.684 -> 0.685: no regression beyond noise.
+
+**Migrated, second round (2026-10-30, files: `enh/ocean.*`, `gbuffer.*`, `gi.*`, `water_rt.*`, `rt_shadows.*`, `rt_debug.*`, `water.cpp` wet shore, `upscale.cpp` / `framegen.cpp` copies, `rt_scene.cpp` skin):**
+4. `enh/ocean.*` (water.ocean=fft): all five compute pipelines + the foam pass through `rhi::Pipeline`, the tile / foam images are `rhi::Texture`s (own images, sampled slots = `heapSampled()`), the wrapped sampler
+   (`SamplerDesc::maxAnisotropy` 8), the clear of the foam history (`clearTexture`), the mip chains (`transitionMips` + `blitTexture`), compute -> compute barriers = `computeBarrier()`. `Ocean::record` / `recordFoam` take
+   an `rhi::CommandList&`.
+5. `upscale.opaque` (`copyTexture`), the exposure read-back (an `rhi::Buffer` Readback + `copyTextureToBuffer` + `invalidate`), `framegen.hudless` / the colour copy (`copyTexture`).
+6. `enh/gbuffer.*`: GTAO + filter pipelines (async build kept), the two- and one-image dispatches, the debug composite. The SSAO replacement (a `d3d9::DrawReplacer` with its own `d3d9::Shader` modules) stays.
+7. `enh/gi.*`: the four compute pipelines (async build kept), the DDGI update's barriers (`computeBarrier`), the screen probes' three- and two-image dispatches. Left raw: the probe / depth / ray buffers (`vk::rt::AddressBuffer`,
+   shared by device address) with their `vkCmdFillBuffer` + barrier at creation.
+8. `enh/water_rt.*`, `enh/rt_shadows.*` (trace / temporal / spatial), `enh/rt_debug.*` (compute + composite; the probe buffer stays an `AddressBuffer`), `water.wet_shore` (fullscreen blend), the RT skinning compute of `enh/rt_scene.cpp`.
+9. Wrapped acceleration structures (section 6a): TLAS slots shared with `vk::Bindless`.
+
+**Still raw Vulkan (and why):**
+- `enh/rt_scene.cpp` BLAS / TLAS builds: batched `vkCmdBuildAccelerationStructuresKHR` of many BLASes per frame, compaction (`vkCmdCopyAccelerationStructureKHR`, query pool), per-frame TLAS slots, build-time timestamps, instance / record
+  buffers ring-allocated from `Frames`: `rhi::CommandList::buildBlas / buildTlas` build one structure at a time and own their scratch, so the RT scene cannot use it as it is (it would need batched builds, compaction, a
+  timestamp / query API and ring buffers in the RHI). `rt_registry.*` has no Vulkan calls.
+- `enh/water.*` (draw replacer: the sea grid, lakes, rivers; the sea-floor field bake), `enh/shadows.*` (draw replacer: the mask pass), `enh/material_variant.*`, `d3d9/*`: draws inside the engine's own rendering scope with the D3D9
+  state's descriptors need the draw-side vertex / index / state model first.
+- `gi.cpp` / `rt_scene.cpp` / `rt_debug.cpp` buffers (`vk::rt::AddressBuffer`: device-address buffers shared across modules and with the TLAS instance records), `vk/fsr.*`, `vk/framegen.*` (AMD's DLLs record into the command buffer).
+
 - `vk/passes.*` (`PassLayout`, `Transients`) stay as the backend's internals; `Transients::Entry` is still handed out as `vk::Image + slot` and wrapped per pass call (two small allocations;
   cache the wrapper next to the Entry when a pass wraps many images).
 - No run-time A/B for the migrated passes: the old raw-Vulkan code is only in git history (the layouts are identical, so a dual path would have kept the whole `PassLayout` plumbing alive).

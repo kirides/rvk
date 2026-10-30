@@ -11,6 +11,7 @@
 #include "core/paths.h"
 #include "enh/gbuffer.h"
 #include "engine/exposure.h"
+#include "enh/rhi_scope.h"
 #include "rhi/vulkan/wrap.h"
 #include "shader/embedded.h"
 #include "vk/context.h"
@@ -182,13 +183,7 @@ void Upscale::setEngineExposure(bool on) {
 }
 
 void Upscale::releaseExposureReadback() {
-    if (exposureRb_ == VK_NULL_HANDLE) return;
-    vk::Context* ctx = &dev_.ctx();
-    const VkBuffer rb = exposureRb_;
-    const VmaAllocation alloc = exposureRbAlloc_;
-    dev_.frames().retire([ctx, rb, alloc]() { vmaDestroyBuffer(ctx->allocator(), rb, alloc); });
-    exposureRb_ = VK_NULL_HANDLE;
-    exposureRbAlloc_ = VK_NULL_HANDLE;
+    exposureRb_.reset();  // (retired with the frame)
     exposureRbPtr_ = nullptr;
     exposureRbWritten_ = false;
 }
@@ -206,38 +201,27 @@ bool Upscale::recordExposure(d3d9::PassContext& ctx, d3d9::Texture& luminance, v
     push.lumMax = kLuminanceMax;
     rhi::Device* rdev = dev_.rhi();
     if (rdev == nullptr || !exposurePipe_) return false;
-    {
-        const auto outTex = rhi::vulkan::wrapImage(*rdev, out.image, out.slot, "upscale.exposure");
-        const auto cl = rhi::vulkan::wrapCommandBuffer(*rdev, cmd);
-        cl->transition(*outTex, VK_IMAGE_LAYOUT_GENERAL);
-        cl->bindPipeline(*exposurePipe_);
-        rhi::Texture* const storage[] = {outTex.get()};
-        cl->setStorageTextures(storage);
-        cl->setPushConstants(&push, sizeof(push));
-        cl->dispatch(1, 1, 1);
-    }
+    const auto outTex = rhi::vulkan::wrapImage(*rdev, out.image, out.slot, "upscale.exposure");
+    const auto cl = rhi::vulkan::wrapCommandBuffer(*rdev, cmd);
+    cl->transition(*outTex, VK_IMAGE_LAYOUT_GENERAL);
+    cl->bindPipeline(*exposurePipe_);
+    rhi::Texture* const storage[] = {outTex.get()};
+    cl->setStorageTextures(storage);
+    cl->setPushConstants(&push, sizeof(push));
+    cl->dispatch(1, 1, 1);
     // for the log line: in the last second before it the value is copied to a host-visible buffer (4 bytes)
     if (dev_.secondsSinceCreate() - lastLog_ > 4.0) {
-        if (exposureRb_ == VK_NULL_HANDLE) {
-            VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-            bci.size = sizeof(float);
-            bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-            VmaAllocationCreateInfo aci{};
-            aci.usage = VMA_MEMORY_USAGE_AUTO;
-            aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
-            VmaAllocationInfo info{};
-            if (vmaCreateBuffer(dev_.ctx().allocator(), &bci, &aci, &exposureRb_, &exposureRbAlloc_, &info) == VK_SUCCESS) {
-                exposureRbPtr_ = static_cast<const float*>(info.pMappedData);
-                *static_cast<float*>(info.pMappedData) = 0.0f;  // (0 = the GPU's copy has not landed yet: not logged)
-                vk::names::object(dev_.ctx(), exposureRb_, VK_OBJECT_TYPE_BUFFER, "upscale exposure read-back");
-            } else {
-                exposureRb_ = VK_NULL_HANDLE;
+        if (!exposureRb_) {
+            exposureRb_ = rdev->createBuffer({sizeof(float), VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "upscale exposure read-back"});
+            if (exposureRb_) {
+                exposureRbPtr_ = static_cast<const float*>(exposureRb_->map());
+                *static_cast<float*>(exposureRb_->map()) = 0.0f;  // (0 = the GPU's copy has not landed yet: not logged)
+                exposureRb_->flush();
             }
         }
-        if (exposureRb_ != VK_NULL_HANDLE) {
-            out.image.transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-            const VkBufferImageCopy region{0, 0, 0, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {1, 1, 1}};
-            vkCmdCopyImageToBuffer(cmd, out.image.image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, exposureRb_, 1, &region);
+        if (exposureRb_) {
+            cl->transition(*outTex, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            cl->copyTextureToBuffer(*exposureRb_, 0, *outTex);
             exposureRbWritten_ = true;
         }
     }
@@ -323,13 +307,17 @@ void Upscale::recordOpaque(d3d9::PassContext& ctx) {
     vk::Transients::Entry* opaque = dev_.transients().get("upscale.opaque", {kOutputFormat, render, kOpaqueUsage});
     if (opaque == nullptr || hdr->image().format() != kOutputFormat) return;
     VkCommandBuffer cmd = ctx.cmd;
-    hdr->image().transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    opaque->image.transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    const VkImageCopy region{{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0},
-                             {render.width, render.height, 1}};
-    vkCmdCopyImage(cmd, hdr->image().image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, opaque->image.image(),
-                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-    opaque->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    RhiScope rs(dev_, cmd);
+    if (!rs) return;
+    rhi::CommandList& cl = rs.cl();
+    rhi::Texture* hdrT = rs.wrap(*hdr);
+    rhi::Texture* opaqueT = rs.wrap(*opaque);
+    cl.transition(*hdrT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    cl.transition(*opaqueT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    rhi::TextureCopy region;
+    region.extent = {render.width, render.height, 1};
+    cl.copyTexture(*opaqueT, *hdrT, std::span<const rhi::TextureCopy>(&region, 1));
+    cl.transition(*opaqueT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     opaqueValid_ = true;
 }
 
@@ -472,7 +460,7 @@ void Upscale::record(d3d9::PassContext& ctx) {
         if (exposureActive_) {
             exposureText = "engine";
             if (exposureRbWritten_ && exposureRbPtr_ != nullptr) {
-                vmaInvalidateAllocation(dev_.ctx().allocator(), exposureRbAlloc_, 0, VK_WHOLE_SIZE);
+                exposureRb_->invalidate();
                 exposureValue_ = *exposureRbPtr_;
             }
             if (exposureValue_ > 0.0f) {

@@ -8,6 +8,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "enh/rhi_scope.h"
 #include "enh/rt_scene.h"
 #include "shader/embedded.h"
 #include "vk/context.h"
@@ -33,34 +34,23 @@ constexpr Tier kTiers[3] = {
 
 WaterRt::WaterRt(d3d9::Device& device, RtScene* scene) : dev_(device), scene_(scene) {
     if (scene_ == nullptr || !scene_->supported()) return;
-    const VkDescriptorSetLayoutBinding out{0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-    if (!layout_.create(dev_.ctx(), dev_.bindless(), {&out, 1})) {
+    rhi::Device* rdev = dev_.rhi();
+    if (rdev == nullptr) {
         failed_ = true;
         return;
     }
-    // the compute pipeline in the background from the start: turning the tier on later costs no frame
-    vk::Context* ctx = &dev_.ctx();
-    const VkPipelineLayout layout = layout_.layout();
-    building_ = std::async(std::launch::async, [ctx, layout]() {
-        return vk::createComputePipeline(*ctx, layout, shader::embedded::spirv("water/water_rt.comp"), "water.rt");
+    // the compute pipeline in the background from the start: turning the tier on later costs no frame (Device::createComputePipeline is thread-safe)
+    building_ = std::async(std::launch::async, [rdev]() {
+        rhi::ComputePipelineDesc d;
+        d.cs.spirv = shader::embedded::spirv("water/water_rt.comp");
+        d.name = "water.rt";
+        return rdev->createComputePipeline(d);
     });
 }
 
 WaterRt::~WaterRt() {
     configure(0, 0, 0);
-    if (building_.valid()) {
-        const VkPipeline p = building_.get();
-        if (p != VK_NULL_HANDLE) vkDestroyPipeline(dev_.ctx().device(), p, nullptr);
-    }
-    vk::Context* ctx = &dev_.ctx();
-    const VkPipeline p = pipeline_;
-    vk::PassLayout layout = layout_;
-    if (p != VK_NULL_HANDLE || layout.valid()) {
-        dev_.frames().retire([ctx, p, layout]() mutable {
-            if (p != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), p, nullptr);
-            layout.destroy(*ctx);
-        });
-    }
+    if (building_.valid()) building_.get();  // (retired with the device's frames)
 }
 
 bool WaterRt::available() const { return scene_ != nullptr && scene_->supported() && !failed_; }
@@ -94,11 +84,11 @@ void WaterRt::seeBody(std::uint64_t id, const Body& b, std::uint64_t frame) {
 }
 
 bool WaterRt::pipelineReady() {
-    if (pipeline_ != VK_NULL_HANDLE) return true;
+    if (pipeline_) return true;
     if (failed_ || !building_.valid()) return false;
     if (building_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
     pipeline_ = building_.get();
-    if (pipeline_ == VK_NULL_HANDLE) {
+    if (!pipeline_) {
         spdlog::error("enh: water.rt: the compute pipeline failed: rt.reflections stays off this session");
         failed_ = true;
         return false;
@@ -186,14 +176,21 @@ void WaterRt::record(d3d9::PassContext& ctx) {
     push.params[0] = static_cast<std::uint32_t>(pa.address);
     push.params[1] = static_cast<std::uint32_t>(pa.address >> 32);
 
-    out->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
-    layout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, dev_.bindless());
-    layout_.pushStorageImage(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, 0, out->image.view());
-    layout_.push(cmd, &push, sizeof(push));
-    vkCmdDispatch(cmd, (w + 7) / 8, (h + 7) / 8, 1);
+    RhiScope rs(dev_, cmd);
+    if (!rs) {
+        ++skipped_;
+        return;
+    }
+    rhi::CommandList& cl = rs.cl();
+    rhi::Texture* outT = rs.wrap(*out);
+    cl.transition(*outT, VK_IMAGE_LAYOUT_GENERAL);
+    cl.bindPipeline(*pipeline_);
+    rhi::Texture* const storage[] = {outT};
+    cl.setStorageTextures(storage);
+    cl.setPushConstants(&push, sizeof(push));
+    cl.dispatch((w + 7) / 8, (h + 7) / 8, 1);
     // -> the water draws' pixel shaders
-    out->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    cl.transition(*outT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     imageFrame_ = frame;
     imageSlot_ = out->slot;
     lastBodies_ = n;

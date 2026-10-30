@@ -30,6 +30,7 @@
 
 #include "d3d9/device.h"
 #include "engine/lights.h"
+#include "rhi/rhi.h"
 #include "shader/abi.h"
 #include "vk/passes.h"
 #include "vk/raytracing.h"
@@ -167,13 +168,12 @@ private:
     Settings s_;
     bool on_ = false, failed_ = false;
     std::uint32_t passId_ = 0;
-    vk::PassLayout layout_;
-    VkPipeline trace_ = VK_NULL_HANDLE, blend_ = VK_NULL_HANDLE;
-    std::future<VkPipeline> traceBuild_, blendBuild_;
+    using PipelineFuture = std::future<std::unique_ptr<rhi::Pipeline>>;  // (built on a worker: Device::createComputePipeline is thread-safe)
+    std::unique_ptr<rhi::Pipeline> trace_, blend_;
+    PipelineFuture traceBuild_, blendBuild_;
     // the screen probes (set 1: three storage images)
-    vk::PassLayout screenLayout_;
-    VkPipeline spTrace_ = VK_NULL_HANDLE, spResolve_ = VK_NULL_HANDLE;
-    std::future<VkPipeline> spTraceBuild_, spResolveBuild_;
+    std::unique_ptr<rhi::Pipeline> spTrace_, spResolve_;
+    PipelineFuture spTraceBuild_, spResolveBuild_;
     std::uint32_t sgiHistory_ = 0;  // the resolved image written last (0 / 1)
     GiPassParams lastParams_{};
     GiVolumeHeader lastHeader_{};

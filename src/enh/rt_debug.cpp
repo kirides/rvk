@@ -5,6 +5,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "enh/rhi_scope.h"
 #include "enh/rt_scene.h"
 #include "shader/embedded.h"
 #include "vk/context.h"
@@ -101,59 +102,49 @@ void RtDebug::setMode(Mode mode, std::uint32_t flags) {
 }
 
 void RtDebug::destroyPipelines() {
-    vk::Context* ctx = &dev_.ctx();
-    const VkPipeline c = compute_, g = composite_, d = depthCompute_;
-    vk::PassLayout layout = layout_;
-    if (c != VK_NULL_HANDLE || g != VK_NULL_HANDLE || d != VK_NULL_HANDLE || layout.valid()) {
-        dev_.frames().retire([ctx, c, g, d, layout]() mutable {
-            for (VkPipeline p : {c, g, d}) {
-                if (p != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), p, nullptr);
-            }
-            layout.destroy(*ctx);
-        });
-    }
-    compute_ = composite_ = depthCompute_ = VK_NULL_HANDLE;
-    layout_ = vk::PassLayout{};
+    compute_.reset();  // (retired with the device's frames)
+    composite_.reset();
+    depthCompute_.reset();
     compositeFormat_ = VK_FORMAT_UNDEFINED;
 }
 
 bool RtDebug::ensurePipelines(VkFormat target) {
     if (failed_) return false;
-    vk::Context& ctx = dev_.ctx();
-    if (!layout_.valid()) {
-        const VkDescriptorSetLayoutBinding out{0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-        if (!layout_.create(ctx, dev_.bindless(), {&out, 1})) {
-            failed_ = true;
-            return false;
-        }
+    rhi::Device* rdev = dev_.rhi();
+    if (rdev == nullptr) {
+        failed_ = true;
+        return false;
     }
-    if (compute_ == VK_NULL_HANDLE) {
-        compute_ = vk::createComputePipeline(ctx, layout_.layout(), shader::embedded::spirv("rt/rt_debug.comp"), "rt.debug compute");
+    if (!compute_) {
+        rhi::ComputePipelineDesc cd;
+        cd.cs.spirv = shader::embedded::spirv("rt/rt_debug.comp");
+        cd.name = "rt.debug compute";
+        compute_ = rdev->createComputePipeline(cd);
     }
-    if (depthCompute_ == VK_NULL_HANDLE) {
-        depthCompute_ = vk::createComputePipeline(ctx, layout_.layout(), shader::embedded::spirv("rt/rt_debug_depth.comp"), "rt.debug depth");
+    if (!depthCompute_) {
+        rhi::ComputePipelineDesc cd;
+        cd.cs.spirv = shader::embedded::spirv("rt/rt_debug_depth.comp");
+        cd.name = "rt.debug depth";
+        depthCompute_ = rdev->createComputePipeline(cd);
     }
-    if (composite_ != VK_NULL_HANDLE && compositeFormat_ != target) {
-        const VkPipeline old = composite_;
-        vk::Context* c = &ctx;
-        dev_.frames().retire([c, old] { vkDestroyPipeline(c->device(), old, nullptr); });
-        composite_ = VK_NULL_HANDLE;
-    }
-    if (composite_ == VK_NULL_HANDLE) {
-        vk::PassGraphicsDesc gd;
-        gd.vs = shader::embedded::spirv("debug/fullscreen.vert");
-        gd.fs = shader::embedded::spirv("rt/rt_debug.frag");
-        gd.color = target;
-        gd.blend.enable = 1;  // src alpha over; the target's alpha kept
-        gd.blend.srcColor = VK_BLEND_FACTOR_SRC_ALPHA;
-        gd.blend.dstColor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-        gd.blend.srcAlpha = VK_BLEND_FACTOR_ZERO;
-        gd.blend.dstAlpha = VK_BLEND_FACTOR_ONE;
+    if (composite_ && compositeFormat_ != target) composite_.reset();
+    if (!composite_) {
+        rhi::GraphicsPipelineDesc gd;
+        gd.vs.spirv = shader::embedded::spirv("debug/fullscreen_rhi.vert");
+        gd.ps.spirv = shader::embedded::spirv("rt/rt_debug.frag");
+        gd.colorFormats[0] = target;
+        gd.blend.blendEnable = VK_TRUE;  // src alpha over; the target's alpha kept
+        gd.blend.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        gd.blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        gd.blend.colorBlendOp = VK_BLEND_OP_ADD;
+        gd.blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        gd.blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        gd.blend.alphaBlendOp = VK_BLEND_OP_ADD;
         gd.name = "rt.debug composite";
-        composite_ = vk::createPassGraphicsPipeline(ctx, layout_.layout(), gd);
+        composite_ = rdev->createGraphicsPipeline(gd);
         compositeFormat_ = target;
     }
-    if (compute_ == VK_NULL_HANDLE || composite_ == VK_NULL_HANDLE || depthCompute_ == VK_NULL_HANDLE) {
+    if (!compute_ || !composite_ || !depthCompute_) {
         spdlog::error("enh: rt.debug: pipelines failed, the view stays off this session");
         failed_ = true;
         return false;
@@ -177,13 +168,17 @@ void RtDebug::captureDepth(d3d9::PassContext& ctx) {
     push.depthTex = ds->texture()->bindlessSlot();
     push.width = w;
     push.height = h;
-    out->image.transition(ctx.cmd, VK_IMAGE_LAYOUT_GENERAL);
-    vkCmdBindPipeline(ctx.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, depthCompute_);
-    layout_.bindSet0(ctx.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, dev_.bindless());
-    layout_.pushStorageImage(ctx.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, 0, out->image.view());
-    layout_.push(ctx.cmd, &push, sizeof(push));
-    vkCmdDispatch(ctx.cmd, (w + 7) / 8, (h + 7) / 8, 1);
-    out->image.transition(ctx.cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    RhiScope rs(dev_, ctx.cmd);
+    if (!rs) return;
+    rhi::CommandList& cl = rs.cl();
+    rhi::Texture* outT = rs.wrap(*out);
+    cl.transition(*outT, VK_IMAGE_LAYOUT_GENERAL);
+    cl.bindPipeline(*depthCompute_);
+    rhi::Texture* const storage[] = {outT};
+    cl.setStorageTextures(storage);
+    cl.setPushConstants(&push, sizeof(push));
+    cl.dispatch((w + 7) / 8, (h + 7) / 8, 1);
+    cl.transition(*outT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     depthFrame_ = dev_.frameValue();
     depthExtent_ = {w, h};
 }
@@ -237,35 +232,32 @@ void RtDebug::record(d3d9::PassContext& ctx) {
         probeFrame_[slot] = dev_.frameValue();
     }
 
-    color->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_);
-    layout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, dev_.bindless());
-    layout_.pushStorageImage(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, 0, color->image.view());
-    layout_.push(cmd, &push, sizeof(push));
-    vkCmdDispatch(cmd, (w + 7) / 8, (h + 7) / 8, 1);
+    RhiScope rs(dev_, cmd);
+    if (!rs) return;
+    rhi::CommandList& cl = rs.cl();
+    rhi::Texture* colorT = rs.wrap(*color);
+    cl.transition(*colorT, VK_IMAGE_LAYOUT_GENERAL);
+    cl.bindPipeline(*compute_);
+    rhi::Texture* const storage[] = {colorT};
+    cl.setStorageTextures(storage);
+    cl.setPushConstants(&push, sizeof(push));
+    cl.dispatch((w + 7) / 8, (h + 7) / 8, 1);
 
-    color->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    target.transition(cmd, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    VkRenderingAttachmentInfo att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    att.imageView = target.attachmentView(dev_.ctx(), 0, 0);
-    att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
-    ri.renderArea = {{0, 0}, {w, h}};
-    ri.layerCount = 1;
-    ri.colorAttachmentCount = 1;
-    ri.pColorAttachments = &att;
-    vkCmdBeginRendering(cmd, &ri);
-    const VkViewport vp{0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h), 0.0f, 1.0f};
-    const VkRect2D sc{{0, 0}, {w, h}};
-    vkCmdSetViewport(cmd, 0, 1, &vp);
-    vkCmdSetScissor(cmd, 0, 1, &sc);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, composite_);
-    layout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, dev_.bindless());
-    layout_.push(cmd, &push, sizeof(push));
-    vkCmdDraw(cmd, 3, 1, 0, 0);
-    vkCmdEndRendering(cmd);
+    cl.transition(*colorT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    rhi::Texture* targetT = rs.wrap(target);
+    cl.transition(*targetT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    rhi::RenderingInfo ri;
+    ri.color[0].texture = targetT;
+    ri.color[0].load = VK_ATTACHMENT_LOAD_OP_LOAD;
+    ri.color[0].store = VK_ATTACHMENT_STORE_OP_STORE;
+    ri.colorCount = 1;
+    ri.width = w;
+    ri.height = h;
+    cl.beginRendering(ri);
+    cl.bindPipeline(*composite_);
+    cl.setPushConstants(&push, sizeof(push));
+    cl.draw(3, 1, 0, 0);
+    cl.endRendering();
     if (frames_++ == 0) {
         spdlog::info("enh: rt.debug mode {} at {}: {}x{}, depth map {}, TLAS {} instances", static_cast<int>(mode_),
                      d3d9::inject::name(ctx.point), w, h, push.depthTex != 0 ? "slot " + std::to_string(push.depthTex) : "none",

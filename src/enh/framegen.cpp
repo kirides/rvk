@@ -10,6 +10,7 @@
 
 #include "core/paths.h"
 #include "enh/gbuffer.h"
+#include "enh/rhi_scope.h"
 #include "rhi/vulkan/wrap.h"
 #include "shader/embedded.h"
 #include "vk/context.h"
@@ -40,12 +41,18 @@ constexpr VkImageUsageFlags kDepthUsage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_
 constexpr VkImageUsageFlags kColorUsage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
                                           VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 
-void copyImage(VkCommandBuffer cmd, vk::Image& src, vk::Image& dst, VkExtent2D size) {
-    src.transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    dst.transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    const VkImageCopy region{{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0},
-                             {size.width, size.height, 1}};
-    vkCmdCopyImage(cmd, src.image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+bool copyImage(d3d9::Device& dev, VkCommandBuffer cmd, vk::Image& src, vk::Image& dst, VkExtent2D size) {
+    RhiScope rs(dev, cmd);
+    if (!rs) return false;
+    rhi::CommandList& cl = rs.cl();
+    rhi::Texture* srcT = rs.wrap(src);
+    rhi::Texture* dstT = rs.wrap(dst);
+    cl.transition(*srcT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    cl.transition(*dstT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    rhi::TextureCopy region;
+    region.extent = {size.width, size.height, 1};
+    cl.copyTexture(*dstT, *srcT, std::span<const rhi::TextureCopy>(&region, 1));
+    return true;
 }
 
 }  // namespace
@@ -344,7 +351,7 @@ void FrameGeneration::recordHudless(d3d9::PassContext& ctx) {
     hudlessIndex_ ^= 1;
     vk::Transients::Entry* h = dev_.transients().get(hudlessKey(), {src.format(), size, kColorUsage});
     if (h == nullptr) return;
-    copyImage(ctx.cmd, src, h->image, size);
+    if (!copyImage(dev_, ctx.cmd, src, h->image, size)) return;
     h->image.transition(ctx.cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     hudlessFrame_ = true;
 }
@@ -471,7 +478,7 @@ void FrameGeneration::recordGenerate(d3d9::PassContext& ctx) {
     if (color == nullptr || out == nullptr || depth == nullptr || motion == nullptr) return;
 
     // the finished frame (GUI included): the colour the interpolation reads and keeps for the next frame
-    copyImage(cmd, real, color->image, display);
+    if (!copyImage(dev_, cmd, real, color->image, display)) return;
 
     vk::FrameGenConfigure cfg;
     cfg.enabled = true;

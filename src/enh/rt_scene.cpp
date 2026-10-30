@@ -10,6 +10,7 @@
 
 #include "engine/materials.h"
 #include "enh/material_variant.h"
+#include "enh/rhi_scope.h"
 #include "shader/embedded.h"
 #include "engine/memread.h"
 #include "vk/context.h"
@@ -927,13 +928,14 @@ bool RtScene::ensureResources() {
     const std::uint32_t cap = limits_.maxInstances;
     vkGetAccelerationStructureBuildSizesKHR(ctx.device(), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &info, &cap, &sizes);
     bool ok = true;
-    std::uint32_t tlasSlot = 0;
     for (Tlas& t : tlas_) {
         ok = ok && createAs(ctx, VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, sizes.accelerationStructureSize, t.as, "rt scene tlas");
         t.capacity = cap;
-        // the HLSL ray queries reach the TLAS through the bindless acceleration structure array (abi.h kBindingTlas)
-        if (ok) dev_.bindless().setTlas(tlasSlot, t.as.handle);
-        ++tlasSlot;
+        // the HLSL ray queries reach the TLAS through the bindless acceleration structure array (abi.h kBindingTlas); the slots are shared with the
+        // RHI's TLASes (vk::Bindless::allocTlasSlot)
+        t.slot = dev_.bindless().allocTlasSlot();
+        ok = ok && t.slot < shader::abi::kMaxTlas;
+        if (ok) dev_.bindless().setTlas(t.slot, t.as.handle);
     }
     tlasScratchSize_ = (sizes.buildScratchSize + scratchAlign_ - 1) & ~(scratchAlign_ - 1);
     ok = ok && ensureScratch(tlasScratchSize_);
@@ -965,17 +967,21 @@ bool RtScene::ensureResources() {
 void RtScene::destroyResources() {
     vk::Context* ctx = &dev_.ctx();
     std::vector<vk::rt::AccelerationStructure> tl;
+    std::vector<std::uint32_t> slots;
     for (Tlas& t : tlas_) {
         tl.push_back(t.as);
+        if (t.as.handle != VK_NULL_HANDLE) slots.push_back(t.slot);
         t = {};
     }
+    vk::Bindless* bindless = &dev_.bindless();
     vk::rt::AddressBuffer scratch = scratch_;
     scratch_ = {};
     const VkQueryPool cp = compactPool_, tp = timePool_;
     compactPool_ = timePool_ = VK_NULL_HANDLE;
     for (auto& c : compactions_) c.clear();
-    dev_.frames().retire([ctx, tl, scratch, cp, tp]() mutable {
+    dev_.frames().retire([ctx, tl, slots, bindless, scratch, cp, tp]() mutable {
         for (auto& t : tl) t.destroy(*ctx);
+        for (std::uint32_t s : slots) bindless->freeTlasSlot(s);
         scratch.destroy(*ctx);
         if (cp != VK_NULL_HANDLE) vkDestroyQueryPool(ctx->device(), cp, nullptr);
         if (tp != VK_NULL_HANDLE) vkDestroyQueryPool(ctx->device(), tp, nullptr);
@@ -1832,20 +1838,22 @@ bool RtScene::skinReady() {
     if (skinReady_) return true;
     if (!skinStarted_) {
         skinStarted_ = true;
-        if (!skinLayout_.create(dev_.ctx(), dev_.bindless(), {})) {
+        rhi::Device* rdev = dev_.rhi();
+        if (rdev == nullptr) {
             skinFailed_ = true;
             return false;
         }
-        vk::Context* ctx = &dev_.ctx();
-        const VkPipelineLayout layout = skinLayout_.layout();
-        skinBuild_ = std::async(std::launch::async, [ctx, layout]() {
-            return vk::createComputePipeline(*ctx, layout, shader::embedded::spirv("rt/rt_skin.comp"), "rt.skin");
+        skinBuild_ = std::async(std::launch::async, [rdev]() {
+            rhi::ComputePipelineDesc d;
+            d.cs.spirv = shader::embedded::spirv("rt/rt_skin.comp");
+            d.name = "rt.skin";
+            return rdev->createComputePipeline(d);
         });
         return false;
     }
     if (!skinBuild_.valid() || skinBuild_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
     skinPipe_ = skinBuild_.get();
-    if (skinPipe_ == VK_NULL_HANDLE) {
+    if (!skinPipe_) {
         spdlog::error("rt: skin: the compute pipeline failed: characters keep the vertex shader captures");
         skinFailed_ = true;
         return false;
@@ -1858,22 +1866,10 @@ bool RtScene::skinReady() {
 void RtScene::destroySkin() {
     skinJobs_.clear();
     vk::Context* ctx = &dev_.ctx();
-    if (skinBuild_.valid()) {
-        const VkPipeline p = skinBuild_.get();
-        if (p != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), p, nullptr);
-    }
-    const VkPipeline pipe = skinPipe_;
-    vk::PassLayout layout = skinLayout_;
+    if (skinBuild_.valid()) skinBuild_.get();  // (a pipeline still being built is waited for; the RHI retires it with the device's frames)
     vk::rt::AddressBuffer err = skinErr_;
-    if (pipe != VK_NULL_HANDLE || layout.valid() || err.buffer != VK_NULL_HANDLE) {
-        dev_.frames().retire([ctx, pipe, layout, err]() mutable {
-            if (pipe != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), pipe, nullptr);
-            layout.destroy(*ctx);
-            err.destroy(*ctx);
-        });
-    }
-    skinPipe_ = VK_NULL_HANDLE;
-    skinLayout_ = {};
+    if (err.buffer != VK_NULL_HANDLE) dev_.frames().retire([ctx, err]() mutable { err.destroy(*ctx); });
+    skinPipe_.reset();
     skinErr_ = {};
     skinReady_ = skinStarted_ = false;
 }
@@ -1953,8 +1949,9 @@ void RtScene::recordSkin(VkCommandBuffer cmd) {
         // a reference capture written by a cascade's vertex shader (verify) before the compute reads it
         barrier(cmd, VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, skinPipe_);
-        skinLayout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, dev_.bindless());
+        RhiScope rs(dev_, cmd);
+        if (!rs) return;
+        rs.cl().bindPipeline(*skinPipe_);
         struct Push {
             abi::PassPushHeader h;
             std::uint32_t table[2];
@@ -1963,8 +1960,8 @@ void RtScene::recordSkin(VkCommandBuffer cmd) {
         push.h.frame = 0;
         push.table[0] = static_cast<std::uint32_t>(t.address);
         push.table[1] = static_cast<std::uint32_t>(t.address >> 32);
-        skinLayout_.push(cmd, &push, sizeof(push));
-        vkCmdDispatch(cmd, chunks, 1, 1);
+        rs.cl().setPushConstants(&push, sizeof(push));
+        rs.cl().dispatch(chunks, 1, 1);
     }
     for (std::uint32_t i = 0; i < n; ++i) dev_.markVertexCaptured(skinJobs_[i].out);
     skinJobsTotal_ += n;
@@ -2342,7 +2339,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
         ++iv_.holeFrames;
         iv_.holes += n - used;
     }
-    dev_.setRtScene({t.as.address, ra.address, static_cast<std::uint32_t>(slot), used, used, frame});
+    dev_.setRtScene({t.as.address, ra.address, t.slot, used, used, frame});
 
     lastInstances_ = used;
     lastTriangles_ = triangles;

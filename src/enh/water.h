@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "d3d9/device.h"
+#include "rhi/rhi.h"
 #include "enh/ocean.h"
 #include "enh/sea_floor.h"
 #include "enh/shore_field.h"
@@ -218,8 +219,7 @@ private:
     };
     std::unordered_map<std::uint64_t, Fall> falls_;
     std::uint32_t wetPassId_ = 0;
-    vk::PassLayout wetLayout_;
-    VkPipeline wetPipeline_ = VK_NULL_HANDLE;
+    std::unique_ptr<rhi::Pipeline> wetPipeline_;
     VkFormat wetFormat_ = VK_FORMAT_UNDEFINED;
     bool wetFailed_ = false;
     float seaLevel_ = 0.0f;

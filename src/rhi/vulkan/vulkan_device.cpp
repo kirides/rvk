@@ -28,7 +28,7 @@ namespace rvk::rhi {
 namespace {
 
 constexpr std::uint32_t kConstantBufferBinding = 8;  // b8 space1: set 1 binding 8
-constexpr std::uint32_t kStorageImages = 4;          // u0..u3 space1: set 1 bindings 0..3
+// (storage images: u0..u7 space1 = set 1 bindings 0..7, rhi::kStorageImages)
 
 class VkDeviceImpl;
 
@@ -39,6 +39,8 @@ public:
     bool create();
     const BufferDesc& desc() const override { return desc_; }
     void* map() override { return mapped_; }
+    void invalidate() override;
+    void flush() override;
     std::uint32_t heapIndex() const override { return 0; }    // Vulkan reaches buffers by address (RVK_REF)
     std::uint32_t heapIndexRw() const override { return 0; }
     std::array<std::uint32_t, 2> shaderRef(std::uint64_t offset) const override {
@@ -171,6 +173,7 @@ private:
     VkAccelerationStructureKHR handle_ = VK_NULL_HANDLE;
     VkDeviceAddress address_ = 0;
     std::uint32_t slot_ = 0;
+    bool hasSlot_ = false;  // a TLAS holds a slot of the shared bindless array (0 is a valid one)
 };
 
 class VkCommandListImpl final : public CommandList {
@@ -178,7 +181,10 @@ public:
     VkCommandListImpl(VkDeviceImpl& dev, VkCommandBuffer cmd) : dev_(dev), cmd_(cmd) {}
 
     void transition(Texture& texture, VkImageLayout layout) override;
+    void transitionMips(Texture& texture, VkImageLayout layout, std::uint32_t baseMip, std::uint32_t mipCount) override;
+    void transitions(std::span<const TextureTransition> list) override;
     void bufferBarrier(Buffer&, BufferAccess) override;
+    void computeBarrier() override;
     void setPushConstants(const void* data, std::uint32_t size) override;
     void setConstantBuffer(Buffer& buffer, std::uint64_t offset, std::uint64_t size) override {
         cb_ = {static_cast<VkBufferImpl&>(buffer).buffer(), offset, size};
@@ -232,6 +238,9 @@ public:
     }
     void copyBufferToTexture(Texture& dst, Buffer& src, std::uint64_t srcOffset, Subresource sub) override;
     void copyTextureToBuffer(Buffer& dst, std::uint64_t dstOffset, Texture& src, Subresource sub) override;
+    void clearTexture(Texture& texture, const VkClearColorValue& value, std::uint32_t baseMip, std::uint32_t mipCount) override;
+    void copyTexture(Texture& dst, Texture& src, std::span<const TextureCopy> regions) override;
+    bool blitTexture(Texture& dst, Texture& src, std::span<const TextureBlit> regions, VkFilter filter) override;
     void buildBlas(AccelerationStructure& blas) override { static_cast<VkAccelImpl&>(blas).recordBuildBlas(cmd_); }
     void buildTlas(AccelerationStructure& tlas, Buffer& instances, std::uint64_t instanceOffset, std::uint32_t count) override {
         static_cast<VkAccelImpl&>(tlas).recordBuildTlas(cmd_, static_cast<VkBufferImpl&>(instances).address() + instanceOffset, count);
@@ -249,7 +258,7 @@ private:
         VkBuffer buffer = VK_NULL_HANDLE;
         std::uint64_t offset = 0, size = 0;
     } cb_;
-    std::array<VkImageView, kStorageImages> views_{};
+    std::array<VkImageView, rhi::kStorageImages> views_{};
     bool dirty_ = true;
     bool pipelineBound_ = false;
 };
@@ -295,6 +304,7 @@ public:
         caps_.bindless = true;
         caps_.heapSize = vk::Bindless::kMax2D;
         caps_.drawIndirectCount = ctx_.features().drawIndirectCount;
+        caps_.textureBlit = true;
         // ray queries need the acceleration structure array in the bindless set (descriptor binding update after bind)
         caps_.rayQuery = ctx_.features().rayTracing.enabled && ctx_.features().rayTracing.tlasDescriptors;
         return true;
@@ -309,15 +319,17 @@ public:
         caps_.bindless = true;
         caps_.heapSize = vk::Bindless::kMax2D;
         caps_.drawIndirectCount = ctx_.features().drawIndirectCount;
-        caps_.rayQuery = false;
+        caps_.textureBlit = true;
+        // acceleration structures of the wrapped device: TLAS slots from the renderer's bindless set (shared with the RT scene)
+        caps_.rayQuery = ctx_.features().rayTracing.enabled && ctx_.features().rayTracing.tlasDescriptors;
         return true;
     }
 
     bool createLayout() {
-        VkDescriptorSetLayoutBinding b[kStorageImages + 1]{};
+        VkDescriptorSetLayoutBinding b[rhi::kStorageImages + 1]{};
         const VkShaderStageFlags stages = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_VERTEX_BIT;
-        for (std::uint32_t i = 0; i < kStorageImages; ++i) b[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, stages, nullptr};
-        b[kStorageImages] = {kConstantBufferBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, stages, nullptr};
+        for (std::uint32_t i = 0; i < rhi::kStorageImages; ++i) b[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, stages, nullptr};
+        b[rhi::kStorageImages] = {kConstantBufferBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, stages, nullptr};
         return layout_.create(ctx_, bindless_, b);
     }
 
@@ -352,6 +364,10 @@ public:
         ci.mipmapMode = desc.filter == VK_FILTER_NEAREST ? VK_SAMPLER_MIPMAP_MODE_NEAREST : VK_SAMPLER_MIPMAP_MODE_LINEAR;
         ci.addressModeU = ci.addressModeV = ci.addressModeW = desc.address;
         ci.maxLod = VK_LOD_CLAMP_NONE;
+        if (desc.maxAnisotropy > 1.0f && desc.filter == VK_FILTER_LINEAR && ctx_.features().samplerAnisotropy) {
+            ci.anisotropyEnable = VK_TRUE;
+            ci.maxAnisotropy = std::min(desc.maxAnisotropy, ctx_.features().maxAnisotropy);
+        }
         VkSampler s = VK_NULL_HANDLE;
         if (vkCreateSampler(ctx_.device(), &ci, nullptr, &s) != VK_SUCCESS) return 0;
         samplers_.push_back(s);
@@ -452,17 +468,10 @@ public:
     vk::Context& ctx() { return ctx_; }
     vk::Bindless& bindless() { return bindless_; }
     vk::PassLayout& layout() { return layout_; }
-    // slots 1 .. kMaxTlas - 1 of the bindless acceleration structure array (0 stays free: tlasSlot() == 0 means "no TLAS"); 0 = none left
-    std::uint32_t allocTlasSlot() {
-        for (std::uint32_t i = 1; i < shader::abi::kMaxTlas; ++i) {
-            if ((tlasUsed_ & (1u << i)) == 0) {
-                tlasUsed_ |= 1u << i;
-                return i;
-            }
-        }
-        return 0;
-    }
-    void freeTlasSlot(std::uint32_t slot) { tlasUsed_ &= ~(1u << slot); }
+    // the bindless acceleration structure array's slots are the renderer's (vk::Bindless::allocTlasSlot: shared with the RT scene's TLASes);
+    // kMaxTlas = none left
+    std::uint32_t allocTlasSlot() { return bindless_.allocTlasSlot(); }
+    void freeTlasSlot(std::uint32_t slot) { bindless_.freeTlasSlot(slot); }
 
 private:
     vk::Context ownCtx_;  // (unused when wrapped)
@@ -475,7 +484,6 @@ private:
     vk::PassLayout layout_;
     DeviceCaps caps_;
     bool bindlessInit_ = false;
-    std::uint32_t tlasUsed_ = 0;
     std::vector<VkSampler> samplers_;
 };
 
@@ -540,6 +548,14 @@ bool VkBufferImpl::create() {
     ai.buffer = buffer_;
     address_ = vkGetBufferDeviceAddress(dev_.ctx().device(), &ai);
     return true;
+}
+
+void VkBufferImpl::invalidate() {
+    if (mapped_ != nullptr) vmaInvalidateAllocation(dev_.ctx().allocator(), alloc_, 0, VK_WHOLE_SIZE);
+}
+
+void VkBufferImpl::flush() {
+    if (mapped_ != nullptr) vmaFlushAllocation(dev_.ctx().allocator(), alloc_, 0, VK_WHOLE_SIZE);
 }
 
 VkBufferImpl::~VkBufferImpl() {
@@ -649,11 +665,19 @@ VkTextureImpl::~VkTextureImpl() {
 // ---- acceleration structures ------------------------------------------------------------------------------------------------
 
 VkAccelImpl::~VkAccelImpl() {
-    dev_.ctx().waitIdle();  // (tools / tests: nothing in flight uses it)
-    if (slot_ != 0) dev_.freeTlasSlot(slot_);
-    if (handle_ != VK_NULL_HANDLE) vkDestroyAccelerationStructureKHR(dev_.ctx().device(), handle_, nullptr);
-    storage_.destroy(dev_.ctx());
-    scratch_.destroy(dev_.ctx());
+    // the GPU may still use it: destroyed when the frame being recorded has completed (a wait on an owning device)
+    vk::Context* ctx = &dev_.ctx();
+    vk::Bindless* bindless = &dev_.bindless();
+    const VkAccelerationStructureKHR handle = handle_;
+    vk::rt::AddressBuffer storage = storage_, scratch = scratch_;
+    const std::uint32_t slot = slot_;
+    const bool hasSlot = hasSlot_;
+    dev_.defer([ctx, bindless, handle, storage, scratch, slot, hasSlot]() mutable {
+        if (handle != VK_NULL_HANDLE) vkDestroyAccelerationStructureKHR(ctx->device(), handle, nullptr);
+        storage.destroy(*ctx);
+        scratch.destroy(*ctx);
+        if (hasSlot) bindless->freeTlasSlot(slot);
+    });
 }
 
 void VkAccelImpl::blasGeometries(std::vector<VkAccelerationStructureGeometryKHR>& geoms, std::vector<VkAccelerationStructureBuildRangeInfoKHR>& ranges,
@@ -727,10 +751,12 @@ bool VkAccelImpl::createBlas(std::span<const TriangleGeometry> geometries) {
 bool VkAccelImpl::createTlas(std::uint32_t maxInstances) {
     maxInstances_ = maxInstances;
     slot_ = dev_.allocTlasSlot();
-    if (slot_ == 0) {
-        spdlog::error("rhi: no free TLAS slot ({} of the bindless array)", shader::abi::kMaxTlas - 1);
+    if (slot_ >= shader::abi::kMaxTlas) {
+        spdlog::error("rhi: no free TLAS slot ({} in the bindless array)", shader::abi::kMaxTlas);
+        slot_ = 0;
         return false;
     }
+    hasSlot_ = true;
     VkAccelerationStructureGeometryKHR g{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
     g.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
     g.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
@@ -807,6 +833,38 @@ void VkCommandListImpl::transition(Texture& texture, VkImageLayout layout) {
     img.transition(cmd_, layout, true);  // the same layout again = a barrier (writes become visible)
 }
 
+void VkCommandListImpl::transitionMips(Texture& texture, VkImageLayout layout, std::uint32_t baseMip, std::uint32_t mipCount) {
+    if (layout == VK_IMAGE_LAYOUT_UNDEFINED) return;
+    static_cast<VkTextureImpl&>(texture).image().transitionMips(cmd_, layout, baseMip, mipCount, true);
+}
+
+void VkCommandListImpl::transitions(std::span<const TextureTransition> list) {
+    std::vector<VkImageMemoryBarrier2> barriers;
+    for (const TextureTransition& t : list) {
+        if (t.layout == VK_IMAGE_LAYOUT_UNDEFINED) continue;
+        static_cast<VkTextureImpl*>(t.texture)->image().appendBarriers(barriers, t.layout, t.baseMip, t.mipCount, true);
+    }
+    if (barriers.empty()) return;
+    VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    di.imageMemoryBarrierCount = static_cast<std::uint32_t>(barriers.size());
+    di.pImageMemoryBarriers = barriers.data();
+    vkCmdPipelineBarrier2(cmd_, &di);
+}
+
+void VkCommandListImpl::computeBarrier() {
+    VkMemoryBarrier2 b{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    b.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+    b.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    b.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+                     VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+    b.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT |
+                      VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    di.memoryBarrierCount = 1;
+    di.pMemoryBarriers = &b;
+    vkCmdPipelineBarrier2(cmd_, &di);
+}
+
 // (one barrier for every access kind: it also covers the buffer as a vertex / index / indirect source, a copy source and acceleration structure build input)
 void VkCommandListImpl::bufferBarrier(Buffer&, BufferAccess) {
     VkMemoryBarrier2 b{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
@@ -833,11 +891,11 @@ void VkCommandListImpl::bindPipeline(Pipeline& pipeline) {
 // the push descriptors of set 1 (constant buffer, storage images) for the bound pipeline's bind point
 void VkCommandListImpl::flush() {
     if (!dirty_ || pipeline_ == nullptr) return;
-    std::array<VkWriteDescriptorSet, kStorageImages + 1> w{};
-    std::array<VkDescriptorImageInfo, kStorageImages> ii{};
+    std::array<VkWriteDescriptorSet, rhi::kStorageImages + 1> w{};
+    std::array<VkDescriptorImageInfo, rhi::kStorageImages> ii{};
     VkDescriptorBufferInfo bi{cb_.buffer, cb_.offset, cb_.size};
     std::uint32_t n = 0;
-    for (std::uint32_t i = 0; i < kStorageImages; ++i) {
+    for (std::uint32_t i = 0; i < rhi::kStorageImages; ++i) {
         if (views_[i] == VK_NULL_HANDLE) continue;
         ii[i] = {VK_NULL_HANDLE, views_[i], VK_IMAGE_LAYOUT_GENERAL};
         w[n] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
@@ -924,6 +982,63 @@ void VkCommandListImpl::copyTextureToBuffer(Buffer& dst, std::uint64_t dstOffset
     c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, sub.mip, sub.layer, 1};
     c.imageExtent = e;
     vkCmdCopyImageToBuffer(cmd_, t.image().image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, static_cast<VkBufferImpl&>(dst).buffer(), 1, &c);
+}
+
+void VkCommandListImpl::clearTexture(Texture& texture, const VkClearColorValue& value, std::uint32_t baseMip, std::uint32_t mipCount) {
+    vk::Image& img = static_cast<VkTextureImpl&>(texture).image();
+    const VkImageSubresourceRange r{VK_IMAGE_ASPECT_COLOR_BIT, baseMip, mipCount, 0, VK_REMAINING_ARRAY_LAYERS};
+    vkCmdClearColorImage(cmd_, img.image(), VK_IMAGE_LAYOUT_GENERAL, &value, 1, &r);
+}
+
+void VkCommandListImpl::copyTexture(Texture& dst, Texture& src, std::span<const TextureCopy> regions) {
+    VkTextureImpl& d = static_cast<VkTextureImpl&>(dst);
+    VkTextureImpl& s = static_cast<VkTextureImpl&>(src);
+    std::vector<VkImageCopy2> rs(regions.size());
+    for (std::size_t i = 0; i < regions.size(); ++i) {
+        const TextureCopy& c = regions[i];
+        const bool whole = c.extent.width == 0 && c.extent.height == 0 && c.extent.depth == 0;
+        rs[i] = {VK_STRUCTURE_TYPE_IMAGE_COPY_2};
+        rs[i].srcSubresource = {s.image().aspect(), c.src.mip, c.src.layer, c.layerCount};
+        rs[i].dstSubresource = {d.image().aspect(), c.dst.mip, c.dst.layer, c.layerCount};
+        rs[i].srcOffset = c.srcOffset;
+        rs[i].dstOffset = c.dstOffset;
+        rs[i].extent = whole ? mipExtent(s.desc(), c.src.mip) : c.extent;
+    }
+    VkCopyImageInfo2 ci{VK_STRUCTURE_TYPE_COPY_IMAGE_INFO_2};
+    ci.srcImage = s.image().image();
+    ci.srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    ci.dstImage = d.image().image();
+    ci.dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    ci.regionCount = static_cast<std::uint32_t>(rs.size());
+    ci.pRegions = rs.data();
+    vkCmdCopyImage2(cmd_, &ci);
+}
+
+bool VkCommandListImpl::blitTexture(Texture& dst, Texture& src, std::span<const TextureBlit> regions, VkFilter filter) {
+    VkTextureImpl& d = static_cast<VkTextureImpl&>(dst);
+    VkTextureImpl& s = static_cast<VkTextureImpl&>(src);
+    std::vector<VkImageBlit2> rs(regions.size());
+    for (std::size_t i = 0; i < regions.size(); ++i) {
+        const TextureBlit& b = regions[i];
+        const auto whole = [](const VkExtent3D& e) { return e.width == 0 && e.height == 0 && e.depth == 0; };
+        const VkExtent3D se = whole(b.srcExtent) ? mipExtent(s.desc(), b.src.mip) : b.srcExtent;
+        const VkExtent3D de = whole(b.dstExtent) ? mipExtent(d.desc(), b.dst.mip) : b.dstExtent;
+        rs[i] = {VK_STRUCTURE_TYPE_IMAGE_BLIT_2};
+        rs[i].srcSubresource = {s.image().aspect(), b.src.mip, b.src.layer, 1};
+        rs[i].dstSubresource = {d.image().aspect(), b.dst.mip, b.dst.layer, 1};
+        rs[i].srcOffsets[1] = {static_cast<std::int32_t>(se.width), static_cast<std::int32_t>(se.height), static_cast<std::int32_t>(se.depth)};
+        rs[i].dstOffsets[1] = {static_cast<std::int32_t>(de.width), static_cast<std::int32_t>(de.height), static_cast<std::int32_t>(de.depth)};
+    }
+    VkBlitImageInfo2 bi{VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2};
+    bi.srcImage = s.image().image();
+    bi.srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    bi.dstImage = d.image().image();
+    bi.dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    bi.regionCount = static_cast<std::uint32_t>(rs.size());
+    bi.pRegions = rs.data();
+    bi.filter = filter;
+    vkCmdBlitImage2(cmd_, &bi);
+    return true;
 }
 
 }  // namespace

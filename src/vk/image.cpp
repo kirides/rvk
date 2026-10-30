@@ -1,5 +1,8 @@
 #include "vk/image.h"
 
+#include <algorithm>
+#include <vector>
+
 #include <spdlog/spdlog.h>
 
 #include "vk/context.h"
@@ -107,6 +110,7 @@ bool Image::create(Context& ctx, const ImageDesc& desc) {
         names::image(ctx, *this, desc.name);  // the image and its view
     }
     layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    split_ = false;
     return true;
 }
 
@@ -165,6 +169,10 @@ VkImageView Image::attachmentView(Context& ctx, std::uint32_t mip, std::uint32_t
 }
 
 void Image::transition(VkCommandBuffer cmd, VkImageLayout layout, bool force) {
+    if (split_) {
+        transitionMips(cmd, layout, 0, desc_.mips, force);
+        return;
+    }
     if (layout_ == layout && !force) {
         return;
     }
@@ -186,6 +194,62 @@ void Image::transition(VkCommandBuffer cmd, VkImageLayout layout, bool force) {
     di.pImageMemoryBarriers = &b;
     vkCmdPipelineBarrier2(cmd, &di);
     layout_ = layout;
+}
+
+
+
+// the barriers of a mip range transition (whole-image bookkeeping while the levels agree, per level after a partial range); the tracked layouts are
+// updated, nothing is recorded
+void Image::appendBarriers(std::vector<VkImageMemoryBarrier2>& out, VkImageLayout layout, std::uint32_t baseMip, std::uint32_t mipCount, bool force) {
+    const std::uint32_t mips = std::min(desc_.mips, 16u);
+    if (baseMip >= mips || mipCount == 0) return;
+    mipCount = std::min(mipCount, mips - baseMip);
+    const auto make = [&](VkImageLayout old, std::uint32_t first, std::uint32_t count) {
+        VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+        layoutSync(old, b.srcStageMask, b.srcAccessMask);
+        layoutSync(layout, b.dstStageMask, b.dstAccessMask);
+        if (b.srcStageMask == VK_PIPELINE_STAGE_2_NONE) b.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+        if (b.dstStageMask == VK_PIPELINE_STAGE_2_NONE) b.dstStageMask = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT;
+        b.oldLayout = old;
+        b.newLayout = layout;
+        b.image = image_;
+        b.subresourceRange = {aspect_, first, count, 0, VK_REMAINING_ARRAY_LAYERS};
+        out.push_back(b);
+    };
+    if (!split_ && baseMip == 0 && mipCount >= desc_.mips) {
+        if (layout_ != layout || force) make(layout_, 0, VK_REMAINING_MIP_LEVELS);
+        layout_ = layout;
+        return;
+    }
+    if (!split_) {
+        for (std::uint32_t m = 0; m < 16; ++m) mipLayout_[m] = layout_;
+        split_ = true;
+    }
+    for (std::uint32_t m = baseMip; m < baseMip + mipCount;) {
+        const VkImageLayout old = mipLayout_[m];
+        std::uint32_t e = m + 1;
+        while (e < baseMip + mipCount && mipLayout_[e] == old) ++e;
+        if (old != layout || force) make(old, m, e - m);
+        m = e;
+    }
+    for (std::uint32_t m = baseMip; m < baseMip + mipCount; ++m) mipLayout_[m] = layout;
+    // all levels in one layout again: back to the whole-image bookkeeping
+    bool same = true;
+    for (std::uint32_t m = 1; m < mips; ++m) same = same && mipLayout_[m] == mipLayout_[0];
+    if (same) {
+        layout_ = mipLayout_[0];
+        split_ = false;
+    }
+}
+
+void Image::transitionMips(VkCommandBuffer cmd, VkImageLayout layout, std::uint32_t baseMip, std::uint32_t mipCount, bool force) {
+    std::vector<VkImageMemoryBarrier2> barriers;
+    appendBarriers(barriers, layout, baseMip, mipCount, force);
+    if (barriers.empty()) return;
+    VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    di.imageMemoryBarrierCount = static_cast<std::uint32_t>(barriers.size());
+    di.pImageMemoryBarriers = barriers.data();
+    vkCmdPipelineBarrier2(cmd, &di);
 }
 
 }  // namespace rvk::vk

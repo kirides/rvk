@@ -9,10 +9,11 @@
 #include <array>
 #include <cstdint>
 
+#include <memory>
+
 #include "enh/ocean_spectrum.h"
+#include "rhi/rhi.h"
 #include "shader/abi.h"
-#include "vk/image.h"
-#include "vk/passes.h"
 
 namespace rvk::d3d9 {
 class Device;
@@ -67,10 +68,10 @@ public:
     // the sea to simulate (re-runs the spectrum pass when it changed noticeably)
     void setSea(const ocean::SeaState& sea);
     // records the simulation of this frame (outside a rendering scope); t in seconds (any epoch)
-    void record(VkCommandBuffer cmd, VkDeviceAddress frameBlock, double seconds);
+    void record(rhi::CommandList& cl, VkDeviceAddress frameBlock, double seconds);
     // the surf's foam coverage around the camera (ocean_foam.comp, docs/research/ocean.md 4.4): records this frame's step
     // (outside a rendering scope, after record); the image is then readable by the vertex / fragment stages
-    void recordFoam(VkCommandBuffer cmd, VkDeviceAddress frameBlock, const OceanFoamInputs& in);
+    void recordFoam(rhi::CommandList& cl, VkDeviceAddress frameBlock, const OceanFoamInputs& in);
     bool foamReady() const { return foamValid_; }
     // the tiles' temporal foam (whitecaps) and the foam buffer start over (a jump of the water's clock: their history is of
     // another moment)
@@ -78,14 +79,14 @@ public:
         for (auto& t : tiles_) t.cleared = false;
         foamValid_ = false;
     }
-    std::uint32_t foamSlot() const { return foamSlot_[static_cast<std::size_t>(foamCur_)]; }  // bindless t2D (wrap sampling)
+    std::uint32_t foamSlot() const { return foamImg_[static_cast<std::size_t>(foamCur_)] ? foamImg_[static_cast<std::size_t>(foamCur_)]->heapSampled() : 0u; }  // bindless t2D (wrap sampling)
     std::array<float, 4> foamMap() const;  // xy the window's first cell (world), z its extent, w 1 / extent
 
     bool ready() const { return ready_; }  // the tiles hold a simulated frame
     const ocean::Cascades& cascades() const { return cascades_; }
     const ocean::SeaState& sea() const { return sea_; }
-    std::uint32_t dispSlot(int c) const { return tiles_[static_cast<std::size_t>(c)].dispSlot; }
-    std::uint32_t derivSlot(int c) const { return tiles_[static_cast<std::size_t>(c)].derivSlot; }
+    std::uint32_t dispSlot(int c) const { return tiles_[static_cast<std::size_t>(c)].disp ? tiles_[static_cast<std::size_t>(c)].disp->heapSampled() : 0u; }
+    std::uint32_t derivSlot(int c) const { return tiles_[static_cast<std::size_t>(c)].deriv ? tiles_[static_cast<std::size_t>(c)].deriv->heapSampled() : 0u; }
     std::uint32_t sampler() const { return samplerSlot_; }  // trilinear + anisotropic (when available), wrap
     float significantHeight() const { return hs_; }         // m, the whole spectrum (4 sqrt(sum of the cascades' variances))
     float peakWavelength() const { return peakLength_; }    // m, the wind sea's peak
@@ -93,18 +94,17 @@ public:
 
 private:
     struct Tile {
-        vk::Image h0, workA, workB, disp, deriv;
-        std::uint32_t dispSlot = 0, derivSlot = 0;
+        std::unique_ptr<rhi::Texture> h0, workA, workB, disp, deriv;
         bool cleared = false;
     };
     bool createPipelines();
     bool createTiles();
     void destroyTiles();
     bool createFoam();
-    void foamStep(VkCommandBuffer cmd, VkDeviceAddress frameBlock, const OceanFoamInputs& in, double t, float dt, const int prevFirst[2]);
+    void foamStep(rhi::CommandList& cl, VkDeviceAddress frameBlock, const OceanFoamInputs& in, double t, float dt, const int prevFirst[2]);
     void destroyFoam();
-    void push(VkCommandBuffer cmd, VkDeviceAddress frameBlock, int cascade, float t, float dt, float direction);
-    void bindImages(VkCommandBuffer cmd, Tile& tile);
+    void push(rhi::CommandList& cl, VkDeviceAddress frameBlock, int cascade, float t, float dt, float direction);
+    void bindImages(rhi::CommandList& cl, Tile& tile);
 
     d3d9::Device& dev_;
     bool failed_ = false, ready_ = false;
@@ -115,18 +115,14 @@ private:
     bool spectrumDirty_ = true;
     float hs_ = 0.0f, peakLength_ = 0.0f;
     std::array<Tile, ocean::kMaxCascades> tiles_{};
-    vk::PassLayout layout_;
-    VkPipeline spectrum_ = VK_NULL_HANDLE, evolve_ = VK_NULL_HANDLE, resolve_ = VK_NULL_HANDLE;
-    std::array<VkPipeline, 3> fft_{};  // N = 128, 256, 512
-    VkSampler sampler_ = VK_NULL_HANDLE;
+    std::unique_ptr<rhi::Pipeline> spectrum_, evolve_, resolve_;
+    std::array<std::unique_ptr<rhi::Pipeline>, 3> fft_;  // N = 128, 256, 512
     std::uint32_t samplerSlot_ = 0;
     double lastSeconds_ = -1.0;
     std::uint64_t frames_ = 0;
     // the foam buffer: two images (this frame's, last frame's = the history), toroidal window of cells around the camera
-    vk::PassLayout foamLayout_;
-    VkPipeline foam_ = VK_NULL_HANDLE;
-    std::array<vk::Image, 2> foamImg_{};
-    std::array<std::uint32_t, 2> foamSlot_{};
+    std::unique_ptr<rhi::Pipeline> foam_;
+    std::array<std::unique_ptr<rhi::Texture>, 2> foamImg_;
     int foamCur_ = 0;
     bool foamValid_ = false, foamCreated_ = false, foamFailed_ = false;
     int foamFirst_[2]{};

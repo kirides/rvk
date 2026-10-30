@@ -17,6 +17,7 @@
 #include <future>
 
 #include "d3d9/device.h"
+#include "rhi/rhi.h"
 #include "shader/abi.h"
 #include "vk/passes.h"
 
@@ -87,9 +88,8 @@ private:
     Settings settings_;
     bool held_ = false, failed_ = false, built_ = false;
     std::uint32_t passId_ = 0;
-    vk::PassLayout layout_;
-    VkPipeline pipeline_[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
-    std::future<VkPipeline> building_[3];
+    std::unique_ptr<rhi::Pipeline> pipeline_[3];
+    std::future<std::unique_ptr<rhi::Pipeline>> building_[3];  // (built on workers: Device::createComputePipeline is thread-safe)
     struct Pending {
         std::uint64_t frame = ~0ull;
         int next = 0;

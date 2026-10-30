@@ -8,9 +8,7 @@
 
 #include "d3d9/device.h"
 #include "shader/embedded.h"
-#include "vk/bindless.h"
 #include "vk/context.h"
-#include "vk/frames.h"
 
 namespace rvk::enh {
 
@@ -39,48 +37,6 @@ int log2i(int n) {
 
 int mipCount(int n) { return log2i(n) + 1; }
 
-struct Barriers {
-    std::vector<VkImageMemoryBarrier2> images;
-    std::vector<VkMemoryBarrier2> memory;
-    void image(VkImage img, VkImageLayout from, VkImageLayout to, VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,
-               VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess, std::uint32_t baseMip = 0,
-               std::uint32_t mips = VK_REMAINING_MIP_LEVELS) {
-        VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
-        b.srcStageMask = srcStage;
-        b.srcAccessMask = srcAccess;
-        b.dstStageMask = dstStage;
-        b.dstAccessMask = dstAccess;
-        b.oldLayout = from;
-        b.newLayout = to;
-        b.image = img;
-        b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, baseMip, mips, 0, 1};
-        images.push_back(b);
-    }
-    void computeToCompute() {
-        VkMemoryBarrier2 m{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-        m.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-        m.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
-        m.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-        m.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-        memory.push_back(m);
-    }
-    void flush(VkCommandBuffer cmd) {
-        if (images.empty() && memory.empty()) return;
-        VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-        di.imageMemoryBarrierCount = static_cast<std::uint32_t>(images.size());
-        di.pImageMemoryBarriers = images.data();
-        di.memoryBarrierCount = static_cast<std::uint32_t>(memory.size());
-        di.pMemoryBarriers = memory.data();
-        vkCmdPipelineBarrier2(cmd, &di);
-        images.clear();
-        memory.clear();
-    }
-};
-
-constexpr VkPipelineStageFlags2 kSampleStages = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
-constexpr VkPipelineStageFlags2 kCompute = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-constexpr VkAccessFlags2 kStorageRW = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-
 }  // namespace
 
 Ocean::Ocean(d3d9::Device& device) : dev_(device) {
@@ -91,38 +47,24 @@ Ocean::Ocean(d3d9::Device& device) : dev_(device) {
 }
 
 Ocean::~Ocean() {
+    // (the RHI objects are retired with the frame: no GPU wait; the sampler lives as long as the device)
     destroyTiles();
     destroyFoam();
-    vk::Context* ctx = &dev_.ctx();
-    std::vector<VkPipeline> pipes = {spectrum_, evolve_, resolve_, fft_[0], fft_[1], fft_[2], foam_};
-    vk::PassLayout layout = layout_;
-    vk::PassLayout foamLayout = foamLayout_;
-    const VkSampler smp = sampler_;
-    dev_.frames().retire([ctx, pipes, layout, foamLayout, smp]() mutable {
-        for (VkPipeline p : pipes) {
-            if (p != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), p, nullptr);
-        }
-        if (layout.valid()) layout.destroy(*ctx);
-        if (foamLayout.valid()) foamLayout.destroy(*ctx);
-        // the sampler's bindless slot is never re-used (one per session)
-        if (smp != VK_NULL_HANDLE) vkDestroySampler(ctx->device(), smp, nullptr);
-    });
 }
 
 bool Ocean::createPipelines() {
-    vk::Context& ctx = dev_.ctx();
-    VkDescriptorSetLayoutBinding b[5]{};
-    for (std::uint32_t i = 0; i < 5; ++i) {
-        b[i].binding = i;
-        b[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        b[i].descriptorCount = 1;
-        b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    }
-    if (!layout_.create(ctx, dev_.bindless(), b)) return false;
-    spectrum_ = vk::createComputePipeline(ctx, layout_.layout(), shader::embedded::spirv("water/ocean_spectrum.comp"), "ocean.spectrum");
-    evolve_ = vk::createComputePipeline(ctx, layout_.layout(), shader::embedded::spirv("water/ocean_evolve.comp"), "ocean.evolve");
-    resolve_ = vk::createComputePipeline(ctx, layout_.layout(), shader::embedded::spirv("water/ocean_resolve.comp"), "ocean.resolve");
-    const VkPhysicalDeviceLimits& lim = ctx.properties().limits;
+    rhi::Device* rdev = dev_.rhi();
+    if (rdev == nullptr) return false;
+    const auto compute = [&](std::span<const std::uint32_t> spirv, const char* name) {
+        rhi::ComputePipelineDesc d;
+        d.cs.spirv = spirv;
+        d.name = name;
+        return rdev->createComputePipeline(d);
+    };
+    spectrum_ = compute(shader::embedded::spirv("water/ocean_spectrum.comp"), "ocean.spectrum");
+    evolve_ = compute(shader::embedded::spirv("water/ocean_evolve.comp"), "ocean.evolve");
+    resolve_ = compute(shader::embedded::spirv("water/ocean_resolve.comp"), "ocean.resolve");
+    const VkPhysicalDeviceLimits& lim = dev_.ctx().properties().limits;
     for (int i = 0; i < 3; ++i) {
         const std::int32_t n = 128 << i;
         // one workgroup of N / 2 threads per line, 2 x N x 16 bytes of shared memory
@@ -134,80 +76,53 @@ bool Ocean::createPipelines() {
         }
         // one module per size (HLSL has no specialisation constants for numthreads / groupshared sizes): OCEAN_N / OCEAN_LOG2N defines
         const std::string defines = std::format("OCEAN_N={};OCEAN_LOG2N={}", n, log2i(n));
-        fft_[static_cast<std::size_t>(i)] =
-            vk::createComputePipeline(ctx, layout_.layout(), shader::embedded::spirvVariant("water/ocean_fft.comp", defines), "ocean.fft");
+        fft_[static_cast<std::size_t>(i)] = compute(shader::embedded::spirvVariant("water/ocean_fft.comp", defines), "ocean.fft");
     }
-    // trilinear (+ anisotropic), wrapping: the tiles repeat
-    VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-    sci.magFilter = sci.minFilter = VK_FILTER_LINEAR;
-    sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-    sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    sci.maxLod = VK_LOD_CLAMP_NONE;
-    // anisotropic where the device has it: the distant sea at grazing angles keeps its waves instead of blurring flat
-    if (ctx.features().samplerAnisotropy) {
-        sci.anisotropyEnable = VK_TRUE;
-        sci.maxAnisotropy = std::min(8.0f, ctx.features().maxAnisotropy);
-    }
-    if (vkCreateSampler(ctx.device(), &sci, nullptr, &sampler_) == VK_SUCCESS) samplerSlot_ = dev_.bindless().addSampler(sampler_);
+    // trilinear (+ anisotropic where the device has it: the distant sea at grazing angles keeps its waves instead of blurring flat), wrapping: the
+    // tiles repeat
+    rhi::SamplerDesc sd;
+    sd.filter = VK_FILTER_LINEAR;
+    sd.address = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sd.maxAnisotropy = 8.0f;
+    samplerSlot_ = rdev->createSampler(sd);
     // the foam pass (one storage image; its history and the floor field through the bindless set). Optional: without it the
     // shading evaluates the surf's foam in place
-    VkDescriptorSetLayoutBinding fb{};
-    fb.binding = 0;
-    fb.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    fb.descriptorCount = 1;
-    fb.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    if (foamLayout_.create(ctx, dev_.bindless(), std::span<const VkDescriptorSetLayoutBinding>(&fb, 1))) {
-        foam_ = vk::createComputePipeline(ctx, foamLayout_.layout(), shader::embedded::spirv("water/ocean_foam.comp"), "ocean.foam");
-    }
-    return spectrum_ != VK_NULL_HANDLE && evolve_ != VK_NULL_HANDLE && resolve_ != VK_NULL_HANDLE && fft_[0] != VK_NULL_HANDLE &&
-           samplerSlot_ != 0;
+    foam_ = compute(shader::embedded::spirv("water/ocean_foam.comp"), "ocean.foam");
+    return spectrum_ && evolve_ && resolve_ && fft_[0] && samplerSlot_ != 0;
 }
 
 void Ocean::destroyTiles() {
-    vk::Context* ctx = &dev_.ctx();
-    for (Tile& t : tiles_) {
-        if (t.dispSlot != 0) dev_.bindless().releaseTexture(vk::TextureKind::Tex2D, t.dispSlot);
-        if (t.derivSlot != 0) dev_.bindless().releaseTexture(vk::TextureKind::Tex2D, t.derivSlot);
-        std::array<vk::Image, 5> imgs = {t.h0, t.workA, t.workB, t.disp, t.deriv};
-        dev_.frames().retire([ctx, imgs]() mutable {
-            for (vk::Image& i : imgs) {
-                if (i.valid()) i.destroy(*ctx);
-            }
-        });
-        t = Tile{};
-    }
+    for (Tile& t : tiles_) t = Tile{};  // (retired with the frame; the sampled slots are released with the textures)
     ready_ = false;
 }
 
 bool Ocean::createTiles() {
-    vk::Context& ctx = dev_.ctx();
+    rhi::Device* rdev = dev_.rhi();
     const auto n = static_cast<std::uint32_t>(cascades_.size);
     for (int c = 0; c < cascades_.count; ++c) {
         Tile& t = tiles_[static_cast<std::size_t>(c)];
-        vk::ImageDesc d;
+        rhi::TextureDesc d;
         d.extent = {n, n, 1};
         d.format = kWorkFormat;
         d.usage = VK_IMAGE_USAGE_STORAGE_BIT;
         d.name = "ocean.h0";
-        bool ok = t.h0.create(ctx, d);
+        t.h0 = rdev->createTexture(d);
         d.name = "ocean.workA";
-        ok = ok && t.workA.create(ctx, d);
+        t.workA = rdev->createTexture(d);
         d.name = "ocean.workB";
-        ok = ok && t.workB.create(ctx, d);
+        t.workB = rdev->createTexture(d);
         d.format = kOutFormat;
         d.mips = static_cast<std::uint32_t>(mipCount(cascades_.size));
         d.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         d.name = "ocean.disp";
-        ok = ok && t.disp.create(ctx, d);
+        t.disp = rdev->createTexture(d);
         d.name = "ocean.deriv";
-        ok = ok && t.deriv.create(ctx, d);
-        if (!ok) {
+        t.deriv = rdev->createTexture(d);
+        if (!t.h0 || !t.workA || !t.workB || !t.disp || !t.deriv) {
             spdlog::error("enh: ocean: tile images {}x{} failed", n, n);
             destroyTiles();
             return false;
         }
-        t.dispSlot = dev_.bindless().addTexture(vk::TextureKind::Tex2D, t.disp.view());
-        t.derivSlot = dev_.bindless().addTexture(vk::TextureKind::Tex2D, t.deriv.view());
         t.cleared = false;
     }
     spectrumDirty_ = true;
@@ -220,19 +135,19 @@ bool Ocean::createTiles() {
 }
 
 bool Ocean::createFoam() {
-    vk::Context& ctx = dev_.ctx();
+    rhi::Device* rdev = dev_.rhi();
     for (int i = 0; i < 2; ++i) {
-        vk::ImageDesc d;
+        rhi::TextureDesc d;
         d.extent = {static_cast<std::uint32_t>(kFoamSize), static_cast<std::uint32_t>(kFoamSize), 1};
         d.format = kFoamFormat;
         d.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
         d.name = "ocean.foam";
-        if (!foamImg_[static_cast<std::size_t>(i)].create(ctx, d)) {
+        foamImg_[static_cast<std::size_t>(i)] = rdev->createTexture(d);
+        if (!foamImg_[static_cast<std::size_t>(i)]) {
             spdlog::error("enh: ocean: foam buffer {}x{} failed, the surf's foam is evaluated in place", kFoamSize, kFoamSize);
             destroyFoam();
             return false;
         }
-        foamSlot_[static_cast<std::size_t>(i)] = dev_.bindless().addTexture(vk::TextureKind::Tex2D, foamImg_[static_cast<std::size_t>(i)].view());
     }
     foamCreated_ = true;
     foamValid_ = false;
@@ -243,18 +158,7 @@ bool Ocean::createFoam() {
 }
 
 void Ocean::destroyFoam() {
-    vk::Context* ctx = &dev_.ctx();
-    for (auto& slot : foamSlot_) {
-        if (slot != 0) dev_.bindless().releaseTexture(vk::TextureKind::Tex2D, slot);
-        slot = 0;
-    }
-    std::array<vk::Image, 2> imgs = foamImg_;
-    foamImg_ = {};
-    dev_.frames().retire([ctx, imgs]() mutable {
-        for (vk::Image& i : imgs) {
-            if (i.valid()) i.destroy(*ctx);
-        }
-    });
+    for (auto& img : foamImg_) img.reset();
     foamCreated_ = false;
     foamValid_ = false;
 }
@@ -264,8 +168,8 @@ std::array<float, 4> Ocean::foamMap() const {
     return {static_cast<float>(foamFirst_[0]) * kFoamCell, static_cast<float>(foamFirst_[1]) * kFoamCell, extent, 1.0f / extent};
 }
 
-void Ocean::recordFoam(VkCommandBuffer cmd, VkDeviceAddress frameBlock, const OceanFoamInputs& in) {
-    if (failed_ || foamFailed_ || foam_ == VK_NULL_HANDLE || quality_ < 0 || in.floorA == 0 || in.floorB == 0) {
+void Ocean::recordFoam(rhi::CommandList& cl, VkDeviceAddress frameBlock, const OceanFoamInputs& in) {
+    if (failed_ || foamFailed_ || !foam_ || quality_ < 0 || in.floorA == 0 || in.floorB == 0) {
         foamValid_ = false;
         return;
     }
@@ -281,7 +185,7 @@ void Ocean::recordFoam(VkCommandBuffer cmd, VkDeviceAddress frameBlock, const Oc
     // the history continues while the pass runs every frame and the window overlaps the last one
     const bool overlap = std::abs(foamFirst_[0] - prevFirst[0]) < kFoamSize / 2 && std::abs(foamFirst_[1] - prevFirst[1]) < kFoamSize / 2;
     if (foamValid_ && dtRaw >= 0.0 && dtRaw < 0.5 && overlap) {
-        foamStep(cmd, frameBlock, in, in.seconds, static_cast<float>(std::clamp(dtRaw, 0.0, 0.1)), prevFirst);
+        foamStep(cl, frameBlock, in, in.seconds, static_cast<float>(std::clamp(dtRaw, 0.0, 0.1)), prevFirst);
         return;
     }
     // no history (the sea comes into view, a pause, a jump of the water's clock, a teleport): the buffer is spun up over the
@@ -290,7 +194,7 @@ void Ocean::recordFoam(VkCommandBuffer cmd, VkDeviceAddress frameBlock, const Oc
     foamValid_ = false;
     for (int i = kFoamPrerollSteps; i >= 0; --i) {
         const double ti = in.seconds - static_cast<double>(i) * kFoamPrerollStep;
-        foamStep(cmd, frameBlock, in, ti, i == kFoamPrerollSteps ? 0.0f : static_cast<float>(kFoamPrerollStep), foamFirst_);
+        foamStep(cl, frameBlock, in, ti, i == kFoamPrerollSteps ? 0.0f : static_cast<float>(kFoamPrerollStep), foamFirst_);
     }
     if (foamPrerolls_++ < 4) {
         spdlog::info("enh: ocean: foam buffer spun up over {:.1f} s ({} steps)", kFoamPrerollSteps * kFoamPrerollStep, kFoamPrerollSteps + 1);
@@ -298,24 +202,17 @@ void Ocean::recordFoam(VkCommandBuffer cmd, VkDeviceAddress frameBlock, const Oc
 }
 
 // one step of the foam buffer at the water's time t (s) after dt (0: no history), the history's window prevFirst
-void Ocean::foamStep(VkCommandBuffer cmd, VkDeviceAddress frameBlock, const OceanFoamInputs& in, double t, float dt, const int prevFirst[2]) {
+void Ocean::foamStep(rhi::CommandList& cl, VkDeviceAddress frameBlock, const OceanFoamInputs& in, double t, float dt, const int prevFirst[2]) {
     const bool history = foamValid_ && dt > 0.0f;
     const int cur = foamValid_ ? 1 - foamCur_ : 0;
     const int prev = 1 - cur;
-    Barriers bar;
-    vk::Image& out = foamImg_[static_cast<std::size_t>(cur)];
-    vk::Image& hist = foamImg_[static_cast<std::size_t>(prev)];
+    rhi::Texture& out = *foamImg_[static_cast<std::size_t>(cur)];
+    rhi::Texture& hist = *foamImg_[static_cast<std::size_t>(prev)];
     // this step's image: all of it is rewritten (after its last use: the water's sampling two frames ago, the foam pass
     // reading it as the history in the step before)
-    bar.image(out.image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, kSampleStages | kCompute, VK_ACCESS_2_NONE, kCompute,
-              VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-    if (!foamValid_) {
-        // the first step: the history image gets a defined layout (never read: prev.w = 0)
-        bar.image(hist.image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kSampleStages | kCompute,
-                  VK_ACCESS_2_NONE, kCompute | kSampleStages, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-        hist.setTrackedLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    }
-    bar.flush(cmd);
+    cl.transition(out, VK_IMAGE_LAYOUT_GENERAL);
+    // the first step: the history image gets a defined layout (never read: prev.w = 0)
+    if (!foamValid_) cl.transition(hist, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     OceanFoamPush p{};
     p.h.frame = frameBlock;
     p.window[0] = static_cast<float>(foamFirst_[0]);
@@ -333,19 +230,16 @@ void Ocean::foamStep(VkCommandBuffer cmd, VkDeviceAddress frameBlock, const Ocea
     p.shoreWave[3] = static_cast<float>(std::fmod(std::max(t, 0.0), 16384.0));
     p.tex[0] = in.floorA;
     p.tex[1] = in.floorB;
-    p.tex[2] = foamSlot_[static_cast<std::size_t>(prev)];
+    p.tex[2] = hist.heapSampled();
     p.tex[3] = in.smpClamp;
     p.info[0] = samplerSlot_;
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, foam_);
-    foamLayout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, dev_.bindless());
-    foamLayout_.pushStorageImage(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, 0, out.view());
-    foamLayout_.push(cmd, &p, sizeof(p));
+    cl.bindPipeline(*foam_);
+    rhi::Texture* const storage[] = {&out};
+    cl.setStorageTextures(storage);
+    cl.setPushConstants(&p, sizeof(p));
     const std::uint32_t groups = (kFoamSize + 7) / 8;
-    vkCmdDispatch(cmd, groups, groups, 1);
-    bar.image(out.image(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, kCompute, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-              kSampleStages | kCompute, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-    out.setTrackedLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    bar.flush(cmd);
+    cl.dispatch(groups, groups, 1);
+    cl.transition(out, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     foamCur_ = cur;
     foamValid_ = true;
 }
@@ -354,7 +248,7 @@ void Ocean::setQuality(int quality) {
     if (failed_) return;
     quality = std::clamp(quality, 0, 2);
     // the largest FFT this GPU runs
-    while (quality > 0 && fft_[static_cast<std::size_t>(quality)] == VK_NULL_HANDLE) --quality;
+    while (quality > 0 && !fft_[static_cast<std::size_t>(quality)]) --quality;
     if (quality == quality_) return;
     destroyTiles();
     quality_ = quality;
@@ -364,7 +258,7 @@ void Ocean::setQuality(int quality) {
         return;
     }
     // the foam buffer with the tiles (not at its first use: no allocation in a later frame)
-    if (!foamCreated_ && !foamFailed_ && foam_ != VK_NULL_HANDLE && !createFoam()) foamFailed_ = true;
+    if (!foamCreated_ && !foamFailed_ && foam_ && !createFoam()) foamFailed_ = true;
     setSea(sea_);
     spectrumDirty_ = true;
 }
@@ -410,7 +304,7 @@ void Ocean::setSea(const ocean::SeaState& sea) {
     spectrumDirty_ = true;
 }
 
-void Ocean::push(VkCommandBuffer cmd, VkDeviceAddress frameBlock, int cascade, float t, float dt, float direction) {
+void Ocean::push(rhi::CommandList& cl, VkDeviceAddress frameBlock, int cascade, float t, float dt, float direction) {
     const ocean::Cascade& c = cascades_.c[static_cast<std::size_t>(cascade)];
     OceanPush p{};
     p.h.frame = frameBlock;
@@ -438,151 +332,111 @@ void Ocean::push(VkCommandBuffer cmd, VkDeviceAddress frameBlock, int cascade, f
     p.foam[1] = kFoamThreshold;
     p.foam[2] = kFoamGain;
     p.foam[3] = ocean::kRepeatTime;
-    layout_.push(cmd, &p, sizeof(p));
+    cl.setPushConstants(&p, sizeof(p));
 }
 
-void Ocean::bindImages(VkCommandBuffer cmd, Tile& tile) {
-    vk::Context& ctx = dev_.ctx();
-    const VkImageView views[5] = {tile.h0.view(), tile.workA.view(), tile.workB.view(), tile.disp.attachmentView(ctx, 0, 0),
-                                  tile.deriv.attachmentView(ctx, 0, 0)};
-    layout_.pushStorageImages(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, views);
+void Ocean::bindImages(rhi::CommandList& cl, Tile& tile) {
+    // (the outputs: mip 0 of the mip chains)
+    const rhi::StorageView views[5] = {{tile.h0.get(), 0, 0}, {tile.workA.get(), 0, 0}, {tile.workB.get(), 0, 0}, {tile.disp.get(), 0, 0}, {tile.deriv.get(), 0, 0}};
+    cl.setStorageViews(views);
 }
 
-void Ocean::record(VkCommandBuffer cmd, VkDeviceAddress frameBlock, double seconds) {
-    if (failed_ || quality_ < 0 || !tiles_[0].disp.valid()) return;
-    const VkPipeline fft = fft_[static_cast<std::size_t>(quality_)];
-    if (fft == VK_NULL_HANDLE) return;
+void Ocean::record(rhi::CommandList& cl, VkDeviceAddress frameBlock, double seconds) {
+    if (failed_ || quality_ < 0 || !tiles_[0].disp) return;
+    rhi::Pipeline* fft = fft_[static_cast<std::size_t>(quality_)].get();
+    if (fft == nullptr) return;
     const float dt = lastSeconds_ < 0.0 ? 0.0f : static_cast<float>(std::clamp(seconds - lastSeconds_, 0.0, 0.1));
     lastSeconds_ = seconds;
     const float t = static_cast<float>(std::fmod(seconds, static_cast<double>(ocean::kRepeatTime)));
     const auto n = static_cast<std::uint32_t>(cascades_.size);
     const int count = cascades_.count;
     const std::uint32_t mips = static_cast<std::uint32_t>(mipCount(cascades_.size));
-    Barriers bar;
 
-    // into GENERAL: work images every frame (contents rewritten), h0 kept, the outputs from last frame's sampling (all of them
-    // discarded and cleared the first time and after resetHistory: after an earlier frame's sampling, hence the stages)
+    // into GENERAL: the work images every frame (contents rewritten), h0 kept, the outputs' mip 0 from last frame's sampling (the other levels stay
+    // readable until the blits); the same-layout transitions are the barriers after last frame's FFT. The first time and after resetHistory the foam
+    // history in disp is cleared.
+    // (one barrier for all of it)
+    std::vector<rhi::TextureTransition> batch;
     for (int c = 0; c < count; ++c) {
         Tile& tl = tiles_[static_cast<std::size_t>(c)];
-        if (!tl.cleared) {
-            bar.image(tl.h0.image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, kSampleStages | kCompute, 0, kCompute, kStorageRW);
-            bar.image(tl.workA.image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, kSampleStages | kCompute, 0, kCompute, kStorageRW);
-            bar.image(tl.workB.image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, kSampleStages | kCompute, 0, kCompute, kStorageRW);
-            bar.image(tl.disp.image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, kSampleStages | kCompute, 0,
-                      VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
-            bar.image(tl.deriv.image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, kSampleStages | kCompute, 0, kCompute, kStorageRW);
-        } else {
-            // last frame's FFT used the work images, its sampling read the outputs
-            bar.image(tl.workA.image(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, kCompute, kStorageRW, kCompute, kStorageRW);
-            bar.image(tl.workB.image(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, kCompute, kStorageRW, kCompute, kStorageRW);
-            bar.image(tl.h0.image(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, kCompute, kStorageRW, kCompute, kStorageRW);
-            bar.image(tl.disp.image(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, kSampleStages,
-                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, kCompute, kStorageRW, 0, 1);
-            bar.image(tl.deriv.image(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, kSampleStages,
-                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, kCompute, kStorageRW, 0, 1);
+        for (rhi::Texture* x : {tl.h0.get(), tl.workA.get(), tl.workB.get()}) batch.push_back({x, VK_IMAGE_LAYOUT_GENERAL});
+        for (rhi::Texture* x : {tl.disp.get(), tl.deriv.get()}) {
+            if (tl.cleared) batch.push_back({x, VK_IMAGE_LAYOUT_GENERAL, 0, 1});
+            else batch.push_back({x, VK_IMAGE_LAYOUT_GENERAL});
         }
     }
-    bar.flush(cmd);
+    cl.transitions(batch);
+    bool cleared = false;
     for (int c = 0; c < count; ++c) {
         Tile& tl = tiles_[static_cast<std::size_t>(c)];
         if (tl.cleared) continue;
         // the foam history starts at zero
         const VkClearColorValue zero{};
-        const VkImageSubresourceRange r{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        vkCmdClearColorImage(cmd, tl.disp.image(), VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &r);
-        bar.image(tl.disp.image(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_CLEAR_BIT,
-                  VK_ACCESS_2_TRANSFER_WRITE_BIT, kCompute, kStorageRW, 0, 1);
+        cl.clearTexture(*tl.disp, zero, 0, 1);
+        cleared = true;
         tl.cleared = true;
         spectrumDirty_ = true;
     }
-    bar.flush(cmd);
-    layout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, dev_.bindless());
+    if (cleared) cl.computeBarrier();  // (the clears' writes are visible to the passes)
     const std::uint32_t groups = (n + 7) / 8;
     if (spectrumDirty_) {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, spectrum_);
+        cl.bindPipeline(*spectrum_);
         for (int c = 0; c < count; ++c) {
-            bindImages(cmd, tiles_[static_cast<std::size_t>(c)]);
-            push(cmd, frameBlock, c, t, dt, 0.0f);
-            vkCmdDispatch(cmd, groups, groups, 1);
+            bindImages(cl, tiles_[static_cast<std::size_t>(c)]);
+            push(cl, frameBlock, c, t, dt, 0.0f);
+            cl.dispatch(groups, groups, 1);
         }
-        bar.computeToCompute();
-        bar.flush(cmd);
+        cl.computeBarrier();
         spectrumDirty_ = false;
     }
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, evolve_);
+    cl.bindPipeline(*evolve_);
     for (int c = 0; c < count; ++c) {
-        bindImages(cmd, tiles_[static_cast<std::size_t>(c)]);
-        push(cmd, frameBlock, c, t, dt, 0.0f);
-        vkCmdDispatch(cmd, groups, groups, 1);
+        bindImages(cl, tiles_[static_cast<std::size_t>(c)]);
+        push(cl, frameBlock, c, t, dt, 0.0f);
+        cl.dispatch(groups, groups, 1);
     }
-    bar.computeToCompute();
-    bar.flush(cmd);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fft);
+    cl.computeBarrier();
+    cl.bindPipeline(*fft);
     for (int pass = 0; pass < 2; ++pass) {
         for (int c = 0; c < count; ++c) {
-            bindImages(cmd, tiles_[static_cast<std::size_t>(c)]);
-            push(cmd, frameBlock, c, t, dt, static_cast<float>(pass));
-            vkCmdDispatch(cmd, n, 1, 1);
+            bindImages(cl, tiles_[static_cast<std::size_t>(c)]);
+            push(cl, frameBlock, c, t, dt, static_cast<float>(pass));
+            cl.dispatch(n, 1, 1);
         }
-        bar.computeToCompute();
-        bar.flush(cmd);
+        cl.computeBarrier();
     }
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, resolve_);
+    cl.bindPipeline(*resolve_);
     for (int c = 0; c < count; ++c) {
-        bindImages(cmd, tiles_[static_cast<std::size_t>(c)]);
-        push(cmd, frameBlock, c, t, dt, 0.0f);
-        vkCmdDispatch(cmd, groups, groups, 1);
+        bindImages(cl, tiles_[static_cast<std::size_t>(c)]);
+        push(cl, frameBlock, c, t, dt, 0.0f);
+        cl.dispatch(groups, groups, 1);
     }
-    // the mip chains (blits): mip 0 -> source; the other levels written one after the other
+    // the mip chains (blits): mip 0 -> source; the other levels written one after the other (one barrier per step for all images)
+    std::vector<rhi::Texture*> chains;
     for (int c = 0; c < count; ++c) {
-        Tile& tl = tiles_[static_cast<std::size_t>(c)];
-        for (vk::Image* img : {&tl.disp, &tl.deriv}) {
-            bar.image(img->image(), VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, kCompute, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                      VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT, 0, 1);
-            if (mips > 1) {
-                bar.image(img->image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, kSampleStages,
-                          VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, 1, mips - 1);
-            }
-        }
+        chains.push_back(tiles_[static_cast<std::size_t>(c)].disp.get());
+        chains.push_back(tiles_[static_cast<std::size_t>(c)].deriv.get());
     }
-    bar.flush(cmd);
+    batch.clear();
+    for (rhi::Texture* img : chains) {
+        batch.push_back({img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 0, 1});
+        if (mips > 1) batch.push_back({img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, mips - 1});
+    }
+    cl.transitions(batch);
     for (std::uint32_t m = 1; m < mips; ++m) {
-        const auto src = static_cast<std::int32_t>(std::max(1u, n >> (m - 1)));
-        const auto dst = static_cast<std::int32_t>(std::max(1u, n >> m));
-        for (int c = 0; c < count; ++c) {
-            Tile& tl = tiles_[static_cast<std::size_t>(c)];
-            for (vk::Image* img : {&tl.disp, &tl.deriv}) {
-                VkImageBlit2 region{VK_STRUCTURE_TYPE_IMAGE_BLIT_2};
-                region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, m - 1, 0, 1};
-                region.srcOffsets[1] = {src, src, 1};
-                region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, m, 0, 1};
-                region.dstOffsets[1] = {dst, dst, 1};
-                VkBlitImageInfo2 bi{VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2};
-                bi.srcImage = img->image();
-                bi.srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-                bi.dstImage = img->image();
-                bi.dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-                bi.regionCount = 1;
-                bi.pRegions = &region;
-                bi.filter = VK_FILTER_LINEAR;
-                vkCmdBlitImage2(cmd, &bi);
-                bar.image(img->image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                          VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_BLIT_BIT,
-                          VK_ACCESS_2_TRANSFER_READ_BIT, m, 1);
-            }
+        batch.clear();
+        for (rhi::Texture* img : chains) {
+            rhi::TextureBlit region;
+            region.src = {m - 1, 0};
+            region.dst = {m, 0};
+            cl.blitTexture(*img, *img, std::span<const rhi::TextureBlit>(&region, 1), VK_FILTER_LINEAR);
+            batch.push_back({img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m, 1});
         }
-        bar.flush(cmd);
+        cl.transitions(batch);
     }
-    for (int c = 0; c < count; ++c) {
-        Tile& tl = tiles_[static_cast<std::size_t>(c)];
-        for (vk::Image* img : {&tl.disp, &tl.deriv}) {
-            bar.image(img->image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                      VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT, kSampleStages,
-                      VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-            img->setTrackedLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        }
-    }
-    bar.flush(cmd);
+    batch.clear();
+    for (rhi::Texture* img : chains) batch.push_back({img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL});
+    cl.transitions(batch);
     ready_ = true;
     if (frames_++ == 0) {
         spdlog::info("enh: ocean: first simulated frame: Hs {:.2f} m, wind sea peak {:.0f} m, U10 {:.1f} m/s, fetch {:.0f} km, swell {:.2f} m "

@@ -41,6 +41,7 @@
 #include "d3d9/device.h"
 #include "enh/rt_material.h"
 #include "enh/rt_registry.h"
+#include "rhi/rhi.h"
 #include "shader/abi.h"
 #include "vk/raytracing.h"
 
@@ -201,6 +202,7 @@ private:
     struct Tlas {
         vk::rt::AccelerationStructure as;
         std::uint32_t capacity = 0;
+        std::uint32_t slot = 0;  // its slot in the bindless acceleration structure array (vk::Bindless::allocTlasSlot)
     };
 
     void activate();
@@ -278,9 +280,8 @@ private:
     std::vector<SkinJob> skinJobs_;
     std::unordered_set<std::uint64_t> skinLogged_;
     bool skinWanted_ = false, skinVerify_ = false, skinReady_ = false, skinFailed_ = false, skinStarted_ = false;
-    vk::PassLayout skinLayout_;
-    std::future<VkPipeline> skinBuild_;
-    VkPipeline skinPipe_ = VK_NULL_HANDLE;
+    std::future<std::unique_ptr<rhi::Pipeline>> skinBuild_;  // (built on a worker: Device::createComputePipeline is thread-safe)
+    std::unique_ptr<rhi::Pipeline> skinPipe_;
     vk::rt::AddressBuffer skinErr_;    // verify: 16 bytes per frame slot (max error bits, compared, missing)
     double skinVerifyAt_ = 0.0, skinLogAt_ = 0.0;
     std::uint64_t skinVerifyCompared_ = 0, skinVerifyMissing_ = 0;

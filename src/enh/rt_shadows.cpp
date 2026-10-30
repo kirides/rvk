@@ -7,6 +7,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "enh/rhi_scope.h"
 #include "enh/rt_scene.h"
 #include "engine/shadow_maps.h"
 #include "shader/embedded.h"
@@ -32,37 +33,25 @@ RtShadows::RtShadows(d3d9::Device& device, RtScene* scene) : dev_(device), scene
 void RtShadows::startBuild() {
     if (built_ || failed_ || !available()) return;
     built_ = true;
-    const VkDescriptorSetLayoutBinding out{0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-    if (!layout_.create(dev_.ctx(), dev_.bindless(), {&out, 1})) {
+    rhi::Device* rdev = dev_.rhi();
+    if (rdev == nullptr) {
         failed_ = true;
         return;
     }
-    vk::Context* ctx = &dev_.ctx();
-    const VkPipelineLayout layout = layout_.layout();
     for (int i = 0; i < 3; ++i) {
-        building_[i] = std::async(std::launch::async, [ctx, layout, i]() {
-            return vk::createComputePipeline(*ctx, layout, shader::embedded::spirv(kShaders[i]), kNames[i]);
+        building_[i] = std::async(std::launch::async, [rdev, i]() {
+            rhi::ComputePipelineDesc d;
+            d.cs.spirv = shader::embedded::spirv(kShaders[i]);
+            d.name = kNames[i];
+            return rdev->createComputePipeline(d);
         });
     }
 }
 
 RtShadows::~RtShadows() {
     apply(Settings{});
-    vk::Context* ctx = &dev_.ctx();
     for (auto& b : building_) {
-        if (!b.valid()) continue;
-        const VkPipeline p = b.get();
-        if (p != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), p, nullptr);
-    }
-    VkPipeline pipes[3] = {pipeline_[0], pipeline_[1], pipeline_[2]};
-    vk::PassLayout layout = layout_;
-    if (layout.valid() || pipes[0] != VK_NULL_HANDLE) {
-        dev_.frames().retire([ctx, pipes, layout]() mutable {
-            for (VkPipeline p : pipes) {
-                if (p != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), p, nullptr);
-            }
-            layout.destroy(*ctx);
-        });
+        if (b.valid()) b.get();  // (a pipeline still being built is waited for; the RHI retires it with the device's frames)
     }
 }
 
@@ -113,13 +102,13 @@ bool RtShadows::pipelinesReady() {
     if (failed_) return false;
     bool all = true;
     for (int i = 0; i < 3; ++i) {
-        if (pipeline_[i] != VK_NULL_HANDLE) continue;
+        if (pipeline_[i]) continue;
         if (!building_[i].valid() || building_[i].wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
             all = false;
             continue;
         }
         pipeline_[i] = building_[i].get();
-        if (pipeline_[i] == VK_NULL_HANDLE) {
+        if (!pipeline_[i]) {
             spdlog::error("enh: shadows.rt: the compute pipeline {} failed: ray-traced shadows stay off this session", kNames[i]);
             failed_ = true;
             return false;
@@ -137,13 +126,17 @@ void RtShadows::record(d3d9::PassContext& ctx, int stage) {
         VkCommandBuffer c = ctx.cmd;
         d3d9::RegionScope r(dev_, kNames[stage]);
         vk::Transients::Entry* out = stage == 1 ? pending_.hist : pending_.fin;
-        out->image.transition(c, VK_IMAGE_LAYOUT_GENERAL);
-        vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_[stage]);
-        layout_.bindSet0(c, VK_PIPELINE_BIND_POINT_COMPUTE, dev_.bindless());
-        layout_.pushStorageImage(c, VK_PIPELINE_BIND_POINT_COMPUTE, 0, out->image.view());
-        layout_.push(c, &pending_.push, sizeof(pending_.push));
-        vkCmdDispatch(c, pending_.gx, pending_.gy, 1);
-        out->image.transition(c, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        RhiScope rs(dev_, c);
+        if (!rs) return;
+        rhi::CommandList& cl = rs.cl();
+        rhi::Texture* outT = rs.wrap(*out);
+        cl.transition(*outT, VK_IMAGE_LAYOUT_GENERAL);
+        cl.bindPipeline(*pipeline_[stage]);
+        rhi::Texture* const storage[] = {outT};
+        cl.setStorageTextures(storage);
+        cl.setPushConstants(&pending_.push, sizeof(pending_.push));
+        cl.dispatch(pending_.gx, pending_.gy, 1);
+        cl.transition(*outT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         pending_.next = stage + 1;
         if (stage == 2) {
             history_ = pending_.cur;
@@ -225,14 +218,21 @@ void RtShadows::record(d3d9::PassContext& ctx, int stage) {
     {
         d3d9::RegionScope r(dev_, kNames[0]);
         // the previous frame's history is sampled (it is read-only since its own frame)
-        hist[history_]->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        raw->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_[0]);
-        layout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, dev_.bindless());
-        layout_.pushStorageImage(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, 0, raw->image.view());
-        layout_.push(cmd, &push, sizeof(push));
-        vkCmdDispatch(cmd, gx, gy, 1);
-        raw->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        RhiScope rs(dev_, cmd);
+        if (!rs) {
+            ++skipped_;
+            return;
+        }
+        rhi::CommandList& cl = rs.cl();
+        rhi::Texture* rawT = rs.wrap(*raw);
+        cl.transition(*rs.wrap(*hist[history_]), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        cl.transition(*rawT, VK_IMAGE_LAYOUT_GENERAL);
+        cl.bindPipeline(*pipeline_[0]);
+        rhi::Texture* const storage[] = {rawT};
+        cl.setStorageTextures(storage);
+        cl.setPushConstants(&push, sizeof(push));
+        cl.dispatch(gx, gy, 1);
+        cl.transition(*rawT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
     pending_ = {frame, 1, push, gx, gy, hist[cur], fin, cur, w, h, p.range[0]};
     lastWidth_ = w;

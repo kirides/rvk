@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "d3d9/device.h"
+#include "rhi/rhi.h"
 #include "vk/fsr.h"
 #include "vk/passes.h"
 
@@ -86,8 +87,7 @@ private:
     bool exposureGaveUp_ = false;  // the image never appeared: automatic exposure this session
     bool fsrAutoExposure_ = true;  // the current context's flag
     float exposureValue_ = 0.0f;  // the last value read back (log only)
-    VkBuffer exposureRb_ = VK_NULL_HANDLE;  // host-visible 4 bytes: the exposure image copied in the last second before a log line
-    VmaAllocation exposureRbAlloc_ = VK_NULL_HANDLE;
+    std::unique_ptr<rhi::Buffer> exposureRb_;  // host-visible 4 bytes: the exposure image copied in the last second before a log line
     const float* exposureRbPtr_ = nullptr;
     bool exposureRbWritten_ = false;
     std::unique_ptr<rhi::Pipeline> exposurePipe_;  // (RHI pipelines: the passes record through rhi::CommandList, hlsl-rhi.md 8)

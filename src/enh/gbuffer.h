@@ -24,6 +24,7 @@
 #include <memory>
 
 #include "d3d9/device.h"
+#include "rhi/rhi.h"
 #include "shader/abi.h"
 #include "vk/passes.h"
 
@@ -85,10 +86,9 @@ private:
     RtScene* scene_ = nullptr;
     Settings s_;
     bool on_ = false, failed_ = false;
-    vk::PassLayout layout_;  // set 1: two storage images
-    VkPipeline gtao_ = VK_NULL_HANDLE, filter_ = VK_NULL_HANDLE, debug_ = VK_NULL_HANDLE;
+    std::unique_ptr<rhi::Pipeline> gtao_, filter_, debug_;
     VkFormat debugFormat_ = VK_FORMAT_UNDEFINED;
-    std::future<VkPipeline> gtaoBuild_, filterBuild_;
+    std::future<std::unique_ptr<rhi::Pipeline>> gtaoBuild_, filterBuild_;  // (built on a worker: Device::createComputePipeline is thread-safe)
     std::shared_ptr<d3d9::Shader> whiteVs_, whitePs_;  // the SSAO replacement (fullscreen, writes 1)
     bool replacing_ = false;
     std::uint64_t ssaoReplaced_ = 0;

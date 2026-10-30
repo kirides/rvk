@@ -10,7 +10,7 @@
 //   bindless heap    sampled textures (rhi::Texture::heapSampled), samplers (heapSampler), storage buffers (Buffer::heapIndex), reached by index
 //                    from push constants / blocks: Vulkan set 0 (typed arrays), DX12 ResourceDescriptorHeap / SamplerDescriptorHeap (SM 6.6)
 //   constant buffer  one per command list state, b8 space1 (setConstantBuffer): Vulkan push descriptor set 1 binding 8, DX12 a root CBV
-//   storage images   u0..u3 space1 (setStorageViews): Vulkan push descriptor set 1 bindings 0..3, DX12 a descriptor table
+//   storage images   u0..u7 space1 (setStorageViews): Vulkan push descriptor set 1 bindings 0..7, DX12 a descriptor table of 8
 //   references       an 8-byte value in blocks / push constants that shaders read as RVK_REF: Buffer::shaderRef (device address on Vulkan,
 //                    {heap index, offset} on DX12); the read-write twin is Buffer::shaderRefRw (RVK_BUF_LOAD / STORE / ADD of rvk_abi.hlsli)
 //   acceleration     the TLAS of a ray query shader: AccelerationStructure::tlasSlot() in the push constants / blocks, RVK_TLAS(slot) in HLSL
@@ -30,6 +30,9 @@
 namespace rvk::rhi {
 
 enum class Backend { Vulkan, D3D12 };
+
+// storage image slots of a pass (u0..u7 space1; CommandList::setStorageViews)
+inline constexpr std::uint32_t kStorageImages = 8;
 const char* backendName(Backend b);
 
 // ---- resources --------------------------------------------------------------------------------------------------------------
@@ -56,6 +59,10 @@ public:
     virtual const BufferDesc& desc() const = 0;
     // the persistent mapping (Upload / Readback), null for Device memory
     virtual void* map() = 0;
+    // Memory::Readback: makes what the GPU wrote visible to the CPU reads of map() (call it once the GPU is done with the copy); Memory::Upload: makes
+    // the CPU's writes visible to the GPU (before the submission that reads them). No-ops where the memory is coherent (always on DX12).
+    virtual void invalidate() = 0;
+    virtual void flush() = 0;
     // index of the buffer as a ByteAddressBuffer in the bindless heap (STORAGE usage; 0 = none; always 0 on Vulkan: buffers are reached by address)
     virtual std::uint32_t heapIndex() const = 0;
     // index of the buffer as a RWByteAddressBuffer (a UAV) in the bindless heap (STORAGE usage and Memory::Device; 0 = none; always 0 on Vulkan)
@@ -86,6 +93,26 @@ struct Subresource {
     std::uint32_t layer = 0;
 };
 
+// A texture -> texture copy region (CommandList::copyTexture): `layerCount` layers from src.layer to dst.layer, the box `extent` (0 in every
+// field = the whole source mip level) from srcOffset to dstOffset. Same format on both sides.
+struct TextureCopy {
+    Subresource src{};
+    Subresource dst{};
+    std::uint32_t layerCount = 1;
+    VkOffset3D srcOffset{};
+    VkOffset3D dstOffset{};
+    VkExtent3D extent{0, 0, 0};
+};
+
+// A texture -> texture blit region (CommandList::blitTexture): one layer of one mip level to another, scaled from srcExtent to dstExtent
+// (0 in every field = the whole mip level of that side).
+struct TextureBlit {
+    Subresource src{};
+    Subresource dst{};
+    VkExtent3D srcExtent{0, 0, 0};
+    VkExtent3D dstExtent{0, 0, 0};
+};
+
 // the extent of mip level `mip` (each dimension halves, at least 1)
 VkExtent3D mipExtent(const TextureDesc& desc, std::uint32_t mip);
 // the bytes a buffer <-> texture copy of one mip level occupies in the buffer: rows are bufferRowPitch(format, mip width) apart, 3D slices follow each
@@ -107,6 +134,7 @@ public:
 struct SamplerDesc {
     VkFilter filter = VK_FILTER_LINEAR;
     VkSamplerAddressMode address = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    float maxAnisotropy = 1.0f;  // > 1: anisotropic filtering up to this ratio (clamped to what the device offers; with VK_FILTER_LINEAR only)
 };
 // a sampler in the bindless sampler heap: its index
 using SamplerIndex = std::uint32_t;
@@ -176,7 +204,7 @@ public:
     // The GPU address instance records name: VkAccelerationStructureInstanceKHR::accelerationStructureReference (which is byte-compatible with
     // D3D12_RAYTRACING_INSTANCE_DESC, 64 bytes: transform 3x4, custom index / mask, flags, reference) takes the BLAS's address().
     virtual std::uint64_t address() const = 0;
-    // TLAS: the slot shaders pass to RVK_TLAS (Vulkan: the bindless acceleration structure array, DX12: the CBV/SRV/UAV heap); 0 for a BLAS
+    // TLAS: the slot shaders pass to RVK_TLAS (Vulkan: the bindless acceleration structure array of the renderer's set, shared with its RT scene: slot 0 is valid there; DX12: the CBV/SRV/UAV heap); 0 for a BLAS
     virtual std::uint32_t tlasSlot() const = 0;
 };
 
@@ -231,25 +259,45 @@ struct StorageView {
     std::uint32_t layer = 0;
 };
 
+// One entry of CommandList::transitions: mip levels [baseMip, baseMip + mipCount) (all layers; the default = every level) to `layout`
+struct TextureTransition {
+    Texture* texture = nullptr;
+    VkImageLayout layout = VK_IMAGE_LAYOUT_GENERAL;
+    std::uint32_t baseMip = 0;
+    std::uint32_t mipCount = 0xFFFFFFFFu;
+};
+
 class CommandList {
 public:
     virtual ~CommandList() = default;
 
-    // whole-resource transition to `layout` (the old layout is tracked per texture; UNDEFINED discards the contents)
+    // whole-resource transition to `layout` (the old layout is tracked per texture; UNDEFINED discards the contents). Transitioning to the layout
+    // a texture is in already is a barrier that makes earlier writes visible (GENERAL -> GENERAL between two dispatches).
     virtual void transition(Texture& texture, VkImageLayout layout) = 0;
+    // Mip levels [baseMip, baseMip + mipCount) of all layers to `layout`; the other levels keep theirs (tracked per level from then on; a whole-texture
+    // transition moves every level again). The same-layout rule of transition applies. UNDEFINED is not allowed here (use transition to discard a
+    // whole texture).
+    virtual void transitionMips(Texture& texture, VkImageLayout layout, std::uint32_t baseMip, std::uint32_t mipCount) = 0;
+    // Several transitions as one barrier (Vulkan: one vkCmdPipelineBarrier2 for all of them: a pass that moves many images between two dispatches pays for
+    // one wait, not one per image). The entries apply in order; UNDEFINED is not allowed (see transitionMips).
+    virtual void transitions(std::span<const TextureTransition> list) = 0;
     // Makes the shader / transfer writes of a buffer visible to later accesses and moves it to the state `next` needs: call it between a write
     // (copy, dispatch) and the next use by shaders, as a vertex / index / indirect source (Vulkan; DX12 transitions in the binding calls) or before
     // copies out of it. A whole-buffer barrier on Vulkan; on DX12 a transition (device memory) or, for ShaderWrite -> ShaderWrite, a UAV barrier.
     virtual void bufferBarrier(Buffer& buffer, BufferAccess next = BufferAccess::ShaderRead) = 0;
+    // A global barrier between dispatches: the storage writes (images and buffers) and clears / copies of everything recorded so far are visible to
+    // the dispatches, draws and copies that follow (Vulkan: a compute / fragment / transfer memory barrier; DX12: a UAV barrier on all resources). It does
+    // not change layouts: a texture that is sampled next still needs its transition.
+    virtual void computeBarrier() = 0;
 
     // bindings (valid for the next draws / dispatches; both backends bind the bindless heap themselves)
     virtual void setPushConstants(const void* data, std::uint32_t size) = 0;
     virtual void setConstantBuffer(Buffer& buffer, std::uint64_t offset, std::uint64_t size) = 0;
-    // storage images u0..u3 (textures in GENERAL layout); a null texture is left unbound
+    // storage images u0..u7 (textures in GENERAL layout); a null texture is left unbound
     virtual void setStorageViews(std::span<const StorageView> views) = 0;
     // mip 0, layer 0 of each texture
     void setStorageTextures(std::span<Texture* const> textures) {
-        std::array<StorageView, 4> v{};
+        std::array<StorageView, kStorageImages> v{};
         for (std::size_t i = 0; i < textures.size() && i < v.size(); ++i) v[i].texture = textures[i];
         setStorageViews(std::span<const StorageView>(v.data(), std::min<std::size_t>(textures.size(), v.size())));
     }
@@ -284,6 +332,14 @@ public:
     virtual void copyBuffer(Buffer& dst, std::uint64_t dstOffset, Buffer& src, std::uint64_t srcOffset, std::uint64_t size) = 0;
     virtual void copyBufferToTexture(Texture& dst, Buffer& src, std::uint64_t srcOffset, Subresource sub = {}) = 0;
     virtual void copyTextureToBuffer(Buffer& dst, std::uint64_t dstOffset, Texture& src, Subresource sub = {}) = 0;
+    // Clears mip levels [baseMip, baseMip + mipCount) of all layers (colour textures with STORAGE usage, which must be in GENERAL layout; integer
+    // formats take clear.uint32, the others clear.float32). Later shader access wants a transition to GENERAL (same layout = barrier).
+    virtual void clearTexture(Texture& texture, const VkClearColorValue& value, std::uint32_t baseMip = 0, std::uint32_t mipCount = 1) = 0;
+    // texture -> texture copies (same format; `src` in TRANSFER_SRC_OPTIMAL, `dst` in TRANSFER_DST_OPTIMAL, or both in one texture's different mip levels)
+    virtual void copyTexture(Texture& dst, Texture& src, std::span<const TextureCopy> regions) = 0;
+    // Scaled copies with a filter (mip chain generation): layouts as copyTexture, a texture may blit between its own mip levels. False (nothing
+    // recorded, logged) without DeviceCaps::textureBlit.
+    virtual bool blitTexture(Texture& dst, Texture& src, std::span<const TextureBlit> regions, VkFilter filter) = 0;
 
     // (Re)builds a BLAS from the geometries it was created with (the buffers must hold the data now), or a TLAS from `count` instance records
     // (VkAccelerationStructureInstanceKHR, 64 bytes each, at `instanceOffset`, a multiple of 16) in `instances`. Both end with a barrier: later builds
@@ -312,6 +368,7 @@ struct DeviceCaps {
     std::uint32_t maxPushBytes = 128;
     std::uint32_t heapSize = 0;     // entries of the texture / buffer heap
     bool drawIndirectCount = false;  // CommandList::drawIndexedIndirectCount (Vulkan 1.2 drawIndirectCount, always on DX12)
+    bool textureBlit = false;        // CommandList::blitTexture (Vulkan only: the DX12 backend has no scaling copy)
     bool rayQuery = false;           // createBlas / createTlas + inline ray queries (Vulkan ray query with a bindless TLAS array, DXR tier 1.1); needs DeviceDesc::rayTracing
 };
 

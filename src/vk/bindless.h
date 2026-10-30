@@ -40,6 +40,11 @@ public:
     // the ray tracing scene's TLAS in slot (< abi::kMaxTlas) of the acceleration structure array (abi.h kBindingTlas); false without the
     // RT tier. Thread-safe against texture updates; the slot may be re-pointed while earlier frames still use their own slot.
     bool setTlas(std::uint32_t slot, VkAccelerationStructureKHR tlas);
+    // The slots of that array are shared by everything that builds a TLAS (the RT scene's per-frame TLASes, the RHI's acceleration structures): one
+    // allocator. allocTlasSlot = the first free slot (0 .. kMaxTlas - 1; kMaxTlas when none is left), freeTlasSlot gives it back (once no frame in
+    // flight uses it). Thread-safe.
+    std::uint32_t allocTlasSlot();
+    void freeTlasSlot(std::uint32_t slot);
     bool hasTlasBinding() const { return tlasBinding_; }
 
     VkDescriptorSetLayout setLayout() const { return layout_; }
@@ -70,6 +75,7 @@ private:
     Array arrays_[3];
     std::uint32_t nextSampler_ = 0;
     bool tlasBinding_ = false;
+    std::uint32_t tlasUsed_ = 0;  // bit mask of the allocated TLAS slots
 
     // defaults
     VkImage defaultImages_[3]{};

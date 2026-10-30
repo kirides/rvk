@@ -52,7 +52,7 @@ struct Blobs {
 // the shaders of all checks (compiled once, to SPIR-V and DXIL)
 struct Shaders {
     Blobs cs, vs, ps;                      // the basic check
-    Blobs tex, texStore, buf, vtxVs, vtxPs, rt;  // the gap checks
+    Blobs tex, texStore, buf, vtxVs, vtxPs, rt, store8;  // the gap checks
 };
 
 bool compileBoth(const std::string& file, const char* entry, const char* profile, Blobs& out) {
@@ -575,7 +575,7 @@ void testRayQuery(rhi::Device& dev, const Shaders& sh) {
         report(dev, "ray query", before);
         return;
     }
-    check(!blas->isTlas() && tlas->isTlas() && blas->address() != 0 && tlas->tlasSlot() != 0, "acceleration structure properties");
+    check(!blas->isTlas() && tlas->isTlas() && blas->address() != 0 && (tlas->tlasSlot() != 0 || dev.caps().backend == rhi::Backend::Vulkan),"acceleration structure properties");  // (Vulkan: slot 0 of the bindless array is valid)
     // two instances of the BLAS: A as it is (opaque), B rotated 180 degrees about z, 1 further away, forced non-opaque. The record is the same 64
     // bytes on both APIs (VkAccelerationStructureInstanceKHR = D3D12_RAYTRACING_INSTANCE_DESC)
     VkAccelerationStructureInstanceKHR inst[2]{};
@@ -630,6 +630,156 @@ void testRayQuery(rhi::Device& dev, const Shaders& sh) {
     check(bad == 0 && hitsA > 0 && hitsB > 0 && misses > 0,
           std::format("{} wrong pixel(s) {}; {} opaque hits, {} alpha-tested hits, {} misses, {} edge pixels skipped", bad, first, hitsA, hitsB, misses, skipped));
     report(dev, "ray query", before);
+}
+
+// Gap 5 (the pass migration's needs, hlsl-rhi.md 8): eight storage images in one dispatch (u0..u7), clears of mip levels, per-mip layout transitions,
+// texture -> texture copies of a box, and (Vulkan) blits down a mip chain.
+void testTextureOps(rhi::Device& dev, const Shaders& sh) {
+    const int before = failures;
+    if (!sh.store8.ok) {
+        check(false, "store8 shader did not compile");
+        report(dev, "texture ops", before);
+        return;
+    }
+    // ---- eight storage images
+    constexpr VkImageUsageFlags kStore = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    std::array<std::unique_ptr<rhi::Texture>, 8> imgs;
+    for (std::size_t i = 0; i < imgs.size(); ++i) imgs[i] = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R32_SFLOAT, {4, 2, 1}, 1, 1, kStore, "rhi store8"});
+    auto store8 = dev.createComputePipeline({sh.store8.shader(), "rhi store8"});
+    auto read = dev.createBuffer({16384, VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "rhi texops readback"});
+    bool created = store8 != nullptr && read != nullptr;
+    for (auto& t : imgs) created = created && t != nullptr;
+    if (!created) {
+        check(false, "texture ops resource / pipeline creation");
+        report(dev, "texture ops", before);
+        return;
+    }
+    dev.submitAndWait([&](rhi::CommandList& cl) {
+        std::array<rhi::Texture*, 8> raw{};
+        for (std::size_t i = 0; i < imgs.size(); ++i) {
+            raw[i] = imgs[i].get();
+            cl.transition(*imgs[i], VK_IMAGE_LAYOUT_GENERAL);
+        }
+        cl.bindPipeline(*store8);
+        cl.setStorageTextures(raw);
+        cl.dispatch(1, 1, 1);
+        cl.computeBarrier();
+        for (std::size_t i = 0; i < imgs.size(); ++i) {
+            cl.transition(*imgs[i], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            cl.copyTextureToBuffer(*read, i * 1024, *imgs[i]);
+        }
+    });
+    {
+        const auto* base = static_cast<const std::uint8_t*>(read->map());
+        int bad = 0;
+        for (std::uint32_t i = 0; i < 8; ++i) {
+            for (std::uint32_t x = 0; x < 4; ++x) {
+                const float a = *reinterpret_cast<const float*>(base + i * 1024 + x * 4);
+                const float b = *reinterpret_cast<const float*>(base + i * 1024 + 256 + x * 4);
+                if (a != static_cast<float>(i + 1) || b != static_cast<float>((i + 1) * 10)) ++bad;
+            }
+        }
+        check(bad == 0, std::format("eight storage images (u0..u7): {} bad texel(s)", bad));
+    }
+
+    // ---- clears, per-mip transitions, a box copy
+    auto mipTex = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R32G32B32A32_SFLOAT, {8, 8, 1}, 3, 1, kStore, "rhi texops mips"});
+    auto copyDst = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R32G32B32A32_SFLOAT, {8, 8, 1}, 1, 1, kStore, "rhi texops copy dst"});
+    if (!mipTex || !copyDst) {
+        check(false, "texture ops mip texture creation");
+        report(dev, "texture ops", before);
+        return;
+    }
+    VkClearColorValue red{}, green{}, blue{};
+    red.float32[0] = 1.0f;
+    red.float32[3] = 1.0f;
+    green.float32[1] = 1.0f;
+    green.float32[3] = 1.0f;
+    blue.float32[2] = 1.0f;
+    blue.float32[3] = 1.0f;
+    dev.submitAndWait([&](rhi::CommandList& cl) {
+        cl.transition(*mipTex, VK_IMAGE_LAYOUT_GENERAL);
+        cl.transition(*copyDst, VK_IMAGE_LAYOUT_GENERAL);
+        cl.clearTexture(*mipTex, red, 0, 3);
+        cl.clearTexture(*copyDst, blue);
+        cl.transitionMips(*mipTex, VK_IMAGE_LAYOUT_GENERAL, 1, 1);  // the same layout again: the first clear is visible to the second
+        cl.clearTexture(*mipTex, green, 1, 1);
+        // mip 0 is copied into the blue image (a 4 x 4 box from (2, 2) to (1, 1)), the levels end up in different layouts before all are read back
+        cl.transitionMips(*mipTex, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 0, 1);
+        cl.transition(*copyDst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        rhi::TextureCopy box;
+        box.srcOffset = {2, 2, 0};
+        box.dstOffset = {1, 1, 0};
+        box.extent = {4, 4, 1};
+        cl.copyTexture(*copyDst, *mipTex, std::span<const rhi::TextureCopy>(&box, 1));
+        // (two textures in one barrier)
+        const rhi::TextureTransition both[] = {{copyDst.get(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {mipTex.get(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 1, 2}};
+        cl.transitions(both);
+        cl.copyTextureToBuffer(*read, 0, *mipTex, {0, 0});
+        cl.copyTextureToBuffer(*read, 2048, *mipTex, {1, 0});
+        cl.copyTextureToBuffer(*read, 3072, *mipTex, {2, 0});
+        cl.copyTextureToBuffer(*read, 4096, *copyDst, {0, 0});
+    });
+    {
+        const auto* base = static_cast<const std::uint8_t*>(read->map());
+        const auto px = [&](std::uint64_t offset, std::uint32_t x, std::uint32_t y) { return reinterpret_cast<const float*>(base + offset + y * 256 + x * 16); };
+        const float wantRed[4] = {1, 0, 0, 1}, wantGreen[4] = {0, 1, 0, 1}, wantBlue[4] = {0, 0, 1, 1};
+        check(nearTo(px(0, 3, 3), wantRed) && nearTo(px(0, 7, 7), wantRed), "clear of mips 0..2 (mip 0)");
+        check(nearTo(px(2048, 0, 0), wantGreen) && nearTo(px(2048, 3, 3), wantGreen), "clear of mip 1 only");
+        check(nearTo(px(3072, 0, 0), wantRed) && nearTo(px(3072, 1, 1), wantRed), "mip 2 keeps the first clear");
+        int bad = 0;
+        for (std::uint32_t y = 0; y < 8; ++y) {
+            for (std::uint32_t x = 0; x < 8; ++x) {
+                const bool inside = x >= 1 && x < 5 && y >= 1 && y < 5;
+                if (!nearTo(px(4096, x, y), inside ? wantRed : wantBlue)) ++bad;
+            }
+        }
+        check(bad == 0, std::format("copyTexture of a box: {} bad texel(s)", bad));
+    }
+
+    // ---- blits down a mip chain
+    if (!dev.caps().textureBlit) {
+        skip(dev, "texture blit", "no scaling copy on this backend");
+    } else {
+        auto chain = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R16G16B16A16_SFLOAT, {8, 8, 1}, 3, 1, kStore, "rhi texops blit chain"});
+        auto chainRead = dev.createBuffer({4096, VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "rhi blit readback"});
+        if (!chain || !chainRead) {
+            check(false, "blit resource creation");
+        } else {
+            VkClearColorValue colour{};
+            colour.float32[0] = 0.25f;
+            colour.float32[1] = 0.5f;
+            colour.float32[2] = 0.75f;
+            colour.float32[3] = 1.0f;
+            dev.submitAndWait([&](rhi::CommandList& cl) {
+                cl.transition(*chain, VK_IMAGE_LAYOUT_GENERAL);
+                cl.clearTexture(*chain, colour, 0, 1);
+                cl.transitionMips(*chain, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 0, 1);
+                cl.transitionMips(*chain, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, 2);
+                for (std::uint32_t m = 1; m < 3; ++m) {
+                    rhi::TextureBlit b;
+                    b.src = {m - 1, 0};
+                    b.dst = {m, 0};
+                    check(cl.blitTexture(*chain, *chain, std::span<const rhi::TextureBlit>(&b, 1), VK_FILTER_LINEAR), "blitTexture");
+                    cl.transitionMips(*chain, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m, 1);
+                }
+                cl.copyTextureToBuffer(*chainRead, 0, *chain, {1, 0});
+                cl.copyTextureToBuffer(*chainRead, 1024, *chain, {2, 0});
+            });
+            const auto* base = static_cast<const std::uint8_t*>(chainRead->map());
+            const auto half4 = [&](std::uint64_t offset, std::uint32_t x, std::uint32_t y, float out[4]) {
+                const auto* h = reinterpret_cast<const std::uint16_t*>(base + offset + y * 256 + x * 8);
+                for (int c = 0; c < 4; ++c) out[c] = halfToFloat(h[c]);
+            };
+            const float want[4] = {0.25f, 0.5f, 0.75f, 1.0f};
+            float got[4];
+            half4(0, 3, 3, got);
+            check(nearTo(got, want), std::format("blit to mip 1: ({:.3f}, {:.3f}, {:.3f}, {:.3f})", got[0], got[1], got[2], got[3]));
+            half4(1024, 1, 1, got);
+            check(nearTo(got, want), std::format("blit to mip 2: ({:.3f}, {:.3f}, {:.3f}, {:.3f})", got[0], got[1], got[2], got[3]));
+        }
+    }
+    report(dev, "texture ops", before);
 }
 
 bool runBackend(rhi::Backend backend, bool validation, const Shaders& sh) {
@@ -812,6 +962,7 @@ bool runBackend(rhi::Backend backend, bool validation, const Shaders& sh) {
     testBuffers(*dev, sh);
     testVertex(*dev, sh);
     testRayQuery(*dev, sh);
+    testTextureOps(*dev, sh);
     check(dev->validationErrors() == 0, std::format("{} validation error(s)", dev->validationErrors()));
     std::printf("[%s] %s\n", rhi::backendName(backend), failures == before ? "PASS" : "FAIL");
     return failures == before;
@@ -845,6 +996,7 @@ int main(int argc, char** argv) {
     compileBoth("test/rhi_vtx.vert.hlsl", "VSMain", "vs_6_6", sh.vtxVs);
     compileBoth("test/rhi_vtx.frag.hlsl", "PSMain", "ps_6_6", sh.vtxPs);
     compileBoth("test/rhi_rt.comp.hlsl", "CSMain", "cs_6_6", sh.rt);
+    compileBoth("test/rhi_store8.comp.hlsl", "CSMain", "cs_6_6", sh.store8);
     if (vulkan) runBackend(rhi::Backend::Vulkan, validation, sh);
     if (d3d12) runBackend(rhi::Backend::D3D12, validation, sh);
     std::printf("%s: %d failure(s)\n", failures == 0 ? "PASS" : "FAIL", failures);

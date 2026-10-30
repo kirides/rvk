@@ -16,6 +16,7 @@
 #include "engine/symbols.h"
 #include "enh/gbuffer.h"
 #include "enh/material_variant.h"
+#include "enh/rhi_scope.h"
 #include "enh/rt_scene.h"
 #include "shader/embedded.h"
 #include "vk/context.h"
@@ -71,55 +72,36 @@ void split(VkDeviceAddress a, std::uint32_t* out) {
 Gi::Gi(d3d9::Device& device, RtScene* scene) : dev_(device), scene_(scene) {
     for (Cascade& c : cascades_) c.queued.assign(kProbesPerCascade, 0);
     if (scene_ == nullptr || !scene_->supported()) return;
-    if (!layout_.create(dev_.ctx(), dev_.bindless(), {})) {
+    rhi::Device* rdev = dev_.rhi();
+    if (rdev == nullptr) {
         failed_ = true;
         return;
     }
+    const auto build = [rdev](const char* file, const char* name) {
+        return [rdev, file, name]() {
+            rhi::ComputePipelineDesc d;
+            d.cs.spirv = shader::embedded::spirv(file);
+            d.name = name;
+            return rdev->createComputePipeline(d);
+        };
+    };
     // both compute pipelines in the background from the start: turning GI on later costs no frame
-    vk::Context* ctx = &dev_.ctx();
-    const VkPipelineLayout layout = layout_.layout();
-    traceBuild_ = std::async(std::launch::async, [ctx, layout]() {
-        return vk::createComputePipeline(*ctx, layout, shader::embedded::spirv("gi/gi_trace.comp"), "gi.trace");
-    });
-    blendBuild_ = std::async(std::launch::async, [ctx, layout]() {
-        return vk::createComputePipeline(*ctx, layout, shader::embedded::spirv("gi/gi_blend.comp"), "gi.blend");
-    });
+    traceBuild_ = std::async(std::launch::async, build("gi/gi_trace.comp", "gi.trace"));
+    blendBuild_ = std::async(std::launch::async, build("gi/gi_blend.comp", "gi.blend"));
     dev_.setVariantProvider(d3d9::VariantSlot::Gi, {materialVariantTag("gi"), variantOptions});
     // the screen probes' passes (stage C)
     // three storage images: the trace writes the probes' ratio / correction / geometry images, the resolve the first two
     // (resolved ratio, correction + count) of them
-    const VkDescriptorSetLayoutBinding outs[3] = {{0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-                                                  {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-                                                  {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}};
-    if (screenLayout_.create(dev_.ctx(), dev_.bindless(), {outs, 3})) {
-        const VkPipelineLayout sl = screenLayout_.layout();
-        spTraceBuild_ = std::async(std::launch::async, [ctx, sl]() {
-            return vk::createComputePipeline(*ctx, sl, shader::embedded::spirv("gi/sp_trace.comp"), "gi.screen trace");
-        });
-        spResolveBuild_ = std::async(std::launch::async, [ctx, sl]() {
-            return vk::createComputePipeline(*ctx, sl, shader::embedded::spirv("gi/sp_resolve.comp"), "gi.screen resolve");
-        });
-    }
+    spTraceBuild_ = std::async(std::launch::async, build("gi/sp_trace.comp", "gi.screen trace"));
+    spResolveBuild_ = std::async(std::launch::async, build("gi/sp_resolve.comp", "gi.screen resolve"));
 }
 
 Gi::~Gi() {
     disable();
-    vk::Context* ctx = &dev_.ctx();
-    for (std::future<VkPipeline>* f : {&traceBuild_, &blendBuild_, &spTraceBuild_, &spResolveBuild_}) {
-        if (f->valid()) {
-            const VkPipeline p = f->get();
-            if (p != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), p, nullptr);
-        }
+    // (a pipeline still being built is waited for, then retired with the others)
+    for (PipelineFuture* f : {&traceBuild_, &blendBuild_, &spTraceBuild_, &spResolveBuild_}) {
+        if (f->valid()) f->get();
     }
-    const VkPipeline t = trace_, b = blend_, st = spTrace_, sr = spResolve_;
-    vk::PassLayout layout = layout_, screenLayout = screenLayout_;
-    dev_.frames().retire([ctx, t, b, st, sr, layout, screenLayout]() mutable {
-        for (VkPipeline p : {t, b, st, sr}) {
-            if (p != VK_NULL_HANDLE) vkDestroyPipeline(ctx->device(), p, nullptr);
-        }
-        if (layout.valid()) layout.destroy(*ctx);
-        if (screenLayout.valid()) screenLayout.destroy(*ctx);
-    });
 }
 
 bool Gi::available() const { return scene_ != nullptr && scene_->supported() && !failed_; }
@@ -433,13 +415,13 @@ void Gi::selectProbes(std::vector<std::uint32_t>& out, std::uint32_t budget) {
 }
 
 bool Gi::pipelinesReady() {
-    if (trace_ != VK_NULL_HANDLE && blend_ != VK_NULL_HANDLE) return true;
+    if (trace_ && blend_) return true;
     if (failed_) return false;
     for (auto [future, out] : {std::pair{&traceBuild_, &trace_}, std::pair{&blendBuild_, &blend_}}) {
-        if (*out != VK_NULL_HANDLE) continue;
+        if (*out) continue;
         if (!future->valid() || future->wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
         *out = future->get();
-        if (*out == VK_NULL_HANDLE) {
+        if (!*out) {
             spdlog::error("enh: gi: a compute pipeline failed: GI stays off this session");
             failed_ = true;
             return false;
@@ -603,34 +585,22 @@ void Gi::record(d3d9::PassContext& ctx) {
     push.h.passId = passId_;
     split(pa.address, push.params);
 
-    const auto barrier = [&](VkPipelineStageFlags2 src, VkAccessFlags2 srcAccess, VkPipelineStageFlags2 dst, VkAccessFlags2 dstAccess) {
-        VkMemoryBarrier2 b{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-        b.srcStageMask = src;
-        b.srcAccessMask = srcAccess;
-        b.dstStageMask = dst;
-        b.dstAccessMask = dstAccess;
-        VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-        di.memoryBarrierCount = 1;
-        di.pMemoryBarriers = &b;
-        vkCmdPipelineBarrier2(cmd, &di);
-    };
     if (n > 0) {
+        RhiScope rs(dev_, cmd);
+        if (!rs) return;
+        rhi::CommandList& cl = rs.cl();
         // this frame's lookups (the solid pass) and last frame's passes before the probe / ray writes
-        barrier(VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-        layout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, dev_.bindless());
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, trace_);
-        layout_.push(cmd, &push, sizeof(push));
-        vkCmdDispatch(cmd, n, 1, 1);
+        cl.computeBarrier();
+        cl.bindPipeline(*trace_);
+        cl.setPushConstants(&push, sizeof(push));
+        cl.dispatch(n, 1, 1);
         // rays -> the blend; the trace's probe reads before the blend's writes
-        barrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, blend_);
-        layout_.push(cmd, &push, sizeof(push));
-        vkCmdDispatch(cmd, n, 1, 1);
+        cl.computeBarrier();
+        cl.bindPipeline(*blend_);
+        cl.setPushConstants(&push, sizeof(push));
+        cl.dispatch(n, 1, 1);
         // the probes -> the lookups of the later draws (alpha) and of the next frames, the next trace
-        barrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+        cl.computeBarrier();
     }
     dev_.setGiHeader({reinterpret_cast<const std::uint8_t*>(&hd), sizeof(hd)});
     // the screen probes of the next frame trace with this update's light and volume (they run before the solid pass)
@@ -653,12 +623,12 @@ void Gi::record(d3d9::PassContext& ctx) {
 void Gi::recordScreen(d3d9::PassContext& ctx) {
     if (ctx.mainView != 1 || !on_ || s_.screen == 0 || !haveLast_) return;
     // the pipelines, the main view's depth after the z pre-pass, the RT scene built there
-    if (spTrace_ == VK_NULL_HANDLE || spResolve_ == VK_NULL_HANDLE) {
+    if (!spTrace_ || !spResolve_) {
         for (auto [future, out] : {std::pair{&spTraceBuild_, &spTrace_}, std::pair{&spResolveBuild_, &spResolve_}}) {
-            if (*out != VK_NULL_HANDLE || !future->valid() || future->wait_for(std::chrono::seconds(0)) != std::future_status::ready) continue;
+            if (*out || !future->valid() || future->wait_for(std::chrono::seconds(0)) != std::future_status::ready) continue;
             *out = future->get();
         }
-        if (spTrace_ == VK_NULL_HANDLE || spResolve_ == VK_NULL_HANDLE) {
+        if (!spTrace_ || !spResolve_) {
             ++screenSkipped_;
             return;
         }
@@ -755,35 +725,44 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
     split(pa.address, push.params);
 
     // the DDGI probes (last frame's update) -> these reads: ordered by the update's own end barrier
-    probes->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
-    probes2->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
-    geom->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, spTrace_);
-    screenLayout_.bindSet0(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, dev_.bindless());
+    RhiScope rs(dev_, cmd);
+    if (!rs) return;
+    rhi::CommandList& cl = rs.cl();
+    rhi::Texture* probesT = rs.wrap(*probes);
+    rhi::Texture* probes2T = rs.wrap(*probes2);
+    rhi::Texture* geomT = rs.wrap(*geom);
+    rhi::Texture* resRead = rs.wrap(*res[sgiHistory_]);
+    rhi::Texture* statsRead = rs.wrap(*stats[sgiHistory_]);
+    rhi::Texture* resWrite = rs.wrap(*res[cur]);
+    rhi::Texture* statsWrite = rs.wrap(*stats[cur]);
+    cl.transition(*probesT, VK_IMAGE_LAYOUT_GENERAL);
+    cl.transition(*probes2T, VK_IMAGE_LAYOUT_GENERAL);
+    cl.transition(*geomT, VK_IMAGE_LAYOUT_GENERAL);
+    cl.bindPipeline(*spTrace_);
     {
-        const VkImageView views[3] = {probes->image.view(), probes2->image.view(), geom->image.view()};
-        screenLayout_.pushStorageImages(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, views);
+        rhi::Texture* const outs[3] = {probesT, probes2T, geomT};
+        cl.setStorageTextures(outs);
     }
-    screenLayout_.push(cmd, &push, sizeof(push));
+    cl.setPushConstants(&push, sizeof(push));
     const std::uint32_t perGroup = 64u / rays;  // one ray per invocation
-    vkCmdDispatch(cmd, (gw * gh + perGroup - 1) / perGroup, 1, 1);
+    cl.dispatch((gw * gh + perGroup - 1) / perGroup, 1, 1);
     // resolve + temporal into this frame's image
-    probes->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    probes2->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    geom->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    res[sgiHistory_]->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    stats[sgiHistory_]->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    res[cur]->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
-    stats[cur]->image.transition(cmd, VK_IMAGE_LAYOUT_GENERAL);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, spResolve_);
+    cl.transition(*probesT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    cl.transition(*probes2T, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    cl.transition(*geomT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    cl.transition(*resRead, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    cl.transition(*statsRead, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    cl.transition(*resWrite, VK_IMAGE_LAYOUT_GENERAL);
+    cl.transition(*statsWrite, VK_IMAGE_LAYOUT_GENERAL);
+    cl.bindPipeline(*spResolve_);
     {
-        const VkImageView views[2] = {res[cur]->image.view(), stats[cur]->image.view()};
-        screenLayout_.pushStorageImages(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, views);
+        rhi::Texture* const outs[2] = {resWrite, statsWrite};
+        cl.setStorageTextures(outs);
     }
-    screenLayout_.push(cmd, &push, sizeof(push));
-    vkCmdDispatch(cmd, (w + 7) / 8, (h + 7) / 8, 1);
-    res[cur]->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    stats[cur]->image.transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    cl.setPushConstants(&push, sizeof(push));
+    cl.dispatch((w + 7) / 8, (h + 7) / 8, 1);
+    cl.transition(*resWrite, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    cl.transition(*statsWrite, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     sgiHistory_ = cur;
     sgiValid_ = true;
     // -> this frame's material shaders (Gbuffer variants: the factor on their DDGI lookup at their pixel)

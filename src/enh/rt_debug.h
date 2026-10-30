@@ -16,6 +16,7 @@
 #include <string_view>
 
 #include "d3d9/device.h"
+#include "rhi/rhi.h"
 #include "shader/abi.h"
 #include "vk/passes.h"
 #include "vk/raytracing.h"
@@ -83,10 +84,7 @@ private:
     vk::rt::AddressBuffer probes_[vk::Frames::kInFlight];  // host-visible probe results per frame slot
     std::uint64_t probeFrame_[vk::Frames::kInFlight]{};     // frame value whose results a slot holds (0 = none)
     std::chrono::steady_clock::time_point probeLogged_{};
-    vk::PassLayout layout_;
-    VkPipeline compute_ = VK_NULL_HANDLE;
-    VkPipeline depthCompute_ = VK_NULL_HANDLE;
-    VkPipeline composite_ = VK_NULL_HANDLE;
+    std::unique_ptr<rhi::Pipeline> compute_, depthCompute_, composite_;
     VkFormat compositeFormat_ = VK_FORMAT_UNDEFINED;
     bool failed_ = false;
     std::uint64_t frames_ = 0;
