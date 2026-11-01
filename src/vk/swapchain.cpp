@@ -143,17 +143,12 @@ bool Swapchain::build(std::uint32_t width, std::uint32_t height) {
         ci.minImageCount = 2;  // the app-facing replacement images ("always specify 2")
         ci.oldSwapchain = VK_NULL_HANDLE;
         bool ok = false;
-        if (fgActive_) {
-            destroyImageObjects();  // views over the replacement images (new ones when the extent changed)
-            ok = fg_->recreate(ci) == VK_SUCCESS;
-            if (!ok) {
-                spdlog::error("vulkan: frame generation swapchain: recreate failed");
-                destroySwapchain();
-            }
-        } else {
-            destroySwapchain();  // our own swapchain first; the API creates one on the surface
-            ok = fg_->create(*ctx_, ci, &fgReason_);
-        }
+        // Never AMD's in-place recreate (pOutCreateSwapchainFFXAPI): the engine's launch re-creates the swapchain several times in a
+        // row (window mode, borderless placement), which crashed inside the DLL's present thread (frame-generation.md 10.5). The full
+        // teardown (WaitForPresents, context, swapchain) and a new create is the path proven clean.
+        ctx_->waitIdle();
+        destroySwapchain();  // our own swapchain, or the API's old one: the surface takes one
+        ok = fg_->create(*ctx_, ci, &fgReason_);
         if (ok) {
             fgActive_ = true;
             swapchain_ = fg_->handle();

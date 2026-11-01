@@ -461,7 +461,14 @@ void Device::setVsync(bool vsync) {
 // every re-creation of the swapchain: the generator's context (frame generation swapchain) goes first, it belongs to the old one
 void Device::rebuildSwapchain(std::uint32_t width, std::uint32_t height) {
     if (swapchain_.frameGenActive() && fgClient_ != nullptr) fgClient_->swapchainWillChange();
+    const bool fgBefore = swapchain_.frameGenActive();
     swapchain_.recreate(width, height);
+    if (fgBefore) {
+        // a new AMD swapchain counts its presents from zero: the stats baselines restart (else the differences underflow)
+        fgTick_ = {};
+        fgReportAt_ = {};
+        fgReportReal_ = 0;
+    }
 }
 
 bool Device::setFrameGenSwapchain(bool want, const std::filesystem::path& loaderDll) {
