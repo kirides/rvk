@@ -267,7 +267,8 @@ private:
     struct SkinJob {
         rhi::GpuRef vertices;      // vertex 0 of the draw's index range's slot 0 (base vertex and stream offset applied)
         rhi::GpuRef bones;         // c32.. of the draw's vertex shader constants (200 vec4, copied into the ring)
-        rhi::GpuRef out;           // the capture-layout buffer
+        rhi::GpuRef out;           // the capture-layout buffer (the writable reference)
+        rhi::GpuRef outKey;        // ... its read reference: the identity the consumers ask for (markVertexCaptured)
         rhi::GpuRef ref;           // verify: the vertex shader capture of the same draw
         std::uint32_t slots = 0, stride = 0, offsets = 0;
     };

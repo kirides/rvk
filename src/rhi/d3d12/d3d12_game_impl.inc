@@ -238,6 +238,8 @@ void D3D12DeviceImpl::destroyShaderModule(ShaderModule module, bool) {
 }
 
 bool D3D12DeviceImpl::formatSupport(VkFormat format, VkImageUsageFlags usage, bool blend) const {
+    // (no hardware has a 24 bit depth buffer any more: AMD stores D24S8 as D32S8 and converts on every access. The D3D9 model falls back to D32S8 like the Vulkan device does)
+    if (format == VK_FORMAT_D24_UNORM_S8_UINT && (usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0) return false;
     const DXGI_FORMAT typed = toDxgi(format);
     if (typed == DXGI_FORMAT_UNKNOWN) return false;
     const auto support = [&](DXGI_FORMAT f) {

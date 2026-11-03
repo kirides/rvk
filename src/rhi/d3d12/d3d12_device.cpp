@@ -1378,6 +1378,7 @@ public:
     void setStorageViews(std::span<const StorageView> views) override {
         tableFirst_ = dev_.nextUavTable();
         for (std::uint32_t i = 0; i < rhi::kStorageImages; ++i) {
+            if (i >= views.size()) break;  // (the slots a pass does not name are not written: nothing reads them)
             D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
             ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
             ID3D12Resource* res = nullptr;

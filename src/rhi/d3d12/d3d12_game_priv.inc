@@ -50,7 +50,7 @@ public:
             k.writeMask = d.stencilMasks[1];
         }
         if (d.depthBiasEnable != 0) {
-            k.bias = static_cast<std::int32_t>(d.depthBias[0] >= 0.0f ? d.depthBias[0] + 0.5f : d.depthBias[0] - 0.5f);
+            k.bias = static_cast<std::int32_t>(d.depthBias[0] >= 0.0f ? std::ceil(d.depthBias[0]) : std::floor(d.depthBias[0]));  // (the fractional units of Vulkan's float constant factor round away from zero: a bias below one unit must not vanish)
             k.slope = d.depthBias[1];
         }
         return k;

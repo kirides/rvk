@@ -462,6 +462,8 @@ bool Gi::ensureResources(rhi::CommandList& cmd) {
         rs.cl().memoryBarrier(VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                               VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                               VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        rs.cl().bufferBarrier(*probes_, rhi::BufferAccess::ShaderRead);
+        rs.cl().bufferBarrier(*depth_, rhi::BufferAccess::ShaderRead);
     }
     spdlog::info("enh: gi: {} cascades x {} x {} x {} probes ({:.0f} / {:.0f} / {:.0f} units apart), {:.1f} MiB", kGiCascades, kDims[0], kDims[1],
                  kDims[2], kSpacing[0], kSpacing[1], kSpacing[2],
@@ -611,11 +613,16 @@ void Gi::record(d3d9::PassContext& ctx) {
         cl.dispatch(n, 1, 1);
         // rays -> the blend; the trace's probe reads before the blend's writes
         cl.computeBarrier();
+        // the probes and their depth moments change state for the blend (D3D12: a buffer is a shader resource for the lookups and a UAV for the blend)
+        cl.bufferBarrier(*probes_, rhi::BufferAccess::ShaderWrite);
+        cl.bufferBarrier(*depth_, rhi::BufferAccess::ShaderWrite);
         cl.bindPipeline(*blend_);
         cl.setPushConstants(&pushRw, sizeof(pushRw));
         cl.dispatch(n, 1, 1);
         // the probes -> the lookups of the later draws (alpha) and of the next frames, the next trace
         cl.computeBarrier();
+        cl.bufferBarrier(*probes_, rhi::BufferAccess::ShaderRead);
+        cl.bufferBarrier(*depth_, rhi::BufferAccess::ShaderRead);
     }
     dev_.setGiHeader({reinterpret_cast<const std::uint8_t*>(&hd), sizeof(hd)});
     // the screen probes of the next frame trace with this update's light and volume (they run before the solid pass)

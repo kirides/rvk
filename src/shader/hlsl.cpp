@@ -13,6 +13,9 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 #include <cstring>
 #include <format>
 #include <map>
@@ -937,7 +940,11 @@ private:
             if (major_ >= 3) {
                 std::set<std::uint32_t> regs(outputs_.begin(), outputs_.end());
                 for (const auto& d : p_.outputs) regs.insert(d.reg.index);
-                for (auto r : regs) g += std::format("static float4 o{} = float4(0.0, 0.0, 0.0, 0.0);\n", r);
+                std::set<std::uint32_t> posRegs;
+                for (const auto& d : p_.outputs) {
+                    if (d.usage == Usage::Position) posRegs.insert(d.reg.index);
+                }
+                for (auto r : regs) g += std::format("static {}float4 o{} = float4(0.0, 0.0, 0.0, 0.0);\n", varyingFillers() && posRegs.contains(r) ? "precise " : "", r);
             } else {
                 g += "static float4 oPos = float4(0.0, 0.0, 0.0, 0.0);\nstatic float4 oFog = float4(0.0, 0.0, 0.0, 0.0);\n"
                      "static float4 oPts = float4(0.0, 0.0, 0.0, 0.0);\n";
@@ -1037,7 +1044,7 @@ private:
         } else {
             m += "RvkPsOut PSMain(RvkPsIn rvk_in) {\n    rvk_draw = rvkLoadDraw();\n    RvkPsOut rvk_out = (RvkPsOut)0;\n";
             m += "    rvk_fragCoord = rvk_in.rvk_fragCoord;\n";
-            if (usesFace_) m += "    rvk_front = rvk_in.rvk_front;\n";
+            if (usesFace_) m += varyingFillers() && ::GetEnvironmentVariableA("RVK_FLIP_FRONT", nullptr, 0) != 0 ? "    rvk_front = !rvk_in.rvk_front;\n" : "    rvk_front = rvk_in.rvk_front;\n";
             for (const auto& d : p_.inputs) {
                 const std::uint32_t loc = psInputLocation(d);
                 if (loc == abi::kInvalidLocation) continue;
@@ -1077,7 +1084,9 @@ private:
                     if (!varyingFillers()) m += "    rvk_out.rvk_psize = oPts.x;\n";
                 }
             }
-            m += std::format("    float4 rvk_pos = {};\n", pos);
+            // D3D12: the depth pre-pass and the solid pass compare positions of two different shaders for equality (ZFUNC_EQUAL): `precise` keeps the
+            // driver from fusing the position's multiply-adds differently in each (Vulkan's compiler gives equal results without it)
+            m += std::format("    {}float4 rvk_pos = {};\n", varyingFillers() ? "precise " : "", pos);
             if (!opt_.epilogue.empty()) {
                 m += opt_.epilogue;
                 m += "\n";

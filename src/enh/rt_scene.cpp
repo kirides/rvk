@@ -1007,6 +1007,12 @@ bool RtScene::prepareInputs(Blas& b) {
     return true;
 }
 
+// RVK_NO_COMPACT (environment): no BLAS compaction (diagnostics)
+static bool noCompaction() {
+    static const bool v = GetEnvironmentVariableA("RVK_NO_COMPACT", nullptr, 0) != 0;
+    return v;
+}
+
 void RtScene::processCompactions(rhi::CommandList& cl, std::uint32_t slot) {
     auto& list = compactions_[slot];
     if (list.empty()) return;
@@ -1096,7 +1102,7 @@ void RtScene::buildPending(rhi::CommandList& cl, std::uint32_t slot) {
         g.opaque = true;  // alpha-tested instances: FORCE_NO_OPAQUE on the instance
         rhi::BlasDesc desc;
         desc.geometries = std::span<const rhi::TriangleGeometry>(&g, 1);
-        desc.allowCompaction = true;  // (not allowUpdate: a BLAS that is both did not compact into a traceable structure on the AMD driver, hlsl-rhi.md 6c)
+        desc.allowCompaction = !noCompaction();  // (not allowUpdate: a BLAS that is both did not compact into a traceable structure on the AMD driver, hlsl-rhi.md 6c)
         desc.name = "rt scene blas";
         std::unique_ptr<rhi::AccelerationStructure> as = rd->createBlas(desc);
         if (as == nullptr) {
@@ -1132,7 +1138,10 @@ void RtScene::buildPending(rhi::CommandList& cl, std::uint32_t slot) {
         list.push_back({id, b->serial, static_cast<std::uint32_t>(handles.size())});
         handles.push_back(b->as.get());
     }
-    if (handles.empty()) return;
+    if (handles.empty() || noCompaction()) {
+        list.clear();
+        return;
+    }
     cl.queryCompactedSizes(*compactQuery_, slot * kQueriesPerSlot, handles);
 }
 
@@ -1470,6 +1479,7 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         SkinJob j;
         j.vertices = vertexAddress.ref;
         j.out = a.rw();
+        j.outKey = a.ref;
         j.slots = slots;
         j.stride = q.vertexStride;
         j.offsets = skinOffsets;
@@ -1787,7 +1797,7 @@ void RtScene::recordSkin(rhi::CommandList& cl) {
         cl.dispatch(chunks, 1, 1);
         dev_.game().captureAccess(cl, false);
     }
-    for (std::uint32_t i = 0; i < n; ++i) dev_.markVertexCaptured(skinJobs_[i].out);
+    for (std::uint32_t i = 0; i < n; ++i) dev_.markVertexCaptured(skinJobs_[i].outKey);
     skinJobsTotal_ += n;
     skinJobs_.clear();
     const double now = dev_.secondsSinceCreate();
