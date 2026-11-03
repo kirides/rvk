@@ -34,6 +34,9 @@
 #include "rhi/rhi.h"
 #include "shader/embedded.h"
 
+#include <imgui.h>
+#include "imgui_impl_dx12.h"
+
 namespace rvk::rhi {
 namespace {
 
@@ -1774,9 +1777,13 @@ public:
         uavBarrier();
     }
 
-    // (capture regions: PIX events need WinPixEventRuntime; the raw BeginEvent API is flagged by the debug layer)
-    void beginRegion(std::string_view) override {}
-    void endRegion() override {}
+    // capture regions: BeginEvent / EndEvent with the legacy UTF-16 payload (what PIX and RenderDoc read without WinPixEventRuntime)
+    void beginRegion(std::string_view name) override {
+        const std::wstring w = widen(std::string(name).c_str());
+        list_->BeginEvent(0, w.c_str(), static_cast<UINT>((w.size() + 1) * sizeof(wchar_t)));
+    }
+    void endRegion() override { list_->EndEvent(); }
+    ID3D12GraphicsCommandList* raw() const { return list_; }
 
 private:
     // GENERAL is the UAV state for textures with storage usage; one without (a mip chain blitted onto itself) stays in COMMON

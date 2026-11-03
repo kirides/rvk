@@ -27,13 +27,13 @@
     Texture* transient(std::string_view key, const TransientDesc& desc) override;
     void releaseTransient(std::string_view key) override;
     std::uint64_t transientBytes() const override;
-    bool enableTimestamps() override { return false; }  // (WP9: a timestamp query heap)
-    bool timestampsEnabled() const override { return false; }
-    void timestampStart(std::uint32_t, bool) override {}
-    bool timestampDetails(std::uint32_t) const override { return false; }
-    void timestampMark(CommandList&, std::uint32_t, TimestampStream, const char*) override {}
-    void timestampMark(CommandList&, std::uint32_t, TimestampStream, std::string&&) override {}
-    TimestampResult timestampCollect(std::uint32_t) override { return {}; }
+    bool enableTimestamps() override;
+    bool timestampsEnabled() const override { return tsHeap_ != nullptr; }
+    void timestampStart(std::uint32_t slot, bool details) override;
+    bool timestampDetails(std::uint32_t slot) const override { return slot < rhi::kFramesInFlight && ts_[slot].details; }
+    void timestampMark(CommandList& list, std::uint32_t slot, TimestampStream stream, const char* label) override;
+    void timestampMark(CommandList& list, std::uint32_t slot, TimestampStream stream, std::string&& label) override;
+    TimestampResult timestampCollect(std::uint32_t slot) override;
     bool createPipelineCaches(const std::filesystem::path& cacheFile, bool libraries) override;
     GamePipeline resolvePipeline(const PipelineDesc& desc, bool* created) override;
     GamePipeline findPipeline(const PipelineDesc& desc) override;
@@ -47,7 +47,7 @@
     void endScope() override;
     void scopeChunk(DrawChunk&& chunk) override;
     void applyDrawPacket(const DrawPacket& packet) override;
-    void scopeLabel(bool, const char*) override {}
+    void scopeLabel(bool begin, const char* text) override;
     void invalidateRecordingState() override;
     std::uint64_t takePipelineBinds() override;
     void resetRecordPools() override {}  // (beginFrame resets the slot's allocators)
@@ -57,16 +57,16 @@
     void logMemoryStats() override;
     std::unique_ptr<Upscaler> createUpscaler() override { return nullptr; }
     std::unique_ptr<FrameGenerator> createFrameGenerator() override { return nullptr; }
-    std::unique_ptr<ImGuiBackend> createImGuiBackend() override { return nullptr; }
+    std::unique_ptr<ImGuiBackend> createImGuiBackend() override;
     void beginFrame() override;
     double lastSlotWaitMs() const override { return lastSlotWaitMs_; }
     void submitFrame(const char* finalMark) override;
     bool namesEnabled() const override { return debugNamesEnabled(); }
     SamplerIndex createGameSampler(const GameSamplerDesc& desc, const std::string& name) override;
     void clearAttachments(const ClearOp& op) override;
-    bool regionsAvailable() const override { return false; }
-    void labelBegin(const char*) override {}
-    void labelEnd() override {}
+    bool regionsAvailable() const override { return true; }
+    void labelBegin(const char* text) override;
+    void labelEnd() override;
     bool setCrashMarkers(bool) override { return false; }
     void crashMarker(bool, const char*) override {}
     GamePresenter& presenter() override { return *presenter_; }

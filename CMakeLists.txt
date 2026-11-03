@@ -427,12 +427,15 @@ rvk_warnings(rvk_shadertool)
 # The slim RHI's DX12 backend (src/rhi/d3d12, docs/research/hlsl-rhi.md 5, 6) and its test: a separate library so that d3d9.dll does not import
 # d3d12.dll / dxgi.dll until the renderer uses the backend. rvk_rhitest runs the same code on both backends.
 # ---------------------------------------------------------------------------------------------
-add_library(rvk_rhi_d3d12 STATIC src/rhi/d3d12/d3d12_device.cpp)
+add_library(rvk_rhi_d3d12 STATIC src/rhi/d3d12/d3d12_device.cpp third_party/imgui_dx12/imgui_impl_dx12.cpp)
 target_include_directories(rvk_rhi_d3d12 PUBLIC src include)
-target_link_libraries(rvk_rhi_d3d12 PUBLIC rvk_core Microsoft::DirectX-Guids d3d12 dxgi dxguid)
+target_include_directories(rvk_rhi_d3d12 PRIVATE third_party/imgui_dx12)
+target_link_libraries(rvk_rhi_d3d12 PUBLIC rvk_core Microsoft::DirectX-Guids d3d12 dxgi dxguid d3dcompiler imgui::imgui)
+# Dear ImGui's DX12 backend, vendored from the imgui release vcpkg installs (third_party/imgui_dx12: built on the Agility headers like the rest of the backend)
+set_source_files_properties(third_party/imgui_dx12/imgui_impl_dx12.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON COMPILE_OPTIONS "/W3")
 # d3d12.dll / dxgi.dll are delay-loaded by everything that links the backend: the Vulkan-only path never loads them
 target_link_libraries(rvk_rhi_d3d12 PUBLIC delayimp)
-target_link_options(rvk_rhi_d3d12 INTERFACE /DELAYLOAD:d3d12.dll /DELAYLOAD:dxgi.dll)
+target_link_options(rvk_rhi_d3d12 INTERFACE /DELAYLOAD:d3d12.dll /DELAYLOAD:dxgi.dll /DELAYLOAD:d3dcompiler_47.dll)
 # rvk_core's createGameDevice(Backend::D3D12) calls into the backend (a cycle between two static libraries: allowed)
 target_link_libraries(rvk_core PUBLIC rvk_rhi_d3d12)
 rvk_warnings(rvk_rhi_d3d12)

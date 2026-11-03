@@ -261,6 +261,7 @@ CommandList& D3D12DeviceImpl::uploadCommands() {
         curUpload_ = acquireList(uploadPool_, frameSlot_);
         uploadList_->rebind(curUpload_);
         uploadOpen_ = true;
+        if (timestampsEnabled()) timestampMark(*uploadList_, frameSlot_, TimestampStream::Upload, "upload begin");
     }
     return *uploadList_;
 }
@@ -287,8 +288,13 @@ void D3D12DeviceImpl::beginFrame() {
     openMainSegment();
 }
 
-void D3D12DeviceImpl::submitFrame(const char*) {
+void D3D12DeviceImpl::submitFrame(const char* finalMark) {
     if (curMain_ == nullptr) return;
+    if (timestampsEnabled()) {
+        if (uploadOpen_) timestampMark(*uploadList_, frameSlot_, TimestampStream::Upload, "uploads");
+        timestampMark(*mainList_, frameSlot_, TimestampStream::Main, finalMark != nullptr ? finalMark : "");
+        resolveTimestamps(curMain_, frameSlot_);
+    }
     closeMainSegment();
     if (uploadOpen_) {
         curUpload_->Close();
@@ -1085,3 +1091,173 @@ void D3D12DeviceImpl::logMemoryStats() {
     spdlog::info("perf: d3d12 mesh arena {} blocks, {:.1f} MiB used of {:.1f} MiB; {} pipelines ({} PSOs built)", arena_.size(), static_cast<double>(used) / 1048576.0,
                  static_cast<double>(size) / 1048576.0, entries_.size(), psoBuilt_.load());
 }
+
+// ---- GPU timestamps ----------------------------------------------------------------------------------------------------------
+
+bool D3D12DeviceImpl::enableTimestamps() {
+    if (tsHeap_) return true;
+    UINT64 freq = 0;
+    if (FAILED(queue_->GetTimestampFrequency(&freq)) || freq == 0) {
+        spdlog::warn("d3d12: GPU timestamps unavailable (no timestamp frequency)");
+        return false;
+    }
+    D3D12_QUERY_HEAP_DESC qd{D3D12_QUERY_HEAP_TYPE_TIMESTAMP, kTsPerSlot * rhi::kFramesInFlight, 0};
+    if (FAILED(device_->CreateQueryHeap(&qd, IID_PPV_ARGS(&tsHeap_)))) {
+        spdlog::warn("d3d12: GPU timestamps unavailable (CreateQueryHeap failed)");
+        return false;
+    }
+    tsReadback_ = createBuffer({static_cast<std::uint64_t>(kTsPerSlot) * rhi::kFramesInFlight * 8, VK_BUFFER_USAGE_TRANSFER_DST_BIT, Memory::Readback, "rvk timestamps"});
+    if (!tsReadback_) {
+        tsHeap_.Reset();
+        return false;
+    }
+    tsNsPerTick_ = 1e9 / static_cast<double>(freq);
+    return true;
+}
+
+void D3D12DeviceImpl::timestampStart(std::uint32_t slot, bool details) {
+    if (timestampsEnabled() && slot < rhi::kFramesInFlight) ts_[slot].details = details;
+}
+
+void D3D12DeviceImpl::timestampMark(CommandList& list, std::uint32_t slot, TimestampStream stream, const char* label) {
+    if (!timestampsEnabled() || slot >= rhi::kFramesInFlight) return;
+    timestampMark(list, slot, stream, ts_[slot].details && label != nullptr ? std::string(label) : std::string());
+}
+
+void D3D12DeviceImpl::timestampMark(CommandList& list, std::uint32_t slot, TimestampStream stream, std::string&& label) {
+    if (!timestampsEnabled() || slot >= rhi::kFramesInFlight) return;
+    TsSlot& s = ts_[slot];
+    if (s.marks.size() >= kTsPerSlot) return;
+    auto* raw = static_cast<D3DCommandList&>(list).raw();
+    raw->EndQuery(tsHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * kTsPerSlot + static_cast<UINT>(s.marks.size()));
+    s.marks.push_back({static_cast<std::uint8_t>(stream), s.details ? std::move(label) : std::string()});
+}
+
+void D3D12DeviceImpl::resolveTimestamps(ID3D12GraphicsCommandList* list, std::uint32_t slot) {
+    const std::uint32_t n = static_cast<std::uint32_t>(ts_[slot].marks.size());
+    if (n == 0) return;
+    list->ResolveQueryData(tsHeap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, slot * kTsPerSlot, n, static_cast<D3DBuffer&>(*tsReadback_).resource(),
+                           static_cast<UINT64>(slot) * kTsPerSlot * 8);
+}
+
+TimestampResult D3D12DeviceImpl::timestampCollect(std::uint32_t slot) {
+    TimestampResult r;
+    if (!timestampsEnabled() || slot >= rhi::kFramesInFlight) return r;
+    TsSlot& s = ts_[slot];
+    const std::size_t n = s.marks.size();
+    if (n >= 2) {
+        const auto* t = static_cast<const std::uint64_t*>(tsReadback_->map()) + static_cast<std::size_t>(slot) * kTsPerSlot;
+        r.valid = true;
+        std::uint64_t first[2] = {0, 0}, last[2] = {0, 0}, prevMain = 0;
+        bool seen[2] = {false, false};
+        for (std::size_t i = 0; i < n; ++i) {
+            const std::size_t k = s.marks[i].stream;
+            if (!seen[k]) {
+                first[k] = t[i];
+                seen[k] = true;
+            } else if (s.details && k == 0) {
+                r.segments.push_back({std::move(s.marks[i].label), static_cast<double>(t[i] - prevMain) * tsNsPerTick_ * 1e-6});
+            }
+            last[k] = t[i];
+            if (k == 0) prevMain = t[i];
+        }
+        r.mainMs = static_cast<double>(last[0] - first[0]) * tsNsPerTick_ * 1e-6;
+        r.uploadMs = static_cast<double>(last[1] - first[1]) * tsNsPerTick_ * 1e-6;
+    }
+    s.marks.clear();
+    s.details = false;
+    return r;
+}
+
+// ---- debug regions (PIX / RenderDoc events on the main list) -----------------------------------------------------------------
+
+namespace {
+void beginEvent(ID3D12GraphicsCommandList* list, const char* text) {
+    const std::wstring w = widen(text != nullptr ? text : "");
+    list->BeginEvent(0 /* PIX_EVENT_UNICODE_VERSION */, w.c_str(), static_cast<UINT>((w.size() + 1) * sizeof(wchar_t)));
+}
+}  // namespace
+
+void D3D12DeviceImpl::labelBegin(const char* text) {
+    if (curMain_ != nullptr) beginEvent(curMain_, text);
+}
+void D3D12DeviceImpl::labelEnd() {
+    if (curMain_ != nullptr) curMain_->EndEvent();
+}
+
+// a label in order with a threaded scope's chunks: its own tiny list, appended where the chunk would be
+void D3D12DeviceImpl::scopeLabel(bool begin, const char* text) {
+    if (!scope_.secondary) {
+        if (begin) labelBegin(text);
+        else labelEnd();
+        return;
+    }
+    ID3D12GraphicsCommandList4* l = acquireList(mainPool_, frameSlot_);
+    if (l == nullptr) return;
+    if (begin) beginEvent(l, text);
+    else l->EndEvent();
+    l->Close();
+    if (chunksUsed_ == chunkPool_.size()) chunkPool_.push_back(std::make_unique<ChunkEntry>());
+    ChunkEntry* e = chunkPool_[chunksUsed_++].get();
+    e->list = l;
+    e->binds = 0;
+    e->done.store(true, std::memory_order_relaxed);
+    scopeChunks_.push_back(e);
+}
+
+// ---- the overlay's UI renderer: Dear ImGui's DX12 backend (third_party/imgui_dx12) --------------------------------------------
+
+namespace {
+
+class D3DImGuiBackend final : public ImGuiBackend {
+public:
+    explicit D3DImGuiBackend(D3D12DeviceImpl& dev) : dev_(dev) {}
+    ~D3DImGuiBackend() override { shutdown(); }
+
+    bool init(const ImGuiBackendDesc& desc) override {
+        if (initialised_) return true;
+        ImGui_ImplDX12_InitInfo ii;
+        ii.Device = dev_.device();
+        ii.CommandQueue = dev_.queue();
+        ii.NumFramesInFlight = static_cast<int>(rhi::kFramesInFlight) + 1;  // (its vertex / index buffers cycle; the draws of 2 frames may be in flight)
+        ii.RTVFormat = toDxgi(desc.colorFormat);
+        ii.DSVFormat = DXGI_FORMAT_UNKNOWN;
+        ii.UserData = &dev_;
+        ii.SrvDescriptorHeap = dev_.srvHeap();
+        ii.SrvDescriptorAllocFn = [](ImGui_ImplDX12_InitInfo* i, D3D12_CPU_DESCRIPTOR_HANDLE* c, D3D12_GPU_DESCRIPTOR_HANDLE* g) {
+            auto* d = static_cast<D3D12DeviceImpl*>(i->UserData);
+            const std::uint32_t slot = d->srvAlloc().alloc();
+            *c = d->srvCpu(slot);
+            *g = d->srvGpu(slot);
+        };
+        ii.SrvDescriptorFreeFn = [](ImGui_ImplDX12_InitInfo* i, D3D12_CPU_DESCRIPTOR_HANDLE c, D3D12_GPU_DESCRIPTOR_HANDLE) {
+            auto* d = static_cast<D3D12DeviceImpl*>(i->UserData);
+            const std::uint32_t slot = static_cast<std::uint32_t>((c.ptr - d->srvCpu(0).ptr) / (d->srvCpu(1).ptr - d->srvCpu(0).ptr));
+            d->retire([d, slot] { d->srvAlloc().release(slot); });  // (a frame in flight may still sample the texture)
+        };
+        initialised_ = ImGui_ImplDX12_Init(&ii);
+        return initialised_;
+    }
+    void shutdown() override {
+        if (!initialised_) return;
+        dev_.waitIdle();
+        ImGui_ImplDX12_Shutdown();
+        initialised_ = false;
+    }
+    void newFrame() override { ImGui_ImplDX12_NewFrame(); }
+    void updateTexture(ImTextureData* texture) override { ImGui_ImplDX12_UpdateTexture(texture); }
+    void renderDrawData(ImDrawData* data, CommandList& cmd) override {
+        auto& c = static_cast<D3DCommandList&>(cmd);
+        ImGui_ImplDX12_RenderDrawData(data, c.raw());
+        c.resetBindings();  // (ImGui set its own root signature / pipeline / vertex input)
+        dev_.invalidateMainRec();
+    }
+
+private:
+    D3D12DeviceImpl& dev_;
+    bool initialised_ = false;
+};
+
+}  // namespace
+
+std::unique_ptr<ImGuiBackend> D3D12DeviceImpl::createImGuiBackend() { return std::make_unique<D3DImGuiBackend>(*this); }

@@ -2415,7 +2415,7 @@ void Device::loadPipelineKeys() {
     if (options_.cacheDir.empty()) {
         return;
     }
-    std::ifstream in(options_.cacheDir / "pipelines.keys", std::ios::binary);
+    std::ifstream in(options_.cacheDir / (options_.backend == rhi::Backend::Vulkan ? "pipelines.keys" : "pipelines_d3d12.keys"), std::ios::binary);
     char magic[8]{};
     std::uint32_t recordSize = 0;
     if (!in.read(magic, sizeof(magic)) || std::memcmp(magic, kKeysMagic, sizeof(magic)) != 0 ||
@@ -2459,7 +2459,7 @@ void Device::savePipelineKeys() {
         keySaver_.join();
     }
     // the file I/O off the render thread; <file>.tmp + rename so a killed game leaves the previous file
-    keySaver_ = std::thread([file = options_.cacheDir / "pipelines.keys", blob = std::move(blob)] {
+    keySaver_ = std::thread([file = options_.cacheDir / (options_.backend == rhi::Backend::Vulkan ? "pipelines.keys" : "pipelines_d3d12.keys"), blob = std::move(blob)] {
         std::error_code ec;
         std::filesystem::create_directories(file.parent_path(), ec);
         auto tmp = file;

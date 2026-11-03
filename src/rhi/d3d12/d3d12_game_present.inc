@@ -148,7 +148,22 @@ public:
         dev_.blitDraw(dev_.curMain_, back, {}, dr, src, {}, uv, true);
         dev_.invalidateMainRec();
     }
-    void drawOverlay(PresentOverlay&) override {}  // (no UI backend on D3D12 yet: the overlay does not initialise)
+    void drawOverlay(PresentOverlay& overlay) override {
+        if (acquired_ < 0) return;
+        D3DTexture& back = *images_[static_cast<std::size_t>(acquired_)];
+        CommandList& cl = dev_.frameCommands();
+        RenderingInfo ri;
+        ri.color[0].texture = &back;
+        ri.color[0].load = VK_ATTACHMENT_LOAD_OP_LOAD;
+        ri.colorCount = 1;
+        ri.width = width_;
+        ri.height = height_;
+        cl.transition(back, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        cl.beginRendering(ri);
+        overlay.record(cl, {width_, height_});
+        cl.endRendering();
+        dev_.invalidateMainRec();
+    }
     void finishFrame() override {
         if (acquired_ < 0) return;
         dev_.frameCommands().transition(*images_[static_cast<std::size_t>(acquired_)], VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);

@@ -228,6 +228,22 @@ public:
     bool recordQuit_ = false;
     std::atomic<std::uint64_t> chunkBinds_{0};
 
+    // GPU timestamps ([debug] perf): a query heap of kTsPerSlot marks per frame slot, resolved into a readback buffer at the frame's submission
+    static constexpr std::uint32_t kTsPerSlot = 1024;
+    struct TsMark {
+        std::uint8_t stream = 0;
+        std::string label;
+    };
+    struct TsSlot {
+        std::vector<TsMark> marks;
+        bool details = false;
+    };
+    ComPtr<ID3D12QueryHeap> tsHeap_;
+    std::unique_ptr<Buffer> tsReadback_;
+    TsSlot ts_[rhi::kFramesInFlight];
+    double tsNsPerTick_ = 0.0;
+    void resolveTimestamps(ID3D12GraphicsCommandList* list, std::uint32_t slot);
+
     std::unique_ptr<GamePresenter> presenter_;
     std::unique_ptr<Texture> defaultCube_, default3d_;
     friend class D3D12Presenter;
