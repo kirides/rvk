@@ -674,7 +674,7 @@ void Device::destroy() {
     stopVariantWorker();
     stopShaderWorkers();
     game_->waitIdle();
-    // the pipeline cache and its threads are the backend's (vk::GameRecord), destroyed with the device
+    // the pipeline cache and its threads are the backend's (the backend's GameRecord), destroyed with the device
     processReleases();
     backBuffer_.reset();
     depthBuffer_.reset();

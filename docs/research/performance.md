@@ -88,7 +88,7 @@ in the main menu at the end).
 
 ## 4. Frame pacing
 
-`vk::FramePacer` (`src/vk/pacer.*`), the waiting adapted from GD3D11's `fpslimiter.h` (same author): QPC time base, a
+`pacing::FramePacer` (`src/core/pacer.*`), the waiting adapted from GD3D11's `fpslimiter.h` (same author): QPC time base, a
 high-resolution waitable timer for the bulk, a `YieldProcessor` spin for the rest. Changes:
 
 * **Cadence**: frame k is released at t0 + k x interval; a slightly late frame is made up by the next one (exact average

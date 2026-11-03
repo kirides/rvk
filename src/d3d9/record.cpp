@@ -1,5 +1,5 @@
 // d3d9::Device scope chunks: the draw packets the opaque passes produce, collected into rhi::DrawChunks and handed to
-// the backend (GameDevice::scopeChunk), which records them on its record threads (vk::GameRecord, docs/research/performance.md 12 + 14).
+// the backend (GameDevice::scopeChunk), which records them on its record threads (the backend's GameRecord, docs/research/performance.md 12 + 14).
 
 #include <algorithm>
 #include <cstring>

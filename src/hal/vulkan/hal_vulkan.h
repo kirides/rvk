@@ -60,7 +60,7 @@ struct Options {
     bool overlayInScreenshots = false;            // [debug] overlay_in_screenshots
     std::vector<std::string> overlayCommands;     // [debug] commands
     std::filesystem::path settingsFile;           // <bin>/rvk/settings.toml
-    bool rtSelfTest = false;                     // [debug] rt_selftest: vk::rt::selfTest at device creation (result in rvk.log)
+    bool rtSelfTest = false;                     // [debug] rt_selftest: GameDevice::runRaytracingSelfTest at device creation (result in rvk.log)
 };
 
 // true while the frame selected by Options::logFrame is being recorded

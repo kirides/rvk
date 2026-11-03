@@ -201,7 +201,7 @@ private:
     struct Tlas {
         std::unique_ptr<rhi::AccelerationStructure> as;
         std::uint32_t capacity = 0;
-        std::uint32_t slot = 0;  // its slot in the bindless acceleration structure array (vk::Bindless::allocTlasSlot)
+        std::uint32_t slot = 0;  // its slot in the bindless acceleration structure array (the backend's allocTlasSlot)
     };
 
     void activate();

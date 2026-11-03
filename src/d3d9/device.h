@@ -50,7 +50,7 @@ struct HWND__;
 namespace rvk::d3d9 {
 
 // The draw path's value vocabulary (packets, chunks, pipeline descriptions) is the seam's: d3d9 builds it,
-// the backend records it (rhi/game_device.h, vk::GameRecord)
+// the backend records it (rhi/game_device.h)
 using rhi::DrawPacket;
 using rhi::DrawChunk;
 using rhi::VertexInputValues;
@@ -503,7 +503,7 @@ struct DeviceOptions {
     bool perf = false;               // [debug] perf: GPU timestamps + CPU timings (Device::takePerf)
     bool pipelineLibraries = false;  // [vulkan] pipeline_libraries (off: AMD driver crash, vk/pipeline_library.cpp)
     std::uint32_t perfFrame = 0;     // [debug] perf_frame: log the GPU time of every pass of this frame
-    bool allowRayTracing = true;     // rt.allow: enable the ray tracing tier when the GPU has it (vk::ContextOptions)
+    bool allowRayTracing = true;     // rt.allow: enable the ray tracing tier when the GPU has it (GameDeviceOptions)
     bool frameGenQueues = false;     // framegen.mode != off at start: the extra queues of the frame generation swapchain
     rhi::Backend backend = rhi::Backend::Vulkan;  // the game device's API
 };
@@ -1371,7 +1371,7 @@ private:
     std::uint64_t planDeclId_ = 0;
     const VertexPlan* plan_ = nullptr;
 
-    // ---- scope chunks (the backend records them: vk::GameRecord, docs/research/performance.md 12 + 14) -------------------
+    // ---- scope chunks (the backend records them: the backend's GameRecord, docs/research/performance.md 12 + 14) -------------------
     // The opaque passes' rendering scopes are begun with secondary contents by the backend: their draw packets go to it in
     // chunks (kChunkPackets), which it records on worker threads into secondary command buffers while the engine thread
     // goes on; endScope waits for them and executes them in order (+ the debug labels kept in order with the chunks).

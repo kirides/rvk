@@ -62,7 +62,7 @@ struct Config {
     bool dumpSavedTextures = false;
     bool perf = false;            // (vulkan) GPU timestamps + CPU timings, a "perf:" line in rvk.log every 5 s
     std::uint32_t perfFrame = 0;  // (vulkan) log the GPU time of every render pass of this frame (needs perf)
-    // (vulkan) build a tiny BLAS / TLAS and trace it with ray query at device creation (vk::rt::selfTest; "rt selftest" in
+    // (vulkan) build a tiny BLAS / TLAS and trace it with ray query at device creation (GameDevice::runRaytracingSelfTest; "rt selftest" in
     // rvk.log); needs the ray tracing tier (rt.allow + a GPU with ray query)
     bool rtSelfTest = false;
     bool shaderDebugInfo = false;  // [debug] shader_debug_info: SPIR-V with names, source lines and the GLSL text (RenderDoc), optimizer off

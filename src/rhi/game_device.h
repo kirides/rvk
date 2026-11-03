@@ -5,9 +5,14 @@
 // no vk/*.h include, no Vulkan or D3D12 object in d3d9::Device's interface. Per-draw logic (prepareDraw, constants, DrawBlock, interning, batching,
 // replacers) stays inline in d3d9; virtual calls happen per chunk / scope / pipeline resolve / resource (< 600 per frame), never per draw.
 //
-// Implementations: the Vulkan one lives in rhi/vulkan/vulkan_device.cpp (rhi::vulkan::wrapGame: over the renderer's vk::Context / Frames / Bindless;
-// WP2b / WP2c move the remaining members into it), the D3D12 one will be rhi/d3d12/game_device.cpp.
+// Implementations: the Vulkan one lives in rhi/vulkan/vulkan_device.cpp (rhi::createGameDevice(Backend::Vulkan, options): it owns the vk::Context / Frames /
+// Bindless / MeshArena / pipeline caches and the presentation; rhi::vulkan::wrap / wrapGame = the same class over someone else's objects, for the tools),
+// the D3D12 one will be rhi/d3d12/game_device.cpp.
 //
+// What stays outside the backend and is named Vulkan: the value vocabulary of this header and rhi.h (VkFormat, VkExtent2D, VkImageUsageFlags, VkFilter, the
+// blend / compare / stencil / topology enums, VkViewport / VkRect2D / VkClearAttachment, VkPipelineStageFlags2 / VkAccessFlags2 of memoryBarrier, the 64-byte
+// VkAccelerationStructureInstanceKHR record): plain data both backends map (D3D12 has its own table in rhi/d3d12). No Vulkan object, handle or call.
+
 // What is in this header (WP2a: GpuRef / GpuAddr / RingAlloc, ShaderModule; WP2b: resources, command lists, rings, capture pool, transients, optional modules):
 //   built (WP2a)   GpuRef / GpuAddr / RingAlloc (the shader-visible and raw GPU addresses), ShaderModule + create / destroy, refShift
 //   built (WP2b)   textures / buffers of the D3D9 model on rhi::Texture / rhi::Buffer (layout tracked by the RHI texture), the frame's command lists,
@@ -468,7 +473,8 @@ public:
     virtual void destroyShaderModule(ShaderModule module, bool deferred) = 0;
 
     // ---- capabilities ----
-    virtual const GameCaps& gameCaps() const = 0;
+    // (non-virtual: read per draw)
+    const GameCaps& gameCaps() const { return gameCaps_; }
     // Whether `format` supports every use in `usage` (optimal tiling): SAMPLED, COLOR_ATTACHMENT, DEPTH_STENCIL_ATTACHMENT, STORAGE, TRANSFER_SRC (= a blit source);
     // `blend`: a colour attachment that blends too.
     virtual bool formatSupport(VkFormat format, VkImageUsageFlags usage, bool blend = false) const = 0;
@@ -612,7 +618,7 @@ public:
     virtual SamplerIndex createGameSampler(const GameSamplerDesc& desc, const std::string& name) = 0;
     // A 16-byte vertex buffer holding (0, 0, 0, 1): what vertex inputs the declaration does not provide read. The handle goes into
     // VertexInputValues::buffers (0 on failure).
-    virtual std::uint64_t nullVertexBuffer() const = 0;
+    std::uint64_t nullVertexBuffer() const { return nullVertexBuffer_; }  // (non-virtual: read per draw)
     // an attachment clear inside the open rendering scope of the main list (the inline path of D3D9 Clear)
     virtual void clearAttachments(const ClearOp& op) = 0;
 
@@ -631,6 +637,8 @@ public:
 protected:
     // the ring front end's state and the frame counters (the backend keeps them current: beginFrame / chunk switches)
     RingChunkState ring_;
+    GameCaps gameCaps_;
+    std::uint64_t nullVertexBuffer_ = 0;  // the handle of nullVertexBuffer()
     std::uint64_t frameValue_ = 1;  // the value the frame being recorded signals
     std::uint32_t frameSlot_ = 0;
     // a block that did not fit the current chunk: the backend switches chunks (ring_ is updated) and allocates

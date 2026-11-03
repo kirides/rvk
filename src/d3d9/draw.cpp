@@ -446,7 +446,7 @@ void Device::computeDynamicState(std::uint32_t primitiveType, DynamicStateValues
     }
 }
 
-// the dynamic state itself is recorded by the backend (vk::GameRecord::applyDynamicState): it sets only what differs from
+// the dynamic state itself is recorded by the backend (GameRecord::applyDynamicState): it sets only what differs from
 // what this command buffer has already recorded
 
 void Device::uploadConstants(bool forceLegacyPs, std::uint32_t psMinEnd) {

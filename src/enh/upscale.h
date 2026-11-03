@@ -12,7 +12,7 @@
 //   rect while the engine builds its scene image, so every scene-sized target, viewport and mask follows; the GUI, the final
 //   image effect pass and the back buffer stay at the output size.
 // * The FSR pass at AfterMainView (the scene HDR target is complete, linear, before the post chain's eye adaptation /
-//   tonemapping) copies the hardware depth into an R32F image (shaders/upscale/prep.comp) and runs vk::Fsr on {scene HDR,
+//   tonemapping) copies the hardware depth into an R32F image (shaders/upscale/prep.comp) and runs the Upscaler module (rhi/modules.h) on {scene HDR,
 //   depth, the G-buffer's motion} into an output-sized transient, which the engine's post chain then samples instead of the
 //   scene image (Device::setSceneSubstitute: both are sampled by uv). Needs the G-buffer (motion vectors; forced on by the
 //   HAL while an FSR mode is on).

@@ -200,7 +200,7 @@ The goal is to name the component that blocks inside the present, and the state 
 
 ## 8. If a cap is wanted for gameplay (options)
 
-* The engine has no usable cap: `MaxFPS` is dead, and `FixedFPS` makes the game clock run per frame. Our `vk::FramePacer`
+* The engine has no usable cap: `MaxFPS` is dead, and `FixedFPS` makes the game clock run per frame. Our `pacing::FramePacer`
   (`[vulkan] max_fps`, QPC + high-resolution waitable timer) already caps accurately in Vulkan mode.
 * Options: (a) a player setting "world frame cap" (`vulkan.max_fps`, or a world-only variant keyed on the session state,
   so menus stay uncapped), default off or ~120 to match the climb clamp; (b) leave uncapped by default, since the 2023 code

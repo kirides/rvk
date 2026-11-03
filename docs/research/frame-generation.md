@@ -105,7 +105,7 @@ this GPU** (section 5.2).
 
 | concern | (i) AMD swapchain | (ii) manual + own presents |
 |---|---|---|
-| pacing (the hard part) | done by AMD: moving average of frame times, variance / safety margin tuning (`FFX_API_CONFIGURE_FG_SWAPCHAIN_KEY_FRAMEPACINGTUNING`, header comment in `ffx_framegeneration_api_types.h`), busy wait presents, 1.99 presents per app frame at 12.4 / 12.6 ms gaps [M] | ours: second present at +0.5 x estimated interval on the presenter thread (`FramePacer` has the waiting primitives: [C] `src/vk/pacer.*`), estimator, FIFO / vsync interaction, VRR behaviour: a project of its own |
+| pacing (the hard part) | done by AMD: moving average of frame times, variance / safety margin tuning (`FFX_API_CONFIGURE_FG_SWAPCHAIN_KEY_FRAMEPACINGTUNING`, header comment in `ffx_framegeneration_api_types.h`), busy wait presents, 1.99 presents per app frame at 12.4 / 12.6 ms gaps [M] | ours: second present at +0.5 x estimated interval on the presenter thread (`FramePacer` has the waiting primitives: [C] `src/core/pacer.*`), estimator, FIFO / vsync interaction, VRR behaviour: a project of its own |
 | driver-assisted pacing on RDNA 4 (swapchain 4.0.0) | yes (selected automatically when the driver allows) | no |
 | `vk::Swapchain` / `Presenter` / `Device::present` [C] | acquire / present / images / recreate go through function pointers (small, mechanical); one new multi-queue requirement | unchanged |
 | device queues [C `vk/context.cpp` creates one queue] | 4 queues (family 0 has 8, family 1 has 8 on the RX 7900 XTX [M `vulkaninfo`]) | none extra |

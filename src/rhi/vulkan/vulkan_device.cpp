@@ -469,8 +469,9 @@ public:
             aci.usage = VMA_MEMORY_USAGE_AUTO;
             aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
             VmaAllocationInfo info{};
-            if (vmaCreateBuffer(ctx_.allocator(), &bci, &aci, &nullVertexBuffer_, &nullVertexAlloc_, &info) != VK_SUCCESS) return false;
-            vk::names::object(ctx_, nullVertexBuffer_, VK_OBJECT_TYPE_BUFFER, "rvk null vertex buffer (unbound streams)");
+            if (vmaCreateBuffer(ctx_.allocator(), &bci, &aci, &nullVertexVk_, &nullVertexAlloc_, &info) != VK_SUCCESS) return false;
+            nullVertexBuffer_ = reinterpret_cast<std::uint64_t>(nullVertexVk_);
+            vk::names::object(ctx_, nullVertexVk_, VK_OBJECT_TYPE_BUFFER, "rvk null vertex buffer (unbound streams)");
             const float v[4] = {0.0f, 0.0f, 0.0f, 1.0f};
             std::memcpy(info.pMappedData, v, sizeof(v));
         }
@@ -495,9 +496,10 @@ public:
         for (VkSampler s : samplers_) vkDestroySampler(ctx_.device(), s, nullptr);
         samplers_.clear();
         layout_.destroy(ctx_);
-        if (nullVertexBuffer_ != VK_NULL_HANDLE) {
-            vmaDestroyBuffer(ctx_.allocator(), nullVertexBuffer_, nullVertexAlloc_);
-            nullVertexBuffer_ = VK_NULL_HANDLE;
+        if (nullVertexVk_ != VK_NULL_HANDLE) {
+            vmaDestroyBuffer(ctx_.allocator(), nullVertexVk_, nullVertexAlloc_);
+            nullVertexVk_ = VK_NULL_HANDLE;
+            nullVertexBuffer_ = 0;
         }
         // frames_ runs the retired destructors (images, bindless slot releases): before the bindless heap goes away
         frames_.destroy();
@@ -567,7 +569,6 @@ public:
     }
 
     // ---- GameDevice: capabilities, command lists, rings, meshes, transients (rhi/game_device.h) ----
-    const GameCaps& gameCaps() const override { return gameCaps_; }
     bool formatSupport(VkFormat format, VkImageUsageFlags usage, bool blend) const override {
         VkFormatProperties fp{};
         vkGetPhysicalDeviceFormatProperties(ctx_.physicalDevice(), format, &fp);
@@ -770,7 +771,6 @@ public:
         }
         return index;
     }
-    std::uint64_t nullVertexBuffer() const override { return reinterpret_cast<std::uint64_t>(nullVertexBuffer_); }
     void clearAttachments(const ClearOp& op) override { vkCmdClearAttachments(frames_.cmd(), op.count, op.atts, 1, &op.rect); }
 
     // ---- debug regions and crash markers ----
@@ -985,14 +985,13 @@ private:
     bool external_ = false;  // retires through the frames instead of waiting (wrapped and game devices)
     bool ownsGame_ = false;  // the game device owns the renderer's objects (createGameDevice)
     bool uploadUsed_ = false;
-    VkBuffer nullVertexBuffer_ = VK_NULL_HANDLE;
+    VkBuffer nullVertexVk_ = VK_NULL_HANDLE;
     VmaAllocation nullVertexAlloc_ = VK_NULL_HANDLE;
     vk::CrashMarkers crashMarkers_;
     std::unique_ptr<vulkan::VkGamePresenter> presenter_;
     vk::PassLayout layout_;
     DeviceCaps caps_;
     bool bindlessInit_ = false;
-    GameCaps gameCaps_;
     vk::MeshArena* arena_ = nullptr;
     vk::GpuTimer gpuTimer_;  // [debug] perf timestamps (enableTimestamps creates it)
     std::unique_ptr<VkCommandListImpl> mainList_, uploadList_;  // the frame's persistent lists (frameCommands / uploadCommands)
