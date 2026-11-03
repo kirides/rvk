@@ -1165,7 +1165,20 @@ caps::Report D3D12DeviceImpl::capabilityReport(bool) {
     set(caps::Cap::RayQuery, caps_.rayQuery, "ray tracing is off (rt.allow) or the GPU / driver has no DXR tier 1.1");
     if (caps_.rayQuery) r[caps::Cap::RayQuery].detail = "DXR 1.1 inline ray queries";
     set(caps::Cap::PositionFetch, false, "not available on D3D12 (the RT scene reads its own geometry records)");
-    set(caps::Cap::FrameGeneration, false, "frame generation on D3D12 is not available yet");
+    // frame generation (d3d12_ffx.h): the effect DLL + a provider; the swapchain needs no extra queues on D3D12
+    {
+        const char* const kNoDll = "amd_fidelityfx_framegeneration_dx12.dll is not installed (folder rvk)";
+        const std::string reason = !fgProbe_.dllPresent ? kNoDll : !fgProbe_.probed ? "not probed" : fgProbe_.reason;
+        set(caps::Cap::FrameGeneration, fgProbe_.dllPresent && fgProbe_.fsr3, reason.c_str());
+        r[caps::Cap::FrameGeneration].detail = fgProbe_.versions;
+        const std::string mlReason = !fgProbe_.dllPresent ? kNoDll
+                                     : fgProbe_.probed    ? "the graphics driver offers no FSR 4 frame generation for this GPU (it needs a Radeon RX 9000 series)"
+                                                          : "not probed";
+        set(caps::Cap::FrameGenerationMl, fgProbe_.dllPresent && fgProbe_.ml, mlReason.c_str());
+        r[caps::Cap::FrameGenerationMl].detail = fgProbe_.versions;
+        set(caps::Cap::FrameGenerationQueues, true, "");
+        r[caps::Cap::FrameGenerationQueues].detail = "AMD's D3D12 swapchain makes its own queues";
+    }
     set(caps::Cap::FullScreenExclusive, false, "exclusive fullscreen is not implemented on D3D12 (the game's fullscreen stays a borderless window)");
     set(caps::Cap::MemoryBudget, adapter3_ != nullptr, "IDXGIAdapter3 is not available");
     if (adapter3_) r[caps::Cap::MemoryBudget].detail = "DXGI QueryVideoMemoryInfo";
@@ -1330,7 +1343,9 @@ public:
         ImGui_ImplDX12_InitInfo ii;
         ii.Device = dev_.device();
         ii.CommandQueue = dev_.queue();
-        ii.NumFramesInFlight = static_cast<int>(rhi::kFramesInFlight) + 1;  // (its vertex / index buffers cycle; the draws of 2 frames may be in flight)
+        // (its vertex / index buffers cycle; the draws of 2 frames may be in flight; with AMD's frame generation swapchain its present callback draws the UI
+        // on the generated and the real frame: two renders per frame, and the swapchain's presents trail the render thread by a few frames)
+        ii.NumFramesInFlight = (static_cast<int>(rhi::kFramesInFlight) + 2) * 2 + 1;
         ii.RTVFormat = toDxgi(desc.colorFormat);
         ii.DSVFormat = DXGI_FORMAT_UNKNOWN;
         ii.UserData = &dev_;
@@ -1361,7 +1376,7 @@ public:
         auto& c = static_cast<D3DCommandList&>(cmd);
         ImGui_ImplDX12_RenderDrawData(data, c.raw());
         c.resetBindings();  // (ImGui set its own root signature / pipeline / vertex input)
-        dev_.invalidateMainRec();
+        if (!d3d12ffx::inPresentCallback()) dev_.invalidateMainRec();  // (the frame generation swapchain's callback records on AMD's thread: not the render thread's recording)
     }
 
 private:

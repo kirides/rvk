@@ -146,7 +146,7 @@ void FrameGeneration::updateBackend() {
     if (want && !dev_.frameGenSwapchainActive()) {
         const auto now = std::chrono::steady_clock::now();
         if (now < retryAt_) return;
-        if (dev_.setFrameGenSwapchain(true, paths::dataDir() / "amd_fidelityfx_loader_vk.dll")) {
+        if (dev_.setFrameGenSwapchain(true, rhi::fidelityFxLoader(paths::dataDir(), dev_.game().caps().backend))) {
             state_.invalidate();
             configured_ = false;
             lastEnabled_ = false;
@@ -264,7 +264,7 @@ bool FrameGeneration::ensureContext(VkExtent2D display, VkFormat format, bool sw
     }
     dropContext();
     std::shared_ptr<rhi::FrameGenerator> f = dev_.game().createFrameGenerator();
-    const std::filesystem::path dll = paths::dataDir() / "amd_fidelityfx_loader_vk.dll";
+    const std::filesystem::path dll = rhi::fidelityFxLoader(paths::dataDir(), dev_.game().caps().backend);
     rhi::FrameGeneratorCreateInfo ci;
     ci.ml = s_.mode == FrameGenMode::Fsr4;
     ci.displaySize = ci.maxRenderSize = display;

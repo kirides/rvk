@@ -246,7 +246,7 @@ bool Upscale::ensureFsr(VkExtent2D render, VkExtent2D display, bool autoExposure
     }
     dropFsr();
     std::shared_ptr<rhi::Upscaler> f = dev_.game().createUpscaler();
-    const std::filesystem::path dll = paths::dataDir() / "amd_fidelityfx_loader_vk.dll";
+    const std::filesystem::path dll = rhi::fidelityFxLoader(paths::dataDir(), dev_.game().caps().backend);
     rhi::UpscalerCreateInfo ci;
     ci.maxRenderSize = render;
     ci.maxUpscaleSize = display;

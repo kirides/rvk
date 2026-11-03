@@ -31,6 +31,7 @@
 #include <spdlog/spdlog.h>
 
 #include "core/caps.h"
+#include "rhi/d3d12/d3d12_ffx.h"
 #include "rhi/game_device.h"
 #include "rhi/rhi.h"
 #include "shader/embedded.h"
@@ -2099,5 +2100,7 @@ std::unique_ptr<Device> createD3D12Device(const DeviceDesc& desc) {
     if (!d->create(desc)) return nullptr;
     return d;
 }
+
+#include "d3d12_game_ffx.inc"
 
 }  // namespace rvk::rhi

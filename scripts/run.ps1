@@ -138,8 +138,11 @@ if ($NoRenderer) {
     New-Item -ItemType Directory -Force $rvkDir | Out-Null
     # FSR (enh/upscale): AMD's signed FSR SDK 2.4.0 DLLs (loader + upscaler), loaded from bin\rvk
     # + the frame generation effect DLL (framegen.mode; shipped as the separate risen-enhanced-graphics-framegen.zip)
-    foreach ($f in 'amd_fidelityfx_loader_vk.dll', 'amd_fidelityfx_upscaler_vk.dll', 'amd_fidelityfx_framegeneration_vk.dll') {
-        Copy-Item (Join-Path $repo "third_party\amd_fidelityfx\signedbin\$f") $rvkDir -Force
+    # (+ the same three for the DX12 backend, _dx12: 87 MB, copied only when the size differs)
+    foreach ($f in 'amd_fidelityfx_loader_vk.dll', 'amd_fidelityfx_upscaler_vk.dll', 'amd_fidelityfx_framegeneration_vk.dll', 'amd_fidelityfx_loader_dx12.dll', 'amd_fidelityfx_upscaler_dx12.dll', 'amd_fidelityfx_framegeneration_dx12.dll') {
+        $src = Join-Path $repo "third_party\amd_fidelityfx\signedbin\$f"
+        $dst = Join-Path $rvkDir $f
+        if (-not (Test-Path $dst) -or (Get-Item $dst).Length -ne (Get-Item $src).Length) { Copy-Item $src $rvkDir -Force }
     }
     Remove-Item (Join-Path $rvkDir 'amd_fidelityfx_vk.dll') -Force -ErrorAction SilentlyContinue  # the SDK 1.1.4 DLL
     # the runtime HLSL compiler (shader/dxc): the vcpkg directx-dxc port's dxcompiler.dll, copied next to d3d9.dll by the build

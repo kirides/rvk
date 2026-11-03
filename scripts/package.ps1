@@ -24,7 +24,8 @@ try {
     Copy-Item package\rvk\config.toml "$stage\rvk"
     # FSR (upscale.mode, framegen.mode): AMD's signed FSR SDK 2.4.0 DLLs (loader + upscaler: FSR 3.1 and FSR 4; frame generation) and the licence notice their
     # licence asks to be reproduced with the software (the part before the list of source files)
-    foreach ($f in 'amd_fidelityfx_loader_vk.dll', 'amd_fidelityfx_upscaler_vk.dll', 'amd_fidelityfx_framegeneration_vk.dll') {
+    # (the same three for the DX12 backend, _dx12)
+    foreach ($f in 'amd_fidelityfx_loader_vk.dll', 'amd_fidelityfx_upscaler_vk.dll', 'amd_fidelityfx_framegeneration_vk.dll', 'amd_fidelityfx_loader_dx12.dll', 'amd_fidelityfx_upscaler_dx12.dll', 'amd_fidelityfx_framegeneration_dx12.dll') {
         Copy-Item "third_party\amd_fidelityfx\signedbin\$f" "$stage\rvk"
     }
     # the runtime HLSL compiler (shader/dxc) and its licence (LLVM Apache-2.0 with LLVM exceptions: a binary redistribution reproduces it)
@@ -45,7 +46,7 @@ try {
         $notice = @("AMD FSR SDK 2.4.0 ($dlls): https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK", '') + $lic[0..($end - 1)]
         [IO.File]::WriteAllText($file, ($notice -join "`r`n") + "`r`n")
     }
-    Write-Notice "$stage\rvk\amd_fidelityfx_LICENSE.txt" 'amd_fidelityfx_loader_vk.dll, amd_fidelityfx_upscaler_vk.dll, amd_fidelityfx_framegeneration_vk.dll'
+    Write-Notice "$stage\rvk\amd_fidelityfx_LICENSE.txt" 'amd_fidelityfx_loader_vk.dll, amd_fidelityfx_upscaler_vk.dll, amd_fidelityfx_framegeneration_vk.dll, amd_fidelityfx_loader_dx12.dll, amd_fidelityfx_upscaler_dx12.dll, amd_fidelityfx_framegeneration_dx12.dll'
 
     # README.txt + the build it belongs to (bug reports), CRLF for Notepad
     $sha = git rev-parse --short HEAD
@@ -64,7 +65,8 @@ try {
     try {
         $names = @($z.Entries | ForEach-Object { $_.FullName -replace '\\', '/' })
         foreach ($need in 'd3d9.dll', 'rvk/config.toml', 'rvk/README.txt', 'rvk/dxcompiler.dll', 'rvk/dxc_LICENSE.txt', 'rvk/d3d12/D3D12Core.dll', 'rvk/d3d12_LICENSE.txt',
-                          'rvk/amd_fidelityfx_loader_vk.dll', 'rvk/amd_fidelityfx_upscaler_vk.dll', 'rvk/amd_fidelityfx_framegeneration_vk.dll', 'rvk/amd_fidelityfx_LICENSE.txt') {
+                          'rvk/amd_fidelityfx_loader_vk.dll', 'rvk/amd_fidelityfx_upscaler_vk.dll', 'rvk/amd_fidelityfx_framegeneration_vk.dll',
+                          'rvk/amd_fidelityfx_loader_dx12.dll', 'rvk/amd_fidelityfx_upscaler_dx12.dll', 'rvk/amd_fidelityfx_framegeneration_dx12.dll', 'rvk/amd_fidelityfx_LICENSE.txt') {
             if ($names -notcontains $need) { throw "package check: $need is missing from $zip" }
         }
         if ($names | Where-Object { $_ -match 'd3d12SDKLayers' }) { throw 'package check: the debug layer (d3d12SDKLayers.dll) must not ship' }

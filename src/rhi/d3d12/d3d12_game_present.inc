@@ -1,6 +1,7 @@
 // The D3D12 game device's presentation (rhi::GamePresenter): a DXGI flip model swapchain on the game window, presented from its own thread; the engine's
-// back buffer is copied (same size: CopyTextureRegion) or drawn (scaled: blitDraw) into the acquired image. Frame generation / exclusive fullscreen / the
-// overlay are later packages: they report themselves unavailable.
+// back buffer is copied (same size: CopyTextureRegion) or drawn (scaled: blitDraw) into the acquired image. Frame generation: AMD's frame generation
+// swapchain (d3d12_ffx.h, WP7) replaces the DXGI one while it is wanted (the same present thread; the overlay is drawn by its present callback); exclusive
+// fullscreen is not available.
 
 class D3D12Presenter final : public GamePresenter {
 public:
@@ -10,29 +11,9 @@ public:
     bool create(void* window, std::uint32_t width, std::uint32_t height, bool vsync) override {
         hwnd_ = static_cast<HWND>(window);
         vsync_ = vsync;
-        DXGI_SWAP_CHAIN_DESC1 sd{};
-        sd.Width = width;
-        sd.Height = height;
-        sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        sd.SampleDesc = {1, 0};
-        sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        sd.BufferCount = kBuffers;
-        sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-        sd.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
-        sd.Flags = dev_.tearing_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
-        ComPtr<IDXGISwapChain1> sc1;
-        const HRESULT hr = dev_.factory()->CreateSwapChainForHwnd(dev_.queue(), hwnd_, &sd, nullptr, nullptr, &sc1);
-        if (FAILED(hr) || FAILED(sc1.As(&sc_))) {
-            spdlog::error("d3d12: CreateSwapChainForHwnd failed (0x{:08x})", static_cast<unsigned>(hr));
-            return false;
-        }
-        dev_.factory()->MakeWindowAssociation(hwnd_, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
-        width_ = width;
-        height_ = height;
-        if (!wrap()) return false;
+        if (!build(width, height)) return false;
         quit_ = false;
         thread_ = std::thread([this] { run(); });
-        spdlog::info("d3d12: swapchain {}x{} flip model, {} buffers, {}", width, height, kBuffers, dev_.tearing_ ? "tearing allowed (vsync off)" : "no tearing support");
         return true;
     }
     void destroy() override {
@@ -44,8 +25,8 @@ public:
             cv_.notify_all();
             thread_.join();
         }
-        images_.clear();
-        sc_.Reset();
+        teardown();
+        fg_.reset();
     }
     PresentInfo info() const override {
         PresentInfo i;
@@ -61,6 +42,13 @@ public:
     bool recreate(std::uint32_t width, std::uint32_t height) override {
         waitDone();
         dev_.waitIdle();
+        if (fgWanted_ || fgActive_) {
+            // AMD's swapchain follows the window by a full teardown (WaitForPresents, the swapchain context, the swapchain) and a new create, never in place
+            // (frame-generation.md 10.5); the generator's context is gone by now (Device::rebuildSwapchain)
+            teardown();
+            acquired_ = -1;
+            return build(width, height);
+        }
         for (auto& i : images_) i->release();
         images_.clear();
         const HRESULT hr = sc_->ResizeBuffers(kBuffers, width, height, DXGI_FORMAT_B8G8R8A8_UNORM, dev_.tearing_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0);
@@ -93,17 +81,34 @@ public:
         presentMs_ = 0.0;
         return v;
     }
-    void setFrameGen(bool on, const std::filesystem::path&) override {
-        if (on) reason_ = "frame generation is not available on the D3D12 backend yet";
+    void setFrameGen(bool on, const std::filesystem::path& loaderDll) override {
+        fgWanted_ = on;
+        if (!loaderDll.empty()) fgLoader_ = loaderDll;
+        if (on) reason_.clear();
     }
-    bool frameGenWanted() const override { return false; }
-    bool frameGenActive() const override { return false; }
+    bool frameGenWanted() const override { return fgWanted_; }
+    bool frameGenActive() const override { return fgActive_; }
     const std::string& frameGenReason() const override { return reason_; }
-    void releaseFrameGen() override {}
-    PresentWrapper* presentWrapper() override { return nullptr; }
+    void releaseFrameGen() override {
+        fgWanted_ = false;
+        if (!fgActive_) return;
+        waitDone();
+        dev_.waitIdle();
+        teardown();
+        acquired_ = -1;
+    }
+    PresentWrapper* presentWrapper() override { return fgActive_ ? fg_.get() : nullptr; }
+    // until the previous present returned and the GPU work it queued (the interpolation) is done
     bool waitFrameGenPresent() override {
         waitDone();
-        return true;
+        if (!fgActive_ || fgFence_ == nullptr) return true;
+        const std::uint64_t v = fgQueued_.load();
+        if (fgFence_->GetCompletedValue() >= v) return true;
+        const HANDLE e = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        fgFence_->SetEventOnCompletion(v, e);
+        const bool ok = WaitForSingleObject(e, 2000) == WAIT_OBJECT_0;
+        CloseHandle(e);
+        return ok;
     }
     void setFullScreenExclusive(void*) override {}
     bool fullScreenExclusiveConfigured() const override { return false; }
@@ -150,6 +155,10 @@ public:
     }
     void drawOverlay(PresentOverlay& overlay) override {
         if (acquired_ < 0) return;
+        if (fgActive_) {
+            overlay.prepare({width_, height_});  // built here (the render thread), drawn by the swapchain's present callback on every frame it shows
+            return;
+        }
         D3DTexture& back = *images_[static_cast<std::size_t>(acquired_)];
         CommandList& cl = dev_.frameCommands();
         RenderingInfo ri;
@@ -173,6 +182,7 @@ public:
         {
             const std::lock_guard lock(m_);
             pending_ = true;
+            useFg_ = fgActive_;
             interval_ = vsync_ ? 1u : 0u;
             flags_ = !vsync_ && dev_.tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0u;
         }
@@ -182,6 +192,84 @@ public:
 
 private:
     static constexpr UINT kBuffers = 3;
+    // the swapchain (AMD's while frame generation is wanted and can be created: else the DXGI flip model one) and its buffers
+    bool build(std::uint32_t width, std::uint32_t height) {
+        if (fgWanted_) {
+            if (buildFrameGen(width, height)) return true;
+            spdlog::warn("d3d12: frame generation swapchain not available ({}): normal swapchain", reason_);
+            fgWanted_ = false;
+        }
+        DXGI_SWAP_CHAIN_DESC1 sd{};
+        sd.Width = width;
+        sd.Height = height;
+        sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        sd.SampleDesc = {1, 0};
+        sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        sd.BufferCount = kBuffers;
+        sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        sd.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+        sd.Flags = dev_.tearing_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+        ComPtr<IDXGISwapChain1> sc1;
+        const HRESULT hr = dev_.factory()->CreateSwapChainForHwnd(dev_.queue(), hwnd_, &sd, nullptr, nullptr, &sc1);
+        if (FAILED(hr) || FAILED(sc1.As(&sc_))) {
+            spdlog::error("d3d12: CreateSwapChainForHwnd failed (0x{:08x})", static_cast<unsigned>(hr));
+            return false;
+        }
+        dev_.factory()->MakeWindowAssociation(hwnd_, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
+        width_ = width;
+        height_ = height;
+        if (!wrap()) return false;
+        spdlog::info("d3d12: swapchain {}x{} flip model, {} buffers, {}", width, height, kBuffers, dev_.tearing_ ? "tearing allowed (vsync off)" : "no tearing support");
+        return true;
+    }
+    bool buildFrameGen(std::uint32_t width, std::uint32_t height) {
+        if (!fg_) fg_ = d3d12ffx::FgSwapchain::make(dev_);
+        if (!fg_->loaded() && !fg_->load(fgLoader_)) {
+            reason_ = "the FidelityFX loader does not load";
+            return false;
+        }
+        if (!fg_->create(hwnd_, width, height, kBuffers, dev_.tearing_, &reason_)) return false;
+        if (FAILED(fg_->swapchain()->QueryInterface(IID_PPV_ARGS(&sc_)))) {
+            fg_->destroy();
+            reason_ = "the frame generation swapchain does not offer IDXGISwapChain3";
+            return false;
+        }
+        dev_.factory()->MakeWindowAssociation(hwnd_, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
+        width_ = width;
+        height_ = height;
+        if (!fgFence_) {
+            if (FAILED(dev_.device()->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fgFence_)))) {
+                sc_.Reset();
+                fg_->destroy();
+                reason_ = "the presents' fence cannot be created";
+                return false;
+            }
+            fgQueued_ = 0;
+        }
+        fgActive_ = true;
+        if (!wrap()) {
+            teardown();
+            reason_ = "the replacement buffers cannot be fetched";
+            return false;
+        }
+        reason_.clear();
+        spdlog::info("d3d12: swapchain {}x{} (AMD frame generation swapchain '{}'), {} replacement buffers, {}", width, height, fg_->providerName(), kBuffers,
+                     dev_.tearing_ ? "tearing allowed (vsync off)" : "no tearing support");
+        return true;
+    }
+    // the buffers, then (AMD's) WaitForPresents + the swapchain context, then the swapchain; the present thread idle, the GPU idle
+    void teardown() {
+        for (auto& i : images_) i->release();  // (the textures' destructors may retire their resource: the swapchain must see its buffers go now)
+        images_.clear();
+        if (fgActive_ && fg_) {
+            fg_->waitForPresents();
+            sc_.Reset();
+            fg_->destroy();
+            fgActive_ = false;
+        } else {
+            sc_.Reset();
+        }
+    }
     bool wrap() {
         TextureDesc td;
         td.format = VK_FORMAT_B8G8R8A8_UNORM;
@@ -203,15 +291,27 @@ private:
         SetThreadDescription(GetCurrentThread(), L"rvk present");
         for (;;) {
             UINT interval = 0, flags = 0;
+            bool useFg = false;
             {
                 std::unique_lock lock(m_);
                 cv_.wait(lock, [this] { return quit_ || pending_; });
                 if (quit_ && !pending_) return;
                 interval = interval_;
                 flags = flags_;
+                useFg = useFg_;
             }
             const auto t0 = std::chrono::steady_clock::now();
-            const HRESULT hr = sc_->Present(interval, flags);
+            HRESULT hr = S_OK;
+            if (useFg) {
+                // the interpolation dispatch runs inside AMD's present: the generator's context must not be used meanwhile
+                const std::lock_guard fgLock(fg_->contextMutex());
+                hr = sc_->Present(interval, flags);
+                // everything this present queued on the game queue (interpolation, the UI composition) sits before this signal
+                dev_.queue()->Signal(fgFence_.Get(), fgQueued_.load() + 1);
+                fgQueued_.fetch_add(1);
+            } else {
+                hr = sc_->Present(interval, flags);
+            }
             const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
             {
                 const std::lock_guard lock(m_);
@@ -234,7 +334,12 @@ private:
     std::uint32_t width_ = 0, height_ = 0;
     std::atomic<bool> vsync_{true};
     int acquired_ = -1;
-    std::string reason_ = "frame generation is not available on the D3D12 backend yet";
+    std::string reason_;
+    bool fgWanted_ = false, fgActive_ = false, useFg_ = false;
+    std::filesystem::path fgLoader_;
+    std::unique_ptr<d3d12ffx::FgSwapchain> fg_;
+    ComPtr<ID3D12Fence> fgFence_;
+    std::atomic<std::uint64_t> fgQueued_{0};
     std::thread thread_;
     std::mutex m_;
     std::condition_variable cv_;
