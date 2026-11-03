@@ -273,6 +273,17 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     o.validation = options.validation;
     o.syncValidation = options.syncValidation;
     o.adapter = options.adapter;
+    // the graphics API of the session (vulkan.api is a restart setting: the value it started with decides); D3D12 needs SM 6.6 / binding tier 3
+    // and falls back to Vulkan with a log line
+    if (rs.api != nullptr && rs.api->startValue() != 0.0) {
+        std::string reason;
+        if (rhi::d3d12Usable(options.adapter, &reason)) {
+            o.backend = rhi::Backend::D3D12;
+            spdlog::info("hal: graphics API Direct3D 12 (vulkan.api = d3d12)");
+        } else {
+            spdlog::warn("hal: vulkan.api = d3d12 is not usable here ({}): Vulkan instead", reason);
+        }
+    }
     o.maxFps = rs.maxFps != nullptr ? rs.maxFps->value() : options.maxFps;
     o.cacheDir = options.cacheDir;
     o.logDraws = options.logDraws;

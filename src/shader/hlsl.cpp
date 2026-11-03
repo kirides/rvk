@@ -999,7 +999,12 @@ private:
                 if (const auto* o = inputOverride(d)) {
                     m += std::format("    v{} = {};\n", d.reg.index, overrideExpr(o->expr, std::format("rvk_in.v{}", d.reg.index), "$v"));
                 } else {
-                    m += std::format("    v{} = rvk_in.v{};\n", d.reg.index, d.reg.index);
+                    if (varyingFillers() && d.reg.index < 15) {
+                        // D3D12: a D3D9 UBYTE4 input is read as R8G8B8A8_UNORM (no scaled formats in DXGI) and scaled back by 255: draws flag such inputs in their push flags
+                        m += std::format("    v{} = ((pc.flags >> {}u) & 1u) != 0u ? round(rvk_in.v{} * 255.0) : rvk_in.v{};\n", d.reg.index, 17 + d.reg.index, d.reg.index, d.reg.index);
+                    } else {
+                        m += std::format("    v{} = rvk_in.v{};\n", d.reg.index, d.reg.index);
+                    }
                 }
             }
         } else {

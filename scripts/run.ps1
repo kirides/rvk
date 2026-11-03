@@ -22,6 +22,8 @@ param(
     # command 'set renderer.mode full' switch at run time)
     [ValidateSet('original', 'wrapper', 'full', 'passthrough', 'trace', 'vulkan')][string]$Mode = 'original',
     [switch]$NoRenderer,
+    # [vulkan] api: the graphics API (vulkan default, d3d12 = the experimental DX12 backend; -Validation turns on its debug layer + GPU-based validation)
+    [ValidateSet('vulkan', 'd3d12')][string]$Api = 'vulkan',
     [switch]$Validation,
     # [vulkan] sync_validation: the validation layer's synchronization validation too (implies -Validation; slow)
     [switch]$SyncValidation,
@@ -150,7 +152,7 @@ if ($NoRenderer) {
         '# written by scripts/run.ps1',
         '[renderer]', "mode = `"$Mode`"",
         '[log]', "level = `"$RvkLogLevel`"",
-        '[vulkan]', "validation = $($Validation.IsPresent.ToString().ToLower())", "sync_validation = $($SyncValidation.IsPresent.ToString().ToLower())", "max_fps = $([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.0##}', $MaxFps))",
+        '[vulkan]', "api = `"$Api`"", "validation = $($Validation.IsPresent.ToString().ToLower())", "sync_validation = $($SyncValidation.IsPresent.ToString().ToLower())", "max_fps = $([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.0##}', $MaxFps))",
         "vsync = $(@{ engine = '"engine"'; on = 'true'; off = 'false' }[$Vsync])",
         '[debug]', "screenshot_frames = [$Screenshots]", "log_draws = $LogDraws", "log_frame = $LogFrame", "snapshot_frames = [$Snapshots]",
         "dump_saved_textures = $($DumpSavedTextures.IsPresent.ToString().ToLower())",

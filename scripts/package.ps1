@@ -30,6 +30,14 @@ try {
     # the runtime HLSL compiler (shader/dxc) and its licence (LLVM Apache-2.0 with LLVM exceptions: a binary redistribution reproduces it)
     Copy-Item (Join-Path $BinDir 'dxcompiler.dll') "$stage\rvk"
     Copy-Item (Join-Path $BinDir 'copyright') "$stage\rvk\dxc_LICENSE.txt"
+    # the DX12 backend (vulkan.api = d3d12): the Agility SDK runtime (D3D12Core.dll, no debug layer) and its redistribution licence
+    $agility = Join-Path $BinDir 'd3d12\D3D12Core.dll'
+    if (Test-Path $agility) {
+        New-Item -ItemType Directory -Force "$stage\rvk\d3d12" | Out-Null
+        Copy-Item $agility "$stage\rvk\d3d12"
+        $agLic = Join-Path $BinDir '..\vcpkg_installed\x64-windows-static-md\share\directx12-agility\copyright'
+        if (Test-Path $agLic) { Copy-Item $agLic "$stage\rvk\d3d12_LICENSE.txt" }
+    }
     $lic = @(Get-Content third_party\amd_fidelityfx\LICENSE.md)
     $end = ($lic | Select-String -Pattern '^These source files' | Select-Object -First 1).LineNumber - 1
     if ($end -lt 10) { throw 'amd_fidelityfx\LICENSE.md: end of the notice not found' }

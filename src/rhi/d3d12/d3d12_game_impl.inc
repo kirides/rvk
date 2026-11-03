@@ -558,8 +558,11 @@ ComPtr<ID3D12PipelineState> D3D12DeviceImpl::buildPso(const PsoEntry& e, const R
         el.Format = toDxgiVertex(a.format);
         el.InputSlot = a.binding;
         el.AlignedByteOffset = a.offset;
-        el.InputSlotClass = perInstance ? D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA : D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
-        el.InstanceDataStepRate = perInstance ? 1 : 0;
+        // a stride 0 binding (the (0, 0, 0, 1) of inputs the declaration lacks) is a per-instance element with step rate 0: the same data for every vertex,
+        // without relying on how a driver ranges a zero-stride vertex buffer
+        const bool constant = a.binding < d.bindingCount && d.bindings[a.binding].stride == 0;
+        el.InputSlotClass = perInstance || constant ? D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA : D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+        el.InstanceDataStepRate = constant ? 0 : perInstance ? 1 : 0;
         elements.push_back(el);
     }
     pd.InputLayout = {elements.data(), static_cast<UINT>(elements.size())};

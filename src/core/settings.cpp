@@ -787,6 +787,20 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .flags = Flag::NoAB | Flag::Hidden,  // the checkbox at the top of the menu
     });
+    r.api = &reg.add({
+        .key = "vulkan.api",
+        .label = "Graphics API",
+        .category = "Hardware",
+        .tab = kTabSystem,
+        .description = "Which graphics API the renderer uses. Vulkan is the default and the tested one. Direct3D 12 is experimental: it needs "
+                       "Shader Model 6.6 and falls back to Vulkan when the card or driver cannot do it. Frame generation, FSR and the "
+                       "overlay are Vulkan only for now.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"vulkan", "d3d12"},
+        .optionLabels = {"Vulkan", "Direct3D 12 (experimental)"},
+        .flags = Flag::Restart | Flag::Advanced,
+    });
     r.adapter = &reg.add({
         .key = "vulkan.adapter",
         .label = "Graphics card",

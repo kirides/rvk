@@ -1507,6 +1507,7 @@ private:
     bool scopeGbuf_ = false;                // the open rendering scope has the G-buffer attachments
     std::uint32_t engineColorCount_ = 0;    // the engine's colour attachments of the open scope (the G-buffer's come after)
     bool gbufWrite_ = false;                // the draw being prepared writes the G-buffer
+    std::uint32_t ubyteInputs_ = 0;         // D3D12: the vertex inputs read from UBYTE4 attributes (integer bits: the translated vertex shader converts), push flags bits 17..31
     Wp0 wp0_;                               // WP0 spike counters (RVK_WP0=1; d3d9/wp0.h)
     void wp0Note(const PipelineDesc& pd, std::uint32_t primitiveType, bool indexed, bool captureDraw, bool giDraw);
     void wp0Log();

@@ -136,6 +136,7 @@ inline constexpr std::uint32_t kDrawKindMask = 0xffu;
 inline constexpr std::uint32_t kDrawPassShift = 8;
 inline constexpr std::uint32_t kDrawViewShift = 12;
 inline constexpr std::uint32_t kDrawFlagTinted = 0x10000u;  // the tint debug view's variant draws it
+// D3D12 only: bits 17..31 flag the vertex inputs v0..v14 that come from UBYTE4 attributes (UBYTE4 is read as UNORM: v * 255)
 constexpr std::uint32_t drawFlags(std::uint32_t kind, std::uint32_t pass, std::uint32_t view) {
     return (kind & kDrawKindMask) | ((pass & 0xfu) << kDrawPassShift) | ((view & 0xfu) << kDrawViewShift);
 }

@@ -296,6 +296,7 @@ struct RendererSettings {
     Setting* menuFps = nullptr;      // vulkan.menu_fps: cap while a menu page is open (engine/menu_state.h); 0 = none
     Setting* exclusiveAcquire = nullptr;  // vulkan.exclusive_acquire: hold Vulkan's exclusive mode in exclusive fullscreen (hidden diagnostics)
     Setting* fullscreen = nullptr;   // vulkan.fullscreen: "borderless", "exclusive" (needs FullScreenExclusive; window-mode.md 8)
+    Setting* api = nullptr;          // vulkan.api: vulkan | d3d12 (restart)
     Setting* adapter = nullptr;      // vulkan.adapter: -1 = best discrete GPU (restart)
     Setting* toggleKey = nullptr;    // overlay.toggle_key
     Setting* abKey = nullptr;        // overlay.ab_key

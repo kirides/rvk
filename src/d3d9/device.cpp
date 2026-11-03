@@ -1352,7 +1352,10 @@ rhi::ShaderModule Device::dxilModule(shader::Stage stage, const std::string& tex
     }
     if (!spvCacheFile.empty()) {
         cacheFile = spvCacheFile.parent_path().parent_path() / "dxil" / spvCacheFile.filename();
-        cacheFile.replace_extension(".dxo");
+        // keyed by the text too: the cached DXIL follows the translator (the SPIR-V cache key's hash does not see every change of the generated HLSL)
+        const std::uint64_t textHash = fnv1a(text.data(), text.size());
+        cacheFile.replace_extension();
+        cacheFile += std::format("_{:08x}.dxo", static_cast<std::uint32_t>(textHash ^ (textHash >> 32)));
         std::ifstream in(cacheFile, std::ios::binary | std::ios::ate);
         if (in) {
             dxil.resize(static_cast<std::size_t>(in.tellg()));

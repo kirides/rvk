@@ -384,6 +384,8 @@ void loadSettings() {
     if (g_config.vsync >= 0) reg.lock(*rs.vsync, g_config.vsync != 0 ? 1.0 : 2.0, "config.toml [vulkan] vsync");
     if (g_config.maxFps > 0.0) reg.lock(*rs.maxFps, g_config.maxFps, "config.toml [vulkan] max_fps");
     if (g_config.adapter >= 0) reg.lock(*rs.adapter, g_config.adapter, "config.toml [vulkan] adapter");
+    if (g_config.api == "d3d12") reg.lock(*rs.api, 1.0, "config.toml [vulkan] api");
+    else if (g_config.api == "vulkan") reg.lock(*rs.api, 0.0, "config.toml [vulkan] api");
     // the render mode (core/config.h): settings.toml's renderer.mode, unless config.toml's [renderer] mode is not the default
     // (wrapper; also "trace" -> original): then that one, locked for the session
     const auto modeLock = configModeLock(g_config);

@@ -19,6 +19,7 @@ struct Wp0 {
     std::uint64_t draws = 0;
     std::uint64_t point = 0, fan = 0, fanIndexed = 0, strip = 0, lineList = 0, lineStrip = 0, stripIndexed = 0;
     std::uint64_t pointInstanced = 0;
+    std::uint32_t skinLogs = 0;
     std::uint64_t capture = 0, gi = 0, gbuf = 0, replacedOrOther = 0;
     std::map<std::string, std::uint64_t> exotic;  // vertex formats the D3D12 input assembler has no equivalent for
     std::unordered_set<std::uint64_t> fullKeys, baseKeys, layoutKeys;

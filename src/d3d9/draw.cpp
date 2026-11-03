@@ -321,6 +321,12 @@ void Device::wp0Note(const PipelineDesc& pd, std::uint32_t primitiveType, bool i
     if (d.depthBiasEnable != 0) {
         full = Wp0::bytes(full, d.depthBias);
     }
+    if (decl_ != nullptr && decl_->hasBlendIndices() && w.layoutKeys.insert(withLayout).second && w.skinLogs++ < 8) {
+        std::string d;
+        for (std::uint32_t i = 0; i < na; ++i) d += std::format(" loc{}:b{}+{}:fmt{}", as[i].location, as[i].binding, as[i].offset, static_cast<int>(as[i].format));
+        for (std::uint32_t i = 0; i < nb; ++i) d += std::format(" [b{} stride {} inst {}]", i, bs[i].stride, bs[i].perInstance);
+        spdlog::info("wp0: skinned layout:{} (ubyte mask {:x}, instances {})", d, ubyteInputs_, instanceCount_);
+    }
     w.baseKeys.insert(base);
     w.layoutKeys.insert(withLayout);
     w.fullKeys.insert(full);
@@ -344,6 +350,7 @@ bool Device::computeVertexInput(PipelineDesc& pd, VertexInputValues& out) {
     std::uint32_t nullBinding = UINT32_MAX;
     pd.bindingCount = 0;
     pd.attributeCount = 0;
+    ubyteInputs_ = 0;
     instanceCount_ = 1;
     if ((streams_[0].freq & STREAMSOURCE_INDEXEDDATA) != 0) {
         instanceCount_ = std::max(1u, streams_[0].freq & 0x3FFFFFFFu);
@@ -372,6 +379,7 @@ bool Device::computeVertexInput(PipelineDesc& pd, VertexInputValues& out) {
                 }
             }
             if (pd.attributeCount < kMaxVertexAttributes) {
+                if (in.format == VK_FORMAT_R8G8B8A8_USCALED && in.location < 15) ubyteInputs_ |= 1u << in.location;
                 pd.attributes[pd.attributeCount++] = {in.location, b, in.format, in.offset};
             }
         } else {
@@ -1220,7 +1228,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     // drawId = the draw's record index; prevVsConsts stays 0 until motion vectors track geometry (injection.md 4)
     const std::uint32_t flags =
         shader::abi::drawFlags(static_cast<std::uint32_t>(kind), static_cast<std::uint32_t>(phase.pass), static_cast<std::uint32_t>(phase.view)) |
-        (tint != 0 ? shader::abi::kDrawFlagTinted : 0u);
+        (tint != 0 ? shader::abi::kDrawFlagTinted : 0u) | (options_.backend == rhi::Backend::D3D12 ? ubyteInputs_ << 17 : 0u);
     const rhi::GpuRef drawBlock = !rep.block.null() && replaced ? rep.block : db.ref;
     packet_.push = shader::abi::PushConstants{drawSplit_[0] ? 0 : vsConstAddr_.bits, drawSplit_[1] ? 0 : psConstAddr_.bits, drawBlock.bits, frameBlockAddress().bits,
                                               captureDraw ? captureRequest_.bits : 0, stats_.draws, flags};
