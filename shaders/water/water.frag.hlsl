@@ -249,11 +249,24 @@ struct Surface {
 float4 PSMain(float4 position : SV_Position,
               [[vk::location(0)]] float4 tc0 : VARY0,    // TEXCOORD0..6: the engine water VS's outputs
               [[vk::location(1)]] float4 tc1 : VARY1,
+#ifndef __spirv__
+              [[vk::location(2)]] float4 pad2 : VARY2,  // D3D12 links by register: the signature is dense
+#endif
               [[vk::location(3)]] float4 tc3 : VARY3,    // world position, w global alpha (c32.w)
               [[vk::location(4)]] float4 tc4 : VARY4,    // world normal, w outdoor factor (COLOR1.w)
               [[vk::location(5)]] float4 tc5 : VARY5,    // tangent (grid: w wave amplitude)
               [[vk::location(6)]] float4 tc6 : VARY6,    // binormal (grid: w crest steepness)
               [[vk::location(7)]] float4 tc7 : VARY7,    // grid only: undisplaced xz, distance to the coast, shore-wave weight
+#ifndef __spirv__
+              [[vk::location(8)]] float4 pad8 : VARY8,
+              [[vk::location(9)]] float4 pad9 : VARY9,
+              [[vk::location(10)]] float4 pad10 : VARY10,
+              [[vk::location(11)]] float4 pad11 : VARY11,
+              [[vk::location(12)]] float4 pad12 : VARY12,
+              [[vk::location(13)]] float4 pad13 : VARY13,
+              [[vk::location(14)]] float4 pad14 : VARY14,
+              [[vk::location(15)]] float4 pad15 : VARY15,
+#endif
               [[vk::location(16)]] float4 col0 : VARY16      // COLOR0 (river: alpha = the mesh's edge fade)
               ) : SV_Target0 {
     WaterBlock w = waterBlock();

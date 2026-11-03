@@ -21,6 +21,11 @@
 namespace rvk::shader {
 
 static std::atomic<bool> g_varyingFillers{false};
+// the VARY<n> index of a variant's extra varying declaration (-1: none)
+static std::int64_t extraVaryLocation(const std::string& text) {
+    const auto p = text.find("VARY");
+    return p == std::string::npos ? -1 : std::strtoll(text.c_str() + p + 4, nullptr, 10);
+}
 void setVaryingFillers(bool on) { g_varyingFillers.store(on); }
 bool varyingFillers() { return g_varyingFillers.load(); }
 
@@ -851,12 +856,24 @@ private:
             }
             // D3D12 links the stages by register: the signature is dense (0..max) on both sides, so a pixel shader that reads fewer / other varyings
             // than the vertex shader writes still lands on the same registers (zero-initialised fillers)
-            if (varyingFillers() && !locs.empty()) {
-                for (std::uint32_t l = 0; l <= *locs.rbegin(); ++l) locs.insert(l);
+            if (varyingFillers() && (!locs.empty() || extraVaryLocation(opt_.extraOutputs) > 0)) {
+                // (a variant's extra varying sits after them: it must land on the same register on both sides)
+                const std::uint32_t top = std::max<std::int64_t>(locs.empty() ? -1 : static_cast<std::int64_t>(*locs.rbegin()), extraVaryLocation(opt_.extraOutputs) - 1);
+                for (std::uint32_t l = 0; static_cast<std::int64_t>(l) <= static_cast<std::int64_t>(top); ++l) locs.insert(l);
             }
-            for (const std::uint32_t loc : locs) g += std::format("    [[vk::location({})]] float4 rvk_out{} : VARY{};\n", loc, loc, loc);
-            g += opt_.extraOutputs;
-            if (!opt_.extraOutputs.empty()) g += "\n";
+            bool extraDone = false;
+            for (const std::uint32_t loc : locs) {
+                if (varyingFillers() && static_cast<std::int64_t>(loc) == extraVaryLocation(opt_.extraOutputs)) {
+                    g += opt_.extraOutputs + "\n";  // (in its register: a plain pixel shader pads this one)
+                    extraDone = true;
+                    continue;
+                }
+                g += std::format("    [[vk::location({})]] float4 rvk_out{} : VARY{};\n", loc, loc, loc);
+            }
+            if (!extraDone) {
+                g += opt_.extraOutputs;
+                if (!opt_.extraOutputs.empty()) g += "\n";
+            }
             g += "};\n";
         } else {
             g += "struct RvkPsIn {\n    float4 rvk_fragCoord : SV_Position;\n";
@@ -867,15 +884,25 @@ private:
                 const std::string name = d.reg.type == RegType::Addr ? std::format("t{}", d.reg.index) : std::format("v{}", d.reg.index);
                 lines[loc] = std::format("    [[vk::location({})]] {}float4 {} : VARY{};\n", loc, d.centroid ? "centroid " : "", name, loc);
             }
-            if (varyingFillers() && !lines.empty()) {
-                for (std::uint32_t l = 0; l < lines.rbegin()->first; ++l) {
-                    if (!lines.contains(l)) lines[l] = std::format("    [[vk::location({})]] float4 rvk_pad{} : VARY{};\n", l, l, l);
+            if (varyingFillers() && (!lines.empty() || extraVaryLocation(opt_.extraInputs) > 0)) {
+                const std::int64_t top = std::max<std::int64_t>(lines.empty() ? 0 : static_cast<std::int64_t>(lines.rbegin()->first), extraVaryLocation(opt_.extraInputs));
+                for (std::int64_t l = 0; l < top; ++l) {
+                    if (!lines.contains(l) && l != extraVaryLocation(opt_.extraInputs)) lines[l] = std::format("    [[vk::location({})]] float4 rvk_pad{} : VARY{};\n", l, l, l);
                 }
             }
+            // a variant's extra varying keeps its register: below the highest input it goes in between (the plain vertex shader's twin pads it)
+            const std::int64_t exIn = varyingFillers() ? extraVaryLocation(opt_.extraInputs) : -1;
+            bool extraInDone = false;
+            if (exIn >= 0 && !lines.empty() && exIn < static_cast<std::int64_t>(lines.rbegin()->first)) {
+                lines[static_cast<std::uint32_t>(exIn)] = opt_.extraInputs + "\n";
+                extraInDone = true;
+            }
             for (const auto& [loc, text] : lines) g += text;
-            if (usesFace_) g += "    bool rvk_front : SV_IsFrontFace;\n";
-            g += opt_.extraInputs;
-            if (!opt_.extraInputs.empty()) g += "\n";
+            if (!extraInDone) {
+                g += opt_.extraInputs;
+                if (!opt_.extraInputs.empty()) g += "\n";
+            }
+            if (usesFace_) g += "    bool rvk_front : SV_IsFrontFace;\n";  // (a system value: after every register the VS also writes)
             g += "};\nstruct RvkPsOut {\n";
             for (std::uint32_t i = 0; i < 4; ++i) {
                 if ((reflection_.colorOutputs & (1u << i)) != 0) g += std::format("    float4 oC{} : SV_Target{};\n", i, i);

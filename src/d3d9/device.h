@@ -1047,8 +1047,9 @@ public:
     // its pipeline are ready); vertexCaptured tells whether it ran this frame (render thread)
     // `instances`: an instanced draw may be captured too: instance k writes its vertices at `buffer` + 16 + 32 (k x slots + i),
     // slots = the header's first word (the buffer holds instances x slots x 32 bytes)
-    void requestVertexCapture(rhi::GpuRef buffer, bool instances = false) {
-        captureRequest_ = buffer;
+    void requestVertexCapture(const rhi::RingAlloc& buffer, bool instances = false) {
+        captureRequest_ = buffer.ref;
+        captureRequestRw_ = buffer.rw();
         captureInstances_ = instances;
     }
     // a buffer written by a compute pass counts as captured this frame (enh/rt_scene's skinning pass)
@@ -1520,6 +1521,7 @@ private:
     std::uint64_t giDrawCount_ = 0;
     bool captureInstances_ = false;         // the request covers an instanced draw (requestVertexCapture)
     rhi::GpuRef captureRequest_;            // the draw being prepared (DrawObserver::observe)
+    rhi::GpuRef captureRequestRw_;          // ... the form the vertex shader writes through (D3D12: the UAV slot)
     std::vector<rhi::GpuRef> captured_;     // this frame's captures that ran
     std::vector<rhi::GpuRef> capturedPrev_;  // the previous frame's
     std::array<VariantProvider, static_cast<std::size_t>(VariantSlot::Count)> variantProviders_;

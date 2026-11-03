@@ -17,7 +17,10 @@
     CommandList& passCommands() override;
     void* nativeCommandBuffer(CommandList&) override { return nullptr; }
     RingAlloc allocRingSlow(std::uint64_t size, std::uint64_t alignment, std::uint64_t minOffset) override;
-    RingAlloc allocCapture(std::uint64_t size, std::uint64_t alignment) override { return allocRing(size, alignment, 0); }
+    RingAlloc allocCapture(std::uint64_t size, std::uint64_t alignment) override;
+    void captureAccess(CommandList& list, bool write) override;
+    // the pool moves to / stays in a read state before a build / a dispatch (`force`: even inside a compute pass that said it writes)
+    void captureForRead(ID3D12GraphicsCommandList* list, bool force);
     Buffer& ringBuffer(const RingAlloc& alloc) override { return *reinterpret_cast<D3DBuffer*>(alloc.buffer); }
     std::uint64_t completedFrame() const override { return frameFence_ ? frameFence_->GetCompletedValue() : 0; }
     void waitFrame(std::uint64_t value) override;
@@ -53,7 +56,7 @@
     void resetRecordPools() override {}  // (beginFrame resets the slot's allocators)
     void probeFrameGeneration(const std::filesystem::path&) override {}
     caps::Report capabilityReport(bool pipelineLibraries) override;
-    void runRaytracingSelfTest() override { spdlog::info("rt selftest: skipped: ray tracing on D3D12 comes with WP6"); }
+    void runRaytracingSelfTest() override;
     void logMemoryStats() override;
     std::unique_ptr<Upscaler> createUpscaler() override { return nullptr; }
     std::unique_ptr<FrameGenerator> createFrameGenerator() override { return nullptr; }
@@ -70,3 +73,13 @@
     bool setCrashMarkers(bool) override { return false; }
     void crashMarker(bool, const char*) override {}
     GamePresenter& presenter() override { return *presenter_; }
+
+    // a removed device: its reason and DRED's breadcrumbs / page fault, logged once (any thread)
+    void reportRemoved(const char* where);
+    bool checkRemoved(HRESULT hr, const char* where) {
+        if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_HUNG || hr == DXGI_ERROR_DEVICE_RESET) {
+            reportRemoved(where);
+            return true;
+        }
+        return false;
+    }

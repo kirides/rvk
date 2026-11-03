@@ -387,6 +387,8 @@ public:
     // the mesh arena's blocks: device memory that lives in GENERIC_READ (draws read it from any thread without barriers); the copy helpers bracket
     // their writes with COPY_DEST; no UAV
     bool arena = false;
+    // the capture pool's chunks: a GPU upload heap (device memory the CPU maps: headers are written through map()) with UAV access
+    bool gpuUpload = false;
 
 private:
     D3D12DeviceImpl& dev_;
@@ -516,13 +518,14 @@ public:
             return D3D12GetDebugInterface(iid, out);  // (the global state answers the debug and the DRED interface by IID)
         };
         UINT factoryFlags = 0;
+        const bool dredWanted = desc.validation || GetEnvironmentVariableA("RVK_DRED", nullptr, 0) != 0;  // (a device removal's breadcrumbs without the debug layer)
         if (desc.validation) {
             ComPtr<ID3D12Debug> debug;
             if (SUCCEEDED(config(CLSID_D3D12Debug, IID_PPV_ARGS(&debug)))) {
                 debug->EnableDebugLayer();
                 factoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
                 ComPtr<ID3D12Debug1> debug1;
-                if (SUCCEEDED(debug.As(&debug1))) debug1->SetEnableGPUBasedValidation(TRUE);
+                if (SUCCEEDED(debug.As(&debug1))) debug1->SetEnableGPUBasedValidation(GetEnvironmentVariableA("RVK_NO_GBV", nullptr, 0) == 0);  // (RVK_NO_GBV: the debug layer without the slow GPU-based validation)
 #if D3D12_SDK_VERSION >= 620
                 // messages the driver reports itself (Agility SDK 1.620+) arrive through the info queue's callback below
                 ComPtr<ID3D12Debug7> debug7;
@@ -531,6 +534,8 @@ public:
             } else {
                 spdlog::warn("d3d12: the debug layer is not available (d3d12SDKLayers.dll missing{})", sdk.factory ? " from the Agility SDK directory" : "");
             }
+        }
+        if (dredWanted) {
             // DRED: breadcrumbs + page fault data for a device removal
             ComPtr<ID3D12DeviceRemovedExtendedDataSettings1> dred;
             if (SUCCEEDED(config(CLSID_D3D12DeviceRemovedExtendedData, IID_PPV_ARGS(&dred)))) {
@@ -615,8 +620,9 @@ public:
         }
         // inline ray queries (DXR tier 1.1) when asked for
         D3D12_FEATURE_DATA_D3D12_OPTIONS5 o5{};
-        if (desc.rayTracing && SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &o5, sizeof(o5))) &&
-            o5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_1 && SUCCEEDED(device_.As(&device5_))) {
+        const bool o5ok = SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &o5, sizeof(o5)));
+        dxr11_ = o5ok && o5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_1;
+        if (desc.rayTracing && dxr11_ && SUCCEEDED(device_.As(&device5_))) {
             caps_.rayQuery = true;
         }
         D3D12_COMMAND_QUEUE_DESC qd{D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_QUEUE_PRIORITY_NORMAL, D3D12_COMMAND_QUEUE_FLAG_NONE, 0};
@@ -1006,6 +1012,7 @@ private:
 bool D3DBuffer::create() {
     D3D12_HEAP_PROPERTIES hp{};
     hp.Type = desc_.memory == Memory::Upload ? D3D12_HEAP_TYPE_UPLOAD : desc_.memory == Memory::Readback ? D3D12_HEAP_TYPE_READBACK : D3D12_HEAP_TYPE_DEFAULT;
+    if (gpuUpload) hp.Type = D3D12_HEAP_TYPE_GPU_UPLOAD;
     D3D12_RESOURCE_DESC rd{};
     rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
     rd.Width = alignUp(std::max<std::uint64_t>(desc_.size, 4), 4);
@@ -1013,12 +1020,17 @@ bool D3DBuffer::create() {
     rd.SampleDesc = {1, 0};
     rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     // shader-writable (RWByteAddressBuffer, atomics): device memory only (upload / readback heaps cannot have UAVs)
-    const bool writable = (desc_.usage & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) != 0 && hp.Type == D3D12_HEAP_TYPE_DEFAULT && !arena;
+    const bool writable = (desc_.usage & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) != 0 && (hp.Type == D3D12_HEAP_TYPE_DEFAULT || gpuUpload) && !arena;
     if (writable) rd.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     state = hp.Type == D3D12_HEAP_TYPE_UPLOAD ? D3D12_RESOURCE_STATE_GENERIC_READ : hp.Type == D3D12_HEAP_TYPE_READBACK ? D3D12_RESOURCE_STATE_COPY_DEST : D3D12_RESOURCE_STATE_COMMON;
-    if (FAILED(dev_.device()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, state, nullptr, IID_PPV_ARGS(&resource_)))) return false;
+    const HRESULT hr0 = dev_.device()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, state, nullptr, IID_PPV_ARGS(&resource_));
+    if (FAILED(hr0)) {
+        dev_.checkRemoved(hr0, "CreateCommittedResource");
+        spdlog::error("d3d12: CreateCommittedResource (buffer '{}', {} bytes, heap {}) failed (0x{:08x})", desc_.name != nullptr ? desc_.name : "?", rd.Width, static_cast<int>(hp.Type), static_cast<unsigned>(hr0));
+        return false;
+    }
     if (desc_.name != nullptr) resource_->SetName(widen(desc_.name).c_str());
-    if (hp.Type != D3D12_HEAP_TYPE_DEFAULT) {
+    if (hp.Type != D3D12_HEAP_TYPE_DEFAULT) {  // (a GPU upload heap maps too)
         D3D12_RANGE none{0, 0};
         if (FAILED(resource_->Map(0, hp.Type == D3D12_HEAP_TYPE_READBACK ? nullptr : &none, &mapped_))) return false;
     }
@@ -1226,10 +1238,12 @@ bool D3DAccel::allocate(const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPU
 bool D3DAccel::createBlas(const BlasDesc& desc) {
     geometries_.assign(desc.geometries.begin(), desc.geometries.end());
     allowUpdate_ = desc.allowUpdate;
+    // (AMD's finding: ALLOW_UPDATE + ALLOW_COMPACTION on one BLAS corrupts the build: a refittable BLAS is not compacted)
+    const bool compaction = desc.allowCompaction && !desc.allowUpdate;
     flags_ = (desc.preferFastBuild ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD
                                    : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE) |
              (desc.allowUpdate ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE) |
-             (desc.allowCompaction ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE);
+             (compaction ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE);
     std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> descs;
     geometryDescs(geometries_, descs);
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
@@ -1406,6 +1420,7 @@ public:
     }
 
     void dispatch(std::uint32_t x, std::uint32_t y, std::uint32_t z) override {
+        dev_.captureForRead(list_, false);  // (a dispatch that reads captures: the pool leaves the state the vertex shaders wrote it in)
         flush();
         list_->Dispatch(x, y, z);
     }
@@ -1519,6 +1534,8 @@ public:
         bufferState(s, D3D12_RESOURCE_STATE_COPY_SOURCE);
         list_->CopyBufferRegion(d.resource(), dstOffset, s.resource(), srcOffset, size);
         if (d.arena) bufferState(d, D3D12_RESOURCE_STATE_GENERIC_READ);  // the arena's blocks live in GENERIC_READ
+        // data copied into device memory is read next (vertex / index data, acceleration structure builds from its address: they need a shader-read state)
+        else if (d.desc().memory == Memory::Device) bufferState(d, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
     }
     void copyBufferToTexture(Texture& dst, Buffer& src, std::uint64_t srcOffset, Subresource sub) override {
         D3DTexture& t = static_cast<D3DTexture&>(dst);
@@ -1668,6 +1685,7 @@ public:
     }
     void buildBlases(std::span<const BlasBuild> builds) override {
         if (builds.empty()) return;
+        dev_.captureForRead(list_, true);  // (captured vertices as build input: the pool in a shader-read state)
         std::uint64_t largest = 0;
         for (const BlasBuild& b : builds) {
             D3DAccel& a = static_cast<D3DAccel&>(*b.blas);
@@ -1714,6 +1732,7 @@ public:
     }
     void buildTlasAt(AccelerationStructure& as, std::uint64_t instancesAddress, std::uint32_t count) override {
         D3DAccel& a = static_cast<D3DAccel&>(as);
+        dev_.captureForRead(list_, true);
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
         bd.DestAccelerationStructureData = a.address();
         bd.ScratchAccelerationStructureData = a.scratchAddress();

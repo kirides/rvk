@@ -1206,7 +1206,7 @@ bool RtScene::captureOptions(const d3d9::Shader& s, shader::TranslateOptions& o)
         "                rvkRwStore<float4, 16>(rvkAddrAdd(rvk_cap, 16u + rvk_at * 32u + 16u), {});\n"
         "                rvk_out.rvk_prevWorld = float4(rvk_world, 0.0);\n"
         "                if (any(rvk_info.yz != uint2(0u, 0u)) && uint(rvk_slot) < rvk_info.w) {{\n"
-        "                    float4 rvk_prev = rvkRwLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvk_info.yz), 16u + uint(rvk_slot) * 32u));\n"
+        "                    float4 rvk_prev = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvk_info.yz), 16u + uint(rvk_slot) * 32u));\n"
         "                    if (rvk_prev.w == 1.0) rvk_out.rvk_prevWorld = float4(rvk_prev.xyz, 1.0);\n"
         "                }}\n"
         "            }}\n"
@@ -1316,7 +1316,7 @@ void RtScene::observeTree(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& 
         std::memcpy(a.ptr, header, 16);
         batch.base = a.addr();
         batch.slots = slots;
-        dev.requestVertexCapture(a.ref, q.instanced);
+        dev.requestVertexCapture(a, q.instanced);
     }
     if (batch.slots != slots) return;
     DynBlas& db = dynBlas_[in.key];
@@ -1469,7 +1469,7 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     if (useSkin) {
         SkinJob j;
         j.vertices = vertexAddress.ref;
-        j.out = a.ref;
+        j.out = a.rw();
         j.slots = slots;
         j.stride = q.vertexStride;
         j.offsets = skinOffsets;
@@ -1485,13 +1485,13 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
                 std::uint32_t rh[4] = {slots | 0x80000000u, 0, 0, 0};
                 std::memcpy(ref.ptr, rh, 16);
                 std::memset(static_cast<std::uint8_t*>(ref.ptr) + 16, 0, static_cast<std::size_t>(slots) * 32);
-                dev.requestVertexCapture(ref.ref);
-                j.ref = ref.ref;
+                dev.requestVertexCapture(ref);
+                j.ref = ref.rw();
             }
         }
         skinJobs_.push_back(j);
     } else {
-        dev.requestVertexCapture(a.ref);
+        dev.requestVertexCapture(a);
     }
     // the draw's material (diffuse + uv map), resolved again when it changes (the solid pass's draws carry it)
     const std::uint64_t sig = RtMaterials::signature(q);
@@ -1773,6 +1773,7 @@ void RtScene::recordSkin(rhi::CommandList& cl) {
         // a reference capture written by a cascade's vertex shader (verify) before the compute reads it
         barrier(cl, VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        dev_.game().captureAccess(cl, true);  // (D3D12: the capture pool in its write state)
         cl.bindPipeline(*skinPipe_);
         struct Push {
             abi::PassPushHeader h;
@@ -1784,6 +1785,7 @@ void RtScene::recordSkin(rhi::CommandList& cl) {
         push.table[1] = t.ref.high();
         cl.setPushConstants(&push, sizeof(push));
         cl.dispatch(chunks, 1, 1);
+        dev_.game().captureAccess(cl, false);
     }
     for (std::uint32_t i = 0; i < n; ++i) dev_.markVertexCaptured(skinJobs_[i].out);
     skinJobsTotal_ += n;

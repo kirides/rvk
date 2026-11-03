@@ -826,6 +826,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     };
     // draw observers (enh/rt_scene, enh/gi): indexed draws from buffers of the kinds / phases they ask for
     captureRequest_ = {};
+    captureRequestRw_ = {};
     captureInstances_ = false;
     if (!observers_.empty() && geom.indexed && !geom.userPointer) {
         for (DrawObserver* o : observers_) {
@@ -1231,7 +1232,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         (tint != 0 ? shader::abi::kDrawFlagTinted : 0u) | (options_.backend == rhi::Backend::D3D12 ? ubyteInputs_ << 17 : 0u);
     const rhi::GpuRef drawBlock = !rep.block.null() && replaced ? rep.block : db.ref;
     packet_.push = shader::abi::PushConstants{drawSplit_[0] ? 0 : vsConstAddr_.bits, drawSplit_[1] ? 0 : psConstAddr_.bits, drawBlock.bits, frameBlockAddress().bits,
-                                              captureDraw ? captureRequest_.bits : 0, stats_.draws, flags};
+                                              captureDraw ? captureRequestRw_.bits : 0, stats_.draws, flags};
     for (std::uint32_t w = 0; w < shader::abi::kConstWindows; ++w) {
         packet_.push.vsWin[w] = drawWin_[0][w].bits;
         packet_.push.psWin[w] = drawWin_[1][w].bits;

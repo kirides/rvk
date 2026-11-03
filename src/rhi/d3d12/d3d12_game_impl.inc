@@ -124,14 +124,19 @@ bool D3D12DeviceImpl::createGame(const GameDeviceOptions& o) {
     dd.backend = Backend::D3D12;
     dd.validation = o.validation || o.syncValidation;
     dd.adapter = o.adapter;
-    dd.rayTracing = false;  // (WP6)
+    dd.rayTracing = o.allowRayTracing;
     dd.name = "risen";
     if (!create(dd)) return false;
 
     D3D12_FEATURE_DATA_D3D12_OPTIONS opt{};
     device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &opt, sizeof(opt));
-    gameCaps_.rayTracing = false;
-    gameCaps_.vertexStores = false;  // (the vertex captures need the device-local UAV pool: WP6)
+    gameCaps_.rayTracing = caps_.rayQuery;
+    {
+        // the capture pool lives in a GPU upload heap (the CPU writes its headers, the GPU stores into it)
+        D3D12_FEATURE_DATA_D3D12_OPTIONS16 o16{};
+        gpuUploadHeap_ = SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS16, &o16, sizeof(o16))) && o16.GPUUploadHeapSupported != FALSE;
+        gameCaps_.vertexStores = gpuUploadHeap_;
+    }
     gameCaps_.storageImageExtendedFormats = opt.TypedUAVLoadAdditionalFormats != FALSE;
     gameCaps_.maxComputeWorkGroupInvocations = D3D12_CS_THREAD_GROUP_MAX_THREADS_PER_GROUP;
     gameCaps_.maxComputeWorkGroupSizeX = D3D12_CS_THREAD_GROUP_MAX_X;
@@ -192,7 +197,7 @@ bool D3D12DeviceImpl::createGame(const GameDeviceOptions& o) {
 
     RVK_HR(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&frameFence_)), "CreateFence (frames)");
     frameEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (!initPool(mainPool_) || !initPool(uploadPool_)) return false;
+    if (!initPool(mainPool_) || !initPool(uploadPool_) || !initPool(labelPool_)) return false;
     {
         BOOL t = FALSE;
         ComPtr<IDXGIFactory5> f5;
@@ -206,8 +211,9 @@ bool D3D12DeviceImpl::createGame(const GameDeviceOptions& o) {
     gameMode_ = true;
     frameValue_ = 1;
     frameSlot_ = 0;
-    spdlog::info("d3d12: game device on '{}' (uploads: rows {} / offsets {} bytes, typed UAV loads {}, tearing {})", caps_.adapterName, gameCaps_.uploadRowAlign,
-                 gameCaps_.uploadOffsetAlign, gameCaps_.storageImageExtendedFormats ? "yes" : "no", tearing_ ? "yes" : "no");
+    spdlog::info("d3d12: game device on '{}' (uploads: rows {} / offsets {} bytes, typed UAV loads {}, tearing {}, ray queries {}, vertex captures {})", caps_.adapterName,
+                 gameCaps_.uploadRowAlign, gameCaps_.uploadOffsetAlign, gameCaps_.storageImageExtendedFormats ? "yes" : "no", tearing_ ? "yes" : "no",
+                 gameCaps_.rayTracing ? "yes" : "no", gameCaps_.vertexStores ? "yes (GPU upload heap)" : "no (no GPU upload heap)");
     return true;
 }
 
@@ -267,6 +273,7 @@ CommandList& D3D12DeviceImpl::uploadCommands() {
 }
 
 void D3D12DeviceImpl::beginFrame() {
+    if (device_->GetDeviceRemovedReason() != S_OK) reportRemoved("beginFrame");
     const auto t0 = std::chrono::steady_clock::now();
     if (frameValue_ > rhi::kFramesInFlight) waitFrame(frameValue_ - rhi::kFramesInFlight);
     lastSlotWaitMs_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -274,9 +281,14 @@ void D3D12DeviceImpl::beginFrame() {
     runRetired();
     resetPool(mainPool_, frameSlot_);
     resetPool(uploadPool_, frameSlot_);
+    resetPool(labelPool_, frameSlot_);
     for (auto& t : recordThreads_) resetPool(t->pool, frameSlot_);
     if (recordSelf_) resetPool(recordSelf_->pool, frameSlot_);
     rings_[frameSlot_].next = 0;
+    for (auto& c : capture_[frameSlot_].chunks) c.used = 0;
+    capture_[frameSlot_].cur = 0;
+    captureHold_ = false;
+    captureAllRead_ = false;
     ring_.ptr = nullptr;
     ring_.size = ring_.used = 0;
     uavTable_ = 0;
@@ -610,6 +622,7 @@ ComPtr<ID3D12PipelineState> D3D12DeviceImpl::buildPso(const PsoEntry& e, const R
     psoNs_ += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
     ++psoBuilt_;
     if (FAILED(hr)) {
+        checkRemoved(hr, "CreateGraphicsPipelineState");
         spdlog::error("d3d12: CreateGraphicsPipelineState ({} / {}) failed (0x{:08x})", vs->name, ps->name, static_cast<unsigned>(hr));
         return nullptr;
     }
@@ -694,6 +707,13 @@ void D3D12DeviceImpl::clearIn(ID3D12GraphicsCommandList* cmd, const Scope& sc, c
 void D3D12DeviceImpl::clearAttachments(const ClearOp& op) { clearIn(curMain_, scope_, op); }
 
 void D3D12DeviceImpl::beginScope(const RenderingInfo& info, bool secondary) {
+    // the capture pool: this frame's slot is written by the scope's vertex shaders, the previous frame's is read by them
+    if (gameCaps_.vertexStores) {
+        setCaptureState(curMain_, frameSlot_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        setCaptureState(curMain_, (frameSlot_ + 1) % rhi::kFramesInFlight, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        captureHold_ = false;
+        captureAllRead_ = false;
+    }
     scope_ = {};
     scope_.open = true;
     scope_.secondary = secondary;
@@ -1076,8 +1096,10 @@ caps::Report D3D12DeviceImpl::capabilityReport(bool) {
     };
     set(caps::Cap::SamplerAnisotropy, true, "");
     set(caps::Cap::DrawIndirectCount, true, "");
-    set(caps::Cap::RayTracingHardware, false, "ray tracing on the D3D12 backend comes with a later work package");
-    set(caps::Cap::RayQuery, false, "ray tracing on the D3D12 backend comes with a later work package");
+    set(caps::Cap::RayTracingHardware, dxr11_ || caps_.rayQuery, "the GPU / driver has no DXR tier 1.1");
+    set(caps::Cap::RayQuery, caps_.rayQuery, "ray tracing is off (rt.allow) or the GPU / driver has no DXR tier 1.1");
+    if (caps_.rayQuery) r[caps::Cap::RayQuery].detail = "DXR 1.1 inline ray queries";
+    set(caps::Cap::PositionFetch, false, "not available on D3D12 (the RT scene reads its own geometry records)");
     set(caps::Cap::FrameGeneration, false, "frame generation on D3D12 is not available yet");
     return r;
 }
@@ -1192,7 +1214,7 @@ void D3D12DeviceImpl::scopeLabel(bool begin, const char* text) {
         else labelEnd();
         return;
     }
-    ID3D12GraphicsCommandList4* l = acquireList(mainPool_, frameSlot_);
+    ID3D12GraphicsCommandList4* l = acquireList(labelPool_, frameSlot_);
     if (l == nullptr) return;
     if (begin) beginEvent(l, text);
     else l->EndEvent();
@@ -1261,3 +1283,132 @@ private:
 }  // namespace
 
 std::unique_ptr<ImGuiBackend> D3D12DeviceImpl::createImGuiBackend() { return std::make_unique<D3DImGuiBackend>(*this); }
+
+// ---- the vertex capture pool ------------------------------------------------------------------------------------------------
+
+void D3D12DeviceImpl::setCaptureState(ID3D12GraphicsCommandList* list, std::uint32_t slot, D3D12_RESOURCE_STATES to) {
+    D3D12_RESOURCE_BARRIER b[16]{};
+    UINT n = 0;
+    const auto flushBarriers = [&] {
+        if (n > 0) list->ResourceBarrier(n, b);
+        n = 0;
+    };
+    for (CaptureChunk& c : capture_[slot].chunks) {
+        if (c.buf->state == to) continue;
+        b[n].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b[n].Transition = {c.buf->resource(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, c.buf->state, to};
+        c.buf->state = to;
+        if (++n == 16) flushBarriers();
+    }
+    flushBarriers();
+}
+
+RingAlloc D3D12DeviceImpl::allocCapture(std::uint64_t size, std::uint64_t alignment) {
+    if (!gameCaps_.vertexStores) return {};
+    CapturePool& p = capture_[frameSlot_];
+    size = std::max<std::uint64_t>(size, 16);
+    for (;;) {
+        if (p.cur < p.chunks.size()) {
+            CaptureChunk& c = p.chunks[p.cur];
+            const std::uint64_t off = (c.used + alignment - 1) & ~(alignment - 1);
+            if (off + size <= c.size) {
+                c.used = off + size;
+                RingAlloc a;
+                a.buffer = reinterpret_cast<std::uint64_t>(c.buf.get());
+                a.offset = off;
+                a.ptr = static_cast<std::uint8_t*>(c.buf->map()) + off;
+                a.ref = GpuRef::fromWords(c.buf->heapIndex(), static_cast<std::uint32_t>(off));
+                a.refRw = GpuRef::fromWords(c.buf->heapIndexRw(), static_cast<std::uint32_t>(off));
+                a.gpuVa = c.buf->gpuAddress() + off;
+                return a;
+            }
+            ++p.cur;
+            continue;
+        }
+        CaptureChunk c;
+        c.size = alignUp(std::max<std::uint64_t>(16ull << 20, size + alignment), 65536);
+        c.buf.reset(new D3DBuffer(*this, {c.size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, Memory::Device, "rvk vertex captures"}));
+        c.buf->gpuUpload = true;
+        if (!c.buf->create()) {
+            spdlog::error("d3d12: the capture pool could not grow ({} bytes)", c.size);
+            return {};
+        }
+        // (the new chunk is written by the draw that asked for it: UAV before it, in the main list = before the chunks of a threaded scope)
+        if (curMain_ != nullptr) {
+            D3D12_RESOURCE_BARRIER rb{};
+            rb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            rb.Transition = {c.buf->resource(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, c.buf->state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+            c.buf->state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            curMain_->ResourceBarrier(1, &rb);
+        }
+        captureAllRead_ = false;
+        p.chunks.push_back(std::move(c));
+    }
+}
+
+void D3D12DeviceImpl::captureAccess(CommandList& list, bool write) {
+    if (!gameCaps_.vertexStores) return;
+    auto* l = static_cast<D3DCommandList&>(list).raw();
+    if (write) {
+        setCaptureState(l, frameSlot_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        captureHold_ = true;
+        captureAllRead_ = false;
+    } else {
+        captureHold_ = false;
+        captureForRead(l, true);
+    }
+}
+
+void D3D12DeviceImpl::captureForRead(ID3D12GraphicsCommandList* list, bool force) {
+    if (!gameCaps_.vertexStores || captureAllRead_ || (captureHold_ && !force)) return;
+    for (std::uint32_t s = 0; s < rhi::kFramesInFlight; ++s) setCaptureState(list, s, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+    captureAllRead_ = true;
+    captureHold_ = false;
+}
+
+void D3D12DeviceImpl::runRaytracingSelfTest() {
+    spdlog::info("rt selftest: {} (D3D12 DXR: the acceleration structure / ray query paths are covered by rvk_rhitest)", gameCaps_.rayTracing ? "available" : "ray queries are not enabled");
+}
+
+// ---- device removal diagnostics ---------------------------------------------------------------------------------------------
+
+void D3D12DeviceImpl::reportRemoved(const char* where) {
+    static std::atomic<bool> done{false};
+    if (done.exchange(true)) return;
+    spdlog::error("d3d12: the device was removed (seen in {}): reason 0x{:08x}", where, static_cast<unsigned>(device_->GetDeviceRemovedReason()));
+    ComPtr<ID3D12DeviceRemovedExtendedData1> dred;
+    if (FAILED(device_.As(&dred))) {
+        spdlog::error("d3d12: no DRED data (start with RVK_DRED=1 or -Validation)");
+        return;
+    }
+    D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 ab{};
+    if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput1(&ab))) {
+        for (const D3D12_AUTO_BREADCRUMB_NODE1* n = ab.pHeadAutoBreadcrumbNode; n != nullptr; n = n->pNext) {
+            const UINT last = n->pLastBreadcrumbValue != nullptr ? *n->pLastBreadcrumbValue : 0;
+            if (last >= n->BreadcrumbCount) continue;  // finished
+            spdlog::error("d3d12: DRED: list '{}' on queue '{}': {} of {} operations done", n->pCommandListDebugNameA != nullptr ? n->pCommandListDebugNameA : "?",
+                          n->pCommandQueueDebugNameA != nullptr ? n->pCommandQueueDebugNameA : "?", last, n->BreadcrumbCount);
+            for (UINT i = last > 4 ? last - 4 : 0; i < std::min(n->BreadcrumbCount, last + 4); ++i) {
+                spdlog::error("d3d12: DRED:   op {} = {}{}", i, static_cast<int>(n->pCommandHistory[i]), i == last ? "   <- the operation the GPU was in" : "");
+            }
+            for (UINT i = 0; i < n->BreadcrumbContextsCount; ++i) {
+                const auto& c = n->pBreadcrumbContexts[i];
+                if (c.BreadcrumbIndex + 8 >= last && c.BreadcrumbIndex <= last + 4) {
+                    std::string ctx;
+                    for (const wchar_t* w = c.pContextString; w != nullptr && *w != 0; ++w) ctx += static_cast<char>(*w < 128 ? *w : '?');
+                    spdlog::error("d3d12: DRED:   context at op {}: {}", c.BreadcrumbIndex, ctx);
+                }
+            }
+        }
+    }
+    D3D12_DRED_PAGE_FAULT_OUTPUT1 pf{};
+    if (SUCCEEDED(dred->GetPageFaultAllocationOutput1(&pf)) && pf.PageFaultVA != 0) {
+        spdlog::error("d3d12: DRED: page fault at 0x{:x}", pf.PageFaultVA);
+        for (const D3D12_DRED_ALLOCATION_NODE1* n = pf.pHeadExistingAllocationNode; n != nullptr; n = n->pNext) {
+            spdlog::error("d3d12: DRED:   existing allocation '{}' type {}", n->ObjectNameA != nullptr ? n->ObjectNameA : "?", static_cast<int>(n->AllocationType));
+        }
+        for (const D3D12_DRED_ALLOCATION_NODE1* n = pf.pHeadRecentFreedAllocationNode; n != nullptr; n = n->pNext) {
+            spdlog::error("d3d12: DRED:   recently freed '{}' type {}", n->ObjectNameA != nullptr ? n->ObjectNameA : "?", static_cast<int>(n->AllocationType));
+        }
+    }
+}

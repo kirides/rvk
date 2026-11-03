@@ -102,8 +102,12 @@ struct RingAlloc {
     void* ptr = nullptr;
     GpuRef ref;
     std::uint64_t gpuVa = 0;
+    // Vertex captures (GameDevice::allocCapture): the write form of `ref`. D3D12 reads a buffer through an SRV and writes it through a UAV: two heap
+    // slots, so a capture has two references (`ref` for readers, `refRw` for the shaders that store into it). Null: `ref` serves both (Vulkan, the ring).
+    GpuRef refRw;
 
     GpuAddr addr() const { return {ref, gpuVa}; }
+    GpuRef rw() const { return refRw.null() ? ref : refRw; }
 };
 
 // The frame ring's current chunk, shared between the backend (which switches chunks) and the inline front end GameDevice::allocRing (called several
@@ -513,6 +517,10 @@ public:
     // Memory that vertex shaders write (the vertex captures: rt skin outputs, object motion, positions of the RT scene's characters) and later passes read.
     // Vulkan: the ring; D3D12: a device-local UAV pool reset per frame (the CPU pointer may then be null: only `ref` / `gpuVa` are valid).
     virtual RingAlloc allocCapture(std::uint64_t size, std::uint64_t alignment = 16) = 0;
+    // The capture memory's use by the commands that follow in `list`: write = vertex shaders / compute store into it (`RingAlloc::rw()`), else it is read
+    // (acceleration structure builds, ray queries, shaders loading it: `ref`). A no-op on Vulkan; D3D12 moves the pool between UNORDERED_ACCESS and a read
+    // state (builds, dispatches and rendering scopes do it themselves: only a compute pass that writes captures needs to say so).
+    virtual void captureAccess(CommandList& /*list*/, bool /*write*/) {}
     // the frame being recorded: the value it signals (counts up), its slot (0 .. in flight - 1), the last completed value; waiting for a value blocks
     std::uint64_t frameValue() const { return frameValue_; }
     std::uint32_t frameSlot() const { return frameSlot_; }

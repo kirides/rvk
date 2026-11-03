@@ -217,6 +217,7 @@ private:
                 const std::lock_guard lock(m_);
                 presentMs_ += ms;
                 if (FAILED(hr)) {
+                    dev_.checkRemoved(hr, "Present");
                     status_ = PresentStatus::Error;
                     errorText_ = std::format("IDXGISwapChain::Present failed (0x{:08x})", static_cast<unsigned>(hr));
                 }

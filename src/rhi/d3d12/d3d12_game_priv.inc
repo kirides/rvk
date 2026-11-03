@@ -150,7 +150,7 @@ public:
     std::vector<std::pair<std::uint64_t, std::function<void()>>> retired_;
     void runRetired();
 
-    ListPool mainPool_, uploadPool_;
+    ListPool mainPool_, uploadPool_, labelPool_;  // (labelPool_: the tiny lists of labels inside a threaded scope: an allocator records one list at a time)
     std::unique_ptr<D3DCommandList> mainList_, uploadList_;
     ID3D12GraphicsCommandList4* curMain_ = nullptr;
     ID3D12GraphicsCommandList4* curUpload_ = nullptr;
@@ -243,6 +243,24 @@ public:
     TsSlot ts_[rhi::kFramesInFlight];
     double tsNsPerTick_ = 0.0;
     void resolveTimestamps(ID3D12GraphicsCommandList* list, std::uint32_t slot);
+
+    // The vertex capture pool (allocCapture): chunks in a GPU upload heap with UAV access (the CPU writes the headers, vertex shaders / compute store the
+    // vertices), per frame slot. State: UNORDERED_ACCESS while rendering scopes write it, a read state for builds / dispatches that read it. The slot of
+    // the frame before stays readable (the capture variants' vertex shaders load the previous positions).
+    struct CaptureChunk {
+        std::unique_ptr<D3DBuffer> buf;
+        std::uint64_t size = 0, used = 0;
+    };
+    struct CapturePool {
+        std::vector<CaptureChunk> chunks;
+        std::size_t cur = 0;
+    };
+    CapturePool capture_[rhi::kFramesInFlight];
+    bool captureHold_ = false;       // a compute pass writes the pool: dispatches leave its state alone
+    bool captureAllRead_ = false;    // both slots are known to be in the read state
+    bool gpuUploadHeap_ = false;
+    bool dxr11_ = false;
+    void setCaptureState(ID3D12GraphicsCommandList* list, std::uint32_t slot, D3D12_RESOURCE_STATES to);
 
     std::unique_ptr<GamePresenter> presenter_;
     std::unique_ptr<Texture> defaultCube_, default3d_;
