@@ -5,7 +5,7 @@
 
 #include "res/dds.h"
 #include "test.h"
-#include "vk/formats.h"
+#include "rhi/d3d_formats.h"
 
 using namespace rvk;
 
@@ -42,46 +42,46 @@ std::vector<std::uint8_t> makeDds(std::uint32_t w, std::uint32_t h, std::uint32_
 }  // namespace
 
 TEST(formats_table) {
-    using namespace vk::d3dfmt;
-    auto f = vk::formatInfo(A8R8G8B8);
+    using namespace rhi::d3dfmt;
+    auto f = rhi::formatInfo(A8R8G8B8);
     CHECK(f && f->format == VK_FORMAT_B8G8R8A8_UNORM && f->blockBytes == 4);
-    f = vk::formatInfo(X8R8G8B8);
+    f = rhi::formatInfo(X8R8G8B8);
     CHECK(f && f->swizzle.a == VK_COMPONENT_SWIZZLE_ONE);
-    f = vk::formatInfo(R32F);
+    f = rhi::formatInfo(R32F);
     CHECK(f && f->format == VK_FORMAT_R32_SFLOAT && f->swizzle.g == VK_COMPONENT_SWIZZLE_ONE);
-    f = vk::formatInfo(DXT5);
+    f = rhi::formatInfo(DXT5);
     CHECK(f && f->compressed && f->format == VK_FORMAT_BC3_UNORM_BLOCK && f->blockBytes == 16);
-    f = vk::formatInfo(D24S8, VK_FORMAT_D32_SFLOAT_S8_UINT);
+    f = rhi::formatInfo(D24S8, VK_FORMAT_D32_SFLOAT_S8_UINT);
     CHECK(f && f->depth && f->stencil && f->format == VK_FORMAT_D32_SFLOAT_S8_UINT);
-    f = vk::formatInfo(DF24);
+    f = rhi::formatInfo(DF24);
     CHECK(f && f->depth && f->format == VK_FORMAT_D32_SFLOAT);
-    CHECK(!vk::formatInfo(NULLFMT));
-    CHECK(!vk::formatInfo(12345));
-    const auto p = vk::d3dPitch(*vk::formatInfo(DXT1), 13, 7);  // 4 x 2 blocks
+    CHECK(!rhi::formatInfo(NULLFMT));
+    CHECK(!rhi::formatInfo(12345));
+    const auto p = rhi::d3dPitch(*rhi::formatInfo(DXT1), 13, 7);  // 4 x 2 blocks
     CHECK(p.rowBytes == 32 && p.rows == 2);
 }
 
 TEST(formats_convert) {
-    const auto rgb = *vk::formatInfo(vk::d3dfmt::R8G8B8);
+    const auto rgb = *rhi::formatInfo(rhi::d3dfmt::R8G8B8);
     const std::uint8_t src[6] = {1, 2, 3, 4, 5, 6};  // two pixels B,G,R
     std::uint8_t dst[8]{};
-    vk::convertLevel(rgb, src, 6, dst, 2, 1);
+    rhi::convertLevel(rgb, src, 6, dst, 2, 1);
     CHECK(dst[0] == 1 && dst[1] == 2 && dst[2] == 3 && dst[3] == 255 && dst[4] == 4 && dst[7] == 255);
-    const auto a4l4 = *vk::formatInfo(vk::d3dfmt::A4L4);
+    const auto a4l4 = *rhi::formatInfo(rhi::d3dfmt::A4L4);
     const std::uint8_t s2[1] = {0xF3};
     std::uint8_t d2[2]{};
-    vk::convertLevel(a4l4, s2, 1, d2, 1, 1);
+    rhi::convertLevel(a4l4, s2, 1, d2, 1, 1);
     CHECK(d2[0] == 3 * 17 && d2[1] == 255);
 }
 
 TEST(dds_dxt1_mips) {
     // 64x64 DXT1 with 7 mips: 2048 + 512 + 128 + 32 + 8 + 8 + 8 bytes
-    const auto file = makeDds(64, 64, 7, 0x4, vk::d3dfmt::DXT1, 0, 0, 0, 0, 0, 2744);
+    const auto file = makeDds(64, 64, 7, 0x4, rhi::d3dfmt::DXT1, 0, 0, 0, 0, 0, 2744);
     std::string err;
     const auto img = res::parseDds(file, &err);
     CHECK_MSG(img.has_value(), err);
     if (!img) return;
-    CHECK(img->d3dFormat == vk::d3dfmt::DXT1 && img->width == 64 && img->mips == 7 && !img->cube);
+    CHECK(img->d3dFormat == rhi::d3dfmt::DXT1 && img->width == 64 && img->mips == 7 && !img->cube);
     const auto l0 = img->level(0, 0);
     const auto l1 = img->level(0, 1);
     const auto l6 = img->level(0, 6);
@@ -97,13 +97,13 @@ TEST(dds_dxt1_mips) {
 
 TEST(dds_masks_and_cube) {
     auto img = res::parseDds(makeDds(4, 4, 1, 0x41, 0, 32, 0xff0000, 0xff00, 0xff, 0xff000000, 64));
-    CHECK(img && img->d3dFormat == vk::d3dfmt::A8R8G8B8);
+    CHECK(img && img->d3dFormat == rhi::d3dfmt::A8R8G8B8);
     img = res::parseDds(makeDds(4, 4, 1, 0x40, 0, 32, 0xff0000, 0xff00, 0xff, 0, 64));
-    CHECK(img && img->d3dFormat == vk::d3dfmt::X8R8G8B8);
+    CHECK(img && img->d3dFormat == rhi::d3dfmt::X8R8G8B8);
     img = res::parseDds(makeDds(4, 4, 1, 0x20000, 0, 8, 0xff, 0, 0, 0, 16));
-    CHECK(img && img->d3dFormat == vk::d3dfmt::L8);
+    CHECK(img && img->d3dFormat == rhi::d3dfmt::L8);
     img = res::parseDds(makeDds(4, 4, 1, 0x2, 0, 8, 0, 0, 0, 0xff, 16));
-    CHECK(img && img->d3dFormat == vk::d3dfmt::A8);
+    CHECK(img && img->d3dFormat == rhi::d3dfmt::A8);
     // numeric FOURCC: A16B16G16R16F
     img = res::parseDds(makeDds(2, 2, 1, 0x4, 113, 0, 0, 0, 0, 0, 32));
     CHECK(img && img->d3dFormat == 113);

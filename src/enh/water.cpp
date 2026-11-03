@@ -16,7 +16,7 @@
 #include "enh/rhi_scope.h"
 #include "enh/rt_scene.h"
 #include "shader/embedded.h"
-#include "vk/formats.h"
+#include "rhi/d3d_formats.h"
 
 namespace rvk::enh {
 
@@ -80,7 +80,7 @@ std::unique_ptr<d3d9::Texture> uploadHalf4(d3d9::Device& device, int width, int 
     desc.width = static_cast<std::uint32_t>(width);
     desc.height = static_cast<std::uint32_t>(height);
     desc.levels = 1;
-    desc.format = vk::d3dfmt::A16B16G16R16F;
+    desc.format = rhi::d3dfmt::A16B16G16R16F;
     desc.pool = d3d9::POOL_MANAGED;
     auto tex = device.createTexture(desc);
     d3d9::Texture::Locked l;
@@ -459,7 +459,7 @@ void Water::serviceBake(d3d9::Device& device) {
             desc.width = static_cast<std::uint32_t>(f.width);
             desc.height = static_cast<std::uint32_t>(f.height);
             desc.levels = 1;
-            desc.format = vk::d3dfmt::A16B16G16R16F;
+            desc.format = rhi::d3dfmt::A16B16G16R16F;
             desc.pool = d3d9::POOL_MANAGED;
             auto tex = device.createTexture(desc);
             d3d9::Texture::Locked l;

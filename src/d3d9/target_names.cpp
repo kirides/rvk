@@ -39,14 +39,14 @@ void onShadowMaskTarget(Device& device, Surface* surface) {
         s.frame = device.stats().frames;
     }
     const TextureDesc& d = t->desc();
-    if (d.format == vk::d3dfmt::R32F) {
+    if (d.format == rhi::d3dfmt::R32F) {
         if (s.depthCopy != t) {
             s.depthCopy = t;
             t->setDebugLabel("shadow mask: 1/4 depth");
         }
         return;
     }
-    if (d.format != vk::d3dfmt::A8R8G8B8) return;  // the mask chain's buffers are A8R8G8B8
+    if (d.format != rhi::d3dfmt::A8R8G8B8) return;  // the mask chain's buffers are A8R8G8B8
     // "scene-sized": the scene target's size when known (the mask is allocated at the scene size, the SSAO buffers at half)
     const Texture* hdr = device.imageWithRole(scene::ImageRole::SceneHdr);
     const bool full = hdr == nullptr || d.width * 4 > hdr->desc().width * 3;

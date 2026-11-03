@@ -5,7 +5,7 @@
 #include <cstdint>
 
 #include "d3d9/defs.h"
-#include "vk/vk.h"
+#include "rhi/rhi.h"
 
 namespace rvk::d3d9 {
 

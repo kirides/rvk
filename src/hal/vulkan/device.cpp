@@ -30,7 +30,7 @@
 #include "engine/window_mode.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "res/dds.h"
-#include "vk/formats.h"
+#include "rhi/d3d_formats.h"
 
 namespace rvk::hal::vulkan {
 
@@ -296,7 +296,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     window_ = p.window;
     engine::window::onModeSet(p.window, p.windowed, o.width, o.height, p.refreshRate);
     spdlog::info("hal: Vulkan device for window {} ({}x{}, vsync {}, depth {})", static_cast<void*>(p.window), o.width, o.height,
-                 o.vsync, vk::d3dFormatName(o.depthFormat));
+                 o.vsync, rhi::d3dFormatName(o.depthFormat));
     engine::scene::attach(&dev_);  // the frame phase markers (no-ops when they are not installed)
     auto& reg = settings::registry();
     // frame generation providers (vk/framegen.h): which of FSR 3 / FSR 4 this device can run, for the capability report
@@ -1058,8 +1058,8 @@ int fromMemoryRequest(const char* what, const eCGfxShared::eSGfxLayersDesc& d, u
     if (!sizeOk(d.width, std::max(1u, dds->width >> s)) || !sizeOk(d.height, std::max(1u, dds->height >> s)) || !formatOk ||
         (d.usage & (USAGE_RENDERTARGET | USAGE_DEPTHSTENCIL)) != 0) {
         spdlog::warn("hal: {}: {}x{} {} usage 0x{:x} from a {}x{} {} file needs D3DX resampling / conversion: not supported", what,
-                     d.width, d.height, vk::d3dFormatName(d.format), d.usage, dds->width, dds->height,
-                     vk::d3dFormatName(dds->d3dFormat));
+                     d.width, d.height, rhi::d3dFormatName(d.format), d.usage, dds->width, dds->height,
+                     rhi::d3dFormatName(dds->d3dFormat));
         return -1;
     }
     return static_cast<int>(skip);
@@ -1113,13 +1113,13 @@ bEResult HalDevice::GetImageInfoFromMemory(void const* a0, unsigned int a1, eCGf
 
 bEResult HalDevice::CheckDeviceFormat(eCGfxShared::eSGfxLayersDesc const& a0, bool a1) {
     const bEResult r = checkFormat(a0, a1);
-    spdlog::debug("hal: CheckDeviceFormat {} (0x{:x}) {}x{} usage 0x{:x} blend {}: {}", vk::d3dFormatName(a0.format), a0.format,
+    spdlog::debug("hal: CheckDeviceFormat {} (0x{:x}) {}x{} usage 0x{:x} blend {}: {}", rhi::d3dFormatName(a0.format), a0.format,
                   a0.width, a0.height, a0.usage, a1, r == bEResult_Ok ? "yes" : "no");
     return r;
 }
 
 bEResult HalDevice::checkFormat(eCGfxShared::eSGfxLayersDesc const& a0, bool a1) {
-    using namespace vk::d3dfmt;
+    using namespace rhi::d3dfmt;
     const std::uint32_t f = a0.format;
     if (f == NULLFMT) {
         return bEResult_Ok;
@@ -1133,7 +1133,7 @@ bEResult HalDevice::checkFormat(eCGfxShared::eSGfxLayersDesc const& a0, bool a1)
         if ((a0.usage & USAGE_DEPTHSTENCIL) == 0 || a0.depth > 1 || a0.cubeMap) {
             return bEResult_False;
         }
-        const auto info = vk::formatInfo(f, dev_.d24s8Format());
+        const auto info = rhi::formatInfo(f, dev_.d24s8Format());
         if (!info) return bEResult_False;
         return dev_.game().formatSupport(info->format, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) ? bEResult_Ok
                                                                                                                                    : bEResult_False;
@@ -1141,7 +1141,7 @@ bEResult HalDevice::checkFormat(eCGfxShared::eSGfxLayersDesc const& a0, bool a1)
     if (f == INTZ || (a0.usage & USAGE_DEPTHSTENCIL) != 0) {
         return bEResult_False;
     }
-    const auto info = vk::formatInfo(f, dev_.d24s8Format());
+    const auto info = rhi::formatInfo(f, dev_.d24s8Format());
     if (!info || info->depth) {
         return bEResult_False;
     }
@@ -2154,7 +2154,7 @@ bEResult HalDevice::SetRenderTarget(void* a0, void* a1) {
         const auto describe = [](const d3d9::Surface* s) {
             if (s == nullptr || s->texture() == nullptr) return std::string("-");
             const auto& d = s->texture()->desc();
-            return std::format("{}x{} {} tex {}", s->width(), s->texture()->levelHeight(s->level()), vk::d3dFormatName(d.format),
+            return std::format("{}x{} {} tex {}", s->width(), s->texture()->levelHeight(s->level()), rhi::d3dFormatName(d.format),
                                static_cast<const void*>(s->texture()));
         };
         HAL_LOG("hal> SetRenderTarget {} [{}] {} [{}] (back buffer {})", a0, describe(rt), a1,

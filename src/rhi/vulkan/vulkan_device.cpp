@@ -7,7 +7,10 @@
 // pass migration, docs/research/hlsl-rhi.md 8). In the wrapped mode nothing is destroyed with a GPU wait: objects are retired through
 // Frames::retire (VkDeviceImpl::defer).
 
+#include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstring>
 #include <format>
 #include <map>
 #include <mutex>
@@ -19,10 +22,12 @@
 
 #include "rhi/game_device.h"
 #include "rhi/rhi.h"
+#include "rhi/vulkan/game_present.h"
 #include "rhi/vulkan/wrap.h"
 #include "shader/abi.h"
 #include "vk/bindless.h"
 #include "vk/context.h"
+#include "vk/crash_markers.h"
 #include "vk/debug_names.h"
 #include "vk/frames.h"
 #include "vk/framegen.h"
@@ -349,10 +354,19 @@ public:
     // over the renderer's objects (rhi::vulkan::wrap)
     VkDeviceImpl(vk::Context& ctx, vk::Frames& frames, vk::Bindless& bindless, vk::MeshArena* arena)
         : ctx_(ctx), frames_(frames), bindless_(bindless), external_(true), arena_(arena) { record_.init(ctx_, frames_, bindless_); }
+    // the game device: owns its Context / Frames / Bindless / MeshArena / presentation, retires through the frames like a wrapped one (createGameDevice)
+    struct GameTag {};
+    explicit VkDeviceImpl(GameTag) : ctx_(ownCtx_), frames_(ownFrames_), bindless_(ownBindless_), external_(true), ownsGame_(true), arena_(&ownArena_) {
+        record_.init(ctx_, frames_, bindless_);
+    }
 
     ~VkDeviceImpl() override {
         record_.shutdown();  // joins the record threads and destroys the pipeline cache while the renderer's objects still exist
         gpuTimer_.destroy();
+        if (ownsGame_) {
+            destroyGame();
+            return;
+        }
         if (external_) {
             // the renderer's objects outlive us: what we made (samplers, pass layout) goes through the frame retirement
             vk::Context* ctx = &ctx_;
@@ -413,6 +427,85 @@ public:
         caps_.rayQuery = ctx_.features().rayTracing.enabled && ctx_.features().rayTracing.tlasDescriptors;
         fillGameCaps();
         return true;
+    }
+
+    // ---- the game device (createGameDevice) ----
+    bool createGame(const GameDeviceOptions& options) {
+        vk::ContextOptions co;
+        co.validation = options.validation || options.syncValidation;
+        co.adapter = options.adapter;
+        co.syncValidation = options.syncValidation;
+        co.allowRayTracing = options.allowRayTracing;
+        co.frameGenQueues = options.frameGenQueues;
+        if (!ctx_.create(co)) return false;
+        if (!frames_.create(ctx_) || !bindless_.create(ctx_, frames_)) return false;
+        frames_.attachRing(&ring_);
+        if (!createLayout()) return false;
+        setRefShift(refShift());
+        caps_.adapterName = ctx_.deviceName();
+        caps_.backend = Backend::Vulkan;
+        caps_.bindless = true;
+        caps_.heapSize = vk::Bindless::kMax2D;
+        caps_.drawIndirectCount = ctx_.features().drawIndirectCount;
+        caps_.textureBlit = true;
+        caps_.rayQuery = ctx_.features().rayTracing.enabled && ctx_.features().rayTracing.tlasDescriptors;
+        fillGameCaps();
+        {
+            // the static vertex / index buffers' arena (vk/mesh_arena.h); with the ray tracing tier also BLAS build inputs that shaders read through their
+            // addresses (docs/research/raytracing.md 2)
+            VkBufferUsageFlags usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+            if (ctx_.features().rayTracing.enabled) {
+                usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+            }
+            ownArena_.create(ctx_, usage);
+        }
+        presenter_ = std::make_unique<vulkan::VkGamePresenter>(*this, ctx_, frames_);
+        {
+            VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+            bci.size = 16;
+            bci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+            VmaAllocationCreateInfo aci{};
+            aci.usage = VMA_MEMORY_USAGE_AUTO;
+            aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+            VmaAllocationInfo info{};
+            if (vmaCreateBuffer(ctx_.allocator(), &bci, &aci, &nullVertexBuffer_, &nullVertexAlloc_, &info) != VK_SUCCESS) return false;
+            vk::names::object(ctx_, nullVertexBuffer_, VK_OBJECT_TYPE_BUFFER, "rvk null vertex buffer (unbound streams)");
+            const float v[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+            std::memcpy(info.pMappedData, v, sizeof(v));
+        }
+        frameValue_ = frames_.currentValue();
+        frameSlot_ = frames_.currentSlot();
+        return true;
+    }
+
+    // the device is idle (the owner waited): everything it owns goes, in the order the objects depend on each other
+    void destroyGame() {
+        if (ctx_.device() == VK_NULL_HANDLE) return;
+        ctx_.waitIdle();
+        presenter_.reset();  // the present thread, the swapchain, AMD's swapchain, the acquire semaphores
+        mainList_.reset();
+        uploadList_.reset();
+        transients_.clear();  // (the textures' destructors retire their images through the frames)
+        ringBuffers_.clear();
+        meshBuffers_.clear();
+        scratch_.destroy(ctx_);
+        for (vk::rt::AddressBuffer& g : graveyard_) g.destroy(ctx_);
+        graveyard_.clear();
+        for (VkSampler s : samplers_) vkDestroySampler(ctx_.device(), s, nullptr);
+        samplers_.clear();
+        layout_.destroy(ctx_);
+        if (nullVertexBuffer_ != VK_NULL_HANDLE) {
+            vmaDestroyBuffer(ctx_.allocator(), nullVertexBuffer_, nullVertexAlloc_);
+            nullVertexBuffer_ = VK_NULL_HANDLE;
+        }
+        // frames_ runs the retired destructors (images, bindless slot releases): before the bindless heap goes away
+        frames_.destroy();
+        ownArena_.destroy();  // after frames_: its retired frees go into the arena
+        bindless_.destroy();
+        ctx_.setLostReporter(nullptr);
+        crashMarkers_.destroy();
+        ctx_.destroy();
     }
 
     void fillGameCaps() {
@@ -490,16 +583,31 @@ public:
 
     CommandList& frameCommands() override { return listFor(mainList_, frames_.cmd(), false); }
     CommandList& passCommands() override { return listFor(mainList_, frames_.cmd(), true); }
-    CommandList& uploadCommands() override { return listFor(uploadList_, frames_.uploadCmd(), false); }
+    CommandList& uploadCommands() override {
+        VkCommandBuffer cmd = frames_.uploadCmd();
+        if (!uploadUsed_ && ownsGame_) {
+            // the upload buffer runs between the previous frame's draws and this frame's: order it after all earlier work
+            VkMemoryBarrier2 b{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+            b.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            b.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+            b.dstStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+            b.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_TRANSFER_READ_BIT;
+            VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+            di.memoryBarrierCount = 1;
+            di.pMemoryBarriers = &b;
+            vkCmdPipelineBarrier2(cmd, &di);
+            uploadUsed_ = true;
+            if (gpuTimer_.enabled()) gpuTimer_.mark(cmd, frames_.currentSlot(), vk::GpuTimer::Stream::Upload, "upload begin");
+        }
+        return listFor(uploadList_, cmd, false);
+    }
     void* nativeCommandBuffer(CommandList& list) override;
 
-    RingAlloc allocRing(std::uint64_t size, std::uint64_t alignment, std::uint64_t minOffset) override {
-        return frames_.allocate(size, alignment, minOffset);
+    RingAlloc allocRingSlow(std::uint64_t size, std::uint64_t alignment, std::uint64_t minOffset) override {
+        return frames_.allocate(size, alignment, minOffset);  // (switches ring_'s chunk)
     }
     RingAlloc allocCapture(std::uint64_t size, std::uint64_t alignment) override { return frames_.allocate(size, alignment, 0); }
     Buffer& ringBuffer(const RingAlloc& alloc) override;
-    std::uint64_t frameValue() const override { return frames_.currentValue(); }
-    std::uint32_t frameSlot() const override { return frames_.currentSlot(); }
     std::uint64_t completedFrame() const override { return frames_.completedValue(); }
     void waitFrame(std::uint64_t value) override { frames_.waitFor(value); }
     void retire(std::function<void()> fn) override { frames_.retire(std::move(fn)); }
@@ -601,6 +709,108 @@ public:
     std::unique_ptr<ImGuiBackend> createImGuiBackend() override { return vulkan::createImGuiBackend(*this); }
 
     vk::MeshArena* arena() { return arena_; }
+
+    // ---- the frame loop ----
+    void beginFrame() override {
+        frames_.begin();
+        if (!bindlessInit_) {
+            bindless_.recordInit(frames_.cmd());
+            bindlessInit_ = true;
+        }
+        frameValue_ = frames_.currentValue();
+        frameSlot_ = frames_.currentSlot();
+        uploadUsed_ = false;
+        record_.resetRecordPools(frames_.currentSlot());  // a new frame slot: its secondary command buffer pools are reset
+    }
+    double lastSlotWaitMs() const override { return frames_.lastSlotWaitMs(); }
+    void submitFrame(const char* finalMark) override {
+        if (uploadUsed_) {
+            VkMemoryBarrier2 b{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+            b.srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+            b.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+            b.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            b.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT;
+            VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+            di.memoryBarrierCount = 1;
+            di.pMemoryBarriers = &b;
+            vkCmdPipelineBarrier2(frames_.uploadCmd(), &di);
+            if (gpuTimer_.enabled()) gpuTimer_.mark(frames_.uploadCmd(), frames_.currentSlot(), vk::GpuTimer::Stream::Upload, "uploads");
+        }
+        if (gpuTimer_.enabled()) gpuTimer_.mark(frames_.cmd(), frames_.currentSlot(), vk::GpuTimer::Stream::Main, finalMark);
+        VkSemaphore wait = VK_NULL_HANDLE, signal = VK_NULL_HANDLE;
+        if (presenter_) presenter_->takeSubmitSync(wait, signal);
+        frames_.submit(wait, signal);
+        frameValue_ = frames_.currentValue();
+        frameSlot_ = frames_.currentSlot();
+    }
+    void waitIdle() override { frames_.waitIdle(); }
+    bool namesEnabled() const override { return ctx_.namesEnabled(); }
+
+    SamplerIndex createGameSampler(const GameSamplerDesc& desc, const std::string& name) override {
+        VkSamplerCreateInfo ci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        ci.magFilter = desc.magFilter;
+        ci.minFilter = desc.minFilter;
+        ci.mipmapMode = desc.mipmap;
+        ci.addressModeU = desc.addressU;
+        ci.addressModeV = desc.addressV;
+        ci.addressModeW = desc.addressW;
+        ci.mipLodBias = desc.lodBias;
+        const bool aniso = desc.maxAnisotropy > 1.0f && ctx_.features().samplerAnisotropy;
+        ci.anisotropyEnable = aniso ? VK_TRUE : VK_FALSE;
+        ci.maxAnisotropy = aniso ? std::clamp(desc.maxAnisotropy, 1.0f, ctx_.features().maxAnisotropy) : 1.0f;
+        ci.minLod = desc.minLod;
+        ci.maxLod = desc.singleLevel ? ci.minLod : VK_LOD_CLAMP_NONE;
+        ci.borderColor = desc.border;
+        VkSampler sampler = VK_NULL_HANDLE;
+        if (vkCreateSampler(ctx_.device(), &ci, nullptr, &sampler) != VK_SUCCESS) return 0;
+        samplers_.push_back(sampler);
+        const std::uint32_t index = bindless_.addSampler(sampler);
+        if (ctx_.namesEnabled() && !name.empty()) {
+            vk::names::object(ctx_, sampler, VK_OBJECT_TYPE_SAMPLER, std::format("sampler [slot {}] {}", index, name));
+        }
+        return index;
+    }
+    std::uint64_t nullVertexBuffer() const override { return reinterpret_cast<std::uint64_t>(nullVertexBuffer_); }
+    void clearAttachments(const ClearOp& op) override { vkCmdClearAttachments(frames_.cmd(), op.count, op.atts, 1, &op.rect); }
+
+    // ---- debug regions and crash markers ----
+    bool regionsAvailable() const override {
+        return ctx_.debugUtilsAvailable() && vkCmdBeginDebugUtilsLabelEXT != nullptr && vkCmdEndDebugUtilsLabelEXT != nullptr;
+    }
+    void labelBegin(const char* name) override {
+        // a colour per name (stable): the label's hue from a hash, so neighbouring regions differ
+        std::uint32_t h = 2166136261u;
+        for (const char* c = name; *c != 0; ++c) h = (h ^ static_cast<std::uint8_t>(*c)) * 16777619u;
+        const float hue = static_cast<float>(h % 360u) / 60.0f;
+        const float x = 1.0f - std::fabs(std::fmod(hue, 2.0f) - 1.0f);
+        const float rgb[6][3] = {{1, x, 0}, {x, 1, 0}, {0, 1, x}, {0, x, 1}, {x, 0, 1}, {1, 0, x}};
+        const float* c = rgb[static_cast<int>(hue) % 6];
+        VkDebugUtilsLabelEXT l{VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT};
+        l.pLabelName = name;
+        l.color[0] = 0.35f + 0.5f * c[0];
+        l.color[1] = 0.35f + 0.5f * c[1];
+        l.color[2] = 0.35f + 0.5f * c[2];
+        l.color[3] = 1.0f;
+        vkCmdBeginDebugUtilsLabelEXT(frames_.cmd(), &l);
+    }
+    void labelEnd() override { vkCmdEndDebugUtilsLabelEXT(frames_.cmd()); }
+    bool setCrashMarkers(bool on) override {
+        if (!on) {
+            ctx_.setLostReporter(nullptr);
+            return true;
+        }
+        if (!crashMarkers_.create(ctx_)) return false;
+        ctx_.setLostReporter([this]() { return crashMarkers_.report(); });
+        return true;
+    }
+    void crashMarker(bool begin, const char* text) override {
+        if (begin) {
+            crashMarkers_.begin(frames_.cmd(), frameValue_, text);
+        } else {
+            crashMarkers_.end(frames_.cmd(), frameValue_, text);
+        }
+    }
+    GamePresenter& presenter() override { return *presenter_; }
 
     std::unique_ptr<Buffer> createBuffer(const BufferDesc& desc) override {
         auto b = std::make_unique<VkBufferImpl>(*this, desc);
@@ -768,10 +978,17 @@ private:
     vk::Context ownCtx_;  // (unused when wrapped)
     vk::Frames ownFrames_;
     vk::Bindless ownBindless_;
+    vk::MeshArena ownArena_;  // (the game device only)
     vk::Context& ctx_;
     vk::Frames& frames_;
     vk::Bindless& bindless_;
-    bool external_ = false;
+    bool external_ = false;  // retires through the frames instead of waiting (wrapped and game devices)
+    bool ownsGame_ = false;  // the game device owns the renderer's objects (createGameDevice)
+    bool uploadUsed_ = false;
+    VkBuffer nullVertexBuffer_ = VK_NULL_HANDLE;
+    VmaAllocation nullVertexAlloc_ = VK_NULL_HANDLE;
+    vk::CrashMarkers crashMarkers_;
+    std::unique_ptr<vulkan::VkGamePresenter> presenter_;
     vk::PassLayout layout_;
     DeviceCaps caps_;
     bool bindlessInit_ = false;
@@ -954,6 +1171,12 @@ void VkTextureImpl::setDebugName(const std::string& name) {
 VkImageView VkTextureImpl::attachmentView(std::uint32_t mip, std::uint32_t layer) {
     // a wrapped image: the image's own attachment views (identity swizzle, created once)
     if (external_) return image_->attachmentView(dev_.ctx(), mip, layer);
+    // a swizzled sampled view (X8R8G8B8's alpha = 1, L8) cannot be an attachment: the image's own identity views
+    const VkComponentMapping& sw = image_->desc().swizzle;
+    if (sw.r != VK_COMPONENT_SWIZZLE_IDENTITY || sw.g != VK_COMPONENT_SWIZZLE_IDENTITY || sw.b != VK_COMPONENT_SWIZZLE_IDENTITY ||
+        sw.a != VK_COMPONENT_SWIZZLE_IDENTITY) {
+        return image_->attachmentView(dev_.ctx(), mip, layer);
+    }
     if (plain2D() || (mip == 0 && layer == 0 && desc_.mips == 1 && desc_.layers == 1)) return image_->view();
     return view(VK_IMAGE_VIEW_TYPE_2D, image_->aspect(), mip, 1, layer, 1);
 }
@@ -1662,5 +1885,15 @@ std::unique_ptr<CommandList> wrapCommandBuffer(Device& device, VkCommandBuffer c
 }
 
 }  // namespace vulkan
+
+std::unique_ptr<GameDevice> createGameDevice(Backend backend, const GameDeviceOptions& options) {
+    if (backend != Backend::Vulkan) {
+        spdlog::error("rhi: the {} game device is not available yet", backendName(backend));
+        return nullptr;
+    }
+    auto d = std::make_unique<VkDeviceImpl>(VkDeviceImpl::GameTag{});
+    if (!d->createGame(options)) return nullptr;
+    return d;
+}
 
 }  // namespace rvk::rhi

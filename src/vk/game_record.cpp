@@ -16,7 +16,7 @@
 #include "vk/game_record.h"
 #include "vk/debug_names.h"
 #include "vk/image.h"
-#include "vk/formats.h"
+#include "rhi/d3d_formats.h"
 #include "rhi/vulkan/wrap.h"
 
 namespace rvk::vk {

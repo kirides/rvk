@@ -4,7 +4,7 @@
 #include <cstring>
 #include <format>
 
-#include "vk/formats.h"
+#include "rhi/d3d_formats.h"
 
 namespace rvk::res {
 namespace {
@@ -27,7 +27,7 @@ struct Header {
 static_assert(sizeof(Header) == 124);
 
 std::uint32_t formatFromMasks(const PixelFormat& pf) {
-    using namespace vk::d3dfmt;
+    using namespace rhi::d3dfmt;
     const bool alpha = (pf.flags & DDPF_ALPHAPIXELS) != 0;
     const std::uint32_t a = alpha ? pf.aMask : 0;
     if ((pf.flags & DDPF_RGB) != 0) {
@@ -82,7 +82,7 @@ std::uint64_t levelBytes(std::uint32_t fmt, std::uint32_t w, std::uint32_t h, st
 }  // namespace
 
 std::uint32_t d3dFormatBlockBytes(std::uint32_t fmt, bool* compressed) {
-    const auto f = vk::formatInfo(fmt);
+    const auto f = rhi::formatInfo(fmt);
     if (!f) {
         return 0;
     }
@@ -140,7 +140,7 @@ std::optional<DdsImage> parseDds(std::span<const std::uint8_t> file, std::string
     std::size_t dataOffset = 4 + sizeof(Header);
     DdsImage img;
     if ((h.pf.flags & DDPF_FOURCC) != 0) {
-        if (h.pf.fourCC == vk::d3dfmt::fourcc('D', 'X', '1', '0')) {
+        if (h.pf.fourCC == rhi::d3dfmt::fourcc('D', 'X', '1', '0')) {
             return fail("DX10 DDS header not supported");
         }
         img.d3dFormat = h.pf.fourCC;  // DXTn FOURCC or a numeric D3DFORMAT (e.g. 113 = A16B16G16R16F)

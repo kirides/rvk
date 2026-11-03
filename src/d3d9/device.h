@@ -42,19 +42,8 @@
 #include "shader/abi.h"
 #include "shader/translate.h"
 #include "shader/hlsl.h"
-#include "vk/bindless.h"
-#include "vk/context.h"
-#include "vk/formats.h"
-#include "vk/frames.h"
-#include "vk/crash_markers.h"
-#include "vk/fg_swapchain.h"
-#include "vk/image.h"
-#include "vk/mesh_arena.h"
-#include "vk/pacer.h"
-#include "vk/passes.h"
-#include "vk/pipeline.h"
-#include "vk/presenter.h"
-#include "vk/swapchain.h"
+#include "core/pacer.h"
+#include "rhi/d3d_formats.h"  // (the D3D9 format table: VkFormat vocabulary, no Vulkan objects)
 
 struct HWND__;
 
@@ -68,6 +57,10 @@ using rhi::VertexInputValues;
 using rhi::DynamicStateValues;
 using rhi::ClearOp;
 using rhi::PipelineDesc;
+using rhi::BlendAttachment;
+using rhi::PresentOverlay;
+using rhi::kMaxVertexBindings;
+using rhi::kMaxVertexAttributes;
 using rhi::GamePipeline;
 using rhi::kChunkPackets;
 
@@ -97,7 +90,7 @@ public:
 
     bool valid() const { return valid_; }
     const TextureDesc& desc() const { return desc_; }
-    const vk::FormatInfo& format() const { return fmt_; }
+    const rhi::FormatInfo& format() const { return fmt_; }
     std::uint32_t levels() const { return desc_.levels; }
     std::uint32_t faces() const { return desc_.type == TextureType::Cube ? 6 : 1; }
     std::uint32_t levelWidth(std::uint32_t level) const { return std::max(1u, desc_.width >> level); }
@@ -127,9 +120,8 @@ public:
     // render thread
     // the RHI texture behind it (the image and its layout tracking: rhi::Texture::layout / CommandList::transition)
     rhi::Texture& rhi() { return *tex_; }
-    // the Vulkan image behind the RHI texture: only for the draw path that has not moved behind the backend seam yet (WP2c: scope attachments, packet
-    // application); everything else uses rhi() / bindlessSlot()
-    vk::Image& image() { return *vkImage_; }
+    // the tracked layout of the image (UNDEFINED for the NULL render target, which has none)
+    VkImageLayout layout() const { return tex_ ? tex_->layout() : VK_IMAGE_LAYOUT_UNDEFINED; }
     std::uint32_t bindlessSlot() const { return slot_; }
     bool prepareForSampling(rhi::CommandList& cl);  // uploads pending data, transitions to shader-read; false if nothing to sample
     // what the engine uses the image for (Device::tagImage; render thread)
@@ -168,12 +160,10 @@ private:
 
     Device& dev_;
     TextureDesc desc_;
-    vk::FormatInfo fmt_{};
+    rhi::FormatInfo fmt_{};
     bool valid_ = false;
     bool isNull_ = false;
     std::unique_ptr<rhi::Texture> tex_;  // the backend's image + its tracked layout + the bindless slot (owned: destroyed through the device's retirement)
-    vk::Image* vkImage_ = &nullImage();  // tex_'s Vulkan image (Texture::image(): the not yet moved draw path); an empty image for the NULL target
-    static vk::Image& nullImage();
     std::uint32_t slot_ = 0;             // tex_->heapSampled()
     std::mutex mutex_;
     std::vector<Level> cpu_;            // [face * levels + level], allocated on demand
@@ -482,25 +472,6 @@ struct RtSceneRef {
     std::uint64_t frame = 0;
 };
 
-// Drawn on top of the frame at present (the in-game overlay, src/overlay): after the back buffer was copied into the
-// swapchain image, so captures of the back buffer (rvk_screenshot, the engine snapshot) never contain it; or, for debugging,
-// into the back buffer itself (Device::drawOverlayIntoBackBuffer). Render thread.
-class PresentOverlay {
-public:
-    virtual ~PresentOverlay() = default;
-    // anything to draw this frame? false leaves the present path untouched
-    virtual bool active() = 0;
-    // records draws inside a dynamic rendering scope of one colour attachment of `extent` (LOAD / STORE; viewport, scissor,
-    // pipeline and descriptor sets are the overlay's own)
-    virtual void record(rhi::CommandList& cmd, VkExtent2D extent) = 0;
-    // The AMD frame generation swapchain draws the overlay in its present callback (another thread, on the generated and the real
-    // frame): prepare builds the UI on the render thread and keeps its draw lists (true: there is something to draw), recordPrepared
-    // draws the latest ones into the scope (any thread; the same contract as record)
-    virtual bool prepare(VkExtent2D /*extent*/) { return false; }
-    virtual void recordPrepared(rhi::CommandList& /*cmd*/, VkExtent2D /*extent*/) {}
-    virtual bool hasPrepared() { return false; }
-};
-
 // What an injected pass gets (Device::inject, d3d9/inject.h; render thread). `cmd` is the frame's command list outside any
 // rendering scope (with nothing bound: GameDevice::passCommands); the pass records its own barriers (CommandList::transition, Device::readable), binds
 // its own pipeline and push constants, and may begin / end its own rendering scopes. It must not change the D3D9 state.
@@ -534,6 +505,7 @@ struct DeviceOptions {
     std::uint32_t perfFrame = 0;     // [debug] perf_frame: log the GPU time of every pass of this frame
     bool allowRayTracing = true;     // rt.allow: enable the ray tracing tier when the GPU has it (vk::ContextOptions)
     bool frameGenQueues = false;     // framegen.mode != off at start: the extra queues of the frame generation swapchain
+    rhi::Backend backend = rhi::Backend::Vulkan;  // the game device's API
 };
 
 struct Viewport {
@@ -621,7 +593,7 @@ struct PerfStats {
     std::uint64_t legacyDraws[2] = {};
     std::uint64_t splitMismatches = 0;
     std::vector<float> frameIntervalsMs;   // present-to-present
-    vk::FramePacer::Stats pacer;
+    pacing::FramePacer::Stats pacer;
     double pacerRate = 0.0;
     bool pacerVblank = false;
 };
@@ -754,7 +726,7 @@ public:
     // re-creates the swapchain. `loaderDll` = the FidelityFX loader. True when the swapchain is the requested kind afterwards;
     // false: the reason is frameGenReason() (ours is in use; a minimised window is retried by the caller).
     bool setFrameGenSwapchain(bool want, const std::filesystem::path& loaderDll);
-    bool frameGenSwapchainActive() const { return swapchain_.frameGenActive(); }
+    bool frameGenSwapchainActive() const { return game_->presenter().frameGenActive(); }
     // shutdown: the generator's context goes (FrameGenClient), then AMD's swapchain, without building another
     void shutdownFrameGenSwapchain();
     rhi::PresentWrapper* frameGenSwapchain() { return presentWrapper(); }
@@ -831,9 +803,9 @@ public:
     // mode (vkAcquireFullScreenExclusiveModeEXT, retried while it fails) - false releases it. Engine thread, before present.
     // Returns true when the swapchain was re-created.
     bool setFullScreenExclusive(void* monitor, bool hold);
-    bool fullScreenExclusiveHeld() const { return swapchain_.fullScreenExclusiveHeld(); }
-    bool fullScreenExclusiveConfigured() const { return swapchain_.fullScreenExclusiveConfigured(); }
-    VkPresentModeKHR presentMode() const { return swapchain_.presentMode(); }
+    bool fullScreenExclusiveHeld() const { return game_->presenter().fullScreenExclusiveHeld(); }
+    bool fullScreenExclusiveConfigured() const { return game_->presenter().fullScreenExclusiveConfigured(); }
+    int presentMode() const { return game_->presenter().info().presentMode; }
     // the window's display mode changed (exclusive fullscreen): the pacer queries the monitor's refresh rate again
     void displayModeChanged();
     // the game's refresh rate as a frame cap with vsync (borderless fullscreen honouring a refresh choice below the
@@ -847,15 +819,15 @@ public:
     void drawOverlayIntoBackBuffer();
     // colour format the overlay renders to (the swapchain's, or the back buffer's with intoBackBuffer)
     VkFormat overlayFormat() const;
-    bool presentValid() const { return swapchain_.valid(); }  // (the presentation itself has not moved behind the seam yet: WP2c)
+    bool presentValid() const { return game_->presenter().valid(); }
     // what the presentation offers the enhancements (the swapchain's size / format, why AMD's swapchain was not used)
-    VkExtent2D presentExtent() const { return swapchain_.extent(); }
-    VkFormat presentFormat() const { return swapchain_.format(); }
-    bool frameGenWanted() const { return swapchain_.frameGenWanted(); }
-    const std::string& frameGenReason() const { return swapchain_.frameGenReason(); }
+    VkExtent2D presentExtent() const { return game_->presenter().info().extent; }
+    VkFormat presentFormat() const { return game_->presenter().info().format; }
+    bool frameGenWanted() const { return game_->presenter().frameGenWanted(); }
+    const std::string& frameGenReason() const { return game_->presenter().frameGenReason(); }
     // the swapchain's image counts (the overlay's UI backend buffers its resources for them)
-    std::uint32_t presentMinImageCount() const { return swapchain_.minImageCount(); }
-    std::uint32_t presentImageCount() const { return swapchain_.imageCount(); }
+    std::uint32_t presentMinImageCount() const { return game_->presenter().info().minImageCount; }
+    std::uint32_t presentImageCount() const { return game_->presenter().info().imageCount; }
     // the last frame's numbers for the overlay's performance panel (cheap, always on; GPU only with [debug] perf)
     struct LiveFrame {
         float intervalMs = 0.0f;  // present to present
@@ -1135,20 +1107,15 @@ public:
     std::uint32_t frameSlot() const { return game_->frameSlot(); }
     std::uint64_t completedFrame() const { return game_->completedFrame(); }
     void retire(std::function<void()> fn) { game_->retire(std::move(fn)); }
-    // the Vulkan image of an RHI texture of this device (Texture::image(): the draw path that has not moved behind the seam yet)
-    vk::Image& vkImage(rhi::Texture& texture);
     bool namesEnabled() const;
     // the slim RHI over this device's Vulkan objects (rhi/vulkan/wrap.h): the backend seam `game()` as an rhi::Device (passes, textures, acceleration structures)
     rhi::Device* rhi() { return game_.get(); }
     rhi::GameDevice& game() { return *game_; }  // valid between create() and destroy()
-    vk::MeshArena& meshArena() { return meshArena_; }
-    vk::Bindless& bindless() { return bindless_; }
-    std::uint64_t frameValue() const { return frames_.currentValue(); }
+    std::uint64_t frameValue() const { return game_->frameValue(); }
     VkFormat d24s8Format() const { return d24s8_; }
     bool recordingThread() const;
-    // the frame's upload command buffer (submitted before the frame's draws); render thread
-    VkCommandBuffer uploadCommands();
-    // the same as an RHI list, ordered after the earlier work (the barrier of the first use in a frame is recorded here); render thread
+    // the frame's upload command list (submitted before the frame's draws), ordered after the earlier work (the backend records the barrier of the
+    // first use in a frame); render thread
     rhi::CommandList& uploadList();
     // the frame's main command list (GameDevice::frameCommands)
     rhi::CommandList& frameList() { return game_->frameCommands(); }
@@ -1169,7 +1136,8 @@ private:
     };
 
     void beginFrame();
-    void submitFrame(VkSemaphore waitAcquire, VkSemaphore signalRendered);
+    // ends the open scope and submits the frame's work; `presenting`: the frame ends in a present blit (the GPU timestamp label)
+    void submitFrame(bool presenting);
     void processReleases();
     bool prepareTextures();
     void endRendering();
@@ -1191,7 +1159,7 @@ private:
     bool gbufferScope() const { return gbuf_.normal != nullptr && gbufArmed_ && gbufferTargetsMatch(); }
     // a G-buffer material draw: the material pixel shader's Gbuffer variant applies (opaque or alpha-over, depth tested)
     bool gbufferEligible(const scene::Phase& phase, draws::Kind kind) const;
-    vk::BlendAttachment attachmentBlend(std::uint32_t index) const;
+    BlendAttachment attachmentBlend(std::uint32_t index) const;
     void variantWorker();
     void stopVariantWorker();
     void enqueueShaderJob(Shader* shader, std::function<void()> job);  // the compile of a translated shader (createShader)
@@ -1214,7 +1182,7 @@ private:
     // A draw's recording state: prepareDraw / the draw call compute the packet (the interned rhi::VertexInputValues /
     // rhi::DynamicStateValues blocks below, plus the push constants); the backend records it: now through
     // GameDevice::applyDrawPacket, or later in a chunk on a record thread (docs/research/performance.md 12 + 14)
-    bool computeVertexInput(vk::PipelineDesc& pd, VertexInputValues& out);
+    bool computeVertexInput(PipelineDesc& pd, VertexInputValues& out);
     void computeDynamicState(std::uint32_t primitiveType, DynamicStateValues& out) const;
     // records the packet now (after the pending batch) or, when it is batchable and batching is on, appends it to the batch
     void submitPacket(DrawPacket& p);  // p = packet_: interns its vertex input / dynamic state, then records or batches it
@@ -1234,17 +1202,10 @@ private:
     static std::uint32_t slotOf(std::uint32_t d3dSampler);
 
     DeviceOptions options_;
-    vk::Context ctx_;
-    vk::Frames frames_;
-    vk::MeshArena meshArena_;
-    vk::Bindless bindless_;
-    vk::Swapchain swapchain_;
-    vk::Presenter presenter_;
     void recreateSwapchain();
-    vk::FramePacer pacer_;
+    rhi::GamePresenter& pres() const { return game_->presenter(); }
+    pacing::FramePacer pacer_;
     FrameGenClient* fgClient_ = nullptr;
-    std::unique_ptr<rhi::PresentWrapper> fgWrapper_;  // presentWrapper(): over swapchain_'s AMD swapchain
-    const vk::FgSwapchain* fgWrapperFor_ = nullptr;
     bool fgRunning_ = false;
     bool fgUiInstalled_ = false;
     // live output / base rate (once a second) and the report window
@@ -1276,7 +1237,6 @@ private:
     std::unique_ptr<Texture> depthBuffer_;
     Surface* backBufferSurface_ = nullptr;
     Surface* depthSurface_ = nullptr;
-    VkSemaphore acquireSemaphores_[vk::Frames::kInFlight]{};
 
     // shader cache
     std::mutex shaderMutex_;
@@ -1289,11 +1249,11 @@ private:
     struct PipelineKey {
         std::uint64_t vs = 0;
         std::uint64_t ps = 0;
-        vk::PipelineDesc desc{};  // vs / fs = VK_NULL_HANDLE
+        PipelineDesc desc{};  // vs / fs = VK_NULL_HANDLE
     };
     void loadPipelineKeys();
     void savePipelineKeys();
-    void recordPipelineKey(const vk::PipelineDesc& pd);
+    void recordPipelineKey(const PipelineDesc& pd);
     void prewarmPipelines(std::uint64_t shaderHash);
     std::mutex keysMutex_;
     std::vector<PipelineKey> keys_;
@@ -1305,11 +1265,6 @@ private:
     // samplers
     std::mutex samplerMutex_;
     std::unordered_map<SamplerKey, std::uint32_t, SamplerKeyHash> samplers_;
-    std::vector<VkSampler> samplerObjects_;
-
-    // null vertex stream (inputs the declaration does not provide read (0,0,0,1))
-    VkBuffer nullVertexBuffer_ = VK_NULL_HANDLE;
-    VmaAllocation nullVertexAlloc_ = VK_NULL_HANDLE;
 
     // D3D9 state
     std::array<std::uint32_t, RS_COUNT> rs_{};
@@ -1348,14 +1303,13 @@ private:
     // DrawPrimitiveUP data replaces stream 0 for one draw
     struct UpStream {
         bool active = false;
-        VkBuffer buffer = VK_NULL_HANDLE;
-        VkDeviceSize offset = 0;
+        std::uint64_t buffer = 0;  // the backend's buffer handle (ring block)
+        std::uint64_t offset = 0;
         std::uint32_t stride = 0;
     } up_;
 
     // recording state
     bool rendering_ = false;
-    bool uploadUsed_ = false;
     std::uint32_t colorCount_ = 0;
     VkFormat colorFormats_[kRenderTargets]{};
     VkFormat depthFormat_ = VK_FORMAT_UNDEFINED;
@@ -1388,18 +1342,18 @@ private:
     void splitStage(bool vertex, const Shader& sh, rhi::GpuRef (&windows)[shader::abi::kConstWindows]);
     void verifySplit(bool vertex, const Shader& sh);
     // redundant-command filters, valid within one command buffer (reset by beginFrame)
-    vk::PipelineDesc lastPipelineDesc_{};
+    PipelineDesc lastPipelineDesc_{};
     GamePipeline lastPipeline_ = GamePipeline::None;
     bool lastPipelineValid_ = false;
     // recently used descriptions -> pipeline (prepareDraw: in front of the backend's pipeline cache)
     struct RecentPipeline {
-        vk::PipelineDesc desc{};
+        PipelineDesc desc{};
         GamePipeline pipeline = GamePipeline::None;
     };
     std::array<RecentPipeline, 256> recentPipelines_{};
-    static std::size_t recentSlot(const vk::PipelineDesc& pd);
-    GamePipeline findPipeline(const vk::PipelineDesc& d);
-    bool sameDesc(const vk::PipelineDesc& a, const vk::PipelineDesc& b) const;
+    static std::size_t recentSlot(const PipelineDesc& pd);
+    GamePipeline findPipeline(const PipelineDesc& d);
+    bool sameDesc(const PipelineDesc& a, const PipelineDesc& b) const;
     // what a vertex shader's inputs read from a vertex declaration (computeVertexInput): fixed per (declaration, shader)
     struct VertexPlanInput {
         std::uint32_t location = 0;
@@ -1510,7 +1464,7 @@ private:
     std::uint64_t ringBytesBase_ = 0;
     std::uint32_t passIndex_ = 0;   // render passes of the current submission (GPU detail labels)
     std::uint32_t passDraws_ = 0;   // draws in the open render pass
-    std::uint64_t gpuDetailFrame_[vk::Frames::kInFlight]{};  // frame number whose details a slot records (0 = none)
+    std::uint64_t gpuDetailFrame_[rhi::kFramesInFlight]{};  // frame number whose details a slot records (0 = none)
 
     // frame semantics
     scene::PhaseTracker phases_;
@@ -1534,10 +1488,10 @@ private:
     std::map<std::string, std::string> status_;
     std::uint32_t shadowDepthMaps_ = 0;
     std::uint32_t customVertices_ = 0;    // the draw prepared by prepareDraw is procedural: vkCmdDraw(customVertices_)
-    vk::PipelineDesc waterTemplate_{};    // pipeline description of the last water draw (prebuildReplacement)
+    PipelineDesc waterTemplate_{};    // pipeline description of the last water draw (prebuildReplacement)
     bool waterTemplateValid_ = false;
     std::uint32_t lookupSamplerStates(const std::uint32_t* states);
-    bool replacementDesc(const Shader& vs, const Shader& ps, bool procedural, vk::PipelineDesc& out) const;
+    bool replacementDesc(const Shader& vs, const Shader& ps, bool procedural, PipelineDesc& out) const;
     struct Registered {
         std::shared_ptr<Shader> vs, ps;
         bool procedural = false;
@@ -1592,7 +1546,6 @@ private:
     std::unordered_set<std::uint64_t> tracedMaterialDraws_;  // RVK_TRACE_MATERIAL (logTracedMaterial)
     std::unordered_set<const void*> tracedEntities_;
     bool regionsOn_ = false;
-    vk::CrashMarkers crashMarkers_;
     bool markersOn_ = false;
     struct OpenRegion {
         const char* base = nullptr;  // the name as given (identity of literals: the phase names; compared with `index`)

@@ -1,6 +1,7 @@
 // rvk_d3d9test: checks d3d9::Device against Direct3D 9 semantics, off-screen with validation on.
 //
-//   rvk_d3d9test [--no-validation] [--keep-images]
+//   rvk_d3d9test [--validation | --no-validation] [--backend vulkan|d3d12] [--keep-images] [--present-test [0]]
+// --backend d3d12 is a clean SKIP (exit 0) until the D3D12 game device exists (docs/research/dx12-game-port.md WP3 / WP4).
 //
 // Every case renders into the 64x64 back buffer with D3D9-style calls (states, streams, D3DX-assembled shaders), reads the
 // pixels back (readBackBuffer) and compares them with what D3D9 produces. Exit code 0 = all pass and no validation errors.
@@ -24,7 +25,7 @@
 #include "d3d9/convert.h"
 #include "d3d9/device.h"
 #include "d3d9/fvf.h"
-#include "vk/formats.h"
+#include "rhi/d3d_formats.h"
 
 using namespace rvk;
 using namespace rvk::d3d9;
@@ -33,6 +34,7 @@ namespace {
 
 constexpr std::uint32_t kSize = 64;
 bool g_keepImages = false;
+static rhi::Backend g_backend = rhi::Backend::Vulkan;  // --backend
 int g_failures = 0;
 
 struct Vertex {
@@ -284,7 +286,7 @@ void testStencil(Fixture& f) {
 void testRenderToTexture(Fixture& f) {
     TextureDesc d;
     d.width = d.height = 32;
-    d.format = vk::d3dfmt::A8R8G8B8;
+    d.format = rhi::d3dfmt::A8R8G8B8;
     d.usage = USAGE_RENDERTARGET;
     d.pool = POOL_DEFAULT;
     auto rt = f.dev.createTexture(d);
@@ -313,7 +315,7 @@ void testDxt1(Fixture& f) {
     // one DXT1 block per 4x4: colour0 = pure red (0xF800), colour1 = pure blue (0x001F), all indices 0 -> red
     TextureDesc d;
     d.width = d.height = 8;
-    d.format = vk::d3dfmt::DXT1;
+    d.format = rhi::d3dfmt::DXT1;
     auto tex = f.dev.createTexture(d);
     std::vector<std::uint8_t> blocks(4 * 8);
     for (int b = 0; b < 4; ++b) {
@@ -380,7 +382,7 @@ void testUpAndScissor(Fixture& f) {
 void testStretchRect(Fixture& f) {
     TextureDesc d;
     d.width = d.height = 64;
-    d.format = vk::d3dfmt::A8R8G8B8;
+    d.format = rhi::d3dfmt::A8R8G8B8;
     d.usage = USAGE_RENDERTARGET;
     d.pool = POOL_DEFAULT;
     auto rt = f.dev.createTexture(d);
@@ -402,7 +404,7 @@ void testMipChainStretchRect(Fixture& f) {
     TextureDesc d;
     d.width = d.height = 64;
     d.levels = 3;
-    d.format = vk::d3dfmt::A8R8G8B8;
+    d.format = rhi::d3dfmt::A8R8G8B8;
     d.usage = USAGE_RENDERTARGET;
     d.pool = POOL_DEFAULT;
     auto tex = f.dev.createTexture(d);
@@ -499,7 +501,7 @@ void testPartialLock(Fixture& f) {
     // a managed texture updated by partial LockRect after it was sampled (the engine's glyph atlases): earlier contents survive
     TextureDesc d;
     d.width = d.height = 64;
-    d.format = vk::d3dfmt::A8R8G8B8;
+    d.format = rhi::d3dfmt::A8R8G8B8;
     d.pool = POOL_MANAGED;
     auto tex = f.dev.createTexture(d);
     Texture::Locked lk;
@@ -535,7 +537,7 @@ void testLockAfterUpload(Fixture& f) {
     // writes one corner must still see the file contents everywhere else (read back from the GPU)
     TextureDesc d;
     d.width = d.height = 64;
-    d.format = vk::d3dfmt::A8R8G8B8;
+    d.format = rhi::d3dfmt::A8R8G8B8;
     d.pool = POOL_MANAGED;
     auto tex = f.dev.createTexture(d);
     std::vector<std::uint32_t> green(64 * 64, 0xFF00FF00u);
@@ -558,7 +560,7 @@ void testReadOnlyLockOfFreshTexture(Fixture& f) {
     // D3DLOCK_READONLY): D3D9 keeps a fresh level dirty until its first upload, so the written texels are sampled
     TextureDesc d;
     d.width = d.height = 64;
-    d.format = vk::d3dfmt::A8R8G8B8;
+    d.format = rhi::d3dfmt::A8R8G8B8;
     d.pool = POOL_MANAGED;
     auto tex = f.dev.createTexture(d);
     Texture::Locked lk;
@@ -636,7 +638,7 @@ void testCubeLock(Fixture& f) {
     TextureDesc d;
     d.type = TextureType::Cube;
     d.width = d.height = 8;
-    d.format = vk::d3dfmt::A8R8G8B8;
+    d.format = rhi::d3dfmt::A8R8G8B8;
     d.pool = POOL_MANAGED;
     auto cube = f.dev.createTexture(d);
     const std::uint32_t faceColors[6] = {0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFFFFFF00, 0xFF00FFFF, 0xFFFF00FF};
@@ -689,7 +691,7 @@ void testLoadSurfaceFromSurface(Fixture& f) {
     // image): blocks 0-2 red, block 3 blue, decoded into the CPU copy
     TextureDesc d;
     d.width = d.height = 8;
-    d.format = vk::d3dfmt::DXT1;
+    d.format = rhi::d3dfmt::DXT1;
     auto src = f.dev.createTexture(d);
     std::vector<std::uint8_t> blocks(4 * 8);
     for (int b = 0; b < 4; ++b) {
@@ -700,7 +702,7 @@ void testLoadSurfaceFromSurface(Fixture& f) {
     src->setLevelData(0, 0, blocks, 16);
     TextureDesc dd;
     dd.width = dd.height = 8;
-    dd.format = vk::d3dfmt::A8R8G8B8;
+    dd.format = rhi::d3dfmt::A8R8G8B8;
     dd.pool = POOL_SYSTEMMEM;
     auto dst = f.dev.createTexture(dd);
     std::string why;
@@ -759,6 +761,7 @@ int presentTest(bool vsync) {
     GetClientRect(hwnd, &rc);
     Device dev;
     DeviceOptions o;
+    o.backend = g_backend;
     o.window = hwnd;
     o.width = static_cast<std::uint32_t>(rc.right);
     o.height = static_cast<std::uint32_t>(rc.bottom);
@@ -786,8 +789,22 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--no-validation") validation = false;
+        if (a == "--validation") validation = true;
+        if (a == "--backend" && i + 1 < argc) {
+            const std::string b = argv[++i];
+            if (b == "vulkan") g_backend = rhi::Backend::Vulkan;
+            else if (b == "d3d12") g_backend = rhi::Backend::D3D12;
+            else {
+                std::printf("unknown backend '%s' (vulkan | d3d12)\n", b.c_str());
+                return 2;
+            }
+        }
         if (a == "--keep-images") g_keepImages = true;
         if (a == "--present-test") return presentTest(i + 1 >= argc || std::string(argv[i + 1]) != "0");
+    }
+    if (g_backend == rhi::Backend::D3D12) {
+        std::printf("SKIP: the D3D12 game device does not exist yet (docs/research/dx12-game-port.md WP3 / WP4); run with --backend vulkan\n");
+        return 0;
     }
     if (!devtools::D3DX::get().available()) {
         std::printf("d3dx9_39.dll not available\n");
@@ -795,8 +812,9 @@ int main(int argc, char** argv) {
     }
     Device dev;
     DeviceOptions o;
+    o.backend = g_backend;
     o.width = o.height = kSize;
-    o.depthFormat = vk::d3dfmt::D24S8;
+    o.depthFormat = rhi::d3dfmt::D24S8;
     o.validation = validation;
     o.offscreen = true;
     if (!dev.create(o)) {

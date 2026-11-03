@@ -40,7 +40,7 @@
 #include "hal/types_base.h"
 #include "overlay/keys.h"
 #include "rvk_api.h"
-#include "vk/probe.h"
+#include "rhi/game_device.h"
 
 namespace rvk::bootstrap {
 namespace {
@@ -162,7 +162,7 @@ void detourInitializeAdmin(void* self, int apiType) {
     }
     if (g_config.cpuProfile && g_config.mode == Mode::Vulkan) diag::enableFrameSampler();
     if (g_config.probe && !g_probed.exchange(true)) {
-        vk::probe();
+        rhi::probeBackend(rhi::Backend::Vulkan);
     }
     const auto& s = engine::sym();
     if (g_config.mode == Mode::Vulkan) {

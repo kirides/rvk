@@ -742,7 +742,7 @@ void RtScene::applyMaterial(rt::Registry::Instance& in, std::uint32_t id, std::u
 RtScene::MaterialFields RtScene::materialFields(const RtMaterial* m) {
     MaterialFields f;
     const auto slotOf = [](d3d9::Texture* t) -> std::uint32_t {
-        return t != nullptr && !t->isNull() && t->image().layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ? t->bindlessSlot() : 0u;
+        return t != nullptr && !t->isNull() && t->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ? t->bindlessSlot() : 0u;
     };
     if (m == nullptr) {
         f.uvSet = abi::kRtUvNoTexture | abi::kRtUvHeuristic | (3u << abi::kRtUvOpacityShift);

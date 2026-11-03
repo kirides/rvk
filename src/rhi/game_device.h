@@ -13,8 +13,10 @@
 //   built (WP2b)   textures / buffers of the D3D9 model on rhi::Texture / rhi::Buffer (layout tracked by the RHI texture), the frame's command lists,
 //                  the upload ring + mesh arena fronts, the vertex-capture pool, transient images, capabilities, format queries, the optional modules
 //                  (rhi/modules.h: Upscaler, FrameGenerator, PresentWrapper, ImGuiBackend), adapters
-//   WP2c           packet application / record threads (GamePipeline, ChunkHandle), pipeline resolve, StretchRect, read-backs, GPU timestamps, regions,
-//                  the frame ring (RingAlloc source), swapchain / Presenter, the frame loop (begin / submit / retire)
+//   built (WP2c)   packet application / record threads (GamePipeline), pipeline resolve, StretchRect / read-backs (on CommandList), GPU timestamps, debug
+//                  regions + crash markers, the frame ring (inline RingChunkState front end), the frame loop (beginFrame / submitFrame / retire),
+//                  the presentation (GamePresenter: swapchain, present thread, frame generation swapchain, exclusive fullscreen), the null vertex
+//                  stream, game samplers; the device owns every Vulkan object (createGameDevice): d3d9 / enh / overlay / hal / native hold none
 
 #include <array>
 #include <cstdint>
@@ -97,6 +99,27 @@ struct RingAlloc {
     std::uint64_t gpuVa = 0;
 
     GpuAddr addr() const { return {ref, gpuVa}; }
+};
+
+// The frame ring's current chunk, shared between the backend (which switches chunks) and the inline front end GameDevice::allocRing (called several
+// times per draw: constants, DrawBlock, dynamic data): the fast path is plain arithmetic on this state, the backend is only asked for a new chunk.
+struct RingChunkState {
+    std::uint64_t buffer = 0;        // the chunk's backend buffer handle (RingAlloc::buffer)
+    std::uint8_t* ptr = nullptr;     // null: no chunk yet this frame
+    GpuRef ref;                      // the chunk's base reference
+    std::uint64_t va = 0;            // ... and GPU address
+    std::uint64_t size = 0, used = 0;
+    std::uint64_t bytes = 0;         // statistics: bytes handed out since creation
+
+    // a block in the current chunk or an empty RingAlloc (ptr null); `first` = the aligned minimum offset
+    RingAlloc tryAlloc(std::uint64_t blockSize, std::uint64_t alignment, std::uint64_t first) {
+        if (ptr == nullptr) return {};
+        const std::uint64_t aligned = (used + alignment - 1) & ~(alignment - 1);
+        const std::uint64_t offset = aligned > first ? aligned : first;
+        if (offset + blockSize > size) return {};
+        used = offset + blockSize;
+        return {buffer, offset, ptr + offset, ref.plus(static_cast<std::int64_t>(offset)), va + offset};
+    }
 };
 
 // ---- shader modules ---------------------------------------------------------------------------------------------------------------
@@ -302,6 +325,117 @@ struct TimestampResult {
     std::vector<TimestampSegment> segments;  // the main list's segments, only with details
 };
 
+
+// ---- the game device's creation and presentation ----------------------------------------------------------------------------------
+
+struct GameDeviceOptions {
+    bool validation = false;
+    bool syncValidation = false;  // + synchronization validation ([vulkan] sync_validation)
+    int adapter = -1;
+    bool allowRayTracing = true;  // rt.allow
+    bool frameGenQueues = false;  // framegen.mode != off at start: the extra queues of the frame generation swapchain
+};
+
+// A sampler of the D3D9 model (SetSamplerState translated by d3d9, the backend creates it and puts it into the bindless sampler heap)
+struct GameSamplerDesc {
+    VkFilter minFilter = VK_FILTER_LINEAR, magFilter = VK_FILTER_LINEAR;
+    VkSamplerMipmapMode mipmap = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    VkSamplerAddressMode addressU = VK_SAMPLER_ADDRESS_MODE_REPEAT, addressV = VK_SAMPLER_ADDRESS_MODE_REPEAT, addressW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    float lodBias = 0.0f;
+    float maxAnisotropy = 1.0f;  // > 1: anisotropic (clamped to GameCaps::maxAnisotropy)
+    float minLod = 0.0f;
+    bool singleLevel = false;    // maxLod = minLod (no mip filter)
+    VkBorderColor border = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+};
+
+// Drawn on top of the frame at present (the in-game overlay, src/overlay): after the back buffer was copied into the swapchain image, so captures of
+// the back buffer (rvk_screenshot, the engine snapshot) never contain it; or, for debugging, into the back buffer itself. Render thread.
+class PresentOverlay {
+public:
+    virtual ~PresentOverlay() = default;
+    // anything to draw this frame? false leaves the present path untouched
+    virtual bool active() = 0;
+    // records draws inside a dynamic rendering scope of one colour attachment of `extent` (LOAD / STORE; viewport, scissor,
+    // pipeline and descriptor sets are the overlay's own)
+    virtual void record(CommandList& cmd, VkExtent2D extent) = 0;
+    // The AMD frame generation swapchain draws the overlay in its present callback (another thread, on the generated and the real
+    // frame): prepare builds the UI on the render thread and keeps its draw lists (true: there is something to draw), recordPrepared
+    // draws the latest ones into the scope (any thread; the same contract as record)
+    virtual bool prepare(VkExtent2D /*extent*/) { return false; }
+    virtual void recordPrepared(CommandList& /*cmd*/, VkExtent2D /*extent*/) {}
+    virtual bool hasPrepared() { return false; }
+};
+
+struct PresentInfo {
+    bool valid = false;  // a swapchain exists
+    VkExtent2D extent{};
+    VkFormat format = VK_FORMAT_B8G8R8A8_UNORM;
+    std::uint32_t minImageCount = 0, imageCount = 0;
+    int presentMode = 0;  // the backend's code (logs only)
+};
+
+// what the present thread reports of its latest present
+enum class PresentStatus { Ok, Suboptimal, OutOfDate, ExclusiveLost, Error };
+
+// The game device's presentation: swapchain on the game's window, the present thread, AMD's frame generation swapchain, exclusive fullscreen. The renderer
+// draws into its own back buffer and the presenter copies it into the acquired image (blitFrame), so swapchain recreation never touches engine-visible
+// resources. All calls on the render thread, except where noted; the swapchain belongs to the present thread until waitIdle() returned.
+//
+// One frame:  waitIdle -> acquire -> [blitFrame, drawOverlay] -> finishFrame -> GameDevice::submitFrame -> queuePresent
+class GamePresenter {
+public:
+    virtual ~GamePresenter() = default;
+    virtual bool create(void* window, std::uint32_t width, std::uint32_t height, bool vsync) = 0;
+    // the present thread stops first (waitIdle before)
+    virtual void destroy() = 0;
+    virtual PresentInfo info() const = 0;
+    bool valid() const { return info().valid; }
+    virtual void setVsync(bool vsync) = 0;  // applies at the next recreate
+    virtual bool recreate(std::uint32_t width, std::uint32_t height) = 0;  // the present thread idle
+
+    // the present thread: until the queued present returned; the latest present's outcome since the last call (Ok when none; `error` = the API's text)
+    virtual PresentStatus waitIdle(std::string* error = nullptr) = 0;
+    virtual void waitDone() = 0;  // ... without collecting the result
+    virtual double takePresentMs() = 0;  // summed ms inside the API's present (present thread), taken and zeroed
+
+    // AMD's frame generation swapchain: the next recreate creates it instead of ours (a normal swapchain when `on` is false); a build that cannot create
+    // it falls back to a normal one (frameGenReason()). `loaderDll` = the FidelityFX loader.
+    virtual void setFrameGen(bool on, const std::filesystem::path& loaderDll = {}) = 0;
+    virtual bool frameGenWanted() const = 0;
+    virtual bool frameGenActive() const = 0;
+    virtual const std::string& frameGenReason() const = 0;
+    // tears the frame generation swapchain down without building another (the generator's context must be gone)
+    virtual void releaseFrameGen() = 0;
+    // the frame generation swapchain as the RHI's PresentWrapper (null while it is not in use)
+    virtual PresentWrapper* presentWrapper() = 0;
+    // until the previous present returned and the GPU work it queued (interpolation) is done (true: done within 2 s)
+    virtual bool waitFrameGenPresent() = 0;
+
+    // Exclusive fullscreen (docs/research/window-mode.md 8): `monitor` != null = the next recreate builds the swapchain with the exclusive structures
+    virtual void setFullScreenExclusive(void* monitor) = 0;
+    virtual bool fullScreenExclusiveConfigured() const = 0;
+    virtual bool fullScreenExclusiveHeld() const = 0;
+    virtual bool acquireFullScreenExclusive(std::string* error) = 0;  // the present thread idle
+    virtual void releaseFullScreenExclusive() = 0;
+    virtual void noteExclusiveLost() = 0;  // a present returned "lost": the exclusive mode is no longer held
+    virtual bool takeExclusiveLost() = 0;  // an acquire reported it (taken and cleared)
+
+    // ---- one frame ----
+    // acquires the next image; false = drop the frame's presentation (minimised / out of date / exclusive mode lost: exclusiveLost(); frame generation
+    // had too many acquired: acquireNotReady()); the frame's work is still submitted
+    virtual bool acquire() = 0;
+    virtual bool exclusiveLost() const = 0;
+    virtual bool acquireNotReady() const = 0;
+    // copies `src` (any size, scaled linearly) into the acquired image (records into the frame's main list); the source ends in TRANSFER_SRC
+    virtual void blitFrame(Texture& src, VkExtent3D srcExtent) = 0;
+    // the overlay on top (frame generation: builds its draw lists for the swapchain's present callback instead)
+    virtual void drawOverlay(PresentOverlay& overlay) = 0;
+    // the acquired image into the state the presentation reads
+    virtual void finishFrame() = 0;
+    // after GameDevice::submitFrame: hands the image to the present thread
+    virtual void queuePresent() = 0;
+};
+
 // ---- adapters (before any device exists) ----
 
 struct AdapterInfo {
@@ -354,15 +488,25 @@ public:
     // ---- the frame ring and transient memory ----
     // transient memory for the frame being recorded (render thread): persistently mapped, GPU readable until the frame has completed; `alignment` a power
     // of two; `minOffset`: the block starts at least that far into its chunk (a dynamic buffer's block of bytes [lo, hi) is bound at offset - lo)
-    virtual RingAlloc allocRing(std::uint64_t size, std::uint64_t alignment = 256, std::uint64_t minOffset = 0) = 0;
+    // (non-virtual: the inline front end over RingChunkState; the backend is asked for a new chunk only when the current one is full)
+    RingAlloc allocRing(std::uint64_t size, std::uint64_t alignment = 256, std::uint64_t minOffset = 0) {
+        const std::uint64_t first = (minOffset + alignment - 1) & ~(alignment - 1);
+        if (const RingAlloc a = ring_.tryAlloc(size, alignment, first); a.ptr != nullptr) {
+            ring_.bytes += size;
+            return a;
+        }
+        return allocRingSlow(size, alignment, minOffset);  // (counts the bytes itself)
+    }
+    // bytes handed out by the ring since creation (statistics)
+    std::uint64_t ringBytes() const { return ring_.bytes; }
     // The ring block as an rhi::Buffer (copy source / destination, build input): the chunk it lies in, owned by the device (valid until the device is destroyed)
     virtual Buffer& ringBuffer(const RingAlloc& alloc) = 0;
     // Memory that vertex shaders write (the vertex captures: rt skin outputs, object motion, positions of the RT scene's characters) and later passes read.
     // Vulkan: the ring; D3D12: a device-local UAV pool reset per frame (the CPU pointer may then be null: only `ref` / `gpuVa` are valid).
     virtual RingAlloc allocCapture(std::uint64_t size, std::uint64_t alignment = 16) = 0;
     // the frame being recorded: the value it signals (counts up), its slot (0 .. in flight - 1), the last completed value; waiting for a value blocks
-    virtual std::uint64_t frameValue() const = 0;
-    virtual std::uint32_t frameSlot() const = 0;
+    std::uint64_t frameValue() const { return frameValue_; }
+    std::uint32_t frameSlot() const { return frameSlot_; }
     virtual std::uint64_t completedFrame() const = 0;
     virtual void waitFrame(std::uint64_t value) = 0;
     // runs `fn` when the frame being recorded (or, between frames, the last submitted one) has completed (any thread): destruction of what the GPU may still use
@@ -450,6 +594,54 @@ public:
     virtual std::unique_ptr<Upscaler> createUpscaler() = 0;
     virtual std::unique_ptr<FrameGenerator> createFrameGenerator() = 0;
     virtual std::unique_ptr<ImGuiBackend> createImGuiBackend() = 0;
+
+    // ---- the frame loop (render thread) ----
+    // starts the next frame: waits for its slot (the GPU may be a full slot behind: lastSlotWaitMs), runs the retirements that came due, begins the
+    // command lists (a new frame slot resets the recording state: invalidateRecordingState + resetRecordPools are part of it)
+    virtual void beginFrame() = 0;
+    virtual double lastSlotWaitMs() const = 0;
+    // ends and submits the frame's upload and main lists (the presenter's acquire / rendered semaphores ride along when an image is acquired).
+    // `finalMark` labels the last GPU timestamp segment ("present blit ..." / "copies ... (flush)")
+    virtual void submitFrame(const char* finalMark) = 0;
+    // waits for the GPU to finish everything submitted
+    virtual void waitIdle() = 0;
+    virtual bool namesEnabled() const = 0;
+
+    // ---- device-level objects of the D3D9 model ----
+    // a sampler in the bindless sampler heap (its index; 0 on failure); `name` for graphics debuggers (empty = none)
+    virtual SamplerIndex createGameSampler(const GameSamplerDesc& desc, const std::string& name) = 0;
+    // A 16-byte vertex buffer holding (0, 0, 0, 1): what vertex inputs the declaration does not provide read. The handle goes into
+    // VertexInputValues::buffers (0 on failure).
+    virtual std::uint64_t nullVertexBuffer() const = 0;
+    // an attachment clear inside the open rendering scope of the main list (the inline path of D3D9 Clear)
+    virtual void clearAttachments(const ClearOp& op) = 0;
+
+    // ---- debug regions and crash markers (docs/research/capture-regions.md) ----
+    // labels in the frame's main command buffer (a colour per name); available when the backend has a labelling extension
+    virtual bool regionsAvailable() const = 0;
+    virtual void labelBegin(const char* text) = 0;
+    virtual void labelEnd() = 0;
+    // debug.crash_markers: events written when the GPU reaches a region's start / end, reported on device loss; false = not available
+    virtual bool setCrashMarkers(bool on) = 0;
+    virtual void crashMarker(bool begin, const char* text) = 0;
+
+    // ---- presentation ----
+    virtual GamePresenter& presenter() = 0;
+
+protected:
+    // the ring front end's state and the frame counters (the backend keeps them current: beginFrame / chunk switches)
+    RingChunkState ring_;
+    std::uint64_t frameValue_ = 1;  // the value the frame being recorded signals
+    std::uint32_t frameSlot_ = 0;
+    // a block that did not fit the current chunk: the backend switches chunks (ring_ is updated) and allocates
+    virtual RingAlloc allocRingSlow(std::uint64_t size, std::uint64_t alignment, std::uint64_t minOffset) = 0;
 };
+
+// The game device of `backend` (it owns the API instance, device, frame ring, heaps, pipeline caches and the presentation). Vulkan only for now: null
+// (logged) for D3D12.
+std::unique_ptr<GameDevice> createGameDevice(Backend backend, const GameDeviceOptions& options);
+
+// What the start-up probe logs about the backend's adapters (docs/PLAN.md "Vulkan floor"); a throw-away instance, not under the loader lock.
+void probeBackend(Backend backend);
 
 }  // namespace rvk::rhi

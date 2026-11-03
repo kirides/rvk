@@ -22,7 +22,7 @@
 #include "engine/symbols.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "rhi/game_device.h"
-#include "vk/formats.h"
+#include "rhi/d3d_formats.h"
 
 namespace rvk::engine::scene {
 namespace {
@@ -226,7 +226,7 @@ void detourExecuteShadowMap(void* db, void* shadowMap) {
         }
         if (d3d9::Surface* ds = scope.d->depthStencil(); ds != nullptr && ds->texture() != nullptr) {
             const std::uint32_t f = ds->texture()->desc().format;
-            if (f == vk::d3dfmt::DF24 || f == vk::d3dfmt::DF16) {
+            if (f == rhi::d3dfmt::DF24 || f == rhi::d3dfmt::DF16) {
                 scope.d->tagImage(ds->texture(), ImageRole::ShadowMap, label.text, label.index);
                 scope.d->countShadowDepthMap();
             }

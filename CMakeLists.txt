@@ -268,7 +268,10 @@ add_library(rvk_core STATIC
     src/rhi/rhi.cpp
     src/rhi/rhi.h
     src/rhi/modules.h
+    src/rhi/names.h
     src/rhi/vulkan/adapters.cpp
+    src/rhi/vulkan/game_present.cpp
+    src/rhi/vulkan/game_present.h
     src/rhi/vulkan/imgui_backend.cpp
     src/rhi/vulkan/imgui_vulkan_impl.cpp
     src/rhi/vulkan/modules.cpp
@@ -300,8 +303,8 @@ add_library(rvk_core STATIC
     src/vk/crash_markers.h
     src/vk/debug_names.cpp
     src/vk/debug_names.h
-    src/vk/formats.cpp
-    src/vk/formats.h
+    src/rhi/d3d_formats.cpp
+    src/rhi/d3d_formats.h
     src/vk/frames.cpp
     src/vk/framegen.cpp
     src/vk/framegen.h
@@ -320,8 +323,8 @@ add_library(rvk_core STATIC
     src/vk/pipeline_library.cpp
     src/vk/game_record.cpp
     src/vk/pipeline.h
-    src/vk/pacer.cpp
-    src/vk/pacer.h
+    src/core/pacer.cpp
+    src/core/pacer.h
     src/vk/passes.cpp
     src/vk/passes.h
     src/vk/presenter.cpp

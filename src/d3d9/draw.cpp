@@ -39,7 +39,7 @@ void Device::endRendering() {
         game_->endScope();  // (the backend ends the scope: waits for + executes the chunks, rebinds the frame's state)
         rendering_ = false;
         if (game_->timestampsEnabled()) {
-            const std::uint32_t slot = frames_.currentSlot();
+            const std::uint32_t slot = game_->frameSlot();
             std::string label;
             if (game_->timestampDetails(slot)) {
                 label = std::format("pass {}: {}x{}, {} colour ({}), depth {}, {} draws", passIndex_, targetWidth_, targetHeight_,
@@ -102,7 +102,7 @@ bool Device::beginRendering() {
         a.mip = ds_->level();
         a.layer = ds_->face();
         depthFormat_ = t->rhi().desc().format;
-        if (vk::hasStencil(depthFormat_)) {
+        if (rhi::hasStencil(depthFormat_)) {
             stencilFormat_ = depthFormat_;
         }
         // D3D9 lets the depth buffer be larger than the render target
@@ -115,7 +115,7 @@ bool Device::beginRendering() {
         return false;
     }
     if (game_->timestampsEnabled()) {
-        const std::uint32_t slot = frames_.currentSlot();
+        const std::uint32_t slot = game_->frameSlot();
         game_->timestampMark(frameList(), slot, rhi::TimestampStream::Main,
                        game_->timestampDetails(slot) ? std::format("barriers / copies / inline uploads before pass {}", passIndex_ + 1)
                                                      : std::string());
@@ -149,7 +149,7 @@ bool Device::prepareTextures() {
         if (t == nullptr || t->isNull() || isTarget(t)) {
             continue;  // unbound, or a feedback loop (undefined in D3D9): the default texture is sampled
         }
-        const bool ready = !t->pending_ && t->image().layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        const bool ready = !t->pending_ && t->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         if (ready) {
             t->lastUseFrame_ = frame;
             continue;
@@ -219,15 +219,15 @@ const Device::VertexPlan& Device::vertexPlan(const VertexDecl* decl, Shader& vs)
 // Two descriptions equal. With extended dynamic state 3 (blend is not in the description: it stays at its defaults) and dynamic
 // vertex input (bindings / attributes are cleared by computeVertexInput) everything after `blend` is the same in every
 // description, so only the 52 leading bytes are compared (the 512-byte compare ran for every draw, twice when the pipeline changed)
-bool Device::sameDesc(const vk::PipelineDesc& a, const vk::PipelineDesc& b) const {
+bool Device::sameDesc(const PipelineDesc& a, const PipelineDesc& b) const {
     if (game_->gameCaps().extendedDynamicState3 && game_->gameCaps().vertexInputDynamicState && a.bindingCount == 0 && a.attributeCount == 0 &&
         b.bindingCount == 0 && b.attributeCount == 0) {
-        return memEqual(&a, &b, offsetof(vk::PipelineDesc, blend));
+        return memEqual(&a, &b, offsetof(PipelineDesc, blend));
     }
     return memEqual(&a, &b, sizeof(a));
 }
 
-std::size_t Device::recentSlot(const vk::PipelineDesc& pd) {
+std::size_t Device::recentSlot(const PipelineDesc& pd) {
     const std::uint64_t h = ((static_cast<std::uint64_t>(pd.vs) >> 4) * 0x9E3779B97F4A7C15ull ^
                              (static_cast<std::uint64_t>(pd.fs) >> 4) * 0xC2B2AE3D27D4EB4Full ^ pd.colorFormats[0] ^
                              (static_cast<std::uint64_t>(pd.depthFormat) << 8) ^ (static_cast<std::uint64_t>(pd.colorCount) << 16)) >>
@@ -236,7 +236,7 @@ std::size_t Device::recentSlot(const vk::PipelineDesc& pd) {
 }
 
 // the pipeline of `d` when it exists (a direct-mapped cache of recent descriptions first: no 520-byte hash, no lock), never builds
-GamePipeline Device::findPipeline(const vk::PipelineDesc& d) {
+GamePipeline Device::findPipeline(const PipelineDesc& d) {
     RecentPipeline& recent = recentPipelines_[recentSlot(d)];
     if (recent.pipeline != GamePipeline::None && sameDesc(recent.desc, d)) return recent.pipeline;
     const GamePipeline p = game_->findPipeline(d);
@@ -247,7 +247,7 @@ GamePipeline Device::findPipeline(const vk::PipelineDesc& d) {
     return p;
 }
 
-bool Device::computeVertexInput(vk::PipelineDesc& pd, VertexInputValues& out) {
+bool Device::computeVertexInput(PipelineDesc& pd, VertexInputValues& out) {
     std::uint32_t streamBinding[kStreams];
     std::fill(std::begin(streamBinding), std::end(streamBinding), UINT32_MAX);
     std::uint32_t nullBinding = UINT32_MAX;
@@ -261,14 +261,14 @@ bool Device::computeVertexInput(vk::PipelineDesc& pd, VertexInputValues& out) {
         if (in.stream != UINT32_MAX && (streams_[in.stream].buffer != nullptr || (in.stream == 0 && up_.active))) {
             std::uint32_t& b = streamBinding[in.stream];
             if (b == UINT32_MAX) {
-                if (pd.bindingCount >= vk::kMaxVertexBindings) {
+                if (pd.bindingCount >= kMaxVertexBindings) {
                     return false;
                 }
                 b = pd.bindingCount++;
                 const Stream& st = streams_[in.stream];
                 if (in.stream == 0 && up_.active) {
                     pd.bindings[b] = {up_.stride, 0};
-                    out.buffers[b] = reinterpret_cast<std::uint64_t>(up_.buffer);
+                    out.buffers[b] = up_.buffer;
                     out.offsets[b] = up_.offset;
                 } else {
                     const Buffer::Binding g = st.buffer->gpu(st.stride);
@@ -280,21 +280,21 @@ bool Device::computeVertexInput(vk::PipelineDesc& pd, VertexInputValues& out) {
                     out.offsets[b] = g.offset + st.offset;
                 }
             }
-            if (pd.attributeCount < vk::kMaxVertexAttributes) {
+            if (pd.attributeCount < kMaxVertexAttributes) {
                 pd.attributes[pd.attributeCount++] = {in.location, b, in.format, in.offset};
             }
         } else {
             // the declaration does not provide this input: D3D9 reads (0,0,0,1)
             if (nullBinding == UINT32_MAX) {
-                if (pd.bindingCount >= vk::kMaxVertexBindings) {
+                if (pd.bindingCount >= kMaxVertexBindings) {
                     return false;
                 }
                 nullBinding = pd.bindingCount++;
                 pd.bindings[nullBinding] = {0, 0};
-                out.buffers[nullBinding] = reinterpret_cast<std::uint64_t>(nullVertexBuffer_);
+                out.buffers[nullBinding] = game_->nullVertexBuffer();
                 out.offsets[nullBinding] = 0;
             }
-            if (pd.attributeCount < vk::kMaxVertexAttributes) {
+            if (pd.attributeCount < kMaxVertexAttributes) {
                 pd.attributes[pd.attributeCount++] = {in.location, nullBinding, VK_FORMAT_R32G32B32A32_SFLOAT, 0};
             }
         }
@@ -347,10 +347,10 @@ bool Device::computeVertexInput(vk::PipelineDesc& pd, VertexInputValues& out) {
 
 namespace {
 
-vk::BlendAttachment blendState(const std::array<std::uint32_t, RS_COUNT>& rs, std::uint32_t target) {
+BlendAttachment blendState(const std::array<std::uint32_t, RS_COUNT>& rs, std::uint32_t target) {
     static constexpr std::uint32_t writeStates[4] = {RS_COLORWRITEENABLE, RS_COLORWRITEENABLE1, RS_COLORWRITEENABLE2,
                                                      RS_COLORWRITEENABLE3};
-    vk::BlendAttachment b;
+    BlendAttachment b;
     b.enable = rs[RS_ALPHABLENDENABLE] != 0 ? 1u : 0u;
     const bool separate = rs[RS_SEPARATEALPHABLENDENABLE] != 0;
     std::uint32_t src = rs[RS_SRCBLEND], dst = rs[RS_DESTBLEND];
@@ -376,9 +376,9 @@ vk::BlendAttachment blendState(const std::array<std::uint32_t, RS_COUNT>& rs, st
 
 // the blend state of colour attachment `index`: the engine's targets from its render states, the G-buffer's (after them)
 // unblended, written only by the draws that write it (gbufWrite_)
-vk::BlendAttachment Device::attachmentBlend(std::uint32_t index) const {
+BlendAttachment Device::attachmentBlend(std::uint32_t index) const {
     if (index < engineColorCount_) return blendState(rs_, index);
-    vk::BlendAttachment b;
+    BlendAttachment b;
     b.writeMask = gbufWrite_ ? 0xFu : 0u;
     return b;
 }
@@ -435,10 +435,10 @@ void Device::computeDynamicState(std::uint32_t primitiveType, DynamicStateValues
     o.depthBias[1] = reversed ? -slope : slope;
     colorToFloat4(rs_[RS_BLENDFACTOR], o.blendConstants);
     o.colorCount = 0;
-    if (ctx_.features().extendedDynamicState3 && colorCount_ > 0) {
+    if (game_->gameCaps().extendedDynamicState3 && colorCount_ > 0) {
         o.colorCount = colorCount_;
         for (std::uint32_t i = 0; i < colorCount_; ++i) {
-            const vk::BlendAttachment b = attachmentBlend(i);
+            const BlendAttachment b = attachmentBlend(i);
             o.blendEnable[i] = b.enable;
             o.blendEquation[i] = {b.srcColor, b.dstColor, b.colorOp, b.srcAlpha, b.dstAlpha, b.alphaOp};
             o.writeMask[i] = b.writeMask;
@@ -454,7 +454,7 @@ void Device::uploadConstants(bool forceLegacyPs, std::uint32_t psMinEnd) {
     // int / bool part only for shaders that read it (Reflection::intBoolConstants; the layout stays, the bytes are left as they are)
     const auto upload = [&](const Shader& sh, const float (*f)[4], std::uint32_t maxFloats, const std::int32_t (*i)[4],
                             const std::uint32_t* b, rhi::GpuRef& addr, std::uint32_t stage) {
-        rhi::RingAlloc a = frames_.allocate(shader::abi::kStageConstsSize, 16);
+        rhi::RingAlloc a = game_->allocRing(shader::abi::kStageConstsSize, 16);
         const std::uint32_t n = std::min(sh.reflection.floatConstCount, maxFloats);
         std::memcpy(a.ptr, f, n * 16);
         std::uint32_t bytes = n * 16;
@@ -518,7 +518,7 @@ void Device::splitStage(bool vertex, const Shader& sh, rhi::GpuRef (&windows)[sh
         const std::uint32_t need = end > first[w] ? end - first[w] : 0;
         if (need == 0) {
             if (zeroBlock_.null()) {
-                rhi::RingAlloc z = frames_.allocate(4096, 16);
+                rhi::RingAlloc z = game_->allocRing(4096, 16);
                 std::memset(z.ptr, 0, 4096);
                 zeroBlock_ = z.ref;
             }
@@ -527,7 +527,7 @@ void Device::splitStage(bool vertex, const Shader& sh, rhi::GpuRef (&windows)[sh
         }
         ConstWindow& cw = constWin_[stage][w];
         if ((constWinDirty_[stage] >> w & 1u) != 0 || cw.address.null() || cw.extent < need) {
-            rhi::RingAlloc a = frames_.allocate(static_cast<VkDeviceSize>(need) * 16, 16);
+            rhi::RingAlloc a = game_->allocRing(static_cast<VkDeviceSize>(need) * 16, 16);
             std::memcpy(a.ptr, regs[first[w]], static_cast<std::size_t>(need) * 16);
             cw.address = a.ref;
             cw.ptr = static_cast<const std::uint8_t*>(a.ptr);
@@ -578,7 +578,7 @@ void Device::verifySplit(bool vertex, const Shader& sh) {
 namespace {
 
 // the all-default pipeline description (padding zero), copied by prepareDraw
-constexpr vk::PipelineDesc kBlankPipelineDesc{};
+constexpr PipelineDesc kBlankPipelineDesc{};
 
 // the render states a replacement overrides (restored when prepareDraw returns)
 constexpr std::uint32_t kReplacedStates[] = {RS_ALPHABLENDENABLE, RS_SRCBLEND, RS_DESTBLEND, RS_BLENDOP, RS_SEPARATEALPHABLENDENABLE,
@@ -820,7 +820,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         // are not allowed inside a rendering scope
         for (Texture* t : rep.sampled) {
             if (t == nullptr || t->isNull()) continue;
-            if (t->pending_ || t->image().layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+            if (t->pending_ || t->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
                 endRendering();
                 t->prepareForSampling(frameList());
             }
@@ -879,9 +879,9 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         fsVariant = variant(ps_, VariantSlot::Gi);
     }
 
-    // a copy of the blank description: `vk::PipelineDesc pd{}` initialised the 520 bytes member by member (blend defaults are
+    // a copy of the blank description: `PipelineDesc pd{}` initialised the 520 bytes member by member (blend defaults are
     // not zero; ~1.5 % of the engine thread in the V4 profile)
-    vk::PipelineDesc pd = kBlankPipelineDesc;
+    PipelineDesc pd = kBlankPipelineDesc;
     pd.vs = vsModule;
     pd.fs = fs;
     pd.topology = topology(primitiveType);
@@ -895,7 +895,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     pd.colorCount = colorCount_;
     for (std::uint32_t i = 0; i < colorCount_; ++i) {
         pd.colorFormats[i] = colorFormats_[i];
-        if (!ctx_.features().extendedDynamicState3) {
+        if (!game_->gameCaps().extendedDynamicState3) {
             pd.blend[i] = attachmentBlend(i);
         }
     }
@@ -912,7 +912,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     // a variant combination whose pipeline exists is taken; a missing one is built in the background (this draw keeps
     // the engine's shaders). `writes`: the pixel shader writes the G-buffer (without EDS3 its write mask is in the pipeline)
     const auto tryVariant = [&](rhi::ShaderModule vsM, rhi::ShaderModule fsM, bool writes) {
-        vk::PipelineDesc vd = pd;
+        PipelineDesc vd = pd;
         if (vsM != rhi::ShaderModule::None) vd.vs = vsM;
         if (fsM != rhi::ShaderModule::None) vd.fs = fsM;
         if (writes && !eds3) {
@@ -950,7 +950,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     // arming the G-buffer (Device::setGbuffer): this solid draw's pipeline with the attachments, built in the background
     if (gbuf_.normal != nullptr && !gbufArmed_ && !scopeGbuf_ && colorCount_ == 1 && gbufferTargetsMatch()) {
         ++gbufSolid_;
-        vk::PipelineDesc md = pd;
+        PipelineDesc md = pd;
         md.colorCount = 3;
         md.colorFormats[1] = gbuf_.normal->desc().format;
         md.colorFormats[2] = gbuf_.motion->desc().format;
@@ -967,7 +967,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         }
         if (!eds3) {
             for (std::uint32_t i = 1; i < 3; ++i) {
-                md.blend[i] = vk::BlendAttachment{};
+                md.blend[i] = BlendAttachment{};
                 md.blend[i].writeMask = writes ? 0xFu : 0u;
             }
         }
@@ -987,7 +987,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     }
     // no enhancement variant took the draw: the GLSL material shader when it and its pipeline exist (else the translated one)
     if (uberBase != rhi::ShaderModule::None && pd.fs == fs) {
-        vk::PipelineDesc ud = pd;
+        PipelineDesc ud = pd;
         ud.fs = uberBase;
         if (findPipeline(ud) != GamePipeline::None) {
             pd = ud;
@@ -1053,7 +1053,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
                                  ((r.samplers[slot] == shader::TextureType::Cube) == (t->desc().type == TextureType::Cube)) &&
                                  ((r.samplers[slot] == shader::TextureType::Volume) == (t->desc().type == TextureType::Volume));
         const bool usable = t != nullptr && !t->isNull() && kindMatches &&
-                            t->image().layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                            t->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         block.tex[slot] = !usable ? 0 : (t == substituteFrom_ && substituteSlot_ != 0) ? substituteSlot_ : t->bindlessSlot();
         block.smp[slot] = lodBias != 0.0f && slot < 16 ? samplerIndexBiased(slot, lodBias) : samplerIndex(slot);
     }
@@ -1105,7 +1105,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         block.pad[1] = static_cast<std::uint32_t>(geom.baseVertex + vertexShift_);
         captured_.push_back(captureRequest_);
     }
-    rhi::RingAlloc db = frames_.allocate(sizeof(block), 16);
+    rhi::RingAlloc db = game_->allocRing(sizeof(block), 16);
     std::memcpy(db.ptr, &block, sizeof(block));
 
     if (stats_.totalDraws < options_.logDraws) {
@@ -1114,7 +1114,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
             if (block.tex[slot] != 0 || tex_[slot] != nullptr) {
                 Texture* t = tex_[slot];
                 tex += std::format(" s{}=slot{}({}x{} {} {} levels, pending {})", slot, block.tex[slot], t ? t->desc().width : 0,
-                                   t ? t->desc().height : 0, t ? vk::d3dFormatName(t->desc().format) : "-", t ? t->levels() : 0,
+                                   t ? t->desc().height : 0, t ? rhi::d3dFormatName(t->desc().format) : "-", t ? t->levels() : 0,
                                    t ? t->pending_.load() : false);
             }
         }
@@ -1233,7 +1233,7 @@ void Device::logWaterDraw(draws::Kind kind) {
         if (ps_->reflection.samplers[slot] == shader::TextureType::Unknown) continue;
         const Texture* t = tex_[slot];
         tex += std::format(" s{}={}", slot, t != nullptr ? std::format("{}x{} {}{}{}", t->desc().width, t->desc().height,
-                                                                        vk::d3dFormatName(t->desc().format),
+                                                                        rhi::d3dFormatName(t->desc().format),
                                                                         t->desc().type == TextureType::Cube ? " cube" : "",
                                                                         t->role() != scene::ImageRole::None
                                                                             ? std::string(" ") + scene::name(t->role())
@@ -1460,13 +1460,13 @@ void Device::drawPrimitiveUP(std::uint32_t type, std::uint32_t primitiveCount, c
         return;
     }
     const std::uint32_t vertices = vertexCount(type, primitiveCount);
-    rhi::RingAlloc a = frames_.allocate(static_cast<VkDeviceSize>(vertices) * stride, 16);
+    rhi::RingAlloc a = game_->allocRing(static_cast<VkDeviceSize>(vertices) * stride, 16);
     if (a.ptr == nullptr) {
         upAllocFailed(static_cast<std::uint64_t>(vertices) * stride);
         return;
     }
     std::memcpy(a.ptr, data, static_cast<std::size_t>(vertices) * stride);
-    up_ = {true, vk::vkBuffer(a), a.offset, stride};
+    up_ = {true, a.buffer, a.offset, stride};
     if (prepareDraw(type, DrawGeom{.userPointer = true, .primitives = primitiveCount})) {
         packet_.op = DrawPacket::Op::Draw;
         packet_.count = vertices;
@@ -1488,20 +1488,20 @@ void Device::drawIndexedPrimitiveUP(std::uint32_t type, std::uint32_t minIndex, 
     }
     const std::uint32_t count = vertexCount(type, primitiveCount);
     const std::uint32_t isize = index32 ? 4 : 2;
-    rhi::RingAlloc ia = frames_.allocate(static_cast<VkDeviceSize>(count) * isize, 16);
+    rhi::RingAlloc ia = game_->allocRing(static_cast<VkDeviceSize>(count) * isize, 16);
     const std::uint32_t vcount = minIndex + numVertices;
-    rhi::RingAlloc va = frames_.allocate(static_cast<VkDeviceSize>(vcount) * stride, 16);
+    rhi::RingAlloc va = game_->allocRing(static_cast<VkDeviceSize>(vcount) * stride, 16);
     if (ia.ptr == nullptr || va.ptr == nullptr) {
         upAllocFailed(static_cast<std::uint64_t>(count) * isize + static_cast<std::uint64_t>(vcount) * stride);
         return;
     }
     std::memcpy(ia.ptr, indices, static_cast<std::size_t>(count) * isize);
     std::memcpy(va.ptr, vertices, static_cast<std::size_t>(vcount) * stride);
-    up_ = {true, vk::vkBuffer(va), va.offset, stride};
+    up_ = {true, va.buffer, va.offset, stride};
     if (prepareDraw(type, DrawGeom{.indexed = true, .userPointer = true, .primitives = primitiveCount})) {
         packet_.op = DrawPacket::Op::DrawIndexed;
         packet_.index32 = index32;
-        packet_.indexBuffer = reinterpret_cast<std::uint64_t>(vk::vkBuffer(ia));
+        packet_.indexBuffer = ia.buffer;
         packet_.first = foldIndexOffset(ia.offset, index32, 0, packet_.indexOffset);
         packet_.count = count;
         packet_.instances = 1;

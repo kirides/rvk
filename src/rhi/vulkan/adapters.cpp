@@ -51,6 +51,10 @@ std::vector<AdapterInfo> enumerateAdapters(Backend backend) {
     return out;
 }
 
+void probeBackend(Backend backend) {
+    if (backend == Backend::Vulkan) vk::probe();
+}
+
 void setDebugNames(bool enabled) { vk::names::setEnabled(enabled); }
 bool debugNamesEnabled() { return vk::names::enabled(); }
 
