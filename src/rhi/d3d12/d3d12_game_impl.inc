@@ -1166,6 +1166,20 @@ caps::Report D3D12DeviceImpl::capabilityReport(bool) {
     if (caps_.rayQuery) r[caps::Cap::RayQuery].detail = "DXR 1.1 inline ray queries";
     set(caps::Cap::PositionFetch, false, "not available on D3D12 (the RT scene reads its own geometry records)");
     set(caps::Cap::FrameGeneration, false, "frame generation on D3D12 is not available yet");
+    set(caps::Cap::FullScreenExclusive, false, "exclusive fullscreen is not implemented on D3D12 (the game's fullscreen stays a borderless window)");
+    set(caps::Cap::MemoryBudget, adapter3_ != nullptr, "IDXGIAdapter3 is not available");
+    if (adapter3_) r[caps::Cap::MemoryBudget].detail = "DXGI QueryVideoMemoryInfo";
+    const auto mib = [](std::uint64_t b) { return std::format("{:.0f} MiB", static_cast<double>(b) / 1048576.0); };
+    r.properties.emplace_back("video memory (dedicated / shared)", mib(vramDedicated_) + " / " + mib(vramShared_));
+    if (adapter3_) {
+        DXGI_QUERY_VIDEO_MEMORY_INFO local{}, nonLocal{};
+        if (SUCCEEDED(adapter3_->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local)) &&
+            SUCCEEDED(adapter3_->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &nonLocal))) {
+            r.properties.emplace_back("video memory budget (local / system)", mib(local.Budget) + " / " + mib(nonLocal.Budget));
+        }
+    }
+    r.properties.emplace_back("GPU upload heap (resizable BAR)", gpuUploadHeap_ ? "yes" : "no");
+    r.properties.emplace_back("tearing (vsync off)", tearing_ ? "yes" : "no");
     return r;
 }
 
@@ -1174,6 +1188,15 @@ void D3D12DeviceImpl::logMemoryStats() {
     for (const auto& b : arena_) {
         used += b->used;
         size += b->size;
+    }
+    if (adapter3_) {
+        DXGI_QUERY_VIDEO_MEMORY_INFO local{}, nonLocal{};
+        if (SUCCEEDED(adapter3_->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local)) &&
+            SUCCEEDED(adapter3_->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &nonLocal))) {
+            const auto mib = [](std::uint64_t b) { return static_cast<double>(b) / 1048576.0; };
+            spdlog::info("perf: d3d12 video memory: local {:.0f} MiB used of a {:.0f} MiB budget (dedicated {:.0f} MiB), system {:.0f} of {:.0f} MiB{}", mib(local.CurrentUsage), mib(local.Budget),
+                         mib(vramDedicated_), mib(nonLocal.CurrentUsage), mib(nonLocal.Budget), local.CurrentUsage > local.Budget ? " (OVER BUDGET)" : "");
+        }
     }
     spdlog::info("perf: d3d12 mesh arena {} blocks, {:.1f} MiB used of {:.1f} MiB; {} pipelines ({} PSOs built in {:.0f} ms of build time, {} pending, {} draws skipped while pending)", arena_.size(),
                  static_cast<double>(used) / 1048576.0, static_cast<double>(size) / 1048576.0, entries_.size(), psoBuilt_.load(), static_cast<double>(psoNs_.load()) * 1e-6,

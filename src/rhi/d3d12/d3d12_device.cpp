@@ -8,6 +8,7 @@
 // the vcpkg directx-headers port's headers (Agility SDK 1.619: ID3D12DeviceFactory, ...), which must win over the Windows SDK's older d3d12.h
 #include <directx/d3d12.h>
 #include <dxgi1_6.h>
+#include "rhi/d3d12/d3d12_test_hooks.h"
 #include <wrl/client.h>
 
 #include <algorithm>
@@ -508,6 +509,7 @@ public:
     ~D3D12DeviceImpl() override;
 #include "d3d12_game_decl.inc"
     bool gpuUploadHeapSupported() const { return gpuUploadHeap_; }
+    friend struct D3D12TestAccess;
 
 
     bool create(const DeviceDesc& desc) {
@@ -586,6 +588,9 @@ public:
             for (const wchar_t* c = ad.Description; *c != L'\0'; ++c) name += static_cast<char>(*c < 128 ? *c : '?');
             caps_.adapterName = name;
         }
+        adapter.As(&adapter3_);
+        vramDedicated_ = ad.DedicatedVideoMemory;
+        vramShared_ = ad.SharedSystemMemory;
         bool viaFactory = false;
         RVK_HR(makeDevice(adapter.Get(), IID_PPV_ARGS(&device_), &viaFactory), "D3D12CreateDevice");
         caps_.agilitySdkVersion = viaFactory ? sdk.version : 0;
@@ -2026,7 +2031,26 @@ void D3D12DeviceImpl::submitAndWait(const std::function<void(CommandList&)>& rec
     waitIdle();
 }
 
+// the pure parts for rvk_tests (d3d12_test_hooks.h)
+struct D3D12TestAccess {
+    using Key = D3D12DeviceImpl::RasterKey;
+    static Key key(const DynamicStateValues& d) { return D3D12DeviceImpl::rasterKey(d); }
+};
+
 }  // namespace
+
+namespace d3d12test {
+std::uint32_t dxgiFormat(VkFormat f) { return static_cast<std::uint32_t>(toDxgi(f)); }
+std::uint32_t dxgiVertexFormat(VkFormat f) { return static_cast<std::uint32_t>(toDxgiVertex(f)); }
+std::uint32_t dxgiResourceFormat(VkFormat f, bool sampled) { return static_cast<std::uint32_t>(resourceFormat(f, sampled)); }
+std::uint32_t dxgiSrvFormat(VkFormat f) { return static_cast<std::uint32_t>(srvFormat(f)); }
+bool rasterKeysEqual(const DynamicStateValues& a, const DynamicStateValues& b) { return D3D12TestAccess::key(a) == D3D12TestAccess::key(b); }
+std::int32_t rasterKeyBias(const DynamicStateValues& d) { return D3D12TestAccess::key(d).bias; }
+std::uint32_t rasterKeySize() { return static_cast<std::uint32_t>(sizeof(D3D12TestAccess::Key)); }
+std::uint32_t rasterKeyFieldBytes() {
+    return static_cast<std::uint32_t>(5 * sizeof(std::uint32_t) + 6 * sizeof(std::uint32_t) + 4 * sizeof(std::uint32_t) + sizeof(std::int32_t) + sizeof(float));
+}
+}  // namespace d3d12test
 
 std::unique_ptr<GameDevice> createD3D12GameDevice(const GameDeviceOptions& options) {
     auto d = std::make_unique<D3D12DeviceImpl>();

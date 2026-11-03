@@ -22,6 +22,7 @@
 // Off: nothing registered, no GPU memory, the material shaders' own modules.
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <future>
@@ -77,6 +78,7 @@ struct GiPassParams {
     float screen6[4];          // directional correction strength, 0, 0, 0
 };
 static_assert(sizeof(GiPassParams) == 16 * (3 + 3 + 1 + 1 + 1 + 1 + 1 + 7 + kGiMaxLights * 2 + 6));
+static_assert(offsetof(GiPassParams, lights) == 288);  // GI_LIGHTS_OFFSET of gi_common.hlsli (the shaders read the lights from memory by offset)
 
 // mirror of gi_common.glsl GiPush
 struct GiPush {

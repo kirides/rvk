@@ -277,6 +277,8 @@ public:
     bool captureHold_ = false;       // a compute pass writes the pool: dispatches leave its state alone
     bool captureAllRead_ = false;    // both slots are known to be in the read state
     bool gpuUploadHeap_ = false;
+    ComPtr<IDXGIAdapter3> adapter3_;  // QueryVideoMemoryInfo (memory budget, WP9)
+    std::uint64_t vramDedicated_ = 0, vramShared_ = 0;
     bool dxr11_ = false;
     void setCaptureState(ID3D12GraphicsCommandList* list, std::uint32_t slot, D3D12_RESOURCE_STATES to);
 

@@ -1047,7 +1047,7 @@ private:
         } else {
             m += "RvkPsOut PSMain(RvkPsIn rvk_in) {\n    rvk_draw = rvkLoadDraw();\n    RvkPsOut rvk_out = (RvkPsOut)0;\n";
             m += "    rvk_fragCoord = rvk_in.rvk_fragCoord;\n";
-            if (usesFace_) m += varyingFillers() && ::GetEnvironmentVariableA("RVK_FLIP_FRONT", nullptr, 0) != 0 ? "    rvk_front = !rvk_in.rvk_front;\n" : "    rvk_front = rvk_in.rvk_front;\n";
+            if (usesFace_) m += "    rvk_front = rvk_in.rvk_front;\n";
             for (const auto& d : p_.inputs) {
                 const std::uint32_t loc = psInputLocation(d);
                 if (loc == abi::kInvalidLocation) continue;

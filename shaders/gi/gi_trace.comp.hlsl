@@ -35,10 +35,10 @@ void CSMain(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
         GroupMemoryBarrierWithGroupSync();
         uint nL = min(p.Get().flags.y, GI_MAX_LIGHTS);
         for (uint j = ray; j < nL; j += GI_RAYS) {
-            float4 lp = p.Get().lights[j * 2u];
+            float4 lp = giLight(j * 2u);
             float3 d = lp.xyz - P;
             float d2 = dot(d, d);
-            if (d2 * lp.w >= 1.0 || dot(p.Get().lights[j * 2u + 1u].rgb, float3(1.0, 1.0, 1.0)) <= 1e-4) continue;
+            if (d2 * lp.w >= 1.0 || dot(giLight(j * 2u + 1u).rgb, float3(1.0, 1.0, 1.0)) <= 1e-4) continue;
             float dist = sqrt(max(d2, 1e-4));
             if (rvkRtVisibility(f, P, d / dist, 1.0, max(dist - 8.0, 1.0), 0.0, 0.0, RVK_RT_TRACE_OPAQUE) > 0.5) {
                 uint orig;

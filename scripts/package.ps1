@@ -32,12 +32,12 @@ try {
     Copy-Item (Join-Path $BinDir 'copyright') "$stage\rvk\dxc_LICENSE.txt"
     # the DX12 backend (vulkan.api = d3d12): the Agility SDK runtime (D3D12Core.dll, no debug layer) and its redistribution licence
     $agility = Join-Path $BinDir 'd3d12\D3D12Core.dll'
-    if (Test-Path $agility) {
-        New-Item -ItemType Directory -Force "$stage\rvk\d3d12" | Out-Null
-        Copy-Item $agility "$stage\rvk\d3d12"
-        $agLic = Join-Path $BinDir '..\vcpkg_installed\x64-windows-static-md\share\directx12-agility\copyright'
-        if (Test-Path $agLic) { Copy-Item $agLic "$stage\rvk\d3d12_LICENSE.txt" }
-    }
+    if (-not (Test-Path $agility)) { throw "$agility missing: the DX12 backend (vulkan.api = d3d12) needs the Agility SDK runtime in the package" }
+    New-Item -ItemType Directory -Force "$stage\rvk\d3d12" | Out-Null
+    Copy-Item $agility "$stage\rvk\d3d12"
+    $agLic = Join-Path $BinDir '..\vcpkg_installed\x64-windows-static-md\share\directx12-agility\copyright'
+    if (-not (Test-Path $agLic)) { throw 'the Agility SDK licence (vcpkg_installed\...\share\directx12-agility\copyright) was not found' }
+    Copy-Item $agLic "$stage\rvk\d3d12_LICENSE.txt"
     $lic = @(Get-Content third_party\amd_fidelityfx\LICENSE.md)
     $end = ($lic | Select-String -Pattern '^These source files' | Select-Object -First 1).LineNumber - 1
     if ($end -lt 10) { throw 'amd_fidelityfx\LICENSE.md: end of the notice not found' }
@@ -57,6 +57,19 @@ try {
     $zip = Join-Path (Resolve-Path $Out) $Name
     Compress-Archive -Path "$stage\*" -DestinationPath $zip -Force
     Remove-Item $stage -Recurse -Force
+
+    # verify what the player zip must carry: the DX12 backend's runtime + licence, the HLSL compiler + licence, AMD's DLLs + notice; never the debug layer
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $z = [IO.Compression.ZipFile]::OpenRead($zip)
+    try {
+        $names = @($z.Entries | ForEach-Object { $_.FullName -replace '\\', '/' })
+        foreach ($need in 'd3d9.dll', 'rvk/config.toml', 'rvk/README.txt', 'rvk/dxcompiler.dll', 'rvk/dxc_LICENSE.txt', 'rvk/d3d12/D3D12Core.dll', 'rvk/d3d12_LICENSE.txt',
+                          'rvk/amd_fidelityfx_loader_vk.dll', 'rvk/amd_fidelityfx_upscaler_vk.dll', 'rvk/amd_fidelityfx_framegeneration_vk.dll', 'rvk/amd_fidelityfx_LICENSE.txt') {
+            if ($names -notcontains $need) { throw "package check: $need is missing from $zip" }
+        }
+        if ($names | Where-Object { $_ -match 'd3d12SDKLayers' }) { throw 'package check: the debug layer (d3d12SDKLayers.dll) must not ship' }
+    } finally { $z.Dispose() }
+    Write-Host "package check: ok ($($names.Count) files)"
 
     Get-Item $zip | Format-Table Name, Length
 } finally {

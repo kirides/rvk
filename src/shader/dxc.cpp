@@ -94,12 +94,10 @@ HMODULE thisModule() {
 
 bool readDefault(std::string_view path, std::string& text) {
     static const std::string dir = [] {
-        char* e = nullptr;
-        std::size_t n = 0;
-        std::string value;
-        if (_dupenv_s(&e, &n, "RVK_SHADER_DIR") == 0 && e) value = e;
-        std::free(e);
-        return value;
+        // (the Win32 block: the proxy sets [debug] environment variables with SetEnvironmentVariableW in DllMain, which the CRT's copy does not see)
+        char buf[1024];
+        const DWORD n = GetEnvironmentVariableA("RVK_SHADER_DIR", buf, sizeof buf);
+        return n > 0 && n < sizeof buf ? std::string(buf, n) : std::string();
     }();
     if (!dir.empty()) {
         std::ifstream in(fs::path(dir) / fs::path(path), std::ios::binary);

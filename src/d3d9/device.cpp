@@ -569,6 +569,13 @@ void Device::setRefreshCap(double hz) {
 
 bool Device::setFullScreenExclusive(void* monitor, bool hold) {
     if (options_.offscreen || !pres().valid()) return false;
+    if (monitor != nullptr && !game_->gameCaps().fullScreenExclusive) {
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true)) {
+            spdlog::info("{}: exclusive fullscreen is not available{}: the game's fullscreen stays a borderless window",
+                         game_->caps().backend == rhi::Backend::D3D12 ? "d3d12" : "vulkan", game_->caps().backend == rhi::Backend::D3D12 ? " on the D3D12 backend" : " (the device lacks VK_EXT_full_screen_exclusive)");
+        }
+    }
     if (!game_->gameCaps().fullScreenExclusive || pres().frameGenWanted()) monitor = nullptr;  // not with AMD's swapchain
     bool recreated = false;
     if (monitor != fseMonitor_) {
