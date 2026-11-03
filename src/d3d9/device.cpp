@@ -247,10 +247,10 @@ void Device::inject(inject::Point point) {
                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - p0).count();
             }
         }
-        if (gpuTimer_.enabled()) {
+        if (game_->timestampsEnabled()) {
             const std::uint32_t slot = frames_.currentSlot();
-            gpuTimer_.mark(cmd, slot, vk::GpuTimer::Stream::Main,
-                           gpuTimer_.details(slot) ? std::format("pass {} at {}", list[i].name, inject::name(point)) : std::string());
+            game_->timestampMark(frameList(), slot, rhi::TimestampStream::Main,
+                           game_->timestampDetails(slot) ? std::format("pass {} at {}", list[i].name, inject::name(point)) : std::string());
         }
     }
     injecting_ = false;
@@ -325,7 +325,7 @@ bool Device::create(const DeviceOptions& options) {
         // present thread and AMD's frame generation threads)
         diag::startHangWatchdog(8.0, [](void* d) { return static_cast<Device*>(d)->stats_.frames; }, this);
     }
-    if (options.perf && gpuTimer_.create(ctx_, vk::Frames::kInFlight)) {
+    if (options.perf && game_->enableTimestamps()) {
         spdlog::info("d3d9: [debug] perf: GPU timestamps on{}",
                      options.perfFrame != 0 ? std::format(", pass timings of frame {}", options.perfFrame) : std::string());
     }
@@ -793,7 +793,6 @@ void Device::destroy() {
         keySaver_.join();
     }
     swapchain_.destroy();
-    gpuTimer_.destroy();
     pipelines_.destroy();
     passes_ = inject::Registry{};
     fgWrapper_.reset();
@@ -821,9 +820,9 @@ void Device::beginFrame() {
     substituteFrom_ = nullptr;
     substituteSlot_ = 0;
     perf_.slotWaitMs += frames_.lastSlotWaitMs();
-    if (gpuTimer_.enabled()) {
+    if (game_->timestampsEnabled()) {
         const std::uint32_t slot = frames_.currentSlot();
-        const vk::GpuTimer::Result r = gpuTimer_.collect(slot);
+        const rhi::TimestampResult r = game_->timestampCollect(slot);
         if (r.valid) {
             live_.gpuMs = static_cast<float>(r.mainMs + r.uploadMs);
             ++perf_.gpuSubmits;
@@ -846,8 +845,8 @@ void Device::beginFrame() {
         }();
         const bool details = options_.perfFrame != 0 && stats_.frames + 1 >= options_.perfFrame && stats_.frames + 1 < options_.perfFrame + perfSpan;
         gpuDetailFrame_[slot] = details ? stats_.frames + 1 : 0;
-        gpuTimer_.start(slot, details);
-        gpuTimer_.mark(frames_.cmd(), slot, vk::GpuTimer::Stream::Main, "begin");
+        game_->timestampStart(slot, details);
+        game_->timestampMark(frameList(), slot, rhi::TimestampStream::Main, "begin");
     }
     processReleases();
     uploadUsed_ = false;
@@ -1022,8 +1021,8 @@ void Device::syncPhaseRegions() {
 }
 
 void Device::gpuMark(const char* what) {
-    if (gpuTimer_.enabled()) {
-        gpuTimer_.mark(frames_.cmd(), frames_.currentSlot(), vk::GpuTimer::Stream::Main, what);
+    if (game_->timestampsEnabled()) {
+        game_->timestampMark(frameList(), frames_.currentSlot(), rhi::TimestampStream::Main, what);
     }
 }
 
@@ -1075,8 +1074,8 @@ VkCommandBuffer Device::uploadCommands() {
         di.pMemoryBarriers = &b;
         vkCmdPipelineBarrier2(cmd, &di);
         uploadUsed_ = true;
-        if (gpuTimer_.enabled()) {
-            gpuTimer_.mark(cmd, frames_.currentSlot(), vk::GpuTimer::Stream::Upload, "upload begin");
+        if (game_->timestampsEnabled()) {
+            game_->timestampMark(game_->uploadCommands(), frames_.currentSlot(), rhi::TimestampStream::Upload, "upload begin");
         }
     }
     return cmd;
@@ -1094,8 +1093,8 @@ void Device::submitFrame(VkSemaphore waitAcquire, VkSemaphore signalRendered) {
         di.memoryBarrierCount = 1;
         di.pMemoryBarriers = &b;
         vkCmdPipelineBarrier2(frames_.uploadCmd(), &di);
-        if (gpuTimer_.enabled()) {
-            gpuTimer_.mark(frames_.uploadCmd(), frames_.currentSlot(), vk::GpuTimer::Stream::Upload, "uploads");
+        if (game_->timestampsEnabled()) {
+            game_->timestampMark(game_->uploadCommands(), frames_.currentSlot(), rhi::TimestampStream::Upload, "uploads");
         }
     }
     gpuMark(signalRendered != VK_NULL_HANDLE ? "present blit + barriers since the last pass"

@@ -48,7 +48,6 @@
 #include "vk/frames.h"
 #include "vk/crash_markers.h"
 #include "vk/fg_swapchain.h"
-#include "vk/gputimer.h"
 #include "vk/image.h"
 #include "vk/mesh_arena.h"
 #include "vk/pacer.h"
@@ -1626,7 +1625,6 @@ private:
     // [debug] perf
     struct DrawTimer;
     void gpuMark(const char* what);
-    vk::GpuTimer gpuTimer_;
     PerfStats perf_;
     std::uint64_t perfPipelinesBase_ = 0;
     double perfPipelineMsBase_ = 0.0;

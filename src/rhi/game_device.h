@@ -117,6 +117,15 @@ struct GameCaps {
     // texture uploads: the row pitch / buffer offset alignment of a buffer -> texture copy (Vulkan: tightly packed rows, 16; D3D12: 256 / 512)
     std::uint32_t uploadRowAlign = 1;
     std::uint32_t uploadOffsetAlign = 16;
+    // what the draw path sets that is not part of the pipeline description: on Vulkan these are dynamic state extensions, on D3D12
+    // they come from the PSO and the render-target selection
+    bool extendedDynamicState3 = false;  // multi-target blend, write masks, depth bias, front face, topology, stencil ops
+    bool vertexInputDynamicState = false;  // vertex input not baked into the pipeline: the layout is recorded per draw
+    bool samplerAnisotropy = false;
+    float maxAnisotropy = 1.0f;  // the device's anisotropy ratio cap (1 = none)
+    // VK_EXT_full_screen_exclusive: the swapchain may take the exclusive fullscreen mode (the HAL's device bring-up offers it
+    // as the `vulkan.exclusive_fullscreen` setting; on D3D12 a DXGI flip model swapchain has its own presentation interval)
+    bool fullScreenExclusive = false;
 };
 
 // A block of the mesh arena (static vertex / index data in device memory, shared big buffers; any thread). `buffer` is the arena buffer it lives in (owned by the
@@ -220,6 +229,35 @@ public:
     virtual void releaseTransient(std::string_view key) = 0;
     // bytes of all transient images (diagnostics)
     virtual std::uint64_t transientBytes() const = 0;
+
+    // ---- GPU timestamps ([debug] perf) ----
+    // Marks of the frame's two command streams: a "begin" mark at the start of a submission and marks after each pass split it
+    // into labelled segments (a render pass, a copy, the present blit). A slot's results are read once that slot's previous
+    // submission has completed, so reading never stalls. Backends without timestamp queries keep the timer off (the renderer
+    // then reports no GPU times).
+    enum class TimestampStream : std::uint8_t { Main, Upload };
+    struct TimestampSegment {
+        std::string label;
+        double ms = 0.0;
+    };
+    struct TimestampResult {
+        bool valid = false;
+        double mainMs = 0.0;    // first to last mark of the main command list
+        double uploadMs = 0.0;  // the same for the upload command list
+        std::vector<TimestampSegment> segments;  // the main list's segments, only with details
+    };
+    // create the timer, once at device creation (only called when the renderer's [debug] perf is on); false = the backend
+    // cannot time (no query pool / no timing queue): the renderer keeps its marks out
+    virtual bool enableTimestamps() = 0;
+    virtual bool timestampsEnabled() const = 0;
+    // starts recording a slot; `details` keeps the labels of the main stream's marks for TimestampResult::segments
+    virtual void timestampStart(std::uint32_t slot, bool details) = 0;
+    virtual bool timestampDetails(std::uint32_t slot) const = 0;
+    // writes a timestamp after all earlier commands of `list`; `label` names the work since the previous mark of that stream
+    virtual void timestampMark(CommandList& list, std::uint32_t slot, TimestampStream stream, const char* label) = 0;
+    virtual void timestampMark(CommandList& list, std::uint32_t slot, TimestampStream stream, std::string&& label) = 0;
+    // reads the slot's previous submission (it must have completed) and resets the slot for reuse
+    virtual TimestampResult timestampCollect(std::uint32_t slot) = 0;
 
     // ---- start-up diagnostics (the HAL's device bring-up) ----
     // which frame generation providers the vendor's API offers on this device (loads the loader DLL, lists, unloads: a few tens of ms); the result goes

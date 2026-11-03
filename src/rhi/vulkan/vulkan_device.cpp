@@ -26,6 +26,7 @@
 #include "vk/debug_names.h"
 #include "vk/frames.h"
 #include "vk/framegen.h"
+#include "vk/gputimer.h"
 #include "vk/image.h"
 #include "vk/mesh_arena.h"
 #include "vk/passes.h"
@@ -349,6 +350,7 @@ public:
         : ctx_(ctx), frames_(frames), bindless_(bindless), external_(true), arena_(arena) {}
 
     ~VkDeviceImpl() override {
+        gpuTimer_.destroy();
         if (external_) {
             // the renderer's objects outlive us: what we made (samplers, pass layout) goes through the frame retirement
             vk::Context* ctx = &ctx_;
@@ -422,6 +424,11 @@ public:
         gameCaps_.maxComputeSharedMemory = lim.maxComputeSharedMemorySize;
         gameCaps_.uploadRowAlign = 1;      // tightly packed rows
         gameCaps_.uploadOffsetAlign = 16;  // the ring's own alignment
+        gameCaps_.extendedDynamicState3 = f.extendedDynamicState3;
+        gameCaps_.vertexInputDynamicState = f.vertexInputDynamicState;
+        gameCaps_.samplerAnisotropy = f.samplerAnisotropy;
+        gameCaps_.maxAnisotropy = f.samplerAnisotropy ? f.maxAnisotropy : 1.0f;
+        gameCaps_.fullScreenExclusive = f.fullScreenExclusive;
     }
 
     bool createLayout() {
@@ -507,6 +514,29 @@ public:
         std::uint64_t n = 0;
         for (const auto& [k, e] : transients_) n += std::uint64_t{e.desc.extent.width} * e.desc.extent.height * std::max(1u, formatBytes(e.desc.format));
         return n;
+    }
+
+    // ---- GPU timestamps ([debug] perf): the renderer's query pool over the frame's two command streams ----
+    bool enableTimestamps() override { return gpuTimer_.create(ctx_, rhi::kFramesInFlight); }
+    bool timestampsEnabled() const override { return gpuTimer_.enabled(); }
+    void timestampStart(std::uint32_t slot, bool details) override { gpuTimer_.start(slot, details); }
+    bool timestampDetails(std::uint32_t slot) const override { return gpuTimer_.details(slot); }
+    void timestampMark(CommandList& list, std::uint32_t slot, TimestampStream stream, const char* label) override {
+        gpuTimer_.mark(commandBufferOf(list), slot,
+                       stream == TimestampStream::Main ? vk::GpuTimer::Stream::Main : vk::GpuTimer::Stream::Upload, label);
+    }
+    void timestampMark(CommandList& list, std::uint32_t slot, TimestampStream stream, std::string&& label) override {
+        gpuTimer_.mark(commandBufferOf(list), slot,
+                       stream == TimestampStream::Main ? vk::GpuTimer::Stream::Main : vk::GpuTimer::Stream::Upload, std::move(label));
+    }
+    TimestampResult timestampCollect(std::uint32_t slot) override {
+        const vk::GpuTimer::Result r = gpuTimer_.collect(slot);
+        TimestampResult out;
+        out.valid = r.valid;
+        out.mainMs = r.mainMs;
+        out.uploadMs = r.uploadMs;
+        for (const vk::GpuTimer::Segment& s : r.segments) out.segments.push_back({s.label, s.ms});
+        return out;
     }
 
     void probeFrameGeneration(const std::filesystem::path& loaderDll) override { ctx_.setFrameGenReport(vk::probeFrameGeneration(ctx_, loaderDll)); }
@@ -723,6 +753,7 @@ private:
     bool bindlessInit_ = false;
     GameCaps gameCaps_;
     vk::MeshArena* arena_ = nullptr;
+    vk::GpuTimer gpuTimer_;  // [debug] perf timestamps (enableTimestamps creates it)
     std::unique_ptr<VkCommandListImpl> mainList_, uploadList_;  // the frame's persistent lists (frameCommands / uploadCommands)
     CommandList& listFor(std::unique_ptr<VkCommandListImpl>& slot, VkCommandBuffer cmd, bool reset) {
         if (!slot) {

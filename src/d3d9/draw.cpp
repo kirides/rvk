@@ -45,15 +45,15 @@ void Device::endRendering() {
             const VkDescriptorSet set = bindless_.set();
             vkCmdBindDescriptorSets(frames_.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS, bindless_.pipelineLayout(), 0, 1, &set, 0, nullptr);
         }
-        if (gpuTimer_.enabled()) {
+        if (game_->timestampsEnabled()) {
             const std::uint32_t slot = frames_.currentSlot();
             std::string label;
-            if (gpuTimer_.details(slot)) {
+            if (game_->timestampDetails(slot)) {
                 label = std::format("pass {}: {}x{}, {} colour ({}), depth {}, {} draws", passIndex_, targetWidth_, targetHeight_,
                                     colorCount_, colorCount_ > 0 ? static_cast<int>(colorFormats_[0]) : 0,
                                     static_cast<int>(depthFormat_), passDraws_);
             }
-            gpuTimer_.mark(frames_.cmd(), slot, vk::GpuTimer::Stream::Main, std::move(label));
+            game_->timestampMark(frameList(), slot, rhi::TimestampStream::Main, std::move(label));
         }
     }
 }
@@ -132,11 +132,11 @@ bool Device::beginRendering() {
         targetWidth_ = targetHeight_ = 0;
         return false;
     }
-    if (gpuTimer_.enabled()) {
+    if (game_->timestampsEnabled()) {
         const std::uint32_t slot = frames_.currentSlot();
-        gpuTimer_.mark(cmd, slot, vk::GpuTimer::Stream::Main,
-                       gpuTimer_.details(slot) ? std::format("barriers / copies / inline uploads before pass {}", passIndex_ + 1)
-                                               : std::string());
+        game_->timestampMark(frameList(), slot, rhi::TimestampStream::Main,
+                       game_->timestampDetails(slot) ? std::format("barriers / copies / inline uploads before pass {}", passIndex_ + 1)
+                                                     : std::string());
     }
     ++passIndex_;
     passDraws_ = 0;
