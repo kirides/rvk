@@ -343,6 +343,7 @@ struct GameDeviceOptions {
     int adapter = -1;
     bool allowRayTracing = true;  // rt.allow
     bool frameGenQueues = false;  // framegen.mode != off at start: the extra queues of the frame generation swapchain
+    bool asyncPipelines = true;   // D3D12: PSOs are built on background threads (a draw whose PSO is pending is skipped); false = built at first use (tests)
 };
 
 // A sampler of the D3D9 model (SetSamplerState translated by d3d9, the backend creates it and puts it into the bindless sampler heap)

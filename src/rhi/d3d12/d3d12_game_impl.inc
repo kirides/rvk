@@ -54,6 +54,7 @@ void D3D12DeviceImpl::shutdownGame() {
     if (!gameMode_) return;
     waitIdle();
     stopRecordThreads();
+    stopPsoThreads();
     presenter_.reset();
     mainList_.reset();
     uploadList_.reset();
@@ -207,6 +208,7 @@ bool D3D12DeviceImpl::createGame(const GameDeviceOptions& o) {
     uploadList_ = std::make_unique<D3DCommandList>(*this, nullptr);
     presenter_ = std::make_unique<D3D12Presenter>(*this);
     setRefShift(32);
+    if (o.asyncPipelines) startPsoThreads();
     shader::embedded::setDxilWanted(true);
     gameMode_ = true;
     frameValue_ = 1;
@@ -633,17 +635,76 @@ ID3D12PipelineState* D3D12DeviceImpl::psoFor(PsoEntry& e, const DynamicStateValu
     const RasterKey k = rasterKey(dyn);
     {
         const std::shared_lock lock(e.mutex);
-        for (const auto& [key, pso] : e.psos) {
-            if (key == k) return pso.Get();
+        for (const auto& s : e.psos) {
+            if (s.key == k) return s.pso.Get();
         }
     }
-    const std::unique_lock lock(e.mutex);
-    for (const auto& [key, pso] : e.psos) {
-        if (key == k) return pso.Get();
+    {
+        const std::unique_lock lock(e.mutex);
+        for (const auto& s : e.psos) {
+            if (s.key == k) return s.pso.Get();
+        }
+        e.psos.push_back({k, nullptr});
     }
-    ComPtr<ID3D12PipelineState> pso = buildPso(e, k);
-    e.psos.emplace_back(k, pso);
-    return pso.Get();
+    if (psoThreads_.empty()) {  // (no PSO threads: built here)
+        ComPtr<ID3D12PipelineState> pso = buildPso(e, k);
+        const std::unique_lock lock(e.mutex);
+        for (auto& s : e.psos) {
+            if (s.key == k) s.pso = pso;
+        }
+        return pso.Get();
+    }
+    psoPending_.fetch_add(1);
+    {
+        const std::lock_guard lock(psoMutex_);
+        psoQueue_.push_back({&e, k});
+    }
+    psoCv_.notify_one();
+    return nullptr;
+}
+
+void D3D12DeviceImpl::startPsoThreads() {
+    if (!psoThreads_.empty()) return;
+    const std::uint32_t hw = std::max(2u, std::thread::hardware_concurrency());
+    const std::uint32_t n = std::clamp(hw / 3, 2u, 6u);
+    psoQuit_ = false;
+    for (std::uint32_t i = 0; i < n; ++i) {
+        psoThreads_.emplace_back([this] {
+            SetThreadDescription(GetCurrentThread(), L"rvk pso");
+            for (;;) {
+                PsoJob job{};
+                {
+                    std::unique_lock lock(psoMutex_);
+                    psoCv_.wait(lock, [this] { return psoQuit_ || !psoQueue_.empty(); });
+                    if (psoQueue_.empty()) return;  // (quitting)
+                    job = psoQueue_.front();
+                    psoQueue_.pop_front();
+                }
+                ComPtr<ID3D12PipelineState> pso = buildPso(*job.entry, job.key);
+                {
+                    const std::unique_lock lock(job.entry->mutex);
+                    for (auto& s : job.entry->psos) {
+                        if (s.key == job.key) s.pso = std::move(pso);
+                    }
+                }
+                psoPending_.fetch_sub(1);
+            }
+        });
+    }
+    spdlog::info("d3d12: {} PSO build threads", n);
+}
+
+void D3D12DeviceImpl::stopPsoThreads() {
+    {
+        const std::lock_guard lock(psoMutex_);
+        psoQuit_ = true;
+        psoQueue_.clear();
+    }
+    psoCv_.notify_all();
+    for (auto& t : psoThreads_) {
+        if (t.joinable()) t.join();
+    }
+    psoThreads_.clear();
 }
 
 // ---- scopes / chunks / packets -----------------------------------------------------------------------------------------------
@@ -849,6 +910,7 @@ void D3D12DeviceImpl::applyPacket(RecState& rs, ID3D12GraphicsCommandList* cmd, 
         rs.psoDyn = p.dyn;
         if (pso == nullptr) {
             rs.pso = nullptr;
+            psoSkipped_.fetch_add(1, std::memory_order_relaxed);
             return;
         }
         if (pso != rs.pso) {
@@ -857,6 +919,7 @@ void D3D12DeviceImpl::applyPacket(RecState& rs, ID3D12GraphicsCommandList* cmd, 
             ++rs.binds;
         }
     } else if (rs.pso == nullptr) {
+        psoSkipped_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     if (p.dyn != rs.lastDyn) {
@@ -1110,8 +1173,9 @@ void D3D12DeviceImpl::logMemoryStats() {
         used += b->used;
         size += b->size;
     }
-    spdlog::info("perf: d3d12 mesh arena {} blocks, {:.1f} MiB used of {:.1f} MiB; {} pipelines ({} PSOs built)", arena_.size(), static_cast<double>(used) / 1048576.0,
-                 static_cast<double>(size) / 1048576.0, entries_.size(), psoBuilt_.load());
+    spdlog::info("perf: d3d12 mesh arena {} blocks, {:.1f} MiB used of {:.1f} MiB; {} pipelines ({} PSOs built in {:.0f} ms of build time, {} pending, {} draws skipped while pending)", arena_.size(),
+                 static_cast<double>(used) / 1048576.0, static_cast<double>(size) / 1048576.0, entries_.size(), psoBuilt_.load(), static_cast<double>(psoNs_.load()) * 1e-6,
+                 psoPending_.load(), psoSkipped_.load());
 }
 
 // ---- GPU timestamps ----------------------------------------------------------------------------------------------------------

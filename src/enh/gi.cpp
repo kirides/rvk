@@ -506,8 +506,9 @@ void Gi::record(d3d9::PassContext& ctx) {
     hd.dims[1] = kDims[1];
     hd.dims[2] = kDims[2];
     hd.dims[3] = kGiCascades;
-    split(probes_->shaderRefRw(), &hd.data[0]);
-    split(depth_->shaderRefRw(), &hd.data[2]);
+    // the frame's header (the lookups of the material shaders and passes: read access) holds the read references; the passes that write the probes get their own copy with the writable ones
+    split(probes_->shaderRef(), &hd.data[0]);
+    split(depth_->shaderRef(), &hd.data[2]);
     hd.params[0] = s_.strength;
     hd.params[1] = 0.1f;  // normal bias (cells)
     hd.params[2] = 0.3f;  // view bias (cells)
@@ -532,6 +533,19 @@ void Gi::record(d3d9::PassContext& ctx) {
         return;
     }
     std::memcpy(ha.ptr, &hd, sizeof(hd));
+    // the blend pass writes the probes: its own copy of the header with the writable references (D3D12: the UAV slots)
+    const rhi::RingAlloc haRw = frames.ring(sizeof(hd), 16);
+    const rhi::RingAlloc paRw = frames.ring(sizeof(GiPassParams), 16);
+    if (haRw.ptr == nullptr || paRw.ptr == nullptr) {
+        ++skipped_;
+        return;
+    }
+    {
+        GiVolumeHeader hp = hd;
+        split(probes_->shaderRefRw(), &hp.data[0]);
+        split(depth_->shaderRefRw(), &hp.data[2]);
+        std::memcpy(haRw.ptr, &hp, sizeof(hp));
+    }
     std::memcpy(la.ptr, list.data(), static_cast<std::size_t>(n) * 4);
 
     GiPassParams p{};
@@ -580,6 +594,11 @@ void Gi::record(d3d9::PassContext& ctx) {
     push.h.frame = ctx.frameBlock.bits;
     push.h.passId = passId_;
     split(pa.ref, push.params);
+    GiPassParams pRw = p;
+    split(haRw.ref, &pRw.volume[0]);
+    std::memcpy(paRw.ptr, &pRw, sizeof(pRw));
+    GiPush pushRw = push;
+    split(paRw.ref, pushRw.params);
 
     if (n > 0) {
         RhiScope rs(dev_, cmd);
@@ -593,7 +612,7 @@ void Gi::record(d3d9::PassContext& ctx) {
         // rays -> the blend; the trace's probe reads before the blend's writes
         cl.computeBarrier();
         cl.bindPipeline(*blend_);
-        cl.setPushConstants(&push, sizeof(push));
+        cl.setPushConstants(&pushRw, sizeof(pushRw));
         cl.dispatch(n, 1, 1);
         // the probes -> the lookups of the later draws (alpha) and of the next frames, the next trace
         cl.computeBarrier();

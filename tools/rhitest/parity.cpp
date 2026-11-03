@@ -303,7 +303,10 @@ bool translated(const std::string& asmText, bool vertex, const shader::Translate
         std::printf("  decoding %s failed: %s\n", name, dec.error.c_str());
         return false;
     }
+    // D3D12 links the stages by register: translated stages have the dense signature (the game device's setting; Vulkan ignores the fillers)
+    shader::setVaryingFillers(true);
     const shader::HlslResult h = shader::toHlsl(dec.program, options);
+    shader::setVaryingFillers(false);
     if (!h.ok()) {
         std::printf("  translating %s failed: %s\n", name, h.error.c_str());
         return false;

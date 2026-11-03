@@ -42,6 +42,8 @@ param(
     # [debug] present_stalls (any mode): sample the presenting thread's stack while a present lasts longer than this many ms;
     # "diag:" lines in rvk.log every 5 s name the modules / functions the time is spent in (docs/research/fps-limit.md)
     [double]$PresentStalls = 0,
+    # test-run.ps1 -StallSeconds: kill the game after this long without a new spass.log line (GPU-based validation runs need hundreds)
+    [int]$StallSeconds = 0,
     # [debug] cpu_profile (Vulkan mode): a sampled flat profile of the engine thread between presents every 5 s (`diag: profile`
     # lines: per module, self and inclusive per function; docs/research/performance.md 8)
     [switch]$CpuProfile,
@@ -203,6 +205,7 @@ $spassArgs = @{
 }
 if ($Scenario) { $spassArgs.Scenario = $Scenario }
 if ($WaitForResult) { $spassArgs.WaitForResult = $true }
+if ($StallSeconds -gt 0) { $spassArgs.StallSeconds = $StallSeconds }
 if ($KeepRunning) { $spassArgs.KeepRunning = $true }
 if ($NoAutostart) { $spassArgs.NoAutostart = $true }
 if ($AllowFocus) { $spassArgs.AllowFocus = $true }

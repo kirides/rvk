@@ -25,7 +25,11 @@ public:
         PipelineDesc desc{};
         std::uint32_t strides[kMaxVertexBindings] = {};
         std::shared_mutex mutex;
-        std::vector<std::pair<RasterKey, ComPtr<ID3D12PipelineState>>> psos;  // null PSO = failed (logged once)
+        struct Slot {
+            RasterKey key;
+            ComPtr<ID3D12PipelineState> pso;  // null: being built by a PSO thread, or failed (logged once)
+        };
+        std::vector<Slot> psos;
     };
     static RasterKey rasterKey(const DynamicStateValues& d) {
         RasterKey k;  // (zero-initialised: padding included)
@@ -59,6 +63,20 @@ public:
     }
     ID3D12PipelineState* psoFor(PsoEntry& e, const DynamicStateValues& dyn);
     ComPtr<ID3D12PipelineState> buildPso(const PsoEntry& e, const RasterKey& k);
+    // PSOs are built by background threads (a draw whose PSO is still pending is skipped, like a pipeline that still compiles on Vulkan)
+    struct PsoJob {
+        PsoEntry* entry;
+        RasterKey key;
+    };
+    std::vector<std::thread> psoThreads_;
+    std::deque<PsoJob> psoQueue_;
+    std::mutex psoMutex_;
+    std::condition_variable psoCv_;
+    bool psoQuit_ = false;
+    std::atomic<std::uint32_t> psoPending_{0};
+    std::atomic<std::uint64_t> psoSkipped_{0};
+    void startPsoThreads();
+    void stopPsoThreads();
 
     // ---- recording state of one command list (the frame's inline path and each chunk) ----
     struct RecState {

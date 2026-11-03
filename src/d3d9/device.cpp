@@ -276,6 +276,7 @@ bool Device::create(const DeviceOptions& options) {
     go.adapter = options.adapter;
     go.allowRayTracing = options.allowRayTracing;
     go.frameGenQueues = options.frameGenQueues;
+    go.asyncPipelines = !options.offscreen;
     shader::setVaryingFillers(options.backend == rhi::Backend::D3D12);
     wp0_.on = GetEnvironmentVariableA("RVK_WP0", nullptr, 0) != 0;
     game_ = rhi::createGameDevice(options.backend, go);  // the backend seam (rhi/game_device.h): owns every API object
