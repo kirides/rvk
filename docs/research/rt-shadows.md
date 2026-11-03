@@ -341,3 +341,34 @@ SpeedTree materials have no graph: none) and finally `D3DCMP_ALWAYS` = every can
 Full lean 26.6 (solid), fixed 40.2 / 42.7, RT off 36.6; spot b 54 -> 72.5 (RT off 74.6). Pictures `out/rtleaf/crop_fix_compare.png`.
 Not re-checked at the Harbour Town smithy's palms (the report's place). Open: an instance with no resolved material at all is still
 opaque (`materialFields(nullptr)`).
+
+## 13. AMD FidelityFX Denoiser evaluated: not adopted (2026-11-04)
+
+Question: can AMD's FidelityFX Denoiser (shadow denoiser) replace or complement our temporal + spatial passes, and is its reflection denoiser useful for
+`water_rt.comp`? Sources read: FidelityFX-SDK tag v1.1.4 (`sdk/include/FidelityFX/gpu/denoiser/ffx_denoiser_shadows_*.h`, `..._reflections_*.h`, the
+HLSL / GLSL pass files, `docs/techniques/denoiser.md` "FidelityFX Denoiser 1.3"), fetched into a scratch dir outside the repo. License: MIT
+(the SDK's LICENSE.txt, (C) AMD) - compatible, would need an attribution in `third_party` if code were ported.
+
+**Availability** [C]: SDK 2.x (v2.4.0 `Kits/FidelityFX/denoisers`, `ffx_denoiser.h`) has no shadow / reflection denoiser any more: its "denoiser" is **FSR Ray Regeneration
+1.2.1**, a machine-learning denoiser in a signed DX12-only DLL (`amd_fidelityfx_denoiser_dx12.dll`), RX 9000 series + Windows 11 only (docs/techniques/denoising.md
+section 6). Unusable on the RX 7900 XTX and on Vulkan. The classic shadow / reflection denoisers exist only as source in SDK 1.x (HLSL + GLSL shaders, ~1,700 lines of
+shader code for shadows + reflections), not as an ffx API provider.
+
+**(a) Shadow denoiser** [C inputs / I effect]: it needs a hit mask packed as one 32-bit word per 8x4 pixel tile (prepare pass; the tracer writes it with wave ops),
+depth, velocity, normals, previous depth and moments, then three passes: tile classification (variable-kernel moments 17x17 separable, disocclusion mask, reprojection,
+neighbourhood clamping, adaptive blend) and three edge-avoiding a-trous filter passes with variance feedback (`CS_6_2`, groupshared). It is built for **at most one
+shadow ray per pixel**, which is what our trace already does (rays = 1; only `high` adds a second ray, and only for uncertain pixels; `low` / `medium` differ in the cut-out
+alpha test, not in the ray count), so the question "FFX at low = ours at medium" has no ray-count meaning here. Our pipeline already
+reprojects with depth + prevViewProj, clamps the history to the raw 3x3 range and filters only high-variance / new pixels. Measured cost of ours: temporal 0.06 + spatial 0.07 ms
+at 1600x900 (section 3), against 0.4 - 1.3 ms for the trace. A port (tile classification + 3 filter passes + the bit-packed hit mask + a velocity image that does
+not exist at `AfterDepthPrepass`: the G-buffer is not armed there, and per-object motion for characters is not available) cannot save the dominant cost, and its own passes
+would be at least as expensive as our 0.13 ms (five dispatches instead of two). The only plausible gain is edge quality in the penumbra, and section 3 shows our stability
+(luma std 0.019 for the RT mode against 0.003 for the cascades) is already within noise. A denoiser would only pay if it allowed fewer rays than one per pixel (checkerboard
+or half-rate tracing), which the FFX shadow denoiser does not support. **Verdict: not adopted; no `shadows.rt_denoiser` setting, no port.**
+
+**(b) Reflection denoiser** [C]: its inputs are a noisy radiance image, variance, per-pixel **roughness**, normals, a depth hierarchy and motion vectors; it targets glossy
+reflections with variable-rate traversal. `water_rt.comp` traces one deterministic mirror ray per (half-resolution) pixel with no roughness sampling and no stochastic
+noise ("watery, broken up, no stochastic noise", rt-reflections.md 3.3); the half-resolution image is bilinear-upsampled with a screen-reuse depth match. There is no noise
+for the denoiser to remove, and its reprojection would only add history and ghosting risk on waves. **Verdict: not useful.**
+
+GI is probe-based (rtgi.md 20) and not a denoiser case. Revisit if the RT shadows ever trace below one ray per pixel (then a purpose-built or SVGF-style filter, not FFX's).

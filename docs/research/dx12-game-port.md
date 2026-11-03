@@ -143,3 +143,35 @@ Orchestration notes: one agent at a time in the tree (shared build dir + GPU loc
 as untested; the backend falls back to Vulkan with a log line when SM 6.6 / binding tier 3 / required features are missing). Open question for later: ship `vulkan.api=d3d12` as experimental after WP6, or after all packages.
 
 **Update (break, after WP2b):** WP2b is committed. Next agent = WP2c (open items listed in its Status section: Frames / MeshArena / Bindless / PipelineCache / Swapchain / Presenter / GpuTimer / FgSwapchain still members of d3d9::Device, RecordState + packet application, pipelineFor, present path, submitFrame/beginFrame, `ctx_.features()`, bootstrap `vk::probe()`; the padded-row texture upload path and D3D12 `copyBufferToTextureBox` are compiled but untested in game; `-PerfFrame` pass times were too noisy in WP2b: rerun on a quiet machine).
+
+## D3D12 feature availability on the RX 7900 XTX (2026-11-04)
+
+Measured with `rvk_rhitest --d3d12` (the D3D12 backend logs `caps: d3d12 <feature>: <value>` lines at device creation: `D3D12DeviceImpl::surveyFeatures`,
+also in `DeviceCaps::featureSurvey`) and `rvk_vktest --rt` (the Vulkan caps lines + the new feature survey properties of `Context::appendFeatureSurvey`, which
+also appear in the game's rvk.log `caps:` lines and the overlay's System tab "Graphics card" properties). Information only: nothing is enabled by it.
+Driver: AMD Radeon RX 7900 XTX (RDNA 3), Agility SDK 1.619 (D3D12SDKVersion 619) active. [C] = measured.
+
+| feature | D3D12 (CheckFeatureSupport) | Vulkan equivalent |
+|---|---|---|
+| runtime / SDK | Agility SDK 619 | Vulkan 1.4 (floor 1.3 + push descriptor) |
+| shader model | 6.9 highest | SPIR-V via DXC |
+| wave size | 32 - 64 lanes, wave ops | subgroup 64 (min 32, max 64), size control supported |
+| ray tracing | **DXR tier 1.1** (no 1.2) | ray query + acceleration structure, position fetch, maintenance1, pipeline |
+| opacity micromap | not in DXR 1.1; the vendored headers have no separate tier query (follows DXR 1.2) | **VK_EXT_opacity_micromap unsupported** |
+| shader execution reordering | OPTIONS22 `ShaderExecutionReorderingActuallyReorders` = false (API only) | `VK_EXT_ray_tracing_invocation_reorder` listed (no NV one); whether RDNA 3 really reorders is not exposed |
+| variable rate shading | tier 2 (tile 8x8) | VK_KHR_fragment_shading_rate: pipeline + primitive + attachment |
+| mesh shaders | tier 1 | VK_EXT_mesh_shader: task + mesh |
+| sampler feedback | tier 1.0 | (none) |
+| enhanced barriers | supported (OPTIONS12) | n/a (sync2 is core) |
+| relaxed format casting | supported | mutable format images |
+| advanced texture ops (OPTIONS14) | supported | n/a |
+| GPU upload heap | supported (OPTIONS16) | device-local + host-visible memory type |
+| resizable BAR | yes (implied by the GPU upload heap; D3D12 has no direct query) | yes, 24,560 MiB device-local + host-visible heap |
+| work graphs | tier 1.0 | VK_AMDX_shader_enqueue unsupported |
+| ExecuteIndirect | tier 1.1 | VK_EXT_device_generated_commands / indirect count (indirect count used) |
+| other Vulkan | | cooperative matrix, descriptor buffer, host image copy supported; present wait, cluster acceleration structure unsupported |
+
+Consequences: the 7900 XTX stays at DXR 1.1, so no OMM / SER path exists on either API for this GPU; mesh shaders, VRS, work graphs, enhanced barriers and the GPU upload
+heap are there for later experiments (none planned). A feature struct a runtime does not know is logged `unknown (...)`. Not in the vendored headers: a separate
+opacity micromap tier / SER tier query (only `RaytracingTier >= 1.2` and OPTIONS22). Side note: `rvk_rhitest --d3d12` run from the repository root reported 3 ubershader
+assembly failures (`X5752`, D3DX assembler) once; from `build\RelWithDebInfo` it passes (cwd dependent, not caused by this change).
