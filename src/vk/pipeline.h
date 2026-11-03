@@ -30,49 +30,15 @@ class Context;
 inline VkShaderModule vkModule(rhi::ShaderModule m) { return reinterpret_cast<VkShaderModule>(static_cast<std::uint64_t>(m)); }
 inline rhi::ShaderModule rhiModule(VkShaderModule m) { return static_cast<rhi::ShaderModule>(reinterpret_cast<std::uint64_t>(m)); }
 
-struct BlendAttachment {
-    std::uint32_t enable = 0;
-    VkBlendFactor srcColor = VK_BLEND_FACTOR_ONE;
-    VkBlendFactor dstColor = VK_BLEND_FACTOR_ZERO;
-    VkBlendOp colorOp = VK_BLEND_OP_ADD;
-    VkBlendFactor srcAlpha = VK_BLEND_FACTOR_ONE;
-    VkBlendFactor dstAlpha = VK_BLEND_FACTOR_ZERO;
-    VkBlendOp alphaOp = VK_BLEND_OP_ADD;
-    VkColorComponentFlags writeMask = 0xF;
-};
-
-struct VertexBinding {
-    std::uint32_t stride = 0;
-    std::uint32_t perInstance = 0;  // VK_VERTEX_INPUT_RATE_INSTANCE
-};
-
-struct VertexAttribute {
-    std::uint32_t location = 0;
-    std::uint32_t binding = 0;
-    VkFormat format = VK_FORMAT_UNDEFINED;
-    std::uint32_t offset = 0;
-};
-
-inline constexpr std::uint32_t kMaxColorTargets = 4;
-inline constexpr std::uint32_t kMaxVertexBindings = 8;
-inline constexpr std::uint32_t kMaxVertexAttributes = 16;
-
-// Plain data, compared and hashed bytewise: always value-initialise (PipelineDesc d{}) so padding is zero.
-struct PipelineDesc {
-    rhi::ShaderModule vs = rhi::ShaderModule::None;
-    rhi::ShaderModule fs = rhi::ShaderModule::None;
-    VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;  // only its class matters (topology is dynamic)
-    VkPolygonMode polygonMode = VK_POLYGON_MODE_FILL;                     // ignored with EDS3 polygon mode
-    std::uint32_t colorCount = 0;
-    VkFormat colorFormats[kMaxColorTargets]{};
-    VkFormat depthFormat = VK_FORMAT_UNDEFINED;
-    VkFormat stencilFormat = VK_FORMAT_UNDEFINED;
-    BlendAttachment blend[kMaxColorTargets]{};  // ignored with EDS3
-    std::uint32_t bindingCount = 0;
-    VertexBinding bindings[kMaxVertexBindings]{};
-    std::uint32_t attributeCount = 0;
-    VertexAttribute attributes[kMaxVertexAttributes]{};
-};
+// pipeline descriptions + vertex input / blend vocabulary live in rhi/game_device.h (the seam's vocabulary); the Vulkan pipeline
+// code keeps the vk names
+using rhi::BlendAttachment;
+using rhi::VertexBinding;
+using rhi::VertexAttribute;
+using rhi::kMaxColorTargets;
+using rhi::kMaxVertexBindings;
+using rhi::kMaxVertexAttributes;
+using rhi::PipelineDesc;
 
 class PipelineCache {
 public:

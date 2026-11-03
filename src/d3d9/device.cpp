@@ -310,7 +310,7 @@ bool Device::create(const DeviceOptions& options) {
         meshArena_.create(ctx_, usage);
     }
     const auto pipelineFile = options.cacheDir.empty() ? std::filesystem::path() : options.cacheDir / "pipelines.bin";
-    if (!pipelines_.create(ctx_, bindless_.pipelineLayout(), pipelineFile, options.pipelineLibraries)) {
+    if (!game_->createPipelineCaches(pipelineFile, options.pipelineLibraries)) {
         return false;
     }
     loadPipelineKeys();
@@ -704,11 +704,9 @@ VkFormat Device::overlayFormat() const {
 
 // after foreign commands (the overlay binds its own pipeline, descriptor set and dynamic state) in the frame's command buffer
 void Device::invalidateRecordingState() {
-    rec_.reset();
     lastPipelineValid_ = false;
     vsConstDirty_ = psConstDirty_ = true;
-    const VkDescriptorSet set = bindless_.set();
-    vkCmdBindDescriptorSets(frames_.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS, bindless_.pipelineLayout(), 0, 1, &set, 0, nullptr);
+    game_->invalidateRecordingState();  // the backend forgets the frame list's recorded pipeline / vertex input / dynamic state
 }
 
 void Device::drawOverlayIntoBackBuffer() {
@@ -743,7 +741,7 @@ void Device::destroy() {
     stopVariantWorker();
     stopShaderWorkers();
     frames_.waitIdle();
-    stopRecordThreads();
+    // the pipeline cache and its threads are the backend's (vk::GameRecord), destroyed with the device
     processReleases();
     backBuffer_.reset();
     depthBuffer_.reset();
@@ -793,7 +791,7 @@ void Device::destroy() {
         keySaver_.join();
     }
     swapchain_.destroy();
-    pipelines_.destroy();
+    // the pipeline cache and its threads are the backend's (vk::GameRecord), destroyed with the device
     passes_ = inject::Registry{};
     fgWrapper_.reset();
     game_.reset();          // retires its samplers / pass layout / transient images
@@ -816,7 +814,8 @@ void Device::beginFrame() {
     dynArena_.clear();
     lastVi_ = nullptr;
     lastDyn_ = nullptr;
-    resetRecordPools(frames_.currentSlot());
+    // a new frame slot: the backend's secondary command buffer pools of that slot are reset
+    game_->resetRecordPools();
     substituteFrom_ = nullptr;
     substituteSlot_ = 0;
     perf_.slotWaitMs += frames_.lastSlotWaitMs();
@@ -851,14 +850,12 @@ void Device::beginFrame() {
     processReleases();
     uploadUsed_ = false;
     rendering_ = false;
-    rec_.reset();
     lastPipelineValid_ = false;
     vsConstDirty_ = psConstDirty_ = true;
     dirtyConstWindows();  // the window blocks live in the frame's ring
     frameAddr_ = {};  // ring memory of the frame block belongs to a submission
     passIndex_ = 0;
-    const VkDescriptorSet set = bindless_.set();
-    vkCmdBindDescriptorSets(frames_.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS, bindless_.pipelineLayout(), 0, 1, &set, 0, nullptr);
+    game_->invalidateRecordingState();  // the backend forgets the frame list's recorded state and rebinds the frame's bindless set
     regionsReopen();
 }
 
@@ -1027,26 +1024,26 @@ void Device::gpuMark(const char* what) {
 }
 
 PerfStats Device::takePerf() {
-    perf_.pipelineBinds += rec_.pipelineBinds;
-    rec_.pipelineBinds = 0;
+    perf_.pipelineBinds += game_->takePipelineBinds();
     PerfStats p = std::move(perf_);
     perf_ = PerfStats{};
-    p.pipelinesBuilt = pipelines_.built() - perfPipelinesBase_;
-    p.pipelineMs = pipelines_.buildMs() - perfPipelineMsBase_;
-    perfPipelinesBase_ = pipelines_.built();
-    perfPipelineMsBase_ = pipelines_.buildMs();
-    p.libraries = pipelines_.libraries() - perfLibrariesBase_;
-    p.libraryMs = pipelines_.libraryMs() - perfLibraryMsBase_;
-    p.optimized = pipelines_.optimized() - perfOptimizedBase_;
-    p.optimizeMs = pipelines_.optimizeMs() - perfOptimizeMsBase_;
-    perfLibrariesBase_ = pipelines_.libraries();
-    perfLibraryMsBase_ = pipelines_.libraryMs();
-    perfOptimizedBase_ = pipelines_.optimized();
-    perfOptimizeMsBase_ = pipelines_.optimizeMs();
-    p.prewarmed = pipelines_.prewarmed() - perfPrewarmedBase_;
-    p.prewarmMs = pipelines_.prewarmMs() - perfPrewarmMsBase_;
-    perfPrewarmedBase_ = pipelines_.prewarmed();
-    perfPrewarmMsBase_ = pipelines_.prewarmMs();
+    const rhi::PipelineStats s = game_->pipelineStats();
+    p.pipelinesBuilt = s.built - perfPipelinesBase_;
+    p.pipelineMs = s.buildMs - perfPipelineMsBase_;
+    perfPipelinesBase_ = s.built;
+    perfPipelineMsBase_ = s.buildMs;
+    p.libraries = s.libraries - perfLibrariesBase_;
+    p.libraryMs = s.libraryMs - perfLibraryMsBase_;
+    p.optimized = s.optimized - perfOptimizedBase_;
+    p.optimizeMs = s.optimizeMs - perfOptimizeMsBase_;
+    perfLibrariesBase_ = s.libraries;
+    perfLibraryMsBase_ = s.libraryMs;
+    perfOptimizedBase_ = s.optimized;
+    perfOptimizeMsBase_ = s.optimizeMs;
+    p.prewarmed = s.prewarmed - perfPrewarmedBase_;
+    p.prewarmMs = s.prewarmMs - perfPrewarmMsBase_;
+    perfPrewarmedBase_ = s.prewarmed;
+    perfPrewarmMsBase_ = s.prewarmMs;
     const std::uint64_t built = shadersBuilt_.load(), compiled = shadersCompiled_.load(), ns = shaderNs_.load();
     p.shadersBuilt = built - perfShadersBase_;
     p.shadersCompiled = compiled - perfShadersCompiledBase_;
@@ -1396,7 +1393,7 @@ void Device::present() {
     // persist new pipelines every 10 s (the game is usually killed, not shut down)
     if (presentStart_ - pipelinesSaved_ > std::chrono::seconds(10)) {
         pipelinesSaved_ = presentStart_;
-        pipelines_.saveAsync();
+        game_->savePipelineCache();
         savePipelineKeys();
     }
     beginFrame();
@@ -1542,7 +1539,7 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
         if (module != rhi::ShaderModule::None) {
             prewarmPipelines(hash);
             // with pipeline libraries the shader's compilation happens here (a worker thread), not at its first draw
-            pipelines_.prepareShader(module, s->stage == shader::Stage::Vertex ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT);
+            game_->preparePipelineShader(module, s->stage == shader::Stage::Vertex ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT);
         }
     });
     return s;
@@ -1758,8 +1755,6 @@ rhi::ShaderModule Device::variantModule(const Shader& s, const shader::Translate
 void Device::setGbuffer(const GbufferTargets& g) {
     const bool was = gbuf_.normal != nullptr;
     gbuf_ = g;
-    gbufImage_[0] = g.normal != nullptr ? &vkImage(*g.normal) : nullptr;  // (the solid pass's scope attachments are still raw Vulkan)
-    gbufImage_[1] = g.motion != nullptr ? &vkImage(*g.motion) : nullptr;
     if (g.normal == nullptr) {
         if (was) spdlog::info("d3d9: g-buffer off");
         gbufArmed_ = false;
@@ -2692,7 +2687,7 @@ void Device::prewarmPipelines(std::uint64_t shaderHash) {
             k.desc.fs = p->second->module;
             if (k.desc.vs == rhi::ShaderModule::None || k.desc.fs == rhi::ShaderModule::None) continue;  // not compiled yet: its own completion prewarms
         }
-        pipelines_.prewarm(k.desc);
+        game_->prewarmPipeline(k.desc);
     }
 }
 
@@ -2770,13 +2765,13 @@ void Device::registerReplacement(std::shared_ptr<Shader> vs, std::shared_ptr<Sha
 bool Device::prebuildReplacement(const Shader& vs, const Shader& ps, bool procedural) {
     vk::PipelineDesc pd{};
     if (!replacementDesc(vs, ps, procedural, pd)) return false;
-    if (!pipelines_.contains(pd)) pipelines_.prewarm(pd);
+    if (!game_->pipelineContains(pd)) game_->prewarmPipeline(pd);
     return true;
 }
 
 bool Device::replacementReady(const Shader& vs, const Shader& ps, bool procedural) const {
     vk::PipelineDesc pd{};
-    return replacementDesc(vs, ps, procedural, pd) && pipelines_.contains(pd);
+    return replacementDesc(vs, ps, procedural, pd) && game_->pipelineContains(pd);
 }
 
 bool Device::replacementDesc(const Shader& vs, const Shader& ps, bool procedural, vk::PipelineDesc& out) const {

@@ -318,6 +318,7 @@ add_library(rvk_core STATIC
     src/vk/image.h
     src/vk/pipeline.cpp
     src/vk/pipeline_library.cpp
+    src/vk/game_record.cpp
     src/vk/pipeline.h
     src/vk/pacer.cpp
     src/vk/pacer.h

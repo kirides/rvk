@@ -60,6 +60,17 @@ struct HWND__;
 
 namespace rvk::d3d9 {
 
+// The draw path's value vocabulary (packets, chunks, pipeline descriptions) is the seam's: d3d9 builds it,
+// the backend records it (rhi/game_device.h, vk::GameRecord)
+using rhi::DrawPacket;
+using rhi::DrawChunk;
+using rhi::VertexInputValues;
+using rhi::DynamicStateValues;
+using rhi::ClearOp;
+using rhi::PipelineDesc;
+using rhi::GamePipeline;
+using rhi::kChunkPackets;
+
 class Device;
 
 // ---- resources -------------------------------------------------------------------------------------------------------
@@ -1200,104 +1211,13 @@ private:
     rhi::ShaderModule uberModule(const Shader& s, const MaterialSource& src, const shader::TranslateOptions& options, std::string_view tag);
     std::atomic<bool> ubershader_{false};
     std::atomic<std::uint64_t> ubershadersBuilt_{0}, ubershadersFailed_{0};
-    // A draw's recording state, computed by prepareDraw / the draw call and recorded by applyPacket: now, or later in a
-    // batch (docs/research/performance.md 12: the opaque passes' draws grouped by pipeline)
-    struct VertexInputValues {
-        std::uint32_t bufferCount = 0;
-        VkBuffer buffers[vk::kMaxVertexBindings]{};
-        VkDeviceSize offsets[vk::kMaxVertexBindings]{};
-        bool dynamicLayout = false;  // VK_EXT_vertex_input_dynamic_state: the layout below is recorded, not in the pipeline
-        std::uint32_t bindingCount = 0;
-        std::uint32_t attributeCount = 0;
-        vk::VertexBinding bindings[vk::kMaxVertexBindings]{};
-        vk::VertexAttribute attributes[vk::kMaxVertexAttributes]{};
-        std::int32_t vertexShift = 0;  // vertexOffset / firstVertex of a per-vertex stream bound at offset 0 (mesh arena)
-    };
-    struct DynamicStateValues {
-        VkViewport viewport{};
-        VkRect2D scissor{};
-        VkCullModeFlags cull = 0;
-        VkPrimitiveTopology topology{};
-        VkBool32 depthTest = 0;
-        VkBool32 depthWrite = 0;
-        VkCompareOp depthCompare{};
-        VkBool32 stencilTest = 0;
-        VkStencilOp stencilFront[3]{};
-        VkCompareOp stencilFrontCompare{};
-        VkStencilOp stencilBack[3]{};
-        VkCompareOp stencilBackCompare{};
-        std::uint32_t stencilMasks[3]{};  // compare, write, reference
-        VkBool32 depthBiasEnable = 0;
-        float depthBias[2]{};             // constant, slope
-        float blendConstants[4]{};
-        std::uint32_t colorCount = 0;     // the blend arrays' used entries (extended dynamic state 3)
-        VkBool32 blendEnable[kRenderTargets]{};
-        VkColorBlendEquationEXT blendEquation[kRenderTargets]{};
-        VkColorComponentFlags writeMask[kRenderTargets]{};
-    };
-    struct DrawPacket {
-        enum class Op : std::uint8_t { Draw, DrawIndexed, Clear };  // Clear: record threads only (`first` = the chunk's ClearOp)
-        Op op = Op::Draw;
-        bool batchable = false;
-        bool index32 = false;
-        VkPipeline pipeline = VK_NULL_HANDLE;
-        const VertexInputValues* vi = nullptr;  // interned (internVi / internDyn): consecutive draws mostly share both
-        const DynamicStateValues* dyn = nullptr;
-        shader::abi::PushConstants push{};
-        VkBuffer indexBuffer = VK_NULL_HANDLE;
-        VkDeviceSize indexOffset = 0;  // the binding's offset (0 when folded into first)
-        std::uint32_t count = 0;       // vertices / indices
-        std::uint32_t instances = 1;
-        std::uint32_t first = 0;       // first vertex / index
-        std::int32_t vertexOffset = 0; // indexed draws
-    };
-    // What one command buffer being recorded has already set (draw recording skips redundant commands): the inline path's
-    // (rec_, the frame's command buffer) and each secondary command buffer's (record threads, d3d9/record.cpp)
-    struct VertexInputCache {
-        bool buffersValid = false;
-        bool layoutValid = false;
-        std::uint32_t bufferCount = 0;
-        VkBuffer buffers[vk::kMaxVertexBindings]{};
-        VkDeviceSize offsets[vk::kMaxVertexBindings]{};
-        std::uint32_t bindingCount = 0;
-        std::uint32_t attributeCount = 0;
-        vk::VertexBinding bindings[vk::kMaxVertexBindings]{};
-        vk::VertexAttribute attributes[vk::kMaxVertexAttributes]{};
-    };
-    struct IndexBindingCache {
-        bool valid = false;
-        bool index32 = false;
-        VkBuffer buffer = VK_NULL_HANDLE;
-        VkDeviceSize offset = 0;
-    };
-    // the dynamic state last recorded (every pipeline declares the same dynamic states, so it survives pipeline binds)
-    struct DynamicStateCache : DynamicStateValues {
-        bool valid = false;
-    };
-    struct RecordState {
-        VkPipeline bound = VK_NULL_HANDLE;
-        VertexInputCache vi;
-        IndexBindingCache ib;
-        DynamicStateCache dyn;
-        const VertexInputValues* lastVi = nullptr;  // the packets' interned blocks last applied (equal pointer = equal contents)
-        const DynamicStateValues* lastDyn = nullptr;
-        std::uint64_t pipelineBinds = 0;
-        void reset() {
-            lastVi = nullptr;
-            lastDyn = nullptr;
-            bound = VK_NULL_HANDLE;
-            vi.buffersValid = vi.layoutValid = false;
-            ib.valid = false;
-            dyn.valid = false;
-        }
-    };
+    // A draw's recording state: prepareDraw / the draw call compute the packet (the interned rhi::VertexInputValues /
+    // rhi::DynamicStateValues blocks below, plus the push constants); the backend records it: now through
+    // GameDevice::applyDrawPacket, or later in a chunk on a record thread (docs/research/performance.md 12 + 14)
     bool computeVertexInput(vk::PipelineDesc& pd, VertexInputValues& out);
-    static void applyVertexInput(RecordState& rs, VkCommandBuffer cmd, const VertexInputValues& vi);
     void computeDynamicState(std::uint32_t primitiveType, DynamicStateValues& out) const;
-    static void applyDynamicState(RecordState& rs, VkCommandBuffer cmd, const DynamicStateValues& v);
     // records the packet now (after the pending batch) or, when it is batchable and batching is on, appends it to the batch
     void submitPacket(DrawPacket& p);  // p = packet_: interns its vertex input / dynamic state, then records or batches it
-    static void applyPacket(RecordState& rs, VkCommandBuffer cmd, VkPipelineLayout layout, const DrawPacket& p);
     // records the pending batch, its draws grouped by pipeline (the engine's order within a pipeline); before anything else
     // is recorded into the frame's command buffer (endRendering, clear, a draw that is not batched)
     void flushBatch();
@@ -1318,7 +1238,6 @@ private:
     vk::Frames frames_;
     vk::MeshArena meshArena_;
     vk::Bindless bindless_;
-    vk::PipelineCache pipelines_;
     vk::Swapchain swapchain_;
     vk::Presenter presenter_;
     void recreateSwapchain();
@@ -1470,18 +1389,17 @@ private:
     void verifySplit(bool vertex, const Shader& sh);
     // redundant-command filters, valid within one command buffer (reset by beginFrame)
     vk::PipelineDesc lastPipelineDesc_{};
-    VkPipeline lastPipeline_ = VK_NULL_HANDLE;
+    GamePipeline lastPipeline_ = GamePipeline::None;
     bool lastPipelineValid_ = false;
-    // recently used descriptions -> pipeline (prepareDraw: in front of vk::PipelineCache's map)
+    // recently used descriptions -> pipeline (prepareDraw: in front of the backend's pipeline cache)
     struct RecentPipeline {
         vk::PipelineDesc desc{};
-        VkPipeline pipeline = VK_NULL_HANDLE;
+        GamePipeline pipeline = GamePipeline::None;
     };
     std::array<RecentPipeline, 256> recentPipelines_{};
     static std::size_t recentSlot(const vk::PipelineDesc& pd);
-    VkPipeline findPipeline(const vk::PipelineDesc& d);
+    GamePipeline findPipeline(const vk::PipelineDesc& d);
     bool sameDesc(const vk::PipelineDesc& a, const vk::PipelineDesc& b) const;
-    RecordState rec_;
     // what a vertex shader's inputs read from a vertex declaration (computeVertexInput): fixed per (declaration, shader)
     struct VertexPlanInput {
         std::uint32_t location = 0;
@@ -1499,76 +1417,26 @@ private:
     std::uint64_t planDeclId_ = 0;
     const VertexPlan* plan_ = nullptr;
 
-    // ---- record threads (d3d9/record.cpp) ----------------------------------------------------------------------------------
-    // The opaque passes' rendering scopes are begun with VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT: their draw packets
-    // go to worker threads in chunks, each recorded into a secondary command buffer (pipeline binds, dynamic state, push
-    // constants, draws: the AMD driver's cost per draw) while the engine thread goes on; endRendering waits for the chunks and
-    // executes them in order. Anything else a scope needs in order with the draws (debug labels, a clear) is a scope item.
-    struct ClearOp {
-        VkClearAttachment atts[kRenderTargets + 1]{};
-        std::uint32_t count = 0;
-        VkClearRect rect{};
-    };
-    struct RecordChunk {
-        std::vector<DrawPacket> packets;
-        std::vector<ClearOp> clears;  // Op::Clear packets: `first` indexes it
-        std::uint32_t colorCount = 0;
-        VkFormat colorFormats[kRenderTargets]{};
-        VkFormat depthFormat = VK_FORMAT_UNDEFINED;
-        VkFormat stencilFormat = VK_FORMAT_UNDEFINED;
-        VkDescriptorSet set = VK_NULL_HANDLE;
-        VkPipelineLayout layout = VK_NULL_HANDLE;
-        std::uint32_t slot = 0;
-        VkCommandBuffer cmd = VK_NULL_HANDLE;  // the result
-        std::uint64_t binds = 0;
-        std::atomic<bool> done{false};
-    };
-    struct ScopeItem {
-        enum class Kind : std::uint8_t { Chunk, LabelBegin, LabelEnd };
-        Kind kind = Kind::Chunk;
-        RecordChunk* chunk = nullptr;
-        char text[48] = {};
-    };
-    struct RecordThread {
-        std::thread thread;
-        VkCommandPool pools[vk::Frames::kInFlight]{};
-        std::vector<VkCommandBuffer> buffers[vk::Frames::kInFlight];
-        std::uint32_t used[vk::Frames::kInFlight]{};
-    };
-    static constexpr std::uint32_t kChunkPackets = 160;
-    static constexpr std::uint32_t kRecordThreads = 2;
+    // ---- scope chunks (the backend records them: vk::GameRecord, docs/research/performance.md 12 + 14) -------------------
+    // The opaque passes' rendering scopes are begun with secondary contents by the backend: their draw packets go to it in
+    // chunks (kChunkPackets), which it records on worker threads into secondary command buffers while the engine thread
+    // goes on; endScope waits for them and executes them in order (+ the debug labels kept in order with the chunks).
     bool wantSecondaryScope() const;            // the current phase's scope is recorded by the record threads
-    void startRecordThreads();
-    void stopRecordThreads();
-    void resetRecordPools(std::uint32_t slot);  // a new frame's slot: its secondary command buffers are free again
-    void recordThreadMain(RecordThread& t);
-    void recordChunk(RecordThread& t, RecordChunk& c);
-    RecordChunk& currentChunk();
+    DrawChunk& currentChunk();                  // the scope's open chunk (built by the D3D9 model)
     void emitPacket(const DrawPacket& p);       // into the scope's open chunk
     void emitClear(const ClearOp& op);
-    void closeChunk();                          // the open chunk (if any) to the record threads
+    void closeChunk();                          // the open chunk (if any) to the backend
     void scopeLabel(bool begin, const char* text);
-    void finishSecondaryScope();                // endRendering: wait for the chunks, execute them (+ labels) in order
+    void finishSecondaryScope();                // endRendering: hand over the last open chunk (the backend waits + executes)
     bool recordThreadsWanted_ = false;          // debug.record_threads
     bool scopeSecondary_ = false;               // the current rendering scope is a secondary-contents one
-    std::vector<std::unique_ptr<RecordChunk>> chunkPool_;
-    std::size_t chunksUsed_ = 0;
-    RecordChunk* openChunk_ = nullptr;
-    std::vector<ScopeItem> scopeItems_;
-    std::vector<std::unique_ptr<RecordThread>> recordThreads_;
-    std::unique_ptr<RecordThread> recordSelf_;  // the engine thread's own pools: it records queued chunks while it waits (work stealing)
-    std::mutex recordMutex_;
-    std::condition_variable recordCv_;
-    std::deque<RecordChunk*> recordQueue_;
-    std::atomic<std::uint32_t> recordPending_{0};  // chunks queued and not yet taken: idle workers spin on it before they sleep
-    std::atomic<std::uint32_t> recordSleepers_{0}; // workers inside the condition variable wait
-    std::atomic<bool> recordQuit_{false};
+    DrawChunk workChunk_;
+    bool chunksOpen_ = false;
     // the draw's vertexOffset / firstVertex for a per-vertex stream bound at offset 0 (computeVertexInput: mesh arena)
     std::int32_t vertexShift_ = 0;
     // an index buffer binding: an offset that is a multiple of the index size goes into firstIndex (the arena block stays
     // bound); returns the first index, `bindOffset` the binding's offset
     static std::uint32_t foldIndexOffset(VkDeviceSize offset, bool index32, std::uint32_t firstIndex, VkDeviceSize& bindOffset);
-    static void bindIndexBuffer(RecordState& rs, VkCommandBuffer cmd, VkBuffer buffer, VkDeviceSize bindOffset, bool index32);
     // the draw being prepared (prepareDraw -> the draw call) and the pending batch (flushBatch)
     DrawPacket packet_;
     VertexInputValues workVi_;   // what prepareDraw computes for the draw (packet_.vi points at its interned copy)
@@ -1599,7 +1467,7 @@ private:
     const DynamicStateValues* internDyn(const DynamicStateValues& v);
     std::vector<DrawPacket> batch_;
     struct RankEntry {
-        VkPipeline pipeline = VK_NULL_HANDLE;
+        GamePipeline pipeline = GamePipeline::None;
         std::uint32_t rank = 0;
     };
     std::vector<RankEntry> rankTable_;       // flushBatch: pipeline -> index of its first draw
@@ -1679,7 +1547,6 @@ private:
     // enhancements
     std::vector<std::uint8_t> giHeader_;
     GbufferTargets gbuf_;
-    vk::Image* gbufImage_[2]{};  // gbuf_'s images (the scope's attachments)
     bool gbufArmed_ = false;
     bool scopeGbuf_ = false;                // the open rendering scope has the G-buffer attachments
     std::uint32_t engineColorCount_ = 0;    // the engine's colour attachments of the open scope (the G-buffer's come after)

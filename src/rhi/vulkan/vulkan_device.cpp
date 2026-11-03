@@ -27,6 +27,7 @@
 #include "vk/frames.h"
 #include "vk/framegen.h"
 #include "vk/gputimer.h"
+#include "vk/game_record.h"
 #include "vk/image.h"
 #include "vk/mesh_arena.h"
 #include "vk/passes.h"
@@ -344,12 +345,13 @@ private:
 
 class VkDeviceImpl final : public GameDevice {
 public:
-    VkDeviceImpl() : ctx_(ownCtx_), frames_(ownFrames_), bindless_(ownBindless_) {}
+    VkDeviceImpl() : ctx_(ownCtx_), frames_(ownFrames_), bindless_(ownBindless_) { record_.init(ctx_, frames_, bindless_); }
     // over the renderer's objects (rhi::vulkan::wrap)
     VkDeviceImpl(vk::Context& ctx, vk::Frames& frames, vk::Bindless& bindless, vk::MeshArena* arena)
-        : ctx_(ctx), frames_(frames), bindless_(bindless), external_(true), arena_(arena) {}
+        : ctx_(ctx), frames_(frames), bindless_(bindless), external_(true), arena_(arena) { record_.init(ctx_, frames_, bindless_); }
 
     ~VkDeviceImpl() override {
+        record_.shutdown();  // joins the record threads and destroys the pipeline cache while the renderer's objects still exist
         gpuTimer_.destroy();
         if (external_) {
             // the renderer's objects outlive us: what we made (samplers, pass layout) goes through the frame retirement
@@ -522,11 +524,11 @@ public:
     void timestampStart(std::uint32_t slot, bool details) override { gpuTimer_.start(slot, details); }
     bool timestampDetails(std::uint32_t slot) const override { return gpuTimer_.details(slot); }
     void timestampMark(CommandList& list, std::uint32_t slot, TimestampStream stream, const char* label) override {
-        gpuTimer_.mark(commandBufferOf(list), slot,
+        gpuTimer_.mark(vulkan::commandBufferOf(list), slot,
                        stream == TimestampStream::Main ? vk::GpuTimer::Stream::Main : vk::GpuTimer::Stream::Upload, label);
     }
     void timestampMark(CommandList& list, std::uint32_t slot, TimestampStream stream, std::string&& label) override {
-        gpuTimer_.mark(commandBufferOf(list), slot,
+        gpuTimer_.mark(vulkan::commandBufferOf(list), slot,
                        stream == TimestampStream::Main ? vk::GpuTimer::Stream::Main : vk::GpuTimer::Stream::Upload, std::move(label));
     }
     TimestampResult timestampCollect(std::uint32_t slot) override {
@@ -538,6 +540,28 @@ public:
         for (const vk::GpuTimer::Segment& s : r.segments) out.segments.push_back({s.label, s.ms});
         return out;
     }
+
+    // ---- the draw path (pipeline cache, scopes, record threads): the recording itself lives in vk::GameRecord ----
+    vk::GameRecordHolder record_;  // (vk::GameRecord; declared here so the ctor can init it after ctx_/frames_/bindless_)
+    bool createPipelineCaches(const std::filesystem::path& cacheFile, bool libraries) override {
+        return record_.create(ctx_, bindless_.pipelineLayout(), cacheFile, libraries);
+    }
+    GamePipeline resolvePipeline(const PipelineDesc& desc, bool* created) override { return record_.resolvePipeline(desc, created); }
+    GamePipeline findPipeline(const PipelineDesc& desc) override { return record_.findPipeline(desc); }
+    bool pipelineContains(const PipelineDesc& desc) override { return record_.containsPipeline(desc); }
+    void prewarmPipeline(const PipelineDesc& desc) override { record_.prewarmPipeline(desc); }
+    void prewarmOncePipeline(const PipelineDesc& desc) override { record_.prewarmOncePipeline(desc); }
+    void preparePipelineShader(ShaderModule module, VkShaderStageFlagBits stage) override { record_.prepareShader(module, stage); }
+    void savePipelineCache() override { record_.saveCache(); }
+    PipelineStats pipelineStats() override { return record_.stats(); }
+    void beginScope(const RenderingInfo& info, bool secondary) override { record_.beginScope(info, secondary); }
+    void endScope() override { record_.endScope(); }
+    void scopeChunk(rhi::DrawChunk&& chunk) override { record_.scopeChunk(std::move(chunk)); }
+    void applyDrawPacket(const DrawPacket& packet) override { record_.applyDrawPacket(packet); }
+    void scopeLabel(bool begin, const char* text) override { record_.scopeLabel(begin, text); }
+    void invalidateRecordingState() override { record_.invalidateRecordingState(); }
+    std::uint64_t takePipelineBinds() override { return record_.takePipelineBinds(); }
+    void resetRecordPools() override { record_.resetRecordPools(frames_.currentSlot()); }
 
     void probeFrameGeneration(const std::filesystem::path& loaderDll) override { ctx_.setFrameGenReport(vk::probeFrameGeneration(ctx_, loaderDll)); }
     caps::Report capabilityReport(bool pipelineLibraries) override { return ctx_.capabilities(pipelineLibraries); }

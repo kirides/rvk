@@ -28,6 +28,7 @@
 #include "core/caps.h"
 #include "rhi/modules.h"
 #include "rhi/rhi.h"
+#include "shader/abi.h"
 
 namespace rvk::rhi {
 
@@ -104,6 +105,140 @@ struct RingAlloc {
 // GameDevice, compared and hashed by value, None (0) = no module / compile failed / not built yet.
 enum class ShaderModule : std::uint64_t { None = 0 };
 
+// A resolved graphics pipeline of the game's draw path, by value (Vulkan: the VkPipeline; D3D12: the PSO / an entry in the backend's
+// factory). The D3D9 model compares and carries it (interned draws, batch grouping) but never interprets it.
+enum class GamePipeline : std::uint64_t { None = 0 };
+
+// ---- pipeline description (what a draw's shaders and fixed input need; byte-compared and hashed by the D3D9 model) ------------------
+
+struct BlendAttachment {
+    std::uint32_t enable = 0;
+    VkBlendFactor srcColor = VK_BLEND_FACTOR_ONE;
+    VkBlendFactor dstColor = VK_BLEND_FACTOR_ZERO;
+    VkBlendOp colorOp = VK_BLEND_OP_ADD;
+    VkBlendFactor srcAlpha = VK_BLEND_FACTOR_ONE;
+    VkBlendFactor dstAlpha = VK_BLEND_FACTOR_ZERO;
+    VkBlendOp alphaOp = VK_BLEND_OP_ADD;
+    VkColorComponentFlags writeMask = 0xF;
+};
+
+struct VertexBinding {
+    std::uint32_t stride = 0;
+    std::uint32_t perInstance = 0;  // VK_VERTEX_INPUT_RATE_INSTANCE
+};
+
+struct VertexAttribute {
+    std::uint32_t location = 0;
+    std::uint32_t binding = 0;
+    VkFormat format = VK_FORMAT_UNDEFINED;
+    std::uint32_t offset = 0;
+};
+
+inline constexpr std::uint32_t kMaxColorTargets = 4;
+inline constexpr std::uint32_t kMaxVertexBindings = 8;
+inline constexpr std::uint32_t kMaxVertexAttributes = 16;
+
+// Plain data, compared and hashed bytewise: always value-initialise (PipelineDesc d{}) so padding is zero.
+struct PipelineDesc {
+    rhi::ShaderModule vs = rhi::ShaderModule::None;
+    rhi::ShaderModule fs = rhi::ShaderModule::None;
+    VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;  // only its class matters (topology is dynamic)
+    VkPolygonMode polygonMode = VK_POLYGON_MODE_FILL;                     // ignored with EDS3
+    std::uint32_t colorCount = 0;
+    VkFormat colorFormats[kMaxColorTargets]{};
+    VkFormat depthFormat = VK_FORMAT_UNDEFINED;
+    VkFormat stencilFormat = VK_FORMAT_UNDEFINED;
+    BlendAttachment blend[kMaxColorTargets]{};  // ignored with EDS3
+    std::uint32_t bindingCount = 0;
+    VertexBinding bindings[kMaxVertexBindings]{};
+    std::uint32_t attributeCount = 0;
+    VertexAttribute attributes[kMaxVertexAttributes]{};
+};
+
+// ---- the draw packet model (d3d9 builds packets and chunks from its state; the backend records them: pipeline binds,
+// vertex input / dynamic state, push constants, draws. Virtual calls happen per chunk / scope / inline draw / pipeline
+// resolve, never below that) ----
+
+struct VertexInputValues {
+    std::uint32_t bufferCount = 0;
+    std::uint64_t buffers[kMaxVertexBindings]{};  // rhi Buffer handles (the Vulkan backend casts to VkBuffer)
+    std::uint64_t offsets[kMaxVertexBindings]{};
+    bool dynamicLayout = false;  // the layout below is recorded per draw, not baked in the pipeline
+    std::uint32_t bindingCount = 0;
+    std::uint32_t attributeCount = 0;
+    VertexBinding bindings[kMaxVertexBindings]{};
+    VertexAttribute attributes[kMaxVertexAttributes]{};
+    std::int32_t vertexShift = 0;  // vertexOffset / firstVertex of a per-vertex stream bound at offset 0 (mesh arena)
+};
+
+struct DynamicStateValues {
+    VkViewport viewport{};
+    VkRect2D scissor{};
+    VkCullModeFlags cull = 0;
+    VkPrimitiveTopology topology{};
+    VkBool32 depthTest = 0;
+    VkBool32 depthWrite = 0;
+    VkCompareOp depthCompare{};
+    VkBool32 stencilTest = 0;
+    VkStencilOp stencilFront[3]{};
+    VkCompareOp stencilFrontCompare{};
+    VkStencilOp stencilBack[3]{};
+    VkCompareOp stencilBackCompare{};
+    std::uint32_t stencilMasks[3]{};  // compare, write, reference
+    VkBool32 depthBiasEnable = 0;
+    float depthBias[2]{};             // constant, slope
+    float blendConstants[4]{};
+    std::uint32_t colorCount = 0;     // the blend arrays' used entries (extended dynamic state 3)
+    VkBool32 blendEnable[kMaxColorTargets]{};
+    VkColorBlendEquationEXT blendEquation[kMaxColorTargets]{};
+    VkColorComponentFlags writeMask[kMaxColorTargets]{};
+};
+
+// an attachment clear recorded inside a rendering scope (the D3D9 clear of the scope's targets)
+struct ClearOp {
+    VkClearAttachment atts[kMaxColorTargets + 1]{};
+    std::uint32_t count = 0;
+    VkClearRect rect{};
+};
+
+struct DrawPacket {
+    enum class Op : std::uint8_t { Draw, DrawIndexed, Clear };  // Clear: chunk-only (`first` = the chunk's ClearOp index)
+    Op op = Op::Draw;
+    bool batchable = false;
+    bool index32 = false;
+    GamePipeline pipeline = GamePipeline::None;
+    const VertexInputValues* vi = nullptr;  // interned by the D3D9 model (equal pointer = equal contents)
+    const DynamicStateValues* dyn = nullptr;
+    shader::abi::PushConstants push{};
+    std::uint64_t indexBuffer = 0;  // rhi Buffer handle
+    std::uint64_t indexOffset = 0;  // the binding's offset (0 when folded into first)
+    std::uint32_t count = 0;        // vertices / indices
+    std::uint32_t instances = 1;
+    std::uint32_t first = 0;        // first vertex / index
+    std::int32_t vertexOffset = 0;  // indexed draws
+};
+
+// A block of packets the D3D9 model hands to the backend at a scope's chunk boundary; the backend may record it on a worker
+// thread into secondary command buffers (when the scope began secondary) and executes them at the scope's end.
+struct DrawChunk {
+    std::vector<DrawPacket> packets;
+    std::vector<ClearOp> clears;  // Op::Clear packets: `first` indexes it
+    std::uint32_t colorCount = 0;
+    VkFormat colorFormats[kMaxColorTargets]{};
+    VkFormat depthFormat = VK_FORMAT_UNDEFINED;
+    VkFormat stencilFormat = VK_FORMAT_UNDEFINED;
+};
+
+// Packets per chunk: a flush or this many packets closes a chunk (the worker's unit of work)
+inline constexpr std::uint32_t kChunkPackets = 160;
+
+// the pipeline cache's cumulative counters (diagnostics: the perf lines)
+struct PipelineStats {
+    std::uint64_t built = 0, libraries = 0, optimized = 0, prewarmed = 0, cached = 0;
+    double buildMs = 0.0, libraryMs = 0.0, optimizeMs = 0.0, prewarmMs = 0.0;
+    bool librariesEnabled = false;
+};
+
 // ---- capabilities, meshes, transients -----------------------------------------------------------------------------------------------
 
 // What the renderer's enhancements ask the device beyond DeviceCaps
@@ -151,7 +286,23 @@ struct TransientDesc {
     }
 };
 
-// ---- adapters (before any device exists) --------------------------------------------------------------------------------------------
+// ---- GPU timestamps ([debug] perf) ----
+// Marks of the frame's two command streams: a "begin" mark at the start of a submission and marks after each pass split
+// into labelled segments (a render pass, a copy, the present blit). A slot's results are read once that slot's previous
+// submission has completed, so reading never stalls. Backends without timestamp queries keep the timer off.
+enum class TimestampStream : std::uint8_t { Main, Upload };
+struct TimestampSegment {
+    std::string label;
+    double ms = 0.0;
+};
+struct TimestampResult {
+    bool valid = false;
+    double mainMs = 0.0;    // first to last mark of the main command list
+    double uploadMs = 0.0;  // the same for the upload command list
+    std::vector<TimestampSegment> segments;  // the main list's segments, only with details
+};
+
+// ---- adapters (before any device exists) ----
 
 struct AdapterInfo {
     std::string name;
@@ -231,21 +382,6 @@ public:
     virtual std::uint64_t transientBytes() const = 0;
 
     // ---- GPU timestamps ([debug] perf) ----
-    // Marks of the frame's two command streams: a "begin" mark at the start of a submission and marks after each pass split it
-    // into labelled segments (a render pass, a copy, the present blit). A slot's results are read once that slot's previous
-    // submission has completed, so reading never stalls. Backends without timestamp queries keep the timer off (the renderer
-    // then reports no GPU times).
-    enum class TimestampStream : std::uint8_t { Main, Upload };
-    struct TimestampSegment {
-        std::string label;
-        double ms = 0.0;
-    };
-    struct TimestampResult {
-        bool valid = false;
-        double mainMs = 0.0;    // first to last mark of the main command list
-        double uploadMs = 0.0;  // the same for the upload command list
-        std::vector<TimestampSegment> segments;  // the main list's segments, only with details
-    };
     // create the timer, once at device creation (only called when the renderer's [debug] perf is on); false = the backend
     // cannot time (no query pool / no timing queue): the renderer keeps its marks out
     virtual bool enableTimestamps() = 0;
@@ -258,6 +394,45 @@ public:
     virtual void timestampMark(CommandList& list, std::uint32_t slot, TimestampStream stream, std::string&& label) = 0;
     // reads the slot's previous submission (it must have completed) and resets the slot for reuse
     virtual TimestampResult timestampCollect(std::uint32_t slot) = 0;
+
+    // ---- the draw path (pipeline resolve, scopes, chunks) ----
+    // The pipeline of `desc`, created on demand (`created`: this call made a new one) or null while a background build
+    // is pending. The backend owns the cache, its prewarm threads, its pipeline libraries and the saved blob.
+    virtual bool createPipelineCaches(const std::filesystem::path& cacheFile, bool libraries) = 0;
+    virtual GamePipeline resolvePipeline(const PipelineDesc& desc, bool* created = nullptr) = 0;
+    // the pipeline of `desc` when the cache has one, else None (never builds)
+    virtual GamePipeline findPipeline(const PipelineDesc& desc) = 0;
+    // whether a pipeline of `desc` exists (built or prewarmed)
+    virtual bool pipelineContains(const PipelineDesc& desc) = 0;
+    // builds `desc` on a background thread unless it exists (pipelines known from earlier runs)
+    virtual void prewarmPipeline(const PipelineDesc& desc) = 0;
+    // the same for descriptions that repeat every frame until the pipeline exists: queued once
+    virtual void prewarmOncePipeline(const PipelineDesc& desc) = 0;
+    // with pipeline libraries: compiles the shader's pre-rasterization / fragment library now (any thread)
+    virtual void preparePipelineShader(ShaderModule module, VkShaderStageFlagBits stage) = 0;
+    // writes the backend's pipeline cache blob to its file, on a background thread when built since the last save
+    virtual void savePipelineCache() = 0;
+    virtual PipelineStats pipelineStats() = 0;
+
+    // A rendering scope: the backend records its begin (attachments transitioned and viewed at mip/layer; secondary
+    // contents mode when `secondary`); endScope executes queued chunks in order, rebinds the frame's bindless state and
+    // invalidates the frame list's recorded state. Between them d3d9 keeps its own viewport / dynamic state bookkeeping.
+    virtual void beginScope(const RenderingInfo& info, bool secondary) = 0;
+    virtual void endScope() = 0;
+    // hand a chunk of packets to the backend (recorded on a worker thread when the scope began secondary)
+    virtual void scopeChunk(DrawChunk&& chunk) = 0;
+    // record one packet into the frame's command list now (the inline path: not batched, not threaded)
+    virtual void applyDrawPacket(const DrawPacket& packet) = 0;
+    // a debug label in order with the scope's chunks (labels of the region stack inside a threaded scope)
+    virtual void scopeLabel(bool begin, const char* text) = 0;
+    // the frame list's recorded pipeline / vertex input / dynamic state: undefined for the next draw (after a scope
+    // end, a pass boundary, an external command)
+    virtual void invalidateRecordingState() = 0;
+    // pipelines bound into the frame's command list since the last call (the perf counter)
+    virtual std::uint64_t takePipelineBinds() = 0;
+    // a new frame slot: the backend's secondary command buffer pools of that slot are reset (its command buffers
+    // were executed and the frame they belonged to has completed)
+    virtual void resetRecordPools() = 0;
 
     // ---- start-up diagnostics (the HAL's device bring-up) ----
     // which frame generation providers the vendor's API offers on this device (loads the loader DLL, lists, unloads: a few tens of ms); the result goes
