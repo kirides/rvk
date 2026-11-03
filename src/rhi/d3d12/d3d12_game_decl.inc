@@ -54,12 +54,13 @@
     void invalidateRecordingState() override;
     std::uint64_t takePipelineBinds() override;
     void resetRecordPools() override {}  // (beginFrame resets the slot's allocators)
-    void probeFrameGeneration(const std::filesystem::path&) override {}
+    void probeFrameGeneration(const std::filesystem::path& loaderDll) override;  // d3d12_game_ffx.inc
+    d3d12ffx::FrameGenProbe fgProbe_;
     caps::Report capabilityReport(bool pipelineLibraries) override;
     void runRaytracingSelfTest() override;
     void logMemoryStats() override;
-    std::unique_ptr<Upscaler> createUpscaler() override { return nullptr; }
-    std::unique_ptr<FrameGenerator> createFrameGenerator() override { return nullptr; }
+    std::unique_ptr<Upscaler> createUpscaler() override;
+    std::unique_ptr<FrameGenerator> createFrameGenerator() override;
     std::unique_ptr<ImGuiBackend> createImGuiBackend() override;
     void beginFrame() override;
     double lastSlotWaitMs() const override { return lastSlotWaitMs_; }

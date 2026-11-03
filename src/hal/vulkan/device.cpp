@@ -311,7 +311,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     engine::scene::attach(&dev_);  // the frame phase markers (no-ops when they are not installed)
     auto& reg = settings::registry();
     // frame generation providers (vk/framegen.h): which of FSR 3 / FSR 4 this device can run, for the capability report
-    dev_.game().probeFrameGeneration(paths::dataDir() / "amd_fidelityfx_loader_vk.dll");
+    dev_.game().probeFrameGeneration(rhi::fidelityFxLoader(paths::dataDir(), o.backend));
     // capability report (core/caps.h, docs/research/raytracing.md 3): logged once, the overlay's "Capabilities", and the
     // resolution of settings with requirements (greyed + parity fallback when unmet)
     {

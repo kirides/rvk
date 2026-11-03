@@ -427,9 +427,9 @@ rvk_warnings(rvk_shadertool)
 # The slim RHI's DX12 backend (src/rhi/d3d12, docs/research/hlsl-rhi.md 5, 6) and its test: a separate library so that d3d9.dll does not import
 # d3d12.dll / dxgi.dll until the renderer uses the backend. rvk_rhitest runs the same code on both backends.
 # ---------------------------------------------------------------------------------------------
-add_library(rvk_rhi_d3d12 STATIC src/rhi/d3d12/d3d12_device.cpp third_party/imgui_dx12/imgui_impl_dx12.cpp)
+add_library(rvk_rhi_d3d12 STATIC src/rhi/d3d12/d3d12_device.cpp src/rhi/d3d12/d3d12_ffx.cpp src/rhi/d3d12/d3d12_ffx.h third_party/imgui_dx12/imgui_impl_dx12.cpp)
 target_include_directories(rvk_rhi_d3d12 PUBLIC src include)
-target_include_directories(rvk_rhi_d3d12 PRIVATE third_party/imgui_dx12)
+target_include_directories(rvk_rhi_d3d12 PRIVATE third_party/imgui_dx12 third_party/amd_fidelityfx/api/include third_party/amd_fidelityfx/upscalers/include third_party/amd_fidelityfx/framegeneration/include)
 target_link_libraries(rvk_rhi_d3d12 PUBLIC rvk_core Microsoft::DirectX-Guids d3d12 dxgi dxguid d3dcompiler imgui::imgui)
 # Dear ImGui's DX12 backend, vendored from the imgui release vcpkg installs (third_party/imgui_dx12: built on the Agility headers like the rest of the backend)
 set_source_files_properties(third_party/imgui_dx12/imgui_impl_dx12.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON COMPILE_OPTIONS "/W3")
@@ -439,7 +439,8 @@ target_link_options(rvk_rhi_d3d12 INTERFACE /DELAYLOAD:d3d12.dll /DELAYLOAD:dxgi
 # rvk_core's createGameDevice(Backend::D3D12) calls into the backend (a cycle between two static libraries: allowed)
 target_link_libraries(rvk_core PUBLIC rvk_rhi_d3d12)
 rvk_warnings(rvk_rhi_d3d12)
-add_executable(rvk_rhitest tools/rhitest/main.cpp tools/rhitest/parity.cpp tools/common/d3dx.h)
+add_executable(rvk_rhitest tools/rhitest/main.cpp tools/rhitest/parity.cpp tools/rhitest/ffx.cpp tools/common/d3dx.h)
+target_compile_definitions(rvk_rhitest PRIVATE RVK_FFX_DLL_DX12="${CMAKE_SOURCE_DIR}/third_party/amd_fidelityfx/signedbin/amd_fidelityfx_loader_dx12.dll")
 target_include_directories(rvk_rhitest PRIVATE tools)
 target_link_libraries(rvk_rhitest PRIVATE rvk_core rvk_rhi_d3d12)
 rvk_deploy_dxc(rvk_rhitest)
