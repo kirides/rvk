@@ -129,13 +129,13 @@ float3 engineLightEx(WaterBlock w, float3 N, float3 Ngeo, float outdoor, float3 
     if (nLights > 0u) {
         float4 mask = waterTexSlot(w, 0u) != 0u ? rvkSample2DLod(waterTexSlot(w, 0u), w.Get().smpOurs.x, uv, 0.0) : float4(0.0, 0.0, 0.0, 0.0);
         for (uint i = 0u; i < nLights; ++i) {
-            float4 lp = w.Get().lights[i * 3u];
+            float4 lp = waterLight(i * 3u);
             float3 lv = lp.xyz - P;
             float d2 = dot(lv, lv);
             float3 ld = lv * rsqrt(max(d2, 1e-6));
-            float att = (1.0 - clamp(d2 * lp.w, 0.0, 1.0)) * (1.0 - dot(w.Get().lights[i * 3u + 2u], mask));
+            float att = (1.0 - clamp(d2 * lp.w, 0.0, 1.0)) * (1.0 - dot(waterLight(i * 3u + 2u), mask));
             float lup = clamp(dot(ld, Ngeo) * 4.0, 0.0, 1.0);
-            l += w.Get().lights[i * 3u + 1u].rgb * clamp(dot(ld, N), 0.0, 1.0) * lup * att;
+            l += waterLight(i * 3u + 1u).rgb * clamp(dot(ld, N), 0.0, 1.0) * lup * att;
         }
     }
     return float3(dpow(l.r, 0.45), dpow(l.g, 0.45), dpow(l.b, 0.45));
