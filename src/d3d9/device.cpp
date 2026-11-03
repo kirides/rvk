@@ -6,6 +6,8 @@
 
 #include <windows.h>
 
+#include <bit>
+#include <map>
 #include <chrono>
 #include <charconv>
 #include <cmath>
@@ -15,6 +17,7 @@
 #include <spdlog/spdlog.h>
 
 #include "d3d9/convert.h"
+#include "engine/exposure.h"
 #include "d3d9/memeq.h"
 #include "d3d9/target_names.h"
 #include "shader/sm_ir.h"
@@ -22,6 +25,9 @@
 
 namespace rvk::d3d9 {
 namespace {
+// diagnostics (RVK_EXPOSURE_LOG): the luminance chain's R32F targets by width (64 .. 1) and the HDR scene colour
+Texture* g_diagLum[8] = {};
+Texture* g_diagScene = nullptr;
 
 // bump when the translator's output changes: invalidates the SPIR-V disk cache
 // 2: the ABI declarations come from shaders/include/rvk_abi.glsl (48-byte push block, FrameBlock)
@@ -1021,6 +1027,37 @@ void Device::updatePacer() {
     }
 }
 
+// diagnostics (RVK_NAN_BISECT=<first frame>): after every draw into the HDR scene colour of that frame (and the next ones) the target is read back and
+// a draw that adds NaN components is logged with its shaders and textures
+void diagAfterDraw(Device& d, const char* what) {
+    static const long first = [] { char e[32]; return GetEnvironmentVariableA("RVK_NAN_BISECT", e, sizeof e) != 0 ? std::atol(e) : -1L; }();
+    if (first < 0 || static_cast<long>(d.stats().frames) < first || static_cast<long>(d.stats().frames) > first + 1) return;
+    Surface* rt = d.renderTarget(0);
+    if (rt == nullptr || rt->texture() == nullptr || rt->texture()->desc().format != 113 || rt->texture()->desc().width < 800) return;
+    Texture* t = rt->texture();
+    static std::map<Texture*, std::uint32_t> lasts;
+    static std::uint64_t lastFrame = ~0ull;
+    if (lastFrame != d.stats().frames) { lastFrame = d.stats().frames; lasts.clear(); }
+    std::uint32_t& last = lasts[t];
+    const std::uint32_t w = t->desc().width, h = t->desc().height;
+    std::vector<std::uint8_t> v;
+    if (!d.readImageLevel(t->rhi(), 0, 0, {w, h, 1}, static_cast<std::uint64_t>(w) * h * 8, v)) return;
+    std::uint32_t nan = 0;
+    for (std::size_t k = 0; k + 8 <= v.size(); k += 8) {
+        for (int c = 0; c < 4; ++c) {
+            const std::uint16_t hf = *reinterpret_cast<const std::uint16_t*>(v.data() + k + c * 2);
+            if (((hf >> 10) & 31) == 31 && (hf & 1023) != 0) ++nan;
+        }
+    }
+    if (nan != last) {
+        const Shader* vs = d.vertexShader();
+        const Shader* ps = d.pixelShader();
+        spdlog::info("diag: nan: frame {} target {} draw '{}' phase {} vs {:016x} ps {:016x}: NaN components {} -> {}", d.stats().frames, static_cast<const void*>(t), what,
+                     static_cast<int>(d.phases().pass()), vs ? vs->hash : 0, ps ? ps->hash : 0, last, nan);
+        last = nan;
+    }
+}
+
 void Device::present() {
     presentStart_ = std::chrono::steady_clock::now();
     if (stats_.frames > 0) {
@@ -1050,6 +1087,54 @@ void Device::present() {
             d.presentEnd_ = now;
         }
     } presentEnd{*this};
+    if (static bool exposureLog = GetEnvironmentVariableA("RVK_EXPOSURE_LOG", nullptr, 0) != 0; exposureLog && stats_.frames % 60 == 59) {
+        // diagnostics: the engine's adapted luminance (the 1x1 R32F output of the AvgLuminance filter) as the GPU holds it
+        if (const void* api = engine::exposure::adaptedLuminanceApi()) {
+            if (Texture* t = engineTexture(api)) {
+                std::vector<std::uint8_t> v;
+                if (readImageLevel(t->rhi(), 0, 0, {1, 1, 1}, 4, v) && v.size() >= 4) {
+                    float f;
+                    std::memcpy(&f, v.data(), 4);
+                    spdlog::info("diag: exposure: frame {} adapted luminance {:.5f}", stats_.frames, f);
+                }
+            }
+        }
+        for (int i = 6; i >= 0; --i) {
+            Texture* t = g_diagLum[i];
+            if (t == nullptr) continue;
+            const std::uint32_t w = 1u << i;
+            std::vector<std::uint8_t> v;
+            if (!readImageLevel(t->rhi(), 0, 0, {w, w, 1}, static_cast<std::uint64_t>(w) * w * 4, v)) continue;
+            double sum = 0, mn = 1e30, mx = -1e30;
+            std::uint32_t bad = 0;
+            for (std::size_t k = 0; k + 4 <= v.size(); k += 4) {
+                float f;
+                std::memcpy(&f, v.data() + k, 4);
+                if (!std::isfinite(f)) { ++bad; continue; }
+                sum += f; mn = std::min<double>(mn, f); mx = std::max<double>(mx, f);
+            }
+            spdlog::info("diag: exposure: lum chain {}x{}: mean {:.5f} min {:.5f} max {:.5f} non-finite {}", w, w, sum / std::max<std::size_t>(1, v.size() / 4 - bad), mn, mx, bad);
+        }
+        if (Texture* t = g_diagScene; t != nullptr && t->desc().width * t->desc().height <= 4000000) {
+            std::vector<std::uint8_t> v;
+            const std::uint32_t w = t->desc().width, h = t->desc().height;
+            if (readImageLevel(t->rhi(), 0, 0, {w, h, 1}, static_cast<std::uint64_t>(w) * h * 8, v)) {
+                double sum = 0;
+                std::uint32_t nan = 0, inf = 0;
+                float mx = 0;
+                for (std::size_t k = 0; k + 8 <= v.size(); k += 8) {
+                    for (int c = 0; c < 3; ++c) {
+                        const std::uint16_t hf = *reinterpret_cast<const std::uint16_t*>(v.data() + k + c * 2);
+                        const std::uint32_t e = (hf >> 10) & 31, m = hf & 1023;
+                        if (e == 31) { (m != 0 ? nan : inf)++; continue; }
+                        const float f = (e == 0 ? std::ldexp(static_cast<float>(m), -24) : std::ldexp(static_cast<float>(m + 1024), static_cast<int>(e) - 25)) * ((hf & 0x8000) ? -1.0f : 1.0f);
+                        sum += f; mx = std::max(mx, f);
+                    }
+                }
+                spdlog::info("diag: exposure: scene {}x{}: mean rgb {:.5f} max {:.2f} nan {} inf {}", w, h, sum / (3.0 * w * h), mx, nan, inf);
+            }
+        }
+    }
     endRendering();
     ++stats_.frames;
     if (wp0_.on && stats_.frames % 600 == 0) wp0Log();
@@ -1983,6 +2068,18 @@ void Device::setRenderTarget(std::uint32_t index, Surface* surface) {
     }
     endRendering();
     rt_[index] = surface;
+    if (index == 0 && surface != nullptr && surface->texture() != nullptr && surface->level() == 0) {
+        static const bool diag = GetEnvironmentVariableA("RVK_EXPOSURE_LOG", nullptr, 0) != 0;
+        if (diag) {
+            Texture* t = surface->texture();
+            const auto& d = t->desc();
+            if (d.format == 114 && d.width == d.height && d.width <= 64 && (d.width & (d.width - 1)) == 0) {
+                g_diagLum[std::countr_zero(d.width)] = t;
+            } else if (d.format == 113 && d.width >= 800) {
+                g_diagScene = t;
+            }
+        }
+    }
     if (index == 0 && surface != nullptr && phases_.pass() == scene::Pass::ShadowMask && rhi::debugNamesEnabled()) {
         debugnames::onShadowMaskTarget(*this, surface);  // debug names of the mask chain's targets (d3d9/target_names.h)
     }

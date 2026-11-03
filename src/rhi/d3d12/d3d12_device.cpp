@@ -507,6 +507,7 @@ class D3D12DeviceImpl final : public GameDevice {
 public:
     ~D3D12DeviceImpl() override;
 #include "d3d12_game_decl.inc"
+    bool gpuUploadHeapSupported() const { return gpuUploadHeap_; }
 
 
     bool create(const DeviceDesc& desc) {
@@ -1012,6 +1013,9 @@ private:
 bool D3DBuffer::create() {
     D3D12_HEAP_PROPERTIES hp{};
     hp.Type = desc_.memory == Memory::Upload ? D3D12_HEAP_TYPE_UPLOAD : desc_.memory == Memory::Readback ? D3D12_HEAP_TYPE_READBACK : D3D12_HEAP_TYPE_DEFAULT;
+    // a read-back buffer the GPU writes with shaders (probes, diagnostics): a readback heap has no UAV access, so it is a GPU upload heap
+    // (device memory the CPU maps; the CPU reads it after the frame's fence)
+    if (desc_.memory == Memory::Readback && (desc_.usage & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) != 0 && !arena && dev_.gpuUploadHeapSupported()) gpuUpload = true;
     if (gpuUpload) hp.Type = D3D12_HEAP_TYPE_GPU_UPLOAD;
     D3D12_RESOURCE_DESC rd{};
     rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -1022,7 +1026,7 @@ bool D3DBuffer::create() {
     // shader-writable (RWByteAddressBuffer, atomics): device memory only (upload / readback heaps cannot have UAVs)
     const bool writable = (desc_.usage & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) != 0 && (hp.Type == D3D12_HEAP_TYPE_DEFAULT || gpuUpload) && !arena;
     if (writable) rd.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-    state = hp.Type == D3D12_HEAP_TYPE_UPLOAD ? D3D12_RESOURCE_STATE_GENERIC_READ : hp.Type == D3D12_HEAP_TYPE_READBACK ? D3D12_RESOURCE_STATE_COPY_DEST : D3D12_RESOURCE_STATE_COMMON;
+    state = hp.Type == D3D12_HEAP_TYPE_UPLOAD ? D3D12_RESOURCE_STATE_GENERIC_READ : hp.Type == D3D12_HEAP_TYPE_GPU_UPLOAD && desc_.memory == Memory::Readback ? D3D12_RESOURCE_STATE_COMMON : hp.Type == D3D12_HEAP_TYPE_READBACK ? D3D12_RESOURCE_STATE_COPY_DEST : D3D12_RESOURCE_STATE_COMMON;
     const HRESULT hr0 = dev_.device()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, state, nullptr, IID_PPV_ARGS(&resource_));
     if (FAILED(hr0)) {
         dev_.checkRemoved(hr0, "CreateCommittedResource");

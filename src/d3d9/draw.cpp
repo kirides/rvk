@@ -19,6 +19,7 @@
 #include "shader/abi.h"
 
 namespace rvk::d3d9 {
+void diagAfterDraw(Device& d, const char* what);  // device.cpp (RVK_NAN_BISECT)
 
 // [debug] perf: CPU time inside a draw call
 struct Device::DrawTimer {
@@ -1373,6 +1374,7 @@ void Device::logWaterDraw(draws::Kind kind) {
 }
 
 void Device::drawPrimitive(std::uint32_t type, std::uint32_t startVertex, std::uint32_t primitiveCount) {
+    struct Diag { Device& d; ~Diag() { diagAfterDraw(d, "plain"); } } diag{*this};
     const DrawTimer timer(*this);
     if (primitiveCount == 0 || !prepareDraw(type, DrawGeom{.first = startVertex, .primitives = primitiveCount})) {
         return;
@@ -1404,6 +1406,7 @@ std::uint32_t Device::foldIndexOffset(VkDeviceSize offset, bool index32, std::ui
 
 void Device::drawIndexedPrimitive(std::uint32_t type, std::int32_t baseVertex, std::uint32_t minIndex, std::uint32_t numVertices,
                                   std::uint32_t startIndex, std::uint32_t primitiveCount) {
+    struct Diag { Device& d; ~Diag() { diagAfterDraw(d, "indexed"); } } diag{*this};
     const DrawTimer timer(*this);
     if (primitiveCount == 0 || indices_ == nullptr ||
         !prepareDraw(type, DrawGeom{.indexed = true, .first = startIndex, .primitives = primitiveCount, .baseVertex = baseVertex,
