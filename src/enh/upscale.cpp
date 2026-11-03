@@ -142,6 +142,7 @@ void Upscale::apply(UpscaleMode mode, unsigned flip) {
         if (rdev != nullptr) {
             rhi::ComputePipelineDesc cd;
             cd.cs.spirv = shader::embedded::spirv("upscale/prep.comp");
+            cd.cs.dxil = shader::embedded::dxilOnDemand("upscale/prep.comp");
             cd.name = "upscale.prep";
             prep_ = rdev->createComputePipeline(cd);
         }
@@ -153,6 +154,7 @@ void Upscale::apply(UpscaleMode mode, unsigned flip) {
         // (without it FSR derives the exposure itself)
         rhi::ComputePipelineDesc ed;
         ed.cs.spirv = shader::embedded::spirv("upscale/exposure.comp");
+        ed.cs.dxil = shader::embedded::dxilOnDemand("upscale/exposure.comp");
         ed.name = "upscale.exposure";
         exposurePipe_ = rdev->createComputePipeline(ed);
     }

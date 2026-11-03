@@ -147,7 +147,7 @@ bool Water::ensureShaders() {
     const auto make = [&](const char* name, shader::Stage stage) {
         auto s = std::make_shared<d3d9::Shader>();
         s->stage = stage;
-        s->module = dev_.game().createShaderModule({.spirv = shader::embedded::spirv(name)});
+        s->module = dev_.game().createShaderModule({.spirv = shader::embedded::spirv(name), .dxil = shader::embedded::dxilOnDemand(name)});
         s->hash = nameHash(name);
         return s;
     };
@@ -1124,7 +1124,9 @@ bool Water::ensureWetPipeline(VkFormat target) {
     wetPipeline_.reset();
     rhi::GraphicsPipelineDesc gd;
     gd.vs.spirv = shader::embedded::spirv("debug/fullscreen_rhi.vert");
+    gd.vs.dxil = shader::embedded::dxilOnDemand("debug/fullscreen_rhi.vert");
     gd.ps.spirv = shader::embedded::spirv("water/wet_shore.frag");
+    gd.ps.dxil = shader::embedded::dxilOnDemand("water/wet_shore.frag");
     gd.colorFormats[0] = target;
     // dst * src.a + src.rgb: darkens the scene (keeps the engine's exposure), adds the wet film's sheen; alpha kept
     gd.blend.blendEnable = VK_TRUE;

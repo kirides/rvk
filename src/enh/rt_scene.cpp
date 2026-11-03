@@ -1663,6 +1663,7 @@ bool RtScene::skinReady() {
         skinBuild_ = std::async(std::launch::async, [rdev]() {
             rhi::ComputePipelineDesc d;
             d.cs.spirv = shader::embedded::spirv("rt/rt_skin.comp");
+            d.cs.dxil = shader::embedded::dxilOnDemand("rt/rt_skin.comp");
             d.name = "rt.skin";
             return rdev->createComputePipeline(d);
         });

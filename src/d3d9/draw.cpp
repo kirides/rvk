@@ -247,6 +247,97 @@ GamePipeline Device::findPipeline(const PipelineDesc& d) {
     return p;
 }
 
+// WP0 (d3d9/wp0.h): what a D3D12 draw path has to cover
+void Device::wp0Note(const PipelineDesc& pd, std::uint32_t primitiveType, bool indexed, bool captureDraw, bool giDraw) {
+    Wp0& w = wp0_;
+    ++w.draws;
+    switch (primitiveType) {
+    case PT_POINTLIST:
+        ++w.point;
+        if (instanceCount_ > 1) ++w.pointInstanced;
+        break;
+    case PT_TRIANGLEFAN:
+        ++w.fan;
+        if (indexed) ++w.fanIndexed;
+        break;
+    case PT_TRIANGLESTRIP:
+        ++w.strip;
+        if (indexed) ++w.stripIndexed;
+        break;
+    case PT_LINELIST: ++w.lineList; break;
+    case PT_LINESTRIP: ++w.lineStrip; break;
+    default: break;
+    }
+    if (captureDraw) ++w.capture;
+    if (giDraw) ++w.gi;
+    if (gbufWrite_) ++w.gbuf;
+    // the layout the draw would bake into a D3D12 PSO: the pipeline description's own (D3D12 has no dynamic vertex input) or the dynamic one
+    const std::uint32_t nb = pd.bindingCount != 0 ? pd.bindingCount : workVi_.bindingCount;
+    const std::uint32_t na = pd.attributeCount != 0 ? pd.attributeCount : workVi_.attributeCount;
+    const rhi::VertexBinding* bs = pd.bindingCount != 0 ? pd.bindings : workVi_.bindings;
+    const rhi::VertexAttribute* as = pd.attributeCount != 0 ? pd.attributes : workVi_.attributes;
+    std::uint64_t layout = 0;
+    for (std::uint32_t i = 0; i < nb; ++i) layout = Wp0::bytes(layout, bs[i]);
+    for (std::uint32_t i = 0; i < na; ++i) {
+        layout = Wp0::bytes(layout, as[i]);
+        const char* name = nullptr;
+        switch (as[i].format) {
+        case VK_FORMAT_R8G8B8A8_USCALED: name = "UBYTE4 (R8G8B8A8_USCALED)"; break;
+        case VK_FORMAT_R16G16_SSCALED: name = "SHORT2 (R16G16_SSCALED)"; break;
+        case VK_FORMAT_R16G16B16A16_SSCALED: name = "SHORT4 (R16G16B16A16_SSCALED)"; break;
+        case VK_FORMAT_A2B10G10R10_USCALED_PACK32: name = "UDEC3 (A2B10G10R10_USCALED)"; break;
+        case VK_FORMAT_A2B10G10R10_SNORM_PACK32: name = "DEC3N (A2B10G10R10_SNORM)"; break;
+        case VK_FORMAT_R32G32B32_SFLOAT: case VK_FORMAT_R32G32B32A32_SFLOAT: case VK_FORMAT_R32G32_SFLOAT: case VK_FORMAT_R32_SFLOAT:
+        case VK_FORMAT_B8G8R8A8_UNORM: case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R16G16_SNORM: case VK_FORMAT_R16G16B16A16_SNORM:
+        case VK_FORMAT_R16G16_UNORM: case VK_FORMAT_R16G16B16A16_UNORM: case VK_FORMAT_R16G16_SFLOAT: case VK_FORMAT_R16G16B16A16_SFLOAT:
+            break;
+        default: name = "other"; break;
+        }
+        if (name != nullptr) ++w.exotic[name];
+    }
+    std::uint64_t base = 0;
+    base = Wp0::mix(base, static_cast<std::uint64_t>(pd.vs));
+    base = Wp0::mix(base, static_cast<std::uint64_t>(pd.fs));
+    base = Wp0::mix(base, static_cast<std::uint64_t>(pd.topology));
+    base = Wp0::mix(base, static_cast<std::uint64_t>(pd.polygonMode));
+    base = Wp0::mix(base, pd.colorCount);
+    for (std::uint32_t i = 0; i < pd.colorCount; ++i) {
+        base = Wp0::mix(base, static_cast<std::uint64_t>(pd.colorFormats[i]));
+        base = Wp0::bytes(base, attachmentBlend(i));
+    }
+    base = Wp0::mix(base, static_cast<std::uint64_t>(pd.depthFormat));
+    base = Wp0::mix(base, static_cast<std::uint64_t>(pd.stencilFormat));
+    std::uint64_t withLayout = Wp0::mix(base, layout);
+    std::uint64_t full = withLayout;
+    const DynamicStateValues& d = workDyn_;
+    full = Wp0::mix(full, static_cast<std::uint64_t>(d.cull));
+    full = Wp0::mix(full, static_cast<std::uint64_t>(d.depthTest) | static_cast<std::uint64_t>(d.depthWrite) << 1 | static_cast<std::uint64_t>(d.depthCompare) << 2);
+    if (d.stencilTest != 0) {
+        full = Wp0::bytes(full, d.stencilFront);
+        full = Wp0::bytes(full, d.stencilBack);
+        full = Wp0::mix(full, static_cast<std::uint64_t>(d.stencilFrontCompare) | static_cast<std::uint64_t>(d.stencilBackCompare) << 8);
+        full = Wp0::mix(full, d.stencilMasks[0] | static_cast<std::uint64_t>(d.stencilMasks[1]) << 8);
+    }
+    if (d.depthBiasEnable != 0) {
+        full = Wp0::bytes(full, d.depthBias);
+    }
+    w.baseKeys.insert(base);
+    w.layoutKeys.insert(withLayout);
+    w.fullKeys.insert(full);
+}
+
+void Device::wp0Log() {
+    const Wp0& w = wp0_;
+    spdlog::info("wp0: frame {}: {} draws counted; PSO keys: {} distinct shaders+targets+blend, {} with the vertex layout, {} with the raster/depth/stencil state (the D3D12 PSO count)",
+                 stats_.frames, w.draws, w.baseKeys.size(), w.layoutKeys.size(), w.fullKeys.size());
+    spdlog::info("wp0:   topology: point lists {} (instanced {}), triangle fans {} (indexed {}), strips {} (indexed {}), line lists {}, line strips {}",
+                 w.point, w.pointInstanced, w.fan, w.fanIndexed, w.strip, w.stripIndexed, w.lineList, w.lineStrip);
+    std::string ex;
+    for (const auto& [k, n] : w.exotic) ex += std::format(" {} x{};", k, n);
+    spdlog::info("wp0:   vertex attributes without a DXGI equivalent:{}", ex.empty() ? " none" : ex);
+    spdlog::info("wp0:   variants: capture draws {}, gi draws {}, g-buffer-writing draws {}", w.capture, w.gi, w.gbuf);
+}
+
 bool Device::computeVertexInput(PipelineDesc& pd, VertexInputValues& out) {
     std::uint32_t streamBinding[kStreams];
     std::fill(std::begin(streamBinding), std::end(streamBinding), UINT32_MAX);
@@ -1027,6 +1118,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     }
     packet_.pipeline = pipeline;
     computeDynamicState(primitiveType, workDyn_);
+    if (wp0_.on) wp0Note(pd, primitiveType, geom.indexed, captureDraw, giDraw);
     {
         // the pixel window of an enhancement variant that reads the ambient registers the base shader may not (enh/material_variant)
         std::uint32_t minEnd = 0;
@@ -1054,7 +1146,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
                                  ((r.samplers[slot] == shader::TextureType::Volume) == (t->desc().type == TextureType::Volume));
         const bool usable = t != nullptr && !t->isNull() && kindMatches &&
                             t->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        block.tex[slot] = !usable ? 0 : (t == substituteFrom_ && substituteSlot_ != 0) ? substituteSlot_ : t->bindlessSlot();
+        block.tex[slot] = !usable ? game_->defaultTextureSlot(static_cast<std::uint32_t>(r.samplers[slot])) : (t == substituteFrom_ && substituteSlot_ != 0) ? substituteSlot_ : t->bindlessSlot();
         block.smp[slot] = lodBias != 0.0f && slot < 16 ? samplerIndexBiased(slot, lodBias) : samplerIndex(slot);
     }
     // half a pixel right/down in NDC units of the viewport (shader/abi.h)

@@ -475,6 +475,9 @@ public:
     // ---- capabilities ----
     // (non-virtual: read per draw)
     const GameCaps& gameCaps() const { return gameCaps_; }
+    // The bindless slot an unbound / unusable sampler of the shader's texture type reads (shader::TextureType: 2 = 2D, 3 = cube, 4 = volume): a texel
+    // (0, 0, 0, 1) of that kind. Vulkan keeps one default per array at index 0; D3D12's one heap needs a descriptor of each dimension (slots 0, 1, 2).
+    std::uint32_t defaultTextureSlot(std::uint32_t textureType) const { return textureType == 3 ? defaultSlots_[1] : textureType == 4 ? defaultSlots_[2] : defaultSlots_[0]; }
     // Whether `format` supports every use in `usage` (optimal tiling): SAMPLED, COLOR_ATTACHMENT, DEPTH_STENCIL_ATTACHMENT, STORAGE, TRANSFER_SRC (= a blit source);
     // `blend`: a colour attachment that blends too.
     virtual bool formatSupport(VkFormat format, VkImageUsageFlags usage, bool blend = false) const = 0;
@@ -638,12 +641,20 @@ protected:
     // the ring front end's state and the frame counters (the backend keeps them current: beginFrame / chunk switches)
     RingChunkState ring_;
     GameCaps gameCaps_;
+    std::uint32_t defaultSlots_[3] = {0, 0, 0};  // defaultTextureSlot: 2D, cube, volume
     std::uint64_t nullVertexBuffer_ = 0;  // the handle of nullVertexBuffer()
     std::uint64_t frameValue_ = 1;  // the value the frame being recorded signals
     std::uint32_t frameSlot_ = 0;
     // a block that did not fit the current chunk: the backend switches chunks (ring_ is updated) and allocates
     virtual RingAlloc allocRingSlow(std::uint64_t size, std::uint64_t alignment, std::uint64_t minOffset) = 0;
 };
+
+// The D3D12 backend (rhi/d3d12, delay-loaded d3d12.dll / dxgi.dll: only called when the session runs on D3D12): null with a logged reason when the GPU lacks
+// Shader Model 6.6 / resource binding tier 3 (the caller falls back to Vulkan)
+std::unique_ptr<GameDevice> createD3D12GameDevice(const GameDeviceOptions& options);
+std::vector<AdapterInfo> enumerateD3D12Adapters();
+// whether the D3D12 backend can run here (adapter 12_0, SM 6.6, binding tier 3); `reason` = why not
+bool d3d12Usable(int adapter, std::string* reason);
 
 // The game device of `backend` (it owns the API instance, device, frame ring, heaps, pipeline caches and the presentation). Vulkan only for now: null
 // (logged) for D3D12.

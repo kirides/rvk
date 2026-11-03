@@ -29,6 +29,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "d3d9/wp0.h"
 #include "core/id_hash.h"
 #include "d3d9/defs.h"
 #include "d3d9/draws.h"
@@ -1175,6 +1176,7 @@ private:
     void logTracedMaterial(draws::Kind kind, bool jittered);
     rhi::ShaderModule tintModule(Shader& ps);  // the tint variant of a pixel shader (None when it fails to build)
     rhi::ShaderModule lodModule(Shader& vs);   // the billboard fade variant of a vertex shader (None when it fails to build)
+    rhi::ShaderModule dxilModule(shader::Stage stage, const std::string& text, std::string_view name, const std::filesystem::path& spvCacheFile, const std::string& label, std::uint64_t hash);
     rhi::ShaderModule variantModule(const Shader& s, const shader::TranslateOptions& options, std::string_view tag);
     rhi::ShaderModule uberModule(const Shader& s, const MaterialSource& src, const shader::TranslateOptions& options, std::string_view tag);
     std::atomic<bool> ubershader_{false};
@@ -1505,6 +1507,9 @@ private:
     bool scopeGbuf_ = false;                // the open rendering scope has the G-buffer attachments
     std::uint32_t engineColorCount_ = 0;    // the engine's colour attachments of the open scope (the G-buffer's come after)
     bool gbufWrite_ = false;                // the draw being prepared writes the G-buffer
+    Wp0 wp0_;                               // WP0 spike counters (RVK_WP0=1; d3d9/wp0.h)
+    void wp0Note(const PipelineDesc& pd, std::uint32_t primitiveType, bool indexed, bool captureDraw, bool giDraw);
+    void wp0Log();
     std::uint64_t gbufWrittenFrame_ = 0;    // frame value whose main view cleared / wrote the G-buffer
     std::uint32_t gbufMissing_ = 0, gbufSolid_ = 0;  // this frame: solid draws whose G-buffer pipeline / variant is not ready, all
     double gbufRequestedAt_ = 0.0;

@@ -178,6 +178,7 @@ void FrameGeneration::enable() {
         if (rdev != nullptr) {
             rhi::ComputePipelineDesc cd;
             cd.cs.spirv = shader::embedded::spirv("upscale/prep.comp");
+            cd.cs.dxil = shader::embedded::dxilOnDemand("upscale/prep.comp");
             cd.name = "framegen.depth";
             prep_ = rdev->createComputePipeline(cd);
         }
@@ -622,7 +623,9 @@ bool FrameGeneration::ensurePipelines(rhi::Device& rdev, VkFormat target) {
     if (!debug_) {
         rhi::GraphicsPipelineDesc gd;
         gd.vs.spirv = shader::embedded::spirv("debug/fullscreen_rhi.vert");
+        gd.vs.dxil = shader::embedded::dxilOnDemand("debug/fullscreen_rhi.vert");
         gd.ps.spirv = shader::embedded::spirv("framegen/debug.frag");
+        gd.ps.dxil = shader::embedded::dxilOnDemand("framegen/debug.frag");
         gd.colorFormats[0] = target;
         gd.name = "framegen.debug";
         debug_ = rdev.createGraphicsPipeline(gd);

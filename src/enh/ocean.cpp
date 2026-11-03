@@ -54,15 +54,16 @@ Ocean::~Ocean() {
 bool Ocean::createPipelines() {
     rhi::Device* rdev = dev_.rhi();
     if (rdev == nullptr) return false;
-    const auto compute = [&](std::span<const std::uint32_t> spirv, const char* name) {
+    const auto compute = [&](std::span<const std::uint32_t> spirv, std::span<const std::uint8_t> dxil, const char* name) {
         rhi::ComputePipelineDesc d;
         d.cs.spirv = spirv;
+        d.cs.dxil = dxil;
         d.name = name;
         return rdev->createComputePipeline(d);
     };
-    spectrum_ = compute(shader::embedded::spirv("water/ocean_spectrum.comp"), "ocean.spectrum");
-    evolve_ = compute(shader::embedded::spirv("water/ocean_evolve.comp"), "ocean.evolve");
-    resolve_ = compute(shader::embedded::spirv("water/ocean_resolve.comp"), "ocean.resolve");
+    spectrum_ = compute(shader::embedded::spirv("water/ocean_spectrum.comp"), shader::embedded::dxilOnDemand("water/ocean_spectrum.comp"), "ocean.spectrum");
+    evolve_ = compute(shader::embedded::spirv("water/ocean_evolve.comp"), shader::embedded::dxilOnDemand("water/ocean_evolve.comp"), "ocean.evolve");
+    resolve_ = compute(shader::embedded::spirv("water/ocean_resolve.comp"), shader::embedded::dxilOnDemand("water/ocean_resolve.comp"), "ocean.resolve");
     const rhi::GameCaps& lim = dev_.game().gameCaps();
     for (int i = 0; i < 3; ++i) {
         const std::int32_t n = 128 << i;
@@ -75,7 +76,7 @@ bool Ocean::createPipelines() {
         }
         // one module per size (HLSL has no specialisation constants for numthreads / groupshared sizes): OCEAN_N / OCEAN_LOG2N defines
         const std::string defines = std::format("OCEAN_N={};OCEAN_LOG2N={}", n, log2i(n));
-        fft_[static_cast<std::size_t>(i)] = compute(shader::embedded::spirvVariant("water/ocean_fft.comp", defines), "ocean.fft");
+        fft_[static_cast<std::size_t>(i)] = compute(shader::embedded::spirvVariant("water/ocean_fft.comp", defines), shader::embedded::dxilVariantOnDemand("water/ocean_fft.comp", defines), "ocean.fft");
     }
     // trilinear (+ anisotropic where the device has it: the distant sea at grazing angles keeps its waves instead of blurring flat), wrapping: the
     // tiles repeat
@@ -86,7 +87,7 @@ bool Ocean::createPipelines() {
     samplerSlot_ = rdev->createSampler(sd);
     // the foam pass (one storage image; its history and the floor field through the bindless set). Optional: without it the
     // shading evaluates the surf's foam in place
-    foam_ = compute(shader::embedded::spirv("water/ocean_foam.comp"), "ocean.foam");
+    foam_ = compute(shader::embedded::spirv("water/ocean_foam.comp"), shader::embedded::dxilOnDemand("water/ocean_foam.comp"), "ocean.foam");
     return spectrum_ && evolve_ && resolve_ && fft_[0] && samplerSlot_ != 0;
 }
 

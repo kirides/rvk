@@ -1886,10 +1886,7 @@ std::unique_ptr<CommandList> wrapCommandBuffer(Device& device, VkCommandBuffer c
 }  // namespace vulkan
 
 std::unique_ptr<GameDevice> createGameDevice(Backend backend, const GameDeviceOptions& options) {
-    if (backend != Backend::Vulkan) {
-        spdlog::error("rhi: the {} game device is not available yet", backendName(backend));
-        return nullptr;
-    }
+    if (backend == Backend::D3D12) return createD3D12GameDevice(options);
     auto d = std::make_unique<VkDeviceImpl>(VkDeviceImpl::GameTag{});
     if (!d->createGame(options)) return nullptr;
     return d;

@@ -84,6 +84,7 @@ Gi::Gi(d3d9::Device& device, RtScene* scene) : dev_(device), scene_(scene) {
         return [rdev, file, name]() {
             rhi::ComputePipelineDesc d;
             d.cs.spirv = shader::embedded::spirv(file);
+            d.cs.dxil = shader::embedded::dxilOnDemand(file);
             d.name = name;
             return rdev->createComputePipeline(d);
         };

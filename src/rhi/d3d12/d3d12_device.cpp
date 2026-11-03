@@ -13,16 +13,26 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <format>
+#include <functional>
 #include <map>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
+#include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include <spdlog/spdlog.h>
 
+#include "core/caps.h"
+#include "rhi/game_device.h"
 #include "rhi/rhi.h"
+#include "shader/embedded.h"
 
 namespace rvk::rhi {
 namespace {
@@ -30,7 +40,10 @@ namespace {
 using Microsoft::WRL::ComPtr;
 
 constexpr std::uint32_t kHeapSize = 65536;      // shader-visible CBV / SRV / UAV heap (the Vulkan side's bindless arrays together are smaller)
-constexpr std::uint32_t kUavRing = 256;         // the last entries of that heap: tables of kStorageImages UAVs written per setStorageViews
+constexpr std::uint32_t kUavRing = 2048;        // the last entries of that heap: tables of kStorageImages UAVs written per setStorageViews / clear / blit view, per frame slot
+constexpr std::uint32_t kUavRingPerSlot = kUavRing / rhi::kFramesInFlight;
+constexpr std::uint32_t kViewRing = 512;        // single transient SRVs (blits), before the UAV ring: kViewRing / kFramesInFlight per frame slot
+constexpr std::uint32_t kReservedSlots = 3;     // 0 = 2D default, 1 = cube default, 2 = 3D default (a texel (0, 0, 0, 1) of that dimension)
 constexpr std::uint32_t kSamplerHeapSize = 2048;
 constexpr std::uint32_t kRtvCount = 128, kDsvCount = 32;
 
@@ -43,39 +56,118 @@ constexpr std::uint32_t kRtvCount = 128, kDsvCount = 32;
         }                                                                                                           \
     } while (0)
 
+// The typed DXGI format of a storage format (render targets, UAVs, copies, input layouts; depth formats: the DSV format)
 DXGI_FORMAT toDxgi(VkFormat f) {
     switch (f) {
     case VK_FORMAT_R8_UNORM: return DXGI_FORMAT_R8_UNORM;
     case VK_FORMAT_R8_UINT: return DXGI_FORMAT_R8_UINT;
     case VK_FORMAT_R8G8_UNORM: return DXGI_FORMAT_R8G8_UNORM;
+    case VK_FORMAT_R8G8_SNORM: return DXGI_FORMAT_R8G8_SNORM;
     case VK_FORMAT_R16_SFLOAT: return DXGI_FORMAT_R16_FLOAT;
     case VK_FORMAT_R16_UNORM: return DXGI_FORMAT_R16_UNORM;
     case VK_FORMAT_R16_UINT: return DXGI_FORMAT_R16_UINT;
     case VK_FORMAT_R8G8B8A8_UNORM: return DXGI_FORMAT_R8G8B8A8_UNORM;
+    case VK_FORMAT_R8G8B8A8_SNORM: return DXGI_FORMAT_R8G8B8A8_SNORM;
     case VK_FORMAT_R8G8B8A8_SRGB: return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
     case VK_FORMAT_B8G8R8A8_UNORM: return DXGI_FORMAT_B8G8R8A8_UNORM;
     case VK_FORMAT_B8G8R8A8_SRGB: return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
-    case VK_FORMAT_A2B10G10R10_UNORM_PACK32: return DXGI_FORMAT_R10G10B10A2_UNORM;
+    case VK_FORMAT_R5G6B5_UNORM_PACK16: return DXGI_FORMAT_B5G6R5_UNORM;
+    case VK_FORMAT_A1R5G5B5_UNORM_PACK16: return DXGI_FORMAT_B5G5R5A1_UNORM;
+    case VK_FORMAT_B4G4R4A4_UNORM_PACK16: return DXGI_FORMAT_B4G4R4A4_UNORM;
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+    case VK_FORMAT_A2R10G10B10_UNORM_PACK32: return DXGI_FORMAT_R10G10B10A2_UNORM;
     case VK_FORMAT_R16G16_SFLOAT: return DXGI_FORMAT_R16G16_FLOAT;
+    case VK_FORMAT_R16G16_UNORM: return DXGI_FORMAT_R16G16_UNORM;
+    case VK_FORMAT_R16G16_SNORM: return DXGI_FORMAT_R16G16_SNORM;
+    case VK_FORMAT_R16G16B16A16_SFLOAT: return DXGI_FORMAT_R16G16B16A16_FLOAT;
+    case VK_FORMAT_R16G16B16A16_UNORM: return DXGI_FORMAT_R16G16B16A16_UNORM;
+    case VK_FORMAT_R16G16B16A16_SNORM: return DXGI_FORMAT_R16G16B16A16_SNORM;
     case VK_FORMAT_R32_SFLOAT: return DXGI_FORMAT_R32_FLOAT;
     case VK_FORMAT_R32_UINT: return DXGI_FORMAT_R32_UINT;
-    case VK_FORMAT_D32_SFLOAT: return DXGI_FORMAT_D32_FLOAT;
-    case VK_FORMAT_R16G16B16A16_SFLOAT: return DXGI_FORMAT_R16G16B16A16_FLOAT;
     case VK_FORMAT_R32G32_SFLOAT: return DXGI_FORMAT_R32G32_FLOAT;
     case VK_FORMAT_R32G32B32_SFLOAT: return DXGI_FORMAT_R32G32B32_FLOAT;
     case VK_FORMAT_R32G32B32A32_SFLOAT: return DXGI_FORMAT_R32G32B32A32_FLOAT;
+    case VK_FORMAT_BC1_RGBA_UNORM_BLOCK: return DXGI_FORMAT_BC1_UNORM;
+    case VK_FORMAT_BC2_UNORM_BLOCK: return DXGI_FORMAT_BC2_UNORM;
+    case VK_FORMAT_BC3_UNORM_BLOCK: return DXGI_FORMAT_BC3_UNORM;
+    case VK_FORMAT_BC4_UNORM_BLOCK: return DXGI_FORMAT_BC4_UNORM;
+    case VK_FORMAT_BC5_UNORM_BLOCK: return DXGI_FORMAT_BC5_UNORM;
+    case VK_FORMAT_D16_UNORM: return DXGI_FORMAT_D16_UNORM;
+    case VK_FORMAT_D24_UNORM_S8_UINT: return DXGI_FORMAT_D24_UNORM_S8_UINT;
+    case VK_FORMAT_D32_SFLOAT: return DXGI_FORMAT_D32_FLOAT;
+    case VK_FORMAT_D32_SFLOAT_S8_UINT: return DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
     default: return DXGI_FORMAT_UNKNOWN;
     }
 }
 
-bool isDepth(VkFormat f) { return f == VK_FORMAT_D32_SFLOAT; }
+// vertex attribute formats: the scaled integer ones (D3D9 UBYTE4, SHORT2 / 4, UDEC3) have no DXGI twin, they are read as integers
+// (docs/research/dx12-game-port.md WP0: the vertex shader of such a draw converts)
+DXGI_FORMAT toDxgiVertex(VkFormat f) {
+    switch (f) {
+    case VK_FORMAT_R8G8B8A8_USCALED: return DXGI_FORMAT_R8G8B8A8_UINT;
+    case VK_FORMAT_R16G16_SSCALED: return DXGI_FORMAT_R16G16_SINT;
+    case VK_FORMAT_R16G16B16A16_SSCALED: return DXGI_FORMAT_R16G16B16A16_SINT;
+    case VK_FORMAT_A2B10G10R10_USCALED_PACK32: return DXGI_FORMAT_R10G10B10A2_UINT;
+    default: return toDxgi(f);
+    }
+}
+
+bool isDepth(VkFormat f) {
+    return f == VK_FORMAT_D16_UNORM || f == VK_FORMAT_D24_UNORM_S8_UINT || f == VK_FORMAT_D32_SFLOAT || f == VK_FORMAT_D32_SFLOAT_S8_UINT;
+}
 
 // the resource format of a texture: depth formats that are also sampled are typeless
 DXGI_FORMAT resourceFormat(VkFormat f, bool sampled) {
-    if (f == VK_FORMAT_D32_SFLOAT && sampled) return DXGI_FORMAT_R32_TYPELESS;
+    if (sampled) {
+        switch (f) {
+        case VK_FORMAT_D16_UNORM: return DXGI_FORMAT_R16_TYPELESS;
+        case VK_FORMAT_D24_UNORM_S8_UINT: return DXGI_FORMAT_R24G8_TYPELESS;
+        case VK_FORMAT_D32_SFLOAT: return DXGI_FORMAT_R32_TYPELESS;
+        case VK_FORMAT_D32_SFLOAT_S8_UINT: return DXGI_FORMAT_R32G8X24_TYPELESS;
+        default: break;
+        }
+    }
     return toDxgi(f);
 }
-DXGI_FORMAT srvFormat(VkFormat f) { return f == VK_FORMAT_D32_SFLOAT ? DXGI_FORMAT_R32_FLOAT : toDxgi(f); }
+DXGI_FORMAT srvFormat(VkFormat f) {
+    switch (f) {
+    case VK_FORMAT_D16_UNORM: return DXGI_FORMAT_R16_UNORM;
+    case VK_FORMAT_D24_UNORM_S8_UINT: return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+    case VK_FORMAT_D32_SFLOAT: return DXGI_FORMAT_R32_FLOAT;
+    case VK_FORMAT_D32_SFLOAT_S8_UINT: return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+    default: return toDxgi(f);
+    }
+}
+
+// The sampled view's component mapping: the texture's own swizzle (VkComponentMapping: L8 -> r r r 1, X8 -> .. 1) composed with what the DXGI
+// format needs of its own. A2R10G10B10 (D3D9: B in the low bits) is read as R10G10B10A2 with R and B swapped (sampled textures only: render
+// targets keep the logical order); B4G4R4A4 is D3D9's A4R4G4B4 as DXGI knows it, so Vulkan's compensating swizzle is dropped.
+UINT srvMapping(const TextureDesc& d) {
+    const VkComponentSwizzle id = VK_COMPONENT_SWIZZLE_IDENTITY;
+    VkComponentSwizzle user[4] = {d.swizzle.r, d.swizzle.g, d.swizzle.b, d.swizzle.a};
+    int inherent[4] = {0, 1, 2, 3};
+    if (d.format == VK_FORMAT_B4G4R4A4_UNORM_PACK16) {
+        const bool alphaOne = d.swizzle.a == VK_COMPONENT_SWIZZLE_ONE;
+        user[0] = user[1] = user[2] = id;
+        user[3] = alphaOne ? VK_COMPONENT_SWIZZLE_ONE : id;
+    } else if (d.format == VK_FORMAT_A2R10G10B10_UNORM_PACK32 && (d.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) == 0) {
+        inherent[0] = 2;
+        inherent[2] = 0;
+    }
+    UINT m[4];
+    for (int i = 0; i < 4; ++i) {
+        switch (user[i]) {
+        case VK_COMPONENT_SWIZZLE_ZERO: m[i] = D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_0; break;
+        case VK_COMPONENT_SWIZZLE_ONE: m[i] = D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1; break;
+        case VK_COMPONENT_SWIZZLE_R: m[i] = static_cast<UINT>(inherent[0]); break;
+        case VK_COMPONENT_SWIZZLE_G: m[i] = static_cast<UINT>(inherent[1]); break;
+        case VK_COMPONENT_SWIZZLE_B: m[i] = static_cast<UINT>(inherent[2]); break;
+        case VK_COMPONENT_SWIZZLE_A: m[i] = static_cast<UINT>(inherent[3]); break;
+        default: m[i] = static_cast<UINT>(inherent[i]); break;
+        }
+    }
+    return D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(m[0], m[1], m[2], m[3]);
+}
 
 D3D12_RESOURCE_STATES toState(VkImageLayout l) {
     switch (l) {
@@ -105,6 +197,11 @@ D3D12_BLEND toBlend(VkBlendFactor f) {
     case VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA: return D3D12_BLEND_INV_SRC_ALPHA;
     case VK_BLEND_FACTOR_DST_ALPHA: return D3D12_BLEND_DEST_ALPHA;
     case VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA: return D3D12_BLEND_INV_DEST_ALPHA;
+    case VK_BLEND_FACTOR_CONSTANT_COLOR:
+    case VK_BLEND_FACTOR_CONSTANT_ALPHA: return D3D12_BLEND_BLEND_FACTOR;
+    case VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR:
+    case VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA: return D3D12_BLEND_INV_BLEND_FACTOR;
+    case VK_BLEND_FACTOR_SRC_ALPHA_SATURATE: return D3D12_BLEND_SRC_ALPHA_SAT;
     default: return D3D12_BLEND_ONE;
     }
 }
@@ -243,7 +340,7 @@ class D3D12DeviceImpl;
 
 // a CPU-writable range of descriptors of a heap with a free list
 struct HeapAllocator {
-    std::uint32_t next = 1;  // 0 is reserved (the default descriptor)
+    std::uint32_t next = 1;  // 0 is reserved (the default descriptor; the texture heap reserves kReservedSlots)
     std::uint32_t limit = 0;
     std::vector<std::uint32_t> freeList;
     std::mutex mutex;
@@ -279,6 +376,9 @@ public:
     ID3D12Resource* resource() const { return resource_.Get(); }
     std::uint64_t gpuAddress() const override { return resource_->GetGPUVirtualAddress(); }
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
+    // the mesh arena's blocks: device memory that lives in GENERIC_READ (draws read it from any thread without barriers); the copy helpers bracket
+    // their writes with COPY_DEST; no UAV
+    bool arena = false;
 
 private:
     D3D12DeviceImpl& dev_;
@@ -306,6 +406,7 @@ public:
     bool split = false;
     // a swapchain back buffer (owned by the swapchain; no SRV)
     void adopt(ComPtr<ID3D12Resource> r) { resource_ = std::move(r); }
+    void release() { resource_.Reset(); }
     bool isArray() const { return !desc_.cube && desc_.type == VK_IMAGE_TYPE_2D && desc_.layers > 1; }
     // D3D12 subresource index of (mip, layer)
     UINT subresource(Subresource s) const { return s.mip + s.layer * desc_.mips; }
@@ -392,14 +493,11 @@ private:
 
 class D3DCommandList;
 
-class D3D12DeviceImpl final : public Device {
+class D3D12DeviceImpl final : public GameDevice {
 public:
-    ~D3D12DeviceImpl() override {
-        if (fenceEvent_ != nullptr) {
-            waitIdle();
-            CloseHandle(fenceEvent_);
-        }
-    }
+    ~D3D12DeviceImpl() override;
+#include "d3d12_game_decl.inc"
+
 
     bool create(const DeviceDesc& desc) {
         const AgilityRuntime& sdk = agility(desc);
@@ -536,7 +634,8 @@ public:
         samplerInc_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
         rtvInc_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
         dsvInc_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
-        srvAlloc_.limit = kHeapSize - kUavRing;
+        srvAlloc_.next = kReservedSlots;
+        srvAlloc_.limit = kHeapSize - kUavRing - kViewRing;
         samplerAlloc_.limit = kSamplerHeapSize;
         // entry 0 of the texture heap: a null SRV until the default texture below exists
         {
@@ -783,8 +882,15 @@ public:
     std::uint32_t nextDsv() { return dsvNext_++ % kDsvCount; }
     // a table of kStorageImages UAV descriptors in the ring at the end of the heap: its first index
     std::uint32_t nextUavTable() {
-        const std::uint32_t t = uavTable_++ % (kUavRing / rhi::kStorageImages);
-        return kHeapSize - kUavRing + t * rhi::kStorageImages;
+        const std::uint32_t perSlot = kUavRingPerSlot / rhi::kStorageImages;
+        const std::uint32_t t = uavTable_++ % perSlot;
+        return kHeapSize - kUavRing + (gameMode_ ? frameSlot_ : 0) * kUavRingPerSlot + t * rhi::kStorageImages;
+    }
+    // one transient SRV slot of this frame slot's share of the view ring
+    std::uint32_t nextViewSlot() {
+        const std::uint32_t perSlot = kViewRing / rhi::kFramesInFlight;
+        const std::uint32_t t = viewNext_++ % perSlot;
+        return kHeapSize - kUavRing - kViewRing + (gameMode_ ? frameSlot_ : 0) * perSlot + t;
     }
     ID3D12Device5* device5() { return device5_.Get(); }
     ComPtr<ID3D12Resource> scratch_;
@@ -820,7 +926,8 @@ public:
     ID3D12DescriptorHeap* srvHeap() { return srvHeap_.Get(); }
     ID3D12DescriptorHeap* samplerHeap() { return samplerHeap_.Get(); }
 
-    void waitIdle() {
+    void waitIdle() override;
+    void legacyWaitIdle() {
         const std::uint64_t v = ++fenceValue_;
         queue_->Signal(fence_.Get(), v);
         if (fence_->GetCompletedValue() < v) {
@@ -830,6 +937,7 @@ public:
     }
 
 private:
+#include "d3d12_game_priv.inc"
     bool createRootSignature() {
         D3D12_ROOT_PARAMETER params[3]{};
         params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -879,7 +987,7 @@ private:
     ComPtr<ID3D12DescriptorHeap> uavClearHeap_;  // one CPU-only UAV descriptor: the source of ClearUnorderedAccessView*
     UINT srvInc_ = 0, samplerInc_ = 0, rtvInc_ = 0, dsvInc_ = 0;
     HeapAllocator srvAlloc_, samplerAlloc_;
-    std::uint32_t rtvNext_ = 0, dsvNext_ = 0, uavTable_ = 0;
+    std::uint32_t rtvNext_ = 0, dsvNext_ = 0, uavTable_ = 0, viewNext_ = 0;
     DeviceCaps caps_;
     std::atomic<std::uint32_t> errors_{0};
     std::unique_ptr<Texture> defaultTexture_;  // the texture behind heap entry 0 (declared last: released first)
@@ -897,9 +1005,9 @@ bool D3DBuffer::create() {
     rd.SampleDesc = {1, 0};
     rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     // shader-writable (RWByteAddressBuffer, atomics): device memory only (upload / readback heaps cannot have UAVs)
-    const bool writable = (desc_.usage & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) != 0 && hp.Type == D3D12_HEAP_TYPE_DEFAULT;
+    const bool writable = (desc_.usage & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) != 0 && hp.Type == D3D12_HEAP_TYPE_DEFAULT && !arena;
     if (writable) rd.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-    state = hp.Type == D3D12_HEAP_TYPE_UPLOAD ? D3D12_RESOURCE_STATE_GENERIC_READ : hp.Type == D3D12_HEAP_TYPE_READBACK ? D3D12_RESOURCE_STATE_COPY_DEST : D3D12_RESOURCE_STATE_COMMON;
+    state = hp.Type == D3D12_HEAP_TYPE_UPLOAD || arena ? D3D12_RESOURCE_STATE_GENERIC_READ : hp.Type == D3D12_HEAP_TYPE_READBACK ? D3D12_RESOURCE_STATE_COPY_DEST : D3D12_RESOURCE_STATE_COMMON;
     if (FAILED(dev_.device()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, state, nullptr, IID_PPV_ARGS(&resource_)))) return false;
     if (desc_.name != nullptr) resource_->SetName(widen(desc_.name).c_str());
     if (hp.Type != D3D12_HEAP_TYPE_DEFAULT) {
@@ -929,6 +1037,16 @@ bool D3DBuffer::create() {
 }
 
 D3DBuffer::~D3DBuffer() {
+    if (dev_.gameMode()) {
+        // the GPU may still read it in the frames in flight: the resource and its heap slots go when the frame being recorded has completed
+        D3D12DeviceImpl* d = &dev_;
+        dev_.retire([d, r = std::move(resource_), a = slot_, b = slotRw_]() mutable {
+            d->srvAlloc().release(a);
+            d->srvAlloc().release(b);
+            r.Reset();
+        });
+        return;
+    }
     dev_.waitIdle();
     dev_.srvAlloc().release(slot_);
     dev_.srvAlloc().release(slotRw_);
@@ -975,7 +1093,7 @@ bool D3DTexture::create() {
             slot_ = dev_.srvAlloc().alloc();
             D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
             sd.Format = srvFormat(desc_.format);
-            sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sd.Shader4ComponentMapping = srvMapping(desc_);
             if (desc_.cube) {
                 sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
                 sd.TextureCube.MipLevels = desc_.mips;
@@ -1003,7 +1121,7 @@ std::uint32_t D3DTexture::heapSampledLayer(std::uint32_t layer) {
         const std::uint32_t slot = dev_.srvAlloc().alloc();
         D3D12_SHADER_RESOURCE_VIEW_DESC sd{};
         sd.Format = srvFormat(desc_.format);
-        sd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sd.Shader4ComponentMapping = srvMapping(desc_);
         sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
         sd.Texture2DArray.MipLevels = desc_.mips;
         sd.Texture2DArray.FirstArraySlice = layer;
@@ -1015,6 +1133,17 @@ std::uint32_t D3DTexture::heapSampledLayer(std::uint32_t layer) {
 }
 
 D3DTexture::~D3DTexture() {
+    if (!resource_) return;
+    if (dev_.gameMode()) {
+        D3D12DeviceImpl* d = &dev_;
+        std::vector<std::uint32_t> slots = layerSlots_;
+        if (!isArray()) slots.push_back(slot_);
+        dev_.retire([d, r = std::move(resource_), slots = std::move(slots)]() mutable {
+            for (std::uint32_t sl : slots) d->srvAlloc().release(sl);
+            r.Reset();
+        });
+        return;
+    }
     dev_.waitIdle();
     if (!isArray()) dev_.srvAlloc().release(slot_);
     for (std::uint32_t s : layerSlots_) dev_.srvAlloc().release(s);
@@ -1023,6 +1152,15 @@ D3DTexture::~D3DTexture() {
 // ---- acceleration structures (DXR 1.1) ---------------------------------------------------------------------------------------
 
 D3DAccel::~D3DAccel() {
+    if (dev_.gameMode()) {
+        D3D12DeviceImpl* d = &dev_;
+        dev_.retire([d, a = std::move(storage_), b = std::move(scratch_), slot = slot_]() mutable {
+            d->srvAlloc().release(slot);
+            a.Reset();
+            b.Reset();
+        });
+        return;
+    }
     dev_.waitIdle();
     dev_.srvAlloc().release(slot_);
 }
@@ -1138,6 +1276,19 @@ bool D3DSizeQuery::create() {
 class D3DCommandList final : public CommandList {
 public:
     D3DCommandList(D3D12DeviceImpl& dev, ID3D12GraphicsCommandList* list) : dev_(dev), list_(list) {}
+    // the game device's lists: a new command list segment (the bindings of the old one are gone)
+    void rebind(ID3D12GraphicsCommandList* list) {
+        list_ = list;
+        list4_.Reset();
+        resetBindings();
+    }
+    void resetBindings() {
+        pipeline_ = nullptr;
+        dirtyConstants_ = dirtyCb_ = dirtyTable_ = false;
+        constantCount_ = 0;
+        cbAddress_ = 0;
+        tableFirst_ = 0;
+    }
 
     void transition(Texture& texture, VkImageLayout layout) override {
         D3DTexture& t = static_cast<D3DTexture&>(texture);
@@ -1147,13 +1298,13 @@ public:
             t.lastLayout = VK_IMAGE_LAYOUT_UNDEFINED;
             return;
         }
-        transitionRange(t, toState(layout), 0, t.desc().mips);
+        transitionRange(t, stateFor(t, layout), 0, t.desc().mips);
         t.lastLayout = layout;
     }
     void transitionMips(Texture& texture, VkImageLayout layout, std::uint32_t baseMip, std::uint32_t mipCount) override {
         if (layout == VK_IMAGE_LAYOUT_UNDEFINED) return;
         D3DTexture& t = static_cast<D3DTexture&>(texture);
-        transitionRange(t, toState(layout), baseMip, mipCount);
+        transitionRange(t, stateFor(t, layout), baseMip, mipCount);
         t.lastLayout = layout;
     }
 
@@ -1179,7 +1330,7 @@ public:
     void transitions(std::span<const TextureTransition> list) override {
         for (const TextureTransition& t : list) {
             if (t.layout != VK_IMAGE_LAYOUT_UNDEFINED) {
-                transitionRange(*static_cast<D3DTexture*>(t.texture), toState(t.layout), t.baseMip, t.mipCount);
+                transitionRange(*static_cast<D3DTexture*>(t.texture), stateFor(*static_cast<D3DTexture*>(t.texture), t.layout), t.baseMip, t.mipCount);
                 static_cast<D3DTexture*>(t.texture)->lastLayout = t.layout;
             }
         }
@@ -1354,6 +1505,7 @@ public:
         bufferState(d, D3D12_RESOURCE_STATE_COPY_DEST);
         bufferState(s, D3D12_RESOURCE_STATE_COPY_SOURCE);
         list_->CopyBufferRegion(d.resource(), dstOffset, s.resource(), srcOffset, size);
+        if (d.arena) bufferState(d, D3D12_RESOURCE_STATE_GENERIC_READ);  // the arena's blocks live in GENERIC_READ
     }
     void copyBufferToTexture(Texture& dst, Buffer& src, std::uint64_t srcOffset, Subresource sub) override {
         D3DTexture& t = static_cast<D3DTexture&>(dst);
@@ -1456,9 +1608,40 @@ public:
             }
         }
     }
-    bool blitTexture(Texture&, Texture&, std::span<const TextureBlit>, VkFilter) override {
-        spdlog::error("d3d12: blitTexture is not implemented (DeviceCaps::textureBlit)");
-        return false;
+    // A scaled copy is a draw into the destination (D3D12 has no scaling copy): colour 2D destinations that can be render targets; a same-size, same-format
+    // copy of anything else is a CopyTextureRegion. The subresource states are restored by blitDraw / not touched by the copy path.
+    bool blitTexture(Texture& dstT, Texture& srcT, std::span<const TextureBlit> regions, VkFilter filter) override {
+        D3DTexture& d = static_cast<D3DTexture&>(dstT);
+        D3DTexture& s = static_cast<D3DTexture&>(srcT);
+        bool ok = true;
+        for (const TextureBlit& r : regions) {
+            const auto whole = [](const VkExtent3D& e) { return e.width == 0 && e.height == 0 && e.depth == 0; };
+            const VkExtent3D sm = mipExtent(s.desc(), r.src.mip), dm = mipExtent(d.desc(), r.dst.mip);
+            const VkExtent3D se = whole(r.srcExtent) ? sm : r.srcExtent, de = whole(r.dstExtent) ? dm : r.dstExtent;
+            const bool drawable = (d.desc().usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0 && d.desc().type == VK_IMAGE_TYPE_2D && !isDepth(d.desc().format) &&
+                                  s.desc().type == VK_IMAGE_TYPE_2D;
+            if (drawable) {
+                const float uv[4] = {static_cast<float>(r.srcOffset.x) / static_cast<float>(sm.width), static_cast<float>(r.srcOffset.y) / static_cast<float>(sm.height),
+                                     static_cast<float>(se.width) / static_cast<float>(sm.width), static_cast<float>(se.height) / static_cast<float>(sm.height)};
+                const D3D12_RECT dr{r.dstOffset.x, r.dstOffset.y, r.dstOffset.x + static_cast<LONG>(de.width), r.dstOffset.y + static_cast<LONG>(de.height)};
+                ok = dev_.blitDraw(list_, d, r.dst, dr, s, r.src, uv, filter == VK_FILTER_LINEAR) && ok;
+                resetBindings();
+                dev_.invalidateMainRec();
+            } else if (se.width == de.width && se.height == de.height && s.desc().format == d.desc().format) {
+                TextureCopy c;
+                c.src = r.src;
+                c.dst = r.dst;
+                c.srcOffset = r.srcOffset;
+                c.dstOffset = r.dstOffset;
+                c.extent = se;
+                if (isDepth(s.desc().format) && (se.width != sm.width || se.height != sm.height)) c.extent = {0, 0, 0};
+                copyTexture(dstT, srcT, std::span<const TextureCopy>(&c, 1));
+            } else {
+                spdlog::error("d3d12: blitTexture {}x{} -> {}x{} of format {} is not supported", se.width, se.height, de.width, de.height, static_cast<int>(s.desc().format));
+                ok = false;
+            }
+        }
+        return ok;
     }
 
     // Acceleration structure builds (ID3D12GraphicsCommandList4). The inputs (vertex / index / instance buffers) must be in a shader read state: device
@@ -1586,6 +1769,11 @@ public:
     void endRegion() override {}
 
 private:
+    // GENERAL is the UAV state for textures with storage usage; one without (a mip chain blitted onto itself) stays in COMMON
+    static D3D12_RESOURCE_STATES stateFor(const D3DTexture& t, VkImageLayout layout) {
+        if (layout == VK_IMAGE_LAYOUT_GENERAL && (t.desc().usage & VK_IMAGE_USAGE_STORAGE_BIT) == 0) return D3D12_RESOURCE_STATE_COMMON;
+        return toState(layout);
+    }
     // mip levels [base, base + count) (all layers) to state `to`; a whole texture keeps one state, levels that differ are tracked in mipStates. The
     // same state again is a UAV barrier for UNORDERED_ACCESS (the writes become visible), nothing otherwise.
     void transitionRange(D3DTexture& t, D3D12_RESOURCE_STATES to, std::uint32_t base, std::uint32_t count) {
@@ -1641,7 +1829,7 @@ private:
     }
     // device-heap buffers move between their states (copy, shader, vertex / index / indirect source); upload / readback heaps keep theirs
     void bufferState(D3DBuffer& b, D3D12_RESOURCE_STATES to) {
-        if (b.desc().memory != Memory::Device || b.state == to) return;
+        if ((b.desc().memory != Memory::Device && !b.arena) || b.state == to) return;
         D3D12_RESOURCE_BARRIER rb{};
         rb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         rb.Transition = {b.resource(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, b.state, to};
@@ -1756,6 +1944,9 @@ private:
     bool vsync_ = true;
 };
 
+#include "d3d12_game_present.inc"
+#include "d3d12_game_impl.inc"
+
 std::unique_ptr<Swapchain> D3D12DeviceImpl::createSwapchain(const SwapchainDesc& desc) {
     auto s = std::make_unique<D3DSwapchain>(*this);
     if (!s->create(desc)) return nullptr;
@@ -1795,6 +1986,48 @@ void D3D12DeviceImpl::submitAndWait(const std::function<void(CommandList&)>& rec
 }
 
 }  // namespace
+
+std::unique_ptr<GameDevice> createD3D12GameDevice(const GameDeviceOptions& options) {
+    auto d = std::make_unique<D3D12DeviceImpl>();
+    if (!d->createGame(options)) return nullptr;
+    return d;
+}
+
+std::vector<AdapterInfo> enumerateD3D12Adapters() {
+    std::vector<AdapterInfo> out;
+    ComPtr<IDXGIFactory2> factory;
+    if (FAILED(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)))) return out;
+    ComPtr<IDXGIFactory6> f6;
+    factory.As(&f6);
+    for (UINT i = 0;; ++i) {
+        ComPtr<IDXGIAdapter1> a;
+        const HRESULT hr = f6 ? f6->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&a)) : factory->EnumAdapters1(i, &a);
+        if (FAILED(hr)) break;
+        DXGI_ADAPTER_DESC1 ad{};
+        a->GetDesc1(&ad);
+        if ((ad.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0) continue;
+        AdapterInfo info;
+        for (const wchar_t* c = ad.Description; *c != 0; ++c) info.name += static_cast<char>(*c < 128 ? *c : '?');
+        info.vendorId = ad.VendorId;
+        info.deviceId = ad.DeviceId;
+        info.vramMB = ad.DedicatedVideoMemory >> 20;
+        info.discrete = ad.DedicatedVideoMemory > (512ull << 20);
+        info.usable = SUCCEEDED(D3D12CreateDevice(a.Get(), D3D_FEATURE_LEVEL_12_0, __uuidof(ID3D12Device), nullptr));
+        out.push_back(std::move(info));
+    }
+    return out;
+}
+
+bool d3d12Usable(int adapter, std::string* reason) {
+    D3D12DeviceImpl probe;
+    DeviceDesc dd;
+    dd.backend = Backend::D3D12;
+    dd.adapter = adapter;
+    dd.name = "probe";
+    const bool ok = probe.create(dd);
+    if (!ok && reason != nullptr) *reason = "no adapter with feature level 12_0, Shader Model 6.6 and resource binding tier 3 (see the d3d12: lines above)";
+    return ok;
+}
 
 std::unique_ptr<Device> createD3D12Device(const DeviceDesc& desc) {
     auto d = std::make_unique<D3D12DeviceImpl>();

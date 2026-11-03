@@ -276,6 +276,8 @@ bool Device::create(const DeviceOptions& options) {
     go.adapter = options.adapter;
     go.allowRayTracing = options.allowRayTracing;
     go.frameGenQueues = options.frameGenQueues;
+    shader::setVaryingFillers(options.backend == rhi::Backend::D3D12);
+    wp0_.on = GetEnvironmentVariableA("RVK_WP0", nullptr, 0) != 0;
     game_ = rhi::createGameDevice(options.backend, go);  // the backend seam (rhi/game_device.h): owns every API object
     if (!game_) {
         spdlog::error("d3d9: the {} game device could not be created", rhi::backendName(options.backend));
@@ -1049,6 +1051,7 @@ void Device::present() {
     } presentEnd{*this};
     endRendering();
     ++stats_.frames;
+    if (wp0_.on && stats_.frames % 600 == 0) wp0Log();
     phases_.endFrame();
     firings_.endFrame();
     shadowDepthMaps_ = 0;
@@ -1280,7 +1283,14 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
     const auto cacheFile = options_.cacheDir.empty() ? std::filesystem::path()
                                                      : options_.cacheDir / "spirv" / std::format("{:016x}.spv", hash);
     enqueueShaderJob(s.get(), [this, s, done, text = std::move(hlsl.hlsl), cacheFile, hash] {
+        rhi::ShaderModule module = rhi::ShaderModule::None;
+        const bool dx12 = options_.backend == rhi::Backend::D3D12;
+        if (dx12) {
+            ++shadersCompiled_;
+            module = dxilModule(s->stage, text, "translated.hlsl", cacheFile, moduleLabel(game_->namesEnabled(), s->stage, hash, {}), hash);
+        }
         std::vector<std::uint32_t> spirv;
+        if (!dx12)
         if (!cacheFile.empty()) {
             std::ifstream in(cacheFile, std::ios::binary | std::ios::ate);
             if (in) {
@@ -1290,7 +1300,7 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
                 in.read(reinterpret_cast<char*>(spirv.data()), static_cast<std::streamsize>(spirv.size() * 4));
             }
         }
-        if (spirv.empty()) {
+        if (!dx12 && spirv.empty()) {
             ++shadersCompiled_;
             auto compiled = shader::compileHlsl(s->stage, text);
             if (!compiled.ok()) {
@@ -1311,7 +1321,7 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
                 std::filesystem::rename(tmp, cacheFile, ec);  // (a half-written file is never a hit)
             }
         }
-        const rhi::ShaderModule module = game_->createShaderModule({.spirv = spirv}, moduleLabel(game_->namesEnabled(), s->stage, hash, {}).c_str());
+        if (!dx12) module = game_->createShaderModule({.spirv = spirv}, moduleLabel(game_->namesEnabled(), s->stage, hash, {}).c_str());
         if (module != rhi::ShaderModule::None) {
             {
                 const std::lock_guard lock(shaderMutex_);
@@ -1328,6 +1338,47 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
         }
     });
     return s;
+}
+
+// The DX12 backend's shader module of generated HLSL: DXIL (SM 6.6) through DXC, cached next to the SPIR-V cache (`.dxo`), never SPIR-V
+rhi::ShaderModule Device::dxilModule(shader::Stage stage, const std::string& text, std::string_view name, const std::filesystem::path& spvCacheFile,
+                                     const std::string& label, std::uint64_t hash) {
+    std::vector<std::uint8_t> dxil;
+    std::filesystem::path cacheFile;
+    if (char dump[MAX_PATH]; GetEnvironmentVariableA("RVK_DUMP_HLSL", dump, MAX_PATH) != 0) {  // diagnostics: the generated text of every module
+        std::error_code ec;
+        std::filesystem::create_directories(dump, ec);
+        std::ofstream(std::filesystem::path(dump) / std::format("{:016x}_{}.hlsl", hash, stage == shader::Stage::Vertex ? "vs" : "ps")) << text;
+    }
+    if (!spvCacheFile.empty()) {
+        cacheFile = spvCacheFile.parent_path().parent_path() / "dxil" / spvCacheFile.filename();
+        cacheFile.replace_extension(".dxo");
+        std::ifstream in(cacheFile, std::ios::binary | std::ios::ate);
+        if (in) {
+            dxil.resize(static_cast<std::size_t>(in.tellg()));
+            in.seekg(0);
+            in.read(reinterpret_cast<char*>(dxil.data()), static_cast<std::streamsize>(dxil.size()));
+        }
+    }
+    if (dxil.empty()) {
+        auto compiled = shader::compileHlslDxil(stage, text, name);
+        if (!compiled.ok()) {
+            spdlog::error("d3d9: shader {:016x} does not compile to DXIL: {}", hash, compiled.log.substr(0, 1500));
+            return rhi::ShaderModule::None;
+        }
+        dxil = std::move(compiled.bytes);
+        if (!cacheFile.empty()) {
+            std::error_code ec;
+            std::filesystem::create_directories(cacheFile.parent_path(), ec);
+            const auto tmp = std::filesystem::path(cacheFile).concat(".tmp");
+            {
+                std::ofstream out(tmp, std::ios::binary);
+                out.write(reinterpret_cast<const char*>(dxil.data()), static_cast<std::streamsize>(dxil.size()));
+            }
+            std::filesystem::rename(tmp, cacheFile, ec);
+        }
+    }
+    return game_->createShaderModule({.dxil = dxil}, label.empty() ? nullptr : label.c_str());
 }
 
 void Device::enqueueShaderJob(Shader* shader, std::function<void()> job) {
@@ -1461,6 +1512,9 @@ rhi::ShaderModule Device::uberModule(const Shader& s, const MaterialSource& src,
             ? std::filesystem::path()
             : options_.cacheDir / "spirv" /
                   std::format("{:016x}_{}_u{:08x}.spv", s.hash, tag, static_cast<std::uint32_t>(shader::uberHlslHash() ^ (shader::uberHlslHash() >> 32)));
+    if (options_.backend == rhi::Backend::D3D12) {
+        return dxilModule(shader::Stage::Pixel, glsl, "uber.hlsl", cacheFile, game_->namesEnabled() ? moduleLabel(true, s.stage, s.hash, std::format("{} {} {}", src.file, src.entry, tag)) : std::string(), s.hash);
+    }
     if (!cacheFile.empty()) {
         std::ifstream in(cacheFile, std::ios::binary | std::ios::ate);
         if (in) {
@@ -1510,6 +1564,9 @@ rhi::ShaderModule Device::variantModule(const Shader& s, const shader::Translate
     std::vector<std::uint32_t> spirv;
     const auto cacheFile = options_.cacheDir.empty() ? std::filesystem::path()
                                                      : options_.cacheDir / "spirv" / std::format("{:016x}_{}_h{:08x}.spv", s.hash, tag, static_cast<std::uint32_t>(shader::hlslIncludesHash() ^ (shader::hlslIncludesHash() >> 32)));
+    if (options_.backend == rhi::Backend::D3D12) {
+        return dxilModule(dec.program.version.stage, glsl.hlsl, "translated.hlsl", cacheFile, moduleLabel(game_->namesEnabled(), s.stage, s.hash, tag), s.hash);
+    }
     if (!cacheFile.empty()) {
         std::ifstream in(cacheFile, std::ios::binary | std::ios::ate);
         if (in) {

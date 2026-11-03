@@ -11,6 +11,7 @@
 #include "shader/embedded.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <format>
@@ -18,6 +19,11 @@
 #include <set>
 
 namespace rvk::shader {
+
+static std::atomic<bool> g_varyingFillers{false};
+void setVaryingFillers(bool on) { g_varyingFillers.store(on); }
+bool varyingFillers() { return g_varyingFillers.load(); }
+
 namespace {
 
 constexpr const char* kComp = "xyzw";
@@ -831,29 +837,42 @@ private:
             if (!opt_.extraInputs.empty()) g += "\n";
             g += "};\n";
             g += "struct RvkVsOut {\n    float4 position : SV_Position;\n";
-            auto varying = [&](std::uint32_t loc) { g += std::format("    [[vk::location({})]] float4 rvk_out{} : VARY{};\n", loc, loc, loc); };
+            std::set<std::uint32_t> locs;
             if (major_ >= 3) {
                 for (const auto& d : p_.outputs) {
-                    if (const std::uint32_t loc = abi::varyingLocation(d.usage, d.usageIndex); loc != abi::kInvalidLocation) varying(loc);
-                    if (d.usage == Usage::PSize) g += "    [[vk::builtin(\"PointSize\")]] float rvk_psize : PSIZE;\n";
+                    if (const std::uint32_t loc = abi::varyingLocation(d.usage, d.usageIndex); loc != abi::kInvalidLocation) locs.insert(loc);
+                    if (d.usage == Usage::PSize && !varyingFillers()) g += "    [[vk::builtin(\"PointSize\")]] float rvk_psize : PSIZE;\n";
                 }
             } else {
-                for (auto i : attrOut_) varying(abi::varyingLocation(Usage::Color, i));
-                for (auto i : outputs_) varying(abi::varyingLocation(Usage::TexCoord, i));
-                if (rastOut_.contains(1)) varying(abi::varyingLocation(Usage::Fog, 0));
-                if (rastOut_.contains(2)) g += "    [[vk::builtin(\"PointSize\")]] float rvk_psize : PSIZE;\n";
+                for (auto i : attrOut_) locs.insert(abi::varyingLocation(Usage::Color, i));
+                for (auto i : outputs_) locs.insert(abi::varyingLocation(Usage::TexCoord, i));
+                if (rastOut_.contains(1)) locs.insert(abi::varyingLocation(Usage::Fog, 0));
+                if (rastOut_.contains(2) && !varyingFillers()) g += "    [[vk::builtin(\"PointSize\")]] float rvk_psize : PSIZE;\n";
             }
+            // D3D12 links the stages by register: the signature is dense (0..max) on both sides, so a pixel shader that reads fewer / other varyings
+            // than the vertex shader writes still lands on the same registers (zero-initialised fillers)
+            if (varyingFillers() && !locs.empty()) {
+                for (std::uint32_t l = 0; l <= *locs.rbegin(); ++l) locs.insert(l);
+            }
+            for (const std::uint32_t loc : locs) g += std::format("    [[vk::location({})]] float4 rvk_out{} : VARY{};\n", loc, loc, loc);
             g += opt_.extraOutputs;
             if (!opt_.extraOutputs.empty()) g += "\n";
             g += "};\n";
         } else {
             g += "struct RvkPsIn {\n    float4 rvk_fragCoord : SV_Position;\n";
+            std::map<std::uint32_t, std::string> lines;  // by location: the register order of a D3D12 signature is the declaration order
             for (const auto& d : p_.inputs) {
                 const std::uint32_t loc = psInputLocation(d);
                 if (loc == abi::kInvalidLocation) continue;
                 const std::string name = d.reg.type == RegType::Addr ? std::format("t{}", d.reg.index) : std::format("v{}", d.reg.index);
-                g += std::format("    [[vk::location({})]] {}float4 {} : VARY{};\n", loc, d.centroid ? "centroid " : "", name, loc);
+                lines[loc] = std::format("    [[vk::location({})]] {}float4 {} : VARY{};\n", loc, d.centroid ? "centroid " : "", name, loc);
             }
+            if (varyingFillers() && !lines.empty()) {
+                for (std::uint32_t l = 0; l < lines.rbegin()->first; ++l) {
+                    if (!lines.contains(l)) lines[l] = std::format("    [[vk::location({})]] float4 rvk_pad{} : VARY{};\n", l, l, l);
+                }
+            }
+            for (const auto& [loc, text] : lines) g += text;
             if (usesFace_) g += "    bool rvk_front : SV_IsFrontFace;\n";
             g += opt_.extraInputs;
             if (!opt_.extraInputs.empty()) g += "\n";
@@ -1007,7 +1026,7 @@ private:
                     if (d.usage == Usage::Position && d.usageIndex == 0) {
                         pos = std::format("o{}", d.reg.index);
                     } else if (d.usage == Usage::PSize) {
-                        m += std::format("    rvk_out.rvk_psize = o{}.x;\n", d.reg.index);
+                        if (!varyingFillers()) m += std::format("    rvk_out.rvk_psize = o{}.x;\n", d.reg.index);
                     } else if (const std::uint32_t loc = abi::varyingLocation(d.usage, d.usageIndex); loc != abi::kInvalidLocation) {
                         m += std::format("    rvk_out.rvk_out{} = o{};\n", loc, d.reg.index);
                     }
@@ -1023,7 +1042,7 @@ private:
                     m += std::format("    rvk_out.rvk_out{} = (float4)oFog.x;\n", abi::varyingLocation(Usage::Fog, 0));
                 }
                 if (rastOut_.contains(2)) {
-                    m += "    rvk_out.rvk_psize = oPts.x;\n";
+                    if (!varyingFillers()) m += "    rvk_out.rvk_psize = oPts.x;\n";
                 }
             }
             m += std::format("    float4 rvk_pos = {};\n", pos);

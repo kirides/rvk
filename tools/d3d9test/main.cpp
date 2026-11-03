@@ -1,7 +1,7 @@
 // rvk_d3d9test: checks d3d9::Device against Direct3D 9 semantics, off-screen with validation on.
 //
 //   rvk_d3d9test [--validation | --no-validation] [--backend vulkan|d3d12] [--keep-images] [--present-test [0]]
-// --backend d3d12 is a clean SKIP (exit 0) until the D3D12 game device exists (docs/research/dx12-game-port.md WP3 / WP4).
+// --backend d3d12 runs the same cases on the D3D12 game device (docs/research/dx12-game-port.md WP3 / WP4).
 //
 // Every case renders into the 64x64 back buffer with D3D9-style calls (states, streams, D3DX-assembled shaders), reads the
 // pixels back (readBackBuffer) and compares them with what D3D9 produces. Exit code 0 = all pass and no validation errors.
@@ -801,10 +801,6 @@ int main(int argc, char** argv) {
         }
         if (a == "--keep-images") g_keepImages = true;
         if (a == "--present-test") return presentTest(i + 1 >= argc || std::string(argv[i + 1]) != "0");
-    }
-    if (g_backend == rhi::Backend::D3D12) {
-        std::printf("SKIP: the D3D12 game device does not exist yet (docs/research/dx12-game-port.md WP3 / WP4); run with --backend vulkan\n");
-        return 0;
     }
     if (!devtools::D3DX::get().available()) {
         std::printf("d3dx9_39.dll not available\n");
