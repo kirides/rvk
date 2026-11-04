@@ -785,3 +785,5 @@ Vulkan 7.04 -> 6.56 ms, D3D12 7.32 -> 6.69 ms (3 interleaved pairs each); with G
 Savegame, lod 2x, Vulkan Full, `-CpuProfile -Perf` (`-Perf` CPU 6.38 ms engine + HAL). Composition + `issue()` per group: trees 1.8 ms (655 batches / frame, 2.9 instances each), static meshes 0.84, shadow views ~0.5, sky cube + dome 0.58,
 vegetation 0.40 (composition 0.16 measured; the device path is shared with Wrapper), effects / particles / decals / alpha / actors ~0.9. A tree-batch merge (consecutive batches of an op as one multi-range draw) finds -10 % (z) / -28 % (solid, equal
 light list) / 0 % (equal illumination object) draws: every tree has its own illumination object, so only a picture-changing merge helps. No code change; gpu-scene.md 9.3 says why a GPU-driven consumer needs the whole persistent-window design (trees first).
+
+Update (2026-11-04, gpu-scene.md 9.4): ceiling experiments for a GPU-driven tree path: one draw per tree op (picture changing) -0.98 ms; exact merge (same light list / limit; what a draw index + per-instance light fetch can do) -0.17 ms (1,290 -> 1,245 draws).

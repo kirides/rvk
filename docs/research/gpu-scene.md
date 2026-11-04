@@ -217,3 +217,27 @@ pack / object-motion consumers: the rewrite of retained-signals.md 12, not one s
 **Next, by measured payoff:** (a) trees as a unit (~1.8 ms): per-instance persistent record {world, tree values, LOD alpha} + per-instance light block updated when the light-set poll changes, one indirect draw per (type, pass), lighting fetched by
 instance id (the SpeedTree VS already indexes its instance rows by the instance-rate stream; D3D12 the same through a per-instance vertex stream, avoiding `SV_StartInstanceLocation`); needs the translator ABI + both RHI backends. (b) static + cascades on
 the same blocks (0.8 + 0.5 ms). (c) vegetation: persistent per-node uploads of the raw entries (0.1 - 0.16 ms). (d) M3 last. Nothing was started: no code, setting or ABI changed (the diagnostics above were reverted), gates unchanged (tree = main 133c36f).
+
+### 9.4 Trees as one GPU-driven unit: the ceiling, measured (2026-11-04, fifth agent, after the order to build it)
+
+Before building the translator / RHI work for the tree path, its CPU ceiling was measured with a timing-only experiment in `composeTree` (`drawBatch` dropped for chosen batches, the instance rows still written, the pictures wrong; reverted; Vulkan Full,
+player defaults, savegame lod 2x, `-Perf` CPU engine + HAL, last 4 windows of each 60 s run, interleaved pairs; base = unmodified):
+
+| experiment | draws / frame | CPU ms | vs base |
+|---|---|---|---|
+| base | 1,277 - 1,290 | 6.39 / 6.35 / 6.55 / 6.38 (mean 6.42) | |
+| **one draw per tree op** (every batch after the first dropped = a perfect "all instances of the op in one indirect draw", per-instance light data free) | 785 | 5.39 / 5.50 (mean 5.44) | **-0.98 ms** |
+| **exact merge only** (a batch is dropped when it has the same light list, no per-object light flags and fits the limit with the previous drawn one; z: within the limit) = what a draw-index + per-instance light fetch can do without changing a pixel | 1,240 - 1,247 | 6.30 / 6.30 (mean 6.30) | **-0.17 ms** |
+
+(An earlier attempt with `getenv` measured nothing because the proxy sets its `environment` entries with `SetEnvironmentVariable`; `GetEnvironmentVariableA` is needed.)
+
+Reading: of the ~650 tree draws per frame only ~45 (3.5 %) are mergeable without changing the picture. The rest differ in the **light list** (the engine's batch is cut when the list pointer differs; different lists = different pixel-shader
+permutations / pass counts: `psIdx = lights + 4 (kind + 3 (combi + 2 sun))`, GetPasses runs lights in passes of up to 3), or carry per-object light flags (static SH / lights, `alone`), or in the z pass hit the 8-bit limit as often as the strip split. A
+per-instance light block fetched in the pixel shader (the design of 9.3) can only replace the register *values*, not the permutation or the number of passes, so it cannot join those draws. The -0.98 ms of the "one draw per op" arm is the
+price of ignoring lighting differences (a different, non-identical picture); getting it exactly needs one tree pixel shader that loops over a per-instance light array = a new tree ubershader whose results are not bit-equal to the engine's
+permutations (the `debug.ubershader` class of work, shader-permutations.md), not an ABI step on the translated shaders.
+
+**Verdict (hard, with numbers):** the GPU-driven tree consumer of 9.3 (persistent per-instance records + per-instance light block + translator prologues + draw index on both backends) has an exact-picture ceiling of **-0.17 ms** on
+Full CPU (6.42 -> 6.30), i.e. it cannot move Full - Wrapper (1.75) toward 0.5; its ABI / RHI / DXIL / verify cost is not justified. The same holds for static meshes and cascades by the same mechanism (their draws are cut by the same light-list /
+pass rules; shadow views and z passes carry no lights but are cut by limit / state changes: 160 draws x 1.3 us = 0.2 ms ceiling total). The only measured lever with real size is a *new ubershader* for lit solid tree / static draws with per-instance
+lights (-0.98 ms for trees at the cost of picture identity), which needs the user's decision to trade bit-identity with the engine's permutations for CPU.
