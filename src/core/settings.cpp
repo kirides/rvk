@@ -2289,12 +2289,13 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .tab = kTabDebug,
         .description = "Full mode: the finished packet of a composed static-mesh / tree draw of the main view is kept and replayed while its description is unchanged "
                        "(prepareDraw and most state setters skipped). 0 off, 1 on, 2 on + every 10th frame the fresh packet is compared with the retained one, "
-                       "3 verify every frame (rvk.log `native: packet cache`, DIFFERING must stay 0). Off while a compare, the frame tap or coverage is on, and per draw "
-                       "while an enhancement needs prepareDraw (RT scene, replacers, G-buffer / GI variants, tint, upscaling jitter).",
+                       "3 verify every frame (rvk.log `native: packet cache`, DIFFERING must stay 0), 4 = on without retaining the variant draws (GI / material pack / billboard fade: the "
+                       "behaviour before retained-signals.md 13, A/B). Off while a compare, the frame tap or coverage is on, and per draw "
+                       "while an enhancement needs prepareDraw (replacers, G-buffer variants, tint, upscaling jitter).",
         .type = Type::Int,
         .defaultValue = 1,
         .min = 0,
-        .max = 3,
+        .max = 4,
         .flags = Flag::NoAB | Flag::Debug,
     });
     r.nativeGpuScene = &reg.add({

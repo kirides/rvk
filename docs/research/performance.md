@@ -773,3 +773,9 @@ Default 1 (Full mode only; auto-off while a compare / tap / coverage is on and p
 ### 24.9 Packet cache stage 4 and clean timings (2026-11-04)
 
 Shadow-view ops joined the cache; refusal reasons are logged. Clean player-default timings, 3 interleaved pairs: Vulkan 6.672 -> 6.254 ms (-0.42), D3D12 6.939 -> 6.520 (-0.42); Wrapper 4.50 / 4.84, so Full - Wrapper 1.75 / 1.68 ms. `native.retained` + the cache: no extra gain (stage 3 no-go). Details and the floor: engine-frame/retained-signals.md 11.
+
+## 25. Variant draws in the packet cache (2026-11-04)
+
+The player defaults (material pack present) took the lit solid draws out of the packet cache; the variant decision is now a cached, re-validated property of the packet (retained-signals.md 13): replayed share ~32 % -> 99.9 %, Full CPU
+Vulkan 7.04 -> 6.56 ms, D3D12 7.32 -> 6.69 ms (3 interleaved pairs each); with GI + AO -0.47 ms, with upscaling on top -0.89 ms (jitter is patched at replay). The material pack costs +0.57 ms in Wrapper and +0.25 ms in Full (the earlier
+"7.2 vs the documented 6.25" was the pack: Full without it 6.3). `native.packet_cache=4` = the old behaviour for A/B. The remaining Full - Wrapper gap is the composition (flat profile, ~1.2 us per op); see retained-signals.md 13.

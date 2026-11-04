@@ -865,7 +865,30 @@ public:
         scene::Phase phase;
         const Shader* vs = nullptr;
         const Shader* ps = nullptr;
-        rhi::ShaderModule vsModule = rhi::ShaderModule::None, fsModule = rhi::ShaderModule::None;
+        rhi::ShaderModule vsModule = rhi::ShaderModule::None, fsModule = rhi::ShaderModule::None;  // vsModule: the one drawn with (the engine's, or the billboards' fade variant); fsModule: the engine's
+        // the enhancement variant decision of prepareDraw and what it was derived from (retained-signals.md 13): replayBuild re-derives the cheap inputs
+        // (settings, the ambient registers, the variant's build state) and refuses the replay when the decision would differ
+        struct Variant {
+            bool gate = false;       // (giDraws_.on || the material pack) when the packet was made
+            // camera jitter (upscaling): the sampler indexes of the plain and the LOD-biased state of each sampled stage, the bias they were made for
+            float biasFor = 0.0f;
+            std::uint32_t smpPlain[16] = {}, smpBias[16] = {};
+            bool gbufGate = false;   // the G-buffer was on
+            bool gbufStatic = false; // gbufferEligible without its ambient test
+            bool gbufWanted = false; // ... the G-buffer's material pass took the draw (eligible, lit, in the G-buffer's rendering scope)
+            bool drawn = false;      // the draw uses the pack word (giDraw || the G-buffer write)
+            bool giOn = false, replaceLightmaps = false, pack = false;
+            bool staticOk = false;   // giEligible without its ambient-register test (phase, water, blend, outputs: fixed by the draw's description)
+            bool wanted = false;     // the draw asked for the GI / pack variant (gate && staticOk && the ambient registers non-zero)
+            bool giDraw = false;     // ... and drew with it
+            rhi::ShaderModule fsAsked = rhi::ShaderModule::None;  // the variant module the draw was offered (None = not built yet)
+            std::uint32_t minEnd = 0;  // the pixel window's minimum end (uploadConstants)
+            bool packStamped = false;           // packStamp / packTex / packTexSlot are valid (the pack has a change stamp)
+            std::uint32_t packStamp = 0;
+            const Texture* packTex = nullptr;   // the pack word's map (null: the word has none)
+            std::uint32_t packTexSlot = 0;      // its bindless slot when the word was made
+            rhi::ShaderModule vsUsed = rhi::ShaderModule::None;  // the vertex module drawn with (the billboards' fade variant while lod.trees != 1)
+        } v;
         std::uint32_t streamMask = 0;
         Buffer::Binding stream[4]{};
         Buffer::Binding ib{};
@@ -896,11 +919,15 @@ public:
     bool replayMatches(const CachedDraw& cached, const CachedDraw& fresh, const ReplayInputs& in, bool& valid, std::string& why);
     // the consumers of prepareDraw's results are idle for this draw (observers, replacers, variants, tint, taps, logging)
     bool replayAllowed(const CachedDraw& c) const;
+    // the last replayDraw was refused because the packet is out of date (shaders, variants, bindings, textures): remake it from a normal draw
+    bool replayWasStale() const { return replayStale_; }
+    // false = draws that took an enhancement variant (GI / material pack word / billboard fade module) are not retained (the behaviour before the variant packets; A/B)
+    void setRetainVariants(bool on) { retainVariants_ = on; }
     struct ReplayStats {
         std::uint64_t replayed = 0, refused = 0, captured = 0, notCaptured = 0;
-        // why a replay was refused: shaders / modules, phase, consumers, env, jitter, stream binding, index binding, texture, observer capture, no scope
+        // why a replay was refused: shaders / modules, phase, consumers, env, jitter, stream binding, index binding, texture, observer capture, no scope, variant decision, sky cube
         std::uint64_t why[12] = {};
-        std::uint64_t ncWhy[12] = {};  // capture refused by prepareDraw: replaced, tint, captureDraw, gi, gbuf write, custom, not indexed, replacement, uber, module, request
+        std::uint64_t ncWhy[12] = {};  // capture refused by prepareDraw: replaced, tint, captureDraw, variant not ready, gbuf write, custom, not indexed, replacement, uber, module, request
     } replayStats;
     // resources report what they copy to the GPU (render thread)
     void countUpload(bool texture, std::uint64_t bytes) {
@@ -1063,6 +1090,8 @@ public:
     };
     using PackProvider = std::function<PackHit(const draws::Tag&)>;
     void setPackProvider(PackProvider p) { packProvider_ = std::move(p); }
+    // the pack's change stamp (any value change = a lookup may answer differently): a retained packet keeps its pack word while it and the map's slot are unchanged
+    void setPackStamp(std::function<std::uint32_t()> f) { packStamp_ = std::move(f); }
     // test switch (materials.alternate): while set the pack's variants are not used at all (the engine's own shaders draw), as without a pack
     void setPackBypass(bool on) { packBypass_ = on; }
     std::uint64_t giDrawsThisInterval() const { return giDrawCount_; }
@@ -1222,11 +1251,16 @@ private:
     bool prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom);
     // GI variant eligibility of the current draw (prepareDraw): the engine set its ambient constants (a first pass)
     bool giEligible(const scene::Phase& phase) const;
+    bool giStaticEligible(const scene::Phase& phase) const;  // giEligible without the ambient registers' test
+    bool ambientLit() const;                                  // ... that test: the ambient semantic's 7 registers hold something
+    std::uint32_t packWord(CachedDraw::Variant* note = nullptr);                                  // the material pack's word for the current tag (0 = none), uploads its map when needed
     // the G-buffer: whether the current targets / phase are its scope (first main view, solid pass, the scene HDR target)
     bool gbufferTargetsMatch() const;
     bool gbufferScope() const { return gbuf_.normal != nullptr && gbufArmed_ && gbufferTargetsMatch(); }
     // a G-buffer material draw: the material pixel shader's Gbuffer variant applies (opaque or alpha-over, depth tested)
     bool gbufferEligible(const scene::Phase& phase, draws::Kind kind) const;
+    bool gbufferStaticEligible(const scene::Phase& phase, draws::Kind kind) const;  // ... without the ambient registers' test
+    bool gbufferLit() const;                                                        // ... that test
     BlendAttachment attachmentBlend(std::uint32_t index) const;
     void variantWorker();
     void stopVariantWorker();
@@ -1464,8 +1498,11 @@ private:
     // packet retention: the capture in progress and what prepareDraw hands to it
     CachedDraw* capture_ = nullptr;
     ReplaceQuery lastQuery_;
+    CachedDraw::Variant lastVariant_;
     bool skipObservers_ = false;  // replayDraw already ran the observers for this draw and then refused it
     bool captureOk_ = false;
+    bool replayStale_ = false;
+    bool retainVariants_ = true;
     shader::abi::DrawBlock lastBlock_{};
     draws::Kind lastKind_ = draws::Kind::Unknown;
     bool replayBuild(const CachedDraw& c, const ReplayInputs& in, DrawPacket& p, shader::abi::DrawBlock& b);
@@ -1595,6 +1632,7 @@ private:
     std::array<std::uint32_t, 4> sgi_{};
     GiDraws giDraws_;
     PackProvider packProvider_;
+    std::function<std::uint32_t()> packStamp_;
     bool packBypass_ = false;
     std::uint64_t giDrawCount_ = 0;
     bool captureInstances_ = false;         // the request covers an instanced draw (requestVertexCapture)

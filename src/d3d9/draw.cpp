@@ -696,18 +696,55 @@ constexpr std::uint32_t kReplacedStates[] = {RS_ALPHABLENDENABLE, RS_SRCBLEND, R
 
 // GI (enh/gi): the main view's lit material draws whose ambient the engine set (its first pass: the later point-light passes
 // add with ONE / ONE blending and no ambient)
-bool Device::giEligible(const scene::Phase& phase) const {
+bool Device::giStaticEligible(const scene::Phase& phase) const {
     if (phase.view != scene::View::Main || tag_.water != draws::Water::None) return false;
     if (phase.pass != scene::Pass::Solid && phase.pass != scene::Pass::Alpha && phase.pass != scene::Pass::AlphaLate) return false;
     if ((ps_->reflection.colorOutputs & 1u) == 0) return false;
     const auto& amb = ps_->semantics[Semantic::AmbientLight];
     if (!amb.present() || amb.count < 7 || amb.reg + 7 > static_cast<int>(kPsFloatConsts)) return false;
     if (rs_[RS_ALPHABLENDENABLE] != 0 && rs_[RS_DESTBLEND] == BLEND_ONE) return false;
+    return true;
+}
+
+// (only after giStaticEligible: the ambient semantic is present with 7 registers)
+bool Device::ambientLit() const {
+    const auto& amb = ps_->semantics[Semantic::AmbientLight];
     for (std::int32_t i = 0; i < 7; ++i) {
         const float* c = psF_[amb.reg + i];
         if (c[0] != 0.0f || c[1] != 0.0f || c[2] != 0.0f || c[3] != 0.0f) return true;
     }
     return false;
+}
+
+bool Device::giEligible(const scene::Phase& phase) const { return giStaticEligible(phase) && ambientLit(); }
+
+// the material pack's word of the current draw's material (0 = none); its map must be uploaded and sampleable (DrawBlock pad[1])
+std::uint32_t Device::packWord(CachedDraw::Variant* note) {
+    if (tag_.material == nullptr) return 0;
+    if (note != nullptr) {
+        // (the stamp is read before the lookup: a snapshot published in between makes the packet look stale, never the other way round)
+        note->packStamped = static_cast<bool>(packStamp_);
+        note->packStamp = packStamp_ ? packStamp_() : 0;
+    }
+    const PackHit hit = packProvider_(tag_);
+    if (note != nullptr) {
+        note->packTex = hit.texture;
+        note->packTexSlot = hit.texture != nullptr ? hit.texture->bindlessSlot() : 0;
+    }
+    if (hit.word != 0 && hit.texture != nullptr) {
+        Texture* t = hit.texture;
+        if (t->pending_ || t->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) t->prepareForSampling(uploadList());
+        const std::uint32_t word = t->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ? hit.word : 0;
+        static bool logged[2] = {false, false};
+        const int which = word != 0 ? 1 : 0;
+        if (!logged[which]) {
+            logged[which] = true;
+            spdlog::info("d3d9: material pack: first draw with a map {} (word {:08x}, slot {}, layout {})", which ? "applied" : "NOT READY", hit.word,
+                         t->bindlessSlot(), static_cast<int>(t->layout()));
+        }
+        return word;
+    }
+    return hit.word;
 }
 
 // the G-buffer's scope: the frame's first main view, its solid pass, rendering into the scene HDR target alone at the
@@ -725,11 +762,16 @@ bool Device::gbufferTargetsMatch() const {
 
 // a material draw of the solid pass that writes the G-buffer (its Gbuffer variant): depth tested, not an additive light pass,
 // and when lit, a first pass (the engine set its ambient)
-bool Device::gbufferEligible(const scene::Phase& phase, draws::Kind kind) const {
+bool Device::gbufferStaticEligible(const scene::Phase& phase, draws::Kind kind) const {
     if (phase.view != scene::View::Main || phase.pass != scene::Pass::Solid || tag_.water != draws::Water::None) return false;
     if (kind == draws::Kind::Sky || kind == draws::Kind::Particle || kind == draws::Kind::Precipitation) return false;
     if ((ps_->reflection.colorOutputs & 1u) == 0 || rs_[RS_ZENABLE] == ZB_FALSE) return false;
     if (rs_[RS_ALPHABLENDENABLE] != 0 && rs_[RS_DESTBLEND] == BLEND_ONE) return false;
+    return true;
+}
+
+// when lit, a first pass (the engine set its ambient)
+bool Device::gbufferLit() const {
     const auto& amb = ps_->semantics[Semantic::AmbientLight];
     if (!amb.present()) return ps_->semantics.has(ShaderSemantics::Material);
     if (amb.count < 7 || amb.reg + 7 > static_cast<int>(kPsFloatConsts)) return false;
@@ -739,6 +781,8 @@ bool Device::gbufferEligible(const scene::Phase& phase, draws::Kind kind) const 
     }
     return false;
 }
+
+bool Device::gbufferEligible(const scene::Phase& phase, draws::Kind kind) const { return gbufferStaticEligible(phase, kind) && gbufferLit(); }
 
 bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     lastRecord_ = nullptr;
@@ -978,19 +1022,31 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     // probe volume instead of the engine's ambient constants (enh/gi), the vertex capture writes a skinned draw's world
     // positions for the RT scene (enh/rt_scene), the G-buffer variants write the thin G-buffer (enh/gbuffer)
     gbufWrite_ = false;
+    CachedDraw::Variant cv;
+    cv.giOn = giDraws_.on;
+    cv.replaceLightmaps = giDraws_.replaceLightmaps;
+    cv.pack = packProvider_ && !packBypass_;
+    cv.gate = cv.giOn || cv.pack;
+    cv.vsUsed = vsModule;
     rhi::ShaderModule fsVariant = rhi::ShaderModule::None, vsVariant = rhi::ShaderModule::None, fsPlain = rhi::ShaderModule::None;
     const bool notInstanced = (streams_[0].freq & STREAMSOURCE_INDEXEDDATA) == 0;
     if (!replaced && !captureRequest_.null() && geom.indexed && (notInstanced || captureInstances_) && vsModule == vs_->module) {
         vsVariant = variant(vs_, VariantSlot::Capture);
     }
-    const bool gbufMaterial = !replaced && tint == 0 && gbuf_.normal != nullptr && gbufferEligible(phase, kind);
+    cv.gbufGate = gbuf_.normal != nullptr;
+    cv.gbufStatic = !replaced && tint == 0 && cv.gbufGate && gbufferStaticEligible(phase, kind);
+    const bool gbufMaterial = cv.gbufStatic && gbufferLit();
     if (gbufMaterial && scopeGbuf_) {
+        cv.gbufWanted = true;
         fsPlain = variant(ps_, VariantSlot::Gbuffer);
         const rhi::ShaderModule motion = vsVariant != rhi::ShaderModule::None ? variant(ps_, VariantSlot::GbufferMotion) : rhi::ShaderModule::None;
         fsVariant = motion != rhi::ShaderModule::None ? motion : fsPlain;
-    } else if (!replaced && tint == 0 && (giDraws_.on || (packProvider_ && !packBypass_)) && giEligible(phase)) {
-        fsVariant = variant(ps_, VariantSlot::Gi);
+    } else if (!replaced && tint == 0 && cv.gate) {
+        cv.staticOk = giStaticEligible(phase);
+        cv.wanted = cv.staticOk && ambientLit();
+        if (cv.wanted) fsVariant = variant(ps_, VariantSlot::Gi);
     }
+    cv.fsAsked = fsVariant;
 
     // a copy of the blank description: `PipelineDesc pd{}` initialised the 520 bytes member by member (blend defaults are
     // not zero; ~1.5 % of the engine thread in the V4 profile)
@@ -1143,7 +1199,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     if (wp0_.on) wp0Note(pd, primitiveType, geom.indexed, captureDraw, giDraw);
     {
         // the pixel window of an enhancement variant that reads the ambient registers the base shader may not (enh/material_variant)
-        std::uint32_t minEnd = 0;
+        std::uint32_t& minEnd = cv.minEnd;
         if (giDraw || gbufWrite_) {
             const auto& amb = ps_->semantics[Semantic::AmbientLight];
             if (amb.present() && amb.count >= 7) {
@@ -1159,6 +1215,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     float jitterX = 0.0f, jitterY = 0.0f;
     geometryJitter(jitterX, jitterY);  // camera jitter of the main view's geometry (TAA / upscaling)
     const float lodBias = (jitterX != 0.0f || jitterY != 0.0f) ? geometryLodBias_ : 0.0f;
+    cv.biasFor = geometryLodBias_;
     for (std::uint32_t mask = boundSamplerMask(); mask != 0; mask &= mask - 1) {
         const std::uint32_t slot = static_cast<std::uint32_t>(std::countr_zero(mask));
         const shader::Reflection& r = slot < 16 ? ps_->reflection : vs_->reflection;
@@ -1170,6 +1227,11 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
                             t->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         block.tex[slot] = !usable ? game_->defaultTextureSlot(static_cast<std::uint32_t>(r.samplers[slot])) : (t == substituteFrom_ && substituteSlot_ != 0) ? substituteSlot_ : t->bindlessSlot();
         block.smp[slot] = lodBias != 0.0f && slot < 16 ? samplerIndexBiased(slot, lodBias) : samplerIndex(slot);
+        if (capture_ != nullptr && slot < 16) {
+            // (a retained packet serves frames with and without jitter: both sampler indexes)
+            cv.smpPlain[slot] = samplerIndex(slot);
+            cv.smpBias[slot] = geometryLodBias_ != 0.0f ? samplerIndexBiased(slot, geometryLodBias_) : cv.smpPlain[slot];
+        }
     }
     // half a pixel right/down in NDC units of the viewport (shader/abi.h)
     block.posFix[0] = 1.0f / static_cast<float>(std::max(1u, viewport_.width));
@@ -1204,24 +1266,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     }
     logTracedMaterial(kind, jitterX != 0.0f || jitterY != 0.0f);
     block.pad[0] = tint;
-    if (packProvider_ && !packBypass_ && (giDraw || gbufWrite_) && tag_.material != nullptr) {
-        // material pack: this material's word (0 = none); its map must be uploaded and sampleable
-        const PackHit hit = packProvider_(tag_);
-        if (hit.word != 0 && hit.texture != nullptr) {
-            Texture* t = hit.texture;
-            if (t->pending_ || t->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) t->prepareForSampling(uploadList());
-            if (t->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) block.pad[1] = hit.word;
-            static bool logged[2] = {false, false};
-            const int which = block.pad[1] != 0 ? 1 : 0;
-            if (!logged[which]) {
-                logged[which] = true;
-                spdlog::info("d3d9: material pack: first draw with a map {} (word {:08x}, slot {}, layout {})", which ? "applied" : "NOT READY", hit.word,
-                             t->bindlessSlot(), static_cast<int>(t->layout()));
-            }
-        } else {
-            block.pad[1] = hit.word;
-        }
-    }
+    if (packProvider_ && !packBypass_ && (giDraw || gbufWrite_)) block.pad[1] = packWord(&cv);  // material pack: this material's word (0 = none)
     std::memcpy(block.psC5, psF_[5], sizeof(block.psC5));  // pixel window 1 of split draws (abi.h)
     if (giDraw) {
         ++giDrawCount_;
@@ -1241,13 +1286,17 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     std::memcpy(db.ptr, &block, sizeof(block));
     if (capture_ != nullptr) {
         // a plain draw: no enhancement took part in it (the retained packet replays exactly this)
-        captureOk_ = !replaced && tint == 0 && !captureDraw && !giDraw && !gbufWrite_ && customVertices_ == 0 && geom.indexed && !geom.userPointer &&
-                     rep.action == DrawReplacement::Action::Engine && uberBase == rhi::ShaderModule::None && vsModule == vs_->module &&
-                     fs == ps_->module && captureRequest_.null();
+        // (a draw with an enhancement variant is retained with its decision: lastVariant_; one offered a variant that is not built / has no pipeline yet is not)
+        const bool variantPending = (fsVariant != rhi::ShaderModule::None && !giDraw && !gbufWrite_) || (!retainVariants_ && (giDraw || cv.vsUsed != vs_->module));
+        captureOk_ = !replaced && tint == 0 && !captureDraw && !variantPending && customVertices_ == 0 && geom.indexed && !geom.userPointer &&
+                     rep.action == DrawReplacement::Action::Engine && uberBase == rhi::ShaderModule::None && fs == ps_->module && captureRequest_.null();
         if (!captureOk_) {
-            ++replayStats.ncWhy[replaced ? 0 : tint != 0 ? 1 : captureDraw ? 2 : giDraw ? 3 : gbufWrite_ ? 4 : customVertices_ != 0 ? 5 : !geom.indexed || geom.userPointer ? 6
-                                : rep.action != DrawReplacement::Action::Engine ? 7 : uberBase != rhi::ShaderModule::None ? 8 : vsModule != vs_->module || fs != ps_->module ? 9 : 10];
+            ++replayStats.ncWhy[replaced ? 0 : tint != 0 ? 1 : captureDraw ? 2 : variantPending ? 3 : customVertices_ != 0 ? 5 : !geom.indexed || geom.userPointer ? 6
+                                : rep.action != DrawReplacement::Action::Engine ? 7 : uberBase != rhi::ShaderModule::None ? 8 : fs != ps_->module ? 9 : 10];
         }
+        cv.giDraw = giDraw;
+        cv.drawn = giDraw || gbufWrite_;
+        lastVariant_ = cv;
         lastBlock_ = block;
         lastKind_ = kind;
         query(lastQuery_);
@@ -1384,6 +1433,7 @@ void Device::fillCapture(const DrawPacket& p) {
     c.ps = ps_.get();
     c.vsModule = vs_->module;
     c.fsModule = ps_->module;
+    c.v = lastVariant_;
     c.streamMask = 0;
     for (std::uint32_t i = 0; i < 4; ++i) {
         if (streams_[i].buffer == nullptr) continue;
@@ -1402,7 +1452,7 @@ void Device::fillCapture(const DrawPacket& p) {
         }
         c.texMask |= 1u << slot;
         c.tex[slot] = t;
-        c.texSlot[slot] = c.block.tex[slot];
+        c.texSlot[slot] = t->bindlessSlot();  // (not the block's: GI's replaced lightmaps are zero there)
     }
     c.env = {};
     c.env.vp = viewport_;
@@ -1418,12 +1468,9 @@ void Device::fillCapture(const DrawPacket& p) {
 }
 
 bool Device::replayAllowed(const CachedDraw& c) const {
-    if (tint_ != draws::TintMode::Off || ubershader_.load(std::memory_order_relaxed) || gbuf_.normal != nullptr || giDraws_.on) return false;
+    if (tint_ != draws::TintMode::Off || ubershader_.load(std::memory_order_relaxed) || (gbuf_.normal != nullptr && !gbufArmed_)) return false;  // (arming counts the solid draws in prepareDraw)
     if (stats_.totalDraws < options_.logDraws || wp0_.on || customVertices_ != 0 || up_.active) return false;
-    if (c.kind == draws::Kind::SpeedTreeBillboard && billboardFadeScale_ != 1.0f) return false;
-    // material pack: a lit main-view material draw takes the pixel shader's variant and carries the material's pack word (DrawBlock pad[1]):
-    // both are decided in prepareDraw, so such draws are not replayed
-    if (packProvider_ && giEligible(c.phase)) return false;
+    // (the GI / material pack variant and the billboards' fade variant are part of the packet: its decision is re-derived by replayBuild)
     // observers (RT scene, GI, object motion) and opaque-observing replacers (water) are shown the cached query at replay (replayDraw)
     for (DrawReplacer* r : replacers_) {
         if (r->handles(c.kind, c.phase, tag_)) return false;
@@ -1434,11 +1481,40 @@ bool Device::replayAllowed(const CachedDraw& c) const {
 bool Device::replayBuild(const CachedDraw& c, const ReplayInputs& in, DrawPacket& p, shader::abi::DrawBlock& b) {
     const auto fail = [&](int why) {
         ++replayStats.why[why];
+        replayStale_ = why == 0 || why == 5 || why == 6 || why == 7 || why == 10 || why == 11;  // the packet is out of date: made again by the caller
         return false;
     };
     if (!c.valid || vs_.get() != c.vs || ps_.get() != c.ps || vs_->module != c.vsModule || ps_->module != c.fsModule) return fail(0);
     if (phases_.current() != c.phase) return fail(1);
     if (!replayAllowed(c)) return fail(2);
+    // the enhancement variant decision (prepareDraw): its inputs are the settings, the ambient registers (the engine's lighting of this draw) and the
+    // variants' build state; a change in any of them makes the draw take another pipeline / pixel window / pack word
+    if (c.v.giOn != giDraws_.on || c.v.replaceLightmaps != giDraws_.replaceLightmaps || c.v.pack != (packProvider_ && !packBypass_)) return fail(10);
+    if (c.v.gbufGate != (gbuf_.normal != nullptr)) return fail(10);
+    bool gbufTaken = false;
+    if (c.v.gbufGate) {
+        // the G-buffer's material pass (its variant reads the ambient too): taken when eligible, lit and in the G-buffer's rendering scope
+        gbufTaken = c.v.gbufStatic && scopeGbuf_ && gbufferLit();
+        if (gbufTaken != c.v.gbufWanted) return fail(10);
+        if (gbufTaken && variant(ps_, VariantSlot::Gbuffer) != c.v.fsAsked) return fail(10);
+    }
+    if (c.v.gate && !gbufTaken) {
+        const bool wanted = c.v.staticOk && ambientLit();
+        if (wanted != c.v.wanted) return fail(10);
+        if (wanted && variant(ps_, VariantSlot::Gi) != c.v.fsAsked) return fail(10);
+    }
+    {
+        rhi::ShaderModule vsM = vs_->module;
+        if (c.kind == draws::Kind::SpeedTreeBillboard && billboardFadeScale_ != 1.0f) {
+            const rhi::ShaderModule m = lodModule(*vs_);
+            vsM = m != rhi::ShaderModule::None ? m : vsM;
+        }
+        if (vsM != c.v.vsUsed) return fail(10);
+    }
+    if (c.v.drawn && packProvider_) {
+        const Texture* cube = imageWithRole(scene::ImageRole::SkyEnvCube);
+        if (cube != nullptr && !cube->isNull() && (cube->pending_ || cube->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)) return fail(11);
+    }
     CachedDraw::Env env{};
     env.vp = viewport_;
     std::memcpy(env.scissor, scissor_, sizeof(scissor_));
@@ -1461,7 +1537,10 @@ bool Device::replayBuild(const CachedDraw& c, const ReplayInputs& in, DrawPacket
     }  // (Env is built from the same fields in the same order; padding is zeroed by value-init)
     float jx = 0.0f, jy = 0.0f;
     geometryJitter(jx, jy);
-    if (jx != 0.0f || jy != 0.0f) return fail(4);
+    const bool jit = jx != 0.0f || jy != 0.0f;
+    if (c.v.biasFor != geometryLodBias_) return fail(10);
+    // (the thickened / hashed cut-outs put the draw's alpha reference and the frame number into the block: not retained)
+    if (jit && (alphaDither_ || cutoutThicken_ * std::clamp(renderRatio_ - 1.0f, 0.0f, 1.0f) > 0.0f)) return fail(4);
     for (std::uint32_t i = 0; i < 4; ++i) {
         if (((c.streamMask >> i) & 1u) == 0) continue;
         if (in.streams[i] == nullptr) return fail(5);
@@ -1474,11 +1553,37 @@ bool Device::replayBuild(const CachedDraw& c, const ReplayInputs& in, DrawPacket
     for (std::uint32_t mask = c.texMask; mask != 0; mask &= mask - 1) {
         const std::uint32_t slot = static_cast<std::uint32_t>(std::countr_zero(mask));
         Texture* t = c.tex[slot];
-        if (t->isNull() || t->pending_ || t->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL || t->bindlessSlot() != c.texSlot[slot]) return fail(7);
+        if (t->isNull() || t->pending_ || t->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL || t->bindlessSlot() != c.texSlot[slot]) {
+            static int logged = 0;
+            if (logged < 6) {
+                ++logged;
+                spdlog::info("d3d9: replay texture differs: slot {} null {} pending {} layout {} slot {} vs {}, role {}, kind {}", slot, t->isNull(), t->pending_.load(), static_cast<int>(t->layout()),
+                             t->bindlessSlot(), c.texSlot[slot], scene::name(t->role()), draws::name(c.kind));
+            }
+            return fail(7);
+        }
     }
     b = c.block;
     std::memcpy(b.psC5, psF_[5], sizeof(b.psC5));
     depthRemap(b.posFix[2], b.posFix[3]);
+    // half a pixel of the viewport (+ the camera jitter, + the LOD bias of the jittered geometry: prepareDraw's arithmetic)
+    b.posFix[0] = 1.0f / static_cast<float>(std::max(1u, c.env.vp.width));
+    b.posFix[1] = -1.0f / static_cast<float>(std::max(1u, c.env.vp.height));
+    b.posFix[0] += jx;
+    b.posFix[1] += jy;
+    if (geometryLodBias_ != 0.0f) {
+        for (std::uint32_t mask = c.texMask & 0xFFFFu; mask != 0; mask &= mask - 1) {
+            const std::uint32_t slot = static_cast<std::uint32_t>(std::countr_zero(mask));
+            b.smp[slot] = jit ? c.v.smpBias[slot] : c.v.smpPlain[slot];
+        }
+    }
+    if (c.v.drawn && c.v.pack) {
+        // the material's word: unchanged while the pack's stamp is and its map is still sampleable in the same slot (else the exact lookup)
+        const Texture* t = c.v.packTex;
+        const bool same = c.v.packStamped && packStamp_ && packStamp_() == c.v.packStamp &&
+                          (t == nullptr || (!t->pending_ && t->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && t->bindlessSlot() == c.v.packTexSlot));
+        if (!same) b.pad[1] = packWord();
+    }
     p = c.packet;
     p.vi = internVi(c.vi);
     p.dyn = internDyn(c.dyn);
@@ -1505,6 +1610,14 @@ bool Device::replayMatches(const CachedDraw& cached, const CachedDraw& fresh, co
     }
     if (p.push.flags != f.push.flags) return bad("push flags");
     {
+        const CachedDraw::Variant& a = cached.v;
+        const CachedDraw::Variant& r = fresh.v;
+        if (a.gbufGate != r.gbufGate || a.gbufStatic != r.gbufStatic || a.gbufWanted != r.gbufWanted || a.drawn != r.drawn || a.gate != r.gate || a.giOn != r.giOn || a.replaceLightmaps != r.replaceLightmaps || a.pack != r.pack || a.staticOk != r.staticOk || a.wanted != r.wanted ||
+            a.giDraw != r.giDraw || a.fsAsked != r.fsAsked || a.minEnd != r.minEnd || a.vsUsed != r.vsUsed) {
+            return bad("variant decision");
+        }
+    }
+    {
         // the observers' input: the cached query against the one the fresh draw showed them (tag / textures / mainView are refreshed at replay)
         const ReplaceQuery& a = cached.query;
         const ReplaceQuery& r = fresh.query;
@@ -1526,6 +1639,7 @@ bool Device::replayMatches(const CachedDraw& cached, const CachedDraw& fresh, co
 }
 
 bool Device::replayDraw(const CachedDraw& c, const ReplayInputs& in) {
+    replayStale_ = false;
     if (!c.valid || vs_.get() == nullptr || ps_.get() == nullptr || vs_->module == rhi::ShaderModule::None || ps_->module == rhi::ShaderModule::None) {
         ++replayStats.refused;
         return false;
@@ -1575,7 +1689,8 @@ bool Device::replayDraw(const CachedDraw& c, const ReplayInputs& in) {
     }
     const std::uint64_t frame = frameValue();
     for (std::uint32_t mask = c.texMask; mask != 0; mask &= mask - 1) c.tex[std::countr_zero(mask)]->lastUseFrame_ = frame;
-    uploadConstants(false, 0);
+    uploadConstants(false, c.v.minEnd);
+    if (c.v.giDraw) ++giDrawCount_;
     rhi::RingAlloc db = game_->allocRing(sizeof(b), 16);
     std::memcpy(db.ptr, &b, sizeof(b));
     const std::uint32_t flags = p.push.flags;

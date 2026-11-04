@@ -1997,6 +1997,7 @@ void StaticOps::issue() {
                           g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)]);
     const std::uint64_t viewKey = (static_cast<std::uint64_t>(viewKind_) << 32) ^ (static_cast<std::uint64_t>(static_cast<std::uint32_t>(cascade_)) << 36) ^
                                   (reinterpret_cast<std::uintptr_t>(shadowMap_) * 0xD6E8FEB86659FD93ull);
+    const std::size_t cacheGroup = g_ == &groups_[static_cast<std::size_t>(Group::Trees)] ? 1 : g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)] ? 2 : 0;
     const bool verifyFrame = cacheOn && packetMode_ >= 2 && (packetMode_ == 3 || dev_.stats().frames % 10 == 0);
     bool fullStates = false;  // a draw went the normal way: the device state beyond shaders / registers was set (and is restored)
     const auto setRegs = [&](const sc::DrawDesc& dd) {
@@ -2018,6 +2019,7 @@ void StaticOps::issue() {
         dev_.setVertexShaderRef(ShaderRef(const_cast<Shader*>(static_cast<const Shader*>(d.vs))));
         dev_.setPixelShaderRef(ShaderRef(const_cast<Shader*>(static_cast<const Shader*>(d.ps))));
         PacketEntry* pe = nullptr;
+        bool stale = false;  // the retained packet is out of date: remade from this draw
         std::uint64_t pkey = 0;
         d3d9::Device::ReplayInputs rin;
         const bool cacheable = cacheOn && d.vertexBytes.empty() && d.inheritMask == 0 && d.indexed && d.cpuStream == 0;
@@ -2040,9 +2042,15 @@ void StaticOps::issue() {
             if (dev_.replayDraw(pe->cd, rin)) {
                 ++g_->issuedDraws;
                 ++pktWindow_.replayed;
+                ++pktGroup_[cacheGroup][0];
                 continue;
             }
             ++pktWindow_.refused;
+            stale = dev_.replayWasStale();
+        }
+        if (cacheOn) {
+            ++pktWindow_.fresh;
+            ++pktGroup_[cacheGroup][1];
         }
         fullStates = true;
         if (!statesSaved) saveStates();
@@ -2109,7 +2117,7 @@ void StaticOps::issue() {
         setRegs(d);
         setTag(d);
         issueIndex_ = k;
-        const bool capturing = cacheable && (pe == nullptr || verifyFrame);
+        const bool capturing = cacheable && (pe == nullptr || verifyFrame || stale);
         if (capturing) {
             if (!pktFresh_) pktFresh_ = std::make_unique<d3d9::Device::CachedDraw>();
             dev_.beginCapture(pktFresh_.get());
@@ -2131,18 +2139,22 @@ void StaticOps::issue() {
                 ne.desc = std::make_unique<sc::DrawDesc>(d);
                 ++pktWindow_.built;
             } else {
-                bool valid = true;
-                std::string why;
-                const bool same = dev_.replayMatches(pe->cd, *pktFresh_, rin, valid, why);
-                ++pktWindow_.verified;
-                if (!valid) {
-                    ++pktWindow_.invalid;
-                } else if (!same) {
-                    ++pktWindow_.mismatches;
-                    if (pktMismatchLogged_ < 12) {
-                        ++pktMismatchLogged_;
-                        spdlog::info("native: packet cache: verify: replay would differ ({}) in frame {}: {}", why, dev_.stats().frames, describe(*op_));
+                if (verifyFrame) {
+                    bool valid = true;
+                    std::string why;
+                    const bool same = dev_.replayMatches(pe->cd, *pktFresh_, rin, valid, why);
+                    ++pktWindow_.verified;
+                    if (!valid) {
+                        ++pktWindow_.invalid;
+                    } else if (!same) {
+                        ++pktWindow_.mismatches;
+                        if (pktMismatchLogged_ < 12) {
+                            ++pktMismatchLogged_;
+                            spdlog::info("native: packet cache: verify: replay would differ ({}) in frame {}: {}", why, dev_.stats().frames, describe(*op_));
+                        }
                     }
+                } else {
+                    ++pktWindow_.rebuilt;
                 }
                 pe->cd = *pktFresh_;  // (also refreshes a stale entry)
             }
@@ -2232,16 +2244,27 @@ void StaticOps::report() {
             pktTotal_.built += w.built;
             pktTotal_.mismatches += w.mismatches;
             pktTotal_.verified += w.verified;
-            spdlog::info("native: packet cache (5 s): {} draws replayed, {} refused at replay, {} built, {} not capturable, {} descriptions changed; verify: {} checked, {} not valid, {} DIFFERING; "
+            spdlog::info("native: packet cache (5 s): {} draws replayed, {} drawn fresh (replayed share {:.1f} %), of those {} refused at replay ({} remade), {} built, {} not capturable, {} descriptions changed; verify: {} checked, {} not valid, {} DIFFERING; "
                          "total replayed {}, verified {}, differing {}; {} entries",
-                         w.replayed, w.refused, w.built, w.notBuilt, w.changed, w.verified, w.invalid, w.mismatches, pktTotal_.replayed, pktTotal_.verified, pktTotal_.mismatches,
-                         packets_.size());
+                         w.replayed, w.fresh, w.replayed + w.fresh != 0 ? 100.0 * static_cast<double>(w.replayed) / static_cast<double>(w.replayed + w.fresh) : 0.0, w.refused, w.rebuilt,
+                         w.built, w.notBuilt, w.changed, w.verified, w.invalid, w.mismatches, pktTotal_.replayed, pktTotal_.verified, pktTotal_.mismatches, packets_.size());
             {
+                const auto share = [&](int i) { return pktGroup_[i][0] + pktGroup_[i][1] != 0 ? 100.0 * static_cast<double>(pktGroup_[i][0]) / static_cast<double>(pktGroup_[i][0] + pktGroup_[i][1]) : 0.0; };
+                spdlog::info("native: packet cache replayed share (5 s): static meshes {:.1f} % ({} / {}), trees {:.1f} % ({} / {}), shadow views {:.1f} % ({} / {})", share(0), pktGroup_[0][0],
+                             pktGroup_[0][0] + pktGroup_[0][1], share(1), pktGroup_[1][0], pktGroup_[1][0] + pktGroup_[1][1], share(2), pktGroup_[2][0], pktGroup_[2][0] + pktGroup_[2][1]);
+                std::memset(pktGroup_, 0, sizeof(pktGroup_));
                 const auto& st = dev_.replayStats;
-                spdlog::info("native: packet cache refusals (total): shaders {}, phase {}, consumers {}, env {}, jitter {}, stream binding {}, index binding {}, texture {}, observer capture {}, no scope {}",
-                             st.why[0], st.why[1], st.why[2], st.why[3], st.why[4], st.why[5], st.why[6], st.why[7], st.why[8], st.why[9]);
-                spdlog::info("native: packet cache not capturable by prepareDraw (total): replaced {}, tint {}, capture variant {}, gi {}, gbuf write {}, custom {}, not indexed {}, replacement {}, uber {}, module {}, request {}; replayAllowed / textures: {}",
-                             st.ncWhy[0], st.ncWhy[1], st.ncWhy[2], st.ncWhy[3], st.ncWhy[4], st.ncWhy[5], st.ncWhy[6], st.ncWhy[7], st.ncWhy[8], st.ncWhy[9], st.ncWhy[10], st.notCaptured);
+                std::uint64_t why[12], nc[12];
+                for (int i = 0; i < 12; ++i) {
+                    why[i] = st.why[i] - pktWhyPrev_[i];
+                    nc[i] = st.ncWhy[i] - pktNcPrev_[i];
+                    pktWhyPrev_[i] = st.why[i];
+                    pktNcPrev_[i] = st.ncWhy[i];
+                }
+                spdlog::info("native: packet cache refusals (5 s): shaders {}, phase {}, consumers {}, env {}, jitter {}, stream binding {}, index binding {}, texture {}, observer capture {}, no scope {}, variant decision {}, sky cube {}",
+                             why[0], why[1], why[2], why[3], why[4], why[5], why[6], why[7], why[8], why[9], why[10], why[11]);
+                spdlog::info("native: packet cache not capturable by prepareDraw (5 s): replaced {}, tint {}, capture variant {}, variant not ready {}, gbuf write {}, custom {}, not indexed {}, replacement {}, uber {}, module {}, request {}; replayAllowed / textures (total): {}",
+                             nc[0], nc[1], nc[2], nc[3], nc[4], nc[5], nc[6], nc[7], nc[8], nc[9], nc[10], st.notCaptured);
             }
             pktWindow_ = {};
         }

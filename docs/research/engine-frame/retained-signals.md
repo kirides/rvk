@@ -331,3 +331,39 @@ FRAME constants once per view, and the packet submission itself (0.35 us x ~940 
 
 None of this is a day's change: stages 2 and 4 touch the shared ABI (`abi.h`, `rvk_abi.hlsli`, the translator's constant windows, the DrawBlock, DXIL parity, `kTranslatorVersion`), both backends' RHI, the RT scene / material pack / object-motion
 consumers and the verify infrastructure. They were not started in this session: the measured state is the packet cache (Full - Wrapper +1.75 / +1.68) and the numbers above are estimates from the profile, not measurements.
+
+## 13. Variant draws in the packet cache (2026-11-04, fourth agent)
+
+**Finding it acts on:** at the player defaults the test copy has the material pack (`bin/rvk/materialpack`), so every lit main-view solid draw takes the pack's pixel-shader variant (the GI variant slot) and carries a pack word;
+those draws (4.18 M per 62 s) and the billboards with the fade module were refused capture, and the cache served ~32 % of the static / tree / shadow draws.
+
+**Built.** `CachedDraw::Variant` keeps the decision of `prepareDraw` and what it was derived from: the settings (`giDraws_.on`, `replaceLightmaps`, pack on / bypassed, G-buffer on), the static part of `giEligible` /
+`gbufferEligible` (phase, water tag, blend, outputs: fixed by the draw's description, which the cache already compares), whether the draw was taken (the *dynamic* part: the 7 ambient registers non-zero, and for the G-buffer
+the open rendering scope), the variant module the draw was offered (`variant(ps, Gi | Gbuffer)`, None while it builds), the pixel window's minimum end, the vertex module drawn with (the billboards' fade variant) and the
+jitter's two sampler indexes per stage. `replayBuild` re-derives the cheap inputs against the live device (registers are set by the caller before the replay, exactly as for a fresh draw) and refuses with reason 10 "variant decision" /
+11 "sky cube" when they differ. A refusal for a stale packet (shaders, bindings, textures, variant decision) now **remakes** the packet from the fresh draw that follows (`replayWasStale`, `rebuilt` in the log), so a settings flip costs one fresh
+frame, not a dead entry. The pack word is kept under the pack's `generation()` stamp + its map's bindless slot / layout (else the exact lookup). Camera jitter: `posFix` and the LOD-biased sampler index are patched at replay
+(plain and biased index stored per stage; thickened / hashed cut-outs still refuse). The G-buffer draws are replayed once it is armed. Not retained: draws with a vertex-capture variant (animated trees in the RT range, object motion), replaced draws, tint,
+the uber shader.
+
+**Fixed on the way:** GI's replaced lightmap slots are zero in the DrawBlock, so the texture check compared 0 with the map's slot and refused every GI draw: the cache now stores the texture's own bindless slot.
+
+**Verify mode** (`native.packet_cache=2|3`) compares the decision fields too (`variant decision`), the whole DrawBlock (pack word, pad, posFix, samplers), pipeline, vertex input, dynamic state, push flags. Results (savegame, lod 2x): player defaults 6.2 M checks 0 differing;
+GI (world lights, lightmaps replace) + AO + material pack 5.9 M, 0 differing; + `upscale.mode=quality` (jitter) 5.2 M, 0 differing; run-time flips under mode 2 (`set gi.enabled`, `ao.enabled`, `lod.trees`, `water.enabled`): 680 k checks, 0 differing, the
+refusals / remakes spike at each flip and the share recovers to > 88 % within one window.
+
+**Coverage** (rvk.log every 5 s: `native: packet cache (5 s)` replayed / fresh / remade, `replayed share` per group, `refusals (5 s)` per reason, `not capturable (5 s)`): player defaults static meshes 99.6 %, trees 100 %, shadow views 100 % (was ~32 % overall).
+
+**Timings** (player defaults, savegame lod 2x, `-Perf` CPU engine + HAL per frame, 3 interleaved pairs, `native.packet_cache=4` = the old behaviour vs `1`): Vulkan 7.039 (7.017 / 7.050 / 7.050) -> **6.557** (6.468 / 6.520 / 6.682) = -0.48 ms;
+D3D12 7.316 (7.388 / 7.303 / 7.257) -> **6.691** (6.812 / 6.687 / 6.573) = -0.62 ms. GI + AO (G-buffer on): 7.145 -> 6.677 (-0.47); + upscaling quality: 7.678 -> 6.787 (-0.89). Wrapper (same copy) 5.1 - 5.5 (Vulkan), 5.13 (D3D12).
+**Why 7.2 and not the documented 6.25:** the material pack. Wrapper without the pack 4.53, with 5.09 (+0.57); Full with the new cache 6.32 without, 6.57 with (+0.25 residual: pack lookups, the wider pixel window); Full without the pack = the documented 6.25 - 6.3.
+Per-draw `issue()` now static 1.4 us, trees 1.1, shadow views 1.15 (was 1.96 / 1.73 / 1.19 with the variants out of the cache).
+
+**What the new profile says** (`-CpuProfile`, flat, 1 % = 0.065 ms): `setVertexShaderConstantF` 2.6 %, `constantsInto` 2.4 %, guarded engine reads (`safeLoad8/4/1`, `ptr`, `get<>`) ~5 %, `issue` 1.9 %, `splitStage` 1.6 %, `replayBuild` 1.1 %,
+`textureOfImageData` + sampler composition 1.6 %, `packetSameDesc` 0.8 %, `replayDraw` 0.6 %: the replay itself is now small; what is left is the composition (engine memory reads + the three register copies) at ~1.2 us per op. Streaming composition
+was already bounded at ~0.2 ms (performance.md 24.3); not built. The pack word stamp alone measured neutral (-0.0 +- 0.05 ms).
+
+**Gates (final build 24b03f0 + docs):** `rvk_tests` 224 / 224; `rvk_d3d9test --validation` Vulkan and D3D12 0 failures, 0 validation errors; `rvk_rhitest` PASS; `testdemo` 7 / 7 with `-Validation -PlayerDefaults` (0 validation lines) on Vulkan wrapper, Vulkan full (cache mode 3), D3D12 wrapper,
+D3D12 full (mode 3, `RVK_NO_GBV=1`: with the GPU-based validation the scene times out in 'new game', the documented slowness), and Vulkan + D3D12 full with GI (world lights, replace) + AO + `upscale.mode=quality` + the pack (mode 3); 0 DIFFERING everywhere;
+compare run (`static_ops_compare`, `scene_ops_compare`, `lean_check=10`) 7 / 7, no mismatching group; `refcompare` Full vs `20261103-130010`: Vulkan 2 FAIL (sea_cliff, harbour_mouth: known noise), D3D12 1 FAIL (sea_cliff), no new FAIL.
+Not done: the composition chain itself (profile flat, see above); jitter with thickened / hashed cut-outs and draws with a vertex-capture variant stay on the fresh path.

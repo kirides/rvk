@@ -702,9 +702,11 @@ private:
     };
     std::unordered_map<std::uint64_t, PacketEntry> packets_;
     struct PacketStats {
-        std::uint64_t replayed = 0, refused = 0, built = 0, notBuilt = 0, verified = 0, invalid = 0, mismatches = 0, changed = 0;
+        std::uint64_t replayed = 0, refused = 0, built = 0, notBuilt = 0, verified = 0, invalid = 0, mismatches = 0, changed = 0, fresh = 0, rebuilt = 0;
     } pktWindow_, pktTotal_;
     std::uint32_t pktMismatchLogged_ = 0;
+    std::uint64_t pktWhyPrev_[12] = {}, pktNcPrev_[12] = {};  // the device's refusal counters at the last report (the window = the difference)
+    std::uint64_t pktGroup_[3][2] = {};                       // per cached group (main-view static, trees, shadow views) in the window: replayed / drawn fresh
     std::unique_ptr<d3d9::Device::CachedDraw> pktFresh_;
     static bool packetSameDesc(const sc::DrawDesc& a, const sc::DrawDesc& b);
     std::size_t issueIndex_ = 0;

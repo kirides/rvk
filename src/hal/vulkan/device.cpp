@@ -197,7 +197,9 @@ void HalDevice::applyStaticOps() {
     effectOps_->setLean(leanOn && (rs.nativeLeanEffects == nullptr || on(rs.nativeLeanEffects)), leanCheck);
     {
         const bool cacheBlocked = compare || sceneCompare || on(rs.nativeFrameTap) || on(rs.nativeCoverage) || !leanOn;
-        staticOps_->setPacketCache(rs.nativePacketCache != nullptr && !cacheBlocked ? rs.nativePacketCache->asInt() : 0);
+        const int pm = rs.nativePacketCache != nullptr && !cacheBlocked ? rs.nativePacketCache->asInt() : 0;
+        staticOps_->setPacketCache(pm == 4 ? 1 : pm);
+        dev_.setRetainVariants(pm != 4);  // 4 = the cache of before the variant packets (A/B)
     }
     staticOps_->setGpuScene(rs.nativeGpuScene != nullptr ? rs.nativeGpuScene->asInt() : 0);
     staticOps_->setOpts(rs.nativeOpts != nullptr ? static_cast<unsigned>(rs.nativeOpts->asInt()) : 255u);
@@ -251,6 +253,7 @@ HalDevice::~HalDevice() {
     if (matPack_) {
         enh::matpack::setReloadHook({});
         dev_.setPackProvider({});
+        dev_.setPackStamp({});
         if (rtScene_) rtScene_->setMaterialPack(nullptr);
     }
     matPack_.reset();    // joins its loader, frees the pack textures
@@ -538,7 +541,8 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         dev_.setPackProvider([this](const d3d9::draws::Tag& tag) {
             const auto h = matPack_->lookupMaterial(tag.material);
             static auto last = std::chrono::steady_clock::now();
-            const auto now = std::chrono::steady_clock::now();
+            static unsigned calls = 0;
+            const auto now = (++calls & 255u) == 0 ? std::chrono::steady_clock::now() : last;
             if (now - last >= std::chrono::seconds(5)) {
                 last = now;
                 const auto c = matPack_->takeCounters();
@@ -546,6 +550,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
             }
             return d3d9::Device::PackHit{h.word, h.texture};
         });
+        dev_.setPackStamp([this]() -> std::uint32_t { return matPack_->generation(); });
         for (settings::Setting* s : {rs.materialsQuality, rs.materialsSpecular, rs.materialsEnvironment, rs.materialsDebug, rs.materialsAlternate, rs.materialsWetness}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyMaterials(); }, this);
         }
