@@ -787,3 +787,13 @@ vegetation 0.40 (composition 0.16 measured; the device path is shared with Wrapp
 light list) / 0 % (equal illumination object) draws: every tree has its own illumination object, so only a picture-changing merge helps. No code change; gpu-scene.md 9.3 says why a GPU-driven consumer needs the whole persistent-window design (trees first).
 
 Update (2026-11-04, gpu-scene.md 9.4): ceiling experiments for a GPU-driven tree path: one draw per tree op (picture changing) -0.98 ms; exact merge (same light list / limit; what a draw index + per-instance light fetch can do) -0.17 ms (1,290 -> 1,245 draws).
+
+## 27. Sky cube refresh interval in Full (2026-11-04)
+
+With the enhanced water on (player default) the engine's sky cube (5 faces: 20 draws per frame, composition 0.33 + `issue()` 0.25 ms in Full) was redrawn whole every frame (ocean.md 9.8: its own refresh is one face per ~10 s, which left lightning flashes baked into some faces).
+`debug.sky_cube_interval` (Debug, ms, default 100, 0 = every frame; **applies in Full only**, Wrapper keeps the per-frame refresh) refreshes the whole cube every 100 ms of wall time instead; in between the detour resets the engine's timer and calls its own function, which then
+takes the "not expired" path and draws nothing (`engine/scene_hooks.cpp`, `detourSkyCube`). The cube is the same whole-cube refresh at 10 Hz (a lightning flash reaches the reflection <= 0.1 s late).
+Paired timing (player defaults, savegame lod 2x, `-Perf` CPU, 2 pairs): Vulkan Full 6.43 -> **5.98** (-0.45), D3D12 Full 6.49 -> **6.07** (-0.42); Wrapper (no stride) Vulkan 4.855, D3D12 5.08: **Full - Wrapper 1.58 -> 1.12 (Vulkan), 1.41 -> 0.99 (D3D12)**. (Wrapper with the stride, measured for
+information: 4.855 -> 4.67; not shipped, Wrapper stays the faithful mode.) Pictures: `water-compare -Mode full` interval 0 vs 100 on `beach_night_storm` (thunder, clock running), `sea_horizon`, `beach_sun`: no cube seam, differences are the running clock's waves / lightning timing.
+
+Remaining Full - Wrapper after this (profile of the same run, ms per frame inclusive): shadow-map path 0.90 (engine 0.9 of which our ops ~0.3), effect units 0.42 (`effectBegin`, composition 0.20, `issueLean` 0.18), trees 1.8, static 0.84, vegetation 0.4 (0.1 - 0.16 Full-only).
