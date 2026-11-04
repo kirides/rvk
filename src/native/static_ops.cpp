@@ -1986,8 +1986,12 @@ void StaticOps::issue() {
 
     issuing_ = true;
     // packet retention: static meshes and trees of the main view (the groups whose draws repeat every frame)
-    const bool cacheOn = packetMode_ != 0 && op_ != nullptr && !inNonOp_ && viewKind_ == ViewKind::Main && !tagOverride_ &&
-                         (g_ == &groups_[static_cast<std::size_t>(Group::Static)] || g_ == &groups_[static_cast<std::size_t>(Group::Trees)]);
+    // (stage 4: the shadow views' z ops too; the same entity is drawn into several cascades / maps, so the key carries the view)
+    const bool cacheOn = packetMode_ != 0 && op_ != nullptr && !inNonOp_ && !tagOverride_ &&
+                         ((viewKind_ == ViewKind::Main && (g_ == &groups_[static_cast<std::size_t>(Group::Static)] || g_ == &groups_[static_cast<std::size_t>(Group::Trees)])) ||
+                          g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)]);
+    const std::uint64_t viewKey = (static_cast<std::uint64_t>(viewKind_) << 32) ^ (static_cast<std::uint64_t>(static_cast<std::uint32_t>(cascade_)) << 36) ^
+                                  (reinterpret_cast<std::uintptr_t>(shadowMap_) * 0xD6E8FEB86659FD93ull);
     const bool verifyFrame = cacheOn && packetMode_ >= 2 && (packetMode_ == 3 || dev_.stats().frames % 10 == 0);
     bool fullStates = false;  // a draw went the normal way: the device state beyond shaders / registers was set (and is restored)
     const auto setRegs = [&](const sc::DrawDesc& dd) {
@@ -2019,7 +2023,7 @@ void StaticOps::issue() {
             }
             rin.indices = const_cast<Buffer*>(static_cast<const Buffer*>(d.indices));
             pkey = (reinterpret_cast<std::uintptr_t>(op_->raw.context) * 0x9E3779B97F4A7C15ull) ^ (static_cast<std::uint64_t>(op_->raw.desc) * 0xC2B2AE3D27D4EB4Full) ^
-                   (static_cast<std::uint64_t>(op_->list) << 56) ^ (static_cast<std::uint64_t>(k) << 48) ^ (static_cast<std::uint64_t>(g_ - groups_.data()) << 40);
+                   (static_cast<std::uint64_t>(op_->list) << 56) ^ (static_cast<std::uint64_t>(k) << 48) ^ (static_cast<std::uint64_t>(g_ - groups_.data()) << 40) ^ viewKey;
             if (const auto it = packets_.find(pkey); it != packets_.end()) {
                 if (packetSameDesc(d, *it->second.desc)) pe = &it->second;
                 else ++pktWindow_.changed;
@@ -2227,6 +2231,11 @@ void StaticOps::report() {
                          "total replayed {}, verified {}, differing {}; {} entries",
                          w.replayed, w.refused, w.built, w.notBuilt, w.changed, w.verified, w.invalid, w.mismatches, pktTotal_.replayed, pktTotal_.verified, pktTotal_.mismatches,
                          packets_.size());
+            {
+                const auto& st = dev_.replayStats;
+                spdlog::info("native: packet cache refusals (total): shaders {}, phase {}, consumers {}, env {}, jitter {}, stream binding {}, index binding {}, texture {}, observer capture {}, no scope {}",
+                             st.why[0], st.why[1], st.why[2], st.why[3], st.why[4], st.why[5], st.why[6], st.why[7], st.why[8], st.why[9]);
+            }
             pktWindow_ = {};
         }
         if (g.takeOver && g.timedDraws != 0) {
