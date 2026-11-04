@@ -1994,7 +1994,7 @@ void Device::setVertexShaderConstantF(std::uint32_t start, const float* data, st
             ++perf_.constSetsUnchanged;
             return;
         }
-        std::memcpy(vsF_[start + first], data + first * 4, (last - first + 1) * 16);
+        copyRegisters(vsF_[start + first], data + first * 4, last - first + 1);
         vsConstDirty_ = true;
         constWinDirty_[0] |= constWindowMask(true, start + first, last - first + 1);
         return;
@@ -2013,7 +2013,7 @@ void Device::setPixelShaderConstantF(std::uint32_t start, const float* data, std
             ++perf_.constSetsUnchanged;
             return;
         }
-        std::memcpy(psF_[start + first], data + first * 4, (last - first + 1) * 16);
+        copyRegisters(psF_[start + first], data + first * 4, last - first + 1);
         psConstDirty_ = true;
         constWinDirty_[1] |= constWindowMask(false, start + first, last - first + 1);
         return;

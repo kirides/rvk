@@ -164,10 +164,11 @@ StaticOps::Skip StaticOps::skyObjectDraws(const std::uint8_t* object, const floa
     if (ptr(shader, 0x220) != view_.admin) return Skip::Unreadable;
     if (get<std::uint8_t>(shader, 0x2a8) == 1 || get<std::uint32_t>(view_.admin, 0x31c) != 0) return Skip::InvalidShader;
     if (ptr(visual, 0x60) != nullptr) return Skip::VisualShader;
-    // the billboards FillVertexBuffer writes
-    std::vector<std::uint8_t> billboards(static_cast<std::size_t>(n) * sc::kSkyBillboardSize);
+    // the billboards FillVertexBuffer writes (scratch reused across calls: no heap traffic per sky object / cube face)
+    std::vector<std::uint8_t>& billboards = skyBb_;
+    billboards.resize(static_cast<std::size_t>(n) * sc::kSkyBillboardSize);
     if (bb == nullptr && billboardsOverride_ != nullptr && billboardsOverride_->size() == billboards.size()) {
-        billboards = *billboardsOverride_;
+        std::memcpy(billboards.data(), billboardsOverride_->data(), billboards.size());
     } else if (bb != nullptr) {
         if (n != 1) return Skip::Unreadable;
         std::memcpy(billboards.data(), bb, sc::kSkyBillboardSize);
@@ -175,9 +176,21 @@ StaticOps::Skip StaticOps::skyObjectDraws(const std::uint8_t* object, const floa
         if (static_cast<std::uint32_t>(std::max(get<std::int32_t>(object, 0x18), 0)) < n) return Skip::Unreadable;
         if (!rd(ptr(object, 0x10), 0, billboards.data(), billboards.size())) return Skip::Unreadable;
     }
-    std::vector<std::uint8_t> vertices, quads;
-    sc::skyBillboardVertices(billboards, n, vertices);
-    sc::skyQuadIndices(dd.startIndex / 6 + n, quads);
+    // the stars' billboards are the same for every cube face and frame: the converted vertices are kept while the input bytes are
+    // equal (F1; native.sky_cache, A/B)
+    // (one entry per sky object: the sun / moon / stars alternate within a cube face)
+    if (skyCaches_.size() > 64) skyCaches_.clear();
+    SkyCache& sk = skyCache_ ? skyCaches_[object] : skyScratch_;
+    std::vector<std::uint8_t>& vertices = sk.verts;
+    std::vector<std::uint8_t>& quads = sk.quads;
+    if (!skyCache_ || sk.key.size() != billboards.size() || std::memcmp(sk.key.data(), billboards.data(), billboards.size()) != 0) {
+        sc::skyBillboardVertices(billboards, n, vertices);
+        sk.key = billboards;
+    }
+    if (sk.quadCount != dd.startIndex / 6 + n || !skyCache_) {
+        sc::skyQuadIndices(dd.startIndex / 6 + n, quads);
+        sk.quadCount = dd.startIndex / 6 + n;
+    }
     // SetWorldMatrix(world, 0), SetGlobalAlpha(1, 0), GetPasses(shader, 0, null, 0, false, 0), ExecutePass + eCGfxVisual::Execute
     writeWorld(0, world);
     writeAlpha(0, 1.0f);

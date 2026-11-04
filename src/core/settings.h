@@ -409,6 +409,7 @@ struct RendererSettings {
     Setting* nativeLean = nullptr;             // native.lean: the engine's slot code not run for the composed mesh-like ops (O2a)
     Setting* nativeLeanCheck = nullptr;        // native.lean_check: every N-th frame the engine's code runs as before (compare)
     Setting* nativeLeanEffects = nullptr;      // native.lean_effects: O3 the effect units / sprite flushes / PSSM pass lean too (A/B)
+    Setting* nativeOpts = nullptr;             // native.cpu_opts: bit mask of the Full-mode CPU optimizations (docs/research/performance.md 22)
     Setting* nativeLeanRestore = nullptr;      // native.lean_restore: false = no per-op device save / restore around lean ops (A/B)
     Setting* nativeRetained = nullptr;         // native.retained: V3 retained composition of the sub-mesh draws (A/B)
     Setting* nativeRetainedCheck = nullptr;    // native.retained_check: every replay recomposed fresh and compared

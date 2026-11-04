@@ -307,6 +307,20 @@ private:
     const std::uint8_t* billboardAdmin_ = nullptr;  // the eCBillboardAdmin of the last RenderBillboards (RenderAlpha's admin)
     std::uint64_t billboardAlphaOps_ = 0, billboardAlphaDraws_ = 0;
     std::uint32_t streakLogged_ = 0;
+    // F1: the sky objects' billboards / converted vertices / quad indices, kept across calls (static_ops_sky.cpp)
+    struct SkyCache {
+        std::vector<std::uint8_t> key, verts, quads;
+        std::uint32_t quadCount = ~0u;
+    };
+    std::vector<std::uint8_t> skyBb_;
+    std::unordered_map<const void*, SkyCache, PtrHash> skyCaches_;
+    SkyCache skyScratch_;
+public:
+    void setOpts(unsigned mask) { opts_ = mask; skyCache_ = (mask & 1u) != 0; }
+    bool opt(unsigned bit) const { return (opts_ & bit) != 0; }
+private:
+    unsigned opts_ = 255;
+    bool skyCache_ = true;
     bool verifyBillboards();
     // the skinned actors' ops (static_ops_actors.cpp)
     bool verifyActors();
