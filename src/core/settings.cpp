@@ -1779,6 +1779,19 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 1,
         .flags = Flag::Debug,
     });
+    r.lightingFullLit = &reg.add({
+        .key = "lighting.full_lit",
+        .label = "Table lighting (Full)",
+        .category = "Lighting",
+        .tab = kTabDebug,
+        .description = "Full mode with clustered lights (default off until validated): every lit mesh / tree draw is composed with ONE pass of the 3-light "
+                       "shader permutation and takes all its point lights from the light table per pixel: the game's per-object light lists are no longer "
+                       "read, the additive passes of objects with more than 3 lights are gone and tree / mesh batches merge more. The picture differs "
+                       "from the game's (more lights where the game gave an object none or few). Run-time switch. rvk.log `native: table lighting`.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::Debug,
+    });
     r.lightingStyle = &reg.add({
         .key = "lighting.style",
         .label = "Light style",

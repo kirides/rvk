@@ -63,8 +63,19 @@ float lightPhysicalRatio(float d2, float rcpSqrRange);
 // the engine's falloff 1 - sat(d^2 / R^2)
 float lightEngineFalloff(float d2, float rcpSqrRange);
 
+// Full-owned lighting (setting lighting.full_lit, gpu-scene.md 9.8): lit draws are composed with one 3-light permutation and take ALL their point
+// lights from the table. Set by HalDevice::applyLighting (needs the table on and no compare run); read by native::StaticOps.
+bool fullLitActive();
+void setFullLitActive(bool on);
+
 class LightTable {
 public:
+    // A drawn object's light (its list entry: reg0 = position + 1 / R^2, reg1 = colour), handed over by native::StaticOps for lists it composed. The next
+    // build adds those the registry walk did not return (within 8 units = the same light). Thread-safe.
+    // true while the registry walk returns no static lights (nothing cached in): the drawn objects' static lights are then taken as a source too
+    static bool wantStaticNotes();
+    static void noteDrawnLight(const float pr[4], const float col[4]);
+
     explicit LightTable(d3d9::Device& device);
     ~LightTable();
     LightTable(const LightTable&) = delete;
@@ -89,6 +100,7 @@ private:
     std::array<std::unique_ptr<rhi::Buffer>, rhi::kFramesInFlight> upload_;        // the CPU's lights, per frame in flight
     std::vector<engine::lights::WorldLight> scratch_;
     std::vector<GpuLight> prev_, cur_;
+    std::uint32_t lastDrawnAdded_ = 0;
     engine::lights::Stats stats_;
     std::uint64_t passes_ = 0, skipped_ = 0, changedTotal_ = 0;
     std::uint32_t lastCount_ = 0, lastChanged_ = 0, lastDropped_ = 0;

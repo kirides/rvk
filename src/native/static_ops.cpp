@@ -15,6 +15,7 @@
 
 #include "d3d9/defs.h"
 #include "d3d9/memeq.h"
+#include "enh/light_table.h"
 #include "engine/memread.h"
 #include "engine/scene_hooks.h"
 #include "engine/scene_table.h"
@@ -677,12 +678,56 @@ void StaticOps::writeLighting(const sc::Pass& pass) {
     if (hasStatic) rd(illum, 0x94, staticSh, sizeof(staticSh));
     sc::ambientSh(sh, indoor, get<float>(illum, 8), hasStatic ? &staticSh[0][0] : nullptr, &L[1]);
     rd(list, 4, L[8], 48);
-    const std::uint32_t n = sc::passLights(pass.flags);
+    if (pass.tableLit) {
+        // the point lights are the table's (per pixel); the registers stay zero so the material variant refills every slot. The list's own dynamic
+        // lights go into the table too (once per list per frame; the table builds from them next frame), for scenes whose registry is empty
+        noteListLights(list);
+        // static lights of this illumination (+0xd, entries at +0x10), only while the registry holds none (a teleport / nothing cached in)
+        const std::uint32_t ns = std::min<std::uint32_t>(get<std::uint8_t>(illum, 0x0d), 4u);
+        if (ns != 0 && enh::LightTable::wantStaticNotes() && std::find(tableLitSeen_.begin(), tableLitSeen_.end(), illum) == tableLitSeen_.end() &&
+            tableLitSeen_.size() < 400) {
+            tableLitSeen_.push_back(illum);
+            for (std::uint32_t i = 0; i < ns; ++i) {
+                float e[8]{};
+                rd(illum + 0x10 + 0x40 * i, 0, &e[0], 16);
+                rd(illum + 0x10 + 0x40 * i, 0x10, &e[4], 16);
+                enh::LightTable::noteDrawnLight(e, e + 4);
+            }
+        }
+    }
     const std::uint32_t nStatic = get<std::uint8_t>(illum, 0x0d);
-    for (std::uint32_t j = 0; j < n; ++j) {
+    // (the engine's own first <= 3 lights stay in the registers: the material variant keeps those the table does not know and replaces the rest
+    // per pixel; a table-lit pass has the 3-light permutation whatever the object carries, the unused slots are zero = no light)
+    const std::uint32_t n = pass.tableLit ? 3u : sc::passLights(pass.flags);
+    const std::uint32_t have = pass.tableLit ? std::min<std::uint32_t>(3u, nStatic + get<std::uint8_t>(list, 0x34)) : n;
+    if (pass.tableLit) std::memset(L[11], 0, 3 * 4 * 16);
+    for (std::uint32_t j = 0; j < std::min(n, have); ++j) {
         const std::uint32_t idx = pass.firstLight + j;
         U8* src = idx < nStatic ? illum + 0x10 + 0x40 * idx : list + 0x38 + 0x40 * (idx - nStatic);
         if (11 + 4 * j + 4 <= 24) rd(src, 0, L[11 + 4 * j], 64);
+    }
+}
+
+void StaticOps::setTableLit(bool on) {
+    if (on != tableLit_) spdlog::info("native: table lighting {}", on ? "on (one 3-light permutation per lit draw, lights from the clustered table)" : "off");
+    tableLit_ = on;
+}
+
+void StaticOps::noteListLights(const std::uint8_t* list) {
+    const std::uint64_t frame = dev_.frameValue();
+    if (frame != tableLitFrame_) {
+        tableLitFrame_ = frame;
+        tableLitSeen_.clear();
+    }
+    if (std::find(tableLitSeen_.begin(), tableLitSeen_.end(), list) != tableLitSeen_.end() || tableLitSeen_.size() >= 400) return;
+    tableLitSeen_.push_back(list);
+    const std::uint32_t n = std::min<std::uint32_t>(get<std::uint8_t>(list, 0x34), 8u);
+    for (std::uint32_t i = 0; i < n; ++i) {
+        float e[8]{};  // c25 + 4 i (position, 1 / R^2) and c26 + 4 i (colour)
+        U8* src = const_cast<U8*>(list) + 0x38 + 0x40 * i;
+        rd(src, 0, &e[0], 16);
+        rd(src, 0x10, &e[4], 16);
+        enh::LightTable::noteDrawnLight(e, e + 4);
     }
 }
 
@@ -1201,6 +1246,7 @@ StaticOps::Skip StaticOps::materialDrawsImpl(const std::uint8_t* shader, const s
     in.combi = combi;
     in.instanced = instanced;
     in.switchValue = switchValue;
+    in.tableLit = tableLit_ && in.hasList;
     if (g_ != nullptr) {
         const std::uint32_t total = in.hasList ? std::min<std::uint32_t>(in.dynamicLights + in.staticLights, 4u) : 0u;
         ++g_->lights[total];
@@ -1421,7 +1467,7 @@ StaticOps::Skip StaticOps::composeSolid(const Op& op) {
         }
         std::vector<sc::Batch>& batches = scr_.batches;
         batches.clear();
-        sc::planBatches(list, 50, batches);
+        sc::planBatches(list, 50, batches, tableLit_);
         for (const sc::Batch& bt : batches) {
             for (std::uint32_t k = 0; k < bt.count; ++k) {
                 writeWorld(k, reinterpret_cast<const float*>(at(static_cast<std::int32_t>(bt.first + k))));
