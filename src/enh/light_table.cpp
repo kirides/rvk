@@ -22,23 +22,39 @@ constexpr std::uint64_t kClustersOffset = kLightsOffset + std::uint64_t{kLightMa
 constexpr std::uint64_t kBufferBytes = kClustersOffset + std::uint64_t{kClusters} * kLightClusterBytes;
 
 std::atomic<bool> g_fullLit{false};
+std::atomic<bool> g_registryThin{true};
 std::mutex g_drawnMutex;
-std::vector<engine::lights::WorldLight> g_drawn;  // lights of the lists drawn last frame(s), merged into the next build
+struct DrawnLight {
+    engine::lights::WorldLight l;
+    std::uint64_t stamp = 0;  // the build counter at the last note
+};
+std::vector<DrawnLight> g_drawn;  // lights of the lists drawn lately (kept while re-noted: replayed packets do not note again), merged into every build
+std::uint64_t g_buildCounter = 0;
+constexpr std::uint64_t kDrawnKeep = 900;  // builds
 }  // namespace
 
 bool fullLitActive() { return g_fullLit.load(std::memory_order_relaxed); }
 void setFullLitActive(bool on) { g_fullLit.store(on, std::memory_order_relaxed); }
 
+bool LightTable::wantStaticNotes() { return g_registryThin.load(std::memory_order_relaxed); }
+
 void LightTable::noteDrawnLight(const float pr[4], const float col[4]) {
     if (!(pr[3] > 0.0f) || !std::isfinite(pr[3]) || !(col[0] + col[1] + col[2] > 1e-4f)) return;
     const std::lock_guard lock(g_drawnMutex);
+    for (auto& d : g_drawn) {
+        if (std::abs(d.l.pos[0] - pr[0]) < 1.0f && std::abs(d.l.pos[1] - pr[1]) < 1.0f && std::abs(d.l.pos[2] - pr[2]) < 1.0f) {
+            std::memcpy(d.l.col, col, 12);
+            d.stamp = g_buildCounter;
+            return;
+        }
+    }
     if (g_drawn.size() >= 512) return;
     engine::lights::WorldLight l;
     std::memcpy(l.pos, pr, 12);
     l.range = 1.0f / std::sqrt(pr[3]);
     std::memcpy(l.col, col, 12);
     l.dynamic = true;
-    g_drawn.push_back(l);
+    g_drawn.push_back({l, g_buildCounter});
 }
 
 float lightSliceScale(float nearZ, float farZ, std::uint32_t slices) { return static_cast<float>(slices) / std::log(farZ / nearZ); }
@@ -138,12 +154,16 @@ void LightTable::record(d3d9::PassContext& ctx) {
         ++skipped_;
         return;
     }
+    g_registryThin.store(stats_.staticTotal == 0, std::memory_order_relaxed);
     // the lights of the lists drawn since the last build that the registry did not return (same light = within 8 units)
     lastDrawnAdded_ = 0;
     {
         const std::lock_guard lock(g_drawnMutex);
         const std::size_t registry = scratch_.size();
-        for (const auto& d : g_drawn) {
+        ++g_buildCounter;
+        std::erase_if(g_drawn, [](const DrawnLight& d) { return g_buildCounter - d.stamp > kDrawnKeep; });
+        for (const auto& dl : g_drawn) {
+            const auto& d = dl.l;
             bool known = false;
             for (std::size_t i = 0; i < scratch_.size() && !known; ++i) {
                 const auto& w = scratch_[i];
@@ -152,7 +172,6 @@ void LightTable::record(d3d9::PassContext& ctx) {
             if (!known) scratch_.push_back(d);
         }
         lastDrawnAdded_ = static_cast<std::uint32_t>(scratch_.size() - registry);
-        g_drawn.clear();
     }
     const auto reach = [&](const engine::lights::WorldLight& l) {
         const float dx = l.pos[0] - cam.position[0], dy = l.pos[1] - cam.position[1], dz = l.pos[2] - cam.position[2];

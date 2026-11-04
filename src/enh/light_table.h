@@ -72,6 +72,8 @@ class LightTable {
 public:
     // A drawn object's light (its list entry: reg0 = position + 1 / R^2, reg1 = colour), handed over by native::StaticOps for lists it composed. The next
     // build adds those the registry walk did not return (within 8 units = the same light). Thread-safe.
+    // true while the registry walk returns no static lights (nothing cached in): the drawn objects' static lights are then taken as a source too
+    static bool wantStaticNotes();
     static void noteDrawnLight(const float pr[4], const float col[4]);
 
     explicit LightTable(d3d9::Device& device);
