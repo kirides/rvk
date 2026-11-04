@@ -283,3 +283,30 @@ Measured effect at the player defaults (cache on vs off, 6 interleaved runs each
 
 Gates (build with the observer feed): `rvk_tests` 216 / 216; `rvk_d3d9test --validation` both backends 0; `testdemo` 7 / 7 with `-PlayerDefaults -Validation native.packet_cache=3` on Vulkan wrapper / full and D3D12 wrapper / full, 0
 validation lines; compare run 0 mismatches; `refcompare` Full + cache on: Vulkan jungle / beach_rain / pub_interior PASS, hero_closeup WARN, harbour_night FAIL (known night noise, dluma -3.8); D3D12 same set with harbour_night WARN.
+
+## 11. Combined-flags probe (stage 3 verdict), stage 4, clean timings, the floor (2026-11-04)
+
+**Stage 3 probe: `native.retained` (read-log composition retention) together with the packet cache** (player defaults, Vulkan, 3 interleaved pairs; the machine was disturbed in this batch: interval p50 up to 115 ms in
+single runs): cache only 6.942 (7.503 / 6.586 / 6.739), cache + retained 7.381 (8.079 / 6.965 / 7.099): no gain, nominally worse. Together with the earlier measurement (retained alone -0.09 ms at 100 % hits; replay 0.52 us per hit vs ~0.62 us
+composing) and the design estimate (composition skipping with signals, class-split patching, ~0.3 us per hit: ~-0.4 ms at best) the verdict is **no-go for stage 3** at the current cost structure: the per-frame redo of the constants
+(three register classes), the lighting block and the image touches is what a skipped composition would still have to do, and the signals only remove the (already small) validation. The signal catalogue (section 9) stays the base
+if the constants ever live in persistent per-object GPU blocks.
+
+**Stage 4 (built): shadow-view ops in the packet cache** (`StaticOps::issue`: group ShadowViews, key carries view kind, cascade and shadow map). Found on the way and fixed: the cache's env snapshot kept stale
+`colorFormats` entries beyond `colorCount_` (cleared per capture, only the used ones compared), which refused ~560 k replays per 5 s in depth-only passes; `rvk.log` now prints the refusal reasons (`native: packet cache refusals`). With it:
+~940 draws per frame replayed (static 232, trees 680, shadow views 160, minus the not capturable ones), shadow-view draws 2.27 -> 1.39 us in `issue()`, verify mode 600 k checks 0 differing (4,498 entries), gates unchanged
+(rvk_tests 216; testdemo 7 / 7 -Validation x4 with `-PlayerDefaults` and cache mode 3; compare run 26 groups none; refcompare no new FAIL on both backends). Vegetation stays out (its instance data is CPU-generated per frame).
+
+**Clean timings** (player defaults, savegame lod 2x, `-Perf` CPU per frame, three interleaved off / on pairs, a quiet window; Wrapper 1 run):
+
+| backend | Full, cache off | Full, cache on | saved | Wrapper | Full - Wrapper before -> after |
+|---|---|---|---|---|---|
+| Vulkan | 6.672 (6.532 / 6.774 / 6.710) | **6.254** (6.229 / 6.323 / 6.209) | **0.42 ms** | 4.503 | 2.17 -> **1.75** |
+| D3D12 | 6.939 (6.972 / 6.909 / 6.935) | **6.520** (6.521 / 6.504 / 6.534) | **0.42 ms** | 4.839 | 2.10 -> **1.68** |
+
+So the D3D12 gain that was unresolved under load (24.8) is real: -0.42 ms, equal to Vulkan.
+
+**The floor of this architecture.** Full - Wrapper is **+1.7 ms** at the player defaults on both backends. What the profile (clean run, 24.4 / 7) says is left: the composition of the ops that still runs every frame
+(trees ~0.8 - 1.0 ms, static meshes ~0.4 - 0.6, sky cube 0.3, effect units 0.4 - 0.7, particles / decals / billboards ~0.3) against the engine's own ~1.1 ms for the same slots; the replay itself 0.35 us x ~940 draws = 0.33 ms; the register setters
+~0.26 ms (compare + copy into the device's register file, then the ring windows); the per-op save / restore ~0.1 ms. To go below ~+1.2 ms the composition must stop being redone per frame: that needs the constants of an object
+in persistent GPU blocks (so that only the view / frame / light classes are patched per frame) and a world-matrix signal to invalidate them, i.e. the stage-3 design with a changed ABI, not a faster replay.

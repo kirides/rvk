@@ -1400,10 +1400,11 @@ void Device::fillCapture(const DrawPacket& p) {
         c.tex[slot] = t;
         c.texSlot[slot] = c.block.tex[slot];
     }
+    c.env = {};
     c.env.vp = viewport_;
     std::memcpy(c.env.scissor, scissor_, sizeof(scissor_));
     c.env.colorCount = colorCount_;
-    for (std::uint32_t i = 0; i < kRenderTargets; ++i) c.env.colorFormats[i] = colorFormats_[i];
+    for (std::uint32_t i = 0; i < colorCount_ && i < kRenderTargets; ++i) c.env.colorFormats[i] = colorFormats_[i];
     c.env.depthFormat = depthFormat_;
     c.env.stencilFormat = stencilFormat_;
     c.env.depthReversed = boundDepthReversed() ? 1u : 0u;
@@ -1427,33 +1428,49 @@ bool Device::replayAllowed(const CachedDraw& c) const {
 }
 
 bool Device::replayBuild(const CachedDraw& c, const ReplayInputs& in, DrawPacket& p, shader::abi::DrawBlock& b) {
-    if (!c.valid || vs_.get() != c.vs || ps_.get() != c.ps || vs_->module != c.vsModule || ps_->module != c.fsModule) return false;
-    if (phases_.current() != c.phase || !replayAllowed(c)) return false;
+    const auto fail = [&](int why) {
+        ++replayStats.why[why];
+        return false;
+    };
+    if (!c.valid || vs_.get() != c.vs || ps_.get() != c.ps || vs_->module != c.vsModule || ps_->module != c.fsModule) return fail(0);
+    if (phases_.current() != c.phase) return fail(1);
+    if (!replayAllowed(c)) return fail(2);
     CachedDraw::Env env{};
     env.vp = viewport_;
     std::memcpy(env.scissor, scissor_, sizeof(scissor_));
     env.colorCount = colorCount_;
-    for (std::uint32_t i = 0; i < kRenderTargets; ++i) env.colorFormats[i] = colorFormats_[i];
+    for (std::uint32_t i = 0; i < colorCount_ && i < kRenderTargets; ++i) env.colorFormats[i] = colorFormats_[i];
     env.depthFormat = depthFormat_;
     env.stencilFormat = stencilFormat_;
     env.depthReversed = boundDepthReversed() ? 1u : 0u;
-    if (std::memcmp(&env, &c.env, sizeof(env)) != 0) return false;  // (Env is built from the same fields in the same order; padding is zeroed by value-init)
+    if (std::memcmp(&env, &c.env, sizeof(env)) != 0) {
+        static int logged = 0;
+        if (logged < 8) {
+            ++logged;
+            spdlog::info("d3d9: replay env differs: viewport {},{} {}x{} vs {},{} {}x{}; scissor {},{},{},{} vs {},{},{},{}; colors {} vs {}; depth {} vs {}; stencil {} vs {}; reversed {} vs {}; z {} {} vs {} {}; phase {}/{}",
+                         env.vp.x, env.vp.y, env.vp.width, env.vp.height, c.env.vp.x, c.env.vp.y, c.env.vp.width, c.env.vp.height, env.scissor[0], env.scissor[1],
+                         env.scissor[2], env.scissor[3], c.env.scissor[0], c.env.scissor[1], c.env.scissor[2], c.env.scissor[3], env.colorCount, c.env.colorCount,
+                         static_cast<int>(env.depthFormat), static_cast<int>(c.env.depthFormat), static_cast<int>(env.stencilFormat), static_cast<int>(c.env.stencilFormat),
+                         env.depthReversed, c.env.depthReversed, env.vp.minZ, env.vp.maxZ, c.env.vp.minZ, c.env.vp.maxZ, scene::name(c.phase.view), scene::name(c.phase.pass));
+        }
+        return fail(3);
+    }  // (Env is built from the same fields in the same order; padding is zeroed by value-init)
     float jx = 0.0f, jy = 0.0f;
     geometryJitter(jx, jy);
-    if (jx != 0.0f || jy != 0.0f) return false;
+    if (jx != 0.0f || jy != 0.0f) return fail(4);
     for (std::uint32_t i = 0; i < 4; ++i) {
         if (((c.streamMask >> i) & 1u) == 0) continue;
-        if (in.streams[i] == nullptr) return false;
+        if (in.streams[i] == nullptr) return fail(5);
         const Buffer::Binding g = in.streams[i]->gpu(in.strides[i]);
-        if (g.buffer != c.stream[i].buffer || g.offset != c.stream[i].offset) return false;
+        if (g.buffer != c.stream[i].buffer || g.offset != c.stream[i].offset) return fail(5);
     }
-    if (in.indices == nullptr) return false;
+    if (in.indices == nullptr) return fail(6);
     const Buffer::Binding ib = in.indices->gpu(in.indices->index32() ? 4 : 2);
-    if (ib.buffer != c.ib.buffer || ib.offset != c.ib.offset) return false;
+    if (ib.buffer != c.ib.buffer || ib.offset != c.ib.offset) return fail(6);
     for (std::uint32_t mask = c.texMask; mask != 0; mask &= mask - 1) {
         const std::uint32_t slot = static_cast<std::uint32_t>(std::countr_zero(mask));
         Texture* t = c.tex[slot];
-        if (t->isNull() || t->pending_ || t->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL || t->bindlessSlot() != c.texSlot[slot]) return false;
+        if (t->isNull() || t->pending_ || t->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL || t->bindlessSlot() != c.texSlot[slot]) return fail(7);
     }
     b = c.block;
     std::memcpy(b.psC5, psF_[5], sizeof(b.psC5));
@@ -1512,6 +1529,7 @@ bool Device::replayDraw(const CachedDraw& c, const ReplayInputs& in) {
     syncPhaseRegions();
     if (rendering_ && (scopeGbuf_ != gbufferScope() || scopeSecondary_ != wantSecondaryScope())) endRendering();
     if (!beginRendering()) {
+        ++replayStats.why[9];
         ++replayStats.refused;
         return false;
     }
@@ -1545,6 +1563,7 @@ bool Device::replayDraw(const CachedDraw& c, const ReplayInputs& in) {
             if (!captureRequest_.null()) {
                 // an observer wants this draw's vertex capture (a different pipeline): the normal path draws it, without asking them again
                 skipObservers_ = true;
+                ++replayStats.why[8];
                 ++replayStats.refused;
                 return false;
             }
