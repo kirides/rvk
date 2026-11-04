@@ -753,3 +753,7 @@ beach_rain FAIL once (bad32 1.28) - flaky: the same spot PASSes in D3D12 Wrapper
 realistic floor of the current architecture (engine's code skipped, composition re-done per frame next to a shared 2.2 ms device path) is **Full - Wrapper ~1.3 ms** (Vulkan and D3D12). Getting to +0.5
 ms needs the composition's *results* to survive frames (retained composition across frames with an engine-side invalidation signal instead of a read log; V3's validation was only 0.05 ms, its replay cost
 was the constants / lighting / touches redone per frame), i.e. a persistent per-object GPU record, not a faster per-frame composition.
+
+### 24.5 Retained composition with engine change signals: study (2026-11-04)
+
+Full write-up: engine-frame/retained-signals.md. Signals exist for lifecycle and movement (OnCacheIn / OnCacheOut 0x6a9720 / 0x6a97b0, OnUpdatedWorldMatrix vt +0x230 / 0x69e8a0), none for materials, lights, LOD, fade (per-frame pulls / in-place writes). `native.retained` re-measured on the current build: 100 % hits (1,118 per frame), CPU 6.530 -> 6.444 ms (-0.09 ms), replay 0.52 us per hit vs ~0.62 composing: the redo of our own constants / lighting / touches is the cost, not validation. Estimate with signals + class-split patching: ~-0.4 ms, Full - Wrapper ~+1.6 ms: no-go for composition-only retention. Conditional go for retaining the packet (bypassing issue + prepareDraw, estimate -1 to -2.5 ms) as a separate project.
