@@ -206,3 +206,46 @@ The crystal cave's reference is the study's (no world lights there; a converged 
 D3D12 wrapper + full with defaults and `-Validation` 7 / 7, D3D12 wrapper with GI on and the debug layer (`RVK_NO_GBV=1`) 7 / 7 (with the GPU-based validation and GI on the RT scene makes the run ~0.1 fps and the scenario times out: known, rtgi/dx12 notes).
 Not run: `rvk_rhitest` GI parity, refcompare (gi off paths are untouched: the only changes act with `flags.z` bit 0 set, i.e. GI on with world lights + replace, and in the Debug reference), a GPU timing of the extra shadow ray per screen-probe ray
 (one `giPointLights` call per ray at the probe's own surface when the lights are in the probes: the 128-light loop is the cost driver of that pass; expected well under the pass's ~1 ms, unmeasured), the moving-light convergence measurement.
+
+## 11. The sky of escaping rays: the engine's sky cube, and the hemisphere SH instead of the far probe (2026-11-04, third agent)
+
+Question: let screen-probe rays that escape (no hit within 40 m, `rvkGiSkyRadiance` of the far DDGI probe's SH) read the engine's real sky. Result: **no change shipped; the far-probe field stays.** Two parts.
+
+### 11.1 The sky cube is not a usable radiance source [C]
+Source: the engine's `eCSkydome_PS::UpdateSkydomeEnvCubemap` cube (illum +0x470, 128^2 A8R8G8B8, LDR, display-space colour; dome + clouds + sun disc / glow + stars / moon, no geometry;
+bindless tCube slot = `RvkFrame.images.w`, the same one the water and the material pack sample). Read in the shader without trouble (`sp_trace` diag, sampler `screen3.w`); the cube is **not stale** in the test spots (water on = whole cube
+redrawn every frame vs water off: numbers within 3 %), so stability is not the problem. Measured with `RVK_GI_DIAG=1` (`tools/gi_sky_diag.py`, runs `out\skyfar\diag0/diag1`): the cube along the far rays, as `^2.2`
+(display -> acc, assumed) against the engine's hemisphere SH sky on the same rays (cube^2.2 / SH sky; spread = std / mean over the rays):
+
+| spot | beach_sun | jungle | harbour_night | lake_jungle | shadow_inland_a | pub_interior |
+|---|---|---|---|---|---|---|
+| mean ratio | 0.31 | 2.4 | 0.2 | 0.35 | 0.37 | (indoor fill 0.17 vs cube 0.21 on few rays) |
+| spread over rays | 1.5 - 1.8 | 0.8 | 1.9 - 2.0 | 1.9 - 2.0 | 1.4 - 1.8 | 0.7 - 1.0 |
+
+The cube's brightness has no fixed relation to the hemisphere's ambient (art-directed separately: jungle's cube is 2.4x its SH, beach 0.3x), its angular structure differs from the SH by more than the SH's own mean (spread 1.5 - 2: sun glow,
+horizon, clouds), it is 8-bit and clamped (the sun disc is 1.0, the NEE sun's colour is above that: the disc would be counted twice), and indoors (pub: the engine's "sky" is a fill colour) it holds the day sky. A per-frame calibration to the SH's brightness would
+leave only the shape mismatch. And the probes store **L2 irradiance** (7 registers): detail above L2 (clouds, disc) cannot be represented by DDGI nor survives the cosine-weighted screen-probe average; only the L0 - L2 content of the cube would matter, and that is
+exactly what differs from the engine's own ambient (hue and the unoccluded look would drift away from the engine's: the GI replaces the engine's ambient, it should keep its sky). Not built: no pass, no reference change. The diag stays (hidden, `RVK_GI_DIAG`: the `sky cube:` terms of the `enh: gi diag` lines).
+
+### 11.2 The hemisphere SH for every escape (`RVK_GI_EXP=64`) is worse [C]
+The reference path tracer and the DDGI rays already use `rvkGiSkyRadiance(sky)` (the hemisphere SH) on a miss, so the cleanest "same source" experiment is to drop the far-probe override of the screen probes (exp 64). Quick re-measure
+(`out\skyfar\remeasure.ps1`: 8 spp, the converged references of the earlier runs; screen bias / mean rel. err / MAE / lit-image err; the same build, EXP 0 vs 64):
+
+| spot | EXP 0 (far probe, shipped) | EXP 64 (SH sky) |
+|---|---|---|
+| beach_sun | -11.6 % / 21 % / 0.077 / 8.9 % | -35.6 % / 41 % / 0.208 / 10.9 % |
+| jungle | -3.3 % / 21 % / 0.018 / 6.9 % | +15.1 % / 35 % / 0.032 / 10.5 % |
+| harbour_night | -2.4 % / 17 % / 0.013 / 6.9 % | +32.3 % / 39 % / 0.036 / 12.4 % |
+| pub_interior | -4.0 % / 6 % / 0.002 / 6.4 % | -3.5 % / 6 % / 0.002 / 6.6 % |
+| monastery_hall | -19.6 % / 96 % / 0.190 / 33.0 % | -19.7 % / 95 % / 0.189 / 32.6 % |
+| crystal_cave | -5.6 % / 4 % / 0.001 / 3.6 % | +2.3 % / 3 % / 0.001 / 2.6 % |
+| lake_jungle | -3.0 % / 26 % / 0.052 / 7.5 % | +18.0 % / 46 % / 0.108 / 11.1 % |
+| shadow_inland_a | +0.3 % / 26 % / 0.049 / 12.3 % | +24.1 % / 50 % / 0.143 / 16.4 % |
+
+The far probe carries what lies beyond the 40 m reach (hills, tree lines, the reference sees them out to 1 km): the flat SH over-lights those pixels. So the beach's -6 .. -12 % is the price of the L2 reconstruction at the horizon, not of a wrong source.
+(Beach's -35 % under EXP 64 is odd and not explained; the other spots' signs fit "no distant occlusion". Run-to-run spread of one spot's bias is +-4 points.) Kept as the developer switch `RVK_GI_EXP=64`.
+Not tried: a hybrid (the far probe's occlusion with the SH's shape) or a longer, cheaper far trace; both stay open ideas.
+
+### 11.3 Tooling and housekeeping
+`gi-reference.ps1` now deletes `gi_ref` (tens of GB: one 59 MB dump per frame at `-Max 8`) after the analysis unless `-KeepDumps` or `-Max >= 512`; use `-Spp 8 -Max 64` for quick re-measures. A run ended while a dump was being written leaves a truncated `.npy`:
+delete it and its `_meta.json`. Gates: rvk_tests 224 / 224, `dxil-check embedded` 58 / 58, one `-Validation` run of beach_sun + pub_interior with GI + diag: no VUID. Not run: corpus --gi (no corpus in this worktree), rhitest, testdemo on both APIs (the shipped paths are unchanged: the cube sampling sits behind `RVK_GI_DIAG`).

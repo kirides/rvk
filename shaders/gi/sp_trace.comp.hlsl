@@ -29,6 +29,7 @@ groupshared float3 sDir[64];
 // GLSL: GiDiag(p.screen5.yz).v[i], a uint array at an address (element i = a BufferPointer<uint, 4>)
 groupshared float4 sD0[64];  // luminance of: hit sun, hit point, hit bounce, hit emission
 groupshared float4 sD1[64];  // ray type (0 far / sky, 1 hit, 2 back face), hit distance, albedo (linear) luminance, the engine's sky radiance along the ray
+groupshared float4 sD3[64];  // sky cube / the engine's sky on the ray: the ratio (clamped), its square, 0, 0
 groupshared float4 sD2[64];  // far field towards +dir, 0, 0, 0
 
 [numthreads(64, 1, 1)]
@@ -108,12 +109,22 @@ void CSMain(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
                 // the radiance arriving from beyond the reach is what the probe at the ray's end sees looking along `dir`: the
                 // probe's irradiance SH with the cosine convolution undone (as for the engine's sky), not its irradiance towards
                 // -dir (the light of a surface facing us: for a ray into the open sky the dim ground light). rtgi.md 23
-                radiance = deconv;
+                if ((rvkGiExp(v) & 64u) == 0u) radiance = deconv;  // (EXP 64: keep giShadeRay's sky = the engine's hemisphere SH, as the DDGI probes and the reference)
             }
         }
         radiance += lightDirect;
         sD0[lane] = float4(dot(gDiagSun, lw0), dot(gDiagPoint, lw0), dot(gDiagBounce, lw0), dot(gDiagEmis, lw0));
         sD1[lane] = d1;
+        if (p.Get().screen5.w != 0u && f.images.w != 0u) {
+            // diagnostics: the engine's sky cube along the ray (display-space colour: raw, and as acc units = ^2.2)
+            float3 cs = RVK_TEXCUBE(f.images.w).SampleLevel(RVK_SAMP(p.Get().screen3.w), dir, 0.0).rgb;
+            d2.z = dot(cs, lw0);
+            d2.w = dot(pow(max(cs, float3(0.0, 0.0, 0.0)), float3(2.2, 2.2, 2.2)), lw0);
+            float q = clamp(d2.w / max(d1.w, 1e-3), 0.0, 8.0);
+            sD3[lane] = float4(q, q * q, 0.0, 0.0);
+        } else {
+            sD3[lane] = float4(0.0, 0.0, 0.0, 0.0);
+        }
         sD2[lane] = d2;
     }
     sRad[lane] = radiance;
@@ -171,17 +182,23 @@ void CSMain(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
         float inv = 1.0 / float(rays);
         float4 a0 = float4(0.0, 0.0, 0.0, 0.0), a1 = float4(0.0, 0.0, 0.0, 0.0);
         float raw = 0.0, nFar = 0.0, nHit = 0.0, nBack = 0.0, nNear = 0.0, nMid = 0.0, alb = 0.0, skyAll = 0.0, hitRad = 0.0, farRad = 0.0;
+        float cubeFarRaw = 0.0, cubeFarG = 0.0, cubeAllG = 0.0, qSum = 0.0, qSum2 = 0.0;
         for (uint i = 0u; i < rays; ++i) {
             float4 q0 = sD0[local * rays + i], q1 = sD1[local * rays + i], q2 = sD2[local * rays + i];
             float rl = dot(sRad[local * rays + i], lw);
             raw += rl;
             skyAll += q1.w;
+            cubeAllG += q2.w;
             if (q1.x < 0.5) {
                 nFar += 1.0;
                 farRad += rl;     // far field used
                 a1.y += q1.w;     // the engine's sky along the same rays
                 a1.z += q2.x;     // far field evaluated towards +dir
                 a1.w += q2.y;     // far field as radiance (the SH's cosine convolution undone) towards +dir
+                cubeFarRaw += q2.z;
+                cubeFarG += q2.w;
+                qSum += sD3[local * rays + i].x;
+                qSum2 += sD3[local * rays + i].y;
             } else if (q1.x < 1.5) {
                 nHit += 1.0;
                 a0 += q0;
@@ -194,8 +211,13 @@ void CSMain(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
             }
         }
         const float S = 1024.0 * inv;
-        float val[21];
+        float val[26];
         val[20] = a1.w * S;
+        val[21] = cubeFarRaw * S;
+        val[22] = cubeFarG * S;
+        val[23] = cubeAllG * S;
+        val[24] = qSum * S;
+        val[25] = qSum2 * S;
         val[0] = 1024.0;
         val[1] = dot(max(rvkGiEvalRegs(p.Get().sky, N), float3(0.0, 0.0, 0.0)), lw) * 1024.0;
         val[2] = dl * 1024.0;
@@ -216,7 +238,7 @@ void CSMain(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
         val[17] = skyAll * S;
         val[18] = alb * S;
         val[19] = hitRad * S;
-        for (uint i = 0u; i < 21u; ++i) {
+        for (uint i = 0u; i < 26u; ++i) {
             rvkRwAtomicAdd(rvkAddrAdd(dg, (b + i) * 4u), uint(clamp(val[i], 0.0, 4.0e6)));
         }
     }
