@@ -147,4 +147,24 @@ estimates from the profile, not measurements.
 
 ## 9. Status
 
-M0 doc and M1a are committed. M1a gate (Full, testdemo 7/7, `native.gpu_scene=1`, 45 s): 787 slots, 2,614 op entities checked, all resolved, matrices equal, DIFFERING 0, no hook warnings; rvk_tests 224/224. Not run yet: D3D12, -Validation, long run, refcompare (hooks are backend independent). Nothing beyond the CPU table exists: no GPU buffer, culling, indirect draws or shader ABI change.
+M0 doc and M1a are committed. M1a gate (Full, testdemo 7/7, `native.gpu_scene=1`, 45 s): 787 slots, 2,614 op entities checked, all resolved, matrices equal, DIFFERING 0, no hook warnings; rvk_tests 224/224. Not run yet: D3D12, -Validation, long run, refcompare (hooks are backend independent). Nothing beyond the CPU table existed then: no GPU buffer, culling, indirect draws or shader ABI change.
+
+### 9.1 M1b part 1: the GPU instance table (built 2026-11-04)
+
+`src/gpuscene/instance_buffer.*`: a 32,768-slot x 160 B device-memory buffer (`InstanceRecord`: world, prev, generation, version, flags, live, movedFrame; HLSL
+`shaders/include/rvk_instance.hlsli`, `rvkLoadInstance(tableRef, i)`), addressed by one `GpuRef` (Vulkan device address / D3D12 heap slot + offset) from `rhi::Buffer::shaderRef`.
+`flush()` runs once per present (`native.gpu_scene=2`, default 0): `scenetable::drainFreed` (new: freed slots, tracked only while a consumer drains) then `drainDirty`, one ring staging
+block per frame, one `copyBuffer` per contiguous run, a barrier. Every 240th frame the table is read back (Readback buffer, collected once the frame completed) and compared with
+the CPU copy that was uploaded. Gate (Full, savegame `out/fg/perf.save`, lod 2x, `-Validation`, 60 s): Vulkan 3,411 flushes, 108,909 slots in 63,755 runs (17 MiB), 21 read-backs
+(67,077 slots) DIFFERING 0, 0.068 ms CPU per flush, scene table 3.4 M op entities checked, DIFFERING 0; D3D12 (debug layer, RVK_NO_GBV) 3,721 flushes, 19 read-backs (71,660 slots)
+DIFFERING 0, 0.096 ms per flush, no validation messages; testdemo 7/7 with `-Validation` (Vulkan Full); rvk_tests 224/224.
+
+**Finding that changes the plan (from the existing profile, performance.md 24):** in Wrapper `eCFrustumDatabase::Execute` is 3.18 ms of which the device draw path 2.07 and the engine's
+slot code ~1.1: the engine's own walk (cull, `Request`, sorts) is ~0 of it. So M3 (taking over `Request`) cannot pay on its own; the gain lies in what is done *per drawn op*: our
+composition (~1.25 us per op x ~1,200) + `issue` / replay (0.35 us x 940) + register setters + the shared prepareDraw path for ops that miss the packet cache. A draw from persistent
+GPU state (object window from the instance table, material / light windows persistent, packets replayed in grouped batches) is the lever; `Request` skipping only a later step.
+
+**Not built (nothing of it exists in the tree):** the translator's `objectFromTable` (world rows c33..c35 of non-instanced static meshes via a variant through `TranslateOptions::constOverrides`;
+needs a push block extension `objTable` + `objIndex` (112 -> 128 B), `noteWindow` skipping overridden registers, a per-draw VS variant choice in `prepareDraw`), the mesh / material tables,
+GPU cull + indirect draws, vegetation, trees, cascades, `Request`. The GPU table has no consumer yet, so `native.gpu_scene=2` costs ~0.07 - 0.1 ms CPU for nothing: keep it at 0 until
+M1b part 2 or the RT scene / object motion read it. No CPU number improved.
