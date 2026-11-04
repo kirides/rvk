@@ -18,6 +18,8 @@ param(
     # render mode of both runs (run.ps1 -Mode): wrapper (default; old name vulkan) or full; Wrapper vs Full side by side:
     # -EngineSetting 'renderer.mode=wrapper' -Setting 'renderer.mode=full' (the player setting, with -Mode wrapper)
     [ValidateSet('wrapper', 'full', 'vulkan')][string]$Mode = 'wrapper',
+    # graphics API of both runs (run.ps1 -Api)
+    [ValidateSet('vulkan', 'd3d12')][string]$Api = 'vulkan',
     [string]$GameDir = 'B:\DevDrive\risen-test-vk',
     # build configuration folder (build\<Config>\d3d9.dll) deployed by run.ps1
     [string]$Config = 'RelWithDebInfo',
