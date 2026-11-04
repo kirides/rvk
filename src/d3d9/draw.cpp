@@ -1209,6 +1209,14 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     }
     rhi::RingAlloc db = game_->allocRing(sizeof(block), 16);
     std::memcpy(db.ptr, &block, sizeof(block));
+    if (capture_ != nullptr) {
+        // a plain draw: no enhancement took part in it (the retained packet replays exactly this)
+        captureOk_ = !replaced && tint == 0 && !captureDraw && !giDraw && !gbufWrite_ && customVertices_ == 0 && geom.indexed && !geom.userPointer &&
+                     rep.action == DrawReplacement::Action::Engine && uberBase == rhi::ShaderModule::None && vsModule == vs_->module &&
+                     fs == ps_->module && captureRequest_.null();
+        lastBlock_ = block;
+        lastKind_ = kind;
+    }
 
     if (stats_.totalDraws < options_.logDraws) {
         std::string tex;
@@ -1318,6 +1326,174 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
             std::memcpy(camera_.vsConstants[i].data(), vsF_[i], sizeof(float) * 4);
         }
     }
+    return true;
+}
+
+// ---- packet retention ---------------------------------------------------------------------------------------------------
+
+void Device::fillCapture(const DrawPacket& p) {
+    CachedDraw& c = *capture_;
+    c.valid = false;
+    if (!captureOk_ || p.op != DrawPacket::Op::DrawIndexed || vs_.get() == nullptr || ps_.get() == nullptr) {
+        ++replayStats.notCaptured;
+        return;
+    }
+    c.packet = p;
+    c.vi = *p.vi;
+    c.dyn = *p.dyn;
+    c.block = lastBlock_;
+    c.kind = lastKind_;
+    c.phase = phases_.current();
+    c.vs = vs_.get();
+    c.ps = ps_.get();
+    c.vsModule = vs_->module;
+    c.fsModule = ps_->module;
+    c.streamMask = 0;
+    for (std::uint32_t i = 0; i < 4; ++i) {
+        if (streams_[i].buffer == nullptr) continue;
+        c.streamMask |= 1u << i;
+        c.stream[i] = streams_[i].buffer->gpu(streams_[i].stride);
+    }
+    c.ib = indices_->gpu(indices_->index32() ? 4 : 2);
+    c.texMask = 0;
+    for (std::uint32_t mask = boundSamplerMask(); mask != 0; mask &= mask - 1) {
+        const std::uint32_t slot = static_cast<std::uint32_t>(std::countr_zero(mask));
+        Texture* t = tex_[slot];
+        // only draws whose textures were all sampled as such (the block holds their bindless slots)
+        if (t == nullptr || t->isNull() || t->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL || t == substituteFrom_) {
+            ++replayStats.notCaptured;
+            return;
+        }
+        c.texMask |= 1u << slot;
+        c.tex[slot] = t;
+        c.texSlot[slot] = c.block.tex[slot];
+    }
+    c.env.vp = viewport_;
+    std::memcpy(c.env.scissor, scissor_, sizeof(scissor_));
+    c.env.colorCount = colorCount_;
+    for (std::uint32_t i = 0; i < kRenderTargets; ++i) c.env.colorFormats[i] = colorFormats_[i];
+    c.env.depthFormat = depthFormat_;
+    c.env.stencilFormat = stencilFormat_;
+    c.env.depthReversed = boundDepthReversed() ? 1u : 0u;
+    c.valid = replayAllowed(c);
+    if (c.valid) ++replayStats.captured;
+    else ++replayStats.notCaptured;
+}
+
+bool Device::replayAllowed(const CachedDraw& c) const {
+    if (tint_ != draws::TintMode::Off || ubershader_.load(std::memory_order_relaxed) || gbuf_.normal != nullptr || giDraws_.on) return false;
+    if (stats_.totalDraws < options_.logDraws || wp0_.on || customVertices_ != 0 || up_.active) return false;
+    if (c.kind == draws::Kind::SpeedTreeBillboard && billboardFadeScale_ != 1.0f) return false;
+    for (DrawObserver* o : observers_) {
+        if (o->observes(c.kind, c.phase)) return false;
+    }
+    if (!replacers_.empty()) {
+        for (DrawReplacer* r : replacers_) {
+            if (r->wantsOpaque()) return false;
+            if (r->handles(c.kind, c.phase, tag_)) return false;
+        }
+    }
+    return true;
+}
+
+bool Device::replayBuild(const CachedDraw& c, const ReplayInputs& in, DrawPacket& p, shader::abi::DrawBlock& b) {
+    if (!c.valid || vs_.get() != c.vs || ps_.get() != c.ps || vs_->module != c.vsModule || ps_->module != c.fsModule) return false;
+    if (phases_.current() != c.phase || !replayAllowed(c)) return false;
+    CachedDraw::Env env{};
+    env.vp = viewport_;
+    std::memcpy(env.scissor, scissor_, sizeof(scissor_));
+    env.colorCount = colorCount_;
+    for (std::uint32_t i = 0; i < kRenderTargets; ++i) env.colorFormats[i] = colorFormats_[i];
+    env.depthFormat = depthFormat_;
+    env.stencilFormat = stencilFormat_;
+    env.depthReversed = boundDepthReversed() ? 1u : 0u;
+    if (std::memcmp(&env, &c.env, sizeof(env)) != 0) return false;  // (Env is built from the same fields in the same order; padding is zeroed by value-init)
+    float jx = 0.0f, jy = 0.0f;
+    geometryJitter(jx, jy);
+    if (jx != 0.0f || jy != 0.0f) return false;
+    for (std::uint32_t i = 0; i < 4; ++i) {
+        if (((c.streamMask >> i) & 1u) == 0) continue;
+        if (in.streams[i] == nullptr) return false;
+        const Buffer::Binding g = in.streams[i]->gpu(in.strides[i]);
+        if (g.buffer != c.stream[i].buffer || g.offset != c.stream[i].offset) return false;
+    }
+    if (in.indices == nullptr) return false;
+    const Buffer::Binding ib = in.indices->gpu(in.indices->index32() ? 4 : 2);
+    if (ib.buffer != c.ib.buffer || ib.offset != c.ib.offset) return false;
+    for (std::uint32_t mask = c.texMask; mask != 0; mask &= mask - 1) {
+        const std::uint32_t slot = static_cast<std::uint32_t>(std::countr_zero(mask));
+        Texture* t = c.tex[slot];
+        if (t->isNull() || t->pending_ || t->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL || t->bindlessSlot() != c.texSlot[slot]) return false;
+    }
+    b = c.block;
+    std::memcpy(b.psC5, psF_[5], sizeof(b.psC5));
+    depthRemap(b.posFix[2], b.posFix[3]);
+    p = c.packet;
+    p.vi = internVi(c.vi);
+    p.dyn = internDyn(c.dyn);
+    return true;
+}
+
+bool Device::replayMatches(const CachedDraw& cached, const CachedDraw& fresh, const ReplayInputs& in, bool& valid, std::string& why) {
+    DrawPacket p;
+    shader::abi::DrawBlock b{};
+    valid = replayBuild(cached, in, p, b);
+    if (!valid) return true;
+    const DrawPacket& f = fresh.packet;
+    const auto bad = [&](const char* what) {
+        why = what;
+        return false;
+    };
+    if (p.pipeline != f.pipeline) return bad("pipeline");
+    if (p.vi != f.vi) return bad("vertex input");
+    if (p.dyn != f.dyn) return bad("dynamic state");
+    if (p.op != f.op || p.index32 != f.index32 || p.batchable != f.batchable) return bad("packet kind / batchable");
+    if (p.indexBuffer != f.indexBuffer || p.indexOffset != f.indexOffset || p.first != f.first || p.count != f.count || p.instances != f.instances ||
+        p.vertexOffset != f.vertexOffset) {
+        return bad("ranges");
+    }
+    if (p.push.flags != f.push.flags) return bad("push flags");
+    if (std::memcmp(&b, &fresh.block, sizeof(b)) != 0) return bad("draw block");
+    return true;
+}
+
+bool Device::replayDraw(const CachedDraw& c, const ReplayInputs& in) {
+    if (!c.valid || vs_.get() == nullptr || ps_.get() == nullptr || vs_->module == rhi::ShaderModule::None || ps_->module == rhi::ShaderModule::None) {
+        ++replayStats.refused;
+        return false;
+    }
+    syncPhaseRegions();
+    if (rendering_ && (scopeGbuf_ != gbufferScope() || scopeSecondary_ != wantSecondaryScope())) endRendering();
+    if (!beginRendering()) {
+        ++replayStats.refused;
+        return false;
+    }
+    DrawPacket p;
+    shader::abi::DrawBlock b{};
+    if (!replayBuild(c, in, p, b)) {
+        ++replayStats.refused;
+        return false;
+    }
+    const std::uint64_t frame = frameValue();
+    for (std::uint32_t mask = c.texMask; mask != 0; mask &= mask - 1) c.tex[std::countr_zero(mask)]->lastUseFrame_ = frame;
+    uploadConstants(false, 0);
+    rhi::RingAlloc db = game_->allocRing(sizeof(b), 16);
+    std::memcpy(db.ptr, &b, sizeof(b));
+    const std::uint32_t flags = p.push.flags;
+    p.push = shader::abi::PushConstants{drawSplit_[0] ? 0 : vsConstAddr_.bits, drawSplit_[1] ? 0 : psConstAddr_.bits, db.ref.bits, frameBlockAddress().bits,
+                                        0, stats_.draws, flags};
+    for (std::uint32_t w = 0; w < shader::abi::kConstWindows; ++w) {
+        p.push.vsWin[w] = drawWin_[0][w].bits;
+        p.push.psWin[w] = drawWin_[1][w].bits;
+    }
+    if (drawSplit_[1]) p.push.psWin[1] = db.ref.plus(static_cast<std::int64_t>(offsetof(shader::abi::DrawBlock, psC5)) - 5 * 16).bits;
+    ++stats_.draws;
+    ++stats_.totalDraws;
+    ++passDraws_;
+    phases_.countDraw();
+    draws_.count(c.kind, c.phase.view);
+    ++replayStats.replayed;
+    submitInterned(p);
     return true;
 }
 
@@ -1497,6 +1673,11 @@ const rhi::DynamicStateValues* Device::internDyn(const rhi::DynamicStateValues& 
 void Device::submitPacket(DrawPacket& p) {
     p.vi = internVi(workVi_);
     p.dyn = internDyn(workDyn_);
+    if (capture_ != nullptr) fillCapture(p);
+    submitInterned(p);
+}
+
+void Device::submitInterned(DrawPacket& p) {
     if (p.batchable && rendering_) {
         batch_.push_back(p);
         // with record threads a full segment goes to a worker at once (the draws of a pass are recorded while the engine goes on

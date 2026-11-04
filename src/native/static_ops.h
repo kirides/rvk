@@ -107,6 +107,12 @@ public:
     void setLean(bool on, int check);
     // native.lean_restore (O2b measurement): false = no device save / restore around a lean op's draws
     void setLeanRestore(bool on) { leanRestore_ = on; }
+    // packet retention (native.packet_cache; retained-signals.md 8): 0 off, 1 on, 2 on + verify every 10th frame, 3 on + verify every frame. Only
+    // set when no compare / tap / coverage is active (they need prepareDraw's tap)
+    void setPacketCache(int mode) {
+        packetMode_ = mode;
+        if (mode == 0) packets_.clear();
+    }
     // V3 retained composition (native.retained / native.retained_groups / native.retained_check)
     void setRetained(bool on, int groups, bool check);
     bool inSkyCube() const { return inSkyCube_; }
@@ -685,6 +691,19 @@ private:
     PtrMemo<d3d9::Shader*> elementMemo_;
     PtrMemo<Mirror::ShaderPools*> poolsMemo_;
 
+    // packet retention: a composed draw's finished packet by (op, draw index), valid while the draw description equals the captured one
+    int packetMode_ = 0;
+    struct PacketEntry {
+        d3d9::Device::CachedDraw cd;
+        std::unique_ptr<sc::DrawDesc> desc;
+    };
+    std::unordered_map<std::uint64_t, PacketEntry> packets_;
+    struct PacketStats {
+        std::uint64_t replayed = 0, refused = 0, built = 0, notBuilt = 0, verified = 0, invalid = 0, mismatches = 0, changed = 0;
+    } pktWindow_, pktTotal_;
+    std::uint32_t pktMismatchLogged_ = 0;
+    std::unique_ptr<d3d9::Device::CachedDraw> pktFresh_;
+    static bool packetSameDesc(const sc::DrawDesc& a, const sc::DrawDesc& b);
     std::size_t issueIndex_ = 0;
     std::vector<std::uint8_t> ownKind_;
     // non-op paths (decals): the unit whose draws are composed in place of an op

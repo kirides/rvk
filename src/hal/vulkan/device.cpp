@@ -191,6 +191,10 @@ void HalDevice::applyStaticOps() {
     staticOps_->setLean(leanOn, leanCheck);
     // O3: the effect units, sprite flushes and the PSSM pass (native.lean_effects: their A/B)
     effectOps_->setLean(leanOn && (rs.nativeLeanEffects == nullptr || on(rs.nativeLeanEffects)), leanCheck);
+    {
+        const bool cacheBlocked = compare || sceneCompare || on(rs.nativeFrameTap) || on(rs.nativeCoverage) || !leanOn;
+        staticOps_->setPacketCache(rs.nativePacketCache != nullptr && !cacheBlocked ? rs.nativePacketCache->asInt() : 0);
+    }
     staticOps_->setOpts(rs.nativeOpts != nullptr ? static_cast<unsigned>(rs.nativeOpts->asInt()) : 255u);
     staticOps_->setLeanRestore(rs.nativeLeanRestore == nullptr || on(rs.nativeLeanRestore));
     staticOps_->setRetained(on(rs.nativeRetained), rs.nativeRetainedGroups != nullptr ? rs.nativeRetainedGroups->asInt() : 0x2ff, on(rs.nativeRetainedCheck));
@@ -478,7 +482,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     frameTap_->setEffectOps(effectOps_.get());
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups,
                                  rs.nativeMirror, rs.nativeCoverage, rs.nativeFrameTap, rs.nativeLean, rs.nativeLeanCheck,
-                                 rs.nativeLeanRestore, rs.nativeOpts, rs.nativeLeanEffects, rs.nativeRetained, rs.nativeRetainedCheck, rs.nativeRetainedGroups}) {
+                                 rs.nativeLeanRestore, rs.nativeOpts, rs.nativePacketCache, rs.nativeLeanEffects, rs.nativeRetained, rs.nativeRetainedCheck, rs.nativeRetainedGroups}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
     // renderer.mode (Wrapper / Full): like the native.* settings applied by the registry's dispatch before a present, i.e. at a

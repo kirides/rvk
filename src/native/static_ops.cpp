@@ -1910,6 +1910,26 @@ bool StaticOps::engineDraw(const d3d9::DrawTapInfo& t, const Op* op) {
     return taken_;
 }
 
+// everything of a composed draw but its register values: what the finished packet is derived from
+bool StaticOps::packetSameDesc(const sc::DrawDesc& a, const sc::DrawDesc& b) {
+    if (a.vs != b.vs || a.ps != b.ps || a.decl != b.decl || a.indices != b.indices || a.indexed != b.indexed || a.primType != b.primType ||
+        a.baseVertex != b.baseVertex || a.minIndex != b.minIndex || a.numVertices != b.numVertices || a.startIndex != b.startIndex ||
+        a.primCount != b.primCount || a.samplerMask != b.samplerMask || a.inheritMask != b.inheritMask || a.drawClass != b.drawClass ||
+        a.passFlags != b.passFlags || a.zPass != b.zPass || a.subMesh != b.subMesh || a.material != b.material || a.tagSubMesh != b.tagSubMesh ||
+        a.tagMaterial != b.tagMaterial || a.tagMeshResource != b.tagMeshResource || a.tagWater != b.tagWater || a.tagMaterialName != b.tagMaterialName) {
+        return false;
+    }
+    for (std::size_t i = 0; i < 4; ++i) {
+        if (!(a.streams[i] == b.streams[i])) return false;
+    }
+    if (a.states != b.states) return false;
+    for (std::uint32_t m = static_cast<std::uint32_t>(a.samplerMask); m != 0; m &= m - 1) {
+        const auto st = sc::lowBit(m);
+        if (!(a.samplers[st] == b.samplers[st])) return false;
+    }
+    return true;
+}
+
 // our own draws of the op: the device state saved and restored around them
 void StaticOps::issue() {
     if (drawCount_ == 0) return;
@@ -1957,10 +1977,46 @@ void StaticOps::issue() {
     const draws::Tag savedTag = tag;
 
     issuing_ = true;
+    // packet retention: static meshes and trees of the main view (the groups whose draws repeat every frame)
+    const bool cacheOn = packetMode_ != 0 && op_ != nullptr && !inNonOp_ && viewKind_ == ViewKind::Main && !tagOverride_ &&
+                         (g_ == &groups_[static_cast<std::size_t>(Group::Static)] || g_ == &groups_[static_cast<std::size_t>(Group::Trees)]);
+    const bool verifyFrame = cacheOn && packetMode_ >= 2 && (packetMode_ == 3 || dev_.stats().frames % 10 == 0);
+    bool fullStates = false;  // a draw went the normal way: the device state beyond shaders / registers was set (and is restored)
+    const auto setRegs = [&](const sc::DrawDesc& dd) {
+        sc::forEachRun(dd.vsSet, [&](std::uint32_t r, std::uint32_t n) { dev_.setVertexShaderConstantF(r, dd.vsF[r], n); });
+        sc::forEachRun(dd.psSet, [&](std::uint32_t r, std::uint32_t n) { dev_.setPixelShaderConstantF(r, dd.psF[r], n); });
+    };
     for (std::size_t k = 0; k < drawCount_; ++k) {
         const sc::DrawDesc& d = *draws_[k];
         dev_.setVertexShaderRef(ShaderRef(const_cast<Shader*>(static_cast<const Shader*>(d.vs))));
         dev_.setPixelShaderRef(ShaderRef(const_cast<Shader*>(static_cast<const Shader*>(d.ps))));
+        PacketEntry* pe = nullptr;
+        std::uint64_t pkey = 0;
+        d3d9::Device::ReplayInputs rin;
+        const bool cacheable = cacheOn && d.vertexBytes.empty() && d.inheritMask == 0 && d.indexed && d.cpuStream == 0;
+        if (cacheable) {
+            for (std::size_t i = 0; i < 4; ++i) {
+                rin.streams[i] = const_cast<Buffer*>(static_cast<const Buffer*>(d.streams[i].buffer));
+                rin.strides[i] = d.streams[i].stride;
+            }
+            rin.indices = const_cast<Buffer*>(static_cast<const Buffer*>(d.indices));
+            pkey = (reinterpret_cast<std::uintptr_t>(op_->raw.context) * 0x9E3779B97F4A7C15ull) ^ (static_cast<std::uint64_t>(op_->raw.desc) * 0xC2B2AE3D27D4EB4Full) ^
+                   (static_cast<std::uint64_t>(op_->list) << 56) ^ (static_cast<std::uint64_t>(k) << 48) ^ (static_cast<std::uint64_t>(g_ - groups_.data()) << 40);
+            if (const auto it = packets_.find(pkey); it != packets_.end()) {
+                if (packetSameDesc(d, *it->second.desc)) pe = &it->second;
+                else ++pktWindow_.changed;
+            }
+        }
+        if (pe != nullptr && !verifyFrame) {
+            setRegs(d);
+            if (dev_.replayDraw(pe->cd, rin)) {
+                ++g_->issuedDraws;
+                ++pktWindow_.replayed;
+                continue;
+            }
+            ++pktWindow_.refused;
+        }
+        fullStates = true;
         dev_.setVertexDecl(const_cast<VertexDecl*>(static_cast<const VertexDecl*>(d.decl)));
         for (std::uint32_t i = 0; i < 4; ++i) {
             const auto& s = d.streams[i];
@@ -2021,8 +2077,7 @@ void StaticOps::issue() {
             dev_.setSamplerStates(st, kSs, d.samplers[st].ss.data(), 7);
         }
         // the composed registers as ranges (one copy per run of consecutive registers)
-        sc::forEachRun(d.vsSet, [&](std::uint32_t r, std::uint32_t n) { dev_.setVertexShaderConstantF(r, d.vsF[r], n); });
-        sc::forEachRun(d.psSet, [&](std::uint32_t r, std::uint32_t n) { dev_.setPixelShaderConstantF(r, d.psF[r], n); });
+        setRegs(d);
         tag = tagOverride_ ? tagOverrideValue_ : savedTag;
         if (d.tagSubMesh != nullptr) {
             tag.subMesh = d.tagSubMesh;
@@ -2032,11 +2087,43 @@ void StaticOps::issue() {
             tag.materialName = d.tagMaterialName;
         }
         issueIndex_ = k;
+        const bool capturing = cacheable && (pe == nullptr || verifyFrame);
+        if (capturing) {
+            if (!pktFresh_) pktFresh_ = std::make_unique<d3d9::Device::CachedDraw>();
+            dev_.beginCapture(pktFresh_.get());
+        }
         const PClock::time_point dt0 = timed ? PClock::now() : PClock::time_point{};
         if (d.indexed) {
             dev_.drawIndexedPrimitive(d.primType, d.baseVertex, d.minIndex, d.numVertices, d.startIndex, d.primCount);
         } else {
             dev_.drawPrimitive(d.primType, d.startIndex, d.primCount);
+        }
+        if (capturing) {
+            if (!dev_.endCapture()) {
+                ++pktWindow_.notBuilt;
+                if (pe != nullptr) packets_.erase(pkey);
+            } else if (pe == nullptr) {
+                if (packets_.size() > 30000) packets_.clear();
+                PacketEntry& ne = packets_[pkey];
+                ne.cd = *pktFresh_;
+                ne.desc = std::make_unique<sc::DrawDesc>(d);
+                ++pktWindow_.built;
+            } else {
+                bool valid = true;
+                std::string why;
+                const bool same = dev_.replayMatches(pe->cd, *pktFresh_, rin, valid, why);
+                ++pktWindow_.verified;
+                if (!valid) {
+                    ++pktWindow_.invalid;
+                } else if (!same) {
+                    ++pktWindow_.mismatches;
+                    if (pktMismatchLogged_ < 12) {
+                        ++pktMismatchLogged_;
+                        spdlog::info("native: packet cache: verify: replay would differ ({}) in frame {}: {}", why, dev_.stats().frames, describe(*op_));
+                    }
+                }
+                pe->cd = *pktFresh_;  // (also refreshes a stale entry)
+            }
         }
         if (timed) deviceNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(PClock::now() - dt0).count());
         ++g_->issuedDraws;
@@ -2063,17 +2150,19 @@ void StaticOps::issue() {
     if (!leanRestore_ && leanCollect_ && leanBlock_ == 0) return;
     dev_.setVertexShaderRef(vs);
     dev_.setPixelShaderRef(ps);
-    dev_.setVertexDecl(decl);
-    for (std::uint32_t i = 0; i < 4; ++i) {
-        dev_.setStreamSource(i, streams[i].buffer, streams[i].offset, streams[i].stride);
-        dev_.setStreamSourceFreq(i, streams[i].freq);
-    }
-    dev_.setIndices(ib);
-    for (std::uint32_t i = 0; i < sc::StOwnedCount; ++i) dev_.setRenderState(kRs[i], rs[i]);
-    for (std::uint32_t m = stagesU; m != 0; m &= m - 1) {
-        const auto st = sc::lowBit(m);
-        dev_.setStageTexture(st, tex[st]);
-        dev_.setSamplerStates(st, kSs, ss[st].data(), 7);
+    if (fullStates) {
+        dev_.setVertexDecl(decl);
+        for (std::uint32_t i = 0; i < 4; ++i) {
+            dev_.setStreamSource(i, streams[i].buffer, streams[i].offset, streams[i].stride);
+            dev_.setStreamSourceFreq(i, streams[i].freq);
+        }
+        dev_.setIndices(ib);
+        for (std::uint32_t i = 0; i < sc::StOwnedCount; ++i) dev_.setRenderState(kRs[i], rs[i]);
+        for (std::uint32_t m = stagesU; m != 0; m &= m - 1) {
+            const auto st = sc::lowBit(m);
+            dev_.setStageTexture(st, tex[st]);
+            dev_.setSamplerStates(st, kSs, ss[st].data(), 7);
+        }
     }
     sc::forEachRun(vsU, [&](std::uint32_t r, std::uint32_t n) { dev_.setVertexShaderConstantF(r, savedVs_[r], n); });
     sc::forEachRun(psU, [&](std::uint32_t r, std::uint32_t n) { dev_.setPixelShaderConstantF(r, savedPs_[r], n); });
@@ -2114,6 +2203,19 @@ void StaticOps::report() {
         }
         spdlog::info("native: {}: sub-mesh draws by lights (total): 0 {}, 1 {}, 2 {}, 3 {}, 4 {}", what, g.lights[0], g.lights[1], g.lights[2],
                      g.lights[3], g.lights[4]);
+        if (gi == static_cast<std::size_t>(Group::Static) && packetMode_ != 0) {
+            const PacketStats& w = pktWindow_;
+            pktTotal_.replayed += w.replayed;
+            pktTotal_.refused += w.refused;
+            pktTotal_.built += w.built;
+            pktTotal_.mismatches += w.mismatches;
+            pktTotal_.verified += w.verified;
+            spdlog::info("native: packet cache (5 s): {} draws replayed, {} refused at replay, {} built, {} not capturable, {} descriptions changed; verify: {} checked, {} not valid, {} DIFFERING; "
+                         "total replayed {}, verified {}, differing {}; {} entries",
+                         w.replayed, w.refused, w.built, w.notBuilt, w.changed, w.verified, w.invalid, w.mismatches, pktTotal_.replayed, pktTotal_.verified, pktTotal_.mismatches,
+                         packets_.size());
+            pktWindow_ = {};
+        }
         if (g.takeOver && g.timedDraws != 0) {
             const double n = static_cast<double>(g.timedDraws);
             spdlog::info("native: {}: issue cost (5 s, -Perf): {} draws in {} ops, {:.3f} us per draw in issue(), of it {:.3f} us the device draw call (prepareDraw + submit), {:.3f} us bookkeeping (state setters, save / restore)",

@@ -848,6 +848,56 @@ public:
     // [debug] perf: the numbers since the last call (zeroed afterwards)
     PerfStats takePerf();
     bool perfEnabled() const { return options_.perf; }
+
+    // ---- packet retention (docs/research/engine-frame/retained-signals.md 8): a finished draw packet kept by the caller and replayed
+    // without prepareDraw. A draw is captured while it is drawn normally (beginCapture ... endCapture) and replayed later by replayDraw,
+    // which validates that everything the packet was derived from still holds (shaders, buffers' GPU bindings, textures, viewport and
+    // targets, phase) and recomputes the per-frame parts (constant windows, DrawBlock's c5 / depth remap, draw id). The caller guarantees
+    // the rest by comparing the draw's description (shaders, declaration, streams, ranges, states, samplers) with the captured one.
+    struct CachedDraw {
+        bool valid = false;
+        DrawPacket packet;  // (vi / dyn point into a per-frame arena: the values are kept below and interned again at replay)
+        VertexInputValues vi;
+        DynamicStateValues dyn;
+        shader::abi::DrawBlock block{};
+        draws::Kind kind = draws::Kind::Unknown;
+        scene::Phase phase;
+        const Shader* vs = nullptr;
+        const Shader* ps = nullptr;
+        rhi::ShaderModule vsModule = rhi::ShaderModule::None, fsModule = rhi::ShaderModule::None;
+        std::uint32_t streamMask = 0;
+        Buffer::Binding stream[4]{};
+        Buffer::Binding ib{};
+        std::uint32_t texMask = 0;
+        Texture* tex[kSamplerCount]{};
+        std::uint32_t texSlot[kSamplerCount]{};
+        struct Env {
+            Viewport vp;
+            std::int32_t scissor[4];
+            std::uint32_t colorCount;
+            VkFormat colorFormats[kRenderTargets];
+            VkFormat depthFormat, stencilFormat;
+            std::uint32_t depthReversed;
+        } env{};
+    };
+    // the buffers a draw reads (the caller's description of it)
+    struct ReplayInputs {
+        Buffer* streams[4]{};
+        std::uint32_t strides[4]{};
+        Buffer* indices = nullptr;
+    };
+    void beginCapture(CachedDraw* into) { capture_ = into; if (into != nullptr) into->valid = false; }
+    bool endCapture() { const bool ok = capture_ != nullptr && capture_->valid; capture_ = nullptr; return ok; }
+    // true = drawn from the retained packet; false = not valid / not allowed: nothing was drawn, draw normally
+    bool replayDraw(const CachedDraw& c, const ReplayInputs& in);
+    // verify mode: would replaying `cached` have produced `fresh` (a draw just made normally)? false = a difference (`why`)
+    // `valid` false: the cached one would not have been used (not a difference)
+    bool replayMatches(const CachedDraw& cached, const CachedDraw& fresh, const ReplayInputs& in, bool& valid, std::string& why);
+    // the consumers of prepareDraw's results are idle for this draw (observers, replacers, variants, tint, taps, logging)
+    bool replayAllowed(const CachedDraw& c) const;
+    struct ReplayStats {
+        std::uint64_t replayed = 0, refused = 0, captured = 0, notCaptured = 0;
+    } replayStats;
     // resources report what they copy to the GPU (render thread)
     void countUpload(bool texture, std::uint64_t bytes) {
         (texture ? perf_.textureUploadBytes : perf_.bufferUploadBytes) += bytes;
@@ -1395,6 +1445,14 @@ private:
     // bound); returns the first index, `bindOffset` the binding's offset
     static std::uint32_t foldIndexOffset(VkDeviceSize offset, bool index32, std::uint32_t firstIndex, VkDeviceSize& bindOffset);
     // the draw being prepared (prepareDraw -> the draw call) and the pending batch (flushBatch)
+    // packet retention: the capture in progress and what prepareDraw hands to it
+    CachedDraw* capture_ = nullptr;
+    bool captureOk_ = false;
+    shader::abi::DrawBlock lastBlock_{};
+    draws::Kind lastKind_ = draws::Kind::Unknown;
+    bool replayBuild(const CachedDraw& c, const ReplayInputs& in, DrawPacket& p, shader::abi::DrawBlock& b);
+    void fillCapture(const DrawPacket& p);
+    void submitInterned(DrawPacket& p);
     DrawPacket packet_;
     VertexInputValues workVi_;   // what prepareDraw computes for the draw (packet_.vi points at its interned copy)
     DynamicStateValues workDyn_;
