@@ -766,6 +766,8 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
             return GetEnvironmentVariableA("RVK_GI_DIAG", buf, sizeof(buf)) > 0 && buf[0] != '0';
         }();
         if (diag) {
+            // the sky cube is sampled by the diagnostics only (rtgi.md 27): ready for sampling
+            if (d3d9::Texture* cube = dev_.imageWithRole(d3d9::scene::ImageRole::SkyEnvCube); cube != nullptr && !cube->isNull()) dev_.readable(cube, cmd);
             if (diag_ == nullptr && dev_.rhi() != nullptr) {
                 diag_ = dev_.rhi()->createBuffer({64 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Readback, "gi diag"});
                 if (diag_ != nullptr) std::memset(diag_->map(), 0, 64 * 4);
@@ -850,10 +852,11 @@ void Gi::logDiag() {
         spdlog::info("enh: gi diag [{}] {} probes: engine ambient {:.3f}, ddgi {:.3f}, traced {:.3f} (uncapped {:.3f}) = {:.0f}% of the engine's; "
                      "far field {:.3f} ({:.0f}% of rays; the engine's sky on them {:.3f}, far field towards +dir {:.3f}, as radiance {:.3f}); hits {:.0f}% of rays: sun {:.3f} "
                      "point {:.3f} bounce {:.3f} emissive {:.3f} (hit rays' mean radiance {:.3f}, mean albedo^2.2 {:.3f}); back faces {:.0f}%; hits "
-                     "< 2 m {:.0f}%, < 10 m {:.0f}%; all rays as the engine's sky {:.3f}",
+                     "< 2 m {:.0f}%, < 10 m {:.0f}%; all rays as the engine's sky {:.3f}; sky cube: far rays (per far ray) raw {:.3f} ^2.2 {:.3f}, all rays ^2.2 {:.3f}; cube / engine sky on far rays: mean {:.3f}, rms {:.3f}",
                      cls == 0 ? "shaded" : "sun-lit", static_cast<long long>(n), m(1), m(2), m(3), m(4), m(1) > 1e-6 ? 100.0 * m(3) / m(1) : 0.0, m(5),
                      100.0 * m(10), m(15), m(16), m(20), 100.0 * m(11), m(6), m(7), m(8), m(9), m(19) / hits,
-                     m(18) / hits, 100.0 * m(12), 100.0 * m(13), 100.0 * m(14), m(17));
+                     m(18) / hits, 100.0 * m(12), 100.0 * m(13), 100.0 * m(14), m(17), m(21) / std::max(m(10), 1e-9), m(22) / std::max(m(10), 1e-9), m(23), m(24) / std::max(m(10), 1e-9),
+                     std::sqrt(m(25) / std::max(m(10), 1e-9)));
     }
     std::fill(std::begin(diagSum_), std::end(diagSum_), 0.0);
 }

@@ -887,3 +887,7 @@ field towards its irradiance form.
 ## 26. Screen probes with lights in the probes (2026-11-04)
 
 With `gi.lights=world` + `gi.lightmaps=replace` the DDGI value holds the point lights' direct light; the screen probes' traced side did not, so the ratio stripped it (monastery screen bias -77 %, MAE 0.405). `sp_trace.comp` now adds one stratified, shadowed light sample at the probe's own surface per ray (`flags.z` bit 0). Monastery: bias -19 %, MAE 0.190, lit-image error 48 -> 33 %; the other seven spots unchanged within noise. Measurements, the corrected reference definition and the rejected experiments (longer screen reach, sea proxy, no-sky fallback, `gi.screen=high`): path-tracing.md 10. Developer mask `RVK_GI_EXP` (`-Environment`).
+
+## 27. The sky of escaping rays: the sky cube evaluated, not used (2026-11-04)
+
+Letting the screen probes' escaping rays read the engine's sky cube (LDR display-space, no fixed relation to the hemisphere ambient: cube^2.2 / SH sky 0.2 - 2.4 across spots, structure spread 1.5 - 2, sun disc inside it) was measured and rejected; replacing the far-probe field by the hemisphere SH (`RVK_GI_EXP=64`) is worse everywhere outdoors (beach -36 %, lake +18 %, shadow_inland +24 % screen bias). Tables and reasoning: path-tracing.md 11. Shipped state unchanged; new hidden diagnostics (`sky cube:` terms of `enh: gi diag`, `tools/gi_sky_diag.py`).

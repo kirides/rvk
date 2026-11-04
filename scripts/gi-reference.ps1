@@ -35,6 +35,8 @@ param(
     [switch]$SkipOff,
     [switch]$SkipDdgi,
     [switch]$Validation,
+    # keep the dumps (out\gi-reference\<stamp>\gi_ref, tens of GB at 1024 spp) after the analysis; by default they are deleted unless the run is meant as a converged reference (-Max >= 512)
+    [switch]$KeepDumps,
     [string]$RunDir = '',
     # quick re-measure after a change to the probes: take the converged reference planes of an earlier run (out/gi-reference/<stamp>), run with a few samples only (-Spp 8 -Max 8 -SkipOff -SkipDdgi)
     [string]$RefRun = '',
@@ -83,3 +85,6 @@ $extra = @()
 if ($RefRun) { $extra = @('--ref-run', (($RefRun -split ',' | ForEach-Object { (Resolve-Path $_).Path }) -join ',')) }
 python -I (Join-Path $repo 'tools\gi_reference.py') analyze $out @extra
 Write-Host "results: $out\analysis (summary.md)"
+if (-not $KeepDumps -and -not $RunDir -and $Max -lt 512 -and (Test-Path (Join-Path $out 'gi_ref'))) {
+    if (Test-Path (Join-Path $out 'analysis\summary.md')) { Remove-Item -Recurse -Force (Join-Path $out 'gi_ref'); Write-Host 'dumps deleted (-KeepDumps keeps them)' }
+}
