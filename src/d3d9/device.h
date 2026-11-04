@@ -870,6 +870,9 @@ public:
         // (settings, the ambient registers, the variant's build state) and refuses the replay when the decision would differ
         struct Variant {
             bool gate = false;       // (giDraws_.on || the material pack) when the packet was made
+            // camera jitter (upscaling): the sampler indexes of the plain and the LOD-biased state of each sampled stage, the bias they were made for
+            float biasFor = 0.0f;
+            std::uint32_t smpPlain[16] = {}, smpBias[16] = {};
             bool gbufGate = false;   // the G-buffer was on
             bool gbufStatic = false; // gbufferEligible without its ambient test
             bool gbufWanted = false; // ... the G-buffer's material pass took the draw (eligible, lit, in the G-buffer's rendering scope)

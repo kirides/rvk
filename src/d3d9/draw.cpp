@@ -1215,6 +1215,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     float jitterX = 0.0f, jitterY = 0.0f;
     geometryJitter(jitterX, jitterY);  // camera jitter of the main view's geometry (TAA / upscaling)
     const float lodBias = (jitterX != 0.0f || jitterY != 0.0f) ? geometryLodBias_ : 0.0f;
+    cv.biasFor = geometryLodBias_;
     for (std::uint32_t mask = boundSamplerMask(); mask != 0; mask &= mask - 1) {
         const std::uint32_t slot = static_cast<std::uint32_t>(std::countr_zero(mask));
         const shader::Reflection& r = slot < 16 ? ps_->reflection : vs_->reflection;
@@ -1226,6 +1227,11 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
                             t->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         block.tex[slot] = !usable ? game_->defaultTextureSlot(static_cast<std::uint32_t>(r.samplers[slot])) : (t == substituteFrom_ && substituteSlot_ != 0) ? substituteSlot_ : t->bindlessSlot();
         block.smp[slot] = lodBias != 0.0f && slot < 16 ? samplerIndexBiased(slot, lodBias) : samplerIndex(slot);
+        if (capture_ != nullptr && slot < 16) {
+            // (a retained packet serves frames with and without jitter: both sampler indexes)
+            cv.smpPlain[slot] = samplerIndex(slot);
+            cv.smpBias[slot] = geometryLodBias_ != 0.0f ? samplerIndexBiased(slot, geometryLodBias_) : cv.smpPlain[slot];
+        }
     }
     // half a pixel right/down in NDC units of the viewport (shader/abi.h)
     block.posFix[0] = 1.0f / static_cast<float>(std::max(1u, viewport_.width));
@@ -1531,7 +1537,10 @@ bool Device::replayBuild(const CachedDraw& c, const ReplayInputs& in, DrawPacket
     }  // (Env is built from the same fields in the same order; padding is zeroed by value-init)
     float jx = 0.0f, jy = 0.0f;
     geometryJitter(jx, jy);
-    if (jx != 0.0f || jy != 0.0f) return fail(4);
+    const bool jit = jx != 0.0f || jy != 0.0f;
+    if (c.v.biasFor != geometryLodBias_) return fail(10);
+    // (the thickened / hashed cut-outs put the draw's alpha reference and the frame number into the block: not retained)
+    if (jit && (alphaDither_ || cutoutThicken_ * std::clamp(renderRatio_ - 1.0f, 0.0f, 1.0f) > 0.0f)) return fail(4);
     for (std::uint32_t i = 0; i < 4; ++i) {
         if (((c.streamMask >> i) & 1u) == 0) continue;
         if (in.streams[i] == nullptr) return fail(5);
@@ -1557,6 +1566,17 @@ bool Device::replayBuild(const CachedDraw& c, const ReplayInputs& in, DrawPacket
     b = c.block;
     std::memcpy(b.psC5, psF_[5], sizeof(b.psC5));
     depthRemap(b.posFix[2], b.posFix[3]);
+    // half a pixel of the viewport (+ the camera jitter, + the LOD bias of the jittered geometry: prepareDraw's arithmetic)
+    b.posFix[0] = 1.0f / static_cast<float>(std::max(1u, c.env.vp.width));
+    b.posFix[1] = -1.0f / static_cast<float>(std::max(1u, c.env.vp.height));
+    b.posFix[0] += jx;
+    b.posFix[1] += jy;
+    if (geometryLodBias_ != 0.0f) {
+        for (std::uint32_t mask = c.texMask & 0xFFFFu; mask != 0; mask &= mask - 1) {
+            const std::uint32_t slot = static_cast<std::uint32_t>(std::countr_zero(mask));
+            b.smp[slot] = jit ? c.v.smpBias[slot] : c.v.smpPlain[slot];
+        }
+    }
     if (c.v.drawn && c.v.pack) {
         // the material's word: unchanged while the pack's stamp is and its map is still sampleable in the same slot (else the exact lookup)
         const Texture* t = c.v.packTex;
