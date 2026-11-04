@@ -14,6 +14,7 @@
 param(
     [string]$Name = 'rvk-test-copy',
     [string]$Who = '',
+    [string]$Name = 'rvk-test-copy',
     [Parameter(Mandatory)][scriptblock]$Run
 )
 $ErrorActionPreference = 'Stop'

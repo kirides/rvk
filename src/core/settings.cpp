@@ -2201,6 +2201,57 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .flags = Flag::NoAB | Flag::Debug,
     });
+    r.fsReadCache = &reg.add({
+        .key = "debug.fs_read_cache",
+        .label = "Read-ahead of packed files (KiB)",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Every read from a file inside the game's data volumes is two system calls (seek + read), however small; loading "
+                       "a world reads millions of bytes a few at a time. The read-ahead buffer (per open file, grows with sequential "
+                       "reads up to this size) serves them from memory. The data read is the same. 0 = off.",
+        .type = Type::Int,
+        .defaultValue = 64,
+        .min = 0,
+        .max = 1024,
+        .flags = Flag::Debug,
+    });
+    r.fastAbsorb = &reg.add({
+        .key = "debug.fast_absorb",
+        .label = "Cloud absorption image by sliding windows",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The game computes the cloud absorption image with 128 integer divisions per pixel whenever a cloud texture is "
+                       "set (every world load). 1 = the same image by sliding window sums (bit-identical), 0 = the game's loop, "
+                       "2 = the game's loop and compare the image with ours (rvk.log).",
+        .type = Type::Int,
+        .defaultValue = 1,
+        .min = 0,
+        .max = 2,
+        .flags = Flag::Debug,
+    });
+    r.soundCompressed = &reg.add({
+        .key = "debug.sound_compressed",
+        .label = "Short sounds stay compressed in memory",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The game decodes sounds below a size limit completely when it creates them (1 - 18 ms on the game thread each time one leaves the cache and plays again). On = FMOD keeps them compressed and decodes them while they play, on its own mixer thread. The sound is the same codec output; not checked by ear.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
+    r.streamStats = &reg.add({
+        .key = "debug.stream_stats",
+        .label = "Loading statistics",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "1 = times the packed-file reads and FMOD sound creation (rvk.log 'engine: stream:' every 5 s), 2 = also "
+                       "compares every buffered read with the game's own read of the same bytes.",
+        .type = Type::Int,
+        .defaultValue = 0,
+        .min = 0,
+        .max = 2,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
     r.xinputInterval = &reg.add({
         .key = "debug.xinput_interval",
         .label = "Gamepad poll interval when disconnected (ms)",

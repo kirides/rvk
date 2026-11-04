@@ -84,3 +84,23 @@ TEST(fastsort_z_matches_crt_qsort_and_is_sorted) {
         }
     }
 }
+
+// engine::loadaccel: the cloud absorption image by sliding windows equals the engine's per-tap loop (docs/research/streaming.md)
+#include "engine/load_accel.h"
+
+TEST(absorb_fast_matches_naive) {
+    std::mt19937 rng(11);
+    struct Dim { std::uint32_t w, h, padPixels; };
+    for (const Dim d : {Dim{1, 1, 0}, Dim{7, 5, 0}, Dim{32, 32, 0}, Dim{33, 31, 3}, Dim{64, 40, 0}, Dim{100, 77, 5}, Dim{256, 128, 0}, Dim{128, 256, 0}}) {
+        const std::uint32_t pitch = (d.w + d.padPixels) * 4;
+        std::vector<std::uint8_t> src(static_cast<std::size_t>(pitch) * d.h), a(src.size(), 0), b(src.size(), 0);
+        for (auto& v : src) v = static_cast<std::uint8_t>(rng());
+        for (const float scale : {1.0f / 32.0f, 0.03f}) {
+            rvk::engine::loadaccel::absorbNaive(src.data(), a.data(), d.w, d.h, pitch, scale);
+            rvk::engine::loadaccel::absorbFast(src.data(), b.data(), d.w, d.h, pitch, scale);
+            bool same = true;
+            for (std::uint32_t y = 0; y < d.h; ++y) same = same && std::memcmp(&a[std::size_t(y) * pitch], &b[std::size_t(y) * pitch], d.w * 4) == 0;
+            CHECK(same);
+        }
+    }
+}
