@@ -640,3 +640,29 @@ ring = 3 copies of the constants; the engine's own path has 2): **compose each d
 compare modes to keep the list path) is the structural change with the largest estimate (~0.5 - 0.8 ms: the copy chain, `newDraw` clears of a ~5 KB descriptor, the op-wide save pass), followed by
 **moving the shadow-view and sky-cube compositions onto a worker** (they only read engine memory the lean path no longer mutates; ~0.4 ms but needs a thread-safe `Device` draw interface: the render-thread
 split that 14.1 / 15.1 rejected).
+
+### 22.3 Bounds for the structural changes, and gates (2026-11-04, second pass)
+
+**Streaming each composed draw into the device** (drop the per-op `DrawDesc` list): bounded from the profile before building it. What it can remove: `newDraw` clears (0.04 + CRT 0.04 ms), one of the
+three constant copies (`constantsInto` 0.28 ms must still write the final registers; the compare + copy in `setVertexShaderConstantF` 0.21 ms is the part that goes), `issue` bookkeeping
+(self 0.13 + CRT 0.25 ms, partly the save / restore). Upper bound ~0.4 ms, realistic ~0.2 ms (not the 0.5 - 0.8 first guessed). And it breaks the composition's atomicity: ops fall back to
+the engine when a composition returns a `Skip` after some draws were composed (`Unreadable`, `NotCompiled`, ...), so earlier draws would already have been drawn. Not built; a streaming path
+would have to validate the op up front (a read-only dry run = the composition cost again).
+
+**Composition on a worker** (structural change 2): blocked by the contract of the lean path, not by locks. (1) `opEnter` must answer synchronously whether the engine's slot runs (a `Skip` = it
+runs); a deferred composition cannot say. (2) The composition mutates `mirror_` (world / alpha / instance registers written per draw) in op order, and the lean commit's side effects
+(touches, instance / tree queue sorts in place, palettes `UpdateRenderMatrices`, particle depth sort, MaskReference stores, class pools) write engine memory the next op's composition
+reads, so they must stay on the engine thread, in order, before it. (3) Shadow-view and sky-cube compositions read the same live objects the engine thread keeps changing between slots (shader
+pools via `SetSwitch`, the admin's view fields). A one-worker in-order pipeline would only overlap composition with *skipped* slots (nothing) - there is no engine work to overlap with in
+lean mode, so the engine thread would just wait for the worker. Estimated gain ~0 ms. Rejected for the same reason as 14.1 / 15.1.
+
+**The device path is the shared 2.2 ms** (`prepareDraw` 1.7 incl: `RtScene::observe` 0.36, `computeVertexInput` 0.27, `uploadConstants` 0.15, `prepareTextures` 0.13, pipeline / intern / dynamic
+~0.2). A draw-state fingerprint fast path in Full only (the composed `DrawDesc` already knows pipeline, vertex input and textures; 78 % of consecutive draws differ only in constants) could reuse
+`computeVertexInput` + `prepareTextures` + pipeline / intern for ~0.4 - 0.5 ms and would be the largest remaining Full-only gain; it touches the 670-line `prepareDraw` and every consumer of its
+results (RT scene, replacers, object motion, G-buffer variants), so it needs its own stage with the compare tools as the gate. Not built here.
+
+**Gates** (build 382a1bd): `rvk_tests` 215 / 215; `rvk_d3d9test --validation` Vulkan and D3D12 `PASS: 0 failure(s), 0 validation error(s)`; `testdemo` 7 / 7 with `-Validation` on Vulkan wrapper,
+Vulkan full, D3D12 wrapper, D3D12 full (0 validation lines each; own copy, instance 4); Full compare run (`static_ops_compare`, `scene_ops_compare`, `lean_check=10`) `mismatches: none`.
+**D3D12 CPU** (savegame, 2 runs per arm, interleaved): Full 6.727 (6.739 / 6.716) vs Wrapper 4.794 (4.789 / 4.799) = **+1.93 ms**; Vulkan Full - Wrapper +1.97 ms.
+`refcompare` vs `out/refcompare/20261103-130010` (Vulkan Full, 5 spots): jungle / beach_rain / pub_interior PASS, hero_closeup WARN (ssim 0.972, noise), harbour_night FAIL once (dluma -3.6, the known night
+noise) and PASS twice on re-run (cpu_opts 255 +0.39, cpu_opts 0 +0.37). Not run: D3D12 refcompare, the jungle CPU spot, the 17-spot route.
