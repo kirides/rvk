@@ -797,3 +797,7 @@ Paired timing (player defaults, savegame lod 2x, `-Perf` CPU, 2 pairs): Vulkan F
 information: 4.855 -> 4.67; not shipped, Wrapper stays the faithful mode.) Pictures: `water-compare -Mode full` interval 0 vs 100 on `beach_night_storm` (thunder, clock running), `sea_horizon`, `beach_sun`: no cube seam, differences are the running clock's waves / lightning timing.
 
 Remaining Full - Wrapper after this (profile of the same run, ms per frame inclusive): shadow-map path 0.90 (engine 0.9 of which our ops ~0.3), effect units 0.42 (`effectBegin`, composition 0.20, `issueLean` 0.18), trees 1.8, static 0.84, vegetation 0.4 (0.1 - 0.16 Full-only).
+
+## 28. Table lighting in Full (2026-11-05, gpu-scene.md 9.8)
+
+`lighting.full_lit` (Debug, default off; with `lighting.clustered`): one 3-light pass per lit draw, no additive passes, mesh batches merge across different illumination alpha factors, the table takes drawn objects' lights. Paired CPU (savegame, lod 2x, player defaults, interleaved, `-Perf` engine+HAL): Vulkan Full 8.04 -> 7.46 ms (-0.58; Wrapper 6.04, gap 2.0 -> 1.4), D3D12 8.23 -> 7.69 (-0.54); `clustered` alone 8.10 (+0.06). Pictures at pub_interior / monastery_hall / harbour_docks / jungle within the stage-a noise floor once the engine's own lights were kept as the fallback (zeroing them dimmed interiors by 17 - 26 %). Goal (gap <= ~0.5 ms) not reached.
