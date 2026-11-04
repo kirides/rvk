@@ -1955,20 +1955,28 @@ void StaticOps::issue() {
         stagesU |= static_cast<std::uint32_t>(d.samplerMask & ~d.inheritMask);
     }
     const ShaderRef vs = dev_.vertexShaderRef(), ps = dev_.pixelShaderRef();
-    VertexDecl* decl = dev_.vertexDecl();
-    Buffer* ib = dev_.indexBuffer();
+    // (the decl / streams / indices / render states / sampler states are saved at the op's first draw that sets them: a retained packet
+    // replays without touching them)
+    VertexDecl* decl = nullptr;
+    Buffer* ib = nullptr;
     std::array<Device::StreamSource, 4> streams{};
-    for (std::uint32_t i = 0; i < 4; ++i) streams[i] = dev_.streamSource(i);
     std::array<std::uint32_t, sc::StOwnedCount> rs{};
-    for (std::uint32_t i = 0; i < sc::StOwnedCount; ++i) rs[i] = dev_.renderState(kRs[i]);
     std::array<Texture*, sc::kStages> tex{};
     std::array<std::array<std::uint32_t, 7>, sc::kStages> ss{};
-    for (std::uint32_t m = stagesU; m != 0; m &= m - 1) {
-        const auto st = sc::lowBit(m);
-        tex[st] = dev_.stageTexture(st);
-        const std::uint32_t* row = dev_.samplerStateRow(st);
-        for (std::uint32_t i = 0; i < 7; ++i) ss[st][i] = row[kSs[i]];
-    }
+    bool statesSaved = false;
+    const auto saveStates = [&] {
+        statesSaved = true;
+        decl = dev_.vertexDecl();
+        ib = dev_.indexBuffer();
+        for (std::uint32_t i = 0; i < 4; ++i) streams[i] = dev_.streamSource(i);
+        for (std::uint32_t i = 0; i < sc::StOwnedCount; ++i) rs[i] = dev_.renderState(kRs[i]);
+        for (std::uint32_t m = stagesU; m != 0; m &= m - 1) {
+            const auto st = sc::lowBit(m);
+            tex[st] = dev_.stageTexture(st);
+            const std::uint32_t* row = dev_.samplerStateRow(st);
+            for (std::uint32_t i = 0; i < 7; ++i) ss[st][i] = row[kSs[i]];
+        }
+    };
     const float (*devVs)[4] = dev_.vsConstants();
     const float (*devPs)[4] = dev_.psConstants();
     sc::forEachRun(vsU, [&](std::uint32_t r, std::uint32_t n) { d3d9::copyRegisters(savedVs_[r], devVs[r], n); });
@@ -2017,6 +2025,7 @@ void StaticOps::issue() {
             ++pktWindow_.refused;
         }
         fullStates = true;
+        if (!statesSaved) saveStates();
         dev_.setVertexDecl(const_cast<VertexDecl*>(static_cast<const VertexDecl*>(d.decl)));
         for (std::uint32_t i = 0; i < 4; ++i) {
             const auto& s = d.streams[i];
