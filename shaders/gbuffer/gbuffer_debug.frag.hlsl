@@ -17,6 +17,10 @@ float4 PSMain(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target0
         float a = atan2(m.y, m.x) / (2.0 * GB_PI) + 0.5;
         float3 hue = clamp(abs(frac(a + float3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0, 0.0, 1.0);
         return float4(hue * len + float3(0.05, 0.05, 0.05), 1.0);
+    } else if (pc.mode == 5u) {
+        // the material channel (material pack): red roughness, green metalness; dark blue = no pack entry (or no material)
+        float3 m = rvkGbufferMaterialDecode(rvkSample2DLod(pc.normalTex, pc.linearSampler, uv, 0.0).z);
+        return float4(m.z > 0.5 ? float3(m.x, m.y, 0.0) : float3(0.0, 0.0, 0.25), 1.0);
     } else if (pc.mode == 4u) {
         // the screen probes' factor on the DDGI: 0.5 = 1 (no change), darker = less light than the probe volume says
         float4 s = pc.aoTex != 0u ? rvkSample2DLod(pc.aoTex, pc.linearSampler, uv, 0.0) : float4(1.0, 1.0, 1.0, 0.0);

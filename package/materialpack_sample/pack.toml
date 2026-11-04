@@ -19,7 +19,7 @@ metalness = 1.0
 [material."Arch_Wood_*"]
 roughness = 0.42     # varnished / oiled wood
 [material."Arch_House_Wood_*"]
-roughness = 0.42
+roughness = 0.22     # polished floor planks: candles slide across them
 [material."Arch_Stone_*"]
 roughness = 0.6
 [material."Arch_Metal_*"]
@@ -28,3 +28,19 @@ metalness = 1.0
 [material."ItWpn_*"]
 roughness = 0.3
 metalness = 1.0
+
+# the interiors of the test spots (pub, monastery, docks): house furniture, plaster, polished monastery floors / walls
+[material."Arch_Comp_Housestuff_*"]
+roughness = 0.38
+[material."Arch_House_Wall_*"]
+roughness = 0.8
+[material."Arch_Floor_*"]
+roughness = 0.5
+[material."Arch_Temple_Stone_*"]
+roughness = 0.5
+[material."Monastery_Stone_*"]
+roughness = 0.45     # worn but polished monastery stone
+[material."Monastery_Stone_Floor_*"]
+roughness = 0.25     # the floor: candle and torch light slides across it
+[material."Nat_Stone_Rock_*"]
+roughness = 0.65

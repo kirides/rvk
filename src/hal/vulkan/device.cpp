@@ -246,6 +246,7 @@ HalDevice::~HalDevice() {
     upscale_.reset();    // clears the device's jitter source
     gbuffer_.reset();    // removes its passes, the G-buffer attachments
     if (matPack_) {
+        enh::matpack::setReloadHook({});
         dev_.setPackProvider({});
         if (rtScene_) rtScene_->setMaterialPack(nullptr);
     }
@@ -547,6 +548,12 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         }
         applyMaterials();
         rtScene_->setMaterialPack(matPack_.get());
+        enh::matpack::setReloadHook([this, packRoots]() {
+            // (the overlay's command thread is the render thread's: the commands run at presents)
+            const auto& rs2 = settings::renderer();
+            matPack_->configure(true, packRoots, static_cast<std::uint64_t>(rs2.materialsBudget->asInt()) << 20, static_cast<float>(rs2.materialsRoughness->asFloat()));
+            return true;
+        });
         spdlog::info("enh: materials: pack on ({} folder(s)), PBR variants enabled", packRoots.size());
     }
     if (rs.giEnabled != nullptr) {
@@ -747,7 +754,7 @@ void HalDevice::applyGbuffer() {
     s.aoStrength = rs.aoStrength->asFloat();
     s.aoRadius = rs.aoRadius->asFloat() * 100.0f;
     const std::string_view d = rs.gbufferDebug->asEnum();
-    s.debug = d == "normals" ? 1 : d == "motion" ? 2 : d == "ao" ? 3 : d == "screen_gi" ? 4 : 0;
+    s.debug = d == "normals" ? 1 : d == "motion" ? 2 : d == "ao" ? 3 : d == "screen_gi" ? 4 : d == "material" ? 5 : 0;
     // the screen probes (enh/gi) read the G-buffer
     s.forced = rs.giEnabled != nullptr && rs.giEnabled->asBool() && rs.giScreen != nullptr && rs.giScreen->asEnum() != "off";
     // FSR (enh/upscale) reads the motion vectors

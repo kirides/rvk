@@ -1709,8 +1709,8 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "material), \"Motion\" the motion vectors (hue = direction), \"AO\" the ambient occlusion.",
         .type = Type::Enum,
         .defaultValue = 0,
-        .options = {"off", "normals", "motion", "ao", "screen_gi"},
-        .optionLabels = {"Off", "Normals", "Motion", "AO", "Screen probes (GI factor)"},
+        .options = {"off", "normals", "motion", "ao", "screen_gi", "material"},
+        .optionLabels = {"Off", "Normals", "Motion", "AO", "Screen probes (GI factor)", "Material (pack: roughness / metalness)"},
         .flags = Flag::NoAB | Flag::Debug,
     });
 

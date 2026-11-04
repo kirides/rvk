@@ -15,6 +15,7 @@
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -93,6 +94,10 @@ struct Surface {
     float occlusion = 1.0f, roughness = 1.0f, metalness = 0.0f, emissive = 0.0f;
 };
 Surface evaluate(const Decoded& d, const float texel[4]);
+
+// hot reload (command "materials reload", overlay / -Commands): the HAL installs the hook that re-reads the pack folders; false = no pack loaded
+void setReloadHook(std::function<bool()> hook);
+bool requestReload();
 
 // ---- the loader --------------------------------------------------------------------------------------------------------------------
 struct Stats {

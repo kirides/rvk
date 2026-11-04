@@ -39,6 +39,7 @@ static uint rvk_giCascade = 0xFFu;
 static float3 rvk_giN = float3(0.0, 1.0, 0.0);  // geometric normal (towards the viewer)
 static float3 rvk_mvP = float3(0.0, 0.0, 0.0);  // world position
 static float4 rvk_gbN = float4(0.0, 0.0, 0.0, 0.0);  // the shaded normal (dot capture / interpolated normal)
+static float rvk_pbrGb = 0.0;                   // the G-buffer material channel (rvkGbufferMaterialEncode; 0 = no pack entry)
 static float rvk_mvAo = 1.0;                    // the reprojected ambient occlusion applied (debug)
 static float3 rvk_mvSgi = float3(1.0, 1.0, 1.0);  // the screen probes' factor applied (debug)
 static float rvk_mvVao = 1.0;                   // the vertex ambient occlusion / indoor factor (TEXCOORD4.w): the engine's ambient = lerp(c14, SH, it)
@@ -290,6 +291,7 @@ void rvkMvPbr(RvkFrame f, inout float4 c0) {
     float rough = saturate((slot == 0u ? 1.0 : (orm ? t.g : t.r)) * rScale + rBias);
     float occl = slot != 0u && orm ? t.r : 1.0;
     float metal = saturate(slot != 0u && orm ? t.b * mScale : mScale);
+    rvk_pbrGb = rvkGbufferMaterialEncode(rough, metal);
     float emis = slot != 0u && orm && (word >> 31) != 0u ? t.a : 0.0;
     uint dbg = uint(f.params[2].w + 0.5);
     if (dbg == 1u) { c0.rgb = float3(rough, rough, rough); return; }
@@ -325,7 +327,8 @@ void rvkMvPbr(RvkFrame f, inout float4 c0) {
             float3 lv = pr.xyz - P;
             float fall = 1.0 - saturate(dot(lv, lv) * pr.w);
             float sh = 1.0 - dot(RVK_PSC(RVK_MV_PBR_PNT_REG + 4 * i + 3), shadowMask);
-            specSum += rvkPbrLight(N, V, normalize(lv), RVK_PSC(RVK_MV_PBR_PNT_REG + 4 * i + 2).rgb, a, F0, fall * saturate(sh));
+            // (the engine's point lights often carry a weak specular colour: the brighter of it and the diffuse colour drives the highlight)
+            specSum += rvkPbrLight(N, V, normalize(lv), max(RVK_PSC(RVK_MV_PBR_PNT_REG + 4 * i + 2).rgb, RVK_PSC(RVK_MV_PBR_PNT_REG + 4 * i + 1).rgb), a, F0, fall * saturate(sh));
         }
     }
 #endif
@@ -337,7 +340,13 @@ void rvkMvPbr(RvkFrame f, inout float4 c0) {
         float3 Fe = F0 + (max(float3(1.0 - rough, 1.0 - rough, 1.0 - rough), F0) - F0) * pow(1.0 - NoV, 5.0);
         float3 sky = RVK_TEXCUBE(f.images.w).SampleLevel(RVK_SAMP(rvkDrawSmp(d, 9u)), R, rough * 6.0).rgb;
         // (rough surfaces reflect a wide blur of the sky: the lobe's energy is spread, so its grazing peak is toned down)
-        env = sky * Fe * smoothstep(-0.15, 0.25, R.y) * rvk_mvVao * occl * f.params[2].z * lerp(1.0, 0.25, rough);
+        // (the sky cube is drawn at its own brightness: scaled by how much light reaches the surface (the engine's lit colour), so a night plaza does not reflect a day sky)
+        float lit01 = saturate(dot(lit, float3(0.3, 0.59, 0.11)) * 3.0);
+        env = sky * Fe * smoothstep(-0.15, 0.25, R.y) * rvk_mvVao * occl * f.params[2].z * lerp(1.0, 0.25, rough) * lit01 * 0.7;
+        // never more than a third of the engine's own lit brightness of this surface (a reflection cannot outshine the light that reaches it)
+        float lumLit = dot(max(lit, float3(0.0, 0.0, 0.0)), float3(0.3, 0.59, 0.11));
+        float lumEnv = dot(env, float3(0.3, 0.59, 0.11));
+        if (lumEnv > 1e-4) env *= min(1.0, (0.35 * lumLit + 0.004) / lumEnv);
     }
     float3 spec = pow(max(specSum * f.params[2].y, float3(0.0, 0.0, 0.0)), float3(0.45, 0.45, 0.45));
     spec = min(spec, float3(4.0, 4.0, 4.0));
@@ -355,7 +364,7 @@ void rvkMvEpilogue(inout float4 c0) {
 #ifdef RVK_MV_GBUFFER
     float3 n = dot(rvk_gbN.xyz, rvk_gbN.xyz) > 1e-8 ? normalize(rvk_gbN.xyz) : rvk_giN;
     uint kind = pc.flags & RVK_DRAW_KIND_MASK;
-    rvk_mvNormalOut = float4(rvkGiOctEncode(n), 0.0, kind == uint(RVK_MV_KIND_SKINNED) ? 2.0 / 3.0 : 1.0 / 3.0);
+    rvk_mvNormalOut = float4(rvkGiOctEncode(n), rvk_pbrGb, kind == uint(RVK_MV_KIND_SKINNED) ? 2.0 / 3.0 : 1.0 / 3.0);
     float3 prevP = rvk_mvP;
 #ifdef RVK_MV_MOTION
     if (rvk_prevWorld.w > 0.5) prevP = rvk_prevWorld.xyz;

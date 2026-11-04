@@ -302,6 +302,12 @@ bool decodePng(const std::vector<std::uint8_t>& file, Kind kind, Decoded8& out) 
 
 }  // namespace
 
+namespace {
+std::function<bool()> g_reload;
+}
+void setReloadHook(std::function<bool()> hook) { g_reload = std::move(hook); }
+bool requestReload() { return g_reload && g_reload(); }
+
 MaterialPack::MaterialPack(d3d9::Device& device) : dev_(device) {}
 
 MaterialPack::~MaterialPack() {
@@ -556,6 +562,12 @@ MaterialPack::Hit MaterialPack::lookupMaterial(const void* material) {
         }
     }
     byMaterial_[material] = h;
+    if (byMaterial_.size() <= 4000) {  // authors: every material seen once, with the names a pack entry can use (-RvkLogLevel debug)
+        mats::ShaderInfo si;
+        std::string image;
+        if (mats::active(si, material) && si.diffuse.source == mats::Source::Sampler && si.diffuse.slot >= 0) image = mats::poolImageName(si, si.diffuse.slot);
+        spdlog::debug("enh: materials: seen '{}' (diffuse image '{}'): {}", mats::resourceName(material), image, h.word != 0 ? "pack entry" : "no entry");
+    }
     ++counters_.lookups;
     return finish(h, key);
 }

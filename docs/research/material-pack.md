@@ -105,10 +105,20 @@ occlusion = R (ORM) else 1; emissive = A (ORM + flag). **Word 0 = no entry = unc
   `emissive`, `packWord` (default without an entry: roughness 1, metalness 0, occlusion 1); debug `rt.debug=roughness|metalness` (dark magenta = no entry).
   `RtMaterial` interning now includes the name (two materials of one texture stay apart).
 
+## 3b. Later additions (2026-11-04)
+* **G-buffer material channel** (no new attachment, no format cost): the normal target's B channel (A2B10G10R10, it was always 0) holds, for draws with a pack entry,
+  `512 | metalness (4 bit) << 5 | roughness (5 bit)` as a 10 bit unorm; 0 = no entry (`rvkGbufferMaterialEncode / Decode` in `shaders/include/rvk_oct.hlsli`, written by
+  the G-buffer variants' epilogue, `rvk_pbrGb`). Consumers read `rvkGbufferMaterialDecode(normalTexel.z)` -> (roughness, metalness, has entry). 5 / 4 bit steps: coarse but enough
+  for lobe selection and reflection blur; occlusion / emissive are not stored (the raster pass already applied them). Debug view `gbuffer.debug=material` (red roughness, green metalness, dark blue none).
+  Only exists while the G-buffer is armed (`ao.enabled`, `gi.screen`, `upscale.mode`, `gbuffer.debug`) and the pack is on.
+* **Hot reload**: command `materials reload` (`-Commands '900: materials reload'`, overlay command line) re-reads all pack folders; the new snapshot replaces the old at the next lookup.
+* **Authoring log**: with `-RvkLogLevel debug` every material is logged once: `enh: materials: seen '<material>' (diffuse image '<image>'): pack entry|no entry`.
+* **Packet cache** (`native.packet_cache`): draws that take the pack variant are not replayed (`Device::replayAllowed` refuses a lit main-view material draw while a pack is on).
+* Not built (design only): SSR / RT reflections for smooth surfaces (`materials.quality=high`), glass (`transmission` / `ior` need a word extension or side table and an alpha-blended response:
+  the pack word has no free bits left), lazy texture loading / freeing unused maps.
+
 ## 4. What is NOT done (limits)
-* No G-buffer channels yet. Design: a third attachment R8G8B8A8 (roughness, metalness, occlusion, id/flags) written by the same epilogue: +4 B/pixel (+7 MB at
-  1920x1080 = +0.8 ms bandwidth class) and a new attachment in the armed-scope pipelines (`Device::setGbuffer`, the other agent's area): deferred until the path tracer needs it.
-  Until then the path tracer reads the pack through the RT hit surface (record word) and, for primary visibility, can sample the same word table.
+* G-buffer: roughness / metalness in the normal target's spare channel (3b); occlusion / emissive / flags are not stored (an RGBA8 attachment would cost +4 B/pixel and a new attachment in the armed-scope pipelines).
 * Raster: the water RT / SSR reflections and the RT scene are not mixed into the pack's reflection (sky cube only); no glass transparency (`transmission` / `ior` are
   parsed only); the sun shadow factor is the engine's mask alpha (no pack-specific shadows); alpha-blended passes use the depth buffer's position (wrong for
   blended materials); the ubershader path (`debug.ubershader`, default off) does not capture the diffuse (its pack data = grey albedo, no map).
