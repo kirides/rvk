@@ -29,6 +29,7 @@ struct Pass {
     const void* illum = nullptr;  // eSShaderMaterialIllumination* (null: no lighting written)
     std::uint8_t firstLight = 0;
     std::int32_t switchValue = 0;
+    bool tableLit = false;  // Full-owned lighting (gpu-scene.md 9.8): the lights come from the clustered table, not from this pass's light list
 };
 inline std::uint32_t passKind(std::uint32_t flags) { return flags >> 6 & 7u; }
 inline std::uint32_t passLights(std::uint32_t flags) { return flags >> 2 & 3u; }
@@ -53,6 +54,8 @@ struct PassInputs {
     std::uint32_t combi = 0;      // eMeshResource2::BindLightmaps' result (0 / 1)
     bool instanced = false;
     std::int32_t switchValue = 0;
+    bool tableLit = false;        // Full-owned lighting: ONE base pass with the maximum light permutation (3 lights; the sun as the engine's first pass),
+                                  // no additive passes: every light beyond comes from the table per pixel
 };
 // appends the passes (in the engine's order); returns how many were added
 std::size_t buildPasses(const PassInputs& in, std::vector<Pass>& out);
@@ -124,7 +127,9 @@ struct Instance {
 struct Batch {
     std::uint32_t first = 0, count = 0;  // instances [first, first + count); the last one's illumination / switch / flags draw it
 };
-void planBatches(std::span<const Instance> instances, std::uint32_t maxPerBatch, std::vector<Batch>& out);
+// tableLit (Full-owned lighting): the illumination's alpha factor (+8) and static lights (+0xd) no longer end a batch - the lights come from the table,
+// only the list (ambient SH / sun), the switch value, the overlay flags and a static SH object do
+void planBatches(std::span<const Instance> instances, std::uint32_t maxPerBatch, std::vector<Batch>& out, bool tableLit = false);
 
 // eCColorSrcConstantSwitch::SetSwitch 0x6c0c60: the colour index of switch value s (count +0x58, repeat +0x68)
 std::int32_t constantSwitchIndex(std::int32_t s, std::int32_t count, std::int32_t repeat);

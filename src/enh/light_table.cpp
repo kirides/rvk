@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <atomic>
 #include <cstring>
+#include <mutex>
 
 #include <spdlog/spdlog.h>
 
@@ -18,7 +20,26 @@ constexpr std::uint32_t kClusters = kLightGridX * kLightGridY * kLightGridZ;
 constexpr std::uint64_t kLightsOffset = kLightHeaderBytes;
 constexpr std::uint64_t kClustersOffset = kLightsOffset + std::uint64_t{kLightMax} * kLightBytes;
 constexpr std::uint64_t kBufferBytes = kClustersOffset + std::uint64_t{kClusters} * kLightClusterBytes;
+
+std::atomic<bool> g_fullLit{false};
+std::mutex g_drawnMutex;
+std::vector<engine::lights::WorldLight> g_drawn;  // lights of the lists drawn last frame(s), merged into the next build
 }  // namespace
+
+bool fullLitActive() { return g_fullLit.load(std::memory_order_relaxed); }
+void setFullLitActive(bool on) { g_fullLit.store(on, std::memory_order_relaxed); }
+
+void LightTable::noteDrawnLight(const float pr[4], const float col[4]) {
+    if (!(pr[3] > 0.0f) || !std::isfinite(pr[3]) || !(col[0] + col[1] + col[2] > 1e-4f)) return;
+    const std::lock_guard lock(g_drawnMutex);
+    if (g_drawn.size() >= 512) return;
+    engine::lights::WorldLight l;
+    std::memcpy(l.pos, pr, 12);
+    l.range = 1.0f / std::sqrt(pr[3]);
+    std::memcpy(l.col, col, 12);
+    l.dynamic = true;
+    g_drawn.push_back(l);
+}
 
 float lightSliceScale(float nearZ, float farZ, std::uint32_t slices) { return static_cast<float>(slices) / std::log(farZ / nearZ); }
 
@@ -117,6 +138,22 @@ void LightTable::record(d3d9::PassContext& ctx) {
         ++skipped_;
         return;
     }
+    // the lights of the lists drawn since the last build that the registry did not return (same light = within 8 units)
+    lastDrawnAdded_ = 0;
+    {
+        const std::lock_guard lock(g_drawnMutex);
+        const std::size_t registry = scratch_.size();
+        for (const auto& d : g_drawn) {
+            bool known = false;
+            for (std::size_t i = 0; i < scratch_.size() && !known; ++i) {
+                const auto& w = scratch_[i];
+                known = std::abs(w.pos[0] - d.pos[0]) < 8.0f && std::abs(w.pos[1] - d.pos[1]) < 8.0f && std::abs(w.pos[2] - d.pos[2]) < 8.0f;
+            }
+            if (!known) scratch_.push_back(d);
+        }
+        lastDrawnAdded_ = static_cast<std::uint32_t>(scratch_.size() - registry);
+        g_drawn.clear();
+    }
     const auto reach = [&](const engine::lights::WorldLight& l) {
         const float dx = l.pos[0] - cam.position[0], dy = l.pos[1] - cam.position[1], dz = l.pos[2] - cam.position[2];
         return std::sqrt(dx * dx + dy * dy + dz * dz) - l.range;
@@ -206,8 +243,10 @@ void LightTable::logStats() {
     const double now = dev_.secondsSinceCreate();
     if (now - lastLog_ < 5.0) return;
     lastLog_ = now;
-    spdlog::info("enh: lights: {} lights in the table ({} changed since the last frame, {} dropped beyond {}), {} builds ({} skipped), style {}, debug {}",
-                 lastCount_, lastChanged_, lastDropped_, kLightMax, passes_, skipped_, style_ == 1 ? "physical" : "original", debug_);
+    spdlog::info("enh: lights: {} lights in the table ({} changed since the last frame, {} dropped beyond {}, {} from drawn lists), {} builds ({} skipped), style {}, "
+                 "debug {}, table lighting {}",
+                 lastCount_, lastChanged_, lastDropped_, kLightMax, lastDrawnAdded_, passes_, skipped_, style_ == 1 ? "physical" : "original", debug_,
+                 fullLitActive() ? "on" : "off");
 }
 
 }  // namespace rvk::enh

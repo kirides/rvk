@@ -107,6 +107,10 @@ public:
     void setLean(bool on, int check);
     // native.lean_restore (O2b measurement): false = no device save / restore around a lean op's draws
     void setLeanRestore(bool on) { leanRestore_ = on; }
+    // Full-owned lighting (lighting.full_lit; gpu-scene.md 9.8): lit mesh / tree / vegetation draws take ONE base pass with the 3-light permutation, their
+    // point lights come from the clustered table (the light registers are written zero; the material variant fills them per pixel), the additive passes of
+    // objects with > 3 lights are gone, the batches no longer end on the illumination's static lights / alpha factor. Pictures differ from the engine's.
+    void setTableLit(bool on);
     // packet retention (native.packet_cache; retained-signals.md 8): 0 off, 1 on, 2 on + verify every 10th frame, 3 on + verify every frame. Only
     // set when no compare / tap / coverage is active (they need prepareDraw's tap)
     void setPacketCache(int mode) {
@@ -297,6 +301,7 @@ private:
     void writeAlpha(std::uint32_t slot, float a);
     void writeTreeInstance(std::uint32_t slot, const float v[2]);  // SetSpeedTreeInstanceData 0x6c9eb0: c32 + 4 slot .xy
     void writeLighting(const sc::Pass& pass);
+    void noteListLights(const std::uint8_t* list);
     std::uint32_t bindLightmaps(const std::uint8_t* res);
     void capture(const d3d9::DrawTapInfo& t, sc::DrawDesc& out);
     // the decals (static_ops_nonop.cpp)
@@ -403,6 +408,9 @@ private:
     // ---- O2a lean ops (static_ops_lean.cpp) ----
     bool lean_ = false;
     bool leanRestore_ = true;
+    bool tableLit_ = false;
+    std::uint64_t tableLitFrame_ = ~0ull;
+    std::vector<const void*> tableLitSeen_;  // light lists whose lights were handed to the table this frame
     int leanCheck_ = 0;
     std::uint64_t leanFrameNo_ = ~0ull;
     sc::LeanFrame leanFrameKind_ = sc::LeanFrame::Lean;

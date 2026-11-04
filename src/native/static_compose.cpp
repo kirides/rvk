@@ -22,6 +22,18 @@ std::size_t buildPasses(const PassInputs& in, std::vector<Pass>& out) {
         out.push_back({(in.combi & 3u) << 4 | (flags & 0xfffffe00u), nullptr, 0, in.switchValue});
         return out.size() - before;
     }
+    if (in.tableLit) {
+        // one pass: the sun as the engine's first pass has it, the 3-light permutation (lights beyond the engine's reach, and the additive passes
+        // of objects with more than 3, are the table's job)
+        flags = base;
+        if (in.listSun != 0 && in.illumNoSun == 0) flags |= 1u;
+        flags |= 3u << 2;
+        flags = (in.combi & 3u) << 4 | (flags & 0xfffffe0fu);
+        Pass p{flags, in.illum, 0, in.switchValue};
+        p.tableLit = true;
+        out.push_back(p);
+        return out.size() - before;
+    }
     const std::int32_t total = static_cast<std::int32_t>(in.dynamicLights) + static_cast<std::int32_t>(in.staticLights);
     bool first = true;
     std::int32_t next = 0;
@@ -252,7 +264,7 @@ void planWholeMeshZ(std::span<const ZSub> subs, std::vector<ZDraw>& out) {
     flush();
 }
 
-void planBatches(std::span<const Instance> instances, std::uint32_t maxPerBatch, std::vector<Batch>& out) {
+void planBatches(std::span<const Instance> instances, std::uint32_t maxPerBatch, std::vector<Batch>& out, bool tableLit) {
     const std::uint32_t n = static_cast<std::uint32_t>(instances.size());
     std::uint8_t count = 0;
     bool first = true, alone = false;
@@ -262,7 +274,7 @@ void planBatches(std::span<const Instance> instances, std::uint32_t maxPerBatch,
         if (!flush) {
             const Instance& in = instances[k];
             flush = cur.list != in.list || cur.switchValue != in.switchValue || cur.flags != in.flags ||
-                    count == static_cast<std::uint8_t>(maxPerBatch) || cur.f != in.f || alone || first;
+                    count == static_cast<std::uint8_t>(maxPerBatch) || (!tableLit && cur.f != in.f) || alone || first;
         }
         if (flush) {
             if (count != 0) {

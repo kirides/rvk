@@ -318,10 +318,10 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
                     ObjSnap<0x98> is;
                     is.load(il);
                     x.list = is.ok ? is.at<U8*>(0) : nullptr;
-                    x.alone = is.ok && (is.at<std::uint8_t>(0x90) != 0 || is.at<std::uint8_t>(0xd) != 0);
+                    x.alone = is.ok && (is.at<std::uint8_t>(0x90) != 0 || (!tableLit_ && is.at<std::uint8_t>(0xd) != 0));
                 } else {
                     x.list = ptr(il, 0);
-                    x.alone = get<std::uint8_t>(il, 0x90) != 0 || get<std::uint8_t>(il, 0xd) != 0;
+                    x.alone = get<std::uint8_t>(il, 0x90) != 0 || (!tableLit_ && get<std::uint8_t>(il, 0xd) != 0);
                 }
             }
             inst.push_back(x);
@@ -401,10 +401,10 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
                         ObjSnap<0x98> is;
                         is.load(il);
                         x.list = is.ok ? is.at<U8*>(0) : nullptr;
-                        x.alone = is.ok && (is.at<std::uint8_t>(0x90) != 0 || is.at<std::uint8_t>(0xd) != 0);
+                        x.alone = is.ok && (is.at<std::uint8_t>(0x90) != 0 || (!tableLit_ && is.at<std::uint8_t>(0xd) != 0));
                     } else {
                         x.list = ptr(il, 0);
-                        x.alone = get<std::uint8_t>(il, 0x90) != 0 || get<std::uint8_t>(il, 0xd) != 0;
+                        x.alone = get<std::uint8_t>(il, 0x90) != 0 || (!tableLit_ && get<std::uint8_t>(il, 0xd) != 0);
                     }
                 }
                 inst.push_back(x);
