@@ -59,7 +59,7 @@ float3 albedoLinear(RvkRtHitSurface s, float scale) {
 }
 
 // the light arriving at a surface point from the sun and one of the frame's point lights (shadow rays): acc units
-float3 directLight(GiPassParams p, RvkFrame f, float3 P, float3 N, float3 G) {
+float3 directLight(GiPassParams p, RvkFrame f, float3 P, float3 N, float3 G, bool points = true) {
     float3 E = float3(0.0, 0.0, 0.0);
     float3 L = p.Get().sunDir.xyz;
     float nl = clamp(dot(L, N), 0.0, 1.0) * clamp(dot(L, G) * 4.0, 0.0, 1.0);
@@ -67,7 +67,7 @@ float3 directLight(GiPassParams p, RvkFrame f, float3 P, float3 N, float3 G) {
         float vis = rvkRtVisibility(f, P + G * 2.0, L, 1.0, p.Get().shade.z, 0.0, 0.0, RVK_RT_TRACE_OPAQUE);
         E += p.Get().sunColor.rgb * (nl * vis);
     }
-    E += giPointLights(p, f, P, N, G, rnd());
+    if (points) E += giPointLights(p, f, P, N, G, rnd());
     return E;
 }
 
@@ -153,12 +153,16 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         float sumL2 = 0.0;
         const float3 lw = float3(0.2126, 0.7152, 0.0722);
         float3 origin0 = P + N * 3.0 + V * 2.0;
+        const bool lightsInProbes = (p.Get().flags.z & 1u) != 0u;
         for (uint s = 0u; s < spp; ++s) {
-            sumDir += directLight(p, f, P + N * 1.0, N, N);
+            // lights in the probes (gi.lights=world + replaced lightmaps): the probes carry the point lights' direct light, so the
+            // reference of the probes' irradiance counts it as part of the "indirect" plane; the direct plane keeps the sun (path-tracing.md 10)
+            sumDir += directLight(p, f, P + N * 1.0, N, N, !lightsInProbes);
             // one indirect path
             float3 dir = cosineDir(N);
             float3 origin = origin0;
             float3 tp = float3(1.0, 1.0, 1.0), rad = float3(0.0, 0.0, 0.0);
+            if (lightsInProbes) rad = giPointLights(p, f, P + N * 1.0, N, N, rnd());
             for (uint b = 0u; b < r.Get().img.z; ++b) {
                 RvkRtHit h = rvkRtTraceClosest(f, origin, dir, 1.0, 1.0e6, 0.0, spread, traceFlags);
                 if (!h.hit) {

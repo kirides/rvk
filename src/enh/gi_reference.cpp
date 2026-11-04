@@ -34,6 +34,19 @@ void split(const std::array<std::uint32_t, 2>& a, std::uint32_t* out) {
     out[1] = a[1];
 }
 
+// the same on values quantised to 1 / scale (slowly drifting light: weather / time of day changes a hair every few frames)
+std::uint64_t hashFloatsQ(const float* v, std::size_t n, float scale, std::uint64_t h = 1469598103934665603ull) {
+    for (std::size_t i = 0; i < n; ++i) {
+        const std::int32_t q = static_cast<std::int32_t>(std::floor(v[i] * scale));
+        const auto* b = reinterpret_cast<const std::uint8_t*>(&q);
+        for (std::size_t k = 0; k < sizeof(q); ++k) {
+            h ^= b[k];
+            h *= 1099511628211ull;
+        }
+    }
+    return h;
+}
+
 std::uint64_t hashFloats(const float* v, std::size_t n, std::uint64_t h = 1469598103934665603ull) {
     const auto* b = reinterpret_cast<const std::uint8_t*>(v);
     for (std::size_t i = 0; i < n * sizeof(float); ++i) {
@@ -188,14 +201,19 @@ void Gi::recordReference(d3d9::PassContext& ctx, rhi::CommandList& cl, GiPush pu
         hs[0] = hashFloats(cam.viewProjection.m.data(), 16);
         hs[0] = hashFloats(cam.position.data(), 3, hs[0]);
         hs[0] = hashFloats(dims, 2, hs[0]);
-        hs[1] = hashFloats(sunColor_, 4);
-        hs[1] = hashFloats(sunDir_, 4, hs[1]);
-        hs[2] = hashFloats(&sky_[0][0], 28);
-        hs[2] = hashFloats(indoor_, 4, hs[2]);
+        // (quantised: a slowly drifting sky would restart the accumulation before it converges, as in the crystal cave)
+        hs[1] = hashFloatsQ(sunColor_, 4, 24.0f);
+        hs[1] = hashFloatsQ(sunDir_, 4, 24.0f, hs[1]);
+        hs[2] = hashFloatsQ(&sky_[0][0], 28, 48.0f);
+        hs[2] = hashFloatsQ(indoor_, 4, 48.0f, hs[2]);
         hs[3] = 1469598103934665603ull;
         for (const auto& l : frameLights_) {
-            hs[3] = hashFloats(l.pos, 4, hs[3]);
-            hs[3] = hashFloats(l.col, 3, hs[3]);
+            // quantised: flickering lights (candles, crystals) would restart the accumulation every few frames and it would never
+            // converge; the reference averages the flicker instead (colour in 41 % steps, position in 10 cm steps)
+            float q[7] = {std::floor(l.pos[0] * 0.1f), std::floor(l.pos[1] * 0.1f), std::floor(l.pos[2] * 0.1f), 0.0f,
+                          std::floor(std::log2(std::max(l.col[0], 1e-3f)) * 2.0f), std::floor(std::log2(std::max(l.col[1], 1e-3f)) * 2.0f),
+                          std::floor(std::log2(std::max(l.col[2], 1e-3f)) * 2.0f)};
+            hs[3] = hashFloats(q, 7, hs[3]);
         }
         const float opts[6] = {static_cast<float>(s_.referenceBounces), s_.emissive, static_cast<float>(s_.cutoutsTested), static_cast<float>(s_.characters),
                                static_cast<float>(dev_.rtScene().instances), static_cast<float>(dev_.rtScene().recordCount)};  // (streaming geometry)

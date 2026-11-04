@@ -563,6 +563,14 @@ void Gi::record(d3d9::PassContext& ctx) {
         hd.cascade[c].spacing[1] = 1.0f / kSpacing[c];
         hd.cascade[c].spacing[2] = kDepthCap;
     }
+    {
+        // developer experiments (-Environment 'RVK_GI_EXP=<bit mask>'): the shaders read the mask from cascade 0's spacing.w (path-tracing.md 10)
+        static const std::uint32_t exp = [] {
+            char buf[16] = {};
+            return GetEnvironmentVariableA("RVK_GI_EXP", buf, sizeof(buf)) > 0 ? static_cast<std::uint32_t>(std::strtoul(buf, nullptr, 0)) : 0u;
+        }();
+        std::memcpy(&hd.cascade[0].spacing[3], &exp, sizeof(exp));
+    }
     const rhi::RingAlloc ha = frames.ring(sizeof(hd), 16);
     const rhi::RingAlloc la = frames.ring(std::max<std::uint64_t>(n, 1) * 4, 16);
     const rhi::RingAlloc pa = frames.ring(sizeof(GiPassParams), 16);
