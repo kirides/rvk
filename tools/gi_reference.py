@@ -390,7 +390,7 @@ def main():
                     rdir = os.path.join(d, 'gi_ref')
                     break
             if rm is None:
-                print(f'{spot}: no reference dump in {a.ref_run}', file=sys.stderr)
+                print(f'{spot}: no reference dump in {a.ref_run}')
                 continue
         r = analyze_spot(spot, em, gi_dir, out, shots, rm, rdir)
         results.append(r)

@@ -60,6 +60,9 @@ struct RvkGiVolumeData {
 // a reference to the header in memory: members are read through `.Get()`
 typedef RVK_REF(RvkGiVolumeData) RvkGiVolume;
 
+// developer experiment mask (-Environment 'RVK_GI_EXP=<n>', enh/gi.cpp: cascade 0's spacing.w): bits are defined where they are used (path-tracing.md 10)
+uint rvkGiExp(RvkGiVolume v) { return asuint(v.Get().cascade[0].spacing.w); }
+
 bool rvkGiValid(RvkFrame f) { return (f.gi.z & RVK_FRAME_GI_VALID) != 0u && any(f.gi.xy != uint2(0u, 0u)); }
 RvkGiVolume rvkGiVolume(RvkFrame f) { return rvkPtr<RvkGiVolumeData, 16>(f.gi.xy); }
 
