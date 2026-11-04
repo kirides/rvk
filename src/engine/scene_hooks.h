@@ -107,4 +107,8 @@ bool ensureOpSlot(const void* vtable, int slot, const void** original);
 // own draws so the enhanced water's DrawReplacer acts on them as on the engine's. Render thread.
 void subMeshWater(const void* material, const void* meshResource, d3d9::draws::Water& water, const char*& name);
 
+// ms between two refreshes of the sky cube while it is kept current (Device::skyCubeEveryFrame; 0 = every frame)
+void setSkyCubeIntervalMs(int ms);
+void setSkyCubeFullMode(bool full);  // the interval applies in Full only
+
 }  // namespace rvk::engine::scene

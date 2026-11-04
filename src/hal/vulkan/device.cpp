@@ -149,6 +149,7 @@ void HalDevice::applyStaticOps() {
     const NativePlan plan = nativePlan(renderMode(), on(rs.nativeStaticOps), on(rs.nativeStaticOpsCompare), on(rs.nativeSceneOps),
                                        on(rs.nativeSceneOpsCompare),
                                        rs.nativeSceneOpsGroups != nullptr ? rs.nativeSceneOpsGroups->asInt() : static_cast<int>(kAllSceneOpGroups));
+    engine::scene::setSkyCubeFullMode(renderMode() == RenderMode::Full);
     const bool takeOver = plan.staticTake;
     const bool compare = plan.staticCompare;
     staticOps_->setMode(native::StaticOps::Group::Static, takeOver, compare);
@@ -620,6 +621,10 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         for (settings::Setting* s : {rs.materialSources, rs.ubershader, rs.ubershaderSkip}) {
             reg.onChange(*s, [applyMaterials](const settings::Setting&) { applyMaterials(); }, this);
         }
+    }
+    if (rs.skyCubeInterval != nullptr) {
+        engine::scene::setSkyCubeIntervalMs(static_cast<int>(rs.skyCubeInterval->asInt()));
+        reg.onChange(*rs.skyCubeInterval, [](const settings::Setting& s) { engine::scene::setSkyCubeIntervalMs(static_cast<int>(s.asInt())); }, this);
     }
     if (rs.shadowStride != nullptr) {
         engine::shadowmaps::setUpdateStride(static_cast<int>(rs.shadowStride->asInt()));
