@@ -88,6 +88,14 @@ struct GiPush {
 };
 static_assert(sizeof(GiPush) == 32);
 
+// mirror of shaders/gi/gi_reference.comp.hlsl GiRefParamsData (the reference path tracer, gi.reference; its address in GiPush::pad)
+struct GiRefParams {
+    std::uint32_t buf[4];   // accumulation buffer address, samples this frame, samples accumulated before
+    std::uint32_t img[4];   // resolved screen probe image (bindless), view mode, max bounces, seed
+    std::uint32_t size[4];  // width, height, bit 0: first frame of the epoch, 0
+};
+static_assert(sizeof(GiRefParams) == 48);
+
 class Gi final : public d3d9::DrawObserver {
 public:
     struct Settings {
@@ -106,6 +114,13 @@ public:
         int lights = 1;           // point lights the rays see (rtgi.md 19): 0 the drawn objects' (nearby), 1 the world's (engine/lights)
         int lightCount = 128;     // the most lights per frame (gi.light_count, debug)
         int screen = 2;           // screen probes (stage C, rtgi.md 11): 0 off, 1 low, 2 medium, 3 high
+        // the reference path tracer (gi.reference*, docs/research/path-tracing.md; Debug): a view (0 off, 1 reference, 2 DDGI volume,
+        // 3 DDGI + screen probes, 4 error of 3, 5 reference indirect, 6 screen indirect, 7 error of 2), samples per frame, samples
+        // until the accumulation stops (and is dumped), the most bounces of a path
+        int reference = 0;
+        int referenceSpp = 4;
+        int referenceMax = 1024;
+        int referenceBounces = 6;
     };
 
     Gi(d3d9::Device& device, RtScene* scene);
@@ -162,6 +177,11 @@ private:
     // stage C: the screen probes after the z pre-pass (this frame's depth, the RT scene built there), with the last update's
     // light and volume
     void recordScreen(d3d9::PassContext& ctx);
+    // gi.reference: the reference path tracer (right after the screen probes, same depth / RT scene / light) and its view
+    void recordReference(d3d9::PassContext& ctx, rhi::CommandList& cl, GiPush push, std::uint32_t resolvedSlot, std::uint32_t w, std::uint32_t h);
+    void recordReferenceView(d3d9::PassContext& ctx);
+    void flushDumps();
+    void scheduleDump(rhi::CommandList& cl, std::uint32_t planes, std::uint32_t spp, bool full);
 
     d3d9::Device& dev_;
     RtScene* scene_ = nullptr;
@@ -188,6 +208,25 @@ private:
     double diagSum_[64]{};
     void logDiag();
     bool cleared_ = false;
+    // gi.reference
+    std::unique_ptr<rhi::Pipeline> refTrace_, refViewPipe_;
+    PipelineFuture refBuild_;
+    std::uint32_t refViewPass_ = 0;
+    std::uint32_t refViewFormat_ = 0;
+    std::uint64_t refViewFrame_ = ~0ull;
+    std::unique_ptr<rhi::Buffer> refBuf_;
+    std::uint32_t refW_ = 0, refH_ = 0, refEpoch_ = 0, refAcc_ = 0, refNextDump_ = 0;
+    bool refFirst_ = true, refFinalDumped_ = false;
+    std::uint64_t refHash_[4]{};
+    std::uint32_t refResets_[4]{}, refFrames_ = 0;
+    struct PendingDump {
+        std::unique_ptr<rhi::Buffer> buf;
+        std::uint64_t frame = 0;
+        std::uint32_t w = 0, h = 0, planes = 0, spp = 0, epoch = 0;
+        bool full = false;
+        float camera[3]{};
+    };
+    std::vector<PendingDump> refDumps_;
     std::array<Cascade, kGiCascades> cascades_;
     std::mt19937 rng_{0x9E3779B9u};
 

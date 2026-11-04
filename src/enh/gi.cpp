@@ -7,15 +7,19 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <format>
+#include <fstream>
 #include <string>
 
 #include <spdlog/spdlog.h>
 
+#include "core/paths.h"
 #include "engine/hemisphere.h"
 #include "engine/symbols.h"
 #include "enh/gbuffer.h"
 #include "enh/material_variant.h"
+#include "enh/debug_view.h"
 #include "enh/rhi_scope.h"
 #include "enh/rt_scene.h"
 #include "shader/embedded.h"
@@ -103,7 +107,7 @@ Gi::Gi(d3d9::Device& device, RtScene* scene) : dev_(device), scene_(scene) {
 Gi::~Gi() {
     disable();
     // (a pipeline still being built is waited for, then retired with the others)
-    for (PipelineFuture* f : {&traceBuild_, &blendBuild_, &spTraceBuild_, &spResolveBuild_}) {
+    for (PipelineFuture* f : {&traceBuild_, &blendBuild_, &spTraceBuild_, &spResolveBuild_, &refBuild_}) {
         if (f->valid()) f->get();
     }
 }
@@ -130,6 +134,34 @@ void Gi::apply(const Settings& s) {
     if (!on_ || s_.screen == 0) {
         dev_.setFrameSgi({});
         sgiValid_ = false;
+    }
+    // the reference path tracer (Debug): its pipeline is built on first use, its view pass exists while a view is selected
+    s_.reference = std::clamp(s_.reference, 0, 7);
+    s_.referenceSpp = std::clamp(s_.referenceSpp, 1, 64);
+    s_.referenceMax = std::clamp(s_.referenceMax, 1, 1000000);
+    s_.referenceBounces = std::clamp(s_.referenceBounces, 1, 16);
+    if (on_ && s_.reference > 0 && !refTrace_ && !refBuild_.valid()) {
+        rhi::Device* rdev = dev_.rhi();
+        if (rdev != nullptr) {
+            refBuild_ = std::async(std::launch::async, [rdev]() {
+                rhi::ComputePipelineDesc d;
+                d.cs.spirv = shader::embedded::spirv("gi/gi_reference.comp");
+                d.cs.dxil = shader::embedded::dxilOnDemand("gi/gi_reference.comp");
+                d.name = "gi.reference";
+                return rdev->createComputePipeline(d);
+            });
+        }
+    }
+    if (on_ && s_.reference > 0 && refViewPass_ == 0) {
+        refViewPass_ = dev_.addPass(d3d9::inject::Point::AfterMainView, "gi.reference view", [this](d3d9::PassContext& ctx) { recordReferenceView(ctx); }, this, 10);
+        refFirst_ = true;
+        refAcc_ = 0;
+    } else if ((!on_ || s_.reference == 0) && refViewPass_ != 0) {
+        dev_.removePass(refViewPass_);
+        refViewPass_ = 0;
+        dev_.releaseTransient("gi.ref.view");
+        refBuf_.reset();
+        refW_ = refH_ = 0;
     }
     spdlog::info("enh: gi: {} (quality {}, strength {:.2f}, lightmaps {}, characters {}, screen probes {}, bleed {:.2f}, debug {})", on_ ? "on" : "off",
                  s_.quality, s_.strength, s_.replaceLightmaps ? "replaced" : "kept", s_.characters ? "on" : "off", s_.screen, s_.bleed, s_.debug);
@@ -166,6 +198,10 @@ void Gi::disable() {
     dev_.removeDrawObserver(this);
     dev_.removePasses(this);
     passId_ = 0;
+    refViewPass_ = 0;
+    refBuf_.reset();
+    refW_ = refH_ = 0;
+    dev_.releaseTransient("gi.ref.view");
     haveLast_ = false;
     scene_->setAnimated(this, false, 0.0f);
     scene_->setDynamic(this, false);
@@ -789,6 +825,7 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
     sgiValid_ = true;
     // -> this frame's material shaders (Gbuffer variants: the factor on their DDGI lookup at their pixel)
     dev_.setFrameSgi({res[cur]->heapSampled(), dev_.samplerFor(true, true), shader::abi::kFrameSgiValid, stats[cur]->heapSampled()});
+    if (s_.reference > 0) recordReference(ctx, cl, push, res[cur]->heapSampled(), w, h);
     if (screenFrames_++ == 0) {
         spdlog::info("enh: gi: screen probes: {}x{} probes ({} px tiles, {} rays each) over {}x{}", gw, gh, tile, rays, w, h);
     }
