@@ -596,3 +596,45 @@ Full mode (Vulkan, savegame, 2 interleaved runs each, all new switches on vs the
 lines in rvk.log), Full compare run (`native.static_ops_compare`, `scene_ops_compare`, `lean_check=10`, `debug.fast_sort=2`) `mismatches: none`, 0 sort
 differences. `refcompare` vs `out/refcompare/20261103-130010`: Vulkan 11 PASS / 6 WARN / 3 FAIL (`harbour_docks`, `sea_cliff`, `harbour_mouth` = the known
 sea-edge noise), D3D12 12 / 6 / 2 (`sea_cliff`, `harbour_mouth`); no new FAIL (`out/refcompare/20261104-021314` Vulkan, `20261104-021937` D3D12).
+
+## 22. Ocean mip chains by compute (2026-11-04)
+
+The FFT ocean's displacement + derivative images (2 per cascade, 4 cascades at High: rgba16f, 128 / 256 / 512 squared, 8 - 10 levels) got their mips
+from one blit per level (64 blits per frame on the savegame's quality, each an SRV + RTV and two barrier calls on D3D12). Now
+`shaders/water/ocean_mips.comp.hlsl` (structure of AMD FidelityFX SPD, MIT: a workgroup reduces a tile through groupshared memory, several levels per
+dispatch; attribution in the file header) writes them: per image **dispatch A** mip 0 -> 1..6 (one group of 16 x 16 threads per 64 x 64 texels, 16 KiB
+groupshared) and **dispatch B** mip 6 -> 7..9 (one group; the source is at most 8 x 8), one `computeBarrier` between all A and all B dispatches and
+no per-level layout transitions (every level in GENERAL, then one transition to SHADER_READ_ONLY). Not SPD's single dispatch: the last-group stage
+needs a globallycoherent UAV + an atomic counter, and the root signature's storage images (u0..u7 space1) hold a source + 6 destination levels per
+dispatch anyway, so two dispatches without cross-group reads are the simple, portable form (no globallycoherent in the HLSL / DXIL path, no counter
+reset). Filter: the 2 x 2 box = what the bilinear blit of a power-of-two level computes (all sizes are 128 / 256 / 512); intermediate levels stay float
+inside a group (the blit rounds to half per level: difference <= 1e-3, one half ulp). Switch `debug.ocean_spd` (Debug, default on; off = the blits,
+kept for A/B; also the fallback when the GPU lacks 16 KiB of shared memory).
+
+**Gates.** `rvk_rhitest` test "ocean mip chain by compute" (128 and 512, random + smooth field, vs a CPU box chain): worst difference 9.5e-4 (half
+rounding) on both backends, **Vulkan vs D3D12 bit-identical** (difference 0 over 350,000 values); `dxil-check embedded` and the pipelines test
+include the new shader; `rvk_tests` 215 / 215, `rvk_vktest --passes` PASS. Pictures (`water-compare`, `water.ocean=fft`, spd off left vs on right,
+sea_cliff / sea_horizon / harbour_mouth / beach_sun, `tools` diff = mean absolute difference per pixel, 0..255): SPD vs blit on Vulkan 2.0 / 0.11 / 0.25
+/ 2.9, on D3D12 3.3 / 0.17 / 0.93 / 3.9 (beach_sun / sea_horizon / harbour_mouth / sea_cliff), against the **same-setting noise** (spd on vs on) 2.6 /
+0.31 / 0.84 / 2.2 (Vulkan run 3.3 / 0.08 / 0.22 / 4.2): the surf's splash particles and eye adaptation dominate; the waves are identical to the eye.
+
+**Numbers** (savegame recipe of 14 / 21, wrapper, lod 2x, `-Perf`, 3 interleaved runs per arm; CPU = engine + HAL per frame, mean of the last 10
+windows; one off-arm run per backend was a 6.6 / 7.7 ms outlier (other load), shown in the means, medians of the other two in brackets):
+
+| | Vulkan off (blits) | Vulkan on | D3D12 off | D3D12 on |
+|---|---|---|---|---|
+| CPU ms per frame | 5.284 (4.652 / 6.614 / 4.585; ex outlier 4.62) | **4.506** (4.450 / 4.625 / 4.442) | 5.784 (4.823 / 4.820 / 7.709; ex 4.82) | **4.556** (4.566 / 4.544 / 4.557) |
+| `water.ocean` pass CPU | 0.215 | **0.048** | 0.355 | **0.099** |
+| all injected passes CPU | 0.318 | 0.144 | 0.467 | 0.194 |
+| `pass water.ocean` GPU (`-PerfFrame 4000`, 24 frames, 2 runs) | 0.421 / 0.419 | **0.318 / 0.286** | 0.557 / 0.590 | **0.247 / 0.366** |
+
+CPU: -0.12 ms (-2.5 %) on Vulkan, -0.26 ms (-5.5 %) on D3D12 against the clean off runs; the ocean's CPU 0.215 -> 0.048 / 0.355 -> 0.099. GPU: the
+chain is 0.1 ms (Vulkan) to 0.2+ ms (D3D12) cheaper (fewer barriers, 16 dispatches instead of 64 blits). **D3D12 vs Vulkan** (SPD on): 4.556 vs 4.506 =
+**+1.1 %** (was +4.9 %, 4.812 vs 4.588).
+
+Validation / regression gates (SPD on): `testdemo` 7 / 7 PASS with `-Validation` on Vulkan wrapper + full (also sync validation) and D3D12 wrapper + full, 0
+validation lines in rvk.log; `water-compare` (sea_cliff / sea_horizon / beach_sun, `water.ocean=fft`, `water.ocean_quality=high`) with `-Validation` (+ sync
+validation on Vulkan) 0 validation lines on both backends (rvk.log `mip chains by compute`); `refcompare` vs `out/refcompare/20261103-130010`: Vulkan 11 PASS /
+7 WARN / 2 FAIL (`harbour_mouth`, `sea_cliff`), D3D12 13 / 5 / 2 (same two): no new FAIL. Gotcha: `-Setting` bools are lowercase `true` / `false`
+(`True` / `False` from PowerShell are not parsed: an A/B arm silently stayed on). Rejected: a true single-dispatch SPD with a global counter (no
+globallycoherent in our HLSL / DXIL path, 8 storage image slots); not needed, the two dispatches already remove the per-level cost.
