@@ -514,3 +514,76 @@ buffers reused, LOD diagnostics without per-call allocation. Result: Full 5.03 -
 -0.13 ms in both (~2 %); vcruntime140 share Full 9.1 -> 7.5 %, Wrapper 5.4 -> 3.1 %. No item above ~1 % of the thread is left in
 the device path; merged indirect draws would not touch the engine thread (plan.md 8.4). Remaining engine-thread time is the
 engine itself (Engine.dll 18 % / 33 %, sharedbase 8 / 11 %), SEH-guarded engine reads (3 %) and the driver's inline `vkCmd*` (4.5 %).
+
+## 21. CPU pass 3: fresh profile of both backends, XInput, typed op sort, D3D12 pipeline hash (2026-11-04)
+
+Scene and recipe as in 14 (perf savegame `out/fg/perf.save`, lod 2x, `-Exe RisenTest.exe -Vsync off -PlayerDefaults -Perf [-CpuProfile]`, scenario
+`rvk_perfsave`, hold 60; D3D12 = `-Api d3d12`, Full on D3D12 = `-Mode wrapper -Setting renderer.mode=full`). Scripts `out/cpu/run1.ps1` /
+`batch*.ps1` (git-ignored); `tools/profsum.py` averages the named `diag: profile module|self|incl` lines over the steady windows (ms per frame =
+share x the frame interval) and symbolizes our unnamed functions (`--dll`). The profiler and `-Perf`'s timers cost ~0.4 ms
+(`RtlQueryPerformanceCounter` 0.18 + `steady_clock::now` 0.22 + `msvcp140 _Query_perf_counter` 0.2 are measurement artefacts, not in normal play).
+
+### 21.1 Profile (build 13e14e6 + profiler, 9 windows of 5 s, ms per frame of the engine thread)
+
+| | Vulkan wrapper | D3D12 wrapper | Vulkan full | D3D12 full |
+|---|---|---|---|---|
+| frame interval (profiled) | 5.55 | 5.66 | 8.09 | 8.24 |
+| d3d9.dll (ours) | 1.98 | 1.97 | 4.37 | 4.40 |
+| Engine.dll | 1.57 | 1.50 | 1.03 | 1.04 |
+| ntdll | 0.65 | 0.68 | 0.65 | 0.63 |
+| driver: amdvlk64 / amdxc64 + d3d12core | 0.48 | 0.53 + 0.16 | 0.58 | 0.61 + 0.17 |
+| sharedbase.dll | 0.42 | 0.41 | 0.42 | 0.40 |
+| vcruntime140 (memcpy / memmove) | 0.21 | 0.19 | 0.76 | 0.68 |
+
+Inclusive, ranked (wrapper, Vulkan / D3D12; Full differs where noted):
+
+| rank | item | ms (VK / D3D12) | note |
+|---|---|---|---|
+| 1 | `eCFrustumDatabase::Execute` (main view) | 3.15 / 3.25 | contains the HAL: `eCGfxVisual::Execute` 2.16 / 2.19 (engine draws incl. ours); Full: `StaticOps::opEnter` 4.6 |
+| 2 | our draw path `Device::drawIndexedPrimitive` | 2.06 / 2.10 | `prepareDraw` 1.51 / 1.63 (D3D12 +0.12: the pipeline hash, fixed below), `computeVertexInput` 0.26, `splitStage` 0.07 self |
+| 3 | `eCCameraBase::Update` (sun cascades: `RenderShadowMaps` 0.64) | 0.95 / 1.00 | `ExecuteShadowMap` 0.34; SpeedTree leaves / fronds / branches in the main view 0.43 + 0.23 + 0.21 |
+| 4 | `eCProcessor::Process` (game logic, illumination 0.18, sky cube 0.16) | 0.72 / 0.71 | engine |
+| 5 | injected passes (`Device::inject`) | 0.39 / 0.59 | ocean 0.20 / 0.34 (64 mip blits), `CopyCurrentRTToImage` 0.26 / 0.42 |
+| 6 | `RtScene::observe` | 0.35 / 0.34 | |
+| 7 | frustum extract / request: `OnQueryNodes` 0.30, `Request` 0.22, `ExtractFromFrustum` 0.19, `RequestRenderOps` 0.25, `CullCamera` 0.16 | ~1.0 | `eCBeamTree::Cull` self 0.13 - 0.16 + `bCPlane::ClassifyPoint` 0.04 + `bCSphere::Contains` 0.02 = ~0.22 (4 %) |
+| 8 | **XInput**: `eCInputAdmin::UpdateX360` -> `XInputGetState` (through the Steam overlay's hook) | **0.13 / 0.16** | a disconnected pad = a driver call (`NtDeviceIoControlFile`) per index per frame: **2.5 - 3 %**; fixed below |
+| 9 | the engine's CRT `qsort` of the op lists | 0.038 | measured by an instrumented detour (the "2 %" estimate in 13 was too high) |
+| 10 | record threads: `NtWaitForAlertByThreadId` 0.06 + `NtAlertThreadByThreadId` 0.05 + critical sections 0.05 | ~0.16 | already minimised (14.1) |
+| 11 | `eCFrustumDatabase` copy ctor 0.01, `SetTime` loop 0.02, `SetCurrentRenderStates` 0.03 | < 0.06 | each < 0.6 %: not built |
+
+D3D12-only (wrapper, vs Vulkan): the `std::unordered_map<PipelineDesc>` hash (`DescHash`, byte-wise FNV over 520 bytes) 0.12 - 0.17 ms (D3D12 has
+no EDS3 / dynamic vertex input, so the 52-byte recent-pipeline compare of `findPipeline` misses more and the full map lookup runs; also behind
+`blitDraw`), `D3DCommandList::transitionRange` 0.17 + `blitTexture` 0.21 (the blit is a draw: an SRV and an RTV created per blit, two barrier calls
+around it; the ocean's mip chains are 64 of them per frame), `d3d12core` + `amdxc64` 0.69 vs `amdvlk64` 0.48 (runtime + driver +0.21). Injected
+passes 0.59 vs 0.39 (the blits again).
+
+### 21.2 Changes (each behind a Debug setting, A/B'd; savegame, wrapper, 14 windows per run, 3 interleaved runs per arm, `-Perf` CPU = engine + HAL)
+
+| change | setting | result |
+|---|---|---|
+| **XInput throttle** (`engine/xinput_throttle.*`): after `ERROR_DEVICE_NOT_CONNECTED` the index is not asked again for 1 s (hooks `XInputGetState` / `XInputSetState` of xinput1_4 once it is loaded; a connected pad is polled every frame) | `debug.xinput_interval` (ms, default 1000, 0 = off) | CPU 4.707 -> 4.618 ms (-0.09, -1.9 %) alone; the profile lines are gone (0.13 / 0.16 ms -> 0). Not tested with a connected pad (none here): by construction only a "not connected" answer is cached |
+| **typed op sort** (`engine/fast_sort.*`): the statically linked CRT `qsort` (0x4a4aa0) for the z / solid / alpha op lists (24-byte records; comparators 0x66e670 / 0x66e6a0 / 0x66e600) replaced by the same algorithm (read from the disassembly: median of three, cut-off 8, same partition and stack order) with inlined comparators; other callers go to the original | `debug.fast_sort` (1 default, 0 off, 2 = also run the engine's qsort on a copy and compare: rvk.log `fast sort: N lists compared ..., 0 differ`) | **bit-identical** (unit test against the UCRT's qsort, equal keys included; in game mode 2 in Wrapper and Full with the static / scene ops compares and `lean_check=10`: 0 differences, `mismatches: none`). Sort cost 7.3 -> 2.8 ms per second (8.0 -> 3.0 us per list, ~920 lists / 122,000 ops per second) = **0.038 -> 0.015 ms per frame (-0.5 %)**, below the A/B noise (A/B CPU +0.035 and -0.03 ms in two pairs). Kept: free and exact. The frame tap's qsort prologue check accepts the hook |
+| **D3D12 `PipelineDesc` hash**, 8 bytes per step instead of byte-wise FNV (`d3d12_game_priv.inc` `DescHash`) | none (pure) | D3D12 CPU 5.026 -> 4.812 ms (-0.21, -4.3 %; about -0.09 of it the hash, the rest XInput + sort) |
+
+**D3D12 vs Vulkan** (wrapper, CPU per frame, 3 runs each): before 5.026 (5.016 / 5.043 / 5.018) vs 4.707 (4.749 / 4.699 / 4.672) = **+6.8 %**;
+after 4.812 (4.818 / 4.827 / 4.792) vs 4.588 (4.594 / 4.596 / 4.574) = **+4.9 %** (goal <= +5 %). The remaining gap is the injected passes
+(0.51 vs 0.35: the ocean's mip blits) and the D3D12 runtime / driver (+0.2). Plain interval p50 (Vulkan) 5.21 -> 5.05 ms with both Vulkan
+switches on (-0.16 ms, -3 %).
+
+### 21.3 Evaluated, not built
+
+* **Frustum cull replacement (SIMD / batched `eCBeamTree::Cull`)**: the sphere / box cull is a pointer walk of an occluder beam tree
+  (`bCPlane::ClassifyPoint` through SharedBase per node, one explicit stack), not a batch of independent plane tests; all of cull is ~0.22 ms
+  (4 %, under the 5 % bar). A bit-identical inline detour would save the ClassifyPoint calls and the stack cookie only (~0.05 ms, 1 %) and must
+  reproduce SharedBase's float formula exactly. The walk repeats per sun cascade (`ExecuteShadowMap` 0.34). Not worth the risk.
+* **Off-thread resource work on our side**: in the steady state texture uploads are 0 KiB per frame and 0 pipelines / shaders are built per
+  interval (the 5 s `perf:` lines); in the first world frames 8 pipelines (115 ms, asynchronous, the draw is skipped meanwhile) and 330 KiB of
+  textures: nothing is left on the engine thread to move to the workers. The frame-time spikes of a still scene (p95 6.2 ms, an occasional 17 -
+  27 ms max per 5 s) and the loading screens (680 / 617 ms frames) are the engine's own streaming / loading on the presenting thread (engine
+  surgery, out of scope).
+* **Drop far ops from the z pre-pass (13 (1))**: not built: no profile share above 3 % to win (the z-list sort and the z draws are inside rank 1)
+  and the depth map feeds the shadow mask, SSAO, DoF and water.
+* **SetTime skip, `eCFrustumDatabase` copy, redundant render / sampler state filter in the HAL**: each < 0.6 % of the thread (0.01 - 0.03 ms);
+  `setSamplerState` / `setRenderState` self time is 0.26 % + 0.17 %: a HAL state cache would have to stay bit-exact for ~0.02 ms.
+* **Compute mip generation / batched barriers for `blitDraw` on D3D12**: the largest D3D12-only item left (~0.1 ms of the 0.2 gap): needs a
+  compute mip-chain pass in `rhi::CommandList` (or batching the per-blit barrier pairs); not done in this pass.

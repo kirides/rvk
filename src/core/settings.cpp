@@ -2188,6 +2188,34 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .flags = Flag::NoAB | Flag::Debug,
     });
+    r.xinputInterval = &reg.add({
+        .key = "debug.xinput_interval",
+        .label = "Gamepad poll interval when disconnected (ms)",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The game asks the XInput library for four gamepads every frame; a disconnected one costs ~0.15 ms each frame. "
+                       "After a 'not connected' answer the index is asked again only after this many milliseconds (a connected pad "
+                       "is polled every frame). 0 = every frame, as the game does.",
+        .type = Type::Int,
+        .defaultValue = 1000,
+        .min = 0,
+        .max = 5000,
+        .flags = Flag::Debug,
+    });
+    r.fastSort = &reg.add({
+        .key = "debug.fast_sort",
+        .label = "Typed sort of the render-op lists",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The game sorts its z / solid / alpha op lists with the CRT's qsort and a function-pointer comparator. 1 = the "
+                       "same algorithm with inlined comparators (bit-identical result, less CPU), 0 = the game's qsort, 2 = typed sort "
+                       "and compare every list with the game's result (rvk.log error on a difference).",
+        .type = Type::Int,
+        .defaultValue = 1,
+        .min = 0,
+        .max = 2,
+        .flags = Flag::Debug,
+    });
     r.prefetchStride = &reg.add({
         .key = "debug.prefetch_stride",
         .label = "Cache-in walk every n-th frame",

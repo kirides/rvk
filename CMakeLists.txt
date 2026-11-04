@@ -219,6 +219,10 @@ add_library(rvk_core STATIC
     src/engine/high_fps.cpp
     src/engine/high_fps.h
     src/engine/lod.cpp
+    src/engine/fast_sort.cpp
+    src/engine/fast_sort.h
+    src/engine/xinput_throttle.cpp
+    src/engine/xinput_throttle.h
     src/engine/material_source.cpp
     src/engine/material_source.h
     src/engine/lights.cpp

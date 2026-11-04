@@ -213,9 +213,18 @@ public:
     std::uint64_t nextModule_ = 1;
     struct DescHash {
         std::size_t operator()(const PipelineDesc& d) const {
+            // 8 bytes per step (the byte-wise FNV over the ~520-byte description was 2 % of the engine thread on D3D12: no
+            // dynamic vertex input / blend there, so the direct-mapped recent cache in front misses more often)
             std::uint64_t h = 1469598103934665603ull;
             const auto* p = reinterpret_cast<const std::uint8_t*>(&d);
-            for (std::size_t i = 0; i < sizeof(d); ++i) h = (h ^ p[i]) * 1099511628211ull;
+            std::size_t i = 0;
+            for (; i + 8 <= sizeof(d); i += 8) {
+                std::uint64_t w;
+                std::memcpy(&w, p + i, 8);
+                h = (h ^ w) * 0x9E3779B97F4A7C15ull;
+                h ^= h >> 29;
+            }
+            for (; i < sizeof(d); ++i) h = (h ^ p[i]) * 1099511628211ull;
             return static_cast<std::size_t>(h);
         }
     };

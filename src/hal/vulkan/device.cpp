@@ -21,7 +21,9 @@
 #include "core/stall_sampler.h"
 #include "d3d9/fvf.h"
 #include "engine/scene_hooks.h"
+#include "engine/fast_sort.h"
 #include "engine/lod.h"
+#include "engine/xinput_throttle.h"
 #include "engine/memread.h"
 #include "engine/material_source.h"
 #include "engine/menu_state.h"
@@ -542,6 +544,14 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     if (rs.shadowStride != nullptr) {
         engine::shadowmaps::setUpdateStride(static_cast<int>(rs.shadowStride->asInt()));
         reg.onChange(*rs.shadowStride, [](const settings::Setting& s) { engine::shadowmaps::setUpdateStride(static_cast<int>(s.asInt())); }, this);
+    }
+    if (rs.xinputInterval != nullptr) {
+        engine::xinput::setIntervalMs(static_cast<int>(rs.xinputInterval->asInt()));
+        reg.onChange(*rs.xinputInterval, [](const settings::Setting& s) { engine::xinput::setIntervalMs(static_cast<int>(s.asInt())); }, this);
+    }
+    if (rs.fastSort != nullptr) {
+        engine::fastsort::setMode(static_cast<int>(rs.fastSort->asInt()));
+        reg.onChange(*rs.fastSort, [](const settings::Setting& s) { engine::fastsort::setMode(static_cast<int>(s.asInt())); }, this);
     }
     if (rs.prefetchStride != nullptr) {
         engine::lod::setPrefetchStride(static_cast<int>(rs.prefetchStride->asInt()));
@@ -1343,6 +1353,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
         dev_.windowResized();
     }
     engine::matsrc::onPresent();
+    engine::xinput::onPresent();
     engine::lod::onPresent();  // a changed object draw distance: the world's cache-in spheres (engine thread)
     dev_.present();
     const auto& s = dev_.stats();

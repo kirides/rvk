@@ -44,3 +44,43 @@ TEST(lod_scales_roundtrip) {
     CHECK(s.trees == 2.0f && s.meshes == 1.5f && s.view == 1.25f);
     lod::setScales(before);
 }
+
+// engine::fastsort: the CRT qsort's algorithm with inlined comparators (docs/research/performance.md 21)
+#include <algorithm>
+#include <cstdlib>
+#include <random>
+#include <vector>
+
+#include "engine/fast_sort.h"
+
+namespace {
+struct Rec {
+    std::uint64_t a, b;
+    std::uint32_t key, sortId;
+};
+int cmpZ(const void* x, const void* y) {
+    const auto *p = static_cast<const Rec*>(x), *q = static_cast<const Rec*>(y);
+    return p->key < q->key ? -1 : p->key > q->key ? 1 : 0;
+}
+}  // namespace
+
+TEST(fastsort_z_matches_crt_qsort_and_is_sorted) {
+    std::mt19937 rng(7);
+    for (const std::size_t n : {2u, 5u, 8u, 9u, 17u, 100u, 1000u, 5000u}) {
+        for (const std::uint32_t range : {3u, 50u, 1000000u}) {
+            std::vector<Rec> v(n);
+            for (std::size_t i = 0; i < n; ++i) v[i] = {i, ~i, static_cast<std::uint32_t>(rng() % range), static_cast<std::uint32_t>(rng())};
+            auto crt = v;
+            auto mine = v;
+            std::qsort(crt.data(), n, sizeof(Rec), cmpZ);
+            rvk::engine::fastsort::sortOps(mine.data(), n, rvk::engine::fastsort::Cmp::Z);
+            CHECK(std::is_sorted(mine.begin(), mine.end(), [](const Rec& x, const Rec& y) { return x.key < y.key; }));
+            std::vector<std::uint64_t> ids;
+            for (const Rec& r : mine) ids.push_back(r.a);
+            std::sort(ids.begin(), ids.end());
+            for (std::size_t i = 0; i < n; ++i) CHECK(ids[i] == i);
+            // (the UCRT's qsort is the same algorithm: equal keys end up in the same order)
+            CHECK(std::memcmp(crt.data(), mine.data(), n * sizeof(Rec)) == 0);
+        }
+    }
+}
