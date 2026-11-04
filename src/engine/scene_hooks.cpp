@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -367,12 +368,29 @@ constexpr std::size_t kSkyCubeTimer = 0x3b8;
 constexpr std::size_t kSkyCubePeriod = 0x3bc;
 constexpr int kSkyCubeFacesPerCycle = 5;
 
+std::atomic<int> g_skyCubeIntervalMs{100};
+std::atomic<bool> g_skyCubeFull{false};  // the stride is a Full mode feature: Wrapper keeps the whole cube current every frame
+std::int64_t g_skyCubeLastRefresh = 0;  // steady_clock ns of the last whole-cube refresh
+std::uint64_t g_skyCubeSkipped = 0, g_skyCubeRefreshed = 0;
+
 bool detourSkyCube(void* sky, void* image) {
     ViewScope scope(View::SkyCube, Pass::Sky, "UpdateSkydomeEnvCubemap");
     d3d9::Device* d = scope.d;
     if (d == nullptr || !d->skyCubeEveryFrame() || sky == nullptr || image == nullptr) return g_skyCube.original(sky, image);
     auto* timer = reinterpret_cast<float*>(static_cast<char*>(sky) + kSkyCubeTimer);
     const float period = *reinterpret_cast<const float*>(static_cast<char*>(sky) + kSkyCubePeriod);
+    const int intervalMs = g_skyCubeFull.load(std::memory_order_relaxed) ? g_skyCubeIntervalMs.load(std::memory_order_relaxed) : 0;
+    if (intervalMs > 0) {
+        const std::int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (g_skyCubeLastRefresh != 0 && now - g_skyCubeLastRefresh < static_cast<std::int64_t>(intervalMs) * 1000000) {
+            // not due: the engine's own call with its timer reset takes the "not expired" path (draws nothing, its natural result)
+            *timer = 0.0f;
+            ++g_skyCubeSkipped;
+            return g_skyCube.original(sky, image);
+        }
+        g_skyCubeLastRefresh = now;
+        ++g_skyCubeRefreshed;
+    }
     if (!(*timer > period)) *timer = std::max(period, 0.0f) + 1.0f;
     bool r = true;
     const std::uint64_t start = d->skyCubeFaces();
@@ -391,6 +409,7 @@ bool detourSkyCube(void* sky, void* image) {
 }
 
 using SceneUpdateFn = bool (*)(void* filter, int index);
+
 Hook<SceneUpdateFn> g_sceneUpdate;
 
 // The main camera's screen rect (left, top, right, bottom ints at +0xc4 of the eCCameraBase: the application's camera +0x38,
@@ -1002,6 +1021,13 @@ const char* currentLabel() {
     if (d == nullptr) return "-";
     const auto p = d->phases().current();
     return labels[static_cast<std::size_t>(p.view)][static_cast<std::size_t>(p.pass)].c_str();
+}
+
+void setSkyCubeFullMode(bool full) { g_skyCubeFull.store(full, std::memory_order_relaxed); }
+
+void setSkyCubeIntervalMs(int ms) {
+    g_skyCubeIntervalMs.store(std::max(0, ms), std::memory_order_relaxed);
+    spdlog::info("scene: sky cube refresh interval {} ms{}", std::max(0, ms), ms > 0 ? "" : " (every frame)");
 }
 
 }  // namespace rvk::engine::scene

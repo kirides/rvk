@@ -430,6 +430,7 @@ struct RendererSettings {
     Setting* nativeRetained = nullptr;         // native.retained: V3 retained composition of the sub-mesh draws (A/B)
     Setting* nativeRetainedCheck = nullptr;    // native.retained_check: every replay recomposed fresh and compared
     Setting* nativeRetainedGroups = nullptr;   // native.retained_groups: bit mask of the groups that retain (bit = StaticOps::Group)
+    Setting* skyCubeInterval = nullptr;   // debug.sky_cube_interval: ms between two refreshes of the sky cube while the water keeps it current (0 = every frame)
     Setting* shadowStride = nullptr;      // debug.shadow_stride: the sun cascades redrawn every n-th frame (engine::shadowmaps::setUpdateStride)
     Setting* fsReadCache = nullptr;       // debug.fs_read_cache: read-ahead of packed file streams (engine::loadaccel)
     Setting* fastAbsorb = nullptr;        // debug.fast_absorb: sliding-window cloud absorption image (engine::loadaccel)

@@ -2106,6 +2106,20 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 4,
         .format = "%.1fx",
     });
+    r.skyCubeInterval = &reg.add({
+        .key = "debug.sky_cube_interval",
+        .label = "Sky cube refresh interval (ms)",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "While the enhanced water is on, the game's sky environment cube (reflected by the water) is redrawn whole. The sky "
+                       "changes slowly: every this many milliseconds is enough (a lightning flash shows up in the reflection at most this "
+                       "late). 0 = every frame.",
+        .type = Type::Int,
+        .defaultValue = 100,
+        .min = 0,
+        .max = 1000,
+        .flags = Flag::Debug,
+    });
     r.shadowStride = &reg.add({
         .key = "debug.shadow_stride",
         .label = "Sun shadow maps redrawn every n-th frame",
