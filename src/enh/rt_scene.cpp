@@ -764,7 +764,7 @@ RtScene::MaterialFields RtScene::materialFields(const RtMaterial* m) const {
     if (pack_ != nullptr && !m->name.empty()) {
         // (the map must be uploaded: the raster draws and the pack's prepare() do that; until then the entry is not used)
         const auto hit = pack_->lookup(m->name);
-        if (hit.word != 0 && (hit.texture == nullptr || hit.texture->image().layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)) f.packWord = hit.word;
+        if (hit.word != 0 && (hit.texture == nullptr || hit.texture->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)) f.packWord = hit.word;
     }
     return f;
 }

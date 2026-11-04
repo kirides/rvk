@@ -1201,14 +1201,14 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         const PackHit hit = packProvider_(tag_);
         if (hit.word != 0 && hit.texture != nullptr) {
             Texture* t = hit.texture;
-            if (t->pending_ || t->image().layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) t->prepareForSampling(uploadList());
-            if (t->image().layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) block.pad[1] = hit.word;
+            if (t->pending_ || t->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) t->prepareForSampling(uploadList());
+            if (t->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) block.pad[1] = hit.word;
             static bool logged[2] = {false, false};
             const int which = block.pad[1] != 0 ? 1 : 0;
             if (!logged[which]) {
                 logged[which] = true;
                 spdlog::info("d3d9: material pack: first draw with a map {} (word {:08x}, slot {}, layout {})", which ? "applied" : "NOT READY", hit.word,
-                             t->bindlessSlot(), static_cast<int>(t->image().layout()));
+                             t->bindlessSlot(), static_cast<int>(t->layout()));
             }
         } else {
             block.pad[1] = hit.word;
@@ -1408,6 +1408,9 @@ bool Device::replayAllowed(const CachedDraw& c) const {
     if (tint_ != draws::TintMode::Off || ubershader_.load(std::memory_order_relaxed) || gbuf_.normal != nullptr || giDraws_.on) return false;
     if (stats_.totalDraws < options_.logDraws || wp0_.on || customVertices_ != 0 || up_.active) return false;
     if (c.kind == draws::Kind::SpeedTreeBillboard && billboardFadeScale_ != 1.0f) return false;
+    // material pack: a lit main-view material draw takes the pixel shader's variant and carries the material's pack word (DrawBlock pad[1]):
+    // both are decided in prepareDraw, so such draws are not replayed
+    if (packProvider_ && giEligible(c.phase)) return false;
     // observers (RT scene, GI, object motion) and opaque-observing replacers (water) are shown the cached query at replay (replayDraw)
     for (DrawReplacer* r : replacers_) {
         if (r->handles(c.kind, c.phase, tag_)) return false;
