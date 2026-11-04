@@ -769,3 +769,7 @@ Full write-up: engine-frame/retained-signals.md. Signals exist for lifecycle and
 ### 24.8 native.packet_cache is on by default (2026-11-04)
 
 Default 1 (Full mode only; auto-off while a compare / tap / coverage is on and per draw while a consumer needs prepareDraw without a cached query; modes 2 / 3 = verify, Debug). Evidence: 0 differing over millions of verify checks (baseline and player defaults), all gates on both backends, Vulkan paired runs -0.33 / -0.92 ms (min-of-arm -0.33). **The D3D12 gain is unresolved under load** (pairs scatter -1.1 .. 0; the other agents' builds are not covered by the lock names): re-measure opportunistically with one off/on pair when the machine is quiet (`-Setting native.packet_cache=0|1`, `-PlayerDefaults`).
+
+### 24.9 Packet cache stage 4 and clean timings (2026-11-04)
+
+Shadow-view ops joined the cache; refusal reasons are logged. Clean player-default timings, 3 interleaved pairs: Vulkan 6.672 -> 6.254 ms (-0.42), D3D12 6.939 -> 6.520 (-0.42); Wrapper 4.50 / 4.84, so Full - Wrapper 1.75 / 1.68 ms. `native.retained` + the cache: no extra gain (stage 3 no-go). Details and the floor: engine-frame/retained-signals.md 11.
