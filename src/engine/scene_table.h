@@ -47,6 +47,11 @@ const Counters& counters();
 // Calls fn(index, slot) for every dirty slot and clears the flags: one batch (the M1b upload). Returns the count.
 std::uint32_t drainDirty(const std::function<void(std::uint32_t, const Slot&)>& fn);
 
+// Calls fn(index) for every slot freed since the last call (apply before drainDirty: a freed slot may have been reallocated and be dirty again).
+// only while a consumer drains them (the GPU table): else the list is not kept
+void trackFreed(bool on);
+std::uint32_t drainFreed(const std::function<void(std::uint32_t)>& fn);
+
 // Verification of one op's entity against the table (counts; logs the first mismatches). `entity` = op context +0x10.
 void checkEntity(const void* entity);
 

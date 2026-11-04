@@ -2303,11 +2303,12 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .category = "Debug views",
         .tab = kTabDebug,
         .description = "GPU-driven scene (docs/research/gpu-scene.md). 1 = verify the signal-fed instance table (cache-in / out, world matrix) against the engine's ops "
-                       "(rvk.log `scene table:`, DIFFERING and unresolved must stay 0). The table itself is always maintained in Vulkan / D3D12 mode.",
+                       "(rvk.log `scene table:`, DIFFERING and unresolved must stay 0). 2 = also keep the table on the GPU (gpuscene/instance_buffer: batched uploads, "
+                       "every 240th frame a read-back compared with the uploaded copy; rvk.log `gpu scene:`, DIFFERING must stay 0). The CPU table is always maintained.",
         .type = Type::Int,
         .defaultValue = 0,
         .min = 0,
-        .max = 1,
+        .max = 2,
         .flags = Flag::NoAB | Flag::Debug,
     });
     r.nativeOpts = &reg.add({

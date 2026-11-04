@@ -27,6 +27,7 @@
 #include "engine/load_accel.h"
 #include "engine/lod.h"
 #include "engine/scene_table.h"
+#include "gpuscene/instance_buffer.h"
 #include "engine/xinput_throttle.h"
 #include "engine/memread.h"
 #include "engine/material_source.h"
@@ -1487,6 +1488,10 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
     engine::xinput::onPresent();
     engine::loadaccel::onPresent();
     engine::scenetable::onPresent();
+    {
+        const auto* gs = settings::renderer().nativeGpuScene;
+        gpuscene::instances().flush(dev_, gs != nullptr ? (gs->asInt() >= 2 ? gs->asInt() : 0) : 0);
+    }
     engine::lod::onPresent();  // a changed object draw distance: the world's cache-in spheres (engine thread)
     dev_.present();
     const auto& s = dev_.stats();

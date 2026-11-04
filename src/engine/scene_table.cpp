@@ -22,6 +22,8 @@ constexpr std::size_t kEntityWorld = 0x60, kEntityFlags = 0x28;
 
 std::vector<Slot> g_slots;
 std::vector<std::uint32_t> g_free;
+bool g_trackFreed = false;
+std::vector<std::uint32_t> g_freedDirty;  // slots freed since the last drainFreed (the GPU records are marked dead)
 std::unordered_map<const void*, std::uint32_t> g_index;
 Counters g_c;
 std::uint64_t g_frame = 0;
@@ -40,6 +42,7 @@ void freeSlot(std::uint32_t i) {
     s.entity = nullptr;
     s.dirty = false;
     g_free.push_back(i);
+    if (g_trackFreed) g_freedDirty.push_back(i);
     --g_live;
 }
 
@@ -163,6 +166,20 @@ std::uint32_t drainDirty(const std::function<void(std::uint32_t, const Slot&)>& 
     }
     g_c.drained += n;
     if (n != 0) ++g_c.batches;
+    return n;
+}
+
+void trackFreed(bool on) {
+    g_trackFreed = on;
+    if (!on) g_freedDirty.clear();
+}
+
+std::uint32_t drainFreed(const std::function<void(std::uint32_t)>& fn) {
+    const std::uint32_t n = static_cast<std::uint32_t>(g_freedDirty.size());
+    if (fn) {
+        for (const std::uint32_t i : g_freedDirty) fn(i);
+    }
+    g_freedDirty.clear();
     return n;
 }
 
