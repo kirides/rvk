@@ -102,7 +102,7 @@ TEST(matpack_word_constants_only) {
     CHECK(std::fabs(s.metalness - 1.0f) < 0.02f);
     // nothing given: the default roughness, dielectric
     const Decoded e = decodeWord(encodeWord(0, false, Constants{}, 0.7f));
-    CHECK(std::fabs(evaluate(e, t).roughness - 0.7f) < 0.02f && evaluate(e, t).metalness == 0.0f);
+    CHECK(std::fabs(evaluate(e, t).roughness - 0.7f) < 0.04f && evaluate(e, t).metalness == 0.0f);
 }
 
 TEST(matpack_word_roughness_map) {
@@ -116,4 +116,26 @@ TEST(matpack_word_roughness_map) {
     const Decoded k = decodeWord(encodeWord(5, false, c, 0.7f));
     CHECK(std::fabs(evaluate(k, t).roughness - 0.3f) < 0.01f);  // the constant does not replace a map's roughness
     CHECK(decodeWord(0).present == false);
+}
+
+TEST(matpack_word_glass_wet) {
+    Constants c;
+    c.transmission = 1.0f;
+    c.wetness = 1.0f;
+    c.roughness = 0.04f;
+    const Decoded d = decodeWord(encodeWord(0, false, c, 0.7f));
+    CHECK(d.glass && d.present && std::fabs(d.wetness - 1.0f) < 1e-6f);
+    c.wetness = 0.5f;  // 2 bits: 0, 1/3, 2/3, 1
+    CHECK(std::fabs(decodeWord(encodeWord(0, false, c, 0.7f)).wetness - 2.0f / 3.0f) < 1e-6f);
+    CHECK(!decodeWord(encodeWord(0, false, Constants{}, 0.7f)).glass);
+    // the layout fields do not overlap: every field at its maximum
+    Constants m;
+    m.roughnessScale = 1.875f;
+    m.roughnessBias = 1.0f;
+    m.metalness = 1.0f;
+    m.wetness = 1.0f;
+    m.transmission = 1.0f;
+    m.emissive = 1.0f;
+    const Decoded e = decodeWord(encodeWord(16383, true, m, 0.7f));
+    CHECK(e.slot == 16383 && e.orm && e.emissive && e.glass && e.roughnessScale == 1.875f && e.roughnessBias == 1.0f && e.metalness == 1.0f && e.wetness == 1.0f);
 }

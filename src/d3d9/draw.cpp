@@ -988,7 +988,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         fsPlain = variant(ps_, VariantSlot::Gbuffer);
         const rhi::ShaderModule motion = vsVariant != rhi::ShaderModule::None ? variant(ps_, VariantSlot::GbufferMotion) : rhi::ShaderModule::None;
         fsVariant = motion != rhi::ShaderModule::None ? motion : fsPlain;
-    } else if (!replaced && tint == 0 && (giDraws_.on || packProvider_) && giEligible(phase)) {
+    } else if (!replaced && tint == 0 && (giDraws_.on || (packProvider_ && !packBypass_)) && giEligible(phase)) {
         fsVariant = variant(ps_, VariantSlot::Gi);
     }
 
@@ -1204,7 +1204,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     }
     logTracedMaterial(kind, jitterX != 0.0f || jitterY != 0.0f);
     block.pad[0] = tint;
-    if (packProvider_ && (giDraw || gbufWrite_) && tag_.material != nullptr) {
+    if (packProvider_ && !packBypass_ && (giDraw || gbufWrite_) && tag_.material != nullptr) {
         // material pack: this material's word (0 = none); its map must be uploaded and sampleable
         const PackHit hit = packProvider_(tag_);
         if (hit.word != 0 && hit.texture != nullptr) {

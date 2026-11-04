@@ -1839,6 +1839,32 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .format = "%.0f MiB",
         .flags = Flag::Restart | Flag::Advanced,
     });
+    r.materialsWetness = &reg.add({
+        .key = "materials.wetness",
+        .label = "Pack wetness",
+        .category = "Materials",
+        .description = "How wet the materials look that have a wetness value in the pack: 0 = dry, 1 = as the pack says (smoother, a little darker).",
+        .type = Type::Float,
+        .defaultValue = 1,
+        .min = 0,
+        .max = 1,
+        .format = "%.2f",
+        .flags = Flag::Advanced,
+    });
+    r.materialsAlternate = &reg.add({
+        .key = "materials.alternate",
+        .label = "Pack variants on / off every N frames",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Test switch: every N frames the material pack's pixel shader variants are bypassed (the engine's own shaders draw), so two "
+                       "pictures N frames apart in a frozen scene show exactly what the variants change where no entry matches. 0 = off.",
+        .type = Type::Int,
+        .defaultValue = 0,
+        .min = 0,
+        .max = 600,
+        .format = "%.0f frames",
+        .flags = Flag::NoAB | Flag::Debug,
+    });
     r.materialsDebug = &reg.add({
         .key = "materials.debug",
         .label = "Material pack debug view",

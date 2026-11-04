@@ -283,12 +283,15 @@ void rvkMvPbr(RvkFrame f, inout float4 c0) {
     float quality = f.params[2].x;
     uint slot = word & 0x3FFFu;
     bool orm = (word & (1u << 15)) != 0u;
-    float rScale = float((word >> 16) & 31u) * (1.0 / 16.0);
-    float rBias = float((word >> 21) & 31u) * (1.0 / 31.0);
-    float mScale = float((word >> 26) & 31u) * (1.0 / 31.0);
+    float rScale = float((word >> 16) & 15u) * (1.0 / 8.0);
+    float rBias = float((word >> 20) & 15u) * (1.0 / 15.0);
+    float mScale = float((word >> 24) & 15u) * (1.0 / 15.0);
+    float wet = float((word >> 28) & 3u) * (1.0 / 3.0) * f.params[3].x;  // the entry's wetness x materials.wetness
+    bool glass = (word & (1u << 30)) != 0u;
     float4 t = float4(1.0, 1.0, 1.0, 0.0);
     if (slot != 0u && rvk_pbrOk) t = RVK_TEX2D(slot).Sample(RVK_SAMP(rvkDrawSmp(d, 9u)), rvk_pbrUv.xy);
     float rough = saturate((slot == 0u ? 1.0 : (orm ? t.g : t.r)) * rScale + rBias);
+    rough *= 1.0 - 0.7 * wet;  // wet surfaces: smoother ...
     float occl = slot != 0u && orm ? t.r : 1.0;
     float metal = saturate(slot != 0u && orm ? t.b * mScale : mScale);
     rvk_pbrGb = rvkGbufferMaterialEncode(rough, metal);
@@ -311,6 +314,7 @@ void rvkMvPbr(RvkFrame f, inout float4 c0) {
     float4 fogColor = RVK_PSC(3), fogSet = RVK_PSC(4);
     float fogK = saturate(min(distance(f.cameraPos.xyz, P) * fogSet.y + fogSet.x, fogSet.z));
     float3 lit = fogK < 0.999 ? (c0.rgb - fogColor.rgb * fogK) / (1.0 - fogK) : c0.rgb;
+    lit *= 1.0 - 0.35 * wet;  // ... and darker (water in the pores)
 
     // lights: the sun (specular colour, the shadow mask's alpha), the point lights of this pass
     float4 shadowMask = float4(1.0, 1.0, 1.0, 1.0);
@@ -354,13 +358,13 @@ void rvkMvPbr(RvkFrame f, inout float4 c0) {
     float3 spec = pow(max(specSum * f.params[2].y, float3(0.0, 0.0, 0.0)), float3(0.45, 0.45, 0.45));
     spec = min(spec, float3(4.0, 4.0, 4.0));
     // diffuse: less of it on metals; the rest is the engine's lighting
-    // the added light never exceeds 0.2 (rough) to 0.8 (smooth) of what the engine's lighting already shows on this surface (+ a small floor): a moon / sun at grazing angles on a rough
+    // the added light never exceeds 0.15 (rough) to 0.55 (smooth) of what the engine's lighting already shows on this surface (+ a small floor): a moon / sun at grazing angles on a rough
     // dark floor otherwise doubles its brightness (the first night / dock shots); metals keep their own scale (they have little diffuse to compare with)
     float3 addLight = spec + env;
     float lumAdd = dot(addLight, float3(0.3, 0.59, 0.11));
     float lumBase = dot(max(lit, float3(0.0, 0.0, 0.0)), float3(0.3, 0.59, 0.11));
-    // (smooth surfaces may shine up to 0.8 of their own brightness, rough ones 0.2: a rough floor under a moon must not turn into frost)
-    float capLum = lerp((lerp(0.8, 0.2, saturate(rough * 2.0)) * lumBase + 0.0004), 1.0e3, metal);
+    // (smooth surfaces may shine up to 0.55 of their own brightness, rough ones 0.15: a rough floor under a moon must not turn into frost)
+    float capLum = lerp((lerp(0.55, 0.15, saturate(rough * 2.0)) * lumBase + 0.0004), 1.0e3, glass ? 1.0 : metal);
     if (lumAdd > capLum) addLight *= capLum / lumAdd;
     float3 shaded = lit * (1.0 - metal) + addLight + albedo * emis;
     c0.rgb = lerp(shaded, fogColor.rgb, fogK);

@@ -1062,6 +1062,8 @@ public:
     };
     using PackProvider = std::function<PackHit(const draws::Tag&)>;
     void setPackProvider(PackProvider p) { packProvider_ = std::move(p); }
+    // test switch (materials.alternate): while set the pack's variants are not used at all (the engine's own shaders draw), as without a pack
+    void setPackBypass(bool on) { packBypass_ = on; }
     std::uint64_t giDrawsThisInterval() const { return giDrawCount_; }
     // ---- thin G-buffer (enh/gbuffer, docs/research/rtgi.md 10) ----
     // Extra colour attachments of the first main view's solid pass (scene HDR target only): `normal` (A2B10G10R10: xy the
@@ -1592,6 +1594,7 @@ private:
     std::array<std::uint32_t, 4> sgi_{};
     GiDraws giDraws_;
     PackProvider packProvider_;
+    bool packBypass_ = false;
     std::uint64_t giDrawCount_ = 0;
     bool captureInstances_ = false;         // the request covers an instanced draw (requestVertexCapture)
     rhi::GpuRef captureRequest_;            // the draw being prepared (DrawObserver::observe)
