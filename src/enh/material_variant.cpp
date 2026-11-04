@@ -13,19 +13,22 @@ using d3d9::Semantic;
 
 namespace {
 bool g_pbr = false;
+bool g_cluster = false;
 }
 void setPbrVariants(bool on) { g_pbr = on; }
 bool pbrVariants() { return g_pbr; }
+void setClusterVariants(bool on) { g_cluster = on; }
+bool clusterVariants() { return g_cluster; }
 
 std::string materialVariantTag(std::string_view base) {
     std::uint64_t h = 1469598103934665603ull;
-    for (const std::string_view t : {shader::embedded::hlslSource("include/rvk_gi.hlsli"), shader::embedded::hlslSource("include/rvk_material_variant.hlsli")}) {
+    for (const std::string_view t : {shader::embedded::hlslSource("include/rvk_gi.hlsli"), shader::embedded::hlslSource("include/rvk_material_variant.hlsli"), shader::embedded::hlslSource("include/rvk_light_model.hlsli")}) {
         for (const char c : t) {
             h ^= static_cast<std::uint8_t>(c);
             h *= 1099511628211ull;
         }
     }
-    return std::format("{}{}{:08x}", base, g_pbr ? "-pbr" : "", static_cast<std::uint32_t>(h ^ (h >> 32)));
+    return std::format("{}{}{}{:08x}", base, g_pbr ? "-pbr" : "", g_cluster ? "-cl" : "", static_cast<std::uint32_t>(h ^ (h >> 32)));
 }
 
 bool materialVariantOptions(const d3d9::Shader& s, MaterialVariant kind, shader::TranslateOptions& o) {
@@ -52,6 +55,13 @@ bool materialVariantOptions(const d3d9::Shader& s, MaterialVariant kind, shader:
                                pntLights.present() ? std::min(3, pntLights.count / 4) : 0);
         const auto& sm = s.semantics[Semantic::ShadowMask];
         defines += std::format("#define RVK_MV_PBR_SHADOW_SLOT {}\n", sm.present() ? sm.reg : -1);
+    }
+    // the Full-owned light table (enh/light_table): the point-light registers become per-pixel values (rvk_light_model.hlsli)
+    const bool cluster = g_cluster && pntLights.present() && pntLights.count >= 4;
+    const int clCount = cluster ? std::min(3, pntLights.count / 4) : 0;
+    if (cluster) {
+        defines += std::format("#define RVK_MV_CLUSTER 1\n#define RVK_MV_CL_REG {}\n#define RVK_MV_CL_COUNT {}\n#define RVK_MV_CL_PARAM {}\n", pntLights.reg, clCount,
+                               shader::abi::kFrameParamLights);
     }
     if (gbuffer) defines += "#define RVK_MV_GBUFFER 1\n";
     if (kind == MaterialVariant::GbufferMotion) defines += "#define RVK_MV_MOTION 1\n";
@@ -86,6 +96,9 @@ bool materialVariantOptions(const d3d9::Shader& s, MaterialVariant kind, shader:
         if (ind.present()) o.constOverrides[static_cast<std::uint32_t>(ind.reg)] = "rvk_gi[0]";
         // the normal the shader evaluates its ambient with (normal-mapped, world space)
         if (gbuffer || pbr) o.dotCaptures.push_back({static_cast<std::uint32_t>(amb.reg), "rvk_gbN"});
+    }
+    if (cluster) {
+        for (int k = 0; k < 4 * clCount; ++k) o.constOverrides[static_cast<std::uint32_t>(pntLights.reg + k)] = std::format("rvk_cl[{}]", k);
     }
     if (pbr) o.texCaptures.push_back({9, "rvk_pbrUv", "rvk_pbrAlbedo", "rvk_pbrOk"});  // the diffuse (g_SamplerData[0] = s9)
     return true;

@@ -1755,6 +1755,54 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .format = "%.2f m",
         .flags = Flag::Advanced,
     });
+    // ---- Full-owned lighting (enh/light_table.h, docs/research/gpu-scene.md 9.7) ----
+    r.lightingClustered = &reg.add({
+        .key = "lighting.clustered",
+        .label = "Clustered lights (Full)",
+        .category = "Lighting",
+        .tab = kTabDebug,
+        .description = "Full mode only (takes effect at the next start; default off until validated): the world's lights go into a GPU light table with a "
+                       "cluster grid and every lit surface takes its point lights per pixel from it, evaluated by the game's own shader, instead of "
+                       "the few lights the game attaches to each object. Lights beyond the game's per-object reach light the surfaces they reach. "
+                       "rvk.log `enh: lights:`.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::Restart | Flag::Debug,
+    });
+    r.lightingEnabled = &reg.add({
+        .key = "lighting.enabled",
+        .label = "Clustered lights on",
+        .category = "Lighting",
+        .tab = kTabDebug,
+        .description = "Run-time switch of the light table while lighting.clustered was on at start (off = the game's own per-object lights: A/B).",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::Debug,
+    });
+    r.lightingStyle = &reg.add({
+        .key = "lighting.style",
+        .label = "Light style",
+        .category = "Lighting",
+        .description = "Original: the game's light falloff, so the image reads like the game. Physical: lamps follow an inverse-square law with a smooth "
+                       "reach (brighter close to a lamp, gentler far away; the sun, sky and exposure stay the game's). Needs clustered lights (Full mode).",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"original", "physical"},
+        .optionLabels = {"Original", "Physical"},
+    });
+    r.lightingDebug = &reg.add({
+        .key = "lighting.debug",
+        .label = "Lights debug view",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Developer view of the light table: \"Cluster counts\" shows the lights in each pixel's cluster (blue few, red 16+, black none), "
+                       "\"Slots filled\" how many of the shader's light slots the table fills (red 1, green 2, yellow 3, dim blue none).",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "clusters", "slots"},
+        .optionLabels = {"Off", "Cluster counts", "Slots filled"},
+        .flags = Flag::NoAB | Flag::Debug,
+    });
     r.gbufferDebug = &reg.add({
         .key = "gbuffer.debug",
         .label = "G-buffer debug view",

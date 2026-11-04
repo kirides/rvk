@@ -190,6 +190,7 @@ inline constexpr std::uint32_t kFrameParams = 16;
 inline constexpr std::uint32_t kFrameParamDebugView = 0;   // debug.inject_view: x mode, y strength, z grid spacing
 inline constexpr std::uint32_t kFrameParamMaterials = 2;   // materials.*: x quality (0 off .. 3), y specular strength, z environment strength, w debug view
 inline constexpr std::uint32_t kFrameParamLod = 1;         // lod.trees: x the billboard fade distance scale (Device::lodModule)
+inline constexpr std::uint32_t kFrameParamLights = 4;      // lighting.*: params[4].xy the light table buffer reference (enh/light_table), params[5] = enabled, style (0 original / 1 physical), debug view
 
 // One geometry record per TLAS instance x geometry of the ray tracing scene (enh/rt_scene; GLSL RvkRtRecord in
 // shaders/include/rvk_rt.glsl, reached as records[instanceCustomIndex + geometryIndex]). Vertex attributes are words

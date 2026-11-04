@@ -12,6 +12,9 @@
 //   RVK_MV_MOTION         + reads the vertex capture's previous world position (location 15): per-object motion (characters)
 //   RVK_MV_VNORMAL        the prologue's argument is the interpolated world normal (TEXCOORD4), else float4(0, 0, 0, 0)
 //   RVK_MV_KIND_SKINNED   draws::Kind::Skinned (the G-buffer id of characters)
+//   RVK_MV_CLUSTER        the point-light registers c[RVK_MV_CL_REG .. + 4 RVK_MV_CL_COUNT) are per-pixel values: the engine's, with the lights the
+//                         engine's own list lacks or only this object carries replaced by the best lights of the pixel's cluster of the Full-owned
+//                         light table (enh/light_table, rvk_light_model.hlsli); RVK_MV_CL_PARAM = the FrameBlock params index of its reference
 //
 // Differences against the GLSL text, all because HLSL has no stage-interface globals:
 //  - the entry's pixel position is an argument: the entry point starts with rvkMvPrologue(rvk_fragCoord, <normal input or
@@ -26,6 +29,7 @@
 
 #include "rvk_draw.hlsli"  // pc (the draw's push block), rvkPtr, RvkStageData
 #include "rvk_gi.hlsli"    // rvkGi* lookup, RvkGiVolume, rvkGiOctEncode
+#include "rvk_light_model.hlsli"  // the light table
 
 #ifndef RVK_MV_INDOOR_FLOOR
 #define RVK_MV_INDOOR_FLOOR 0.6  // share of the engine's average ambient kept as a floor (up to RVK_MV_FLOOR_MAX)
@@ -207,6 +211,120 @@ void rvkMvAo(RvkFrame f, float3 P) {
 #endif
 #endif
 
+#ifdef RVK_MV_CLUSTER
+// ---- the Full-owned light table (enh/light_table, docs/research/gpu-scene.md 9.7) ------------------------------------------------------------
+// The shader's light loop reads its lights from rvk_cl (constant overrides of c[RVK_MV_CL_REG ..]); the prologue fills them: the engine's values
+// (this draw's list), then, when the table is valid for this frame, per pixel
+//   - an engine light the table does not know and that reaches this pixel stays (dynamic lights the registry misses, spells, flashes), as does
+//     every engine light with a shadow channel selector (cubemap shadows: the table has none yet) together with its table twin (excluded)
+//   - the other slots take the best lights of the pixel's cluster, scored by luminance x falloff x (0.25 + 0.75 sat(N.L)); an unused slot gets
+//     colour 0 (the loop still runs, adds nothing)
+// style physical: the colour of every table light is scaled by phys(d) / orig(d) (rvkLmPhysicalRatio).
+static float4 rvk_cl[RVK_MV_CL_COUNT * 4];
+static uint rvk_clCount = 0xFFFFFFFFu;  // lights in the pixel's cluster (0xFFFFFFFF = table not used: the engine's values)
+static uint rvk_clUsed = 0;             // table lights written into the registers
+
+float4 rvkMvEngineReg(uint reg) { return rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(pc.psw3), reg * 16u)); }
+
+void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
+    [unroll] for (uint k = 0; k < RVK_MV_CL_COUNT * 4u; ++k) rvk_cl[k] = rvkMvEngineReg(uint(RVK_MV_CL_REG) + k);
+    uint2 ref = asuint(f.params[RVK_MV_CL_PARAM].xy);
+    float4 ctl = f.params[RVK_MV_CL_PARAM + 1];  // x enabled, y style (0 original, 1 physical), z debug view
+    if ((ref.x | ref.y) == 0u || ctl.x < 0.5) return;
+    RvkAddr base = rvkAddr(ref);
+    uint4 h0 = rvkRawLoad<uint4, 16>(base);
+    if (h0.x != f.frameInfo.x + 1u) return;  // not built this frame (no main view yet, or the pass was skipped)
+    uint4 grid = rvkRawLoad<uint4, 16>(rvkAddrAdd(base, 16u));
+    float4 zs = rvkRawLoad<float4, 16>(rvkAddrAdd(base, 32u));
+    uint4 offs = rvkRawLoad<uint4, 16>(rvkAddrAdd(base, 48u));
+    float2 uv = rvk_mvFrag.xy * f.viewport.zw;
+    uint tx = min(uint(uv.x * float(grid.x)), grid.x - 1u), ty = min(uint(uv.y * float(grid.y)), grid.y - 1u);
+    uint sl = rvkLightSlice(rvkMvViewDepth(f), zs.x, zs.z, grid.z);
+    RvkAddr cb = rvkAddrAdd(base, offs.y + ((sl * grid.y + ty) * grid.x + tx) * RVK_LIGHT_CLUSTER_BYTES);
+    uint cnt = min(rvkRawLoad<uint, 4>(cb), RVK_LIGHT_MAX_PER_CLUSTER);
+    rvk_clCount = cnt;
+
+    // the engine's lights at this pixel: positions, which carry a shadow selector
+    float3 ePos[RVK_MV_CL_COUNT];
+    uint selMask = 0u, litMask = 0u, knownMask = 0u;
+    [unroll] for (uint i = 0; i < RVK_MV_CL_COUNT; ++i) {
+        float4 pr = rvk_cl[4 * i], col = rvk_cl[4 * i + 1], sel = rvk_cl[4 * i + 3];
+        ePos[i] = pr.xyz;
+        float3 lv = pr.xyz - P;
+        if (rvkLmLum(col.rgb) > 0.0 && pr.w > 0.0 && dot(lv, lv) * pr.w < 1.0) litMask |= 1u << i;
+        if (dot(abs(sel), float4(1.0, 1.0, 1.0, 1.0)) > 0.0) selMask |= 1u << i;
+    }
+    // the cluster's lights: score, keep the best RVK_MV_CL_COUNT
+    float cScore[RVK_MV_CL_COUNT];
+    uint cIdx[RVK_MV_CL_COUNT];
+    [unroll] for (uint i = 0; i < RVK_MV_CL_COUNT; ++i) {
+        cScore[i] = 0.0;
+        cIdx[i] = 0xFFFFFFFFu;
+    }
+    RvkAddr lb = rvkAddrAdd(base, offs.x);
+    for (uint j = 0; j < cnt; ++j) {
+        uint idx = rvkRawLoad<uint, 4>(rvkAddrAdd(cb, 4u + 4u * j));
+        float4 pr = rvkRawLoad<float4, 16>(rvkAddrAdd(lb, idx * RVK_LIGHT_BYTES));
+        bool twin = false;
+        [unroll] for (uint i = 0; i < RVK_MV_CL_COUNT; ++i) {
+            float3 dd = ePos[i] - pr.xyz;
+            if (dot(dd, dd) < RVK_LM_MATCH_DIST2) {
+                knownMask |= 1u << i;
+                if ((selMask >> i & 1u) != 0u) twin = true;
+            }
+        }
+        if (twin) continue;
+        float3 lv = pr.xyz - P;
+        float fall = 1.0 - saturate(dot(lv, lv) * pr.w);
+        if (fall <= 0.0) continue;
+        float4 cr = rvkRawLoad<float4, 16>(rvkAddrAdd(lb, idx * RVK_LIGHT_BYTES + 16u));
+        float nl = saturate(dot(ng, normalize(lv)));
+        float sc = rvkLmLum(cr.rgb) * fall * (0.25 + 0.75 * nl);
+        // insertion into the sorted top list
+        [unroll] for (uint i = 0; i < RVK_MV_CL_COUNT; ++i) {
+            if (sc > cScore[i]) {
+                float ts = cScore[i];
+                uint ti = cIdx[i];
+                cScore[i] = sc;
+                cIdx[i] = idx;
+                sc = ts;
+                idx = ti;
+                if (idx == 0xFFFFFFFFu) sc = 0.0;
+            }
+        }
+    }
+    // the slots: kept (shadow selector, or lit by a light the table does not know) or refilled from the top list
+    uint next = 0;
+    [unroll] for (uint i = 0; i < RVK_MV_CL_COUNT; ++i) {
+        bool keep = (selMask >> i & 1u) != 0u || ((litMask >> i & 1u) != 0u && (knownMask >> i & 1u) == 0u);
+        if (keep) continue;
+        uint pick = 0xFFFFFFFFu;
+        [unroll] for (uint q = 0; q < RVK_MV_CL_COUNT; ++q) {
+            if (q == next) pick = cIdx[q];
+        }
+        if (pick != 0xFFFFFFFFu) {
+            ++next;
+            float4 pr = rvkRawLoad<float4, 16>(rvkAddrAdd(lb, pick * RVK_LIGHT_BYTES));
+            float4 cr = rvkRawLoad<float4, 16>(rvkAddrAdd(lb, pick * RVK_LIGHT_BYTES + 16u));
+            float4 sr = rvkRawLoad<float4, 16>(rvkAddrAdd(lb, pick * RVK_LIGHT_BYTES + 32u));
+            float k = 1.0;
+            if (ctl.y > 0.5) {
+                float3 lv = pr.xyz - P;
+                k = rvkLmPhysicalRatio(dot(lv, lv), pr.w);
+            }
+            rvk_cl[4 * i] = pr;
+            rvk_cl[4 * i + 1] = float4(cr.rgb * k, rvk_cl[4 * i + 1].w);
+            rvk_cl[4 * i + 2] = float4(sr.rgb * k, rvk_cl[4 * i + 2].w);
+            rvk_cl[4 * i + 3] = float4(0.0, 0.0, 0.0, 0.0);
+            ++rvk_clUsed;
+        } else {
+            rvk_cl[4 * i + 1] = float4(0.0, 0.0, 0.0, rvk_cl[4 * i + 1].w);
+            rvk_cl[4 * i + 2] = float4(0.0, 0.0, 0.0, rvk_cl[4 * i + 2].w);
+        }
+    }
+}
+#endif
+
 // `fragCoord` = the pixel's SV_Position (HLSL has no gl_FragCoord outside the entry point)
 void rvkMvPrologue(float4 fragCoord, float4 vertexNormal) {
     rvk_mvFrag = fragCoord;
@@ -231,6 +349,9 @@ void rvkMvPrologue(float4 fragCoord, float4 vertexNormal) {
     if (dot(n, V) < 0.0) n = -n;
     rvk_mvP = P;
     rvk_giN = n;
+#ifdef RVK_MV_CLUSTER
+    rvkMvCluster(f, P, n);
+#endif
 #ifdef RVK_MV_VNORMAL
     rvk_gbN = float4(vertexNormal.xyz, 0.0);
 #endif
@@ -252,6 +373,11 @@ void rvkMvPrologue(float4 fragCoord, float4 vertexNormal) {
 // C++ side defines: RVK_MV_PBR_DIR_REG (c# of g_DirLight, -1 none), RVK_MV_PBR_PNT_REG / RVK_MV_PBR_PNT_COUNT (g_PointLights, 4 registers each),
 // RVK_MV_PBR_SHADOW_SLOT (the shadow mask's sampler). The translator captures the diffuse texld (coordinate, colour) of sampler s9.
 // Frame params[2] = (quality 0 off .. 3, specular strength, environment strength, debug view).
+#ifdef RVK_MV_CLUSTER
+#define RVK_MV_PL(k) rvk_cl[k]  // the per-pixel point-light registers (RVK_MV_PBR_PNT_REG == RVK_MV_CL_REG)
+#else
+#define RVK_MV_PL(k) RVK_PSC(RVK_MV_PBR_PNT_REG + (k))
+#endif
 static float4 rvk_pbrUv = float4(0.0, 0.0, 0.0, 0.0);      // the diffuse coordinate (xy)
 static float4 rvk_pbrAlbedo = float4(0.5, 0.5, 0.5, 1.0);  // the diffuse sample
 static bool rvk_pbrOk = false;                              // the shader sampled s9
@@ -330,12 +456,12 @@ void rvkMvPbr(RvkFrame f, inout float4 c0) {
 #if RVK_MV_PBR_PNT_COUNT > 0
     if (quality > 1.5) {
         [unroll] for (int i = 0; i < RVK_MV_PBR_PNT_COUNT; ++i) {
-            float4 pr = RVK_PSC(RVK_MV_PBR_PNT_REG + 4 * i);
+            float4 pr = RVK_MV_PL(4 * i);
             float3 lv = pr.xyz - P;
             float fall = 1.0 - saturate(dot(lv, lv) * pr.w);
-            float sh = 1.0 - dot(RVK_PSC(RVK_MV_PBR_PNT_REG + 4 * i + 3), shadowMask);
+            float sh = 1.0 - dot(RVK_MV_PL(4 * i + 3), shadowMask);
             // (the engine's point lights often carry a weak specular colour: the brighter of it and the diffuse colour drives the highlight)
-            specSum += rvkPbrLight(N, V, normalize(lv), max(RVK_PSC(RVK_MV_PBR_PNT_REG + 4 * i + 2).rgb, RVK_PSC(RVK_MV_PBR_PNT_REG + 4 * i + 1).rgb), a, F0, fall * saturate(sh));
+            specSum += rvkPbrLight(N, V, normalize(lv), max(RVK_MV_PL(4 * i + 2).rgb, RVK_MV_PL(4 * i + 1).rgb), a, F0, fall * saturate(sh));
         }
     }
 #endif
@@ -373,6 +499,18 @@ void rvkMvPbr(RvkFrame f, inout float4 c0) {
 
 void rvkMvEpilogue(inout float4 c0) {
     RvkFrame f = rvkLoadFrame(pc.frame);
+#ifdef RVK_MV_CLUSTER
+    // lighting.debug: 1 = lights in the pixel's cluster (blue 1 .. red 16+), 2 = table lights that fill the shader's slots (0 .. 3)
+    {
+        uint dbg = uint(f.params[RVK_MV_CL_PARAM + 1].z + 0.5);
+        if (dbg == 1u && rvk_clCount != 0xFFFFFFFFu) {
+            float t = saturate(float(rvk_clCount) / 16.0);
+            c0.rgb = rvk_clCount == 0u ? float3(0.0, 0.0, 0.0) : lerp(float3(0.0, 0.3, 1.0), float3(1.0, 0.1, 0.0), t);
+        } else if (dbg == 2u && rvk_clCount != 0xFFFFFFFFu) {
+            c0.rgb = float3(rvk_clUsed == 1u || rvk_clUsed == 3u ? 1.0 : 0.0, rvk_clUsed >= 2u ? 1.0 : 0.0, rvk_clUsed == 0u ? 0.3 : 0.0);
+        }
+    }
+#endif
 #ifdef RVK_MV_PBR
     rvkMvPbr(f, c0);
 #endif

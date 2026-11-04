@@ -389,6 +389,7 @@ int cmdDxilCheck(int argc, char** argv) {
         int jobs = defaultJobs(), maxErrors = 30;
         for (int i = 4; i < argc; ++i) {
             const std::string a = argv[i];
+            if (a == "--cluster") { rvk::enh::setClusterVariants(true); continue; }
             if (a == "--pbr") rvk::enh::setPbrVariants(true);
             else if (a == "--gi") variant = &rvk::enh::Gi::variantOptions;
             else if (a == "--gbuf") variant = [](const rvk::d3d9::Shader& sh, TranslateOptions& o) { return rvk::enh::materialVariantOptions(sh, rvk::enh::MaterialVariant::Gbuffer, o); };
