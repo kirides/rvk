@@ -701,7 +701,86 @@ public:
         caps_.heapSize = kHeapSize;
         caps_.drawIndirectCount = true;  // ExecuteIndirect with a count buffer
         caps_.textureBlit = false;       // no scaling copy (a mip chain would need a compute / graphics pass of the backend's own)
+        surveyFeatures();
         return true;
+    }
+
+    // Information only: what the GPU / runtime offers beyond the floor (each CheckFeatureSupport; a struct the runtime does not know = unknown).
+    void surveyFeatures() {
+        auto& out = caps_.featureSurvey;
+        const auto add = [&](std::string name, std::string value) {
+            spdlog::info("caps: d3d12 {}: {}", name, value);
+            out.emplace_back(std::move(name), std::move(value));
+        };
+        const auto yn = [](bool b) { return b ? "supported" : "unsupported"; };
+        const auto unknown = "unknown (the runtime does not know this feature struct: older D3D12 runtime / Agility SDK)";
+        const auto query = [&](D3D12_FEATURE f, auto& data) { return SUCCEEDED(device_->CheckFeatureSupport(f, &data, sizeof(data))); };
+        add("Agility SDK", caps_.agilitySdkVersion != 0 ? std::format("{} (D3D12Core from the SDK dir)", caps_.agilitySdkVersion) : "none (system D3D12 runtime)");
+        D3D12_FEATURE_DATA_SHADER_MODEL sm{D3D_SHADER_MODEL_6_9};
+        if (!query(D3D12_FEATURE_SHADER_MODEL, sm)) {
+            sm.HighestShaderModel = D3D_SHADER_MODEL_6_6;
+            query(D3D12_FEATURE_SHADER_MODEL, sm);
+        }
+        add("highest shader model", std::format("{}.{}", (static_cast<int>(sm.HighestShaderModel) >> 4) & 0xF, static_cast<int>(sm.HighestShaderModel) & 0xF));
+        D3D12_FEATURE_DATA_D3D12_OPTIONS1 o1{};
+        if (query(D3D12_FEATURE_D3D12_OPTIONS1, o1)) {
+            add("wave size", std::format("lanes {} - {}, wave ops {}", o1.WaveLaneCountMin, o1.WaveLaneCountMax, yn(o1.WaveOps)));
+        } else {
+            add("wave size", unknown);
+        }
+        D3D12_FEATURE_DATA_D3D12_OPTIONS5 o5{};
+        if (query(D3D12_FEATURE_D3D12_OPTIONS5, o5)) {
+            const int t = o5.RaytracingTier;
+            add("DXR tier", t >= D3D12_RAYTRACING_TIER_1_2 ? "1.2 (opacity micromaps + shader execution reordering are part of it)"
+                            : t >= D3D12_RAYTRACING_TIER_1_1 ? "1.1 (inline ray queries; no OMM / SER)"
+                            : t >= D3D12_RAYTRACING_TIER_1_0 ? "1.0"
+                                                             : "unsupported");
+        } else {
+            add("DXR tier", unknown);
+        }
+        D3D12_FEATURE_DATA_D3D12_OPTIONS6 o6{};
+        add("variable rate shading", query(D3D12_FEATURE_D3D12_OPTIONS6, o6)
+                                         ? std::format("tier {} (tile size {})", o6.VariableShadingRateTier == D3D12_VARIABLE_SHADING_RATE_TIER_2 ? "2" : o6.VariableShadingRateTier == D3D12_VARIABLE_SHADING_RATE_TIER_1 ? "1" : "none",
+                                                       o6.ShadingRateImageTileSize)
+                                         : unknown);
+        D3D12_FEATURE_DATA_D3D12_OPTIONS7 o7{};
+        if (query(D3D12_FEATURE_D3D12_OPTIONS7, o7)) {
+            add("mesh shaders", o7.MeshShaderTier >= D3D12_MESH_SHADER_TIER_1 ? "tier 1" : "unsupported");
+            add("sampler feedback", o7.SamplerFeedbackTier >= D3D12_SAMPLER_FEEDBACK_TIER_1_0 ? "tier 1.0" : o7.SamplerFeedbackTier != 0 ? "tier 0.9" : "unsupported");
+        } else {
+            add("mesh shaders", unknown);
+            add("sampler feedback", unknown);
+        }
+        D3D12_FEATURE_DATA_D3D12_OPTIONS12 o12{};
+        if (query(D3D12_FEATURE_D3D12_OPTIONS12, o12)) {
+            add("enhanced barriers", yn(o12.EnhancedBarriersSupported));
+            add("relaxed format casting", yn(o12.RelaxedFormatCastingSupported));
+        } else {
+            add("enhanced barriers", unknown);
+            add("relaxed format casting", unknown);
+        }
+        D3D12_FEATURE_DATA_D3D12_OPTIONS14 o14{};
+        add("advanced texture ops (OPTIONS14)", query(D3D12_FEATURE_D3D12_OPTIONS14, o14) ? yn(o14.AdvancedTextureOpsSupported) : unknown);
+        D3D12_FEATURE_DATA_D3D12_OPTIONS16 o16{};
+        if (query(D3D12_FEATURE_D3D12_OPTIONS16, o16)) {
+            add("GPU upload heap", yn(o16.GPUUploadHeapSupported));
+            add("resizable BAR", o16.GPUUploadHeapSupported ? "yes (implied by the GPU upload heap: CPU-visible VRAM)" : "no / not exposed (no GPU upload heap)");
+        } else {
+            add("GPU upload heap", unknown);
+            add("resizable BAR", unknown);
+        }
+        D3D12_FEATURE_DATA_D3D12_OPTIONS21 o21{};
+        if (query(D3D12_FEATURE_D3D12_OPTIONS21, o21)) {
+            add("work graphs", o21.WorkGraphsTier >= D3D12_WORK_GRAPHS_TIER_1_0 ? "tier 1.0" : "unsupported");
+            add("ExecuteIndirect", o21.ExecuteIndirectTier >= D3D12_EXECUTE_INDIRECT_TIER_1_1 ? "tier 1.1 (indirect draw / dispatch ids, incrementing constants)" : "tier 1.0");
+        } else {
+            add("work graphs", unknown);
+            add("ExecuteIndirect", unknown);
+        }
+        D3D12_FEATURE_DATA_D3D12_OPTIONS22 o22{};
+        add("shader execution reordering (OPTIONS22)",
+            query(D3D12_FEATURE_D3D12_OPTIONS22, o22) ? std::format("{}", o22.ShaderExecutionReorderingActuallyReorders ? "hardware reorders" : "API only, the hardware does not reorder") : unknown);
+        add("opacity micromap tier", "no separate tier query in the vendored headers (Agility SDK 1.619): follows the DXR tier");
     }
 
     const DeviceCaps& caps() const override { return caps_; }
