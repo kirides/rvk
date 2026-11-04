@@ -882,3 +882,8 @@ Noise [C] (`tools/gi_noise.py`, 4 spots): history on 0.064 (before section 23: 0
 sky-contrasty far field is noisier per frame; the walking capture (`out\gi\20261029-181400-merged-motion`) shows no grain / ghosting. If
 disocclusion grain is reported, the first knob is a wider spatial filter for fresh pixels (`sp_resolve.comp` ring) or a lerp of the far
 field towards its irradiance form.
+
+
+## 26. Screen probes with lights in the probes (2026-11-04)
+
+With `gi.lights=world` + `gi.lightmaps=replace` the DDGI value holds the point lights' direct light; the screen probes' traced side did not, so the ratio stripped it (monastery screen bias -77 %, MAE 0.405). `sp_trace.comp` now adds one stratified, shadowed light sample at the probe's own surface per ray (`flags.z` bit 0). Monastery: bias -19 %, MAE 0.190, lit-image error 48 -> 33 %; the other seven spots unchanged within noise. Measurements, the corrected reference definition and the rejected experiments (longer screen reach, sea proxy, no-sky fallback, `gi.screen=high`): path-tracing.md 10. Developer mask `RVK_GI_EXP` (`-Environment`).

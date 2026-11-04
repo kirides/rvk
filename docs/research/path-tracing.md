@@ -147,3 +147,62 @@ the cache bias (section 5), which is what limits quality. Decision: not before t
 * Not run: refcompare (the changes only act with the Debug setting on), sync validation, 2560x1440 timing, GPU timings on the default lock (the cost figures are whole-frame GPU times from `-Perf` in the private copy, jungle, 1600x900).
 * Known limits of the tool: the reference restarts whenever the sun / sky registers change (the hemisphere light drifts: epochs complete only in frozen scenes); the primary normal comes from the depth map (no normal maps, as the screen probes);
   characters are in the RT scene only if `gi.characters`; the sea surface is not in the volume's comparison (see failure mode 4).
+
+## 10. Reducing DDGI's error: results (2026-11-04, second agent)
+
+Tooling added: `tools/gi_reference.py analyze <run> --ref-run <dir[,dir]>` (reference planes from earlier converged runs, DDGI planes from this run: a re-measure needs only a few
+reference samples, `gi-reference.ps1 -Spp 8 -Max 8 -SkipOff -SkipDdgi -RefRun ...`, `-Environment` for `RVK_SHADER_DIR` / `RVK_GI_EXP`), the reference's restart hash is now quantised
+(flickering candles / a drifting sky no longer restart the accumulation), and `RVK_GI_EXP=<mask>` (developer experiments read from the volume header; with `RVK_SHADER_DIR` no rebuild):
+1 no sky-ambient fallback when the probe lookup at a hit fails, 2 no exact point-light term at hits when the probes carry the lights, 4 sky misses = 0, 8 no multi-bounce at hits,
+16 the screen probes WITHOUT the lights' term (= the behaviour before this work), 32 screen-probe reach x4.
+
+### 10.1 The first finding was a measurement mismatch, then a real bug in the screen probes
+
+* **Mismatch.** With `gi.lights=world` + `gi.lightmaps=replace` the probes carry the point lights' direct light (a delta per visible light, `gi_blend`); the study's reference "indirect" plane
+  did not, so the candle-lit monastery read "+89 % / volume +523 %". The reference now puts the point lights' direct light at the primary hit into the indirect plane (the sun stays in the direct plane;
+  `gi_reference.comp`). Corrected monastery_hall: reference mean 0.060 -> **0.486**; the volume is now **-27 %** (smooth 1.5 m probes against the candles' sharp pools and shadows), not +523 %.
+  Spots without world lights (all outdoor spots, pub, crystal cave) are unchanged. There is no sky leak into the hall: EXP 1 (no sky fallback at hits) changes the monastery by 1 %, EXP 4 (no sky at all) by 2 %.
+* **Bug.** The screen probes' ratio (traced / DDGI volume) divided an irradiance with the lights' direct term by one without it, so the screen resolve stripped the candle light: monastery screen bias **-77 %**
+  (the lit picture went dark). `sp_trace.comp` now adds the lights' direct light at the probe's own surface (one light per ray, stratified, with a shadow ray) when the probes carry the lights.
+* Other candidates, measured at the monastery (screen bias / mean rel. err.): fix alone -25 % / 87 %, EXP 2 (no light term at hits) -34 % / 75 %, EXP 3 (2 + 1) -35 % / 75 %,
+  EXP 8 (no bounce) -38 % / 71 %, EXP 4 -27 % / 85 %: the bounce at hits adds ~13 % of the hall's light; the double count of the lights at hits (exact term + the probes' own) is real (EXP 2 lowers the error spread)
+  but removing it makes the bias worse (the lights are under-represented in the probes), so it stays; nothing else in the cache leaks.
+
+### 10.2 Before / after, all 8 spots (1280x720, 1024 spp reference, DDGI planes from short runs of the same build; EXP 16 = before, EXP 0 = after)
+
+| spot | ref mean | screen bias before | after | mean rel. err before | after | MAE before | after | lit-image err before | after |
+|---|---|---|---|---|---|---|---|---|---|
+| beach_sun | 0.570 | -6.5 % | -6.4 % | 19 % | 19 % | 0.057 | 0.057 | 8.9 % | 8.9 % |
+| jungle | 0.152 | +2.2 % | -4.1 % | 20 % | 22 % | 0.016 | 0.020 | 6.7 % | 7.2 % |
+| harbour_night | 0.108 | -2.4 % | -2.4 % | 17 % | 17 % | 0.013 | 0.013 | 6.9 % | 6.9 % |
+| pub_interior | 0.012 | -3.9 % | -3.9 % | 5 % | 6 % | 0.002 | 0.002 | 6.4 % | 6.3 % |
+| monastery_hall | 0.486 | **-76.9 %** | **-19.1 %** | 89 % (median 81 %) | 98 % (median 42 %) | 0.405 | **0.190** | 48.2 % | **33.2 %** |
+| crystal_cave | 0.006 | -7.0 % | -4.5 % | 4 % | 4 % | 0.001 | 0.001 | 3.8 % | 3.5 % |
+| lake_jungle | 0.343 | -2.9 % | -2.9 % | 28 % | 28 % | 0.054 | 0.054 | 7.9 % | 7.9 % |
+| shadow_inland_a | 0.450 | +0.2 % | -0.4 % | 25 % | 28 % | 0.048 | 0.052 | 11.9 % | 12.9 % |
+
+Spots without world lights run the identical code path in both columns: their differences (jungle, shadow_inland_a, pub) are the run-to-run noise of the screen probes (repeat runs of one build:
+jungle -4.1 / +6.6 / +2.2 %, lake_jungle -2.9 / -0.4 / -2.5 %, rel. err +-3 points). The monastery's mean relative error stays high because it is dominated by the pixels in the candles' shadows
+(reference near 0, the smooth probes leak light into them; relative error against max(ref, 0.02)); its absolute and median errors halve. The monastery reference counts the lights now: **the old +89 % / +523 % figures of
+section 4 are void** (the other rows of section 4 stand; the beach's old -16.5 % reads -6.5 % in this build's runs: run-to-run state differs).
+The crystal cave's reference is the study's (no world lights there; a converged new reference was not obtainable: its sky / lights drift, the accumulation ended at 600 of 1024 samples twice).
+
+### 10.3 Evaluated, not adopted
+
+* **Bright sunlit bounce / the sea** (beach_sun): the sea is excluded from the RT scene on purpose (it reflects; `RtScene::learnExcluded`). Pixels where the volume reads 0 are 4.9 % of the beach picture with a reference of 0.095
+  (against a mean of 0.57): no weight in the error, and the game falls back to the engine's ambient there. A proxy hit for the sea would make rays towards the sea darker (the sea floor / sky they see now are brighter than a dark sea albedo)
+  and push the beach's slight under-estimate the wrong way: not built. The beach's under-estimate (-6 %) is the screen probes' far field (the sky radiance reconstructed from the probe SH: rtgi.md 23); a 4x longer
+  screen-probe reach (EXP 32, 160 m) made it **worse** (-29.7 %, jungle +218 % in the same run) and was dropped.
+* **Contact occlusion**: `gi.screen=high` (finer tiles) lowers the mean relative error by 0 - 5 points on the foliage / shadow spots (jungle 22 -> 22 %, lake_jungle 28 -> 24 %, shadow_inland_a 28 -> 23 %, monastery 98 -> 82 %;
+  one run of harbour_night in that batch diverged: +173 %, volume +160 %, an unexplained state difference, not used) at the cost of its extra probes (not re-timed here). The depth-edge class has biases of -2 .. -6 % in this
+  build (the study's +14.6 % came with an older state) and a relative error of 22 - 59 % that looks like noise, not a systematic over-brightening; a GTAO / bent-normal term would need a second per-pixel occlusion
+  source blended with the traced ratio: not built, the default stays `gi.screen=medium`.
+* **Canopy / coloured bounce**: not touched (errors of both signs, patchy; chroma errors 2 - 8 %).
+* **Moving light**: not measured (a converged reference needs a still scene, section 4 point 7). Probe hysteresis is 0.98 with the adaptive fast blend (rtgi.md 20).
+
+### 10.4 Gates
+
+`rvk_tests` 216 / 216, `rvk_shadertool dxil-check embedded` 58 / 58; `rvk_shadertool corpus corpus --gi`: 2246 PS ok, 0 failures (2483 shaders); testdemo 7 / 7 with `-Validation` and GI on (world lights, replace) on Vulkan wrapper + full (no validation message in the digest);
+D3D12 wrapper + full with defaults and `-Validation` 7 / 7, D3D12 wrapper with GI on and the debug layer (`RVK_NO_GBV=1`) 7 / 7 (with the GPU-based validation and GI on the RT scene makes the run ~0.1 fps and the scenario times out: known, rtgi/dx12 notes).
+Not run: `rvk_rhitest` GI parity, refcompare (gi off paths are untouched: the only changes act with `flags.z` bit 0 set, i.e. GI on with world lights + replace, and in the Debug reference), a GPU timing of the extra shadow ray per screen-probe ray
+(one `giPointLights` call per ray at the probe's own surface when the lights are in the probes: the 128-light loop is the cost driver of that pass; expected well under the pass's ~1 ms, unmeasured), the moving-light convergence measurement.
