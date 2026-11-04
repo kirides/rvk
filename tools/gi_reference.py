@@ -84,8 +84,8 @@ def chroma_error(ref_rgb, est_rgb, mask, floor=0.05):
     m = mask & (lr > floor) & (le > floor)
     if m.sum() == 0:
         return 0.0
-    cr = ref_rgb[m] / lr[m][:, None]
-    ce = est_rgb[m] / le[m][:, None]
+    cr = ref_rgb[..., :3][m] / lr[m][:, None]
+    ce = est_rgb[..., :3][m] / le[m][:, None]
     return float(np.abs(cr - ce).mean())
 
 
@@ -162,6 +162,33 @@ def crops(ref_img, est_img, heat_img, rel, mask, outdir, name, count=3, tile=96,
     return files
 
 
+def atrous(img, normal, z, valid, iters=5, sig_n=32.0, sig_z=0.05, sig_l=4.0):
+    """edge-avoiding a-trous (our baseline denoiser, offline here): weights from the normal, the view depth and the luminance"""
+    cur = img.copy()
+    h, w = img.shape[:2]
+    kern = [1 / 16, 1 / 4, 3 / 8, 1 / 4, 1 / 16]
+    zl = np.log(np.maximum(z, 1.0))
+    for it in range(iters):
+        step = 1 << it
+        acc = np.zeros_like(cur)
+        wsum = np.zeros(cur.shape[:2], np.float32)
+        lc = lum(cur)
+        for dy in range(-2, 3):
+            for dx in range(-2, 3):
+                ys = np.clip(np.arange(h) + dy * step, 0, h - 1)
+                xs = np.clip(np.arange(w) + dx * step, 0, w - 1)
+                n2 = normal[ys][:, xs]
+                wn = np.maximum((normal * n2).sum(-1), 0) ** sig_n
+                wz = np.exp(-np.abs(zl - zl[ys][:, xs]) / sig_z)
+                l2 = lc[ys][:, xs]
+                wl = np.exp(-np.abs(lc - l2) / (sig_l * (np.sqrt(lc * 0 + 0.05) + 1e-3) * (2.0 ** it) ** 0.5 + 1e-3))
+                wgt = kern[dy + 2] * kern[dx + 2] * wn * wz * wl
+                acc += cur[ys][:, xs] * wgt[..., None]
+                wsum += wgt
+        cur = acc / np.maximum(wsum, 1e-6)[..., None]
+    return cur
+
+
 def find_epoch(gi_dir, camera, tol=80.0):
     """the full dump nearest to a camera position (the latest epoch among the matches)"""
     best = None
@@ -206,6 +233,7 @@ def analyze_spot(spot, meta, gi_dir, outdir, shots):
     full = os.path.join(gi_dir, f"e{meta['epoch']:03d}_full_{meta['spp']:05d}.npy")
     P = load_full(full)
     ref_ind, ref_dir, ddgi_v, ddgi_s, alb_z, nrm = P[:6]
+    pix1, pix4 = (P[6], P[7]) if P.shape[0] >= 8 else (None, None)
     valid = nrm[..., 3] > 0.5
     albedo = alb_z.copy()
     # inputs of the comparison: indirect, per estimator; and the lit image (direct + indirect) in the engine's units
@@ -215,6 +243,13 @@ def analyze_spot(spot, meta, gi_dir, outdir, shots):
            'screen_probe_coverage': float(have_scr.sum() / max(valid.sum(), 1))}
     mask = valid & (lr > 1e-4)
     res['indirect'] = {'volume': metrics(lr, lv, mask), 'screen': metrics(lr, ls, mask)}
+    if pix1 is not None:
+        res['pixel'] = {'raw_1spp': metrics(lr, lum(pix1), mask), 'raw_4spp': metrics(lr, lum(pix4), mask)}
+        for name, plane in (('atrous_1spp', pix1), ('atrous_4spp', pix4)):
+            den = atrous(plane[..., :3], nrm[..., :3], albedo[..., 3], valid)
+            res['pixel'][name] = metrics(lr, lum(den), mask)
+            if name == 'atrous_1spp':
+                pix_den = den
     res['chroma'] = {'volume': chroma_error(ref_ind, ddgi_v, mask), 'screen': chroma_error(ref_ind, ddgi_s, mask)}
     # the lit image: direct (traced, the same for both) + indirect, through the engine's pow(acc, 0.45)
     tot_r = lum(np.power(np.maximum(ref_dir[..., :3] + ref_ind[..., :3], 0), 0.45))
@@ -241,6 +276,9 @@ def analyze_spot(spot, meta, gi_dir, outdir, shots):
     ind = lambda a: to_u8(np.repeat((np.power(np.maximum(lum(a), 0.0), 0.45) * ind_exp)[..., None], 3, -1))
     row1 = np.concatenate([label(imgs['reference'], 'reference'), label(imgs['ddgi_volume'], 'DDGI volume'), label(imgs['ddgi_screen'], 'DDGI + screen probes')], 1)
     row2 = np.concatenate([label(ind(ref_ind), 'indirect: reference'), label(ind(ddgi_s), 'indirect: DDGI + screen'), label(hs, 'error (red: DDGI too bright)')], 1)
+    if pix1 is not None:
+        row3 = np.concatenate([label(ind(pix1), 'pixel GI 1 spp raw'), label(ind(pix_den), 'pixel GI 1 spp + a-trous'), label(to_u8(heat((lum(pix_den) - lr) / np.maximum(lr, EPS))), 'error of the filtered')], 1)
+        row2 = np.concatenate([row2, row3], 0)
     sheet = np.concatenate([row1, row2], 0)
     Image.fromarray(sheet).save(os.path.join(outdir, f'sbs_{spot}.png'))
     Image.fromarray(np.concatenate([label(imgs['reference'], 'reference'), label(hv, 'error: volume only')], 1)).save(os.path.join(outdir, f'err_volume_{spot}.png'))

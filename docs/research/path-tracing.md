@@ -1,0 +1,149 @@
+# Path tracing vs DDGI: measuring the probes against ground truth (2026-11-04)
+
+Question: would full path tracing give better fidelity than the DDGI probes + screen probes (replace mode, `gi.lights=world`)?
+Step one (this document): measure how far DDGI is from ground truth, and try the first piece of a per-pixel traced GI. No vendor SDK work.
+
+## 1. The reference path tracer (`gi.reference`)
+
+* Code: `shaders/gi/gi_reference.comp.hlsl` (HLSL SM 6.6, DXIL parity checked: `rvk_shadertool dxil-check embedded` 58 of 58), `src/enh/gi_reference.cpp`
+  (accumulation, dumps, view pass), hooks in `src/enh/gi.cpp` (`recordScreen` calls it right after the screen probes). Debug settings (Debug tab):
+  `gi.reference = off | reference | ddgi | screen | error | reference_indirect | screen_indirect | error_ddgi` (the in-game view), `gi.reference_spp`
+  (samples per pixel and frame, default 4), `gi.reference_max` (default 1024: accumulation stops, planes are dumped), `gi.reference_bounces` (6).
+  Off = nothing exists (no pipeline, buffer or pass).
+* Method. Per pixel of the main view the primary hit comes from the z pre-pass depth (position, depth-derived geometric normal: the same as the
+  screen probes). Albedo at the primary hit: a camera ray traced against the RT scene (same material path as GI hits), once per epoch.
+  Indirect = cosine-weighted paths, every hit lit like the engine's materials (GI hit shading, `gi_shade.hlsli`: albedo^2.2 x (sun x N.L with a
+  shadow ray + one point light chosen by its unshadowed contribution with a shadow ray) + `gi.emissive` self-illumination), the path continues
+  with throughput x albedo (cosine sampling), Russian roulette from the third bounce, up to `gi.reference_bounces`, the sky (the engine's hemisphere
+  SH, `engine/hemisphere`) on a miss, no ray reach limit (1 km). Direct = the same sun + point light estimators at the primary hit. Units are the
+  engine's "acc" (image = albedo x pow(acc, 0.45)); the indirect value = mean radiance of cosine rays = what `rvkGiEvalRegs` returns for the probes.
+* Same inputs as DDGI: the same TLAS / records / materials, `gi.lights=world` lights, sun, sky SH, emissive gain; the only differences are the
+  method's (no probe cache: the second bounce on is traced; no reach, no firefly cap, no filter). Not compared: the engine's shadow maps (direct
+  light in both columns is the traced one), `gi.shadow_fill` / indoor floors of the material shader (these lift the engine's final ambient above the
+  raw probe value; the comparison is of the probes' own irradiance: volume lookup, and volume x the screen probes' factor as the material shader applies
+  it, the directional correction does not change the value at the geometric normal).
+* Accumulation: restarts when the view, sun, sky SH, the lights, the RT scene's instance count or the settings change; stops at `gi.reference_max`.
+  Dumps `bin\rvk\gi_ref\e<epoch>_full_<spp>.npy` (float16, planes ref indirect (+ luma^2 for the variance), ref direct, DDGI volume, DDGI + screen
+  probes, albedo + view depth, normal, pixel-GI 1 spp, pixel-GI 4 spp) and luminance-only dumps at 64, 128, ... spp (convergence test), `e<epoch>_meta.json`.
+* Cost: 1600x900 on the RX 7900 XTX: one reference sample per pixel is ~36 ms of GPU time (whole-frame GPU 77 ms at 1 spp vs 362 ms at 9 spp, includes
+  the 4 pixel-GI samples); a 1000-sample image takes 125 frames at 8 spp/frame at 1280x720 (about 5 minutes per spot with warm-up).
+
+## 2. Tooling
+
+* `scripts/gi-reference.ps1`: three `rvkcompare` runs (gi off / DDGI at `gi.quality=high`, replace, world lights / reference), then
+  `tools/gi_reference.py analyze <run dir>`. Run in a private copy under its own lock:
+  `.\scripts\with-test-lock.ps1 -Name rvk-pathtrace -Who pathtrace -Run { .\scripts\gi-reference.ps1 -GameDir B:\DevDrive\risen-test-vk-pt -Instance 6 -Spp 8 -Max 1024 }`.
+  `-RunDir` re-analyses; the dump of a spot is found by its camera position (the RVKCMP lines).
+* Output in `out\gi-reference\<stamp>\analysis`: `sbs_<spot>.png` (reference | DDGI volume | DDGI + screen / indirect-only images / error heat map
+  / pixel-GI rows), `err_volume_*`, `crop_*` (the three worst 96 px tiles, 3x: reference | DDGI | error), `triptych_*` (the game's own gi off | DDGI | reference view),
+  `summary.md`, `results.json` (mean abs error, bias, relative errors, over/under shares, chroma error, per-class shares of the squared error, convergence).
+* Runs: full set `out\gi-reference\20261104-121754` (8 spots, 1024 spp), pixel-GI set `out\gi-reference\20261104-124510` (5 spots).
+
+## 3. How converged is the reference?
+
+Standard error of the final mean from the stored second moment, per spot (median / p90 relative): beach_sun 1.9 / 3.2 %, jungle 3.2 / 4.7 %, harbour_night 3.3 / 5.2 %,
+pub_interior 3.8 / 5.1 %, monastery_hall 5.5 / 9.1 %, crystal_cave 1.0 / 1.6 %, lake_jungle 3.8 / 7.2 %, shadow_inland_a 2.2 / 4.9 %. RMS difference to the final image at
+64 / 128 / 256 / 512 spp (jungle): 13.8 / 9.4 / 6.2 / 3.6 %, i.e. the 1/sqrt(n) law; the final is ~3 % per pixel noisy. The DDGI errors below (mean 5 - 25 %, bias
+-16..+90 %) are larger than the reference noise except in the quietest spots, and noise averages out in the bias and in the class tables. Monastery hall (dark interior, 61 % of pixels over 5 %
+s.e.) needs more samples before its per-pixel numbers are trustworthy; its bias (+89 %) is not noise.
+
+## 4. DDGI error (indirect irradiance, 1280x720, 1024 spp; "screen" = probes + screen probes, "volume" = probes alone)
+
+| spot | ref mean (acc) | screen bias | screen mean rel. err | volume bias | volume mean rel. err | lit-image rel. err |
+|---|---|---|---|---|---|---|
+| beach_sun | 0.570 | -16.5 % | 25 % | +17.9 % | 33 % | 9.3 % |
+| jungle | 0.152 | +2.8 % | 13 % | +20.2 % | 34 % | 4.7 % |
+| harbour_night | 0.108 | +9.0 % | 14 % | +34.0 % | 44 % | 5.8 % |
+| pub_interior | 0.012 | -4.1 % | 5 % | -8.9 % | 14 % | 6.1 % |
+| monastery_hall | 0.060 | +89 % | 106 % | +523 % | 645 % | 18.5 % |
+| crystal_cave | 0.006 | +7.1 % | 4 % | +285 % | 88 % | 4.1 % |
+| lake_jungle | 0.343 | -2.5 % | 18 % | +9.2 % | 30 % | 5.6 % |
+| shadow_inland_a | 0.450 | +0.6 % | 22 % | +21.8 % | 46 % | 10.9 % |
+
+(lit-image = error in the image albedo x pow(direct + indirect, 0.45), which is what is seen; the chroma error of the screen probes is 0.02 - 0.08 in rgb/luminance units.)
+The screen probes roughly halve the volume's error everywhere (probes alone: 30 - 45 % mean relative error outdoors). With them the outdoor error is 13 - 25 % per pixel,
+unbiased within a few % (the beach: -16 %), and the visible (pow 0.45) image error is 4 - 11 %. Indoors where the ambient is dark (pub, crystal cave) both
+are within a few % in absolute terms; monastery_hall is the outlier (see 1.).
+
+### Ranked failure modes (images: the paths above; `summary.md` has the class table)
+
+1. **Indoor over-brightening / sky leak (monastery_hall: screen +89 %, volume +523 %; crystal_cave volume +285 %).** The probes return several times the traced irradiance in
+   a stone hall (82 % of pixels > +50 %, `sbs_monastery_hall.png`). The pixel-GI prototype (probes only as the second-bounce cache) shows the same +70 - 80 % bias, so the
+   cause sits in the probe cache: the probes see more sky than the reference path (probe depth / inside-geometry classification, far-field / ambient
+   fallbacks, the 4 km reach with the far-field lookup). Biggest single error and the most visible (the interior is lit like open air); a fix is probable
+   in the probes (visibility, ambient fallback), not in the method.
+2. **Contact shadows, creases, rock bases and object undersides** (depth-edge pixels: +14.6 % bias, 38 % mean relative error, 14 % pixels over +50 %; ceilings/undersides +11 %, 38 %):
+   DDGI too bright where a surface meets another (`sbs_shadow_inland_a.png`, red at rock bases / planks; `crop_*`). The 1.5 m probe grid cannot see occlusion below its spacing; the screen probes
+   (16 px tiles) fix the broad part, not the sub-tile creases.
+3. **Canopy and foliage** (jungle, lake_jungle, shadow_inland_a, harbour_night): errors of both signs in alternating patches under trees (the traced shade is
+   patchy, the probes smooth it), canopy tops / sky-facing leaves DDGI too dark (blue, -33 % under-estimates on 5 - 6 % of pixels), leaf cards need `gi.foliage`.
+4. **Bright sunlit bounce** (beach_sun: bias -16.5 %, "bright indirect > 0.3" class -39.5 % bias, 45 % of those pixels under -33 %): the light bounced from the sunlit sand / rock into
+   shade and the sea surface is under-represented (probe hysteresis and the screen-probe ratio cap of 2); the sea mesh pixels read 0 in the volume (blue band in `sbs_beach_sun.png`).
+5. **Coloured bounce / bleeding** (class "coloured light": 74 % of the squared error in the all-spot aggregate, mean 27 %): hue is right on average (chroma error 2 - 8 %), magnitude in coloured areas is what is off.
+6. **Dark indirect (ref < 0.06)**: relative errors are large (+80 % bias, 129 % mean) but absolute errors tiny (0.001 - 0.002) and the engine's indoor floor lifts these areas anyway.
+7. **Temporal response to a moving light**: not measured here (the reference needs a still scene). The probes converge with hysteresis 0.98 (about 100 frames); `rvk_lightturn` measures the light counts, an offline moving-light reference would need
+   per-frame reference rendering (1000 spp per frame): out of scope.
+
+## 5. Per-pixel traced GI prototype (`gi.mode=pixel`: measured, not shipped)
+
+Not a switchable renderer path yet: the measurement lives in the reference pass (planes 6 and 7: k = 1 and 4 cosine rays per pixel from the G-buffer hit, each shaded with
+`giShadeRay`: sun + a point light with shadow rays + the DDGI probes for the second bounce on, far field when the ray runs out), raw per frame. The spatial filter is evaluated offline
+(`tools/gi_reference.py atrous`: edge-avoiding a-trous, 5 iterations, weights from normal / depth / luminance; temporal accumulation is not simulated: a still camera accumulates N frames of raw samples,
+which equals the 4-spp column for N = 4). Mean relative error of the indirect irradiance against the reference:
+
+| spot | DDGI + screen probes | pixel 1 spp raw | 1 spp + a-trous | 4 spp raw | 4 spp + a-trous |
+|---|---|---|---|---|---|
+| jungle | 13 % | 73 % | 18 % | 36 % | 14 % |
+| pub_interior | 6 % | 64 % | 7 % | 41 % | 6 % |
+| shadow_inland_a | 23 % | 64 % | 30 % | 35 % | 27 % |
+| beach_sun | 24 % | 37 % | 19 % | 22 % | 19 % |
+| monastery_hall | 107 % | 150 % | 84 % | 109 % | 92 % |
+
+Biases equal the probes' (the cache bias passes straight into the pixel estimate: monastery +70 %, beach -14 %). Reading: with a filter, 1 spp per pixel matches the screen probes' error (better on the beach, a little worse in
+foliage where the a-trous blurs thin geometry) but does not beat it, because the remaining error is the probe cache's bias and the filter's blur, not the first bounce's variance. Cost (RX 7900 XTX, 1600x900, whole-frame GPU
+deltas, jungle): about 9 ms per shaded pixel sample (4 samples + the probe lookups ~36 ms), i.e. ~9 ms for 1 spp before any denoiser, against ~0.5 - 1 ms for the screen probes. The shading is not optimised (128-light
+loop, incoherent shadow rays); a 2 - 3x gain is plausible (no light loop for far lights, ReSTIR-style light picks, ray sorting) but 3 ms+ remains.
+
+## 6. NRD evaluation (not built)
+
+Sources (web, 2026-11-04): NVIDIA-RTX/NRD on GitHub (https://github.com/NVIDIA-RTX/NRD): REBLUR (recurrent blur), RELAX (a-trous, for RTXDI), SIGMA (shadows); API-agnostic: NRD makes no graphics calls, the application runs
+its compute dispatches (own implementation of the NRD API, or the NRI layer for D3D11 / D3D12 / Vulkan); shaders are HLSL (`NRD.hlsli`), precompiled DXBC / DXIL / SPIRV can be embedded.
+License: not retrievable in this session; the task statement says MIT, to verify against LICENSE.txt before any use.
+Inputs (REBLUR diffuse): noisy diffuse radiance packed with a normalised hit distance (`REBLUR_FrontEnd_PackRadianceAndNormHitDist`), world normal + linear roughness, view Z, non-jittered motion vectors, optional confidence / disocclusion
+threshold. We have all of them for a diffuse-only signal: normals / view Z / motion from the G-buffer (`enh/gbuffer`; roughness = 1 constant), hit distance is a by-product of our traced ray (the closest hit t, already in `giShadeRay`), jitter-free.
+Fit with our RHI: its dispatch descriptions (pipelines + resource bindings of ~20 compute shaders, constants up to several hundred bytes) do not fit "push constants <= 128 B, one root CBV b8, UAVs u0..u7 space1" as they are: we would map them
+through the root CBV and the bindless heaps (NRD's permanent / transient pools are textures we create anyway) and compile its HLSL through our DXC path for SM 6.6 / SPIR-V and DXIL; its SPIRV / DXIL embed options remove that step. Estimated 3 - 5 days
+(resource pool + binding mapping on both backends + tuning), not day-sized, so not built. Expected value: a production-grade denoiser would remove the blur of our a-trous at 1 spp and handle disocclusion, but cannot remove
+the cache bias (section 5), which is what limits quality. Decision: not before the probe cache bias (failure mode 1) is understood.
+
+## 7. DLSS Ray Reconstruction / AMD FSR Ray Regeneration: what they need from us
+
+* NVIDIA DLSS Ray Reconstruction: RTX GPUs only; unavailable on the RX 7900 XTX of this machine: nothing here is verified. From NVIDIA's public integration notes (not retrieved today): noisy radiance, diffuse albedo, specular albedo,
+  normals, roughness, linear depth, motion vectors (specular hit-distance / motion optional), exposure; replaces the denoiser and the upscaler.
+* AMD FSR Ray Regeneration: part of the FSR SDK (2.2 from March 2026 added it; 2.3 / June 2026 ships Ray Regeneration 1.2.0 with ambient + specular occlusion denoising; `amd_fidelityfx_denoiser*.dll` next to the signed loader). Per
+  https://gpuopen.com/amd-fsr-sdk/ (fetched 2026-11-04): Radeon RX 9000 series (RDNA 4) or newer, **DirectX 12 only (no Vulkan), SM 6.6, Windows 11**, signed AMD DLLs; the page lists no input buffers (the manual
+  was not read). Press coverage: https://www.cgchannel.com/2026/03/amd-releases-fsr-sdk-2-2-with-new-ai-denoiser-ray-regeneration/, https://tweaktown.com/news/112349/amd-updates-fsr-sdk-with-fsr-4-1-1-support-for-rdna-3-and-improved-fsr-ray-regeneration-1-2-0/.
+  Not usable on the 7900 XTX (RDNA 3) and only through the D3D12 backend: cannot be tested here.
+* What we have vs what such denoisers want (both are specular-aware): noisy diffuse radiance (yes, planes 6 / 7), normals (G-buffer), depth, motion vectors (yes), diffuse albedo (the primary albedo trace of the reference pass proves we can
+  get it; the G-buffer does not store it: add it), specular albedo and roughness (**missing**: Risen has no roughness / ORM textures; this is what the material-pack project would supply; a constant roughness 1 / dielectric F0 = 0.04
+  would only feed the diffuse path), exposure (the engine's adapted luminance, `engine/exposure`). A specular GI / reflection signal does not exist in the game's lighting model at all, so these denoisers would act on diffuse GI
+  (where a conventional denoiser does as well) until materials have roughness.
+
+## 8. Recommendation
+
+* **No-go for pixel GI as the default / as the next stage.** At 1 spp it costs ~9 ms at 1600x900 (unoptimised) and, filtered by a baseline a-trous, matches but does not beat the screen probes (5 - 25 % error vs 6 - 30 %), because what limits
+  quality now is the probe cache's bias, and the pixel path would inherit it. A neural denoiser would improve noise, not bias, and is not available on the target GPU / backend (Ray Regeneration: RDNA 4 + D3D12 only).
+* **Stage 1 (cheap, high value): fix DDGI's measured failure modes using the reference as the oracle**: indoor sky leak / bias (monastery +89 %, crystal cave volume +285 %), the bright-bounce under-estimate (beach -16 %), then sub-probe contact
+  occlusion. `gi.reference=error` shows each in-game; `scripts/gi-reference.ps1` re-measures after every change (the unit: mean relative error and bias per spot in `summary.md`).
+* **Stage 2 (optional, evaluate later):** pixel GI only as a high-quality tier for the near field (contact light within a few metres, 1 spp + temporal + a-trous), after stage 1 and after the diffuse albedo is in the G-buffer; then NRD
+  REBLUR diffuse (3 - 5 days) if the in-game noise of the a-trous baseline is the complaint. Ray Regeneration / DLSS-RR when materials have roughness and only as optional vendor paths.
+* Not verified: the temporal response to a moving light, D3D12 numbers beyond a smoke run, 2560x1440 cost, any vendor denoiser's quality.
+
+## 9. Gates
+
+* `rvk_tests`: 216 of 216 (the settings count test: 129 -> 133). `rvk_shadertool dxil-check embedded`: 58 of 58 (gi 5 / 5 with `gi_reference.comp`).
+* `testdemo` PASS on Vulkan and on D3D12 (default settings: the new settings are Debug, off: the default look is untouched; nothing is created when `gi.reference` is off).
+* Reference on Vulkan with `-Validation`: pub_interior run clean (no validation message). Reference on D3D12 (pub_interior, 256 spp): works and agrees with Vulkan (screen probes bias +0.8 %, mean rel. error 8 %; Vulkan 4 - 13 % depending on spp).
+* Not run: refcompare (the changes only act with the Debug setting on), sync validation, 2560x1440 timing, GPU timings on the default lock (the cost figures are whole-frame GPU times from `-Perf` in the private copy, jungle, 1600x900).
+* Known limits of the tool: the reference restarts whenever the sun / sky registers change (the hemisphere light drifts: epochs complete only in frozen scenes); the primary normal comes from the depth map (no normal maps, as the screen probes);
+  characters are in the RT scene only if `gi.characters`; the sea surface is not in the volume's comparison (see failure mode 4).

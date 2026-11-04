@@ -106,7 +106,7 @@ void Gi::flushDumps() {
                 std::ofstream meta(dir / std::format("e{:03}_meta.json", d.epoch));
                 meta << std::format("{{\"epoch\": {}, \"w\": {}, \"h\": {}, \"spp\": {}, \"camera\": [{:.2f}, {:.2f}, {:.2f}], \"bounces\": {}, "
                                     "\"sun\": [{:.4f}, {:.4f}, {:.4f}], \"sun_dir\": [{:.4f}, {:.4f}, {:.4f}], \"lights\": {}, "
-                                    "\"planes\": [\"ref_indirect\", \"ref_direct\", \"ddgi_volume\", \"ddgi_screen\", \"albedo\", \"normal\"]}}\n",
+                                    "\"planes\": [\"ref_indirect\", \"ref_direct\", \"ddgi_volume\", \"ddgi_screen\", \"albedo\", \"normal\", \"pixel_1spp\", \"pixel_4spp\"]}}\n",
                                     d.epoch, d.w, d.h, d.spp, d.camera[0], d.camera[1], d.camera[2], s_.referenceBounces, sunColor_[0], sunColor_[1],
                                     sunColor_[2], sunDir_[0], sunDir_[1], sunDir_[2], frameLights_.size());
             }
@@ -158,14 +158,14 @@ void Gi::recordReference(d3d9::PassContext& ctx, rhi::CommandList& cl, GiPush pu
     if (rd == nullptr) return;
     const std::uint64_t stride = static_cast<std::uint64_t>(w) * h * 16;
     if (refBuf_ == nullptr || refW_ != w || refH_ != h) {
-        refBuf_ = rd->createBuffer({stride * 6, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        refBuf_ = rd->createBuffer({stride * 8, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                     rhi::Memory::Device, "gi reference"});
         if (refBuf_ == nullptr) {
-            spdlog::error("enh: gi.reference: the accumulation buffer failed ({} MiB)", stride * 6 / 1048576);
+            spdlog::error("enh: gi.reference: the accumulation buffer failed ({} MiB)", stride * 8 / 1048576);
             s_.reference = 0;
             return;
         }
-        cl.fillBuffer(*refBuf_, 0, stride * 6, 0);
+        cl.fillBuffer(*refBuf_, 0, stride * 8, 0);
         cl.memoryBarrier(VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                          VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
         refW_ = w;
@@ -174,7 +174,7 @@ void Gi::recordReference(d3d9::PassContext& ctx, rhi::CommandList& cl, GiPush pu
         refAcc_ = 0;
         refHash_[0] = refHash_[1] = refHash_[2] = refHash_[3] = 0;
         spdlog::info("enh: gi.reference: {}x{}, {:.0f} MiB, {} samples per frame, up to {} samples, {} bounces, view {}", w, h,
-                     static_cast<double>(stride * 6) / 1048576.0, s_.referenceSpp, s_.referenceMax, s_.referenceBounces, s_.reference);
+                     static_cast<double>(stride * 8) / 1048576.0, s_.referenceSpp, s_.referenceMax, s_.referenceBounces, s_.reference);
     }
     rhi::Texture* view = dev_.transient("gi.ref.view", {VK_FORMAT_R16G16B16A16_SFLOAT, {w, h}});
     const rhi::RingAlloc ra = dev_.ring(sizeof(GiRefParams), 16);
@@ -261,7 +261,7 @@ void Gi::recordReference(d3d9::PassContext& ctx, rhi::CommandList& cl, GiPush pu
     }
     if (refAcc_ >= maxSamples && !refFinalDumped_) {
         refFinalDumped_ = true;
-        scheduleDump(cl, 6, refAcc_, true);
+        scheduleDump(cl, 8, refAcc_, true);
     }
 }
 
@@ -280,6 +280,8 @@ void Gi::recordReferenceView(d3d9::PassContext& ctx) {
         rhi::GraphicsPipelineDesc gd;
         gd.vs.spirv = shader::embedded::spirv("debug/fullscreen_rhi.vert");
         gd.ps.spirv = shader::embedded::spirv("debug/inject_view.frag");
+        gd.vs.dxil = shader::embedded::dxilOnDemand("debug/fullscreen_rhi.vert");
+        gd.ps.dxil = shader::embedded::dxilOnDemand("debug/inject_view.frag");
         gd.colorFormats[0] = target.desc().format;
         gd.blend.blendEnable = VK_FALSE;
         gd.name = "gi.reference view";

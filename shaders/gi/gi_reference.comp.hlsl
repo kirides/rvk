@@ -89,7 +89,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     float z = rvkHwDepthToD3D(f, zHw);
     float viewZ = spViewDepth(f, z);
     if (viewZ <= 0.0) {
-        for (uint k = 0u; k < 6u; ++k) rvkRwStore<float4, 16>(PLANE(k), float4(0.0, 0.0, 0.0, 0.0));
+        for (uint k = 0u; k < 8u; ++k) rvkRwStore<float4, 16>(PLANE(k), float4(0.0, 0.0, 0.0, 0.0));
         outView[px] = float4(0.0, 0.0, 0.0, 1.0);
         return;
     }
@@ -194,6 +194,30 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         dir0 = float4((dir0.rgb * n0 + sumDir) / n1, n1);
         rvkRwStore<float4, 16>(PLANE(0), ind);
         rvkRwStore<float4, 16>(PLANE(1), dir0);
+    }
+
+    // ---- the per-pixel traced GI prototype (docs/research/path-tracing.md): k cosine rays per pixel shaded like the DDGI rays (hit lit by
+    // the sun / a point light / the probes: the second bounce on comes from the probe cache), no temporal or spatial filter.
+    // Planes 6 (1 sample) and 7 (4 samples), this frame's raw estimate of the indirect light
+    {
+        gRng = giHash(pix * 2246822519u ^ r.Get().img.w ^ 0x5bd1e995u);
+        gGiTwoSided = true;
+        float reach = p.Get().screen4.x;
+        float3 acc = float3(0.0, 0.0, 0.0), first = float3(0.0, 0.0, 0.0);
+        for (uint k = 0u; k < 4u; ++k) {
+            float3 dd = cosineDir(N);
+            float4 hit = giShadeRay(p, f, v, P + N * 3.0 + V * 2.0, dd, reach, rnd());
+            float3 rad = hit.rgb;
+            if (hit.w >= reach) {
+                float4 fr[7];
+                if (rvkGiLookupFast(v, P + dd * reach, fr)) rad = rvkGiSkyRadiance(fr, dd);
+            }
+            if (any(isnan(rad)) || any(isinf(rad))) rad = float3(0.0, 0.0, 0.0);
+            if (k == 0u) first = rad;
+            acc += rad;
+        }
+        rvkRwStore<float4, 16>(PLANE(6), float4(first, 1.0));
+        rvkRwStore<float4, 16>(PLANE(7), float4(acc * 0.25, 1.0));
     }
 
     // ---- the view

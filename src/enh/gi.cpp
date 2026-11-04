@@ -146,6 +146,7 @@ void Gi::apply(const Settings& s) {
             refBuild_ = std::async(std::launch::async, [rdev]() {
                 rhi::ComputePipelineDesc d;
                 d.cs.spirv = shader::embedded::spirv("gi/gi_reference.comp");
+                d.cs.dxil = shader::embedded::dxilOnDemand("gi/gi_reference.comp");
                 d.name = "gi.reference";
                 return rdev->createComputePipeline(d);
             });
