@@ -148,3 +148,11 @@ Still scene: unchanged (p50 5.3 - 5.5 / p95 5.9 ms with and without; the changes
 * The remaining loading cost is the engine's object parsing (`ReadObject` 29 %) and entity creation: a wholly engine-side cost.
 * `eCConfigFile::ReadFile` reads the physics config line by line through the physical stream (`g_FFReadFile` per character): 1.8 % of the loading, the same buffer idea for `FUN_1800267e0` (FileSystem2 0x267e0) would remove it.
 * Sound cache: the engine flushes sounds at its soft limit (`FlushBytes`); a larger sound cache would stop the replay decodes in the still scene (not looked at).
+
+## 8. Gates (2026-11-04, build 9f19968 + b632899)
+
+`rvk_tests` 216 / 216 (`absorb_fast_matches_naive`); in-game compares: `debug.fast_absorb=2` 0 rows differ (4 loads), `debug.stream_stats=2` 6,479,678 buffered
+reads, 0 differ; `-Validation` run of the savegame load: 0 validation lines; `testdemo` 7 / 7 PASS with `-Validation` on Vulkan wrapper + full and
+D3D12 wrapper + full (0 validation lines; own copy `risen-test-vk-stream`, instance 5); `refcompare` (Vulkan wrapper, stored reference
+`out/refcompare/20261103-130010`): 11 PASS / 7 WARN / 2 FAIL (`sea_cliff`, `harbour_mouth` = the known sea-edge noise), no new FAIL. Note: a fresh
+worktree's `scripts/refcompare.ps1` snapshot needs `dxcompiler.dll` in `build\refcompare-snapshot` (copy it by hand; the script copies only d3d9.dll / d3d9.pdb).
