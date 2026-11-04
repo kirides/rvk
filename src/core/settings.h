@@ -379,6 +379,11 @@ struct RendererSettings {
     Setting* aoStrength = nullptr;        // ao.strength: 0..1
     Setting* aoRadius = nullptr;          // ao.radius: metres
     Setting* gbufferDebug = nullptr;      // gbuffer.debug: "off", "normals", "motion", "ao"
+    // Full-owned lighting (enh/light_table, docs/research/gpu-scene.md 9.7)
+    Setting* lightingClustered = nullptr; // lighting.clustered (restart, debug): the light table + cluster grid; the material variants take their point lights from it
+    Setting* lightingEnabled = nullptr;   // lighting.enabled (debug): run-time switch of the table (A/B)
+    Setting* lightingStyle = nullptr;     // lighting.style: "original" (the engine's distance law) | "physical"
+    Setting* lightingDebug = nullptr;     // lighting.debug: "off" | "clusters" | "slots"
     // material pack (enh/material_pack, docs/research/material-pack.md)
     Setting* materialsPack = nullptr;        // materials.pack (restart): load the pack folder; its materials get PBR specular / reflections
     Setting* materialsQuality = nullptr;     // materials.quality: "off" | "low" | "medium" | "high"

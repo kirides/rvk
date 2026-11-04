@@ -530,6 +530,10 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         std::erase_if(packRoots, [&](const std::filesystem::path& p) { return !hasFiles(p); });
     }
     enh::setPbrVariants(!packRoots.empty());
+    // Full-owned clustered lights (enh/light_table.h): decided here for the same reason (variants are cached per shader)
+    const bool clusterLights = rs.lightingClustered != nullptr && rs.lightingClustered->asBool() && renderMode() == RenderMode::Full;
+    if (rs.lightingClustered != nullptr && rs.lightingClustered->asBool() && !clusterLights) spdlog::info("enh: lights: lighting.clustered applies in Full mode only");
+    enh::setClusterVariants(clusterLights);
     // ray-traced global illumination (enh/gi.h, docs/research/rtgi.md): probes + the material shaders' GI variants
     gi_ = std::make_unique<enh::Gi>(dev_, rtScene_.get());
     if (!packRoots.empty()) {
@@ -564,6 +568,18 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
             return true;
         });
         spdlog::info("enh: materials: pack on ({} folder(s)), PBR variants enabled", packRoots.size());
+    }
+    if (clusterLights) {
+        // the variants ride on the Gi slot and the pack's gate (lit material draws of the main view); a pack provider that finds nothing (word 0) opens the gate
+        dev_.setVariantProvider(d3d9::VariantSlot::Gi, {enh::materialVariantTag("gi"), [](const d3d9::Shader& s, shader::TranslateOptions& o) {
+                                                            return enh::materialVariantOptions(s, enh::MaterialVariant::Gi, o);
+                                                        }});
+        if (!matPack_) dev_.setPackProvider([](const d3d9::draws::Tag&) { return d3d9::Device::PackHit{}; });
+        lightTable_ = std::make_unique<enh::LightTable>(dev_);
+        for (settings::Setting* s : {rs.lightingEnabled, rs.lightingStyle, rs.lightingDebug}) {
+            if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyLighting(); }, this);
+        }
+        applyLighting();
     }
     if (rs.giEnabled != nullptr) {
         for (settings::Setting* s : {rs.giEnabled, rs.giQuality, rs.giStrength, rs.giLightmaps, rs.giCharacters, rs.giScreen, rs.giBleed, rs.giDirectional, rs.giFoliage, rs.giFill, rs.giCutouts, rs.giLights, rs.giLightCount, rs.giEmissive, rs.giDebug, rs.giReference, rs.giReferenceSpp, rs.giReferenceMax, rs.giReferenceBounces}) {
@@ -776,6 +792,13 @@ void HalDevice::applyMaterials() {
     dev_.setFrameParam(shader::abi::kFrameParamMaterials, {quality, rs.materialsSpecular->asFloat(), rs.materialsEnvironment->asFloat(), debug});
     spdlog::info("enh: materials: quality {}, specular {:.2f}, environment {:.2f}, debug {}", rs.materialsQuality->asEnum(), rs.materialsSpecular->asFloat(),
                  rs.materialsEnvironment->asFloat(), rs.materialsDebug->asEnum());
+}
+
+void HalDevice::applyLighting() {
+    const auto& rs = settings::renderer();
+    if (!lightTable_ || rs.lightingEnabled == nullptr) return;
+    const std::string_view d = rs.lightingDebug->asEnum();
+    lightTable_->configure(rs.lightingEnabled->asBool(), rs.lightingStyle->asEnum() == "physical" ? 1 : 0, d == "clusters" ? 1 : d == "slots" ? 2 : 0);
 }
 
 void HalDevice::applyGbuffer() {

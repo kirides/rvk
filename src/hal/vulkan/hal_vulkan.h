@@ -25,6 +25,7 @@
 #include "enh/object_motion.h"
 #include "enh/upscale.h"
 #include "enh/gi.h"
+#include "enh/light_table.h"
 #include "enh/rt_debug.h"
 #include "enh/rt_scene.h"
 #include "enh/rt_shadows.h"
@@ -615,7 +616,9 @@ private:
     std::unique_ptr<enh::FrameGeneration> framegen_;  // framegen.mode (FSR 3 / FSR 4 frame generation; the manual model)
     std::unique_ptr<enh::Gbuffer> gbuffer_;      // ao.* / gbuffer.debug (the G-buffer attachments + passes)
     std::unique_ptr<enh::matpack::MaterialPack> matPack_;  // materials.* (docs/research/material-pack.md)
+    std::unique_ptr<enh::LightTable> lightTable_;  // lighting.clustered (Full: the light table + cluster grid, docs/research/gpu-scene.md 9.7)
     void applyMaterials();
+    void applyLighting();
     void applyWater();
     void applyGi();
     void applyGbuffer();

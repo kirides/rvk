@@ -33,6 +33,11 @@ std::string materialVariantTag(std::string_view base);
 void setPbrVariants(bool on);
 bool pbrVariants();
 
+// Full-owned light table (enh/light_table, gpu-scene.md 9.7): with this on at startup (setting lighting.clustered, a restart setting) every variant of a
+// shader that reads g_PointLights fills those registers per pixel from the table's cluster (RVK_MV_CLUSTER); the tag changes with it.
+void setClusterVariants(bool on);
+bool clusterVariants();
+
 // the varying location of the capture vertex shader's previous world position (enh/rt_scene)
 inline constexpr std::uint32_t kPrevWorldLocation = 15;  // TEXCOORD15: no game shader writes it (location 30 exceeded maxVertexOutputComponents 128)
 
