@@ -587,3 +587,12 @@ switches on (-0.16 ms, -3 %).
   `setSamplerState` / `setRenderState` self time is 0.26 % + 0.17 %: a HAL state cache would have to stay bit-exact for ~0.02 ms.
 * **Compute mip generation / batched barriers for `blitDraw` on D3D12**: the largest D3D12-only item left (~0.1 ms of the 0.2 gap): needs a
   compute mip-chain pass in `rhi::CommandList` (or batching the per-blit barrier pairs); not done in this pass.
+
+### 21.4 Gates and Full mode (2026-11-04)
+
+Full mode (Vulkan, savegame, 2 interleaved runs each, all new switches on vs the 13e14e6 DLL): CPU per frame 6.910 / 6.911 -> 6.729 / 6.821 ms
+(-0.14 ms, -2.0 %; p50 interval 7.61 / 7.57 -> 7.41 / 7.50). Gates: `rvk_tests` 215 / 215, `rvk_d3d9test --validation` (Vulkan and D3D12) 0 failures /
+0 validation errors, `rvk_rhitest --validation` PASS, `testdemo` 7 / 7 PASS with `-Validation` on Vulkan wrapper + full and D3D12 wrapper + full (0 validation
+lines in rvk.log), Full compare run (`native.static_ops_compare`, `scene_ops_compare`, `lean_check=10`, `debug.fast_sort=2`) `mismatches: none`, 0 sort
+differences. `refcompare` vs `out/refcompare/20261103-130010`: Vulkan 11 PASS / 6 WARN / 3 FAIL (`harbour_docks`, `sea_cliff`, `harbour_mouth` = the known
+sea-edge noise), D3D12 12 / 6 / 2 (`sea_cliff`, `harbour_mouth`); no new FAIL (`out/refcompare/20261104-021314` Vulkan, `20261104-021937` D3D12).
