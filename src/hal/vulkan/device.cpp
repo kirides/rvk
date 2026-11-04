@@ -197,7 +197,9 @@ void HalDevice::applyStaticOps() {
     effectOps_->setLean(leanOn && (rs.nativeLeanEffects == nullptr || on(rs.nativeLeanEffects)), leanCheck);
     {
         const bool cacheBlocked = compare || sceneCompare || on(rs.nativeFrameTap) || on(rs.nativeCoverage) || !leanOn;
-        staticOps_->setPacketCache(rs.nativePacketCache != nullptr && !cacheBlocked ? rs.nativePacketCache->asInt() : 0);
+        const int pm = rs.nativePacketCache != nullptr && !cacheBlocked ? rs.nativePacketCache->asInt() : 0;
+        staticOps_->setPacketCache(pm == 4 ? 1 : pm);
+        dev_.setRetainVariants(pm != 4);  // 4 = the cache of before the variant packets (A/B)
     }
     staticOps_->setGpuScene(rs.nativeGpuScene != nullptr ? rs.nativeGpuScene->asInt() : 0);
     staticOps_->setOpts(rs.nativeOpts != nullptr ? static_cast<unsigned>(rs.nativeOpts->asInt()) : 255u);
