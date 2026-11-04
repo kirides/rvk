@@ -414,6 +414,9 @@ struct RendererSettings {
     Setting* nativeRetainedCheck = nullptr;    // native.retained_check: every replay recomposed fresh and compared
     Setting* nativeRetainedGroups = nullptr;   // native.retained_groups: bit mask of the groups that retain (bit = StaticOps::Group)
     Setting* shadowStride = nullptr;      // debug.shadow_stride: the sun cascades redrawn every n-th frame (engine::shadowmaps::setUpdateStride)
+    Setting* fsReadCache = nullptr;       // debug.fs_read_cache: read-ahead of packed file streams (engine::loadaccel)
+    Setting* fastAbsorb = nullptr;        // debug.fast_absorb: sliding-window cloud absorption image (engine::loadaccel)
+    Setting* streamStats = nullptr;       // debug.stream_stats: loading work statistics (engine::loadaccel)
     Setting* xinputInterval = nullptr;    // debug.xinput_interval: re-poll interval of a disconnected gamepad (engine::xinput)
     Setting* fastSort = nullptr;          // debug.fast_sort: typed sort of the render-op lists (engine::fastsort)
     Setting* prefetchStride = nullptr;    // debug.prefetch_stride: the cache-in walk every n-th frame (engine::lod::setPrefetchStride)

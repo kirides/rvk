@@ -28,6 +28,7 @@
 #include "engine/hemisphere.h"
 #include "engine/lights.h"
 #include "engine/fast_sort.h"
+#include "engine/load_accel.h"
 #include "engine/lod.h"
 #include "engine/material_source.h"
 #include "engine/shadow_maps.h"
@@ -162,6 +163,7 @@ void detourInitializeAdmin(void* self, int apiType) {
                                    g_config.presentStalls);
     }
     if (g_config.cpuProfile && g_config.mode == Mode::Vulkan) diag::enableFrameSampler();
+    if (g_config.mode == Mode::Vulkan) engine::loadaccel::install();  // loading work: packed read buffer, absorption image (streaming.md)
     if (g_config.probe && !g_probed.exchange(true)) {
         rhi::probeBackend(rhi::Backend::Vulkan);
     }

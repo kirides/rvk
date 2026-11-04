@@ -221,6 +221,8 @@ add_library(rvk_core STATIC
     src/engine/lod.cpp
     src/engine/fast_sort.cpp
     src/engine/fast_sort.h
+    src/engine/load_accel.cpp
+    src/engine/load_accel.h
     src/engine/xinput_throttle.cpp
     src/engine/xinput_throttle.h
     src/engine/material_source.cpp

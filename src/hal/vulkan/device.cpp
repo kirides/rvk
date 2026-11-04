@@ -22,6 +22,7 @@
 #include "d3d9/fvf.h"
 #include "engine/scene_hooks.h"
 #include "engine/fast_sort.h"
+#include "engine/load_accel.h"
 #include "engine/lod.h"
 #include "engine/xinput_throttle.h"
 #include "engine/memread.h"
@@ -544,6 +545,18 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     if (rs.shadowStride != nullptr) {
         engine::shadowmaps::setUpdateStride(static_cast<int>(rs.shadowStride->asInt()));
         reg.onChange(*rs.shadowStride, [](const settings::Setting& s) { engine::shadowmaps::setUpdateStride(static_cast<int>(s.asInt())); }, this);
+    }
+    if (rs.fsReadCache != nullptr) {
+        engine::loadaccel::setReadCacheKiB(static_cast<int>(rs.fsReadCache->asInt()));
+        reg.onChange(*rs.fsReadCache, [](const settings::Setting& s) { engine::loadaccel::setReadCacheKiB(static_cast<int>(s.asInt())); }, this);
+    }
+    if (rs.fastAbsorb != nullptr) {
+        engine::loadaccel::setAbsorbMode(static_cast<int>(rs.fastAbsorb->asInt()));
+        reg.onChange(*rs.fastAbsorb, [](const settings::Setting& s) { engine::loadaccel::setAbsorbMode(static_cast<int>(s.asInt())); }, this);
+    }
+    if (rs.streamStats != nullptr) {
+        engine::loadaccel::setStats(static_cast<int>(rs.streamStats->asInt()));
+        reg.onChange(*rs.streamStats, [](const settings::Setting& s) { engine::loadaccel::setStats(static_cast<int>(s.asInt())); }, this);
     }
     if (rs.xinputInterval != nullptr) {
         engine::xinput::setIntervalMs(static_cast<int>(rs.xinputInterval->asInt()));
@@ -1354,6 +1367,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
     }
     engine::matsrc::onPresent();
     engine::xinput::onPresent();
+    engine::loadaccel::onPresent();
     engine::lod::onPresent();  // a changed object draw distance: the world's cache-in spheres (engine thread)
     dev_.present();
     const auto& s = dev_.stats();

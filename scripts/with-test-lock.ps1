@@ -13,10 +13,11 @@
 #>
 param(
     [string]$Who = '',
+    [string]$Name = 'rvk-test-copy',
     [Parameter(Mandatory)][scriptblock]$Run
 )
 $ErrorActionPreference = 'Stop'
-$mutex = New-Object System.Threading.Mutex($false, 'Global\rvk-test-copy')
+$mutex = New-Object System.Threading.Mutex($false, "Global\$Name")
 $label = if ($Who) { $Who } else { (Get-Location).Path }
 $start = Get-Date
 $held = $false
