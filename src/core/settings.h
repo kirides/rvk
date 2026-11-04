@@ -370,6 +370,10 @@ struct RendererSettings {
     Setting* aoEnabled = nullptr;         // ao.enabled: GTAO on the ambient light
     Setting* giLights = nullptr;          // gi.lights: "nearby" (the drawn objects' lights) or "world" (engine/lights: every loaded light)
     Setting* giEmissive = nullptr;        // gi.emissive: gain of self-illuminated surfaces as light sources
+    Setting* giReference = nullptr;       // gi.reference (debug): the reference path tracer's view (docs/research/path-tracing.md)
+    Setting* giReferenceSpp = nullptr;    // gi.reference_spp: samples per pixel and frame
+    Setting* giReferenceMax = nullptr;    // gi.reference_max: samples until the accumulation stops and is dumped
+    Setting* giReferenceBounces = nullptr;  // gi.reference_bounces: the most bounces of a path
     Setting* giLightCount = nullptr;      // gi.light_count (debug): the most lights the GI considers per frame
     Setting* aoMode = nullptr;            // ao.mode: "replace" (the game's SSAO off), "add"
     Setting* aoStrength = nullptr;        // ao.strength: 0..1

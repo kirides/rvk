@@ -144,6 +144,7 @@ add_library(rvk_core STATIC
     src/enh/debug_view.cpp
     src/enh/debug_view.h
     src/enh/gi.cpp
+    src/enh/gi_reference.cpp
     src/enh/gi.h
     src/enh/framegen.cpp
     src/enh/framegen.h

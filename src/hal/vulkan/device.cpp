@@ -557,7 +557,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         spdlog::info("enh: materials: pack on ({} folder(s)), PBR variants enabled", packRoots.size());
     }
     if (rs.giEnabled != nullptr) {
-        for (settings::Setting* s : {rs.giEnabled, rs.giQuality, rs.giStrength, rs.giLightmaps, rs.giCharacters, rs.giScreen, rs.giBleed, rs.giDirectional, rs.giFoliage, rs.giFill, rs.giCutouts, rs.giLights, rs.giLightCount, rs.giEmissive, rs.giDebug}) {
+        for (settings::Setting* s : {rs.giEnabled, rs.giQuality, rs.giStrength, rs.giLightmaps, rs.giCharacters, rs.giScreen, rs.giBleed, rs.giDirectional, rs.giFoliage, rs.giFill, rs.giCutouts, rs.giLights, rs.giLightCount, rs.giEmissive, rs.giDebug, rs.giReference, rs.giReferenceSpp, rs.giReferenceMax, rs.giReferenceBounces}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) {
                 applyGi();
                 applyGbuffer();  // the screen probes need the G-buffer
@@ -718,6 +718,16 @@ void HalDevice::applyGi() {
     if (rs.giCutouts != nullptr) s.cutoutsTested = rs.giCutouts->asEnum() == "tested";
     if (rs.giEmissive != nullptr) s.emissive = rs.giEmissive->asFloat();
     if (rs.giLightCount != nullptr) s.lightCount = rs.giLightCount->asInt();
+    if (rs.giReference != nullptr) {
+        static const char* const kViews[] = {"off", "reference", "ddgi", "screen", "error", "reference_indirect", "screen_indirect", "error_ddgi"};
+        const std::string_view rv = rs.giReference->asEnum();
+        for (int i = 0; i < 8; ++i) {
+            if (rv == kViews[i]) s.reference = i;
+        }
+        s.referenceSpp = static_cast<int>(rs.giReferenceSpp->asInt());
+        s.referenceMax = static_cast<int>(rs.giReferenceMax->asInt());
+        s.referenceBounces = static_cast<int>(rs.giReferenceBounces->asInt());
+    }
     if (rs.giLights != nullptr) s.lights = rs.giLights->asEnum() == "world" ? 1 : 0;
     const std::string_view d = rs.giDebug->asEnum();
     s.debug = d == "irradiance" ? 1 : d == "cascades" ? 2 : d == "vertex_ao" ? 3 : 0;

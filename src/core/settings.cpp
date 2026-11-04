@@ -1625,6 +1625,61 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::Debug | Flag::NoAB,
         .requirements = caps::bit(caps::Cap::RayQuery),
     });
+    r.giReference = &reg.add({
+        .key = "gi.reference",
+        .label = "GI reference path tracer",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Developer view: the ground truth of the ray-traced lighting. Paths with next-event estimation from the same "
+                       "scene, materials and lights as the probes, accumulated while the camera and the light stand still (a "
+                       "still image converges over a few hundred frames), dumped to bin/rvk/gi_ref when gi.reference_max samples "
+                       "are reached. Views: the reference, the probe volume, the probes with the screen probes' factor, heat maps "
+                       "(red = the probes are too bright, blue = too dark), the indirect light alone. Needs the screen probes.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "reference", "ddgi", "screen", "error", "reference_indirect", "screen_indirect", "error_ddgi"},
+        .optionLabels = {"Off", "Reference", "Probe volume", "Probes + screen probes", "Error (probes + screen)", "Reference, indirect only",
+                         "Probes + screen, indirect only", "Error (probe volume)"},
+        .flags = Flag::NoAB | Flag::Debug,
+        .requirements = caps::bit(caps::Cap::RayQuery),
+    });
+    r.giReferenceSpp = &reg.add({
+        .key = "gi.reference_spp",
+        .label = "Reference samples per frame",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Samples per pixel the reference path tracer adds each frame (costs GPU time: 1 sample at 1280x720 is about 1 ms).",
+        .type = Type::Int,
+        .defaultValue = 4,
+        .min = 1,
+        .max = 64,
+        .flags = Flag::Debug | Flag::NoAB,
+    });
+    r.giReferenceMax = &reg.add({
+        .key = "gi.reference_max",
+        .label = "Reference samples (total)",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The accumulation stops at this many samples per pixel and its planes are written to bin/rvk/gi_ref "
+                       "(luminance-only dumps at 64, 128, ... on the way).",
+        .type = Type::Int,
+        .defaultValue = 1024,
+        .min = 1,
+        .max = 1000000,
+        .flags = Flag::Debug | Flag::NoAB,
+    });
+    r.giReferenceBounces = &reg.add({
+        .key = "gi.reference_bounces",
+        .label = "Reference bounces",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The most bounces of a reference path (Russian roulette ends most earlier).",
+        .type = Type::Int,
+        .defaultValue = 6,
+        .min = 1,
+        .max = 16,
+        .flags = Flag::Debug | Flag::NoAB,
+    });
     r.giLightCount = &reg.add({
         .key = "gi.light_count",
         .label = "GI light sources (most)",
