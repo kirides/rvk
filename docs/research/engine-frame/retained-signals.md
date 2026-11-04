@@ -114,3 +114,32 @@ Ceiling of the bypass at a replay cost of 0.3 us per draw (stamp compare + 3 add
 "~-1 ms for static meshes alone" expectation does not hold (0.42 ms); the target (Full - Wrapper 1.97 -> ~0.3-0.5) needs trees + static + shadow views together, and the composition itself (1.5 ms) stays on top unless
 the signals (section 1) let it be skipped too. Saved per 1,000 draws: ~1.3 ms for trees / shadow views, ~1.8 ms for static meshes. Not built: the replay itself (a persistent object-block slot, per-view window patching,
 `beginRendering` / scope bookkeeping, record threads, the verify mode and the consumer switch-off are a Device-level change; see section 5).
+
+## 8. Stage 1 result: the retained packet, measured (2026-11-04; `native.packet_cache`, commit 32b9956)
+
+What it is: for the main view's static-mesh (z / solid) and SpeedTree / tree-billboard draws, `StaticOps::issue()` keeps the finished `DrawPacket` (+ its DrawBlock, the interned vertex-input /
+dynamic-state **values** (the interning arena is per frame: pointers cannot be kept), the buffers' GPU bindings, the textures with their bindless slots, the viewport / targets) in
+`Device::CachedDraw`, keyed by (op context, op desc, list, draw index, group) and valid while the composed `DrawDesc` is structurally equal (shaders, declaration, streams, ranges, states, samplers, tag;
+registers are NOT compared: they are re-set every frame and the constant windows re-uploaded). `Device::replayDraw` skips `prepareDraw` and the state setters (decl, streams, indices, 10 render states, sampler states),
+re-validates shaders / modules / buffer bindings / textures / env, rebuilds the per-frame parts (windows via `uploadConstants`, DrawBlock c5 + depth remap, draw id) and submits the packet. Restore
+after the op only touches the states a normally drawn draw set. Cache refuses per draw while an observer observes the draw's kind / phase (RT scene, GI, object motion), a replacer handles it, tint /
+ubershader / G-buffer / GI variants / upscaling jitter / logging are on; off for compare, tap, coverage runs. Setting values 2 / 3 verify (every 10th / every frame): the draw is made fresh and compared
+with what the replay would have produced (pipeline, vertex input, dynamic state, ranges, flags, DrawBlock bytes): **4.9 M checks, 0 differing** (savegame, mode 3).
+
+Measured (savegame, lod 2x, test-baseline settings = no RT scene / water, `-Perf` CPU = engine + HAL, 3 interleaved runs per arm):
+
+| backend | Full, cache off | Full, cache on | Wrapper | saved | Full - Wrapper before -> after |
+|---|---|---|---|---|---|
+| Vulkan | 5.470 (5.479 / 5.451 / 5.482) | **5.145** (5.126 / 5.133 / 5.175) | 3.674 | **0.325 ms** | 1.80 -> **1.47** |
+| D3D12 | 5.781 (5.654 / 5.589 / 6.099, the last disturbed; median 5.65) | **5.279** (5.253 / 5.291 / 5.293) | 3.820 | 0.37 - 0.50 ms | 1.96 (1.83 on the median) -> **1.46** |
+
+~1,020 draws per frame are replayed (756,520 per 5 s), ~90 per frame are not capturable (uploading textures, dynamic buffers). **Measured replay cost: `replayDraw` 0.359 ms per frame = 0.35 us per draw (the 0.3 us
+assumption was right)**: `replayBuild` 0.126, `uploadConstants` / `splitStage` 0.136, `submitInterned` 0.155. What is left of `issue()` per replayed draw is ~0.45 us: the register setters (`setVertexShaderConstantF`
+0.22 ms + PS 0.04 for the whole frame, the compare + copy into the device's register file), the save / restore pass, the map lookup + structural compare (0.05 ms), plus the composition that still runs.
+So the saved 0.33 - 0.4 ms is **not** the 1.3 ms of section 7: that ceiling came from the player-default run (RT scene `observe` 0.36 ms inside `prepareDraw`, 2.1 us per static draw); with enhancements off the
+same draws cost 1.25 us in `issue()` (static 1.25, trees 1.27), of which replay removes ~0.4 us. **With the player defaults (water + RT reflections) the cache is refused for every draw (the RT scene observes
+static meshes), so Full gains nothing there until the observer is fed from signals (stage 4).**
+
+Gates (build 32b9956): `rvk_tests` 216 / 216; `rvk_d3d9test --validation` Vulkan + D3D12 0 failures / 0 validation errors; `testdemo` 7 / 7 with `-Validation` and `native.packet_cache=3` on Vulkan
+wrapper / full and D3D12 wrapper / full, 0 validation lines; compare run (`static_ops_compare`, `scene_ops_compare`, `lean_check=10`, cache setting 3: auto-off) 26 groups `mismatches: none`;
+`refcompare` Full + cache on vs `20261103-130010`: Vulkan beach_rain / jungle / pub_interior PASS, hero_closeup WARN, harbour_night FAIL (dluma -3.5, the known night noise); D3D12 the same set.

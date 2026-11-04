@@ -761,3 +761,7 @@ Full write-up: engine-frame/retained-signals.md. Signals exist for lifecycle and
 ### 24.6 Packet retention, stage 0: the ceiling (2026-11-04)
 
 `-Perf` now logs per group what `issue()` costs per draw and how much of it is the device call (retained-signals.md 7). Savegame Full: static meshes 2.10 us/draw (232 draws per frame), trees 1.56 (680), shadow views 1.59 (160), actors 1.77 (21), vegetation 2.50 (66); Vulkan and D3D12 within 3 %. Bypassing issue + prepareDraw at 0.3 us per replayed draw would save 0.42 ms for static meshes alone and ~1.5-1.7 ms with trees, shadow views, actors (vegetation, alpha). Static meshes alone do not reach -1 ms; the combination does.
+
+### 24.7 Packet retention, stage 1 (2026-11-04)
+
+`native.packet_cache` (Debug, default off): static-mesh + tree draws of the main view replayed from kept packets (retained-signals.md 8). Savegame, baseline settings, 3 runs each: Vulkan Full 5.470 -> 5.145 ms (-0.33), Wrapper 3.674, gap 1.80 -> 1.47; D3D12 5.78 -> 5.28, gap -> 1.46. Measured replay 0.35 us per draw; the section-7 ceiling (1.3 ms) was inflated by the RT scene observer that the player defaults have inside prepareDraw; with it active the cache is refused. Verify mode: 4.9 M checks, 0 differing.
