@@ -35,7 +35,11 @@ param(
     [switch]$SkipOff,
     [switch]$SkipDdgi,
     [switch]$Validation,
-    [string]$RunDir = ''
+    [string]$RunDir = '',
+    # quick re-measure after a change to the probes: take the converged reference planes of an earlier run (out/gi-reference/<stamp>), run with a few samples only (-Spp 8 -Max 8 -SkipOff -SkipDdgi)
+    [string]$RefRun = '',
+    # environment variables for the game ('RVK_SHADER_DIR=...' edits shaders without a rebuild)
+    [string[]]$Environment = @()
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
@@ -58,6 +62,7 @@ if ($RunDir) {
                       Param = @("tag=$tag", $spotParam, 'burst=1', "freeze_wait=$FreezeWait"); Setting = $settings
                       RvkFilter = 'enh: gi.reference|enh: gi: (on|off)|\[error\]' }
         if ($Validation) { $runArgs.Validation = $true }
+        if ($Environment.Count -gt 0) { $runArgs.Environment = $Environment }
         & (Join-Path $PSScriptRoot 'run.ps1') @runArgs | Out-Host
         $dir = Join-Path $out $tag
         New-Item -ItemType Directory -Force $dir | Out-Null
@@ -74,5 +79,7 @@ if ($RunDir) {
     $metaLines = @(Get-Content (Join-Path $out 'ref\spass.log') | Where-Object { $_ -match 'RVKCMP (\{.*\})$' } | ForEach-Object { $Matches[1] })
     Set-Content -Path (Join-Path $out 'meta.json') -Value ('[' + ($metaLines -join ',') + ']') -Encoding utf8
 }
-python -I (Join-Path $repo 'tools\gi_reference.py') analyze $out
+$extra = @()
+if ($RefRun) { $extra = @('--ref-run', (($RefRun -split ',' | ForEach-Object { (Resolve-Path $_).Path }) -join ',')) }
+python -I (Join-Path $repo 'tools\gi_reference.py') analyze $out @extra
 Write-Host "results: $out\analysis (summary.md)"

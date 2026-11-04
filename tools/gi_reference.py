@@ -229,9 +229,20 @@ def convergence(gi_dir, epoch, final_ind, mask, final_spp, var_plane):
     return rows, pred
 
 
-def analyze_spot(spot, meta, gi_dir, outdir, shots):
+def analyze_spot(spot, meta, gi_dir, outdir, shots, ref_meta=None, ref_dir=None):
+    """ref_meta / ref_dir: take the reference planes (0 indirect, 1 direct, 4 albedo + depth, 5 normal) from an earlier, converged run and
+    only the DDGI planes (2, 3, 6, 7) from this one (a quick re-measure after a change to the probes: this run needs only a few reference
+    samples; the cameras of both runs are pinned, the images align). The convergence rows come from the earlier run."""
     full = os.path.join(gi_dir, f"e{meta['epoch']:03d}_full_{meta['spp']:05d}.npy")
     P = load_full(full)
+    if ref_meta is not None:
+        R = load_full(os.path.join(ref_dir, f"e{ref_meta['epoch']:03d}_full_{ref_meta['spp']:05d}.npy"))
+        if R.shape[1:3] != P.shape[1:3]:
+            raise SystemExit(f'{spot}: image sizes differ between the runs')
+        for k in (0, 1, 4, 5):
+            P[k] = R[k]
+        meta = ref_meta
+        gi_dir = ref_dir
     ref_ind, ref_dir, ddgi_v, ddgi_s, alb_z, nrm = P[:6]
     pix1, pix4 = (P[6], P[7]) if P.shape[0] >= 8 else (None, None)
     valid = nrm[..., 3] > 0.5
@@ -351,6 +362,7 @@ def main():
     ap.add_argument('run')
     ap.add_argument('--spots', default='')
     ap.add_argument('--out', default='')
+    ap.add_argument('--ref-run', default='', help="an earlier run dir whose converged reference planes replace this run's (quick re-measure)")
     a = ap.parse_args()
     run = a.run
     gi_dir = os.path.join(run, 'gi_ref')
@@ -369,7 +381,18 @@ def main():
         if em is None:
             print(f'{spot}: no reference dump near the camera', file=sys.stderr)
             continue
-        r = analyze_spot(spot, em, gi_dir, out, shots)
+        rm, rdir = None, None
+        if a.ref_run:
+            # several run dirs may be given (comma separated): the first that holds the spot wins
+            for d in a.ref_run.split(','):
+                rm = find_epoch(os.path.join(d, 'gi_ref'), [cam['x'], cam['y'], cam['z']])
+                if rm is not None:
+                    rdir = os.path.join(d, 'gi_ref')
+                    break
+            if rm is None:
+                print(f'{spot}: no reference dump in {a.ref_run}', file=sys.stderr)
+                continue
+        r = analyze_spot(spot, em, gi_dir, out, shots, rm, rdir)
         results.append(r)
         s = r['indirect']['screen']
         print(f"{spot}: spp {r['spp']}, ref {s['ref_mean']:.3f}, screen bias {fmt_pct(s['bias_rel'])}, mean rel err {100 * s['mean_rel_err']:.0f}%, "
