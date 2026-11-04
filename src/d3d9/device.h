@@ -900,6 +900,7 @@ public:
         std::uint64_t replayed = 0, refused = 0, captured = 0, notCaptured = 0;
         // why a replay was refused: shaders / modules, phase, consumers, env, jitter, stream binding, index binding, texture, observer capture, no scope
         std::uint64_t why[12] = {};
+        std::uint64_t ncWhy[12] = {};  // capture refused by prepareDraw: replaced, tint, captureDraw, gi, gbuf write, custom, not indexed, replacement, uber, module, request
     } replayStats;
     // resources report what they copy to the GPU (render thread)
     void countUpload(bool texture, std::uint64_t bytes) {

@@ -1244,6 +1244,10 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         captureOk_ = !replaced && tint == 0 && !captureDraw && !giDraw && !gbufWrite_ && customVertices_ == 0 && geom.indexed && !geom.userPointer &&
                      rep.action == DrawReplacement::Action::Engine && uberBase == rhi::ShaderModule::None && vsModule == vs_->module &&
                      fs == ps_->module && captureRequest_.null();
+        if (!captureOk_) {
+            ++replayStats.ncWhy[replaced ? 0 : tint != 0 ? 1 : captureDraw ? 2 : giDraw ? 3 : gbufWrite_ ? 4 : customVertices_ != 0 ? 5 : !geom.indexed || geom.userPointer ? 6
+                                : rep.action != DrawReplacement::Action::Engine ? 7 : uberBase != rhi::ShaderModule::None ? 8 : vsModule != vs_->module || fs != ps_->module ? 9 : 10];
+        }
         lastBlock_ = block;
         lastKind_ = kind;
         query(lastQuery_);

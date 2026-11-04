@@ -168,3 +168,18 @@ GPU state (object window from the instance table, material / light windows persi
 needs a push block extension `objTable` + `objIndex` (112 -> 128 B), `noteWindow` skipping overridden registers, a per-draw VS variant choice in `prepareDraw`), the mesh / material tables,
 GPU cull + indirect draws, vegetation, trees, cascades, `Request`. The GPU table has no consumer yet, so `native.gpu_scene=2` costs ~0.07 - 0.1 ms CPU for nothing: keep it at 0 until
 M1b part 2 or the RT scene / object motion read it. No CPU number improved.
+
+### 9.2 Session 2026-11-04 (third agent): measurement before building M1b part 2 - the object-window / persistent-window step cannot pay
+
+Nothing of the translator `objectFromTable` / push extension was built: two cheap measurements (Full, `-PlayerDefaults`, savegame lod 2x, `native.packet_cache=1`, Vulkan) show it targets the wrong cost.
+
+1. **Upper bound of persistent windows (experiment, removed again).** For static main-view replays the register setters and `uploadConstants` were skipped (windows reused from the previous draw, wrong pictures, timing only): static `issue()`
+   1.960 -> 1.891 us per draw (bookkeeping 0.924 -> 0.827 us), `-Perf` CPU 7.22 -> 7.26 ms (noise). The whole constants chain (object / material / light windows + setters) of the replayed static draws is worth
+   ~0.05 - 0.1 us per draw, i.e. < 0.05 ms per frame. An object window fetched from the instance table can save at most that, plus the fade (c32.w) still needs a window.
+2. **At the player defaults most static / solid draws are not in the packet cache at all.** New counters (`native: packet cache not capturable by prepareDraw`): over the run 4.18 M draws were refused capture because they are
+   `giDraw` (G-buffer / GI pixel-shader variants of lit main-view solid draws: `giDraws_.on` && `gbufWrite_` or an eligible ambient), 0.35 M because the VS / PS module differs from the engine's (variants). Per 5 s: 238 k draws replayed vs 497 k fresh
+   (~360 vs ~750 per frame); fresh static draws cost `issue()` 1.96 us of which 1.04 us `prepareDraw` + submit. The earlier "940 draws replayed" figure holds only without the variant consumers (test baseline).
+   So the deliverable's class (static z + solid, main view) is exactly the one the variants take out of every retained path.
+3. Consequence for the plan: before any GPU-resident object window, the *variant decision* of `prepareDraw` (G-buffer / GI / material pack: `giEligible` reads the ambient registers every draw) must become a cached,
+   signal-validated property of the op (a per-entry variant choice + its pipeline in `CachedDraw`, the ambient-nonzero test from the light-set stamp), otherwise the O(1) path never runs at the player defaults. Only then do
+   persistent windows / table fetches matter (and by 1. they are ~0.05 ms). The composition (DrawDesc, ~1.25 us/op) remains the largest item (retained-signals.md 12, performance.md 24).

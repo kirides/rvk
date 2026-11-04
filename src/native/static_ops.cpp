@@ -2240,6 +2240,8 @@ void StaticOps::report() {
                 const auto& st = dev_.replayStats;
                 spdlog::info("native: packet cache refusals (total): shaders {}, phase {}, consumers {}, env {}, jitter {}, stream binding {}, index binding {}, texture {}, observer capture {}, no scope {}",
                              st.why[0], st.why[1], st.why[2], st.why[3], st.why[4], st.why[5], st.why[6], st.why[7], st.why[8], st.why[9]);
+                spdlog::info("native: packet cache not capturable by prepareDraw (total): replaced {}, tint {}, capture variant {}, gi {}, gbuf write {}, custom {}, not indexed {}, replacement {}, uber {}, module {}, request {}; replayAllowed / textures: {}",
+                             st.ncWhy[0], st.ncWhy[1], st.ncWhy[2], st.ncWhy[3], st.ncWhy[4], st.ncWhy[5], st.ncWhy[6], st.ncWhy[7], st.ncWhy[8], st.ncWhy[9], st.ncWhy[10], st.notCaptured);
             }
             pktWindow_ = {};
         }
