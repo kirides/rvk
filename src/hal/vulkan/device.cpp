@@ -543,7 +543,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
             }
             return d3d9::Device::PackHit{h.word, h.texture};
         });
-        for (settings::Setting* s : {rs.materialsQuality, rs.materialsSpecular, rs.materialsEnvironment, rs.materialsDebug}) {
+        for (settings::Setting* s : {rs.materialsQuality, rs.materialsSpecular, rs.materialsEnvironment, rs.materialsDebug, rs.materialsAlternate, rs.materialsWetness}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyMaterials(); }, this);
         }
         applyMaterials();
@@ -750,6 +750,16 @@ void HalDevice::applyMaterials() {
     };
     const float quality = index(rs.materialsQuality->asEnum(), {"off", "low", "medium", "high"});
     const float debug = index(rs.materialsDebug->asEnum(), {"off", "roughness", "metalness", "orm", "coverage"});
+    dev_.removePasses(&matPack_);
+    if (const int n = rs.materialsAlternate != nullptr ? rs.materialsAlternate->asInt() : 0; n > 0) {
+        // the variants on / off every n frames, decided at the start of each frame's main view (the whole frame uses one state)
+        dev_.addPass(d3d9::inject::Point::BeforeDepthPrepass, "materials.alternate", [this, n](d3d9::PassContext&) {
+            dev_.setPackBypass(((dev_.frameValue() / static_cast<std::uint64_t>(n)) & 1u) != 0);
+        }, &matPack_, 0);
+    } else {
+        dev_.setPackBypass(false);
+    }
+    dev_.setFrameParam(shader::abi::kFrameParamMaterials + 1, {rs.materialsWetness != nullptr ? rs.materialsWetness->asFloat() : 1.0f, 0.0f, 0.0f, 0.0f});
     dev_.setFrameParam(shader::abi::kFrameParamMaterials, {quality, rs.materialsSpecular->asFloat(), rs.materialsEnvironment->asFloat(), debug});
     spdlog::info("enh: materials: quality {}, specular {:.2f}, environment {:.2f}, debug {}", rs.materialsQuality->asEnum(), rs.materialsSpecular->asFloat(),
                  rs.materialsEnvironment->asFloat(), rs.materialsDebug->asEnum());

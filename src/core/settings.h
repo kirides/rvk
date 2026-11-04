@@ -386,6 +386,8 @@ struct RendererSettings {
     Setting* materialsEnvironment = nullptr; // materials.environment: strength of the sky reflection
     Setting* materialsRoughness = nullptr;   // materials.default_roughness: for entries without a roughness map
     Setting* materialsBudget = nullptr;      // materials.budget (restart): MiB of decoded pack textures
+    Setting* materialsWetness = nullptr;     // materials.wetness: scales the entries' wetness (0 = dry world, 1 = as authored)
+    Setting* materialsAlternate = nullptr;   // materials.alternate: test switch, the pack variants on / off every N frames (exact "no entry = unchanged" proof)
     Setting* materialsDebug = nullptr;       // materials.debug: "off" | "roughness" | "metalness" | "orm" | "coverage"
     // upscaling / anti-aliasing (enh/upscale.h, docs/research/upscaling.md)
     Setting* upscaleObjectMotion = nullptr;  // upscale.object_motion: motion vectors of characters and moving objects (enh/object_motion)

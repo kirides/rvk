@@ -80,13 +80,16 @@ bool hasRule(const Manifest& m, std::string_view key);  // an exact / wildcard r
 inline constexpr std::uint32_t kWordSlotMask = 0x3FFFu;  // bindless 2D slots are < 16384 (vk::Bindless::kMax2D)
 inline constexpr std::uint32_t kWordPresent = 1u << 14;
 inline constexpr std::uint32_t kWordOrm = 1u << 15;       // layout ORM (else roughness in R)
+inline constexpr std::uint32_t kWordGlass = 1u << 30;     // glass: full reflection (no light cap), the engine's diffuse stays
 inline constexpr std::uint32_t kWordEmissive = 1u << 31;  // the map's A channel is an emissive mask
 struct Decoded {
     std::uint32_t slot = 0;
     bool present = false, orm = false, emissive = false;
-    float roughnessScale = 1.0f, roughnessBias = 0.0f, metalness = 0.0f;
+    bool glass = false;
+    float roughnessScale = 1.0f, roughnessBias = 0.0f, metalness = 0.0f, wetness = 0.0f;
 };
-// roughness = saturate(tex * scale + bias): scale = bits 16-20 / 16 (0..1.94), bias = bits 21-25 / 31, metalness (scale / constant) = bits 26-30 / 31
+// roughness = saturate(tex * scale + bias): scale = bits 16-19 / 8 (0..1.875), bias = bits 20-23 / 15, metalness (scale / constant) = bits 24-27 / 15,
+// wetness = bits 28-29 / 3, glass = bit 30, emissive = bit 31
 std::uint32_t encodeWord(std::uint32_t slot, bool orm, const Constants& c, float defaultRoughness);
 Decoded decodeWord(std::uint32_t word);
 // the roughness / metalness the shader computes for a texel (R, G, B, A of the map), for tests and the CPU mirror
@@ -143,7 +146,8 @@ public:
 
 private:
     struct Entry {
-        std::unique_ptr<d3d9::Texture> texture;
+        mutable std::unique_ptr<d3d9::Texture> texture;  // created at the first lookup that matches (render thread): unused maps cost nothing
+        mutable bool tried = false;
         Constants c;
         bool orm = false;
         std::string file;
@@ -153,7 +157,11 @@ private:
         Manifest manifest;                               // wildcard rules (constants only)
         Stats stats;
         float defaultRoughness = 0.7f;
+        std::uint64_t budget = 0;
+        mutable std::uint64_t used = 0;  // decoded bytes of the maps created so far
     };
+    // decodes the entry's file into a texture (render thread, at its first match); null = failed / over the budget (logged)
+    std::unique_ptr<d3d9::Texture> createMap(const Entry& e, const Snapshot& s, std::uint64_t& bytes);
     void load(std::vector<std::filesystem::path> roots, std::uint64_t budget, float defaultRoughness, std::uint32_t token);
     Hit resolve(const Snapshot& s, std::string_view key);
     bool adopt();

@@ -121,6 +121,8 @@ struct RvkRtHitSurface {
     float metalness;
     float occlusion;
     float emissive;          // 0..1 mask: the albedo is emitted (ORM alpha)
+    float wetness;           // the entry's wetness 0..1 (the raster scales it with materials.wetness; here as authored)
+    bool glass;              // the entry has transmission > 0
     uint packWord;           // the entry (0 = none)
 };
 
@@ -201,13 +203,17 @@ RvkRtHitSurface rvkRtHitSurface(RvkFrame f, RvkRtHit h, float3 dir, float coneWi
     o.metalness = 0.0;
     o.occlusion = 1.0;
     o.emissive = 0.0;
+    o.wetness = 0.0;
+    o.glass = false;
     o.packWord = r.packWord;
     if ((r.packWord & (1u << 14)) != 0u) {
         uint slot = r.packWord & 0x3FFFu;
         bool orm = (r.packWord & (1u << 15)) != 0u;
-        float rScale = float((r.packWord >> 16) & 31u) * (1.0 / 16.0);
-        float rBias = float((r.packWord >> 21) & 31u) * (1.0 / 31.0);
-        float mScale = float((r.packWord >> 26) & 31u) * (1.0 / 31.0);
+        float rScale = float((r.packWord >> 16) & 15u) * (1.0 / 8.0);
+        float rBias = float((r.packWord >> 20) & 15u) * (1.0 / 15.0);
+        float mScale = float((r.packWord >> 24) & 15u) * (1.0 / 15.0);
+        o.wetness = float((r.packWord >> 28) & 3u) * (1.0 / 3.0);
+        o.glass = (r.packWord & (1u << 30)) != 0u;
         float4 t = float4(1.0, 1.0, 1.0, 0.0);
         if (slot != 0u) {
             float lod = o.lod;

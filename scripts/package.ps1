@@ -39,6 +39,12 @@ try {
     $agLic = Join-Path $BinDir '..\vcpkg_installed\x64-windows-static-md\share\directx12-agility\copyright'
     if (-not (Test-Path $agLic)) { throw 'the Agility SDK licence (vcpkg_installed\...\share\directx12-agility\copyright) was not found' }
     Copy-Item $agLic "$stage\rvk\d3d12_LICENSE.txt"
+    # the sample material pack (optional content: NOT enabled; the README inside says how to install it: copy to rvk\materialpack)
+    New-Item -ItemType Directory -Force "$stage\rvk\materialpack_sample" | Out-Null
+    Copy-Item package\materialpack_sample\* "$stage\rvk\materialpack_sample" -Recurse
+    Get-ChildItem "$stage\rvk\materialpack_sample" -Filter *.txt | ForEach-Object {
+        [IO.File]::WriteAllText($_.FullName, ((Get-Content $_.FullName) -join "`r`n") + "`r`n")  # CRLF for Notepad
+    }
     $lic = @(Get-Content third_party\amd_fidelityfx\LICENSE.md)
     $end = ($lic | Select-String -Pattern '^These source files' | Select-Object -First 1).LineNumber - 1
     if ($end -lt 10) { throw 'amd_fidelityfx\LICENSE.md: end of the notice not found' }
@@ -66,9 +72,11 @@ try {
         $names = @($z.Entries | ForEach-Object { $_.FullName -replace '\\', '/' })
         foreach ($need in 'd3d9.dll', 'rvk/config.toml', 'rvk/README.txt', 'rvk/dxcompiler.dll', 'rvk/dxc_LICENSE.txt', 'rvk/d3d12/D3D12Core.dll', 'rvk/d3d12_LICENSE.txt',
                           'rvk/amd_fidelityfx_loader_vk.dll', 'rvk/amd_fidelityfx_upscaler_vk.dll', 'rvk/amd_fidelityfx_framegeneration_vk.dll',
-                          'rvk/amd_fidelityfx_loader_dx12.dll', 'rvk/amd_fidelityfx_upscaler_dx12.dll', 'rvk/amd_fidelityfx_framegeneration_dx12.dll', 'rvk/amd_fidelityfx_LICENSE.txt') {
+                          'rvk/amd_fidelityfx_loader_dx12.dll', 'rvk/amd_fidelityfx_upscaler_dx12.dll', 'rvk/amd_fidelityfx_framegeneration_dx12.dll', 'rvk/amd_fidelityfx_LICENSE.txt',
+                          'rvk/materialpack_sample/pack.toml', 'rvk/materialpack_sample/README.txt') {
             if ($names -notcontains $need) { throw "package check: $need is missing from $zip" }
         }
+        if ($names | Where-Object { $_ -match '^rvk/materialpack/' }) { throw 'package check: rvk/materialpack/ would enable the pack: the sample ships as rvk/materialpack_sample' }
         if ($names | Where-Object { $_ -match 'd3d12SDKLayers' }) { throw 'package check: the debug layer (d3d12SDKLayers.dll) must not ship' }
     } finally { $z.Dispose() }
     Write-Host "package check: ok ($($names.Count) files)"

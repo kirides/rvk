@@ -45,3 +45,7 @@ CREDITS
 
 PROBLEMS
   Attach rvk\rvk.log (written each start) to bug reports, plus the build line below.
+
+Material packs (optional): extra roughness / metalness data for chosen materials (glossy wood and stone, metal, glass, wet ground).
+A small sample is in rvk\materialpack_sample: copy that folder to rvk\materialpack to try it (its README.txt explains the format;
+delete the folder to go back). Setting "Material pack" (overlay F11, Graphics tab) turns it off.

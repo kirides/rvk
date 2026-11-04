@@ -198,10 +198,12 @@ std::uint32_t encodeWord(std::uint32_t slot, bool orm, const Constants& c, float
         rb = c.roughness.value_or(defaultRoughness);
     }  // (with a map the constant roughness is ignored: wildcard rules must not flatten a map; use roughness_scale / roughness_bias)
     float metal = c.metalness.value_or(map && orm ? 1.0f : 0.0f);
-    const auto q5 = [](float v, float scale) { return static_cast<std::uint32_t>(std::lround(std::clamp(v * scale, 0.0f, 31.0f))); };
-    w |= q5(rs, 16.0f) << 16;
-    w |= q5(rb, 31.0f) << 21;
-    w |= q5(metal, 31.0f) << 26;
+    const auto q = [](float v, float scale, float top) { return static_cast<std::uint32_t>(std::lround(std::clamp(v * scale, 0.0f, top))); };
+    w |= q(rs, 8.0f, 15.0f) << 16;
+    w |= q(rb, 15.0f, 15.0f) << 20;
+    w |= q(metal, 15.0f, 15.0f) << 24;
+    w |= q(c.wetness.value_or(0.0f), 3.0f, 3.0f) << 28;
+    if (c.transmission.value_or(0.0f) > 0.0f) w |= kWordGlass;
     if (orm && map) w |= kWordOrm;
     if (orm && map && c.emissive.value_or(0.0f) > 0.0f) w |= kWordEmissive;
     return w;
@@ -213,9 +215,11 @@ Decoded decodeWord(std::uint32_t w) {
     d.present = (w & kWordPresent) != 0;
     d.orm = (w & kWordOrm) != 0;
     d.emissive = (w & kWordEmissive) != 0;
-    d.roughnessScale = static_cast<float>((w >> 16) & 31u) / 16.0f;
-    d.roughnessBias = static_cast<float>((w >> 21) & 31u) / 31.0f;
-    d.metalness = static_cast<float>((w >> 26) & 31u) / 31.0f;
+    d.glass = (w & kWordGlass) != 0;
+    d.roughnessScale = static_cast<float>((w >> 16) & 15u) / 8.0f;
+    d.roughnessBias = static_cast<float>((w >> 20) & 15u) / 15.0f;
+    d.metalness = static_cast<float>((w >> 24) & 15u) / 15.0f;
+    d.wetness = static_cast<float>((w >> 28) & 3u) / 3.0f;
     return d;
 }
 
@@ -387,79 +391,18 @@ void MaterialPack::load(std::vector<std::filesystem::path> roots, std::uint64_t 
         (fn.kind == Kind::Roughness ? f.rough : f.orm) = *r.c.map;
     }
 
-    std::uint64_t used = 0;
+    snap->budget = budget;
     for (auto& [key, f] : found) {
         if (loadToken_.load() != token) return;  // superseded
         const bool orm = !f.orm.empty();
         const fs::path& file = orm ? f.orm : f.rough;
-        std::vector<std::uint8_t> bytes;
-        if (!readFile(file, bytes)) {
+        std::error_code ec;
+        if (!fs::is_regular_file(file, ec)) {
             ++snap->stats.failed;
             spdlog::warn("enh: materials: cannot read '{}'", file.string());
             continue;
         }
-        d3d9::TextureDesc d;
-        std::unique_ptr<d3d9::Texture> tex;
-        std::uint64_t size = 0;
-        const std::string ext = lower(file.extension().string());
-        if (ext == ".dds") {
-            std::string err;
-            const auto dds = res::parseDds(bytes, &err);
-            if (!dds || dds->cube || dds->volume) {
-                ++snap->stats.failed;
-                spdlog::warn("enh: materials: '{}': {}", file.string(), dds ? "cube / volume maps are not supported" : err);
-                continue;
-            }
-            for (std::uint32_t m = 0; m < dds->mips; ++m) {
-                if (const auto l = dds->level(0, m)) size += l->bytes.size();
-            }
-            if (used + size > budget) {
-                ++snap->stats.failed;
-                spdlog::warn("enh: materials: memory budget reached, '{}' skipped", file.string());
-                continue;
-            }
-            d.width = dds->width;
-            d.height = dds->height;
-            d.levels = dds->mips;
-            d.format = dds->d3dFormat;
-            tex = dev_.createTexture(d);
-            if (!tex) {
-                ++snap->stats.failed;
-                spdlog::warn("enh: materials: '{}': unsupported format {}", file.string(), dds->d3dFormat);
-                continue;
-            }
-            for (std::uint32_t m = 0; m < dds->mips; ++m) {
-                if (const auto l = dds->level(0, m)) tex->setLevelData(m, 0, l->bytes, l->rowPitch);
-            }
-        } else {
-            Decoded8 img;
-            if (!decodePng(bytes, orm ? Kind::Orm : Kind::Roughness, img)) {
-                ++snap->stats.failed;
-                spdlog::warn("enh: materials: '{}': not a readable PNG", file.string());
-                continue;
-            }
-            for (const auto& m : img.mips) size += m.size();
-            if (used + size > budget) {
-                ++snap->stats.failed;
-                spdlog::warn("enh: materials: memory budget reached, '{}' skipped", file.string());
-                continue;
-            }
-            d.width = img.w;
-            d.height = img.h;
-            d.levels = static_cast<std::uint32_t>(img.mips.size());
-            d.format = img.channels == 1 ? kFmtL8 : kFmtA8R8G8B8;
-            tex = dev_.createTexture(d);
-            if (!tex) {
-                ++snap->stats.failed;
-                continue;
-            }
-            for (std::uint32_t m = 0; m < img.mips.size(); ++m) {
-                tex->setLevelData(m, 0, img.mips[m], std::max(1u, img.w >> m) * img.channels);
-            }
-        }
-        used += size;
         Entry e;
-        e.texture = std::move(tex);
         e.orm = orm;
         e.file = file.string();
         e.c = resolveConstants(snap->manifest, key);
@@ -467,11 +410,10 @@ void MaterialPack::load(std::vector<std::filesystem::path> roots, std::uint64_t 
         ++snap->stats.loaded;
     }
     snap->stats.entries = static_cast<std::uint32_t>(snap->entries.size());
-    snap->stats.bytes = used;
     snap->stats.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     if (loadToken_.load() != token) return;
-    spdlog::info("enh: materials: pack loaded: {} files, {} entries ({} failed), {} rules, {:.1f} MiB, {:.0f} ms", snap->stats.files, snap->stats.loaded,
-                 snap->stats.failed, snap->stats.rules, static_cast<double>(used) / (1024.0 * 1024.0), snap->stats.ms);
+    spdlog::info("enh: materials: pack indexed: {} files, {} entries ({} failed), {} rules, {:.0f} ms (maps are decoded when a draw first uses them)", snap->stats.files,
+                 snap->stats.loaded, snap->stats.failed, snap->stats.rules, snap->stats.ms);
     const std::lock_guard lock(mutex_);
     pending_ = std::move(snap);
     generation_.fetch_add(1, std::memory_order_release);
@@ -479,18 +421,87 @@ void MaterialPack::load(std::vector<std::filesystem::path> roots, std::uint64_t 
 
 Stats MaterialPack::stats() const { return snap_ ? snap_->stats : Stats{}; }
 
+std::unique_ptr<d3d9::Texture> MaterialPack::createMap(const Entry& e, const Snapshot& s, std::uint64_t& bytes) {
+    namespace fs = std::filesystem;
+    std::vector<std::uint8_t> data;
+    const fs::path file = e.file;
+    if (!readFile(file, data)) {
+        spdlog::warn("enh: materials: cannot read '{}'", e.file);
+        return nullptr;
+    }
+    d3d9::TextureDesc d;
+    std::unique_ptr<d3d9::Texture> tex;
+    std::uint64_t size = 0;
+    if (lower(file.extension().string()) == ".dds") {
+        std::string err;
+        const auto dds = res::parseDds(data, &err);
+        if (!dds || dds->cube || dds->volume) {
+            spdlog::warn("enh: materials: '{}': {}", e.file, dds ? "cube / volume maps are not supported" : err);
+            return nullptr;
+        }
+        for (std::uint32_t m = 0; m < dds->mips; ++m) {
+            if (const auto l = dds->level(0, m)) size += l->bytes.size();
+        }
+        if (s.used + size > s.budget) {
+            spdlog::warn("enh: materials: memory budget reached, '{}' skipped", e.file);
+            return nullptr;
+        }
+        d.width = dds->width;
+        d.height = dds->height;
+        d.levels = dds->mips;
+        d.format = dds->d3dFormat;
+        tex = dev_.createTexture(d);
+        if (!tex) {
+            spdlog::warn("enh: materials: '{}': unsupported format {}", e.file, dds->d3dFormat);
+            return nullptr;
+        }
+        for (std::uint32_t m = 0; m < dds->mips; ++m) {
+            if (const auto l = dds->level(0, m)) tex->setLevelData(m, 0, l->bytes, l->rowPitch);
+        }
+    } else {
+        Decoded8 img;
+        if (!decodePng(data, e.orm ? Kind::Orm : Kind::Roughness, img)) {
+            spdlog::warn("enh: materials: '{}': not a readable PNG", e.file);
+            return nullptr;
+        }
+        for (const auto& m : img.mips) size += m.size();
+        if (s.used + size > s.budget) {
+            spdlog::warn("enh: materials: memory budget reached, '{}' skipped", e.file);
+            return nullptr;
+        }
+        d.width = img.w;
+        d.height = img.h;
+        d.levels = static_cast<std::uint32_t>(img.mips.size());
+        d.format = img.channels == 1 ? kFmtL8 : kFmtA8R8G8B8;
+        tex = dev_.createTexture(d);
+        if (!tex) return nullptr;
+        for (std::uint32_t m = 0; m < img.mips.size(); ++m) tex->setLevelData(m, 0, img.mips[m], std::max(1u, img.w >> m) * img.channels);
+    }
+    bytes = size;
+    return tex;
+}
+
 MaterialPack::Hit MaterialPack::resolve(const Snapshot& s, std::string_view key) {
     Hit h;
     if (const auto it = s.entries.find(std::string(key)); it != s.entries.end()) {
         const Entry& e = it->second;
+        if (!e.tried) {
+            e.tried = true;
+            std::uint64_t bytes = 0;
+            e.texture = createMap(e, s, bytes);
+            s.used += bytes;
+            if (e.texture) spdlog::info("enh: materials: map of '{}' loaded ({:.1f} MiB of the pack's {:.0f} MiB budget)", key, static_cast<double>(s.used) / (1024.0 * 1024.0),
+                                        static_cast<double>(s.budget) / (1024.0 * 1024.0));
+        }
         h.texture = e.texture.get();
-        h.word = encodeWord(1, e.orm, e.c, s.defaultRoughness) & ~kWordSlotMask;  // the bindless slot is added at lookup
+        // (a map that failed to load: the entry's constants alone)
+        h.word = encodeWord(h.texture != nullptr ? 1 : 0, e.orm, e.c, s.defaultRoughness) & ~kWordSlotMask;  // the bindless slot is added at lookup
         return h;
     }
     // a wildcard / exact rule without a map of its own: constants only (roughness / metalness for every matching material)
     if (hasRule(s.manifest, key)) {
         const Constants c = resolveConstants(s.manifest, key);
-        if (c.roughness || c.metalness || c.roughnessBias) h.word = encodeWord(0, false, c, s.defaultRoughness);
+        if (c.roughness || c.metalness || c.roughnessBias || c.wetness || c.transmission) h.word = encodeWord(0, false, c, s.defaultRoughness);
     }
     return h;
 }
