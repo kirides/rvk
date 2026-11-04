@@ -870,12 +870,20 @@ public:
         // (settings, the ambient registers, the variant's build state) and refuses the replay when the decision would differ
         struct Variant {
             bool gate = false;       // (giDraws_.on || the material pack) when the packet was made
+            bool gbufGate = false;   // the G-buffer was on
+            bool gbufStatic = false; // gbufferEligible without its ambient test
+            bool gbufWanted = false; // ... the G-buffer's material pass took the draw (eligible, lit, in the G-buffer's rendering scope)
+            bool drawn = false;      // the draw uses the pack word (giDraw || the G-buffer write)
             bool giOn = false, replaceLightmaps = false, pack = false;
             bool staticOk = false;   // giEligible without its ambient-register test (phase, water, blend, outputs: fixed by the draw's description)
             bool wanted = false;     // the draw asked for the GI / pack variant (gate && staticOk && the ambient registers non-zero)
             bool giDraw = false;     // ... and drew with it
             rhi::ShaderModule fsAsked = rhi::ShaderModule::None;  // the variant module the draw was offered (None = not built yet)
             std::uint32_t minEnd = 0;  // the pixel window's minimum end (uploadConstants)
+            bool packStamped = false;           // packStamp / packTex / packTexSlot are valid (the pack has a change stamp)
+            std::uint32_t packStamp = 0;
+            const Texture* packTex = nullptr;   // the pack word's map (null: the word has none)
+            std::uint32_t packTexSlot = 0;      // its bindless slot when the word was made
             rhi::ShaderModule vsUsed = rhi::ShaderModule::None;  // the vertex module drawn with (the billboards' fade variant while lod.trees != 1)
         } v;
         std::uint32_t streamMask = 0;
@@ -1079,6 +1087,8 @@ public:
     };
     using PackProvider = std::function<PackHit(const draws::Tag&)>;
     void setPackProvider(PackProvider p) { packProvider_ = std::move(p); }
+    // the pack's change stamp (any value change = a lookup may answer differently): a retained packet keeps its pack word while it and the map's slot are unchanged
+    void setPackStamp(std::function<std::uint32_t()> f) { packStamp_ = std::move(f); }
     // test switch (materials.alternate): while set the pack's variants are not used at all (the engine's own shaders draw), as without a pack
     void setPackBypass(bool on) { packBypass_ = on; }
     std::uint64_t giDrawsThisInterval() const { return giDrawCount_; }
@@ -1240,12 +1250,14 @@ private:
     bool giEligible(const scene::Phase& phase) const;
     bool giStaticEligible(const scene::Phase& phase) const;  // giEligible without the ambient registers' test
     bool ambientLit() const;                                  // ... that test: the ambient semantic's 7 registers hold something
-    std::uint32_t packWord();                                  // the material pack's word for the current tag (0 = none), uploads its map when needed
+    std::uint32_t packWord(CachedDraw::Variant* note = nullptr);                                  // the material pack's word for the current tag (0 = none), uploads its map when needed
     // the G-buffer: whether the current targets / phase are its scope (first main view, solid pass, the scene HDR target)
     bool gbufferTargetsMatch() const;
     bool gbufferScope() const { return gbuf_.normal != nullptr && gbufArmed_ && gbufferTargetsMatch(); }
     // a G-buffer material draw: the material pixel shader's Gbuffer variant applies (opaque or alpha-over, depth tested)
     bool gbufferEligible(const scene::Phase& phase, draws::Kind kind) const;
+    bool gbufferStaticEligible(const scene::Phase& phase, draws::Kind kind) const;  // ... without the ambient registers' test
+    bool gbufferLit() const;                                                        // ... that test
     BlendAttachment attachmentBlend(std::uint32_t index) const;
     void variantWorker();
     void stopVariantWorker();
@@ -1617,6 +1629,7 @@ private:
     std::array<std::uint32_t, 4> sgi_{};
     GiDraws giDraws_;
     PackProvider packProvider_;
+    std::function<std::uint32_t()> packStamp_;
     bool packBypass_ = false;
     std::uint64_t giDrawCount_ = 0;
     bool captureInstances_ = false;         // the request covers an instanced draw (requestVertexCapture)
