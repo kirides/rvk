@@ -779,3 +779,9 @@ Shadow-view ops joined the cache; refusal reasons are logged. Clean player-defau
 The player defaults (material pack present) took the lit solid draws out of the packet cache; the variant decision is now a cached, re-validated property of the packet (retained-signals.md 13): replayed share ~32 % -> 99.9 %, Full CPU
 Vulkan 7.04 -> 6.56 ms, D3D12 7.32 -> 6.69 ms (3 interleaved pairs each); with GI + AO -0.47 ms, with upscaling on top -0.89 ms (jitter is patched at replay). The material pack costs +0.57 ms in Wrapper and +0.25 ms in Full (the earlier
 "7.2 vs the documented 6.25" was the pack: Full without it 6.3). `native.packet_cache=4` = the old behaviour for A/B. The remaining Full - Wrapper gap is the composition (flat profile, ~1.2 us per op); see retained-signals.md 13.
+
+## 26. Per-group Full CPU profile at the player defaults; tree batch merge probe (2026-11-04, gpu-scene.md 9.3)
+
+Savegame, lod 2x, Vulkan Full, `-CpuProfile -Perf` (`-Perf` CPU 6.38 ms engine + HAL). Composition + `issue()` per group: trees 1.8 ms (655 batches / frame, 2.9 instances each), static meshes 0.84, shadow views ~0.5, sky cube + dome 0.58,
+vegetation 0.40 (composition 0.16 measured; the device path is shared with Wrapper), effects / particles / decals / alpha / actors ~0.9. A tree-batch merge (consecutive batches of an op as one multi-range draw) finds -10 % (z) / -28 % (solid, equal
+light list) / 0 % (equal illumination object) draws: every tree has its own illumination object, so only a picture-changing merge helps. No code change; gpu-scene.md 9.3 says why a GPU-driven consumer needs the whole persistent-window design (trees first).

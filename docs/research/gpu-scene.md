@@ -183,3 +183,37 @@ Nothing of the translator `objectFromTable` / push extension was built: two chea
 3. Consequence for the plan: before any GPU-resident object window, the *variant decision* of `prepareDraw` (G-buffer / GI / material pack: `giEligible` reads the ambient registers every draw) must become a cached,
    signal-validated property of the op (a per-entry variant choice + its pipeline in `CachedDraw`, the ambient-nonzero test from the light-set stamp), otherwise the O(1) path never runs at the player defaults. Only then do
    persistent windows / table fetches matter (and by 1. they are ~0.05 ms). The composition (DrawDesc, ~1.25 us/op) remains the largest item (retained-signals.md 12, performance.md 24).
+
+### 9.3 Session 2026-11-04 (fifth agent): the per-group profile at the player defaults, and why no GPU-driven consumer was built
+
+Profile (Full, `-PlayerDefaults`, savegame lod 2x, `-CpuProfile -Perf`, Vulkan, main 133c36f; 11 windows, interval 7.40 ms with the profiler, `-Perf` CPU 6.38 ms) and the `issue cost` lines, per frame
+(699 frames per 5 s window); composition = CPU time of the group's `compose*` (profile inclusive), issue = draws x us per draw in `issue()` (packet replay):
+
+| group | draws / frame | composition ms | `issue()` us per draw -> ms | total ms |
+|---|---|---|---|---|
+| SpeedTree + tree billboards | 691 (655 batches / 169 ops: 2.9 instances per batch) | 0.78 (`composeTree`) + 0.16 (billboards) | 1.27 -> 0.88 | **~1.8** |
+| static meshes (z + solid) | 240 | 0.47 (`composeOp`) | 1.54 -> 0.37 | 0.84 |
+| shadow views (cascades, terrain map) | 167 | ~0.3 | 1.32 -> 0.22 | ~0.5 |
+| vegetation (grass) | 68 (~30 ops, 1,500 nodes, 9,300 instances = 410 KB repacked per frame) | **0.16** (timer in `composeVegetation`: 111.7 ms per 5 s) | 3.5 (2.9 of it the device path, not replayable: new instance bytes every frame) -> 0.24 | 0.40 (device path 0.20 shared with Wrapper; Full-only ~0.1 - 0.16) |
+| sky cube (5 faces) + dome | 24 | 0.33 | 11 / 7.7 -> 0.25 | 0.58 |
+| effect units, particles, decals, alpha meshes, actors, precipitation | ~65 | ~0.6 | 2.4 - 13.7 -> ~0.3 | ~0.9 |
+
+So "static meshes + cascades dominate" does not hold at the player defaults: **trees are ~1.8 ms of ~6.4**, static 0.84, shadow views 0.5, vegetation 0.4 (the user's side question: the grid-node walk + instance repack is
+0.16 ms; a GPU grass path could save at most ~0.1 - 0.16 ms Full-only, the draws are shared with Wrapper).
+
+**Merging tree batches into multi-draws (measured, dropped).** Hypothesis: the ~4 batches per tree op differ only by strip length (an index range), so consecutive batches could be one packet with N ranges (instance rows in consecutive
+constant slots, `firstInstance` offsetting the instance-rate index stream). Probe counters in `composeTree` (removed again), per 5 s: z / shadow batches 111,151 -> 100,370 (-10 %: they are cut by the 8-bit limit as often as by strip), solid batches
+384,131 -> 277,882 when merged by equal light *list* (-28 %), **384,131 -> 384,131 when merged by equal illumination object**: every tree has its own illumination object (a batch is drawn with its last instance's illumination: ambient / SH /
+lights c14..c37 per instance), so an exact merge finds nothing and a merge by list changes the lighting of the earlier instances (not pixel-equal). Best case -28 % of ~650 draws x ~2.3 us = 0.35 ms with a picture change. No-go.
+
+**Why no indirect consumer was built.** (1) The ceiling of a perfect GPU-driven path is large (compose + issue of trees + static + shadow views ~3.1 ms of 6.4: Full would drop below Wrapper), but each of those draws needs per-draw state that is
+composed on the CPU from engine memory every frame: the light window from the instance's own illumination object (content changes in place every frame, retained-signals.md 9.2), the material window, the instance rows. A draw from the instance
+table without them is wrong for exactly the lit solid pass, so the first real consumer needs the whole persistent-window design at once: per-instance light blocks on the GPU fed from the light-set poll, translator `objectFromTable` /
+`lightFromTable` prologues, a draw-index source on D3D12 (no `SV_StartInstanceLocation` below SM 6.8; per-draw root constants break multi-draw), push block growth past 128 B, DXIL parity, new keys for the packet cache / verify mode, and the RT scene /
+pack / object-motion consumers: the rewrite of retained-signals.md 12, not one step. (2) The recommended static / cascade subset is 1.3 ms of composition + issue, of which persistent windows were bounded at < 0.05 ms (9.2) and the rest
+(~1.2 us composition + 0.3 us `opEnter` per op) disappears only if the op is not entered, i.e. `Request` take-over (M3), which 9.1 showed saves ~0 on its own. A half-way consumer would add GPU passes and a second verify path for no CPU gain
+(design risk 3: not worth keeping on).
+
+**Next, by measured payoff:** (a) trees as a unit (~1.8 ms): per-instance persistent record {world, tree values, LOD alpha} + per-instance light block updated when the light-set poll changes, one indirect draw per (type, pass), lighting fetched by
+instance id (the SpeedTree VS already indexes its instance rows by the instance-rate stream; D3D12 the same through a per-instance vertex stream, avoiding `SV_StartInstanceLocation`); needs the translator ABI + both RHI backends. (b) static + cascades on
+the same blocks (0.8 + 0.5 ms). (c) vegetation: persistent per-node uploads of the raw entries (0.1 - 0.16 ms). (d) M3 last. Nothing was started: no code, setting or ABI changed (the diagnostics above were reverted), gates unchanged (tree = main 133c36f).
