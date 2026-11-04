@@ -314,8 +314,11 @@ void rvkMvPbr(RvkFrame f, inout float4 c0) {
 
     // lights: the sun (specular colour, the shadow mask's alpha), the point lights of this pass
     float4 shadowMask = float4(1.0, 1.0, 1.0, 1.0);
+#if RVK_MV_PBR_SHADOW_SLOT >= 0
+    // (only when the pixel shader samples the mask itself: the draw path transitions the textures a shader declares, others may be render targets)
     uint shadowTex = rvkDrawTex(d, uint(RVK_MV_PBR_SHADOW_SLOT));
     if (shadowTex != 0u) shadowMask = RVK_TEX2D(shadowTex).Sample(RVK_SAMP(rvkDrawSmp(d, uint(RVK_MV_PBR_SHADOW_SLOT))), (rvk_mvFrag.xy) * f.viewport.zw);
+#endif
     float3 specSum = float3(0.0, 0.0, 0.0);
 #if RVK_MV_PBR_DIR_REG >= 0
     specSum += rvkPbrLight(N, V, normalize(RVK_PSC(RVK_MV_PBR_DIR_REG + 2).xyz), RVK_PSC(RVK_MV_PBR_DIR_REG + 1).rgb, a, F0, shadowMask.a);
@@ -346,12 +349,20 @@ void rvkMvPbr(RvkFrame f, inout float4 c0) {
         // never more than a third of the engine's own lit brightness of this surface (a reflection cannot outshine the light that reaches it)
         float lumLit = dot(max(lit, float3(0.0, 0.0, 0.0)), float3(0.3, 0.59, 0.11));
         float lumEnv = dot(env, float3(0.3, 0.59, 0.11));
-        if (lumEnv > 1e-4) env *= min(1.0, (0.35 * lumLit + 0.004) / lumEnv);
+        if (lumEnv > 1e-4) env *= min(1.0, (0.35 * lumLit + 0.0004) / lumEnv);
     }
     float3 spec = pow(max(specSum * f.params[2].y, float3(0.0, 0.0, 0.0)), float3(0.45, 0.45, 0.45));
     spec = min(spec, float3(4.0, 4.0, 4.0));
     // diffuse: less of it on metals; the rest is the engine's lighting
-    float3 shaded = lit * (1.0 - metal) + (spec + env) + albedo * emis;
+    // the added light never exceeds 0.2 (rough) to 0.8 (smooth) of what the engine's lighting already shows on this surface (+ a small floor): a moon / sun at grazing angles on a rough
+    // dark floor otherwise doubles its brightness (the first night / dock shots); metals keep their own scale (they have little diffuse to compare with)
+    float3 addLight = spec + env;
+    float lumAdd = dot(addLight, float3(0.3, 0.59, 0.11));
+    float lumBase = dot(max(lit, float3(0.0, 0.0, 0.0)), float3(0.3, 0.59, 0.11));
+    // (smooth surfaces may shine up to 0.8 of their own brightness, rough ones 0.2: a rough floor under a moon must not turn into frost)
+    float capLum = lerp((lerp(0.8, 0.2, saturate(rough * 2.0)) * lumBase + 0.0004), 1.0e3, metal);
+    if (lumAdd > capLum) addLight *= capLum / lumAdd;
+    float3 shaded = lit * (1.0 - metal) + addLight + albedo * emis;
     c0.rgb = lerp(shaded, fogColor.rgb, fogK);
 }
 #endif

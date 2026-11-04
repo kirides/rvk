@@ -51,7 +51,7 @@ bool materialVariantOptions(const d3d9::Shader& s, MaterialVariant kind, shader:
                                dirLight.present() ? dirLight.reg : -1, pntLights.present() ? pntLights.reg : 0,
                                pntLights.present() ? std::min(3, pntLights.count / 4) : 0);
         const auto& sm = s.semantics[Semantic::ShadowMask];
-        defines += std::format("#define RVK_MV_PBR_SHADOW_SLOT {}\n", sm.present() ? sm.reg : 0);
+        defines += std::format("#define RVK_MV_PBR_SHADOW_SLOT {}\n", sm.present() ? sm.reg : -1);
     }
     if (gbuffer) defines += "#define RVK_MV_GBUFFER 1\n";
     if (kind == MaterialVariant::GbufferMotion) defines += "#define RVK_MV_MOTION 1\n";

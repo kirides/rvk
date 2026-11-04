@@ -163,6 +163,14 @@ bool Device::prepareTextures() {
         }
         t->lastUseFrame_ = frame;
     }
+    // material pack: the variant reflects the sky cube, which the engine draws into (a render target layout until something samples it)
+    if (packProvider_) {
+        if (Texture* cube = imageWithRole(scene::ImageRole::SkyEnvCube); cube != nullptr && !cube->isNull() &&
+            (cube->pending_ || cube->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)) {
+            endRendering();
+            cube->prepareForSampling(frameList());
+        }
+    }
     return true;
 }
 
