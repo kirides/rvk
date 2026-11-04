@@ -596,3 +596,47 @@ Full mode (Vulkan, savegame, 2 interleaved runs each, all new switches on vs the
 lines in rvk.log), Full compare run (`native.static_ops_compare`, `scene_ops_compare`, `lean_check=10`, `debug.fast_sort=2`) `mismatches: none`, 0 sort
 differences. `refcompare` vs `out/refcompare/20261103-130010`: Vulkan 11 PASS / 6 WARN / 3 FAIL (`harbour_docks`, `sea_cliff`, `harbour_mouth` = the known
 sea-edge noise), D3D12 12 / 6 / 2 (`sea_cliff`, `harbour_mouth`); no new FAIL (`out/refcompare/20261104-021314` Vulkan, `20261104-021937` D3D12).
+
+## 22. Full mode CPU: where the gap to Wrapper is, first batch (2026-11-04)
+
+Goal (user): `-Mode full` as the main mode, Full - Wrapper <= ~0.5 ms. Recipe as in 21 (savegame `out/fg/perf.save`, lod 2x, `-Perf`; profiled with `-CpuProfile`,
+`tools/profsum.py`, `tools/pcsites.py --callers`, `tools/pcprofile.py`; scripts `out/cpx/run1.ps1` / `ab.py`, git-ignored). Profile of main cb5097a (1 % = 0.078 ms;
+Full 7.82 ms interval profiled, Wrapper 5.38; 1,290 draws per frame in both):
+
+| item (inclusive, ms per frame) | Wrapper | Full | note |
+|---|---|---|---|
+| `eCFrustumDatabase::Execute` main view | 3.18 | 4.79 | +1.6 |
+| of it the device draw path (`drawIndexedPrimitive`, `prepareDraw` 1.54 / 1.64) | 2.07 | 2.19 | **parity**: the same code, the same draws |
+| engine slot code (Wrapper) vs our composition + `issue` bookkeeping + lean commit (Full) | ~1.1 | ~2.3 | `opEnterImpl` 4.51 = `issue` 2.52 (2.19 of it the draw) + compose / commit ~2.0 (sky cube 0.49 of it) |
+| sky cube faces (`UpdateSkydomeEnvCubemap`, 5 faces per frame) | 0.15 | 0.52 | +0.37: star vertices converted + copied 3-4 times per face |
+| sun cascades / shadow-view ops (`eCCameraBase::Update`) | 0.88 | 1.16 | +0.28 |
+| effect units (`effectBegin`, ~25 units / ~45 draws) | 0.25 | 0.45 | +0.2 |
+
+Module view (profiled): ours 1.98 -> 4.37, Engine.dll 1.48 -> 0.96, vcruntime140 0.20 -> 0.79 (memcpy / memmove). So the per-draw device path is shared, the engine
+already runs less in Full, and the gap is our composition being ~2x the engine's own slot code for the same ops (plus the sky cube). **There is no single hot spot**:
+`pcprofile` self time is flat (largest: `skyBillboardVertices` 2 %, `setVertexShaderConstantF` 1.9 % (the issue-time compare + copy), `safeLoad8/4/1/2` 3.3 % + `safeRead`
+1.9 % = ~0.4 ms of guarded engine reads, mostly cache misses on engine memory that the engine's own slot code paid before, `prepareDraw` 2.5 %). The 5 - 6 us per composed
+draw = ~1.5 us composition + ~0.3 us `issue` bookkeeping + ~1.6 us shared device path + the rest of the frame.
+
+### 22.1 Changes (`native.cpu_opts` bit mask, Debug, default 255: bit 1 sky cache, bit 2 batched tree-object reads; the CRT-call removal is unconditional)
+
+| change | evidence | result |
+|---|---|---|
+| sky objects: scratch vectors + the converted star vertices / quad indices kept per sky object while the input billboards are byte-equal (the sun / moon / stars alternate inside one cube face: a single entry thrashed and did not hit; one entry per object does) | `skyObjectDraws` 0.337 -> 0.151, `skyCubeBegin` 0.49 -> 0.31 (profile) | -0.18 ms |
+| inline SSE register-run copies (`d3d9::copyRegisters`) in `constantsInto`, `issue`'s save runs, `setVertexShaderConstantF` / `setPixelShaderConstantF`, `splitStage` (each was a CRT `memcpy` call per run, ~20 runs per draw) | vcruntime140 0.79 -> 0.55 ms, d3d9 +0.15 | ~-0.08 ms |
+| SpeedTree composition: tree / illumination objects read as one 0x70 / 0x98 byte snapshot instead of 6 + 3 guarded loads per instance | `composeTree` 0.73 -> 0.77 (profile noise) | neutral (the cost is the cache misses, not the call count); kept behind bit 2 |
+
+A/B (Full, savegame, 3 runs each, last 14 windows, `-Perf` CPU = engine + HAL, `build\Base` = cb5097a): **6.898 (6.736 / 7.005 / 6.954) -> 6.532 (6.534 / 6.549 / 6.512) ms, -0.37 ms
+(-5.3 %)**; interval p50 7.36 -> 7.08 ms. Wrapper (same session) 4.560 (4.549 / 4.572). **Full - Wrapper 2.34 -> 1.97 ms.** (The machine is shared with other agents; the
+arms were interleaved; a first `cpu_opts=0` run at 8.9 ms was a disturbed outlier.) Gates: `rvk_tests` (settings count), Full `testdemo` 7 / 7 with `-Validation` + `native.static_ops_compare`
++ `scene_ops_compare` + `lean_check=10`: every group `mismatches: none`, 0 validation messages (own copy, instance 4).
+
+### 22.2 What is left and what it would take
+
+Remaining Full - Wrapper ~2 ms = composition ~1.0 ms more than the engine's slot code, sky cube +0.2, shadow-view ops +0.28, effect units +0.2, the rest spread. Items measured and
+**not** worth it: dropping the per-op device restore (0.07 ms, 21), more SEH-call removal (the cost is cache misses), retained composition (19), merged indirect draws (8.4), device-generated
+commands (12). To reach <= +0.5 ms the composition must stop being a second pipeline staged through `DrawDesc` (mirror -> `DrawDesc.vsF` -> device registers with compare -> window block ->
+ring = 3 copies of the constants; the engine's own path has 2): **compose each draw straight into the device and issue it per draw** (streaming `newDraw` + `issue`, no per-op draw list; needs the
+compare modes to keep the list path) is the structural change with the largest estimate (~0.5 - 0.8 ms: the copy chain, `newDraw` clears of a ~5 KB descriptor, the op-wide save pass), followed by
+**moving the shadow-view and sky-cube compositions onto a worker** (they only read engine memory the lean path no longer mutates; ~0.4 ms but needs a thread-safe `Device` draw interface: the render-thread
+split that 14.1 / 15.1 rejected).

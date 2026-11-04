@@ -2117,6 +2117,19 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 1000,
         .flags = Flag::NoAB | Flag::Debug,
     });
+    r.nativeOpts = &reg.add({
+        .key = "native.cpu_opts",
+        .label = "Native frame: CPU optimizations (bit mask)",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full-mode CPU pass (performance.md 22): bit 1 sky vertices kept across cube faces / frames, 2 composition caches, "
+                       "4 issue fast paths, 8 sky/dynamic vertex copies. Each bit is an A/B switch; 0 = the old behaviour.",
+        .type = Type::Int,
+        .defaultValue = 255,
+        .min = 0,
+        .max = 255,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
     r.nativeLeanRestore = &reg.add({
         .key = "native.lean_restore",
         .label = "Native frame: device restore around lean ops",

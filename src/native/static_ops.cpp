@@ -12,6 +12,7 @@
 #include <spdlog/spdlog.h>
 
 #include "d3d9/defs.h"
+#include "d3d9/memeq.h"
 #include "engine/memread.h"
 #include "engine/scene_hooks.h"
 #include "engine/symbols.h"
@@ -825,7 +826,7 @@ void StaticOps::constantsInto(sc::DrawDesc& d, const std::uint8_t* shader, const
     // O1: the live registers by source region (masks), copied as runs; the sources (diagnostics of the compare) only with it
     const bool trackSrc = g_ != nullptr && g_->compare;
     const auto take = [&](const sc::RegMask& m, const float (*src)[4], std::uint32_t srcFirst, float (*dst)[4], sc::RegMask& set) {
-        sc::forEachRun(m, [&](std::uint32_t r, std::uint32_t n) { std::memcpy(dst[r], src[r - srcFirst], 16 * n); });
+        sc::forEachRun(m, [&](std::uint32_t r, std::uint32_t n) { d3d9::copyRegisters(dst[r], src[r - srcFirst], n); });
         sc::orInto(set, m);
     };
     const auto mark = [](const sc::RegMask& m, sc::Src* out, auto&& srcOf) {
@@ -1944,8 +1945,8 @@ void StaticOps::issue() {
     }
     const float (*devVs)[4] = dev_.vsConstants();
     const float (*devPs)[4] = dev_.psConstants();
-    sc::forEachRun(vsU, [&](std::uint32_t r, std::uint32_t n) { std::memcpy(savedVs_[r], devVs[r], 16 * n); });
-    sc::forEachRun(psU, [&](std::uint32_t r, std::uint32_t n) { std::memcpy(savedPs_[r], devPs[r], 16 * n); });
+    sc::forEachRun(vsU, [&](std::uint32_t r, std::uint32_t n) { d3d9::copyRegisters(savedVs_[r], devVs[r], n); });
+    sc::forEachRun(psU, [&](std::uint32_t r, std::uint32_t n) { d3d9::copyRegisters(savedPs_[r], devPs[r], n); });
     draws::Tag& tag = dev_.drawTag();
     const draws::Tag savedTag = tag;
 

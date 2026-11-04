@@ -628,7 +628,7 @@ void Device::splitStage(bool vertex, const Shader& sh, rhi::GpuRef (&windows)[sh
         ConstWindow& cw = constWin_[stage][w];
         if ((constWinDirty_[stage] >> w & 1u) != 0 || cw.address.null() || cw.extent < need) {
             rhi::RingAlloc a = game_->allocRing(static_cast<VkDeviceSize>(need) * 16, 16);
-            std::memcpy(a.ptr, regs[first[w]], static_cast<std::size_t>(need) * 16);
+            copyRegisters(a.ptr, regs[first[w]], need);
             cw.address = a.ref;
             cw.ptr = static_cast<const std::uint8_t*>(a.ptr);
             cw.extent = need;
