@@ -2297,6 +2297,19 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 3,
         .flags = Flag::NoAB | Flag::Debug,
     });
+    r.nativeGpuScene = &reg.add({
+        .key = "native.gpu_scene",
+        .label = "Native frame: GPU scene tables",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "GPU-driven scene (docs/research/gpu-scene.md). 1 = verify the signal-fed instance table (cache-in / out, world matrix) against the engine's ops "
+                       "(rvk.log `scene table:`, DIFFERING and unresolved must stay 0). The table itself is always maintained in Vulkan / D3D12 mode.",
+        .type = Type::Int,
+        .defaultValue = 0,
+        .min = 0,
+        .max = 1,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
     r.nativeOpts = &reg.add({
         .key = "native.cpu_opts",
         .label = "Native frame: CPU optimizations (bit mask)",

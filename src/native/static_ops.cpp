@@ -17,6 +17,7 @@
 #include "d3d9/memeq.h"
 #include "engine/memread.h"
 #include "engine/scene_hooks.h"
+#include "engine/scene_table.h"
 #include "engine/symbols.h"
 #include "fx/effect_binary.h"
 #include "hal/vulkan/hal_vulkan.h"
@@ -1541,6 +1542,10 @@ void StaticOps::opEnterImpl(const Op& op) {
     finishOp();
     recycleTransient();
     retFrameBegin();
+    if (gpuScene_ > 0 && op.entity != nullptr &&
+        (op.kind == OpKind::Mesh || op.kind == OpKind::Animation || op.kind == OpKind::SpeedTree || op.kind == OpKind::SpeedTreeBB || op.kind == OpKind::Vegetation)) {
+        engine::scenetable::checkEntity(op.entity);
+    }
     if (pendingVersion_ != nullptr) {
         // diagnostics: a special pass found uncompiled at the last op's entry, after the engine's slot ran
         if (pendingLogged_ < 12) {

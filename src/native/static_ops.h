@@ -113,6 +113,8 @@ public:
         packetMode_ = mode;
         if (mode == 0) packets_.clear();
     }
+    // native.gpu_scene (docs/research/gpu-scene.md): >= 1 checks every mesh / tree / actor op's entity against the signal-fed instance table
+    void setGpuScene(int mode) { gpuScene_ = mode; }
     // V3 retained composition (native.retained / native.retained_groups / native.retained_check)
     void setRetained(bool on, int groups, bool check);
     bool inSkyCube() const { return inSkyCube_; }
@@ -693,6 +695,7 @@ private:
 
     // packet retention: a composed draw's finished packet by (op, draw index), valid while the draw description equals the captured one
     int packetMode_ = 0;
+    int gpuScene_ = 0;
     struct PacketEntry {
         d3d9::Device::CachedDraw cd;
         std::unique_ptr<sc::DrawDesc> desc;

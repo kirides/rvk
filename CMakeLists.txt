@@ -231,6 +231,8 @@ add_library(rvk_core STATIC
     src/engine/material_source.cpp
     src/engine/material_source.h
     src/engine/lights.cpp
+    src/engine/scene_table.cpp
+    src/engine/scene_table.h
     src/engine/lights.h
     src/engine/lod.h
     src/engine/menu_state.cpp

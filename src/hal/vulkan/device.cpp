@@ -26,6 +26,7 @@
 #include "engine/fast_sort.h"
 #include "engine/load_accel.h"
 #include "engine/lod.h"
+#include "engine/scene_table.h"
 #include "engine/xinput_throttle.h"
 #include "engine/memread.h"
 #include "engine/material_source.h"
@@ -197,6 +198,7 @@ void HalDevice::applyStaticOps() {
         const bool cacheBlocked = compare || sceneCompare || on(rs.nativeFrameTap) || on(rs.nativeCoverage) || !leanOn;
         staticOps_->setPacketCache(rs.nativePacketCache != nullptr && !cacheBlocked ? rs.nativePacketCache->asInt() : 0);
     }
+    staticOps_->setGpuScene(rs.nativeGpuScene != nullptr ? rs.nativeGpuScene->asInt() : 0);
     staticOps_->setOpts(rs.nativeOpts != nullptr ? static_cast<unsigned>(rs.nativeOpts->asInt()) : 255u);
     staticOps_->setLeanRestore(rs.nativeLeanRestore == nullptr || on(rs.nativeLeanRestore));
     staticOps_->setRetained(on(rs.nativeRetained), rs.nativeRetainedGroups != nullptr ? rs.nativeRetainedGroups->asInt() : 0x2ff, on(rs.nativeRetainedCheck));
@@ -490,7 +492,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     frameTap_->setEffectOps(effectOps_.get());
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups,
                                  rs.nativeMirror, rs.nativeCoverage, rs.nativeFrameTap, rs.nativeLean, rs.nativeLeanCheck,
-                                 rs.nativeLeanRestore, rs.nativeOpts, rs.nativePacketCache, rs.nativeLeanEffects, rs.nativeRetained, rs.nativeRetainedCheck, rs.nativeRetainedGroups}) {
+                                 rs.nativeLeanRestore, rs.nativeOpts, rs.nativeGpuScene, rs.nativePacketCache, rs.nativeLeanEffects, rs.nativeRetained, rs.nativeRetainedCheck, rs.nativeRetainedGroups}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
     // renderer.mode (Wrapper / Full): like the native.* settings applied by the registry's dispatch before a present, i.e. at a
@@ -1484,6 +1486,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
     engine::matsrc::onPresent();
     engine::xinput::onPresent();
     engine::loadaccel::onPresent();
+    engine::scenetable::onPresent();
     engine::lod::onPresent();  // a changed object draw distance: the world's cache-in spheres (engine thread)
     dev_.present();
     const auto& s = dev_.stats();
