@@ -1,3 +1,5 @@
+#include <chrono>
+
 #include "native/static_ops.h"
 
 #include <type_traits>
@@ -1912,6 +1914,10 @@ bool StaticOps::engineDraw(const d3d9::DrawTapInfo& t, const Op* op) {
 void StaticOps::issue() {
     if (drawCount_ == 0) return;
     using namespace d3d9;
+    using PClock = std::chrono::steady_clock;
+    const bool timed = dev_.perfEnabled();
+    const PClock::time_point issueT0 = timed ? PClock::now() : PClock::time_point{};
+    std::uint64_t deviceNs = 0;
     static constexpr std::uint32_t kRs[sc::StOwnedCount] = {RS_ZFUNC, RS_ZWRITEENABLE, RS_ALPHABLENDENABLE, RS_SRCBLEND, RS_DESTBLEND,
                                                             RS_COLORWRITEENABLE, RS_ALPHATESTENABLE, RS_CULLMODE, RS_FILLMODE, RS_FOGENABLE};
     static constexpr std::uint32_t kSs[7] = {SAMP_ADDRESSU, SAMP_ADDRESSV, SAMP_MAGFILTER, SAMP_MINFILTER, SAMP_MIPFILTER, SAMP_MIPMAPLODBIAS,
@@ -2026,11 +2032,13 @@ void StaticOps::issue() {
             tag.materialName = d.tagMaterialName;
         }
         issueIndex_ = k;
+        const PClock::time_point dt0 = timed ? PClock::now() : PClock::time_point{};
         if (d.indexed) {
             dev_.drawIndexedPrimitive(d.primType, d.baseVertex, d.minIndex, d.numVertices, d.startIndex, d.primCount);
         } else {
             dev_.drawPrimitive(d.primType, d.startIndex, d.primCount);
         }
+        if (timed) deviceNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(PClock::now() - dt0).count());
         ++g_->issuedDraws;
     }
     issuing_ = false;
@@ -2038,6 +2046,19 @@ void StaticOps::issue() {
 
     // restore
     tag = savedTag;
+    struct TimedEnd {
+        GroupState* g;
+        std::uint64_t deviceNs, drawCount;
+        PClock::time_point t0;
+        bool on;
+        ~TimedEnd() {
+            if (!on) return;
+            g->issueNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(PClock::now() - t0).count());
+            g->deviceNs += deviceNs;
+            g->timedDraws += drawCount;
+            ++g->timedOps;
+        }
+    } timedEnd{g_, deviceNs, drawCount_, issueT0, timed};
     // (native.lean_restore off, a lean op: the device keeps our last draw's state; measurement only)
     if (!leanRestore_ && leanCollect_ && leanBlock_ == 0) return;
     dev_.setVertexShaderRef(vs);
@@ -2093,6 +2114,13 @@ void StaticOps::report() {
         }
         spdlog::info("native: {}: sub-mesh draws by lights (total): 0 {}, 1 {}, 2 {}, 3 {}, 4 {}", what, g.lights[0], g.lights[1], g.lights[2],
                      g.lights[3], g.lights[4]);
+        if (g.takeOver && g.timedDraws != 0) {
+            const double n = static_cast<double>(g.timedDraws);
+            spdlog::info("native: {}: issue cost (5 s, -Perf): {} draws in {} ops, {:.3f} us per draw in issue(), of it {:.3f} us the device draw call (prepareDraw + submit), {:.3f} us bookkeeping (state setters, save / restore)",
+                         what, g.timedDraws, g.timedOps, static_cast<double>(g.issueNs) / n / 1000.0, static_cast<double>(g.deviceNs) / n / 1000.0,
+                         static_cast<double>(g.issueNs - g.deviceNs) / n / 1000.0);
+            g.issueNs = g.deviceNs = g.timedDraws = g.timedOps = 0;
+        }
         if (g.takeOver) {
             spdlog::info("native: {}: drawn by the renderer: {} ops, {} draws (total); engine draws dropped {}; own draws checked {}, "
                          "differing from their composition {}",

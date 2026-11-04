@@ -140,6 +140,8 @@ private:
         sc::CompareCounts window, total;
         std::array<std::uint64_t, static_cast<std::size_t>(Skip::Count)> skips{}, skipsTotal{};
         std::uint64_t issuedDraws = 0, issuedOps = 0, droppedDraws = 0, ownChecked = 0, ownMismatch = 0;
+        // -Perf: issue()'s cost split (ns): the whole call, the draw calls inside it (device path), draws timed (stage 0 of the packet retention)
+        std::uint64_t issueNs = 0, deviceNs = 0, timedDraws = 0, timedOps = 0;
         // the lights of the composed sub-mesh draws (dynamic list +0x34 + static illum +0xd: 0..4; 4 = an additive light pass)
         std::array<std::uint64_t, 5> lights{};
         bool active() const { return takeOver || compare; }

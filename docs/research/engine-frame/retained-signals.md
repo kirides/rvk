@@ -93,3 +93,24 @@ trees and billboards qualify. First stage: static-mesh z / solid packets with al
 * Composition-only retention: **no-go** (measured replay 0.52 us per hit; ceiling ~0.4 ms; Full - Wrapper stays ~+1.6).
 * Packet-level retention (bypass `issue` + `prepareDraw`): **conditional go as its own project** (estimate -1 to -2.5 ms; risk in the `prepareDraw` consumers); stage 1 = a per-draw cost measurement of the bypass on static
   meshes with enhancements off, not a signal hook.
+
+## 7. Stage 0 of the packet retention: the ceiling, measured (2026-11-04)
+
+Instrumentation (kept: `-Perf` only): `issue()` times itself and the device draw call inside it per group; rvk.log `native: <group>: issue cost (5 s, -Perf): ...`. Savegame, Full, 5 s windows (~742 frames),
+timer overhead ~0.05 us per draw included. Vulkan / D3D12 are within 3 % of each other.
+
+| group | draws / frame | us per draw in `issue()` | of it the device call (`prepareDraw` + submit) | bookkeeping (setters, save / restore) |
+|---|---|---|---|---|
+| static meshes z / solid (main view) | 232 | 2.10 (D3D12 2.13) | 1.71 (1.73) | 0.40 |
+| SpeedTree + tree billboards | 680 | 1.56 (1.57) | 1.15 (1.16) | 0.41 |
+| shadow views (all view kinds) | 160 | 1.59 (1.60) | 1.19 (1.21) | 0.40 |
+| skinned actors | 21 | 1.77 | 1.16 | 0.62 |
+| vegetation | 66 | 2.50 (2.24) | 2.00 | 0.50 |
+| alpha / refracted meshes | 19 | 4.15 | 3.57 | 0.58 |
+| particles / sky cube / decals / precipitation | ~30 | 3 - 13 | | |
+
+Ceiling of the bypass at a replay cost of 0.3 us per draw (stamp compare + 3 address patches + window uploads + enqueue; **not yet measured**): static meshes alone 232 x (2.10 - 0.3) = **0.42 ms**
+(1.8 ms per 1,000 draws), trees 0.86, shadow views 0.21, actors 0.03, vegetation 0.14, alpha 0.07: **~1.7 ms with every retainable class**, ~1.5 ms without vegetation / alpha. So the
+"~-1 ms for static meshes alone" expectation does not hold (0.42 ms); the target (Full - Wrapper 1.97 -> ~0.3-0.5) needs trees + static + shadow views together, and the composition itself (1.5 ms) stays on top unless
+the signals (section 1) let it be skipped too. Saved per 1,000 draws: ~1.3 ms for trees / shadow views, ~1.8 ms for static meshes. Not built: the replay itself (a persistent object-block slot, per-view window patching,
+`beginRendering` / scope bookkeeping, record threads, the verify mode and the consumer switch-off are a Device-level change; see section 5).

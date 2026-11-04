@@ -757,3 +757,7 @@ was the constants / lighting / touches redone per frame), i.e. a persistent per-
 ### 24.5 Retained composition with engine change signals: study (2026-11-04)
 
 Full write-up: engine-frame/retained-signals.md. Signals exist for lifecycle and movement (OnCacheIn / OnCacheOut 0x6a9720 / 0x6a97b0, OnUpdatedWorldMatrix vt +0x230 / 0x69e8a0), none for materials, lights, LOD, fade (per-frame pulls / in-place writes). `native.retained` re-measured on the current build: 100 % hits (1,118 per frame), CPU 6.530 -> 6.444 ms (-0.09 ms), replay 0.52 us per hit vs ~0.62 composing: the redo of our own constants / lighting / touches is the cost, not validation. Estimate with signals + class-split patching: ~-0.4 ms, Full - Wrapper ~+1.6 ms: no-go for composition-only retention. Conditional go for retaining the packet (bypassing issue + prepareDraw, estimate -1 to -2.5 ms) as a separate project.
+
+### 24.6 Packet retention, stage 0: the ceiling (2026-11-04)
+
+`-Perf` now logs per group what `issue()` costs per draw and how much of it is the device call (retained-signals.md 7). Savegame Full: static meshes 2.10 us/draw (232 draws per frame), trees 1.56 (680), shadow views 1.59 (160), actors 1.77 (21), vegetation 2.50 (66); Vulkan and D3D12 within 3 %. Bypassing issue + prepareDraw at 0.3 us per replayed draw would save 0.42 ms for static meshes alone and ~1.5-1.7 ms with trees, shadow views, actors (vegetation, alpha). Static meshes alone do not reach -1 ms; the combination does.
