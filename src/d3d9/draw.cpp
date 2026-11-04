@@ -826,10 +826,14 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         q.depthBias = rs_[RS_DEPTHBIAS] != 0 || rs_[RS_SLOPESCALEDEPTHBIAS] != 0;
     };
     // draw observers (enh/rt_scene, enh/gi): indexed draws from buffers of the kinds / phases they ask for
-    captureRequest_ = {};
-    captureRequestRw_ = {};
-    captureInstances_ = false;
-    if (!observers_.empty() && geom.indexed && !geom.userPointer) {
+    const bool skipObs = skipObservers_;  // (a refused replay ran them already: their capture request stands)
+    skipObservers_ = false;
+    if (!skipObs) {
+        captureRequest_ = {};
+        captureRequestRw_ = {};
+        captureInstances_ = false;
+    }
+    if (!skipObs && !observers_.empty() && geom.indexed && !geom.userPointer) {
         for (DrawObserver* o : observers_) {
             if (!o->observes(kind, phase)) continue;
             ReplaceQuery q;
@@ -837,7 +841,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
             o->observe(*this, q);
         }
     }
-    if (!replacers_.empty() && kind == draws::Kind::StaticMesh && phase.view == scene::View::Main && phase.pass == scene::Pass::Solid &&
+    if (!skipObs && !replacers_.empty() && kind == draws::Kind::StaticMesh && phase.view == scene::View::Main && phase.pass == scene::Pass::Solid &&
         geom.indexed && !geom.userPointer) {
         for (DrawReplacer* r : replacers_) {
             if (!r->wantsOpaque()) continue;
@@ -1216,6 +1220,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
                      fs == ps_->module && captureRequest_.null();
         lastBlock_ = block;
         lastKind_ = kind;
+        query(lastQuery_);
     }
 
     if (stats_.totalDraws < options_.logDraws) {
@@ -1342,6 +1347,7 @@ void Device::fillCapture(const DrawPacket& p) {
     c.vi = *p.vi;
     c.dyn = *p.dyn;
     c.block = lastBlock_;
+    c.query = lastQuery_;
     c.kind = lastKind_;
     c.phase = phases_.current();
     c.vs = vs_.get();
@@ -1384,14 +1390,9 @@ bool Device::replayAllowed(const CachedDraw& c) const {
     if (tint_ != draws::TintMode::Off || ubershader_.load(std::memory_order_relaxed) || gbuf_.normal != nullptr || giDraws_.on) return false;
     if (stats_.totalDraws < options_.logDraws || wp0_.on || customVertices_ != 0 || up_.active) return false;
     if (c.kind == draws::Kind::SpeedTreeBillboard && billboardFadeScale_ != 1.0f) return false;
-    for (DrawObserver* o : observers_) {
-        if (o->observes(c.kind, c.phase)) return false;
-    }
-    if (!replacers_.empty()) {
-        for (DrawReplacer* r : replacers_) {
-            if (r->wantsOpaque()) return false;
-            if (r->handles(c.kind, c.phase, tag_)) return false;
-        }
+    // observers (RT scene, GI, object motion) and opaque-observing replacers (water) are shown the cached query at replay (replayDraw)
+    for (DrawReplacer* r : replacers_) {
+        if (r->handles(c.kind, c.phase, tag_)) return false;
     }
     return true;
 }
@@ -1453,6 +1454,23 @@ bool Device::replayMatches(const CachedDraw& cached, const CachedDraw& fresh, co
         return bad("ranges");
     }
     if (p.push.flags != f.push.flags) return bad("push flags");
+    {
+        // the observers' input: the cached query against the one the fresh draw showed them (tag / textures / mainView are refreshed at replay)
+        const ReplaceQuery& a = cached.query;
+        const ReplaceQuery& r = fresh.query;
+        if (a.kind != r.kind || !(a.phase == r.phase) || a.vertexBuffer != r.vertexBuffer || a.vertexOffset != r.vertexOffset || a.vertexStride != r.vertexStride ||
+            a.indexBuffer != r.indexBuffer || a.indexed != r.indexed || a.primitiveType != r.primitiveType || a.first != r.first || a.primitives != r.primitives ||
+            a.baseVertex != r.baseVertex || a.minIndex != r.minIndex || a.numVertices != r.numVertices || a.instanced != r.instanced || a.instances != r.instances ||
+            a.engineVs != r.engineVs || a.enginePs != r.enginePs || a.decl != r.decl || a.blended != r.blended || a.blending != r.blending || a.srcBlend != r.srcBlend ||
+            a.dstBlend != r.dstBlend || a.alphaTest != r.alphaTest || a.alphaFunc != r.alphaFunc || a.alphaRef != r.alphaRef || a.depthWrite != r.depthWrite ||
+            a.depthBias != r.depthBias) {
+            return bad("observer query");
+        }
+        for (std::uint32_t mask = cached.texMask; mask != 0; mask &= mask - 1) {
+            const std::uint32_t slot = static_cast<std::uint32_t>(std::countr_zero(mask));
+            if (fresh.tex[slot] != cached.tex[slot]) return bad("observer textures");
+        }
+    }
     if (std::memcmp(&b, &fresh.block, sizeof(b)) != 0) return bad("draw block");
     return true;
 }
@@ -1473,6 +1491,35 @@ bool Device::replayDraw(const CachedDraw& c, const ReplayInputs& in) {
     if (!replayBuild(c, in, p, b)) {
         ++replayStats.refused;
         return false;
+    }
+    {
+        bool opaqueObserver = false;
+        if (c.kind == draws::Kind::StaticMesh && c.phase.view == scene::View::Main && c.phase.pass == scene::Pass::Solid) {
+            for (DrawReplacer* r : replacers_) opaqueObserver |= r->wantsOpaque();
+        }
+        if (!observers_.empty() || opaqueObserver) {
+            ReplaceQuery q = c.query;
+            q.tag = &tag_;
+            q.textures = c.tex;
+            q.mainView = firings_.mainViews();
+            captureRequest_ = {};
+            captureRequestRw_ = {};
+            captureInstances_ = false;
+            for (DrawObserver* o : observers_) {
+                if (o->observes(c.kind, c.phase)) o->observe(*this, q);
+            }
+            if (opaqueObserver) {
+                for (DrawReplacer* r : replacers_) {
+                    if (r->wantsOpaque()) r->observeOpaque(*this, q);
+                }
+            }
+            if (!captureRequest_.null()) {
+                // an observer wants this draw's vertex capture (a different pipeline): the normal path draws it, without asking them again
+                skipObservers_ = true;
+                ++replayStats.refused;
+                return false;
+            }
+        }
     }
     const std::uint64_t frame = frameValue();
     for (std::uint32_t mask = c.texMask; mask != 0; mask &= mask - 1) c.tex[std::countr_zero(mask)]->lastUseFrame_ = frame;

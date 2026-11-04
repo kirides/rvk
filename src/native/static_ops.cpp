@@ -1994,6 +1994,16 @@ void StaticOps::issue() {
         sc::forEachRun(dd.vsSet, [&](std::uint32_t r, std::uint32_t n) { dev_.setVertexShaderConstantF(r, dd.vsF[r], n); });
         sc::forEachRun(dd.psSet, [&](std::uint32_t r, std::uint32_t n) { dev_.setPixelShaderConstantF(r, dd.psF[r], n); });
     };
+    const auto setTag = [&](const sc::DrawDesc& dd) {
+        tag = tagOverride_ ? tagOverrideValue_ : savedTag;
+        if (dd.tagSubMesh != nullptr) {
+            tag.subMesh = dd.tagSubMesh;
+            tag.material = dd.tagMaterial;
+            tag.meshResource = dd.tagMeshResource;
+            tag.water = static_cast<draws::Water>(dd.tagWater);
+            tag.materialName = dd.tagMaterialName;
+        }
+    };
     for (std::size_t k = 0; k < drawCount_; ++k) {
         const sc::DrawDesc& d = *draws_[k];
         dev_.setVertexShaderRef(ShaderRef(const_cast<Shader*>(static_cast<const Shader*>(d.vs))));
@@ -2017,6 +2027,7 @@ void StaticOps::issue() {
         }
         if (pe != nullptr && !verifyFrame) {
             setRegs(d);
+            setTag(d);  // (the observers and replacers look at it)
             if (dev_.replayDraw(pe->cd, rin)) {
                 ++g_->issuedDraws;
                 ++pktWindow_.replayed;
@@ -2087,14 +2098,7 @@ void StaticOps::issue() {
         }
         // the composed registers as ranges (one copy per run of consecutive registers)
         setRegs(d);
-        tag = tagOverride_ ? tagOverrideValue_ : savedTag;
-        if (d.tagSubMesh != nullptr) {
-            tag.subMesh = d.tagSubMesh;
-            tag.material = d.tagMaterial;
-            tag.meshResource = d.tagMeshResource;
-            tag.water = static_cast<draws::Water>(d.tagWater);
-            tag.materialName = d.tagMaterialName;
-        }
+        setTag(d);
         issueIndex_ = k;
         const bool capturing = cacheable && (pe == nullptr || verifyFrame);
         if (capturing) {

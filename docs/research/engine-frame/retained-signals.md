@@ -255,3 +255,31 @@ Differences to section 1:
 4. The state `-> 1` has a second site (`Flush` 0x688500 inlines `FlushResource`); the "0 -> 3 store site not located" is now `0x6850af` in `LoadData` 0x684e90.
 5. New signal for lighting that section 1 missed: `eCIlluminated_PS` dirty byte `+0x188` (set by `OnUpdatedWorldMatrix` 0x595d00, `OnCacheIn`, ctor, `Invalidate`, `Destroy`; cleared at the end of `UpdateIllumination`); `UpdateIllumination` runs only for dirty PSs, regardless of "static illuminated".
 6. `vt+0x240` is `SetLocalMatrix` (the dynamic override 0x69eee0 notifies through `+0x138` -> `UpdateChildDependencies` -> `+0x230`); `eCDynamicEntity` is the only subclass overriding `+0x230 / +0x240` in Engine.dll.
+
+## 10. Player defaults: the gap, and the observer feed (2026-11-04)
+
+**Step 1, measured at `-PlayerDefaults`** (savegame, lod 2x, `-Perf`; the machine was shared, outlier runs dropped):
+
+| | Vulkan | D3D12 |
+|---|---|---|
+| Full (2 runs) | 6.458 (6.445 / 6.471) | 6.763 (6.729 / 6.796) |
+| Wrapper (2 runs) | 4.459 | 4.727 |
+| **Full - Wrapper** | **2.00** | **2.04** |
+
+Profile (`-CpuProfile`, ms per frame, Wrapper / Full): `RtScene::observe` **0.376 / 0.376** (D3D12 0.334 / 0.352): Full pays the observer exactly as Wrapper does, once per draw (the draws the tap drops
+never reach it), so it is not part of the gap; it only blocks the packet cache. `prepareDraw` 1.575 / 1.750, `drawIndexedPrimitive` 2.088 / 2.279, `uploadConstants` 0.152 / 0.156, injected passes 0.26 / 0.27: the
+same picture as the test baseline (gap 1.8 there), +0.2 ms from the enhancements' per-draw costs on our composed draws.
+
+**Step 2, the observer feed (built).** Instead of moving the RT scene to signals (its registry reads the device's constant registers per draw and decides capture variants), the cache **replays the observers' input**:
+`CachedDraw::query` keeps the `ReplaceQuery` the observers and opaque-observing replacers were shown when the draw was made fresh; `replayDraw` refreshes its tag / textures / mainView, runs `observes` + `observe`
+(and `observeOpaque` of the water replacer for main-view solid static meshes) exactly as `prepareDraw` would, and refuses the replay (without asking the observers again: `skipObservers_`) if one of them now wants the draw's vertex capture
+(animated trees within the range, object motion), which needs the capture pipeline variant. Replacers that `handles()` a draw still refuse. Verify mode additionally compares the cached query field by field with the fresh one (kind, phase, buffers,
+strides, ranges, instancing, shaders, declaration, blend / alpha / depth flags, textures): the observers are pure functions of that query and the device's registers, which replay sets identically. 563 k verified draws at the
+player defaults with RT scene + water on, 0 differing; the RT scene's own counters with the cache on and off agree (652 instances in the TLAS, registry 655, 561 instance sightings per frame, both).
+
+Measured effect at the player defaults (cache on vs off, 6 interleaved runs each, machine shared with other agents: 2 - 3 runs per arm were disturbed by 1 - 9 ms): Vulkan per-draw timers `issue()`: static
+2.84 -> 1.65 us, trees 2.01 -> 1.23 us (-1.19 / -0.78 us per draw, ~-0.8 ms per frame at 900 draws, on a loaded machine whose draws were ~35 % slower than on a quiet one); `-Perf` CPU per frame, paired good runs: -0.26 / -0.42 / -0.47 / -0.58 ms
+(median ~-0.4 ms) on Vulkan; D3D12 pairs scatter between -0.5 and +0.7 ms (median ~0): not resolvable under this load. **Do not turn the cache on by default yet**: a quiet-machine run (or `-Perf` GPU-independent per-draw counters) is needed.
+
+Gates (build with the observer feed): `rvk_tests` 216 / 216; `rvk_d3d9test --validation` both backends 0; `testdemo` 7 / 7 with `-PlayerDefaults -Validation native.packet_cache=3` on Vulkan wrapper / full and D3D12 wrapper / full, 0
+validation lines; compare run 0 mismatches; `refcompare` Full + cache on: Vulkan jungle / beach_rain / pub_interior PASS, hero_closeup WARN, harbour_night FAIL (known night noise, dluma -3.8); D3D12 same set with harbour_night WARN.

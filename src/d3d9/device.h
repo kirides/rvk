@@ -860,6 +860,7 @@ public:
         VertexInputValues vi;
         DynamicStateValues dyn;
         shader::abi::DrawBlock block{};
+        ReplaceQuery query;  // what the observers / opaque-observing replacers were shown (tag, textures and mainView are refreshed at replay)
         draws::Kind kind = draws::Kind::Unknown;
         scene::Phase phase;
         const Shader* vs = nullptr;
@@ -1447,6 +1448,8 @@ private:
     // the draw being prepared (prepareDraw -> the draw call) and the pending batch (flushBatch)
     // packet retention: the capture in progress and what prepareDraw hands to it
     CachedDraw* capture_ = nullptr;
+    ReplaceQuery lastQuery_;
+    bool skipObservers_ = false;  // replayDraw already ran the observers for this draw and then refused it
     bool captureOk_ = false;
     shader::abi::DrawBlock lastBlock_{};
     draws::Kind lastKind_ = draws::Kind::Unknown;
