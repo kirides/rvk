@@ -666,3 +666,30 @@ Vulkan full, D3D12 wrapper, D3D12 full (0 validation lines each; own copy, insta
 **D3D12 CPU** (savegame, 2 runs per arm, interleaved): Full 6.727 (6.739 / 6.716) vs Wrapper 4.794 (4.789 / 4.799) = **+1.93 ms**; Vulkan Full - Wrapper +1.97 ms.
 `refcompare` vs `out/refcompare/20261103-130010` (Vulkan Full, 5 spots): jungle / beach_rain / pub_interior PASS, hero_closeup WARN (ssim 0.972, noise), harbour_night FAIL once (dluma -3.6, the known night
 noise) and PASS twice on re-run (cpu_opts 255 +0.39, cpu_opts 0 +0.37). Not run: D3D12 refcompare, the jungle CPU spot, the 17-spot route.
+
+### 22.4 Draw-state fingerprint: measured ceiling; jungle; D3D12 refcompare (2026-11-04, third pass)
+
+**Fingerprint fast path in `prepareDraw`: not built, the ceiling is too low.** A diagnostic (reverted) compared, at every `prepareDraw`, everything the derivation reads (shaders, declaration, the 4
+stream tuples, index buffer, the 100+ render states, the bound stages' textures + sampler states, viewport, targets, kind / view / pass, primitive type) with the previous draw: **17.8 % of the
+Full draws at the savegame (5 M draws) are identical to their predecessor**. The derivation it would skip costs `computeVertexInput` 0.27 + `prepareTextures` 0.13 + `computeDynamicState` / intern /
+`findPipeline` ~0.15 = ~0.55 ms, so the saving is ~0.1 ms (and the pieces keyed on fewer inputs, e.g. the vertex input on shader + declaration + streams, would hit more often but then save one
+component each). Below the noise; the consumers' complexity (observers, replacers, variants, G-buffer) is not worth it.
+
+**Composing per material / per tree type once.** The tree work is per batch, not per instance: per frame ~168 tree ops, ~1,900 instances in ~650 batches, 70 vegetation draws; `materialDraws` costs
+0.70 ms = ~1.07 us per batch, of which `constantsInto` + `materialSamplers` are 0.42 (the live registers copied from the mirror: they must be redone because the instance rows differ per batch) and the
+pass logic ~0.15. A clone-and-patch of the previous batch's `DrawDesc` (same shader / illumination / geometry stream) would redo the constants, switch writes, lighting, touches and tag - exactly what the V3
+replay did (0.57 us per hit, "net zero", plan.md 7.1) - so the ceiling is ~0.3 us x 650 = 0.2 ms. The engine's own tree code recomputes the same per batch (its `RenderBranches` / `RenderLeafs` ~1.0 ms in
+Wrapper), i.e. the per-batch cost is inherent to the engine's batch model, ours is on par (0.95 ms for trees + billboards). Static meshes: `composeOp` 0.44 vs the engine's `eCSubMesh::Render` +
+`RenderZPass` ~0.5-0.8: also on par. **Per group our composition is not slower than the engine's code; the difference to Wrapper is the sum of the parts the engine does not have to do**: sky cube
+(+0.16), effect units (+0.2), the `issue` bookkeeping (~0.4), the shadow-view ops (+0.28), the guarded reads, and the lean commit.
+
+**Jungle spot** (`rvkcompare` jungle hold, `-Perf`, last 3 windows, 2 runs each, `build\Base` = cb5097a): Full before 5.917 (5.933 / 5.900), after 5.975 (6.090 / 5.860) - no change within the noise (the
+spot has no night sky work; the sky cache does not apply), Wrapper 3.960 (3.973 / 3.947): **Full - Wrapper +2.0 ms**.
+
+**D3D12 refcompare** (Full via `renderer.mode=full`, 6 spots vs `20261103-130010`): jungle / pub_interior PASS, hero_closeup WARN, harbour_night + sea_cliff FAIL (the known night / sea-edge noise),
+beach_rain FAIL once (bad32 1.28) - flaky: the same spot PASSes in D3D12 Wrapper and in Full with `native.cpu_opts=255` on a re-run, FAILs with `cpu_opts=0`, so it is run-to-run noise (rain), not this change.
+
+**Floor.** Ceilings measured or bounded this pass: sky cube further ~0.15, streaming draws ~0.2, per-batch clone ~0.2, fingerprint ~0.1, effect units ~0.1: about 0.7 ms together, for large risk. The
+realistic floor of the current architecture (engine's code skipped, composition re-done per frame next to a shared 2.2 ms device path) is **Full - Wrapper ~1.3 ms** (Vulkan and D3D12). Getting to +0.5
+ms needs the composition's *results* to survive frames (retained composition across frames with an engine-side invalidation signal instead of a read log; V3's validation was only 0.05 ms, its replay cost
+was the constants / lighting / touches redone per frame), i.e. a persistent per-object GPU record, not a faster per-frame composition.
