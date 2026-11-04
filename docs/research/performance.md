@@ -765,3 +765,7 @@ Full write-up: engine-frame/retained-signals.md. Signals exist for lifecycle and
 ### 24.7 Packet retention, stage 1 (2026-11-04)
 
 `native.packet_cache` (Debug, default off): static-mesh + tree draws of the main view replayed from kept packets (retained-signals.md 8). Savegame, baseline settings, 3 runs each: Vulkan Full 5.470 -> 5.145 ms (-0.33), Wrapper 3.674, gap 1.80 -> 1.47; D3D12 5.78 -> 5.28, gap -> 1.46. Measured replay 0.35 us per draw; the section-7 ceiling (1.3 ms) was inflated by the RT scene observer that the player defaults have inside prepareDraw; with it active the cache is refused. Verify mode: 4.9 M checks, 0 differing.
+
+### 24.8 native.packet_cache is on by default (2026-11-04)
+
+Default 1 (Full mode only; auto-off while a compare / tap / coverage is on and per draw while a consumer needs prepareDraw without a cached query; modes 2 / 3 = verify, Debug). Evidence: 0 differing over millions of verify checks (baseline and player defaults), all gates on both backends, Vulkan paired runs -0.33 / -0.92 ms (min-of-arm -0.33). **The D3D12 gain is unresolved under load** (pairs scatter -1.1 .. 0; the other agents' builds are not covered by the lock names): re-measure opportunistically with one off/on pair when the machine is quiet (`-Setting native.packet_cache=0|1`, `-PlayerDefaults`).

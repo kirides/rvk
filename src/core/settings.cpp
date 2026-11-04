@@ -2127,7 +2127,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "3 verify every frame (rvk.log `native: packet cache`, DIFFERING must stay 0). Off while a compare, the frame tap or coverage is on, and per draw "
                        "while an enhancement needs prepareDraw (RT scene, replacers, G-buffer / GI variants, tint, upscaling jitter).",
         .type = Type::Int,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .min = 0,
         .max = 3,
         .flags = Flag::NoAB | Flag::Debug,
