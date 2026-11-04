@@ -310,3 +310,24 @@ So the D3D12 gain that was unresolved under load (24.8) is real: -0.42 ms, equal
 (trees ~0.8 - 1.0 ms, static meshes ~0.4 - 0.6, sky cube 0.3, effect units 0.4 - 0.7, particles / decals / billboards ~0.3) against the engine's own ~1.1 ms for the same slots; the replay itself 0.35 us x ~940 draws = 0.33 ms; the register setters
 ~0.26 ms (compare + copy into the device's register file, then the ring windows); the per-op save / restore ~0.1 ms. To go below ~+1.2 ms the composition must stop being redone per frame: that needs the constants of an object
 in persistent GPU blocks (so that only the view / frame / light classes are patched per frame) and a world-matrix signal to invalidate them, i.e. the stage-3 design with a changed ABI, not a faster replay.
+
+## 12. Plan for the persistent-block rewrite (ABI-breaking allowed; 2026-11-04) and what the profile says it can reach
+
+Profile of retained replay with the packet cache on (`native.retained=true`, player defaults, ms per frame, a loaded window: ratios only): `materialDraws` 0.73 of which `retReplay` 0.53 (`constantsInto` 0.36 = every live
+register re-copied from the mirror, `retValid` 0.17: the read log 0.05 + pool / slot / texture re-checks 0.12); composeTree 0.8, composeOp 0.54, effect composition 0.26, sky cube 0.38, `composeFx` 0.24, tree billboards 0.23.
+`materialDraws` is ~80 % of the composition of the ops that matter, so the lever is real, but its floor is what must happen per frame per draw whatever the data layout: the engine still walks, culls and sorts the op lists and calls our
+slot per op (~1,200 ops: `opEnter` bookkeeping + a validity check ~0.3 us = ~0.4 ms), the image touches (the resource LRU, ~600 per frame), the lighting block per light set (the light sets' contents change in place every frame), the VIEW /
+FRAME constants once per view, and the packet submission itself (0.35 us x ~940 = 0.33 ms).
+
+**Staged plan (each stage: compare modes none, verify fresh-vs-retained 0 differing, validation, testdemo x4, refcompare no new FAIL, a clean paired timing):**
+1. *Lean replay of `materialDraws`* (no ABI change): replay patches only the register classes that move per frame (VIEW c0..c11 / c30 / PS c0..c4 from the view epoch, LIGHT from the light-set block cached per illumination pointer and frame, MATERIAL from a per-shader
+   pool epoch) instead of every live register; validation by a per-entity world-matrix compare + per-material pool epoch instead of the read log. Estimate: replay 0.52 -> ~0.25 us per hit, -0.3 ms; Full - Wrapper ~1.4.
+2. *Persistent OBJECT / MATERIAL window blocks* (ABI: a persistent device-address slab `allocPersistent` with per-object slots on both backends - Vulkan: one host-visible BAR buffer with a free list; D3D12: GPU upload heap, as the capture pool; window addresses patched
+   into the cached packet, the DrawBlock copies disappear from the per-frame ring): removes the per-draw OBJECT / MATERIAL window uploads and `splitStage` for retained draws (~0.2 ms), plus the register setters (~0.26 ms) because retained draws no longer
+   write the device register file (observers read the retained query + a per-draw instance-row copy). Estimate -0.4 ms; ~1.0.
+3. *Signals instead of polling* (OnCacheIn / OnCacheOut + OnUpdatedWorldMatrix detours, section 9): saves the per-op world compare / pool compare (~0.1 ms); mainly makes validity O(1) so ops can be skipped before `opEnter` does any work. ~0.9.
+4. *Trees*: ~650 batches per frame are 40 % of the retainable draws and their batch composition (instance rows, LOD strip lengths, wind) changes with the camera: they need per-instance records and indirect / instanced submission
+   (the tree's instance data in a persistent buffer, a per-frame compacted draw list from the LOD / cull result = the engine's queue), which is a GPU-driven path of its own (material pack, RT scene, shadow cascades all read it). Estimate -0.4 ms; ~0.5. This is the stage that decides whether +0.5 is reached.
+
+None of this is a day's change: stages 2 and 4 touch the shared ABI (`abi.h`, `rvk_abi.hlsli`, the translator's constant windows, the DrawBlock, DXIL parity, `kTranslatorVersion`), both backends' RHI, the RT scene / material pack / object-motion
+consumers and the verify infrastructure. They were not started in this session: the measured state is the packet cache (Full - Wrapper +1.75 / +1.68) and the numbers above are estimates from the profile, not measurements.
