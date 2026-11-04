@@ -416,6 +416,7 @@ struct RendererSettings {
     Setting* shadowStride = nullptr;      // debug.shadow_stride: the sun cascades redrawn every n-th frame (engine::shadowmaps::setUpdateStride)
     Setting* fsReadCache = nullptr;       // debug.fs_read_cache: read-ahead of packed file streams (engine::loadaccel)
     Setting* fastAbsorb = nullptr;        // debug.fast_absorb: sliding-window cloud absorption image (engine::loadaccel)
+    Setting* soundCompressed = nullptr;   // debug.sound_compressed: short sounds as compressed samples (engine::loadaccel)
     Setting* streamStats = nullptr;       // debug.stream_stats: loading work statistics (engine::loadaccel)
     Setting* xinputInterval = nullptr;    // debug.xinput_interval: re-poll interval of a disconnected gamepad (engine::xinput)
     Setting* fastSort = nullptr;          // debug.fast_sort: typed sort of the render-op lists (engine::fastsort)

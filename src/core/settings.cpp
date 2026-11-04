@@ -2216,6 +2216,16 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 2,
         .flags = Flag::Debug,
     });
+    r.soundCompressed = &reg.add({
+        .key = "debug.sound_compressed",
+        .label = "Short sounds stay compressed in memory",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The game decodes sounds below a size limit completely when it creates them (1 - 18 ms on the game thread each time one leaves the cache and plays again). On = FMOD keeps them compressed and decodes them while they play, on its own mixer thread. The sound is the same codec output; not checked by ear.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
     r.streamStats = &reg.add({
         .key = "debug.stream_stats",
         .label = "Loading statistics",

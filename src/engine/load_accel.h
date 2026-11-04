@@ -38,6 +38,8 @@ void setAbsorbMode(int mode);
 // 0 = off, 1 = statistics lines and per-call timing (a clock read around every hooked call), 2 = also compare every buffered read
 // with the engine's own read of the same bytes
 void setStats(int level);
+// debug.sound_compressed: FMOD sounds the game wants decoded inside createSound are created as compressed samples (decoded while playing)
+void setSoundCompressed(bool on);
 
 // Engine thread, once per present: the 5 s statistics line
 void onPresent();

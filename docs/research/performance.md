@@ -596,3 +596,21 @@ Full mode (Vulkan, savegame, 2 interleaved runs each, all new switches on vs the
 lines in rvk.log), Full compare run (`native.static_ops_compare`, `scene_ops_compare`, `lean_check=10`, `debug.fast_sort=2`) `mismatches: none`, 0 sort
 differences. `refcompare` vs `out/refcompare/20261103-130010`: Vulkan 11 PASS / 6 WARN / 3 FAIL (`harbour_docks`, `sea_cliff`, `harbour_mouth` = the known
 sea-edge noise), D3D12 12 / 6 / 2 (`sea_cliff`, `harbour_mouth`); no new FAIL (`out/refcompare/20261104-021314` Vulkan, `20261104-021937` D3D12).
+
+## 23. Streaming and loading screens (2026-11-04; details docs/research/streaming.md)
+
+The frame-time spikes of a still scene and the loading screens (21.3: "the engine's own streaming on the presenting thread") were profiled with
+the new spike profile (`-CpuProfile`: samples more than `RVK_SPIKE_MS` = 8 ms into a frame, `diag: spike` rows, `tools/spikesum.py`).
+
+* **Still scene**: frames over 8 ms are rare (64 ms of time beyond 8 ms in 90 s); 29 % of them is `FMOD::System::createSound` (a sound that
+  left the cache plays again: `gCEffectCommandPlaySound` -> `eCSoundResource2::Play` -> direct `QueueData` -> decode, 1 - 18 ms), the rest our
+  first draws / the engine's render. p95 vs p50 (5.9 vs 5.4 ms) is plain frame variance. **Walking** (55 s): 18 ms beyond 8 ms in total, no
+  resource load in any stack. Resource file IO of the lazy queue is already asynchronous (FFC async read + completion queue); only the
+  parse (`OnLoadData`) is on the engine thread and not provably thread-safe (streaming.md 4).
+* **Loading screens**: 40 % of the engine thread was `NtReadFile` / `SetFilePointerEx` (FileSystem2's packed stream: two system calls per
+  Read, 6 million Reads per load) and 22 % `eCSkydome_PS::CreateAbsorbationImage` (128 divisions per pixel, 2 x 280 ms per load).
+* **Built** (`engine/load_accel.*`): `debug.fs_read_cache` (KiB, default 64; read-ahead of packed streams; 6.48 M buffered reads verified
+  against the engine's own reads, 0 differ), `debug.fast_absorb` (default 1; sliding windows, bit-identical, `=2` compares in-game: 0 rows
+  differ), `debug.sound_compressed` (default off; sounds as compressed FMOD samples: 320 -> 12.5 ms of `createSound` per 257 sounds; audio
+  unchecked), `debug.stream_stats` (1 = timing + `engine: stream:` lines, 2 = verify the buffer). **Quick load 4.13 -> 2.78 s (-33 %),
+  new game 6.2 -> 3.9 s (-37 %)**; still-scene CPU unchanged.

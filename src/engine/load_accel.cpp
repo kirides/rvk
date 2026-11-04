@@ -115,12 +115,13 @@ std::atomic<int> g_readKiB{0};
 std::atomic<int> g_absorbMode{0};
 std::atomic<bool> g_stats{false};
 std::atomic<bool> g_verify{false};
+std::atomic<bool> g_soundCompressed{false};
 std::atomic<bool> g_installed{false};
 
 struct Counters {
     std::atomic<std::uint64_t> reads{0}, hits{0}, refills{0}, passThrough{0}, bytesServed{0}, bytesFetched{0};
     std::atomic<std::uint64_t> readNs{0}, verified{0}, verifyDiffer{0};
-    std::atomic<std::uint64_t> sounds{0}, soundNs{0}, soundMaxNs{0};
+    std::atomic<std::uint64_t> sounds{0}, soundNs{0}, soundMaxNs{0}, soundsSample{0}, soundsOther{0}, soundsCompressed{0}, soundFallbacks{0};
     std::atomic<std::uint64_t> absorbs{0}, absorbNs{0}, absorbPixels{0}, absorbCompared{0}, absorbDiffer{0};
 };
 Counters g_c;
@@ -234,10 +235,29 @@ using CreateSoundFn = int (*)(void*, const char*, unsigned, void*, void**);
 Hook<CreateSoundFn> g_createSound;
 
 int detourCreateSound(void* system, const char* name, unsigned mode, void* exinfo, void** sound) {
-    if (!g_stats.load(std::memory_order_relaxed)) return g_createSound.original(system, name, mode, exinfo, sound);
+    // FMOD_CREATESAMPLE (0x100) decodes the whole sound inside createSound; FMOD_CREATECOMPRESSEDSAMPLE (0x200) keeps it compressed and
+    // decodes while it plays (on FMOD's mixer thread). The game picks 0x100 below a size limit. debug.sound_compressed asks for 0x200 for
+    // those too; if FMOD refuses, the game's own flags are tried (the game sees no difference).
+    constexpr unsigned kSample = 0x100, kCompressed = 0x200;
+    const bool swap = g_soundCompressed.load(std::memory_order_relaxed) && (mode & kSample) != 0 && (mode & kCompressed) == 0;
+    const bool stats = g_stats.load(std::memory_order_relaxed);
+    if (!stats && !swap) return g_createSound.original(system, name, mode, exinfo, sound);
     const std::uint64_t t0 = nowNs();
-    const int r = g_createSound.original(system, name, mode, exinfo, sound);
+    int r;
+    if (swap) {
+        r = g_createSound.original(system, name, (mode & ~kSample) | kCompressed, exinfo, sound);
+        if (r != 0) {
+            g_c.soundFallbacks.fetch_add(1, std::memory_order_relaxed);
+            r = g_createSound.original(system, name, mode, exinfo, sound);
+        } else {
+            g_c.soundsCompressed.fetch_add(1, std::memory_order_relaxed);
+        }
+    } else {
+        r = g_createSound.original(system, name, mode, exinfo, sound);
+    }
+    if (!stats) return r;
     const std::uint64_t dt = nowNs() - t0;
+    if (!swap) ((mode & kSample) != 0 ? g_c.soundsSample : g_c.soundsOther).fetch_add(1, std::memory_order_relaxed);
     g_c.sounds.fetch_add(1, std::memory_order_relaxed);
     g_c.soundNs.fetch_add(dt, std::memory_order_relaxed);
     std::uint64_t mx = g_c.soundMaxNs.load(std::memory_order_relaxed);
@@ -462,6 +482,7 @@ void setReadCacheKiB(int kib) {
     const std::lock_guard lock(g_entryMutex);
     for (auto& e : g_entries) e.self = nullptr;
 }
+void setSoundCompressed(bool on) { g_soundCompressed.store(on, std::memory_order_relaxed); }
 void setAbsorbMode(int mode) { g_absorbMode.store(std::clamp(mode, 0, 2), std::memory_order_relaxed); }
 void setStats(int level) {
     g_stats.store(level >= 1, std::memory_order_relaxed);
@@ -523,8 +544,10 @@ void onPresent() {
     }
     const std::uint64_t dSounds = d(g_c.sounds, g_last.sounds);
     if (dSounds != 0) {
-        spdlog::info("engine: stream: sounds created {} in {:.1f} ms (longest so far {:.1f} ms)", dSounds, d(g_c.soundNs, g_last.soundNs) * 1e-6,
-                     g_c.soundMaxNs.load() * 1e-6);
+        spdlog::info("engine: stream: sounds created {} in {:.1f} ms (longest so far {:.1f} ms; so far {} decoded in createSound, {} as compressed samples, {} other, "
+                     "{} compressed refused)",
+                     dSounds, d(g_c.soundNs, g_last.soundNs) * 1e-6, g_c.soundMaxNs.load() * 1e-6, g_c.soundsSample.load(), g_c.soundsCompressed.load(),
+                     g_c.soundsOther.load(), g_c.soundFallbacks.load());
     }
     g_last.reads = g_c.reads.load();
     g_last.hits = g_c.hits.load();

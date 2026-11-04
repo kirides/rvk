@@ -554,6 +554,10 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         engine::loadaccel::setAbsorbMode(static_cast<int>(rs.fastAbsorb->asInt()));
         reg.onChange(*rs.fastAbsorb, [](const settings::Setting& s) { engine::loadaccel::setAbsorbMode(static_cast<int>(s.asInt())); }, this);
     }
+    if (rs.soundCompressed != nullptr) {
+        engine::loadaccel::setSoundCompressed(rs.soundCompressed->asBool());
+        reg.onChange(*rs.soundCompressed, [](const settings::Setting& s) { engine::loadaccel::setSoundCompressed(s.asBool()); }, this);
+    }
     if (rs.streamStats != nullptr) {
         engine::loadaccel::setStats(static_cast<int>(rs.streamStats->asInt()));
         reg.onChange(*rs.streamStats, [](const settings::Setting& s) { engine::loadaccel::setStats(static_cast<int>(s.asInt())); }, this);
