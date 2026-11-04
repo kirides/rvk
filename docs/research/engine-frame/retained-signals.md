@@ -1,0 +1,95 @@
+# Retained composition with engine change signals: design study (2026-11-04)
+
+Question (user): GD3D11 gets vob add / remove / move from Gothic. Does Risen's engine offer the same, and does that make retained composition (cache a composed draw across
+frames, invalidate by signal) reach Full - Wrapper <= ~+0.8 ms? Starting point: Full - Wrapper +1.97 ms (Vulkan) / +1.93 (D3D12) at the perf savegame (performance.md 24).
+
+**Answer in one paragraph.** The engine does have usable signals for the *object-static* part (entity cache-in / cache-out, world-matrix change), none for materials, lights, LOD or fade
+(those are per-frame pulls or in-place field writes). But signals are not what limits retained composition: the V3 prototype (`native.retained`) already hits 100 % at the savegame
+(1,118 hits per frame, 0 built, 0 invalid) and gains only 0.09 ms, because **the replay itself costs almost as much as the composition it replaces** (0.52 us per hit vs ~0.62 us). Validation
+is a small part. Signals can remove the validation (~0.05 - 0.1 ms) and a class-split constant patch can bring the hit to ~0.3 us: **estimate for composition-only retention
+with signals: gap ~1.6 ms (1.97 - ~0.4). No-go for that.** The structure that could reach the target retains the *packet* (bypassing `issue` + `prepareDraw`, 0.4 + 1.7 ms), where
+signals do matter; that is a larger project (section 5) and is not prototyped here.
+
+## 1. The engine's change signals
+
+Source: the existing dumps / notes (engine-frame/*.md, native-renderer.md 8) and a capstone scan of Engine.dll by the lookup agents (the Ghidra MCP had Risen.exe open, not Engine.dll, so no new decompilation;
+direct field-store sweeps were therefore only done for the world matrix). RVAs are Engine.dll RVAs. [C] read in code, [I] inferred.
+
+| what a composed draw depends on | signal | RVA | hook sees all writers? | hotness |
+|---|---|---|---|---|
+| render contexts exist (entity in the world) | `eCGeometryEntity::OnCacheIn` (vt +0x1d0) / `OnCacheOut` (+0x1d8); inside: `eCFrustumElementItem::CacheIn` 0x670e60 creates the contexts, `eCPrefetchAdmin::OnEntityCachedIn` 0x696120 inserts into the scene sphere tree; `CacheOut` 0x670de0 destroys them | 0x6a9720 / 0x6a97b0 [C] | yes: only called from `eCPrefetchAdmin::OnCacheIn / OnCacheOut` (0x696590 / 0x696550) through the vtable; destroy is always preceded by cache-out (fatal error otherwise) | per streaming event (already hooked for lod.md) |
+| entity deleted | `eCEntity::Destroy` 0x6a4180 -> `eCEntityAdmin::NotifyDeleteEntities` 0x695310 | [C] | yes (after cache-out) | rare |
+| world matrix (entity +0x60) | `eCGeometryEntity::OnUpdatedWorldMatrix(new, old)` (vt +0x230; dynamic override 0x69e8a0, base 0x6a8d70) | [C] | every change through the setter chain (`UpdateChildDependencies` 0x69e530 <- `SetLocalMatrix` 0x69eee0; `SetWorldMatrix` 0x6a8e90). Bypasses: `CopyEntityPrivateData` 0x6a8820, base `SetLocalMatrix` 0x6a62f0 (non-dynamic subclasses), savegame `OnRead`, four unnamed chunks (0x4c77a5, 0x4c829c, 0x6e47a8, 0x6e80a5) [I] | once per matrix change of a moved entity (equal matrices early-out) |
+| attachments / animated props | `eCActorAttachment::Process` 0x4d0f90 -> `SetToWorldMatrix` 0x6aaf80 -> the chain above | [C] | yes | per frame per attached entity |
+| visibility / enable | `EnableRendering` 0x6a5d80 (flag 0x2), `Enable` 0x6a3670 / 0x6a96a0 (0x4) | [C] | yes | rare |
+| mesh LOD | `eCRenderContextMesh::UpdateLoD` 0x5c74b0 stores ctx +0x28 (via item `Request` 0x671370, slot +0x30) | [C] | the only writer, but it runs per visible item per **database** per frame and shadow databases overwrite the same field: poll ctx +0x28 in the op (we read it anyway) | hot |
+| fade | `CalculateFadeOut` 0x671220, recomputed every frame (< 1 moves the op to the alpha list) | [C] | no signal | per frame |
+| material values | none: constant pools are written in place; the dirty range `pool +0xc/+0x10` is a CPU->GPU upload flag reset every draw; property notify reacts only to "FallbackMaterial" | [C] | - | - |
+| material time elements (scroll, rotate, oscillate, animated sampler) | `eCShaderMaterialAdmin::Process` 0x6bb250 -> `SetTime` on every timed element | [C] | single caller | per frame |
+| sampler image / register layout | `SetImageResource` 0x6c49f0 (+ UpdateSampler 0x6c3ab0), permutation compile funnel `CompileShaderPoolEllement` 0x6b8140 / 0x6b8890 (already hooked: engine/material_source) | [C] | compile: one funnel; `SetImageResource`: other writers unverified | rare for meshes |
+| resource load / evict | `eCResource2::Load` 0x683540, `LoadData` 0x6828f0, `LoadDataV2` (mesh) 0x75e080, `FlushResource` 0x684340, `FlushBytes` 0x684250; state field `res +0x38` read directly everywhere; the 0 -> 3 store site not located | [C]/[I] | no: poll `res +0x38` / `image +0x70` (our composition already reads them) | event-rate |
+| lighting | `eCIlluminationAdmin::Process` 0x579260 -> `UpdateLightSets` 0x575130 rebuilds every light set **every frame**, no dirty flag; per-entity `eCIlluminated_PS::UpdateIllumination` 0x595300 (from `Request` when bit 0x80); the lighting pool caches (list ptr, f, SH flag) at pool +0x48..0x54 | [C] | single entry per frame; field stores direct | per frame (sun / hemisphere / flicker) |
+| SpeedTree wind / LOD / instance alpha | `UpdateWindMatrices` 0x6efa10 (once per DB execution, 3 matrices + 4 angle pairs -> c14..c29); LOD `0x6e8be0 -> 0x6f8f30` with camera distance | [C] | single callers | per frame |
+| vegetation | `eCVegetation_PS::Render` 0x707800 gathers instances into the dynamic VB each frame | [C] | - | per frame |
+| skin palette | `UpdateRenderMatrices` 0x4dfee0, stamp-guarded, frame id | [C] | single caller | per frame per visible actor |
+| particles / strips / rain / decals / billboards / star vertices | CPU-built every frame | [C] | - | per frame |
+
+Hook cost: `OnCacheIn / OnCacheOut` and `OnUpdatedWorldMatrix` are cold or per-change (vtable slots or real functions, not thunks / COMDAT-folded). The per-frame classes have no signal because they
+have no *change*: they are pulls, and a pull cannot be cached.
+
+## 2. Prior art in our code and why it did not pay
+
+* `enh/rt_registry` / `rt_scene`: instance identity by sighting (quantised world rows + owner views, "moved" = a new instance replaces the unseen owner's latest one, "volatile ranges" = churn counters): no
+  signals, a per-draw hash lookup (~0.35 ms `observe`). A world-matrix signal would replace its moved detection (the callback receives the old and the new matrix).
+* `object_motion`: previous-frame vertex capture of moving draws; signal-compatible (the moved set is known).
+* `native.retained` (V3, vulkanize/plan.md 7): memoises `materialDraws` / `specialPassDraw` by key + a **read log** (every engine read logged and compared at replay). Re-measured on the current build (savegame,
+  lod 2x, 2 runs each): 6.530 -> **6.444 ms (-0.09 ms)**, hit rate 100 % (1,118 hits / frame, built 0, invalid 0, stale 0). Own timer: **replay 0.585 ms / frame = 0.52 us per hit**; the unretained
+  `materialDraws` is 0.70 ms for the same calls (profile). Replay = switch writes (pool registers, slot images), `writeLighting`, `constantsInto` (all live registers from the mirror again), the water tag
+  classification, image touches (`leanImage`: the resource-cache LRU touch the engine made every frame) and validation (~0.05 ms). **Validation was never the cost; the per-frame redo of our own work is.**
+
+## 3. What each op class depends on
+
+| op class | static per object (cacheable) | changes with a signal | per frame by nature |
+|---|---|---|---|
+| static mesh z / solid (`composeZ` / `composeSolid`) | shader / permutation, decl, streams, index ranges, states, sampler states, sub-mesh draw list | world matrix (moved), cache-out, mesh LOD (poll), lightmap combi (once), image load (poll) | view (c0..c11, fog), fade, light list + lighting pool c14..c37, sun / ambient, material time elements, image touches |
+| trees (`composeTree`, ~650 batches / frame) | per type: shader, geometry ranges, states | cache-out (trees do not move) | wind c14..c29, LOD alpha / strip lengths (camera distance), batch grouping (sorted queue), view |
+| tree billboards | UploadTexCoords tables, geometry | cache-out | view, fade |
+| vegetation | node geometry | - | the whole instance buffer, cursor |
+| actors | shader / geometry per body part | cache-out, attachments | palette, morphs, alpha, lights |
+| particles / strips / rain / decals / sky | - | - | everything (CPU-built vertices) |
+| shadow-view ops | same as their mesh / tree / actor op | same | the cascade view, per cascade |
+
+A draw carries ~75 live registers; only the object block (world, instance rows) is signal-invalidated; VIEW, FRAME (wind, sun), LIGHT, TIME and the touches are per frame.
+
+## 4. Estimate: composition-only retention with signals
+
+Per frame at the savegame: ~1,118 retainable hits; Full - Wrapper = composition ~1.5 ms + bookkeeping `issue` 0.4 + shadow views / sky / effects.
+
+| step | per hit | per frame |
+|---|---|---|
+| today, unretained `materialDraws` | ~0.62 us | 0.70 ms |
+| V3 replay (measured) | 0.52 us | 0.585 ms |
+| + signals instead of the read log (validation -> a stamp compare) | ~0.45 us | ~0.5 ms |
+| + class-split patch (only VIEW / FRAME / LIGHT registers re-copied) and batched touches | ~0.3 us | ~0.33 ms |
+
+Gain over today ~0.37 ms on `materialDraws`; the rest of the composition (op loops, `composeTree`'s per-instance world writes, sky, effects, lean commit) does not shrink. **Full - Wrapper ~1.6 ms.**
+Composition-only retention is a no-go; the per-hit floor is what must happen every frame (three classes of constants, the lighting block, the image touches).
+
+## 5. Where signals would matter: retaining the packet (not prototyped)
+
+After composition a draw still costs `issue` (0.4 ms bookkeeping + setters) and the device path (`prepareDraw` 1.7 ms incl. observers, `computeVertexInput` 0.27, `prepareTextures` 0.13, constant upload 0.15; the
+fingerprint test found only 17.8 % of consecutive draws identical, so neighbour comparison cannot shortcut it). A cached **per-draw packet** (pipeline, vertex input, push block, descriptor indices, texture list,
+OBJECT / MATERIAL window blocks in a persistent buffer) stays valid as long as its object does (signals: cache-in / out, world matrix; polls: LOD, lightmap combi, image state, permutation-compile counter), and per
+frame only the per-view addresses (VIEW / FRAME / LIGHT window blocks) are patched before it goes to the record threads. Estimate: ~0.25 us per cached draw (stamp check + 3 patches + enqueue) instead of ~3.1 us
+(compose 1.5 + issue 0.4 + prepareDraw 1.2); for ~1,000 retainable of 1,290 draws about -2.5 ms, i.e. Full could end *below* Wrapper (the engine still walks and culls the op lists; the touches stay).
+Risks: (1) every consumer hangs off `prepareDraw` (RT scene `observe`, replacers, object motion, G-buffer / GI variants, tint, coverage): with an enhancement active the draw takes the normal path or the consumer needs its
+own signal feed (the RT registry's moved detection is exactly `OnUpdatedWorldMatrix`); (2) the window-block ABI: the OBJECT block must live in a persistent GPU buffer with per-object slots (today the ring, 2.3 MB / frame);
+(3) correctness only checkable if the packet path can run "fresh" every N frames and be diffed (verify mode); (4) per-frame classes (particles, vegetation, actor palettes) stay on the old path, so only static meshes,
+trees and billboards qualify. First stage: static-mesh z / solid packets with all enhancements off, verified against fresh composition; gain ~0.8 - 1.0 ms at ~800 draws if the estimate holds.
+
+## 6. Verdict
+
+* Signals: usable for lifecycle and movement (OnCacheIn / OnCacheOut / OnUpdatedWorldMatrix + polls); none for materials, lights, LOD, fade.
+* Composition-only retention: **no-go** (measured replay 0.52 us per hit; ceiling ~0.4 ms; Full - Wrapper stays ~+1.6).
+* Packet-level retention (bypass `issue` + `prepareDraw`): **conditional go as its own project** (estimate -1 to -2.5 ms; risk in the `prepareDraw` consumers); stage 1 = a per-draw cost measurement of the bypass on static
+  meshes with enhancements off, not a signal hook.
