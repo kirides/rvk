@@ -2202,6 +2202,17 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 5000,
         .flags = Flag::Debug,
     });
+    r.oceanSpd = &reg.add({
+        .key = "debug.ocean_spd",
+        .label = "FFT ocean: mip chains by compute",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The FFT ocean's displacement / derivative mip chains: on = two compute dispatches per image (a single-pass "
+                       "downsampler in the style of FidelityFX SPD, ocean_mips.comp), off = one blit per level (the old path, for A/B).",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
     r.fastSort = &reg.add({
         .key = "debug.fast_sort",
         .label = "Typed sort of the render-op lists",

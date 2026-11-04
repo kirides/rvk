@@ -88,6 +88,10 @@ bool Ocean::createPipelines() {
     // the foam pass (one storage image; its history and the floor field through the bindless set). Optional: without it the
     // shading evaluates the surf's foam in place
     foam_ = compute(shader::embedded::spirv("water/ocean_foam.comp"), shader::embedded::dxilOnDemand("water/ocean_foam.comp"), "ocean.foam");
+    // the mip chains (optional: without it, or with a GPU below 16 KiB of shared memory, the blits)
+    if (lim.maxComputeSharedMemory >= 32u * 32u * 16u && lim.maxComputeWorkGroupInvocations >= 256u) {
+        mips_ = compute(shader::embedded::spirv("water/ocean_mips.comp"), shader::embedded::dxilOnDemand("water/ocean_mips.comp"), "ocean.mips");
+    }
     return spectrum_ && evolve_ && resolve_ && fft_[0] && samplerSlot_ != 0;
 }
 
@@ -353,7 +357,7 @@ void Ocean::record(rhi::CommandList& cl, rhi::GpuRef frameBlock, double seconds)
     const std::uint32_t mips = static_cast<std::uint32_t>(mipCount(cascades_.size));
 
     // into GENERAL: the work images every frame (contents rewritten), h0 kept, the outputs' mip 0 from last frame's sampling (the other levels stay
-    // readable until the blits); the same-layout transitions are the barriers after last frame's FFT. The first time and after resetHistory the foam
+    // readable until the mip chains); the same-layout transitions are the barriers after last frame's FFT. The first time and after resetHistory the foam
     // history in disp is cleared.
     // (one barrier for all of it)
     std::vector<rhi::TextureTransition> batch;
@@ -411,13 +415,56 @@ void Ocean::record(rhi::CommandList& cl, rhi::GpuRef frameBlock, double seconds)
         push(cl, frameBlock, c, t, dt, 0.0f);
         cl.dispatch(groups, groups, 1);
     }
-    // the mip chains (blits): mip 0 -> source; the other levels written one after the other (one barrier per step for all images)
     std::vector<rhi::Texture*> chains;
     for (int c = 0; c < count; ++c) {
         chains.push_back(tiles_[static_cast<std::size_t>(c)].disp.get());
         chains.push_back(tiles_[static_cast<std::size_t>(c)].deriv.get());
     }
+    if (mips_ && spd_.load(std::memory_order_relaxed) && mips >= 8 && mips <= 10) recordMipsCompute(cl, frameBlock, chains, mips);
+    else recordMipsBlit(cl, chains, mips);
+    ready_ = true;
+    if (frames_++ == 0) {
+        spdlog::info("enh: ocean: first simulated frame: Hs {:.2f} m, wind sea peak {:.0f} m, U10 {:.1f} m/s, fetch {:.0f} km, swell {:.2f} m "
+                     "{:.1f} s, choppiness {:.2f}; mip chains by {}",
+                     hs_, peakLength_, sea_.windSpeed, sea_.fetch / 1000.0f, sea_.swellHeight, sea_.swellPeriod, sea_.choppiness,
+                     mips_ && spd_.load(std::memory_order_relaxed) ? "compute (2 dispatches per image)" : "blits");
+    }
+}
+
+// the mip chains by compute (shaders/water/ocean_mips.comp.hlsl): dispatch A mip 0 -> 1..6 (one group per 64 x 64 texels), dispatch B
+// mip 6 -> 7.. (one group); every image in the same GENERAL layout, one barrier between the two
+void Ocean::recordMipsCompute(rhi::CommandList& cl, rhi::GpuRef frameBlock, std::span<rhi::Texture* const> chains, std::uint32_t mips) {
+    std::vector<rhi::TextureTransition> batch;
+    for (rhi::Texture* img : chains) batch.push_back({img, VK_IMAGE_LAYOUT_GENERAL});
+    cl.computeBarrier();  // (the resolve pass's writes of mip 0)
+    cl.transitions(batch);
+    const auto n = static_cast<std::uint32_t>(cascades_.size);
+    cl.bindPipeline(*mips_);
+    for (int stage = 0; stage < 2; ++stage) {
+        const std::uint32_t first = stage == 0 ? 0u : 6u;                   // the source level
+        const std::uint32_t levels = stage == 0 ? 6u : mips - 1u - 6u;      // written levels
+        OceanMipPush p{};
+        p.h.frame = frameBlock.bits;
+        p.info[0] = n >> first;
+        p.info[1] = levels;
+        const std::uint32_t groups = stage == 0 ? n / 64u : 1u;
+        for (rhi::Texture* img : chains) {
+            rhi::StorageView views[7];
+            for (std::uint32_t i = 0; i < 7; ++i) views[i] = {img, std::min(first + i, mips - 1u), 0};  // (unused slots repeat the last level)
+            cl.setStorageViews(views);
+            cl.setPushConstants(&p, sizeof(p));
+            cl.dispatch(groups, groups, 1);
+        }
+        if (stage == 0) cl.computeBarrier();
+    }
     batch.clear();
+    for (rhi::Texture* img : chains) batch.push_back({img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL});
+    cl.transitions(batch);
+}
+
+// the mip chains by blits: mip 0 -> source; the other levels written one after the other (one barrier per step for all images)
+void Ocean::recordMipsBlit(rhi::CommandList& cl, std::span<rhi::Texture* const> chains, std::uint32_t mips) {
+    std::vector<rhi::TextureTransition> batch;
     for (rhi::Texture* img : chains) {
         batch.push_back({img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 0, 1});
         if (mips > 1) batch.push_back({img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, mips - 1});
@@ -437,12 +484,6 @@ void Ocean::record(rhi::CommandList& cl, rhi::GpuRef frameBlock, double seconds)
     batch.clear();
     for (rhi::Texture* img : chains) batch.push_back({img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL});
     cl.transitions(batch);
-    ready_ = true;
-    if (frames_++ == 0) {
-        spdlog::info("enh: ocean: first simulated frame: Hs {:.2f} m, wind sea peak {:.0f} m, U10 {:.1f} m/s, fetch {:.0f} km, swell {:.2f} m "
-                     "{:.1f} s, choppiness {:.2f}",
-                     hs_, peakLength_, sea_.windSpeed, sea_.fetch / 1000.0f, sea_.swellHeight, sea_.swellPeriod, sea_.choppiness);
-    }
 }
 
 }  // namespace rvk::enh

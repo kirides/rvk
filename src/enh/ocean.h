@@ -7,7 +7,9 @@
 // Owned by enh::Water; recorded from its AfterOpaque pass (before the water is drawn). Render thread.
 
 #include <array>
+#include <atomic>
 #include <cstdint>
+#include <span>
 
 #include <memory>
 
@@ -45,6 +47,13 @@ struct OceanFoamPush {
     float shoreWave[4];     // period, amplitude, breaker index, time
 };
 static_assert(sizeof(OceanFoamPush) == 112 && sizeof(OceanFoamPush) <= shader::abi::kPushConstantBudget);
+
+// mirror of shaders/water/ocean_mips.comp.hlsl MipPush
+struct OceanMipPush {
+    shader::abi::PassPushHeader h;
+    std::uint32_t info[4];  // x source size, y levels written
+};
+static_assert(sizeof(OceanMipPush) <= shader::abi::kPushConstantBudget);
 
 // what the foam pass needs from the water module (the floor field, the waves rolling in)
 struct OceanFoamInputs {
@@ -92,8 +101,13 @@ public:
     float significantHeight() const { return hs_; }         // m, the whole spectrum (4 sqrt(sum of the cascades' variances))
     float peakWavelength() const { return peakLength_; }    // m, the wind sea's peak
     bool failed() const { return failed_; }
+    // debug.ocean_spd: the mip chains by two compute dispatches per image (default) instead of one blit per level
+    static void setSpd(bool on) { spd_.store(on, std::memory_order_relaxed); }
 
 private:
+    static inline std::atomic<bool> spd_{true};
+    void recordMipsCompute(rhi::CommandList& cl, rhi::GpuRef frameBlock, std::span<rhi::Texture* const> chains, std::uint32_t mips);
+    void recordMipsBlit(rhi::CommandList& cl, std::span<rhi::Texture* const> chains, std::uint32_t mips);
     struct Tile {
         std::unique_ptr<rhi::Texture> h0, workA, workB, disp, deriv;
         bool cleared = false;
@@ -116,7 +130,7 @@ private:
     bool spectrumDirty_ = true;
     float hs_ = 0.0f, peakLength_ = 0.0f;
     std::array<Tile, ocean::kMaxCascades> tiles_{};
-    std::unique_ptr<rhi::Pipeline> spectrum_, evolve_, resolve_;
+    std::unique_ptr<rhi::Pipeline> spectrum_, evolve_, resolve_, mips_;
     std::array<std::unique_ptr<rhi::Pipeline>, 3> fft_;  // N = 128, 256, 512
     std::uint32_t samplerSlot_ = 0;
     double lastSeconds_ = -1.0;

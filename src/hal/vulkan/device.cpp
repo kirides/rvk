@@ -20,6 +20,7 @@
 #include "core/settings.h"
 #include "core/stall_sampler.h"
 #include "d3d9/fvf.h"
+#include "enh/ocean.h"
 #include "engine/scene_hooks.h"
 #include "engine/fast_sort.h"
 #include "engine/lod.h"
@@ -548,6 +549,10 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     if (rs.xinputInterval != nullptr) {
         engine::xinput::setIntervalMs(static_cast<int>(rs.xinputInterval->asInt()));
         reg.onChange(*rs.xinputInterval, [](const settings::Setting& s) { engine::xinput::setIntervalMs(static_cast<int>(s.asInt())); }, this);
+    }
+    if (rs.oceanSpd != nullptr) {
+        enh::Ocean::setSpd(rs.oceanSpd->asBool());
+        reg.onChange(*rs.oceanSpd, [](const settings::Setting& s) { enh::Ocean::setSpd(s.asBool()); }, this);
     }
     if (rs.fastSort != nullptr) {
         engine::fastsort::setMode(static_cast<int>(rs.fastSort->asInt()));
