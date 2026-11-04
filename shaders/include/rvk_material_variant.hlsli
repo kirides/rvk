@@ -215,7 +215,7 @@ void rvkMvAo(RvkFrame f, float3 P) {
 // ---- the Full-owned light table (enh/light_table, docs/research/gpu-scene.md 9.7) ------------------------------------------------------------
 // The shader's light loop reads its lights from rvk_cl (constant overrides of c[RVK_MV_CL_REG ..]); the prologue fills them: the engine's values
 // (this draw's list), then, when the table is valid for this frame, per pixel
-//   - an engine light the table does not know and that reaches this pixel stays (dynamic lights the registry misses, spells, flashes), as does
+//   - an engine light the table does not know (no table light within 8 units in the pixel's cluster) stays (dynamic lights the registry misses, spells, flashes), as does
 //     every engine light with a shadow channel selector (cubemap shadows: the table has none yet) together with its table twin (excluded)
 //   - the other slots take the best lights of the pixel's cluster, scored by luminance x falloff x (0.25 + 0.75 sat(N.L)); an unused slot gets
 //     colour 0 (the loop still runs, adds nothing)
@@ -296,7 +296,7 @@ void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
     // the slots: kept (shadow selector, or lit by a light the table does not know) or refilled from the top list
     uint next = 0;
     [unroll] for (uint i = 0; i < RVK_MV_CL_COUNT; ++i) {
-        bool keep = (selMask >> i & 1u) != 0u || ((litMask >> i & 1u) != 0u && (knownMask >> i & 1u) == 0u);
+        bool keep = (selMask >> i & 1u) != 0u || (rvkLmLum(rvk_cl[4 * i + 1].rgb) > 0.0 && (knownMask >> i & 1u) == 0u);
         if (keep) continue;
         uint pick = 0xFFFFFFFFu;
         [unroll] for (uint q = 0; q < RVK_MV_CL_COUNT; ++q) {
