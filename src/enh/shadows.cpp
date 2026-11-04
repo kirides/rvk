@@ -58,7 +58,7 @@ bool Shadows::ensureShaders() {
     const auto make = [&](const char* name, shader::Stage stage) {
         auto s = std::make_shared<d3d9::Shader>();
         s->stage = stage;
-        s->module = dev_.game().createShaderModule({.spirv = shader::embedded::spirv(name)});
+        s->module = dev_.game().createShaderModule({.spirv = shader::embedded::spirv(name), .dxil = shader::embedded::dxilOnDemand(name)});
         s->hash = nameHash(name);
         return s;
     };

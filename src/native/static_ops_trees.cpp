@@ -36,6 +36,20 @@ inline T get(const void* p, std::size_t off, T fallback = T{}) {
 inline U8* ptr(const void* p, std::size_t off) { return get<U8*>(p, off, nullptr); }
 inline bool rd(const void* p, std::size_t off, void* out, std::size_t n) { return p != nullptr && safeRead(static_cast<U8*>(p) + off, out, n); }
 
+// F2: an engine object's first N bytes read once (one SEH frame, one copy) instead of one guarded load per field (native.cpu_opts bit 2)
+template <std::size_t N>
+struct ObjSnap {
+    alignas(8) std::uint8_t b[N];
+    bool ok = false;
+    void load(const void* p) { ok = p != nullptr && engine::safeReadN<N>(p, b); }
+    template <class T>
+    T at(std::size_t off) const {
+        T v;
+        std::memcpy(&v, b + off, sizeof(T));
+        return v;
+    }
+};
+
 constexpr std::uint32_t kQsort = 0x4a4aa0;
 constexpr std::uint32_t kTreeAdmin = 0x25a6d0, kVegAdmin = 0x265df0;  // FUN_18025a6d0 / FUN_180265df0 (module singletons)
 constexpr std::uint32_t kSortInstances = 0x6f2180, kSortInstancesZ = 0x6f2120;
@@ -243,6 +257,7 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
     const bool hardware = get<std::int32_t>(admin, 0x320) != 0;
     ++(hardware ? st.hardware : st.software);
     const std::uint8_t limit = get<std::uint8_t>(rb, 0x128 + t);
+    const bool fastReads = opt(2);
     Geom g;
     const auto* record = hal::vulkan::HalPrimitive::fromApi(ptr(visual, 0x10));
     if (record == nullptr || !geometryOfVisual(visual, g)) return Skip::Primitive;
@@ -282,8 +297,16 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
         const float vy = get<float>(rb, type == 0 ? 0xa0 : 0xa4);
         for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(n); ++i) {
             U8* tree = treeOf(i);
-            if (ptr(tree, 0x40) == nullptr) return Skip::Unreadable;  // the engine reads the LOD values through it
-            const std::int32_t lod = get<std::int32_t>(tree, lodAt, -1);
+            std::int32_t lod;
+            if (fastReads) {
+                ObjSnap<0x70> ts;
+                ts.load(tree);
+                if (!ts.ok || ts.at<U8*>(0x40) == nullptr) return Skip::Unreadable;  // the engine reads the LOD values through it
+                lod = ts.at<std::int32_t>(lodAt);
+            } else {
+                if (ptr(tree, 0x40) == nullptr) return Skip::Unreadable;
+                lod = get<std::int32_t>(tree, lodAt, -1);
+            }
             if (lod < 0) continue;
             sc::TreeInstance x;
             x.queueIndex = i;
@@ -291,8 +314,15 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
             x.start = get<std::uint16_t>(rb, startAt + 2 * static_cast<std::size_t>(lod));
             if (!zpass) {
                 U8* il = illumOf(i);
-                x.list = ptr(il, 0);
-                x.alone = get<std::uint8_t>(il, 0x90) != 0 || get<std::uint8_t>(il, 0xd) != 0;
+                if (fastReads) {
+                    ObjSnap<0x98> is;
+                    is.load(il);
+                    x.list = is.ok ? is.at<U8*>(0) : nullptr;
+                    x.alone = is.ok && (is.at<std::uint8_t>(0x90) != 0 || is.at<std::uint8_t>(0xd) != 0);
+                } else {
+                    x.list = ptr(il, 0);
+                    x.alone = get<std::uint8_t>(il, 0x90) != 0 || get<std::uint8_t>(il, 0xd) != 0;
+                }
             }
             inst.push_back(x);
         }
@@ -335,18 +365,31 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
             alpha.clear();
             for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(n); ++i) {
                 U8* tree = treeOf(i);
-                if (ptr(tree, 0x40) == nullptr) return Skip::Unreadable;
                 float a = 0.0f;
-                const std::int32_t l0 = get<std::int32_t>(tree, 0x58, -1), l1 = get<std::int32_t>(tree, 0x5c, -1);
+                std::int32_t l0, l1;
+                float r0 = 0, r1 = 0;
+                if (fastReads) {
+                    ObjSnap<0x70> ts;
+                    ts.load(tree);
+                    if (!ts.ok || ts.at<U8*>(0x40) == nullptr) return Skip::Unreadable;
+                    l0 = ts.at<std::int32_t>(0x58);
+                    l1 = ts.at<std::int32_t>(0x5c);
+                    r0 = ts.at<float>(0x60);
+                    r1 = ts.at<float>(0x64);
+                } else {
+                    if (ptr(tree, 0x40) == nullptr) return Skip::Unreadable;
+                    l0 = get<std::int32_t>(tree, 0x58, -1);
+                    l1 = get<std::int32_t>(tree, 0x5c, -1);
+                }
                 if (shadow) {
                     // RenderLeafsZPass 0x6f0860 in a shadow map: the one leaf LOD min(+0x58 + 1, LODs - 1), global alpha 1
                     const std::int32_t l = l0 < 0 ? -1 : std::min(l0 + 1, lods - 1);
                     if (l != lodi) continue;
                     a = one_;
                 } else if (l0 == lodi && l0 > -1) {
-                    a = fixedRef / get<float>(tree, 0x60);
+                    a = fixedRef / (fastReads ? r0 : get<float>(tree, 0x60));
                 } else if (l1 == lodi && l1 > -1) {
-                    a = fixedRef / get<float>(tree, 0x64);
+                    a = fixedRef / (fastReads ? r1 : get<float>(tree, 0x64));
                 } else {
                     continue;
                 }
@@ -354,8 +397,15 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
                 x.queueIndex = i;
                 if (!zpass) {
                     U8* il = illumOf(i);
-                    x.list = ptr(il, 0);
-                    x.alone = get<std::uint8_t>(il, 0x90) != 0 || get<std::uint8_t>(il, 0xd) != 0;
+                    if (fastReads) {
+                        ObjSnap<0x98> is;
+                        is.load(il);
+                        x.list = is.ok ? is.at<U8*>(0) : nullptr;
+                        x.alone = is.ok && (is.at<std::uint8_t>(0x90) != 0 || is.at<std::uint8_t>(0xd) != 0);
+                    } else {
+                        x.list = ptr(il, 0);
+                        x.alone = get<std::uint8_t>(il, 0x90) != 0 || get<std::uint8_t>(il, 0xd) != 0;
+                    }
                 }
                 inst.push_back(x);
                 alpha.push_back(a);

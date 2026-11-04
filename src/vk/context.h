@@ -131,6 +131,9 @@ public:
     // the capability report of this device (core/caps.h): GPU, driver, optional features available / enabled + reasons.
     // `pipelineLibrariesInUse`: [vulkan] pipeline_libraries (the device enables the extension; the pipeline cache decides)
     caps::Report capabilities(bool pipelineLibrariesInUse) const;
+    // information-only survey of features the renderer does not use yet (opacity micromap, shader execution reordering, VRS, mesh shaders,
+    // subgroup sizes, resizable BAR, ...) as caps properties; the Vulkan side of docs/research/dx12-game-port.md "D3D12 feature availability"
+    void appendFeatureSurvey(caps::Report& r) const;
 
     // validation messages of severity error seen so far (tests assert 0)
     std::uint32_t validationErrors() const { return validationErrors_.load(); }

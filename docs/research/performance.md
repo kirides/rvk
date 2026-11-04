@@ -88,7 +88,7 @@ in the main menu at the end).
 
 ## 4. Frame pacing
 
-`vk::FramePacer` (`src/vk/pacer.*`), the waiting adapted from GD3D11's `fpslimiter.h` (same author): QPC time base, a
+`pacing::FramePacer` (`src/core/pacer.*`), the waiting adapted from GD3D11's `fpslimiter.h` (same author): QPC time base, a
 high-resolution waitable timer for the bulk, a `YieldProcessor` spin for the rest. Changes:
 
 * **Cadence**: frame k is released at t0 + k x interval; a slightly late frame is made up by the next one (exact average
@@ -514,3 +514,254 @@ buffers reused, LOD diagnostics without per-call allocation. Result: Full 5.03 -
 -0.13 ms in both (~2 %); vcruntime140 share Full 9.1 -> 7.5 %, Wrapper 5.4 -> 3.1 %. No item above ~1 % of the thread is left in
 the device path; merged indirect draws would not touch the engine thread (plan.md 8.4). Remaining engine-thread time is the
 engine itself (Engine.dll 18 % / 33 %, sharedbase 8 / 11 %), SEH-guarded engine reads (3 %) and the driver's inline `vkCmd*` (4.5 %).
+
+## 21. CPU pass 3: fresh profile of both backends, XInput, typed op sort, D3D12 pipeline hash (2026-11-04)
+
+Scene and recipe as in 14 (perf savegame `out/fg/perf.save`, lod 2x, `-Exe RisenTest.exe -Vsync off -PlayerDefaults -Perf [-CpuProfile]`, scenario
+`rvk_perfsave`, hold 60; D3D12 = `-Api d3d12`, Full on D3D12 = `-Mode wrapper -Setting renderer.mode=full`). Scripts `out/cpu/run1.ps1` /
+`batch*.ps1` (git-ignored); `tools/profsum.py` averages the named `diag: profile module|self|incl` lines over the steady windows (ms per frame =
+share x the frame interval) and symbolizes our unnamed functions (`--dll`). The profiler and `-Perf`'s timers cost ~0.4 ms
+(`RtlQueryPerformanceCounter` 0.18 + `steady_clock::now` 0.22 + `msvcp140 _Query_perf_counter` 0.2 are measurement artefacts, not in normal play).
+
+### 21.1 Profile (build 13e14e6 + profiler, 9 windows of 5 s, ms per frame of the engine thread)
+
+| | Vulkan wrapper | D3D12 wrapper | Vulkan full | D3D12 full |
+|---|---|---|---|---|
+| frame interval (profiled) | 5.55 | 5.66 | 8.09 | 8.24 |
+| d3d9.dll (ours) | 1.98 | 1.97 | 4.37 | 4.40 |
+| Engine.dll | 1.57 | 1.50 | 1.03 | 1.04 |
+| ntdll | 0.65 | 0.68 | 0.65 | 0.63 |
+| driver: amdvlk64 / amdxc64 + d3d12core | 0.48 | 0.53 + 0.16 | 0.58 | 0.61 + 0.17 |
+| sharedbase.dll | 0.42 | 0.41 | 0.42 | 0.40 |
+| vcruntime140 (memcpy / memmove) | 0.21 | 0.19 | 0.76 | 0.68 |
+
+Inclusive, ranked (wrapper, Vulkan / D3D12; Full differs where noted):
+
+| rank | item | ms (VK / D3D12) | note |
+|---|---|---|---|
+| 1 | `eCFrustumDatabase::Execute` (main view) | 3.15 / 3.25 | contains the HAL: `eCGfxVisual::Execute` 2.16 / 2.19 (engine draws incl. ours); Full: `StaticOps::opEnter` 4.6 |
+| 2 | our draw path `Device::drawIndexedPrimitive` | 2.06 / 2.10 | `prepareDraw` 1.51 / 1.63 (D3D12 +0.12: the pipeline hash, fixed below), `computeVertexInput` 0.26, `splitStage` 0.07 self |
+| 3 | `eCCameraBase::Update` (sun cascades: `RenderShadowMaps` 0.64) | 0.95 / 1.00 | `ExecuteShadowMap` 0.34; SpeedTree leaves / fronds / branches in the main view 0.43 + 0.23 + 0.21 |
+| 4 | `eCProcessor::Process` (game logic, illumination 0.18, sky cube 0.16) | 0.72 / 0.71 | engine |
+| 5 | injected passes (`Device::inject`) | 0.39 / 0.59 | ocean 0.20 / 0.34 (64 mip blits), `CopyCurrentRTToImage` 0.26 / 0.42 |
+| 6 | `RtScene::observe` | 0.35 / 0.34 | |
+| 7 | frustum extract / request: `OnQueryNodes` 0.30, `Request` 0.22, `ExtractFromFrustum` 0.19, `RequestRenderOps` 0.25, `CullCamera` 0.16 | ~1.0 | `eCBeamTree::Cull` self 0.13 - 0.16 + `bCPlane::ClassifyPoint` 0.04 + `bCSphere::Contains` 0.02 = ~0.22 (4 %) |
+| 8 | **XInput**: `eCInputAdmin::UpdateX360` -> `XInputGetState` (through the Steam overlay's hook) | **0.13 / 0.16** | a disconnected pad = a driver call (`NtDeviceIoControlFile`) per index per frame: **2.5 - 3 %**; fixed below |
+| 9 | the engine's CRT `qsort` of the op lists | 0.038 | measured by an instrumented detour (the "2 %" estimate in 13 was too high) |
+| 10 | record threads: `NtWaitForAlertByThreadId` 0.06 + `NtAlertThreadByThreadId` 0.05 + critical sections 0.05 | ~0.16 | already minimised (14.1) |
+| 11 | `eCFrustumDatabase` copy ctor 0.01, `SetTime` loop 0.02, `SetCurrentRenderStates` 0.03 | < 0.06 | each < 0.6 %: not built |
+
+D3D12-only (wrapper, vs Vulkan): the `std::unordered_map<PipelineDesc>` hash (`DescHash`, byte-wise FNV over 520 bytes) 0.12 - 0.17 ms (D3D12 has
+no EDS3 / dynamic vertex input, so the 52-byte recent-pipeline compare of `findPipeline` misses more and the full map lookup runs; also behind
+`blitDraw`), `D3DCommandList::transitionRange` 0.17 + `blitTexture` 0.21 (the blit is a draw: an SRV and an RTV created per blit, two barrier calls
+around it; the ocean's mip chains are 64 of them per frame), `d3d12core` + `amdxc64` 0.69 vs `amdvlk64` 0.48 (runtime + driver +0.21). Injected
+passes 0.59 vs 0.39 (the blits again).
+
+### 21.2 Changes (each behind a Debug setting, A/B'd; savegame, wrapper, 14 windows per run, 3 interleaved runs per arm, `-Perf` CPU = engine + HAL)
+
+| change | setting | result |
+|---|---|---|
+| **XInput throttle** (`engine/xinput_throttle.*`): after `ERROR_DEVICE_NOT_CONNECTED` the index is not asked again for 1 s (hooks `XInputGetState` / `XInputSetState` of xinput1_4 once it is loaded; a connected pad is polled every frame) | `debug.xinput_interval` (ms, default 1000, 0 = off) | CPU 4.707 -> 4.618 ms (-0.09, -1.9 %) alone; the profile lines are gone (0.13 / 0.16 ms -> 0). Not tested with a connected pad (none here): by construction only a "not connected" answer is cached |
+| **typed op sort** (`engine/fast_sort.*`): the statically linked CRT `qsort` (0x4a4aa0) for the z / solid / alpha op lists (24-byte records; comparators 0x66e670 / 0x66e6a0 / 0x66e600) replaced by the same algorithm (read from the disassembly: median of three, cut-off 8, same partition and stack order) with inlined comparators; other callers go to the original | `debug.fast_sort` (1 default, 0 off, 2 = also run the engine's qsort on a copy and compare: rvk.log `fast sort: N lists compared ..., 0 differ`) | **bit-identical** (unit test against the UCRT's qsort, equal keys included; in game mode 2 in Wrapper and Full with the static / scene ops compares and `lean_check=10`: 0 differences, `mismatches: none`). Sort cost 7.3 -> 2.8 ms per second (8.0 -> 3.0 us per list, ~920 lists / 122,000 ops per second) = **0.038 -> 0.015 ms per frame (-0.5 %)**, below the A/B noise (A/B CPU +0.035 and -0.03 ms in two pairs). Kept: free and exact. The frame tap's qsort prologue check accepts the hook |
+| **D3D12 `PipelineDesc` hash**, 8 bytes per step instead of byte-wise FNV (`d3d12_game_priv.inc` `DescHash`) | none (pure) | D3D12 CPU 5.026 -> 4.812 ms (-0.21, -4.3 %; about -0.09 of it the hash, the rest XInput + sort) |
+
+**D3D12 vs Vulkan** (wrapper, CPU per frame, 3 runs each): before 5.026 (5.016 / 5.043 / 5.018) vs 4.707 (4.749 / 4.699 / 4.672) = **+6.8 %**;
+after 4.812 (4.818 / 4.827 / 4.792) vs 4.588 (4.594 / 4.596 / 4.574) = **+4.9 %** (goal <= +5 %). The remaining gap is the injected passes
+(0.51 vs 0.35: the ocean's mip blits) and the D3D12 runtime / driver (+0.2). Plain interval p50 (Vulkan) 5.21 -> 5.05 ms with both Vulkan
+switches on (-0.16 ms, -3 %).
+
+### 21.3 Evaluated, not built
+
+* **Frustum cull replacement (SIMD / batched `eCBeamTree::Cull`)**: the sphere / box cull is a pointer walk of an occluder beam tree
+  (`bCPlane::ClassifyPoint` through SharedBase per node, one explicit stack), not a batch of independent plane tests; all of cull is ~0.22 ms
+  (4 %, under the 5 % bar). A bit-identical inline detour would save the ClassifyPoint calls and the stack cookie only (~0.05 ms, 1 %) and must
+  reproduce SharedBase's float formula exactly. The walk repeats per sun cascade (`ExecuteShadowMap` 0.34). Not worth the risk.
+* **Off-thread resource work on our side**: in the steady state texture uploads are 0 KiB per frame and 0 pipelines / shaders are built per
+  interval (the 5 s `perf:` lines); in the first world frames 8 pipelines (115 ms, asynchronous, the draw is skipped meanwhile) and 330 KiB of
+  textures: nothing is left on the engine thread to move to the workers. The frame-time spikes of a still scene (p95 6.2 ms, an occasional 17 -
+  27 ms max per 5 s) and the loading screens (680 / 617 ms frames) are the engine's own streaming / loading on the presenting thread (engine
+  surgery, out of scope).
+* **Drop far ops from the z pre-pass (13 (1))**: not built: no profile share above 3 % to win (the z-list sort and the z draws are inside rank 1)
+  and the depth map feeds the shadow mask, SSAO, DoF and water.
+* **SetTime skip, `eCFrustumDatabase` copy, redundant render / sampler state filter in the HAL**: each < 0.6 % of the thread (0.01 - 0.03 ms);
+  `setSamplerState` / `setRenderState` self time is 0.26 % + 0.17 %: a HAL state cache would have to stay bit-exact for ~0.02 ms.
+* **Compute mip generation / batched barriers for `blitDraw` on D3D12**: the largest D3D12-only item left (~0.1 ms of the 0.2 gap): needs a
+  compute mip-chain pass in `rhi::CommandList` (or batching the per-blit barrier pairs); not done in this pass.
+
+### 21.4 Gates and Full mode (2026-11-04)
+
+Full mode (Vulkan, savegame, 2 interleaved runs each, all new switches on vs the 13e14e6 DLL): CPU per frame 6.910 / 6.911 -> 6.729 / 6.821 ms
+(-0.14 ms, -2.0 %; p50 interval 7.61 / 7.57 -> 7.41 / 7.50). Gates: `rvk_tests` 215 / 215, `rvk_d3d9test --validation` (Vulkan and D3D12) 0 failures /
+0 validation errors, `rvk_rhitest --validation` PASS, `testdemo` 7 / 7 PASS with `-Validation` on Vulkan wrapper + full and D3D12 wrapper + full (0 validation
+lines in rvk.log), Full compare run (`native.static_ops_compare`, `scene_ops_compare`, `lean_check=10`, `debug.fast_sort=2`) `mismatches: none`, 0 sort
+differences. `refcompare` vs `out/refcompare/20261103-130010`: Vulkan 11 PASS / 6 WARN / 3 FAIL (`harbour_docks`, `sea_cliff`, `harbour_mouth` = the known
+sea-edge noise), D3D12 12 / 6 / 2 (`sea_cliff`, `harbour_mouth`); no new FAIL (`out/refcompare/20261104-021314` Vulkan, `20261104-021937` D3D12).
+
+## 22. Ocean mip chains by compute (2026-11-04)
+
+The FFT ocean's displacement + derivative images (2 per cascade, 4 cascades at High: rgba16f, 128 / 256 / 512 squared, 8 - 10 levels) got their mips
+from one blit per level (64 blits per frame on the savegame's quality, each an SRV + RTV and two barrier calls on D3D12). Now
+`shaders/water/ocean_mips.comp.hlsl` (structure of AMD FidelityFX SPD, MIT: a workgroup reduces a tile through groupshared memory, several levels per
+dispatch; attribution in the file header) writes them: per image **dispatch A** mip 0 -> 1..6 (one group of 16 x 16 threads per 64 x 64 texels, 16 KiB
+groupshared) and **dispatch B** mip 6 -> 7..9 (one group; the source is at most 8 x 8), one `computeBarrier` between all A and all B dispatches and
+no per-level layout transitions (every level in GENERAL, then one transition to SHADER_READ_ONLY). Not SPD's single dispatch: the last-group stage
+needs a globallycoherent UAV + an atomic counter, and the root signature's storage images (u0..u7 space1) hold a source + 6 destination levels per
+dispatch anyway, so two dispatches without cross-group reads are the simple, portable form (no globallycoherent in the HLSL / DXIL path, no counter
+reset). Filter: the 2 x 2 box = what the bilinear blit of a power-of-two level computes (all sizes are 128 / 256 / 512); intermediate levels stay float
+inside a group (the blit rounds to half per level: difference <= 1e-3, one half ulp). Switch `debug.ocean_spd` (Debug, default on; off = the blits,
+kept for A/B; also the fallback when the GPU lacks 16 KiB of shared memory).
+
+**Gates.** `rvk_rhitest` test "ocean mip chain by compute" (128 and 512, random + smooth field, vs a CPU box chain): worst difference 9.5e-4 (half
+rounding) on both backends, **Vulkan vs D3D12 bit-identical** (difference 0 over 350,000 values); `dxil-check embedded` and the pipelines test
+include the new shader; `rvk_tests` 215 / 215, `rvk_vktest --passes` PASS. Pictures (`water-compare`, `water.ocean=fft`, spd off left vs on right,
+sea_cliff / sea_horizon / harbour_mouth / beach_sun, `tools` diff = mean absolute difference per pixel, 0..255): SPD vs blit on Vulkan 2.0 / 0.11 / 0.25
+/ 2.9, on D3D12 3.3 / 0.17 / 0.93 / 3.9 (beach_sun / sea_horizon / harbour_mouth / sea_cliff), against the **same-setting noise** (spd on vs on) 2.6 /
+0.31 / 0.84 / 2.2 (Vulkan run 3.3 / 0.08 / 0.22 / 4.2): the surf's splash particles and eye adaptation dominate; the waves are identical to the eye.
+
+**Numbers** (savegame recipe of 14 / 21, wrapper, lod 2x, `-Perf`, 3 interleaved runs per arm; CPU = engine + HAL per frame, mean of the last 10
+windows; one off-arm run per backend was a 6.6 / 7.7 ms outlier (other load), shown in the means, medians of the other two in brackets):
+
+| | Vulkan off (blits) | Vulkan on | D3D12 off | D3D12 on |
+|---|---|---|---|---|
+| CPU ms per frame | 5.284 (4.652 / 6.614 / 4.585; ex outlier 4.62) | **4.506** (4.450 / 4.625 / 4.442) | 5.784 (4.823 / 4.820 / 7.709; ex 4.82) | **4.556** (4.566 / 4.544 / 4.557) |
+| `water.ocean` pass CPU | 0.215 | **0.048** | 0.355 | **0.099** |
+| all injected passes CPU | 0.318 | 0.144 | 0.467 | 0.194 |
+| `pass water.ocean` GPU (`-PerfFrame 4000`, 24 frames, 2 runs) | 0.421 / 0.419 | **0.318 / 0.286** | 0.557 / 0.590 | **0.247 / 0.366** |
+
+CPU: -0.12 ms (-2.5 %) on Vulkan, -0.26 ms (-5.5 %) on D3D12 against the clean off runs; the ocean's CPU 0.215 -> 0.048 / 0.355 -> 0.099. GPU: the
+chain is 0.1 ms (Vulkan) to 0.2+ ms (D3D12) cheaper (fewer barriers, 16 dispatches instead of 64 blits). **D3D12 vs Vulkan** (SPD on): 4.556 vs 4.506 =
+**+1.1 %** (was +4.9 %, 4.812 vs 4.588).
+
+Validation / regression gates (SPD on): `testdemo` 7 / 7 PASS with `-Validation` on Vulkan wrapper + full (also sync validation) and D3D12 wrapper + full, 0
+validation lines in rvk.log; `water-compare` (sea_cliff / sea_horizon / beach_sun, `water.ocean=fft`, `water.ocean_quality=high`) with `-Validation` (+ sync
+validation on Vulkan) 0 validation lines on both backends (rvk.log `mip chains by compute`); `refcompare` vs `out/refcompare/20261103-130010`: Vulkan 11 PASS /
+7 WARN / 2 FAIL (`harbour_mouth`, `sea_cliff`), D3D12 13 / 5 / 2 (same two): no new FAIL. Gotcha: `-Setting` bools are lowercase `true` / `false`
+(`True` / `False` from PowerShell are not parsed: an A/B arm silently stayed on). Rejected: a true single-dispatch SPD with a global counter (no
+globallycoherent in our HLSL / DXIL path, 8 storage image slots); not needed, the two dispatches already remove the per-level cost.
+
+## 23. Streaming and loading screens (2026-11-04; details docs/research/streaming.md)
+
+The frame-time spikes of a still scene and the loading screens (21.3: "the engine's own streaming on the presenting thread") were profiled with
+the new spike profile (`-CpuProfile`: samples more than `RVK_SPIKE_MS` = 8 ms into a frame, `diag: spike` rows, `tools/spikesum.py`).
+
+* **Still scene**: frames over 8 ms are rare (64 ms of time beyond 8 ms in 90 s); 29 % of them is `FMOD::System::createSound` (a sound that
+  left the cache plays again: `gCEffectCommandPlaySound` -> `eCSoundResource2::Play` -> direct `QueueData` -> decode, 1 - 18 ms), the rest our
+  first draws / the engine's render. p95 vs p50 (5.9 vs 5.4 ms) is plain frame variance. **Walking** (55 s): 18 ms beyond 8 ms in total, no
+  resource load in any stack. Resource file IO of the lazy queue is already asynchronous (FFC async read + completion queue); only the
+  parse (`OnLoadData`) is on the engine thread and not provably thread-safe (streaming.md 4).
+* **Loading screens**: 40 % of the engine thread was `NtReadFile` / `SetFilePointerEx` (FileSystem2's packed stream: two system calls per
+  Read, 6 million Reads per load) and 22 % `eCSkydome_PS::CreateAbsorbationImage` (128 divisions per pixel, 2 x 280 ms per load).
+* **Built** (`engine/load_accel.*`): `debug.fs_read_cache` (KiB, default 64; read-ahead of packed streams; 6.48 M buffered reads verified
+  against the engine's own reads, 0 differ), `debug.fast_absorb` (default 1; sliding windows, bit-identical, `=2` compares in-game: 0 rows
+  differ), `debug.sound_compressed` (default off; sounds as compressed FMOD samples: 320 -> 12.5 ms of `createSound` per 257 sounds; audio
+  unchecked), `debug.stream_stats` (1 = timing + `engine: stream:` lines, 2 = verify the buffer). **Quick load 4.13 -> 2.78 s (-33 %),
+  new game 6.2 -> 3.9 s (-37 %)**; still-scene CPU unchanged.
+
+## 24. Full mode CPU: where the gap to Wrapper is, first batch (2026-11-04)
+
+Goal (user): `-Mode full` as the main mode, Full - Wrapper <= ~0.5 ms. Recipe as in 21 (savegame `out/fg/perf.save`, lod 2x, `-Perf`; profiled with `-CpuProfile`,
+`tools/profsum.py`, `tools/pcsites.py --callers`, `tools/pcprofile.py`; scripts `out/cpx/run1.ps1` / `ab.py`, git-ignored). Profile of main cb5097a (1 % = 0.078 ms;
+Full 7.82 ms interval profiled, Wrapper 5.38; 1,290 draws per frame in both):
+
+| item (inclusive, ms per frame) | Wrapper | Full | note |
+|---|---|---|---|
+| `eCFrustumDatabase::Execute` main view | 3.18 | 4.79 | +1.6 |
+| of it the device draw path (`drawIndexedPrimitive`, `prepareDraw` 1.54 / 1.64) | 2.07 | 2.19 | **parity**: the same code, the same draws |
+| engine slot code (Wrapper) vs our composition + `issue` bookkeeping + lean commit (Full) | ~1.1 | ~2.3 | `opEnterImpl` 4.51 = `issue` 2.52 (2.19 of it the draw) + compose / commit ~2.0 (sky cube 0.49 of it) |
+| sky cube faces (`UpdateSkydomeEnvCubemap`, 5 faces per frame) | 0.15 | 0.52 | +0.37: star vertices converted + copied 3-4 times per face |
+| sun cascades / shadow-view ops (`eCCameraBase::Update`) | 0.88 | 1.16 | +0.28 |
+| effect units (`effectBegin`, ~25 units / ~45 draws) | 0.25 | 0.45 | +0.2 |
+
+Module view (profiled): ours 1.98 -> 4.37, Engine.dll 1.48 -> 0.96, vcruntime140 0.20 -> 0.79 (memcpy / memmove). So the per-draw device path is shared, the engine
+already runs less in Full, and the gap is our composition being ~2x the engine's own slot code for the same ops (plus the sky cube). **There is no single hot spot**:
+`pcprofile` self time is flat (largest: `skyBillboardVertices` 2 %, `setVertexShaderConstantF` 1.9 % (the issue-time compare + copy), `safeLoad8/4/1/2` 3.3 % + `safeRead`
+1.9 % = ~0.4 ms of guarded engine reads, mostly cache misses on engine memory that the engine's own slot code paid before, `prepareDraw` 2.5 %). The 5 - 6 us per composed
+draw = ~1.5 us composition + ~0.3 us `issue` bookkeeping + ~1.6 us shared device path + the rest of the frame.
+
+### 24.1 Changes (`native.cpu_opts` bit mask, Debug, default 255: bit 1 sky cache, bit 2 batched tree-object reads; the CRT-call removal is unconditional)
+
+| change | evidence | result |
+|---|---|---|
+| sky objects: scratch vectors + the converted star vertices / quad indices kept per sky object while the input billboards are byte-equal (the sun / moon / stars alternate inside one cube face: a single entry thrashed and did not hit; one entry per object does) | `skyObjectDraws` 0.337 -> 0.151, `skyCubeBegin` 0.49 -> 0.31 (profile) | -0.18 ms |
+| inline SSE register-run copies (`d3d9::copyRegisters`) in `constantsInto`, `issue`'s save runs, `setVertexShaderConstantF` / `setPixelShaderConstantF`, `splitStage` (each was a CRT `memcpy` call per run, ~20 runs per draw) | vcruntime140 0.79 -> 0.55 ms, d3d9 +0.15 | ~-0.08 ms |
+| SpeedTree composition: tree / illumination objects read as one 0x70 / 0x98 byte snapshot instead of 6 + 3 guarded loads per instance | `composeTree` 0.73 -> 0.77 (profile noise) | neutral (the cost is the cache misses, not the call count); kept behind bit 2 |
+
+A/B (Full, savegame, 3 runs each, last 14 windows, `-Perf` CPU = engine + HAL, `build\Base` = cb5097a): **6.898 (6.736 / 7.005 / 6.954) -> 6.532 (6.534 / 6.549 / 6.512) ms, -0.37 ms
+(-5.3 %)**; interval p50 7.36 -> 7.08 ms. Wrapper (same session) 4.560 (4.549 / 4.572). **Full - Wrapper 2.34 -> 1.97 ms.** (The machine is shared with other agents; the
+arms were interleaved; a first `cpu_opts=0` run at 8.9 ms was a disturbed outlier.) Gates: `rvk_tests` (settings count), Full `testdemo` 7 / 7 with `-Validation` + `native.static_ops_compare`
++ `scene_ops_compare` + `lean_check=10`: every group `mismatches: none`, 0 validation messages (own copy, instance 4).
+
+### 24.2 What is left and what it would take
+
+Remaining Full - Wrapper ~2 ms = composition ~1.0 ms more than the engine's slot code, sky cube +0.2, shadow-view ops +0.28, effect units +0.2, the rest spread. Items measured and
+**not** worth it: dropping the per-op device restore (0.07 ms, 21), more SEH-call removal (the cost is cache misses), retained composition (19), merged indirect draws (8.4), device-generated
+commands (12). To reach <= +0.5 ms the composition must stop being a second pipeline staged through `DrawDesc` (mirror -> `DrawDesc.vsF` -> device registers with compare -> window block ->
+ring = 3 copies of the constants; the engine's own path has 2): **compose each draw straight into the device and issue it per draw** (streaming `newDraw` + `issue`, no per-op draw list; needs the
+compare modes to keep the list path) is the structural change with the largest estimate (~0.5 - 0.8 ms: the copy chain, `newDraw` clears of a ~5 KB descriptor, the op-wide save pass), followed by
+**moving the shadow-view and sky-cube compositions onto a worker** (they only read engine memory the lean path no longer mutates; ~0.4 ms but needs a thread-safe `Device` draw interface: the render-thread
+split that 14.1 / 15.1 rejected).
+
+### 24.3 Bounds for the structural changes, and gates (2026-11-04, second pass)
+
+**Streaming each composed draw into the device** (drop the per-op `DrawDesc` list): bounded from the profile before building it. What it can remove: `newDraw` clears (0.04 + CRT 0.04 ms), one of the
+three constant copies (`constantsInto` 0.28 ms must still write the final registers; the compare + copy in `setVertexShaderConstantF` 0.21 ms is the part that goes), `issue` bookkeeping
+(self 0.13 + CRT 0.25 ms, partly the save / restore). Upper bound ~0.4 ms, realistic ~0.2 ms (not the 0.5 - 0.8 first guessed). And it breaks the composition's atomicity: ops fall back to
+the engine when a composition returns a `Skip` after some draws were composed (`Unreadable`, `NotCompiled`, ...), so earlier draws would already have been drawn. Not built; a streaming path
+would have to validate the op up front (a read-only dry run = the composition cost again).
+
+**Composition on a worker** (structural change 2): blocked by the contract of the lean path, not by locks. (1) `opEnter` must answer synchronously whether the engine's slot runs (a `Skip` = it
+runs); a deferred composition cannot say. (2) The composition mutates `mirror_` (world / alpha / instance registers written per draw) in op order, and the lean commit's side effects
+(touches, instance / tree queue sorts in place, palettes `UpdateRenderMatrices`, particle depth sort, MaskReference stores, class pools) write engine memory the next op's composition
+reads, so they must stay on the engine thread, in order, before it. (3) Shadow-view and sky-cube compositions read the same live objects the engine thread keeps changing between slots (shader
+pools via `SetSwitch`, the admin's view fields). A one-worker in-order pipeline would only overlap composition with *skipped* slots (nothing) - there is no engine work to overlap with in
+lean mode, so the engine thread would just wait for the worker. Estimated gain ~0 ms. Rejected for the same reason as 14.1 / 15.1.
+
+**The device path is the shared 2.2 ms** (`prepareDraw` 1.7 incl: `RtScene::observe` 0.36, `computeVertexInput` 0.27, `uploadConstants` 0.15, `prepareTextures` 0.13, pipeline / intern / dynamic
+~0.2). A draw-state fingerprint fast path in Full only (the composed `DrawDesc` already knows pipeline, vertex input and textures; 78 % of consecutive draws differ only in constants) could reuse
+`computeVertexInput` + `prepareTextures` + pipeline / intern for ~0.4 - 0.5 ms and would be the largest remaining Full-only gain; it touches the 670-line `prepareDraw` and every consumer of its
+results (RT scene, replacers, object motion, G-buffer variants), so it needs its own stage with the compare tools as the gate. Not built here.
+
+**Gates** (build 382a1bd): `rvk_tests` 215 / 215; `rvk_d3d9test --validation` Vulkan and D3D12 `PASS: 0 failure(s), 0 validation error(s)`; `testdemo` 7 / 7 with `-Validation` on Vulkan wrapper,
+Vulkan full, D3D12 wrapper, D3D12 full (0 validation lines each; own copy, instance 4); Full compare run (`static_ops_compare`, `scene_ops_compare`, `lean_check=10`) `mismatches: none`.
+**D3D12 CPU** (savegame, 2 runs per arm, interleaved): Full 6.727 (6.739 / 6.716) vs Wrapper 4.794 (4.789 / 4.799) = **+1.93 ms**; Vulkan Full - Wrapper +1.97 ms.
+`refcompare` vs `out/refcompare/20261103-130010` (Vulkan Full, 5 spots): jungle / beach_rain / pub_interior PASS, hero_closeup WARN (ssim 0.972, noise), harbour_night FAIL once (dluma -3.6, the known night
+noise) and PASS twice on re-run (cpu_opts 255 +0.39, cpu_opts 0 +0.37). Not run: D3D12 refcompare, the jungle CPU spot, the 17-spot route.
+
+### 24.4 Draw-state fingerprint: measured ceiling; jungle; D3D12 refcompare (2026-11-04, third pass)
+
+**Fingerprint fast path in `prepareDraw`: not built, the ceiling is too low.** A diagnostic (reverted) compared, at every `prepareDraw`, everything the derivation reads (shaders, declaration, the 4
+stream tuples, index buffer, the 100+ render states, the bound stages' textures + sampler states, viewport, targets, kind / view / pass, primitive type) with the previous draw: **17.8 % of the
+Full draws at the savegame (5 M draws) are identical to their predecessor**. The derivation it would skip costs `computeVertexInput` 0.27 + `prepareTextures` 0.13 + `computeDynamicState` / intern /
+`findPipeline` ~0.15 = ~0.55 ms, so the saving is ~0.1 ms (and the pieces keyed on fewer inputs, e.g. the vertex input on shader + declaration + streams, would hit more often but then save one
+component each). Below the noise; the consumers' complexity (observers, replacers, variants, G-buffer) is not worth it.
+
+**Composing per material / per tree type once.** The tree work is per batch, not per instance: per frame ~168 tree ops, ~1,900 instances in ~650 batches, 70 vegetation draws; `materialDraws` costs
+0.70 ms = ~1.07 us per batch, of which `constantsInto` + `materialSamplers` are 0.42 (the live registers copied from the mirror: they must be redone because the instance rows differ per batch) and the
+pass logic ~0.15. A clone-and-patch of the previous batch's `DrawDesc` (same shader / illumination / geometry stream) would redo the constants, switch writes, lighting, touches and tag - exactly what the V3
+replay did (0.57 us per hit, "net zero", plan.md 7.1) - so the ceiling is ~0.3 us x 650 = 0.2 ms. The engine's own tree code recomputes the same per batch (its `RenderBranches` / `RenderLeafs` ~1.0 ms in
+Wrapper), i.e. the per-batch cost is inherent to the engine's batch model, ours is on par (0.95 ms for trees + billboards). Static meshes: `composeOp` 0.44 vs the engine's `eCSubMesh::Render` +
+`RenderZPass` ~0.5-0.8: also on par. **Per group our composition is not slower than the engine's code; the difference to Wrapper is the sum of the parts the engine does not have to do**: sky cube
+(+0.16), effect units (+0.2), the `issue` bookkeeping (~0.4), the shadow-view ops (+0.28), the guarded reads, and the lean commit.
+
+**Jungle spot** (`rvkcompare` jungle hold, `-Perf`, last 3 windows, 2 runs each, `build\Base` = cb5097a): Full before 5.917 (5.933 / 5.900), after 5.975 (6.090 / 5.860) - no change within the noise (the
+spot has no night sky work; the sky cache does not apply), Wrapper 3.960 (3.973 / 3.947): **Full - Wrapper +2.0 ms**.
+
+**D3D12 refcompare** (Full via `renderer.mode=full`, 6 spots vs `20261103-130010`): jungle / pub_interior PASS, hero_closeup WARN, harbour_night + sea_cliff FAIL (the known night / sea-edge noise),
+beach_rain FAIL once (bad32 1.28) - flaky: the same spot PASSes in D3D12 Wrapper and in Full with `native.cpu_opts=255` on a re-run, FAILs with `cpu_opts=0`, so it is run-to-run noise (rain), not this change.
+
+**Floor.** Ceilings measured or bounded this pass: sky cube further ~0.15, streaming draws ~0.2, per-batch clone ~0.2, fingerprint ~0.1, effect units ~0.1: about 0.7 ms together, for large risk. The
+realistic floor of the current architecture (engine's code skipped, composition re-done per frame next to a shared 2.2 ms device path) is **Full - Wrapper ~1.3 ms** (Vulkan and D3D12). Getting to +0.5
+ms needs the composition's *results* to survive frames (retained composition across frames with an engine-side invalidation signal instead of a read log; V3's validation was only 0.05 ms, its replay cost
+was the constants / lighting / touches redone per frame), i.e. a persistent per-object GPU record, not a faster per-frame composition.
+
+### 24.5 Retained composition with engine change signals: study (2026-11-04)
+
+Full write-up: engine-frame/retained-signals.md. Signals exist for lifecycle and movement (OnCacheIn / OnCacheOut 0x6a9720 / 0x6a97b0, OnUpdatedWorldMatrix vt +0x230 / 0x69e8a0), none for materials, lights, LOD, fade (per-frame pulls / in-place writes). `native.retained` re-measured on the current build: 100 % hits (1,118 per frame), CPU 6.530 -> 6.444 ms (-0.09 ms), replay 0.52 us per hit vs ~0.62 composing: the redo of our own constants / lighting / touches is the cost, not validation. Estimate with signals + class-split patching: ~-0.4 ms, Full - Wrapper ~+1.6 ms: no-go for composition-only retention. Conditional go for retaining the packet (bypassing issue + prepareDraw, estimate -1 to -2.5 ms) as a separate project.
+
+### 24.6 Packet retention, stage 0: the ceiling (2026-11-04)
+
+`-Perf` now logs per group what `issue()` costs per draw and how much of it is the device call (retained-signals.md 7). Savegame Full: static meshes 2.10 us/draw (232 draws per frame), trees 1.56 (680), shadow views 1.59 (160), actors 1.77 (21), vegetation 2.50 (66); Vulkan and D3D12 within 3 %. Bypassing issue + prepareDraw at 0.3 us per replayed draw would save 0.42 ms for static meshes alone and ~1.5-1.7 ms with trees, shadow views, actors (vegetation, alpha). Static meshes alone do not reach -1 ms; the combination does.
+
+### 24.7 Packet retention, stage 1 (2026-11-04)
+
+`native.packet_cache` (Debug, default off): static-mesh + tree draws of the main view replayed from kept packets (retained-signals.md 8). Savegame, baseline settings, 3 runs each: Vulkan Full 5.470 -> 5.145 ms (-0.33), Wrapper 3.674, gap 1.80 -> 1.47; D3D12 5.78 -> 5.28, gap -> 1.46. Measured replay 0.35 us per draw; the section-7 ceiling (1.3 ms) was inflated by the RT scene observer that the player defaults have inside prepareDraw; with it active the cache is refused. Verify mode: 4.9 M checks, 0 differing.

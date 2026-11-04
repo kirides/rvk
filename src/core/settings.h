@@ -296,6 +296,7 @@ struct RendererSettings {
     Setting* menuFps = nullptr;      // vulkan.menu_fps: cap while a menu page is open (engine/menu_state.h); 0 = none
     Setting* exclusiveAcquire = nullptr;  // vulkan.exclusive_acquire: hold Vulkan's exclusive mode in exclusive fullscreen (hidden diagnostics)
     Setting* fullscreen = nullptr;   // vulkan.fullscreen: "borderless", "exclusive" (needs FullScreenExclusive; window-mode.md 8)
+    Setting* api = nullptr;          // vulkan.api: vulkan | d3d12 (restart)
     Setting* adapter = nullptr;      // vulkan.adapter: -1 = best discrete GPU (restart)
     Setting* toggleKey = nullptr;    // overlay.toggle_key
     Setting* abKey = nullptr;        // overlay.ab_key
@@ -416,11 +417,20 @@ struct RendererSettings {
     Setting* nativeLean = nullptr;             // native.lean: the engine's slot code not run for the composed mesh-like ops (O2a)
     Setting* nativeLeanCheck = nullptr;        // native.lean_check: every N-th frame the engine's code runs as before (compare)
     Setting* nativeLeanEffects = nullptr;      // native.lean_effects: O3 the effect units / sprite flushes / PSSM pass lean too (A/B)
+    Setting* nativePacketCache = nullptr;      // native.packet_cache: retained draw packets of the main view's static meshes + trees (retained-signals.md 8)
+    Setting* nativeOpts = nullptr;             // native.cpu_opts: bit mask of the Full-mode CPU optimizations (docs/research/performance.md 22)
     Setting* nativeLeanRestore = nullptr;      // native.lean_restore: false = no per-op device save / restore around lean ops (A/B)
     Setting* nativeRetained = nullptr;         // native.retained: V3 retained composition of the sub-mesh draws (A/B)
     Setting* nativeRetainedCheck = nullptr;    // native.retained_check: every replay recomposed fresh and compared
     Setting* nativeRetainedGroups = nullptr;   // native.retained_groups: bit mask of the groups that retain (bit = StaticOps::Group)
     Setting* shadowStride = nullptr;      // debug.shadow_stride: the sun cascades redrawn every n-th frame (engine::shadowmaps::setUpdateStride)
+    Setting* fsReadCache = nullptr;       // debug.fs_read_cache: read-ahead of packed file streams (engine::loadaccel)
+    Setting* fastAbsorb = nullptr;        // debug.fast_absorb: sliding-window cloud absorption image (engine::loadaccel)
+    Setting* soundCompressed = nullptr;   // debug.sound_compressed: short sounds as compressed samples (engine::loadaccel)
+    Setting* streamStats = nullptr;       // debug.stream_stats: loading work statistics (engine::loadaccel)
+    Setting* xinputInterval = nullptr;    // debug.xinput_interval: re-poll interval of a disconnected gamepad (engine::xinput)
+    Setting* oceanSpd = nullptr;          // debug.ocean_spd: the FFT ocean's mip chains by compute (enh::Ocean::setSpd)
+    Setting* fastSort = nullptr;         // debug.fast_sort: typed sort of the render-op lists (engine::fastsort)
     Setting* prefetchStride = nullptr;    // debug.prefetch_stride: the cache-in walk every n-th frame (engine::lod::setPrefetchStride)
     Setting* lodView = nullptr;           // lod.view: the view range of objects (eCFrustumDatabase view range factor)
     Setting* highFps = nullptr;           // compat.high_fps: the high frame rate gameplay fixes (engine/high_fps.h)

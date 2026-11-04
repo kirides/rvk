@@ -13,7 +13,7 @@
 #include "fx/effect_binary.h"
 #include "hal/vulkan/buffer_lookup.h"
 #include "hal/vulkan/hal_vulkan.h"
-#include "vk/formats.h"
+#include "rhi/d3d_formats.h"
 
 namespace rvk::hal::vulkan {
 
@@ -85,7 +85,7 @@ bEResult HalTexture::GetRenderTargetHandle(void** a0) {
 
 bEResult HalTexture::SetTexture(unsigned long a0) {
     if (logThisFrame()) spdlog::info("hal> Texture::SetTexture stage {} ({}x{} {})", a0, tex_->desc().width, tex_->desc().height,
-                                     vk::d3dFormatName(tex_->desc().format));
+                                     rhi::d3dFormatName(tex_->desc().format));
     dev_.dev().setTexture(static_cast<std::uint32_t>(a0), tex_.get());
     return bEResult_Ok;
 }
@@ -96,7 +96,7 @@ bEResult HalTexture::CopyCurrentRTToImage(eCGfxShared::eETexFilter a0, bCRect* a
     auto& d = dev_.dev();
     const auto phase = d.phases().current();
     if (logThisFrame()) spdlog::info("hal> CopyCurrentRTToImage -> {}x{} {} in {}/{}", tex_->desc().width, tex_->desc().height,
-                                     vk::d3dFormatName(tex_->desc().format), d3d9::scene::name(phase.view),
+                                     rhi::d3dFormatName(tex_->desc().format), d3d9::scene::name(phase.view),
                                      d3d9::scene::name(phase.pass));
     const bool refraction = phase.view == d3d9::scene::View::Main && phase.pass == d3d9::scene::Pass::Solid;
     if (refraction) {
@@ -161,7 +161,7 @@ bEResult HalTexture::SaveTextureToFile(char* const a0) {
     }
     const auto& dir = dev_.options().dumpDir;
     const auto& d = tex_->desc();
-    if (!dir.empty() && (d.format == vk::d3dfmt::A8R8G8B8 || d.format == vk::d3dfmt::X8R8G8B8)) {
+    if (!dir.empty() && (d.format == rhi::d3dfmt::A8R8G8B8 || d.format == rhi::d3dfmt::X8R8G8B8)) {
         d3d9::Texture::Locked lk;
         if (tex_->lock(0, 0, nullptr, d3d9::LOCK_READONLY, lk)) {
             const std::uint32_t w = tex_->levelWidth(0), h = tex_->levelHeight(0);
@@ -204,16 +204,16 @@ bEResult HalTexture::LoadSurfaceFromSurface(unsigned int a0, void const*, bCRect
                                            reinterpret_cast<const std::int32_t*>(a6), linear, &why)) {
         static std::atomic<int> logged{0};
         if (logged.fetch_add(1) < 4) {
-            spdlog::warn("hal: LoadSurfaceFromSurface {} -> {}: {}", vk::d3dFormatName(src->tex()->desc().format),
-                         vk::d3dFormatName(tex_->desc().format), why);
+            spdlog::warn("hal: LoadSurfaceFromSurface {} -> {}: {}", rhi::d3dFormatName(src->tex()->desc().format),
+                         rhi::d3dFormatName(tex_->desc().format), why);
         }
         return bEResult_False;
     }
     static std::atomic<int> done{0};
     if (done.fetch_add(1) < 4) {
         spdlog::info("hal: LoadSurfaceFromSurface {}x{} {} level {} -> {}x{} {} level {} (filter 0x{:x})",
-                     src->tex()->levelWidth(a4), src->tex()->levelHeight(a4), vk::d3dFormatName(src->tex()->desc().format), a4,
-                     tex_->levelWidth(a0), tex_->levelHeight(a0), vk::d3dFormatName(tex_->desc().format), a0, a7);
+                     src->tex()->levelWidth(a4), src->tex()->levelHeight(a4), rhi::d3dFormatName(src->tex()->desc().format), a4,
+                     tex_->levelWidth(a0), tex_->levelHeight(a0), rhi::d3dFormatName(tex_->desc().format), a0, a7);
     }
     return bEResult_Ok;
 }

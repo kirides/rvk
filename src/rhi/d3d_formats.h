@@ -5,9 +5,9 @@
 #include <cstdint>
 #include <optional>
 
-#include "vk/vk.h"
+#include "rhi/rhi.h"
 
-namespace rvk::vk {
+namespace rvk::rhi {
 
 namespace d3dfmt {
 constexpr std::uint32_t fourcc(char a, char b, char c, char d) {
@@ -68,4 +68,4 @@ std::uint64_t storageSize(const FormatInfo& f, std::uint32_t width, std::uint32_
 void convertLevel(const FormatInfo& f, const void* src, std::uint32_t srcRowPitch, void* dst, std::uint32_t width,
                   std::uint32_t height);
 
-}  // namespace rvk::vk
+}  // namespace rvk::rhi

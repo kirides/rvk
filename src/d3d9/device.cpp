@@ -6,6 +6,8 @@
 
 #include <windows.h>
 
+#include <bit>
+#include <map>
 #include <chrono>
 #include <charconv>
 #include <cmath>
@@ -15,15 +17,17 @@
 #include <spdlog/spdlog.h>
 
 #include "d3d9/convert.h"
+#include "engine/exposure.h"
 #include "d3d9/memeq.h"
 #include "d3d9/target_names.h"
-#include "rhi/vulkan/wrap.h"
 #include "shader/sm_ir.h"
 #include "shader/spirv.h"
-#include "vk/debug_names.h"
 
 namespace rvk::d3d9 {
 namespace {
+// diagnostics (RVK_EXPOSURE_LOG): the luminance chain's R32F targets by width (64 .. 1) and the HDR scene colour
+Texture* g_diagLum[8] = {};
+Texture* g_diagScene = nullptr;
 
 // bump when the translator's output changes: invalidates the SPIR-V disk cache
 // 2: the ABI declarations come from shaders/include/rvk_abi.glsl (48-byte push block, FrameBlock)
@@ -87,7 +91,7 @@ void Device::tagImage(Texture* texture, scene::ImageRole role, const char* label
         ++roleLogs_;
         const TextureDesc& d = texture->desc();
         spdlog::info("scene: {} = texture {} ({}x{} {}{}{}) at frame {}{}", scene::name(role), static_cast<void*>(texture), d.width,
-                     d.height, vk::d3dFormatName(d.format), d.type == TextureType::Cube ? " cube" : "",
+                     d.height, rhi::d3dFormatName(d.format), d.type == TextureType::Cube ? " cube" : "",
                      texture->isDepth() ? " depth" : "", stats_.frames + 1,
                      old != scene::ImageRole::None ? std::format(" (was the {})", scene::name(old)) : std::string());
     }
@@ -133,7 +137,7 @@ rhi::GpuRef Device::frameBlockAddress() {
         x.rtTlasSlot = rtScene_.tlasSlot;
     }
     if (!giHeader_.empty()) {
-        const rhi::RingAlloc g = frames_.allocate(giHeader_.size(), 16);
+        const rhi::RingAlloc g = game_->allocRing(giHeader_.size(), 16);
         if (g.ptr != nullptr) {
             std::memcpy(g.ptr, giHeader_.data(), giHeader_.size());
             x.gi = g.ref.bits;
@@ -142,7 +146,7 @@ rhi::GpuRef Device::frameBlockAddress() {
     x.ao = ao_;
     x.sgi = sgi_;
     x.jitter = jitter_;
-    const rhi::RingAlloc a = frames_.allocate(sizeof(shader::abi::FrameBlock), 16);
+    const rhi::RingAlloc a = game_->allocRing(sizeof(shader::abi::FrameBlock), 16);
     scene::fillFrameBlock(*static_cast<shader::abi::FrameBlock*>(a.ptr), camera_, lastCamera_, x);
     frameAddr_ = a.ref;
     ++perf_.frameBlocks;
@@ -223,7 +227,6 @@ void Device::inject(inject::Point point) {
     syncPhaseRegions();
     const auto t0 = std::chrono::steady_clock::now();
     endRendering();
-    VkCommandBuffer cmd = frames_.cmd();
     gpuMark("before injection");
     Surface* rt0 = rt_[0];
     PassContext ctx{*this, game_->passCommands(), point};
@@ -247,10 +250,10 @@ void Device::inject(inject::Point point) {
                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - p0).count();
             }
         }
-        if (gpuTimer_.enabled()) {
-            const std::uint32_t slot = frames_.currentSlot();
-            gpuTimer_.mark(cmd, slot, vk::GpuTimer::Stream::Main,
-                           gpuTimer_.details(slot) ? std::format("pass {} at {}", list[i].name, inject::name(point)) : std::string());
+        if (game_->timestampsEnabled()) {
+            const std::uint32_t slot = game_->frameSlot();
+            game_->timestampMark(frameList(), slot, rhi::TimestampStream::Main,
+                           game_->timestampDetails(slot) ? std::format("pass {} at {}", list[i].name, inject::name(point)) : std::string());
         }
     }
     injecting_ = false;
@@ -266,88 +269,47 @@ bool Device::readable(Texture* texture, rhi::CommandList& cmd) {
     return texture->rhi().layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
 
-vk::Image& Device::vkImage(rhi::Texture& texture) { return rhi::vulkan::imageOf(texture); }
+bool Device::namesEnabled() const { return game_ != nullptr && game_->namesEnabled(); }
 
-bool Device::namesEnabled() const { return ctx_.namesEnabled(); }
-
-rhi::CommandList& Device::uploadList() {
-    uploadCommands();  // (begins the upload buffer and orders it after the earlier work on the first use of a frame)
-    return game_->uploadCommands();
-}
+rhi::CommandList& Device::uploadList() { return game_->uploadCommands(); }  // (the backend orders it after the earlier work on its first use in a frame)
 
 bool Device::create(const DeviceOptions& options) {
     options_ = options;
     renderThread_ = GetCurrentThreadId();
-    vk::ContextOptions co;
-    co.validation = options.validation || options.syncValidation;
-    co.adapter = options.adapter;
-    co.syncValidation = options.syncValidation;
-    co.allowRayTracing = options.allowRayTracing;
-    co.frameGenQueues = options.frameGenQueues;
-    if (!ctx_.create(co)) {
-        return false;
-    }
-    if (!frames_.create(ctx_) || !bindless_.create(ctx_, frames_)) {
-        return false;
-    }
-    game_ = rhi::vulkan::wrapGame(ctx_, frames_, bindless_, &meshArena_);  // the backend seam over these objects (rhi/game_device.h)
+    rhi::GameDeviceOptions go;
+    go.validation = options.validation;
+    go.syncValidation = options.syncValidation;
+    go.adapter = options.adapter;
+    go.allowRayTracing = options.allowRayTracing;
+    go.frameGenQueues = options.frameGenQueues;
+    go.asyncPipelines = !options.offscreen;
+    shader::setVaryingFillers(options.backend == rhi::Backend::D3D12);
+    wp0_.on = GetEnvironmentVariableA("RVK_WP0", nullptr, 0) != 0;
+    game_ = rhi::createGameDevice(options.backend, go);  // the backend seam (rhi/game_device.h): owns every API object
     if (!game_) {
-        spdlog::error("d3d9: the RHI over the device could not be created");
+        spdlog::error("d3d9: the {} game device could not be created", rhi::backendName(options.backend));
         return false;
     }
     // D24S8 depth is optional in Vulkan (AMD has none): fall back to D32S8
     d24s8_ = game_->formatSupport(VK_FORMAT_D24_UNORM_S8_UINT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)
                  ? VK_FORMAT_D24_UNORM_S8_UINT
                  : VK_FORMAT_D32_SFLOAT_S8_UINT;
-    {
-        // the static vertex / index buffers' arena (vk/mesh_arena.h); with the ray tracing tier also BLAS build inputs that
-        // shaders read through their addresses (docs/research/raytracing.md 2)
-        VkBufferUsageFlags usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-        if (ctx_.features().rayTracing.enabled) {
-            usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                     VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
-        }
-        meshArena_.create(ctx_, usage);
-    }
     const auto pipelineFile = options.cacheDir.empty() ? std::filesystem::path() : options.cacheDir / "pipelines.bin";
-    if (!pipelines_.create(ctx_, bindless_.pipelineLayout(), pipelineFile, options.pipelineLibraries)) {
+    if (!game_->createPipelineCaches(pipelineFile, options.pipelineLibraries)) {
         return false;
     }
     loadPipelineKeys();
-    if (!options.offscreen && !swapchain_.create(ctx_, options.window, options.width, options.height, options.vsync)) {
+    if (!options.offscreen && !pres().create(options.window, options.width, options.height, options.vsync)) {
         return false;
-    }
-    if (swapchain_.valid()) {
-        presenter_.start(swapchain_);
     }
     if (options.perf) {
         // [debug] perf: a frame that does not come within 8 s logs every thread's stack (a deadlock between the render thread, the
         // present thread and AMD's frame generation threads)
         diag::startHangWatchdog(8.0, [](void* d) { return static_cast<Device*>(d)->stats_.frames; }, this);
     }
-    if (options.perf && gpuTimer_.create(ctx_, vk::Frames::kInFlight)) {
+    if (options.perf && game_->enableTimestamps()) {
         spdlog::info("d3d9: [debug] perf: GPU timestamps on{}",
                      options.perfFrame != 0 ? std::format(", pass timings of frame {}", options.perfFrame) : std::string());
-    }
-    for (auto& s : acquireSemaphores_) {
-        VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
-        vkCreateSemaphore(ctx_.device(), &sci, nullptr, &s);
-        vk::names::object(ctx_, s, VK_OBJECT_TYPE_SEMAPHORE, "rvk swapchain acquire");
-    }
-    {
-        VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-        bci.size = 16;
-        bci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-        VmaAllocationCreateInfo aci{};
-        aci.usage = VMA_MEMORY_USAGE_AUTO;
-        aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
-        VmaAllocationInfo info{};
-        if (vmaCreateBuffer(ctx_.allocator(), &bci, &aci, &nullVertexBuffer_, &nullVertexAlloc_, &info) != VK_SUCCESS) {
-            return false;
-        }
-        vk::names::object(ctx_, nullVertexBuffer_, VK_OBJECT_TYPE_BUFFER, "rvk null vertex buffer (unbound streams)");
-        const float v[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-        std::memcpy(info.pMappedData, v, sizeof(v));
     }
 
     for (std::uint32_t i = 0; i < RS_COUNT; ++i) {
@@ -371,9 +333,8 @@ bool Device::create(const DeviceOptions& options) {
     if (!resize(options.width, options.height)) {
         return false;
     }
-    bindless_.recordInit(frames_.cmd());
     spdlog::info("d3d9: device ready, back buffer {}x{}, depth {} ({})", options.width, options.height,
-                 options.depthFormat != 0 ? vk::d3dFormatName(options.depthFormat) : "none",
+                 options.depthFormat != 0 ? rhi::d3dFormatName(options.depthFormat) : "none",
                  d24s8_ == VK_FORMAT_D24_UNORM_S8_UINT ? "D24S8" : "D32S8 for D24S8");
     return true;
 }
@@ -385,7 +346,7 @@ bool Device::resize(std::uint32_t width, std::uint32_t height) {
     TextureDesc bb;
     bb.width = width;
     bb.height = height;
-    bb.format = vk::d3dfmt::X8R8G8B8;
+    bb.format = rhi::d3dfmt::X8R8G8B8;
     bb.usage = USAGE_RENDERTARGET;
     bb.pool = POOL_DEFAULT;
     auto newBack = createTexture(bb);
@@ -421,8 +382,8 @@ bool Device::resize(std::uint32_t width, std::uint32_t height) {
     scissor_[3] = static_cast<std::int32_t>(height);
     options_.width = width;
     options_.height = height;
-    if (swapchain_.valid() && (swapchain_.extent().width != width || swapchain_.extent().height != height)) {
-        presenter_.waitIdle();
+    if (pres().valid() && (pres().info().extent.width != width || pres().info().extent.height != height)) {
+        pres().waitIdle();
         rebuildSwapchain(width, height);
     }
     return true;
@@ -432,12 +393,12 @@ void Device::windowResized() {
     if (options_.offscreen) {
         return;
     }
-    presenter_.waitIdle();
-    if (swapchain_.frameGenActive()) {
+    pres().waitIdle();
+    if (pres().frameGenActive()) {
         // AMD's swapchain follows the window by its size only: a re-creation at the same size would only cost the generator's context
         RECT rc{};
         GetClientRect(options_.window, &rc);
-        if (static_cast<std::uint32_t>(rc.right) == swapchain_.extent().width && static_cast<std::uint32_t>(rc.bottom) == swapchain_.extent().height) {
+        if (static_cast<std::uint32_t>(rc.right) == pres().info().extent.width && static_cast<std::uint32_t>(rc.bottom) == pres().info().extent.height) {
             return;
         }
     }
@@ -451,18 +412,18 @@ void Device::setVsync(bool vsync) {
     options_.vsync = vsync;
     pacerChecked_ = {};
     pacerRequested_ = -1.0;
-    presenter_.waitIdle();
-    swapchain_.setVsync(vsync);
-    if (swapchain_.valid()) {
-        rebuildSwapchain(swapchain_.extent().width, swapchain_.extent().height);
+    pres().waitIdle();
+    pres().setVsync(vsync);
+    if (pres().valid()) {
+        rebuildSwapchain(pres().info().extent.width, pres().info().extent.height);
     }
 }
 
 // every re-creation of the swapchain: the generator's context (frame generation swapchain) goes first, it belongs to the old one
 void Device::rebuildSwapchain(std::uint32_t width, std::uint32_t height) {
-    if (swapchain_.frameGenActive() && fgClient_ != nullptr) fgClient_->swapchainWillChange();
-    const bool fgBefore = swapchain_.frameGenActive();
-    swapchain_.recreate(width, height);
+    if (pres().frameGenActive() && fgClient_ != nullptr) fgClient_->swapchainWillChange();
+    const bool fgBefore = pres().frameGenActive();
+    pres().recreate(width, height);
     if (fgBefore) {
         // a new AMD swapchain counts its presents from zero: the stats baselines restart (else the differences underflow)
         fgTick_ = {};
@@ -472,17 +433,17 @@ void Device::rebuildSwapchain(std::uint32_t width, std::uint32_t height) {
 }
 
 bool Device::setFrameGenSwapchain(bool want, const std::filesystem::path& loaderDll) {
-    if (options_.offscreen || !swapchain_.valid()) return false;
-    if (want == swapchain_.frameGenActive()) return true;
-    presenter_.waitIdle();
-    if (fgClient_ != nullptr && swapchain_.frameGenActive()) fgClient_->swapchainWillChange();
+    if (options_.offscreen || !pres().valid()) return false;
+    if (want == pres().frameGenActive()) return true;
+    pres().waitIdle();
+    if (fgClient_ != nullptr && pres().frameGenActive()) fgClient_->swapchainWillChange();
     if (!want) {
         if (auto* fg = presentWrapper()) fg->setUi({});
         fgUiInstalled_ = false;
     }
-    swapchain_.setFrameGen(want, loaderDll);
+    pres().setFrameGen(want, loaderDll);
     recreateSwapchain();
-    if (want && swapchain_.frameGenActive() && !fgUiInstalled_) {
+    if (want && pres().frameGenActive() && !fgUiInstalled_) {
         // the overlay in the swapchain's present callback (on AMD's threads): the UI built on the render thread at present
         rhi::PresentUi hook;
         hook.wants = [this] { return overlay_ != nullptr && !overlayIntoBackBuffer_ && overlay_->hasPrepared(); };
@@ -500,33 +461,21 @@ bool Device::setFrameGenSwapchain(bool want, const std::filesystem::path& loader
     fgTick_ = {};
     fgReportAt_ = {};  // a new swapchain counts its presents from zero
     fgReportReal_ = 0;
-    return swapchain_.frameGenActive() == want;
+    return pres().frameGenActive() == want;
 }
 
 void Device::shutdownFrameGenSwapchain() {
-    swapchain_.setFrameGen(false);
-    if (!swapchain_.frameGenActive()) return;
-    presenter_.waitIdle();
+    pres().setFrameGen(false);
+    if (!pres().frameGenActive()) return;
+    pres().waitIdle();
     if (fgClient_ != nullptr) fgClient_->swapchainWillChange();
     if (auto* fg = presentWrapper()) fg->setUi({});
     fgUiInstalled_ = false;
-    fgWrapper_.reset();
-    swapchain_.releaseFrameGen();
+    pres().releaseFrameGen();
 }
 
-// AMD's swapchain as the RHI's PresentWrapper (made on first use, dropped when the swapchain goes)
-rhi::PresentWrapper* Device::presentWrapper() {
-    vk::FgSwapchain* fg = swapchain_.frameGen();
-    if (fg == nullptr) {
-        fgWrapper_.reset();
-        return nullptr;
-    }
-    if (!fgWrapper_ || fgWrapperFor_ != fg) {
-        fgWrapper_ = rhi::vulkan::wrapFgSwapchain(*game_, *fg);
-        fgWrapperFor_ = fg;
-    }
-    return fgWrapper_.get();
-}
+// AMD's swapchain as the RHI's PresentWrapper (null while it is not in use)
+rhi::PresentWrapper* Device::presentWrapper() { return game_ ? pres().presentWrapper() : nullptr; }
 
 void Device::setFrameGenRunning(bool on) {
     if (on == fgRunning_) return;
@@ -595,16 +544,12 @@ Device::FrameGenReport Device::takeFrameGenReport() {
 
 void Device::flushFrameAndWait() {
     endRendering();
-    submitFrame(VK_NULL_HANDLE, VK_NULL_HANDLE);
-    frames_.waitFor(frames_.currentValue() - 1);
+    submitFrame(false);
+    game_->waitFrame(game_->frameValue() - 1);
     beginFrame();
 }
 
-bool Device::waitFrameGenPresent() {
-    if (!swapchain_.frameGenActive()) return true;
-    presenter_.waitDone();
-    return swapchain_.waitFrameGenDone(swapchain_.frameGenPresentsQueued(), 2'000'000'000ull);
-}
+bool Device::waitFrameGenPresent() { return pres().waitFrameGenPresent(); }
 
 void Device::resetPacer() {
     pacerChecked_ = {};
@@ -623,15 +568,22 @@ void Device::setRefreshCap(double hz) {
 }
 
 bool Device::setFullScreenExclusive(void* monitor, bool hold) {
-    if (options_.offscreen || !swapchain_.valid()) return false;
-    if (!ctx_.features().fullScreenExclusive || swapchain_.frameGenWanted()) monitor = nullptr;  // not with AMD's swapchain
+    if (options_.offscreen || !pres().valid()) return false;
+    if (monitor != nullptr && !game_->gameCaps().fullScreenExclusive) {
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true)) {
+            spdlog::info("{}: exclusive fullscreen is not available{}: the game's fullscreen stays a borderless window",
+                         game_->caps().backend == rhi::Backend::D3D12 ? "d3d12" : "vulkan", game_->caps().backend == rhi::Backend::D3D12 ? " on the D3D12 backend" : " (the device lacks VK_EXT_full_screen_exclusive)");
+        }
+    }
+    if (!game_->gameCaps().fullScreenExclusive || pres().frameGenWanted()) monitor = nullptr;  // not with AMD's swapchain
     bool recreated = false;
     if (monitor != fseMonitor_) {
         recreated = true;
         fseMonitor_ = monitor;
-        presenter_.waitIdle();
-        swapchain_.releaseFullScreenExclusive();
-        swapchain_.setFullScreenExclusive(monitor);
+        pres().waitIdle();
+        pres().releaseFullScreenExclusive();
+        pres().setFullScreenExclusive(monitor);
         recreateSwapchain();
         fseRetry_ = {};
         resetPacer();
@@ -639,9 +591,9 @@ bool Device::setFullScreenExclusive(void* monitor, bool hold) {
     if (hold != fseHold_) {
         fseHold_ = hold;
         fseRetry_ = {};
-        if (!hold && swapchain_.fullScreenExclusiveHeld()) {
-            presenter_.waitIdle();
-            swapchain_.releaseFullScreenExclusive();
+        if (!hold && pres().fullScreenExclusiveHeld()) {
+            pres().waitIdle();
+            pres().releaseFullScreenExclusive();
             spdlog::info("vulkan: exclusive fullscreen released");
             resetPacer();
         }
@@ -651,22 +603,22 @@ bool Device::setFullScreenExclusive(void* monitor, bool hold) {
 
 // render thread, the present thread idle: take the exclusive mode while wanted (retried once a second after a failure / loss)
 void Device::serviceFullScreenExclusive() {
-    if (swapchain_.takeExclusiveLost()) {
+    if (pres().takeExclusiveLost()) {
         spdlog::info("vulkan: exclusive fullscreen lost (acquire): re-acquired later");
         fseRetry_ = std::chrono::steady_clock::now() + std::chrono::seconds(1);
         resetPacer();
     }
-    if (!fseHold_ || !swapchain_.fullScreenExclusiveConfigured() || swapchain_.fullScreenExclusiveHeld()) return;
+    if (!fseHold_ || !pres().fullScreenExclusiveConfigured() || pres().fullScreenExclusiveHeld()) return;
     const auto now = std::chrono::steady_clock::now();
     if (now < fseRetry_) return;
-    const VkResult r = swapchain_.acquireFullScreenExclusive();
-    if (r == VK_SUCCESS) {
-        spdlog::info("vulkan: exclusive fullscreen acquired (swapchain {}x{}, present mode {})", swapchain_.extent().width,
-                     swapchain_.extent().height, static_cast<int>(swapchain_.presentMode()));
+    std::string error;
+    if (pres().acquireFullScreenExclusive(&error)) {
+        const rhi::PresentInfo info = pres().info();
+        spdlog::info("vulkan: exclusive fullscreen acquired (swapchain {}x{}, present mode {})", info.extent.width, info.extent.height, info.presentMode);
         resetPacer();
     } else {
         static int logged = 0;
-        if (logged++ < 10) spdlog::warn("vulkan: vkAcquireFullScreenExclusiveModeEXT: {} (retried in 1 s)", vk::resultString(r));
+        if (logged++ < 10) spdlog::warn("vulkan: {} (retried in 1 s)", error);
         fseRetry_ = now + std::chrono::seconds(1);
     }
 }
@@ -696,19 +648,17 @@ void Device::setOverlay(PresentOverlay* overlay, bool intoBackBuffer) {
 }
 
 VkFormat Device::overlayFormat() const {
-    if (overlayIntoBackBuffer_ || !swapchain_.valid()) {
-        return backBuffer_ ? backBuffer_->image().format() : VK_FORMAT_B8G8R8A8_UNORM;
+    if (overlayIntoBackBuffer_ || !pres().valid()) {
+        return backBuffer_ && backBuffer_->valid() && !backBuffer_->isNull() ? backBuffer_->rhi().desc().format : VK_FORMAT_B8G8R8A8_UNORM;
     }
-    return swapchain_.format();
+    return pres().info().format;
 }
 
 // after foreign commands (the overlay binds its own pipeline, descriptor set and dynamic state) in the frame's command buffer
 void Device::invalidateRecordingState() {
-    rec_.reset();
     lastPipelineValid_ = false;
     vsConstDirty_ = psConstDirty_ = true;
-    const VkDescriptorSet set = bindless_.set();
-    vkCmdBindDescriptorSets(frames_.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS, bindless_.pipelineLayout(), 0, 1, &set, 0, nullptr);
+    game_->invalidateRecordingState();  // the backend forgets the frame list's recorded pipeline / vertex input / dynamic state
 }
 
 void Device::drawOverlayIntoBackBuffer() {
@@ -716,23 +666,20 @@ void Device::drawOverlayIntoBackBuffer() {
         return;
     }
     endRendering();
-    VkCommandBuffer cmd = frames_.cmd();
-    vk::Image& bb = backBuffer_->image();
-    bb.transition(cmd, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    VkRenderingAttachmentInfo att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    att.imageView = bb.attachmentView(ctx_, 0, 0);
-    att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    rhi::CommandList& cl = game_->frameCommands();
+    rhi::Texture& bb = backBuffer_->rhi();
+    cl.transition(bb, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     const VkExtent2D extent{backBuffer_->desc().width, backBuffer_->desc().height};
-    VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
-    ri.renderArea = {{0, 0}, extent};
-    ri.layerCount = 1;
-    ri.colorAttachmentCount = 1;
-    ri.pColorAttachments = &att;
-    vkCmdBeginRendering(cmd, &ri);
-    overlay_->record(game_->frameCommands(), extent);
-    vkCmdEndRendering(cmd);
+    rhi::RenderingInfo ri;
+    ri.colorCount = 1;
+    ri.color[0].texture = &bb;
+    ri.color[0].load = VK_ATTACHMENT_LOAD_OP_LOAD;
+    ri.color[0].store = VK_ATTACHMENT_STORE_OP_STORE;
+    ri.width = extent.width;
+    ri.height = extent.height;
+    cl.beginRendering(ri);
+    overlay_->record(cl, extent);
+    cl.endRendering();
     invalidateRecordingState();
 }
 
@@ -742,8 +689,8 @@ void Device::destroy() {
     }
     stopVariantWorker();
     stopShaderWorkers();
-    frames_.waitIdle();
-    stopRecordThreads();
+    game_->waitIdle();
+    // the pipeline cache and its threads are the backend's (the backend's GameRecord), destroyed with the device
     processReleases();
     backBuffer_.reset();
     depthBuffer_.reset();
@@ -769,22 +716,7 @@ void Device::destroy() {
     }
     vs_.reset();
     ps_.reset();
-    for (auto s : samplerObjects_) {
-        vkDestroySampler(ctx_.device(), s, nullptr);
-    }
-    samplerObjects_.clear();
     samplers_.clear();
-    if (nullVertexBuffer_ != VK_NULL_HANDLE) {
-        vmaDestroyBuffer(ctx_.allocator(), nullVertexBuffer_, nullVertexAlloc_);
-        nullVertexBuffer_ = VK_NULL_HANDLE;
-    }
-    for (auto& s : acquireSemaphores_) {
-        if (s != VK_NULL_HANDLE) {
-            vkDestroySemaphore(ctx_.device(), s, nullptr);
-            s = VK_NULL_HANDLE;
-        }
-    }
-    presenter_.stop();
     if (keySaver_.joinable()) {
         keySaver_.join();
     }
@@ -792,38 +724,26 @@ void Device::destroy() {
     if (keySaver_.joinable()) {
         keySaver_.join();
     }
-    swapchain_.destroy();
-    gpuTimer_.destroy();
-    pipelines_.destroy();
     passes_ = inject::Registry{};
-    fgWrapper_.reset();
-    game_.reset();          // retires its samplers / pass layout / transient images
-    // frames_ runs the retired destructors (images, bindless slot releases): before the bindless heap goes away
-    frames_.destroy();
-    meshArena_.destroy();  // after frames_: its retired frees go into the arena
-    bindless_.destroy();
-    ctx_.setLostReporter(nullptr);
-    crashMarkers_.destroy();
     markersOn_ = false;
-    ctx_.destroy();
+    game_.reset();  // the backend: the present thread and the swapchain, the frame ring, the heaps, every API object
     created_ = false;
 }
 
 // ---- frames ---------------------------------------------------------------------------------------------------------
 
 void Device::beginFrame() {
-    frames_.begin();
+    game_->beginFrame();
     viArena_.clear();  // every chunk of the last submission has been recorded and executed
     dynArena_.clear();
     lastVi_ = nullptr;
     lastDyn_ = nullptr;
-    resetRecordPools(frames_.currentSlot());
     substituteFrom_ = nullptr;
     substituteSlot_ = 0;
-    perf_.slotWaitMs += frames_.lastSlotWaitMs();
-    if (gpuTimer_.enabled()) {
-        const std::uint32_t slot = frames_.currentSlot();
-        const vk::GpuTimer::Result r = gpuTimer_.collect(slot);
+    perf_.slotWaitMs += game_->lastSlotWaitMs();
+    if (game_->timestampsEnabled()) {
+        const std::uint32_t slot = game_->frameSlot();
+        const rhi::TimestampResult r = game_->timestampCollect(slot);
         if (r.valid) {
             live_.gpuMs = static_cast<float>(r.mainMs + r.uploadMs);
             ++perf_.gpuSubmits;
@@ -846,43 +766,23 @@ void Device::beginFrame() {
         }();
         const bool details = options_.perfFrame != 0 && stats_.frames + 1 >= options_.perfFrame && stats_.frames + 1 < options_.perfFrame + perfSpan;
         gpuDetailFrame_[slot] = details ? stats_.frames + 1 : 0;
-        gpuTimer_.start(slot, details);
-        gpuTimer_.mark(frames_.cmd(), slot, vk::GpuTimer::Stream::Main, "begin");
+        game_->timestampStart(slot, details);
+        game_->timestampMark(frameList(), slot, rhi::TimestampStream::Main, "begin");
     }
     processReleases();
-    uploadUsed_ = false;
     rendering_ = false;
-    rec_.reset();
     lastPipelineValid_ = false;
     vsConstDirty_ = psConstDirty_ = true;
     dirtyConstWindows();  // the window blocks live in the frame's ring
     frameAddr_ = {};  // ring memory of the frame block belongs to a submission
     passIndex_ = 0;
-    const VkDescriptorSet set = bindless_.set();
-    vkCmdBindDescriptorSets(frames_.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS, bindless_.pipelineLayout(), 0, 1, &set, 0, nullptr);
+    game_->invalidateRecordingState();  // the backend forgets the frame list's recorded state and rebinds the frame's bindless set
     regionsReopen();
 }
 
 // ---- debug regions ----------------------------------------------------------------------------------------------------------
 
 namespace {
-
-void beginLabel(VkCommandBuffer cmd, const char* name) {
-    // a colour per name (stable): the label's hue from a hash, so neighbouring regions differ
-    std::uint32_t h = 2166136261u;
-    for (const char* c = name; *c != 0; ++c) h = (h ^ static_cast<std::uint8_t>(*c)) * 16777619u;
-    const float hue = static_cast<float>(h % 360u) / 60.0f;
-    const float x = 1.0f - std::fabs(std::fmod(hue, 2.0f) - 1.0f);
-    const float rgb[6][3] = {{1, x, 0}, {x, 1, 0}, {0, 1, x}, {0, x, 1}, {x, 0, 1}, {1, 0, x}};
-    const float* c = rgb[static_cast<int>(hue) % 6];
-    VkDebugUtilsLabelEXT l{VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT};
-    l.pLabelName = name;
-    l.color[0] = 0.35f + 0.5f * c[0];
-    l.color[1] = 0.35f + 0.5f * c[1];
-    l.color[2] = 0.35f + 0.5f * c[2];
-    l.color[3] = 1.0f;
-    vkCmdBeginDebugUtilsLabelEXT(cmd, &l);
-}
 
 // "base" or "base #index" into a fixed buffer (no allocation)
 void formatLabel(char (&out)[48], const char* base, std::uint32_t index) {
@@ -909,9 +809,9 @@ void Device::regionBegin(const char* name, std::uint32_t index) {
     if (rendering_ && scopeSecondary_) {
         scopeLabel(true, r.text);  // in order with the scope's chunks
     } else {
-        beginLabel(frames_.cmd(), r.text);
+        game_->labelBegin(r.text);
         if (markersOn_ && !rendering_) {
-            crashMarkers_.begin(frames_.cmd(), frameValue(), r.text);
+            game_->crashMarker(true, r.text);
             r.marked = true;
         }
     }
@@ -923,8 +823,8 @@ void Device::regionEnd() {
     if (rendering_ && scopeSecondary_) {
         scopeLabel(false, nullptr);
     } else {
-        vkCmdEndDebugUtilsLabelEXT(frames_.cmd());
-        if (regions_[regionCount_].marked && markersOn_ && !rendering_) crashMarkers_.end(frames_.cmd(), frameValue(), regions_[regionCount_].text);
+        game_->labelEnd();
+        if (regions_[regionCount_].marked && markersOn_ && !rendering_) game_->crashMarker(false, regions_[regionCount_].text);
     }
 }
 
@@ -932,18 +832,16 @@ void Device::setCrashMarkers(bool on) {
     if (on == markersOn_) return;
     if (!on) {
         markersOn_ = false;
-        ctx_.setLostReporter(nullptr);
+        game_->setCrashMarkers(false);
         return;
     }
-    if (!created_ || !crashMarkers_.create(ctx_)) return;
+    if (!created_ || !game_->setCrashMarkers(true)) return;
     markersOn_ = true;
-    ctx_.setLostReporter([this]() { return crashMarkers_.report(); });
     if (!regionsOn_) spdlog::warn("vulkan: crash markers: they follow the capture regions (debug.regions is off)");
 }
 
 void Device::setRegionsEnabled(bool on) {
-    const bool can = ctx_.debugUtilsAvailable() && vkCmdBeginDebugUtilsLabelEXT != nullptr && vkCmdEndDebugUtilsLabelEXT != nullptr;
-    on = on && can && created_;
+    on = on && created_ && game_->regionsAvailable();
     if (on == regionsOn_) return;
     phasesSeen_ = ~0ull;
     if (on) {
@@ -952,7 +850,7 @@ void Device::setRegionsEnabled(bool on) {
         regionCount_ = 0;
         regionsReopen();
     } else {
-        for (std::uint32_t i = 0; i < regionCount_; ++i) vkCmdEndDebugUtilsLabelEXT(frames_.cmd());
+        for (std::uint32_t i = 0; i < regionCount_; ++i) game_->labelEnd();
         regionCount_ = 0;
         regionsOn_ = false;
     }
@@ -961,14 +859,13 @@ void Device::setRegionsEnabled(bool on) {
 // a submission is about to be made: its command buffer must not end with labels open
 void Device::regionsClose() {
     if (!regionsOn_) return;
-    for (std::uint32_t i = 0; i < regionCount_; ++i) vkCmdEndDebugUtilsLabelEXT(frames_.cmd());
+    for (std::uint32_t i = 0; i < regionCount_; ++i) game_->labelEnd();
 }
 
 // a new command buffer: the frame's region (a new frame: a new one) and whatever was open at the submit
 void Device::regionsReopen() {
     if (!regionsOn_) return;
     phasesSeen_ = ~0ull;
-    VkCommandBuffer cmd = frames_.cmd();
     if (regionCount_ == 0 || regionsFrame_ != stats_.frames) {
         regionCount_ = 0;
         regionsFrame_ = stats_.frames;
@@ -976,7 +873,7 @@ void Device::regionsReopen() {
         regionBegin("Frame", static_cast<std::uint32_t>(stats_.frames + 1));
         return;
     }
-    for (std::uint32_t i = 0; i < regionCount_; ++i) beginLabel(cmd, regions_[i].text);
+    for (std::uint32_t i = 0; i < regionCount_; ++i) game_->labelBegin(regions_[i].text);
 }
 
 // The view / pass regions follow the phase tracker; called when a draw is recorded and before an injection. Cheap when the
@@ -1022,32 +919,32 @@ void Device::syncPhaseRegions() {
 }
 
 void Device::gpuMark(const char* what) {
-    if (gpuTimer_.enabled()) {
-        gpuTimer_.mark(frames_.cmd(), frames_.currentSlot(), vk::GpuTimer::Stream::Main, what);
+    if (game_->timestampsEnabled()) {
+        game_->timestampMark(frameList(), game_->frameSlot(), rhi::TimestampStream::Main, what);
     }
 }
 
 PerfStats Device::takePerf() {
-    perf_.pipelineBinds += rec_.pipelineBinds;
-    rec_.pipelineBinds = 0;
+    perf_.pipelineBinds += game_->takePipelineBinds();
     PerfStats p = std::move(perf_);
     perf_ = PerfStats{};
-    p.pipelinesBuilt = pipelines_.built() - perfPipelinesBase_;
-    p.pipelineMs = pipelines_.buildMs() - perfPipelineMsBase_;
-    perfPipelinesBase_ = pipelines_.built();
-    perfPipelineMsBase_ = pipelines_.buildMs();
-    p.libraries = pipelines_.libraries() - perfLibrariesBase_;
-    p.libraryMs = pipelines_.libraryMs() - perfLibraryMsBase_;
-    p.optimized = pipelines_.optimized() - perfOptimizedBase_;
-    p.optimizeMs = pipelines_.optimizeMs() - perfOptimizeMsBase_;
-    perfLibrariesBase_ = pipelines_.libraries();
-    perfLibraryMsBase_ = pipelines_.libraryMs();
-    perfOptimizedBase_ = pipelines_.optimized();
-    perfOptimizeMsBase_ = pipelines_.optimizeMs();
-    p.prewarmed = pipelines_.prewarmed() - perfPrewarmedBase_;
-    p.prewarmMs = pipelines_.prewarmMs() - perfPrewarmMsBase_;
-    perfPrewarmedBase_ = pipelines_.prewarmed();
-    perfPrewarmMsBase_ = pipelines_.prewarmMs();
+    const rhi::PipelineStats s = game_->pipelineStats();
+    p.pipelinesBuilt = s.built - perfPipelinesBase_;
+    p.pipelineMs = s.buildMs - perfPipelineMsBase_;
+    perfPipelinesBase_ = s.built;
+    perfPipelineMsBase_ = s.buildMs;
+    p.libraries = s.libraries - perfLibrariesBase_;
+    p.libraryMs = s.libraryMs - perfLibraryMsBase_;
+    p.optimized = s.optimized - perfOptimizedBase_;
+    p.optimizeMs = s.optimizeMs - perfOptimizeMsBase_;
+    perfLibrariesBase_ = s.libraries;
+    perfLibraryMsBase_ = s.libraryMs;
+    perfOptimizedBase_ = s.optimized;
+    perfOptimizeMsBase_ = s.optimizeMs;
+    p.prewarmed = s.prewarmed - perfPrewarmedBase_;
+    p.prewarmMs = s.prewarmMs - perfPrewarmMsBase_;
+    perfPrewarmedBase_ = s.prewarmed;
+    perfPrewarmMsBase_ = s.prewarmMs;
     const std::uint64_t built = shadersBuilt_.load(), compiled = shadersCompiled_.load(), ns = shaderNs_.load();
     p.shadersBuilt = built - perfShadersBase_;
     p.shadersCompiled = compiled - perfShadersCompiledBase_;
@@ -1061,51 +958,14 @@ PerfStats Device::takePerf() {
     return p;
 }
 
-VkCommandBuffer Device::uploadCommands() {
-    VkCommandBuffer cmd = frames_.uploadCmd();
-    if (!uploadUsed_) {
-        // the upload buffer runs between the previous frame's draws and this frame's: order it after all earlier work
-        VkMemoryBarrier2 b{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-        b.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-        b.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
-        b.dstStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
-        b.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_TRANSFER_READ_BIT;
-        VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-        di.memoryBarrierCount = 1;
-        di.pMemoryBarriers = &b;
-        vkCmdPipelineBarrier2(cmd, &di);
-        uploadUsed_ = true;
-        if (gpuTimer_.enabled()) {
-            gpuTimer_.mark(cmd, frames_.currentSlot(), vk::GpuTimer::Stream::Upload, "upload begin");
-        }
-    }
-    return cmd;
-}
-
-void Device::submitFrame(VkSemaphore waitAcquire, VkSemaphore signalRendered) {
+void Device::submitFrame(bool presenting) {
     endRendering();
-    if (uploadUsed_) {
-        VkMemoryBarrier2 b{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-        b.srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
-        b.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-        b.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-        b.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT;
-        VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-        di.memoryBarrierCount = 1;
-        di.pMemoryBarriers = &b;
-        vkCmdPipelineBarrier2(frames_.uploadCmd(), &di);
-        if (gpuTimer_.enabled()) {
-            gpuTimer_.mark(frames_.uploadCmd(), frames_.currentSlot(), vk::GpuTimer::Stream::Upload, "uploads");
-        }
-    }
-    gpuMark(signalRendered != VK_NULL_HANDLE ? "present blit + barriers since the last pass"
-                                             : "copies + barriers since the last pass (flush)");
-    regionsClose();
+    regionsClose();  // a submission's command buffer must not end with labels open
     const auto t0 = std::chrono::steady_clock::now();
-    frames_.submit(waitAcquire, signalRendered);
+    game_->submitFrame(presenting ? "present blit + barriers since the last pass" : "copies + barriers since the last pass (flush)");
     perf_.submitMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-    perf_.ringBytes += frames_.ringBytes() - ringBytesBase_;
-    ringBytesBase_ = frames_.ringBytes();
+    perf_.ringBytes += game_->ringBytes() - ringBytesBase_;
+    ringBytesBase_ = game_->ringBytes();
 }
 
 // the pacer's rate follows the window's monitor. EnumDisplaySettings is slow (it stalled the frames while the world loaded
@@ -1122,7 +982,7 @@ void Device::updatePacer() {
         if (monitor != pacerMonitor_) {
             pacerMonitor_ = monitor;
             const auto t0 = std::chrono::steady_clock::now();
-            pacerMonitorRate_ = vk::monitorRefreshRate(options_.window);
+            pacerMonitorRate_ = pacing::monitorRefreshRate(options_.window);
             spdlog::info("vulkan: monitor refresh rate {} Hz (queried in {:.1f} ms)", pacerMonitorRate_,
                          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
         }
@@ -1150,17 +1010,17 @@ void Device::updatePacer() {
         rate *= 0.5;
     }
     // an unlocked vsync pacer retries the lock (DWM's measured period strays under load)
-    vk::VblankClock probe;
+    pacing::VblankClock probe;
     const double vblanks = rate > 0.0 ? std::round(refresh / rate) : 0.0;
     const bool lockable = refresh > 0.0 && vblanks >= 1.0 && vblanks <= 8.0 && std::abs(refresh / vblanks - rate) < 0.01 * rate;
-    const bool relock = rate == pacerRequested_ && lockable && !pacer_.vblankLocked() && vk::dwmVblankClock(probe) &&
+    const bool relock = rate == pacerRequested_ && lockable && !pacer_.vblankLocked() && pacing::dwmVblankClock(probe) &&
                         std::abs(probe.rate() - refresh) < 0.005 * refresh;
     if (rate != pacerRequested_ || relock) {
         pacerRequested_ = rate;
         // with vsync the slots sit on DWM's vblank grid (the refresh rate or an integer fraction of it)
         pacer_.setRate(rate, refresh);
-        vk::VblankClock clock;
-        const bool dwm = vk::dwmVblankClock(clock);
+        pacing::VblankClock clock;
+        const bool dwm = pacing::dwmVblankClock(clock);
         spdlog::info("vulkan: DWM composition clock {}", dwm ? std::format("{:.3f} Hz", clock.rate()) : std::string("unavailable"));
         const double outRate = halved ? rate * 2.0 : rate;
         spdlog::info("vulkan: frame pacing at {:.3f} fps{}{}{}", pacer_.rate(),
@@ -1171,6 +1031,37 @@ void Device::updatePacer() {
                                                                       : "",
                      halved ? std::format(", frame generation: base = output {:.3f} fps / 2", outRate) : std::string(),
                      pacer_.vblankLocked() ? ", locked to DWM's vblank" : "");
+    }
+}
+
+// diagnostics (RVK_NAN_BISECT=<first frame>): after every draw into the HDR scene colour of that frame (and the next ones) the target is read back and
+// a draw that adds NaN components is logged with its shaders and textures
+void diagAfterDraw(Device& d, const char* what) {
+    static const long first = [] { char e[32]; return GetEnvironmentVariableA("RVK_NAN_BISECT", e, sizeof e) != 0 ? std::atol(e) : -1L; }();
+    if (first < 0 || static_cast<long>(d.stats().frames) < first || static_cast<long>(d.stats().frames) > first + 1) return;
+    Surface* rt = d.renderTarget(0);
+    if (rt == nullptr || rt->texture() == nullptr || rt->texture()->desc().format != 113 || rt->texture()->desc().width < 800) return;
+    Texture* t = rt->texture();
+    static std::map<Texture*, std::uint32_t> lasts;
+    static std::uint64_t lastFrame = ~0ull;
+    if (lastFrame != d.stats().frames) { lastFrame = d.stats().frames; lasts.clear(); }
+    std::uint32_t& last = lasts[t];
+    const std::uint32_t w = t->desc().width, h = t->desc().height;
+    std::vector<std::uint8_t> v;
+    if (!d.readImageLevel(t->rhi(), 0, 0, {w, h, 1}, static_cast<std::uint64_t>(w) * h * 8, v)) return;
+    std::uint32_t nan = 0;
+    for (std::size_t k = 0; k + 8 <= v.size(); k += 8) {
+        for (int c = 0; c < 4; ++c) {
+            const std::uint16_t hf = *reinterpret_cast<const std::uint16_t*>(v.data() + k + c * 2);
+            if (((hf >> 10) & 31) == 31 && (hf & 1023) != 0) ++nan;
+        }
+    }
+    if (nan != last) {
+        const Shader* vs = d.vertexShader();
+        const Shader* ps = d.pixelShader();
+        spdlog::info("diag: nan: frame {} target {} draw '{}' phase {} vs {:016x} ps {:016x}: NaN components {} -> {}", d.stats().frames, static_cast<const void*>(t), what,
+                     static_cast<int>(d.phases().pass()), vs ? vs->hash : 0, ps ? ps->hash : 0, last, nan);
+        last = nan;
     }
 }
 
@@ -1203,8 +1094,57 @@ void Device::present() {
             d.presentEnd_ = now;
         }
     } presentEnd{*this};
+    if (static bool exposureLog = GetEnvironmentVariableA("RVK_EXPOSURE_LOG", nullptr, 0) != 0; exposureLog && stats_.frames % 60 == 59) {
+        // diagnostics: the engine's adapted luminance (the 1x1 R32F output of the AvgLuminance filter) as the GPU holds it
+        if (const void* api = engine::exposure::adaptedLuminanceApi()) {
+            if (Texture* t = engineTexture(api)) {
+                std::vector<std::uint8_t> v;
+                if (readImageLevel(t->rhi(), 0, 0, {1, 1, 1}, 4, v) && v.size() >= 4) {
+                    float f;
+                    std::memcpy(&f, v.data(), 4);
+                    spdlog::info("diag: exposure: frame {} adapted luminance {:.5f}", stats_.frames, f);
+                }
+            }
+        }
+        for (int i = 6; i >= 0; --i) {
+            Texture* t = g_diagLum[i];
+            if (t == nullptr) continue;
+            const std::uint32_t w = 1u << i;
+            std::vector<std::uint8_t> v;
+            if (!readImageLevel(t->rhi(), 0, 0, {w, w, 1}, static_cast<std::uint64_t>(w) * w * 4, v)) continue;
+            double sum = 0, mn = 1e30, mx = -1e30;
+            std::uint32_t bad = 0;
+            for (std::size_t k = 0; k + 4 <= v.size(); k += 4) {
+                float f;
+                std::memcpy(&f, v.data() + k, 4);
+                if (!std::isfinite(f)) { ++bad; continue; }
+                sum += f; mn = std::min<double>(mn, f); mx = std::max<double>(mx, f);
+            }
+            spdlog::info("diag: exposure: lum chain {}x{}: mean {:.5f} min {:.5f} max {:.5f} non-finite {}", w, w, sum / std::max<std::size_t>(1, v.size() / 4 - bad), mn, mx, bad);
+        }
+        if (Texture* t = g_diagScene; t != nullptr && t->desc().width * t->desc().height <= 4000000) {
+            std::vector<std::uint8_t> v;
+            const std::uint32_t w = t->desc().width, h = t->desc().height;
+            if (readImageLevel(t->rhi(), 0, 0, {w, h, 1}, static_cast<std::uint64_t>(w) * h * 8, v)) {
+                double sum = 0;
+                std::uint32_t nan = 0, inf = 0;
+                float mx = 0;
+                for (std::size_t k = 0; k + 8 <= v.size(); k += 8) {
+                    for (int c = 0; c < 3; ++c) {
+                        const std::uint16_t hf = *reinterpret_cast<const std::uint16_t*>(v.data() + k + c * 2);
+                        const std::uint32_t e = (hf >> 10) & 31, m = hf & 1023;
+                        if (e == 31) { (m != 0 ? nan : inf)++; continue; }
+                        const float f = (e == 0 ? std::ldexp(static_cast<float>(m), -24) : std::ldexp(static_cast<float>(m + 1024), static_cast<int>(e) - 25)) * ((hf & 0x8000) ? -1.0f : 1.0f);
+                        sum += f; mx = std::max(mx, f);
+                    }
+                }
+                spdlog::info("diag: exposure: scene {}x{}: mean rgb {:.5f} max {:.2f} nan {} inf {}", w, h, sum / (3.0 * w * h), mx, nan, inf);
+            }
+        }
+    }
     endRendering();
     ++stats_.frames;
+    if (wp0_.on && stats_.frames % 600 == 0) wp0Log();
     phases_.endFrame();
     firings_.endFrame();
     shadowDepthMaps_ = 0;
@@ -1231,8 +1171,8 @@ void Device::present() {
     stats_.draws = 0;
     stats_.renderPasses = 0;
     stats_.drawsSkipped = 0;
-    if (options_.offscreen || !swapchain_.valid()) {
-        submitFrame(VK_NULL_HANDLE, VK_NULL_HANDLE);
+    if (options_.offscreen || !pres().valid()) {
+        submitFrame(false);
         beginFrame();
         return;
     }
@@ -1245,7 +1185,7 @@ void Device::present() {
         const double fps = pacer_.rate() > 0.0 ? std::min(pacer_.rate(), kLoadingFps) : kLoadingFps;
         if (now - loadingShown_ < std::chrono::duration<double>(1.0 / fps)) {
             ++stats_.loadingFramesDropped;
-            submitFrame(VK_NULL_HANDLE, VK_NULL_HANDLE);
+            submitFrame(false);
             beginFrame();
             return;
         }
@@ -1269,125 +1209,62 @@ void Device::present() {
         const double left = 0.5 * baseIntervalMs_ - std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - generatedAt).count();
         if (left > 0.05) pacer_.sleepFor(left);
     }
-    const std::uint32_t slot = static_cast<std::uint32_t>(frames_.currentValue() % vk::Frames::kInFlight);
-    VkSemaphore acquired = acquireSemaphores_[slot];
-    std::uint32_t imageIndex = 0;
+    rhi::GamePresenter& pr = pres();
     const auto tq = std::chrono::steady_clock::now();
     // the swapchain is the present thread's until its present returned
-    const VkResult previous = presenter_.waitIdle();
-    stats_.presentMs += presenter_.takePresentMs();
-    if (previous == VK_SUBOPTIMAL_KHR && swapchain_.frameGenActive()) {
+    std::string presentError;
+    const rhi::PresentStatus previous = pr.waitIdle(&presentError);
+    stats_.presentMs += pr.takePresentMs();
+    if (previous == rhi::PresentStatus::Suboptimal && pr.frameGenActive()) {
         ++stats_.presentSuboptimal;  // AMD's swapchain: a hint, not worth re-creating the whole frame generation setup
-    } else if (previous == VK_ERROR_OUT_OF_DATE_KHR || previous == VK_SUBOPTIMAL_KHR) {
+    } else if (previous == rhi::PresentStatus::OutOfDate || previous == rhi::PresentStatus::Suboptimal) {
         ++stats_.presentSuboptimal;
         ++stats_.swapchainRecreates;
         recreateSwapchain();
-    } else if (previous == VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT) {
+    } else if (previous == rhi::PresentStatus::ExclusiveLost) {
         // exclusive fullscreen taken away (another window, a mode change): presents go on non-exclusive, re-acquired later
-        swapchain_.noteExclusiveLost();
+        pr.noteExclusiveLost();
         spdlog::info("vulkan: exclusive fullscreen lost (present): re-acquired later");
         fseRetry_ = std::chrono::steady_clock::now() + std::chrono::seconds(1);
         resetPacer();
-    } else if (previous != VK_SUCCESS) {
-        spdlog::error("vulkan: present: {}", vk::resultString(previous));
+    } else if (previous != rhi::PresentStatus::Ok) {
+        spdlog::error("vulkan: present: {}", presentError);
     }
     serviceFullScreenExclusive();
     const auto ta = std::chrono::steady_clock::now();
     stats_.presentWaitMs += std::chrono::duration<double, std::milli>(ta - tq).count();
-    const bool acquiredOk = swapchain_.acquire(acquired, imageIndex);
+    const bool acquiredOk = pr.acquire();
     stats_.acquireMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - ta).count();
     if (!acquiredOk) {
         // minimised or out of date: drop the frame's presentation, keep its work (exclusive fullscreen lost: no recreation,
         // serviceFullScreenExclusive re-acquires it)
         ++stats_.acquireFailures;
-        submitFrame(VK_NULL_HANDLE, VK_NULL_HANDLE);
-        if (!swapchain_.exclusiveLost() && !swapchain_.acquireNotReady()) recreateSwapchain();
+        submitFrame(false);
+        if (!pr.exclusiveLost() && !pr.acquireNotReady()) recreateSwapchain();
         beginFrame();
         return;
     }
-    const bool fgSc = swapchain_.frameGenActive();  // AMD's swapchain: the replacement image, its callback draws the overlay
+    const bool fgSc = pr.frameGenActive();  // AMD's swapchain: the replacement image, its callback draws the overlay
     std::optional<RegionScope> presentRegion;
     presentRegion.emplace(*this, showGenerated ? "Present (generated)" : "Present");
-    VkCommandBuffer cmd = frames_.cmd();
     // the frame shown: the engine's back buffer, or (first of the two) the generated frame
-    vk::Image& bb = showGenerated ? vkImage(*generated) : backBuffer_->image();
+    rhi::Texture& shown = showGenerated ? *generated : backBuffer_->rhi();
     const VkExtent3D srcExtent = showGenerated ? generated->desc().extent
                                                : VkExtent3D{backBuffer_->desc().width, backBuffer_->desc().height, 1};
-    bb.transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
-    b.srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
-    b.dstStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
-    b.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-    b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    b.image = swapchain_.image(imageIndex);
-    b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-    di.imageMemoryBarrierCount = 1;
-    di.pImageMemoryBarriers = &b;
-    vkCmdPipelineBarrier2(cmd, &di);
-    const VkExtent2D ext = swapchain_.extent();
-    VkImageBlit2 region{VK_STRUCTURE_TYPE_IMAGE_BLIT_2};
-    region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    region.srcOffsets[1] = {static_cast<std::int32_t>(srcExtent.width), static_cast<std::int32_t>(srcExtent.height), 1};
-    region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    region.dstOffsets[1] = {static_cast<std::int32_t>(ext.width), static_cast<std::int32_t>(ext.height), 1};
-    VkBlitImageInfo2 bi{VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2};
-    bi.srcImage = bb.image();
-    bi.srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    bi.dstImage = swapchain_.image(imageIndex);
-    bi.dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    bi.regionCount = 1;
-    bi.pRegions = &region;
-    bi.filter = VK_FILTER_LINEAR;
-    vkCmdBlitImage2(cmd, &bi);
-    b.srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
-    b.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-    b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    // the overlay (src/overlay) on top of the copied frame: only in the swapchain image, never in the back buffer that
-    // captures read
-    if (fgSc) {
-        // built here (the render thread), drawn by the swapchain's present callback on every frame it shows
-        if (overlay_ != nullptr && !overlayIntoBackBuffer_ && overlay_->active()) overlay_->prepare(ext);
-    } else if (overlay_ != nullptr && !overlayIntoBackBuffer_ && swapchain_.view(imageIndex) != VK_NULL_HANDLE && overlay_->active()) {
-        b.dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-        b.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
-        b.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        vkCmdPipelineBarrier2(cmd, &di);
-        VkRenderingAttachmentInfo att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-        att.imageView = swapchain_.view(imageIndex);
-        att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        att.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
-        ri.renderArea = {{0, 0}, ext};
-        ri.layerCount = 1;
-        ri.colorAttachmentCount = 1;
-        ri.pColorAttachments = &att;
-        vkCmdBeginRendering(cmd, &ri);
-        {
+    pr.blitFrame(shown, srcExtent);
+    // the overlay (src/overlay) on top of the copied frame: only in the swapchain image, never in the back buffer that captures read
+    if (overlay_ != nullptr && !overlayIntoBackBuffer_ && overlay_->active()) {
+        if (fgSc) {
+            pr.drawOverlay(*overlay_);  // built here (the render thread), drawn by the swapchain's present callback on every frame it shows
+        } else {
             RegionScope overlayRegion(*this, "Overlay");
-            overlay_->record(game_->frameCommands(), ext);
+            pr.drawOverlay(*overlay_);
         }
-        vkCmdEndRendering(cmd);
-        b.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-        b.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
-        b.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     }
-    if (fgSc) {
-        // the replacement image goes to the API in the layout it reads (frame-generation.md F3: ReplacementBufferTransferState)
-        b.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-        b.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT;
-        b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    } else {
-        b.dstStageMask = VK_PIPELINE_STAGE_2_NONE;
-        b.dstAccessMask = VK_ACCESS_2_NONE;
-        b.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    }
-    vkCmdPipelineBarrier2(cmd, &di);
+    pr.finishFrame();
     presentRegion.reset();
-    submitFrame(acquired, swapchain_.renderedSemaphore(imageIndex));
-    presenter_.present(imageIndex);
+    submitFrame(true);
+    pr.queuePresent();
     ++stats_.presentsQueued;
     fgStatsTick(std::chrono::steady_clock::now());
     if (showGenerated) {
@@ -1397,7 +1274,7 @@ void Device::present() {
     // persist new pipelines every 10 s (the game is usually killed, not shut down)
     if (presentStart_ - pipelinesSaved_ > std::chrono::seconds(10)) {
         pipelinesSaved_ = presentStart_;
-        pipelines_.saveAsync();
+        game_->savePipelineCache();
         savePipelineKeys();
     }
     beginFrame();
@@ -1433,8 +1310,8 @@ std::unique_ptr<VertexDecl> Device::createVertexDecl(std::span<const VertexEleme
 
 namespace {
 // the debug name of a translated shader's module (vk/debug_names.h): "vs|ps <hash> [<variant>]"; empty with names off
-std::string moduleLabel(const vk::Context& ctx, shader::Stage stage, std::uint64_t hash, std::string_view tag) {
-    if (!ctx.namesEnabled()) return {};
+std::string moduleLabel(bool names, shader::Stage stage, std::uint64_t hash, std::string_view tag) {
+    if (!names) return {};
     return std::format("{} {:016x}{}{}", stage == shader::Stage::Vertex ? "vs" : "ps", hash, tag.empty() ? "" : " ", tag);
 }
 }  // namespace
@@ -1499,7 +1376,14 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
     const auto cacheFile = options_.cacheDir.empty() ? std::filesystem::path()
                                                      : options_.cacheDir / "spirv" / std::format("{:016x}.spv", hash);
     enqueueShaderJob(s.get(), [this, s, done, text = std::move(hlsl.hlsl), cacheFile, hash] {
+        rhi::ShaderModule module = rhi::ShaderModule::None;
+        const bool dx12 = options_.backend == rhi::Backend::D3D12;
+        if (dx12) {
+            ++shadersCompiled_;
+            module = dxilModule(s->stage, text, "translated.hlsl", cacheFile, moduleLabel(game_->namesEnabled(), s->stage, hash, {}), hash);
+        }
         std::vector<std::uint32_t> spirv;
+        if (!dx12)
         if (!cacheFile.empty()) {
             std::ifstream in(cacheFile, std::ios::binary | std::ios::ate);
             if (in) {
@@ -1509,7 +1393,7 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
                 in.read(reinterpret_cast<char*>(spirv.data()), static_cast<std::streamsize>(spirv.size() * 4));
             }
         }
-        if (spirv.empty()) {
+        if (!dx12 && spirv.empty()) {
             ++shadersCompiled_;
             auto compiled = shader::compileHlsl(s->stage, text);
             if (!compiled.ok()) {
@@ -1530,7 +1414,7 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
                 std::filesystem::rename(tmp, cacheFile, ec);  // (a half-written file is never a hit)
             }
         }
-        const rhi::ShaderModule module = game_->createShaderModule({.spirv = spirv}, moduleLabel(ctx_, s->stage, hash, {}).c_str());
+        if (!dx12) module = game_->createShaderModule({.spirv = spirv}, moduleLabel(game_->namesEnabled(), s->stage, hash, {}).c_str());
         if (module != rhi::ShaderModule::None) {
             {
                 const std::lock_guard lock(shaderMutex_);
@@ -1543,10 +1427,54 @@ std::shared_ptr<Shader> Device::createShader(std::span<const std::uint32_t> byte
         if (module != rhi::ShaderModule::None) {
             prewarmPipelines(hash);
             // with pipeline libraries the shader's compilation happens here (a worker thread), not at its first draw
-            pipelines_.prepareShader(module, s->stage == shader::Stage::Vertex ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT);
+            game_->preparePipelineShader(module, s->stage == shader::Stage::Vertex ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT);
         }
     });
     return s;
+}
+
+// The DX12 backend's shader module of generated HLSL: DXIL (SM 6.6) through DXC, cached next to the SPIR-V cache (`.dxo`), never SPIR-V
+rhi::ShaderModule Device::dxilModule(shader::Stage stage, const std::string& text, std::string_view name, const std::filesystem::path& spvCacheFile,
+                                     const std::string& label, std::uint64_t hash) {
+    std::vector<std::uint8_t> dxil;
+    std::filesystem::path cacheFile;
+    if (char dump[MAX_PATH]; GetEnvironmentVariableA("RVK_DUMP_HLSL", dump, MAX_PATH) != 0) {  // diagnostics: the generated text of every module
+        std::error_code ec;
+        std::filesystem::create_directories(dump, ec);
+        std::ofstream(std::filesystem::path(dump) / std::format("{:016x}_{}.hlsl", hash, stage == shader::Stage::Vertex ? "vs" : "ps")) << text;
+    }
+    if (!spvCacheFile.empty()) {
+        cacheFile = spvCacheFile.parent_path().parent_path() / "dxil" / spvCacheFile.filename();
+        // keyed by the text too: the cached DXIL follows the translator (the SPIR-V cache key's hash does not see every change of the generated HLSL)
+        const std::uint64_t textHash = fnv1a(text.data(), text.size());
+        cacheFile.replace_extension();
+        cacheFile += std::format("_{:08x}.dxo", static_cast<std::uint32_t>(textHash ^ (textHash >> 32)));
+        std::ifstream in(cacheFile, std::ios::binary | std::ios::ate);
+        if (in) {
+            dxil.resize(static_cast<std::size_t>(in.tellg()));
+            in.seekg(0);
+            in.read(reinterpret_cast<char*>(dxil.data()), static_cast<std::streamsize>(dxil.size()));
+        }
+    }
+    if (dxil.empty()) {
+        auto compiled = shader::compileHlslDxil(stage, text, name);
+        if (!compiled.ok()) {
+            spdlog::error("d3d9: shader {:016x} does not compile to DXIL: {}", hash, compiled.log.substr(0, 1500));
+            return rhi::ShaderModule::None;
+        }
+        dxil = std::move(compiled.bytes);
+        if (!cacheFile.empty()) {
+            std::error_code ec;
+            std::filesystem::create_directories(cacheFile.parent_path(), ec);
+            const auto tmp = std::filesystem::path(cacheFile).concat(".tmp");
+            {
+                std::ofstream out(tmp, std::ios::binary);
+                out.write(reinterpret_cast<const char*>(dxil.data()), static_cast<std::streamsize>(dxil.size()));
+            }
+            std::filesystem::rename(tmp, cacheFile, ec);
+        }
+    }
+    return game_->createShaderModule({.dxil = dxil}, label.empty() ? nullptr : label.c_str());
 }
 
 void Device::enqueueShaderJob(Shader* shader, std::function<void()> job) {
@@ -1680,6 +1608,9 @@ rhi::ShaderModule Device::uberModule(const Shader& s, const MaterialSource& src,
             ? std::filesystem::path()
             : options_.cacheDir / "spirv" /
                   std::format("{:016x}_{}_u{:08x}.spv", s.hash, tag, static_cast<std::uint32_t>(shader::uberHlslHash() ^ (shader::uberHlslHash() >> 32)));
+    if (options_.backend == rhi::Backend::D3D12) {
+        return dxilModule(shader::Stage::Pixel, glsl, "uber.hlsl", cacheFile, game_->namesEnabled() ? moduleLabel(true, s.stage, s.hash, std::format("{} {} {}", src.file, src.entry, tag)) : std::string(), s.hash);
+    }
     if (!cacheFile.empty()) {
         std::ifstream in(cacheFile, std::ios::binary | std::ios::ate);
         if (in) {
@@ -1709,7 +1640,7 @@ rhi::ShaderModule Device::uberModule(const Shader& s, const MaterialSource& src,
         spdlog::info("d3d9: GLSL material shaders: {} modules built, {} failed", n, ubershadersFailed_.load());
     }
     return game_->createShaderModule(
-        {.spirv = spirv}, ctx_.namesEnabled() ? moduleLabel(ctx_, s.stage, s.hash, std::format("{} {} {}", src.file, src.entry, tag)).c_str() : nullptr);
+        {.spirv = spirv}, game_->namesEnabled() ? moduleLabel(game_->namesEnabled(), s.stage, s.hash, std::format("{} {} {}", src.file, src.entry, tag)).c_str() : nullptr);
 }
 
 rhi::ShaderModule Device::variantModule(const Shader& s, const shader::TranslateOptions& options, std::string_view tag) {
@@ -1729,6 +1660,9 @@ rhi::ShaderModule Device::variantModule(const Shader& s, const shader::Translate
     std::vector<std::uint32_t> spirv;
     const auto cacheFile = options_.cacheDir.empty() ? std::filesystem::path()
                                                      : options_.cacheDir / "spirv" / std::format("{:016x}_{}_h{:08x}.spv", s.hash, tag, static_cast<std::uint32_t>(shader::hlslIncludesHash() ^ (shader::hlslIncludesHash() >> 32)));
+    if (options_.backend == rhi::Backend::D3D12) {
+        return dxilModule(dec.program.version.stage, glsl.hlsl, "translated.hlsl", cacheFile, moduleLabel(game_->namesEnabled(), s.stage, s.hash, tag), s.hash);
+    }
     if (!cacheFile.empty()) {
         std::ifstream in(cacheFile, std::ios::binary | std::ios::ate);
         if (in) {
@@ -1751,7 +1685,7 @@ rhi::ShaderModule Device::variantModule(const Shader& s, const shader::Translate
             out.write(reinterpret_cast<const char*>(spirv.data()), static_cast<std::streamsize>(spirv.size() * 4));
         }
     }
-    return game_->createShaderModule({.spirv = spirv}, moduleLabel(ctx_, s.stage, s.hash, tag).c_str());
+    return game_->createShaderModule({.spirv = spirv}, moduleLabel(game_->namesEnabled(), s.stage, s.hash, tag).c_str());
 }
 
 // ---- thin G-buffer (enh/gbuffer) ----
@@ -1759,8 +1693,6 @@ rhi::ShaderModule Device::variantModule(const Shader& s, const shader::Translate
 void Device::setGbuffer(const GbufferTargets& g) {
     const bool was = gbuf_.normal != nullptr;
     gbuf_ = g;
-    gbufImage_[0] = g.normal != nullptr ? &vkImage(*g.normal) : nullptr;  // (the solid pass's scope attachments are still raw Vulkan)
-    gbufImage_[1] = g.motion != nullptr ? &vkImage(*g.motion) : nullptr;
     if (g.normal == nullptr) {
         if (was) spdlog::info("d3d9: g-buffer off");
         gbufArmed_ = false;
@@ -2062,7 +1994,7 @@ void Device::setVertexShaderConstantF(std::uint32_t start, const float* data, st
             ++perf_.constSetsUnchanged;
             return;
         }
-        std::memcpy(vsF_[start + first], data + first * 4, (last - first + 1) * 16);
+        copyRegisters(vsF_[start + first], data + first * 4, last - first + 1);
         vsConstDirty_ = true;
         constWinDirty_[0] |= constWindowMask(true, start + first, last - first + 1);
         return;
@@ -2081,7 +2013,7 @@ void Device::setPixelShaderConstantF(std::uint32_t start, const float* data, std
             ++perf_.constSetsUnchanged;
             return;
         }
-        std::memcpy(psF_[start + first], data + first * 4, (last - first + 1) * 16);
+        copyRegisters(psF_[start + first], data + first * 4, last - first + 1);
         psConstDirty_ = true;
         constWinDirty_[1] |= constWindowMask(false, start + first, last - first + 1);
         return;
@@ -2143,7 +2075,19 @@ void Device::setRenderTarget(std::uint32_t index, Surface* surface) {
     }
     endRendering();
     rt_[index] = surface;
-    if (index == 0 && surface != nullptr && phases_.pass() == scene::Pass::ShadowMask && vk::names::enabled()) {
+    if (index == 0 && surface != nullptr && surface->texture() != nullptr && surface->level() == 0) {
+        static const bool diag = GetEnvironmentVariableA("RVK_EXPOSURE_LOG", nullptr, 0) != 0;
+        if (diag) {
+            Texture* t = surface->texture();
+            const auto& d = t->desc();
+            if (d.format == 114 && d.width == d.height && d.width <= 64 && (d.width & (d.width - 1)) == 0) {
+                g_diagLum[std::countr_zero(d.width)] = t;
+            } else if (d.format == 113 && d.width >= 800) {
+                g_diagScene = t;
+            }
+        }
+    }
+    if (index == 0 && surface != nullptr && phases_.pass() == scene::Pass::ShadowMask && rhi::debugNamesEnabled()) {
         debugnames::onShadowMaskTarget(*this, surface);  // debug names of the mask chain's targets (d3d9/target_names.h)
     }
     if (index == 0 && surface != nullptr) {
@@ -2225,14 +2169,14 @@ void Device::clear(std::uint32_t flags, std::uint32_t color, float z, std::uint3
     }
     if (n > 0) {
         flushBatch();  // the draws batched before the clear
+        ClearOp op;
+        std::copy(atts, atts + n, op.atts);
+        op.count = n;
+        op.rect = rect;
         if (scopeSecondary_) {
-            ClearOp op;
-            std::copy(atts, atts + n, op.atts);
-            op.count = n;
-            op.rect = rect;
             emitClear(op);
         } else {
-            vkCmdClearAttachments(frames_.cmd(), n, atts, 1, &rect);
+            game_->clearAttachments(op);
         }
     }
 }
@@ -2258,7 +2202,7 @@ void Device::blit(rhi::Texture& src, std::uint32_t srcLevel, std::uint32_t srcLa
     region.dstOffset = dstBox[0];
     region.srcExtent = extent(srcBox);
     region.dstExtent = extent(dstBox);
-    cl.blitTexture(dst, src, std::span<const rhi::TextureBlit>(&region, 1), vk::isDepthFormat(src.desc().format) ? VK_FILTER_NEAREST : filter);
+    cl.blitTexture(dst, src, std::span<const rhi::TextureBlit>(&region, 1), rhi::isDepthFormat(src.desc().format) ? VK_FILTER_NEAREST : filter);
 }
 
 void Device::stretchRect(Surface* src, const std::int32_t* srcRect, Surface* dst, const std::int32_t* dstRect, bool linear) {
@@ -2291,8 +2235,8 @@ bool Device::readRenderTarget(Surface* src, Texture* dst, std::uint32_t dstLevel
     }
     std::vector<std::uint8_t> pixels;
     const std::uint32_t w = src->width(), h = src->height();
-    const vk::FormatInfo& f = src->texture()->format();
-    const std::uint64_t size = vk::storageSize(f, w, h);
+    const rhi::FormatInfo& f = src->texture()->format();
+    const std::uint64_t size = rhi::storageSize(f, w, h);
     if (!readImageLevel(src->texture()->rhi(), src->level(), src->face(), {w, h, 1}, size, pixels)) {
         return false;
     }
@@ -2313,7 +2257,7 @@ namespace {
 
 // One 4x4 block of BC1 / BC2 / BC3 (D3D9 DXT1 / DXT2-3 / DXT4-5) to 16 BGRA texels (A8R8G8B8 in memory: B, G, R, A).
 void decodeDxtBlock(const std::uint8_t* b, std::uint32_t d3dFormat, std::uint8_t out[16][4]) {
-    const std::uint8_t* c = d3dFormat == vk::d3dfmt::DXT1 ? b : b + 8;
+    const std::uint8_t* c = d3dFormat == rhi::d3dfmt::DXT1 ? b : b + 8;
     std::uint16_t c0, c1;
     std::memcpy(&c0, c, 2);
     std::memcpy(&c1, c + 2, 2);
@@ -2327,7 +2271,7 @@ void decodeDxtBlock(const std::uint8_t* b, std::uint32_t d3dFormat, std::uint8_t
     expand(c1, pal[1]);
     pal[0][3] = pal[1][3] = pal[2][3] = 255;
     pal[3][3] = 255;
-    const bool fourColours = d3dFormat != vk::d3dfmt::DXT1 || c0 > c1;
+    const bool fourColours = d3dFormat != rhi::d3dfmt::DXT1 || c0 > c1;
     for (int i = 0; i < 3; ++i) {
         if (fourColours) {
             pal[2][i] = static_cast<std::uint8_t>((2 * pal[0][i] + pal[1][i]) / 3);
@@ -2342,12 +2286,12 @@ void decodeDxtBlock(const std::uint8_t* b, std::uint32_t d3dFormat, std::uint8_t
     std::memcpy(&idx, c + 4, 4);
     std::uint8_t alpha[16];
     std::fill(alpha, alpha + 16, std::uint8_t{255});
-    if (d3dFormat == vk::d3dfmt::DXT2 || d3dFormat == vk::d3dfmt::DXT3) {
+    if (d3dFormat == rhi::d3dfmt::DXT2 || d3dFormat == rhi::d3dfmt::DXT3) {
         for (int i = 0; i < 16; ++i) {
             const std::uint8_t n = (b[i / 2] >> ((i & 1) * 4)) & 15;
             alpha[i] = static_cast<std::uint8_t>(n * 17);
         }
-    } else if (d3dFormat == vk::d3dfmt::DXT4 || d3dFormat == vk::d3dfmt::DXT5) {
+    } else if (d3dFormat == rhi::d3dfmt::DXT4 || d3dFormat == rhi::d3dfmt::DXT5) {
         std::uint8_t a[8] = {b[0], b[1]};
         for (int i = 1; i <= (a[0] > a[1] ? 6 : 4); ++i) {
             a[i + 1] = a[0] > a[1] ? static_cast<std::uint8_t>(((7 - i) * a[0] + i * a[1]) / 7)
@@ -2366,12 +2310,12 @@ void decodeDxtBlock(const std::uint8_t* b, std::uint32_t d3dFormat, std::uint8_t
         out[i][0] = p[2];
         out[i][1] = p[1];
         out[i][2] = p[0];
-        out[i][3] = d3dFormat == vk::d3dfmt::DXT1 ? p[3] : alpha[i];
+        out[i][3] = d3dFormat == rhi::d3dfmt::DXT1 ? p[3] : alpha[i];
     }
 }
 
 bool isBlockDxt(std::uint32_t f) {
-    return f == vk::d3dfmt::DXT1 || f == vk::d3dfmt::DXT2 || f == vk::d3dfmt::DXT3 || f == vk::d3dfmt::DXT4 || f == vk::d3dfmt::DXT5;
+    return f == rhi::d3dfmt::DXT1 || f == rhi::d3dfmt::DXT2 || f == rhi::d3dfmt::DXT3 || f == rhi::d3dfmt::DXT4 || f == rhi::d3dfmt::DXT5;
 }
 
 }  // namespace
@@ -2419,7 +2363,7 @@ bool Device::loadSurfaceFromSurface(Texture* dst, std::uint32_t dstLevel, const 
         stretchRect(srcSurface, srcRect, dst->surface(dstLevel, 0), r, linear);
         return true;
     }
-    if (dst->format().compressed || dst->format().convert != vk::Convert::None) {
+    if (dst->format().compressed || dst->format().convert != rhi::Convert::None) {
         return fail("compressed / converted destination format");
     }
     const std::uint32_t w = static_cast<std::uint32_t>(r[2] - r[0]), h = static_cast<std::uint32_t>(r[3] - r[1]);
@@ -2434,7 +2378,7 @@ bool Device::loadSurfaceFromSurface(Texture* dst, std::uint32_t dstLevel, const 
         if (sr[0] >= 0 && sr[1] >= 0 && sr[0] < sr[2] && sr[1] < sr[3] && sr[2] <= static_cast<std::int32_t>(sLvlW) &&
             sr[3] <= static_cast<std::int32_t>(sLvlH)) {
             std::vector<std::uint8_t> raw;
-            if (!readImageLevel(src->rhi(), srcLevel, 0, {sLvlW, sLvlH, 1}, vk::storageSize(src->format(), sLvlW, sLvlH), raw)) {
+            if (!readImageLevel(src->rhi(), srcLevel, 0, {sLvlW, sLvlH, 1}, rhi::storageSize(src->format(), sLvlW, sLvlH), raw)) {
                 return fail("read-back of the source failed");
             }
             const std::uint32_t bw = (sLvlW + 3) / 4, blockBytes = src->format().blockBytes;
@@ -2476,7 +2420,7 @@ bool Device::loadSurfaceFromSurface(Texture* dst, std::uint32_t dstLevel, const 
     }
     stretchRect(srcSurface, srcRect, tmp->surface(0, 0), nullptr, linear);
     std::vector<std::uint8_t> pixels;
-    const std::uint64_t size = vk::storageSize(tmp->format(), w, h);
+    const std::uint64_t size = rhi::storageSize(tmp->format(), w, h);
     const bool read = readImageLevel(tmp->rhi(), 0, 0, {w, h, 1}, size, pixels);
     release(std::move(tmp));
     if (!read) {
@@ -2524,9 +2468,7 @@ bool Device::readImageLevel(rhi::Texture& tex, std::uint32_t level, std::uint32_
     if (tex.layout() != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) cl.transition(tex, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     cl.copyTextureToBuffer(*rb, 0, tex, {level, layer});
     // the copy must finish before the CPU reads: end the frame's work here and start a new command buffer
-    submitFrame(VK_NULL_HANDLE, VK_NULL_HANDLE);
-    frames_.waitFor(frames_.currentValue() - 1);
-    beginFrame();
+    flushFrameAndWait();
     rb->invalidate();
     const auto* p = static_cast<const std::uint8_t*>(rb->map());
     const std::uint32_t rowBytes = ((full.width + fb.width - 1) / fb.width) * fb.bytes;
@@ -2549,7 +2491,7 @@ bool Device::readBackBuffer(std::vector<std::uint8_t>& bgra, std::uint32_t& widt
     TextureDesc d;
     d.width = backBuffer_->desc().width;
     d.height = backBuffer_->desc().height;
-    d.format = vk::d3dfmt::A8R8G8B8;
+    d.format = rhi::d3dfmt::A8R8G8B8;
     d.pool = POOL_SYSTEMMEM;
     auto tmp = createTexture(d);
     if (!tmp || !readRenderTarget(backBufferSurface_, tmp.get(), 0)) {
@@ -2578,7 +2520,7 @@ void Device::loadPipelineKeys() {
     if (options_.cacheDir.empty()) {
         return;
     }
-    std::ifstream in(options_.cacheDir / "pipelines.keys", std::ios::binary);
+    std::ifstream in(options_.cacheDir / (options_.backend == rhi::Backend::Vulkan ? "pipelines.keys" : "pipelines_d3d12.keys"), std::ios::binary);
     char magic[8]{};
     std::uint32_t recordSize = 0;
     if (!in.read(magic, sizeof(magic)) || std::memcmp(magic, kKeysMagic, sizeof(magic)) != 0 ||
@@ -2622,7 +2564,7 @@ void Device::savePipelineKeys() {
         keySaver_.join();
     }
     // the file I/O off the render thread; <file>.tmp + rename so a killed game leaves the previous file
-    keySaver_ = std::thread([file = options_.cacheDir / "pipelines.keys", blob = std::move(blob)] {
+    keySaver_ = std::thread([file = options_.cacheDir / (options_.backend == rhi::Backend::Vulkan ? "pipelines.keys" : "pipelines_d3d12.keys"), blob = std::move(blob)] {
         std::error_code ec;
         std::filesystem::create_directories(file.parent_path(), ec);
         auto tmp = file;
@@ -2636,7 +2578,7 @@ void Device::savePipelineKeys() {
 }
 
 // a pipeline was created for a draw: remember it by its shaders' hashes (render thread)
-void Device::recordPipelineKey(const vk::PipelineDesc& pd) {
+void Device::recordPipelineKey(const PipelineDesc& pd) {
     PipelineKey k;
     {
         const std::lock_guard lock(shaderMutex_);
@@ -2693,7 +2635,7 @@ void Device::prewarmPipelines(std::uint64_t shaderHash) {
             k.desc.fs = p->second->module;
             if (k.desc.vs == rhi::ShaderModule::None || k.desc.fs == rhi::ShaderModule::None) continue;  // not compiled yet: its own completion prewarms
         }
-        pipelines_.prewarm(k.desc);
+        game_->prewarmPipeline(k.desc);
     }
 }
 
@@ -2769,20 +2711,20 @@ void Device::registerReplacement(std::shared_ptr<Shader> vs, std::shared_ptr<Sha
 }
 
 bool Device::prebuildReplacement(const Shader& vs, const Shader& ps, bool procedural) {
-    vk::PipelineDesc pd{};
+    PipelineDesc pd{};
     if (!replacementDesc(vs, ps, procedural, pd)) return false;
-    if (!pipelines_.contains(pd)) pipelines_.prewarm(pd);
+    if (!game_->pipelineContains(pd)) game_->prewarmPipeline(pd);
     return true;
 }
 
 bool Device::replacementReady(const Shader& vs, const Shader& ps, bool procedural) const {
-    vk::PipelineDesc pd{};
-    return replacementDesc(vs, ps, procedural, pd) && pipelines_.contains(pd);
+    PipelineDesc pd{};
+    return replacementDesc(vs, ps, procedural, pd) && game_->pipelineContains(pd);
 }
 
-bool Device::replacementDesc(const Shader& vs, const Shader& ps, bool procedural, vk::PipelineDesc& out) const {
+bool Device::replacementDesc(const Shader& vs, const Shader& ps, bool procedural, PipelineDesc& out) const {
     if (!waterTemplateValid_ || vs.module == rhi::ShaderModule::None || ps.module == rhi::ShaderModule::None) return false;
-    vk::PipelineDesc pd = waterTemplate_;
+    PipelineDesc pd = waterTemplate_;
     pd.vs = vs.module;
     pd.fs = ps.module;
     if (procedural) {
@@ -2793,8 +2735,8 @@ bool Device::replacementDesc(const Shader& vs, const Shader& ps, bool procedural
         std::memset(pd.attributes, 0, sizeof(pd.attributes));
     }
     for (std::uint32_t i = 0; i < pd.colorCount; ++i) {
-        if (!ctx_.features().extendedDynamicState3) {
-            pd.blend[i] = vk::BlendAttachment{};
+        if (!game_->gameCaps().extendedDynamicState3) {
+            pd.blend[i] = BlendAttachment{};
             pd.blend[i].writeMask = 0xF;
         }
     }
@@ -2813,41 +2755,36 @@ std::uint32_t Device::lookupSamplerStates(const std::uint32_t* states) {
         return it->second;
     }
     const auto& s = key.states;
-    VkSamplerCreateInfo ci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-    ci.magFilter = filter(s[SAMP_MAGFILTER]);
-    ci.minFilter = filter(s[SAMP_MINFILTER]);
-    ci.mipmapMode = mipmapMode(s[SAMP_MIPFILTER]);
-    ci.addressModeU = addressMode(s[SAMP_ADDRESSU]);
-    ci.addressModeV = addressMode(s[SAMP_ADDRESSV]);
-    ci.addressModeW = addressMode(s[SAMP_ADDRESSW]);
-    ci.mipLodBias = std::clamp(asFloat(s[SAMP_MIPMAPLODBIAS]), -15.0f, 15.0f);
-    const bool aniso = (s[SAMP_MINFILTER] == TEXF_ANISOTROPIC || s[SAMP_MAGFILTER] == TEXF_ANISOTROPIC) &&
-                       ctx_.features().samplerAnisotropy;
-    ci.anisotropyEnable = aniso ? VK_TRUE : VK_FALSE;
-    ci.maxAnisotropy = aniso ? std::clamp(static_cast<float>(s[SAMP_MAXANISOTROPY]), 1.0f, ctx_.features().maxAnisotropy) : 1.0f;
+    rhi::GameSamplerDesc sd;
+    sd.magFilter = filter(s[SAMP_MAGFILTER]);
+    sd.minFilter = filter(s[SAMP_MINFILTER]);
+    sd.mipmap = mipmapMode(s[SAMP_MIPFILTER]);
+    sd.addressU = addressMode(s[SAMP_ADDRESSU]);
+    sd.addressV = addressMode(s[SAMP_ADDRESSV]);
+    sd.addressW = addressMode(s[SAMP_ADDRESSW]);
+    sd.lodBias = std::clamp(asFloat(s[SAMP_MIPMAPLODBIAS]), -15.0f, 15.0f);
+    const rhi::GameCaps& caps = game_->gameCaps();
+    const bool aniso = (s[SAMP_MINFILTER] == TEXF_ANISOTROPIC || s[SAMP_MAGFILTER] == TEXF_ANISOTROPIC) && caps.samplerAnisotropy;
+    sd.maxAnisotropy = aniso ? std::clamp(static_cast<float>(s[SAMP_MAXANISOTROPY]), 1.0f, caps.maxAnisotropy) : 1.0f;
     // MAXMIPLEVEL is the most detailed level used; MIPFILTER NONE samples that level only
-    ci.minLod = static_cast<float>(s[SAMP_MAXMIPLEVEL]);
-    ci.maxLod = s[SAMP_MIPFILTER] == TEXF_NONE ? ci.minLod : VK_LOD_CLAMP_NONE;
+    sd.minLod = static_cast<float>(s[SAMP_MAXMIPLEVEL]);
+    sd.singleLevel = s[SAMP_MIPFILTER] == TEXF_NONE;
     const std::uint32_t border = s[SAMP_BORDERCOLOR];
     const bool white = (border & 0x00FFFFFF) == 0x00FFFFFF;
     const bool opaque = (border >> 24) >= 0x80;
-    ci.borderColor = white ? VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE
-                           : (opaque ? VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK : VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK);
-    VkSampler sampler = VK_NULL_HANDLE;
-    if (vkCreateSampler(ctx_.device(), &ci, nullptr, &sampler) != VK_SUCCESS) {
-        return 0;
-    }
-    samplerObjects_.push_back(sampler);
-    const std::uint32_t index = bindless_.addSampler(sampler);
-    if (ctx_.namesEnabled()) {
+    sd.border = white ? VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE : (opaque ? VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK : VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK);
+    std::string name;
+    if (game_->namesEnabled()) {
         static constexpr const char* kFilter[] = {"none", "point", "linear", "aniso", "pyramid", "gauss"};
         static constexpr const char* kAddress[] = {"?", "wrap", "mirror", "clamp", "border", "mirror-once"};
         const auto f = [](const char* const* t, std::uint32_t v, std::uint32_t n) { return v < n ? t[v] : "?"; };
-        vk::names::object(ctx_, sampler, VK_OBJECT_TYPE_SAMPLER,
-                          std::format("sampler [slot {}] min {} mag {} mip {} | U {} V {} W {}{}", index, f(kFilter, s[SAMP_MINFILTER], 6),
-                                      f(kFilter, s[SAMP_MAGFILTER], 6), f(kFilter, s[SAMP_MIPFILTER], 6), f(kAddress, s[SAMP_ADDRESSU], 6),
-                                      f(kAddress, s[SAMP_ADDRESSV], 6), f(kAddress, s[SAMP_ADDRESSW], 6),
-                                      aniso ? std::format(" | aniso {}x", ci.maxAnisotropy) : std::string()));
+        name = std::format("min {} mag {} mip {} | U {} V {} W {}{}", f(kFilter, s[SAMP_MINFILTER], 6), f(kFilter, s[SAMP_MAGFILTER], 6),
+                           f(kFilter, s[SAMP_MIPFILTER], 6), f(kAddress, s[SAMP_ADDRESSU], 6), f(kAddress, s[SAMP_ADDRESSV], 6),
+                           f(kAddress, s[SAMP_ADDRESSW], 6), aniso ? std::format(" | aniso {}x", sd.maxAnisotropy) : std::string());
+    }
+    const std::uint32_t index = game_->createGameSampler(sd, name);
+    if (index == 0) {
+        return 0;
     }
     samplers_.emplace(key, index);
     return index;
@@ -2872,7 +2809,7 @@ void Device::logTracedMaterial(draws::Kind kind, bool jittered) {
     for (std::uint32_t slot = 0; slot < 16; ++slot) {
         if (!ps_ || ps_->reflection.samplers[slot] == shader::TextureType::Unknown) continue;
         const Texture* t = tex_[slot];
-        tex += t != nullptr ? std::format(" s{}={}x{} {}", slot, t->desc().width, t->desc().height, vk::d3dFormatName(t->desc().format))
+        tex += t != nullptr ? std::format(" s{}={}x{} {}", slot, t->desc().width, t->desc().height, rhi::d3dFormatName(t->desc().format))
                             : std::format(" s{}=-", slot);
     }
     spdlog::info("d3d9: material trace '{}' (entity {}) {}/{} kind {}: vs {:016x} ps {:016x} (texkill {}), blend {} {}/{} op {}, "

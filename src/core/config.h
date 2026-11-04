@@ -38,6 +38,7 @@ struct Config {
     bool syncValidation = false;  // + its synchronization validation (implies validation; slow)
     bool probe = true;         // log the Vulkan devices and their features at startup
     int adapter = -1;          // physical device index, -1 = best discrete GPU
+    std::string api;           // "" = the player's setting (vulkan.api), else "vulkan" / "d3d12" (locks it)
     // vsync, max_fps and adapter are also player settings (settings.toml, core/settings.h); a non-default value here
     // overrides the player's for the session (developer runs: run.ps1 -Vsync / -MaxFps)
     double maxFps = 0.0;       // present-rate cap; 0 = the monitor's refresh rate with vsync, none without
@@ -62,7 +63,7 @@ struct Config {
     bool dumpSavedTextures = false;
     bool perf = false;            // (vulkan) GPU timestamps + CPU timings, a "perf:" line in rvk.log every 5 s
     std::uint32_t perfFrame = 0;  // (vulkan) log the GPU time of every render pass of this frame (needs perf)
-    // (vulkan) build a tiny BLAS / TLAS and trace it with ray query at device creation (vk::rt::selfTest; "rt selftest" in
+    // (vulkan) build a tiny BLAS / TLAS and trace it with ray query at device creation (GameDevice::runRaytracingSelfTest; "rt selftest" in
     // rvk.log); needs the ray tracing tier (rt.allow + a GPU with ray query)
     bool rtSelfTest = false;
     bool shaderDebugInfo = false;  // [debug] shader_debug_info: SPIR-V with names, source lines and the GLSL text (RenderDoc), optimizer off

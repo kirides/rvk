@@ -11,13 +11,27 @@
 #include "shader/embedded.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstdlib>
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 #include <cstring>
 #include <format>
 #include <map>
 #include <set>
 
 namespace rvk::shader {
+
+static std::atomic<bool> g_varyingFillers{false};
+// the VARY<n> index of a variant's extra varying declaration (-1: none)
+static std::int64_t extraVaryLocation(const std::string& text) {
+    const auto p = text.find("VARY");
+    return p == std::string::npos ? -1 : std::strtoll(text.c_str() + p + 4, nullptr, 10);
+}
+void setVaryingFillers(bool on) { g_varyingFillers.store(on); }
+bool varyingFillers() { return g_varyingFillers.load(); }
+
 namespace {
 
 constexpr const char* kComp = "xyzw";
@@ -673,7 +687,7 @@ private:
             break;
         }
         case Op::Pow:
-            if (need(2)) assign(ins, splat(std::format("pow(abs({}), {})", scalar(s[0]), scalar(s[1]))));
+            if (need(2)) assign(ins, splat(std::format("{}(abs({}), {})", varyingFillers() ? "rvk_pow" : "pow", scalar(s[0]), scalar(s[1]))));
             break;
         case Op::Crs:
             if (need(2)) assign(ins, std::format("float4(cross({}.xyz, {}.xyz), 0.0)", paren(srcExpr(s[0])), paren(srcExpr(s[1]))));
@@ -842,32 +856,67 @@ private:
             if (!opt_.extraInputs.empty()) g += "\n";
             g += "};\n";
             g += "struct RvkVsOut {\n    float4 position : SV_Position;\n";
-            auto varying = [&](std::uint32_t loc) { g += std::format("    [[vk::location({})]] float4 rvk_out{} : VARY{};\n", loc, loc, loc); };
+            std::set<std::uint32_t> locs;
             if (major_ >= 3) {
                 for (const auto& d : p_.outputs) {
-                    if (const std::uint32_t loc = abi::varyingLocation(d.usage, d.usageIndex); loc != abi::kInvalidLocation) varying(loc);
-                    if (d.usage == Usage::PSize) g += "    [[vk::builtin(\"PointSize\")]] float rvk_psize : PSIZE;\n";
+                    if (const std::uint32_t loc = abi::varyingLocation(d.usage, d.usageIndex); loc != abi::kInvalidLocation) locs.insert(loc);
+                    if (d.usage == Usage::PSize && !varyingFillers()) g += "    [[vk::builtin(\"PointSize\")]] float rvk_psize : PSIZE;\n";
                 }
             } else {
-                for (auto i : attrOut_) varying(abi::varyingLocation(Usage::Color, i));
-                for (auto i : outputs_) varying(abi::varyingLocation(Usage::TexCoord, i));
-                if (rastOut_.contains(1)) varying(abi::varyingLocation(Usage::Fog, 0));
-                if (rastOut_.contains(2)) g += "    [[vk::builtin(\"PointSize\")]] float rvk_psize : PSIZE;\n";
+                for (auto i : attrOut_) locs.insert(abi::varyingLocation(Usage::Color, i));
+                for (auto i : outputs_) locs.insert(abi::varyingLocation(Usage::TexCoord, i));
+                if (rastOut_.contains(1)) locs.insert(abi::varyingLocation(Usage::Fog, 0));
+                if (rastOut_.contains(2) && !varyingFillers()) g += "    [[vk::builtin(\"PointSize\")]] float rvk_psize : PSIZE;\n";
             }
-            g += opt_.extraOutputs;
-            if (!opt_.extraOutputs.empty()) g += "\n";
+            // D3D12 links the stages by register: the signature is dense (0..max) on both sides, so a pixel shader that reads fewer / other varyings
+            // than the vertex shader writes still lands on the same registers (zero-initialised fillers)
+            if (varyingFillers() && (!locs.empty() || extraVaryLocation(opt_.extraOutputs) > 0)) {
+                // (a variant's extra varying sits after them: it must land on the same register on both sides)
+                const std::uint32_t top = std::max<std::int64_t>(locs.empty() ? -1 : static_cast<std::int64_t>(*locs.rbegin()), extraVaryLocation(opt_.extraOutputs) - 1);
+                for (std::uint32_t l = 0; static_cast<std::int64_t>(l) <= static_cast<std::int64_t>(top); ++l) locs.insert(l);
+            }
+            bool extraDone = false;
+            for (const std::uint32_t loc : locs) {
+                if (varyingFillers() && static_cast<std::int64_t>(loc) == extraVaryLocation(opt_.extraOutputs)) {
+                    g += opt_.extraOutputs + "\n";  // (in its register: a plain pixel shader pads this one)
+                    extraDone = true;
+                    continue;
+                }
+                g += std::format("    [[vk::location({})]] float4 rvk_out{} : VARY{};\n", loc, loc, loc);
+            }
+            if (!extraDone) {
+                g += opt_.extraOutputs;
+                if (!opt_.extraOutputs.empty()) g += "\n";
+            }
             g += "};\n";
         } else {
             g += "struct RvkPsIn {\n    float4 rvk_fragCoord : SV_Position;\n";
+            std::map<std::uint32_t, std::string> lines;  // by location: the register order of a D3D12 signature is the declaration order
             for (const auto& d : p_.inputs) {
                 const std::uint32_t loc = psInputLocation(d);
                 if (loc == abi::kInvalidLocation) continue;
                 const std::string name = d.reg.type == RegType::Addr ? std::format("t{}", d.reg.index) : std::format("v{}", d.reg.index);
-                g += std::format("    [[vk::location({})]] {}float4 {} : VARY{};\n", loc, d.centroid ? "centroid " : "", name, loc);
+                lines[loc] = std::format("    [[vk::location({})]] {}float4 {} : VARY{};\n", loc, d.centroid ? "centroid " : "", name, loc);
             }
-            if (usesFace_) g += "    bool rvk_front : SV_IsFrontFace;\n";
-            g += opt_.extraInputs;
-            if (!opt_.extraInputs.empty()) g += "\n";
+            if (varyingFillers() && (!lines.empty() || extraVaryLocation(opt_.extraInputs) > 0)) {
+                const std::int64_t top = std::max<std::int64_t>(lines.empty() ? 0 : static_cast<std::int64_t>(lines.rbegin()->first), extraVaryLocation(opt_.extraInputs));
+                for (std::int64_t l = 0; l < top; ++l) {
+                    if (!lines.contains(l) && l != extraVaryLocation(opt_.extraInputs)) lines[l] = std::format("    [[vk::location({})]] float4 rvk_pad{} : VARY{};\n", l, l, l);
+                }
+            }
+            // a variant's extra varying keeps its register: below the highest input it goes in between (the plain vertex shader's twin pads it)
+            const std::int64_t exIn = varyingFillers() ? extraVaryLocation(opt_.extraInputs) : -1;
+            bool extraInDone = false;
+            if (exIn >= 0 && !lines.empty() && exIn < static_cast<std::int64_t>(lines.rbegin()->first)) {
+                lines[static_cast<std::uint32_t>(exIn)] = opt_.extraInputs + "\n";
+                extraInDone = true;
+            }
+            for (const auto& [loc, text] : lines) g += text;
+            if (!extraInDone) {
+                g += opt_.extraInputs;
+                if (!opt_.extraInputs.empty()) g += "\n";
+            }
+            if (usesFace_) g += "    bool rvk_front : SV_IsFrontFace;\n";  // (a system value: after every register the VS also writes)
             g += "};\nstruct RvkPsOut {\n";
             for (std::uint32_t i = 0; i < 4; ++i) {
                 if ((reflection_.colorOutputs & (1u << i)) != 0) g += std::format("    float4 oC{} : SV_Target{};\n", i, i);
@@ -902,7 +951,11 @@ private:
             if (major_ >= 3) {
                 std::set<std::uint32_t> regs(outputs_.begin(), outputs_.end());
                 for (const auto& d : p_.outputs) regs.insert(d.reg.index);
-                for (auto r : regs) g += std::format("static float4 o{} = float4(0.0, 0.0, 0.0, 0.0);\n", r);
+                std::set<std::uint32_t> posRegs;
+                for (const auto& d : p_.outputs) {
+                    if (d.usage == Usage::Position) posRegs.insert(d.reg.index);
+                }
+                for (auto r : regs) g += std::format("static {}float4 o{} = float4(0.0, 0.0, 0.0, 0.0);\n", varyingFillers() && posRegs.contains(r) ? "precise " : "", r);
             } else {
                 g += "static float4 oPos = float4(0.0, 0.0, 0.0, 0.0);\nstatic float4 oFog = float4(0.0, 0.0, 0.0, 0.0);\n"
                      "static float4 oPts = float4(0.0, 0.0, 0.0, 0.0);\n";
@@ -942,6 +995,9 @@ private:
                 g += std::format("    default: return uint(i) < {}u ? {} : float4(0.0, 0.0, 0.0, 0.0);\n    }}\n}}\n", regLimit(), rel);
             }
         }
+        // D3D9's multiplication is "legacy" (0 * anything = 0, also 0 * inf), so pow(0, 0) = exp2(0 * log2(0)) = 1 there (and on AMD's Vulkan compiler);
+        // the D3D12 path's IEEE exp2(0 * -inf) is NaN, which poisoned the scene colour (refracted crystals) and the engine's eye adaptation
+        if (varyingFillers()) g += "float rvk_pow(float x, float y) { return y == 0.0 ? 1.0 : pow(x, y); }\n";
         g += "float4 rvk_lit(float4 s) {\n"
              "    float y = max(s.x, 0.0);\n"
              "    float z = (s.x > 0.0 && s.y > 0.0) ? pow(s.y, clamp(s.w, -128.0, 128.0)) : 0.0;\n"
@@ -991,7 +1047,12 @@ private:
                 if (const auto* o = inputOverride(d)) {
                     m += std::format("    v{} = {};\n", d.reg.index, overrideExpr(o->expr, std::format("rvk_in.v{}", d.reg.index), "$v"));
                 } else {
-                    m += std::format("    v{} = rvk_in.v{};\n", d.reg.index, d.reg.index);
+                    if (varyingFillers() && d.reg.index < 15) {
+                        // D3D12: a D3D9 UBYTE4 input is read as R8G8B8A8_UNORM (no scaled formats in DXGI) and scaled back by 255: draws flag such inputs in their push flags
+                        m += std::format("    v{} = ((pc.flags >> {}u) & 1u) != 0u ? round(rvk_in.v{} * 255.0) : rvk_in.v{};\n", d.reg.index, 17 + d.reg.index, d.reg.index, d.reg.index);
+                    } else {
+                        m += std::format("    v{} = rvk_in.v{};\n", d.reg.index, d.reg.index);
+                    }
                 }
             }
         } else {
@@ -1018,7 +1079,7 @@ private:
                     if (d.usage == Usage::Position && d.usageIndex == 0) {
                         pos = std::format("o{}", d.reg.index);
                     } else if (d.usage == Usage::PSize) {
-                        m += std::format("    rvk_out.rvk_psize = o{}.x;\n", d.reg.index);
+                        if (!varyingFillers()) m += std::format("    rvk_out.rvk_psize = o{}.x;\n", d.reg.index);
                     } else if (const std::uint32_t loc = abi::varyingLocation(d.usage, d.usageIndex); loc != abi::kInvalidLocation) {
                         m += std::format("    rvk_out.rvk_out{} = o{};\n", loc, d.reg.index);
                     }
@@ -1034,10 +1095,12 @@ private:
                     m += std::format("    rvk_out.rvk_out{} = (float4)oFog.x;\n", abi::varyingLocation(Usage::Fog, 0));
                 }
                 if (rastOut_.contains(2)) {
-                    m += "    rvk_out.rvk_psize = oPts.x;\n";
+                    if (!varyingFillers()) m += "    rvk_out.rvk_psize = oPts.x;\n";
                 }
             }
-            m += std::format("    float4 rvk_pos = {};\n", pos);
+            // D3D12: the depth pre-pass and the solid pass compare positions of two different shaders for equality (ZFUNC_EQUAL): `precise` keeps the
+            // driver from fusing the position's multiply-adds differently in each (Vulkan's compiler gives equal results without it)
+            m += std::format("    {}float4 rvk_pos = {};\n", varyingFillers() ? "precise " : "", pos);
             if (!opt_.epilogue.empty()) {
                 m += opt_.epilogue;
                 m += "\n";

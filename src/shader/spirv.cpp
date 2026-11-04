@@ -26,4 +26,20 @@ SpirvResult compileHlsl(Stage stage, std::string_view hlsl, std::string_view nam
     return result;
 }
 
+DxilResult compileHlslDxil(Stage stage, std::string_view hlsl, std::string_view name) {
+    DxilResult result;
+    dxc::Request r;
+    r.file = std::string(name);
+    r.source = std::string(hlsl);
+    r.entry = stage == Stage::Vertex ? "VSMain" : "PSMain";
+    r.profile = stage == Stage::Vertex ? "vs_6_6" : "ps_6_6";
+    r.target = dxc::Target::Dxil;
+    r.optLevel = 1;
+    r.cache = false;
+    dxc::Result c = dxc::compile(r);
+    result.bytes = std::move(c.bytes);
+    result.log = std::move(c.log);
+    return result;
+}
+
 }  // namespace rvk::shader

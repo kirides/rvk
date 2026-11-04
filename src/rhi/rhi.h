@@ -23,6 +23,8 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <utility>
+#include <vector>
 #include <string_view>
 
 #include "vk/vk.h"
@@ -462,6 +464,9 @@ struct DeviceCaps {
     bool textureBlit = false;        // CommandList::blitTexture (Vulkan only: the DX12 backend has no scaling copy)
     bool rayQuery = false;           // createBlas / createTlas + inline ray queries (Vulkan ray query with a bindless TLAS array, DXR tier 1.1); needs DeviceDesc::rayTracing
     std::uint32_t agilitySdkVersion = 0;  // DX12: the D3D12SDKVersion of the Agility SDK the device was created from (0 = the system runtime; always 0 on Vulkan)
+    // DX12: information-only feature survey (name, "supported ..." / "unsupported" / "unknown (<why>)"), logged as `caps:` lines at device creation
+    // (docs/research/dx12-game-port.md "D3D12 feature availability"); empty on Vulkan (core/caps.h properties carry the Vulkan side)
+    std::vector<std::pair<std::string, std::string>> featureSurvey;
 };
 
 class Device {
@@ -514,6 +519,9 @@ std::unique_ptr<Device> createD3D12Device(const DeviceDesc& desc);
 
 // bytes per pixel of the uncompressed formats the RHI knows (0 = unknown or block compressed)
 std::uint32_t formatBytes(VkFormat format);
+// depth / depth-stencil formats; the ones with a stencil aspect
+bool isDepthFormat(VkFormat format);
+bool hasStencil(VkFormat format);
 // the texel block of a format: 1x1 for the uncompressed ones, 4x4 for BC1 - BC5; bytes = one block (0 = unknown format)
 struct FormatBlock {
     std::uint32_t width = 1, height = 1, bytes = 0;

@@ -221,6 +221,12 @@ add_library(rvk_core STATIC
     src/engine/high_fps.cpp
     src/engine/high_fps.h
     src/engine/lod.cpp
+    src/engine/fast_sort.cpp
+    src/engine/fast_sort.h
+    src/engine/load_accel.cpp
+    src/engine/load_accel.h
+    src/engine/xinput_throttle.cpp
+    src/engine/xinput_throttle.h
     src/engine/material_source.cpp
     src/engine/material_source.h
     src/engine/lights.cpp
@@ -270,7 +276,10 @@ add_library(rvk_core STATIC
     src/rhi/rhi.cpp
     src/rhi/rhi.h
     src/rhi/modules.h
+    src/rhi/names.h
     src/rhi/vulkan/adapters.cpp
+    src/rhi/vulkan/game_present.cpp
+    src/rhi/vulkan/game_present.h
     src/rhi/vulkan/imgui_backend.cpp
     src/rhi/vulkan/imgui_vulkan_impl.cpp
     src/rhi/vulkan/modules.cpp
@@ -302,8 +311,8 @@ add_library(rvk_core STATIC
     src/vk/crash_markers.h
     src/vk/debug_names.cpp
     src/vk/debug_names.h
-    src/vk/formats.cpp
-    src/vk/formats.h
+    src/rhi/d3d_formats.cpp
+    src/rhi/d3d_formats.h
     src/vk/frames.cpp
     src/vk/framegen.cpp
     src/vk/framegen.h
@@ -320,9 +329,10 @@ add_library(rvk_core STATIC
     src/vk/image.h
     src/vk/pipeline.cpp
     src/vk/pipeline_library.cpp
+    src/vk/game_record.cpp
     src/vk/pipeline.h
-    src/vk/pacer.cpp
-    src/vk/pacer.h
+    src/core/pacer.cpp
+    src/core/pacer.h
     src/vk/passes.cpp
     src/vk/passes.h
     src/vk/presenter.cpp
@@ -425,11 +435,20 @@ rvk_warnings(rvk_shadertool)
 # The slim RHI's DX12 backend (src/rhi/d3d12, docs/research/hlsl-rhi.md 5, 6) and its test: a separate library so that d3d9.dll does not import
 # d3d12.dll / dxgi.dll until the renderer uses the backend. rvk_rhitest runs the same code on both backends.
 # ---------------------------------------------------------------------------------------------
-add_library(rvk_rhi_d3d12 STATIC src/rhi/d3d12/d3d12_device.cpp)
+add_library(rvk_rhi_d3d12 STATIC src/rhi/d3d12/d3d12_device.cpp src/rhi/d3d12/d3d12_ffx.cpp src/rhi/d3d12/d3d12_ffx.h third_party/imgui_dx12/imgui_impl_dx12.cpp)
 target_include_directories(rvk_rhi_d3d12 PUBLIC src include)
-target_link_libraries(rvk_rhi_d3d12 PUBLIC rvk_core Microsoft::DirectX-Guids d3d12 dxgi dxguid)
+target_include_directories(rvk_rhi_d3d12 PRIVATE third_party/imgui_dx12 third_party/amd_fidelityfx/api/include third_party/amd_fidelityfx/upscalers/include third_party/amd_fidelityfx/framegeneration/include)
+target_link_libraries(rvk_rhi_d3d12 PUBLIC rvk_core Microsoft::DirectX-Guids d3d12 dxgi dxguid d3dcompiler imgui::imgui)
+# Dear ImGui's DX12 backend, vendored from the imgui release vcpkg installs (third_party/imgui_dx12: built on the Agility headers like the rest of the backend)
+set_source_files_properties(third_party/imgui_dx12/imgui_impl_dx12.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON COMPILE_OPTIONS "/W3")
+# d3d12.dll / dxgi.dll are delay-loaded by everything that links the backend: the Vulkan-only path never loads them
+target_link_libraries(rvk_rhi_d3d12 PUBLIC delayimp)
+target_link_options(rvk_rhi_d3d12 INTERFACE /DELAYLOAD:d3d12.dll /DELAYLOAD:dxgi.dll /DELAYLOAD:d3dcompiler_47.dll)
+# rvk_core's createGameDevice(Backend::D3D12) calls into the backend (a cycle between two static libraries: allowed)
+target_link_libraries(rvk_core PUBLIC rvk_rhi_d3d12)
 rvk_warnings(rvk_rhi_d3d12)
-add_executable(rvk_rhitest tools/rhitest/main.cpp tools/rhitest/parity.cpp tools/common/d3dx.h)
+add_executable(rvk_rhitest tools/rhitest/main.cpp tools/rhitest/parity.cpp tools/rhitest/ffx.cpp tools/common/d3dx.h)
+target_compile_definitions(rvk_rhitest PRIVATE RVK_FFX_DLL_DX12="${CMAKE_SOURCE_DIR}/third_party/amd_fidelityfx/signedbin/amd_fidelityfx_loader_dx12.dll")
 target_include_directories(rvk_rhitest PRIVATE tools)
 target_link_libraries(rvk_rhitest PRIVATE rvk_core rvk_rhi_d3d12)
 rvk_deploy_dxc(rvk_rhitest)
@@ -472,7 +491,7 @@ rvk_warnings(rvk_d3d9test)
 # tests
 # ---------------------------------------------------------------------------------------------
 if(RVK_BUILD_TESTS)
-    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp tests/api_tests.cpp tests/fvf_tests.cpp tests/settings_tests.cpp tests/settings_api_tests.cpp tests/scene_tests.cpp tests/draws_tests.cpp tests/inject_tests.cpp tests/caps_tests.cpp tests/water_tests.cpp tests/ocean_tests.cpp tests/shadows_tests.cpp tests/lod_tests.cpp tests/high_fps_tests.cpp tests/rt_tests.cpp tests/shader_eval_tests.cpp tests/window_mode_tests.cpp tests/keys_tests.cpp tests/upscale_tests.cpp tests/native_tests.cpp tests/names_tests.cpp tests/framegen_tests.cpp tests/dxc_tests.cpp tests/gpu_ref_tests.cpp tests/material_pack_tests.cpp)
+    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp tests/api_tests.cpp tests/fvf_tests.cpp tests/settings_tests.cpp tests/settings_api_tests.cpp tests/scene_tests.cpp tests/draws_tests.cpp tests/inject_tests.cpp tests/caps_tests.cpp tests/water_tests.cpp tests/ocean_tests.cpp tests/shadows_tests.cpp tests/lod_tests.cpp tests/high_fps_tests.cpp tests/rt_tests.cpp tests/shader_eval_tests.cpp tests/window_mode_tests.cpp tests/keys_tests.cpp tests/upscale_tests.cpp tests/native_tests.cpp tests/names_tests.cpp tests/framegen_tests.cpp tests/dxc_tests.cpp tests/gpu_ref_tests.cpp tests/d3d12_tests.cpp tests/material_pack_tests.cpp)
     target_link_libraries(rvk_tests PRIVATE rvk_core SPIRV-Tools-static)
     rvk_warnings(rvk_tests)
     rvk_deploy_dxc(rvk_tests)

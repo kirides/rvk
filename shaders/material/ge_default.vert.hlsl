@@ -163,6 +163,16 @@ struct RvkVsOut {
     [[vk::location(5)]] float3 rvk_vTangent : VARY5;
     [[vk::location(6)]] float3 rvk_vBinormal : VARY6;
     [[vk::location(7)]] float2 rvk_vLightmap : VARY7;
+#ifndef __spirv__
+    [[vk::location(8)]] float4 rvk_vPad8 : VARY8;
+    [[vk::location(9)]] float4 rvk_vPad9 : VARY9;
+    [[vk::location(10)]] float4 rvk_vPad10 : VARY10;
+    [[vk::location(11)]] float4 rvk_vPad11 : VARY11;
+    [[vk::location(12)]] float4 rvk_vPad12 : VARY12;
+    [[vk::location(13)]] float4 rvk_vPad13 : VARY13;
+    [[vk::location(14)]] float4 rvk_vPad14 : VARY14;
+    [[vk::location(15)]] float4 rvk_vPad15 : VARY15;
+#endif
     [[vk::location(16)]] float4 rvk_vColor0 : VARY16;
 };
 

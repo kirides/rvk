@@ -8,7 +8,7 @@
 #include <spdlog/spdlog.h>
 
 #include "d3d9/device.h"
-#include "vk/debug_names.h"  // (the pure name formatter: textureName)
+#include "rhi/names.h"
 
 namespace rvk::d3d9 {
 
@@ -24,14 +24,14 @@ Texture::Texture(Device& device, const TextureDesc& desc) : dev_(device), desc_(
     if (desc_.levels == 0 || desc_.levels > fullChain) {
         desc_.levels = fullChain;
     }
-    if (desc_.format == vk::d3dfmt::NULLFMT) {
+    if (desc_.format == rhi::d3dfmt::NULLFMT) {
         isNull_ = true;  // depth-only passes render to a NULL colour target: no memory
         valid_ = true;
         return;
     }
-    const auto fmt = vk::formatInfo(desc_.format, dev_.d24s8Format());
+    const auto fmt = rhi::formatInfo(desc_.format, dev_.d24s8Format());
     if (!fmt) {
-        spdlog::warn("d3d9: texture format {} (0x{:x}) is not supported", vk::d3dFormatName(desc_.format), desc_.format);
+        spdlog::warn("d3d9: texture format {} (0x{:x}) is not supported", rhi::d3dFormatName(desc_.format), desc_.format);
         return;
     }
     fmt_ = *fmt;
@@ -53,7 +53,6 @@ Texture::Texture(Device& device, const TextureDesc& desc) : dev_(device), desc_(
     if (!tex_) {
         return;
     }
-    vkImage_ = &dev_.vkImage(*tex_);
     slot_ = tex_->heapSampled();
     applyDebugName();  // after the slot: the name carries it
     valid_ = true;
@@ -62,7 +61,7 @@ Texture::Texture(Device& device, const TextureDesc& desc) : dev_(device), desc_(
 // ---- debug names (vk/debug_names.h) ----
 
 std::string Texture::debugName() const {
-    vk::names::TextureInfo t;
+    rhi::names::TextureInfo t;
     t.label = label_;
     t.labelIndex = labelIndex_;
     t.id = id_;
@@ -70,14 +69,14 @@ std::string Texture::debugName() const {
     t.height = desc_.height;
     t.depth = desc_.depth;
     t.levels = desc_.levels;
-    t.format = vk::d3dFormatName(desc_.format);
+    t.format = rhi::d3dFormatName(desc_.format);
     t.cube = desc_.type == TextureType::Cube;
     t.volume = desc_.type == TextureType::Volume;
     t.renderTarget = isRenderTarget();
     t.depthFormat = fmt_.depth;
     t.dynamic = (desc_.usage & USAGE_DYNAMIC) != 0;
     t.slot = slot_;
-    return vk::names::textureName(t);
+    return rhi::names::textureName(t);
 }
 
 void Texture::applyDebugName() {
@@ -97,11 +96,6 @@ void Texture::setDebugLabel(const char* label, std::uint32_t index) {
     if (label != nullptr && logged.fetch_add(1) < 160) {
         spdlog::info("names: {} = image '{}' bindless slot {}", label, name, slot_);
     }
-}
-
-vk::Image& Texture::nullImage() {
-    static vk::Image image;  // (never created: valid() is false, layout UNDEFINED)
-    return image;
 }
 
 Texture::~Texture() {
@@ -130,7 +124,7 @@ std::uint64_t Texture::cpuBytesTotal() { return g_textureCpuBytes.load(std::memo
 Texture::Level& Texture::cpuLevel(std::uint32_t level, std::uint32_t face) {
     Level& l = cpu_[face * desc_.levels + level];
     if (l.data.empty()) {
-        const vk::Pitch p = vk::d3dPitch(fmt_, levelWidth(level), levelHeight(level));
+        const rhi::Pitch p = rhi::d3dPitch(fmt_, levelWidth(level), levelHeight(level));
         l.rowPitch = p.rowBytes;
         l.slicePitch = p.rowBytes * p.rows;
         l.data.assign(static_cast<std::size_t>(l.slicePitch) * levelDepth(level), 0);
@@ -143,7 +137,6 @@ void Texture::orphan() {
     // Device::destroy (frames idle): what the destructor would hand to the device, now; the frames run the retired work
     tex_.reset();
     slot_ = 0;
-    vkImage_ = &nullImage();
     role_ = scene::ImageRole::None;
     orphaned_ = true;
 }
@@ -195,12 +188,12 @@ bool Texture::restoreLevel(std::uint32_t level, std::uint32_t face) {
     const char* why = nullptr;
     if (!dev_.recordingThread()) {
         why = "not on the render thread";
-    } else if (fmt_.convert != vk::Convert::None) {
+    } else if (fmt_.convert != rhi::Convert::None) {
         why = "converted format";
     }
     std::vector<std::uint8_t> bytes;
     if (why == nullptr) {
-        const VkDeviceSize size = vk::storageSize(fmt_, w, h) * d;
+        const VkDeviceSize size = rhi::storageSize(fmt_, w, h) * d;
         if (!dev_.readImageLevel(*tex_, level, desc_.type == TextureType::Cube ? face : 0u, {w, h, d}, size, bytes)) {
             why = "read-back failed";
         }
@@ -211,7 +204,7 @@ bool Texture::restoreLevel(std::uint32_t level, std::uint32_t face) {
             restoreWarned_ = true;
             spdlog::warn("d3d9: lock of a {}x{} {} texture (pool {}) whose CPU copy was dropped: {}; its texels read as 0 (only the "
                          "locked region is uploaded)",
-                         desc_.width, desc_.height, vk::d3dFormatName(desc_.format), desc_.pool, why);
+                         desc_.width, desc_.height, rhi::d3dFormatName(desc_.format), desc_.pool, why);
         }
         return false;
     }
@@ -219,7 +212,7 @@ bool Texture::restoreLevel(std::uint32_t level, std::uint32_t face) {
     std::memcpy(l.data.data(), bytes.data(), std::min(l.data.size(), bytes.size()));  // Convert::None: storage = D3D9 layout
     l.dropped = false;
     spdlog::debug("d3d9: restored level {} face {} of a {}x{} {} texture from the GPU", level, face, desc_.width, desc_.height,
-                  vk::d3dFormatName(desc_.format));
+                  rhi::d3dFormatName(desc_.format));
     return true;
 }
 
@@ -267,7 +260,7 @@ bool Texture::lock(std::uint32_t level, std::uint32_t face, const std::int32_t* 
             static std::atomic<int> logged{0};
             if (desc_.pool != POOL_SYSTEMMEM && logged.fetch_add(1) < 4) {  // system memory: read-back targets, not sampled
                 spdlog::info("d3d9: read-only lock of level {} of a fresh {}x{} {} texture (pool {}): the level is uploaded as a whole",
-                             level, desc_.width, desc_.height, vk::d3dFormatName(desc_.format), desc_.pool);
+                             level, desc_.width, desc_.height, rhi::d3dFormatName(desc_.format), desc_.pool);
             }
             break;
         }
@@ -292,7 +285,7 @@ void Texture::setLevelData(std::uint32_t level, std::uint32_t face, std::span<co
         cpu_.resize(static_cast<std::size_t>(faces()) * desc_.levels);
     }
     Level& l = cpuLevel(level, face);
-    const vk::Pitch p = vk::d3dPitch(fmt_, levelWidth(level), levelHeight(level));
+    const rhi::Pitch p = rhi::d3dPitch(fmt_, levelWidth(level), levelHeight(level));
     const std::uint32_t rows = p.rows * levelDepth(level);
     for (std::uint32_t r = 0; r < rows; ++r) {
         const std::size_t src = static_cast<std::size_t>(r) * rowPitch;
@@ -350,8 +343,8 @@ void Texture::upload(rhi::CommandList& cl) {
             const std::uint32_t x0 = l.box[0], y0 = l.box[1], z0 = l.box[2];
             const std::uint32_t w = l.box[3] - x0, h = l.box[4] - y0, d = l.box[5] - z0;
             // staging rows: tightly packed (rowBytes), or `rowPitch` apart where the backend wants an alignment (GameCaps::uploadRowAlign)
-            const std::uint64_t tight = vk::storageSize(fmt_, w, h);
-            const std::uint32_t rowBytes = static_cast<std::uint32_t>(vk::storageSize(fmt_, w, 1));
+            const std::uint64_t tight = rhi::storageSize(fmt_, w, h);
+            const std::uint32_t rowBytes = static_cast<std::uint32_t>(rhi::storageSize(fmt_, w, 1));
             const std::uint32_t align = std::max(1u, caps.uploadRowAlign);
             const std::uint32_t rowPitch = (rowBytes + align - 1) / align * align;
             const std::uint32_t blockRows = fmt_.compressed ? (h + 3) / 4 : h;
@@ -367,12 +360,12 @@ void Texture::upload(rhi::CommandList& cl) {
                 const std::uint8_t* src = l.data.data() + static_cast<std::size_t>(z0 + z) * l.slicePitch + srcOffset;
                 std::uint8_t* dst = static_cast<std::uint8_t*>(staging.ptr) + z * sliceBytes;
                 if (rowPitch == rowBytes) {
-                    vk::convertLevel(fmt_, src, l.rowPitch, dst, w, h);
+                    rhi::convertLevel(fmt_, src, l.rowPitch, dst, w, h);
                 } else {
                     // aligned rows: one row of blocks at a time into its place
                     const std::uint32_t step = fmt_.compressed ? 4 : 1;
                     for (std::uint32_t row = 0, br = 0; row < h; row += step, ++br) {
-                        vk::convertLevel(fmt_, src + static_cast<std::size_t>(br) * l.rowPitch, l.rowPitch, dst + static_cast<std::size_t>(br) * rowPitch, w,
+                        rhi::convertLevel(fmt_, src + static_cast<std::size_t>(br) * l.rowPitch, l.rowPitch, dst + static_cast<std::size_t>(br) * rowPitch, w,
                                          std::min(step, h - row));
                     }
                 }

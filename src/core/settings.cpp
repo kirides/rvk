@@ -787,6 +787,20 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .flags = Flag::NoAB | Flag::Hidden,  // the checkbox at the top of the menu
     });
+    r.api = &reg.add({
+        .key = "vulkan.api",
+        .label = "Graphics API",
+        .category = "Hardware",
+        .tab = kTabSystem,
+        .description = "Which graphics API the renderer uses. Vulkan is the default and the tested one. Direct3D 12 is experimental: it needs "
+                       "Shader Model 6.6 and falls back to Vulkan when the card or driver cannot do it. Frame generation and FSR upscaling "
+                       "(Image) and exclusive fullscreen are Vulkan only for now.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"vulkan", "d3d12"},
+        .optionLabels = {"Vulkan", "Direct3D 12 (experimental)"},
+        .flags = Flag::Restart | Flag::Advanced,
+    });
     r.adapter = &reg.add({
         .key = "vulkan.adapter",
         .label = "Graphics card",
@@ -2187,6 +2201,34 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 1000,
         .flags = Flag::NoAB | Flag::Debug,
     });
+    r.nativePacketCache = &reg.add({
+        .key = "native.packet_cache",
+        .label = "Native frame: retained draw packets",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode: the finished packet of a composed static-mesh / tree draw of the main view is kept and replayed while its description is unchanged "
+                       "(prepareDraw and most state setters skipped). 0 off, 1 on, 2 on + every 10th frame the fresh packet is compared with the retained one, "
+                       "3 verify every frame (rvk.log `native: packet cache`, DIFFERING must stay 0). Off while a compare, the frame tap or coverage is on, and per draw "
+                       "while an enhancement needs prepareDraw (RT scene, replacers, G-buffer / GI variants, tint, upscaling jitter).",
+        .type = Type::Int,
+        .defaultValue = 0,
+        .min = 0,
+        .max = 3,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
+    r.nativeOpts = &reg.add({
+        .key = "native.cpu_opts",
+        .label = "Native frame: CPU optimizations (bit mask)",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full-mode CPU pass (performance.md 22): bit 1 sky vertices kept across cube faces / frames, 2 composition caches, "
+                       "4 issue fast paths, 8 sky/dynamic vertex copies. Each bit is an A/B switch; 0 = the old behaviour.",
+        .type = Type::Int,
+        .defaultValue = 255,
+        .min = 0,
+        .max = 255,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
     r.nativeLeanRestore = &reg.add({
         .key = "native.lean_restore",
         .label = "Native frame: device restore around lean ops",
@@ -2257,6 +2299,96 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 0,
         .flags = Flag::NoAB | Flag::Debug,
+    });
+    r.fsReadCache = &reg.add({
+        .key = "debug.fs_read_cache",
+        .label = "Read-ahead of packed files (KiB)",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Every read from a file inside the game's data volumes is two system calls (seek + read), however small; loading "
+                       "a world reads millions of bytes a few at a time. The read-ahead buffer (per open file, grows with sequential "
+                       "reads up to this size) serves them from memory. The data read is the same. 0 = off.",
+        .type = Type::Int,
+        .defaultValue = 64,
+        .min = 0,
+        .max = 1024,
+        .flags = Flag::Debug,
+    });
+    r.fastAbsorb = &reg.add({
+        .key = "debug.fast_absorb",
+        .label = "Cloud absorption image by sliding windows",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The game computes the cloud absorption image with 128 integer divisions per pixel whenever a cloud texture is "
+                       "set (every world load). 1 = the same image by sliding window sums (bit-identical), 0 = the game's loop, "
+                       "2 = the game's loop and compare the image with ours (rvk.log).",
+        .type = Type::Int,
+        .defaultValue = 1,
+        .min = 0,
+        .max = 2,
+        .flags = Flag::Debug,
+    });
+    r.soundCompressed = &reg.add({
+        .key = "debug.sound_compressed",
+        .label = "Short sounds stay compressed in memory",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The game decodes sounds below a size limit completely when it creates them (1 - 18 ms on the game thread each time one leaves the cache and plays again). On = FMOD keeps them compressed and decodes them while they play, on its own mixer thread. The sound is the same codec output; not checked by ear.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
+    r.streamStats = &reg.add({
+        .key = "debug.stream_stats",
+        .label = "Loading statistics",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "1 = times the packed-file reads and FMOD sound creation (rvk.log 'engine: stream:' every 5 s), 2 = also "
+                       "compares every buffered read with the game's own read of the same bytes.",
+        .type = Type::Int,
+        .defaultValue = 0,
+        .min = 0,
+        .max = 2,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
+    r.xinputInterval = &reg.add({
+        .key = "debug.xinput_interval",
+        .label = "Gamepad poll interval when disconnected (ms)",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The game asks the XInput library for four gamepads every frame; a disconnected one costs ~0.15 ms each frame. "
+                       "After a 'not connected' answer the index is asked again only after this many milliseconds (a connected pad "
+                       "is polled every frame). 0 = every frame, as the game does.",
+        .type = Type::Int,
+        .defaultValue = 1000,
+        .min = 0,
+        .max = 5000,
+        .flags = Flag::Debug,
+    });
+    r.oceanSpd = &reg.add({
+        .key = "debug.ocean_spd",
+        .label = "FFT ocean: mip chains by compute",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The FFT ocean's displacement / derivative mip chains: on = two compute dispatches per image (a single-pass "
+                       "downsampler in the style of FidelityFX SPD, ocean_mips.comp), off = one blit per level (the old path, for A/B).",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
+    r.fastSort = &reg.add({
+        .key = "debug.fast_sort",
+        .label = "Typed sort of the render-op lists",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The game sorts its z / solid / alpha op lists with the CRT's qsort and a function-pointer comparator. 1 = the "
+                       "same algorithm with inlined comparators (bit-identical result, less CPU), 0 = the game's qsort, 2 = typed sort "
+                       "and compare every list with the game's result (rvk.log error on a difference).",
+        .type = Type::Int,
+        .defaultValue = 1,
+        .min = 0,
+        .max = 2,
+        .flags = Flag::Debug,
     });
     r.prefetchStride = &reg.add({
         .key = "debug.prefetch_stride",

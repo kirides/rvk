@@ -107,6 +107,12 @@ public:
     void setLean(bool on, int check);
     // native.lean_restore (O2b measurement): false = no device save / restore around a lean op's draws
     void setLeanRestore(bool on) { leanRestore_ = on; }
+    // packet retention (native.packet_cache; retained-signals.md 8): 0 off, 1 on, 2 on + verify every 10th frame, 3 on + verify every frame. Only
+    // set when no compare / tap / coverage is active (they need prepareDraw's tap)
+    void setPacketCache(int mode) {
+        packetMode_ = mode;
+        if (mode == 0) packets_.clear();
+    }
     // V3 retained composition (native.retained / native.retained_groups / native.retained_check)
     void setRetained(bool on, int groups, bool check);
     bool inSkyCube() const { return inSkyCube_; }
@@ -140,6 +146,8 @@ private:
         sc::CompareCounts window, total;
         std::array<std::uint64_t, static_cast<std::size_t>(Skip::Count)> skips{}, skipsTotal{};
         std::uint64_t issuedDraws = 0, issuedOps = 0, droppedDraws = 0, ownChecked = 0, ownMismatch = 0;
+        // -Perf: issue()'s cost split (ns): the whole call, the draw calls inside it (device path), draws timed (stage 0 of the packet retention)
+        std::uint64_t issueNs = 0, deviceNs = 0, timedDraws = 0, timedOps = 0;
         // the lights of the composed sub-mesh draws (dynamic list +0x34 + static illum +0xd: 0..4; 4 = an additive light pass)
         std::array<std::uint64_t, 5> lights{};
         bool active() const { return takeOver || compare; }
@@ -307,6 +315,20 @@ private:
     const std::uint8_t* billboardAdmin_ = nullptr;  // the eCBillboardAdmin of the last RenderBillboards (RenderAlpha's admin)
     std::uint64_t billboardAlphaOps_ = 0, billboardAlphaDraws_ = 0;
     std::uint32_t streakLogged_ = 0;
+    // F1: the sky objects' billboards / converted vertices / quad indices, kept across calls (static_ops_sky.cpp)
+    struct SkyCache {
+        std::vector<std::uint8_t> key, verts, quads;
+        std::uint32_t quadCount = ~0u;
+    };
+    std::vector<std::uint8_t> skyBb_;
+    std::unordered_map<const void*, SkyCache, PtrHash> skyCaches_;
+    SkyCache skyScratch_;
+public:
+    void setOpts(unsigned mask) { opts_ = mask; skyCache_ = (mask & 1u) != 0; }
+    bool opt(unsigned bit) const { return (opts_ & bit) != 0; }
+private:
+    unsigned opts_ = 255;
+    bool skyCache_ = true;
     bool verifyBillboards();
     // the skinned actors' ops (static_ops_actors.cpp)
     bool verifyActors();
@@ -669,6 +691,19 @@ private:
     PtrMemo<d3d9::Shader*> elementMemo_;
     PtrMemo<Mirror::ShaderPools*> poolsMemo_;
 
+    // packet retention: a composed draw's finished packet by (op, draw index), valid while the draw description equals the captured one
+    int packetMode_ = 0;
+    struct PacketEntry {
+        d3d9::Device::CachedDraw cd;
+        std::unique_ptr<sc::DrawDesc> desc;
+    };
+    std::unordered_map<std::uint64_t, PacketEntry> packets_;
+    struct PacketStats {
+        std::uint64_t replayed = 0, refused = 0, built = 0, notBuilt = 0, verified = 0, invalid = 0, mismatches = 0, changed = 0;
+    } pktWindow_, pktTotal_;
+    std::uint32_t pktMismatchLogged_ = 0;
+    std::unique_ptr<d3d9::Device::CachedDraw> pktFresh_;
+    static bool packetSameDesc(const sc::DrawDesc& a, const sc::DrawDesc& b);
     std::size_t issueIndex_ = 0;
     std::vector<std::uint8_t> ownKind_;
     // non-op paths (decals): the unit whose draws are composed in place of an op

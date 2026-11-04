@@ -84,6 +84,7 @@ Gi::Gi(d3d9::Device& device, RtScene* scene) : dev_(device), scene_(scene) {
         return [rdev, file, name]() {
             rhi::ComputePipelineDesc d;
             d.cs.spirv = shader::embedded::spirv(file);
+            d.cs.dxil = shader::embedded::dxilOnDemand(file);
             d.name = name;
             return rdev->createComputePipeline(d);
         };
@@ -461,6 +462,8 @@ bool Gi::ensureResources(rhi::CommandList& cmd) {
         rs.cl().memoryBarrier(VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                               VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                               VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        rs.cl().bufferBarrier(*probes_, rhi::BufferAccess::ShaderRead);
+        rs.cl().bufferBarrier(*depth_, rhi::BufferAccess::ShaderRead);
     }
     spdlog::info("enh: gi: {} cascades x {} x {} x {} probes ({:.0f} / {:.0f} / {:.0f} units apart), {:.1f} MiB", kGiCascades, kDims[0], kDims[1],
                  kDims[2], kSpacing[0], kSpacing[1], kSpacing[2],
@@ -505,8 +508,9 @@ void Gi::record(d3d9::PassContext& ctx) {
     hd.dims[1] = kDims[1];
     hd.dims[2] = kDims[2];
     hd.dims[3] = kGiCascades;
-    split(probes_->shaderRefRw(), &hd.data[0]);
-    split(depth_->shaderRefRw(), &hd.data[2]);
+    // the frame's header (the lookups of the material shaders and passes: read access) holds the read references; the passes that write the probes get their own copy with the writable ones
+    split(probes_->shaderRef(), &hd.data[0]);
+    split(depth_->shaderRef(), &hd.data[2]);
     hd.params[0] = s_.strength;
     hd.params[1] = 0.1f;  // normal bias (cells)
     hd.params[2] = 0.3f;  // view bias (cells)
@@ -531,6 +535,19 @@ void Gi::record(d3d9::PassContext& ctx) {
         return;
     }
     std::memcpy(ha.ptr, &hd, sizeof(hd));
+    // the blend pass writes the probes: its own copy of the header with the writable references (D3D12: the UAV slots)
+    const rhi::RingAlloc haRw = frames.ring(sizeof(hd), 16);
+    const rhi::RingAlloc paRw = frames.ring(sizeof(GiPassParams), 16);
+    if (haRw.ptr == nullptr || paRw.ptr == nullptr) {
+        ++skipped_;
+        return;
+    }
+    {
+        GiVolumeHeader hp = hd;
+        split(probes_->shaderRefRw(), &hp.data[0]);
+        split(depth_->shaderRefRw(), &hp.data[2]);
+        std::memcpy(haRw.ptr, &hp, sizeof(hp));
+    }
     std::memcpy(la.ptr, list.data(), static_cast<std::size_t>(n) * 4);
 
     GiPassParams p{};
@@ -579,6 +596,11 @@ void Gi::record(d3d9::PassContext& ctx) {
     push.h.frame = ctx.frameBlock.bits;
     push.h.passId = passId_;
     split(pa.ref, push.params);
+    GiPassParams pRw = p;
+    split(haRw.ref, &pRw.volume[0]);
+    std::memcpy(paRw.ptr, &pRw, sizeof(pRw));
+    GiPush pushRw = push;
+    split(paRw.ref, pushRw.params);
 
     if (n > 0) {
         RhiScope rs(dev_, cmd);
@@ -591,11 +613,16 @@ void Gi::record(d3d9::PassContext& ctx) {
         cl.dispatch(n, 1, 1);
         // rays -> the blend; the trace's probe reads before the blend's writes
         cl.computeBarrier();
+        // the probes and their depth moments change state for the blend (D3D12: a buffer is a shader resource for the lookups and a UAV for the blend)
+        cl.bufferBarrier(*probes_, rhi::BufferAccess::ShaderWrite);
+        cl.bufferBarrier(*depth_, rhi::BufferAccess::ShaderWrite);
         cl.bindPipeline(*blend_);
-        cl.setPushConstants(&push, sizeof(push));
+        cl.setPushConstants(&pushRw, sizeof(pushRw));
         cl.dispatch(n, 1, 1);
         // the probes -> the lookups of the later draws (alpha) and of the next frames, the next trace
         cl.computeBarrier();
+        cl.bufferBarrier(*probes_, rhi::BufferAccess::ShaderRead);
+        cl.bufferBarrier(*depth_, rhi::BufferAccess::ShaderRead);
     }
     dev_.setGiHeader({reinterpret_cast<const std::uint8_t*>(&hd), sizeof(hd)});
     // the screen probes of the next frame trace with this update's light and volume (they run before the solid pass)

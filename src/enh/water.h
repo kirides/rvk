@@ -15,6 +15,7 @@
 // Off: the replacer answers "engine" for every draw; nothing else changes.
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <future>
 #include <memory>
@@ -91,6 +92,8 @@ struct WaterBlock {
     std::uint32_t rtRefl[4];
 };
 static_assert(sizeof(WaterBlock) == 192 + 71 * 16);
+// shaders/water/water_common.hlsli WATER_LIGHTS_OFFSET (waterLight reads the array straight from memory)
+static_assert(offsetof(WaterBlock, lights) == 896);
 
 // mirror of shaders/water/wet_shore.frag WetPush
 struct WetShorePush {

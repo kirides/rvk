@@ -36,7 +36,7 @@ $spotParam = 'spots=' + ($Spots -replace ',', ';')
 
 function Invoke-Run([string]$tag, [string[]]$settings) {
     if (Test-Path $shots) { Get-ChildItem $shots -Filter "${tag}_*" | Remove-Item -Force }
-    $runArgs = @{ Mode = $Mode; GameDir = $GameDir; Instance = $Instance; Mods = @('rvkcompare'); Scenario = 'rvkcompare'; WaitForResult = $true; Seconds = 1200
+    $runArgs = @{ Api = $Api; Mode = $Mode; GameDir = $GameDir; Instance = $Instance; Mods = @('rvkcompare'); Scenario = 'rvkcompare'; WaitForResult = $true; Seconds = 1200
                   Param = @("tag=$tag", $spotParam, 'burst=1') + $Param; Setting = $settings; RvkFilter = 'enh: shadows|\[error\]|VUID' }
     if ($Validation) { $runArgs.Validation = $true }
     if ($Perf) { $runArgs.Perf = $true }

@@ -116,12 +116,14 @@ bool RtDebug::ensurePipelines(VkFormat target) {
     if (!compute_) {
         rhi::ComputePipelineDesc cd;
         cd.cs.spirv = shader::embedded::spirv("rt/rt_debug.comp");
+        cd.cs.dxil = shader::embedded::dxilOnDemand("rt/rt_debug.comp");
         cd.name = "rt.debug compute";
         compute_ = rdev->createComputePipeline(cd);
     }
     if (!depthCompute_) {
         rhi::ComputePipelineDesc cd;
         cd.cs.spirv = shader::embedded::spirv("rt/rt_debug_depth.comp");
+        cd.cs.dxil = shader::embedded::dxilOnDemand("rt/rt_debug_depth.comp");
         cd.name = "rt.debug depth";
         depthCompute_ = rdev->createComputePipeline(cd);
     }
@@ -129,7 +131,9 @@ bool RtDebug::ensurePipelines(VkFormat target) {
     if (!composite_) {
         rhi::GraphicsPipelineDesc gd;
         gd.vs.spirv = shader::embedded::spirv("debug/fullscreen_rhi.vert");
+        gd.vs.dxil = shader::embedded::dxilOnDemand("debug/fullscreen_rhi.vert");
         gd.ps.spirv = shader::embedded::spirv("rt/rt_debug.frag");
+        gd.ps.dxil = shader::embedded::dxilOnDemand("rt/rt_debug.frag");
         gd.colorFormats[0] = target;
         gd.blend.blendEnable = VK_TRUE;  // src alpha over; the target's alpha kept
         gd.blend.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;

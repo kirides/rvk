@@ -21,8 +21,12 @@
 #include "core/settings.h"
 #include "core/stall_sampler.h"
 #include "d3d9/fvf.h"
+#include "enh/ocean.h"
 #include "engine/scene_hooks.h"
+#include "engine/fast_sort.h"
+#include "engine/load_accel.h"
 #include "engine/lod.h"
+#include "engine/xinput_throttle.h"
 #include "engine/memread.h"
 #include "engine/material_source.h"
 #include "engine/menu_state.h"
@@ -32,7 +36,7 @@
 #include "enh/material_variant.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "res/dds.h"
-#include "vk/formats.h"
+#include "rhi/d3d_formats.h"
 
 namespace rvk::hal::vulkan {
 
@@ -189,6 +193,11 @@ void HalDevice::applyStaticOps() {
     staticOps_->setLean(leanOn, leanCheck);
     // O3: the effect units, sprite flushes and the PSSM pass (native.lean_effects: their A/B)
     effectOps_->setLean(leanOn && (rs.nativeLeanEffects == nullptr || on(rs.nativeLeanEffects)), leanCheck);
+    {
+        const bool cacheBlocked = compare || sceneCompare || on(rs.nativeFrameTap) || on(rs.nativeCoverage) || !leanOn;
+        staticOps_->setPacketCache(rs.nativePacketCache != nullptr && !cacheBlocked ? rs.nativePacketCache->asInt() : 0);
+    }
+    staticOps_->setOpts(rs.nativeOpts != nullptr ? static_cast<unsigned>(rs.nativeOpts->asInt()) : 255u);
     staticOps_->setLeanRestore(rs.nativeLeanRestore == nullptr || on(rs.nativeLeanRestore));
     staticOps_->setRetained(on(rs.nativeRetained), rs.nativeRetainedGroups != nullptr ? rs.nativeRetainedGroups->asInt() : 0x2ff, on(rs.nativeRetainedCheck));
     frameTap_->setCoverage(on(rs.nativeCoverage) || on(rs.nativeFrameTap) || compare || sceneCompare);
@@ -280,6 +289,17 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     o.validation = options.validation;
     o.syncValidation = options.syncValidation;
     o.adapter = options.adapter;
+    // the graphics API of the session (vulkan.api is a restart setting: the value it started with decides); D3D12 needs SM 6.6 / binding tier 3
+    // and falls back to Vulkan with a log line
+    if (rs.api != nullptr && rs.api->startValue() != 0.0) {
+        std::string reason;
+        if (rhi::d3d12Usable(options.adapter, &reason)) {
+            o.backend = rhi::Backend::D3D12;
+            spdlog::info("hal: graphics API Direct3D 12 (vulkan.api = d3d12)");
+        } else {
+            spdlog::warn("hal: vulkan.api = d3d12 is not usable here ({}): Vulkan instead", reason);
+        }
+    }
     o.maxFps = rs.maxFps != nullptr ? rs.maxFps->value() : options.maxFps;
     o.cacheDir = options.cacheDir;
     o.logDraws = options.logDraws;
@@ -303,11 +323,11 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     window_ = p.window;
     engine::window::onModeSet(p.window, p.windowed, o.width, o.height, p.refreshRate);
     spdlog::info("hal: Vulkan device for window {} ({}x{}, vsync {}, depth {})", static_cast<void*>(p.window), o.width, o.height,
-                 o.vsync, vk::d3dFormatName(o.depthFormat));
+                 o.vsync, rhi::d3dFormatName(o.depthFormat));
     engine::scene::attach(&dev_);  // the frame phase markers (no-ops when they are not installed)
     auto& reg = settings::registry();
     // frame generation providers (vk/framegen.h): which of FSR 3 / FSR 4 this device can run, for the capability report
-    dev_.game().probeFrameGeneration(paths::dataDir() / "amd_fidelityfx_loader_vk.dll");
+    dev_.game().probeFrameGeneration(rhi::fidelityFxLoader(paths::dataDir(), o.backend));
     // capability report (core/caps.h, docs/research/raytracing.md 3): logged once, the overlay's "Capabilities", and the
     // resolution of settings with requirements (greyed + parity fallback when unmet)
     {
@@ -469,7 +489,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     frameTap_->setEffectOps(effectOps_.get());
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups,
                                  rs.nativeMirror, rs.nativeCoverage, rs.nativeFrameTap, rs.nativeLean, rs.nativeLeanCheck,
-                                 rs.nativeLeanRestore, rs.nativeLeanEffects, rs.nativeRetained, rs.nativeRetainedCheck, rs.nativeRetainedGroups}) {
+                                 rs.nativeLeanRestore, rs.nativeOpts, rs.nativePacketCache, rs.nativeLeanEffects, rs.nativeRetained, rs.nativeRetainedCheck, rs.nativeRetainedGroups}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
     // renderer.mode (Wrapper / Full): like the native.* settings applied by the registry's dispatch before a present, i.e. at a
@@ -589,6 +609,34 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     if (rs.shadowStride != nullptr) {
         engine::shadowmaps::setUpdateStride(static_cast<int>(rs.shadowStride->asInt()));
         reg.onChange(*rs.shadowStride, [](const settings::Setting& s) { engine::shadowmaps::setUpdateStride(static_cast<int>(s.asInt())); }, this);
+    }
+    if (rs.fsReadCache != nullptr) {
+        engine::loadaccel::setReadCacheKiB(static_cast<int>(rs.fsReadCache->asInt()));
+        reg.onChange(*rs.fsReadCache, [](const settings::Setting& s) { engine::loadaccel::setReadCacheKiB(static_cast<int>(s.asInt())); }, this);
+    }
+    if (rs.fastAbsorb != nullptr) {
+        engine::loadaccel::setAbsorbMode(static_cast<int>(rs.fastAbsorb->asInt()));
+        reg.onChange(*rs.fastAbsorb, [](const settings::Setting& s) { engine::loadaccel::setAbsorbMode(static_cast<int>(s.asInt())); }, this);
+    }
+    if (rs.soundCompressed != nullptr) {
+        engine::loadaccel::setSoundCompressed(rs.soundCompressed->asBool());
+        reg.onChange(*rs.soundCompressed, [](const settings::Setting& s) { engine::loadaccel::setSoundCompressed(s.asBool()); }, this);
+    }
+    if (rs.streamStats != nullptr) {
+        engine::loadaccel::setStats(static_cast<int>(rs.streamStats->asInt()));
+        reg.onChange(*rs.streamStats, [](const settings::Setting& s) { engine::loadaccel::setStats(static_cast<int>(s.asInt())); }, this);
+    }
+    if (rs.xinputInterval != nullptr) {
+        engine::xinput::setIntervalMs(static_cast<int>(rs.xinputInterval->asInt()));
+        reg.onChange(*rs.xinputInterval, [](const settings::Setting& s) { engine::xinput::setIntervalMs(static_cast<int>(s.asInt())); }, this);
+    }
+    if (rs.oceanSpd != nullptr) {
+        enh::Ocean::setSpd(rs.oceanSpd->asBool());
+        reg.onChange(*rs.oceanSpd, [](const settings::Setting& s) { enh::Ocean::setSpd(s.asBool()); }, this);
+    }
+    if (rs.fastSort != nullptr) {
+        engine::fastsort::setMode(static_cast<int>(rs.fastSort->asInt()));
+        reg.onChange(*rs.fastSort, [](const settings::Setting& s) { engine::fastsort::setMode(static_cast<int>(s.asInt())); }, this);
     }
     if (rs.prefetchStride != nullptr) {
         engine::lod::setPrefetchStride(static_cast<int>(rs.prefetchStride->asInt()));
@@ -1133,8 +1181,8 @@ int fromMemoryRequest(const char* what, const eCGfxShared::eSGfxLayersDesc& d, u
     if (!sizeOk(d.width, std::max(1u, dds->width >> s)) || !sizeOk(d.height, std::max(1u, dds->height >> s)) || !formatOk ||
         (d.usage & (USAGE_RENDERTARGET | USAGE_DEPTHSTENCIL)) != 0) {
         spdlog::warn("hal: {}: {}x{} {} usage 0x{:x} from a {}x{} {} file needs D3DX resampling / conversion: not supported", what,
-                     d.width, d.height, vk::d3dFormatName(d.format), d.usage, dds->width, dds->height,
-                     vk::d3dFormatName(dds->d3dFormat));
+                     d.width, d.height, rhi::d3dFormatName(d.format), d.usage, dds->width, dds->height,
+                     rhi::d3dFormatName(dds->d3dFormat));
         return -1;
     }
     return static_cast<int>(skip);
@@ -1188,13 +1236,13 @@ bEResult HalDevice::GetImageInfoFromMemory(void const* a0, unsigned int a1, eCGf
 
 bEResult HalDevice::CheckDeviceFormat(eCGfxShared::eSGfxLayersDesc const& a0, bool a1) {
     const bEResult r = checkFormat(a0, a1);
-    spdlog::debug("hal: CheckDeviceFormat {} (0x{:x}) {}x{} usage 0x{:x} blend {}: {}", vk::d3dFormatName(a0.format), a0.format,
+    spdlog::debug("hal: CheckDeviceFormat {} (0x{:x}) {}x{} usage 0x{:x} blend {}: {}", rhi::d3dFormatName(a0.format), a0.format,
                   a0.width, a0.height, a0.usage, a1, r == bEResult_Ok ? "yes" : "no");
     return r;
 }
 
 bEResult HalDevice::checkFormat(eCGfxShared::eSGfxLayersDesc const& a0, bool a1) {
-    using namespace vk::d3dfmt;
+    using namespace rhi::d3dfmt;
     const std::uint32_t f = a0.format;
     if (f == NULLFMT) {
         return bEResult_Ok;
@@ -1208,7 +1256,7 @@ bEResult HalDevice::checkFormat(eCGfxShared::eSGfxLayersDesc const& a0, bool a1)
         if ((a0.usage & USAGE_DEPTHSTENCIL) == 0 || a0.depth > 1 || a0.cubeMap) {
             return bEResult_False;
         }
-        const auto info = vk::formatInfo(f, dev_.d24s8Format());
+        const auto info = rhi::formatInfo(f, dev_.d24s8Format());
         if (!info) return bEResult_False;
         return dev_.game().formatSupport(info->format, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) ? bEResult_Ok
                                                                                                                                    : bEResult_False;
@@ -1216,7 +1264,7 @@ bEResult HalDevice::checkFormat(eCGfxShared::eSGfxLayersDesc const& a0, bool a1)
     if (f == INTZ || (a0.usage & USAGE_DEPTHSTENCIL) != 0) {
         return bEResult_False;
     }
-    const auto info = vk::formatInfo(f, dev_.d24s8Format());
+    const auto info = rhi::formatInfo(f, dev_.d24s8Format());
     if (!info || info->depth) {
         return bEResult_False;
     }
@@ -1407,6 +1455,8 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
         dev_.windowResized();
     }
     engine::matsrc::onPresent();
+    engine::xinput::onPresent();
+    engine::loadaccel::onPresent();
     engine::lod::onPresent();  // a changed object draw distance: the world's cache-in spheres (engine thread)
     dev_.present();
     const auto& s = dev_.stats();
@@ -2229,7 +2279,7 @@ bEResult HalDevice::SetRenderTarget(void* a0, void* a1) {
         const auto describe = [](const d3d9::Surface* s) {
             if (s == nullptr || s->texture() == nullptr) return std::string("-");
             const auto& d = s->texture()->desc();
-            return std::format("{}x{} {} tex {}", s->width(), s->texture()->levelHeight(s->level()), vk::d3dFormatName(d.format),
+            return std::format("{}x{} {} tex {}", s->width(), s->texture()->levelHeight(s->level()), rhi::d3dFormatName(d.format),
                                static_cast<const void*>(s->texture()));
         };
         HAL_LOG("hal> SetRenderTarget {} [{}] {} [{}] (back buffer {})", a0, describe(rt), a1,

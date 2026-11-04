@@ -742,7 +742,7 @@ void RtScene::applyMaterial(rt::Registry::Instance& in, std::uint32_t id, std::u
 RtScene::MaterialFields RtScene::materialFields(const RtMaterial* m) const {
     MaterialFields f;
     const auto slotOf = [](d3d9::Texture* t) -> std::uint32_t {
-        return t != nullptr && !t->isNull() && t->image().layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ? t->bindlessSlot() : 0u;
+        return t != nullptr && !t->isNull() && t->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ? t->bindlessSlot() : 0u;
     };
     if (m == nullptr) {
         f.uvSet = abi::kRtUvNoTexture | abi::kRtUvHeuristic | (3u << abi::kRtUvOpacityShift);
@@ -1012,6 +1012,12 @@ bool RtScene::prepareInputs(Blas& b) {
     return true;
 }
 
+// RVK_NO_COMPACT (environment): no BLAS compaction (diagnostics)
+static bool noCompaction() {
+    static const bool v = GetEnvironmentVariableA("RVK_NO_COMPACT", nullptr, 0) != 0;
+    return v;
+}
+
 void RtScene::processCompactions(rhi::CommandList& cl, std::uint32_t slot) {
     auto& list = compactions_[slot];
     if (list.empty()) return;
@@ -1101,7 +1107,7 @@ void RtScene::buildPending(rhi::CommandList& cl, std::uint32_t slot) {
         g.opaque = true;  // alpha-tested instances: FORCE_NO_OPAQUE on the instance
         rhi::BlasDesc desc;
         desc.geometries = std::span<const rhi::TriangleGeometry>(&g, 1);
-        desc.allowCompaction = true;  // (not allowUpdate: a BLAS that is both did not compact into a traceable structure on the AMD driver, hlsl-rhi.md 6c)
+        desc.allowCompaction = !noCompaction();  // (not allowUpdate: a BLAS that is both did not compact into a traceable structure on the AMD driver, hlsl-rhi.md 6c)
         desc.name = "rt scene blas";
         std::unique_ptr<rhi::AccelerationStructure> as = rd->createBlas(desc);
         if (as == nullptr) {
@@ -1137,7 +1143,10 @@ void RtScene::buildPending(rhi::CommandList& cl, std::uint32_t slot) {
         list.push_back({id, b->serial, static_cast<std::uint32_t>(handles.size())});
         handles.push_back(b->as.get());
     }
-    if (handles.empty()) return;
+    if (handles.empty() || noCompaction()) {
+        list.clear();
+        return;
+    }
     cl.queryCompactedSizes(*compactQuery_, slot * kQueriesPerSlot, handles);
 }
 
@@ -1211,7 +1220,7 @@ bool RtScene::captureOptions(const d3d9::Shader& s, shader::TranslateOptions& o)
         "                rvkRwStore<float4, 16>(rvkAddrAdd(rvk_cap, 16u + rvk_at * 32u + 16u), {});\n"
         "                rvk_out.rvk_prevWorld = float4(rvk_world, 0.0);\n"
         "                if (any(rvk_info.yz != uint2(0u, 0u)) && uint(rvk_slot) < rvk_info.w) {{\n"
-        "                    float4 rvk_prev = rvkRwLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvk_info.yz), 16u + uint(rvk_slot) * 32u));\n"
+        "                    float4 rvk_prev = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvk_info.yz), 16u + uint(rvk_slot) * 32u));\n"
         "                    if (rvk_prev.w == 1.0) rvk_out.rvk_prevWorld = float4(rvk_prev.xyz, 1.0);\n"
         "                }}\n"
         "            }}\n"
@@ -1321,7 +1330,7 @@ void RtScene::observeTree(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& 
         std::memcpy(a.ptr, header, 16);
         batch.base = a.addr();
         batch.slots = slots;
-        dev.requestVertexCapture(a.ref, q.instanced);
+        dev.requestVertexCapture(a, q.instanced);
     }
     if (batch.slots != slots) return;
     DynBlas& db = dynBlas_[in.key];
@@ -1474,7 +1483,8 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     if (useSkin) {
         SkinJob j;
         j.vertices = vertexAddress.ref;
-        j.out = a.ref;
+        j.out = a.rw();
+        j.outKey = a.ref;
         j.slots = slots;
         j.stride = q.vertexStride;
         j.offsets = skinOffsets;
@@ -1490,13 +1500,13 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
                 std::uint32_t rh[4] = {slots | 0x80000000u, 0, 0, 0};
                 std::memcpy(ref.ptr, rh, 16);
                 std::memset(static_cast<std::uint8_t*>(ref.ptr) + 16, 0, static_cast<std::size_t>(slots) * 32);
-                dev.requestVertexCapture(ref.ref);
-                j.ref = ref.ref;
+                dev.requestVertexCapture(ref);
+                j.ref = ref.rw();
             }
         }
         skinJobs_.push_back(j);
     } else {
-        dev.requestVertexCapture(a.ref);
+        dev.requestVertexCapture(a);
     }
     // the draw's material (diffuse + uv map), resolved again when it changes (the solid pass's draws carry it)
     const std::uint64_t sig = RtMaterials::signature(q);
@@ -1668,6 +1678,7 @@ bool RtScene::skinReady() {
         skinBuild_ = std::async(std::launch::async, [rdev]() {
             rhi::ComputePipelineDesc d;
             d.cs.spirv = shader::embedded::spirv("rt/rt_skin.comp");
+            d.cs.dxil = shader::embedded::dxilOnDemand("rt/rt_skin.comp");
             d.name = "rt.skin";
             return rdev->createComputePipeline(d);
         });
@@ -1777,6 +1788,7 @@ void RtScene::recordSkin(rhi::CommandList& cl) {
         // a reference capture written by a cascade's vertex shader (verify) before the compute reads it
         barrier(cl, VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        dev_.game().captureAccess(cl, true);  // (D3D12: the capture pool in its write state)
         cl.bindPipeline(*skinPipe_);
         struct Push {
             abi::PassPushHeader h;
@@ -1788,8 +1800,9 @@ void RtScene::recordSkin(rhi::CommandList& cl) {
         push.table[1] = t.ref.high();
         cl.setPushConstants(&push, sizeof(push));
         cl.dispatch(chunks, 1, 1);
+        dev_.game().captureAccess(cl, false);
     }
-    for (std::uint32_t i = 0; i < n; ++i) dev_.markVertexCaptured(skinJobs_[i].out);
+    for (std::uint32_t i = 0; i < n; ++i) dev_.markVertexCaptured(skinJobs_[i].outKey);
     skinJobsTotal_ += n;
     skinJobs_.clear();
     const double now = dev_.secondsSinceCreate();

@@ -59,6 +59,10 @@ jobs:
         run: cmake --build build-release --config RelWithDebInfo --target rvk_d3d9 rvk_tests
       - name: Unit tests
         run: build-release\RelWithDebInfo\rvk_tests.exe
+      # the Vulkan-only path must start without the DX12 runtime: d3d12.dll / dxgi.dll / d3dcompiler_47.dll are delay-load imports only
+      - name: DX12 runtime is delay-loaded
+        shell: pwsh
+        run: .\scripts\check-delayload.ps1 -Dll build-release\RelWithDebInfo\d3d9.dll
 
       - name: Package
         shell: pwsh

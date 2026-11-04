@@ -1,9 +1,9 @@
-#include "vk/formats.h"
+#include "rhi/d3d_formats.h"
 
 #include <algorithm>
 #include <cstring>
 
-namespace rvk::vk {
+namespace rvk::rhi {
 namespace {
 
 constexpr VkComponentSwizzle R = VK_COMPONENT_SWIZZLE_R, G = VK_COMPONENT_SWIZZLE_G, B = VK_COMPONENT_SWIZZLE_B,
@@ -163,4 +163,4 @@ void convertLevel(const FormatInfo& f, const void* src, std::uint32_t srcRowPitc
     }
 }
 
-}  // namespace rvk::vk
+}  // namespace rvk::rhi
