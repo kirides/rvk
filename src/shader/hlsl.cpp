@@ -491,6 +491,17 @@ private:
         } else {
             v = std::format("{}.Sample({}, {})", tex, smp, coord(s, c));
         }
+        for (std::size_t k = 0; k < opt_.texCaptures.size() && !vs_; ++k) {
+            const auto& cap = opt_.texCaptures[k];
+            if (cap.samplerReg != s || texCapturesDone_.contains(k)) continue;
+            texCapturesDone_.insert(k);
+            line("{");
+            line(std::format("    float4 rvk_ts = {};", v));
+            line(std::format("    {} = float4({}.xy, 0.0, 0.0); {} = rvk_ts; {} = true;", cap.uvTarget, paren(c), cap.colorTarget, cap.okTarget));
+            assign(ins, "rvk_ts");
+            line("}");
+            return;
+        }
         assign(ins, v);
     }
 
@@ -1077,6 +1088,7 @@ private:
 
     std::set<std::uint32_t> temps_, rastOut_, attrOut_, outputs_, labels_;
     std::set<std::size_t> capturesDone_;
+    std::set<std::size_t> texCapturesDone_;
     std::map<std::uint32_t, std::array<std::uint32_t, 4>> defF_, defI_;
     std::map<std::uint32_t, bool> defB_;
 

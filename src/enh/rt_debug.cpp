@@ -17,6 +17,8 @@ RtDebug::Mode RtDebug::parse(std::string_view option) {
     if (option == "normals") return Mode::Normals;
     if (option == "albedo" || option == "albedo_split" || option == "albedo_opaque") return Mode::Albedo;
     if (option == "uv") return Mode::Uv;
+    if (option == "roughness") return Mode::Roughness;
+    if (option == "metalness") return Mode::Metalness;
     return Mode::Off;
 }
 
@@ -39,7 +41,7 @@ void RtDebug::readProbes(std::uint32_t slot) {
     const auto* r = static_cast<const RtDebugProbe*>(probes_[slot]->map());
     const auto now = std::chrono::steady_clock::now();
     // the material views every second (the probe pixels of a capture's frozen frames get logged)
-    const bool materialView = mode_ == Mode::Albedo || mode_ == Mode::Uv;
+    const bool materialView = mode_ == Mode::Albedo || mode_ == Mode::Uv || mode_ == Mode::Roughness || mode_ == Mode::Metalness;
     if (now - probeLogged_ >= std::chrono::seconds(materialView ? 1 : 5)) {
         probeLogged_ = now;
         static constexpr const char* kCodes[] = {"nothing", "match", "traced farther", "traced closer", "missed (raster has geometry)",

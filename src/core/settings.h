@@ -374,6 +374,14 @@ struct RendererSettings {
     Setting* aoStrength = nullptr;        // ao.strength: 0..1
     Setting* aoRadius = nullptr;          // ao.radius: metres
     Setting* gbufferDebug = nullptr;      // gbuffer.debug: "off", "normals", "motion", "ao"
+    // material pack (enh/material_pack, docs/research/material-pack.md)
+    Setting* materialsPack = nullptr;        // materials.pack (restart): load the pack folder; its materials get PBR specular / reflections
+    Setting* materialsQuality = nullptr;     // materials.quality: "off" | "low" | "medium" | "high"
+    Setting* materialsSpecular = nullptr;    // materials.specular: strength of the lights' specular
+    Setting* materialsEnvironment = nullptr; // materials.environment: strength of the sky reflection
+    Setting* materialsRoughness = nullptr;   // materials.default_roughness: for entries without a roughness map
+    Setting* materialsBudget = nullptr;      // materials.budget (restart): MiB of decoded pack textures
+    Setting* materialsDebug = nullptr;       // materials.debug: "off" | "roughness" | "metalness" | "orm" | "coverage"
     // upscaling / anti-aliasing (enh/upscale.h, docs/research/upscaling.md)
     Setting* upscaleObjectMotion = nullptr;  // upscale.object_motion: motion vectors of characters and moving objects (enh/object_motion)
     Setting* upscaleProvider = nullptr;   // upscale.provider: "fsr3" (FSR 3.1, default) or "fsr4" (the ML upscaler of the FSR SDK 2.4)

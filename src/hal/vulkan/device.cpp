@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <filesystem>
 #include <format>
 #include <string>
 
@@ -28,6 +29,7 @@
 #include "engine/shadow_maps.h"
 #include "engine/vfs.h"
 #include "engine/window_mode.h"
+#include "enh/material_variant.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "res/dds.h"
 #include "vk/formats.h"
@@ -234,6 +236,11 @@ HalDevice::~HalDevice() {
     framegen_.reset();   // removes its passes, retires the generator
     upscale_.reset();    // clears the device's jitter source
     gbuffer_.reset();    // removes its passes, the G-buffer attachments
+    if (matPack_) {
+        dev_.setPackProvider({});
+        if (rtScene_) rtScene_->setMaterialPack(nullptr);
+    }
+    matPack_.reset();    // joins its loader, frees the pack textures
     gi_.reset();         // unregisters its observer / pass, releases the RT scene
     water_.reset();      // unregisters its draw replacer, releases the RT scene
     shadows_.reset();
@@ -469,8 +476,59 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     // frame boundary (no frame starts with one mode and ends with the other)
     if (rs.rendererMode != nullptr) reg.onChange(*rs.rendererMode, [this](const settings::Setting&) { applyRenderMode(); }, this);
     applyRenderMode();
+    // material pack (enh/material_pack.h, docs/research/material-pack.md): decided before any material variant is built (variants are cached
+    // per shader, the PBR code is part of them or not): the setting is on and the pack folder has something in it
+    std::vector<std::filesystem::path> packRoots;
+    if (rs.materialsPack != nullptr && rs.materialsPack->asBool()) {
+        packRoots.push_back(paths::dataDir() / "materialpack");
+        if (const char* env = std::getenv("RVK_MATPACK"); env != nullptr && *env != 0) {
+            std::string list = env;
+            for (std::size_t at = 0; at <= list.size();) {
+                const std::size_t semi = list.find(';', at);
+                const std::string part = list.substr(at, semi == std::string::npos ? std::string::npos : semi - at);
+                if (!part.empty()) packRoots.emplace_back(part);
+                if (semi == std::string::npos) break;
+                at = semi + 1;
+            }
+        }
+        const auto hasFiles = [](const std::filesystem::path& root) {
+            std::error_code ec;
+            if (!std::filesystem::is_directory(root, ec)) return false;
+            for (std::filesystem::recursive_directory_iterator it(root, ec), end; it != end && !ec; it.increment(ec)) {
+                if (it->is_regular_file(ec)) return true;
+            }
+            return false;
+        };
+        std::erase_if(packRoots, [&](const std::filesystem::path& p) { return !hasFiles(p); });
+    }
+    enh::setPbrVariants(!packRoots.empty());
     // ray-traced global illumination (enh/gi.h, docs/research/rtgi.md): probes + the material shaders' GI variants
     gi_ = std::make_unique<enh::Gi>(dev_, rtScene_.get());
+    if (!packRoots.empty()) {
+        // the pack rides on the GI variant slot (the Gi class registers it only with a ray tracing scene)
+        dev_.setVariantProvider(d3d9::VariantSlot::Gi, {enh::materialVariantTag("gi"), [](const d3d9::Shader& s, shader::TranslateOptions& o) {
+                                                            return enh::materialVariantOptions(s, enh::MaterialVariant::Gi, o);
+                                                        }});
+        matPack_ = std::make_unique<enh::matpack::MaterialPack>(dev_);
+        matPack_->configure(true, packRoots, static_cast<std::uint64_t>(rs.materialsBudget->asInt()) << 20, static_cast<float>(rs.materialsRoughness->asFloat()));
+        dev_.setPackProvider([this](const d3d9::draws::Tag& tag) {
+            const auto h = matPack_->lookupMaterial(tag.material);
+            static auto last = std::chrono::steady_clock::now();
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last >= std::chrono::seconds(5)) {
+                last = now;
+                const auto c = matPack_->takeCounters();
+                if (c.lookups != 0) spdlog::info("enh: materials: {} draws looked up, {} matched ({} distinct entries seen)", c.lookups, c.matched, matPack_->matchedNames());
+            }
+            return d3d9::Device::PackHit{h.word, h.texture};
+        });
+        for (settings::Setting* s : {rs.materialsQuality, rs.materialsSpecular, rs.materialsEnvironment, rs.materialsDebug}) {
+            if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyMaterials(); }, this);
+        }
+        applyMaterials();
+        rtScene_->setMaterialPack(matPack_.get());
+        spdlog::info("enh: materials: pack on ({} folder(s)), PBR variants enabled", packRoots.size());
+    }
     if (rs.giEnabled != nullptr) {
         for (settings::Setting* s : {rs.giEnabled, rs.giQuality, rs.giStrength, rs.giLightmaps, rs.giCharacters, rs.giScreen, rs.giBleed, rs.giDirectional, rs.giFoliage, rs.giFill, rs.giCutouts, rs.giLights, rs.giLightCount, rs.giEmissive, rs.giDebug}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) {
@@ -613,6 +671,23 @@ void HalDevice::applyGi() {
         s.screen = sc == "low" ? 1 : sc == "medium" ? 2 : sc == "high" ? 3 : 0;
     }
     gi_->apply(s);
+}
+
+void HalDevice::applyMaterials() {
+    const auto& rs = settings::renderer();
+    const auto index = [](std::string_view v, std::initializer_list<std::string_view> names) {
+        float i = 0;
+        for (const auto n : names) {
+            if (n == v) return i;
+            ++i;
+        }
+        return 0.0f;
+    };
+    const float quality = index(rs.materialsQuality->asEnum(), {"off", "low", "medium", "high"});
+    const float debug = index(rs.materialsDebug->asEnum(), {"off", "roughness", "metalness", "orm", "coverage"});
+    dev_.setFrameParam(shader::abi::kFrameParamMaterials, {quality, rs.materialsSpecular->asFloat(), rs.materialsEnvironment->asFloat(), debug});
+    spdlog::info("enh: materials: quality {}, specular {:.2f}, environment {:.2f}, debug {}", rs.materialsQuality->asEnum(), rs.materialsSpecular->asFloat(),
+                 rs.materialsEnvironment->asFloat(), rs.materialsDebug->asEnum());
 }
 
 void HalDevice::applyGbuffer() {

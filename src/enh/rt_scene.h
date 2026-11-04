@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "d3d9/device.h"
+#include "enh/material_pack.h"
 #include "enh/rt_material.h"
 #include "enh/rt_registry.h"
 #include "rhi/rhi.h"
@@ -223,10 +224,15 @@ private:
     void learnLayer(d3d9::Device& dev, const d3d9::ReplaceQuery& q, const rt::BlasKey& key);
     // the record / segment material fields of `m` (bindless slots of this frame); returns whether the opacity has a texture
     struct MaterialFields {
-        std::uint32_t albedoTex = 0, albedoSampler = 0, uvSet = 0, opacityTex = 0;
+        std::uint32_t albedoTex = 0, albedoSampler = 0, uvSet = 0, opacityTex = 0, packWord = 0;
         float uvMap[2][4]{};
     };
-    static MaterialFields materialFields(const RtMaterial* m);
+    MaterialFields materialFields(const RtMaterial* m) const;
+    matpack::MaterialPack* pack_ = nullptr;
+public:
+    // the material pack (enh/material_pack.h): its entries' maps reach the hit shading through the records' packWord
+    void setMaterialPack(matpack::MaterialPack* p) { pack_ = p; }
+private:
     static constexpr std::size_t kMaterialSlots = 8;
     // CPU side of a build: index range scan (max vertex, bounds); false = unusable (logged once per reason)
     bool prepareInputs(Blas& b);

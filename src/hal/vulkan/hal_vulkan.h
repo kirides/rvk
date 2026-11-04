@@ -21,6 +21,7 @@
 #include "enh/debug_view.h"
 #include "enh/framegen.h"
 #include "enh/gbuffer.h"
+#include "enh/material_pack.h"
 #include "enh/object_motion.h"
 #include "enh/upscale.h"
 #include "enh/gi.h"
@@ -613,6 +614,8 @@ private:
     std::unique_ptr<enh::Upscale> upscale_;     // upscale.mode (camera jitter, FSR)
     std::unique_ptr<enh::FrameGeneration> framegen_;  // framegen.mode (FSR 3 / FSR 4 frame generation; the manual model)
     std::unique_ptr<enh::Gbuffer> gbuffer_;      // ao.* / gbuffer.debug (the G-buffer attachments + passes)
+    std::unique_ptr<enh::matpack::MaterialPack> matPack_;  // materials.* (docs/research/material-pack.md)
+    void applyMaterials();
     void applyWater();
     void applyGi();
     void applyGbuffer();

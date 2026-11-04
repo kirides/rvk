@@ -56,7 +56,7 @@ struct RvkRtRecordData {
     uint4 w3;  // 48 albedoTex (bindless t2D slot, 0 = none), albedoSampler, alpha (D3DCMPFUNC | reference << 8), uvSet (RVK_RT_UV_*)
     uint4 uvMap0;  // 64 float bits: u' = dot(uvMap0.xy, uv) + uvMap0.z; .w = colour without a texture (RGBA8 bits)
     uint4 uvMap1;  // 80 float bits: v' = dot(uvMap1.xy, uv) + uvMap1.z; .w = the opacity texture's slot (bits)
-    uint4 w6;  // 96 segments.xy (address of segmentCount RvkRtSegment, sorted by firstPrimitive), segmentCount, pad
+    uint4 w6;  // 96 segments.xy (address of segmentCount RvkRtSegment, sorted by firstPrimitive), segmentCount, packWord
 };
 
 // the record as the shaders use it
@@ -79,12 +79,13 @@ struct RvkRtRecord {
     float4 uvMap1;
     uint2 segments;
     uint segmentCount;
+    uint packWord;  // material pack word (enh/material_pack.h; 0 = no entry): map slot in bits 0-13
 };
 
 // the material of a sub-range of a record's triangles (abi.h RtMaterialSegment, 64 bytes)
 struct RvkRtSegmentData {
     uint4 w0;  // firstPrimitive, primitiveCount, albedoTex, albedoSampler
-    uint4 w1;  // alpha, uvSet, pad, pad
+    uint4 w1;  // alpha, uvSet, packWord, pad
     uint4 uvMap0;
     uint4 uvMap1;
 };
@@ -114,6 +115,7 @@ RvkRtRecord rvkRtRecord(RvkFrame f, uint index) {
     r.uvMap1 = asfloat(d.uvMap1);
     r.segments = d.w6.xy;
     r.segmentCount = d.w6.z;
+    r.packWord = d.w6.w;
     return r;
 }
 
@@ -232,6 +234,7 @@ void rvkRtApplySegment(inout RvkRtRecord r, uint primitive) {
             r.uvSet = s.w1.y;
             r.uvMap0 = asfloat(s.uvMap0);
             r.uvMap1 = asfloat(s.uvMap1);
+            r.packWord = s.w1.z;
             return;
         }
     }

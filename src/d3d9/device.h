@@ -1016,6 +1016,16 @@ public:
         bool replaceLightmaps = false;
     };
     void setGiDraws(const GiDraws& g) { giDraws_ = g; }
+    // ---- material pack (enh/material_pack, docs/research/material-pack.md) ----
+    // With a provider set, the main view's lit material draws take the pixel shader's variant (like GI draws) and carry the provider's word for
+    // their material in the DrawBlock (pad[1] = alpha.w; 0 = no entry: the variant leaves the pixels alone). `texture` (null: constants only)
+    // is uploaded here before the word is used. Render thread.
+    struct PackHit {
+        std::uint32_t word = 0;
+        Texture* texture = nullptr;
+    };
+    using PackProvider = std::function<PackHit(const draws::Tag&)>;
+    void setPackProvider(PackProvider p) { packProvider_ = std::move(p); }
     std::uint64_t giDrawsThisInterval() const { return giDrawCount_; }
     // ---- thin G-buffer (enh/gbuffer, docs/research/rtgi.md 10) ----
     // Extra colour attachments of the first main view's solid pass (scene HDR target only): `normal` (A2B10G10R10: xy the
@@ -1692,6 +1702,7 @@ private:
     std::array<std::uint32_t, 4> ao_{};
     std::array<std::uint32_t, 4> sgi_{};
     GiDraws giDraws_;
+    PackProvider packProvider_;
     std::uint64_t giDrawCount_ = 0;
     bool captureInstances_ = false;         // the request covers an instanced draw (requestVertexCapture)
     rhi::GpuRef captureRequest_;            // the draw being prepared (DrawObserver::observe)

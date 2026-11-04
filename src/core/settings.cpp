@@ -1066,8 +1066,8 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "cut-outs solid), \"UV\" their texture coordinates. Needs ray tracing. Off renders exactly as without it.",
         .type = Type::Enum,
         .defaultValue = 0,
-        .options = {"off", "instances", "depth", "normals", "albedo", "albedo_split", "albedo_opaque", "uv"},
-        .optionLabels = {"Off", "Instances", "Depth check", "Normals", "Albedo", "Albedo (split)", "Albedo (cut-outs solid)", "UV"},
+        .options = {"off", "instances", "depth", "normals", "albedo", "albedo_split", "albedo_opaque", "uv", "roughness", "metalness"},
+        .optionLabels = {"Off", "Instances", "Depth check", "Normals", "Albedo", "Albedo (split)", "Albedo (cut-outs solid)", "UV", "Roughness (pack)", "Metalness (pack)"},
         .flags = Flag::NoAB | Flag::Debug,
         .requirements = caps::bit(caps::Cap::RayQuery),
     });
@@ -1697,6 +1697,90 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .options = {"off", "normals", "motion", "ao", "screen_gi"},
         .optionLabels = {"Off", "Normals", "Motion", "AO", "Screen probes (GI factor)"},
+        .flags = Flag::NoAB | Flag::Debug,
+    });
+
+    // ---- Graphics tab: material pack (enh/material_pack.h, docs/research/material-pack.md) ----
+    r.materialsPack = &reg.add({
+        .key = "materials.pack",
+        .label = "Material pack",
+        .category = "Materials",
+        .description = "Loads extra material data (roughness / metalness / emissive maps) from the folder bin\\rvk\\materialpack and gives "
+                       "the materials in it a physically based specular response and sky reflections. Materials without an entry look "
+                       "exactly as before. Takes effect at the next start.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::Restart,
+    });
+    r.materialsQuality = &reg.add({
+        .key = "materials.quality",
+        .label = "Material pack quality",
+        .category = "Materials",
+        .description = "Low: sun specular and sky reflection. Medium: + the nearby lights' specular. High: reserved for traced reflections.",
+        .type = Type::Enum,
+        .defaultValue = 2,
+        .options = {"off", "low", "medium", "high"},
+        .optionLabels = {"Off", "Low", "Medium", "High"},
+    });
+    r.materialsSpecular = &reg.add({
+        .key = "materials.specular",
+        .label = "Pack specular strength",
+        .category = "Materials",
+        .description = "Strength of the lights' specular highlights on materials with pack data.",
+        .type = Type::Float,
+        .defaultValue = 1,
+        .min = 0,
+        .max = 2,
+        .format = "%.2f",
+        .flags = Flag::Advanced,
+    });
+    r.materialsEnvironment = &reg.add({
+        .key = "materials.environment",
+        .label = "Pack reflection strength",
+        .category = "Materials",
+        .description = "Strength of the sky reflection on materials with pack data.",
+        .type = Type::Float,
+        .defaultValue = 1,
+        .min = 0,
+        .max = 2,
+        .format = "%.2f",
+        .flags = Flag::Advanced,
+    });
+    r.materialsRoughness = &reg.add({
+        .key = "materials.default_roughness",
+        .label = "Default roughness",
+        .category = "Materials",
+        .description = "Roughness of pack entries that have no roughness map or constant.",
+        .type = Type::Float,
+        .defaultValue = 0.7,
+        .min = 0,
+        .max = 1,
+        .format = "%.2f",
+        .flags = Flag::Advanced,
+    });
+    r.materialsBudget = &reg.add({
+        .key = "materials.budget",
+        .label = "Pack texture memory",
+        .category = "Materials",
+        .description = "Maximum memory of the decoded pack textures. Takes effect at the next start.",
+        .type = Type::Int,
+        .defaultValue = 256,
+        .min = 16,
+        .max = 2048,
+        .format = "%.0f MiB",
+        .flags = Flag::Restart | Flag::Advanced,
+    });
+    r.materialsDebug = &reg.add({
+        .key = "materials.debug",
+        .label = "Material pack debug view",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Developer view of the pack data on the draws that have an entry: roughness, metalness, the packed map (red occlusion, "
+                       "green roughness, blue metalness) or a green tint (coverage: which draws matched).",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "roughness", "metalness", "orm", "coverage"},
+        .optionLabels = {"Off", "Roughness", "Metalness", "Packed map", "Coverage"},
         .flags = Flag::NoAB | Flag::Debug,
     });
 

@@ -1004,7 +1004,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         fsPlain = variant(ps_, VariantSlot::Gbuffer);
         const rhi::ShaderModule motion = vsVariant != rhi::ShaderModule::None ? variant(ps_, VariantSlot::GbufferMotion) : rhi::ShaderModule::None;
         fsVariant = motion != rhi::ShaderModule::None ? motion : fsPlain;
-    } else if (!replaced && tint == 0 && giDraws_.on && giEligible(phase)) {
+    } else if (!replaced && tint == 0 && (giDraws_.on || packProvider_) && giEligible(phase)) {
         fsVariant = variant(ps_, VariantSlot::Gi);
     }
 
@@ -1219,6 +1219,24 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     }
     logTracedMaterial(kind, jitterX != 0.0f || jitterY != 0.0f);
     block.pad[0] = tint;
+    if (packProvider_ && (giDraw || gbufWrite_) && tag_.material != nullptr) {
+        // material pack: this material's word (0 = none); its map must be uploaded and sampleable
+        const PackHit hit = packProvider_(tag_);
+        if (hit.word != 0 && hit.texture != nullptr) {
+            Texture* t = hit.texture;
+            if (t->pending_ || t->image().layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) t->prepareForSampling(uploadList());
+            if (t->image().layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) block.pad[1] = hit.word;
+            static bool logged[2] = {false, false};
+            const int which = block.pad[1] != 0 ? 1 : 0;
+            if (!logged[which]) {
+                logged[which] = true;
+                spdlog::info("d3d9: material pack: first draw with a map {} (word {:08x}, slot {}, layout {})", which ? "applied" : "NOT READY", hit.word,
+                             t->bindlessSlot(), static_cast<int>(t->image().layout()));
+            }
+        } else {
+            block.pad[1] = hit.word;
+        }
+    }
     std::memcpy(block.psC5, psF_[5], sizeof(block.psC5));  // pixel window 1 of split draws (abi.h)
     if (giDraw) {
         ++giDrawCount_;

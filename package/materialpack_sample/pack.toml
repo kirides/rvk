@@ -1,0 +1,30 @@
+# Sample material pack (docs/research/material-pack.md). Keys are the engine's diffuse image / material names (case does not matter;
+# '*' and '?' match). Maps next to this file: <name>_orm.png = R occlusion, G roughness, B metalness, A emissive; <name>_r.png = roughness.
+# Rules apply in file order, later ones override earlier ones. A constant `roughness` only acts on entries WITHOUT a map (a map's own
+# roughness is shaped with roughness_scale / roughness_bias); entries with a map keep it.
+
+# constants only (no map): glass and metal variants of the shared misc-item texture
+[material."ItMisc_01_Diffuse_01_Glass"]
+roughness = 0.04
+metalness = 0.0
+ior = 1.5            # carried for later glass / path tracing consumers, not used by the raster shader yet
+transmission = 1.0
+
+[material."ItMisc_01_Diffuse_01_Metal"]
+roughness = 0.3
+metalness = 1.0
+
+# wildcards without maps: whole families get one look; the files next to this manifest (Arch_Wood_Planks_01, Arch_Stone_Bricks_01,
+# Arch_Floor_Cobblestone_03, Arch_Metal_Rust_01, ItWpn_SwordBlades_01) override them with per-texel maps
+[material."Arch_Wood_*"]
+roughness = 0.42     # varnished / oiled wood
+[material."Arch_House_Wood_*"]
+roughness = 0.42
+[material."Arch_Stone_*"]
+roughness = 0.6
+[material."Arch_Metal_*"]
+roughness = 0.35
+metalness = 1.0
+[material."ItWpn_*"]
+roughness = 0.3
+metalness = 1.0

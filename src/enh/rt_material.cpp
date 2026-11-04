@@ -54,7 +54,7 @@ bool isEmitterName(const std::string& name) {
 
 bool RtMaterial::operator==(const RtMaterial& o) const {
     return albedo == o.albedo && opacity == o.opacity && sampler == o.sampler && uvSet == o.uvSet &&
-           std::memcmp(uvMap, o.uvMap, sizeof(uvMap)) == 0 && colour == o.colour && alpha == o.alpha && masked == o.masked;
+           std::memcmp(uvMap, o.uvMap, sizeof(uvMap)) == 0 && colour == o.colour && alpha == o.alpha && masked == o.masked && name == o.name;
 }
 
 std::uint64_t RtMaterials::signature(const d3d9::ReplaceQuery& q) {
@@ -123,6 +123,7 @@ std::uint32_t RtMaterials::intern(const RtMaterial& m) {
     for (const auto& row : m.uvMap)
         for (float f : row) key = mixFloat(key, f);
     key = mix(key, m.colour);
+    key = mix(key, std::hash<std::string>{}(m.name));  // (the material pack keys by name: two materials of one texture stay apart)
     key = mix(key, m.alpha | (m.masked ? 0x80000000u : 0u));
     if (const auto it = byKey_.find(key); it != byKey_.end()) {
         Entry& e = entries_[it->second];

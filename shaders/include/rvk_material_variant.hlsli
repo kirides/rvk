@@ -244,8 +244,114 @@ void rvkMvPrologue(float4 fragCoord, float4 vertexNormal) {
 #endif
 }
 
+#ifdef RVK_MV_PBR
+// ---- material pack (docs/research/material-pack.md, src/enh/material_pack.*): physically based specular on top of the engine's lighting ----------
+// Draws whose material has a pack entry carry its word in the DrawBlock (alpha.w): bindless slot of the map (bits 0-13), flags and constants
+// above (enh::matpack::encodeWord). No entry = word 0 = this function returns before touching anything (the pixels are the engine's).
+// C++ side defines: RVK_MV_PBR_DIR_REG (c# of g_DirLight, -1 none), RVK_MV_PBR_PNT_REG / RVK_MV_PBR_PNT_COUNT (g_PointLights, 4 registers each),
+// RVK_MV_PBR_SHADOW_SLOT (the shadow mask's sampler). The translator captures the diffuse texld (coordinate, colour) of sampler s9.
+// Frame params[2] = (quality 0 off .. 3, specular strength, environment strength, debug view).
+static float4 rvk_pbrUv = float4(0.0, 0.0, 0.0, 0.0);      // the diffuse coordinate (xy)
+static float4 rvk_pbrAlbedo = float4(0.5, 0.5, 0.5, 1.0);  // the diffuse sample
+static bool rvk_pbrOk = false;                              // the shader sampled s9
+
+float rvkPbrGgx(float NoH, float a) {
+    float a2 = a * a;
+    float d = NoH * NoH * (a2 - 1.0) + 1.0;
+    return a2 / (3.14159265 * d * d + 1e-6);
+}
+float rvkPbrVis(float NoV, float NoL, float a) {  // height-correlated Smith GGX, divided by 4 NoL NoV
+    float a2 = a * a;
+    float gv = NoL * sqrt(NoV * NoV * (1.0 - a2) + a2);
+    float gl = NoV * sqrt(NoL * NoL * (1.0 - a2) + a2);
+    return 0.5 / (gv + gl + 1e-4);
+}
+float3 rvkPbrLight(float3 N, float3 V, float3 L, float3 radiance, float a, float3 F0, float atten) {
+    float NoL = saturate(dot(N, L));
+    if (NoL <= 0.0 || atten <= 0.0) return float3(0.0, 0.0, 0.0);
+    float3 H = normalize(V + L);
+    float NoH = saturate(dot(N, H)), VoH = saturate(dot(V, H)), NoV = max(dot(N, V), 1e-3);
+    float3 F = F0 + (1.0 - F0) * pow(1.0 - VoH, 5.0);
+    return radiance * F * (rvkPbrGgx(NoH, a) * rvkPbrVis(NoV, NoL, a) * NoL * atten);
+}
+
+void rvkMvPbr(RvkFrame f, inout float4 c0) {
+    RvkDrawData d = rvkLoadDraw();
+    uint word = d.alpha.w;
+    if ((word & (1u << 14)) == 0u || f.params[2].x < 0.5) return;
+    float quality = f.params[2].x;
+    uint slot = word & 0x3FFFu;
+    bool orm = (word & (1u << 15)) != 0u;
+    float rScale = float((word >> 16) & 31u) * (1.0 / 16.0);
+    float rBias = float((word >> 21) & 31u) * (1.0 / 31.0);
+    float mScale = float((word >> 26) & 31u) * (1.0 / 31.0);
+    float4 t = float4(1.0, 1.0, 1.0, 0.0);
+    if (slot != 0u && rvk_pbrOk) t = RVK_TEX2D(slot).Sample(RVK_SAMP(rvkDrawSmp(d, 9u)), rvk_pbrUv.xy);
+    float rough = saturate((slot == 0u ? 1.0 : (orm ? t.g : t.r)) * rScale + rBias);
+    float occl = slot != 0u && orm ? t.r : 1.0;
+    float metal = saturate(slot != 0u && orm ? t.b * mScale : mScale);
+    float emis = slot != 0u && orm && (word >> 31) != 0u ? t.a : 0.0;
+    uint dbg = uint(f.params[2].w + 0.5);
+    if (dbg == 1u) { c0.rgb = float3(rough, rough, rough); return; }
+    if (dbg == 2u) { c0.rgb = float3(metal, metal, metal); return; }
+    if (dbg == 3u) { c0.rgb = float3(occl, rough, metal); return; }
+    if (dbg == 4u) { c0.rgb = lerp(c0.rgb, float3(0.1, 1.0, 0.2), 0.6); return; }
+
+    float3 P = rvk_mvP;
+    float3 V = normalize(f.cameraPos.xyz - P);
+    float3 N = dot(rvk_gbN.xyz, rvk_gbN.xyz) > 1e-8 ? normalize(rvk_gbN.xyz) : rvk_giN;
+    if (dot(N, V) < 0.0) N = reflect(N, V);  // back-facing normal-mapped texels: stay in the front hemisphere
+    float3 albedo = rvk_pbrOk ? saturate(rvk_pbrAlbedo.rgb) : float3(0.5, 0.5, 0.5);
+    float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo, metal);
+    float a = max(rough * rough, 0.0025);
+
+    // the engine's fog on this pixel (ge_default.fxh RadialFog): undone so the new terms and the metal diffuse reduction act on the lit colour
+    float4 fogColor = RVK_PSC(3), fogSet = RVK_PSC(4);
+    float fogK = saturate(min(distance(f.cameraPos.xyz, P) * fogSet.y + fogSet.x, fogSet.z));
+    float3 lit = fogK < 0.999 ? (c0.rgb - fogColor.rgb * fogK) / (1.0 - fogK) : c0.rgb;
+
+    // lights: the sun (specular colour, the shadow mask's alpha), the point lights of this pass
+    float4 shadowMask = float4(1.0, 1.0, 1.0, 1.0);
+    uint shadowTex = rvkDrawTex(d, uint(RVK_MV_PBR_SHADOW_SLOT));
+    if (shadowTex != 0u) shadowMask = RVK_TEX2D(shadowTex).Sample(RVK_SAMP(rvkDrawSmp(d, uint(RVK_MV_PBR_SHADOW_SLOT))), (rvk_mvFrag.xy) * f.viewport.zw);
+    float3 specSum = float3(0.0, 0.0, 0.0);
+#if RVK_MV_PBR_DIR_REG >= 0
+    specSum += rvkPbrLight(N, V, normalize(RVK_PSC(RVK_MV_PBR_DIR_REG + 2).xyz), RVK_PSC(RVK_MV_PBR_DIR_REG + 1).rgb, a, F0, shadowMask.a);
+#endif
+#if RVK_MV_PBR_PNT_COUNT > 0
+    if (quality > 1.5) {
+        [unroll] for (int i = 0; i < RVK_MV_PBR_PNT_COUNT; ++i) {
+            float4 pr = RVK_PSC(RVK_MV_PBR_PNT_REG + 4 * i);
+            float3 lv = pr.xyz - P;
+            float fall = 1.0 - saturate(dot(lv, lv) * pr.w);
+            float sh = 1.0 - dot(RVK_PSC(RVK_MV_PBR_PNT_REG + 4 * i + 3), shadowMask);
+            specSum += rvkPbrLight(N, V, normalize(lv), RVK_PSC(RVK_MV_PBR_PNT_REG + 4 * i + 2).rgb, a, F0, fall * saturate(sh));
+        }
+    }
+#endif
+    // the sky cube (display-space colour) blurred by the roughness, weighted by the split-sum Fresnel and the indoor factor
+    float3 env = float3(0.0, 0.0, 0.0);
+    if (f.images.w != 0u && f.params[2].z > 0.0) {
+        float3 R = reflect(-V, N);
+        float NoV = saturate(dot(N, V));
+        float3 Fe = F0 + (max(float3(1.0 - rough, 1.0 - rough, 1.0 - rough), F0) - F0) * pow(1.0 - NoV, 5.0);
+        float3 sky = RVK_TEXCUBE(f.images.w).SampleLevel(RVK_SAMP(rvkDrawSmp(d, 9u)), R, rough * 6.0).rgb;
+        // (rough surfaces reflect a wide blur of the sky: the lobe's energy is spread, so its grazing peak is toned down)
+        env = sky * Fe * smoothstep(-0.15, 0.25, R.y) * rvk_mvVao * occl * f.params[2].z * lerp(1.0, 0.25, rough);
+    }
+    float3 spec = pow(max(specSum * f.params[2].y, float3(0.0, 0.0, 0.0)), float3(0.45, 0.45, 0.45));
+    spec = min(spec, float3(4.0, 4.0, 4.0));
+    // diffuse: less of it on metals; the rest is the engine's lighting
+    float3 shaded = lit * (1.0 - metal) + (spec + env) + albedo * emis;
+    c0.rgb = lerp(shaded, fogColor.rgb, fogK);
+}
+#endif
+
 void rvkMvEpilogue(inout float4 c0) {
     RvkFrame f = rvkLoadFrame(pc.frame);
+#ifdef RVK_MV_PBR
+    rvkMvPbr(f, c0);
+#endif
 #ifdef RVK_MV_GBUFFER
     float3 n = dot(rvk_gbN.xyz, rvk_gbN.xyz) > 1e-8 ? normalize(rvk_gbN.xyz) : rvk_giN;
     uint kind = pc.flags & RVK_DRAW_KIND_MASK;

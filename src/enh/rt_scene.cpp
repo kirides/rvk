@@ -739,7 +739,7 @@ void RtScene::applyMaterial(rt::Registry::Instance& in, std::uint32_t id, std::u
     in.materialRank = rank;
 }
 
-RtScene::MaterialFields RtScene::materialFields(const RtMaterial* m) {
+RtScene::MaterialFields RtScene::materialFields(const RtMaterial* m) const {
     MaterialFields f;
     const auto slotOf = [](d3d9::Texture* t) -> std::uint32_t {
         return t != nullptr && !t->isNull() && t->image().layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ? t->bindlessSlot() : 0u;
@@ -761,6 +761,11 @@ RtScene::MaterialFields RtScene::materialFields(const RtMaterial* m) {
     }
     std::memcpy(&f.uvMap[0][3], &m->colour, 4);
     std::memcpy(&f.uvMap[1][3], &f.opacityTex, 4);
+    if (pack_ != nullptr && !m->name.empty()) {
+        // (the map must be uploaded: the raster draws and the pack's prepare() do that; until then the entry is not used)
+        const auto hit = pack_->lookup(m->name);
+        if (hit.word != 0 && (hit.texture == nullptr || hit.texture->image().layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)) f.packWord = hit.word;
+    }
     return f;
 }
 
@@ -1954,6 +1959,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
         r.alpha = recordAlpha(in.flags, in.data, m);
         r.albedoTex = mf.albedoTex;
         r.albedoSampler = mf.albedoSampler;
+        r.packWord = mf.packWord;
         r.uvSet = mf.uvSet;
         std::memcpy(r.uvMap, mf.uvMap, sizeof(r.uvMap));
         // a range without a main-view material of its own (a cascade's merged level-mesh range): per-triangle materials from
@@ -1977,6 +1983,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
                     e.albedoSampler = sf.albedoSampler;
                     e.alpha = r.alpha;
                     e.uvSet = sf.uvSet;
+                    e.packWord = sf.packWord;
                     std::memcpy(e.uvMap, sf.uvMap, sizeof(e.uvMap));
                     segs.push_back(e);
                 }
