@@ -913,7 +913,7 @@ void Overlay::buildSettingsWindow() {
             ImGui::SetScrollY(scrollFrac_ * ImGui::GetScrollMaxY());
         }
         const float width = ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ScrollbarSize * 0.5f;
-        const int columns = width > em * 62.0f ? 2 : 1;
+        const int columns = (width > em * 62.0f && !searching) ? 2 : 1;
 
         // restart-required banner (every restart setting whose value differs from the one this session started with)
         {
