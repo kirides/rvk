@@ -185,11 +185,15 @@ TEST(matpack_derive_from_specular_rules) {
     s.powerKnown = true;
     s.power = 0.25f;
     const Derived d = deriveFromSpecular(s, o, 0.7f);
-    CHECK(d.valid && d.strength == 1.0f && std::fabs(d.roughness - roughnessFromPower(0.25f)) < 1e-6f);
+    CHECK(d.valid && d.strength == 1.0f && std::fabs(d.roughness - glossGate(roughnessFromPower(0.25f))) < 1e-6f);
+    CHECK(d.roughness > 0.7f);  // a broad matte lobe (n = 32): gated to rough, not traced
+    s.power = 1.0f;
+    CHECK(deriveFromSpecular(s, o, 0.7f).roughness < 0.4f);  // n = 128: really glossy, keeps its roughness
+    s.power = 0.25f;
     s.power = 8.0f;  // very smooth: clamped to the minimum
     CHECK(std::fabs(deriveFromSpecular(s, o, 0.7f).roughness - o.minRoughness) < 1e-6f);
     s.power = 0.0f;  // very rough: clamped to the maximum
-    CHECK(std::fabs(deriveFromSpecular(s, o, 0.7f).roughness - o.maxRoughness) < 1e-6f);
+    CHECK(deriveFromSpecular(s, o, 0.7f).roughness >= o.maxRoughness);
     s.power = 0.25f;
     s.maskLum = 0.5f;  // a weak mask pushes towards 1
     const Derived w = deriveFromSpecular(s, o, 0.7f);
@@ -199,7 +203,10 @@ TEST(matpack_derive_from_specular_rules) {
     s.maskMap = true;  // a map: fixed strength
     CHECK(std::fabs(deriveFromSpecular(s, o, 0.7f).strength - kMapMaskStrength) < 1e-6f);
     s.powerKnown = false;  // a power texture: the default roughness stands in
-    CHECK(std::fabs(deriveFromSpecular(s, o, 0.7f).roughness - (0.7f + 0.3f * (1.0f - kMapMaskStrength))) < 1e-5f);
+    {
+        const float g = glossGate(0.7f);
+        CHECK(std::fabs(deriveFromSpecular(s, o, 0.7f).roughness - (g + (1.0f - g) * (1.0f - kMapMaskStrength))) < 1e-5f);
+    }
     o.enabled = false;
     CHECK(!deriveFromSpecular(s, o, 0.7f).valid);  // off: nothing
 }
