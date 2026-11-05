@@ -20,20 +20,28 @@ bool Swapchain::create(Context& ctx, HWND__* window, std::uint32_t width, std::u
     ctx_ = &ctx;
     window_ = window;
     vsync_ = vsync;
+    if (!createSurface()) {
+        return false;
+    }
+    return build(width, height);
+}
+
+bool Swapchain::createSurface() {
     VkWin32SurfaceCreateInfoKHR sci{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
     sci.hinstance = GetModuleHandleW(nullptr);
-    sci.hwnd = window;
-    if (const VkResult r = vkCreateWin32SurfaceKHR(ctx.instance(), &sci, nullptr, &surface_); r != VK_SUCCESS) {
+    sci.hwnd = window_;
+    if (const VkResult r = vkCreateWin32SurfaceKHR(ctx_->instance(), &sci, nullptr, &surface_); r != VK_SUCCESS) {
         spdlog::error("vulkan: vkCreateWin32SurfaceKHR: {}", resultString(r));
+        surface_ = VK_NULL_HANDLE;
         return false;
     }
     VkBool32 supported = VK_FALSE;
-    vkGetPhysicalDeviceSurfaceSupportKHR(ctx.physicalDevice(), ctx.queueFamily(), surface_, &supported);
+    vkGetPhysicalDeviceSurfaceSupportKHR(ctx_->physicalDevice(), ctx_->queueFamily(), surface_, &supported);
     if (!supported) {
         spdlog::error("vulkan: the queue family cannot present to the game window");
         return false;
     }
-    return build(width, height);
+    return true;
 }
 
 bool Swapchain::build(std::uint32_t width, std::uint32_t height) {
@@ -207,6 +215,20 @@ bool Swapchain::build(std::uint32_t width, std::uint32_t height) {
 
 bool Swapchain::recreate(std::uint32_t width, std::uint32_t height) {
     ctx_->waitIdle();
+    if (surfaceLost_.exchange(false)) {
+        // VK_ERROR_SURFACE_LOST_KHR (a display / driver reset of the WSI, a remote session): the swapchain and the surface are
+        // dead, a rebuild on the old surface fails forever; DXVK recreates the surface the same way (dxvk_presenter.cpp)
+        spdlog::warn("vulkan: surface lost: recreating the window surface");
+        destroySwapchain();
+        if (surface_ != VK_NULL_HANDLE) {
+            vkDestroySurfaceKHR(ctx_->instance(), surface_, nullptr);
+            surface_ = VK_NULL_HANDLE;
+        }
+        if (!createSurface()) {
+            surfaceLost_ = true;  // try again at the next recreation
+            return false;
+        }
+    }
     return build(width, height);
 }
 
@@ -324,6 +346,10 @@ bool Swapchain::acquire(VkSemaphore acquired, std::uint32_t& imageIndex) {
         fseLost_ = true;
         return false;
     }
+    if (r == VK_ERROR_SURFACE_LOST_KHR) {
+        if (!surfaceLost_.exchange(true)) spdlog::warn("vulkan: vkAcquireNextImageKHR: VK_ERROR_SURFACE_LOST_KHR");
+        return false;
+    }
     if (r != VK_ERROR_OUT_OF_DATE_KHR) {
         spdlog::error("vulkan: vkAcquireNextImageKHR: {}", resultString(r));
     }
@@ -369,7 +395,11 @@ VkResult Swapchain::present(std::uint32_t imageIndex) {
         fgPresents_.store(v);
         return r;
     }
-    return ctx_->queuePresent(pi);
+    const VkResult r = ctx_->queuePresent(pi);
+    if (r == VK_ERROR_SURFACE_LOST_KHR && !surfaceLost_.exchange(true)) {
+        spdlog::warn("vulkan: vkQueuePresentKHR: VK_ERROR_SURFACE_LOST_KHR");
+    }
+    return r;
 }
 
 std::uint64_t Swapchain::frameGenPresentsDone() const {

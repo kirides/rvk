@@ -85,6 +85,7 @@ public:
 
 private:
     bool build(std::uint32_t width, std::uint32_t height);
+    bool createSurface();  // surface_ for window_
     void destroySwapchain();
     void destroyImageObjects();  // views and semaphores over the current images
     bool collectImages(std::vector<VkImage> images);
@@ -92,6 +93,7 @@ private:
     Context* ctx_ = nullptr;
     HWND__* window_ = nullptr;
     VkSurfaceKHR surface_ = VK_NULL_HANDLE;
+    std::atomic<bool> surfaceLost_{false};  // acquire / present returned VK_ERROR_SURFACE_LOST_KHR: recreate() rebuilds the surface
     VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
     VkFormat format_ = VK_FORMAT_B8G8R8A8_UNORM;
     VkExtent2D extent_{};
