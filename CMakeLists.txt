@@ -36,6 +36,7 @@ find_package(VulkanHeaders CONFIG REQUIRED)
 find_package(VulkanMemoryAllocator CONFIG REQUIRED)
 find_package(SPIRV-Tools CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
+find_package(meshoptimizer CONFIG REQUIRED)
 find_path(STB_INCLUDE_DIR stb_image_write.h REQUIRED)
 
 function(rvk_warnings target)
@@ -187,6 +188,8 @@ add_library(rvk_core STATIC
     src/native/static_ops.h
     src/enh/rt_registry.cpp
     src/enh/rt_registry.h
+    src/enh/rt_lod.cpp
+    src/enh/rt_lod.h
     src/enh/rt_scene.cpp
     src/enh/rt_scene.h
     src/enh/rt_shadows.cpp
@@ -353,6 +356,7 @@ target_link_libraries(rvk_core PUBLIC
     Vulkan::Headers
     GPUOpen::VulkanMemoryAllocator
     imgui::imgui
+    meshoptimizer::meshoptimizer
 )
 rvk_warnings(rvk_core)
 # ccache cannot cache files built with a PCH: CI configures with RVK_PCH=OFF and force-includes the same headers instead

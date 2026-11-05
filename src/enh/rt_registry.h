@@ -114,6 +114,7 @@ public:
         // age()'s world sphere, computed once the BLAS bounds are known (the rows never change: they are part of the key)
         Sphere sphere{};
         bool sphereValid = false;
+        std::uint8_t lod = 0;  // the RT level of detail rung (enh/rt_lod.h: 0 full, 1 proxy, 2 box): the hysteresis state
     };
     struct Counters {
         std::uint64_t added = 0, replaced = 0, aged = 0, tooFar = 0, capped = 0, dropped = 0;
@@ -137,6 +138,7 @@ public:
     void clear();
     std::size_t size() const { return list_.size(); }
     const std::vector<Instance>& instances() const { return list_; }
+    std::vector<Instance>& instancesMutable() { return list_; }  // (per-frame state only: never key / blas / owner)
     const Instance* find(std::uint64_t key) const;
     Instance* find(std::uint64_t key);  // (pointer valid until the next change)
     // an instance only `view` saw while its owner has a live instance seen in `preferred` (the cascades draw some objects at

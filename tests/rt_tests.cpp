@@ -6,8 +6,10 @@
 #include <cmath>
 #include <cstdint>
 #include <unordered_map>
+#include <vector>
 
 #include "d3d9/scene.h"
+#include "enh/rt_lod.h"
 #include "enh/rt_registry.h"
 #include "shader/abi.h"
 #include "test.h"
@@ -223,4 +225,55 @@ TEST(rt_frame_block_fields) {
     fillFrameBlock(fb, cur, last, x);
     CHECK(fb.rtScene[0] == 0x34567890u && fb.rtScene[1] == 0x12u && fb.rtScene[2] == 0x1000u && fb.rtScene[3] == 0xABCu);
     CHECK(fb.rtInfo[0] == 42 && fb.rtInfo[1] == 42 && fb.rtInfo[2] == shader::abi::kFrameRtValid);
+}
+
+TEST(rt_lod_bands_and_hysteresis) {
+    namespace lod = rt::lod;
+    CHECK(lod::bandOf(0.0f) == 0 && lod::bandOf(19.9f) == 0 && lod::bandOf(20.0f) == 1 && lod::bandOf(49.0f) == 1);
+    CHECK(lod::bandOf(75.0f) == 2 && lod::bandOf(150.0f) == 3 && lod::bandOf(200.0f) == 4 && lod::bandOf(5000.0f) == 4);
+    CHECK(lod::targetRatio(0) == 1.0f && lod::targetRatio(1) == 0.5f && lod::targetRatio(2) == 0.25f && lod::targetRatio(3) == 0.125f);
+    CHECK(lod::targetRatio(-1) == 1.0f && lod::targetRatio(9) == 1.0f);
+    // the ladder: 0 full, 1 proxy beyond 60 m (6000), 2 box beyond 150 m; back below 85 % of each range
+    CHECK(lod::rungFor(0, 100.0f, 6000.0f, 15000.0f) == 0 && lod::rungFor(0, 6001.0f, 6000.0f, 15000.0f) == 1);
+    CHECK(lod::rungFor(1, 5500.0f, 6000.0f, 15000.0f) == 1 && lod::rungFor(0, 5500.0f, 6000.0f, 15000.0f) == 0);
+    CHECK(lod::rungFor(1, 5000.0f, 6000.0f, 15000.0f) == 0);
+    CHECK(lod::rungFor(1, 15001.0f, 6000.0f, 15000.0f) == 2 && lod::rungFor(2, 14000.0f, 6000.0f, 15000.0f) == 2);
+    CHECK(lod::rungFor(2, 12000.0f, 6000.0f, 15000.0f) == 1 && lod::rungFor(2, 4000.0f, 6000.0f, 15000.0f) == 0);
+    // a disabled proxy rung: the box follows the engine's draw directly; both disabled: always full
+    CHECK(lod::rungFor(0, 16000.0f, 0.0f, 15000.0f) == 2 && lod::rungFor(0, 9000.0f, 0.0f, 15000.0f) == 0 && lod::rungFor(2, 9000.0f, 0.0f, 15000.0f) == 0);
+    CHECK(lod::rungFor(2, 1e6f, 0.0f, 0.0f) == 0 && lod::rungFor(1, 1e6f, 0.0f, 0.0f) == 0);
+    CHECK(lod::tooSmall(50.0f, 20000.0f) && !lod::tooSmall(300.0f, 20000.0f) && !lod::tooSmall(1.0f, 0.5f));
+}
+
+TEST(rt_lod_simplify_grid) {
+    namespace lod = rt::lod;
+    // a 48 x 48 quad grid (wavy, so the simplifier cannot drop it all): 4608 triangles, one vertex array with a duplicated
+    // seam column (a uv seam) that must not block the collapse
+    const int n = 48;
+    std::vector<float> pos;
+    for (int y = 0; y <= n; ++y) {
+        for (int x = 0; x <= n; ++x) {
+            pos.insert(pos.end(), {static_cast<float>(x), static_cast<float>(y), 0.4f * std::sin(0.3f * x) * std::cos(0.2f * y)});
+        }
+    }
+    std::vector<std::uint32_t> idx;
+    for (int y = 0; y < n; ++y) {
+        for (int x = 0; x < n; ++x) {
+            const std::uint32_t a = y * (n + 1) + x, b = a + 1, c = a + n + 1, d = c + 1;
+            idx.insert(idx.end(), {a, b, c, b, d, c});
+        }
+    }
+    const std::size_t vertexCount = pos.size() / 3;
+    const lod::Result half = lod::simplify(pos.data(), vertexCount, 12, idx, 0.5f, 0.05f);
+    CHECK(!half.indices.empty() && half.indices.size() % 3 == 0);
+    CHECK(half.indices.size() <= idx.size() * 6 / 10);
+    for (std::uint32_t v : half.indices) CHECK(v < vertexCount);  // a subset of the original vertices
+    const lod::Result eighth = lod::simplify(pos.data(), vertexCount, 12, idx, 0.125f, 0.1f);
+    CHECK(!eighth.indices.empty() && eighth.indices.size() < half.indices.size());
+    // ratio 1 / a tiny mesh / a bad index: nothing (the caller keeps the original)
+    CHECK(lod::simplify(pos.data(), vertexCount, 12, idx, 1.0f, 0.05f).indices.empty());
+    CHECK(lod::simplify(pos.data(), vertexCount, 12, std::vector<std::uint32_t>{0, 1, 2}, 0.5f, 0.05f).indices.empty());
+    std::vector<std::uint32_t> bad = idx;
+    bad[7] = static_cast<std::uint32_t>(vertexCount + 5);
+    CHECK(lod::simplify(pos.data(), vertexCount, 12, bad, 0.5f, 0.05f).indices.empty());
 }

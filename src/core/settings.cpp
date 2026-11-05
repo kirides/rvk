@@ -1414,6 +1414,50 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .requirements = caps::bit(caps::Cap::RayQuery),
         .unmetValue = 0,
     });
+    r.rtLodRange = &reg.add({
+        .key = "rt.lod_range",
+        .label = "Ray tracing detail distance",
+        .category = "Lighting",
+        .description = "Beyond this distance from the player the world is traced with simpler copies of the objects (fewer "
+                       "triangles): ray-traced shadows, reflections and lighting cost less in big scenes. Near objects are "
+                       "unchanged. 0 = always full detail.",
+        .type = Type::Float,
+        .defaultValue = 0,
+        .min = 0,
+        .max = 500,
+        .format = "%.0f m",
+        .flags = Flag::Advanced,
+        .requirements = caps::bit(caps::Cap::RayQuery),
+        .unmetValue = 0,
+    });
+    r.rtLodFarRange = &reg.add({
+        .key = "rt.lod_far_range",
+        .label = "Ray tracing box distance",
+        .category = "Lighting",
+        .description = "Beyond this distance from the player small and medium objects are traced as simple boxes around them "
+                       "(trees as thin ones), and tiny ones are left out. 0 = never.",
+        .type = Type::Float,
+        .defaultValue = 0,
+        .min = 0,
+        .max = 1000,
+        .format = "%.0f m",
+        .flags = Flag::Advanced,
+        .requirements = caps::bit(caps::Cap::RayQuery),
+        .unmetValue = 0,
+    });
+    r.rtLodBias = &reg.add({
+        .key = "rt.lod_bias",
+        .label = "Ray tracing detail reduction",
+        .category = "Lighting",
+        .description = "How much simpler the far copies are: 1 keeps half of the triangles, 2 a quarter, 3 an eighth. 0 = off.",
+        .type = Type::Int,
+        .defaultValue = 0,
+        .min = 0,
+        .max = 3,
+        .flags = Flag::Advanced,
+        .requirements = caps::bit(caps::Cap::RayQuery),
+        .unmetValue = 0,
+    });
     r.shadowsRtWind = &reg.add({
         .key = "shadows.rt_wind",
         .label = "Ray-traced shadows follow the wind",

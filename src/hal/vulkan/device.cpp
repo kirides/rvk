@@ -418,6 +418,17 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         if (!rs.rtSceneViews->isDefault()) applyViews(*rs.rtSceneViews);
         reg.onChange(*rs.rtSceneViews, applyViews, this);
     }
+    // the RT scene's far level of detail (docs/research/rt-lod.md)
+    if (rs.rtLodRange != nullptr && rs.rtLodBias != nullptr && rs.rtLodFarRange != nullptr) {
+        const auto applyLod = [this](const settings::Setting&) {
+            const auto& rs2 = settings::renderer();
+            rtScene_->setLod(static_cast<float>(rs2.rtLodRange->asFloat()), static_cast<int>(rs2.rtLodBias->asInt()), static_cast<float>(rs2.rtLodFarRange->asFloat()));
+        };
+        applyLod(*rs.rtLodRange);
+        reg.onChange(*rs.rtLodRange, applyLod, this);
+        reg.onChange(*rs.rtLodBias, applyLod, this);
+        reg.onChange(*rs.rtLodFarRange, applyLod, this);
+    }
     // characters skinned by compute for the RT scene (docs/research/rt-shadows.md 10)
     if (rs.rtSkin != nullptr && rs.rtSkinVerify != nullptr) {
         const auto applySkin = [this](const settings::Setting&) {

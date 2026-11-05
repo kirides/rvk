@@ -323,6 +323,9 @@ struct RendererSettings {
     Setting* rtReflections = nullptr; // rt.reflections: "off", "low", "medium", "high" (the water's ray-traced reflections, needs RayQuery)
     Setting* rtDebug = nullptr;      // rt.debug: "off", "instances", "depth", "normals" (enh/rt_debug.h, needs RayQuery)
     Setting* rtReflectionTweaks = nullptr;  // rt.reflection_tweaks: hidden diagnostics bitmask of the water's RT reflections (enh/water.h)
+    Setting* rtLodRange = nullptr;   // rt.lod_range (m, 0 = off) + rt.lod_bias (0..3): the RT scene's far level of detail (docs/research/rt-lod.md)
+    Setting* rtLodBias = nullptr;
+    Setting* rtLodFarRange = nullptr;  // rt.lod_far_range (m, 0 = off): the box rung
     Setting* rtSceneViews = nullptr; // rt.scene_views: "all", "main", "shadow": which views feed the RT scene (hidden, diagnostics)
     // enhanced water (enh/water.h, docs/research/water.md)
     Setting* waterEnabled = nullptr;      // water.enabled
