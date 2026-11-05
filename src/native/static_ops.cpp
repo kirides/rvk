@@ -678,6 +678,14 @@ void StaticOps::writeLighting(const sc::Pass& pass) {
     if (hasStatic) rd(illum, 0x94, staticSh, sizeof(staticSh));
     sc::ambientSh(sh, indoor, get<float>(illum, 8), hasStatic ? &staticSh[0][0] : nullptr, &L[1]);
     rd(list, 4, L[8], 48);
+    // (a list with dynamic lights keeps its reads: only those can carry the engine's cubemap shadow channel, which the table does not have yet)
+    if (pass.tableLit && enh::fullLitSkipsReads() && get<std::uint8_t>(list, 0x34) == 0 &&
+        (enh::LightTable::registryComplete() || get<std::uint8_t>(illum, 0x0d) == 0)) {
+        // the table is complete (the registry returned the static tree's lights, rebuilt this frame): no light of this object is read; the three
+        // registers are zero and the material variant fills every slot per pixel from the cluster (gpu-scene.md 9.9)
+        std::memset(L[11], 0, 3 * 4 * 16);
+        return;
+    }
     if (pass.tableLit) {
         // the point lights are the table's (per pixel); the registers stay zero so the material variant refills every slot. The list's own dynamic
         // lights go into the table too (once per list per frame; the table builds from them next frame), for scenes whose registry is empty
@@ -2380,10 +2388,10 @@ void StaticOps::report() {
             return std::format("SpeedTree ops {} (branches {}, fronds {}, leaf cards {}, leaf meshes {}; 0 draws {}, wrong TransformationType {}), "
                                "instancing hardware {} / software {} ops, {} instances in {} batches ({} not drawn: strip length 0), {} leaf LOD "
                                "passes, queue copies sorted {}, shadow fronds skipped (leaf-card vertices > frond vertices) {}; tree billboard ops {} ({} tex-coord uploads); vegetation ops {} (0 draws {}, mesh "
-                               "not cached {}), {} nodes, {} instances, {} draws, buffer wraps {}, c12 from the pool (the clock moved since Process) {}",
+                               "not cached {}), {} nodes, {} instances, {} draws, buffer wraps {}, c12 from the pool (the clock moved since Process) {}; solid batch cuts: limit {} / strip {} / list {} / sun {} / static {} / own lights {} / null list {}",
                                a.ops, a.types[0], a.types[1], a.types[2], a.types[3], a.zeroOps, a.wrongTransformation, a.hardware, a.software,
                                a.instances, a.batches, a.undrawnBatches, a.leafLods, a.sortedCopies, a.shadowFrondsSkipped, a.billboardOps, a.billboardTexCoords, a.grassOps,
-                               a.grassZeroOps, a.grassNotCached, a.grassNodes, a.grassInstances, a.grassDraws, a.grassWraps, a.grassClockMoved);
+                               a.grassZeroOps, a.grassNotCached, a.grassNodes, a.grassInstances, a.grassDraws, a.grassWraps, a.grassClockMoved, a.splits[0], a.splits[1], a.splits[2], a.splits[3], a.splits[4], a.splits[5], a.splits[6]);
         };
         TreeStats& t = treeTotal_;
         const TreeStats& w = treeWindow_;
@@ -2395,6 +2403,7 @@ void StaticOps::report() {
         t.batches += w.batches;
         t.sortedCopies += w.sortedCopies;
         t.undrawnBatches += w.undrawnBatches;
+        for (std::size_t i = 0; i < t.splits.size(); ++i) t.splits[i] += w.splits[i];
         for (std::size_t i = 0; i < t.types.size(); ++i) t.types[i] += w.types[i];
         t.leafLods += w.leafLods;
         t.shadowFrondsSkipped += w.shadowFrondsSkipped;

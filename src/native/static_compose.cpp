@@ -753,18 +753,25 @@ MorphPick pickMorphTargets(std::span<const float> weights) {
 
 namespace rvk::native::sc {
 
-void planTreeBatches(std::span<const TreeInstance> instances, std::uint8_t limit, bool byLight, bool byStrip, std::vector<TreeBatch>& out) {
+void planTreeBatches(std::span<const TreeInstance> instances, std::uint8_t limit, bool byLight, bool byStrip, std::vector<TreeBatch>& out, bool tableMerge) {
     out.clear();
     // the engine's loop: count (8 bit), the previous instance's strip (0xffff before the first), light list and flags
     std::uint8_t count = 0;
     std::uint16_t prevStrip = 0xffff;
     const void* prevList = nullptr;
-    bool prevAlone = false;
+    bool prevAlone = false, prevSun = false, prevStaticSh = false, prevOwn = false;
+    std::uint64_t prevSig = 0;
     for (std::uint32_t i = 0; i < instances.size(); ++i) {
         const TreeInstance& t = instances[i];
         bool split = count == limit;
         if (byStrip && t.strip != prevStrip) split = true;
-        if (byLight && (t.list != prevList || t.alone || prevAlone)) split = true;
+        if (byLight) {
+            if (tableMerge) {
+                if (i != 0 && (t.sun != prevSun || t.staticSh || prevStaticSh || t.ownLights || prevOwn || t.lightSig != prevSig)) split = true;
+            } else if (t.list != prevList || t.alone || prevAlone) {
+                split = true;
+            }
+        }
         if (split) {
             // the batch so far is drawn (when it holds an instance); the next one starts with this instance's strip / start
             count = 0;
@@ -778,6 +785,10 @@ void planTreeBatches(std::span<const TreeInstance> instances, std::uint8_t limit
         ++out.back().count;
         prevList = t.list;
         prevAlone = t.alone;
+        prevSun = t.sun;
+        prevStaticSh = t.staticSh;
+        prevOwn = t.ownLights;
+        prevSig = t.lightSig;
         ++count;
     }
 }

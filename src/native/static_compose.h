@@ -231,6 +231,10 @@ struct TreeInstance {
     std::uint16_t start = 0;       // branches / fronds: the LOD's start index (+0xe8 / +0xf8 [lod]); leaves: 0
     const void* list = nullptr;    // the illumination's light list (illum +0)
     bool alone = false;            // the illumination has static SH (+0x90) or static lights (+0xd)
+    bool sun = false;              // the pass's sun bit (the list's sun flag and not the illumination's no-sun flag): table lighting merges by it
+    bool staticSh = false;         // the illumination has static SH (+0x90) alone (table lighting: static lights come from the table)
+    std::uint64_t lightSig = 0;    // table lighting: hash of the illumination's static light entries (0 = none): instances with equal ones share a batch
+    bool ownLights = false;        // table lighting: the object's own lights still reach the registers (dynamic lights of its list, static ones while the table is empty, no list)
 };
 struct TreeBatch {
     std::uint32_t first = 0, count = 0;  // instances [first, first + count) of the planned span; the last one's illumination draws it
@@ -240,7 +244,9 @@ struct TreeBatch {
 // ends before an instance when the batch is full (an 8-bit count equal to the render buffer's limit +0x128 + type), when its strip
 // length differs (byStrip: branches / fronds), or (byLight: the solid passes) when its light list differs or it or the batch's last
 // instance has the per-object light flags
-void planTreeBatches(std::span<const TreeInstance> instances, std::uint8_t limit, bool byLight, bool byStrip, std::vector<TreeBatch>& out);
+// tableMerge (table lighting with a complete table, gpu-scene.md 9.9): the light list and the static lights no longer cut a batch - only a different sun
+// flag (another pass structure) and static ambient (staticSh) do; the batch's ambient / sun values are its last instance's
+void planTreeBatches(std::span<const TreeInstance> instances, std::uint8_t limit, bool byLight, bool byStrip, std::vector<TreeBatch>& out, bool tableMerge = false);
 // the draw description a batch writes into the visual's record (the rest stays as the record has it)
 struct TreeRange {
     std::uint32_t numVertices = 0, startIndex = 0, primCount = 0;

@@ -23,6 +23,8 @@ constexpr std::uint64_t kBufferBytes = kClustersOffset + std::uint64_t{kClusters
 
 std::atomic<bool> g_fullLit{false};
 std::atomic<bool> g_registryThin{true};
+std::atomic<bool> g_registryComplete{false};
+std::atomic<std::uint64_t> g_completeStamp{0};
 std::mutex g_drawnMutex;
 struct DrawnLight {
     engine::lights::WorldLight l;
@@ -35,6 +37,17 @@ constexpr std::uint64_t kDrawnKeep = 900;  // builds
 
 bool fullLitActive() { return g_fullLit.load(std::memory_order_relaxed); }
 void setFullLitActive(bool on) { g_fullLit.store(on, std::memory_order_relaxed); }
+namespace {
+std::atomic<bool> g_skipReads{true}, g_treeMerge{true};
+}
+bool fullLitSkipsReads() { return g_skipReads.load(std::memory_order_relaxed); }
+bool fullLitTreeMerge() { return g_treeMerge.load(std::memory_order_relaxed); }
+void setFullLitOptions(bool skipReads, bool treeMerge) {
+    g_skipReads.store(skipReads, std::memory_order_relaxed);
+    g_treeMerge.store(treeMerge, std::memory_order_relaxed);
+}
+
+bool LightTable::registryComplete() { return g_registryComplete.load(std::memory_order_relaxed); }
 
 bool LightTable::wantStaticNotes() { return g_registryThin.load(std::memory_order_relaxed); }
 
@@ -110,6 +123,7 @@ LightTable::~LightTable() {
 
 void LightTable::configure(bool enabled, int style, int debug) {
     if (failed_) enabled = false;
+    if (!enabled) g_registryComplete.store(false, std::memory_order_relaxed);
     style_ = style;
     debug_ = debug;
     if (!failed_) dev_.setFrameParam(shader::abi::kFrameParamLights + 1, {enabled ? 1.0f : 0.0f, static_cast<float>(style), static_cast<float>(debug), 0.0f});
@@ -141,20 +155,25 @@ bool LightTable::pipelineReady() {
 
 void LightTable::record(d3d9::PassContext& ctx) {
     if (ctx.mainView != 1 || !enabled_ || !pipelineReady()) {
+        g_registryComplete.store(false, std::memory_order_relaxed);
         ++skipped_;
         return;
     }
     const auto& cam = dev_.camera().valid ? dev_.camera() : dev_.lastCamera();
     if (!cam.valid) {
+        g_registryComplete.store(false, std::memory_order_relaxed);
         ++skipped_;
         return;
     }
     // the world's lights within the grid's reach, nearest first when there are more than the table holds
     if (!engine::lights::collect(cam.position.data(), kLightFar, scratch_, stats_)) {
+        g_registryComplete.store(false, std::memory_order_relaxed);
         ++skipped_;
         return;
     }
     g_registryThin.store(stats_.staticTotal == 0, std::memory_order_relaxed);
+    // the registry (static tree within reach + this frame's dynamic lights) is what the engine gives objects too: a non-empty registry is trusted whole
+    g_registryComplete.store(!scratch_.empty(), std::memory_order_relaxed);
     // the lights of the lists drawn since the last build that the registry did not return (same light = within 8 units)
     lastDrawnAdded_ = 0;
     {

@@ -381,6 +381,8 @@ struct RendererSettings {
     Setting* gbufferDebug = nullptr;      // gbuffer.debug: "off", "normals", "motion", "ao"
     // Full-owned lighting (enh/light_table, docs/research/gpu-scene.md 9.7)
     Setting* lightingClustered = nullptr; // lighting.clustered (restart, debug): the light table + cluster grid; the material variants take their point lights from it
+    Setting* lightingTableComplete = nullptr; // lighting.table_complete (debug): with the registry complete, table-lit draws do not read their own light lists
+    Setting* lightingTreeMerge = nullptr;     // lighting.tree_merge (debug): table-lit tree batches merge across light lists
     Setting* lightingFullLit = nullptr;   // lighting.full_lit (debug): lit draws take all point lights from the table (one 3-light permutation; gpu-scene.md 9.8)
     Setting* lightingEnabled = nullptr;   // lighting.enabled (debug): run-time switch of the table (A/B)
     Setting* lightingStyle = nullptr;     // lighting.style: "original" (the engine's distance law) | "physical"

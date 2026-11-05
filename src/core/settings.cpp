@@ -1761,12 +1761,12 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .label = "Clustered lights (Full)",
         .category = "Lighting",
         .tab = kTabDebug,
-        .description = "Full mode only (takes effect at the next start; default off until validated): the world's lights go into a GPU light table with a "
+        .description = "Full mode only (takes effect at the next start; default on, Full mode only: Wrapper is unchanged): the world's lights go into a GPU light table with a "
                        "cluster grid and every lit surface takes its point lights per pixel from it, evaluated by the game's own shader, instead of "
                        "the few lights the game attaches to each object. Lights beyond the game's per-object reach light the surfaces they reach. "
                        "rvk.log `enh: lights:`.",
         .type = Type::Bool,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .flags = Flag::Restart | Flag::Debug,
     });
     r.lightingEnabled = &reg.add({
@@ -1784,12 +1784,36 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .label = "Table lighting (Full)",
         .category = "Lighting",
         .tab = kTabDebug,
-        .description = "Full mode with clustered lights (default off until validated): every lit mesh / tree draw is composed with ONE pass of the 3-light "
+        .description = "Full mode with clustered lights (default on): every lit mesh / tree draw is composed with ONE pass of the 3-light "
                        "shader permutation and takes all its point lights from the light table per pixel: the game's per-object light lists are no longer "
                        "read, the additive passes of objects with more than 3 lights are gone and tree / mesh batches merge more. The picture differs "
                        "from the game's (more lights where the game gave an object none or few). Run-time switch. rvk.log `native: table lighting`.",
         .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::Debug,
+    });
+    r.lightingTableComplete = &reg.add({
+        .key = "lighting.table_complete",
+        .label = "Table lighting: skip per-object light reads",
+        .category = "Lighting",
+        .tab = kTabDebug,
+        .description = "With table lighting on and the light table complete (the engine's static light tree returned lights, built every frame: no latency), "
+                       "lit draws do not read their light list's / illumination's point lights at all (default off: a registry that holds lights elsewhere "
+                       "may still miss the local ones, which dimmed the monastery's candles; off = the engine's own first three lights stay in the registers "
+                       "as the fallback). Run-time switch.",
+        .type = Type::Bool,
         .defaultValue = 0,
+        .flags = Flag::Debug,
+    });
+    r.lightingTreeMerge = &reg.add({
+        .key = "lighting.tree_merge",
+        .label = "Table lighting: merge tree batches",
+        .category = "Lighting",
+        .tab = kTabDebug,
+        .description = "With table lighting on, consecutive SpeedTree instances of one pass merge into one draw whenever they share the sun flag and carry no "
+                       "static ambient (the light list no longer cuts a batch); the batch's ambient is its last instance's. Run-time switch (A/B).",
+        .type = Type::Bool,
+        .defaultValue = 1,
         .flags = Flag::Debug,
     });
     r.lightingStyle = &reg.add({

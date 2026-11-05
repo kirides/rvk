@@ -67,6 +67,10 @@ float lightEngineFalloff(float d2, float rcpSqrRange);
 // lights from the table. Set by HalDevice::applyLighting (needs the table on and no compare run); read by native::StaticOps.
 bool fullLitActive();
 void setFullLitActive(bool on);
+// the two table lighting options (lighting.table_complete / lighting.tree_merge), meaningful while fullLitActive()
+bool fullLitSkipsReads();   // lighting.table_complete: lit draws skip their own point-light reads when the registry is trusted / the object has none
+bool fullLitTreeMerge();
+void setFullLitOptions(bool skipReads, bool treeMerge);
 
 class LightTable {
 public:
@@ -74,6 +78,9 @@ public:
     // build adds those the registry walk did not return (within 8 units = the same light). Thread-safe.
     // true while the registry walk returns no static lights (nothing cached in): the drawn objects' static lights are then taken as a source too
     static bool wantStaticNotes();
+    // true while the registry walk returned lights (static tree within reach + this frame's dynamic lights, no latency) and the table is built every frame:
+    // the registry is trusted whole. With an EMPTY registry the objects' own lights are still read (a teleport: nothing cached in), objects without any skip
+    static bool registryComplete();
     static void noteDrawnLight(const float pr[4], const float col[4]);
 
     explicit LightTable(d3d9::Device& device);
