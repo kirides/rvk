@@ -22,6 +22,7 @@ bool AddressBuffer::create(Context& ctx, VkDeviceSize bytes, VkBufferUsageFlags 
     bci.size = bytes;
     bci.usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     VmaAllocationCreateInfo aci{};
+    aci.priority = 0.5f;  // VK_EXT_memory_priority: the default (a zero-initialised priority is the lowest)
     aci.usage = hostVisible ? VMA_MEMORY_USAGE_AUTO : VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
     if (hostVisible) aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
     VmaAllocationInfo info{};

@@ -54,6 +54,7 @@ bool MeshArena::newBlock() {
     bci.size = kBlockSize;
     bci.usage = usage_;
     VmaAllocationCreateInfo aci{};
+    aci.priority = 0.5f;  // VK_EXT_memory_priority: the default (a zero-initialised priority is the lowest)
     aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
     if (vmaCreateBuffer(ctx_->allocator(), &bci, &aci, &b.buffer, &b.allocation, nullptr) != VK_SUCCESS) return false;
     VmaVirtualBlockCreateInfo vci{};
@@ -99,6 +100,7 @@ MeshArena::Alloc MeshArena::allocate(VkDeviceSize size, std::uint32_t multiple) 
     bci.size = size;
     bci.usage = usage_;
     VmaAllocationCreateInfo aci{};
+    aci.priority = 0.5f;  // VK_EXT_memory_priority: the default (a zero-initialised priority is the lowest)
     aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
     if (vmaCreateBuffer(ctx_->allocator(), &bci, &aci, &a.buffer, &a.dedicated, nullptr) != VK_SUCCESS) return {};
     a.addr = gpuAddr(addressOf(a.buffer));

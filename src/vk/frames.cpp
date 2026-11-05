@@ -205,6 +205,7 @@ bool Frames::newChunk(VkDeviceSize minSize) {
         bci.usage |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
     }
     VmaAllocationCreateInfo aci{};
+    aci.priority = 0.5f;  // VK_EXT_memory_priority: the default (a zero-initialised priority is the lowest)
     aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
     aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
     VmaAllocationInfo info{};

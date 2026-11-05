@@ -81,9 +81,12 @@ bool Image::create(Context& ctx, const ImageDesc& desc) {
     ici.usage = desc.usage;
     ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VmaAllocationCreateInfo aci{};
+    aci.priority = 0.5f;  // VK_EXT_memory_priority: the default (a zero-initialised priority is the lowest)
     aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
     if ((desc.usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) != 0) {
         aci.flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+        // render targets stay resident when VRAM is oversubscribed (the driver evicts textures first); DXVK does the same
+        aci.priority = 1.0f;
     }
     if (const VkResult r = vmaCreateImage(ctx.allocator(), &ici, &aci, &image_, &alloc_, nullptr); r != VK_SUCCESS) {
         spdlog::error("vulkan: vmaCreateImage {}x{} format {}: {}", desc.extent.width, desc.extent.height,

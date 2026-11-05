@@ -404,6 +404,7 @@ int main(int argc, char** argv) {
         bci.size = kSize * kSize * 16;
         bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         VmaAllocationCreateInfo aci{};
+        aci.priority = 0.5f;  // VK_EXT_memory_priority: the default (a zero-initialised priority is the lowest)
         aci.usage = VMA_MEMORY_USAGE_AUTO;
         aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
         vmaCreateBuffer(ctx.allocator(), &bci, &aci, &readback[i], &readbackAlloc[i], &readbackInfo[i]);

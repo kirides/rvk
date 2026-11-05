@@ -93,6 +93,7 @@ bool Bindless::createDefaults() {
         ici.tiling = VK_IMAGE_TILING_OPTIMAL;
         ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         VmaAllocationCreateInfo aci{};
+        aci.priority = 0.5f;  // VK_EXT_memory_priority: the default (a zero-initialised priority is the lowest)
         aci.usage = VMA_MEMORY_USAGE_AUTO;
         if (vmaCreateImage(ctx_->allocator(), &ici, &aci, &defaultImages_[k], &defaultAllocs_[k], nullptr) != VK_SUCCESS) {
             return false;
@@ -125,6 +126,7 @@ bool Bindless::createDefaults() {
     bci.size = 4;
     bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     VmaAllocationCreateInfo aci{};
+    aci.priority = 0.5f;  // VK_EXT_memory_priority: the default (a zero-initialised priority is the lowest)
     aci.usage = VMA_MEMORY_USAGE_AUTO;
     aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
     VmaAllocationInfo info{};

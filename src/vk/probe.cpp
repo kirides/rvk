@@ -135,6 +135,17 @@ DeviceReport inspectImpl(VkPhysicalDevice pd) {
     r.deviceFault = hasExtension(exts, VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
     r.memoryBudget = hasExtension(exts, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
     r.robustness2 = hasExtension(exts, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
+    if (hasExtension(exts, VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME)) {
+        VkPhysicalDevicePageableDeviceLocalMemoryFeaturesEXT pageable{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PAGEABLE_DEVICE_LOCAL_MEMORY_FEATURES_EXT};
+        VkPhysicalDeviceMemoryPriorityFeaturesEXT prio{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PRIORITY_FEATURES_EXT};
+        const bool hasPageable = hasExtension(exts, VK_EXT_PAGEABLE_DEVICE_LOCAL_MEMORY_EXTENSION_NAME);
+        if (hasPageable) prio.pNext = &pageable;
+        VkPhysicalDeviceFeatures2 f{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &prio};
+        vkGetPhysicalDeviceFeatures2(pd, &f);
+        r.memoryPriority = prio.memoryPriority == VK_TRUE;
+        r.pageableDeviceLocal = r.memoryPriority && hasPageable && pageable.pageableDeviceLocalMemory == VK_TRUE;
+    }
 
     if (r.api13) {
         VkPhysicalDeviceVulkan12Properties p12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES};

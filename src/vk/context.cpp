@@ -123,6 +123,8 @@ bool Context::create(const ContextOptions& options) {
                  deviceName_, versionString(props_.apiVersion), features_.extendedDynamicState3, features_.vertexInputDynamicState,
                  features_.graphicsPipelineLibrary, features_.maxAnisotropy, features_.shaderDrawParameters,
                  features_.drawIndirectCount, features_.indirectDraws);
+    spdlog::info("vulkan: driver id {} ({} {}), memoryPriority={}, pageableDeviceLocal={}", report_.driverId, report_.driverName,
+                 report_.driverInfo, features_.memoryPriority, features_.pageableDeviceLocal);
     return true;
 }
 
@@ -479,6 +481,25 @@ bool Context::createDevice(bool withRayTracing) {
     if (features_.memoryBudget) {
         enabled.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
     }
+    // residency priorities (DXVK dxvk_memory.cpp): render targets 1.0, the rest 0.5, so an oversubscribed VRAM evicts textures
+    // before attachments; pageable device-local memory lets the driver move low-priority allocations out instead of failing
+    VkPhysicalDeviceMemoryPriorityFeaturesEXT memPrio{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PRIORITY_FEATURES_EXT};
+    VkPhysicalDevicePageableDeviceLocalMemoryFeaturesEXT pageable{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PAGEABLE_DEVICE_LOCAL_MEMORY_FEATURES_EXT};
+    if (report_.memoryPriority) {
+        memPrio.memoryPriority = VK_TRUE;
+        enabled.push_back(VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME);
+        features_.memoryPriority = true;
+        *tail = &memPrio;
+        tail = &memPrio.pNext;
+        if (report_.pageableDeviceLocal) {
+            pageable.pageableDeviceLocalMemory = VK_TRUE;
+            enabled.push_back(VK_EXT_PAGEABLE_DEVICE_LOCAL_MEMORY_EXTENSION_NAME);
+            features_.pageableDeviceLocal = true;
+            *tail = &pageable;
+            tail = &pageable.pNext;
+        }
+    }
     VkPhysicalDeviceFaultFeaturesEXT fault{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
     if (features_.deviceFault) {
         fault.deviceFault = VK_TRUE;
@@ -609,6 +630,9 @@ bool Context::createAllocator() {
     aci.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
     if (features_.memoryBudget) {
         aci.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
+    }
+    if (features_.memoryPriority) {
+        aci.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_PRIORITY_BIT;  // every allocation site sets VmaAllocationCreateInfo::priority
     }
     aci.physicalDevice = physical_;
     aci.device = device_;

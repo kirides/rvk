@@ -39,6 +39,8 @@ struct DeviceReport {
     bool deviceFault = false;
     bool memoryBudget = false;
     bool robustness2 = false;
+    bool memoryPriority = false;           // VK_EXT_memory_priority + memoryPriority: residency priority per allocation
+    bool pageableDeviceLocal = false;      // VK_EXT_pageable_device_local_memory + pageableDeviceLocalMemory
     bool shaderDrawParameters = false;  // Vulkan 1.1 feature (gl_DrawID)
     bool drawIndirectCount = false;     // Vulkan 1.2 feature
 

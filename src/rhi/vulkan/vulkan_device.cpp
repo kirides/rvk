@@ -466,6 +466,7 @@ public:
             bci.size = 16;
             bci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
             VmaAllocationCreateInfo aci{};
+            aci.priority = 0.5f;  // VK_EXT_memory_priority: the default (a zero-initialised priority is the lowest)
             aci.usage = VMA_MEMORY_USAGE_AUTO;
             aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
             VmaAllocationInfo info{};
@@ -1078,6 +1079,7 @@ bool VkBufferImpl::create() {
     // vertex, index and instance data of acceleration structure builds (DeviceDesc::rayTracing)
     if (dev_.ctx().features().rayTracing.enabled) bci.usage |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
     VmaAllocationCreateInfo aci{};
+    aci.priority = 0.5f;  // VK_EXT_memory_priority: the default (a zero-initialised priority is the lowest)
     aci.usage = VMA_MEMORY_USAGE_AUTO;
     if (desc_.memory == Memory::Upload) {
         aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;

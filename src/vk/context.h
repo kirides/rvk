@@ -75,6 +75,8 @@ struct DeviceFeatures {
     bool graphicsPipelineLibrary = false;   // VK_EXT_graphics_pipeline_library: shaders compiled once, pipelines linked fast
     bool robustness2NullDescriptor = false;
     bool memoryBudget = false;
+    bool memoryPriority = false;       // VK_EXT_memory_priority (VMA priorities: attachments 1.0, the rest 0.5)
+    bool pageableDeviceLocal = false;  // VK_EXT_pageable_device_local_memory
     bool deviceFault = false;
     bool bufferMarker = false;    // VK_AMD_buffer_marker enabled (debug.crash_markers: vk/crash_markers.h)
     bool samplerAnisotropy = false;

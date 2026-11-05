@@ -311,6 +311,7 @@ int passTest(bool hazard, bool viaRhi) {
         bci.size = kSize * kSize * 8;
         bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         VmaAllocationCreateInfo aci{};
+        aci.priority = 0.5f;  // VK_EXT_memory_priority: the default (a zero-initialised priority is the lowest)
         aci.usage = VMA_MEMORY_USAGE_AUTO;
         aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
         vmaCreateBuffer(ctx.allocator(), &bci, &aci, &readback, &readbackAlloc, &readbackInfo);
@@ -1187,6 +1188,7 @@ int fsrTest(const std::string& dllArg, bool validation) {
                 bci.size = kW * kH * 8;
                 bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
                 VmaAllocationCreateInfo aci{};
+                aci.priority = 0.5f;  // VK_EXT_memory_priority: the default (a zero-initialised priority is the lowest)
                 aci.usage = VMA_MEMORY_USAGE_AUTO;
                 aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
                 vmaCreateBuffer(ctx.allocator(), &bci, &aci, &readback, &readbackAlloc, &readbackInfo);
@@ -1342,6 +1344,7 @@ int fgTest(const std::string& dllArg, bool validation) {
                 bci.size = k == 0 ? planeBytes * 3 : planeBytes;
                 bci.usage = k == 0 ? VK_BUFFER_USAGE_TRANSFER_SRC_BIT : VK_BUFFER_USAGE_TRANSFER_DST_BIT;
                 VmaAllocationCreateInfo aci{};
+                aci.priority = 0.5f;  // VK_EXT_memory_priority: the default (a zero-initialised priority is the lowest)
                 aci.usage = VMA_MEMORY_USAGE_AUTO;
                 aci.flags = (k == 0 ? VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT : VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT) |
                             VMA_ALLOCATION_CREATE_MAPPED_BIT;
@@ -1569,6 +1572,7 @@ int main(int argc, char** argv) {
         bci.size = kSize * kSize * 4;
         bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         VmaAllocationCreateInfo aci{};
+        aci.priority = 0.5f;  // VK_EXT_memory_priority: the default (a zero-initialised priority is the lowest)
         aci.usage = VMA_MEMORY_USAGE_AUTO;
         aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
         vmaCreateBuffer(ctx.allocator(), &bci, &aci, &readback, &readbackAlloc, &readbackInfo);
