@@ -162,6 +162,10 @@ does not help there (it is now saved every 10 s anyway: the game is killed rathe
   the same SPIR-V is fine in monolithic pipelines; not caused by the Steam fossilize layer, the pipeline cache or the
   retain-LTO flag). `rvk_vktest --gpl-corpus <bin/rvk/cache/spirv>` compiles a directory as libraries and reports such
   crashes (SEH-guarded, test tool only). Enable it only on drivers that pass that check.
+  2026-11-05 (docs/research/dxvk.md 2): driver 26.10.1 passes all 2561 modules; the recipe is now DXVK's (no retained
+  link-time info, no pipeline cache, optimised = monolithic build; `RVK_GPL_RECIPE=lto` = the former): corpus libraries 3.6 s
+  instead of 135 s, cold world entry 166 pipelines linked in 17 ms vs 163 built in 1940 ms without libraries; still off by
+  default (`run.ps1 -PipelineLibraries`).
 
 ## 7. GPU
 

@@ -5,7 +5,7 @@ importer of d3d9, and only of `Direct3DCreate9`). It replaces the engine's own g
 the `eCAPI*` resource interfaces) with a Vulkan implementation; no D3D9 device is created in Vulkan mode.
 
 Read first: `docs/PLAN.md` (decisions, milestones), `docs/research/engine-gfx.md` (the engine's HAL, frame, shaders, formats, RVAs),
-`docs/research/spass.md` (loading chain, test tooling of risen-spass), `docs/research/gd3d11.md` (GD3D11's Vulkan backend, reuse).
+`docs/research/spass.md` (loading chain, test tooling of risen-spass), `docs/research/gd3d11.md` (GD3D11's Vulkan backend, reuse), `docs/research/dxvk.md` (DXVK techniques: applied, candidates).
 
 ## Hard rules
 
@@ -74,7 +74,7 @@ Performance (docs/research/performance.md): `-Perf` (GPU timestamps, CPU split, 
 lines every 5 s), `-PerfFrame N` (GPU time of every render pass of frame N; `-Environment 'RVK_PERF_FRAMES=24'` = the 24 frames from N on, average them: one frame's pass times are noisy), `-Vsync on|off|engine`, `-MaxFps N`; the
 `rvk_shadows` scenario logs the fps for either renderer (also `-NoRenderer`). Other games on the GPU skew GPU times.
 **The world's 80 fps cap is an AMD Radeon Chill profile on `Risen.exe`** (min = max = 80, in the driver's present;
-docs/research/fps-limit.md): `-Exe RisenTest.exe` runs a renamed copy of the exe (uncapped: 175-240 fps); `-PresentStalls 4`
+docs/research/fps-limit.md): `-Exe RisenTest.exe` runs a renamed copy of the exe (uncapped: 175-240 fps); `-PipelineLibraries` (`[vulkan] pipeline_libraries`, off by default; DXVK's library recipe, `-Environment 'RVK_GPL_RECIPE=lto'` = the former; dxvk.md 2); `-PresentStalls 4`
 samples the presenting thread's stack during long presents (`diag:` lines: module / export of the wait, any mode);
 `-Environment 'NAME=VALUE'` sets environment variables from the proxy's DllMain (e.g. `VK_LOADER_LAYERS_DISABLE=~implicit~`).
 Scenario `rvk_highfps`: frame-time distribution + the hero's walk / jumps / drop / ledge per tick (compare rates).
