@@ -127,7 +127,7 @@ void CSMain(uint3 gid : SV_DispatchThreadID) {
     lit = max(lit, float3(0.0, 0.0, 0.0));
     float3 tint = lit / max(max(lit.r, max(lit.g, lit.b)), 1e-3);
     float3 F0 = lerp(float3(0.04, 0.04, 0.04), saturate(tint * 0.92), metal);
-    F0 = lerp(F0, float3(0.06, 0.06, 0.06), puddle);  // (water's 0.02, lifted so a puddle reads in the engine's flat light)
+    F0 = lerp(F0, float3(0.16, 0.16, 0.16), puddle);  // (water's 0.02, lifted so a puddle reads in the engine's flat light)
     float3 Fe = F0 + (max(float3(1.0 - rough, 1.0 - rough, 1.0 - rough), F0) - F0) * pow(1.0 - NoV, 5.0);
 
     // the reflection direction: the mirror one, or one drawn from the GGX lobe of the roughness (the filter pass accumulates the draws)
@@ -178,7 +178,7 @@ void CSMain(uint3 gid : SV_DispatchThreadID) {
         // reflect a day sky); nothing below the horizon
         refl = float3(0.0, 0.0, 0.0);
         if (f.images.w != 0u) {
-            float lit01 = saturate(mrtLum(lit) * 3.0);
+            float lit01 = max(saturate(mrtLum(lit) * 3.0), puddle * 0.85);  // (a puddle shows the sky even where the ground itself is dim)
             refl = RVK_TEXCUBE(f.images.w).SampleLevel(RVK_SAMP(p.tex.w), R, rough * 6.0).rgb * lit01 * 0.7 * p.strength.x * smoothstep(-0.15, 0.25, R.y);
         }
     }
