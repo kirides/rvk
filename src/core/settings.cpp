@@ -1333,6 +1333,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .format = "%d degrees",
         .autoLabel = "Auto",
         .flags = Flag::Advanced,
+        .needs = {{"water.ocean", "off", true, true}},
         .page = "Water & Materials", .section = "Sea",
     });
     r.waterWaveScale = &reg.add({
@@ -2219,7 +2220,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .min = 1,
         .max = 4,
         .format = "%.1fx",
-        .page = "Detail Distances", .section = "Draw distances",
+        .page = "Display", .section = "Draw distances",
     });
     r.lodMeshes = &reg.add({
         .key = "lod.meshes",
@@ -2232,7 +2233,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .min = 1,
         .max = 4,
         .format = "%.1fx",
-        .page = "Detail Distances", .section = "Draw distances",
+        .page = "Display", .section = "Draw distances",
     });
     r.shadowStride = &reg.add({
         .key = "debug.shadow_stride",
@@ -2477,7 +2478,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .min = 1,
         .max = 3,
         .format = "%.1fx",
-        .page = "Detail Distances", .section = "Draw distances",
+        .page = "Display", .section = "Draw distances",
     });
     reg.setDebugSwitch(*r.debugMode);
     if (&reg == &registry()) g_renderer = r;
@@ -2588,7 +2589,7 @@ int matchPreset(const Registry& reg) {
 
 const std::vector<std::string>& pageOrder() {
     static const std::vector<std::string> pages = {kPageDisplay, kPageLighting, kPageRayTracing, kPageWater,
-                                                   kPageImage,   kPageDetail,   kPageSystem,     kPageDebug};
+                                                   kPageImage,   kPageSystem,     kPageDebug};
     return pages;
 }
 

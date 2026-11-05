@@ -2,6 +2,7 @@
 // the renderer's floor.
 
 #include <algorithm>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -13,6 +14,16 @@
 #include "vk/vk.h"
 
 namespace rvk::rhi {
+
+namespace {
+std::mutex g_lastMutex;
+std::vector<AdapterInfo> g_last;  // the most recent Vulkan enumeration (the overlay's adapter list: enumerating again at run time is not safe)
+}  // namespace
+
+std::vector<AdapterInfo> lastEnumeratedAdapters() {
+    const std::lock_guard lock(g_lastMutex);
+    return g_last;
+}
 
 std::vector<AdapterInfo> enumerateAdapters(Backend backend) {
     std::vector<AdapterInfo> out;
@@ -50,6 +61,10 @@ std::vector<AdapterInfo> enumerateAdapters(Backend backend) {
         out.push_back(std::move(a));
     }
     vkDestroyInstance(instance, nullptr);
+    {
+        const std::lock_guard lock(g_lastMutex);
+        g_last = out;
+    }
     return out;
 }
 
