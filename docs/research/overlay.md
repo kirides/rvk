@@ -129,6 +129,50 @@ Tooltips are the specs' descriptions in player language (developer wording only 
 "Default: <label>" (and `key = value` in debug mode). `[debug] commands`: `overlay tab <display|graphics|system|debug>`
 selects a tab (screenshots of each tab). Unit test `settings_presets_and_tabs`.
 
+### 2.8 The settings window, 2026-11-05 redesign (`overlay_ui.cpp`)
+
+Replaces the tab bar of 2.6 with a game-options screen (mockups: sidebar of pages, titled page, small-caps section headings,
+label + control rows in two columns, "Graphics Quality" on top, "Restore Defaults" / "Apply" bottom right). Gold on warm dark,
+Georgia Bold titles, Segoe UI body (Windows fonts, optional), everything scaled with the window height (`applyTheme`: the unscaled
+style is copied and `ScaleAllSizes` each frame); dim backdrop; same hotkey, never in captures without `-OverlayInScreenshots`;
+drawn through the RHI's ImGui backend, so Vulkan and D3D12 look the same. Escape clears the search, then closes.
+
+* **Data**: `Spec::page / section / order` (core/settings.h, last members of `Spec`, written next to each registration; empty page =
+  derived from `tab`, empty section = `category`), `tierOf(spec)` (Basic / Advanced / Debug / Hidden from the flags), `description` =
+  the tooltip. Pages (`pageOrder()`): Display, Lighting & Shadows, Ray Tracing, Water & Materials, Image, Detail Distances, System,
+  Debug (debug mode only), plus the settings-less Performance page (fps, frame times, VRAM bar from `GameDevice::videoMemory`:
+  VMA heap budgets on Vulkan, `QueryVideoMemoryInfo` on D3D12). Sections are ordered by `order` (lower first) then by first
+  registration; rows inside by `order`. **Removing a setting = deleting its registration block** (its placement goes with it).
+  Hidden on purpose (file / API only): `overlay.show_advanced` (the Advanced toggle in the header), `vulkan.exclusive_acquire`,
+  `debug.draw_records`, `debug.pace_loading`, `rt.reflection_tweaks`, `rt.scene_views`. Everything else is reachable: Basic always,
+  Advanced with the toggle, Debug in debug mode.
+* **Rows**: label column (truncated with "..." + tooltip), toggle switch / slider (thin track, value to the right) / combo, a gold dot
+  when not default plus a Reset button, "restart" / "restart needed" badge, a greyed row with its reason ("Greyed because: ..." from
+  the capability resolution), "Set by rvk\config.toml" for locks, tooltip after a short rest (description, default, `key = value`
+  in debug mode). Two columns above 62 em of content width, one below. Search (header): every word must occur in label, key,
+  section, page or description; results grouped as "Page - Section".
+* **Dependents**: a setting that only acts while another is on is indented under it and dimmed while it is off (one
+  "greyed because X is off" line per group); changing a dependent switches the prerequisite on first and shows a toast "Also
+  switched on: X". Today this is a UI adapter (`kNeeds` / `userSet` in overlay_ui.cpp); the registry model (`Spec::needs`,
+  `setWithNeeds`) replaces it when the settings clean-up merges.
+* **Restart**: one amber "Restart required" banner at the top of every page lists each pending restart setting (old -> new) with
+  "Apply and restart": saves settings.toml, starts a helper shell that waits 5 s and launches the exe again with the same command
+  line and working directory, posts WM_CLOSE (the process is ended after 3 s if it has not left). `vulkan.api` sits on the Display page
+  under the render mode; its Direct3D 12 option is greyed with the reason of `rhi::d3d12Usable` (SM 6.6 / binding tier 3), checked
+  once when the window is first built.
+* **Debug page**: the A/B panel (F10 unchanged), the A/B options, debug views, internals, "Frame structure". `[debug] commands`:
+  `overlay tab <page>` takes a page name prefix ignoring case / punctuation (`graphics` = Lighting & Shadows, `rt`, `perf`).
+
+### 2.9 Master quality ("Graphics Quality")
+
+One table, `settings::graphicsPresets()` (core/settings.cpp): Original, Low, Medium, High, Ultra; "Custom" is shown when
+`matchPreset` finds none (any manual change of a member). Each preset writes the water / sea / sun shadow knobs named in the
+table plus the RT cost knobs of `rtPresets()` (rt.lod_*, memory budget, shadows.rt_quality / range, rt.reflections, gi.quality /
+screen, materials.rt_reflections / range): Low = rt low, Medium + High = rt medium, Ultra = rt high; a key a preset names itself
+wins. It never switches a feature on that is off by default (traced shadows, GI, material quality, framegen, upscaling). High =
+the shipped defaults (`settings_presets_and_tabs`). Unit tests: `settings_overlay_metadata` (label, tooltip, page, section;
+presets name existing settings), `settings_presets_and_tabs`.
+
 ### 2.7 Render mode (`renderer.mode`, 2026-10-28)
 
 The user's decision: three render modes. **Original** = the system d3d9 forwarded (backend `Mode::Passthrough`: no Vulkan,

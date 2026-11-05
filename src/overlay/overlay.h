@@ -79,7 +79,10 @@ private:
     // the UI of one frame (input, ImGui::NewFrame .. Render, texture uploads); null when not initialised. drawMutex_ held.
     ImDrawData* buildFrame(VkExtent2D extent);
     void buildUi();
-    void buildSettingsWindow();
+    void buildSettingsWindow();          // overlay_ui.cpp: the sidebar / pages / search / quality bar layout
+    void initTheme();                    // overlay_ui.cpp: fonts + the unscaled theme (docs/research/overlay.md 2.8)
+    void applyTheme(float scale);        // overlay_ui.cpp: the theme at the frame's DPI / resolution scale
+    void buildVramBar(float width, bool label);  // overlay_ui.cpp
     void buildAbPanel();                 // Debug tab
     void buildCapabilitiesPanel();       // System tab
     void buildPerformancePanel(bool debug);  // System tab; debug: + diagnostics
@@ -122,6 +125,8 @@ private:
     std::size_t historyPos_ = 0;
     std::size_t historyCount_ = 0;
     std::uint64_t frame_ = 0;
+    std::uint64_t vramUsed_ = 0, vramBudget_ = 0;  // the VRAM bar (queried twice a second)
+    std::chrono::steady_clock::time_point vramAt_{};
 
     struct Command {
         std::uint64_t frame;

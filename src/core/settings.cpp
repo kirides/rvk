@@ -804,6 +804,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .options = {"engine", "on", "off"},
         .optionLabels = {"Game option", "On", "Off"},
+        .page = "Display", .section = "Display",
     });
     r.maxFps = &reg.add({
         .key = "vulkan.max_fps",
@@ -820,6 +821,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 500,
         .format = "%.0f fps",
         .autoLabel = "Unlimited",
+        .page = "Display", .section = "Display",
     });
     r.menuFps = &reg.add({
         .key = "vulkan.menu_fps",
@@ -835,6 +837,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 240,
         .format = "%.0f fps",
         .autoLabel = "Unlimited",
+        .page = "Display", .section = "Display",
     });
     r.fullscreen = &reg.add({
         .key = "vulkan.fullscreen",
@@ -850,6 +853,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Borderless window", "Exclusive"},
         .flags = Flag::NoAB,
         .requirements = caps::bit(caps::Cap::FullScreenExclusive),
+        .page = "Display", .section = "Display",
     });
 
     // ---- System tab ----
@@ -871,6 +875,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"original", "wrapper", "full"},
         .optionLabels = {"Original (Direct3D 9)", "Wrapper (Vulkan)", "Full (Vulkan, experimental)"},
         .restartGroups = {0, 1, 1},
+        .page = "Display", .section = "Render mode", .order = -10,
     });
     r.toggleKey = &reg.add({
         .key = "overlay.toggle_key",
@@ -883,6 +888,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = hotkeyNames(),
         .optionLabels = keyLabels,
         .flags = Flag::NoAB,
+        .page = "System",
     });
     r.fpsCounter = &reg.add({
         .key = "overlay.fps_counter",
@@ -893,6 +899,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 0,
         .flags = Flag::NoAB,
+        .page = "System",
     });
     r.debugMode = &reg.add({
         .key = "overlay.debug_mode",
@@ -904,6 +911,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 0,
         .flags = Flag::NoAB | Flag::Advanced,
+        .page = "System",
     });
     r.showAdvanced = &reg.add({
         .key = "overlay.show_advanced",
@@ -914,6 +922,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 0,
         .flags = Flag::NoAB | Flag::Hidden,  // the checkbox at the top of the menu
+        .page = "System",
     });
     r.api = &reg.add({
         .key = "vulkan.api",
@@ -927,7 +936,10 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .options = {"vulkan", "d3d12"},
         .optionLabels = {"Vulkan", "Direct3D 12 (experimental)"},
-        .flags = Flag::Restart | Flag::Advanced,
+        .flags = Flag::Restart,
+        .page = "Display",
+        .section = "Render mode",
+        .order = -5,
     });
     r.adapter = &reg.add({
         .key = "vulkan.adapter",
@@ -942,6 +954,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 15,
         .autoLabel = "Auto",
         .flags = Flag::Restart | Flag::Advanced,
+        .page = "System",
     });
     r.exclusiveAcquire = &reg.add({
         .key = "vulkan.exclusive_acquire",
@@ -953,6 +966,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Hidden | Flag::Debug,
+        .page = "Debug", .section = "Debug views",
     });
     r.rtAllow = &reg.add({
         .key = "rt.allow",
@@ -967,6 +981,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::Restart | Flag::Advanced,
         .requirements = caps::bit(caps::Cap::RayTracingHardware),
         .unmetValue = 0,
+        .page = "System",
     });
 
     r.highFps = &reg.add({
@@ -980,6 +995,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 1,
         .flags = Flag::NoAB,
+        .page = "System",
     });
 
     // ---- Debug tab (debug mode) ----
@@ -995,6 +1011,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = hotkeyNames(),
         .optionLabels = keyLabels,
         .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "A/B options",
     });
     r.abBadge = &reg.add({
         .key = "overlay.ab_badge",
@@ -1005,6 +1022,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "A/B options",
     });
     r.tintDraws = &reg.add({
         .key = "debug.tint_draws",
@@ -1019,6 +1037,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"off", "kind", "pass"},
         .optionLabels = {"Off", "By kind", "By pass"},
         .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Debug views",
     });
     r.debugCrashMarkers = &reg.add({
         .key = "debug.crash_markers",
@@ -1031,6 +1050,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 0,
         .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Renderer internals",
     });
     r.debugRegions = &reg.add({
         .key = "debug.regions",
@@ -1042,6 +1062,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Renderer internals",
     });
     r.debugNames = &reg.add({
         .key = "debug.names",
@@ -1054,6 +1075,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug | Flag::Restart,
+        .page = "Debug", .section = "Renderer internals",
     });
     r.recordThreads = &reg.add({
         .key = "debug.record_threads",
@@ -1065,6 +1087,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 1,
         .flags = Flag::Debug,
+        .page = "Debug", .section = "Renderer internals",
     });
     r.ubershaderSkip = &reg.add({
         .key = "debug.ubershader_skip",
@@ -1078,6 +1101,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .min = 0,
         .max = 255,
         .flags = Flag::Debug | Flag::NoAB,
+        .page = "Debug", .section = "Renderer internals",
     });
     r.ubershader = &reg.add({
         .key = "debug.ubershader",
@@ -1090,6 +1114,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 0,
         .flags = Flag::Debug,
+        .page = "Debug", .section = "Renderer internals",
     });
     r.materialSources = &reg.add({
         .key = "debug.material_sources",
@@ -1102,6 +1127,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 0,
         .flags = Flag::Debug | Flag::NoAB,
+        .page = "Debug", .section = "Renderer internals",
     });
     r.reverseZ = &reg.add({
         .key = "debug.reverse_z",
@@ -1114,6 +1140,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 1,
         .flags = Flag::Debug | Flag::NoAB,
+        .page = "Debug", .section = "Renderer internals",
     });
     r.batchDraws = &reg.add({
         .key = "debug.batch_draws",
@@ -1125,6 +1152,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 1,
         .flags = Flag::Debug,
+        .page = "Debug", .section = "Renderer internals",
     });
     r.splitVerify = &reg.add({
         .key = "debug.split_verify",
@@ -1136,6 +1164,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 0,
         .flags = Flag::Debug,
+        .page = "Debug", .section = "Renderer internals",
     });
     r.injectView = &reg.add({
         .key = "debug.inject_view",
@@ -1150,6 +1179,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"off", "depth", "tint"},
         .optionLabels = {"Off", "Depth + world grid", "Tint"},
         .flags = Flag::Debug,
+        .page = "Debug", .section = "Debug views",
     });
     r.rtDebug = &reg.add({
         .key = "rt.debug",
@@ -1167,6 +1197,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Off", "Instances", "Depth check", "Normals", "Albedo", "Albedo (split)", "Albedo (cut-outs solid)", "UV", "Roughness (pack)", "Metalness (pack)"},
         .flags = Flag::NoAB | Flag::Debug,
         .requirements = caps::bit(caps::Cap::RayQuery),
+        .page = "Debug", .section = "Debug views",
     });
     r.rtReflectionTweaks = &reg.add({
         .key = "rt.reflection_tweaks",
@@ -1180,6 +1211,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .min = 0,
         .max = 15,
         .flags = Flag::NoAB | Flag::Hidden | Flag::Debug,
+        .page = "Debug", .section = "Debug views",
     });
     r.rtSceneViews = &reg.add({
         .key = "rt.scene_views",
@@ -1193,6 +1225,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"all", "main", "shadow"},
         .optionLabels = {"Main view + sun cascades", "Main view", "Sun cascades"},
         .flags = Flag::NoAB | Flag::Hidden | Flag::Debug,
+        .page = "Debug", .section = "Debug views",
     });
 
     // ---- Graphics tab: water ----
@@ -1205,6 +1238,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "water.",
         .type = Type::Bool,
         .defaultValue = 1,
+        .page = "Water & Materials", .section = "Water",
     });
     r.waterQuality = &reg.add({
         .key = "water.quality",
@@ -1216,6 +1250,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"low", "medium", "high"},
         .optionLabels = {"Low", "Medium", "High"},
         .needs = {{"water.enabled", "true", false, true}},
+        .page = "Water & Materials", .section = "Water",
     });
     r.rtReflections = &reg.add({
         .key = "rt.reflections",
@@ -1231,6 +1266,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .requirements = caps::bit(caps::Cap::RayQuery),
         .unmetValue = 0,
         .needs = {{"water.enabled", "true", false, true}, {"water.reflections", "ssr", false, true}},
+        .page = "Water & Materials", .section = "Water",
     });
     r.waterOcean = &reg.add({
         .key = "water.ocean",
@@ -1244,6 +1280,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"off", "gerstner", "fft"},
         .optionLabels = {"Off", "Simple", "Realistic"},
         .needs = {{"water.enabled", "true", false, true}},
+        .page = "Water & Materials", .section = "Sea",
     });
     r.waterOceanQuality = &reg.add({
         .key = "water.ocean_quality",
@@ -1256,6 +1293,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Low", "Medium", "High"},
         .flags = Flag::Advanced,
         .needs = {{"water.ocean", "fft", false, true}},
+        .page = "Water & Materials", .section = "Sea",
     });
     r.waterSeaState = &reg.add({
         .key = "water.sea_state",
@@ -1267,6 +1305,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"auto", "calm", "moderate", "rough", "storm"},
         .optionLabels = {"Follow weather", "Calm", "Moderate", "Rough", "Storm"},
         .needs = {{"water.ocean", "off", true, true}},
+        .page = "Water & Materials", .section = "Sea",
     });
     r.waterReflections = &reg.add({
         .key = "water.reflections",
@@ -1280,6 +1319,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Sky only", "World"},
         .flags = Flag::Advanced,
         .needs = {{"water.enabled", "true", false, true}},
+        .page = "Water & Materials", .section = "Water",
     });
     r.waterWindDirection = &reg.add({
         .key = "water.wind_direction",
@@ -1293,6 +1333,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .format = "%d degrees",
         .autoLabel = "Auto",
         .flags = Flag::Advanced,
+        .page = "Water & Materials", .section = "Sea",
     });
     r.waterWaveScale = &reg.add({
         .key = "water.wave_scale",
@@ -1306,6 +1347,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .format = "%.2f",
         .flags = Flag::Advanced,
         .needs = {{"water.ocean", "off", true, true}},
+        .page = "Water & Materials", .section = "Sea",
     });
     r.waterDebug = &reg.add({
         .key = "water.debug",
@@ -1325,6 +1367,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"off", "shore_field", "depth", "normals", "reflection", "foam", "sea_floor", "waves", "reflection_source", "reflection_shaded"},
         .optionLabels = {"Off", "Shore field", "Depth", "Normals", "Reflection", "Foam", "Sea floor", "Wave attenuation", "Reflection source", "Reflection (RT hits all shaded)"},
         .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Debug views",
     });
 
     // ---- Graphics tab: shadows ----
@@ -1337,6 +1380,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "original shadows.",
         .type = Type::Bool,
         .defaultValue = 1,
+        .page = "Lighting & Shadows", .section = "Sun shadows",
     });
     r.shadowsFilter = &reg.add({
         .key = "shadows.filter",
@@ -1348,6 +1392,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"low", "medium", "high"},
         .optionLabels = {"Low", "Medium", "High"},
         .needs = {{"shadows.enabled", "true", false, true}},
+        .page = "Lighting & Shadows", .section = "Sun shadows",
     });
     r.shadowsMapSize = &reg.add({
         .key = "shadows.map_size",
@@ -1359,6 +1404,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 3,
         .options = {"auto", "game", "1024", "2048", "4096"},
         .optionLabels = {"Auto", "Game setting", "Low (1024)", "Medium (2048)", "High (4096)"},
+        .page = "Lighting & Shadows", .section = "Sun shadows",
     });
     r.shadowsBias = &reg.add({
         .key = "shadows.bias",
@@ -1373,6 +1419,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .format = "%.2f",
         .flags = Flag::Advanced,
         .needs = {{"shadows.enabled", "true", false, true}},
+        .page = "Lighting & Shadows", .section = "Sun shadows",
     });
     r.shadowsRange = &reg.add({
         .key = "shadows.range",
@@ -1387,6 +1434,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .format = "%.0f m",
         .autoLabel = "Auto",
         .flags = Flag::Advanced,
+        .page = "Lighting & Shadows", .section = "Sun shadows",
     });
     r.shadowsRt = &reg.add({
         .key = "shadows.rt",
@@ -1403,6 +1451,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .requirements = caps::bit(caps::Cap::RayQuery),
         .unmetValue = 0,
         .needs = {{"shadows.enabled", "true", false, true}},
+        .page = "Ray Tracing", .section = "Traced sun shadows",
     });
     r.shadowsRtQuality = &reg.add({
         .key = "shadows.rt_quality",
@@ -1417,6 +1466,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .requirements = caps::bit(caps::Cap::RayQuery),
         .unmetValue = 1,
         .needs = {{"shadows.rt", "off", true, true}},
+        .page = "Ray Tracing", .section = "Traced sun shadows",
     });
     r.shadowsRtRange = &reg.add({
         .key = "shadows.rt_range",
@@ -1434,6 +1484,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .requirements = caps::bit(caps::Cap::RayQuery),
         .unmetValue = 0,
         .needs = {{"shadows.rt", "off", true, true}},
+        .page = "Ray Tracing", .section = "Traced sun shadows",
     });
     r.rtLodScale = &reg.add({
         .key = "rt.lod_scale",
@@ -1449,6 +1500,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::Hidden,
         .requirements = caps::bit(caps::Cap::RayQuery),
         .unmetValue = 0,
+        .page = "Ray Tracing", .section = "Detail and memory",
     });
     r.rtMemoryBudget = &reg.add({
         .key = "rt.memory_budget",
@@ -1465,6 +1517,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::Advanced,
         .requirements = caps::bit(caps::Cap::RayQuery),
         .unmetValue = 0,
+        .page = "Ray Tracing", .section = "Detail and memory",
     });
     r.rtPreset = &reg.add({
         .key = "rt.preset",
@@ -1480,6 +1533,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Low", "Medium", "High", "Custom"},
         .requirements = caps::bit(caps::Cap::RayQuery),
         .unmetValue = 1,
+        .page = "Ray Tracing", .section = "Quality", .order = -10,
     });
     r.shadowsDebug = &reg.add({
         .key = "shadows.debug",
@@ -1494,6 +1548,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"off", "cascades", "cascade_term", "terrain_term", "rt_term", "rt_coverage"},
         .optionLabels = {"Off", "Cascades", "Cascade shadows only", "Terrain shadows only", "Ray-traced shadows only", "Ray-traced coverage"},
         .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Debug views",
     });
 
     // ---- Graphics tab: global illumination (enh/gi.h, docs/research/rtgi.md) ----
@@ -1508,6 +1563,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .requirements = caps::bit(caps::Cap::RayQuery),
         .unmetValue = 0,
+        .page = "Ray Tracing", .section = "Traced lighting",
     });
     r.giQuality = &reg.add({
         .key = "gi.quality",
@@ -1519,6 +1575,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"low", "medium", "high"},
         .optionLabels = {"Low", "Medium", "High"},
         .needs = {{"gi.enabled", "true", false, true}},
+        .page = "Ray Tracing", .section = "Traced lighting",
     });
     r.giStrength = &reg.add({
         .key = "gi.strength",
@@ -1532,6 +1589,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .format = "%.2f",
         .flags = Flag::Advanced,
         .needs = {{"gi.enabled", "true", false, true}},
+        .page = "Ray Tracing", .section = "Traced lighting",
     });
     r.giLightmaps = &reg.add({
         .key = "gi.lightmaps",
@@ -1545,6 +1603,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Keep", "Replace"},
         .flags = Flag::Advanced,
         .needs = {{"gi.enabled", "true", false, true}},
+        .page = "Ray Tracing", .section = "Traced lighting",
     });
     r.giScreen = &reg.add({
         .key = "gi.screen",
@@ -1560,6 +1619,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .requirements = caps::bit(caps::Cap::RayQuery),
         .unmetValue = 0,
         .needs = {{"gi.enabled", "true", false, true}},
+        .page = "Ray Tracing", .section = "Traced lighting",
     });
     r.giFoliage = &reg.add({
         .key = "gi.foliage",
@@ -1575,6 +1635,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::Advanced,
         .requirements = caps::bit(caps::Cap::RayQuery),
         .needs = {{"gi.enabled", "true", false, true}},
+        .page = "Ray Tracing", .section = "Traced lighting",
     });
     r.giReference = &reg.add({
         .key = "gi.reference",
@@ -1593,6 +1654,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                          "Probes + screen, indirect only", "Error (probe volume)"},
         .flags = Flag::NoAB | Flag::Debug,
         .requirements = caps::bit(caps::Cap::RayQuery),
+        .page = "Debug", .section = "GI reference",
     });
     r.giReferenceSpp = &reg.add({
         .key = "gi.reference_spp",
@@ -1605,6 +1667,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .min = 1,
         .max = 64,
         .flags = Flag::Debug | Flag::NoAB,
+        .page = "Debug", .section = "GI reference",
     });
     r.giReferenceMax = &reg.add({
         .key = "gi.reference_max",
@@ -1618,6 +1681,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .min = 1,
         .max = 1000000,
         .flags = Flag::Debug | Flag::NoAB,
+        .page = "Debug", .section = "GI reference",
     });
     r.giReferenceBounces = &reg.add({
         .key = "gi.reference_bounces",
@@ -1630,6 +1694,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .min = 1,
         .max = 16,
         .flags = Flag::Debug | Flag::NoAB,
+        .page = "Debug", .section = "GI reference",
     });
     r.giDebug = &reg.add({
         .key = "gi.debug",
@@ -1646,6 +1711,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Off", "Irradiance", "Cascades", "Vertex AO"},
         .flags = Flag::NoAB | Flag::Debug,
         .requirements = caps::bit(caps::Cap::RayQuery),
+        .page = "Debug", .section = "Debug views",
     });
 
     r.aoEnabled = &reg.add({
@@ -1656,6 +1722,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "ambient light; works with and without ray-traced lighting).",
         .type = Type::Bool,
         .defaultValue = 0,
+        .page = "Lighting & Shadows", .section = "Ambient occlusion",
     });
     r.aoMode = &reg.add({
         .key = "ao.mode",
@@ -1669,6 +1736,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Replace", "Add"},
         .flags = Flag::Advanced,
         .needs = {{"ao.enabled", "true", false, true}},
+        .page = "Lighting & Shadows", .section = "Ambient occlusion",
     });
     r.aoStrength = &reg.add({
         .key = "ao.strength",
@@ -1682,6 +1750,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .format = "%.2f",
         .flags = Flag::Advanced,
         .needs = {{"ao.enabled", "true", false, true}},
+        .page = "Lighting & Shadows", .section = "Ambient occlusion",
     });
     // ---- Full-owned lighting (enh/light_table.h, docs/research/gpu-scene.md 9.7) ----
     r.lightingClustered = &reg.add({
@@ -1696,6 +1765,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 1,
         .flags = Flag::Restart | Flag::Debug,
+        .page = "Debug", .section = "Clustered lights",
     });
     r.lightingEnabled = &reg.add({
         .key = "lighting.enabled",
@@ -1706,6 +1776,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 1,
         .flags = Flag::Debug,
+        .page = "Debug", .section = "Clustered lights",
     });
     r.lightingFullLit = &reg.add({
         .key = "lighting.full_lit",
@@ -1719,6 +1790,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 1,
         .flags = Flag::Debug,
+        .page = "Debug", .section = "Clustered lights",
     });
     r.lightingStyle = &reg.add({
         .key = "lighting.style",
@@ -1734,6 +1806,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Original", "Physical"},
         .flags = Flag::Restart,
         .needs = {{"renderer.mode", "full", false, false}, {"lighting.clustered", "true", false, true}},
+        .page = "Lighting & Shadows", .section = "Light style",
     });
     r.lightingDebug = &reg.add({
         .key = "lighting.debug",
@@ -1747,6 +1820,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"off", "clusters", "slots", "shadows"},
         .optionLabels = {"Off", "Cluster counts", "Slots filled", "Light shadows"},
         .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Clustered lights",
     });
     r.lightingShadows = &reg.add({
         .key = "lighting.light_shadows",
@@ -1762,6 +1836,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .requirements = caps::bit(caps::Cap::RayQuery),
         .unmetValue = 0,
         .needs = {{"renderer.mode", "full", false, false}, {"lighting.clustered", "true", false, true}, {"lighting.full_lit", "true", false, true}},
+        .page = "Ray Tracing", .section = "Lamp shadows",
     });
     r.lightingShadowQuality = &reg.add({
         .key = "lighting.light_shadow_quality",
@@ -1776,6 +1851,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .requirements = caps::bit(caps::Cap::RayQuery),
         .unmetValue = 1,
         .needs = {{"lighting.light_shadows", "off", true, true}},
+        .page = "Ray Tracing", .section = "Lamp shadows",
     });
     r.gbufferDebug = &reg.add({
         .key = "gbuffer.debug",
@@ -1789,6 +1865,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"off", "normals", "motion", "ao", "screen_gi", "material"},
         .optionLabels = {"Off", "Normals", "Motion", "AO", "Screen probes (GI factor)", "Material (pack: roughness / metalness)"},
         .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Debug views",
     });
 
     // ---- Graphics tab: material pack (enh/material_pack.h, docs/research/material-pack.md) ----
@@ -1802,6 +1879,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 1,
         .flags = Flag::Restart,
+        .page = "Water & Materials", .section = "Material pack",
     });
     r.materialsQuality = &reg.add({
         .key = "materials.quality",
@@ -1815,6 +1893,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Off", "Low", "Medium", "High"},
         .optionRequirements = {0, 0, 0, caps::bit(caps::Cap::RayQuery)},
         .needs = {{"materials.pack", "true", false, true}},
+        .page = "Water & Materials", .section = "Material pack",
     });
     r.materialsRtReflections = &reg.add({
         .key = "materials.rt_reflections",
@@ -1827,6 +1906,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"low", "medium", "high"},
         .optionLabels = {"Low", "Medium", "High"},
         .needs = {{"materials.quality", "high", false, true}},
+        .page = "Water & Materials", .section = "Traced reflections",
     });
     r.materialsRtRange = &reg.add({
         .key = "materials.rt_range",
@@ -1840,6 +1920,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .format = "%.0f m",
         .flags = Flag::Advanced,
         .needs = {{"materials.quality", "high", false, true}},
+        .page = "Water & Materials", .section = "Traced reflections",
     });
     r.materialsDerive = &reg.add({
         .key = "materials.derive_from_specular",
@@ -1851,6 +1932,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "pack entry, and those without specular data, are not changed.",
         .type = Type::Bool,
         .defaultValue = 1,
+        .page = "Water & Materials", .section = "Material pack",
     });
     r.materialsBudget = &reg.add({
         .key = "materials.budget",
@@ -1863,6 +1945,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 2048,
         .format = "%.0f MiB",
         .flags = Flag::Restart | Flag::Advanced,
+        .page = "Water & Materials", .section = "Material pack",
     });
     r.materialsGlass = &reg.add({
         .key = "materials.glass",
@@ -1873,6 +1956,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 1,
         .needs = {{"materials.quality", "high", false, true}},
+        .page = "Water & Materials", .section = "Traced reflections",
     });
     r.materialsRainWetness = &reg.add({
         .key = "materials.rain_wetness",
@@ -1886,6 +1970,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 1,
         .format = "%.2f",
         .needs = {{"materials.quality", "high", false, true}},
+        .page = "Water & Materials", .section = "Rain",
     });
     r.materialsRainForce = &reg.add({
         .key = "materials.rain_force",
@@ -1900,6 +1985,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 1,
         .format = "%.2f",
         .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Debug views",
     });
     r.materialsAlternate = &reg.add({
         .key = "materials.alternate",
@@ -1914,6 +2000,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 600,
         .format = "%.0f frames",
         .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Debug views",
     });
     r.materialsDebug = &reg.add({
         .key = "materials.debug",
@@ -1927,6 +2014,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"off", "roughness", "metalness", "orm", "coverage"},
         .optionLabels = {"Off", "Roughness", "Metalness", "Packed map", "Coverage"},
         .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Debug views",
     });
 
     // ---- Graphics tab: upscaling / anti-aliasing (enh/upscale.h) ----
@@ -1943,6 +2031,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"off", "native_aa", "high_quality", "quality", "balanced", "performance", "ultra_performance", "jitter_only"},
         .optionLabels = {"Off", "Native AA (FSR)", "High quality (1.2x)", "Quality (1.5x)", "Balanced (1.7x)", "Performance (2x)",
                          "Ultra performance (3x)", "Jitter only (test)"},
+        .page = "Image", .section = "Upscaling and anti-aliasing",
     });
 
     r.upscaleProvider = &reg.add({
@@ -1958,6 +2047,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"FSR 3.1", "FSR 4 (neural, experimental)"},
         .flags = Flag::Advanced,
         .needs = {{"upscale.mode", "off", true, true}},
+        .page = "Image", .section = "Upscaling and anti-aliasing",
     });
     r.upscaleObjectMotion = &reg.add({
         .key = "upscale.object_motion",
@@ -1972,6 +2062,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Off", "Characters", "Characters and objects"},
         .flags = Flag::Debug,
         .needs = {{"upscale.mode", "off", true, true}},
+        .page = "Debug", .section = "Debug views",
     });
     r.upscaleReactive = &reg.add({
         .key = "upscale.reactive",
@@ -1983,6 +2074,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 1,
         .flags = Flag::Advanced,
         .needs = {{"upscale.mode", "off", true, true}},
+        .page = "Image", .section = "Upscaling and anti-aliasing",
     });
     r.upscaleSharpness = &reg.add({
         .key = "upscale.sharpness",
@@ -1996,6 +2088,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 1,
         .format = "%.2f",
         .needs = {{"upscale.mode", "off", true, true}},
+        .page = "Image", .section = "Upscaling and anti-aliasing",
     });
     r.upscaleExposure = &reg.add({
         .key = "upscale.exposure",
@@ -2010,6 +2103,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Game", "Automatic (FSR)"},
         .flags = Flag::Debug,
         .needs = {{"upscale.mode", "off", true, true}},
+        .page = "Debug", .section = "Debug views",
     });
     r.upscaleJitterFlip = &reg.add({
         .key = "upscale.jitter_flip",
@@ -2022,6 +2116,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"none", "x", "y", "xy"},
         .optionLabels = {"None", "X", "Y", "X and Y"},
         .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Debug views",
     });
     r.upscaleCutoutThicken = &reg.add({
         .key = "upscale.cutout_thicken",
@@ -2038,6 +2133,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .format = "%.2f",
         .flags = Flag::Debug,
         .needs = {{"upscale.mode", "off", true, true}},
+        .page = "Debug", .section = "Debug views",
     });
     r.upscaleAlphaDither = &reg.add({
         .key = "upscale.alpha_dither",
@@ -2051,6 +2147,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .flags = Flag::Debug,
         .needs = {{"upscale.mode", "off", true, true}},
+        .page = "Debug", .section = "Debug views",
     });
 
     // ---- Graphics tab: frame generation (enh/framegen.h; docs/research/frame-generation.md). AMD's frame generation swapchain presents
@@ -2074,6 +2171,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .requirements = caps::bit(caps::Cap::FrameGeneration),
         .unmetValue = 0,
         .optionRequirements = {0, 0, caps::bit(caps::Cap::FrameGenerationMl)},
+        .page = "Image", .section = "Frame generation",
     });
     r.framegenManual = &reg.add({
         .key = "framegen.manual",
@@ -2090,6 +2188,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .requirements = caps::bit(caps::Cap::FrameGeneration),
         .unmetValue = 0,
         .needs = {{"framegen.mode", "off", true, true}},
+        .page = "Debug", .section = "Debug views",
     });
     r.framegenDebug = &reg.add({
         .key = "framegen.debug",
@@ -2104,6 +2203,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Off", "Motion vectors", "Depth", "HUD-less copy", "Generated frame"},
         .flags = Flag::NoAB | Flag::Debug,
         .needs = {{"framegen.mode", "off", true, true}},
+        .page = "Debug", .section = "Debug views",
     });
 
     // ---- Graphics tab: detail distances (engine/lod.h) ----
@@ -2119,6 +2219,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .min = 1,
         .max = 4,
         .format = "%.1fx",
+        .page = "Detail Distances", .section = "Draw distances",
     });
     r.lodMeshes = &reg.add({
         .key = "lod.meshes",
@@ -2131,6 +2232,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .min = 1,
         .max = 4,
         .format = "%.1fx",
+        .page = "Detail Distances", .section = "Draw distances",
     });
     r.shadowStride = &reg.add({
         .key = "debug.shadow_stride",
@@ -2144,6 +2246,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .min = 1,
         .max = 4,
         .flags = Flag::Debug,
+        .page = "Debug", .section = "Renderer internals",
     });
     r.rtShadowSync = &reg.add({
         .key = "debug.rt_shadow_sync",
@@ -2156,6 +2259,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 0,
         .flags = Flag::Debug,
+        .page = "Debug", .section = "Renderer internals",
     });
     r.rtSkin = &reg.add({
         .key = "debug.rt_skin",
@@ -2168,6 +2272,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 1,
         .flags = Flag::Debug,
+        .page = "Debug", .section = "Renderer internals",
     });
     r.rtSkinVerify = &reg.add({
         .key = "debug.rt_skin_verify",
@@ -2179,6 +2284,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 0,
         .flags = Flag::Debug,
+        .page = "Debug", .section = "Renderer internals",
     });
     r.nativeFrameTap = &reg.add({
         .key = "native.frame_tap",
@@ -2191,6 +2297,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 0,
         .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
     });
     r.nativeStaticOps = &reg.add({
         .key = "native.static_ops",
@@ -2204,6 +2311,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 0,
         .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
     });
     r.nativeStaticOpsCompare = &reg.add({
         .key = "native.static_ops_compare",
@@ -2216,6 +2324,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 0,
         .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
     });
     r.nativeSceneOps = &reg.add({
         .key = "native.scene_ops",
@@ -2229,6 +2338,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 0,
         .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
     });
     r.nativeSceneOpsCompare = &reg.add({
         .key = "native.scene_ops_compare",
@@ -2240,6 +2350,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 0,
         .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
     });
     r.nativeSceneOpsGroups = &reg.add({
         .key = "native.scene_ops_groups",
@@ -2262,6 +2373,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .min = 0,
         .max = 131071,
         .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
     });
     r.nativeLean = &reg.add({
         .key = "native.lean",
@@ -2279,6 +2391,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 1,
         .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
     });
     r.nativeLeanCheck = &reg.add({
         .key = "native.lean_check",
@@ -2292,6 +2405,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .min = 0,
         .max = 1000,
         .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
     });
     r.nativePacketCache = &reg.add({
         .key = "native.packet_cache",
@@ -2308,6 +2422,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"off", "on", "verify_10", "verify_all", "no_variants"},
         .optionLabels = {"Off", "On", "On + verify every 10th frame", "On + verify every frame", "On without the variant draws (A/B)"},
         .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
     });
     r.nativeCoverage = &reg.add({
         .key = "native.coverage",
@@ -2319,6 +2434,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 0,
         .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
     });
     r.streamStats = &reg.add({
         .key = "debug.stream_stats",
@@ -2332,6 +2448,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .min = 0,
         .max = 2,
         .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Renderer internals",
     });
     r.prefetchStride = &reg.add({
         .key = "debug.prefetch_stride",
@@ -2346,6 +2463,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .min = 1,
         .max = 8,
         .flags = Flag::Debug,
+        .page = "Debug", .section = "Renderer internals",
     });
     r.lodView = &reg.add({
         .key = "lod.view",
@@ -2359,6 +2477,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .min = 1,
         .max = 3,
         .format = "%.1fx",
+        .page = "Detail Distances", .section = "Draw distances",
     });
     reg.setDebugSwitch(*r.debugMode);
     if (&reg == &registry()) g_renderer = r;
@@ -2370,27 +2489,42 @@ const RendererSettings& renderer() { return g_renderer; }
 // ---- presets ----------------------------------------------------------------------------------------------------------
 
 const std::vector<Preset>& graphicsPresets() {
-    // High = the defaults. Original lists only what turns the enhancements off (the rest does not matter then).
-    static const std::vector<Preset> presets = {
-        {"original", "Original",
-         {{"water.enabled", "false"}, {"shadows.enabled", "false"}, {"shadows.map_size", "game"}}},
-        {"low", "Low",
-         {{"water.enabled", "true"}, {"water.quality", "low"}, {"water.reflections", "sky"}, {"water.ocean", "gerstner"},
-          {"water.ocean_quality", "low"}, {"shadows.enabled", "true"}, {"shadows.filter", "low"},
-          {"shadows.map_size", "1024"}}},
-        {"medium", "Medium",
-         {{"water.enabled", "true"}, {"water.quality", "medium"}, {"water.reflections", "ssr"}, {"water.ocean", "fft"},
-          {"water.ocean_quality", "medium"}, {"shadows.enabled", "true"}, {"shadows.filter", "low"},
-          {"shadows.map_size", "2048"}}},
-        {"high", "High",
-         {{"water.enabled", "true"}, {"water.quality", "high"}, {"water.reflections", "ssr"}, {"water.ocean", "fft"},
-          {"water.ocean_quality", "high"}, {"shadows.enabled", "true"}, {"shadows.filter", "low"},
-          {"shadows.map_size", "2048"}}},
-        {"ultra", "Ultra",
-         {{"water.enabled", "true"}, {"water.quality", "high"}, {"water.reflections", "ssr"}, {"water.ocean", "fft"},
-          {"water.ocean_quality", "high"}, {"shadows.enabled", "true"}, {"shadows.filter", "high"},
-          {"shadows.map_size", "4096"}}},
-    };
+    // THE master quality table ("Graphics Quality" in the overlay; docs/research/overlay.md 2.9). Each preset writes only existing
+    // quality knobs: the water / sea / sun shadow knobs listed here, plus the RT cost knobs of rtPresets() (Low = rt low, Medium and
+    // High = rt medium, Ultra = rt high; what a preset names itself wins over the RT member of the same key). It never switches a
+    // feature on that is off by default (shadows.rt, gi.enabled, materials.quality, framegen, upscaling). High = the shipped
+    // defaults. Original lists only what turns the enhancements off (the rest does not matter then).
+    static const std::vector<Preset> presets = [] {
+        std::vector<Preset> p = {
+            {"original", "Original",
+             {{"water.enabled", "false"}, {"rt.reflections", "off"}, {"shadows.enabled", "false"}, {"shadows.map_size", "game"}}},
+            {"low", "Low",
+             {{"water.enabled", "true"}, {"water.quality", "low"}, {"water.reflections", "sky"}, {"water.ocean", "gerstner"},
+              {"water.ocean_quality", "low"}, {"rt.reflections", "off"}, {"shadows.enabled", "true"}, {"shadows.filter", "low"},
+              {"shadows.map_size", "1024"}}},
+            {"medium", "Medium",
+             {{"water.enabled", "true"}, {"water.quality", "medium"}, {"water.reflections", "ssr"}, {"water.ocean", "fft"},
+              {"water.ocean_quality", "medium"}, {"rt.reflections", "medium"}, {"shadows.enabled", "true"}, {"shadows.filter", "low"},
+              {"shadows.map_size", "2048"}}},
+            {"high", "High",
+             {{"water.enabled", "true"}, {"water.quality", "high"}, {"water.reflections", "ssr"}, {"water.ocean", "fft"},
+              {"water.ocean_quality", "high"}, {"rt.reflections", "high"}, {"shadows.enabled", "true"}, {"shadows.filter", "low"},
+              {"shadows.map_size", "2048"}}},
+            {"ultra", "Ultra",
+             {{"water.enabled", "true"}, {"water.quality", "high"}, {"water.reflections", "ssr"}, {"water.ocean", "fft"},
+              {"water.ocean_quality", "high"}, {"rt.reflections", "high"}, {"shadows.enabled", "true"}, {"shadows.filter", "high"},
+              {"shadows.map_size", "4096"}}},
+        };
+        const auto& rt = rtPresets();  // low, medium, high
+        const std::size_t member[5] = {0, 0, 1, 1, 2};  // per preset: its rtPresets() index (Original takes none)
+        for (std::size_t i = 1; i < p.size(); ++i) {
+            for (const auto& kv : rt[member[i]].values) {
+                const bool named = std::ranges::any_of(p[i].values, [&](const auto& e) { return e.first == kv.first; });
+                if (!named) p[i].values.push_back(kv);
+            }
+        }
+        return p;
+    }();
     return presets;
 }
 
@@ -2450,6 +2584,39 @@ int matchPreset(const Registry& reg) {
         if (all) return static_cast<int>(i);
     }
     return -1;
+}
+
+const std::vector<std::string>& pageOrder() {
+    static const std::vector<std::string> pages = {kPageDisplay, kPageLighting, kPageRayTracing, kPageWater,
+                                                   kPageImage,   kPageDetail,   kPageSystem,     kPageDebug};
+    return pages;
+}
+
+Tier tierOf(const Spec& spec) {
+    if ((spec.flags & Flag::Hidden) != 0) return Tier::Hidden;
+    if ((spec.flags & Flag::Debug) != 0) return Tier::Debug;
+    if ((spec.flags & Flag::Advanced) != 0) return Tier::Advanced;
+    return Tier::Basic;
+}
+
+std::string pageOf(const Spec& spec) {
+    if (!spec.page.empty()) return spec.page;
+    if (spec.tab == kTabDisplay) return kPageDisplay;
+    if (spec.tab == kTabSystem) return kPageSystem;
+    if (spec.tab == kTabDebug) return kPageDebug;
+    return kPageLighting;
+}
+
+std::string sectionOf(const Spec& spec) { return spec.section.empty() ? spec.category : spec.section; }
+
+std::size_t resetPage(Registry& reg, std::string_view page) {
+    std::size_t n = 0;
+    for (Setting* s : reg.all()) {
+        if (pageOf(s->spec()) != page || s->isDefault() || s->locked()) continue;
+        reg.resetToDefault(*s);
+        ++n;
+    }
+    return n;
 }
 
 std::size_t resetTab(Registry& reg, std::string_view tab) {

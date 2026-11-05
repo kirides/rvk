@@ -1198,6 +1198,14 @@ caps::Report D3D12DeviceImpl::capabilityReport(bool) {
     return r;
 }
 
+bool D3D12DeviceImpl::videoMemory(std::uint64_t& used, std::uint64_t& budget) {
+    DXGI_QUERY_VIDEO_MEMORY_INFO local{};
+    if (!adapter3_ || FAILED(adapter3_->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local))) return false;
+    used = local.CurrentUsage;
+    budget = local.Budget;
+    return budget > 0;
+}
+
 void D3D12DeviceImpl::logMemoryStats() {
     std::uint64_t used = 0, size = 0;
     for (const auto& b : arena_) {

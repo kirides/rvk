@@ -608,6 +608,8 @@ public:
     virtual void runRaytracingSelfTest() = 0;
     // logs the "perf: GPU memory ..." and "perf: mesh arena ..." lines (the allocator's heap statistics)
     virtual void logMemoryStats() = 0;
+    // device-local video memory in use / the budget the OS gives this process (the overlay's VRAM bar); false = unknown
+    virtual bool videoMemory(std::uint64_t& usedBytes, std::uint64_t& budgetBytes) { (void)usedBytes; (void)budgetBytes; return false; }
 
     // ---- optional modules (rhi/modules.h) ----
     // null when the backend has none (the caller keeps the feature off); the object is the caller's, retire it through retire() while the GPU may use it
