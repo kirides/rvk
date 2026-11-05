@@ -495,6 +495,8 @@ struct DeviceOptions {
     bool vsync = true;
     double maxFps = 0.0;  // present-rate cap; 0 = the window monitor's refresh rate with vsync, none without
     std::uint32_t depthFormat = 0;  // D3DFORMAT of the auto depth stencil, 0 = none
+    bool d3d12Messages = false;  // [debug] d3d12_messages (GameDeviceOptions)
+    bool d3d12Dred = true;       // [debug] d3d12_dred
     bool validation = false;
     bool syncValidation = false;  // + synchronization validation ([vulkan] sync_validation)
     int adapter = -1;

@@ -281,6 +281,8 @@ bool Device::create(const DeviceOptions& options) {
     go.syncValidation = options.syncValidation;
     go.adapter = options.adapter;
     go.allowRayTracing = options.allowRayTracing;
+    go.d3d12Messages = options.d3d12Messages;
+    go.d3d12Dred = options.d3d12Dred;
     go.frameGenQueues = options.frameGenQueues;
     go.asyncPipelines = !options.offscreen;
     shader::setVaryingFillers(options.backend == rhi::Backend::D3D12);

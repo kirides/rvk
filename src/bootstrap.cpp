@@ -1,5 +1,7 @@
 #include "bootstrap.h"
 
+#include "core/crash_dump.h"
+
 #include <algorithm>
 #include <charconv>
 #include <atomic>
@@ -175,6 +177,8 @@ void detourInitializeAdmin(void* self, int apiType) {
         // code that checks it afterwards (docs/research/hal-structs.md 1).
         hal::vulkan::Options vo;
         vo.validation = g_config.validation;
+        vo.d3d12Messages = g_config.d3d12Messages;
+        vo.d3d12Dred = g_config.d3d12Dred;
         vo.syncValidation = g_config.syncValidation;
         vo.adapter = g_config.adapter;
         vo.maxFps = g_config.maxFps;
@@ -425,6 +429,8 @@ void onProcessAttach(void* module) {
     std::string cfgError;
     g_config = loadConfig(paths::dataDir() / L"config.toml", &cfgError);
     log::init(paths::dataDir() / L"rvk.log", g_config.logLevel);
+    crashdump::setDirectory(paths::dataDir() / L"dumps");
+    if (g_config.crashDumps) crashdump::installUnhandledExceptionFilter();
     spdlog::info("risen-enhanced-graphics 0.1.0 ({}), config.toml mode = {}, {:.2f} s after process start",
                  modulePathOf(static_cast<HMODULE>(module)),
                  g_config.mode == Mode::Trace ? std::string_view("trace")

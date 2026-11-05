@@ -125,6 +125,8 @@ bool D3D12DeviceImpl::createGame(const GameDeviceOptions& o) {
     dd.backend = Backend::D3D12;
     dd.validation = o.validation || o.syncValidation;
     dd.adapter = o.adapter;
+    dd.messages = o.d3d12Messages;
+    dd.dred = o.d3d12Dred;
     dd.rayTracing = o.allowRayTracing;
     dd.name = "risen";
     if (!create(dd)) return false;
@@ -1297,8 +1299,10 @@ TimestampResult D3D12DeviceImpl::timestampCollect(std::uint32_t slot) {
 
 namespace {
 void beginEvent(ID3D12GraphicsCommandList* list, const char* text) {
-    const std::wstring w = widen(text != nullptr ? text : "");
-    list->BeginEvent(0 /* PIX_EVENT_UNICODE_VERSION */, w.c_str(), static_cast<UINT>((w.size() + 1) * sizeof(wchar_t)));
+    // PIX3 blob (header-only encoder of the winpixevent port, no runtime DLL); the debug layer and DRED's breadcrumb contexts understand it
+    UINT64 blob[PIXEventsGraphicsRecordSpaceQwords];
+    UINT64* end = PixEventsLegacy::EncodeBeginEventForContext(blob, static_cast<UINT64>(PIX_COLOR_DEFAULT), "%s", text != nullptr ? text : "");
+    list->BeginEvent(D3D12_EVENT_METADATA, blob, static_cast<UINT>(reinterpret_cast<BYTE*>(end) - reinterpret_cast<BYTE*>(blob)));
 }
 }  // namespace
 
@@ -1477,42 +1481,6 @@ void D3D12DeviceImpl::runRaytracingSelfTest() {
 // ---- device removal diagnostics ---------------------------------------------------------------------------------------------
 
 void D3D12DeviceImpl::reportRemoved(const char* where) {
-    static std::atomic<bool> done{false};
-    if (done.exchange(true)) return;
-    spdlog::error("d3d12: the device was removed (seen in {}): reason 0x{:08x}", where, static_cast<unsigned>(device_->GetDeviceRemovedReason()));
-    ComPtr<ID3D12DeviceRemovedExtendedData1> dred;
-    if (FAILED(device_.As(&dred))) {
-        spdlog::error("d3d12: no DRED data (start with RVK_DRED=1 or -Validation)");
-        return;
-    }
-    D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 ab{};
-    if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput1(&ab))) {
-        for (const D3D12_AUTO_BREADCRUMB_NODE1* n = ab.pHeadAutoBreadcrumbNode; n != nullptr; n = n->pNext) {
-            const UINT last = n->pLastBreadcrumbValue != nullptr ? *n->pLastBreadcrumbValue : 0;
-            if (last >= n->BreadcrumbCount) continue;  // finished
-            spdlog::error("d3d12: DRED: list '{}' on queue '{}': {} of {} operations done", n->pCommandListDebugNameA != nullptr ? n->pCommandListDebugNameA : "?",
-                          n->pCommandQueueDebugNameA != nullptr ? n->pCommandQueueDebugNameA : "?", last, n->BreadcrumbCount);
-            for (UINT i = last > 4 ? last - 4 : 0; i < std::min(n->BreadcrumbCount, last + 4); ++i) {
-                spdlog::error("d3d12: DRED:   op {} = {}{}", i, static_cast<int>(n->pCommandHistory[i]), i == last ? "   <- the operation the GPU was in" : "");
-            }
-            for (UINT i = 0; i < n->BreadcrumbContextsCount; ++i) {
-                const auto& c = n->pBreadcrumbContexts[i];
-                if (c.BreadcrumbIndex + 8 >= last && c.BreadcrumbIndex <= last + 4) {
-                    std::string ctx;
-                    for (const wchar_t* w = c.pContextString; w != nullptr && *w != 0; ++w) ctx += static_cast<char>(*w < 128 ? *w : '?');
-                    spdlog::error("d3d12: DRED:   context at op {}: {}", c.BreadcrumbIndex, ctx);
-                }
-            }
-        }
-    }
-    D3D12_DRED_PAGE_FAULT_OUTPUT1 pf{};
-    if (SUCCEEDED(dred->GetPageFaultAllocationOutput1(&pf)) && pf.PageFaultVA != 0) {
-        spdlog::error("d3d12: DRED: page fault at 0x{:x}", pf.PageFaultVA);
-        for (const D3D12_DRED_ALLOCATION_NODE1* n = pf.pHeadExistingAllocationNode; n != nullptr; n = n->pNext) {
-            spdlog::error("d3d12: DRED:   existing allocation '{}' type {}", n->ObjectNameA != nullptr ? n->ObjectNameA : "?", static_cast<int>(n->AllocationType));
-        }
-        for (const D3D12_DRED_ALLOCATION_NODE1* n = pf.pHeadRecentFreedAllocationNode; n != nullptr; n = n->pNext) {
-            spdlog::error("d3d12: DRED:   recently freed '{}' type {}", n->ObjectNameA != nullptr ? n->ObjectNameA : "?", static_cast<int>(n->AllocationType));
-        }
-    }
+    // the reason, DRED's breadcrumbs / page fault and a minidump in bin\rvk\dumps, once (markRemoved)
+    markRemoved(where, device_->GetDeviceRemovedReason());
 }

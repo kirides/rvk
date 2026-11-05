@@ -7,6 +7,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "core/crash_dump.h"
 #include "core/paths.h"
 #include "vk/debug_names.h"
 #include "vk/probe.h"
@@ -654,10 +655,16 @@ VkResult Context::queuePresent(const VkPresentInfoKHR& present) {
 void Context::reportDeviceLost(const char* where) {
     if (lostReported_.exchange(true)) return;
     spdlog::error("vulkan: DEVICE LOST at {} (validation errors so far: {})", where, validationErrors_.load());
+    std::string report = std::format("Vulkan device lost at {} (validation errors so far: {})\r\n", where, validationErrors_.load());
     if (lostReporter_) {
         const std::string text = lostReporter_();
-        if (!text.empty()) spdlog::error("vulkan: {}", text);
+        if (!text.empty()) {
+            spdlog::error("vulkan: {}", text);
+            report += text + "\r\n";
+        }
     }
+    // a minidump of the process at the moment of the loss (threads, modules) + the report, next to rvk.log (core/crash_dump.h)
+    if (const auto dump = crashdump::write("vulkan_device_lost", report); !dump.empty()) spdlog::error("vulkan: minidump written to {}", dump.string());
     if (!features_.deviceFault || vkGetDeviceFaultInfoEXT == nullptr) {
         spdlog::error("vulkan: device fault: the driver offers no VK_EXT_device_fault");
         return;
@@ -787,6 +794,16 @@ caps::Report Context::capabilities(bool pipelineLibrariesInUse) const {
         fgQueues_.requested ? fgQueues_.reason : "not requested: the extra queues are created when frame generation is on at startup",
         std::format("graphics queue family {} x{}, compute-only family {}", queueFamily_, queueFamilyCount_,
                     computeFamily_ != ~0u ? std::format("{} x{}", computeFamily_, computeFamilyCount_) : std::string("none")));
+    // vendor RT extensions: information only (the renderer does not use them; docs/research/raytracing.md 9)
+    set(Cap::ClusterAccelerationStructure, prt.clusterAccelerationStructure, false,
+        prt.clusterAccelerationStructure ? "information only: nothing in the renderer builds cluster structures (static meshes are few, large BLASes)"
+                                         : "the GPU / driver has no VK_NV_cluster_acceleration_structure (NVIDIA only)",
+        prt.clusterAccelerationStructure ? "VK_NV_cluster_acceleration_structure" : "");
+    set(Cap::RayTracingReorder, prt.invocationReorder, false,
+        prt.invocationReorder ? "information only: ray query has no reorder hint (needs ray tracing pipelines)"
+                              : "the GPU / driver has no VK_EXT / VK_NV_ray_tracing_invocation_reorder",
+        prt.invocationReorder ? std::format("{}, hardware reordering hint: {}", prt.invocationReorderName, prt.invocationReorderReorders ? "reorders" : "none (no-op)")
+                              : std::string());
     set(Cap::SamplerAnisotropy, features_.samplerAnisotropy, features_.samplerAnisotropy, "",
         features_.samplerAnisotropy ? std::format("max {:.0f}x", features_.maxAnisotropy) : "");
     if (prt.accelerationStructure) {

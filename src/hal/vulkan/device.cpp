@@ -312,6 +312,8 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     o.cacheDir = options.cacheDir;
     o.logDraws = options.logDraws;
     // rt.allow is a restart setting: the value the session started with decides (its effective value waits for the report)
+    o.d3d12Messages = options.d3d12Messages;
+    o.d3d12Dred = options.d3d12Dred;
     o.allowRayTracing = rs.rtAllow == nullptr || rs.rtAllow->startValue() != 0.0;
     // the frame generation swapchain needs three more queues than the floor's one (vk/fg_swapchain.h): requested whenever the frame
     // generation DLL is installed, so that framegen.mode can be switched at run time (queues nobody uses cost nothing)

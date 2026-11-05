@@ -43,6 +43,8 @@ namespace rvk::hal::vulkan {
 class HalDevice;
 
 struct Options {
+    bool d3d12Messages = false;  // [debug] d3d12_messages
+    bool d3d12Dred = true;       // [debug] d3d12_dred
     bool validation = false;
     bool syncValidation = false;
     int adapter = -1;

@@ -101,6 +101,9 @@ Config parseConfig(std::string_view text, std::string* error) {
     cfg.logDraws = static_cast<std::uint32_t>(tbl["debug"]["log_draws"].value_or(0));
     cfg.logFrame = static_cast<std::uint32_t>(tbl["debug"]["log_frame"].value_or(0));
     cfg.dumpSavedTextures = tbl["debug"]["dump_saved_textures"].value_or(cfg.dumpSavedTextures);
+    cfg.crashDumps = tbl["debug"]["crash_dumps"].value_or(cfg.crashDumps);
+    cfg.d3d12Messages = tbl["debug"]["d3d12_messages"].value_or(cfg.d3d12Messages);
+    cfg.d3d12Dred = tbl["debug"]["d3d12_dred"].value_or(cfg.d3d12Dred);
     cfg.perf = tbl["debug"]["perf"].value_or(cfg.perf);
     cfg.rtSelfTest = tbl["debug"]["rt_selftest"].value_or(cfg.rtSelfTest);
     cfg.shaderDebugInfo = tbl["debug"]["shader_debug_info"].value_or(cfg.shaderDebugInfo);

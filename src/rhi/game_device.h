@@ -343,6 +343,8 @@ struct GameDeviceOptions {
     int adapter = -1;
     bool allowRayTracing = true;  // rt.allow
     bool frameGenQueues = false;  // framegen.mode != off at start: the extra queues of the frame generation swapchain
+    bool d3d12Messages = false;   // D3D12: the debug layer's messages into rvk.log without GPU based validation ([debug] d3d12_messages)
+    bool d3d12Dred = true;        // D3D12: DRED breadcrumbs + page fault data for a device removal report ([debug] d3d12_dred; RVK_DRED=0 off)
     bool asyncPipelines = true;   // D3D12: PSOs are built on background threads (a draw whose PSO is pending is skipped); false = built at first use (tests)
 };
 
