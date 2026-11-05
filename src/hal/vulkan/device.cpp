@@ -1789,6 +1789,46 @@ void HalDevice::logPerf(d3d9::PerfStats p) {
     }
     const double n = static_cast<double>(p.frames);
     auto& iv = p.frameIntervalsMs;
+    if (iv.size() >= 16 && p.frameSplits.size() == iv.size()) {
+        // frame spikes: intervals above 2x the median (and 4 ms over it), their spacing in frames and where their time went
+        std::vector<float> sorted = iv;
+        std::ranges::nth_element(sorted, sorted.begin() + sorted.size() / 2);
+        const float med = sorted[sorted.size() / 2];
+        const float limit = std::max(med * 2.0f, med + 4.0f);
+        std::size_t count = 0, last = 0, gapSum = 0, gapMin = SIZE_MAX, gapMax = 0;
+        double sumIv = 0, sumCpu = 0, sumPresent = 0, sumSlot = 0, nCpu = 0, nPresent = 0, nSlot = 0;
+        for (std::size_t i = 1; i < iv.size(); ++i) {
+            // interval i = the previous frame's present call + this frame's CPU (present start to present start)
+            const auto& s = p.frameSplits[i];
+            const float prevPresent = p.frameSplits[i - 1].presentMs;
+            if (iv[i] <= limit) {
+                nCpu += s.cpuMs;
+                nPresent += prevPresent;
+                nSlot += s.slotWaitMs;
+                continue;
+            }
+            if (count > 0) {
+                const std::size_t g = i - last;
+                gapSum += g;
+                gapMin = std::min(gapMin, g);
+                gapMax = std::max(gapMax, g);
+            }
+            last = i;
+            ++count;
+            sumIv += iv[i];
+            sumCpu += s.cpuMs;
+            sumPresent += prevPresent;
+            sumSlot += s.slotWaitMs;
+        }
+        if (count > 0) {
+            const double c = static_cast<double>(count), rest = static_cast<double>(iv.size() - 1 - count);
+            spdlog::info("perf: frame spikes: {} of {} intervals > {:.1f} ms (median {:.2f}), gap {} frames (min {} / max {}); spike frames: "
+                         "interval {:.2f} ms = CPU {:.2f} (slot wait {:.2f}) + present {:.2f}; other frames: CPU {:.2f} (slot wait {:.2f}) + present {:.2f}",
+                         count, iv.size(), limit, med, count > 1 ? std::format("{:.1f}", static_cast<double>(gapSum) / (c - 1)) : std::string("-"),
+                         count > 1 ? gapMin : 0, gapMax, sumIv / c, sumCpu / c, sumSlot / c, sumPresent / c, rest > 0 ? nCpu / rest : 0.0,
+                         rest > 0 ? nSlot / rest : 0.0, rest > 0 ? nPresent / rest : 0.0);
+        }
+    }
     std::ranges::sort(iv);
     const auto pct = [&](double q) { return iv.empty() ? 0.0 : static_cast<double>(iv[std::min(iv.size() - 1, static_cast<std::size_t>(q * static_cast<double>(iv.size())))]); };
     const double other = p.cpuFrameMs - p.drawMs - p.readbackMs;

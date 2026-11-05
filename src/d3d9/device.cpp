@@ -743,6 +743,7 @@ void Device::beginFrame() {
     substituteFrom_ = nullptr;
     substituteSlot_ = 0;
     perf_.slotWaitMs += game_->lastSlotWaitMs();
+    frameSlotWaitMs_ = static_cast<float>(game_->lastSlotWaitMs());
     if (game_->timestampsEnabled()) {
         const std::uint32_t slot = game_->frameSlot();
         const rhi::TimestampResult r = game_->timestampCollect(slot);
@@ -1090,6 +1091,8 @@ void Device::present() {
                 d.live_.intervalMs = interval;
                 if (d.options_.perf) {  // takePerf (the only consumer) runs only with [debug] perf
                     d.perf_.frameIntervalsMs.push_back(interval);
+                    d.perf_.frameSplits.push_back({d.live_.cpuMs, std::chrono::duration<float, std::milli>(now - d.presentStart_).count(),
+                                                   d.frameSlotWaitMs_});
                 }
             }
             d.lastPresentStart_ = d.presentStart_;

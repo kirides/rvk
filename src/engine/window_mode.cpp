@@ -249,9 +249,32 @@ MonitorInfo gatherMonitor(HMONITOR monitor) {
     return mi;
 }
 
-std::string signatureOf(const MonitorInfo& m) {
-    return std::format("{} {} {} {} {}x{}@{} {}", m.name, rectText(m.rect), rectText(m.work), m.modes.size(), m.desktop.width, m.desktop.height,
-                       m.desktop.refresh, fake.on ? "fake" : "");
+// The display watcher's signature of a monitor: name, rect, work area and current mode, WITHOUT the mode list. Enumerating
+// the modes is one driver round trip per mode (334 modes on a 2560x1440 panel: 15-17 ms), which run 4 times a second was a
+// frame-time spike every 250 ms; the current mode is one call (~0.002 ms). The full MonitorInfo is gathered only when this
+// signature changes (a display mode change, another monitor, a virtual display, the work area: all move one of these).
+std::string quickSignature(HMONITOR monitor) {
+    Rect r;
+    std::string name;
+    if (!monitorRect(monitor, r, &name)) return {};
+    Rect work = r;
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (fake.on) {
+        work = {r.x, r.y, r.width, r.height > 60 ? r.height - 48 : r.height};
+    } else if (GetMonitorInfoW(monitor, &info)) {
+        work = {info.rcWork.left, info.rcWork.top, info.rcWork.right - info.rcWork.left, info.rcWork.bottom - info.rcWork.top};
+    }
+    DisplayMode current{static_cast<std::uint32_t>(r.width), static_cast<std::uint32_t>(r.height), 0};
+    if (fake.on) {
+        current = {fake.width, fake.height, 60};
+    } else {
+        DEVMODEW dm{};
+        dm.dmSize = sizeof(dm);
+        if (EnumDisplaySettingsW(monitorDevice(monitor).c_str(), ENUM_CURRENT_SETTINGS, &dm)) current = modeOf(dm);
+    }
+    return std::format("{} {} {} {}x{}@{} {}", name, rectText(r), rectText(work), current.width, current.height, current.refresh,
+                       fake.on ? "fake" : "");
 }
 
 void logUnavailable(const Request& req, const Resolved& res, const MonitorInfo& mon, std::string_view when) {
@@ -409,7 +432,7 @@ int detourCreateGraphicsSubsystem(void* self, std::uint8_t* setup, bool b) {
     g.startModes = engineModes(mon.modes, res);
     g.startDesktop = mon.desktop;
     g.startDone = true;
-    g.sig = signatureOf(mon);
+    g.sig = quickSignature(monitor);
     spdlog::info("window: start: configured {}x{} @ {} Hz {} on {} (desktop {}x{} @ {} Hz, {} modes)", req.width, req.height, req.refresh,
                  kindName(req.kind), mon.name, mon.desktop.width, mon.desktop.height, mon.desktop.refresh, mon.modes.size());
     if (res.changed) {
@@ -828,10 +851,10 @@ void watchDisplay() {
     if (now - last < std::chrono::milliseconds(250)) return;
     last = now;
     const HMONITOR monitor = MonitorFromWindow(g.window, MONITOR_DEFAULTTONEAREST);
-    const MonitorInfo mon = gatherMonitor(monitor);
-    const std::string sig = signatureOf(mon);
+    std::string sig = quickSignature(monitor);  // cheap: the mode list is enumerated only after a change (see quickSignature)
     if (sig == g.sig) return;
-    g.sig = sig;
+    g.sig = std::move(sig);
+    const MonitorInfo mon = gatherMonitor(monitor);
     Request req = g.pref;
     const bool popup = req.kind != Kind::Windowed;
     req.kind = kindOf(popup);

@@ -815,3 +815,13 @@ Remaining Full - Wrapper after this (profile of the same run, ms per frame inclu
 ## 30. Lighting round 3 (2026-11-05, gpu-scene.md 9.10)
 
 Far light level, the group-shared cluster build (0.228 -> 0.112 ms Vulkan, 0.232 -> 0.150 ms D3D12), lamp shadows (`light.shadow` 0.07 / 0.09 ms at 9 lights, +0.25 / +0.3 ms GPU in `many` mode at harbour_docks), physical-style PBR code (+0.45 ms GPU Vulkan, +0.8 ms D3D12 in the jungle save when compiled into every cluster variant: now compiled in only when a session starts with `lighting.style=physical`). CPU: lit 7.34 vs Full 8.04 (Vulkan), 7.50 vs 8.33 (D3D12, mean of two); Wrapper 5.99: Full - Wrapper 1.3 - 1.5 ms. The table-known tree rule cuts the tree batches by 37 % (4.27 M -> 2.70 M per run) for -0.1 ms.
+
+## 31. Frame spikes 4 times a second: the display watcher (2026-11-06)
+
+`-Perf` now logs `perf: frame spikes: N of M intervals > X ms (median m), gap G frames (min / max); spike frames: interval =
+CPU (slot wait) + present; other frames: ...` per 5 s window (intervals above 2x the median and 4 ms over it; "present" = the
+previous frame's present call, which the interval contains). It found a +17 ms CPU spike every 250 ms: `watchDisplay`
+enumerated all 334 display modes each time (window-mode.md 10.1). Fixed; note that `-CpuProfile`'s window (present end ->
+`SwapScreen` entry) does not cover our own `SwapScreen` prologue (settings, overlay, menu pacing, BeforePresent passes,
+window / display watchers): a spike the `perf: frame spikes` line shows as CPU but the spike profile misses lives there.
+

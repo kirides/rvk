@@ -596,6 +596,12 @@ struct PerfStats {
     std::uint64_t legacyDraws[2] = {};
     std::uint64_t splitMismatches = 0;
     std::vector<float> frameIntervalsMs;   // present-to-present
+    // per frame (same order as frameIntervalsMs): engine + HAL CPU before the present, the present call itself, the frame
+    // slot wait inside the frame; the perf line names the spike frames' share of each (performance.md, frame spikes)
+    struct FrameSplit {
+        float cpuMs = 0.0f, presentMs = 0.0f, slotWaitMs = 0.0f;
+    };
+    std::vector<FrameSplit> frameSplits;
     pacing::FramePacer::Stats pacer;
     double pacerRate = 0.0;
     bool pacerVblank = false;
@@ -1577,6 +1583,7 @@ private:
     std::uint64_t perfShadersBase_ = 0, perfShadersCompiledBase_ = 0, perfShaderNsBase_ = 0;
     std::chrono::steady_clock::time_point presentEnd_{};
     std::chrono::steady_clock::time_point presentStart_{};
+    float frameSlotWaitMs_ = 0.0f;  // this frame's slot wait (beginFrame), for PerfStats::frameSplits
     std::chrono::steady_clock::time_point lastPresentStart_{};
     std::chrono::steady_clock::time_point pipelinesSaved_{};
     std::uint64_t ringBytesBase_ = 0;

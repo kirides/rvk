@@ -283,7 +283,7 @@ has). A `WM_SIZE` inside that call crashed (Game.dll GUI not created yet, null r
 subclass that holds `WM_SIZE` back; the first present sends it (`window: start: the engine's WM_SIZE sent now`). Later:
 `SetResolutionEx` pre-hook resolves every request (options menu, F2, commands); the **preference** (config at the start, any
 non-own request) is kept in memory and **never written back** to ConfigUser.xml. At run time `watchDisplay` (every 250 ms at
-presents: monitor rect, work area, desktop mode, mode count) re-resolves the preference when the window's monitor changes (virtual
+presents: monitor rect, work area, current mode; NOT the mode list, see below) re-resolves the preference when the window's monitor changes (virtual
 display appears, desktop mode changes, window moved to another monitor): a smaller monitor gets the fallback through the engine's own
 `SetResolution` (back buffer, viewports, GUI `OnSize`, swapchain, FSR render scale, frame generation, overlay follow as they do for
 any mode change), the monitor that offers the preference gets it back (`window: resolution WxH is available on <monitor> again`).
@@ -304,3 +304,14 @@ Also left: after a live fallback and return the **size** is the preference's aga
 (`SetResolution` keeps `+0x6cc`); exclusive fullscreen of the resolver (nearest mode) was only checked with the fake monitor (no
 display mode change, the window was in the background); verified [V] 2026-11-05 on a real 1920x1200 desktop (virtual display) and
 with `RVK_FAKE_MONITOR` 1600x900 / 1366x768 / 1920x1080, live `display fake 1280x800` -> `off`.
+
+### 10.1 The watcher's cost (2026-11-06)
+
+The first version built its signature from the full `MonitorInfo` every 250 ms, i.e. enumerated every display mode
+(`EnumDisplaySettingsW` per index: 334 modes on the 2560x1440 / 120 Hz panel = **15 - 17 ms** on the engine thread, measured).
+That was a frame-time spike exactly 4 times a second in every Vulkan / D3D12 mode (user report: +15 ms spikes in the overlay's
+frame graph; `-Perf` line `perf: frame spikes: 20 of ~600 intervals ..., gap ~30 frames, spike frames: CPU +17 ms`). The CPU
+spike profile (`-CpuProfile`) missed it: its window ends where `SwapScreen` begins, and `watchDisplay` runs inside `SwapScreen`
+before `Device::present`. Now `quickSignature` (name, rect, work area, `ENUM_CURRENT_SETTINGS`: ~0.002 ms) is compared and the
+mode list is gathered only after it changed; the fake-monitor test (`display fake 1280x720` / `off`) still switches both ways.
+After: max interval 11 - 12 ms at p50 7.2 ms in the savegame hold (before 22 - 27 ms), no spike line.
