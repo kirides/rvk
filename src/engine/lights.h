@@ -15,6 +15,7 @@ struct WorldLight {
     float pos[3]{};
     float range = 0.0f;      // the light's radius (the engine's falloff 1 - d^2 / R^2 reaches 0 there)
     float col[3]{};          // diffuse colour x intensity, as the engine hands it to the shaders (c26 + 4 i)
+    bool ambient = false;    // an eCStaticAmbientLight_PS (diagnostics: its draw colour is scaled differently)
     bool dynamic = false;    // eCPointLight_PS (flicker, spells, torches carried by the world), else a static light
 };
 

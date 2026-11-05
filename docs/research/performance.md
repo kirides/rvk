@@ -805,3 +805,7 @@ Remaining Full - Wrapper after this (profile of the same run, ms per frame inclu
 ## 29. Table lighting, completed (2026-11-05, gpu-scene.md 9.9)
 
 `lighting.tree_merge` + `lighting.table_complete` (see gpu-scene.md 9.9). Vulkan, paired: Wrapper 5.93, Full 8.00, `clustered + full_lit` 7.52, + `tree_merge` 7.53 (the savegame's trees end their batches on their own far static lights: nothing to merge). A forced 40 % batch reduction (table far 48,000) gained 0.05 - 0.1 ms in timing runs, 0.3 - 0.5 in the sampled profile: draws are 99.9 % packet-cache replays. Gap Full - Wrapper 1.6 ms. `kLightFar` = 48,000 changed pictures (monastery_hall mean |d| 12.7): stays 16,000.
+
+## 30. Lighting round 3 (2026-11-05, gpu-scene.md 9.10)
+
+Far light level, the group-shared cluster build (0.228 -> 0.112 ms Vulkan, 0.232 -> 0.150 ms D3D12), lamp shadows (`light.shadow` 0.07 / 0.09 ms at 9 lights, +0.25 / +0.3 ms GPU in `many` mode at harbour_docks), physical-style PBR code (+0.45 ms GPU Vulkan, +0.8 ms D3D12 in the jungle save when compiled into every cluster variant: now compiled in only when a session starts with `lighting.style=physical`). CPU: lit 7.34 vs Full 8.04 (Vulkan), 7.50 vs 8.33 (D3D12, mean of two); Wrapper 5.99: Full - Wrapper 1.3 - 1.5 ms. The table-known tree rule cuts the tree batches by 37 % (4.27 M -> 2.70 M per run) for -0.1 ms.

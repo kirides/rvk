@@ -324,7 +324,17 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
         }
         if (tableMerge && statLights) {
             const std::uint32_t ns = static_cast<std::uint32_t>(buf[1] >> 40 & 0xff);  // illum +0xd
-            if (ns > 2) {
+            // lights the table holds (the far level reaches 96,000 units) light this instance's pixels by position: they no longer tie it to its batch
+            bool allKnown = ns >= 1 && ns <= 2 && enh::LightTable::registryComplete();
+            for (std::uint32_t e = 0; allKnown && e < ns; ++e) {
+                float p[3];
+                std::memcpy(p, &buf[2 + 8 * e], sizeof(p));
+                allKnown = enh::LightTable::lightKnown(p);
+            }
+            if (allKnown) {
+                x.lightSig = 0;
+                ++st.knownLights;
+            } else if (ns > 2) {
                 x.ownLights = true;
             } else {
                 std::uint64_t sig = 1469598103934665603ull ^ ns;

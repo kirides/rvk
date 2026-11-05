@@ -16,6 +16,9 @@ struct LightClusterPush {
     uint4 grid;      // x tiles x, y tiles y, z slices, w light count
     float4 zs;       // x near, y far, z slices / ln(far / near), w unused
     uint4 offs;      // x lights offset, y clusters offset (bytes), z style, w flags
+    uint4 shadow;    // x light shadow image slot (bindless, 0 = none this frame), y width, z height, w light count with a shadow id
+    uint4 grid1;     // the far level: x tiles x, y tiles y, z slices (0 = none), w its clusters' offset (bytes)
+    float4 zs1;      // x near (= zs.y), y far, z slices / ln(far / near), w unused
 };
 RVK_PUSH(LightClusterPush, pc);
 
@@ -24,18 +27,21 @@ float2 rvkClusterSlope(RvkFrame f, float2 ndc) {
     return v.xy / (abs(v.z) > 1e-9 ? v.z : 1e-9);
 }
 
+groupshared float4 gsLight[64];
+
 [numthreads(64, 1, 1)]
-void CSMain(uint3 id : SV_DispatchThreadID) {
+void CSMain(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     const uint t = id.x;
     const uint count = pc.grid.w;
-    const uint clusters = pc.grid.x * pc.grid.y * pc.grid.z;
+    const uint clusters0 = pc.grid.x * pc.grid.y * pc.grid.z;
+    const uint clusters = clusters0 + pc.grid1.x * pc.grid1.y * pc.grid1.z;
     RvkFrame f = rvkLoadFrame(pc.frame);
 
     if (t == 0u) {
         rvkBufStore(pc.dst, 0, f.frameInfo.x + 1u);
         rvkBufStore(pc.dst, 4, count);
-        rvkBufStore(pc.dst, 8, 0u);
-        rvkBufStore(pc.dst, 12, 0u);
+        rvkBufStore(pc.dst, 8, pc.shadow.x);
+        rvkBufStore(pc.dst, 12, pc.shadow.y | (pc.shadow.z << 16));
         rvkBufStore(pc.dst, 16, pc.grid.x);
         rvkBufStore(pc.dst, 20, pc.grid.y);
         rvkBufStore(pc.dst, 24, pc.grid.z);
@@ -48,6 +54,14 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         rvkBufStore(pc.dst, 52, pc.offs.y);
         rvkBufStore(pc.dst, 56, pc.offs.z);
         rvkBufStore(pc.dst, 60, pc.offs.w);
+        rvkBufStore(pc.dst, 64, pc.grid1.x);
+        rvkBufStore(pc.dst, 68, pc.grid1.y);
+        rvkBufStore(pc.dst, 72, pc.grid1.z);
+        rvkBufStore(pc.dst, 76, pc.grid1.w);
+        rvkBufStore(pc.dst, 80, asuint(pc.zs1.x));
+        rvkBufStore(pc.dst, 84, asuint(pc.zs1.y));
+        rvkBufStore(pc.dst, 88, asuint(pc.zs1.z));
+        rvkBufStore(pc.dst, 92, 0u);
     }
     // the copy: lights the pixel shaders read (the CPU upload buffer is per frame in flight, its address changes)
     if (t < count) {
@@ -56,19 +70,23 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
             rvkRwStore<float4, 16>(rvkAddrAdd(rvkAddr(pc.dst), pc.offs.x + t * RVK_LIGHT_BYTES + k * 16u), v);
         }
     }
-    if (t >= clusters) return;
+    const bool active = t < clusters;
 
-    // cluster t -> (tile x, tile y, slice)
-    const uint tx = t % pc.grid.x;
-    const uint ty = (t / pc.grid.x) % pc.grid.y;
-    const uint sz = t / (pc.grid.x * pc.grid.y);
+    // cluster t -> (level, tile x, tile y, slice)
+    const bool far = t >= clusters0;
+    const uint u = far ? t - clusters0 : t;
+    const uint3 gd = far ? pc.grid1.xyz : pc.grid.xyz;
+    const uint tx = u % gd.x;
+    const uint ty = (u / gd.x) % gd.y;
+    const uint sz = u / (gd.x * gd.y);
     // NDC of the tile's corners (y up in NDC; tile row 0 = top of the screen)
-    const float x0 = -1.0 + 2.0 * float(tx) / float(pc.grid.x), x1 = -1.0 + 2.0 * float(tx + 1u) / float(pc.grid.x);
-    const float y1 = 1.0 - 2.0 * float(ty) / float(pc.grid.y), y0 = 1.0 - 2.0 * float(ty + 1u) / float(pc.grid.y);
+    const float x0 = -1.0 + 2.0 * float(tx) / float(gd.x), x1 = -1.0 + 2.0 * float(tx + 1u) / float(gd.x);
+    const float y1 = 1.0 - 2.0 * float(ty) / float(gd.y), y0 = 1.0 - 2.0 * float(ty + 1u) / float(gd.y);
     const float2 s00 = rvkClusterSlope(f, float2(x0, y0)), s10 = rvkClusterSlope(f, float2(x1, y0));
     const float2 s01 = rvkClusterSlope(f, float2(x0, y1)), s11 = rvkClusterSlope(f, float2(x1, y1));
-    const float zn = pc.zs.x * exp(float(sz) / pc.zs.z);
-    const float zf = pc.zs.x * exp(float(sz + 1u) / pc.zs.z);
+    const float zNear = far ? pc.zs1.x : pc.zs.x, zScale = far ? pc.zs1.z : pc.zs.z;
+    const float zn = zNear * exp(float(sz) / zScale);
+    const float zf = zNear * exp(float(sz + 1u) / zScale);
     float3 bmin = float3(1e30, 1e30, 1e30), bmax = float3(-1e30, -1e30, -1e30);
     const float2 sl[4] = {s00, s10, s01, s11};
     [unroll] for (uint c = 0; c < 4; ++c) {
@@ -77,17 +95,29 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         bmax = max(bmax, max(a, b));
     }
     uint n = 0;
-    const uint outBase = pc.offs.y + t * RVK_LIGHT_CLUSTER_BYTES;
-    for (uint i = 0; i < count && n < RVK_LIGHT_MAX_PER_CLUSTER; ++i) {
-        float4 pr = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(pc.src), i * RVK_LIGHT_BYTES));
-        float range = rsqrt(max(pr.w, 1e-12));
-        float3 c = mul(float4(pr.xyz, 1.0), f.view).xyz;
-        float3 q = clamp(c, bmin, bmax);
-        float3 d = c - q;
-        if (dot(d, d) <= range * range) {
-            rvkBufStore(pc.dst, outBase + 4u + n * 4u, i);
-            ++n;
+    const uint outBase = (far ? pc.grid1.w : pc.offs.y) + u * RVK_LIGHT_CLUSTER_BYTES;
+    // the group stages 64 lights at a time (view-space centre + range) in shared memory: every thread tests them against its own box
+    for (uint base = 0; base < count; base += 64u) {
+        const uint li = base + gi;
+        float4 v = float4(1e30, 1e30, 1e30, 0.0);
+        if (li < count) {
+            float4 pr = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(pc.src), li * RVK_LIGHT_BYTES));
+            v = float4(mul(float4(pr.xyz, 1.0), f.view).xyz, rsqrt(max(pr.w, 1e-12)));
         }
+        gsLight[gi] = v;
+        GroupMemoryBarrierWithGroupSync();
+        if (active) {
+            const uint m = min(64u, count - base);
+            for (uint k = 0; k < m && n < RVK_LIGHT_MAX_PER_CLUSTER; ++k) {
+                float4 g = gsLight[k];
+                float3 d = g.xyz - clamp(g.xyz, bmin, bmax);
+                if (dot(d, d) <= g.w * g.w) {
+                    rvkBufStore(pc.dst, outBase + 4u + n * 4u, base + k);
+                    ++n;
+                }
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
     }
-    rvkBufStore(pc.dst, outBase, n);
+    if (active) rvkBufStore(pc.dst, outBase, n);
 }

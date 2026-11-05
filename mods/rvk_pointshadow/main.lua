@@ -19,6 +19,7 @@ local holdS = tonumber(T.param("hold", "20")) or 20
 local dist = tonumber(T.param("dist", "500")) or 500
 local height = tonumber(T.param("height", "120")) or 120
 local weather = T.param("weather", "Sunny_Full")
+local cast = T.param("cast", "true")  -- "false": the light does not cast the engine's own shadows (lighting.light_shadows traces them instead)
 
 T.plan { "new game started", "light spawned", "light casts shadows", "held" }
 
@@ -46,7 +47,7 @@ T.run(function()
     risen.log.info(("rvk_pointshadow: player at (%.0f, %.0f, %.0f)"):format(px or 0, py or 0, pz or 0))
     local t = risen.template.get("It_Cast_Light")
     T.expect("template", t ~= nil, "It_Cast_Light")
-    local okShadow = t and t:set_property("eCPointLight_PS", "CastShadows", "true")
+    local okShadow = t and t:set_property("eCPointLight_PS", "CastShadows", cast)
     local okRange = t and t:set_property("eCPointLight_PS", "Range", range)
     risen.log.info(("rvk_pointshadow: template CastShadows set %s, Range set %s"):format(tostring(okShadow), tostring(okRange)))
     local light = risen.entity.spawn("It_Cast_Light", px + 150, py + height, pz + 150)
@@ -55,10 +56,10 @@ T.run(function()
         risen.log.info(("rvk_pointshadow: light CastShadows %s, Range %s, Enabled %s, Intensity %s"):format(
             tostring(light:get_property("eCPointLight_PS", "CastShadows")), tostring(light:get_property("eCPointLight_PS", "Range")),
             tostring(light:get_property("eCPointLight_PS", "Enabled")), tostring(light:get_property("eCPointLight_PS", "Intensity"))))
-        if tostring(light:get_property("eCPointLight_PS", "CastShadows")):lower() ~= "true" then
-            light:set_property("eCPointLight_PS", "CastShadows", "true")
+        if tostring(light:get_property("eCPointLight_PS", "CastShadows")):lower() ~= cast then
+            light:set_property("eCPointLight_PS", "CastShadows", cast)
         end
-        T.eq("light casts shadows", tostring(light:get_property("eCPointLight_PS", "CastShadows")):lower(), "true")
+        T.eq("light casts shadows", tostring(light:get_property("eCPointLight_PS", "CastShadows")):lower(), cast)
     end
     risen.camera.set { pos = { px - dist, py + 250, pz - dist * 0.3 }, target = { px + 75, py + 60, pz + 75 }, fov = 60, instant = true }
     wait_s(holdS)

@@ -23,7 +23,9 @@
 #define RVK_LIGHT_MAX_PER_CLUSTER 63u                      // indices per cluster (+ the count word = 64 words = 256 B)
 #define RVK_LIGHT_CLUSTER_BYTES 256u
 #define RVK_LIGHT_BYTES         64u
-#define RVK_LIGHT_HEADER_BYTES  64u
+#define RVK_LIGHT_HEADER_BYTES  128u
+#define RVK_LIGHT_SHADOW_MAX    31u                         // ids of the ray-traced light shadows (a pixel keeps 4 of them: RVK_LS_ENTRIES)
+#define RVK_LS_ENTRIES          4u
 #define RVK_LIGHT_FLAG_DYNAMIC  1u                          // an eCPointLight_PS (flicker, spells), else a static light
 
 // engine constants of the model
@@ -33,17 +35,19 @@
 
 // header words (uint4 x 4): the build pass writes them every frame
 struct RvkLightHeader {
-    uint4 a;  // x frame stamp (frameInfo.x + 1), y light count, z unused, w unused
+    uint4 a;  // x frame stamp (frameInfo.x + 1), y light count, z light shadow image slot (0 = none this frame), w its size (width | height << 16)
     uint4 grid;  // x tiles x, y tiles y, z slices, w max indices per cluster
     float4 zs;   // x near, y far, z slices / ln(far / near), w unused
     uint4 offs;  // x lights offset (bytes), y clusters offset (bytes), z style, w flags
+    uint4 grid1; // the far level (beyond zs.y): x tiles x, y tiles y, z slices (0 = none), w clusters offset (bytes)
+    float4 zs1;  // x near (= zs.y), y far, z slices / ln(far / near), w unused
 };
 
 struct RvkLight {
     float4 posRcp;    // xyz world position, w 1 / R^2
     float4 colRange;  // rgb diffuse x intensity (the constants the engine's shaders get), w range R
     float4 specFlags; // rgb specular colour, w RVK_LIGHT_FLAG_* (as float bits)
-    float4 misc;      // x stable id (float bits), y shadow channel selector index + 1 (0 = none; reserved for the shadow cube array), zw unused
+    float4 misc;      // x stable id (float bits), y light shadow id 1..RVK_LIGHT_SHADOW_MAX (uint bits, 0 = none: lighting.light_shadows), zw unused
 };
 
 // ---- the engine's terms (shared by the variant's scoring and the physical ratio) ------------------------------------------------------
@@ -65,4 +69,22 @@ float rvkLmPhysicalRatio(float d2, float rcpSqrRange) {
 uint rvkLightSlice(float viewZ, float nearZ, float slicesPerLn, uint slices) {
     float s = log(max(viewZ, nearZ) / nearZ) * slicesPerLn;
     return min(uint(s), slices - 1u);
+}
+
+// the cluster that holds view depth `viewZ` at screen position `uv` (0..1): level 0 (exponential slices zs.x .. zs.y), beyond zs.y the coarse far level 1
+// (a finer tile grid over a few slices up to zs1.y: lights of the far forests the material shaders' per-object lists still carry); `base` = the table
+RvkAddr rvkLightClusterAt(RvkAddr base, float viewZ, float2 uv) {
+    uint4 grid = rvkRawLoad<uint4, 16>(rvkAddrAdd(base, 16u));
+    float4 zs = rvkRawLoad<float4, 16>(rvkAddrAdd(base, 32u));
+    uint4 offs = rvkRawLoad<uint4, 16>(rvkAddrAdd(base, 48u));
+    uint4 grid1 = rvkRawLoad<uint4, 16>(rvkAddrAdd(base, 64u));
+    if (grid1.z != 0u && viewZ >= zs.y) {
+        float4 zs1 = rvkRawLoad<float4, 16>(rvkAddrAdd(base, 80u));
+        uint tx1 = min(uint(uv.x * float(grid1.x)), grid1.x - 1u), ty1 = min(uint(uv.y * float(grid1.y)), grid1.y - 1u);
+        uint sl1 = rvkLightSlice(viewZ, zs1.x, zs1.z, grid1.z);
+        return rvkAddrAdd(base, grid1.w + ((sl1 * grid1.y + ty1) * grid1.x + tx1) * RVK_LIGHT_CLUSTER_BYTES);
+    }
+    uint tx = min(uint(uv.x * float(grid.x)), grid.x - 1u), ty = min(uint(uv.y * float(grid.y)), grid.y - 1u);
+    uint sl = rvkLightSlice(viewZ, zs.x, zs.z, grid.z);
+    return rvkAddrAdd(base, offs.y + ((sl * grid.y + ty) * grid.x + tx) * RVK_LIGHT_CLUSTER_BYTES);
 }

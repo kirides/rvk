@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <future>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "d3d9/device.h"
@@ -28,11 +29,14 @@ namespace rvk::enh {
 
 inline constexpr std::uint32_t kLightMax = 1024;               // RVK_LIGHT_MAX
 inline constexpr std::uint32_t kLightBytes = 64;               // RVK_LIGHT_BYTES
-inline constexpr std::uint32_t kLightHeaderBytes = 64;         // RVK_LIGHT_HEADER_BYTES
+inline constexpr std::uint32_t kLightHeaderBytes = 128;        // RVK_LIGHT_HEADER_BYTES
 inline constexpr std::uint32_t kLightClusterBytes = 256;       // RVK_LIGHT_CLUSTER_BYTES
 inline constexpr std::uint32_t kLightMaxPerCluster = 63;       // RVK_LIGHT_MAX_PER_CLUSTER
 inline constexpr std::uint32_t kLightGridX = 16, kLightGridY = 9, kLightGridZ = 24;
-inline constexpr float kLightNear = 20.0f, kLightFar = 16000.0f;  // the grid's depth range (engine units); lights are collected over the far range
+inline constexpr float kLightNear = 20.0f, kLightFar = 16000.0f;  // the grid's depth range (engine units)
+// the far level (gpu-scene.md 9.10): beyond kLightFar a coarser-in-depth, finer-in-tiles grid up to kLightFar1; lights are collected over that range
+inline constexpr float kLightFar1 = 96000.0f;
+inline constexpr std::uint32_t kLightGrid1X = 32, kLightGrid1Y = 18, kLightGrid1Z = 8;
 
 // mirror of shaders/include/rvk_light_model.hlsli RvkLight (64 bytes)
 struct GpuLight {
@@ -51,8 +55,22 @@ struct LightClusterPush {
     std::uint32_t grid[4];
     float zs[4];
     std::uint32_t offs[4];
+    std::uint32_t shadow[4];
+    std::uint32_t grid1[4];
+    float zs1[4];
 };
-static_assert(sizeof(LightClusterPush) == 80 && sizeof(LightClusterPush) <= shader::abi::kPushConstantBudget);
+static_assert(sizeof(LightClusterPush) == 128 && sizeof(LightClusterPush) <= shader::abi::kPushConstantBudget);
+
+// mirror of shaders/lighting/light_shadow_common.hlsli LightShadowPush (the ray-traced lamp shadow passes)
+struct LightShadowPush {
+    shader::abi::PassPushHeader h;
+    std::uint32_t table[2];
+    std::uint32_t tex[4];   // depth map slot, raw entries slot, width, height
+    float cfg[4];           // lamp radius (units), ray reach, origin bias, rays per light
+    std::uint32_t misc[4];  // frame index, RVK_RT_TRACE_* flags, debug, 0
+};
+static_assert(sizeof(LightShadowPush) <= shader::abi::kPushConstantBudget);
+inline constexpr std::uint32_t kLightShadowMax = 31;  // RVK_LIGHT_SHADOW_MAX
 
 // pure cluster math (rvk_tests; the same formulas as the shader)
 float lightSliceScale(float nearZ, float farZ, std::uint32_t slices);                    // slices / ln(far / near)
@@ -60,6 +78,10 @@ std::uint32_t lightSlice(float viewZ, float nearZ, float slicesPerLn, std::uint3
 float lightSliceNear(std::uint32_t slice, float nearZ, float slicesPerLn);               // the view depth where `slice` begins
 // the physical distance law relative to the engine's (rvkLmPhysicalRatio)
 float lightPhysicalRatio(float d2, float rcpSqrRange);
+// the lamp shadow image's entries (light_shadow_common.hlsli lsEncode / lsId / lsVis): shadow id 1..31 + q / 64, q = visibility in 1 / 63 steps
+float lightShadowEncode(std::uint32_t id, float vis);
+std::uint32_t lightShadowId(float entry);
+float lightShadowVis(float entry);
 // the engine's falloff 1 - sat(d^2 / R^2)
 float lightEngineFalloff(float d2, float rcpSqrRange);
 
@@ -72,8 +94,15 @@ bool fullLitSkipsReads();   // lighting.table_complete: lit draws skip their own
 bool fullLitTreeMerge();
 void setFullLitOptions(bool skipReads, bool treeMerge);
 
+class RtScene;
+
 class LightTable {
 public:
+    struct ShadowSettings {
+        int mode = 0;            // lighting.light_shadows: 0 off, 1 nearby (8 lights within 25 m), 2 many (31 within 60 m)
+        int quality = 2;         // 1 low (cut-outs solid), 2 medium, 3 high (2 rays per light)
+        float radius = 20.0f;    // the lamps' size (world units): the soft shadow's disc
+    };
     // A drawn object's light (its list entry: reg0 = position + 1 / R^2, reg1 = colour), handed over by native::StaticOps for lists it composed. The next
     // build adds those the registry walk did not return (within 8 units = the same light). Thread-safe.
     // true while the registry walk returns no static lights (nothing cached in): the drawn objects' static lights are then taken as a source too
@@ -81,6 +110,9 @@ public:
     // true while the registry walk returned lights (static tree within reach + this frame's dynamic lights, no latency) and the table is built every frame:
     // the registry is trusted whole. With an EMPTY registry the objects' own lights are still read (a teleport: nothing cached in), objects without any skip
     static bool registryComplete();
+    // true when a light of the last build (any level: the far lights too) sits within 8 units of `pos`: the table lights an object's own light there
+    // per pixel, so the object's batch need not end on that light (native::planTreeBatches' table merge)
+    static bool lightKnown(const float pos[3]);
     static void noteDrawnLight(const float pr[4], const float col[4]);
 
     explicit LightTable(d3d9::Device& device);
@@ -90,16 +122,27 @@ public:
 
     bool available() const { return !failed_; }
     // run time: on/off (the pass exists only while on), style 0 original / 1 physical, debug 0 off / 1 cluster counts / 2 slots filled
-    void configure(bool enabled, int style, int debug);
+    void configure(bool enabled, int style, int debug, float defaultRoughness = 0.7f);
+    // ray-traced lamp shadows (needs the RT scene; the table must be on): the nearest lights get a shadow id, the pass light.shadow traces them
+    void setRtScene(RtScene* scene) { scene_ = scene; }
+    void configureShadows(const ShadowSettings& s);
+    void setCollectRadius(float r) { collectRadius_ = r; }
 
 private:
     void record(d3d9::PassContext& ctx);
+    void recordShadow(d3d9::PassContext& ctx);
     bool pipelineReady();
+    bool shadowPipelinesReady();
+    void applyShadowHold();
     void logStats();
 
     d3d9::Device& dev_;
     bool enabled_ = false, failed_ = false;
     int style_ = 0, debug_ = 0;
+    float collectRadius_ = 96000.0f;
+    double colourRatio_[3]{};
+    std::uint64_t colourRatioN_ = 0;
+    float defaultRoughness_ = 0.7f;  // the physical style's roughness of surfaces without a pack entry
     std::uint32_t passId_ = 0;
     std::unique_ptr<rhi::Pipeline> pipeline_;
     std::future<std::unique_ptr<rhi::Pipeline>> building_;
@@ -109,8 +152,23 @@ private:
     std::vector<GpuLight> prev_, cur_;
     std::uint32_t lastDrawnAdded_ = 0;
     engine::lights::Stats stats_;
+    // ray-traced lamp shadows
+    RtScene* scene_ = nullptr;
+    ShadowSettings shadow_;
+    bool shadowHeld_ = false, shadowFailed_ = false;
+    std::uint32_t shadowPassId_ = 0, shadowLights_ = 0;
+    std::unique_ptr<rhi::Pipeline> shadowPipeline_[2];
+    std::future<std::unique_ptr<rhi::Pipeline>> shadowBuilding_[2];
+    struct PendingShadow {
+        std::uint64_t frame = ~0ull;
+        LightShadowPush push{};
+        rhi::Texture* raw = nullptr;
+        rhi::Texture* fin = nullptr;
+        std::uint32_t gx = 0, gy = 0;
+    } pendingShadow_;
+    std::uint64_t shadowPasses_ = 0, shadowSkipped_ = 0;
     std::uint64_t passes_ = 0, skipped_ = 0, changedTotal_ = 0;
-    std::uint32_t lastCount_ = 0, lastChanged_ = 0, lastDropped_ = 0;
+    std::uint32_t lastCount_ = 0, lastChanged_ = 0, lastDropped_ = 0, lastNear_ = 0, lastNearStatic_ = 0, lastNearAny_ = 0;
     double lastLog_ = -1e9;
 };
 
