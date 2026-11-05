@@ -28,6 +28,7 @@
 #include "enh/light_table.h"
 #include "enh/rt_debug.h"
 #include "enh/rt_scene.h"
+#include "enh/material_rt.h"
 #include "enh/rt_shadows.h"
 #include "enh/shadows.h"
 #include "enh/water.h"
@@ -614,6 +615,7 @@ private:
     std::unique_ptr<enh::ObjectMotion> objectMotion_;  // per-object motion vectors of characters / moving rigid draws (FSR)
     std::unique_ptr<enh::Upscale> upscale_;     // upscale.mode (camera jitter, FSR)
     std::unique_ptr<enh::FrameGeneration> framegen_;  // framegen.mode (FSR 3 / FSR 4 frame generation; the manual model)
+    std::unique_ptr<enh::MaterialRt> materialRt_;  // materials.quality = high: traced reflections of the pack's smooth surfaces
     std::unique_ptr<enh::Gbuffer> gbuffer_;      // ao.* / gbuffer.debug (the G-buffer attachments + passes)
     std::unique_ptr<enh::matpack::MaterialPack> matPack_;  // materials.* (docs/research/material-pack.md)
     std::unique_ptr<enh::LightTable> lightTable_;  // lighting.clustered (Full: the light table + cluster grid, docs/research/gpu-scene.md 9.7)

@@ -37,4 +37,8 @@ std::optional<std::uint32_t> appState();
 // weight. Pure (unit-tested).
 std::optional<float> seaLevelOfWeather(const std::vector<WeatherState>& states);
 
+// how much of the current weather is rain (0..1): the weight share of the states named rain / storm / thunder / drizzle / shower among all states
+// (dungeon / cave / indoor states count as dry: the rain does not reach the player there); 0 without weight. Pure (unit-tested).
+float rainOfWeather(const std::vector<WeatherState>& states);
+
 }  // namespace rvk::engine
