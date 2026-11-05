@@ -3,7 +3,7 @@
   "name": "risen-enhanced-graphics",
   "version-string": "0.1.0",
   "description": "Pure Vulkan renderer for Risen (Enhanced, x64)",
-  "builtin-baseline": "6f6324d69cc4d5229804bee9f72737fe2ef08087",
+  "builtin-baseline": "29718cfec805208b4e2d80ed91e681143b488dd7",
   "dependencies": [
     "directx-dxc",
     "directx12-agility",

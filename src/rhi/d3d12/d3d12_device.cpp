@@ -417,11 +417,6 @@ public:
                 factoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
                 ComPtr<ID3D12Debug1> debug1;
                 if (SUCCEEDED(debug.As(&debug1))) debug1->SetEnableGPUBasedValidation(TRUE);
-#if D3D12_SDK_VERSION >= 620
-                // messages the driver reports itself (Agility SDK 1.620+) arrive through the info queue's callback below
-                ComPtr<ID3D12Debug7> debug7;
-                if (SUCCEEDED(debug.As(&debug7))) debug7->SetEnableDriverReportedMessages(TRUE);
-#endif
             } else {
                 spdlog::warn("d3d12: the debug layer is not available (d3d12SDKLayers.dll missing{})", sdk.factory ? " from the Agility SDK directory" : "");
             }
