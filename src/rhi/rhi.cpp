@@ -1,6 +1,32 @@
 #include "rhi/rhi.h"
 
+#include <format>
+
+#include "rhi/names.h"
+
 namespace rvk::rhi {
+
+namespace names {
+std::string textureName(const TextureInfo& t) {
+    std::string s;
+    if (t.label != nullptr) {
+        s = t.label;
+        if (t.labelIndex != ~0u) s += std::format(" #{}", t.labelIndex);
+        s += " | ";
+    }
+    s += t.renderTarget || t.depthFormat ? "rt " : "tex ";
+    s += std::format("{} {}x{}", t.id, t.width, t.height);
+    if (t.volume) s += std::format("x{}", t.depth);
+    s += ' ';
+    s += t.format;
+    if (t.cube) s += " cube";
+    if (t.volume) s += " vol";
+    if (t.levels > 1) s += std::format(" L{}", t.levels);
+    if (t.dynamic) s += " dynamic";
+    if (t.slot != 0) s += std::format(" [{}slot {}]", t.cube ? "cube " : t.volume ? "3d " : "", t.slot);  // slots index the array of the texture kind
+    return s;
+}
+}  // namespace names
 
 const char* backendName(Backend b) { return b == Backend::Vulkan ? "Vulkan" : "D3D12"; }
 
@@ -38,6 +64,22 @@ std::uint32_t formatBytes(VkFormat f) {
     case VK_FORMAT_R32G32B32A32_SFLOAT: return 16;
     default: return 0;
     }
+}
+
+bool isDepthFormat(VkFormat f) {
+    switch (f) {
+    case VK_FORMAT_D16_UNORM:
+    case VK_FORMAT_X8_D24_UNORM_PACK32:
+    case VK_FORMAT_D32_SFLOAT:
+    case VK_FORMAT_D16_UNORM_S8_UINT:
+    case VK_FORMAT_D24_UNORM_S8_UINT:
+    case VK_FORMAT_D32_SFLOAT_S8_UINT: return true;
+    default: return false;
+    }
+}
+
+bool hasStencil(VkFormat f) {
+    return f == VK_FORMAT_D16_UNORM_S8_UINT || f == VK_FORMAT_D24_UNORM_S8_UINT || f == VK_FORMAT_D32_SFLOAT_S8_UINT;
 }
 
 FormatBlock formatBlock(VkFormat f) {

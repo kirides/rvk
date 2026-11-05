@@ -370,9 +370,12 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     // water reflects, it is not reflected: its meshes are learnt from the main view's refracted / water draws and left out
     // of every view (the sun cascades draw the sea too, untagged: StaticMesh there)
     // the same holds for meshes the main view draws alpha-blended (shore overlays, glass, ...)
+    // (a window of the pack's glass entries is drawn in the refracted pass like water, but it is no water: kept as a glass pane while a glass consumer exists)
     const bool mainBlended = q.phase.view == View::Main && q.blending;
-    const bool water = q.kind == Kind::Refracted || (q.tag != nullptr && q.tag->water != d3d9::draws::Water::None);
-    if (water || mainBlended) {
+    const bool realWater = q.tag != nullptr && q.tag->water != d3d9::draws::Water::None;
+    const bool glassDraw = q.phase.view == View::Main && (q.blending || q.kind == Kind::Refracted) && !realWater && isGlassDraw(q);
+    const bool water = !glassDraw && (q.kind == Kind::Refracted || realWater);
+    if (water || (mainBlended && !glassDraw)) {
         learnExcluded(q, water);
         // the terrain: a z pre-pass of the range (opaque, its BLAS) and blended layers in the solid pass (each its own
         // material on the same geometry): the frame's first layer is the base, its material is the range's
@@ -419,9 +422,9 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         }
         return reject(water ? "water" : "blended in the main view");
     }
-    if (q.phase.view == View::Main && (q.phase.pass == Pass::Alpha || q.phase.pass == Pass::AlphaLate)) return skip();
+    if (q.phase.view == View::Main && (q.phase.pass == Pass::Alpha || q.phase.pass == Pass::AlphaLate) && !glassDraw) return skip();
     if (q.tag != nullptr && q.tag->material != nullptr && waterMaterials_.contains(q.tag->material)) return skip();
-    if (q.blending) return reject("blended");                                        // alpha-blended: not P1
+    if (q.blending && !glassDraw) return reject("blended");                          // alpha-blended: not P1
     // SpeedTree leaves (op > 1): cards positioned by their vertex shader (wind, facing), so there is no rest pose to put in the
     // TLAS: only the animated capture of the main view's solid pass stands for them (observeTree), the static BLAS only gives
     // the topology and the material (`animatedOnly`)
@@ -517,6 +520,10 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     }
     if (b->state == BlasState::Failed) return skip();
     if (leaf) b->animatedOnly = true;
+    if (glassDraw && !b->glass) {
+        b->glass = true;
+        spdlog::info("rt: scene: glass pane BLAS #{}: material '{}'", b->id, q.tag != nullptr && q.tag->material != nullptr ? engine::materials::resourceName(q.tag->material) : "?");
+    }
     std::uint8_t materialRank = 0;
     bool overlay = false;
     // depth-only draws (z pre-pass, cascades) carry no material: the engine's sub-mesh of the range gives it
@@ -542,7 +549,7 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     const bool alphaTested = q.alphaTest || (speedTree && q.tag->opDesc >= 1);
     const std::uint32_t flags = (key.index32 != 0 ? abi::kRtRecordIndex32 : 0u) | (alphaTested ? abi::kRtRecordAlphaTested : 0u) |
                                 (q.depthBias && q.phase.view == View::Main ? abi::kRtRecordDepthBias : 0u) |
-                                (speedTree ? abi::kRtRecordSpeedTree : 0u) | (q.instanced ? abi::kRtRecordInstanced : 0u) |
+                                (speedTree ? abi::kRtRecordSpeedTree : 0u) | (b->glass ? abi::kRtRecordGlass : 0u) | (q.instanced ? abi::kRtRecordInstanced : 0u) |
                                 (!q.depthWrite && q.phase.view == View::Main && q.phase.pass == Pass::Solid ? abi::kRtRecordNoDepthWrite : 0u) |
                                 (static_cast<std::uint32_t>(viewBit(q.phase.view)) << abi::kRtRecordViewShift);
     // the instance's data word: the alpha test (func | ref << 8, 0 = none) and the draw kind << 16 (the latest sighting's;
@@ -743,10 +750,10 @@ void RtScene::applyMaterial(rt::Registry::Instance& in, std::uint32_t id, std::u
     in.materialRank = rank;
 }
 
-RtScene::MaterialFields RtScene::materialFields(const RtMaterial* m) {
+RtScene::MaterialFields RtScene::materialFields(const RtMaterial* m) const {
     MaterialFields f;
     const auto slotOf = [](d3d9::Texture* t) -> std::uint32_t {
-        return t != nullptr && !t->isNull() && t->image().layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ? t->bindlessSlot() : 0u;
+        return t != nullptr && !t->isNull() && t->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ? t->bindlessSlot() : 0u;
     };
     if (m == nullptr) {
         f.uvSet = abi::kRtUvNoTexture | abi::kRtUvHeuristic | (3u << abi::kRtUvOpacityShift);
@@ -765,6 +772,11 @@ RtScene::MaterialFields RtScene::materialFields(const RtMaterial* m) {
     }
     std::memcpy(&f.uvMap[0][3], &m->colour, 4);
     std::memcpy(&f.uvMap[1][3], &f.opacityTex, 4);
+    if (pack_ != nullptr && !m->name.empty()) {
+        // (the map must be uploaded: the raster draws and the pack's prepare() do that; until then the entry is not used)
+        const auto hit = pack_->lookup(m->name);
+        if (hit.word != 0 && (hit.texture == nullptr || hit.texture->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)) f.packWord = hit.word;
+    }
     return f;
 }
 
@@ -1013,6 +1025,12 @@ bool RtScene::prepareInputs(Blas& b) {
     return true;
 }
 
+// RVK_NO_COMPACT (environment): no BLAS compaction (diagnostics)
+static bool noCompaction() {
+    static const bool v = GetEnvironmentVariableA("RVK_NO_COMPACT", nullptr, 0) != 0;
+    return v;
+}
+
 void RtScene::processCompactions(rhi::CommandList& cl, std::uint32_t slot) {
     auto& list = compactions_[slot];
     if (list.empty()) return;
@@ -1102,7 +1120,7 @@ void RtScene::buildPending(rhi::CommandList& cl, std::uint32_t slot) {
         g.opaque = true;  // alpha-tested instances: FORCE_NO_OPAQUE on the instance
         rhi::BlasDesc desc;
         desc.geometries = std::span<const rhi::TriangleGeometry>(&g, 1);
-        desc.allowCompaction = true;  // (not allowUpdate: a BLAS that is both did not compact into a traceable structure on the AMD driver, hlsl-rhi.md 6c)
+        desc.allowCompaction = !noCompaction();  // (not allowUpdate: a BLAS that is both did not compact into a traceable structure on the AMD driver, hlsl-rhi.md 6c)
         desc.name = "rt scene blas";
         std::unique_ptr<rhi::AccelerationStructure> as = rd->createBlas(desc);
         if (as == nullptr) {
@@ -1138,7 +1156,10 @@ void RtScene::buildPending(rhi::CommandList& cl, std::uint32_t slot) {
         list.push_back({id, b->serial, static_cast<std::uint32_t>(handles.size())});
         handles.push_back(b->as.get());
     }
-    if (handles.empty()) return;
+    if (handles.empty() || noCompaction()) {
+        list.clear();
+        return;
+    }
     cl.queryCompactedSizes(*compactQuery_, slot * kQueriesPerSlot, handles);
 }
 
@@ -1476,7 +1497,7 @@ bool RtScene::captureOptions(const d3d9::Shader& s, shader::TranslateOptions& o)
         "                rvkRwStore<float4, 16>(rvkAddrAdd(rvk_cap, 16u + rvk_at * 32u + 16u), {});\n"
         "                rvk_out.rvk_prevWorld = float4(rvk_world, 0.0);\n"
         "                if (any(rvk_info.yz != uint2(0u, 0u)) && uint(rvk_slot) < rvk_info.w) {{\n"
-        "                    float4 rvk_prev = rvkRwLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvk_info.yz), 16u + uint(rvk_slot) * 32u));\n"
+        "                    float4 rvk_prev = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvk_info.yz), 16u + uint(rvk_slot) * 32u));\n"
         "                    if (rvk_prev.w == 1.0) rvk_out.rvk_prevWorld = float4(rvk_prev.xyz, 1.0);\n"
         "                }}\n"
         "            }}\n"
@@ -1484,6 +1505,13 @@ bool RtScene::captureOptions(const d3d9::Shader& s, shader::TranslateOptions& o)
         "    }}",
         tc);
     return true;
+}
+
+// a blended main-view draw of a pack entry with transmission > 0 (glass): only while a glass consumer exists (exact off: nothing changes)
+bool RtScene::isGlassDraw(const d3d9::ReplaceQuery& q) const {
+    if (glassConsumers_.empty() || pack_ == nullptr || q.tag == nullptr || q.tag->material == nullptr) return false;
+    const auto hit = pack_->lookupMaterial(q.tag->material);
+    return hit.word != 0 && matpack::decodeWord(hit.word).glass;
 }
 
 bool RtScene::dynamicSupported() const { return supported() && dev_.game().gameCaps().vertexStores; }
@@ -1586,7 +1614,7 @@ void RtScene::observeTree(d3d9::Device& dev, const d3d9::ReplaceQuery& q, Blas& 
         std::memcpy(a.ptr, header, 16);
         batch.base = a.addr();
         batch.slots = slots;
-        dev.requestVertexCapture(a.ref, q.instanced);
+        dev.requestVertexCapture(a, q.instanced);
     }
     if (batch.slots != slots) return;
     DynBlas& db = dynBlas_[in.key];
@@ -1739,7 +1767,8 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     if (useSkin) {
         SkinJob j;
         j.vertices = vertexAddress.ref;
-        j.out = a.ref;
+        j.out = a.rw();
+        j.outKey = a.ref;
         j.slots = slots;
         j.stride = q.vertexStride;
         j.offsets = skinOffsets;
@@ -1755,13 +1784,13 @@ void RtScene::observeSkinned(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
                 std::uint32_t rh[4] = {slots | 0x80000000u, 0, 0, 0};
                 std::memcpy(ref.ptr, rh, 16);
                 std::memset(static_cast<std::uint8_t*>(ref.ptr) + 16, 0, static_cast<std::size_t>(slots) * 32);
-                dev.requestVertexCapture(ref.ref);
-                j.ref = ref.ref;
+                dev.requestVertexCapture(ref);
+                j.ref = ref.rw();
             }
         }
         skinJobs_.push_back(j);
     } else {
-        dev.requestVertexCapture(a.ref);
+        dev.requestVertexCapture(a);
     }
     // the draw's material (diffuse + uv map), resolved again when it changes (the solid pass's draws carry it)
     const std::uint64_t sig = RtMaterials::signature(q);
@@ -1933,6 +1962,7 @@ bool RtScene::skinReady() {
         skinBuild_ = std::async(std::launch::async, [rdev]() {
             rhi::ComputePipelineDesc d;
             d.cs.spirv = shader::embedded::spirv("rt/rt_skin.comp");
+            d.cs.dxil = shader::embedded::dxilOnDemand("rt/rt_skin.comp");
             d.name = "rt.skin";
             return rdev->createComputePipeline(d);
         });
@@ -2042,6 +2072,7 @@ void RtScene::recordSkin(rhi::CommandList& cl) {
         // a reference capture written by a cascade's vertex shader (verify) before the compute reads it
         barrier(cl, VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        dev_.game().captureAccess(cl, true);  // (D3D12: the capture pool in its write state)
         cl.bindPipeline(*skinPipe_);
         struct Push {
             abi::PassPushHeader h;
@@ -2053,8 +2084,9 @@ void RtScene::recordSkin(rhi::CommandList& cl) {
         push.table[1] = t.ref.high();
         cl.setPushConstants(&push, sizeof(push));
         cl.dispatch(chunks, 1, 1);
+        dev_.game().captureAccess(cl, false);
     }
-    for (std::uint32_t i = 0; i < n; ++i) dev_.markVertexCaptured(skinJobs_[i].out);
+    for (std::uint32_t i = 0; i < n; ++i) dev_.markVertexCaptured(skinJobs_[i].outKey);
     skinJobsTotal_ += n;
     skinJobs_.clear();
     const double now = dev_.secondsSinceCreate();
@@ -2223,7 +2255,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
         content = &contents_.back().second;
         content->reserve(n);
     }
-    std::uint64_t textured = 0, untextured = 0, cutOut = 0, segmented = 0, speedTrees = 0;
+    std::uint64_t textured = 0, untextured = 0, cutOut = 0, segmented = 0, speedTrees = 0, glassCount = 0;
     std::vector<abi::RtMaterialSegment> segs;              // the frame's segment table
     std::vector<std::pair<std::uint32_t, std::uint32_t>> segRecords;  // record -> its first segment
     // level of detail: instances beyond the range are traced through their BLAS's proxy; the stats snapshot by distance band
@@ -2254,7 +2286,9 @@ void RtScene::record(d3d9::PassContext& ctx) {
         VkAccelerationStructureInstanceKHR vi{};
         std::memcpy(vi.transform.matrix, in.rows.data(), sizeof(vi.transform.matrix));
         vi.instanceCustomIndex = k;
-        vi.mask = alpha ? abi::kRtMaskAlphaTested : abi::kRtMaskOpaque;
+        const bool glass = (in.flags & abi::kRtRecordGlass) != 0 && !glassConsumers_.empty();
+        glassCount += glass ? 1 : 0;
+        vi.mask = glass ? abi::kRtMaskGlass : alpha ? abi::kRtMaskAlphaTested : abi::kRtMaskOpaque;
         vi.instanceShaderBindingTableRecordOffset = 0;
         vi.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR |
                    (alpha ? VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR : VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR);
@@ -2277,6 +2311,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
         r.alpha = recordAlpha(in.flags, in.data, m);
         r.albedoTex = mf.albedoTex;
         r.albedoSampler = mf.albedoSampler;
+        r.packWord = mf.packWord;
         r.uvSet = mf.uvSet;
         std::memcpy(r.uvMap, mf.uvMap, sizeof(r.uvMap));
         // a range without a main-view material of its own (a cascade's merged level-mesh range): per-triangle materials from
@@ -2300,6 +2335,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
                     e.albedoSampler = sf.albedoSampler;
                     e.alpha = r.alpha;
                     e.uvSet = sf.uvSet;
+                    e.packWord = sf.packWord;
                     std::memcpy(e.uvMap, sf.uvMap, sizeof(e.uvMap));
                     segs.push_back(e);
                 }
@@ -2523,6 +2559,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
     iv_.textured = textured;
     iv_.untextured = untextured;
     iv_.cutOut = cutOut;
+    glassInstances_ = glassCount;
     ++iv_.frames;
     const double passMs = msSince(t0);
     iv_.passCpuMs += passMs;

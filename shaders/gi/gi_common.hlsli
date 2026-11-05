@@ -49,6 +49,12 @@ struct GiPush {
 };
 RVK_PUSH(GiPush, pc);
 
+// the frame's point lights: element i of GiPassParamsData::lights read straight from memory. `p.Get().lights[i]` with a loop index loads the whole 4 KiB
+// block by value on D3D12 (no pointers: the array is indexed dynamically, so DXC keeps all of it): a GI pass took 10-15 ms instead of 1-2 ms
+// with 40+ lights. Byte offset of `lights` = 16 x (3 + 3 + 1 + 1 + 1 + 1 + 1 + 7) = 288 (enh/gi.h static_assert)
+static const uint GI_LIGHTS_OFFSET = 288u;
+float4 giLight(uint i) { return rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(pc.params), GI_LIGHTS_OFFSET + i * 16u)); }
+
 GiPassParams giParams() { return rvkPtr<GiPassParamsData, 16>(pc.params); }
 
 uint giHash(uint x) {

@@ -18,7 +18,7 @@
 
 struct HWND__;
 
-namespace rvk::vk {
+namespace rvk::pacing {
 
 // refresh rate of the monitor that shows most of the window, 0 if unknown
 double monitorRefreshRate(HWND__* window);
@@ -79,4 +79,4 @@ private:
     Stats stats_;
 };
 
-}  // namespace rvk::vk
+}  // namespace rvk::pacing

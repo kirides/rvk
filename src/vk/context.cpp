@@ -7,6 +7,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "core/crash_dump.h"
 #include "core/paths.h"
 #include "vk/debug_names.h"
 #include "vk/probe.h"
@@ -654,10 +655,16 @@ VkResult Context::queuePresent(const VkPresentInfoKHR& present) {
 void Context::reportDeviceLost(const char* where) {
     if (lostReported_.exchange(true)) return;
     spdlog::error("vulkan: DEVICE LOST at {} (validation errors so far: {})", where, validationErrors_.load());
+    std::string report = std::format("Vulkan device lost at {} (validation errors so far: {})\r\n", where, validationErrors_.load());
     if (lostReporter_) {
         const std::string text = lostReporter_();
-        if (!text.empty()) spdlog::error("vulkan: {}", text);
+        if (!text.empty()) {
+            spdlog::error("vulkan: {}", text);
+            report += text + "\r\n";
+        }
     }
+    // a minidump of the process at the moment of the loss (threads, modules) + the report, next to rvk.log (core/crash_dump.h)
+    if (const auto dump = crashdump::write("vulkan_device_lost", report); !dump.empty()) spdlog::error("vulkan: minidump written to {}", dump.string());
     if (!features_.deviceFault || vkGetDeviceFaultInfoEXT == nullptr) {
         spdlog::error("vulkan: device fault: the driver offers no VK_EXT_device_fault");
         return;
@@ -787,6 +794,16 @@ caps::Report Context::capabilities(bool pipelineLibrariesInUse) const {
         fgQueues_.requested ? fgQueues_.reason : "not requested: the extra queues are created when frame generation is on at startup",
         std::format("graphics queue family {} x{}, compute-only family {}", queueFamily_, queueFamilyCount_,
                     computeFamily_ != ~0u ? std::format("{} x{}", computeFamily_, computeFamilyCount_) : std::string("none")));
+    // vendor RT extensions: information only (the renderer does not use them; docs/research/raytracing.md 9)
+    set(Cap::ClusterAccelerationStructure, prt.clusterAccelerationStructure, false,
+        prt.clusterAccelerationStructure ? "information only: nothing in the renderer builds cluster structures (static meshes are few, large BLASes)"
+                                         : "the GPU / driver has no VK_NV_cluster_acceleration_structure (NVIDIA only)",
+        prt.clusterAccelerationStructure ? "VK_NV_cluster_acceleration_structure" : "");
+    set(Cap::RayTracingReorder, prt.invocationReorder, false,
+        prt.invocationReorder ? "information only: ray query has no reorder hint (needs ray tracing pipelines)"
+                              : "the GPU / driver has no VK_EXT / VK_NV_ray_tracing_invocation_reorder",
+        prt.invocationReorder ? std::format("{}, hardware reordering hint: {}", prt.invocationReorderName, prt.invocationReorderReorders ? "reorders" : "none (no-op)")
+                              : std::string());
     set(Cap::SamplerAnisotropy, features_.samplerAnisotropy, features_.samplerAnisotropy, "",
         features_.samplerAnisotropy ? std::format("max {:.0f}x", features_.maxAnisotropy) : "");
     if (prt.accelerationStructure) {
@@ -798,7 +815,81 @@ caps::Report Context::capabilities(bool pipelineLibrariesInUse) const {
                                               prt.maxDescriptorSetAccelerationStructures));
     }
     if (prt.maintenance1) r.properties.emplace_back("ray tracing maintenance1", rt.enabled && rt.maintenance1 ? "enabled" : "available");
+    appendFeatureSurvey(r);
     return r;
+}
+
+void Context::appendFeatureSurvey(caps::Report& r) const {
+    if (physical_ == VK_NULL_HANDLE) return;
+    std::uint32_t n = 0;
+    vkEnumerateDeviceExtensionProperties(physical_, nullptr, &n, nullptr);
+    std::vector<VkExtensionProperties> exts(n);
+    vkEnumerateDeviceExtensionProperties(physical_, nullptr, &n, exts.data());
+    const auto has = [&](const char* name) { return hasExtension(exts, name); };
+    const auto yn = [](bool b) { return b ? "supported" : "unsupported"; };
+
+    VkPhysicalDeviceFragmentShadingRateFeaturesKHR vrs{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR};
+    VkPhysicalDeviceMeshShaderFeaturesEXT mesh{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT};
+    VkPhysicalDeviceOpacityMicromapFeaturesEXT omm{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_FEATURES_EXT};
+    VkPhysicalDeviceVulkan13Features v13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+    VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    const bool hasVrs = has(VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME);
+    const bool hasMesh = has(VK_EXT_MESH_SHADER_EXTENSION_NAME);
+    const bool hasOmm = has(VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME);
+    // only the structures of listed extensions are chained
+    void** tail = &f2.pNext;
+    const auto chain = [&](bool on, auto& s) {
+        if (!on) return;
+        *tail = &s;
+        tail = &s.pNext;
+    };
+    chain(true, v13);
+    chain(hasVrs, vrs);
+    chain(hasMesh, mesh);
+    chain(hasOmm, omm);
+    vkGetPhysicalDeviceFeatures2(physical_, &f2);
+
+    r.properties.emplace_back("vrs (VK_KHR_fragment_shading_rate)",
+                              hasVrs ? std::format("{}: pipeline {}, primitive {}, attachment {}", "supported", yn(vrs.pipelineFragmentShadingRate == VK_TRUE),
+                                                   yn(vrs.primitiveFragmentShadingRate == VK_TRUE), yn(vrs.attachmentFragmentShadingRate == VK_TRUE))
+                                     : "unsupported");
+    r.properties.emplace_back("mesh shaders (VK_EXT_mesh_shader)",
+                              hasMesh ? std::format("supported: task {}, mesh {}", yn(mesh.taskShader == VK_TRUE), yn(mesh.meshShader == VK_TRUE)) : "unsupported");
+    r.properties.emplace_back("opacity micromap (VK_EXT_opacity_micromap)", hasOmm ? std::format("extension listed, feature {}", yn(omm.micromap == VK_TRUE)) : "unsupported");
+    const bool serNv = has("VK_NV_ray_tracing_invocation_reorder");
+    const bool serExt = has("VK_EXT_ray_tracing_invocation_reorder");
+    r.properties.emplace_back("shader execution reordering",
+                              serNv || serExt ? std::format("{}{}{}", serNv ? "VK_NV_ray_tracing_invocation_reorder " : "", serExt ? "VK_EXT_ray_tracing_invocation_reorder " : "", "listed")
+                                              : "unsupported (neither the NV nor the EXT extension)");
+    r.properties.emplace_back("other", std::format("ray tracing position fetch {}, pipeline {}, maintenance1 {}, cooperative matrix {}, descriptor buffer {}, "
+                                                   "host image copy {}, present wait {}, work-graph-like (VK_AMDX_shader_enqueue) {}, cluster acceleration structure {}",
+                                                   yn(has(VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME)), yn(has(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME)),
+                                                   yn(has(VK_KHR_RAY_TRACING_MAINTENANCE_1_EXTENSION_NAME)), yn(has(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME)),
+                                                   yn(has(VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME)), yn(has(VK_EXT_HOST_IMAGE_COPY_EXTENSION_NAME)),
+                                                   yn(has(VK_KHR_PRESENT_WAIT_EXTENSION_NAME)), yn(has("VK_AMDX_shader_enqueue")),
+                                                   yn(has("VK_NV_cluster_acceleration_structure"))));
+    // subgroup sizes
+    VkPhysicalDeviceVulkan13Properties p13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES};
+    VkPhysicalDeviceVulkan11Properties p11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES};
+    VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    p2.pNext = &p11;
+    p11.pNext = &p13;
+    vkGetPhysicalDeviceProperties2(physical_, &p2);
+    r.properties.emplace_back("wave / subgroup size",
+                              std::format("{} (min {}, max {}), size control {}", p11.subgroupSize, p13.minSubgroupSize, p13.maxSubgroupSize,
+                                          yn(v13.subgroupSizeControl == VK_TRUE)));
+    // resizable BAR: a device-local heap that is also host visible and bigger than the legacy 256 MiB window
+    VkPhysicalDeviceMemoryProperties mp{};
+    vkGetPhysicalDeviceMemoryProperties(physical_, &mp);
+    VkDeviceSize bar = 0;
+    for (std::uint32_t i = 0; i < mp.memoryTypeCount; ++i) {
+        const VkMemoryPropertyFlags f = mp.memoryTypes[i].propertyFlags;
+        if ((f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0 && (f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0) {
+            bar = std::max(bar, mp.memoryHeaps[mp.memoryTypes[i].heapIndex].size);
+        }
+    }
+    r.properties.emplace_back("resizable BAR (device-local + host-visible heap)",
+                              bar > (256ull << 20) ? std::format("supported ({} MiB)", bar >> 20) : bar != 0 ? std::format("window only ({} MiB)", bar >> 20) : "none");
 }
 
 bool Context::namesEnabled() const {

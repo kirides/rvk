@@ -146,7 +146,7 @@ void FrameGeneration::updateBackend() {
     if (want && !dev_.frameGenSwapchainActive()) {
         const auto now = std::chrono::steady_clock::now();
         if (now < retryAt_) return;
-        if (dev_.setFrameGenSwapchain(true, paths::dataDir() / "amd_fidelityfx_loader_vk.dll")) {
+        if (dev_.setFrameGenSwapchain(true, rhi::fidelityFxLoader(paths::dataDir(), dev_.game().caps().backend))) {
             state_.invalidate();
             configured_ = false;
             lastEnabled_ = false;
@@ -178,6 +178,7 @@ void FrameGeneration::enable() {
         if (rdev != nullptr) {
             rhi::ComputePipelineDesc cd;
             cd.cs.spirv = shader::embedded::spirv("upscale/prep.comp");
+            cd.cs.dxil = shader::embedded::dxilOnDemand("upscale/prep.comp");
             cd.name = "framegen.depth";
             prep_ = rdev->createComputePipeline(cd);
         }
@@ -263,7 +264,7 @@ bool FrameGeneration::ensureContext(VkExtent2D display, VkFormat format, bool sw
     }
     dropContext();
     std::shared_ptr<rhi::FrameGenerator> f = dev_.game().createFrameGenerator();
-    const std::filesystem::path dll = paths::dataDir() / "amd_fidelityfx_loader_vk.dll";
+    const std::filesystem::path dll = rhi::fidelityFxLoader(paths::dataDir(), dev_.game().caps().backend);
     rhi::FrameGeneratorCreateInfo ci;
     ci.ml = s_.mode == FrameGenMode::Fsr4;
     ci.displaySize = ci.maxRenderSize = display;
@@ -622,7 +623,9 @@ bool FrameGeneration::ensurePipelines(rhi::Device& rdev, VkFormat target) {
     if (!debug_) {
         rhi::GraphicsPipelineDesc gd;
         gd.vs.spirv = shader::embedded::spirv("debug/fullscreen_rhi.vert");
+        gd.vs.dxil = shader::embedded::dxilOnDemand("debug/fullscreen_rhi.vert");
         gd.ps.spirv = shader::embedded::spirv("framegen/debug.frag");
+        gd.ps.dxil = shader::embedded::dxilOnDemand("framegen/debug.frag");
         gd.colorFormats[0] = target;
         gd.name = "framegen.debug";
         debug_ = rdev.createGraphicsPipeline(gd);

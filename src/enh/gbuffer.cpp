@@ -39,6 +39,7 @@ Gbuffer::Gbuffer(d3d9::Device& device, RtScene* scene) : dev_(device), scene_(sc
         return [rdev, file, name]() {
             rhi::ComputePipelineDesc d;
             d.cs.spirv = shader::embedded::spirv(file);
+            d.cs.dxil = shader::embedded::dxilOnDemand(file);
             d.name = name;
             return rdev->createComputePipeline(d);
         };
@@ -50,7 +51,7 @@ Gbuffer::Gbuffer(d3d9::Device& device, RtScene* scene) : dev_(device), scene_(sc
     const auto make = [&](const char* name, shader::Stage stage) {
         auto s = std::make_shared<d3d9::Shader>();
         s->stage = stage;
-        s->module = dev_.game().createShaderModule({.spirv = shader::embedded::spirv(name)});
+        s->module = dev_.game().createShaderModule({.spirv = shader::embedded::spirv(name), .dxil = shader::embedded::dxilOnDemand(name)});
         return s;
     };
     whiteVs_ = make("debug/fullscreen.vert", shader::Stage::Vertex);
@@ -312,7 +313,9 @@ void Gbuffer::recordDebug(d3d9::PassContext& ctx) {
     if (!debug_) {
         rhi::GraphicsPipelineDesc gd;
         gd.vs.spirv = shader::embedded::spirv("debug/fullscreen_rhi.vert");
+        gd.vs.dxil = shader::embedded::dxilOnDemand("debug/fullscreen_rhi.vert");
         gd.ps.spirv = shader::embedded::spirv("gbuffer/gbuffer_debug.frag");
+        gd.ps.dxil = shader::embedded::dxilOnDemand("gbuffer/gbuffer_debug.frag");
         gd.colorFormats[0] = target.desc().format;
         gd.name = "gbuffer.debug";
         debug_ = rs.device().createGraphicsPipeline(gd);

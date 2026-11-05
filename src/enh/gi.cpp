@@ -7,15 +7,19 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <format>
+#include <fstream>
 #include <string>
 
 #include <spdlog/spdlog.h>
 
+#include "core/paths.h"
 #include "engine/hemisphere.h"
 #include "engine/symbols.h"
 #include "enh/gbuffer.h"
 #include "enh/material_variant.h"
+#include "enh/debug_view.h"
 #include "enh/rhi_scope.h"
 #include "enh/rt_scene.h"
 #include "shader/embedded.h"
@@ -84,6 +88,7 @@ Gi::Gi(d3d9::Device& device, RtScene* scene) : dev_(device), scene_(scene) {
         return [rdev, file, name]() {
             rhi::ComputePipelineDesc d;
             d.cs.spirv = shader::embedded::spirv(file);
+            d.cs.dxil = shader::embedded::dxilOnDemand(file);
             d.name = name;
             return rdev->createComputePipeline(d);
         };
@@ -102,7 +107,7 @@ Gi::Gi(d3d9::Device& device, RtScene* scene) : dev_(device), scene_(scene) {
 Gi::~Gi() {
     disable();
     // (a pipeline still being built is waited for, then retired with the others)
-    for (PipelineFuture* f : {&traceBuild_, &blendBuild_, &spTraceBuild_, &spResolveBuild_}) {
+    for (PipelineFuture* f : {&traceBuild_, &blendBuild_, &spTraceBuild_, &spResolveBuild_, &refBuild_}) {
         if (f->valid()) f->get();
     }
 }
@@ -129,6 +134,34 @@ void Gi::apply(const Settings& s) {
     if (!on_ || s_.screen == 0) {
         dev_.setFrameSgi({});
         sgiValid_ = false;
+    }
+    // the reference path tracer (Debug): its pipeline is built on first use, its view pass exists while a view is selected
+    s_.reference = std::clamp(s_.reference, 0, 7);
+    s_.referenceSpp = std::clamp(s_.referenceSpp, 1, 64);
+    s_.referenceMax = std::clamp(s_.referenceMax, 1, 1000000);
+    s_.referenceBounces = std::clamp(s_.referenceBounces, 1, 16);
+    if (on_ && s_.reference > 0 && !refTrace_ && !refBuild_.valid()) {
+        rhi::Device* rdev = dev_.rhi();
+        if (rdev != nullptr) {
+            refBuild_ = std::async(std::launch::async, [rdev]() {
+                rhi::ComputePipelineDesc d;
+                d.cs.spirv = shader::embedded::spirv("gi/gi_reference.comp");
+                d.cs.dxil = shader::embedded::dxilOnDemand("gi/gi_reference.comp");
+                d.name = "gi.reference";
+                return rdev->createComputePipeline(d);
+            });
+        }
+    }
+    if (on_ && s_.reference > 0 && refViewPass_ == 0) {
+        refViewPass_ = dev_.addPass(d3d9::inject::Point::AfterMainView, "gi.reference view", [this](d3d9::PassContext& ctx) { recordReferenceView(ctx); }, this, 10);
+        refFirst_ = true;
+        refAcc_ = 0;
+    } else if ((!on_ || s_.reference == 0) && refViewPass_ != 0) {
+        dev_.removePass(refViewPass_);
+        refViewPass_ = 0;
+        dev_.releaseTransient("gi.ref.view");
+        refBuf_.reset();
+        refW_ = refH_ = 0;
     }
     spdlog::info("enh: gi: {} (quality {}, strength {:.2f}, lightmaps {}, characters {}, screen probes {}, bleed {:.2f}, debug {})", on_ ? "on" : "off",
                  s_.quality, s_.strength, s_.replaceLightmaps ? "replaced" : "kept", s_.characters ? "on" : "off", s_.screen, s_.bleed, s_.debug);
@@ -165,6 +198,10 @@ void Gi::disable() {
     dev_.removeDrawObserver(this);
     dev_.removePasses(this);
     passId_ = 0;
+    refViewPass_ = 0;
+    refBuf_.reset();
+    refW_ = refH_ = 0;
+    dev_.releaseTransient("gi.ref.view");
     haveLast_ = false;
     scene_->setAnimated(this, false, 0.0f);
     scene_->setDynamic(this, false);
@@ -461,6 +498,8 @@ bool Gi::ensureResources(rhi::CommandList& cmd) {
         rs.cl().memoryBarrier(VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                               VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                               VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        rs.cl().bufferBarrier(*probes_, rhi::BufferAccess::ShaderRead);
+        rs.cl().bufferBarrier(*depth_, rhi::BufferAccess::ShaderRead);
     }
     spdlog::info("enh: gi: {} cascades x {} x {} x {} probes ({:.0f} / {:.0f} / {:.0f} units apart), {:.1f} MiB", kGiCascades, kDims[0], kDims[1],
                  kDims[2], kSpacing[0], kSpacing[1], kSpacing[2],
@@ -505,8 +544,9 @@ void Gi::record(d3d9::PassContext& ctx) {
     hd.dims[1] = kDims[1];
     hd.dims[2] = kDims[2];
     hd.dims[3] = kGiCascades;
-    split(probes_->shaderRefRw(), &hd.data[0]);
-    split(depth_->shaderRefRw(), &hd.data[2]);
+    // the frame's header (the lookups of the material shaders and passes: read access) holds the read references; the passes that write the probes get their own copy with the writable ones
+    split(probes_->shaderRef(), &hd.data[0]);
+    split(depth_->shaderRef(), &hd.data[2]);
     hd.params[0] = s_.strength;
     hd.params[1] = 0.1f;  // normal bias (cells)
     hd.params[2] = 0.3f;  // view bias (cells)
@@ -523,6 +563,14 @@ void Gi::record(d3d9::PassContext& ctx) {
         hd.cascade[c].spacing[1] = 1.0f / kSpacing[c];
         hd.cascade[c].spacing[2] = kDepthCap;
     }
+    {
+        // developer experiments (-Environment 'RVK_GI_EXP=<bit mask>'): the shaders read the mask from cascade 0's spacing.w (path-tracing.md 10)
+        static const std::uint32_t exp = [] {
+            char buf[16] = {};
+            return GetEnvironmentVariableA("RVK_GI_EXP", buf, sizeof(buf)) > 0 ? static_cast<std::uint32_t>(std::strtoul(buf, nullptr, 0)) : 0u;
+        }();
+        std::memcpy(&hd.cascade[0].spacing[3], &exp, sizeof(exp));
+    }
     const rhi::RingAlloc ha = frames.ring(sizeof(hd), 16);
     const rhi::RingAlloc la = frames.ring(std::max<std::uint64_t>(n, 1) * 4, 16);
     const rhi::RingAlloc pa = frames.ring(sizeof(GiPassParams), 16);
@@ -531,6 +579,19 @@ void Gi::record(d3d9::PassContext& ctx) {
         return;
     }
     std::memcpy(ha.ptr, &hd, sizeof(hd));
+    // the blend pass writes the probes: its own copy of the header with the writable references (D3D12: the UAV slots)
+    const rhi::RingAlloc haRw = frames.ring(sizeof(hd), 16);
+    const rhi::RingAlloc paRw = frames.ring(sizeof(GiPassParams), 16);
+    if (haRw.ptr == nullptr || paRw.ptr == nullptr) {
+        ++skipped_;
+        return;
+    }
+    {
+        GiVolumeHeader hp = hd;
+        split(probes_->shaderRefRw(), &hp.data[0]);
+        split(depth_->shaderRefRw(), &hp.data[2]);
+        std::memcpy(haRw.ptr, &hp, sizeof(hp));
+    }
     std::memcpy(la.ptr, list.data(), static_cast<std::size_t>(n) * 4);
 
     GiPassParams p{};
@@ -579,6 +640,11 @@ void Gi::record(d3d9::PassContext& ctx) {
     push.h.frame = ctx.frameBlock.bits;
     push.h.passId = passId_;
     split(pa.ref, push.params);
+    GiPassParams pRw = p;
+    split(haRw.ref, &pRw.volume[0]);
+    std::memcpy(paRw.ptr, &pRw, sizeof(pRw));
+    GiPush pushRw = push;
+    split(paRw.ref, pushRw.params);
 
     if (n > 0) {
         RhiScope rs(dev_, cmd);
@@ -591,11 +657,16 @@ void Gi::record(d3d9::PassContext& ctx) {
         cl.dispatch(n, 1, 1);
         // rays -> the blend; the trace's probe reads before the blend's writes
         cl.computeBarrier();
+        // the probes and their depth moments change state for the blend (D3D12: a buffer is a shader resource for the lookups and a UAV for the blend)
+        cl.bufferBarrier(*probes_, rhi::BufferAccess::ShaderWrite);
+        cl.bufferBarrier(*depth_, rhi::BufferAccess::ShaderWrite);
         cl.bindPipeline(*blend_);
-        cl.setPushConstants(&push, sizeof(push));
+        cl.setPushConstants(&pushRw, sizeof(pushRw));
         cl.dispatch(n, 1, 1);
         // the probes -> the lookups of the later draws (alpha) and of the next frames, the next trace
         cl.computeBarrier();
+        cl.bufferBarrier(*probes_, rhi::BufferAccess::ShaderRead);
+        cl.bufferBarrier(*depth_, rhi::BufferAccess::ShaderRead);
     }
     dev_.setGiHeader({reinterpret_cast<const std::uint8_t*>(&hd), sizeof(hd)});
     // the screen probes of the next frame trace with this update's light and volume (they run before the solid pass)
@@ -695,6 +766,8 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
             return GetEnvironmentVariableA("RVK_GI_DIAG", buf, sizeof(buf)) > 0 && buf[0] != '0';
         }();
         if (diag) {
+            // the sky cube is sampled by the diagnostics only (rtgi.md 27): ready for sampling
+            if (d3d9::Texture* cube = dev_.imageWithRole(d3d9::scene::ImageRole::SkyEnvCube); cube != nullptr && !cube->isNull()) dev_.readable(cube, cmd);
             if (diag_ == nullptr && dev_.rhi() != nullptr) {
                 diag_ = dev_.rhi()->createBuffer({64 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Readback, "gi diag"});
                 if (diag_ != nullptr) std::memset(diag_->map(), 0, 64 * 4);
@@ -762,6 +835,7 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
     sgiValid_ = true;
     // -> this frame's material shaders (Gbuffer variants: the factor on their DDGI lookup at their pixel)
     dev_.setFrameSgi({res[cur]->heapSampled(), dev_.samplerFor(true, true), shader::abi::kFrameSgiValid, stats[cur]->heapSampled()});
+    if (s_.reference > 0) recordReference(ctx, cl, push, res[cur]->heapSampled(), w, h);
     if (screenFrames_++ == 0) {
         spdlog::info("enh: gi: screen probes: {}x{} probes ({} px tiles, {} rays each) over {}x{}", gw, gh, tile, rays, w, h);
     }
@@ -778,10 +852,11 @@ void Gi::logDiag() {
         spdlog::info("enh: gi diag [{}] {} probes: engine ambient {:.3f}, ddgi {:.3f}, traced {:.3f} (uncapped {:.3f}) = {:.0f}% of the engine's; "
                      "far field {:.3f} ({:.0f}% of rays; the engine's sky on them {:.3f}, far field towards +dir {:.3f}, as radiance {:.3f}); hits {:.0f}% of rays: sun {:.3f} "
                      "point {:.3f} bounce {:.3f} emissive {:.3f} (hit rays' mean radiance {:.3f}, mean albedo^2.2 {:.3f}); back faces {:.0f}%; hits "
-                     "< 2 m {:.0f}%, < 10 m {:.0f}%; all rays as the engine's sky {:.3f}",
+                     "< 2 m {:.0f}%, < 10 m {:.0f}%; all rays as the engine's sky {:.3f}; sky cube: far rays (per far ray) raw {:.3f} ^2.2 {:.3f}, all rays ^2.2 {:.3f}; cube / engine sky on far rays: mean {:.3f}, rms {:.3f}",
                      cls == 0 ? "shaded" : "sun-lit", static_cast<long long>(n), m(1), m(2), m(3), m(4), m(1) > 1e-6 ? 100.0 * m(3) / m(1) : 0.0, m(5),
                      100.0 * m(10), m(15), m(16), m(20), 100.0 * m(11), m(6), m(7), m(8), m(9), m(19) / hits,
-                     m(18) / hits, 100.0 * m(12), 100.0 * m(13), 100.0 * m(14), m(17));
+                     m(18) / hits, 100.0 * m(12), 100.0 * m(13), 100.0 * m(14), m(17), m(21) / std::max(m(10), 1e-9), m(22) / std::max(m(10), 1e-9), m(23), m(24) / std::max(m(10), 1e-9),
+                     std::sqrt(m(25) / std::max(m(10), 1e-9)));
     }
     std::fill(std::begin(diagSum_), std::end(diagSum_), 0.0);
 }

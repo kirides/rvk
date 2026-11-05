@@ -29,6 +29,9 @@ QUIRKS
     menus and loading screens. Fast camera turns with a character close to the camera can show a smeared character. If you use
     AMD Radeon Chill or another driver frame limiter for Risen.exe, switch it off for the game: it counts the generated
     frames too. The frame generation DLL is in this zip (rvk folder).
+  - Graphics API (System tab, advanced; or [vulkan] api = "d3d12" in rvk\config.toml): Vulkan is the default. "Direct3D 12" is an
+    experimental second backend (needs Shader Model 6.6; falls back to Vulkan otherwise). FSR, frame generation and exclusive
+    fullscreen are Vulkan only for now. Needs a restart.
   - The first start (and the first visit to a coast with the enhanced ocean) can take longer: caches are built
     in rvk\cache.
   - Render mode (System tab): Wrapper (default: the game's rendering on Vulkan + the enhancements), Full
@@ -42,3 +45,7 @@ CREDITS
 
 PROBLEMS
   Attach rvk\rvk.log (written each start) to bug reports, plus the build line below.
+
+Material packs (optional): extra roughness / metalness data for chosen materials (glossy wood and stone, metal, glass, wet ground).
+A small sample is in rvk\materialpack_sample: copy that folder to rvk\materialpack to try it (its README.txt explains the format;
+delete the folder to go back). Setting "Material pack" (overlay F11, Graphics tab) turns it off.

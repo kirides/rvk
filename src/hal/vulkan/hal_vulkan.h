@@ -21,11 +21,14 @@
 #include "enh/debug_view.h"
 #include "enh/framegen.h"
 #include "enh/gbuffer.h"
+#include "enh/material_pack.h"
 #include "enh/object_motion.h"
 #include "enh/upscale.h"
 #include "enh/gi.h"
+#include "enh/light_table.h"
 #include "enh/rt_debug.h"
 #include "enh/rt_scene.h"
+#include "enh/material_rt.h"
 #include "enh/rt_shadows.h"
 #include "enh/shadows.h"
 #include "enh/water.h"
@@ -41,6 +44,8 @@ namespace rvk::hal::vulkan {
 class HalDevice;
 
 struct Options {
+    bool d3d12Messages = false;  // [debug] d3d12_messages
+    bool d3d12Dred = true;       // [debug] d3d12_dred
     bool validation = false;
     bool syncValidation = false;
     int adapter = -1;
@@ -60,7 +65,7 @@ struct Options {
     bool overlayInScreenshots = false;            // [debug] overlay_in_screenshots
     std::vector<std::string> overlayCommands;     // [debug] commands
     std::filesystem::path settingsFile;           // <bin>/rvk/settings.toml
-    bool rtSelfTest = false;                     // [debug] rt_selftest: vk::rt::selfTest at device creation (result in rvk.log)
+    bool rtSelfTest = false;                     // [debug] rt_selftest: GameDevice::runRaytracingSelfTest at device creation (result in rvk.log)
 };
 
 // true while the frame selected by Options::logFrame is being recorded
@@ -612,7 +617,12 @@ private:
     std::unique_ptr<enh::ObjectMotion> objectMotion_;  // per-object motion vectors of characters / moving rigid draws (FSR)
     std::unique_ptr<enh::Upscale> upscale_;     // upscale.mode (camera jitter, FSR)
     std::unique_ptr<enh::FrameGeneration> framegen_;  // framegen.mode (FSR 3 / FSR 4 frame generation; the manual model)
+    std::unique_ptr<enh::MaterialRt> materialRt_;  // materials.quality = high: traced reflections of the pack's smooth surfaces
     std::unique_ptr<enh::Gbuffer> gbuffer_;      // ao.* / gbuffer.debug (the G-buffer attachments + passes)
+    std::unique_ptr<enh::matpack::MaterialPack> matPack_;  // materials.* (docs/research/material-pack.md)
+    std::unique_ptr<enh::LightTable> lightTable_;  // lighting.clustered (Full: the light table + cluster grid, docs/research/gpu-scene.md 9.7)
+    void applyMaterials();
+    void applyLighting();
     void applyWater();
     void applyGi();
     void applyGbuffer();

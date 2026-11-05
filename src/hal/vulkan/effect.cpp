@@ -137,7 +137,7 @@ public:
             const auto& d = t->desc();
             const Handle* h = handleOf(a0);
             spdlog::info("hal> Effect::SetTexture {} ({}x{} {} tex {})", h != nullptr ? paramOf(*h).name : std::string("?"), d.width,
-                         d.height, vk::d3dFormatName(d.format), static_cast<const void*>(t));
+                         d.height, rhi::d3dFormatName(d.format), static_cast<const void*>(t));
         }
         return setTex(a0, a1 != nullptr ? static_cast<HalTexture*>(a1)->tex() : nullptr);
     }

@@ -80,6 +80,11 @@ typedef RVK_REF(WaterBlockData) WaterBlock;
 
 WaterBlock waterBlock() { return rvkPtr<WaterBlockData, 16>(pc.draw); }
 
+// element i of WaterBlockData::lights read straight from memory: `w.Get().lights[i]` with a loop index makes DXC keep the whole array by value
+// on D3D12 (same class as giLight). Byte offset of `lights` = 896 (enh/water.h static_assert)
+static const uint WATER_LIGHTS_OFFSET = 896u;
+float4 waterLight(uint i) { return rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(pc.draw), WATER_LIGHTS_OFFSET + i * 16u)); }
+
 // bindless texture / sampler slot of the engine draw's sampler s (GLSL: w.tex[s], w.smp[s])
 uint waterTexSlot(WaterBlock w, uint s) { return w.Get().tex[s >> 2][s & 3u]; }
 uint waterSmpSlot(WaterBlock w, uint s) { return w.Get().smp[s >> 2][s & 3u]; }

@@ -90,7 +90,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     }
 
     // albedo / uv split view: the left half shows the raster
-    bool material = mode == RT_DEBUG_ALBEDO || mode == RT_DEBUG_UV;
+    bool material = mode == RT_DEBUG_ALBEDO || mode == RT_DEBUG_UV || mode == RT_DEBUG_ROUGHNESS || mode == RT_DEBUG_METALNESS;
     if (material && (pc.mode & RT_DEBUG_SPLIT) != 0u && p.x < pc.width / 2u) {
         outColor[p] = p.x + 1u >= pc.width / 2u ? float4(1.0, 1.0, 0.0, 1.0) : float4(0.0, 0.0, 0.0, 0.0);
         return;
@@ -146,7 +146,11 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         result = err > max(2.0, t * 0.002) ? float4(1.0, 0.0, 1.0, 0.9) : float4(n * 0.5 + 0.5, 0.85);
     } else {
         RvkRtHitSurface s = rvkRtHitSurface(f, h, dir, 0.0, coneSpread);
-        if (mode == RT_DEBUG_UV) {
+        if (mode == RT_DEBUG_ROUGHNESS || mode == RT_DEBUG_METALNESS) {
+            float v = mode == RT_DEBUG_ROUGHNESS ? s.roughness : s.metalness;
+            result = float4(v, v, v, 1.0);
+            if (s.packWord == 0u) result.rgb = float3(0.35, 0.0, 0.35);  // no pack entry: dark magenta
+        } else if (mode == RT_DEBUG_UV) {
             result = float4(frac(s.uv), (s.uvSet & RVK_RT_UV_APPROX) != 0u ? 0.8 : 0.0, 1.0);
         } else {
             // a fixed light from above-front so shapes read; the texture itself unlit

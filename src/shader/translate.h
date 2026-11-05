@@ -97,6 +97,14 @@ struct TranslateOptions {
         std::string target;
     };
     std::vector<DotCapture> dotCaptures;
+    // texture captures (HLSL only): the first texld of pixel sampler `samplerReg` copies its coordinate (xy, as read) into the float4 global
+    // `uvTarget`, its sampled value into `colorTarget` and sets the bool `okTarget` (the prelude declares all three): the diffuse
+    // coordinate and colour the material pack's variant needs (enh/material_variant)
+    struct TexCapture {
+        std::uint32_t samplerReg = 0;
+        std::string uvTarget, colorTarget, okTarget;
+    };
+    std::vector<TexCapture> texCaptures;
 
     // material pixel shaders (enh/material_variant): the variant may be built from the GLSL material shader instead of the
     // translated bytecode (d3d9::Device ubershader setting, shader/uber.h). `uberDefines` = the RVK_MV_* defines of the hooks

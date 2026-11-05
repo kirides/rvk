@@ -219,7 +219,7 @@ void ObjectMotion::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         header[3] = s.lastSlots;
     }
     std::memcpy(a.ptr, header, 16);
-    dev.requestVertexCapture(a.ref);
+    dev.requestVertexCapture(a);
     s.pending = a.ref;
     s.pendingSlots = slots;
     s.pendingFrame = frame;

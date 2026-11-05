@@ -12,11 +12,12 @@
     The script block runs in the caller's working directory (the repo / worktree the script is started from).
 #>
 param(
+    [string]$Name = 'rvk-test-copy',
     [string]$Who = '',
     [Parameter(Mandatory)][scriptblock]$Run
 )
 $ErrorActionPreference = 'Stop'
-$mutex = New-Object System.Threading.Mutex($false, 'Global\rvk-test-copy')
+$mutex = New-Object System.Threading.Mutex($false, "Global\$Name")
 $label = if ($Who) { $Who } else { (Get-Location).Path }
 $start = Get-Date
 $held = $false

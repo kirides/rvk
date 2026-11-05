@@ -1,4 +1,4 @@
-#include "vk/pacer.h"
+#include "core/pacer.h"
 
 #include <windows.h>
 
@@ -11,7 +11,7 @@
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "winmm.lib")
 
-namespace rvk::vk {
+namespace rvk::pacing {
 namespace {
 
 std::int64_t qpc() {
@@ -195,4 +195,4 @@ FramePacer::Stats FramePacer::takeStats() {
     return s;
 }
 
-}  // namespace rvk::vk
+}  // namespace rvk::pacing

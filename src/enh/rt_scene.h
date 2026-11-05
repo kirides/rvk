@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "d3d9/device.h"
+#include "enh/material_pack.h"
 #include "enh/rt_material.h"
 #include "enh/rt_lod.h"
 #include "enh/rt_registry.h"
@@ -157,6 +158,7 @@ private:
         // of moving objects without an owner) leaves a trail of stale instances in the registry: while `volatileUntil` has
         // not passed, its instances count only while they are seen (this frame or the two before)
         bool animatedOnly = false;   // SpeedTree leaves: no rest pose, only the animated capture goes into the TLAS (observeTree)
+        bool glass = false;          // a main-view blended draw of a pack glass material used this range (kRtRecordGlass)
         std::uint64_t churnStart = 0, volatileUntil = 0;
         std::uint32_t churnNew = 0;
         // the materials its draws showed (enh/rt_material ids, M9 P2), by the draw's material signature: one range may be
@@ -224,7 +226,7 @@ private:
     struct Tlas {
         std::unique_ptr<rhi::AccelerationStructure> as;
         std::uint32_t capacity = 0;
-        std::uint32_t slot = 0;  // its slot in the bindless acceleration structure array (vk::Bindless::allocTlasSlot)
+        std::uint32_t slot = 0;  // its slot in the bindless acceleration structure array (the backend's allocTlasSlot)
     };
 
     void activate();
@@ -246,10 +248,26 @@ private:
     void learnLayer(d3d9::Device& dev, const d3d9::ReplaceQuery& q, const rt::BlasKey& key);
     // the record / segment material fields of `m` (bindless slots of this frame); returns whether the opacity has a texture
     struct MaterialFields {
-        std::uint32_t albedoTex = 0, albedoSampler = 0, uvSet = 0, opacityTex = 0;
+        std::uint32_t albedoTex = 0, albedoSampler = 0, uvSet = 0, opacityTex = 0, packWord = 0;
         float uvMap[2][4]{};
     };
-    static MaterialFields materialFields(const RtMaterial* m);
+    MaterialFields materialFields(const RtMaterial* m) const;
+    matpack::MaterialPack* pack_ = nullptr;
+    // glass panes (materials.glass, docs/research/material-rt.md 8): the main view's blended draws of pack entries with transmission > 0 enter the scene
+    // under their own mask (they are in no other ray's way)
+    std::unordered_set<const void*> glassConsumers_;
+    std::uint64_t glassInstances_ = 0;
+    bool isGlassDraw(const d3d9::ReplaceQuery& q) const;
+public:
+    void setGlass(const void* consumer, bool on) {
+        if (on) glassConsumers_.insert(consumer);
+        else glassConsumers_.erase(consumer);
+    }
+    // glass instances in the TLAS of the latest build
+    std::uint64_t glassInstances() const { return glassInstances_; }
+    // the material pack (enh/material_pack.h): its entries' maps reach the hit shading through the records' packWord
+    void setMaterialPack(matpack::MaterialPack* p) { pack_ = p; }
+private:
     static constexpr std::size_t kMaterialSlots = 8;
     // CPU side of a build: index range scan (max vertex, bounds); false = unusable (logged once per reason)
     bool prepareInputs(Blas& b);
@@ -320,7 +338,8 @@ private:
     struct SkinJob {
         rhi::GpuRef vertices;      // vertex 0 of the draw's index range's slot 0 (base vertex and stream offset applied)
         rhi::GpuRef bones;         // c32.. of the draw's vertex shader constants (200 vec4, copied into the ring)
-        rhi::GpuRef out;           // the capture-layout buffer
+        rhi::GpuRef out;           // the capture-layout buffer (the writable reference)
+        rhi::GpuRef outKey;        // ... its read reference: the identity the consumers ask for (markVertexCaptured)
         rhi::GpuRef ref;           // verify: the vertex shader capture of the same draw
         std::uint32_t slots = 0, stride = 0, offsets = 0;
     };

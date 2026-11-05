@@ -57,6 +57,7 @@ bool DebugView::ensurePipelines(rhi::Device& rdev, VkFormat target) {
     if (!compute_) {
         rhi::ComputePipelineDesc cd;
         cd.cs.spirv = shader::embedded::spirv("debug/inject_view.comp");
+        cd.cs.dxil = shader::embedded::dxilOnDemand("debug/inject_view.comp");
         cd.name = "debug.inject_view compute";
         compute_ = rdev.createComputePipeline(cd);
     }
@@ -64,7 +65,9 @@ bool DebugView::ensurePipelines(rhi::Device& rdev, VkFormat target) {
     if (!composite_) {
         rhi::GraphicsPipelineDesc gd;
         gd.vs.spirv = shader::embedded::spirv("debug/fullscreen_rhi.vert");
+        gd.vs.dxil = shader::embedded::dxilOnDemand("debug/fullscreen_rhi.vert");
         gd.ps.spirv = shader::embedded::spirv("debug/inject_view.frag");
+        gd.ps.dxil = shader::embedded::dxilOnDemand("debug/inject_view.frag");
         gd.colorFormats[0] = target;
         // dst * src: the factor image multiplies the scene (keeps the engine's exposure); alpha kept
         gd.blend.blendEnable = VK_TRUE;

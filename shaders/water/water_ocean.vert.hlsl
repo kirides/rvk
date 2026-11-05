@@ -16,11 +16,24 @@ struct WaterVsOut {
     float4 position : SV_Position;
     [[vk::location(0)]] float4 oTc0 : VARY0;
     [[vk::location(1)]] float4 oTc1 : VARY1;
+#ifndef __spirv__
+    [[vk::location(2)]] float4 oPad2 : VARY2;  // D3D12 links by register: the signature is dense
+#endif
     [[vk::location(3)]] float4 oTc3 : VARY3;   // world position, w global alpha
     [[vk::location(4)]] float4 oTc4 : VARY4;   // wave normal, w outdoor factor
     [[vk::location(5)]] float4 oTc5 : VARY5;   // tangent (recomputed in the PS), w wave amplitude (FFT: height over the mean / Hs/2)
     [[vk::location(6)]] float4 oTc6 : VARY6;   // binormal (recomputed in the PS), w crest steepness
     [[vk::location(7)]] float4 oTc7 : VARY7;   // undisplaced xz, distance to the coast (FFT: signed, to the waterline), shore-wave weight
+#ifndef __spirv__
+    [[vk::location(8)]] float4 oPad8 : VARY8;
+    [[vk::location(9)]] float4 oPad9 : VARY9;
+    [[vk::location(10)]] float4 oPad10 : VARY10;
+    [[vk::location(11)]] float4 oPad11 : VARY11;
+    [[vk::location(12)]] float4 oPad12 : VARY12;
+    [[vk::location(13)]] float4 oPad13 : VARY13;
+    [[vk::location(14)]] float4 oPad14 : VARY14;
+    [[vk::location(15)]] float4 oPad15 : VARY15;
+#endif
     [[vk::location(16)]] float4 oCol0 : VARY16;
 };
 
@@ -95,7 +108,7 @@ SeaPoint surfacePoint(WaterBlock w, float2 xz, float t, float3 cam) {
 }
 
 WaterVsOut VSMain(uint vertexId : SV_VertexID) {
-    WaterVsOut o;
+    WaterVsOut o = (WaterVsOut)0;
     WaterBlock w = waterBlock();
     int vertexIndex = int(vertexId);
     int n = int(w.Get().grid.z);

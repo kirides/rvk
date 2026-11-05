@@ -25,10 +25,21 @@ struct RvkPsIn {
     [[vk::location(5)]] float3 vTangent : VARY5;         // TEXCOORD5
     [[vk::location(6)]] float3 vBinormal : VARY6;        // TEXCOORD6
     [[vk::location(7)]] float2 vLightmap : VARY7;        // TEXCOORD7
-    [[vk::location(16)]] float4 vColor0 : VARY16;        // COLOR0
+#ifndef __spirv__
+    [[vk::location(8)]] float4 rvk_pad8 : VARY8;
+    [[vk::location(9)]] float4 rvk_pad9 : VARY9;
+    [[vk::location(10)]] float4 rvk_pad10 : VARY10;
+    [[vk::location(11)]] float4 rvk_pad11 : VARY11;
+    [[vk::location(12)]] float4 rvk_pad12 : VARY12;
+    [[vk::location(13)]] float4 rvk_pad13 : VARY13;
+    [[vk::location(14)]] float4 rvk_pad14 : VARY14;
+#endif  // (D3D12 links the stages by register: the signature is dense, in register order)
 #ifdef RVK_MV_MOTION
     [[vk::location(15)]] float4 rvk_prevWorld : VARY15;  // enh::kPrevWorldLocation: the vertex capture's previous world position
+#elif !defined(__spirv__)
+    [[vk::location(15)]] float4 rvk_pad15 : VARY15;
 #endif
+    [[vk::location(16)]] float4 vColor0 : VARY16;        // COLOR0
 #if XFX_DOUBLESIDED
     bool rvk_front : SV_IsFrontFace;
 #endif

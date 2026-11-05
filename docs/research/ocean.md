@@ -108,8 +108,11 @@ slope variance (`cascadeStats`, a 64^2 grid), used for the shading's roughness.
 4. **resolve**: the `(-1)^(x+z)` sign of the centred k-grid, choppiness, displacement (RGBA16F: dx, dy, dz in metres, foam)
    and derivatives (RGBA16F: dDy/dx, dDy/dz, dDx/dx, dDz/dz); **foam** where the Jacobian `(1 + Dxx)(1 + Dzz) - Dxz^2` falls
    below 0.8, accumulated over time (decay 0.35 / s) in the displacement's alpha;
-5. **mip chains** of both outputs by blits (one barrier batch per level for all cascades); the images end in
-   `SHADER_READ_ONLY` for the vertex and fragment stages.
+5. **mip chains** of both outputs (2 x cascades images, 128 / 256 / 512 squared, 8 - 10 levels, a 2 x 2 box = what the bilinear
+   blit of a power-of-two level computes) by `ocean_mips.comp` (SPD-style, performance.md 22): per image dispatch A (mip 0 ->
+   1..6, one group per 64 x 64 texels, groupshared) and dispatch B (mip 6 -> 7..9, one group), one barrier between; `debug.ocean_spd`
+   off = the old path, one blit per level (one barrier batch per level for all cascades). The images end in `SHADER_READ_ONLY` for
+   the vertex and fragment stages.
 
 Push descriptors (5 storage images) + a 112-byte push block; images are the module's own (`vk::Image`, per-layer views for
 the bindless set). Memory: medium 17 MiB, high 69 MiB, low 3 MiB [C: log].

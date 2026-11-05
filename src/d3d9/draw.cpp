@@ -19,6 +19,7 @@
 #include "shader/abi.h"
 
 namespace rvk::d3d9 {
+void diagAfterDraw(Device& d, const char* what);  // device.cpp (RVK_NAN_BISECT)
 
 // [debug] perf: CPU time inside a draw call
 struct Device::DrawTimer {
@@ -35,25 +36,18 @@ struct Device::DrawTimer {
 void Device::endRendering() {
     if (rendering_) {
         flushBatch();  // the batched draws belong to this rendering scope
-        const bool secondary = scopeSecondary_;
-        if (secondary) finishSecondaryScope();
-        vkCmdEndRendering(frames_.cmd());
+        if (scopeSecondary_) finishSecondaryScope();
+        game_->endScope();  // (the backend ends the scope: waits for + executes the chunks, rebinds the frame's state)
         rendering_ = false;
-        if (secondary) {
-            // executing secondary command buffers leaves the primary's pipeline, dynamic state and descriptor sets undefined
-            rec_.reset();
-            const VkDescriptorSet set = bindless_.set();
-            vkCmdBindDescriptorSets(frames_.cmd(), VK_PIPELINE_BIND_POINT_GRAPHICS, bindless_.pipelineLayout(), 0, 1, &set, 0, nullptr);
-        }
-        if (gpuTimer_.enabled()) {
-            const std::uint32_t slot = frames_.currentSlot();
+        if (game_->timestampsEnabled()) {
+            const std::uint32_t slot = game_->frameSlot();
             std::string label;
-            if (gpuTimer_.details(slot)) {
+            if (game_->timestampDetails(slot)) {
                 label = std::format("pass {}: {}x{}, {} colour ({}), depth {}, {} draws", passIndex_, targetWidth_, targetHeight_,
                                     colorCount_, colorCount_ > 0 ? static_cast<int>(colorFormats_[0]) : 0,
                                     static_cast<int>(depthFormat_), passDraws_);
             }
-            gpuTimer_.mark(frames_.cmd(), slot, vk::GpuTimer::Stream::Main, std::move(label));
+            game_->timestampMark(frameList(), slot, rhi::TimestampStream::Main, std::move(label));
         }
     }
 }
@@ -62,65 +56,54 @@ bool Device::beginRendering() {
     if (rendering_) {
         return true;
     }
-    VkCommandBuffer cmd = frames_.cmd();
-    VkRenderingAttachmentInfo colors[kRenderTargets]{};
     colorCount_ = 0;
     targetWidth_ = UINT32_MAX;
     targetHeight_ = UINT32_MAX;
+    rhi::RenderingInfo ri{};
     for (std::uint32_t i = 0; i < kRenderTargets; ++i) {
         Surface* s = rt_[i];
         if (s == nullptr || s->texture()->isNull() || s->texture()->isDepth()) {
             continue;
         }
         Texture* t = s->texture();
-        t->image().transition(cmd, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         t->lastUseFrame_ = frameValue();
-        VkRenderingAttachmentInfo& a = colors[colorCount_];
-        a.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-        a.imageView = t->image().attachmentView(ctx_, s->level(), s->face());
-        a.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        a.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        a.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        colorFormats_[colorCount_] = t->image().format();
+        rhi::RenderingInfo::Attachment& a = ri.color[colorCount_];
+        a.texture = &t->rhi();
+        a.mip = s->level();
+        a.layer = s->face();
+        colorFormats_[colorCount_] = t->rhi().desc().format;
         ++colorCount_;
         targetWidth_ = std::min(targetWidth_, s->width());
         targetHeight_ = std::min(targetHeight_, s->height());
     }
+    ri.colorCount = colorCount_;
     // the thin G-buffer (enh/gbuffer): normal + motion after the engine's target, cleared at the frame's first use
     engineColorCount_ = colorCount_;
     scopeGbuf_ = false;
     if (colorCount_ == 1 && gbufferScope()) {
         const bool first = gbufWrittenFrame_ != frameValue();
-        for (vk::Image* img : {gbufImage_[0], gbufImage_[1]}) {
-            img->transition(cmd, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-            VkRenderingAttachmentInfo& a = colors[colorCount_];
-            a.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-            a.imageView = img->view();
-            a.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-            a.loadOp = first ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
-            a.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-            a.clearValue.color = {{0.0f, 0.0f, 0.0f, 0.0f}};
-            colorFormats_[colorCount_] = img->format();
+        for (rhi::Texture* img : {gbuf_.normal, gbuf_.motion}) {
+            rhi::RenderingInfo::Attachment& a = ri.color[colorCount_];
+            a.texture = img;
+            a.load = first ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+            colorFormats_[colorCount_] = img->desc().format;
             ++colorCount_;
         }
+        ri.colorCount = colorCount_;
         gbufWrittenFrame_ = frameValue();
         scopeGbuf_ = true;
     }
-    VkRenderingAttachmentInfo depth{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    VkRenderingAttachmentInfo stencil{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     depthFormat_ = VK_FORMAT_UNDEFINED;
     stencilFormat_ = VK_FORMAT_UNDEFINED;
     if (ds_ != nullptr && !ds_->texture()->isNull() && ds_->texture()->isDepth()) {
         Texture* t = ds_->texture();
-        t->image().transition(cmd, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
         t->lastUseFrame_ = frameValue();
-        depth.imageView = t->image().attachmentView(ctx_, ds_->level(), ds_->face());
-        depth.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        depth.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        depth.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        depthFormat_ = t->image().format();
-        if (vk::hasStencil(depthFormat_)) {
-            stencil = depth;
+        rhi::RenderingInfo::Attachment& a = ri.depth;
+        a.texture = &t->rhi();
+        a.mip = ds_->level();
+        a.layer = ds_->face();
+        depthFormat_ = t->rhi().desc().format;
+        if (rhi::hasStencil(depthFormat_)) {
             stencilFormat_ = depthFormat_;
         }
         // D3D9 lets the depth buffer be larger than the render target
@@ -132,24 +115,18 @@ bool Device::beginRendering() {
         targetWidth_ = targetHeight_ = 0;
         return false;
     }
-    if (gpuTimer_.enabled()) {
-        const std::uint32_t slot = frames_.currentSlot();
-        gpuTimer_.mark(cmd, slot, vk::GpuTimer::Stream::Main,
-                       gpuTimer_.details(slot) ? std::format("barriers / copies / inline uploads before pass {}", passIndex_ + 1)
-                                               : std::string());
+    if (game_->timestampsEnabled()) {
+        const std::uint32_t slot = game_->frameSlot();
+        game_->timestampMark(frameList(), slot, rhi::TimestampStream::Main,
+                       game_->timestampDetails(slot) ? std::format("barriers / copies / inline uploads before pass {}", passIndex_ + 1)
+                                                     : std::string());
     }
     ++passIndex_;
     passDraws_ = 0;
-    VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
-    ri.renderArea = {{0, 0}, {targetWidth_, targetHeight_}};
-    ri.layerCount = 1;
-    ri.colorAttachmentCount = colorCount_;
-    ri.pColorAttachments = colors;
-    ri.pDepthAttachment = depthFormat_ != VK_FORMAT_UNDEFINED ? &depth : nullptr;
-    ri.pStencilAttachment = stencilFormat_ != VK_FORMAT_UNDEFINED ? &stencil : nullptr;
+    ri.width = targetWidth_;
+    ri.height = targetHeight_;
     scopeSecondary_ = wantSecondaryScope();
-    if (scopeSecondary_) ri.flags = VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT;
-    vkCmdBeginRendering(cmd, &ri);
+    game_->beginScope(ri, scopeSecondary_);  // (the backend transitions + views the attachments, secondary contents when threaded)
     rendering_ = true;
     ++stats_.renderPasses;
     ++stats_.totalRenderPasses;
@@ -173,7 +150,7 @@ bool Device::prepareTextures() {
         if (t == nullptr || t->isNull() || isTarget(t)) {
             continue;  // unbound, or a feedback loop (undefined in D3D9): the default texture is sampled
         }
-        const bool ready = !t->pending_ && t->image().layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        const bool ready = !t->pending_ && t->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         if (ready) {
             t->lastUseFrame_ = frame;
             continue;
@@ -185,6 +162,14 @@ bool Device::prepareTextures() {
             t->prepareForSampling(frameList());
         }
         t->lastUseFrame_ = frame;
+    }
+    // material pack: the variant reflects the sky cube, which the engine draws into (a render target layout until something samples it)
+    if (packProvider_) {
+        if (Texture* cube = imageWithRole(scene::ImageRole::SkyEnvCube); cube != nullptr && !cube->isNull() &&
+            (cube->pending_ || cube->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)) {
+            endRendering();
+            cube->prepareForSampling(frameList());
+        }
     }
     return true;
 }
@@ -243,15 +228,15 @@ const Device::VertexPlan& Device::vertexPlan(const VertexDecl* decl, Shader& vs)
 // Two descriptions equal. With extended dynamic state 3 (blend is not in the description: it stays at its defaults) and dynamic
 // vertex input (bindings / attributes are cleared by computeVertexInput) everything after `blend` is the same in every
 // description, so only the 52 leading bytes are compared (the 512-byte compare ran for every draw, twice when the pipeline changed)
-bool Device::sameDesc(const vk::PipelineDesc& a, const vk::PipelineDesc& b) const {
-    if (ctx_.features().extendedDynamicState3 && ctx_.features().vertexInputDynamicState && a.bindingCount == 0 && a.attributeCount == 0 &&
+bool Device::sameDesc(const PipelineDesc& a, const PipelineDesc& b) const {
+    if (game_->gameCaps().extendedDynamicState3 && game_->gameCaps().vertexInputDynamicState && a.bindingCount == 0 && a.attributeCount == 0 &&
         b.bindingCount == 0 && b.attributeCount == 0) {
-        return memEqual(&a, &b, offsetof(vk::PipelineDesc, blend));
+        return memEqual(&a, &b, offsetof(PipelineDesc, blend));
     }
     return memEqual(&a, &b, sizeof(a));
 }
 
-std::size_t Device::recentSlot(const vk::PipelineDesc& pd) {
+std::size_t Device::recentSlot(const PipelineDesc& pd) {
     const std::uint64_t h = ((static_cast<std::uint64_t>(pd.vs) >> 4) * 0x9E3779B97F4A7C15ull ^
                              (static_cast<std::uint64_t>(pd.fs) >> 4) * 0xC2B2AE3D27D4EB4Full ^ pd.colorFormats[0] ^
                              (static_cast<std::uint64_t>(pd.depthFormat) << 8) ^ (static_cast<std::uint64_t>(pd.colorCount) << 16)) >>
@@ -260,23 +245,121 @@ std::size_t Device::recentSlot(const vk::PipelineDesc& pd) {
 }
 
 // the pipeline of `d` when it exists (a direct-mapped cache of recent descriptions first: no 520-byte hash, no lock), never builds
-VkPipeline Device::findPipeline(const vk::PipelineDesc& d) {
+GamePipeline Device::findPipeline(const PipelineDesc& d) {
     RecentPipeline& recent = recentPipelines_[recentSlot(d)];
-    if (recent.pipeline != VK_NULL_HANDLE && sameDesc(recent.desc, d)) return recent.pipeline;
-    const VkPipeline p = pipelines_.find(d);
-    if (p != VK_NULL_HANDLE) {
+    if (recent.pipeline != GamePipeline::None && sameDesc(recent.desc, d)) return recent.pipeline;
+    const GamePipeline p = game_->findPipeline(d);
+    if (p != GamePipeline::None) {
         recent.desc = d;
         recent.pipeline = p;
     }
     return p;
 }
 
-bool Device::computeVertexInput(vk::PipelineDesc& pd, VertexInputValues& out) {
+// WP0 (d3d9/wp0.h): what a D3D12 draw path has to cover
+void Device::wp0Note(const PipelineDesc& pd, std::uint32_t primitiveType, bool indexed, bool captureDraw, bool giDraw) {
+    Wp0& w = wp0_;
+    ++w.draws;
+    switch (primitiveType) {
+    case PT_POINTLIST:
+        ++w.point;
+        if (instanceCount_ > 1) ++w.pointInstanced;
+        break;
+    case PT_TRIANGLEFAN:
+        ++w.fan;
+        if (indexed) ++w.fanIndexed;
+        break;
+    case PT_TRIANGLESTRIP:
+        ++w.strip;
+        if (indexed) ++w.stripIndexed;
+        break;
+    case PT_LINELIST: ++w.lineList; break;
+    case PT_LINESTRIP: ++w.lineStrip; break;
+    default: break;
+    }
+    if (captureDraw) ++w.capture;
+    if (giDraw) ++w.gi;
+    if (gbufWrite_) ++w.gbuf;
+    // the layout the draw would bake into a D3D12 PSO: the pipeline description's own (D3D12 has no dynamic vertex input) or the dynamic one
+    const std::uint32_t nb = pd.bindingCount != 0 ? pd.bindingCount : workVi_.bindingCount;
+    const std::uint32_t na = pd.attributeCount != 0 ? pd.attributeCount : workVi_.attributeCount;
+    const rhi::VertexBinding* bs = pd.bindingCount != 0 ? pd.bindings : workVi_.bindings;
+    const rhi::VertexAttribute* as = pd.attributeCount != 0 ? pd.attributes : workVi_.attributes;
+    std::uint64_t layout = 0;
+    for (std::uint32_t i = 0; i < nb; ++i) layout = Wp0::bytes(layout, bs[i]);
+    for (std::uint32_t i = 0; i < na; ++i) {
+        layout = Wp0::bytes(layout, as[i]);
+        const char* name = nullptr;
+        switch (as[i].format) {
+        case VK_FORMAT_R8G8B8A8_USCALED: name = "UBYTE4 (R8G8B8A8_USCALED)"; break;
+        case VK_FORMAT_R16G16_SSCALED: name = "SHORT2 (R16G16_SSCALED)"; break;
+        case VK_FORMAT_R16G16B16A16_SSCALED: name = "SHORT4 (R16G16B16A16_SSCALED)"; break;
+        case VK_FORMAT_A2B10G10R10_USCALED_PACK32: name = "UDEC3 (A2B10G10R10_USCALED)"; break;
+        case VK_FORMAT_A2B10G10R10_SNORM_PACK32: name = "DEC3N (A2B10G10R10_SNORM)"; break;
+        case VK_FORMAT_R32G32B32_SFLOAT: case VK_FORMAT_R32G32B32A32_SFLOAT: case VK_FORMAT_R32G32_SFLOAT: case VK_FORMAT_R32_SFLOAT:
+        case VK_FORMAT_B8G8R8A8_UNORM: case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R16G16_SNORM: case VK_FORMAT_R16G16B16A16_SNORM:
+        case VK_FORMAT_R16G16_UNORM: case VK_FORMAT_R16G16B16A16_UNORM: case VK_FORMAT_R16G16_SFLOAT: case VK_FORMAT_R16G16B16A16_SFLOAT:
+            break;
+        default: name = "other"; break;
+        }
+        if (name != nullptr) ++w.exotic[name];
+    }
+    std::uint64_t base = 0;
+    base = Wp0::mix(base, static_cast<std::uint64_t>(pd.vs));
+    base = Wp0::mix(base, static_cast<std::uint64_t>(pd.fs));
+    base = Wp0::mix(base, static_cast<std::uint64_t>(pd.topology));
+    base = Wp0::mix(base, static_cast<std::uint64_t>(pd.polygonMode));
+    base = Wp0::mix(base, pd.colorCount);
+    for (std::uint32_t i = 0; i < pd.colorCount; ++i) {
+        base = Wp0::mix(base, static_cast<std::uint64_t>(pd.colorFormats[i]));
+        base = Wp0::bytes(base, attachmentBlend(i));
+    }
+    base = Wp0::mix(base, static_cast<std::uint64_t>(pd.depthFormat));
+    base = Wp0::mix(base, static_cast<std::uint64_t>(pd.stencilFormat));
+    std::uint64_t withLayout = Wp0::mix(base, layout);
+    std::uint64_t full = withLayout;
+    const DynamicStateValues& d = workDyn_;
+    full = Wp0::mix(full, static_cast<std::uint64_t>(d.cull));
+    full = Wp0::mix(full, static_cast<std::uint64_t>(d.depthTest) | static_cast<std::uint64_t>(d.depthWrite) << 1 | static_cast<std::uint64_t>(d.depthCompare) << 2);
+    if (d.stencilTest != 0) {
+        full = Wp0::bytes(full, d.stencilFront);
+        full = Wp0::bytes(full, d.stencilBack);
+        full = Wp0::mix(full, static_cast<std::uint64_t>(d.stencilFrontCompare) | static_cast<std::uint64_t>(d.stencilBackCompare) << 8);
+        full = Wp0::mix(full, d.stencilMasks[0] | static_cast<std::uint64_t>(d.stencilMasks[1]) << 8);
+    }
+    if (d.depthBiasEnable != 0) {
+        full = Wp0::bytes(full, d.depthBias);
+    }
+    if (decl_ != nullptr && decl_->hasBlendIndices() && w.layoutKeys.insert(withLayout).second && w.skinLogs++ < 8) {
+        std::string d;
+        for (std::uint32_t i = 0; i < na; ++i) d += std::format(" loc{}:b{}+{}:fmt{}", as[i].location, as[i].binding, as[i].offset, static_cast<int>(as[i].format));
+        for (std::uint32_t i = 0; i < nb; ++i) d += std::format(" [b{} stride {} inst {}]", i, bs[i].stride, bs[i].perInstance);
+        spdlog::info("wp0: skinned layout:{} (ubyte mask {:x}, instances {})", d, ubyteInputs_, instanceCount_);
+    }
+    w.baseKeys.insert(base);
+    w.layoutKeys.insert(withLayout);
+    w.fullKeys.insert(full);
+}
+
+void Device::wp0Log() {
+    const Wp0& w = wp0_;
+    spdlog::info("wp0: frame {}: {} draws counted; PSO keys: {} distinct shaders+targets+blend, {} with the vertex layout, {} with the raster/depth/stencil state (the D3D12 PSO count)",
+                 stats_.frames, w.draws, w.baseKeys.size(), w.layoutKeys.size(), w.fullKeys.size());
+    spdlog::info("wp0:   topology: point lists {} (instanced {}), triangle fans {} (indexed {}), strips {} (indexed {}), line lists {}, line strips {}",
+                 w.point, w.pointInstanced, w.fan, w.fanIndexed, w.strip, w.stripIndexed, w.lineList, w.lineStrip);
+    std::string ex;
+    for (const auto& [k, n] : w.exotic) ex += std::format(" {} x{};", k, n);
+    spdlog::info("wp0:   vertex attributes without a DXGI equivalent:{}", ex.empty() ? " none" : ex);
+    spdlog::info("wp0:   variants: capture draws {}, gi draws {}, g-buffer-writing draws {}", w.capture, w.gi, w.gbuf);
+}
+
+bool Device::computeVertexInput(PipelineDesc& pd, VertexInputValues& out) {
     std::uint32_t streamBinding[kStreams];
     std::fill(std::begin(streamBinding), std::end(streamBinding), UINT32_MAX);
     std::uint32_t nullBinding = UINT32_MAX;
     pd.bindingCount = 0;
     pd.attributeCount = 0;
+    ubyteInputs_ = 0;
     instanceCount_ = 1;
     if ((streams_[0].freq & STREAMSOURCE_INDEXEDDATA) != 0) {
         instanceCount_ = std::max(1u, streams_[0].freq & 0x3FFFFFFFu);
@@ -285,7 +368,7 @@ bool Device::computeVertexInput(vk::PipelineDesc& pd, VertexInputValues& out) {
         if (in.stream != UINT32_MAX && (streams_[in.stream].buffer != nullptr || (in.stream == 0 && up_.active))) {
             std::uint32_t& b = streamBinding[in.stream];
             if (b == UINT32_MAX) {
-                if (pd.bindingCount >= vk::kMaxVertexBindings) {
+                if (pd.bindingCount >= kMaxVertexBindings) {
                     return false;
                 }
                 b = pd.bindingCount++;
@@ -300,25 +383,26 @@ bool Device::computeVertexInput(vk::PipelineDesc& pd, VertexInputValues& out) {
                         return false;
                     }
                     pd.bindings[b] = {st.stride, (st.freq & STREAMSOURCE_INSTANCEDATA) != 0 ? 1u : 0u};
-                    out.buffers[b] = reinterpret_cast<VkBuffer>(g.buffer);
+                    out.buffers[b] = g.buffer;
                     out.offsets[b] = g.offset + st.offset;
                 }
             }
-            if (pd.attributeCount < vk::kMaxVertexAttributes) {
+            if (pd.attributeCount < kMaxVertexAttributes) {
+                if (in.format == VK_FORMAT_R8G8B8A8_USCALED && in.location < 15) ubyteInputs_ |= 1u << in.location;
                 pd.attributes[pd.attributeCount++] = {in.location, b, in.format, in.offset};
             }
         } else {
             // the declaration does not provide this input: D3D9 reads (0,0,0,1)
             if (nullBinding == UINT32_MAX) {
-                if (pd.bindingCount >= vk::kMaxVertexBindings) {
+                if (pd.bindingCount >= kMaxVertexBindings) {
                     return false;
                 }
                 nullBinding = pd.bindingCount++;
                 pd.bindings[nullBinding] = {0, 0};
-                out.buffers[nullBinding] = nullVertexBuffer_;
+                out.buffers[nullBinding] = game_->nullVertexBuffer();
                 out.offsets[nullBinding] = 0;
             }
-            if (pd.attributeCount < vk::kMaxVertexAttributes) {
+            if (pd.attributeCount < kMaxVertexAttributes) {
                 pd.attributes[pd.attributeCount++] = {in.location, nullBinding, VK_FORMAT_R32G32B32A32_SFLOAT, 0};
             }
         }
@@ -354,7 +438,7 @@ bool Device::computeVertexInput(vk::PipelineDesc& pd, VertexInputValues& out) {
         }
     }
     vertexShift_ = out.vertexShift;
-    out.dynamicLayout = ctx_.features().vertexInputDynamicState;
+    out.dynamicLayout = game_->gameCaps().vertexInputDynamicState;
     if (out.dynamicLayout) {
         out.bindingCount = pd.bindingCount;
         out.attributeCount = pd.attributeCount;
@@ -369,48 +453,12 @@ bool Device::computeVertexInput(vk::PipelineDesc& pd, VertexInputValues& out) {
     return true;
 }
 
-// records the buffers / layout that differ from what this command buffer has
-void Device::applyVertexInput(RecordState& rs, VkCommandBuffer cmd, const VertexInputValues& vi) {
-    VertexInputCache& vc = rs.vi;
-    const std::uint32_t n = vi.bufferCount;
-    if (n > 0 && (!vc.buffersValid || vc.bufferCount != n || std::memcmp(vc.buffers, vi.buffers, sizeof(VkBuffer) * n) != 0 ||
-                  std::memcmp(vc.offsets, vi.offsets, sizeof(VkDeviceSize) * n) != 0)) {
-        vkCmdBindVertexBuffers(cmd, 0, n, vi.buffers, vi.offsets);
-        vc.bufferCount = n;
-        std::memcpy(vc.buffers, vi.buffers, sizeof(VkBuffer) * n);
-        std::memcpy(vc.offsets, vi.offsets, sizeof(VkDeviceSize) * n);
-        vc.buffersValid = true;
-    }
-    if (!vi.dynamicLayout) return;
-    if (vc.layoutValid && vc.bindingCount == vi.bindingCount && vc.attributeCount == vi.attributeCount &&
-        std::memcmp(vc.bindings, vi.bindings, sizeof(vi.bindings[0]) * vi.bindingCount) == 0 &&
-        std::memcmp(vc.attributes, vi.attributes, sizeof(vi.attributes[0]) * vi.attributeCount) == 0) {
-        return;
-    }
-    VkVertexInputBindingDescription2EXT b[vk::kMaxVertexBindings]{};
-    VkVertexInputAttributeDescription2EXT a[vk::kMaxVertexAttributes]{};
-    for (std::uint32_t i = 0; i < vi.bindingCount; ++i) {
-        b[i] = {VK_STRUCTURE_TYPE_VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT, nullptr, i, vi.bindings[i].stride,
-                vi.bindings[i].perInstance ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX, 1};
-    }
-    for (std::uint32_t i = 0; i < vi.attributeCount; ++i) {
-        a[i] = {VK_STRUCTURE_TYPE_VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT, nullptr, vi.attributes[i].location,
-                vi.attributes[i].binding, vi.attributes[i].format, vi.attributes[i].offset};
-    }
-    vkCmdSetVertexInputEXT(cmd, vi.bindingCount, b, vi.attributeCount, a);
-    vc.bindingCount = vi.bindingCount;
-    vc.attributeCount = vi.attributeCount;
-    std::memcpy(vc.bindings, vi.bindings, sizeof(vi.bindings[0]) * vi.bindingCount);
-    std::memcpy(vc.attributes, vi.attributes, sizeof(vi.attributes[0]) * vi.attributeCount);
-    vc.layoutValid = true;
-}
-
 namespace {
 
-vk::BlendAttachment blendState(const std::array<std::uint32_t, RS_COUNT>& rs, std::uint32_t target) {
+BlendAttachment blendState(const std::array<std::uint32_t, RS_COUNT>& rs, std::uint32_t target) {
     static constexpr std::uint32_t writeStates[4] = {RS_COLORWRITEENABLE, RS_COLORWRITEENABLE1, RS_COLORWRITEENABLE2,
                                                      RS_COLORWRITEENABLE3};
-    vk::BlendAttachment b;
+    BlendAttachment b;
     b.enable = rs[RS_ALPHABLENDENABLE] != 0 ? 1u : 0u;
     const bool separate = rs[RS_SEPARATEALPHABLENDENABLE] != 0;
     std::uint32_t src = rs[RS_SRCBLEND], dst = rs[RS_DESTBLEND];
@@ -436,28 +484,14 @@ vk::BlendAttachment blendState(const std::array<std::uint32_t, RS_COUNT>& rs, st
 
 // the blend state of colour attachment `index`: the engine's targets from its render states, the G-buffer's (after them)
 // unblended, written only by the draws that write it (gbufWrite_)
-vk::BlendAttachment Device::attachmentBlend(std::uint32_t index) const {
+BlendAttachment Device::attachmentBlend(std::uint32_t index) const {
     if (index < engineColorCount_) return blendState(rs_, index);
-    vk::BlendAttachment b;
+    BlendAttachment b;
     b.writeMask = gbufWrite_ ? 0xFu : 0u;
     return b;
 }
 
-namespace {
-
-// true (and the cache updated) when `value` differs from the cached one or the cache is not valid yet
-template <class T>
-bool changed(bool valid, T& cached, const T& value) {
-    if (valid && std::memcmp(&cached, &value, sizeof(T)) == 0) {
-        return false;
-    }
-    std::memcpy(&cached, &value, sizeof(T));
-    return true;
-}
-
-}  // namespace
-
-// The draw's dynamic state from the D3D9 render states (recorded by applyDynamicState)
+// The draw's dynamic state from the D3D9 render states (recorded by the backend's applyDynamicState)
 void Device::computeDynamicState(std::uint32_t primitiveType, DynamicStateValues& o) const {
     // D3D9 screen space is y-down with a y-up clip space: flip with a negative viewport height
     const float vx = static_cast<float>(viewport_.x), vy = static_cast<float>(viewport_.y);
@@ -509,10 +543,10 @@ void Device::computeDynamicState(std::uint32_t primitiveType, DynamicStateValues
     o.depthBias[1] = reversed ? -slope : slope;
     colorToFloat4(rs_[RS_BLENDFACTOR], o.blendConstants);
     o.colorCount = 0;
-    if (ctx_.features().extendedDynamicState3 && colorCount_ > 0) {
+    if (game_->gameCaps().extendedDynamicState3 && colorCount_ > 0) {
         o.colorCount = colorCount_;
         for (std::uint32_t i = 0; i < colorCount_; ++i) {
-            const vk::BlendAttachment b = attachmentBlend(i);
+            const BlendAttachment b = attachmentBlend(i);
             o.blendEnable[i] = b.enable;
             o.blendEquation[i] = {b.srcColor, b.dstColor, b.colorOp, b.srcAlpha, b.dstAlpha, b.alphaOp};
             o.writeMask[i] = b.writeMask;
@@ -520,70 +554,15 @@ void Device::computeDynamicState(std::uint32_t primitiveType, DynamicStateValues
     }
 }
 
-// Records only the dynamic state that differs from what this command buffer has already set (dyn_)
-void Device::applyDynamicState(RecordState& rs, VkCommandBuffer cmd, const DynamicStateValues& s) {
-    DynamicStateCache& c = rs.dyn;
-    const bool v = c.valid;
-    if (!v) {
-        // a new command buffer: nothing is set yet (the cached colour attachment count would carry over otherwise)
-        c.colorCount = 0;
-        // constant for every draw
-        vkCmdSetFrontFace(cmd, kFrontFace);
-        vkCmdSetPrimitiveRestartEnable(cmd, VK_FALSE);
-    }
-    if (changed(v, c.viewport, s.viewport)) vkCmdSetViewportWithCount(cmd, 1, &s.viewport);
-    if (changed(v, c.scissor, s.scissor)) vkCmdSetScissorWithCount(cmd, 1, &s.scissor);
-    if (changed(v, c.cull, s.cull)) vkCmdSetCullMode(cmd, s.cull);
-    if (changed(v, c.topology, s.topology)) vkCmdSetPrimitiveTopology(cmd, s.topology);
-    if (changed(v, c.depthTest, s.depthTest)) vkCmdSetDepthTestEnable(cmd, s.depthTest);
-    if (changed(v, c.depthWrite, s.depthWrite)) vkCmdSetDepthWriteEnable(cmd, s.depthWrite);
-    if (changed(v, c.depthCompare, s.depthCompare)) vkCmdSetDepthCompareOp(cmd, s.depthCompare);
-    if (changed(v, c.stencilTest, s.stencilTest)) vkCmdSetStencilTestEnable(cmd, s.stencilTest);
-    {
-        const bool f1 = changed(v, c.stencilFront, s.stencilFront);
-        if (changed(v, c.stencilFrontCompare, s.stencilFrontCompare) || f1) {
-            vkCmdSetStencilOp(cmd, VK_STENCIL_FACE_FRONT_BIT, s.stencilFront[0], s.stencilFront[1], s.stencilFront[2], s.stencilFrontCompare);
-        }
-        const bool b1 = changed(v, c.stencilBack, s.stencilBack);
-        if (changed(v, c.stencilBackCompare, s.stencilBackCompare) || b1) {
-            vkCmdSetStencilOp(cmd, VK_STENCIL_FACE_BACK_BIT, s.stencilBack[0], s.stencilBack[1], s.stencilBack[2], s.stencilBackCompare);
-        }
-    }
-    if (changed(v, c.stencilMasks[0], s.stencilMasks[0])) vkCmdSetStencilCompareMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, s.stencilMasks[0]);
-    if (changed(v, c.stencilMasks[1], s.stencilMasks[1])) vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, s.stencilMasks[1]);
-    if (changed(v, c.stencilMasks[2], s.stencilMasks[2])) vkCmdSetStencilReference(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, s.stencilMasks[2]);
-    if (changed(v, c.depthBiasEnable, s.depthBiasEnable)) vkCmdSetDepthBiasEnable(cmd, s.depthBiasEnable);
-    if (changed(v, c.depthBias, s.depthBias)) vkCmdSetDepthBias(cmd, s.depthBias[0], 0.0f, s.depthBias[1]);
-    if (changed(v, c.blendConstants, s.blendConstants)) vkCmdSetBlendConstants(cmd, s.blendConstants);
-    if (s.colorCount > 0) {
-        const std::uint32_t n = s.colorCount;
-        // attachments beyond the count keep stale values: only the first n are compared and recorded
-        const bool sameCount = v && c.colorCount >= n;
-        if (!sameCount || std::memcmp(c.blendEnable, s.blendEnable, sizeof(VkBool32) * n) != 0) {
-            vkCmdSetColorBlendEnableEXT(cmd, 0, n, s.blendEnable);
-            std::memcpy(c.blendEnable, s.blendEnable, sizeof(VkBool32) * n);
-        }
-        if (!sameCount || std::memcmp(c.blendEquation, s.blendEquation, sizeof(VkColorBlendEquationEXT) * n) != 0) {
-            vkCmdSetColorBlendEquationEXT(cmd, 0, n, s.blendEquation);
-            std::memcpy(c.blendEquation, s.blendEquation, sizeof(VkColorBlendEquationEXT) * n);
-        }
-        if (!sameCount || std::memcmp(c.writeMask, s.writeMask, sizeof(VkColorComponentFlags) * n) != 0) {
-            vkCmdSetColorWriteMaskEXT(cmd, 0, n, s.writeMask);
-            std::memcpy(c.writeMask, s.writeMask, sizeof(VkColorComponentFlags) * n);
-        }
-        if (!sameCount) {
-            c.colorCount = n;
-        }
-    }
-    c.valid = true;
-}
+// the dynamic state itself is recorded by the backend (GameRecord::applyDynamicState): it sets only what differs from
+// what this command buffer has already recorded
 
 void Device::uploadConstants(bool forceLegacyPs, std::uint32_t psMinEnd) {
     // per dirty stage a StageConsts block (shader/abi.h) from the ring: the floats up to the shader's highest read register, the
     // int / bool part only for shaders that read it (Reflection::intBoolConstants; the layout stays, the bytes are left as they are)
     const auto upload = [&](const Shader& sh, const float (*f)[4], std::uint32_t maxFloats, const std::int32_t (*i)[4],
                             const std::uint32_t* b, rhi::GpuRef& addr, std::uint32_t stage) {
-        rhi::RingAlloc a = frames_.allocate(shader::abi::kStageConstsSize, 16);
+        rhi::RingAlloc a = game_->allocRing(shader::abi::kStageConstsSize, 16);
         const std::uint32_t n = std::min(sh.reflection.floatConstCount, maxFloats);
         std::memcpy(a.ptr, f, n * 16);
         std::uint32_t bytes = n * 16;
@@ -647,7 +626,7 @@ void Device::splitStage(bool vertex, const Shader& sh, rhi::GpuRef (&windows)[sh
         const std::uint32_t need = end > first[w] ? end - first[w] : 0;
         if (need == 0) {
             if (zeroBlock_.null()) {
-                rhi::RingAlloc z = frames_.allocate(4096, 16);
+                rhi::RingAlloc z = game_->allocRing(4096, 16);
                 std::memset(z.ptr, 0, 4096);
                 zeroBlock_ = z.ref;
             }
@@ -656,8 +635,8 @@ void Device::splitStage(bool vertex, const Shader& sh, rhi::GpuRef (&windows)[sh
         }
         ConstWindow& cw = constWin_[stage][w];
         if ((constWinDirty_[stage] >> w & 1u) != 0 || cw.address.null() || cw.extent < need) {
-            rhi::RingAlloc a = frames_.allocate(static_cast<VkDeviceSize>(need) * 16, 16);
-            std::memcpy(a.ptr, regs[first[w]], static_cast<std::size_t>(need) * 16);
+            rhi::RingAlloc a = game_->allocRing(static_cast<VkDeviceSize>(need) * 16, 16);
+            copyRegisters(a.ptr, regs[first[w]], need);
             cw.address = a.ref;
             cw.ptr = static_cast<const std::uint8_t*>(a.ptr);
             cw.extent = need;
@@ -707,7 +686,7 @@ void Device::verifySplit(bool vertex, const Shader& sh) {
 namespace {
 
 // the all-default pipeline description (padding zero), copied by prepareDraw
-constexpr vk::PipelineDesc kBlankPipelineDesc{};
+constexpr PipelineDesc kBlankPipelineDesc{};
 
 // the render states a replacement overrides (restored when prepareDraw returns)
 constexpr std::uint32_t kReplacedStates[] = {RS_ALPHABLENDENABLE, RS_SRCBLEND, RS_DESTBLEND, RS_BLENDOP, RS_SEPARATEALPHABLENDENABLE,
@@ -717,18 +696,55 @@ constexpr std::uint32_t kReplacedStates[] = {RS_ALPHABLENDENABLE, RS_SRCBLEND, R
 
 // GI (enh/gi): the main view's lit material draws whose ambient the engine set (its first pass: the later point-light passes
 // add with ONE / ONE blending and no ambient)
-bool Device::giEligible(const scene::Phase& phase) const {
+bool Device::giStaticEligible(const scene::Phase& phase) const {
     if (phase.view != scene::View::Main || tag_.water != draws::Water::None) return false;
     if (phase.pass != scene::Pass::Solid && phase.pass != scene::Pass::Alpha && phase.pass != scene::Pass::AlphaLate) return false;
     if ((ps_->reflection.colorOutputs & 1u) == 0) return false;
     const auto& amb = ps_->semantics[Semantic::AmbientLight];
     if (!amb.present() || amb.count < 7 || amb.reg + 7 > static_cast<int>(kPsFloatConsts)) return false;
     if (rs_[RS_ALPHABLENDENABLE] != 0 && rs_[RS_DESTBLEND] == BLEND_ONE) return false;
+    return true;
+}
+
+// (only after giStaticEligible: the ambient semantic is present with 7 registers)
+bool Device::ambientLit() const {
+    const auto& amb = ps_->semantics[Semantic::AmbientLight];
     for (std::int32_t i = 0; i < 7; ++i) {
         const float* c = psF_[amb.reg + i];
         if (c[0] != 0.0f || c[1] != 0.0f || c[2] != 0.0f || c[3] != 0.0f) return true;
     }
     return false;
+}
+
+bool Device::giEligible(const scene::Phase& phase) const { return giStaticEligible(phase) && ambientLit(); }
+
+// the material pack's word of the current draw's material (0 = none); its map must be uploaded and sampleable (DrawBlock pad[1])
+std::uint32_t Device::packWord(CachedDraw::Variant* note) {
+    if (tag_.material == nullptr) return 0;
+    if (note != nullptr) {
+        // (the stamp is read before the lookup: a snapshot published in between makes the packet look stale, never the other way round)
+        note->packStamped = static_cast<bool>(packStamp_);
+        note->packStamp = packStamp_ ? packStamp_() : 0;
+    }
+    const PackHit hit = packProvider_(tag_);
+    if (note != nullptr) {
+        note->packTex = hit.texture;
+        note->packTexSlot = hit.texture != nullptr ? hit.texture->bindlessSlot() : 0;
+    }
+    if (hit.word != 0 && hit.texture != nullptr) {
+        Texture* t = hit.texture;
+        if (t->pending_ || t->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) t->prepareForSampling(uploadList());
+        const std::uint32_t word = t->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ? hit.word : 0;
+        static bool logged[2] = {false, false};
+        const int which = word != 0 ? 1 : 0;
+        if (!logged[which]) {
+            logged[which] = true;
+            spdlog::info("d3d9: material pack: first draw with a map {} (word {:08x}, slot {}, layout {})", which ? "applied" : "NOT READY", hit.word,
+                         t->bindlessSlot(), static_cast<int>(t->layout()));
+        }
+        return word;
+    }
+    return hit.word;
 }
 
 // the G-buffer's scope: the frame's first main view, its solid pass, rendering into the scene HDR target alone at the
@@ -746,11 +762,16 @@ bool Device::gbufferTargetsMatch() const {
 
 // a material draw of the solid pass that writes the G-buffer (its Gbuffer variant): depth tested, not an additive light pass,
 // and when lit, a first pass (the engine set its ambient)
-bool Device::gbufferEligible(const scene::Phase& phase, draws::Kind kind) const {
+bool Device::gbufferStaticEligible(const scene::Phase& phase, draws::Kind kind) const {
     if (phase.view != scene::View::Main || phase.pass != scene::Pass::Solid || tag_.water != draws::Water::None) return false;
     if (kind == draws::Kind::Sky || kind == draws::Kind::Particle || kind == draws::Kind::Precipitation) return false;
     if ((ps_->reflection.colorOutputs & 1u) == 0 || rs_[RS_ZENABLE] == ZB_FALSE) return false;
     if (rs_[RS_ALPHABLENDENABLE] != 0 && rs_[RS_DESTBLEND] == BLEND_ONE) return false;
+    return true;
+}
+
+// when lit, a first pass (the engine set its ambient)
+bool Device::gbufferLit() const {
     const auto& amb = ps_->semantics[Semantic::AmbientLight];
     if (!amb.present()) return ps_->semantics.has(ShaderSemantics::Material);
     if (amb.count < 7 || amb.reg + 7 > static_cast<int>(kPsFloatConsts)) return false;
@@ -760,6 +781,8 @@ bool Device::gbufferEligible(const scene::Phase& phase, draws::Kind kind) const 
     }
     return false;
 }
+
+bool Device::gbufferEligible(const scene::Phase& phase, draws::Kind kind) const { return gbufferStaticEligible(phase, kind) && gbufferLit(); }
 
 bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     lastRecord_ = nullptr;
@@ -855,9 +878,14 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         q.depthBias = rs_[RS_DEPTHBIAS] != 0 || rs_[RS_SLOPESCALEDEPTHBIAS] != 0;
     };
     // draw observers (enh/rt_scene, enh/gi): indexed draws from buffers of the kinds / phases they ask for
-    captureRequest_ = {};
-    captureInstances_ = false;
-    if (!observers_.empty() && geom.indexed && !geom.userPointer) {
+    const bool skipObs = skipObservers_;  // (a refused replay ran them already: their capture request stands)
+    skipObservers_ = false;
+    if (!skipObs) {
+        captureRequest_ = {};
+        captureRequestRw_ = {};
+        captureInstances_ = false;
+    }
+    if (!skipObs && !observers_.empty() && geom.indexed && !geom.userPointer) {
         for (DrawObserver* o : observers_) {
             if (!o->observes(kind, phase)) continue;
             ReplaceQuery q;
@@ -865,7 +893,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
             o->observe(*this, q);
         }
     }
-    if (!replacers_.empty() && kind == draws::Kind::StaticMesh && phase.view == scene::View::Main && phase.pass == scene::Pass::Solid &&
+    if (!skipObs && !replacers_.empty() && kind == draws::Kind::StaticMesh && phase.view == scene::View::Main && phase.pass == scene::Pass::Solid &&
         geom.indexed && !geom.userPointer) {
         for (DrawReplacer* r : replacers_) {
             if (!r->wantsOpaque()) continue;
@@ -949,7 +977,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         // are not allowed inside a rendering scope
         for (Texture* t : rep.sampled) {
             if (t == nullptr || t->isNull()) continue;
-            if (t->pending_ || t->image().layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+            if (t->pending_ || t->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
                 endRendering();
                 t->prepareForSampling(frameList());
             }
@@ -994,23 +1022,35 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     // probe volume instead of the engine's ambient constants (enh/gi), the vertex capture writes a skinned draw's world
     // positions for the RT scene (enh/rt_scene), the G-buffer variants write the thin G-buffer (enh/gbuffer)
     gbufWrite_ = false;
+    CachedDraw::Variant cv;
+    cv.giOn = giDraws_.on;
+    cv.replaceLightmaps = giDraws_.replaceLightmaps;
+    cv.pack = packProvider_ && !packBypass_;
+    cv.gate = cv.giOn || cv.pack;
+    cv.vsUsed = vsModule;
     rhi::ShaderModule fsVariant = rhi::ShaderModule::None, vsVariant = rhi::ShaderModule::None, fsPlain = rhi::ShaderModule::None;
     const bool notInstanced = (streams_[0].freq & STREAMSOURCE_INDEXEDDATA) == 0;
     if (!replaced && !captureRequest_.null() && geom.indexed && (notInstanced || captureInstances_) && vsModule == vs_->module) {
         vsVariant = variant(vs_, VariantSlot::Capture);
     }
-    const bool gbufMaterial = !replaced && tint == 0 && gbuf_.normal != nullptr && gbufferEligible(phase, kind);
+    cv.gbufGate = gbuf_.normal != nullptr;
+    cv.gbufStatic = !replaced && tint == 0 && cv.gbufGate && gbufferStaticEligible(phase, kind);
+    const bool gbufMaterial = cv.gbufStatic && gbufferLit();
     if (gbufMaterial && scopeGbuf_) {
+        cv.gbufWanted = true;
         fsPlain = variant(ps_, VariantSlot::Gbuffer);
         const rhi::ShaderModule motion = vsVariant != rhi::ShaderModule::None ? variant(ps_, VariantSlot::GbufferMotion) : rhi::ShaderModule::None;
         fsVariant = motion != rhi::ShaderModule::None ? motion : fsPlain;
-    } else if (!replaced && tint == 0 && giDraws_.on && giEligible(phase)) {
-        fsVariant = variant(ps_, VariantSlot::Gi);
+    } else if (!replaced && tint == 0 && cv.gate) {
+        cv.staticOk = giStaticEligible(phase);
+        cv.wanted = cv.staticOk && ambientLit();
+        if (cv.wanted) fsVariant = variant(ps_, VariantSlot::Gi);
     }
+    cv.fsAsked = fsVariant;
 
-    // a copy of the blank description: `vk::PipelineDesc pd{}` initialised the 520 bytes member by member (blend defaults are
+    // a copy of the blank description: `PipelineDesc pd{}` initialised the 520 bytes member by member (blend defaults are
     // not zero; ~1.5 % of the engine thread in the V4 profile)
-    vk::PipelineDesc pd = kBlankPipelineDesc;
+    PipelineDesc pd = kBlankPipelineDesc;
     pd.vs = vsModule;
     pd.fs = fs;
     pd.topology = topology(primitiveType);
@@ -1024,7 +1064,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     pd.colorCount = colorCount_;
     for (std::uint32_t i = 0; i < colorCount_; ++i) {
         pd.colorFormats[i] = colorFormats_[i];
-        if (!ctx_.features().extendedDynamicState3) {
+        if (!game_->gameCaps().extendedDynamicState3) {
             pd.blend[i] = attachmentBlend(i);
         }
     }
@@ -1037,21 +1077,21 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         return false;
     }
     bool giDraw = false, captureDraw = false;
-    const bool eds3 = ctx_.features().extendedDynamicState3;
+    const bool eds3 = game_->gameCaps().extendedDynamicState3;
     // a variant combination whose pipeline exists is taken; a missing one is built in the background (this draw keeps
     // the engine's shaders). `writes`: the pixel shader writes the G-buffer (without EDS3 its write mask is in the pipeline)
     const auto tryVariant = [&](rhi::ShaderModule vsM, rhi::ShaderModule fsM, bool writes) {
-        vk::PipelineDesc vd = pd;
+        PipelineDesc vd = pd;
         if (vsM != rhi::ShaderModule::None) vd.vs = vsM;
         if (fsM != rhi::ShaderModule::None) vd.fs = fsM;
         if (writes && !eds3) {
             for (std::uint32_t i = engineColorCount_; i < colorCount_; ++i) vd.blend[i].writeMask = 0xF;
         }
-        if (findPipeline(vd) != VK_NULL_HANDLE) {
+        if (findPipeline(vd) != GamePipeline::None) {
             pd = vd;
             return true;
         }
-        pipelines_.prewarmOnce(vd);
+        game_->prewarmOncePipeline(vd);
         return false;
     };
     if (gbufMaterial && scopeGbuf_) {
@@ -1079,7 +1119,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     // arming the G-buffer (Device::setGbuffer): this solid draw's pipeline with the attachments, built in the background
     if (gbuf_.normal != nullptr && !gbufArmed_ && !scopeGbuf_ && colorCount_ == 1 && gbufferTargetsMatch()) {
         ++gbufSolid_;
-        vk::PipelineDesc md = pd;
+        PipelineDesc md = pd;
         md.colorCount = 3;
         md.colorFormats[1] = gbuf_.normal->desc().format;
         md.colorFormats[2] = gbuf_.motion->desc().format;
@@ -1096,12 +1136,12 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         }
         if (!eds3) {
             for (std::uint32_t i = 1; i < 3; ++i) {
-                md.blend[i] = vk::BlendAttachment{};
+                md.blend[i] = BlendAttachment{};
                 md.blend[i].writeMask = writes ? 0xFu : 0u;
             }
         }
-        if (!pipelines_.contains(md)) {
-            pipelines_.prewarmOnce(md);
+        if (!game_->pipelineContains(md)) {
+            game_->prewarmOncePipeline(md);
             ++gbufMissing_;
         }
     }
@@ -1116,29 +1156,29 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     }
     // no enhancement variant took the draw: the GLSL material shader when it and its pipeline exist (else the translated one)
     if (uberBase != rhi::ShaderModule::None && pd.fs == fs) {
-        vk::PipelineDesc ud = pd;
+        PipelineDesc ud = pd;
         ud.fs = uberBase;
-        if (findPipeline(ud) != VK_NULL_HANDLE) {
+        if (findPipeline(ud) != GamePipeline::None) {
             pd = ud;
         } else {
-            pipelines_.prewarmOnce(ud);
+            game_->prewarmOncePipeline(ud);
         }
     }
     // consecutive draws mostly keep their pipeline: compare with the last description before hashing
-    VkPipeline pipeline = VK_NULL_HANDLE;
+    GamePipeline pipeline = GamePipeline::None;
     if (lastPipelineValid_ && sameDesc(pd, lastPipelineDesc_)) {
         pipeline = lastPipeline_;
     } else {
-        // a direct-mapped cache of recent descriptions in front of the pipeline map: no 520-byte hash, no lock, no node walk
+        // a direct-mapped cache of recent descriptions in front of the backend's pipeline map: no 520-byte hash, no lock, no node walk
         // (a pipeline never changes once made)
         pipeline = findPipeline(pd);
-        if (pipeline == VK_NULL_HANDLE) {
+        if (pipeline == GamePipeline::None) {
             bool created = false;
-            pipeline = pipelines_.get(pd, &created);
-            if (created && pipeline != VK_NULL_HANDLE) {
+            pipeline = game_->resolvePipeline(pd, &created);
+            if (created && pipeline != GamePipeline::None) {
                 recordPipelineKey(pd);
             }
-            if (pipeline != VK_NULL_HANDLE) {
+            if (pipeline != GamePipeline::None) {
                 RecentPipeline& recent = recentPipelines_[recentSlot(pd)];
                 recent.desc = pd;
                 recent.pipeline = pipeline;
@@ -1148,7 +1188,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         lastPipeline_ = pipeline;
         lastPipelineValid_ = true;
     }
-    if (pipeline == VK_NULL_HANDLE) {
+    if (pipeline == GamePipeline::None) {
         ++stats_.drawsSkipped;
         ++stats_.skippedPipeline;
         customVertices_ = 0;
@@ -1156,9 +1196,10 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     }
     packet_.pipeline = pipeline;
     computeDynamicState(primitiveType, workDyn_);
+    if (wp0_.on) wp0Note(pd, primitiveType, geom.indexed, captureDraw, giDraw);
     {
         // the pixel window of an enhancement variant that reads the ambient registers the base shader may not (enh/material_variant)
-        std::uint32_t minEnd = 0;
+        std::uint32_t& minEnd = cv.minEnd;
         if (giDraw || gbufWrite_) {
             const auto& amb = ps_->semantics[Semantic::AmbientLight];
             if (amb.present() && amb.count >= 7) {
@@ -1174,6 +1215,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     float jitterX = 0.0f, jitterY = 0.0f;
     geometryJitter(jitterX, jitterY);  // camera jitter of the main view's geometry (TAA / upscaling)
     const float lodBias = (jitterX != 0.0f || jitterY != 0.0f) ? geometryLodBias_ : 0.0f;
+    cv.biasFor = geometryLodBias_;
     for (std::uint32_t mask = boundSamplerMask(); mask != 0; mask &= mask - 1) {
         const std::uint32_t slot = static_cast<std::uint32_t>(std::countr_zero(mask));
         const shader::Reflection& r = slot < 16 ? ps_->reflection : vs_->reflection;
@@ -1182,9 +1224,14 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
                                  ((r.samplers[slot] == shader::TextureType::Cube) == (t->desc().type == TextureType::Cube)) &&
                                  ((r.samplers[slot] == shader::TextureType::Volume) == (t->desc().type == TextureType::Volume));
         const bool usable = t != nullptr && !t->isNull() && kindMatches &&
-                            t->image().layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        block.tex[slot] = !usable ? 0 : (t == substituteFrom_ && substituteSlot_ != 0) ? substituteSlot_ : t->bindlessSlot();
+                            t->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        block.tex[slot] = !usable ? game_->defaultTextureSlot(static_cast<std::uint32_t>(r.samplers[slot])) : (t == substituteFrom_ && substituteSlot_ != 0) ? substituteSlot_ : t->bindlessSlot();
         block.smp[slot] = lodBias != 0.0f && slot < 16 ? samplerIndexBiased(slot, lodBias) : samplerIndex(slot);
+        if (capture_ != nullptr && slot < 16) {
+            // (a retained packet serves frames with and without jitter: both sampler indexes)
+            cv.smpPlain[slot] = samplerIndex(slot);
+            cv.smpBias[slot] = geometryLodBias_ != 0.0f ? samplerIndexBiased(slot, geometryLodBias_) : cv.smpPlain[slot];
+        }
     }
     // half a pixel right/down in NDC units of the viewport (shader/abi.h)
     block.posFix[0] = 1.0f / static_cast<float>(std::max(1u, viewport_.width));
@@ -1219,6 +1266,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     }
     logTracedMaterial(kind, jitterX != 0.0f || jitterY != 0.0f);
     block.pad[0] = tint;
+    if (packProvider_ && !packBypass_ && (giDraw || gbufWrite_)) block.pad[1] = packWord(&cv);  // material pack: this material's word (0 = none)
     std::memcpy(block.psC5, psF_[5], sizeof(block.psC5));  // pixel window 1 of split draws (abi.h)
     if (giDraw) {
         ++giDrawCount_;
@@ -1234,8 +1282,25 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         block.pad[1] = static_cast<std::uint32_t>(geom.baseVertex + vertexShift_);
         captured_.push_back(captureRequest_);
     }
-    rhi::RingAlloc db = frames_.allocate(sizeof(block), 16);
+    rhi::RingAlloc db = game_->allocRing(sizeof(block), 16);
     std::memcpy(db.ptr, &block, sizeof(block));
+    if (capture_ != nullptr) {
+        // a plain draw: no enhancement took part in it (the retained packet replays exactly this)
+        // (a draw with an enhancement variant is retained with its decision: lastVariant_; one offered a variant that is not built / has no pipeline yet is not)
+        const bool variantPending = (fsVariant != rhi::ShaderModule::None && !giDraw && !gbufWrite_) || (!retainVariants_ && (giDraw || cv.vsUsed != vs_->module));
+        captureOk_ = !replaced && tint == 0 && !captureDraw && !variantPending && customVertices_ == 0 && geom.indexed && !geom.userPointer &&
+                     rep.action == DrawReplacement::Action::Engine && uberBase == rhi::ShaderModule::None && fs == ps_->module && captureRequest_.null();
+        if (!captureOk_) {
+            ++replayStats.ncWhy[replaced ? 0 : tint != 0 ? 1 : captureDraw ? 2 : variantPending ? 3 : customVertices_ != 0 ? 5 : !geom.indexed || geom.userPointer ? 6
+                                : rep.action != DrawReplacement::Action::Engine ? 7 : uberBase != rhi::ShaderModule::None ? 8 : fs != ps_->module ? 9 : 10];
+        }
+        cv.giDraw = giDraw;
+        cv.drawn = giDraw || gbufWrite_;
+        lastVariant_ = cv;
+        lastBlock_ = block;
+        lastKind_ = kind;
+        query(lastQuery_);
+    }
 
     if (stats_.totalDraws < options_.logDraws) {
         std::string tex;
@@ -1243,7 +1308,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
             if (block.tex[slot] != 0 || tex_[slot] != nullptr) {
                 Texture* t = tex_[slot];
                 tex += std::format(" s{}=slot{}({}x{} {} {} levels, pending {})", slot, block.tex[slot], t ? t->desc().width : 0,
-                                   t ? t->desc().height : 0, t ? vk::d3dFormatName(t->desc().format) : "-", t ? t->levels() : 0,
+                                   t ? t->desc().height : 0, t ? rhi::d3dFormatName(t->desc().format) : "-", t ? t->levels() : 0,
                                    t ? t->pending_.load() : false);
             }
         }
@@ -1257,10 +1322,10 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     // drawId = the draw's record index; prevVsConsts stays 0 until motion vectors track geometry (injection.md 4)
     const std::uint32_t flags =
         shader::abi::drawFlags(static_cast<std::uint32_t>(kind), static_cast<std::uint32_t>(phase.pass), static_cast<std::uint32_t>(phase.view)) |
-        (tint != 0 ? shader::abi::kDrawFlagTinted : 0u);
+        (tint != 0 ? shader::abi::kDrawFlagTinted : 0u) | (options_.backend == rhi::Backend::D3D12 ? ubyteInputs_ << 17 : 0u);
     const rhi::GpuRef drawBlock = !rep.block.null() && replaced ? rep.block : db.ref;
     packet_.push = shader::abi::PushConstants{drawSplit_[0] ? 0 : vsConstAddr_.bits, drawSplit_[1] ? 0 : psConstAddr_.bits, drawBlock.bits, frameBlockAddress().bits,
-                                              captureDraw ? captureRequest_.bits : 0, stats_.draws, flags};
+                                              captureDraw ? captureRequestRw_.bits : 0, stats_.draws, flags};
     for (std::uint32_t w = 0; w < shader::abi::kConstWindows; ++w) {
         packet_.push.vsWin[w] = drawWin_[0][w].bits;
         packet_.push.psWin[w] = drawWin_[1][w].bits;
@@ -1348,6 +1413,304 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     return true;
 }
 
+// ---- packet retention ---------------------------------------------------------------------------------------------------
+
+void Device::fillCapture(const DrawPacket& p) {
+    CachedDraw& c = *capture_;
+    c.valid = false;
+    if (!captureOk_ || p.op != DrawPacket::Op::DrawIndexed || vs_.get() == nullptr || ps_.get() == nullptr) {
+        ++replayStats.notCaptured;
+        return;
+    }
+    c.packet = p;
+    c.vi = *p.vi;
+    c.dyn = *p.dyn;
+    c.block = lastBlock_;
+    c.query = lastQuery_;
+    c.kind = lastKind_;
+    c.phase = phases_.current();
+    c.vs = vs_.get();
+    c.ps = ps_.get();
+    c.vsModule = vs_->module;
+    c.fsModule = ps_->module;
+    c.v = lastVariant_;
+    c.streamMask = 0;
+    for (std::uint32_t i = 0; i < 4; ++i) {
+        if (streams_[i].buffer == nullptr) continue;
+        c.streamMask |= 1u << i;
+        c.stream[i] = streams_[i].buffer->gpu(streams_[i].stride);
+    }
+    c.ib = indices_->gpu(indices_->index32() ? 4 : 2);
+    c.texMask = 0;
+    for (std::uint32_t mask = boundSamplerMask(); mask != 0; mask &= mask - 1) {
+        const std::uint32_t slot = static_cast<std::uint32_t>(std::countr_zero(mask));
+        Texture* t = tex_[slot];
+        // only draws whose textures were all sampled as such (the block holds their bindless slots)
+        if (t == nullptr || t->isNull() || t->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL || t == substituteFrom_) {
+            ++replayStats.notCaptured;
+            return;
+        }
+        c.texMask |= 1u << slot;
+        c.tex[slot] = t;
+        c.texSlot[slot] = t->bindlessSlot();  // (not the block's: GI's replaced lightmaps are zero there)
+    }
+    c.env = {};
+    c.env.vp = viewport_;
+    std::memcpy(c.env.scissor, scissor_, sizeof(scissor_));
+    c.env.colorCount = colorCount_;
+    for (std::uint32_t i = 0; i < colorCount_ && i < kRenderTargets; ++i) c.env.colorFormats[i] = colorFormats_[i];
+    c.env.depthFormat = depthFormat_;
+    c.env.stencilFormat = stencilFormat_;
+    c.env.depthReversed = boundDepthReversed() ? 1u : 0u;
+    c.valid = replayAllowed(c);
+    if (c.valid) ++replayStats.captured;
+    else ++replayStats.notCaptured;
+}
+
+bool Device::replayAllowed(const CachedDraw& c) const {
+    if (tint_ != draws::TintMode::Off || ubershader_.load(std::memory_order_relaxed) || (gbuf_.normal != nullptr && !gbufArmed_)) return false;  // (arming counts the solid draws in prepareDraw)
+    if (stats_.totalDraws < options_.logDraws || wp0_.on || customVertices_ != 0 || up_.active) return false;
+    // (the GI / material pack variant and the billboards' fade variant are part of the packet: its decision is re-derived by replayBuild)
+    // observers (RT scene, GI, object motion) and opaque-observing replacers (water) are shown the cached query at replay (replayDraw)
+    for (DrawReplacer* r : replacers_) {
+        if (r->handles(c.kind, c.phase, tag_)) return false;
+    }
+    return true;
+}
+
+bool Device::replayBuild(const CachedDraw& c, const ReplayInputs& in, DrawPacket& p, shader::abi::DrawBlock& b) {
+    const auto fail = [&](int why) {
+        ++replayStats.why[why];
+        replayStale_ = why == 0 || why == 5 || why == 6 || why == 7 || why == 10 || why == 11;  // the packet is out of date: made again by the caller
+        return false;
+    };
+    if (!c.valid || vs_.get() != c.vs || ps_.get() != c.ps || vs_->module != c.vsModule || ps_->module != c.fsModule) return fail(0);
+    if (phases_.current() != c.phase) return fail(1);
+    if (!replayAllowed(c)) return fail(2);
+    // the enhancement variant decision (prepareDraw): its inputs are the settings, the ambient registers (the engine's lighting of this draw) and the
+    // variants' build state; a change in any of them makes the draw take another pipeline / pixel window / pack word
+    if (c.v.giOn != giDraws_.on || c.v.replaceLightmaps != giDraws_.replaceLightmaps || c.v.pack != (packProvider_ && !packBypass_)) return fail(10);
+    if (c.v.gbufGate != (gbuf_.normal != nullptr)) return fail(10);
+    bool gbufTaken = false;
+    if (c.v.gbufGate) {
+        // the G-buffer's material pass (its variant reads the ambient too): taken when eligible, lit and in the G-buffer's rendering scope
+        gbufTaken = c.v.gbufStatic && scopeGbuf_ && gbufferLit();
+        if (gbufTaken != c.v.gbufWanted) return fail(10);
+        if (gbufTaken && variant(ps_, VariantSlot::Gbuffer) != c.v.fsAsked) return fail(10);
+    }
+    if (c.v.gate && !gbufTaken) {
+        const bool wanted = c.v.staticOk && ambientLit();
+        if (wanted != c.v.wanted) return fail(10);
+        if (wanted && variant(ps_, VariantSlot::Gi) != c.v.fsAsked) return fail(10);
+    }
+    {
+        rhi::ShaderModule vsM = vs_->module;
+        if (c.kind == draws::Kind::SpeedTreeBillboard && billboardFadeScale_ != 1.0f) {
+            const rhi::ShaderModule m = lodModule(*vs_);
+            vsM = m != rhi::ShaderModule::None ? m : vsM;
+        }
+        if (vsM != c.v.vsUsed) return fail(10);
+    }
+    if (c.v.drawn && packProvider_) {
+        const Texture* cube = imageWithRole(scene::ImageRole::SkyEnvCube);
+        if (cube != nullptr && !cube->isNull() && (cube->pending_ || cube->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)) return fail(11);
+    }
+    CachedDraw::Env env{};
+    env.vp = viewport_;
+    std::memcpy(env.scissor, scissor_, sizeof(scissor_));
+    env.colorCount = colorCount_;
+    for (std::uint32_t i = 0; i < colorCount_ && i < kRenderTargets; ++i) env.colorFormats[i] = colorFormats_[i];
+    env.depthFormat = depthFormat_;
+    env.stencilFormat = stencilFormat_;
+    env.depthReversed = boundDepthReversed() ? 1u : 0u;
+    if (std::memcmp(&env, &c.env, sizeof(env)) != 0) {
+        static int logged = 0;
+        if (logged < 8) {
+            ++logged;
+            spdlog::info("d3d9: replay env differs: viewport {},{} {}x{} vs {},{} {}x{}; scissor {},{},{},{} vs {},{},{},{}; colors {} vs {}; depth {} vs {}; stencil {} vs {}; reversed {} vs {}; z {} {} vs {} {}; phase {}/{}",
+                         env.vp.x, env.vp.y, env.vp.width, env.vp.height, c.env.vp.x, c.env.vp.y, c.env.vp.width, c.env.vp.height, env.scissor[0], env.scissor[1],
+                         env.scissor[2], env.scissor[3], c.env.scissor[0], c.env.scissor[1], c.env.scissor[2], c.env.scissor[3], env.colorCount, c.env.colorCount,
+                         static_cast<int>(env.depthFormat), static_cast<int>(c.env.depthFormat), static_cast<int>(env.stencilFormat), static_cast<int>(c.env.stencilFormat),
+                         env.depthReversed, c.env.depthReversed, env.vp.minZ, env.vp.maxZ, c.env.vp.minZ, c.env.vp.maxZ, scene::name(c.phase.view), scene::name(c.phase.pass));
+        }
+        return fail(3);
+    }  // (Env is built from the same fields in the same order; padding is zeroed by value-init)
+    float jx = 0.0f, jy = 0.0f;
+    geometryJitter(jx, jy);
+    const bool jit = jx != 0.0f || jy != 0.0f;
+    if (c.v.biasFor != geometryLodBias_) return fail(10);
+    // (the thickened / hashed cut-outs put the draw's alpha reference and the frame number into the block: not retained)
+    if (jit && (alphaDither_ || cutoutThicken_ * std::clamp(renderRatio_ - 1.0f, 0.0f, 1.0f) > 0.0f)) return fail(4);
+    for (std::uint32_t i = 0; i < 4; ++i) {
+        if (((c.streamMask >> i) & 1u) == 0) continue;
+        if (in.streams[i] == nullptr) return fail(5);
+        const Buffer::Binding g = in.streams[i]->gpu(in.strides[i]);
+        if (g.buffer != c.stream[i].buffer || g.offset != c.stream[i].offset) return fail(5);
+    }
+    if (in.indices == nullptr) return fail(6);
+    const Buffer::Binding ib = in.indices->gpu(in.indices->index32() ? 4 : 2);
+    if (ib.buffer != c.ib.buffer || ib.offset != c.ib.offset) return fail(6);
+    for (std::uint32_t mask = c.texMask; mask != 0; mask &= mask - 1) {
+        const std::uint32_t slot = static_cast<std::uint32_t>(std::countr_zero(mask));
+        Texture* t = c.tex[slot];
+        if (t->isNull() || t->pending_ || t->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL || t->bindlessSlot() != c.texSlot[slot]) {
+            static int logged = 0;
+            if (logged < 6) {
+                ++logged;
+                spdlog::info("d3d9: replay texture differs: slot {} null {} pending {} layout {} slot {} vs {}, role {}, kind {}", slot, t->isNull(), t->pending_.load(), static_cast<int>(t->layout()),
+                             t->bindlessSlot(), c.texSlot[slot], scene::name(t->role()), draws::name(c.kind));
+            }
+            return fail(7);
+        }
+    }
+    b = c.block;
+    std::memcpy(b.psC5, psF_[5], sizeof(b.psC5));
+    depthRemap(b.posFix[2], b.posFix[3]);
+    // half a pixel of the viewport (+ the camera jitter, + the LOD bias of the jittered geometry: prepareDraw's arithmetic)
+    b.posFix[0] = 1.0f / static_cast<float>(std::max(1u, c.env.vp.width));
+    b.posFix[1] = -1.0f / static_cast<float>(std::max(1u, c.env.vp.height));
+    b.posFix[0] += jx;
+    b.posFix[1] += jy;
+    if (geometryLodBias_ != 0.0f) {
+        for (std::uint32_t mask = c.texMask & 0xFFFFu; mask != 0; mask &= mask - 1) {
+            const std::uint32_t slot = static_cast<std::uint32_t>(std::countr_zero(mask));
+            b.smp[slot] = jit ? c.v.smpBias[slot] : c.v.smpPlain[slot];
+        }
+    }
+    if (c.v.drawn && c.v.pack) {
+        // the material's word: unchanged while the pack's stamp is and its map is still sampleable in the same slot (else the exact lookup)
+        const Texture* t = c.v.packTex;
+        const bool same = c.v.packStamped && packStamp_ && packStamp_() == c.v.packStamp &&
+                          (t == nullptr || (!t->pending_ && t->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && t->bindlessSlot() == c.v.packTexSlot));
+        if (!same) b.pad[1] = packWord();
+    }
+    p = c.packet;
+    p.vi = internVi(c.vi);
+    p.dyn = internDyn(c.dyn);
+    return true;
+}
+
+bool Device::replayMatches(const CachedDraw& cached, const CachedDraw& fresh, const ReplayInputs& in, bool& valid, std::string& why) {
+    DrawPacket p;
+    shader::abi::DrawBlock b{};
+    valid = replayBuild(cached, in, p, b);
+    if (!valid) return true;
+    const DrawPacket& f = fresh.packet;
+    const auto bad = [&](const char* what) {
+        why = what;
+        return false;
+    };
+    if (p.pipeline != f.pipeline) return bad("pipeline");
+    if (p.vi != f.vi) return bad("vertex input");
+    if (p.dyn != f.dyn) return bad("dynamic state");
+    if (p.op != f.op || p.index32 != f.index32 || p.batchable != f.batchable) return bad("packet kind / batchable");
+    if (p.indexBuffer != f.indexBuffer || p.indexOffset != f.indexOffset || p.first != f.first || p.count != f.count || p.instances != f.instances ||
+        p.vertexOffset != f.vertexOffset) {
+        return bad("ranges");
+    }
+    if (p.push.flags != f.push.flags) return bad("push flags");
+    {
+        const CachedDraw::Variant& a = cached.v;
+        const CachedDraw::Variant& r = fresh.v;
+        if (a.gbufGate != r.gbufGate || a.gbufStatic != r.gbufStatic || a.gbufWanted != r.gbufWanted || a.drawn != r.drawn || a.gate != r.gate || a.giOn != r.giOn || a.replaceLightmaps != r.replaceLightmaps || a.pack != r.pack || a.staticOk != r.staticOk || a.wanted != r.wanted ||
+            a.giDraw != r.giDraw || a.fsAsked != r.fsAsked || a.minEnd != r.minEnd || a.vsUsed != r.vsUsed) {
+            return bad("variant decision");
+        }
+    }
+    {
+        // the observers' input: the cached query against the one the fresh draw showed them (tag / textures / mainView are refreshed at replay)
+        const ReplaceQuery& a = cached.query;
+        const ReplaceQuery& r = fresh.query;
+        if (a.kind != r.kind || !(a.phase == r.phase) || a.vertexBuffer != r.vertexBuffer || a.vertexOffset != r.vertexOffset || a.vertexStride != r.vertexStride ||
+            a.indexBuffer != r.indexBuffer || a.indexed != r.indexed || a.primitiveType != r.primitiveType || a.first != r.first || a.primitives != r.primitives ||
+            a.baseVertex != r.baseVertex || a.minIndex != r.minIndex || a.numVertices != r.numVertices || a.instanced != r.instanced || a.instances != r.instances ||
+            a.engineVs != r.engineVs || a.enginePs != r.enginePs || a.decl != r.decl || a.blended != r.blended || a.blending != r.blending || a.srcBlend != r.srcBlend ||
+            a.dstBlend != r.dstBlend || a.alphaTest != r.alphaTest || a.alphaFunc != r.alphaFunc || a.alphaRef != r.alphaRef || a.depthWrite != r.depthWrite ||
+            a.depthBias != r.depthBias) {
+            return bad("observer query");
+        }
+        for (std::uint32_t mask = cached.texMask; mask != 0; mask &= mask - 1) {
+            const std::uint32_t slot = static_cast<std::uint32_t>(std::countr_zero(mask));
+            if (fresh.tex[slot] != cached.tex[slot]) return bad("observer textures");
+        }
+    }
+    if (std::memcmp(&b, &fresh.block, sizeof(b)) != 0) return bad("draw block");
+    return true;
+}
+
+bool Device::replayDraw(const CachedDraw& c, const ReplayInputs& in) {
+    replayStale_ = false;
+    if (!c.valid || vs_.get() == nullptr || ps_.get() == nullptr || vs_->module == rhi::ShaderModule::None || ps_->module == rhi::ShaderModule::None) {
+        ++replayStats.refused;
+        return false;
+    }
+    syncPhaseRegions();
+    if (rendering_ && (scopeGbuf_ != gbufferScope() || scopeSecondary_ != wantSecondaryScope())) endRendering();
+    if (!beginRendering()) {
+        ++replayStats.why[9];
+        ++replayStats.refused;
+        return false;
+    }
+    DrawPacket p;
+    shader::abi::DrawBlock b{};
+    if (!replayBuild(c, in, p, b)) {
+        ++replayStats.refused;
+        return false;
+    }
+    {
+        bool opaqueObserver = false;
+        if (c.kind == draws::Kind::StaticMesh && c.phase.view == scene::View::Main && c.phase.pass == scene::Pass::Solid) {
+            for (DrawReplacer* r : replacers_) opaqueObserver |= r->wantsOpaque();
+        }
+        if (!observers_.empty() || opaqueObserver) {
+            ReplaceQuery q = c.query;
+            q.tag = &tag_;
+            q.textures = c.tex;
+            q.mainView = firings_.mainViews();
+            captureRequest_ = {};
+            captureRequestRw_ = {};
+            captureInstances_ = false;
+            for (DrawObserver* o : observers_) {
+                if (o->observes(c.kind, c.phase)) o->observe(*this, q);
+            }
+            if (opaqueObserver) {
+                for (DrawReplacer* r : replacers_) {
+                    if (r->wantsOpaque()) r->observeOpaque(*this, q);
+                }
+            }
+            if (!captureRequest_.null()) {
+                // an observer wants this draw's vertex capture (a different pipeline): the normal path draws it, without asking them again
+                skipObservers_ = true;
+                ++replayStats.why[8];
+                ++replayStats.refused;
+                return false;
+            }
+        }
+    }
+    const std::uint64_t frame = frameValue();
+    for (std::uint32_t mask = c.texMask; mask != 0; mask &= mask - 1) c.tex[std::countr_zero(mask)]->lastUseFrame_ = frame;
+    uploadConstants(false, c.v.minEnd);
+    if (c.v.giDraw) ++giDrawCount_;
+    rhi::RingAlloc db = game_->allocRing(sizeof(b), 16);
+    std::memcpy(db.ptr, &b, sizeof(b));
+    const std::uint32_t flags = p.push.flags;
+    p.push = shader::abi::PushConstants{drawSplit_[0] ? 0 : vsConstAddr_.bits, drawSplit_[1] ? 0 : psConstAddr_.bits, db.ref.bits, frameBlockAddress().bits,
+                                        0, stats_.draws, flags};
+    for (std::uint32_t w = 0; w < shader::abi::kConstWindows; ++w) {
+        p.push.vsWin[w] = drawWin_[0][w].bits;
+        p.push.psWin[w] = drawWin_[1][w].bits;
+    }
+    if (drawSplit_[1]) p.push.psWin[1] = db.ref.plus(static_cast<std::int64_t>(offsetof(shader::abi::DrawBlock, psC5)) - 5 * 16).bits;
+    ++stats_.draws;
+    ++stats_.totalDraws;
+    ++passDraws_;
+    phases_.countDraw();
+    draws_.count(c.kind, c.phase.view);
+    ++replayStats.replayed;
+    submitInterned(p);
+    return true;
+}
+
 // first water / refracted draw of each material: what the engine draws it with (docs/research/water.md)
 void Device::logWaterDraw(draws::Kind kind) {
     const scene::Phase phase = phases_.current();
@@ -1362,7 +1725,7 @@ void Device::logWaterDraw(draws::Kind kind) {
         if (ps_->reflection.samplers[slot] == shader::TextureType::Unknown) continue;
         const Texture* t = tex_[slot];
         tex += std::format(" s{}={}", slot, t != nullptr ? std::format("{}x{} {}{}{}", t->desc().width, t->desc().height,
-                                                                        vk::d3dFormatName(t->desc().format),
+                                                                        rhi::d3dFormatName(t->desc().format),
                                                                         t->desc().type == TextureType::Cube ? " cube" : "",
                                                                         t->role() != scene::ImageRole::None
                                                                             ? std::string(" ") + scene::name(t->role())
@@ -1401,6 +1764,7 @@ void Device::logWaterDraw(draws::Kind kind) {
 }
 
 void Device::drawPrimitive(std::uint32_t type, std::uint32_t startVertex, std::uint32_t primitiveCount) {
+    struct Diag { Device& d; ~Diag() { diagAfterDraw(d, "plain"); } } diag{*this};
     const DrawTimer timer(*this);
     if (primitiveCount == 0 || !prepareDraw(type, DrawGeom{.first = startVertex, .primitives = primitiveCount})) {
         return;
@@ -1430,17 +1794,9 @@ std::uint32_t Device::foldIndexOffset(VkDeviceSize offset, bool index32, std::ui
     return firstIndex;
 }
 
-// the index buffer binding, recorded only when it differs from this command buffer's last one
-void Device::bindIndexBuffer(RecordState& rs, VkCommandBuffer cmd, VkBuffer buffer, VkDeviceSize bindOffset, bool index32) {
-    IndexBindingCache& c = rs.ib;
-    if (!c.valid || c.buffer != buffer || c.offset != bindOffset || c.index32 != index32) {
-        vkCmdBindIndexBuffer(cmd, buffer, bindOffset, index32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
-        c = {true, index32, buffer, bindOffset};
-    }
-}
-
 void Device::drawIndexedPrimitive(std::uint32_t type, std::int32_t baseVertex, std::uint32_t minIndex, std::uint32_t numVertices,
                                   std::uint32_t startIndex, std::uint32_t primitiveCount) {
+    struct Diag { Device& d; ~Diag() { diagAfterDraw(d, "indexed"); } } diag{*this};
     const DrawTimer timer(*this);
     if (primitiveCount == 0 || indices_ == nullptr ||
         !prepareDraw(type, DrawGeom{.indexed = true, .first = startIndex, .primitives = primitiveCount, .baseVertex = baseVertex,
@@ -1467,7 +1823,7 @@ void Device::drawIndexedPrimitive(std::uint32_t type, std::int32_t baseVertex, s
     }
     packet_.op = DrawPacket::Op::DrawIndexed;
     packet_.index32 = index32;
-    packet_.indexBuffer = reinterpret_cast<VkBuffer>(ib.buffer);
+    packet_.indexBuffer = ib.buffer;
     packet_.first = foldIndexOffset(ib.offset, index32, startIndex, packet_.indexOffset);
     packet_.count = vertexCount(type, primitiveCount);
     packet_.instances = instanceCount_;
@@ -1503,12 +1859,12 @@ void Device::setBatching(bool on) {
 }
 
 // the used parts only: the work blocks keep stale bytes beyond the counts
-const Device::VertexInputValues* Device::internVi(const VertexInputValues& v) {
-    const auto same = [](const VertexInputValues& a, const VertexInputValues& b) {
+const rhi::VertexInputValues* Device::internVi(const rhi::VertexInputValues& v) {
+    const auto same = [](const rhi::VertexInputValues& a, const rhi::VertexInputValues& b) {
         return a.bufferCount == b.bufferCount && a.dynamicLayout == b.dynamicLayout && a.bindingCount == b.bindingCount &&
                a.attributeCount == b.attributeCount && a.vertexShift == b.vertexShift &&
-               memEqual(a.buffers, b.buffers, sizeof(VkBuffer) * a.bufferCount) &&
-               memEqual(a.offsets, b.offsets, sizeof(VkDeviceSize) * a.bufferCount) &&
+               memEqual(a.buffers, b.buffers, sizeof(a.buffers[0]) * a.bufferCount) &&
+               memEqual(a.offsets, b.offsets, sizeof(a.offsets[0]) * a.bufferCount) &&
                memEqual(a.bindings, b.bindings, sizeof(a.bindings[0]) * a.bindingCount) &&
                memEqual(a.attributes, b.attributes, sizeof(a.attributes[0]) * a.attributeCount);
     };
@@ -1516,7 +1872,7 @@ const Device::VertexInputValues* Device::internVi(const VertexInputValues& v) {
     return lastVi_;
 }
 
-const Device::DynamicStateValues* Device::internDyn(const DynamicStateValues& v) {
+const rhi::DynamicStateValues* Device::internDyn(const rhi::DynamicStateValues& v) {
     const auto same = [](const DynamicStateValues& a, const DynamicStateValues& b) {
         constexpr std::size_t prefix = offsetof(DynamicStateValues, blendEnable);
         const std::uint32_t n = a.colorCount;
@@ -1531,6 +1887,11 @@ const Device::DynamicStateValues* Device::internDyn(const DynamicStateValues& v)
 void Device::submitPacket(DrawPacket& p) {
     p.vi = internVi(workVi_);
     p.dyn = internDyn(workDyn_);
+    if (capture_ != nullptr) fillCapture(p);
+    submitInterned(p);
+}
+
+void Device::submitInterned(DrawPacket& p) {
     if (p.batchable && rendering_) {
         batch_.push_back(p);
         // with record threads a full segment goes to a worker at once (the draws of a pass are recorded while the engine goes on
@@ -1543,41 +1904,19 @@ void Device::submitPacket(DrawPacket& p) {
         emitPacket(p);
         return;
     }
-    applyPacket(rec_, frames_.cmd(), bindless_.pipelineLayout(), p);
+    game_->applyDrawPacket(p);
 }
 
-void Device::applyPacket(RecordState& rs, VkCommandBuffer cmd, VkPipelineLayout layout, const DrawPacket& p) {
-    if (p.vi != rs.lastVi) {
-        applyVertexInput(rs, cmd, *p.vi);
-        rs.lastVi = p.vi;
-    }
-    if (p.pipeline != rs.bound) {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p.pipeline);
-        rs.bound = p.pipeline;
-        ++rs.pipelineBinds;
-    }
-    if (p.dyn != rs.lastDyn) {
-        applyDynamicState(rs, cmd, *p.dyn);
-        rs.lastDyn = p.dyn;
-    }
-    vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(p.push), &p.push);
-    if (p.op == DrawPacket::Op::DrawIndexed) {
-        bindIndexBuffer(rs, cmd, p.indexBuffer, p.indexOffset, p.index32);
-        vkCmdDrawIndexed(cmd, p.count, p.instances, p.first, p.vertexOffset, 0);
-    } else {
-        vkCmdDraw(cmd, p.count, p.instances, p.first, 0);
-    }
-}
+// the pending batch is recorded by the backend (game_->applyDrawPacket or emitPacket + chunks)
 
-// The pending batch: grouped by pipeline (stable: the engine's order within a pipeline), the first-seen pipeline first
+// The upload ring could not take a user-pointer draw's data (a ring chunk could not be created): the draw is dropped
 void Device::flushBatch() {
     if (batch_.empty()) return;
     const std::uint32_t n = static_cast<std::uint32_t>(batch_.size());
-    VkCommandBuffer cmd = frames_.cmd();
     const bool threaded = scopeSecondary_ && rendering_;
     const auto record = [&](const DrawPacket& p) {
         if (threaded) emitPacket(p);
-        else applyPacket(rec_, cmd, bindless_.pipelineLayout(), p);
+        else game_->applyDrawPacket(p);
     };
     if (n <= 2) {
         for (std::uint32_t i = 0; i < n; ++i) record(batch_[i]);
@@ -1591,16 +1930,16 @@ void Device::flushBatch() {
         const std::uint32_t mask = cap - 1;
         batchKeys_.resize(n);
         for (std::uint32_t i = 0; i < n; ++i) {
-            const VkPipeline p = batch_[i].pipeline;
-            std::uint32_t h = static_cast<std::uint32_t>((reinterpret_cast<std::uintptr_t>(p) >> 4) * 0x9E3779B97F4A7C15ull >> 32) & mask;
-            while (rankTable_[h].pipeline != VK_NULL_HANDLE && rankTable_[h].pipeline != p) h = (h + 1) & mask;
-            if (rankTable_[h].pipeline == VK_NULL_HANDLE) rankTable_[h] = {p, i};
+            const GamePipeline p = batch_[i].pipeline;
+            std::uint32_t h = static_cast<std::uint32_t>((static_cast<std::uint64_t>(p) >> 4) * 0x9E3779B97F4A7C15ull >> 32) & mask;
+            while (rankTable_[h].pipeline != GamePipeline::None && rankTable_[h].pipeline != p) h = (h + 1) & mask;
+            if (rankTable_[h].pipeline == GamePipeline::None) rankTable_[h] = {p, i};
             batchKeys_[i] = (static_cast<std::uint64_t>(rankTable_[h].rank) << 32) | i;
         }
         std::sort(batchKeys_.begin(), batchKeys_.end());
         for (const std::uint64_t k : batchKeys_) record(batch_[static_cast<std::uint32_t>(k)]);
     }
-    if (threaded) closeChunk();  // a flush is one chunk: a worker starts on it now
+    if (threaded) closeChunk();  // a flush is one chunk: the backend's workers start on it now
     perf_.batchedDraws += n;
     ++perf_.batches;
     batch_.clear();
@@ -1620,13 +1959,13 @@ void Device::drawPrimitiveUP(std::uint32_t type, std::uint32_t primitiveCount, c
         return;
     }
     const std::uint32_t vertices = vertexCount(type, primitiveCount);
-    rhi::RingAlloc a = frames_.allocate(static_cast<VkDeviceSize>(vertices) * stride, 16);
+    rhi::RingAlloc a = game_->allocRing(static_cast<VkDeviceSize>(vertices) * stride, 16);
     if (a.ptr == nullptr) {
         upAllocFailed(static_cast<std::uint64_t>(vertices) * stride);
         return;
     }
     std::memcpy(a.ptr, data, static_cast<std::size_t>(vertices) * stride);
-    up_ = {true, vk::vkBuffer(a), a.offset, stride};
+    up_ = {true, a.buffer, a.offset, stride};
     if (prepareDraw(type, DrawGeom{.userPointer = true, .primitives = primitiveCount})) {
         packet_.op = DrawPacket::Op::Draw;
         packet_.count = vertices;
@@ -1648,20 +1987,20 @@ void Device::drawIndexedPrimitiveUP(std::uint32_t type, std::uint32_t minIndex, 
     }
     const std::uint32_t count = vertexCount(type, primitiveCount);
     const std::uint32_t isize = index32 ? 4 : 2;
-    rhi::RingAlloc ia = frames_.allocate(static_cast<VkDeviceSize>(count) * isize, 16);
+    rhi::RingAlloc ia = game_->allocRing(static_cast<VkDeviceSize>(count) * isize, 16);
     const std::uint32_t vcount = minIndex + numVertices;
-    rhi::RingAlloc va = frames_.allocate(static_cast<VkDeviceSize>(vcount) * stride, 16);
+    rhi::RingAlloc va = game_->allocRing(static_cast<VkDeviceSize>(vcount) * stride, 16);
     if (ia.ptr == nullptr || va.ptr == nullptr) {
         upAllocFailed(static_cast<std::uint64_t>(count) * isize + static_cast<std::uint64_t>(vcount) * stride);
         return;
     }
     std::memcpy(ia.ptr, indices, static_cast<std::size_t>(count) * isize);
     std::memcpy(va.ptr, vertices, static_cast<std::size_t>(vcount) * stride);
-    up_ = {true, vk::vkBuffer(va), va.offset, stride};
+    up_ = {true, va.buffer, va.offset, stride};
     if (prepareDraw(type, DrawGeom{.indexed = true, .userPointer = true, .primitives = primitiveCount})) {
         packet_.op = DrawPacket::Op::DrawIndexed;
         packet_.index32 = index32;
-        packet_.indexBuffer = vk::vkBuffer(ia);
+        packet_.indexBuffer = ia.buffer;
         packet_.first = foldIndexOffset(ia.offset, index32, 0, packet_.indexOffset);
         packet_.count = count;
         packet_.instances = 1;

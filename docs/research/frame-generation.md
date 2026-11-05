@@ -105,7 +105,7 @@ this GPU** (section 5.2).
 
 | concern | (i) AMD swapchain | (ii) manual + own presents |
 |---|---|---|
-| pacing (the hard part) | done by AMD: moving average of frame times, variance / safety margin tuning (`FFX_API_CONFIGURE_FG_SWAPCHAIN_KEY_FRAMEPACINGTUNING`, header comment in `ffx_framegeneration_api_types.h`), busy wait presents, 1.99 presents per app frame at 12.4 / 12.6 ms gaps [M] | ours: second present at +0.5 x estimated interval on the presenter thread (`FramePacer` has the waiting primitives: [C] `src/vk/pacer.*`), estimator, FIFO / vsync interaction, VRR behaviour: a project of its own |
+| pacing (the hard part) | done by AMD: moving average of frame times, variance / safety margin tuning (`FFX_API_CONFIGURE_FG_SWAPCHAIN_KEY_FRAMEPACINGTUNING`, header comment in `ffx_framegeneration_api_types.h`), busy wait presents, 1.99 presents per app frame at 12.4 / 12.6 ms gaps [M] | ours: second present at +0.5 x estimated interval on the presenter thread (`FramePacer` has the waiting primitives: [C] `src/core/pacer.*`), estimator, FIFO / vsync interaction, VRR behaviour: a project of its own |
 | driver-assisted pacing on RDNA 4 (swapchain 4.0.0) | yes (selected automatically when the driver allows) | no |
 | `vk::Swapchain` / `Presenter` / `Device::present` [C] | acquire / present / images / recreate go through function pointers (small, mechanical); one new multi-queue requirement | unchanged |
 | device queues [C `vk/context.cpp` creates one queue] | 4 queues (family 0 has 8, family 1 has 8 on the RX 7900 XTX [M `vulkaninfo`]) | none extra |
@@ -432,3 +432,7 @@ Real presents counted from the swapchain's own counter (`pOutGetLastPresentCount
 3. The driver-provided `4.0.0 *` swapchain stays unused (crashes in its destroy). FSR 4 (ML) frame generation + the 3.1.7 swapchain is untested.
 4. The sampler thread and the AMD present threads spin: expect ~0.5 - 1 core extra while frame generation runs; Radeon Chill on `Risen.exe` caps the total presents (README note).
 5. Not done: async compute (`allowAsyncWorkloads`), AMD's pacing tuning keys, Anti-Lag, the UI-texture composition (not needed), RenderDoc (use FG off).
+
+## 11. D3D12 backend (WP7, 2026-11-03)
+
+Same callback model on D3D12 (`src/rhi/d3d12/d3d12_ffx.*`, details and rules in dx12-game-port.md Status "WP7"): `ffxCreateContextDescFrameGenerationSwapChainForHwndDX12`, provider pinned to 3.1.7, interpolation inside `Present` (held under `contextMutex()`), the overlay in the present callback, teardown generator context -> WaitForPresents -> swapchain context -> swapchain, never in place. Measured on the RX 7900 XTX, 1600x900, overlay open: base 60 -> output 120 fps, 2.00 real presents per rendered frame, real present gaps 8.2 / 8.45 ms (read from `IDXGISwapChain::GetLastPresentCount`; the callbacks run ahead of the present). The probe lists `3.1.6` (frame generation) and `3.1.7` / `4.0.0 *` (swapchain); FSR 4 frame generation is not offered on this GPU.

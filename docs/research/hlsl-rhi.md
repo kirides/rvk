@@ -212,25 +212,44 @@ The retail OS runtime of d3d12.dll is older than SM 6.6 root signature flags / t
 `CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED` flag on an OS runtime that predates SM 6.6). Devices are created with `factory->CreateDevice` (falls back to `D3D12CreateDevice`); the debug layer, GPU based
 validation and DRED (`DeviceDesc::validation` only) are enabled through `factory->GetConfigurationInterface` (a factory-made device ignores the global `D3D12GetDebugInterface` state).
 
-- **Layout**: `<dir>\D3D12Core.dll` (+ `d3d12SDKLayers.dll` for `validation`). `<dir>` = `DeviceDesc::d3d12SdkDir`, else the environment variable `RVK_D3D12_SDK_DIR`, else `d3d12\` next
-  to the module the backend is linked into (`build\<config>\d3d12\` for the tools, `bin\rvk\d3d12\` for the game's d3d9.dll). The version is read from the DLL's `D3D12SDKVersion` export. Missing DLL,
+- **Layout**: `<dir>\D3D12Core.dll` (+ `d3d12SDKLayers.dll` for `validation` / `messages`). `<dir>` = `DeviceDesc::d3d12SdkDir`, else the environment variable `RVK_D3D12_SDK_DIR`, else `d3d12\` next
+  to the module the backend is linked into (`build\<config>\d3d12\` for the tools); when the module has no `d3d12\` but `rvk\d3d12\D3D12Core.dll` exists beside it, that one (the game: d3d9.dll is in `bin`,
+  the player zip and `scripts/run.ps1` put the runtime in `bin\rvk\d3d12\`). The version is read from the DLL's `D3D12SDKVersion` export. Missing DLL,
   an OS without `ID3D12SDKConfiguration1` or a refused factory = the system runtime (logged, no failure). Absolute paths only (a relative one is relative to the exe for the factory but not for the version probe).
-- **Build**: vcpkg `directx12-agility` (1.619.5; NuGet `Microsoft.Direct3D.D3D12`; pulls `directx-headers`). The backend includes `<directx/d3d12.h>` (the Windows SDK 10.0.26100 headers
-  only know SDK 616 and lack some of the newer interfaces) and links `Microsoft::DirectX-Guids`. CMake `rvk_deploy_agility(<target>)` copies D3D12Core.dll + d3d12SDKLayers.dll to
-  `$<TARGET_FILE_DIR>/d3d12` (rvk_rhitest, d3d9); `scripts/run.ps1` copies that folder to the test copy's `bin\rvk\d3d12`. **`scripts/package.ps1` does not ship it** (the game does not use the
-  DX12 backend yet; when it does, add `D3D12Core.dll` to `rvk\d3d12` of the zip, plus the redistribution licence from the port's `share/directx12-agility/copyright`, and not the layers).
-  A union-api-style scanner of game-folder DLLs (GD3D11's `PreloadGameFolderDlls`) is not a concern for Risen; if D3D12Core.dll should be loaded early, load it by full path at start-up.
-- **Log / caps**: `d3d12: Agility SDK 619 from <dir>` + `d3d12: device from the Agility SDK 619 factory`, or `d3d12: system runtime (...)` / `device from the system runtime`;
-  `DeviceCaps::agilitySdkVersion` (0 = system runtime), printed by `rvk_rhitest` (`[D3D12] adapter '...', Agility SDK 619`).
-- **Versions**: 1.619.5 is what the port has (headers = SDK 619). Retail 1.620 / preview 1.722 (blog "Agility SDK 1.620 retail and 1.722 preview"; the port has to update first, then the version
-  in `vcpkg.json`'s baseline moves; the code needs no change, the guarded `ID3D12Debug7` call below turns on with 1.620 headers). The preview runtime needs Windows developer mode (preview SDKs
-  are refused otherwise) and a driver that supports it; use retail for anything that ships.
-- **Usable later** (none built; the Vulkan side has no counterparts of the batched calls, so they stay DX12 only optimizations): 1.620: *Driver Reported Messages*
-  (`ID3D12Debug7::SetEnableDriverReportedMessages`, messages arrive through the info queue callback we already route; prepared in `create()` behind `D3D12_SDK_VERSION >= 620`), *batched async commands*
+  How it works for a proxy DLL (verified 2026-11-05, rvk_rhitest, AMD RX 7900 XTX, Windows 11 26300): the exe-export route (`D3D12SDKVersion` / `D3D12SDKPath` of Risen.exe) is not available to a DLL; the factory route above is the
+  supported one (`SetSDKVersion`-style early call = `CreateDeviceFactory` + `ApplyToGlobalState`) and the log shows `d3d12: device from the Agility SDK 620 factory`.
+- **Build**: vcpkg `directx12-agility`. The registry baseline has 1.619.5 only; **`vcpkg-overlay/directx12-agility`** (vcpkg-configuration.json `overlay-ports`) is the same port at the retail **1.620.1**
+  (NuGet `Microsoft.Direct3D.D3D12` 1.620.1, SHA512 in its portfile; D3D12_SDK_VERSION 620 = the directx-headers 1.721.2 headers); drop the overlay when the registry catches up. The backend includes `<directx/d3d12.h>` (the Windows SDK 10.0.26100 headers
+  only know SDK 616 and lack some of the newer interfaces) and links `Microsoft::DirectX-Guids`. CMake `rvk_deploy_agility(<target>)` copies D3D12Core.dll + d3d12SDKLayers.dll + the licence (`copyright`) to
+  `$<TARGET_FILE_DIR>/d3d12` (rvk_rhitest, d3d9); `scripts/run.ps1` copies that folder to the test copy's `bin\rvk\d3d12`. **`scripts/package.ps1` ships `rvk\d3d12\D3D12Core.dll` + `D3D12_LICENSE.txt`**
+  (Microsoft DirectX licence: the distributables of the package may be redistributed with the application, the layers `d3d12SDKLayers.dll` are a developer tool and stay out of the zip; ~4.9 MB). Without it
+  (or on an OS that refuses it) the backend runs on the inbox runtime.
+- **Availability** (checked 2026-11-05): NuGet `Microsoft.Direct3D.D3D12` has retail 1.619.x (.0 - .6) and **1.620.1** and previews up to 1.722.0-preview; the vcpkg registry port is 1.619.5. WinPixEventRuntime 1.0.240308001 is in the registry
+  (`winpixevent`; headers used, the DLL is not needed: see PIX below).
+- **Log / caps**: `d3d12: Agility SDK 620 from <dir>` + `d3d12: device from the Agility SDK 620 factory`, or `d3d12: system runtime (...)` / `device from the system runtime`;
+  `DeviceCaps::agilitySdkVersion` (0 = system runtime), printed by `rvk_rhitest` (`[D3D12] adapter '...', Agility SDK 620`); `d3d12: caps: DXR 1.1 (...), SER reorders no, work graphs tier 1, ExecuteIndirect tier 1,
+  enhanced barriers yes` (`DeviceCaps::dxrTier` 10 / 11 / 12, `serReorders`).
+- **Used (2026-11-05, 1.620.1)**: the debug layer's `ID3D12Device::CheckFeatureSupport` warning (message 989, "use ID3D12Device16::CheckFeatureSupport1"; the 1.721.2 headers have no Device16) is denied through the info queue
+  (the capability queries run once at device creation). The `ID3D12Debug7::SetEnableDriverReportedMessages` call the earlier text announced does not exist in the 1.620 / 1.721.2 headers (no `ID3D12Debug7`): removed;
+  driver messages arrive through the info queue we already route when the driver reports them.
+- **Debugging, built 2026-11-05** (`rvk_rhitest --device-lost` is the test):
+  * DRED auto-breadcrumbs + breadcrumb contexts + page fault data are on by default for every D3D12 device (`DeviceDesc::dred`, default true; `RVK_DRED=0` / config `[debug] d3d12_dred = false` off), not only with validation.
+  * Device removal: after each wait / present `GetDeviceRemovedReason` is checked (`Device::deviceLost()`); the first failure logs the reason + DRED report (unfinished command lists, the op the GPU stopped at with its neighbours,
+    breadcrumb contexts, the page fault VA with live / recently freed allocations; `d3d12: DRED: ...` error lines) and writes `rvk_<stamp>_d3d12_device_removed.dmp` + `.txt` into `bin\rvk\dumps\` (`core/crash_dump.*`,
+    `MiniDumpWriteDump`, at most 4 files per run). The fence wait is bounded (10 s -> reported as DXGI_ERROR_DEVICE_HUNG instead of hanging). Test hook `Device::simulateDeviceLoss()` = `ID3D12Device5::RemoveDevice`
+    (`rvk_rhitest --device-lost`: PASS; a removal this way has no unfinished breadcrumbs, a real fault shows them).
+  * Vulkan: `Context::reportDeviceLost` (VK_EXT_device_fault report, `devicefault.bin`) now also writes `rvk_<stamp>_vulkan_device_lost.dmp` + the report into `bin\rvk\dumps\`. `[debug] crash_dumps` (default true) installs an
+    unhandled-exception filter writing `..._crash.dmp` (chains to the previous filter; the engine's own handler, installed later, replaces it).
+  * Debug layer messages: `DeviceDesc::messages` / `RVK_D3D12_MESSAGES=1` / config `[debug] d3d12_messages` turn the layer on without GPU based validation and route its messages into rvk.log (`d3d12: validation <id>: ...`),
+    validation keeps GBV. The game creates no D3D12 device yet: the config keys are read, the device creation site (WP4) passes them.
+  * PIX / capture regions: `CommandList::beginRegion / endRegion` write PIX3-encoded events with the header-only encoder of the `winpixevent` port (`PixEventsLegacy::EncodeBeginEventForContext` + `list->BeginEvent(D3D12_EVENT_METADATA, ...)`):
+    `PIXBeginEvent(list, ...)` itself also records a CPU timeline event that needs `WinPixEventRuntime.dll` (`PIXGetThreadInfo` / `PIXEventsReplaceBlock` do not link without it), so the DLL stays out. The debug layer accepts these events
+    (rvk_rhitest --validation: 0 errors) and the DRED breadcrumbs list them as BeginEvent / EndEvent ops.
+- **Usable later** (none built; the Vulkan side has no counterparts of the batched calls, so they stay DX12 only optimizations): 1.620: *batched async commands*
   (`CopyBufferRegions`, `ClearTextureSubresources`, `FillBuffers`, bound RTV / DSV clears: fewer calls for the RHI's `copyBuffer` / `clear*` / `fillBuffer` on AMD RX 7000+, RTX, Intel),
   *extended PIX markers*, *DirectX dump files*, `CheckFeatureSupport1`, castable format query (typeless depth / sRGB views). 1.722 preview: *DXR clustered geometry*, *partitioned TLAS* and *indirect
   acceleration structure builds* (the RT scene's per-frame TLAS rebuild and BLAS batches: GPU-driven instance lists; AMD RX 9000, Intel B-series, RTX only), *GPU timeline CopyDescriptors* (Resource
-  Binding Tier 4, AMD RX 7000+).
+  Binding Tier 4, AMD RX 7000+). The preview runtime needs Windows developer mode and a driver that supports it; use retail for anything that ships.
 
 ## 6b. Decisions after the first runs
 
@@ -460,6 +479,10 @@ Rules the DXIL side forced (all verified with the checker):
   the host (dx12-game-port.md WP3/WP4).
 - **`rhi::GraphicsPipelineDesc::colorFormats[1..3]` were ignored by the Vulkan backend** (one attachment only): `vk::PassGraphicsDesc::moreColors` (same blend state on each) fixes it; the G-buffer
   variant (three render targets) now draws identically on both.
+
+- **`pow(0, 0)` is 1 in D3D9 (legacy multiplication: 0 * anything = 0, also 0 * inf) and NaN in IEEE** (found in game, D3D12): `exp2(y * log2(x))` with x = y = 0 gave NaN in a refracted crystal's pixel shader (the gloss texture 0 x a dot product clamped to 0); the NaN pixels made the engine's AvgLuminance chain NaN, which its clamp turned into the constant 0.18 = a bright picture (monastery_hall, harbour_night). The translator emits `rvk_pow` (y == 0 -> 1) when the D3D12 backend is active; AMD's Vulkan compiler happens to behave like D3D9. Diagnostics: `RVK_EXPOSURE_LOG=1` (the adapted luminance, the luminance chain's levels and the HDR scene's NaN count every 60 frames), `RVK_NAN_BISECT=<frame>` (reads the scene back after every draw of that frame and names the draw that adds NaNs).
+- **`p.Get().array[i]` with a loop index loads the whole block by value on DXIL** (no pointers: `ByteAddressBuffer.Load<T>`): GiPassParams holds 256 float4 of lights, a GI pass with 40+ lights took 10-15 ms on D3D12 against 1-2 ms on Vulkan (bisected with `RVK_SHADER_DIR` edits: trace only 1 ms, + hit surface 1 ms, + point lights 14 ms). Dynamically indexed arrays of a block are read with `rvkRawLoad<T, A>(rvkAddrAdd(rvkAddr(pair), offset + i * stride))` (`giLight`, offset asserted in enh/gi.h). Small arrays with constant indices are fine. After the change D3D12 lake_jungle: gi.screen 1.13 ms (Vulkan 2.05), gi 0.55 ms (1.01).
+- `RVK_SHADER_DIR` did not reach `shader/dxc` (the CRT's `_dupenv_s` does not see variables the proxy sets with `SetEnvironmentVariableW` in DllMain): now `GetEnvironmentVariableA`.
 
 ### 9.5 Equivalence on the GPU: `rvk_rhitest` (`tools/rhitest/parity.cpp`, `parity_water.inl`, `shaders/test/parity_refs.comp.hlsl`)
 

@@ -11,7 +11,7 @@
 
 #include "engine/materials.h"
 #include "shader/abi.h"
-#include "vk/formats.h"
+#include "rhi/d3d_formats.h"
 
 namespace rvk::enh {
 
@@ -54,7 +54,7 @@ bool isEmitterName(const std::string& name) {
 
 bool RtMaterial::operator==(const RtMaterial& o) const {
     return albedo == o.albedo && opacity == o.opacity && sampler == o.sampler && uvSet == o.uvSet &&
-           std::memcmp(uvMap, o.uvMap, sizeof(uvMap)) == 0 && colour == o.colour && alpha == o.alpha && masked == o.masked;
+           std::memcmp(uvMap, o.uvMap, sizeof(uvMap)) == 0 && colour == o.colour && alpha == o.alpha && masked == o.masked && name == o.name;
 }
 
 std::uint64_t RtMaterials::signature(const d3d9::ReplaceQuery& q) {
@@ -123,6 +123,7 @@ std::uint32_t RtMaterials::intern(const RtMaterial& m) {
     for (const auto& row : m.uvMap)
         for (float f : row) key = mixFloat(key, f);
     key = mix(key, m.colour);
+    key = mix(key, std::hash<std::string>{}(m.name));  // (the material pack keys by name: two materials of one texture stay apart)
     key = mix(key, m.alpha | (m.masked ? 0x80000000u : 0u));
     if (const auto it = byKey_.find(key); it != byKey_.end()) {
         Entry& e = entries_[it->second];
@@ -459,7 +460,7 @@ std::uint32_t RtMaterials::resolve(d3d9::Device& dev, const d3d9::ReplaceQuery& 
         for (std::uint32_t r = kMaterialBase; r < 16; ++r) {
             if (samplers[r] == shader::TextureType::Unknown) continue;
             const d3d9::Texture* t = q.textures[r];
-            declared += std::format(" s{}={}", r, t == nullptr ? std::string("-") : std::format("{}x{} {}", t->desc().width, t->desc().height, vk::d3dFormatName(t->desc().format)));
+            declared += std::format(" s{}={}", r, t == nullptr ? std::string("-") : std::format("{}x{} {}", t->desc().width, t->desc().height, rhi::d3dFormatName(t->desc().format)));
         }
         const std::string matName = q.tag != nullptr && q.tag->material != nullptr ? mats::resourceName(q.tag->material) : std::string("?");
         spdlog::info("rt: material '{}' ({} {}, vs {:016x} ps {:016x}): {}; bound{}; albedo {} uv set {} map ({:.4g} {:.4g} {:.4g} / {:.4g} {:.4g} {:.4g}){}{}{}{}{}",

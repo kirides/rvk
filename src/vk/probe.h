@@ -46,6 +46,15 @@ struct DeviceReport {
         bool opacityMicromap = false;         // VK_EXT_opacity_micromap + micromap
         bool pipeline = false;                // VK_KHR_ray_tracing_pipeline + rayTracingPipeline (information only)
         bool maintenance1 = false;            // VK_KHR_ray_tracing_maintenance1 + rayTracingMaintenance1
+        // vendor / newer RT extensions, information only (never enabled: nothing in the renderer uses them; docs/research/raytracing.md 9). Present = the
+        // extension is in the device's list (feature bits are not queried: a caps line says "offered" or "the GPU / driver has no ...").
+        bool clusterAccelerationStructure = false;  // VK_NV_cluster_acceleration_structure (clustered geometry / "mega geometry", NVIDIA)
+        bool partitionedAccelerationStructure = false;  // VK_NV_partitioned_acceleration_structure (NVIDIA)
+        bool invocationReorder = false;       // VK_EXT_ray_tracing_invocation_reorder / VK_NV_ray_tracing_invocation_reorder (shader execution reordering)
+        std::string invocationReorderName;    // which of the two
+        bool invocationReorderReorders = false;  // the EXT's rayTracingInvocationReorderReorderingHint = REORDER (false: the hint does nothing on this GPU)
+        bool linearSweptSpheres = false;      // VK_NV_ray_tracing_linear_swept_spheres
+        bool displacementMicromap = false;    // VK_NV_displacement_micromap
         bool bufferDeviceAddress = false;     // Vulkan 1.2 bufferDeviceAddress (the renderer enables it anyway)
         std::vector<std::string> extensionsMissing;  // of the three the tier needs (AS, ray query, deferred host operations)
         std::vector<std::string> featuresMissing;    // extension present, feature bit false

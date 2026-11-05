@@ -34,6 +34,8 @@ enum class Cap : std::uint8_t {
     FrameGeneration,       // AMD frame generation (FSR 3): the effect DLL is installed and the API offers a provider on this device
     FrameGenerationMl,     // ... the ML provider (FSR 4 frame generation: Radeon RX 9000 and newer)
     FrameGenerationQueues, // the extra queues for the frame generation swapchain were created (framegen.mode != off at start)
+    ClusterAccelerationStructure,  // VK_NV_cluster_acceleration_structure offered (clustered geometry; information only, never enabled)
+    RayTracingReorder,             // VK_EXT / VK_NV_ray_tracing_invocation_reorder offered (shader execution reordering; information only)
     Count
 };
 inline constexpr std::size_t kCount = static_cast<std::size_t>(Cap::Count);

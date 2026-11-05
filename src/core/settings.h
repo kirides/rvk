@@ -296,6 +296,7 @@ struct RendererSettings {
     Setting* menuFps = nullptr;      // vulkan.menu_fps: cap while a menu page is open (engine/menu_state.h); 0 = none
     Setting* exclusiveAcquire = nullptr;  // vulkan.exclusive_acquire: hold Vulkan's exclusive mode in exclusive fullscreen (hidden diagnostics)
     Setting* fullscreen = nullptr;   // vulkan.fullscreen: "borderless", "exclusive" (needs FullScreenExclusive; window-mode.md 8)
+    Setting* api = nullptr;          // vulkan.api: vulkan | d3d12 (restart)
     Setting* adapter = nullptr;      // vulkan.adapter: -1 = best discrete GPU (restart)
     Setting* toggleKey = nullptr;    // overlay.toggle_key
     Setting* abKey = nullptr;        // overlay.ab_key
@@ -372,11 +373,44 @@ struct RendererSettings {
     Setting* aoEnabled = nullptr;         // ao.enabled: GTAO on the ambient light
     Setting* giLights = nullptr;          // gi.lights: "nearby" (the drawn objects' lights) or "world" (engine/lights: every loaded light)
     Setting* giEmissive = nullptr;        // gi.emissive: gain of self-illuminated surfaces as light sources
+    Setting* giReference = nullptr;       // gi.reference (debug): the reference path tracer's view (docs/research/path-tracing.md)
+    Setting* giReferenceSpp = nullptr;    // gi.reference_spp: samples per pixel and frame
+    Setting* giReferenceMax = nullptr;    // gi.reference_max: samples until the accumulation stops and is dumped
+    Setting* giReferenceBounces = nullptr;  // gi.reference_bounces: the most bounces of a path
     Setting* giLightCount = nullptr;      // gi.light_count (debug): the most lights the GI considers per frame
     Setting* aoMode = nullptr;            // ao.mode: "replace" (the game's SSAO off), "add"
     Setting* aoStrength = nullptr;        // ao.strength: 0..1
     Setting* aoRadius = nullptr;          // ao.radius: metres
     Setting* gbufferDebug = nullptr;      // gbuffer.debug: "off", "normals", "motion", "ao"
+    // Full-owned lighting (enh/light_table, docs/research/gpu-scene.md 9.7)
+    Setting* lightingClustered = nullptr; // lighting.clustered (restart, debug): the light table + cluster grid; the material variants take their point lights from it
+    Setting* lightingTableComplete = nullptr; // lighting.table_complete (debug): with the registry complete, table-lit draws do not read their own light lists
+    Setting* lightingTreeMerge = nullptr;     // lighting.tree_merge (debug): table-lit tree batches merge across light lists
+    Setting* lightingFullLit = nullptr;   // lighting.full_lit (debug): lit draws take all point lights from the table (one 3-light permutation; gpu-scene.md 9.8)
+    Setting* lightingEnabled = nullptr;   // lighting.enabled (debug): run-time switch of the table (A/B)
+    Setting* lightingStyle = nullptr;     // lighting.style: "original" (the engine's distance law) | "physical"
+    Setting* lightingDebug = nullptr;     // lighting.debug: "off" | "clusters" | "slots" | "shadows"
+    Setting* lightingCollect = nullptr;   // debug.light_collect: the radius the light table collects lights over (units)
+    Setting* lightingShadows = nullptr;   // lighting.light_shadows: "off" | "nearby" | "many" (ray-traced point-light shadows on the table's lights)
+    Setting* lightingShadowQuality = nullptr;  // lighting.light_shadow_quality: "low" | "medium" | "high"
+    Setting* lightingShadowRadius = nullptr;   // lighting.light_shadow_radius: the lamps' size in cm (the soft shadow's disc)
+    // material pack (enh/material_pack, docs/research/material-pack.md)
+    Setting* materialsPack = nullptr;        // materials.pack (restart): load the pack folder; its materials get PBR specular / reflections
+    Setting* materialsQuality = nullptr;     // materials.quality: "off" | "low" | "medium" | "high"
+    Setting* materialsRtReflections = nullptr; // materials.rt_reflections: "low" | "medium" | "high" (traced reflections at materials.quality = high)
+    Setting* materialsRtRange = nullptr;     // materials.rt_range: metres a reflection ray travels
+    Setting* materialsRtStrength = nullptr;  // materials.rt_strength
+    Setting* materialsGlass = nullptr;       // materials.glass: traced glass panes (windows reflect, bottles refract) with the traced reflections
+    Setting* materialsRainWetness = nullptr; // materials.rain_wetness: how strongly rain wets the pack's surfaces (traced reflections on)
+    Setting* materialsPuddles = nullptr;     // materials.puddles: puddle coverage while it rains
+    Setting* materialsRainForce = nullptr;   // materials.rain_force (debug): a forced rain share
+    Setting* materialsSpecular = nullptr;    // materials.specular: strength of the lights' specular
+    Setting* materialsEnvironment = nullptr; // materials.environment: strength of the sky reflection
+    Setting* materialsRoughness = nullptr;   // materials.default_roughness: for entries without a roughness map
+    Setting* materialsBudget = nullptr;      // materials.budget (restart): MiB of decoded pack textures
+    Setting* materialsWetness = nullptr;     // materials.wetness: scales the entries' wetness (0 = dry world, 1 = as authored)
+    Setting* materialsAlternate = nullptr;   // materials.alternate: test switch, the pack variants on / off every N frames (exact "no entry = unchanged" proof)
+    Setting* materialsDebug = nullptr;       // materials.debug: "off" | "roughness" | "metalness" | "orm" | "coverage"
     // upscaling / anti-aliasing (enh/upscale.h, docs/research/upscaling.md)
     Setting* upscaleObjectMotion = nullptr;  // upscale.object_motion: motion vectors of characters and moving objects (enh/object_motion)
     Setting* upscaleProvider = nullptr;   // upscale.provider: "fsr3" (FSR 3.1, default) or "fsr4" (the ML upscaler of the FSR SDK 2.4)
@@ -411,11 +445,22 @@ struct RendererSettings {
     Setting* nativeLean = nullptr;             // native.lean: the engine's slot code not run for the composed mesh-like ops (O2a)
     Setting* nativeLeanCheck = nullptr;        // native.lean_check: every N-th frame the engine's code runs as before (compare)
     Setting* nativeLeanEffects = nullptr;      // native.lean_effects: O3 the effect units / sprite flushes / PSSM pass lean too (A/B)
+    Setting* nativeGpuScene = nullptr;         // native.gpu_scene: verify the signal-fed GPU scene tables (docs/research/gpu-scene.md)
+    Setting* nativePacketCache = nullptr;     // native.packet_cache: retained draw packets of the main view's static meshes + trees (retained-signals.md 8)
+    Setting* nativeOpts = nullptr;             // native.cpu_opts: bit mask of the Full-mode CPU optimizations (docs/research/performance.md 22)
     Setting* nativeLeanRestore = nullptr;      // native.lean_restore: false = no per-op device save / restore around lean ops (A/B)
     Setting* nativeRetained = nullptr;         // native.retained: V3 retained composition of the sub-mesh draws (A/B)
     Setting* nativeRetainedCheck = nullptr;    // native.retained_check: every replay recomposed fresh and compared
     Setting* nativeRetainedGroups = nullptr;   // native.retained_groups: bit mask of the groups that retain (bit = StaticOps::Group)
+    Setting* skyCubeInterval = nullptr;   // debug.sky_cube_interval: ms between two refreshes of the sky cube while the water keeps it current (0 = every frame)
     Setting* shadowStride = nullptr;      // debug.shadow_stride: the sun cascades redrawn every n-th frame (engine::shadowmaps::setUpdateStride)
+    Setting* fsReadCache = nullptr;       // debug.fs_read_cache: read-ahead of packed file streams (engine::loadaccel)
+    Setting* fastAbsorb = nullptr;        // debug.fast_absorb: sliding-window cloud absorption image (engine::loadaccel)
+    Setting* soundCompressed = nullptr;   // debug.sound_compressed: short sounds as compressed samples (engine::loadaccel)
+    Setting* streamStats = nullptr;       // debug.stream_stats: loading work statistics (engine::loadaccel)
+    Setting* xinputInterval = nullptr;    // debug.xinput_interval: re-poll interval of a disconnected gamepad (engine::xinput)
+    Setting* oceanSpd = nullptr;          // debug.ocean_spd: the FFT ocean's mip chains by compute (enh::Ocean::setSpd)
+    Setting* fastSort = nullptr;         // debug.fast_sort: typed sort of the render-op lists (engine::fastsort)
     Setting* prefetchStride = nullptr;    // debug.prefetch_stride: the cache-in walk every n-th frame (engine::lod::setPrefetchStride)
     Setting* lodView = nullptr;           // lod.view: the view range of objects (eCFrustumDatabase view range factor)
     Setting* highFps = nullptr;           // compat.high_fps: the high frame rate gameplay fixes (engine/high_fps.h)

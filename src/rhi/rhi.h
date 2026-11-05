@@ -23,6 +23,8 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <utility>
+#include <vector>
 #include <string_view>
 
 #include "vk/vk.h"
@@ -450,6 +452,11 @@ struct DeviceDesc {
     // variable RVK_D3D12_SDK_DIR, else "d3d12\" next to the module this code is linked into (d3d9.dll in bin\rvk, or the tool's exe). The SDK is activated
     // once per process: the first device decides; a missing / unusable SDK falls back to the system runtime (DeviceCaps::agilitySdkVersion == 0).
     const char* d3d12SdkDir = nullptr;
+    // DX12 only (the debug tools; docs/research/dx12-game-port.md "Agility SDK 620: debugging"):
+    // messages = the debug layer's messages (not GPU based validation) reach rvk.log (setting debug.d3d12_messages; env RVK_D3D12_MESSAGES=1);
+    // dred = DRED auto-breadcrumbs + page fault data are on, so a device removal can be explained (default on: ~free; env RVK_DRED=0 turns it off).
+    bool messages = false;
+    bool dred = true;
 };
 
 struct DeviceCaps {
@@ -462,6 +469,13 @@ struct DeviceCaps {
     bool textureBlit = false;        // CommandList::blitTexture (Vulkan only: the DX12 backend has no scaling copy)
     bool rayQuery = false;           // createBlas / createTlas + inline ray queries (Vulkan ray query with a bindless TLAS array, DXR tier 1.1); needs DeviceDesc::rayTracing
     std::uint32_t agilitySdkVersion = 0;  // DX12: the D3D12SDKVersion of the Agility SDK the device was created from (0 = the system runtime; always 0 on Vulkan)
+    // DX12: ray tracing generation of the device (0 none, 10 / 11 / 12 = DXR 1.0 / 1.1 / 1.2); DXR 1.2 = opacity micromaps + shader execution reordering
+    // in the API (the renderer uses neither: they are reported, docs/research/raytracing.md 9)
+    std::uint32_t dxrTier = 0;
+    bool serReorders = false;  // DX12: D3D12_FEATURE_DATA_D3D12_OPTIONS22::ShaderExecutionReorderingActuallyReorders
+    // DX12: information-only feature survey (name, "supported ..." / "unsupported" / "unknown (<why>)"), logged as `caps:` lines at device creation
+    // (docs/research/dx12-game-port.md "D3D12 feature availability"); empty on Vulkan (core/caps.h properties carry the Vulkan side)
+    std::vector<std::pair<std::string, std::string>> featureSurvey;
 };
 
 class Device {
@@ -470,6 +484,10 @@ public:
     virtual const DeviceCaps& caps() const = 0;
     // validation messages of severity error seen so far (Vulkan validation layer / D3D12 debug layer + GPU based validation; 0 without validation)
     virtual std::uint32_t validationErrors() const = 0;
+    // true once the GPU device was removed / lost (DX12: GetDeviceRemovedReason failed; the report + a minidump were written on the first detection)
+    virtual bool deviceLost() const { return false; }
+    // test hook: make the device fail like a TDR / page fault (DX12: ID3D12Device5::RemoveDevice); false = not supported (Vulkan)
+    virtual bool simulateDeviceLoss() { return false; }
 
     virtual std::unique_ptr<Buffer> createBuffer(const BufferDesc& desc) = 0;
     virtual std::unique_ptr<Texture> createTexture(const TextureDesc& desc) = 0;
@@ -514,6 +532,9 @@ std::unique_ptr<Device> createD3D12Device(const DeviceDesc& desc);
 
 // bytes per pixel of the uncompressed formats the RHI knows (0 = unknown or block compressed)
 std::uint32_t formatBytes(VkFormat format);
+// depth / depth-stencil formats; the ones with a stencil aspect
+bool isDepthFormat(VkFormat format);
+bool hasStencil(VkFormat format);
 // the texel block of a format: 1x1 for the uncompressed ones, 4x4 for BC1 - BC5; bytes = one block (0 = unknown format)
 struct FormatBlock {
     std::uint32_t width = 1, height = 1, bytes = 0;

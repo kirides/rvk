@@ -303,7 +303,10 @@ bool translated(const std::string& asmText, bool vertex, const shader::Translate
         std::printf("  decoding %s failed: %s\n", name, dec.error.c_str());
         return false;
     }
+    // D3D12 links the stages by register: translated stages have the dense signature (the game device's setting; Vulkan ignores the fillers)
+    shader::setVaryingFillers(true);
     const shader::HlslResult h = shader::toHlsl(dec.program, options);
+    shader::setVaryingFillers(false);
     if (!h.ok()) {
         std::printf("  translating %s failed: %s\n", name, h.error.c_str());
         return false;
@@ -969,12 +972,142 @@ void testPipelines(rhi::Device& dev) {
     std::printf("[%s] %s: %s\n", rhi::backendName(dev.caps().backend), label, failures == before ? "PASS" : "FAIL");
 }
 
+// ---- test 6: the ocean's mip chain by compute (ocean_mips.comp) against a CPU 2 x 2 box chain --------------------------------------------------
+
+float halfToF(std::uint16_t h) {
+    const std::uint32_t s = (h >> 15) & 1u, e = (h >> 10) & 31u, m = h & 1023u;
+    float v = e == 0 ? std::ldexp(static_cast<float>(m), -24) : std::ldexp(static_cast<float>(m | 1024u), static_cast<int>(e) - 25);
+    return s ? -v : v;
+}
+
+std::uint16_t floatToHalf(float f) {  // round to nearest even; |f| < 65504, no NaN / Inf inputs
+    const std::uint32_t s = f < 0 ? 0x8000u : 0u;
+    f = std::fabs(f);
+    if (f < 6.103515625e-05f) return static_cast<std::uint16_t>(s | static_cast<std::uint32_t>(std::lrintf(f * 16777216.0f)));
+    int e;
+    const float fr = std::frexp(f, &e);  // f = fr * 2^e, fr in [0.5, 1)
+    const long m = std::lrintf(std::ldexp(fr, 11));  // 1024..2048
+    int ex = e + 14;
+    long mm = m;
+    if (mm == 2048) {
+        mm = 1024;
+        ++ex;
+    }
+    return static_cast<std::uint16_t>(s | (static_cast<std::uint32_t>(ex) << 10) | static_cast<std::uint32_t>(mm - 1024));
+}
+
+void testOceanMips(Harness& h) {
+    rhi::Device& dev = h.dev;
+    const int before = failures;
+    const char* label = "ocean mip chain by compute";
+    if (!selected(label)) return;
+    Blobs cs;
+    if (!compileBoth("water/ocean_mips.comp.hlsl", "", "CSMain", "cs_6_6", cs)) {
+        check(false, "ocean_mips: compile");
+        return;
+    }
+    // the embedded text is picked by the file name when `source` is empty (as the other embedded compiles of this file)
+    for (std::uint32_t n : {128u, 512u}) {
+        std::uint32_t mips = 1;
+        while ((1u << (mips - 1)) < n) ++mips;
+        rhi::TextureDesc td{VK_IMAGE_TYPE_2D, VK_FORMAT_R16G16B16A16_SFLOAT, {n, n, 1}, mips, 1,
+                            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, "ocean mips test"};
+        auto tex = dev.createTexture(td);
+        const std::uint32_t pitch0 = rhi::bufferRowPitch(td.format, n);
+        auto staging = dev.createBuffer({static_cast<std::uint64_t>(pitch0) * n, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, rhi::Memory::Upload, "ocean mips staging"});
+        std::uint64_t total = 0;
+        std::vector<std::uint64_t> offs(mips);
+        for (std::uint32_t m = 0; m < mips; ++m) {
+            offs[m] = total;
+            total += (rhi::copyBytes(td, m) + 511) & ~511ull;
+        }
+        auto readback = dev.createBuffer({total, VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "ocean mips readback"});
+        auto pipeline = dev.createComputePipeline({cs.shader(), "ocean mips"});
+        if (!tex || !staging || !readback || !pipeline) {
+            check(false, "ocean_mips: resources / pipeline");
+            return;
+        }
+        // mip 0: a smooth field + noise + a foam-like channel (values the ocean writes: metres, slopes, 0..1), as halves
+        std::vector<float> level(static_cast<std::size_t>(n) * n * 4);
+        std::uint32_t seed = 12345u;
+        for (std::uint32_t y = 0; y < n; ++y) {
+            for (std::uint32_t x = 0; x < n; ++x) {
+                for (int c = 0; c < 4; ++c) {
+                    seed = seed * 1664525u + 1013904223u;
+                    const float noise = static_cast<float>(seed >> 8) / 16777216.0f - 0.5f;
+                    const float v = (c == 3 ? 0.5f : 0.0f) + std::sin(0.05f * static_cast<float>(x + 3 * c)) * std::cos(0.07f * static_cast<float>(y)) + 0.6f * noise;
+                    const std::uint16_t hv = floatToHalf(v);
+                    std::memcpy(static_cast<std::uint8_t*>(staging->map()) + static_cast<std::size_t>(y) * pitch0 + (x * 4 + c) * 2, &hv, 2);
+                    level[(static_cast<std::size_t>(y) * n + x) * 4 + c] = halfToF(hv);
+                }
+            }
+        }
+        struct Push {
+            std::uint64_t frame;
+            std::uint32_t passId, passFlags, info[4];
+        };
+        dev.submitAndWait([&](rhi::CommandList& cl) {
+            cl.transition(*tex, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            cl.copyBufferToTexture(*tex, *staging, 0, {0, 0});
+            cl.transition(*tex, VK_IMAGE_LAYOUT_GENERAL);
+            cl.bindPipeline(*pipeline);
+            for (int stage = 0; stage < 2; ++stage) {
+                const std::uint32_t first = stage == 0 ? 0u : 6u, levels = stage == 0 ? 6u : mips - 7u;
+                if (levels == 0) continue;
+                Push p{};
+                p.info[0] = n >> first;
+                p.info[1] = levels;
+                rhi::StorageView views[7];
+                for (std::uint32_t i = 0; i < 7; ++i) views[i] = {tex.get(), std::min(first + i, mips - 1u), 0};
+                cl.setStorageViews(views);
+                cl.setPushConstants(&p, sizeof(p));
+                const std::uint32_t groups = stage == 0 ? n / 64u : 1u;
+                cl.dispatch(groups, groups, 1);
+                cl.computeBarrier();
+            }
+            cl.transition(*tex, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            for (std::uint32_t m = 1; m < mips; ++m) cl.copyTextureToBuffer(*readback, offs[m], *tex, {m, 0});
+        });
+        readback->invalidate();
+        const auto* base = static_cast<const std::uint8_t*>(readback->map());
+        // CPU chain: the average of 2 x 2 of the previous level in float, rounded to half only at the end (the shader's groups keep float inside)
+        std::vector<float> all;
+        float worst = 0.0f;
+        std::uint32_t size = n;
+        for (std::uint32_t m = 1; m < mips; ++m) {
+            const std::uint32_t o = size / 2, pitch = rhi::bufferRowPitch(td.format, o);
+            std::vector<float> next(static_cast<std::size_t>(o) * o * 4);
+            for (std::uint32_t y = 0; y < o; ++y) {
+                for (std::uint32_t x = 0; x < o; ++x) {
+                    for (int c = 0; c < 4; ++c) {
+                        const auto at = [&](std::uint32_t xx, std::uint32_t yy) { return level[(static_cast<std::size_t>(yy) * size + xx) * 4 + c]; };
+                        const float want = 0.25f * (at(2 * x, 2 * y) + at(2 * x + 1, 2 * y) + at(2 * x, 2 * y + 1) + at(2 * x + 1, 2 * y + 1));
+                        next[(static_cast<std::size_t>(y) * o + x) * 4 + c] = want;
+                        std::uint16_t hv;
+                        std::memcpy(&hv, base + offs[m] + static_cast<std::size_t>(y) * pitch + (x * 4 + c) * 2, 2);
+                        const float got = halfToF(hv);
+                        worst = std::max(worst, std::fabs(got - want));
+                        all.push_back(got);
+                    }
+                }
+            }
+            level = std::move(next);
+            size = o;
+        }
+        check(worst < 2e-3f, std::format("ocean_mips {}: worst difference to the CPU chain {}", n, worst));
+        std::printf("  ocean mips %u (%u levels): worst difference to the CPU chain %g\n", n, mips - 1, worst);
+        crossCheck(dev, n == 128 ? "ocean mips 128" : "ocean mips 512", all, 1e-3f);
+    }
+    std::printf("[%s] %s: %s\n", rhi::backendName(dev.caps().backend), label, failures == before ? "PASS" : "FAIL");
+}
+
 }  // namespace
 
 int run(rhi::Device& dev) {
     failures = 0;
     Harness h(dev);
     testPipelines(dev);
+    testOceanMips(h);
     testTranslatedDraw(h);
     testUberDraw(h, "diffuse * vertex colour", simpleRequest(), "PS_Default", {}, false, false);
     testUberDraw(h, "normal map, specular, lightmap, lights", heavyRequest(), "PS_Default", {}, false, true);

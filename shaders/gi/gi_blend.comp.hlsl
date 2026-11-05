@@ -77,11 +77,11 @@ void CSMain(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
             uint nL = min(p.Get().flags.y, GI_MAX_LIGHTS);
             for (uint j = 0u; j < nL; ++j) {
                 if (((vw[j >> 5u] >> (j & 31u)) & 1u) == 0u) continue;
-                float4 lp = p.Get().lights[j * 2u];
+                float4 lp = giLight(j * 2u);
                 float3 d = lp.xyz - P;
                 float d2 = dot(d, d);
                 float fall = 1.0 - clamp(d2 * lp.w, 0.0, 1.0);
-                direct += 3.14159265 * p.Get().lights[j * 2u + 1u].rgb[ch] * fall * giShBasis(k, d * rsqrt(max(d2, 1e-4)));
+                direct += 3.14159265 * giLight(j * 2u + 1u).rgb[ch] * fall * giShBasis(k, d * rsqrt(max(d2, 1e-4)));
             }
         }
         // 4 pi / N (uniform directions) x the cosine lobe's band factor in acc units (irradiance / pi: A0 = 1, A1 = 2/3, A2 = 1/4)

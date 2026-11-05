@@ -186,6 +186,12 @@
        void eCPrefetchAdmin::SetDefaultCacheInRange(float) (0x695c10: re-evaluates every entity's sphere when the value       \
        changes); eECullStatus eCFrustumElementItem::CullTree(eCFrustumDatabase&) (0x6711a0: a parent entity's subtree cull    \
        with its raw ViewRange) */                                                                                              \
+    /* gpu scene (docs/research/gpu-scene.md): the entity table's change signals: eCPrefetchAdmin::OnEntityCachedIn (0x696120) / OnEntityCachedOut (0x696040), eCEntityAdmin::NotifyDeleteEntities (0x695310), the world matrix notifies (0x69e8a0 / 0x6a8d70) */ \
+    X(prefetchEntityCachedIn, L"Engine.dll", "?OnEntityCachedIn@eCPrefetchAdmin@@QEAAXPEAVeCGeometryEntity@@@Z", false)             \
+    X(prefetchEntityCachedOut, L"Engine.dll", "?OnEntityCachedOut@eCPrefetchAdmin@@QEAAXPEAVeCGeometryEntity@@@Z", false)           \
+    X(entityAdminNotifyDelete, L"Engine.dll", "?NotifyDeleteEntities@eCEntityAdmin@@QEAAXPEAVeCEntity@@@Z", false)                   \
+    X(dynEntityWorldMatrix, L"Engine.dll", "?OnUpdatedWorldMatrix@eCDynamicEntity@@MEAAXAEBVbCMatrix@@0@Z", false)                  \
+    X(geoEntityWorldMatrix, L"Engine.dll", "?OnUpdatedWorldMatrix@eCGeometryEntity@@MEAAXAEBVbCMatrix@@0@Z", false)                  \
     X(prefetchGetSphere, L"Engine.dll", "?GetPrefetchSphere@eCPrefetchAdmin@@QEAA_NPEAVeCGeometryEntity@@AEAVbCSphere@@@Z", false) \
     /* void eCPrefetchAdmin::CacheEntities(bCVector const&, unsigned char, bool, bool) (0x6969c0): the per-frame cache-in walk of the         scene's sphere tree (OnPreRender); its two bools gate the walks (lod.md 7, performance.md 14) */                              X(prefetchCacheEntities, L"Engine.dll", "?CacheEntities@eCPrefetchAdmin@@QEAAXAEBVbCVector@@E_N1@Z", false)                      X(prefetchSetDefaultRange, L"Engine.dll", "?SetDefaultCacheInRange@eCPrefetchAdmin@@QEAAXM@Z", false)                       \
     /* eCShaderPoolEllement* eCShaderMaterialAdmin::CompileShaderPoolEllement(eSGfxHLSLShaderSrc const&, eEShaderMaterialVersion, \

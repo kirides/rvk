@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <filesystem>
 #include <format>
 #include <string>
 
@@ -20,17 +21,24 @@
 #include "core/settings.h"
 #include "core/stall_sampler.h"
 #include "d3d9/fvf.h"
+#include "enh/ocean.h"
 #include "engine/scene_hooks.h"
+#include "engine/fast_sort.h"
+#include "engine/load_accel.h"
 #include "engine/lod.h"
+#include "engine/scene_table.h"
+#include "gpuscene/instance_buffer.h"
+#include "engine/xinput_throttle.h"
 #include "engine/memread.h"
 #include "engine/material_source.h"
 #include "engine/menu_state.h"
 #include "engine/shadow_maps.h"
 #include "engine/vfs.h"
 #include "engine/window_mode.h"
+#include "enh/material_variant.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "res/dds.h"
-#include "vk/formats.h"
+#include "rhi/d3d_formats.h"
 
 namespace rvk::hal::vulkan {
 
@@ -141,6 +149,7 @@ void HalDevice::applyStaticOps() {
     const NativePlan plan = nativePlan(renderMode(), on(rs.nativeStaticOps), on(rs.nativeStaticOpsCompare), on(rs.nativeSceneOps),
                                        on(rs.nativeSceneOpsCompare),
                                        rs.nativeSceneOpsGroups != nullptr ? rs.nativeSceneOpsGroups->asInt() : static_cast<int>(kAllSceneOpGroups));
+    engine::scene::setSkyCubeFullMode(renderMode() == RenderMode::Full);
     const bool takeOver = plan.staticTake;
     const bool compare = plan.staticCompare;
     staticOps_->setMode(native::StaticOps::Group::Static, takeOver, compare);
@@ -187,6 +196,14 @@ void HalDevice::applyStaticOps() {
     staticOps_->setLean(leanOn, leanCheck);
     // O3: the effect units, sprite flushes and the PSSM pass (native.lean_effects: their A/B)
     effectOps_->setLean(leanOn && (rs.nativeLeanEffects == nullptr || on(rs.nativeLeanEffects)), leanCheck);
+    {
+        const bool cacheBlocked = compare || sceneCompare || on(rs.nativeFrameTap) || on(rs.nativeCoverage) || !leanOn;
+        const int pm = rs.nativePacketCache != nullptr && !cacheBlocked ? rs.nativePacketCache->asInt() : 0;
+        staticOps_->setPacketCache(pm == 4 ? 1 : pm);
+        dev_.setRetainVariants(pm != 4);  // 4 = the cache of before the variant packets (A/B)
+    }
+    staticOps_->setGpuScene(rs.nativeGpuScene != nullptr ? rs.nativeGpuScene->asInt() : 0);
+    staticOps_->setOpts(rs.nativeOpts != nullptr ? static_cast<unsigned>(rs.nativeOpts->asInt()) : 255u);
     staticOps_->setLeanRestore(rs.nativeLeanRestore == nullptr || on(rs.nativeLeanRestore));
     staticOps_->setRetained(on(rs.nativeRetained), rs.nativeRetainedGroups != nullptr ? rs.nativeRetainedGroups->asInt() : 0x2ff, on(rs.nativeRetainedCheck));
     frameTap_->setCoverage(on(rs.nativeCoverage) || on(rs.nativeFrameTap) || compare || sceneCompare);
@@ -233,7 +250,15 @@ HalDevice::~HalDevice() {
     objectMotion_.reset();  // unregisters its observer
     framegen_.reset();   // removes its passes, retires the generator
     upscale_.reset();    // clears the device's jitter source
+    materialRt_.reset(); // removes its pass, releases the RT scene
     gbuffer_.reset();    // removes its passes, the G-buffer attachments
+    if (matPack_) {
+        enh::matpack::setReloadHook({});
+        dev_.setPackProvider({});
+        dev_.setPackStamp({});
+        if (rtScene_) rtScene_->setMaterialPack(nullptr);
+    }
+    matPack_.reset();    // joins its loader, frees the pack textures
     gi_.reset();         // unregisters its observer / pass, releases the RT scene
     water_.reset();      // unregisters its draw replacer, releases the RT scene
     shadows_.reset();
@@ -273,10 +298,23 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     o.validation = options.validation;
     o.syncValidation = options.syncValidation;
     o.adapter = options.adapter;
+    // the graphics API of the session (vulkan.api is a restart setting: the value it started with decides); D3D12 needs SM 6.6 / binding tier 3
+    // and falls back to Vulkan with a log line
+    if (rs.api != nullptr && rs.api->startValue() != 0.0) {
+        std::string reason;
+        if (rhi::d3d12Usable(options.adapter, &reason)) {
+            o.backend = rhi::Backend::D3D12;
+            spdlog::info("hal: graphics API Direct3D 12 (vulkan.api = d3d12)");
+        } else {
+            spdlog::warn("hal: vulkan.api = d3d12 is not usable here ({}): Vulkan instead", reason);
+        }
+    }
     o.maxFps = rs.maxFps != nullptr ? rs.maxFps->value() : options.maxFps;
     o.cacheDir = options.cacheDir;
     o.logDraws = options.logDraws;
     // rt.allow is a restart setting: the value the session started with decides (its effective value waits for the report)
+    o.d3d12Messages = options.d3d12Messages;
+    o.d3d12Dred = options.d3d12Dred;
     o.allowRayTracing = rs.rtAllow == nullptr || rs.rtAllow->startValue() != 0.0;
     // the frame generation swapchain needs three more queues than the floor's one (vk/fg_swapchain.h): requested whenever the frame
     // generation DLL is installed, so that framegen.mode can be switched at run time (queues nobody uses cost nothing)
@@ -296,11 +334,11 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     window_ = p.window;
     engine::window::onModeSet(p.window, p.windowed, o.width, o.height, p.refreshRate);
     spdlog::info("hal: Vulkan device for window {} ({}x{}, vsync {}, depth {})", static_cast<void*>(p.window), o.width, o.height,
-                 o.vsync, vk::d3dFormatName(o.depthFormat));
+                 o.vsync, rhi::d3dFormatName(o.depthFormat));
     engine::scene::attach(&dev_);  // the frame phase markers (no-ops when they are not installed)
     auto& reg = settings::registry();
     // frame generation providers (vk/framegen.h): which of FSR 3 / FSR 4 this device can run, for the capability report
-    dev_.game().probeFrameGeneration(paths::dataDir() / "amd_fidelityfx_loader_vk.dll");
+    dev_.game().probeFrameGeneration(rhi::fidelityFxLoader(paths::dataDir(), o.backend));
     // capability report (core/caps.h, docs/research/raytracing.md 3): logged once, the overlay's "Capabilities", and the
     // resolution of settings with requirements (greyed + parity fallback when unmet)
     {
@@ -473,17 +511,100 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     frameTap_->setEffectOps(effectOps_.get());
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups,
                                  rs.nativeMirror, rs.nativeCoverage, rs.nativeFrameTap, rs.nativeLean, rs.nativeLeanCheck,
-                                 rs.nativeLeanRestore, rs.nativeLeanEffects, rs.nativeRetained, rs.nativeRetainedCheck, rs.nativeRetainedGroups}) {
+                                 rs.nativeLeanRestore, rs.nativeOpts, rs.nativeGpuScene, rs.nativePacketCache, rs.nativeLeanEffects, rs.nativeRetained, rs.nativeRetainedCheck, rs.nativeRetainedGroups}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
     // renderer.mode (Wrapper / Full): like the native.* settings applied by the registry's dispatch before a present, i.e. at a
     // frame boundary (no frame starts with one mode and ends with the other)
     if (rs.rendererMode != nullptr) reg.onChange(*rs.rendererMode, [this](const settings::Setting&) { applyRenderMode(); }, this);
     applyRenderMode();
+    // material pack (enh/material_pack.h, docs/research/material-pack.md): decided before any material variant is built (variants are cached
+    // per shader, the PBR code is part of them or not): the setting is on and the pack folder has something in it
+    std::vector<std::filesystem::path> packRoots;
+    if (rs.materialsPack != nullptr && rs.materialsPack->asBool()) {
+        packRoots.push_back(paths::dataDir() / "materialpack");
+        if (const char* env = std::getenv("RVK_MATPACK"); env != nullptr && *env != 0) {
+            std::string list = env;
+            for (std::size_t at = 0; at <= list.size();) {
+                const std::size_t semi = list.find(';', at);
+                const std::string part = list.substr(at, semi == std::string::npos ? std::string::npos : semi - at);
+                if (!part.empty()) packRoots.emplace_back(part);
+                if (semi == std::string::npos) break;
+                at = semi + 1;
+            }
+        }
+        const auto hasFiles = [](const std::filesystem::path& root) {
+            std::error_code ec;
+            if (!std::filesystem::is_directory(root, ec)) return false;
+            for (std::filesystem::recursive_directory_iterator it(root, ec), end; it != end && !ec; it.increment(ec)) {
+                if (it->is_regular_file(ec)) return true;
+            }
+            return false;
+        };
+        std::erase_if(packRoots, [&](const std::filesystem::path& p) { return !hasFiles(p); });
+    }
+    // Full-owned clustered lights (enh/light_table.h): decided here for the same reason (variants are cached per shader)
+    const bool clusterLights = rs.lightingClustered != nullptr && rs.lightingClustered->asBool() && renderMode() == RenderMode::Full;
+    // (the physical light style evaluates the PBR code of the pack's variants on every lit draw: a session that STARTS with lighting.style = physical carries it in the
+    // cluster variants, original <-> physical then switch at run time; the code costs ~0.4 ms GPU in the jungle save, so it is not compiled in otherwise)
+    enh::setPbrVariants(!packRoots.empty() || (clusterLights && rs.lightingStyle != nullptr && rs.lightingStyle->asEnum() == "physical"));
+    if (rs.lightingClustered != nullptr && rs.lightingClustered->asBool() && !clusterLights) spdlog::info("enh: lights: lighting.clustered applies in Full mode only");
+    enh::setClusterVariants(clusterLights);
     // ray-traced global illumination (enh/gi.h, docs/research/rtgi.md): probes + the material shaders' GI variants
     gi_ = std::make_unique<enh::Gi>(dev_, rtScene_.get());
+    if (!packRoots.empty()) {
+        // the pack rides on the GI variant slot (the Gi class registers it only with a ray tracing scene)
+        dev_.setVariantProvider(d3d9::VariantSlot::Gi, {enh::materialVariantTag("gi"), [](const d3d9::Shader& s, shader::TranslateOptions& o) {
+                                                            return enh::materialVariantOptions(s, enh::MaterialVariant::Gi, o);
+                                                        }});
+        matPack_ = std::make_unique<enh::matpack::MaterialPack>(dev_);
+        matPack_->configure(true, packRoots, static_cast<std::uint64_t>(rs.materialsBudget->asInt()) << 20, static_cast<float>(rs.materialsRoughness->asFloat()));
+        dev_.setPackProvider([this](const d3d9::draws::Tag& tag) {
+            const auto h = matPack_->lookupMaterial(tag.material);
+            static auto last = std::chrono::steady_clock::now();
+            static unsigned calls = 0;
+            const auto now = (++calls & 255u) == 0 ? std::chrono::steady_clock::now() : last;
+            if (now - last >= std::chrono::seconds(5)) {
+                last = now;
+                const auto c = matPack_->takeCounters();
+                if (c.lookups != 0) spdlog::info("enh: materials: {} draws looked up, {} matched ({} distinct entries seen)", c.lookups, c.matched, matPack_->matchedNames());
+            }
+            return d3d9::Device::PackHit{h.word, h.texture};
+        });
+        dev_.setPackStamp([this]() -> std::uint32_t { return matPack_->generation(); });
+        materialRt_ = std::make_unique<enh::MaterialRt>(dev_, rtScene_.get());
+        for (settings::Setting* s : {rs.materialsQuality, rs.materialsSpecular, rs.materialsEnvironment, rs.materialsDebug, rs.materialsAlternate, rs.materialsWetness,
+                                     rs.materialsRtReflections, rs.materialsRtRange, rs.materialsRtStrength, rs.materialsRainWetness, rs.materialsPuddles, rs.materialsRainForce, rs.materialsGlass}) {
+            if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) {
+                applyMaterials();
+                applyGbuffer();  // the traced reflections read the G-buffer
+            }, this);
+        }
+        applyMaterials();
+        rtScene_->setMaterialPack(matPack_.get());
+        enh::matpack::setReloadHook([this, packRoots]() {
+            // (the overlay's command thread is the render thread's: the commands run at presents)
+            const auto& rs2 = settings::renderer();
+            matPack_->configure(true, packRoots, static_cast<std::uint64_t>(rs2.materialsBudget->asInt()) << 20, static_cast<float>(rs2.materialsRoughness->asFloat()));
+            return true;
+        });
+        spdlog::info("enh: materials: pack on ({} folder(s)), PBR variants enabled", packRoots.size());
+    }
+    if (clusterLights) {
+        // the variants ride on the Gi slot and the pack's gate (lit material draws of the main view); a pack provider that finds nothing (word 0) opens the gate
+        dev_.setVariantProvider(d3d9::VariantSlot::Gi, {enh::materialVariantTag("gi"), [](const d3d9::Shader& s, shader::TranslateOptions& o) {
+                                                            return enh::materialVariantOptions(s, enh::MaterialVariant::Gi, o);
+                                                        }});
+        if (!matPack_) dev_.setPackProvider([](const d3d9::draws::Tag&) { return d3d9::Device::PackHit{}; });
+        lightTable_ = std::make_unique<enh::LightTable>(dev_);
+        lightTable_->setRtScene(rtScene_.get());
+        for (settings::Setting* s : {rs.lightingEnabled, rs.lightingStyle, rs.lightingDebug, rs.lightingFullLit, rs.lightingTableComplete, rs.lightingTreeMerge, rs.lightingCollect, rs.lightingShadows, rs.lightingShadowQuality, rs.lightingShadowRadius, rs.materialsRoughness, rs.nativeStaticOpsCompare, rs.nativeSceneOpsCompare}) {
+            if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyLighting(); }, this);
+        }
+        applyLighting();
+    }
     if (rs.giEnabled != nullptr) {
-        for (settings::Setting* s : {rs.giEnabled, rs.giQuality, rs.giStrength, rs.giLightmaps, rs.giCharacters, rs.giScreen, rs.giBleed, rs.giDirectional, rs.giFoliage, rs.giFill, rs.giCutouts, rs.giLights, rs.giLightCount, rs.giEmissive, rs.giDebug}) {
+        for (settings::Setting* s : {rs.giEnabled, rs.giQuality, rs.giStrength, rs.giLightmaps, rs.giCharacters, rs.giScreen, rs.giBleed, rs.giDirectional, rs.giFoliage, rs.giFill, rs.giCutouts, rs.giLights, rs.giLightCount, rs.giEmissive, rs.giDebug, rs.giReference, rs.giReferenceSpp, rs.giReferenceMax, rs.giReferenceBounces}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) {
                 applyGi();
                 applyGbuffer();  // the screen probes need the G-buffer
@@ -539,9 +660,41 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
             reg.onChange(*s, [applyMaterials](const settings::Setting&) { applyMaterials(); }, this);
         }
     }
+    if (rs.skyCubeInterval != nullptr) {
+        engine::scene::setSkyCubeIntervalMs(static_cast<int>(rs.skyCubeInterval->asInt()));
+        reg.onChange(*rs.skyCubeInterval, [](const settings::Setting& s) { engine::scene::setSkyCubeIntervalMs(static_cast<int>(s.asInt())); }, this);
+    }
     if (rs.shadowStride != nullptr) {
         engine::shadowmaps::setUpdateStride(static_cast<int>(rs.shadowStride->asInt()));
         reg.onChange(*rs.shadowStride, [](const settings::Setting& s) { engine::shadowmaps::setUpdateStride(static_cast<int>(s.asInt())); }, this);
+    }
+    if (rs.fsReadCache != nullptr) {
+        engine::loadaccel::setReadCacheKiB(static_cast<int>(rs.fsReadCache->asInt()));
+        reg.onChange(*rs.fsReadCache, [](const settings::Setting& s) { engine::loadaccel::setReadCacheKiB(static_cast<int>(s.asInt())); }, this);
+    }
+    if (rs.fastAbsorb != nullptr) {
+        engine::loadaccel::setAbsorbMode(static_cast<int>(rs.fastAbsorb->asInt()));
+        reg.onChange(*rs.fastAbsorb, [](const settings::Setting& s) { engine::loadaccel::setAbsorbMode(static_cast<int>(s.asInt())); }, this);
+    }
+    if (rs.soundCompressed != nullptr) {
+        engine::loadaccel::setSoundCompressed(rs.soundCompressed->asBool());
+        reg.onChange(*rs.soundCompressed, [](const settings::Setting& s) { engine::loadaccel::setSoundCompressed(s.asBool()); }, this);
+    }
+    if (rs.streamStats != nullptr) {
+        engine::loadaccel::setStats(static_cast<int>(rs.streamStats->asInt()));
+        reg.onChange(*rs.streamStats, [](const settings::Setting& s) { engine::loadaccel::setStats(static_cast<int>(s.asInt())); }, this);
+    }
+    if (rs.xinputInterval != nullptr) {
+        engine::xinput::setIntervalMs(static_cast<int>(rs.xinputInterval->asInt()));
+        reg.onChange(*rs.xinputInterval, [](const settings::Setting& s) { engine::xinput::setIntervalMs(static_cast<int>(s.asInt())); }, this);
+    }
+    if (rs.oceanSpd != nullptr) {
+        enh::Ocean::setSpd(rs.oceanSpd->asBool());
+        reg.onChange(*rs.oceanSpd, [](const settings::Setting& s) { enh::Ocean::setSpd(s.asBool()); }, this);
+    }
+    if (rs.fastSort != nullptr) {
+        engine::fastsort::setMode(static_cast<int>(rs.fastSort->asInt()));
+        reg.onChange(*rs.fastSort, [](const settings::Setting& s) { engine::fastsort::setMode(static_cast<int>(s.asInt())); }, this);
     }
     if (rs.prefetchStride != nullptr) {
         engine::lod::setPrefetchStride(static_cast<int>(rs.prefetchStride->asInt()));
@@ -616,6 +769,16 @@ void HalDevice::applyGi() {
     if (rs.giCutouts != nullptr) s.cutoutsTested = rs.giCutouts->asEnum() == "tested";
     if (rs.giEmissive != nullptr) s.emissive = rs.giEmissive->asFloat();
     if (rs.giLightCount != nullptr) s.lightCount = rs.giLightCount->asInt();
+    if (rs.giReference != nullptr) {
+        static const char* const kViews[] = {"off", "reference", "ddgi", "screen", "error", "reference_indirect", "screen_indirect", "error_ddgi"};
+        const std::string_view rv = rs.giReference->asEnum();
+        for (int i = 0; i < 8; ++i) {
+            if (rv == kViews[i]) s.reference = i;
+        }
+        s.referenceSpp = static_cast<int>(rs.giReferenceSpp->asInt());
+        s.referenceMax = static_cast<int>(rs.giReferenceMax->asInt());
+        s.referenceBounces = static_cast<int>(rs.giReferenceBounces->asInt());
+    }
     if (rs.giLights != nullptr) s.lights = rs.giLights->asEnum() == "world" ? 1 : 0;
     const std::string_view d = rs.giDebug->asEnum();
     s.debug = d == "irradiance" ? 1 : d == "cascades" ? 2 : d == "vertex_ao" ? 3 : 0;
@@ -624,6 +787,73 @@ void HalDevice::applyGi() {
         s.screen = sc == "low" ? 1 : sc == "medium" ? 2 : sc == "high" ? 3 : 0;
     }
     gi_->apply(s);
+}
+
+void HalDevice::applyMaterials() {
+    const auto& rs = settings::renderer();
+    const auto index = [](std::string_view v, std::initializer_list<std::string_view> names) {
+        float i = 0;
+        for (const auto n : names) {
+            if (n == v) return i;
+            ++i;
+        }
+        return 0.0f;
+    };
+    const float quality = index(rs.materialsQuality->asEnum(), {"off", "low", "medium", "high"});
+    const float debug = index(rs.materialsDebug->asEnum(), {"off", "roughness", "metalness", "orm", "coverage"});
+    dev_.removePasses(&matPack_);
+    if (const int n = rs.materialsAlternate != nullptr ? rs.materialsAlternate->asInt() : 0; n > 0) {
+        // the variants on / off every n frames, decided at the start of each frame's main view (the whole frame uses one state)
+        dev_.addPass(d3d9::inject::Point::BeforeDepthPrepass, "materials.alternate", [this, n](d3d9::PassContext&) {
+            dev_.setPackBypass(((dev_.frameValue() / static_cast<std::uint64_t>(n)) & 1u) != 0);
+        }, &matPack_, 0);
+    } else {
+        dev_.setPackBypass(false);
+    }
+    dev_.setFrameParam(shader::abi::kFrameParamMaterials + 1, {rs.materialsWetness != nullptr ? rs.materialsWetness->asFloat() : 1.0f, 0.0f, 0.0f, 0.0f});
+    // materials.quality = high: the traced reflections (enh/material_rt) carry the sky too: the raster's sky cube term is off while they run
+    if (materialRt_) {
+        enh::MaterialRt::Settings m;
+        const std::string_view tier = rs.materialsRtReflections != nullptr ? rs.materialsRtReflections->asEnum() : std::string_view("medium");
+        m.tier = quality >= 3.0f ? (tier == "low" ? 1 : tier == "high" ? 3 : 2) : 0;
+        m.environment = rs.materialsEnvironment->asFloat();
+        if (rs.materialsRtRange != nullptr) m.rangeMetres = rs.materialsRtRange->asFloat();
+        if (rs.materialsRtStrength != nullptr) m.strength = rs.materialsRtStrength->asFloat();
+        if (rs.materialsGlass != nullptr) m.glass = rs.materialsGlass->asBool();
+        if (rs.materialsRainWetness != nullptr) m.rain = rs.materialsRainWetness->asFloat();
+        if (rs.materialsPuddles != nullptr) m.puddles = rs.materialsPuddles->asFloat();
+        if (rs.materialsRainForce != nullptr) m.forceRain = rs.materialsRainForce->asFloat();
+        materialRt_->apply(m);
+    }
+    const float environment = materialRt_ && materialRt_->active() ? 0.0f : rs.materialsEnvironment->asFloat();
+    dev_.setFrameParam(shader::abi::kFrameParamMaterials, {quality, rs.materialsSpecular->asFloat(), environment, debug});
+    spdlog::info("enh: materials: quality {}, specular {:.2f}, environment {:.2f}, debug {}", rs.materialsQuality->asEnum(), rs.materialsSpecular->asFloat(),
+                 rs.materialsEnvironment->asFloat(), rs.materialsDebug->asEnum());
+}
+
+void HalDevice::applyLighting() {
+    const auto& rs = settings::renderer();
+    if (!lightTable_ || rs.lightingEnabled == nullptr) return;
+    const std::string_view d = rs.lightingDebug->asEnum();
+    lightTable_->configure(rs.lightingEnabled->asBool(), rs.lightingStyle->asEnum() == "physical" ? 1 : 0, d == "clusters" ? 1 : d == "slots" ? 2 : d == "shadows" ? 3 : 0,
+                           rs.materialsRoughness != nullptr ? rs.materialsRoughness->asFloat() : 0.7f);
+    if (rs.lightingCollect != nullptr) lightTable_->setCollectRadius(rs.lightingCollect->asFloat());
+    {
+        enh::LightTable::ShadowSettings ls;
+        const std::string_view m = rs.lightingShadows->asEnum();
+        ls.mode = renderMode() == RenderMode::Full ? (m == "nearby" ? 1 : m == "many" ? 2 : 0) : 0;
+        const std::string_view q = rs.lightingShadowQuality->asEnum();
+        ls.quality = q == "low" ? 1 : q == "high" ? 3 : 2;
+        ls.radius = rs.lightingShadowRadius->asFloat();
+        lightTable_->configureShadows(ls);
+    }
+    // table lighting needs the table, Full's composition and no compare run (a compare diffs against the engine's passes)
+    const auto on = [](const settings::Setting* s) { return s != nullptr && s->asBool(); };
+    const bool full = on(rs.lightingFullLit) && rs.lightingEnabled->asBool() && lightTable_->available() && renderMode() == RenderMode::Full &&
+                      !on(rs.nativeStaticOpsCompare) && !on(rs.nativeSceneOpsCompare);
+    enh::setFullLitActive(full);
+    enh::setFullLitOptions(on(rs.lightingTableComplete), on(rs.lightingTreeMerge));
+    if (staticOps_) staticOps_->setTableLit(full);
 }
 
 void HalDevice::applyGbuffer() {
@@ -635,13 +865,15 @@ void HalDevice::applyGbuffer() {
     s.aoStrength = rs.aoStrength->asFloat();
     s.aoRadius = rs.aoRadius->asFloat() * 100.0f;
     const std::string_view d = rs.gbufferDebug->asEnum();
-    s.debug = d == "normals" ? 1 : d == "motion" ? 2 : d == "ao" ? 3 : d == "screen_gi" ? 4 : 0;
+    s.debug = d == "normals" ? 1 : d == "motion" ? 2 : d == "ao" ? 3 : d == "screen_gi" ? 4 : d == "material" ? 5 : 0;
     // the screen probes (enh/gi) read the G-buffer
     s.forced = rs.giEnabled != nullptr && rs.giEnabled->asBool() && rs.giScreen != nullptr && rs.giScreen->asEnum() != "off";
     // FSR (enh/upscale) reads the motion vectors
     s.forced = s.forced || (upscale_ && enh::usesFsr(upscale_->mode()));
     // frame generation (enh/framegen) reads them too
     s.forced = s.forced || (framegen_ && framegen_->wantsGbuffer());
+    // the traced material reflections read the normal and the pack's roughness / metalness
+    s.forced = s.forced || (materialRt_ && materialRt_->tier() > 0);
     gbuffer_->apply(s);
 }
 
@@ -1069,8 +1301,8 @@ int fromMemoryRequest(const char* what, const eCGfxShared::eSGfxLayersDesc& d, u
     if (!sizeOk(d.width, std::max(1u, dds->width >> s)) || !sizeOk(d.height, std::max(1u, dds->height >> s)) || !formatOk ||
         (d.usage & (USAGE_RENDERTARGET | USAGE_DEPTHSTENCIL)) != 0) {
         spdlog::warn("hal: {}: {}x{} {} usage 0x{:x} from a {}x{} {} file needs D3DX resampling / conversion: not supported", what,
-                     d.width, d.height, vk::d3dFormatName(d.format), d.usage, dds->width, dds->height,
-                     vk::d3dFormatName(dds->d3dFormat));
+                     d.width, d.height, rhi::d3dFormatName(d.format), d.usage, dds->width, dds->height,
+                     rhi::d3dFormatName(dds->d3dFormat));
         return -1;
     }
     return static_cast<int>(skip);
@@ -1124,13 +1356,13 @@ bEResult HalDevice::GetImageInfoFromMemory(void const* a0, unsigned int a1, eCGf
 
 bEResult HalDevice::CheckDeviceFormat(eCGfxShared::eSGfxLayersDesc const& a0, bool a1) {
     const bEResult r = checkFormat(a0, a1);
-    spdlog::debug("hal: CheckDeviceFormat {} (0x{:x}) {}x{} usage 0x{:x} blend {}: {}", vk::d3dFormatName(a0.format), a0.format,
+    spdlog::debug("hal: CheckDeviceFormat {} (0x{:x}) {}x{} usage 0x{:x} blend {}: {}", rhi::d3dFormatName(a0.format), a0.format,
                   a0.width, a0.height, a0.usage, a1, r == bEResult_Ok ? "yes" : "no");
     return r;
 }
 
 bEResult HalDevice::checkFormat(eCGfxShared::eSGfxLayersDesc const& a0, bool a1) {
-    using namespace vk::d3dfmt;
+    using namespace rhi::d3dfmt;
     const std::uint32_t f = a0.format;
     if (f == NULLFMT) {
         return bEResult_Ok;
@@ -1144,7 +1376,7 @@ bEResult HalDevice::checkFormat(eCGfxShared::eSGfxLayersDesc const& a0, bool a1)
         if ((a0.usage & USAGE_DEPTHSTENCIL) == 0 || a0.depth > 1 || a0.cubeMap) {
             return bEResult_False;
         }
-        const auto info = vk::formatInfo(f, dev_.d24s8Format());
+        const auto info = rhi::formatInfo(f, dev_.d24s8Format());
         if (!info) return bEResult_False;
         return dev_.game().formatSupport(info->format, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) ? bEResult_Ok
                                                                                                                                    : bEResult_False;
@@ -1152,7 +1384,7 @@ bEResult HalDevice::checkFormat(eCGfxShared::eSGfxLayersDesc const& a0, bool a1)
     if (f == INTZ || (a0.usage & USAGE_DEPTHSTENCIL) != 0) {
         return bEResult_False;
     }
-    const auto info = vk::formatInfo(f, dev_.d24s8Format());
+    const auto info = rhi::formatInfo(f, dev_.d24s8Format());
     if (!info || info->depth) {
         return bEResult_False;
     }
@@ -1343,6 +1575,13 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
         dev_.windowResized();
     }
     engine::matsrc::onPresent();
+    engine::xinput::onPresent();
+    engine::loadaccel::onPresent();
+    engine::scenetable::onPresent();
+    {
+        const auto* gs = settings::renderer().nativeGpuScene;
+        gpuscene::instances().flush(dev_, gs != nullptr ? (gs->asInt() >= 2 ? gs->asInt() : 0) : 0);
+    }
     engine::lod::onPresent();  // a changed object draw distance: the world's cache-in spheres (engine thread)
     dev_.present();
     const auto& s = dev_.stats();
@@ -2165,7 +2404,7 @@ bEResult HalDevice::SetRenderTarget(void* a0, void* a1) {
         const auto describe = [](const d3d9::Surface* s) {
             if (s == nullptr || s->texture() == nullptr) return std::string("-");
             const auto& d = s->texture()->desc();
-            return std::format("{}x{} {} tex {}", s->width(), s->texture()->levelHeight(s->level()), vk::d3dFormatName(d.format),
+            return std::format("{}x{} {} tex {}", s->width(), s->texture()->levelHeight(s->level()), rhi::d3dFormatName(d.format),
                                static_cast<const void*>(s->texture()));
         };
         HAL_LOG("hal> SetRenderTarget {} [{}] {} [{}] (back buffer {})", a0, describe(rt), a1,

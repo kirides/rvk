@@ -100,11 +100,11 @@ void Frames::begin() {
     }
     runRetired(completedValue());
     for (std::size_t c : s.chunks) {
-        chunks_[c].used = 0;
         freeChunks_.push_back(c);
     }
     s.chunks.clear();
     currentChunk_ = SIZE_MAX;
+    ring_->ptr = nullptr;  // (the next allocation takes a chunk)
     vkResetCommandPool(ctx_->device(), s.pool, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -233,23 +233,21 @@ rhi::RingAlloc Frames::makeAlloc(const Chunk& c, VkDeviceSize offset) {
     const VkDeviceAddress a = c.address + offset;
     return {reinterpret_cast<std::uint64_t>(c.buffer), offset, c.ptr + offset, rhi::GpuRef{a}, a};
 }
-
+// the slow path of the ring: the inline front end (rhi::RingChunkState::tryAlloc) did not fit
 rhi::RingAlloc Frames::allocate(VkDeviceSize size, VkDeviceSize alignment, VkDeviceSize minOffset) {
-    ringBytes_ += size;
+    ring_->bytes += size;
     const VkDeviceSize first = (minOffset + alignment - 1) & ~(alignment - 1);
-    if (currentChunk_ != SIZE_MAX) {
-        Chunk& c = chunks_[currentChunk_];
-        const VkDeviceSize offset = std::max((c.used + alignment - 1) & ~(alignment - 1), first);
-        if (offset + size <= c.size) {
-            c.used = offset + size;
-            return makeAlloc(c, offset);
-        }
-    }
+    if (const rhi::RingAlloc a = ring_->tryAlloc(size, alignment, first); a.ptr != nullptr) return a;
     if (!newChunk(first + size)) {
         return {};
     }
-    Chunk& c = chunks_[currentChunk_];
-    c.used = first + size;
+    const Chunk& c = chunks_[currentChunk_];
+    ring_->buffer = reinterpret_cast<std::uint64_t>(c.buffer);
+    ring_->ptr = c.ptr;
+    ring_->ref = rhi::GpuRef{c.address};
+    ring_->va = c.address;
+    ring_->size = c.size;
+    ring_->used = first + size;
     return makeAlloc(c, first);
 }
 

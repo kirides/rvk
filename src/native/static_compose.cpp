@@ -22,6 +22,18 @@ std::size_t buildPasses(const PassInputs& in, std::vector<Pass>& out) {
         out.push_back({(in.combi & 3u) << 4 | (flags & 0xfffffe00u), nullptr, 0, in.switchValue});
         return out.size() - before;
     }
+    if (in.tableLit) {
+        // one pass: the sun as the engine's first pass has it, the 3-light permutation (lights beyond the engine's reach, and the additive passes
+        // of objects with more than 3, are the table's job)
+        flags = base;
+        if (in.listSun != 0 && in.illumNoSun == 0) flags |= 1u;
+        flags |= 3u << 2;
+        flags = (in.combi & 3u) << 4 | (flags & 0xfffffe0fu);
+        Pass p{flags, in.illum, 0, in.switchValue};
+        p.tableLit = true;
+        out.push_back(p);
+        return out.size() - before;
+    }
     const std::int32_t total = static_cast<std::int32_t>(in.dynamicLights) + static_cast<std::int32_t>(in.staticLights);
     bool first = true;
     std::int32_t next = 0;
@@ -252,7 +264,7 @@ void planWholeMeshZ(std::span<const ZSub> subs, std::vector<ZDraw>& out) {
     flush();
 }
 
-void planBatches(std::span<const Instance> instances, std::uint32_t maxPerBatch, std::vector<Batch>& out) {
+void planBatches(std::span<const Instance> instances, std::uint32_t maxPerBatch, std::vector<Batch>& out, bool tableLit) {
     const std::uint32_t n = static_cast<std::uint32_t>(instances.size());
     std::uint8_t count = 0;
     bool first = true, alone = false;
@@ -262,7 +274,7 @@ void planBatches(std::span<const Instance> instances, std::uint32_t maxPerBatch,
         if (!flush) {
             const Instance& in = instances[k];
             flush = cur.list != in.list || cur.switchValue != in.switchValue || cur.flags != in.flags ||
-                    count == static_cast<std::uint8_t>(maxPerBatch) || cur.f != in.f || alone || first;
+                    count == static_cast<std::uint8_t>(maxPerBatch) || (!tableLit && cur.f != in.f) || alone || first;
         }
         if (flush) {
             if (count != 0) {
@@ -741,18 +753,25 @@ MorphPick pickMorphTargets(std::span<const float> weights) {
 
 namespace rvk::native::sc {
 
-void planTreeBatches(std::span<const TreeInstance> instances, std::uint8_t limit, bool byLight, bool byStrip, std::vector<TreeBatch>& out) {
+void planTreeBatches(std::span<const TreeInstance> instances, std::uint8_t limit, bool byLight, bool byStrip, std::vector<TreeBatch>& out, bool tableMerge) {
     out.clear();
     // the engine's loop: count (8 bit), the previous instance's strip (0xffff before the first), light list and flags
     std::uint8_t count = 0;
     std::uint16_t prevStrip = 0xffff;
     const void* prevList = nullptr;
-    bool prevAlone = false;
+    bool prevAlone = false, prevSun = false, prevStaticSh = false, prevOwn = false;
+    std::uint64_t prevSig = 0;
     for (std::uint32_t i = 0; i < instances.size(); ++i) {
         const TreeInstance& t = instances[i];
         bool split = count == limit;
         if (byStrip && t.strip != prevStrip) split = true;
-        if (byLight && (t.list != prevList || t.alone || prevAlone)) split = true;
+        if (byLight) {
+            if (tableMerge) {
+                if (i != 0 && (t.sun != prevSun || t.staticSh || prevStaticSh || t.ownLights || prevOwn || t.lightSig != prevSig)) split = true;
+            } else if (t.list != prevList || t.alone || prevAlone) {
+                split = true;
+            }
+        }
         if (split) {
             // the batch so far is drawn (when it holds an instance); the next one starts with this instance's strip / start
             count = 0;
@@ -766,6 +785,10 @@ void planTreeBatches(std::span<const TreeInstance> instances, std::uint8_t limit
         ++out.back().count;
         prevList = t.list;
         prevAlone = t.alone;
+        prevSun = t.sun;
+        prevStaticSh = t.staticSh;
+        prevOwn = t.ownLights;
+        prevSig = t.lightSig;
         ++count;
     }
 }
