@@ -2,8 +2,8 @@
 -- Scenario `rvkcompare`: the fixed spots of the D3D9-vs-Vulkan reference comparison (docs/research/reference-compare.md sections 5 and 8).
 -- Normally driven by scripts\refcompare.ps1 (both renderers, collection, diff report); by hand:
 --
---   .\scripts\run.ps1 -GameDir B:\DevDrive\risen-test-vk-cmp -Instance 3 -NoRenderer -Mods rvkcompare -Scenario rvkcompare -WaitForResult -Seconds 1200 -Param tag=d3d9
---   .\scripts\run.ps1 -GameDir B:\DevDrive\risen-test-vk-cmp -Instance 3 -Mode vulkan -Mods rvkcompare -Scenario rvkcompare -WaitForResult -Seconds 1200 -Param tag=vk
+--   .\scripts\run.ps1 -GameDir B:\DevDrive\rvk-work\copies\risen-test-vk-cmp -Instance 3 -NoRenderer -Mods rvkcompare -Scenario rvkcompare -WaitForResult -Seconds 1200 -Param tag=d3d9
+--   .\scripts\run.ps1 -GameDir B:\DevDrive\rvk-work\copies\risen-test-vk-cmp -Instance 3 -Mode vulkan -Mods rvkcompare -Scenario rvkcompare -WaitForResult -Seconds 1200 -Param tag=vk
 --
 -- Parameters (-Param key=value,...): tag (file prefix, default "x"), spots (all | id,id,...), mode (run | calibrate), burst (3), interval (10 frames),
 -- settle (default frames before the freeze, 600), freeze_wait (frames between freeze and capture, 60), start_wait (seconds after the new game, 30),

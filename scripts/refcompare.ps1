@@ -6,7 +6,7 @@
 .DESCRIPTION
     Design and noise handling: docs/research/reference-compare.md (sections 5-8, "How to run"). Steps:
       1. free RAM check (a steamwebhelper.exe above 5 GiB is killed, user instruction); the real install is refused
-      2. the dedicated copy (default B:\DevDrive\risen-test-vk-cmp, spass instance 3) is created on first use; its ConfigUser.xml
+      2. the dedicated copy (default B:\DevDrive\rvk-work\copies\risen-test-vk-cmp, spass instance 3) is created on first use; its ConfigUser.xml
          graphics block is pinned before every run (same resolution and quality for both renderers)
       3. run A: run.ps1 -NoRenderer (the game's D3D9), tag d3d9 -> out\refcompare\<stamp>\d3d9\
          (optional -Baseline: a second D3D9 run, tag d3d9 -> ...\d3d9_b\: known-noise masks + thresholds from A vs A')
@@ -37,7 +37,7 @@ param(
     [switch]$Calibrate,
     # a stored reference (a former output directory with d3d9\ and thresholds.json or d3d9_b\): skips the D3D9 run(s)
     [string]$ReferenceDir = '',
-    [string]$GameDir = 'B:\DevDrive\risen-test-vk-cmp',
+    [string]$GameDir = 'B:\DevDrive\rvk-work\copies\risen-test-vk-cmp',
     [int]$Instance = 3,
     [int]$Seconds = 1500,
     [string]$Config = 'RelWithDebInfo',
@@ -59,11 +59,12 @@ param(
     [ValidateSet('vulkan', 'd3d12')][string]$Api = 'vulkan',
     [switch]$NoImages
 )
+. "$PSScriptRoot\lib\rvk-work.ps1"; $GameDir = Resolve-RvkGameDir $GameDir
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $GameDir = $GameDir.TrimEnd('\')
 if ($GameDir -like 'B:\SteamLibrary*') { throw 'refusing to touch the real install' }
-if ($GameDir -eq 'B:\DevDrive\risen-test-vk') { throw 'use a dedicated copy: -NoRenderer deletes d3d9.dll from the copy (another agent''s runs use risen-test-vk)' }
+if ((Split-Path $GameDir -Leaf) -eq 'risen-test-vk') { throw 'use a dedicated copy: -NoRenderer deletes d3d9.dll from the copy (another agent''s runs use risen-test-vk)' }
 if (-not $OutRoot) { $OutRoot = Join-Path $repo 'out\refcompare' }
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $out = Join-Path $OutRoot $stamp

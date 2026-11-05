@@ -1,6 +1,6 @@
 -- Savegame thumbnails in the Load / Save pages (docs/research/savegame-thumbnails.md):
 --
---   .\scripts\run.ps1 -Mode vulkan -GameDir B:\DevDrive\risen-test-vk-cmp -Instance 3 -Mods rvk_savethumbs `
+--   .\scripts\run.ps1 -Mode vulkan -GameDir B:\DevDrive\rvk-work\copies\risen-test-vk-cmp -Instance 3 -Mods rvk_savethumbs `
 --       -Scenario rvk_savethumbs -WaitForResult -Seconds 300 [-Param save=rvk_vk]
 --
 -- New game, the start window closed, then (with save=<name>) an auto save named <name> is written (the thumbnail is taken from

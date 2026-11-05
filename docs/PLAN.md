@@ -28,7 +28,7 @@ tooling of risen-spass), `docs/research/gd3d11.md` (GD3D11's Vulkan backend, reu
 | settings UI | in-game ImGui overlay + `bin\rvk\settings.toml` (never under `data\`); instant A/B toggling is a first-class feature (user, 2026-10-21) |
 | build | CMake + vcpkg manifest, MSVC, C++23, x64-windows-static-md |
 | render modes | **three** (user, 2026-10-28): **Original** = the system d3d9 forwarded (no Vulkan, no enhancements, no overlay), **Wrapper** = the D3D9 model on Vulkan + the enhancements (the engine draws through the HAL), **Full** = the native frame takes over every draw (`native.static_ops` + `native.scene_ops`, all groups); player setting `renderer.mode` (settings.toml = source of truth; config.toml `[renderer] mode` locks it when not `wrapper`; Wrapper <-> Full live at a frame boundary, Original <-> the others after a restart; A/B flips Wrapper / Full); shipped default Wrapper (Full costs about +5.4 ms CPU until the first optimization); `trace` stays a developer mode; overlay.md 2.7 |
-| testing | own copy `B:\DevDrive\risen-test-vk`, driven by risen-spass's `test-run.ps1 -GameDir`; D3D9 vs Vulkan screenshots at fixed poses |
+| testing | own copy `B:\DevDrive\rvk-work\copies\risen-test-vk`, driven by risen-spass's `test-run.ps1 -GameDir`; D3D9 vs Vulkan screenshots at fixed poses |
 
 ## 2. Milestones
 

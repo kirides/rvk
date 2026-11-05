@@ -20,7 +20,7 @@ param(
     [ValidateSet('wrapper', 'full', 'vulkan')][string]$Mode = 'wrapper',
     # graphics API of both runs (run.ps1 -Api)
     [ValidateSet('vulkan', 'd3d12')][string]$Api = 'vulkan',
-    [string]$GameDir = 'B:\DevDrive\risen-test-vk',
+    [string]$GameDir = 'B:\DevDrive\rvk-work\copies\risen-test-vk',
     # build configuration folder (build\<Config>\d3d9.dll) deployed by run.ps1
     [string]$Config = 'RelWithDebInfo',
     # risen-spass instance id (run.ps1 -Instance): needed to run beside another Risen
@@ -41,6 +41,7 @@ param(
     [int]$Burst = 1,
     [int]$Interval = 10
 )
+. "$PSScriptRoot\lib\rvk-work.ps1"; $GameDir = Resolve-RvkGameDir $GameDir
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'

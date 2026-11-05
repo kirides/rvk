@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Runs a script block while holding a machine-wide lock on the game test copy (B:\DevDrive\risen-test-vk) and the GPU: several
+    Runs a script block while holding a machine-wide lock on the game test copy (B:\DevDrive\rvk-work\copies\risen-test-vk) and the GPU: several
     agents / worktrees can queue their game runs without two games running at once (a run deploys its d3d9.dll into the shared copy).
 
 .EXAMPLE

@@ -10,11 +10,12 @@ param(
     [int]$Runs = 3,
     [int]$PerfFrame = 4300,
     [int]$Span = 24,
-    [string]$GameDir = 'B:\DevDrive\risen-test-vk',
+    [string]$GameDir = 'B:\DevDrive\rvk-work\copies\risen-test-vk',
     [int]$Instance = 0,
     [string]$Api = '',
     [string]$Mode = 'wrapper'
 )
+. "$PSScriptRoot\lib\rvk-work.ps1"; $GameDir = Resolve-RvkGameDir $GameDir
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'

@@ -12,7 +12,7 @@
 
 .EXAMPLE
     # in a private copy / instance with its own lock (correctness runs; timing runs use the default lock and copy)
-    .\scripts\with-test-lock.ps1 -Name rvk-pathtrace -Who pathtrace -Run { .\scripts\gi-reference.ps1 -GameDir B:\DevDrive\risen-test-vk-pt -Instance 6 }
+    .\scripts\with-test-lock.ps1 -Name rvk-pathtrace -Who pathtrace -Run { .\scripts\gi-reference.ps1 -GameDir B:\DevDrive\rvk-work\copies\risen-test-vk-pt -Instance 6 }
     .\scripts\gi-reference.ps1 -Spots pub_interior,jungle -Spp 8 -Max 2048
     .\scripts\gi-reference.ps1 -RunDir out\gi-reference\20261104-120000
 #>
@@ -29,7 +29,7 @@ param(
     [string]$WindowSize = '1280x720',
     [ValidateSet('vulkan', 'd3d12')][string]$Api = 'vulkan',
     [ValidateSet('wrapper', 'full')][string]$Mode = 'wrapper',
-    [string]$GameDir = 'B:\DevDrive\risen-test-vk',
+    [string]$GameDir = 'B:\DevDrive\rvk-work\copies\risen-test-vk',
     [string]$Config = 'RelWithDebInfo',
     [int]$Instance = 0,
     [switch]$SkipOff,
@@ -43,6 +43,7 @@ param(
     # environment variables for the game ('RVK_SHADER_DIR=...' edits shaders without a rebuild)
     [string[]]$Environment = @()
 )
+. "$PSScriptRoot\lib\rvk-work.ps1"; $GameDir = Resolve-RvkGameDir $GameDir
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 if ($RunDir) {

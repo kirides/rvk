@@ -75,7 +75,7 @@ param(
     [string[]]$Commands = @(),
     [ValidateSet('trace', 'debug', 'info', 'warn', 'error')][string]$RvkLogLevel = 'info',
     [string]$Config = 'RelWithDebInfo',
-    [string]$GameDir = 'B:\DevDrive\risen-test-vk',
+    [string]$GameDir = 'B:\DevDrive\rvk-work\copies\risen-test-vk',
     # risen-spass instance id (own single-instance mutex, window offset): needed to run beside another Risen
     [int]$Instance = 0,
     [string]$SpassRepo ='B:\DevDrive\git\github\risen-spass',
@@ -108,6 +108,7 @@ param(
     # regex of rvk.log lines to print after the run ('' = none, '.' = all)
     [string]$RvkFilter = '\[(warning|error|critical)\]|probe|  \[|missing|InitializeAdmin|ms_pAPI|Direct3DCreate9|hooks|mode =|renderer: mode|selftest|snapshot|overlay|settings|caps:|ray tracing|diag:|environment:'
 )
+. "$PSScriptRoot\lib\rvk-work.ps1"; $GameDir = Resolve-RvkGameDir $GameDir
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $GameDir = $GameDir.TrimEnd('\')

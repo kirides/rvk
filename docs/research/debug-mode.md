@@ -158,7 +158,7 @@ missing in the retail data in both renderers.
 
 ## 7. Verification plan (in game, test copy only)
 
-Prepare (the test copy `B:\DevDrive\risen-test-vk`, windowed; never the real install; `data\common` / `data\compiled` are junctions):
+Prepare (the test copy `B:\DevDrive\rvk-work\copies\risen-test-vk`, windowed; never the real install; `data\common` / `data\compiled` are junctions):
 
 1. **Enable TestMode** in the copy only. Either `localappdata\Local\Risen\ConfigUser.xml`: inside the existing `<Engine>` add
    `<Debug TestMode="true"/>` (the file lives in the copy; `test-run.ps1` rewrites window size / audio in it before a start, so edit

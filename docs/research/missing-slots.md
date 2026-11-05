@@ -4,7 +4,7 @@ State of `hal/vulkan` after commit cae8530. Engine.dll RVAs unless noted (Game.d
 **[C]** confirmed (decompiled, trace counts, our code read), **[I]** inferred.
 Dumps: `B:\DevDrive\risen-ghidra\rvk_missing_slots_dump{,2..9}.txt`, `rvk_missing_slots_game_dump.txt` (Game.dll),
 `rvk_missing_slots_sg_dump.txt` (Script_Game.dll). eCDX9 bodies: `B:\DevDrive\risen-gfx-re\dx9_layer.txt`.
-Call counts: `B:\DevDrive\risen-test-vk\bin\rvk\trace-stats.txt` (trace mode, menu + new game, ~340 frames).
+Call counts: `B:\DevDrive\rvk-work\copies\risen-test-vk\bin\rvk\trace-stats.txt` (trace mode, menu + new game, ~340 frames).
 
 How the callers were found: the engine reaches these slots through `eCGfxImageData` / `eCGfxAssistantAdmin` /
 `eCGfxMixerAdmin` / `eCGfxHLSLShader` / `eCGfxVisual` wrappers. I dumped each wrapper with its callers, checked which other

@@ -2,7 +2,7 @@
 
 Status: research (2026-10-21). Evidence tags: **[C]** read in the binary / decompile / trace, **[I]** inferred.
 RVAs are Engine.dll RVAs (image base `0x180000000`). Dumps: `B:\DevDrive\risen-ghidra\rvk_occlusion_dump{,2,3}.txt`;
-static scans: `%TEMP%\rvk_occ\scan_occ.py`, `scan_devirt.py` (capstone over `B:\DevDrive\risen-test-vk\bin\Engine.dll`).
+static scans: `%TEMP%\rvk_occ\scan_occ.py`, `scan_devirt.py` (capstone over `B:\DevDrive\rvk-work\copies\risen-test-vk\bin\Engine.dll`).
 
 ## TL;DR
 

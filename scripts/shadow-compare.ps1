@@ -16,7 +16,7 @@ param(
     [string[]]$EngineSetting = @(),
     # render mode of both runs (run.ps1 -Mode): wrapper (default; old name vulkan) or full
     [ValidateSet('wrapper', 'full', 'vulkan')][string]$Mode = 'wrapper',
-    [string]$GameDir = 'B:\DevDrive\risen-test-vk',
+    [string]$GameDir = 'B:\DevDrive\rvk-work\copies\risen-test-vk',
     # risen-spass instance id (run.ps1 -Instance): needed to run beside another Risen
     [int]$Instance = 0,
     [string[]]$Param = @(),
@@ -26,6 +26,7 @@ param(
     # reuse the engine pictures of an earlier run (out\shadows\<stamp>)
     [string]$EngineDir = ''
 )
+. "$PSScriptRoot\lib\rvk-work.ps1"; $GameDir = Resolve-RvkGameDir $GameDir
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'

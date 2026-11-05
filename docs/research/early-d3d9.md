@@ -3,7 +3,7 @@
 Question: why does the system `d3d9.dll` still get loaded in Vulkan mode, who calls `Direct3DCreate9` before
 `eCGfxAdmin::InitializeAdmin`, what is done with the result, and how do we avoid it?
 Evidence: headless Ghidra (Engine, Game projects; dumps `B:\DevDrive\risen-ghidra\rvk_earlyd3d9_dump.txt`, `..._dump2.txt`,
-`..._game_dump.txt`), capstone scans of the test copy's binaries (`B:\DevDrive\risen-test-vk\bin`), and the Vulkan-mode
+`..._game_dump.txt`), capstone scans of the test copy's binaries (`B:\DevDrive\rvk-work\copies\risen-test-vk\bin`), and the Vulkan-mode
 `rvk.log` of 2026-10-21 15:43. All addresses are RVAs (image base 0x180000000). **[C]** = confirmed by code or log,
 **[I]** = inferred.
 

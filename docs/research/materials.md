@@ -214,7 +214,7 @@ Suggestions, all untested:
 
 ### 6.1 Texture filtering (anisotropy)
 
-Source: game-runner agent, 2026-10-22, D3D9-passthrough trace logs (`B:\DevDrive\risen-test-vk-cmp\gr-trace-tfm*.log`).
+Source: game-runner agent, 2026-10-22, D3D9-passthrough trace logs (`B:\DevDrive\rvk-work\copies\risen-test-vk-cmp\gr-trace-tfm*.log`).
 C = confirmed, I = inferred.
 
 * The engine never calls `SetTextureFiltering` (HAL slot 128). All filtering goes through `SetSamplerState` (slot 130) with

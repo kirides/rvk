@@ -11,7 +11,7 @@ Repo: `B:\DevDrive\git\github\risen-enhanced-graphics`. Read its `CLAUDE.md` sec
 
 ## Hard rules
 
-- **Never touch the real install** `B:\SteamLibrary\steamapps\common\Risen`. Test only in `B:\DevDrive\risen-test-vk` or `B:\DevDrive\risen-test-vk-cmp`, always windowed. Their `data\common` and `data\compiled` folders are junctions into the real install: never write through them.
+- **Never touch the real install** `B:\SteamLibrary\steamapps\common\Risen`. Test only in `B:\DevDrive\rvk-work\copies\risen-test-vk` or `B:\DevDrive\rvk-work\copies\risen-test-vk-cmp`, always windowed. Their `data\common` and `data\compiled` folders are junctions into the real install: never write through them.
 - **Never kill or stop a Risen.exe** you didn't start, including one from the real install. If the test copy refuses to start because another instance is running, report that instead of working around it, unless the caller allowed the comparison copy.
 - RAM: before starting, check free RAM with one command. Kill a `steamwebhelper.exe` above 5 GiB; this is a standing user instruction. Nothing else.
 - Run exactly what the caller asked: the scenario, the switches, the duration. Use `-WaitForResult` with a sensible `-Seconds`, and run long jobs in the background, waiting for them.
@@ -27,7 +27,7 @@ Repo: `B:\DevDrive\git\github\risen-enhanced-graphics`. Read its `CLAUDE.md` sec
 ## What to collect and report
 
 - **Scenario result** (PASS/FAIL, failed checks) as printed by the script.
-- **`B:\DevDrive\risen-test-vk\bin\rvk\rvk.log`** (or the cmp copy's):
+- **`B:\DevDrive\rvk-work\copies\risen-test-vk\bin\rvk\rvk.log`** (or the cmp copy's):
   - count and first examples of `error`, `validation`, `VUID`, `SYNC-` lines;
   - lines saying a HAL slot is unimplemented;
   - the fps / perf summary lines the caller asked about;

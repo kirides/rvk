@@ -73,12 +73,12 @@ marked Game.dll).
 ## 4. Verification (2026-10-22, AMD RX 7900 XTX)
 
 Scenario `mods/rvk_savethumbs` (new game, `risen.world.auto_save(<save>)`, then `risen.gui.open(15)` Menu_Load and
-`open(16)` Menu_Save with `risen.debug.screenshot`), in the comparison copy `B:\DevDrive\risen-test-vk-cmp` (instance 3;
+`open(16)` Menu_Save with `risen.debug.screenshot`), in the comparison copy `B:\DevDrive\rvk-work\copies\risen-test-vk-cmp` (instance 3;
 savegames go to the copy's `localappdata\Local\Risen\SaveGames`, not through the data junctions):
 
 ```powershell
-.\scripts\run.ps1 -NoRenderer -GameDir B:\DevDrive\risen-test-vk-cmp -Instance 3 -Mods rvk_savethumbs -Scenario rvk_savethumbs -WaitForResult -Param save=rvk_d3d9
-.\scripts\run.ps1 -Mode vulkan -Validation -GameDir B:\DevDrive\risen-test-vk-cmp -Instance 3 -Mods rvk_savethumbs -Scenario rvk_savethumbs -WaitForResult -Param save=rvk_vk2
+.\scripts\run.ps1 -NoRenderer -GameDir B:\DevDrive\rvk-work\copies\risen-test-vk-cmp -Instance 3 -Mods rvk_savethumbs -Scenario rvk_savethumbs -WaitForResult -Param save=rvk_d3d9
+.\scripts\run.ps1 -Mode vulkan -Validation -GameDir B:\DevDrive\rvk-work\copies\risen-test-vk-cmp -Instance 3 -Mods rvk_savethumbs -Scenario rvk_savethumbs -WaitForResult -Param save=rvk_vk2
 ```
 
 * D3D9: thumbnails shown. Vulkan before the fix: every thumbnail empty (black), for the D3D9-made and the Vulkan-made save.

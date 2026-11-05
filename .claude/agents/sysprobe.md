@@ -14,10 +14,10 @@ You check process liveness and memory on a Windows 11 machine and report facts. 
   `Get-CimInstance Win32_Process -Filter "Name='Risen.exe'"` gives `ExecutablePath` and `CreationDate`; `Get-Process -Id <pid>` gives `WorkingSet64`, `CPU`, `Responding`.
 - For Risen.exe always classify each instance by its path:
   - `B:\SteamLibrary\steamapps\common\Risen\...` = **real install** (the user's game)
-  - `B:\DevDrive\risen-test-vk\...` = test copy
-  - `B:\DevDrive\risen-test-vk-cmp\...` = comparison copy
+  - `B:\DevDrive\rvk-work\copies\risen-test-vk\...` = test copy
+  - `B:\DevDrive\rvk-work\copies\risen-test-vk-cmp\...` = comparison copy
   - anything else = other
-- Liveness of a file-based run: if asked, the last write time and size of a log, e.g. `B:\DevDrive\risen-test-vk\bin\rvk\rvk.log`. Read at most its last 20 lines.
+- Liveness of a file-based run: if asked, the last write time and size of a log, e.g. `B:\DevDrive\rvk-work\copies\risen-test-vk\bin\rvk\rvk.log`. Read at most its last 20 lines.
 
 ## The only action you may take
 

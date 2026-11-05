@@ -4,16 +4,17 @@
     (materials.pack=false) vs. pack ON with a pack folder that matches nothing; then a pixel diff of the captures.
 
 .EXAMPLE
-    .\scripts\with-test-lock.ps1 -Name rvk-matpack -Who matpack -Run { .\scripts\matpack-nomatch.ps1 -GameDir B:\DevDrive\risen-test-vk-mp -Instance 7 }
+    .\scripts\with-test-lock.ps1 -Name rvk-matpack -Who matpack -Run { .\scripts\matpack-nomatch.ps1 -GameDir B:\DevDrive\rvk-work\copies\risen-test-vk-mp -Instance 7 }
 #>
 param(
     [string]$Spots = 'pub_interior;monastery_hall;harbour_docks;harbour_night;crystal_cave',
-    [string]$GameDir = 'B:\DevDrive\risen-test-vk-mp',
+    [string]$GameDir = 'B:\DevDrive\rvk-work\copies\risen-test-vk-mp',
     [int]$Instance = 7,
     [ValidateSet('wrapper', 'full')][string]$Mode = 'wrapper',
     [string]$Api = '',
     [string[]]$Setting = @()
 )
+. "$PSScriptRoot\lib\rvk-work.ps1"; $GameDir = Resolve-RvkGameDir $GameDir
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'

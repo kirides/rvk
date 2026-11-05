@@ -4,19 +4,20 @@
     pack folder that matches nothing (so the variants exist in both arms and only the derived words differ), -Perf + -PerfFrame over a span of frames.
     Prints per arm: GPU main submission ms, Solid pass ms, the pack lookup counters, and the uncapped fps / CPU lines of the 5 s perf windows.
     Default lock + copy for timing numbers (RisenTest.exe, vsync off):
-    .\scripts\with-test-lock.ps1 -Name rvk-derive -Run { .\scripts\derive-perf.ps1 -GameDir B:\DevDrive\risen-test-vk-derive -Instance 8 -Api d3d12 -Mode full }
+    .\scripts\with-test-lock.ps1 -Name rvk-derive -Run { .\scripts\derive-perf.ps1 -GameDir B:\DevDrive\rvk-work\copies\risen-test-vk-derive -Instance 8 -Api d3d12 -Mode full }
 #>
 param(
     [string]$Spot = 'harbour_docks',
     [int]$Runs = 3,
     [int]$PerfFrame = 4300,
     [int]$Span = 24,
-    [string]$GameDir = 'B:\DevDrive\risen-test-vk',
+    [string]$GameDir = 'B:\DevDrive\rvk-work\copies\risen-test-vk',
     [int]$Instance = 0,
     [string]$Api = '',
     [string]$Mode = 'wrapper',
     [string[]]$Setting = @('materials.quality=medium')
 )
+. "$PSScriptRoot\lib\rvk-work.ps1"; $GameDir = Resolve-RvkGameDir $GameDir
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'

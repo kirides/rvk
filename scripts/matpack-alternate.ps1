@@ -10,12 +10,13 @@
 #>
 param(
     [string]$Spots = 'pub_interior;monastery_hall;harbour_docks;harbour_night;crystal_cave;jungle;hero_closeup',
-    [string]$GameDir = 'B:\DevDrive\risen-test-vk-mp',
+    [string]$GameDir = 'B:\DevDrive\rvk-work\copies\risen-test-vk-mp',
     [int]$Instance = 7,
     [ValidateSet('wrapper', 'full')][string]$Mode = 'wrapper',
     [string]$Api = '',
     [string[]]$Setting = @()
 )
+. "$PSScriptRoot\lib\rvk-work.ps1"; $GameDir = Resolve-RvkGameDir $GameDir
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'

@@ -269,11 +269,11 @@ overrides them.
 ### 9.4 The profiles
 
 * Adrenalin's game list `%LOCALAPPDATA%\AMD\CN\gmdb.blb` has one Risen entry: `exe_path`
-  `B:\DevDrive\risen-test-vk\bin\Risen.exe` (`"manual": "TRUE"`, `"profileCustomized": "TRUE"`, `steam_id` 40300,
+  `B:\DevDrive\rvk-work\copies\risen-test-vk\bin\Risen.exe` (`"manual": "TRUE"`, `"profileCustomized": "TRUE"`, `steam_id` 40300,
   `amdId` 537); the real install's exe is not listed separately.
 * The driver-side user profiles `%LOCALAPPDATA%\ATI\ACE\APL\User.blb` (binary; string offsets = index x 8 + 0x60) hold
-  five 3D profiles with these bindings: `steamappid:40300`; `Risen.exe` + `B:\DevDrive\risen-test-vk\bin*`; `Risen.exe` +
-  `B:\DevDrive\risen-test-vk-cmp\bin*`; `rvk_vktest.exe` + `...\build\RelWithDebInfo*`; `Risen.exe` +
+  five 3D profiles with these bindings: `steamappid:40300`; `Risen.exe` + `B:\DevDrive\rvk-work\copies\risen-test-vk\bin*`; `Risen.exe` +
+  `B:\DevDrive\rvk-work\copies\risen-test-vk-cmp\bin*`; `rvk_vktest.exe` + `...\build\RelWithDebInfo*`; `Risen.exe` +
   `B:\DevDrive\risen-test\bin*`. Their Chill keys (`Chil_PFEnable`, `Chil_MinFRate`, `Chil_MaxFRate`, `Chil_Level`,
   `Chil_LdSDThsh`): three profiles Chill **on** 300 / 300, one Chill **off** 80 / 80, one Chill **on 80 / 80**. Which
   binding owns which profile was not decoded [open]; the process values (9.3) show that the `Risen.exe` in
@@ -315,7 +315,7 @@ in every run:
 
 ## 11. What the user can do
 
-1. AMD Software: Adrenalin Edition -> Gaming -> Games -> **Risen** (the tile points at `B:\DevDrive\risen-test-vk\bin\Risen.exe`)
+1. AMD Software: Adrenalin Edition -> Gaming -> Games -> **Risen** (the tile points at `B:\DevDrive\rvk-work\copies\risen-test-vk\bin\Risen.exe`)
    -> Radeon Chill **off**; check every other Risen tile / copy the same way, and Graphics -> Global Graphics. The profile
    that is in effect for `Risen.exe` has Chill on with min = max = 80, even though one of the five Risen profiles has it
    off. If toggling does not change it, "Reset game profile" for the tile (or, with Adrenalin closed, move

@@ -626,7 +626,7 @@ differ by a pixel): judged by `psnr_q` and `bad32`.
 .\scripts\refcompare.ps1 -ReferenceDir out\refcompare\<stamp>   # Vulkan run only, against a stored reference
 .\scripts\refcompare.ps1 -Spots beach_rain,pub_interior -Baseline   # + a second D3D9 run used as --baseline
 ```
-Other switches: `-GameDir` (default `B:\DevDrive\risen-test-vk-cmp`; `risen-test-vk` is refused because `-NoRenderer` deletes
+Other switches: `-GameDir` (default `B:\DevDrive\rvk-work\copies\risen-test-vk-cmp`; `risen-test-vk` is refused because `-NoRenderer` deletes
 its `d3d9.dll`), `-Instance` (3), `-Seconds` (1500), `-Param 'settle=900','burst=5'` (scenario parameters, 5.1),
 `-PostEffect DoF|None|...`, `-Quality`, `-WindowSize`, `-Validation`, `-NoImages`, `-Config`.
 1. Free RAM is printed; a `steamwebhelper.exe` above 5 GiB is killed (user instruction). The real install is refused.

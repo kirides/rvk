@@ -171,7 +171,7 @@ compared equal (`ownKind_`). (e)-(h) RT / coverage / batching: `shadows.rt` off 
 composed draws like engine draws (`!replaced`, `opaquePass`). Left-to-the-engine ops in shadow views keep the engine's draws (not
 dropped). Test: compare Wrapper vs Full images **after** the mask works (section 1 fix), with `native.lean=false` as the A/B.
 
-## 5. Experiments and commands (do not run while the V4 agent has the test copy; each run needs the test copy `B:\DevDrive\risen-test-vk`)
+## 5. Experiments and commands (do not run while the V4 agent has the test copy; each run needs the test copy `B:\DevDrive\rvk-work\copies\risen-test-vk`)
 
 Baselines: `shadows.enabled=true` with `shadows.map_size=2048`, `shadows.filter=low`. Spots (rvkcompare, noon, sunny): `shadow_inland_b`
 (open clearing inland of the beach, trees, rocks, eye height), `jungle`, and `hero_idle` (the hero in his idle animation, clock running;
@@ -183,7 +183,7 @@ E0 - the discriminator, Wrapper vs Full, mask view (answers "is Wrapper broken t
 .\scripts\run.ps1 -Mode wrapper -Mods rvkcompare -Scenario rvkcompare -WaitForResult -Seconds 600 -Param 'spots=shadow_inland_b','tag=w' -Setting 'shadows.enabled=true','shadows.debug=cascades'
 .\scripts\run.ps1 -Mode full    -Mods rvkcompare -Scenario rvkcompare -WaitForResult -Seconds 600 -Param 'spots=shadow_inland_b','tag=f' -Setting 'shadows.enabled=true','shadows.debug=cascades'
 ```
-then `Select-String 'enh: shadows: mask pass' B:\DevDrive\risen-test-vk\bin\rvk\rvk.log` after each (with `-Screenshots '450,500'`
+then `Select-String 'enh: shadows: mask pass' B:\DevDrive\rvk-work\copies\risen-test-vk\bin\rvk\rvk.log` after each (with `-Screenshots '450,500'`
 if pictures are wanted; rvkcompare writes its own pictures). Expected under section 1: **both** modes show no cascade bands and
 both logs have the `mask pass with 3 cascades` line. Engine reference: `-Setting 'shadows.enabled=false'` in either mode must show
 the engine's shadows (Full = Wrapper there, README 13).

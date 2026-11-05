@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Creates the renderer's own test copy of Risen (default B:\DevDrive\risen-test-vk) from risen-spass's main test copy.
+    Creates the renderer's own test copy of Risen (default B:\DevDrive\rvk-work\copies\risen-test-vk) from risen-spass's main test copy.
 
 .DESCRIPTION
     Same layout as risen-spass's parallel instances (scripts/test-run.ps1 New-TestCopy): bin is copied (without spass\), data\ini is
@@ -8,15 +8,16 @@
     The real install is never touched. Delete the directory to drop the copy.
 #>
 param(
-    [string]$GameDir = 'B:\DevDrive\risen-test-vk',
+    [string]$GameDir = 'B:\DevDrive\rvk-work\copies\risen-test-vk',
     [string]$Template = 'B:\DevDrive\risen-test'
 )
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot\lib\rvk-work.ps1"; $GameDir = Resolve-RvkGameDir $GameDir
 $GameDir = $GameDir.TrimEnd('\')
 if ($GameDir -like 'B:\SteamLibrary*') { throw 'refusing to touch the real install' }
 # risen-spass's test-run.ps1 only accepts copies named risen-test*
-if ($GameDir -notlike 'B:\DevDrive\risen-test*') { throw "test copies must be named B:\DevDrive\risen-test*, not $GameDir" }
 if (Test-Path (Join-Path $GameDir 'bin\Risen.exe')) { Write-Host "$GameDir exists already"; return }
+if ((Split-Path $GameDir -Leaf) -notlike 'risen-test*' -or $GameDir -notlike ($RvkWork + '\*')) { throw "test copies must be named risen-test* below $RvkCopies (RVK_WORK), not $GameDir" }
 if (-not (Test-Path (Join-Path $Template 'bin\Risen.exe'))) { throw "the template copy $Template does not exist" }
 
 Write-Host "creating the test copy $GameDir from $Template"

@@ -34,7 +34,7 @@ Step one (this document): measure how far DDGI is from ground truth, and try the
 
 * `scripts/gi-reference.ps1`: three `rvkcompare` runs (gi off / DDGI at `gi.quality=high`, replace, world lights / reference), then
   `tools/gi_reference.py analyze <run dir>`. Run in a private copy under its own lock:
-  `.\scripts\with-test-lock.ps1 -Name rvk-pathtrace -Who pathtrace -Run { .\scripts\gi-reference.ps1 -GameDir B:\DevDrive\risen-test-vk-pt -Instance 6 -Spp 8 -Max 1024 }`.
+  `.\scripts\with-test-lock.ps1 -Name rvk-pathtrace -Who pathtrace -Run { .\scripts\gi-reference.ps1 -GameDir B:\DevDrive\rvk-work\copies\risen-test-vk-pt -Instance 6 -Spp 8 -Max 1024 }`.
   `-RunDir` re-analyses; the dump of a spot is found by its camera position (the RVKCMP lines).
 * Output in `out\gi-reference\<stamp>\analysis`: `sbs_<spot>.png` (reference | DDGI volume | DDGI + screen / indirect-only images / error heat map
   / pixel-GI rows), `err_volume_*`, `crop_*` (the three worst 96 px tiles, 3x: reference | DDGI | error), `triptych_*` (the game's own gi off | DDGI | reference view),

@@ -7,7 +7,7 @@ light streaks, precipitation. For every function reached from these slots: each 
 preparation, who reads it later, how often it runs, whether it depends on the slot being reached, and whether our composition
 (`src/native/static_ops_actors.cpp`, `static_ops_trees.cpp`, `static_ops_fx.cpp`) already reproduces it.
 
-Sources: capstone disassembly of the test copy's `B:\DevDrive\risen-test-vk\bin\Engine.dll` (this session; helpers:
+Sources: capstone disassembly of the test copy's `B:\DevDrive\rvk-work\copies\risen-test-vk\bin\Engine.dll` (this session; helpers:
 `B:\DevDrive\risen-ghidra\n56\edis.py` plus throw-away scripts for a `.pdata`-bounded function disassembler, a direct-caller scan
 and a linear sweep for field writes), the decompiles `frameD_dump1..3.txt`, `skin_dump.txt`, `nativeskin_dump1/2.txt`. All
 RVAs are Engine.dll. [C] = read in the code, [I] = inferred, [?] = open. Nothing here was run in the game.
