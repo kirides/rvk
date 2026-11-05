@@ -255,6 +255,7 @@ masks); `-ReferenceDir out\refcompare\<stamp>` = only the Vulkan run against it 
 `out\refcompare\20261022-093252`, 20 spots); `-Spots a,b`; `-Setting k=v` (Vulkan run's
 player settings, e.g. `rt.allow=false`). Renderer scenario mods live in
 this repo's `mods/` (never in risen-spass). Details, spot list, noise handling: docs/research/reference-compare.md 5, 7, 8, 11.
+**Full mode expected differences** (user decision 2026-11-05, reference-compare.md 11.2): the lighting table makes Full show more lamp light, so `refcompare` Full FAILs `monastery_hall`, `crystal_cave`, `pub_interior` by design (judge against Wrapper, or `-Setting 'lighting.clustered=false'` for the old pass).
 
 Startup facts (measured, docs/research/early-d3d9.md): `eCApplication::CreateEngine` calls `eCGfxAdmin::sEnumAdapterDesc`
 (pixel shader 3.0 check) before the window: in passthrough/trace it runs `Direct3DCreate9` + DxDiag (5.7-7.4 s, loads

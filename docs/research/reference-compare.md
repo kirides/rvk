@@ -824,3 +824,8 @@ Previous: **`out\refcompare\20261022-002054`** (`-Calibrate` with the 17 spots i
 skipped by the calibration (eye 4.93 apart between the two D3D9 runs > 4.0): it keeps the default thresholds. First
 Vulkan run against it (water off, HEAD with the water work): **16 PASS + 1 WARN** (beach_rain: bad32 0.53 %, psnr_q 35.2:
 rain and sea noise, as before), run `out\refcompare\20261022-003113` (superseded by `20261022-093252`).
+
+### 11.2 Full mode: expected differences (user decision 2026-11-05)
+
+With the lighting round 3 (gpu-scene.md 9.10) the clustered light table holds the real lights (96,000-unit far level), so `-Mode full` intentionally shows more lamp / torch light in interiors than the engine's D3D9 picture: surfaces and objects the engine gave fewer than three lights get the table's lights in the free slots. Luma against the engine at the rvkcompare spots: pub_interior +9 %, crystal_cave +15 %, monastery_hall +6 %, harbour_night +4 %. Consequence: `refcompare` in Full **FAILs `monastery_hall`, `crystal_cave` and `pub_interior`** against the D3D9 reference on both backends. Decision: keep this (re-baseline); these three spots are **expected differences in Full**, not regressions. The faithful comparison to the engine is **Wrapper**.
+When gating Full against the D3D9 reference, either treat those 3 FAILs as expected, or get the old picture with `-Setting 'lighting.clustered=false'`. Other knobs: `debug.light_collect=16000` (the old empty-table behaviour), Wrapper mode.
