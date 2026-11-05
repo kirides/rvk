@@ -324,6 +324,12 @@ struct RendererSettings {
     Setting* rtReflections = nullptr; // rt.reflections: "off", "low", "medium", "high" (the water's ray-traced reflections, needs RayQuery)
     Setting* rtDebug = nullptr;      // rt.debug: "off", "instances", "depth", "normals" (enh/rt_debug.h, needs RayQuery)
     Setting* rtReflectionTweaks = nullptr;  // rt.reflection_tweaks: hidden diagnostics bitmask of the water's RT reflections (enh/water.h)
+    Setting* rtLodRange = nullptr;   // rt.lod_range (m, 0 = off) + rt.lod_bias (0..3): the RT scene's far level of detail (docs/research/rt-lod.md)
+    Setting* rtLodBias = nullptr;
+    Setting* rtLodFarRange = nullptr;  // rt.lod_far_range (m, 0 = off): the box rung
+    Setting* rtLodScale = nullptr;     // rt.lod_scale: multiplies both ranges (0 = ladder off)
+    Setting* rtMemoryBudget = nullptr; // rt.memory_budget (MB, 0 = none): the ladder tightens when the AS memory would exceed it
+    Setting* rtPreset = nullptr;       // rt.preset: "low", "medium", "high", "custom" (rtPresets())
     Setting* rtSceneViews = nullptr; // rt.scene_views: "all", "main", "shadow": which views feed the RT scene (hidden, diagnostics)
     // enhanced water (enh/water.h, docs/research/water.md)
     Setting* waterEnabled = nullptr;      // water.enabled
@@ -480,6 +486,10 @@ struct Preset {
 };
 // Original (the game's look), Low, Medium, High (= the defaults), Ultra
 const std::vector<Preset>& graphicsPresets();
+// the RT quality presets (rt.preset): low / medium / high = the cost knobs of everything that traces (shadows, reflections, GI, material
+// reflections, the LOD ladder, the memory limit); matchRtPreset = index of the first whose values all match, -1 = custom
+const std::vector<Preset>& rtPresets();
+int matchRtPreset(const Registry& reg);
 // sets the preset's values (locked settings keep theirs)
 void applyPreset(Registry& reg, const Preset& preset);
 // index of the first preset whose values all match the current ones, -1 = custom

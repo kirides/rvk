@@ -31,6 +31,10 @@ constexpr std::uint64_t kChurnWindow = 90;   // frames: a range with kChurnLimit
 constexpr std::uint32_t kChurnLimit = 48;
 constexpr std::uint64_t kVolatileKeep = 3;   // frames a volatile range's instance stays in the TLAS after its last sighting
 constexpr std::uint32_t kMaxAnimatedTrees = 160;  // SpeedTree draws captured per frame (their captures take 32 bytes per vertex of the frame's ring)
+constexpr float kBoxMaxRadius = 2000.0f;        // world units (20 m): bigger objects (cliffs, level meshes) never become boxes
+constexpr std::uint32_t kBoxMinTriangles = 64;  // a smaller BLAS gains nothing from a 12-triangle box
+constexpr float kBoxShrink = 0.92f;             // the box's half extents relative to the object's bounds
+constexpr float kTreeThin = 0.45f;              // a tree's box: the two short axes relative to the shrunk bounds
 constexpr std::uint64_t kOpaqueRecent = 600;               // frames: "the main view draws this range opaque"
 constexpr std::uint64_t kMaterialRefresh = 64;             // frames: a BLAS's material is resolved again (animated uv maps)
 // why a draw was not taken (logged once each)
@@ -880,6 +884,8 @@ void RtScene::dropBlas(std::uint64_t id, bool countEvicted) {
         blasBytes_ -= std::min(blasBytes_, b->as->storageBytes());
         b->as.reset();
     }
+    dropProxy(*b);
+    if (b->released && released_ > 0) --released_;
     if (b->listIndices != nullptr) {
         blasBytes_ -= std::min(blasBytes_, b->listIndices->desc().size);
         b->listIndices.reset();
@@ -932,6 +938,7 @@ void RtScene::destroyResources() {
     for (Tlas& t : tlas_) t = {};
     compactQuery_.reset();
     for (auto& c : compactions_) c.clear();
+    box_ = {};
 }
 
 void RtScene::barrier(rhi::CommandList& cl, VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess, VkPipelineStageFlags2 dstStage,
@@ -1078,6 +1085,9 @@ void RtScene::buildPending(rhi::CommandList& cl, std::uint32_t slot) {
         const rt::BlasKey& k = b->key;
         const auto failBuild = [&] {
             b->state = BlasState::Failed;
+            b->rebuild = false;
+            if (b->released && released_ > 0) --released_;
+            b->released = false;
             ++iv_.failed;
             registry_.removeBlas(b->id);
         };
@@ -1124,6 +1134,11 @@ void RtScene::buildPending(rhi::CommandList& cl, std::uint32_t slot) {
             continue;
         }
         b->as = std::move(as);
+        if (b->released) {
+            b->released = false;
+            if (released_ > 0) --released_;
+        }
+        b->rebuild = false;
         geoms.push_back(g);
         builds.push_back({b->as.get(), std::span<const rhi::TriangleGeometry>(&geoms.back(), 1), false});
         b->state = BlasState::Built;
@@ -1193,6 +1208,318 @@ void RtScene::evictOverBudget() {
 // main view's inverse view-projection; the skinned draws use its camera) and the TEXCOORD0 input go to the push constant
 // prevVs's buffer (16-byte header: slots) at the vertex's index-buffer value (gl_VertexIndex - the draw's vertexOffset,
 // DrawBlock pad1)
+// ---- level of detail (docs/research/rt-lod.md) -----------------------------------------------------------------------------
+
+void RtScene::setLod(float rangeMetres, int bias, float farRangeMetres, float scale) {
+    const int b = std::clamp(bias, 0, 3);
+    const bool wasOn = lodActive();
+    if (b != lodBias_) {
+        // another level: every proxy is made again
+        for (auto& [id, blas] : blas_) dropProxy(blas);
+        proxyJobs_.clear();
+    }
+    lodBias_ = b;
+    lodBaseRange_ = std::max(0.0f, rangeMetres) * 100.0f;
+    lodBaseFar_ = std::max(0.0f, farRangeMetres) * 100.0f;
+    lodScale_ = std::max(0.0f, scale);
+    applyLodEffective();
+    if (wasOn != lodActive() || lodActive()) {
+        spdlog::info("rt: scene: lod {} (proxy beyond {:.0f} m, bias {}, box beyond {:.0f} m; base {:.0f} / {:.0f} m x scale {:.2f}, budget scale {:.2f})",
+                     lodActive() ? "on" : "off", lodRangeUnits_ / 100.0f, b, lodFarUnits_ / 100.0f, rangeMetres, farRangeMetres, scale, budgetScale_);
+    }
+}
+
+void RtScene::setMemoryBudget(std::uint32_t megabytes) {
+    budgetBytes_ = static_cast<std::uint64_t>(megabytes) << 20;
+    budgetScale_ = 1.0f;
+    limits_.memoryBudget = budgetBytes_ != 0 ? std::min<std::uint64_t>(budgetBytes_, 512ull << 20) : (512ull << 20);
+    applyLodEffective();
+    spdlog::info("rt: scene: memory limit {}", megabytes != 0 ? std::format("{} MB", megabytes) : std::string("none"));
+}
+
+// the effective ranges: base x scale x the budget's scale; scale 0 = off unless a memory limit asks for the ladder (base ranges then)
+void RtScene::applyLodEffective() {
+    const float s = (lodScale_ > 0.0f ? lodScale_ : (budgetBytes_ != 0 ? 1.0f : 0.0f)) * budgetScale_;
+    lodRangeUnits_ = lodBias_ > 0 && s > 0.0f ? lodBaseRange_ * s : 0.0f;
+    lodFarUnits_ = s > 0.0f ? lodBaseFar_ * s : 0.0f;
+    if (!lodActive()) {
+        for (rt::Registry::Instance& in : registry_.instancesMutable()) in.lod = 0;
+    }
+}
+
+std::uint64_t RtScene::asBytes() const {
+    const std::uint64_t tlas = tlas_[0].as != nullptr ? tlas_[0].as->storageBytes() * rhi::kFramesInFlight : 0;
+    return blasBytes_ + tlas;
+}
+
+// gives up the original AS of BLASes that no instance of this frame traces at full detail (a proxy or the box stands in), largest first,
+// until the AS memory is at `target`
+void RtScene::releaseOriginals(std::uint64_t target) {
+    if (!box_.built) return;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> cand;  // bytes, id
+    for (const auto& [id, b] : blas_) {
+        if (b.released || b.state != BlasState::Built || b.as == nullptr || nearBlas_.contains(id) || b.animatedOnly || !b.bounds.valid()) continue;
+        cand.emplace_back(b.as->storageBytes(), id);
+    }
+    std::sort(cand.begin(), cand.end(), std::greater<>());
+    for (const auto& [bytes, id] : cand) {
+        if (asBytes() <= target) break;
+        Blas* b = findBlas(id);
+        if (b == nullptr) continue;
+        blasBytes_ -= std::min(blasBytes_, b->as->storageBytes());
+        b->as.reset();  // (destroyed with the frame being recorded: the GPU may still use it)
+        b->released = true;
+        ++released_;
+        ++releasedTotal_;
+    }
+}
+
+void RtScene::requestRebuild(Blas& b) {
+    if (!b.released || b.rebuild) return;
+    b.rebuild = true;
+    b.state = BlasState::Pending;
+    pending_.push_back(b.id);
+    ++rebuiltTotal_;
+}
+
+// The shared box of rung 2: a unit cube [-1, 1]^3 (8 vertices, 36 u16 indices) and its BLAS, built once.
+bool RtScene::ensureBox(rhi::CommandList& cl) {
+    if (box_.built) return true;
+    if (box_.failed) return false;
+    rhi::Device* rd = dev_.rhi();
+    static constexpr std::uint16_t kIdx[36] = {0, 2, 1, 1, 2, 3, 4, 5, 6, 5, 7, 6, 0, 1, 4, 1, 5, 4, 2, 6, 3, 3, 6, 7, 0, 4, 2, 2, 4, 6, 1, 3, 5, 3, 7, 5};
+    std::uint8_t data[96 + 72];
+    float verts[24];
+    for (int i = 0; i < 8; ++i) {
+        verts[i * 3] = (i & 1) != 0 ? 1.0f : -1.0f;
+        verts[i * 3 + 1] = (i & 2) != 0 ? 1.0f : -1.0f;
+        verts[i * 3 + 2] = (i & 4) != 0 ? 1.0f : -1.0f;
+    }
+    std::memcpy(data, verts, 96);
+    std::memcpy(data + 96, kIdx, 72);
+    const rhi::RingAlloc up = dev_.ring(sizeof(data), 16);
+    if (up.ptr == nullptr) return false;
+    box_.buffer = rd->createBuffer({sizeof(data), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Device, "rt scene lod box"});
+    if (box_.buffer == nullptr) {
+        box_.failed = true;
+        return false;
+    }
+    std::memcpy(up.ptr, data, sizeof(data));
+    cl.copyBuffer(*box_.buffer, 0, dev_.game().ringBuffer(up), up.offset, sizeof(data));
+    cl.memoryBarrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                     VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+    rhi::TriangleGeometry g;
+    g.vertexAddress = box_.buffer->gpuAddress();
+    g.vertexStride = 12;
+    g.vertexCount = 8;
+    g.indexType = VK_INDEX_TYPE_UINT16;
+    g.indexAddress = box_.buffer->gpuAddress() + 96;
+    g.indexCount = 36;
+    g.opaque = true;
+    rhi::BlasDesc desc;
+    desc.geometries = std::span<const rhi::TriangleGeometry>(&g, 1);
+    desc.allowCompaction = false;
+    desc.name = "rt scene lod box blas";
+    box_.as = rd->createBlas(desc);
+    if (box_.as == nullptr) {
+        box_.failed = true;
+        return false;
+    }
+    rhi::BlasBuild build{box_.as.get(), std::span<const rhi::TriangleGeometry>(&g, 1), false};
+    cl.buildBlases(std::span<const rhi::BlasBuild>(&build, 1));
+    box_.built = true;
+    return true;
+}
+
+// a static triangle mesh worth a proxy: a SpeedTree's cut-out parts and merged per-triangle-material ranges are not
+bool RtScene::lodEligible(const Blas& b) const {
+    if ((b.state != BlasState::Built && !b.rebuild) || b.animatedOnly || b.triangles < 128 || b.proxy.state == Blas::Proxy::State::Failed) return false;
+    if (!b.segments.empty() || !b.engineSegments.empty()) return false;
+    const auto kind = static_cast<Kind>(b.kind);
+    return kind == Kind::StaticMesh || kind == Kind::InstancedMesh || kind == Kind::SpeedTree;
+}
+
+void RtScene::dropProxy(Blas& b) {
+    if (b.proxy.state == Blas::Proxy::State::None) return;
+    blasBytes_ -= std::min(blasBytes_, b.proxy.bytes);
+    proxyBytes_ -= std::min(proxyBytes_, b.proxy.bytes);
+    if (b.proxy.state == Blas::Proxy::State::Built && proxiesBuilt_ > 0) --proxiesBuilt_;
+    // (the RHI objects are destroyed with the frame being recorded; a running job is waited for by the future)
+    b.proxy = {};
+}
+
+// Gathers the draw's triangles + positions on this thread (the CPU copies of the buffers) and simplifies them on a worker.
+void RtScene::queueProxy(Blas& b) {
+    if (b.proxy.state != Blas::Proxy::State::None || proxyJobs_.size() >= 8) return;
+    const std::uint64_t frame = dev_.frameValue();
+    if (proxyGatherFrame_ != frame) {
+        proxyGatherFrame_ = frame;
+        proxyGatherTriangles_ = 0;
+    }
+    if (proxyGatherTriangles_ > 0 && proxyGatherTriangles_ + b.triangles > 200000) return;  // next frame
+    const auto t0 = std::chrono::steady_clock::now();
+    const rt::BlasKey& k = b.key;
+    const std::uint32_t isize = k.index32 != 0 ? 4u : 2u;
+    const std::uint32_t count = k.strip != 0 ? k.primitives + 2 : k.primitives * 3;
+    const auto fail = [&] {
+        b.proxy.state = Blas::Proxy::State::Failed;
+        ++proxyJobsFailed_;
+    };
+    std::vector<std::uint8_t> idx(static_cast<std::size_t>(count) * isize);
+    if (b.vb == nullptr || b.ib == nullptr || !b.ib->readCpu(k.first * isize, count * isize, idx.data())) return fail();
+    const auto at = [&](std::uint32_t i) {
+        std::uint32_t v = 0;
+        if (isize == 4) {
+            std::memcpy(&v, idx.data() + static_cast<std::size_t>(i) * 4, 4);
+        } else {
+            std::uint16_t w;
+            std::memcpy(&w, idx.data() + static_cast<std::size_t>(i) * 2, 2);
+            v = w;
+        }
+        return v;
+    };
+    std::vector<std::uint32_t> tri;
+    tri.reserve(static_cast<std::size_t>(k.primitives) * 3);
+    if (k.strip != 0) {
+        for (std::uint32_t t = 0; t < k.primitives; ++t) {
+            const std::uint32_t a = at(t), c1 = at(t + 1), c2 = at(t + 2);
+            if (a == c1 || c1 == c2 || a == c2) continue;
+            tri.push_back(a);
+            tri.push_back((t & 1u) != 0 ? c2 : c1);
+            tri.push_back((t & 1u) != 0 ? c1 : c2);
+        }
+    } else {
+        for (std::uint32_t i = 0; i < count; ++i) tri.push_back(at(i));
+    }
+    if (tri.size() < 12 || k.baseVertex < 0) return fail();
+    std::uint32_t lo = UINT32_MAX, hi = 0;
+    for (std::uint32_t v : tri) {
+        lo = std::min(lo, v);
+        hi = std::max(hi, v);
+    }
+    const std::uint64_t first = k.vertexOffset + (static_cast<std::uint64_t>(k.baseVertex) + lo) * k.stride;
+    const std::uint64_t bytes = static_cast<std::uint64_t>(hi - lo) * k.stride + 12;
+    if (first + bytes > b.vb->size()) return fail();
+    std::vector<std::uint8_t> verts(static_cast<std::size_t>(bytes));
+    if (!b.vb->readCpu(static_cast<std::uint32_t>(first), static_cast<std::uint32_t>(bytes), verts.data())) return fail();
+    const std::uint32_t n = hi - lo + 1;
+    std::vector<float> pos(static_cast<std::size_t>(n) * 3);
+    for (std::uint32_t i = 0; i < n; ++i) {
+        std::memcpy(&pos[static_cast<std::size_t>(i) * 3], verts.data() + static_cast<std::size_t>(i) * k.stride, 12);
+        for (int c = 0; c < 3; ++c) {
+            float& f = pos[static_cast<std::size_t>(i) * 3 + c];
+            if (!std::isfinite(f)) f = 0.0f;
+        }
+    }
+    for (std::uint32_t& v : tri) v -= lo;
+    proxyGatherTriangles_ += b.triangles;
+    const float ratio = rt::lod::targetRatio(lodBias_);
+    b.proxy.state = Blas::Proxy::State::Queued;
+    b.proxy.level = static_cast<std::uint32_t>(lodBias_);
+    b.proxy.serial = b.serial;
+    b.proxy.job = std::async(std::launch::async, [pos = std::move(pos), tri = std::move(tri), n, lo, ratio]() mutable {
+        rt::lod::Result r = rt::lod::simplify(pos.data(), n, 12, tri, ratio, 0.03f);
+        for (std::uint32_t& v : r.indices) v += lo;
+        return r;
+    });
+    proxyJobs_.push_back(b.id);
+    proxyGatherMs_ += msSince(t0);
+}
+
+// finished jobs: the index list into a device buffer of its own, a BLAS over the same vertices (no compaction: they are small)
+void RtScene::buildProxies(rhi::CommandList& cl) {
+    if (proxyJobs_.empty()) return;
+    rhi::Device* rd = dev_.rhi();
+    std::vector<rhi::TriangleGeometry> geoms;
+    std::vector<rhi::BlasBuild> builds;
+    constexpr std::size_t kMaxProxyBuilds = 16;
+    geoms.reserve(kMaxProxyBuilds);
+    builds.reserve(kMaxProxyBuilds);
+    bool copied = false;
+    std::vector<std::uint64_t> keep;
+    for (std::uint64_t id : proxyJobs_) {
+        Blas* b = findBlas(id);
+        if (b == nullptr || b->proxy.state != Blas::Proxy::State::Queued || !b->proxy.job.valid()) continue;
+        if (builds.size() >= kMaxProxyBuilds || b->proxy.job.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+            keep.push_back(id);
+            continue;
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        rt::lod::Result res = b->proxy.job.get();
+        const rt::BlasKey& k = b->key;
+        const std::uint32_t isize = k.index32 != 0 ? 4u : 2u;
+        if (res.indices.empty() || b->state == BlasState::Failed) {
+            b->proxy.state = Blas::Proxy::State::Failed;  // the simplifier kept most of the mesh (nothing to gain): the original stays
+            ++proxyJobsFailed_;
+            continue;
+        }
+        const std::uint64_t bytes = (static_cast<std::uint64_t>(res.indices.size()) * isize + 3) & ~static_cast<std::uint64_t>(3);
+        std::vector<std::uint8_t> data(bytes, 0);
+        for (std::size_t i = 0; i < res.indices.size(); ++i) {
+            if (isize == 4) {
+                std::memcpy(data.data() + i * 4, &res.indices[i], 4);
+            } else {
+                const std::uint16_t v = static_cast<std::uint16_t>(res.indices[i]);
+                std::memcpy(data.data() + i * 2, &v, 2);
+            }
+        }
+        const rhi::RingAlloc up = dev_.ring(bytes, 16);
+        std::unique_ptr<rhi::Buffer> buf;
+        if (up.ptr != nullptr) {
+            buf = rd->createBuffer({bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Device, "rt scene lod indices"});
+        }
+        if (buf == nullptr) {
+            // the ring is full this frame: the Blas is queued again from its next instance (the job's result is lost)
+            b->proxy = {};
+            continue;
+        }
+        std::memcpy(up.ptr, data.data(), bytes);
+        cl.copyBuffer(*buf, 0, dev_.game().ringBuffer(up), up.offset, bytes);
+        copied = true;
+        rhi::TriangleGeometry g;
+        g.vertexAddress = b->vbAddress.plus(static_cast<std::int64_t>(k.vertexOffset) + static_cast<std::int64_t>(k.baseVertex) * k.stride).va;
+        g.vertexStride = k.stride;
+        g.vertexCount = b->maxVertex + 1;
+        g.indexType = k.index32 != 0 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
+        g.indexAddress = buf->gpuAddress();
+        g.indexCount = static_cast<std::uint32_t>(res.indices.size());
+        g.opaque = true;
+        rhi::BlasDesc desc;
+        desc.geometries = std::span<const rhi::TriangleGeometry>(&g, 1);
+        desc.allowCompaction = false;
+        desc.name = "rt scene lod blas";
+        std::unique_ptr<rhi::AccelerationStructure> as = rd->createBlas(desc);
+        if (as == nullptr) {
+            b->proxy.state = Blas::Proxy::State::Failed;
+            ++proxyJobsFailed_;
+            continue;
+        }
+        geoms.push_back(g);
+        builds.push_back({as.get(), std::span<const rhi::TriangleGeometry>(&geoms.back(), 1), false});
+        b->proxy.triangles = static_cast<std::uint32_t>(res.indices.size() / 3);
+        b->proxy.bytes = as->storageBytes() + bytes;
+        b->proxy.indices = std::move(buf);
+        b->proxy.as = std::move(as);
+        b->proxy.state = Blas::Proxy::State::Built;
+        blasBytes_ += b->proxy.bytes;
+        proxyBytes_ += b->proxy.bytes;
+        ++proxiesBuilt_;
+        proxyTrianglesOriginal_ += b->triangles;
+        proxyTrianglesKept_ += b->proxy.triangles;
+        ++proxyJobsDone_;
+        proxyBuildMs_ += msSince(t0);
+    }
+    proxyJobs_ = std::move(keep);
+    if (builds.empty()) return;
+    if (copied) {
+        cl.memoryBarrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                         VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                         VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+    }
+    cl.buildBlases(builds);
+}
+
 bool RtScene::captureOptions(const d3d9::Shader& s, shader::TranslateOptions& o) {
     if (s.stage != shader::Stage::Vertex) return false;
     std::string tc = "float4(0.0, 0.0, 0.0, 0.0)";
@@ -1871,6 +2198,18 @@ void RtScene::record(d3d9::PassContext& ctx) {
         return b != nullptr && b->bounds.valid() ? &b->bounds : nullptr;
     });
     evictOverBudget();
+    if (budgetBytes_ != 0 && frame % 16 == 0) {
+        // the memory limit (rt.memory_budget): over it the ladder tightens and far originals are given up; well under it it relaxes again
+        const std::uint64_t total = asBytes();
+        if (total > budgetBytes_) {
+            budgetScale_ = std::max(0.08f, budgetScale_ * 0.85f);
+            applyLodEffective();
+            releaseOriginals(budgetBytes_ / 10 * 9);
+        } else if (total < budgetBytes_ / 10 * 8 && budgetScale_ < 1.0f) {
+            budgetScale_ = std::min(1.0f, budgetScale_ * 1.05f);
+            applyLodEffective();
+        }
+    }
     if (frame % 300 == 0) {
         std::erase_if(blendedKeys_, [&](const auto& e) { return e.second + kOpaqueRecent < frame; });
         std::erase_if(layers_, [&](auto& e) {
@@ -1886,6 +2225,10 @@ void RtScene::record(d3d9::PassContext& ctx) {
     {
         d3d9::RegionScope r(dev_, "rt.blas builds");
         buildPending(cl, slot);
+    }
+    if ((lodRangeUnits_ > 0.0f && lodBias_ > 0) || !proxyJobs_.empty()) {
+        d3d9::RegionScope r(dev_, "rt.lod proxies");
+        buildProxies(cl);
     }
     {
         d3d9::RegionScope r(dev_, "rt.dynamic");
@@ -1905,11 +2248,70 @@ void RtScene::record(d3d9::PassContext& ctx) {
             return b != nullptr && b->volatileUntil >= frame && in.lastFrame + 4 * kVolatileKeep < frame;
         });
     }
-    const std::vector<std::uint32_t> chosen = rt::selectForTlas(list, camera, tlas_[slot].capacity - dynCount, [this, frame](const rt::Registry::Instance& in) {
+    // level of detail (docs/research/rt-lod.md): each instance's rung (0 the engine's draw, 1 the proxy, 2 the box) with hysteresis,
+    // from its distance; only static opaque instances of a built BLAS whose per-triangle materials are not needed move off rung 0
+    const bool lodOn = lodActive() && cam.valid;
+    nearBlas_.clear();
+    const float proxyRange = lodRangeUnits_ > 0.0f && lodBias_ > 0 ? lodRangeUnits_ : 0.0f;
+    if (lodOn) {
+        const float nearest = std::min(proxyRange > 0.0f ? proxyRange : 3.0e38f, lodFarUnits_ > 0.0f ? lodFarUnits_ : 3.0e38f) * 0.8f;
+        for (rt::Registry::Instance& in : registry_.instancesMutable()) {
+            if (!in.sphereValid) {
+                in.lod = 0;
+                nearBlas_.insert(in.blas);
+                continue;
+            }
+            const float dx = in.sphere.c[0] - camera[0], dy = in.sphere.c[1] - camera[1], dz = in.sphere.c[2] - camera[2];
+            const float d = std::max(0.0f, std::sqrt(dx * dx + dy * dy + dz * dz) - in.sphere.r);
+            if (in.lod == 0 && d < nearest) {
+                nearBlas_.insert(in.blas);
+                if (released_ != 0) {
+                    if (Blas* rb = findBlas(in.blas); rb != nullptr && rb->released) requestRebuild(*rb);
+                }
+                continue;
+            }
+            Blas* b = findBlas(in.blas);
+            if (b == nullptr || !lodEligible(*b) || (in.flags & abi::kRtRecordAlphaTested) != 0) {
+                in.lod = 0;
+                nearBlas_.insert(in.blas);
+                continue;
+            }
+            const RtMaterial* m = in.material != 0 ? materials_.get(in.material) : nullptr;
+            if (m == nullptr || m->dead) m = bestMaterial(*b);
+            if (m != nullptr && m->masked) {
+                in.lod = 0;
+                nearBlas_.insert(in.blas);
+                continue;
+            }
+            // a box only for bounded objects (a cliff, the terrain or a level mesh is no box)
+            const bool boxOk = lodFarUnits_ > 0.0f && b->bounds.valid() && in.sphere.r <= kBoxMaxRadius && b->triangles >= kBoxMinTriangles;
+            in.lod = static_cast<std::uint8_t>(rt::lod::rungFor(in.lod, d, proxyRange, boxOk ? lodFarUnits_ : 0.0f));
+            if (in.lod == 2 && !boxOk) in.lod = proxyRange > 0.0f ? 1 : 0;
+            if (in.lod == 0) {
+                nearBlas_.insert(in.blas);
+                if (b->released) requestRebuild(*b);
+            }
+        }
+    }
+    if (!lodOn && released_ != 0) {
+        // the ladder is off (or no camera): every released original comes back
+        for (auto& [id, rb] : blas_) {
+            if (rb.released) requestRebuild(rb);
+        }
+    }
+    const std::vector<std::uint32_t> chosen = rt::selectForTlas(list, camera, tlas_[slot].capacity - dynCount, [this, frame, &camera](const rt::Registry::Instance& in) {
         const Blas* b = findBlas(in.blas);
         // an object the cascades draw at another level of detail than the main view: the main view's
-        if (b == nullptr || b->state != BlasState::Built || registry_.supersededBy(in, viewBit(View::Main))) return false;
+        if (b == nullptr || (b->state != BlasState::Built && !b->rebuild) || registry_.supersededBy(in, viewBit(View::Main))) return false;
         if (b->animatedOnly) return false;
+        // far away and tiny: not part of the scene (rung 2 only)
+        if (in.lod == 2 && in.sphereValid) {
+            const float dx = in.sphere.c[0] - camera[0], dy = in.sphere.c[1] - camera[1], dz = in.sphere.c[2] - camera[2];
+            if (rt::lod::tooSmall(in.sphere.r, std::sqrt(dx * dx + dy * dy + dz * dz))) {
+                ++lastSkippedTiny_;
+                return false;
+            }
+        }
         // an animated SpeedTree stands in for its rest-pose instance (the wind: observeTree)
         if (!animatedKeys_.empty() && animatedKeys_.contains(in.key)) return false;
         // volatile ranges (churning instances): only what was seen in the last frames, the stale ones are ghosts of earlier places
@@ -1946,8 +2348,18 @@ void RtScene::record(d3d9::PassContext& ctx) {
     std::uint64_t textured = 0, untextured = 0, cutOut = 0, segmented = 0, speedTrees = 0, glassCount = 0;
     std::vector<abi::RtMaterialSegment> segs;              // the frame's segment table
     std::vector<std::pair<std::uint32_t, std::uint32_t>> segRecords;  // record -> its first segment
+    // level of detail: instances beyond the range are traced through their BLAS's proxy; the stats snapshot by distance band
+    const bool snap = std::chrono::steady_clock::now() - lastLog_ >= std::chrono::seconds(5);
+    std::unordered_map<std::uint64_t, std::uint8_t> nearestBand;
+    std::uint64_t characterTriangles = 0;
+    std::uint64_t animatedTreeTriangles = 0;
+    if (snap) {
+        for (BandStat& s : bands_) s = {};
+        bandsValid_ = true;
+    }
+    auto& mutableList = registry_.instancesMutable();
     for (std::uint32_t k = 0; k < worldCount; ++k) {
-        const rt::Registry::Instance& in = list[chosen[k]];
+        rt::Registry::Instance& in = mutableList[chosen[k]];
         Blas& b = *findBlas(in.blas);
         // the material (M9 P2): the bindless slots of this frame (a texture that died is gone from the entry)
         const RtMaterial* m = in.material != 0 ? materials_.get(in.material) : nullptr;
@@ -1970,7 +2382,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
         vi.instanceShaderBindingTableRecordOffset = 0;
         vi.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR |
                    (alpha ? VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR : VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR);
-        vi.accelerationStructureReference = b.as->address();
+        vi.accelerationStructureReference = b.as != nullptr ? b.as->address() : 0;  // (released: replaced below by the proxy or the box)
         insts[k] = vi;
         abi::RtGeometryRecord r{};
         const rt::BlasKey& key = b.key;
@@ -2022,9 +2434,95 @@ void RtScene::record(d3d9::PassContext& ctx) {
                 ++segmented;
             }
         }
+        // the distance of the instance's bounding sphere from the camera (world units)
+        float distance = 0.0f;
+        if (in.sphereValid && cam.valid) {
+            const float dx = in.sphere.c[0] - camera[0], dy = in.sphere.c[1] - camera[1], dz = in.sphere.c[2] - camera[2];
+            distance = std::max(0.0f, std::sqrt(dx * dx + dy * dy + dz * dz) - in.sphere.r);
+        } else if (cam.valid) {
+            const float dx = in.rows[3] - camera[0], dy = in.rows[7] - camera[1], dz = in.rows[11] - camera[2];
+            distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+        }
+        std::uint32_t instTriangles = b.triangles;
+        bool proxied = false, boxed = false;
+        const bool noOriginal = b.as == nullptr;
+        if (lodOn && (in.lod != 0 || noOriginal)) {
+            std::uint8_t rung = in.lod;
+            if (noOriginal) rung = rung == 1 && b.proxy.state == Blas::Proxy::State::Built ? 1 : 2;  // coming back / released: whatever stands in
+            if ((alpha || r.segmentCount != 0) && !noOriginal) {
+                in.lod = 0;  // (cut-outs and per-triangle materials index the original's triangles)
+            } else if (rung == 1) {
+                if (b.proxy.state == Blas::Proxy::State::None) queueProxy(b);
+                if (b.proxy.state == Blas::Proxy::State::Built && b.proxy.level == static_cast<std::uint32_t>(lodBias_)) {
+                    insts[k].accelerationStructureReference = b.proxy.as->address();
+                    split(addrOf(*b.proxy.indices).ref, r.indices);
+                    instTriangles = b.proxy.triangles;
+                    proxied = true;
+                }
+            } else if (ensureBox(cl)) {
+                // the object's oriented bounding box: the unit cube scaled to the object-space AABB (shrunk a little; a tree's thin
+                // hull: its longest axis is up) under the instance's rows: A' = A diag(h), t' = A c + t
+                const rt::Aabb& bb = b.bounds;
+                float c[3], h[3];
+                int tall = 0;
+                for (int a2 = 0; a2 < 3; ++a2) {
+                    c[a2] = 0.5f * (bb.min[a2] + bb.max[a2]);
+                    h[a2] = 0.5f * (bb.max[a2] - bb.min[a2]) * kBoxShrink;
+                    if (bb.max[a2] - bb.min[a2] > bb.max[tall] - bb.min[tall]) tall = a2;
+                }
+                if ((in.flags & abi::kRtRecordSpeedTree) != 0) {
+                    for (int a2 = 0; a2 < 3; ++a2) h[a2] *= a2 == tall ? 1.0f : kTreeThin;
+                }
+                auto& mat = insts[k].transform.matrix;
+                for (int row = 0; row < 3; ++row) {
+                    const float* A = &in.rows[row * 4];
+                    for (int col = 0; col < 3; ++col) mat[row][col] = A[col] * h[col];
+                    mat[row][3] = A[0] * c[0] + A[1] * c[1] + A[2] * c[2] + A[3];
+                }
+                insts[k].accelerationStructureReference = box_.as->address();
+                const rhi::GpuAddr base = addrOf(*box_.buffer);
+                split(base.ref, r.vertices);
+                split(base.plus(96).ref, r.indices);
+                r.stride = 12;
+                r.flags &= ~(abi::kRtRecordIndex32 | abi::kRtRecordAlphaTested | abi::kRtRecordSpeedTree | abi::kRtRecordInstanced);
+                r.normal = r.texcoord0 = r.texcoord1 = r.texcoord6 = r.color0 = abi::kRtAttribAbsent;
+                r.albedoTex = 0;
+                r.alpha = 8u;
+                r.uvSet = abi::kRtUvNoTexture | abi::kRtUvOpacityOpaque;
+                std::memset(r.uvMap, 0, sizeof(r.uvMap));
+                const std::uint32_t colour = 0xFF5C6166u;  // a neutral stone / earth grey-brown (the box has no texture coordinates)
+                std::memcpy(&r.uvMap[0][3], &colour, 4);
+                instTriangles = 12;
+                boxed = true;
+            }
+        }
         recs[k] = r;
-        triangles += b.triangles;
+        triangles += instTriangles;
+        if (snap) {
+            const std::size_t band = rt::lod::bandOf(distance / 100.0f);
+            BandStat& s = bands_[band];
+            const std::uint32_t kind = (in.data >> 16) & 0xFFu;
+            const std::size_t cat = kind == static_cast<std::uint32_t>(Kind::StaticMesh) || kind == static_cast<std::uint32_t>(Kind::InstancedMesh) ? 0
+                                    : kind == static_cast<std::uint32_t>(Kind::SpeedTree)                                                         ? 1
+                                                                                                                                                  : 2;
+            ++s.instances;
+            s.triangles += instTriangles;
+            s.trianglesOriginal += b.triangles;
+            s.proxied += proxied ? 1 : 0;
+            s.boxed += boxed ? 1 : 0;
+            s.byKind[cat] += instTriangles;
+            auto [it, fresh] = nearestBand.try_emplace(in.blas, static_cast<std::uint8_t>(band));
+            if (!fresh) it->second = std::min<std::uint8_t>(it->second, static_cast<std::uint8_t>(band));
+        }
         if (content != nullptr) content->push_back({in.blas, in.id, r.flags, in.material, {in.rows[3], in.rows[7], in.rows[11]}});
+    }
+    if (snap) {
+        for (const auto& [id, band] : nearestBand) {
+            const Blas* sb = findBlas(id);
+            if (sb == nullptr) continue;
+            bands_[band].blases += 1;
+            bands_[band].blasBytes += (sb->as != nullptr ? sb->as->storageBytes() : 0) + (sb->listIndices != nullptr ? sb->listIndices->desc().size : 0) + sb->proxy.bytes;
+        }
     }
 
     // the characters: world-space vertices (identity transform), no normals, the draw's diffuse material
@@ -2080,6 +2578,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
                 std::memcpy(r.uvMap, mf.uvMap, sizeof(r.uvMap));
                 recs[k] = r;
                 triangles += d.triangles;
+                animatedTreeTriangles += d.triangles;
                 ++treesNow;
                 if (content != nullptr) content->push_back({d.blas, in->id, r.flags, in->material, {in->rows[3], in->rows[7], in->rows[11]}});
                 ++k;
@@ -2107,6 +2606,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
             std::memcpy(r.uvMap, mf.uvMap, sizeof(r.uvMap));
             recs[k] = r;
             triangles += d.triangles;
+            characterTriangles += d.triangles;
             if (content != nullptr) content->push_back({0, b.id, r.flags, b.material, {0.0f, 0.0f, 0.0f}});
             ++k;
         }
@@ -2147,6 +2647,8 @@ void RtScene::record(d3d9::PassContext& ctx) {
 
     lastInstances_ = used;
     lastTriangles_ = triangles;
+    lastCharTriangles_ = characterTriangles;
+    lastAnimTreeTriangles_ = animatedTreeTriangles;
     iv_.textured = textured;
     iv_.untextured = untextured;
     iv_.cutOut = cutOut;
@@ -2199,6 +2701,26 @@ void RtScene::logStats(bool force) {
                  materials_.size(), static_cast<double>(mc.resolves) / f, mc.ms / f, mc.evaluations, mc.graph, mc.pool, mc.heuristic, mc.noTexture,
                  mc.approx, mc.failed, mc.shaderMismatch, iv_.textured, iv_.untextured, iv_.cutOut, iv_.segmented, iv_.segments,
                  iv_.engineSegments, iv_.engineMerged, iv_.speedTree);
+    if (bandsValid_) {
+        // the last frame's TLAS by distance band (docs/research/rt-lod.md): instances, triangles traced (original in brackets when a
+        // proxy stands in), by kind (meshes / SpeedTree branches / other), the BLAS storage whose nearest instance lies in the band
+        std::string line;
+        std::uint64_t totalTri = 0, totalOrig = 0;
+        for (std::size_t i = 0; i < rt::lod::kBands; ++i) {
+            const BandStat& s = bands_[i];
+            totalTri += s.triangles;
+            totalOrig += s.trianglesOriginal;
+            line += std::format(" | {}: {} inst, {}k tri{} (mesh {}k, tree {}k, other {}k), {} proxied, {} boxed, {} BLAS {:.1f} MiB", rt::lod::bandName(i), s.instances,
+                                s.triangles / 1000, s.trianglesOriginal != s.triangles ? std::format(" [{}k]", s.trianglesOriginal / 1000) : std::string(),
+                                s.byKind[0] / 1000, s.byKind[1] / 1000, s.byKind[2] / 1000, s.proxied, s.boxed, s.blases, static_cast<double>(s.blasBytes) / 1048576.0);
+        }
+        spdlog::info("rt: scene: lod bands (proxy {:.0f} m, bias {}, box {:.0f} m){} | tiny skipped {} per frame | memory limit {} MB (scale {:.2f}, {} originals released, {} released / {} rebuilt in total, AS {:.1f} MiB) | total {}k tri [{}k], characters {}k tri, animated trees {}k tri | proxies: {} built "
+                     "({} MiB, {} triangles of {} kept, {} jobs failed / nothing to gain, gather {:.1f} ms, build {:.1f} ms in total, {} queued)",
+                     lodRangeUnits_ / 100.0f, lodBias_, lodFarUnits_ / 100.0f, line, lastSkippedTiny_ / std::max<std::uint64_t>(1, iv_.frames), budgetBytes_ >> 20, budgetScale_, released_, releasedTotal_, rebuiltTotal_, static_cast<double>(asBytes()) / 1048576.0, totalTri / 1000, totalOrig / 1000, lastCharTriangles_ / 1000, lastAnimTreeTriangles_ / 1000,
+                     proxiesBuilt_, proxyBytes_ >> 20, proxyTrianglesKept_, proxyTrianglesOriginal_, proxyJobsFailed_, proxyGatherMs_, proxyBuildMs_, proxyJobs_.size());
+        bandsValid_ = false;
+        lastSkippedTiny_ = 0;
+    }
     if (dynamic_) {
         spdlog::info("rt: scene: characters {} + animated SpeedTrees {} in the last TLAS ({} tracked, interval: {} BLAS builds, {} refits; "
                      "volatile ranges {}; tree draws {} ({} beyond the range, {} captured); BLAS refits from this frame's capture {} / the previous frame's {}; characters: {} from this frame's pose ({} skinned by compute) / {} from the previous frame's (skinning pass: {} draws taken, {} not eligible; solid-pass draws {} with / {} without a job); capture variant needs vertexPipelineStoresAndAtomics: {})",

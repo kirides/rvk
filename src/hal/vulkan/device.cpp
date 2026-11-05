@@ -456,6 +456,43 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         if (!rs.rtSceneViews->isDefault()) applyViews(*rs.rtSceneViews);
         reg.onChange(*rs.rtSceneViews, applyViews, this);
     }
+    // the RT scene's far level of detail + memory limit (docs/research/rt-lod.md) and the RT quality preset (rt.preset)
+    if (rs.rtLodRange != nullptr && rs.rtLodBias != nullptr && rs.rtLodFarRange != nullptr && rs.rtLodScale != nullptr && rs.rtMemoryBudget != nullptr) {
+        const auto applyLod = [this](const settings::Setting&) {
+            const auto& rs2 = settings::renderer();
+            rtScene_->setLod(rs2.rtLodRange->asFloat(), rs2.rtLodBias->asInt(), rs2.rtLodFarRange->asFloat(), rs2.rtLodScale->asFloat());
+        };
+        const auto applyBudget = [this](const settings::Setting&) {
+            rtScene_->setMemoryBudget(static_cast<std::uint32_t>(settings::renderer().rtMemoryBudget->asInt()));
+        };
+        applyLod(*rs.rtLodRange);
+        if (rs.rtMemoryBudget->asInt() != 0) applyBudget(*rs.rtMemoryBudget);
+        for (settings::Setting* s : {rs.rtLodRange, rs.rtLodBias, rs.rtLodFarRange, rs.rtLodScale}) reg.onChange(*s, applyLod, this);
+        reg.onChange(*rs.rtMemoryBudget, applyBudget, this);
+    }
+    if (rs.rtPreset != nullptr) {
+        // Low / Medium / High set the cost knobs of everything that traces; a hand change of one of them makes the preset Custom
+        // (callbacks run in the registry's dispatch: a preset's own values arrive together, so they match it by then)
+        settings::Registry* regp = &reg;
+        reg.onChange(*rs.rtPreset, [regp](const settings::Setting& s) {
+            const std::string_view v = s.asEnum();
+            if (v == "custom") return;
+            const auto& presets = settings::rtPresets();
+            for (const auto& p : presets) {
+                if (p.name == v) settings::applyPreset(*regp, p);
+            }
+        }, this);
+        for (const auto& kv : settings::rtPresets().front().values) {
+            if (settings::Setting* member = reg.find(kv.first); member != nullptr) {
+                reg.onChange(*member, [regp](const settings::Setting&) {
+                    settings::Setting* preset = settings::renderer().rtPreset;
+                    if (preset == nullptr || preset->asEnum() == "custom") return;
+                    const int m = settings::matchRtPreset(*regp);
+                    if (m < 0) regp->setText("rt.preset", "custom");
+                }, this);
+            }
+        }
+    }
     // characters skinned by compute for the RT scene (docs/research/rt-shadows.md 10)
     if (rs.rtSkin != nullptr && rs.rtSkinVerify != nullptr) {
         const auto applySkin = [this](const settings::Setting&) {

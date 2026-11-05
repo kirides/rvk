@@ -41,6 +41,7 @@
 #include "d3d9/device.h"
 #include "enh/material_pack.h"
 #include "enh/rt_material.h"
+#include "enh/rt_lod.h"
 #include "enh/rt_registry.h"
 #include "rhi/rhi.h"
 #include "shader/abi.h"
@@ -89,6 +90,20 @@ public:
     bool gpuSkinning() const { return skinWanted_ && skinReady_; }
     // the scene captures skinned draws right now (enh/object_motion leaves them to it)
     bool capturingCharacters() const { return active_ && dynamic_; }
+    // Level of detail (docs/research/rt-lod.md; rt.lod_range / rt.lod_bias): beyond `rangeMetres` from the camera an instance of
+    // a static mesh / SpeedTree branch BLAS is traced through a proxy of the same vertices with fewer triangles (index list from
+    // meshoptimizer's simplifier on a worker thread, own BLAS; 1/2, 1/4, 1/8 of the triangles for bias 1..3). range 0 or bias 0
+    // = off (every proxy is dropped). Nothing changes inside the range; alpha-tested and per-triangle-material instances keep
+    // their BLAS.
+    // Beyond `farRangeMetres` (0 = off) a static mesh / tree instance of bounded size (<= 20 m radius) is traced as the object's own
+    // oriented bounding box (one shared 12-triangle BLAS scaled by the instance transform, trees thinned), and instances whose
+    // bounds are tiny at that distance are left out.
+    void setLod(float rangeMetres, int bias, float farRangeMetres, float scale = 1.0f);
+    // rt.lod_scale multiplies both ranges (0 = the ladder is off), rt.memory_budget (0 = none): while the AS memory (BLAS + TLAS) is over
+    // the limit the ladder's ranges shrink (x0.85 per 16 frames, down to 8 %; back up when it is under 80 %) even when the scale is 0
+    // (base ranges then), and BLASes whose instances are all beyond rung 0 give up their detailed original (rebuilt when the camera
+    // comes back). The AS memory the proxies hold counts: the ladder only saves where originals are released.
+    void setMemoryBudget(std::uint32_t megabytes);
     // the GLSL options of a vertex shader's capture variant (d3d9::VariantSlot::Capture); public for rvk_shadertool --capture
     static bool captureOptions(const d3d9::Shader& s, shader::TranslateOptions& o);
 
@@ -140,6 +155,8 @@ private:
         std::uint32_t refs = 0;      // registry instances
         std::uint32_t serial = 0;    // build / compaction generation (stale compaction queries)
         bool compacted = false;
+        bool released = false;       // the original AS was given up (rt.memory_budget): proxies / the box stand in
+        bool rebuild = false;        // released and queued to be built again (state Pending): still in the TLAS through its proxy / box
         std::uint64_t lastUsedFrame = 0;
         double lastUsedTime = 0.0;
         std::uint64_t opaqueMainFrame = 0;  // the main view's last opaque draw of it (blended-only ranges stay out)
@@ -188,6 +205,19 @@ private:
         const void* material = nullptr;  // the first draw's engine objects (diagnostics; may be stale)
         const void* entity = nullptr;
         std::uint32_t opDesc = 0;
+        // the coarser stand-in beyond rt.lod_range: the same vertex buffer, an index list of its own (relative to the draw's base
+        // vertex, as the original's), a BLAS of its own built without compaction
+        struct Proxy {
+            enum class State : std::uint8_t { None, Queued, Built, Failed } state = State::None;
+            std::future<rt::lod::Result> job;
+            std::unique_ptr<rhi::Buffer> indices;
+            std::unique_ptr<rhi::AccelerationStructure> as;
+            std::uint32_t triangles = 0;
+            std::uint32_t level = 0;   // the bias it was made for
+            std::uint64_t bytes = 0;   // AS storage + index buffer (counted in blasBytes_)
+            double jobMs = 0.0;
+            std::uint32_t serial = 0;  // the BLAS's serial when queued (a rebuilt original makes it stale)
+        } proxy;
     };
     // what the TLAS of a frame held (diagnostics: describe)
     struct Entry {
@@ -251,6 +281,45 @@ private:
     void processCompactions(rhi::CommandList& cl, std::uint32_t slot);
     void buildPending(rhi::CommandList& cl, std::uint32_t slot);
     void evictOverBudget();
+    // level of detail: proxies (queued from record() for instances beyond the range, built when their job is done)
+    void queueProxy(Blas& b);
+    void buildProxies(rhi::CommandList& cl);
+    void dropProxy(Blas& b);
+    bool lodEligible(const Blas& b) const;
+    float lodRangeUnits_ = 0.0f, lodFarUnits_ = 0.0f;    // effective (base x scale x budget scale)
+    float lodBaseRange_ = 0.0f, lodBaseFar_ = 0.0f, lodScale_ = 0.0f, budgetScale_ = 1.0f;
+    std::uint64_t budgetBytes_ = 0;
+    std::uint32_t released_ = 0;                          // BLASes without their original AS right now
+    std::uint64_t releasedTotal_ = 0, rebuiltTotal_ = 0;
+    std::unordered_set<std::uint64_t> nearBlas_;          // BLASes with an instance on rung 0 this frame
+    void applyLodEffective();
+    void releaseOriginals(std::uint64_t target);
+    void requestRebuild(Blas& b);
+    std::uint64_t asBytes() const;
+    bool lodActive() const { return (lodRangeUnits_ > 0.0f && lodBias_ > 0) || lodFarUnits_ > 0.0f; }
+    // the shared box of rung 2: 8 vertices + 36 u16 indices in one buffer, one BLAS (built once, in record)
+    struct Box {
+        std::unique_ptr<rhi::Buffer> buffer;
+        std::unique_ptr<rhi::AccelerationStructure> as;
+        bool built = false, failed = false;
+    } box_;
+    bool ensureBox(rhi::CommandList& cl);
+    std::uint64_t lastSkippedTiny_ = 0, lastBoxed_ = 0;
+    int lodBias_ = 0;
+    std::vector<std::uint64_t> proxyJobs_;       // BLAS ids with a queued job
+    std::uint64_t proxyBytes_ = 0;               // of blasBytes_
+    std::uint32_t proxiesBuilt_ = 0;
+    std::uint64_t proxyTrianglesOriginal_ = 0, proxyTrianglesKept_ = 0, proxyJobsDone_ = 0, proxyJobsFailed_ = 0;  // totals over the proxies built
+    double proxyJobMs_ = 0.0, proxyGatherMs_ = 0.0, proxyBuildMs_ = 0.0;
+    std::uint64_t proxyGatherTriangles_ = 0;     // this frame's gathers (budget)
+    std::uint64_t proxyGatherFrame_ = 0;
+    // the snapshot of the last frame's TLAS by distance band and kind (taken on the frame a stats line is due)
+    struct BandStat {
+        std::uint64_t instances = 0, triangles = 0, trianglesOriginal = 0, proxied = 0, boxed = 0, blasBytes = 0, blases = 0;
+        std::uint64_t byKind[3] = {0, 0, 0};  // triangles: meshes, SpeedTree, other
+    };
+    BandStat bands_[rt::lod::kBands];
+    bool bandsValid_ = false;
     void noteNewInstance(Blas& b, std::uint64_t frame);
     void barrier(rhi::CommandList& cl, VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess, VkPipelineStageFlags2 dstStage,
                  VkAccessFlags2 dstAccess);
@@ -400,6 +469,7 @@ private:
     std::deque<std::pair<std::uint64_t, std::vector<Entry>>> contents_;  // frame value -> the TLAS's instances (last 4)
     std::uint32_t lastInstances_ = 0;
     std::uint64_t lastTriangles_ = 0;
+    std::uint64_t lastCharTriangles_ = 0, lastAnimTreeTriangles_ = 0;
     std::chrono::steady_clock::time_point lastLog_{};
     std::unordered_set<const void*> declLogged_;
     std::unordered_map<std::uint64_t, const char*, IdHash> vsVerdict_;  // VS hash (^ instanced) -> why its draws are not taken (null = taken)

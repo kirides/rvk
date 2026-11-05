@@ -439,3 +439,23 @@ TEST(settings_renderer_mode) {
     // the player's own value is what settings.toml keeps
     CHECK(reg.toToml().find("mode = \"full\"") != std::string::npos);
 }
+
+TEST(rt_presets_match_defaults_and_apply) {
+    settings::Registry reg;
+    settings::registerRendererSettings(reg);
+    // a fresh registry = Medium (the preset's members all at their defaults)
+    CHECK(settings::matchRtPreset(reg) == 1);
+    const auto& presets = settings::rtPresets();
+    CHECK(presets.size() == 3);
+    for (const auto& p : presets) {
+        for (const auto& kv : p.values) CHECK(reg.find(kv.first) != nullptr);
+    }
+    settings::applyPreset(reg, presets[0]);
+    CHECK(settings::matchRtPreset(reg) == 0);
+    CHECK(reg.find("rt.lod_scale")->value() > 0.29 && reg.find("rt.lod_scale")->value() < 0.31);
+    CHECK(reg.find("rt.memory_budget")->value() == 384);
+    settings::applyPreset(reg, presets[2]);
+    CHECK(settings::matchRtPreset(reg) == 2 && reg.find("rt.lod_scale")->value() == 0.0);
+    reg.setText("gi.quality", "low");  // a hand change: no preset matches
+    CHECK(settings::matchRtPreset(reg) == -1);
+}
