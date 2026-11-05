@@ -226,7 +226,8 @@ static uint rvk_clUsed = 0;             // table lights written into the registe
 static bool rvk_clPhysical = false;     // lighting.style = physical and the table valid for this pixel: the PBR evaluation (rvkMvPbr) runs on every lit draw
 static float rvk_clDefRough = 0.7;      // the roughness of surfaces without a pack entry in the physical style (materials.default_roughness)
 static float rvk_clShadow = 1.0;        // the smallest ray-traced shadow visibility among them (lighting.debug = shadows)
-static float rvk_clShadowTested = 0.0;  // 1 when a table light with a shadow id was among them
+static float rvk_clShadowTested = 0.0;
+static float rvk_clKeptState = 0.0;  // debug: 1 an engine light kept with a table twin without shadow id, 2 kept and unknown to the table, 3 kept shadow-channel light  // 1 when a table light with a shadow id was among them
 
 // the ray-traced visibility of table light `sid` at this pixel (enh/light_table: pass light.shadow; entries = id + q / 64); 1 = lit / not traced
 float rvkMvLightShadow(uint slot, uint size, uint sid) {
@@ -329,6 +330,7 @@ void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
                 rvk_cl[4 * i + 1].rgb *= k;
                 rvk_cl[4 * i + 2].rgb *= k;
             }
+            if (twinSid[i] == 0u) rvk_clKeptState = max(rvk_clKeptState, (selMask >> i & 1u) != 0u ? 3.0 : ((knownMask >> i & 1u) != 0u ? 1.0 : 2.0));
             if (twinSid[i] != 0u) {
                 // the engine's own (unshadowed) light of this slot: its table twin's ray-traced visibility shades it (the shadow-channel lights keep the engine's mask)
                 float sv = rvkMvLightShadow(h0.z, h0.w, twinSid[i]);
@@ -578,7 +580,7 @@ void rvkMvEpilogue(inout float4 c0) {
             c0.rgb = rvk_clCount == 0u ? float3(0.0, 0.0, 0.0) : lerp(float3(0.0, 0.3, 1.0), float3(1.0, 0.1, 0.0), t);
         } else if (dbg == 3u && rvk_clCount != 0xFFFFFFFFu) {
             // ray-traced light shadows: grey = no shadow-casting light here, white lit .. red shadowed
-            c0.rgb = rvk_clShadowTested > 0.5 ? lerp(float3(1.0, 0.0, 0.0), float3(1.0, 1.0, 1.0), rvk_clShadow) : float3(0.0, 0.0, 0.25);
+            c0.rgb = rvk_clShadowTested > 0.5 ? lerp(float3(1.0, 0.0, 0.0), float3(1.0, 1.0, 1.0), rvk_clShadow) : (rvk_clKeptState > 2.5 ? float3(0.6, 0.0, 0.6) : rvk_clKeptState > 1.5 ? float3(0.0, 0.5, 0.0) : rvk_clKeptState > 0.5 ? float3(0.6, 0.6, 0.0) : float3(0.0, 0.0, 0.25));
         } else if (dbg == 2u && rvk_clCount != 0xFFFFFFFFu) {
             c0.rgb = float3(rvk_clUsed == 1u || rvk_clUsed == 3u ? 1.0 : 0.0, rvk_clUsed >= 2u ? 1.0 : 0.0, rvk_clUsed == 0u ? 0.3 : 0.0);
         }
