@@ -140,24 +140,19 @@ bEResult HalInstance::Init(eCGfxShared::eEAPIType) {
     // the primary display's 32-bit modes (the engine creates its window at 0,0): the engine picks the one matching the
     // window's size and its configured refresh exactly, with RefreshRate 0 the first of that size - so per size the
     // desktop's refresh rate comes first (engine/window_mode.h orderModes; docs/research/window-mode.md 8.1)
-    DEVMODEW dm{};
-    dm.dmSize = sizeof(dm);
-    std::vector<engine::window::DisplayMode> modes;
-    for (DWORD i = 0; EnumDisplaySettingsW(nullptr, i, &dm); ++i) {
-        if (dm.dmBitsPerPel == 32) modes.push_back({dm.dmPelsWidth, dm.dmPelsHeight, dm.dmDisplayFrequency});
-    }
-    std::uint32_t desktopRefresh = 0;
-    if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm)) desktopRefresh = dm.dmDisplayFrequency;
+    engine::window::DisplayMode desktop{};
+    std::vector<engine::window::DisplayMode> modes = engine::window::startupModes(&desktop);
+    const std::uint32_t desktopRefresh = desktop.refresh;
     for (const auto& m : engine::window::orderModes(std::move(modes), desktopRefresh)) modes_.push_back({m.width, m.height, m.refresh});
     if (modes_.empty()) {
         modes_.push_back({1280, 720, 60});
     }
     std::string refreshes;
     for (const Mode& m : modes_) {
-        if (m.width == dm.dmPelsWidth && m.height == dm.dmPelsHeight) refreshes += std::format("{}{}", refreshes.empty() ? "" : " ", m.refresh);
+        if (m.width == desktop.width && m.height == desktop.height) refreshes += std::format("{}{}", refreshes.empty() ? "" : " ", m.refresh);
     }
     spdlog::info("hal: Vulkan instance, {} display modes (desktop {}x{} @ {} Hz; its size offers {} Hz)", modes_.size(),
-                 dm.dmPelsWidth, dm.dmPelsHeight, desktopRefresh, refreshes);
+                 desktop.width, desktop.height, desktopRefresh, refreshes);
     return bEResult_Ok;
 }
 

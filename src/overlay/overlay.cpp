@@ -377,6 +377,11 @@ bool Overlay::runCommand(std::string_view command, std::string* out) {
         // the material pack folders are read again (docs/research/material-pack.md)
         return enh::matpack::requestReload() ? ok("material pack reload started") : fail("no material pack is loaded");
     }
+    if (w[0] == "display" && w.size() >= 2) {
+        // "display fake <W>x<H>" | "display fake off": the display resolver sees another monitor (docs/research/window-mode.md 10)
+        const auto rest = command.substr(static_cast<std::size_t>(w[1].data() - command.data()));
+        return engine::window::runCommand(rest, out);
+    }
     if (w[0] == "window" && w.size() >= 2) {
         // the engine's own mode changes (borderless fullscreen, docs/research/window-mode.md)
         const auto rest = command.substr(static_cast<std::size_t>(w[1].data() - command.data()));

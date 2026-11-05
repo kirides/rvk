@@ -67,6 +67,11 @@ std::vector<DisplayMode> orderModes(std::vector<DisplayMode> modes, std::uint32_
 // is created (the sEnumAdapterDesc detour). Logs the result.
 void enableDpiAwareness();
 
+// The display modes the HAL lists for the engine (CreateGraphicsSubsystem needs an exact match): the start monitor's modes (the
+// primary display, or the debug override) plus the resolved start size when it is no display mode; *desktop = its desktop mode.
+// docs/research/window-mode.md 10.
+std::vector<DisplayMode> startupModes(DisplayMode* desktop);
+
 // Creates the SetResolutionEx detour (enabled with the others by hooks::enableAll); false when the symbols are missing
 // (borderless placement still works, a fullscreen request at another size then keeps its size, scaled to the monitor).
 bool install();

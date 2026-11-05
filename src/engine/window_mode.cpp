@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cstdlib>
 #include <chrono>
 #include <cstdint>
 #include <format>
@@ -15,6 +16,8 @@
 #include <spdlog/spdlog.h>
 
 #include "core/hooks.h"
+#include "core/settings.h"
+#include "engine/display_resolve.h"
 #include "engine/symbols.h"
 
 namespace rvk::engine::window {
@@ -57,8 +60,65 @@ struct State {
     // SetResolutionEx ran: the engine's Reset -> ToggleNewMode -> onModeSet follows (its window style already changed);
     // no placement until then (at most 3 s: an unchanged request never resets)
     std::chrono::steady_clock::time_point changing{};
+    // display fallback (docs/research/window-mode.md 10)
+    bool prefValid = false;                // what the engine / the player asked for last (never rewritten by our resolver)
+    Request pref{};
+    bool own = false;                      // inside one of our own SetResolution calls: not a new preference
+    std::string sig;                       // signature of the window's monitor (size, work area, modes): a change re-resolves
+    bool startDone = false;                // CreateGraphicsSubsystem ran
+    Resolved start{};                      // the resolution of the start (its size is in the engine's mode list)
+    std::vector<DisplayMode> startModes;   // the engine's mode list (the monitor's modes + the start size)
+    DisplayMode startDesktop{};
+    bool unavailableLogged = false;
+    bool sizeSwallowed = false;            // the start's resize ran with the engine's WM_SIZE (GUI layout) held back: send it at the first present
 };
 State g;
+
+// debug override (RVK_FAKE_MONITOR=WxH or "display fake WxH" / "display fake off"): the resolver sees a monitor of that size
+// with a standard mode list; the real monitor, window placement and display modes stay as they are (exclusive fullscreen
+// never changes a real display mode while it is on)
+struct Fake {
+    bool on = false;
+    std::uint32_t width = 0, height = 0;
+    bool envRead = false;
+} fake;
+
+bool parseSize(std::string_view t, std::uint32_t& w, std::uint32_t& h) {
+    const auto x = t.find_first_of("xX");
+    if (x == std::string_view::npos) return false;
+    const auto rw = std::from_chars(t.data(), t.data() + x, w);
+    const auto rh = std::from_chars(t.data() + x + 1, t.data() + t.size(), h);
+    return rw.ec == std::errc{} && rh.ec == std::errc{} && w >= 320 && h >= 200;
+}
+
+void readFakeEnv() {
+    if (fake.envRead) return;
+    fake.envRead = true;
+    // the Win32 environment (the proxy's DllMain sets [debug] environment entries with SetEnvironmentVariable; the CRT's copy is stale)
+    char buf[64]{};
+    if (GetEnvironmentVariableA("RVK_FAKE_MONITOR", buf, sizeof(buf)) > 0) {
+        std::uint32_t w = 0, h = 0;
+        if (parseSize(buf, w, h)) {
+            fake.on = true;
+            fake.width = w;
+            fake.height = h;
+            spdlog::info("engine: window: RVK_FAKE_MONITOR: the display resolver sees a {}x{} monitor", w, h);
+        }
+    }
+}
+
+std::vector<DisplayMode> fakeModes() {
+    static const std::pair<std::uint32_t, std::uint32_t> sizes[] = {{800, 600},   {1024, 768},  {1280, 720},  {1280, 800},  {1360, 768},
+                                                                    {1366, 768},  {1440, 900},  {1600, 900},  {1680, 1050}, {1920, 1080},
+                                                                    {1920, 1200}, {2560, 1440}, {2560, 1600}, {3840, 2160}};
+    std::vector<DisplayMode> out;
+    for (const auto& [w, h] : sizes) {
+        if (w <= fake.width && h <= fake.height && !(w == fake.width && h == fake.height)) out.push_back({w, h, 60});
+    }
+    out.push_back({fake.width, fake.height, 60});
+    out.push_back({fake.width, fake.height, 30});
+    return out;
+}
 
 // GDI device names (DISPLAYn) are not stable across display mode changes on this machine (two monitors swapped their
 // names after a mode change was undone): always derive them from the monitor handle when needed
@@ -87,6 +147,12 @@ struct MonitorModes {
 };
 MonitorModes monitorModes(const std::wstring& device) {
     MonitorModes mm;
+    readFakeEnv();
+    if (fake.on) {
+        mm.modes = fakeModes();
+        mm.desktop = mm.current = {fake.width, fake.height, 60};
+        return mm;
+    }
     DEVMODEW dm{};
     dm.dmSize = sizeof(dm);
     for (DWORD i = 0; EnumDisplaySettingsW(device.c_str(), i, &dm); ++i) {
@@ -102,6 +168,11 @@ bool monitorRect(HMONITOR monitor, Rect& r, std::string* name = nullptr) {
     mi.cbSize = sizeof(mi);
     if (monitor == nullptr || !GetMonitorInfoW(monitor, &mi)) return false;
     r = {mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top};
+    readFakeEnv();
+    if (fake.on) {
+        r.width = static_cast<int>(fake.width);
+        r.height = static_cast<int>(fake.height);
+    }
     if (name != nullptr) {
         name->clear();
         for (const wchar_t* c = mi.szDevice; *c != 0; ++c) name->push_back(*c < 128 ? static_cast<char>(*c) : '?');
@@ -131,7 +202,66 @@ bool requestResolution(std::uint32_t width, std::uint32_t height, std::uint32_t 
         return false;
     }
     spdlog::info("engine: window: SetResolution({}x{}, {}) ({})", width, height, mode == kModePopup ? "fullscreen" : "windowed", why);
-    return reinterpret_cast<SetResolutionFn>(s.appSetResolution)(a, width, height, mode);
+    g.own = true;
+    const bool r = reinterpret_cast<SetResolutionFn>(s.appSetResolution)(a, width, height, mode);
+    g.own = false;
+    return r;
+}
+
+bool exclusiveWanted() {
+    if (g.exclusive) return true;
+    const auto& rs = settings::renderer();
+    if (rs.fullscreen == nullptr) return false;
+    // before the device exists the capability report is not in: the player's value decides (the effective one is "borderless")
+    if (!g.startDone) {
+        const auto i = static_cast<std::size_t>(rs.fullscreen->value());
+        return i < rs.fullscreen->spec().options.size() && rs.fullscreen->spec().options[i] == "exclusive";
+    }
+    return rs.fullscreen->asEnum() == "exclusive";
+}
+
+Kind kindOf(bool popup) { return popup ? (exclusiveWanted() ? Kind::Exclusive : Kind::Borderless) : Kind::Windowed; }
+
+// the monitor's facts for the resolver (real or the debug override)
+MonitorInfo gatherMonitor(HMONITOR monitor) {
+    MonitorInfo mi;
+    Rect r;
+    std::string name;
+    if (!monitorRect(monitor, r, &name)) return mi;
+    mi.rect = r;
+    mi.name = name;
+    mi.work = r;
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (GetMonitorInfoW(monitor, &info)) {
+        mi.work = {info.rcWork.left, info.rcWork.top, info.rcWork.right - info.rcWork.left, info.rcWork.bottom - info.rcWork.top};
+    }
+    if (fake.on) {
+        mi.work = {r.x, r.y, r.width, r.height > 60 ? r.height - 48 : r.height};  // a taskbar
+    }
+    const MonitorModes mm = monitorModes(monitorDevice(monitor));
+    mi.modes = mm.modes;
+    mi.desktop = mm.current.width != 0 ? mm.current : DisplayMode{static_cast<std::uint32_t>(r.width), static_cast<std::uint32_t>(r.height), 0};
+    RECT fr{0, 0, 100, 100};
+    AdjustWindowRectEx(&fr, kModeWindowed, FALSE, 0);
+    mi.frameWidth = (fr.right - fr.left) - 100;
+    mi.frameHeight = (fr.bottom - fr.top) - 100;
+    return mi;
+}
+
+std::string signatureOf(const MonitorInfo& m) {
+    return std::format("{} {} {} {} {}x{}@{} {}", m.name, rectText(m.rect), rectText(m.work), m.modes.size(), m.desktop.width, m.desktop.height,
+                       m.desktop.refresh, fake.on ? "fake" : "");
+}
+
+void logUnavailable(const Request& req, const Resolved& res, const MonitorInfo& mon, std::string_view when) {
+    if (!res.changed) {
+        g.unavailableLogged = false;
+        return;
+    }
+    spdlog::info("window: resolution {}x{}{} not available on {}, using {}x{}{} {} ({}) [{}]", req.width, req.height,
+                 req.refresh != 0 ? std::format("@{}", req.refresh) : std::string(), mon.name, res.width, res.height,
+                 res.refresh != 0 ? std::format("@{}", res.refresh) : std::string(), kindName(res.kind), res.reason, when);
 }
 
 void place(HMONITOR monitor, const Rect& mr, const std::string& monitorName, bool engineFullscreen) {
@@ -195,35 +325,124 @@ bool detourSetResolutionEx(void* self, unsigned long adapter, unsigned long widt
         // the monitor the player is on (SetClientSize centres the window on the primary desktop afterwards)
         const HMONITOR monitor = MonitorFromWindow(g.window, MONITOR_DEFAULTTONEAREST);
         g.target = monitor;
-        Rect mr;
-        std::string name;
         if (mode != kModePopup && g.displayChanged) {
             // leaving exclusive fullscreen: the desktop's mode back before the engine sizes and centres its window
             restoreDisplayMode("the game leaves fullscreen");
             g.exActive = false;
         }
-        if (mode == kModePopup && g.exclusive) {
-            // exclusive fullscreen: the requested size when the monitor has such a mode (the display switches to it), else
-            // the monitor's desktop size
-            const MonitorModes mm = monitorModes(monitorDevice(monitor));
-            const bool has = std::ranges::any_of(mm.modes, [&](const DisplayMode& m) { return m.width == width && m.height == height; });
-            if (!has && mm.desktop.width != 0) {
-                spdlog::info("engine: window: exclusive fullscreen request {}x{}: the monitor has no such mode, its desktop {}x{} instead",
-                             width, height, mm.desktop.width, mm.desktop.height);
-                width = mm.desktop.width;
-                height = mm.desktop.height;
-            } else {
-                spdlog::info("engine: window: exclusive fullscreen request {}x{} @ {} Hz", width, height, refresh);
-            }
-        } else if (mode == kModePopup && monitorRect(monitor, mr, &name) && mr.width > 0 && mr.height > 0 &&
-                   (width != static_cast<unsigned long>(mr.width) || height != static_cast<unsigned long>(mr.height))) {
-            spdlog::info("engine: window: fullscreen request {}x{} -> the monitor's {}x{} ({})", width, height, mr.width, mr.height, name);
-            width = static_cast<unsigned long>(mr.width);
-            height = static_cast<unsigned long>(mr.height);
+        const Request req{static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), static_cast<std::uint32_t>(refresh),
+                          kindOf(mode == kModePopup)};
+        // the player's / the engine's choice is remembered as the preference (the options menu, F2, config); our own
+        // corrections are not: the preference comes back when a monitor offers it again
+        if (!g.own) {
+            g.pref = req;
+            g.prefValid = true;
+        }
+        const MonitorInfo mon = gatherMonitor(monitor);
+        const Resolved res = resolve(req, mon);
+        if (res.changed) {
+            if (!g.own) logUnavailable(req, res, mon, "SetResolutionEx");
+            width = res.width;
+            height = res.height;
+            refresh = res.refresh;
+            // windowed larger than the monitor: the engine stays "windowed" at exactly the monitor's size, which the
+            // placement makes borderless (decide)
+        } else if (req.kind == Kind::Exclusive) {
+            spdlog::info("engine: window: exclusive fullscreen request {}x{} @ {} Hz", width, height, refresh);
         }
     }
     if (g.window != nullptr) g.changing = std::chrono::steady_clock::now();
     return g_setResolutionEx.original(self, adapter, width, height, refresh, vsync, value, mode);
+}
+
+// the engine's own start: eCApplication::CreateGraphicsSubsystem(setup, bool) needs a display mode of exactly the setup's
+// width x height x refresh (else a fatal error "can't find correct context in gfx-system"); the config's size may not exist
+// on the monitor the game starts on. The setup (and the app's mode desc, +0x6c4 / 0x6c8 / 0x6cc) is resolved first and the
+// HAL's mode list (startupModes) holds the resolved mode; the window gets the resolved size before the device exists.
+// A WM_SIZE inside the device creation reaches the engine's OnSize -> Game.dll's GUI, which does not exist yet (null read, crash
+// [V]): the start's window resize holds the message back and the first present sends it (sendHeldSize).
+WNDPROC g_holdOriginal = nullptr;
+bool g_holdUnicode = false;
+LRESULT CALLBACK holdSizeProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_SIZE) {
+        g.sizeSwallowed = true;
+        return 0;
+    }
+    return g_holdUnicode ? CallWindowProcW(g_holdOriginal, hwnd, msg, wp, lp) : CallWindowProcA(g_holdOriginal, hwnd, msg, wp, lp);
+}
+
+void setWindowPosHoldingSize(HWND hwnd, int x, int y, int w, int h, UINT flags) {
+    g_holdUnicode = IsWindowUnicode(hwnd) != FALSE;
+    const auto proc = reinterpret_cast<LONG_PTR>(&holdSizeProc);
+    const LONG_PTR previous = g_holdUnicode ? SetWindowLongPtrW(hwnd, GWLP_WNDPROC, proc) : SetWindowLongPtrA(hwnd, GWLP_WNDPROC, proc);
+    if (previous == 0) return;
+    g_holdOriginal = reinterpret_cast<WNDPROC>(previous);
+    SetWindowPos(hwnd, nullptr, x, y, w, h, flags);
+    if (g_holdUnicode) SetWindowLongPtrW(hwnd, GWLP_WNDPROC, previous); else SetWindowLongPtrA(hwnd, GWLP_WNDPROC, previous);
+}
+
+// the held WM_SIZE, with the client size of now (engine thread, at a present: the GUI exists)
+void sendHeldSize() {
+    if (!g.sizeSwallowed || g.window == nullptr) return;
+    g.sizeSwallowed = false;
+    RECT cr{};
+    GetClientRect(g.window, &cr);
+    SendMessageW(g.window, WM_SIZE, SIZE_RESTORED, MAKELPARAM(cr.right, cr.bottom));
+    spdlog::info("window: start: the engine's WM_SIZE sent now: client {}x{} (GUI layout)", cr.right, cr.bottom);
+}
+
+using CreateGfxFn = int (*)(void* self, std::uint8_t* setup, bool b);
+Hook<CreateGfxFn> g_createGfx;
+
+int detourCreateGraphicsSubsystem(void* self, std::uint8_t* setup, bool b) {
+    auto* a = static_cast<std::uint8_t*>(self);
+    HWND hwnd = *reinterpret_cast<HWND*>(a + 0x18);
+    const bool popup = a[0xe0] != 0;
+    const HMONITOR monitor = hwnd != nullptr ? MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY) : MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    const MonitorInfo mon = gatherMonitor(monitor);
+    const Request req{*reinterpret_cast<std::uint32_t*>(setup), *reinterpret_cast<std::uint32_t*>(setup + 4),
+                      *reinterpret_cast<std::uint32_t*>(setup + 8), kindOf(popup)};
+    const Resolved res = resolve(req, mon);
+    g.pref = req;
+    g.prefValid = true;
+    g.start = res;
+    g.startModes = engineModes(mon.modes, res);
+    g.startDesktop = mon.desktop;
+    g.startDone = true;
+    g.sig = signatureOf(mon);
+    spdlog::info("window: start: configured {}x{} @ {} Hz {} on {} (desktop {}x{} @ {} Hz, {} modes)", req.width, req.height, req.refresh,
+                 kindName(req.kind), mon.name, mon.desktop.width, mon.desktop.height, mon.desktop.refresh, mon.modes.size());
+    if (res.changed) {
+        logUnavailable(req, res, mon, "start");
+        *reinterpret_cast<std::uint32_t*>(setup) = res.width;
+        *reinterpret_cast<std::uint32_t*>(setup + 4) = res.height;
+        *reinterpret_cast<std::uint32_t*>(setup + 8) = res.refresh;
+        *reinterpret_cast<std::uint32_t*>(a + 0x6c4) = res.width;
+        *reinterpret_cast<std::uint32_t*>(a + 0x6c8) = res.height;
+        *reinterpret_cast<std::uint32_t*>(a + 0x6cc) = res.refresh;
+        if (hwnd != nullptr) {
+            // the window (created at the configured size) to the resolved one before the device: windowed = client size,
+            // centred on the work area; borderless / fullscreen = over the monitor (the placement at the first present
+            // takes the style away)
+            const LONG style = GetWindowLongW(hwnd, GWL_STYLE);
+            const LONG ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
+            const UINT async = asyncFlag(hwnd);
+            if (res.kind == Kind::Windowed) {
+                RECT r{0, 0, static_cast<LONG>(res.width), static_cast<LONG>(res.height)};
+                AdjustWindowRectEx(&r, static_cast<DWORD>(style), FALSE, static_cast<DWORD>(ex));
+                const int ww = r.right - r.left, wh = r.bottom - r.top;
+                setWindowPosHoldingSize(hwnd, mon.work.x + (mon.work.width - ww) / 2, mon.work.y + (mon.work.height - wh) / 2, ww, wh,
+                                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER | async);
+            } else {
+                setWindowPosHoldingSize(hwnd, mon.rect.x, mon.rect.y, mon.rect.width, mon.rect.height,
+                                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER | async);
+            }
+            RECT cr{};
+            GetClientRect(hwnd, &cr);
+            spdlog::info("window: start: window resized before the device, client {}x{}", cr.right, cr.bottom);
+        }
+    }
+    return g_createGfx.original(self, setup, b);
 }
 
 }  // namespace
@@ -308,8 +527,25 @@ bool install() {
         spdlog::warn("engine: window: eCApplication::SetResolutionEx not found: fullscreen keeps the requested resolution");
         return false;
     }
+    if (s.appCreateGraphicsSubsystem != nullptr) {
+        g_createGfx.install("eCApplication::CreateGraphicsSubsystem", reinterpret_cast<CreateGfxFn>(s.appCreateGraphicsSubsystem),
+                            &detourCreateGraphicsSubsystem);
+    } else {
+        spdlog::warn("engine: window: eCApplication::CreateGraphicsSubsystem not found: no resolution fallback at the start");
+    }
     return g_setResolutionEx.install("eCApplication::SetResolutionEx", reinterpret_cast<SetResolutionExFn>(s.appSetResolutionEx),
                                      &detourSetResolutionEx);
+}
+
+std::vector<DisplayMode> startupModes(DisplayMode* desktop) {
+    if (g.startDone) {
+        if (desktop != nullptr) *desktop = g.startDesktop;
+        return g.startModes;
+    }
+    // before / without the start hook: the primary monitor's modes
+    const MonitorInfo mon = gatherMonitor(MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY));
+    if (desktop != nullptr) *desktop = mon.desktop;
+    return mon.modes;
 }
 
 void onModeSet(HWND__* window, bool windowed, std::uint32_t width, std::uint32_t height, std::uint32_t refresh) {
@@ -436,7 +672,9 @@ bool activateExclusive(HMONITOR monitor) {
         spdlog::warn("engine: window: exclusive fullscreen: {} has no {}x{} mode", narrow(device), g.width, g.height);
         return false;
     }
-    if (mm.current != *pick) {
+    if (fake.on) {
+        spdlog::info("engine: window: exclusive fullscreen: fake monitor, no real display mode change ({} requested)", modeText(*pick));
+    } else if (mm.current != *pick) {
         DEVMODEW dm{};
         dm.dmSize = sizeof(dm);
         dm.dmPelsWidth = pick->width;
@@ -570,9 +808,50 @@ void restoreDisplayModeImpl(const char* why) {
 
 void restoreDisplayMode(const char* why) { restoreDisplayModeImpl(why); }
 
+namespace {
+// A monitor change at run time (the display mode of the window's monitor, the monitor itself, a virtual display appearing,
+// the work area): the preference is resolved again (never rewritten): a smaller monitor gets the fallback, the monitor that
+// offers the preferred size gets it back. WM_DISPLAYCHANGE reaches the engine's window procedure unseen by us: polled.
+void watchDisplay() {
+    if (!g.prefValid || g.window == nullptr || g.pending || IsIconic(g.window)) return;
+    static std::chrono::steady_clock::time_point last{};
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last < std::chrono::milliseconds(250)) return;
+    last = now;
+    const HMONITOR monitor = MonitorFromWindow(g.window, MONITOR_DEFAULTTONEAREST);
+    const MonitorInfo mon = gatherMonitor(monitor);
+    const std::string sig = signatureOf(mon);
+    if (sig == g.sig) return;
+    g.sig = sig;
+    Request req = g.pref;
+    const bool popup = req.kind != Kind::Windowed;
+    req.kind = kindOf(popup);
+    const Resolved res = resolve(req, mon);
+    spdlog::info("window: display changed: {} {} desktop {}x{} @ {} Hz, {} modes", mon.name, rectText(mon.rect), mon.desktop.width,
+                 mon.desktop.height, mon.desktop.refresh, mon.modes.size());
+    if (res.changed) {
+        logUnavailable(req, res, mon, "display change");
+        g.unavailableLogged = true;
+    } else if (g.unavailableLogged) {
+        g.unavailableLogged = false;
+        spdlog::info("window: resolution {}x{} is available on {} again", req.width, req.height, mon.name);
+    }
+    if (res.width != g.width || res.height != g.height) {
+        g.corrections = 0;
+        g.target = monitor;
+        requestResolution(res.width, res.height, popup ? kModePopup : kModeWindowed, "display changed");
+    } else if (res.kind == Kind::Borderless || res.kind == Kind::Exclusive) {
+        g.pending = true;  // same size: the window is placed over the (new) monitor rectangle again
+    }
+}
+}  // namespace
+
 Presentation onPresent() {
     Presentation out;
     if (g.window == nullptr) return out;
+    if (g.changing == std::chrono::steady_clock::time_point{} || std::chrono::steady_clock::now() - g.changing >= std::chrono::seconds(3)) {
+        watchDisplay();
+    }
     const bool engaged = g.exclusive && !g.windowed;
     if (g.changing != std::chrono::steady_clock::time_point{} &&
         std::chrono::steady_clock::now() - g.changing < std::chrono::seconds(3)) {
@@ -592,6 +871,7 @@ Presentation onPresent() {
         g.exMonitor = nullptr;
         out.resized = borderlessStep();
     }
+    sendHeldSize();
     // the exclusive swapchain only while the display mode is set and the window in front: on AMD an application-
     // controlled exclusive swapchain that is not held presented at ~4 fps in the background (window-mode.md 8.3)
     out.exclusiveMonitor = engaged && g.exActive ? g.exMonitor : nullptr;
@@ -637,6 +917,25 @@ bool runCommand(std::string_view args, std::string* out) {
     };
     while (!args.empty() && args.front() == ' ') args.remove_prefix(1);
     while (!args.empty() && args.back() == ' ') args.remove_suffix(1);
+    if (args.starts_with("fake")) {
+        // test tooling: the resolver sees a monitor of that size ("display fake 1920x1200" / "display fake off")
+        std::string_view v = args.substr(4);
+        while (!v.empty() && v.front() == ' ') v.remove_prefix(1);
+        std::uint32_t w = 0, h = 0;
+        if (v == "off") {
+            fake.on = false;
+        } else if (parseSize(v, w, h)) {
+            fake.on = true;
+            fake.width = w;
+            fake.height = h;
+        } else {
+            return fail("display fake <W>x<H> | off");
+        }
+        fake.envRead = true;
+        spdlog::info("engine: window: fake monitor {}", fake.on ? std::format("{}x{}", fake.width, fake.height) : std::string("off"));
+        if (out != nullptr) *out = fake.on ? std::format("fake monitor {}x{}", fake.width, fake.height) : "fake monitor off";
+        return true;
+    }
     if (args == "state") {
         if (out != nullptr) *out = describe();
         return true;
@@ -728,7 +1027,7 @@ bool runCommand(std::string_view args, std::string* out) {
             return true;
         }
     }
-    return fail("window fullscreen [<W>x<H>[@<Hz>]] | toggle | <W>x<H> | state | minimize | restore | focus | display");
+    return fail("window fullscreen [<W>x<H>[@<Hz>]] | toggle | fake <W>x<H>|off | <W>x<H> | state | minimize | restore | focus | display");
 }
 
 std::string describe() {

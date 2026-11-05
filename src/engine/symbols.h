@@ -32,7 +32,7 @@
     X(appSetResolutionEx, L"Engine.dll", "?SetResolutionEx@eCApplication@@QEAA_NKKKK_NMW4eEWindowMode@eCWindow@@@Z", false)     \
     /* bool eCApplication::SetResolution(w, h, eEWindowMode) (0x4c0430), bool eCApplication::ToggleFullscreen() (0x4c01f0) */ \
     X(appSetResolution, L"Engine.dll", "?SetResolution@eCApplication@@QEAA_NKKW4eEWindowMode@eCWindow@@@Z", false)              \
-    X(appToggleFullscreen, L"Engine.dll", "?ToggleFullscreen@eCApplication@@QEAA_NXZ", false)                                   \
+    /* bEResult eCApplication::CreateGraphicsSubsystem(eSSetupWindow&, bool) (0x4c4330): needs a context (display mode) of exactly the        setup's width x height x refresh, else a fatal error; pre-hooked to resolve the configured size (display_resolve) */      X(appCreateGraphicsSubsystem, L"Engine.dll", "?CreateGraphicsSubsystem@eCApplication@@IEAA?AW4bEResult@@AEAUeSSetupWindow@@_N@Z", false)     X(appToggleFullscreen, L"Engine.dll", "?ToggleFullscreen@eCApplication@@QEAA_NXZ", false)                                   \
     /* bEResult eCDX9Device::SwapScreen(HWND, bCRect const*, bCRect const*) (0x7407b0): IDirect3DDevice9::Present +         \
        GetBackBuffer; hooked outside Vulkan mode for [debug] present_stalls (docs/research/fps-limit.md) */                   \
     X(dx9SwapScreen, L"Engine.dll", "?SwapScreen@eCDX9Device@@UEAA?AW4bEResult@@PEAUHWND__@@PEBVbCRect@@1@Z", false)           \

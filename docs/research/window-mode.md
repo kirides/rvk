@@ -246,3 +246,57 @@ Symptom in Vulkan mode: the Windows arrow over the game at all times (menus: on 
   WM_SETCURSOR over `HTCLIENT` with `SetCursor(NULL)`; caption and frame keep their cursors. It is installed before the
   overlay's subclass, so the overlay (open: hides the cursor itself, ImGui draws one) forwards to it when closed.
   rvk.log `engine: window: OS cursor hidden over the client area (the game draws its own)`.
+
+## 10. A configured resolution the monitor does not offer (2026-11-05)
+
+User case: 2560x1440 saved in the config, played on a 1920x1200 streaming display (and back on a 2560x1440 monitor).
+
+**Root cause [V]** (old DLL, windowed config 2560x1440 on the 1920x1200 desktop): the engine creates its window at the config size and
+tells the device 2560x1440; Windows clamps the bordered window (`window (-10,-10 1940x1220), client 1924x1181`, rvk.log
+`vulkan: swapchain 1924x1181`); `eCApplication::OnSize` lays the GUI out for the **client** size, the back buffer / viewports stay
+2560x1440 (the screenshot has the HUD and inventory squeezed into the upper-left part of the 2560x1440 target with black
+below: "as if the viewport was smaller than the window"). The borderless decision (`decide`) keyed on back buffer ==
+monitor size, so the window kept its caption (second symptom). A fullscreen config at the same size only recovered at the first
+present (about 8 s of loading screens at 2560x1440 in a 1920x1200 window, then `SetResolution(monitor)`). A size the HAL's mode
+list lacks is worse: `CreateGraphicsSubsystem` (0x4c4330) needs a context of exactly width x height x **refresh** (also windowed)
+and otherwise calls `bCErrorAdmin::CallFatalError("... can't find correct context in gfx-system")` [C]: the self-exiting test
+runs seen at 1600x900 / 2560x1440 once the desktop was 1920x1200 (mode lists differ per display; a refresh of 120 Hz in the
+config on a 60 Hz display does the same).
+
+**Resolver** (`engine/display_resolve.*`, pure, `rvk_tests display_resolve_*`): input = request (size, refresh, kind windowed /
+borderless / exclusive) + `MonitorInfo` (rcMonitor, rcWork, current desktop mode, enumerated 32 bpp modes, the windowed style's frame
+overhead); all in physical pixels (the process is per-monitor DPI aware since `sEnumAdapterDesc`, section 4).
+
+| kind | result |
+|---|---|
+| borderless (engine fullscreen, setting borderless) | the monitor's desktop size; refresh -> the size's nearest offered one below (else above) |
+| exclusive | the mode when enumerated; else the best match: same aspect (1 %) first, nearest area, not above the desktop, larger on a tie; no candidate -> the desktop mode; refresh <= requested, else the lowest above |
+| windowed, size >= the monitor in both dimensions, or larger in one | **borderless over the monitor** (the intent was the whole screen; the engine stays "windowed" at exactly the monitor's size, `decide` then removes the caption) |
+| windowed, fits the monitor but not the work area (taskbar, frame) | the largest listed mode of the same aspect that fits, else scaled (aspect kept, even sizes); minimum 640x480 |
+| windowed, fits | unchanged (a size that is no display mode is added to the engine's list: `engineModes`) |
+
+**Wiring** (`engine/window_mode.cpp`): the **start**: a pre-hook of `eCApplication::CreateGraphicsSubsystem` resolves the setup
+(`+0 width, +4 height, +8 refresh`, kind from `app+0xe0` = fullscreen and the `vulkan.fullscreen` setting), rewrites it and the
+app's mode desc (`+0x6c4 / 0x6c8 / 0x6cc`), resizes the window before the device exists and gives `HalInstance::Init` the matching
+mode list (`window::startupModes`: the start monitor's modes + the resolved mode; the options menu lists only what the monitor
+has). A `WM_SIZE` inside that call crashed (Game.dll GUI not created yet, null read) [V]: the resize runs with a temporary window
+subclass that holds `WM_SIZE` back; the first present sends it (`window: start: the engine's WM_SIZE sent now`). Later:
+`SetResolutionEx` pre-hook resolves every request (options menu, F2, commands); the **preference** (config at the start, any
+non-own request) is kept in memory and **never written back** to ConfigUser.xml. At run time `watchDisplay` (every 250 ms at
+presents: monitor rect, work area, desktop mode, mode count) re-resolves the preference when the window's monitor changes (virtual
+display appears, desktop mode changes, window moved to another monitor): a smaller monitor gets the fallback through the engine's own
+`SetResolution` (back buffer, viewports, GUI `OnSize`, swapchain, FSR render scale, frame generation, overlay follow as they do for
+any mode change), the monitor that offers the preference gets it back (`window: resolution WxH is available on <monitor> again`).
+rvk.log: `window: start: configured ...`, `window: resolution WxH@Hz not available on <monitor>, using ... (<reason>) [start|SetResolutionEx|display change]`,
+`window: display changed: ...`.
+
+**Debug override** (never changes a real display mode; exclusive fullscreen logs "fake monitor, no real display mode change"):
+`-Environment 'RVK_FAKE_MONITOR=1920x1200'` or `-Commands '600: display fake 1600x900','1200: display fake off'`: the resolver, the
+mode list and the borderless placement see a monitor of that size (standard modes up to it, 60 / 30 Hz, a 48 px taskbar) at the real
+monitor's origin. `scripts/display-compare.ps1` runs the cases (native, bl_big, win_big, bl_fake, odd_fake, ex_fake) over the
+rvkcompare spots `hud_view`, `menu_esc`, `gui_inventory`, `gui_character` -> `out\display\<stamp>\<case>\`.
+
+**Not handled**: the GUI layout of the engine is its own aspect preset (`Aspect16x9` 1365x768 virtual, `Aspect5x4`, `Aspect4x3`,
+`Aspect10x9`: nearest to the client aspect, then scaled non-uniformly): 16:10 (1920x1200) stretches the GUI vertically by 11 %
+exactly as the stock game does (the main menu portrait is taller) [V]; pillar / letterboxing the GUI is not done. The options menu's
+list is built once at the start (stale after a live display change: a request the display lacks is resolved at SetResolutionEx).
