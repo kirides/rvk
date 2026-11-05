@@ -88,6 +88,7 @@ Config parseConfig(std::string_view text, std::string* error) {
     cfg.validation = cfg.validation || cfg.syncValidation;
     cfg.probe = tbl["vulkan"]["probe"].value_or(cfg.probe);
     cfg.adapter = tbl["vulkan"]["adapter"].value_or(cfg.adapter);
+    cfg.api = tbl["vulkan"]["api"].value_or(std::string());
     cfg.maxFps = tbl["vulkan"]["max_fps"].value_or(cfg.maxFps);
     cfg.pipelineLibraries = tbl["vulkan"]["pipeline_libraries"].value_or(cfg.pipelineLibraries);
     if (const auto v = tbl["vulkan"]["vsync"].value<bool>()) {

@@ -27,6 +27,17 @@ bool materialVariantOptions(const d3d9::Shader& s, MaterialVariant kind, shader:
 // rvk_material_variant.glsl never reuses a stale cached variant)
 std::string materialVariantTag(std::string_view base);
 
+// Material pack (enh/material_pack, docs/research/material-pack.md): with this on at startup (setting materials.pack, a restart setting) every
+// variant also contains the physically based specular / reflection code of rvk_material_variant.hlsli (RVK_MV_PBR); it acts on draws whose
+// DrawBlock carries a pack word (alpha.w != 0), others are untouched. Decided once: variants are cached per shader.
+void setPbrVariants(bool on);
+bool pbrVariants();
+
+// Full-owned light table (enh/light_table, gpu-scene.md 9.7): with this on at startup (setting lighting.clustered, a restart setting) every variant of a
+// shader that reads g_PointLights fills those registers per pixel from the table's cluster (RVK_MV_CLUSTER); the tag changes with it.
+void setClusterVariants(bool on);
+bool clusterVariants();
+
 // the varying location of the capture vertex shader's previous world position (enh/rt_scene)
 inline constexpr std::uint32_t kPrevWorldLocation = 15;  // TEXCOORD15: no game shader writes it (location 30 exceeded maxVertexOutputComponents 128)
 

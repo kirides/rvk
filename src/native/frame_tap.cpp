@@ -10,6 +10,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "engine/fast_sort.h"
 #include "engine/memread.h"
 #include "engine/shadow_maps.h"
 #include "engine/symbols.h"
@@ -163,7 +164,7 @@ bool FrameTap::verifySortSites() {
         compare_[static_cast<std::size_t>(s.list)] = reinterpret_cast<CompareFn>(const_cast<std::uint8_t*>(cmp));
     }
     std::array<std::uint8_t, kQsortPrologue.size()> qp{};
-    if (qsortAddr != base + kQsortRva || !safeRead(qsortAddr, qp.data(), qp.size()) || qp != kQsortPrologue) {
+    if (qsortAddr != base + kQsortRva || !safeRead(qsortAddr, qp.data(), qp.size()) || (qp != kQsortPrologue && !engine::fastsort::installed())) {
         spdlog::warn("native: frame tap: Execute's qsort is at RVA {:#x} (expected {:#x}) or differs: the tap stays idle", qsortAddr - base,
                      kQsortRva);
         return false;

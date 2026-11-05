@@ -1,0 +1,92 @@
+# Sample material pack (docs/research/material-pack.md). Keys are the engine's diffuse image / material names (case does not matter;
+# '*' and '?' match). Maps next to this file: <name>_orm.png = R occlusion, G roughness, B metalness, A emissive; <name>_r.png = roughness.
+# Rules apply in file order, later ones override earlier ones. A constant `roughness` only acts on entries WITHOUT a map (a map's own
+# roughness is shaped with roughness_scale / roughness_bias); entries with a map keep it.
+
+# constants only (no map): glass and metal variants of the shared misc-item texture
+[material."ItMisc_01_Diffuse_01_Glass"]
+roughness = 0.03
+metalness = 0.0
+ior = 1.5            # carried for later glass / path tracing consumers, not used by the raster shader yet
+transmission = 1.0
+
+[material."ItMisc_01_Diffuse_01_Metal"]
+roughness = 0.3
+metalness = 1.0
+
+# wildcards without maps: whole families get one look; the files next to this manifest (Arch_Wood_Planks_01, Arch_Stone_Bricks_01,
+# Arch_Floor_Cobblestone_03, Arch_Metal_Rust_01, ItWpn_SwordBlades_01) override them with per-texel maps
+[material."Arch_Wood_*"]
+roughness = 0.5     # varnished / oiled wood
+[material."Arch_House_Wood_*"]
+roughness = 0.22     # polished floor planks: candles slide across them
+[material."Arch_Stone_*"]
+roughness = 0.6
+[material."Arch_Metal_*"]
+roughness = 0.35
+metalness = 1.0
+[material."ItWpn_*"]
+roughness = 0.3
+metalness = 1.0
+
+# the interiors of the test spots (pub, monastery, docks): house furniture, plaster, polished monastery floors / walls
+[material."Arch_Comp_Housestuff_*"]
+roughness = 0.38
+wetness = 0.0
+[material."Arch_House_Wall_*"]
+roughness = 0.8
+[material."Arch_Floor_*"]
+roughness = 0.5
+[material."Arch_Temple_Stone_*"]
+roughness = 0.5
+[material."Monastery_Stone_*"]
+roughness = 0.45     # worn but polished monastery stone
+[material."Monastery_Stone_Floor_*"]
+roughness = 0.25     # the floor: candle and torch light slides across it
+[material."Nat_Stone_Rock_*"]
+roughness = 0.6
+wetness = 0.33
+
+# ---- richer sample (pub, monastery, harbour, forest) ----
+# glass: strong reflection, no light cap (transmission > 0 marks glass; ior / the refraction itself are not used yet)
+[material."*_Glass*"]
+roughness = 0.03
+transmission = 1.0
+[material."*Window*"]
+roughness = 0.05
+transmission = 1.0
+[material."*Bottle*"]
+roughness = 0.05
+transmission = 1.0
+
+# harbour: stone that sea spray keeps wet (wetness 0..1 in steps of a third, scaled by the setting "Pack wetness")
+[material."Arch_Floor_Cobblestone_*"]
+wetness = 0.66
+[material."Arch_Stone_Bricks_*"]
+wetness = 0.33
+[material."Arch_Stone_Stairs_*"]
+wetness = 0.66
+
+# water barrels, barrels and crates: oiled wood
+[material."Arch_Comp_Shipstuff_*"]
+roughness = 0.45
+wetness = 0.33
+
+# forest and jungle: wet earth, river pebbles and rock
+[material."Nat_Ground_River_*"]
+roughness = 0.5
+wetness = 1.0
+[material."Nat_Ground_Gravel_*"]
+roughness = 0.7
+wetness = 0.33
+[material."Nat_Ground_Moss_*"]
+roughness = 0.75
+wetness = 0.66
+[material."Nat_Ground_GreenMud_*"]
+roughness = 0.5
+wetness = 1.0
+[material."Nat_Ground_Soil_*"]
+roughness = 0.8
+wetness = 0.33
+[material."Nat_Bark_*"]
+roughness = 0.85

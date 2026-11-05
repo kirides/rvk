@@ -29,6 +29,7 @@ struct Pass {
     const void* illum = nullptr;  // eSShaderMaterialIllumination* (null: no lighting written)
     std::uint8_t firstLight = 0;
     std::int32_t switchValue = 0;
+    bool tableLit = false;  // Full-owned lighting (gpu-scene.md 9.8): the lights come from the clustered table, not from this pass's light list
 };
 inline std::uint32_t passKind(std::uint32_t flags) { return flags >> 6 & 7u; }
 inline std::uint32_t passLights(std::uint32_t flags) { return flags >> 2 & 3u; }
@@ -53,6 +54,8 @@ struct PassInputs {
     std::uint32_t combi = 0;      // eMeshResource2::BindLightmaps' result (0 / 1)
     bool instanced = false;
     std::int32_t switchValue = 0;
+    bool tableLit = false;        // Full-owned lighting: ONE base pass with the maximum light permutation (3 lights; the sun as the engine's first pass),
+                                  // no additive passes: every light beyond comes from the table per pixel
 };
 // appends the passes (in the engine's order); returns how many were added
 std::size_t buildPasses(const PassInputs& in, std::vector<Pass>& out);
@@ -124,7 +127,9 @@ struct Instance {
 struct Batch {
     std::uint32_t first = 0, count = 0;  // instances [first, first + count); the last one's illumination / switch / flags draw it
 };
-void planBatches(std::span<const Instance> instances, std::uint32_t maxPerBatch, std::vector<Batch>& out);
+// tableLit (Full-owned lighting): the illumination's alpha factor (+8) and static lights (+0xd) no longer end a batch - the lights come from the table,
+// only the list (ambient SH / sun), the switch value, the overlay flags and a static SH object do
+void planBatches(std::span<const Instance> instances, std::uint32_t maxPerBatch, std::vector<Batch>& out, bool tableLit = false);
 
 // eCColorSrcConstantSwitch::SetSwitch 0x6c0c60: the colour index of switch value s (count +0x58, repeat +0x68)
 std::int32_t constantSwitchIndex(std::int32_t s, std::int32_t count, std::int32_t repeat);
@@ -226,6 +231,10 @@ struct TreeInstance {
     std::uint16_t start = 0;       // branches / fronds: the LOD's start index (+0xe8 / +0xf8 [lod]); leaves: 0
     const void* list = nullptr;    // the illumination's light list (illum +0)
     bool alone = false;            // the illumination has static SH (+0x90) or static lights (+0xd)
+    bool sun = false;              // the pass's sun bit (the list's sun flag and not the illumination's no-sun flag): table lighting merges by it
+    bool staticSh = false;         // the illumination has static SH (+0x90) alone (table lighting: static lights come from the table)
+    std::uint64_t lightSig = 0;    // table lighting: hash of the illumination's static light entries (0 = none): instances with equal ones share a batch
+    bool ownLights = false;        // table lighting: the object's own lights still reach the registers (dynamic lights of its list, static ones while the table is empty, no list)
 };
 struct TreeBatch {
     std::uint32_t first = 0, count = 0;  // instances [first, first + count) of the planned span; the last one's illumination draws it
@@ -235,7 +244,9 @@ struct TreeBatch {
 // ends before an instance when the batch is full (an 8-bit count equal to the render buffer's limit +0x128 + type), when its strip
 // length differs (byStrip: branches / fronds), or (byLight: the solid passes) when its light list differs or it or the batch's last
 // instance has the per-object light flags
-void planTreeBatches(std::span<const TreeInstance> instances, std::uint8_t limit, bool byLight, bool byStrip, std::vector<TreeBatch>& out);
+// tableMerge (table lighting with a complete table, gpu-scene.md 9.9): the light list and the static lights no longer cut a batch - only a different sun
+// flag (another pass structure) and static ambient (staticSh) do; the batch's ambient / sun values are its last instance's
+void planTreeBatches(std::span<const TreeInstance> instances, std::uint8_t limit, bool byLight, bool byStrip, std::vector<TreeBatch>& out, bool tableMerge = false);
 // the draw description a batch writes into the visual's record (the rest stays as the record has it)
 struct TreeRange {
     std::uint32_t numVertices = 0, startIndex = 0, primCount = 0;

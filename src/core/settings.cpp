@@ -787,6 +787,20 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .flags = Flag::NoAB | Flag::Hidden,  // the checkbox at the top of the menu
     });
+    r.api = &reg.add({
+        .key = "vulkan.api",
+        .label = "Graphics API",
+        .category = "Hardware",
+        .tab = kTabSystem,
+        .description = "Which graphics API the renderer uses. Vulkan is the default and the tested one. Direct3D 12 is experimental: it needs "
+                       "Shader Model 6.6 and falls back to Vulkan when the card or driver cannot do it. Frame generation and FSR upscaling "
+                       "(Image) and exclusive fullscreen are Vulkan only for now.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"vulkan", "d3d12"},
+        .optionLabels = {"Vulkan", "Direct3D 12 (experimental)"},
+        .flags = Flag::Restart | Flag::Advanced,
+    });
     r.adapter = &reg.add({
         .key = "vulkan.adapter",
         .label = "Graphics card",
@@ -1066,8 +1080,8 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "cut-outs solid), \"UV\" their texture coordinates. Needs ray tracing. Off renders exactly as without it.",
         .type = Type::Enum,
         .defaultValue = 0,
-        .options = {"off", "instances", "depth", "normals", "albedo", "albedo_split", "albedo_opaque", "uv"},
-        .optionLabels = {"Off", "Instances", "Depth check", "Normals", "Albedo", "Albedo (split)", "Albedo (cut-outs solid)", "UV"},
+        .options = {"off", "instances", "depth", "normals", "albedo", "albedo_split", "albedo_opaque", "uv", "roughness", "metalness"},
+        .optionLabels = {"Off", "Instances", "Depth check", "Normals", "Albedo", "Albedo (split)", "Albedo (cut-outs solid)", "UV", "Roughness (pack)", "Metalness (pack)"},
         .flags = Flag::NoAB | Flag::Debug,
         .requirements = caps::bit(caps::Cap::RayQuery),
     });
@@ -1611,6 +1625,61 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::Debug | Flag::NoAB,
         .requirements = caps::bit(caps::Cap::RayQuery),
     });
+    r.giReference = &reg.add({
+        .key = "gi.reference",
+        .label = "GI reference path tracer",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Developer view: the ground truth of the ray-traced lighting. Paths with next-event estimation from the same "
+                       "scene, materials and lights as the probes, accumulated while the camera and the light stand still (a "
+                       "still image converges over a few hundred frames), dumped to bin/rvk/gi_ref when gi.reference_max samples "
+                       "are reached. Views: the reference, the probe volume, the probes with the screen probes' factor, heat maps "
+                       "(red = the probes are too bright, blue = too dark), the indirect light alone. Needs the screen probes.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "reference", "ddgi", "screen", "error", "reference_indirect", "screen_indirect", "error_ddgi"},
+        .optionLabels = {"Off", "Reference", "Probe volume", "Probes + screen probes", "Error (probes + screen)", "Reference, indirect only",
+                         "Probes + screen, indirect only", "Error (probe volume)"},
+        .flags = Flag::NoAB | Flag::Debug,
+        .requirements = caps::bit(caps::Cap::RayQuery),
+    });
+    r.giReferenceSpp = &reg.add({
+        .key = "gi.reference_spp",
+        .label = "Reference samples per frame",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Samples per pixel the reference path tracer adds each frame (costs GPU time: 1 sample at 1280x720 is about 1 ms).",
+        .type = Type::Int,
+        .defaultValue = 4,
+        .min = 1,
+        .max = 64,
+        .flags = Flag::Debug | Flag::NoAB,
+    });
+    r.giReferenceMax = &reg.add({
+        .key = "gi.reference_max",
+        .label = "Reference samples (total)",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The accumulation stops at this many samples per pixel and its planes are written to bin/rvk/gi_ref "
+                       "(luminance-only dumps at 64, 128, ... on the way).",
+        .type = Type::Int,
+        .defaultValue = 1024,
+        .min = 1,
+        .max = 1000000,
+        .flags = Flag::Debug | Flag::NoAB,
+    });
+    r.giReferenceBounces = &reg.add({
+        .key = "gi.reference_bounces",
+        .label = "Reference bounces",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The most bounces of a reference path (Russian roulette ends most earlier).",
+        .type = Type::Int,
+        .defaultValue = 6,
+        .min = 1,
+        .max = 16,
+        .flags = Flag::Debug | Flag::NoAB,
+    });
     r.giLightCount = &reg.add({
         .key = "gi.light_count",
         .label = "GI light sources (most)",
@@ -1686,6 +1755,143 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .format = "%.2f m",
         .flags = Flag::Advanced,
     });
+    // ---- Full-owned lighting (enh/light_table.h, docs/research/gpu-scene.md 9.7) ----
+    r.lightingClustered = &reg.add({
+        .key = "lighting.clustered",
+        .label = "Clustered lights (Full)",
+        .category = "Lighting",
+        .tab = kTabDebug,
+        .description = "Full mode only (takes effect at the next start; default on, Full mode only: Wrapper is unchanged): the world's lights go into a GPU light table with a "
+                       "cluster grid and every lit surface takes its point lights per pixel from it, evaluated by the game's own shader, instead of "
+                       "the few lights the game attaches to each object. Lights beyond the game's per-object reach light the surfaces they reach. "
+                       "rvk.log `enh: lights:`.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::Restart | Flag::Debug,
+    });
+    r.lightingEnabled = &reg.add({
+        .key = "lighting.enabled",
+        .label = "Clustered lights on",
+        .category = "Lighting",
+        .tab = kTabDebug,
+        .description = "Run-time switch of the light table while lighting.clustered was on at start (off = the game's own per-object lights: A/B).",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::Debug,
+    });
+    r.lightingFullLit = &reg.add({
+        .key = "lighting.full_lit",
+        .label = "Table lighting (Full)",
+        .category = "Lighting",
+        .tab = kTabDebug,
+        .description = "Full mode with clustered lights (default on): every lit mesh / tree draw is composed with ONE pass of the 3-light "
+                       "shader permutation and takes all its point lights from the light table per pixel: the game's per-object light lists are no longer "
+                       "read, the additive passes of objects with more than 3 lights are gone and tree / mesh batches merge more. The picture differs "
+                       "from the game's (more lights where the game gave an object none or few). Run-time switch. rvk.log `native: table lighting`.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::Debug,
+    });
+    r.lightingTableComplete = &reg.add({
+        .key = "lighting.table_complete",
+        .label = "Table lighting: skip per-object light reads",
+        .category = "Lighting",
+        .tab = kTabDebug,
+        .description = "With table lighting on and the light table complete (the engine's static light tree returned lights, built every frame: no latency), "
+                       "lit draws do not read their light list's / illumination's point lights at all (default off: a registry that holds lights elsewhere "
+                       "may still miss the local ones, which dimmed the monastery's candles; off = the engine's own first three lights stay in the registers "
+                       "as the fallback). Run-time switch.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::Debug,
+    });
+    r.lightingTreeMerge = &reg.add({
+        .key = "lighting.tree_merge",
+        .label = "Table lighting: merge tree batches",
+        .category = "Lighting",
+        .tab = kTabDebug,
+        .description = "With table lighting on, consecutive SpeedTree instances of one pass merge into one draw whenever they share the sun flag and carry no "
+                       "static ambient (the light list no longer cuts a batch); the batch's ambient is its last instance's. Run-time switch (A/B).",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::Debug,
+    });
+    r.lightingStyle = &reg.add({
+        .key = "lighting.style",
+        .label = "Light style",
+        .category = "Lighting",
+        .description = "Original: the game's light falloff, so the image reads like the game. Physical: lamps follow an inverse-square law with a smooth "
+                       "reach (brighter close to a lamp, gentler far away) and surfaces get a physically based specular highlight with energy-conserving diffuse (the sun, sky and "
+                       "exposure stay the game's). Needs clustered lights (Full mode); the shader code for it is loaded only when the game STARTS with Physical selected "
+                       "(a later switch changes the lamps' distance law only).",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"original", "physical"},
+        .optionLabels = {"Original", "Physical"},
+    });
+    r.lightingDebug = &reg.add({
+        .key = "lighting.debug",
+        .label = "Lights debug view",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Developer view of the light table: \"Cluster counts\" shows the lights in each pixel's cluster (blue few, red 16+, black none), "
+                       "\"Slots filled\" how many of the shader's light slots the table fills (red 1, green 2, yellow 3, dim blue none), \"Light shadows\" the ray-traced lamp shadows (white lit, red shadowed, dark blue no shadow-casting lamp).",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "clusters", "slots", "shadows"},
+        .optionLabels = {"Off", "Cluster counts", "Slots filled", "Light shadows"},
+        .flags = Flag::NoAB | Flag::Debug,
+    });
+    r.lightingCollect = &reg.add({
+        .key = "debug.light_collect",
+        .label = "Light table: collection radius",
+        .category = "Lighting",
+        .tab = kTabDebug,
+        .description = "Developer: the distance over which the light table collects lights (the near grid ends at 16,000, the far level at 96,000).",
+        .type = Type::Float,
+        .defaultValue = 96000,
+        .min = 16000,
+        .max = 96000,
+        .format = "%.0f",
+        .flags = Flag::Advanced | Flag::Debug,
+    });
+    r.lightingShadows = &reg.add({
+        .key = "lighting.light_shadows",
+        .label = "Lamp shadows",
+        .category = "Lighting",
+        .description = "Ray-traced shadows of the lamps, torches and candles: the nearest lights (Nearby: 8 within 25 m, Many: 31 within 60 m) shade the surfaces they "
+                       "reach with soft shadows traced against the world, so far more lights than the game's own three shadowed lights cast shadows. Full mode "
+                       "with the clustered lights; needs a graphics card with ray tracing (without one the game's own point-light shadows stay).",
+        .type = Type::Enum,
+        .defaultValue = 1,
+        .options = {"off", "nearby", "many"},
+        .optionLabels = {"Off", "Nearby", "Many"},
+        .requirements = caps::bit(caps::Cap::RayQuery),
+        .unmetValue = 0,
+    });
+    r.lightingShadowQuality = &reg.add({
+        .key = "lighting.light_shadow_quality",
+        .label = "Lamp shadow quality",
+        .category = "Lighting",
+        .description = "Low: leaves and fences cast solid shadows. Medium: leaves cast their own shape. High: two rays per light, smoother soft edges.",
+        .type = Type::Enum,
+        .defaultValue = 1,
+        .options = {"low", "medium", "high"},
+        .optionLabels = {"Low", "Medium", "High"},
+        .flags = Flag::Advanced,
+    });
+    r.lightingShadowRadius = &reg.add({
+        .key = "lighting.light_shadow_radius",
+        .label = "Lamp size (shadow softness)",
+        .category = "Lighting",
+        .description = "The size of a lamp's flame for its shadow: a larger value gives softer shadow edges.",
+        .type = Type::Float,
+        .defaultValue = 20,
+        .min = 2,
+        .max = 80,
+        .format = "%.0f cm",
+        .flags = Flag::Advanced,
+    });
     r.gbufferDebug = &reg.add({
         .key = "gbuffer.debug",
         .label = "G-buffer debug view",
@@ -1695,8 +1901,118 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "material), \"Motion\" the motion vectors (hue = direction), \"AO\" the ambient occlusion.",
         .type = Type::Enum,
         .defaultValue = 0,
-        .options = {"off", "normals", "motion", "ao", "screen_gi"},
-        .optionLabels = {"Off", "Normals", "Motion", "AO", "Screen probes (GI factor)"},
+        .options = {"off", "normals", "motion", "ao", "screen_gi", "material"},
+        .optionLabels = {"Off", "Normals", "Motion", "AO", "Screen probes (GI factor)", "Material (pack: roughness / metalness)"},
+        .flags = Flag::NoAB | Flag::Debug,
+    });
+
+    // ---- Graphics tab: material pack (enh/material_pack.h, docs/research/material-pack.md) ----
+    r.materialsPack = &reg.add({
+        .key = "materials.pack",
+        .label = "Material pack",
+        .category = "Materials",
+        .description = "Loads extra material data (roughness / metalness / emissive maps) from the folder bin\\rvk\\materialpack and gives "
+                       "the materials in it a physically based specular response and sky reflections. Materials without an entry look "
+                       "exactly as before. Takes effect at the next start.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::Restart,
+    });
+    r.materialsQuality = &reg.add({
+        .key = "materials.quality",
+        .label = "Material pack quality",
+        .category = "Materials",
+        .description = "Low: sun specular and sky reflection. Medium: + the nearby lights' specular. High: reserved for traced reflections.",
+        .type = Type::Enum,
+        .defaultValue = 2,
+        .options = {"off", "low", "medium", "high"},
+        .optionLabels = {"Off", "Low", "Medium", "High"},
+    });
+    r.materialsSpecular = &reg.add({
+        .key = "materials.specular",
+        .label = "Pack specular strength",
+        .category = "Materials",
+        .description = "Strength of the lights' specular highlights on materials with pack data.",
+        .type = Type::Float,
+        .defaultValue = 1,
+        .min = 0,
+        .max = 2,
+        .format = "%.2f",
+        .flags = Flag::Advanced,
+    });
+    r.materialsEnvironment = &reg.add({
+        .key = "materials.environment",
+        .label = "Pack reflection strength",
+        .category = "Materials",
+        .description = "Strength of the sky reflection on materials with pack data.",
+        .type = Type::Float,
+        .defaultValue = 1,
+        .min = 0,
+        .max = 2,
+        .format = "%.2f",
+        .flags = Flag::Advanced,
+    });
+    r.materialsRoughness = &reg.add({
+        .key = "materials.default_roughness",
+        .label = "Default roughness",
+        .category = "Materials",
+        .description = "Roughness of pack entries that have no roughness map or constant.",
+        .type = Type::Float,
+        .defaultValue = 0.7,
+        .min = 0,
+        .max = 1,
+        .format = "%.2f",
+        .flags = Flag::Advanced,
+    });
+    r.materialsBudget = &reg.add({
+        .key = "materials.budget",
+        .label = "Pack texture memory",
+        .category = "Materials",
+        .description = "Maximum memory of the decoded pack textures. Takes effect at the next start.",
+        .type = Type::Int,
+        .defaultValue = 256,
+        .min = 16,
+        .max = 2048,
+        .format = "%.0f MiB",
+        .flags = Flag::Restart | Flag::Advanced,
+    });
+    r.materialsWetness = &reg.add({
+        .key = "materials.wetness",
+        .label = "Pack wetness",
+        .category = "Materials",
+        .description = "How wet the materials look that have a wetness value in the pack: 0 = dry, 1 = as the pack says (smoother, a little darker).",
+        .type = Type::Float,
+        .defaultValue = 1,
+        .min = 0,
+        .max = 1,
+        .format = "%.2f",
+        .flags = Flag::Advanced,
+    });
+    r.materialsAlternate = &reg.add({
+        .key = "materials.alternate",
+        .label = "Pack variants on / off every N frames",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Test switch: every N frames the material pack's pixel shader variants are bypassed (the engine's own shaders draw), so two "
+                       "pictures N frames apart in a frozen scene show exactly what the variants change where no entry matches. 0 = off.",
+        .type = Type::Int,
+        .defaultValue = 0,
+        .min = 0,
+        .max = 600,
+        .format = "%.0f frames",
+        .flags = Flag::NoAB | Flag::Debug,
+    });
+    r.materialsDebug = &reg.add({
+        .key = "materials.debug",
+        .label = "Material pack debug view",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Developer view of the pack data on the draws that have an entry: roughness, metalness, the packed map (red occlusion, "
+                       "green roughness, blue metalness) or a green tint (coverage: which draws matched).",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "roughness", "metalness", "orm", "coverage"},
+        .optionLabels = {"Off", "Roughness", "Metalness", "Packed map", "Coverage"},
         .flags = Flag::NoAB | Flag::Debug,
     });
 
@@ -1927,6 +2243,20 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 4,
         .format = "%.1fx",
     });
+    r.skyCubeInterval = &reg.add({
+        .key = "debug.sky_cube_interval",
+        .label = "Sky cube refresh interval (ms)",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "While the enhanced water is on, the game's sky environment cube (reflected by the water) is redrawn whole. The sky "
+                       "changes slowly: every this many milliseconds is enough (a lightning flash shows up in the reflection at most this "
+                       "late). 0 = every frame.",
+        .type = Type::Int,
+        .defaultValue = 100,
+        .min = 0,
+        .max = 1000,
+        .flags = Flag::Debug,
+    });
     r.shadowStride = &reg.add({
         .key = "debug.shadow_stride",
         .label = "Sun shadow maps redrawn every n-th frame",
@@ -2103,6 +2433,49 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 1000,
         .flags = Flag::NoAB | Flag::Debug,
     });
+    r.nativePacketCache = &reg.add({
+        .key = "native.packet_cache",
+        .label = "Native frame: retained draw packets",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode: the finished packet of a composed static-mesh / tree draw of the main view is kept and replayed while its description is unchanged "
+                       "(prepareDraw and most state setters skipped). 0 off, 1 on, 2 on + every 10th frame the fresh packet is compared with the retained one, "
+                       "3 verify every frame (rvk.log `native: packet cache`, DIFFERING must stay 0), 4 = on without retaining the variant draws (GI / material pack / billboard fade: the "
+                       "behaviour before retained-signals.md 13, A/B). Off while a compare, the frame tap or coverage is on, and per draw "
+                       "while an enhancement needs prepareDraw (replacers, G-buffer variants, tint, upscaling jitter).",
+        .type = Type::Int,
+        .defaultValue = 1,
+        .min = 0,
+        .max = 4,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
+    r.nativeGpuScene = &reg.add({
+        .key = "native.gpu_scene",
+        .label = "Native frame: GPU scene tables",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "GPU-driven scene (docs/research/gpu-scene.md). 1 = verify the signal-fed instance table (cache-in / out, world matrix) against the engine's ops "
+                       "(rvk.log `scene table:`, DIFFERING and unresolved must stay 0). 2 = also keep the table on the GPU (gpuscene/instance_buffer: batched uploads, "
+                       "every 240th frame a read-back compared with the uploaded copy; rvk.log `gpu scene:`, DIFFERING must stay 0). The CPU table is always maintained.",
+        .type = Type::Int,
+        .defaultValue = 0,
+        .min = 0,
+        .max = 2,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
+    r.nativeOpts = &reg.add({
+        .key = "native.cpu_opts",
+        .label = "Native frame: CPU optimizations (bit mask)",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full-mode CPU pass (performance.md 22): bit 1 sky vertices kept across cube faces / frames, 2 composition caches, "
+                       "4 issue fast paths, 8 sky/dynamic vertex copies. Each bit is an A/B switch; 0 = the old behaviour.",
+        .type = Type::Int,
+        .defaultValue = 255,
+        .min = 0,
+        .max = 255,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
     r.nativeLeanRestore = &reg.add({
         .key = "native.lean_restore",
         .label = "Native frame: device restore around lean ops",
@@ -2173,6 +2546,96 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 0,
         .flags = Flag::NoAB | Flag::Debug,
+    });
+    r.fsReadCache = &reg.add({
+        .key = "debug.fs_read_cache",
+        .label = "Read-ahead of packed files (KiB)",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Every read from a file inside the game's data volumes is two system calls (seek + read), however small; loading "
+                       "a world reads millions of bytes a few at a time. The read-ahead buffer (per open file, grows with sequential "
+                       "reads up to this size) serves them from memory. The data read is the same. 0 = off.",
+        .type = Type::Int,
+        .defaultValue = 64,
+        .min = 0,
+        .max = 1024,
+        .flags = Flag::Debug,
+    });
+    r.fastAbsorb = &reg.add({
+        .key = "debug.fast_absorb",
+        .label = "Cloud absorption image by sliding windows",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The game computes the cloud absorption image with 128 integer divisions per pixel whenever a cloud texture is "
+                       "set (every world load). 1 = the same image by sliding window sums (bit-identical), 0 = the game's loop, "
+                       "2 = the game's loop and compare the image with ours (rvk.log).",
+        .type = Type::Int,
+        .defaultValue = 1,
+        .min = 0,
+        .max = 2,
+        .flags = Flag::Debug,
+    });
+    r.soundCompressed = &reg.add({
+        .key = "debug.sound_compressed",
+        .label = "Short sounds stay compressed in memory",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The game decodes sounds below a size limit completely when it creates them (1 - 18 ms on the game thread each time one leaves the cache and plays again). On = FMOD keeps them compressed and decodes them while they play, on its own mixer thread. The sound is the same codec output; not checked by ear.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
+    r.streamStats = &reg.add({
+        .key = "debug.stream_stats",
+        .label = "Loading statistics",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "1 = times the packed-file reads and FMOD sound creation (rvk.log 'engine: stream:' every 5 s), 2 = also "
+                       "compares every buffered read with the game's own read of the same bytes.",
+        .type = Type::Int,
+        .defaultValue = 0,
+        .min = 0,
+        .max = 2,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
+    r.xinputInterval = &reg.add({
+        .key = "debug.xinput_interval",
+        .label = "Gamepad poll interval when disconnected (ms)",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The game asks the XInput library for four gamepads every frame; a disconnected one costs ~0.15 ms each frame. "
+                       "After a 'not connected' answer the index is asked again only after this many milliseconds (a connected pad "
+                       "is polled every frame). 0 = every frame, as the game does.",
+        .type = Type::Int,
+        .defaultValue = 1000,
+        .min = 0,
+        .max = 5000,
+        .flags = Flag::Debug,
+    });
+    r.oceanSpd = &reg.add({
+        .key = "debug.ocean_spd",
+        .label = "FFT ocean: mip chains by compute",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The FFT ocean's displacement / derivative mip chains: on = two compute dispatches per image (a single-pass "
+                       "downsampler in the style of FidelityFX SPD, ocean_mips.comp), off = one blit per level (the old path, for A/B).",
+        .type = Type::Bool,
+        .defaultValue = 1,
+        .flags = Flag::NoAB | Flag::Debug,
+    });
+    r.fastSort = &reg.add({
+        .key = "debug.fast_sort",
+        .label = "Typed sort of the render-op lists",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "The game sorts its z / solid / alpha op lists with the CRT's qsort and a function-pointer comparator. 1 = the "
+                       "same algorithm with inlined comparators (bit-identical result, less CPU), 0 = the game's qsort, 2 = typed sort "
+                       "and compare every list with the game's result (rvk.log error on a difference).",
+        .type = Type::Int,
+        .defaultValue = 1,
+        .min = 0,
+        .max = 2,
+        .flags = Flag::Debug,
     });
     r.prefetchStride = &reg.add({
         .key = "debug.prefetch_stride",

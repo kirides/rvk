@@ -645,3 +645,7 @@ in `out/fsrexposure` (git-ignored). rvk_tests: settings count 115.
 
 **Open**: adaptation in motion (the scene was frozen), the FSR 4 (ML) provider with the engine exposure, only wrapper + full at
 Quality 1.5x run.
+
+## 21. D3D12 backend (WP7, 2026-11-03)
+
+The DX12 loader / upscaler DLLs (`amd_fidelityfx_{loader,upscaler}_dx12.dll`, SDK 2.4.0) behind the same `rhi::Upscaler` (`src/rhi/d3d12/d3d12_ffx.cpp`): offers 4.1.2 (ML), 3.1.6 and 2.3.4 on the RX 7900 XTX; both providers pass `rvk_rhitest --fsr --validation` and run in game (`upscale.mode=native_aa` with FSR 3.1.6, `quality` with `upscale.provider=fsr4`). Pictures match the Vulkan ones at the same spots (PSNR 27.6 - 32.4 dB, the same range as Vulkan native AA vs Vulkan Quality). Resource states are FFX `PIXEL_COMPUTE_READ` (= ALL_SHADER_RESOURCE) / `UNORDERED_ACCESS`; the loader name comes from `rhi::fidelityFxLoader`.

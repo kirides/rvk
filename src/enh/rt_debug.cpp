@@ -17,6 +17,8 @@ RtDebug::Mode RtDebug::parse(std::string_view option) {
     if (option == "normals") return Mode::Normals;
     if (option == "albedo" || option == "albedo_split" || option == "albedo_opaque") return Mode::Albedo;
     if (option == "uv") return Mode::Uv;
+    if (option == "roughness") return Mode::Roughness;
+    if (option == "metalness") return Mode::Metalness;
     return Mode::Off;
 }
 
@@ -39,7 +41,7 @@ void RtDebug::readProbes(std::uint32_t slot) {
     const auto* r = static_cast<const RtDebugProbe*>(probes_[slot]->map());
     const auto now = std::chrono::steady_clock::now();
     // the material views every second (the probe pixels of a capture's frozen frames get logged)
-    const bool materialView = mode_ == Mode::Albedo || mode_ == Mode::Uv;
+    const bool materialView = mode_ == Mode::Albedo || mode_ == Mode::Uv || mode_ == Mode::Roughness || mode_ == Mode::Metalness;
     if (now - probeLogged_ >= std::chrono::seconds(materialView ? 1 : 5)) {
         probeLogged_ = now;
         static constexpr const char* kCodes[] = {"nothing", "match", "traced farther", "traced closer", "missed (raster has geometry)",
@@ -114,12 +116,14 @@ bool RtDebug::ensurePipelines(VkFormat target) {
     if (!compute_) {
         rhi::ComputePipelineDesc cd;
         cd.cs.spirv = shader::embedded::spirv("rt/rt_debug.comp");
+        cd.cs.dxil = shader::embedded::dxilOnDemand("rt/rt_debug.comp");
         cd.name = "rt.debug compute";
         compute_ = rdev->createComputePipeline(cd);
     }
     if (!depthCompute_) {
         rhi::ComputePipelineDesc cd;
         cd.cs.spirv = shader::embedded::spirv("rt/rt_debug_depth.comp");
+        cd.cs.dxil = shader::embedded::dxilOnDemand("rt/rt_debug_depth.comp");
         cd.name = "rt.debug depth";
         depthCompute_ = rdev->createComputePipeline(cd);
     }
@@ -127,7 +131,9 @@ bool RtDebug::ensurePipelines(VkFormat target) {
     if (!composite_) {
         rhi::GraphicsPipelineDesc gd;
         gd.vs.spirv = shader::embedded::spirv("debug/fullscreen_rhi.vert");
+        gd.vs.dxil = shader::embedded::dxilOnDemand("debug/fullscreen_rhi.vert");
         gd.ps.spirv = shader::embedded::spirv("rt/rt_debug.frag");
+        gd.ps.dxil = shader::embedded::dxilOnDemand("rt/rt_debug.frag");
         gd.colorFormats[0] = target;
         gd.blend.blendEnable = VK_TRUE;  // src alpha over; the target's alpha kept
         gd.blend.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;

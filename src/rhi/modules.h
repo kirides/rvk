@@ -24,6 +24,12 @@ struct ImTextureData;
 
 namespace rvk::rhi {
 
+// The FidelityFX loader DLL of a backend (third_party/amd_fidelityfx/signedbin; it finds its effect DLLs next to itself): amd_fidelityfx_loader_vk.dll /
+// amd_fidelityfx_loader_dx12.dll, in `dir` (binvk)
+inline std::filesystem::path fidelityFxLoader(const std::filesystem::path& dir, Backend backend) {
+    return dir / (backend == Backend::D3D12 ? "amd_fidelityfx_loader_dx12.dll" : "amd_fidelityfx_loader_vk.dll");
+}
+
 // ---- upscaler (FidelityFX Super Resolution) --------------------------------------------------------------------------------------
 
 // one upscaler provider the API offers

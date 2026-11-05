@@ -17,25 +17,25 @@ float3 giPointLights(GiPassParams p, RvkFrame f, float3 P, float3 N, float3 G, f
     if (n == 0u) return float3(0.0, 0.0, 0.0);
     float total = 0.0;
     for (uint i = 0u; i < n; ++i) {
-        float4 lp = p.Get().lights[i * 2u];
+        float4 lp = giLight(i * 2u);
         float3 d = lp.xyz - P;
         float d2 = dot(d, d);
         float3 L = d * rsqrt(max(d2, 1e-4));
         float fall = 1.0 - clamp(d2 * lp.w, 0.0, 1.0);
         float k = clamp(dot(N, L), 0.0, 1.0) * clamp(4.0 * dot(G, L), 0.0, 1.0) * fall;
-        total += k * dot(p.Get().lights[i * 2u + 1u].rgb, float3(0.333, 0.333, 0.333));
+        total += k * dot(giLight(i * 2u + 1u).rgb, float3(0.333, 0.333, 0.333));
     }
     if (total <= 1e-6) return float3(0.0, 0.0, 0.0);
     float pick = u * total;
     for (uint i = 0u; i < n; ++i) {
-        float4 lp = p.Get().lights[i * 2u];
+        float4 lp = giLight(i * 2u);
         float3 d = lp.xyz - P;
         float d2 = dot(d, d);
         float dist = sqrt(max(d2, 1e-4));
         float3 L = d / dist;
         float fall = 1.0 - clamp(d2 * lp.w, 0.0, 1.0);
         float k = clamp(dot(N, L), 0.0, 1.0) * clamp(4.0 * dot(G, L), 0.0, 1.0) * fall;
-        float3 col = p.Get().lights[i * 2u + 1u].rgb;
+        float3 col = giLight(i * 2u + 1u).rgb;
         float w = k * dot(col, float3(0.333, 0.333, 0.333));
         if (w <= 0.0) continue;
         pick -= w;
@@ -69,7 +69,7 @@ float4 giShadeRay(GiPassParams p, RvkFrame f, RvkGiVolume v, float3 origin, floa
     float spread = p.Get().shade.w;
     RvkRtHit h = rvkRtTraceClosest(f, origin, dir, 1.0, tMax, 0.0, spread, p.Get().flags.x);
     if (!h.hit) {
-        result.rgb = rvkGiSkyRadiance(p.Get().sky, dir);
+        result.rgb = (rvkGiExp(v) & 4u) != 0u ? float3(0.0, 0.0, 0.0) : rvkGiSkyRadiance(p.Get().sky, dir);
         return result;
     }
     RvkRtRecord r = rvkRtRecord(f, h.record);
@@ -98,7 +98,9 @@ float4 giShadeRay(GiPassParams p, RvkFrame f, RvkGiVolume v, float3 origin, floa
         E += p.Get().sunColor.rgb * (nl * vis);
         Esun = p.Get().sunColor.rgb * (nl * vis);
     }
-    Epoint = giPointLights(p, f, s.position, N, G, u);
+    const uint ex = rvkGiExp(v);
+    // (EXP 2: the probes carry the point lights' direct light already: do not count it twice at the hit)
+    if ((ex & 2u) == 0u || (p.Get().flags.z & 1u) == 0u) Epoint = giPointLights(p, f, s.position, N, G, u);
     E += Epoint;
     // the probes' irradiance at the hit (last frames': multi-bounce); where no probe covers the hit, the engine's outdoor
     // ambient
@@ -107,8 +109,9 @@ float4 giShadeRay(GiPassParams p, RvkFrame f, RvkGiVolume v, float3 origin, floa
     if (rvkGiLookupHit(v, s.position + N * 4.0, N, regs)) {
         Ebounce = max(rvkGiEvalRegs(regs, N), float3(0.0, 0.0, 0.0)) * p.Get().shade.x;
     } else {
-        Ebounce = max(rvkGiEvalRegs(p.Get().sky, N), float3(0.0, 0.0, 0.0)) * p.Get().shade.x;
+        Ebounce = (ex & 1u) != 0u ? float3(0.0, 0.0, 0.0) : max(rvkGiEvalRegs(p.Get().sky, N), float3(0.0, 0.0, 0.0)) * p.Get().shade.x;
     }
+    if ((ex & 8u) != 0u) Ebounce = float3(0.0, 0.0, 0.0);
     E += Ebounce;
     // self-illuminated surfaces (lava, lamp glass: rtgi.md 19) emit their diffuse colour; the engine adds the self-illumination
     // after the pow, so its acc-unit equivalent is the colour ^ 2.2; flags.w = the gain (gi.emissive)

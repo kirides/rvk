@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include <spdlog/spdlog.h>
+
 #include "rhi/game_device.h"
 #include "vk/debug_names.h"
 #include "vk/probe.h"
@@ -14,7 +16,7 @@ namespace rvk::rhi {
 
 std::vector<AdapterInfo> enumerateAdapters(Backend backend) {
     std::vector<AdapterInfo> out;
-    if (backend != Backend::Vulkan) return out;  // (DXGI enumeration comes with the D3D12 game device)
+    if (backend == Backend::D3D12) return enumerateD3D12Adapters();
     if (volkInitialize() != VK_SUCCESS) return out;
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     app.apiVersion = VK_API_VERSION_1_3;
@@ -49,6 +51,15 @@ std::vector<AdapterInfo> enumerateAdapters(Backend backend) {
     }
     vkDestroyInstance(instance, nullptr);
     return out;
+}
+
+void probeBackend(Backend backend) {
+    if (backend == Backend::Vulkan) vk::probe();
+    else {
+        std::string reason;
+        const bool ok = d3d12Usable(-1, &reason);
+        spdlog::info("probe: D3D12: {}", ok ? std::string("usable (feature level 12_0, Shader Model 6.6, binding tier 3)") : reason);
+    }
 }
 
 void setDebugNames(bool enabled) { vk::names::setEnabled(enabled); }

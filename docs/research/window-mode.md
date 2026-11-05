@@ -69,7 +69,7 @@ the monitor's size was clamped by Windows (client 2560x1421 for 2560x1440 with a
 
 ## 3. Frame pacer, overlay
 
-`vk::FramePacer` already re-queries the refresh rate when `MonitorFromWindow` changes (once per second). The overlay
+`pacing::FramePacer` already re-queries the refresh rate when `MonitorFromWindow` changes (once per second). The overlay
 (`src/overlay`) sizes ImGui from the swapchain extent and reads client coordinates from the window procedure: it follows
 the new size without changes ([V] F10 after four mode switches: "overlay: opened").
 

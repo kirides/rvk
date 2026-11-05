@@ -2,7 +2,7 @@
 
 // Frame generation with AMD FidelityFX (FSR 3 frame generation; the ML provider of FSR 4 where the API offers it): stages F2 / F3
 // of docs/research/frame-generation.md. Two ways to show the frames:
-//   * the AMD frame generation swapchain (default, F3): vk::Swapchain creates AMD's swapchain (vk/fg_swapchain.h), the generator's
+//   * the AMD frame generation swapchain (default, F3): the backend's presenter creates AMD's swapchain (vk/fg_swapchain.h), the generator's
 //     context is configured with its callbacks, the interpolation runs inside the swapchain's present and AMD paces the generated
 //     and the real frame; the overlay is drawn by the present callback on both. This file records the Prepare (depth, motion,
 //     camera) and configures the generator every frame;

@@ -47,7 +47,9 @@ public:
     bool uploadBegun() const { return slots_[slot()].uploadBegun; }
     // statistics: ms the last begin() waited for its slot (the CPU ran a full slot ahead of the GPU); ring bytes handed out
     double lastSlotWaitMs() const { return lastSlotWaitMs_; }
-    std::uint64_t ringBytes() const { return ringBytes_; }
+    std::uint64_t ringBytes() const { return ring_->bytes; }
+    // the ring's current-chunk state lives in a rhi::RingChunkState (the game device's inline allocRing front end shares it); default: an own one
+    void attachRing(rhi::RingChunkState* state) { ring_ = state != nullptr ? state : &ownRing_; }
     std::uint64_t completedValue() const;
     void waitFor(std::uint64_t value) const;
     void waitIdle();
@@ -66,7 +68,6 @@ private:
         std::uint8_t* ptr = nullptr;
         VkDeviceAddress address = 0;
         VkDeviceSize size = 0;
-        VkDeviceSize used = 0;
     };
     struct Slot {
         VkCommandPool pool = VK_NULL_HANDLE;
@@ -86,7 +87,8 @@ private:
     std::uint64_t frameValue_ = 1;  // value of the frame being recorded / next to record
     bool recording_ = false;
     double lastSlotWaitMs_ = 0.0;
-    std::uint64_t ringBytes_ = 0;
+    rhi::RingChunkState ownRing_;
+    rhi::RingChunkState* ring_ = &ownRing_;
 
     std::vector<Chunk> chunks_;
     std::vector<std::size_t> freeChunks_;

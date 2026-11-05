@@ -55,6 +55,8 @@ param(
     [string[]]$Setting = @(),
     # Vulkan run: render mode (run.ps1 -Mode): wrapper (default; old name vulkan) or full (the native frame takes over)
     [ValidateSet('wrapper', 'full', 'vulkan')][string]$Mode = 'wrapper',
+    # graphics API of the renderer run (run.ps1 -Api): vulkan (default) or d3d12
+    [ValidateSet('vulkan', 'd3d12')][string]$Api = 'vulkan',
     [switch]$NoImages
 )
 $ErrorActionPreference = 'Stop'
@@ -139,7 +141,8 @@ if (-not $Calibrate) {
     if (-not (Test-Path (Join-Path $src 'd3d9.dll'))) { throw "$src\d3d9.dll not built" }
     $snap = Join-Path $repo "build\$snapConfig"
     New-Item -ItemType Directory -Force $snap | Out-Null
-    foreach ($f in 'd3d9.dll', 'd3d9.pdb') { if (Test-Path (Join-Path $src $f)) { Copy-Item (Join-Path $src $f) $snap -Force } }
+    foreach ($f in 'd3d9.dll', 'd3d9.pdb', 'dxcompiler.dll', 'dxil.dll') { if (Test-Path (Join-Path $src $f)) { Copy-Item (Join-Path $src $f) $snap -Force } }
+    if (Test-Path (Join-Path $src 'd3d12')) { Copy-Item (Join-Path $src 'd3d12') $snap -Recurse -Force }  # the DX12 backend's Agility SDK (run.ps1 deploys it)
     Write-Host ("renderer snapshot: {0} ({1})" -f (Join-Path $snap 'd3d9.dll'), (Get-Item (Join-Path $src 'd3d9.dll')).LastWriteTime.ToString('s'))
 }
 
@@ -159,7 +162,7 @@ function Invoke-GameRun([string]$tag, [string]$dir, [bool]$d3d9) {
         GameDir = $GameDir; Instance = $Instance; Mods = @('rvkcompare'); Scenario = 'rvkcompare'; WaitForResult = $true
         Seconds = $Seconds; Param = $p; WindowSize = $WindowSize; Config = $snapConfig
     }
-    if ($d3d9) { $runArgs.NoRenderer = $true } else { $runArgs.Mode = $Mode; $runArgs.MaxFps = $MaxFps; if ($Validation) { $runArgs.Validation = $true }; if ($Setting) { $runArgs.Setting = $Setting } }
+    if ($d3d9) { $runArgs.NoRenderer = $true } else { $runArgs.Mode = $Mode; $runArgs.Api = $Api; $runArgs.MaxFps = $MaxFps; if ($Validation) { $runArgs.Validation = $true }; if ($Setting) { $runArgs.Setting = $Setting } }
     Write-Host "==== run $tag ($(if ($d3d9) { 'game D3D9' } else { "Vulkan, $Mode" })) -> $dir"
     $t0 = Get-Date
     & (Join-Path $PSScriptRoot 'run.ps1') @runArgs | Out-Host

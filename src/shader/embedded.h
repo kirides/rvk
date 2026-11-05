@@ -23,6 +23,12 @@ std::span<const std::uint32_t> spirvVariant(std::string_view name, std::string_v
 std::span<const std::uint8_t> dxil(std::string_view name);
 std::span<const std::uint8_t> dxilVariant(std::string_view name, std::string_view defines);
 
+// The DX12 backend asks for DXIL, the Vulkan one never pays for it: setDxilWanted(true) once at start (the game device's backend); dxilOnDemand(name) is
+// dxil(name) when wanted, else an empty span. The passes fill `Shader{.spirv, .dxil}` with both.
+void setDxilWanted(bool wanted);
+std::span<const std::uint8_t> dxilOnDemand(std::string_view name);
+std::span<const std::uint8_t> dxilVariantOnDemand(std::string_view name, std::string_view defines);
+
 // HLSL sources embedded from shaders/** (*.hlsl, *.hlsli); name = path below shaders/ with '/' ("include/rvk_abi.hlsli")
 struct SourceFile {
     std::string_view name;

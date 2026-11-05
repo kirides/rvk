@@ -485,3 +485,8 @@ image's case) are decoded on the CPU from the read-back level, honouring both re
   frames, merged indirect draws) are the next lever, not more engine code removal.
 * The per-op restore (0.07 ms) and the tap's copy + resolve stay; particles' own permutation compile and first-frame cases stay the
   engine's (13 - 25 draws per run); the crosshair indicator's mesh not met; HDRI not re-run under O3.
+
+## Full CPU pass 4 (2026-11-04)
+
+Full - Wrapper at the savegame 2.34 -> 1.97 ms (Vulkan; D3D12 +1.93): sky cube star cache, inline register-run copies, batched tree reads (`native.cpu_opts`). Profile, bounds of the streaming-draw and
+worker-composition ideas, and why the remaining ~2 ms is spread over composition (~1.0 ms above the engine's slot code), sky cube, shadow views and effect units: performance.md 24.

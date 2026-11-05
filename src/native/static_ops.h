@@ -107,6 +107,18 @@ public:
     void setLean(bool on, int check);
     // native.lean_restore (O2b measurement): false = no device save / restore around a lean op's draws
     void setLeanRestore(bool on) { leanRestore_ = on; }
+    // Full-owned lighting (lighting.full_lit; gpu-scene.md 9.8): lit mesh / tree / vegetation draws take ONE base pass with the 3-light permutation, their
+    // point lights come from the clustered table (the light registers are written zero; the material variant fills them per pixel), the additive passes of
+    // objects with > 3 lights are gone, the batches no longer end on the illumination's static lights / alpha factor. Pictures differ from the engine's.
+    void setTableLit(bool on);
+    // packet retention (native.packet_cache; retained-signals.md 8): 0 off, 1 on, 2 on + verify every 10th frame, 3 on + verify every frame. Only
+    // set when no compare / tap / coverage is active (they need prepareDraw's tap)
+    void setPacketCache(int mode) {
+        packetMode_ = mode;
+        if (mode == 0) packets_.clear();
+    }
+    // native.gpu_scene (docs/research/gpu-scene.md): >= 1 checks every mesh / tree / actor op's entity against the signal-fed instance table
+    void setGpuScene(int mode) { gpuScene_ = mode; }
     // V3 retained composition (native.retained / native.retained_groups / native.retained_check)
     void setRetained(bool on, int groups, bool check);
     bool inSkyCube() const { return inSkyCube_; }
@@ -140,6 +152,8 @@ private:
         sc::CompareCounts window, total;
         std::array<std::uint64_t, static_cast<std::size_t>(Skip::Count)> skips{}, skipsTotal{};
         std::uint64_t issuedDraws = 0, issuedOps = 0, droppedDraws = 0, ownChecked = 0, ownMismatch = 0;
+        // -Perf: issue()'s cost split (ns): the whole call, the draw calls inside it (device path), draws timed (stage 0 of the packet retention)
+        std::uint64_t issueNs = 0, deviceNs = 0, timedDraws = 0, timedOps = 0;
         // the lights of the composed sub-mesh draws (dynamic list +0x34 + static illum +0xd: 0..4; 4 = an additive light pass)
         std::array<std::uint64_t, 5> lights{};
         bool active() const { return takeOver || compare; }
@@ -287,6 +301,7 @@ private:
     void writeAlpha(std::uint32_t slot, float a);
     void writeTreeInstance(std::uint32_t slot, const float v[2]);  // SetSpeedTreeInstanceData 0x6c9eb0: c32 + 4 slot .xy
     void writeLighting(const sc::Pass& pass);
+    void noteListLights(const std::uint8_t* list);
     std::uint32_t bindLightmaps(const std::uint8_t* res);
     void capture(const d3d9::DrawTapInfo& t, sc::DrawDesc& out);
     // the decals (static_ops_nonop.cpp)
@@ -307,6 +322,20 @@ private:
     const std::uint8_t* billboardAdmin_ = nullptr;  // the eCBillboardAdmin of the last RenderBillboards (RenderAlpha's admin)
     std::uint64_t billboardAlphaOps_ = 0, billboardAlphaDraws_ = 0;
     std::uint32_t streakLogged_ = 0;
+    // F1: the sky objects' billboards / converted vertices / quad indices, kept across calls (static_ops_sky.cpp)
+    struct SkyCache {
+        std::vector<std::uint8_t> key, verts, quads;
+        std::uint32_t quadCount = ~0u;
+    };
+    std::vector<std::uint8_t> skyBb_;
+    std::unordered_map<const void*, SkyCache, PtrHash> skyCaches_;
+    SkyCache skyScratch_;
+public:
+    void setOpts(unsigned mask) { opts_ = mask; skyCache_ = (mask & 1u) != 0; }
+    bool opt(unsigned bit) const { return (opts_ & bit) != 0; }
+private:
+    unsigned opts_ = 255;
+    bool skyCache_ = true;
     bool verifyBillboards();
     // the skinned actors' ops (static_ops_actors.cpp)
     bool verifyActors();
@@ -379,6 +408,9 @@ private:
     // ---- O2a lean ops (static_ops_lean.cpp) ----
     bool lean_ = false;
     bool leanRestore_ = true;
+    bool tableLit_ = false;
+    std::uint64_t tableLitFrame_ = ~0ull;
+    std::vector<const void*> tableLitSeen_;  // light lists whose lights were handed to the table this frame
     int leanCheck_ = 0;
     std::uint64_t leanFrameNo_ = ~0ull;
     sc::LeanFrame leanFrameKind_ = sc::LeanFrame::Lean;
@@ -669,6 +701,22 @@ private:
     PtrMemo<d3d9::Shader*> elementMemo_;
     PtrMemo<Mirror::ShaderPools*> poolsMemo_;
 
+    // packet retention: a composed draw's finished packet by (op, draw index), valid while the draw description equals the captured one
+    int packetMode_ = 0;
+    int gpuScene_ = 0;
+    struct PacketEntry {
+        d3d9::Device::CachedDraw cd;
+        std::unique_ptr<sc::DrawDesc> desc;
+    };
+    std::unordered_map<std::uint64_t, PacketEntry> packets_;
+    struct PacketStats {
+        std::uint64_t replayed = 0, refused = 0, built = 0, notBuilt = 0, verified = 0, invalid = 0, mismatches = 0, changed = 0, fresh = 0, rebuilt = 0;
+    } pktWindow_, pktTotal_;
+    std::uint32_t pktMismatchLogged_ = 0;
+    std::uint64_t pktWhyPrev_[12] = {}, pktNcPrev_[12] = {};  // the device's refusal counters at the last report (the window = the difference)
+    std::uint64_t pktGroup_[3][2] = {};                       // per cached group (main-view static, trees, shadow views) in the window: replayed / drawn fresh
+    std::unique_ptr<d3d9::Device::CachedDraw> pktFresh_;
+    static bool packetSameDesc(const sc::DrawDesc& a, const sc::DrawDesc& b);
     std::size_t issueIndex_ = 0;
     std::vector<std::uint8_t> ownKind_;
     // non-op paths (decals): the unit whose draws are composed in place of an op
@@ -702,6 +750,8 @@ private:
     struct TreeStats {
         std::uint64_t ops = 0, zeroOps = 0, hardware = 0, software = 0, instances = 0, batches = 0, sortedCopies = 0, undrawnBatches = 0;
         std::array<std::uint64_t, 4> types{};  // branches, fronds, leaf cards, leaf meshes
+        std::array<std::uint64_t, 7> splits{};  // solid-pass tree batch cuts by reason: limit, strip, list, sun, static ambient / lights, other
+        std::uint64_t knownLights = 0;  // tree instances whose static lights the table holds (their batch no longer ends on them)
         std::uint64_t leafLods = 0, wrongTransformation = 0, billboardOps = 0, billboardTexCoords = 0, shadowFrondsSkipped = 0;
         std::uint64_t grassOps = 0, grassZeroOps = 0, grassNodes = 0, grassInstances = 0, grassDraws = 0, grassWraps = 0, grassNotCached = 0, grassClockMoved = 0;
     } treeWindow_, treeTotal_;

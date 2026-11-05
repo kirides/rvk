@@ -48,6 +48,16 @@ inline bool memEqual(const void* a, const void* b, std::size_t n) {
     return true;
 }
 
+// n registers (16 bytes each) copied inline (the CRT's memcpy is a call into vcruntime140 per run: the composition and the setters copy
+// ~20 short runs per draw)
+inline void copyRegisters(void* dst, const void* src, std::uint32_t n) {
+    auto* d = static_cast<std::uint8_t*>(dst);
+    const auto* s = static_cast<const std::uint8_t*>(src);
+    for (std::uint32_t i = 0; i < n; ++i) {
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(d + 16 * i), _mm_loadu_si128(reinterpret_cast<const __m128i*>(s + 16 * i)));
+    }
+}
+
 // the registers (16 bytes each) of two runs: the first and the last register that differ, false when all are equal
 inline bool diffRegisters(const float (*a)[4], const float (*b)[4], std::uint32_t count, std::uint32_t& first, std::uint32_t& last) {
     const auto differs = [&](std::uint32_t i) {

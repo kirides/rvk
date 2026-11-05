@@ -59,26 +59,6 @@ void pipeline(const Context& ctx, VkPipeline p, VkShaderModule vs, VkShaderModul
     object(ctx, VK_OBJECT_TYPE_PIPELINE, reinterpret_cast<std::uint64_t>(p), "pipe " + moduleName(vs) + " + " + moduleName(fs));
 }
 
-std::string textureName(const TextureInfo& t) {
-    std::string s;
-    if (t.label != nullptr) {
-        s = t.label;
-        if (t.labelIndex != ~0u) s += std::format(" #{}", t.labelIndex);
-        s += " | ";
-    }
-    s += t.renderTarget || t.depthFormat ? "rt " : "tex ";
-    s += std::format("{} {}x{}", t.id, t.width, t.height);
-    if (t.volume) s += std::format("x{}", t.depth);
-    s += ' ';
-    s += t.format;
-    if (t.cube) s += " cube";
-    if (t.volume) s += " vol";
-    if (t.levels > 1) s += std::format(" L{}", t.levels);
-    if (t.dynamic) s += " dynamic";
-    if (t.slot != 0) s += std::format(" [{}slot {}]", t.cube ? "cube " : t.volume ? "3d " : "", t.slot);  // slots index the array of the texture kind
-    return s;
-}
-
 void texture(const Context& ctx, const Image& img, const TextureInfo& info) {
     if (!img.valid() || !ctx.namesEnabled()) return;
     image(ctx, img, textureName(info));

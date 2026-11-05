@@ -135,6 +135,7 @@ bool collect(const float center[3], float radius, std::vector<WorldLight>& out, 
                                 WorldLight l;
                                 std::memcpy(l.pos, pos, sizeof(pos));
                                 l.range = range;
+                                l.ambient = vt == ambfv;
                                 for (int c = 0; c < 3; ++c) l.col[c] = rgb[c] * k;
                                 out.push_back(l);
                             }

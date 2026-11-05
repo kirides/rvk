@@ -22,6 +22,8 @@ param(
     # command 'set renderer.mode full' switch at run time)
     [ValidateSet('original', 'wrapper', 'full', 'passthrough', 'trace', 'vulkan')][string]$Mode = 'original',
     [switch]$NoRenderer,
+    # [vulkan] api: the graphics API (vulkan default, d3d12 = the experimental DX12 backend; -Validation turns on its debug layer + GPU-based validation)
+    [ValidateSet('vulkan', 'd3d12')][string]$Api = 'vulkan',
     [switch]$Validation,
     # [vulkan] sync_validation: the validation layer's synchronization validation too (implies -Validation; slow)
     [switch]$SyncValidation,
@@ -40,6 +42,8 @@ param(
     # [debug] present_stalls (any mode): sample the presenting thread's stack while a present lasts longer than this many ms;
     # "diag:" lines in rvk.log every 5 s name the modules / functions the time is spent in (docs/research/fps-limit.md)
     [double]$PresentStalls = 0,
+    # test-run.ps1 -StallSeconds: kill the game after this long without a new spass.log line (GPU-based validation runs need hundreds)
+    [int]$StallSeconds = 0,
     # [debug] cpu_profile (Vulkan mode): a sampled flat profile of the engine thread between presents every 5 s (`diag: profile`
     # lines: per module, self and inclusive per function; docs/research/performance.md 8)
     [switch]$CpuProfile,
@@ -134,8 +138,11 @@ if ($NoRenderer) {
     New-Item -ItemType Directory -Force $rvkDir | Out-Null
     # FSR (enh/upscale): AMD's signed FSR SDK 2.4.0 DLLs (loader + upscaler), loaded from bin\rvk
     # + the frame generation effect DLL (framegen.mode; shipped as the separate risen-enhanced-graphics-framegen.zip)
-    foreach ($f in 'amd_fidelityfx_loader_vk.dll', 'amd_fidelityfx_upscaler_vk.dll', 'amd_fidelityfx_framegeneration_vk.dll') {
-        Copy-Item (Join-Path $repo "third_party\amd_fidelityfx\signedbin\$f") $rvkDir -Force
+    # (+ the same three for the DX12 backend, _dx12: 87 MB, copied only when the size differs)
+    foreach ($f in 'amd_fidelityfx_loader_vk.dll', 'amd_fidelityfx_upscaler_vk.dll', 'amd_fidelityfx_framegeneration_vk.dll', 'amd_fidelityfx_loader_dx12.dll', 'amd_fidelityfx_upscaler_dx12.dll', 'amd_fidelityfx_framegeneration_dx12.dll') {
+        $src = Join-Path $repo "third_party\amd_fidelityfx\signedbin\$f"
+        $dst = Join-Path $rvkDir $f
+        if (-not (Test-Path $dst) -or (Get-Item $dst).Length -ne (Get-Item $src).Length) { Copy-Item $src $rvkDir -Force }
     }
     Remove-Item (Join-Path $rvkDir 'amd_fidelityfx_vk.dll') -Force -ErrorAction SilentlyContinue  # the SDK 1.1.4 DLL
     # the runtime HLSL compiler (shader/dxc): the vcpkg directx-dxc port's dxcompiler.dll, copied next to d3d9.dll by the build
@@ -150,7 +157,7 @@ if ($NoRenderer) {
         '# written by scripts/run.ps1',
         '[renderer]', "mode = `"$Mode`"",
         '[log]', "level = `"$RvkLogLevel`"",
-        '[vulkan]', "validation = $($Validation.IsPresent.ToString().ToLower())", "sync_validation = $($SyncValidation.IsPresent.ToString().ToLower())", "max_fps = $([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.0##}', $MaxFps))",
+        '[vulkan]', "api = `"$Api`"", "validation = $($Validation.IsPresent.ToString().ToLower())", "sync_validation = $($SyncValidation.IsPresent.ToString().ToLower())", "max_fps = $([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.0##}', $MaxFps))",
         "vsync = $(@{ engine = '"engine"'; on = 'true'; off = 'false' }[$Vsync])",
         '[debug]', "screenshot_frames = [$Screenshots]", "log_draws = $LogDraws", "log_frame = $LogFrame", "snapshot_frames = [$Snapshots]",
         "dump_saved_textures = $($DumpSavedTextures.IsPresent.ToString().ToLower())",
@@ -172,6 +179,7 @@ if ($NoRenderer) {
             $values['rt.reflections'] = 'medium'
             $values['shadows.enabled'] = 'false'; $values['shadows.filter'] = 'high'; $values['shadows.map_size'] = 'auto'
             $values['lod.trees'] = '1'; $values['lod.meshes'] = '1'; $values['lod.view'] = '1'
+            $values['lighting.clustered'] = 'false'; $values['lighting.full_lit'] = 'false'
         }
         foreach ($kv in $Setting) { $k, $v = $kv -split '=', 2; $values[$k] = $v }
         # "table.key=value" -> [table] key = value (strings quoted unless number / bool)
@@ -201,6 +209,7 @@ $spassArgs = @{
 }
 if ($Scenario) { $spassArgs.Scenario = $Scenario }
 if ($WaitForResult) { $spassArgs.WaitForResult = $true }
+if ($StallSeconds -gt 0) { $spassArgs.StallSeconds = $StallSeconds }
 if ($KeepRunning) { $spassArgs.KeepRunning = $true }
 if ($NoAutostart) { $spassArgs.NoAutostart = $true }
 if ($AllowFocus) { $spassArgs.AllowFocus = $true }

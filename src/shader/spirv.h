@@ -19,6 +19,14 @@ struct SpirvResult {
 // -O1, no DXC disk cache of its own (callers keep the SPIR-V by their own keys). `name` = the shader in diagnostics. Thread-safe.
 SpirvResult compileHlsl(Stage stage, std::string_view hlsl, std::string_view name = "translated.hlsl");
 
+// The same HLSL text as signed DXIL SM 6.6 for the DX12 backend (container bytes; empty on failure, `log` has the messages).
+struct DxilResult {
+    std::vector<std::uint8_t> bytes;
+    std::string log;
+    bool ok() const { return !bytes.empty(); }
+};
+DxilResult compileHlslDxil(Stage stage, std::string_view hlsl, std::string_view name = "translated.hlsl");
+
 // Debug info in the SPIR-V DXC produces (config.toml [debug] shader_debug_info, run.ps1 -ShaderDebug): -Zi -Od with OpName / OpLine and the HLSL source text,
 // so RenderDoc / PIX show names and source lines and allow stepping through the translated D3D9 shaders, the material shaders and the embedded ones.
 // Set before the first compile; part of the SPIR-V cache keys.

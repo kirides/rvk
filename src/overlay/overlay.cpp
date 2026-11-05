@@ -3,6 +3,7 @@
 // (D3D11Engine/ImGuiShim.cpp, same author as this repository): dynamic rendering, own descriptor pool, no ini file.
 
 #include "overlay/overlay.h"
+#include "enh/material_pack.h"
 
 #include <windows.h>
 
@@ -387,6 +388,10 @@ bool Overlay::runCommand(std::string_view command, std::string* out) {
         else if (w[1] == "reset") reg.resetOther();
         else return fail("ab flip|a|b|copy|reset");
         return ok(std::format("side {} active, {} settings differ", sideName(reg.bActive()), reg.abDifferences().size()));
+    }
+    if (w[0] == "materials" && w.size() == 2 && w[1] == "reload") {
+        // the material pack folders are read again (docs/research/material-pack.md)
+        return enh::matpack::requestReload() ? ok("material pack reload started") : fail("no material pack is loaded");
     }
     if (w[0] == "window" && w.size() >= 2) {
         // the engine's own mode changes (borderless fullscreen, docs/research/window-mode.md)

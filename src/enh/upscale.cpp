@@ -142,6 +142,7 @@ void Upscale::apply(UpscaleMode mode, unsigned flip) {
         if (rdev != nullptr) {
             rhi::ComputePipelineDesc cd;
             cd.cs.spirv = shader::embedded::spirv("upscale/prep.comp");
+            cd.cs.dxil = shader::embedded::dxilOnDemand("upscale/prep.comp");
             cd.name = "upscale.prep";
             prep_ = rdev->createComputePipeline(cd);
         }
@@ -153,6 +154,7 @@ void Upscale::apply(UpscaleMode mode, unsigned flip) {
         // (without it FSR derives the exposure itself)
         rhi::ComputePipelineDesc ed;
         ed.cs.spirv = shader::embedded::spirv("upscale/exposure.comp");
+        ed.cs.dxil = shader::embedded::dxilOnDemand("upscale/exposure.comp");
         ed.name = "upscale.exposure";
         exposurePipe_ = rdev->createComputePipeline(ed);
     }
@@ -244,7 +246,7 @@ bool Upscale::ensureFsr(VkExtent2D render, VkExtent2D display, bool autoExposure
     }
     dropFsr();
     std::shared_ptr<rhi::Upscaler> f = dev_.game().createUpscaler();
-    const std::filesystem::path dll = paths::dataDir() / "amd_fidelityfx_loader_vk.dll";
+    const std::filesystem::path dll = rhi::fidelityFxLoader(paths::dataDir(), dev_.game().caps().backend);
     rhi::UpscalerCreateInfo ci;
     ci.maxRenderSize = render;
     ci.maxUpscaleSize = display;

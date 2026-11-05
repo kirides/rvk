@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <format>
 #include <map>
@@ -337,6 +338,11 @@ struct StallSampler::Impl {
 
     std::mutex mutex;  // never held while the watched thread is suspended
     std::map<std::vector<std::uint64_t>, std::uint32_t> stacks;
+    // spike profile (streaming.md): samples taken more than spikeTicks into the frame (a normal frame never lasts that long),
+    // so they belong to a frame-time spike or a loading step; RVK_SPIKE_MS (default 8, 0 = off)
+    std::uint64_t spikeTicks = 0;
+    std::map<std::vector<std::uint64_t>, std::uint32_t> spikeStacks;
+    std::uint32_t spikeSamples = 0;
     std::uint32_t samples = 0;
     std::uint32_t calls = 0, longCalls = 0;
     double callMs = 0.0, longMs = 0.0, maxMs = 0.0;
@@ -349,7 +355,51 @@ struct StallSampler::Impl {
     void run();
     void report(double seconds);
     void reportProfile(const std::map<std::vector<std::uint64_t>, std::uint32_t>& taken, std::uint32_t n);
+    void reportSpikes(const std::map<std::vector<std::uint64_t>, std::uint32_t>& taken, std::uint32_t n, std::uint32_t total);
 };
+
+// the spike samples: module / self / inclusive per function and the heaviest full stacks (percent of the spike samples)
+void StallSampler::Impl::reportSpikes(const std::map<std::vector<std::uint64_t>, std::uint32_t>& taken, std::uint32_t n,
+                                      std::uint32_t total) {
+    std::unordered_map<std::string, std::uint32_t> modules, self, incl;
+    for (const auto& [stack, count] : taken) {
+        if (stack.empty()) continue;
+        modules[sym.moduleName(stack[0])] += count;
+        self[sym.function(stack[0])] += count;
+        std::vector<std::string> seen;
+        for (const std::uint64_t pc : stack) {
+            std::string f = sym.function(pc);
+            if (std::ranges::find(seen, f) != seen.end()) continue;
+            incl[f] += count;
+            seen.push_back(std::move(f));
+        }
+    }
+    spdlog::info("diag: spike: {} samples >= {:.1f} ms into a frame ({:.1f} % of all {} samples)", n,
+                 1000.0 * spikeTicks / freq, 100.0 * n / std::max(1u, total), total);
+    const auto top = [&](const std::unordered_map<std::string, std::uint32_t>& m, std::size_t k, const char* label) {
+        std::vector<std::pair<std::uint32_t, const std::string*>> v;
+        for (const auto& [name, c] : m) v.emplace_back(c, &name);
+        std::ranges::sort(v, [](const auto& a, const auto& b) { return a.first > b.first; });
+        for (std::size_t i = 0; i < std::min(v.size(), k); ++i) {
+            spdlog::info("diag: spike {} {:5.1f} % {}", label, 100.0 * v[i].first / n, *v[i].second);
+        }
+    };
+    top(modules, 8, "module");
+    top(self, 40, "self");
+    top(incl, 80, "incl");
+    std::vector<std::pair<std::uint32_t, const std::vector<std::uint64_t>*>> st;
+    for (const auto& [stack, count] : taken) st.emplace_back(count, &stack);
+    std::ranges::sort(st, [](const auto& a, const auto& b) { return a.first > b.first; });
+    for (std::size_t i = 0; i < std::min<std::size_t>(st.size(), 12); ++i) {
+        std::string text;
+        int k = 0;
+        for (const std::uint64_t pc : *st[i].second) {
+            if (++k > 28) break;
+            text += (text.empty() ? "" : " < ") + sym.function(pc);
+        }
+        spdlog::info("diag: spike stack {:5.1f} % {}", 100.0 * st[i].first / n, text);
+    }
+}
 
 // flat profile: per module (leaf), self per function (leaf), inclusive per function (once per stack)
 void StallSampler::Impl::reportProfile(const std::map<std::vector<std::uint64_t>, std::uint32_t>& taken, std::uint32_t n) {
@@ -453,6 +503,11 @@ StallSampler::StallSampler(std::string what, double thresholdMs, bool profile) :
     impl_->what = std::move(what);
     impl_->profile = profile;
     impl_->thresholdTicks = static_cast<std::uint64_t>(thresholdMs * impl_->freq / 1000.0);
+    if (profile) {
+        double spikeMs = 8.0;
+        if (const char* e = std::getenv("RVK_SPIKE_MS")) spikeMs = std::atof(e);
+        impl_->spikeTicks = spikeMs > 0.0 ? static_cast<std::uint64_t>(spikeMs * impl_->freq / 1000.0) : 0;
+    }
     HMODULE self = nullptr;
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                        reinterpret_cast<LPCWSTR>(&presentSampler), &self);
@@ -533,17 +588,26 @@ void StallSampler::Impl::run() {
         const std::lock_guard lock(mutex);
         ++stacks[std::vector<std::uint64_t>(pcs, pcs + keep)];
         ++samples;
+        if (spikeTicks != 0 && now - start >= spikeTicks) {
+            ++spikeStacks[std::vector<std::uint64_t>(pcs, pcs + keep)];
+            ++spikeSamples;
+        }
     }
     if (timer != nullptr) CloseHandle(timer);
 }
 
 void StallSampler::Impl::report(double seconds) {
     std::map<std::vector<std::uint64_t>, std::uint32_t> taken;
+    std::map<std::vector<std::uint64_t>, std::uint32_t> spikes;
+    std::uint32_t nSpike = 0;
     std::uint32_t n = 0, nCalls = 0, nLong = 0;
     double sumMs = 0.0, sumLong = 0.0, mx = 0.0;
     {
         const std::lock_guard lock(mutex);
         taken.swap(stacks);
+        spikes.swap(spikeStacks);
+        nSpike = spikeSamples;
+        spikeSamples = 0;
         n = samples;
         nCalls = calls;
         nLong = longCalls;
@@ -572,6 +636,7 @@ void StallSampler::Impl::report(double seconds) {
     if (n == 0) return;
     if (profile) {
         reportProfile(taken, n);
+        if (nSpike > 0) reportSpikes(spikes, nSpike, n);
         return;
     }
     // who owns the wait: the first frame (from the leaf) outside the OS's user-mode DLLs

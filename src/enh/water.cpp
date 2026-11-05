@@ -16,7 +16,7 @@
 #include "enh/rhi_scope.h"
 #include "enh/rt_scene.h"
 #include "shader/embedded.h"
-#include "vk/formats.h"
+#include "rhi/d3d_formats.h"
 
 namespace rvk::enh {
 
@@ -80,7 +80,7 @@ std::unique_ptr<d3d9::Texture> uploadHalf4(d3d9::Device& device, int width, int 
     desc.width = static_cast<std::uint32_t>(width);
     desc.height = static_cast<std::uint32_t>(height);
     desc.levels = 1;
-    desc.format = vk::d3dfmt::A16B16G16R16F;
+    desc.format = rhi::d3dfmt::A16B16G16R16F;
     desc.pool = d3d9::POOL_MANAGED;
     auto tex = device.createTexture(desc);
     d3d9::Texture::Locked l;
@@ -147,7 +147,7 @@ bool Water::ensureShaders() {
     const auto make = [&](const char* name, shader::Stage stage) {
         auto s = std::make_shared<d3d9::Shader>();
         s->stage = stage;
-        s->module = dev_.game().createShaderModule({.spirv = shader::embedded::spirv(name)});
+        s->module = dev_.game().createShaderModule({.spirv = shader::embedded::spirv(name), .dxil = shader::embedded::dxilOnDemand(name)});
         s->hash = nameHash(name);
         return s;
     };
@@ -459,7 +459,7 @@ void Water::serviceBake(d3d9::Device& device) {
             desc.width = static_cast<std::uint32_t>(f.width);
             desc.height = static_cast<std::uint32_t>(f.height);
             desc.levels = 1;
-            desc.format = vk::d3dfmt::A16B16G16R16F;
+            desc.format = rhi::d3dfmt::A16B16G16R16F;
             desc.pool = d3d9::POOL_MANAGED;
             auto tex = device.createTexture(desc);
             d3d9::Texture::Locked l;
@@ -1124,7 +1124,9 @@ bool Water::ensureWetPipeline(VkFormat target) {
     wetPipeline_.reset();
     rhi::GraphicsPipelineDesc gd;
     gd.vs.spirv = shader::embedded::spirv("debug/fullscreen_rhi.vert");
+    gd.vs.dxil = shader::embedded::dxilOnDemand("debug/fullscreen_rhi.vert");
     gd.ps.spirv = shader::embedded::spirv("water/wet_shore.frag");
+    gd.ps.dxil = shader::embedded::dxilOnDemand("water/wet_shore.frag");
     gd.colorFormats[0] = target;
     // dst * src.a + src.rgb: darkens the scene (keeps the engine's exposure), adds the wet film's sheen; alpha kept
     gd.blend.blendEnable = VK_TRUE;

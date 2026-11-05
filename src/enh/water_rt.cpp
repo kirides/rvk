@@ -42,6 +42,7 @@ WaterRt::WaterRt(d3d9::Device& device, RtScene* scene) : dev_(device), scene_(sc
     building_ = std::async(std::launch::async, [rdev]() {
         rhi::ComputePipelineDesc d;
         d.cs.spirv = shader::embedded::spirv("water/water_rt.comp");
+        d.cs.dxil = shader::embedded::dxilOnDemand("water/water_rt.comp");
         d.name = "water.rt";
         return rdev->createComputePipeline(d);
     });

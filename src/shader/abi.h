@@ -136,6 +136,7 @@ inline constexpr std::uint32_t kDrawKindMask = 0xffu;
 inline constexpr std::uint32_t kDrawPassShift = 8;
 inline constexpr std::uint32_t kDrawViewShift = 12;
 inline constexpr std::uint32_t kDrawFlagTinted = 0x10000u;  // the tint debug view's variant draws it
+// D3D12 only: bits 17..31 flag the vertex inputs v0..v14 that come from UBYTE4 attributes (UBYTE4 is read as UNORM: v * 255)
 constexpr std::uint32_t drawFlags(std::uint32_t kind, std::uint32_t pass, std::uint32_t view) {
     return (kind & kDrawKindMask) | ((pass & 0xfu) << kDrawPassShift) | ((view & 0xfu) << kDrawViewShift);
 }
@@ -187,7 +188,9 @@ inline constexpr std::uint32_t kFramePrevValid = 4u;        // the prev* fields 
 inline constexpr std::uint32_t kFrameReverseZ = 8u;         // the main view's hardware depth is reversed (see DrawBlock posFix.zw)
 inline constexpr std::uint32_t kFrameParams = 16;
 inline constexpr std::uint32_t kFrameParamDebugView = 0;   // debug.inject_view: x mode, y strength, z grid spacing
+inline constexpr std::uint32_t kFrameParamMaterials = 2;   // materials.*: x quality (0 off .. 3), y specular strength, z environment strength, w debug view
 inline constexpr std::uint32_t kFrameParamLod = 1;         // lod.trees: x the billboard fade distance scale (Device::lodModule)
+inline constexpr std::uint32_t kFrameParamLights = 4;      // lighting.*: params[4].xy the light table buffer reference (enh/light_table), params[5] = enabled, style (0 original / 1 physical), debug view
 
 // One geometry record per TLAS instance x geometry of the ray tracing scene (enh/rt_scene; GLSL RvkRtRecord in
 // shaders/include/rvk_rt.glsl, reached as records[instanceCustomIndex + geometryIndex]). Vertex attributes are words
@@ -216,7 +219,7 @@ struct RtGeometryRecord {
     // segmentCount RtMaterialSegment sorted by firstPrimitive; triangles outside every segment keep the record's material
     std::uint32_t segments[2];
     std::uint32_t segmentCount;
-    std::uint32_t pad;
+    std::uint32_t packWord;      // material pack word (enh/material_pack.h; 0 = none): the ORM / roughness map slot (bits 0-13), constants above
 };
 static_assert(sizeof(RtGeometryRecord) == 112);
 // the material of the record's triangles [firstPrimitive, firstPrimitive + primitiveCount) (the record's fields of that name)
@@ -227,7 +230,8 @@ struct RtMaterialSegment {
     std::uint32_t albedoSampler;
     std::uint32_t alpha;
     std::uint32_t uvSet;
-    std::uint32_t pad[2];
+    std::uint32_t packWord;
+    std::uint32_t pad;
     float uvMap[2][4];
 };
 static_assert(sizeof(RtMaterialSegment) == 64);

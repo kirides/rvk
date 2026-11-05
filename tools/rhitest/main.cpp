@@ -1,6 +1,7 @@
 // rvk_rhitest: the slim RHI (src/rhi/rhi.h) on both backends with the same code and the same HLSL (docs/research/hlsl-rhi.md 5, 6).
 //
-//   rvk_rhitest [--vulkan] [--d3d12] [--validation] [--device-lost]
+//   rvk_rhitest [--vulkan] [--d3d12] [--validation]
+//   rvk_rhitest --fsr | --fg [loader dll] [--validation]   FidelityFX on the D3D12 backend (tools/rhitest/ffx.cpp), nothing else
 //
 // Per backend: a compute pass that reads a constant buffer (b8), a bindless texture + sampler (indices in the constant buffer), a RVK_REF block
 // (the frame block: Buffer::shaderRef) and the push constants, writing a storage image that is read back and compared with the CPU; a graphics
@@ -45,6 +46,9 @@
 
 namespace rvk::parity {
 int run(rhi::Device& dev);  // tools/rhitest/parity.cpp
+}
+namespace rvk::ffxtest {
+int run(bool fsr, bool fg, const std::string& dll, bool validation);  // tools/rhitest/ffx.cpp (D3D12 only)
 }
 
 using namespace rvk;
@@ -1223,10 +1227,14 @@ bool runDeviceLost(bool validation) {
 
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
-    bool vulkan = false, d3d12 = false, validation = false, deviceLost = false;
+    bool vulkan = false, d3d12 = false, validation = false, fsr = false, fg = false, deviceLost = false;
+    std::string ffxDll;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
-        if (a == "--vulkan") vulkan = true;
+        if (a == "--fsr" || a == "--fg") {
+            (a == "--fsr" ? fsr : fg) = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') ffxDll = argv[++i];
+        } else if (a == "--vulkan") vulkan = true;
         else if (a == "--d3d12") d3d12 = true;
         else if (a == "--validation") validation = true;
         else if (a == "--device-lost") deviceLost = true;
@@ -1236,6 +1244,7 @@ int main(int argc, char** argv) {
         std::printf("%s: %d failure(s)\n", failures == 0 ? "PASS" : "FAIL", failures);
         return failures == 0 ? 0 : 1;
     }
+    if (fsr || fg) return ffxtest::run(fsr, fg, ffxDll, validation);
     if (!vulkan && !d3d12) vulkan = d3d12 = true;
     if (!shader::dxc::available()) {
         std::printf("SKIP: %s\n", std::string(shader::dxc::unavailableReason()).c_str());

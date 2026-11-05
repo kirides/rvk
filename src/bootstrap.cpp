@@ -29,7 +29,10 @@
 #include "engine/high_fps.h"
 #include "engine/hemisphere.h"
 #include "engine/lights.h"
+#include "engine/fast_sort.h"
+#include "engine/load_accel.h"
 #include "engine/lod.h"
+#include "engine/scene_table.h"
 #include "engine/material_source.h"
 #include "engine/shadow_maps.h"
 #include "engine/symbols.h"
@@ -42,7 +45,7 @@
 #include "hal/types_base.h"
 #include "overlay/keys.h"
 #include "rvk_api.h"
-#include "vk/probe.h"
+#include "rhi/game_device.h"
 
 namespace rvk::bootstrap {
 namespace {
@@ -163,8 +166,9 @@ void detourInitializeAdmin(void* self, int apiType) {
                                    g_config.presentStalls);
     }
     if (g_config.cpuProfile && g_config.mode == Mode::Vulkan) diag::enableFrameSampler();
+    if (g_config.mode == Mode::Vulkan) engine::loadaccel::install();  // loading work: packed read buffer, absorption image (streaming.md)
     if (g_config.probe && !g_probed.exchange(true)) {
-        vk::probe();
+        rhi::probeBackend(rhi::Backend::Vulkan);
     }
     const auto& s = engine::sym();
     if (g_config.mode == Mode::Vulkan) {
@@ -173,6 +177,8 @@ void detourInitializeAdmin(void* self, int apiType) {
         // code that checks it afterwards (docs/research/hal-structs.md 1).
         hal::vulkan::Options vo;
         vo.validation = g_config.validation;
+        vo.d3d12Messages = g_config.d3d12Messages;
+        vo.d3d12Dred = g_config.d3d12Dred;
         vo.syncValidation = g_config.syncValidation;
         vo.adapter = g_config.adapter;
         vo.maxFps = g_config.maxFps;
@@ -386,6 +392,8 @@ void loadSettings() {
     if (g_config.vsync >= 0) reg.lock(*rs.vsync, g_config.vsync != 0 ? 1.0 : 2.0, "config.toml [vulkan] vsync");
     if (g_config.maxFps > 0.0) reg.lock(*rs.maxFps, g_config.maxFps, "config.toml [vulkan] max_fps");
     if (g_config.adapter >= 0) reg.lock(*rs.adapter, g_config.adapter, "config.toml [vulkan] adapter");
+    if (g_config.api == "d3d12") reg.lock(*rs.api, 1.0, "config.toml [vulkan] api");
+    else if (g_config.api == "vulkan") reg.lock(*rs.api, 0.0, "config.toml [vulkan] api");
     // the render mode (core/config.h): settings.toml's renderer.mode, unless config.toml's [renderer] mode is not the default
     // (wrapper; also "trace" -> original): then that one, locked for the session
     const auto modeLock = configModeLock(g_config);
@@ -476,7 +484,9 @@ void onProcessAttach(void* module) {
         engine::shadowmaps::install();
         engine::hemisphere::install();  // the weather hemisphere light for the GI sky (docs/research/rtgi.md 17)
         engine::lights::install();      // the illumination admin: all of the world's lights for the GI (rtgi.md 19)
+        engine::scenetable::install();  // the GPU scene's signal-fed instance table (docs/research/gpu-scene.md)
         engine::lod::install();     // detail distances (docs/research/lod.md)
+        engine::fastsort::install();  // typed sort of the render-op lists (performance.md 21)
         if (!engine::matsrc::install()) spdlog::warn("engine: CompileShaderPoolEllement not hooked: no material shader sources");
         engine::window::install();  // borderless fullscreen (docs/research/window-mode.md)
     }

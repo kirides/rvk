@@ -429,7 +429,10 @@ int main(int argc, char** argv) {
         VariantFn variant = nullptr;
         for (int i = 3; i < argc; ++i) {
             const std::string a = argv[i];
-            if (a == "--gi") {
+            if (a == "--cluster") { rvk::enh::setClusterVariants(true); continue; }
+            if (a == "--pbr") {
+                rvk::enh::setPbrVariants(true);  // the material pack code inside every variant (enh/material_pack.h)
+            } else if (a == "--gi") {
                 variant = &rvk::enh::Gi::variantOptions;
             } else if (a == "--gbuf") {
                 variant = [](const rvk::d3d9::Shader& sh, TranslateOptions& o) {

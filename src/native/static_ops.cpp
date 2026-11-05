@@ -1,3 +1,5 @@
+#include <chrono>
+
 #include "native/static_ops.h"
 
 #include <type_traits>
@@ -12,8 +14,11 @@
 #include <spdlog/spdlog.h>
 
 #include "d3d9/defs.h"
+#include "d3d9/memeq.h"
+#include "enh/light_table.h"
 #include "engine/memread.h"
 #include "engine/scene_hooks.h"
+#include "engine/scene_table.h"
 #include "engine/symbols.h"
 #include "fx/effect_binary.h"
 #include "hal/vulkan/hal_vulkan.h"
@@ -673,12 +678,64 @@ void StaticOps::writeLighting(const sc::Pass& pass) {
     if (hasStatic) rd(illum, 0x94, staticSh, sizeof(staticSh));
     sc::ambientSh(sh, indoor, get<float>(illum, 8), hasStatic ? &staticSh[0][0] : nullptr, &L[1]);
     rd(list, 4, L[8], 48);
-    const std::uint32_t n = sc::passLights(pass.flags);
+    // (a list with dynamic lights keeps its reads: only those can carry the engine's cubemap shadow channel, which the table does not have yet)
+    if (pass.tableLit && enh::fullLitSkipsReads() && get<std::uint8_t>(list, 0x34) == 0 &&
+        (enh::LightTable::registryComplete() || get<std::uint8_t>(illum, 0x0d) == 0)) {
+        // the table is complete (the registry returned the static tree's lights, rebuilt this frame): no light of this object is read; the three
+        // registers are zero and the material variant fills every slot per pixel from the cluster (gpu-scene.md 9.9)
+        std::memset(L[11], 0, 3 * 4 * 16);
+        return;
+    }
+    if (pass.tableLit) {
+        // the point lights are the table's (per pixel); the registers stay zero so the material variant refills every slot. The list's own dynamic
+        // lights go into the table too (once per list per frame; the table builds from them next frame), for scenes whose registry is empty
+        noteListLights(list);
+        // static lights of this illumination (+0xd, entries at +0x10), only while the registry holds none (a teleport / nothing cached in)
+        const std::uint32_t ns = std::min<std::uint32_t>(get<std::uint8_t>(illum, 0x0d), 4u);
+        if (ns != 0 && enh::LightTable::wantStaticNotes() && std::find(tableLitSeen_.begin(), tableLitSeen_.end(), illum) == tableLitSeen_.end() &&
+            tableLitSeen_.size() < 400) {
+            tableLitSeen_.push_back(illum);
+            for (std::uint32_t i = 0; i < ns; ++i) {
+                float e[8]{};
+                rd(illum + 0x10 + 0x40 * i, 0, &e[0], 16);
+                rd(illum + 0x10 + 0x40 * i, 0x10, &e[4], 16);
+                enh::LightTable::noteDrawnLight(e, e + 4);
+            }
+        }
+    }
     const std::uint32_t nStatic = get<std::uint8_t>(illum, 0x0d);
-    for (std::uint32_t j = 0; j < n; ++j) {
+    // (the engine's own first <= 3 lights stay in the registers: the material variant keeps those the table does not know and replaces the rest
+    // per pixel; a table-lit pass has the 3-light permutation whatever the object carries, the unused slots are zero = no light)
+    const std::uint32_t n = pass.tableLit ? 3u : sc::passLights(pass.flags);
+    const std::uint32_t have = pass.tableLit ? std::min<std::uint32_t>(3u, nStatic + get<std::uint8_t>(list, 0x34)) : n;
+    if (pass.tableLit) std::memset(L[11], 0, 3 * 4 * 16);
+    for (std::uint32_t j = 0; j < std::min(n, have); ++j) {
         const std::uint32_t idx = pass.firstLight + j;
         U8* src = idx < nStatic ? illum + 0x10 + 0x40 * idx : list + 0x38 + 0x40 * (idx - nStatic);
         if (11 + 4 * j + 4 <= 24) rd(src, 0, L[11 + 4 * j], 64);
+    }
+}
+
+void StaticOps::setTableLit(bool on) {
+    if (on != tableLit_) spdlog::info("native: table lighting {}", on ? "on (one 3-light permutation per lit draw, lights from the clustered table)" : "off");
+    tableLit_ = on;
+}
+
+void StaticOps::noteListLights(const std::uint8_t* list) {
+    const std::uint64_t frame = dev_.frameValue();
+    if (frame != tableLitFrame_) {
+        tableLitFrame_ = frame;
+        tableLitSeen_.clear();
+    }
+    if (std::find(tableLitSeen_.begin(), tableLitSeen_.end(), list) != tableLitSeen_.end() || tableLitSeen_.size() >= 400) return;
+    tableLitSeen_.push_back(list);
+    const std::uint32_t n = std::min<std::uint32_t>(get<std::uint8_t>(list, 0x34), 8u);
+    for (std::uint32_t i = 0; i < n; ++i) {
+        float e[8]{};  // c25 + 4 i (position, 1 / R^2) and c26 + 4 i (colour)
+        U8* src = const_cast<U8*>(list) + 0x38 + 0x40 * i;
+        rd(src, 0, &e[0], 16);
+        rd(src, 0x10, &e[4], 16);
+        enh::LightTable::noteDrawnLight(e, e + 4);
     }
 }
 
@@ -825,7 +882,7 @@ void StaticOps::constantsInto(sc::DrawDesc& d, const std::uint8_t* shader, const
     // O1: the live registers by source region (masks), copied as runs; the sources (diagnostics of the compare) only with it
     const bool trackSrc = g_ != nullptr && g_->compare;
     const auto take = [&](const sc::RegMask& m, const float (*src)[4], std::uint32_t srcFirst, float (*dst)[4], sc::RegMask& set) {
-        sc::forEachRun(m, [&](std::uint32_t r, std::uint32_t n) { std::memcpy(dst[r], src[r - srcFirst], 16 * n); });
+        sc::forEachRun(m, [&](std::uint32_t r, std::uint32_t n) { d3d9::copyRegisters(dst[r], src[r - srcFirst], n); });
         sc::orInto(set, m);
     };
     const auto mark = [](const sc::RegMask& m, sc::Src* out, auto&& srcOf) {
@@ -1197,6 +1254,7 @@ StaticOps::Skip StaticOps::materialDrawsImpl(const std::uint8_t* shader, const s
     in.combi = combi;
     in.instanced = instanced;
     in.switchValue = switchValue;
+    in.tableLit = tableLit_ && in.hasList;
     if (g_ != nullptr) {
         const std::uint32_t total = in.hasList ? std::min<std::uint32_t>(in.dynamicLights + in.staticLights, 4u) : 0u;
         ++g_->lights[total];
@@ -1417,7 +1475,7 @@ StaticOps::Skip StaticOps::composeSolid(const Op& op) {
         }
         std::vector<sc::Batch>& batches = scr_.batches;
         batches.clear();
-        sc::planBatches(list, 50, batches);
+        sc::planBatches(list, 50, batches, tableLit_);
         for (const sc::Batch& bt : batches) {
             for (std::uint32_t k = 0; k < bt.count; ++k) {
                 writeWorld(k, reinterpret_cast<const float*>(at(static_cast<std::int32_t>(bt.first + k))));
@@ -1538,6 +1596,10 @@ void StaticOps::opEnterImpl(const Op& op) {
     finishOp();
     recycleTransient();
     retFrameBegin();
+    if (gpuScene_ > 0 && op.entity != nullptr &&
+        (op.kind == OpKind::Mesh || op.kind == OpKind::Animation || op.kind == OpKind::SpeedTree || op.kind == OpKind::SpeedTreeBB || op.kind == OpKind::Vegetation)) {
+        engine::scenetable::checkEntity(op.entity);
+    }
     if (pendingVersion_ != nullptr) {
         // diagnostics: a special pass found uncompiled at the last op's entry, after the engine's slot ran
         if (pendingLogged_ < 12) {
@@ -1907,10 +1969,34 @@ bool StaticOps::engineDraw(const d3d9::DrawTapInfo& t, const Op* op) {
     return taken_;
 }
 
+// everything of a composed draw but its register values: what the finished packet is derived from
+bool StaticOps::packetSameDesc(const sc::DrawDesc& a, const sc::DrawDesc& b) {
+    if (a.vs != b.vs || a.ps != b.ps || a.decl != b.decl || a.indices != b.indices || a.indexed != b.indexed || a.primType != b.primType ||
+        a.baseVertex != b.baseVertex || a.minIndex != b.minIndex || a.numVertices != b.numVertices || a.startIndex != b.startIndex ||
+        a.primCount != b.primCount || a.samplerMask != b.samplerMask || a.inheritMask != b.inheritMask || a.drawClass != b.drawClass ||
+        a.passFlags != b.passFlags || a.zPass != b.zPass || a.subMesh != b.subMesh || a.material != b.material || a.tagSubMesh != b.tagSubMesh ||
+        a.tagMaterial != b.tagMaterial || a.tagMeshResource != b.tagMeshResource || a.tagWater != b.tagWater || a.tagMaterialName != b.tagMaterialName) {
+        return false;
+    }
+    for (std::size_t i = 0; i < 4; ++i) {
+        if (!(a.streams[i] == b.streams[i])) return false;
+    }
+    if (a.states != b.states) return false;
+    for (std::uint32_t m = static_cast<std::uint32_t>(a.samplerMask); m != 0; m &= m - 1) {
+        const auto st = sc::lowBit(m);
+        if (!(a.samplers[st] == b.samplers[st])) return false;
+    }
+    return true;
+}
+
 // our own draws of the op: the device state saved and restored around them
 void StaticOps::issue() {
     if (drawCount_ == 0) return;
     using namespace d3d9;
+    using PClock = std::chrono::steady_clock;
+    const bool timed = dev_.perfEnabled();
+    const PClock::time_point issueT0 = timed ? PClock::now() : PClock::time_point{};
+    std::uint64_t deviceNs = 0;
     static constexpr std::uint32_t kRs[sc::StOwnedCount] = {RS_ZFUNC, RS_ZWRITEENABLE, RS_ALPHABLENDENABLE, RS_SRCBLEND, RS_DESTBLEND,
                                                             RS_COLORWRITEENABLE, RS_ALPHATESTENABLE, RS_CULLMODE, RS_FILLMODE, RS_FOGENABLE};
     static constexpr std::uint32_t kSs[7] = {SAMP_ADDRESSU, SAMP_ADDRESSV, SAMP_MAGFILTER, SAMP_MINFILTER, SAMP_MIPFILTER, SAMP_MIPMAPLODBIAS,
@@ -1928,32 +2014,100 @@ void StaticOps::issue() {
         stagesU |= static_cast<std::uint32_t>(d.samplerMask & ~d.inheritMask);
     }
     const ShaderRef vs = dev_.vertexShaderRef(), ps = dev_.pixelShaderRef();
-    VertexDecl* decl = dev_.vertexDecl();
-    Buffer* ib = dev_.indexBuffer();
+    // (the decl / streams / indices / render states / sampler states are saved at the op's first draw that sets them: a retained packet
+    // replays without touching them)
+    VertexDecl* decl = nullptr;
+    Buffer* ib = nullptr;
     std::array<Device::StreamSource, 4> streams{};
-    for (std::uint32_t i = 0; i < 4; ++i) streams[i] = dev_.streamSource(i);
     std::array<std::uint32_t, sc::StOwnedCount> rs{};
-    for (std::uint32_t i = 0; i < sc::StOwnedCount; ++i) rs[i] = dev_.renderState(kRs[i]);
     std::array<Texture*, sc::kStages> tex{};
     std::array<std::array<std::uint32_t, 7>, sc::kStages> ss{};
-    for (std::uint32_t m = stagesU; m != 0; m &= m - 1) {
-        const auto st = sc::lowBit(m);
-        tex[st] = dev_.stageTexture(st);
-        const std::uint32_t* row = dev_.samplerStateRow(st);
-        for (std::uint32_t i = 0; i < 7; ++i) ss[st][i] = row[kSs[i]];
-    }
+    bool statesSaved = false;
+    const auto saveStates = [&] {
+        statesSaved = true;
+        decl = dev_.vertexDecl();
+        ib = dev_.indexBuffer();
+        for (std::uint32_t i = 0; i < 4; ++i) streams[i] = dev_.streamSource(i);
+        for (std::uint32_t i = 0; i < sc::StOwnedCount; ++i) rs[i] = dev_.renderState(kRs[i]);
+        for (std::uint32_t m = stagesU; m != 0; m &= m - 1) {
+            const auto st = sc::lowBit(m);
+            tex[st] = dev_.stageTexture(st);
+            const std::uint32_t* row = dev_.samplerStateRow(st);
+            for (std::uint32_t i = 0; i < 7; ++i) ss[st][i] = row[kSs[i]];
+        }
+    };
     const float (*devVs)[4] = dev_.vsConstants();
     const float (*devPs)[4] = dev_.psConstants();
-    sc::forEachRun(vsU, [&](std::uint32_t r, std::uint32_t n) { std::memcpy(savedVs_[r], devVs[r], 16 * n); });
-    sc::forEachRun(psU, [&](std::uint32_t r, std::uint32_t n) { std::memcpy(savedPs_[r], devPs[r], 16 * n); });
+    sc::forEachRun(vsU, [&](std::uint32_t r, std::uint32_t n) { d3d9::copyRegisters(savedVs_[r], devVs[r], n); });
+    sc::forEachRun(psU, [&](std::uint32_t r, std::uint32_t n) { d3d9::copyRegisters(savedPs_[r], devPs[r], n); });
     draws::Tag& tag = dev_.drawTag();
     const draws::Tag savedTag = tag;
 
     issuing_ = true;
+    // packet retention: static meshes and trees of the main view (the groups whose draws repeat every frame)
+    // (stage 4: the shadow views' z ops too; the same entity is drawn into several cascades / maps, so the key carries the view)
+    const bool cacheOn = packetMode_ != 0 && op_ != nullptr && !inNonOp_ && !tagOverride_ &&
+                         ((viewKind_ == ViewKind::Main && (g_ == &groups_[static_cast<std::size_t>(Group::Static)] || g_ == &groups_[static_cast<std::size_t>(Group::Trees)])) ||
+                          g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)]);
+    const std::uint64_t viewKey = (static_cast<std::uint64_t>(viewKind_) << 32) ^ (static_cast<std::uint64_t>(static_cast<std::uint32_t>(cascade_)) << 36) ^
+                                  (reinterpret_cast<std::uintptr_t>(shadowMap_) * 0xD6E8FEB86659FD93ull);
+    const std::size_t cacheGroup = g_ == &groups_[static_cast<std::size_t>(Group::Trees)] ? 1 : g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)] ? 2 : 0;
+    const bool verifyFrame = cacheOn && packetMode_ >= 2 && (packetMode_ == 3 || dev_.stats().frames % 10 == 0);
+    bool fullStates = false;  // a draw went the normal way: the device state beyond shaders / registers was set (and is restored)
+    const auto setRegs = [&](const sc::DrawDesc& dd) {
+        sc::forEachRun(dd.vsSet, [&](std::uint32_t r, std::uint32_t n) { dev_.setVertexShaderConstantF(r, dd.vsF[r], n); });
+        sc::forEachRun(dd.psSet, [&](std::uint32_t r, std::uint32_t n) { dev_.setPixelShaderConstantF(r, dd.psF[r], n); });
+    };
+    const auto setTag = [&](const sc::DrawDesc& dd) {
+        tag = tagOverride_ ? tagOverrideValue_ : savedTag;
+        if (dd.tagSubMesh != nullptr) {
+            tag.subMesh = dd.tagSubMesh;
+            tag.material = dd.tagMaterial;
+            tag.meshResource = dd.tagMeshResource;
+            tag.water = static_cast<draws::Water>(dd.tagWater);
+            tag.materialName = dd.tagMaterialName;
+        }
+    };
     for (std::size_t k = 0; k < drawCount_; ++k) {
         const sc::DrawDesc& d = *draws_[k];
         dev_.setVertexShaderRef(ShaderRef(const_cast<Shader*>(static_cast<const Shader*>(d.vs))));
         dev_.setPixelShaderRef(ShaderRef(const_cast<Shader*>(static_cast<const Shader*>(d.ps))));
+        PacketEntry* pe = nullptr;
+        bool stale = false;  // the retained packet is out of date: remade from this draw
+        std::uint64_t pkey = 0;
+        d3d9::Device::ReplayInputs rin;
+        const bool cacheable = cacheOn && d.vertexBytes.empty() && d.inheritMask == 0 && d.indexed && d.cpuStream == 0;
+        if (cacheable) {
+            for (std::size_t i = 0; i < 4; ++i) {
+                rin.streams[i] = const_cast<Buffer*>(static_cast<const Buffer*>(d.streams[i].buffer));
+                rin.strides[i] = d.streams[i].stride;
+            }
+            rin.indices = const_cast<Buffer*>(static_cast<const Buffer*>(d.indices));
+            pkey = (reinterpret_cast<std::uintptr_t>(op_->raw.context) * 0x9E3779B97F4A7C15ull) ^ (static_cast<std::uint64_t>(op_->raw.desc) * 0xC2B2AE3D27D4EB4Full) ^
+                   (static_cast<std::uint64_t>(op_->list) << 56) ^ (static_cast<std::uint64_t>(k) << 48) ^ (static_cast<std::uint64_t>(g_ - groups_.data()) << 40) ^ viewKey;
+            if (const auto it = packets_.find(pkey); it != packets_.end()) {
+                if (packetSameDesc(d, *it->second.desc)) pe = &it->second;
+                else ++pktWindow_.changed;
+            }
+        }
+        if (pe != nullptr && !verifyFrame) {
+            setRegs(d);
+            setTag(d);  // (the observers and replacers look at it)
+            if (dev_.replayDraw(pe->cd, rin)) {
+                ++g_->issuedDraws;
+                ++pktWindow_.replayed;
+                ++pktGroup_[cacheGroup][0];
+                continue;
+            }
+            ++pktWindow_.refused;
+            stale = dev_.replayWasStale();
+        }
+        if (cacheOn) {
+            ++pktWindow_.fresh;
+            ++pktGroup_[cacheGroup][1];
+        }
+        fullStates = true;
+        if (!statesSaved) saveStates();
         dev_.setVertexDecl(const_cast<VertexDecl*>(static_cast<const VertexDecl*>(d.decl)));
         for (std::uint32_t i = 0; i < 4; ++i) {
             const auto& s = d.streams[i];
@@ -2014,22 +2168,52 @@ void StaticOps::issue() {
             dev_.setSamplerStates(st, kSs, d.samplers[st].ss.data(), 7);
         }
         // the composed registers as ranges (one copy per run of consecutive registers)
-        sc::forEachRun(d.vsSet, [&](std::uint32_t r, std::uint32_t n) { dev_.setVertexShaderConstantF(r, d.vsF[r], n); });
-        sc::forEachRun(d.psSet, [&](std::uint32_t r, std::uint32_t n) { dev_.setPixelShaderConstantF(r, d.psF[r], n); });
-        tag = tagOverride_ ? tagOverrideValue_ : savedTag;
-        if (d.tagSubMesh != nullptr) {
-            tag.subMesh = d.tagSubMesh;
-            tag.material = d.tagMaterial;
-            tag.meshResource = d.tagMeshResource;
-            tag.water = static_cast<draws::Water>(d.tagWater);
-            tag.materialName = d.tagMaterialName;
-        }
+        setRegs(d);
+        setTag(d);
         issueIndex_ = k;
+        const bool capturing = cacheable && (pe == nullptr || verifyFrame || stale);
+        if (capturing) {
+            if (!pktFresh_) pktFresh_ = std::make_unique<d3d9::Device::CachedDraw>();
+            dev_.beginCapture(pktFresh_.get());
+        }
+        const PClock::time_point dt0 = timed ? PClock::now() : PClock::time_point{};
         if (d.indexed) {
             dev_.drawIndexedPrimitive(d.primType, d.baseVertex, d.minIndex, d.numVertices, d.startIndex, d.primCount);
         } else {
             dev_.drawPrimitive(d.primType, d.startIndex, d.primCount);
         }
+        if (capturing) {
+            if (!dev_.endCapture()) {
+                ++pktWindow_.notBuilt;
+                if (pe != nullptr) packets_.erase(pkey);
+            } else if (pe == nullptr) {
+                if (packets_.size() > 30000) packets_.clear();
+                PacketEntry& ne = packets_[pkey];
+                ne.cd = *pktFresh_;
+                ne.desc = std::make_unique<sc::DrawDesc>(d);
+                ++pktWindow_.built;
+            } else {
+                if (verifyFrame) {
+                    bool valid = true;
+                    std::string why;
+                    const bool same = dev_.replayMatches(pe->cd, *pktFresh_, rin, valid, why);
+                    ++pktWindow_.verified;
+                    if (!valid) {
+                        ++pktWindow_.invalid;
+                    } else if (!same) {
+                        ++pktWindow_.mismatches;
+                        if (pktMismatchLogged_ < 12) {
+                            ++pktMismatchLogged_;
+                            spdlog::info("native: packet cache: verify: replay would differ ({}) in frame {}: {}", why, dev_.stats().frames, describe(*op_));
+                        }
+                    }
+                } else {
+                    ++pktWindow_.rebuilt;
+                }
+                pe->cd = *pktFresh_;  // (also refreshes a stale entry)
+            }
+        }
+        if (timed) deviceNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(PClock::now() - dt0).count());
         ++g_->issuedDraws;
     }
     issuing_ = false;
@@ -2037,21 +2221,36 @@ void StaticOps::issue() {
 
     // restore
     tag = savedTag;
+    struct TimedEnd {
+        GroupState* g;
+        std::uint64_t deviceNs, drawCount;
+        PClock::time_point t0;
+        bool on;
+        ~TimedEnd() {
+            if (!on) return;
+            g->issueNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(PClock::now() - t0).count());
+            g->deviceNs += deviceNs;
+            g->timedDraws += drawCount;
+            ++g->timedOps;
+        }
+    } timedEnd{g_, deviceNs, drawCount_, issueT0, timed};
     // (native.lean_restore off, a lean op: the device keeps our last draw's state; measurement only)
     if (!leanRestore_ && leanCollect_ && leanBlock_ == 0) return;
     dev_.setVertexShaderRef(vs);
     dev_.setPixelShaderRef(ps);
-    dev_.setVertexDecl(decl);
-    for (std::uint32_t i = 0; i < 4; ++i) {
-        dev_.setStreamSource(i, streams[i].buffer, streams[i].offset, streams[i].stride);
-        dev_.setStreamSourceFreq(i, streams[i].freq);
-    }
-    dev_.setIndices(ib);
-    for (std::uint32_t i = 0; i < sc::StOwnedCount; ++i) dev_.setRenderState(kRs[i], rs[i]);
-    for (std::uint32_t m = stagesU; m != 0; m &= m - 1) {
-        const auto st = sc::lowBit(m);
-        dev_.setStageTexture(st, tex[st]);
-        dev_.setSamplerStates(st, kSs, ss[st].data(), 7);
+    if (fullStates) {
+        dev_.setVertexDecl(decl);
+        for (std::uint32_t i = 0; i < 4; ++i) {
+            dev_.setStreamSource(i, streams[i].buffer, streams[i].offset, streams[i].stride);
+            dev_.setStreamSourceFreq(i, streams[i].freq);
+        }
+        dev_.setIndices(ib);
+        for (std::uint32_t i = 0; i < sc::StOwnedCount; ++i) dev_.setRenderState(kRs[i], rs[i]);
+        for (std::uint32_t m = stagesU; m != 0; m &= m - 1) {
+            const auto st = sc::lowBit(m);
+            dev_.setStageTexture(st, tex[st]);
+            dev_.setSamplerStates(st, kSs, ss[st].data(), 7);
+        }
     }
     sc::forEachRun(vsU, [&](std::uint32_t r, std::uint32_t n) { dev_.setVertexShaderConstantF(r, savedVs_[r], n); });
     sc::forEachRun(psU, [&](std::uint32_t r, std::uint32_t n) { dev_.setPixelShaderConstantF(r, savedPs_[r], n); });
@@ -2092,6 +2291,44 @@ void StaticOps::report() {
         }
         spdlog::info("native: {}: sub-mesh draws by lights (total): 0 {}, 1 {}, 2 {}, 3 {}, 4 {}", what, g.lights[0], g.lights[1], g.lights[2],
                      g.lights[3], g.lights[4]);
+        if (gi == static_cast<std::size_t>(Group::Static) && packetMode_ != 0) {
+            const PacketStats& w = pktWindow_;
+            pktTotal_.replayed += w.replayed;
+            pktTotal_.refused += w.refused;
+            pktTotal_.built += w.built;
+            pktTotal_.mismatches += w.mismatches;
+            pktTotal_.verified += w.verified;
+            spdlog::info("native: packet cache (5 s): {} draws replayed, {} drawn fresh (replayed share {:.1f} %), of those {} refused at replay ({} remade), {} built, {} not capturable, {} descriptions changed; verify: {} checked, {} not valid, {} DIFFERING; "
+                         "total replayed {}, verified {}, differing {}; {} entries",
+                         w.replayed, w.fresh, w.replayed + w.fresh != 0 ? 100.0 * static_cast<double>(w.replayed) / static_cast<double>(w.replayed + w.fresh) : 0.0, w.refused, w.rebuilt,
+                         w.built, w.notBuilt, w.changed, w.verified, w.invalid, w.mismatches, pktTotal_.replayed, pktTotal_.verified, pktTotal_.mismatches, packets_.size());
+            {
+                const auto share = [&](int i) { return pktGroup_[i][0] + pktGroup_[i][1] != 0 ? 100.0 * static_cast<double>(pktGroup_[i][0]) / static_cast<double>(pktGroup_[i][0] + pktGroup_[i][1]) : 0.0; };
+                spdlog::info("native: packet cache replayed share (5 s): static meshes {:.1f} % ({} / {}), trees {:.1f} % ({} / {}), shadow views {:.1f} % ({} / {})", share(0), pktGroup_[0][0],
+                             pktGroup_[0][0] + pktGroup_[0][1], share(1), pktGroup_[1][0], pktGroup_[1][0] + pktGroup_[1][1], share(2), pktGroup_[2][0], pktGroup_[2][0] + pktGroup_[2][1]);
+                std::memset(pktGroup_, 0, sizeof(pktGroup_));
+                const auto& st = dev_.replayStats;
+                std::uint64_t why[12], nc[12];
+                for (int i = 0; i < 12; ++i) {
+                    why[i] = st.why[i] - pktWhyPrev_[i];
+                    nc[i] = st.ncWhy[i] - pktNcPrev_[i];
+                    pktWhyPrev_[i] = st.why[i];
+                    pktNcPrev_[i] = st.ncWhy[i];
+                }
+                spdlog::info("native: packet cache refusals (5 s): shaders {}, phase {}, consumers {}, env {}, jitter {}, stream binding {}, index binding {}, texture {}, observer capture {}, no scope {}, variant decision {}, sky cube {}",
+                             why[0], why[1], why[2], why[3], why[4], why[5], why[6], why[7], why[8], why[9], why[10], why[11]);
+                spdlog::info("native: packet cache not capturable by prepareDraw (5 s): replaced {}, tint {}, capture variant {}, variant not ready {}, gbuf write {}, custom {}, not indexed {}, replacement {}, uber {}, module {}, request {}; replayAllowed / textures (total): {}",
+                             nc[0], nc[1], nc[2], nc[3], nc[4], nc[5], nc[6], nc[7], nc[8], nc[9], nc[10], st.notCaptured);
+            }
+            pktWindow_ = {};
+        }
+        if (g.takeOver && g.timedDraws != 0) {
+            const double n = static_cast<double>(g.timedDraws);
+            spdlog::info("native: {}: issue cost (5 s, -Perf): {} draws in {} ops, {:.3f} us per draw in issue(), of it {:.3f} us the device draw call (prepareDraw + submit), {:.3f} us bookkeeping (state setters, save / restore)",
+                         what, g.timedDraws, g.timedOps, static_cast<double>(g.issueNs) / n / 1000.0, static_cast<double>(g.deviceNs) / n / 1000.0,
+                         static_cast<double>(g.issueNs - g.deviceNs) / n / 1000.0);
+            g.issueNs = g.deviceNs = g.timedDraws = g.timedOps = 0;
+        }
         if (g.takeOver) {
             spdlog::info("native: {}: drawn by the renderer: {} ops, {} draws (total); engine draws dropped {}; own draws checked {}, "
                          "differing from their composition {}",
@@ -2151,10 +2388,10 @@ void StaticOps::report() {
             return std::format("SpeedTree ops {} (branches {}, fronds {}, leaf cards {}, leaf meshes {}; 0 draws {}, wrong TransformationType {}), "
                                "instancing hardware {} / software {} ops, {} instances in {} batches ({} not drawn: strip length 0), {} leaf LOD "
                                "passes, queue copies sorted {}, shadow fronds skipped (leaf-card vertices > frond vertices) {}; tree billboard ops {} ({} tex-coord uploads); vegetation ops {} (0 draws {}, mesh "
-                               "not cached {}), {} nodes, {} instances, {} draws, buffer wraps {}, c12 from the pool (the clock moved since Process) {}",
+                               "not cached {}), {} nodes, {} instances, {} draws, buffer wraps {}, c12 from the pool (the clock moved since Process) {}; solid batch cuts: limit {} / strip {} / list {} / sun {} / static {} / own lights {} / null list {}; instances with table-known lights {}",
                                a.ops, a.types[0], a.types[1], a.types[2], a.types[3], a.zeroOps, a.wrongTransformation, a.hardware, a.software,
                                a.instances, a.batches, a.undrawnBatches, a.leafLods, a.sortedCopies, a.shadowFrondsSkipped, a.billboardOps, a.billboardTexCoords, a.grassOps,
-                               a.grassZeroOps, a.grassNotCached, a.grassNodes, a.grassInstances, a.grassDraws, a.grassWraps, a.grassClockMoved);
+                               a.grassZeroOps, a.grassNotCached, a.grassNodes, a.grassInstances, a.grassDraws, a.grassWraps, a.grassClockMoved, a.splits[0], a.splits[1], a.splits[2], a.splits[3], a.splits[4], a.splits[5], a.splits[6], a.knownLights);
         };
         TreeStats& t = treeTotal_;
         const TreeStats& w = treeWindow_;
@@ -2166,6 +2403,8 @@ void StaticOps::report() {
         t.batches += w.batches;
         t.sortedCopies += w.sortedCopies;
         t.undrawnBatches += w.undrawnBatches;
+        for (std::size_t i = 0; i < t.splits.size(); ++i) t.splits[i] += w.splits[i];
+        t.knownLights += w.knownLights;
         for (std::size_t i = 0; i < t.types.size(); ++i) t.types[i] += w.types[i];
         t.leafLods += w.leafLods;
         t.shadowFrondsSkipped += w.shadowFrondsSkipped;

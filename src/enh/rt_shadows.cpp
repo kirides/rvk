@@ -41,6 +41,7 @@ void RtShadows::startBuild() {
         building_[i] = std::async(std::launch::async, [rdev, i]() {
             rhi::ComputePipelineDesc d;
             d.cs.spirv = shader::embedded::spirv(kShaders[i]);
+            d.cs.dxil = shader::embedded::dxilOnDemand(kShaders[i]);
             d.name = kNames[i];
             return rdev->createComputePipeline(d);
         });

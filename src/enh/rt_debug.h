@@ -49,7 +49,7 @@ static_assert(sizeof(RtDebugPush) == 48 && sizeof(RtDebugPush) <= shader::abi::k
 
 class RtDebug {
 public:
-    enum class Mode : std::uint8_t { Off, Instances, Depth, Normals, Albedo, Uv };
+    enum class Mode : std::uint8_t { Off, Instances, Depth, Normals, Albedo, Uv, Roughness, Metalness };
     // "off" / "instances" / "depth" / "normals" / "albedo" / "albedo_split" / "albedo_opaque" / "uv"
     static Mode parse(std::string_view option);
     // the shader flags of an option (kRtDebugSplit: the right half only; kRtDebugOpaque: alpha-tested geometry solid)

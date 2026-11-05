@@ -116,6 +116,14 @@ struct RvkRtHitSurface {
     uint flags;              // record flags (RVK_RT_*: kind << 8, views << 16)
     uint uvSet;              // record uvSet (RVK_RT_UV_*)
     uint instanceId;
+    // material pack (enh/material_pack.h, docs/research/material-pack.md): defaults without an entry: rough dielectric, no emission
+    float roughness;         // 0 mirror .. 1
+    float metalness;
+    float occlusion;
+    float emissive;          // 0..1 mask: the albedo is emitted (ORM alpha)
+    float wetness;           // the entry's wetness 0..1 (the raster scales it with materials.wetness; here as authored)
+    bool glass;              // the entry has transmission > 0
+    uint packWord;           // the entry (0 = none)
 };
 
 // Terrain layers (a level's ground is several coplanar copies of its triangles, one per ground texture, each fading out through its vertex colour alpha; the
@@ -191,5 +199,31 @@ RvkRtHitSurface rvkRtHitSurface(RvkFrame f, RvkRtHit h, float3 dir, float coneWi
     }
     o.albedo = rvkRtAlbedo(r, o.uv, o.lod);
     if ((r.flags & RVK_RT_LAYER) != 0u) o.albedo = rvkRtBlendLayers(f, h, o.position - dir * h.t, dir, o.lod, o.albedo);
+    o.roughness = 1.0;
+    o.metalness = 0.0;
+    o.occlusion = 1.0;
+    o.emissive = 0.0;
+    o.wetness = 0.0;
+    o.glass = false;
+    o.packWord = r.packWord;
+    if ((r.packWord & (1u << 14)) != 0u) {
+        uint slot = r.packWord & 0x3FFFu;
+        bool orm = (r.packWord & (1u << 15)) != 0u;
+        float rScale = float((r.packWord >> 16) & 15u) * (1.0 / 8.0);
+        float rBias = float((r.packWord >> 20) & 15u) * (1.0 / 15.0);
+        float mScale = float((r.packWord >> 24) & 15u) * (1.0 / 15.0);
+        o.wetness = float((r.packWord >> 28) & 3u) * (1.0 / 3.0);
+        o.glass = (r.packWord & (1u << 30)) != 0u;
+        float4 t = float4(1.0, 1.0, 1.0, 0.0);
+        if (slot != 0u) {
+            float lod = o.lod;
+            if (r.albedoTex != 0u && (r.uvSet & RVK_RT_UV_NO_TEXTURE) == 0u) lod += log2(float(max(rvkSize2D(r.albedoTex).x, 1)) / float(max(rvkSize2D(slot).x, 1)));
+            t = rvkSample2DLod(slot, r.albedoSampler, o.uv, max(lod, 0.0));
+        }
+        o.roughness = saturate((slot == 0u ? 1.0 : (orm ? t.g : t.r)) * rScale + rBias);
+        o.occlusion = slot != 0u && orm ? t.r : 1.0;
+        o.metalness = saturate(slot != 0u && orm ? t.b * mScale : mScale);
+        o.emissive = slot != 0u && orm && (r.packWord >> 31) != 0u ? t.a : 0.0;
+    }
     return o;
 }

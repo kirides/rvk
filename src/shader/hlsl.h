@@ -11,6 +11,11 @@
 
 namespace rvk::shader {
 
+// D3D12 links vertex and pixel shaders by register: with this on the translated varying signatures are dense (0..max, zero fillers). Set once at start (the D3D12 backend).
+void setVaryingFillers(bool on);
+bool varyingFillers();
+
+
 struct HlslResult {
     std::string hlsl;
     Reflection reflection;
