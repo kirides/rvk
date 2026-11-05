@@ -342,6 +342,36 @@ TEST(settings_presets_and_tabs) {
     }
 }
 
+TEST(settings_overlay_metadata) {
+    // every registered setting has a label, a tooltip, a known page and a section; Debug-tier settings are on the Debug page only
+    Registry reg;
+    registerRendererSettings(reg);
+    const auto& pages = pageOrder();
+    for (const Setting* s : reg.all()) {
+        const Spec& sp = s->spec();
+        const std::string page = pageOf(sp);
+        CHECK_MSG(!sp.label.empty() && !sp.description.empty(), s->key());
+        CHECK_MSG(std::ranges::find(pages, page) != pages.end(), s->key() + " page " + page);
+        CHECK_MSG(!sectionOf(sp).empty(), s->key());
+        if (tierOf(sp) == Tier::Debug) CHECK_MSG(page == kPageDebug, s->key());
+        if (page == kPageDebug) CHECK_MSG(tierOf(sp) != Tier::Basic, s->key());
+    }
+    // every preset (master quality, rt) names existing settings with valid values
+    for (const auto* list : {&graphicsPresets(), &rtPresets()}) {
+        for (const Preset& p : *list) {
+            for (const auto& [key, text] : p.values) {
+                const Setting* s = reg.find(key);
+                double v = 0.0;
+                CHECK_MSG(s != nullptr && Registry::parseText(s->spec(), text, v), p.name + ": " + key);
+            }
+        }
+    }
+    // a page reset touches only that page
+    CHECK(reg.setText("vulkan.max_fps", "60") == Result::Ok && reg.setText("water.murkiness", "2") == Result::Ok);
+    CHECK(resetPage(reg, kPageDisplay) == 1);
+    CHECK(reg.find("water.murkiness")->value() == 2);
+}
+
 TEST(settings_debug_mode) {
     Registry reg;
     const RendererSettings r = registerRendererSettings(reg);
