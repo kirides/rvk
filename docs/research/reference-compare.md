@@ -1,5 +1,7 @@
 # Design: D3D9 reference comparison at fixed spots
 
+> Note (2026-11-05): the settings `debug.light_collect` named below were removed (removed 2026-11-05, now a constant in code or an always-on behaviour: see `docs/research/settings-audit.md`); read them as the history / the values the code now fixes, not as switches to set.
+
 Status: **built and run end to end (2026-10-21)**: renderer exports (4.1, 4.3), spass controls (3, risen-spass RE.md 58-60), the
 scenario `mods/rvkcompare` (5), the diff tool (6), the orchestration `scripts\refcompare.ps1` (7); determinism (8.1); results (11).
 The design text below is kept; the as-built parts say so. Goal (user decision): run the **same deterministic scenario** once

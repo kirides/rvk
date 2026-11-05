@@ -1,5 +1,7 @@
 # Upscaling / temporal AA (FSR)
 
+> Note (2026-11-05): the settings `upscale.post_full_size`, `upscale.reactive_cutoff`, `upscale.reactive_scale` named below were removed (removed 2026-11-05, now a constant in code or an always-on behaviour: see `docs/research/settings-audit.md`); read them as the history / the values the code now fixes, not as switches to set.
+
 Build and measurements of 2026-10-23 (RX 7900 XTX). Legend: [C] confirmed (measured), [I] inferred.
 Built: **native AA** (FSR 3.1.6 at render size = display size; SDK 2.4.0 since 2026-10-29, section 15) and **render scale / quality modes** (section 7) through AMD's
 signed FFX API DLL, with an **automatic reactive mask** for translucent effects (section 8). Open: explicit / water masks,

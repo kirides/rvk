@@ -1,5 +1,7 @@
 # Path tracing vs DDGI: measuring the probes against ground truth (2026-11-04)
 
+> Note (2026-11-05): the settings `gi.characters`, `gi.emissive`, `gi.lights`, `gi.shadow_fill` named below were removed (removed 2026-11-05, now a constant in code or an always-on behaviour: see `docs/research/settings-audit.md`); read them as the history / the values the code now fixes, not as switches to set.
+
 Question: would full path tracing give better fidelity than the DDGI probes + screen probes (replace mode, `gi.lights=world`)?
 Step one (this document): measure how far DDGI is from ground truth, and try the first piece of a per-pixel traced GI. No vendor SDK work.
 

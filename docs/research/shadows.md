@@ -1,5 +1,7 @@
 # Sun shadows: the engine's cascades and shadow mask, the enhanced mask (M11 shadows)
 
+> Note (2026-11-05): the settings `shadows.cascade_blend`, `shadows.fade`, `shadows.softness`, `shadows.split` named below were removed (removed 2026-11-05, now a constant in code or an always-on behaviour: see `docs/research/settings-audit.md`); read them as the history / the values the code now fixes, not as switches to set.
+
 Status: the enhanced mask pass and the cascade overrides are built and verified in game (`src/enh/shadows.*`, `src/engine/shadow_maps.*`,
 `shaders/shadows/shadow_mask.*`); settings category Shadows (`shadows.*`; player default on since 2026-10-23 with filter low + 2048 maps, off = the game's shadows in the test baseline: overlay.md 2.3).
 [C] = confirmed (decompiled and/or measured in the running game), [I] = inferred.

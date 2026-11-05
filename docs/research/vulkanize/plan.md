@@ -1,5 +1,7 @@
 # Vulkanize: GPU-resident data and retained draws (plan, 2026-10-28)
 
+> Note (2026-11-05): the settings `debug.constant_compare`, `debug.split_constants`, `native.retained`, `native.retained_check`, `native.retained_groups` named below were removed (removed 2026-11-05, now a constant in code or an always-on behaviour: see `docs/research/settings-audit.md`); read them as the history / the values the code now fixes, not as switches to set.
+
 Goal (user, 2026-10-28): optimize our own render pipeline and objects: mesh arenas, material information in structured GPU
 buffers indexed per draw, minimal CPU <-> GPU traffic. Builds on the Full mode after O1-O3 (engine-frame/opt-plan.md); the
 three modes stay (Original / Wrapper / Full); every stage is a Debug A/B switch first, default on once verified.

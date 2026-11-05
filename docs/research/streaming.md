@@ -1,5 +1,7 @@
 # Resource streaming, loading screens and frame-time spikes of the engine thread (2026-11-04)
 
+> Note (2026-11-05): the settings `debug.fast_absorb`, `debug.fs_read_cache`, `debug.sound_compressed` named below were removed (removed 2026-11-05, now a constant in code or an always-on behaviour: see `docs/research/settings-audit.md`); read them as the history / the values the code now fixes, not as switches to set.
+
 Goal: find out what the still scene's frame-time spikes (p95 6.2 ms vs p50 5 ms, an occasional 15 - 19 ms frame per 5 s) and the loading
 screens (frames of 300 - 620 ms) consist of, and what of it can be done cheaper or off the engine thread. Method, facts, and the
 switches that came out of it. [C] = confirmed in the running game / disassembly, [I] = inferred.

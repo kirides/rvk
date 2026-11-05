@@ -1,5 +1,7 @@
 # Material pack: roughness / ORM / metalness / emissive for the game's materials
 
+> Note (2026-11-05): the settings `materials.default_roughness`, `materials.derive_max`, `materials.derive_min`, `materials.environment`, `materials.specular`, `materials.wetness` named below were removed (removed 2026-11-05, now a constant in code or an always-on behaviour: see `docs/research/settings-audit.md`); read them as the history / the values the code now fixes, not as switches to set.
+
 Status: first version built (2026-11-04). Legend: **[C]** confirmed (code, data or a game run), **[I]** inferred / from other notes, not re-verified.
 Code: `src/enh/material_pack.*` (loader, names, manifest, pack word), `shaders/include/rvk_material_variant.hlsli` (raster response, `RVK_MV_PBR`),
 `shaders/include/rvk_rt_trace.hlsli` (hit surface), `src/enh/material_variant.*`, `src/d3d9/draw.cpp` (the word per draw), `tools/matpack_make.py`,

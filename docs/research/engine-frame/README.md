@@ -1,5 +1,7 @@
 # The engine's frame, decompiled (2026-10-27)
 
+> Note (2026-11-05): the settings `shadows.rt_wind` named below were removed (removed 2026-11-05, now a constant in code or an always-on behaviour: see `docs/research/settings-audit.md`); read them as the history / the values the code now fixes, not as switches to set.
+
 The complete render sequence of Risen Enhanced (x64), read from Engine.dll (headless Ghidra, six parallel slices) and checked
 against a recorded frame. Purpose: the specification of the **native frame** (native-renderer.md N5): first a faithful copy of
 this sequence on our Vulkan backend, then our own optimized modes step by step (section 4).

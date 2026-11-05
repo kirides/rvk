@@ -1,5 +1,7 @@
 # RT scene level of detail, memory limit and the RT quality preset
 
+> Note (2026-11-05): the settings `rt.lod_bias`, `rt.lod_far_range`, `rt.lod_range` named below were removed (removed 2026-11-05, now a constant in code or an always-on behaviour: see `docs/research/settings-audit.md`); read them as the history / the values the code now fixes, not as switches to set.
+
 Status (2026-11-05): built and measured. **Result: the far-LOD ladder gains no GPU time on the RX 7900 XTX at any scene the game has**
 (triangles traced -7 .. -28 %, every RT pass unchanged within noise) and **costs AS memory** (+4 .. +10 MiB, the proxies are additional BLASes)
 and, on D3D12, +0.3 - 0.4 ms of `rt.scene` GPU time. It therefore stays **off in Medium / High** (`rt.lod_scale` 0). What pays is
