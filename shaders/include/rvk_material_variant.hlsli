@@ -472,6 +472,12 @@ void rvkMvPbr(RvkFrame f, inout float4 c0) {
     float mScale = float((word >> 24) & 15u) * (1.0 / 15.0);
     float wet = float((word >> 28) & 3u) * (1.0 / 3.0) * f.params[3].x;  // the entry's wetness x materials.wetness
     bool glass = (word & (1u << 30)) != 0u;
+    // a DERIVED word (no pack entry; roughness from the engine's specular data, enh::matpack::kWordDerived): slot 0 + bit 15, roughness = bits 16-23 / 255
+    bool derived = hasEntry && slot == 0u && orm;
+    if (derived) {
+        rScale = 0.0;
+        rBias = float((word >> 16) & 255u) * (1.0 / 255.0);
+    }
 #ifdef RVK_MV_CLUSTER
     if (!hasEntry) {
         rScale = 0.0;
@@ -491,7 +497,7 @@ void rvkMvPbr(RvkFrame f, inout float4 c0) {
     if (dbg == 1u) { c0.rgb = float3(rough, rough, rough); return; }
     if (dbg == 2u) { c0.rgb = float3(metal, metal, metal); return; }
     if (dbg == 3u) { c0.rgb = float3(occl, rough, metal); return; }
-    if (dbg == 4u) { c0.rgb = lerp(c0.rgb, float3(0.1, 1.0, 0.2), 0.6); return; }
+    if (dbg == 4u) { c0.rgb = lerp(c0.rgb, derived ? float3(1.0, 0.55, 0.05) : float3(0.1, 1.0, 0.2), 0.6); return; }  // coverage: green = pack entry, orange = derived
 
     float3 P = rvk_mvP;
     float3 V = normalize(f.cameraPos.xyz - P);
@@ -522,11 +528,12 @@ void rvkMvPbr(RvkFrame f, inout float4 c0) {
     if (shadowTex != 0u) shadowMask = RVK_TEX2D(shadowTex).Sample(RVK_SAMP(rvkDrawSmp(d, uint(RVK_MV_PBR_SHADOW_SLOT))), (rvk_mvFrag.xy) * f.viewport.zw);
 #endif
     float3 specSum = float3(0.0, 0.0, 0.0);
+    // (a derived surface keeps the engine's own Phong highlights: no direct GGX on top, only the environment reflection and the G-buffer channel)
 #if RVK_MV_PBR_DIR_REG >= 0
-    specSum += rvkPbrLight(N, V, normalize(RVK_PSC(RVK_MV_PBR_DIR_REG + 2).xyz), RVK_PSC(RVK_MV_PBR_DIR_REG + 1).rgb, a, F0, shadowMask.a);
+    if (!derived) specSum += rvkPbrLight(N, V, normalize(RVK_PSC(RVK_MV_PBR_DIR_REG + 2).xyz), RVK_PSC(RVK_MV_PBR_DIR_REG + 1).rgb, a, F0, shadowMask.a);
 #endif
 #if RVK_MV_PBR_PNT_COUNT > 0
-    if (quality > 1.5) {
+    if (quality > 1.5 && !derived) {
         [unroll] for (int i = 0; i < RVK_MV_PBR_PNT_COUNT; ++i) {
             float4 pr = RVK_MV_PL(4 * i);
             float3 lv = pr.xyz - P;

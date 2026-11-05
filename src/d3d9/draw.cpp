@@ -720,7 +720,7 @@ bool Device::giEligible(const scene::Phase& phase) const { return giStaticEligib
 
 // the material pack's word of the current draw's material (0 = none); its map must be uploaded and sampleable (DrawBlock pad[1])
 std::uint32_t Device::packWord(CachedDraw::Variant* note) {
-    if (tag_.material == nullptr) return 0;
+    // (skinned draws carry no material tag: the provider then reads the executing shader, which holds the derived gloss; word 0 without it)
     if (note != nullptr) {
         // (the stamp is read before the lookup: a snapshot published in between makes the packet look stale, never the other way round)
         note->packStamped = static_cast<bool>(packStamp_);

@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "d3d9/device.h"
+#include "enh/material_pack.h"
 #include "shader/sm_eval.h"
 
 namespace rvk::enh {
@@ -37,6 +38,7 @@ struct RtMaterial {
     std::uint32_t colour = 0xFF808080u;  // RGBA8 (kRtUvNoTexture)
     std::uint32_t alpha = 0;            // the material's own alpha test (masked: GREATER | MaskReference << 8), 0 = none
     bool masked = false;                // blend mode Masked (alpha-tested geometry whatever the draw's states)
+    matpack::SpecularInfo spec;         // the engine's specular roles (materials.derive_from_specular: the hit's roughness without a pack entry)
     bool dead = false;                  // a texture it pointed to was released
     std::string name;                   // diagnostics: the diffuse's pool image (or the engine material)
     bool operator==(const RtMaterial& o) const;

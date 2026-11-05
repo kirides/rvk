@@ -772,6 +772,7 @@ RtScene::MaterialFields RtScene::materialFields(const RtMaterial* m) const {
         // (the map must be uploaded: the raster draws and the pack's prepare() do that; until then the entry is not used)
         const auto hit = pack_->lookup(m->name);
         if (hit.word != 0 && (hit.texture == nullptr || hit.texture->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)) f.packWord = hit.word;
+        else if (hit.word == 0) f.packWord = pack_->deriveWord(m->spec);  // no entry: the roughness the engine's specular data implies (materials.derive_from_specular)
     }
     return f;
 }

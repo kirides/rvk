@@ -29,6 +29,9 @@ namespace rvk::d3d9 {
 class Device;
 class Texture;
 }  // namespace rvk::d3d9
+namespace rvk::engine::materials {
+struct ShaderInfo;
+}
 
 namespace rvk::enh::matpack {
 
@@ -82,16 +85,48 @@ inline constexpr std::uint32_t kWordPresent = 1u << 14;
 inline constexpr std::uint32_t kWordOrm = 1u << 15;       // layout ORM (else roughness in R)
 inline constexpr std::uint32_t kWordGlass = 1u << 30;     // glass: full reflection (no light cap), the engine's diffuse stays
 inline constexpr std::uint32_t kWordEmissive = 1u << 31;  // the map's A channel is an emissive mask
+// DERIVED words (a draw WITHOUT a pack entry whose engine material has specular data, docs/research/material-pack.md 6): slot 0 and bit 15 set (an ORM layout needs a
+// map, so the combination is free), bits 16-23 = the roughness (8 bit, /255), metalness / wetness / glass / emissive = 0. Consumers decode them like a constant entry
+// with roughness scale 0 and bias = the roughness; only the raster variant treats them differently (the engine's own Phong highlights stay: no direct GGX added).
+inline constexpr std::uint32_t kWordDerived = 1u << 15;
 struct Decoded {
     std::uint32_t slot = 0;
     bool present = false, orm = false, emissive = false;
-    bool glass = false;
+    bool glass = false, derived = false;
     float roughnessScale = 1.0f, roughnessBias = 0.0f, metalness = 0.0f, wetness = 0.0f;
 };
 // roughness = saturate(tex * scale + bias): scale = bits 16-19 / 8 (0..1.875), bias = bits 20-23 / 15, metalness (scale / constant) = bits 24-27 / 15,
 // wetness = bits 28-29 / 3, glass = bit 30, emissive = bit 31
 std::uint32_t encodeWord(std::uint32_t slot, bool orm, const Constants& c, float defaultRoughness);
 Decoded decodeWord(std::uint32_t word);
+// ---- roughness derived from the engine's own specular data (materials.derive_from_specular) ---------------------------------------------------------------
+// What the engine's material graph says about gloss: the Specular role (a colour mask: a map or a constant colour) and the SpecularPower role (a constant, a map or
+// absent = the engine's default 1.0); the engine's Phong exponent is n = SpecularPower * 128 (ge_default.fxh PhongSpecular).
+struct SpecularInfo {
+    bool hasMask = false;      // the material has a Specular role
+    bool maskMap = false;      // ... a texture (its mean is unknown on the CPU)
+    float maskLum = 1.0f;      // a constant mask's luminance
+    bool powerKnown = false;   // SpecularPower is a constant (or absent: the engine's default 1.0)
+    float power = 1.0f;        // that value (the engine multiplies it by 128)
+    bool operator==(const SpecularInfo&) const = default;
+};
+struct DeriveOptions {
+    bool enabled = false;
+    float minRoughness = 0.25f, maxRoughness = 0.9f;  // the derived roughness is clamped to [min, max] (before the strength folds in)
+};
+struct Derived {
+    bool valid = false;        // the material has specular data
+    float roughness = 1.0f;    // effective roughness: the exponent's roughness (clamped), pushed towards 1 by a weak specular mask
+    float strength = 0.0f;     // the specular mask's strength 0..1
+};
+// Blinn / Phong exponent -> GGX: alpha = sqrt(2 / (n + 2)) (the usual Phong-to-GGX match), the pack's roughness r has alpha = r * r (shaders: a = max(r * r, 0.0025)), so r = sqrt(alpha)
+float roughnessFromPower(float specularPower);
+inline constexpr float kMapMaskStrength = 0.8f;  // a Specular MAP's strength (the per-pixel mask is not read: skin / cloth maps are mostly dark with bright spots)
+Derived deriveFromSpecular(const SpecularInfo& s, const DeriveOptions& o, float defaultRoughness);
+std::uint32_t encodeDerivedWord(float roughness);
+// the engine's material graph -> SpecularInfo (engine/materials.h roles; the Specular / SpecularPower proxies' constants and swizzle)
+SpecularInfo specularInfo(const engine::materials::ShaderInfo& info);
+
 // the roughness / metalness the shader computes for a texel (R, G, B, A of the map), for tests and the CPU mirror
 struct Surface {
     float occlusion = 1.0f, roughness = 1.0f, metalness = 0.0f, emissive = 0.0f;
@@ -123,6 +158,7 @@ public:
     struct Hit {
         std::uint32_t word = 0;          // 0 = no entry
         d3d9::Texture* texture = nullptr;  // the map (null: constants only)
+        bool derived = false;              // no pack entry: the word is derived from the engine's specular data
     };
     // The entry of a diffuse image name (any case / extension; render thread). Cached per (name, generation).
     Hit lookup(std::string_view diffuseName);
@@ -134,13 +170,18 @@ public:
     Stats stats() const;
     // counters since the last call (matched = lookups with an entry), for the 5 s log line
     struct Counters {
-        std::uint64_t lookups = 0, matched = 0;
+        std::uint64_t lookups = 0, matched = 0, derived = 0;
     };
     Counters takeCounters() {
         Counters c = counters_;
         counters_ = {};
         return c;
     }
+    // materials.derive_from_specular (render thread): applies to the lookups after the call (the generation changes: caches re-look-up)
+    void setDerive(const DeriveOptions& o);
+    const DeriveOptions& deriveOptions() const { return derive_; }
+    // the derived word of a material's specular data (0 = none / derive off), for consumers that do not hold the engine material (the RT scene)
+    std::uint32_t deriveWord(const SpecularInfo& s) const;
     // names of the entries that matched a lookup (diagnostics, first N)
     std::size_t matchedNames() const { return matched_.size(); }
 
@@ -176,9 +217,11 @@ private:
     std::shared_ptr<const Snapshot> pending_;
     std::thread worker_;
     std::unordered_map<std::string, Hit> byName_;           // lookup cache of this generation
+    std::unordered_map<const void*, Hit> byShader_;         // shader pointer -> derived hit (draws without a material tag)
     std::unordered_map<const void*, Hit> byMaterial_;       // material pointer -> hit (cleared on a new generation)
     std::unordered_map<std::string, bool> matched_;         // keys that matched (log)
     Counters counters_;
+    DeriveOptions derive_;
     std::uint32_t cacheGeneration_ = 0;
 };
 

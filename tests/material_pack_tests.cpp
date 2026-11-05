@@ -167,3 +167,50 @@ TEST(rain_wetness_rises_fast_and_dries_slowly) {
     for (int i = 0; i < 400; ++i) wet = rvk::enh::rain::wetnessStep(wet, 0.3f, 1.0f);
     CHECK(std::fabs(wet - 0.3f) < 0.01f);
 }
+
+TEST(matpack_derive_roughness_from_power) {
+    // n = power * 128; GGX alpha = sqrt(2 / (n + 2)); the pack's roughness r has alpha = r * r
+    CHECK(std::fabs(roughnessFromPower(0.25f) - std::sqrt(std::sqrt(2.0f / 34.0f))) < 1e-6f);
+    CHECK(roughnessFromPower(1.0f) < roughnessFromPower(0.25f));  // a higher exponent is smoother
+    CHECK(roughnessFromPower(0.0f) > 0.99f);                      // n = 0: fully rough
+}
+
+TEST(matpack_derive_from_specular_rules) {
+    DeriveOptions o;
+    o.enabled = true;
+    SpecularInfo s;
+    CHECK(!deriveFromSpecular(s, o, 0.7f).valid);  // no Specular role: no data
+    s.hasMask = true;
+    s.maskLum = 1.0f;
+    s.powerKnown = true;
+    s.power = 0.25f;
+    const Derived d = deriveFromSpecular(s, o, 0.7f);
+    CHECK(d.valid && d.strength == 1.0f && std::fabs(d.roughness - roughnessFromPower(0.25f)) < 1e-6f);
+    s.power = 8.0f;  // very smooth: clamped to the minimum
+    CHECK(std::fabs(deriveFromSpecular(s, o, 0.7f).roughness - o.minRoughness) < 1e-6f);
+    s.power = 0.0f;  // very rough: clamped to the maximum
+    CHECK(std::fabs(deriveFromSpecular(s, o, 0.7f).roughness - o.maxRoughness) < 1e-6f);
+    s.power = 0.25f;
+    s.maskLum = 0.5f;  // a weak mask pushes towards 1
+    const Derived w = deriveFromSpecular(s, o, 0.7f);
+    CHECK(w.roughness > d.roughness && w.roughness < 1.0f);
+    s.maskLum = 0.0f;  // black constant mask: no highlight
+    CHECK(!deriveFromSpecular(s, o, 0.7f).valid);
+    s.maskMap = true;  // a map: fixed strength
+    CHECK(std::fabs(deriveFromSpecular(s, o, 0.7f).strength - kMapMaskStrength) < 1e-6f);
+    s.powerKnown = false;  // a power texture: the default roughness stands in
+    CHECK(std::fabs(deriveFromSpecular(s, o, 0.7f).roughness - (0.7f + 0.3f * (1.0f - kMapMaskStrength))) < 1e-5f);
+    o.enabled = false;
+    CHECK(!deriveFromSpecular(s, o, 0.7f).valid);  // off: nothing
+}
+
+TEST(matpack_derived_word_roundtrip) {
+    const std::uint32_t w = encodeDerivedWord(0.5f);
+    const Decoded d = decodeWord(w);
+    CHECK(d.present && d.derived && !d.orm && d.slot == 0 && !d.glass && !d.emissive && d.metalness == 0.0f && d.wetness == 0.0f);
+    const float t[4] = {1, 1, 1, 0};
+    CHECK(std::fabs(evaluate(d, t).roughness - 0.5f) < 1.0f / 255.0f);
+    // a real ORM word (slot != 0) is never read as derived; a constant entry (bit 15 clear) neither
+    CHECK(!decodeWord(encodeWord(5, true, Constants{}, 0.7f)).derived);
+    CHECK(!decodeWord(encodeWord(0, false, Constants{}, 0.7f)).derived);
+}

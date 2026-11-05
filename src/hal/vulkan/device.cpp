@@ -556,14 +556,15 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
             if (now - last >= std::chrono::seconds(5)) {
                 last = now;
                 const auto c = matPack_->takeCounters();
-                if (c.lookups != 0) spdlog::info("enh: materials: {} draws looked up, {} matched ({} distinct entries seen)", c.lookups, c.matched, matPack_->matchedNames());
+                if (c.lookups != 0) spdlog::info("enh: materials: {} draws looked up, {} matched ({} distinct entries seen), {} derived from the specular data", c.lookups, c.matched, matPack_->matchedNames(), c.derived);
             }
             return d3d9::Device::PackHit{h.word, h.texture};
         });
         dev_.setPackStamp([this]() -> std::uint32_t { return matPack_->generation(); });
         materialRt_ = std::make_unique<enh::MaterialRt>(dev_, rtScene_.get());
         for (settings::Setting* s : {rs.materialsQuality, rs.materialsSpecular, rs.materialsEnvironment, rs.materialsDebug, rs.materialsAlternate, rs.materialsWetness,
-                                     rs.materialsRtReflections, rs.materialsRtRange, rs.materialsRtStrength, rs.materialsRainWetness, rs.materialsPuddles, rs.materialsRainForce, rs.materialsGlass}) {
+                                     rs.materialsRtReflections, rs.materialsRtRange, rs.materialsRtStrength, rs.materialsRainWetness, rs.materialsPuddles, rs.materialsRainForce, rs.materialsGlass,
+                                     rs.materialsDerive, rs.materialsDeriveMin, rs.materialsDeriveMax}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) {
                 applyMaterials();
                 applyGbuffer();  // the traced reflections read the G-buffer
@@ -798,6 +799,17 @@ void HalDevice::applyMaterials() {
         }, &matPack_, 0);
     } else {
         dev_.setPackBypass(false);
+    }
+    if (matPack_ && rs.materialsDerive != nullptr) {
+        enh::matpack::DeriveOptions d;
+        d.enabled = rs.materialsDerive->asBool();
+        d.minRoughness = static_cast<float>(rs.materialsDeriveMin->asFloat());
+        d.maxRoughness = static_cast<float>(rs.materialsDeriveMax->asFloat());
+        const auto& cur = matPack_->deriveOptions();
+        if (cur.enabled != d.enabled || cur.minRoughness != d.minRoughness || cur.maxRoughness != d.maxRoughness) {
+            matPack_->setDerive(d);
+            spdlog::info("enh: materials: derive from specular {} (roughness {:.2f} .. {:.2f})", d.enabled ? "on" : "off", d.minRoughness, d.maxRoughness);
+        }
     }
     dev_.setFrameParam(shader::abi::kFrameParamMaterials + 1, {rs.materialsWetness != nullptr ? rs.materialsWetness->asFloat() : 1.0f, 0.0f, 0.0f, 0.0f});
     // materials.quality = high: the traced reflections (enh/material_rt) carry the sky too: the raster's sky cube term is off while they run

@@ -54,7 +54,7 @@ bool isEmitterName(const std::string& name) {
 
 bool RtMaterial::operator==(const RtMaterial& o) const {
     return albedo == o.albedo && opacity == o.opacity && sampler == o.sampler && uvSet == o.uvSet &&
-           std::memcmp(uvMap, o.uvMap, sizeof(uvMap)) == 0 && colour == o.colour && alpha == o.alpha && masked == o.masked && name == o.name;
+           std::memcmp(uvMap, o.uvMap, sizeof(uvMap)) == 0 && colour == o.colour && alpha == o.alpha && masked == o.masked && name == o.name && spec == o.spec;
 }
 
 std::uint64_t RtMaterials::signature(const d3d9::ReplaceQuery& q) {
@@ -124,6 +124,8 @@ std::uint32_t RtMaterials::intern(const RtMaterial& m) {
         for (float f : row) key = mixFloat(key, f);
     key = mix(key, m.colour);
     key = mix(key, std::hash<std::string>{}(m.name));  // (the material pack keys by name: two materials of one texture stay apart)
+    key = mix(key, (m.spec.hasMask ? 1u : 0u) | (m.spec.maskMap ? 2u : 0u) | (m.spec.powerKnown ? 4u : 0u));
+    key = mixFloat(mixFloat(key, m.spec.maskLum), m.spec.power);
     key = mix(key, m.alpha | (m.masked ? 0x80000000u : 0u));
     if (const auto it = byKey_.find(key); it != byKey_.end()) {
         Entry& e = entries_[it->second];
@@ -429,6 +431,7 @@ std::uint32_t RtMaterials::resolve(d3d9::Device& dev, const d3d9::ReplaceQuery& 
         }
     }
     m.uvSet |= channel << abi::kRtUvOpacityShift;
+    if (graph) m.spec = matpack::specularInfo(info);
     if (graph && info.diffuse.slot >= 0) m.name = mats::poolImageName(info, info.diffuse.slot);
     if (m.name.empty() && q.tag != nullptr && q.tag->material != nullptr) m.name = mats::resourceName(q.tag->material);
     // light emitters (the GI lets them emit their diffuse colour, rtgi.md 19): the engine has no emission term the RT scene could
