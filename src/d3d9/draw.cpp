@@ -496,7 +496,9 @@ void Device::computeDynamicState(std::uint32_t primitiveType, DynamicStateValues
     // D3D9 screen space is y-down with a y-up clip space: flip with a negative viewport height
     const float vx = static_cast<float>(viewport_.x), vy = static_cast<float>(viewport_.y);
     const float vw = static_cast<float>(std::max(1u, viewport_.width)), vh = static_cast<float>(std::max(1u, viewport_.height));
-    o.viewport = VkViewport{vx, vy + vh, vw, -vh, viewport_.minZ, std::max(viewport_.minZ, viewport_.maxZ)};
+    // depth range clamped to [0, 1] (D3D9 allows any floats, Vulkan without VK_EXT_depth_range_unrestricted only [0, 1]; DXVK clamps the same way)
+    const float minZ = std::clamp(viewport_.minZ, 0.0f, 1.0f);
+    o.viewport = VkViewport{vx, vy + vh, vw, -vh, minZ, std::clamp(viewport_.maxZ, minZ, 1.0f)};
     std::int32_t x0 = static_cast<std::int32_t>(viewport_.x), y0 = static_cast<std::int32_t>(viewport_.y);
     std::int32_t x1 = x0 + static_cast<std::int32_t>(viewport_.width), y1 = y0 + static_cast<std::int32_t>(viewport_.height);
     if (rs_[RS_SCISSORTESTENABLE] != 0) {
