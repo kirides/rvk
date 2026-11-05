@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cwchar>
+#include <vector>
 
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "winmm.lib")
@@ -20,6 +22,39 @@ std::int64_t qpc() {
     return li.QuadPart;
 }
 
+// The exact (rational) refresh rate of the active display path whose GDI source is `device`, 0 = not found. DEVMODE's
+// dmDisplayFrequency is an integer (59 on a 59.94 Hz panel), 1.6 % off DWM's clock: FramePacer::setRate locks to the
+// vblank grid only within 0.5 %, so such panels free-ran at 59.000 fps against the 59.94 Hz FIFO (a repeated frame per
+// second). DXVK maps monitors the same way (wsi_monitor_win32.cpp).
+double displayConfigRefreshRate(const wchar_t* device) {
+    UINT32 pathCount = 0, modeCount = 0;
+    if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount) != ERROR_SUCCESS || pathCount == 0) {
+        return 0.0;
+    }
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
+    if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &pathCount, paths.data(), &modeCount, modes.data(), nullptr) !=
+        ERROR_SUCCESS) {
+        return 0.0;
+    }
+    for (UINT32 i = 0; i < pathCount; ++i) {
+        const DISPLAYCONFIG_PATH_INFO& path = paths[i];
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME source{};
+        source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+        source.header.size = sizeof(source);
+        source.header.adapterId = path.sourceInfo.adapterId;
+        source.header.id = path.sourceInfo.id;
+        if (DisplayConfigGetDeviceInfo(&source.header) != ERROR_SUCCESS || wcscmp(source.viewGdiDeviceName, device) != 0) {
+            continue;
+        }
+        const DISPLAYCONFIG_RATIONAL r = path.targetInfo.refreshRate;
+        if (r.Numerator != 0 && r.Denominator != 0) {
+            return static_cast<double>(r.Numerator) / static_cast<double>(r.Denominator);
+        }
+    }
+    return 0.0;
+}
+
 }  // namespace
 
 double monitorRefreshRate(HWND__* window) {
@@ -28,6 +63,9 @@ double monitorRefreshRate(HWND__* window) {
     mi.cbSize = sizeof(mi);
     if (monitor == nullptr || !GetMonitorInfoW(monitor, &mi)) {
         return 0.0;
+    }
+    if (const double exact = displayConfigRefreshRate(mi.szDevice); exact > 1.0) {
+        return exact;
     }
     DEVMODEW dm{};
     dm.dmSize = sizeof(dm);
