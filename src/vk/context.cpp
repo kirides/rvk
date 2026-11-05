@@ -238,8 +238,15 @@ bool Context::pickPhysicalDevice(const ContextOptions& options) {
             pick = i;
         }
     }
+    // then an integrated GPU, then anything else usable except a software rasterizer (DXVK's device filter skips those too;
+    // a configured adapter index still takes one)
     for (int i = 0; pick < 0 && i < static_cast<int>(n); ++i) {
-        if (probeResult.devices[static_cast<std::size_t>(i)].usable()) {
+        if (probeResult.devices[static_cast<std::size_t>(i)].usable() && probeResult.devices[static_cast<std::size_t>(i)].integrated) {
+            pick = i;
+        }
+    }
+    for (int i = 0; pick < 0 && i < static_cast<int>(n); ++i) {
+        if (probeResult.devices[static_cast<std::size_t>(i)].usable() && !probeResult.devices[static_cast<std::size_t>(i)].cpu) {
             pick = i;
         }
     }

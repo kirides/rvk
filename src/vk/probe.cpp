@@ -118,6 +118,8 @@ DeviceReport inspectImpl(VkPhysicalDevice pd) {
     r.driverVersion = props.driverVersion;
     r.vendorId = props.vendorID;
     r.discrete = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+    r.integrated = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+    r.cpu = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
     r.api13 = props.apiVersion >= VK_API_VERSION_1_3;
 
     std::uint32_t n = 0;
@@ -140,6 +142,7 @@ DeviceReport inspectImpl(VkPhysicalDevice pd) {
         vkGetPhysicalDeviceProperties2(pd, &p2);
         r.driverName = p12.driverName;
         r.driverInfo = p12.driverInfo;
+        r.driverId = static_cast<std::uint32_t>(p12.driverID);
         inspectRayTracing(pd, exts, r.rt);
     }
     if (r.api13) {
@@ -157,6 +160,8 @@ DeviceReport inspectImpl(VkPhysicalDevice pd) {
                                f12.descriptorBindingSampledImageUpdateAfterBind && f12.descriptorBindingPartiallyBound &&
                                f12.runtimeDescriptorArray && f12.descriptorBindingVariableDescriptorCount;
         r.timelineSemaphore = f12.timelineSemaphore == VK_TRUE;
+        r.scalarBlockLayout = f12.scalarBlockLayout == VK_TRUE;
+        r.bufferDeviceAddress = f12.bufferDeviceAddress == VK_TRUE;
         r.textureCompressionBC = f2.features.textureCompressionBC == VK_TRUE;
     }
 
@@ -172,6 +177,9 @@ DeviceReport inspectImpl(VkPhysicalDevice pd) {
     require(r.pushDescriptor, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME);
     require(r.descriptorIndexing, "descriptorIndexing (update-after-bind, partially bound, variable count)");
     require(r.timelineSemaphore, "timelineSemaphore");
+    // enabled unconditionally at device creation: without them vkCreateDevice would fail with no reason given
+    require(r.scalarBlockLayout, "scalarBlockLayout");
+    require(r.bufferDeviceAddress, "bufferDeviceAddress");
     require(r.textureCompressionBC, "textureCompressionBC");
     require(r.swapchain, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
     return r;

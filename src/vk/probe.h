@@ -15,6 +15,9 @@ struct DeviceReport {
     std::uint32_t driverVersion = 0;
     std::uint32_t vendorId = 0;
     bool discrete = false;
+    bool integrated = false;
+    bool cpu = false;                  // a software rasterizer (llvmpipe, SwiftShader, WARP-like): only taken when configured
+    std::uint32_t driverId = 0;        // VkDriverId (VkPhysicalDeviceVulkan12Properties): driver workarounds key on it
 
     // required
     bool api13 = false;
@@ -26,6 +29,8 @@ struct DeviceReport {
     bool timelineSemaphore = false;
     bool textureCompressionBC = false;
     bool swapchain = false;
+    bool scalarBlockLayout = false;    // Vulkan 1.2 feature, not required by 1.3: the ABI's buffer layouts need it
+    bool bufferDeviceAddress = false;
 
     // optional
     bool extendedDynamicState3 = false;
