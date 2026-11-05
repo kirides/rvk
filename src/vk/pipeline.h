@@ -52,7 +52,8 @@ public:
     // from precompiled libraries (fast, unoptimised) and replaced by its link-time-optimised build in the background.
     VkPipeline get(const PipelineDesc& desc, bool* created = nullptr);  // created: this call made a new pipeline
     // builds `desc` on a background thread unless it exists: pipelines known from earlier runs, before their first draw
-    void prewarm(const PipelineDesc& desc);
+    // (urgent: a draw waits for it; served before the others)
+    void prewarm(const PipelineDesc& desc, bool urgent = false);
     // the same for draw-time requests that repeat every frame until the pipeline exists (shader variants of enhancements): a
     // description is queued once
     void prewarmOnce(const PipelineDesc& desc);
@@ -96,6 +97,7 @@ private:
     std::mutex prewarmMutex_;
     std::condition_variable prewarmCv_;
     std::deque<PipelineDesc> prewarmQueue_;
+    std::deque<PipelineDesc> prewarmUrgent_;  // prewarmOnce: draw-time requests
     bool prewarmQuit_ = false;
     struct HashOf {
         std::size_t operator()(const PipelineDesc& d) const;
@@ -157,6 +159,9 @@ private:
     std::filesystem::path file_;
     mutable std::mutex mutex_;
     std::unordered_map<PipelineDesc, VkPipeline, Hash, Eq> pipelines_;
+    std::unordered_set<PipelineDesc, Hash, Eq> building_;  // descriptions being compiled outside mutex_ (under mutex_)
+    std::condition_variable builtCv_;                      // a description left building_
+    std::mutex dataMutex_;                                 // data(): savedBuilt_ and one serialisation at a time
     std::atomic<std::uint64_t> built_{0};
     std::atomic<std::uint64_t> buildNs_{0};
     std::uint64_t savedBuilt_ = 0;  // built_ at the last save

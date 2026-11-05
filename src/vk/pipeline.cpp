@@ -123,8 +123,9 @@ std::vector<char> PipelineCache::data() {
     if (cache_ == VK_NULL_HANDLE) {
         return blob;
     }
-    // under the lock: no pipeline is being created into the cache meanwhile
-    const std::lock_guard lock(mutex_);
+    // a VkPipelineCache is internally synchronised: serialising it while workers create pipelines into it is valid (no
+    // mutex_, which draws take for every lookup: DXVK keeps lookups lock-free for the same reason)
+    const std::lock_guard lock(dataMutex_);
     std::size_t size = 0;
     vkGetPipelineCacheData(ctx_->device(), cache_, &size, nullptr);
     blob.resize(size);
@@ -195,7 +196,7 @@ std::size_t PipelineCache::size() const {
     return pipelines_.size();
 }
 
-void PipelineCache::prewarm(const PipelineDesc& desc) {
+void PipelineCache::prewarm(const PipelineDesc& desc, bool urgent) {
     {
         const std::lock_guard lock(prewarmMutex_);
         if (prewarmThreads_.empty()) {
@@ -205,7 +206,7 @@ void PipelineCache::prewarm(const PipelineDesc& desc) {
                 prewarmThreads_.emplace_back([this] { prewarmWorker(); });
             }
         }
-        prewarmQueue_.push_back(desc);
+        (urgent ? prewarmUrgent_ : prewarmQueue_).push_back(desc);
     }
     prewarmCv_.notify_one();
 }
@@ -218,27 +219,29 @@ void PipelineCache::prewarmOnce(const PipelineDesc& desc) {
         const std::lock_guard lock(prewarmMutex_);
         if (!prewarmRequested_.insert(desc).second) return;
     }
-    prewarm(desc);
+    prewarm(desc, true);  // a draw is waiting for it (skipped meanwhile): ahead of the pipelines known from earlier runs
 }
 
 void PipelineCache::prewarmWorker() {
     SetThreadDescription(GetCurrentThread(), L"rvk pipeline prewarm");
     std::unique_lock lock(prewarmMutex_);
     for (;;) {
-        prewarmCv_.wait(lock, [&] { return prewarmQuit_ || !prewarmQueue_.empty(); });
+        prewarmCv_.wait(lock, [&] { return prewarmQuit_ || !prewarmQueue_.empty() || !prewarmUrgent_.empty(); });
         if (prewarmQuit_) {
             return;
         }
-        const PipelineDesc d = prewarmQueue_.front();
-        prewarmQueue_.pop_front();
+        std::deque<PipelineDesc>& q = !prewarmUrgent_.empty() ? prewarmUrgent_ : prewarmQueue_;
+        const PipelineDesc d = q.front();
+        q.pop_front();
         lock.unlock();
-        bool exists = false;
+        bool claimed = false;
         {
+            // claimed under the lock, built outside it: draws meanwhile find their pipelines, a get() of this one waits for it
+            // instead of compiling it a second time (DXVK: parallel duplicate compiles are "problematic on some drivers")
             const std::lock_guard pl(mutex_);
-            exists = pipelines_.contains(d);
+            claimed = !pipelines_.contains(d) && building_.insert(d).second;
         }
-        if (!exists) {
-            // built outside the cache lock: draws meanwhile find their pipelines (or build a missing one themselves)
+        if (claimed) {
             const auto t0 = std::chrono::steady_clock::now();
             VkPipeline p = build(d);
             const auto ns = static_cast<std::uint64_t>(
@@ -246,11 +249,13 @@ void PipelineCache::prewarmWorker() {
             if (p != VK_NULL_HANDLE) {
                 prewarmed_.fetch_add(1, std::memory_order_relaxed);
                 prewarmNs_.fetch_add(ns, std::memory_order_relaxed);
-                const std::lock_guard pl(mutex_);
-                if (!pipelines_.emplace(d, p).second) {
-                    vkDestroyPipeline(ctx_->device(), p, nullptr);  // a draw was faster
-                }
             }
+            {
+                const std::lock_guard pl(mutex_);
+                if (p != VK_NULL_HANDLE) pipelines_.emplace(d, p);  // a failure is left to get(), which logs and caches it
+                building_.erase(d);
+            }
+            builtCv_.notify_all();
         }
         lock.lock();
     }
@@ -261,6 +266,7 @@ void PipelineCache::stopPrewarm() {
         const std::lock_guard lock(prewarmMutex_);
         prewarmQuit_ = true;
         prewarmQueue_.clear();
+        prewarmUrgent_.clear();
     }
     prewarmCv_.notify_all();
     for (auto& t : prewarmThreads_) {
@@ -270,16 +276,24 @@ void PipelineCache::stopPrewarm() {
 }
 
 VkPipeline PipelineCache::get(const PipelineDesc& desc, bool* created) {
-    const std::lock_guard lock(mutex_);
+    std::unique_lock lock(mutex_);
     if (created != nullptr) {
         *created = false;
     }
-    if (auto it = pipelines_.find(desc); it != pipelines_.end()) {
-        return it->second;
+    for (;;) {
+        if (auto it = pipelines_.find(desc); it != pipelines_.end()) {
+            return it->second;
+        }
+        if (!building_.contains(desc)) break;
+        builtCv_.wait(lock);  // another thread compiles this description: its result, not a second compile
     }
     if (created != nullptr) {
         *created = true;
     }
+    // compiled outside the lock (it was held across vkCreateGraphicsPipelines, ~13 ms per pipeline on AMD: every lookup of the
+    // record threads and prewarm workers waited for it)
+    building_.insert(desc);
+    lock.unlock();
     const auto t0 = std::chrono::steady_clock::now();
     VkPipeline p = useLibraries_ ? link(desc, false) : VK_NULL_HANDLE;
     const bool linked = p != VK_NULL_HANDLE;
@@ -289,7 +303,11 @@ VkPipeline PipelineCache::get(const PipelineDesc& desc, bool* created) {
     built_.fetch_add(1, std::memory_order_relaxed);
     buildNs_.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()),
                        std::memory_order_relaxed);
+    lock.lock();
     pipelines_.emplace(desc, p);  // also caches failures (VK_NULL_HANDLE) so they are logged once
+    building_.erase(desc);
+    lock.unlock();
+    builtCv_.notify_all();
     if (linked) {
         {
             const std::lock_guard ol(optMutex_);
