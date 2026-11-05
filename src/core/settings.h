@@ -386,7 +386,10 @@ struct RendererSettings {
     Setting* lightingFullLit = nullptr;   // lighting.full_lit (debug): lit draws take all point lights from the table (one 3-light permutation; gpu-scene.md 9.8)
     Setting* lightingEnabled = nullptr;   // lighting.enabled (debug): run-time switch of the table (A/B)
     Setting* lightingStyle = nullptr;     // lighting.style: "original" (the engine's distance law) | "physical"
-    Setting* lightingDebug = nullptr;     // lighting.debug: "off" | "clusters" | "slots"
+    Setting* lightingDebug = nullptr;     // lighting.debug: "off" | "clusters" | "slots" | "shadows"
+    Setting* lightingShadows = nullptr;   // lighting.light_shadows: "off" | "nearby" | "many" (ray-traced point-light shadows on the table's lights)
+    Setting* lightingShadowQuality = nullptr;  // lighting.light_shadow_quality: "low" | "medium" | "high"
+    Setting* lightingShadowRadius = nullptr;   // lighting.light_shadow_radius: the lamps' size in cm (the soft shadow's disc)
     // material pack (enh/material_pack, docs/research/material-pack.md)
     Setting* materialsPack = nullptr;        // materials.pack (restart): load the pack folder; its materials get PBR specular / reflections
     Setting* materialsQuality = nullptr;     // materials.quality: "off" | "low" | "medium" | "high"

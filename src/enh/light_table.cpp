@@ -5,20 +5,26 @@
 #include <cmath>
 #include <atomic>
 #include <cstring>
+#include <memory>
 #include <mutex>
+#include <unordered_map>
 
 #include <spdlog/spdlog.h>
 
 #include "enh/rhi_scope.h"
+#include "enh/rt_scene.h"
 #include "shader/embedded.h"
 
 namespace rvk::enh {
 
 namespace {
 constexpr float kSpecularShare = 0.5f;   // specular colour = diffuse x this (the engine's c27 of point lights is a share of c26; measured in the LogFrame constants)
-constexpr std::uint32_t kClusters = kLightGridX * kLightGridY * kLightGridZ;
+constexpr std::uint32_t kClusters0 = kLightGridX * kLightGridY * kLightGridZ;
+constexpr std::uint32_t kClusters1 = kLightGrid1X * kLightGrid1Y * kLightGrid1Z;
+constexpr std::uint32_t kClusters = kClusters0 + kClusters1;
 constexpr std::uint64_t kLightsOffset = kLightHeaderBytes;
 constexpr std::uint64_t kClustersOffset = kLightsOffset + std::uint64_t{kLightMax} * kLightBytes;
+constexpr std::uint64_t kClusters1Offset = kClustersOffset + std::uint64_t{kClusters0} * kLightClusterBytes;
 constexpr std::uint64_t kBufferBytes = kClustersOffset + std::uint64_t{kClusters} * kLightClusterBytes;
 
 std::atomic<bool> g_fullLit{false};
@@ -45,6 +51,36 @@ bool fullLitTreeMerge() { return g_treeMerge.load(std::memory_order_relaxed); }
 void setFullLitOptions(bool skipReads, bool treeMerge) {
     g_skipReads.store(skipReads, std::memory_order_relaxed);
     g_treeMerge.store(treeMerge, std::memory_order_relaxed);
+}
+
+namespace {
+// the last build's light positions in 16-unit cells (lightKnown)
+struct KnownGrid {
+    std::unordered_multimap<std::uint64_t, std::array<float, 3>> cells;
+};
+std::atomic<std::shared_ptr<const KnownGrid>> g_known;
+std::uint64_t knownKey(std::int32_t x, std::int32_t y, std::int32_t z) {
+    return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(x)) * 73856093ull) ^ (static_cast<std::uint64_t>(static_cast<std::uint32_t>(y)) * 19349663ull) ^
+           (static_cast<std::uint64_t>(static_cast<std::uint32_t>(z)) * 83492791ull);
+}
+}  // namespace
+
+bool LightTable::lightKnown(const float pos[3]) {
+    const auto g = g_known.load();
+    if (!g || g->cells.empty()) return false;
+    const std::int32_t cx = static_cast<std::int32_t>(std::floor(pos[0] / 16.0f)), cy = static_cast<std::int32_t>(std::floor(pos[1] / 16.0f)),
+                       cz = static_cast<std::int32_t>(std::floor(pos[2] / 16.0f));
+    for (std::int32_t dx = -1; dx <= 1; ++dx) {
+        for (std::int32_t dy = -1; dy <= 1; ++dy) {
+            for (std::int32_t dz = -1; dz <= 1; ++dz) {
+                const auto range = g->cells.equal_range(knownKey(cx + dx, cy + dy, cz + dz));
+                for (auto it = range.first; it != range.second; ++it) {
+                    if (std::abs(it->second[0] - pos[0]) < 8.0f && std::abs(it->second[1] - pos[1]) < 8.0f && std::abs(it->second[2] - pos[2]) < 8.0f) return true;
+                }
+            }
+        }
+    }
+    return false;
 }
 
 bool LightTable::registryComplete() { return g_registryComplete.load(std::memory_order_relaxed); }
@@ -78,6 +114,10 @@ std::uint32_t lightSlice(float viewZ, float nearZ, float slicesPerLn, std::uint3
 }
 
 float lightSliceNear(std::uint32_t slice, float nearZ, float slicesPerLn) { return nearZ * std::exp(static_cast<float>(slice) / slicesPerLn); }
+
+float lightShadowEncode(std::uint32_t id, float vis) { return static_cast<float>(id) + std::floor(std::clamp(vis, 0.0f, 1.0f) * 63.0f + 0.5f) / 64.0f; }
+std::uint32_t lightShadowId(float e) { return static_cast<std::uint32_t>(std::floor(e + 0.0001f)); }
+float lightShadowVis(float e) { return std::floor((e + 0.0001f - std::floor(e + 0.0001f)) * 64.0f) / 63.0f; }
 
 float lightEngineFalloff(float d2, float rcpSqrRange) { return 1.0f - std::clamp(d2 * rcpSqrRange, 0.0f, 1.0f); }
 
@@ -117,16 +157,85 @@ LightTable::LightTable(d3d9::Device& device) : dev_(device) {
 }
 
 LightTable::~LightTable() {
+    shadow_.mode = 0;
     configure(false, 0, 0);
+    for (auto& b : shadowBuilding_) {
+        if (b.valid()) b.get();
+    }
     if (building_.valid()) building_.get();
 }
 
-void LightTable::configure(bool enabled, int style, int debug) {
+// ray-traced lamp shadows: held (RT scene, pass, pipelines) only while the table is on and the setting asks for them; off = nothing exists
+void LightTable::configureShadows(const ShadowSettings& s) {
+    shadow_ = s;
+    applyShadowHold();
+}
+
+void LightTable::applyShadowHold() {
+    const bool want = enabled_ && shadow_.mode > 0 && scene_ != nullptr && scene_->supported() && !shadowFailed_ && !failed_;
+    if (want && !shadowHeld_) {
+        rhi::Device* rdev = dev_.rhi();
+        if (rdev == nullptr) {
+            shadowFailed_ = true;
+            return;
+        }
+        static constexpr const char* kShaders[2] = {"lighting/light_shadow_trace.comp", "lighting/light_shadow_filter.comp"};
+        static constexpr const char* kNames[2] = {"light.shadow trace", "light.shadow filter"};
+        for (int i = 0; i < 2; ++i) {
+            if (shadowPipeline_[i] || shadowBuilding_[i].valid()) continue;
+            shadowBuilding_[i] = std::async(std::launch::async, [rdev, i]() {
+                rhi::ComputePipelineDesc d;
+                d.cs.spirv = shader::embedded::spirv(kShaders[i]);
+                d.cs.dxil = shader::embedded::dxilOnDemand(kShaders[i]);
+                d.name = kNames[i];
+                return rdev->createComputePipeline(d);
+            });
+        }
+        scene_->acquire(this);
+        scene_->setDynamic(this, true);  // characters cast lamp shadows
+        shadowPassId_ = dev_.addPass(d3d9::inject::Point::AfterDepthPrepass, "light.shadow", [this](d3d9::PassContext& ctx) { recordShadow(ctx); }, &shadowPassId_, 5);
+        shadowHeld_ = true;
+        spdlog::info("enh: lights: lamp shadows on (mode {}, quality {}, lamp radius {:.0f} units)", shadow_.mode == 2 ? "many" : "nearby", shadow_.quality,
+                     shadow_.radius);
+    } else if (!want && shadowHeld_) {
+        dev_.removePasses(&shadowPassId_);
+        shadowPassId_ = 0;
+        pendingShadow_ = {};
+        scene_->setDynamic(this, false);
+        scene_->release(this);
+        for (const char* k : {"light.shadow raw", "light.shadow final"}) dev_.releaseTransient(k);
+        shadowHeld_ = false;
+        shadowLights_ = 0;
+        spdlog::info("enh: lights: lamp shadows off");
+    }
+}
+
+bool LightTable::shadowPipelinesReady() {
+    if (shadowFailed_) return false;
+    bool all = true;
+    for (int i = 0; i < 2; ++i) {
+        if (shadowPipeline_[i]) continue;
+        if (!shadowBuilding_[i].valid() || shadowBuilding_[i].wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+            all = false;
+            continue;
+        }
+        shadowPipeline_[i] = shadowBuilding_[i].get();
+        if (!shadowPipeline_[i]) {
+            spdlog::error("enh: lights: a lamp shadow pipeline failed: lamp shadows stay off this session");
+            shadowFailed_ = true;
+            return false;
+        }
+    }
+    return all;
+}
+
+void LightTable::configure(bool enabled, int style, int debug, float defaultRoughness) {
+    defaultRoughness_ = defaultRoughness;
     if (failed_) enabled = false;
     if (!enabled) g_registryComplete.store(false, std::memory_order_relaxed);
     style_ = style;
     debug_ = debug;
-    if (!failed_) dev_.setFrameParam(shader::abi::kFrameParamLights + 1, {enabled ? 1.0f : 0.0f, static_cast<float>(style), static_cast<float>(debug), 0.0f});
+    if (!failed_) dev_.setFrameParam(shader::abi::kFrameParamLights + 1, {enabled ? 1.0f : 0.0f, static_cast<float>(style), static_cast<float>(debug), defaultRoughness_});
     if (enabled && !enabled_) {
         passId_ = dev_.addPass(d3d9::inject::Point::AfterDepthPrepass, "light.cluster", [this](d3d9::PassContext& ctx) { record(ctx); }, this);
         spdlog::info("enh: lights: light table on (style {}, {} x {} x {} clusters, up to {} lights)", style == 1 ? "physical" : "original", kLightGridX, kLightGridY,
@@ -137,6 +246,7 @@ void LightTable::configure(bool enabled, int style, int debug) {
         spdlog::info("enh: lights: light table off");
     }
     enabled_ = enabled;
+    applyShadowHold();
 }
 
 bool LightTable::pipelineReady() {
@@ -166,7 +276,7 @@ void LightTable::record(d3d9::PassContext& ctx) {
         return;
     }
     // the world's lights within the grid's reach, nearest first when there are more than the table holds
-    if (!engine::lights::collect(cam.position.data(), kLightFar, scratch_, stats_)) {
+    if (!engine::lights::collect(cam.position.data(), kLightFar1, scratch_, stats_)) {
         g_registryComplete.store(false, std::memory_order_relaxed);
         ++skipped_;
         return;
@@ -203,6 +313,23 @@ void LightTable::record(d3d9::PassContext& ctx) {
         scratch_.resize(kLightMax);
     }
     const std::uint32_t count = static_cast<std::uint32_t>(scratch_.size());
+    // lamp shadows: the nearest lights within the mode's reach get the ids 1..N (the pass light.shadow traces them)
+    std::vector<std::uint32_t> shadowId(count, 0);
+    shadowLights_ = 0;
+    if (shadowHeld_ && shadow_.mode > 0) {
+        const std::uint32_t maxLights = shadow_.mode == 2 ? kLightShadowMax : 8u;
+        const float limit = shadow_.mode == 2 ? 6000.0f : 2500.0f;
+        std::vector<std::pair<float, std::uint32_t>> nearLights;
+        for (std::uint32_t i = 0; i < count; ++i) {
+            const auto& w = scratch_[i];
+            const float dx = w.pos[0] - cam.position[0], dy = w.pos[1] - cam.position[1], dz = w.pos[2] - cam.position[2];
+            const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (dist < limit && w.range < 3000.0f) nearLights.emplace_back(dist, i);
+        }
+        std::sort(nearLights.begin(), nearLights.end());
+        for (std::uint32_t k = 0; k < nearLights.size() && k < maxLights; ++k) shadowId[nearLights[k].second] = k + 1;
+        shadowLights_ = static_cast<std::uint32_t>(std::min<std::size_t>(nearLights.size(), maxLights));
+    }
     cur_.resize(count);
     for (std::uint32_t i = 0; i < count; ++i) {
         const auto& w = scratch_[i];
@@ -227,6 +354,7 @@ void LightTable::record(d3d9::PassContext& ctx) {
         g.misc[0] = 0;
         std::memcpy(&g.misc[0], &id, 4);
         g.misc[1] = g.misc[2] = g.misc[3] = 0.0f;
+        std::memcpy(&g.misc[1], &shadowId[i], 4);
     }
     // batch change detection against the previous upload (the statistics of how many lights move: static ones are the same every frame)
     lastChanged_ = 0;
@@ -236,6 +364,16 @@ void LightTable::record(d3d9::PassContext& ctx) {
     changedTotal_ += lastChanged_;
     prev_.swap(cur_);
     lastCount_ = count;
+    {
+        auto known = std::make_shared<KnownGrid>();
+        known->cells.reserve(count);
+        for (const auto& g : prev_) {
+            known->cells.emplace(knownKey(static_cast<std::int32_t>(std::floor(g.posRcp[0] / 16.0f)), static_cast<std::int32_t>(std::floor(g.posRcp[1] / 16.0f)),
+                                          static_cast<std::int32_t>(std::floor(g.posRcp[2] / 16.0f))),
+                                 std::array<float, 3>{g.posRcp[0], g.posRcp[1], g.posRcp[2]});
+        }
+        g_known.store(std::move(known));
+    }
 
     rhi::Buffer& up = *upload_[dev_.frameValue() % rhi::kFramesInFlight];
     if (count > 0) std::memcpy(up.map(), prev_.data(), std::size_t{count} * kLightBytes);
@@ -265,6 +403,43 @@ void LightTable::record(d3d9::PassContext& ctx) {
     push.offs[0] = static_cast<std::uint32_t>(kLightsOffset);
     push.offs[1] = static_cast<std::uint32_t>(kClustersOffset);
     push.offs[2] = static_cast<std::uint32_t>(style_);
+    push.grid1[0] = kLightGrid1X;
+    push.grid1[1] = kLightGrid1Y;
+    push.grid1[2] = kLightGrid1Z;
+    push.grid1[3] = static_cast<std::uint32_t>(kClusters1Offset);
+    push.zs1[0] = kLightFar;
+    push.zs1[1] = kLightFar1;
+    push.zs1[2] = lightSliceScale(kLightFar, kLightFar1, kLightGrid1Z);
+    // the lamp shadows of this frame: certain to run (the header names their image; the pass light.shadow fills it)
+    pendingShadow_ = {};
+    if (shadowHeld_ && shadowLights_ > 0 && ctx.depthMap != nullptr && dev_.rtSceneValid() && shadowPipelinesReady() && dev_.readable(ctx.depthMap, ctx.cmd)) {
+        const std::uint32_t w = ctx.depthMap->desc().width, h = ctx.depthMap->desc().height;
+        rhi::Texture* raw = dev_.transient("light.shadow raw", {VK_FORMAT_R16G16B16A16_SFLOAT, {w, h}});
+        rhi::Texture* fin = dev_.transient("light.shadow final", {VK_FORMAT_R16G16B16A16_SFLOAT, {w, h}});
+        if (raw != nullptr && fin != nullptr && w < 65536 && h < 65536) {
+            LightShadowPush sp{};
+            sp.h.frame = ctx.frameBlock.bits;
+            const auto tab = device_->shaderRef(0);
+            sp.table[0] = tab[0];
+            sp.table[1] = tab[1];
+            sp.tex[0] = ctx.depthMap->bindlessSlot();
+            sp.tex[1] = raw->heapSampled();
+            sp.tex[2] = w;
+            sp.tex[3] = h;
+            sp.cfg[0] = shadow_.radius;
+            sp.cfg[1] = 12000.0f;
+            sp.cfg[2] = 1.5f;
+            sp.cfg[3] = shadow_.quality >= 3 ? 2.0f : 1.0f;
+            sp.misc[0] = static_cast<std::uint32_t>(dev_.frameValue());
+            sp.misc[1] = shadow_.quality <= 1 ? 1u : 0u;  // RVK_RT_TRACE_OPAQUE at low
+            pendingShadow_ = {dev_.frameValue(), sp, raw, fin, (w + 7) / 8, (h + 7) / 8};
+            push.shadow[0] = fin->heapSampled();
+            push.shadow[1] = w;
+            push.shadow[2] = h;
+            push.shadow[3] = shadowLights_;
+        }
+    }
+    if (shadowHeld_ && pendingShadow_.frame == ~0ull) ++shadowSkipped_;
     cl.bufferBarrier(*device_, rhi::BufferAccess::ShaderWrite);
     cl.bindPipeline(*pipeline_);
     cl.setPushConstants(&push, sizeof(push));
@@ -277,6 +452,37 @@ void LightTable::record(d3d9::PassContext& ctx) {
     logStats();
 }
 
+// pass 2 of the lamp shadows: the trace and the filter (a frame the cluster build prepared)
+void LightTable::recordShadow(d3d9::PassContext& ctx) {
+    if (ctx.mainView != 1 || pendingShadow_.frame != dev_.frameValue()) return;
+    PendingShadow p = pendingShadow_;
+    pendingShadow_ = {};
+    d3d9::RegionScope region(dev_, "light.shadow");
+    RhiScope rs(dev_, ctx.cmd);
+    if (!rs) return;
+    rhi::CommandList& cl = rs.cl();
+    rhi::Texture* raw = rs.wrap(*p.raw);
+    rhi::Texture* fin = rs.wrap(*p.fin);
+    cl.transition(*raw, VK_IMAGE_LAYOUT_GENERAL);
+    cl.bindPipeline(*shadowPipeline_[0]);
+    rhi::Texture* const s0[] = {raw};
+    cl.setStorageTextures(s0);
+    cl.setPushConstants(&p.push, sizeof(p.push));
+    cl.dispatch(p.gx, p.gy, 1);
+    cl.transition(*raw, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    cl.transition(*fin, VK_IMAGE_LAYOUT_GENERAL);
+    cl.bindPipeline(*shadowPipeline_[1]);
+    rhi::Texture* const s1[] = {fin};
+    cl.setStorageTextures(s1);
+    cl.setPushConstants(&p.push, sizeof(p.push));
+    cl.dispatch(p.gx, p.gy, 1);
+    cl.transition(*fin, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (shadowPasses_++ == 0) {
+        spdlog::info("enh: lights: first lamp shadow frame {}x{}: {} shadow-casting lights, radius {:.0f} units, {} ray(s) per light", p.push.tex[2], p.push.tex[3],
+                     shadowLights_, p.push.cfg[0], static_cast<int>(p.push.cfg[3]));
+    }
+}
+
 void LightTable::logStats() {
     const double now = dev_.secondsSinceCreate();
     if (now - lastLog_ < 5.0) return;
@@ -285,6 +491,10 @@ void LightTable::logStats() {
                  "debug {}, table lighting {}",
                  lastCount_, lastChanged_, lastDropped_, kLightMax, lastDrawnAdded_, passes_, skipped_, style_ == 1 ? "physical" : "original", debug_,
                  fullLitActive() ? "on" : "off");
+    if (shadowHeld_) {
+        spdlog::info("enh: lights: lamp shadows: {} lights with a shadow id, {} frames traced, {} skipped (no RT scene / pipelines / depth)", shadowLights_, shadowPasses_,
+                     shadowSkipped_);
+    }
 }
 
 }  // namespace rvk::enh

@@ -41,3 +41,38 @@ TEST(light_table_physical_ratio_keeps_the_engine_brightness_at_035_range) {
     CHECK(std::abs(lightEngineFalloff(0.0f, rcp) - 1.0f) < 1e-6f && lightEngineFalloff(R * R, rcp) == 0.0f);
     CHECK(std::abs(lightEngineFalloff(d * d, rcp) - (1.0f - 0.1225f)) < 1e-5f);
 }
+
+// the far level continues the near grid's slices without a gap and covers the world
+TEST(light_table_far_level_continues_the_slices) {
+    using namespace enh;
+    const float s1 = lightSliceScale(kLightFar, kLightFar1, kLightGrid1Z);
+    CHECK(lightSlice(kLightFar, kLightFar, s1, kLightGrid1Z) == 0);
+    CHECK(lightSlice(kLightFar1 * 3.0f, kLightFar, s1, kLightGrid1Z) == kLightGrid1Z - 1);
+    CHECK(std::abs(lightSliceNear(kLightGrid1Z, kLightFar, s1) - kLightFar1) < kLightFar1 * 1e-4f);
+    for (std::uint32_t k = 0; k < kLightGrid1Z; ++k) CHECK(lightSlice(lightSliceNear(k, kLightFar, s1) * 1.001f, kLightFar, s1, kLightGrid1Z) == k);
+    // the cluster budget: 16 x 9 x 24 + 32 x 18 x 8 clusters of 256 bytes
+    CHECK(kLightGridX * kLightGridY * kLightGridZ + kLightGrid1X * kLightGrid1Y * kLightGrid1Z == 3456 + 4608);
+}
+
+// a lamp shadow entry survives the RGBA16F image: id + q / 64 is exact in a half float for every id 1..31 and q 0..63
+static float roundToHalf(float v) {
+    if (v == 0.0f) return 0.0f;
+    int e = 0;
+    std::frexp(v, &e);  // v = m 2^e, m in [0.5, 1): the half's ulp is 2^(e - 11)
+    const float ulp = std::ldexp(1.0f, e - 11);
+    return std::nearbyint(v / ulp) * ulp;
+}
+
+TEST(light_table_shadow_entries_are_exact_in_half_floats) {
+    using namespace enh;
+    for (std::uint32_t id = 1; id <= kLightShadowMax; ++id) {
+        for (int q = 0; q <= 63; ++q) {
+            const float vis = static_cast<float>(q) / 63.0f;
+            const float e = lightShadowEncode(id, vis);
+            CHECK(roundToHalf(e) == e);
+            CHECK(lightShadowId(e) == id);
+            CHECK(std::abs(lightShadowVis(e) - vis) < 1e-5f);
+        }
+    }
+    CHECK(lightShadowEncode(5, 1.0f) < 6.0f && lightShadowEncode(5, 0.0f) == 5.0f);
+}

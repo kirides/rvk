@@ -1833,12 +1833,49 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .category = "Debug views",
         .tab = kTabDebug,
         .description = "Developer view of the light table: \"Cluster counts\" shows the lights in each pixel's cluster (blue few, red 16+, black none), "
-                       "\"Slots filled\" how many of the shader's light slots the table fills (red 1, green 2, yellow 3, dim blue none).",
+                       "\"Slots filled\" how many of the shader's light slots the table fills (red 1, green 2, yellow 3, dim blue none), \"Light shadows\" the ray-traced lamp shadows (white lit, red shadowed, dark blue no shadow-casting lamp).",
         .type = Type::Enum,
         .defaultValue = 0,
-        .options = {"off", "clusters", "slots"},
-        .optionLabels = {"Off", "Cluster counts", "Slots filled"},
+        .options = {"off", "clusters", "slots", "shadows"},
+        .optionLabels = {"Off", "Cluster counts", "Slots filled", "Light shadows"},
         .flags = Flag::NoAB | Flag::Debug,
+    });
+    r.lightingShadows = &reg.add({
+        .key = "lighting.light_shadows",
+        .label = "Lamp shadows",
+        .category = "Lighting",
+        .description = "Ray-traced shadows of the lamps, torches and candles: the nearest lights (Nearby: 8 within 25 m, Many: 31 within 60 m) shade the surfaces they "
+                       "reach with soft shadows traced against the world, so far more lights than the game's own three shadowed lights cast shadows. Full mode "
+                       "with the clustered lights; needs a graphics card with ray tracing.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"off", "nearby", "many"},
+        .optionLabels = {"Off", "Nearby", "Many"},
+        .requirements = caps::bit(caps::Cap::RayQuery),
+        .unmetValue = 0,
+    });
+    r.lightingShadowQuality = &reg.add({
+        .key = "lighting.light_shadow_quality",
+        .label = "Lamp shadow quality",
+        .category = "Lighting",
+        .description = "Low: leaves and fences cast solid shadows. Medium: leaves cast their own shape. High: two rays per light, smoother soft edges.",
+        .type = Type::Enum,
+        .defaultValue = 1,
+        .options = {"low", "medium", "high"},
+        .optionLabels = {"Low", "Medium", "High"},
+        .flags = Flag::Advanced,
+    });
+    r.lightingShadowRadius = &reg.add({
+        .key = "lighting.light_shadow_radius",
+        .label = "Lamp size (shadow softness)",
+        .category = "Lighting",
+        .description = "The size of a lamp's flame for its shadow: a larger value gives softer shadow edges.",
+        .type = Type::Float,
+        .defaultValue = 20,
+        .min = 2,
+        .max = 80,
+        .format = "%.0f cm",
+        .flags = Flag::Advanced,
     });
     r.gbufferDebug = &reg.add({
         .key = "gbuffer.debug",

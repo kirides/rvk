@@ -751,6 +751,7 @@ private:
         std::uint64_t ops = 0, zeroOps = 0, hardware = 0, software = 0, instances = 0, batches = 0, sortedCopies = 0, undrawnBatches = 0;
         std::array<std::uint64_t, 4> types{};  // branches, fronds, leaf cards, leaf meshes
         std::array<std::uint64_t, 7> splits{};  // solid-pass tree batch cuts by reason: limit, strip, list, sun, static ambient / lights, other
+        std::uint64_t knownLights = 0;  // tree instances whose static lights the table holds (their batch no longer ends on them)
         std::uint64_t leafLods = 0, wrongTransformation = 0, billboardOps = 0, billboardTexCoords = 0, shadowFrondsSkipped = 0;
         std::uint64_t grassOps = 0, grassZeroOps = 0, grassNodes = 0, grassInstances = 0, grassDraws = 0, grassWraps = 0, grassNotCached = 0, grassClockMoved = 0;
     } treeWindow_, treeTotal_;
