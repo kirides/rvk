@@ -460,6 +460,8 @@ struct AdapterInfo {
 // Every adapter of the API in the API's own order (Vulkan: physical devices). Creates and destroys a temporary instance (~0.1 s). D3D12: not enumerated yet
 // (empty).
 std::vector<AdapterInfo> enumerateAdapters(Backend backend);
+// the adapters of the last Vulkan enumeration (no new instance: safe to call while the game runs)
+std::vector<AdapterInfo> lastEnumeratedAdapters();
 // `debug.names` (a restart setting): the devices name their objects for graphics debuggers and validation messages as they create them; set before any
 // device exists (Vulkan: VK_EXT_debug_utils names, vk/debug_names.h)
 void setDebugNames(bool enabled);

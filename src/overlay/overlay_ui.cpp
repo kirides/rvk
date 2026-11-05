@@ -57,6 +57,8 @@ struct UiState {
     bool d3d12Checked = false;   // vulkan.api: whether Direct3D 12 can run here (checked once, on first use)
     bool d3d12Ok = true;
     std::string d3d12Reason;
+    bool adaptersChecked = false;   // vulkan.adapter: the adapters' names (listed once, on first use)
+    std::vector<std::string> adapters;
 };
 UiState g_ui;
 
@@ -141,7 +143,8 @@ std::string displayValue(const settings::Spec& sp, double v) {
 }
 
 // a tooltip wrapped at a readable width (descriptions are long single lines)
-void wrappedTooltip(const std::string& text) {
+void wrappedTooltip(const std::string& text, const ImVec2* anchor = nullptr, ImVec2 pivot = ImVec2(0, 0)) {
+    if (anchor != nullptr) ImGui::SetNextWindowPos(*anchor, ImGuiCond_Always, pivot);
     if (!ImGui::BeginTooltip()) return;
     ImGui::PushTextWrapPos(ImGui::GetFontSize() * 26.0f);
     ImGui::TextUnformatted(text.c_str());
@@ -183,7 +186,20 @@ settings::Setting* parentOf(settings::Registry& reg, const settings::Setting& s)
 }
 
 // why `s` is greyed by its prerequisites ("" = none)
-std::string needsOff(settings::Registry& reg, const settings::Setting& s) { return reg.needsReason(s); }
+std::string needsOffDepth(settings::Registry& reg, const settings::Setting& s, int depth) {
+    std::string r = reg.needsReason(s);
+    if (!r.empty() || depth > 5) return r;
+    // a prerequisite that is itself unavailable (capability / config lock) greys its dependents the same way
+    for (const settings::Need& n : s.spec().needs) {
+        const settings::Setting* p = reg.find(n.key);
+        if (p == nullptr) continue;
+        if (!p->available()) return p->spec().label + " is unavailable";
+        r = needsOffDepth(reg, *p, depth + 1);
+        if (!r.empty()) return r;
+    }
+    return r;
+}
+std::string needsOff(settings::Registry& reg, const settings::Setting& s) { return needsOffDepth(reg, s, 0); }
 
 // a change made by the player: the unmet prerequisites are switched on first (the registry names them: a toast; restart-only ones
 // show up in the restart banner like any restart setting)
@@ -243,6 +259,7 @@ void drawRow(settings::Registry& reg, settings::Setting& s, ImVec2 p, float w, b
     const bool hovered = windowHovered && ImGui::IsMouseHoveringRect(rmin, rmax, false);
     if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) g_ui.selected = sp.key;
     const bool selected = g_ui.selected == sp.key;
+    dl->AddLine(ImVec2(rmin.x + em * 0.5f, rmax.y - 1.0f), ImVec2(rmax.x - em * 0.5f, rmax.y - 1.0f), col(ImVec4(1, 1, 1, 1), 0.04f));  // row separator
     if (selected) {
         dl->AddRectFilled(rmin, rmax, col(kGold, 0.10f), em * 0.25f);
         dl->AddRectFilled(rmin, ImVec2(rmin.x + 3.0f, rmax.y), col(kGold, 0.9f));
@@ -264,7 +281,7 @@ void drawRow(settings::Registry& reg, settings::Setting& s, ImVec2 p, float w, b
     const float labelW = (w - gutter) * 0.45f;
     const float resetW = em * 3.3f;
     const float xc = p.x + gutter + labelW;                       // control column
-    const float cw = std::max(em * 4.0f, w - (xc - p.x) - resetW - em * 0.3f);
+    const float cw = std::clamp(w - (xc - p.x) - resetW - em * 0.3f, em * 4.0f, em * 20.0f);
     const float ty = p.y + (rowH - em) * 0.5f;                    // text baseline row
 
     // changed-from-default dot
@@ -308,6 +325,25 @@ void drawRow(settings::Registry& reg, settings::Setting& s, ImVec2 p, float w, b
     }
     case settings::Type::Int:
     case settings::Type::Float: {
+        if (sp.key == "vulkan.adapter") {
+            if (!g_ui.adaptersChecked) {
+                g_ui.adaptersChecked = true;
+                for (const rhi::AdapterInfo& a : rhi::lastEnumeratedAdapters()) g_ui.adapters.push_back(a.name);
+            }
+            const int cur = s.asInt();
+            const std::string curText = cur < 0 ? "Auto (the fastest card)"
+                                        : static_cast<std::size_t>(cur) < g_ui.adapters.size() ? g_ui.adapters[static_cast<std::size_t>(cur)]
+                                                                                              : std::format("Card {}", cur);
+            ImGui::SetNextItemWidth(cw);
+            if (ImGui::BeginCombo("##v", curText.c_str())) {
+                if (ImGui::Selectable("Auto (the fastest card)", cur < 0)) userSet(reg, s, -1.0);
+                for (std::size_t i = 0; i < g_ui.adapters.size(); ++i) {
+                    if (ImGui::Selectable(std::format("{}: {}", i, g_ui.adapters[i]).c_str(), static_cast<int>(i) == cur)) userSet(reg, s, static_cast<double>(i));
+                }
+                ImGui::EndCombo();
+            }
+            break;
+        }
         const bool isInt = sp.type == settings::Type::Int;
         float v = static_cast<float>(isInt ? s.asInt() : s.asFloat());
         const float valueW = em * 5.4f;
@@ -405,7 +441,7 @@ void drawRow(settings::Registry& reg, settings::Setting& s, ImVec2 p, float w, b
 
     // tooltip after a short rest on the row (never while a popup is open)
     if (hovered && g_ui.hover == sp.key && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) &&
-        std::chrono::steady_clock::now() - g_ui.hoverSince > std::chrono::milliseconds(550) && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        std::chrono::steady_clock::now() - g_ui.hoverSince > std::chrono::milliseconds(800) && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         std::string tip = sp.description;
         if (unavailable) {
             tip += std::format("\n\nUnavailable: {}\nYour choice ({}) is kept and applies once this is available.", reg.unavailableReason(s),
@@ -415,7 +451,13 @@ void drawRow(settings::Registry& reg, settings::Setting& s, ImVec2 p, float w, b
         if (s.restart()) tip += "\n\nTakes effect after a restart of the game.";
         tip += std::format("\n\nDefault: {}", displayValue(sp, sp.defaultValue));
         if (debug) tip += std::format("  ({} = {})", sp.key, settings::Registry::formatValue(sp, s.value()));
-        wrappedTooltip(tip);
+        // beside the row, never over its neighbours: right of the control in the left column, left of the label in the right one
+        const ImVec2 mid = ImGui::GetMousePos();
+        const ImGuiViewport* vp = ImGui::GetMainViewport();
+        const bool leftHalf = p.x + w * 0.5f < vp->Pos.x + vp->Size.x * 0.5f;
+        const ImVec2 at = leftHalf ? ImVec2(xc + cw + resetW + em * 1.0f, rmin.y) : ImVec2(rmin.x - em * 0.5f, rmin.y);
+        (void)mid;
+        wrappedTooltip(tip, &at, leftHalf ? ImVec2(0, 0) : ImVec2(1, 0));
     }
     if (parentOff && !disabled) ImGui::PopStyleVar();
     ImGui::PopID();
@@ -448,18 +490,33 @@ void drawRows(settings::Registry& reg, const std::vector<settings::Setting*>& it
         bool note;  // the first dependent of a group carries the "greyed because" line
     };
     std::vector<std::vector<Row>> groups;
-    for (settings::Setting* s : items) {
-        const settings::Setting* par = parentOf(reg, *s);
-        const bool inSection = par != nullptr && std::ranges::find(items, par) != items.end();
-        if (inSection) {
+    {
+        // roots: settings whose prerequisite is not in this section; dependents (any depth) are listed under their root in order
+        const auto inItems = [&](const settings::Setting* x) { return x != nullptr && std::ranges::find(items, x) != items.end(); };
+        const auto rootOf = [&](settings::Setting* x, int& depth) {
+            depth = 0;
+            while (depth < 4) {
+                settings::Setting* par = parentOf(reg, *x);
+                if (!inItems(par) || par == x) break;
+                x = par;
+                ++depth;
+            }
+            return x;
+        };
+        for (settings::Setting* x : items) {
+            int d = 0;
+            if (rootOf(x, d) == x) groups.push_back({{x, 0, false}});
+        }
+        for (settings::Setting* x : items) {
+            int d = 0;
+            settings::Setting* root = rootOf(x, d);
+            if (root == x) continue;
             for (auto& g : groups) {
-                if (g.front().s == par) {
-                    g.push_back({s, 1, g.size() == 1});
+                if (g.front().s == root) {
+                    g.push_back({x, std::min(d, 2), g.size() == 1});
                     break;
                 }
             }
-        } else {
-            groups.push_back({{s, 0, false}});
         }
     }
     float total = 0.0f;
@@ -612,7 +669,7 @@ void Overlay::initTheme() {
     st.FramePadding = ImVec2(9.0f, 5.0f);
     st.ItemSpacing = ImVec2(9.0f, 6.0f);
     st.ItemInnerSpacing = ImVec2(7.0f, 5.0f);
-    st.ScrollbarSize = 11.0f;
+    st.ScrollbarSize = 8.0f;
     st.GrabMinSize = 12.0f;
     st.SeparatorTextBorderSize = 1.0f;
     ImVec4* c = st.Colors;
@@ -628,7 +685,7 @@ void Overlay::initTheme() {
     c[ImGuiCol_TitleBg] = kPanel;
     c[ImGuiCol_TitleBgActive] = kPanel;
     c[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0);
-    c[ImGuiCol_ScrollbarGrab] = ImVec4(0.32f, 0.27f, 0.19f, 1.0f);
+    c[ImGuiCol_ScrollbarGrab] = ImVec4(0.50f, 0.40f, 0.20f, 0.85f);
     c[ImGuiCol_ScrollbarGrabHovered] = kGoldDim;
     c[ImGuiCol_ScrollbarGrabActive] = kGold;
     c[ImGuiCol_CheckMark] = kGold;
@@ -768,12 +825,12 @@ void Overlay::buildSettingsWindow() {
     const float W = ImGui::GetWindowWidth(), H = ImGui::GetWindowHeight();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float pad = em * 1.3f;
-    const float headerH = em * 3.5f, qualityH = em * 3.3f, footerH = em * 3.3f, sideW = em * 15.0f;
+    const float headerH = em * 3.9f, qualityH = em * 3.3f, footerH = em * 3.3f, sideW = em * 15.0f;
     const float frameH = ImGui::GetFrameHeight();
 
     // ---- header: title, search, advanced, close ----
-    ImGui::SetCursorPos(ImVec2(pad, em * 0.55f));
-    ImGui::PushFont(g_serif, baseSize * 1.75f);
+    ImGui::SetCursorPos(ImVec2(pad, em * 0.5f));
+    ImGui::PushFont(g_serif, baseSize * 2.1f);
     ImGui::TextColored(kGold, "Risen Enhanced Graphics");
     ImGui::PopFont();
     {
@@ -819,13 +876,14 @@ void Overlay::buildSettingsWindow() {
         const float segW = em * 6.0f;
         const auto segment = [&](const char* label, bool active, bool clickable) {
             if (active) {
-                ImGui::PushStyleColor(ImGuiCol_Button, kGoldDim);
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kGold);
+                ImGui::PushStyleColor(ImGuiCol_Button, kGold);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.82f, 0.45f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive, kGold);
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.08f, 0.06f, 0.03f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(1.0f, 0.90f, 0.62f, 0.9f));
             }
             const bool clicked = ImGui::Button(label, ImVec2(segW, frameH)) && clickable;
-            if (active) ImGui::PopStyleColor(4);
+            if (active) ImGui::PopStyleColor(5);
             return clicked;
         };
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(em * 0.25f, 0));
@@ -846,7 +904,18 @@ void Overlay::buildSettingsWindow() {
         ImGui::PopStyleVar();
         ImGui::SameLine(0.0f, em * 1.2f);
         ImGui::AlignTextToFramePadding();
-        ImGui::TextDisabled("%s", current < 0 ? "Your own mix of settings." : "Changing a quality setting switches to Custom.");
+        {
+            const char* line = "Your own mix of settings. Pick a preset to start over from it.";
+            if (current >= 0) {
+                const std::string& nm = presets[static_cast<std::size_t>(current)].name;
+                line = nm == "original" ? "The game's own look: every enhancement off."
+                       : nm == "low"    ? "Light on the graphics card: the cheapest enhancements."
+                       : nm == "medium" ? "A balance of looks and speed."
+                       : nm == "high"   ? "The recommended defaults."
+                                        : "Everything on, for the strongest graphics cards.";
+            }
+            ImGui::TextColored(current >= 0 ? kText : kTextDim, "%s", line);
+        }
     }
     dl->AddLine(ImVec2(wpos.x, wpos.y + headerH + qualityH), ImVec2(wpos.x + W, wpos.y + headerH + qualityH), col(kGold, 0.25f));
 
@@ -970,12 +1039,23 @@ void Overlay::buildSettingsWindow() {
         const auto emptyNote = [&](const char* text) { ImGui::Dummy(ImVec2(1, em)); ImGui::TextDisabled("%s", text); };
         if (searching) {
             const auto words = searchWords(g_ui.search);
-            const auto sections = collectSections(reg, view, [&](const settings::Spec& sp) { return matches(sp, words); }, true);
-            if (sections.empty()) emptyNote(view.advanced ? "Nothing matches." : "Nothing matches. Turn on Advanced to search the fine-tuning settings too.");
-            for (const Section& sec : sections) {
-                sectionHeading(sec.name, width);
-                drawRows(reg, sec.items, width, columns, view.debug);
+            if (reg.all().empty()) emptyNote("Nothing to search.");
+            bool anyHit = false;
+            std::vector<std::string> order = settings::pageOrder();
+            for (const std::string& pg : order) {
+                const auto sections = collectSections(reg, view, [&](const settings::Spec& sp) { return settings::pageOf(sp) == pg && matches(sp, words); }, false);
+                if (sections.empty()) continue;
+                anyHit = true;
+                ImGui::Dummy(ImVec2(1, em * 0.6f));
+                ImGui::PushFont(g_serif, baseSize * 1.3f);
+                ImGui::TextColored(ImVec4(0.96f, 0.88f, 0.66f, 1.0f), "%s", pg.c_str());
+                ImGui::PopFont();
+                for (const Section& sec : sections) {
+                    sectionHeading(sec.name, width);
+                    drawRows(reg, sec.items, width, 1, view.debug);
+                }
             }
+            if (!anyHit) emptyNote(view.advanced ? "Nothing matches." : "Nothing matches. Turn on Advanced to search the fine-tuning settings too.");
         } else if (g_ui.page == kPagePerformance) {
             buildPerformancePanel(view.debug);
         } else {
@@ -986,6 +1066,7 @@ void Overlay::buildSettingsWindow() {
                 sectionHeading(sec.name, width);
                 drawRows(reg, sec.items, width, sec.name == "Render mode" ? 1 : columns, view.debug);
                 if (page == settings::kPageDisplay && sec.name == "Render mode") renderModeNotes(r.rendererMode);
+                if (page == settings::kPageDisplay && sec.name == "Draw distances") ImGui::TextDisabled("1.0x = the game's own distances, 2.0x = twice as far. Farther costs some frame rate in forests and towns.");
             }
             if (page == settings::kPageDisplay) {
                 ImGui::Dummy(ImVec2(1, em * 0.6f));
@@ -998,6 +1079,20 @@ void Overlay::buildSettingsWindow() {
             }
         }
         ImGui::Dummy(ImVec2(1, em * 0.5f));
+        {
+            // rows scrolled under the footer fade out instead of being cut mid-row
+            ImDrawList* cdl = ImGui::GetWindowDrawList();
+            const ImVec2 cp = ImGui::GetWindowPos();
+            const ImVec2 cs = ImGui::GetWindowSize();
+            const ImVec4 bg = ImGui::GetStyle().Colors[ImGuiCol_WindowBg];
+            const ImU32 clear = ImGui::GetColorU32(ImVec4(bg.x, bg.y, bg.z, 0.0f)), solid = ImGui::GetColorU32(ImVec4(bg.x, bg.y, bg.z, 1.0f));
+            if (ImGui::GetScrollY() < ImGui::GetScrollMaxY() - 1.0f) {
+                cdl->AddRectFilledMultiColor(ImVec2(cp.x, cp.y + cs.y - em * 2.6f), ImVec2(cp.x + cs.x - ImGui::GetStyle().ScrollbarSize, cp.y + cs.y), clear, clear, solid, solid);
+            }
+            if (ImGui::GetScrollY() > 1.0f) {
+                cdl->AddRectFilledMultiColor(cp, ImVec2(cp.x + cs.x - ImGui::GetStyle().ScrollbarSize, cp.y + em * 1.4f), solid, solid, clear, clear);
+            }
+        }
         ImGui::EndChild();
     }
 
@@ -1099,20 +1194,22 @@ void Overlay::buildAbPanel() {
     if (diffs.empty()) {
         ImGui::TextDisabled("Both sides are the same. Side B starts as the defaults:\n"
                             "change settings on one side, then flip to compare.");
-    } else if (ImGui::BeginTable("##ab", 3, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
-        ImGui::TableSetupColumn("setting");
-        ImGui::TableSetupColumn("A");
-        ImGui::TableSetupColumn("B");
+    } else if (ImGui::BeginTable("##ab", 3, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX)) {
+        ImGui::TableSetupColumn("Setting", ImGuiTableColumnFlags_WidthStretch, 0.5f);
+        ImGui::TableSetupColumn("A", ImGuiTableColumnFlags_WidthStretch, 0.25f);
+        ImGui::TableSetupColumn("B", ImGuiTableColumnFlags_WidthStretch, 0.25f);
+        ImGui::PushStyleColor(ImGuiCol_Text, kGold);
         ImGui::TableHeadersRow();
+        ImGui::PopStyleColor();
         for (const settings::Setting* s : diffs) {
             const double active = s->value(), other = reg.otherValue(*s);
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(s->spec().label.c_str());
             ImGui::TableNextColumn();
-            ImGui::TextUnformatted(settings::Registry::formatValue(s->spec(), b ? other : active).c_str());
+            ImGui::TextUnformatted(displayValue(s->spec(), b ? other : active).c_str());
             ImGui::TableNextColumn();
-            ImGui::TextUnformatted(settings::Registry::formatValue(s->spec(), b ? active : other).c_str());
+            ImGui::TextUnformatted(displayValue(s->spec(), b ? active : other).c_str());
         }
         ImGui::EndTable();
     }
@@ -1120,14 +1217,10 @@ void Overlay::buildAbPanel() {
 
 // ---- capabilities (core/caps.h, docs/research/raytracing.md 3) ----
 void Overlay::buildCapabilitiesPanel() {
-    // a quiet header: the default Header colour is a bright gold bar that also sticks out past the sections' edges
-    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(kGold.x, kGold.y, kGold.z, 0.06f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(kGold.x, kGold.y, kGold.z, 0.16f));
-    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(kGold.x, kGold.y, kGold.z, 0.24f));
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetStyle().WindowPadding.x * 0.5f);
-    const bool capsOpen = ImGui::CollapsingHeader("Graphics card");
-    ImGui::PopStyleColor(3);
+    ImGui::Dummy(ImVec2(1, ImGui::GetFontSize() * 0.4f));
+    const bool capsOpen = ImGui::TreeNodeEx("Graphics card details", ImGuiTreeNodeFlags_SpanAvailWidth);
     if (!capsOpen) return;
+    struct Pop { ~Pop() { ImGui::TreePop(); } } popTree;
     const caps::Report report = settings::registry().capabilities();
     if (!report.known) {
         ImGui::TextDisabled("no Vulkan device");
