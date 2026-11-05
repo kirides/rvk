@@ -1432,45 +1432,91 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .key = "rt.lod_range",
         .label = "Ray tracing detail distance",
         .category = "Lighting",
-        .description = "Beyond this distance from the player the world is traced with simpler copies of the objects (fewer "
-                       "triangles): ray-traced shadows, reflections and lighting cost less in big scenes. Near objects are "
-                       "unchanged. 0 = always full detail.",
+        .description = "Base distance beyond which the world is traced with simpler copies of the objects (fewer triangles, less "
+                       "graphics memory): the Ray tracing detail scale multiplies it. Near objects are never changed.",
         .type = Type::Float,
-        .defaultValue = 0,
-        .min = 0,
+        .defaultValue = 60,
+        .min = 5,
         .max = 500,
         .format = "%.0f m",
         .flags = Flag::Advanced,
         .requirements = caps::bit(caps::Cap::RayQuery),
-        .unmetValue = 0,
+        .unmetValue = 60,
     });
     r.rtLodFarRange = &reg.add({
         .key = "rt.lod_far_range",
         .label = "Ray tracing box distance",
         .category = "Lighting",
-        .description = "Beyond this distance from the player small and medium objects are traced as simple boxes around them "
-                       "(trees as thin ones), and tiny ones are left out. 0 = never.",
+        .description = "Base distance beyond which small and medium objects are traced as simple boxes around them (trees as thin "
+                       "ones) and tiny ones are left out; times the Ray tracing detail scale. 0 = never.",
         .type = Type::Float,
-        .defaultValue = 0,
+        .defaultValue = 150,
         .min = 0,
         .max = 1000,
         .format = "%.0f m",
         .flags = Flag::Advanced,
         .requirements = caps::bit(caps::Cap::RayQuery),
-        .unmetValue = 0,
+        .unmetValue = 150,
     });
     r.rtLodBias = &reg.add({
         .key = "rt.lod_bias",
         .label = "Ray tracing detail reduction",
         .category = "Lighting",
-        .description = "How much simpler the far copies are: 1 keeps half of the triangles, 2 a quarter, 3 an eighth. 0 = off.",
+        .description = "How much simpler the far copies are: 1 keeps half of the triangles, 2 a quarter, 3 an eighth. 0 = no simple "
+                       "copies (boxes only).",
         .type = Type::Int,
-        .defaultValue = 0,
+        .defaultValue = 2,
         .min = 0,
         .max = 3,
         .flags = Flag::Advanced,
         .requirements = caps::bit(caps::Cap::RayQuery),
+        .unmetValue = 2,
+    });
+    r.rtLodScale = &reg.add({
+        .key = "rt.lod_scale",
+        .label = "Ray tracing detail scale",
+        .category = "Lighting",
+        .description = "Scales the distances beyond which the traced world gets simpler: 0.3 starts close (small and fast, for "
+                       "weaker graphics cards), 1 is the base distances, 0 = off (always full detail).",
+        .type = Type::Float,
+        .defaultValue = 0,
+        .min = 0,
+        .max = 2,
+        .format = "%.2f",
+        .flags = Flag::Advanced,
+        .requirements = caps::bit(caps::Cap::RayQuery),
         .unmetValue = 0,
+    });
+    r.rtMemoryBudget = &reg.add({
+        .key = "rt.memory_budget",
+        .label = "Ray tracing memory limit",
+        .category = "Lighting",
+        .description = "Limit for the graphics memory the traced world may use. Above it the simple copies start closer and far "
+                       "objects give up their detailed version until it fits. 0 = no limit.",
+        .type = Type::Int,
+        .defaultValue = 0,
+        .min = 0,
+        .max = 4096,
+        .format = "%.0f MB",
+        .autoLabel = "No limit",
+        .flags = Flag::Advanced,
+        .requirements = caps::bit(caps::Cap::RayQuery),
+        .unmetValue = 0,
+    });
+    r.rtPreset = &reg.add({
+        .key = "rt.preset",
+        .label = "Ray tracing quality",
+        .category = "Lighting",
+        .description = "One setting for the cost of everything that uses ray tracing: shadow, reflection and lighting quality and "
+                       "ranges, how far the traced world keeps its detail and the memory it may use. Low is for weaker graphics "
+                       "cards or when memory runs short, High traces the most. Changing any of those settings by hand makes it "
+                       "Custom.",
+        .type = Type::Enum,
+        .defaultValue = 1,
+        .options = {"low", "medium", "high", "custom"},
+        .optionLabels = {"Low", "Medium", "High", "Custom"},
+        .requirements = caps::bit(caps::Cap::RayQuery),
+        .unmetValue = 1,
     });
     r.shadowsRtWind = &reg.add({
         .key = "shadows.rt_wind",
@@ -2824,6 +2870,36 @@ const std::vector<Preset>& graphicsPresets() {
           {"shadows.map_size", "4096"}}},
     };
     return presets;
+}
+
+const std::vector<Preset>& rtPresets() {
+    // Medium = the defaults of every member (a fresh install matches it; the ladder stays off: measured no gain, docs/research/rt-lod.md); Low is the cheap end: the ladder starts at 0.3 x its base
+    // distances, a memory limit, fewer rays; High has the ladder off and the most rays (docs/research/rt-lod.md)
+    static const std::vector<Preset> presets = {
+        {"low", "Low",
+         {{"rt.lod_scale", "0.3"}, {"rt.lod_bias", "3"}, {"rt.memory_budget", "384"}, {"shadows.rt_quality", "low"}, {"shadows.rt_range", "15"},
+          {"rt.reflections", "low"}, {"gi.quality", "low"}, {"gi.screen", "low"}, {"materials.rt_reflections", "low"}, {"materials.rt_range", "60"}}},
+        {"medium", "Medium",
+         {{"rt.lod_scale", "0"}, {"rt.lod_bias", "2"}, {"rt.memory_budget", "0"}, {"shadows.rt_quality", "medium"}, {"shadows.rt_range", "0"},
+          {"rt.reflections", "high"}, {"gi.quality", "medium"}, {"gi.screen", "medium"}, {"materials.rt_reflections", "high"}, {"materials.rt_range", "150"}}},
+        {"high", "High",
+         {{"rt.lod_scale", "0"}, {"rt.lod_bias", "2"}, {"rt.memory_budget", "0"}, {"shadows.rt_quality", "high"}, {"shadows.rt_range", "0"},
+          {"rt.reflections", "high"}, {"gi.quality", "high"}, {"gi.screen", "high"}, {"materials.rt_reflections", "high"}, {"materials.rt_range", "300"}}},
+    };
+    return presets;
+}
+
+int matchRtPreset(const Registry& reg) {
+    const auto& presets = rtPresets();
+    for (std::size_t i = 0; i < presets.size(); ++i) {
+        const bool all = std::ranges::all_of(presets[i].values, [&](const auto& kv) {
+            const Setting* s = reg.find(kv.first);
+            double v = 0.0;
+            return s != nullptr && Registry::parseText(s->spec(), kv.second, v) && s->value() == v;
+        });
+        if (all) return static_cast<int>(i);
+    }
+    return -1;
 }
 
 void applyPreset(Registry& reg, const Preset& preset) {

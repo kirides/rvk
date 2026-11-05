@@ -98,7 +98,12 @@ public:
     // Beyond `farRangeMetres` (0 = off) a static mesh / tree instance of bounded size (<= 20 m radius) is traced as the object's own
     // oriented bounding box (one shared 12-triangle BLAS scaled by the instance transform, trees thinned), and instances whose
     // bounds are tiny at that distance are left out.
-    void setLod(float rangeMetres, int bias, float farRangeMetres = 0.0f);
+    void setLod(float rangeMetres, int bias, float farRangeMetres, float scale = 1.0f);
+    // rt.lod_scale multiplies both ranges (0 = the ladder is off), rt.memory_budget (0 = none): while the AS memory (BLAS + TLAS) is over
+    // the limit the ladder's ranges shrink (x0.85 per 16 frames, down to 8 %; back up when it is under 80 %) even when the scale is 0
+    // (base ranges then), and BLASes whose instances are all beyond rung 0 give up their detailed original (rebuilt when the camera
+    // comes back). The AS memory the proxies hold counts: the ladder only saves where originals are released.
+    void setMemoryBudget(std::uint32_t megabytes);
     // the GLSL options of a vertex shader's capture variant (d3d9::VariantSlot::Capture); public for rvk_shadertool --capture
     static bool captureOptions(const d3d9::Shader& s, shader::TranslateOptions& o);
 
@@ -150,6 +155,8 @@ private:
         std::uint32_t refs = 0;      // registry instances
         std::uint32_t serial = 0;    // build / compaction generation (stale compaction queries)
         bool compacted = false;
+        bool released = false;       // the original AS was given up (rt.memory_budget): proxies / the box stand in
+        bool rebuild = false;        // released and queued to be built again (state Pending): still in the TLAS through its proxy / box
         std::uint64_t lastUsedFrame = 0;
         double lastUsedTime = 0.0;
         std::uint64_t opaqueMainFrame = 0;  // the main view's last opaque draw of it (blended-only ranges stay out)
@@ -279,7 +286,16 @@ private:
     void buildProxies(rhi::CommandList& cl);
     void dropProxy(Blas& b);
     bool lodEligible(const Blas& b) const;
-    float lodRangeUnits_ = 0.0f, lodFarUnits_ = 0.0f;
+    float lodRangeUnits_ = 0.0f, lodFarUnits_ = 0.0f;    // effective (base x scale x budget scale)
+    float lodBaseRange_ = 0.0f, lodBaseFar_ = 0.0f, lodScale_ = 0.0f, budgetScale_ = 1.0f;
+    std::uint64_t budgetBytes_ = 0;
+    std::uint32_t released_ = 0;                          // BLASes without their original AS right now
+    std::uint64_t releasedTotal_ = 0, rebuiltTotal_ = 0;
+    std::unordered_set<std::uint64_t> nearBlas_;          // BLASes with an instance on rung 0 this frame
+    void applyLodEffective();
+    void releaseOriginals(std::uint64_t target);
+    void requestRebuild(Blas& b);
+    std::uint64_t asBytes() const;
     bool lodActive() const { return (lodRangeUnits_ > 0.0f && lodBias_ > 0) || lodFarUnits_ > 0.0f; }
     // the shared box of rung 2: 8 vertices + 36 u16 indices in one buffer, one BLAS (built once, in record)
     struct Box {

@@ -884,6 +884,7 @@ void RtScene::dropBlas(std::uint64_t id, bool countEvicted) {
         b->as.reset();
     }
     dropProxy(*b);
+    if (b->released && released_ > 0) --released_;
     if (b->listIndices != nullptr) {
         blasBytes_ -= std::min(blasBytes_, b->listIndices->desc().size);
         b->listIndices.reset();
@@ -1083,6 +1084,9 @@ void RtScene::buildPending(rhi::CommandList& cl, std::uint32_t slot) {
         const rt::BlasKey& k = b->key;
         const auto failBuild = [&] {
             b->state = BlasState::Failed;
+            b->rebuild = false;
+            if (b->released && released_ > 0) --released_;
+            b->released = false;
             ++iv_.failed;
             registry_.removeBlas(b->id);
         };
@@ -1129,6 +1133,11 @@ void RtScene::buildPending(rhi::CommandList& cl, std::uint32_t slot) {
             continue;
         }
         b->as = std::move(as);
+        if (b->released) {
+            b->released = false;
+            if (released_ > 0) --released_;
+        }
+        b->rebuild = false;
         geoms.push_back(g);
         builds.push_back({b->as.get(), std::span<const rhi::TriangleGeometry>(&geoms.back(), 1), false});
         b->state = BlasState::Built;
@@ -1200,28 +1209,76 @@ void RtScene::evictOverBudget() {
 // DrawBlock pad1)
 // ---- level of detail (docs/research/rt-lod.md) -----------------------------------------------------------------------------
 
-void RtScene::setLod(float rangeMetres, int bias, float farRangeMetres) {
-    const float units = std::max(0.0f, rangeMetres) * 100.0f;
+void RtScene::setLod(float rangeMetres, int bias, float farRangeMetres, float scale) {
     const int b = std::clamp(bias, 0, 3);
-    const float farUnits = std::max(0.0f, farRangeMetres) * 100.0f;
-    const bool wasOn = lodRangeUnits_ > 0.0f && lodBias_ > 0;
-    const bool on = units > 0.0f && b > 0;
-    if (b != lodBias_ || (wasOn && !on)) {
-        // another level (or off): every proxy is made again / gone
+    const bool wasOn = lodActive();
+    if (b != lodBias_) {
+        // another level: every proxy is made again
         for (auto& [id, blas] : blas_) dropProxy(blas);
         proxyJobs_.clear();
     }
-    const bool changed = units != lodRangeUnits_ || b != lodBias_ || farUnits != lodFarUnits_;
-    lodRangeUnits_ = units;
     lodBias_ = b;
-    lodFarUnits_ = farUnits;
+    lodBaseRange_ = std::max(0.0f, rangeMetres) * 100.0f;
+    lodBaseFar_ = std::max(0.0f, farRangeMetres) * 100.0f;
+    lodScale_ = std::max(0.0f, scale);
+    applyLodEffective();
+    if (wasOn != lodActive() || lodActive()) {
+        spdlog::info("rt: scene: lod {} (proxy beyond {:.0f} m, bias {}, box beyond {:.0f} m; base {:.0f} / {:.0f} m x scale {:.2f}, budget scale {:.2f})",
+                     lodActive() ? "on" : "off", lodRangeUnits_ / 100.0f, b, lodFarUnits_ / 100.0f, rangeMetres, farRangeMetres, scale, budgetScale_);
+    }
+}
+
+void RtScene::setMemoryBudget(std::uint32_t megabytes) {
+    budgetBytes_ = static_cast<std::uint64_t>(megabytes) << 20;
+    budgetScale_ = 1.0f;
+    limits_.memoryBudget = budgetBytes_ != 0 ? std::min<std::uint64_t>(budgetBytes_, 512ull << 20) : (512ull << 20);
+    applyLodEffective();
+    spdlog::info("rt: scene: memory limit {}", megabytes != 0 ? std::format("{} MB", megabytes) : std::string("none"));
+}
+
+// the effective ranges: base x scale x the budget's scale; scale 0 = off unless a memory limit asks for the ladder (base ranges then)
+void RtScene::applyLodEffective() {
+    const float s = (lodScale_ > 0.0f ? lodScale_ : (budgetBytes_ != 0 ? 1.0f : 0.0f)) * budgetScale_;
+    lodRangeUnits_ = lodBias_ > 0 && s > 0.0f ? lodBaseRange_ * s : 0.0f;
+    lodFarUnits_ = s > 0.0f ? lodBaseFar_ * s : 0.0f;
     if (!lodActive()) {
         for (rt::Registry::Instance& in : registry_.instancesMutable()) in.lod = 0;
     }
-    if (changed) {
-        spdlog::info("rt: scene: lod proxy {} (range {:.0f} m, bias {}), box {} (beyond {:.0f} m)", on ? "on" : "off", rangeMetres, b,
-                     farUnits > 0.0f ? "on" : "off", farRangeMetres);
+}
+
+std::uint64_t RtScene::asBytes() const {
+    const std::uint64_t tlas = tlas_[0].as != nullptr ? tlas_[0].as->storageBytes() * rhi::kFramesInFlight : 0;
+    return blasBytes_ + tlas;
+}
+
+// gives up the original AS of BLASes that no instance of this frame traces at full detail (a proxy or the box stands in), largest first,
+// until the AS memory is at `target`
+void RtScene::releaseOriginals(std::uint64_t target) {
+    if (!box_.built) return;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> cand;  // bytes, id
+    for (const auto& [id, b] : blas_) {
+        if (b.released || b.state != BlasState::Built || b.as == nullptr || nearBlas_.contains(id) || b.animatedOnly || !b.bounds.valid()) continue;
+        cand.emplace_back(b.as->storageBytes(), id);
     }
+    std::sort(cand.begin(), cand.end(), std::greater<>());
+    for (const auto& [bytes, id] : cand) {
+        if (asBytes() <= target) break;
+        Blas* b = findBlas(id);
+        if (b == nullptr) continue;
+        blasBytes_ -= std::min(blasBytes_, b->as->storageBytes());
+        b->as.reset();  // (destroyed with the frame being recorded: the GPU may still use it)
+        b->released = true;
+        ++released_;
+        ++releasedTotal_;
+    }
+}
+
+void RtScene::requestRebuild(Blas& b) {
+    if (!b.released || b.rebuild) return;
+    b.rebuild = true;
+    b.state = BlasState::Pending;
+    pending_.push_back(b.id);
+    ++rebuiltTotal_;
 }
 
 // The shared box of rung 2: a unit cube [-1, 1]^3 (8 vertices, 36 u16 indices) and its BLAS, built once.
@@ -1276,7 +1333,7 @@ bool RtScene::ensureBox(rhi::CommandList& cl) {
 
 // a static triangle mesh worth a proxy: a SpeedTree's cut-out parts and merged per-triangle-material ranges are not
 bool RtScene::lodEligible(const Blas& b) const {
-    if (b.state != BlasState::Built || b.animatedOnly || b.triangles < 128 || b.proxy.state == Blas::Proxy::State::Failed) return false;
+    if ((b.state != BlasState::Built && !b.rebuild) || b.animatedOnly || b.triangles < 128 || b.proxy.state == Blas::Proxy::State::Failed) return false;
     if (!b.segments.empty() || !b.engineSegments.empty()) return false;
     const auto kind = static_cast<Kind>(b.kind);
     return kind == Kind::StaticMesh || kind == Kind::InstancedMesh || kind == Kind::SpeedTree;
@@ -1391,7 +1448,7 @@ void RtScene::buildProxies(rhi::CommandList& cl) {
         rt::lod::Result res = b->proxy.job.get();
         const rt::BlasKey& k = b->key;
         const std::uint32_t isize = k.index32 != 0 ? 4u : 2u;
-        if (res.indices.empty() || b->state != BlasState::Built || b->as == nullptr || b->proxy.serial != b->serial) {
+        if (res.indices.empty() || b->state == BlasState::Failed) {
             b->proxy.state = Blas::Proxy::State::Failed;  // the simplifier kept most of the mesh (nothing to gain): the original stays
             ++proxyJobsFailed_;
             continue;
@@ -2140,6 +2197,18 @@ void RtScene::record(d3d9::PassContext& ctx) {
         return b != nullptr && b->bounds.valid() ? &b->bounds : nullptr;
     });
     evictOverBudget();
+    if (budgetBytes_ != 0 && frame % 16 == 0) {
+        // the memory limit (rt.memory_budget): over it the ladder tightens and far originals are given up; well under it it relaxes again
+        const std::uint64_t total = asBytes();
+        if (total > budgetBytes_) {
+            budgetScale_ = std::max(0.08f, budgetScale_ * 0.85f);
+            applyLodEffective();
+            releaseOriginals(budgetBytes_ / 10 * 9);
+        } else if (total < budgetBytes_ / 10 * 8 && budgetScale_ < 1.0f) {
+            budgetScale_ = std::min(1.0f, budgetScale_ * 1.05f);
+            applyLodEffective();
+        }
+    }
     if (frame % 300 == 0) {
         std::erase_if(blendedKeys_, [&](const auto& e) { return e.second + kOpaqueRecent < frame; });
         std::erase_if(layers_, [&](auto& e) {
@@ -2181,38 +2250,58 @@ void RtScene::record(d3d9::PassContext& ctx) {
     // level of detail (docs/research/rt-lod.md): each instance's rung (0 the engine's draw, 1 the proxy, 2 the box) with hysteresis,
     // from its distance; only static opaque instances of a built BLAS whose per-triangle materials are not needed move off rung 0
     const bool lodOn = lodActive() && cam.valid;
+    nearBlas_.clear();
     const float proxyRange = lodRangeUnits_ > 0.0f && lodBias_ > 0 ? lodRangeUnits_ : 0.0f;
     if (lodOn) {
         const float nearest = std::min(proxyRange > 0.0f ? proxyRange : 3.0e38f, lodFarUnits_ > 0.0f ? lodFarUnits_ : 3.0e38f) * 0.8f;
         for (rt::Registry::Instance& in : registry_.instancesMutable()) {
             if (!in.sphereValid) {
                 in.lod = 0;
+                nearBlas_.insert(in.blas);
                 continue;
             }
             const float dx = in.sphere.c[0] - camera[0], dy = in.sphere.c[1] - camera[1], dz = in.sphere.c[2] - camera[2];
             const float d = std::max(0.0f, std::sqrt(dx * dx + dy * dy + dz * dz) - in.sphere.r);
-            if (in.lod == 0 && d < nearest) continue;
-            const Blas* b = findBlas(in.blas);
+            if (in.lod == 0 && d < nearest) {
+                nearBlas_.insert(in.blas);
+                if (released_ != 0) {
+                    if (Blas* rb = findBlas(in.blas); rb != nullptr && rb->released) requestRebuild(*rb);
+                }
+                continue;
+            }
+            Blas* b = findBlas(in.blas);
             if (b == nullptr || !lodEligible(*b) || (in.flags & abi::kRtRecordAlphaTested) != 0) {
                 in.lod = 0;
+                nearBlas_.insert(in.blas);
                 continue;
             }
             const RtMaterial* m = in.material != 0 ? materials_.get(in.material) : nullptr;
             if (m == nullptr || m->dead) m = bestMaterial(*b);
             if (m != nullptr && m->masked) {
                 in.lod = 0;
+                nearBlas_.insert(in.blas);
                 continue;
             }
             // a box only for bounded objects (a cliff, the terrain or a level mesh is no box)
             const bool boxOk = lodFarUnits_ > 0.0f && b->bounds.valid() && in.sphere.r <= kBoxMaxRadius && b->triangles >= kBoxMinTriangles;
             in.lod = static_cast<std::uint8_t>(rt::lod::rungFor(in.lod, d, proxyRange, boxOk ? lodFarUnits_ : 0.0f));
             if (in.lod == 2 && !boxOk) in.lod = proxyRange > 0.0f ? 1 : 0;
+            if (in.lod == 0) {
+                nearBlas_.insert(in.blas);
+                if (b->released) requestRebuild(*b);
+            }
+        }
+    }
+    if (!lodOn && released_ != 0) {
+        // the ladder is off (or no camera): every released original comes back
+        for (auto& [id, rb] : blas_) {
+            if (rb.released) requestRebuild(rb);
         }
     }
     const std::vector<std::uint32_t> chosen = rt::selectForTlas(list, camera, tlas_[slot].capacity - dynCount, [this, frame, &camera](const rt::Registry::Instance& in) {
         const Blas* b = findBlas(in.blas);
         // an object the cascades draw at another level of detail than the main view: the main view's
-        if (b == nullptr || b->state != BlasState::Built || registry_.supersededBy(in, viewBit(View::Main))) return false;
+        if (b == nullptr || (b->state != BlasState::Built && !b->rebuild) || registry_.supersededBy(in, viewBit(View::Main))) return false;
         if (b->animatedOnly) return false;
         // far away and tiny: not part of the scene (rung 2 only)
         if (in.lod == 2 && in.sphereValid) {
@@ -2292,7 +2381,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
         vi.instanceShaderBindingTableRecordOffset = 0;
         vi.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR |
                    (alpha ? VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR : VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR);
-        vi.accelerationStructureReference = b.as->address();
+        vi.accelerationStructureReference = b.as != nullptr ? b.as->address() : 0;  // (released: replaced below by the proxy or the box)
         insts[k] = vi;
         abi::RtGeometryRecord r{};
         const rt::BlasKey& key = b.key;
@@ -2355,10 +2444,13 @@ void RtScene::record(d3d9::PassContext& ctx) {
         }
         std::uint32_t instTriangles = b.triangles;
         bool proxied = false, boxed = false;
-        if (lodOn && in.lod != 0) {
-            if (alpha || r.segmentCount != 0) {
+        const bool noOriginal = b.as == nullptr;
+        if (lodOn && (in.lod != 0 || noOriginal)) {
+            std::uint8_t rung = in.lod;
+            if (noOriginal) rung = rung == 1 && b.proxy.state == Blas::Proxy::State::Built ? 1 : 2;  // coming back / released: whatever stands in
+            if ((alpha || r.segmentCount != 0) && !noOriginal) {
                 in.lod = 0;  // (cut-outs and per-triangle materials index the original's triangles)
-            } else if (in.lod == 1) {
+            } else if (rung == 1) {
                 if (b.proxy.state == Blas::Proxy::State::None) queueProxy(b);
                 if (b.proxy.state == Blas::Proxy::State::Built && b.proxy.level == static_cast<std::uint32_t>(lodBias_)) {
                     insts[k].accelerationStructureReference = b.proxy.as->address();
@@ -2621,9 +2713,9 @@ void RtScene::logStats(bool force) {
                                 s.triangles / 1000, s.trianglesOriginal != s.triangles ? std::format(" [{}k]", s.trianglesOriginal / 1000) : std::string(),
                                 s.byKind[0] / 1000, s.byKind[1] / 1000, s.byKind[2] / 1000, s.proxied, s.boxed, s.blases, static_cast<double>(s.blasBytes) / 1048576.0);
         }
-        spdlog::info("rt: scene: lod bands (proxy {:.0f} m, bias {}, box {:.0f} m){} | tiny skipped {} per frame | total {}k tri [{}k], characters {}k tri, animated trees {}k tri | proxies: {} built "
+        spdlog::info("rt: scene: lod bands (proxy {:.0f} m, bias {}, box {:.0f} m){} | tiny skipped {} per frame | memory limit {} MB (scale {:.2f}, {} originals released, {} released / {} rebuilt in total, AS {:.1f} MiB) | total {}k tri [{}k], characters {}k tri, animated trees {}k tri | proxies: {} built "
                      "({} MiB, {} triangles of {} kept, {} jobs failed / nothing to gain, gather {:.1f} ms, build {:.1f} ms in total, {} queued)",
-                     lodRangeUnits_ / 100.0f, lodBias_, lodFarUnits_ / 100.0f, line, lastSkippedTiny_ / std::max<std::uint64_t>(1, iv_.frames), totalTri / 1000, totalOrig / 1000, lastCharTriangles_ / 1000, lastAnimTreeTriangles_ / 1000,
+                     lodRangeUnits_ / 100.0f, lodBias_, lodFarUnits_ / 100.0f, line, lastSkippedTiny_ / std::max<std::uint64_t>(1, iv_.frames), budgetBytes_ >> 20, budgetScale_, released_, releasedTotal_, rebuiltTotal_, static_cast<double>(asBytes()) / 1048576.0, totalTri / 1000, totalOrig / 1000, lastCharTriangles_ / 1000, lastAnimTreeTriangles_ / 1000,
                      proxiesBuilt_, proxyBytes_ >> 20, proxyTrianglesKept_, proxyTrianglesOriginal_, proxyJobsFailed_, proxyGatherMs_, proxyBuildMs_, proxyJobs_.size());
         bandsValid_ = false;
         lastSkippedTiny_ = 0;
