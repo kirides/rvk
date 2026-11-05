@@ -27,6 +27,8 @@ struct Role {
     bool uvSource = false;          // it has a tex-coord source (scale / scroller / rotator ...: the VS or PS computes the uv)
     std::uint8_t swizzle = 0;       // the role proxy's channel swizzle (+0x28): 0 none, 1 .rgb, 2 .r, 3 .g, 4 .b, 5 .a
     const void* image = nullptr;    // the pool's eCImageResource2 of the slot (names in logs)
+    bool hasConstant = false;       // the role's element is an eCColorSrcConstant: its colour (rgba) is in `constant` (before the swizzle)
+    float constant[4] = {0, 0, 0, 0};
 };
 
 struct ShaderInfo {
@@ -38,6 +40,9 @@ struct ShaderInfo {
     std::uint8_t samplerCount = 0;  // +0x21b (slots handed out)
     Role diffuse, opacity, normal;
     Role selfIllum;                 // the SelfIllumination role (+0x340): added unlit after the lighting (lava, lamps, fire meshes)
+    bool enableSpecular = false;    // +0x2c0 (EnableSpecular: XFX_SPECULAR, the engine's Phong highlights)
+    Role specular;                  // the Specular role (+0x370): the Phong highlight's colour mask (51 materials have a map)
+    Role specularPower;             // the SpecularPower role (+0x3a0): the Phong exponent / 128 (texture or constant)
 };
 
 // whether the symbols (ms_pActiveShader, the vtables) were found

@@ -405,6 +405,9 @@ struct RendererSettings {
     Setting* materialsEnvironment = nullptr; // materials.environment: strength of the sky reflection
     Setting* materialsRoughness = nullptr;   // materials.default_roughness: for entries without a roughness map
     Setting* materialsBudget = nullptr;      // materials.budget (restart): MiB of decoded pack textures
+    Setting* materialsDerive = nullptr;      // materials.derive_from_specular: roughness from the engine's Specular / SpecularPower roles for draws without a pack entry
+    Setting* materialsDeriveMin = nullptr;   // materials.derive_min / derive_max: the derived roughness is clamped to this range
+    Setting* materialsDeriveMax = nullptr;
     Setting* materialsWetness = nullptr;     // materials.wetness: scales the entries' wetness (0 = dry world, 1 = as authored)
     Setting* materialsAlternate = nullptr;   // materials.alternate: test switch, the pack variants on / off every N frames (exact "no entry = unchanged" proof)
     Setting* materialsDebug = nullptr;       // materials.debug: "off" | "roughness" | "metalness" | "orm" | "coverage"

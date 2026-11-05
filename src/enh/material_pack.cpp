@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <format>
 #include <fstream>
 #include <iterator>
 #include <set>
@@ -209,15 +210,69 @@ std::uint32_t encodeWord(std::uint32_t slot, bool orm, const Constants& c, float
     return w;
 }
 
+float roughnessFromPower(float specularPower) {
+    const float n = std::max(specularPower, 0.0f) * 128.0f;
+    return std::sqrt(std::sqrt(2.0f / (n + 2.0f)));
+}
+
+Derived deriveFromSpecular(const SpecularInfo& s, const DeriveOptions& o, float defaultRoughness) {
+    Derived d;
+    if (!o.enabled || !s.hasMask) return d;
+    const float strength = s.maskMap ? kMapMaskStrength : clamp01(s.maskLum);
+    if (!s.maskMap && strength < 0.02f) return d;  // a black constant mask: no highlight at all
+    const float lo = std::min(o.minRoughness, o.maxRoughness), hi = std::max(o.minRoughness, o.maxRoughness);
+    float r = s.powerKnown ? roughnessFromPower(s.power) : defaultRoughness;  // a power TEXTURE: its mean is unknown, the default roughness stands in
+    r = std::clamp(r, lo, hi);
+    d.valid = true;
+    d.strength = strength;
+    d.roughness = clamp01(r + (1.0f - r) * (1.0f - strength));
+    return d;
+}
+
+std::uint32_t encodeDerivedWord(float roughness) {
+    return kWordPresent | kWordDerived | (static_cast<std::uint32_t>(std::lround(clamp01(roughness) * 255.0f)) << 16);
+}
+
+SpecularInfo specularInfo(const engine::materials::ShaderInfo& info) {
+    namespace mats = engine::materials;
+    SpecularInfo s;
+    if (!info.enableSpecular || info.specular.source == mats::Source::None) return s;
+    const mats::Role& m = info.specular;
+    if (m.source == mats::Source::Sampler) {
+        s.hasMask = true;
+        s.maskMap = true;
+    } else if (m.hasConstant) {
+        s.hasMask = true;
+        s.maskLum = 0.3f * m.constant[0] + 0.59f * m.constant[1] + 0.11f * m.constant[2];
+        if (!std::isfinite(s.maskLum)) s.maskLum = 1.0f;
+    }
+    const mats::Role& p = info.specularPower;
+    if (p.source == mats::Source::None) {
+        s.powerKnown = true;  // the engine's default m_fSpecularPower = 1
+        s.power = 1.0f;
+    } else if (p.hasConstant) {
+        const int c = p.swizzle >= 3 && p.swizzle <= 5 ? p.swizzle - 2 : 0;  // "", .rgb, .r, .g, .b, .a
+        const float v = p.constant[c];
+        s.powerKnown = std::isfinite(v) && v >= 0.0f && v <= 64.0f;  // (a value outside the engine's range = not read right: the default roughness stands in)
+        s.power = v;
+    }
+    return s;
+}
+
 Decoded decodeWord(std::uint32_t w) {
     Decoded d;
     d.slot = w & kWordSlotMask;
     d.present = (w & kWordPresent) != 0;
-    d.orm = (w & kWordOrm) != 0;
+    d.derived = d.slot == 0 && (w & kWordDerived) != 0;
+    d.orm = (w & kWordOrm) != 0 && !d.derived;
     d.emissive = (w & kWordEmissive) != 0;
     d.glass = (w & kWordGlass) != 0;
     d.roughnessScale = static_cast<float>((w >> 16) & 15u) / 8.0f;
     d.roughnessBias = static_cast<float>((w >> 20) & 15u) / 15.0f;
+    if (d.derived) {
+        d.roughnessScale = 0.0f;
+        d.roughnessBias = static_cast<float>((w >> 16) & 255u) / 255.0f;
+    }
     d.metalness = static_cast<float>((w >> 24) & 15u) / 15.0f;
     d.wetness = static_cast<float>((w >> 28) & 3u) / 3.0f;
     return d;
@@ -419,6 +474,17 @@ void MaterialPack::load(std::vector<std::filesystem::path> roots, std::uint64_t 
     generation_.fetch_add(1, std::memory_order_release);
 }
 
+void MaterialPack::setDerive(const DeriveOptions& o) {
+    derive_ = o;
+    generation_.fetch_add(1, std::memory_order_release);
+}
+
+std::uint32_t MaterialPack::deriveWord(const SpecularInfo& s) const {
+    if (!derive_.enabled) return 0;
+    const Derived d = deriveFromSpecular(s, derive_, snap_ ? snap_->defaultRoughness : 0.7f);
+    return d.valid ? encodeDerivedWord(d.roughness) : 0u;
+}
+
 Stats MaterialPack::stats() const { return snap_ ? snap_->stats : Stats{}; }
 
 std::unique_ptr<d3d9::Texture> MaterialPack::createMap(const Entry& e, const Snapshot& s, std::uint64_t& bytes) {
@@ -519,6 +585,7 @@ bool MaterialPack::adopt() {
     if (gen != cacheGeneration_) {
         byName_.clear();
         byMaterial_.clear();
+        byShader_.clear();
         cacheGeneration_ = gen;
     }
     return true;
@@ -530,6 +597,10 @@ MaterialPack::Hit MaterialPack::finish(Hit h, std::string_view key) {
         const std::uint32_t slot = h.texture->bindlessSlot() & kWordSlotMask;
         if (slot == 0) return {};
         h.word = (h.word & ~kWordSlotMask) | slot;
+    }
+    if (h.derived) {
+        ++counters_.derived;
+        return h;
     }
     ++counters_.matched;
     if (!key.empty()) matched_.emplace(std::string(key), true);
@@ -546,7 +617,23 @@ MaterialPack::Hit MaterialPack::lookup(std::string_view diffuseName) {
 }
 
 MaterialPack::Hit MaterialPack::lookupMaterial(const void* material) {
-    if (material == nullptr || !adopt()) return {};
+    if (!adopt()) return {};
+    if (material == nullptr) {
+        // a draw without a material tag (skinned actors): no pack entry is possible, but the executing shader still tells the engine's specular data
+        if (!derive_.enabled) return {};
+        namespace mats = engine::materials;
+        mats::ShaderInfo di;
+        if (!mats::active(di) || (di.cls != mats::ShaderClass::Default && di.cls != mats::ShaderClass::Leafs)) return {};
+        ++counters_.lookups;
+        if (const auto it = byShader_.find(di.shader); it != byShader_.end()) return finish(it->second, {});
+        Hit h;
+        if (const std::uint32_t w = deriveWord(specularInfo(di)); w != 0) {
+            h.word = w;
+            h.derived = true;
+        }
+        byShader_[di.shader] = h;
+        return finish(h, {});
+    }
     if (const auto it = byMaterial_.find(material); it != byMaterial_.end()) {
         ++counters_.lookups;
         return finish(it->second, {});
@@ -572,12 +659,27 @@ MaterialPack::Hit MaterialPack::lookupMaterial(const void* material) {
             byKey(normalizeKey(mats::poolImageName(info, info.diffuse.slot)));
         }
     }
+    bool derivedNow = false;
+    if (h.word == 0 && derive_.enabled) {
+        mats::ShaderInfo di;
+        if (mats::active(di, material) && (di.cls == mats::ShaderClass::Default || di.cls == mats::ShaderClass::Leafs)) {
+            const SpecularInfo si = specularInfo(di);
+            const std::uint32_t w = deriveWord(si);
+            if (w != 0) {
+                h.word = w;
+                h.texture = nullptr;
+                h.derived = derivedNow = true;
+                spdlog::debug("enh: materials: derived '{}': specular {}{:.2f}, power {} -> roughness {:.2f}", mats::resourceName(material), si.maskMap ? "map " : "const ",
+                              si.maskLum, si.powerKnown ? std::format("{:.3f}", si.power) : std::string("texture"), decodeWord(w).roughnessBias);
+            }
+        }
+    }
     byMaterial_[material] = h;
     if (byMaterial_.size() <= 4000) {  // authors: every material seen once, with the names a pack entry can use (-RvkLogLevel debug)
         mats::ShaderInfo si;
         std::string image;
         if (mats::active(si, material) && si.diffuse.source == mats::Source::Sampler && si.diffuse.slot >= 0) image = mats::poolImageName(si, si.diffuse.slot);
-        spdlog::debug("enh: materials: seen '{}' (diffuse image '{}'): {}", mats::resourceName(material), image, h.word != 0 ? "pack entry" : "no entry");
+        spdlog::debug("enh: materials: seen '{}' (diffuse image '{}'): {}", mats::resourceName(material), image, derivedNow ? "derived from the specular data" : h.word != 0 ? "pack entry" : "no entry");
     }
     ++counters_.lookups;
     return finish(h, key);

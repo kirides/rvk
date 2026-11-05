@@ -2001,6 +2001,41 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .format = "%.2f",
         .flags = Flag::Advanced,
     });
+    r.materialsDerive = &reg.add({
+        .key = "materials.derive_from_specular",
+        .label = "Gloss from the game's specular data",
+        .category = "Materials",
+        .description = "Materials WITHOUT a pack entry that the game itself makes glossy (a specular map or colour with a specular power) get a "
+                       "roughness derived from that data, so the sky and traced reflections and the G-buffer's material channel cover them too "
+                       "(skin, cloth, wet ground layers). The game's own highlights stay as they are. Needs the material pack. Materials with a "
+                       "pack entry, and those without specular data, are not changed.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+    });
+    r.materialsDeriveMin = &reg.add({
+        .key = "materials.derive_min",
+        .label = "Derived roughness, smoothest",
+        .category = "Materials",
+        .description = "The derived roughness never goes below this (keeps cloth and skin from turning into mirrors).",
+        .type = Type::Float,
+        .defaultValue = 0.25,
+        .min = 0,
+        .max = 1,
+        .format = "%.2f",
+        .flags = Flag::Advanced,
+    });
+    r.materialsDeriveMax = &reg.add({
+        .key = "materials.derive_max",
+        .label = "Derived roughness, roughest",
+        .category = "Materials",
+        .description = "The derived roughness never goes above this (before a weak specular mask makes it rougher).",
+        .type = Type::Float,
+        .defaultValue = 0.9,
+        .min = 0,
+        .max = 1,
+        .format = "%.2f",
+        .flags = Flag::Advanced,
+    });
     r.materialsBudget = &reg.add({
         .key = "materials.budget",
         .label = "Pack texture memory",
