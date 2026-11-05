@@ -19,7 +19,7 @@
 param(
     [string]$Spots = 'pub_interior,monastery_hall,jungle,lake_jungle,harbour_night,crystal_cave,lava_cave,shadow_inland_a,beach_sun',
     # the GI settings of the "DDGI" and the reference run (the player defaults at quality high, replace mode, the world's lights)
-    [string[]]$Setting = @('gi.quality=high', 'gi.lightmaps=replace', 'gi.lights=world'),
+    [string[]]$Setting = @('gi.quality=high', 'gi.lightmaps=replace'),
     # reference samples per frame / in total / bounces
     [int]$Spp = 4,
     [int]$Max = 1024,
