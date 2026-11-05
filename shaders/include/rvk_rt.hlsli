@@ -38,6 +38,7 @@ static const uint RVK_RT_VIEW_SHADOW = 0x20000u;
 static const uint RVK_RT_MASK_OPAQUE = 1u;
 static const uint RVK_RT_MASK_ALPHA_TESTED = 2u;
 static const uint RVK_RT_MASK_DYNAMIC = 4u;  // characters
+static const uint RVK_RT_MASK_GLASS = 8u;    // glass panes: only RVK_RT_TRACE_GLASS rays see them
 // RvkRtRecord.uvSet (abi.h kRtUv*)
 static const uint RVK_RT_UV_SET_MASK = 3u;             // 0 = the vertex's TEXCOORD0, 1 = TEXCOORD1
 static const uint RVK_RT_UV_APPROX = 4u;               // the pixel shader's coordinate is not affine in that set

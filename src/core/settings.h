@@ -397,6 +397,7 @@ struct RendererSettings {
     Setting* materialsRtReflections = nullptr; // materials.rt_reflections: "low" | "medium" | "high" (traced reflections at materials.quality = high)
     Setting* materialsRtRange = nullptr;     // materials.rt_range: metres a reflection ray travels
     Setting* materialsRtStrength = nullptr;  // materials.rt_strength
+    Setting* materialsGlass = nullptr;       // materials.glass: traced glass panes (windows reflect, bottles refract) with the traced reflections
     Setting* materialsRainWetness = nullptr; // materials.rain_wetness: how strongly rain wets the pack's surfaces (traced reflections on)
     Setting* materialsPuddles = nullptr;     // materials.puddles: puddle coverage while it rains
     Setting* materialsRainForce = nullptr;   // materials.rain_force (debug): a forced rain share

@@ -563,7 +563,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         dev_.setPackStamp([this]() -> std::uint32_t { return matPack_->generation(); });
         materialRt_ = std::make_unique<enh::MaterialRt>(dev_, rtScene_.get());
         for (settings::Setting* s : {rs.materialsQuality, rs.materialsSpecular, rs.materialsEnvironment, rs.materialsDebug, rs.materialsAlternate, rs.materialsWetness,
-                                     rs.materialsRtReflections, rs.materialsRtRange, rs.materialsRtStrength, rs.materialsRainWetness, rs.materialsPuddles, rs.materialsRainForce}) {
+                                     rs.materialsRtReflections, rs.materialsRtRange, rs.materialsRtStrength, rs.materialsRainWetness, rs.materialsPuddles, rs.materialsRainForce, rs.materialsGlass}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) {
                 applyMaterials();
                 applyGbuffer();  // the traced reflections read the G-buffer
@@ -808,6 +808,7 @@ void HalDevice::applyMaterials() {
         m.environment = rs.materialsEnvironment->asFloat();
         if (rs.materialsRtRange != nullptr) m.rangeMetres = rs.materialsRtRange->asFloat();
         if (rs.materialsRtStrength != nullptr) m.strength = rs.materialsRtStrength->asFloat();
+        if (rs.materialsGlass != nullptr) m.glass = rs.materialsGlass->asBool();
         if (rs.materialsRainWetness != nullptr) m.rain = rs.materialsRainWetness->asFloat();
         if (rs.materialsPuddles != nullptr) m.puddles = rs.materialsPuddles->asFloat();
         if (rs.materialsRainForce != nullptr) m.forceRain = rs.materialsRainForce->asFloat();

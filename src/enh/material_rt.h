@@ -65,6 +65,7 @@ public:
         float strength = 1.0f;       // materials.rt_strength
         float rangeMetres = 150.0f;  // materials.rt_range
         float roughnessLimit = 0.7f; // surfaces rougher than this keep the raster's response only
+        bool glass = true;           // materials.glass: panes of the pack's glass entries (windows, bottles) reflect / refract through the RT scene
         float rain = 1.0f;           // materials.rain_wetness: how strongly rain wets the pack's surfaces (0 = dry world)
         float puddles = 0.7f;        // materials.puddles: puddle coverage on flat ground while it rains / is wet
         float forceRain = 0.0f;      // materials.rain_force (debug): > 0 = this rain share instead of the weather's
@@ -93,6 +94,18 @@ private:
     void enable();
     void disable();
     void record(d3d9::PassContext& ctx);
+    void recordGlass(d3d9::PassContext& ctx);
+    void recordFilter(d3d9::PassContext& ctx);
+    void recordComposite(d3d9::PassContext& ctx);
+    // what the trace stage hands to the filter and composite stages of the same frame (three injected passes: -PerfFrame times each)
+    struct Stage {
+        std::uint64_t frame = ~0ull;
+        d3d9::Texture* scene = nullptr;
+        rhi::Texture *raw = nullptr, *histRead = nullptr, *histWrite = nullptr;
+        MaterialRtPush push{};
+        std::uint32_t w = 0, h = 0, tw = 0, th = 0, cur = 0, image = 0;
+        bool filtered = false;
+    } stage_;
     bool pipelinesReady(VkFormat target);
     void updateRain();
     void logStats();
@@ -102,7 +115,10 @@ private:
     Settings s_;
     int tier_ = 0;
     bool on_ = false, failed_ = false;
-    std::unique_ptr<rhi::Pipeline> trace_, filter_, composite_;
+    std::unique_ptr<rhi::Pipeline> trace_, filter_, composite_, glassPipe_;
+    std::future<std::unique_ptr<rhi::Pipeline>> glassBuild_;
+    bool glassOn_ = false;
+    std::uint64_t glassPasses_ = 0;
     VkFormat compositeFormat_ = VK_FORMAT_UNDEFINED;
     std::future<std::unique_ptr<rhi::Pipeline>> traceBuild_, filterBuild_;
     // the frame's light (the draws' registers): sun, fog
