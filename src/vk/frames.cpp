@@ -69,7 +69,9 @@ void Frames::destroy() {
 
 std::uint64_t Frames::completedValue() const {
     std::uint64_t v = 0;
-    vkGetSemaphoreCounterValue(ctx_->device(), timeline_, &v);
+    if (vkGetSemaphoreCounterValue(ctx_->device(), timeline_, &v) == VK_ERROR_DEVICE_LOST) {
+        ctx_->reportDeviceLost("vkGetSemaphoreCounterValue");
+    }
     return v;
 }
 
@@ -81,7 +83,23 @@ void Frames::waitFor(std::uint64_t value) const {
     wi.semaphoreCount = 1;
     wi.pSemaphores = &timeline_;
     wi.pValues = &value;
-    vkWaitSemaphores(ctx_->device(), &wi, UINT64_MAX);
+    // waited in slices (DXVK: 5 s): a GPU that stops making progress is logged instead of hanging silently, a loss seen here
+    // gets the device-fault report (before, only submit / present reported it); the wait goes on (a slow driver recovers)
+    constexpr std::uint64_t kSliceNs = 4'000'000'000ull;
+    for (int slice = 1;; ++slice) {
+        const VkResult r = vkWaitSemaphores(ctx_->device(), &wi, kSliceNs);
+        if (r == VK_SUCCESS) return;
+        if (r == VK_ERROR_DEVICE_LOST) {
+            ctx_->reportDeviceLost("vkWaitSemaphores");
+            return;
+        }
+        if (r != VK_TIMEOUT) {
+            spdlog::error("vulkan: vkWaitSemaphores (frame value {}): {}", value, resultString(r));
+            return;
+        }
+        spdlog::warn("vulkan: the GPU has not finished frame value {} after {} s (completed {})", value, slice * 4,
+                     completedValue());
+    }
 }
 
 void Frames::waitIdle() {
