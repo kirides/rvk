@@ -515,6 +515,8 @@ std::string Registry::toToml() const {
 namespace {
 // settings of earlier builds that were taken out (the early native prototypes: native-renderer.md N3 / N4); an old settings.toml that
 // still has them loads, with one warning per key, and the next save leaves them out
+// settings of an earlier build under a new key: the old key still loads (one warning)
+constexpr std::pair<std::string_view, std::string_view> kRenamedSettings[] = {{"lighting.table_complete", "lighting.trust_table"}};
 constexpr std::string_view kRemovedSettings[] = {"native.opaque", "native.shadows", "native.debug", "rt.source"};
 }  // namespace
 
@@ -536,7 +538,13 @@ bool Registry::fromToml(std::string_view text, std::vector<std::string>* warning
     std::vector<std::string> removedSeen;
     for (const auto& leaf : leaves) {
         const bool sideB = leaf.starts_with("ab.");
-        const std::string key = sideB ? leaf.substr(3) : leaf;
+        std::string key = sideB ? leaf.substr(3) : leaf;
+        for (const auto& [from, to] : kRenamedSettings) {
+            if (key == from) {
+                warn(std::format("'{}' was renamed to '{}', loaded under the new name", key, to));
+                key = std::string(to);
+            }
+        }
         Setting* s = nullptr;
         for (auto& x : settings_) {
             if (x->spec_.key == key) s = x.get();
@@ -1882,15 +1890,14 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 1,
         .flags = Flag::Debug,
     });
-    r.lightingTableComplete = &reg.add({
-        .key = "lighting.table_complete",
-        .label = "Table lighting: skip per-object light reads",
+    r.lightingTrustTable = &reg.add({
+        .key = "lighting.trust_table",
+        .label = "Table lighting: trust the table (skip per-object light reads)",
         .category = "Lighting",
         .tab = kTabDebug,
-        .description = "With table lighting on and the light table complete (the engine's static light tree returned lights, built every frame: no latency), "
-                       "lit draws do not read their light list's / illumination's point lights at all (default off: a registry that holds lights elsewhere "
-                       "may still miss the local ones, which dimmed the monastery's candles; off = the engine's own first three lights stay in the registers "
-                       "as the fallback). Run-time switch.",
+        .description = "Developer option (formerly lighting.table_complete). With table lighting on, a lit draw skips reading its own point lights when the light "
+                       "table verifiably holds every light its object names (each within 8 units of a table light); an object with a light the table misses keeps "
+                       "its own reads and hands the light to the table. Default off: a small CPU saving only. Run-time switch.",
         .type = Type::Bool,
         .defaultValue = 0,
         .flags = Flag::Debug,
@@ -1968,6 +1975,19 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 1,
         .options = {"low", "medium", "high"},
         .optionLabels = {"Low", "Medium", "High"},
+        .flags = Flag::Advanced,
+    });
+    r.lightingShadowBaked = &reg.add({
+        .key = "lighting.light_shadow_baked",
+        .label = "Lamp shadows on baked light",
+        .category = "Lighting",
+        .description = "The floors and walls of the world carry their lamps' light baked in (lightmaps, light probes): a lamp's traced shadow also takes this share "
+                       "off such surfaces, where the hero or a prop blocks the lamp. 0 = only lights the game computes per pixel are shadowed.",
+        .type = Type::Float,
+        .defaultValue = 0.8,
+        .min = 0,
+        .max = 1,
+        .format = "%.2f",
         .flags = Flag::Advanced,
     });
     r.lightingShadowRadius = &reg.add({

@@ -387,7 +387,7 @@ struct RendererSettings {
     Setting* gbufferDebug = nullptr;      // gbuffer.debug: "off", "normals", "motion", "ao"
     // Full-owned lighting (enh/light_table, docs/research/gpu-scene.md 9.7)
     Setting* lightingClustered = nullptr; // lighting.clustered (restart, debug): the light table + cluster grid; the material variants take their point lights from it
-    Setting* lightingTableComplete = nullptr; // lighting.table_complete (debug): with the registry complete, table-lit draws do not read their own light lists
+    Setting* lightingTrustTable = nullptr; // lighting.trust_table (debug): with the registry complete, table-lit draws do not read their own light lists
     Setting* lightingTreeMerge = nullptr;     // lighting.tree_merge (debug): table-lit tree batches merge across light lists
     Setting* lightingFullLit = nullptr;   // lighting.full_lit (debug): lit draws take all point lights from the table (one 3-light permutation; gpu-scene.md 9.8)
     Setting* lightingEnabled = nullptr;   // lighting.enabled (debug): run-time switch of the table (A/B)
@@ -396,6 +396,7 @@ struct RendererSettings {
     Setting* lightingCollect = nullptr;   // debug.light_collect: the radius the light table collects lights over (units)
     Setting* lightingShadows = nullptr;   // lighting.light_shadows: "off" | "nearby" | "many" (ray-traced point-light shadows on the table's lights)
     Setting* lightingShadowQuality = nullptr;  // lighting.light_shadow_quality: "low" | "medium" | "high"
+    Setting* lightingShadowBaked = nullptr;    // lighting.light_shadow_baked: how much the traced lamp shadows darken baked / probe light under them (0 = only the table lights)
     Setting* lightingShadowRadius = nullptr;   // lighting.light_shadow_radius: the lamps' size in cm (the soft shadow's disc)
     // material pack (enh/material_pack, docs/research/material-pack.md)
     Setting* materialsPack = nullptr;        // materials.pack (restart): load the pack folder; its materials get PBR specular / reflections

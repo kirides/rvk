@@ -89,8 +89,8 @@ float lightEngineFalloff(float d2, float rcpSqrRange);
 // lights from the table. Set by HalDevice::applyLighting (needs the table on and no compare run); read by native::StaticOps.
 bool fullLitActive();
 void setFullLitActive(bool on);
-// the two table lighting options (lighting.table_complete / lighting.tree_merge), meaningful while fullLitActive()
-bool fullLitSkipsReads();   // lighting.table_complete: lit draws skip their own point-light reads when the registry is trusted / the object has none
+// the two table lighting options (lighting.trust_table / lighting.tree_merge), meaningful while fullLitActive()
+bool fullLitSkipsReads();   // lighting.trust_table: lit draws skip their own point-light reads when the table verifiably holds every light of the object
 bool fullLitTreeMerge();
 void setFullLitOptions(bool skipReads, bool treeMerge);
 
@@ -102,6 +102,7 @@ public:
         int mode = 0;            // lighting.light_shadows: 0 off, 1 nearby (8 lights within 25 m), 2 many (31 within 60 m)
         int quality = 2;         // 1 low (cut-outs solid), 2 medium, 3 high (2 rays per light)
         float radius = 20.0f;    // the lamps' size (world units): the soft shadow's disc
+        float baked = 0.8f;      // lighting.light_shadow_baked: the share of the baked light a traced shadow takes away (frame param z)
     };
     // A drawn object's light (its list entry: reg0 = position + 1 / R^2, reg1 = colour), handed over by native::StaticOps for lists it composed. The next
     // build adds those the registry walk did not return (within 8 units = the same light). Thread-safe.
@@ -139,6 +140,7 @@ private:
     d3d9::Device& dev_;
     bool enabled_ = false, failed_ = false;
     int style_ = 0, debug_ = 0;
+    float refA_ = 0.0f, refB_ = 0.0f;  // the light table reference words of frame param kFrameParamLights (x, y)
     float collectRadius_ = 96000.0f;
     double colourRatio_[3]{};
     std::uint64_t colourRatioN_ = 0;

@@ -628,7 +628,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         if (!matPack_) dev_.setPackProvider([](const d3d9::draws::Tag&) { return d3d9::Device::PackHit{}; });
         lightTable_ = std::make_unique<enh::LightTable>(dev_);
         lightTable_->setRtScene(rtScene_.get());
-        for (settings::Setting* s : {rs.lightingEnabled, rs.lightingStyle, rs.lightingDebug, rs.lightingFullLit, rs.lightingTableComplete, rs.lightingTreeMerge, rs.lightingCollect, rs.lightingShadows, rs.lightingShadowQuality, rs.lightingShadowRadius, rs.materialsRoughness, rs.nativeStaticOpsCompare, rs.nativeSceneOpsCompare}) {
+        for (settings::Setting* s : {rs.lightingEnabled, rs.lightingStyle, rs.lightingDebug, rs.lightingFullLit, rs.lightingTrustTable, rs.lightingTreeMerge, rs.lightingCollect, rs.lightingShadows, rs.lightingShadowQuality, rs.lightingShadowRadius, rs.lightingShadowBaked, rs.materialsRoughness, rs.nativeStaticOpsCompare, rs.nativeSceneOpsCompare}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyLighting(); }, this);
         }
         applyLighting();
@@ -886,6 +886,7 @@ void HalDevice::applyLighting() {
         const std::string_view q = rs.lightingShadowQuality->asEnum();
         ls.quality = q == "low" ? 1 : q == "high" ? 3 : 2;
         ls.radius = rs.lightingShadowRadius->asFloat();
+        if (rs.lightingShadowBaked != nullptr) ls.baked = rs.lightingShadowBaked->asFloat();
         lightTable_->configureShadows(ls);
     }
     // table lighting needs the table, Full's composition and no compare run (a compare diffs against the engine's passes)
@@ -893,7 +894,7 @@ void HalDevice::applyLighting() {
     const bool full = on(rs.lightingFullLit) && rs.lightingEnabled->asBool() && lightTable_->available() && renderMode() == RenderMode::Full &&
                       !on(rs.nativeStaticOpsCompare) && !on(rs.nativeSceneOpsCompare);
     enh::setFullLitActive(full);
-    enh::setFullLitOptions(on(rs.lightingTableComplete), on(rs.lightingTreeMerge));
+    enh::setFullLitOptions(on(rs.lightingTrustTable), on(rs.lightingTreeMerge));
     if (staticOps_) staticOps_->setTableLit(full);
 }
 

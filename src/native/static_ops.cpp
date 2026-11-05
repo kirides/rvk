@@ -679,9 +679,20 @@ void StaticOps::writeLighting(const sc::Pass& pass) {
     sc::ambientSh(sh, indoor, get<float>(illum, 8), hasStatic ? &staticSh[0][0] : nullptr, &L[1]);
     rd(list, 4, L[8], 48);
     // (a list with dynamic lights keeps its reads: only those can carry the engine's cubemap shadow channel, which the table does not have yet)
-    if (pass.tableLit && enh::fullLitSkipsReads() && get<std::uint8_t>(list, 0x34) == 0 &&
-        (enh::LightTable::registryComplete() || get<std::uint8_t>(illum, 0x0d) == 0)) {
-        // the table is complete (the registry returned the static tree's lights, rebuilt this frame): no light of this object is read; the three
+    bool tableHoldsAll = false;
+    if (pass.tableLit && enh::fullLitSkipsReads() && get<std::uint8_t>(list, 0x34) == 0) {
+        // lighting.trust_table: only when the table VERIFIABLY holds every light this object's illumination names (each within 8 units of a table light);
+        // an object with a light the registry missed keeps its own reads (and hands the light to the table: the drawn lists below)
+        tableHoldsAll = enh::LightTable::registryComplete() || get<std::uint8_t>(illum, 0x0d) == 0;
+        const std::uint32_t nsKnown = std::min<std::uint32_t>(get<std::uint8_t>(illum, 0x0d), 4u);
+        for (std::uint32_t i = 0; i < nsKnown && tableHoldsAll; ++i) {
+            float e[4]{};
+            rd(illum + 0x10 + 0x40 * i, 0, &e[0], 16);
+            tableHoldsAll = enh::LightTable::lightKnown(e);
+        }
+    }
+    if (tableHoldsAll) {
+        // the table holds this object's lights (rebuilt this frame): no light of this object is read; the three
         // registers are zero and the material variant fills every slot per pixel from the cluster (gpu-scene.md 9.9)
         std::memset(L[11], 0, 3 * 4 * 16);
         return;
