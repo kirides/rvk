@@ -617,10 +617,11 @@ private:
             if (need(3)) assign(ins, std::format("{} * {} + {}", paren(srcExpr(s[0])), paren(srcExpr(s[1])), srcExpr(s[2])));
             break;
         case Op::Rcp:
-            if (need(1)) assign(ins, splat("1.0 / " + scalar(s[0])));
+            // clamped to FLT_MAX (DXVK d3d9.floatEmulation): D3D9's 0 * rcp(0) is 0 (legacy multiply), IEEE 0 * inf is NaN
+            if (need(1)) assign(ins, splat(std::format("min(1.0 / {}, 3.402823466e+38)", scalar(s[0]))));
             break;
         case Op::Rsq:
-            if (need(1)) assign(ins, splat(std::format("rsqrt(abs({}))", scalar(s[0]))));
+            if (need(1)) assign(ins, splat(std::format("min(rsqrt(abs({})), 3.402823466e+38)", scalar(s[0]))));
             break;
         case Op::Dp3:
             if (need(2)) assign(ins, splat(std::format("dot({}.xyz, {}.xyz)", paren(srcExpr(s[0])), paren(srcExpr(s[1])))));
@@ -642,11 +643,12 @@ private:
             break;
         case Op::Exp:
         case Op::ExpP:
-            if (need(1)) assign(ins, splat("exp2(" + scalar(s[0]) + ")"));
+            if (need(1)) assign(ins, splat(std::format("min(exp2({}), 3.402823466e+38)", scalar(s[0]))));
             break;
         case Op::Log:
         case Op::LogP:
-            if (need(1)) assign(ins, splat(std::format("log2(abs({}))", scalar(s[0]))));
+            // log(0) = -FLT_MAX, not -inf: FXC's expanded pow (log, mul, exp) of pow(0, 0) is exp(0 * -FLT_MAX) = 1, as on D3D9
+            if (need(1)) assign(ins, splat(std::format("max(log2(abs({})), -3.402823466e+38)", scalar(s[0]))));
             break;
         case Op::Lit:
             if (need(1)) assign(ins, std::format("rvk_lit({})", srcExpr(s[0])));
