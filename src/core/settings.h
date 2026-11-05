@@ -60,6 +60,17 @@ inline constexpr const char* kTabGraphics = "Graphics";
 inline constexpr const char* kTabSystem = "System";
 inline constexpr const char* kTabDebug = "Debug";  // shown in debug mode only
 
+// A prerequisite of a setting (Spec::needs): the setting acts only while `key`'s effective value equals `value` (text form,
+// Registry::parseText; `negate`: while it does NOT equal it, e.g. {"shadows.rt", "off", true} = ray-traced shadows on).
+struct Need {
+    std::string key;
+    std::string value;
+    bool negate = false;
+    // false: never switched on for the player (the renderer mode: Wrapper / Full needs a restart and is the player's own choice);
+    // an unmet need of this kind only greys the dependent with the reason
+    bool autoApply = true;
+};
+
 struct Spec {
     std::string key;          // "<table>.<name>" (lower case, digits, '_'): stable, it is the TOML path and the API key
     std::string label;        // overlay label
@@ -89,6 +100,13 @@ struct Spec {
     // group applies at once; between groups only at the next start (restartPending, "restart needed" in the overlay), e.g.
     // renderer.mode: original {0} | wrapper, full {1}. Empty = no such rule.
     std::vector<std::uint8_t> restartGroups;
+    // Prerequisites (docs/research/settings-audit.md; Registry::setWithNeeds / needsReason): all must be met for the setting to act.
+    // Rules: (1) turning a dependent ON through setWithNeeds (a Bool true, an Enum option > 0 of an option list that starts with
+    // "off") switches its unmet prerequisites on first (chains followed, cycles cut; a restart-only prerequisite is set and shows
+    // "restart needed" like any restart setting); (2) turning a prerequisite OFF never changes its dependents: they are greyed
+    // with the reason (needsReason) and act again when it is back; (3) a prerequisite that cannot be satisfied (locked,
+    // capability unmet, `autoApply` false) greys the dependent with that reason. The effective value is never changed by needs.
+    std::vector<Need> needs;
 };
 
 class Registry;
@@ -217,6 +235,29 @@ public:
     // the requirements of a spec against a report: "" when met (pure; also what setCapabilities applies)
     static std::string resolve(const Spec& spec, const caps::Report& report);
 
+    // ---- prerequisites (Spec::needs) ----
+    struct NeedChange {
+        std::string key;
+        std::string from;  // text form before
+        std::string to;    // text form after
+        bool restart = false;  // the change takes effect only at the next start (Flag::Restart / a restart group)
+    };
+    struct NeedsResult {
+        Result result = Result::Ok;           // of the requested change itself
+        std::vector<NeedChange> changes;      // prerequisites switched on (the overlay's "Also switched on: ..." toast), nearest first
+        std::string blocked;                  // prerequisites that could not be satisfied ("" = none), "; "-separated reasons
+    };
+    // set(key, text) + switching on the prerequisites of the new value (see Spec::needs); a change that turns the setting off
+    // or leaves it off touches nothing else
+    NeedsResult setWithNeeds(std::string_view key, std::string_view text);
+    // "" when every prerequisite of `s` is met (transitively: a met prerequisite that is itself greyed counts as unmet), else
+    // "Needs <label> = <value>" lines joined by "; " (the overlay's greyed reason)
+    std::string needsReason(const Setting& s) const;
+    // the keys of the settings that list `key` as a prerequisite (the overlay indents them under it)
+    std::vector<std::string> dependentsOf(std::string_view key) const;
+    // "key=value" / "key!=value" lines of a spec's needs, newline separated (the tool API)
+    static std::string needsText(const Spec& spec);
+
     // ---- debug mode ----
     // `s` (a Bool) switches debug mode: while it is false, Flag::Debug settings are gated (effective = default, hidden in the
     // overlay) and switching it off returns the A/B comparison to side A. Without a switch every setting applies (debug mode).
@@ -272,6 +313,10 @@ private:
 
     void resolveLocked(Setting& s);              // mutex_ held
     static void resolveOptions(Setting& s, const caps::Report& report);
+    bool needMet(const Need& n, const Setting*& prereq) const;
+    bool needsOn(const Setting& s, double v) const;
+    void applyNeeds(Setting& s, std::vector<Setting*>& visiting, NeedsResult& out);
+    std::string needsReasonDepth(const Setting& s, int depth) const;
     void gateLocked();                           // mutex_ held: Flag::Debug settings follow the debug switch
     void flipLocked();                           // mutex_ held
 
@@ -305,8 +350,6 @@ struct RendererSettings {
     Setting* debugMode = nullptr;    // overlay.debug_mode: shows the Flag::Debug settings, the A/B comparison, diagnostics
     Setting* showAdvanced = nullptr; // overlay.show_advanced: shows the Flag::Advanced settings (hidden: the overlay's checkbox)
     Setting* tintDraws = nullptr;    // debug.tint_draws: "off", "kind", "pass" (d3d9/draws.h TintMode)
-    Setting* drawRecords = nullptr;  // debug.draw_records: per-frame draw records (hidden; the histogram is always on)
-    Setting* paceLoading = nullptr;  // debug.pace_loading: loading screens wait for the pacer (hidden; load-time A/B)
     Setting* debugCrashMarkers = nullptr;  // debug.crash_markers: VK_AMD_buffer_marker events around the regions, logged after a device loss
     Setting* debugRegions = nullptr;  // debug.regions: command buffer labels for graphics captures (d3d9::Device::setRegionsEnabled)
     Setting* debugNames = nullptr;    // debug.names: VK_EXT_debug_utils object names (restart; vk/debug_names.h)
@@ -316,17 +359,12 @@ struct RendererSettings {
     Setting* materialSources = nullptr;  // debug.material_sources: the engine's request of each material shader (engine::matsrc)
     Setting* reverseZ = nullptr;     // debug.reverse_z: reversed infinite depth in the main view (d3d9::Device::setReverseZ)
     Setting* batchDraws = nullptr;   // debug.batch_draws: the opaque passes' draws grouped by pipeline (d3d9::Device::setBatching)
-    Setting* constantCompare = nullptr;  // debug.constant_compare: register setters dirty a stage only on a change (d3d9::Device::setConstantCompare)
-    Setting* splitConstants = nullptr;   // debug.split_constants: a draw's constants uploaded by register window, only what changed (d3d9::Device::setSplitConstants)
     Setting* splitVerify = nullptr;      // debug.split_verify: check every split draw's window blocks against the register file (d3d9::Device::setSplitVerify)
     Setting* injectView = nullptr;   // debug.inject_view: "off", "depth", "tint" (enh/debug_view.h, an injected pass)
     Setting* rtAllow = nullptr;      // rt.allow: enable the ray tracing extensions at device creation (restart)
     Setting* rtReflections = nullptr; // rt.reflections: "off", "low", "medium", "high" (the water's ray-traced reflections, needs RayQuery)
     Setting* rtDebug = nullptr;      // rt.debug: "off", "instances", "depth", "normals" (enh/rt_debug.h, needs RayQuery)
     Setting* rtReflectionTweaks = nullptr;  // rt.reflection_tweaks: hidden diagnostics bitmask of the water's RT reflections (enh/water.h)
-    Setting* rtLodRange = nullptr;   // rt.lod_range (m, 0 = off) + rt.lod_bias (0..3): the RT scene's far level of detail (docs/research/rt-lod.md)
-    Setting* rtLodBias = nullptr;
-    Setting* rtLodFarRange = nullptr;  // rt.lod_far_range (m, 0 = off): the box rung
     Setting* rtLodScale = nullptr;     // rt.lod_scale: multiplies both ranges (0 = ladder off)
     Setting* rtMemoryBudget = nullptr; // rt.memory_budget (MB, 0 = none): the ladder tightens when the AS memory would exceed it
     Setting* rtPreset = nullptr;       // rt.preset: "low", "medium", "high", "custom" (rtPresets())
@@ -340,94 +378,61 @@ struct RendererSettings {
     Setting* waterSeaState = nullptr;     // water.sea_state: "auto" (weather), "calm", "moderate", "rough", "storm"
     Setting* waterWindDirection = nullptr;  // water.wind_direction: degrees, -1 = auto
     Setting* waterWaveScale = nullptr;    // water.wave_scale: multiplier
-    Setting* waterMurkiness = nullptr;    // water.murkiness: multiplier on the absorption
-    Setting* waterReflectionStrength = nullptr;  // water.reflection_strength
     Setting* waterDebug = nullptr;        // water.debug: "off", "shore_field", "depth", "normals", "reflection"
     // enhanced sun shadows (enh/shadows.h, docs/research/shadows.md)
     Setting* shadowsEnabled = nullptr;    // shadows.enabled
     Setting* shadowsFilter = nullptr;     // shadows.filter: "low", "medium", "high" (bilinear taps per axis 2 / 3 / 4)
-    Setting* shadowsSoftness = nullptr;   // shadows.softness: tap spacing in texels
-    Setting* shadowsBlend = nullptr;      // shadows.cascade_blend: fraction of a cascade blended into the next
-    Setting* shadowsFade = nullptr;       // shadows.fade: fraction of the last cascade over which shadows fade out
     Setting* shadowsBias = nullptr;       // shadows.bias: constant depth bias (texels of a 45° slope)
     Setting* shadowsDebug = nullptr;      // shadows.debug: "off", "cascades"
     Setting* shadowsMapSize = nullptr;    // shadows.map_size: "auto" (4096 with enhanced shadows, else the game's), "game", "1024", "2048", "4096"
     Setting* shadowsRange = nullptr;      // shadows.range: metres, 0 = auto (100 with enhanced shadows, else the game's)
-    Setting* shadowsSplit = nullptr;      // shadows.split: 0 (logarithmic) .. 1 (uniform) cascade splits with an overridden range
     Setting* shadowsRt = nullptr;         // shadows.rt: "off", "near", "extended" (ray-traced sun shadows near the camera, enh/rt_shadows)
     Setting* shadowsRtQuality = nullptr;  // shadows.rt_quality: "low", "medium", "high"
-    Setting* shadowsRtSoftness = nullptr; // shadows.rt_softness: the sun cone's half angle in degrees
-    Setting* shadowsRtWind = nullptr;     // shadows.rt_wind: the animated SpeedTrees in the RT scene
     Setting* shadowsRtRange = nullptr;    // shadows.rt_range: metres, 0 = from the mode
     // ray-traced global illumination (enh/gi.h, docs/research/rtgi.md; needs RayQuery)
     Setting* giEnabled = nullptr;         // gi.enabled
     Setting* giQuality = nullptr;         // gi.quality: "low", "medium", "high" (probes traced per frame)
     Setting* giStrength = nullptr;        // gi.strength: 0 = the engine's ambient .. 1 = GI
     Setting* giLightmaps = nullptr;       // gi.lightmaps: "keep", "replace"
-    Setting* giCharacters = nullptr;      // gi.characters: skinned draws in the RT scene (enh/rt_scene)
     Setting* giScreen = nullptr;          // gi.screen: "off", "low", "medium", "high" (stage C screen probes, needs the G-buffer)
-    Setting* giBleed = nullptr;           // gi.bleed: 0..1 colour bleeding of the screen probes (chroma ratio)
     Setting* giFoliage = nullptr;         // gi.foliage: "off" / "near" / "far": leaf cards in the ray-traced scene (rtgi.md 22)
-    Setting* giFill = nullptr;            // gi.shadow_fill: 0..1 share of the engine's ambient kept as a floor in shade (rtgi.md 21)
-    Setting* giCutouts = nullptr;         // gi.cutouts (debug): "solid" / "tested": how the probe rays treat alpha-tested foliage (rtgi.md 21)
-    Setting* giDirectional = nullptr;     // gi.directional: 0..1 the screen probes' correction of the light's direction (rtgi.md 20)
     Setting* giDebug = nullptr;           // gi.debug: "off", "irradiance", "cascades", "vertex_ao"
     // G-buffer / motion vectors / GTAO (enh/gbuffer.h, docs/research/rtgi.md 10)
     Setting* aoEnabled = nullptr;         // ao.enabled: GTAO on the ambient light
-    Setting* giLights = nullptr;          // gi.lights: "nearby" (the drawn objects' lights) or "world" (engine/lights: every loaded light)
-    Setting* giEmissive = nullptr;        // gi.emissive: gain of self-illuminated surfaces as light sources
     Setting* giReference = nullptr;       // gi.reference (debug): the reference path tracer's view (docs/research/path-tracing.md)
     Setting* giReferenceSpp = nullptr;    // gi.reference_spp: samples per pixel and frame
     Setting* giReferenceMax = nullptr;    // gi.reference_max: samples until the accumulation stops and is dumped
     Setting* giReferenceBounces = nullptr;  // gi.reference_bounces: the most bounces of a path
-    Setting* giLightCount = nullptr;      // gi.light_count (debug): the most lights the GI considers per frame
     Setting* aoMode = nullptr;            // ao.mode: "replace" (the game's SSAO off), "add"
     Setting* aoStrength = nullptr;        // ao.strength: 0..1
-    Setting* aoRadius = nullptr;          // ao.radius: metres
     Setting* gbufferDebug = nullptr;      // gbuffer.debug: "off", "normals", "motion", "ao"
     // Full-owned lighting (enh/light_table, docs/research/gpu-scene.md 9.7)
     Setting* lightingClustered = nullptr; // lighting.clustered (restart, debug): the light table + cluster grid; the material variants take their point lights from it
-    Setting* lightingTrustTable = nullptr; // lighting.trust_table (debug): with the registry complete, table-lit draws do not read their own light lists
-    Setting* lightingTreeMerge = nullptr;     // lighting.tree_merge (debug): table-lit tree batches merge across light lists
     Setting* lightingFullLit = nullptr;   // lighting.full_lit (debug): lit draws take all point lights from the table (one 3-light permutation; gpu-scene.md 9.8)
     Setting* lightingEnabled = nullptr;   // lighting.enabled (debug): run-time switch of the table (A/B)
     Setting* lightingStyle = nullptr;     // lighting.style: "original" (the engine's distance law) | "physical"
     Setting* lightingDebug = nullptr;     // lighting.debug: "off" | "clusters" | "slots" | "shadows"
-    Setting* lightingCollect = nullptr;   // debug.light_collect: the radius the light table collects lights over (units)
     Setting* lightingShadows = nullptr;   // lighting.light_shadows: "off" | "nearby" | "many" (ray-traced point-light shadows on the table's lights)
     Setting* lightingShadowQuality = nullptr;  // lighting.light_shadow_quality: "low" | "medium" | "high"
-    Setting* lightingShadowBaked = nullptr;    // lighting.light_shadow_baked: how much the traced lamp shadows darken baked / probe light under them (0 = only the table lights)
-    Setting* lightingShadowRadius = nullptr;   // lighting.light_shadow_radius: the lamps' size in cm (the soft shadow's disc)
     // material pack (enh/material_pack, docs/research/material-pack.md)
     Setting* materialsPack = nullptr;        // materials.pack (restart): load the pack folder; its materials get PBR specular / reflections
     Setting* materialsQuality = nullptr;     // materials.quality: "off" | "low" | "medium" | "high"
     Setting* materialsRtReflections = nullptr; // materials.rt_reflections: "low" | "medium" | "high" (traced reflections at materials.quality = high)
     Setting* materialsRtRange = nullptr;     // materials.rt_range: metres a reflection ray travels
-    Setting* materialsRtStrength = nullptr;  // materials.rt_strength
     Setting* materialsGlass = nullptr;       // materials.glass: traced glass panes (windows reflect, bottles refract) with the traced reflections
     Setting* materialsRainWetness = nullptr; // materials.rain_wetness: how strongly rain wets the pack's surfaces (traced reflections on)
-    Setting* materialsPuddles = nullptr;     // materials.puddles: puddle coverage while it rains
     Setting* materialsRainForce = nullptr;   // materials.rain_force (debug): a forced rain share
-    Setting* materialsSpecular = nullptr;    // materials.specular: strength of the lights' specular
-    Setting* materialsEnvironment = nullptr; // materials.environment: strength of the sky reflection
-    Setting* materialsRoughness = nullptr;   // materials.default_roughness: for entries without a roughness map
     Setting* materialsBudget = nullptr;      // materials.budget (restart): MiB of decoded pack textures
     Setting* materialsDerive = nullptr;      // materials.derive_from_specular: roughness from the engine's Specular / SpecularPower roles for draws without a pack entry
-    Setting* materialsDeriveMin = nullptr;   // materials.derive_min / derive_max: the derived roughness is clamped to this range
-    Setting* materialsDeriveMax = nullptr;
-    Setting* materialsWetness = nullptr;     // materials.wetness: scales the entries' wetness (0 = dry world, 1 = as authored)
     Setting* materialsAlternate = nullptr;   // materials.alternate: test switch, the pack variants on / off every N frames (exact "no entry = unchanged" proof)
     Setting* materialsDebug = nullptr;       // materials.debug: "off" | "roughness" | "metalness" | "orm" | "coverage"
     // upscaling / anti-aliasing (enh/upscale.h, docs/research/upscaling.md)
     Setting* upscaleObjectMotion = nullptr;  // upscale.object_motion: motion vectors of characters and moving objects (enh/object_motion)
     Setting* upscaleProvider = nullptr;   // upscale.provider: "fsr3" (FSR 3.1, default) or "fsr4" (the ML upscaler of the FSR SDK 2.4)
     Setting* upscaleReactive = nullptr;   // upscale.reactive: FSR's automatic reactive mask (particles, rain, spells)
-    Setting* upscaleReactiveCutoff = nullptr;  // upscale.reactive_cutoff: advanced, the difference above which a pixel is reactive
-    Setting* upscaleReactiveScale = nullptr;   // upscale.reactive_scale: advanced, multiplies the mask
     Setting* upscaleSharpness = nullptr;  // upscale.sharpness: 0..1, FSR's RCAS sharpening pass
     Setting* upscaleExposure = nullptr;   // upscale.exposure: advanced, "engine" (the game's tone map exposure, default) or "auto" (FSR's own)
     Setting* upscaleJitterFlip = nullptr; // upscale.jitter_flip: debug, "none", "x", "y", "xy" (the geometry jitter's sign)
-    Setting* upscalePostFullSize = nullptr;  // upscale.post_full_size: debug, the post chain at the output size (default on)
     Setting* upscaleCutoutThicken = nullptr;  // upscale.cutout_thicken: advanced, cut-out strands kept about a render pixel wide (0 = off)
     Setting* upscaleAlphaDither = nullptr;   // upscale.alpha_dither: debug, hashed alpha test on the jittered draws (thin cut-outs)
     // frame generation (enh/framegen.h, docs/research/frame-generation.md)
@@ -447,27 +452,12 @@ struct RendererSettings {
     Setting* nativeSceneOps = nullptr;         // native.scene_ops: the rest of the main view's mesh-like work drawn by the renderer (N5.2)
     Setting* nativeSceneOpsCompare = nullptr;  // native.scene_ops_compare: ... composed and diffed against the engine's draws
     Setting* nativeSceneOpsGroups = nullptr;   // native.scene_ops_groups: which N5.2 groups (bit mask, hidden)
-    Setting* nativeMirror = nullptr;           // native.mirror: the composition's register file (0 ours, 1 per view, 2 per op; O1)
     Setting* nativeCoverage = nullptr;         // native.coverage: the per-draw coverage counter in plain Full runs (O1)
     Setting* nativeLean = nullptr;             // native.lean: the engine's slot code not run for the composed mesh-like ops (O2a)
     Setting* nativeLeanCheck = nullptr;        // native.lean_check: every N-th frame the engine's code runs as before (compare)
-    Setting* nativeLeanEffects = nullptr;      // native.lean_effects: O3 the effect units / sprite flushes / PSSM pass lean too (A/B)
-    Setting* nativeGpuScene = nullptr;         // native.gpu_scene: verify the signal-fed GPU scene tables (docs/research/gpu-scene.md)
     Setting* nativePacketCache = nullptr;     // native.packet_cache: retained draw packets of the main view's static meshes + trees (retained-signals.md 8)
-    Setting* nativeOpts = nullptr;             // native.cpu_opts: bit mask of the Full-mode CPU optimizations (docs/research/performance.md 22)
-    Setting* nativeLeanRestore = nullptr;      // native.lean_restore: false = no per-op device save / restore around lean ops (A/B)
-    Setting* nativeRetained = nullptr;         // native.retained: V3 retained composition of the sub-mesh draws (A/B)
-    Setting* nativeRetainedCheck = nullptr;    // native.retained_check: every replay recomposed fresh and compared
-    Setting* nativeRetainedGroups = nullptr;   // native.retained_groups: bit mask of the groups that retain (bit = StaticOps::Group)
-    Setting* skyCubeInterval = nullptr;   // debug.sky_cube_interval: ms between two refreshes of the sky cube while the water keeps it current (0 = every frame)
     Setting* shadowStride = nullptr;      // debug.shadow_stride: the sun cascades redrawn every n-th frame (engine::shadowmaps::setUpdateStride)
-    Setting* fsReadCache = nullptr;       // debug.fs_read_cache: read-ahead of packed file streams (engine::loadaccel)
-    Setting* fastAbsorb = nullptr;        // debug.fast_absorb: sliding-window cloud absorption image (engine::loadaccel)
-    Setting* soundCompressed = nullptr;   // debug.sound_compressed: short sounds as compressed samples (engine::loadaccel)
     Setting* streamStats = nullptr;       // debug.stream_stats: loading work statistics (engine::loadaccel)
-    Setting* xinputInterval = nullptr;    // debug.xinput_interval: re-poll interval of a disconnected gamepad (engine::xinput)
-    Setting* oceanSpd = nullptr;          // debug.ocean_spd: the FFT ocean's mip chains by compute (enh::Ocean::setSpd)
-    Setting* fastSort = nullptr;         // debug.fast_sort: typed sort of the render-op lists (engine::fastsort)
     Setting* prefetchStride = nullptr;    // debug.prefetch_stride: the cache-in walk every n-th frame (engine::lod::setPrefetchStride)
     Setting* lodView = nullptr;           // lod.view: the view range of objects (eCFrustumDatabase view range factor)
     Setting* highFps = nullptr;           // compat.high_fps: the high frame rate gameplay fixes (engine/high_fps.h)
@@ -491,6 +481,10 @@ const std::vector<Preset>& graphicsPresets();
 // reflections, the LOD ladder, the memory limit); matchRtPreset = index of the first whose values all match, -1 = custom
 const std::vector<Preset>& rtPresets();
 int matchRtPreset(const Registry& reg);
+// makes rt.preset say what the members say: the matching preset, else "custom" ("custom" is a state, not a choice: setting it changes nothing;
+// the hidden members rt.lod_scale / shadows.rt_range do not count). Called after settings.toml is loaded and after every member change;
+// true = rt.preset changed
+bool syncRtPreset(Registry& reg);
 // sets the preset's values (locked settings keep theirs)
 void applyPreset(Registry& reg, const Preset& preset);
 // index of the first preset whose values all match the current ones, -1 = custom

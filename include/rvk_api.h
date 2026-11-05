@@ -129,7 +129,9 @@ struct rvk_setting_info {
     double default_value;   /* bool 0/1, enum option index */
     double min;             /* int / float range */
     double max;
-};                          /* version 1: 80 bytes */
+    const char* needs;         /* version 2: prerequisites, one "key=value" / "key!=value" per line ("" = none): the setting acts only while they hold */
+    const char* needs_reason;  /* "" when they hold now, else why it is greyed ("Material reflections must be High"); valid until the next call */
+};                          /* version 1: 80 bytes, version 2: 96 bytes */
 
 /* Number of settings (indices 0 .. count-1 for rvk_setting_info; registration order, stable within a build). */
 uint32_t rvk_setting_count(void);
@@ -141,8 +143,16 @@ int32_t rvk_setting_info(uint32_t index, struct rvk_setting_info* out, uint32_t 
    needed). Returns the full length of the text (excluding the NUL; > value_size - 1 means truncated) or an error. */
 int32_t rvk_setting_get(const char* key, char* value, uint32_t value_size);
 
-/* Sets `key` from text. flags: none defined, must be 0. Returns RVK_SETTING_OK or an error. */
+/* Sets `key` from text. flags: none defined, must be 0. Returns RVK_SETTING_OK or an error. Prerequisites (rvk_setting_info::needs)
+   are NOT touched: use rvk_setting_set_with_needs for the "player switched it on" behaviour. */
 int32_t rvk_setting_set(const char* key, const char* value, uint32_t flags);
+
+/* Like a player's change in the overlay: sets `key`, and when that turns it on (a bool true, an enum option past "off") also switches its
+   unmet prerequisites on (chains followed; run-time ones at once, restart-only ones are set and show "restart needed"; turning a
+   prerequisite OFF never changes its dependents, they are greyed). `changes` (optional) receives one line per prerequisite switched,
+   nearest first: "<key>=<old>><new>" (+ " restart" when it needs a restart), then "blocked: <reason>" when one could not be satisfied
+   (locked, capability missing, the renderer mode). Returns RVK_SETTING_OK or the error of the change itself. */
+int32_t rvk_setting_set_with_needs(const char* key, const char* value, char* changes, uint32_t changes_size);
 
 /* rvk_ab() ops. Side A is the session's starting values, side B a stored second set (initially the defaults: the plain
    renderer). Flipping swaps them for every A/B setting; the overlay shows which side is active. */

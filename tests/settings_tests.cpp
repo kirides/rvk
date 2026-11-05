@@ -276,9 +276,8 @@ TEST(settings_renderer_registration) {
     CHECK(r.abKey != nullptr && r.abKey->asEnum() == "f10");
     CHECK(r.abBadge->asBool());
     CHECK(!r.fpsCounter->asBool());
-    // debug: the tint view is off by default and not part of A/B; draw records are on and hidden (cost measurements only)
+    // debug: the tint view is off by default and not part of A/B
     CHECK(r.tintDraws != nullptr && r.tintDraws->asEnum() == "off" && !r.tintDraws->abEligible());
-    CHECK(r.drawRecords != nullptr && r.drawRecords->asBool() && (r.drawRecords->spec().flags & Flag::Hidden) != 0);
     // ... and so is the RT scene's source switch (diagnostics)
     CHECK(r.rtSceneViews != nullptr && r.rtSceneViews->asEnum() == "all" && (r.rtSceneViews->spec().flags & Flag::Hidden) != 0);
     // ... and the water's RT reflection tweaks (cost measurements)
@@ -288,12 +287,13 @@ TEST(settings_renderer_registration) {
     CHECK(r.exclusiveAcquire != nullptr && r.exclusiveAcquire->asBool() && (r.exclusiveAcquire->spec().flags & Flag::Hidden) != 0);
     CHECK(r.fullscreen != nullptr && r.fullscreen->spec().defaultValue == 0 &&
           r.fullscreen->spec().requirements == rvk::caps::bit(rvk::caps::Cap::FullScreenExclusive));
-    // ... and the loading screens' pacing (the load-time A/B); the menu frame rate limit is a player setting (60 fps)
-    CHECK(r.paceLoading != nullptr && !r.paceLoading->asBool() && (r.paceLoading->spec().flags & Flag::Hidden) != 0);
+    // the menu frame rate limit is a player setting (60 fps)
     CHECK(r.menuFps != nullptr && r.menuFps->value() == 60 && (r.menuFps->spec().flags & Flag::Hidden) == 0);
     for (const Setting* s : reg.all()) {
-        CHECK(s == r.drawRecords || s == r.rtSceneViews || s == r.rtReflectionTweaks || s == r.exclusiveAcquire || s == r.showAdvanced ||
-              s == r.paceLoading || (s->spec().flags & Flag::Hidden) == 0);
+        // Hidden settings are the checkbox, the preset's invisible members, or developer switches (which carry Flag::Debug: a stray
+        // value in settings.toml does not apply for players)
+        const bool hidden = (s->spec().flags & Flag::Hidden) != 0;
+        CHECK(!hidden || s == r.showAdvanced || s == r.rtLodScale || s == r.shadowsRtRange || (s->spec().flags & Flag::Debug) != 0);
     }
     // the player defaults: enhanced water (high, RT reflections high) and enhanced shadows (low filter, 2048 maps)
     CHECK(r.waterEnabled->asBool() && r.waterQuality->asEnum() == "high" && r.waterOceanQuality->asEnum() == "high");
@@ -460,12 +460,126 @@ TEST(rt_presets_match_defaults_and_apply) {
     CHECK(settings::matchRtPreset(reg) == -1);
 }
 
-TEST(settings_renamed_key_loads_under_the_new_name) {
+// settings that were taken out (docs/research/settings-audit.md clean-up): an old settings.toml loads, one line per key, the rest applies
+TEST(settings_cleanup_removed_keys_still_load) {
     using namespace rvk::settings;
     Registry reg;
-    Setting& s = reg.add({.key = "lighting.trust_table", .label = "t", .category = "Lighting", .type = Type::Bool, .defaultValue = 0});
+    registerRendererSettings(reg);
     std::vector<std::string> warnings;
-    CHECK(reg.fromToml("[lighting]\ntable_complete = true\n", &warnings));
-    CHECK(s.asBool());
-    CHECK(warnings.size() == 1);
+    CHECK(reg.fromToml("[lighting]\ntable_complete = true\ntrust_table = true\n[shadows]\nsoftness = 2.0\nfilter = \"high\"\n"
+                       "[materials]\npuddles = 0.3\n[native]\nretained = true\n[debug]\nfast_sort = 0\n", &warnings));
+    CHECK(warnings.size() == 6);
+    for (const auto& w : warnings) CHECK_MSG(w.find("was removed") != std::string::npos, w);
+    CHECK(reg.find("shadows.filter")->asEnum() == "high");
+    CHECK(reg.find("shadows.softness") == nullptr && reg.find("lighting.trust_table") == nullptr);
+    CHECK(reg.toToml().find("softness") == std::string::npos);
+}
+
+TEST(rt_preset_follows_the_members_after_a_load) {
+    using namespace rvk::settings;
+    Registry reg;
+    registerRendererSettings(reg);
+    std::vector<std::string> warnings;
+    // run.ps1's baseline: preset medium + reflections medium is not Medium (the preset's reflections are high)
+    CHECK(reg.fromToml("[rt]\npreset = \"medium\"\nreflections = \"medium\"\n", &warnings));
+    CHECK(reg.find("rt.preset")->asEnum() == "medium");  // as loaded (RT unavailable here: effective follows the default anyway)
+    CHECK(matchRtPreset(reg) == -1);
+    CHECK(syncRtPreset(reg));
+    CHECK(reg.text(*reg.find("rt.preset")) == "custom");
+    CHECK(reg.setText("rt.reflections", "high") == Result::Ok);  // back to the members of Medium
+    CHECK(syncRtPreset(reg) && reg.text(*reg.find("rt.preset")) == "medium");
+    CHECK(!syncRtPreset(reg));
+    // the hidden members do not make a preset custom
+    CHECK(reg.setText("rt.lod_scale", "0.5") == Result::Ok);
+    CHECK(matchRtPreset(reg) == 1);
+    // no graphics preset touches an RT member
+    for (const Preset& p : graphicsPresets()) {
+        for (const auto& kv : p.values) {
+            for (const auto& rp : rtPresets()) {
+                for (const auto& rv : rp.values) CHECK_MSG(rv.first != kv.first, p.name + " writes " + kv.first);
+            }
+        }
+    }
+}
+
+TEST(settings_needs_resolution) {
+    using namespace rvk::settings;
+    Registry reg;
+    const auto boolean = [&](const char* key, std::vector<Need> needs, std::uint32_t flags = 0) -> Setting& {
+        return reg.add({.key = key, .label = key, .category = "t", .type = Type::Bool, .defaultValue = 0, .flags = flags, .needs = std::move(needs)});
+    };
+    boolean("a.root", {});
+    Setting& mid = reg.add({.key = "a.mid", .label = "Mid", .category = "t", .type = Type::Enum, .defaultValue = 0,
+                            .options = {"off", "low", "high"}, .optionLabels = {"Off", "Low", "High"}, .needs = {{"a.root", "true"}}});
+    boolean("a.leaf", {{"a.mid", "high"}});
+    boolean("a.neg", {{"a.mid", "off", true}});
+    boolean("a.cycle1", {{"a.cycle2", "true"}});
+    boolean("a.cycle2", {{"a.cycle1", "true"}});
+    boolean("a.restart", {}, Flag::Restart);
+    boolean("a.needs_restart", {{"a.restart", "true"}});
+    boolean("a.manual", {{"a.root", "true", false, false}});
+    boolean("a.cap", {}, 0);
+    reg.add({.key = "a.capdep", .label = "c", .category = "t", .type = Type::Bool, .requirements = caps::bit(caps::Cap::RayQuery), .unmetValue = 0});
+    boolean("a.needs_cap", {{"a.capdep", "true"}});
+
+    // a chain: the leaf switches mid to High and root on; the toast list names both, nearest first
+    CHECK(reg.needsReason(*reg.find("a.leaf")).find("Mid must be High") != std::string::npos);
+    auto r = reg.setWithNeeds("a.leaf", "true");
+    CHECK(r.result == Result::Ok && r.blocked.empty() && r.changes.size() == 2);
+    CHECK(r.changes[0].key == "a.root" && r.changes[1].key == "a.mid" && r.changes[1].to == "high");
+    CHECK(reg.needsReason(*reg.find("a.leaf")).empty());
+    // turning a prerequisite off changes nothing else: the dependents are greyed with the reason
+    CHECK(reg.setText("a.root", "false") == Result::Ok);
+    CHECK(reg.find("a.leaf")->asBool() && reg.find("a.mid")->value() == 2);
+    CHECK(reg.needsReason(*reg.find("a.leaf")).find("a.root must be on") != std::string::npos);
+    // turning a dependent off or setting an unrelated one touches nothing
+    r = reg.setWithNeeds("a.leaf", "false");
+    CHECK(r.changes.empty() && !reg.find("a.root")->asBool());
+    // a negated need: "a.mid != off"
+    CHECK(reg.setText("a.mid", "off") == Result::Ok);
+    CHECK(!reg.needsReason(*reg.find("a.neg")).empty());
+    r = reg.setWithNeeds("a.neg", "true");
+    CHECK(r.changes.size() == 2 && reg.find("a.mid")->value() == 1 && reg.find("a.root")->asBool());
+    // a cycle terminates and still switches both on
+    r = reg.setWithNeeds("a.cycle1", "true");
+    CHECK(r.result == Result::Ok && reg.find("a.cycle2")->asBool());
+    // a restart-only prerequisite is set and flagged
+    r = reg.setWithNeeds("a.needs_restart", "true");
+    CHECK(r.changes.size() == 1 && r.changes[0].restart && reg.find("a.restart")->asBool() && reg.find("a.restart")->restartPending());
+    // a prerequisite that is not auto-applied (a mode) is reported, not switched
+    CHECK(reg.setText("a.root", "false") == Result::Ok);
+    r = reg.setWithNeeds("a.manual", "true");
+    CHECK(r.changes.empty() && !r.blocked.empty() && !reg.find("a.root")->asBool());
+    // an unavailable prerequisite (no ray query here) is reported and stays off
+    r = reg.setWithNeeds("a.needs_cap", "true");
+    CHECK(r.changes.empty() && !r.blocked.empty() && !reg.find("a.capdep")->asBool());
+    // a locked prerequisite is not touched
+    reg.lock(*reg.find("a.root"), 0, "test");
+    r = reg.setWithNeeds("a.mid", "high");
+    CHECK(r.changes.empty() && !r.blocked.empty());
+    // bad input
+    CHECK(reg.setWithNeeds("a.nope", "1").result == Result::UnknownKey);
+    CHECK(reg.setWithNeeds("a.mid", "sometimes").result == Result::BadValue);
+    CHECK(reg.dependentsOf("a.mid").size() == 2);
+    CHECK(Registry::needsText(mid.spec()) == "a.root=true\n");
+}
+
+TEST(settings_needs_of_the_renderer_settings) {
+    using namespace rvk::settings;
+    Registry reg;
+    registerRendererSettings(reg);
+    // every key a need names exists, its value parses, and there is no cycle through the registrations
+    for (const Setting* s : reg.all()) {
+        for (const Need& n : s->spec().needs) {
+            const Setting* p = reg.find(n.key);
+            double v = 0.0;
+            CHECK_MSG(p != nullptr && Registry::parseText(p->spec(), n.value, v), s->key() + " needs " + n.key + "=" + n.value);
+            CHECK(n.key != s->key());
+        }
+    }
+    // the materials family acts only at "High": switching glass on switches the quality to High
+    CHECK(reg.setText("materials.quality", "medium") == Result::Ok);
+    const auto r = reg.setWithNeeds("materials.glass", "true");
+    CHECK(r.result == Result::Ok);
+    CHECK(!reg.needsReason(*reg.find("materials.glass")).empty() || reg.find("materials.quality")->asEnum() == "high");
 }

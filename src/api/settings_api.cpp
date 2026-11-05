@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 #include <deque>
+#include <format>
 #include <map>
 #include <mutex>
 #include <string>
@@ -26,6 +27,18 @@ const char* optionsText(const settings::Setting& s) {
     return it->second.c_str();
 }
 
+// rvk_setting_info::needs: built once per setting; ::needs_reason: the last text of each setting, replaced on the next call for it
+const char* needsStrings(const settings::Setting& s, bool reason, const std::string& now = {}) {
+    static std::mutex mutex;
+    static std::map<const settings::Setting*, std::string> needs;
+    static std::map<const settings::Setting*, std::string> reasons;
+    const std::lock_guard lock(mutex);
+    if (reason) return (reasons[&s] = now).c_str();
+    auto it = needs.find(&s);
+    if (it == needs.end()) it = needs.emplace(&s, settings::Registry::needsText(s.spec())).first;
+    return it->second.c_str();
+}
+
 std::int32_t toResult(settings::Result r) { return static_cast<std::int32_t>(r); }
 
 }  // namespace
@@ -33,7 +46,7 @@ std::int32_t toResult(settings::Result r) { return static_cast<std::int32_t>(r);
 std::uint32_t settingCount(settings::Registry& reg) { return static_cast<std::uint32_t>(reg.size()); }
 
 std::int32_t settingInfo(settings::Registry& reg, std::uint32_t index, struct rvk_setting_info* out, std::uint32_t size) {
-    static_assert(sizeof(struct rvk_setting_info) == 80, "rvk_setting_info v1 is 80 bytes; only append fields");
+    static_assert(sizeof(struct rvk_setting_info) == 96, "rvk_setting_info v2 is 96 bytes; only append fields");
     const auto all = reg.all();
     if (out == nullptr || size < 8 || index >= all.size()) return RVK_SETTING_BAD_ARGUMENT;
     const settings::Setting& s = *all[index];
@@ -53,6 +66,8 @@ std::int32_t settingInfo(settings::Registry& reg, std::uint32_t index, struct rv
     i.default_value = sp.defaultValue;
     i.min = sp.min;
     i.max = sp.max;
+    i.needs = needsStrings(s, false);
+    i.needs_reason = needsStrings(s, true, reg.needsReason(s));
     const std::uint32_t n = std::min<std::uint32_t>(size, sizeof(i));
     i.size = n;
     std::memcpy(out, &i, n);
@@ -81,6 +96,25 @@ std::int32_t settingSet(settings::Registry& reg, const char* key, const char* va
         spdlog::warn("rvk_setting_set({}, {}): {}", key, value, settings::toString(r));
     }
     return toResult(r);
+}
+
+std::int32_t settingSetWithNeeds(settings::Registry& reg, const char* key, const char* value, char* changes, std::uint32_t changesSize) {
+    if (key == nullptr || value == nullptr) return RVK_SETTING_BAD_ARGUMENT;
+    const auto r = reg.setWithNeeds(key, value);
+    std::string text;
+    for (const auto& c : r.changes) text += std::format("{}={}>{}{}\n", c.key, c.from, c.to, c.restart ? " restart" : "");
+    if (!r.blocked.empty()) text += "blocked: " + r.blocked + "\n";
+    if (changes != nullptr && changesSize > 0) {
+        const std::size_t n = std::min<std::size_t>(text.size(), changesSize - 1);
+        std::memcpy(changes, text.data(), n);
+        changes[n] = '\0';
+    }
+    if (r.result == settings::Result::Ok) {
+        spdlog::info("rvk_setting_set_with_needs({}, {}): {} prerequisite(s) switched{}", key, value, r.changes.size(), r.blocked.empty() ? "" : ", " + r.blocked);
+    } else {
+        spdlog::warn("rvk_setting_set_with_needs({}, {}): {}", key, value, settings::toString(r.result));
+    }
+    return toResult(r.result);
 }
 
 std::int32_t ab(settings::Registry& reg, std::int32_t op) {

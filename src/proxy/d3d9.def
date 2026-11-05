@@ -20,5 +20,6 @@ EXPORTS
     rvk_setting_info
     rvk_setting_get
     rvk_setting_set
+    rvk_setting_set_with_needs
     rvk_ab
     rvk_overlay

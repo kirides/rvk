@@ -14,6 +14,7 @@ std::uint32_t settingCount(settings::Registry& reg);
 std::int32_t settingInfo(settings::Registry& reg, std::uint32_t index, struct rvk_setting_info* out, std::uint32_t size);
 std::int32_t settingGet(settings::Registry& reg, const char* key, char* value, std::uint32_t valueSize);
 std::int32_t settingSet(settings::Registry& reg, const char* key, const char* value, std::uint32_t flags);
+std::int32_t settingSetWithNeeds(settings::Registry& reg, const char* key, const char* value, char* changes, std::uint32_t changesSize);
 std::int32_t ab(settings::Registry& reg, std::int32_t op);
 
 }  // namespace rvk::api
