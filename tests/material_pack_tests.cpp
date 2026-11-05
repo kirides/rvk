@@ -2,7 +2,9 @@
 
 #include <cmath>
 
+#include "engine/weather.h"
 #include "enh/material_pack.h"
+#include "enh/rain_wetness.h"
 #include "test.h"
 
 using namespace rvk::enh::matpack;
@@ -138,4 +140,30 @@ TEST(matpack_word_glass_wet) {
     m.emissive = 1.0f;
     const Decoded e = decodeWord(encodeWord(16383, true, m, 0.7f));
     CHECK(e.slot == 16383 && e.orm && e.emissive && e.glass && e.roughnessScale == 1.875f && e.roughnessBias == 1.0f && e.metalness == 1.0f && e.wetness == 1.0f);
+}
+
+TEST(rain_of_weather_share_of_rain_states) {
+    CHECK(rvk::engine::rainOfWeather({}) == 0.0f);
+    CHECK(rvk::engine::rainOfWeather({{"Sunny_Full", 1.0f}}) == 0.0f);
+    CHECK(rvk::engine::rainOfWeather({{"Stormy_Rain", 1.0f}}) == 1.0f);
+    const float half = rvk::engine::rainOfWeather({{"Sunny_Half_02", 0.5f}, {"Stormy_Rain", 0.5f}});
+    CHECK(std::fabs(half - 0.5f) < 1e-5f);
+    // a dungeon state is dry and carries weight: the rain does not reach the player inside
+    const float inside = rvk::engine::rainOfWeather({{"Dungeon_Cave", 0.75f}, {"Stormy_Rain", 0.25f}});
+    CHECK(std::fabs(inside - 0.25f) < 1e-5f);
+}
+
+TEST(rain_wetness_rises_fast_and_dries_slowly) {
+    float wet = 0.0f;
+    for (int i = 0; i < 60; ++i) wet = rvk::enh::rain::wetnessStep(wet, 1.0f, 1.0f);  // a minute of rain
+    CHECK(wet > 0.85f && wet <= 1.0f);
+    const float wetNow = wet;
+    for (int i = 0; i < 60; ++i) wet = rvk::enh::rain::wetnessStep(wet, 0.0f, 1.0f);  // a minute of sun: still mostly wet
+    CHECK(wet < wetNow && wet > wetNow - 0.3f);
+    for (int i = 0; i < 300; ++i) wet = rvk::enh::rain::wetnessStep(wet, 0.0f, 1.0f);
+    CHECK(wet == 0.0f);
+    // light rain (0.3) holds the level at its share, never above it
+    wet = 0.0f;
+    for (int i = 0; i < 400; ++i) wet = rvk::enh::rain::wetnessStep(wet, 0.3f, 1.0f);
+    CHECK(std::fabs(wet - 0.3f) < 0.01f);
 }

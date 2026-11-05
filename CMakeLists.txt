@@ -152,6 +152,7 @@ add_library(rvk_core STATIC
     src/enh/framegen.cpp
     src/enh/framegen.h
     src/enh/gbuffer.cpp
+    src/enh/material_rt.cpp
     src/enh/gbuffer.h
     src/enh/object_motion.cpp
     src/enh/object_motion.h

@@ -250,6 +250,7 @@ HalDevice::~HalDevice() {
     objectMotion_.reset();  // unregisters its observer
     framegen_.reset();   // removes its passes, retires the generator
     upscale_.reset();    // clears the device's jitter source
+    materialRt_.reset(); // removes its pass, releases the RT scene
     gbuffer_.reset();    // removes its passes, the G-buffer attachments
     if (matPack_) {
         enh::matpack::setReloadHook({});
@@ -560,8 +561,13 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
             return d3d9::Device::PackHit{h.word, h.texture};
         });
         dev_.setPackStamp([this]() -> std::uint32_t { return matPack_->generation(); });
-        for (settings::Setting* s : {rs.materialsQuality, rs.materialsSpecular, rs.materialsEnvironment, rs.materialsDebug, rs.materialsAlternate, rs.materialsWetness}) {
-            if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyMaterials(); }, this);
+        materialRt_ = std::make_unique<enh::MaterialRt>(dev_, rtScene_.get());
+        for (settings::Setting* s : {rs.materialsQuality, rs.materialsSpecular, rs.materialsEnvironment, rs.materialsDebug, rs.materialsAlternate, rs.materialsWetness,
+                                     rs.materialsRtReflections, rs.materialsRtRange, rs.materialsRtStrength, rs.materialsRainWetness, rs.materialsPuddles, rs.materialsRainForce}) {
+            if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) {
+                applyMaterials();
+                applyGbuffer();  // the traced reflections read the G-buffer
+            }, this);
         }
         applyMaterials();
         rtScene_->setMaterialPack(matPack_.get());
@@ -794,7 +800,21 @@ void HalDevice::applyMaterials() {
         dev_.setPackBypass(false);
     }
     dev_.setFrameParam(shader::abi::kFrameParamMaterials + 1, {rs.materialsWetness != nullptr ? rs.materialsWetness->asFloat() : 1.0f, 0.0f, 0.0f, 0.0f});
-    dev_.setFrameParam(shader::abi::kFrameParamMaterials, {quality, rs.materialsSpecular->asFloat(), rs.materialsEnvironment->asFloat(), debug});
+    // materials.quality = high: the traced reflections (enh/material_rt) carry the sky too: the raster's sky cube term is off while they run
+    if (materialRt_) {
+        enh::MaterialRt::Settings m;
+        const std::string_view tier = rs.materialsRtReflections != nullptr ? rs.materialsRtReflections->asEnum() : std::string_view("medium");
+        m.tier = quality >= 3.0f ? (tier == "low" ? 1 : tier == "high" ? 3 : 2) : 0;
+        m.environment = rs.materialsEnvironment->asFloat();
+        if (rs.materialsRtRange != nullptr) m.rangeMetres = rs.materialsRtRange->asFloat();
+        if (rs.materialsRtStrength != nullptr) m.strength = rs.materialsRtStrength->asFloat();
+        if (rs.materialsRainWetness != nullptr) m.rain = rs.materialsRainWetness->asFloat();
+        if (rs.materialsPuddles != nullptr) m.puddles = rs.materialsPuddles->asFloat();
+        if (rs.materialsRainForce != nullptr) m.forceRain = rs.materialsRainForce->asFloat();
+        materialRt_->apply(m);
+    }
+    const float environment = materialRt_ && materialRt_->active() ? 0.0f : rs.materialsEnvironment->asFloat();
+    dev_.setFrameParam(shader::abi::kFrameParamMaterials, {quality, rs.materialsSpecular->asFloat(), environment, debug});
     spdlog::info("enh: materials: quality {}, specular {:.2f}, environment {:.2f}, debug {}", rs.materialsQuality->asEnum(), rs.materialsSpecular->asFloat(),
                  rs.materialsEnvironment->asFloat(), rs.materialsDebug->asEnum());
 }
@@ -840,6 +860,8 @@ void HalDevice::applyGbuffer() {
     s.forced = s.forced || (upscale_ && enh::usesFsr(upscale_->mode()));
     // frame generation (enh/framegen) reads them too
     s.forced = s.forced || (framegen_ && framegen_->wantsGbuffer());
+    // the traced material reflections read the normal and the pack's roughness / metalness
+    s.forced = s.forced || (materialRt_ && materialRt_->tier() > 0);
     gbuffer_->apply(s);
 }
 

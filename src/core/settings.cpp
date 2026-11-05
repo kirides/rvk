@@ -1922,11 +1922,48 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .key = "materials.quality",
         .label = "Material pack quality",
         .category = "Materials",
-        .description = "Low: sun specular and sky reflection. Medium: + the nearby lights' specular. High: reserved for traced reflections.",
+        .description = "Low: sun specular and sky reflection. Medium: + the nearby lights' specular. High: + reflections traced through the world "
+                       "(smooth surfaces mirror the buildings, trees and ships around them, not only the sky; needs a graphics card with ray tracing).",
         .type = Type::Enum,
         .defaultValue = 2,
         .options = {"off", "low", "medium", "high"},
         .optionLabels = {"Off", "Low", "Medium", "High"},
+        .optionRequirements = {0, 0, 0, caps::bit(caps::Cap::RayQuery)},
+    });
+    r.materialsRtReflections = &reg.add({
+        .key = "materials.rt_reflections",
+        .label = "Traced reflections detail",
+        .category = "Materials",
+        .description = "Detail of the traced reflections of the material pack's smooth surfaces (Material pack quality: High). Low traces one ray per four "
+                       "pixels and shows foliage solid, High traces every pixel with alpha-tested leaves and shadows in the reflection.",
+        .type = Type::Enum,
+        .defaultValue = 2,
+        .options = {"low", "medium", "high"},
+        .optionLabels = {"Low", "Medium", "High"},
+    });
+    r.materialsRtRange = &reg.add({
+        .key = "materials.rt_range",
+        .label = "Traced reflection range",
+        .category = "Materials",
+        .description = "How far a reflection ray travels (metres); beyond it the sky is reflected.",
+        .type = Type::Float,
+        .defaultValue = 150,
+        .min = 10,
+        .max = 600,
+        .format = "%.0f m",
+        .flags = Flag::Advanced,
+    });
+    r.materialsRtStrength = &reg.add({
+        .key = "materials.rt_strength",
+        .label = "Traced reflection strength",
+        .category = "Materials",
+        .description = "Strength of the traced reflections on materials with pack data.",
+        .type = Type::Float,
+        .defaultValue = 1,
+        .min = 0,
+        .max = 2,
+        .format = "%.2f",
+        .flags = Flag::Advanced,
     });
     r.materialsSpecular = &reg.add({
         .key = "materials.specular",
@@ -1987,6 +2024,44 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 1,
         .format = "%.2f",
         .flags = Flag::Advanced,
+    });
+    r.materialsRainWetness = &reg.add({
+        .key = "materials.rain_wetness",
+        .label = "Rain wetness",
+        .category = "Materials",
+        .description = "How much rain wets the world while the traced reflections run (Material pack quality: High): surfaces in the open get smoother, "
+                       "darker and shinier, and dry again slowly after the rain. 0 = the rain leaves no trace.",
+        .type = Type::Float,
+        .defaultValue = 1,
+        .min = 0,
+        .max = 1,
+        .format = "%.2f",
+    });
+    r.materialsPuddles = &reg.add({
+        .key = "materials.puddles",
+        .label = "Rain puddles",
+        .category = "Materials",
+        .description = "Puddles on flat ground while it rains and after: dark water that mirrors the sky and the buildings, with rings where drops "
+                       "fall (needs the traced reflections: Material pack quality High). 0 = no puddles.",
+        .type = Type::Float,
+        .defaultValue = 0.7,
+        .min = 0,
+        .max = 1,
+        .format = "%.2f",
+    });
+    r.materialsRainForce = &reg.add({
+        .key = "materials.rain_force",
+        .label = "Force rain",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Test switch: treats the weather as this much rain (0 = the game's weather, 1 = pouring) so the wet look and the puddles can be "
+                       "checked in sunshine.",
+        .type = Type::Float,
+        .defaultValue = 0,
+        .min = 0,
+        .max = 1,
+        .format = "%.2f",
+        .flags = Flag::NoAB | Flag::Debug,
     });
     r.materialsAlternate = &reg.add({
         .key = "materials.alternate",

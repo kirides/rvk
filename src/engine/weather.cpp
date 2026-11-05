@@ -180,4 +180,17 @@ std::optional<float> seaLevelOfWeather(const std::vector<WeatherState>& states) 
     return sum / weight;
 }
 
+float rainOfWeather(const std::vector<WeatherState>& states) {
+    float rain = 0.0f, weight = 0.0f;
+    for (const WeatherState& st : states) {
+        if (!(st.weight > 1e-3f)) continue;
+        std::string l = st.name;
+        std::transform(l.begin(), l.end(), l.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        weight += st.weight;
+        if (contains(l, "dungeon") || contains(l, "cave") || contains(l, "indoor")) continue;
+        if (contains(l, "rain") || contains(l, "storm") || contains(l, "thunder") || contains(l, "drizzle") || contains(l, "shower")) rain += st.weight;
+    }
+    return weight > 1e-3f ? std::clamp(rain / weight, 0.0f, 1.0f) : 0.0f;
+}
+
 }  // namespace rvk::engine
