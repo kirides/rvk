@@ -18,38 +18,6 @@ struct MaterialRtPush {
 };
 RVK_PUSH(MaterialRtPush, pc);
 
-bool mrtProject(RvkFrame f, float3 p, out float2 uv, out float viewZ) {
-    float4 c = mul(float4(p, 1.0), f.viewProj);
-    viewZ = c.w;
-    uv = float2(c.x / c.w * 0.5 + 0.5, 0.5 - c.y / c.w * 0.5);
-    return c.w > 1.0;
-}
-
-float3 mrtShadeHit(MaterialRtParams p, RvkFrame f, RvkRtHit h, float3 dir, float width0, float spread) {
-    if ((p.trace.z & 8u) != 0u) return float3(0.15, 0.15, 0.15);
-    RvkRtHitSurface s = rvkRtHitSurface(f, h, dir, width0, spread);
-    float3 albedo = s.albedo.rgb;
-    if ((s.uvSet & RVK_RT_UV_NO_TEXTURE) != 0u) albedo = (s.uvSet & RVK_RT_UV_HEURISTIC) != 0u ? float3(0.2, 0.2, 0.2) : min(albedo, float3(0.5, 0.5, 0.5));
-    float3 N = normalize(s.normal), G = s.geometricNormal;
-    float4 n1 = float4(N, 1.0);
-    float4 n2 = N.yzzx * N.xyzz;
-    float3 sh = float3(dot(p.sh[0], n1) + dot(p.sh[3], n2), dot(p.sh[1], n1) + dot(p.sh[4], n2), dot(p.sh[2], n1) + dot(p.sh[5], n2)) +
-                p.sh[6].rgb * (N.x * N.x - N.y * N.y);
-    float3 L = p.sunDir.xyz;
-    float nl = clamp(dot(L, N), 0.0, 1.0) * clamp(dot(L, G) * 4.0, 0.0, 1.0);
-    float shadow = 1.0;
-    if (nl > 0.0 && p.trace.y != 0u && dot(p.sunColor.rgb, float3(1.0, 1.0, 1.0)) > 1e-3) {
-        shadow = rvkRtVisibility(f, s.position + G * 4.0, L, 2.0, p.reach.z, 0.0, 0.004, p.trace.y == 1u ? RVK_RT_TRACE_OPAQUE : 0u);
-    }
-    // the hemisphere's sky ambient where the hit sees the sky (a ray straight up), the engine's indoor colour under a roof
-    float skyVis = p.trace.y != 0u ? rvkRtVisibility(f, s.position + G * 4.0, float3(0.0, 1.0, 0.0), 2.0, 6000.0, 0.0, 0.004, RVK_RT_TRACE_OPAQUE) : 1.0;
-    float3 l = max(lerp(p.indoor.rgb, sh, skyVis), float3(0.0, 0.0, 0.0)) + p.sunColor.rgb * (nl * shadow);
-    float3 c = albedo * mrtDpow3(l, 0.45);
-    if (s.emissive > 0.0) c += albedo * s.emissive;
-    float fog = clamp(min(length(s.position - f.cameraPos.xyz) * p.fogParams.y + p.fogParams.x, p.fogParams.z), 0.0, 1.0);
-    return lerp(c, p.fogColor.rgb, fog);
-}
-
 [numthreads(8, 8, 1)]
 void CSMain(uint3 gid : SV_DispatchThreadID) {
     MaterialRtParams p = rvkPtr<MaterialRtParams, 16>(pc.params).Get();

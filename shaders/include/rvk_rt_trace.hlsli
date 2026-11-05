@@ -16,10 +16,12 @@
 static const uint RVK_RT_TRACE_OPAQUE = 1u;       // alpha-tested instances count as solid (cheap tier: no candidate loop work)
 static const uint RVK_RT_TRACE_NO_CUTOUTS = 2u;   // alpha-tested instances are left out (cull mask)
 static const uint RVK_RT_TRACE_NO_DYNAMIC = 4u;   // characters are left out (cull mask)
+static const uint RVK_RT_TRACE_GLASS = 8u;        // only the glass panes (the glass pass's primary / exit rays); every other ray ignores them
 
 // the cull mask of RVK_RT_TRACE_* flags
 uint rvkRtTraceMask(uint flags) {
-    uint mask = 0xFFu;
+    if ((flags & RVK_RT_TRACE_GLASS) != 0u) return RVK_RT_MASK_GLASS;
+    uint mask = 0xFFu & ~RVK_RT_MASK_GLASS;
     if ((flags & RVK_RT_TRACE_NO_CUTOUTS) != 0u) mask &= ~RVK_RT_MASK_ALPHA_TESTED;
     if ((flags & RVK_RT_TRACE_NO_DYNAMIC) != 0u) mask &= ~RVK_RT_MASK_DYNAMIC;
     return mask;

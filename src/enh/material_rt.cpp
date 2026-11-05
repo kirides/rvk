@@ -57,11 +57,12 @@ MaterialRt::MaterialRt(d3d9::Device& device, RtScene* scene) : dev_(device), sce
     };
     traceBuild_ = build("materials/material_rt.comp", "materials.rt trace");
     filterBuild_ = build("materials/material_rt_filter.comp", "materials.rt filter");
+    glassBuild_ = build("materials/material_glass.comp", "materials.glass");
 }
 
 MaterialRt::~MaterialRt() {
     disable();
-    for (std::future<std::unique_ptr<rhi::Pipeline>>* f : {&traceBuild_, &filterBuild_}) {
+    for (std::future<std::unique_ptr<rhi::Pipeline>>* f : {&traceBuild_, &filterBuild_, &glassBuild_}) {
         if (f->valid()) f->get();
     }
 }
@@ -76,6 +77,7 @@ void MaterialRt::apply(const Settings& s) {
     if (want > 0 && !on_) enable();
     if (want == 0 && on_) disable();
     tier_ = want;
+    if (scene_ != nullptr) scene_->setGlass(this, on_ && s_.glass);  // (the glass panes enter the TLAS under their own mask only while a glass pass runs)
     if (on_) {
         spdlog::info("enh: materials.rt: tier {} (1 ray per {}x{} pixels), range {:.0f} m, strength {:.2f}, rougher than {:.2f} keep the raster", tier_,
                      kTiers[tier_ - 1].scale, kTiers[tier_ - 1].scale, s_.rangeMetres, s_.strength, s_.roughnessLimit);
@@ -87,7 +89,10 @@ void MaterialRt::enable() {
     historyValid_ = false;
     scene_->acquire(this);
     dev_.addDrawObserver(this);
-    dev_.addPass(d3d9::inject::Point::AfterOpaque, "materials.rt", [this](d3d9::PassContext& ctx) { record(ctx); }, this, 30);
+    dev_.addPass(d3d9::inject::Point::AfterOpaque, "materials.rt trace", [this](d3d9::PassContext& ctx) { record(ctx); }, this, 30);
+    dev_.addPass(d3d9::inject::Point::AfterOpaque, "materials.rt filter", [this](d3d9::PassContext& ctx) { recordFilter(ctx); }, this, 31);
+    dev_.addPass(d3d9::inject::Point::AfterOpaque, "materials.rt composite", [this](d3d9::PassContext& ctx) { recordComposite(ctx); }, this, 32);
+    dev_.addPass(d3d9::inject::Point::AfterMainView, "materials.glass", [this](d3d9::PassContext& ctx) { recordGlass(ctx); }, this, 20);
 }
 
 void MaterialRt::disable() {
@@ -96,7 +101,9 @@ void MaterialRt::disable() {
     tier_ = 0;
     dev_.removePasses(this);
     dev_.removeDrawObserver(this);
+    scene_->setGlass(this, false);
     scene_->release(this);
+    dev_.releaseTransient("matrt.glass");
     for (const char* k : {"matrt.raw", "matrt.hist0", "matrt.hist1"}) dev_.releaseTransient(k);
     historyValid_ = false;
 }
@@ -171,6 +178,10 @@ bool MaterialRt::pipelinesReady(VkFormat target) {
             failed_ = true;
             return false;
         }
+    }
+    if (!glassPipe_ && glassBuild_.valid() && glassBuild_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        glassPipe_ = glassBuild_.get();
+        if (!glassPipe_) spdlog::error("enh: materials.glass: the compute pipeline failed: glass keeps the engine's blend this session");
     }
     return trace_ && filter_ && composite_;
 }
@@ -272,22 +283,124 @@ void MaterialRt::record(d3d9::PassContext& ctx) {
     cl.setPushConstants(&push, sizeof(push));
     cl.dispatch((tw + 7) / 8, (th + 7) / 8, 1);
 
-    // the gather + temporal filter into this frame's history
-    cl.transition(*rawT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    if (historyValid_) cl.transition(*histRead, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    cl.transition(*histWrite, VK_IMAGE_LAYOUT_GENERAL);
-    cl.bindPipeline(*filter_);
-    rhi::Texture* const storage2[] = {histWrite};
-    cl.setStorageTextures(storage2);
-    cl.setPushConstants(&push, sizeof(push));
-    cl.dispatch((w + 7) / 8, (h + 7) / 8, 1);
-    cl.transition(*histWrite, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    stage_ = {dev_.frameValue(), scene, rawT, histRead, histWrite, push, w, h, tw, th, cur, hist[cur]->heapSampled(), false};
+}
 
-    // onto the scene
+// the gather + temporal filter into this frame's history
+void MaterialRt::recordFilter(d3d9::PassContext& ctx) {
+    if (ctx.mainView != 1 || stage_.frame != dev_.frameValue()) return;
+    RhiScope rs(dev_, ctx.cmd);
+    if (!rs) return;
+    rhi::CommandList& cl = rs.cl();
+    cl.transition(*stage_.raw, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (historyValid_) cl.transition(*stage_.histRead, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    cl.transition(*stage_.histWrite, VK_IMAGE_LAYOUT_GENERAL);
+    cl.bindPipeline(*filter_);
+    rhi::Texture* const storage2[] = {stage_.histWrite};
+    cl.setStorageTextures(storage2);
+    cl.setPushConstants(&stage_.push, sizeof(stage_.push));
+    cl.dispatch((stage_.w + 7) / 8, (stage_.h + 7) / 8, 1);
+    cl.transition(*stage_.histWrite, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    stage_.filtered = true;
+}
+
+// onto the scene
+void MaterialRt::recordComposite(d3d9::PassContext& ctx) {
+    if (ctx.mainView != 1 || stage_.frame != dev_.frameValue() || !stage_.filtered) return;
+    RhiScope rs(dev_, ctx.cmd);
+    if (!rs) return;
+    rhi::CommandList& cl = rs.cl();
     MaterialRtCompositePush cp{};
     cp.h.frame = ctx.frameBlock.bits;
     cp.h.passId = 41;
-    cp.image = hist[cur]->heapSampled();
+    cp.image = stage_.image;
+    cp.sampler = dev_.samplerFor(false, true);
+    rhi::Texture* sceneT = rs.wrap(*stage_.scene);
+    cl.transition(*sceneT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    rhi::RenderingInfo ri;
+    ri.color[0].texture = sceneT;
+    ri.color[0].load = VK_ATTACHMENT_LOAD_OP_LOAD;
+    ri.color[0].store = VK_ATTACHMENT_STORE_OP_STORE;
+    ri.colorCount = 1;
+    ri.width = stage_.w;
+    ri.height = stage_.h;
+    cl.beginRendering(ri);
+    cl.bindPipeline(*composite_);
+    cl.setPushConstants(&cp, sizeof(cp));
+    cl.draw(3, 1, 0, 0);
+    cl.endRendering();
+
+    history_ = stage_.cur;
+    historyValid_ = true;
+    lastTraceW_ = stage_.tw;
+    lastTraceH_ = stage_.th;
+    if (passes_++ == 0) {
+        spdlog::info("enh: materials.rt: first reflection frame: trace {}x{} (tier {}), image {}x{}", stage_.tw, stage_.th, tier_, stage_.w, stage_.h);
+    }
+    logStats();
+}
+
+// glass panes (docs/research/material-rt.md 8): after the alpha passes; the shader traces the primary rays against the glass instances only
+void MaterialRt::recordGlass(d3d9::PassContext& ctx) {
+    if (ctx.mainView != 1 || tier_ == 0 || !s_.glass || ctx.sceneHdr == nullptr || scene_->glassInstances() == 0) return;
+    rhi::CommandList& cmd = ctx.cmd;
+    d3d9::Texture* scene = ctx.sceneHdr;
+    if (!dev_.rtSceneValid() || ctx.depthMap == nullptr || !pipelinesReady(scene->rhi().desc().format) || !glassPipe_ || !dev_.readable(ctx.depthMap, cmd)) return;
+    const std::uint32_t w = scene->desc().width, h = scene->desc().height;
+    rhi::Texture* img = dev_.transient("matrt.glass", {kImageFormat, {w, h}});
+    const rhi::RingAlloc pa = dev_.ring(sizeof(MaterialRtParams), 16);
+    if (img == nullptr || pa.ptr == nullptr) return;
+    const Tier& t = kTiers[tier_ - 1];
+    MaterialRtParams p{};
+    p.tex[0] = ctx.depthMap->bindlessSlot();
+    p.tex[2] = scene->bindlessSlot();
+    p.tex[3] = dev_.samplerFor(true, true);
+    p.tex2[0] = dev_.samplerFor(false, true);
+    p.info[0] = w;
+    p.info[1] = h;
+    p.info[2] = 1;
+    p.info[3] = static_cast<std::uint32_t>(dev_.frameValue());
+    p.trace[0] = t.traceFlags;
+    p.trace[1] = t.shadows;
+    p.trace[2] = static_cast<std::uint32_t>(s_.tweaks);
+    p.reach[0] = s_.rangeMetres * 100.0f;
+    p.reach[1] = 0.0015f;
+    p.reach[2] = 20000.0f;
+    p.strength[0] = s_.environment;
+    p.strength[1] = s_.strength;
+    std::memcpy(p.fogColor, fogColor_, 16);
+    std::memcpy(p.fogParams, fogParams_, 16);
+    if (!haveFog_) p.fogParams[2] = 0.0f;
+    engine::hemisphere::Light hemi;
+    if (engine::hemisphere::latest(hemi)) {
+        std::memcpy(p.sh, hemi.regs, sizeof(p.sh));
+        std::memcpy(p.indoor, hemi.indoor, sizeof(hemi.indoor));
+    }
+    std::memcpy(p.sunColor, sunColor_, 16);
+    std::memcpy(p.sunDir, sunDir_, 16);
+    std::memcpy(pa.ptr, &p, sizeof(p));
+    MaterialRtPush push{};
+    push.h.frame = ctx.frameBlock.bits;
+    push.h.passId = 42;
+    push.params[0] = pa.ref.low();
+    push.params[1] = pa.ref.high();
+    RhiScope rs(dev_, cmd);
+    if (!rs) return;
+    rhi::CommandList& cl = rs.cl();
+    rhi::Texture* sceneT = rs.wrap(*scene);
+    rhi::Texture* imgT = rs.wrap(*img);
+    cl.transition(*sceneT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    cl.transition(*imgT, VK_IMAGE_LAYOUT_GENERAL);
+    cl.bindPipeline(*glassPipe_);
+    rhi::Texture* const storage[] = {imgT};
+    cl.setStorageTextures(storage);
+    cl.setPushConstants(&push, sizeof(push));
+    cl.dispatch((w + 7) / 8, (h + 7) / 8, 1);
+    cl.transition(*imgT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    MaterialRtCompositePush cp{};
+    cp.h.frame = ctx.frameBlock.bits;
+    cp.h.passId = 43;
+    cp.image = img->heapSampled();
     cp.sampler = dev_.samplerFor(false, true);
     cl.transition(*sceneT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     rhi::RenderingInfo ri;
@@ -302,15 +415,7 @@ void MaterialRt::record(d3d9::PassContext& ctx) {
     cl.setPushConstants(&cp, sizeof(cp));
     cl.draw(3, 1, 0, 0);
     cl.endRendering();
-
-    history_ = cur;
-    historyValid_ = true;
-    lastTraceW_ = tw;
-    lastTraceH_ = th;
-    if (passes_++ == 0) {
-        spdlog::info("enh: materials.rt: first reflection frame: trace {}x{} (tier {}), image {}x{}", tw, th, tier_, w, h);
-    }
-    logStats();
+    if (glassPasses_++ == 0) spdlog::info("enh: materials.glass: first glass frame: {} glass instances in the TLAS", scene_->glassInstances());
 }
 
 // the rain share of the weather (about once a second: the weather admin's states, SEH-guarded engine reads) -> the wetness level

@@ -1,6 +1,6 @@
 # Traced reflections of the material pack's surfaces, rain wetness and puddles
 
-Status: built 2026-11-05 (features 1 and 4 of the RT follow-up list; glass and the GI follow-ups: section 7). Legend: **[C]** confirmed in a game run, **[I]** inferred.
+Status: built 2026-11-05 (traced reflections, rain, puddles; glass: section 8; GI follow-ups: section 9, not built). Legend: **[C]** confirmed in a game run, **[I]** inferred.
 Code: `src/enh/material_rt.*` (the pass), `src/enh/rain_wetness.h` (pure wetness model), `engine::rainOfWeather` (`src/engine/weather.*`),
 `shaders/materials/material_rt_common.hlsli`, `material_rt.comp.hlsl`, `material_rt_filter.comp.hlsl`, `material_rt.frag.hlsl`. Tests: `rvk_tests rain_*`.
 
@@ -55,14 +55,17 @@ white-out, no seams, no trails. See section 6 for costs and the gates.
   same candidate set. Rings: `mrtRipple`, a 55 cm grid of expanding rings.
 * **Only with the traced reflections** (quality high): the raster pack's wetness stays the authored constant x `materials.wetness`; the rain acts in the traced pass, which is the one place that has a roof test.
 
-## 6. Costs and gates
+## 6. Costs and gates (re-measured section: per-stage)
 GPU time of the pass `materials.rt` (trace + filter + composite, `-PerfFrame 4300`, `RVK_PERF_FRAMES=24`, 24 frames averaged, RX 7900 XTX, 1600x900, harbour_docks hold of rvkcompare, tier medium,
 sample pack, other agents' games on the same GPU: +-0.3 ms noise; the span includes the wait for the solid pass to drain):
 | | dry (`rain_force=0`) | pouring (`rain_force=1`: every flat pixel traces, roof rays) |
 |---|---|---|
 | Vulkan | 3.1 - 3.5 ms | 3.0 ms |
 | D3D12 | 1.3 - 1.6 ms | 1.9 ms |
-A first version of the filter gathered 4x4 taps, the final one 2x2 (3x3 at full rate): no measurable change, so the filter is not the main cost; the trace and the pass's barriers are. Not
+**Per-stage breakdown** (the pass is now three injected passes `materials.rt trace / filter / composite`, harbour_docks, tier medium, dry, 24 frames): Vulkan trace 1.8 ms / filter 0.08 / composite 0.01;
+D3D12 trace 1.4 / 0.07 / 0.01 (a second Vulkan sample read 2.8 ms for the trace: other agents' games share the GPU, the spread is +-1 ms). So the "Vulkan costs more" of the first numbers was measurement
+noise plus the old single span (which also covered the sync with the solid pass); the two APIs run the same shader at about the same speed, and **the ray trace is the cost**, not the barriers. A lower roughness limit
+(0.55 instead of 0.7) did not give a measurable gain at this spot and was reverted. A first version of the filter gathered 4x4 taps, the final one 2x2 (3x3 at full rate): no measurable change, so the filter is not the main cost; the trace and the pass's barriers are. Not
 optimised further (a tier-low option exists: no shadow rays at hits, cut-outs solid). Vulkan costing more than D3D12 is unexplained (same HLSL; probably the RT scene wait / barrier span).
 Gates of the commit: `rvk_tests` 231/231 (incl. `rain_*`, settings count 161), `rvk_d3d9test --validation` Vulkan + D3D12 0 failures / 0 validation errors, `rvk_rhitest` PASS,
 `rvk_shadertool dxil-check embedded` 64/64 (3 new), testdemo 7/7 with `-Validation` on Vulkan and D3D12 (`RVK_NO_GBV=1`) with `materials.quality=high` + `materials.rain_force=1`: 0 VUID / `d3d12: validation`.
@@ -70,10 +73,28 @@ No corpus variant was touched (no change in `rvk_material_variant.hlsli`, the G-
 Pictures: `out/water/20261105-131557` (dry, 4 spots), `-132159` / `-132526` (forced rain: the pier turns dark and glossy, the forest floor gets dark puddles, no patchiness after the roof-ray fix).
 
 ## 7. Not built / evidence
-* **Glass / window transmission (feature 2)**: not built. Findings: (a) the RT scene deliberately excludes alpha-blended meshes of the main view (`RtScene::observe`: "blended in the main view" is rejected),
-  so a window pane is not in the TLAS and a camera ray cannot find it; (b) a blended glass draw has no position of its own in the material variants (they rebuild positions from the depth buffer, which holds
-  the opaque scene behind the pane), so neither the raster variant nor a G-buffer pass knows where the glass is; (c) the pack word has no free bit for ior / tint. A real implementation needs the glass
-  meshes in the TLAS as their own mask (a flagged instance class), a glass id in the G-buffer (metalness code 15 is free: real metals clamp to 14) and a pass after the alpha passes that traces the
-  primary ray to the pane, adds the Fresnel reflection and (for thick glass) refracts through two interfaces. Windows lit from inside seen from outside already work through the engine's blend.
-* **GI follow-ups (feature 3)**: not started in this round (sea proxy / contact occlusion, moving-light response, probe improvements).
-* No screen-space march fallback for GPUs without ray query.
+* **GI follow-ups (feature 3)**: see section 9.
+* No screen-space march fallback for GPUs without ray query (the option `materials.quality = high` is unavailable there; the raster's sky cube stays).
+
+## 8. Glass panes (setting `materials.glass`, default on; acts with the traced reflections)
+Findings that shaped it [C]: the sample pack's glass entries are drawn two ways. **Windows** (`Arch_Glass_01_Diffuse_01`, mesh `Obj_Window_Harbour_01`) go through the **refracted pass** (kind
+Refracted, like water, the engine's pixel shaders sample the refraction copy) and were excluded from the RT scene as "water"; other glass (`ItMisc_01_Diffuse_01_Glass`, bottles) is drawn unblended
+(blend 0) in the main view and is already an ordinary opaque instance (nothing is added for it: the traced material reflections cover it through its G-buffer entry: smooth, metal exempt from the cap).
+* **TLAS**: while the glass pass is on (`RtScene::setGlass`), a main-view draw of a pack entry with transmission > 0 that is blended or in the refracted pass (and no real water) enters the scene as an
+  ordinary instance whose record carries `kRtRecordGlass` and whose TLAS mask is `kRtMaskGlass` (8). `rvkRtTraceMask` now excludes that bit from every ray; only `RVK_RT_TRACE_GLASS` rays see it:
+  shadows, GI, the water, the material reflections are unchanged. rvk.log `rt: scene: glass pane BLAS #n: material ...`. Off = `isGlassDraw` is false at once: the observer path is the old one.
+* **Pass** `materials.glass` at AfterMainView (order 20; the scene HDR holds the engine's blended glass; skipped when the TLAS holds no glass instance): `material_glass.comp` casts the primary ray of every
+  pixel against the glass only (to just behind the depth map's opaque surface) and, on a pane: Schlick Fresnel (F0 0.04) x a reflection traced like the material reflections' (screen reuse, engine-style
+  hit shading, sky cube), capped at 2x the pixel's own brightness; **thin** panes (the exit face within 8 cm and parallel) add nothing else (the engine's blend shows what lies behind a slab); **thick / curved**
+  glass refracts in (eta 1/1.5), a ray inside finds the exit face, refracts out (total internal reflection reflects), the transmitted ray's hit replaces 80 % of (1 - F) of the scene behind it, tinted by the
+  glass' diffuse colour. The composite is the material reflections' (`src.rgb + dst * src.a`). The engine's blend is kept as the base: off = nothing changes.
+* **Seen** [C]: harbour windows: 12 glass instances in the TLAS in the harbour spots, the pass runs (`enh: materials.glass: first glass frame`), no validation messages. The visible effect in the available spots is **subtle**:
+  the harbour_night windows are dark panes in shadow reflecting a dark street (4 % Fresnel at a steep angle); a daylit window at a glancing angle would show it and was **not** captured. Refraction through thick glass
+  (bottles) is implemented but no bottle is drawn through the refracted / blended path in the test spots (the pack's bottles are opaque draws), so **it is untested in the game**.
+
+## 9. GI follow-ups (feature 3): not built, and why
+`path-tracing.md` 10.3 already evaluated the three candidates with the reference path tracer: the **sea proxy** (measured: it would push the beach's under-estimate the wrong way: the sea floor / sky the rays see now are brighter than
+a dark sea albedo; ~5 % of the beach picture), **contact occlusion** (`gi.screen=high` gives 0 - 5 points of mean relative error at extra probe cost; a GTAO / bent-normal blend is the open idea), and the **moving light**
+(not measured: a converged reference needs a still scene). None of them was started here: each needs hours-long converged reference runs per spot (1024 spp, tens of GB of dumps) to show a gain, which did not fit this round; the
+decisions stand as documented there. Open ideas, unchanged: a GTAO term blended with the traced ratio, a hybrid far field (far probe occlusion with the SH's shape), a moving-light convergence test (a light spell
+orbiting a still camera, compare the DDGI plane against a reference restarted per light position).

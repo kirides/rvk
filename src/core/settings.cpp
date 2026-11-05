@@ -2025,6 +2025,15 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .format = "%.2f",
         .flags = Flag::Advanced,
     });
+    r.materialsGlass = &reg.add({
+        .key = "materials.glass",
+        .label = "Traced glass",
+        .category = "Materials",
+        .description = "Windows and bottles of the material pack's glass entries reflect the world through ray tracing (Fresnel: more at a glancing "
+                       "angle) and bottles refract what is behind them. Needs Material pack quality High. Off: the game's plain blended glass.",
+        .type = Type::Bool,
+        .defaultValue = 1,
+    });
     r.materialsRainWetness = &reg.add({
         .key = "materials.rain_wetness",
         .label = "Rain wetness",

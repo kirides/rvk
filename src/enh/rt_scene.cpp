@@ -366,9 +366,12 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     // water reflects, it is not reflected: its meshes are learnt from the main view's refracted / water draws and left out
     // of every view (the sun cascades draw the sea too, untagged: StaticMesh there)
     // the same holds for meshes the main view draws alpha-blended (shore overlays, glass, ...)
+    // (a window of the pack's glass entries is drawn in the refracted pass like water, but it is no water: kept as a glass pane while a glass consumer exists)
     const bool mainBlended = q.phase.view == View::Main && q.blending;
-    const bool water = q.kind == Kind::Refracted || (q.tag != nullptr && q.tag->water != d3d9::draws::Water::None);
-    if (water || mainBlended) {
+    const bool realWater = q.tag != nullptr && q.tag->water != d3d9::draws::Water::None;
+    const bool glassDraw = q.phase.view == View::Main && (q.blending || q.kind == Kind::Refracted) && !realWater && isGlassDraw(q);
+    const bool water = !glassDraw && (q.kind == Kind::Refracted || realWater);
+    if (water || (mainBlended && !glassDraw)) {
         learnExcluded(q, water);
         // the terrain: a z pre-pass of the range (opaque, its BLAS) and blended layers in the solid pass (each its own
         // material on the same geometry): the frame's first layer is the base, its material is the range's
@@ -415,9 +418,9 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         }
         return reject(water ? "water" : "blended in the main view");
     }
-    if (q.phase.view == View::Main && (q.phase.pass == Pass::Alpha || q.phase.pass == Pass::AlphaLate)) return skip();
+    if (q.phase.view == View::Main && (q.phase.pass == Pass::Alpha || q.phase.pass == Pass::AlphaLate) && !glassDraw) return skip();
     if (q.tag != nullptr && q.tag->material != nullptr && waterMaterials_.contains(q.tag->material)) return skip();
-    if (q.blending) return reject("blended");                                        // alpha-blended: not P1
+    if (q.blending && !glassDraw) return reject("blended");                          // alpha-blended: not P1
     // SpeedTree leaves (op > 1): cards positioned by their vertex shader (wind, facing), so there is no rest pose to put in the
     // TLAS: only the animated capture of the main view's solid pass stands for them (observeTree), the static BLAS only gives
     // the topology and the material (`animatedOnly`)
@@ -513,6 +516,10 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     }
     if (b->state == BlasState::Failed) return skip();
     if (leaf) b->animatedOnly = true;
+    if (glassDraw && !b->glass) {
+        b->glass = true;
+        spdlog::info("rt: scene: glass pane BLAS #{}: material '{}'", b->id, q.tag != nullptr && q.tag->material != nullptr ? engine::materials::resourceName(q.tag->material) : "?");
+    }
     std::uint8_t materialRank = 0;
     bool overlay = false;
     // depth-only draws (z pre-pass, cascades) carry no material: the engine's sub-mesh of the range gives it
@@ -538,7 +545,7 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     const bool alphaTested = q.alphaTest || (speedTree && q.tag->opDesc >= 1);
     const std::uint32_t flags = (key.index32 != 0 ? abi::kRtRecordIndex32 : 0u) | (alphaTested ? abi::kRtRecordAlphaTested : 0u) |
                                 (q.depthBias && q.phase.view == View::Main ? abi::kRtRecordDepthBias : 0u) |
-                                (speedTree ? abi::kRtRecordSpeedTree : 0u) | (q.instanced ? abi::kRtRecordInstanced : 0u) |
+                                (speedTree ? abi::kRtRecordSpeedTree : 0u) | (b->glass ? abi::kRtRecordGlass : 0u) | (q.instanced ? abi::kRtRecordInstanced : 0u) |
                                 (!q.depthWrite && q.phase.view == View::Main && q.phase.pass == Pass::Solid ? abi::kRtRecordNoDepthWrite : 0u) |
                                 (static_cast<std::uint32_t>(viewBit(q.phase.view)) << abi::kRtRecordViewShift);
     // the instance's data word: the alpha test (func | ref << 8, 0 = none) and the draw kind << 16 (the latest sighting's;
@@ -1228,6 +1235,13 @@ bool RtScene::captureOptions(const d3d9::Shader& s, shader::TranslateOptions& o)
         "    }}",
         tc);
     return true;
+}
+
+// a blended main-view draw of a pack entry with transmission > 0 (glass): only while a glass consumer exists (exact off: nothing changes)
+bool RtScene::isGlassDraw(const d3d9::ReplaceQuery& q) const {
+    if (glassConsumers_.empty() || pack_ == nullptr || q.tag == nullptr || q.tag->material == nullptr) return false;
+    const auto hit = pack_->lookupMaterial(q.tag->material);
+    return hit.word != 0 && matpack::decodeWord(hit.word).glass;
 }
 
 bool RtScene::dynamicSupported() const { return supported() && dev_.game().gameCaps().vertexStores; }
@@ -1928,7 +1942,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
         content = &contents_.back().second;
         content->reserve(n);
     }
-    std::uint64_t textured = 0, untextured = 0, cutOut = 0, segmented = 0, speedTrees = 0;
+    std::uint64_t textured = 0, untextured = 0, cutOut = 0, segmented = 0, speedTrees = 0, glassCount = 0;
     std::vector<abi::RtMaterialSegment> segs;              // the frame's segment table
     std::vector<std::pair<std::uint32_t, std::uint32_t>> segRecords;  // record -> its first segment
     for (std::uint32_t k = 0; k < worldCount; ++k) {
@@ -1949,7 +1963,9 @@ void RtScene::record(d3d9::PassContext& ctx) {
         VkAccelerationStructureInstanceKHR vi{};
         std::memcpy(vi.transform.matrix, in.rows.data(), sizeof(vi.transform.matrix));
         vi.instanceCustomIndex = k;
-        vi.mask = alpha ? abi::kRtMaskAlphaTested : abi::kRtMaskOpaque;
+        const bool glass = (in.flags & abi::kRtRecordGlass) != 0 && !glassConsumers_.empty();
+        glassCount += glass ? 1 : 0;
+        vi.mask = glass ? abi::kRtMaskGlass : alpha ? abi::kRtMaskAlphaTested : abi::kRtMaskOpaque;
         vi.instanceShaderBindingTableRecordOffset = 0;
         vi.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR |
                    (alpha ? VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR : VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR);
@@ -2133,6 +2149,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
     iv_.textured = textured;
     iv_.untextured = untextured;
     iv_.cutOut = cutOut;
+    glassInstances_ = glassCount;
     ++iv_.frames;
     const double passMs = msSince(t0);
     iv_.passCpuMs += passMs;
