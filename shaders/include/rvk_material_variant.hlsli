@@ -212,6 +212,9 @@ void rvkMvAo(RvkFrame f, float3 P) {
 #endif
 
 #ifdef RVK_MV_CLUSTER
+#ifndef RVK_MV_BAKE_REST
+#define RVK_MV_BAKE_REST 4.0  // the pixel's other light (its lit luminance x this) the lamp's share is measured against
+#endif
 // ---- the Full-owned light table (enh/light_table, docs/research/gpu-scene.md 9.7) ------------------------------------------------------------
 // The shader's light loop reads its lights from rvk_cl (constant overrides of c[RVK_MV_CL_REG ..]); the prologue fills them: the engine's values
 // (this draw's list), then, when the table is valid for this frame, per pixel
@@ -227,6 +230,7 @@ static bool rvk_clPhysical = false;     // lighting.style = physical and the tab
 static float rvk_clDefRough = 0.7;      // the roughness of surfaces without a pack entry in the physical style (materials.default_roughness)
 static float rvk_clShadow = 1.0;        // the smallest ray-traced shadow visibility among them (lighting.debug = shadows)
 static float rvk_clShadowTested = 0.0;
+static float2 rvk_clBake = float2(0.0, 0.0);  // baked light under lamp shadows (rvkMvBakedShade): x sum of (lamp light x occlusion), y sum of lamp light, over the pixel's shadow-casting lamps
 static float rvk_clKeptState = 0.0;  // debug: 1 an engine light kept with a table twin without shadow id, 2 kept and unknown to the table, 3 kept shadow-channel light  // 1 when a table light with a shadow id was among them
 
 // the ray-traced visibility of table light `sid` at this pixel (enh/light_table: pass light.shadow; entries = id + q / 64); 1 = lit / not traced
@@ -282,6 +286,22 @@ void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
     for (uint j = 0; j < cnt; ++j) {
         uint idx = rvkRawLoad<uint, 4>(rvkAddrAdd(cb, 4u + 4u * j));
         float4 pr = rvkRawLoad<float4, 16>(rvkAddrAdd(lb, idx * RVK_LIGHT_BYTES));
+        {
+            // lamp shadows on the BAKED light: the lightmaps / probes of static surfaces hold this lamp's light unshadowed by the characters and props, so the
+            // traced visibility of every shadow-casting lamp also darkens the pixel by the lamp's share of its light (rvkMvBakedShade, the epilogue)
+            uint bsid = rvkRawLoad<uint, 4>(rvkAddrAdd(lb, idx * RVK_LIGHT_BYTES + 52u));
+            if (bsid != 0u) {
+                float3 blv = pr.xyz - P;
+                float bfall = 1.0 - saturate(dot(blv, blv) * pr.w);
+                float bnl = saturate(dot(ng, normalize(blv)));
+                float4 bcr = rvkRawLoad<float4, 16>(rvkAddrAdd(lb, idx * RVK_LIGHT_BYTES + 16u));
+                float be = rvkLmLum(bcr.rgb) * bfall * bnl;
+                if (be > 0.0) {
+                    float bv = rvkMvLightShadow(h0.z, h0.w, bsid);
+                    rvk_clBake += float2(be * (1.0 - bv), be);
+                }
+            }
+        }
         bool twin = false;
         [unroll] for (uint i = 0; i < RVK_MV_CL_COUNT; ++i) {
             float3 dd = ePos[i] - pr.xyz;
@@ -591,6 +611,14 @@ void rvkMvEpilogue(inout float4 c0) {
         } else if (dbg == 2u && rvk_clCount != 0xFFFFFFFFu) {
             c0.rgb = float3(rvk_clUsed == 1u || rvk_clUsed == 3u ? 1.0 : 0.0, rvk_clUsed >= 2u ? 1.0 : 0.0, rvk_clUsed == 0u ? 0.3 : 0.0);
         }
+    }
+#endif
+#ifdef RVK_MV_CLUSTER
+    // lamp shadows on baked light (not on characters: their lamp light is the table's, already shaded)
+    if (rvk_clBake.x > 0.0 && (pc.flags & RVK_DRAW_KIND_MASK) != uint(RVK_MV_KIND_SKINNED)) {
+        float dark = saturate(f.params[RVK_MV_CL_PARAM].z);  // lighting.light_shadow_baked
+        float lumC = dot(max(c0.rgb, float3(0.0, 0.0, 0.0)), float3(0.3, 0.59, 0.11));
+        c0.rgb *= 1.0 - dark * saturate(rvk_clBake.x / (rvk_clBake.y + lumC * RVK_MV_BAKE_REST + 0.05));
     }
 #endif
 #ifdef RVK_MV_PBR

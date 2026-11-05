@@ -459,3 +459,13 @@ TEST(rt_presets_match_defaults_and_apply) {
     reg.setText("gi.quality", "low");  // a hand change: no preset matches
     CHECK(settings::matchRtPreset(reg) == -1);
 }
+
+TEST(settings_renamed_key_loads_under_the_new_name) {
+    using namespace rvk::settings;
+    Registry reg;
+    Setting& s = reg.add({.key = "lighting.trust_table", .label = "t", .category = "Lighting", .type = Type::Bool, .defaultValue = 0});
+    std::vector<std::string> warnings;
+    CHECK(reg.fromToml("[lighting]\ntable_complete = true\n", &warnings));
+    CHECK(s.asBool());
+    CHECK(warnings.size() == 1);
+}

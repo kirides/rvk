@@ -136,6 +136,14 @@ return {
         notes = "the hero in his idle animation, the world clock running",
     },
     {
+        id = "torch_hero",
+        player = { x = -4361, y = 486, z = -19659, yaw = 0 },
+        camera = { target = { 0, 100, 0 }, yaw = 270, pitch = -22, distance = 600 },
+        hide_player = false, hide_npcs = 2500,
+        time = { 23, 30 }, weather = "Sunny_Full", explicit = true,
+        notes = "the hero visible at the harbour torch wall at night: his shadow from the torch (lamp shadows)",
+    },
+    {
         id = "pub_idle",
         player = { x = -1100, y = 600, z = -19300, yaw = 0 },
         camera = { target = { 0, 150, 0 }, yaw = 90, pitch = -10, distance = 400 },

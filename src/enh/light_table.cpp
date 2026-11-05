@@ -144,7 +144,9 @@ LightTable::LightTable(d3d9::Device& device) : dev_(device) {
     float a, b;
     std::memcpy(&a, &ref[0], 4);
     std::memcpy(&b, &ref[1], 4);
-    dev_.setFrameParam(shader::abi::kFrameParamLights, {a, b, 0.0f, 0.0f});
+    refA_ = a;
+    refB_ = b;
+    dev_.setFrameParam(shader::abi::kFrameParamLights, {a, b, shadow_.mode > 0 ? shadow_.baked : 0.0f, 0.0f});
     dev_.setFrameParam(shader::abi::kFrameParamLights + 1, {0.0f, 0.0f, 0.0f, 0.0f});
     // the compute pipeline in the background from the start (Device::createComputePipeline is thread-safe)
     building_ = std::async(std::launch::async, [rdev]() {
@@ -168,6 +170,7 @@ LightTable::~LightTable() {
 // ray-traced lamp shadows: held (RT scene, pass, pipelines) only while the table is on and the setting asks for them; off = nothing exists
 void LightTable::configureShadows(const ShadowSettings& s) {
     shadow_ = s;
+    if (!failed_ && (refA_ != 0.0f || refB_ != 0.0f)) dev_.setFrameParam(shader::abi::kFrameParamLights, {refA_, refB_, s.mode > 0 ? std::clamp(s.baked, 0.0f, 1.0f) : 0.0f, 0.0f});
     applyShadowHold();
 }
 
@@ -367,7 +370,7 @@ void LightTable::record(d3d9::PassContext& ctx) {
     std::vector<std::uint32_t> shadowId(count, 0);
     shadowLights_ = 0;
     if (shadowHeld_ && shadow_.mode > 0) {
-        const std::uint32_t maxLights = shadow_.mode == 2 ? kLightShadowMax : 8u;
+        const std::uint32_t maxLights = shadow_.mode == 2 ? kLightShadowMax : 12u;
         const float limit = shadow_.mode == 2 ? 6000.0f : 2500.0f;
         std::vector<std::pair<float, std::uint32_t>> nearLights;
         for (std::uint32_t i = 0; i < count; ++i) {
@@ -375,6 +378,32 @@ void LightTable::record(d3d9::PassContext& ctx) {
             const float dx = w.pos[0] - cam.position[0], dy = w.pos[1] - cam.position[1], dz = w.pos[2] - cam.position[2];
             const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
             if (dist < limit && w.range < 3000.0f) nearLights.emplace_back(dist, i);
+        }
+        {
+            static std::uint32_t diagCounter = 0;
+            if (++diagCounter % 600 == 1) {
+                std::uint32_t within = 0, bigRange = 0;
+                float nearest = 1e9f;
+                for (std::uint32_t i = 0; i < count; ++i) {
+                    const auto& w = scratch_[i];
+                    const float dx = w.pos[0] - cam.position[0], dy = w.pos[1] - cam.position[1], dz = w.pos[2] - cam.position[2];
+                    const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    nearest = std::min(nearest, dist);
+                    if (dist < limit) {
+                        ++within;
+                        if (w.range >= 3000.0f) ++bigRange;
+                    }
+                }
+                for (std::uint32_t i = 0; i < count; ++i) {
+                    const auto& w = scratch_[i];
+                    const float dx = w.pos[0] - cam.position[0], dy = w.pos[1] - cam.position[1], dz = w.pos[2] - cam.position[2];
+                    if (std::sqrt(dx * dx + dy * dy + dz * dz) < 4000.0f)
+                        spdlog::debug("enh: lights:   lamp near camera: ({:.0f}, {:.0f}, {:.0f}) range {:.0f} col ({:.2f}, {:.2f}, {:.2f}) dynamic {} ambient {}", w.pos[0], w.pos[1],
+                                     w.pos[2], w.range, w.col[0], w.col[1], w.col[2], w.dynamic, w.ambient);
+                }
+                spdlog::info("enh: lights: lamp shadow candidates: camera ({:.0f}, {:.0f}, {:.0f}), {} lights within {:.0f} units ({} with range >= 3000), nearest {:.0f}, {} get ids",
+                             cam.position[0], cam.position[1], cam.position[2], within, limit, bigRange, nearest, nearLights.size());
+            }
         }
         std::sort(nearLights.begin(), nearLights.end());
         for (std::uint32_t k = 0; k < nearLights.size() && k < maxLights; ++k) shadowId[nearLights[k].second] = k + 1;
