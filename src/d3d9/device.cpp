@@ -31,7 +31,7 @@ Texture* g_diagScene = nullptr;
 
 // bump when the translator's output changes: invalidates the SPIR-V disk cache
 // 2: the ABI declarations come from shaders/include/rvk_abi.glsl (48-byte push block, FrameBlock)
-constexpr std::uint32_t kTranslatorVersion = 10;  // 10: rcp / rsq / exp / log clamped to +-FLT_MAX; 9: DXIL parity (rvk_draw.hlsli: uint2 frame, window members, address helpers); 8: HLSL (shader/hlsl.cpp) through DXC
+constexpr std::uint32_t kTranslatorVersion = 11;  // 11: rvk_pow on Vulkan too; 10: rcp / rsq / exp / log clamped to +-FLT_MAX; 9: DXIL parity (rvk_draw.hlsli: uint2 frame, window members, address helpers); 8: HLSL (shader/hlsl.cpp) through DXC
 // bump when the tint epilogue (TranslateOptions::tintEpilogue) changes: the tint variants' cache files
 constexpr std::uint32_t kTintVersion = 2;
 // bump when the billboard fade variant (Device::lodModule) changes

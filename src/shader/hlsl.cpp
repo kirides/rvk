@@ -689,7 +689,7 @@ private:
             break;
         }
         case Op::Pow:
-            if (need(2)) assign(ins, splat(std::format("{}(abs({}), {})", varyingFillers() ? "rvk_pow" : "pow", scalar(s[0]), scalar(s[1]))));
+            if (need(2)) assign(ins, splat(std::format("rvk_pow(abs({}), {})", scalar(s[0]), scalar(s[1]))));
             break;
         case Op::Crs:
             if (need(2)) assign(ins, std::format("float4(cross({}.xyz, {}.xyz), 0.0)", paren(srcExpr(s[0])), paren(srcExpr(s[1]))));
@@ -998,8 +998,9 @@ private:
             }
         }
         // D3D9's multiplication is "legacy" (0 * anything = 0, also 0 * inf), so pow(0, 0) = exp2(0 * log2(0)) = 1 there (and on AMD's Vulkan compiler);
-        // the D3D12 path's IEEE exp2(0 * -inf) is NaN, which poisoned the scene colour (refracted crystals) and the engine's eye adaptation
-        if (varyingFillers()) g += "float rvk_pow(float x, float y) { return y == 0.0 ? 1.0 : pow(x, y); }\n";
+        // the D3D12 path's IEEE exp2(0 * -inf) is NaN, which poisoned the scene colour (refracted crystals) and the engine's eye adaptation. SPIR-V's
+        // Pow(0, 0) is undefined too (NVIDIA / Intel may give NaN): both backends use it (DXVK selects 1 for a zero exponent the same way)
+        g += "float rvk_pow(float x, float y) { return y == 0.0 ? 1.0 : pow(x, y); }\n";
         g += "float4 rvk_lit(float4 s) {\n"
              "    float y = max(s.x, 0.0);\n"
              "    float z = (s.x > 0.0 && s.y > 0.0) ? pow(s.y, clamp(s.w, -128.0, 128.0)) : 0.0;\n"
