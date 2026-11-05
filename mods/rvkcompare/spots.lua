@@ -202,6 +202,14 @@ return {
         notes = "the character screen (C): attribute and skill lists, numbers, text",
     },
     {
+        id = "hud_view",
+        player = { x = -38559, y = 15, z = -5770, yaw = 58 },
+        camera = { target = { 0, 160, 0 }, yaw = 238, pitch = -5, distance = 220 },
+        hide_player = false, hide_npcs = 2500, hud = true, explicit = true,
+        time = { 13, 0 }, weather = "Sunny_Full", settle = 120,
+        notes = "the HUD at the screen's edges (bars, compass, quick slots); display fallback pictures (window-mode.md 10)",
+    },
+    {
         id = "menu_esc",
         player = { x = -38559, y = 15, z = -5770, yaw = 58 },
         camera = { target = { 0, 160, 0 }, yaw = 238, pitch = -5, distance = 220 },

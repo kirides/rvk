@@ -153,6 +153,7 @@ runs beside another Risen. Swim check:
 scenario `rvk_swim` (the hero in the sea, his swim line logged, pictures `swim_follow_b*` / `swim_water_b*`). Survey
 scenario `rvk_water` (water level-mesh entities' boxes + a look at each; `-Param 'only=Levelmesh_Lakemesh_06','find=SP_Don'`;
 `'around=x;y;z','radius=2500'` = 17 pictures around a place; with `-RvkLogLevel trace` rvk.log also names opaque materials).
+Display fallback (window-mode.md 10): a configured resolution / refresh the monitor does not offer is resolved (`engine/display_resolve.*`, pure; borderless -> desktop size, exclusive -> nearest mode, windowed larger than the monitor -> borderless over it) at the start (`CreateGraphicsSubsystem` pre-hook + the HAL mode list), in `SetResolutionEx` and on display changes at run time (`window: resolution ... not available`); the saved config is never rewritten. Test without a real display change: `-Environment 'RVK_FAKE_MONITOR=1920x1200'` / `-Commands '600: display fake 1600x900'`, `scripts/display-compare.ps1`.
 Window modes (docs/research/window-mode.md): by default the engine's fullscreen and a windowed mode at the monitor's
 resolution become a borderless window over the monitor (`engine/window_mode.*`).
 `run.ps1 -Fullscreen` (exception to "always windowed": borderless, no mode change; keep such runs short) writes
