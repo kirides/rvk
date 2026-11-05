@@ -284,7 +284,9 @@ void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
             float3 dd = ePos[i] - pr.xyz;
             if (dot(dd, dd) < RVK_LM_MATCH_DIST2) {
                 knownMask |= 1u << i;
-                if ((selMask >> i & 1u) != 0u) twin = true;
+                // (the engine's own light of this object keeps its slot and its colour: the engine weights every static light per object, 0.2 .. 2.0 of
+                // the registry's colour (gpu-scene.md 9.10), which the table cannot know; its table twin must not count a second time)
+                if ((selMask >> i & 1u) != 0u || rvkLmLum(rvk_cl[4 * i + 1].rgb) > 0.0) twin = true;
             }
         }
         if (twin) continue;
@@ -310,8 +312,17 @@ void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
     // the slots: kept (shadow selector, or lit by a light the table does not know) or refilled from the top list
     uint next = 0;
     [unroll] for (uint i = 0; i < RVK_MV_CL_COUNT; ++i) {
-        bool keep = (selMask >> i & 1u) != 0u || (rvkLmLum(rvk_cl[4 * i + 1].rgb) > 0.0 && (knownMask >> i & 1u) == 0u);
-        if (keep) continue;
+        bool keep = (selMask >> i & 1u) != 0u || rvkLmLum(rvk_cl[4 * i + 1].rgb) > 0.0;
+        if (keep) {
+            if (ctl.y > 0.5 && (selMask >> i & 1u) == 0u && (knownMask >> i & 1u) != 0u) {
+                // physical style: the engine's light of this slot follows the physical distance law as well
+                float3 lv = rvk_cl[4 * i].xyz - P;
+                float k = rvkLmPhysicalRatio(dot(lv, lv), rvk_cl[4 * i].w);
+                rvk_cl[4 * i + 1].rgb *= k;
+                rvk_cl[4 * i + 2].rgb *= k;
+            }
+            continue;
+        }
         uint pick = 0xFFFFFFFFu;
         [unroll] for (uint q = 0; q < RVK_MV_CL_COUNT; ++q) {
             if (q == next) pick = cIdx[q];

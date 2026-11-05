@@ -27,8 +27,10 @@ float2 rvkClusterSlope(RvkFrame f, float2 ndc) {
     return v.xy / (abs(v.z) > 1e-9 ? v.z : 1e-9);
 }
 
+groupshared float4 gsLight[64];
+
 [numthreads(64, 1, 1)]
-void CSMain(uint3 id : SV_DispatchThreadID) {
+void CSMain(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     const uint t = id.x;
     const uint count = pc.grid.w;
     const uint clusters0 = pc.grid.x * pc.grid.y * pc.grid.z;
@@ -68,7 +70,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
             rvkRwStore<float4, 16>(rvkAddrAdd(rvkAddr(pc.dst), pc.offs.x + t * RVK_LIGHT_BYTES + k * 16u), v);
         }
     }
-    if (t >= clusters) return;
+    const bool active = t < clusters;
 
     // cluster t -> (level, tile x, tile y, slice)
     const bool far = t >= clusters0;
@@ -94,16 +96,28 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     }
     uint n = 0;
     const uint outBase = (far ? pc.grid1.w : pc.offs.y) + u * RVK_LIGHT_CLUSTER_BYTES;
-    for (uint i = 0; i < count && n < RVK_LIGHT_MAX_PER_CLUSTER; ++i) {
-        float4 pr = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(pc.src), i * RVK_LIGHT_BYTES));
-        float range = rsqrt(max(pr.w, 1e-12));
-        float3 c = mul(float4(pr.xyz, 1.0), f.view).xyz;
-        float3 q = clamp(c, bmin, bmax);
-        float3 d = c - q;
-        if (dot(d, d) <= range * range) {
-            rvkBufStore(pc.dst, outBase + 4u + n * 4u, i);
-            ++n;
+    // the group stages 64 lights at a time (view-space centre + range) in shared memory: every thread tests them against its own box
+    for (uint base = 0; base < count; base += 64u) {
+        const uint li = base + gi;
+        float4 v = float4(1e30, 1e30, 1e30, 0.0);
+        if (li < count) {
+            float4 pr = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(pc.src), li * RVK_LIGHT_BYTES));
+            v = float4(mul(float4(pr.xyz, 1.0), f.view).xyz, rsqrt(max(pr.w, 1e-12)));
         }
+        gsLight[gi] = v;
+        GroupMemoryBarrierWithGroupSync();
+        if (active) {
+            const uint m = min(64u, count - base);
+            for (uint k = 0; k < m && n < RVK_LIGHT_MAX_PER_CLUSTER; ++k) {
+                float4 g = gsLight[k];
+                float3 d = g.xyz - clamp(g.xyz, bmin, bmax);
+                if (dot(d, d) <= g.w * g.w) {
+                    rvkBufStore(pc.dst, outBase + 4u + n * 4u, base + k);
+                    ++n;
+                }
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
     }
-    rvkBufStore(pc.dst, outBase, n);
+    if (active) rvkBufStore(pc.dst, outBase, n);
 }

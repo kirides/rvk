@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <future>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "d3d9/device.h"
@@ -125,6 +126,7 @@ public:
     // ray-traced lamp shadows (needs the RT scene; the table must be on): the nearest lights get a shadow id, the pass light.shadow traces them
     void setRtScene(RtScene* scene) { scene_ = scene; }
     void configureShadows(const ShadowSettings& s);
+    void setCollectRadius(float r) { collectRadius_ = r; }
 
 private:
     void record(d3d9::PassContext& ctx);
@@ -137,6 +139,9 @@ private:
     d3d9::Device& dev_;
     bool enabled_ = false, failed_ = false;
     int style_ = 0, debug_ = 0;
+    float collectRadius_ = 96000.0f;
+    double colourRatio_[3]{};
+    std::uint64_t colourRatioN_ = 0;
     float defaultRoughness_ = 0.7f;  // the physical style's roughness of surfaces without a pack entry
     std::uint32_t passId_ = 0;
     std::unique_ptr<rhi::Pipeline> pipeline_;
@@ -163,7 +168,7 @@ private:
     } pendingShadow_;
     std::uint64_t shadowPasses_ = 0, shadowSkipped_ = 0;
     std::uint64_t passes_ = 0, skipped_ = 0, changedTotal_ = 0;
-    std::uint32_t lastCount_ = 0, lastChanged_ = 0, lastDropped_ = 0;
+    std::uint32_t lastCount_ = 0, lastChanged_ = 0, lastDropped_ = 0, lastNear_ = 0, lastNearStatic_ = 0, lastNearAny_ = 0;
     double lastLog_ = -1e9;
 };
 

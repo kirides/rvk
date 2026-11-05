@@ -85,7 +85,7 @@ bool LightTable::lightKnown(const float pos[3]) {
 
 bool LightTable::registryComplete() { return g_registryComplete.load(std::memory_order_relaxed); }
 
-bool LightTable::wantStaticNotes() { return g_registryThin.load(std::memory_order_relaxed); }
+bool LightTable::wantStaticNotes() { return true; }  // always: the drawn lights also give the registry's static lights their draw colour
 
 void LightTable::noteDrawnLight(const float pr[4], const float col[4]) {
     if (!(pr[3] > 0.0f) || !std::isfinite(pr[3]) || !(col[0] + col[1] + col[2] > 1e-4f)) return;
@@ -276,14 +276,27 @@ void LightTable::record(d3d9::PassContext& ctx) {
         return;
     }
     // the world's lights within the grid's reach, nearest first when there are more than the table holds
-    if (!engine::lights::collect(cam.position.data(), kLightFar1, scratch_, stats_)) {
+    if (!engine::lights::collect(cam.position.data(), collectRadius_, scratch_, stats_)) {
         g_registryComplete.store(false, std::memory_order_relaxed);
         ++skipped_;
         return;
     }
-    g_registryThin.store(stats_.staticTotal == 0, std::memory_order_relaxed);
+    // "the registry holds lights" means lights that reach the NEAR level (the old collection range, kLightFar): the far lights of the whole island (the far level,
+    // up to kLightFar1) are in the tree even where nothing is cached in around the camera, and must not hide the objects' own lights (a teleport into the
+    // monastery: the candles are only in the drawn lists)
+    std::uint32_t nearStatic = 0, nearAny = 0;
+    for (const auto& w : scratch_) {
+        const float dx = w.pos[0] - cam.position[0], dy = w.pos[1] - cam.position[1], dz = w.pos[2] - cam.position[2];
+        if (std::sqrt(dx * dx + dy * dy + dz * dz) <= kLightFar + w.range) {
+            ++nearAny;
+            if (!w.dynamic) ++nearStatic;
+        }
+    }
+    lastNearStatic_ = nearStatic;
+    lastNearAny_ = nearAny;
+    g_registryThin.store(nearStatic == 0, std::memory_order_relaxed);
     // the registry (static tree within reach + this frame's dynamic lights) is what the engine gives objects too: a non-empty registry is trusted whole
-    g_registryComplete.store(!scratch_.empty(), std::memory_order_relaxed);
+    g_registryComplete.store(nearAny != 0, std::memory_order_relaxed);
     // the lights of the lists drawn since the last build that the registry did not return (same light = within 8 units)
     lastDrawnAdded_ = 0;
     {
@@ -291,12 +304,38 @@ void LightTable::record(d3d9::PassContext& ctx) {
         const std::size_t registry = scratch_.size();
         ++g_buildCounter;
         std::erase_if(g_drawn, [](const DrawnLight& d) { return g_buildCounter - d.stamp > kDrawnKeep; });
+        // the registry's lights in 16-unit cells: a drawn light is "the same" within 8 units. The static lights of the registry carry the colour the
+        // engine's DRAWS give them: the registry's rgb x intensity x scale x 0.5 is a guess, the draws' register colour differs per light by 0.2 .. 2.0
+        // (measured: gpu-scene.md 9.10; the engine weights each static light), so a matched light takes the colour of the draw that was seen last
+        std::unordered_multimap<std::uint64_t, std::uint32_t> cells;
+        cells.reserve(registry);
+        for (std::uint32_t i = 0; i < registry; ++i) {
+            const auto& w = scratch_[i];
+            cells.emplace(knownKey(static_cast<std::int32_t>(std::floor(w.pos[0] / 16.0f)), static_cast<std::int32_t>(std::floor(w.pos[1] / 16.0f)),
+                                   static_cast<std::int32_t>(std::floor(w.pos[2] / 16.0f))),
+                          i);
+        }
         for (const auto& dl : g_drawn) {
             const auto& d = dl.l;
+            const std::int32_t cx = static_cast<std::int32_t>(std::floor(d.pos[0] / 16.0f)), cy = static_cast<std::int32_t>(std::floor(d.pos[1] / 16.0f)),
+                               cz = static_cast<std::int32_t>(std::floor(d.pos[2] / 16.0f));
             bool known = false;
-            for (std::size_t i = 0; i < scratch_.size() && !known; ++i) {
-                const auto& w = scratch_[i];
-                known = std::abs(w.pos[0] - d.pos[0]) < 8.0f && std::abs(w.pos[1] - d.pos[1]) < 8.0f && std::abs(w.pos[2] - d.pos[2]) < 8.0f;
+            for (std::int32_t dx = -1; dx <= 1 && !known; ++dx) {
+                for (std::int32_t dy = -1; dy <= 1 && !known; ++dy) {
+                    for (std::int32_t dz = -1; dz <= 1 && !known; ++dz) {
+                        const auto range = cells.equal_range(knownKey(cx + dx, cy + dy, cz + dz));
+                        for (auto it = range.first; it != range.second && !known; ++it) {
+                            auto& w = scratch_[it->second];
+                            if (!(std::abs(w.pos[0] - d.pos[0]) < 8.0f && std::abs(w.pos[1] - d.pos[1]) < 8.0f && std::abs(w.pos[2] - d.pos[2]) < 8.0f)) continue;
+                            known = true;
+                            if (!w.dynamic && w.col[0] > 1e-4f && w.col[1] > 1e-4f && w.col[2] > 1e-4f && d.col[0] + d.col[1] + d.col[2] > 1e-4f) {
+                                for (int c = 0; c < 3; ++c) colourRatio_[c] += d.col[c] / w.col[c];
+                                ++colourRatioN_;
+                                std::memcpy(w.col, d.col, sizeof(w.col));
+                            }
+                        }
+                    }
+                }
             }
             if (!known) scratch_.push_back(d);
         }
@@ -307,9 +346,20 @@ void LightTable::record(d3d9::PassContext& ctx) {
         return std::sqrt(dx * dx + dy * dy + dz * dz) - l.range;
     };
     lastDropped_ = 0;
+    lastNear_ = 0;
     if (scratch_.size() > kLightMax) {
         lastDropped_ = static_cast<std::uint32_t>(scratch_.size()) - kLightMax;
-        std::nth_element(scratch_.begin(), scratch_.begin() + kLightMax, scratch_.end(), [&](const auto& a, const auto& b) { return reach(a) < reach(b); });
+        // the lights that reach the near level (the set the table held before the far level existed) come first and keep their order; the far lights of the
+        // island only fill the capacity that is left, nearest first: they never push a local lamp out
+        const auto mid = std::stable_partition(scratch_.begin(), scratch_.end(), [&](const auto& l) { return reach(l) <= kLightFar; });
+        const std::size_t nearCount = static_cast<std::size_t>(mid - scratch_.begin());
+        lastNear_ = static_cast<std::uint32_t>(nearCount);
+        const auto byReach = [&](const auto& a, const auto& b) { return reach(a) < reach(b); };
+        if (nearCount >= kLightMax) {
+            std::nth_element(scratch_.begin(), scratch_.begin() + kLightMax, mid, byReach);
+        } else {
+            std::nth_element(mid, scratch_.begin() + kLightMax, scratch_.end(), byReach);
+        }
         scratch_.resize(kLightMax);
     }
     const std::uint32_t count = static_cast<std::uint32_t>(scratch_.size());
@@ -487,10 +537,14 @@ void LightTable::logStats() {
     const double now = dev_.secondsSinceCreate();
     if (now - lastLog_ < 5.0) return;
     lastLog_ = now;
-    spdlog::info("enh: lights: {} lights in the table ({} changed since the last frame, {} dropped beyond {}, {} from drawn lists), {} builds ({} skipped), style {}, "
+    spdlog::info("enh: lights: tree walk {} nodes ({} static lights seen), near lights {} (static near {} / any {} of the registry), {} lights in the table ({} changed since the last frame, {} dropped beyond {}, {} from drawn lists), {} builds ({} skipped), style {}, "
                  "debug {}, table lighting {}",
-                 lastCount_, lastChanged_, lastDropped_, kLightMax, lastDrawnAdded_, passes_, skipped_, style_ == 1 ? "physical" : "original", debug_,
+                 stats_.nodes, stats_.staticTotal, lastNear_, lastNearStatic_, lastNearAny_, lastCount_, lastChanged_, lastDropped_, kLightMax, lastDrawnAdded_, passes_, skipped_, style_ == 1 ? "physical" : "original", debug_,
                  fullLitActive() ? "on" : "off");
+    if (colourRatioN_ > 0) {
+        spdlog::info("enh: lights: drawn lists' register colour / registry colour of the same light: {:.3f} {:.3f} {:.3f} (mean over {} matches)", colourRatio_[0] / colourRatioN_,
+                     colourRatio_[1] / colourRatioN_, colourRatio_[2] / colourRatioN_, colourRatioN_);
+    }
     if (shadowHeld_) {
         spdlog::info("enh: lights: lamp shadows: {} lights with a shadow id, {} frames traced, {} skipped (no RT scene / pipelines / depth)", shadowLights_, shadowPasses_,
                      shadowSkipped_);

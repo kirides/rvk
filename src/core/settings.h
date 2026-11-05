@@ -387,6 +387,7 @@ struct RendererSettings {
     Setting* lightingEnabled = nullptr;   // lighting.enabled (debug): run-time switch of the table (A/B)
     Setting* lightingStyle = nullptr;     // lighting.style: "original" (the engine's distance law) | "physical"
     Setting* lightingDebug = nullptr;     // lighting.debug: "off" | "clusters" | "slots" | "shadows"
+    Setting* lightingCollect = nullptr;   // debug.light_collect: the radius the light table collects lights over (units)
     Setting* lightingShadows = nullptr;   // lighting.light_shadows: "off" | "nearby" | "many" (ray-traced point-light shadows on the table's lights)
     Setting* lightingShadowQuality = nullptr;  // lighting.light_shadow_quality: "low" | "medium" | "high"
     Setting* lightingShadowRadius = nullptr;   // lighting.light_shadow_radius: the lamps' size in cm (the soft shadow's disc)

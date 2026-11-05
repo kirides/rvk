@@ -531,8 +531,9 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     }
     // Full-owned clustered lights (enh/light_table.h): decided here for the same reason (variants are cached per shader)
     const bool clusterLights = rs.lightingClustered != nullptr && rs.lightingClustered->asBool() && renderMode() == RenderMode::Full;
-    // (the physical light style evaluates the PBR code of the pack's variants on every lit draw: the cluster variants carry it too, a run-time switch of the style)
-    enh::setPbrVariants(!packRoots.empty() || clusterLights);
+    // (the physical light style evaluates the PBR code of the pack's variants on every lit draw: a session that STARTS with lighting.style = physical carries it in the
+    // cluster variants, original <-> physical then switch at run time; the code costs ~0.4 ms GPU in the jungle save, so it is not compiled in otherwise)
+    enh::setPbrVariants(!packRoots.empty() || (clusterLights && rs.lightingStyle != nullptr && rs.lightingStyle->asEnum() == "physical"));
     if (rs.lightingClustered != nullptr && rs.lightingClustered->asBool() && !clusterLights) spdlog::info("enh: lights: lighting.clustered applies in Full mode only");
     enh::setClusterVariants(clusterLights);
     // ray-traced global illumination (enh/gi.h, docs/research/rtgi.md): probes + the material shaders' GI variants
@@ -578,7 +579,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         if (!matPack_) dev_.setPackProvider([](const d3d9::draws::Tag&) { return d3d9::Device::PackHit{}; });
         lightTable_ = std::make_unique<enh::LightTable>(dev_);
         lightTable_->setRtScene(rtScene_.get());
-        for (settings::Setting* s : {rs.lightingEnabled, rs.lightingStyle, rs.lightingDebug, rs.lightingFullLit, rs.lightingTableComplete, rs.lightingTreeMerge, rs.lightingShadows, rs.lightingShadowQuality, rs.lightingShadowRadius, rs.materialsRoughness, rs.nativeStaticOpsCompare, rs.nativeSceneOpsCompare}) {
+        for (settings::Setting* s : {rs.lightingEnabled, rs.lightingStyle, rs.lightingDebug, rs.lightingFullLit, rs.lightingTableComplete, rs.lightingTreeMerge, rs.lightingCollect, rs.lightingShadows, rs.lightingShadowQuality, rs.lightingShadowRadius, rs.materialsRoughness, rs.nativeStaticOpsCompare, rs.nativeSceneOpsCompare}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyLighting(); }, this);
         }
         applyLighting();
@@ -802,6 +803,7 @@ void HalDevice::applyLighting() {
     const std::string_view d = rs.lightingDebug->asEnum();
     lightTable_->configure(rs.lightingEnabled->asBool(), rs.lightingStyle->asEnum() == "physical" ? 1 : 0, d == "clusters" ? 1 : d == "slots" ? 2 : d == "shadows" ? 3 : 0,
                            rs.materialsRoughness != nullptr ? rs.materialsRoughness->asFloat() : 0.7f);
+    if (rs.lightingCollect != nullptr) lightTable_->setCollectRadius(rs.lightingCollect->asFloat());
     {
         enh::LightTable::ShadowSettings ls;
         const std::string_view m = rs.lightingShadows->asEnum();

@@ -1821,7 +1821,9 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .label = "Light style",
         .category = "Lighting",
         .description = "Original: the game's light falloff, so the image reads like the game. Physical: lamps follow an inverse-square law with a smooth "
-                       "reach (brighter close to a lamp, gentler far away; the sun, sky and exposure stay the game's). Needs clustered lights (Full mode).",
+                       "reach (brighter close to a lamp, gentler far away) and surfaces get a physically based specular highlight with energy-conserving diffuse (the sun, sky and "
+                       "exposure stay the game's). Needs clustered lights (Full mode); the shader code for it is loaded only when the game STARTS with Physical selected "
+                       "(a later switch changes the lamps' distance law only).",
         .type = Type::Enum,
         .defaultValue = 0,
         .options = {"original", "physical"},
@@ -1840,15 +1842,28 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Off", "Cluster counts", "Slots filled", "Light shadows"},
         .flags = Flag::NoAB | Flag::Debug,
     });
+    r.lightingCollect = &reg.add({
+        .key = "debug.light_collect",
+        .label = "Light table: collection radius",
+        .category = "Lighting",
+        .tab = kTabDebug,
+        .description = "Developer: the distance over which the light table collects lights (the near grid ends at 16,000, the far level at 96,000).",
+        .type = Type::Float,
+        .defaultValue = 96000,
+        .min = 16000,
+        .max = 96000,
+        .format = "%.0f",
+        .flags = Flag::Advanced | Flag::Debug,
+    });
     r.lightingShadows = &reg.add({
         .key = "lighting.light_shadows",
         .label = "Lamp shadows",
         .category = "Lighting",
         .description = "Ray-traced shadows of the lamps, torches and candles: the nearest lights (Nearby: 8 within 25 m, Many: 31 within 60 m) shade the surfaces they "
                        "reach with soft shadows traced against the world, so far more lights than the game's own three shadowed lights cast shadows. Full mode "
-                       "with the clustered lights; needs a graphics card with ray tracing.",
+                       "with the clustered lights; needs a graphics card with ray tracing (without one the game's own point-light shadows stay).",
         .type = Type::Enum,
-        .defaultValue = 0,
+        .defaultValue = 1,
         .options = {"off", "nearby", "many"},
         .optionLabels = {"Off", "Nearby", "Many"},
         .requirements = caps::bit(caps::Cap::RayQuery),
