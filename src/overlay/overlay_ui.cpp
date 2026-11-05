@@ -173,68 +173,36 @@ bool toggleSwitch(const char* id, bool value, bool showText = true) {
     return clicked;
 }
 
-// ---- dependencies (UI adapter) ----
-// A dependent setting only has an effect while its prerequisite is on. The registry-side model (Spec needs, auto-apply) is the
-// cleanup agent's work; until it lands this adapter holds the pairs the pages group (key -> prerequisite key, the value that
-// switches the prerequisite on: -1 = the first non-zero option / true). Swap parentOf / userSet for the registry's API.
-struct Need {
-    const char* key;
-    const char* parent;
-    double on = -1.0;
-};
-constexpr Need kNeeds[] = {
-    {"water.quality", "water.enabled"}, {"water.reflections", "water.enabled"}, {"rt.reflections", "water.enabled"},
-    {"water.reflection_strength", "water.enabled"}, {"water.murkiness", "water.enabled"}, {"water.ocean", "water.enabled"},
-    {"water.ocean_quality", "water.ocean"}, {"water.sea_state", "water.ocean"}, {"water.wind_direction", "water.ocean"},
-    {"water.wave_scale", "water.ocean"},
-    {"shadows.filter", "shadows.enabled"}, {"shadows.softness", "shadows.enabled"}, {"shadows.cascade_blend", "shadows.enabled"},
-    {"shadows.fade", "shadows.enabled"}, {"shadows.bias", "shadows.enabled"},
-    {"shadows.rt_quality", "shadows.rt"}, {"shadows.rt_softness", "shadows.rt"}, {"shadows.rt_range", "shadows.rt"},
-    {"shadows.rt_wind", "shadows.rt"},
-    {"gi.quality", "gi.enabled"}, {"gi.strength", "gi.enabled"}, {"gi.lightmaps", "gi.enabled"}, {"gi.characters", "gi.enabled"},
-    {"gi.screen", "gi.enabled"}, {"gi.bleed", "gi.enabled"}, {"gi.directional", "gi.enabled"}, {"gi.lights", "gi.enabled"},
-    {"gi.emissive", "gi.enabled"}, {"gi.foliage", "gi.enabled"}, {"gi.shadow_fill", "gi.enabled"},
-    {"ao.mode", "ao.enabled"}, {"ao.strength", "ao.enabled"}, {"ao.radius", "ao.enabled"},
-    {"lighting.light_shadow_quality", "lighting.light_shadows"}, {"lighting.light_shadow_baked", "lighting.light_shadows"},
-    {"lighting.light_shadow_radius", "lighting.light_shadows"},
-    {"materials.derive_min", "materials.derive_from_specular"}, {"materials.derive_max", "materials.derive_from_specular"},
-    {"materials.rt_reflections", "materials.quality", 3.0}, {"materials.rt_range", "materials.quality", 3.0},
-    {"materials.rt_strength", "materials.quality", 3.0}, {"materials.glass", "materials.quality", 3.0},
-    {"materials.rain_wetness", "materials.quality", 3.0}, {"materials.puddles", "materials.quality", 3.0},
-    {"upscale.provider", "upscale.mode"}, {"upscale.object_motion", "upscale.mode"}, {"upscale.reactive", "upscale.mode"},
-    {"upscale.reactive_cutoff", "upscale.mode"}, {"upscale.reactive_scale", "upscale.mode"}, {"upscale.sharpness", "upscale.mode"},
-    {"upscale.exposure", "upscale.mode"}, {"upscale.cutout_thicken", "upscale.mode"},
-};
-
-const Need* needOf(const settings::Setting& s) {
-    for (const Need& n : kNeeds) {
-        if (s.key() == n.key) return &n;
+// ---- dependencies (the registry's Spec::needs) ----
+// The group parent of a dependent: its first prerequisite that is switched on for the player (a render-mode need only greys it).
+settings::Setting* parentOf(settings::Registry& reg, const settings::Setting& s) {
+    for (const settings::Need& n : s.spec().needs) {
+        if (n.autoApply) return reg.find(n.key);
     }
     return nullptr;
 }
 
-settings::Setting* parentOf(settings::Registry& reg, const settings::Setting& s) {
-    const Need* n = needOf(s);
-    return n != nullptr ? reg.find(n->parent) : nullptr;
-}
+// why `s` is greyed by its prerequisites ("" = none)
+std::string needsOff(settings::Registry& reg, const settings::Setting& s) { return reg.needsReason(s); }
 
-bool parentIsOn(const settings::Setting& parent, const Need& n) {
-    return n.on >= 0.0 ? parent.value() >= n.on : parent.value() > 0.0;
-}
-
-// a change made by the player: the prerequisite is switched on first (and named in a toast)
+// a change made by the player: the unmet prerequisites are switched on first (the registry names them: a toast; restart-only ones
+// show up in the restart banner like any restart setting)
 void userSet(settings::Registry& reg, settings::Setting& s, double value) {
-    if (const Need* n = needOf(s)) {
-        settings::Setting* parent = reg.find(n->parent);
-        if (parent != nullptr && !parent->locked() && !parentIsOn(*parent, *n)) {
-            double on = n->on >= 0.0 ? n->on : 1.0;
-            if (parent->type() == settings::Type::Enum && n->on < 0.0 && std::string_view(n->parent) == "water.ocean") on = static_cast<double>(parent->spec().options.size()) - 1.0;
-            reg.set(*parent, on);
-            g_ui.toast = "Also switched on: " + parent->spec().label;
-            g_ui.toastUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(3500);
-        }
+    if (s.type() != settings::Type::Bool && s.type() != settings::Type::Enum) {
+        reg.set(s, value);
+        return;
     }
-    reg.set(s, value);
+    const settings::Registry::NeedsResult r = reg.setWithNeeds(s.key(), settings::Registry::formatValue(s.spec(), value));
+    if (r.changes.empty()) return;
+    std::string names;
+    for (const settings::Registry::NeedChange& c : r.changes) {
+        const settings::Setting* p = reg.find(c.key);
+        if (p == nullptr) continue;
+        if (!names.empty()) names += ", ";
+        names += p->spec().label;
+    }
+    g_ui.toast = "Also switched on: " + names;
+    g_ui.toastUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(3500);
 }
 
 // ---- one setting row ----
@@ -245,8 +213,7 @@ struct RowGeometry {
 
 RowGeometry rowGeometry(const settings::Setting& s, bool depNote) {
     const float em = ImGui::GetFontSize();
-    const settings::Setting* par = parentOf(settings::registry(), s);
-    const bool note = !s.available() || s.locked() || s.spec().key == "vulkan.api" || (depNote && par != nullptr && !parentIsOn(*par, *needOf(s)));
+    const bool note = !s.available() || s.locked() || s.spec().key == "vulkan.api" || (depNote && !needsOff(settings::registry(), s).empty());
     return {ImGui::GetFrameHeight() + em * 0.55f + (note ? em * 0.95f : 0.0f), note};
 }
 
@@ -254,8 +221,8 @@ RowGeometry rowGeometry(const settings::Setting& s, bool depNote) {
 void drawRow(settings::Registry& reg, settings::Setting& s, ImVec2 p, float w, bool debug, int indent, bool depNote) {
     const float emI = ImGui::GetFontSize();
     // a dependent: indented under its prerequisite, dimmed while that is off
-    const settings::Setting* parent = parentOf(reg, s);
-    const bool parentOff = parent != nullptr && !parentIsOn(*parent, *needOf(s));
+    const std::string needReason = needsOff(reg, s);
+    const bool parentOff = !needReason.empty();
     if (indent > 0) {
         const float d = emI * 1.3f * static_cast<float>(indent);
         ImGui::GetWindowDrawList()->AddLine(ImVec2(p.x + emI * 0.55f, p.y), ImVec2(p.x + emI * 0.55f, p.y + ImGui::GetFrameHeight() * 0.85f), col(kGold, 0.30f));
@@ -411,18 +378,28 @@ void drawRow(settings::Registry& reg, settings::Setting& s, ImVec2 p, float w, b
 
     // the reason a row is greyed
     if (g.note) {
-        std::string note = unavailable ? "Greyed because: " + reg.unavailableReason(s) : std::string("Set by rvk\\config.toml for this session");
+        std::string note;
+        if (unavailable) {
+            // the reason reads "<capability>: <detail>": the detail alone says it in less room (the tooltip has the whole text)
+            note = reg.unavailableReason(s);
+            const std::size_t colon = note.find(": ");
+            if (colon != std::string::npos && colon < 40) note = note.substr(colon + 2);
+            if (!note.empty()) note[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(note[0])));
+            note = "Unavailable: " + note;
+        } else {
+            note = "Set by rvk\\config.toml for this session";
+        }
         bool amber = unavailable;
         if (!unavailable && !locked && parentOff && depNote) {
-            note = "Greyed because " + parent->spec().label + " is off (changing any of these switches it on)";
+            note = "Greyed: " + needReason;
             amber = true;
         } else if (!unavailable && !locked && sp.key == "vulkan.api") {
             note = g_ui.d3d12Ok ? "Restart required. Direct3D 12 is experimental." : "Direct3D 12 is not usable here: " + g_ui.d3d12Reason;
             amber = !g_ui.d3d12Ok;
         }
-        ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 0.82f);
+        ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 0.9f);
         note = fit(note, w - gutter - em * 0.3f);
-        dl->AddText(ImVec2(p.x + gutter, p.y + rowH - em * 0.1f), col(amber ? kAmber : kTextDim, 0.85f), note.c_str());
+        dl->AddText(ImVec2(p.x + gutter, p.y + rowH - em * 0.1f), col(amber ? kAmber : kTextDim, 1.0f), note.c_str());
         ImGui::PopFont();
     }
 
@@ -936,7 +913,7 @@ void Overlay::buildSettingsWindow() {
             ImGui::SetScrollY(scrollFrac_ * ImGui::GetScrollMaxY());
         }
         const float width = ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ScrollbarSize * 0.5f;
-        const int columns = width > em * 62.0f ? 2 : 1;
+        const int columns = (width > em * 62.0f && !searching) ? 2 : 1;
 
         // restart-required banner (every restart setting whose value differs from the one this session started with)
         {
@@ -1143,7 +1120,14 @@ void Overlay::buildAbPanel() {
 
 // ---- capabilities (core/caps.h, docs/research/raytracing.md 3) ----
 void Overlay::buildCapabilitiesPanel() {
-    if (!ImGui::CollapsingHeader("Graphics card")) return;
+    // a quiet header: the default Header colour is a bright gold bar that also sticks out past the sections' edges
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(kGold.x, kGold.y, kGold.z, 0.06f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(kGold.x, kGold.y, kGold.z, 0.16f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(kGold.x, kGold.y, kGold.z, 0.24f));
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetStyle().WindowPadding.x * 0.5f);
+    const bool capsOpen = ImGui::CollapsingHeader("Graphics card");
+    ImGui::PopStyleColor(3);
+    if (!capsOpen) return;
     const caps::Report report = settings::registry().capabilities();
     if (!report.known) {
         ImGui::TextDisabled("no Vulkan device");
