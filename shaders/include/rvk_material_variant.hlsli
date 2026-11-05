@@ -261,6 +261,8 @@ void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
     // the engine's lights at this pixel: positions, which carry a shadow selector
     float3 ePos[RVK_MV_CL_COUNT];
     uint selMask = 0u, litMask = 0u, knownMask = 0u;
+    uint twinSid[RVK_MV_CL_COUNT];  // the ray-traced shadow id of the table twin of each engine light (0 = none)
+    [unroll] for (uint i0 = 0; i0 < RVK_MV_CL_COUNT; ++i0) twinSid[i0] = 0u;
     [unroll] for (uint i = 0; i < RVK_MV_CL_COUNT; ++i) {
         float4 pr = rvk_cl[4 * i], col = rvk_cl[4 * i + 1], sel = rvk_cl[4 * i + 3];
         ePos[i] = pr.xyz;
@@ -286,7 +288,13 @@ void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
                 knownMask |= 1u << i;
                 // (the engine's own light of this object keeps its slot and its colour: the engine weights every static light per object, 0.2 .. 2.0 of
                 // the registry's colour (gpu-scene.md 9.10), which the table cannot know; its table twin must not count a second time)
-                if ((selMask >> i & 1u) != 0u || rvkLmLum(rvk_cl[4 * i + 1].rgb) > 0.0) twin = true;
+                if ((selMask >> i & 1u) != 0u || rvkLmLum(rvk_cl[4 * i + 1].rgb) > 0.0) {
+                    twin = true;
+                    if ((selMask >> i & 1u) == 0u) {
+                        uint tsid = rvkRawLoad<uint, 4>(rvkAddrAdd(lb, idx * RVK_LIGHT_BYTES + 52u));
+                        if (tsid != 0u) twinSid[i] = tsid;
+                    }
+                }
             }
         }
         if (twin) continue;
@@ -320,6 +328,14 @@ void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
                 float k = rvkLmPhysicalRatio(dot(lv, lv), rvk_cl[4 * i].w);
                 rvk_cl[4 * i + 1].rgb *= k;
                 rvk_cl[4 * i + 2].rgb *= k;
+            }
+            if (twinSid[i] != 0u) {
+                // the engine's own (unshadowed) light of this slot: its table twin's ray-traced visibility shades it (the shadow-channel lights keep the engine's mask)
+                float sv = rvkMvLightShadow(h0.z, h0.w, twinSid[i]);
+                rvk_cl[4 * i + 1].rgb *= sv;
+                rvk_cl[4 * i + 2].rgb *= sv;
+                rvk_clShadow = min(rvk_clShadow, sv);
+                rvk_clShadowTested = 1.0;
             }
             continue;
         }

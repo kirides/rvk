@@ -148,3 +148,7 @@ shaders read from `pc.draw`.
 * Ray-traced sun shadows (RT tier) as a later source of the same mask alpha: the mask pass is the seam.
 * The terrain variance map's size / light bleeding beyond the cascades.
 * PCSS-style contact hardening.
+
+## 7. Lamp shadows (clustered lights, 2026-11-05)
+
+Point lights (candles, torches, lamps) get ray-traced shadows of their own, `lighting.light_shadows` (gpu-scene.md 9.10, rtgi.md 28): the engine's own point-light shadows (3 lights, atlas) stay for lights with a shadow channel; every other light of the table is traced by the `light.shadow` pass and scales the light's colour in the material variants. Debug view `lighting.debug=shadows`. Verified: the hero's and palm leaves' (cut-out) shadows from a spawned light (`rvk_pointshadow cast=false`), Vulkan = D3D12. Engine-owned register lights get their table twin's visibility since 2026-11-05 (rtgi.md 28; not yet seen at a walked-in lamp).
