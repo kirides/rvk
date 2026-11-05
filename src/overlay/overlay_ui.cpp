@@ -111,6 +111,7 @@ struct View {
     bool debug = false;
     bool advanced = false;
     bool visible(const settings::Spec& sp) const {
+        if (sp.key == "vulkan.api" && !debug) return false;  // the Direct3D 12 backend is not released yet
         switch (settings::tierOf(sp)) {
         case settings::Tier::Hidden: return false;
         case settings::Tier::Debug: return debug;

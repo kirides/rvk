@@ -936,7 +936,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .options = {"vulkan", "d3d12"},
         .optionLabels = {"Vulkan", "Direct3D 12 (experimental)"},
-        .flags = Flag::Restart,
+        .flags = Flag::Restart,  // the D3D12 backend is not released yet: the overlay shows it in debug mode only (View::visible), device.cpp ignores it otherwise
         .page = "Display",
         .section = "Render mode",
         .order = -5,

@@ -327,7 +327,11 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     o.adapter = options.adapter;
     // the graphics API of the session (vulkan.api is a restart setting: the value it started with decides); D3D12 needs SM 6.6 / binding tier 3
     // and falls back to Vulkan with a log line
-    if (rs.api != nullptr && rs.api->startValue() != 0.0) {
+    // the D3D12 backend is a debug-mode feature while it is not released: a stored d3d12 value is ignored outside debug mode
+    // (a config.toml `[vulkan] api` lock counts as the developer's choice and sets the value through the same setting)
+    if (rs.api != nullptr && rs.api->startValue() != 0.0 && !settings::registry().debugMode()) {
+        spdlog::info("hal: vulkan.api = d3d12 ignored: the Direct3D 12 backend needs debug mode (overlay.debug_mode)");
+    } else if (rs.api != nullptr && rs.api->startValue() != 0.0) {
         std::string reason;
         if (rhi::d3d12Usable(options.adapter, &reason)) {
             o.backend = rhi::Backend::D3D12;
