@@ -683,7 +683,16 @@ bool activateExclusive(HMONITOR monitor) {
         dm.dmBitsPerPel = 32;
         dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY | DM_BITSPERPEL;
         const auto t0 = std::chrono::steady_clock::now();
-        const LONG r = ChangeDisplaySettingsExW(device.c_str(), &dm, nullptr, CDS_FULLSCREEN, nullptr);
+        LONG r = ChangeDisplaySettingsExW(device.c_str(), &dm, nullptr, CDS_FULLSCREEN, nullptr);
+        if (r != DISP_CHANGE_SUCCESSFUL) {
+            // some drivers / EDIDs reject the exact refresh rate of a listed mode: retry at the driver's rate for the size
+            // (DXVK wsi_window_win32.cpp does the same)
+            spdlog::warn("engine: window: exclusive fullscreen: ChangeDisplaySettingsEx({}, {}) failed: {}; retrying without the "
+                         "refresh rate", narrow(device), modeText(*pick), r);
+            dm.dmFields &= ~static_cast<DWORD>(DM_DISPLAYFREQUENCY);
+            dm.dmDisplayFrequency = 0;
+            r = ChangeDisplaySettingsExW(device.c_str(), &dm, nullptr, CDS_FULLSCREEN, nullptr);
+        }
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         if (r != DISP_CHANGE_SUCCESSFUL) {
             spdlog::warn("engine: window: exclusive fullscreen: ChangeDisplaySettingsEx({}, {}) failed: {}", narrow(device),
