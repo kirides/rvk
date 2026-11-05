@@ -1101,9 +1101,10 @@ private:
                     if (!varyingFillers()) m += "    rvk_out.rvk_psize = oPts.x;\n";
                 }
             }
-            // D3D12: the depth pre-pass and the solid pass compare positions of two different shaders for equality (ZFUNC_EQUAL): `precise` keeps the
-            // driver from fusing the position's multiply-adds differently in each (Vulkan's compiler gives equal results without it)
-            m += std::format("    {}float4 rvk_pos = {};\n", varyingFillers() ? "precise " : "", pos);
+            // the depth pre-pass and the solid pass compare positions of two different shaders for equality (ZFUNC_EQUAL): `precise` keeps the
+            // driver from fusing the position's multiply-adds differently in each. Both backends: AMD's Vulkan compiler happens to give equal
+            // results without it, other drivers need not (DXVK decorates the position Invariant for the same reason)
+            m += std::format("    precise float4 rvk_pos = {};\n", pos);
             if (!opt_.epilogue.empty()) {
                 m += opt_.epilogue;
                 m += "\n";
