@@ -1,5 +1,7 @@
 # Enhanced shadows show nothing (root cause CONFIRMED and fixed 2026-10-28; the original code-reading analysis follows)
 
+> Note (2026-11-05): the settings `native.lean_effects`, `native.lean_restore`, `native.retained`, `native.retained_groups` named below were removed (removed 2026-11-05, now a constant in code or an always-on behaviour: see `docs/research/settings-audit.md`); read them as the history / the values the code now fixes, not as switches to set.
+
 ## 0. Result (2026-10-29)
 
 * **Cause (section 1, confirmed in game):** `shadow_mask.vert` read `pc.draw.posFix.zw` (the reversed-depth remap added by d120038,

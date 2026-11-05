@@ -1,5 +1,7 @@
 # Draw tags, draw records, resource identity, shader semantics (M6 do-now items 2, 3, 4)
 
+> Note (2026-11-05): the settings `debug.draw_records` named below were removed (removed 2026-11-05, now a constant in code or an always-on behaviour: see `docs/research/settings-audit.md`); read them as the history / the values the code now fixes, not as switches to set.
+
 Every draw of a frame now says what it is (water, palm, hero, rock, grass, particle, sky, post, GUI, ...), where in the frame it
 happens (view / pass of docs/research/frame-phases.md), which engine objects issued it (render context, entity, sub-mesh,
 material), which data it draws (buffer ids + generations, ranges), where its constants and draw block live on the GPU and which

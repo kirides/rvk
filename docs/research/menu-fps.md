@@ -1,5 +1,7 @@
 # Menu frame rate limit and unpaced loading screens
 
+> Note (2026-11-05): the settings `debug.pace_loading` named below were removed (removed 2026-11-05, now a constant in code or an always-on behaviour: see `docs/research/settings-audit.md`); read them as the history / the values the code now fixes, not as switches to set.
+
 Research and build of 2026-10-23. Question (user): cap the frame rate while a menu is open (ESC menu, character screen) so
 the GPU does not run flat out on a still picture, without a "savegame load penalty" (in Piranha Bytes' earlier games the
 loading screen's render rate also set the load speed).

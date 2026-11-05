@@ -1,5 +1,7 @@
 # GPU-resident scene: design (M0, 2026-11-04)
 
+> Note (2026-11-05): the settings `debug.light_collect`, `lighting.light_shadow_baked`, `lighting.table_complete`, `lighting.tree_merge`, `lighting.trust_table`, `native.gpu_scene`, `native.retained` named below were removed (removed 2026-11-05, now a constant in code or an always-on behaviour: see `docs/research/settings-audit.md`); read them as the history / the values the code now fixes, not as switches to set.
+
 User decision (firm; ABI-breaking changes and large rewrites allowed): the whole game state lives on the GPU and is only batch-updated on changes; rendering becomes
 GPU-driven (better GPU use, slightly less CPU). `-Mode full` is to become the main mode: CPU at most Wrapper +0.5 ms at the player defaults (today +1.7 ms,
 retained-signals.md 11, both backends). Labels: [C] confirmed in code / measured, [I] inferred, [?] open.

@@ -230,6 +230,10 @@ int32_t rvk_setting_set(const char* key, const char* value, uint32_t flags) {
     return rvk::api::settingSet(rvk::settings::registry(), key, value, flags);
 }
 
+int32_t rvk_setting_set_with_needs(const char* key, const char* value, char* changes, uint32_t changes_size) {
+    return rvk::api::settingSetWithNeeds(rvk::settings::registry(), key, value, changes, changes_size);
+}
+
 int32_t rvk_ab(int32_t op) { return rvk::api::ab(rvk::settings::registry(), op); }
 
 int32_t rvk_overlay(int32_t op) {

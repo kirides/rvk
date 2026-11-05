@@ -1,5 +1,7 @@
 # Ray-traced global illumination (RTGI): research and plan (M10)
 
+> Note (2026-11-05): the settings `ao.radius`, `gi.bleed`, `gi.characters`, `gi.cutouts`, `gi.directional`, `gi.emissive`, `gi.light_count`, `gi.lights`, `gi.shadow_fill` named below were removed (removed 2026-11-05, now a constant in code or an always-on behaviour: see `docs/research/settings-audit.md`); read them as the history / the values the code now fixes, not as switches to set.
+
 Research of 2026-10-23, three strands: our renderer's RT groundwork (code / docs), how Risen lights a surface (Engine.dll RE +
 the shipped material HLSL + the shader corpus; dumps `B:\DevDrive\risen-ghidra\gi\`), and a technique survey. [C] = read in
 code / measured, [I] = inferred, [P] = published figure, [est] = estimate. Supersedes enhancements-roadmap.md 3.6 in detail.

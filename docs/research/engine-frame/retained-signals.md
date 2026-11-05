@@ -1,5 +1,7 @@
 # Retained composition with engine change signals: design study (2026-11-04)
 
+> Note (2026-11-05): the settings `native.retained` named below were removed (removed 2026-11-05, now a constant in code or an always-on behaviour: see `docs/research/settings-audit.md`); read them as the history / the values the code now fixes, not as switches to set.
+
 Question (user): GD3D11 gets vob add / remove / move from Gothic. Does Risen's engine offer the same, and does that make retained composition (cache a composed draw across
 frames, invalidate by signal) reach Full - Wrapper <= ~+0.8 ms? Starting point: Full - Wrapper +1.97 ms (Vulkan) / +1.93 (D3D12) at the perf savegame (performance.md 24).
 

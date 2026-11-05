@@ -1,5 +1,7 @@
 # The FFT ocean (M8): spectrum cascades, the sea floor field, waves calming towards the shore and the harbour
 
+> Note (2026-11-05): the settings `debug.ocean_spd`, `water.reflection_strength` named below were removed (removed 2026-11-05, now a constant in code or an always-on behaviour: see `docs/research/settings-audit.md`); read them as the history / the values the code now fixes, not as switches to set.
+
 The open sea of the enhanced water (docs/research/water.md) simulated from a wave spectrum: big waves far out that get
 progressively smaller towards the beaches and inside the harbour basin, waves rolling in parallel to the coast, breaking on
 the shallows, surf, foam, a real, lower shoreline; the colour stays the engine's sea material. Replaces the M7 Gerstner sum

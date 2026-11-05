@@ -1,5 +1,7 @@
 # Ray-traced soft sun shadows (M12 RT shadows)
 
+> Note (2026-11-05): the settings `gi.characters`, `shadows.rt_softness`, `shadows.rt_wind` named below were removed (removed 2026-11-05, now a constant in code or an always-on behaviour: see `docs/research/settings-audit.md`); read them as the history / the values the code now fixes, not as switches to set.
+
 Status: stage 1 built (2026-10-24): `src/enh/rt_shadows.*`, `shaders/shadows/rt_shadow_*.comp`, the mask shader's RT term.
 Settings category Shadows (`shadows.rt` off | near | extended, default off). Needs the RT tier (ray query) and the enhanced
 shadow mask (`shadows.enabled`). [C] = measured in the running game, [I] = inferred / design intent.

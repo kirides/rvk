@@ -45,6 +45,33 @@ namespace rvk::hal::vulkan {
 using namespace rvk::d3d9;
 
 namespace {
+// Values that used to be player / developer settings (docs/research/settings-audit.md, the clean-up of 2026-11): art coefficients
+// frozen at their shipped defaults, and the finished A/B switches' outcome. Change the number here to tune.
+namespace frozen {
+constexpr float kWaterMurkiness = 1.0f, kWaterReflection = 1.0f;
+constexpr float kShadowSoftness = 1.0f, kShadowBlend = 0.2f, kShadowFade = 0.35f, kShadowSplit = 0.4f;
+constexpr float kRtShadowSoftness = 1.0f;
+constexpr bool kRtShadowWind = true;
+constexpr float kRtLodRange = 60.0f, kRtLodFarRange = 150.0f;
+constexpr int kRtLodBias = 2, kRtLodBiasLow = 3;  // the ladder runs only with rt.lod_scale > 0 (the Low preset): that gets the stronger bias
+constexpr float kGiBleed = 0.5f, kGiDirectional = 0.5f, kGiShadowFill = 0.5f, kGiEmissive = 1.0f;
+constexpr int kGiLightCount = 128;
+constexpr bool kGiCharacters = true, kGiCutoutsTested = true;
+constexpr int kGiLightsWorld = 1;
+constexpr float kAoRadiusMetres = 1.0f;
+constexpr float kLightCollectRadius = 96000.0f, kLampRadiusCm = 20.0f, kLampShadowBaked = 0.8f;
+constexpr bool kTrustTable = false, kTreeMerge = true;
+constexpr float kMaterialSpecular = 1.0f, kMaterialEnvironment = 1.0f, kMaterialRtStrength = 1.0f, kMaterialRoughness = 0.7f;
+constexpr float kDeriveMin = 0.25f, kDeriveMax = 0.9f, kPuddleShare = 0.7f;  // puddles = materials.rain_wetness x 0.7
+constexpr float kReactiveCutoff = 0.08f, kReactiveScale = 1.0f;
+// the Full-mode CPU optimisations (native.*): the finished ones always on, the dead ends off; the code stays behind these constants
+constexpr int kMirrorMode = 0, kGpuScene = 0;
+constexpr unsigned kCpuOpts = 255u;
+constexpr bool kLeanRestore = true, kLeanEffects = true, kRetained = false, kRetainedCheck = false;
+constexpr int kRetainedGroups = 0x2ff;
+constexpr int kReadCacheKiB = 64, kAbsorbMode = 1;
+}  // namespace frozen
+
 std::atomic<bool> g_logFrame{false};
 }  // namespace
 
@@ -186,7 +213,7 @@ void HalDevice::applyStaticOps() {
     frameTap_->setStaticOpsActive(staticOps_->active());
     frameTap_->setEffectOpsActive(effectOps_->active());
     // O1: the register file's source; the coverage counter only where it is read (a compare, the tap's own report, or asked for)
-    staticOps_->setMirrorMode(rs.nativeMirror != nullptr ? rs.nativeMirror->asInt() : 0);
+    staticOps_->setMirrorMode(frozen::kMirrorMode);
     // O2a / O2b: the engine's slot code skipped for the composed ops (per op: only where the group takes over; default on). A compare
     // needs the engine's code: without native.lean_check (its check frames) a compare run keeps lean off
     const int leanCheck = rs.nativeLeanCheck != nullptr ? rs.nativeLeanCheck->asInt() : 0;
@@ -194,18 +221,18 @@ void HalDevice::applyStaticOps() {
     const bool leanOn = leanWanted && !((compare || sceneCompare) && leanCheck <= 0);
     if (leanWanted && !leanOn) spdlog::info("native: lean ops off: a compare is on and native.lean_check is 0 (the compare needs the engine's code)");
     staticOps_->setLean(leanOn, leanCheck);
-    // O3: the effect units, sprite flushes and the PSSM pass (native.lean_effects: their A/B)
-    effectOps_->setLean(leanOn && (rs.nativeLeanEffects == nullptr || on(rs.nativeLeanEffects)), leanCheck);
+    // O3: the effect units, sprite flushes and the PSSM pass
+    effectOps_->setLean(leanOn && frozen::kLeanEffects, leanCheck);
     {
         const bool cacheBlocked = compare || sceneCompare || on(rs.nativeFrameTap) || on(rs.nativeCoverage) || !leanOn;
         const int pm = rs.nativePacketCache != nullptr && !cacheBlocked ? rs.nativePacketCache->asInt() : 0;
         staticOps_->setPacketCache(pm == 4 ? 1 : pm);
         dev_.setRetainVariants(pm != 4);  // 4 = the cache of before the variant packets (A/B)
     }
-    staticOps_->setGpuScene(rs.nativeGpuScene != nullptr ? rs.nativeGpuScene->asInt() : 0);
-    staticOps_->setOpts(rs.nativeOpts != nullptr ? static_cast<unsigned>(rs.nativeOpts->asInt()) : 255u);
-    staticOps_->setLeanRestore(rs.nativeLeanRestore == nullptr || on(rs.nativeLeanRestore));
-    staticOps_->setRetained(on(rs.nativeRetained), rs.nativeRetainedGroups != nullptr ? rs.nativeRetainedGroups->asInt() : 0x2ff, on(rs.nativeRetainedCheck));
+    staticOps_->setGpuScene(frozen::kGpuScene);
+    staticOps_->setOpts(frozen::kCpuOpts);
+    staticOps_->setLeanRestore(frozen::kLeanRestore);
+    staticOps_->setRetained(frozen::kRetained, frozen::kRetainedGroups, frozen::kRetainedCheck);
     frameTap_->setCoverage(on(rs.nativeCoverage) || on(rs.nativeFrameTap) || compare || sceneCompare);
 }
 
@@ -401,30 +428,9 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
             spdlog::info("hal: settings: batch opaque draws {}", s.asBool() ? "on" : "off");
         }, this);
     }
-    if (rs.constantCompare != nullptr) {
-        dev_.setConstantCompare(rs.constantCompare->asBool());
-        reg.onChange(*rs.constantCompare, [this](const settings::Setting& s) {
-            dev_.setConstantCompare(s.asBool());
-            spdlog::info("hal: settings: constant compare {}", s.asBool() ? "on" : "off");
-        }, this);
-    }
-    if (rs.splitConstants != nullptr) {
-        dev_.setSplitConstants(rs.splitConstants->asBool());
-        reg.onChange(*rs.splitConstants, [this](const settings::Setting& s) {
-            dev_.setSplitConstants(s.asBool());
-            spdlog::info("hal: settings: split constants {}", s.asBool() ? "on" : "off");
-        }, this);
-    }
     if (rs.splitVerify != nullptr) {
         dev_.setSplitVerify(rs.splitVerify->asBool());
         reg.onChange(*rs.splitVerify, [this](const settings::Setting& s) { dev_.setSplitVerify(s.asBool()); }, this);
-    }
-    if (rs.drawRecords != nullptr) {
-        dev_.setDrawRecords(rs.drawRecords->asBool());
-        reg.onChange(*rs.drawRecords, [this](const settings::Setting& s) {
-            dev_.setDrawRecords(s.asBool());
-            spdlog::info("hal: settings: draw records {}", s.asBool() ? "on" : "off");
-        }, this);
     }
     // enhancements (docs/research/injection.md): the debug injection view
     debugView_ = std::make_unique<enh::DebugView>(dev_);
@@ -457,17 +463,17 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         reg.onChange(*rs.rtSceneViews, applyViews, this);
     }
     // the RT scene's far level of detail + memory limit (docs/research/rt-lod.md) and the RT quality preset (rt.preset)
-    if (rs.rtLodRange != nullptr && rs.rtLodBias != nullptr && rs.rtLodFarRange != nullptr && rs.rtLodScale != nullptr && rs.rtMemoryBudget != nullptr) {
+    if (rs.rtLodScale != nullptr && rs.rtMemoryBudget != nullptr) {
         const auto applyLod = [this](const settings::Setting&) {
-            const auto& rs2 = settings::renderer();
-            rtScene_->setLod(rs2.rtLodRange->asFloat(), rs2.rtLodBias->asInt(), rs2.rtLodFarRange->asFloat(), rs2.rtLodScale->asFloat());
+            const float scale = settings::renderer().rtLodScale->asFloat();
+            rtScene_->setLod(frozen::kRtLodRange, scale > 0.0f ? frozen::kRtLodBiasLow : frozen::kRtLodBias, frozen::kRtLodFarRange, scale);
         };
         const auto applyBudget = [this](const settings::Setting&) {
             rtScene_->setMemoryBudget(static_cast<std::uint32_t>(settings::renderer().rtMemoryBudget->asInt()));
         };
-        applyLod(*rs.rtLodRange);
+        applyLod(*rs.rtLodScale);
         if (rs.rtMemoryBudget->asInt() != 0) applyBudget(*rs.rtMemoryBudget);
-        for (settings::Setting* s : {rs.rtLodRange, rs.rtLodBias, rs.rtLodFarRange, rs.rtLodScale}) reg.onChange(*s, applyLod, this);
+        reg.onChange(*rs.rtLodScale, applyLod, this);
         reg.onChange(*rs.rtMemoryBudget, applyBudget, this);
     }
     if (rs.rtPreset != nullptr) {
@@ -484,14 +490,11 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         }, this);
         for (const auto& kv : settings::rtPresets().front().values) {
             if (settings::Setting* member = reg.find(kv.first); member != nullptr) {
-                reg.onChange(*member, [regp](const settings::Setting&) {
-                    settings::Setting* preset = settings::renderer().rtPreset;
-                    if (preset == nullptr || preset->asEnum() == "custom") return;
-                    const int m = settings::matchRtPreset(*regp);
-                    if (m < 0) regp->setText("rt.preset", "custom");
-                }, this);
+                reg.onChange(*member, [regp](const settings::Setting&) { settings::syncRtPreset(*regp); }, this);
             }
         }
+        // the preset says what the members say, also for a settings.toml / config.toml loaded before this point
+        if (settings::syncRtPreset(reg)) spdlog::info("hal: settings: rt.preset set to {} (the files' ray tracing values)", rs.rtPreset->asEnum());
     }
     // characters skinned by compute for the RT scene (docs/research/rt-shadows.md 10)
     if (rs.rtSkin != nullptr && rs.rtSkinVerify != nullptr) {
@@ -507,8 +510,8 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     water_ = std::make_unique<enh::Water>(dev_, rtScene_.get());
     if (rs.waterEnabled != nullptr) {
         for (settings::Setting* s : {rs.waterEnabled, rs.waterQuality, rs.waterReflections, rs.waterOcean, rs.waterOceanQuality,
-                                     rs.waterSeaState, rs.waterWindDirection, rs.waterWaveScale, rs.waterMurkiness,
-                                     rs.waterReflectionStrength, rs.waterDebug, rs.rtReflections, rs.rtReflectionTweaks}) {
+                                     rs.waterSeaState, rs.waterWindDirection, rs.waterWaveScale,
+                                     rs.waterDebug, rs.rtReflections, rs.rtReflectionTweaks}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyWater(); }, this);
         }
         if (rs.waterEnabled->asBool()) applyWater();
@@ -518,8 +521,8 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     rtShadows_ = std::make_unique<enh::RtShadows>(dev_, rtScene_.get());
     shadows_->setRtShadows(rtShadows_.get());
     if (rs.shadowsEnabled != nullptr) {
-        for (settings::Setting* s : {rs.shadowsRt, rs.shadowsRtQuality, rs.shadowsRtSoftness, rs.shadowsRtRange, rs.shadowsRtWind, rs.rtShadowSync, rs.shadowsEnabled, rs.shadowsFilter, rs.shadowsSoftness, rs.shadowsBlend, rs.shadowsFade,
-                                     rs.shadowsBias, rs.shadowsDebug, rs.shadowsMapSize, rs.shadowsRange, rs.shadowsSplit}) {
+        for (settings::Setting* s : {rs.shadowsRt, rs.shadowsRtQuality, rs.shadowsRtRange, rs.rtShadowSync, rs.shadowsEnabled, rs.shadowsFilter,
+                                     rs.shadowsBias, rs.shadowsDebug, rs.shadowsMapSize, rs.shadowsRange}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyShadows(); }, this);
         }
         applyShadows();  // also the engine's cascade overrides (shadows.map_size / range: "auto" follows shadows.enabled)
@@ -536,8 +539,8 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     effectOps_ = std::make_unique<native::EffectOps>(*this);
     frameTap_->setEffectOps(effectOps_.get());
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups,
-                                 rs.nativeMirror, rs.nativeCoverage, rs.nativeFrameTap, rs.nativeLean, rs.nativeLeanCheck,
-                                 rs.nativeLeanRestore, rs.nativeOpts, rs.nativeGpuScene, rs.nativePacketCache, rs.nativeLeanEffects, rs.nativeRetained, rs.nativeRetainedCheck, rs.nativeRetainedGroups}) {
+                                 rs.nativeCoverage, rs.nativeFrameTap, rs.nativeLean, rs.nativeLeanCheck,
+                                 rs.nativePacketCache}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
     // renderer.mode (Wrapper / Full): like the native.* settings applied by the registry's dispatch before a present, i.e. at a
@@ -587,7 +590,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
                                                             return enh::materialVariantOptions(s, enh::MaterialVariant::Gi, o);
                                                         }});
         matPack_ = std::make_unique<enh::matpack::MaterialPack>(dev_);
-        matPack_->configure(true, packRoots, static_cast<std::uint64_t>(rs.materialsBudget->asInt()) << 20, static_cast<float>(rs.materialsRoughness->asFloat()));
+        matPack_->configure(true, packRoots, static_cast<std::uint64_t>(rs.materialsBudget->asInt()) << 20, static_cast<float>(frozen::kMaterialRoughness));
         dev_.setPackProvider([this](const d3d9::draws::Tag& tag) {
             const auto h = matPack_->lookupMaterial(tag.material);
             static auto last = std::chrono::steady_clock::now();
@@ -602,9 +605,9 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         });
         dev_.setPackStamp([this]() -> std::uint32_t { return matPack_->generation(); });
         materialRt_ = std::make_unique<enh::MaterialRt>(dev_, rtScene_.get());
-        for (settings::Setting* s : {rs.materialsQuality, rs.materialsSpecular, rs.materialsEnvironment, rs.materialsDebug, rs.materialsAlternate, rs.materialsWetness,
-                                     rs.materialsRtReflections, rs.materialsRtRange, rs.materialsRtStrength, rs.materialsRainWetness, rs.materialsPuddles, rs.materialsRainForce, rs.materialsGlass,
-                                     rs.materialsDerive, rs.materialsDeriveMin, rs.materialsDeriveMax}) {
+        for (settings::Setting* s : {rs.materialsQuality, rs.materialsDebug, rs.materialsAlternate,
+                                     rs.materialsRtReflections, rs.materialsRtRange, rs.materialsRainWetness, rs.materialsRainForce, rs.materialsGlass,
+                                     rs.materialsDerive}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) {
                 applyMaterials();
                 applyGbuffer();  // the traced reflections read the G-buffer
@@ -615,7 +618,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         enh::matpack::setReloadHook([this, packRoots]() {
             // (the overlay's command thread is the render thread's: the commands run at presents)
             const auto& rs2 = settings::renderer();
-            matPack_->configure(true, packRoots, static_cast<std::uint64_t>(rs2.materialsBudget->asInt()) << 20, static_cast<float>(rs2.materialsRoughness->asFloat()));
+            matPack_->configure(true, packRoots, static_cast<std::uint64_t>(rs2.materialsBudget->asInt()) << 20, static_cast<float>(frozen::kMaterialRoughness));
             return true;
         });
         spdlog::info("enh: materials: pack on ({} folder(s)), PBR variants enabled", packRoots.size());
@@ -628,13 +631,13 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         if (!matPack_) dev_.setPackProvider([](const d3d9::draws::Tag&) { return d3d9::Device::PackHit{}; });
         lightTable_ = std::make_unique<enh::LightTable>(dev_);
         lightTable_->setRtScene(rtScene_.get());
-        for (settings::Setting* s : {rs.lightingEnabled, rs.lightingStyle, rs.lightingDebug, rs.lightingFullLit, rs.lightingTrustTable, rs.lightingTreeMerge, rs.lightingCollect, rs.lightingShadows, rs.lightingShadowQuality, rs.lightingShadowRadius, rs.lightingShadowBaked, rs.materialsRoughness, rs.nativeStaticOpsCompare, rs.nativeSceneOpsCompare}) {
+        for (settings::Setting* s : {rs.lightingEnabled, rs.lightingStyle, rs.lightingDebug, rs.lightingFullLit, rs.lightingShadows, rs.lightingShadowQuality, rs.nativeStaticOpsCompare, rs.nativeSceneOpsCompare}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyLighting(); }, this);
         }
         applyLighting();
     }
     if (rs.giEnabled != nullptr) {
-        for (settings::Setting* s : {rs.giEnabled, rs.giQuality, rs.giStrength, rs.giLightmaps, rs.giCharacters, rs.giScreen, rs.giBleed, rs.giDirectional, rs.giFoliage, rs.giFill, rs.giCutouts, rs.giLights, rs.giLightCount, rs.giEmissive, rs.giDebug, rs.giReference, rs.giReferenceSpp, rs.giReferenceMax, rs.giReferenceBounces}) {
+        for (settings::Setting* s : {rs.giEnabled, rs.giQuality, rs.giStrength, rs.giLightmaps, rs.giScreen, rs.giFoliage, rs.giDebug, rs.giReference, rs.giReferenceSpp, rs.giReferenceMax, rs.giReferenceBounces}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) {
                 applyGi();
                 applyGbuffer();  // the screen probes need the G-buffer
@@ -645,7 +648,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     // the thin G-buffer, motion vectors and GTAO (enh/gbuffer.h, docs/research/rtgi.md 10)
     gbuffer_ = std::make_unique<enh::Gbuffer>(dev_, rtScene_.get());
     if (rs.aoEnabled != nullptr) {
-        for (settings::Setting* s : {rs.aoEnabled, rs.aoMode, rs.aoStrength, rs.aoRadius, rs.gbufferDebug}) {
+        for (settings::Setting* s : {rs.aoEnabled, rs.aoMode, rs.aoStrength, rs.gbufferDebug}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyGbuffer(); }, this);
         }
         applyGbuffer();
@@ -654,8 +657,8 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     upscale_ = std::make_unique<enh::Upscale>(dev_);
     objectMotion_ = std::make_unique<enh::ObjectMotion>(dev_, rtScene_.get());
     if (rs.upscaleMode != nullptr) {
-        for (settings::Setting* s : {rs.upscaleMode, rs.upscaleProvider, rs.upscaleObjectMotion, rs.upscaleReactive, rs.upscaleReactiveCutoff, rs.upscaleReactiveScale, rs.upscaleSharpness, rs.upscaleExposure,
-                                     rs.upscaleJitterFlip, rs.upscalePostFullSize, rs.upscaleAlphaDither, rs.upscaleCutoutThicken}) {
+        for (settings::Setting* s : {rs.upscaleMode, rs.upscaleProvider, rs.upscaleObjectMotion, rs.upscaleReactive, rs.upscaleSharpness, rs.upscaleExposure,
+                                     rs.upscaleJitterFlip, rs.upscaleAlphaDither, rs.upscaleCutoutThicken}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyUpscale(); }, this);
         }
         applyUpscale();
@@ -690,41 +693,15 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
             reg.onChange(*s, [applyMaterials](const settings::Setting&) { applyMaterials(); }, this);
         }
     }
-    if (rs.skyCubeInterval != nullptr) {
-        engine::scene::setSkyCubeIntervalMs(static_cast<int>(rs.skyCubeInterval->asInt()));
-        reg.onChange(*rs.skyCubeInterval, [](const settings::Setting& s) { engine::scene::setSkyCubeIntervalMs(static_cast<int>(s.asInt())); }, this);
-    }
     if (rs.shadowStride != nullptr) {
         engine::shadowmaps::setUpdateStride(static_cast<int>(rs.shadowStride->asInt()));
         reg.onChange(*rs.shadowStride, [](const settings::Setting& s) { engine::shadowmaps::setUpdateStride(static_cast<int>(s.asInt())); }, this);
     }
-    if (rs.fsReadCache != nullptr) {
-        engine::loadaccel::setReadCacheKiB(static_cast<int>(rs.fsReadCache->asInt()));
-        reg.onChange(*rs.fsReadCache, [](const settings::Setting& s) { engine::loadaccel::setReadCacheKiB(static_cast<int>(s.asInt())); }, this);
-    }
-    if (rs.fastAbsorb != nullptr) {
-        engine::loadaccel::setAbsorbMode(static_cast<int>(rs.fastAbsorb->asInt()));
-        reg.onChange(*rs.fastAbsorb, [](const settings::Setting& s) { engine::loadaccel::setAbsorbMode(static_cast<int>(s.asInt())); }, this);
-    }
-    if (rs.soundCompressed != nullptr) {
-        engine::loadaccel::setSoundCompressed(rs.soundCompressed->asBool());
-        reg.onChange(*rs.soundCompressed, [](const settings::Setting& s) { engine::loadaccel::setSoundCompressed(s.asBool()); }, this);
-    }
+    engine::loadaccel::setReadCacheKiB(frozen::kReadCacheKiB);
+    engine::loadaccel::setAbsorbMode(frozen::kAbsorbMode);
     if (rs.streamStats != nullptr) {
         engine::loadaccel::setStats(static_cast<int>(rs.streamStats->asInt()));
         reg.onChange(*rs.streamStats, [](const settings::Setting& s) { engine::loadaccel::setStats(static_cast<int>(s.asInt())); }, this);
-    }
-    if (rs.xinputInterval != nullptr) {
-        engine::xinput::setIntervalMs(static_cast<int>(rs.xinputInterval->asInt()));
-        reg.onChange(*rs.xinputInterval, [](const settings::Setting& s) { engine::xinput::setIntervalMs(static_cast<int>(s.asInt())); }, this);
-    }
-    if (rs.oceanSpd != nullptr) {
-        enh::Ocean::setSpd(rs.oceanSpd->asBool());
-        reg.onChange(*rs.oceanSpd, [](const settings::Setting& s) { enh::Ocean::setSpd(s.asBool()); }, this);
-    }
-    if (rs.fastSort != nullptr) {
-        engine::fastsort::setMode(static_cast<int>(rs.fastSort->asInt()));
-        reg.onChange(*rs.fastSort, [](const settings::Setting& s) { engine::fastsort::setMode(static_cast<int>(s.asInt())); }, this);
     }
     if (rs.prefetchStride != nullptr) {
         engine::lod::setPrefetchStride(static_cast<int>(rs.prefetchStride->asInt()));
@@ -763,8 +740,8 @@ void HalDevice::applyWater() {
     s.seaState = ss == "calm" ? 0 : ss == "moderate" ? 1 : ss == "rough" ? 2 : ss == "storm" ? 3 : -1;
     s.windDirection = static_cast<int>(rs.waterWindDirection->asInt());
     s.waveHeight = rs.waterWaveScale->asFloat();
-    s.murkiness = rs.waterMurkiness->asFloat();
-    s.reflections = rs.waterReflectionStrength->asFloat();
+    s.murkiness = frozen::kWaterMurkiness;
+    s.reflections = frozen::kWaterReflection;
     // rt.reflections (effective value: off while the ray tracing tier is unavailable)
     if (rs.rtReflections != nullptr) {
         const std::string_view rt = rs.rtReflections->asEnum();
@@ -788,17 +765,17 @@ void HalDevice::applyGi() {
     s.quality = q == "low" ? 0 : q == "high" ? 2 : 1;
     s.strength = rs.giStrength->asFloat();
     s.replaceLightmaps = rs.giLightmaps->asEnum() == "replace";
-    s.characters = rs.giCharacters->asBool();
-    if (rs.giBleed != nullptr) s.bleed = rs.giBleed->asFloat();
-    if (rs.giDirectional != nullptr) s.directional = rs.giDirectional->asFloat();
+    s.characters = frozen::kGiCharacters;
+    s.bleed = frozen::kGiBleed;
+    s.directional = frozen::kGiDirectional;
     if (rs.giFoliage != nullptr) {
         const std::string_view fo = rs.giFoliage->asEnum();
         s.foliage = fo == "off" ? 0 : fo == "far" ? 2 : 1;
     }
-    if (rs.giFill != nullptr) s.shadowFill = rs.giFill->asFloat();
-    if (rs.giCutouts != nullptr) s.cutoutsTested = rs.giCutouts->asEnum() == "tested";
-    if (rs.giEmissive != nullptr) s.emissive = rs.giEmissive->asFloat();
-    if (rs.giLightCount != nullptr) s.lightCount = rs.giLightCount->asInt();
+    s.shadowFill = frozen::kGiShadowFill;
+    s.cutoutsTested = frozen::kGiCutoutsTested;
+    s.emissive = frozen::kGiEmissive;
+    s.lightCount = frozen::kGiLightCount;
     if (rs.giReference != nullptr) {
         static const char* const kViews[] = {"off", "reference", "ddgi", "screen", "error", "reference_indirect", "screen_indirect", "error_ddgi"};
         const std::string_view rv = rs.giReference->asEnum();
@@ -809,7 +786,7 @@ void HalDevice::applyGi() {
         s.referenceMax = static_cast<int>(rs.giReferenceMax->asInt());
         s.referenceBounces = static_cast<int>(rs.giReferenceBounces->asInt());
     }
-    if (rs.giLights != nullptr) s.lights = rs.giLights->asEnum() == "world" ? 1 : 0;
+    s.lights = frozen::kGiLightsWorld;
     const std::string_view d = rs.giDebug->asEnum();
     s.debug = d == "irradiance" ? 1 : d == "cascades" ? 2 : d == "vertex_ao" ? 3 : 0;
     if (rs.giScreen != nullptr) {
@@ -843,33 +820,35 @@ void HalDevice::applyMaterials() {
     if (matPack_ && rs.materialsDerive != nullptr) {
         enh::matpack::DeriveOptions d;
         d.enabled = rs.materialsDerive->asBool();
-        d.minRoughness = static_cast<float>(rs.materialsDeriveMin->asFloat());
-        d.maxRoughness = static_cast<float>(rs.materialsDeriveMax->asFloat());
+        d.minRoughness = frozen::kDeriveMin;
+        d.maxRoughness = frozen::kDeriveMax;
         const auto& cur = matPack_->deriveOptions();
         if (cur.enabled != d.enabled || cur.minRoughness != d.minRoughness || cur.maxRoughness != d.maxRoughness) {
             matPack_->setDerive(d);
             spdlog::info("enh: materials: derive from specular {} (roughness {:.2f} .. {:.2f})", d.enabled ? "on" : "off", d.minRoughness, d.maxRoughness);
         }
     }
-    dev_.setFrameParam(shader::abi::kFrameParamMaterials + 1, {rs.materialsWetness != nullptr ? rs.materialsWetness->asFloat() : 1.0f, 0.0f, 0.0f, 0.0f});
+    dev_.setFrameParam(shader::abi::kFrameParamMaterials + 1, {1.0f, 0.0f, 0.0f, 0.0f});
     // materials.quality = high: the traced reflections (enh/material_rt) carry the sky too: the raster's sky cube term is off while they run
     if (materialRt_) {
         enh::MaterialRt::Settings m;
         const std::string_view tier = rs.materialsRtReflections != nullptr ? rs.materialsRtReflections->asEnum() : std::string_view("medium");
         m.tier = quality >= 3.0f ? (tier == "low" ? 1 : tier == "high" ? 3 : 2) : 0;
-        m.environment = rs.materialsEnvironment->asFloat();
+        m.environment = frozen::kMaterialEnvironment;
         if (rs.materialsRtRange != nullptr) m.rangeMetres = rs.materialsRtRange->asFloat();
-        if (rs.materialsRtStrength != nullptr) m.strength = rs.materialsRtStrength->asFloat();
+        m.strength = frozen::kMaterialRtStrength;
         if (rs.materialsGlass != nullptr) m.glass = rs.materialsGlass->asBool();
-        if (rs.materialsRainWetness != nullptr) m.rain = rs.materialsRainWetness->asFloat();
-        if (rs.materialsPuddles != nullptr) m.puddles = rs.materialsPuddles->asFloat();
+        if (rs.materialsRainWetness != nullptr) {
+            m.rain = rs.materialsRainWetness->asFloat();
+            m.puddles = m.rain * frozen::kPuddleShare;  // one "Rain" setting
+        }
         if (rs.materialsRainForce != nullptr) m.forceRain = rs.materialsRainForce->asFloat();
         materialRt_->apply(m);
     }
-    const float environment = materialRt_ && materialRt_->active() ? 0.0f : rs.materialsEnvironment->asFloat();
-    dev_.setFrameParam(shader::abi::kFrameParamMaterials, {quality, rs.materialsSpecular->asFloat(), environment, debug});
-    spdlog::info("enh: materials: quality {}, specular {:.2f}, environment {:.2f}, debug {}", rs.materialsQuality->asEnum(), rs.materialsSpecular->asFloat(),
-                 rs.materialsEnvironment->asFloat(), rs.materialsDebug->asEnum());
+    const float environment = materialRt_ && materialRt_->active() ? 0.0f : frozen::kMaterialEnvironment;
+    dev_.setFrameParam(shader::abi::kFrameParamMaterials, {quality, frozen::kMaterialSpecular, environment, debug});
+    spdlog::info("enh: materials: quality {}, specular {:.2f}, environment {:.2f}, debug {}", rs.materialsQuality->asEnum(), frozen::kMaterialSpecular,
+                 frozen::kMaterialEnvironment, rs.materialsDebug->asEnum());
 }
 
 void HalDevice::applyLighting() {
@@ -877,16 +856,16 @@ void HalDevice::applyLighting() {
     if (!lightTable_ || rs.lightingEnabled == nullptr) return;
     const std::string_view d = rs.lightingDebug->asEnum();
     lightTable_->configure(rs.lightingEnabled->asBool(), rs.lightingStyle->asEnum() == "physical" ? 1 : 0, d == "clusters" ? 1 : d == "slots" ? 2 : d == "shadows" ? 3 : 0,
-                           rs.materialsRoughness != nullptr ? rs.materialsRoughness->asFloat() : 0.7f);
-    if (rs.lightingCollect != nullptr) lightTable_->setCollectRadius(rs.lightingCollect->asFloat());
+                           frozen::kMaterialRoughness);
+    lightTable_->setCollectRadius(frozen::kLightCollectRadius);
     {
         enh::LightTable::ShadowSettings ls;
         const std::string_view m = rs.lightingShadows->asEnum();
         ls.mode = renderMode() == RenderMode::Full ? (m == "nearby" ? 1 : m == "many" ? 2 : 0) : 0;
         const std::string_view q = rs.lightingShadowQuality->asEnum();
         ls.quality = q == "low" ? 1 : q == "high" ? 3 : 2;
-        ls.radius = rs.lightingShadowRadius->asFloat();
-        if (rs.lightingShadowBaked != nullptr) ls.baked = rs.lightingShadowBaked->asFloat();
+        ls.radius = frozen::kLampRadiusCm;
+        ls.baked = frozen::kLampShadowBaked;
         lightTable_->configureShadows(ls);
     }
     // table lighting needs the table, Full's composition and no compare run (a compare diffs against the engine's passes)
@@ -894,7 +873,7 @@ void HalDevice::applyLighting() {
     const bool full = on(rs.lightingFullLit) && rs.lightingEnabled->asBool() && lightTable_->available() && renderMode() == RenderMode::Full &&
                       !on(rs.nativeStaticOpsCompare) && !on(rs.nativeSceneOpsCompare);
     enh::setFullLitActive(full);
-    enh::setFullLitOptions(on(rs.lightingTrustTable), on(rs.lightingTreeMerge));
+    enh::setFullLitOptions(frozen::kTrustTable, frozen::kTreeMerge);
     if (staticOps_) staticOps_->setTableLit(full);
 }
 
@@ -905,7 +884,7 @@ void HalDevice::applyGbuffer() {
     s.ao = rs.aoEnabled->asBool();
     s.replaceEngineSsao = rs.aoMode == nullptr || rs.aoMode->asEnum() != "add";
     s.aoStrength = rs.aoStrength->asFloat();
-    s.aoRadius = rs.aoRadius->asFloat() * 100.0f;
+    s.aoRadius = frozen::kAoRadiusMetres * 100.0f;
     const std::string_view d = rs.gbufferDebug->asEnum();
     s.debug = d == "normals" ? 1 : d == "motion" ? 2 : d == "ao" ? 3 : d == "screen_gi" ? 4 : d == "material" ? 5 : 0;
     // the screen probes (enh/gi) read the G-buffer
@@ -958,15 +937,13 @@ void HalDevice::applyUpscale() {
     if (!upscale_ || rs.upscaleMode == nullptr) return;
     const std::string_view m = rs.upscaleMode->asEnum();
     if (rs.upscaleSharpness != nullptr) upscale_->setSharpness(rs.upscaleSharpness->asFloat());
-    dev_.setPostAtDisplaySize(rs.upscalePostFullSize == nullptr || rs.upscalePostFullSize->asBool());
+    dev_.setPostAtDisplaySize(true);
     dev_.setAlphaDither(rs.upscaleAlphaDither != nullptr && rs.upscaleAlphaDither->asBool());
     dev_.setCutoutThicken(rs.upscaleCutoutThicken != nullptr ? rs.upscaleCutoutThicken->asFloat() : 0.0f);
     if (rs.upscaleReactive != nullptr) upscale_->setReactive(rs.upscaleReactive->asBool());
     if (rs.upscaleProvider != nullptr) upscale_->setMl(rs.upscaleProvider->asEnum() == "fsr4");
     if (rs.upscaleExposure != nullptr) upscale_->setEngineExposure(rs.upscaleExposure->asEnum() == "engine");
-    if (rs.upscaleReactiveCutoff != nullptr && rs.upscaleReactiveScale != nullptr) {
-        upscale_->setReactiveTuning(rs.upscaleReactiveCutoff->asFloat(), rs.upscaleReactiveScale->asFloat());
-    }
+    upscale_->setReactiveTuning(frozen::kReactiveCutoff, frozen::kReactiveScale);
     unsigned flip = 0;
     if (rs.upscaleJitterFlip != nullptr) {
         const std::string_view f = rs.upscaleJitterFlip->asEnum();
@@ -996,9 +973,9 @@ void HalDevice::applyShadows() {
     s.enabled = rs.shadowsEnabled->asBool();
     const std::string_view f = rs.shadowsFilter->asEnum();
     s.taps = f == "low" ? 2 : f == "medium" ? 3 : 4;
-    s.softness = rs.shadowsSoftness->asFloat();
-    s.blend = rs.shadowsBlend->asFloat();
-    s.fade = rs.shadowsFade->asFloat();
+    s.softness = frozen::kShadowSoftness;
+    s.blend = frozen::kShadowBlend;
+    s.fade = frozen::kShadowFade;
     s.bias = rs.shadowsBias->asFloat();
     const std::string_view dbg = rs.shadowsDebug->asEnum();
     s.debug = dbg == "cascades" ? 1 : dbg == "cascade_term" ? 2 : dbg == "terrain_term" ? 3 : dbg == "rt_term" ? 4 : dbg == "rt_coverage" ? 5 : 0;
@@ -1009,8 +986,8 @@ void HalDevice::applyShadows() {
         const std::string_view m = rs.shadowsRt->asEnum();
         r.mode = s.enabled ? (m == "near" ? 1 : m == "extended" ? 2 : 0) : 0;
         r.rangeMetres = rs.shadowsRtRange->asFloat();
-        r.softness = rs.shadowsRtSoftness->asFloat();
-        r.wind = rs.shadowsRtWind->asBool();
+        r.softness = frozen::kRtShadowSoftness;
+        r.wind = frozen::kRtShadowWind;
         r.sync = rs.rtShadowSync->asBool();
         const std::string_view q = rs.shadowsRtQuality->asEnum();
         r.quality = q == "low" ? 1 : q == "high" ? 3 : 2;
@@ -1022,7 +999,7 @@ void HalDevice::applyShadows() {
     o.mapSize = size == "auto" ? (s.enabled ? 4096 : 0) : size == "game" ? 0 : std::atoi(std::string(size).c_str());
     const float metres = rs.shadowsRange->asFloat();
     o.range = metres > 0.0f ? metres * 100.0f : (s.enabled ? 10000.0f : 0.0f);
-    o.splitFactor = o.range > 0.0f ? rs.shadowsSplit->asFloat() : -1.0f;
+    o.splitFactor = o.range > 0.0f ? frozen::kShadowSplit : -1.0f;
     engine::shadowmaps::setOverrides(o);
     spdlog::info("hal: settings: shadow cascades: map size {}, range {}, split factor {}", o.mapSize > 0 ? std::to_string(o.mapSize) : "game",
                  o.range > 0.0f ? std::format("{:.0f} m", o.range / 100.0f) : std::string("game"),
@@ -1621,8 +1598,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
     engine::loadaccel::onPresent();
     engine::scenetable::onPresent();
     {
-        const auto* gs = settings::renderer().nativeGpuScene;
-        gpuscene::instances().flush(dev_, gs != nullptr ? (gs->asInt() >= 2 ? gs->asInt() : 0) : 0);
+        gpuscene::instances().flush(dev_, frozen::kGpuScene >= 2 ? frozen::kGpuScene : 0);
     }
     engine::lod::onPresent();  // a changed object draw distance: the world's cache-in spheres (engine thread)
     dev_.present();
@@ -1651,8 +1627,7 @@ void HalDevice::updateMenuPacing() {
     const engine::menu::Status st = engine::menu::query();
     const auto& rs = settings::renderer();
     const auto* menuFps = rs.menuFps;
-    const bool paceLoading = rs.paceLoading != nullptr && rs.paceLoading->asBool();
-    dev_.setUnpaced(st.state == engine::menu::State::Loading && !paceLoading);
+    dev_.setUnpaced(st.state == engine::menu::State::Loading);
     // frame generation: the world only (Unknown = the GUI is not up yet: the world), not paused (app state 1)
     if (framegen_) framegen_->setGameState(st.state == engine::menu::State::Game || st.state == engine::menu::State::Unknown, st.appState == 1);
     dev_.setMenuCap(st.state == engine::menu::State::Menu && menuFps != nullptr ? menuFps->value() : 0.0);

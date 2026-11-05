@@ -267,6 +267,122 @@ Result Registry::setText(std::string_view key, std::string_view text) {
     return set(*s, v);
 }
 
+// ---- prerequisites (Spec::needs) ------------------------------------------------------------------------------------
+
+namespace {
+std::string optionText(const Spec& spec, double v) {
+    if (spec.type == Type::Enum) {
+        const auto i = static_cast<std::size_t>(v);
+        if (i < spec.optionLabels.size()) return spec.optionLabels[i];
+        if (i < spec.options.size()) return spec.options[i];
+    }
+    if (spec.type == Type::Bool) return v != 0.0 ? "on" : "off";
+    return Registry::formatValue(spec, v);
+}
+}  // namespace
+
+// a prerequisite is met while its effective value matches (or, negated, differs); `prereq` = the setting (null: unknown key = met)
+bool Registry::needMet(const Need& n, const Setting*& prereq) const {
+    prereq = find(n.key);
+    if (prereq == nullptr) return true;
+    double v = 0.0;
+    if (!parseText(prereq->spec_, n.value, v)) return true;
+    const bool eq = prereq->available() && prereq->effective() == v;
+    return n.negate ? (prereq->available() && !eq) : eq;
+}
+
+// "on": a Bool true or an Enum option past "off" (settings without an off state never switch anything on)
+bool Registry::needsOn(const Setting& s, double v) const {
+    if (s.spec_.type == Type::Bool) return v != 0.0;
+    if (s.spec_.type == Type::Enum && !s.spec_.options.empty() && (s.spec_.options[0] == "off" || s.spec_.options[0] == "none")) return v > 0.0;
+    return false;
+}
+
+void Registry::applyNeeds(Setting& s, std::vector<Setting*>& visiting, NeedsResult& out) {
+    if (std::ranges::find(visiting, &s) != visiting.end()) return;  // a cycle: cut
+    visiting.push_back(&s);
+    for (const Need& n : s.spec_.needs) {
+        const Setting* cp = nullptr;
+        if (needMet(n, cp)) continue;
+        Setting* p = find(n.key);
+        double want = 0.0;
+        const auto blockWith = [&](const std::string& why) {
+            if (!out.blocked.empty()) out.blocked += "; ";
+            out.blocked += why;
+        };
+        if (!parseText(p->spec_, n.value, want)) continue;
+        if (!n.autoApply) { blockWith(std::format("{} must be {}", p->spec_.label, optionText(p->spec_, want))); continue; }
+        if (!p->available()) { blockWith(std::format("{}: {}", p->spec_.label, unavailableReason(*p))); continue; }
+        if (p->locked()) { blockWith(std::format("{} is fixed by config.toml", p->spec_.label)); continue; }
+        if (n.negate) {  // "not <value>": the nearest other option (Enum: the first past "off"), a Bool's opposite
+            if (p->spec_.type == Type::Bool) {
+                want = want != 0.0 ? 0.0 : 1.0;
+            } else if (p->spec_.type == Type::Enum) {
+                want = want == 0.0 ? 1.0 : 0.0;
+            } else {
+                continue;
+            }
+        }
+        if (p->spec_.type == Type::Enum && !p->optionAvailable(want)) { blockWith(std::format("{} = {} is not available", p->spec_.label, optionText(p->spec_, want))); continue; }
+        applyNeeds(*p, visiting, out);  // its own prerequisites first
+        const double before = p->value();
+        if (before == want) continue;
+        const bool restart = p->restart() || (!p->spec_.restartGroups.empty() && p->restartGroup(before) != p->restartGroup(want));
+        if (set(*p, want) == Result::Ok) out.changes.push_back({p->spec_.key, formatValue(p->spec_, before), formatValue(p->spec_, want), restart});
+    }
+    visiting.pop_back();
+}
+
+Registry::NeedsResult Registry::setWithNeeds(std::string_view key, std::string_view text) {
+    NeedsResult out;
+    Setting* s = find(key);
+    if (s == nullptr) { out.result = Result::UnknownKey; return out; }
+    double v = 0.0;
+    if (!parseText(s->spec_, text, v)) { out.result = Result::BadValue; return out; }
+    out.result = set(*s, v);
+    if (out.result != Result::Ok || !needsOn(*s, v)) return out;
+    std::vector<Setting*> visiting;
+    applyNeeds(*s, visiting, out);
+    return out;
+}
+
+std::string Registry::needsReasonDepth(const Setting& s, int depth) const {
+    if (depth > 6) return {};
+    std::string out;
+    for (const Need& n : s.spec_.needs) {
+        const Setting* p = nullptr;
+        std::string why;
+        if (!needMet(n, p)) {
+            double v = 0.0;
+            parseText(p->spec_, n.value, v);
+            why = n.negate ? std::format("{} must not be {}", p->spec_.label, optionText(p->spec_, v))
+                           : std::format("{} must be {}", p->spec_.label, optionText(p->spec_, v));
+        } else if (p != nullptr) {
+            why = needsReasonDepth(*p, depth + 1);  // met, but the prerequisite is itself greyed
+        }
+        if (why.empty()) continue;
+        if (!out.empty()) out += "; ";
+        out += why;
+    }
+    return out;
+}
+
+std::string Registry::needsReason(const Setting& s) const { return needsReasonDepth(s, 0); }
+
+std::vector<std::string> Registry::dependentsOf(std::string_view key) const {
+    std::vector<std::string> out;
+    for (const auto& s : settings_) {
+        if (std::ranges::any_of(s->spec_.needs, [&](const Need& n) { return n.key == key; })) out.push_back(s->spec_.key);
+    }
+    return out;
+}
+
+std::string Registry::needsText(const Spec& spec) {
+    std::string out;
+    for (const Need& n : spec.needs) out += std::format("{}{}{}\n", n.key, n.negate ? "!=" : "=", n.value);
+    return out;
+}
+
 void Registry::lock(Setting& s, double value, std::string reason) {
     const std::lock_guard lock(mutex_);
     if (!normalise(s.spec_, value)) return;
@@ -513,11 +629,21 @@ std::string Registry::toToml() const {
 }
 
 namespace {
-// settings of earlier builds that were taken out (the early native prototypes: native-renderer.md N3 / N4); an old settings.toml that
-// still has them loads, with one warning per key, and the next save leaves them out
-// settings of an earlier build under a new key: the old key still loads (one warning)
-constexpr std::pair<std::string_view, std::string_view> kRenamedSettings[] = {{"lighting.table_complete", "lighting.trust_table"}};
-constexpr std::string_view kRemovedSettings[] = {"native.opaque", "native.shadows", "native.debug", "rt.source"};
+// settings of earlier builds that were taken out (the early native prototypes: native-renderer.md N3 / N4; the settings clean-up of
+// docs/research/settings-audit.md: finished A/B switches and art coefficients, now constants in the code); an old settings.toml /
+// config.toml that still has them loads, with one warning per key, and the next save leaves them out
+constexpr std::string_view kRemovedSettings[] = {"native.opaque", "native.shadows", "native.debug", "rt.source",
+    "ao.radius", "debug.constant_compare", "debug.draw_records", "debug.fast_absorb", "debug.fast_sort", "debug.fs_read_cache",
+    "debug.light_collect", "debug.ocean_spd", "debug.pace_loading", "debug.sky_cube_interval", "debug.sound_compressed",
+    "debug.split_constants", "debug.xinput_interval", "gi.bleed", "gi.characters", "gi.cutouts", "gi.directional", "gi.emissive",
+    "gi.light_count", "gi.lights", "gi.shadow_fill", "lighting.light_shadow_baked", "lighting.light_shadow_radius",
+    "lighting.table_complete", "materials.puddles", "lighting.tree_merge", "lighting.trust_table", "materials.default_roughness",
+    "materials.derive_max", "materials.derive_min", "materials.environment", "materials.rt_strength", "materials.specular",
+    "materials.wetness", "native.cpu_opts", "native.gpu_scene", "native.lean_effects", "native.lean_restore", "native.mirror",
+    "native.retained", "native.retained_check", "native.retained_groups", "rt.lod_bias", "rt.lod_far_range", "rt.lod_range",
+    "shadows.cascade_blend", "shadows.fade", "shadows.rt_softness", "shadows.rt_wind", "shadows.softness", "shadows.split",
+    "upscale.post_full_size", "upscale.reactive_cutoff", "upscale.reactive_scale", "water.murkiness",
+    "water.reflection_strength",};
 }  // namespace
 
 bool Registry::fromToml(std::string_view text, std::vector<std::string>* warnings) {
@@ -539,12 +665,6 @@ bool Registry::fromToml(std::string_view text, std::vector<std::string>* warning
     for (const auto& leaf : leaves) {
         const bool sideB = leaf.starts_with("ab.");
         std::string key = sideB ? leaf.substr(3) : leaf;
-        for (const auto& [from, to] : kRenamedSettings) {
-            if (key == from) {
-                warn(std::format("'{}' was renamed to '{}', loaded under the new name", key, to));
-                key = std::string(to);
-            }
-        }
         Setting* s = nullptr;
         for (auto& x : settings_) {
             if (x->spec_.key == key) s = x.get();
@@ -790,7 +910,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "playing. Turning it off also turns the debug views off.",
         .type = Type::Bool,
         .defaultValue = 0,
-        .flags = Flag::NoAB,
+        .flags = Flag::NoAB | Flag::Advanced,
         .page = "System",
     });
     r.showAdvanced = &reg.add({
@@ -823,7 +943,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
     });
     r.adapter = &reg.add({
         .key = "vulkan.adapter",
-        .label = "Graphics card",
+        .label = "Graphics card number",
         .category = "Hardware",
         .tab = kTabSystem,
         .description = "Which graphics card renders the game when the PC has more than one. Auto picks the fastest dedicated "
@@ -839,14 +959,14 @@ RendererSettings registerRendererSettings(Registry& reg) {
     r.exclusiveAcquire = &reg.add({
         .key = "vulkan.exclusive_acquire",
         .label = "Vulkan exclusive mode",
-        .category = "Hardware",
-        .tab = kTabSystem,
+        .category = "Debug views",
+        .tab = kTabDebug,
         .description = "Exclusive fullscreen: also take Vulkan's exclusive mode (VK_EXT_full_screen_exclusive) on top of the "
                        "display mode change. Diagnostics (docs/research/window-mode.md 8.3).",
         .type = Type::Bool,
         .defaultValue = 1,
-        .flags = Flag::NoAB | Flag::Hidden,
-        .page = "System",
+        .flags = Flag::NoAB | Flag::Hidden | Flag::Debug,
+        .page = "Debug", .section = "Debug views",
     });
     r.rtAllow = &reg.add({
         .key = "rt.allow",
@@ -919,30 +1039,6 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Debug views",
     });
-    r.drawRecords = &reg.add({
-        .key = "debug.draw_records",
-        .label = "Draw records",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "Keep a record of every draw of the frame (tags, geometry identity, constants, textures) for later "
-                       "features and tools. Off only to measure their cost.",
-        .type = Type::Bool,
-        .defaultValue = 1,
-        .flags = Flag::NoAB | Flag::Hidden,
-        .page = "Debug", .section = "Debug views",
-    });
-    r.paceLoading = &reg.add({
-        .key = "debug.pace_loading",
-        .label = "Pace loading screens",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "Loading screens wait for the frame rate limit / vsync like other frames (the behaviour before "
-                       "2026-10-23: each wait lengthens the load). Only to measure the load-time penalty.",
-        .type = Type::Bool,
-        .defaultValue = 0,
-        .flags = Flag::NoAB | Flag::Hidden,
-        .page = "Debug", .section = "Debug views",
-    });
     r.debugCrashMarkers = &reg.add({
         .key = "debug.crash_markers",
         .label = "Crash markers",
@@ -995,7 +1091,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
     });
     r.ubershaderSkip = &reg.add({
         .key = "debug.ubershader_skip",
-        .label = "GLSL material shaders: keep classes translated",
+        .label = "HLSL material shaders: keep classes translated",
         .category = "Debug views",
         .tab = kTabDebug,
         .description = "Bit mask of material shader classes that stay on the translated shaders (1 z pass, 2 masked, 4 alpha blend, "
@@ -1009,10 +1105,10 @@ RendererSettings registerRendererSettings(Registry& reg) {
     });
     r.ubershader = &reg.add({
         .key = "debug.ubershader",
-        .label = "GLSL material shaders",
+        .label = "HLSL material shaders",
         .category = "Debug views",
         .tab = kTabDebug,
-        .description = "Draws the game's material pixel shaders with the GLSL port of its material shader (built from the same "
+        .description = "Draws the game's material pixel shaders with the HLSL port of its material shader (built from the same "
                        "macros the game compiled them with) instead of the translated precompiled shaders. Shaders the port "
                        "cannot build stay translated.",
         .type = Type::Bool,
@@ -1027,7 +1123,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .tab = kTabDebug,
         .description = "Records, for every material shader the game asks for, its effect, entry function and the full macro list "
                        "(the material graph's code snippets included) and writes them to bin/rvk/cache/materials/sources.jsonl "
-                       "(developer data for the GLSL material shader).",
+                       "(developer data for the HLSL material shader).",
         .type = Type::Bool,
         .defaultValue = 0,
         .flags = Flag::Debug | Flag::NoAB,
@@ -1053,31 +1149,6 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .tab = kTabDebug,
         .description = "Records the opaque passes' mesh draws grouped by pipeline (fewer pipeline switches, less CPU time per "
                        "draw). Off = every draw in the engine's order, to compare.",
-        .type = Type::Bool,
-        .defaultValue = 1,
-        .flags = Flag::Debug,
-        .page = "Debug", .section = "Renderer internals",
-    });
-    r.constantCompare = &reg.add({
-        .key = "debug.constant_compare",
-        .label = "Upload only changed constants",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "A shader constant write that changes nothing leaves the draw's constant block as it is (no new upload). "
-                       "Off = every write uploads a new block at the next draw, to compare.",
-        .type = Type::Bool,
-        .defaultValue = 1,
-        .flags = Flag::Debug,
-        .page = "Debug", .section = "Renderer internals",
-    });
-    r.splitConstants = &reg.add({
-        .key = "debug.split_constants",
-        .label = "Split shader constants",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "Uploads a draw's shader constants per register window (view, frame, object, material, light), only the "
-                       "windows that changed since their last upload and only the registers the shader reads, instead of one "
-                       "full block per stage per draw. Off = the full blocks, to compare.",
         .type = Type::Bool,
         .defaultValue = 1,
         .flags = Flag::Debug,
@@ -1139,7 +1210,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .min = 0,
         .max = 15,
-        .flags = Flag::NoAB | Flag::Hidden,
+        .flags = Flag::NoAB | Flag::Hidden | Flag::Debug,
         .page = "Debug", .section = "Debug views",
     });
     r.rtSceneViews = &reg.add({
@@ -1153,7 +1224,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .options = {"all", "main", "shadow"},
         .optionLabels = {"Main view + sun cascades", "Main view", "Sun cascades"},
-        .flags = Flag::NoAB | Flag::Hidden,
+        .flags = Flag::NoAB | Flag::Hidden | Flag::Debug,
         .page = "Debug", .section = "Debug views",
     });
 
@@ -1178,12 +1249,13 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 2,
         .options = {"low", "medium", "high"},
         .optionLabels = {"Low", "Medium", "High"},
+        .needs = {{"water.enabled", "true", false, true}},
         .page = "Water & Materials", .section = "Water",
     });
     r.rtReflections = &reg.add({
         .key = "rt.reflections",
-        .label = "Ray-traced reflections",
-        .category = "Water",
+        .label = "Ray-traced water reflections",
+        .category = "Ray tracing",
         .description = "Reflections on the water traced through the world: cliffs, trees, ships and houses are reflected even "
                        "when they are not on screen, with their own textures and shadows. Low is the fastest, High looks "
                        "best. Off: the water reflects only what is on screen. Needs a graphics card with ray tracing.",
@@ -1193,6 +1265,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Off", "Low", "Medium", "High"},
         .requirements = caps::bit(caps::Cap::RayQuery),
         .unmetValue = 0,
+        .needs = {{"water.enabled", "true", false, true}, {"water.reflections", "ssr", false, true}},
         .page = "Water & Materials", .section = "Water",
     });
     r.waterOcean = &reg.add({
@@ -1206,6 +1279,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 2,
         .options = {"off", "gerstner", "fft"},
         .optionLabels = {"Off", "Simple", "Realistic"},
+        .needs = {{"water.enabled", "true", false, true}},
         .page = "Water & Materials", .section = "Sea",
     });
     r.waterOceanQuality = &reg.add({
@@ -1217,6 +1291,8 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 2,
         .options = {"low", "medium", "high"},
         .optionLabels = {"Low", "Medium", "High"},
+        .flags = Flag::Advanced,
+        .needs = {{"water.ocean", "fft", false, true}},
         .page = "Water & Materials", .section = "Sea",
     });
     r.waterSeaState = &reg.add({
@@ -1228,6 +1304,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .options = {"auto", "calm", "moderate", "rough", "storm"},
         .optionLabels = {"Follow weather", "Calm", "Moderate", "Rough", "Storm"},
+        .needs = {{"water.ocean", "off", true, true}},
         .page = "Water & Materials", .section = "Sea",
     });
     r.waterReflections = &reg.add({
@@ -1241,6 +1318,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"sky", "ssr"},
         .optionLabels = {"Sky only", "World"},
         .flags = Flag::Advanced,
+        .needs = {{"water.enabled", "true", false, true}},
         .page = "Water & Materials", .section = "Water",
     });
     r.waterWindDirection = &reg.add({
@@ -1268,33 +1346,8 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 3,
         .format = "%.2f",
         .flags = Flag::Advanced,
+        .needs = {{"water.ocean", "off", true, true}},
         .page = "Water & Materials", .section = "Sea",
-    });
-    r.waterMurkiness = &reg.add({
-        .key = "water.murkiness",
-        .label = "Water murkiness",
-        .category = "Water",
-        .description = "How quickly the water gets cloudy with depth (1 = like each water's original look).",
-        .type = Type::Float,
-        .defaultValue = 1,
-        .min = 0.25,
-        .max = 4,
-        .format = "%.2f",
-        .flags = Flag::Advanced,
-        .page = "Water & Materials", .section = "Water",
-    });
-    r.waterReflectionStrength = &reg.add({
-        .key = "water.reflection_strength",
-        .label = "Reflection strength",
-        .category = "Water",
-        .description = "Brightness of the reflections and sun glints on the water (1 = realistic).",
-        .type = Type::Float,
-        .defaultValue = 1,
-        .min = 0,
-        .max = 2,
-        .format = "%.2f",
-        .flags = Flag::Advanced,
-        .page = "Water & Materials", .section = "Water",
     });
     r.waterDebug = &reg.add({
         .key = "water.debug",
@@ -1338,6 +1391,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 0,
         .options = {"low", "medium", "high"},
         .optionLabels = {"Low", "Medium", "High"},
+        .needs = {{"shadows.enabled", "true", false, true}},
         .page = "Lighting & Shadows", .section = "Sun shadows",
     });
     r.shadowsMapSize = &reg.add({
@@ -1352,46 +1406,6 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Auto", "Game setting", "Low (1024)", "Medium (2048)", "High (4096)"},
         .page = "Lighting & Shadows", .section = "Sun shadows",
     });
-    r.shadowsSoftness = &reg.add({
-        .key = "shadows.softness",
-        .label = "Shadow softness",
-        .category = "Shadows",
-        .description = "Width of the soft shadow edges.",
-        .type = Type::Float,
-        .defaultValue = 1,
-        .min = 0.5,
-        .max = 3,
-        .format = "%.2f",
-        .flags = Flag::Advanced,
-        .page = "Lighting & Shadows", .section = "Sun shadows",
-    });
-    r.shadowsBlend = &reg.add({
-        .key = "shadows.cascade_blend",
-        .label = "Shadow detail blending",
-        .category = "Shadows",
-        .description = "How gently the sharp shadows near the player blend into the coarser distant ones (0 = a hard line, "
-                       "like the game).",
-        .type = Type::Float,
-        .defaultValue = 0.2,
-        .min = 0,
-        .max = 0.5,
-        .format = "%.2f",
-        .flags = Flag::Advanced,
-        .page = "Lighting & Shadows", .section = "Sun shadows",
-    });
-    r.shadowsFade = &reg.add({
-        .key = "shadows.fade",
-        .label = "Shadow fade-out",
-        .category = "Shadows",
-        .description = "How gradually shadows fade out towards the end of the shadow distance.",
-        .type = Type::Float,
-        .defaultValue = 0.35,
-        .min = 0.05,
-        .max = 0.8,
-        .format = "%.2f",
-        .flags = Flag::Advanced,
-        .page = "Lighting & Shadows", .section = "Sun shadows",
-    });
     r.shadowsBias = &reg.add({
         .key = "shadows.bias",
         .label = "Shadow offset",
@@ -1404,6 +1418,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 4,
         .format = "%.2f",
         .flags = Flag::Advanced,
+        .needs = {{"shadows.enabled", "true", false, true}},
         .page = "Lighting & Shadows", .section = "Sun shadows",
     });
     r.shadowsRange = &reg.add({
@@ -1421,20 +1436,6 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::Advanced,
         .page = "Lighting & Shadows", .section = "Sun shadows",
     });
-    r.shadowsSplit = &reg.add({
-        .key = "shadows.split",
-        .label = "Shadow detail distribution",
-        .category = "Shadows",
-        .description = "Where the shadow detail goes when the shadow distance is changed: 0 keeps the most detail close to "
-                       "the player, 1 spreads it evenly.",
-        .type = Type::Float,
-        .defaultValue = 0.4,
-        .min = 0,
-        .max = 1,
-        .format = "%.2f",
-        .flags = Flag::Advanced,
-        .page = "Lighting & Shadows", .section = "Sun shadows",
-    });
     r.shadowsRt = &reg.add({
         .key = "shadows.rt",
         .label = "Ray-traced shadows",
@@ -1449,6 +1450,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Off", "Near", "Extended"},
         .requirements = caps::bit(caps::Cap::RayQuery),
         .unmetValue = 0,
+        .needs = {{"shadows.enabled", "true", false, true}},
         .page = "Ray Tracing", .section = "Traced sun shadows",
     });
     r.shadowsRtQuality = &reg.add({
@@ -1463,22 +1465,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Low", "Medium", "High"},
         .requirements = caps::bit(caps::Cap::RayQuery),
         .unmetValue = 1,
-        .page = "Ray Tracing", .section = "Traced sun shadows",
-    });
-    r.shadowsRtSoftness = &reg.add({
-        .key = "shadows.rt_softness",
-        .label = "Ray-traced shadow softness",
-        .category = "Shadows",
-        .description = "How wide the soft edge of a shadow grows with the distance to the object casting it (the sun's apparent "
-                       "size; the real sun is 0.27 degrees).",
-        .type = Type::Float,
-        .defaultValue = 1,
-        .min = 0.25,
-        .max = 4,
-        .format = "%.2f deg",
-        .flags = Flag::Advanced,
-        .requirements = caps::bit(caps::Cap::RayQuery),
-        .unmetValue = 1,
+        .needs = {{"shadows.rt", "off", true, true}},
         .page = "Ray Tracing", .section = "Traced sun shadows",
     });
     r.shadowsRtRange = &reg.add({
@@ -1493,62 +1480,16 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 120,
         .format = "%.0f m",
         .autoLabel = "Auto",
-        .flags = Flag::Advanced,
+        .flags = Flag::Hidden,
         .requirements = caps::bit(caps::Cap::RayQuery),
         .unmetValue = 0,
+        .needs = {{"shadows.rt", "off", true, true}},
         .page = "Ray Tracing", .section = "Traced sun shadows",
-    });
-    r.rtLodRange = &reg.add({
-        .key = "rt.lod_range",
-        .label = "Ray tracing detail distance",
-        .category = "Lighting",
-        .description = "Base distance beyond which the world is traced with simpler copies of the objects (fewer triangles, less "
-                       "graphics memory): the Ray tracing detail scale multiplies it. Near objects are never changed.",
-        .type = Type::Float,
-        .defaultValue = 60,
-        .min = 5,
-        .max = 500,
-        .format = "%.0f m",
-        .flags = Flag::Advanced,
-        .requirements = caps::bit(caps::Cap::RayQuery),
-        .unmetValue = 60,
-        .page = "Ray Tracing", .section = "Detail and memory",
-    });
-    r.rtLodFarRange = &reg.add({
-        .key = "rt.lod_far_range",
-        .label = "Ray tracing box distance",
-        .category = "Lighting",
-        .description = "Base distance beyond which small and medium objects are traced as simple boxes around them (trees as thin "
-                       "ones) and tiny ones are left out; times the Ray tracing detail scale. 0 = never.",
-        .type = Type::Float,
-        .defaultValue = 150,
-        .min = 0,
-        .max = 1000,
-        .format = "%.0f m",
-        .flags = Flag::Advanced,
-        .requirements = caps::bit(caps::Cap::RayQuery),
-        .unmetValue = 150,
-        .page = "Ray Tracing", .section = "Detail and memory",
-    });
-    r.rtLodBias = &reg.add({
-        .key = "rt.lod_bias",
-        .label = "Ray tracing detail reduction",
-        .category = "Lighting",
-        .description = "How much simpler the far copies are: 1 keeps half of the triangles, 2 a quarter, 3 an eighth. 0 = no simple "
-                       "copies (boxes only).",
-        .type = Type::Int,
-        .defaultValue = 2,
-        .min = 0,
-        .max = 3,
-        .flags = Flag::Advanced,
-        .requirements = caps::bit(caps::Cap::RayQuery),
-        .unmetValue = 2,
-        .page = "Ray Tracing", .section = "Detail and memory",
     });
     r.rtLodScale = &reg.add({
         .key = "rt.lod_scale",
         .label = "Ray tracing detail scale",
-        .category = "Lighting",
+        .category = "Ray tracing",
         .description = "Scales the distances beyond which the traced world gets simpler: 0.3 starts close (small and fast, for "
                        "weaker graphics cards), 1 is the base distances, 0 = off (always full detail).",
         .type = Type::Float,
@@ -1556,7 +1497,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .min = 0,
         .max = 2,
         .format = "%.2f",
-        .flags = Flag::Advanced,
+        .flags = Flag::Hidden,
         .requirements = caps::bit(caps::Cap::RayQuery),
         .unmetValue = 0,
         .page = "Ray Tracing", .section = "Detail and memory",
@@ -1564,7 +1505,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
     r.rtMemoryBudget = &reg.add({
         .key = "rt.memory_budget",
         .label = "Ray tracing memory limit",
-        .category = "Lighting",
+        .category = "Ray tracing",
         .description = "Limit for the graphics memory the traced world may use. Above it the simple copies start closer and far "
                        "objects give up their detailed version until it fits. 0 = no limit.",
         .type = Type::Int,
@@ -1581,7 +1522,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
     r.rtPreset = &reg.add({
         .key = "rt.preset",
         .label = "Ray tracing quality",
-        .category = "Lighting",
+        .category = "Ray tracing",
         .description = "One setting for the cost of everything that uses ray tracing: shadow, reflection and lighting quality and "
                        "ranges, how far the traced world keeps its detail and the memory it may use. Low is for weaker graphics "
                        "cards or when memory runs short, High traces the most. Changing any of those settings by hand makes it "
@@ -1593,19 +1534,6 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .requirements = caps::bit(caps::Cap::RayQuery),
         .unmetValue = 1,
         .page = "Ray Tracing", .section = "Quality", .order = -10,
-    });
-    r.shadowsRtWind = &reg.add({
-        .key = "shadows.rt_wind",
-        .label = "Ray-traced shadows follow the wind",
-        .category = "Shadows",
-        .description = "The branches and fronds of the trees near the player sway in the shadows as they do on screen. Costs a "
-                       "little graphics card time per tree.",
-        .type = Type::Bool,
-        .defaultValue = 1,
-        .flags = Flag::Advanced,
-        .requirements = caps::bit(caps::Cap::RayQuery),
-        .unmetValue = 0,
-        .page = "Ray Tracing", .section = "Traced sun shadows",
     });
     r.shadowsDebug = &reg.add({
         .key = "shadows.debug",
@@ -1646,6 +1574,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 1,
         .options = {"low", "medium", "high"},
         .optionLabels = {"Low", "Medium", "High"},
+        .needs = {{"gi.enabled", "true", false, true}},
         .page = "Ray Tracing", .section = "Traced lighting",
     });
     r.giStrength = &reg.add({
@@ -1659,6 +1588,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 1,
         .format = "%.2f",
         .flags = Flag::Advanced,
+        .needs = {{"gi.enabled", "true", false, true}},
         .page = "Ray Tracing", .section = "Traced lighting",
     });
     r.giLightmaps = &reg.add({
@@ -1672,22 +1602,12 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"keep", "replace"},
         .optionLabels = {"Keep", "Replace"},
         .flags = Flag::Advanced,
-        .page = "Ray Tracing", .section = "Traced lighting",
-    });
-    r.giCharacters = &reg.add({
-        .key = "gi.characters",
-        .label = "Characters in ray tracing",
-        .category = "Lighting",
-        .description = "The hero, people and monsters block and bounce the traced light (and appear in ray-traced "
-                       "reflections).",
-        .type = Type::Bool,
-        .defaultValue = 1,
-        .flags = Flag::Advanced,
+        .needs = {{"gi.enabled", "true", false, true}},
         .page = "Ray Tracing", .section = "Traced lighting",
     });
     r.giScreen = &reg.add({
         .key = "gi.screen",
-        .label = "Lighting detail",
+        .label = "Screen-space light detail",
         .category = "Lighting",
         .description = "Traces the bounced light from the surfaces on screen as well: exact shade where objects meet, light "
                        "that leaks less through walls. Lower it if the frame rate drops.",
@@ -1698,65 +1618,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::Advanced,
         .requirements = caps::bit(caps::Cap::RayQuery),
         .unmetValue = 0,
-        .page = "Ray Tracing", .section = "Traced lighting",
-    });
-    r.giBleed = &reg.add({
-        .key = "gi.bleed",
-        .label = "Colour bleeding",
-        .category = "Lighting",
-        .description = "How much surfaces tint the light they bounce onto their neighbours (a red wall reddens the floor next "
-                       "to it). Needs Lighting detail.",
-        .type = Type::Float,
-        .defaultValue = 0.5,
-        .min = 0,
-        .max = 1,
-        .format = "%.2f",
-        .flags = Flag::Advanced,
-        .requirements = caps::bit(caps::Cap::RayQuery),
-        .page = "Ray Tracing", .section = "Traced lighting",
-    });
-    r.giDirectional = &reg.add({
-        .key = "gi.directional",
-        .label = "Light direction detail",
-        .category = "Lighting",
-        .description = "How closely the bounced light follows where it really comes from at each surface: bumpy and curved "
-                       "surfaces are lit more from the side the light arrives from. Needs Lighting detail.",
-        .type = Type::Float,
-        .defaultValue = 0.5,
-        .min = 0,
-        .max = 1,
-        .format = "%.2f",
-        .flags = Flag::Advanced,
-        .requirements = caps::bit(caps::Cap::RayQuery),
-        .page = "Ray Tracing", .section = "Traced lighting",
-    });
-    r.giLights = &reg.add({
-        .key = "gi.lights",
-        .label = "Light sources",
-        .category = "Lighting",
-        .description = "Which lamps, fires and torches light the scene through the traced light. Nearby: only those the game "
-                       "lights the visible objects with (they fade out within a few dozen metres). World: all the lights the game "
-                       "has loaded around you, so distant light sources still light the places near them.",
-        .type = Type::Enum,
-        .defaultValue = 1,
-        .options = {"nearby", "world"},
-        .optionLabels = {"Nearby", "World"},
-        .flags = Flag::Advanced,
-        .requirements = caps::bit(caps::Cap::RayQuery),
-        .page = "Ray Tracing", .section = "Traced lighting",
-    });
-    r.giEmissive = &reg.add({
-        .key = "gi.emissive",
-        .label = "Glowing surfaces",
-        .category = "Lighting",
-        .description = "How strongly lava, glowing glass and other self-lit surfaces light their surroundings.",
-        .type = Type::Float,
-        .defaultValue = 1.0,
-        .min = 0,
-        .max = 4,
-        .format = "%.2f",
-        .flags = Flag::Advanced,
-        .requirements = caps::bit(caps::Cap::RayQuery),
+        .needs = {{"gi.enabled", "true", false, true}},
         .page = "Ray Tracing", .section = "Traced lighting",
     });
     r.giFoliage = &reg.add({
@@ -1772,39 +1634,8 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Off", "Near", "Far"},
         .flags = Flag::Advanced,
         .requirements = caps::bit(caps::Cap::RayQuery),
+        .needs = {{"gi.enabled", "true", false, true}},
         .page = "Ray Tracing", .section = "Traced lighting",
-    });
-    r.giFill = &reg.add({
-        .key = "gi.shadow_fill",
-        .label = "Shadow fill",
-        .category = "Lighting",
-        .description = "How dark the traced shade may get compared with the game's own flat ambient light: 0 lets shaded places "
-                       "fall as dark as the traced light says, higher keeps a share of the game's ambient there (softer, lighter "
-                       "shadows under trees and cliffs). Interiors and caves are not lifted: the share is of the ambient the game "
-                       "really shows at each surface (its baked indoor factor).",
-        .type = Type::Float,
-        .defaultValue = 0.5,
-        .min = 0,
-        .max = 1,
-        .format = "%.2f",
-        .flags = Flag::Advanced,
-        .requirements = caps::bit(caps::Cap::RayQuery),
-        .page = "Ray Tracing", .section = "Traced lighting",
-    });
-    r.giCutouts = &reg.add({
-        .key = "gi.cutouts",
-        .label = "GI foliage rays",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "How the traced light treats leaf cards and fronds. Solid: the whole card blocks (cheap, denser shade "
-                       "under trees). Tested: only the opaque part of the leaf texture blocks (the sky shows through).",
-        .type = Type::Enum,
-        .defaultValue = 1,
-        .options = {"solid", "tested"},
-        .optionLabels = {"Solid", "Tested"},
-        .flags = Flag::Debug | Flag::NoAB,
-        .requirements = caps::bit(caps::Cap::RayQuery),
-        .page = "Debug", .section = "Debug views",
     });
     r.giReference = &reg.add({
         .key = "gi.reference",
@@ -1865,20 +1696,6 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::Debug | Flag::NoAB,
         .page = "Debug", .section = "GI reference",
     });
-    r.giLightCount = &reg.add({
-        .key = "gi.light_count",
-        .label = "GI light sources (most)",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "The most light sources the traced light considers per frame (the strongest / nearest of the world's "
-                       "lights). More = lamps further away light their surroundings.",
-        .type = Type::Int,
-        .defaultValue = 128,
-        .min = 4,
-        .max = 128,
-        .flags = Flag::Debug | Flag::NoAB,
-        .page = "Debug", .section = "GI reference",
-    });
     r.giDebug = &reg.add({
         .key = "gi.debug",
         .label = "GI debug view",
@@ -1909,7 +1726,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
     });
     r.aoMode = &reg.add({
         .key = "ao.mode",
-        .label = "Game's ambient occlusion",
+        .label = "Ambient occlusion mode",
         .category = "Lighting",
         .description = "Replace: the game's own ambient occlusion is switched off and only the new one shades (on the ambient "
                        "light only: sunlit edges stay bright). Add: both shade (darker creases).",
@@ -1918,6 +1735,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"replace", "add"},
         .optionLabels = {"Replace", "Add"},
         .flags = Flag::Advanced,
+        .needs = {{"ao.enabled", "true", false, true}},
         .page = "Lighting & Shadows", .section = "Ambient occlusion",
     });
     r.aoStrength = &reg.add({
@@ -1931,19 +1749,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 1,
         .format = "%.2f",
         .flags = Flag::Advanced,
-        .page = "Lighting & Shadows", .section = "Ambient occlusion",
-    });
-    r.aoRadius = &reg.add({
-        .key = "ao.radius",
-        .label = "Ambient occlusion reach",
-        .category = "Lighting",
-        .description = "How far (in metres) surfaces shade each other.",
-        .type = Type::Float,
-        .defaultValue = 1,
-        .min = 0.25,
-        .max = 3,
-        .format = "%.2f m",
-        .flags = Flag::Advanced,
+        .needs = {{"ao.enabled", "true", false, true}},
         .page = "Lighting & Shadows", .section = "Ambient occlusion",
     });
     // ---- Full-owned lighting (enh/light_table.h, docs/research/gpu-scene.md 9.7) ----
@@ -1986,43 +1792,20 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::Debug,
         .page = "Debug", .section = "Clustered lights",
     });
-    r.lightingTrustTable = &reg.add({
-        .key = "lighting.trust_table",
-        .label = "Table lighting: trust the table (skip per-object light reads)",
-        .category = "Lighting",
-        .tab = kTabDebug,
-        .description = "Developer option (formerly lighting.table_complete). With table lighting on, a lit draw skips reading its own point lights when the light "
-                       "table verifiably holds every light its object names (each within 8 units of a table light); an object with a light the table misses keeps "
-                       "its own reads and hands the light to the table. Default off: a small CPU saving only. Run-time switch.",
-        .type = Type::Bool,
-        .defaultValue = 0,
-        .flags = Flag::Debug,
-        .page = "Debug", .section = "Clustered lights",
-    });
-    r.lightingTreeMerge = &reg.add({
-        .key = "lighting.tree_merge",
-        .label = "Table lighting: merge tree batches",
-        .category = "Lighting",
-        .tab = kTabDebug,
-        .description = "With table lighting on, consecutive SpeedTree instances of one pass merge into one draw whenever they share the sun flag and carry no "
-                       "static ambient (the light list no longer cuts a batch); the batch's ambient is its last instance's. Run-time switch (A/B).",
-        .type = Type::Bool,
-        .defaultValue = 1,
-        .flags = Flag::Debug,
-        .page = "Debug", .section = "Clustered lights",
-    });
     r.lightingStyle = &reg.add({
         .key = "lighting.style",
         .label = "Light style",
         .category = "Lighting",
         .description = "Original: the game's light falloff, so the image reads like the game. Physical: lamps follow an inverse-square law with a smooth "
                        "reach (brighter close to a lamp, gentler far away) and surfaces get a physically based specular highlight with energy-conserving diffuse (the sun, sky and "
-                       "exposure stay the game's). Needs clustered lights (Full mode); the shader code for it is loaded only when the game STARTS with Physical selected "
-                       "(a later switch changes the lamps' distance law only).",
+                       "exposure stay the game's). Needs Full mode with clustered lights; the shader code for it is loaded only when the game STARTS with Physical selected, "
+                       "so a change takes effect at the next start.",
         .type = Type::Enum,
         .defaultValue = 0,
         .options = {"original", "physical"},
         .optionLabels = {"Original", "Physical"},
+        .flags = Flag::Restart,
+        .needs = {{"renderer.mode", "full", false, false}, {"lighting.clustered", "true", false, true}},
         .page = "Lighting & Shadows", .section = "Light style",
     });
     r.lightingDebug = &reg.add({
@@ -2039,20 +1822,6 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Clustered lights",
     });
-    r.lightingCollect = &reg.add({
-        .key = "debug.light_collect",
-        .label = "Light table: collection radius",
-        .category = "Lighting",
-        .tab = kTabDebug,
-        .description = "Developer: the distance over which the light table collects lights (the near grid ends at 16,000, the far level at 96,000).",
-        .type = Type::Float,
-        .defaultValue = 96000,
-        .min = 16000,
-        .max = 96000,
-        .format = "%.0f",
-        .flags = Flag::Advanced | Flag::Debug,
-        .page = "Debug", .section = "Clustered lights",
-    });
     r.lightingShadows = &reg.add({
         .key = "lighting.light_shadows",
         .label = "Lamp shadows",
@@ -2066,6 +1835,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .optionLabels = {"Off", "Nearby", "Many"},
         .requirements = caps::bit(caps::Cap::RayQuery),
         .unmetValue = 0,
+        .needs = {{"renderer.mode", "full", false, false}, {"lighting.clustered", "true", false, true}, {"lighting.full_lit", "true", false, true}},
         .page = "Ray Tracing", .section = "Lamp shadows",
     });
     r.lightingShadowQuality = &reg.add({
@@ -2078,33 +1848,9 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"low", "medium", "high"},
         .optionLabels = {"Low", "Medium", "High"},
         .flags = Flag::Advanced,
-        .page = "Ray Tracing", .section = "Lamp shadows",
-    });
-    r.lightingShadowBaked = &reg.add({
-        .key = "lighting.light_shadow_baked",
-        .label = "Lamp shadows on baked light",
-        .category = "Lighting",
-        .description = "The floors and walls of the world carry their lamps' light baked in (lightmaps, light probes): a lamp's traced shadow also takes this share "
-                       "off such surfaces, where the hero or a prop blocks the lamp. 0 = only lights the game computes per pixel are shadowed.",
-        .type = Type::Float,
-        .defaultValue = 0.8,
-        .min = 0,
-        .max = 1,
-        .format = "%.2f",
-        .flags = Flag::Advanced,
-        .page = "Ray Tracing", .section = "Lamp shadows",
-    });
-    r.lightingShadowRadius = &reg.add({
-        .key = "lighting.light_shadow_radius",
-        .label = "Lamp size (shadow softness)",
-        .category = "Lighting",
-        .description = "The size of a lamp's flame for its shadow: a larger value gives softer shadow edges.",
-        .type = Type::Float,
-        .defaultValue = 20,
-        .min = 2,
-        .max = 80,
-        .format = "%.0f cm",
-        .flags = Flag::Advanced,
+        .requirements = caps::bit(caps::Cap::RayQuery),
+        .unmetValue = 1,
+        .needs = {{"lighting.light_shadows", "off", true, true}},
         .page = "Ray Tracing", .section = "Lamp shadows",
     });
     r.gbufferDebug = &reg.add({
@@ -2137,7 +1883,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
     });
     r.materialsQuality = &reg.add({
         .key = "materials.quality",
-        .label = "Material pack quality",
+        .label = "Material reflections",
         .category = "Materials",
         .description = "Low: sun specular and sky reflection. Medium: + the nearby lights' specular. High: + reflections traced through the world "
                        "(smooth surfaces mirror the buildings, trees and ships around them, not only the sky; needs a graphics card with ray tracing).",
@@ -2146,11 +1892,12 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"off", "low", "medium", "high"},
         .optionLabels = {"Off", "Low", "Medium", "High"},
         .optionRequirements = {0, 0, 0, caps::bit(caps::Cap::RayQuery)},
+        .needs = {{"materials.pack", "true", false, true}},
         .page = "Water & Materials", .section = "Material pack",
     });
     r.materialsRtReflections = &reg.add({
         .key = "materials.rt_reflections",
-        .label = "Traced reflections detail",
+        .label = "Traced material reflection detail",
         .category = "Materials",
         .description = "Detail of the traced reflections of the material pack's smooth surfaces (Material pack quality: High). Low traces one ray per four "
                        "pixels and shows foliage solid, High traces every pixel with alpha-tested leaves and shadows in the reflection.",
@@ -2158,6 +1905,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .defaultValue = 2,
         .options = {"low", "medium", "high"},
         .optionLabels = {"Low", "Medium", "High"},
+        .needs = {{"materials.quality", "high", false, true}},
         .page = "Water & Materials", .section = "Traced reflections",
     });
     r.materialsRtRange = &reg.add({
@@ -2171,59 +1919,8 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 600,
         .format = "%.0f m",
         .flags = Flag::Advanced,
+        .needs = {{"materials.quality", "high", false, true}},
         .page = "Water & Materials", .section = "Traced reflections",
-    });
-    r.materialsRtStrength = &reg.add({
-        .key = "materials.rt_strength",
-        .label = "Traced reflection strength",
-        .category = "Materials",
-        .description = "Strength of the traced reflections on materials with pack data.",
-        .type = Type::Float,
-        .defaultValue = 1,
-        .min = 0,
-        .max = 2,
-        .format = "%.2f",
-        .flags = Flag::Advanced,
-        .page = "Water & Materials", .section = "Traced reflections",
-    });
-    r.materialsSpecular = &reg.add({
-        .key = "materials.specular",
-        .label = "Pack specular strength",
-        .category = "Materials",
-        .description = "Strength of the lights' specular highlights on materials with pack data.",
-        .type = Type::Float,
-        .defaultValue = 1,
-        .min = 0,
-        .max = 2,
-        .format = "%.2f",
-        .flags = Flag::Advanced,
-        .page = "Water & Materials", .section = "Material pack",
-    });
-    r.materialsEnvironment = &reg.add({
-        .key = "materials.environment",
-        .label = "Pack reflection strength",
-        .category = "Materials",
-        .description = "Strength of the sky reflection on materials with pack data.",
-        .type = Type::Float,
-        .defaultValue = 1,
-        .min = 0,
-        .max = 2,
-        .format = "%.2f",
-        .flags = Flag::Advanced,
-        .page = "Water & Materials", .section = "Material pack",
-    });
-    r.materialsRoughness = &reg.add({
-        .key = "materials.default_roughness",
-        .label = "Default roughness",
-        .category = "Materials",
-        .description = "Roughness of pack entries that have no roughness map or constant.",
-        .type = Type::Float,
-        .defaultValue = 0.7,
-        .min = 0,
-        .max = 1,
-        .format = "%.2f",
-        .flags = Flag::Advanced,
-        .page = "Water & Materials", .section = "Material pack",
     });
     r.materialsDerive = &reg.add({
         .key = "materials.derive_from_specular",
@@ -2235,32 +1932,6 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "pack entry, and those without specular data, are not changed.",
         .type = Type::Bool,
         .defaultValue = 1,
-        .page = "Water & Materials", .section = "Material pack",
-    });
-    r.materialsDeriveMin = &reg.add({
-        .key = "materials.derive_min",
-        .label = "Derived roughness, smoothest",
-        .category = "Materials",
-        .description = "The derived roughness never goes below this (keeps cloth and skin from turning into mirrors).",
-        .type = Type::Float,
-        .defaultValue = 0.25,
-        .min = 0,
-        .max = 1,
-        .format = "%.2f",
-        .flags = Flag::Advanced,
-        .page = "Water & Materials", .section = "Material pack",
-    });
-    r.materialsDeriveMax = &reg.add({
-        .key = "materials.derive_max",
-        .label = "Derived roughness, roughest",
-        .category = "Materials",
-        .description = "The derived roughness never goes above this (before a weak specular mask makes it rougher).",
-        .type = Type::Float,
-        .defaultValue = 0.9,
-        .min = 0,
-        .max = 1,
-        .format = "%.2f",
-        .flags = Flag::Advanced,
         .page = "Water & Materials", .section = "Material pack",
     });
     r.materialsBudget = &reg.add({
@@ -2276,19 +1947,6 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::Restart | Flag::Advanced,
         .page = "Water & Materials", .section = "Material pack",
     });
-    r.materialsWetness = &reg.add({
-        .key = "materials.wetness",
-        .label = "Pack wetness",
-        .category = "Materials",
-        .description = "How wet the materials look that have a wetness value in the pack: 0 = dry, 1 = as the pack says (smoother, a little darker).",
-        .type = Type::Float,
-        .defaultValue = 1,
-        .min = 0,
-        .max = 1,
-        .format = "%.2f",
-        .flags = Flag::Advanced,
-        .page = "Water & Materials", .section = "Material pack",
-    });
     r.materialsGlass = &reg.add({
         .key = "materials.glass",
         .label = "Traced glass",
@@ -2297,11 +1955,12 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "angle) and bottles refract what is behind them. Needs Material pack quality High. Off: the game's plain blended glass.",
         .type = Type::Bool,
         .defaultValue = 1,
+        .needs = {{"materials.quality", "high", false, true}},
         .page = "Water & Materials", .section = "Traced reflections",
     });
     r.materialsRainWetness = &reg.add({
         .key = "materials.rain_wetness",
-        .label = "Rain wetness",
+        .label = "Rain",
         .category = "Materials",
         .description = "How much rain wets the world while the traced reflections run (Material pack quality: High): surfaces in the open get smoother, "
                        "darker and shinier, and dry again slowly after the rain. 0 = the rain leaves no trace.",
@@ -2310,19 +1969,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .min = 0,
         .max = 1,
         .format = "%.2f",
-        .page = "Water & Materials", .section = "Rain",
-    });
-    r.materialsPuddles = &reg.add({
-        .key = "materials.puddles",
-        .label = "Rain puddles",
-        .category = "Materials",
-        .description = "Puddles on flat ground while it rains and after: dark water that mirrors the sky and the buildings, with rings where drops "
-                       "fall (needs the traced reflections: Material pack quality High). 0 = no puddles.",
-        .type = Type::Float,
-        .defaultValue = 0.7,
-        .min = 0,
-        .max = 1,
-        .format = "%.2f",
+        .needs = {{"materials.quality", "high", false, true}},
         .page = "Water & Materials", .section = "Rain",
     });
     r.materialsRainForce = &reg.add({
@@ -2399,20 +2046,23 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"fsr3", "fsr4"},
         .optionLabels = {"FSR 3.1", "FSR 4 (neural, experimental)"},
         .flags = Flag::Advanced,
+        .needs = {{"upscale.mode", "off", true, true}},
         .page = "Image", .section = "Upscaling and anti-aliasing",
     });
     r.upscaleObjectMotion = &reg.add({
         .key = "upscale.object_motion",
         .label = "Motion of characters and objects",
-        .category = "Image",
+        .category = "Debug views",
+        .tab = kTabDebug,
         .description = "Tells FSR how characters (and with \"Characters and objects\" also moving rigid objects such as a drawn "
                        "weapon) really move, so they stay sharp instead of blurring while they animate.",
         .type = Type::Enum,
         .defaultValue = 1,
         .options = {"off", "characters", "all"},
         .optionLabels = {"Off", "Characters", "Characters and objects"},
-        .flags = Flag::Advanced,
-        .page = "Image", .section = "Upscaling and anti-aliasing",
+        .flags = Flag::Debug,
+        .needs = {{"upscale.mode", "off", true, true}},
+        .page = "Debug", .section = "Debug views",
     });
     r.upscaleReactive = &reg.add({
         .key = "upscale.reactive",
@@ -2422,33 +2072,8 @@ RendererSettings registerRendererSettings(Registry& reg) {
                        "less where such effects are drawn.",
         .type = Type::Bool,
         .defaultValue = 1,
-        .page = "Image", .section = "Upscaling and anti-aliasing",
-    });
-    r.upscaleReactiveCutoff = &reg.add({
-        .key = "upscale.reactive_cutoff",
-        .label = "Effect detection threshold",
-        .category = "Image",
-        .description = "How different a pixel must look with and without the translucent effects before FSR treats it as an "
-                       "effect. Lower catches fainter effects (rain), 0 = every difference counts.",
-        .type = Type::Float,
-        .defaultValue = 0.08,
-        .min = 0,
-        .max = 1,
-        .format = "%.3f",
         .flags = Flag::Advanced,
-        .page = "Image", .section = "Upscaling and anti-aliasing",
-    });
-    r.upscaleReactiveScale = &reg.add({
-        .key = "upscale.reactive_scale",
-        .label = "Effect clean-up strength",
-        .category = "Image",
-        .description = "Multiplies the effect mask: higher trusts the temporal history less where effects are drawn.",
-        .type = Type::Float,
-        .defaultValue = 1,
-        .min = 0,
-        .max = 4,
-        .format = "%.2f",
-        .flags = Flag::Advanced,
+        .needs = {{"upscale.mode", "off", true, true}},
         .page = "Image", .section = "Upscaling and anti-aliasing",
     });
     r.upscaleSharpness = &reg.add({
@@ -2462,20 +2087,23 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .min = 0,
         .max = 1,
         .format = "%.2f",
+        .needs = {{"upscale.mode", "off", true, true}},
         .page = "Image", .section = "Upscaling and anti-aliasing",
     });
     r.upscaleExposure = &reg.add({
         .key = "upscale.exposure",
         .label = "Exposure",
-        .category = "Image",
+        .category = "Debug views",
+        .tab = kTabDebug,
         .description = "Which brightness FSR weighs bright and dark pixels with: \"Game\" gives it the exposure the game's own tone "
                        "mapping uses (steady, and what you actually see); \"Automatic\" lets FSR estimate it from every frame.",
         .type = Type::Enum,
         .defaultValue = 0,
         .options = {"engine", "auto"},
         .optionLabels = {"Game", "Automatic (FSR)"},
-        .flags = Flag::Advanced,
-        .page = "Image", .section = "Upscaling and anti-aliasing",
+        .flags = Flag::Debug,
+        .needs = {{"upscale.mode", "off", true, true}},
+        .page = "Debug", .section = "Debug views",
     });
     r.upscaleJitterFlip = &reg.add({
         .key = "upscale.jitter_flip",
@@ -2490,23 +2118,11 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Debug views",
     });
-    r.upscalePostFullSize = &reg.add({
-        .key = "upscale.post_full_size",
-        .label = "Post effects at output size",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "With a render scale below 1 the game's post effects (tone mapping, depth of field) size their images from the "
-                       "scene image. On: they are told the output size, so FSR's upscaled picture reaches the screen as it is. Off = "
-                       "the old behaviour (tone mapped at the render size and stretched again), to compare.",
-        .type = Type::Bool,
-        .defaultValue = 1,
-        .flags = Flag::Debug,
-        .page = "Debug", .section = "Debug views",
-    });
     r.upscaleCutoutThicken = &reg.add({
         .key = "upscale.cutout_thicken",
         .label = "Steadier thin cut-outs",
-        .category = "Image",
+        .category = "Debug views",
+        .tab = kTabDebug,
         .description = "Below native resolution, cut-out textures with strands thinner than a pixel (fishing nets, fine leaves) "
                        "flicker under FSR. This keeps such strands about a pixel wide: steadier, but they look heavier and less "
                        "see-through. Scaled with the render scale (nothing at native AA). 0 = off; 0.15 to 0.25 is a mild setting.",
@@ -2515,8 +2131,9 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .min = 0,
         .max = 0.5,
         .format = "%.2f",
-        .flags = Flag::Advanced,
-        .page = "Image", .section = "Upscaling and anti-aliasing",
+        .flags = Flag::Debug,
+        .needs = {{"upscale.mode", "off", true, true}},
+        .page = "Debug", .section = "Debug views",
     });
     r.upscaleAlphaDither = &reg.add({
         .key = "upscale.alpha_dither",
@@ -2529,6 +2146,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .type = Type::Bool,
         .defaultValue = 0,
         .flags = Flag::Debug,
+        .needs = {{"upscale.mode", "off", true, true}},
         .page = "Debug", .section = "Debug views",
     });
 
@@ -2569,6 +2187,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::Debug,
         .requirements = caps::bit(caps::Cap::FrameGeneration),
         .unmetValue = 0,
+        .needs = {{"framegen.mode", "off", true, true}},
         .page = "Debug", .section = "Debug views",
     });
     r.framegenDebug = &reg.add({
@@ -2583,6 +2202,7 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .options = {"off", "motion", "depth", "hudless", "generated"},
         .optionLabels = {"Off", "Motion vectors", "Depth", "HUD-less copy", "Generated frame"},
         .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"framegen.mode", "off", true, true}},
         .page = "Debug", .section = "Debug views",
     });
 
@@ -2613,21 +2233,6 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .max = 4,
         .format = "%.1fx",
         .page = "Detail Distances", .section = "Draw distances",
-    });
-    r.skyCubeInterval = &reg.add({
-        .key = "debug.sky_cube_interval",
-        .label = "Sky cube refresh interval (ms)",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "While the enhanced water is on, the game's sky environment cube (reflected by the water) is redrawn whole. The sky "
-                       "changes slowly: every this many milliseconds is enough (a lightning flash shows up in the reflection at most this "
-                       "late). 0 = every frame.",
-        .type = Type::Int,
-        .defaultValue = 100,
-        .min = 0,
-        .max = 1000,
-        .flags = Flag::Debug,
-        .page = "Debug", .section = "Renderer internals",
     });
     r.shadowStride = &reg.add({
         .key = "debug.shadow_stride",
@@ -2770,22 +2375,6 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Native frame",
     });
-    r.nativeMirror = &reg.add({
-        .key = "native.mirror",
-        .label = "Native frame: register file",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "Where the composition's constant registers come from (docs/research/engine-frame/opt-plan.md, O1 result): 0 our own register "
-                       "file, carried across ops and views like the device's (the engine's pools read once, then only the writes of engine "
-                       "code that is not composed are merged in), 1 the engine's pools re-read once per view, 2 re-read at every op (the N5.x "
-                       "behaviour, for A/B).",
-        .type = Type::Int,
-        .defaultValue = 0,
-        .min = 0,
-        .max = 2,
-        .flags = Flag::NoAB | Flag::Debug,
-        .page = "Debug", .section = "Native frame",
-    });
     r.nativeLean = &reg.add({
         .key = "native.lean",
         .label = "Native frame: lean ops",
@@ -2824,108 +2413,14 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .category = "Debug views",
         .tab = kTabDebug,
         .description = "Full mode: the finished packet of a composed static-mesh / tree draw of the main view is kept and replayed while its description is unchanged "
-                       "(prepareDraw and most state setters skipped). 0 off, 1 on, 2 on + every 10th frame the fresh packet is compared with the retained one, "
-                       "3 verify every frame (rvk.log `native: packet cache`, DIFFERING must stay 0), 4 = on without retaining the variant draws (GI / material pack / billboard fade: the "
+                       "(prepareDraw and most state setters skipped). Off, on (default), on + every 10th frame the fresh packet is compared with the retained one, "
+                       "verify every frame (rvk.log `native: packet cache`, DIFFERING must stay 0), no variants = on without retaining the variant draws (GI / material pack / billboard fade: the "
                        "behaviour before retained-signals.md 13, A/B). Off while a compare, the frame tap or coverage is on, and per draw "
                        "while an enhancement needs prepareDraw (replacers, G-buffer variants, tint, upscaling jitter).",
-        .type = Type::Int,
+        .type = Type::Enum,
         .defaultValue = 1,
-        .min = 0,
-        .max = 4,
-        .flags = Flag::NoAB | Flag::Debug,
-        .page = "Debug", .section = "Native frame",
-    });
-    r.nativeGpuScene = &reg.add({
-        .key = "native.gpu_scene",
-        .label = "Native frame: GPU scene tables",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "GPU-driven scene (docs/research/gpu-scene.md). 1 = verify the signal-fed instance table (cache-in / out, world matrix) against the engine's ops "
-                       "(rvk.log `scene table:`, DIFFERING and unresolved must stay 0). 2 = also keep the table on the GPU (gpuscene/instance_buffer: batched uploads, "
-                       "every 240th frame a read-back compared with the uploaded copy; rvk.log `gpu scene:`, DIFFERING must stay 0). The CPU table is always maintained.",
-        .type = Type::Int,
-        .defaultValue = 0,
-        .min = 0,
-        .max = 2,
-        .flags = Flag::NoAB | Flag::Debug,
-        .page = "Debug", .section = "Native frame",
-    });
-    r.nativeOpts = &reg.add({
-        .key = "native.cpu_opts",
-        .label = "Native frame: CPU optimizations (bit mask)",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "Full-mode CPU pass (performance.md 22): bit 1 sky vertices kept across cube faces / frames, 2 composition caches, "
-                       "4 issue fast paths, 8 sky/dynamic vertex copies. Each bit is an A/B switch; 0 = the old behaviour.",
-        .type = Type::Int,
-        .defaultValue = 255,
-        .min = 0,
-        .max = 255,
-        .flags = Flag::NoAB | Flag::Debug,
-        .page = "Debug", .section = "Native frame",
-    });
-    r.nativeLeanRestore = &reg.add({
-        .key = "native.lean_restore",
-        .label = "Native frame: device restore around lean ops",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "O2b measurement switch: off = the device state is not saved / restored around the draws of an op whose engine "
-                       "code is skipped (the engine's state caches then no longer match the device for the engine code that still "
-                       "runs: an A/B of the restore's cost only).",
-        .type = Type::Bool,
-        .defaultValue = 1,
-        .flags = Flag::NoAB | Flag::Debug,
-        .page = "Debug", .section = "Native frame",
-    });
-    r.nativeRetained = &reg.add({
-        .key = "native.retained",
-        .label = "Native frame: retained composition",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "V3 (docs/research/vulkanize/plan.md): the composed sub-mesh draws (passes, pipelines' shaders, states, samplers, "
-                       "geometry) of an op are kept across frames, keyed by their inputs and validated against the engine memory the "
-                       "composition read; per frame only the constants (world, lighting, bones, view) are refreshed. Off = every draw "
-                       "composed from scratch each frame (A/B). rvk.log `native: retained`.",
-        .type = Type::Bool,
-        .defaultValue = 0,
-        .flags = Flag::NoAB | Flag::Debug,
-        .page = "Debug", .section = "Native frame",
-    });
-    r.nativeRetainedCheck = &reg.add({
-        .key = "native.retained_check",
-        .label = "Native frame: retained composition check",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "With native.retained: every retained replay is also composed fresh and compared field by field (a difference = a "
-                       "missing invalidation key: rvk.log `native: retained ... stale`, must stay 0); the lean_check frames do it too.",
-        .type = Type::Bool,
-        .defaultValue = 0,
-        .flags = Flag::NoAB | Flag::Debug,
-        .page = "Debug", .section = "Native frame",
-    });
-    r.nativeRetainedGroups = &reg.add({
-        .key = "native.retained_groups",
-        .label = "Native frame: retained groups",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "Bit mask of the StaticOps groups that retain their draws (0 static, 1 mesh, 6 actors, 7 trees, 8 vegetation, 9 shadow views).",
-        .type = Type::Int,
-        .defaultValue = 0x2ff,
-        .min = 0,
-        .max = 0xffff,
-        .flags = Flag::NoAB | Flag::Debug,
-        .page = "Debug", .section = "Native frame",
-    });
-    r.nativeLeanEffects = &reg.add({
-        .key = "native.lean_effects",
-        .label = "Native frame: lean effect units",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "O3: with native.lean, the composed effect filters (shadow mask chain, terrain blur, post chain), sprite flushes "
-                       "and the PSSM pass skip the engine's code too (their side effects reproduced). Off = only the scene ops are lean "
-                       "(A/B switch).",
-        .type = Type::Bool,
-        .defaultValue = 1,
+        .options = {"off", "on", "verify_10", "verify_all", "no_variants"},
+        .optionLabels = {"Off", "On", "On + verify every 10th frame", "On + verify every frame", "On without the variant draws (A/B)"},
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Native frame",
     });
@@ -2941,47 +2436,6 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Native frame",
     });
-    r.fsReadCache = &reg.add({
-        .key = "debug.fs_read_cache",
-        .label = "Read-ahead of packed files (KiB)",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "Every read from a file inside the game's data volumes is two system calls (seek + read), however small; loading "
-                       "a world reads millions of bytes a few at a time. The read-ahead buffer (per open file, grows with sequential "
-                       "reads up to this size) serves them from memory. The data read is the same. 0 = off.",
-        .type = Type::Int,
-        .defaultValue = 64,
-        .min = 0,
-        .max = 1024,
-        .flags = Flag::Debug,
-        .page = "Debug", .section = "Renderer internals",
-    });
-    r.fastAbsorb = &reg.add({
-        .key = "debug.fast_absorb",
-        .label = "Cloud absorption image by sliding windows",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "The game computes the cloud absorption image with 128 integer divisions per pixel whenever a cloud texture is "
-                       "set (every world load). 1 = the same image by sliding window sums (bit-identical), 0 = the game's loop, "
-                       "2 = the game's loop and compare the image with ours (rvk.log).",
-        .type = Type::Int,
-        .defaultValue = 1,
-        .min = 0,
-        .max = 2,
-        .flags = Flag::Debug,
-        .page = "Debug", .section = "Renderer internals",
-    });
-    r.soundCompressed = &reg.add({
-        .key = "debug.sound_compressed",
-        .label = "Short sounds stay compressed in memory",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "The game decodes sounds below a size limit completely when it creates them (1 - 18 ms on the game thread each time one leaves the cache and plays again). On = FMOD keeps them compressed and decodes them while they play, on its own mixer thread. The sound is the same codec output; not checked by ear.",
-        .type = Type::Bool,
-        .defaultValue = 0,
-        .flags = Flag::NoAB | Flag::Debug,
-        .page = "Debug", .section = "Renderer internals",
-    });
     r.streamStats = &reg.add({
         .key = "debug.stream_stats",
         .label = "Loading statistics",
@@ -2994,48 +2448,6 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .min = 0,
         .max = 2,
         .flags = Flag::NoAB | Flag::Debug,
-        .page = "Debug", .section = "Renderer internals",
-    });
-    r.xinputInterval = &reg.add({
-        .key = "debug.xinput_interval",
-        .label = "Gamepad poll interval when disconnected (ms)",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "The game asks the XInput library for four gamepads every frame; a disconnected one costs ~0.15 ms each frame. "
-                       "After a 'not connected' answer the index is asked again only after this many milliseconds (a connected pad "
-                       "is polled every frame). 0 = every frame, as the game does.",
-        .type = Type::Int,
-        .defaultValue = 1000,
-        .min = 0,
-        .max = 5000,
-        .flags = Flag::Debug,
-        .page = "Debug", .section = "Renderer internals",
-    });
-    r.oceanSpd = &reg.add({
-        .key = "debug.ocean_spd",
-        .label = "FFT ocean: mip chains by compute",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "The FFT ocean's displacement / derivative mip chains: on = two compute dispatches per image (a single-pass "
-                       "downsampler in the style of FidelityFX SPD, ocean_mips.comp), off = one blit per level (the old path, for A/B).",
-        .type = Type::Bool,
-        .defaultValue = 1,
-        .flags = Flag::NoAB | Flag::Debug,
-        .page = "Debug", .section = "Renderer internals",
-    });
-    r.fastSort = &reg.add({
-        .key = "debug.fast_sort",
-        .label = "Typed sort of the render-op lists",
-        .category = "Debug views",
-        .tab = kTabDebug,
-        .description = "The game sorts its z / solid / alpha op lists with the CRT's qsort and a function-pointer comparator. 1 = the "
-                       "same algorithm with inlined comparators (bit-identical result, less CPU), 0 = the game's qsort, 2 = typed sort "
-                       "and compare every list with the game's result (rvk.log error on a difference).",
-        .type = Type::Int,
-        .defaultValue = 1,
-        .min = 0,
-        .max = 2,
-        .flags = Flag::Debug,
         .page = "Debug", .section = "Renderer internals",
     });
     r.prefetchStride = &reg.add({
@@ -3121,13 +2533,13 @@ const std::vector<Preset>& rtPresets() {
     // distances, a memory limit, fewer rays; High has the ladder off and the most rays (docs/research/rt-lod.md)
     static const std::vector<Preset> presets = {
         {"low", "Low",
-         {{"rt.lod_scale", "0.3"}, {"rt.lod_bias", "3"}, {"rt.memory_budget", "384"}, {"shadows.rt_quality", "low"}, {"shadows.rt_range", "15"},
+         {{"rt.lod_scale", "0.3"}, {"rt.memory_budget", "384"}, {"shadows.rt_quality", "low"}, {"shadows.rt_range", "15"}, {"lighting.light_shadow_quality", "low"},
           {"rt.reflections", "low"}, {"gi.quality", "low"}, {"gi.screen", "low"}, {"materials.rt_reflections", "low"}, {"materials.rt_range", "60"}}},
         {"medium", "Medium",
-         {{"rt.lod_scale", "0"}, {"rt.lod_bias", "2"}, {"rt.memory_budget", "0"}, {"shadows.rt_quality", "medium"}, {"shadows.rt_range", "0"},
+         {{"rt.lod_scale", "0"}, {"rt.memory_budget", "0"}, {"shadows.rt_quality", "medium"}, {"shadows.rt_range", "0"}, {"lighting.light_shadow_quality", "medium"},
           {"rt.reflections", "high"}, {"gi.quality", "medium"}, {"gi.screen", "medium"}, {"materials.rt_reflections", "high"}, {"materials.rt_range", "150"}}},
         {"high", "High",
-         {{"rt.lod_scale", "0"}, {"rt.lod_bias", "2"}, {"rt.memory_budget", "0"}, {"shadows.rt_quality", "high"}, {"shadows.rt_range", "0"},
+         {{"rt.lod_scale", "0"}, {"rt.memory_budget", "0"}, {"shadows.rt_quality", "high"}, {"shadows.rt_range", "0"}, {"lighting.light_shadow_quality", "high"},
           {"rt.reflections", "high"}, {"gi.quality", "high"}, {"gi.screen", "high"}, {"materials.rt_reflections", "high"}, {"materials.rt_range", "300"}}},
     };
     return presets;
@@ -3138,12 +2550,23 @@ int matchRtPreset(const Registry& reg) {
     for (std::size_t i = 0; i < presets.size(); ++i) {
         const bool all = std::ranges::all_of(presets[i].values, [&](const auto& kv) {
             const Setting* s = reg.find(kv.first);
+            if (s != nullptr && (s->spec().flags & Flag::Hidden) != 0) return true;  // members the player cannot see do not decide "custom"
             double v = 0.0;
             return s != nullptr && Registry::parseText(s->spec(), kv.second, v) && s->value() == v;
         });
         if (all) return static_cast<int>(i);
     }
     return -1;
+}
+
+bool syncRtPreset(Registry& reg) {
+    Setting* preset = reg.find("rt.preset");
+    if (preset == nullptr) return false;
+    const int m = matchRtPreset(reg);
+    const std::string want = m < 0 ? "custom" : rtPresets()[static_cast<std::size_t>(m)].name;
+    if (reg.text(*preset) == want) return false;
+    reg.setText("rt.preset", want);
+    return true;
 }
 
 void applyPreset(Registry& reg, const Preset& preset) {

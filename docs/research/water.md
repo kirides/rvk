@@ -1,5 +1,7 @@
 # Water: classification, the enhanced water pass, the sea's shore (M7, first piece)
 
+> Note (2026-11-05): the settings `water.murkiness`, `water.reflection_strength` named below were removed (removed 2026-11-05, now a constant in code or an always-on behaviour: see `docs/research/settings-audit.md`); read them as the history / the values the code now fixes, not as switches to set.
+
 What Risen's water is (materials, meshes, passes, the engine's own sea and coast), how the renderer recognises each body of
 water, and the optional enhanced water (settings category "Water", player default on since 2026-10-23, off in the test baseline: overlay.md 2.3): the engine's own water materials evaluated in
 GLSL (the same water) with traced reflections, a wave grid for the open sea with waves rolling in, a lower, moving shoreline

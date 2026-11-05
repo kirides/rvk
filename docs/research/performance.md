@@ -1,5 +1,7 @@
 # Performance and frame pacing (M5)
 
+> Note (2026-11-05): the settings `debug.constant_compare`, `debug.fast_absorb`, `debug.fast_sort`, `debug.fs_read_cache`, `debug.ocean_spd`, `debug.sky_cube_interval`, `debug.sound_compressed`, `debug.split_constants`, `debug.xinput_interval`, `lighting.table_complete`, `lighting.tree_merge`, `native.cpu_opts`, `native.lean_effects`, `native.lean_restore`, `native.mirror`, `native.retained` named below were removed (removed 2026-11-05, now a constant in code or an always-on behaviour: see `docs/research/settings-audit.md`); read them as the history / the values the code now fixes, not as switches to set.
+
 Measurements and findings of the first performance pass (2026-10-21). Machine: AMD Radeon RX 7900 XTX (Adrenalin, Vulkan
 1.4.355), 120 Hz primary display (DWM clock 120.01 Hz) + a 60 Hz virtual display, game window 1600x900 windowed.
 

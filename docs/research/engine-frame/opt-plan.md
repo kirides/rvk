@@ -1,5 +1,7 @@
 # Full mode optimization plan (2026-10-28)
 
+> Note (2026-11-05): the settings `native.cpu_opts`, `native.lean_effects`, `native.lean_restore`, `native.mirror` named below were removed (removed 2026-11-05, now a constant in code or an always-on behaviour: see `docs/research/settings-audit.md`); read them as the history / the values the code now fixes, not as switches to set.
+
 Inputs: `opt-profile.md` (where Full's CPU goes), `opt-side-effects-mesh.md`, `opt-side-effects-anim.md`, `opt-side-effects-frame.md`
 (what the engine's render code does besides drawing). All side-effect findings are from code reading, not yet checked in game.
 

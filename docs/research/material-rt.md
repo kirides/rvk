@@ -1,5 +1,7 @@
 # Traced reflections of the material pack's surfaces, rain wetness and puddles
 
+> Note (2026-11-05): the settings `materials.puddles`, `materials.rt_strength`, `materials.wetness` named below were removed (removed 2026-11-05, now a constant in code or an always-on behaviour: see `docs/research/settings-audit.md`); read them as the history / the values the code now fixes, not as switches to set.
+
 Status: built 2026-11-05 (traced reflections, rain, puddles; glass: section 8; GI follow-ups: section 9, not built). Legend: **[C]** confirmed in a game run, **[I]** inferred.
 Code: `src/enh/material_rt.*` (the pass), `src/enh/rain_wetness.h` (pure wetness model), `engine::rainOfWeather` (`src/engine/weather.*`),
 `shaders/materials/material_rt_common.hlsli`, `material_rt.comp.hlsl`, `material_rt_filter.comp.hlsl`, `material_rt.frag.hlsl`. Tests: `rvk_tests rain_*`.
