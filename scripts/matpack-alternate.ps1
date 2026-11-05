@@ -64,6 +64,10 @@ for s in spots:
     cross = (ne(b[0], b[1]) | ne(b[2], b[3])) & keep
     n = int(cross.sum()); total += n
     print(f"{s}: not-animated pixels {int(keep.sum())} of {keep.size}; variant-vs-engine differing pixels among them {n}")
+    if n:  # magnitude (derive on: this is the derived gloss's effect; b0 / b2 = variants, b1 / b3 = engine shaders)
+        d = np.maximum(np.abs(b[0] - b[1]).max(axis=2), np.abs(b[2] - b[3]).max(axis=2))[cross]
+        l0 = (b[0].mean(axis=2) + b[2].mean(axis=2))[keep].mean() / 2; l1 = (b[1].mean(axis=2) + b[3].mean(axis=2))[keep].mean() / 2
+        print(f"    {100.0 * n / keep.sum():.2f} % of the pixels; max diff {int(d.max())}, mean {d.mean():.1f}, p99 {np.percentile(d, 99):.0f}; mean luma variants / engine {l0 / l1:.4f}")
 print('TOTAL variant-vs-engine differing pixels (not-animated)', total)
 '@
 $pyFile = Join-Path $out 'diff.py'

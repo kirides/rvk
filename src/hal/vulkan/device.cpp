@@ -512,8 +512,11 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     std::vector<std::filesystem::path> packRoots;
     if (rs.materialsPack != nullptr && rs.materialsPack->asBool()) {
         packRoots.push_back(paths::dataDir() / "materialpack");
-        if (const char* env = std::getenv("RVK_MATPACK"); env != nullptr && *env != 0) {
-            std::string list = env;
+        // (the Win32 environment, not the CRT's getenv snapshot: run.ps1 -Environment / [debug] environment set the variable from DllMain with SetEnvironmentVariableW)
+        char envBuf[4096];
+        const DWORD envLen = GetEnvironmentVariableA("RVK_MATPACK", envBuf, sizeof(envBuf));
+        if (envLen != 0 && envLen < sizeof(envBuf)) {
+            std::string list(envBuf, envLen);
             for (std::size_t at = 0; at <= list.size();) {
                 const std::size_t semi = list.find(';', at);
                 const std::string part = list.substr(at, semi == std::string::npos ? std::string::npos : semi - at);

@@ -215,6 +215,11 @@ float roughnessFromPower(float specularPower) {
     return std::sqrt(std::sqrt(2.0f / (n + 2.0f)));
 }
 
+float glossGate(float r) {
+    const float t = clamp01((r - kGlossStart) / kGlossSpan);
+    return r + (1.0f - r) * t;
+}
+
 Derived deriveFromSpecular(const SpecularInfo& s, const DeriveOptions& o, float defaultRoughness) {
     Derived d;
     if (!o.enabled || !s.hasMask) return d;
@@ -222,7 +227,7 @@ Derived deriveFromSpecular(const SpecularInfo& s, const DeriveOptions& o, float 
     if (!s.maskMap && strength < 0.02f) return d;  // a black constant mask: no highlight at all
     const float lo = std::min(o.minRoughness, o.maxRoughness), hi = std::max(o.minRoughness, o.maxRoughness);
     float r = s.powerKnown ? roughnessFromPower(s.power) : defaultRoughness;  // a power TEXTURE: its mean is unknown, the default roughness stands in
-    r = std::clamp(r, lo, hi);
+    r = glossGate(std::clamp(r, lo, hi));
     d.valid = true;
     d.strength = strength;
     d.roughness = clamp01(r + (1.0f - r) * (1.0f - strength));
@@ -237,6 +242,9 @@ SpecularInfo specularInfo(const engine::materials::ShaderInfo& info) {
     namespace mats = engine::materials;
     SpecularInfo s;
     if (!info.enableSpecular || info.specular.source == mats::Source::None) return s;
+    // a Diffuse that is a CUBE sampler (the wet beach / rock "_Specular" layers, 19 materials): the layer IS the engine's own environment reflection, drawn blended over the
+    // ground; adding another sky reflection on top would double it, so these are never derived
+    if (info.diffuse.source == mats::Source::Cube) return s;
     const mats::Role& m = info.specular;
     if (m.source == mats::Source::Sampler) {
         s.hasMask = true;
@@ -679,7 +687,13 @@ MaterialPack::Hit MaterialPack::lookupMaterial(const void* material) {
         mats::ShaderInfo si;
         std::string image;
         if (mats::active(si, material) && si.diffuse.source == mats::Source::Sampler && si.diffuse.slot >= 0) image = mats::poolImageName(si, si.diffuse.slot);
-        spdlog::debug("enh: materials: seen '{}' (diffuse image '{}'): {}", mats::resourceName(material), image, derivedNow ? "derived from the specular data" : h.word != 0 ? "pack entry" : "no entry");
+        spdlog::debug("enh: materials: seen '{}' (diffuse image '{}'): {}{}", mats::resourceName(material), image,
+                      derivedNow ? "derived from the specular data" : h.word != 0 ? "pack entry" : "no entry",
+                      h.word != 0 ? std::string() : std::format(" [class {} diffuse {} specular {} power {} enableSpecular {}, specular rgb {:.2f} {:.2f} {:.2f}{}, power {:.3f}{}]",
+                                                                 mats::name(si.cls), mats::name(si.diffuse.source), mats::name(si.specular.source),
+                                                                 mats::name(si.specularPower.source), si.enableSpecular, si.specular.constant[0], si.specular.constant[1],
+                                                                 si.specular.constant[2], si.specular.hasConstant ? "" : " (not read)", si.specularPower.constant[0],
+                                                                 si.specularPower.hasConstant ? "" : " (not read)"));
     }
     ++counters_.lookups;
     return finish(h, key);

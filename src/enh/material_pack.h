@@ -121,6 +121,11 @@ struct Derived {
 };
 // Blinn / Phong exponent -> GGX: alpha = sqrt(2 / (n + 2)) (the usual Phong-to-GGX match), the pack's roughness r has alpha = r * r (shaders: a = max(r * r, 0.0025)), so r = sqrt(alpha)
 float roughnessFromPower(float specularPower);
+// Gloss gate: a Phong exponent below ~64 (SpecularPower < 0.5) is a broad matte lobe the engine already draws; a GGX reflection at F0 0.04 of that roughness would only add a
+// faint sky veil (and a traced ray per pixel) to every stone / wood surface. The derived roughness therefore runs to 1 (= nothing added, not traced: the RT limit is 0.7)
+// between kGlossStart and kGlossStart + kGlossSpan, and only really glossy surfaces keep a reflection.
+inline constexpr float kGlossStart = 0.35f, kGlossSpan = 0.3f;
+float glossGate(float roughness);
 inline constexpr float kMapMaskStrength = 0.8f;  // a Specular MAP's strength (the per-pixel mask is not read: skin / cloth maps are mostly dark with bright spots)
 Derived deriveFromSpecular(const SpecularInfo& s, const DeriveOptions& o, float defaultRoughness);
 std::uint32_t encodeDerivedWord(float roughness);
