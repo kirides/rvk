@@ -540,8 +540,10 @@ void Device::computeDynamicState(std::uint32_t primitiveType, DynamicStateValues
     const float bias = asFloat(rs_[RS_DEPTHBIAS]);
     const float slope = asFloat(rs_[RS_SLOPESCALEDEPTHBIAS]);
     const float unit = depthFormat_ == VK_FORMAT_D16_UNORM ? 65535.0f : 16777215.0f;
-    o.depthBiasEnable = bias != 0.0f || slope != 0.0f ? VK_TRUE : VK_FALSE;
-    o.depthBias[0] = reversed ? -bias * unit : bias * unit;  // reversed depth grows towards the camera
+    // reversed depth: the constant part is in the vertex remap (depthRemap, exact), the slope part stays here (a float format's
+    // slope bias does not depend on the depth's exponent)
+    o.depthBiasEnable = (!reversed && bias != 0.0f) || slope != 0.0f ? VK_TRUE : VK_FALSE;
+    o.depthBias[0] = reversed ? 0.0f : bias * unit;
     o.depthBias[1] = reversed ? -slope : slope;
     colorToFloat4(rs_[RS_BLENDFACTOR], o.blendConstants);
     o.colorCount = 0;
@@ -1850,8 +1852,14 @@ bool Device::boundDepthReversed() const {
 void Device::depthRemap(float& zScale, float& zBias) const {
     zScale = zBias = 0.0f;
     if (!boundDepthReversed()) return;
-    zScale = -reverseDepthK() - 1.0f;  // z' = z (1 + zScale) + zBias w = w - k z
-    zBias = 1.0f;
+    const float k = reverseDepthK();
+    zScale = -k - 1.0f;  // z' = z (1 + zScale) + zBias w = w - k z
+    // D3D9's constant depth bias b is added to the D3D depth z / w: z' / w = 1 - k (z / w + b), so it is exact in this term.
+    // In the rasterizer it was not: Vulkan scales a float format's constant bias by the exponent of the primitive's depth,
+    // and reversed depth is small far away (n / viewZ), so a decal 100 m away kept ~1/1000 of its bias (computeDynamicState
+    // leaves the constant part out for reversed buffers; DXVK uses VK_EXT_depth_bias_control's float representation, which
+    // the AMD driver does not offer)
+    zBias = 1.0f - k * asFloat(rs_[RS_DEPTHBIAS]);
 }
 
 void Device::setBatching(bool on) {
