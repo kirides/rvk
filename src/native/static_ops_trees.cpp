@@ -17,6 +17,7 @@
 #include "engine/memread.h"
 #include "engine/symbols.h"
 #include "hal/vulkan/hal_vulkan.h"
+#include "enh/light_table.h"
 #include "native/static_ops.h"
 
 namespace rvk::native {
@@ -285,8 +286,73 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
         // GetPasses(shader, 0, illumination, 0, instanced, 0)
         return materialDraws(shader, illum, 0, true, 0, 0, gg, nullptr);
     };
+    // the batch rules' light inputs of an instance (its illumination: list, per-object flags; with table lighting also the sun bit of the pass)
+    const bool tableMerge = tableLit_ && !zpass && enh::fullLitTreeMerge();
+    const U8* sunList = nullptr;
+    bool sunListValue = false, dynListValue = false;
+    const auto readLight = [&](sc::TreeInstance& x, U8* il) {
+        bool noSun = false, statLights = false;
+        std::uint64_t buf[16]{};  // the illumination's first 0x80 bytes (static light entries 0 and 1 start at +0x10 / +0x50)
+        if (fastReads) {
+            ObjSnap<0x98> is;
+            is.load(il);
+            x.list = is.ok ? is.at<U8*>(0) : nullptr;
+            x.alone = is.ok && (is.at<std::uint8_t>(0x90) != 0 || is.at<std::uint8_t>(0xd) != 0);
+            x.staticSh = is.ok && is.at<std::uint8_t>(0x90) != 0;
+            noSun = is.ok && is.at<std::uint8_t>(0xc) != 0;
+            statLights = is.ok && is.at<std::uint8_t>(0xd) != 0;
+            if (statLights) for (std::size_t k = 0; k < 16; ++k) buf[k] = is.at<std::uint64_t>(8 * k);
+        } else {
+            x.list = ptr(il, 0);
+            x.alone = get<std::uint8_t>(il, 0x90) != 0 || get<std::uint8_t>(il, 0xd) != 0;
+            x.staticSh = get<std::uint8_t>(il, 0x90) != 0;
+            noSun = get<std::uint8_t>(il, 0xc) != 0;
+            statLights = get<std::uint8_t>(il, 0xd) != 0;
+            if (statLights) rd(il, 0, buf, sizeof(buf));
+        }
+        if (tableMerge && x.list == nullptr) x.ownLights = true;  // no list: no table-lit pass, stays a batch of its own
+        if (tableMerge && x.list != nullptr) {
+            if (x.list != sunList) {
+                sunList = static_cast<const U8*>(x.list);
+                sunListValue = get<std::uint8_t>(sunList, 0) != 0;
+                dynListValue = get<std::uint8_t>(sunList, 0x34) != 0;
+            }
+            x.sun = sunListValue && !noSun;
+            // the registers keep the engine's own lights (the fallback of table lighting): instances share a batch only when those are the same ones - no dynamic
+            // lights of the list, equal static light entries (up to two: position, range, colour), no more than two
+            if (dynListValue) x.ownLights = true;
+        }
+        if (tableMerge && statLights) {
+            const std::uint32_t ns = static_cast<std::uint32_t>(buf[1] >> 40 & 0xff);  // illum +0xd
+            if (ns > 2) {
+                x.ownLights = true;
+            } else {
+                std::uint64_t sig = 1469598103934665603ull ^ ns;
+                for (std::uint32_t e = 0; e < ns; ++e) {
+                    for (std::size_t k = 0; k < 6; ++k) sig = (sig ^ buf[2 + 8 * e + k]) * 1099511628211ull;
+                }
+                x.lightSig = sig;
+            }
+        }
+    };
     std::vector<sc::TreeInstance>& inst = scr_.treeInst;
     std::vector<sc::TreeBatch>& batches = scr_.treeBatches;
+    // the reasons the solid pass's batches end (diagnostics: which rule cuts them)
+    const auto countSplits = [&](const std::vector<sc::TreeBatch>& bs) {
+        if (zpass) return;
+        for (std::size_t k = 1; k < bs.size(); ++k) {
+            const sc::TreeInstance& a = inst[bs[k].first - 1];
+            const sc::TreeInstance& b = inst[bs[k].first];
+            std::size_t r = 5;  // own lights / other
+            if (bs[k - 1].count >= limit) r = 0;
+            else if (type <= 1 && a.strip != b.strip) r = 1;
+            else if (!tableMerge && a.list != b.list) r = 2;
+            else if (tableMerge && a.sun != b.sun) r = 3;
+            else if (tableMerge ? (a.staticSh || b.staticSh) : (a.alone || b.alone)) r = 4;
+            else if (a.list == nullptr || b.list == nullptr) r = 6;
+            ++st.splits[r];
+        }
+    };
     inst.clear();
     batches.clear();
     if (type <= 1) {
@@ -313,20 +379,12 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
             x.strip = get<std::uint16_t>(rb, stripAt + 2 * static_cast<std::size_t>(lod));
             x.start = get<std::uint16_t>(rb, startAt + 2 * static_cast<std::size_t>(lod));
             if (!zpass) {
-                U8* il = illumOf(i);
-                if (fastReads) {
-                    ObjSnap<0x98> is;
-                    is.load(il);
-                    x.list = is.ok ? is.at<U8*>(0) : nullptr;
-                    x.alone = is.ok && (is.at<std::uint8_t>(0x90) != 0 || is.at<std::uint8_t>(0xd) != 0);
-                } else {
-                    x.list = ptr(il, 0);
-                    x.alone = get<std::uint8_t>(il, 0x90) != 0 || get<std::uint8_t>(il, 0xd) != 0;
-                }
+                readLight(x, illumOf(i));
             }
             inst.push_back(x);
         }
-        sc::planTreeBatches(inst, limit, !zpass, true, batches);
+        sc::planTreeBatches(inst, limit, !zpass, true, batches, tableMerge);
+        countSplits(batches);
         for (const sc::TreeBatch& b : batches) {
             for (std::uint32_t k = 0; k < b.count; ++k) {
                 U8* tree = treeOf(inst[b.first + k].queueIndex);
@@ -396,21 +454,13 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
                 sc::TreeInstance x;
                 x.queueIndex = i;
                 if (!zpass) {
-                    U8* il = illumOf(i);
-                    if (fastReads) {
-                        ObjSnap<0x98> is;
-                        is.load(il);
-                        x.list = is.ok ? is.at<U8*>(0) : nullptr;
-                        x.alone = is.ok && (is.at<std::uint8_t>(0x90) != 0 || is.at<std::uint8_t>(0xd) != 0);
-                    } else {
-                        x.list = ptr(il, 0);
-                        x.alone = get<std::uint8_t>(il, 0x90) != 0 || get<std::uint8_t>(il, 0xd) != 0;
-                    }
+                    readLight(x, illumOf(i));
                 }
                 inst.push_back(x);
                 alpha.push_back(a);
             }
-            sc::planTreeBatches(inst, limit, !zpass, false, batches);
+            sc::planTreeBatches(inst, limit, !zpass, false, batches, tableMerge);
+            countSplits(batches);
             for (const sc::TreeBatch& b : batches) {
                 for (std::uint32_t k = 0; k < b.count; ++k) {
                     U8* tree = treeOf(inst[b.first + k].queueIndex);

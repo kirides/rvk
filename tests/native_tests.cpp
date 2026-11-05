@@ -667,6 +667,24 @@ TEST(native_attribution_skinned_zero_draws) {
     CHECK(!native::nothingToDraw(op));
 }
 
+TEST(tree_batches_table_merge_cuts_by_sun_and_static_sh_only) {
+    int l1 = 0, l2 = 0;
+    // table lighting: other lists / static lights no longer cut; the sun flag and static ambient do
+    std::vector<sc::TreeInstance> in = {
+        {0, 60, 0, &l1, false, true, false}, {1, 60, 0, &l2, true, true, false},   // list change + static lights: one batch
+        {2, 60, 0, &l1, false, false, false},                                     // sun flag differs
+        {3, 60, 0, &l1, true, false, true},                                       // static SH: alone
+        {4, 60, 0, &l1, false, false, false},                                     // after an alone one
+    };
+    std::vector<sc::TreeBatch> b;
+    sc::planTreeBatches(in, 50, true, true, b, true);
+    CHECK(b.size() == 4);
+    CHECK(b[0].first == 0 && b[0].count == 2);
+    CHECK(b[1].first == 2 && b[1].count == 1);
+    CHECK(b[2].first == 3 && b[2].count == 1);
+    CHECK(b[3].first == 4 && b[3].count == 1);
+}
+
 TEST(tree_batches_follow_render_branches) {
     int l1 = 0, l2 = 0;
     // solid branches: breaks on the strip length, the light list, the light flags (the instance's or the batch's last) and the limit

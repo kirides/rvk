@@ -801,3 +801,7 @@ Remaining Full - Wrapper after this (profile of the same run, ms per frame inclu
 ## 28. Table lighting in Full (2026-11-05, gpu-scene.md 9.8)
 
 `lighting.full_lit` (Debug, default off; with `lighting.clustered`): one 3-light pass per lit draw, no additive passes, mesh batches merge across different illumination alpha factors, the table takes drawn objects' lights. Paired CPU (savegame, lod 2x, player defaults, interleaved, `-Perf` engine+HAL): Vulkan Full 8.04 -> 7.46 ms (-0.58; Wrapper 6.04, gap 2.0 -> 1.4), D3D12 8.23 -> 7.69 (-0.54); `clustered` alone 8.10 (+0.06). Pictures at pub_interior / monastery_hall / harbour_docks / jungle within the stage-a noise floor once the engine's own lights were kept as the fallback (zeroing them dimmed interiors by 17 - 26 %). Goal (gap <= ~0.5 ms) not reached.
+
+## 29. Table lighting, completed (2026-11-05, gpu-scene.md 9.9)
+
+`lighting.tree_merge` + `lighting.table_complete` (see gpu-scene.md 9.9). Vulkan, paired: Wrapper 5.93, Full 8.00, `clustered + full_lit` 7.52, + `tree_merge` 7.53 (the savegame's trees end their batches on their own far static lights: nothing to merge). A forced 40 % batch reduction (table far 48,000) gained 0.05 - 0.1 ms in timing runs, 0.3 - 0.5 in the sampled profile: draws are 99.9 % packet-cache replays. Gap Full - Wrapper 1.6 ms. `kLightFar` = 48,000 changed pictures (monastery_hall mean |d| 12.7): stays 16,000.

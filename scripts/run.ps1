@@ -179,6 +179,7 @@ if ($NoRenderer) {
             $values['rt.reflections'] = 'medium'
             $values['shadows.enabled'] = 'false'; $values['shadows.filter'] = 'high'; $values['shadows.map_size'] = 'auto'
             $values['lod.trees'] = '1'; $values['lod.meshes'] = '1'; $values['lod.view'] = '1'
+            $values['lighting.clustered'] = 'false'; $values['lighting.full_lit'] = 'false'
         }
         foreach ($kv in $Setting) { $k, $v = $kv -split '=', 2; $values[$k] = $v }
         # "table.key=value" -> [table] key = value (strings quoted unless number / bool)

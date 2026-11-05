@@ -576,7 +576,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
                                                         }});
         if (!matPack_) dev_.setPackProvider([](const d3d9::draws::Tag&) { return d3d9::Device::PackHit{}; });
         lightTable_ = std::make_unique<enh::LightTable>(dev_);
-        for (settings::Setting* s : {rs.lightingEnabled, rs.lightingStyle, rs.lightingDebug, rs.lightingFullLit, rs.nativeStaticOpsCompare, rs.nativeSceneOpsCompare}) {
+        for (settings::Setting* s : {rs.lightingEnabled, rs.lightingStyle, rs.lightingDebug, rs.lightingFullLit, rs.lightingTableComplete, rs.lightingTreeMerge, rs.nativeStaticOpsCompare, rs.nativeSceneOpsCompare}) {
             if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyLighting(); }, this);
         }
         applyLighting();
@@ -804,6 +804,7 @@ void HalDevice::applyLighting() {
     const bool full = on(rs.lightingFullLit) && rs.lightingEnabled->asBool() && lightTable_->available() && renderMode() == RenderMode::Full &&
                       !on(rs.nativeStaticOpsCompare) && !on(rs.nativeSceneOpsCompare);
     enh::setFullLitActive(full);
+    enh::setFullLitOptions(on(rs.lightingTableComplete), on(rs.lightingTreeMerge));
     if (staticOps_) staticOps_->setTableLit(full);
 }
 
