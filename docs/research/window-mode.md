@@ -300,3 +300,7 @@ rvkcompare spots `hud_view`, `menu_esc`, `gui_inventory`, `gui_character` -> `ou
 `Aspect10x9`: nearest to the client aspect, then scaled non-uniformly): 16:10 (1920x1200) stretches the GUI vertically by 11 %
 exactly as the stock game does (the main menu portrait is taller) [V]; pillar / letterboxing the GUI is not done. The options menu's
 list is built once at the start (stale after a live display change: a request the display lacks is resolved at SetResolutionEx).
+Also left: after a live fallback and return the **size** is the preference's again but the refresh stays the one the engine holds
+(`SetResolution` keeps `+0x6cc`); exclusive fullscreen of the resolver (nearest mode) was only checked with the fake monitor (no
+display mode change, the window was in the background); verified [V] 2026-11-05 on a real 1920x1200 desktop (virtual display) and
+with `RVK_FAKE_MONITOR` 1600x900 / 1366x768 / 1920x1080, live `display fake 1280x800` -> `off`.
