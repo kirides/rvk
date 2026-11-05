@@ -10,10 +10,16 @@
 // Used when the device has GPL plus EDS3 blend state and dynamic vertex input: then a pipeline depends only on the shaders,
 // the polygon mode, the topology class and the attachment formats, and everything else is dynamic state.
 //
-// OFF by default ([vulkan] pipeline_libraries): the AMD driver (Adrenalin, RX 7900 XTX, 2026-10) crashes with an access
+// OFF by default ([vulkan] pipeline_libraries): the AMD driver (Adrenalin, RX 7900 XTX, 2026-10) crashed with an access
 // violation inside its compiler on 2 of the game's 2561 shaders when they are compiled as fragment-shader libraries
-// (corpus ps30_7dd28aa4c2be47a5, ps30_72a979df27ac55e3; monolithic pipelines with the same SPIR-V are fine). Reproduce
-// without the game: rvk_vktest --gpl-corpus <bin/rvk/cache/spirv>.
+// (corpus ps30_7dd28aa4c2be47a5, ps30_72a979df27ac55e3; monolithic pipelines with the same SPIR-V are fine). Driver 26.10.1
+// (2026-11-05) passes all 2561 with either recipe. Check without the game: rvk_vktest --gpl-corpus <bin/rvk/cache/spirv>.
+//
+// Recipe (2026-11-05, DXVK's, dxvk_shader.cpp / dxvk_graphics.cpp): the libraries carry no retained link-time information,
+// use no VkPipelineCache and the fragment shader library no multisample state; the optimised pipeline that replaces a
+// fast link is a monolithic compile from SPIR-V. On the RX 7900 XTX the 2561 corpus libraries compile in 3.6 s instead of
+// 135 s, the in-game cold world entry links 166 pipelines in 17 ms (monolithic without libraries: 163 in 1940 ms), the
+// background builds finish sooner. RVK_GPL_RECIPE=lto = the former recipe (retained information, optimised links).
 
 #include <windows.h>
 
@@ -96,7 +102,9 @@ VkPipeline PipelineCache::createLibrary(VkGraphicsPipelineLibraryFlagsEXT part, 
     lib.flags = part;
     VkPipelineRenderingCreateInfo ri{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, &lib};
     VkGraphicsPipelineCreateInfo ci{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &ri};
-    ci.flags = VK_PIPELINE_CREATE_LIBRARY_BIT_KHR | VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT;
+    // DXVK's recipe (default; RVK_GPL_RECIPE=lto = the former one): no retained link-time information, no pipeline cache, no
+    // multisample state in the fragment shader library; the optimised pipeline is a monolithic compile instead of a link
+    ci.flags = VK_PIPELINE_CREATE_LIBRARY_BIT_KHR | (retainLto_ ? VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT : 0);
     ci.pDynamicState = &dy;
 
     VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
@@ -135,7 +143,7 @@ VkPipeline PipelineCache::createLibrary(VkGraphicsPipelineLibraryFlagsEXT part, 
         ci.stageCount = 1;
         ci.pStages = &stage;
         ci.pDepthStencilState = &ds;
-        ci.pMultisampleState = &ms;
+        ci.pMultisampleState = retainLto_ ? &ms : nullptr;
         ci.layout = layout_;
         break;
     case VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT:
@@ -157,7 +165,8 @@ VkPipeline PipelineCache::createLibrary(VkGraphicsPipelineLibraryFlagsEXT part, 
     }
     const auto t0 = std::chrono::steady_clock::now();
     VkPipeline p = VK_NULL_HANDLE;
-    if (const VkResult r = vkCreateGraphicsPipelines(ctx_->device(), cache_, 1, &ci, nullptr, &p); r != VK_SUCCESS) {
+    if (const VkResult r = vkCreateGraphicsPipelines(ctx_->device(), retainLto_ ? cache_ : VK_NULL_HANDLE, 1, &ci, nullptr, &p);
+        r != VK_SUCCESS) {
         spdlog::error("vulkan: pipeline library (part {:#x}): {}", static_cast<std::uint32_t>(part), resultString(r));
         return VK_NULL_HANDLE;
     }
@@ -249,7 +258,7 @@ void PipelineCache::optimizer() {
         optQueue_.pop_front();
         lock.unlock();
         const auto t0 = std::chrono::steady_clock::now();
-        VkPipeline p = link(d, true);
+        VkPipeline p = retainLto_ ? link(d, true) : build(d);
         if (p != VK_NULL_HANDLE) {
             optimized_.fetch_add(1, std::memory_order_relaxed);
             optimizeNs_.fetch_add(elapsedNs(t0), std::memory_order_relaxed);
@@ -269,6 +278,9 @@ void PipelineCache::optimizer() {
 
 void PipelineCache::startLibraries() {
     useLibraries_ = true;
+    char recipe[16]{};
+    retainLto_ = GetEnvironmentVariableA("RVK_GPL_RECIPE", recipe, sizeof(recipe)) > 0 && std::strcmp(recipe, "lto") == 0;
+    spdlog::info("vulkan: pipeline libraries: {} recipe", retainLto_ ? "link-time optimised (RVK_GPL_RECIPE=lto)" : "DXVK (monolithic optimised builds)");
     optQuit_ = false;
     optThread_ = std::thread([this] { optimizer(); });
 }

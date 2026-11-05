@@ -131,6 +131,7 @@ private:
     void stopLibraries();
     void destroyLibraries();
     bool useLibraries_ = false;
+    bool retainLto_ = false;  // true = the former library recipe (RVK_GPL_RECIPE=lto); false = DXVK's
     std::mutex libMutex_;
     std::map<LibKey, VkPipeline> shaderLibs_;
     std::map<VkPrimitiveTopology, VkPipeline> vertexInputLibs_;
