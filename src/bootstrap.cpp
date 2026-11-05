@@ -1,5 +1,7 @@
 #include "bootstrap.h"
 
+#include "core/crash_dump.h"
+
 #include <algorithm>
 #include <charconv>
 #include <atomic>
@@ -419,6 +421,8 @@ void onProcessAttach(void* module) {
     std::string cfgError;
     g_config = loadConfig(paths::dataDir() / L"config.toml", &cfgError);
     log::init(paths::dataDir() / L"rvk.log", g_config.logLevel);
+    crashdump::setDirectory(paths::dataDir() / L"dumps");
+    if (g_config.crashDumps) crashdump::installUnhandledExceptionFilter();
     spdlog::info("risen-enhanced-graphics 0.1.0 ({}), config.toml mode = {}, {:.2f} s after process start",
                  modulePathOf(static_cast<HMODULE>(module)),
                  g_config.mode == Mode::Trace ? std::string_view("trace")

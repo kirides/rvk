@@ -1,6 +1,6 @@
 // rvk_rhitest: the slim RHI (src/rhi/rhi.h) on both backends with the same code and the same HLSL (docs/research/hlsl-rhi.md 5, 6).
 //
-//   rvk_rhitest [--vulkan] [--d3d12] [--validation]
+//   rvk_rhitest [--vulkan] [--d3d12] [--validation] [--device-lost]
 //
 // Per backend: a compute pass that reads a constant buffer (b8), a bindless texture + sampler (indices in the constant buffer), a RVK_REF block
 // (the frame block: Buffer::shaderRef) and the push constants, writing a storage image that is read back and compared with the CPU; a graphics
@@ -29,13 +29,16 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <format>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include <spdlog/spdlog.h>
 
+#include "core/crash_dump.h"
 #include "rhi/rhi.h"
 #include "shader/abi.h"
 #include "shader/dxc.h"
@@ -1172,16 +1175,66 @@ bool runBackend(rhi::Backend backend, bool validation, const Shaders& sh) {
     return failures == before;
 }
 
+// --device-lost: the DX12 device-removal report (DRED + a minidump into a temp directory) after ID3D12Device5::RemoveDevice, and PIX events on a live list
+bool runDeviceLost(bool validation) {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "rvk_dumps_test";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    rvk::crashdump::setDirectory(dir);
+    rhi::DeviceDesc dd;
+    dd.backend = rhi::Backend::D3D12;
+    dd.validation = validation;
+    dd.messages = true;
+    dd.name = "rvk_rhitest device lost";
+    auto dev = rhi::createD3D12Device(dd);
+    if (!dev) {
+        std::printf("[d3d12] SKIP: no device\n");
+        return true;
+    }
+    const int before = failures;
+    dev->submitAndWait([&](rhi::CommandList& cl) {
+        cl.beginRegion("before the loss");
+        cl.endRegion();
+    });
+    check(!dev->deviceLost(), "device alive before the removal");
+    check(dev->simulateDeviceLoss(), "RemoveDevice");
+    dev->submitAndWait([&](rhi::CommandList& cl) {
+        cl.beginRegion("after the loss");
+        cl.endRegion();
+    });
+    check(dev->deviceLost(), "device lost detected");
+    bool dump = false, report = false;
+    for (const auto& e : fs::directory_iterator(dir, ec)) {
+        dump = dump || e.path().extension() == ".dmp";
+        if (e.path().extension() == ".txt") {
+            std::ifstream in(e.path());
+            const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            report = text.find("DRED") != std::string::npos && text.find("device removed") != std::string::npos;
+        }
+    }
+    check(dump, "a minidump was written");
+    check(report, "the report names DRED");
+    std::printf("[d3d12] device lost: %s (%s)\n", failures == before ? "PASS" : "FAIL", dir.string().c_str());
+    return failures == before;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
-    bool vulkan = false, d3d12 = false, validation = false;
+    bool vulkan = false, d3d12 = false, validation = false, deviceLost = false;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--vulkan") vulkan = true;
         else if (a == "--d3d12") d3d12 = true;
         else if (a == "--validation") validation = true;
+        else if (a == "--device-lost") deviceLost = true;
+    }
+    if (deviceLost) {
+        runDeviceLost(validation);
+        std::printf("%s: %d failure(s)\n", failures == 0 ? "PASS" : "FAIL", failures);
+        return failures == 0 ? 0 : 1;
     }
     if (!vulkan && !d3d12) vulkan = d3d12 = true;
     if (!shader::dxc::available()) {

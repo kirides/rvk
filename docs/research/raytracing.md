@@ -212,3 +212,20 @@ ranges and declarations, the injection points and pass layout.
 * An AS-specific synchronization hazard test (like `--passes --hazard`) is not there yet; the self-test's barriers are
   checked by synchronization validation only in the positive case.
 * A player-facing "ray tracing" preset group comes with M9's first setting (`rt.reflections`), declared as in 3.2.
+
+
+## 9. Newer RT features: what this machine offers (2026-11-05, AMD Radeon RX 7900 XTX, Adrenalin Vulkan 1.4.359, Agility SDK 1.620.1)
+
+Probed at start-up and logged as `caps:` lines (Vulkan, `vk/probe.cpp` -> `core/caps.*`, overlay System tab) and `d3d12: caps:` (D3D12 backend, `D3D12DeviceImpl::queryRayTracingCaps`, `DeviceCaps::dxrTier / serReorders`).
+All information only: nothing in the renderer uses them (floor + optional tier unchanged, "off = nothing exists").
+
+| feature | API | this GPU | verdict |
+|---|---|---|---|
+| Opacity micromaps (alpha-tested leaves in RT shadows) | `VK_EXT_opacity_micromap`; D3D12 = DXR 1.2 (`D3D12_RAYTRACING_TIER_1_2`) | **no** (`caps: Opacity micromaps unavailable`; D3D12 reports DXR 1.1) | not built: cannot be tested here; the candidate loop (5.1) stays. A future OMM path must be optional with exactly that loop as the fallback |
+| Shader execution reordering | `VK_EXT_ray_tracing_invocation_reorder` (the driver lists it), D3D12 DXR 1.2 + `OPTIONS22.ShaderExecutionReorderingActuallyReorders` | extension offered, but `rayTracingInvocationReorderReorderingHint = NONE` (the hint is a no-op), D3D12 `SER reorders no` | no gain, and SER is a ray-generation-shader (ray tracing pipeline) feature: the renderer's inline ray query has no reorder call. Not built |
+| Clustered geometry / "mega geometry" | `VK_NV_cluster_acceleration_structure`; DXR cluster operations (NVAPI, preview SDK 1.7xx) | **no** (NVIDIA only) | not built; the world's static meshes are few large BLASes, characters are skinned per frame (rt_skin), a cluster path would not help them |
+| Partitioned TLAS, linear swept spheres, displacement micromaps | `VK_NV_partitioned_acceleration_structure` / `VK_NV_ray_tracing_linear_swept_spheres` / `VK_NV_displacement_micromap` | no | probed (`ClusterAccelerationStructure` cap covers the first family only) |
+| DXR 1.1 inline ray query, position fetch, maintenance1 | already in use | yes | - |
+| Work graphs / ExecuteIndirect tier / enhanced barriers (D3D12) | `OPTIONS21` / `OPTIONS12` | work graphs tier 1.0, ExecuteIndirect tier 1.0, enhanced barriers yes | reported only |
+
+New `caps::Cap` entries (append-only): `ClusterAccelerationStructure` ("Clustered geometry (mega geometry)"), `RayTracingReorder` ("Shader execution reordering"). Never enabled: no extension or feature is requested at device creation.

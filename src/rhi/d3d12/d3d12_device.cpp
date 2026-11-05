@@ -22,6 +22,12 @@
 
 #include <spdlog/spdlog.h>
 
+// PIX events on the command lists (capture regions): the header-only encoder of the vcpkg winpixevent port, no WinPixEventRuntime.dll / lib needed for
+// command list events (PIX reads the encoded blob); the debug layer accepts this format, unlike the raw BeginEvent(0, wide string) one
+#define USE_PIX
+#include <pix3.h>
+
+#include "core/crash_dump.h"
 #include "rhi/rhi.h"
 
 namespace rvk::rhi {
@@ -185,7 +191,20 @@ std::string defaultAgilityDir() {
     std::string s(path, n < MAX_PATH ? n : 0);
     const auto slash = s.find_last_of("\\/");
     s.erase(slash == std::string::npos ? 0 : slash + 1);
-    return s + "d3d12\\";
+    // the tools: "d3d12\" beside the exe; the game: d3d9.dll is in bin, the package puts the runtime into "bin\rvk\d3d12\" (no "d3d12" beside the DLL)
+    const std::string beside = s + "d3d12\\";
+    if (GetFileAttributesA((beside + "D3D12Core.dll").c_str()) == INVALID_FILE_ATTRIBUTES &&
+        GetFileAttributesA((s + "rvk\\d3d12\\D3D12Core.dll").c_str()) != INVALID_FILE_ATTRIBUTES) {
+        return s + "rvk\\d3d12\\";
+    }
+    return beside;
+}
+
+bool envFlag(const char* name, bool fallback) {
+    char v[16]{};
+    const DWORD n = GetEnvironmentVariableA(name, v, sizeof(v));
+    if (n == 0 || n >= sizeof(v)) return fallback;
+    return v[0] != '0' && v[0] != 'f' && v[0] != 'F';
 }
 
 // D3D12SDKVersion, exported by D3D12Core.dll (loaded only to read it); 0 = no usable DLL there
@@ -410,22 +429,29 @@ public:
             return D3D12GetDebugInterface(iid, out);  // (the global state answers the debug and the DRED interface by IID)
         };
         UINT factoryFlags = 0;
-        if (desc.validation) {
+        // debug.d3d12_messages / DeviceDesc::messages: the layer's messages without GPU based validation (which runs at a fraction of the speed)
+        const bool messages = desc.messages || envFlag("RVK_D3D12_MESSAGES", false);
+        const bool layer = desc.validation || messages;
+        if (layer) {
             ComPtr<ID3D12Debug> debug;
             if (SUCCEEDED(config(CLSID_D3D12Debug, IID_PPV_ARGS(&debug)))) {
                 debug->EnableDebugLayer();
                 factoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
                 ComPtr<ID3D12Debug1> debug1;
-                if (SUCCEEDED(debug.As(&debug1))) debug1->SetEnableGPUBasedValidation(TRUE);
+                if (desc.validation && SUCCEEDED(debug.As(&debug1))) debug1->SetEnableGPUBasedValidation(TRUE);
             } else {
                 spdlog::warn("d3d12: the debug layer is not available (d3d12SDKLayers.dll missing{})", sdk.factory ? " from the Agility SDK directory" : "");
             }
-            // DRED: breadcrumbs + page fault data for a device removal
+        }
+        // DRED: breadcrumbs + page fault data for a device removal. On by default, also without validation (both cost next to nothing: the breadcrumbs are
+        // a few writes per command list op; docs/research/dx12-game-port.md): RVK_DRED=0 / DeviceDesc::dred = false turns it off.
+        if (desc.validation || (desc.dred && envFlag("RVK_DRED", true))) {
             ComPtr<ID3D12DeviceRemovedExtendedDataSettings1> dred;
             if (SUCCEEDED(config(CLSID_D3D12DeviceRemovedExtendedData, IID_PPV_ARGS(&dred)))) {
                 dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
                 dred->SetBreadcrumbContextEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
                 dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                dredOn_ = true;
             }
         }
         // (creates through the Agility factory when there is one, else the system runtime; falls back to the latter if the factory refuses)
@@ -473,10 +499,17 @@ public:
         RVK_HR(makeDevice(adapter.Get(), IID_PPV_ARGS(&device_), &viaFactory), "D3D12CreateDevice");
         caps_.agilitySdkVersion = viaFactory ? sdk.version : 0;
         spdlog::info("d3d12: device from {}", viaFactory ? std::format("the Agility SDK {} factory", sdk.version) : std::string("the system runtime"));
-        if (desc.validation) {
+        if (layer) {
             // the debug layer's messages go to the log and count as errors (a debugger's output window is not needed)
             ComPtr<ID3D12InfoQueue1> iq;
             if (SUCCEEDED(device_.As(&iq))) {
+                // Agility SDK 620's layer warns on every ID3D12Device::CheckFeatureSupport (message 989: use ID3D12Device16::CheckFeatureSupport1, which the
+                // 1.721 headers do not declare yet): denied, the capability queries are made once at device creation
+                D3D12_MESSAGE_ID deny[] = {static_cast<D3D12_MESSAGE_ID>(989)};
+                D3D12_INFO_QUEUE_FILTER filter{};
+                filter.DenyList.NumIDs = 1;
+                filter.DenyList.pIDList = deny;
+                iq->PushStorageFilter(&filter);
                 DWORD cookie = 0;
                 iq->RegisterMessageCallback(
                     [](D3D12_MESSAGE_CATEGORY, D3D12_MESSAGE_SEVERITY severity, D3D12_MESSAGE_ID id, LPCSTR text, void* self) {
@@ -491,6 +524,7 @@ public:
                     D3D12_MESSAGE_CALLBACK_FLAG_NONE, this, &cookie);
             }
         }
+        queryRayTracingCaps(desc);
         D3D12_FEATURE_DATA_SHADER_MODEL sm{D3D_SHADER_MODEL_6_6};
         if (FAILED(device_->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &sm, sizeof(sm))) || sm.HighestShaderModel < D3D_SHADER_MODEL_6_6) {
             spdlog::error("d3d12: '{}' does not support Shader Model 6.6 (bindless is required)", caps_.adapterName);
@@ -816,15 +850,153 @@ public:
     ID3D12DescriptorHeap* samplerHeap() { return samplerHeap_.Get(); }
 
     void waitIdle() {
+        if (removed_.load()) return;
         const std::uint64_t v = ++fenceValue_;
         queue_->Signal(fence_.Get(), v);
         if (fence_->GetCompletedValue() < v) {
-            fence_->SetEventOnCompletion(v, fenceEvent_);
-            WaitForSingleObject(fenceEvent_, INFINITE);
+            if (FAILED(fence_->SetEventOnCompletion(v, fenceEvent_))) {
+                checkRemoved("waitIdle (SetEventOnCompletion)");
+                return;
+            }
+            // a removed device signals its fences; a GPU that never answers is reported after 10 s instead of hanging the process
+            if (WaitForSingleObject(fenceEvent_, 10000) == WAIT_TIMEOUT) {
+                spdlog::error("d3d12: the GPU did not finish within 10 s (hang)");
+                markRemoved("waitIdle: 10 s timeout", DXGI_ERROR_DEVICE_HUNG);
+                return;
+            }
         }
+        checkRemoved("waitIdle");
+    }
+
+    // ---- device removal (docs/research/dx12-game-port.md "Agility SDK 620: debugging") ----
+    bool deviceLost() const override { return removed_.load(); }
+    bool simulateDeviceLoss() override {
+        ComPtr<ID3D12Device5> d5;
+        if (FAILED(device_.As(&d5))) return false;
+        d5->RemoveDevice();
+        return true;
+    }
+    // GetDeviceRemovedReason: on the first failure the reason, DRED's breadcrumbs / page fault and a minidump are written (once)
+    bool checkRemoved(const char* where) {
+        if (removed_.load()) return true;
+        const HRESULT reason = device_ ? device_->GetDeviceRemovedReason() : S_OK;
+        if (SUCCEEDED(reason)) return false;
+        markRemoved(where, reason);
+        return true;
+    }
+    void markRemoved(const char* where, HRESULT reason) {
+        if (removed_.exchange(true)) return;
+        std::string text = std::format("D3D12 device removed at {}: 0x{:08x} ({})\r\nadapter {}, Agility SDK {}\r\n", where, static_cast<unsigned>(reason),
+                                       removedReasonName(reason), caps_.adapterName, caps_.agilitySdkVersion);
+        if (device_ && dredOn_) text += dredReport();
+        else text += "DRED is off (RVK_DRED=0): no breadcrumbs / page fault data\r\n";
+        std::size_t from = 0;
+        while (from < text.size()) {
+            const std::size_t end = text.find("\r\n", from);
+            spdlog::error("d3d12: {}", text.substr(from, end == std::string::npos ? std::string::npos : end - from));
+            if (end == std::string::npos) break;
+            from = end + 2;
+        }
+        if (const auto dump = crashdump::write("d3d12_device_removed", text); !dump.empty()) spdlog::error("d3d12: minidump written to {}", dump.string());
     }
 
 private:
+    static const char* removedReasonName(HRESULT hr) {
+        switch (hr) {
+        case DXGI_ERROR_DEVICE_HUNG: return "DXGI_ERROR_DEVICE_HUNG: the GPU stopped answering (TDR)";
+        case DXGI_ERROR_DEVICE_REMOVED: return "DXGI_ERROR_DEVICE_REMOVED: the adapter was removed / reset";
+        case DXGI_ERROR_DEVICE_RESET: return "DXGI_ERROR_DEVICE_RESET: a command made the GPU reset";
+        case DXGI_ERROR_DRIVER_INTERNAL_ERROR: return "DXGI_ERROR_DRIVER_INTERNAL_ERROR";
+        case DXGI_ERROR_INVALID_CALL: return "DXGI_ERROR_INVALID_CALL";
+        default: return "unknown reason";
+        }
+    }
+    static std::string narrow(const wchar_t* w) {
+        std::string s;
+        for (; w != nullptr && *w != L'\0'; ++w) s += static_cast<char>(*w < 128 ? *w : '?');
+        return s;
+    }
+    static const char* breadcrumbOp(UINT op) {
+        static constexpr const char* kNames[] = {
+            "SetMarker", "BeginEvent", "EndEvent", "DrawInstanced", "DrawIndexedInstanced", "ExecuteIndirect", "Dispatch", "CopyBufferRegion",
+            "CopyTextureRegion", "CopyResource", "CopyTiles", "ResolveSubresource", "ClearRenderTargetView", "ClearUnorderedAccessView",
+            "ClearDepthStencilView", "ResourceBarrier", "ExecuteBundle", "Present", "ResolveQueryData", "BeginSubmission", "EndSubmission",
+            "DecodeFrame", "ProcessFrames", "AtomicCopyBufferUint", "AtomicCopyBufferUint64", "ResolveSubresourceRegion", "WriteBufferImmediate",
+            "DecodeFrame1", "SetProtectedResourceSession", "DecodeFrame2", "ProcessFrames1", "BuildRaytracingAccelerationStructure",
+            "EmitRaytracingAccelerationStructurePostbuildInfo", "CopyRaytracingAccelerationStructure", "DispatchRays", "InitializeMetaCommand",
+            "ExecuteMetaCommand", "EstimateMotion", "ResolveMotionVectorHeap", "SetPipelineState1", "InitializeExtensionCommand",
+            "ExecuteExtensionCommand", "DispatchMesh"};
+        return op < std::size(kNames) ? kNames[op] : "(newer op)";
+    }
+    // DRED (ID3D12DeviceRemovedExtendedData1): the command lists that had not finished (the op the GPU stopped at, with its neighbours) and the page fault
+    // (the faulting address, the live and the recently freed allocations around it)
+    std::string dredReport() {
+        std::string text;
+        ComPtr<ID3D12DeviceRemovedExtendedData1> dred;
+        if (FAILED(device_.As(&dred))) return "DRED: ID3D12DeviceRemovedExtendedData1 is not available\r\n";
+        D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 ab{};
+        if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput1(&ab))) {
+            int lists = 0;
+            for (const D3D12_AUTO_BREADCRUMB_NODE1* n = ab.pHeadAutoBreadcrumbNode; n != nullptr && lists < 16; n = n->pNext) {
+                const UINT last = n->pLastBreadcrumbValue != nullptr ? *n->pLastBreadcrumbValue : 0;
+                if (last >= n->BreadcrumbCount) continue;  // finished
+                ++lists;
+                text += std::format("DRED: command list '{}' on queue '{}': {} of {} ops completed\r\n",
+                                    n->pCommandListDebugNameW != nullptr ? narrow(n->pCommandListDebugNameW) : std::string("(unnamed)"),
+                                    n->pCommandQueueDebugNameW != nullptr ? narrow(n->pCommandQueueDebugNameW) : std::string("(unnamed)"), last,
+                                    n->BreadcrumbCount);
+                const UINT first = last > 3 ? last - 3 : 0;
+                for (UINT i = first; i < n->BreadcrumbCount && i <= last + 3 && n->pCommandHistory != nullptr; ++i) {
+                    text += std::format("DRED:   op {}: {}{}\r\n", i, breadcrumbOp(static_cast<UINT>(n->pCommandHistory[i])), i == last ? "   <-- GPU stopped here" : "");
+                }
+                for (UINT i = 0; i < n->BreadcrumbContextsCount && n->pBreadcrumbContexts != nullptr; ++i) {
+                    if (n->pBreadcrumbContexts[i].BreadcrumbIndex <= last + 3 && n->pBreadcrumbContexts[i].BreadcrumbIndex + 6 >= last)
+                        text += std::format("DRED:   context at op {}: {}\r\n", n->pBreadcrumbContexts[i].BreadcrumbIndex, narrow(n->pBreadcrumbContexts[i].pContextString));
+                }
+            }
+            if (lists == 0) text += "DRED: no command list with unfinished ops\r\n";
+        } else {
+            text += "DRED: no breadcrumb data\r\n";
+        }
+        D3D12_DRED_PAGE_FAULT_OUTPUT1 pf{};
+        if (SUCCEEDED(dred->GetPageFaultAllocationOutput1(&pf)) && pf.PageFaultVA != 0) {
+            text += std::format("DRED: page fault at GPU VA 0x{:x}\r\n", static_cast<std::uint64_t>(pf.PageFaultVA));
+            const auto list = [&](const char* what, const D3D12_DRED_ALLOCATION_NODE1* n) {
+                int count = 0;
+                for (; n != nullptr && count < 8; n = n->pNext, ++count) {
+                    text += std::format("DRED:   {} allocation '{}' (type {})\r\n", what, n->ObjectNameW != nullptr ? narrow(n->ObjectNameW) : std::string("(unnamed)"),
+                                        static_cast<int>(n->AllocationType));
+                }
+            };
+            list("live", pf.pHeadExistingAllocationNode);
+            list("recently freed", pf.pHeadRecentFreedAllocationNode);
+        } else {
+            text += "DRED: no page fault recorded\r\n";
+        }
+        return text;
+    }
+    // what the device offers beyond the floor (docs/research/raytracing.md 9); DXR 1.2 = opacity micromaps + shader execution reordering, work graphs,
+    // enhanced barriers and the ExecuteIndirect tier are reported for the record. The renderer uses none of them (the RX 7900 XTX has none of the DXR 1.2 ones).
+    void queryRayTracingCaps(const DeviceDesc&) {
+        D3D12_FEATURE_DATA_D3D12_OPTIONS5 o5{};
+        if (SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &o5, sizeof(o5)))) {
+            const auto tier = static_cast<int>(o5.RaytracingTier);
+            caps_.dxrTier = tier >= D3D12_RAYTRACING_TIER_1_2 ? 12 : tier >= D3D12_RAYTRACING_TIER_1_1 ? 11 : tier >= D3D12_RAYTRACING_TIER_1_0 ? 10 : 0;
+        }
+        D3D12_FEATURE_DATA_D3D12_OPTIONS22 o22{};
+        const bool o22Ok = SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS22, &o22, sizeof(o22)));
+        caps_.serReorders = o22Ok && o22.ShaderExecutionReorderingActuallyReorders != FALSE;
+        D3D12_FEATURE_DATA_D3D12_OPTIONS21 o21{};
+        const bool o21Ok = SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS21, &o21, sizeof(o21)));
+        D3D12_FEATURE_DATA_D3D12_OPTIONS12 o12{};
+        const bool o12Ok = SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS12, &o12, sizeof(o12)));
+        spdlog::info("d3d12: caps: DXR {} (opacity micromaps and shader execution reordering are DXR 1.2: {}), SER reorders {}, work graphs tier {}, ExecuteIndirect "
+                     "tier {}, enhanced barriers {}; clustered geometry is NVIDIA-only (NVAPI / VK_NV_cluster_acceleration_structure: not queried here)",
+                     caps_.dxrTier == 12 ? "1.2" : caps_.dxrTier == 11 ? "1.1" : caps_.dxrTier == 10 ? "1.0" : "none", caps_.dxrTier >= 12 ? "offered" : "not offered",
+                     o22Ok ? (caps_.serReorders ? "yes" : "no") : "not reported", o21Ok ? static_cast<int>(o21.WorkGraphsTier) / 10 : -1,
+                     o21Ok ? static_cast<int>(o21.ExecuteIndirectTier) / 10 : -1, o12Ok ? (o12.EnhancedBarriersSupported ? "yes" : "no") : "not reported");
+    }
+
     bool createRootSignature() {
         D3D12_ROOT_PARAMETER params[3]{};
         params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -877,6 +1049,8 @@ private:
     std::uint32_t rtvNext_ = 0, dsvNext_ = 0, uavTable_ = 0;
     DeviceCaps caps_;
     std::atomic<std::uint32_t> errors_{0};
+    std::atomic<bool> removed_{false};  // the device was removed (markRemoved ran)
+    bool dredOn_ = false;               // DRED was enabled before the device was made
     std::unique_ptr<Texture> defaultTexture_;  // the texture behind heap entry 0 (declared last: released first)
 };
 
@@ -1576,9 +1750,15 @@ public:
         uavBarrier();
     }
 
-    // (capture regions: PIX events need WinPixEventRuntime; the raw BeginEvent API is flagged by the debug layer)
-    void beginRegion(std::string_view) override {}
-    void endRegion() override {}
+    // capture regions (PIX / the DRED breadcrumbs' BeginEvent ops): PIX3 encoded events written by the header-only encoder
+    void beginRegion(std::string_view name) override {
+        // (PIXBeginEvent(list, ...) also records a CPU timeline event, which needs WinPixEventRuntime.dll: the GPU marker alone is encoded here)
+        const std::string n(name);
+        UINT64 blob[PIXEventsGraphicsRecordSpaceQwords];
+        UINT64* end = PixEventsLegacy::EncodeBeginEventForContext(blob, static_cast<UINT64>(PIX_COLOR_DEFAULT), "%s", n.c_str());
+        list_->BeginEvent(D3D12_EVENT_METADATA, blob, static_cast<UINT>(reinterpret_cast<BYTE*>(end) - reinterpret_cast<BYTE*>(blob)));
+    }
+    void endRegion() override { list_->EndEvent(); }
 
 private:
     // mip levels [base, base + count) (all layers) to state `to`; a whole texture keeps one state, levels that differ are tracked in mipStates. The
@@ -1772,6 +1952,7 @@ bool D3D12DeviceImpl::renderAndPresent(Swapchain& swapchain, const std::function
     ID3D12CommandList* lists[1] = {list_.Get()};
     queue_->ExecuteCommandLists(1, lists);
     const HRESULT hr = sw.swapchain()->Present(sw.vsync() ? 1 : 0, 0);
+    if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_HUNG || hr == DXGI_ERROR_DEVICE_RESET) checkRemoved("Present");
     waitIdle();
     return SUCCEEDED(hr);
 }

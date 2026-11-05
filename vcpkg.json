@@ -19,6 +19,7 @@
     "stb",
     "tomlplusplus",
     "volk",
+    "winpixevent",
     "vulkan-headers",
     "vulkan-memory-allocator"
   ]

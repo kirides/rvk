@@ -31,6 +31,17 @@ void inspectRayTracing(VkPhysicalDevice pd, const std::vector<VkExtensionPropert
     if (!extRq) rt.extensionsMissing.emplace_back(VK_KHR_RAY_QUERY_EXTENSION_NAME);
     if (!extDho) rt.extensionsMissing.emplace_back(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
     rt.deferredHostOperations = extDho;
+    rt.clusterAccelerationStructure = hasExtension(exts, "VK_NV_cluster_acceleration_structure");
+    rt.partitionedAccelerationStructure = hasExtension(exts, "VK_NV_partitioned_acceleration_structure");
+    rt.linearSweptSpheres = hasExtension(exts, "VK_NV_ray_tracing_linear_swept_spheres");
+    rt.displacementMicromap = hasExtension(exts, "VK_NV_displacement_micromap");
+    for (const char* name : {"VK_EXT_ray_tracing_invocation_reorder", "VK_NV_ray_tracing_invocation_reorder"}) {
+        if (hasExtension(exts, name)) {
+            rt.invocationReorder = true;
+            rt.invocationReorderName = name;
+            break;
+        }
+    }
 
     // feature structs only of extensions that exist (an unknown structure in the chain is invalid usage)
     VkPhysicalDeviceVulkan12Features f12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
@@ -88,6 +99,13 @@ void inspectRayTracing(VkPhysicalDevice pd, const std::vector<VkExtensionPropert
         rt.minScratchOffsetAlignment = pAs.minAccelerationStructureScratchOffsetAlignment;
         rt.maxRayRecursionDepth = pPipe.maxRayRecursionDepth;
         rt.shaderGroupHandleSize = pPipe.shaderGroupHandleSize;
+    }
+    // shader execution reordering: does the hardware reorder, or is the hint a no-op (VK_EXT only; the NV one has the same property)
+    if (rt.invocationReorder && rt.invocationReorderName == "VK_EXT_ray_tracing_invocation_reorder") {
+        VkPhysicalDeviceRayTracingInvocationReorderPropertiesEXT pSer{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_PROPERTIES_EXT};
+        VkPhysicalDeviceProperties2 q2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &pSer};
+        vkGetPhysicalDeviceProperties2(pd, &q2);
+        rt.invocationReorderReorders = pSer.rayTracingInvocationReorderReorderingHint == VK_RAY_TRACING_INVOCATION_REORDER_MODE_REORDER_EXT;
     }
 }
 

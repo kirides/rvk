@@ -115,6 +115,14 @@ Built on 7540a9a (uncommitted tree when written). Resources, passes and the opti
   attachments (`Texture::image()`), `pipelineFor` (`GamePipeline`), the present path (blit to the swapchain, the overlay's rendering scope), `submitFrame / beginFrame` (read-backs flush the frame through them), `ctx_.features()`
   queries, `moduleLabel(ctx_...)`; `bootstrap.cpp`'s `vk::probe()`. `GameCaps::uploadRowAlign / uploadOffsetAlign` are untested above 1 / 16 (the padded-row staging path in `Texture::upload` is compiled but never taken on Vulkan).
 
+### 2026-11-05: toolchain update + Agility SDK 1.620.1 + debugging
+
+vcpkg baseline moved to the user's clone (directx-dxc 1.9.2602.24, directx-headers 1.721.2, spdlog 1.17.0; the disk caches key on the DXC version, so they refill); gates after the update: rvk_tests (209), `rvk_vktest --rt --passes`,
+`rvk_d3d9test --validation` (Vulkan: this tool has no D3D12 backend yet), `rvk_rhitest --validation` (Vulkan + D3D12 parity), `dxil-check embedded` 54 / 54 and `corpus` 2483 / 2483 (spirv + dxil), `testdemo` 7 / 7
+(wrapper; the game does not create a D3D12 device yet, so there is no D3D12 testdemo). Agility SDK **1.620.1** through the repo's `vcpkg-overlay/directx12-agility` (registry: 1.619.5), shipped as `rvk\d3d12\D3D12Core.dll`
+by `package.ps1`; details, the proxy-DLL activation, the debugging features (DRED always on, device-removed report + minidump in `bin\rvk\dumps`, PIX events, debug-layer messages, `rvk_rhitest --device-lost`) and what the
+RX 7900 XTX does not offer (OMM, SER, cluster geometry: raytracing.md 9): hlsl-rhi.md 6d.
+
 ## Next steps (written 2026-10-30, at the break; user order: "make dx12 work, do everything necessary, do not report back until it works")
 
 Done and committed: S1 = WP1 (2774402: every shader to signed DXIL, uint2-pair address ABI, parity tests, checker `rvk_shadertool dxil-check`; the helpers are `RvkRef` / `rvkPtr` / `rvkRw*`, not the `RVK_PTR_*` macros

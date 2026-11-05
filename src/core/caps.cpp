@@ -29,6 +29,8 @@ constexpr std::array<Names, kCount> kNames = {{
     {"frame_generation", "Frame generation (FSR 3)"},
     {"frame_generation_ml", "Frame generation (FSR 4)"},
     {"frame_generation_queues", "Frame generation queues"},
+    {"cluster_acceleration_structure", "Clustered geometry (mega geometry)"},
+    {"ray_tracing_reorder", "Shader execution reordering"},
 }};
 
 std::mutex g_mutex;

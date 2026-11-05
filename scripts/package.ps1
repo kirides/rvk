@@ -30,6 +30,16 @@ try {
     # the runtime HLSL compiler (shader/dxc) and its licence (LLVM Apache-2.0 with LLVM exceptions: a binary redistribution reproduces it)
     Copy-Item (Join-Path $BinDir 'dxcompiler.dll') "$stage\rvk"
     Copy-Item (Join-Path $BinDir 'copyright') "$stage\rvk\dxc_LICENSE.txt"
+    # the DirectX 12 Agility SDK runtime (rhi/d3d12 activates it from rvk\d3d12 when the DX12 backend is chosen; the system's d3d12.dll otherwise): D3D12Core.dll
+    # is redistributable (Microsoft DirectX licence, shipped as D3D12_LICENSE.txt); the debug layer d3d12SDKLayers.dll is a developer tool and is not shipped
+    $agility = Join-Path $BinDir 'd3d12'
+    if (Test-Path (Join-Path $agility 'D3D12Core.dll')) {
+        New-Item -ItemType Directory -Force "$stage\rvk\d3d12" | Out-Null
+        Copy-Item (Join-Path $agility 'D3D12Core.dll') "$stage\rvk\d3d12"
+        Copy-Item (Join-Path $agility 'copyright') "$stage\rvk\d3d12\D3D12_LICENSE.txt"
+    } else {
+        Write-Warning "$agility\D3D12Core.dll missing: the package has no Agility SDK"
+    }
     $lic = @(Get-Content third_party\amd_fidelityfx\LICENSE.md)
     $end = ($lic | Select-String -Pattern '^These source files' | Select-Object -First 1).LineNumber - 1
     if ($end -lt 10) { throw 'amd_fidelityfx\LICENSE.md: end of the notice not found' }
