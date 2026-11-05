@@ -89,7 +89,32 @@ struct Spec {
     // group applies at once; between groups only at the next start (restartPending, "restart needed" in the overlay), e.g.
     // renderer.mode: original {0} | wrapper, full {1}. Empty = no such rule.
     std::vector<std::uint8_t> restartGroups;
+    // Overlay placement (the pages are generated from these; docs/research/overlay.md 2.8). Keep them next to the registration:
+    // removing a setting removes its place. page = a sidebar page (kPage*, see pageOrder()); section = the heading inside the
+    // page (empty = `category`); order = position inside its section / the section's position in the page (lower first,
+    // ties keep the registration order). The tooltip is `description`, the tier comes from the flags (tierOf).
+    std::string page;
+    std::string section;
+    int order = 0;
 };
+
+// the sidebar pages in order (the Debug page is shown in debug mode only)
+inline constexpr const char* kPageDisplay = "Display";
+inline constexpr const char* kPageLighting = "Lighting & Shadows";
+inline constexpr const char* kPageRayTracing = "Ray Tracing";
+inline constexpr const char* kPageWater = "Water & Materials";
+inline constexpr const char* kPageImage = "Image";
+inline constexpr const char* kPageDetail = "Detail Distances";
+inline constexpr const char* kPageSystem = "System";
+inline constexpr const char* kPageDebug = "Debug";
+// the settings pages in sidebar order (the Performance page of the overlay has no settings)
+const std::vector<std::string>& pageOrder();
+
+enum class Tier : std::uint8_t { Basic, Advanced, Debug, Hidden };
+Tier tierOf(const Spec& spec);
+// the page / section a spec is shown in (explicit metadata, else derived from `tab` / `category`)
+std::string pageOf(const Spec& spec);
+std::string sectionOf(const Spec& spec);
 
 class Registry;
 
@@ -497,5 +522,7 @@ void applyPreset(Registry& reg, const Preset& preset);
 int matchPreset(const Registry& reg);
 // resets every setting of an overlay tab to its default (locked ones stay); returns how many changed
 std::size_t resetTab(Registry& reg, std::string_view tab);
+// the same for an overlay page (Spec::page); returns how many changed
+std::size_t resetPage(Registry& reg, std::string_view page);
 
 }  // namespace rvk::settings

@@ -59,6 +59,7 @@
     caps::Report capabilityReport(bool pipelineLibraries) override;
     void runRaytracingSelfTest() override;
     void logMemoryStats() override;
+    bool videoMemory(std::uint64_t& used, std::uint64_t& budget) override;
     std::unique_ptr<Upscaler> createUpscaler() override;
     std::unique_ptr<FrameGenerator> createFrameGenerator() override;
     std::unique_ptr<ImGuiBackend> createImGuiBackend() override;

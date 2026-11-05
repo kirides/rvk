@@ -683,6 +683,19 @@ public:
                         t.detail);
         }
     }
+    bool videoMemory(std::uint64_t& used, std::uint64_t& budget) override {
+        const VkPhysicalDeviceMemoryProperties* mp = nullptr;
+        vmaGetMemoryProperties(ctx_.allocator(), &mp);
+        VmaBudget budgets[VK_MAX_MEMORY_HEAPS]{};
+        vmaGetHeapBudgets(ctx_.allocator(), budgets);
+        used = budget = 0;
+        for (std::uint32_t h = 0; h < mp->memoryHeapCount; ++h) {
+            if ((mp->memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) == 0) continue;
+            used += budgets[h].usage;
+            budget += budgets[h].budget;
+        }
+        return budget > 0;
+    }
     void logMemoryStats() override {
         const VkPhysicalDeviceMemoryProperties* mp = nullptr;
         vmaGetMemoryProperties(ctx_.allocator(), &mp);

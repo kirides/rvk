@@ -282,6 +282,7 @@ add_library(rvk_core STATIC
     src/overlay/keys.h
     src/overlay/overlay.cpp
     src/overlay/overlay.h
+    src/overlay/overlay_ui.cpp
     src/res/dds.cpp
     src/res/dds.h
     src/shader/abi.h
