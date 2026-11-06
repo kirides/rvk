@@ -34,6 +34,7 @@
 #include "enh/water.h"
 #include "native/effect_ops.h"
 #include "native/frame_tap.h"
+#include "native/owned_observe.h"
 #include "native/static_ops.h"
 #include "overlay/overlay.h"
 #include "hal/stub_generated.h"

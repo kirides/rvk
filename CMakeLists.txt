@@ -182,6 +182,8 @@ add_library(rvk_core STATIC
     src/native/frame_desc.h
     src/native/frame_tap.cpp
     src/native/frame_tap.h
+    src/native/owned_observe.cpp
+    src/native/owned_observe.h
     src/native/static_compose.cpp
     src/native/static_ops_lean.cpp
     src/native/static_ops_retained.cpp

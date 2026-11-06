@@ -43,6 +43,7 @@
 #include "engine/window_mode.h"
 #include "hal/trace.h"
 #include "hal/vulkan/hal_vulkan.h"
+#include "native/owned_observe.h"
 #include "hal/types_base.h"
 #include "overlay/keys.h"
 #include "rvk_api.h"
@@ -487,6 +488,8 @@ void onProcessAttach(void* module) {
         engine::lights::install();      // the illumination admin: all of the world's lights for the GI (rtgi.md 19)
         engine::scenetable::install();  // the GPU scene's signal-fed instance table (docs/research/gpu-scene.md)
         engine::illumcensus::install();  // RVK_ILLUM_CENSUS=1 only (frame-ownership.md F0)
+        // frame ownership F0 (docs/research/frame-ownership.md): the RequestRenderOps hooks, only when native.owned_observe is on at start
+        if (const auto& rs = settings::renderer(); rs.nativeOwnedObserve != nullptr && rs.nativeOwnedObserve->asBool()) native::owned_observe::install();
         engine::lod::install();     // detail distances (docs/research/lod.md)
         engine::fastsort::install();  // typed sort of the render-op lists (performance.md 21)
         if (!engine::matsrc::install()) spdlog::warn("engine: CompileShaderPoolEllement not hooked: no material shader sources");

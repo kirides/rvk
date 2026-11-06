@@ -2300,6 +2300,20 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeOwnedObserve = &reg.add({
+        .key = "native.owned_observe",
+        .label = "Frame ownership: observe requests",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Records every RequestRenderOps of the mesh / skinned / SpeedTree / tree billboard / vegetation contexts per view (the visible "
+                       "lists of the owned frame, F0) and verifies them against the databases' op lists and the frame tap; rvk.log `native: owned "
+                       "observe (5 s)`. Observes only. The hooks are installed at start only when this is on then (turning it on later needs a "
+                       "restart); Full.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeStaticOps = &reg.add({
         .key = "native.static_ops",
         .label = "Native frame: static ops",

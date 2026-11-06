@@ -537,6 +537,15 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         reg.onChange(*rs.nativeFrameTap, [this](const settings::Setting& s) { frameTap_->apply(s.asBool()); }, this);
         frameTap_->apply(rs.nativeFrameTap->asBool());
     }
+    // frame ownership F0 (native/owned_observe.h): the tap runs for it and reports each view's start
+    if (rs.nativeOwnedObserve != nullptr) {
+        const auto applyObserve = [this](const settings::Setting& s) {
+            native::owned_observe::setEnabled(s.asBool());
+            frameTap_->setObserve(s.asBool() && native::owned_observe::installed());
+        };
+        reg.onChange(*rs.nativeOwnedObserve, applyObserve, this);
+        applyObserve(*rs.nativeOwnedObserve);
+    }
     // N5.1 static ops (native/static_ops.h): driven by the frame tap
     staticOps_ = std::make_unique<native::StaticOps>(*this);
     frameTap_->setStaticOps(staticOps_.get());

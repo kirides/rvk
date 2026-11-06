@@ -472,6 +472,7 @@ struct RendererSettings {
     Setting* rtSkin = nullptr;            // debug.rt_skin: characters skinned by compute for the RT scene
     Setting* rtSkinVerify = nullptr;      // debug.rt_skin_verify: compare it with the vertex shader capture
     Setting* nativeFrameTap = nullptr;    // native.frame_tap: the main view's render ops + draw attribution (engine-frame N5.0)
+    Setting* nativeOwnedObserve = nullptr;  // native.owned_observe: frame ownership F0, the RequestRenderOps hooks in observe mode (frame-ownership.md)
     Setting* nativeStaticOps = nullptr;   // native.static_ops: the static mesh z / solid ops drawn by the renderer (engine-frame N5.1)
     Setting* nativeStaticOpsCompare = nullptr;  // native.static_ops_compare: their composed draws diffed against the engine's
     Setting* nativeSceneOps = nullptr;         // native.scene_ops: the rest of the main view's mesh-like work drawn by the renderer (N5.2)

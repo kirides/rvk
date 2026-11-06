@@ -15,6 +15,7 @@
 #include "engine/shadow_maps.h"
 #include "engine/symbols.h"
 #include "hal/vulkan/hal_vulkan.h"
+#include "native/owned_observe.h"
 #include "native/static_ops.h"
 
 namespace rvk::native {
@@ -100,8 +101,13 @@ void FrameTap::setEffectOpsActive(bool on) {
     update();
 }
 
+void FrameTap::setObserve(bool on) {
+    observeWanted_ = on;
+    update();
+}
+
 void FrameTap::update() {
-    const bool on = wanted_ || staticsWanted_ || effectsWanted_;
+    const bool on = wanted_ || staticsWanted_ || effectsWanted_ || observeWanted_;
     if (on == on_) return;
     on_ = on;
     if (on) {
@@ -619,6 +625,7 @@ void FrameTap::beginView(void* db, void* desc, ViewKind kind, void* shadowMap, s
     db_ = db;
     executing_ = true;
     attr_.begin(&desc_);
+    if (observeWanted_) owned_observe::viewBegin(db, kind, frame, desc_);
     if (statics_ != nullptr && staticsWanted_) statics_->viewBegin(db, desc, desc_);
 }
 
@@ -840,6 +847,7 @@ void FrameTap::logOps() const {
 }
 
 void FrameTap::report() {
+    if (observeWanted_) owned_observe::report();
     if (statics_ != nullptr) statics_->report();
     if (on_ && !cov_.empty()) {
         for (const std::string& line : cov_.lines(" (5 s)")) spdlog::info("{}", line);

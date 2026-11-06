@@ -38,6 +38,8 @@ public:
     // N5.5c: the effect draws (native/effect_ops) take the draws of their units first
     void setEffectOps(class EffectOps* ops) { effects_ = ops; }
     void setEffectOpsActive(bool on);
+    // frame ownership F0 (native/owned_observe): the tap runs for it and tells it every view's start
+    void setObserve(bool on);
     // N5.8 coverage counter (per draw; O1: off in plain Full runs, native.coverage)
     void setCoverage(bool on) { coverage_ = on; }
     // the report (HalDevice, every 5 s): the last main view + the window since the last report
@@ -87,6 +89,7 @@ private:
     bool staticsWanted_ = false;  // the static ops are active
     class StaticOps* statics_ = nullptr;
     bool effectsWanted_ = false;  // the effect draws are active
+    bool observeWanted_ = false;  // native.owned_observe
     class EffectOps* effects_ = nullptr;
     int verified_ = 0;  // 0 not yet, 1 the sort sites are as expected, -1 not (the tap stays idle)
     int shadowVerified_ = 0;  // ExecuteShadowMap's sort site (N5.5): 1 as expected, -1 not (shadow views stay untapped)
