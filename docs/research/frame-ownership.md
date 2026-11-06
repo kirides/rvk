@@ -979,6 +979,14 @@ scene-draw path only) shows the same size of difference (0.3 - 0.6, max 28): **t
 engine's order of same-depth surfaces changes), not from the owned replay; accepted as a Full-mode picture change like the batching of 7.11. Owned frames vs composed frames differ by nothing the compare
 sees (DIFFERING 0 on every check frame).
 
+**CPU A/B** (savegame, `-Perf`, `RisenTest.exe`, vsync off, lod 2x, shared default copy under `with-test-lock -Who f41-perf`, interleaved off / on / off / on, mean of the last 6 windows): engine + HAL
+CPU per frame **off 6.72 / 6.71 ms, on 7.03 / 6.97 ms (+0.29 ms: no gain, a loss)**; GPU 3.36 / 3.37 vs 3.27 / 3.27 ms (-0.10 ms: fewer, batched calls). The owned replay itself cost 0.36 ms per frame in
+those runs (the first build) against the 0.25 - 0.55 ms of compose + issue it replaces: **the owned replay is not cheaper than the composition yet.** After the poll was made once per material per
+frame and the windows of the dry run were reused (this commit's last change; the 4 spots / save runs above predate it), the savegame hold measured 107 -> **86 us per frame** for the replay with DIFFERING 0
+(not re-timed A/B: the shared copy was busy with another agent's run). What is left is per-op fixed work: stamps (~40 guarded reads), the source / read-log validation (3 KB hash of the constants), `viewAndMirror`
+(`initMirror`), `fillViews` + `fillWindows` per draw, two derivations per draw (dry run + submit). The honest reading: billboards are too few ops (13 - 21 per list) for the record path to win on CPU
+by itself; its value is the proven path (record -> derive -> submit with nothing composed, DIFFERING 0, both backends) that F4-2..4 reuse for the 77 tree ops / 129 draws of a view, where per-op costs amortise.
+
 **Not done / handed on:** viewBegin compaction (slot-time replay instead); the shadow views and the trees themselves (F4-2..4); the per-frame cost of the replay is dominated by the material
 poll (`constantsInto` + `checkDraw` per draw: polling once per material per frame is the next saving) and `initMirror` per op; check-frame period / env knob should become `native.owned_check` when F2c-3 lands it.
 

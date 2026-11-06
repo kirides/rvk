@@ -773,6 +773,9 @@ private:
     bool bbCheckFrame();
     std::unique_ptr<sc::DrawDesc> bbScratch_;
     std::vector<d3d9::Device::DeriveIn> bbIns_;
+    std::vector<d3d9::OwnedWindows> bbWins_;
+    std::vector<std::uint64_t> bbPolled_;
+    std::uint64_t bbPolledFrame_ = ~0ull;
     // packet retention: a composed draw's finished packet by (op, draw index), valid while the draw description equals the captured one
     int packetMode_ = 0;
     int gpuScene_ = 0;

@@ -832,6 +832,17 @@ bool StaticOps::bbPollMaterials(const bbrec::Record& rec) {
     for (std::size_t k = 0; k < rec.draws.size() && k < rec.mats.size(); ++k) {
         const orec::DrawRec& r = rec.draws[k];
         const bbrec::MatArgs& m = rec.mats[k];
+        // (once per frame per material and pass kind: the table's own poll is once per frame, the later calls would only repeat the verification)
+        const std::uint64_t pk = reinterpret_cast<std::uintptr_t>(m.owner) ^ (m.zPass ? 1ull : 0ull) ^ (m.blendMode == 0 ? 0ull : 2ull);
+        if (bbPolledFrame_ != dev_.stats().frames) {
+            bbPolledFrame_ = dev_.stats().frames;
+            bbPolled_.clear();
+        }
+        if (std::find(bbPolled_.begin(), bbPolled_.end(), pk) != bbPolled_.end()) {
+            h = mix(mix(h, r.matSlot), gpuscene::materialtable().structVersion(r.matSlot));
+            continue;
+        }
+        bbPolled_.push_back(pk);
         d.vs = r.cd->vs;
         d.ps = r.cd->ps;
         d.vsSet = {};
@@ -926,13 +937,14 @@ bool StaticOps::bbReplay(const Op& op) {
     };
     // all draws are checked before one is submitted (a refusal after the first would draw it twice)
     bbrec::Refuse why = bbrec::Refuse::Count;
-    d3d9::OwnedWindows dw;
+    std::vector<d3d9::OwnedWindows>& wins = bbWins_;
+    wins.resize(rec.draws.size());
     for (std::size_t k = 0; k < rec.draws.size() && why == bbrec::Refuse::Count; ++k) {
         const orec::DrawRec& r = rec.draws[k];
         setTag(r);
-        bbWindowsFor(rec, k, dw);
+        bbWindowsFor(rec, k, wins[k]);
         int dwhy = 0;
-        switch (dev_.submitOwned(*r.cd, ins[k], dw, true, &dwhy)) {
+        switch (dev_.submitOwned(*r.cd, ins[k], wins[k], true, &dwhy)) {
             case d3d9::Device::OwnedWhy::Submitted: break;
             case d3d9::Device::OwnedWhy::Window: why = bbrec::Refuse::Windows; break;
             case d3d9::Device::OwnedWhy::Consumers: why = bbrec::Refuse::Consumers; break;
@@ -948,8 +960,7 @@ bool StaticOps::bbReplay(const Op& op) {
     for (std::size_t k = 0; k < rec.draws.size(); ++k) {
         const orec::DrawRec& r = rec.draws[k];
         setTag(r);
-        bbWindowsFor(rec, k, dw);
-        if (dev_.submitOwned(*r.cd, ins[k], dw, false) == d3d9::Device::OwnedWhy::Submitted) ++made;
+        if (dev_.submitOwned(*r.cd, ins[k], wins[k], false) == d3d9::Device::OwnedWhy::Submitted) ++made;
         else ++w.refuse[static_cast<std::size_t>(bbrec::Refuse::Partial)];  // (not expected: the dry run passed; the draw is lost for this frame)
     }
     tag = savedTag;
