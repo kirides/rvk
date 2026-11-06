@@ -2556,6 +2556,21 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .needs = {{"native.owned_records", "true", false, true}, {"native.scene_draws", "true", false, true}},
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeOwnedPersistent = &reg.add({
+        .key = "native.owned_persistent",
+        .label = "Native frame: persistent owned draws",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode only, needs owned static draws and scene ABI v2 (frame-ownership.md F2c-4a): the owned draws' DrawRecords and DrawBlocks stay in persistent GPU tables and are "
+                       "rewritten only when an input of their derivation changed (the device's pass state, the draw's textures / buffers / windows); a frame writes one reference list + "
+                       "argument block and queues ONE indirect draw per bucket. native.owned_check frames compare the persistent content with a fresh derivation (MISS must stay 0; a MISS "
+                       "turns owned_static off) and a rolling scrub re-derives 16 draws per frame. rvk.log `native: owned persistent (5 s)`, `native: draw record table (5 s)`.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"native.owned_static", "true", false, true}},
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeOwnedCheck = &reg.add({
         .key = "native.owned_check",
         .label = "Native frame: owned static check interval",

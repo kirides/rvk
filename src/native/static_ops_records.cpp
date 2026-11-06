@@ -453,6 +453,7 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
         return;
     }
     ++w.derived;
+    if (ownedPersistent_) ownedMissCheck(rec, k, in, dv);  // F2c-4a: the persistent draw (if the owned path would reuse it now) against this derivation
     const d3d9::Device::SceneView& pv = R.probes[k];
     std::array<bool, orec::kFieldCount> diff{};
     std::string detail;

@@ -490,6 +490,7 @@ struct RendererSettings {
     Setting* nativeSceneDraws = nullptr;       // native.scene_draws: the static main-view z / solid draws as DrawRecords + indirect runs (frame-ownership.md 7.11)
     Setting* nativeOwnedObjects = nullptr;     // native.owned_objects: the static ops' non-instanced mesh draws read VS windows 1 / 2 from the view block / the object table (frame-ownership.md 7.13)
     Setting* nativeOwnedStatic = nullptr;      // native.owned_static: the static z / solid ops of valid records drawn from the records, left out of the engine's lists (frame-ownership.md 7.16)
+    Setting* nativeOwnedPersistent = nullptr;  // native.owned_persistent: the owned draws' DrawRecords / DrawBlocks persistent on the GPU, one indirect draw per bucket (frame-ownership.md 7.21)
     Setting* nativeOwnedCheck = nullptr;       // native.owned_check: every N-th frame (and the one before it) runs the old path and compares
     Setting* nativeOwnedRecords = nullptr;     // native.owned_records: op records built from the static composition and compared with record-derived draws (frame-ownership.md 7.14)
     Setting* nativeOwnedBillboards = nullptr;  // native.owned_billboards: the tree billboards' ops retained as records and drawn from them (frame-ownership.md 7.17, F4-1)
