@@ -28,6 +28,7 @@
 #include "engine/lod.h"
 #include "engine/scene_table.h"
 #include "gpuscene/instance_buffer.h"
+#include "gpuscene/illumination_table.h"
 #include "engine/xinput_throttle.h"
 #include "engine/memread.h"
 #include "engine/material_source.h"
@@ -1614,6 +1615,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
     engine::scenetable::onPresent();
     {
         gpuscene::instances().flush(dev_, frozen::kGpuScene >= 2 ? frozen::kGpuScene : 0);
+        gpuscene::illumtable().flush(dev_, true);
     }
     engine::lod::onPresent();  // a changed object draw distance: the world's cache-in spheres (engine thread)
     dev_.present();

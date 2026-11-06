@@ -479,6 +479,7 @@ struct RendererSettings {
     Setting* nativeSceneOpsCompare = nullptr;  // native.scene_ops_compare: ... composed and diffed against the engine's draws
     Setting* nativeSceneOpsGroups = nullptr;   // native.scene_ops_groups: which N5.2 groups (bit mask, hidden)
     Setting* nativeCoverage = nullptr;         // native.coverage: the per-draw coverage counter in plain Full runs (O1)
+    Setting* nativeIllumTable = nullptr;       // native.illum_table: the GPU illumination table + its draw-lighting verification (frame-ownership.md F0; restart)
     Setting* nativeLean = nullptr;             // native.lean: the engine's slot code not run for the composed mesh-like ops (O2a)
     Setting* nativeLeanCheck = nullptr;        // native.lean_check: every N-th frame the engine's code runs as before (compare)
     Setting* nativePacketCache = nullptr;     // native.packet_cache: retained draw packets of the main view's static meshes + trees (retained-signals.md 8)

@@ -21,6 +21,7 @@
 #include "engine/illum_census.h"
 #include "engine/scene_table.h"
 #include "engine/symbols.h"
+#include "gpuscene/illumination_table.h"
 #include "fx/effect_binary.h"
 #include "hal/vulkan/hal_vulkan.h"
 
@@ -666,6 +667,26 @@ void StaticOps::writeTreeInstance(std::uint32_t slot, const float v[2]) {
 
 // FUN_1806cd1d0: the pass's lighting into the lighting pool (c14 .. c37)
 void StaticOps::writeLighting(const sc::Pass& pass) {
+    gpuscene::IllumTable& table = gpuscene::illumtable();
+    if (!table.active() || pass.illum == nullptr || ptr(static_cast<U8*>(pass.illum), 0) == nullptr) {
+        bool holdsAll = false;
+        writeLightingRegisters(pass, holdsAll);
+        return;
+    }
+    // frame-ownership.md F0: what this function writes must equal the composition from the illumination table's records
+    float prior[24][4];
+    std::memcpy(prior, mirror_.lighting, sizeof(prior));
+    bool holdsAll = false;
+    writeLightingRegisters(pass, holdsAll);
+    gpuscene::ComposeParams p;
+    p.tableLit = pass.tableLit;
+    p.holdsAll = holdsAll;
+    p.n = pass.tableLit ? 3u : sc::passLights(pass.flags);
+    p.firstLight = pass.firstLight;
+    table.checkDraw(pass.illum, p, prior, mirror_.lighting);
+}
+
+void StaticOps::writeLightingRegisters(const sc::Pass& pass, bool& holdsAll) {
     const ret::NoLog noLog;  // V3: values re-read at every replay
     U8* illum = static_cast<U8*>(pass.illum);
     U8* list = ptr(illum, 0);
@@ -697,6 +718,7 @@ void StaticOps::writeLighting(const sc::Pass& pass) {
         // the table holds this object's lights (rebuilt this frame): no light of this object is read; the three
         // registers are zero and the material variant fills every slot per pixel from the cluster (gpu-scene.md 9.9)
         std::memset(L[11], 0, 3 * 4 * 16);
+        holdsAll = true;
         return;
     }
     if (pass.tableLit) {

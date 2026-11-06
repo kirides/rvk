@@ -301,6 +301,8 @@ private:
     void writeAlpha(std::uint32_t slot, float a);
     void writeTreeInstance(std::uint32_t slot, const float v[2]);  // SetSpeedTreeInstanceData 0x6c9eb0: c32 + 4 slot .xy
     void writeLighting(const sc::Pass& pass);
+    // the engine's lighting composition (FUN_1806cd1d0); `holdsAll` = the table-lit early exit was taken (nothing read for the point lights)
+    void writeLightingRegisters(const sc::Pass& pass, bool& holdsAll);
     void noteListLights(const std::uint8_t* list);
     std::uint32_t bindLightmaps(const std::uint8_t* res);
     void capture(const d3d9::DrawTapInfo& t, sc::DrawDesc& out);

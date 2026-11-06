@@ -153,6 +153,7 @@
     /* illumination census (engine/illum_census.*, frame-ownership.md F0): eCLightSet::UpdateIllumination 0x579c70, eCIlluminated_PS::UpdateIllumination 0x595300, SetLightSet 0x5972e0, eCIlluminationAdmin::UpdateLightSets 0x575130 (once per frame) */ \
     X(lightSetUpdateIllumination, L"Engine.dll", "?UpdateIllumination@eCLightSet@@QEAA_NXZ", false)                              \
     X(illumPsUpdateIllumination, L"Engine.dll", "?UpdateIllumination@eCIlluminated_PS@@QEAAXXZ", false)                          \
+    X(illumPsDestroy, L"Engine.dll", "?Destroy@eCIlluminated_PS@@UEAAXXZ", false)                                                  \
     X(illumPsSetLightSet, L"Engine.dll", "?SetLightSet@eCIlluminated_PS@@QEAAXPEAVeCLightSet@@@Z", false)                        \
     X(illumAdminUpdateLightSets, L"Engine.dll", "?UpdateLightSets@eCIlluminationAdmin@@IEAAXXZ", false)                          \
     /* ---- the world's lights (engine/lights.*, docs/research/rtgi.md 19): the illumination admin (found through the `this` of   \

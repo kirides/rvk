@@ -326,6 +326,19 @@ the records carry no draw counts).
   particle 5, skydome 2) against the ~400 assumed in 6.1 risk 3. VS_DefaultZPass: 4 graphs but 19 static combinations (skinned / instanced /
   morphed split more than the graph).
 
-### 7.4 Running (not done)
+### 7.4 Observe hooks (commit 43fe79e, `native.owned_observe`)
 
-F0 observe hooks on the contexts' `RequestRenderOps`; F0 illumination + light-set GPU tables with register verification.
+The five contexts' `RequestRenderOps` detoured (observe only); per-view visible lists verified against the op lists and the frame tap: 0 unmatched ops / requests in steady state (rvkcompare spots + Risen_Save_0005, Full); cost within noise.
+
+### 7.5 Illumination + light-set tables (2026-11-06, `native.illum_table`)
+
+`src/gpuscene/illumination_table.*` + `illum_compose.h` (pure compose, tests `illum_table_*`) + `shaders/include/rvk_illum.hlsli` (+ GPU twin
+`shaders/test/illum_compose.comp.hlsl`, DXIL-checked, not yet run on the GPU). Records are RAW engine bytes: illumination 288 B (uint4 info + illum
+[0,0x110)), light set 336 B (uint4 info + list [0,0x140) = set + 0x10); capacity 16384 illuminations / 8 sets. Hooks (shared with the census,
+`engine/illum_census.cpp`): post `eCIlluminated_PS::UpdateIllumination` (dirty byte), post `SetLightSet`, post `eCLightSet::UpdateIllumination` +
+`UpdateLightSets` (set records), pre `eCIlluminated_PS::Destroy`; `OnCacheOut` 0x595ce0 is not exported (freed by Destroy or 1800 idle frames).
+Check: `StaticOps::writeLighting` composes c14..c37 from the records and compares: **DIFFERING 0** (1.7-1.9 M draws per run, Vulkan / D3D12 /
+validation, rvkcompare spots with and without table lighting, Risen_Save_0005); GPU read-back every 240th frame 0 differing. Finding: hooks alone
+were NOT enough (123,891 of 1.85 M draws differed): some illumination objects (0x118 stride, not eCIlluminated_PS + 0x78: batch copies) are
+rewritten in place without a hook, so the objects drawn are also polled once per frame against their record (`poll` uploads, 40-140 per minute at
+the spots, 0-1 at the savegame). Upload rate at the savegame ~1 record + 0.33 KiB per frame (set data dominates: the set changes nearly every frame).

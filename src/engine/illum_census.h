@@ -7,10 +7,12 @@
 
 namespace rvk::engine::illumcensus {
 
-// Creates the detours (enabled with the others by hooks::enableAll); false and no hooks when the variable is not set / a symbol is missing
+// Creates the detours (enabled with the others by hooks::enableAll); false and no hooks when neither the variable nor native.illum_table is set / a symbol is missing
 bool install();
 
 extern bool g_on;
+// the illumination table's hooks (setting native.illum_table, restart): the same four detours + eCIlluminated_PS::Destroy feed gpuscene::illumtable()
+extern bool g_table;
 
 // Called by the native lighting composition for every pass that writes an illumination's lighting (illum = eSShaderMaterialIllumination*,
 // list = its light list = the light set + 0x10)

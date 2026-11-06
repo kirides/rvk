@@ -15,11 +15,14 @@
 
 #include "core/hooks.h"
 #include "engine/memread.h"
+#include "core/settings.h"
 #include "engine/symbols.h"
+#include "gpuscene/illumination_table.h"
 
 namespace rvk::engine::illumcensus {
 
 bool g_on = false;
+bool g_table = false;
 
 namespace {
 
@@ -29,7 +32,7 @@ using VoidFn = void (*)(void*);
 using BoolFn = bool (*)(void*);
 using SetFn = void (*)(void*, void*);
 Hook<BoolFn> g_setUpdate;
-Hook<VoidFn> g_psUpdate, g_admin;
+Hook<VoidFn> g_psUpdate, g_admin, g_psDestroy;
 Hook<SetFn> g_setLightSet;
 
 using Ptrs = std::unordered_set<const void*>;
@@ -92,43 +95,53 @@ void endFrame() {
 }
 
 void detourAdmin(void* self) {
-    {
+    if (g_on) {
         std::lock_guard lock(g_mutex);
         endFrame();  // the previous frame's updates and draws
     }
     g_admin.original(self);
+    if (g_table) gpuscene::illumtable().onSetsUpdated();
 }
 
 bool detourSetUpdate(void* self) {
-    {
+    if (g_on) {
         std::lock_guard lock(g_mutex);
         ++g_f.setUpdates;
         g_f.updatedSets.insert(self);
         g_runSets.insert(self);
     }
-    return g_setUpdate.original(self);
+    const bool r = g_setUpdate.original(self);
+    if (g_table) gpuscene::illumtable().onSetUpdated(self);
+    return r;
 }
 
 void detourPsUpdate(void* self) {
     std::uint8_t dirty = 0;
     readAt(self, kDirtyByte, dirty);
-    {
+    if (g_on) {
         std::lock_guard lock(g_mutex);
         ++g_f.psUpdates;
         if (dirty != 0) ++g_f.psDirty;
     }
     g_psUpdate.original(self);
+    if (g_table) gpuscene::illumtable().onPsUpdate(self, dirty != 0);
+}
+
+void detourPsDestroy(void* self) {
+    if (g_table) gpuscene::illumtable().onPsDestroy(self);
+    g_psDestroy.original(self);
 }
 
 void detourSetLightSet(void* self, void* set) {
     const void* old = nullptr;
     readAt(self, kPsSet, old);
-    {
+    if (g_on) {
         std::lock_guard lock(g_mutex);
         ++g_f.setCalls;
         if (old != set) ++g_f.setChanged;
     }
     g_setLightSet.original(self, set);
+    if (g_table) gpuscene::illumtable().onSetLightSet(self);
 }
 
 }  // namespace
@@ -173,15 +186,22 @@ void noteDrawImpl(const void* illum, const void* list) {
 
 bool install() {
     char buf[8]{};
-    if (GetEnvironmentVariableA("RVK_ILLUM_CENSUS", buf, sizeof(buf)) == 0 || buf[0] != '1') return false;
+    const bool census = GetEnvironmentVariableA("RVK_ILLUM_CENSUS", buf, sizeof(buf)) != 0 && buf[0] == '1';
+    const auto* setting = settings::renderer().nativeIllumTable;
+    const bool table = setting != nullptr && setting->asBool();
+    if (!census && !table) return false;
     const auto& s = sym();
     bool ok = true;
     ok &= g_setUpdate.install("eCLightSet::UpdateIllumination", reinterpret_cast<BoolFn>(s.lightSetUpdateIllumination), &detourSetUpdate);
     ok &= g_psUpdate.install("eCIlluminated_PS::UpdateIllumination", reinterpret_cast<VoidFn>(s.illumPsUpdateIllumination), &detourPsUpdate);
     ok &= g_setLightSet.install("eCIlluminated_PS::SetLightSet", reinterpret_cast<SetFn>(s.illumPsSetLightSet), &detourSetLightSet);
     ok &= g_admin.install("eCIlluminationAdmin::UpdateLightSets", reinterpret_cast<VoidFn>(s.illumAdminUpdateLightSets), &detourAdmin);
-    g_on = ok;
-    spdlog::info("engine: illum census {} (RVK_ILLUM_CENSUS=1)", ok ? "installed" : "NOT installed: a symbol is missing");
+    if (table) ok &= g_psDestroy.install("eCIlluminated_PS::Destroy", reinterpret_cast<VoidFn>(s.illumPsDestroy), &detourPsDestroy);
+    g_on = ok && census;
+    g_table = ok && table;
+    gpuscene::illumtable().setActive(g_table);
+    if (census) spdlog::info("engine: illum census {} (RVK_ILLUM_CENSUS=1)", ok ? "installed" : "NOT installed: a symbol is missing");
+    if (table) spdlog::info("engine: illum table hooks {} (native.illum_table)", ok ? "installed" : "NOT installed: a symbol is missing");
     return ok;
 }
 

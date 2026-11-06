@@ -2390,6 +2390,20 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeIllumTable = &reg.add({
+        .key = "native.illum_table",
+        .label = "Native frame: illumination table",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode only (takes effect at the next start; frame-ownership.md F0, no picture change): a GPU table of the world's illumination "
+                       "objects and light sets (raw static lights / SH / f / set; the set's sun / SH / indoor / dynamic lights), kept current from the engine's "
+                       "UpdateIllumination / SetLightSet / UpdateLightSets, and a check that composes every lit draw's lighting registers c14..c37 from the "
+                       "records and compares them with what the native composition wrote. rvk.log `native: illum table (5 s)`, DIFFERING must stay 0.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::Restart | Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeLean = &reg.add({
         .key = "native.lean",
         .label = "Native frame: lean ops",

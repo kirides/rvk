@@ -487,7 +487,7 @@ void onProcessAttach(void* module) {
         engine::hemisphere::install();  // the weather hemisphere light for the GI sky (docs/research/rtgi.md 17)
         engine::lights::install();      // the illumination admin: all of the world's lights for the GI (rtgi.md 19)
         engine::scenetable::install();  // the GPU scene's signal-fed instance table (docs/research/gpu-scene.md)
-        engine::illumcensus::install();  // RVK_ILLUM_CENSUS=1 only (frame-ownership.md F0)
+        engine::illumcensus::install();  // RVK_ILLUM_CENSUS=1 or native.illum_table (frame-ownership.md F0)
         // frame ownership F0 (docs/research/frame-ownership.md): the RequestRenderOps hooks, only when native.owned_observe is on at start
         if (const auto& rs = settings::renderer(); rs.nativeOwnedObserve != nullptr && rs.nativeOwnedObserve->asBool()) native::owned_observe::install();
         engine::lod::install();     // detail distances (docs/research/lod.md)
