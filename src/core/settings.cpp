@@ -2465,6 +2465,34 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .needs = {{"native.material_table", "true", false, true}},
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeSceneDraws = &reg.add({
+        .key = "native.scene_draws",
+        .label = "Native frame: scene draws",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode only (frame-ownership.md F2b-1, no picture change): the native static ops' main-view z / solid draws are recorded as DrawRecords "
+                       "(register window bases, DrawBlock, flags) and drawn by one indirect call per run of consecutive draws with the same pipeline, vertex / index "
+                       "buffers and state, through the scene form of their shaders (needs vertex input location 24 and indirect first instance). "
+                       "rvk.log `native: scene draws (5 s)`.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
+    });
+    r.nativeSceneDrawsCheck = &reg.add({
+        .key = "native.scene_draws_check",
+        .label = "Native frame: scene draws check interval",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "With native.scene_draws: every N-th frame the GPU copies the record and argument blocks of that frame into a read-back buffer and they are "
+                       "compared with what the CPU wrote (rvk.log `native: scene draws check`, DIFFERING must stay 0); 0 = never.",
+        .type = Type::Int,
+        .defaultValue = 0,
+        .min = 0,
+        .max = 1000,
+        .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeLean = &reg.add({
         .key = "native.lean",
         .label = "Native frame: lean ops",

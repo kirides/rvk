@@ -115,6 +115,7 @@ public:
     void applyPacket(RecState& rs, ID3D12GraphicsCommandList* cmd, const DrawPacket& p);
     void bindScope(ID3D12GraphicsCommandList* cmd, const Scope& sc);
     void clearIn(ID3D12GraphicsCommandList* cmd, const Scope& sc, const ClearOp& op);
+    ID3D12CommandSignature* sceneSig_ = nullptr;  // F2b-1: ExecuteIndirect of DrawIndexedIndirect packets (stride kIndirectStride)
     void fixupPacket(DrawPacket& p);  // triangle fans -> an index list (engine thread: allocates from the ring)
 
     // ---- command list pools ----

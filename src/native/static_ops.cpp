@@ -2252,6 +2252,9 @@ void StaticOps::issue() {
     };
     gpuscene::MeshPartTable& meshParts = gpuscene::meshparts();
     const bool owned = ownedWindows_ && gpuscene::windowtables().active();
+    // F2b-1: the main view's static draws (z pre-pass + solid ops) are recorded as scene draws by the device
+    const bool sceneIssue = sceneDraws_ && viewKind_ == ViewKind::Main && g_ == &groups_[static_cast<std::size_t>(Group::Static)];
+    dev_.setSceneIssue(sceneIssue);
     for (std::size_t k = 0; k < drawCount_; ++k) {
         const sc::DrawDesc& d = *draws_[k];
         dev_.setVertexShaderRef(ShaderRef(const_cast<Shader*>(static_cast<const Shader*>(d.vs))));
@@ -2408,6 +2411,7 @@ void StaticOps::issue() {
         }
     }
     issuing_ = false;
+    dev_.setSceneIssue(false);
     if (owned) dev_.setOwnedWindows(nullptr);
     ++g_->issuedOps;
 

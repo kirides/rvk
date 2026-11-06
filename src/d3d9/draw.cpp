@@ -857,6 +857,8 @@ bool Device::gbufferEligible(const scene::Phase& phase, draws::Kind kind) const 
 bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     lastRecord_ = nullptr;
     customVertices_ = 0;
+    scenePipe_ = GamePipeline::None;
+    packet_.scene = 0;  // (packet_ is reused: a scene draw's record index must not leak into the next draw's packet)
     if (drawTap_ != nullptr) {
         // the N5.0 op tap sees every draw, also the ones skipped below
         DrawTapInfo t;
@@ -1420,6 +1422,10 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
                             (z == VK_COMPARE_OP_LESS || z == VK_COMPARE_OP_LESS_OR_EQUAL || z == VK_COMPARE_OP_EQUAL ||
                          z == VK_COMPARE_OP_GREATER || z == VK_COMPARE_OP_GREATER_OR_EQUAL);
     }
+    // F2b-1: the main view's static draws issued by the static ops may be drawn as scene draws (scene_draws.cpp); submitPacket makes the packet
+    if (sceneActive()) {
+        sceneDecide(pd, giDraw, captureDraw, uberBase != rhi::ShaderModule::None && pd.fs == uberBase, kind, phase, !replaced && tint == 0 && customVertices_ == 0 && geom.indexed && !geom.userPointer);
+    }
     ++stats_.draws;
     ++stats_.totalDraws;
     ++passDraws_;
@@ -1503,6 +1509,7 @@ void Device::fillCapture(const DrawPacket& p) {
     c.phase = phases_.current();
     c.vs = vs_.get();
     c.ps = ps_.get();
+    c.scenePipeline = scenePipe_;
     c.vsModule = vs_->module;
     c.fsModule = ps_->module;
     c.v = lastVariant_;
@@ -1563,6 +1570,8 @@ bool Device::replayBuild(const CachedDraw& c, const ReplayInputs& in, DrawPacket
     // variants' build state; a change in any of them makes the draw take another pipeline / pixel window / pack word
     if (c.v.giOn != giDraws_.on || c.v.replaceLightmaps != giDraws_.replaceLightmaps || c.v.pack != (packProvider_ && !packBypass_)) return fail(10);
     if (c.v.gbufGate != gbuf_.active) return fail(10);
+    // F2b-1: scene draws switched on / off, or the scene form of the draw was not ready when the packet was made: remade
+    if (c.v.sceneActive != sceneActive() || (c.v.sceneActive && c.v.scenePending)) return fail(10);
     bool gbufTaken = false;
     if (c.v.gbufGate) {
         // the G-buffer's material pass (its variant reads the ambient too): taken when eligible, lit and in the G-buffer's rendering scope
@@ -1779,6 +1788,10 @@ bool Device::replayDraw(const CachedDraw& c, const ReplayInputs& in) {
     phases_.countDraw();
     draws_.count(c.kind, c.phase.view);
     ++replayStats.replayed;
+    if (c.scenePipeline != GamePipeline::None && sceneActive() && p.batchable && rendering_ && ensureSceneRef()) {
+        if (toScenePacket(p, c.scenePipeline)) ++sceneStats_.replayedSceneDraws;
+        ++sceneStats_.candidates;
+    }
     submitInterned(p);
     return true;
 }
@@ -1966,15 +1979,27 @@ void Device::submitPacket(DrawPacket& p) {
     p.vi = internVi(workVi_);
     p.dyn = internDyn(workDyn_);
     if (capture_ != nullptr) fillCapture(p);
+    if (scenePipe_ != GamePipeline::None) {
+        toScenePacket(p, scenePipe_);
+        scenePipe_ = GamePipeline::None;
+    }
     submitInterned(p);
+    p.scene = 0;
 }
 
 void Device::submitInterned(DrawPacket& p) {
+    if (p.scene != 0 && !(p.batchable && rendering_)) {
+        // (not expected: scene draws are only made for batchable draws inside a scope) a run of its own
+        batch_.push_back(p);
+        flushBatch();
+        return;
+    }
     if (p.batchable && rendering_) {
         batch_.push_back(p);
         // with record threads a full segment goes to a worker at once (the draws of a pass are recorded while the engine goes on
         // producing them, not all at the scope's end)
-        if (scopeSecondary_ && batch_.size() >= kChunkPackets) flushBatch();
+        // (scene draws: a longer batch = longer indirect runs; frame-ownership.md 7.11)
+        if (scopeSecondary_ && batch_.size() >= (sceneRecs_.empty() ? kChunkPackets : 1024u)) flushBatch();
         return;
     }
     flushBatch();  // the batch's draws come before this one
@@ -1996,8 +2021,42 @@ void Device::flushBatch() {
         if (threaded) emitPacket(p);
         else game_->applyDrawPacket(p);
     };
+    // the packets in recording order; runs of scene packets become one indirect call each (scene_draws.cpp)
+    const auto recordOrdered = [&](auto&& index, std::uint32_t count) {
+        if (sceneRecs_.empty()) {
+            for (std::uint32_t i = 0; i < count; ++i) record(batch_[index(i)]);
+            return;
+        }
+        sceneRun_.clear();
+        const auto flushRun = [&] {
+            if (sceneRun_.empty()) return;
+            ++sceneStats_.groups;
+            sceneFlushRun(sceneRun_, record);
+            sceneRun_.clear();
+        };
+        for (std::uint32_t i = 0; i < count; ++i) {
+            const std::uint32_t at = index(i);
+            const DrawPacket& p = batch_[at];
+            if (p.scene == 0) {
+                flushRun();
+                record(p);
+                continue;
+            }
+            if (!sceneRun_.empty()) {
+                const int why = sceneMergeBreak(batch_[sceneRun_[0]], p);
+                if (why >= 0 && why < 5) ++sceneStats_.breaks[why];
+                if (why >= 0) flushRun();
+                else if (sceneRun_.size() >= 1024) {
+                    ++sceneStats_.breaks[4];
+                    flushRun();
+                }
+            }
+            sceneRun_.push_back(at);
+        }
+        flushRun();
+    };
     if (n <= 2) {
-        for (std::uint32_t i = 0; i < n; ++i) record(batch_[i]);
+        recordOrdered([](std::uint32_t i) { return i; }, n);
     } else {
         // rank of each pipeline = the index of its first draw: groups keep the order in which their pipelines first appeared.
         // An open-addressing table of (pipeline, rank) and one sort of (rank << 32 | index) keys: stable by construction
@@ -2015,8 +2074,9 @@ void Device::flushBatch() {
             batchKeys_[i] = (static_cast<std::uint64_t>(rankTable_[h].rank) << 32) | i;
         }
         std::sort(batchKeys_.begin(), batchKeys_.end());
-        for (const std::uint64_t k : batchKeys_) record(batch_[static_cast<std::uint32_t>(k)]);
+        recordOrdered([&](std::uint32_t i) { return static_cast<std::uint32_t>(batchKeys_[i]); }, n);
     }
+    sceneRecs_.clear();
     if (threaded) closeChunk();  // a flush is one chunk: the backend's workers start on it now
     perf_.batchedDraws += n;
     ++perf_.batches;

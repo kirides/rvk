@@ -740,6 +740,8 @@ void Device::beginFrame() {
     dynArena_.clear();
     lastVi_ = nullptr;
     lastDyn_ = nullptr;
+    sceneBeginFrame();
+    sceneReport();
     substituteFrom_ = nullptr;
     substituteSlot_ = 0;
     perf_.slotWaitMs += game_->lastSlotWaitMs();
@@ -1605,7 +1607,7 @@ void Device::setUbershader(bool on) {
 // A material pixel shader built from the GLSL material shader with its request's macros (+ the enhancement hooks of
 // options.uberDefines); null when it does not build (the draw keeps the translated shader)
 rhi::ShaderModule Device::uberModule(const Shader& s, const MaterialSource& src, const shader::TranslateOptions& options, std::string_view tag) {
-    const std::string glsl = shader::uberPixelHlsl(src.entry, src.macros, options.uberDefines);
+    const std::string glsl = shader::uberPixelHlsl(src.entry, src.macros, options.uberDefines, options.sceneRecord);
     if (glsl.empty()) return rhi::ShaderModule::None;
     std::vector<std::uint32_t> spirv;
     const auto cacheFile =
@@ -1737,7 +1739,9 @@ rhi::ShaderModule Device::variant(const ShaderRef& s, VariantSlot slot) {
     s->variantState[i].store(1, std::memory_order_release);
     {
         const std::lock_guard lock(variantMutex_);
-        if (!variantProviders_[i].options) {
+        const bool scene = slot >= VariantSlot::SceneVs;
+        const VariantSlot baseSlot = scene ? sceneBaseSlot(slot) : slot;
+        if (baseSlot != VariantSlot::Count && !variantProviders_[static_cast<std::size_t>(baseSlot)].options) {
             s->variantState[i].store(3);
             return rhi::ShaderModule::None;
         }
@@ -1769,6 +1773,20 @@ void Device::variantWorker() {
             job = std::move(variantJobs_.front());
             variantJobs_.pop_front();
             provider = variantProviders_[static_cast<std::size_t>(job.slot)];
+            if (job.slot >= VariantSlot::SceneVs) {
+                // a scene form (7.11): the base slot's provider + sceneRecord (SceneVs / ScenePs: no base options)
+                const VariantSlot b = sceneBaseSlot(job.slot);
+                VariantProvider base;
+                if (b != VariantSlot::Count) base = variantProviders_[static_cast<std::size_t>(b)];
+                const bool pixel = job.slot != VariantSlot::SceneVs;
+                provider.tag = b != VariantSlot::Count ? base.tag + "_scene" : pixel ? "scene_ps" : "scene_vs";
+                provider.options = [base, hasBase = b != VariantSlot::Count, pixel](const Shader& sh, shader::TranslateOptions& o) {
+                    if ((sh.stage == shader::Stage::Pixel) != pixel) return false;
+                    if (hasBase && (!base.options || !base.options(sh, o))) return false;
+                    o.sceneRecord = true;
+                    return true;
+                };
+            }
         }
         const std::size_t i = static_cast<std::size_t>(job.slot);
         shader::TranslateOptions o;

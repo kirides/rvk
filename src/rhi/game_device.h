@@ -234,7 +234,9 @@ struct ClearOp {
 };
 
 struct DrawPacket {
-    enum class Op : std::uint8_t { Draw, DrawIndexed, Clear };  // Clear: chunk-only (`first` = the chunk's ClearOp index)
+    // Clear: chunk-only (`first` = the chunk's ClearOp index). DrawIndexedIndirect (frame-ownership.md 7.11, F2b-1): `count` indexed draws from the
+    // VkDrawIndexedIndirectCommand records at indirectBuffer + indirectOffset (stride kIndirectStride), index binding and push block as DrawIndexed
+    enum class Op : std::uint8_t { Draw, DrawIndexed, Clear, DrawIndexedIndirect };
     Op op = Op::Draw;
     bool batchable = false;
     bool index32 = false;
@@ -248,7 +250,11 @@ struct DrawPacket {
     std::uint32_t instances = 1;
     std::uint32_t first = 0;        // first vertex / index
     std::int32_t vertexOffset = 0;  // indexed draws
+    std::uint64_t indirectBuffer = 0;  // DrawIndexedIndirect: rhi Buffer handle of the argument records (a ring block)
+    std::uint64_t indirectOffset = 0;
+    std::uint32_t scene = 0;        // d3d9 model only: 1 + the index of the draw's DrawRecord while a scene draw waits in the batch (0 = not a scene draw)
 };
+inline constexpr std::uint32_t kIndirectStride = 20;  // sizeof(VkDrawIndexedIndirectCommand) = D3D12_DRAW_INDEXED_ARGUMENTS
 
 // A block of packets the D3D9 model hands to the backend at a scope's chunk boundary; the backend may record it on a worker
 // thread into secondary command buffers (when the scope began secondary) and executes them at the scope's end.
@@ -293,6 +299,7 @@ struct GameCaps {
     // VK_EXT_full_screen_exclusive: the swapchain may take the exclusive fullscreen mode (the HAL's device bring-up offers it
     // as the `vulkan.exclusive_fullscreen` setting; on D3D12 a DXGI flip model swapchain has its own presentation interval)
     bool fullScreenExclusive = false;
+    std::uint32_t maxVertexInputAttributes = 16;  // vertex input locations (the scene variant's ref stream is location 24: needs >= 25)
 };
 
 // A block of the mesh arena (static vertex / index data in device memory, shared big buffers; any thread). `buffer` is the arena buffer it lives in (owned by the

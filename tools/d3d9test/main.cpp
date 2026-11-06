@@ -746,6 +746,107 @@ void testLoadSurfaceFromSurface(Fixture& f) {
     f.dev.release(std::move(src));
 }
 
+
+// F2b-1 scene draws (frame-ownership.md 7.11) through the device's own path: eight quads drawn as indexed static-mesh draws of the main view's solid pass,
+// with scene draws off (reference) and on (one indirect call over eight records); the same with a normal draw in the middle of the batch (a stale scene
+// packet must not leak into it) and with the null-address guard forced (every scene draw must fall back, the picture stays the same)
+void testSceneDraws(Fixture& f) {
+    Device& dev = f.dev;
+    dev.setSceneDraws(true, 0);
+    if (!dev.sceneDrawsActive()) {
+        std::printf("  SKIP scene draws: not available on this device\n");
+        return;
+    }
+    constexpr std::uint32_t kQuads = 8;
+    std::vector<Vertex> verts;
+    for (std::uint32_t k = 0; k < kQuads; ++k) {
+        const float x0 = -1.0f + 0.25f * static_cast<float>(k), x1 = x0 + 0.25f;
+        const std::uint32_t color = 0xFF000000u | (k * 30u + 20u) << 16 | (255u - k * 25u) << 8 | (k & 1u ? 200u : 40u);
+        verts.push_back({x0, 0.5f, 0.5f, 1, color, 0, 0});
+        verts.push_back({x1, 0.5f, 0.5f, 1, color, 1, 0});
+        verts.push_back({x0, -0.5f, 0.5f, 1, color, 0, 1});
+        verts.push_back({x1, -0.5f, 0.5f, 1, color, 1, 1});
+    }
+    const std::uint16_t idx[6] = {0, 1, 2, 1, 3, 2};
+    auto vb = dev.createBuffer(static_cast<std::uint32_t>(verts.size() * sizeof(Vertex)), USAGE_WRITEONLY, POOL_MANAGED, false, false);
+    auto ib = dev.createBuffer(sizeof(idx), USAGE_WRITEONLY, POOL_MANAGED, true, false);
+    std::memcpy(vb->lock(0, 0, 0), verts.data(), verts.size() * sizeof(Vertex));
+    vb->unlock();
+    std::memcpy(ib->lock(0, 0, 0), idx, sizeof(idx));
+    ib->unlock();
+    // mode 0: scene on for every quad; 1: quad 3 drawn normally (inside the batch); 2: the guard forced
+    const auto render = [&](bool scene, int mode) {
+        f.reset();
+        dev.drawTag() = {};
+        dev.drawTag().source = draws::Source::Mesh;
+        dev.phases().push(scene::View::Main, scene::Pass::Solid);
+        dev.setStreamSource(0, vb.get(), 0, sizeof(Vertex));
+        dev.setIndices(ib.get());
+        dev.setSceneFaultInject(mode == 2);
+        for (std::uint32_t k = 0; k < kQuads; ++k) {
+            dev.setSceneIssue(scene && !(mode == 1 && k == 3));
+            dev.drawIndexedPrimitive(PT_TRIANGLELIST, static_cast<std::int32_t>(4 * k), 0, 4, 0, 2);
+        }
+        dev.setSceneIssue(false);
+        dev.setSceneFaultInject(false);
+        dev.phases().pop();
+        return capture(dev, scene ? "scene" : "scene_ref");
+    };
+    const Pixels ref = render(false, 0);
+    const auto same = [&](const Pixels& p, const char* what) {
+        std::uint32_t bad = 0;
+        for (std::size_t i = 0; i < ref.bgra.size() && i < p.bgra.size(); ++i) bad += ref.bgra[i] != p.bgra[i];
+        if (bad != 0 || ref.bgra.size() != p.bgra.size()) {
+            std::printf("  FAIL scene draws (%s): %u bytes differ from the normal draws\n", what, bad);
+            ++g_failures;
+        }
+    };
+    expect("scene reference quad 0", ref, 2, 32, 0xFF000000u | (20u << 16) | (255u << 8) | 40u);
+    Pixels first;
+    bool ready = false;
+    for (int i = 0; i < 1200 && !ready; ++i) {
+        const auto before = dev.sceneStats();
+        first = render(true, 0);
+        ready = dev.sceneStats().sceneDraws - before.sceneDraws == kQuads;
+        if (!ready) Sleep(50);  // (the scene shaders / pipelines are built in the background; those draws were normal)
+    }
+    if (!ready) {
+        std::printf("  FAIL scene draws: the scene variants never became ready\n");
+        ++g_failures;
+        return;
+    }
+    same(first, "all scene");
+    const auto s0 = dev.sceneStats();
+    same(render(true, 0), "all scene, again");
+    const auto s1 = dev.sceneStats();
+    if (s1.sceneDraws - s0.sceneDraws != kQuads || s1.indirectCalls - s0.indirectCalls != 1 || s1.records - s0.records != kQuads) {
+        std::printf("  FAIL scene draws: %llu scene draws / %llu indirect calls / %llu records for %u quads (expected one call over all)\n",
+                    static_cast<unsigned long long>(s1.sceneDraws - s0.sceneDraws), static_cast<unsigned long long>(s1.indirectCalls - s0.indirectCalls),
+                    static_cast<unsigned long long>(s1.records - s0.records), kQuads);
+        ++g_failures;
+    }
+    // a normal draw in the middle of the batch: no stale record index may leak into it (the bug of the first version)
+    same(render(true, 1), "a normal draw inside the batch");
+    const auto s2 = dev.sceneStats();
+    if (s2.sceneDraws - s1.sceneDraws != kQuads - 1) {
+        std::printf("  FAIL scene draws: %llu scene draws with one quad drawn normally\n", static_cast<unsigned long long>(s2.sceneDraws - s1.sceneDraws));
+        ++g_failures;
+    }
+    // the guard: a null address refuses every scene draw, the normal path draws them
+    same(render(true, 2), "null address guard");
+    const auto s3 = dev.sceneStats();
+    if (s3.sceneDraws != s2.sceneDraws || s3.fbNullAddress - s2.fbNullAddress != kQuads) {
+        std::printf("  FAIL scene draws: the guard let %llu scene draws through and refused %llu of %u\n", static_cast<unsigned long long>(s3.sceneDraws - s2.sceneDraws),
+                    static_cast<unsigned long long>(s3.fbNullAddress - s2.fbNullAddress), kQuads);
+        ++g_failures;
+    }
+    // and scene draws work again after the refusals
+    same(render(true, 0), "scene again");
+    dev.setSceneDraws(false, 0);
+    dev.release(std::move(vb));
+    dev.release(std::move(ib));
+}
+
 }  // namespace
 
 // --present-test [vsync 0/1]: a real window, clears + presents 300 frames, prints the frame rate (vsync pacing check)
@@ -835,7 +936,7 @@ int main(int argc, char** argv) {
         {"mip chain stretch rect", testMipChainStretchRect}, {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
         {"read-only lock of a fresh texture", testReadOnlyLockOfFreshTexture},
-        {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
+        {"scene draws (indirect)", testSceneDraws}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
     };
     for (const auto& [name, fn] : cases) {
         const int before = g_failures;

@@ -534,6 +534,7 @@ public:
         gameCaps_.samplerAnisotropy = f.samplerAnisotropy;
         gameCaps_.maxAnisotropy = f.samplerAnisotropy ? f.maxAnisotropy : 1.0f;
         gameCaps_.fullScreenExclusive = f.fullScreenExclusive;
+        gameCaps_.maxVertexInputAttributes = lim.maxVertexInputAttributes;
     }
 
     bool createLayout() {

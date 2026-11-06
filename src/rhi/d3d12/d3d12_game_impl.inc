@@ -151,7 +151,9 @@ bool D3D12DeviceImpl::createGame(const GameDeviceOptions& o) {
     gameCaps_.samplerAnisotropy = true;
     gameCaps_.maxAnisotropy = 16.0f;
     gameCaps_.fullScreenExclusive = false;
+    gameCaps_.maxVertexInputAttributes = D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT;  // (32 input elements)
     caps_.textureBlit = true;  // a draw into the destination (blitDraw)
+    sceneSig_ = drawIndexedSignature(kIndirectStride);  // (made here: the record threads only read it)
 
     // slots 1 and 2: a black texel of the cube and volume dimension (slot 0 = the 2D one made by create())
     {
@@ -965,7 +967,7 @@ void D3D12DeviceImpl::applyPacket(RecState& rs, ID3D12GraphicsCommandList* cmd, 
         rs.viEntry = e;
     }
     cmd->SetGraphicsRoot32BitConstants(0, sizeof(p.push) / 4, &p.push, 0);
-    if (p.op == DrawPacket::Op::DrawIndexed) {
+    if (p.op == DrawPacket::Op::DrawIndexed || p.op == DrawPacket::Op::DrawIndexedIndirect) {
         if (!rs.ibValid || rs.ib != p.indexBuffer || rs.ibOffset != p.indexOffset || rs.ib32 != p.index32) {
             auto* b = reinterpret_cast<D3DBuffer*>(p.indexBuffer);
             D3D12_INDEX_BUFFER_VIEW v{b->gpuAddress() + p.indexOffset, static_cast<UINT>(std::min<std::uint64_t>(b->desc().size - p.indexOffset, 0xFFFFFFFFull)),
@@ -976,7 +978,12 @@ void D3D12DeviceImpl::applyPacket(RecState& rs, ID3D12GraphicsCommandList* cmd, 
             rs.ib32 = p.index32;
             rs.ibValid = true;
         }
-        cmd->DrawIndexedInstanced(p.count, p.instances, p.first, p.vertexOffset, 0);
+        if (p.op == DrawPacket::Op::DrawIndexedIndirect) {
+            // F2b-1 scene draws: p.count records of VkDrawIndexedIndirectCommand layout in a ring block (an upload heap: readable as an indirect argument)
+            if (sceneSig_ != nullptr) cmd->ExecuteIndirect(sceneSig_, p.count, reinterpret_cast<D3DBuffer*>(p.indirectBuffer)->resource(), p.indirectOffset, nullptr, 0);
+        } else {
+            cmd->DrawIndexedInstanced(p.count, p.instances, p.first, p.vertexOffset, 0);
+        }
     } else {
         cmd->DrawInstanced(p.count, p.instances, p.first, 0);
     }

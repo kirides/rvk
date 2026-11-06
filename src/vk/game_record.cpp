@@ -442,7 +442,11 @@ void GameRecord::applyPacket(GameRecordState& rs, VkCommandBuffer cmd, VkPipelin
         rs.lastDyn = p.dyn;
     }
     vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(p.push), &p.push);
-    if (p.op == rhi::DrawPacket::Op::DrawIndexed) {
+    if (p.op == rhi::DrawPacket::Op::DrawIndexedIndirect) {
+        // F2b-1 scene draws: p.count records in a ring block (frame-ownership.md 7.11)
+        bindIndexBuffer(rs, cmd, reinterpret_cast<VkBuffer>(p.indexBuffer), p.indexOffset, p.index32);
+        vkCmdDrawIndexedIndirect(cmd, reinterpret_cast<VkBuffer>(p.indirectBuffer), p.indirectOffset, p.count, rhi::kIndirectStride);
+    } else if (p.op == rhi::DrawPacket::Op::DrawIndexed) {
         bindIndexBuffer(rs, cmd, reinterpret_cast<VkBuffer>(p.indexBuffer), p.indexOffset, p.index32);
         vkCmdDrawIndexed(cmd, p.count, p.instances, p.first, p.vertexOffset, 0);
     } else {

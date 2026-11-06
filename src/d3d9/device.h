@@ -278,6 +278,8 @@ private:
     bool texcoord4_ = false;
 };
 
+inline constexpr std::size_t kVariantSlots = 14;  // VariantSlot::Count
+
 class Shader {
 public:
     shader::Stage stage = shader::Stage::Vertex;
@@ -313,8 +315,8 @@ public:
     rhi::ShaderModule lodModule = rhi::ShaderModule::None;
     bool lodFailed = false;
     // variants of enhancements built in the background (Device::variant, VariantSlot): the module once ready
-    std::array<std::atomic<rhi::ShaderModule>, 8> variants{};  // (VariantSlot::Count)
-    std::array<std::atomic<std::uint8_t>, 8> variantState{};  // 0 not requested, 1 queued, 2 ready, 3 failed / not applicable
+    std::array<std::atomic<rhi::ShaderModule>, kVariantSlots> variants{};  // (VariantSlot::Count)
+    std::array<std::atomic<std::uint8_t>, kVariantSlots> variantState{};  // 0 not requested, 1 queued, 2 ready, 3 failed / not applicable
 };
 
 // A non-owning reference to the device's current shader (setVertexShader / setPixelShader / a replacement's): switching
@@ -347,9 +349,38 @@ enum class VariantSlot : std::uint8_t {
     GbufferM = 5,        // as Gbuffer with the motion output only (FSR / frame generation read no normal)
     GbufferMotionM = 6,  // as GbufferMotion with the motion output only
     GbufferA = 7,        // GI + AO / screen probes, no G-buffer output (no consumer reads the targets)
+    // scene forms (TranslateOptions::sceneRecord, frame-ownership.md 7.10 / 7.11: the draw's data from a DrawRecord): SceneVs of a vertex shader;
+    // the pixel shader's plain module and the Gi / Gbuffer variants as scene forms (Device::sceneSlotOf)
+    SceneVs = 8,
+    ScenePs = 9,
+    SceneGi = 10,
+    SceneGbuffer = 11,
+    SceneGbufferM = 12,
+    SceneGbufferA = 13,
     Count
 };
-static_assert(static_cast<std::size_t>(VariantSlot::Count) == 8, "Shader::variants / variantState sizes");
+static_assert(static_cast<std::size_t>(VariantSlot::Count) == kVariantSlots, "Shader::variants / variantState sizes");
+// the slot a scene form is built from (its provider's options + sceneRecord); Count = none (SceneVs / ScenePs: sceneRecord alone)
+inline VariantSlot sceneBaseSlot(VariantSlot s) {
+    switch (s) {
+    case VariantSlot::SceneGi: return VariantSlot::Gi;
+    case VariantSlot::SceneGbuffer: return VariantSlot::Gbuffer;
+    case VariantSlot::SceneGbufferM: return VariantSlot::GbufferM;
+    case VariantSlot::SceneGbufferA: return VariantSlot::GbufferA;
+    default: return VariantSlot::Count;
+    }
+}
+// the scene form of a pixel shader's variant slot (Base = the plain module); Count = the variant has none (the capture / motion variants)
+inline VariantSlot sceneSlotOf(VariantSlot base) {
+    switch (base) {
+    case VariantSlot::Base: return VariantSlot::ScenePs;
+    case VariantSlot::Gi: return VariantSlot::SceneGi;
+    case VariantSlot::Gbuffer: return VariantSlot::SceneGbuffer;
+    case VariantSlot::GbufferM: return VariantSlot::SceneGbufferM;
+    case VariantSlot::GbufferA: return VariantSlot::SceneGbufferA;
+    default: return VariantSlot::Count;
+    }
+}
 struct VariantProvider {
     std::string tag;  // part of the SPIR-V cache name (bump it when the variant's GLSL changes)
     // the options of a shader's variant; false = not applicable (the draw keeps the engine's module). Any thread
@@ -796,6 +827,21 @@ public:
     // Window override (frame-ownership.md 7.8, F1a): the register windows `w` covers are not uploaded for the draws prepared while it is set (null =
     // none); the caller keeps the object alive until it clears it. Render thread.
     void setOwnedWindows(const OwnedWindows* w) { owned_ = w; }
+    // ---- F2b-1 scene draws (docs/research/frame-ownership.md 7.11; src/d3d9/scene_draws.cpp): the static ops' main-view z / solid draws are recorded as
+    // DrawRecords and drawn by one indirect call per run of draws with the same pipeline and state. setSceneDraws = the setting (false without the
+    // capabilities: logged once), setSceneIssue = the caller is issuing such draws now (native/static_ops)
+    struct SceneDrawStats {
+        std::uint64_t candidates = 0, sceneDraws = 0, replayedSceneDraws = 0, indirectCalls = 0, records = 0, maxRun = 0, groups = 0;
+        std::uint64_t breaks[5] = {};     // runs cut inside one pipeline: vertex input, dynamic state, index binding, frame block, run size
+        std::uint64_t fbNotBatchable = 0, fbVariantKind = 0, fbVariantFailed = 0, fbVariantPending = 0, fbPipelinePending = 0, fbNoRoom = 0, fbRingFull = 0, fbNullAddress = 0;
+        std::uint64_t checks = 0, checkedRecords = 0, checkedBytes = 0, checkDiffering = 0, checkSkipped = 0;
+    };
+    void setSceneDraws(bool on, std::uint32_t checkEvery);
+    void setSceneIssue(bool on) { sceneIssue_ = on; }
+    void setSceneFaultInject(bool on) { sceneFaultInject_ = on; }  // tests: every scene packet looks like it has a null address (the guard must refuse it)
+    bool sceneDrawsActive() const { return sceneDrawsOn_ && sceneAvail_; }
+    SceneDrawStats& sceneStats() { return sceneStats_; }
+    void sceneReport();  // the 5 s log line (frame start)
     OwnedStats& ownedStats() { return ownedStats_; }
     // Reversed infinite depth (debug.reverse_z, docs/research/reverse-z.md): a depth buffer cleared in a main view holds
     // near / view z (1 at the near plane, 0 at infinity and for the cleared sky) instead of the engine's D3D value. The engine's
@@ -885,6 +931,7 @@ public:
         scene::Phase phase;
         const Shader* vs = nullptr;
         const Shader* ps = nullptr;
+        GamePipeline scenePipeline = GamePipeline::None;  // F2b-1: the scene form's pipeline when the draw was eligible and it existed (None: drawn normally)
         rhi::ShaderModule vsModule = rhi::ShaderModule::None, fsModule = rhi::ShaderModule::None;  // vsModule: the one drawn with (the engine's, or the billboards' fade variant); fsModule: the engine's
         // the enhancement variant decision of prepareDraw and what it was derived from (retained-signals.md 13): replayBuild re-derives the cheap inputs
         // (settings, the ambient registers, the variant's build state) and refuses the replay when the decision would differ
@@ -907,6 +954,8 @@ public:
             std::uint32_t packStamp = 0;
             const Texture* packTex = nullptr;   // the pack word's map (null: the word has none)
             std::uint32_t packTexSlot = 0;      // its bindless slot when the word was made
+            bool sceneActive = false;   // F2b-1: scene draws were on for this draw (a change remakes the packet)
+            bool scenePending = false;  // ... and its scene variants / pipeline were not ready: retried until they are
             rhi::ShaderModule vsUsed = rhi::ShaderModule::None;  // the vertex module drawn with (the billboards' fade variant while lod.trees != 1)
         } v;
         std::uint32_t streamMask = 0;
@@ -1545,6 +1594,38 @@ private:
     bool replayBuild(const CachedDraw& c, const ReplayInputs& in, DrawPacket& p, shader::abi::DrawBlock& b);
     void fillCapture(const DrawPacket& p);
     void submitInterned(DrawPacket& p);
+    // F2b-1 (scene_draws.cpp)
+    bool sceneActive() const { return sceneIssue_ && sceneDrawsOn_ && sceneAvail_; }
+    void sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, bool uberTaken, draws::Kind kind, const scene::Phase& phase, bool geomOk);
+    bool toScenePacket(DrawPacket& p, GamePipeline pipeline);  // false: an address the scene shader reads is null, the packet stays a normal one
+    bool ensureSceneRef();
+    const VertexInputValues* internSceneVi(const VertexInputValues& normal);
+    void sceneFlushRun(const std::vector<std::uint32_t>& run, const std::function<void(const DrawPacket&)>& record);
+    int sceneMergeBreak(const DrawPacket& a, const DrawPacket& b) const;  // -1 = mergeable, else the SceneDrawStats::breaks index
+    void sceneBeginFrame();
+    void sceneCollectCheck();
+    bool sceneDrawsOn_ = false, sceneAvail_ = false, sceneIssue_ = false, sceneFaultInject_ = false;
+    std::uint32_t sceneCheckEvery_ = 0;
+    GamePipeline scenePipe_ = GamePipeline::None;  // prepareDraw's decision for the draw being submitted
+    std::vector<shader::abi::DrawRecord> sceneRecs_;  // the batch's records (DrawPacket::scene - 1)
+    std::vector<std::uint32_t> sceneRun_, batchOrder_;
+    struct SceneRefStream {
+        std::uint64_t buffer = 0, offset = 0;
+        bool valid = false;
+    } sceneRef_;  // (i, 0) for i < kSceneRunMax: the instance-rate ref stream, a ring block of this frame
+    VertexInputValues sceneViWork_;
+    const VertexInputValues* lastSceneVi_ = nullptr;
+    SceneDrawStats sceneStats_;
+    bool sceneCheckFrame_ = false;
+    struct SceneCheck {
+        std::unique_ptr<rhi::Buffer> buffer;
+        std::uint64_t bytes = 0, capacity = 0, frameValue = 0;
+        bool busy = false;
+        std::vector<std::uint8_t> expect;  // what the CPU wrote, at the offsets of the copies into `buffer`
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> segments;  // the copied (offset, size) ranges: the padding between them is not compared
+    } sceneCheck_;
+    double sceneLastReport_ = 0.0;
+    SceneDrawStats sceneLast_;
     DrawPacket packet_;
     VertexInputValues workVi_;   // what prepareDraw computes for the draw (packet_.vi points at its interned copy)
     DynamicStateValues workDyn_;

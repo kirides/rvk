@@ -542,6 +542,59 @@ main build; `kTranslatorVersion` NOT bumped).
   `dxil-check embedded` (74, `material scene` = `ge_default.vert / .frag` with the define), `dxil-check uber` gained the variants `plain+scene`, `gbuffer+motion+scene`.
   Note: `rvk_rhitest` "references (GI lookup, RT records)" fails on D3D12 in this environment with and without this change (also in the main build, 10 of 2048 values; unrelated).
 
+### 7.11 F2b-1 indirect scene draws (2026-11-06, `native.scene_draws`)
+
+Debug setting (Bool, runtime, default off, Full only: `StaticOps` issues the draws; Wrapper / off = nothing changes) + `native.scene_draws_check` (Int, every N-th frame
+a GPU read-back check). Files: `src/d3d9/scene_draws.cpp` (decision, records, ref stream, runs, check, 5 s log), `draw.cpp` (`prepareDraw` / `submitPacket` /
+`replayDraw` / `flushBatch` hooks), `rhi::DrawPacket::Op::DrawIndexedIndirect` (Vulkan `vkCmdDrawIndexedIndirect`, D3D12 `ExecuteIndirect` with a signature made at
+device creation), `GameCaps::maxVertexInputAttributes`, `VariantSlot::SceneVs / ScenePs / SceneGi / SceneGbuffer(M|A)`, test `rvk_d3d9test` "scene draws (indirect)".
+
+* **What changes.** The CPU still composes every draw (registers, windows, DrawBlock, push block) exactly as before. For a draw of the main view's z pre-pass / solid
+  pass issued by the static ops (kind StaticMesh, batchable, indexed) `prepareDraw` also resolves its scene form: the scene VS (`SceneVs`) + the scene form of the pixel
+  shader it takes (plain `ScenePs`, GI `SceneGi`, G-buffer `SceneGbuffer*`; a scene slot = the base slot's provider options + `sceneRecord`, built in the background like
+  every variant) and the pipeline with the ref stream added (binding after the draw's own, instance rate, stride 8, attribute location 24 `R32G32_UINT`; baked into the
+  pipeline description where the vertex layout is not dynamic). `submitPacket` / `replayDraw` then turn the finished packet into a scene packet: its push block (8 window
+  bases, DrawBlock, `prevVs`, drawId, flags) becomes a 128 B `DrawRecord`, the packet waits in the batch. `flushBatch` groups the batch by pipeline as before and cuts it into
+  runs of scene packets that agree in pipeline, vertex input (buffers; `vertexShift` is zeroed, the per-command `vertexOffset` carries it), dynamic state, index binding and
+  frame block: **one `DrawIndexedIndirect` per run** over a ring block of its records and one of its 20 B argument records (`firstInstance` = the record's index in the block =
+  `ref.x`; the ref stream is a per-frame ring block of `(i, 0)`, 1024 entries). The packet cache keeps the scene pipeline in `CachedDraw` (a draw whose scene variants were not
+  ready is retried: `variant decision` refusal) and re-makes the scene packet at replay.
+* **Not scene draws (counted as fallbacks in `native: scene draws (5 s)`):** not batchable / no scope, capture / motion / tint / ubershader forms (`variant kind`), scene
+  variant failed or pending, pipeline pending, no room in the vertex input (16 attributes / 8 bindings), ring full, null address (guard below). Capability:
+  `maxVertexInputAttributes >= 25`, `drawIndirectFirstInstance`, `multiDrawIndirect` (else logged once and off).
+* **The crash of the first version (two driver timeouts).** `Device::packet_` is reused by every draw; `toScenePacket` set `packet_.scene` and `prepareDraw` did not clear
+  it, so a later normal draw (fallback, another kind, same batch) inherited a stale record index and was recorded as an indirect call with a normal pipeline and somebody
+  else's records: a null read, `VK_ERROR_DEVICE_LOST`. Fixed (`packet_.scene = 0` at the start of `prepareDraw` and after the submit) and guarded: a scene packet is refused
+  (normal path, counter `null address / bad record`) when the DrawBlock, the frame block, any of the 8 window bases, the ref stream or the vertex input is 0; `sceneFlushRun`
+  drops a run whose packet has no valid record. Test `rvk_d3d9test` "scene draws (indirect)" (both backends, `--validation`): eight indexed quads as static-mesh draws of the
+  main view's solid pass, drawn normally (reference) and as scene draws (exactly one indirect call over eight records, **0 bytes differ**), with a normal draw inside the
+  batch (7 scene draws, 0 differ: the stale-packet case), with the guard forced (all eight refused, 0 differ) and again after it. Vulkan and D3D12 (debug layer): 0 failures,
+  0 validation errors. The first game run after the fix used GPU-assisted validation (`VK_KHRONOS_VALIDATION_VALIDATE_GPU_BASED=GPU_BASED_GPU_ASSISTED`): no fault, no VUID
+  (the environment variable reached the process; the layer does not log whether it applied it).
+* **Check mode** (`native.scene_draws_check=10`): the GPU copies the frame's record and argument blocks (upload list, ring buffers as copy sources) into a read-back buffer,
+  compared word by word with what the CPU wrote (padding excluded): Vulkan 3 spots with `-Validation` 243 read-backs / 4.9 MiB, D3D12 55 read-backs, **DIFFERING 0**. (The first
+  version compared the padding too and reported differences: a check bug.)
+* **Batches (savegame Risen_Save_0005, lod 2x, Full, material table + owned windows):** 99.8 k static main-view draws per 5 s window, **all** drawn as scene draws (99.1 k of
+  them replayed from the packet cache), 16.7 k indirect calls: **mean batch 6.0, max 100** (spots 2.4 - 7.4, max 73 - 97). Runs end almost only because the next packet has
+  another pipeline (16.7 k pipeline groups); 6.9 k of the runs are cut inside one pipeline by another vertex input (another vertex buffer), dynamic state / index binding / frame
+  block / run size cuts are ~0. The run length is bounded by the number of draws that share a pipeline in one flush (a flush every 1024 packets; 160 without scene draws).
+  Many materials = many pipelines; larger runs need the ubershader's merged permutations (F2c).
+* **Verification.** `debug.split_verify` with owned windows + scene draws: MISMATCHES 0 (Vulkan 3 spots with `-Validation`: 63.7 k windows; D3D12). D3D12 `-Validation` (debug
+  layer, pub_interior): no device removal, only the old DSV-format warning of pipelines without depth. `rvk_tests` 279 / 279.
+* **Picture A/B (same run, toggled at run time with `-Commands 'N: set native.scene_draws true|false'`, a shot every 50 presents).** A spot's hold does not start at the same present
+  number in two runs (loading time), so the pairs are taken after the run from consecutive shots inside the hold; same-state pairs are the control. pub_interior (hold ~1250 - 1700):
+  control on/on 0.63, 0.41, 1.20, 0.40, off/off 0.46, 0.52, 0.33 mean abs (max 12 - 18), toggle pairs 0.61 and 0.43 (max 12 / 19); harbour_docks: control 1.68 - 2.03, toggles 1.75 /
+  2.13 (max 88 - 93); jungle: control 1.61 - 1.90, toggles 1.70 / 1.78 (max 91 - 102): **the toggle pairs lie inside the control pairs' range** (eye adaptation, sea, rain / foliage
+  animation are the noise). Bit-exactness is not proven by game pixels; the per-draw proofs are the window verification and the check mode, and the d3d9test scenes are bit-exact.
+* **The setting-toggle "perturbation" of the F1a finding: not reproduced.** Toggling `native.scene_draws` (through `applyStaticOps`; `StaticOps::setMode` returns early when nothing
+  changes, the packet cache entries are remade through the `variant decision` refusal) does not change the picture beyond the control noise. The earlier "different camera / sea
+  state" came from comparing shots at fixed present numbers: the hold starts at different presents in different runs and shots outside it show the spot being placed or the start
+  prompt. Use a long `freeze_wait`, many shots, and choose the pairs inside the hold afterwards (`rvk-work/scratch/f2b1/ab.py`).
+* **CPU** (savegame, `-Perf`, `RisenTest.exe`, vsync off, interleaved off / on / off / on, shared default copy under `with-test-lock -Who f2b1-perf`): engine + HAL CPU per frame
+  off 6.20 / 6.13 ms, **on 6.32 / 6.34 ms (+0.15 ms)**; GPU 3.33 / 3.32 vs 3.32 / 3.36 ms; the "draw calls" part 0.54 ms in both. No CPU gain: the composition stays, the
+  indirect path adds the record / argument writes and the merge scan, and the calls it removes (pipeline bind + bindings + push + draw per run of ~6 draws) were already cheap on the
+  record threads. The value of F2b-1 is the DrawRecord / indirect path proven on both backends; the CPU gain needs F2c (nothing composed per draw).
+
 ## 8. F1 / F2 design decision: windows onto persistent tables (2026-11-06, orchestrator)
 
 **Decision.** F1 does not start with new shaders. Translated shaders and the ported ubershader read every float register through 4 register windows per

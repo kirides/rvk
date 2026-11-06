@@ -244,6 +244,12 @@ void HalDevice::applyStaticOps() {
         gpuscene::windowtables().setActive(owned);
         staticOps_->setOwnedWindows(owned);
     }
+    {
+        // frame-ownership.md 7.11: F2b-1 scene draws (Full only, needs the static ops to issue the draws)
+        const bool scene = on(rs.nativeSceneDraws) && renderMode() == RenderMode::Full && staticOps_->active();
+        dev_.setSceneDraws(scene, rs.nativeSceneDrawsCheck != nullptr ? static_cast<std::uint32_t>(std::max(0, rs.nativeSceneDrawsCheck->asInt())) : 0u);
+        staticOps_->setSceneDraws(scene && dev_.sceneDrawsActive());
+    }
     staticOps_->setRetained(frozen::kRetained, frozen::kRetainedGroups, frozen::kRetainedCheck);
     frameTap_->setCoverage(on(rs.nativeCoverage) || on(rs.nativeFrameTap) || compare || sceneCompare);
 }
@@ -567,7 +573,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     frameTap_->setEffectOps(effectOps_.get());
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups,
                                  rs.nativeCoverage, rs.nativeFrameTap, rs.nativeLean, rs.nativeLeanCheck,
-                                 rs.nativePacketCache, rs.nativeOwnedWindows}) {
+                                 rs.nativePacketCache, rs.nativeOwnedWindows, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
     // renderer.mode (Wrapper / Full): like the native.* settings applied by the registry's dispatch before a present, i.e. at a

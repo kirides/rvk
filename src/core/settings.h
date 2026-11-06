@@ -484,6 +484,8 @@ struct RendererSettings {
     Setting* nativeLightingImages = nullptr;   // native.lighting_images: GPU-composed lighting register images + their verification (frame-ownership.md 7.9; restart; needs native.illum_table)
     Setting* nativeMaterialTable = nullptr;    // native.material_table: the GPU material table + its draw verification (frame-ownership.md F0; restart)
     Setting* nativeOwnedWindows = nullptr;     // native.owned_windows: the static draws' register windows read from the material / view tables (frame-ownership.md 7.8; needs native.material_table)
+    Setting* nativeSceneDraws = nullptr;       // native.scene_draws: the static main-view z / solid draws as DrawRecords + indirect runs (frame-ownership.md 7.11)
+    Setting* nativeSceneDrawsCheck = nullptr;  // native.scene_draws_check: every N-th frame the record / argument buffers are read back and compared
     Setting* nativeLean = nullptr;             // native.lean: the engine's slot code not run for the composed mesh-like ops (O2a)
     Setting* nativeLeanCheck = nullptr;        // native.lean_check: every N-th frame the engine's code runs as before (compare)
     Setting* nativePacketCache = nullptr;     // native.packet_cache: retained draw packets of the main view's static meshes + trees (retained-signals.md 8)
