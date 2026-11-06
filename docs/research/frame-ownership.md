@@ -1308,6 +1308,75 @@ accounting as an upper bound).
   But the engine already has 2 - 3 LOD levels per mesh, all resident (+2 MiB measured), so **the F5-2 per-instance GPU LOD pick among the engine's own LODs** (distance -> index range) is the cheap remedy and is memory-free; no simplified cluster hierarchy is needed. Re-measure after F5-2: the < 1 px share of the main z pass
   should fall well below 20 % with a screen-size-driven LOD pick (target: a LOD whose triangles average >= ~2 px), and the F5-3 HiZ pass decision stays open until the occlusion share (not measured here: the engine's per-object cull already removes whole objects) is known.
 
+### 7.24 Full-frame CPU profile (2026-11-07, build 91720f3 + `-CpuProfile`; no behaviour change)
+
+Question: where does the engine thread's frame go in Full, and how much of it can ownership remove? Savegame recipe (`Risen_Save_0005`, `RisenTest.exe`, vsync off, `-PlayerDefaults`, lod 2x, hold 60, shared copy + default lock), steady windows only (fps >= 100, no loading samples), 2 runs per arm (24 windows) and one pub_interior hold (4 windows); logs and scripts in `rvk-work/scratch/fprof/` (`ana.py`, `comb.py`, `pcdir.py`). ms per frame = share x the frame interval of that 5 s window. Arms: **Full** = defaults; **Owned** = the whole F1 / F2c chain (`native.material_table, illum_table, lighting_images, owned_windows, owned_objects, owned_records, scene_draws`) + `owned_static`, `owned_persistent`, `owned_billboards`, `rt.table_entries` (`-Setting` does not apply `needs`: a first attempt with only the four named settings had owned_static gated off and was discarded); **Wrapper**. `-Perf` CPU (engine + HAL) of the same arms: Full 6.53 / 6.34, Owned 7.12 / 7.42, Wrapper 5.30 / 5.22 (draw calls 2.0 - 2.1 of it in Wrapper, 0.57 in Full).
+
+**By module** (ms / frame of the engine thread):
+
+| module | Full | Owned | Wrapper | pub_interior (Full) |
+|---|---|---|---|---|
+| frame interval | 6.50 | 7.54 | 5.75 | 4.93 |
+| d3d9.dll (ours) | 3.79 | 4.58 | 2.47 | 2.75 |
+| Engine.dll | 0.84 | 0.88 | 1.46 | 0.59 |
+| ntdll (heap, SRW locks, waits) | 0.48 | 0.58 | 0.63 | 0.40 |
+| vcruntime140 (memcpy / memmove) | 0.40 | 0.44 | 0.19 | 0.33 |
+| driver amdvlk64 | 0.36 | 0.40 | 0.37 | 0.32 |
+| sharedbase (engine math, strings) | 0.33 | 0.35 | 0.40 | 0.31 |
+| Game.dll + Script + gui2 + fmod + sentry | 0.18 | 0.17 | 0.17 | 0.12 |
+| ucrtbase + msvcp140 | 0.07 | 0.09 | 0.09 | 0.06 |
+
+**The engine's own code is 18 % of Full's thread (Engine.dll 0.84 + sharedbase 0.33 = 1.2 ms); our DLL is 58 %** (4.4 ms with the CRT / ntdll / driver it calls). Same structure as performance.md 21.1 (Full: d3d9 4.37, Engine 1.03 of 8.09; now 3.79 / 0.84 of 6.50: the packet cache, lean frames and the fast sort did their work). What the lean path left is **our composition of the engine's ops** (`StaticOps::opEnter` 3.35 ms = 52 % of the frame), not the engine's collection.
+
+**Inclusive tree, Full** (ms / frame; the sampler lists entries >= 1.5 % only, nesting is read from the named frames; names of unexported functions come from the sampler's COMDAT hints, `~` = best guess):
+
+| item | ms | what it is |
+|---|---|---|
+| `eCApplication::DoRender` | 5.83 | 90 % of the thread |
+| `eCFrustumDatabase::Execute` (main view) | 4.09 | |
+| - `FrameTap` / `StaticOps::opEnter` (ours) | 3.35 | the native frame: compose + issue + HAL for every op of the lists |
+| - - `StaticOps::issue` (HAL replay: `replayDraw` 0.49, `drawIndexedPrimitive` 0.58, `prepareDraw` 0.39) | 1.54 | per draw: packet build / replay |
+| - - mesh slots `RenderContextMesh::Render` / `RenderZPass` (`composeOp`, `materialDraws`, `meshZDraws`) | 0.44 / 0.56 | main + shadow views together |
+| - - SpeedTree Render / ZPass (`composeTree` 0.52 incl. lambda 0.19) | 0.42 / 0.51 | trees |
+| - - tree billboards Render / ZPass | 0.17 / 0.19 | |
+| - - vegetation Render / ZPass | 0.28 / 0.15 | |
+| - - skinned actors, particles (`composeParticle` 0.16, `composeFx` 0.20), effects (`composeEffect` 0.21, `issueLean` 0.17) | ~0.5 | |
+| - engine residual of Execute (`OnQueryNodes` 0.21, `RequestRenderOps` 0.21, `Request` 0.14, `ExtractFromFrustum` 0.10, `CullCamera` 0.11, `eCBeamTree::Cull` self 0.12, op-list sorts 0.10 in our `fastsort`) | ~0.75 | engine collection / culling / sorting |
+| `eCCameraBase::Update` -> `UpdateShadowMaps` -> `RenderShadowMaps` | 1.07 / 0.87 | `ExecuteShadowMap` 0.57 (our shadow z ops, the same slots as above); cascade fit / setup ~0.3 |
+| injected passes `Device::inject` (CPU recording) | 0.91 | `LightTable::record` 0.41 (+ `lights::collect` 0.09), `RtScene::record` 0.33 / `observe` 0.24, ocean 0.05, `CopyCurrentRTToImage` 0.14 |
+| post chain `eCImageFilterEffect::OnUpdateOutput` / `ExecuteEffect` (`effectBegin` 0.43, `UpdateShadowMask` 0.20) | 0.36 | |
+| `eCProcessor::Process` (game logic, scripts 0.06, AI, animation, physics, streaming, audio: all of it) | 0.65 | 10 % |
+| COMDAT hint `eCStaticLightPreprocessor` copy ctor (~ a large struct copy under Process / PreExecute) | 0.22 | unidentified |
+
+Cross-cutting costs inside the above (self / site view, `pcsites`): `operator new` call sites 2.5 % of the thread (0.16 ms: `std::list` / map nodes, material pack adopt, RT registry; `MaterialPack::lookup` string work 0.15), `safeRead` / `safeLoad8` SEH-guarded engine reads 0.16 + 0.12 (memcpy 1.9 %), driver recording `GameRecord::applyPacket` 2.2 % (0.14), `Image::transition` 0.7 %, record-thread hand-off (`scopeChunk` notify 0.6 %, `MaterialPack::adopt` mutex unlock 0.8 %).
+
+**Wrapper reference** (5.75 ms): Engine.dll 1.46 (its own `eCSubMesh::Render` 0.38, `RenderLeafs` 0.59, `RenderFronds` 0.29, sky cube 0.19, particles 0.15), the HAL / D3D9 model 2.3 (`drawIndexedPrimitive` 2.25, `prepareDraw` 1.8, `MaterialPack::lookup` 0.37), `eCProcessor::Process` 0.82. Full is 0.75 ms slower than Wrapper in this scene because of the native frame (composition of all groups, light table, RT scene) even though it issues 815 draws instead of 1,286: Full pays ~3.3 ms in `opEnter` where Wrapper pays 2.3 ms in the HAL + ~1.5 ms in the engine's render code.
+
+**Owned arm** (the whole-frame check of 7.16 / 7.21): `-Perf` CPU Full 6.4, tables only (the F1 / F2c chain without owned_static) 6.9 / 7.3, + owned_static + owned_persistent 6.6, + billboards + `rt.table_entries` 7.1 / 7.4 (noise +-0.3). The tables (windows, objects, records, check frames every 10th) cost ~ +0.6 - 0.7 ms; owned_static + persistent win back ~ -0.5; billboards and the RT entries add ~ +0.6 again. Net of the whole chain at the savegame: **+0.7 ms (+11 %), not a gain.** Visible in the profile as new inclusive entries: `Device::sceneFlushRun` 0.20, `checkMaterial` 0.20, `ownedPass` 0.16, `writeLighting` 0.15, `submitOwned` 0.12, `scene_hash.h` hashing 0.12 (`hashVi` 0.07), `MaterialTable::checkDraw` 0.16, `flushBatch` 0.25. The owned path draws 39 % of the static ops (the rest: hardware batch 7k, instance list 14k, hierarchy 44k per 5 s), and the SpeedTree / vegetation / shadow-view composition (the biggest groups) is unchanged. pub_interior (Full defaults) is 4.9 ms: d3d9 2.75, Engine 0.59, same shape.
+
+**Classification** (Full defaults, savegame; ms / frame; estimates are each stage's own remaining cost, not strictly additive):
+
+| class | item | now | removable by | est. gain | note |
+|---|---|---|---|---|---|
+| removable | SpeedTree + billboard + tree Z compose / issue (slots 7 - 10) | 1.29 | F4 (trees GPU-driven, 7.15; billboards F4-1 exists but are 0.37 of it) | -0.8 .. -1.1 | biggest single block |
+| removable | shadow views' op compose / issue (`ExecuteShadowMap` 0.57, inside the mesh / tree Z slots) | 0.57 | F3 (static + trees in cascades / terrain map) | -0.3 .. -0.45 | the large part needs F4 first |
+| removable | RT scene observe + record | 0.57 | F8 (TLAS from the tables; `rt.table_entries` alone did not pay: the compose of its inputs must go too) | -0.3 .. -0.45 | |
+| removable | vegetation compose (slots 11 / 12) | 0.43 | F7 | -0.25 .. -0.35 | repack of 410 KB / frame |
+| removable | static mesh ops (slots 0 / 3, main view) | ~1.0 incl. issue | F2 completion: hardware batches, instance lists, hierarchy meshes (60 % of the ops are still not owned) | -0.3 .. -0.5 | `owned_static` today: 39 % of ops, net ~0 |
+| reducible | light table collection (`LightTable::record` + `lights::collect`) | 0.50 | persistent table + dirty signals instead of a per-frame walk / sort | -0.25 | light_table.cpp, not an ownership stage |
+| reducible | allocations (operator new 0.16, ntdll heap 0.25), `safeRead` / `safeLoad` 0.3, `MaterialPack::lookup` 0.15 | ~0.8 | arenas / reserve, unguarded reads on validated ranges, key cache | -0.3 .. -0.4 | plain engineering, all modes |
+| reducible | effects / particles / strips / rain composition (CPU vertices) | ~0.5 | stays CPU by design (README 14); sky cube stride | -0.1 | |
+| removable, high risk | engine collection: `OnQueryNodes`, `Request`, `RequestRenderOps`, `ExtractFromFrustum`, `CullCamera`, beam tree, sorts | ~0.75 | F10 (GPU cull, residency from read-back) | -0.4 .. -0.6 | residency side effects; last; the sorts (0.10) go with F2 / F4 when no op exists |
+| stays engine | `eCProcessor::Process` (logic, scripts, AI, animation, physics, streaming, audio) | 0.65 | - | 0 | `Game` / `Script` / `fmod` self < 0.2 |
+| stays engine | cascade fit / camera update, post chain control, GUI, message loop, the unidentified struct copy 0.22 | ~0.8 | partly (cascade fit: `shadow_stride`) | ~0 | |
+| stays (driver / API) | amdvlk64 recording | 0.36 | fewer, larger indirect draws (all stages above) | -0.1 | |
+
+Floor of the engine thread if every removable item went: game logic 0.65 + engine-side residue (cascade fit, post control, GUI) ~0.8 + driver ~0.3 + particle / effect composition ~0.4 + per-frame fixed pass recording ~0.4 = **~2.5 ms of today's 6.4 ms**; the ownership stages in the order below realistically reach ~4.0 - 4.5 ms.
+
+**Ranked next steps** (CPU win at the savegame): 1. **F4 trees** -0.8 .. -1.1 ms (largest block; the owned machinery exists for billboards); 2. **F3 shadow views** -0.3 .. -0.45 (after F4, so trees are in it); 3. **F8 RT from tables** -0.3 .. -0.45 (needs the compose of its inputs gone first); 4. **allocation / guarded-read / pack-lookup cleanup** -0.3 .. -0.4 (cheap, no ownership needed, helps every mode); 5. **F7 vegetation** -0.25 .. -0.35; 6. persistent light table -0.25; 7. F2 completion (hardware batch / instance list / hierarchy) -0.3 .. -0.5; 8. F10 -0.4 .. -0.6 (last, high risk). Before any more stage: the tables' own fixed cost (+0.6 - 0.7 ms with `native.owned_*` + `rt.table_entries` on) has to be paid for by the stages that follow; the current chain is a net loss until F4 / F3 land.
+
+**Method limits.** The sampler lists only entries >= 1.5 % (inclusive) / ~1 % (self), so nesting and sums of children are read from named frames and are approximate; the mesh / tree Z slots include their shadow-view calls (main vs shadow split only via `ExecuteShadowMap`); Wrapper has 10 usable windows (its first run hit a slow load: 2 windows); pub_interior is a single run with 4 windows; profiler and `-Perf` timers cost ~0.4 ms (performance.md 21); run-to-run noise of `-Perf` CPU is +-0.3 ms, so the ablation differences are indicative only; the Owned arm includes check frames (every 10th); unnamed Engine.dll functions are named by COMDAT hints (the Ghidra project open in this session is Risen.exe, not Engine.dll: no new RE was done); GPU numbers were not examined.
+
 ## 8. F1 / F2 design decision: windows onto persistent tables (2026-11-06, orchestrator)
 
 **Decision.** F1 does not start with new shaders. Translated shaders and the ported ubershader read every float register through 4 register windows per
