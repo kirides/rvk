@@ -70,4 +70,5 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     putU(t.z);
     putU(r.flags);
     putF2(rvkRtMaterialUv(r, t.y));  // 3 + 1 + 2 = 6 words
+    putU(0u);  // word 63: pad (the record is 64 words; unwritten words would compare uninitialised memory)
 }
