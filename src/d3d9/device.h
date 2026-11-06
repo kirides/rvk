@@ -1436,6 +1436,8 @@ private:
         std::uint32_t minIndex = 0, numVertices = 0;
     };
     bool prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom);
+    // F5-0 measurements (RVK_F5_MEASURE=1; d3d9/f5_note.cpp, frame-ownership.md 7.22): the draw's triangles per view / size class, cluster + exact estimates
+    void f5Note(std::uint32_t primitiveType, const DrawGeom& geom, draws::Kind kind, scene::Phase phase);
     // GI variant eligibility of the current draw (prepareDraw): the engine set its ambient constants (a first pass)
     bool giEligible(const scene::Phase& phase) const;
     bool giStaticEligible(const scene::Phase& phase) const;  // giEligible without the ambient registers' test

@@ -1103,6 +1103,131 @@ paths cost the same, see below); F2c-4a builds on it. F2b-1's composed scene dra
    pub_interior 13 us per call (select 11.1, sort 0.7, resolve 1.0, rewrite 0.2), savegame 163 us (select 134, sort 18, resolve 10, rewrite 1). The comparator sort and the list rewrite together are only 6 - 12 % of the compaction (about 7 us of 62 at 7.16's position, ~20 us here):
    the cost is the per-op select (stamps), which F2c-4a's bulk validity removes; the GPU compaction of 4c would take over the sort (stable by the engine's order) and the rewrite.
 
+### 7.22 F5-0 measurements (2026-11-06, `RVK_F5_MEASURE=1`; no behaviour change)
+
+Stage F5-0 of section 13. Code: `src/core/f5_measure.{h,cpp}` (pure geometry: ~128-triangle clusters from meshoptimizer, object-space frustum planes, normal cones, per-triangle classes, counters + report; tests `tests/f5_tests.cpp`, 4 cases),
+`src/d3d9/f5_note.cpp` (`Device::f5Note`, one call per draw from `prepareDraw` behind one `f5::enabled()` bool test; nothing else changes). rvk.log `native: f5 measure (5 s) [<view>]`, `native: f5 clusters [<view>] meshopt|spatial`,
+`native: f5 exact [...]`, `native: f5 exact vs clusters [...]`, `native: f5 lod memory`. Runs (Full, `-PlayerDefaults`: lod 2x, **`native.packet_cache=off`**: a replayed packet does not pass `prepareDraw`, so with the cache on only the draws it
+refuses are counted), copy `risen-test-vk-f50`, logs in `rvk-work/scratch/f50/` (`m_<spot>.log`, `lod_save.log`, `pf_*.log`; `agg.py` / `pf.py` digest them). Spots = rvkcompare harbour_docks / jungle / pub_interior (200 s runs, 1,973 - 2,209 main
+views each) and the savegame hold (`Risen_Save_0005`, `rvk_perfsave hold=60`, 3,173 main views).
+
+**Methods and limits.**
+* *Submitted triangles / index entries / vertex ranges*: CPU counts at the draw (`primitives` x instances; index entries = 3 x triangles = the vertex-shader upper bound without the post-transform cache; the vertex range is the engine's `numVertices`, an overestimate for sub-meshes).
+  View keys: main z (`DepthPrepass`), main solid, main alpha (refracted + alpha + late), sun cascades / other shadow views by entry order (`shadow 0..3`; shadow 3 = rarely entered, 3 - 5 frames per run, ignore), sky cube. The cascades update every 2nd frame while the camera is still
+  (`debug.shadow_stride` 2): numbers are per frame **in which the view was drawn**. **No pipeline-statistics queries**: the RHI has none (Vulkan `pipelineStatisticsQuery` is not enabled, D3D12 would need `PIPELINE_STATISTICS` queries
+  too) and a query pool per scope is more than a small addition; the CPU counts and the per-triangle classification below stand in (the GPU numbers are `-PerfFrame` pass times).
+* *Clusters*: for rigid static draws (`Kind::StaticMesh`, indexed triangle lists, a material vertex shader with `g_vInstanceData` at c32 and no skinning / SpeedTree / vegetation, POSITION FLOAT3 at offset 0; **large = >= 1,024 triangles per draw**) the draw's CPU copies
+  of the vertex / index range (`Buffer::readCpu`) are cached and clustered once per distinct draw range (two builders: `meshopt_buildMeshlets` cone weight 0.5 and `meshopt_buildMeshletsSpatial` 64..128 triangles, <= 128 vertices; ~0.9 s of builds per run, 80 - 250 MiB cache).
+  Per view and frame the draw's VS c0..c3 (checked against the camera block: 0 differences) and world rows c33..c35 give an object-space frustum (six planes) and eye; a cluster is out when its sphere is outside a plane, back-facing by meshopt's cone test
+  (`dot(c - eye, axis) >= cutoff * |c - eye| + r`, ortho: view direction), "runs" = maximal runs of visible clusters in the builder's order and in a Morton order of the cluster centres (GD3D11's BVH order stand-in).
+  Skinned, instanced, SpeedTree, vegetation, billboards, blended draws are counted in the submission tables but not clustered.
+* *Exact per-triangle classes* (sampled: every 4th main frame for the main z pass, every 2nd shadow frame for large shadow draws): each vertex through the draw's clip rows; a triangle is frustum-out when all three vertices are outside one plane, back-facing by its screen winding and the draw's cull mode,
+  else its projected area in pixels (viewport of the view) goes into the histogram. Conservative per triangle (a triangle crossing a frustum corner but outside counts as drawn). 70 - 370 M triangles per run. **Validation of the cone verdict**: a cluster called back-facing whose triangle is front-facing and fully inside = a false negative:
+  with the right winding sign 0 of 24,000+ back clusters violated (main) and 0 of 6,000+ (shadows); the other sign violated every time (the sign is `+` for D3D9's winding in both perspective and ortho views). So the estimates are valid, and the cone result below is not an artifact.
+* *LOD memory*: for the contexts of the main view's static draws (`ctx + 0x18` mesh PS: LOD count byte `+0x6c`, LOD resources `+0x40[b]`; `ctx + 0x28` = the chosen one), `res + 0x38 == 3` = loaded and `res + 0x2c` = the engine's byte count of a loaded resource (7.19 item 5).
+* Extrapolation: no Radeon 680M was available; every 680M figure below is an **extrapolation** from the RX 7900 XTX (shared with other agents' games: GPU times are +- 20 %).
+
+**1. Triangles submitted per frame (average over the hold; draws / triangles, k = 1,000; "inst" = triangles in instanced draws: SpeedTree / vegetation / instanced meshes).**
+
+| view | harbour_docks | jungle | pub_interior | savegame |
+|---|---|---|---|---|
+| main z | 360 d / 704k (inst 334k) | 559 d / 949k (473k) | 308 d / 585k (299k) | 687 d / 775k (268k) |
+| main solid | 376 d / 712k | 523 d / 957k | 317 d / 591k | 432 d / 781k |
+| main alpha | 63 d / 22k | 110 d / 32k | 57 d / 20k | 50 d / 10k |
+| shadow 0 (1024^2) | 50 d / 61k | 62 d / 59k | 58 d / 57k | 42 d / 32k |
+| shadow 1 (2048^2) | 67 d / 96k | 91 d / 110k | 77 d / 103k | 68 d / 66k |
+| shadow 2 (2048^2) | 165 d / 262k | 247 d / 347k | 207 d / 324k | 403 d / 474k |
+| sky cube (when refreshed) | 20 d / 28k | 20 d / 28k | 20 d / 28k | 20 d / 28k |
+
+Index entries = 3 x triangles (main z 1.8 - 2.9 M per frame). The three cascades add 0.4 - 0.6 M triangles in the frames they are drawn, z + solid 2 x 0.6 - 0.95 M: the geometry of one frame is 1.6 - 2.5 M triangles (4.8 - 7.5 M index entries) at the player defaults.
+
+By triangles per draw, main z (draws / triangles per frame):
+
+| class | harbour_docks | jungle | pub_interior | savegame |
+|---|---|---|---|---|
+| < 256 | 127 / 239k | 193 / 297k | 111 / 212k | 180 / 136k |
+| 256 - 1K | 148 / 119k | 256 / 210k | 130 / 106k | 386 / 238k |
+| 1K - 4K | 65 / 158k | 87 / 214k | 52 / 130k | 103 / 182k |
+| 4K - 16K | 16 / 121k | 20 / 156k | 12 / 90k | 15 / 143k |
+| > 16K | 3 / 66k | 4 / 73k | 2 / 47k | 4 / 76k |
+| **>= 1K: share of draws / of triangles** | 23 % / 49 % | 19 % / 47 % | 21 % / 46 % | 18 % / 52 % |
+
+The < 256 class is mostly instanced draws (SpeedTree / vegetation: triangles of all instances). Cascades follow the same shape (shadow 2 of the savegame: 51 / 40k, 251 / 245k, 101 / 184k, 1 / 5k). About 20 % of the draws hold half the triangles; 3 - 4 draws a frame are > 16K triangles (level meshes).
+
+**2. Large static meshes (>= 1K triangles/draw, rigid): what a cluster cull could remove** (share of the large static draws' triangles; "large static" = 35 - 43 % of the main z triangles: 277k / 340k / 204k / 334k per frame; 54 - 108 such draws per frame; 40 - 65 clusters of ~128 triangles per draw; cluster
+columns: meshopt / spatial, same draws and frames as the exact column, the exact figures from the sampled frames of the same run).
+
+| view | exact per-triangle frustum-out | cluster sphere out (meshopt / spatial) | exact back-facing (hardware culls it) | cone back-only (meshopt / spatial) | triangles drawn by the hardware |
+|---|---|---|---|---|---|
+| main z, harbour_docks | 56.4 % | 50.8 / 53.0 % | 25.3 % | 0.4 / 1.0 % | 18.3 % |
+| main z, jungle | 45.2 % | 38.8 / 41.3 % | 29.5 % | 0.4 / 1.0 % | 25.3 % |
+| main z, pub_interior | 50.4 % | 44.0 / 46.5 % | 29.1 % | 0.6 / 1.3 % | 20.5 % |
+| main z, savegame | 54.9 % | 46.4 / 49.4 % | 23.0 % | 0.1 / 0.3 % | 22.0 % |
+| cascades (all drawn ones), harbour_docks | 34.0 % | 30.0 / 32.0 % | 29.5 % | 0.1 / 0.1 % | 36.5 % |
+| cascades, jungle | 14.4 % | 13.6 / 14.0 % | 39.7 % | 0.1 / 0.2 % | 45.9 % |
+| cascades, pub_interior | 21.9 % | 20.6 / 21.3 % | 35.6 % | 0.0 / 0.2 % | 42.6 % |
+| cascades, savegame | 0.3 % | 0.3 / 0.3 % | 47.5 % | 0.2 / 0.1 % | 52.2 % |
+
+(The exact figures are over the whole-run triangle sums, e.g. 137 - 265 M triangles per spot for main z; the cluster columns come from the same draws in the same frames; a per-frame window varies by +- 10 points with the view.)
+* **The frustum cull of clusters is real: 39 - 53 % of the large meshes' triangles in the main z pass** (cluster tests find 90 - 95 % of what the exact per-triangle test finds: 50.8 of 56.4, 38.8 of 45.2, 44.0 of 50.4, 46.4 of 54.9; the spatial builder gets 2 - 3 points more for 40 % more clusters),
+  which is **15 - 21 % of the whole main z triangles** (large static share x cluster-out: 0.39 x 0.51, 0.36 x 0.39, 0.35 x 0.44, 0.43 x 0.46). The solid pass is similar (cluster-out 51 - 65 %, but only 27 - 45 large draws per frame, since the solid pass lists static meshes per sub-mesh).
+  In the cascades the cull is 0 - 30 % (cascade 0 and 1 are small and mostly inside their frusta; cascade 2 / the long ones 17 - 25 %; the savegame's cascades are all inside), about **3 - 10 % of a cascade's triangles**.
+* **The back-face (normal cone) cull is worthless at cluster size: 0.1 - 1.3 % against 23 - 47 % of triangles the hardware culls individually.** Risen's level meshes (rock, terrain, walls, 2009 modelling) give 128-triangle clusters wide normal spread (the cone test needs `dot(view, axis) >= sin(half angle)`),
+  and the radius term of the conservative form kills it at close range. Cone data in a cluster table is not worth its bytes: **frustum only** (plus HiZ later).
+* Visible clusters per large draw: 36 - 48 (meshopt) / 52 - 68 (spatial); **visible runs per large draw in the main z pass: 1.7 - 2.4 (builder order), 2.2 - 3.0 (Morton order of the centres; the builder's own order is better than a Morton re-sort), spatial builder 1.9 - 3.1 / 2.2 - 3.8**,
+  cascades 1.0 - 1.4 runs. So 70 - 110 large draws a frame become ~150 - 260 indirect commands in the main view (GD3D11's merging works: about 2 commands per draw), 1.0 - 1.4 per draw in the cascades. A draw whose clusters are all out: 1 - 4 % of large draws (meshopt), 3 - 14 % (spatial).
+  Cluster builds: 332 meshes / 1.5 M triangles = 0.9 s (meshopt + spatial together) for ~90 large meshes of one spot: the offline cache is small (the unit of caching = the mesh range).
+
+**3. Triangle screen-size histogram** (main z, all analysed rigid static draws of every size, sampled frames; share of the triangles the hardware actually rasterizes = inside the frustum and front-facing; projected area in 1600x900 pixels). Of all submitted rigid triangles 37 - 49 % are
+frustum-out, 28 - 33 % back-facing, only 22 - 30 % are drawn.
+
+| | < 1 px | 1 - 4 px | 4 - 16 px | 16 - 64 px | > 64 px |
+|---|---|---|---|---|---|
+| harbour_docks | 32.5 % | 22.4 % | 21.6 % | 14.1 % | 9.4 % |
+| jungle | 35.1 % | 22.9 % | 21.1 % | 12.8 % | 8.1 % |
+| pub_interior | 31.0 % | 22.4 % | 22.0 % | 14.7 % | 9.8 % |
+| savegame | 31.0 % | 25.0 % | 22.3 % | 12.6 % | 9.1 % |
+| cascades (map pixels), large draws, jungle / savegame | 44 % / 50 % | 23 % / 28 % | 16 % / 13 % | 11 % / 6 % | 6 % / 3 % |
+
+**About a third of the drawn static triangles cover less than one pixel and 55 - 58 % less than four** (rigid static draws only: skinned / SpeedTree / vegetation are not in it). Sub-pixel triangles cost front end + setup, and each one that is rasterized shades at least a 2x2 quad
+in the solid pass (4x pixel work for a 1-pixel triangle); the player defaults' `lod.meshes` / `lod.view` 2x double the distances at which the engine switches LODs, which pushes this share up (the runs are at 2x). Approximate: the histogram counts triangles, not covered pixels, and the z-pass uses the same geometry as the solid pass.
+
+**4. GPU time** (`-PerfFrame` with `RVK_PERF_FRAMES=24`, averaged, RX 7900 XTX, 1600x900, `RisenTest.exe` vsync off, Full, player defaults, GPU shared with other agents: +- 20 %, the pass times of the vertex-bound passes are the stable ones). Frames 3500 (savegame hold) and 1500 (pub_interior hold).
+ms per frame: cascades = the three depth-only passes (drawn every frame in these 24 frames' average: 0.24 ms in the pub's frame 1500 when all three draw).
+
+| | pub_interior | pub, low bandwidth on | savegame (2 runs) | savegame, low bandwidth on (2 runs) |
+|---|---|---|---|---|
+| main submission total | 4.63 | 2.79 | 4.49 / 2.21 | 4.35 / 3.81 |
+| depth pre-pass (main z, 209 draws / ~690) | 0.30 | 0.15 | 0.33 / 0.24 | 0.33 / 0.33 |
+| solid pass | 1.33 | 0.75 | 1.29 / 0.40 | 1.53 / 1.09 |
+| cascades (3 passes) | 0.12 | 0.12 | 0.13 / 0.13 | 0.13 / 0.13 |
+| water.rt + water.ocean + wet shore | 1.51 | 0.67 | 1.62 / 0.82 | 1.32 / 1.16 |
+| rt.scene + light.cluster + light.shadow | 0.42 | 0.42 | 0.54 / 0.17 | 0.40 / 0.58 |
+| other raster passes (alpha, refracted, post chain, GUI) | 0.41 | 0.54 | 0.43 / 0.38 | 0.42 / 0.39 |
+
+* **The geometry passes are small on the 7900 XTX: z pre-pass 0.24 - 0.33 ms, cascades 0.13 ms per frame (0.24 ms when all three are drawn), together 0.4 - 0.6 ms = 10 - 20 % of the 2.2 - 4.6 ms main submission**; the pixel / compute passes (solid 0.4 - 1.5, water RT 0.6 - 1.0, ocean 0.2 - 0.7, post) dominate.
+  Low bandwidth only changes the pixel passes (solid, water RT, ocean: the test copy's discrete GPU: -0.5 to -1.8 ms in the pub, within the noise of the other agents' load in the savegame); z and cascades do not move (they are vertex / ROP bound).
+* **680M extrapolation (not measured)**: the XTX has 96 CU, 6 shader engines (6 primitive units), ~2.5 GHz; the 680M 12 CU, 1 shader engine, 2.2 GHz: front end ~5 - 7x slower, shader throughput ~15 - 20x, bandwidth ~10x less. The z pre-pass and the cascades are front-end / vertex bound,
+  so ~5 - 7x: **z 1.2 - 2.3 ms, cascades 0.7 - 1.6 ms (drawn frames), solid 6 - 20 ms** (pixel + vertex): geometry about 2 - 4 ms of a 680M frame at best, certainly not the largest part (the solid pass and the post / RT / water passes are). Treat as +- 2x.
+
+**5. Memory: every LOD of every in-view static mesh resident.** At the savegame (lod 2x), main-view static draws (446 meshes per frame, 260 with 2 or more LODs; 252 frames): the resources of the **chosen LODs 46.6 MiB**, the siblings that are loaded today **62.8 MiB** (all resident LODs of the in-view meshes),
+with every sibling resident (the 2 % not loaded estimated from the measured size ratio LOD1 / LOD0 = 0.33, 351,716 samples) **64.8 MiB: +2.0 MiB (+3 %) over today, +18 MiB (+39 %) over the chosen-only set**. The engine keeps nearly all sibling LODs of the in-view meshes loaded already (3,780 of 177,912 sibling slots per
+252 frames unloaded): its `UpdateLoD` prefetches the finest wanted level and the coarser ones were loaded earlier while the camera moved. The whole mesh arena holds 69.6 MiB at that point (the cached-in world; `perf: mesh arena`), 1 block of 64 MiB + 1 dedicated buffer. **Memory is not an obstacle to a GPU-side LOD choice among the engine's own LODs**
+(all LODs resident costs +2 MiB; even forcing the coarser ones in would be ~+18 MiB of 70). The resource byte count (`res + 0x2c`) matches the unique drawn vertex + index buffer bytes in small cases (2.5 = 2.5, 11.9 = 11.9 MiB) and is larger at the savegame (46.6 vs 32.1 MiB: contexts whose draws are replayed / instanced share buffers; treat the
+accounting as an upper bound).
+
+**Recommendation for F5-1 / F5-2.**
+* **Threshold: >= 1,024 triangles per draw** (static rigid draws): 18 - 23 % of the main z draws (66 - 122 per frame) hold 46 - 52 % of its triangles, and a draw of < 1K triangles has < 8 clusters (cluster culling inside it gains nothing the engine's per-object cull does not already give). Keep the 256 - 1K class (130 - 390 draws, 106 - 238k triangles) unclustered;
+  revisit 512 only if the first measurements of F5-2 say the draw count matters. Cluster size 128 triangles / 128 vertices; **meshopt's `buildMeshlets` is enough** (the spatial builder culls 2 - 3 points more but has 40 % more clusters and more runs; GD3D11's BVH order is not better than the builder's order here).
+* **Expected triangle saving of F5-2**: main z / solid **15 - 21 % of the view's triangles** (39 - 53 % of the large static meshes), cascades **3 - 10 %**; no cone (0.1 - 1.3 %), no back-face test in the cull pass: **frustum clusters only**; the cull is exact enough (false negatives against the exact triangle test: none, the sphere test is conservative by construction; the 5 - 10 points the cluster test misses against the per-triangle one are triangles
+  whose cluster sphere crosses the plane). Merged runs: ~2 indirect commands per large draw (main), 1 - 1.4 (cascades).
+* **GPU saving**: on the 7900 XTX nothing visible (0.4 - 0.6 ms of geometry passes x 15 - 20 % = 0.06 - 0.12 ms); **on the 680M an extrapolated 0.3 - 0.7 ms per frame** (z 1.2 - 2.3 ms x 18 % + drawn cascades 0.7 - 1.6 ms x 6 %, plus the saved vertex shading in the solid pass) = a few percent of a 680M frame. **Cluster culling alone is not worth its complexity on the 680M**;
+  it is worth doing as part of F2c-4c's GPU-driven draws because the indirect-count machinery exists then, the cull pass is cheap (4 - 7k clusters per view, a trivial compute pass) and the per-cluster table is needed for HiZ (F5-3) anyway. Order: F5-1 (build + table) can follow F2c-4c cheaply; ship F5-2 behind a setting and keep it only if the 680M measures >= 0.3 ms.
+  The 25 - 47 % hardware back-face cull and the 22 - 30 % drawn share also say the geometry front end shades (vertex-shades) ~3 - 4x more vertices than it rasterizes: a cheaper lever on weak GPUs than cluster culling is the **vertex shader's cost per vertex** (the z pass could use a position-only shader / stream: z pass at 700k triangles has no need for normals, uv, colours).
+* **Does the far-triangle data change "no cluster LOD"? Not the decision, but it sharpens the next step.** 31 - 35 % of drawn static triangles are < 1 px and 55 - 58 % < 4 px at lod 2x: that is real front-end and quad-overshading cost, and it grows with the player defaults' 2x distances.
+  But the engine already has 2 - 3 LOD levels per mesh, all resident (+2 MiB measured), so **the F5-2 per-instance GPU LOD pick among the engine's own LODs** (distance -> index range) is the cheap remedy and is memory-free; no simplified cluster hierarchy is needed. Re-measure after F5-2: the < 1 px share of the main z pass
+  should fall well below 20 % with a screen-size-driven LOD pick (target: a LOD whose triangles average >= ~2 px), and the F5-3 HiZ pass decision stays open until the occlusion share (not measured here: the engine's per-object cull already removes whole objects) is known.
+
 ## 8. F1 / F2 design decision: windows onto persistent tables (2026-11-06, orchestrator)
 
 **Decision.** F1 does not start with new shaders. Translated shaders and the ported ubershader read every float register through 4 register windows per

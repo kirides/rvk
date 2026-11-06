@@ -104,6 +104,8 @@ add_library(rvk_core STATIC
     src/core/config.cpp
     src/core/f2c4_measure.cpp
     src/core/f2c4_measure.h
+    src/core/f5_measure.cpp
+    src/core/f5_measure.h
     src/core/crash_dump.cpp
     src/core/crash_dump.h
     src/core/config.h
@@ -129,6 +131,7 @@ add_library(rvk_core STATIC
     src/d3d9/device.cpp
     src/d3d9/device.h
     src/d3d9/draw.cpp
+    src/d3d9/f5_note.cpp
     src/d3d9/scene_draws.cpp
     src/d3d9/owned_submit.cpp
     src/gpuscene/billboard_table.cpp
@@ -548,7 +551,7 @@ rvk_warnings(rvk_d3d9test)
 # tests
 # ---------------------------------------------------------------------------------------------
 if(RVK_BUILD_TESTS)
-    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp tests/api_tests.cpp tests/fvf_tests.cpp tests/settings_tests.cpp tests/settings_api_tests.cpp tests/scene_tests.cpp tests/draws_tests.cpp tests/inject_tests.cpp tests/caps_tests.cpp tests/water_tests.cpp tests/ocean_tests.cpp tests/shadows_tests.cpp tests/lod_tests.cpp tests/high_fps_tests.cpp tests/rt_tests.cpp tests/shader_eval_tests.cpp tests/window_mode_tests.cpp tests/display_resolve_tests.cpp tests/keys_tests.cpp tests/upscale_tests.cpp tests/native_tests.cpp tests/names_tests.cpp tests/framegen_tests.cpp tests/dxc_tests.cpp tests/gpu_ref_tests.cpp tests/d3d12_tests.cpp tests/material_pack_tests.cpp tests/light_table_tests.cpp tests/illum_table_tests.cpp tests/mesh_parts_tests.cpp tests/material_table_tests.cpp tests/window_tables_tests.cpp tests/crash_dump_tests.cpp)
+    add_executable(rvk_tests tests/test.h tests/test_main.cpp tests/shader_tests.cpp tests/hal_types_tests.cpp tests/fx_tests.cpp tests/format_tests.cpp tests/hal_stub_tests.cpp tests/api_tests.cpp tests/fvf_tests.cpp tests/settings_tests.cpp tests/settings_api_tests.cpp tests/scene_tests.cpp tests/draws_tests.cpp tests/inject_tests.cpp tests/caps_tests.cpp tests/water_tests.cpp tests/ocean_tests.cpp tests/shadows_tests.cpp tests/lod_tests.cpp tests/high_fps_tests.cpp tests/rt_tests.cpp tests/shader_eval_tests.cpp tests/window_mode_tests.cpp tests/display_resolve_tests.cpp tests/keys_tests.cpp tests/upscale_tests.cpp tests/native_tests.cpp tests/names_tests.cpp tests/framegen_tests.cpp tests/dxc_tests.cpp tests/gpu_ref_tests.cpp tests/d3d12_tests.cpp tests/material_pack_tests.cpp tests/light_table_tests.cpp tests/illum_table_tests.cpp tests/mesh_parts_tests.cpp tests/material_table_tests.cpp tests/window_tables_tests.cpp tests/crash_dump_tests.cpp tests/f5_tests.cpp)
     target_link_libraries(rvk_tests PRIVATE rvk_core SPIRV-Tools-static)
     rvk_warnings(rvk_tests)
     rvk_deploy_dxc(rvk_tests)

@@ -14,6 +14,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "core/f5_measure.h"
 #include "d3d9/convert.h"
 #include "d3d9/device.h"
 #include "d3d9/memeq.h"
@@ -1487,6 +1488,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     phases_.countDraw();
     const auto recordStart = options_.perf ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     draws_.count(kind, phase.view);
+    if (f5::enabled()) f5Note(primitiveType, geom, kind, phase);
     if (tint != 0) draws_.countTinted();
     if (draws::Record* r = draws_.add()) {
         lastRecord_ = r;
