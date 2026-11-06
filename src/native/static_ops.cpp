@@ -2106,7 +2106,7 @@ void StaticOps::opEnterImpl(const Op& op) {
     opDiffLogged_ = false;
     taken_ = false;
     if (g_->takeOver) {
-        issue();
+        { const f4m::IssueScope f4i(op.kind == OpKind::SpeedTree ? 1 : op.kind == OpKind::SpeedTreeBB ? 2 : 0); issue(); }
         taken_ = true;
     }
     if (taken_) leanCommit();

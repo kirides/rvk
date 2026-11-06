@@ -739,6 +739,99 @@ rows, window, tests `object_*`), `object_table.{h,cpp}`, `window_tables.*` (view
 * **Not measured:** CPU gain (none expected: the composition still runs; the point is the records F2c-2 builds DrawRecords from) and picture A/B (no per-draw difference is possible
   by construction + verify; the picture was not compared).
 
+### 7.15 F4-0 tree measurements (2026-11-06, `RVK_F4_MEASURE=1`; no behaviour change)
+
+Counters only (`src/native/f4_measure.{h,cpp}`; hooks in `static_ops_trees.cpp` `composeTree` / `composeTreeBillboard` + ONE line in `static_ops.cpp` (`f4m::IssueScope` around
+`issue()`, its header comes through `f2c_measure.h`)). The variable is read once at the first tree op (`GetEnvironmentVariableA`); off = one bool test per site. rvk.log
+`native: f4 measure (5 s) <section>: ...` (sections `time`, `census`, `hist`, `trees`, `illum`, `inval`, `stream1 freq`; raw sums, a "view" = the ops sharing frame / view kind /
+cascade / db / desc), `native: f4 ctab:` and `native: f4 stream1:` once per shader / buffer. Summing script: `B:\DevDrive\rvk-work\scratch\f40\summ4.py <log>` (sums the windows that
+held a main view with tree ops). Runs (Full, Vulkan, `-PlayerDefaults`, own copy `risen-test-vk-f40`, logs `rvk-work/scratch/f40/*.log`): **spots** = rvkcompare `jungle, lake_jungle,
+waterfall_jungle, swamp_camp` (time frozen, 4173 main views), **save** = Risen_Save_0005 hold 40 s with lod view / trees / meshes 2x (4577 views), **save lod.trees=3** (4711),
+**walk** = `rvk_rtwalk` from that save, 60 s, turning 3 deg / s (7164 views; the hero walks, trees stream in: "fresh").
+Caveats: other agents ran games concurrently (absolute ms are noisy, shares are what matter); the timers cost ~2 QPC reads per phase switch (per tree in `readLight`) and the
+census itself costs ~0.2 ms per category per frame (reported as "census", NOT in the sums): the phase numbers are an upper bound, `light` most of all (2 QPC per solid instance).
+
+**1. Phase timers** (ms per view of the category, save run; the other runs within +-15 %: spots 0.72 / 0.43 / 0.29, walk 0.59 / 0.38 / 0.20, lod.trees=3 0.67 / 0.40 / 0.22 per main-view frame).
+"issue" = `StaticOps::issue()` of the tree ops (outside composeTree).
+
+| category | queue | snapshot | readLight | rows | plan | draw (materialDraws / specialPassDraw) | other | issue | sum | views / frame |
+|---|---|---|---|---|---|---|---|---|---|---|
+| main solid | 0.026 | 0.029 | 0.069 | 0.022 | 0.009 | 0.157 | 0.062 | 0.275 | **0.649** | 1 |
+| main z | 0.026 | 0.016 | - | 0.020 | 0.007 | 0.097 | 0.060 | 0.164 | **0.389** | 1 |
+| shadow z (cascades etc.) per view | 0.017 | 0.006 | - | 0.007 | 0.003 | 0.030 | 0.024 | 0.052 | 0.140 | 1.5 -> 0.21 per frame |
+
+Per main-view frame the tree ops cost **~1.25 ms** (spots 1.44, walk 1.16), of which `issue` 0.5 and `draw` 0.3 are per-DRAW costs (composition + device calls); the per-INSTANCE work
+(queue copy + sort, snapshots, light reads, rows, plan: main + shadow) is only **~0.26 ms**. Billboards (per main-view frame, solid + z; no shadow billboards): 13 ops / 26 draws per
+list in the save, 21 ops / 43 draws at the jungle spots; compose 0.17 ms + issue 0.08 ms (save), 0.30 + 0.27 ms (spots). Vegetation not measured here.
+
+**2. Census** (per view of the category; save run, spots in brackets; z and solid see the same trees and ops):
+
+| | main solid | main z | shadow z (per view; 1.5 views / frame) |
+|---|---|---|---|
+| unique trees | 237 [261] | 237 | cas0 15 [24], cas1 37 [72], cas2 416 [314] |
+| tree ops (type 0 / 1 / 2 / 3) | 79.6 (21 / 24 / 26 / 8) [71.9] | same | 31 (11 / 3 / 14 / 3) [36] |
+| queue entries / instances (rows) | 643 / 681 [681 / 754] | same | 278 / 272 |
+| (op, type, LOD) buckets | 137 [127] | 137 | 37 [44] |
+| today: planned batches / device draws | 138 / 129 [134 / 126] | 135 / 126 | 36.5 / 36 |
+| **calls under the F4 cut rule** (shader x vb x ib x topology x sun) | **77 [71]** | **77** | **31 [36]** |
+| hardware / software instancing | 79.6 / 0 (all) | all | all |
+
+* **Calls**: the cut rule gives ~one call per op (77 vs 129 device draws today, -40 %); the buckets (137) become args records of those calls. Today's batches (138) are already close to the
+  bucket count, because the 88 % illumination cuts cost little at this scale (solid draws 129 = 1 pass per batch + a few multi-pass ones): **the F4 win is per-draw CPU (compose + issue),
+  not fewer GPU calls alone.**
+* **Instances per bucket** (share of buckets; save, main): 1 inst 23 - 31 %, 2: 13 - 18 %, 3-4: 15 - 22 %, 5-8: 18 - 24 %, 9-16: 9 - 18 %, 17-32: 2 - 9 %, > 32: ~1 %; mean 5 per bucket. Args records
+  are the right shape (a bucket is rarely worth its own call).
+* **Two leaf-LOD buckets** (trees in leaf ops with both +0x58 and +0x5c >= 0): main 23 % (save), 32 % (spots), **50 % with `lod.trees=3`**; cascades 7 - 45 %. Instances > queue entries by that share.
+* **Trees without an entity (tree+0x18 & 0x10)**: **0** in every run (entity world matrix always available).
+* **Sun values**: every tree instance had the sun on (100 %, one light list per frame in every main view, 0 off-only / both): at the player defaults the sun-split call key never splits.
+* **Illumination classes** (solid instances): plain (list only) 75 - 79 %, 1 - 2 static lights 20 - 25 %, static ambient SH 0.1 - 0.9 %, **> 2 static lights 0, dynamic lights in the list 0, no list 0**.
+* **Hardware instancing** (admin +0x320 != 0): all ops in all runs; stream-0 divider `n | 0x40000000` on every draw; software path never ran (still composed by the old code, not measured).
+
+**3. Invalidation** (changed / pairs, per tree per view; main view; a pair = the tree was in the previous view of the same category; "fresh" = not in it):
+
+| input | spots (frozen) | save hold | save lod.trees=3 | walk |
+|---|---|---|---|---|
+| LOD ints +0x48 / +0x50 / +0x58 / +0x5c | 0.02 % each | 0.000 % (2-5 of 1.08 M) | 0.000 % | 0.002 % |
+| float refs +0x60 / +0x64 | 5.5 / 2.9 % | 0.38 / 0.31 % | 0.55 / 0.69 % | 3.7 / 2.1 % |
+| +0x6c | 10.4 % | 0.72 % | 1.14 % | 7.7 % |
+| any of the 7 fields | 10.4 % | **0.72 %** | 1.14 % | 7.7 % |
+| entity matrix (entity +0x60) | **0 / 1.09 M** | 0 | 0 | 0 |
+| illumination pointer / bytes [0, 0x110) | **0 / 0** | 0 / 0 | 0 / 0 | 0 / 0 |
+| render buffer tables (+0x38.., +0xe8..) | 0 / 105 k | 0 / 125 k | 0 / 129 k | 0 / 191 k |
+| wind block: admin +0xac (matrices) / +0x6c (rock) | 0.38 / 0.36 % of views | 0.22 / 0.20 % | 0.21 / 0.19 % | 0.15 / 0.13 % |
+| billboard constant block (c32..c36 + c37+j) | 0 / 89 k | 0 / 60 k | 0 / 60 k | 0 / 92 k |
+| fresh trees per run (main) | 2440 | 762 | 761 | 779 (the walk streams few) |
+
+Reading: the LOD index ints almost never change; the float fade ratios / +0x6c change for 0.4 - 8 % of the trees per view (distance-driven, more while walking or at the spots' frozen game time
+where the cascades / fades keep moving: not zero-cost but a per-view snapshot is cheap); **entity matrix, illumination and render-buffer tables are constant** (trees do not move: rows could
+persist per tree; the sun-lit illumination never changes). The wind block changes in 0.1 - 0.4 % of the views (so c14..c29 is a per-view record that is almost always the same).
+Cascade views read the same: 0.00 - 0.04 % for the ints, up to 12 % for any-field at cas2 (spots).
+
+**4. CTAB / stream 1** (decoded bytecode, 10 tree VS + 9 PS shaders per run, the same in every run; `native: f4 ctab`):
+* **VS** (every tree VS, z and solid, shadow views): reads c0..c3 (+ c11 for the 3 main-view z variants), **c14..c31** (wind c14..c29, c30 / c31 fog etc.; 14..31 in full), c32..c39 and
+  **relative reads c40+** (the instance block: `g_vInstanceData(vInstance * 4 + k)` with relative addressing, instanced flag set). None reads c4..c10 or c12 / c13.
+* **PS**: solid PS read c0, c1, c3, c4, (c6 / c7 / c8), c14..c31 (lighting), c32..c36 (billboard / leaf texcoord rows) and **never c5**; the z-pass PS read **c5 (MaskReference) and c0 / c6 / c7**: the alpha-test value matters for the z passes only,
+  as `leanMaskRef` assumes. Shadow-map PS read c5 only.
+* **Stream 1**: ONE buffer in every run (`size 1024 B, stride 4, offset 0`): **frequency `0x80000001` (INSTANCEDATA | 1: one element per instance)**, a **float identity ramp 0, 1, 2 ... 255** (256 elements, all equal to
+  their index), shared by all tree draws (z, solid, shadow, every type); stream 0 carries the divider `n | 0x40000000`. 100 % of the 1.29 M - 2.24 M composed draws per run used it.
+  => the GPU-driven design may replace it by our own ramp (>= the row capacity: today <= 255 instances per call under the batch limit) and later set vInstance from `firstInstance` / ref.y.
+
+**5. RT coupling at the player defaults**: `rt: scene: ... animated SpeedTrees 0`, `tree draws 0 (0 beyond the range, 0 captured)` in every window of every run: `RtScene::animated_` is off
+(`setAnimated` is only called by the RT shadows / GI consumers, both off by default), so no tree draw is captured and `observeTree` is never reached. Composition for the animated-tree path is
+therefore only needed while `shadows.rt` or `gi.enabled` is on (not measured; code reading: `observeTree` takes the draw's rows from the VS c32.. block and the instanced stream, one capture per
+tree within `animRange_`, `kMaxAnimatedTrees` / 512 per frame).
+
+**Recommendation.**
+1. **F4-1 billboards first** (confirmed easiest): the constant block never changes (0 / 300 k pairs), 13 - 21 ops per list per view, ~0.25 - 0.55 ms per frame (compose + issue), so the estimate of -0.15 .. -0.25 holds (the upper part at jungle-like spots).
+2. **F4-2 tree records + per-view plans**: the plan inputs are the render-buffer tables (never change), the 7 LOD fields (snapshot per view, 0.7 - 10 % changed) and nothing per-tree else: rows (entity matrix) and
+   illumination are constant (retain per tree, key = tree pointer + the table epoch). The sun-split is dead at the defaults (keep the bit in the key, no work).
+3. **F4-3 scope**: the target is the per-draw work, `draw` + `issue` + `other` = ~0.8 of the ~1.25 ms; the per-instance work is 0.26 ms (the design's -1.0 .. -1.4 is optimistic: expect **-0.7 .. -0.9 ms** per frame
+   with main + shadow views done, -0.5 .. -0.6 for the main view alone). Calls 129 -> 77 (main), 36 -> 31 (shadow): little GPU gain, the CPU gain is retained DrawRecords + one args record per bucket (137).
+   Do the shadow views (F4-4) with the main view: they are ~1/6 of the cost and cas2 sees 300 - 430 trees.
+4. Bucket records: 5 instances on average, 23 - 50 % of the trees in two leaf buckets: records must support a tree in two buckets (as args records, not per-tree rows).
+5. Keep composition for the software instancing path and while `RtScene::animated_` is on; no entity-less trees exist (drop that guard's cost model), 0 dynamic-light / no-list / > 2 static-light illuminations (the
+   simple per-instance lighting image is enough at the defaults).
+
 ## 8. F1 / F2 design decision: windows onto persistent tables (2026-11-06, orchestrator)
 
 **Decision.** F1 does not start with new shaders. Translated shaders and the ported ubershader read every float register through 4 register windows per

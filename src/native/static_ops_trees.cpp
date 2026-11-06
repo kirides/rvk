@@ -19,6 +19,7 @@
 #include "engine/symbols.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "enh/light_table.h"
+#include "native/f4_measure.h"
 #include "native/static_ops.h"
 
 namespace rvk::native {
@@ -201,13 +202,17 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
     if (!zpass && op.list != List::Solid) return Skip::Kind;
     // a shadow-map z op (desc bit 0x10 << 16, the shadow views of N5.5): RenderZPass 0x6ee3f0 passes it to the z passes
     const bool shadow = zpass && ((op.raw.desc >> 16) & 0x10u) != 0;
+    const f4m::OpScope f4scope(&drawCount_, dev_.stats().frames, static_cast<std::uint32_t>(viewKind_), cascade_, db_, desc_, zpass, shadow);
     U8* ps = ptr(op.raw.context, 0x18);
     U8* res = ptr(ps, 0x38);
     if (res == nullptr) return Skip::None;
     U8* rb = ptr(res, 0x78);
     if (rb == nullptr) return Skip::Unreadable;
     // O2b lean: the queue sorted in place at the render buffer's first op (before the type dispatch, as the slot does it)
-    if (leanCollect_) leanTreeSort(rb, zpass);
+    if (leanCollect_) {
+        const f4m::PhaseScope f4q(f4m::kQueue);
+        leanTreeSort(rb, zpass);
+    }
     const std::uint32_t type = zpass ? (op.raw.desc & 0xffffu) : op.raw.desc;
     if (type > 3) return Skip::None;
     ++st.types[type];
@@ -243,11 +248,14 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
     if (leanCollect_) leanMaskRef(shader);  // O2b lean: MaskReference = 80 (the RT material reads it) before any draw
     if (!viewAndMirror(shader)) return Skip::Unreadable;
     std::vector<std::uint8_t>& queue = scr_.treeQueue;
-    queue.resize(static_cast<std::size_t>(n) * 0x18);
-    if (!rd(ptr(rb, zpass ? 0xd0 : 0xb8), 0, queue.data(), queue.size())) return Skip::Unreadable;
-    if (get<std::int32_t>(rb, zpass ? 0xe4 : 0xe0) != 0 && n > 0) {
-        qsort_(queue.data(), static_cast<std::size_t>(n), 0x18, zpass ? treeCmpZ_ : treeCmp_);
-        ++st.sortedCopies;
+    {
+        const f4m::PhaseScope f4q(f4m::kQueue);
+        queue.resize(static_cast<std::size_t>(n) * 0x18);
+        if (!rd(ptr(rb, zpass ? 0xd0 : 0xb8), 0, queue.data(), queue.size())) return Skip::Unreadable;
+        if (get<std::int32_t>(rb, zpass ? 0xe4 : 0xe0) != 0 && n > 0) {
+            qsort_(queue.data(), static_cast<std::size_t>(n), 0x18, zpass ? treeCmpZ_ : treeCmp_);
+            ++st.sortedCopies;
+        }
     }
     const auto entry = [&](std::uint32_t i) { return queue.data() + 0x18 * static_cast<std::size_t>(i); };
     const auto treeOf = [&](std::uint32_t i) { U8* p = nullptr; std::memcpy(&p, entry(i), 8); return p; };
@@ -271,6 +279,22 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
     g.material = material;
     g.subMesh = nullptr;  // no eCSubMesh::Render: the slot's tag only
     g.meshResource = nullptr;
+    if (f4m::on()) {
+        f4m::OpInfo oi;
+        oi.type = type;
+        oi.hardware = hardware;
+        oi.limit = limit;
+        oi.rb = rb;
+        oi.admin = admin;
+        oi.queue = queue.data();
+        oi.n = n;
+        oi.leafLods = type >= 2 ? get<std::int32_t>(ptr(ptr(wrapper, 0), 8), 0xf4) : 0;
+        oi.shader = shader;
+        oi.vb = g.streams[0].buffer;
+        oi.ib = g.indices;
+        oi.primType = g.primType;
+        f4m::census(oi);
+    }
     treeWind();
     const std::uint16_t verts = get<std::uint16_t>(rb, 0x38 + 2 * t);
     const auto entityWorld = [&](U8* tree, float out[16]) {
@@ -283,16 +307,30 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
         gg.startIndex = r.startIndex;
         gg.primCount = r.primCount;
         if (r.freq0 != 0 && gg.streams[0].buffer != nullptr) gg.streams[0].freq = r.freq0;
-        if (zpass) return specialPassDraw(shader, gg, true);
-        // GetPasses(shader, 0, illumination, 0, instanced, 0)
-        const engine::illumcensus::KindScope census(1);
-        return materialDraws(shader, illum, 0, true, 0, 0, gg, nullptr);
+        const f4m::PhaseScope f4d(f4m::kDraw);
+        const std::size_t f4before = drawCount_;
+        Skip res = Skip::None;
+        if (zpass) {
+            res = specialPassDraw(shader, gg, true);
+        } else {
+            // GetPasses(shader, 0, illumination, 0, instanced, 0)
+            const engine::illumcensus::KindScope census(1);
+            res = materialDraws(shader, illum, 0, true, 0, 0, gg, nullptr);
+        }
+        if (f4m::on()) {
+            for (std::size_t k = f4before; k < drawCount_; ++k) {
+                const sc::DrawDesc& dd = *draws_[k];
+                f4m::draw(dd.vs, dd.ps, dd.streams[1].buffer, dd.streams[1].offset, dd.streams[1].stride, dd.streams[1].freq, dd.streams[0].freq);
+            }
+        }
+        return res;
     };
     // the batch rules' light inputs of an instance (its illumination: list, per-object flags; with table lighting also the sun bit of the pass)
     const bool tableMerge = tableLit_ && !zpass && enh::fullLitTreeMerge();
     const U8* sunList = nullptr;
     bool sunListValue = false, dynListValue = false;
     const auto readLight = [&](sc::TreeInstance& x, U8* il) {
+        const f4m::PhaseScope f4l(f4m::kLight);
         bool noSun = false, statLights = false;
         std::uint64_t buf[16]{};  // the illumination's first 0x80 bytes (static light entries 0 and 1 start at +0x10 / +0x50)
         if (fastReads) {
@@ -373,6 +411,8 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
         if (!(zpass && type == 1)) writeAlpha(0, one_);
         const std::size_t lodAt = type == 0 ? 0x48 : 0x50, stripAt = type == 0 ? 0x40 : 0x50, startAt = type == 0 ? 0xe8 : 0xf8;
         const float vy = get<float>(rb, type == 0 ? 0xa0 : 0xa4);
+        {
+        const f4m::PhaseScope f4s(f4m::kSnapshot);
         for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(n); ++i) {
             U8* tree = treeOf(i);
             std::int32_t lod;
@@ -395,9 +435,16 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
             }
             inst.push_back(x);
         }
-        sc::planTreeBatches(inst, limit, !zpass, true, batches, tableMerge);
-        countSplits(batches);
+        }
+        {
+            const f4m::PhaseScope f4p(f4m::kPlan);
+            sc::planTreeBatches(inst, limit, !zpass, true, batches, tableMerge);
+            countSplits(batches);
+            f4m::batches(static_cast<std::uint32_t>(batches.size()), static_cast<std::uint32_t>(inst.size()));
+        }
         for (const sc::TreeBatch& b : batches) {
+            {
+            const f4m::PhaseScope f4r(f4m::kRows);
             for (std::uint32_t k = 0; k < b.count; ++k) {
                 U8* tree = treeOf(inst[b.first + k].queueIndex);
                 float world[16];
@@ -405,6 +452,7 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
                 writeWorld(k, world);
                 const float v[2] = {get<float>(tree, 0x6c), vy};
                 writeTreeInstance(k, v);
+            }
             }
             st.instances += b.count;
             ++st.batches;
@@ -433,6 +481,8 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
             inst.clear();
             std::vector<float>& alpha = scr_.treeAlpha;
             alpha.clear();
+            {
+            const f4m::PhaseScope f4s(f4m::kSnapshot);
             for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(n); ++i) {
                 U8* tree = treeOf(i);
                 float a = 0.0f;
@@ -471,9 +521,16 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
                 inst.push_back(x);
                 alpha.push_back(a);
             }
-            sc::planTreeBatches(inst, limit, !zpass, false, batches, tableMerge);
-            countSplits(batches);
+            }
+            {
+                const f4m::PhaseScope f4p(f4m::kPlan);
+                sc::planTreeBatches(inst, limit, !zpass, false, batches, tableMerge);
+                countSplits(batches);
+                f4m::batches(static_cast<std::uint32_t>(batches.size()), static_cast<std::uint32_t>(inst.size()));
+            }
             for (const sc::TreeBatch& b : batches) {
+                {
+                const f4m::PhaseScope f4r(f4m::kRows);
                 for (std::uint32_t k = 0; k < b.count; ++k) {
                     U8* tree = treeOf(inst[b.first + k].queueIndex);
                     float world[16];
@@ -481,6 +538,7 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
                     writeWorld(k, world);
                     writeAlpha(k, alpha[b.first + k]);
                     writeTreeInstance(k, v);
+                }
                 }
                 st.instances += b.count;
                 ++st.batches;
@@ -501,6 +559,7 @@ StaticOps::Skip StaticOps::composeTreeBillboard(const Op& op) {
     ++st.billboardOps;
     const bool zpass = op.list == List::ZPass;
     if (!zpass && op.list != List::Solid) return Skip::Kind;
+    const f4m::BbScope f4bb(&drawCount_, dev_.stats().frames, static_cast<std::uint32_t>(viewKind_), cascade_, db_, desc_, zpass, zpass && ((op.raw.desc >> 16) & 0x10u) != 0);
     U8* ps = ptr(op.raw.context, 0x18);
     if (ps == nullptr) return Skip::None;
     U8* res = ptr(ps, 0x30);
@@ -537,6 +596,7 @@ StaticOps::Skip StaticOps::composeTreeBillboard(const Op& op) {
             if (!rd(ptr(ps, 0x40), 16 * static_cast<std::size_t>(static_cast<std::int32_t>(first + j)), mirror_.global[6 + j], 16)) return Skip::Unreadable;
         }
         ++st.billboardTexCoords;
+        if (f4m::on()) f4m::bbConstants(ps, op.raw.desc, mirror_.global[1], (5 + static_cast<std::size_t>(count)) * 16);
     }
     if (zpass) {
         // RenderZPass(null world, sub-mesh, cell, false) then (..., true): two special-pass options (VS variants)

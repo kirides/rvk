@@ -10,6 +10,8 @@
 
 #include <cstdint>
 
+#include "native/f4_measure.h"  // F4-0: static_ops.cpp's single issue() hook (f4m::IssueScope) comes through this header
+
 namespace rvk::d3d9 {
 class Shader;
 }
