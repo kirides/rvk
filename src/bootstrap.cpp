@@ -32,6 +32,7 @@
 #include "engine/fast_sort.h"
 #include "engine/load_accel.h"
 #include "engine/lod.h"
+#include "engine/illum_census.h"
 #include "engine/scene_table.h"
 #include "engine/material_source.h"
 #include "engine/shadow_maps.h"
@@ -485,6 +486,7 @@ void onProcessAttach(void* module) {
         engine::hemisphere::install();  // the weather hemisphere light for the GI sky (docs/research/rtgi.md 17)
         engine::lights::install();      // the illumination admin: all of the world's lights for the GI (rtgi.md 19)
         engine::scenetable::install();  // the GPU scene's signal-fed instance table (docs/research/gpu-scene.md)
+        engine::illumcensus::install();  // RVK_ILLUM_CENSUS=1 only (frame-ownership.md F0)
         engine::lod::install();     // detail distances (docs/research/lod.md)
         engine::fastsort::install();  // typed sort of the render-op lists (performance.md 21)
         if (!engine::matsrc::install()) spdlog::warn("engine: CompileShaderPoolEllement not hooked: no material shader sources");

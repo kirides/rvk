@@ -240,9 +240,11 @@ add_library(rvk_core STATIC
     src/engine/material_source.h
     src/engine/lights.cpp
     src/engine/scene_table.cpp
+    src/engine/illum_census.cpp
     src/gpuscene/instance_buffer.cpp
     src/gpuscene/instance_buffer.h
     src/engine/scene_table.h
+    src/engine/illum_census.h
     src/engine/lights.h
     src/engine/lod.h
     src/engine/menu_state.cpp

@@ -15,6 +15,7 @@
 #include <spdlog/spdlog.h>
 
 #include "engine/memread.h"
+#include "engine/illum_census.h"
 #include "engine/symbols.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "enh/light_table.h"
@@ -284,6 +285,7 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
         if (r.freq0 != 0 && gg.streams[0].buffer != nullptr) gg.streams[0].freq = r.freq0;
         if (zpass) return specialPassDraw(shader, gg, true);
         // GetPasses(shader, 0, illumination, 0, instanced, 0)
+        const engine::illumcensus::KindScope census(1);
         return materialDraws(shader, illum, 0, true, 0, 0, gg, nullptr);
     };
     // the batch rules' light inputs of an instance (its illumination: list, per-object flags; with table lighting also the sun bit of the pass)
@@ -680,6 +682,7 @@ StaticOps::Skip StaticOps::composeVegetation(const Op& op) {
         if (stream1) gg.streams[1] = sc::DrawDesc::Stream{data->buffer(), d.bufferOffset * sc::kGrassInstanceSize, data->stride(), 0x80000001u};
         U8* illum = d.illumNode >= 0 ? nodes + 0x118 * static_cast<std::size_t>(d.illumNode) + 0x10 : nullptr;
         const std::size_t before = drawCount_;
+        const engine::illumcensus::KindScope census(2);
         const Skip s = zpass ? specialPassDraw(shader, gg, false) : materialDraws(shader, illum, 0, false, 0, 0, gg, nullptr);
         if (s != Skip::None) return s;
         for (std::size_t k = before; k < drawCount_; ++k) {

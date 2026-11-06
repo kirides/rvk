@@ -18,6 +18,7 @@
 #include "enh/light_table.h"
 #include "engine/memread.h"
 #include "engine/scene_hooks.h"
+#include "engine/illum_census.h"
 #include "engine/scene_table.h"
 #include "engine/symbols.h"
 #include "fx/effect_binary.h"
@@ -669,6 +670,7 @@ void StaticOps::writeLighting(const sc::Pass& pass) {
     U8* illum = static_cast<U8*>(pass.illum);
     U8* list = ptr(illum, 0);
     if (illum == nullptr || list == nullptr) return;
+    engine::illumcensus::noteDraw(illum, list);
     float (*L)[4] = mirror_.lighting;  // L[r - 14]
     rd(list, 0x128, L[0], 12);
     float sh[7][4]{}, staticSh[7][4]{}, indoor[3]{};
