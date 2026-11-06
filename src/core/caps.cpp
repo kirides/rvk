@@ -1,5 +1,9 @@
 #include "core/caps.h"
 
+#include <windows.h>
+
+#include <atomic>
+#include <cstdlib>
 #include <format>
 #include <mutex>
 
@@ -35,6 +39,8 @@ constexpr std::array<Names, kCount> kNames = {{
 
 std::mutex g_mutex;
 Report g_current;
+std::atomic<bool> g_lowBandwidth{false};
+LowBandwidth g_lowBandwidthDecision;
 
 }  // namespace
 
@@ -99,6 +105,50 @@ void setCurrent(Report report) {
 Report current() {
     const std::lock_guard lock(g_mutex);
     return g_current;
+}
+
+LowBandwidth resolveLowBandwidth(std::string_view mode, const Report& report) {
+    LowBandwidth d;
+    if (mode == "on") {
+        d.on = true;
+        d.reason = "set by the player";
+    } else if (mode == "off") {
+        d.reason = "set by the player";
+    } else {
+        d.automatic = true;
+        if (!report.known) {
+            d.reason = "no device yet";
+        } else {
+            d.on = report.integratedGpu;  // the one criterion for now: integrated GPUs share the PC's memory
+            d.reason = report.integratedGpu ? "integrated GPU" : "discrete GPU";
+        }
+    }
+    return d;
+}
+
+bool lowBandwidth() { return g_lowBandwidth.load(std::memory_order_relaxed); }
+
+bool lowBandwidth(unsigned item) {
+    // -Environment 'RVK_LOWBW_OFF=<mask>' leaves single items out (bisecting pictures): 1 AO, 2 screen probes, 8 material RT, 16 water RT (4 = lamp shadows was tried and dropped: docs/research/low-bandwidth.md)
+    static const unsigned off = [] {
+        char buf[16] = {};
+        return GetEnvironmentVariableA("RVK_LOWBW_OFF", buf, sizeof(buf)) > 0 ? static_cast<unsigned>(std::strtoul(buf, nullptr, 0)) : 0u;
+    }();
+    return lowBandwidth() && (off & item) == 0;
+}
+
+LowBandwidth lowBandwidthDecision() {
+    const std::lock_guard lock(g_mutex);
+    return g_lowBandwidthDecision;
+}
+
+bool setLowBandwidth(const LowBandwidth& decision) {
+    const std::lock_guard lock(g_mutex);
+    const bool changed = g_lowBandwidth.load() != decision.on || g_lowBandwidthDecision.reason != decision.reason ||
+                         g_lowBandwidthDecision.automatic != decision.automatic;
+    g_lowBandwidthDecision = decision;
+    g_lowBandwidth.store(decision.on, std::memory_order_relaxed);
+    return changed;
 }
 
 }  // namespace rvk::caps

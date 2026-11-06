@@ -78,16 +78,17 @@ float rvkMvViewDepth(RvkFrame f) {
 // depth-aware gather of this frame's AO / screen probe image around the pixel. 12 fixed taps on a spiral (fixed, no per-pixel
 // noise: stable), only texels whose stored view depth is close to this surface's count; the share of valid weight is the
 // confidence the result is blended in with (rtgi.md 14). float4(value, confidence); .xyz = rgb (sgi) or .x = ao.
-float4 rvkMvGather(uint img, float myZ, bool isAo) {
+// scale: the image's size relative to the render target (1 = same size, 0.5 = the screen probes' low bandwidth images)
+float4 rvkMvGather(uint img, float myZ, bool isAo, float scale) {
     int2 sz = rvkSize2D(img);
-    int2 c0 = int2(rvk_mvFrag.xy);
+    int2 c0 = int2(rvk_mvFrag.xy * scale);
     float tol = max(myZ * 0.05, 15.0);
     float3 acc = float3(0.0, 0.0, 0.0);
     float wsum = 0.0, wmax = 0.0;
     for (int i = 0; i < 12; ++i) {
         float r = 4.0 + 16.0 * (float(i) + 0.5) / 12.0;
         float a = float(i) * 2.39996323;
-        int2 q = clamp(c0 + int2(round(float2(cos(a), sin(a)) * r)), int2(0, 0), sz - 1);
+        int2 q = clamp(c0 + int2(round(float2(cos(a), sin(a)) * r * scale)), int2(0, 0), sz - 1);
         float4 t = rvkFetch2D(img, q);
         float z = isAo ? t.g : t.a;
         float w = z > 0.0 ? max(1.0 - abs(z - myZ) / tol, 0.0) : 0.0;
@@ -98,6 +99,33 @@ float4 rvkMvGather(uint img, float myZ, bool isAo) {
     }
     if (wsum <= 1e-4) return float4(0.0, 0.0, 0.0, 0.0);
     return float4(acc / wsum, clamp(wsum / (0.5 * wmax), 0.0, 1.0));  // half the taps valid = full confidence
+}
+
+// the screen probes' low bandwidth images (half the render size, texel i = pixel 2 i; docs/research/low-bandwidth.md): the 2 x 2 texels around this
+// pixel, bilinear x a depth weight (the texel's stored view depth against this surface's: edges keep their own side). Returns the summed weight
+// (>= 0.5: a direct hit); `ratio` / `corr` = the weighted means of the first / second image.
+float rvkMvSgiTaps(uint img, uint img2, float myZ, out float4 ratio, out float3 corr) {
+    float2 hp = rvk_mvFrag.xy * 0.5;
+    int2 i0 = int2(floor(hp));
+    float2 fr = hp - float2(i0);
+    int2 hs = rvkSize2D(img);
+    float tol = max(myZ * 0.05, 8.0);
+    float3 acc = float3(0.0, 0.0, 0.0);
+    float3 cacc = float3(0.0, 0.0, 0.0);
+    float wsum = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        int2 o = int2(i & 1, i >> 1);
+        int2 t = clamp(i0 + o, int2(0, 0), hs - 1);
+        float4 s = rvkFetch2D(img, t);
+        float wz = s.a > 0.0 ? saturate(1.0 - abs(s.a - myZ) / tol) : 0.0;
+        float w = (o.x == 0 ? 1.0 - fr.x : fr.x) * (o.y == 0 ? 1.0 - fr.y : fr.y) * wz;
+        acc += s.rgb * w;
+        if (img2 != 0u) cacc += rvkFetch2D(img2, t).rgb * w;
+        wsum += w;
+    }
+    ratio = float4(acc / max(wsum, 1e-4), 1.0);
+    corr = cacc / max(wsum, 1e-4);
+    return wsum;
 }
 #endif
 // GI: the probes' irradiance as the draw's ambient (enh/gi)
@@ -112,13 +140,21 @@ void rvkMvGi(RvkFrame f, float3 P, float3 n, float3 V) {
     uint4 sg = f.sgi;
     if ((sg.z & RVK_FRAME_SGI_VALID) != 0u && sg.x != 0u) {
         // this frame's (computed after the z pre-pass) at this pixel, when its depth is this surface's
-        float4 s = rvkFetch2D(sg.x, int2(rvk_mvFrag.xy));
+        const bool sgiHalf = (sg.z & RVK_FRAME_SGI_HALF) != 0u;
         float myZ = rvkMvViewDepth(f);
+        float4 s = float4(1.0, 1.0, 1.0, 0.0);
+        float3 dgTaps = float3(0.0, 0.0, 0.0);
+        bool tapsHit = false;
+        if (sgiHalf) {
+            tapsHit = rvkMvSgiTaps(sg.x, sg.w, myZ, s, dgTaps) >= 0.5;
+        } else {
+            s = rvkFetch2D(sg.x, int2(rvk_mvFrag.xy));
+        }
         {
-            bool hit = s.a > 0.0 && abs(s.a - myZ) < max(myZ * 0.02, 4.0);
+            bool hit = sgiHalf ? tapsHit : (s.a > 0.0 && abs(s.a - myZ) < max(myZ * 0.02, 4.0));
             bool direct = hit;
             if (!hit) {
-                float4 g = rvkMvGather(sg.x, myZ, false);
+                float4 g = rvkMvGather(sg.x, myZ, false, sgiHalf ? 0.5 : 1.0);
                 s = float4(lerp(float3(1.0, 1.0, 1.0), g.rgb, g.w), 1.0);
                 hit = g.w > 0.0;
             }
@@ -135,7 +171,7 @@ void rvkMvGi(RvkFrame f, float3 P, float3 n, float3 V) {
                 // the registers' L1 vector, with the constant term moved so the irradiance at the geometric normal stays
                 // what the ratio made it: normal-mapped and curved surfaces then follow the direction the light comes from
                 if (direct && sg.w != 0u) {
-                    float3 dg = rvkFetch2D(sg.w, int2(rvk_mvFrag.xy)).rgb;
+                    float3 dg = sgiHalf ? dgTaps : rvkFetch2D(sg.w, int2(rvk_mvFrag.xy)).rgb;
                     float lum = dot(k, float3(0.2126, 0.7152, 0.0722));
                     for (int c = 0; c < 3; ++c) {
                         float3 dc = dg * (lum > 1e-3 ? k[c] / lum : 1.0);
@@ -202,7 +238,7 @@ void rvkMvAo(RvkFrame f, float3 P) {
     float2 s = rvkFetch2D(a.x, int2(rvk_mvFrag.xy)).rg;
     float myZ = rvkMvViewDepth(f);
     if (s.g <= 0.0 || abs(s.g - myZ) > max(myZ * 0.02, 4.0)) {
-        float4 g = rvkMvGather(a.x, myZ, true);
+        float4 g = rvkMvGather(a.x, myZ, true, 1.0);
         if (g.w <= 0.0) return;
         s = float2(lerp(1.0, g.x, g.w), myZ);
     }

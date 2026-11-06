@@ -58,6 +58,7 @@ struct Report {
     std::string gpu;     // device name
     std::string driver;  // driver name + info, e.g. "AMD proprietary driver 25.9.1"
     std::string api;     // Vulkan API version of the device, e.g. "1.4.315"
+    bool integratedGpu = false;  // the device shares the PC's memory (Vulkan: VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU; D3D12: <= 512 MiB dedicated)
     std::array<Entry, kCount> entries{};
     std::vector<std::pair<std::string, std::string>> properties;  // extra report lines (acceleration structure limits, ...)
 
@@ -71,6 +72,23 @@ struct Report {
     // the report as log lines (startup log, rvk.log)
     std::vector<std::string> lines() const;
 };
+
+// ---- Low bandwidth mode (vulkan.low_bandwidth; docs/research/low-bandwidth.md) ----
+// The decision lives in ONE function so another criterion (video memory size, ...) can be added later.
+struct LowBandwidth {
+    bool on = false;
+    bool automatic = false;  // the setting is "auto"
+    std::string reason;      // "integrated GPU", "discrete GPU", "set by the player", "no device yet"
+};
+// mode: "auto" | "off" | "on" (anything else = auto). Pure.
+LowBandwidth resolveLowBandwidth(std::string_view mode, const Report& report);
+// the session's decision (any thread, lock-free read); the features read this where they create their images / configure their passes
+bool lowBandwidth();
+// the same for one item (1 AO, 2 screen probes, 8 material RT, 16 water RT (4 = lamp shadows was tried and dropped: docs/research/low-bandwidth.md)); developer env RVK_LOWBW_OFF=<mask> leaves items out
+bool lowBandwidth(unsigned item);
+LowBandwidth lowBandwidthDecision();
+// stores the decision; true when it changed
+bool setLowBandwidth(const LowBandwidth& decision);
 
 // the process's report (set by the renderer when its device exists; any thread)
 void setCurrent(Report report);

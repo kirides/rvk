@@ -378,7 +378,16 @@ void drawRow(settings::Registry& reg, settings::Setting& s, ImVec2 p, float w, b
         break;
     }
     case settings::Type::Enum: {
-        const auto optLabel = [&](std::size_t i) { return i < sp.optionLabels.size() ? sp.optionLabels[i].c_str() : sp.options[i].c_str(); };
+        // Low bandwidth mode's "Auto" says what it resolved to: "Auto (on: integrated GPU)"
+        std::string autoLabel;
+        if (sp.key == "vulkan.low_bandwidth") {
+            const caps::LowBandwidth d = caps::lowBandwidthDecision();
+            if (d.automatic) autoLabel = std::format("Auto ({}: {})", d.on ? "on" : "off", d.reason);
+        }
+        const auto optLabel = [&](std::size_t i) {
+            if (i == 0 && !autoLabel.empty()) return autoLabel.c_str();
+            return i < sp.optionLabels.size() ? sp.optionLabels[i].c_str() : sp.options[i].c_str();
+        };
         const auto cur = static_cast<std::size_t>(s.effective());
         ImGui::SetNextItemWidth(cw);
         if (ImGui::BeginCombo("##v", optLabel(cur))) {

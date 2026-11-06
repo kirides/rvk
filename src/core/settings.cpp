@@ -956,6 +956,23 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::Restart | Flag::Advanced,
         .page = "System",
     });
+    r.lowBandwidth = &reg.add({
+        .key = "vulkan.low_bandwidth",
+        .label = "Low bandwidth mode",
+        .category = "Hardware",
+        .tab = kTabSystem,
+        .description = "Saves memory bandwidth on graphics cards that share the PC's memory (integrated graphics, e.g. a Radeon "
+                       "680M) by drawing a few of the enhancements' own intermediate images smaller or with less precision: "
+                       "ambient occlusion, the global illumination probes and traced reflections. A little less "
+                       "detail in those effects, the game's own picture is unchanged. Auto turns it on for integrated graphics "
+                       "only. Takes effect at once.",
+        .type = Type::Enum,
+        .defaultValue = 0,
+        .options = {"auto", "off", "on"},
+        .optionLabels = {"Auto", "Off", "On"},
+        .page = "System",
+        .section = "Hardware",
+    });
     r.exclusiveAcquire = &reg.add({
         .key = "vulkan.exclusive_acquire",
         .label = "Vulkan exclusive mode",

@@ -199,6 +199,7 @@ private:
     GiVolumeHeader lastHeader_{};
     bool haveLast_ = false;
     bool sgiValid_ = false;
+    bool sgiHalf_ = false;  // the resolved / stats images are half size (low bandwidth mode)
     std::uint64_t screenFrames_ = 0, screenSkipped_ = 0;
     std::unique_ptr<rhi::Buffer> probes_, depth_, rays_;
     // diagnostics (RVK_GI_DIAG, rtgi.md 23): the screen probes' light terms summed by the GPU (wrapping fixed-point counters,

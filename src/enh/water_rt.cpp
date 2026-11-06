@@ -8,6 +8,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "core/caps.h"
 #include "enh/rhi_scope.h"
 #include "enh/rt_scene.h"
 #include "shader/embedded.h"
@@ -131,7 +132,9 @@ void WaterRt::record(d3d9::PassContext& ctx) {
     }
     const Tier& t = kTiers[tier_ - 1];
     const std::uint32_t sw = ctx.sceneHdr->desc().width, sh = ctx.sceneHdr->desc().height;
-    const std::uint32_t w = (sw + t.scale - 1) / t.scale, h = (sh + t.scale - 1) / t.scale;
+    // low bandwidth mode (docs/research/low-bandwidth.md): one ray per 2x2 pixels at every tier (High: 1x1 -> 2x2)
+    const std::uint32_t scale = caps::lowBandwidth(16) ? std::max(t.scale, 2u) : t.scale;
+    const std::uint32_t w = (sw + scale - 1) / scale, h = (sh + scale - 1) / scale;
     rhi::Texture* out = dev_.transient("water.rt", {VK_FORMAT_R16G16B16A16_SFLOAT, {w, h}});
     const rhi::RingAlloc pa = dev_.ring(sizeof(WaterRtParams), 16);
     if (out == nullptr || pa.ptr == nullptr) {
@@ -146,7 +149,7 @@ void WaterRt::record(d3d9::PassContext& ctx) {
     const std::uint32_t n = static_cast<std::uint32_t>(std::min<std::size_t>(list.size(), kWaterRtMaxBodies));
     p.info[0] = w;
     p.info[1] = h;
-    p.info[2] = t.scale;
+    p.info[2] = scale;
     p.info[3] = n;
     p.trace[0] = t.traceFlags | ((tweaks_ & 1) != 0 ? 1u : 0u);
     p.trace[1] = (tweaks_ & 2) != 0 ? 0u : t.shadows;
@@ -197,8 +200,8 @@ void WaterRt::record(d3d9::PassContext& ctx) {
     lastWidth_ = w;
     lastHeight_ = h;
     if (passes_++ == 0) {
-        spdlog::info("enh: water.rt: first reflection image {}x{} (tier {}, 1 ray per {}x{} pixels), {} water bodies", w, h, tier_, t.scale,
-                     t.scale, n);
+        spdlog::info("enh: water.rt: first reflection image {}x{} (tier {}, 1 ray per {}x{} pixels), {} water bodies", w, h, tier_, scale,
+                     scale, n);
     }
     logStats();
 }

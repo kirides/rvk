@@ -83,6 +83,8 @@ private:
     bool ensureTargets(d3d9::PassContext& ctx);
     GbufferOutputs outputs() const;
     bool pipelinesReady();
+    // the AO pass's pipeline for the raw image's format (R32F, or R16F in low bandwidth mode: built on a worker at first use); null while it builds
+    rhi::Pipeline* aoPipeline(bool low);
     void recordAo(d3d9::PassContext& ctx);
     void recordMotionFill(d3d9::PassContext& ctx);
     void recordDebug(d3d9::PassContext& ctx);
@@ -90,10 +92,10 @@ private:
     d3d9::Device& dev_;
     RtScene* scene_ = nullptr;
     Settings s_;
-    bool on_ = false, failed_ = false;
-    std::unique_ptr<rhi::Pipeline> gtao_, filter_, debug_;
+    bool on_ = false, failed_ = false, gtaoLowFailed_ = false;
+    std::unique_ptr<rhi::Pipeline> gtao_, gtaoLow_, filter_, debug_;  // gtaoLow_: the raw AO as R16F (low bandwidth mode), built when first needed
     VkFormat debugFormat_ = VK_FORMAT_UNDEFINED;
-    std::future<std::unique_ptr<rhi::Pipeline>> gtaoBuild_, filterBuild_;  // (built on a worker: Device::createComputePipeline is thread-safe)
+    std::future<std::unique_ptr<rhi::Pipeline>> gtaoBuild_, gtaoLowBuild_, filterBuild_;  // (built on a worker: Device::createComputePipeline is thread-safe)
     std::shared_ptr<d3d9::Shader> whiteVs_, whitePs_;  // the SSAO replacement (fullscreen, writes 1)
     bool replacing_ = false;
     std::uint64_t ssaoReplaced_ = 0;

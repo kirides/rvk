@@ -218,6 +218,7 @@ struct FrameBlock {
     std::uint32_t sgi[4];
 };
 static_assert(sizeof(FrameBlock) == 976);
+inline constexpr std::uint32_t kFrameSgiHalf = 2u;   // the sgi images have half the scene's size (low bandwidth mode): texel i = pixel 2 i
 inline constexpr std::uint32_t kFrameSgiValid = 1u;  // sgi holds last frame's screen probe image
 inline constexpr std::uint32_t kFrameGiValid = 1u;  // gi holds a volume header
 inline constexpr std::uint32_t kFrameAoValid = 1u;  // ao holds last frame's AO image

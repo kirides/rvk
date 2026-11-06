@@ -7,6 +7,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "core/caps.h"
 #include "d3d9/semantics.h"
 #include "enh/gbuffer.h"
 #include "engine/hemisphere.h"
@@ -199,18 +200,25 @@ void MaterialRt::record(d3d9::PassContext& ctx) {
     rhi::Texture* normal = dev_.transient("gbuffer.normal", {kGbufferNormalFormat, {w, h}, kGbufferNormalUsage});
     rhi::Texture* motion = dev_.transient("gbuffer.motion", {kGbufferMotionFormat, {w, h}, kGbufferMotionUsage});
     const Tier& t = kTiers[tier_ - 1];
-    const std::uint32_t tw = (w + t.scale - 1) / t.scale, th = (h + t.scale - 1) / t.scale;
+    // low bandwidth mode (docs/research/low-bandwidth.md): one trace pixel per 2x2 pixels at every tier, and the history (written by the filter,
+    // read back next frame, read by the composite) at the trace image's size instead of the scene's
+    const bool low = caps::lowBandwidth(8);
+    const std::uint32_t scale = low ? std::max(t.scale, 2u) : t.scale;
+    const bool halfOut = low && scale > 1;
+    const std::uint32_t tw = (w + scale - 1) / scale, th = (h + scale - 1) / scale;
+    const std::uint32_t hw = halfOut ? tw : w, hh = halfOut ? th : h;
     rhi::Texture* raw = dev_.transient("matrt.raw", {kImageFormat, {tw, th}});
-    rhi::Texture* hist[2] = {dev_.transient("matrt.hist0", {kImageFormat, {w, h}}), dev_.transient("matrt.hist1", {kImageFormat, {w, h}})};
+    rhi::Texture* hist[2] = {dev_.transient("matrt.hist0", {kImageFormat, {hw, hh}}), dev_.transient("matrt.hist1", {kImageFormat, {hw, hh}})};
     if (normal == nullptr || motion == nullptr || raw == nullptr || hist[0] == nullptr || hist[1] == nullptr || !dev_.readable(ctx.depthMap, cmd)) {
         ++skipped_;
         historyValid_ = false;
         return;
     }
-    if (historyW_ != w || historyH_ != h) {
+    if (historyW_ != hw || historyH_ != hh || historyHalf_ != halfOut) {
         historyValid_ = false;
-        historyW_ = w;
-        historyH_ = h;
+        historyW_ = hw;
+        historyH_ = hh;
+        historyHalf_ = halfOut;
     }
     const std::uint32_t cur = history_ ^ 1u;
     const rhi::RingAlloc pa = dev_.ring(sizeof(MaterialRtParams), 16);
@@ -229,7 +237,7 @@ void MaterialRt::record(d3d9::PassContext& ctx) {
     p.tex2[3] = raw->heapSampled();
     p.info[0] = tw;
     p.info[1] = th;
-    p.info[2] = t.scale;
+    p.info[2] = scale;
     p.info[3] = static_cast<std::uint32_t>(dev_.frameValue());
     p.trace[0] = t.traceFlags;
     p.trace[1] = t.shadows;
@@ -260,6 +268,7 @@ void MaterialRt::record(d3d9::PassContext& ctx) {
     push.h.passId = 40;
     push.params[0] = pa.ref.low();
     push.params[1] = pa.ref.high();
+    push.pad[0] = halfOut ? 1u : 0u;  // (the filter: its output has the trace image's size)
 
     RhiScope rs(dev_, cmd);
     if (!rs) {
@@ -283,7 +292,8 @@ void MaterialRt::record(d3d9::PassContext& ctx) {
     cl.setPushConstants(&push, sizeof(push));
     cl.dispatch((tw + 7) / 8, (th + 7) / 8, 1);
 
-    stage_ = {dev_.frameValue(), scene, rawT, histRead, histWrite, push, w, h, tw, th, cur, hist[cur]->heapSampled(), false};
+    stage_ = {dev_.frameValue(), scene, rawT, histRead, histWrite, push, w, h, tw, th, cur, hist[cur]->heapSampled(), false,
+              halfOut ? scale : 0u, static_cast<std::uint32_t>(ctx.depthMap->bindlessSlot()), halfOut};
 }
 
 // the gather + temporal filter into this frame's history
@@ -299,7 +309,8 @@ void MaterialRt::recordFilter(d3d9::PassContext& ctx) {
     rhi::Texture* const storage2[] = {stage_.histWrite};
     cl.setStorageTextures(storage2);
     cl.setPushConstants(&stage_.push, sizeof(stage_.push));
-    cl.dispatch((stage_.w + 7) / 8, (stage_.h + 7) / 8, 1);
+    const std::uint32_t fw = stage_.halfOut ? stage_.tw : stage_.w, fh = stage_.halfOut ? stage_.th : stage_.h;
+    cl.dispatch((fw + 7) / 8, (fh + 7) / 8, 1);
     cl.transition(*stage_.histWrite, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     stage_.filtered = true;
 }
@@ -315,6 +326,8 @@ void MaterialRt::recordComposite(d3d9::PassContext& ctx) {
     cp.h.passId = 41;
     cp.image = stage_.image;
     cp.sampler = dev_.samplerFor(false, true);
+    cp.scale = stage_.scale;  // (0: the image has the scene's size)
+    cp.depth = stage_.depth;
     rhi::Texture* sceneT = rs.wrap(*stage_.scene);
     cl.transition(*sceneT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     rhi::RenderingInfo ri;

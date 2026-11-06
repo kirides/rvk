@@ -53,7 +53,7 @@ static_assert(sizeof(MaterialRtPush) == 32 && sizeof(MaterialRtPush) <= shader::
 // mirror of material_rt.frag MaterialRtCompositePush
 struct MaterialRtCompositePush {
     shader::abi::PassPushHeader h;
-    std::uint32_t image, sampler, pad0, pad1;
+    std::uint32_t image, sampler, scale, depth;
 };
 static_assert(sizeof(MaterialRtCompositePush) == 32 && sizeof(MaterialRtCompositePush) <= shader::abi::kPushConstantBudget);
 
@@ -105,6 +105,8 @@ private:
         MaterialRtPush push{};
         std::uint32_t w = 0, h = 0, tw = 0, th = 0, cur = 0, image = 0;
         bool filtered = false;
+        std::uint32_t scale = 1, depth = 0;  // the trace image's scale; the depth map's slot
+        bool halfOut = false;                // low bandwidth mode: the history has the trace image's size (scale > 1)
     } stage_;
     bool pipelinesReady(VkFormat target);
     void updateRain();
@@ -131,6 +133,7 @@ private:
     std::uint32_t history_ = 0;
     bool historyValid_ = false;
     std::uint32_t historyW_ = 0, historyH_ = 0;
+    bool historyHalf_ = false;
     std::uint64_t passes_ = 0, skipped_ = 0;
     std::uint32_t lastTraceW_ = 0, lastTraceH_ = 0;
     double lastLog_ = -1e9;

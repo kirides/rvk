@@ -29,6 +29,9 @@ QUIRKS
     menus and loading screens. Fast camera turns with a character close to the camera can show a smeared character. If you use
     AMD Radeon Chill or another driver frame limiter for Risen.exe, switch it off for the game: it counts the generated
     frames too. The frame generation DLL is in this zip (rvk folder).
+  - Low bandwidth mode (System tab, Hardware): saves memory bandwidth on integrated graphics (e.g. Radeon 680M) by drawing a few
+    effect-internal images (ambient occlusion, GI probes, traced reflections) smaller. "Auto" turns it on for
+    integrated graphics only and says what it chose; On / Off force it. Takes effect at once.
   - The first start (and the first visit to a coast with the enhanced ocean) can take longer: caches are built
     in rvk\cache.
   - Render mode (System tab): Wrapper (default: the game's rendering on Vulkan + the enhancements), Full

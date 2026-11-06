@@ -6,7 +6,12 @@
 
 #include "gbuffer_common.hlsli"
 
+// GTAO_RAW_R16F (low bandwidth mode, docs/research/low-bandwidth.md): the raw AO image is R16F instead of R32F
+#ifdef GTAO_RAW_R16F
+[[vk::image_format("r16f")]] RWTexture2D<float> outAo : register(u0, space1);
+#else
 [[vk::image_format("r32f")]] RWTexture2D<float> outAo : register(u0, space1);
+#endif
 // pc.flags: 1 = the AO (after the z pre-pass), 2 = the G-buffer's motion fill (after the opaque scene)
 [[vk::image_format("rg16f")]] RWTexture2D<float2> motionImage : register(u1, space1);
 

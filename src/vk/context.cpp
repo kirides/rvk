@@ -774,6 +774,7 @@ caps::Report Context::capabilities(bool pipelineLibrariesInUse) const {
     caps::Report r;
     r.known = device_ != VK_NULL_HANDLE;
     r.gpu = deviceName_;
+    r.integratedGpu = report_.integrated;
     r.driver = report_.driverName.empty() ? std::format("version 0x{:x}", props_.driverVersion)
                                           : std::format("{} {}", report_.driverName, report_.driverInfo);
     r.api = versionString(props_.apiVersion);

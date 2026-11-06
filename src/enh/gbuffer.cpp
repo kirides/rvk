@@ -8,6 +8,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "core/caps.h"
 #include "enh/material_variant.h"
 #include "enh/rhi_scope.h"
 #include "enh/rt_scene.h"
@@ -79,7 +80,7 @@ Gbuffer::~Gbuffer() {
         s->reset();
     }
     // (a pipeline still being built is waited for, then retired with the others)
-    for (std::future<std::unique_ptr<rhi::Pipeline>>* f : {&gtaoBuild_, &filterBuild_}) {
+    for (std::future<std::unique_ptr<rhi::Pipeline>>* f : {&gtaoBuild_, &gtaoLowBuild_, &filterBuild_}) {
         if (f->valid()) f->get();
     }
 }
@@ -213,6 +214,30 @@ bool Gbuffer::pipelinesReady() {
     return true;
 }
 
+rhi::Pipeline* Gbuffer::aoPipeline(bool low) {
+    if (!low) return gtao_.get();
+    if (gtaoLow_) return gtaoLow_.get();
+    if (gtaoLowFailed_) return nullptr;
+    if (!gtaoLowBuild_.valid()) {
+        rhi::Device* rdev = dev_.rhi();
+        gtaoLowBuild_ = std::async(std::launch::async, [rdev]() {
+            rhi::ComputePipelineDesc d;
+            d.cs.spirv = shader::embedded::spirvVariant("gbuffer/gtao.comp", "GTAO_RAW_R16F=1");
+            d.cs.dxil = shader::embedded::dxilVariantOnDemand("gbuffer/gtao.comp", "GTAO_RAW_R16F=1");
+            d.name = "gbuffer.gtao (R16F raw)";
+            return rdev->createComputePipeline(d);
+        });
+        return nullptr;
+    }
+    if (gtaoLowBuild_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return nullptr;
+    gtaoLow_ = gtaoLowBuild_.get();
+    if (!gtaoLow_) {
+        gtaoLowFailed_ = true;
+        spdlog::error("enh: gbuffer: the R16F AO pipeline failed: the raw AO stays R32F");
+    }
+    return gtaoLow_.get();
+}
+
 // the camera's motion in the G-buffer's motion image where no material wrote one (after the opaque scene)
 void Gbuffer::recordMotionFill(d3d9::PassContext& ctx) {
     if (ctx.mainView != 1 || !on_) return;
@@ -268,7 +293,14 @@ void Gbuffer::recordAo(d3d9::PassContext& ctx) {
     // (the AO reads neither G-buffer target: normals and reprojection come from the depth; the motion slot of gtao.comp is bound, not
     // written in this mode: a 1x1 stand-in)
     rhi::Texture* motion = dev_.transient(kDummyMotion, {kMotionFormat, {1, 1}, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT});
-    rhi::Texture* raw = dev_.transient("gtao.raw", {VK_FORMAT_R32_SFLOAT, {w, h}});
+    // low bandwidth mode: the raw AO (written once, read once by the filter) as R16F: 4 -> 2 bytes per pixel (a value 0..1 loses nothing visible)
+    bool low = caps::lowBandwidth(1);
+    rhi::Pipeline* aoPipe = aoPipeline(low);
+    if (aoPipe == nullptr) {  // the R16F pipeline is still building (or failed): the R32F one
+        low = false;
+        aoPipe = gtao_.get();
+    }
+    rhi::Texture* raw = dev_.transient("gtao.raw", {low ? VK_FORMAT_R16_SFLOAT : VK_FORMAT_R32_SFLOAT, {w, h}});
     const std::uint32_t cur = history_ ^ 1u;
     rhi::Texture* hist[2] = {dev_.transient("gtao.history0", {VK_FORMAT_R16G16_SFLOAT, {w, h}}),
                                       dev_.transient("gtao.history1", {VK_FORMAT_R16G16_SFLOAT, {w, h}})};
@@ -301,7 +333,7 @@ void Gbuffer::recordAo(d3d9::PassContext& ctx) {
     // the raw AO (the motion image is bound but not written in this mode)
     cl.transition(*motionT, VK_IMAGE_LAYOUT_GENERAL);
     cl.transition(*rawT, VK_IMAGE_LAYOUT_GENERAL);
-    cl.bindPipeline(*gtao_);
+    cl.bindPipeline(*aoPipe);
     rhi::Texture* const storage1[] = {rawT, motionT};
     cl.setStorageTextures(storage1);
     cl.setPushConstants(&push, sizeof(push));

@@ -234,6 +234,7 @@ static const uint RVK_FRAME_RT_VALID = 1u;
 static const uint RVK_FRAME_GI_VALID = 1u;
 static const uint RVK_FRAME_AO_VALID = 1u;
 static const uint RVK_FRAME_SGI_VALID = 1u;
+static const uint RVK_FRAME_SGI_HALF = 2u;  // the sgi images have half the scene's size (low bandwidth mode): texel i = pixel 2 i
 
 // RvkFrame.frameInfo.y
 static const uint RVK_FRAME_CAMERA_VALID = 1u;      // the camera fields hold this frame's main view

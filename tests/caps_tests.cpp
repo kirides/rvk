@@ -121,3 +121,47 @@ TEST(caps_renderer_rt_allow_registered) {
     // the existing renderer settings have no requirements: unaffected by a missing device
     CHECK(rs.vsync->available() && rs.maxFps->available() && rs.injectView->available());
 }
+
+// Low bandwidth mode (vulkan.low_bandwidth, docs/research/low-bandwidth.md): auto = on for an integrated GPU only; an explicit on / off wins
+TEST(low_bandwidth_resolution) {
+    caps::Report integrated;
+    integrated.known = true;
+    integrated.integratedGpu = true;
+    caps::Report discrete;
+    discrete.known = true;
+    const caps::Report none;  // no device yet
+
+    const caps::LowBandwidth a = caps::resolveLowBandwidth("auto", integrated);
+    CHECK(a.on && a.automatic && a.reason == "integrated GPU");
+    const caps::LowBandwidth b = caps::resolveLowBandwidth("auto", discrete);
+    CHECK(!b.on && b.automatic && b.reason == "discrete GPU");
+    CHECK(!caps::resolveLowBandwidth("auto", none).on);
+    // explicit values win over the GPU class
+    const caps::LowBandwidth c = caps::resolveLowBandwidth("on", discrete);
+    CHECK(c.on && !c.automatic);
+    const caps::LowBandwidth d = caps::resolveLowBandwidth("off", integrated);
+    CHECK(!d.on && !d.automatic);
+    // an unknown text is auto
+    CHECK(caps::resolveLowBandwidth("bogus", integrated).on);
+
+    // the process-wide decision
+    CHECK(caps::setLowBandwidth(a));
+    CHECK(caps::lowBandwidth());
+    CHECK(!caps::setLowBandwidth(a));  // unchanged
+    CHECK(caps::setLowBandwidth(d));
+    CHECK(!caps::lowBandwidth());
+    CHECK(caps::lowBandwidthDecision().reason == "set by the player");
+}
+
+TEST(low_bandwidth_setting_registered) {
+    Registry reg;
+    const RendererSettings rs = registerRendererSettings(reg);
+    CHECK(rs.lowBandwidth != nullptr);
+    CHECK(rs.lowBandwidth->key() == "vulkan.low_bandwidth");
+    CHECK(rs.lowBandwidth->asEnum() == "auto");  // the default
+    CHECK(tierOf(rs.lowBandwidth->spec()) == Tier::Basic);
+    CHECK(!rs.lowBandwidth->restart());
+    CHECK(reg.setText("vulkan.low_bandwidth", "on") == Result::Ok);
+    CHECK(rs.lowBandwidth->asEnum() == "on");
+    CHECK(reg.setText("vulkan.low_bandwidth", "sometimes") == Result::BadValue);
+}

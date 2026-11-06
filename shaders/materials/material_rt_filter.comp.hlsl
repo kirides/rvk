@@ -11,7 +11,8 @@
 struct MaterialRtPush {
     RVK_PASS_PUSH_HEADER
     uint2 params;
-    uint2 pad;
+    uint pad;       // x: 1 = the output has the trace image's size (low bandwidth mode; scale > 1)
+    uint pad1;
 };
 RVK_PUSH(MaterialRtPush, pc);
 
@@ -25,9 +26,13 @@ void CSMain(uint3 gid : SV_DispatchThreadID) {
     MaterialRtParams p = rvkPtr<MaterialRtParams, 16>(pc.params).Get();
     RvkFrame f = rvkLoadFrame(pc.frame);
     uint2 id = gid.xy;
-    uint2 size = uint2(f.viewport.xy);
+    uint scale = p.info.z;
+    // low bandwidth mode: the output (the history) has the trace image's size: its texel is the trace texel, its centre the centre of the trace pixel's
+    // scale x scale block
+    const bool halfOut = pc.pad != 0u && scale > 1u;
+    uint2 size = halfOut ? p.info.xy : uint2(f.viewport.xy);
     if (id.x >= size.x || id.y >= size.y) return;
-    float2 uv = (float2(id) + 0.5) * f.viewport.zw;
+    float2 uv = halfOut ? (float2(id) * float(scale) + 0.5 * float(scale)) * f.viewport.zw : (float2(id) + 0.5) * f.viewport.zw;
     float far = f.cameraPos.w;
     float4 gb = rvkSample2DLod(p.tex.y, p.tex2.x, uv, 0.0);
     float3 mat = rvkGbufferMaterialDecode(gb.z);
@@ -39,7 +44,6 @@ void CSMain(uint3 gid : SV_DispatchThreadID) {
         outImage[int2(id)] = float4(0.0, 0.0, 0.0, 1.0);
         return;
     }
-    uint scale = p.info.z;
     int2 traceSize = int2(p.info.xy);
     // the trace pixels around this pixel: the 2x2 that bracket it (a quarter-rate image), or the 3x3 around it (a full-rate one)
     float2 tf = (float2(id) + 0.5) / float(scale) - 0.5;
@@ -48,14 +52,15 @@ void CSMain(uint3 gid : SV_DispatchThreadID) {
     float4 sum = float4(0.0, 0.0, 0.0, 0.0);
     float wsum = 0.0;
     float3 lo = float3(1e9, 1e9, 1e9), hi = float3(-1e9, -1e9, -1e9);
-    const int first = scale > 1u ? 0 : -1;
-    const int last = scale > 1u ? 1 : 1;
-    if (scale == 1u) { t0 = int2(id); fr = float2(0.0, 0.0); }
+    const bool aligned = scale == 1u || halfOut;  // the output pixel is a trace pixel: the 3x3 around it
+    const int first = aligned ? -1 : 0;
+    const int last = 1;
+    if (aligned) { t0 = int2(id); fr = float2(0.0, 0.0); }
     for (int dy = first; dy <= last; ++dy) {
         for (int dx = first; dx <= last; ++dx) {
             int2 tp = clamp(t0 + int2(dx, dy), int2(0, 0), traceSize - 1);
             float2 d = float2(float(dx), float(dy)) - fr;
-            float w = exp(-dot(d, d) * (scale > 1u ? 0.5 : 0.7));
+            float w = exp(-dot(d, d) * (aligned ? 0.7 : 0.5));
             float2 tuv = (float2(tp * int(scale)) + 0.5 * float(scale)) * f.viewport.zw;
             float4 g = rvkSample2DLod(p.tex.y, p.tex2.x, tuv, 0.0);
             float3 m = rvkGbufferMaterialDecode(g.z);

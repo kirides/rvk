@@ -14,7 +14,7 @@ TEST(settings_api_info_get_set) {
     settings::Registry reg;
     settings::registerRendererSettings(reg);
     const std::uint32_t n = api::settingCount(reg);
-    CHECK(n == 125);  // 172 before the settings clean-up (docs/research/settings-audit.md): 55 finished A/B switches / art coefficients are constants now
+    CHECK(n == 126);  // 172 before the settings clean-up (docs/research/settings-audit.md): 55 finished A/B switches / art coefficients are constants now
     struct rvk_setting_info info{};
     CHECK(api::settingInfo(reg, 0, &info, sizeof(info)) == 96);
     CHECK(info.size == 96);
@@ -47,7 +47,7 @@ TEST(settings_api_info_get_set) {
     CHECK(api::settingInfo(reg, 10, &info, sizeof(info)) == 96);  // vulkan.adapter (System tab, after renderer.mode, the menu settings and vulkan.api)
     CHECK((info.flags & (RVK_SETTING_RESTART | RVK_SETTING_IS_LOCKED)) == (RVK_SETTING_RESTART | RVK_SETTING_IS_LOCKED));
     // capability resolution: rt.allow needs ray tracing hardware; this registry has no device report
-    CHECK(api::settingInfo(reg, 12, &info, sizeof(info)) == 96);
+    CHECK(api::settingInfo(reg, 13, &info, sizeof(info)) == 96);
     CHECK(std::string(info.key) == "rt.allow");
     CHECK((info.flags & RVK_SETTING_UNAVAILABLE) != 0);
     CHECK(api::settingGet(reg, "rt.allow", buf, sizeof(buf)) == 4);  // the request ("true") is kept

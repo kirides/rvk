@@ -24,15 +24,20 @@
 void CSMain(uint3 id : SV_DispatchThreadID) {
     GiPassParams p = giParams();
     RvkFrame f = rvkLoadFrame(pc.frame);
-    int2 px = int2(id.xy);
+    // low bandwidth mode (screen6.y = 1, docs/research/low-bandwidth.md): the two outputs have half the scene's size; texel ph stands for
+    // the full-resolution pixel 2 ph (the material shaders take the 2 x 2 taps around their pixel, depth-aware: rvkMvSgiTaps)
+    const bool halfRes = p.Get().screen6.y > 0.5;
+    int2 ph = int2(id.xy);
     int2 sizeI = int2(p.Get().screen2.zw);
-    if (px.x >= sizeI.x || px.y >= sizeI.y) return;
+    int2 outSize = halfRes ? (sizeI + 1) / 2 : sizeI;
+    if (ph.x >= outSize.x || ph.y >= outSize.y) return;
+    int2 px = halfRes ? min(ph * 2, sizeI - 1) : ph;
     float2 size = float2(sizeI);
     float zpx = rvkHwDepthToD3D(f, rvkFetch2D(p.Get().screen.x, px).r);
     float viewZ = spViewDepth(f, zpx);
     if (viewZ <= 0.0) {
-        outResolved[px] = float4(1.0, 1.0, 1.0, 0.0);
-        outStats[px] = float4(0.0, 0.0, 0.0, 0.0);
+        outResolved[ph] = float4(1.0, 1.0, 1.0, 0.0);
+        outStats[ph] = float4(0.0, 0.0, 0.0, 0.0);
         return;
     }
     float3 N = spDepthNormal(f, px, size, p.Get().screen.x);
@@ -47,14 +52,14 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         float4 q = mul(float4(P, 1.0), f.prevViewProj);
         if (q.w > 1e-3) {
             float2 pprev = (q.xy / q.w) * float2(0.5, -0.5) + 0.5;
-            pprev = pprev * size - 0.5;
+            pprev = (pprev * size - 0.5) * (halfRes ? 0.5 : 1.0);  // the history's texel index (texel i = pixel 2 i at half size)
             int2 i0 = int2(floor(pprev));
             float2 fr = pprev - float2(i0);
             float tol = max(q.w * 0.03, 6.0);
             for (int i = 0; i < 4; ++i) {
                 int2 o = int2(i & 1, i >> 1);
                 int2 t = i0 + o;
-                if (any(t < int2(0, 0)) || any(t >= sizeI)) continue;
+                if (any(t < int2(0, 0)) || any(t >= outSize)) continue;
                 float4 h = rvkFetch2D(p.Get().screen3.y, t);
                 if (h.a <= 0.0 || abs(h.a - q.w) > tol) continue;
                 float4 g = rvkFetch2D(p.Get().screen3.z, t);
@@ -144,6 +149,6 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         result = float4(hist, viewZ);
         stats = float4(histG, min(count + 1.0, 255.0));
     }
-    outResolved[px] = result;
-    outStats[px] = stats;
+    outResolved[ph] = result;
+    outStats[ph] = stats;
 }

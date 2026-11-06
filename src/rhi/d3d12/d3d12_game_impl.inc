@@ -1160,6 +1160,7 @@ caps::Report D3D12DeviceImpl::capabilityReport(bool) {
     caps::Report r;
     r.known = true;
     r.gpu = caps_.adapterName;
+    r.integratedGpu = vramDedicated_ <= (512ull << 20);  // as enumerateD3D12Adapters: no real dedicated memory = shares the PC's
     r.driver = "Direct3D 12";
     r.api = std::format("D3D12 (feature level 12_0, Shader Model 6.6, binding tier 3{})", caps_.agilitySdkVersion != 0 ? std::format(", Agility SDK {}", caps_.agilitySdkVersion) : std::string());
     const auto set = [&](caps::Cap c, bool on, const char* why) {

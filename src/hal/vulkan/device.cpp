@@ -397,6 +397,18 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         for (const auto& line : report.lines()) spdlog::info("caps: {}", line);
         caps::setCurrent(report);
         reg.setCapabilities(report);
+        // Low bandwidth mode (docs/research/low-bandwidth.md): auto = on for integrated GPUs; the decision is read by the passes that
+        // create the affected images (caps::lowBandwidth()), a change re-creates them (transients are keyed by description)
+        if (rs.lowBandwidth != nullptr) {
+            const auto applyLowBandwidth = [report](const settings::Setting& s) {
+                const caps::LowBandwidth d = caps::resolveLowBandwidth(s.asEnum(), report);
+                if (caps::setLowBandwidth(d)) {
+                    spdlog::info("vulkan: low bandwidth: {} ({})", d.on ? "on" : "off", d.automatic ? "auto: " + d.reason : d.reason);
+                }
+            };
+            applyLowBandwidth(*rs.lowBandwidth);
+            reg.onChange(*rs.lowBandwidth, applyLowBandwidth, this);
+        }
     }
     if (options.rtSelfTest) dev_.game().runRaytracingSelfTest();
     if (rs.vsync != nullptr) reg.onChange(*rs.vsync, [this](const settings::Setting&) { applyVsync(); }, this);

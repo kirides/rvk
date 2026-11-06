@@ -14,6 +14,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "core/caps.h"
 #include "core/paths.h"
 #include "engine/hemisphere.h"
 #include "engine/symbols.h"
@@ -708,7 +709,16 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
         return;
     }
     const std::uint32_t w = std::min(ctx.sceneHdr->desc().width, ds->width()), h = std::min(ctx.sceneHdr->desc().height, ds->height());
-    const std::uint32_t sw = ctx.sceneHdr->desc().width, sh = ctx.sceneHdr->desc().height;
+    const std::uint32_t sceneW = ctx.sceneHdr->desc().width, sceneH = ctx.sceneHdr->desc().height;
+    // low bandwidth mode: the resolved / stats images at half the scene's size (4 x 16 bytes -> 1 / 4 of it per pixel and frame; the
+    // material shaders take the 2 x 2 texels around their pixel, depth-aware). The reference path tracer reads the images at its pixel: full size.
+    const bool halfRes = caps::lowBandwidth(2) && s_.reference == 0;
+    const std::uint32_t sw = halfRes ? (sceneW + 1) / 2 : sceneW, sh = halfRes ? (sceneH + 1) / 2 : sceneH;
+    if (halfRes != sgiHalf_) {  // the images are re-created at the other size (transients are keyed by description): no history
+        sgiHalf_ = halfRes;
+        sgiValid_ = false;
+        spdlog::info("enh: gi: screen probe images at {} size ({}x{})", halfRes ? "half" : "full", sw, sh);
+    }
     // low: 16 x 16 tiles x 8 rays, medium: 16 x 16 x 16, high: 8 x 8 x 16 (1600 x 900: 5.7k / 5.7k / 22.5k probes)
     const std::uint32_t tile = s_.screen == 3 ? 8u : 16u;
     const std::uint32_t rays = s_.screen == 1 ? 8u : 16u;
@@ -786,6 +796,7 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
         }
     }
     p.screen6[0] = s_.directional;
+    p.screen6[1] = halfRes ? 1.0f : 0.0f;
     std::memcpy(pa.ptr, &p, sizeof(p));
     GiPush push{};
     push.h.frame = ctx.frameBlock.bits;
@@ -828,13 +839,14 @@ void Gi::recordScreen(d3d9::PassContext& ctx) {
         cl.setStorageTextures(outs);
     }
     cl.setPushConstants(&push, sizeof(push));
-    cl.dispatch((w + 7) / 8, (h + 7) / 8, 1);
+    cl.dispatch((sw + 7) / 8, (sh + 7) / 8, 1);  // (the output's size: half the scene's in low bandwidth mode)
     cl.transition(*resWrite, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     cl.transition(*statsWrite, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     sgiHistory_ = cur;
     sgiValid_ = true;
     // -> this frame's material shaders (Gbuffer variants: the factor on their DDGI lookup at their pixel)
-    dev_.setFrameSgi({res[cur]->heapSampled(), dev_.samplerFor(true, true), shader::abi::kFrameSgiValid, stats[cur]->heapSampled()});
+    dev_.setFrameSgi({res[cur]->heapSampled(), dev_.samplerFor(true, true), shader::abi::kFrameSgiValid | (halfRes ? shader::abi::kFrameSgiHalf : 0u),
+                      stats[cur]->heapSampled()});
     if (s_.reference > 0) recordReference(ctx, cl, push, res[cur]->heapSampled(), w, h);
     if (screenFrames_++ == 0) {
         spdlog::info("enh: gi: screen probes: {}x{} probes ({} px tiles, {} rays each) over {}x{}", gw, gh, tile, rays, w, h);
