@@ -170,9 +170,11 @@ if ($NoRenderer) {
         "shader_debug_info = $($ShaderDebug.IsPresent.ToString().ToLower())",
         "present_stalls = $([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.0##}', $PresentStalls))",
         "cpu_profile = $($CpuProfile.IsPresent.ToString().ToLower())",
-        "environment = [$(($Environment | ForEach-Object { '"' + ($_ -replace '"', '') + '"' }) -join ', ')]",
+        # (TOML basic strings: a backslash must be escaped, else the whole config.toml fails to parse and the run silently falls back to
+        # mode original; Windows paths in -Environment are common)
+        "environment = [$(($Environment | ForEach-Object { '"' + (($_ -replace '"', '') -replace '\\', '\\') + '"' }) -join ', ')]",
         "overlay_in_screenshots = $($OverlayInScreenshots.IsPresent.ToString().ToLower())",
-        "commands = [$(($Commands | ForEach-Object { '"' + ($_ -replace '"', '') + '"' }) -join ', ')]",
+        "commands = [$(($Commands | ForEach-Object { '"' + (($_ -replace '"', '') -replace '\\', '\\') + '"' }) -join ', ')]",
         '[overlay]', "enabled = $((-not $NoOverlay.IsPresent).ToString().ToLower())"
     )
     $settingsFile = Join-Path $rvkDir 'settings.toml'
@@ -192,7 +194,7 @@ if ($NoRenderer) {
             $v = $values[$k]
             $dot = $k.LastIndexOf('.')
             $t = $k.Substring(0, $dot); $name = $k.Substring($dot + 1)
-            if ($v -notmatch '^(true|false|-?[0-9.]+)$') { $v = '"' + $v + '"' }
+            if ($v -notmatch '^(true|false|-?[0-9.]+)$') { $v = '"' + (($v -replace '"', '') -replace '\\', '\\') + '"' }
             if (-not $tables.Contains($t)) { $tables[$t] = @() }
             $tables[$t] += "$name = $v"
         }
