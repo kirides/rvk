@@ -790,7 +790,7 @@ private:
     struct PersistStats {
         std::uint64_t ops = 0, draws = 0, reused = 0, derived = 0, derivedChanged = 0, tableFull = 0, refused = 0, observerRefused = 0, injected = 0;
         std::uint64_t scrubbed = 0, scrubMiss = 0, checkCompared = 0, checkSkipped = 0, checkMiss = 0, passes = 0, envChanges = 0, flushFailed = 0, arenaFailed = 0;
-        std::uint64_t sigNs = 0, deriveNs = 0, observeNs = 0, flushNs = 0, windowNs = 0, items = 0;
+        std::uint64_t sigNs = 0, deriveNs = 0, observeNs = 0, flushNs = 0, windowNs = 0, items = 0, bulkNs = 0;
         void add(const PersistStats& o);
     } persistW_, persistT_;
     std::uint64_t persistEnvLast_[2] = {};

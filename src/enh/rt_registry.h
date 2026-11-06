@@ -118,6 +118,9 @@ public:
         // F8-0 (docs/research/frame-ownership.md 7.20): a persistent table entry holds this instance (its scene-table slot is live and unmoved): it does not
         // age out for being unseen (the radius still applies) and counts as seen for the volatile-range rule
         bool pinned = false;
+        // F2c-4b: two unlike rank-4 draws gave this instance different materials in one frame (an instanced + a plain draw, two passes on one range): the last one wins, so the
+        // material depends on which draws are observed: such an instance is never held by a table entry (its draws stay on the observed path)
+        bool ambiguous = false;
     };
     struct Counters {
         std::uint64_t added = 0, replaced = 0, aged = 0, tooFar = 0, capped = 0, dropped = 0;

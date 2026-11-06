@@ -538,6 +538,7 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
                     scrubPhase = static_cast<std::uint32_t>((++persistScrubTick_ * 7919u) % scrubStride);
                     ++persistW_.passes;
                     persistPassDraw_ = 0;
+                    dev_.ownedBulkBegin(solid);  // F2c-4b: the bulk observers' list of this pass
                     const std::size_t kk = solid ? 1 : 0;
                     if (epoch != persistEnvLast_[kk]) {
                         ++persistW_.envChanges;
@@ -577,6 +578,12 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
     // flush queued nothing: the ops that contributed are composed instead
     std::uint32_t flushedDraws = 0;
     const auto flushItems = [&] {
+        if (persistent) {
+            // F2c-4b: the bulk observers see the draws collected so far (before an op is composed late: its record may be dropped)
+            const auto tb = Clock::now();
+            dev_.ownedBulkFlush(false);
+            persistW_.bulkNs += ns(tb, Clock::now());
+        }
         if (!persistent || ownedItems_.empty()) return;
         const auto tf = Clock::now();
         const bool ok = dev_.ownedFlush(ownedItems_, ownedArena_, viewSlotP, gpuscene::drawrecords().recordsRef(), gpuscene::drawrecords().recordsShadow(), gpuscene::DrawRecordTable::kCapacity);
@@ -646,6 +653,11 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
         }
     }
     flushItems();
+    if (persistent) {
+        const auto tb = Clock::now();
+        dev_.ownedBulkFlush(true);  // F2c-4b: the end of the pass (the left list)
+        persistW_.bulkNs += ns(tb, Clock::now());
+    }
     ownedItems_.clear();
     ownedItemOp_.clear();
     dev_.setSceneIssue(false);
@@ -676,7 +688,7 @@ void StaticOps::PersistStats::add(const PersistStats& o) {
     ops += o.ops; draws += o.draws; reused += o.reused; derived += o.derived; derivedChanged += o.derivedChanged; tableFull += o.tableFull; refused += o.refused;
     observerRefused += o.observerRefused; injected += o.injected; scrubbed += o.scrubbed; scrubMiss += o.scrubMiss; checkCompared += o.checkCompared; checkSkipped += o.checkSkipped;
     checkMiss += o.checkMiss; passes += o.passes; envChanges += o.envChanges; flushFailed += o.flushFailed; arenaFailed += o.arenaFailed;
-    sigNs += o.sigNs; deriveNs += o.deriveNs; observeNs += o.observeNs; flushNs += o.flushNs; windowNs += o.windowNs; items += o.items;
+    sigNs += o.sigNs; deriveNs += o.deriveNs; observeNs += o.observeNs; flushNs += o.flushNs; windowNs += o.windowNs; items += o.items; bulkNs += o.bulkNs;
 }
 
 void StaticOps::setOwnedPersistent(bool on) {
@@ -946,7 +958,12 @@ bool StaticOps::ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, c
         } else {
             ++S.reused;
         }
-        if (!dev_.ownedObserve(cd, P.ow)) {
+        d3d9::Device::OwnedObsInfo obs;
+        obs.id = P.handle.slot;
+        obs.sig = P.sig;
+        obs.epoch = P.epoch;
+        obs.changed = !reuse;
+        if (!dev_.ownedObserve(cd, P.ow, obs)) {
             ++S.observerRefused;
             restoreTag();
             why = kFbRefused;
@@ -1044,6 +1061,17 @@ void StaticOps::ownedReport() {
                      persistT_.items, tab.liveCount(), tab.peak(), tab.stats().writes, tab.stats().same, static_cast<double>(q.windowNs) / nv / 1000.0, static_cast<double>(q.sigNs) / nv / 1000.0,
                      static_cast<double>(q.deriveNs) / nv / 1000.0, static_cast<double>(q.observeNs) / nv / 1000.0, static_cast<double>(q.flushNs) / nv / 1000.0,
                      f2c4::enabled() ? "" : " (fine timers need RVK_F2C4_MEASURE=1)");
+        {
+            // F2c-4b: the bulk observers' pass lists (frame-ownership.md 7.23)
+            static d3d9::Device::OwnedBulkStats lastBs;
+            const d3d9::Device::OwnedBulkStats& bs = dev_.ownedBulkStats;
+            if (bs.flushes != lastBs.flushes || bs.perDrawCovered != lastBs.perDrawCovered) {
+                spdlog::info("native: owned bulk observers (5 s): {} flushes, {} records ({} entered, {} left), per-draw pre-filter covered {}, late capture requests {}; CPU per main view: bulk observers {:.1f} us{}",
+                             bs.flushes - lastBs.flushes, bs.records - lastBs.records, bs.entered - lastBs.entered, bs.left - lastBs.left, bs.perDrawCovered - lastBs.perDrawCovered,
+                             bs.lateCapture - lastBs.lateCapture, static_cast<double>(q.bulkNs) / nv / 1000.0, dev_.ownedBulkOn() ? "" : " (bulk off: RVK_F2C4B_PERDRAW)");
+            }
+            lastBs = bs;
+        }
         q = {};
         lastDs = ds;
         if (miss != 0) ownedAutoOffMiss(miss);
