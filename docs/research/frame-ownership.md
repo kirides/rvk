@@ -379,3 +379,36 @@ static GPU copy's address without the RT gate of `gpuAddress()`.
   device creation).
 * Cost (savegame, packet cache off, `-Perf`; the check does a mutex + 4 buffer-address lookups per draw): CPU ~6.8 ms vs ~6.7 ms per frame, interval p50 7.5 vs 7.2 ms: about
   +0.1 - 0.3 ms, a verification cost (a shipping path reads the tables only on the GPU). Upload ~0.1 record / 0.01 KiB per frame in steady state, ~0.3 records at cache-in.
+
+## 8. F1 / F2 design decision: windows onto persistent tables (2026-11-06, orchestrator)
+
+**Decision.** F1 does not start with new shaders. Translated shaders and the ported ubershader read every float register through 4 register windows per
+stage (`RVK_VSC(n)` / `RVK_PSC(n)`, `shaders/include/rvk_draw.hlsli`; window starts `abi.h kVsWindowFirst = {0, 12, 31, 232}`, `kPsWindowFirst =
+{0, 5, 6, 14}`: `c[n]` = `rvkRawLoad(window base + n * 16)`). The window classes already match the tables:
+
+| window | vertex stage | pixel stage |
+|---|---|---|
+| 0 | c0..c11 view / camera (per view) | c0..c4 camera, fog (per view) |
+| 1 | c12..c30 vegetation / tree data | c5 mask reference / obstacle (per draw: DrawBlock `psC5`) |
+| 2 | c31..c231 object rows, instance data, bones | c6..c13 material `g_ShaderData` (Material table) |
+| 3 | c232.. material `g_vShaderData` (Material table) | c14..c37 lighting (Illumination + LightSet, composed) |
+
+So a window can point at a **persistent table record laid out as a register image** (record address - first register x 16) instead of a per-draw
+ring upload, and every existing shader reads identical values: picture identical by construction, verified with the existing `debug.split_verify`
+(every window block a draw reads compared with the CPU register file) and the tables' own checks.
+
+* **F1a (CPU path, persistent windows):** for the static ops N5 composes, the windows that a table covers point into the table: PS window 2 + VS window 3
+  -> a Material register image (c6..c13, c232..c251), VS / PS window 0 -> a per-view block written once per view, VS window 2 -> a per-instance object
+  block (the world rows / fade the composition writes, re-written on the matrix signal or a poll), PS window 3 -> a lighting register image per
+  (illumination, pass parameters) composed from the Illumination / LightSet records (first on the CPU with `gpuscene::composeLighting`, then F1b on the
+  GPU with its HLSL twin `rvkIllumCompose` in one compute pass per frame). Window bases may lie below the record (base = record - first x 16): Vulkan
+  addresses are plain 64-bit arithmetic; D3D12 (heap slot, byte offset) needs offset >= first x 16, so register-image tables start with a pad of
+  first x 16 bytes (VS window 3: 3,712 B; a 4 KiB pad covers every window). Gate: `split_verify` mismatches 0, picture identical, the composition
+  of the covered registers skipped (CPU measured, gpu-scene.md 9.2 bounds the setter part at < 0.05 ms: the value of F1a is the proof of the register
+  images, the CPU gain comes with F2).
+* **F2 (GPU-driven):** one uniform shader change for every pipeline of an owned draw: a *scene variant* where `rvkVsWin(w)` / `rvkPsWin(w)` read the 8
+  window bases (+ the DrawBlock address) from a per-instance **DrawRecord** selected by the instance-rate ref stream (section 4) instead of the push
+  block. DrawRecords are written by the compaction compute from (instance slot, part, material slot, illumination slot, pass); indirect draws per
+  pipeline bucket. Translated engine shaders stay valid: batches are still split by pipeline (the engine's permutations), but no longer by register
+  values, and the CPU no longer touches the draw. The owned ubershader (graph-shared pipelines, dynamic light loop: 196 pipelines estimated, 7.3)
+  is the later step that merges permutations.
