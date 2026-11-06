@@ -25,6 +25,8 @@
 #include "gpuscene/lighting_images.h"
 #include "gpuscene/mesh_parts.h"
 #include "gpuscene/material_table.h"
+#include "gpuscene/window_tables.h"
+#include "gpuscene/lighting_images.h"
 #include "fx/effect_binary.h"
 #include "hal/vulkan/hal_vulkan.h"
 
@@ -507,6 +509,8 @@ sc::DrawDesc& StaticOps::newDraw() {
     std::memcpy(d.vsI, entryVsI_, sizeof(d.vsI));
     std::memcpy(d.psI, entryPsI_, sizeof(d.psI));
     d.biLive = 0;
+    d.matSlot = gpuscene::MaterialTable::kNoSlot;
+    d.lightEntry = gpuscene::kNoEntry;
     return d;
 }
 
@@ -669,12 +673,12 @@ void StaticOps::writeTreeInstance(std::uint32_t slot, const float v[2]) {
 }
 
 // FUN_1806cd1d0: the pass's lighting into the lighting pool (c14 .. c37)
-void StaticOps::writeLighting(const sc::Pass& pass) {
+std::uint32_t StaticOps::writeLighting(const sc::Pass& pass) {
     gpuscene::IllumTable& table = gpuscene::illumtable();
     if (!table.active() || pass.illum == nullptr || ptr(static_cast<U8*>(pass.illum), 0) == nullptr) {
         bool holdsAll = false;
         writeLightingRegisters(pass, holdsAll);
-        return;
+        return gpuscene::kNoEntry;
     }
     // frame-ownership.md F0: what this function writes must equal the composition from the illumination table's records
     float prior[24][4];
@@ -687,7 +691,7 @@ void StaticOps::writeLighting(const sc::Pass& pass) {
     p.n = pass.tableLit ? 3u : sc::passLights(pass.flags);
     p.firstLight = pass.firstLight;
     const std::uint32_t illumSlot = table.checkDraw(pass.illum, p, prior, mirror_.lighting);
-    gpuscene::lightingimages().note(illumSlot, p, mirror_.lighting);  // F1b: the lighting register image of (illumination, parameters)
+    return gpuscene::lightingimages().note(illumSlot, p, mirror_.lighting);  // F1b: the lighting register image of (illumination, parameters)
 }
 
 void StaticOps::writeLightingRegisters(const sc::Pass& pass, bool& holdsAll) {
@@ -1071,7 +1075,7 @@ std::uint32_t StaticOps::materialTexture(void* self, std::uint32_t stage, const 
     return ok && t != nullptr ? t->bindlessSlot() : gpuscene::kMatNoTex;
 }
 
-void StaticOps::checkMaterial(const sc::DrawDesc& d, const std::uint8_t* owner, const void* material, bool zPass, std::uint16_t psMask, std::int32_t blendMode,
+void StaticOps::checkMaterial(sc::DrawDesc& d, const std::uint8_t* owner, const void* material, bool zPass, std::uint16_t psMask, std::int32_t blendMode,
                               std::int32_t maskRef) {
     gpuscene::MaterialTable& mt = gpuscene::materialtable();
     if (!mt.active()) return;
@@ -1102,7 +1106,43 @@ void StaticOps::checkMaterial(const sc::DrawDesc& d, const std::uint8_t* owner, 
         if (t != nullptr && (d.inheritMask >> st & 1u) == 0) m.texSlot[st] = t->bindlessSlot();
         for (std::uint32_t i = 0; i < 7; ++i) m.ss[st][i] = d.samplers[st].ss[i];
     }
-    mt.checkDraw(md);
+    d.matSlot = mt.checkDraw(md);
+}
+
+// frame-ownership.md 7.8: the override of the draw about to be issued (its registers are already in the device): Material windows from the draw's record,
+// view windows from the per-view block
+void StaticOps::setOwnedFor(const sc::DrawDesc& d) {
+    gpuscene::materialtable().fillWindows(d.matSlot, d.vsSet.data(), d.psSet.data(), ownedWin_);
+    gpuscene::windowtables().fillViews(dev_, ownedWin_);
+    {
+        // PS window 3 (c14..c37): the lighting image of the draw's pass, composed on the GPU in this frame's upload list (F1b); only with native.lighting_images
+        d3d9::OwnedWindows::Win& lw = ownedWin_.w[1][3];
+        lw = d3d9::OwnedWindows::Win{};
+        gpuscene::LightingImages& li = gpuscene::lightingimages();
+        if (li.active()) {
+            if (d.lightEntry != gpuscene::kNoEntry && li.ready()) {
+                lw.kind = d3d9::OwnedWindows::Kind::Lighting;
+                lw.base = li.windowBase(d.lightEntry);
+                lw.covered = gpuscene::kLightingRegs;
+                lw.verifyMask = 0;  // (no CPU twin: the GPU read-back of lighting_images compares the image with the drawn registers)
+            } else {
+                lw.why = d3d9::OwnedWindows::WhyOther;
+            }
+        }
+    }
+    // (developer bisect: RVK_OWNED_MASK bit 1 VS material, 2 PS material, 4 VS view, 8 PS view windows; default all)
+    static const std::uint32_t mask = [] {
+        const char* e = std::getenv("RVK_OWNED_MASK");
+        return e != nullptr ? static_cast<std::uint32_t>(std::strtoul(e, nullptr, 0)) : 15u;
+    }();
+    if (mask != 15u) {
+        if ((mask & 1u) == 0) ownedWin_.w[0][3].kind = d3d9::OwnedWindows::Kind::None;
+        if ((mask & 2u) == 0) ownedWin_.w[1][2].kind = d3d9::OwnedWindows::Kind::None;
+        if ((mask & 4u) == 0) ownedWin_.w[0][0].kind = d3d9::OwnedWindows::Kind::None;
+        if ((mask & 8u) == 0) ownedWin_.w[1][0].kind = d3d9::OwnedWindows::Kind::None;
+        if ((mask & 16u) == 0) ownedWin_.w[1][3].kind = d3d9::OwnedWindows::Kind::None;
+    }
+    dev_.setOwnedWindows(&ownedWin_);
 }
 
 // ---- composition ------------------------------------------------------------------------------------------------------------
@@ -1208,7 +1248,7 @@ StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8
                                static_cast<const void*>(psElem));
         return Skip::NotCompiled;
     }
-    writeLighting(pass);
+    const std::uint32_t lightEntry = writeLighting(pass);
     sc::BlendInputs b;
     b.mode = blendModeOf(owner);
     b.maskRef = maskRefOf(owner);
@@ -1227,6 +1267,7 @@ StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8
         return Skip::NotCompiled;
     }
     sc::DrawDesc& d = drawFrom(geometry);
+    d.lightEntry = lightEntry;
     const sc::Visual& vis = geometry.visual;
     d.passFlags = pass.flags;
     d.drawClass = sc::passClass(pass.flags, overlay);
@@ -2210,6 +2251,7 @@ void StaticOps::issue() {
         }
     };
     gpuscene::MeshPartTable& meshParts = gpuscene::meshparts();
+    const bool owned = ownedWindows_ && gpuscene::windowtables().active();
     for (std::size_t k = 0; k < drawCount_; ++k) {
         const sc::DrawDesc& d = *draws_[k];
         dev_.setVertexShaderRef(ShaderRef(const_cast<Shader*>(static_cast<const Shader*>(d.vs))));
@@ -2234,6 +2276,7 @@ void StaticOps::issue() {
         }
         if (pe != nullptr && !verifyFrame) {
             setRegs(d);
+            if (owned) setOwnedFor(d);
             setTag(d);  // (the observers and replacers look at it)
             if (dev_.replayDraw(pe->cd, rin)) {
                 ++g_->issuedDraws;
@@ -2312,6 +2355,7 @@ void StaticOps::issue() {
         }
         // the composed registers as ranges (one copy per run of consecutive registers)
         setRegs(d);
+        if (owned) setOwnedFor(d);
         setTag(d);
         issueIndex_ = k;
         const bool capturing = cacheable && (pe == nullptr || verifyFrame || stale);
@@ -2364,6 +2408,7 @@ void StaticOps::issue() {
         }
     }
     issuing_ = false;
+    if (owned) dev_.setOwnedWindows(nullptr);
     ++g_->issuedOps;
 
     // restore

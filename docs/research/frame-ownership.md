@@ -419,6 +419,60 @@ static GPU copy's address without the RT gate of `gpuAddress()`.
 * Cost (checkDraw time only, debug setting, Full): 0.03-0.22 ms per frame (draw count dependent: 60-80 k checked draws per second-run frame x ~3 us incl. the
   mutex, the hash lookup, the compare), flush negligible. Not a shipping cost: the table's draw check is the F0 gate; F1 reads the records on the GPU.
 
+### 7.8 F1a owned windows (2026-11-06, `native.owned_windows`)
+
+Debug setting (Bool, runtime, default off, Full, `needs` native.material_table; Wrapper / off = the old path untouched). Files: `src/d3d9/owned_windows.h`
+(`OwnedWindows` / `OwnedStats`), `src/gpuscene/window_compose.h` (pure address math, tests `window_*`), `window_tables.*` (view blocks + the 5 s log),
+`MaterialTable::fillWindows`, `StaticOps::setOwnedFor`, `Device::setOwnedWindows` + `splitStage` / `verifyOwned` (`d3d9/draw.cpp`).
+
+* **Mechanism.** `StaticOps::issue()` builds an `OwnedWindows` per issued draw right after `setRegs(d)` (also before `replayDraw`: the packet cache's
+  replay re-runs `uploadConstants`) and hands it to the device (`setOwnedWindows`; cleared after the op's draws). `Device::splitStage` (the one place the
+  four windows per stage are made) serves a window from the override when the image covers the shader's extent (`covered >= need`), else the normal
+  ring block: nothing is uploaded and `constWin_` / its dirty bit stay as they are. Windows served: **VS 3 + PS 2** from the Material record
+  (`MaterialRecord.vs` / `.ps` at record offsets 80 / 592, base = record address + regs offset - first register x 16), **VS 0 + PS 0** from a per-view
+  block (`WindowTables`, `ViewRecord` = VS c0..c11 + PS c0..c4, 272 B; a draw reuses one of the last 8 blocks of the frame when its 17 registers are
+  equal, else writes a new slot; slots restart every present and re-upload only when their bytes differ), **PS 3** (c14..c37) from F1b's lighting image
+  entry (`LightingImages::windowBase`, only with `native.lighting_images`). VS 1 / VS 2 (object rows, instances) and PS 1 (c5) stay per draw (F1a scope).
+  Not served (counted): a stage of a material whose record has switch / native pool writes (`sw` masks, per stage), draws without a record (sky,
+  decals, FX, non-default shaders), images shorter than the shader's extent (`image too short`: 21.6 k of 1.05 M candidate windows at the savegame: a
+  pool shorter than the shader's c232.. read).
+* **Address arithmetic.** Vulkan: a GpuRef is the device address, `plus(delta)` is 64-bit. D3D12: {heap slot, byte offset}, the offset word wraps
+  modulo 2^32 and the shaders' 32-bit offset arithmetic undoes it (tests `gpu_ref_*` + `window_register_addresses_*`), but the tables now start with
+  `kTablePad` = 4 KiB unused bytes (`GpuTable::create(..., padBytes)`: the buffer is that much larger, `ref()` points past it, uploads / read-back
+  offset by it) so the biased base never goes below 0: record 0 of the Material table has base offset 4096 + 80 - 232 x 16 = 464. The view table needs no
+  bias (window 0 starts at c0).
+* **Ordering (item 4).** Both tables are flushed at the present into the frame's UPLOAD list, which the backend runs before ALL of that frame's
+  draws (barrier all-commands -> transfer at its start), so a draw reads the CPU shadow as it is at the present. A Material record only changes at its
+  first draw of a frame (the poll in `checkDraw`) and a view slot is written once per frame, so that value is the one every draw of the frame was
+  composed with; the draw check of F0 (`diffMaterial`, 0 differing) and `split_verify` below confirm the CPU side. A record that does not exist on the GPU
+  yet (buffer created at the first present) is not offered. What this does NOT cover: a record changed by a later poll in the same frame (none
+  exists); the water materials' VS c232 / c233 change every frame and are re-uploaded every frame, they are served like the others.
+* **Verification.** `debug.split_verify`: for every served window `verifyOwned` compares the image's CPU twin with the register file over the registers
+  the draw composed (`vsSet` / `psSet`; views: all), plus a diagnostic for registers inside the shader's extent that the draw did NOT compose and whose
+  image differs (the old path read stale register values there): **0** in every run. The lighting window has no CPU twin (F1b's GPU read-back compares the
+  image with the drawn registers, c14.w and unwritten registers excluded; DIFFERING 0). Log `native: owned windows (5 s)`: draws, windows from tables
+  (material VS / PS, view VS / PS, lighting), uploaded / reused (the draws' other windows), fallbacks, view block stats, verified / MISMATCHES.
+  Developer bisect: `-Environment 'RVK_OWNED_MASK=<bits>'` (1 VS material, 2 PS material, 4 VS view, 8 PS view, 16 lighting; default all).
+* **Results** (rvk.log in `B:\DevDrive\rvk-work\scratch\owned-windows\`): Full, Vulkan, `harbour_docks,jungle,pub_interior`, material table + owned
+  windows + split_verify: 1.81 M draws, windows from tables: material VS 324 k / PS 723 k, view VS 1.81 M / PS 1.04 M (= 3.9 M windows, all compared:
+  **MISMATCHES 0**, 0 uncomposed differing), uploaded 2.49 M / reused 1.02 M (the other windows), fallback: switch materials 5.6 k, no record 2.8 k.
+  With `native.illum_table` + `native.lighting_images` (pub_interior, harbour_docks, 2 runs): 0.47 M draws each, lighting served 236 k / 238 k, 99.5 %
+  of the candidate windows from tables (the rest: 3 k switch materials, 3 k no record), MISMATCHES 0, view table read-backs 0 differing, lighting images
+  read-backs DIFFERING 0. D3D12 (pub_interior, lighting on): 0.94 M draws, 2.65 M of 2.66 M candidate windows served, 0 / 0. `-Validation` (Vulkan,
+  lighting on): 0.24 M draws, 0 mismatches, no validation message. View blocks: 6-9 per frame, 0.1 - 3 blocks uploaded per frame (a few 100 B).
+* **Picture A/B.** Not bit-comparable between runs here: two runs with the SAME settings differ by more than owned on vs off. rvkcompare spots, separate
+  runs (the first run after a deploy and the odd run of a batch are outliers): `pub_interior` off vs off 0.83 / 0.75 mean abs, off vs on 0.91 / 0.94 /
+  0.40 (on vs on 0.40 - 0.61); `jungle` off vs off 2.4 / 1.8, off vs on 2.2 - 2.4; `harbour_docks` (animated shore, caustics, storm sea phase) off vs off
+  2.5 - 5.5, on vs on 0.14 - 0.39, off vs on 0.7. All differences sit in the water-related materials / foliage (heat maps), none at the lit or textured
+  static meshes. **The in-run toggle (`-Commands 'N: set native.owned_windows ...'`) is not usable as a control**: with `RVK_OWNED_MASK=0` (nothing
+  served) toggling the setting changed the harbour picture by 20 mean abs (a different camera / sea state), so the toggle itself perturbs the scenario.
+  Honest status: no systematic picture difference found, bit-exactness not proven by pixels; the proof is the per-draw register compare (3.9 M windows, 0).
+* **CPU.** Savegame Risen_Save_0005 (Full, player defaults, lod 2x, vsync off, `-Perf`, 4 runs off / on / off / on, engine + HAL CPU per frame): off 6.30 /
+  6.62 ms, on 6.92 / 6.33 ms: no measurable change (noise +-0.3 ms), as expected (the register setters stay; only ~1.0 M window blocks per 5 s are not
+  uploaded, 0.1 KiB-scale each). The value of F1a is the proven register images; the CPU gain needs F2 (nothing composed per draw).
+* **Counts.** Savegame (last 5 s log line of an owned run, lighting images off there): 531 k draws, view blocks 535 k lookups / 531 k reused / 3.7 k new,
+  material windows 72 k + 146 k, `image too short` 21.6 k, 2.5 k switch-material and 0.9 k no-record windows.
+
 ### 7.9 F1b lighting register images (2026-11-06, `native.lighting_images`)
 
 `src/gpuscene/lighting_images.{h,cpp}` + `shaders/gpuscene/lighting_compose.comp.hlsl` (the first GPU run of `rvkIllumCompose`). Debug setting (Bool, restart,

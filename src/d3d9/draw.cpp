@@ -623,6 +623,8 @@ void Device::splitStage(bool vertex, const Shader& sh, rhi::GpuRef (&windows)[sh
     const std::uint32_t stage = vertex ? 0 : 1;
     const std::uint32_t* first = vertex ? shader::abi::kVsWindowFirst : shader::abi::kPsWindowFirst;
     const float (*regs)[4] = vertex ? vsF_ : psF_;
+    ownedServed_[stage] = 0;
+    if (owned_ != nullptr && !vertex) ++ownedStats_.draws;  // (counted once per draw: the pixel stage is split second)
     for (std::uint32_t w = 0; w < shader::abi::kConstWindows; ++w) {
         if (!vertex && w == 1) {
             windows[w] = {};
@@ -640,6 +642,26 @@ void Device::splitStage(bool vertex, const Shader& sh, rhi::GpuRef (&windows)[sh
             windows[w] = zeroBlock_.plus(-static_cast<std::int64_t>(first[w]) * 16);
             continue;
         }
+        // window override: a persistent register image of the caller's (Material record, view block) instead of a ring block
+        if (owned_ != nullptr) {
+            const OwnedWindows::Win& ow = owned_->w[stage][w];
+            if (ow.kind != OwnedWindows::Kind::None) {
+                if (ow.covered >= need && !ow.base.null()) {
+                    windows[w] = ow.base;
+                    ownedServed_[stage] |= 1u << w;
+                    if (ow.kind == OwnedWindows::Kind::Material) ++ownedStats_.material[stage];
+                    else if (ow.kind == OwnedWindows::Kind::Lighting) ++ownedStats_.lighting;
+                    else ++ownedStats_.view[stage];
+                    if (splitVerify_ && ow.image != nullptr) verifyOwned(vertex, w, need, ow, regs, sh);
+                    continue;
+                }
+                ++ownedStats_.fallbackShort;  // (the image is shorter than this shader reads: the normal block)
+            } else if (ow.why == OwnedWindows::WhySwitch) {
+                ++ownedStats_.fallbackSwitch;
+            } else if (ow.why == OwnedWindows::WhyOther) {
+                ++ownedStats_.fallbackOther;
+            }
+        }
         ConstWindow& cw = constWin_[stage][w];
         if ((constWinDirty_[stage] >> w & 1u) != 0 || cw.address.null() || cw.extent < need) {
             rhi::RingAlloc a = game_->allocRing(static_cast<VkDeviceSize>(need) * 16, 16);
@@ -651,12 +673,52 @@ void Device::splitStage(bool vertex, const Shader& sh, rhi::GpuRef (&windows)[sh
             ++perf_.splitBlocks[stage][w];
             perf_.splitBytes[stage][w] += static_cast<std::uint64_t>(need) * 16;
             perf_.constBytes += static_cast<std::uint64_t>(need) * 16;
+            if (owned_ != nullptr) ++ownedStats_.uploaded;
         } else {
             ++perf_.splitReused[stage][w];
+            if (owned_ != nullptr) ++ownedStats_.reused;
         }
         windows[w] = cw.address.plus(-static_cast<std::int64_t>(first[w]) * 16);
     }
     if (splitVerify_) verifySplit(vertex, sh);
+}
+
+// debug.split_verify, owned windows: the CPU twin of the image equals the register file for the registers the draw composed (verifyMask)
+void Device::verifyOwned(bool vertex, std::uint32_t w, std::uint32_t need, const OwnedWindows::Win& ow, const float (*regs)[4], const Shader& sh) {
+    const std::uint32_t* first = vertex ? shader::abi::kVsWindowFirst : shader::abi::kPsWindowFirst;
+    ++ownedStats_.verified;
+    bool bad = ow.image == nullptr;
+    std::uint32_t reg = first[w];
+    for (std::uint32_t i = 0; !bad && i < need && i < 32; ++i) {
+        if ((ow.verifyMask >> i & 1u) == 0) continue;
+        if (std::memcmp(ow.image + static_cast<std::size_t>(i) * 4, regs[first[w] + i], 16) != 0) {
+            bad = true;
+            reg = first[w] + i;
+        }
+    }
+    // (diagnostic: registers inside the shader's extent that the draw did not compose and whose image differs from the register file: the old path read the
+    // device's stale value there, the table gives the record's)
+    if (!bad) {
+        for (std::uint32_t i = 0; i < need && i < 32; ++i) {
+            if ((ow.verifyMask >> i & 1u) != 0) continue;
+            if (std::memcmp(ow.image + static_cast<std::size_t>(i) * 4, regs[first[w] + i], 16) != 0) {
+                ++ownedStats_.uncomposedDiffer;
+                if (ownedStats_.uncomposedDiffer <= 12) {
+                    spdlog::warn("d3d9: owned window: {} window {} (shader {:016x}) register c{} is not composed by the draw and differs (image {:g} {:g} {:g} {:g}, file {:g} {:g} {:g} {:g}; need {}, mask {:#x})",
+                                 vertex ? "VS" : "PS", w, sh.hash, first[w] + i, ow.image[i * 4], ow.image[i * 4 + 1], ow.image[i * 4 + 2], ow.image[i * 4 + 3],
+                                 regs[first[w] + i][0], regs[first[w] + i][1], regs[first[w] + i][2], regs[first[w] + i][3], need, ow.verifyMask);
+                }
+                break;
+            }
+        }
+    }
+    if (bad) {
+        ++ownedStats_.mismatches;
+        if (perf_.splitMismatches++ < 24) {
+            spdlog::error("d3d9: owned window: {} window {} (shader {:016x}) image differs from the register file at c{} (need {} registers, image holds {})",
+                          vertex ? "VS" : "PS", w, sh.hash, reg, need, ow.covered);
+        }
+    }
 }
 
 // debug.split_verify: every window block this shader reads equals the register file now (dirty tracking, extents)
@@ -666,6 +728,7 @@ void Device::verifySplit(bool vertex, const Shader& sh) {
     const float (*regs)[4] = vertex ? vsF_ : psF_;
     for (std::uint32_t w = 0; w < shader::abi::kConstWindows; ++w) {
         if (!vertex && w == 1) continue;
+        if ((ownedServed_[stage] >> w & 1u) != 0) continue;  // (verified against its image: verifyOwned)
         std::uint32_t end = sh.reflection.windowEnd[w];
         if (!vertex && w == 3) end = std::max(end, psWindowMinEnd_);
         const std::uint32_t need = end > first[w] ? end - first[w] : 0;

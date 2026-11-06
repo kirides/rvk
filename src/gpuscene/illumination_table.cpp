@@ -12,6 +12,7 @@
 #include "engine/memread.h"
 #include "gpuscene/mesh_layout.h"
 #include "gpuscene/material_compose.h"
+#include "gpuscene/window_compose.h"
 #include "gpuscene/lighting_images.h"
 
 namespace rvk::gpuscene {
@@ -27,13 +28,14 @@ template <class T>
 GpuTable<T>::~GpuTable() = default;
 
 template <class T>
-bool GpuTable<T>::create(d3d9::Device& dev, std::uint32_t capacity, const char* name) {
+bool GpuTable<T>::create(d3d9::Device& dev, std::uint32_t capacity, const char* name, std::uint64_t padBytes) {
     rhi::Device* rd = dev.rhi();
     if (rd == nullptr) return false;
-    buffer_ = rd->createBuffer({static_cast<std::uint64_t>(capacity) * sizeof(T),
+    pad_ = padBytes;
+    buffer_ = rd->createBuffer({static_cast<std::uint64_t>(capacity) * sizeof(T) + pad_,
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, rhi::Memory::Device, name});
     if (!buffer_) return false;
-    const auto w = buffer_->shaderRef(0);
+    const auto w = buffer_->shaderRef(pad_);
     ref_ = rhi::GpuRef::fromWords(w[0], w[1]);
     init(capacity);
     spdlog::info("native: gpu table: {} buffer {} slots x {} B = {} KiB (ref {:#x})", name, capacity, sizeof(T), capacity * sizeof(T) / 1024, ref_.bits);
@@ -87,7 +89,7 @@ void GpuTable<T>::flush(d3d9::Device& dev, bool verify, std::uint32_t used) {
             std::size_t e = k + 1;
             while (e < dirty_.size() && dirty_[e] == dirty_[e - 1] + 1) ++e;
             const std::uint64_t n = (e - k) * sizeof(T);
-            list->copyBuffer(*buffer_, static_cast<std::uint64_t>(dirty_[k]) * sizeof(T), ring, a.offset + pos, n);
+            list->copyBuffer(*buffer_, pad_ + static_cast<std::uint64_t>(dirty_[k]) * sizeof(T), ring, a.offset + pos, n);
             pos += n;
             ++stats_.runs;
             k = e;
@@ -121,7 +123,7 @@ void GpuTable<T>::startVerify(d3d9::Device& dev, std::uint32_t used) {
     }
     rhi::CommandList& list = dev.uploadList();
     list.bufferBarrier(*buffer_, rhi::BufferAccess::ShaderRead);  // the uploads' copies are complete before the read-back copies them
-    list.copyBuffer(*p.buffer, 0, *buffer_, 0, bytes);
+    list.copyBuffer(*p.buffer, 0, *buffer_, pad_, bytes);
     list.bufferBarrier(*buffer_, rhi::BufferAccess::ShaderRead);
     p.expect.assign(shadow_.begin(), shadow_.begin() + used);
     p.frameValue = game.frameValue();
@@ -156,6 +158,7 @@ template class GpuTable<PartRecord>;
 template class GpuTable<LayoutRecord>;
 template class GpuTable<LightingJob>;  // the lighting images' jobs (lighting_images.cpp)
 template class GpuTable<MaterialRecord>;  // the material table (material_table.cpp)
+template class GpuTable<ViewRecord>;      // the view blocks (window_tables.cpp)
 
 // ---- IllumTable ------------------------------------------------------------------------------------------------------------------
 

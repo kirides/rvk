@@ -24,6 +24,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "d3d9/owned_windows.h"
 #include "gpuscene/illumination_table.h"
 #include "gpuscene/material_compose.h"
 #include "gpuscene/material_graph.h"
@@ -72,7 +73,17 @@ public:
         void* texCtx = nullptr;
     };
     // after the draw's constants and samplers are composed (engine thread)
-    void checkDraw(const Draw& d);
+    // returns the record's slot (kNoSlot: none: not active / overflow / unreadable)
+    static constexpr std::uint32_t kNoSlot = 0xffffffffu;
+    std::uint32_t checkDraw(const Draw& d);
+
+    // Window override (frame-ownership.md 7.8, F1a): the Material windows of a draw of record `slot` (VS window 3, PS window 2) as register images of the GPU
+    // record, into `ow` (windows left as they are when the record cannot serve them: `why` set). `vsSet` / `psSet` = the registers the composition wrote
+    // (4 x 64 bit masks): the verification compares only those. The GPU copy of a record is the shadow at the present of the frame (the upload list runs
+    // before the frame's draws), and a record only changes at its first draw of the frame (the poll), so the draws of a frame see the value they were
+    // composed with; see frame-ownership.md 7.8 for the ordering argument.
+    void fillWindows(std::uint32_t slot, const std::uint64_t* vsSet, const std::uint64_t* psSet, d3d9::OwnedWindows& ow);
+    std::uint64_t windowDraws() const { return windowDraws_; }
 
     // once per present: uploads, read-back verification, idle sweep, the 5 s log
     void flush(d3d9::Device& dev, bool verify);
@@ -96,6 +107,7 @@ private:
     void reportGraphs();
 
     bool active_ = false;
+    std::uint64_t windowDraws_ = 0;
     std::mutex mutex_;
     GpuTable<MaterialRecord> table_;
     std::unordered_map<const void*, std::uint32_t> slotOf_;

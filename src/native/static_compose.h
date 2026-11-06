@@ -371,6 +371,10 @@ struct DrawDesc {
     // the stream the vertex bytes are on: 0 = [minIndex, minIndex + numVertices) of stream 0 with the index bytes; else that
     // stream's bytes from its offset (the vegetation's instance data on stream 1; no index bytes)
     std::uint8_t cpuStream = 0;
+    // the material table's record slot of the draw's material (gpuscene::MaterialTable::checkDraw; 0xffffffff = none): the owned windows read it
+    std::uint32_t matSlot = 0xffffffffu;
+    // the lighting images entry of the draw's pass (gpuscene::LightingImages; 0xffffffff = none): the owned windows read it
+    std::uint32_t lightEntry = 0xffffffffu;
 };
 
 // the lowest set bit of a non-zero word (bsf: an intrinsic, inlined in every build configuration)

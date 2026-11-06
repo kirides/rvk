@@ -31,6 +31,7 @@
 #include "gpuscene/illumination_table.h"
 #include "gpuscene/lighting_images.h"
 #include "gpuscene/mesh_parts.h"
+#include "gpuscene/window_tables.h"
 #include "gpuscene/material_table.h"
 #include "engine/xinput_throttle.h"
 #include "engine/memread.h"
@@ -236,6 +237,13 @@ void HalDevice::applyStaticOps() {
     staticOps_->setGpuScene(frozen::kGpuScene);
     staticOps_->setOpts(frozen::kCpuOpts);
     staticOps_->setLeanRestore(frozen::kLeanRestore);
+    {
+        // frame-ownership.md 7.8: owned register windows (Full + the material table, which is a restart setting)
+        const bool owned = on(rs.nativeOwnedWindows) && renderMode() == RenderMode::Full && gpuscene::materialtable().active();
+        if (owned != gpuscene::windowtables().active()) spdlog::info("native: owned windows {}", owned ? "on" : "off");
+        gpuscene::windowtables().setActive(owned);
+        staticOps_->setOwnedWindows(owned);
+    }
     staticOps_->setRetained(frozen::kRetained, frozen::kRetainedGroups, frozen::kRetainedCheck);
     frameTap_->setCoverage(on(rs.nativeCoverage) || on(rs.nativeFrameTap) || compare || sceneCompare);
 }
@@ -559,7 +567,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     frameTap_->setEffectOps(effectOps_.get());
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups,
                                  rs.nativeCoverage, rs.nativeFrameTap, rs.nativeLean, rs.nativeLeanCheck,
-                                 rs.nativePacketCache}) {
+                                 rs.nativePacketCache, rs.nativeOwnedWindows}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
     // renderer.mode (Wrapper / Full): like the native.* settings applied by the registry's dispatch before a present, i.e. at a
@@ -1624,6 +1632,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
         gpuscene::lightingimages().flush(dev_, true);  // after the illumination table's flush: the compose pass reads this frame's records (frame-ownership.md 7.9)
         gpuscene::meshparts().flush(dev_, true);
         gpuscene::materialtable().flush(dev_, true);
+        gpuscene::windowtables().flush(dev_);
     }
     engine::lod::onPresent();  // a changed object draw distance: the world's cache-in spheres (engine thread)
     dev_.present();

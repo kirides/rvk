@@ -42,7 +42,8 @@ public:
     ~GpuTable();
     // CPU side only (records can be written before the GPU buffer exists)
     void init(std::uint32_t capacity);
-    bool create(d3d9::Device& dev, std::uint32_t capacity, const char* name);
+    // `padBytes`: unused bytes in front of record 0 (ref() points past them), so a register window biased below a record (frame-ownership.md 7.8) keeps a byte offset >= 0 on D3D12
+    bool create(d3d9::Device& dev, std::uint32_t capacity, const char* name, std::uint64_t padBytes = 0);
     bool ready() const { return buffer_ != nullptr; }
     rhi::GpuRef ref() const { return ref_; }
     std::uint32_t capacity() const { return capacity_; }
@@ -63,6 +64,7 @@ private:
     std::unique_ptr<rhi::Buffer> buffer_;
     rhi::GpuRef ref_;
     std::uint32_t capacity_ = 0;
+    std::uint64_t pad_ = 0;  // bytes in front of record 0 in buffer_
     std::vector<T> shadow_;
     std::vector<std::uint32_t> dirty_;
     std::vector<std::uint8_t> isDirty_;

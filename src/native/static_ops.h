@@ -117,6 +117,8 @@ public:
         packetMode_ = mode;
         if (mode == 0) packets_.clear();
     }
+    // native.owned_windows (frame-ownership.md 7.8): the issued draws' register windows from the material / view tables (needs the material table; Full)
+    void setOwnedWindows(bool on) { ownedWindows_ = on; }
     // native.gpu_scene (docs/research/gpu-scene.md): >= 1 checks every mesh / tree / actor op's entity against the signal-fed instance table
     void setGpuScene(int mode) { gpuScene_ = mode; }
     // V3 retained composition (native.retained / native.retained_groups / native.retained_check)
@@ -299,13 +301,14 @@ private:
     void applySwitch(const std::uint8_t* shader, std::int32_t switchValue, Skip& skip);
     // frame-ownership.md F0 (native.material_table): the draw's material registers / texture bindings composed from the material's record and compared
     // with `d` (after constantsInto + materialSamplers); owner = the shader object whose pools / slots were used, psMask = the PS element's sampler mask
-    void checkMaterial(const sc::DrawDesc& d, const std::uint8_t* owner, const void* material, bool zPass, std::uint16_t psMask, std::int32_t blendMode,
+    void checkMaterial(sc::DrawDesc& d, const std::uint8_t* owner, const void* material, bool zPass, std::uint16_t psMask, std::int32_t blendMode,
                        std::int32_t maskRef);
     static std::uint32_t materialTexture(void* self, std::uint32_t stage, const void* imageRes);  // the table's texture resolution (materialSamplers')
     void writeWorld(std::uint32_t slot, const float* m);
     void writeAlpha(std::uint32_t slot, float a);
     void writeTreeInstance(std::uint32_t slot, const float v[2]);  // SetSpeedTreeInstanceData 0x6c9eb0: c32 + 4 slot .xy
-    void writeLighting(const sc::Pass& pass);
+    // returns the lighting image entry of the pass (gpuscene::LightingImages::note; kNoEntry without one): F1a points PS window 3 at it
+    std::uint32_t writeLighting(const sc::Pass& pass);
     // the engine's lighting composition (FUN_1806cd1d0); `holdsAll` = the table-lit early exit was taken (nothing read for the point lights)
     void writeLightingRegisters(const sc::Pass& pass, bool& holdsAll);
     void noteListLights(const std::uint8_t* list);
@@ -707,6 +710,12 @@ private:
     PtrMemo<const Live*> liveMemo_;
     PtrMemo<d3d9::Shader*> elementMemo_;
     PtrMemo<Mirror::ShaderPools*> poolsMemo_;
+
+    // frame-ownership.md 7.8 (F1a, native.owned_windows): the issued draws' Material windows (PS window 2, VS window 3) and view windows (window 0 of both
+    // stages) point into persistent tables instead of ring uploads (d3d9::Device::setOwnedWindows); the override of the draw being issued
+    bool ownedWindows_ = false;
+    d3d9::OwnedWindows ownedWin_;
+    void setOwnedFor(const sc::DrawDesc& d);
 
     // packet retention: a composed draw's finished packet by (op, draw index), valid while the draw description equals the captured one
     int packetMode_ = 0;

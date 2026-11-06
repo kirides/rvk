@@ -2450,6 +2450,21 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::Restart | Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeOwnedWindows = &reg.add({
+        .key = "native.owned_windows",
+        .label = "Native frame: owned register windows",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode only, needs the material table (frame-ownership.md F1a, no picture change): the native static draws read their material "
+                       "registers (PS c6..c13, VS c232..) from the material table's records and the camera / fog registers (c0..c11 / c0..c4) from a per-view "
+                       "block instead of uploading them per draw (the other windows stay uploaded). debug.split_verify compares every served window with the "
+                       "register file. rvk.log `native: owned windows (5 s)`.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"native.material_table", "true", false, true}},
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeLean = &reg.add({
         .key = "native.lean",
         .label = "Native frame: lean ops",

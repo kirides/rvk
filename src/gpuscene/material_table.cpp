@@ -10,6 +10,7 @@
 #include "d3d9/device.h"
 #include "d3d9/material_source.h"
 #include "engine/memread.h"
+#include "gpuscene/window_compose.h"
 
 namespace rvk::gpuscene {
 
@@ -217,29 +218,29 @@ void MaterialTable::applyGraph(std::uint32_t slot, const Draw& d) {
     if (lastGraph_[cache][slot] != 0) frameGraphs_.insert(lastGraph_[cache][slot]);
 }
 
-void MaterialTable::checkDraw(const Draw& d) {
-    if (!active_ || d.owner == nullptr) return;
+std::uint32_t MaterialTable::checkDraw(const Draw& d) {
+    if (!active_ || d.owner == nullptr) return kNoSlot;
     const std::uint64_t t0 = nowNs();
     std::lock_guard lock(mutex_);
     ++stats_.draws;
     const std::uint32_t slot = lookupOrCreate(d.owner, d.material);
     if (slot == kNone) {
         ++stats_.unchecked;
-        return;
+        return kNoSlot;
     }
     seen_[slot] = frame_;
     if (polled_[slot] != frame_ + 1) {
         polled_[slot] = frame_ + 1;
         if (!refresh(slot, d.owner, d)) {
             ++stats_.unchecked;
-            return;
+            return kNoSlot;
         }
     }
     applyGraph(slot, d);
     const MaterialRecord& rec = table_.shadow()[slot];
     if (rec.info[0] == 0) {
         ++stats_.unchecked;
-        return;
+        return kNoSlot;
     }
     const MaterialDiff df = diffMaterial(rec, d.draw);
     ++stats_.checked;
@@ -273,6 +274,51 @@ void MaterialTable::checkDraw(const Draw& d) {
                       d.zPass, rec.sw[0], rec.sw[1], what);
     }
     stats_.checkNs += nowNs() - t0;
+    return slot;
+}
+
+void MaterialTable::fillWindows(std::uint32_t slot, const std::uint64_t* vsSet, const std::uint64_t* psSet, d3d9::OwnedWindows& ow) {
+    using d3d9::OwnedWindows;
+    OwnedWindows::Win& vsWin = ow.w[0][3];
+    OwnedWindows::Win& psWin = ow.w[1][2];
+    vsWin = OwnedWindows::Win{};
+    psWin = OwnedWindows::Win{};
+    vsWin.why = psWin.why = OwnedWindows::WhyOther;
+    if (!active_ || slot >= kCapacity) return;
+    std::lock_guard lock(mutex_);
+    if (!table_.ready() || slot >= used_ || key_[slot] == nullptr) return;
+    const MaterialRecord& r = table_.shadow()[slot];
+    if (r.info[0] == 0) return;
+    ++windowDraws_;
+    const rhi::GpuRef rec = table_.ref().plus(static_cast<std::int64_t>(slot) * static_cast<std::int64_t>(sizeof(MaterialRecord)));
+    const auto maskOf = [](const std::uint64_t* set, std::uint32_t firstReg, std::uint32_t n) {
+        std::uint32_t m = 0;
+        for (std::uint32_t i = 0; i < n && i < 32; ++i) {
+            const std::uint32_t reg = firstReg + i;
+            if ((set[reg >> 6] >> (reg & 63) & 1u) != 0) m |= 1u << i;
+        }
+        return m;
+    };
+    if (materialVsSwitched(r)) {
+        vsWin.why = OwnedWindows::WhySwitch;
+    } else if (const WindowImage w = materialVsWindow(r); w.covered != 0) {
+        vsWin.kind = OwnedWindows::Kind::Material;
+        vsWin.why = OwnedWindows::WhyNone;
+        vsWin.base = rec.plus(w.baseDelta);
+        vsWin.covered = w.covered;
+        vsWin.image = r.vs[w.imageIndex];
+        vsWin.verifyMask = maskOf(vsSet, shader::abi::kVsWindowFirst[3], w.covered);
+    }
+    if (materialPsSwitched(r)) {
+        psWin.why = OwnedWindows::WhySwitch;
+    } else if (const WindowImage w = materialPsWindow(r); w.covered != 0) {
+        psWin.kind = OwnedWindows::Kind::Material;
+        psWin.why = OwnedWindows::WhyNone;
+        psWin.base = rec.plus(w.baseDelta);
+        psWin.covered = w.covered;
+        psWin.image = r.ps[w.imageIndex];
+        psWin.verifyMask = maskOf(psSet, shader::abi::kPsWindowFirst[2], w.covered);
+    }
 }
 
 void MaterialTable::flush(d3d9::Device& dev, bool verify) {
@@ -287,7 +333,7 @@ void MaterialTable::flush(d3d9::Device& dev, bool verify) {
     }
     if (used_ == 0) return;
     if (!gpuFailed_ && !table_.ready()) {
-        if (!table_.create(dev, kCapacity, "material table")) {
+        if (!table_.create(dev, kCapacity, "material table", kTablePad)) {
             gpuFailed_ = true;
             spdlog::warn("native: material table: the GPU buffer could not be created (the CPU records and the draw check keep running)");
         } else {

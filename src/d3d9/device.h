@@ -36,6 +36,7 @@
 #include "d3d9/identity.h"
 #include "d3d9/inject.h"
 #include "d3d9/material_source.h"
+#include "d3d9/owned_windows.h"
 #include "d3d9/scene.h"
 #include "d3d9/semantics.h"
 #include "rhi/game_device.h"
@@ -792,6 +793,10 @@ public:
         dirtyConstWindows();
     }
     void setSplitVerify(bool on) { splitVerify_ = on; }
+    // Window override (frame-ownership.md 7.8, F1a): the register windows `w` covers are not uploaded for the draws prepared while it is set (null =
+    // none); the caller keeps the object alive until it clears it. Render thread.
+    void setOwnedWindows(const OwnedWindows* w) { owned_ = w; }
+    OwnedStats& ownedStats() { return ownedStats_; }
     // Reversed infinite depth (debug.reverse_z, docs/research/reverse-z.md): a depth buffer cleared in a main view holds
     // near / view z (1 at the near plane, 0 at infinity and for the cleared sky) instead of the engine's D3D value. The engine's
     // vertex output is remapped in the shaders (DrawBlock::posFix.zw: z' = z (1 + zw.x) + zw.y w, = w - k z with k = 1 - near / far
@@ -1327,6 +1332,9 @@ private:
     // the draw being prepared: split stages and the window addresses its push constants carry
     bool drawSplit_[2] = {};
     rhi::GpuRef drawWin_[2][shader::abi::kConstWindows]{};
+    const OwnedWindows* owned_ = nullptr;      // setOwnedWindows
+    std::uint32_t ownedServed_[2] = {};        // per stage: the windows of the draw being prepared that came from owned_ (verifySplit skips them)
+    OwnedStats ownedStats_;
     std::uint32_t psWindowMinEnd_ = 0;
     void blit(rhi::Texture& src, std::uint32_t srcLevel, std::uint32_t srcLayer, const VkOffset3D srcBox[2], rhi::Texture& dst,
               std::uint32_t dstLevel, std::uint32_t dstLayer, const VkOffset3D dstBox[2], VkFilter filter);
@@ -1472,6 +1480,7 @@ private:
     static std::uint32_t constWindowMask(bool vertex, std::uint32_t start, std::uint32_t count);
     void splitStage(bool vertex, const Shader& sh, rhi::GpuRef (&windows)[shader::abi::kConstWindows]);
     void verifySplit(bool vertex, const Shader& sh);
+    void verifyOwned(bool vertex, std::uint32_t w, std::uint32_t need, const OwnedWindows::Win& ow, const float (*regs)[4], const Shader& sh);
     // redundant-command filters, valid within one command buffer (reset by beginFrame)
     PipelineDesc lastPipelineDesc_{};
     GamePipeline lastPipeline_ = GamePipeline::None;
