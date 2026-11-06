@@ -1,5 +1,7 @@
 #include "enh/rt_scene.h"
 
+#include <windows.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -9,6 +11,7 @@
 #include <spdlog/spdlog.h>
 
 #include "engine/materials.h"
+#include "engine/scene_table.h"
 #include "enh/material_variant.h"
 #include "enh/rhi_scope.h"
 #include "shader/embedded.h"
@@ -84,6 +87,7 @@ RtScene::RtScene(d3d9::Device& device) : dev_(device) {
     };
     registry_.onRemoved = [this](const rt::Registry::Instance& in) {
         if (Blas* b = findBlas(in.blas); b != nullptr && b->refs > 0) --b->refs;
+        if (in.pinned) tableInstanceRemoved(in.key);
     };
 }
 
@@ -127,6 +131,7 @@ void RtScene::deactivate() {
     if (passId2_ != 0) dev_.removePass(passId2_);
     passId_ = passId2_ = 0;
     logStats(true);
+    tableClear();
     registry_.clear();
     dropDynamic(true, 0);
     destroySkin();
@@ -570,10 +575,20 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         if (!rowsAt(kInstanceDataBase + 1, rows) || outside(rows)) return skip();
         const std::uint64_t owner = q.tag != nullptr ? rt::ownerKey(q.tag->entity, q.tag->opDesc) : 0;
         ++iv_.sightings;
+        // F8-0 check frame: the instance as it stands before this sighting (what a covered draw would have left untouched)
+        rt::Registry::Instance pre;
+        bool havePre = false;
+        if (tableOn_ && tableCompare_ && !speedTree && tableCompareFrame(frame)) {
+            if (const rt::Registry::Instance* p = registry_.find(rt::instanceKey(b->id, rows))) {
+                pre = *p;
+                havePre = true;
+            }
+        }
         auto sr = registry_.see(rt::instanceKey(b->id, rows), b->id, rows, owner, flags, alphaWord, view, frame, now);
         rt::Registry::Instance* in = sr.first;
         if (sr.second) noteNewInstance(*b, frame);
         if (in != nullptr && materialId != 0) applyMaterial(*in, materialId, materialRank, overlay, frame);
+        if (in != nullptr && tableOn_ && !speedTree) tableObserved(q, *b, *in, rows, sr.second, havePre ? &pre : nullptr);
         if (in != nullptr && speedTree && animated_ && q.phase.view == View::Main && q.phase.pass == Pass::Solid) {
             TreeBatch batch;
             observeTree(dev, q, *b, *in, rows, batch, 0, 1);
@@ -616,6 +631,384 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         spdlog::info("rt: scene: instance stream check: {}", indexDeviations_ == 0 ? "TEXCOORD4 = 0, 1, 2, ... in every batch so far"
                                                                                    : std::format("{} instances deviate from 0, 1, 2, ...", indexDeviations_));
     }
+}
+
+// ---- F8-0 persistent table entries (docs/research/frame-ownership.md 7.20) ------------------------------------------------------
+
+namespace {
+
+std::uint64_t tableMix(std::uint64_t h, std::uint64_t v) {
+    h ^= v + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+    h *= 0xBF58476D1CE4E5B9ull;
+    return h ^ (h >> 31);
+}
+
+// the 3 float4 world rows of the draw (VS c33..c35) from an entity's matrix (entity +0x60, 4x4): row r = columns 0..2 of the matrix (as the object table writes them)
+void rowsOfWorld(const float* m, rt::Rows& rows) {
+    for (int r = 0; r < 3; ++r) {
+        for (int j = 0; j < 4; ++j) rows[static_cast<std::size_t>(r * 4 + j)] = m[4 * j + r];
+    }
+}
+
+bool rowsNear(const rt::Rows& a, const rt::Rows& b) {
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (std::fabs(a[i] - b[i]) > 1e-5f + 1e-6f * std::fabs(a[i])) return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+std::uint8_t RtScene::tableClass(d3d9::scene::Phase p) {
+    if (p.view == View::Shadow) return 4;
+    if (p.view != View::Main) return 0;
+    return p.pass == Pass::Solid ? 1 : p.pass == Pass::DepthPrepass ? 2 : 0;
+}
+
+std::uint64_t RtScene::tableKey(const void* entity, std::uint32_t opDesc, std::uint32_t first, std::uint32_t primitives) {
+    return tableMix(tableMix(tableMix(reinterpret_cast<std::uintptr_t>(entity), opDesc), first), primitives);
+}
+
+void RtScene::setTableEntries(bool on, bool compare) {
+    {  // diagnostics: keep running through DIFFERING (the counts show how often)
+        char buf[8];
+        tableNoTrip_ = GetEnvironmentVariableA("RVK_TABLE_NOTRIP", buf, sizeof(buf)) != 0;
+    }
+    tableCompare_ = compare;
+    if (on == tableOn_) return;
+    tableOn_ = on && !tableTripped_;
+    if (!tableOn_) tableClear();
+    spdlog::info("rt: scene table: persistent entries {}{}", tableOn_ ? "on" : "off", tableOn_ && compare ? std::format(" (check frame every {} frames)", kTableCompare) : "");
+}
+
+void RtScene::tableClear() {
+    for (auto& [k, e] : table_) {
+        if (rt::Registry::Instance* in = registry_.find(e.instKey)) in->pinned = false;
+    }
+    table_.clear();
+    tableByInst_.clear();
+    tableByOp_.clear();
+}
+
+void RtScene::tableErase(std::unordered_map<std::uint64_t, TableEntry, IdHash>::iterator it, bool unpin) {
+    const TableEntry& e = it->second;
+    if (unpin) {
+        if (rt::Registry::Instance* in = registry_.find(e.instKey)) in->pinned = false;
+    }
+    bool others = false;
+    {
+        const auto range = tableByInst_.equal_range(e.instKey);
+        for (auto o = range.first; o != range.second;) {
+            if (o->second == it->first) {
+                o = tableByInst_.erase(o);
+            } else {
+                others = true;
+                ++o;
+            }
+        }
+    }
+    if (unpin && others) {
+        if (rt::Registry::Instance* in = registry_.find(e.instKey)) in->pinned = true;  // (another entry still holds it)
+    }
+    const std::uint64_t opKey = tableMix(reinterpret_cast<std::uintptr_t>(e.entity), e.opDesc);
+    const auto range = tableByOp_.equal_range(opKey);
+    for (auto o = range.first; o != range.second; ++o) {
+        if (o->second == it->first) {
+            tableByOp_.erase(o);
+            break;
+        }
+    }
+    table_.erase(it);
+}
+
+// the registry dropped a pinned instance (aged by distance, its BLAS died, replaced, capped): its entry goes with it
+void RtScene::tableInstanceRemoved(std::uint64_t instKey) {
+    std::vector<std::uint64_t> keys;
+    const auto range = tableByInst_.equal_range(instKey);
+    for (auto o = range.first; o != range.second; ++o) keys.push_back(o->second);
+    if (keys.empty()) return;
+    ++ts_.instGone;
+    for (const std::uint64_t k : keys) {
+        if (const auto it = table_.find(k); it != table_.end()) tableErase(it, false);
+    }
+    tableByInst_.erase(instKey);
+}
+
+bool RtScene::coversDraw(const d3d9::CoverQuery& d) {
+    if (!tableOn_ || !active_ || d.kind != Kind::StaticMesh || d.instanced || d.blending || d.primitiveType != 4 || d.tag == nullptr ||
+        d.tag->entity == nullptr || d.vertexBuffer == nullptr || d.indexBuffer == nullptr) {
+        return false;
+    }
+    const std::uint8_t cls = tableClass(d.phase);
+    if (cls == 0) return false;
+    const bool timed = dev_.perfEnabled();
+    const auto t0 = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    const int ci = cls == 1 ? 0 : cls == 2 ? 1 : 2;
+    ++ts_.asked[ci];
+    bool covered = false;
+    do {
+        const auto it = table_.find(tableKey(d.tag->entity, d.tag->opDesc, d.first, d.primitives));
+        if (it == table_.end()) {
+            ++ts_.fallNone;
+            break;
+        }
+        const TableEntry& e = it->second;
+        if (e.entity != d.tag->entity || e.opDesc != d.tag->opDesc) {
+            ++ts_.fallIdent;
+            break;
+        }
+        if ((e.classMask & cls) == 0) {
+            ++ts_.fallClass;
+            break;
+        }
+        const engine::scenetable::Slot* s = engine::scenetable::slot(e.slot);
+        if (s == nullptr || s->entity != e.entity || s->generation != e.slotGen || s->version != e.slotVersion) {
+            ++ts_.fallMoved;
+            break;
+        }
+        // the BLAS key of the draw: the same buffers' generations, offsets and range as when it was learned
+        const d3d9::ResourceRef vr = d.vertexBuffer->ref(), ir = d.indexBuffer->ref();
+        const rt::BlasKey& k = e.key;
+        if (k.vb != vr.id || k.vbGen != vr.generation || k.ib != ir.id || k.ibGen != ir.generation || k.vertexOffset != d.vertexOffset ||
+            k.stride != d.vertexStride || k.first != d.first || k.primitives != d.primitives || k.baseVertex != d.baseVertex) {
+            ++ts_.fallIdent;
+            break;
+        }
+        if (RtMaterials::signature(d.engineVs, d.enginePs, d.tag->material, d.textures) != e.matSig[ci]) {
+            ++ts_.fallMaterial;  // another shader / texture (a streamed-in image): the material is resolved again by the full observation
+            break;
+        }
+        const std::uint64_t frame = dev_.frameValue();
+        if (tableCompareFrame(frame)) {
+            tableCheckFrame_ = frame;
+            ++ts_.fallCompare;
+            break;
+        }
+        if ((frame + e.salt) % kTableRelearn == 0) {
+            ++ts_.fallRelearn;
+            break;
+        }
+        ++ts_.covered[ci];
+        covered = true;
+    } while (false);
+    if (timed) ts_.coverMs += msSince(t0);
+    return covered;
+}
+
+// a plain draw of the table's class has just been observed in full (`in` = its registry instance after the sighting): compare it with its entry
+// (check frames), then learn / refresh the entry and pin the instance
+void RtScene::tableObserved(const d3d9::ReplaceQuery& q, const Blas& b, rt::Registry::Instance& in, const rt::Rows& rows, bool fresh,
+                            const rt::Registry::Instance* pre) {
+    if (q.kind != Kind::StaticMesh || q.tag == nullptr || q.tag->entity == nullptr || q.primitiveType != 4 || q.blending || q.instanced || b.glass ||
+        b.animatedOnly || q.tag->water != d3d9::draws::Water::None) {
+        return;
+    }
+    const std::uint8_t cls = tableClass(q.phase);
+    if (cls == 0) return;
+    const int ci = cls == 1 ? 0 : cls == 2 ? 1 : 2;
+    ++ts_.observed[ci];
+    const std::uint64_t frame = dev_.frameValue();
+    const std::uint64_t ek = tableKey(q.tag->entity, q.tag->opDesc, q.first, q.primitives);
+    auto it = table_.find(ek);
+    const std::uint32_t slotIndex = engine::scenetable::find(q.tag->entity);
+    const engine::scenetable::Slot* slot = engine::scenetable::slot(slotIndex);
+    if (slot == nullptr) {
+        ++ts_.refusedNoSlot;
+        if (it != table_.end()) tableErase(it, true);
+        return;
+    }
+    rt::Rows derived;
+    rowsOfWorld(slot->world, derived);
+    if (!rowsNear(derived, rows)) {
+        ++ts_.refusedRows;  // a hierarchy node / carried matrix: not the entity's own world matrix
+        if (it != table_.end()) tableErase(it, true);
+        return;
+    }
+    // the check frame: the entry as the last full observation left it against what this one found
+    if (tableCompareFrame(frame)) {
+        if (it != table_.end() && (it->second.classMask & cls) != 0 && it->second.slotGen == slot->generation && it->second.slotVersion == slot->version) {
+            TableEntry& e = it->second;
+            e.comparedFrame = frame;
+            bool bad = false;
+            if (pre == nullptr || e.instKey != in.key || e.blas != b.id || !(e.key == b.key)) {
+                ++ts_.diffKey;
+                bad = true;
+            }
+            if (!rowsNear(e.rows, rows) || !rowsNear(derived, e.rows)) {
+                ++ts_.diffRows;
+                bad = true;
+            }
+            // what the covered draw would have skipped: the sighting must change nothing of the instance it had (flags, data word, view bit, material)
+            if (pre != nullptr) {
+                if (pre->flags != in.flags) {
+                    ++ts_.diffFlags;
+                    bad = true;
+                }
+                if ((pre->data & 0xFFFFu) != (in.data & 0xFFFFu)) {  // (the kind in the high bits is the latest sighting's, diagnostics only)
+                    ++ts_.diffData;
+                    bad = true;
+                }
+                if ((pre->views & viewBit(q.phase.view)) != viewBit(q.phase.view)) {
+                    ++ts_.diffFlags;
+                    bad = true;
+                }
+                // the material is judged on the frame's final state (several draws over one instance: the last one counts): the first pre-state of each instance
+                tableMatPre_.emplace(in.key, pre->material);
+            }
+            bad ? ++ts_.differing : ++ts_.matched;
+            if (bad && ts_.differing <= 8) {
+                spdlog::warn("rt: scene table: DIFFERING entry (entity {} op {} range {} x {}, class {}, view {}): key {} rows {} flags 0x{:x} -> 0x{:x} views {} -> {} data 0x{:x} -> 0x{:x} material {} -> {}",
+                             q.tag->entity, q.tag->opDesc, q.first, q.primitives, cls, static_cast<int>(viewBit(q.phase.view)), pre != nullptr && e.instKey == in.key ? "same" : "differs",
+                             rowsNear(e.rows, rows) ? "same" : "differ", pre != nullptr ? pre->flags : 0u, in.flags, pre != nullptr ? pre->views : 0u, in.views,
+                             pre != nullptr ? pre->data : 0u, in.data, pre != nullptr ? pre->material : 0u, in.material);
+            }
+        } else if (it == table_.end() && !fresh && in.firstFrame + 2 <= frame) {
+            ++ts_.missing;  // an old instance of an eligible draw that no entry held
+        }
+    }
+    // learn / refresh
+    if (it != table_.end()) {
+        TableEntry& e = it->second;
+        const bool same = e.instKey == in.key && e.blas == b.id && e.key == b.key && e.slotGen == slot->generation && e.slotVersion == slot->version;
+        if (!same) {
+            tableErase(it, true);
+            it = table_.end();
+        } else {
+            e.classMask |= cls;
+            e.matSig[ci] = RtMaterials::signature(q);
+            e.flags = in.flags;
+            e.data = in.data;
+            e.material = in.material;
+            in.pinned = true;
+            ++ts_.relearned;
+            return;
+        }
+    }
+    // a level-of-detail switch: the entity's same op drawn from another vertex / index buffer replaces the entries of the old one
+    const std::uint64_t opKey = tableMix(reinterpret_cast<std::uintptr_t>(q.tag->entity), q.tag->opDesc);
+    {
+        std::vector<std::uint64_t> stale;
+        const auto range = tableByOp_.equal_range(opKey);
+        for (auto o = range.first; o != range.second; ++o) {
+            const auto other = table_.find(o->second);
+            if (other == table_.end()) continue;
+            if (other->second.key.vb != b.key.vb || other->second.key.vbGen != b.key.vbGen || other->second.key.ib != b.key.ib ||
+                other->second.key.ibGen != b.key.ibGen) {
+                stale.push_back(o->second);
+            }
+        }
+        for (const std::uint64_t k : stale) {
+            if (const auto o = table_.find(k); o != table_.end()) {
+                tableErase(o, true);
+                ++ts_.lodErased;
+            }
+        }
+    }
+    TableEntry e;
+    e.entity = q.tag->entity;
+    e.opDesc = q.tag->opDesc;
+    e.first = q.first;
+    e.primitives = q.primitives;
+    e.slot = slotIndex;
+    e.slotGen = slot->generation;
+    e.slotVersion = slot->version;
+    e.key = b.key;
+    e.blas = b.id;
+    e.instKey = in.key;
+    e.rows = rows;
+    e.flags = in.flags;
+    e.data = in.data;
+    e.material = in.material;
+    e.classMask = cls;
+    e.salt = static_cast<std::uint8_t>(tableMix(in.key, 0x5A17) >> 40);  // per instance: every entry over one instance is observed again in the same frame (its final material is the last draw's)
+    e.matSig[ci] = RtMaterials::signature(q);
+    e.comparedFrame = tableCompareFrame(frame) ? frame : 0;
+    table_.emplace(ek, e);
+    tableByInst_.emplace(in.key, ek);
+    tableByOp_.emplace(opKey, ek);
+    in.pinned = true;
+    ++ts_.learned;
+}
+
+// once per frame (the RT scene's pass, before the registry ages): an entry whose scene-table slot was freed, reallocated or moved no longer pins its
+// instance (the instance ages as before; a moved object's draws fall through to the full observation and make a new one)
+void RtScene::tableMaintain(std::uint64_t frame) {
+    if (!tableOn_) return;
+    if (!tableMatPre_.empty() && frame > tableCheckFrame_) {
+        // the previous check frame's materials: the instance's final material against its first pre-state (same content, or the old one died)
+        for (const auto& [key, preMaterial] : tableMatPre_) {
+            const rt::Registry::Instance* in = registry_.find(key);
+            if (in == nullptr || in->material == preMaterial) continue;
+            const RtMaterial* a = preMaterial != 0 ? materials_.get(preMaterial) : nullptr;
+            const RtMaterial* c = in->material != 0 ? materials_.get(in->material) : nullptr;
+            const bool same = a != nullptr && c != nullptr && a->albedo == c->albedo && a->opacity == c->opacity && a->sampler == c->sampler &&
+                              a->uvSet == c->uvSet && a->alpha == c->alpha && a->masked == c->masked && a->colour == c->colour;
+            if (a == nullptr || a->dead || same) {
+                ++ts_.materialIds;
+            } else {
+                ++ts_.diffMaterial;
+                ++ts_.differing;
+                if (ts_.diffMaterial <= 4) {
+                    spdlog::warn("rt: scene table: DIFFERING material of instance {}: {} '{}' -> {} '{}' over a check frame (albedo {}/{} opacity {}/{} sampler {}/{} uvSet 0x{:x}/0x{:x} alpha {}/{} masked {}/{} colour {:x}/{:x} dead {}/{})", key, preMaterial,
+                                 a != nullptr ? a->name : std::string("gone"), in->material, c != nullptr ? c->name : std::string("none"),
+                                 a ? static_cast<const void*>(a->albedo) : nullptr, c ? static_cast<const void*>(c->albedo) : nullptr, a ? static_cast<const void*>(a->opacity) : nullptr, c ? static_cast<const void*>(c->opacity) : nullptr,
+                                 a ? a->sampler : 0u, c ? c->sampler : 0u, a ? a->uvSet : 0u, c ? c->uvSet : 0u, a ? a->alpha : 0u, c ? c->alpha : 0u, a ? a->masked : false, c ? c->masked : false,
+                                 a ? a->colour : 0u, c ? c->colour : 0u, a ? a->dead : false, c ? c->dead : false);
+                }
+            }
+        }
+        tableMatPre_.clear();
+    }
+    if (tableCheckFrame_ != 0 && tableCheckFrame_ != tableExtraCounted_ && frame > tableCheckFrame_) {
+        // the previous check frame: entries none of whose draws was observed on it (off-screen / not drawn now) stay
+        for (const auto& [k, e] : table_) ts_.extra += e.comparedFrame != tableCheckFrame_ ? 1u : 0u;
+        ++ts_.checkFrames;
+        tableExtraCounted_ = tableCheckFrame_;
+    }
+    for (auto it = table_.begin(); it != table_.end();) {
+        const TableEntry& e = it->second;
+        const engine::scenetable::Slot* s = engine::scenetable::slot(e.slot);
+        if (s == nullptr || s->entity != e.entity || s->generation != e.slotGen || s->version != e.slotVersion) {
+            const auto victim = it++;
+            tableErase(victim, true);
+            ++ts_.slotDropped;
+        } else {
+            ++it;
+        }
+    }
+}
+
+void RtScene::logTable(double frames) {
+    if (!tableOn_ && ts_.asked[0] + ts_.asked[1] + ts_.asked[2] + ts_.learned == 0) return;
+    std::size_t pinned = 0, mainOnly = 0, shadowOnly = 0, both = 0;
+    for (const rt::Registry::Instance& in : registry_.instances()) {
+        pinned += in.pinned ? 1 : 0;
+        const bool m = (in.views & 1) != 0, sh = (in.views & 2) != 0;
+        (m && sh ? both : m ? mainOnly : shadowOnly) += 1;
+    }
+    const TableStats& t = ts_;
+    const auto sum3 = [](const std::uint64_t (&a)[3]) { return a[0] + a[1] + a[2]; };
+    const std::uint64_t asked = sum3(t.asked), covered = sum3(t.covered);
+    spdlog::info("rt: scene table (5 s): entries {} (pinned instances {} of {}: views main-only {} / cascade-only {} / both {}), per frame: covered draws skipped {:.0f} of {:.0f} asked ({:.1f} %; "
+                 "main solid {}/{}, z {}/{}, cascades {}/{}), full observations of the class {:.0f}; fall-throughs: no entry {}, class {}, moved {}, buffers / range {}, material inputs {}, relearn {}, check frame {}; "
+                 "learned {} (refreshed {}), refused: no slot {} / rows {}; erased: LOD {} / slot {} / instance gone {}; compare: matched {} / missing {} / extra {:.0f} per check frame ({} check frames) / DIFFERING {} "
+                 "(key {} rows {} flags {} data {} material {}; material ids changed {}); observe {:.3f} ms/frame, pre-filter {:.3f} ms/frame",
+                 table_.size(), pinned, registry_.size(), mainOnly, shadowOnly, both, static_cast<double>(covered) / frames, static_cast<double>(asked) / frames,
+                 asked != 0 ? 100.0 * static_cast<double>(covered) / static_cast<double>(asked) : 0.0, t.covered[0], t.asked[0], t.covered[1], t.asked[1], t.covered[2], t.asked[2],
+                 static_cast<double>(sum3(t.observed)) / frames, t.fallNone, t.fallClass, t.fallMoved, t.fallIdent, t.fallMaterial, t.fallRelearn, t.fallCompare, t.learned, t.relearned,
+                 t.refusedNoSlot, t.refusedRows, t.lodErased, t.slotDropped, t.instGone, t.matched, t.missing, static_cast<double>(t.extra) / static_cast<double>(std::max<std::uint64_t>(1, t.checkFrames)), t.checkFrames, t.differing, t.diffKey, t.diffRows, t.diffFlags,
+                 t.diffData, t.diffMaterial, t.materialIds, iv_.observeMs / frames, t.coverMs / frames);
+    // key / rows / flags / data differences are never expected; a material that differs from the frame's final one is a rare ordering case of several draws
+    // over one instance (a few per million compared draws): only a rate above 0.5 % trips
+    const std::uint64_t hard = t.diffKey + t.diffRows + t.diffFlags + t.diffData;
+    const bool tripped = hard != 0 || t.diffMaterial > std::max<std::uint64_t>(8, (t.matched + t.diffMaterial) / 200);
+    if (tripped && tableOn_ && !tableNoTrip_) {
+        tableTripped_ = true;
+        tableOn_ = false;
+        tableClear();
+        spdlog::error("rt: scene table: turned off: {} entries DIFFERING from the full observation on the check frames (rt.table_entries stays set; restart to retry)", t.differing);
+    }
+    ts_ = {};
 }
 
 // a range that gets new instances all the time (kChurnLimit within kChurnWindow frames) is volatile for a while
@@ -2198,6 +2591,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
     // the camera of this frame's main view
     const auto& cam = dev_.camera().valid ? dev_.camera() : dev_.lastCamera();
     const float camera[3] = {cam.position[0], cam.position[1], cam.position[2]};
+    tableMaintain(frame);
     registry_.age(camera, frame, now, limits_, [this](std::uint64_t id) -> const rt::Aabb* {
         const Blas* b = findBlas(id);
         return b != nullptr && b->bounds.valid() ? &b->bounds : nullptr;
@@ -2250,7 +2644,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
         // the registry's ghosts of volatile ranges (the TLAS skips them anyway): dropped
         registry_.removeIf([&](const rt::Registry::Instance& in) {
             const Blas* b = findBlas(in.blas);
-            return b != nullptr && b->volatileUntil >= frame && in.lastFrame + 4 * kVolatileKeep < frame;
+            return b != nullptr && !in.pinned && b->volatileUntil >= frame && in.lastFrame + 4 * kVolatileKeep < frame;
         });
     }
     // level of detail (docs/research/rt-lod.md): each instance's rung (0 the engine's draw, 1 the proxy, 2 the box) with hysteresis,
@@ -2320,7 +2714,7 @@ void RtScene::record(d3d9::PassContext& ctx) {
         // an animated SpeedTree stands in for its rest-pose instance (the wind: observeTree)
         if (!animatedKeys_.empty() && animatedKeys_.contains(in.key)) return false;
         // volatile ranges (churning instances): only what was seen in the last frames, the stale ones are ghosts of earlier places
-        if (b->volatileUntil >= frame && in.lastFrame + kVolatileKeep < frame) return false;
+        if (b->volatileUntil >= frame && !in.pinned && in.lastFrame + kVolatileKeep < frame) return false;
         // an instance known only through an overlay material (caustics, a blended untextured wet-sand strip) lies on another
         // surface: left out (its coplanar hits would speckle the base)
         if (in.material != 0) {
@@ -2699,6 +3093,7 @@ void RtScene::logStats(bool force) {
                  lastTriangles_, blasMiB + tlasMiB + scratchMiB, blasMiB, tlasMiB, scratchMiB, iv_.observeMs / f,
                  static_cast<double>(iv_.observed) / f, static_cast<double>(iv_.skipped) / f, static_cast<double>(iv_.sightings) / f, iv_.buildCpuMs / f, iv_.passCpuMs / f,
                  std::string("-PerfFrame: pass rt.scene"));
+    logTable(f);
     const RtMaterials::Counters mc = materials_.takeCounters();
     spdlog::info("rt: scene: materials {} (per frame: {:.1f} resolves, {:.3f} ms; interval: {} uv evaluations, graph {} (pool image {}) / bytecode s9 {} / "
                  "no texture {}, approximate {}, failed {}, active shader != material's {}); records: textured {}, untextured {}, cut-out {}, segmented {} ({} segments; "

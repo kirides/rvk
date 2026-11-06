@@ -115,6 +115,9 @@ public:
         Sphere sphere{};
         bool sphereValid = false;
         std::uint8_t lod = 0;  // the RT level of detail rung (enh/rt_lod.h: 0 full, 1 proxy, 2 box): the hysteresis state
+        // F8-0 (docs/research/frame-ownership.md 7.20): a persistent table entry holds this instance (its scene-table slot is live and unmoved): it does not
+        // age out for being unseen (the radius still applies) and counts as seen for the volatile-range rule
+        bool pinned = false;
     };
     struct Counters {
         std::uint64_t added = 0, replaced = 0, aged = 0, tooFar = 0, capped = 0, dropped = 0;

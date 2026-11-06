@@ -1245,6 +1245,35 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .page = "Debug", .section = "Debug views",
     });
 
+    r.rtTableEntries = &reg.add({
+        .key = "rt.table_entries",
+        .label = "RT scene: persistent entries",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode only (frame-ownership.md F8-0, no picture change intended): the ray tracing scene learns each static, non-instanced, opaque mesh draw once "
+                       "and then holds it as a persistent entry keyed by its scene-table slot (entity, op, draw range): while the entity is cached in and unmoved the draw "
+                       "is no longer shown to the scene's observer (no query, no sighting), its instance stays in the TLAS. Every 32nd frame per entry the draw is observed "
+                       "again (materials). rvk.log `rt: scene table (5 s)`.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"renderer.mode", "full", false, false}},
+        .page = "Debug", .section = "Native frame",
+    });
+    r.rtTableCompare = &reg.add({
+        .key = "debug.rt_table_compare",
+        .label = "RT scene: compare the persistent entries",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "With rt.table_entries: every 10th frame the pre-filter is off, every covered draw is observed in full and diffed against its entry (BLAS key, rows, "
+                       "flags, material); any DIFFERING in a 5 s window turns the entries off (rvk.log `rt: scene table (5 s)`).",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"rt.table_entries", "true", false, true}},
+        .page = "Debug", .section = "Native frame",
+    });
+
     // ---- Graphics tab: water ----
     r.waterEnabled = &reg.add({
         .key = "water.enabled",

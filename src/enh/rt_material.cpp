@@ -58,14 +58,18 @@ bool RtMaterial::operator==(const RtMaterial& o) const {
 }
 
 std::uint64_t RtMaterials::signature(const d3d9::ReplaceQuery& q) {
+    return signature(q.engineVs, q.enginePs, q.tag != nullptr ? q.tag->material : nullptr, q.textures);
+}
+
+std::uint64_t RtMaterials::signature(const d3d9::Shader* vs, const d3d9::Shader* ps, const void* tagMaterial, d3d9::Texture* const* textures) {
     std::uint64_t h = 0x51ED27u;
-    h = mix(h, q.engineVs != nullptr ? q.engineVs->hash : 0);
-    h = mix(h, q.enginePs != nullptr ? q.enginePs->hash : 0);
-    h = mix(h, reinterpret_cast<std::uintptr_t>(q.tag != nullptr ? q.tag->material : nullptr));
+    h = mix(h, vs != nullptr ? vs->hash : 0);
+    h = mix(h, ps != nullptr ? ps->hash : 0);
+    h = mix(h, reinterpret_cast<std::uintptr_t>(tagMaterial));
     // the textures of the material slots the pixel shader samples (the others are stale bindings of earlier draws)
     for (std::uint32_t s = kMaterialBase; s < kMaterialBase + kMaterialSlots; ++s) {
-        const bool used = q.enginePs != nullptr && q.enginePs->reflection.samplers[s] != shader::TextureType::Unknown;
-        h = mix(h, reinterpret_cast<std::uintptr_t>(used && q.textures != nullptr ? q.textures[s] : nullptr));
+        const bool used = ps != nullptr && ps->reflection.samplers[s] != shader::TextureType::Unknown;
+        h = mix(h, reinterpret_cast<std::uintptr_t>(used && textures != nullptr ? textures[s] : nullptr));
     }
     return h;
 }

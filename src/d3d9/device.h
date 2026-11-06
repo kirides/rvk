@@ -400,6 +400,23 @@ struct VariantProvider {
 
 // ---- device -------------------------------------------------------------------------------------------------------
 
+// F8-0 (docs/research/frame-ownership.md 7.20): the identity of an indexed draw as the observer loops know it before any query is built
+// (DrawObserver::coversDraw): everything the RT scene's BLAS key and its "is this draw the one of a table entry" test read
+struct CoverQuery {
+    draws::Kind kind = draws::Kind::Unknown;
+    scene::Phase phase{};
+    const draws::Tag* tag = nullptr;
+    const Buffer* vertexBuffer = nullptr;
+    const Buffer* indexBuffer = nullptr;
+    std::uint32_t vertexOffset = 0, vertexStride = 0, primitiveType = 4, first = 0, primitives = 0;
+    std::int32_t baseVertex = 0;
+    bool instanced = false, blending = false;
+    // the inputs of an RT material (RtMaterials::signature): the engine's shaders and the bound textures s0..s15
+    const Shader* engineVs = nullptr;
+    const Shader* enginePs = nullptr;
+    Texture* const* textures = nullptr;
+};
+
 // Draw replacement (enhancements that take over engine draws, e.g. enh/water: docs/research/water.md). For draws of camera
 // views tagged as water (draws::Tag::water, or kind Refracted) the device asks the replacer what to do with the draw before
 // it records anything: draw it as the engine asked, skip it, draw the same geometry with other shaders, or draw procedural
@@ -436,6 +453,12 @@ struct ReplaceQuery {
     // F2c-2 (native.owned_records): the draw's world rows c33..c35 (3 float4) as the object table holds them; null = read the register file (c33..c35)
     const float* objectRows = nullptr;
 };
+
+// (defined with the observer loops' helper: the CoverQuery of a built query)
+inline CoverQuery coverOf(const ReplaceQuery& q) {
+    return {q.kind, q.phase, q.tag, q.vertexBuffer, q.indexBuffer, q.vertexOffset, q.vertexStride, q.primitiveType, q.first, q.primitives, q.baseVertex,
+            q.instanced, q.blending, q.engineVs, q.enginePs, q.textures};
+}
 
 struct DrawReplacement {
     enum class Action : std::uint8_t {
@@ -507,6 +530,9 @@ public:
     virtual bool observes(draws::Kind kind, scene::Phase phase) const = 0;
     // must not change device state (Device::vsConstant, streamSource, Buffer::gpu / readCpu / deviceAddress are fine)
     virtual void observe(Device& device, const ReplaceQuery& query) = 0;
+    // F8-0 pre-filter, asked right after `observes` and before the query is built: true = the observer already holds everything observe() would
+    // learn from this draw (a persistent table entry): the draw is not shown to it. Must be cheap and must not change device state.
+    virtual bool coversDraw(const CoverQuery& /*draw*/) { return false; }
     // F2c-3 (native.owned_static): what the observer reads of the draw's constant registers. An owned draw has no composed register file: `Material` = the
     // world rows (ReplaceQuery::objectRows) and the registers of the material / view / object windows (the device loads their CPU images before observe),
     // `All` (the default) = anything: owned draws are not made while such an observer is registered

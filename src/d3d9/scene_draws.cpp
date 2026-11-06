@@ -564,8 +564,10 @@ int Device::replayOwned(const CachedDraw& c, const DeriveIn& in, const OwnedWind
             captureRequestRw_ = {};
             captureInstances_ = false;
             bool loaded = false;
+            const CoverQuery cq = coverOf(q);
             for (DrawObserver* o : observers_) {
                 if (!o->observes(c.kind, c.phase)) continue;
+                if (o->coversDraw(cq)) continue;  // F8-0
                 if (!loaded) {
                     loadOwnedRegisters(ow);
                     loaded = true;

@@ -277,3 +277,24 @@ TEST(rt_lod_simplify_grid) {
     bad[7] = static_cast<std::uint32_t>(vertexCount + 5);
     CHECK(lod::simplify(pos.data(), vertexCount, 12, bad, 0.5f, 0.05f).indices.empty());
 }
+
+// F8-0: a pinned instance (held by a persistent table entry) never ages for being unseen, the radius still applies
+TEST(rt_registry_pinned_never_stale) {
+    rt::Registry reg;
+    rt::Limits l;
+    l.unseenFrames = 100;
+    l.unseenSeconds = 5.0;
+    l.radius = 10000.0f;
+    const float cam[3] = {0, 0, 0};
+    const rt::Rows a = at(100, 0, 0), b = at(200, 0, 0), c = at(12000, 0, 0);
+    reg.see(rt::instanceKey(1, a), 1, a, 0, 0, 0, 1, 1, 0.0);
+    reg.see(rt::instanceKey(2, b), 2, b, 0, 0, 0, 1, 1, 0.0);
+    reg.see(rt::instanceKey(3, c), 3, c, 0, 0, 0, 1, 1, 0.0);
+    reg.find(rt::instanceKey(1, a))->pinned = true;
+    reg.find(rt::instanceKey(3, c))->pinned = true;
+    // long unseen: the unpinned one goes, the pinned near one stays, the pinned far one goes by the radius
+    CHECK(reg.age(cam, 5000, 500.0, l, nullptr) == 2);
+    CHECK(reg.size() == 1 && reg.find(rt::instanceKey(1, a)) != nullptr && reg.counters().aged == 1 && reg.counters().tooFar == 1);
+    reg.find(rt::instanceKey(1, a))->pinned = false;
+    CHECK(reg.age(cam, 5001, 501.0, l, nullptr) == 1 && reg.size() == 0);
+}
