@@ -78,6 +78,9 @@ public:
     // drawn) for the check. Returns the entry (kNoEntry: table full).
     std::uint32_t note(std::uint32_t illumSlot, const ComposeParams& p, const float drawn[24][4]);
 
+    // F2c-1: the same entry (created / kept alive like note's) without registers to check: for draws derived from records. kNoEntry: inactive / table full
+    std::uint32_t entryFor(std::uint32_t illumSlot, const ComposeParams& p);
+
     // once per present, after illumtable().flush (engine thread): entry uploads, idle sweep, the compose pass, the read-back check, the 5 s log
     void flush(d3d9::Device& dev, bool verify);
 
@@ -111,6 +114,7 @@ private:
         };
         std::vector<Expect> expect;
     };
+    std::uint32_t entryForLocked(std::uint32_t illumSlot, const ComposeParams& p);  // (mutex_ held)
     void flushLocked(d3d9::Device& dev, bool verify);
     void startCheck(d3d9::Device& dev, std::uint32_t used);
     void collect(d3d9::Device& dev);

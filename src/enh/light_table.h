@@ -27,6 +27,12 @@
 
 namespace rvk::enh {
 
+// registryGeneration's bookkeeping (pure state transitions; LightTable::record drives them, tests call them directly)
+void registryNoteComplete(bool complete);             // bumps the generation when the flag changes
+void registryNoteKnown(std::uint64_t positionsHash);  // bumps the generation when the light set's position hash differs from the previous build's
+std::uint64_t registryPositionHash(const float (*positions)[4], std::uint32_t count);  // order-independent: a sum of a mix of each position's x / y / z (the 4th float is ignored)
+void registryResetForTest();
+
 inline constexpr std::uint32_t kLightMax = 1024;               // RVK_LIGHT_MAX
 inline constexpr std::uint32_t kLightBytes = 64;               // RVK_LIGHT_BYTES
 inline constexpr std::uint32_t kLightHeaderBytes = 128;        // RVK_LIGHT_HEADER_BYTES
@@ -114,6 +120,9 @@ public:
     // true when a light of the last build (any level: the far lights too) sits within 8 units of `pos`: the table lights an object's own light there
     // per pixel, so the object's batch need not end on that light (native::planTreeBatches' table merge)
     static bool lightKnown(const float pos[3]);
+    // F2c-1: a counter bumped whenever what `lightKnown` / `registryComplete` depend on changes (the "registry complete" flag flips, or the set of the last build's
+    // light positions differs from the previous build's): a retained record that took its `holdsAll` decision from them stays valid while the value is the same
+    static std::uint64_t registryGeneration();
     static void noteDrawnLight(const float pr[4], const float col[4]);
 
     explicit LightTable(d3d9::Device& device);

@@ -690,11 +690,15 @@ void Device::splitStage(bool vertex, const Shader& sh, rhi::GpuRef (&windows)[sh
                     ownedServed_[stage] |= 1u << w;
                     if (ow.kind == OwnedWindows::Kind::Material) ++ownedStats_.material[stage];
                     else if (ow.kind == OwnedWindows::Kind::Lighting) ++ownedStats_.lighting;
+                    else if (ow.kind == OwnedWindows::Kind::Object) ++ownedStats_.object;
+                    else if (vertex && w == 1) ++ownedStats_.view1;
                     else ++ownedStats_.view[stage];
                     if (splitVerify_ && ow.image != nullptr) verifyOwned(vertex, w, need, ow, regs, sh);
                     continue;
                 }
-                ++ownedStats_.fallbackShort;  // (the image is shorter than this shader reads: the normal block)
+                ++ownedStats_.fallbackShort;
+                if (vertex && w == 1) ++ownedStats_.shortVs1;
+                if (vertex && w == 2) ++ownedStats_.shortVs2;  // (the image is shorter than this shader reads: the normal block)
             } else if (ow.why == OwnedWindows::WhySwitch) {
                 ++ownedStats_.fallbackSwitch;
             } else if (ow.why == OwnedWindows::WhyOther) {
@@ -730,7 +734,8 @@ void Device::verifyOwned(bool vertex, std::uint32_t w, std::uint32_t need, const
     std::uint32_t reg = first[w];
     for (std::uint32_t i = 0; !bad && i < need && i < 32; ++i) {
         if ((ow.verifyMask >> i & 1u) == 0) continue;
-        if (std::memcmp(ow.image + static_cast<std::size_t>(i) * 4, regs[first[w] + i], 16) != 0) {
+        const bool wOnly = (ow.wOnlyMask >> i & 1u) != 0;
+        if (std::memcmp(ow.image + static_cast<std::size_t>(i) * 4 + (wOnly ? 3 : 0), regs[first[w] + i] + (wOnly ? 3 : 0), wOnly ? 4 : 16) != 0) {
             bad = true;
             reg = first[w] + i;
         }
@@ -739,7 +744,7 @@ void Device::verifyOwned(bool vertex, std::uint32_t w, std::uint32_t need, const
     // device's stale value there, the table gives the record's)
     if (!bad) {
         for (std::uint32_t i = 0; i < need && i < 32; ++i) {
-            if ((ow.verifyMask >> i & 1u) != 0) continue;
+            if ((ow.verifyMask >> i & 1u) != 0 || (ow.ignoreMask >> i & 1u) != 0) continue;
             if (std::memcmp(ow.image + static_cast<std::size_t>(i) * 4, regs[first[w] + i], 16) != 0) {
                 ++ownedStats_.uncomposedDiffer;
                 if (ownedStats_.uncomposedDiffer <= 12) {

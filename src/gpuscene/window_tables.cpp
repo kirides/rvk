@@ -20,15 +20,18 @@ WindowTables& windowtables() {
     return t;
 }
 
-bool WindowTables::fillViews(d3d9::Device& dev, d3d9::OwnedWindows& ow) {
+bool WindowTables::fillViews(d3d9::Device& dev, d3d9::OwnedWindows& ow, const float (*vs1)[4], std::uint32_t vs1Composed) {
     using d3d9::OwnedWindows;
     ow.w[0][0] = OwnedWindows::Win{};
     ow.w[1][0] = OwnedWindows::Win{};
+    ow.w[0][1] = OwnedWindows::Win{};
     if (!active_ || !views_.ready()) return false;
     ++viewLookups_;
     ViewRecord cand;
     std::memcpy(cand.vs, dev.vsConstants(), sizeof(cand.vs));
     std::memcpy(cand.ps, dev.psConstants(), sizeof(cand.ps));
+    if (vs1 != nullptr) std::memcpy(cand.vs1, vs1, sizeof(cand.vs1));
+    else std::memset(cand.vs1, 0, sizeof(cand.vs1));
     auto& shadow = views_.shadow();
     std::uint32_t slot = kViewCapacity;
     // the block just used first (consecutive draws of one view), then the few before it
@@ -45,6 +48,19 @@ bool WindowTables::fillViews(d3d9::Device& dev, d3d9::OwnedWindows& ow) {
         slot = cursor_++;
         peak_ = std::max(peak_, cursor_);
         if (std::memcmp(&shadow[slot], &cand, sizeof(cand)) != 0) {
+            // (statistics: is this block a variant of one of this frame's other blocks in c0..c3 only (depth-bias view-projection) / c12..c30 only?)
+            for (std::uint32_t s = 0; s < slot; ++s) {
+                const ViewRecord& o = shadow[s];
+                const bool restSame = std::memcmp(&o.vs[4], &cand.vs[4], sizeof(cand.vs) - 4 * 16) == 0 && std::memcmp(o.ps, cand.ps, sizeof(cand.ps)) == 0;
+                if (restSame && std::memcmp(o.vs1, cand.vs1, sizeof(cand.vs1)) == 0) {
+                    ++viewDbvp_;
+                    break;
+                }
+                if (std::memcmp(o.vs, cand.vs, sizeof(cand.vs)) == 0 && std::memcmp(o.ps, cand.ps, sizeof(cand.ps)) == 0) {
+                    ++viewVs1Split_;
+                    break;
+                }
+            }
             shadow[slot] = cand;
             views_.mark(slot);
             ++viewNew_;
@@ -69,6 +85,16 @@ bool WindowTables::fillViews(d3d9::Device& dev, d3d9::OwnedWindows& ow) {
     ps.covered = 5;
     ps.verifyMask = 0x1Fu;
     ps.image = shadow[slot].ps[0];
+    if (vs1 != nullptr) {
+        // VS window 1 (c12..c30): the block's vs1 registers; the biased base = block + 272 - 12 x 16
+        OwnedWindows::Win& w1 = ow.w[0][1];
+        w1.kind = OwnedWindows::Kind::View;
+        w1.base = rec.plus(static_cast<std::int64_t>(offsetof(ViewRecord, vs1)) - 12 * 16);
+        w1.covered = kViewVs1Regs;
+        w1.verifyMask = vs1Composed & ((1u << kViewVs1Regs) - 1u);
+        w1.ignoreMask = ~vs1Composed & ((1u << kViewVs1Regs) - 1u);  // (an uncomposed register holds the admin pool's value; the file holds the stale one of an earlier draw)
+        w1.image = shadow[slot].vs1[0];
+    }
     return true;
 }
 

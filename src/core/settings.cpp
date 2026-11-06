@@ -2482,6 +2482,21 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .needs = {{"native.material_table", "true", false, true}},
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeOwnedObjects = &reg.add({
+        .key = "native.owned_objects",
+        .label = "Native frame: owned object registers",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode only, needs owned windows (frame-ownership.md F2c-1, no picture change): the native static ops' non-instanced mesh draws read the "
+                       "object registers (VS c31..c35: fade, world matrix) from a persistent object table by scene-table slot and the admin registers (VS c12..c30) "
+                       "from the per-view block instead of uploading them per draw. debug.split_verify compares every served window with the register file. "
+                       "rvk.log `native: owned objects (5 s)`.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"native.owned_windows", "true", false, true}, {"native.material_table", "true", false, true}},
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeSceneDraws = &reg.add({
         .key = "native.scene_draws",
         .label = "Native frame: scene draws",

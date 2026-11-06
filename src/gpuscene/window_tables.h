@@ -32,7 +32,12 @@ public:
     bool active() const { return active_; }
 
     // the view windows of a draw (VS / PS window 0) from the device's register file as it is now, into `ow`; false: no view table yet / full
-    bool fillViews(d3d9::Device& dev, d3d9::OwnedWindows& ow);
+    // `vs1` (optional, 19 registers c12..c30: the admin pool's values as the composition holds them): written into the block too and VS window 1 served
+    // from it (F2c-1, native.owned_objects); null = the block's c12..c30 stay zero and window 1 is not offered
+    bool fillViews(d3d9::Device& dev, d3d9::OwnedWindows& ow, const float (*vs1)[4] = nullptr, std::uint32_t vs1Composed = 0);
+    // blocks of this frame that differ from another block only in c0..c3 (the depth-bias view-projection variant) / only in c12..c30 (per-draw variation of window 1)
+    std::uint64_t dbvpBlocks() const { return viewDbvp_; }
+    std::uint64_t vs1SplitBlocks() const { return viewVs1Split_; }
 
     // once per present (before the upload list is closed): uploads the frame's view blocks, restarts the cursor, the 5 s log
     void flush(d3d9::Device& dev);
@@ -46,6 +51,7 @@ private:
     std::uint32_t cursor_ = 0;          // view blocks of this frame
     std::uint32_t lastSlot_ = 0;
     std::uint64_t frame_ = 0;
+    std::uint64_t viewDbvp_ = 0, viewVs1Split_ = 0;
     std::uint64_t viewLookups_ = 0, viewReused_ = 0, viewNew_ = 0, viewFull_ = 0, viewSame_ = 0;  // totals
     std::uint64_t lastLookups_ = 0, lastReused_ = 0, lastNew_ = 0, lastFrame_ = 0, lastBytes_ = 0, lastSlots_ = 0;
     std::uint32_t peak_ = 0;

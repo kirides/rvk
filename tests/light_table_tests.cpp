@@ -76,3 +76,32 @@ TEST(light_table_shadow_entries_are_exact_in_half_floats) {
     }
     CHECK(lightShadowEncode(5, 1.0f) < 6.0f && lightShadowEncode(5, 0.0f) == 5.0f);
 }
+
+// F2c-1: LightTable::registryGeneration moves exactly when the "registry complete" flag flips or the set of known light positions changes
+TEST(light_table_registry_generation) {
+    using namespace enh;
+    registryResetForTest();
+    const std::uint64_t g0 = LightTable::registryGeneration();
+    registryNoteComplete(false);  // unchanged flag
+    CHECK(LightTable::registryGeneration() == g0);
+    registryNoteComplete(true);
+    const std::uint64_t g1 = LightTable::registryGeneration();
+    CHECK(g1 != g0 && LightTable::registryComplete());
+    registryNoteComplete(true);
+    CHECK(LightTable::registryGeneration() == g1);
+    const float a[3][4] = {{1, 2, 3, 0.5f}, {4, 5, 6, 0.25f}, {7, 8, 9, 1.0f}};
+    const float reordered[3][4] = {{7, 8, 9, 7.0f}, {1, 2, 3, 8.0f}, {4, 5, 6, 9.0f}};  // same positions, another order and other 4th floats
+    const float moved[3][4] = {{1, 2, 3, 0.5f}, {4, 5, 6, 0.25f}, {7, 8, 9.5f, 1.0f}};
+    const float fewer[2][4] = {{1, 2, 3, 0.5f}, {4, 5, 6, 0.25f}};
+    CHECK(registryPositionHash(a, 3) == registryPositionHash(reordered, 3));
+    CHECK(registryPositionHash(a, 3) != registryPositionHash(moved, 3));
+    CHECK(registryPositionHash(a, 3) != registryPositionHash(fewer, 2));
+    registryNoteKnown(registryPositionHash(a, 3));
+    const std::uint64_t g2 = LightTable::registryGeneration();
+    CHECK(g2 != g1);
+    registryNoteKnown(registryPositionHash(reordered, 3));  // the same set: no change
+    CHECK(LightTable::registryGeneration() == g2);
+    registryNoteKnown(registryPositionHash(moved, 3));
+    CHECK(LightTable::registryGeneration() != g2);
+    registryResetForTest();
+}

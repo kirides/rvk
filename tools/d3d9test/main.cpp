@@ -926,6 +926,130 @@ void testSceneDraws(Fixture& f) {
     dev.release(std::move(ib));
 }
 
+// F2c-1 owned windows through the device's own path (frame-ownership.md 7.13): a translated vertex shader that reads VS window 1 (c12) and window 2 (c32.w, c33)
+// is drawn (a) with the registers set the normal way and (b) with the register file holding junk and the windows served from persistent images
+// (a view block's c12..c30 + an object record's c31..c35 in one host-visible buffer behind a 4 KiB pad, window bases = image - first x 16, as the tables
+// build them): the pictures must agree, the stats must count one VS1 + one VS2 window, an image shorter than the shader's read extent must fall back to the
+// registers, and a changed image must change the picture (the draw really reads it)
+void testOwnedWindows(Fixture& f) {
+    Device& dev = f.dev;
+    static const char* kVsOwned = R"(
+vs_3_0
+dcl_position v0
+dcl_color v1
+dcl_texcoord v2
+dcl_position o0
+dcl_color o1
+dcl_texcoord o2
+mov o0, v0
+add r0, c12, c33
+mul o1, r0, c32.w
+mov o2, v2
+)";
+    const auto vsOwned = shaderFrom(dev, kVsOwned);
+    if (!vsOwned) {
+        std::printf("  FAIL owned windows: shader\n");
+        ++g_failures;
+        return;
+    }
+    rhi::Device* rd = dev.rhi();
+    constexpr std::uint64_t kPad = 4096, kObjectOffset = kPad + 1024;
+    auto buf = rd->createBuffer({kObjectOffset + 256, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "owned windows test"});
+    if (!buf) {
+        std::printf("  FAIL owned windows: buffer\n");
+        ++g_failures;
+        return;
+    }
+    auto* bytes = static_cast<std::uint8_t*>(buf->map());
+    std::memset(bytes, 0, static_cast<std::size_t>(kObjectOffset + 256));
+    const float c12[4] = {0.2f, 0.1f, 0.3f, 0.5f};
+    std::memcpy(bytes + kPad, c12, sizeof(c12));  // the view block's vs1 register 0 = c12
+    struct Record {
+        float regs[5][4];  // c31 .. c35 (gpuscene::ObjectRecord)
+        std::uint32_t info[4];
+    } rec{};
+    rec.regs[1][3] = 0.5f;  // c32.w
+    const float c33[4] = {0.3f, 0.4f, 0.1f, 0.5f};
+    std::memcpy(rec.regs[2], c33, sizeof(c33));
+    rec.info[3] = 1;
+    std::memcpy(bytes + kObjectOffset, &rec, sizeof(rec));
+    buf->flush();
+    const auto imageRef = [&](std::uint64_t offset) {
+        const auto w = buf->shaderRef(offset);
+        return rhi::GpuRef::fromWords(w[0], w[1]);
+    };
+    OwnedWindows ow;
+    ow.w[0][1].kind = OwnedWindows::Kind::View;
+    ow.w[0][1].base = imageRef(kPad).plus(-12 * 16);
+    ow.w[0][1].covered = 19;
+    ow.w[0][2].kind = OwnedWindows::Kind::Object;
+    ow.w[0][2].base = imageRef(kObjectOffset).plus(-31 * 16);
+    ow.w[0][2].covered = 5;
+    const auto render = [&](bool owned, bool junk, const char* name) {
+        f.reset();
+        dev.setVertexShader(vsOwned);
+        const float junk4[4] = {0.9f, 0.9f, 0.9f, 0.9f};
+        {
+            // the register file: the true values (reference) or junk (the served windows must not read it)
+            const float* a = junk ? junk4 : c12;
+            dev.setVertexShaderConstantF(12, a, 1);
+            const float c32[4] = {junk ? 0.9f : 0.0f, 0.0f, 0.0f, junk ? 0.9f : 0.5f};
+            dev.setVertexShaderConstantF(32, c32, 1);
+            dev.setVertexShaderConstantF(33, junk ? junk4 : c33, 1);
+        }
+        if (owned) dev.setOwnedWindows(&ow);
+        f.draw(quad(-1, -1, 1, 1, 0.5f, 0xFFFFFFFF));
+        dev.setOwnedWindows(nullptr);
+        return capture(dev, name);
+    };
+    const Pixels ref = render(false, false, "owned_ref");
+    expect("owned windows reference", ref, 32, 32, 0xFF000000u | (64u << 16) | (64u << 8) | 51u, 3);  // (0.25, 0.25, 0.2)
+    const OwnedStats s0 = dev.ownedStats();
+    const Pixels served = render(true, true, "owned_served");
+    const OwnedStats s1 = dev.ownedStats();
+    std::uint32_t bad = 0;
+    for (std::size_t i = 0; i < ref.bgra.size() && i < served.bgra.size(); ++i) bad += ref.bgra[i] != served.bgra[i];
+    if (bad != 0 || ref.bgra.size() != served.bgra.size()) {
+        std::printf("  FAIL owned windows: %u bytes differ between the register file and the served images\n", bad);
+        ++g_failures;
+    }
+    if (s1.view1 - s0.view1 != 1 || s1.object - s0.object != 1) {
+        std::printf("  FAIL owned windows: served %llu VS1 / %llu VS2 windows (expected 1 / 1)\n", static_cast<unsigned long long>(s1.view1 - s0.view1),
+                    static_cast<unsigned long long>(s1.object - s0.object));
+        ++g_failures;
+    }
+    // a changed image changes the picture
+    const float c12b[4] = {0.6f, 0.5f, 0.1f, 0.5f};
+    std::memcpy(bytes + kPad, c12b, sizeof(c12b));
+    buf->flush();
+    const Pixels changed = render(true, true, "owned_changed");
+    expect("owned windows, changed image", changed, 32, 32, 0xFF000000u | (115u << 16) | (115u << 8) | 25u, 3);  // ((0.6 + 0.3) x 0.5, (0.5 + 0.4) x 0.5, (0.1 + 0.1) x 0.5)
+    // an object image shorter than the shader's read extent (c31..c33 = 3 registers): the registers are read, the window is counted as short
+    std::memcpy(bytes + kPad, c12, sizeof(c12));
+    buf->flush();
+    ow.w[0][2].covered = 2;
+    const OwnedStats s2 = dev.ownedStats();
+    const Pixels fallback = render(true, false, "owned_short");  // (the register file holds the true values here)
+    const OwnedStats s3 = dev.ownedStats();
+    bad = 0;
+    for (std::size_t i = 0; i < ref.bgra.size() && i < fallback.bgra.size(); ++i) bad += ref.bgra[i] != fallback.bgra[i];
+    if (bad != 0 || s3.shortVs2 - s2.shortVs2 != 1 || s3.object != s2.object) {
+        std::printf("  FAIL owned windows: a short object image: %u bytes differ, %llu short VS2 windows, %llu served\n", bad, static_cast<unsigned long long>(s3.shortVs2 - s2.shortVs2),
+                    static_cast<unsigned long long>(s3.object - s2.object));
+        ++g_failures;
+    }
+    // a null base is never used (the guard of the tables): the register file is read
+    ow.w[0][2].covered = 5;
+    ow.w[0][2].base = rhi::GpuRef{};
+    const Pixels nullBase = render(true, false, "owned_null");
+    bad = 0;
+    for (std::size_t i = 0; i < ref.bgra.size() && i < nullBase.bgra.size(); ++i) bad += ref.bgra[i] != nullBase.bgra[i];
+    if (bad != 0) {
+        std::printf("  FAIL owned windows: a null window base was used (%u bytes differ)\n", bad);
+        ++g_failures;
+    }
+}
+
 }  // namespace
 
 // --present-test [vsync 0/1]: a real window, clears + presents 300 frames, prints the frame rate (vsync pacing check)
@@ -1015,7 +1139,7 @@ int main(int argc, char** argv) {
         {"mip chain stretch rect", testMipChainStretchRect}, {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
         {"read-only lock of a fresh texture", testReadOnlyLockOfFreshTexture},
-        {"scene draws (indirect)", testSceneDraws}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
+        {"scene draws (indirect)", testSceneDraws}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
     };
     for (const auto& [name, fn] : cases) {
         const int before = g_failures;

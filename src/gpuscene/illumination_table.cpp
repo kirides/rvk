@@ -13,6 +13,7 @@
 #include "gpuscene/mesh_layout.h"
 #include "gpuscene/material_compose.h"
 #include "gpuscene/window_compose.h"
+#include "gpuscene/object_compose.h"
 #include "gpuscene/lighting_images.h"
 
 namespace rvk::gpuscene {
@@ -159,6 +160,7 @@ template class GpuTable<LayoutRecord>;
 template class GpuTable<LightingJob>;  // the lighting images' jobs (lighting_images.cpp)
 template class GpuTable<MaterialRecord>;  // the material table (material_table.cpp)
 template class GpuTable<ViewRecord>;      // the view blocks (window_tables.cpp)
+template class GpuTable<ObjectRecord>;    // the object table (object_table.cpp)
 
 // ---- IllumTable ------------------------------------------------------------------------------------------------------------------
 

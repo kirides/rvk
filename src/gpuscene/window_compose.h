@@ -18,13 +18,17 @@ namespace rvk::gpuscene {
 
 inline constexpr std::uint32_t kTablePad = 4096;  // >= first register of any window x 16 (VS window 3: 232 x 16 = 3,712)
 
-// the per-view block: the VS registers c0..c11 (window 0) + the PS registers c0..c4 (window 0), written from the register file
+// the per-view block: the VS registers c0..c11 (window 0) + the PS registers c0..c4 (window 0), written from the register file, + (F2c-1, owned objects)
+// the VS registers c12..c30 (window 1: the admin pool's view-wide values; zero while native.owned_objects is off)
 struct alignas(16) ViewRecord {
     float vs[12][4];
     float ps[5][4];
+    float vs1[19][4];
 };
-static_assert(sizeof(ViewRecord) == 272);
-static_assert(shader::abi::kVsWindowFirst[1] == 12 && shader::abi::kPsWindowFirst[1] == 5, "ViewRecord holds exactly windows 0");
+static_assert(sizeof(ViewRecord) == 576);
+static_assert(shader::abi::kVsWindowFirst[1] == 12 && shader::abi::kPsWindowFirst[1] == 5 && shader::abi::kVsWindowFirst[2] == 12 + 19,
+              "ViewRecord holds exactly windows 0 (VS, PS) and VS window 1");
+inline constexpr std::uint32_t kViewVs1Regs = 19;
 
 // an image's use for one window
 struct WindowImage {

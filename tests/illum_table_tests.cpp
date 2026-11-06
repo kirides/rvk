@@ -209,3 +209,30 @@ TEST(lighting_images_key_separates_every_compose_parameter) {
     const LightingJob j = lightingJob(7, b);
     CHECK(j.illum == 7 && j.flags == 0 && j.n == 3 && j.firstLight == 1);
 }
+
+// F2c-1: LightingImages::entryFor finds / creates the same entry as note() for one (illumination slot, parameters) and keeps no composed registers
+TEST(lighting_images_entry_for_shares_note_keys) {
+    LightingImages inactive;
+    ComposeParams p;
+    p.n = 2;
+    CHECK(inactive.entryFor(7, p) == kNoEntry);  // not active: nothing
+    LightingImages li;
+    li.setActive(true);
+    const std::uint32_t e = li.entryFor(7, p);
+    CHECK(e != kNoEntry);
+    CHECK(li.entryFor(7, p) == e);  // the same key: the same entry
+    float drawn[24][4] = {};
+    CHECK(li.note(7, p, drawn) == e);  // note() lands on the entry entryFor made
+    ComposeParams q = p;
+    q.firstLight = 1;
+    const std::uint32_t e2 = li.entryFor(7, q);
+    CHECK(e2 != kNoEntry && e2 != e);
+    ComposeParams r = p;
+    r.tableLit = true;
+    CHECK(li.entryFor(7, r) != e);
+    CHECK(li.entryFor(8, p) != e);
+    CHECK(li.entryFor(kNoSlot, p) == kNoEntry);  // an unknown illumination slot
+    CHECK(li.liveEntries() == 4);
+    CHECK(li.note(9, p, drawn) != kNoEntry);
+    CHECK(li.liveEntries() == 5);
+}

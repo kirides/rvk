@@ -705,6 +705,38 @@ VS; the same 12 non-instanced VS (VS_Default / VS_DefaultZPass permutations) in 
 5. Stamps: Material structure (not pool bytes), MeshPart generation, LOD (ctx +0x28), illumination record + light-set epoch, overlay flags, illum pointer, lightmap residency; all <= 0.02
    changes per view in the measured scenes.
 
+### 7.13 F2c-1 object table (2026-11-06, `native.owned_objects`)
+
+Debug setting (Bool, runtime, default off, Full, `needs` native.owned_windows + native.material_table; off = nothing allocated). Files: `src/gpuscene/object_compose.h` (pure: record,
+rows, window, tests `object_*`), `object_table.{h,cpp}`, `window_tables.*` (view block extension), `StaticOps::setOwnedFor` (the only edit in static_ops.cpp), `d3d9/owned_windows.h` +
+`draw.cpp` (`Kind::Object`, `ignoreMask` / `wOnlyMask`, stats), `LightingImages::entryFor`, `LightTable::registryGeneration`, `rvk_d3d9test` case "owned windows (VS 1 / 2)".
+
+* **ObjectRecord (96 B, indexed by scene-table slot, capacity 32768 = 3 MiB, 4 KiB pad):** c31 (0: the engine keeps the actors' / trees' carry-over there), c32 = (0, 0, 0, fade),
+  c33..c35 = columns 0..2 of entity +0x60 exactly as `writeWorld` (m[k], m[4+k], m[8+k], m[12+k]), info {generation, version, flags, live}. VS window 2 base = record - 31 x 16
+  (covered 5 registers). A VS that reads c31 is refused (`c31 live`, 0 seen); c32.xyz is carry-over and only .w is compared by split_verify (`wOnlyMask`).
+* **Update rules.** `ObjectTable::serve` per draw (composition done): the slot's signal-fed matrix must equal the composed rows (`matrix check`, the "table matrix vs entity +0x60 now"
+  test), the CPU shadow is rewritten right then (so split_verify's twin is what the present uploads) and marked. The GPU sees ONE value per frame (uploads precede all draws), so a
+  record already served this frame cannot change: a draw with another fade / matrix keeps its upload (`fade / matrix conflict`). Rewrites: `new records`, `fade rewrites`,
+  `matrix rewrites`. The present drains the scene table's dirty list (matrix signal) and re-composes existing records; a slot served this frame whose version changed after the serve
+  counts `changed after serve`. Only when nothing else drains (`instances().ready()` false; native.gpu_scene is frozen 0).
+* **Which of c12..c31 are per view / per draw (measured, all runs):** no non-instanced static mesh VS (z or solid) reads any of c12..c30 (VS window 1 need = 0 in every draw: the
+  device never counted a VS1 served or short window), so window 1 is trivially view-wide for them; the view block carries c12..c30 anyway (`ViewRecord` 576 B, candidate =
+  `mirror_.adminVs[12..30]`, a draw whose composed c12..c30 differ keeps the upload: `composed differs`, 0). c0..c3 are the view-projection or `dbvp` (UseDepthBias material,
+  shader +0x78); the depth-bias variant is just another content-deduped block of the frame (`WindowTables::dbvpBlocks()` / `vs1SplitBlocks()` count them; not in the 5 s log).
+  c31 is never live for these draws; c32 = fade (per draw: z 1 / solid op fade), c33..c35 per object. Instanced draws (c32 + 4i) are not covered (`instanced`).
+* **Coverage** (draws of Static-group mesh ops, VS window 2 served by the device): Vulkan 3 spots 441,324 of 443,648 non-instanced candidates (99.5 %; the rest read no c31..c35),
+  + 128,969 instanced draws left on the old path; D3D12 610,486 / 613,901; savegame 140,220 / 140,686 + 23,015 instanced. Fallbacks: not ready 0, no slot 0, c31 live 0, matrix
+  differs 0, conflict 0, short windows 0. Uploads: 551 new records + 21 matrix rewrites in 3 spots (0 - 17 records / frame; savegame 783 new, 476 matrix rewrites).
+* **Verification (all 0):** split_verify MISMATCHES 0 (owned windows verified 4.30 M Vulkan spots / 6.10 M D3D12 / 4.28 M Vulkan validation / 0.78 M savegame), `uncomposed differ` 0,
+  object-table read-backs every 240th frame DIFFERING 0, view table read-backs 0, matrix check bad 0 and changed after serve 0 in every run, no `[error]`, no validation message,
+  no device loss. Runs (rvk.log in `rvk-work/scratch/f2c1/`: `val1` first run, `vk_spots`, `f2c1d3d12_spots.log` in scratch, `f2c1vk_val.log`, `save_vk`): (1) first run per the GPU safety
+  rule: pub_interior 120 s Vulkan `-Validation` + `VK_KHRONOS_VALIDATION_VALIDATE_GPU_BASED=GPU_BASED_GPU_ASSISTED`: clean; (2) Vulkan `harbour_docks,jungle,pub_interior`; (3) D3D12 same;
+  (4) Vulkan `-Validation` same; (5) Risen_Save_0005 (lod 2x, player defaults). `rvk_d3d9test --validation` passes on both backends with the new case; `rvk_tests` 284 / 284.
+* **Also in this stage:** `LightingImages::entryFor(slot, ComposeParams)` (the entry of `note()` without drawn registers; unit test shares keys with `note`), `LightTable::registryGeneration()`
+  (bumped when the "registry complete" flag flips or the order-independent hash of the last build's light positions changes; test `light_table_registry_generation`).
+* **Not measured:** CPU gain (none expected: the composition still runs; the point is the records F2c-2 builds DrawRecords from) and picture A/B (no per-draw difference is possible
+  by construction + verify; the picture was not compared).
+
 ## 8. F1 / F2 design decision: windows onto persistent tables (2026-11-06, orchestrator)
 
 **Decision.** F1 does not start with new shaders. Translated shaders and the ported ubershader read every float register through 4 register windows per

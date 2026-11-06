@@ -27,6 +27,7 @@
 #include "gpuscene/mesh_parts.h"
 #include "gpuscene/material_table.h"
 #include "gpuscene/window_tables.h"
+#include "gpuscene/object_table.h"
 #include "gpuscene/lighting_images.h"
 #include "fx/effect_binary.h"
 #include "hal/vulkan/hal_vulkan.h"
@@ -1175,7 +1176,45 @@ void StaticOps::checkMaterial(sc::DrawDesc& d, const std::uint8_t* owner, const 
 // view windows from the per-view block
 void StaticOps::setOwnedFor(const sc::DrawDesc& d) {
     gpuscene::materialtable().fillWindows(d.matSlot, d.vsSet.data(), d.psSet.data(), ownedWin_);
-    gpuscene::windowtables().fillViews(dev_, ownedWin_);
+    // F2c-1 (native.owned_objects): the non-instanced static mesh draws of the Static group: VS window 1 (c12..c30) from the view block, VS window 2 (c31..c35)
+    // from the object table. Candidates are checked here; the device serves a window only when its image covers the shader's read extent (splitStage)
+    bool vs1 = false;
+    ownedWin_.w[0][2] = d3d9::OwnedWindows::Win{};
+    const float(*vs1Regs)[4] = nullptr;
+    std::uint32_t vs1Composed = 0;
+    gpuscene::ObjectTable& objects = gpuscene::objecttable();
+    if (ownedObjects_ && objects.active()) {
+        gpuscene::ObjectStats& os = objects.mutableStats();
+        // (the admin pool's c12..c30 as the composition holds them: every register a draw composed there is a copy of the mirror's)
+        vs1Regs = mirror_.adminVs + 12;
+        const bool staticMesh = op_ != nullptr && g_ == &groups_[static_cast<std::size_t>(Group::Static)] && op_->kind == OpKind::Mesh && op_->entity != nullptr && !inNonOp_;
+        bool instanced = false;
+        for (const auto& s : d.streams) instanced = instanced || (s.buffer != nullptr && s.freq != 1);
+        if (!staticMesh) {
+            ++os.notCandidate;
+            vs1Regs = mirror_.adminVs + 12;
+        } else if (instanced) {
+            ++os.instanced;  // (c32 + 4 i: the table's image does not cover it; the device counts it as a short window too)
+        } else {
+            vs1 = true;
+            ++os.vs1Offered;
+            // VS window 1: the composed registers must equal the mirror's (they do by construction; a register that came from elsewhere keeps the upload)
+            for (std::uint32_t r = 12; r < 31 && vs1; ++r) {
+                if ((d.vsSet[0] >> r & 1u) != 0 && std::memcmp(d.vsF[r], mirror_.adminVs[r], 16) != 0) vs1 = false;
+            }
+            if (!vs1) ++os.vs1Differs;
+            vs1Composed = static_cast<std::uint32_t>((d.vsSet[0] >> 12) & ((1u << 19) - 1u));
+            // VS window 2: the object table
+            const float composed[gpuscene::kObjectRegs][4] = {
+                {d.vsF[31][0], d.vsF[31][1], d.vsF[31][2], d.vsF[31][3]}, {d.vsF[32][0], d.vsF[32][1], d.vsF[32][2], d.vsF[32][3]},
+                {d.vsF[33][0], d.vsF[33][1], d.vsF[33][2], d.vsF[33][3]}, {d.vsF[34][0], d.vsF[34][1], d.vsF[34][2], d.vsF[34][3]},
+                {d.vsF[35][0], d.vsF[35][1], d.vsF[35][2], d.vsF[35][3]}};
+            d3d9::OwnedWindows::Win ow;
+            if (objects.serve(op_->entity, composed, gpuscene::objectComposedBits(d.vsSet.data()), ow) == gpuscene::ObjectWhy::Served) ownedWin_.w[0][2] = ow;
+        }
+    }
+    gpuscene::windowtables().fillViews(dev_, ownedWin_, vs1Regs, vs1Composed);
+    if (!vs1) ownedWin_.w[0][1] = d3d9::OwnedWindows::Win{};  // (the block is written with the admin registers, window 1 is only offered to candidates)
     {
         // PS window 3 (c14..c37): the lighting image of the draw's pass, composed on the GPU in this frame's upload list (F1b); only with native.lighting_images
         d3d9::OwnedWindows::Win& lw = ownedWin_.w[1][3];

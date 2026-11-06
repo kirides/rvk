@@ -30,6 +30,8 @@ constexpr std::uint64_t kBufferBytes = kClustersOffset + std::uint64_t{kClusters
 std::atomic<bool> g_fullLit{false};
 std::atomic<bool> g_registryThin{true};
 std::atomic<bool> g_registryComplete{false};
+std::atomic<std::uint64_t> g_registryGeneration{1};
+std::atomic<std::uint64_t> g_knownHash{0};
 std::atomic<std::uint64_t> g_completeStamp{0};
 std::mutex g_drawnMutex;
 struct DrawnLight {
@@ -84,6 +86,37 @@ bool LightTable::lightKnown(const float pos[3]) {
 }
 
 bool LightTable::registryComplete() { return g_registryComplete.load(std::memory_order_relaxed); }
+
+std::uint64_t LightTable::registryGeneration() { return g_registryGeneration.load(std::memory_order_relaxed); }
+
+void registryNoteComplete(bool complete) {
+    if (g_registryComplete.exchange(complete, std::memory_order_relaxed) != complete) g_registryGeneration.fetch_add(1, std::memory_order_relaxed);
+}
+
+void registryNoteKnown(std::uint64_t positionsHash) {
+    if (g_knownHash.exchange(positionsHash, std::memory_order_relaxed) != positionsHash) g_registryGeneration.fetch_add(1, std::memory_order_relaxed);
+}
+
+std::uint64_t registryPositionHash(const float (*positions)[4], std::uint32_t count) {
+    std::uint64_t sum = 0;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        std::uint32_t b[3];
+        std::memcpy(b, positions[i], 12);
+        std::uint64_t h = 0x9E3779B97F4A7C15ull;
+        for (const std::uint32_t w : b) {
+            h = (h ^ w) * 0xC2B2AE3D27D4EB4Full;
+            h ^= h >> 29;
+        }
+        sum += h;
+    }
+    return sum ^ (static_cast<std::uint64_t>(count) << 48);
+}
+
+void registryResetForTest() {
+    g_registryComplete.store(false);
+    g_knownHash.store(0);
+    g_registryGeneration.store(1);
+}
 
 bool LightTable::wantStaticNotes() { return true; }  // always: the drawn lights also give the registry's static lights their draw colour
 
@@ -235,7 +268,7 @@ bool LightTable::shadowPipelinesReady() {
 void LightTable::configure(bool enabled, int style, int debug, float defaultRoughness) {
     defaultRoughness_ = defaultRoughness;
     if (failed_) enabled = false;
-    if (!enabled) g_registryComplete.store(false, std::memory_order_relaxed);
+    if (!enabled) registryNoteComplete(false);
     style_ = style;
     debug_ = debug;
     if (!failed_) dev_.setFrameParam(shader::abi::kFrameParamLights + 1, {enabled ? 1.0f : 0.0f, static_cast<float>(style), static_cast<float>(debug), defaultRoughness_});
@@ -268,19 +301,19 @@ bool LightTable::pipelineReady() {
 
 void LightTable::record(d3d9::PassContext& ctx) {
     if (ctx.mainView != 1 || !enabled_ || !pipelineReady()) {
-        g_registryComplete.store(false, std::memory_order_relaxed);
+        registryNoteComplete(false);
         ++skipped_;
         return;
     }
     const auto& cam = dev_.camera().valid ? dev_.camera() : dev_.lastCamera();
     if (!cam.valid) {
-        g_registryComplete.store(false, std::memory_order_relaxed);
+        registryNoteComplete(false);
         ++skipped_;
         return;
     }
     // the world's lights within the grid's reach, nearest first when there are more than the table holds
     if (!engine::lights::collect(cam.position.data(), collectRadius_, scratch_, stats_)) {
-        g_registryComplete.store(false, std::memory_order_relaxed);
+        registryNoteComplete(false);
         ++skipped_;
         return;
     }
@@ -299,7 +332,7 @@ void LightTable::record(d3d9::PassContext& ctx) {
     lastNearAny_ = nearAny;
     g_registryThin.store(nearStatic == 0, std::memory_order_relaxed);
     // the registry (static tree within reach + this frame's dynamic lights) is what the engine gives objects too: a non-empty registry is trusted whole
-    g_registryComplete.store(nearAny != 0, std::memory_order_relaxed);
+    registryNoteComplete(nearAny != 0);
     // the lights of the lists drawn since the last build that the registry did not return (same light = within 8 units)
     lastDrawnAdded_ = 0;
     {
@@ -450,6 +483,13 @@ void LightTable::record(d3d9::PassContext& ctx) {
             known->cells.emplace(knownKey(static_cast<std::int32_t>(std::floor(g.posRcp[0] / 16.0f)), static_cast<std::int32_t>(std::floor(g.posRcp[1] / 16.0f)),
                                           static_cast<std::int32_t>(std::floor(g.posRcp[2] / 16.0f))),
                                  std::array<float, 3>{g.posRcp[0], g.posRcp[1], g.posRcp[2]});
+        }
+        {
+            // (the generation: a build whose light positions equal the last build's leaves it alone)
+            std::vector<std::array<float, 4>> pos;
+            pos.reserve(prev_.size());
+            for (const auto& g : prev_) pos.push_back({g.posRcp[0], g.posRcp[1], g.posRcp[2], 0.0f});
+            registryNoteKnown(registryPositionHash(reinterpret_cast<const float(*)[4]>(pos.data()), static_cast<std::uint32_t>(pos.size())));
         }
         g_known.store(std::move(known));
     }

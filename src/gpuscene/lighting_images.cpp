@@ -76,6 +76,23 @@ Diff compare(const float a[24][4], const float b[24][4], const bool (*written)[4
 std::uint32_t LightingImages::note(std::uint32_t illumSlot, const ComposeParams& p, const float drawn[24][4]) {
     if (!active_ || illumSlot == kNoSlot) return kNoEntry;
     std::lock_guard lock(mutex_);
+    const std::uint32_t e = entryForLocked(illumSlot, p);
+    if (e == kNoEntry) return kNoEntry;
+    Entry& en = entries_[e];
+    en.drawnFrame = frame_;
+    std::memcpy(en.drawn, drawn, sizeof(en.drawn));
+    return e;
+}
+
+// F2c-1: the entry of (illumination slot, parameters) without the composed registers (a record-derived draw has no drawn registers to check against; the
+// image is composed on the GPU as for note()). Same key, same idle clock
+std::uint32_t LightingImages::entryFor(std::uint32_t illumSlot, const ComposeParams& p) {
+    if (!active_ || illumSlot == kNoSlot) return kNoEntry;
+    std::lock_guard lock(mutex_);
+    return entryForLocked(illumSlot, p);
+}
+
+std::uint32_t LightingImages::entryForLocked(std::uint32_t illumSlot, const ComposeParams& p) {
     if (entries_.empty()) {
         entries_.resize(kCapacity);
         jobs_.init(kCapacity);
@@ -108,10 +125,7 @@ std::uint32_t LightingImages::note(std::uint32_t illumSlot, const ComposeParams&
         peak_ = std::max(peak_, live_);
         ++stats_.entriesNew;
     }
-    Entry& en = entries_[e];
-    en.seen = frame_;
-    en.drawnFrame = frame_;
-    std::memcpy(en.drawn, drawn, sizeof(en.drawn));
+    entries_[e].seen = frame_;
     return e;
 }
 

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstring>
 
+#include "gpuscene/object_compose.h"
 #include "gpuscene/window_compose.h"
 #include "rhi/game_device.h"
 #include "test.h"
@@ -27,7 +28,8 @@ gpuscene::MaterialRecord record(std::uint32_t vsFirst, std::uint32_t vsCount, st
 TEST(window_layout_constants) {
     CHECK(gpuscene::kMatVsRegsOffset == 80);
     CHECK(gpuscene::kMatPsRegsOffset == 80 + 32 * 16);
-    CHECK(sizeof(gpuscene::ViewRecord) == 272);
+    CHECK(sizeof(gpuscene::ViewRecord) == 576);
+    CHECK(offsetof(gpuscene::ViewRecord, vs1) == 17 * 16);
     CHECK(offsetof(gpuscene::ViewRecord, ps) == 12 * 16);
     // the pad covers the highest window start: VS window 3 at c232
     CHECK(gpuscene::kTablePad >= shader::abi::kVsWindowFirst[3] * 16);
@@ -108,4 +110,39 @@ TEST(window_register_addresses_d3d12_never_go_below_zero) {
     const rhi::GpuRef view = rhi::GpuRef::fromWords(18, 272u * 5u);
     const rhi::GpuRef psBase = view.plusAt(static_cast<std::int64_t>(offsetof(gpuscene::ViewRecord, ps)), kShiftD3D12);
     CHECK(psBase.high() + 4u * 16 == 272u * 5u + 12u * 16 + 4u * 16);
+}
+
+// F2c-1: the object record (c31..c35) and its window
+TEST(object_record_layout_and_rows) {
+    CHECK(sizeof(gpuscene::ObjectRecord) == 96);
+    CHECK(offsetof(gpuscene::ObjectRecord, info) == 5 * 16);
+    float m[16];
+    for (int i = 0; i < 16; ++i) m[i] = static_cast<float>(i + 1);
+    const gpuscene::ObjectRecord r = gpuscene::makeObjectRecord(m, 0.75f, 3, 9, 0x200000);
+    // c33 + k = column k of the row-vector matrix, exactly what StaticOps::writeWorld writes
+    CHECK(r.regs[2][0] == m[0] && r.regs[2][1] == m[4] && r.regs[2][2] == m[8] && r.regs[2][3] == m[12]);
+    CHECK(r.regs[3][0] == m[1] && r.regs[3][1] == m[5] && r.regs[3][2] == m[9] && r.regs[3][3] == m[13]);
+    CHECK(r.regs[4][0] == m[2] && r.regs[4][1] == m[6] && r.regs[4][2] == m[10] && r.regs[4][3] == m[14]);
+    CHECK(r.regs[1][3] == 0.75f && r.regs[1][0] == 0.0f && r.regs[0][0] == 0.0f);
+    CHECK(r.info[0] == 3 && r.info[1] == 9 && r.info[2] == 0x200000 && r.info[3] == 1);
+}
+
+TEST(object_window_covers_c31_to_c35_inside_the_pad) {
+    const gpuscene::WindowImage w = gpuscene::objectWindow();
+    CHECK(w.covered == 5 && w.imageIndex == 0);
+    CHECK(w.baseDelta == -31 * 16);
+    CHECK(-w.baseDelta <= static_cast<std::int64_t>(gpuscene::kTablePad));
+    // D3D12: record 0's biased offset (heap offset after the pad + delta) stays >= 0
+    CHECK(static_cast<std::int64_t>(gpuscene::kTablePad) + w.baseDelta >= 0);
+    // a shader reading c33..c35 (need 5 from c31) is covered, an instanced one (c32 + 4 i, windowEnd 256 -> need 225) is not
+    CHECK(w.covered >= 36 - 31);
+    CHECK(w.covered < 256 - 31);
+}
+
+TEST(object_composed_bits_pick_c31_to_c35) {
+    std::uint64_t set[4] = {};
+    set[0] = (1ull << 32) | (1ull << 33) | (1ull << 35) | (1ull << 20) | (1ull << 36);
+    CHECK(gpuscene::objectComposedBits(set) == 0b10110u);  // c32, c33, c35 (c20 / c36 are outside)
+    set[0] |= 1ull << 31;
+    CHECK((gpuscene::objectComposedBits(set) & 1u) == 1u);
 }

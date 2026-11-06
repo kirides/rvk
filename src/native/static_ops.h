@@ -119,6 +119,8 @@ public:
     }
     // native.owned_windows (frame-ownership.md 7.8): the issued draws' register windows from the material / view tables (needs the material table; Full)
     void setOwnedWindows(bool on) { ownedWindows_ = on; }
+    // native.owned_objects (frame-ownership.md 7.13): VS windows 1 / 2 of the non-instanced static mesh draws from the view block / the object table
+    void setOwnedObjects(bool on) { ownedObjects_ = on; }
     // native.scene_draws (frame-ownership.md 7.11): the main view's static draws are issued as scene draws (Device::setSceneIssue)
     void setSceneDraws(bool on) { sceneDraws_ = on; }
     // native.gpu_scene (docs/research/gpu-scene.md): >= 1 checks every mesh / tree / actor op's entity against the signal-fed instance table
@@ -719,6 +721,7 @@ private:
     // frame-ownership.md 7.8 (F1a, native.owned_windows): the issued draws' Material windows (PS window 2, VS window 3) and view windows (window 0 of both
     // stages) point into persistent tables instead of ring uploads (d3d9::Device::setOwnedWindows); the override of the draw being issued
     bool ownedWindows_ = false;
+    bool ownedObjects_ = false;
     bool sceneDraws_ = false;
     d3d9::OwnedWindows ownedWin_;
     void setOwnedFor(const sc::DrawDesc& d);

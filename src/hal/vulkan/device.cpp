@@ -32,6 +32,7 @@
 #include "gpuscene/lighting_images.h"
 #include "gpuscene/mesh_parts.h"
 #include "gpuscene/window_tables.h"
+#include "gpuscene/object_table.h"
 #include "gpuscene/material_table.h"
 #include "engine/xinput_throttle.h"
 #include "engine/memread.h"
@@ -243,6 +244,11 @@ void HalDevice::applyStaticOps() {
         if (owned != gpuscene::windowtables().active()) spdlog::info("native: owned windows {}", owned ? "on" : "off");
         gpuscene::windowtables().setActive(owned);
         staticOps_->setOwnedWindows(owned);
+        // frame-ownership.md 7.13: F2c-1 owned objects (VS windows 1 / 2; needs the owned windows)
+        const bool objects = on(rs.nativeOwnedObjects) && owned;
+        if (objects != gpuscene::objecttable().active()) spdlog::info("native: owned objects {}", objects ? "on" : "off");
+        gpuscene::objecttable().setActive(objects);
+        staticOps_->setOwnedObjects(objects);
     }
     {
         // frame-ownership.md 7.11: F2b-1 scene draws (Full only, needs the static ops to issue the draws)
@@ -585,7 +591,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     frameTap_->setEffectOps(effectOps_.get());
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups,
                                  rs.nativeCoverage, rs.nativeFrameTap, rs.nativeLean, rs.nativeLeanCheck,
-                                 rs.nativePacketCache, rs.nativeOwnedWindows, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck}) {
+                                 rs.nativePacketCache, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
     // renderer.mode (Wrapper / Full): like the native.* settings applied by the registry's dispatch before a present, i.e. at a
@@ -1651,6 +1657,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
         gpuscene::meshparts().flush(dev_, true);
         gpuscene::materialtable().flush(dev_, true);
         gpuscene::windowtables().flush(dev_);
+        gpuscene::objecttable().flush(dev_);
     }
     engine::lod::onPresent();  // a changed object draw distance: the world's cache-in spheres (engine thread)
     dev_.present();

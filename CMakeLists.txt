@@ -257,6 +257,9 @@ add_library(rvk_core STATIC
     src/gpuscene/window_compose.h
     src/gpuscene/window_tables.cpp
     src/gpuscene/window_tables.h
+    src/gpuscene/object_table.cpp
+    src/gpuscene/object_table.h
+    src/gpuscene/object_compose.h
     src/gpuscene/illum_compose.h
     src/gpuscene/lighting_images.cpp
     src/gpuscene/lighting_images.h
