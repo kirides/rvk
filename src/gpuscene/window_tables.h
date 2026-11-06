@@ -34,7 +34,9 @@ public:
     // the view windows of a draw (VS / PS window 0) from the device's register file as it is now, into `ow`; false: no view table yet / full
     // `vs1` (optional, 19 registers c12..c30: the admin pool's values as the composition holds them): written into the block too and VS window 1 served
     // from it (F2c-1, native.owned_objects); null = the block's c12..c30 stay zero and window 1 is not offered
-    bool fillViews(d3d9::Device& dev, d3d9::OwnedWindows& ow, const float (*vs1)[4] = nullptr, std::uint32_t vs1Composed = 0);
+    // `vs0` / `ps0` (optional, 12 / 5 registers): the view registers when the caller holds them itself (an owned draw has no composed register file: F2c-3)
+    bool fillViews(d3d9::Device& dev, d3d9::OwnedWindows& ow, const float (*vs1)[4] = nullptr, std::uint32_t vs1Composed = 0, const float (*vs0)[4] = nullptr,
+                   const float (*ps0)[4] = nullptr);
     // blocks of this frame that differ from another block only in c0..c3 (the depth-bias view-projection variant) / only in c12..c30 (per-draw variation of window 1)
     std::uint64_t dbvpBlocks() const { return viewDbvp_; }
     std::uint64_t vs1SplitBlocks() const { return viewVs1Split_; }

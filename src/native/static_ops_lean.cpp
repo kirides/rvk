@@ -461,7 +461,7 @@ void StaticOps::leanImage(const void* resource, const void* imageData) {
             if (lean_ && placeholderNames_.size() < 6) placeholderNames_.push_back(engine::readCString(static_cast<U8*>(resource) + 0x40));
         }
     }
-    if (!leanCollect_) return;
+    if (!leanCollect_ && !recCollect_) return;
     leanTouches_.push_back(resource);
     const void* video = nullptr;
     if (imageData != nullptr && readAt(imageData, 0x70, video) && video != nullptr) {
@@ -476,7 +476,7 @@ void StaticOps::leanImage(const void* resource, const void* imageData) {
 }
 
 void StaticOps::leanStream3(const std::uint8_t* res, bool on) {
-    if (!leanCollect_) return;
+    if (!leanCollect_ && !recCollect_) return;
     if (auto* prim = hal::vulkan::HalPrimitive::fromApi(ptr(ptr(res, 0x88), 0x10))) leanStream3_.push_back({prim, on});
 }
 

@@ -286,7 +286,12 @@ bool detourBeginZPass(void* admin, void* depthMap, bool a, bool b) {
             if (d->phases().view() == View::Main) d->inject(d3d9::inject::Point::BeforeDepthPrepass);
         }
     }
-    return g_beginZPass.original(admin, depthMap, a, b);
+    const bool r = g_beginZPass.original(admin, depthMap, a, b);
+    // F2c-3: the ops that left the main view's z list are drawn from their records (the pass began: the engine's first op would draw now)
+    if (d3d9::Device* d = device(); d != nullptr && d->phases().view() == View::Main && d->phases().pass() == Pass::DepthPrepass) {
+        if (OpTap* t = g_opTap.load(std::memory_order_relaxed); t != nullptr) t->passBegin(false);
+    }
+    return r;
 }
 
 using EndZPassFn = bool (*)(void* admin);
@@ -335,7 +340,10 @@ Hook<VoidThisFn> g_beginRenderSolid;
 void detourBeginRenderSolid(void* self) {
     setPass(Pass::Solid, "DoBeginRenderSolid");
     g_beginRenderSolid.original(self);
-    if (d3d9::Device* d = device(); d != nullptr && d->phases().view() == View::Main) d->inject(d3d9::inject::Point::BeforeSolid);
+    if (d3d9::Device* d = device(); d != nullptr && d->phases().view() == View::Main) {
+        d->inject(d3d9::inject::Point::BeforeSolid);
+        if (OpTap* t = g_opTap.load(std::memory_order_relaxed); t != nullptr) t->passBegin(true);  // F2c-3 (see detourBeginZPass)
+    }
 }
 
 Hook<VoidThisFn> g_beginRenderAlpha;

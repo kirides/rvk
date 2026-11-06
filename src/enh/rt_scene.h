@@ -109,6 +109,7 @@ public:
 
     // d3d9::DrawObserver
     bool observes(d3d9::draws::Kind kind, d3d9::scene::Phase phase) const override;
+    Registers registersRead() const override { return Registers::Material; }  // (world rows: ReplaceQuery::objectRows; the uv map's material constants)
     void observe(d3d9::Device& device, const d3d9::ReplaceQuery& query) override;
     void bufferChanged(std::uint64_t bufferId) override;
     void textureReleased(const d3d9::Texture* texture) override;

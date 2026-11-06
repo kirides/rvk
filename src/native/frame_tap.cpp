@@ -5,6 +5,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <format>
 
@@ -591,6 +592,8 @@ void FrameTap::beginView(void* db, void* desc, ViewKind kind, void* shadowMap, s
     // a shadow database's caps say no z pre-pass, but ExecuteShadowMap runs its z list unconditionally
     if (!shadow) readAt(db, 0x1590, zPrepass);
     desc_.zPrepass = zPrepass != 0;
+    // F2c-3: a main view with owned ops (not with the observe hooks: they check the lists against the requests)
+    const bool ownedFrame = kind == ViewKind::Main && statics_ != nullptr && staticsWanted_ && !observeWanted_ && statics_->ownedViewBegin(db, desc);
     for (std::size_t l = 0; l < kListCount; ++l) {
         const std::uint8_t* data = nullptr;
         std::int32_t count = 0;
@@ -603,6 +606,12 @@ void FrameTap::beginView(void* db, void* desc, ViewKind kind, void* shadowMap, s
         }
         raw_.resize(static_cast<std::size_t>(count));
         if (!safeRead(data, raw_.data(), raw_.size() * sizeof(RawOp))) continue;
+        // F2c-3 (native.owned_static): the ops of valid records leave the engine's list before it is sorted; they are drawn from their records when the pass begins
+        if (ownedFrame && (l == 0 || l == 1) && statics_->ownedListOk(db, static_cast<List>(l))) compactOwned(db, static_cast<List>(l), data, count);
+        if (count <= 0) {
+            desc_.liveData[l] = data;
+            continue;
+        }
         // the engine's own qsort with the engine's comparator, on the copy: the order Execute will produce (MSVC's qsort is
         // deterministic, the input is byte-identical; attribution checks every position against the executed array)
         if (kListSorted[l] && count > 1) qsort_(raw_.data(), raw_.size(), sizeof(RawOp), compare_[l]);
@@ -627,6 +636,67 @@ void FrameTap::beginView(void* db, void* desc, ViewKind kind, void* shadowMap, s
     attr_.begin(&desc_);
     if (observeWanted_) owned_observe::viewBegin(db, kind, frame, desc_);
     if (statics_ != nullptr && staticsWanted_) statics_->viewBegin(db, desc, desc_);
+}
+
+// F2c-3: the raw (unsorted) list `list` of the main view: the ops whose record is valid (StaticOps::ownedSelect) are taken out of the engine's array in place
+// (the others keep their relative order, the count shrinks) and handed to StaticOps sorted by the engine's comparator; `raw_` / `count` become the kept list,
+// so the snapshot, the sort copy and the attribution describe exactly what Execute will run
+void FrameTap::compactOwned(void* db, List list, const std::uint8_t* data, std::int32_t& count) {
+    const auto t0 = std::chrono::steady_clock::now();
+    ownedMark_.assign(raw_.size(), 0);
+    ownedOps_.clear();
+    for (std::size_t i = 0; i < raw_.size(); ++i) {
+        Op op;
+        op.raw = raw_[i];
+        op.list = list;
+        const void* vtable = nullptr;
+        if (op.raw.context == nullptr || !readAt(op.raw.context, 0, vtable) || vtable == nullptr) continue;
+        if (vtableInfo(vtable).kind != OpKind::Mesh) continue;
+        op.vtable = vtable;
+        op.kind = OpKind::Mesh;
+        if (!statics_->ownedSelect(op)) continue;
+        ownedMark_[i] = 1;
+        ownedOps_.push_back(op);
+    }
+    if (ownedOps_.empty()) return;
+    ownedKept_.clear();
+    for (std::size_t i = 0; i < raw_.size(); ++i) {
+        if (ownedMark_[i] == 0) ownedKept_.push_back(raw_[i]);
+    }
+    // the engine's array, in place: the kept ops in their original order
+    const std::int32_t kept = static_cast<std::int32_t>(ownedKept_.size());
+    if (!ownedKept_.empty() && !engine::safeWrite(const_cast<std::uint8_t*>(data), ownedKept_.data(), ownedKept_.size() * sizeof(RawOp))) {
+        ownedOps_.clear();
+        return;
+    }
+    if (!engine::safeWrite(static_cast<std::uint8_t*>(db) + kListOffset[static_cast<std::size_t>(list)] + 0x10, &kept, sizeof(kept))) {
+        // (the array was rewritten but its count could not be: put the original back)
+        engine::safeWrite(const_cast<std::uint8_t*>(data), raw_.data(), raw_.size() * sizeof(RawOp));
+        ownedOps_.clear();
+        return;
+    }
+    // the owned ops in the engine's sort order of their list
+    const CompareFn cmp = compare_[static_cast<std::size_t>(list)];
+    std::stable_sort(ownedOps_.begin(), ownedOps_.end(), [cmp](const Op& a, const Op& b) { return cmp(&a.raw, &b.raw) < 0; });
+    for (Op& op : ownedOps_) {
+        resolve(op);  // (the sub-mesh / material / shader the late composition of a refused op needs)
+        op.index = 0;
+    }
+    raw_.swap(ownedKept_);
+    count = kept;
+    statics_->ownedTake(list, std::move(ownedOps_), static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()));
+    ownedOps_.clear();
+}
+
+std::uint32_t FrameTap::passBegin(bool solid) {
+    if (!executing_ || desc_.kind != ViewKind::Main || statics_ == nullptr || !staticsWanted_) return 0;
+    const std::uint32_t n = statics_->ownedPass(solid);
+    if (n != 0 && coverage_) {
+        // N5.8 coverage: the draws from records are ours (the tap never sees them: they do not go through prepareDraw)
+        const auto pass = solid ? d3d9::scene::Pass::Solid : d3d9::scene::Pass::DepthPrepass;
+        for (std::uint32_t i = 0; i < n; ++i) cov_.ours(d3d9::scene::View::Main, pass, d3d9::draws::Kind::StaticMesh);
+    }
+    return n;
 }
 
 bool FrameTap::opEnter(const void* op) {

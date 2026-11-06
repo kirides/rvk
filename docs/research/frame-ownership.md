@@ -924,6 +924,58 @@ tree within `animRange_`, `kMaxAnimatedTrees` / 512 per frame).
 5. Keep composition for the software instancing path and while `RtScene::animated_` is on; no entity-less trees exist (drop that guard's cost model), 0 dynamic-light / no-list / > 2 static-light illuminations (the
    simple per-instance lighting image is enough at the defaults).
 
+### 7.16 F2c-3 owned static draws (2026-11-06, `native.owned_static`; correct, no CPU gain yet)
+
+Debug setting (Bool, run time, default off, Full; `needs` native.owned_records + native.scene_draws, so also the whole F1 / F2c chain) + `native.owned_check` (Int, default 10, 0 = never). Files:
+`src/native/static_ops_owned.cpp` (all of it: `ownedViewBegin / ownedListOk / ownedSelect / ownedTake / ownedPass`, the 5 s line), `frame_tap.cpp` (`compactOwned`, `passBegin`),
+`engine/scene_hooks.cpp` (`OpTap::passBegin` after BeginZPass's original and after the BeforeSolid injection), `d3d9/scene_draws.cpp` (`Device::replayOwned`), `static_ops_records.cpp`
+(`recExclusion`, `viewStampOf`, the side-effect lists in the record), `gpuscene/material_table.*` (`pollOwned`, `fillWindows(.., pad)`), `window_tables.*` (`fillViews` with explicit registers),
+`DrawObserver::registersRead`, test `rvk_d3d9test` "owned replay (records)".
+
+* **Compaction (frame tap, main view only).** `FrameTap::beginView` reads the raw (unsorted) z / solid list; every Mesh op whose record is eligible, `ownable`, and whose stamps equal the record's
+  (`recStamp` minus view / materials) is taken out of the engine's array **in place** (the kept ops keep their relative order, the count at db +list+0x10 shrinks); `raw_` / the snapshot / the sort copy /
+  the attribution describe exactly what Execute then runs, so there are no "not entered" counters. The owned ops are sorted with the engine's comparator and kept in `StaticOps::ownedOps_`.
+  Only when the z list is executed (caps +0x1590) / DoBeginRenderSolid is called (caps +0x15a0 == 0), not with `native.owned_observe`, not on a check frame / its warm-up frame
+  (`sc::leanFrameKind(frame, native.owned_check)`), not while an observer that reads more than material constants is registered (`DrawObserver::Registers`: GI, material RT, object motion = All; the RT scene = Material).
+* **Drawing.** `OpTap::passBegin(false / true)` fires after BeginZPass returned / after BeforeSolid: `ownedPass` composes the view like the first op's composition would (`composeView`, `initMirror`), writes the view
+  block once per pass (`fillViews` with the mirror's c0..c11 / c12..c30 / PS c0..c4: no register file), then per op: view stamp at the pass (the admin's type bytes differ between the passes: not computable
+  at viewBegin, found in the first run), materials polled once per slot and frame (`MaterialTable::pollOwned`, the missed writer of 7.14) and their structure versions compared with the record's,
+  the object record served (`ObjectTable::serve` with the entity's matrix: same matrix check, fade 1 / the op's), then per draw `Device::replayOwned`: `deriveScene` (one derivation: validation + DrawBlock),
+  all eight windows from the caller (material windows padded to the whole window: a composed draw read the register file's carry-over beyond the pool's count, the record's array holds zeros), observers
+  with the windows' register images loaded first (the RT scene's uv map), `uploadConstants`, a guard (every window the shaders read must be served, `ownedServed_`), the DrawBlock, the scene packet
+  (`toScenePacket`: null address guard), `submitInterned`. Nothing is queued before a refusal (reasons 1..15 in `ownedReplayStats`, listed in the 5 s line). An op that cannot be drawn this way (material stamp,
+  object window, a refused draw: a texture still pending / in another layout, a variant gate) is **composed right there** (`opEnter`: what the engine's slot would have done, the record is rebuilt): never lost.
+  Side effects per owned op afterwards: `BindLightmaps(res, 1)` (+ our lightmap slots), `touchNow` of every image / material the slot touches, `EnableStream(3, ..)` (lists collected while the record
+  was built: `recCollect_`, a record built before is rebuilt once: `ownable`).
+* **Order.** Owned ops are drawn first in each pass (their relative engine order kept), before the engine's own ops of that pass. Eligibility now also requires opaque, depth-writing draws (new exclusions
+  `blended / no z write`, `depth-bias material`, `lean block`), so the order against the engine's blended terrain layers / decals (hierarchy ops, the decal admin: after the solid pass) is immaterial;
+  the pass batches draws by pipeline anyway.
+* **Check frames.** Every 10th frame (and the one before it) nothing is compacted: the old path composes, the F2c-2 compare derives each draw and compares; any DIFFERING in a 5 s window turns owned_static off
+  (error line). The compare now only compares the registers of a view window the shader reads (the first runs showed non-live carry-over registers of view blocks differing between draws of one view: a compare
+  artefact, 60 draws, turned the feature off once).
+* **Safety steps.** (a) every owned submit is guarded as above (window bases, DrawBlock, frame block, ref stream, pipeline, scene record; `packet_.scene` is reset by `toScenePacket` / `submitInterned`);
+  (b) `rvk_d3d9test` "owned replay (records)" on both backends with `--validation`: 8 owned draws = one indirect call over 8 records, 0 bytes differ from the normal draws; the null-address guard refused 8 of 8,
+  a changed stream 8 of 8 (code 6), another bound shader (11), nothing drawn by any refusal, owned draws again afterwards: 0 failures, 0 validation errors; (c) the first game run:
+  pub_interior, Vulkan, `-Validation` + `VK_KHRONOS_VALIDATION_VALIDATE_GPU_BASED=GPU_BASED_GPU_ASSISTED`: PASS, no VUID, no device loss; the rebuilt code again with pub_interior + jungle: PASS, clean.
+* **Numbers** (Full, `-PlayerDefaults`, logs `rvk-work/scratch/f2c3/`): owned share of the Static group's main-view z / solid ops (mesh ops looked at, incl. hardware batch / instance list / hierarchy) 3 spots 52 - 68 %,
+  savegame hold (lod 2x) 39 %, walk 74 %; 97 - 99.7 % of the owned ops drawn from records, the rest composed late (almost all: one op per view whose slot-0 texture is a 1600x900 render target in
+  COLOR_ATTACHMENT layout), 0 undrawn, check frames DIFFERING 0 in every run (Vulkan 3 spots + monastery_hall, Vulkan validation, D3D12 `-Api d3d12` pub_interior + harbour_docks, savegame, walk 150 s, mode switches).
+  Run-time Full <-> Wrapper (`-Mode wrapper -Setting renderer.mode=full`, 4 switches inside pub_interior's hold): owned_static follows (`owned static on / off`), 0 undrawn, no error; after the last switch
+  ~10 ops per view stayed on the late composition (replay refusal `variant`: the ambient test of the record's lighting differs from the composed decision, not found yet; harmless).
+  Residency: `placeholder binds 0` in the walk and the savegame runs; touches per owned op replace the slot's RequestData (counts in the 5 s line: 6 - 9 touches per owned op-view); no texture went missing.
+  Picture A/B (7.11 method, toggled inside one hold with 300-frame periods, shots at frames not = 0 / 9 mod 10): pub_interior toggle pairs 0.7 / 3.1 mean abs vs controls 0.4 - 3.9, harbour_docks 0.5 - 1.3 vs
+  control 0.7, jungle 2.2 - 2.6 vs control 1.7 - 2.9 (wind), **monastery_hall 0.06 / 0.014 / 0.003 mean abs, max 2 levels** (eye adaptation only): the toggle pairs lie inside the control pairs' range.
+  refcompare Full (stored reference 20261022-093252, whose hashes no longer match spots.lua / spass: the absolute verdicts are stale; `-Setting` = the F1 / F2c chain + `lighting.clustered / full_lit`, owned_static on vs off, same run conditions): both arms 13 FAIL / 4 WARN / 3 PASS with the same spots failing (the FAIL set is the known Full lighting differences + the stale reference), per-spot ssim within the run noise (pub_interior 0.9853 on / 0.9847 off, monastery_hall 0.9727 / 0.9727, jungle 0.7976 / 0.7982, harbour_docks 0.8349 / 0.8350). Without table lighting (a plain Full refcompare) owned_static is gated off (`not this view ... table lighting false`).
+* **CPU (the honest result: no gain).** Savegame, `-Perf`, `RisenTest.exe`, vsync off, shared copy, interleaved, engine + HAL CPU per frame: base (no records, no owned) **6.69 / 6.60 ms**, owned with `owned_check=0`
+  **6.65 / 6.70**, owned with check 10 **6.67 / 6.70** (GPU 3.1 / 3.35: unchanged). Per piece of the owned path at the savegame (per main view = per frame, 78 owned ops / 82 draws, check 0):
+  compaction 62 us (of it the stamp + record checks 32), view + window setup 2 us, material polls + stamp compare 12 us, build 76 us (DeriveIn, window lookups, object serve, ambient memo), side effects 5 us,
+  submit 124 us (`replayOwned`: derivation + observers + the scene packet; the RT scene's observe is in it as it was in the old replay) = **281 us per frame, 3.4 us per owned draw**; the pub_interior spot (560 owned ops /
+  frame, validation off) compaction 211 (stamps 119), material 35, build 193, side effects 26, submit 527 us. The composition + issue it replaces was already cheap (retained packets, F2b-1: the packet
+  cache replays 99 % of those draws), so the owned path trades ~1.7 us / draw of compose + packet replay for ~3.4 us of stamp + derivation + window + submit work. Not tuned further (coordinator's rule: report the
+  pieces). Where the cost is: the stamp (~60 reads per op: batch per entity / resource), `deriveScene` + `replayOwned` per draw, observers; ideas: a per-frame epoch for the global inputs, persistent DrawRecords
+  per op (F2c-4: nothing derived per frame, only the dirty ones), moving stamps to the signals. Check frames cost ~0.1 ms / frame averaged at the savegame (20 % of the frames run compare).
+* **Gates.** `rvk_tests` 288 / 288 (settings count 130), `rvk_d3d9test --validation` PASS both backends, Vulkan validation + GPU-assisted clean.
+
 ## 8. F1 / F2 design decision: windows onto persistent tables (2026-11-06, orchestrator)
 
 **Decision.** F1 does not start with new shaders. Translated shaders and the ported ubershader read every float register through 4 register windows per

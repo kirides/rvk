@@ -926,6 +926,161 @@ void testSceneDraws(Fixture& f) {
     dev.release(std::move(ib));
 }
 
+// F2c-3 owned replay (frame-ownership.md 7.16): eight quads drawn normally (reference), captured as retained draws, then submitted through Device::replayOwned
+// (the DrawBlock derived, the windows from the caller, no register file) as scene draws: one indirect call over eight records, 0 bytes differ; every refusal
+// (null address guard, a shader that is not bound, a stream that is not the recorded one) leaves nothing behind and the next replays work again
+void testOwnedReplay(Fixture& f) {
+    Device& dev = f.dev;
+    dev.setSceneDraws(true, 0);
+    if (!dev.sceneDrawsActive()) {
+        std::printf("  SKIP owned replay: scene draws are not available on this device\n");
+        return;
+    }
+    constexpr std::uint32_t kQuads = 8;
+    std::vector<Vertex> verts;
+    for (std::uint32_t k = 0; k < kQuads; ++k) {
+        const float x0 = -1.0f + 0.25f * static_cast<float>(k), x1 = x0 + 0.25f;
+        const std::uint32_t color = 0xFF000000u | (k * 30u + 20u) << 16 | (255u - k * 25u) << 8 | (k & 1u ? 200u : 40u);
+        verts.push_back({x0, 0.5f, 0.5f, 1, color, 0, 0});
+        verts.push_back({x1, 0.5f, 0.5f, 1, color, 1, 0});
+        verts.push_back({x0, -0.5f, 0.5f, 1, color, 0, 1});
+        verts.push_back({x1, -0.5f, 0.5f, 1, color, 1, 1});
+    }
+    const std::uint16_t idx[6] = {0, 1, 2, 1, 3, 2};
+    auto vb = dev.createBuffer(static_cast<std::uint32_t>(verts.size() * sizeof(Vertex)), USAGE_WRITEONLY, POOL_MANAGED, false, false);
+    auto ib = dev.createBuffer(sizeof(idx), USAGE_WRITEONLY, POOL_MANAGED, true, false);
+    auto other = dev.createBuffer(static_cast<std::uint32_t>(verts.size() * sizeof(Vertex)), USAGE_WRITEONLY, POOL_MANAGED, false, false);
+    std::memcpy(vb->lock(0, 0, 0), verts.data(), verts.size() * sizeof(Vertex));
+    vb->unlock();
+    std::memcpy(other->lock(0, 0, 0), verts.data(), verts.size() * sizeof(Vertex));
+    other->unlock();
+    std::memcpy(ib->lock(0, 0, 0), idx, sizeof(idx));
+    ib->unlock();
+    const auto begin = [&] {
+        f.reset();
+        dev.drawTag() = {};
+        dev.drawTag().source = draws::Source::Mesh;
+        dev.phases().push(scene::View::Main, scene::Pass::Solid);
+        dev.setStreamSource(0, vb.get(), 0, sizeof(Vertex));
+        dev.setIndices(ib.get());
+    };
+    const auto end = [&](const char* name) {
+        dev.setSceneIssue(false);
+        dev.setSceneFaultInject(false);
+        dev.phases().pop();
+        return capture(dev, name);
+    };
+    // the reference: normal draws
+    begin();
+    for (std::uint32_t k = 0; k < kQuads; ++k) dev.drawIndexedPrimitive(PT_TRIANGLELIST, static_cast<std::int32_t>(4 * k), 0, 4, 0, 2);
+    const Pixels ref = end("owned_ref");
+    expect("owned reference quad 0", ref, 2, 32, 0xFF000000u | (20u << 16) | (255u << 8) | 40u);
+    const auto same = [&](const Pixels& p, const char* what) {
+        std::uint32_t bad = 0;
+        for (std::size_t i = 0; i < ref.bgra.size() && i < p.bgra.size(); ++i) bad += ref.bgra[i] != p.bgra[i];
+        if (bad != 0 || ref.bgra.size() != p.bgra.size()) {
+            std::printf("  FAIL owned replay (%s): %u bytes differ from the normal draws\n", what, bad);
+            ++g_failures;
+        }
+    };
+    // the retained draws: made as scene draws once their variants / pipelines exist
+    std::vector<Device::CachedDraw> cd(kQuads);
+    bool ready = false;
+    for (int i = 0; i < 1200 && !ready; ++i) {
+        begin();
+        dev.setSceneIssue(true);
+        for (std::uint32_t k = 0; k < kQuads; ++k) {
+            dev.beginCapture(&cd[k]);
+            dev.drawIndexedPrimitive(PT_TRIANGLELIST, static_cast<std::int32_t>(4 * k), 0, 4, 0, 2);
+            dev.endCapture();
+        }
+        end("owned_capture");
+        ready = true;
+        for (const auto& c : cd) ready = ready && c.valid && c.scenePipeline != GamePipeline::None;
+        if (!ready) Sleep(50);
+    }
+    if (!ready) {
+        std::printf("  FAIL owned replay: the draws were never captured as scene draws\n");
+        ++g_failures;
+        return;
+    }
+    const OwnedWindows none;  // (the test shaders read no register window)
+    const auto replay = [&](std::uint32_t k, Buffer* stream) {
+        Device::DeriveIn in;
+        in.streams[0] = stream;
+        in.strides[0] = sizeof(Vertex);
+        in.indices = ib.get();
+        return dev.replayOwned(cd[k], in, none);
+    };
+    const auto all = [&](const char* name, int expectRc, Buffer* stream) {
+        begin();
+        dev.setSceneIssue(true);
+        for (std::uint32_t k = 0; k < kQuads; ++k) {
+            const int rc = replay(k, stream);
+            if (rc != expectRc) {
+                std::printf("  FAIL owned replay (%s): quad %u returned %d, expected %d\n", name, k, rc, expectRc);
+                ++g_failures;
+            }
+        }
+        return end(name);
+    };
+    const auto s0 = dev.sceneStats();
+    const auto o0 = dev.ownedReplayStats;
+    const Pixels first = all("owned_replay", 0, vb.get());
+    same(first, "eight owned draws");
+    const auto s1 = dev.sceneStats();
+    if (s1.indirectCalls - s0.indirectCalls != 1 || s1.records - s0.records != kQuads || dev.ownedReplayStats.drawn - o0.drawn != kQuads) {
+        std::printf("  FAIL owned replay: %llu indirect calls / %llu records / %llu owned draws for %u quads (expected one call over all)\n",
+                    static_cast<unsigned long long>(s1.indirectCalls - s0.indirectCalls), static_cast<unsigned long long>(s1.records - s0.records),
+                    static_cast<unsigned long long>(dev.ownedReplayStats.drawn - o0.drawn), kQuads);
+        ++g_failures;
+    }
+    std::printf("  owned replay: %llu owned draws in %llu indirect call(s) over %llu records, %d refusals so far\n", static_cast<unsigned long long>(dev.ownedReplayStats.drawn - o0.drawn), static_cast<unsigned long long>(s1.indirectCalls - s0.indirectCalls), static_cast<unsigned long long>(s1.records - s0.records), static_cast<int>(dev.ownedReplayStats.attempts - dev.ownedReplayStats.drawn));
+    // refusals: nothing may be queued (the picture is the cleared target), the reason is counted
+    {
+        begin();
+        dev.setSceneIssue(true);
+        dev.setSceneFaultInject(true);
+        int refused = 0;
+        for (std::uint32_t k = 0; k < kQuads; ++k) refused += replay(k, vb.get()) == 15;
+        const Pixels p = end("owned_guard");
+        if (refused != static_cast<int>(kQuads) || p.bgra[(32 * p.w + 2) * 4 + 1] != 0) {
+            std::printf("  FAIL owned replay: the null address guard refused %d of %u and drew something\n", refused, kQuads);
+            ++g_failures;
+        }
+    }
+    {
+        // a stream that is not the recorded one: refused as a binding change (6), nothing drawn
+        begin();
+        dev.setSceneIssue(true);
+        int refused = 0;
+        for (std::uint32_t k = 0; k < kQuads; ++k) refused += replay(k, other.get()) == 6;
+        const Pixels p = end("owned_binding");
+        if (refused != static_cast<int>(kQuads) || p.bgra[(32 * p.w + 2) * 4 + 1] != 0) {
+            std::printf("  FAIL owned replay: a changed stream refused %d of %u and drew something\n", refused, kQuads);
+            ++g_failures;
+        }
+    }
+    {
+        // the shaders of the record are not the bound ones: refused (11)
+        begin();
+        dev.setSceneIssue(true);
+        dev.setVertexShader(f.vsInst);
+        const int rc = replay(0, vb.get());
+        end("owned_shader");
+        if (rc != 11) {
+            std::printf("  FAIL owned replay: another vertex shader returned %d, expected 11\n", rc);
+            ++g_failures;
+        }
+    }
+    // and the owned draws work again after the refusals
+    same(all("owned_replay_again", 0, vb.get()), "owned draws after the refusals");
+    dev.setSceneDraws(false, 0);
+    dev.release(std::move(vb));
+    dev.release(std::move(ib));
+    dev.release(std::move(other));
+}
+
 // F2c-1 owned windows through the device's own path (frame-ownership.md 7.13): a translated vertex shader that reads VS window 1 (c12) and window 2 (c32.w, c33)
 // is drawn (a) with the registers set the normal way and (b) with the register file holding junk and the windows served from persistent images
 // (a view block's c12..c30 + an object record's c31..c35 in one host-visible buffer behind a 4 KiB pad, window bases = image - first x 16, as the tables
@@ -1139,7 +1294,7 @@ int main(int argc, char** argv) {
         {"mip chain stretch rect", testMipChainStretchRect}, {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
         {"read-only lock of a fresh texture", testReadOnlyLockOfFreshTexture},
-        {"scene draws (indirect)", testSceneDraws}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
+        {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
     };
     for (const auto& [name, fn] : cases) {
         const int before = g_failures;

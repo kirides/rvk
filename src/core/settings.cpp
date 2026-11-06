@@ -2512,6 +2512,35 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .needs = {{"native.owned_objects", "true", false, true}, {"native.lighting_images", "true", false, true}},
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeOwnedStatic = &reg.add({
+        .key = "native.owned_static",
+        .label = "Native frame: owned static draws",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode only, needs the owned op records, scene draws and table lighting (frame-ownership.md F2c-3): the main view's static z / solid mesh ops whose "
+                       "record is valid leave the engine's op lists at the view's start and are drawn from the records without a composition (DrawBlock derived, every "
+                       "register window from the tables), when the z / solid pass begins; their side effects (resource touches, lightmap binds, stream 3) run for each. "
+                       "native.owned_check frames run the old path and compare; a difference turns it off. rvk.log `native: owned static (5 s)`.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"native.owned_records", "true", false, true}, {"native.scene_draws", "true", false, true}},
+        .page = "Debug", .section = "Native frame",
+    });
+    r.nativeOwnedCheck = &reg.add({
+        .key = "native.owned_check",
+        .label = "Native frame: owned static check interval",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "With native.owned_static: every N-th frame (and the frame before it) no op leaves the lists: the old path composes and draws them and the record-derived "
+                       "draws are compared with the composed ones (rvk.log `native: owned records`, DIFFERING must stay 0; a difference turns owned_static off); 0 = never.",
+        .type = Type::Int,
+        .defaultValue = 10,
+        .min = 0,
+        .max = 1000,
+        .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeSceneDraws = &reg.add({
         .key = "native.scene_draws",
         .label = "Native frame: scene draws",

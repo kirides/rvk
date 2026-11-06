@@ -2174,6 +2174,7 @@ void StaticOps::finishOp() {
     const bool skipped = slotSkipped_;
     slotSkipped_ = false;
     leanCollect_ = false;
+    recCollect_ = false;
     if (op_ == nullptr) return;
     // (a lean op: the engine's code did not run, it made no draws to compare)
     if (!skipped && engineDraws_ != drawCount_ && comparing()) {
@@ -2723,6 +2724,7 @@ void StaticOps::report() {
     leanReport();
     retReport();
     recReport();
+    ownedReport();
     static constexpr const char* kListNames[] = {"z", "solid", "debug", "sky", "refracted", "alpha", "late", "non-op"};
     if (active()) {
         spdlog::info("native: register file: mode {} ({}), engine code left to the engine {} times, {} registers merged from it (total), {} shaders' pools held",

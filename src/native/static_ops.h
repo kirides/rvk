@@ -124,6 +124,21 @@ public:
     void setOwnedObjects(bool on) { ownedObjects_ = on; }
     // native.owned_records (frame-ownership.md 7.14, F2c-2): op records built from the composition and compared (never submitted); needs the object table, the lighting images and table lighting
     void setOwnedRecords(bool on);
+    // native.owned_static (frame-ownership.md 7.16, F2c-3; static_ops_owned.cpp): the main view's z / solid mesh ops with a valid op record leave the engine's op
+    // lists at the view's start (frame tap, before Execute sorts) and are drawn from their records, without a composition, when the pass begins (BeginZPass /
+    // DoBeginRenderSolid returned); their side effects run here. check: every N-th frame (and the one before it) the old path runs and the records are compared
+    void setOwnedStatic(bool on, int check);
+    bool ownedStaticOn() const { return ownedStatic_; }
+    // a main view begins (frame tap, before the lists are read): false = no compaction this view (setting / prerequisites / a check frame)
+    bool ownedViewBegin(void* db, void* desc);
+    // may the list's ops leave it (the database's caps: the z list is executed, the solid pass is bracketed by DoBeginRenderSolid)
+    bool ownedListOk(void* db, List list);
+    // an op of the raw (unsorted) list: true = its record is valid, the op leaves the engine's list
+    bool ownedSelect(const Op& op);
+    // the ops that left `list`, in the engine's sort order; compactNs = the time the tap spent on the list
+    void ownedTake(List list, std::vector<Op>&& ops, std::uint64_t compactNs);
+    // BeginZPass / DoBeginRenderSolid of the main view returned: the pass's owned ops are drawn; returns the draws made (owned + late compositions)
+    std::uint32_t ownedPass(bool solid);
     // native.scene_draws (frame-ownership.md 7.11): the main view's static draws are issued as scene draws (Device::setSceneIssue)
     void setSceneDraws(bool on) { sceneDraws_ = on; }
     // native.gpu_scene (docs/research/gpu-scene.md): >= 1 checks every mesh / tree / actor op's entity against the signal-fed instance table
@@ -464,7 +479,7 @@ private:
     bool leanCommit();
     void leanAbort() { leanCollect_ = false; }
     void leanTouch(const void* resource) {
-        if (leanCollect_ && resource != nullptr) leanTouches_.push_back(resource);
+        if ((leanCollect_ || recCollect_) && resource != nullptr) leanTouches_.push_back(resource);
     }
     void leanImage(const void* resource, const void* imageData);  // a bound image: touch + video check + placeholder count
     void touchNow(const void* resource);  // eCResource2::RequestData(resource, 1) once per frame
@@ -729,6 +744,48 @@ private:
     d3d9::OwnedWindows ownedWin_;
     void setOwnedFor(const sc::DrawDesc& d);
 
+    // F2c-3 (static_ops_owned.cpp)
+    bool ownedStatic_ = false, ownedTripped_ = false;
+    int ownedCheck_ = 10;
+    struct OwnedView {
+        bool active = false, adminKnown = false, zColor = false;
+        std::uint64_t frame = 0;
+        const std::uint8_t* admin = nullptr;
+        std::uint64_t viewStamp = 0;
+    } ownedView_;
+    std::array<std::vector<Op>, 2> ownedOps_;  // the ops that left the engine's z / solid list (sorted), until their pass begins
+    struct OwnedStats {
+        static constexpr std::size_t kFallback = 8;
+        std::uint64_t views = 0, owned = 0, drawnOps = 0, draws = 0, lateOps = 0, lateDraws = 0, undrawn = 0;
+        std::uint64_t checkViews = 0, warmupViews = 0, gatedViews = 0, leanFrames = 0;
+        std::uint64_t seen = 0;                                   // ops of the lists that were looked at (mesh ops)
+        std::uint64_t leftExcl[orec::kExclCount] = {};            // not eligible, by reason
+        std::uint64_t leftStamp[orec::kStampFields] = {};         // the record's stamp differs, by first field
+        std::uint64_t leftNoRecord = 0, leftView = 0, leftAudit = 0, leftNotOwnable = 0, leftScene = 0;
+        std::uint64_t fallback[kFallback] = {};                   // owned ops composed late: materials, view, object window, refused draw, ...
+        std::uint64_t touches = 0, lightmaps = 0, stream3 = 0;
+        std::uint64_t compactNs = 0, selectNs = 0, buildNs = 0, submitNs = 0, sideNs = 0, matNs = 0, prepNs = 0;
+        void add(const OwnedStats& o);
+    } ownedW_, ownedT_;
+    d3d9::Device::OwnedReplayStats ownedDevLast_{};
+    std::unordered_map<std::uint64_t, bool> ownedAmbient_;    // (lighting key -> ambient registers non-zero), per pass
+    std::vector<std::uint64_t> ownedPolled_;                  // material slot -> frame + 1 of the last poll made for an owned op
+    std::uint32_t ownedLogged_ = 0;
+    std::uint64_t ownedIndirectLast_ = 0;
+    struct OwnedWinCache {  // per pass: the material windows of a slot, the lighting window base of a (slot, params)
+        std::uint64_t frame = ~0ull;
+        std::unordered_map<std::uint32_t, d3d9::OwnedWindows> mat;
+        std::unordered_map<std::uint64_t, std::uint32_t> light;
+    } ownedCache_;
+    bool ownedDrawOp(const Op& op, const orec::OpRecord& rec, const d3d9::OwnedWindows& viewWin, bool viewWinOk, int& why);
+    bool ownedMaterialsOk(const orec::OpRecord& rec);
+    bool ownedAuditOk(const Op& op, const orec::OpRecord& rec);
+    void ownedSideEffects(const orec::OpRecord& rec);
+    void ownedReport();
+    void ownedAutoOff(std::uint64_t differing);
+    orec::Excl recExclusion(const Op& op);
+    static std::uint64_t viewStampOf(const std::uint8_t* admin, bool zColorWrite, bool fog);
+
     // F2c-2 (static_ops_records.cpp)
     bool ownedRecords_ = false;
     std::unique_ptr<orec::Store> recs_;
@@ -738,6 +795,7 @@ private:
         std::uint32_t n = 0, first = 0;
     } lightKey_;
     bool recNoRetain_ = false;
+    bool recCollect_ = false;  // F2c-3: the composition of the eligible op being made collects its touches / stream 3 switches for the record (also off the lean frames)
     std::uint64_t recViewSerial_ = 0;
     void recEnter(const Op& op);          // before the composition: eligibility, stamps, the record valid at entry, the read log
     void recComposed(const Op& op, Skip s);  // after the composition

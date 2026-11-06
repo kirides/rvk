@@ -127,42 +127,23 @@ bool StaticOps::recStamp(const Op& op, orec::Stamp& st) {
     return true;
 }
 
-// the view's inputs to a composed pass (the admin's version / type / z write / render mode, the global alpha, the depth-bias order, fog)
-std::uint64_t StaticOps::recViewStamp() {
-    U8* admin = view_.admin;
+// the view's inputs to a composed pass (the admin's version / type / z write / render mode, fog): F2c-3 asks it before the view's composition exists (viewStampOf)
+std::uint64_t StaticOps::viewStampOf(const std::uint8_t* admin, bool zColorWrite, bool fog) {
     std::uint64_t h = mixPtr(0, admin);
-    h = mix(h, get<std::uint8_t>(admin, 0x313) | (get<std::uint8_t>(admin, 0x314) << 8) | (view_.zColorWrite ? 0x10000u : 0u) | (view_.fog ? 0x20000u : 0u));
+    h = mix(h, get<std::uint8_t>(admin, 0x313) | (get<std::uint8_t>(admin, 0x314) << 8) | (zColorWrite ? 0x10000u : 0u) | (fog ? 0x20000u : 0u));
     h = mix(h, static_cast<std::uint64_t>(get<std::uint32_t>(admin, 0x340)) | (static_cast<std::uint64_t>(get<std::int32_t>(admin, 0x170)) << 32));
-    h = mix(h, static_cast<std::uint64_t>(get<std::uint32_t>(admin, 0x31c)) | (static_cast<std::uint64_t>(static_cast<std::uint32_t>(view_.dbOrder)) << 32));
-    h = mix(h, std::bit_cast<std::uint32_t>(mirror_.global[1][3]));
+    h = mix(h, get<std::uint32_t>(admin, 0x31c));
     return h;
 }
+std::uint64_t StaticOps::recViewStamp() { return viewStampOf(view_.admin, view_.zColorWrite, view_.fog); }
 
-void StaticOps::recEnter(const Op& op) {
-    ret::gLog = nullptr;
-    if (!ownedRecords_ || !recs_) return;
-    orec::Store& R = *recs_;
-    R.active = R.building = R.auditBad = R.diffInOp = R.refused = false;
-    R.cur = nullptr;
-    R.postDone = false;
-    R.rebuildWhy = -1;
-    R.probes.clear();
-    R.pkeys.clear();
-    recNoRetain_ = false;
-    if (viewKind_ != ViewKind::Main || g_ != &groups_[static_cast<std::size_t>(Group::Static)] || op.kind != OpKind::Mesh || inNonOp_ ||
-        (op.list != List::ZPass && op.list != List::Solid)) {
-        return;
-    }
-    const auto t0 = Clock::now();
-    orec::Stats& w = R.window;
-    ++w.opsAll;
+// why an op is not in cut 1 (7.12 / 7.14), by reading the same engine fields the composition reads; Excl::Count = eligible
+orec::Excl StaticOps::recExclusion(const Op& op) {
     U8* ctx = static_cast<U8*>(op.raw.context);
     U8* res = ptr(ctx, 0x28);
     U8* entity = ptr(ctx, 0x10);
     const std::uint32_t sub = op.raw.desc & 0xffu, node = op.raw.desc >> 8;
     const bool solid = op.list == List::Solid;
-    R.key = {ctx, op.raw.desc, static_cast<std::uint8_t>(op.list), 0};
-    // the exclusions of 7.12 (the first reason in orec::Excl order)
     orec::Excl ex = orec::Excl::Count;
     const auto reason = [&](orec::Excl e) {
         if (ex == orec::Excl::Count) ex = e;
@@ -201,8 +182,35 @@ void StaticOps::recEnter(const Op& op) {
                 continue;
             }
             if (get<std::uint8_t>(shader, 0x2b8) != 0) reason(orec::Excl::SortId);
+            if (get<std::uint8_t>(shader, 0x78) != 0) reason(orec::Excl::DepthBias);  // (the owned view block holds the plain view-projection in c0..c3)
         }
     }
+    return ex;
+}
+
+void StaticOps::recEnter(const Op& op) {
+    ret::gLog = nullptr;
+    if (!ownedRecords_ || !recs_) return;
+    orec::Store& R = *recs_;
+    R.active = R.building = R.auditBad = R.diffInOp = R.refused = R.wantOwnable = false;
+    R.cur = nullptr;
+    R.postDone = false;
+    R.rebuildWhy = -1;
+    R.probes.clear();
+    R.pkeys.clear();
+    recNoRetain_ = false;
+    if (viewKind_ != ViewKind::Main || g_ != &groups_[static_cast<std::size_t>(Group::Static)] || op.kind != OpKind::Mesh || inNonOp_ ||
+        (op.list != List::ZPass && op.list != List::Solid)) {
+        return;
+    }
+    const auto t0 = Clock::now();
+    orec::Stats& w = R.window;
+    ++w.opsAll;
+    U8* ctx = static_cast<U8*>(op.raw.context);
+    U8* res = ptr(ctx, 0x28);
+    U8* entity = ptr(ctx, 0x10);
+    R.key = {ctx, op.raw.desc, static_cast<std::uint8_t>(op.list), 0};
+    const orec::Excl ex = recExclusion(op);
     if (ex != orec::Excl::Count) {
         ++w.excluded[static_cast<std::size_t>(ex)];
         R.map.erase(R.key);
@@ -231,7 +239,9 @@ void StaticOps::recEnter(const Op& op) {
     if (R.cur != nullptr) {
         recAudit(op);
     }
-    R.building = R.cur == nullptr || R.auditBad;
+    R.wantOwnable = ownedStatic_ && R.cur != nullptr && !R.cur->ownable;
+    R.building = R.cur == nullptr || R.auditBad || R.wantOwnable;
+    recCollect_ = ownedStatic_;  // (the touches / stream 3 lists of every composed eligible op: a record can be made from any composition)
     if (R.building) {
         R.readLog = {};
         ret::gLog = &R.readLog;  // (the composition's reads: the signal audit of the next frames)
@@ -306,6 +316,18 @@ void StaticOps::recComposed(const Op& op, Skip s) {
             return;
         }
     }
+    for (std::size_t k = 0; k < drawCount_; ++k) {
+        // (F2c-3: an owned op's draws are opaque and write depth: drawn before the engine's other ops, in any order among themselves)
+        const sc::DrawDesc& d = *draws_[k];
+        if (d.states[sc::StBlend] != 0 || d.states[sc::StZWrite] == 0) {
+            exclude(orec::Excl::Blended);
+            return;
+        }
+    }
+    if (leanBlock_ != 0) {
+        exclude(orec::Excl::LeanBlock);
+        return;
+    }
     if (recNoRetain_) {
         exclude(orec::Excl::NoRetain);
         return;
@@ -353,12 +375,22 @@ void StaticOps::recComposed(const Op& op, Skip s) {
 
 namespace {
 // two offers are the same window: kind, covered and base; view blocks (deduplicated by a bounded search) also when they hold the same registers at another slot
-bool sameWin(const d3d9::OwnedWindows::Win& a, const d3d9::OwnedWindows::Win& b, bool& dup) {
+// (`live` = the registers the draw reads, bit i = register first + i: a view block's registers the shader never reads hold the register file's carry-over of
+// whichever draw came before, and differ between blocks of one view)
+bool sameWin(const d3d9::OwnedWindows::Win& a, const d3d9::OwnedWindows::Win& b, bool& dup, const std::uint64_t* live, std::uint32_t first) {
     if (a.kind != b.kind || a.covered != b.covered) return false;
     if (a.base.bits == b.base.bits) return true;
-    if (a.kind == d3d9::OwnedWindows::Kind::View && a.image != nullptr && b.image != nullptr && std::memcmp(a.image, b.image, a.covered * 16u) == 0) {
-        dup = true;
-        return true;
+    if (a.kind == d3d9::OwnedWindows::Kind::View && a.image != nullptr && b.image != nullptr) {
+        bool equal = true;
+        for (std::uint32_t i = 0; i < a.covered && equal; ++i) {
+            const std::uint32_t reg = first + i;
+            if (live != nullptr && ((live[reg >> 6] >> (reg & 63)) & 1u) == 0) continue;
+            equal = std::memcmp(a.image + 4u * i, b.image + 4u * i, 16) == 0;
+        }
+        if (equal) {
+            dup = true;
+            return true;
+        }
     }
     return false;
 }
@@ -515,7 +547,7 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
         for (std::uint32_t st = 0; st < 2; ++st) {
             for (std::uint32_t wi = 0; wi < shader::abi::kConstWindows; ++wi) {
                 bool dup = false;
-                const bool same = sameWin(dw.w[st][wi], ownedWin_.w[st][wi], dup);
+                const bool same = sameWin(dw.w[st][wi], ownedWin_.w[st][wi], dup, st == 0 ? r.vsSet.data() : r.psSet.data(), (st == 0 ? shader::abi::kVsWindowFirst : shader::abi::kPsWindowFirst)[wi]);
                 if (dup) ++w.viewDup;
                 if (!same) {
                     std::string regs;
@@ -563,7 +595,7 @@ void StaticOps::recEnd(const Op& op) {
     if (!recs_ || !recs_->active) return;
     orec::Store& R = *recs_;
     orec::Stats& w = R.window;
-    if (R.cur != nullptr && !R.auditBad && !R.refused) {
+    if (R.cur != nullptr && !R.auditBad && !R.refused && !R.wantOwnable) {
         ++w.validAtEntry;
         return;
     }
@@ -648,8 +680,12 @@ void StaticOps::recEnd(const Op& op) {
         rec->lightmapRes = res;
         rec->bindLightmaps = op.list == List::Solid;
         rec->stream3 = op.list == List::ZPass;
+        // F2c-3: what the engine's slot code touches (collected by leanTouch / leanImage / leanStream3 while the record was built)
+        rec->touches = leanTouches_;
+        for (const LeanStream3& x : leanStream3_) rec->stream3Prims.push_back({x.primitive, x.on});
     }
     rec->builtFrame = dev_.stats().frames;
+    rec->ownable = recCollect_ || leanCollect_;
     if (ret::gLog == nullptr && !R.readLog.v.empty()) {
         ret::finalize(R.readLog.v);
         if (!R.readLog.failed) rec->reads = std::move(R.readLog.v);
@@ -673,6 +709,7 @@ void StaticOps::recReport() {
     orec::Store& R = *recs_;
     orec::Stats& w = R.window;
     R.total.add(w);
+    if (ownedStatic_ && w.differing != 0) ownedAutoOff(w.differing);  // F2c-3: a check frame's derived draw differs from the composed one
     const std::uint64_t frames = std::max<std::uint64_t>(1, dev_.stats().frames - R.lastFrame);
     R.lastFrame = dev_.stats().frames;
     const auto list = [](const std::uint64_t* v, const char* const* names, std::size_t n, std::size_t from = 0) {

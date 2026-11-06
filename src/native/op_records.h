@@ -79,10 +79,11 @@ inline int firstDifference(const Stamp& a, const Stamp& b) {
 }
 
 // why an op is not in cut 1 (the first reason in this order; counted per op)
-enum class Excl : std::uint8_t { Instanced, InstanceList, Overlay, Fade, Hierarchy, NodeOp, NoList, NotTableLit, ShaderClass, SortId, NotComposed, Switch, DrawLevel, NoRetain, NotRetained, Count };
+enum class Excl : std::uint8_t { Instanced, InstanceList, Overlay, Fade, Hierarchy, NodeOp, NoList, NotTableLit, ShaderClass, SortId, NotComposed, Switch, DrawLevel, NoRetain, NotRetained,
+                                 DepthBias, Blended, LeanBlock, Count };
 inline constexpr const char* kExclNames[] = {"hardware batch", "instance list", "overlay flags", "fade < 1", "hierarchy", "node op", "no light list", "not table-lit",
                                              "shader class", "sort id", "not composed (left to the engine)", "switch material", "draw level (inherited stage / CPU stream / not indexed)", "no retain (compile at the slot)",
-                                             "draw not retainable (no packet)"};
+                                             "draw not retainable (no packet)", "depth-bias material (F2c-3)", "blended / no z write draw (F2c-3)", "lean block (video / edge case)"};
 inline constexpr std::size_t kExclCount = static_cast<std::size_t>(Excl::Count);
 
 // the compare's field classes
@@ -140,6 +141,15 @@ struct OpRecord {
     const void* lightmapRes = nullptr;
     bool bindLightmaps = false, stream3 = false;
     std::vector<const void*> images;
+    // F2c-3: the engine resources the slot's code touches (RequestData(res, 1): every image a draw samples, the materials) and the visual's stream 3 switches
+    // the composition collected (StaticOps::leanTouch / leanImage / leanStream3 while a record is built)
+    std::vector<const void*> touches;
+    struct Stream3 {
+        void* primitive = nullptr;
+        bool on = false;
+    };
+    std::vector<Stream3> stream3Prims;
+    bool ownable = false;  // the touches / stream 3 lists were collected while this record was built (a record built on a frame that did not collect them is rebuilt once)
     std::string name;                              // diagnostics: mesh / material name
     std::uint64_t builtFrame = 0;
 };
@@ -192,6 +202,7 @@ struct Store {
     bool auditBad = false;                   // the read log disagreed at entry
     std::size_t auditCls = 0;
     bool diffInOp = false;                   // a draw of the op differed (attributes an audit disagreement)
+    bool wantOwnable = false;                // the record valid at entry was built without the side-effect lists: rebuilt from this composition (F2c-3)
     bool refused = false;                    // a derivation was refused for a reason that makes the record stale (module, variant, binding, texture)
     Key key;
     Stamp stamp;                             // the stamp read at entry

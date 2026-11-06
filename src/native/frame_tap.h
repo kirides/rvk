@@ -57,6 +57,7 @@ public:
     void shadowExecuteBegin(void* db, void* shadowMap) override;
     void shadowExecuteEnd(void* db) override { executeEnd(db); }
     bool opEnter(const void* op) override;
+    std::uint32_t passBegin(bool solid) override;
     bool nonOpBegin(NonOp which, void* admin, void* db) override;
     void nonOpEnd(NonOp which) override;
     // d3d9::DrawTap
@@ -108,6 +109,11 @@ private:
     FrameDesc desc_;
     Attribution attr_;
     std::vector<RawOp> raw_;
+    // F2c-3: the main view's raw z / solid list after the ops of valid records were taken out (compactOwned)
+    void compactOwned(void* db, List list, const std::uint8_t* data, std::int32_t& count);
+    std::vector<RawOp> ownedKept_;
+    std::vector<Op> ownedOps_;
+    std::vector<std::uint8_t> ownedMark_;
     std::unordered_map<const void*, VtableInfo> vtables_;
 
     // per view kind: the last view, the window since the last report, its first view with mismatches
