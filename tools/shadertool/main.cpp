@@ -1,6 +1,6 @@
 // rvk_shadertool: offline driver of the D3D9 -> SPIR-V shader translator.
 //
-//   rvk_shadertool corpus <dir> [--out <dir>] [--max-errors N] [--tint | --gi | --gbuf | --gbuf-motion | --capture]  (HLSL through DXC)
+//   rvk_shadertool corpus <dir> [--out <dir>] [--max-errors N] [--tint | --scene | --fillers | --gi | --gbuf | --gbuf-motion | --capture]  (HLSL through DXC)
 //                                                                translate + validate every vs*/ps* file of a capture corpus
 //                                                                (--tint: the pixel shaders' tint debug-view variant; --gi: the
 //                                                                material pixel shaders' GI variant, enh/gi; --capture: the vertex
@@ -10,7 +10,7 @@
 //   rvk_shadertool export <corpus dir> <out dir>                 write every shader as plain HLSL (<name>.vs.hlsl / .ps.hlsl): the translator's
 //                                                                exact output, the D3D9 listing + CTAB register names in a comment; out/include/
 //                                                                gets the ABI headers; dxc -I <out>/include -E VSMain|PSMain compiles each file
-//   rvk_shadertool dxil-check embedded [--filter S] | corpus <dir> [--tint|--gi|--gbuf|--gbuf-motion|--capture] | uber <jsonl>... [--limit N]
+//   rvk_shadertool dxil-check embedded [--filter S] | corpus <dir> [--tint|--scene|--fillers|--gi|--gbuf|--gbuf-motion|--capture] | uber <jsonl>... [--limit N]
 //                                                                SPIR-V + signed DXIL (SM 6.6) per shader; see docs/research/hlsl-rhi.md "DXIL parity (S1)"
 //   rvk_shadertool refdisasm <file>                              D3DXDisassembleShader (d3dx9_39.dll) as the reference listing
 //   rvk_shadertool evalcheck <dir>                               the CPU evaluator (shader/sm_eval.h) on every SM 3.0 shader of a
@@ -270,9 +270,11 @@ int cmdExport(const fs::path& dir, const fs::path& out) {
     return failed == 0 ? 0 : 1;
 }
 
-int cmdShow(const fs::path& file) {
+int cmdShow(const fs::path& file, bool scene) {
     spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
-    const Outcome o = translate(readTokens(file), tools);
+    TranslateOptions options;
+    options.sceneRecord = scene;  // `show <file> --scene`: the scene variant's text
+    const Outcome o = translate(readTokens(file), tools, options);
     std::printf("%s\n---- hlsl\n%s\n", o.disasm.c_str(), o.glsl.c_str());
     if (!o.stage.empty()) {
         std::printf("---- FAILED at %s\n%s\n", o.stage.c_str(), o.message.c_str());
@@ -446,6 +448,10 @@ int main(int argc, char** argv) {
                 variant = &rvk::enh::RtScene::captureOptions;
             } else if (a == "--hlsl") {
                 // (always HLSL now; the flag is kept for old command lines)
+            } else if (a == "--scene") {
+                options.sceneRecord = true;  // scene variants: the draw's data from a DrawRecord (frame-ownership.md 7.10)
+            } else if (a == "--fillers") {
+                rvk::shader::setVaryingFillers(true);  // the D3D12 game device's dense stage signatures
             } else if (a == "--tint") {
                 options.tintEpilogue = true;
             } else if (i + 1 < argc && a == "--out") {
@@ -465,7 +471,7 @@ int main(int argc, char** argv) {
     }
     if (cmd == "dxil-check") return cmdDxilCheck(argc, argv);
     if (cmd == "hlsl") return cmdHlsl(argc, argv);
-    if (cmd == "show") return cmdShow(argv[2]);
+    if (cmd == "show") return cmdShow(argv[2], argc > 3 && std::string(argv[3]) == "--scene");
     if (cmd == "refdisasm") return cmdRefDisasm(argv[2]);
     if (cmd == "evalcheck") return cmdEvalCheck(argv[2]);
     std::printf("unknown command %s\n", cmd.c_str());

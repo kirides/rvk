@@ -455,6 +455,39 @@ default off, Full, `needs` `native.illum_table`; off = nothing allocated).
   ~0.011 ms; at the spots ~55 entries per pass); main stream unchanged. CPU: one hash lookup + a 384 B copy per lit draw (debug setting, not a shipping cost).
 * Next (F1a, other agent): point PS window 3 at `windowBase(entry)` for the static ops; the entry index of a draw is what `LightingImages::note` returns.
 
+### 7.10 F2a scene variant (2026-11-06, `TranslateOptions::sceneRecord`, HLSL `RVK_SCENE_RECORD`)
+
+The shader side of section 8's F2: a scene variant of a translated pair / the ubershader reads everything of the draw's push block from a **DrawRecord**.
+Nothing in `src/d3d9` / `src/native` uses it yet (F2b); the default (non-scene) generated text is byte-identical (checked on three corpus shaders against the
+main build; `kTranslatorVersion` NOT bumped).
+
+* **ABI** (`src/shader/abi.h`, twin `shaders/include/rvk_draw.hlsli` under `RVK_SCENE_RECORD`, offsets checked by `rvk_tests abi_hlsl_scene_layout_matches_cpp`):
+  `DrawRecord` (128 B, uint4 rows) = `vsWin[4]` @0, `psWin[4]` @32 (address pairs as in `PushConstants`), `draw` (DrawBlock) @64, `prevVs` @72,
+  `drawId` @80, `flags` @84 (kind / pass / view / D3D12 UBYTE4 bits), `instanceSlot` @88, `part` @92, `materialSlot` @96, `illumEntry` @100, 24 B reserved.
+  Push block `ScenePush` (same 112 B): `records` @0 (the frame's record buffer), `frame` @24 (the offset of `PushConstants::frame`: hooks'
+  `rvkLoadFrame(pc.frame)` is unchanged), `recordBase` @32 (added to `ref.x`), the rest spare. `pc.vs / ps / draw / flags / drawId / prevVs` and the windows
+  do not exist in a scene shader: `rvkVsWin / rvkPsWin / rvkLoadDraw` and the new `rvkDrawFlags() / rvkDrawId() / rvkDrawPrevVs() / rvkDrawAddr()` read the
+  record (in plain shaders the same accessors read the push block; `rvk_material_variant.hlsli` and the RT capture hook use them instead of `pc.*`).
+* **Locations.** Vertex input `uint2 ref` = location **24**, semantic `ATTR24` (`abi::kSceneRefLocation`): D3D9 declarations stop at v15 and the ubershader's compact
+  locations at 21, so no game declaration or existing stream uses 24 (instanced draws use the same locations for their instance-rate elements; the ref stream is one
+  more instance-rate binding). Cost: needs `maxVertexInputAttributes >= 25` (every desktop driver reports >= 29; D3D12 allows 32). ref.x = record index, ref.y free.
+  Varying `nointerpolation uint` at **VARY14** = TEXCOORD14 (`abi::kSceneVaryingLocation`): no corpus shader reads or writes it (the translator refuses
+  such a shader and any shader reading i# / b# constants, which need the full stage block; none in the corpus); the ubershader's D3D12 pad14 gives way to it; the
+  RT / GI variants' extra varying stays at 15. D3D12's dense signatures pad around it as for any location.
+* **Generated text, vertex shader** (`show <file> --scene`): `#define RVK_SCENE_RECORD 1` before the include, `[[vk::location(24)]] uint2 rvk_sceneRef : ATTR24;` in
+  `RvkVsIn`, `[[vk::location(14)]] nointerpolation uint rvk_sceneIdx : VARY14;` in `RvkVsOut`, `rvkSceneBeginVs(rvk_in.rvk_sceneRef);` before `rvk_draw = rvkLoadDraw();`
+  and `rvk_out.rvk_sceneIdx = rvk_sceneIndex;`. Pixel shader: the define, the varying in `RvkPsIn`, `rvkSceneBeginPs(rvk_in.rvk_sceneIdx);` first. Ubershader:
+  `uberPixelHlsl(..., sceneRecord)` / `-D RVK_SCENE_RECORD=1` for `ge_default.vert / .frag`.
+* **GPU test** (`tools/rhitest/parity_scene.inl`, both backends, also `--validation`): 4 draws of a mesh with distinct register files and textures, blended
+  additively, drawn (a) with per-draw push blocks, (b) with the scene variants by ONE `drawIndexedIndirect` (firstInstance = i, `vertexOffset` 0) over the DrawRecords: the
+  images are byte-equal (0 pixels differ) on Vulkan and D3D12 and the scene image agrees across backends (worst difference 0 - 1). Cases: the asm pair of the
+  translated-draw test, the ubershader (simple, heavy with normal map / specular / lightmap / lights, GI hooks reading window 3), two real corpus pairs (a rigid mesh + a
+  12-texture lit material, a skinned mesh + the same material; `RVK_CORPUS` or a `corpus/` found above the source). A mutation (a record pointing at the next draw's DrawBlock)
+  fails every case. `RVK_PARITY_ONLY='scene variant'` runs only these.
+* **Checks:** `rvk_shadertool corpus corpus --scene` (2483 / 2483), `dxil-check corpus corpus --scene [--fillers | --gbuf-motion | --gi | --capture]` (0 failures; push block 112 B),
+  `dxil-check embedded` (74, `material scene` = `ge_default.vert / .frag` with the define), `dxil-check uber` gained the variants `plain+scene`, `gbuffer+motion+scene`.
+  Note: `rvk_rhitest` "references (GI lookup, RT records)" fails on D3D12 in this environment with and without this change (also in the main build, 10 of 2048 values; unrelated).
+
 ## 8. F1 / F2 design decision: windows onto persistent tables (2026-11-06, orchestrator)
 
 **Decision.** F1 does not start with new shaders. Translated shaders and the ported ubershader read every float register through 4 register windows per

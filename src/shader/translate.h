@@ -56,6 +56,12 @@ struct TranslateOptions {
     // separate variant: the default output is unchanged (the tint debug view, docs/research/draw-tags.md 5)
     bool tintEpilogue = false;
 
+    // scene variant (docs/research/frame-ownership.md 7.10, abi.h DrawRecord / ScenePush): the shader's draw data (register windows, DrawBlock,
+    // flags) comes from the DrawRecord that the per-instance `uint2 ref` stream (vertex input kSceneRefLocation) selects instead of the push block;
+    // the record index reaches the pixel shader as a nointerpolation varying (kSceneVaryingLocation). Both stages of a pipeline must be scene
+    // variants. Refused for shaders that read i# / b# constants or use that varying location. Default text unchanged when false.
+    bool sceneRecord = false;
+
     // ---- variant hooks for enhancements (docs/research/injection.md 4). All empty = the default translation, unchanged.
     // GLSL right after the ABI declarations, before the generated globals: declarations and functions that constOverrides /
     // inputOverrides expressions call (they are used inside the generated helpers, e.g. rvk_cRel), e.g. the GI lookup

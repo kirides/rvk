@@ -32,8 +32,12 @@ struct RvkPsIn {
     [[vk::location(11)]] float4 rvk_pad11 : VARY11;
     [[vk::location(12)]] float4 rvk_pad12 : VARY12;
     [[vk::location(13)]] float4 rvk_pad13 : VARY13;
-    [[vk::location(14)]] float4 rvk_pad14 : VARY14;
 #endif  // (D3D12 links the stages by register: the signature is dense, in register order)
+#ifdef RVK_SCENE_RECORD
+    [[vk::location(14)]] nointerpolation uint rvk_sceneIdx : VARY14;  // abi.h kSceneVaryingLocation: the DrawRecord index (scene variant)
+#elif !defined(__spirv__)
+    [[vk::location(14)]] float4 rvk_pad14 : VARY14;
+#endif
 #ifdef RVK_MV_MOTION
     [[vk::location(15)]] float4 rvk_prevWorld : VARY15;  // enh::kPrevWorldLocation: the vertex capture's previous world position
 #elif !defined(__spirv__)
@@ -601,6 +605,9 @@ float4 PS_DefaultZPass() {
 #endif
 
 RvkPsOut PSMain(RvkPsIn rvk_in) {
+#ifdef RVK_SCENE_RECORD
+    rvkSceneBeginPs(rvk_in.rvk_sceneIdx);
+#endif
     rvk_draw = rvkLoadDraw();
     rvk_fragCoord = rvk_in.rvk_fragCoord;
     vTex0 = rvk_in.vTex0;

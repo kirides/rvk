@@ -22,7 +22,7 @@ bool uberSupports(std::string_view effectFile, std::string_view entry) {
     return effectFile == "ge_default_phong.fx" && (entry == "PS_Default" || entry == "PS_DefaultZPass");
 }
 
-std::string uberPixelHlsl(std::string_view entry, const MacroList& macros, std::string_view hookDefines) {
+std::string uberPixelHlsl(std::string_view entry, const MacroList& macros, std::string_view hookDefines, bool sceneRecord) {
     std::string out = "// HLSL material shader (shaders/material) built from the engine's macros\n";
     for (const auto& [name, value] : macros) {
         if (!validName(name)) return {};
@@ -45,6 +45,7 @@ std::string uberPixelHlsl(std::string_view entry, const MacroList& macros, std::
         out += std::format("#define {} {}\n", name, v);
     }
     if (entry.ends_with("ZPass")) out += "#define XFX_PASS 1\n";
+    if (sceneRecord) out += "#define RVK_SCENE_RECORD 1\n";  // scene variant (abi.h DrawRecord): the draw's data from a record, not the push block
     if (!hookDefines.empty()) {
         out += "#define RVK_UBER_HOOKS 1\n";
         out += hookDefines;

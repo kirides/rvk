@@ -131,6 +131,46 @@ static_assert(sizeof(PushConstants) == 112);
 inline constexpr std::uint32_t kPushConstantBudget = 128;
 static_assert(sizeof(PushConstants) <= kPushConstantBudget);
 
+// ---- scene variant (docs/research/frame-ownership.md 7.10 / 8): the GPU-driven draw ABI ------------------------------------------------
+// A scene variant of a translated / ubershader pair (TranslateOptions::sceneRecord, HLSL `RVK_SCENE_RECORD`) takes everything a draw's push block
+// carries from a DrawRecord instead: the vertex shader reads the per-instance-rate stream `uint2 ref` (vertex input location kSceneRefLocation,
+// semantic ATTR24; ref.x = record index, ref.y = free for later consumers: instance slot / template id), loads DrawRecord[recordBase + ref.x]
+// from the per-frame record buffer and hands the record index to the pixel shader as a nointerpolation uint varying at kSceneVaryingLocation
+// (TEXCOORD14: no game shader writes it; the translator refuses a shader that does). The push block of these draws is ScenePush (same 112 bytes;
+// `frame` stays at offset 24 so the hooks' rvkLoadFrame(pc.frame) works unchanged; the window / DrawBlock members of PushConstants do not exist).
+inline constexpr std::uint32_t kSceneRefLocation = 24;      // vertex input of the ref stream (above every D3D9 v# and the ubershader's compact locations)
+inline constexpr std::uint32_t kSceneVaryingLocation = 14;  // VARY14: the record index, vertex -> pixel
+inline constexpr std::uint32_t kDrawRecordSize = 128;
+
+// One draw's windows onto the persistent tables (frame-ownership.md 8). Eight window bases (address pairs as in PushConstants::vsWin / psWin), the
+// DrawBlock, the draw's flags, and room for the consumers of F2b+. The HLSL twin is RvkDrawRecord (uint4 only).
+struct DrawRecord {
+    std::uint64_t vsWin[kConstWindows];  // 0: vertex register windows 0..3 (kVsWindowFirst)
+    std::uint64_t psWin[kConstWindows];  // 32: pixel register windows 0..3 (kPsWindowFirst)
+    std::uint64_t draw;                  // 64: the DrawBlock (RvkDrawData)
+    std::uint64_t prevVs;                // 72: a vertex capture address (draw variants; 0 = none)
+    std::uint32_t drawId;                // 80: the draw's index in the frame
+    std::uint32_t flags;                 // 84: PushConstants::flags (kind / pass / view / UBYTE4 bits)
+    std::uint32_t instanceSlot;          // 88: the engine instance's slot in the instance table
+    std::uint32_t part;                  // 92: MeshPart table index
+    std::uint32_t materialSlot;          // 96: Material table slot
+    std::uint32_t illumEntry;            // 100: Illumination table entry
+    std::uint32_t reserved0[2];          // 104
+    std::uint32_t reserved1[4];          // 112: rounded to kDrawRecordSize
+};
+static_assert(sizeof(DrawRecord) == kDrawRecordSize && alignof(DrawRecord) == 8);
+
+struct ScenePush {
+    std::uint64_t records;     // 0: the frame's DrawRecord buffer (record i at + i * kDrawRecordSize)
+    std::uint64_t pad0;        // 8: (PushConstants::ps)
+    std::uint64_t pad1;        // 16: (PushConstants::draw)
+    std::uint64_t frame;       // 24: the FrameBlock, as in PushConstants
+    std::uint32_t recordBase;  // 32: added to ref.x (a bucket of records that starts inside the buffer)
+    std::uint32_t pad2;        // 36
+    std::uint64_t spare[9];    // 40: to 112 bytes
+};
+static_assert(sizeof(ScenePush) == sizeof(PushConstants) && offsetof(ScenePush, frame) == offsetof(PushConstants, frame));
+
 // PushConstants::flags
 inline constexpr std::uint32_t kDrawKindMask = 0xffu;
 inline constexpr std::uint32_t kDrawPassShift = 8;

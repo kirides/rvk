@@ -250,7 +250,7 @@ float rvkMvLightShadow(uint slot, uint size, uint sid) {
     return v;
 }
 
-float4 rvkMvEngineReg(uint reg) { return rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(pc.psw3), reg * 16u)); }
+float4 rvkMvEngineReg(uint reg) { return rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvkPsWin(3u)), reg * 16u)); }
 
 void rvkMvCluster(RvkFrame f, float3 P, float3 ng) {
     [unroll] for (uint k = 0; k < RVK_MV_CL_COUNT * 4u; ++k) rvk_cl[k] = rvkMvEngineReg(uint(RVK_MV_CL_REG) + k);
@@ -405,9 +405,9 @@ void rvkMvPrologue(float4 fragCoord, float4 vertexNormal) {
     rvk_mvFrag = fragCoord;
     RvkFrame f = rvkLoadFrame(pc.frame);
 #ifdef RVK_MV_AMBIENT
-    for (int i = 0; i < 7; ++i) rvk_gi[1 + i] = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(pc.psw3), uint(RVK_MV_AMB_REG + i) * 16u));  /* c14..c223 = window 3 (abi.h) */
+    for (int i = 0; i < 7; ++i) rvk_gi[1 + i] = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvkPsWin(3u)), uint(RVK_MV_AMB_REG + i) * 16u));  /* c14..c223 = window 3 (abi.h) */
 #ifdef RVK_MV_HAS_IND
-    rvk_gi[0] = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(pc.psw3), uint(RVK_MV_IND_REG) * 16u));
+    rvk_gi[0] = rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvkPsWin(3u)), uint(RVK_MV_IND_REG) * 16u));
 #else
     rvk_gi[0] = float4(0.0, 0.0, 0.0, 0.0);
 #endif
@@ -620,7 +620,7 @@ void rvkMvEpilogue(inout float4 c0) {
 #endif
 #ifdef RVK_MV_CLUSTER
     // lamp shadows on baked light (not on characters: their lamp light is the table's, already shaded)
-    if (rvk_clBake.x > 0.0 && (pc.flags & RVK_DRAW_KIND_MASK) != uint(RVK_MV_KIND_SKINNED)) {
+    if (rvk_clBake.x > 0.0 && (rvkDrawFlags() & RVK_DRAW_KIND_MASK) != uint(RVK_MV_KIND_SKINNED)) {
         float dark = saturate(f.params[RVK_MV_CL_PARAM].z);  // lighting.light_shadow_baked
         float lumC = dot(max(c0.rgb, float3(0.0, 0.0, 0.0)), float3(0.3, 0.59, 0.11));
         c0.rgb *= 1.0 - dark * saturate(rvk_clBake.x / (rvk_clBake.y + lumC * RVK_MV_BAKE_REST + 0.05));
@@ -631,7 +631,7 @@ void rvkMvEpilogue(inout float4 c0) {
 #endif
 #ifdef RVK_MV_GB_NORMAL
     float3 n = dot(rvk_gbN.xyz, rvk_gbN.xyz) > 1e-8 ? normalize(rvk_gbN.xyz) : rvk_giN;
-    uint kind = pc.flags & RVK_DRAW_KIND_MASK;
+    uint kind = rvkDrawFlags() & RVK_DRAW_KIND_MASK;
     rvk_mvNormalOut = float4(rvkGiOctEncode(n), rvk_pbrGb, kind == uint(RVK_MV_KIND_SKINNED) ? 2.0 / 3.0 : 1.0 / 3.0);
 #endif
 #ifdef RVK_MV_GB_MOTION

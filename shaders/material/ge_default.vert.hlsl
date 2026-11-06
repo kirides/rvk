@@ -124,6 +124,9 @@ struct RvkVsIn {
     [[vk::location(RVK_N15 + 2)]] float4 aPosDelta3 : ATTR20;  // POSITION3
     [[vk::location(RVK_N15 + 3)]] float3 aNormDelta3 : ATTR21;  // NORMAL3
 #endif
+#ifdef RVK_SCENE_RECORD
+    [[vk::location(RVK_SCENE_REF_LOCATION)]] uint2 rvk_sceneRef : ATTR24;  // abi.h kSceneRefLocation: (record index, free), per instance
+#endif
 };
 
 struct sVSInput_Default {
@@ -170,8 +173,13 @@ struct RvkVsOut {
     [[vk::location(11)]] float4 rvk_vPad11 : VARY11;
     [[vk::location(12)]] float4 rvk_vPad12 : VARY12;
     [[vk::location(13)]] float4 rvk_vPad13 : VARY13;
+#ifndef RVK_SCENE_RECORD
     [[vk::location(14)]] float4 rvk_vPad14 : VARY14;
+#endif
     [[vk::location(15)]] float4 rvk_vPad15 : VARY15;
+#endif
+#ifdef RVK_SCENE_RECORD
+    [[vk::location(14)]] nointerpolation uint rvk_sceneIdx : VARY14;  // abi.h kSceneVaryingLocation: the DrawRecord index (scene variant)
 #endif
     [[vk::location(16)]] float4 rvk_vColor0 : VARY16;
 };
@@ -648,6 +656,9 @@ sVSOutput_Default VS_DefaultZPass() {
 #endif
 
 RvkVsOut VSMain(RvkVsIn rvk_in) {
+#ifdef RVK_SCENE_RECORD
+    rvkSceneBeginVs(rvk_in.rvk_sceneRef);
+#endif
     rvk_draw = rvkLoadDraw();
     loadInputs(rvk_in);
 #if XFX_PASS == XFX_PASS_DEFAULT
@@ -656,6 +667,9 @@ RvkVsOut VSMain(RvkVsIn rvk_in) {
     sVSOutput_Default o = VS_DefaultZPass();
 #endif
     RvkVsOut rvk_out = (RvkVsOut)0;
+#ifdef RVK_SCENE_RECORD
+    rvk_out.rvk_sceneIdx = rvk_sceneIndex;
+#endif
     rvk_out.rvk_vTex0 = o.vTex0;
     rvk_out.rvk_vTex1 = o.vTex1;
     rvk_out.rvk_vViewPos = o.vViewPos;

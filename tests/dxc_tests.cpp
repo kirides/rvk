@@ -201,6 +201,35 @@ TEST(abi_hlsl_draw_layout_matches_cpp) {
               "RvkDrawData");
 }
 
+// the scene variant's blocks (RVK_SCENE_RECORD in shaders/include/rvk_draw.hlsli: ScenePush, DrawRecord) against abi.h
+TEST(abi_hlsl_scene_layout_matches_cpp) {
+    if (!dxc::available()) return;
+    const auto words = embedded::spirv("test/abi_scene_layout.comp");
+    CHECK(!words.empty());
+    if (words.empty()) return;
+    const auto m = rvk::test::memberOffsets(words);
+    CHECK(m.contains("type.PushConstant.RvkScenePush") && m.contains("RvkDrawRecord") && m.contains("RvkDrawData"));
+    if (!m.contains("type.PushConstant.RvkScenePush") || !m.contains("RvkDrawRecord")) return;
+    using SP = abi::ScenePush;
+    checkHlsl(m.at("type.PushConstant.RvkScenePush"),
+              {{"records", offsetof(SP, records)}, {"pad0", offsetof(SP, pad0)}, {"pad1", offsetof(SP, pad1)}, {"frame", offsetof(SP, frame)},
+               {"recordBase", offsetof(SP, recordBase)}, {"pad2", offsetof(SP, pad2)}, {"spare0", offsetof(SP, spare)}, {"spare1", offsetof(SP, spare) + 8},
+               {"spare2", offsetof(SP, spare) + 16}, {"spare3", offsetof(SP, spare) + 24}, {"spare4", offsetof(SP, spare) + 32},
+               {"spare5", offsetof(SP, spare) + 40}, {"spare6", offsetof(SP, spare) + 48}, {"spare7", offsetof(SP, spare) + 56},
+               {"spare8", offsetof(SP, spare) + 64}},
+              "RvkScenePush");
+    // the frame block sits where the plain push block has it (hooks read pc.frame in both)
+    CHECK(offsetof(SP, frame) == offsetof(abi::PushConstants, frame));
+    using DR = abi::DrawRecord;
+    checkHlsl(m.at("RvkDrawRecord"),
+              {{"vsw01", offsetof(DR, vsWin)}, {"vsw23", offsetof(DR, vsWin) + 16}, {"psw01", offsetof(DR, psWin)}, {"psw23", offsetof(DR, psWin) + 16},
+               {"drawPrev", offsetof(DR, draw)}, {"ids", offsetof(DR, drawId)}, {"slots", offsetof(DR, materialSlot)}, {"reserved", offsetof(DR, reserved1)}},
+              "RvkDrawRecord");
+    // inside the rows: draw, prevVs / drawId, flags, instanceSlot, part / materialSlot, illumEntry
+    CHECK(offsetof(DR, prevVs) == offsetof(DR, draw) + 8 && offsetof(DR, flags) == offsetof(DR, drawId) + 4 && offsetof(DR, instanceSlot) == offsetof(DR, drawId) + 8 &&
+          offsetof(DR, part) == offsetof(DR, drawId) + 12 && offsetof(DR, illumEntry) == offsetof(DR, materialSlot) + 4);
+}
+
 // the RT scene's geometry record (shaders/include/rvk_rt.hlsli: seven uint4) and the RT debug view's push block
 TEST(abi_hlsl_rt_layout_matches_cpp) {
     if (!dxc::available()) return;

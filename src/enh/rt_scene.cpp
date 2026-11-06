@@ -1539,7 +1539,7 @@ bool RtScene::captureOptions(const d3d9::Shader& s, shader::TranslateOptions& o)
     o.epilogue = std::format(
         "    rvk_out.rvk_prevWorld = float4(0.0, 0.0, 0.0, 0.0);\n"
         "    {{\n"
-        "        uint2 rvk_capAddr = pc.prevVs;\n"
+        "        uint2 rvk_capAddr = rvkDrawPrevVs();\n"
         "        if (any(rvk_capAddr != uint2(0u, 0u))) {{\n"
         "            RvkAddr rvk_cap = rvkAddr(rvk_capAddr);\n"
         "            int rvk_slot = int(rvk_in.rvk_vertexId) - int(rvk_draw.alpha.w);\n"

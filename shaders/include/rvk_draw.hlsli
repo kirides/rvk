@@ -45,11 +45,82 @@ struct RvkDrawPush {
     uint2 psw2;
     uint2 psw3;
 };
+#ifndef RVK_SCENE_RECORD
 RVK_PUSH(RvkDrawPush, pc);
 
 // the window block of window index w (a constant after folding in every shader that reads a constant register)
 uint2 rvkVsWin(uint w) { return w == 0u ? pc.vsw0 : w == 1u ? pc.vsw1 : w == 2u ? pc.vsw2 : pc.vsw3; }
 uint2 rvkPsWin(uint w) { return w == 0u ? pc.psw0 : w == 1u ? pc.psw1 : w == 2u ? pc.psw2 : pc.psw3; }
+// the draw's own block / flags / id / vertex capture (a scene variant reads them from its DrawRecord: below)
+uint2 rvkDrawAddr() { return pc.draw; }
+uint rvkDrawFlags() { return pc.flags; }
+uint rvkDrawId() { return pc.drawId; }
+uint2 rvkDrawPrevVs() { return pc.prevVs; }
+#else
+// ---- scene variant (RVK_SCENE_RECORD; abi.h DrawRecord / ScenePush, frame-ownership.md 7.10 / 8) -----------------------------------------------
+// The push block shrinks to the record buffer + the frame block; the draw's windows, DrawBlock, flags and id come from the DrawRecord that the
+// vertex stage's per-instance `ref` stream selects (ref.x). Entry points call rvkSceneBeginVs(ref) / rvkSceneBeginPs(index) before anything reads one.
+struct RvkScenePush {
+    uint2 records;  // the frame's DrawRecord buffer
+    uint2 pad0;
+    uint2 pad1;
+    uint2 frame;    // the FrameBlock (same offset as RvkDrawPush.frame)
+    uint recordBase;
+    uint pad2;
+    uint2 spare0;
+    uint2 spare1;
+    uint2 spare2;
+    uint2 spare3;
+    uint2 spare4;
+    uint2 spare5;
+    uint2 spare6;
+    uint2 spare7;
+    uint2 spare8;
+};
+RVK_PUSH(RvkScenePush, pc);
+
+// the vertex input of the ref stream and the varying that carries the record index (abi.h kSceneRefLocation / kSceneVaryingLocation)
+#define RVK_SCENE_REF_LOCATION 24
+#define RVK_SCENE_VARYING_LOCATION 14
+
+struct RvkDrawRecord {
+    uint4 vsw01;     // vertex windows 0 (xy) and 1 (zw)
+    uint4 vsw23;
+    uint4 psw01;     // pixel windows 0 and 1
+    uint4 psw23;
+    uint4 drawPrev;  // xy the DrawBlock, zw the vertex capture
+    uint4 ids;       // x drawId, y flags, z instance slot, w part
+    uint4 slots;     // x material slot, y illumination entry, zw reserved
+    uint4 reserved;
+};
+static RvkDrawRecord rvk_rec;
+static uint2 rvk_sceneRef;   // the vertex stage's ref stream value (ref.y is free for the consumers of later steps)
+static uint rvk_sceneIndex;  // the record's index (the pixel shader gets it as a varying)
+
+void rvkSceneLoad(uint index) {
+    rvk_sceneIndex = index;
+    rvk_rec = rvkPtr<RvkDrawRecord, 16>(rvkPairAdd(pc.records, index * 128u)).Get();
+}
+void rvkSceneBeginVs(uint2 ref) {
+    rvk_sceneRef = ref;
+    rvkSceneLoad(pc.recordBase + ref.x);
+}
+void rvkSceneBeginPs(uint index) {
+    rvk_sceneRef = uint2(index - pc.recordBase, 0u);
+    rvkSceneLoad(index);
+}
+
+uint2 rvkSceneWin(uint4 a, uint4 b, uint w) {
+    const uint4 q = w < 2u ? a : b;
+    return (w & 1u) == 0u ? q.xy : q.zw;
+}
+uint2 rvkVsWin(uint w) { return rvkSceneWin(rvk_rec.vsw01, rvk_rec.vsw23, w); }
+uint2 rvkPsWin(uint w) { return rvkSceneWin(rvk_rec.psw01, rvk_rec.psw23, w); }
+uint2 rvkDrawAddr() { return rvk_rec.drawPrev.xy; }
+uint rvkDrawFlags() { return rvk_rec.ids.y; }
+uint rvkDrawId() { return rvk_rec.ids.x; }
+uint2 rvkDrawPrevVs() { return rvk_rec.drawPrev.zw; }
+#endif
 
 // RvkDrawPush.flags: bits 0-7 the draw kind (d3d9/draws.h Kind), 8-11 the pass (scene.h Pass), 12-15 the view (scene.h View), 16.. feature bits
 static const uint RVK_DRAW_KIND_MASK = 0xffu;
@@ -65,6 +136,6 @@ static const uint RVK_DRAW_TINTED = 0x10000u;
 #define RVK_PSC(n) rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvkPsWin(RVK_PS_WIN(n))), uint(n) * 16u))
 
 // the draw's DrawBlock (not for replacers that put their own block in pc.draw)
-RvkDrawData rvkLoadDraw() { return rvkPtr<RvkDrawData, 16>(pc.draw).Get(); }
+RvkDrawData rvkLoadDraw() { return rvkPtr<RvkDrawData, 16>(rvkDrawAddr()).Get(); }
 uint rvkDrawTex(RvkDrawData d, uint i) { return d.tex[i >> 2][i & 3u]; }
 uint rvkDrawSmp(RvkDrawData d, uint i) { return d.smp[i >> 2][i & 3u]; }

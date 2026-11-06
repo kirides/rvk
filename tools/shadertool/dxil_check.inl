@@ -175,6 +175,8 @@ int cmdDxilEmbedded(int argc, char** argv) {
             }
         } else {
             jobList.push_back({name, {}, family});
+            // the material shaders also as scene variants (the draw's data from a DrawRecord, frame-ownership.md 7.10)
+            if (name == "material/ge_default.vert" || name == "material/ge_default.frag") jobList.push_back({name, "RVK_SCENE_RECORD=1", family + " scene"});
         }
     }
     std::vector<Item> items(jobList.size());
@@ -348,12 +350,16 @@ int cmdDxilUber(int argc, char** argv) {
     struct Variant {
         const char* name;
         const char* defines;
+        bool scene = false;
     };
     static const Variant kVariants[] = {
         {"plain", ""},
         {"gbuffer", "#define RVK_MV_AMBIENT 1\n#define RVK_MV_AMB_REG 14\n#define RVK_MV_HAS_IND 1\n#define RVK_MV_IND_REG 21\n#define RVK_MV_GBUFFER 1\n#define RVK_MV_KIND_SKINNED 3\n#define RVK_MV_VNORMAL 1\n"},
         {"gbuffer+motion", "#define RVK_MV_AMBIENT 1\n#define RVK_MV_AMB_REG 14\n#define RVK_MV_HAS_IND 1\n#define RVK_MV_IND_REG 21\n#define RVK_MV_GBUFFER 1\n#define RVK_MV_MOTION 1\n#define RVK_MV_KIND_SKINNED 3\n#define RVK_MV_VNORMAL 1\n"},
         {"gi", "#define RVK_MV_AMBIENT 1\n#define RVK_MV_AMB_REG 14\n#define RVK_MV_HAS_IND 1\n#define RVK_MV_IND_REG 21\n#define RVK_MV_KIND_SKINNED 3\n"},
+        // scene variants (RVK_SCENE_RECORD: the draw's data from a DrawRecord, frame-ownership.md 7.10)
+        {"plain+scene", "", true},
+        {"gbuffer+motion+scene", "#define RVK_MV_AMBIENT 1\n#define RVK_MV_AMB_REG 14\n#define RVK_MV_HAS_IND 1\n#define RVK_MV_IND_REG 21\n#define RVK_MV_GBUFFER 1\n#define RVK_MV_MOTION 1\n#define RVK_MV_KIND_SKINNED 3\n#define RVK_MV_VNORMAL 1\n", true},
     };
     constexpr std::size_t kN = std::size(kVariants);
     std::vector<Item> items(reqs.size() * kN);
@@ -365,7 +371,7 @@ int cmdDxilUber(int argc, char** argv) {
         items[i].family = std::string("uber ") + v.name;
         rvk::shader::dxc::Request r;
         r.file = "uber.hlsl";
-        r.source = rvk::shader::uberPixelHlsl(q.entry, q.macros, v.defines);
+        r.source = rvk::shader::uberPixelHlsl(q.entry, q.macros, v.defines, v.scene);
         if (r.source.empty()) {
             items[i].r.spirvMsg = "uber: invalid macro name";
             return;
@@ -396,6 +402,8 @@ int cmdDxilCheck(int argc, char** argv) {
             else if (a == "--gbuf-motion") variant = [](const rvk::d3d9::Shader& sh, TranslateOptions& o) { return rvk::enh::materialVariantOptions(sh, rvk::enh::MaterialVariant::GbufferMotion, o); };
             else if (a == "--capture") variant = &rvk::enh::RtScene::captureOptions;
             else if (a == "--tint") options.tintEpilogue = true;
+            else if (a == "--scene") options.sceneRecord = true;
+            else if (a == "--fillers") rvk::shader::setVaryingFillers(true);  // the D3D12 game device's dense signatures
             else if (a == "--jobs" && i + 1 < argc) jobs = std::atoi(argv[++i]);
             else if (a == "--max-errors" && i + 1 < argc) maxErrors = std::atoi(argv[++i]);
         }

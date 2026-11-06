@@ -24,7 +24,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <format>
+#include <fstream>
+#include <functional>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <string>
@@ -659,6 +663,7 @@ void testUberDraw(Harness& h, const char* name, const shader::MacroList& macros,
 }
 
 #include "parity_water.inl"
+#include "parity_scene.inl"
 
 // ---- test 3: references ---------------------------------------------------------------------------------------------------------------------
 
@@ -1113,6 +1118,7 @@ int run(rhi::Device& dev) {
     testUberDraw(h, "normal map, specular, lightmap, lights", heavyRequest(), "PS_Default", {}, false, true);
     testUberDraw(h, "gbuffer + gi hooks", heavyRequest(), "PS_Default", kHookDefines, true, true);
     testWaterDraw(h);
+    testScene(h);
     testReferences(h);
     return failures;
 }
