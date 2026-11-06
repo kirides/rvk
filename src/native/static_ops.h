@@ -764,7 +764,7 @@ private:
         std::uint64_t leftNoRecord = 0, leftView = 0, leftAudit = 0, leftNotOwnable = 0, leftScene = 0;
         std::uint64_t fallback[kFallback] = {};                   // owned ops composed late: materials, view, object window, refused draw, ...
         std::uint64_t touches = 0, lightmaps = 0, stream3 = 0;
-        std::uint64_t compactNs = 0, buildNs = 0, submitNs = 0;
+        std::uint64_t compactNs = 0, selectNs = 0, buildNs = 0, submitNs = 0, sideNs = 0, matNs = 0, prepNs = 0;
         void add(const OwnedStats& o);
     } ownedW_, ownedT_;
     d3d9::Device::OwnedReplayStats ownedDevLast_{};
@@ -772,6 +772,11 @@ private:
     std::vector<std::uint64_t> ownedPolled_;                  // material slot -> frame + 1 of the last poll made for an owned op
     std::uint32_t ownedLogged_ = 0;
     std::uint64_t ownedIndirectLast_ = 0;
+    struct OwnedWinCache {  // per pass: the material windows of a slot, the lighting window base of a (slot, params)
+        std::uint64_t frame = ~0ull;
+        std::unordered_map<std::uint32_t, d3d9::OwnedWindows> mat;
+        std::unordered_map<std::uint64_t, std::uint32_t> light;
+    } ownedCache_;
     bool ownedDrawOp(const Op& op, const orec::OpRecord& rec, const d3d9::OwnedWindows& viewWin, bool viewWinOk, int& why);
     bool ownedMaterialsOk(const orec::OpRecord& rec);
     bool ownedAuditOk(const Op& op, const orec::OpRecord& rec);

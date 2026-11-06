@@ -68,7 +68,7 @@ void StaticOps::OwnedStats::add(const OwnedStats& o) {
     leftNoRecord += o.leftNoRecord; leftView += o.leftView; leftAudit += o.leftAudit; leftNotOwnable += o.leftNotOwnable; leftScene += o.leftScene;
     for (std::size_t i = 0; i < kFallback; ++i) fallback[i] += o.fallback[i];
     touches += o.touches; lightmaps += o.lightmaps; stream3 += o.stream3;
-    compactNs += o.compactNs; buildNs += o.buildNs; submitNs += o.submitNs;
+    compactNs += o.compactNs; selectNs += o.selectNs; buildNs += o.buildNs; submitNs += o.submitNs; sideNs += o.sideNs; matNs += o.matNs; prepNs += o.prepNs;
 }
 
 void StaticOps::setOwnedStatic(bool on, int check) {
@@ -144,18 +144,31 @@ bool StaticOps::ownedListOk(void* db, List list) {
 bool StaticOps::ownedSelect(const Op& op) {
     OwnedStats& W = ownedW_;
     ++W.seen;
-    const orec::Excl ex = recExclusion(op);
-    if (ex != orec::Excl::Count) {
-        ++W.leftExcl[static_cast<std::size_t>(ex)];
-        return false;
-    }
+    struct T {
+        std::uint64_t& ns;
+        Clock::time_point t0 = Clock::now();
+        ~T() { ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count()); }
+    } selTimer{W.selectNs};
     const orec::Key key{op.raw.context, op.raw.desc, static_cast<std::uint8_t>(op.list), 0};
     const auto it = recs_->map.find(key);
     if (it == recs_->map.end()) {
-        ++W.leftNoRecord;
+        // (not a candidate: the first reason it is not eligible, for the counters)
+        const orec::Excl ex = recExclusion(op);
+        if (ex != orec::Excl::Count) ++W.leftExcl[static_cast<std::size_t>(ex)];
+        else ++W.leftNoRecord;
         return false;
     }
     const orec::OpRecord& rec = *it->second;
+    // a record exists only for an eligible op; of recExclusion's reasons the stamps hold the overlay flags, the fade, the light list, the shader's class / sort id /
+    // depth bias; what they do not: the hierarchy flag of the context and the table lighting
+    if (op.list == List::Solid && !tableLit_) {
+        ++W.leftExcl[static_cast<std::size_t>(orec::Excl::NotTableLit)];
+        return false;
+    }
+    if (get<std::int32_t>(op.raw.context, 0x34) > 0) {
+        ++W.leftExcl[static_cast<std::size_t>(orec::Excl::Hierarchy)];
+        return false;
+    }
     if (!rec.ownable) {
         ++W.leftNotOwnable;
         return false;
@@ -222,6 +235,12 @@ bool StaticOps::ownedMaterialsOk(const orec::OpRecord& rec) {
     gpuscene::MaterialTable& mt = gpuscene::materialtable();
     const std::uint64_t frame = dev_.stats().frames + 1;
     std::uint64_t h = 0;
+    const auto tm = Clock::now();
+    struct Guard {
+        std::uint64_t& ns;
+        Clock::time_point t0;
+        ~Guard() { ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count()); }
+    } guard{ownedW_.matNs, tm};
     for (const std::uint32_t slot : rec.matSlots) {
         if (slot >= gpuscene::MaterialTable::kCapacity) return false;
         if (slot >= ownedPolled_.size()) ownedPolled_.resize(gpuscene::MaterialTable::kCapacity, 0);
@@ -237,6 +256,11 @@ bool StaticOps::ownedMaterialsOk(const orec::OpRecord& rec) {
 // the engine slot's non-drawing side effects of the op (the lean commit's order): BindLightmaps(1), the resource touches, stream 3
 void StaticOps::ownedSideEffects(const orec::OpRecord& rec) {
     OwnedStats& W = ownedW_;
+    struct Guard {
+        std::uint64_t& ns;
+        Clock::time_point t0 = Clock::now();
+        ~Guard() { ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count()); }
+    } guard{W.sideNs};
     if (rec.bindLightmaps && rec.lightmapRes != nullptr) {
         bindLightmaps(static_cast<U8*>(rec.lightmapRes));  // (our copy of the admin's lightmap slots)
         reinterpret_cast<BindLightmapsFn>(engine::sym().meshBindLightmaps)(rec.lightmapRes, 1);
@@ -339,10 +363,27 @@ bool StaticOps::ownedDrawOp(const Op& op, const orec::OpRecord& rec, const d3d9:
         dw.w[0][0] = viewWin.w[0][0];
         dw.w[1][0] = viewWin.w[1][0];
         dw.w[0][1] = r.vs1Offered ? viewWin.w[0][1] : d3d9::OwnedWindows::Win{};
-        gpuscene::materialtable().fillWindows(r.matSlot, r.vsSet.data(), r.psSet.data(), dw, true);
+        {
+            // (once per material slot and pass: the record's windows do not depend on the draw)
+            auto mc = ownedCache_.mat.find(r.matSlot);
+            if (mc == ownedCache_.mat.end()) {
+                d3d9::OwnedWindows mw;
+                gpuscene::materialtable().fillWindows(r.matSlot, r.vsSet.data(), r.psSet.data(), mw, true);
+                mc = ownedCache_.mat.emplace(r.matSlot, mw).first;
+            }
+            dw.w[0][3] = mc->second.w[0][3];
+            dw.w[1][2] = mc->second.w[1][2];
+        }
         if (r.vs1Offered) dw.w[0][2] = objWin;
         if (li.active() && r.illumSlot != gpuscene::kNoSlot) {
-            const std::uint32_t entry = li.entryFor(r.illumSlot, p);
+            const std::uint64_t lkey = mix(mix(mix(r.illumSlot, (p.tableLit ? 1u : 0u) | (p.holdsAll ? 2u : 0u)), p.n), p.firstLight);
+            std::uint32_t entry;
+            if (const auto lc = ownedCache_.light.find(lkey); lc != ownedCache_.light.end()) {
+                entry = lc->second;
+            } else {
+                entry = li.entryFor(r.illumSlot, p);
+                ownedCache_.light.emplace(lkey, entry);
+            }
             if (entry != gpuscene::kNoEntry && li.ready()) {
                 d3d9::OwnedWindows::Win& lw = dw.w[1][3];
                 lw.kind = d3d9::OwnedWindows::Kind::Lighting;
@@ -382,13 +423,14 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
         return 0;
     }
     const auto t0 = Clock::now();
-    const std::uint64_t submit0 = W.submitNs;
+    const std::uint64_t submit0 = W.submitNs, side0 = W.sideNs, mat0 = W.matNs;
     ret::gLog = nullptr;
     finishOp();
     leanAbort();
     // the view as the first op's composition would have made it
     bool viewOk = view_.valid;
     if (!viewOk && ownedView_.admin != nullptr) viewOk = composeView(ownedView_.admin);
+    const auto tPrep = Clock::now();
     ++opSerial_;  // (the sampler snapshot of the polls is read afresh)
     // the view's stamp as the admin is now (the pass's state: the admin's type / mode bytes differ between the z and the solid pass)
     const std::uint64_t viewStamp = viewOk ? recViewStamp() : 0;
@@ -407,7 +449,10 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
     const d3d9::ShaderRef vsSaved = dev_.vertexShaderRef(), psSaved = dev_.pixelShaderRef();
     d3d9::draws::Tag& tag = dev_.drawTag();
     const d3d9::draws::Tag savedTag = tag;
+    W.prepNs += ns(tPrep, Clock::now());
     ownedAmbient_.clear();
+    ownedCache_.mat.clear();
+    ownedCache_.light.clear();
     std::uint32_t drawn = 0;
     dev_.setSceneIssue(true);
     for (Op& op : ops) {
@@ -432,8 +477,6 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
                 why = kFbNoView;
             } else if (recPtr->stamp.view != viewStamp) {
                 why = kFbView;
-            } else if (!ownedAuditOk(op, *recPtr)) {
-                why = kFbAudit;
             } else {
                 const orec::OpRecord& rec = *recPtr;
                 done = ownedDrawOp(op, rec, viewWin, viewWinOk, why);
@@ -480,7 +523,8 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
     finishOp();
     ops.clear();
     const std::uint64_t total = ns(t0, Clock::now());
-    W.buildNs += total > W.submitNs - submit0 ? total - (W.submitNs - submit0) : 0;
+    const std::uint64_t sub = (W.submitNs - submit0) + (W.sideNs - side0) + (W.matNs - mat0);
+    W.buildNs += total > sub ? total - sub : 0;
     return drawn;
 }
 
@@ -517,11 +561,11 @@ void StaticOps::ownedReport() {
     spdlog::info(
         "native: owned static (5 s): {} main views ({} compacted, {} check frames, {} warm-up, {} gated off), ops looked at {}, owned {} ({:.1f} %), drawn from records {} ops / {} draws, composed late {} ops / {} draws "
         "(fallbacks: {}), undrawn {}; left to the engine path: {}; replay refusals: {}; scene indirect calls {}; check frames DIFFERING {} draws; side effects: {} touches, {} lightmap binds, {} stream 3; "
-        "CPU per main view: compaction {:.1f} us, build {:.1f} us, submit {:.1f} us",
+        "CPU per main view: compaction {:.1f} us (of it the stamp / record checks {:.1f}), view + windows setup {:.1f} us, material polls + stamps {:.1f} us, build {:.1f} us (the rest: derivation inputs, windows, object records), side effects {:.1f} us, submit {:.1f} us (replayOwned incl. observers)",
         w.views, w.views - w.checkViews - w.warmupViews - w.gatedViews, w.checkViews, w.warmupViews, w.gatedViews, w.seen, w.owned, w.seen != 0 ? 100.0 * static_cast<double>(w.owned) / static_cast<double>(w.seen) : 0.0, w.drawnOps,
         w.draws, w.lateOps, w.lateDraws, list(w.fallback, kFallbackNames, kFbCount), w.undrawn, left, refused.empty() ? "none" : refused, dev_.sceneStats().indirectCalls - ownedIndirectLast_,
-        recs_ ? recs_->total.differing : 0, w.touches, w.lightmaps, w.stream3, static_cast<double>(w.compactNs) / nv / 1000.0, static_cast<double>(w.buildNs) / nv / 1000.0,
-        static_cast<double>(w.submitNs) / nv / 1000.0);
+        recs_ ? recs_->total.differing : 0, w.touches, w.lightmaps, w.stream3, static_cast<double>(w.compactNs) / nv / 1000.0, static_cast<double>(w.selectNs) / nv / 1000.0, static_cast<double>(w.prepNs) / nv / 1000.0, static_cast<double>(w.matNs) / nv / 1000.0,
+        static_cast<double>(w.buildNs) / nv / 1000.0, static_cast<double>(w.sideNs) / nv / 1000.0, static_cast<double>(w.submitNs) / nv / 1000.0);
     ownedIndirectLast_ = dev_.sceneStats().indirectCalls;
     ownedDevLast_ = d;
     w = {};
