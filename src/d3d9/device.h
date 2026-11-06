@@ -582,6 +582,9 @@ struct FrameStats {
     std::uint64_t skippedPipeline = 0;
     std::uint64_t totalClears = 0;
     std::uint64_t totalRenderPasses = 0;
+    std::uint64_t scopeClears = 0;       // clears folded into a scope's load ops (no vkCmdClearAttachments)
+    mutable std::uint64_t stencilPlaneDraws = 0;   // draws with the stencil test on, on a surface with a stencil plane
+    mutable std::uint64_t stencilNoPlaneDraws = 0;  // ... on a depth surface without stencil bits (D24X8, DF24: a D3D9 test that passes; counted, expected 0)
 };
 
 // [debug] perf: timings and volumes summed over a stats interval (Device::takePerf). CPU times are wall-clock ms on the render
@@ -1274,6 +1277,20 @@ public:
     // (the backend seam below replaces the old public ctx() / frames() for everything outside the not yet moved frame loop)
     // the transient images of the passes (GameDevice::transient): created on first use, recreated when the description changes
     rhi::Texture* transient(std::string_view key, const rhi::TransientDesc& desc) { return game_->transient(key, desc); }
+    // The main view's hardware depth converted to R32F (shaders/upscale/prep.comp) by whichever consumer ran first this frame (FSR's
+    // "upscale.depth"): a second consumer at the same size reads that image instead of converting again (performance.md 32)
+    // RVK_BW_BASELINE=1 (`-Environment`): the pre-performance.md-32 behaviour (stencil planes attached everywhere, clears as vkCmdClearAttachments,
+    // R16 / RGBA8 images, one depth conversion per consumer), to measure the difference in one build
+    static bool bwBaseline() {
+        static const bool on = GetEnvironmentVariableA("RVK_BW_BASELINE", nullptr, 0) != 0;
+        return on;
+    }
+    void notePreparedDepth(const char* key, VkExtent2D extent) { preparedDepth_ = {key, extent, frameValue()}; }
+    const char* preparedDepthKey(VkExtent2D extent) const {
+        return preparedDepth_.frame == frameValue() && preparedDepth_.extent.width == extent.width && preparedDepth_.extent.height == extent.height
+                   ? preparedDepth_.key
+                   : nullptr;
+    }
     void releaseTransient(std::string_view key) { game_->releaseTransient(key); }
     // frame ring / frame state (GameDevice)
     rhi::RingAlloc ring(std::uint64_t size, std::uint64_t alignment = 256) { return game_->allocRing(size, alignment); }
@@ -1314,7 +1331,17 @@ private:
     void processReleases();
     bool prepareTextures();
     void endRendering();
-    bool beginRendering();
+    // `clear`: a Device::clear that opened this scope; when it covers the whole attachment area the scope's load ops do it (VK_ATTACHMENT_LOAD_OP_CLEAR)
+    // instead of a vkCmdClearAttachments after a LOAD (performance.md 32.5); the flags it performed are in scopeClearFlags_
+    struct ScopeClear {
+        std::uint32_t flags;
+        float color[4];
+        float z;
+        std::uint32_t stencil;
+    };
+    bool beginRendering(const ScopeClear* clear = nullptr);
+    float clearDepthValue(float z);
+    std::uint32_t scopeClearFlags_ = 0;
     // the geometry of a draw (for its record)
     struct DrawGeom {
         bool indexed = false;
@@ -1501,6 +1528,11 @@ private:
     std::uint32_t colorCount_ = 0;
     VkFormat colorFormats_[kRenderTargets]{};
     VkFormat depthFormat_ = VK_FORMAT_UNDEFINED;
+    struct PreparedDepth {
+        const char* key = nullptr;
+        VkExtent2D extent{};
+        std::uint64_t frame = ~0ull;
+    } preparedDepth_;
     VkFormat stencilFormat_ = VK_FORMAT_UNDEFINED;
     std::uint32_t targetWidth_ = 0;
     std::uint32_t targetHeight_ = 0;

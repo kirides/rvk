@@ -313,6 +313,12 @@ struct RenderingInfo {
     std::uint32_t colorCount = 0;
     Attachment depth{};
     VkClearDepthStencilValue depthClear{1.0f, 0};
+    // The stencil plane of a combined depth/stencil image has its own ops (the depth attachment's `load` / `store` are the depth plane's).
+    // `stencil` = false binds no stencil attachment at all: the plane is neither loaded nor stored (a D3D9 surface without stencil bits that
+    // lives in a D24S8 / D32S8 image, rhi::d3dDepthHasStencil); pipelines are then built without a stencil attachment format.
+    bool stencil = true;
+    VkAttachmentLoadOp stencilLoad = VK_ATTACHMENT_LOAD_OP_LOAD;
+    VkAttachmentStoreOp stencilStore = VK_ATTACHMENT_STORE_OP_STORE;
     std::uint32_t width = 0, height = 0;
 };
 

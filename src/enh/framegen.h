@@ -158,6 +158,8 @@ private:
     VkFormat debugFormat_ = VK_FORMAT_UNDEFINED;
     FrameGenState state_;
     // this frame
+    const char* depthKey_ = "framegen.depth";  // the transient holding this frame's R32F depth (FSR's "upscale.depth" when it was converted already)
+    std::uint64_t depthConversions_ = 0, depthShared_ = 0;  // own conversions / frames that reused FSR's
     std::uint64_t depthFrame_ = 0;      // the frame (device frame value) whose depth was prepared
     VkExtent2D renderSize_{};
     bool hudlessFrame_ = false;         // a hudless copy of this frame exists

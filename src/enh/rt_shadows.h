@@ -86,6 +86,7 @@ private:
     RtScene* scene_ = nullptr;
     Settings settings_;
     bool held_ = false, failed_ = false, built_ = false;
+    bool r8_ = false;  // the visibility images (raw, final) are R8_UNORM (one channel is all that is written); else RGBA8
     std::uint32_t passId_ = 0;
     std::unique_ptr<rhi::Pipeline> pipeline_[3];
     std::future<std::unique_ptr<rhi::Pipeline>> building_[3];  // (built on workers: Device::createComputePipeline is thread-safe)

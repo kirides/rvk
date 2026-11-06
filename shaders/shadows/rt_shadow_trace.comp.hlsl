@@ -6,7 +6,12 @@
 #include "rt_shadow_common.hlsli"
 #include "rvk_rt_trace.hlsli"
 
+// only .r is written / read: R8 where the GPU has the extended storage formats (RTS_R8, rt_shadows.cpp), else RGBA8
+#ifdef RTS_R8
+[[vk::image_format("r8")]] RWTexture2D<float4> outRaw : register(u0, space1);
+#else
 [[vk::image_format("rgba8")]] RWTexture2D<float4> outRaw : register(u0, space1);
+#endif
 
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {

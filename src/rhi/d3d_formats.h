@@ -43,7 +43,7 @@ struct FormatInfo {
     std::uint32_t blockBytes = 0;            // bytes per pixel, or per 4x4 block when compressed
     bool compressed = false;
     bool depth = false;
-    bool stencil = false;
+    bool stencil = false;                    // a depth format with a stencil plane in D3D9 terms (d3dDepthHasStencil) that the storage format holds
     Convert convert = Convert::None;
     std::uint32_t srcBlockBytes = 0;         // bytes per pixel of the D3D9 data when converted (else = blockBytes)
     const char* name = "";
@@ -52,6 +52,10 @@ struct FormatInfo {
 // nullopt for formats the renderer does not support. `depthFormat` is the device's choice for D24S8 (D24_UNORM_S8_UINT is
 // optional, AMD lacks it: D32_SFLOAT_S8_UINT then).
 std::optional<FormatInfo> formatInfo(std::uint32_t d3dFormat, VkFormat d24s8 = VK_FORMAT_D24_UNORM_S8_UINT);
+
+// A D3D9 depth format with stencil bits (D24S8, D24X4S4, D24FS8, D15S1, INTZ): the others (D16, D32, D24X8, DF16, DF24, ...) have none, whatever
+// storage format the renderer picks for them (D24X8 / DF24 share the D24S8 / D32S8 choice on GPUs without D24)
+bool d3dDepthHasStencil(std::uint32_t d3dFormat);
 
 const char* d3dFormatName(std::uint32_t d3dFormat);
 

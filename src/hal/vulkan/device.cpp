@@ -1784,10 +1784,11 @@ void HalDevice::logFrameStats() {
         if (frameTap_) frameTap_->report();
         if (effectOps_) effectOps_->report();
         spdlog::info("hal: frame {}: {} draws total, {} clears, {} render passes; skipped: {} no shader, {} compiling, {} no target, {} vertex "
-                     "input, {} pipeline; HAL Draw calls {}; {} unimplemented slots seen; texture CPU copies {:.1f} MiB",
+                     "input, {} pipeline; HAL Draw calls {}; {} unimplemented slots seen; texture CPU copies {:.1f} MiB; clears folded into load ops {}; stencil-tested draws {} (on a surface without stencil bits {})",
                      s.frames, s.totalDraws, s.totalClears, s.totalRenderPasses, s.skippedNoShader, s.skippedCompiling, s.skippedNoTarget,
                      s.skippedVertexInput, s.skippedPipeline, halDraws_, unimplementedCount(),
-                     static_cast<double>(d3d9::Texture::cpuBytesTotal()) / (1024.0 * 1024.0));
+                     static_cast<double>(d3d9::Texture::cpuBytesTotal()) / (1024.0 * 1024.0), s.scopeClears, s.stencilPlaneDraws,
+                     s.stencilNoPlaneDraws);
     }
 }
 

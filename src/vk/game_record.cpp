@@ -356,8 +356,8 @@ void GameRecord::beginScope(const rhi::RenderingInfo& info, bool secondary) {
         ri.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
         ri.imageView = img.attachmentView(*ctx_, a.mip, a.layer);
         ri.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        ri.loadOp = a.load == VK_ATTACHMENT_LOAD_OP_CLEAR ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
-        ri.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        ri.loadOp = a.load;  // (what the D3D9 layer asks for: LOAD, CLEAR, or DONT_CARE for an attachment it overwrites / never reads)
+        ri.storeOp = a.store;
         if (ri.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) ri.clearValue.color = a.clear;
     }
     VkRenderingAttachmentInfo depth{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
@@ -369,14 +369,14 @@ void GameRecord::beginScope(const rhi::RenderingInfo& info, bool secondary) {
         depth.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
         depth.imageView = img.attachmentView(*ctx_, info.depth.mip, info.depth.layer);
         depth.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        depth.loadOp = info.depth.load == VK_ATTACHMENT_LOAD_OP_CLEAR ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
-        depth.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        if (depth.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) {
-            depth.clearValue.depthStencil.depth = info.depthClear.depth;
-            depth.clearValue.depthStencil.stencil = info.depthClear.stencil;
-        }
-        if (vk::hasStencil(img.format())) {
+        depth.loadOp = info.depth.load;
+        depth.storeOp = info.depth.store;
+        if (depth.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) depth.clearValue.depthStencil.depth = info.depthClear.depth;
+        if (info.stencil && vk::hasStencil(img.format())) {
             stencil = depth;
+            stencil.loadOp = info.stencilLoad;
+            stencil.storeOp = info.stencilStore;
+            stencil.clearValue.depthStencil = {info.depthClear.depth, info.depthClear.stencil};
             stencilOn = true;
         }
     }

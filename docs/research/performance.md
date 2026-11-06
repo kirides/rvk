@@ -825,3 +825,40 @@ enumerated all 334 display modes each time (window-mode.md 10.1). Fixed; note th
 `SwapScreen` entry) does not cover our own `SwapScreen` prologue (settings, overlay, menu pacing, BeforePresent passes,
 window / display watchers): a spike the `perf: frame spikes` line shows as CPU but the spike profile misses lives there.
 
+## 32. Unread outputs: load / store ops, stencil, shared depth, R8 shadows (2026-11-06)
+
+User rule: never write / store / allocate a GPU output nobody reads, in every mode; no picture change. `RVK_BW_BASELINE=1` (`-Environment`) restores the old behaviour of all five items in one build
+(A/B; `Device::bwBaseline`). Baseline numbers below = that switch.
+
+1. **Load / store ops honoured.** `rhi::RenderingInfo` gained `stencil` / `stencilLoad` / `stencilStore`; `GameRecord::beginScope` passes the d3d9 layer's `load` / `store` through (a DONT_CARE
+   request used to become LOAD / STORE; the stencil plane copied the depth attachment's ops). The RHI path (`vulkan_device.cpp`) already did. The d3d9 layer asks for DONT_CARE nowhere today
+   (D3D9 has no discard intent for a surface the layer sees; every engine target is read later), so this is plumbing; the producers are items 2 and 5. **D3D12:** the game device binds plain
+   RTV / DSV (`OMSetRenderTargets`, `ClearRenderTargetView` / `ClearDepthStencilView` for a CLEAR load); there is no load / store control (no render passes, no `DiscardResource` use), nothing to
+   change; the stencil clear flag now follows `stencilLoad`.
+2. **No stencil plane for D3D surfaces without stencil bits.** `rhi::d3dDepthHasStencil` (D24S8 / D24X4S4 / D24FS8 / D15S1 / INTZ yes; D24X8, DF24, DF16, D16, D32 no) -> `FormatInfo::stencil`;
+   `Device::beginRendering` binds no stencil attachment (`stencilFormat_` undefined: no load, no store, pipelines without stencil attachment format, a stencil test passes as in D3D9) for such a
+   surface although D24X8 lives in a D32S8 image on AMD (DF24 maps to D32F, which has no stencil anyway). Counters in the `hal: frame` line: `stencil-tested draws N (on a surface without stencil
+   bits M)`: M = 0 in harbour_docks / jungle / pub_interior (the engine never stencil-tests a D24X8 buffer), so the engine itself gains little; D24X8 appears only as the extra depth buffer of
+   colour-format shadow maps. Tests: `rvk_tests` `formats_depth_stencil_planes`; `rvk_d3d9test` "no-stencil depth" (D24X8 + stencil NEVER: the draw must appear): **baseline FAILS** (the D32S8
+   plane rejects it, AMD), new passes on Vulkan and D3D12.
+3. **One depth conversion with FSR + frame generation.** FSR's `upscale.depth` records `Device::notePreparedDepth`; `framegen.depth` at the same extent reads that image (`depthKey_`) and skips
+   its own dispatch (own conversions / shared counted in the framegen log line). Different extents: its own conversion.
+4. **RT sun shadows' `raw` / `final`: R8_UNORM** (was RGBA8, only R written / read) when `storageImageExtendedFormats` (variant define `RTS_R8`, shaders keep the float4 type; else RGBA8).
+   rvk.log `enh: shadows.rt: visibility images R8_UNORM`. SPIR-V checked: `OpTypeImage ... R8`, `spirv-val` clean.
+5. **Clears folded into load ops** (`Device::clear` -> `beginRendering(&ScopeClear)`): a `Clear` that is the first command of a scope and covers the whole render area (viewport / scissor
+   rectangle >= the attachments) sets `loadOp = CLEAR` (colour, depth, stencil each only if the call asked) instead of `vkCmdClearAttachments` after a LOAD; a partial rectangle, a clear
+   inside an open scope (after draws, or a second clear) stays a clear command. Z value conversion (`clearDepthValue`) shared. `hal: frame` line `clears folded into load ops N`: 7,055 of
+   the ~8,000 clears in 60 s of pub_interior. Not done (design): a second clear in the same scope (colour then depth) could merge if the scope began lazily at the first draw; needs a deferred
+   `vkCmdBeginRendering` (changes the scope's recording model), not attempted. Test: `rvk_d3d9test` "scope clear" (full / partial viewport / depth-only fresh scope / z = 0.5), identical to
+   baseline pixels.
+
+**Evidence.** `rvk_tests` 280 / 280; `rvk_d3d9test --validation` Vulkan and `--backend d3d12`: PASS, 0 validation errors (baseline: the no-stencil case fails, the rest equal);
+`rvk_rhitest --validation` both backends PASS. Game (own copy, Vulkan, `-Validation`, harbour_docks / jungle / pub_interior, `shadows.enabled shadows.rt=near upscale.mode=native_aa
+framegen.mode=fsr3`): no device loss, only AMD's own `rw_output` OpImageWrite errors / format warnings (accepted, frame-generation.md 9.4); D3D12 `-Validation`: only the old DSV-format warning.
+**Pictures** (rvkcompare, frozen time, 4-shot bursts; mean abs difference): within one run 0.00 - 0.4; base vs new 0.29 / 1.34 / 1.67 (harbour / jungle / pub) with the features, 0.39 / 2.76 /
+1.27 plain; **base vs base (a second run of the same baseline) 0.30 / 3.07 / 1.89**: the difference is run-to-run noise (eye adaptation, smooth brightness differences in the heat maps), the new
+build lies inside it (base2 vs new 0.32 / 2.85 / 1.18). **GPU** (`-PerfFrame 1900`, 24 frames averaged, harbour_docks 1600x900, features on, main submission): baseline 4.599 ms, new 4.616 ms
+(noise); passes: `framegen.depth` 0.012 -> 0.000, `shadows.rt trace` 0.842 -> 0.848, `shadows.rt spatial` 0.053 -> 0.052, `upscale.fsr` 0.505 -> 0.505, render passes 2.735 -> 2.765. **No measurable
+GPU gain on the 7900 XTX at this size** (DCC / fast clears / cheap R8 stores); the changes remove allocations and traffic (R8 images: 3 B/pixel less each, stencil planes, one 1600x900 R32F
+dispatch) that other GPUs / sizes feel more; no cost either. Logs / pictures: `B:\DevDrive\rvk-work\scratch\bw`.
+

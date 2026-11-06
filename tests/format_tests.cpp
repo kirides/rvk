@@ -61,6 +61,22 @@ TEST(formats_table) {
     CHECK(p.rowBytes == 32 && p.rows == 2);
 }
 
+TEST(formats_depth_stencil_planes) {
+    using namespace rvk::rhi::d3dfmt;
+    // stencil bits in D3D9 terms: D24X8 / DF24 / DF16 / D16 / D32 have none, though D24X8 and DF24 end up in a D32_SFLOAT_S8 image on AMD
+    for (const std::uint32_t d : {D24S8, D24X4S4, D24FS8, INTZ}) CHECK(rhi::d3dDepthHasStencil(d));
+    for (const std::uint32_t d : {D24X8, DF24, DF16, D16, D32, D16_LOCKABLE, D32F_LOCKABLE, A8R8G8B8}) CHECK(!rhi::d3dDepthHasStencil(d));
+    const VkFormat d32s8 = VK_FORMAT_D32_SFLOAT_S8_UINT;
+    CHECK(rhi::formatInfo(D24S8, d32s8)->stencil);
+    CHECK(rhi::formatInfo(D24FS8, d32s8)->stencil);
+    CHECK(!rhi::formatInfo(D24X8, d32s8)->stencil);
+    CHECK(rhi::formatInfo(D24X8, d32s8)->depth);
+    CHECK(!rhi::formatInfo(DF24, d32s8)->stencil);
+    CHECK(!rhi::formatInfo(D16, d32s8)->stencil);
+    CHECK(rhi::formatInfo(D24S8, VK_FORMAT_D24_UNORM_S8_UINT)->stencil);
+    CHECK(!rhi::formatInfo(D24X8, VK_FORMAT_D24_UNORM_S8_UINT)->stencil);
+}
+
 TEST(formats_convert) {
     const auto rgb = *rhi::formatInfo(rhi::d3dfmt::R8G8B8);
     const std::uint8_t src[6] = {1, 2, 3, 4, 5, 6};  // two pixels B,G,R

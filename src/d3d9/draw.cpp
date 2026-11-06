@@ -54,7 +54,8 @@ void Device::endRendering() {
     }
 }
 
-bool Device::beginRendering() {
+bool Device::beginRendering(const ScopeClear* clear) {
+    scopeClearFlags_ = 0;
     if (rendering_) {
         return true;
     }
@@ -108,9 +109,12 @@ bool Device::beginRendering() {
         a.mip = ds_->level();
         a.layer = ds_->face();
         depthFormat_ = t->rhi().desc().format;
-        if (rhi::hasStencil(depthFormat_)) {
+        // a D3D9 surface without stencil bits (D24X8, DF24, ...) may live in a D24S8 / D32S8 image: it gets no stencil attachment (the plane is
+        // never loaded or stored; a stencil test there passes, as in D3D9)
+        if (rhi::hasStencil(depthFormat_) && (t->format().stencil || bwBaseline())) {
             stencilFormat_ = depthFormat_;
         }
+        ri.stencil = stencilFormat_ != VK_FORMAT_UNDEFINED;
         // D3D9 lets the depth buffer be larger than the render target
         targetWidth_ = colorCount_ > 0 ? targetWidth_ : ds_->width();
         targetHeight_ = colorCount_ > 0 ? targetHeight_ : ds_->height();
@@ -130,6 +134,38 @@ bool Device::beginRendering() {
     passDraws_ = 0;
     ri.width = targetWidth_;
     ri.height = targetHeight_;
+    if (clear != nullptr && !bwBaseline()) {
+        // D3D9 clears the viewport rectangle (and the scissor rect when the scissor test is on): when that is the whole render area, a load op
+        // does it (the same rectangle clamp as Device::clear)
+        std::int32_t x0 = static_cast<std::int32_t>(viewport_.x), y0 = static_cast<std::int32_t>(viewport_.y);
+        std::int32_t x1 = x0 + static_cast<std::int32_t>(viewport_.width), y1 = y0 + static_cast<std::int32_t>(viewport_.height);
+        if (rs_[RS_SCISSORTESTENABLE] != 0) {
+            x0 = std::max(x0, scissor_[0]);
+            y0 = std::max(y0, scissor_[1]);
+            x1 = std::min(x1, scissor_[2]);
+            y1 = std::min(y1, scissor_[3]);
+        }
+        if (x0 <= 0 && y0 <= 0 && x1 >= static_cast<std::int32_t>(targetWidth_) && y1 >= static_cast<std::int32_t>(targetHeight_)) {
+            if ((clear->flags & CLEAR_TARGET) != 0 && engineColorCount_ > 0) {
+                for (std::uint32_t i = 0; i < engineColorCount_; ++i) {
+                    ri.color[i].load = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                    std::memcpy(ri.color[i].clear.float32, clear->color, sizeof(clear->color));
+                }
+                scopeClearFlags_ |= CLEAR_TARGET;
+            }
+            if ((clear->flags & CLEAR_ZBUFFER) != 0 && depthFormat_ != VK_FORMAT_UNDEFINED) {
+                ri.depth.load = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                ri.depthClear.depth = std::clamp(clearDepthValue(clear->z), 0.0f, 1.0f);
+                scopeClearFlags_ |= CLEAR_ZBUFFER;
+            }
+            if ((clear->flags & CLEAR_STENCIL) != 0 && stencilFormat_ != VK_FORMAT_UNDEFINED) {
+                ri.stencilLoad = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                ri.depthClear.stencil = clear->stencil & 0xFF;
+                scopeClearFlags_ |= CLEAR_STENCIL;
+            }
+            if (scopeClearFlags_ != 0) ++stats_.scopeClears;
+        }
+    }
     scopeSecondary_ = wantSecondaryScope();
     game_->beginScope(ri, scopeSecondary_);  // (the backend transitions + views the attachments, secondary contents when threaded)
     rendering_ = true;
@@ -526,6 +562,7 @@ void Device::computeDynamicState(std::uint32_t primitiveType, DynamicStateValues
     const bool reversed = boundDepthReversed();
     if (reversed) o.depthCompare = reverseCompareOp(o.depthCompare);
     const bool stencil = stencilFormat_ != VK_FORMAT_UNDEFINED && rs_[RS_STENCILENABLE] != 0;
+    if (rs_[RS_STENCILENABLE] != 0 && depthFormat_ != VK_FORMAT_UNDEFINED) ++(stencilFormat_ != VK_FORMAT_UNDEFINED ? stats_.stencilPlaneDraws : stats_.stencilNoPlaneDraws);
     o.stencilTest = stencil ? VK_TRUE : VK_FALSE;
     // front = clockwise (kFrontFace); two-sided stencil gives the counter-clockwise (back) faces their own ops
     o.stencilFront[0] = stencilOp(rs_[RS_STENCILFAIL]);

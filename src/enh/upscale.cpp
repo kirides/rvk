@@ -388,6 +388,7 @@ void Upscale::record(d3d9::PassContext& ctx) {
         cl->setStorageTextures(storage);
         cl->setPushConstants(&push, sizeof(push));
         cl->dispatch((render.width + 7) / 8, (render.height + 7) / 8, 1);
+        dev_.notePreparedDepth("upscale.depth", render);  // (frame generation reads this image when it runs at the same size)
     }
 
     // the automatic reactive mask: translucent effects (particles, rain, spells, spray) drawn after the BeforeAlpha snapshot

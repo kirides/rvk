@@ -305,18 +305,21 @@ void FrameGeneration::recordDepth(d3d9::PassContext& ctx) {
     if (hdr == nullptr || ds == nullptr || ds->texture() == nullptr || !dev_.gbufferWritten()) return;
     const VkExtent2D render{hdr->desc().width, hdr->desc().height};
     if (ds->width() < render.width || ds->height() < render.height) return;
-    rhi::Texture* depth = dev_.transient("framegen.depth", {kDepthFormat, render, kDepthUsage});
+    // FSR (same size, AfterMainView order 100) has converted the same depth this frame: that image is ours too (one conversion, not two)
+    const char* shared = d3d9::Device::bwBaseline() ? nullptr : dev_.preparedDepthKey(render);
+    const char* key = shared != nullptr ? shared : "framegen.depth";
+    rhi::Texture* depth = dev_.transient(key, {kDepthFormat, render, kDepthUsage});
     rhi::Texture* motion =
         dev_.transient("gbuffer.motion", {kGbufferMotionFormat, {render.width, render.height}, kGbufferMotionUsage});
     if (depth == nullptr || motion == nullptr || !dev_.readable(ds->texture(), cmd)) return;
-    PrepPush push{};
-    push.h.frame = ctx.frameBlock.bits;
-    push.depthTex = ds->texture()->bindlessSlot();
-    push.width = render.width;
-    push.height = render.height;
-    rhi::Device* rdev = dev_.rhi();
-    if (rdev == nullptr || !prep_) return;
-    {
+    if (shared == nullptr) {
+        PrepPush push{};
+        push.h.frame = ctx.frameBlock.bits;
+        push.depthTex = ds->texture()->bindlessSlot();
+        push.width = render.width;
+        push.height = render.height;
+        rhi::Device* rdev = dev_.rhi();
+        if (rdev == nullptr || !prep_) return;
         rhi::CommandList* const cl = &cmd;
         cl->transition(*depth, VK_IMAGE_LAYOUT_GENERAL);
         cl->bindPipeline(*prep_);
@@ -324,7 +327,11 @@ void FrameGeneration::recordDepth(d3d9::PassContext& ctx) {
         cl->setStorageTextures(storage);
         cl->setPushConstants(&push, sizeof(push));
         cl->dispatch((render.width + 7) / 8, (render.height + 7) / 8, 1);
+        ++depthConversions_;
+    } else {
+        ++depthShared_;
     }
+    depthKey_ = key;
     depthFrame_ = dev_.stats().frames + 1;
     renderSize_ = render;
 }
@@ -462,7 +469,7 @@ void FrameGeneration::recordGenerate(d3d9::PassContext& ctx) {
     const VkFormat fmt = real.desc().format;
     rhi::Texture* color = dev_.transient("framegen.color", {fmt, display, kColorUsage});
     rhi::Texture* out = dev_.transient("framegen.out", {fmt, display, kColorUsage});
-    rhi::Texture* depth = dev_.transient("framegen.depth", {kDepthFormat, renderSize_, kDepthUsage});
+    rhi::Texture* depth = dev_.transient(depthKey_, {kDepthFormat, renderSize_, kDepthUsage});
     rhi::Texture* motion =
         dev_.transient("gbuffer.motion", {kGbufferMotionFormat, {renderSize_.width, renderSize_.height}, kGbufferMotionUsage});
     rhi::Texture* hudless =
@@ -515,9 +522,9 @@ void FrameGeneration::recordGenerate(d3d9::PassContext& ctx) {
     if (now - lastLog_ > 5.0) {
         lastLog_ = now;
         spdlog::info("enh: framegen: {} frames generated ({} shown, {} resets, {} camera cuts, {} frames without generation), provider '{}', "
-                     "{}x{} (render {}x{}), jitter ({:.3f}, {:.3f}) px, frame time {:.1f} ms, generated frames presented {}, previous-frame waits {} ({:.1f} ms)",
+                     "{}x{} (render {}x{}), jitter ({:.3f}, {:.3f}) px, frame time {:.1f} ms, generated frames presented {}, previous-frame waits {} ({:.1f} ms), depth conversions own {} / shared with FSR {}",
                      frames_, shown_, resets_, cuts_, blocked_, fg_->providerName(), display.width, display.height, renderSize_.width,
-                     renderSize_.height, p.jitterX, p.jitterY, p.frameTimeMs, dev_.stats().generatedPresented, ringWaits_, ringWaitMs_);
+                     renderSize_.height, p.jitterX, p.jitterY, p.frameTimeMs, dev_.stats().generatedPresented, ringWaits_, ringWaitMs_, depthConversions_, depthShared_);
     }
 }
 
@@ -570,7 +577,7 @@ void FrameGeneration::recordSwapchain(d3d9::PassContext& ctx, FrameGenBlock bloc
     if (cut) ++cuts_;
     if (step.reset) ++resets_;
 
-    rhi::Texture* depth = dev_.transient("framegen.depth", {kDepthFormat, renderSize_, kDepthUsage});
+    rhi::Texture* depth = dev_.transient(depthKey_, {kDepthFormat, renderSize_, kDepthUsage});
     rhi::Texture* motion =
         dev_.transient("gbuffer.motion", {kGbufferMotionFormat, {renderSize_.width, renderSize_.height}, kGbufferMotionUsage});
     rhi::Texture* hudless = hudlessFrame_ ? dev_.transient(hudlessKey(), {hudFmt, display, kColorUsage}) : nullptr;
@@ -651,7 +658,7 @@ void FrameGeneration::recordDebug(d3d9::PassContext& ctx) {
             mode = 1;
             break;
         case FrameGenView::Depth:
-            if (depthFrame_ == frame) src = dev_.transient("framegen.depth", {kDepthFormat, renderSize_, kDepthUsage});
+            if (depthFrame_ == frame) src = dev_.transient(depthKey_, {kDepthFormat, renderSize_, kDepthUsage});
             mode = 2;
             break;
         case FrameGenView::Hudless:

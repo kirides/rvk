@@ -798,7 +798,7 @@ void D3D12DeviceImpl::beginScope(const RenderingInfo& info, bool secondary) {
         scope_.dsv = makeDsv(t, info.depth.mip, info.depth.layer);
         scope_.hasDepth = true;
         if (info.depth.load == VK_ATTACHMENT_LOAD_OP_CLEAR) {
-            const D3D12_CLEAR_FLAGS f = D3D12_CLEAR_FLAG_DEPTH | (hasStencil(t.desc().format) ? D3D12_CLEAR_FLAG_STENCIL : static_cast<D3D12_CLEAR_FLAGS>(0));
+            const D3D12_CLEAR_FLAGS f = D3D12_CLEAR_FLAG_DEPTH | (hasStencil(t.desc().format) && info.stencil && info.stencilLoad == VK_ATTACHMENT_LOAD_OP_CLEAR ? D3D12_CLEAR_FLAG_STENCIL : static_cast<D3D12_CLEAR_FLAGS>(0));
             curMain_->ClearDepthStencilView(scope_.dsv, f, info.depthClear.depth, static_cast<UINT8>(info.depthClear.stencil), 0, nullptr);
         }
     }

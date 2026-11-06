@@ -37,11 +37,16 @@ void RtShadows::startBuild() {
         failed_ = true;
         return;
     }
+    // the visibility images hold one channel: R8 when the GPU has the extended storage formats (else RGBA8, same values)
+    r8_ = dev_.game().gameCaps().storageImageExtendedFormats && !d3d9::Device::bwBaseline();
+    const bool r8 = r8_;
+    spdlog::info("enh: shadows.rt: visibility images {}", r8_ ? "R8_UNORM (one channel)" : "RGBA8 (no extended storage formats / baseline)");
     for (int i = 0; i < 3; ++i) {
-        building_[i] = std::async(std::launch::async, [rdev, i]() {
+        building_[i] = std::async(std::launch::async, [rdev, i, r8]() {
             rhi::ComputePipelineDesc d;
-            d.cs.spirv = shader::embedded::spirv(kShaders[i]);
-            d.cs.dxil = shader::embedded::dxilOnDemand(kShaders[i]);
+            const bool vis = r8 && i != 1;  // (trace writes the raw image, spatial the final one; temporal writes the RGBA16F history)
+            d.cs.spirv = vis ? shader::embedded::spirvVariant(kShaders[i], "RTS_R8=1") : shader::embedded::spirv(kShaders[i]);
+            d.cs.dxil = vis ? shader::embedded::dxilVariantOnDemand(kShaders[i], "RTS_R8=1") : shader::embedded::dxilOnDemand(kShaders[i]);
             d.name = kNames[i];
             return rdev->createComputePipeline(d);
         });
@@ -165,8 +170,9 @@ void RtShadows::record(d3d9::PassContext& ctx, int stage) {
     }
     const std::uint32_t w = ctx.depthMap->desc().width, h = ctx.depthMap->desc().height;
     if (w != lastWidth_ || h != lastHeight_) historyValid_ = false;  // new images: no history
-    rhi::Texture* raw = dev_.transient("shadows.rt raw", {VK_FORMAT_R8G8B8A8_UNORM, {w, h}});
-    rhi::Texture* fin = dev_.transient("shadows.rt final", {VK_FORMAT_R8G8B8A8_UNORM, {w, h}});
+    const VkFormat visFormat = r8_ ? VK_FORMAT_R8_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
+    rhi::Texture* raw = dev_.transient("shadows.rt raw", {visFormat, {w, h}});
+    rhi::Texture* fin = dev_.transient("shadows.rt final", {visFormat, {w, h}});
     rhi::Texture* hist[2] = {dev_.transient("shadows.rt history0", {VK_FORMAT_R16G16B16A16_SFLOAT, {w, h}}),
                                       dev_.transient("shadows.rt history1", {VK_FORMAT_R16G16B16A16_SFLOAT, {w, h}})};
     const rhi::RingAlloc pa = dev_.ring(sizeof(RtShadowParams), 16);

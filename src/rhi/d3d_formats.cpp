@@ -4,6 +4,11 @@
 #include <cstring>
 
 namespace rvk::rhi {
+bool d3dDepthHasStencil(std::uint32_t d) {
+    using namespace d3dfmt;
+    return d == D24S8 || d == D24X4S4 || d == D24FS8 || d == D15S1 || d == INTZ;
+}
+
 namespace {
 
 constexpr VkComponentSwizzle R = VK_COMPONENT_SWIZZLE_R, G = VK_COMPONENT_SWIZZLE_G, B = VK_COMPONENT_SWIZZLE_B,
@@ -30,7 +35,7 @@ FormatInfo compressed(std::uint32_t d3d, VkFormat f, std::uint32_t bytes, const 
 FormatInfo depth(std::uint32_t d3d, VkFormat f, std::uint32_t bytes, const char* name) {
     FormatInfo i = make(d3d, f, bytes, name);
     i.depth = true;
-    i.stencil = f == VK_FORMAT_D24_UNORM_S8_UINT || f == VK_FORMAT_D32_SFLOAT_S8_UINT || f == VK_FORMAT_D16_UNORM_S8_UINT;
+    i.stencil = (f == VK_FORMAT_D24_UNORM_S8_UINT || f == VK_FORMAT_D32_SFLOAT_S8_UINT || f == VK_FORMAT_D16_UNORM_S8_UINT) && d3dDepthHasStencil(d3d);
     return i;
 }
 

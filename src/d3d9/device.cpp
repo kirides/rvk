@@ -2147,12 +2147,26 @@ void Device::setScissorRect(std::int32_t left, std::int32_t top, std::int32_t ri
 
 // ---- commands -------------------------------------------------------------------------------------------------------
 
+// the convention of the buffer follows the view that clears it (reversed: 1 -> 0 = infinity, else 1 - k z)
+float Device::clearDepthValue(float z) {
+    ds_->texture()->reverseZ_ = reverseZ_ && phases_.current().view == scene::View::Main;
+    if (ds_->texture()->reverseZ_) z = z >= 1.0f ? 0.0f : 1.0f - reverseDepthK() * std::max(z, 0.0f);
+    return z;
+}
+
 void Device::clear(std::uint32_t flags, std::uint32_t color, float z, std::uint32_t stencil) {
     ++stats_.totalClears;
     if (rendering_ && (scopeGbuf_ != gbufferScope() || scopeSecondary_ != wantSecondaryScope())) endRendering();
-    if (!beginRendering()) {
+    const ScopeClear request = [&] {
+        ScopeClear r{flags, {}, z, stencil};
+        colorToFloat4(color, r.color);
+        return r;
+    }();
+    if (!beginRendering(&request)) {
         return;
     }
+    flags &= ~scopeClearFlags_;  // (the scope's load ops did those: the whole area, as the first command of the scope)
+    if ((flags & (CLEAR_TARGET | CLEAR_ZBUFFER | CLEAR_STENCIL)) == 0) return;
     // D3D9 clears the viewport rectangle (and the scissor rect when the scissor test is on)
     std::int32_t x0 = static_cast<std::int32_t>(viewport_.x), y0 = static_cast<std::int32_t>(viewport_.y);
     std::int32_t x1 = x0 + static_cast<std::int32_t>(viewport_.width), y1 = y0 + static_cast<std::int32_t>(viewport_.height);
@@ -2185,9 +2199,7 @@ void Device::clear(std::uint32_t flags, std::uint32_t color, float z, std::uint3
     VkImageAspectFlags ds = 0;
     if ((flags & CLEAR_ZBUFFER) != 0 && depthFormat_ != VK_FORMAT_UNDEFINED) {
         ds |= VK_IMAGE_ASPECT_DEPTH_BIT;
-        // the convention of the buffer follows the view that clears it (reversed: 1 -> 0 = infinity, else 1 - k z)
-        ds_->texture()->reverseZ_ = reverseZ_ && phases_.current().view == scene::View::Main;
-        if (ds_->texture()->reverseZ_) z = z >= 1.0f ? 0.0f : 1.0f - reverseDepthK() * std::max(z, 0.0f);
+        z = clearDepthValue(z);
     }
     if ((flags & CLEAR_STENCIL) != 0 && stencilFormat_ != VK_FORMAT_UNDEFINED) ds |= VK_IMAGE_ASPECT_STENCIL_BIT;
     if (ds != 0) {

@@ -311,6 +311,85 @@ void testRenderToTexture(Fixture& f) {
     f.dev.release(std::move(rt));
 }
 
+// Clears that open a scope are folded into its load ops (performance.md 32.5): same pixels as vkCmdClearAttachments, whole-area or partial
+void testScopeClear(Fixture& f) {
+    f.reset();
+    capture(f.dev, "scope_clear_0");  // (the scope ends: the next clear is the first command of a new one)
+    f.dev.clear(CLEAR_TARGET, 0xFF336699, 1.0f, 0);
+    f.draw(quad(-1, -1, 0, 1, 0.5f, 0xFFFF0000));
+    Pixels p = capture(f.dev, "scope_clear_1");
+    expect("scope clear (colour kept right of the quad)", p, 50, 10, 0x336699);
+    expect("scope clear (quad on top)", p, 10, 10, 0xFF0000);
+    // a partial clear (viewport = left half) must leave the right half alone
+    f.dev.setViewport({0, 0, 32, 64, 0.0f, 1.0f});
+    f.dev.clear(CLEAR_TARGET, 0xFF00FF00, 1.0f, 0);
+    f.dev.setViewport({0, 0, 64, 64, 0.0f, 1.0f});
+    p = capture(f.dev, "scope_clear_2");
+    expect("partial clear (cleared half)", p, 10, 10, 0x00FF00);
+    expect("partial clear (other half untouched)", p, 50, 10, 0x336699);
+    // depth: a near quad, then a fresh scope that clears depth + stencil first: a far quad then passes the depth test
+    f.reset();
+    f.draw(quad(-1, -1, 1, 1, 0.3f, 0xFF0000FF));
+    capture(f.dev, "scope_clear_3");
+    f.dev.clear(CLEAR_ZBUFFER | CLEAR_STENCIL, 0, 1.0f, 0);
+    f.draw(quad(-1, -1, 1, 1, 0.6f, 0xFFFF0000));
+    p = capture(f.dev, "scope_clear_4");
+    expect("depth clear as a load op", p, 32, 32, 0xFF0000);
+    // colour + depth with a clear value other than 1 (z = 0.5): a quad at 0.6 is rejected, one at 0.4 drawn
+    f.reset();
+    capture(f.dev, "scope_clear_5");
+    f.dev.clear(CLEAR_TARGET | CLEAR_ZBUFFER, 0xFF102030, 0.5f, 0);
+    f.draw(quad(-1, -1, 0, 1, 0.6f, 0xFFFF0000));
+    f.draw(quad(0, -1, 1, 1, 0.4f, 0xFF00FF00));
+    p = capture(f.dev, "scope_clear_6");
+    expect("clear z 0.5: far quad rejected", p, 10, 10, 0x102030);
+    expect("clear z 0.5: near quad drawn", p, 50, 10, 0x00FF00);
+}
+
+// A depth surface without stencil bits (D24X8) has no stencil plane even where the image has one (D32S8 on AMD): a stencil test there passes
+void testNoStencilDepth(Fixture& f) {
+    TextureDesc rd;
+    rd.width = rd.height = 32;
+    rd.format = rhi::d3dfmt::A8R8G8B8;
+    rd.usage = USAGE_RENDERTARGET;
+    rd.pool = POOL_DEFAULT;
+    auto rt = f.dev.createTexture(rd);
+    TextureDesc dd = rd;
+    dd.format = rhi::d3dfmt::D24X8;
+    dd.usage = USAGE_DEPTHSTENCIL;
+    auto ds = f.dev.createTexture(dd);
+    f.reset();
+    capture(f.dev, "nostencil_0");
+    const std::uint64_t before = f.dev.stats().stencilNoPlaneDraws;
+    f.dev.setRenderTarget(0, rt->surface(0, 0));
+    f.dev.setDepthStencil(ds->surface(0, 0));
+    f.dev.clear(CLEAR_TARGET | CLEAR_ZBUFFER | CLEAR_STENCIL, 0xFF00FFFF, 1.0f, 0);
+    f.dev.setRenderState(RS_STENCILENABLE, 1);
+    f.dev.setRenderState(RS_STENCILFUNC, CMP_NEVER);  // D3D9: no stencil buffer = the test passes
+    f.draw(quad(-1, -1, 0, 1, 0.5f, 0xFFFF00FF));
+    f.dev.setRenderState(RS_STENCILENABLE, 0);
+    f.dev.setRenderTarget(0, f.dev.backBuffer());
+    f.dev.setDepthStencil(f.dev.autoDepthStencil());
+    f.dev.setPixelShader(f.psTexture);
+    f.dev.setTexture(0, rt.get());
+    f.dev.setSamplerState(0, SAMP_MAGFILTER, TEXF_POINT);
+    f.dev.setSamplerState(0, SAMP_MINFILTER, TEXF_POINT);
+    f.dev.setSamplerState(0, SAMP_ADDRESSU, TADDRESS_CLAMP);
+    f.dev.setSamplerState(0, SAMP_ADDRESSV, TADDRESS_CLAMP);
+    f.draw(quad(-1, -1, 1, 1, 0.5f, 0xFFFFFFFF));
+    const Pixels p = capture(f.dev, "nostencil");
+    expect("no-stencil depth: NEVER passes (drawn)", p, 10, 10, 0xFF00FF);
+    expect("no-stencil depth: outside the quad", p, 50, 10, 0x00FFFF);
+    if (f.dev.stats().stencilNoPlaneDraws != before + 1) {
+        std::printf("  FAIL no-stencil depth: stencilNoPlaneDraws %llu, expected %llu\n", static_cast<unsigned long long>(f.dev.stats().stencilNoPlaneDraws),
+                    static_cast<unsigned long long>(before + 1));
+        ++g_failures;
+    }
+    f.dev.setTexture(0, nullptr);
+    f.dev.release(std::move(rt));
+    f.dev.release(std::move(ds));
+}
+
 void testDxt1(Fixture& f) {
     // one DXT1 block per 4x4: colour0 = pure red (0xF800), colour1 = pure blue (0x001F), all indices 0 -> red
     TextureDesc d;
@@ -931,7 +1010,7 @@ int main(int argc, char** argv) {
     const std::pair<const char*, std::function<void(Fixture&)>> cases[] = {
         {"clear", testClear},         {"raster rules", testRasterRules}, {"cull", testCull},
         {"depth", testDepth},         {"blend", testBlend},              {"alpha test", testAlphaTest},
-        {"stencil", testStencil},     {"render to texture", testRenderToTexture}, {"dxt1", testDxt1},
+        {"stencil", testStencil}, {"scope clear", testScopeClear}, {"no-stencil depth", testNoStencilDepth},     {"render to texture", testRenderToTexture}, {"dxt1", testDxt1},
         {"instancing", testInstancing}, {"UP + scissor", testUpAndScissor}, {"stretch rect", testStretchRect},
         {"mip chain stretch rect", testMipChainStretchRect}, {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
