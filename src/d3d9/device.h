@@ -496,6 +496,11 @@ public:
     virtual bool observes(draws::Kind kind, scene::Phase phase) const = 0;
     // must not change device state (Device::vsConstant, streamSource, Buffer::gpu / readCpu / deviceAddress are fine)
     virtual void observe(Device& device, const ReplaceQuery& query) = 0;
+    // F2c-3 (native.owned_static): what the observer reads of the draw's constant registers. An owned draw has no composed register file: `Material` = the
+    // world rows (ReplaceQuery::objectRows) and the registers of the material / view / object windows (the device loads their CPU images before observe),
+    // `All` (the default) = anything: owned draws are not made while such an observer is registered
+    enum class Registers : std::uint8_t { None, Material, All };
+    virtual Registers registersRead() const { return Registers::All; }
     // the buffer `id` got a new static GPU copy (a new generation: the old VkBuffer and its address are retired) or is
     // released (its GPU copy dies after the frame): anything built from it must be forgotten
     virtual void bufferChanged(std::uint64_t /*bufferId*/) {}
@@ -1022,6 +1027,19 @@ public:
     };
     // 0 = derived into `out`; else why not (1 stale module, 2 phase, 3 consumers, 4 variant, 5 env, 6 stream / index binding, 7 texture, 8 jitter flags, 9 scene form)
     int deriveScene(const CachedDraw& c, const DeriveIn& in, SceneView& out);
+    // ---- F2c-3 (native.owned_static, frame-ownership.md 7.16; scene_draws.cpp): an op record's draw submitted as a scene draw WITHOUT a composition: the block is
+    // derived (deriveScene), every register window comes from the caller's tables (`windows`), the register file is not read. The caller set the draw tag,
+    // the vertex / pixel shader refs of the record, setSceneIssue(true) and the windows' tables; 0 = queued, else the refusal reason (nothing queued):
+    // 1..9 deriveScene's codes, 10 scene draws not active, 11 shaders not bound / record invalid, 12 no rendering scope, 13 an observer wants a capture,
+    // 14 a window the shader reads is not served, 15 the scene packet's guard (null address)
+    struct OwnedReplayStats {
+        std::uint64_t attempts = 0, drawn = 0, registersLoaded = 0;
+        std::uint64_t why[16] = {};
+    } ownedReplayStats;
+    int replayOwned(const CachedDraw& c, const DeriveIn& in, const OwnedWindows& windows);
+    // every registered observer reads no more than an owned draw provides (DrawObserver::Registers)
+    bool ownedObserversOk() const;
+    bool ownedReplayActive() const { return ownedReplay_; }
     // counters of the owned object rows handed to observers (ReplaceQuery::objectRows) against the register file
     struct ObjectRowStats {
         std::uint64_t given = 0, differing = 0;
@@ -1446,6 +1464,9 @@ private:
     const OwnedWindows* owned_ = nullptr;      // setOwnedWindows
     std::uint32_t ownedServed_[2] = {};        // per stage: the windows of the draw being prepared that came from owned_ (verifySplit skips them)
     OwnedStats ownedStats_;
+    bool ownedReplay_ = false;                 // F2c-3: replayOwned is preparing the draw (the register file is not the draw's: no verification against it)
+    bool ownedWindowsServed(std::uint32_t* stageOut = nullptr, std::uint32_t* windowOut = nullptr, std::uint32_t* needOut = nullptr) const;
+    void loadOwnedRegisters(const OwnedWindows& ow);
     std::uint32_t psWindowMinEnd_ = 0;
     void blit(rhi::Texture& src, std::uint32_t srcLevel, std::uint32_t srcLayer, const VkOffset3D srcBox[2], rhi::Texture& dst,
               std::uint32_t dstLevel, std::uint32_t dstLayer, const VkOffset3D dstBox[2], VkFilter filter);

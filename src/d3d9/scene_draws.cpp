@@ -297,7 +297,15 @@ int Device::deriveScene(const CachedDraw& c, const DeriveIn& in, SceneView& out)
         const std::uint32_t slot = static_cast<std::uint32_t>(std::countr_zero(mask));
         const shader::Reflection& r = c.ps->reflection;
         Texture* t = in.tex[slot];
-        if (t != nullptr && (t->isNull() || t->pending_ || t->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL || t->bindlessSlot() != c.texSlot[slot])) return 7;
+        if (t != nullptr && (t->isNull() || t->pending_ || t->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL || t->bindlessSlot() != c.texSlot[slot])) {
+            static int logged = 0;
+            if (logged < 8) {
+                ++logged;
+                spdlog::info("d3d9: owned replay: texture differs: slot {} null {} pending {} layout {} bindless {} vs {}, {}x{} role {}", slot, t->isNull(), t->pending_.load(), static_cast<int>(t->layout()),
+                             t->bindlessSlot(), c.texSlot[slot], t->desc().width, t->desc().height, scene::name(t->role()));
+            }
+            return 7;
+        }
         const bool kindMatches = t != nullptr && ((r.samplers[slot] == shader::TextureType::Cube) == (t->desc().type == TextureType::Cube)) &&
                                  ((r.samplers[slot] == shader::TextureType::Volume) == (t->desc().type == TextureType::Volume));
         if (t != nullptr && t == substituteFrom_) return 7;
@@ -340,6 +348,160 @@ int Device::deriveScene(const CachedDraw& c, const DeriveIn& in, SceneView& out)
     out.vertexOffset = c.packet.vertexOffset;
     out.flags = c.packet.push.flags;
     out.valid = true;
+    return 0;
+}
+
+// F2c-3: every window the shaders of the draw being prepared read came from the caller's tables (splitStage's `ownedServed_`): a window that is not served
+// would be read from the register file, which an owned draw never sets
+bool Device::ownedWindowsServed(std::uint32_t* stageOut, std::uint32_t* windowOut, std::uint32_t* needOut) const {
+    if (!drawSplit_[0] || !drawSplit_[1]) return false;
+    for (std::uint32_t stage = 0; stage < 2; ++stage) {
+        const Shader& sh = stage == 0 ? *vs_ : *ps_;
+        const std::uint32_t* first = stage == 0 ? shader::abi::kVsWindowFirst : shader::abi::kPsWindowFirst;
+        for (std::uint32_t w = 0; w < shader::abi::kConstWindows; ++w) {
+            if (stage == 1 && w == 1) continue;  // (c5: the DrawBlock's psC5)
+            std::uint32_t end = sh.reflection.windowEnd[w];
+            if (stage == 1 && w == 3) end = std::max(end, psWindowMinEnd_);
+            const std::uint32_t need = end > first[w] ? end - first[w] : 0;
+            if (need != 0 && (ownedServed_[stage] >> w & 1u) == 0) {
+                if (stageOut != nullptr) *stageOut = stage;
+                if (windowOut != nullptr) *windowOut = w;
+                if (needOut != nullptr) *needOut = need;
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool Device::ownedObserversOk() const {
+    for (const DrawObserver* o : observers_) {
+        if (o->registersRead() == DrawObserver::Registers::All) return false;
+    }
+    return true;
+}
+
+// the register images the windows hold (their CPU twins) into the register file, for the observers that read material constants of the draw (the RT scene's
+// uv map); the caller restores the file after its owned draws
+void Device::loadOwnedRegisters(const OwnedWindows& ow) {
+    for (std::uint32_t stage = 0; stage < 2; ++stage) {
+        const std::uint32_t* first = stage == 0 ? shader::abi::kVsWindowFirst : shader::abi::kPsWindowFirst;
+        for (std::uint32_t w = 0; w < shader::abi::kConstWindows; ++w) {
+            const OwnedWindows::Win& x = ow.w[stage][w];
+            if (x.kind == OwnedWindows::Kind::None || x.image == nullptr || x.covered == 0) continue;
+            if (stage == 0) setVertexShaderConstantF(first[w], x.image, x.covered);
+            else setPixelShaderConstantF(first[w], x.image, x.covered);
+            ++ownedReplayStats.registersLoaded;
+        }
+    }
+}
+
+int Device::replayOwned(const CachedDraw& c, const DeriveIn& in, const OwnedWindows& ow) {
+    OwnedReplayStats& st = ownedReplayStats;
+    ++st.attempts;
+    const auto refuse = [&](int why) {
+        ++st.why[why];
+        return why;
+    };
+    if (!sceneActive()) return refuse(10);
+    if (!c.valid || vs_.get() != c.vs || ps_.get() != c.ps || vs_->module == rhi::ShaderModule::None || ps_->module == rhi::ShaderModule::None) return refuse(11);
+    syncPhaseRegions();
+    if (rendering_ && (scopeGbuf_ != gbufferScope() || scopeSecondary_ != wantSecondaryScope())) endRendering();
+    if (!beginRendering()) return refuse(12);
+    SceneView sv;
+    if (const int why = deriveScene(c, in, sv); why != 0) return refuse(why);
+    if (!sv.scene || !c.packet.batchable) return refuse(9);
+    DrawPacket p = c.packet;
+    p.vi = internVi(c.vi);
+    p.dyn = internDyn(c.dyn);
+    struct Scope {
+        Device& d;
+        const OwnedWindows* savedOwned;
+        Scope(Device& dev, const OwnedWindows* o) : d(dev), savedOwned(dev.owned_) {
+            d.owned_ = o;
+            d.ownedReplay_ = true;
+        }
+        ~Scope() {
+            d.owned_ = savedOwned;
+            d.ownedReplay_ = false;
+        }
+    } scope(*this, &ow);
+    {
+        bool opaqueObserver = false;
+        if (c.kind == draws::Kind::StaticMesh && c.phase.view == scene::View::Main && c.phase.pass == scene::Pass::Solid) {
+            for (DrawReplacer* r : replacers_) opaqueObserver |= r->wantsOpaque();
+        }
+        if (!observers_.empty() || opaqueObserver) {
+            ReplaceQuery q = c.query;
+            q.tag = &tag_;
+            q.textures = c.tex;
+            q.mainView = firings_.mainViews();
+            q.objectRows = ownedObjectRows();
+            captureRequest_ = {};
+            captureRequestRw_ = {};
+            captureInstances_ = false;
+            bool loaded = false;
+            for (DrawObserver* o : observers_) {
+                if (!o->observes(c.kind, c.phase)) continue;
+                if (!loaded) {
+                    loadOwnedRegisters(ow);
+                    loaded = true;
+                }
+                o->observe(*this, q);
+            }
+            if (opaqueObserver) {
+                for (DrawReplacer* r : replacers_) {
+                    if (!r->wantsOpaque()) continue;
+                    if (!loaded) {
+                        loadOwnedRegisters(ow);
+                        loaded = true;
+                    }
+                    r->observeOpaque(*this, q);
+                }
+            }
+            if (!captureRequest_.null()) return refuse(13);
+        }
+    }
+    uploadConstants(false, c.v.minEnd);
+    {
+        std::uint32_t stage = 0, window = 0, need = 0;
+        if (!ownedWindowsServed(&stage, &window, &need)) {
+            static std::uint32_t logged = 0;
+            if (logged < 8) {
+                ++logged;
+                const OwnedWindows::Win& x = ow.w[stage][window];
+                spdlog::info("d3d9: owned replay: the {} window {} is not served (the shader reads {} registers; offered kind {} covered {} base {:#x}, why {}; vs {:016x} ps {:016x}, split {} / {})",
+                             stage == 0 ? "VS" : "PS", window, need, static_cast<int>(x.kind), x.covered, x.base.bits, static_cast<int>(x.why), vs_->hash, ps_->hash, drawSplit_[0], drawSplit_[1]);
+            }
+            return refuse(14);
+        }
+    }
+    shader::abi::DrawBlock& b = sv.block;
+    // the packet's guard (toScenePacket) refuses a null address: nothing may be queued then
+    rhi::RingAlloc db = game_->allocRing(sizeof(b), 16);
+    if (db.ptr == nullptr) return refuse(15);
+    std::memcpy(db.ptr, &b, sizeof(b));
+    const std::uint32_t flags = p.push.flags;
+    p.push = shader::abi::PushConstants{0, 0, db.ref.bits, frameBlockAddress().bits, 0, stats_.draws, flags};
+    for (std::uint32_t w = 0; w < shader::abi::kConstWindows; ++w) {
+        p.push.vsWin[w] = drawWin_[0][w].bits;
+        p.push.psWin[w] = drawWin_[1][w].bits;
+    }
+    p.push.psWin[1] = db.ref.plus(static_cast<std::int64_t>(offsetof(shader::abi::DrawBlock, psC5)) - 5 * 16).bits;
+    if (!ensureSceneRef() || !toScenePacket(p, c.scenePipeline)) return refuse(15);
+    const std::uint64_t frame = frameValue();
+    for (std::uint32_t mask = c.texMask; mask != 0; mask &= mask - 1) c.tex[std::countr_zero(mask)]->lastUseFrame_ = frame;
+    if (c.v.giDraw) ++giDrawCount_;
+    ++stats_.draws;
+    ++stats_.totalDraws;
+    ++passDraws_;
+    phases_.countDraw();
+    draws_.count(c.kind, c.phase.view);
+    ++replayStats.replayed;
+    ++sceneStats_.replayedSceneDraws;
+    ++sceneStats_.candidates;
+    submitInterned(p);
+    ++st.drawn;
     return 0;
 }
 

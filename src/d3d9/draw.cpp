@@ -693,7 +693,7 @@ void Device::splitStage(bool vertex, const Shader& sh, rhi::GpuRef (&windows)[sh
                     else if (ow.kind == OwnedWindows::Kind::Object) ++ownedStats_.object;
                     else if (vertex && w == 1) ++ownedStats_.view1;
                     else ++ownedStats_.view[stage];
-                    if (splitVerify_ && ow.image != nullptr) verifyOwned(vertex, w, need, ow, regs, sh);
+                    if (splitVerify_ && ow.image != nullptr && !ownedReplay_) verifyOwned(vertex, w, need, ow, regs, sh);
                     continue;
                 }
                 ++ownedStats_.fallbackShort;
@@ -723,7 +723,7 @@ void Device::splitStage(bool vertex, const Shader& sh, rhi::GpuRef (&windows)[sh
         }
         windows[w] = cw.address.plus(-static_cast<std::int64_t>(first[w]) * 16);
     }
-    if (splitVerify_) verifySplit(vertex, sh);
+    if (splitVerify_ && !ownedReplay_) verifySplit(vertex, sh);
 }
 
 // debug.split_verify, owned windows: the CPU twin of the image equals the register file for the registers the draw composed (verifyMask)
@@ -1607,6 +1607,7 @@ const float* Device::ownedObjectRows() {
     if (w.kind != OwnedWindows::Kind::Object || w.image == nullptr) return nullptr;
     const float* rows = w.image + 8;  // image = c31 (5 float4): c33 starts at the third
     ++objectRowStats.given;
+    if (ownedReplay_) return rows;  // (an owned draw has no composed register file to compare with)
     for (std::uint32_t r = 0; r < 3; ++r) {
         if (std::memcmp(rows + 4 * r, vsF_[33 + r], 16) != 0) {
             ++objectRowStats.differing;

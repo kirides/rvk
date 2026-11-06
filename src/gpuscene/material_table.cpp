@@ -284,7 +284,22 @@ std::uint32_t MaterialTable::checkDraw(const Draw& d) {
     return slot;
 }
 
-void MaterialTable::fillWindows(std::uint32_t slot, const std::uint64_t* vsSet, const std::uint64_t* psSet, d3d9::OwnedWindows& ow) {
+bool MaterialTable::pollOwned(std::uint32_t slot, TexFn tex, void* texCtx) {
+    if (!active_ || slot >= kCapacity) return false;
+    std::lock_guard lock(mutex_);
+    if (slot >= used_ || key_[slot] == nullptr) return false;
+    seen_[slot] = frame_;
+    if (polled_[slot] != frame_ + 1) {
+        polled_[slot] = frame_ + 1;
+        Draw d;
+        d.tex = tex;
+        d.texCtx = texCtx;
+        if (!refresh(slot, key_[slot], d)) return false;
+    }
+    return table_.shadow()[slot].info[0] != 0;
+}
+
+void MaterialTable::fillWindows(std::uint32_t slot, const std::uint64_t* vsSet, const std::uint64_t* psSet, d3d9::OwnedWindows& ow, bool pad) {
     using d3d9::OwnedWindows;
     OwnedWindows::Win& vsWin = ow.w[0][3];
     OwnedWindows::Win& psWin = ow.w[1][2];
@@ -312,7 +327,7 @@ void MaterialTable::fillWindows(std::uint32_t slot, const std::uint64_t* vsSet, 
         vsWin.kind = OwnedWindows::Kind::Material;
         vsWin.why = OwnedWindows::WhyNone;
         vsWin.base = rec.plus(w.baseDelta);
-        vsWin.covered = w.covered;
+        vsWin.covered = pad ? std::min<std::uint32_t>(shader::abi::kVsWindowFirst[4] - shader::abi::kVsWindowFirst[3], kMatVsRegs - w.imageIndex) : w.covered;
         vsWin.image = r.vs[w.imageIndex];
         vsWin.verifyMask = maskOf(vsSet, shader::abi::kVsWindowFirst[3], w.covered);
     }
@@ -322,7 +337,7 @@ void MaterialTable::fillWindows(std::uint32_t slot, const std::uint64_t* vsSet, 
         psWin.kind = OwnedWindows::Kind::Material;
         psWin.why = OwnedWindows::WhyNone;
         psWin.base = rec.plus(w.baseDelta);
-        psWin.covered = w.covered;
+        psWin.covered = pad ? std::min<std::uint32_t>(shader::abi::kPsWindowFirst[3] - shader::abi::kPsWindowFirst[2], kMatPsRegs - w.imageIndex) : w.covered;
         psWin.image = r.ps[w.imageIndex];
         psWin.verifyMask = maskOf(psSet, shader::abi::kPsWindowFirst[2], w.covered);
     }

@@ -487,6 +487,8 @@ struct RendererSettings {
     Setting* nativeOwnedWindows = nullptr;     // native.owned_windows: the static draws' register windows read from the material / view tables (frame-ownership.md 7.8; needs native.material_table)
     Setting* nativeSceneDraws = nullptr;       // native.scene_draws: the static main-view z / solid draws as DrawRecords + indirect runs (frame-ownership.md 7.11)
     Setting* nativeOwnedObjects = nullptr;     // native.owned_objects: the static ops' non-instanced mesh draws read VS windows 1 / 2 from the view block / the object table (frame-ownership.md 7.13)
+    Setting* nativeOwnedStatic = nullptr;      // native.owned_static: the static z / solid ops of valid records drawn from the records, left out of the engine's lists (frame-ownership.md 7.16)
+    Setting* nativeOwnedCheck = nullptr;       // native.owned_check: every N-th frame (and the one before it) runs the old path and compares
     Setting* nativeOwnedRecords = nullptr;     // native.owned_records: op records built from the static composition and compared with record-derived draws (frame-ownership.md 7.14)
     Setting* nativeSceneDrawsCheck = nullptr;  // native.scene_draws_check: every N-th frame the record / argument buffers are read back and compared
     Setting* nativeLean = nullptr;             // native.lean: the engine's slot code not run for the composed mesh-like ops (O2a)

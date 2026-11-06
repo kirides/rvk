@@ -60,6 +60,9 @@ public:
     // original: its z list is not sorted yet) / ends
     virtual void shadowExecuteBegin(void* /*db*/, void* /*shadowMap*/) {}
     virtual void shadowExecuteEnd(void* /*db*/) {}
+    // F2c-3 (native.owned_static): the main view's z pass (BeginZPass) / solid pass (DoBeginRenderSolid + the BeforeSolid injection point) has begun: the original
+    // returned, the targets are bound; the ops that left the lists are drawn now. Returns the draws made
+    virtual std::uint32_t passBegin(bool /*solid*/) { return 0; }
 };
 void setOpTap(OpTap* tap);
 

@@ -82,8 +82,12 @@ public:
     // (4 x 64 bit masks): the verification compares only those. The GPU copy of a record is the shadow at the present of the frame (the upload list runs
     // before the frame's draws), and a record only changes at its first draw of the frame (the poll), so the draws of a frame see the value they were
     // composed with; see frame-ownership.md 7.8 for the ordering argument.
-    void fillWindows(std::uint32_t slot, const std::uint64_t* vsSet, const std::uint64_t* psSet, d3d9::OwnedWindows& ow);
+    // `pad` (F2c-3, owned draws): the images are served over their whole windows when the shader reads registers beyond the pool's count (the record's arrays hold zeros
+    // there; a composed draw reads the register file's carry-over)
+    void fillWindows(std::uint32_t slot, const std::uint64_t* vsSet, const std::uint64_t* psSet, d3d9::OwnedWindows& ow, bool pad = false);
     std::uint64_t windowDraws() const { return windowDraws_; }
+    // F2c-3: the poll of slot `slot`'s record without a composed draw (an owned op): re-reads the record once per frame like checkDraw's poll; false: no such record / unreadable
+    bool pollOwned(std::uint32_t slot, TexFn tex, void* texCtx);
     // F2c-2: the record's structure version (texture slots / sampler states, counts, state words, flags, graph ids; not the pool bytes); unique per change
     std::uint32_t structVersion(std::uint32_t slot) const { return slot < structVer_.size() ? structVer_[slot] : 0; }
 
