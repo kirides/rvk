@@ -1467,7 +1467,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     {
         const draws::Kind k = kind;
         const bool meshKind = k == draws::Kind::StaticMesh || k == draws::Kind::InstancedMesh || k == draws::Kind::SpeedTree ||
-                              k == draws::Kind::Skinned;
+                              k == draws::Kind::Skinned || (sceneBb_ && k == draws::Kind::SpeedTreeBillboard);
         const bool opaquePass = (phase.view == scene::View::Main && (phase.pass == scene::Pass::DepthPrepass || phase.pass == scene::Pass::Solid)) ||
                                 (phase.view == scene::View::Shadow && phase.pass == scene::Pass::ShadowDepth);
         const VkCompareOp z = workDyn_.depthCompare;

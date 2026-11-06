@@ -490,6 +490,7 @@ struct RendererSettings {
     Setting* nativeOwnedStatic = nullptr;      // native.owned_static: the static z / solid ops of valid records drawn from the records, left out of the engine's lists (frame-ownership.md 7.16)
     Setting* nativeOwnedCheck = nullptr;       // native.owned_check: every N-th frame (and the one before it) runs the old path and compares
     Setting* nativeOwnedRecords = nullptr;     // native.owned_records: op records built from the static composition and compared with record-derived draws (frame-ownership.md 7.14)
+    Setting* nativeOwnedBillboards = nullptr;  // native.owned_billboards: the tree billboards' ops retained as records and drawn from them (frame-ownership.md 7.17, F4-1)
     Setting* nativeSceneDrawsCheck = nullptr;  // native.scene_draws_check: every N-th frame the record / argument buffers are read back and compared
     Setting* nativeLean = nullptr;             // native.lean: the engine's slot code not run for the composed mesh-like ops (O2a)
     Setting* nativeLeanCheck = nullptr;        // native.lean_check: every N-th frame the engine's code runs as before (compare)

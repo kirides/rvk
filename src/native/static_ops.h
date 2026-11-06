@@ -37,6 +37,7 @@
 #include "native/static_ops_retained.h"
 #include "native/frame_desc.h"
 #include "native/static_compose.h"
+#include "native/bb_records.h"
 #include "native/op_records.h"
 
 namespace rvk::hal::vulkan {
@@ -139,6 +140,8 @@ public:
     void ownedTake(List list, std::vector<Op>&& ops, std::uint64_t compactNs);
     // BeginZPass / DoBeginRenderSolid of the main view returned: the pass's owned ops are drawn; returns the draws made (owned + late compositions)
     std::uint32_t ownedPass(bool solid);
+    // native.owned_billboards (frame-ownership.md 7.17, F4-1): the tree billboard ops retained as records, compared / drawn from them (needs owned windows, lighting images, scene draws)
+    void setOwnedBillboards(bool on);
     // native.scene_draws (frame-ownership.md 7.11): the main view's static draws are issued as scene draws (Device::setSceneIssue)
     void setSceneDraws(bool on) { sceneDraws_ = on; }
     // native.gpu_scene (docs/research/gpu-scene.md): >= 1 checks every mesh / tree / actor op's entity against the signal-fed instance table
@@ -807,6 +810,30 @@ private:
     void recAudit(const Op& op);
     std::uint64_t recViewStamp();
 
+    // F4-1 (static_ops_bb.cpp)
+    bool ownedBb_ = false;
+    std::unique_ptr<bbrec::Store> bb_;
+    bool bbStamp(const Op& op, orec::Stamp& st, const void*& ps, const void*& list, std::uint32_t& first, std::uint32_t& count);
+    void bbEnter(const Op& op);               // before the composition: eligibility, stamps, the record valid at entry, sources, the read log
+    void bbComposed(const Op& op, Skip s);    // after the composition
+    void bbDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey);  // after each issued draw: derive + compare
+    void bbEnd(const Op& op);                 // after issue(): build / refresh the record
+    void bbAudit(const Op& op);
+    void bbDeriveIn(const orec::DrawRec& r, d3d9::Device::DeriveIn& in);
+    bool bbSceneIssue() const;                // the op being issued is a billboard op that takes scene draws
+    void bbReport();
+    bool bbReplay(const Op& op);              // owned frames: the op's draws submitted from its record (true: done, the engine's slot is skipped by the commit)
+    void bbNoteMat(const sc::DrawDesc& d, const std::uint8_t* owner, const void* material, bool zPass, std::uint16_t psMask, std::int32_t blendMode, std::int32_t maskRef);  // the composition's checkMaterial call
+    bool bbPollMaterials(const bbrec::Record& rec);                              // the material poll of an owned op (checkMaterial without composing)
+    void bbWindowsFor(const bbrec::Record& rec, std::size_t k, d3d9::OwnedWindows& dw);  // the draw's windows from tables / the view's mirror
+    std::uint64_t bbViewStamp();
+    void bbNoteLights(const std::uint8_t* illum);  // writeLighting's hand-over of an illumination's lights to the light table (what an owned solid op still does)
+    bool bbCheckFrame();
+    std::unique_ptr<sc::DrawDesc> bbScratch_;
+    std::vector<d3d9::Device::DeriveIn> bbIns_;
+    std::vector<d3d9::OwnedWindows> bbWins_;
+    std::vector<std::uint64_t> bbPolled_;
+    std::uint64_t bbPolledFrame_ = ~0ull;
     // packet retention: a composed draw's finished packet by (op, draw index), valid while the draw description equals the captured one
     int packetMode_ = 0;
     int gpuScene_ = 0;

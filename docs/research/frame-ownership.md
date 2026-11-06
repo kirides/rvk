@@ -975,6 +975,71 @@ Debug setting (Bool, run time, default off, Full; `needs` native.owned_records +
   pieces). Where the cost is: the stamp (~60 reads per op: batch per entity / resource), `deriveScene` + `replayOwned` per draw, observers; ideas: a per-frame epoch for the global inputs, persistent DrawRecords
   per op (F2c-4: nothing derived per frame, only the dirty ones), moving stamps to the signals. Check frames cost ~0.1 ms / frame averaged at the savegame (20 % of the frames run compare).
 * **Gates.** `rvk_tests` 288 / 288 (settings count 130), `rvk_d3d9test --validation` PASS both backends, Vulkan validation + GPU-assisted clean.
+### 7.17 F4-1 billboards (2026-11-06, `native.owned_billboards`; records compared AND owned)
+
+Debug setting (Bool, run time, default off, Full; `needs` native.owned_windows + native.lighting_images + native.scene_draws). Files: `src/native/bb_records.h` (record, stats, reasons),
+`src/native/static_ops_bb.cpp` (StaticOps `bbEnter / bbComposed / bbDraw / bbEnd / bbReplay / bbReport`, the pattern of 7.14 copied, not shared: F2c-3 changes those functions),
+`src/gpuscene/billboard_table.*` (persistent constants images), `src/d3d9/owned_submit.cpp` (`Device::submitOwned`, `ownedBindingsLive`), small additions: `IllumTable::pollDraw`,
+`WindowTables::fillViews(.., vs0, ps0)` (view registers given by the caller), `VariantSlot::SceneVsLod`, `Device::setSceneBillboards`, test `rvk_d3d9test` "owned submit (F4-1)".
+
+* **Scope and a deviation.** The main view's `eCRenderContextSpeedTreeBB` z / solid ops (eCMeshResource2::Render path with a cell index range; z = two special passes). **No viewBegin compaction:**
+  an owned op stays in the engine's lists (order, sort, hooks untouched) and is replayed at its own slot instead of being composed (`opEnterImpl`: `if (ownedBb_ && bbReplay(op)) return;`,
+  slot skipped through the lean commit). The CPU gain is the composition + issue, which is all compaction would remove for 13 - 21 ops; F2c-3's helper can replace the call later.
+* **Record** (`bbrec::Record`, key ctx / desc / list, main view): `orec::Stamp` (billboard mesh = PS +0x30, sub-mesh range / material / shader class + flags, illumination + light set + sun bit
+  for solid, lightmaps, variant epoch, view, material structure versions) + the **billboard source** (PS, its list pointer +0x40, range entry first / count) ; `draws[]` = F2c-2 `DrawRec`
+  (own copy of the retained `CachedDraw`, buffers, textures, seven sampler states, alpha test / mask, matSlot, lighting key, register sets, tag fields; 2 draws per op in z and solid);
+  per draw the **material poll's arguments** (`MatArgs`: owner, material, zPass, PS mask, blend, mask ref, the sampler inputs of the pool slots); the **constants image** (VS c32..c36 = the
+  engine's fixed table 0xbfcbd0, c37 + j = the PS list entries: 198 registers in every area seen) with its **source read log** (3 hashed reads: table, range entry, list entries) and a slot in the
+  persistent table (images interned by content: 1 - 3 distinct images; 3.2 KB each, uploaded once, no per-frame upload; window base = record - 31 x 16); the composition's full read log (signal
+  audit); the side effects (the mesh's inline touch, the images the draws sample, stream 3 of the z op; BindLightmaps is re-run for solid).
+* **Windows of a billboard draw** (found from the shaders' read extents, z VS reads c0..c3 / c11 and c32..c231, PS c5 only): VS 0 / PS 0 = a view block written from the view's mirror
+  (`bbWindowsFor`: c0..c3 = vp or dbvp by the shader's depth-bias flag, c4..c11 + c12..c30 + PS c0..c4 from the mirror) with `fillViews(.., vs0, ps0)`; VS 1 = the same block's c12..c30; VS 2 = the
+  constants table; VS 3 / PS 2 = Material records; PS 3 = the lighting image; PS 1 = the DrawBlock's c5.
+* **Billboards as scene draws** (needed by both parts): `Device::setSceneBillboards` makes `SpeedTreeBillboard` opaque draws batchable (they were not: `meshKind` list) and eligible for
+  `sceneDecide`; at the player defaults `lod.trees = 2` every billboard draw uses the fade vertex module (`lodModule`), so a scene form of it exists (`VariantSlot::SceneVsLod`: lod
+  `inputOverrides` + `sceneRecord`; the first run found every draw refused with "variant gate" without it).
+* **Compare** (every composed frame whose record is valid: check frames, 1 in 10 plus the frames the stamps broke): scene form, pipeline, vertex input / dynamic state, geometry (the cell index
+  range), flags, tag, windows (VS 0 / PS 0 on the registers the draw composed: the others are the device's carry-over, found by the first run), VS 1 (c12..c30 live registers against the admin
+  pool), VS 2 / constants (c32.. against the image), material / lighting windows, DrawBlock tex / smp / posFix / alpha / pad / c5.
+* **Owned frame** (`bbReplay`, lean frames that are not check frames): stamps + constants sources + the composition's read log valid, the view (`viewAndMirror`, view stamp), every buffer /
+  texture of the record still alive (`ownedBindingsLive`: a record outlives them), the **material poll** (`checkMaterial` with the recorded arguments and samplers: slot and structure version
+  must be the build's), the illumination polled (`IllumTable::pollDraw`: same slot, bytes against the record once per frame) and its lights handed to the light table, the draw tag, then a
+  **dry run of every draw** (`submitOwned(.., dryRun)`: split shaders, no observers, windows cover the read extents, `deriveScene`: modules, phase, variants, environment, bindings, textures)
+  before the first is submitted (no partial op), then `submitOwned` per draw (DrawBlock derived, push block from the window offers, `toScenePacket`: the null-address guard applies) and the lean
+  commit. Anything refused composes the op as before (counted by reason). `RVK_BB_CHECK=N` (`-Environment`): N = check period (default 10, 1 = never owned, 0 = no check frames).
+* **GPU safety.** CPU guards as above; `rvk_d3d9test --validation` "owned submit" on **Vulkan and D3D12**: four quads submitted with junk in the register file, 0 bytes differ from the normal draws,
+  one indirect run of 4 records, a dry run draws nothing, a short image / null base / the scene guard refuse and draw nothing, a changed image changes the picture; 0 validation errors. First game
+  runs with `-Validation` + `VK_KHRONOS_VALIDATION_VALIDATE_GPU_BASED=GPU_BASED_GPU_ASSISTED` (jungle, 3 runs, the last with owned replays): no VUID, no device loss. `rvk_tests` 288 / 288 (settings count 129).
+* **Findings that shaped the code:** the `lod.trees != 1` fade module (above); the material table's own verification caught the first version of the poll (sampler states of pool slots the PS does
+  not sample were missing from the record: `MatArgs` keeps all stages checkMaterial reads); view windows differ in registers the shader never reads (negative zeros in the device's carry-over).
+
+**Numbers** (Full, `-PlayerDefaults`, the 8 native settings of the task; logs `rvk-work/scratch/f41/`; "owned" = ops replayed without composition, the rest composed: check frames 1 in 10 + rebuilds):
+
+| run | recordable ops composed (compared) | owned ops | share owned | DIFFERING | audit disagreements | owned replay CPU / frame |
+|---|---|---|---|---|---|---|
+| Vulkan 4 spots (jungle, lake_jungle, waterfall_jungle, swamp_camp) | 25.1 k | 214 k | 89 % | **0** | 2 (+33 caught by the post stamps) | 0.26 - 0.30 ms (the busiest spot) |
+| savegame Risen_Save_0005 hold (lod 2x) | 7.3 k | 51.7 k | 88 % | **0** | 2 (+33) | 0.11 ms |
+| savegame `lod.trees=3` | 9.2 k | 59.2 k | 87 % | **0** | 2 (+33) | 0.10 ms |
+| D3D12 (jungle, lake_jungle) | 17.5 k | 128.6 k | 88 % | **0** | 0 (+66) | 0.25 ms |
+
+No `[error]`, no device loss, no validation message in any run. Refusals: only "check frame". The audit's 2 disagreements are the pointer-streaming kind of 7.14 (`other`).
+
+**Pictures** (jungle spot frozen, `native.owned_billboards` toggled at run time every 200 presents, a shot every 50, pairs inside the hold chosen afterwards): control pairs (same state) 0.004 - 0.05 mean
+abs; on vs off **0.22 mean abs, max 19, ~1,200 pixels above 8, all in one band of the horizon rows (y 113 - 136, soft sky / haze)**. The same toggle with owned replays disabled (`RVK_BB_CHECK=1`: the
+scene-draw path only) shows the same size of difference (0.3 - 0.6, max 28): **the change comes from the billboards becoming batched scene draws** (their opaque draws are grouped by pipeline within a flush, the
+engine's order of same-depth surfaces changes), not from the owned replay; accepted as a Full-mode picture change like the batching of 7.11. Owned frames vs composed frames differ by nothing the compare
+sees (DIFFERING 0 on every check frame).
+
+**CPU A/B** (savegame, `-Perf`, `RisenTest.exe`, vsync off, lod 2x, shared default copy under `with-test-lock -Who f41-perf`, interleaved off / on / off / on, mean of the last 6 windows): engine + HAL
+CPU per frame **off 6.72 / 6.71 ms, on 7.03 / 6.97 ms (+0.29 ms: no gain, a loss)**; GPU 3.36 / 3.37 vs 3.27 / 3.27 ms (-0.10 ms: fewer, batched calls). The owned replay itself cost 0.36 ms per frame in
+those runs (the first build) against the 0.25 - 0.55 ms of compose + issue it replaces: **the owned replay is not cheaper than the composition yet.** After the poll was made once per material per
+frame and the windows of the dry run were reused (this commit's last change; the 4 spots / save runs above predate it), the savegame hold measured 107 -> **86 us per frame** for the replay with DIFFERING 0
+(not re-timed A/B: the shared copy was busy with another agent's run). What is left is per-op fixed work: stamps (~40 guarded reads), the source / read-log validation (3 KB hash of the constants), `viewAndMirror`
+(`initMirror`), `fillViews` + `fillWindows` per draw, two derivations per draw (dry run + submit). The honest reading: billboards are too few ops (13 - 21 per list) for the record path to win on CPU
+by itself; its value is the proven path (record -> derive -> submit with nothing composed, DIFFERING 0, both backends) that F4-2..4 reuse for the 77 tree ops / 129 draws of a view, where per-op costs amortise.
+
+**Not done / handed on:** viewBegin compaction (slot-time replay instead); the shadow views and the trees themselves (F4-2..4); the per-frame cost of the replay is dominated by the material
+poll (`constantsInto` + `checkDraw` per draw: polling once per material per frame is the next saving) and `initMirror` per op; check-frame period / env knob should become `native.owned_check` when F2c-3 lands it.
 
 ## 8. F1 / F2 design decision: windows onto persistent tables (2026-11-06, orchestrator)
 

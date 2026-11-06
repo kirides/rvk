@@ -14,7 +14,7 @@ TEST(settings_api_info_get_set) {
     settings::Registry reg;
     settings::registerRendererSettings(reg);
     const std::uint32_t n = api::settingCount(reg);
-    CHECK(n == 130);  // 172 before the settings clean-up (docs/research/settings-audit.md): 55 finished A/B switches / art coefficients are constants now
+    CHECK(n == 131);  // 172 before the settings clean-up (docs/research/settings-audit.md): 55 finished A/B switches / art coefficients are constants now
     struct rvk_setting_info info{};
     CHECK(api::settingInfo(reg, 0, &info, sizeof(info)) == 96);
     CHECK(info.size == 96);
