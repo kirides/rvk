@@ -130,6 +130,10 @@ public:
     // DoBeginRenderSolid returned); their side effects run here. check: every N-th frame (and the one before it) the old path runs and the records are compared
     void setOwnedStatic(bool on, int check);
     bool ownedStaticOn() const { return ownedStatic_; }
+    // native.owned_persistent (frame-ownership.md 7.21, F2c-4a): the owned draws' DrawRecords + DrawBlocks live in gpuscene::drawrecords() and are rewritten only when an
+    // input of their derivation changed; a frame queues one indirect draw per bucket. Needs owned_static and the scene ABI v2 view table
+    void setOwnedPersistent(bool on);
+    bool ownedPersistentOn() const { return ownedPersistent_; }
     // a main view begins (frame tap, before the lists are read): false = no compaction this view (setting / prerequisites / a check frame)
     bool ownedViewBegin(void* db, void* desc);
     // may the list's ops leave it (the database's caps: the z list is executed, the solid pass is bracketed by DoBeginRenderSolid)
@@ -781,6 +785,38 @@ private:
         std::unordered_map<std::uint64_t, std::uint32_t> light;
     } ownedCache_;
     bool ownedDrawOp(const Op& op, const orec::OpRecord& rec, const d3d9::OwnedWindows& viewWin, bool viewWinOk, int& why);
+    // F2c-4a (static_ops_owned.cpp)
+    bool ownedPersistent_ = false;
+    struct PersistStats {
+        std::uint64_t ops = 0, draws = 0, reused = 0, derived = 0, derivedChanged = 0, tableFull = 0, refused = 0, observerRefused = 0, injected = 0;
+        std::uint64_t scrubbed = 0, scrubMiss = 0, checkCompared = 0, checkSkipped = 0, checkMiss = 0, passes = 0, envChanges = 0, flushFailed = 0, arenaFailed = 0;
+        std::uint64_t sigNs = 0, deriveNs = 0, observeNs = 0, flushNs = 0, windowNs = 0, items = 0;
+        void add(const PersistStats& o);
+    } persistW_, persistT_;
+    std::uint64_t persistEnvLast_[2] = {};
+    std::uint64_t persistMissReported_ = 0, persistInjectSeen_ = 0, persistInjectEvery_ = 0, persistMissLogged_ = 0;
+    std::uint64_t persistScrubTick_ = 0;
+    std::uint32_t persistPassDraw_ = 0;
+    void ownedAutoOffMiss(std::uint64_t miss);
+    struct MatWinEntry {  // per material slot and pass: the two windows the material record serves (a flat cache in front of ownedCache_.mat)
+        d3d9::OwnedWindows::Win v3, p2;
+        std::uint64_t pass = 0;
+    };
+    std::vector<MatWinEntry> ownedMatWin_;
+    std::uint64_t ownedPassSerial_ = 0;
+    std::vector<d3d9::Device::OwnedItem> ownedItems_;
+    std::vector<std::uint32_t> ownedItemOp_;
+    std::vector<const orec::OpRecord*> ownedRecPtrs_;
+    d3d9::Device::OwnedArena ownedArena_;
+    bool ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, const d3d9::OwnedWindows& viewWin, std::uint32_t viewSlot, std::uint64_t epoch, std::uint32_t scrubStride, std::uint32_t scrubPhase, int& why);
+    void ownedBuildWindows(const orec::DrawRec& r, const d3d9::OwnedWindows& viewWin, const d3d9::OwnedWindows::Win& objWin, const gpuscene::ComposeParams& p, bool cached, d3d9::OwnedWindows& dw);
+    bool ownedAmbientLit(const orec::DrawRec& r, const gpuscene::ComposeParams& p);
+    void ownedMakeIn(const orec::DrawRec& r, bool ambientLit, d3d9::Device::DeriveIn& in);
+    void ownedMissReport(const char* where, const Op* op, const orec::DrawRec& r, const d3d9::Device::OwnedPersist& fresh, std::uint32_t slot);
+public:
+    // check frames (static_ops_records.cpp recDraw): the persistent content of the draw against the one the composition's derivation gives, when the owned path would reuse it
+    void ownedMissCheck(const orec::OpRecord& rec, std::size_t k, const d3d9::Device::DeriveIn& in, const d3d9::Device::SceneView& derived);
+private:
     bool ownedMaterialsOk(const orec::OpRecord& rec);
     bool ownedAuditOk(const Op& op, const orec::OpRecord& rec);
     void ownedSideEffects(const orec::OpRecord& rec);

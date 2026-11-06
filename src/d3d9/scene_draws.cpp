@@ -13,6 +13,7 @@
 
 #include "core/f2c4_measure.h"
 #include "d3d9/device.h"
+#include "d3d9/scene_hash.h"
 
 namespace rvk::d3d9 {
 
@@ -20,52 +21,7 @@ namespace {
 
 constexpr std::uint32_t kSceneRunMax = 1024;  // records per indirect call (the ref stream's length)
 
-bool viEqual(const rhi::VertexInputValues& a, const rhi::VertexInputValues& b) {
-    const auto eq = [](const void* x, const void* y, std::size_t n) { return n == 0 || std::memcmp(x, y, n) == 0; };
-    return a.bufferCount == b.bufferCount && a.dynamicLayout == b.dynamicLayout && a.bindingCount == b.bindingCount && a.attributeCount == b.attributeCount &&
-           a.vertexShift == b.vertexShift && eq(a.buffers, b.buffers, sizeof(a.buffers[0]) * a.bufferCount) && eq(a.offsets, b.offsets, sizeof(a.offsets[0]) * a.bufferCount) &&
-           eq(a.bindings, b.bindings, sizeof(a.bindings[0]) * a.bindingCount) && eq(a.attributes, b.attributes, sizeof(a.attributes[0]) * a.attributeCount);
-}
-
-bool dynEqual(const rhi::DynamicStateValues& a, const rhi::DynamicStateValues& b) {
-    constexpr std::size_t prefix = offsetof(rhi::DynamicStateValues, blendEnable);
-    const std::uint32_t n = a.colorCount;
-    if (a.colorCount != b.colorCount || std::memcmp(&a, &b, prefix) != 0) return false;
-    return n == 0 || (std::memcmp(a.blendEnable, b.blendEnable, sizeof(VkBool32) * n) == 0 && std::memcmp(a.blendEquation, b.blendEquation, sizeof(VkColorBlendEquationEXT) * n) == 0 &&
-                      std::memcmp(a.writeMask, b.writeMask, sizeof(VkColorComponentFlags) * n) == 0);
-}
-
 std::uint64_t alignUp16(std::uint64_t v) { return (v + 15) & ~std::uint64_t{15}; }
-
-// F2c-2: content hashes of the interned vertex input / dynamic state (the arena pointers differ between frames, the contents do not)
-std::uint64_t hashBytes(std::uint64_t h, const void* p, std::size_t n) {
-    const auto* b = static_cast<const std::uint8_t*>(p);
-    for (std::size_t i = 0; i < n; ++i) h = (h ^ b[i]) * 0x100000001B3ull;
-    return h;
-}
-
-std::uint64_t hashVi(const rhi::VertexInputValues& v) {
-    std::uint64_t h = 0xcbf29ce484222325ull;
-    h = hashBytes(h, &v.bufferCount, sizeof(v.bufferCount));
-    h = hashBytes(h, &v.dynamicLayout, sizeof(v.dynamicLayout));
-    h = hashBytes(h, &v.bindingCount, sizeof(v.bindingCount));
-    h = hashBytes(h, &v.attributeCount, sizeof(v.attributeCount));
-    h = hashBytes(h, &v.vertexShift, sizeof(v.vertexShift));
-    h = hashBytes(h, v.buffers, sizeof(v.buffers[0]) * v.bufferCount);
-    h = hashBytes(h, v.offsets, sizeof(v.offsets[0]) * v.bufferCount);
-    h = hashBytes(h, v.bindings, sizeof(v.bindings[0]) * v.bindingCount);
-    h = hashBytes(h, v.attributes, sizeof(v.attributes[0]) * v.attributeCount);
-    return h;
-}
-
-std::uint64_t hashDyn(const rhi::DynamicStateValues& d) {
-    constexpr std::size_t prefix = offsetof(rhi::DynamicStateValues, blendEnable);
-    std::uint64_t h = hashBytes(0xcbf29ce484222325ull, &d, prefix);
-    const std::uint32_t n = d.colorCount;
-    h = hashBytes(h, d.blendEnable, sizeof(VkBool32) * n);
-    h = hashBytes(h, d.blendEquation, sizeof(VkColorBlendEquationEXT) * n);
-    return hashBytes(h, d.writeMask, sizeof(VkColorComponentFlags) * n);
-}
 
 }  // namespace
 
@@ -236,13 +192,18 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
 // the scene vertex input of a draw: its normal one + the ref stream (instance-rate binding after the draw's own, attribute 24). vertexShift is zeroed: the
 // per-draw vertexOffset of the indirect arguments already carries it
 const VertexInputValues* Device::internSceneVi(const VertexInputValues& n, std::int32_t viewSlot) {
+    const SceneRefStream& ref = viewSlot >= 0 ? sceneRefV2_[static_cast<std::uint32_t>(viewSlot) % kSceneRefSlots] : sceneRef_;
+    return internSceneViAt(n, ref.buffer, ref.offset);
+}
+
+// ... with the ref stream at an explicit buffer / offset (F2c-4a: the frame's ref list of the persistent records)
+const VertexInputValues* Device::internSceneViAt(const VertexInputValues& n, std::uint64_t refBuffer, std::uint64_t refOffset) {
     VertexInputValues& v = sceneViWork_;
     v = n;
     v.vertexShift = 0;
     const std::uint32_t idx = v.bufferCount;
-    const SceneRefStream& ref = viewSlot >= 0 ? sceneRefV2_[static_cast<std::uint32_t>(viewSlot) % kSceneRefSlots] : sceneRef_;
-    v.buffers[idx] = ref.buffer;
-    v.offsets[idx] = ref.offset;
+    v.buffers[idx] = refBuffer;
+    v.offsets[idx] = refOffset;
     v.bufferCount = idx + 1;
     if (v.dynamicLayout) {
         v.bindings[idx] = {8, 1};

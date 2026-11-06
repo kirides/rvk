@@ -32,6 +32,7 @@
 #include "gpuscene/lighting_images.h"
 #include "gpuscene/mesh_parts.h"
 #include "gpuscene/window_tables.h"
+#include "gpuscene/draw_record_table.h"
 #include "gpuscene/view_table.h"
 #include "gpuscene/billboard_table.h"
 #include "gpuscene/object_table.h"
@@ -270,6 +271,8 @@ void HalDevice::applyStaticOps() {
         gpuscene::viewtable().setActive(ownedStatic && !forceV1);
         dev_.setSceneViews(ownedStatic && !forceV1);
         staticOps_->setOwnedStatic(ownedStatic, rs.nativeOwnedCheck != nullptr ? rs.nativeOwnedCheck->asInt() : 10);
+        // frame-ownership.md 7.21: F2c-4a persistent owned draws (scene ABI v2 + the view table)
+        staticOps_->setOwnedPersistent(ownedStatic && !forceV1 && on(rs.nativeOwnedPersistent));
         staticOps_->setOwnedBillboards(on(rs.nativeOwnedBillboards) && scene && dev_.sceneDrawsActive() && gpuscene::lightingimages().active() && gpuscene::windowtables().active());
     }
     staticOps_->setRetained(frozen::kRetained, frozen::kRetainedGroups, frozen::kRetainedCheck);
@@ -607,7 +610,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     frameTap_->setEffectOps(effectOps_.get());
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups,
                                  rs.nativeCoverage, rs.nativeFrameTap, rs.nativeLean, rs.nativeLeanCheck,
-                                 rs.nativePacketCache, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedCheck}) {
+                                 rs.nativePacketCache, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedCheck}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
     // renderer.mode (Wrapper / Full): like the native.* settings applied by the registry's dispatch before a present, i.e. at a
@@ -1674,6 +1677,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
         gpuscene::materialtable().flush(dev_, true);
         gpuscene::windowtables().flush(dev_);
         gpuscene::viewtable().flush(dev_);
+        gpuscene::drawrecords().flush(dev_);
         gpuscene::objecttable().flush(dev_);
         gpuscene::bbtable().flush(dev_);
     }

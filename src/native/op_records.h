@@ -17,6 +17,7 @@
 
 #include "d3d9/device.h"
 #include "d3d9/owned_windows.h"
+#include "gpuscene/draw_record_table.h"
 #include "native/static_ops_retained.h"
 
 namespace rvk::native::orec {
@@ -100,8 +101,40 @@ inline constexpr const char* kDeriveWhy[] = {"derived", "stale module", "phase",
                                              "draw count", "no packet"};
 inline constexpr std::size_t kDeriveWhyCount = std::size(kDeriveWhy);
 
+// F2c-4a (native.owned_persistent): the draw's slot in gpuscene::drawrecords(), returned (deferred) when the draw record goes away
+struct SlotHandle {
+    std::uint32_t slot = 0xffffffffu;
+    SlotHandle() = default;
+    SlotHandle(const SlotHandle&) = delete;
+    SlotHandle& operator=(const SlotHandle&) = delete;
+    SlotHandle(SlotHandle&& o) noexcept : slot(o.slot) { o.slot = 0xffffffffu; }
+    SlotHandle& operator=(SlotHandle&& o) noexcept {
+        if (this != &o) {
+            reset();
+            slot = o.slot;
+            o.slot = 0xffffffffu;
+        }
+        return *this;
+    }
+    ~SlotHandle() { reset(); }
+    void reset() {
+        if (slot != 0xffffffffu) gpuscene::drawrecords().release(slot);
+        slot = 0xffffffffu;
+    }
+    bool has() const { return slot != 0xffffffffu; }
+};
+
+// what a persistent draw was derived from (frame-ownership.md 7.21): the slot holds the derivation of (env epoch, sig) for this very draw record
+struct Persist {
+    SlotHandle handle;
+    bool valid = false;
+    std::uint64_t epoch = 0, sig = 0, bucket = 0;
+    d3d9::OwnedWindows ow;  // the draw's windows as the last frame built them (the observers' CPU twin; the view windows are patched per pass)
+};
+
 struct DrawRec {
     std::unique_ptr<d3d9::Device::CachedDraw> cd;  // the retained packet (own copy)
+    mutable Persist persist;                       // F2c-4a
     // buffers (bindings re-validated at derive)
     const void* streams[4] = {};
     std::uint32_t strides[4] = {};

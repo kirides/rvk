@@ -269,6 +269,9 @@ add_library(rvk_core STATIC
     src/gpuscene/window_compose.h
     src/gpuscene/window_tables.cpp
     src/gpuscene/view_table.cpp
+    src/gpuscene/draw_record_table.cpp
+    src/gpuscene/draw_record_table.h
+    src/d3d9/owned_persist.cpp
     src/gpuscene/view_table.h
     src/gpuscene/window_tables.h
     src/gpuscene/object_table.cpp

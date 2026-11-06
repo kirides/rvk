@@ -503,15 +503,110 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
     ownedAmbient_.clear();
     ownedCache_.mat.clear();
     ownedCache_.light.clear();
+    ++ownedPassSerial_;
     std::uint32_t drawn = 0;
     dev_.setSceneIssue(true);
-    for (Op& op : ops) {
-        const orec::Key key{op.raw.context, op.raw.desc, static_cast<std::uint8_t>(op.list), 0};
-        const orec::OpRecord* recPtr = nullptr;
-        if (recs_) {
-            const auto it = recs_->map.find(key);
-            if (it != recs_->map.end()) recPtr = it->second.get();
+    // F2c-4a: persistent draws (frame-ownership.md 7.21): the pass's env epoch, the reserved ref list / argument blocks, the rolling scrub's stride
+    bool persistent = false;
+    std::uint32_t persistBound = 0;
+    std::uint64_t epoch = 0;
+    std::uint32_t scrubStride = 0, scrubPhase = 0, viewSlotP = 0;
+    ownedItems_.clear();
+    ownedItemOp_.clear();
+    ownedRecPtrs_.assign(ops.size(), nullptr);
+    {
+        std::uint32_t bound = 0;
+        for (std::size_t i = 0; i < ops.size(); ++i) {
+            if (!recs_) break;
+            const Op& o = ops[i];
+            const auto it = recs_->map.find(orec::Key{o.raw.context, o.raw.desc, static_cast<std::uint8_t>(o.list), 0});
+            if (it != recs_->map.end()) {
+                ownedRecPtrs_[i] = it->second.get();
+                bound += static_cast<std::uint32_t>(it->second->draws.size());
+            }
         }
+        if (ownedPersistent_ && viewWinOk && viewWin.viewSlot != d3d9::OwnedWindows::kNoView && gpuscene::drawrecords().ready() && bound != 0) {
+            bool ok = dev_.ownedBeginScope();
+            if (ok) epoch = dev_.ownedEnvEpoch(solid, viewWin.viewSlot, ok);
+            if (ok) {
+                if (dev_.ownedReserve(bound, ownedArena_)) {
+                    persistent = true;
+                    persistBound = bound;
+                    viewSlotP = viewWin.viewSlot;
+                    const std::uint64_t perFrame = 16;  // (the rolling scrub: draws re-derived and compared with their slot per frame)
+                    scrubStride = static_cast<std::uint32_t>(std::max<std::uint64_t>(16, (bound + perFrame / 2 - 1) / (perFrame / 2)));  // (at most one draw in 16, 8 per pass in the big ones)
+                    scrubPhase = static_cast<std::uint32_t>((++persistScrubTick_ * 7919u) % scrubStride);
+                    ++persistW_.passes;
+                    persistPassDraw_ = 0;
+                    const std::size_t kk = solid ? 1 : 0;
+                    if (epoch != persistEnvLast_[kk]) {
+                        ++persistW_.envChanges;
+                        persistEnvLast_[kk] = epoch;
+                    }
+                } else {
+                    ++persistW_.arenaFailed;
+                }
+            }
+        }
+    }
+    // an owned op composed where the engine's slot would have run it (the record is rebuilt from this composition)
+    const auto composeLate = [&](Op& op, int why) {
+        ++W.fallback[why];
+        dev_.setSceneIssue(false);
+        tag = savedTag;
+        tag.source = d3d9::draws::Source::Mesh;
+        tag.context = op.raw.context;
+        tag.entity = op.entity != nullptr ? op.entity : ptr(op.raw.context, 0x10);
+        tag.opDesc = op.raw.desc;
+        tag.subMesh = tag.material = tag.meshResource = nullptr;
+        tag.water = d3d9::draws::Water::None;
+        tag.materialName = nullptr;
+        opEnter(op);
+        if (op_ == &op) {
+            ++W.lateOps;
+            W.lateDraws += drawCount_;
+            drawn += static_cast<std::uint32_t>(drawCount_);
+        } else {
+            ++W.fallback[kFbLost];
+        }
+        finishOp();
+        dev_.setSceneIssue(true);
+    };
+    // persistent frames: the items collected so far are queued (one indirect draw per bucket) before an op is composed late: a composition rebuilds / may drop op
+    // records, which the pending items point into (and the late op's texture transition makes the next ops' derivations succeed, as in the per-draw path). A failed
+    // flush queued nothing: the ops that contributed are composed instead
+    std::uint32_t flushedDraws = 0;
+    const auto flushItems = [&] {
+        if (!persistent || ownedItems_.empty()) return;
+        const auto tf = Clock::now();
+        const bool ok = dev_.ownedFlush(ownedItems_, ownedArena_, viewSlotP, gpuscene::drawrecords().recordsRef(), gpuscene::drawrecords().recordsShadow(), gpuscene::DrawRecordTable::kCapacity);
+        persistW_.flushNs += ns(tf, Clock::now());
+        persistW_.items += ownedItems_.size();
+        flushedDraws += static_cast<std::uint32_t>(ownedItems_.size());
+        std::vector<std::uint32_t> failed;
+        if (!ok) {
+            ++persistW_.flushFailed;
+            std::uint32_t last = ~0u;
+            for (const std::uint32_t oi : ownedItemOp_) {
+                if (oi == last) continue;
+                last = oi;
+                failed.push_back(oi);
+            }
+        }
+        ownedItems_.clear();
+        ownedItemOp_.clear();
+        // (the next flush of this pass needs a block of its own: the queued indirect draws still read this one)
+        if (flushedDraws < persistBound) {
+            if (!dev_.ownedReserve(persistBound - flushedDraws, ownedArena_)) {
+                ++persistW_.arenaFailed;
+                persistent = false;  // (the rest of the pass: the per-draw path)
+            }
+        }
+        for (const std::uint32_t oi : failed) composeLate(ops[oi], kFbRefused);
+    };
+    for (std::size_t opIndex = 0; opIndex < ops.size(); ++opIndex) {
+        Op& op = ops[opIndex];
+        const orec::OpRecord* recPtr = ownedRecPtrs_[opIndex];
         tag = savedTag;
         tag.source = d3d9::draws::Source::Mesh;
         tag.context = op.raw.context;
@@ -529,7 +624,14 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
                 why = kFbView;
             } else {
                 const orec::OpRecord& rec = *recPtr;
-                done = ownedDrawOp(op, rec, viewWin, viewWinOk, why);
+                const std::size_t itemsBefore = ownedItems_.size();
+                if (persistent) {
+                    done = ownedDrawOpPersistent(op, rec, viewWin, viewSlotP, epoch, scrubStride, scrubPhase, why);
+                    if (done) ownedItemOp_.resize(ownedItems_.size(), static_cast<std::uint32_t>(opIndex));
+                    else ownedItems_.resize(itemsBefore);
+                } else {
+                    done = ownedDrawOp(op, rec, viewWin, viewWinOk, why);
+                }
                 if (done) {
                     ownedSideEffects(rec);
                     ++W.drawnOps;
@@ -539,29 +641,13 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
             }
         }
         if (!done) {
-            ++W.fallback[why];
-            // composed now, where the engine's slot would have run it (the record is rebuilt from this composition)
-            dev_.setSceneIssue(false);
-            tag = savedTag;
-            tag.source = d3d9::draws::Source::Mesh;
-            tag.context = op.raw.context;
-            tag.entity = op.entity != nullptr ? op.entity : ptr(op.raw.context, 0x10);
-            tag.opDesc = op.raw.desc;
-            tag.subMesh = tag.material = tag.meshResource = nullptr;
-            tag.water = d3d9::draws::Water::None;
-            tag.materialName = nullptr;
-            opEnter(op);
-            if (op_ == &op) {
-                ++W.lateOps;
-                W.lateDraws += drawCount_;
-                drawn += static_cast<std::uint32_t>(drawCount_);
-            } else {
-                ++W.fallback[kFbLost];
-            }
-            finishOp();
-            dev_.setSceneIssue(true);
+            flushItems();
+            composeLate(op, why);
         }
     }
+    flushItems();
+    ownedItems_.clear();
+    ownedItemOp_.clear();
     dev_.setSceneIssue(false);
     tag = savedTag;
     dev_.setVertexShaderRef(vsSaved);
@@ -584,6 +670,342 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
     return drawn;
 }
 
+// ---- F2c-4a persistent owned draws (frame-ownership.md 7.21, native.owned_persistent) ---------------------------------------------------------------------------
+
+void StaticOps::PersistStats::add(const PersistStats& o) {
+    ops += o.ops; draws += o.draws; reused += o.reused; derived += o.derived; derivedChanged += o.derivedChanged; tableFull += o.tableFull; refused += o.refused;
+    observerRefused += o.observerRefused; injected += o.injected; scrubbed += o.scrubbed; scrubMiss += o.scrubMiss; checkCompared += o.checkCompared; checkSkipped += o.checkSkipped;
+    checkMiss += o.checkMiss; passes += o.passes; envChanges += o.envChanges; flushFailed += o.flushFailed; arenaFailed += o.arenaFailed;
+    sigNs += o.sigNs; deriveNs += o.deriveNs; observeNs += o.observeNs; flushNs += o.flushNs; windowNs += o.windowNs; items += o.items;
+}
+
+void StaticOps::setOwnedPersistent(bool on) {
+    if (on == ownedPersistent_) return;
+    ownedPersistent_ = on;
+    gpuscene::drawrecords().setActive(on);
+    if (on) {
+        char v[16] = {};
+        if (GetEnvironmentVariableA("RVK_F2C4A_INJECT", v, sizeof(v)) != 0) persistInjectEvery_ = static_cast<std::uint64_t>(std::strtoull(v, nullptr, 10));
+        if (persistInjectEvery_ != 0) spdlog::warn("native: owned persistent: FAULT INJECTION on (RVK_F2C4A_INJECT={}): every {}th dependency change is not noticed", persistInjectEvery_, persistInjectEvery_);
+    } else if (recs_) {
+        for (auto& kv : recs_->map) {
+            for (orec::DrawRec& d : kv.second->draws) d.persist.valid = false;
+        }
+    }
+    spdlog::info("native: owned persistent {}", on ? "on" : "off");
+}
+
+// the ambient test of the GI / pack variant decision of a draw, from its record's illumination (once per lighting state and pass)
+bool StaticOps::ownedAmbientLit(const orec::DrawRec& r, const gpuscene::ComposeParams& p) {
+    const d3d9::Device::CachedDraw& cd = *r.cd;
+    if (!(cd.v.gate && cd.v.staticOk && r.illumSlot != gpuscene::kNoSlot)) return false;
+    const auto& amb = cd.ps->semantics[d3d9::Semantic::AmbientLight];
+    if (!(amb.present() && amb.count >= 7 && amb.reg >= 14 && amb.reg + 7 <= 14 + 24)) return false;
+    const std::uint64_t key = mix(mix(mix(mix(r.illumSlot, (p.tableLit ? 1u : 0u) | (p.holdsAll ? 2u : 0u)), p.n), p.firstLight), amb.reg);
+    const auto hit = ownedAmbient_.find(key);
+    if (hit != ownedAmbient_.end()) return hit->second;
+    float L[24][4]{};
+    bool lit = false;
+    if (gpuscene::illumtable().compose(r.illumSlot, p, L)) {
+        for (std::int32_t i = 0; i < 7 && !lit; ++i) {
+            const float* c = L[amb.reg - 14 + i];
+            lit = c[0] != 0.0f || c[1] != 0.0f || c[2] != 0.0f || c[3] != 0.0f;
+        }
+    }
+    ownedAmbient_.emplace(key, lit);
+    return lit;
+}
+
+void StaticOps::ownedMakeIn(const orec::DrawRec& r, bool ambientLit, d3d9::Device::DeriveIn& in) {
+    for (std::size_t i = 0; i < 4; ++i) {
+        in.streams[i] = const_cast<d3d9::Buffer*>(static_cast<const d3d9::Buffer*>(r.streams[i]));
+        in.strides[i] = r.strides[i];
+    }
+    in.indices = const_cast<d3d9::Buffer*>(static_cast<const d3d9::Buffer*>(r.indices));
+    for (std::uint32_t m = r.texMask; m != 0; m &= m - 1) {
+        const std::uint32_t st = static_cast<std::uint32_t>(std::countr_zero(m));
+        in.tex[st] = const_cast<d3d9::Texture*>(static_cast<const d3d9::Texture*>(r.tex[st]));
+        for (std::uint32_t i = 0; i < 7; ++i) in.ss[st][i] = r.ss[st][i];
+    }
+    in.alphaFunc = r.alphaTestState != 0 ? r.alphaFunc : 8u;
+    in.alphaRef = static_cast<float>(r.alphaRef & 0xffu);
+    in.psC5[0] = mirror_.adminPs[5][0];
+    in.psC5[1] = mirror_.adminPs[5][1];
+    in.psC5[2] = mirror_.adminPs[5][2];
+    in.psC5[3] = r.maskSet ? r.maskValue : 0.0f;
+    in.ambientLit = ambientLit;
+}
+
+// the draw's eight windows: the view's (per pass), the material record's, the object record's, the lighting entry's. `cached` = the per-pass memos (the owned path);
+// else everything afresh (the check frames)
+void StaticOps::ownedBuildWindows(const orec::DrawRec& r, const d3d9::OwnedWindows& viewWin, const d3d9::OwnedWindows::Win& objWin, const gpuscene::ComposeParams& p, bool cached, d3d9::OwnedWindows& dw) {
+    using Win = d3d9::OwnedWindows::Win;
+    dw.viewSlot = viewWin.viewSlot;
+    dw.w[0][0] = viewWin.w[0][0];
+    dw.w[1][0] = viewWin.w[1][0];
+    dw.w[0][1] = r.vs1Offered ? viewWin.w[0][1] : Win{};
+    dw.w[1][1] = Win{};
+    if (cached && r.matSlot < gpuscene::MaterialTable::kCapacity) {
+        if (ownedMatWin_.empty()) ownedMatWin_.resize(gpuscene::MaterialTable::kCapacity);
+        MatWinEntry& e = ownedMatWin_[r.matSlot];
+        if (e.pass != ownedPassSerial_) {
+            d3d9::OwnedWindows mw;
+            gpuscene::materialtable().fillWindows(r.matSlot, r.vsSet.data(), r.psSet.data(), mw, true);
+            e.v3 = mw.w[0][3];
+            e.p2 = mw.w[1][2];
+            e.pass = ownedPassSerial_;
+        }
+        dw.w[0][3] = e.v3;
+        dw.w[1][2] = e.p2;
+    } else {
+        d3d9::OwnedWindows mw;
+        gpuscene::materialtable().fillWindows(r.matSlot, r.vsSet.data(), r.psSet.data(), mw, true);
+        dw.w[0][3] = mw.w[0][3];
+        dw.w[1][2] = mw.w[1][2];
+    }
+    dw.w[0][2] = r.vs1Offered ? objWin : Win{};
+    dw.w[1][3] = Win{};
+    gpuscene::LightingImages& li = gpuscene::lightingimages();
+    if (li.active() && r.illumSlot != gpuscene::kNoSlot) {
+        std::uint32_t entry;
+        if (cached) {
+            const std::uint64_t lkey = mix(mix(mix(r.illumSlot, (p.tableLit ? 1u : 0u) | (p.holdsAll ? 2u : 0u)), p.n), p.firstLight);
+            if (const auto lc = ownedCache_.light.find(lkey); lc != ownedCache_.light.end()) {
+                entry = lc->second;
+            } else {
+                entry = li.entryFor(r.illumSlot, p);
+                ownedCache_.light.emplace(lkey, entry);
+            }
+        } else {
+            entry = li.entryFor(r.illumSlot, p);
+        }
+        if (entry != gpuscene::kNoEntry && li.ready()) {
+            Win& lw = dw.w[1][3];
+            lw.kind = d3d9::OwnedWindows::Kind::Lighting;
+            lw.base = li.windowBase(entry);
+            lw.covered = gpuscene::kLightingRegs;
+        }
+    }
+}
+
+namespace {
+inline gpuscene::ComposeParams paramsOf(const orec::DrawRec& r) {
+    gpuscene::ComposeParams p;
+    p.tableLit = r.lightTableLit;
+    p.holdsAll = r.lightHoldsAll;
+    p.n = r.lightN;
+    p.firstLight = r.lightFirst;
+    return p;
+}
+}  // namespace
+
+// MISS: the persistent content of a draw differs from a fresh derivation although the reuse conditions held. The first few are logged with the differing fields
+void StaticOps::ownedMissReport(const char* where, const Op* op, const orec::DrawRec& r, const d3d9::Device::OwnedPersist& fresh, std::uint32_t slot) {
+    if (persistMissLogged_ >= 12) return;
+    ++persistMissLogged_;
+    gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
+    const shader::abi::DrawRecord& a = tab.record(slot);
+    const shader::abi::DrawRecord& b = fresh.rec;
+    std::string what;
+    const auto add = [&](const std::string& s) { what += (what.empty() ? "" : "; ") + s; };
+    for (std::uint32_t w = 0; w < shader::abi::kConstWindows; ++w) {
+        if (a.vsWin[w] != b.vsWin[w]) add(std::format("VS window {} {:#x} vs {:#x}", w, a.vsWin[w], b.vsWin[w]));
+        if (a.psWin[w] != b.psWin[w]) add(std::format("PS window {} {:#x} vs {:#x}", w, a.psWin[w], b.psWin[w]));
+    }
+    if (a.draw != b.draw) add("block address");
+    if (a.flags != b.flags) add(std::format("flags {:#x} vs {:#x}", a.flags, b.flags));
+    if (a.c5w != b.c5w) add(std::format("c5.w {:#x} vs {:#x}", a.c5w, b.c5w));
+    const shader::abi::DrawBlock& x = tab.block(slot);
+    const shader::abi::DrawBlock& y = fresh.blk;
+    for (std::uint32_t i = 0; i < shader::abi::kSamplerSlots; ++i) {
+        if (x.tex[i] != y.tex[i]) add(std::format("tex[{}] {} vs {}", i, x.tex[i], y.tex[i]));
+        if (x.smp[i] != y.smp[i]) add(std::format("smp[{}] {} vs {}", i, x.smp[i], y.smp[i]));
+    }
+    if (x.alphaFunc != y.alphaFunc || x.alphaRef != y.alphaRef) add(std::format("alpha {} {} vs {} {}", x.alphaFunc, x.alphaRef, y.alphaFunc, y.alphaRef));
+    if (x.pad[0] != y.pad[0] || x.pad[1] != y.pad[1]) add(std::format("pad ({}, {}) vs ({}, {})", x.pad[0], x.pad[1], y.pad[0], y.pad[1]));
+    spdlog::error("native: owned persistent: MISS ({}): the persistent draw of {} (slot {}, material '{}') differs from a fresh derivation although nothing it was derived from moved: {}", where,
+                  op != nullptr ? describe(*op) : std::string("an op"), slot, r.tagMaterialName != nullptr ? r.tagMaterialName : "", what.empty() ? "(bytes)" : what);
+}
+
+// one op from its persistent draw records: false = not drawn (why: a Fallback code); the draws it queued stay in ownedItems_ (the caller drops them)
+bool StaticOps::ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, const d3d9::OwnedWindows& viewWin, std::uint32_t viewSlot, std::uint64_t epoch, std::uint32_t scrubStride,
+                                      std::uint32_t scrubPhase, int& why) {
+    PersistStats& S = persistW_;
+    const bool timers = f2c4::enabled();
+    if (!ownedMaterialsOk(rec)) {
+        why = kFbMaterials;
+        return false;
+    }
+    ++S.ops;
+    U8* ctx = static_cast<U8*>(op.raw.context);
+    U8* entity = ptr(ctx, 0x10);
+    float world[16];
+    if (entity == nullptr || !engine::safeRead(entity + 0x60, world, sizeof(world))) {
+        why = kFbObject;
+        return false;
+    }
+    float composed[gpuscene::kObjectRegs][4] = {};
+    composed[1][3] = op.list == List::ZPass ? 1.0f : op.raw.fade;
+    {
+        float rows[3][4];
+        gpuscene::objectWorldRows(world, rows);
+        std::memcpy(composed[2], rows, sizeof(rows));
+    }
+    d3d9::OwnedWindows::Win objWin;
+    if (gpuscene::objecttable().serve(entity, composed, 0x1eu, objWin) != gpuscene::ObjectWhy::Served) {
+        why = kFbObject;
+        return false;
+    }
+    (void)viewSlot;
+    gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
+    d3d9::draws::Tag& tag = dev_.drawTag();
+    const d3d9::draws::Tag baseTag = tag;
+    const auto restoreTag = [&] { tag = baseTag; };
+    for (std::size_t k = 0; k < rec.draws.size(); ++k) {
+        const orec::DrawRec& r = rec.draws[k];
+        const d3d9::Device::CachedDraw& cd = *r.cd;
+        orec::Persist& P = r.persist;
+        ++S.draws;
+        auto t0 = timers ? Clock::now() : Clock::time_point{};
+        const auto lap = [&](std::uint64_t& acc) {
+            if (!timers) return;
+            const auto now = Clock::now();
+            acc += ns(t0, now);
+            t0 = now;
+        };
+        const gpuscene::ComposeParams p = paramsOf(r);
+        const bool amb = ownedAmbientLit(r, p);
+        ownedBuildWindows(r, viewWin, objWin, p, true, P.ow);
+        // the device state the draw is derived under: its shaders, the tag the observers / replacers / the pack's word look at
+        if (dev_.vertexShader() != cd.vs) dev_.setVertexShaderRef(d3d9::ShaderRef(const_cast<d3d9::Shader*>(cd.vs)));
+        if (dev_.pixelShader() != cd.ps) dev_.setPixelShaderRef(d3d9::ShaderRef(const_cast<d3d9::Shader*>(cd.ps)));
+        tag = baseTag;
+        tag.subMesh = r.tagSubMesh;
+        tag.material = r.tagMaterial;
+        tag.meshResource = r.tagMeshResource;
+        tag.water = static_cast<d3d9::draws::Water>(r.tagWater);
+        tag.materialName = r.tagMaterialName;
+        lap(S.windowNs);
+        bool allowed = false;
+        const std::uint64_t sig = dev_.ownedDrawSig(cd, r.streams, r.strides, r.indices, r.tex, amb, P.ow, allowed);
+        lap(S.sigNs);
+        if (!allowed) {
+            ++S.refused;
+            restoreTag();
+            why = kFbRefused;
+            return false;
+        }
+        bool reuse = P.valid && P.handle.has() && tab.live(P.handle.slot) && P.epoch == epoch && P.sig == sig;
+        const bool scrub = reuse && scrubStride != 0 && (persistPassDraw_++ % scrubStride) == scrubPhase;
+        if (!reuse || scrub) {
+            if (!P.handle.has()) {
+                const std::uint32_t slot = tab.alloc();
+                if (slot == gpuscene::kNoSlot) {
+                    ++S.tableFull;
+                    restoreTag();
+                    why = kFbRefused;
+                    return false;
+                }
+                P.handle.slot = slot;
+            }
+            d3d9::Device::DeriveIn in;
+            ownedMakeIn(r, amb, in);
+            d3d9::Device::OwnedPersist out;
+            const int rc = dev_.ownedDerive(cd, in, P.ow, tab.blockRef(P.handle.slot), tab.zeroRef(), true, out);
+            lap(S.deriveNs);
+            if (rc != 0) {
+                P.valid = false;
+                ++S.refused;
+                restoreTag();
+                why = kFbRefused;
+                return false;
+            }
+            if (scrub) {
+                ++S.scrubbed;
+                if (std::memcmp(&tab.record(P.handle.slot), &out.rec, sizeof(out.rec)) != 0 || std::memcmp(&tab.block(P.handle.slot), &out.blk, sizeof(out.blk)) != 0) {
+                    ++S.scrubMiss;
+                    ownedMissReport("rolling scrub", &op, r, out, P.handle.slot);
+                }
+            } else {
+                ++S.derived;
+            }
+            // FAULT INJECTION (RVK_F2C4A_INJECT=n): every n-th change of a slot's content that a moved dependency makes necessary is not made (the slot keeps its stale content and
+            // looks up to date from now on): the check frames / the scrub must find it (MISS)
+            bool skipWrite = false;
+            if (!scrub && P.valid && persistInjectEvery_ != 0 &&
+                (std::memcmp(&tab.record(P.handle.slot), &out.rec, sizeof(out.rec)) != 0 || std::memcmp(&tab.block(P.handle.slot), &out.blk, sizeof(out.blk)) != 0) &&
+                ++persistInjectSeen_ % persistInjectEvery_ == 0) {
+                skipWrite = true;
+                ++S.injected;
+            }
+            if (!skipWrite && tab.write(P.handle.slot, out.rec, out.blk) && !scrub) ++S.derivedChanged;
+            P.valid = true;
+            P.epoch = epoch;
+            P.sig = sig;
+            P.bucket = out.bucketKey;
+        } else {
+            ++S.reused;
+        }
+        if (!dev_.ownedObserve(cd, P.ow)) {
+            ++S.observerRefused;
+            restoreTag();
+            why = kFbRefused;
+            return false;
+        }
+        lap(S.observeNs);
+        ownedItems_.push_back({&cd, P.bucket, P.handle.slot});
+    }
+    restoreTag();
+    return true;
+}
+
+// check frames (recDraw): would the owned path reuse this draw's slot now? then its content must be what the composition's derivation gives
+void StaticOps::ownedMissCheck(const orec::OpRecord& rec, std::size_t k, const d3d9::Device::DeriveIn& in, const d3d9::Device::SceneView& derived) {
+    if (!ownedPersistent_ || !ownedStatic_ || k >= rec.draws.size()) return;  // (owned_static tripped by a MISS: the slots are not used any more)
+    const orec::DrawRec& r = rec.draws[k];
+    orec::Persist& P = r.persist;
+    PersistStats& S = persistW_;
+    if (!P.valid || !P.handle.has()) return;  // (no persistent derivation of this draw yet)
+    gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
+    gpuscene::ViewTable& vt = gpuscene::viewtable();
+    const bool solid = rec.key.list == static_cast<std::uint8_t>(List::Solid);
+    const std::uint32_t viewSlot = solid ? shader::abi::kViewSlotMainSolid : shader::abi::kViewSlotMainZ;
+    d3d9::OwnedWindows viewWin;
+    d3d9::OwnedWindows::Win objWin;
+    if (!tab.ready() || !tab.live(P.handle.slot) || !vt.ready() || !vt.fillWindows(viewSlot, viewWin) || (r.vs1Offered && !gpuscene::objecttable().windowFor(rec.stamp.objSlot, objWin))) {
+        ++S.checkSkipped;
+        return;
+    }
+    const gpuscene::ComposeParams p = paramsOf(r);
+    d3d9::OwnedWindows dw;
+    ownedBuildWindows(r, viewWin, objWin, p, false, dw);
+    bool allowed = false;
+    const std::uint64_t sig = dev_.ownedDrawSig(*r.cd, r.streams, r.strides, r.indices, r.tex, in.ambientLit, dw, allowed);
+    if (!allowed || P.sig != sig || !dev_.ownedEnvSame(solid, viewSlot, P.epoch)) {
+        ++S.checkSkipped;  // (the owned path would derive this draw again)
+        return;
+    }
+    d3d9::Device::OwnedPersist fresh;
+    if (dev_.ownedBuild(*r.cd, derived, dw, tab.blockRef(P.handle.slot), tab.zeroRef(), fresh) != 0) {
+        ++S.checkSkipped;
+        return;
+    }
+    ++S.checkCompared;
+    if (std::memcmp(&tab.record(P.handle.slot), &fresh.rec, sizeof(fresh.rec)) != 0 || std::memcmp(&tab.block(P.handle.slot), &fresh.blk, sizeof(fresh.blk)) != 0) {
+        ++S.checkMiss;
+        ownedMissReport("check frame", op_, r, fresh, P.handle.slot);
+    }
+}
+
+void StaticOps::ownedAutoOffMiss(std::uint64_t miss) {
+    if (!ownedStatic_) return;
+    ownedStatic_ = false;
+    ownedTripped_ = true;
+    for (auto& v : ownedOps_) v.clear();
+    ownedView_ = {};
+    spdlog::error("native: owned static turned off: {} MISS (a persistent draw judged valid differs from a fresh derivation: a dependency change was not noticed)", miss);
+}
+
 void StaticOps::ownedReport() {
     if (f2c4::enabled() && ownedStatic_) {
         // item 6: the distinct buckets of every live record (every 5 s: a walk over the record map)
@@ -604,6 +1026,27 @@ void StaticOps::ownedReport() {
         m.liveDraws = draws;
         m.liveBuckets = keys.size();
         f2c4::report();
+    }
+    if (ownedPersistent_ || persistW_.passes != 0 || persistW_.checkCompared != 0) {
+        PersistStats& q = persistW_;
+        persistT_.add(q);
+        const double nv = static_cast<double>(std::max<std::uint64_t>(1, ownedW_.views));
+        static d3d9::Device::OwnedPersistStats lastDs;
+        const d3d9::Device::OwnedPersistStats& ds = dev_.ownedPersistStats;
+        const gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
+        const std::uint64_t miss = q.scrubMiss + q.checkMiss;
+        spdlog::info("native: owned persistent (5 s): {} passes ({} env epoch changes, {} reserve failures, {} flush failures), {} ops / {} draws: reused {} ({:.1f} %), derived {} ({} rewrote the slot), refused {} "
+                     "(table full {}, an observer wanted a capture {}); rolling scrub {} draws, MISS {}; check frames: {} compared, {} skipped (the owned path would derive them), MISS {}; injected {}; "
+                     "buckets {} / indirect packets {} / items {} (device total {}); slots {} live (peak {}), table writes {} changed / {} unchanged; CPU per main view: windows {:.1f} us, signature {:.1f} us, derive {:.1f} us, "
+                     "observers {:.1f} us, flush {:.1f} us{}",
+                     q.passes, q.envChanges, q.arenaFailed, q.flushFailed, q.ops, q.draws, q.reused, q.draws != 0 ? 100.0 * static_cast<double>(q.reused) / static_cast<double>(q.draws) : 0.0, q.derived + q.scrubbed,
+                     q.derivedChanged, q.refused, q.tableFull, q.observerRefused, q.scrubbed, q.scrubMiss, q.checkCompared, q.checkSkipped, q.checkMiss, q.injected, ds.buckets - lastDs.buckets, ds.packets - lastDs.packets, ds.items - lastDs.items,
+                     persistT_.items, tab.liveCount(), tab.peak(), tab.stats().writes, tab.stats().same, static_cast<double>(q.windowNs) / nv / 1000.0, static_cast<double>(q.sigNs) / nv / 1000.0,
+                     static_cast<double>(q.deriveNs) / nv / 1000.0, static_cast<double>(q.observeNs) / nv / 1000.0, static_cast<double>(q.flushNs) / nv / 1000.0,
+                     f2c4::enabled() ? "" : " (fine timers need RVK_F2C4_MEASURE=1)");
+        q = {};
+        lastDs = ds;
+        if (miss != 0) ownedAutoOffMiss(miss);
     }
     if (!ownedStatic_ && ownedW_.views == 0) return;
     OwnedStats& w = ownedW_;

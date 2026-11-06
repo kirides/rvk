@@ -1058,6 +1058,49 @@ public:
         std::uint64_t why[24] = {};
     } ownedReplayStats;
     int replayOwned(const CachedDraw& c, const DeriveIn& in, const OwnedWindows& windows);
+    // ---- F2c-4a (native.owned_persistent, frame-ownership.md 7.21; owned_persist.cpp): owned draws as PERSISTENT records. replayOwned derives, builds and queues every draw every frame;
+    // here the derivation result (a DrawRecord + a DrawBlock in gpuscene::drawrecords()) stays, is rewritten only when an input of the derivation moved, and a frame submits one
+    // indirect draw per bucket (v2 scene pipeline, vertex input, dynamic state, index binding, view slot) over a CPU-written ref list + argument block.
+    //   ownedEnvEpoch: a number that changes when anything the derivation reads from the device (phase, enhancement state, viewport / targets, jitter, sampler states, view table ...)
+    //   differs from this pass kind's last call; ok = false: the pass cannot take persistent draws (no scene issue / v2 / table / ...).
+    //   ownedDrawSig: the per-draw inputs (textures' bindless slot / state, buffer bindings, ambient test, replay allowance, pack word, the four window bases) as one hash.
+    //   ownedDerive: replayOwned up to the block: the refusal code (replayOwned's codes) or 0 with `out` made for `slot` (DrawBlock posFix / c5.xyz left zero: the v2 shaders read the view's).
+    //   ownedObserve: the observers' / opaque-observing replacers' turn for the draw (false = one wants a capture: the op is composed instead).
+    //   ownedReserve / ownedFlush: the frame's ref list + argument ring blocks for up to `maxDraws` items, then the packets of the items bucket by bucket.
+    struct OwnedPersist {
+        shader::abi::DrawRecord rec{};
+        shader::abi::DrawBlock blk{};
+        std::uint64_t bucketKey = 0;
+    };
+    std::uint64_t ownedEnvHash(bool solid, std::uint32_t viewSlot, bool& ok) const;
+    std::uint64_t ownedEnvEpoch(bool solid, std::uint32_t viewSlot, bool& ok);
+    bool ownedEnvSame(bool solid, std::uint32_t viewSlot, std::uint64_t epoch) const;  // the check frames: nothing the derivation reads moved since `epoch` (no state is touched)
+    std::uint64_t ownedDrawSig(const CachedDraw& c, const void* const* streams, const std::uint32_t* strides, const void* indices, const void* const* tex, bool ambientLit, const OwnedWindows& ow, bool& allowed);
+    // the DrawRecord + DrawBlock of a derived draw (pure: no register file, no device constants): 14 a window the shaders read is not served, 15 a null address
+    int ownedBuild(const CachedDraw& c, const SceneView& sv, const OwnedWindows& ow, rhi::GpuRef blockAddress, rhi::GpuRef zeroBlock, OwnedPersist& out);
+    // deriveScene + the view checks + ownedBuild; `checkView` false = the view table's slot is not this frame's (the check frames compare the content only)
+    int ownedDerive(const CachedDraw& c, const DeriveIn& in, const OwnedWindows& ow, rhi::GpuRef blockAddress, rhi::GpuRef zeroBlock, bool checkView, OwnedPersist& out);
+    bool ownedObserve(const CachedDraw& c, const OwnedWindows& ow);
+    std::uint64_t ownedBucketKey(const CachedDraw& c, std::uint32_t viewSlot) const;
+    struct OwnedItem {
+        const CachedDraw* cd = nullptr;
+        std::uint64_t bucket = 0;
+        std::uint32_t slot = 0;
+    };
+    struct OwnedArena {
+        rhi::RingAlloc list, args;
+        std::uint32_t capacity = 0;
+        bool valid() const { return capacity != 0; }
+    };
+    // the rendering scope the owned draws are drawn in, begun before anything is derived (the device's targets / formats of the scope are part of the derivation's environment)
+    bool ownedBeginScope();
+    bool ownedReserve(std::uint32_t maxDraws, OwnedArena& arena);
+    // true = every item drawn (queued as indirect packets); false = nothing queued (no rendering scope / a guard), the caller composes the items' ops
+    // `shadow` / `slotCount`: the records table's CPU twin: an item whose slot is out of range or whose record was never written (no block address) is refused (GPU safety)
+    bool ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, std::uint32_t viewSlot, rhi::GpuRef recordsRef, const shader::abi::DrawRecord* shadow, std::uint32_t slotCount);
+    struct OwnedPersistStats {
+        std::uint64_t derived = 0, refused = 0, observed = 0, buckets = 0, packets = 0, items = 0, bucketKeyClash = 0;
+    } ownedPersistStats;
     // F2c-4-0 item 6 (RVK_F2C4_MEASURE): the draw's bucket = what a GPU compaction pass could merge into one indirect call: the v2 scene pipeline, the vertex input and
     // dynamic state (by content), the index binding. Not the frame block (one per frame)
     std::uint64_t f2c4BucketKey(const CachedDraw& c) const;
@@ -1724,6 +1767,7 @@ private:
     bool ensureSceneRefV2(std::uint32_t slot);
     void currentPosFix(float out[4], float& jx, float& jy);
     const VertexInputValues* internSceneVi(const VertexInputValues& normal, std::int32_t viewSlot = -1);
+    const VertexInputValues* internSceneViAt(const VertexInputValues& normal, std::uint64_t refBuffer, std::uint64_t refOffset);
     void sceneFlushRun(const std::vector<std::uint32_t>& run, const std::function<void(const DrawPacket&)>& record);
     int sceneMergeBreak(const DrawPacket& a, const DrawPacket& b) const;  // -1 = mergeable, else the SceneDrawStats::breaks index
     void sceneBeginFrame();
@@ -1751,6 +1795,9 @@ private:
         bool valid = false;
     } sceneRef_;  // (i, 0) for i < kSceneRunMax: the instance-rate ref stream, a ring block of this frame
     SceneRefStream sceneRefV2_[kSceneRefSlots];  // scene ABI v2: (i, slot) per view slot, ring blocks of this frame
+    std::uint64_t ownedEnvHash_[2] = {}, ownedEnvEpoch_[2] = {}, ownedEnvCounter_ = 0;  // F2c-4a: ownedEnvEpoch per pass kind (z / solid)
+    std::vector<std::uint32_t> ownedBucketOf_, ownedBucketStart_, ownedBucketCursor_;   // ownedFlush's scratch
+    std::vector<std::uint64_t> ownedBucketKeys_;
     VertexInputValues sceneViWork_;
     const VertexInputValues* lastSceneVi_ = nullptr;
     SceneDrawStats sceneStats_;

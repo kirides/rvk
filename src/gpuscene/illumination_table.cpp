@@ -1,4 +1,5 @@
 #include "gpuscene/illumination_table.h"
+#include "gpuscene/draw_record_table.h"
 
 #include <algorithm>
 #include <chrono>
@@ -163,6 +164,9 @@ template class GpuTable<MaterialRecord>;  // the material table (material_table.
 template class GpuTable<ViewRecord>;      // the view blocks (window_tables.cpp)
 template class GpuTable<ObjectRecord>;    // the object table (object_table.cpp)
 template class GpuTable<shader::abi::ViewBlock2>;  // the view table (view_table.cpp)
+template class GpuTable<shader::abi::DrawRecord>;  // the persistent draw records / blocks (draw_record_table.cpp)
+template class GpuTable<shader::abi::DrawBlock>;
+template class GpuTable<ZeroBlock>;
 
 // ---- IllumTable ------------------------------------------------------------------------------------------------------------------
 

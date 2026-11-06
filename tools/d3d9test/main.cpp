@@ -25,6 +25,7 @@
 #include "d3d9/convert.h"
 #include "d3d9/device.h"
 #include "d3d9/fvf.h"
+#include "gpuscene/draw_record_table.h"
 #include "gpuscene/view_table.h"
 #include "rhi/d3d_formats.h"
 
@@ -1376,6 +1377,361 @@ mov oC0, r0
     dev.release(std::move(ib));
 }
 
+// F2c-4a persistent owned draws through the device's own path (frame-ownership.md 7.21): the eight quads of the v2 case, each owned draw a SLOT of the real
+// gpuscene::drawrecords() tables (derived once by Device::ownedDerive, written by DrawRecordTable::write, uploaded by its flush) and drawn by Device::ownedFlush as
+// indirect draws over a CPU-written ref list. Checked against the normal draws (0 bytes differ): (1) one bucket = one indirect call over eight slots; (2) the same
+// slots in the next frame with nothing derived again; (3) a slot rewritten (its draw's alpha test changed: the quad vanishes) and rewritten back; (4) a released slot is
+// NOT handed out again before the deferral (kFramesInFlight + 1 presents) is over, and the reused slot draws; (5) two view slots = two buckets = two calls and the
+// reference's second picture; (6) the guards: a window of another slot (18), a null block address (15), more items than the reserved arena, a null records table:
+// nothing drawn, drawn again right after
+void testOwnedPersistent(Fixture& f) {
+    Device& dev = f.dev;
+    dev.setSceneDraws(true, 0);
+    if (!dev.sceneDrawsActive()) {
+        std::printf("  SKIP owned persistent: scene draws are not available on this device\n");
+        return;
+    }
+    static const char* kVs = R"(
+vs_3_0
+dcl_position v0
+dcl_color v1
+dcl_position o0
+dcl_color o1
+mov o0, v0
+add o1, v1, c0
+add o1, o1, c12
+)";
+    static const char* kPs = R"(
+ps_3_0
+dcl_color v0
+add r0, v0, c0
+mul r0, r0, c5
+mov oC0, r0
+)";
+    const auto vsV = shaderFrom(dev, kVs);
+    const auto psV = shaderFrom(dev, kPs);
+    if (!vsV || !psV) {
+        std::printf("  FAIL owned persistent: shaders\n");
+        ++g_failures;
+        return;
+    }
+    constexpr std::uint32_t kQuads = 8, kSlots = 16;
+    std::vector<Vertex> verts;
+    for (std::uint32_t k = 0; k < kQuads; ++k) {
+        const float x0 = -1.0f + 0.25f * static_cast<float>(k), x1 = x0 + 0.25f;
+        const std::uint32_t color = 0xFF000000u | (k * 6u + 10u) << 16 | (30u + k * 4u) << 8 | (k & 1u ? 40u : 20u);
+        verts.push_back({x0, 0.5f, 0.5f, 1, color, 0, 0});
+        verts.push_back({x1, 0.5f, 0.5f, 1, color, 1, 0});
+        verts.push_back({x0, -0.5f, 0.5f, 1, color, 0, 1});
+        verts.push_back({x1, -0.5f, 0.5f, 1, color, 1, 1});
+    }
+    const std::uint16_t idx[6] = {0, 1, 2, 1, 3, 2};
+    auto vb = dev.createBuffer(static_cast<std::uint32_t>(verts.size() * sizeof(Vertex)), USAGE_WRITEONLY, POOL_MANAGED, false, false);
+    auto ib = dev.createBuffer(sizeof(idx), USAGE_WRITEONLY, POOL_MANAGED, true, false);
+    std::memcpy(vb->lock(0, 0, 0), verts.data(), verts.size() * sizeof(Vertex));
+    vb->unlock();
+    std::memcpy(ib->lock(0, 0, 0), idx, sizeof(idx));
+    ib->unlock();
+    rhi::Device* rd = dev.rhi();
+    auto tableBuf = rd->createBuffer({static_cast<std::uint64_t>(kSlots) * shader::abi::kViewBlock2Size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "owned persistent view table"});
+    if (!tableBuf) {
+        std::printf("  FAIL owned persistent: view table buffer\n");
+        ++g_failures;
+        return;
+    }
+    const auto tw = tableBuf->shaderRef(0);
+    const rhi::GpuRef tableRef = rhi::GpuRef::fromWords(tw[0], tw[1]);
+    std::vector<shader::abi::ViewBlock2> twin(kSlots);
+    std::memset(twin.data(), 0, twin.size() * sizeof(shader::abi::ViewBlock2));
+    const auto upload = [&] { std::memcpy(tableBuf->map(), twin.data(), twin.size() * sizeof(shader::abi::ViewBlock2)); };
+    struct Regs {
+        float vs0[4], vs12[4], ps0[4], ps5[4];
+    };
+    const Regs regs[2] = {{{0.10f, 0.05f, 0.02f, 0.0f}, {0.02f, 0.10f, 0.05f, 0.0f}, {0.30f, 0.20f, 0.10f, 0.0f}, {0.9f, 0.8f, 0.7f, 0.5f}},
+                          {{0.02f, 0.12f, 0.06f, 0.0f}, {0.12f, 0.02f, 0.03f, 0.0f}, {0.05f, 0.25f, 0.30f, 0.0f}, {0.6f, 1.0f, 0.5f, 0.5f}}};
+    const auto setRegs = [&](const Regs& r) {
+        dev.setVertexShaderConstantF(0, r.vs0, 1);
+        dev.setVertexShaderConstantF(12, r.vs12, 1);
+        dev.setPixelShaderConstantF(0, r.ps0, 1);
+        dev.setPixelShaderConstantF(5, r.ps5, 1);
+    };
+    const auto fillSlot = [&](std::uint32_t slot, const Regs& r) {
+        shader::abi::ViewBlock2& b = twin[slot];
+        std::memset(&b, 0, sizeof(b));
+        std::memcpy(b.vs0[0], r.vs0, 16);
+        std::memcpy(b.vs1[0], r.vs12, 16);
+        std::memcpy(b.ps0[0], r.ps0, 16);
+        dev.viewPosFix(b.posFix);
+        std::memcpy(b.c5, r.ps5, 3 * sizeof(float));
+        upload();
+    };
+    const auto windowsOf = [&](std::uint32_t slot) {
+        OwnedWindows ow;
+        const auto set = [&](OwnedWindows::Win& w, bool vertex, std::uint32_t win, std::uint32_t covered) {
+            w.kind = OwnedWindows::Kind::View;
+            w.base = rhi::GpuRef{gpuscene::ViewTable::windowBase(tableRef, slot, vertex, win)};
+            w.covered = covered;
+        };
+        set(ow.w[0][0], true, 0, 12);
+        set(ow.w[0][1], true, 1, 19);
+        set(ow.w[1][0], false, 0, 5);
+        ow.viewSlot = slot;
+        return ow;
+    };
+    const auto begin = [&] {
+        f.reset();
+        dev.drawTag() = {};
+        dev.drawTag().source = draws::Source::Mesh;
+        dev.phases().push(scene::View::Main, scene::Pass::Solid);
+        dev.setVertexShader(vsV);
+        dev.setPixelShader(psV);
+        dev.setStreamSource(0, vb.get(), 0, sizeof(Vertex));
+        dev.setIndices(ib.get());
+    };
+    gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
+    tab.setActive(true);
+    if (!tab.ensure(dev)) {
+        std::printf("  FAIL owned persistent: the draw record tables\n");
+        ++g_failures;
+        return;
+    }
+    // (every frame's table flush goes into the upload list that runs before the frame's draws)
+    const auto end = [&](const char* name) {
+        tab.flush(dev);
+        dev.setSceneIssue(false);
+        dev.phases().pop();
+        return capture(dev, name);
+    };
+    const auto bad = [&](const Pixels& ref, const Pixels& p, const char* what) {
+        std::uint32_t n = 0;
+        for (std::size_t i = 0; i < ref.bgra.size() && i < p.bgra.size(); ++i) n += ref.bgra[i] != p.bgra[i];
+        if (n != 0 || ref.bgra.size() != p.bgra.size()) {
+            std::printf("  FAIL owned persistent (%s): %u bytes differ from the normal draws\n", what, n);
+            ++g_failures;
+        }
+        return n;
+    };
+    // references: all eight with view 0; seven (quad 3 left out: its alpha test never passes); four + four on two views
+    begin();
+    setRegs(regs[0]);
+    for (std::uint32_t k = 0; k < kQuads; ++k) dev.drawIndexedPrimitive(PT_TRIANGLELIST, static_cast<std::int32_t>(4 * k), 0, 4, 0, 2);
+    const Pixels ref1 = end("ownedp_ref1");
+    begin();
+    setRegs(regs[0]);
+    for (std::uint32_t k = 0; k < kQuads; ++k) {
+        if (k != 3) dev.drawIndexedPrimitive(PT_TRIANGLELIST, static_cast<std::int32_t>(4 * k), 0, 4, 0, 2);
+    }
+    const Pixels ref7 = end("ownedp_ref7");
+    begin();
+    for (std::uint32_t k = 0; k < kQuads; ++k) {
+        setRegs(regs[k < 4 ? 0 : 1]);
+        dev.drawIndexedPrimitive(PT_TRIANGLELIST, static_cast<std::int32_t>(4 * k), 0, 4, 0, 2);
+    }
+    const Pixels ref2 = end("ownedp_ref2");
+    dev.setSceneViewTable(tableRef, twin.data(), kSlots);
+    dev.setSceneViews(true);
+    std::vector<Device::CachedDraw> cd(kQuads);
+    bool ready = false;
+    for (int i = 0; i < 1200 && !ready; ++i) {
+        begin();
+        setRegs(regs[0]);
+        dev.setSceneIssue(true);
+        for (std::uint32_t k = 0; k < kQuads; ++k) {
+            dev.beginCapture(&cd[k]);
+            dev.drawIndexedPrimitive(PT_TRIANGLELIST, static_cast<std::int32_t>(4 * k), 0, 4, 0, 2);
+            dev.endCapture();
+        }
+        end("ownedp_capture");
+        ready = true;
+        for (const auto& c : cd) ready = ready && c.valid && c.scenePipeline != GamePipeline::None && c.scenePipeline2 != GamePipeline::None;
+        if (!ready) Sleep(50);
+    }
+    if (!ready) {
+        std::printf("  FAIL owned persistent: the draws never got their v2 pipelines\n");
+        ++g_failures;
+        return;
+    }
+    fillSlot(3, regs[0]);
+    fillSlot(9, regs[1]);
+    std::uint32_t slots[kQuads];
+    for (auto& s : slots) s = gpuscene::kNoSlot;
+    const auto deriveQuad = [&](std::uint32_t k, std::uint32_t viewSlot, std::uint32_t alphaFunc, Device::OwnedPersist& out) {
+        Device::DeriveIn in;
+        in.streams[0] = vb.get();
+        in.strides[0] = sizeof(Vertex);
+        in.indices = ib.get();
+        in.alphaFunc = alphaFunc;
+        std::memcpy(in.psC5, regs[viewSlot == 9 ? 1 : 0].ps5, sizeof(in.psC5));
+        const OwnedWindows ow = windowsOf(viewSlot);
+        return dev.ownedDerive(cd[k], in, ow, tab.blockRef(slots[k]), tab.zeroRef(), true, out);
+    };
+    // one frame of owned draws: quads `from`..`to` on `viewSlot`, derived only where `derive[k]`; the items' bucket calls
+    const auto frame = [&](const char* name, std::uint32_t viewSlot0, std::uint32_t viewSlot1, std::uint32_t split, const bool* derive, const std::uint32_t* alpha, std::uint64_t& calls) {
+        begin();
+        dev.setSceneIssue(true);
+        std::vector<Device::OwnedItem> items[2];
+        for (std::uint32_t k = 0; k < kQuads; ++k) {
+            const std::uint32_t vs = k < split ? viewSlot0 : viewSlot1;
+            if (slots[k] == gpuscene::kNoSlot) slots[k] = tab.alloc();
+            if (derive != nullptr && derive[k]) {
+                Device::OwnedPersist out;
+                const int rc = deriveQuad(k, vs, alpha != nullptr ? alpha[k] : 8u, out);
+                if (rc != 0) {
+                    std::printf("  FAIL owned persistent (%s): quad %u derive returned %d\n", name, k, rc);
+                    ++g_failures;
+                }
+                tab.write(slots[k], out.rec, out.blk);
+                items[k < split ? 0 : 1].push_back({&cd[k], out.bucketKey, slots[k]});
+            } else {
+                // (nothing derived: the bucket key of the retained draw is a function of it and the view slot)
+                items[k < split ? 0 : 1].push_back({&cd[k], dev.ownedBucketKey(cd[k], vs), slots[k]});
+            }
+        }
+        const auto s0 = dev.sceneStats();
+        for (std::uint32_t g = 0; g < 2; ++g) {
+            if (items[g].empty()) continue;
+            Device::OwnedArena arena;
+            if (!dev.ownedReserve(static_cast<std::uint32_t>(items[g].size()), arena) || !dev.ownedFlush(items[g], arena, g == 0 ? viewSlot0 : viewSlot1, tab.recordsRef(), tab.recordsShadow(), gpuscene::DrawRecordTable::kCapacity)) {
+                std::printf("  FAIL owned persistent (%s): the flush of group %u was refused\n", name, g);
+                ++g_failures;
+            }
+        }
+        calls = dev.sceneStats().indirectCalls - s0.indirectCalls;
+        return end(name);
+    };
+    std::uint64_t calls = 0;
+    bool all[kQuads];
+    for (auto& a : all) a = true;
+    const auto w0 = tab.stats().writes;
+    // 1. eight owned draws on one view slot: ONE indirect call
+    bad(ref1, frame("ownedp_one", 3, 3, kQuads, all, nullptr, calls), "eight persistent draws, one bucket");
+    if (calls != 1) {
+        std::printf("  FAIL owned persistent: %llu indirect calls for one bucket of %u draws (expected 1)\n", static_cast<unsigned long long>(calls), kQuads);
+        ++g_failures;
+    }
+    const auto w1 = tab.stats().writes;
+    if (w1 - w0 != kQuads) {
+        std::printf("  FAIL owned persistent: %llu slot writes for %u first derivations\n", static_cast<unsigned long long>(w1 - w0), kQuads);
+        ++g_failures;
+    }
+    // 2. the next frame: the same slots, nothing derived again
+    const auto d0 = dev.ownedPersistStats.derived;
+    bad(ref1, frame("ownedp_again", 3, 3, kQuads, nullptr, nullptr, calls), "the same slots, nothing derived");
+    if (dev.ownedPersistStats.derived != d0 || tab.stats().writes != w1) {
+        std::printf("  FAIL owned persistent: a frame of unchanged persistent draws derived / wrote something\n");
+        ++g_failures;
+    }
+    // 3. a slot rewritten: quad 3's alpha test never passes (the slot's block changes), then rewritten back
+    {
+        bool one[kQuads] = {};
+        std::uint32_t alpha[kQuads];
+        for (auto& a : alpha) a = 8u;
+        one[3] = true;
+        alpha[3] = CMP_NEVER;
+        bad(ref7, frame("ownedp_rewrite", 3, 3, kQuads, one, alpha, calls), "a slot rewritten (quad 3 discarded)");
+        alpha[3] = 8u;
+        bad(ref1, frame("ownedp_rewrite_back", 3, 3, kQuads, one, alpha, calls), "the slot rewritten back");
+    }
+    // 4. slot reuse is deferred: a released slot is not handed out again before kFramesInFlight + 1 presents
+    {
+        const std::uint32_t released = slots[7];
+        tab.release(released);
+        slots[7] = gpuscene::kNoSlot;
+        const std::uint32_t fresh = tab.alloc();
+        if (fresh == released || fresh == gpuscene::kNoSlot) {
+            std::printf("  FAIL owned persistent: slot %u was handed out again right after its release\n", released);
+            ++g_failures;
+        }
+        for (std::uint32_t i = 0; i < rhi::kFramesInFlight; ++i) {
+            tab.flush(dev);
+            const std::uint32_t other = tab.alloc();
+            if (other == released) {
+                std::printf("  FAIL owned persistent: slot %u was reused %u presents after its release (deferral %u + 1)\n", released, i + 1, rhi::kFramesInFlight);
+                ++g_failures;
+            }
+            if (other != gpuscene::kNoSlot) tab.release(other);
+        }
+        tab.flush(dev);
+        std::uint32_t got = gpuscene::kNoSlot;
+        bool reused = false;
+        for (int i = 0; i < 8 && !reused; ++i) {
+            got = tab.alloc();
+            reused = got == released;
+        }
+        if (!reused) {
+            std::printf("  FAIL owned persistent: slot %u never came back after the deferral\n", released);
+            ++g_failures;
+        }
+        slots[7] = got;  // (quad 7 on a reused slot: derived again, drawn the same)
+        bool one[kQuads] = {};
+        one[7] = true;
+        bad(ref1, frame("ownedp_reuse", 3, 3, kQuads, one, nullptr, calls), "quad 7 on a reused slot");
+        tab.release(fresh);
+    }
+    // 5. two view slots = two buckets = two indirect calls, the reference's second picture
+    {
+        bool derive[kQuads];
+        for (auto& d : derive) d = true;
+        bad(ref2, frame("ownedp_two", 3, 9, 4, derive, nullptr, calls), "two view slots");
+        if (calls != 2) {
+            std::printf("  FAIL owned persistent: two view slots made %llu indirect calls (expected 2)\n", static_cast<unsigned long long>(calls));
+            ++g_failures;
+        }
+    }
+    // 6. the guards
+    {
+        begin();
+        dev.setSceneIssue(true);
+        Device::OwnedPersist out;
+        Device::DeriveIn in;
+        in.streams[0] = vb.get();
+        in.strides[0] = sizeof(Vertex);
+        in.indices = ib.get();
+        std::memcpy(in.psC5, regs[0].ps5, sizeof(in.psC5));
+        OwnedWindows other = windowsOf(3);
+        other.viewSlot = 9;
+        int refused = 0;
+        refused += dev.ownedDerive(cd[0], in, other, tab.blockRef(slots[0]), tab.zeroRef(), true, out) == 18;
+        refused += dev.ownedDerive(cd[0], in, windowsOf(3), rhi::GpuRef{}, tab.zeroRef(), true, out) == 15;
+        refused += dev.ownedDerive(cd[0], in, windowsOf(40), tab.blockRef(slots[0]), tab.zeroRef(), true, out) == 17;
+        std::vector<Device::OwnedItem> items;
+        for (std::uint32_t k = 0; k < kQuads; ++k) items.push_back({&cd[k], dev.ownedBucketKey(cd[k], 3), slots[k]});
+        Device::OwnedArena arena;
+        const bool reserved = dev.ownedReserve(4, arena);  // (room for four of the eight)
+        const bool tooMany = reserved && !dev.ownedFlush(items, arena, 3, tab.recordsRef(), tab.recordsShadow(), gpuscene::DrawRecordTable::kCapacity);
+        Device::OwnedArena arena2;
+        const bool reserved2 = dev.ownedReserve(kQuads, arena2);
+        const bool noTable = reserved2 && !dev.ownedFlush(items, arena2, 3, rhi::GpuRef{}, tab.recordsShadow(), gpuscene::DrawRecordTable::kCapacity);
+        const bool badSlot = reserved2 && !dev.ownedFlush(items, arena2, 40, tab.recordsRef(), tab.recordsShadow(), gpuscene::DrawRecordTable::kCapacity);
+        // (an item whose slot was never written / is out of range)
+        std::vector<Device::OwnedItem> bogus = {{&cd[0], dev.ownedBucketKey(cd[0], 3), gpuscene::DrawRecordTable::kCapacity}, {&cd[1], dev.ownedBucketKey(cd[1], 3), tab.alloc()}};
+        Device::OwnedArena arena3;
+        const bool bogusRefused = dev.ownedReserve(2, arena3) && !dev.ownedFlush(bogus, arena3, 3, tab.recordsRef(), tab.recordsShadow(), gpuscene::DrawRecordTable::kCapacity);
+        tab.release(bogus[1].slot);
+        const Pixels p = end("ownedp_guards");
+        if (refused != 3 || !tooMany || !noTable || !badSlot || !bogusRefused || p.bgra[(32 * p.w + 2) * 4 + 1] != 0) {
+            std::printf("  FAIL owned persistent: guards: %d of 3 derivations refused as expected, more items than the arena refused %d, null records table refused %d, a view slot out of range refused %d, an unwritten / out-of-range slot refused %d, drew something %d\n",
+                        refused, tooMany, noTable, badSlot, bogusRefused, p.bgra[(32 * p.w + 2) * 4 + 1] != 0);
+            ++g_failures;
+        }
+        bad(ref1, frame("ownedp_after_guards", 3, 3, kQuads, nullptr, nullptr, calls), "persistent draws after the refusals");
+    }
+    std::printf("  owned persistent: %llu derivations, %llu refused, %llu buckets / %llu indirect packets / %llu items; %llu slot writes, %llu unchanged, %llu allocated, %llu released, %llu reused\n",
+                static_cast<unsigned long long>(dev.ownedPersistStats.derived), static_cast<unsigned long long>(dev.ownedPersistStats.refused), static_cast<unsigned long long>(dev.ownedPersistStats.buckets),
+                static_cast<unsigned long long>(dev.ownedPersistStats.packets), static_cast<unsigned long long>(dev.ownedPersistStats.items), static_cast<unsigned long long>(tab.stats().writes),
+                static_cast<unsigned long long>(tab.stats().same), static_cast<unsigned long long>(tab.stats().allocs), static_cast<unsigned long long>(tab.stats().releases),
+                static_cast<unsigned long long>(tab.stats().reused));
+    for (const std::uint32_t s : slots) {
+        if (s != gpuscene::kNoSlot) tab.release(s);
+    }
+    tab.setActive(false);
+    tab.destroy();
+    dev.setSceneViews(false);
+    dev.setSceneDraws(false, 0);
+    dev.release(std::move(vb));
+    dev.release(std::move(ib));
+}
+
 // F2c-1 owned windows through the device's own path (frame-ownership.md 7.13): a translated vertex shader that reads VS window 1 (c12) and window 2 (c32.w, c33)
 // is drawn (a) with the registers set the normal way and (b) with the register file holding junk and the windows served from persistent images
 // (a view block's c12..c30 + an object record's c31..c35 in one host-visible buffer behind a 4 KiB pad, window bases = image - first x 16, as the tables
@@ -1786,7 +2142,7 @@ int main(int argc, char** argv) {
         {"mip chain stretch rect", testMipChainStretchRect}, {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
         {"read-only lock of a fresh texture", testReadOnlyLockOfFreshTexture},
-        {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
+        {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned persistent (F2c-4a)", testOwnedPersistent}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
     };
     for (const auto& [name, fn] : cases) {
         const int before = g_failures;
