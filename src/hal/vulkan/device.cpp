@@ -29,6 +29,7 @@
 #include "engine/scene_table.h"
 #include "gpuscene/instance_buffer.h"
 #include "gpuscene/illumination_table.h"
+#include "gpuscene/lighting_images.h"
 #include "gpuscene/mesh_parts.h"
 #include "gpuscene/material_table.h"
 #include "engine/xinput_throttle.h"
@@ -1620,6 +1621,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
     {
         gpuscene::instances().flush(dev_, frozen::kGpuScene >= 2 ? frozen::kGpuScene : 0);
         gpuscene::illumtable().flush(dev_, true);
+        gpuscene::lightingimages().flush(dev_, true);  // after the illumination table's flush: the compose pass reads this frame's records (frame-ownership.md 7.9)
         gpuscene::meshparts().flush(dev_, true);
         gpuscene::materialtable().flush(dev_, true);
     }

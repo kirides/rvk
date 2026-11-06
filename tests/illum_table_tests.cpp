@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "gpuscene/illum_compose.h"
+#include "gpuscene/lighting_images.h"
 #include "test.h"
 
 using namespace rvk;
@@ -177,4 +178,34 @@ TEST(illum_table_f_changes_the_sh_and_the_indoor_blend) {
     CHECK(composeLighting(ir, sr, p, b));
     CHECK(std::memcmp(a[1], b[1], 16) != 0);
     CHECK(std::memcmp(a[8], b[8], 48) == 0);  // the sun does not depend on f
+}
+
+TEST(lighting_images_layout_keeps_the_window_base_valid) {
+    // entry address - 14 x 16 must be a valid window base on both backends (D3D12: byte offset >= 224), 16-byte aligned entries
+    CHECK(kLightingStride == 24 * 16);
+    CHECK(kLightingPad >= kLightingFirstReg * 16);
+    CHECK((kLightingPad - kLightingFirstReg * 16) % 16 == 0);
+    CHECK(kLightingPad + std::uint64_t{LightingImages::kCapacity} * kLightingStride < (1ull << 32));
+}
+
+TEST(lighting_images_key_separates_every_compose_parameter) {
+    ComposeParams a;
+    a.n = 3;
+    const std::uint64_t base = lightingKey(5, a);
+    CHECK(lightingKey(6, a) != base);
+    ComposeParams b = a;
+    b.tableLit = true;
+    CHECK(lightingKey(5, b) != base);
+    b = a;
+    b.holdsAll = true;
+    CHECK(lightingKey(5, b) != base);
+    b = a;
+    b.n = 2;
+    CHECK(lightingKey(5, b) != base);
+    b = a;
+    b.firstLight = 1;
+    CHECK(lightingKey(5, b) != base);
+    CHECK(lightingKey(5, a) == base);
+    const LightingJob j = lightingJob(7, b);
+    CHECK(j.illum == 7 && j.flags == 0 && j.n == 3 && j.firstLight == 1);
 }

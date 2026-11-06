@@ -18,6 +18,7 @@
 #include "core/settings.h"
 #include "engine/symbols.h"
 #include "gpuscene/illumination_table.h"
+#include "gpuscene/lighting_images.h"
 
 namespace rvk::engine::illumcensus {
 
@@ -200,6 +201,10 @@ bool install() {
     g_on = ok && census;
     g_table = ok && table;
     gpuscene::illumtable().setActive(g_table);
+    if (const auto* li = settings::renderer().nativeLightingImages; li != nullptr && li->asBool() && g_table) {
+        gpuscene::lightingimages().setActive(true);
+        spdlog::info("native: lighting images on (native.lighting_images)");
+    }
     if (census) spdlog::info("engine: illum census {} (RVK_ILLUM_CENSUS=1)", ok ? "installed" : "NOT installed: a symbol is missing");
     if (table) spdlog::info("engine: illum table hooks {} (native.illum_table)", ok ? "installed" : "NOT installed: a symbol is missing");
     return ok;

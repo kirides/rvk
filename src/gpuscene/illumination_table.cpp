@@ -12,6 +12,7 @@
 #include "engine/memread.h"
 #include "gpuscene/mesh_layout.h"
 #include "gpuscene/material_compose.h"
+#include "gpuscene/lighting_images.h"
 
 namespace rvk::gpuscene {
 
@@ -153,6 +154,7 @@ template class GpuTable<IllumRecord>;
 template class GpuTable<LightSetRecord>;
 template class GpuTable<PartRecord>;
 template class GpuTable<LayoutRecord>;
+template class GpuTable<LightingJob>;  // the lighting images' jobs (lighting_images.cpp)
 template class GpuTable<MaterialRecord>;  // the material table (material_table.cpp)
 
 // ---- IllumTable ------------------------------------------------------------------------------------------------------------------
@@ -341,13 +343,13 @@ void IllumTable::onPsDestroy(const void* ps) {
     ++stats_.freed;
 }
 
-void IllumTable::checkDraw(const void* illum, const ComposeParams& p, const float prior[24][4], const float now[24][4]) {
-    if (!active_ || illum == nullptr) return;
+std::uint32_t IllumTable::checkDraw(const void* illum, const ComposeParams& p, const float prior[24][4], const float now[24][4]) {
+    if (!active_ || illum == nullptr) return kNoSlot;
     std::lock_guard lock(mutex_);
     const std::uint32_t slot = lookupOrCreate(illum);
     if (slot == kNone) {
         ++stats_.unchecked;
-        return;
+        return kNoSlot;
     }
     illumSeen_[slot] = frame_;
     IllumRecord& rec = illums_.shadow()[slot];
@@ -374,16 +376,16 @@ void IllumTable::checkDraw(const void* illum, const ComposeParams& p, const floa
     const std::uint32_t setSlot = rec.info[1];
     if (setSlot >= setUsed_ || setKey_[setSlot] == nullptr) {
         ++stats_.unchecked;
-        return;
+        return slot;
     }
     float exp[24][4];
     std::memcpy(exp, prior, sizeof(exp));
     if (!composeLighting(rec, sets_.shadow()[setSlot], p, exp)) {
         ++stats_.unchecked;
-        return;
+        return slot;
     }
     ++stats_.checked;
-    if (std::memcmp(exp, now, sizeof(exp)) == 0) return;
+    if (std::memcmp(exp, now, sizeof(exp)) == 0) return slot;
     ++stats_.differing;
     if (differingLogged_ < 8) {
         ++differingLogged_;
@@ -396,6 +398,23 @@ void IllumTable::checkDraw(const void* illum, const ComposeParams& p, const floa
         spdlog::error("native: illum table: DIFFERING draw: illum {} slot {} set slot {} gen {} (tableLit {}, holdsAll {}, n {}, first {}):{}", illum, slot, setSlot, rec.info[2],
                       p.tableLit, p.holdsAll, p.n, p.firstLight, regs);
     }
+    return slot;
+}
+
+bool IllumTable::compose(std::uint32_t slot, const ComposeParams& p, float L[24][4], int* why) {
+    std::lock_guard lock(mutex_);
+    if (!active_ || slot >= illumUsed_ || illumKey_.empty() || illumKey_[slot] == nullptr) {
+        if (why != nullptr) *why = 1;
+        return false;
+    }
+    const IllumRecord& rec = illums_.shadow()[slot];
+    const std::uint32_t setSlot = rec.info[1];
+    if (setSlot >= setUsed_ || setKey_[setSlot] == nullptr) {
+        if (why != nullptr) *why = 2;
+        return false;
+    }
+    composeLighting(rec, sets_.shadow()[setSlot], p, L);
+    return true;
 }
 
 void IllumTable::flush(d3d9::Device& dev, bool verify) {

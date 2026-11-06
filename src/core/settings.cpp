@@ -2419,6 +2419,22 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::Restart | Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeLightingImages = &reg.add({
+        .key = "native.lighting_images",
+        .label = "Native frame: lighting register images",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode only (takes effect at the next start; frame-ownership.md 7.9 / F1b, no picture change; needs native.illum_table): one image of the "
+                       "lighting registers c14..c37 per distinct (illumination, pass parameters) the native composition used, composed on the GPU every frame "
+                       "from the illumination table's records by one compute pass (before the frame's draws), and a check (every 60th frame) that reads the "
+                       "images back and compares them with the CPU composition and with the registers the draws got. rvk.log `native: lighting images (5 s)`, "
+                       "both DIFFERING counts must stay 0.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::Restart | Flag::NoAB | Flag::Debug,
+        .needs = {{"native.illum_table", "true", false, true}},
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeMaterialTable = &reg.add({
         .key = "native.material_table",
         .label = "Native frame: material table",

@@ -28,6 +28,8 @@ class Device;
 
 namespace rvk::gpuscene {
 
+inline constexpr std::uint32_t kNoSlot = 0xffffffffu;
+
 struct TableStats {
     std::uint64_t flushes = 0, slotsUploaded = 0, runs = 0, bytes = 0, overflow = 0;
     std::uint64_t verifies = 0, verifyDone = 0, verifySlots = 0, verifyBad = 0;
@@ -102,7 +104,12 @@ public:
 
     // ---- StaticOps::writeLighting ----
     // `prior` = the lighting registers (24 x float4) before writeLighting wrote them, `now` = after. Composes from the records and compares.
-    void checkDraw(const void* illum, const ComposeParams& p, const float prior[24][4], const float now[24][4]);
+    // Returns the illumination's slot (kNoSlot: not active / table full).
+    std::uint32_t checkDraw(const void* illum, const ComposeParams& p, const float prior[24][4], const float now[24][4]);
+    // The CPU composition of slot `slot` from the CURRENT shadow records (the lighting images' check); L must be initialised by the caller. False: no live
+    // record / no light set.
+    // `why` (optional): 1 = no live record for the slot, 2 = the record has no (live) light set
+    bool compose(std::uint32_t slot, const ComposeParams& p, float L[24][4], int* why = nullptr);
 
     // once per present (engine thread, before the frame's draws are submitted): uploads, verification, idle sweep, 5 s log. `verify` = read-back every 240th frame
     void flush(d3d9::Device& dev, bool verify);

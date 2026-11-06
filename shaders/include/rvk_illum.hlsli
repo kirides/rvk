@@ -43,7 +43,8 @@ bool rvkIllumCompose(uint2 illumTable, uint illumSlot, uint2 setTable, RvkIllumP
     const float g = 1.0 - f;
     const bool hasStatic = rvkIllumRawByte(ir, 0x90u) != 0u;
     [unroll] for (uint k = 0u; k < 7u; ++k) {
-        float4 v = rvkIllumRawF4(sr, 0xb8u + 16u * k) * f;
+        // (precise: no fused multiply-add, the CPU twin rounds the product and the sum separately: bit-exact registers)
+        precise float4 v = rvkIllumRawF4(sr, 0xb8u + 16u * k) * f;
         if (k < 3u) v.w = g * indoor[k] + v.w;
         if (hasStatic) v += rvkIllumRawF4(ir, 0x94u + 16u * k);
         L[1 + k] = v;

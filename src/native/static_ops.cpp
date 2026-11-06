@@ -22,6 +22,7 @@
 #include "engine/scene_table.h"
 #include "engine/symbols.h"
 #include "gpuscene/illumination_table.h"
+#include "gpuscene/lighting_images.h"
 #include "gpuscene/mesh_parts.h"
 #include "gpuscene/material_table.h"
 #include "fx/effect_binary.h"
@@ -685,7 +686,8 @@ void StaticOps::writeLighting(const sc::Pass& pass) {
     p.holdsAll = holdsAll;
     p.n = pass.tableLit ? 3u : sc::passLights(pass.flags);
     p.firstLight = pass.firstLight;
-    table.checkDraw(pass.illum, p, prior, mirror_.lighting);
+    const std::uint32_t illumSlot = table.checkDraw(pass.illum, p, prior, mirror_.lighting);
+    gpuscene::lightingimages().note(illumSlot, p, mirror_.lighting);  // F1b: the lighting register image of (illumination, parameters)
 }
 
 void StaticOps::writeLightingRegisters(const sc::Pass& pass, bool& holdsAll) {

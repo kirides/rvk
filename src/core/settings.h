@@ -481,6 +481,7 @@ struct RendererSettings {
     Setting* nativeCoverage = nullptr;         // native.coverage: the per-draw coverage counter in plain Full runs (O1)
     Setting* nativeIllumTable = nullptr;       // native.illum_table: the GPU illumination table + its draw-lighting verification (frame-ownership.md F0; restart)
     Setting* nativeMeshParts = nullptr;        // native.mesh_parts: the GPU mesh part + layout tables and their verification (frame-ownership.md F0; restart)
+    Setting* nativeLightingImages = nullptr;   // native.lighting_images: GPU-composed lighting register images + their verification (frame-ownership.md 7.9; restart; needs native.illum_table)
     Setting* nativeMaterialTable = nullptr;    // native.material_table: the GPU material table + its draw verification (frame-ownership.md F0; restart)
     Setting* nativeLean = nullptr;             // native.lean: the engine's slot code not run for the composed mesh-like ops (O2a)
     Setting* nativeLeanCheck = nullptr;        // native.lean_check: every N-th frame the engine's code runs as before (compare)

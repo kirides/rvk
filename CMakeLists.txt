@@ -251,6 +251,8 @@ add_library(rvk_core STATIC
     src/gpuscene/material_compose.h
     src/gpuscene/material_graph.h
     src/gpuscene/illum_compose.h
+    src/gpuscene/lighting_images.cpp
+    src/gpuscene/lighting_images.h
     src/gpuscene/mesh_layout.h
     src/gpuscene/mesh_parts.cpp
     src/gpuscene/mesh_parts.h

@@ -419,6 +419,42 @@ static GPU copy's address without the RT gate of `gpuAddress()`.
 * Cost (checkDraw time only, debug setting, Full): 0.03-0.22 ms per frame (draw count dependent: 60-80 k checked draws per second-run frame x ~3 us incl. the
   mutex, the hash lookup, the compare), flush negligible. Not a shipping cost: the table's draw check is the F0 gate; F1 reads the records on the GPU.
 
+### 7.9 F1b lighting register images (2026-11-06, `native.lighting_images`)
+
+`src/gpuscene/lighting_images.{h,cpp}` + `shaders/gpuscene/lighting_compose.comp.hlsl` (the first GPU run of `rvkIllumCompose`). Debug setting (Bool, restart,
+default off, Full, `needs` `native.illum_table`; off = nothing allocated).
+
+* **Entry layout.** One persistent device buffer, `kLightingPad` = 4096 B pad (no entry) + 8192 entries x `kLightingStride` = 384 B (24 float4 = c14 .. c37,
+  entry register `r` at `+ (r - 14) x 16`), 3 MiB. Window base of entry `e` = `entryRef(e) - 14 x 16` (`LightingImages::windowBase`, `GpuRef::plus` with a negative
+  delta): on D3D12 the (heap slot, byte offset) form needs offset >= 224, the pad guarantees it for entry 0; entries are 16-byte aligned. The compose pass writes
+  through the buffer's `shaderRefRw` form, F1a must read through `windowBase` (the read form: `shaderRef`; they differ on D3D12).
+* **Parameter set** (everything `composeLighting` takes besides the two records): illumination slot (the F0 table's), `tableLit`, `holdsAll`, `n` (lights the
+  pass takes: 3 when table-lit, else `passLights(flags)` 0..3), `firstLight`. Key `lightingKey(slot, p)`; a GPU job record (16 B: slot or 0xffffffff = free,
+  flags, n, first) per entry in `GpuTable<LightingJob>`. Entries are created on first sight in `StaticOps::writeLighting` (`IllumTable::checkDraw` now returns the
+  illumination slot), freed after 600 idle frames (job -> free, the pass skips it). Spots: 460-530 entries peak, 55-60 live; savegame 248 live (peak 665); 0 overflow.
+* **Ordering decision.** `LightingImages::flush` runs at present right after `illumtable().flush`, recording the compose pass into the UPLOAD command list (the
+  tables' own copies are in the same list: one memory barrier between). The upload list executes before ALL draws of the frame it is recorded for (backend:
+  `uploadCommands()`), and the present flush uploads the tables' END-OF-CPU-FRAME state. So the "illumination flush at present = previous frame" caveat does not apply:
+  records and images are this frame's, an entry first seen this frame is composed in this frame, no extra flush point before the main view is needed. A draw
+  composed before a record's last in-frame change would differ from the image; the check below counts that and found none.
+* **Pass.** One thread per entry slot, compose = `rvkIllumCompose` (all 24 registers, unwritten ones 0). Bit-exactness needed one change in the shared
+  `rvk_illum.hlsli`: `precise` on the SH accumulation (without it the driver fused `g x indoor + v.w` into an FMA: c15..c17.w off by 1 ulp in ~30 % of entries).
+* **Verification** (every 60th frame, `kVerifyEvery`): the images are copied back; each live entry is compared (a) with `composeLighting` on the CPU from the
+  illumination table's shadow records at that present, (b) with the registers `writeLighting` last wrote for it in that CPU frame (entries not drawn that frame
+  are skipped for (b)). Left out of both: registers the composition does not write (c14.w, the lights beyond the pass's count: found by composing twice on different
+  priors): the engine's register file keeps STALE values there (the image has 0); the pixel-shader permutation of n lights never reads them, but a window
+  block compared whole against the CPU register file (`split_verify`, F1a) will see them differ. Two denormal-only differences (a static SH word the engine
+  holds as 7.4e-44, the GPU's float ALU flushes denormals) are counted as `denormal-only words`, not as differences (a shader reads 0 either way).
+  rvk.log `native: lighting images (5 s)`: entries / new / freed, passes, read-back checks (entries, not comparable = record freed or its light set gone (idle entries),
+  `of them drawn this frame` must be 0), `DIFFERING N (vs CPU compose, max ulp) / M (vs drawn registers, compared, max ulp)`.
+* **Results** (rvk.log in the scratch dir `rvk-work/scratch/f1b/`, Full): Vulkan rvkcompare `harbour_docks,pub_interior,monastery_hall`: 80 read-backs, 21.6 k entries,
+  12.3 k compared with drawn registers, 1.95 M draws noted: **0 (vs CPU) / 0 (vs drawn), max 0 ulp**; Risen_Save_0005 (lod 2x, packet cache off): 64 read-backs, 16.1 k
+  entries, 11.3 k vs drawn: 0 / 0; D3D12 spots 100 read-backs 0 / 0 (17.2 k vs drawn), D3D12 savegame 76 read-backs 0 / 0 (16.6 k vs drawn); `-Validation` savegame:
+  68 read-backs 0 / 0, no validation message. Illumination table's own check stays DIFFERING 0 in all runs. Job table read-backs 0 differing.
+* **GPU cost**: the whole upload stream per frame at the savegame (248 entries, `-Perf`, Vulkan): 0.003 ms without -> 0.014 ms with the table + images (the pass is
+  ~0.011 ms; at the spots ~55 entries per pass); main stream unchanged. CPU: one hash lookup + a 384 B copy per lit draw (debug setting, not a shipping cost).
+* Next (F1a, other agent): point PS window 3 at `windowBase(entry)` for the static ops; the entry index of a draw is what `LightingImages::note` returns.
+
 ## 8. F1 / F2 design decision: windows onto persistent tables (2026-11-06, orchestrator)
 
 **Decision.** F1 does not start with new shaders. Translated shaders and the ported ubershader read every float register through 4 register windows per
