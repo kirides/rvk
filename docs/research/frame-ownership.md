@@ -1257,3 +1257,31 @@ material record except the uv map (evaluated on record change from the record's 
 | F8-4 | optional GPU instance assembly | only if profiled |
 Measure first: observer calls per view / pass / class, observe vs query-building ms, registry composition by class, the share of instances
 whose entity has an ownable OpRecord, the cascade-only (off-screen) share.
+
+## 13. F5 plan: measure first, then cluster culling (no cluster LOD) (2026-11-06, accepted by the orchestrator + user)
+
+User decision 2026-11-06: **cluster LOD (Nanite-style simplified cluster hierarchies) is not planned**. Risen's geometry is from 2009, and the
+meshes it would help simplify badly: SpeedTree leaves and alpha-tested cards, skinned actors, meshes whose lightmap UVs and vertex colours carry
+baked light. RT gets nothing from it on AMD (the caps report: no cluster acceleration structures on the RX 7900 XTX). Revisit only if F5-0 shows
+that far, sub-pixel triangles cost real GPU time. **LOD selection itself** moves to the GPU inside the F5 cull pass (per instance: distance ->
+the LOD's index range in the indirect args; never in the vertex shader, which cannot change a draw's vertex count). The engine's resource cache
+must still see its touches: either every LOD of an in-view object stays resident, or the GPU's choices are read back a frame late and touched per
+resource in the batched side effects of F2c-4b, as GD3D11 does for its texture streaming. Measure the memory of "all LODs resident" before
+deciding the 680M default. Until F5 the engine's LOD choice stays: it is a dep of the F2c-4a records (7.19 measurement 4: 27 LOD-resource
+changes in 2.5 M context-frame pairs).
+
+**Model: GD3D11's GPU world** (`E:\git\github\GD3D11`, `Shaders/D3D12/WorldCull.hlsl`, `WorldObjects.h` `MeshCluster`,
+`WorldConverter::ClusterWorldMeshTriangles`, `SpatialBVH.h`). The world mesh lies in XZ grid sections, and each mesh's triangles are split into
+~128-triangle spatial clusters by a BVH. The index buffer is reordered so every cluster is a contiguous range (the shadow indices are derived
+after clustering, so they stay valid). Per view a compute pass culls the sections, then the meshes, then the clusters (a groupshared visibility
+bit mask of up to 2,048 clusters per mesh; beyond that the rest join the last run unculled). A **run of contiguous visible clusters becomes one
+indirect command**, so hidden clusters drop out without multiplying draws.
+
+| stage | content | gate | gain (est.) |
+|---|---|---|---|
+| **F5-0** measurement (no behaviour change) | at the player defaults (savegame, harbour_docks, jungle, pub_interior): triangles / vertices submitted per view kind (main z, main solid, each cascade) and per mesh-size class (pipeline-statistics queries where offered: input primitives, clipping primitives, fragment invocations; otherwise index counts on the CPU); the share of each large mesh's triangles outside the frustum and back-facing (offline from cluster bounds + normal cones built from the mesh arena's copies); a triangle screen-size histogram (a debug pass or offline from captured positions); `-PerfFrame` GPU time of the depth pre-pass + cascades vs the pixel-heavy passes; memory of "all LODs resident" vs today. A 680M run if the hardware is available, otherwise extrapolate from the 7900 XTX and say so. | numbers in 7.x | decides F5-1..3 |
+| **F5-1** cluster build | static meshes above a size threshold (level meshes first; set the threshold from F5-0): ~128-triangle spatial clusters (`meshopt_buildMeshlets` or a BVH split as GD3D11), the **mesh arena's copy** of the index range reordered so each cluster is contiguous; z pre-pass, solid pass and cascades all use the same reordered indices, so the solid pass's depth EQUAL stays invariant; per cluster: bounds + normal cone in a GPU cluster table (the GpuTable pattern); cached on disk keyed by mesh content | per sub-mesh, the index multiset is equal to the engine's; picture A/B 0 beyond noise; rt / ocean floor / captures still see valid offsets | none by itself |
+| **F5-2** cluster cull (after F2c-4c) | per view (main + cascades), per visible owned record of a clustered mesh: frustum + back-face cone per cluster, runs of visible clusters merged (cap of runs per record, else the whole range), args written into the F2c-4c arena, `DrawIndexedIndirectCount`; per-instance GPU LOD selection in the same pass (see above) | GPU-safety steps; read-back verify on check frames (a cluster drawn by the engine but culled by us = a false negative, must be 0 for the conservative tests); bursts while turning (no pop-in); sync validation; D3D12 GBV | vertex + raster work of hidden parts of large meshes (680M first) |
+| **F5-3** HiZ occlusion | same-frame two-phase HiZ from the main depth pre-pass (section 2's F5 row), per cluster and per small mesh | as F5-2 + pop-in bursts | depends on occlusion (old probe: 8-24 % hidden) |
+
+Only opaque / z / shadow-caster draws are clustered. Alpha-blended draws keep their engine order and their whole range.
