@@ -24,6 +24,7 @@
 #include <memory>
 
 #include "d3d9/device.h"
+#include "enh/material_variant.h"
 #include "rhi/rhi.h"
 #include "shader/abi.h"
 
@@ -58,7 +59,11 @@ public:
         float aoStrength = 1.0f;
         float aoRadius = 100.0f;  // world units (cm)
         int debug = 0;            // 1 normals, 2 motion, 3 AO, 4 the screen probes' GI factor
-        bool forced = false;      // on for another consumer (enh/gi's screen probes)
+        bool forced = false;      // on for another consumer (enh/gi's screen probes, FSR, frame generation, materials.rt)
+        // the targets some consumer reads (no unread outputs): motion = FSR / frame generation / materials.rt, normal = materials.rt /
+        // the debug views; AO and the screen probes read neither (normals from the depth): their variants then write no target
+        bool needMotion = false;
+        bool needNormal = false;
     };
 
     Gbuffer(d3d9::Device& device, RtScene* scene);
@@ -76,6 +81,7 @@ private:
     void enable();
     void disable();
     bool ensureTargets(d3d9::PassContext& ctx);
+    GbufferOutputs outputs() const;
     bool pipelinesReady();
     void recordAo(d3d9::PassContext& ctx);
     void recordMotionFill(d3d9::PassContext& ctx);

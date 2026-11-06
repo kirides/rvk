@@ -22,10 +22,15 @@ constexpr VkFormat kMotionFormat = kGbufferMotionFormat;
 constexpr VkImageUsageFlags kNormalUsage = kGbufferNormalUsage;
 constexpr VkImageUsageFlags kMotionUsage = kGbufferMotionUsage;
 
-bool gbufferVariant(const d3d9::Shader& s, shader::TranslateOptions& o) { return materialVariantOptions(s, MaterialVariant::Gbuffer, o); }
-bool gbufferMotionVariant(const d3d9::Shader& s, shader::TranslateOptions& o) {
-    return materialVariantOptions(s, MaterialVariant::GbufferMotion, o);
+// one variant slot per target layout (d3d9::Device::gbufferSlot): a layout change at run time takes other modules, none is rebuilt
+template <MaterialVariant K, GbufferOutputs O>
+bool gbufferVariantOf(const d3d9::Shader& s, shader::TranslateOptions& o) {
+    return materialVariantOptions(s, K, o, O);
 }
+
+// 1x1 stand-ins for storage images a pass binds but does not write in its mode (no full-size image without a reader)
+constexpr const char* kDummyAo = "gtao.unused_ao";
+constexpr const char* kDummyMotion = "gtao.unused_motion";
 
 }  // namespace
 
@@ -46,7 +51,10 @@ Gbuffer::Gbuffer(d3d9::Device& device, RtScene* scene) : dev_(device), scene_(sc
     };
     gtaoBuild_ = std::async(std::launch::async, build("gbuffer/gtao.comp", "gbuffer.gtao"));
     filterBuild_ = std::async(std::launch::async, build("gbuffer/gtao_filter.comp", "gbuffer.gtao filter"));
-    dev_.setVariantProvider(d3d9::VariantSlot::Gbuffer, {materialVariantTag("gbuf"), gbufferVariant});
+    using GO = GbufferOutputs;
+    dev_.setVariantProvider(d3d9::VariantSlot::Gbuffer, {materialVariantTag("gbuf"), gbufferVariantOf<MaterialVariant::Gbuffer, GO::NormalMotion>});
+    dev_.setVariantProvider(d3d9::VariantSlot::GbufferM, {materialVariantTag("gbuf_m"), gbufferVariantOf<MaterialVariant::Gbuffer, GO::Motion>});
+    dev_.setVariantProvider(d3d9::VariantSlot::GbufferA, {materialVariantTag("gbuf_a"), gbufferVariantOf<MaterialVariant::Gbuffer, GO::None>});
     // the replacement of the game's SSAO draws (ao.mode = replace)
     const auto make = [&](const char* name, shader::Stage stage) {
         auto s = std::make_shared<d3d9::Shader>();
@@ -57,7 +65,10 @@ Gbuffer::Gbuffer(d3d9::Device& device, RtScene* scene) : dev_(device), scene_(sc
     whiteVs_ = make("debug/fullscreen.vert", shader::Stage::Vertex);
     whitePs_ = make("gbuffer/ao_white.frag", shader::Stage::Pixel);
     whitePs_->reflection.colorOutputs = 1;
-    dev_.setVariantProvider(d3d9::VariantSlot::GbufferMotion, {materialVariantTag("gbufm"), gbufferMotionVariant});
+    dev_.setVariantProvider(d3d9::VariantSlot::GbufferMotion,
+                            {materialVariantTag("gbufm"), gbufferVariantOf<MaterialVariant::GbufferMotion, GO::NormalMotion>});
+    dev_.setVariantProvider(d3d9::VariantSlot::GbufferMotionM,
+                            {materialVariantTag("gbufm_m"), gbufferVariantOf<MaterialVariant::GbufferMotion, GO::Motion>});
 }
 
 Gbuffer::~Gbuffer() {
@@ -73,7 +84,14 @@ Gbuffer::~Gbuffer() {
     }
 }
 
+GbufferOutputs Gbuffer::outputs() const {
+    // (the debug views read both; normal without motion does not exist: the only normal reader also reads motion)
+    if (s_.needNormal || s_.debug != 0) return GbufferOutputs::NormalMotion;
+    return s_.needMotion ? GbufferOutputs::Motion : GbufferOutputs::None;
+}
+
 void Gbuffer::apply(const Settings& s) {
+    const GbufferOutputs before = outputs();
     s_ = s;
     s_.aoStrength = std::clamp(s_.aoStrength, 0.0f, 1.0f);
     s_.aoRadius = std::clamp(s_.aoRadius, 10.0f, 1000.0f);
@@ -84,15 +102,28 @@ void Gbuffer::apply(const Settings& s) {
     const bool want = (s.ao || s.debug != 0 || s.forced) && !failed_;
     if (want && !on_) enable();
     if (!want && on_) disable();
-    if (on_ && !s_.ao) dev_.setFrameAo({});
+    if (on_ && outputs() != before) {
+        // targets nobody reads any more are released; the device takes the new layout at the next ensureTargets
+        dev_.setGbuffer({});
+        if (!writesNormal(outputs())) dev_.releaseTransient("gbuffer.normal");
+        if (!writesMotion(outputs())) dev_.releaseTransient("gbuffer.motion");
+    }
+    if (on_ && scene_ != nullptr) scene_->setDynamic(this, writesMotion(outputs()));
+    if (on_ && !s_.ao) {
+        dev_.setFrameAo({});
+        for (const char* k : {"gtao.raw", "gtao.history0", "gtao.history1"}) dev_.releaseTransient(k);
+        historyValid_ = false;
+    }
     // the game's SSAO off while ours replaces it
     const bool replace = on_ && s_.ao && s_.replaceEngineSsao && whiteVs_ && whitePs_ && whiteVs_->module != rhi::ShaderModule::None &&
                          whitePs_->module != rhi::ShaderModule::None;
     if (replace && !replacing_) dev_.addDrawReplacer(this);
     if (!replace && replacing_) dev_.removeDrawReplacer(this);
     replacing_ = replace;
-    spdlog::info("enh: gbuffer: {} (ao {}, game SSAO {}, strength {:.2f}, radius {:.0f}, debug {})", on_ ? "on" : "off", s_.ao ? "on" : "off",
-                 replace ? "replaced" : "kept", s_.aoStrength, s_.aoRadius, s_.debug);
+    const GbufferOutputs out = outputs();
+    spdlog::info("enh: gbuffer: {} (targets {}, ao {}, game SSAO {}, strength {:.2f}, radius {:.0f}, debug {})", on_ ? "on" : "off",
+                 out == GbufferOutputs::NormalMotion ? "normal + motion" : out == GbufferOutputs::Motion ? "motion" : "none",
+                 s_.ao ? "on" : "off", replace ? "replaced" : "kept", s_.aoStrength, s_.aoRadius, s_.debug);
 }
 
 void Gbuffer::enable() {
@@ -104,8 +135,7 @@ void Gbuffer::enable() {
     dev_.addPass(d3d9::inject::Point::AfterDepthPrepass, "gbuffer.ao", [this](d3d9::PassContext& ctx) { recordAo(ctx); }, this, 20);
     dev_.addPass(d3d9::inject::Point::AfterOpaque, "gbuffer.motion", [this](d3d9::PassContext& ctx) { recordMotionFill(ctx); }, this, 20);
     dev_.addPass(d3d9::inject::Point::BeforeGui, "gbuffer.debug", [this](d3d9::PassContext& ctx) { recordDebug(ctx); }, this);
-    // characters' own motion (the vertex capture runs while the RT scene is active: GI, RT reflections)
-    if (scene_ != nullptr) scene_->setDynamic(this, true);
+    // characters' own motion (the vertex capture runs while the RT scene is active: GI, RT reflections): only with a motion target (apply)
 }
 
 void Gbuffer::disable() {
@@ -115,7 +145,9 @@ void Gbuffer::disable() {
     dev_.setGbuffer({});
     dev_.setFrameAo({});
     if (scene_ != nullptr) scene_->setDynamic(this, false);
-    for (const char* k : {"gbuffer.normal", "gbuffer.motion", "gtao.raw", "gtao.history0", "gtao.history1"}) dev_.releaseTransient(k);
+    for (const char* k : {"gbuffer.normal", "gbuffer.motion", "gtao.raw", "gtao.history0", "gtao.history1", kDummyAo, kDummyMotion}) {
+        dev_.releaseTransient(k);
+    }
     historyValid_ = false;
 }
 
@@ -151,13 +183,17 @@ void Gbuffer::replace(d3d9::Device& device, const d3d9::ReplaceQuery&, d3d9::Dra
 bool Gbuffer::ensureTargets(d3d9::PassContext& ctx) {
     if (ctx.mainView != 1 || ctx.sceneHdr == nullptr) return false;
     const std::uint32_t w = ctx.sceneHdr->desc().width, h = ctx.sceneHdr->desc().height;
-    rhi::Texture* n = dev_.transient("gbuffer.normal", {kNormalFormat, {w, h}, kNormalUsage});
-    rhi::Texture* m = dev_.transient("gbuffer.motion", {kMotionFormat, {w, h}, kMotionUsage});
-    if (n == nullptr || m == nullptr) {
+    const GbufferOutputs out = outputs();
+    rhi::Texture* n = writesNormal(out) ? dev_.transient("gbuffer.normal", {kNormalFormat, {w, h}, kNormalUsage}) : nullptr;
+    rhi::Texture* m = writesMotion(out) ? dev_.transient("gbuffer.motion", {kMotionFormat, {w, h}, kMotionUsage}) : nullptr;
+    if ((writesNormal(out) && n == nullptr) || (writesMotion(out) && m == nullptr)) {
         dev_.setGbuffer({});
         return false;
     }
-    dev_.setGbuffer({n, m, w, h});
+    d3d9::Device::GbufferTargets t{n, m, w, h, true};
+    // where no material writes, the fill pass puts the camera's motion; before its pipeline exists those pixels stay zero
+    t.motionClear = pipelinesReady() ? d3d9::Device::kGbufferMotionUnwritten : 0.0f;
+    dev_.setGbuffer(t);
     return true;
 }
 
@@ -181,32 +217,29 @@ bool Gbuffer::pipelinesReady() {
 void Gbuffer::recordMotionFill(d3d9::PassContext& ctx) {
     if (ctx.mainView != 1 || !on_) return;
     ensureTargets(ctx);  // for the next frame's solid pass (the z pre-pass point may not fire)
+    if (!writesMotion(outputs())) return;  // (no motion target: no reader)
     d3d9::Surface* ds = dev_.depthStencil();
     rhi::CommandList& cmd = ctx.cmd;
-    if (!dev_.gbufferWritten() || ds == nullptr || ds->texture() == nullptr || ctx.sceneHdr == nullptr || !pipelinesReady() ||
-        !dev_.readable(ds->texture(), cmd)) {
-        return;
-    }
+    if (!dev_.gbufferWritten() || ctx.sceneHdr == nullptr) return;
     const std::uint32_t w = ctx.sceneHdr->desc().width, h = ctx.sceneHdr->desc().height;
-    rhi::Texture* normal = dev_.transient("gbuffer.normal", {kNormalFormat, {w, h}, kNormalUsage});
     rhi::Texture* motion = dev_.transient("gbuffer.motion", {kMotionFormat, {w, h}, kMotionUsage});
-    rhi::Texture* raw = dev_.transient("gtao.raw", {VK_FORMAT_R32_SFLOAT, {w, h}});
-    if (normal == nullptr || motion == nullptr || raw == nullptr) return;
+    if (motion == nullptr) return;
+    // (the target is cleared to the "unwritten" marker only once the fill pipeline exists: ensureTargets)
+    if (ds == nullptr || ds->texture() == nullptr || !pipelinesReady() || !dev_.readable(ds->texture(), cmd)) return;
+    rhi::Texture* raw = dev_.transient(kDummyAo, {VK_FORMAT_R32_SFLOAT, {1, 1}});  // (bound, not written in this mode)
+    if (raw == nullptr) return;
     GbufferPush push{};
     push.h.frame = ctx.frameBlock.bits;
     push.h.passId = 2;
     push.depthTex = ds->texture()->bindlessSlot();
-    push.normalTex = normal->heapSampled();
     push.width = std::min(w, ds->width());
     push.height = std::min(h, ds->height());
     push.flags = 2u;  // gtao.comp: the motion fill only
     RhiScope rs(dev_, cmd);
     if (!rs) return;
     rhi::CommandList& cl = rs.cl();
-    rhi::Texture* normalT = rs.wrap(*normal);
     rhi::Texture* motionT = rs.wrap(*motion);
     rhi::Texture* rawT = rs.wrap(*raw);
-    cl.transition(*normalT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     cl.transition(*motionT, VK_IMAGE_LAYOUT_GENERAL);
     cl.transition(*rawT, VK_IMAGE_LAYOUT_GENERAL);
     cl.bindPipeline(*gtao_);
@@ -232,13 +265,14 @@ void Gbuffer::recordAo(d3d9::PassContext& ctx) {
         return;
     }
     const std::uint32_t w = ctx.sceneHdr->desc().width, h = ctx.sceneHdr->desc().height;
-    rhi::Texture* normal = dev_.transient("gbuffer.normal", {kNormalFormat, {w, h}, kNormalUsage});
-    rhi::Texture* motion = dev_.transient("gbuffer.motion", {kMotionFormat, {w, h}, kMotionUsage});
+    // (the AO reads neither G-buffer target: normals and reprojection come from the depth; the motion slot of gtao.comp is bound, not
+    // written in this mode: a 1x1 stand-in)
+    rhi::Texture* motion = dev_.transient(kDummyMotion, {kMotionFormat, {1, 1}, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT});
     rhi::Texture* raw = dev_.transient("gtao.raw", {VK_FORMAT_R32_SFLOAT, {w, h}});
     const std::uint32_t cur = history_ ^ 1u;
     rhi::Texture* hist[2] = {dev_.transient("gtao.history0", {VK_FORMAT_R16G16_SFLOAT, {w, h}}),
                                       dev_.transient("gtao.history1", {VK_FORMAT_R16G16_SFLOAT, {w, h}})};
-    if (normal == nullptr || motion == nullptr || raw == nullptr || hist[0] == nullptr || hist[1] == nullptr) {
+    if (motion == nullptr || raw == nullptr || hist[0] == nullptr || hist[1] == nullptr) {
         ++skipped_;
         return;
     }
@@ -246,8 +280,6 @@ void Gbuffer::recordAo(d3d9::PassContext& ctx) {
     push.h.frame = ctx.frameBlock.bits;
     push.h.passId = 1;
     push.depthTex = ds->texture()->bindlessSlot();
-    push.normalTex = normal->heapSampled();
-    push.motionTex = motion->heapSampled();
     push.linearSampler = dev_.samplerFor(true, true);
     push.width = std::min(w, ds->width());
     push.height = std::min(h, ds->height());

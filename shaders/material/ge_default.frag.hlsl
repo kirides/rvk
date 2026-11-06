@@ -47,9 +47,13 @@ struct RvkPsIn {
 
 struct RvkPsOut {
     float4 rvk_oC0 : SV_Target0;
-#ifdef RVK_MV_GBUFFER
-    float4 rvk_gbNormal : SV_Target1;  // A2B10G10R10: xy octahedral world normal (rvkGiOctEncode), z 0, w id / 3
+#ifdef RVK_MV_GB_NORMAL
+    float4 rvk_gbNormal : SV_Target1;  // A2B10G10R10: xy octahedral world normal (rvkGiOctEncode), z material channel, w id / 3
+#ifdef RVK_MV_GB_MOTION
     float2 rvk_gbMotion : SV_Target2;  // R16G16F: previous uv - this uv
+#endif
+#elif defined(RVK_MV_GB_MOTION)
+    float2 rvk_gbMotion : SV_Target1;  // (motion only: FSR / frame generation read no normal)
 #endif
 };
 
@@ -633,9 +637,11 @@ RvkPsOut PSMain(RvkPsIn rvk_in) {
 #endif
     RvkPsOut rvk_out = (RvkPsOut)0;
     rvk_out.rvk_oC0 = oC0;
-#ifdef RVK_MV_GBUFFER
 #ifdef RVK_UBER_HOOKS
+#ifdef RVK_MV_GB_NORMAL
     rvk_out.rvk_gbNormal = rvk_mvNormalOut;
+#endif
+#ifdef RVK_MV_GB_MOTION
     rvk_out.rvk_gbMotion = rvk_mvMotionOut;
 #endif
 #endif

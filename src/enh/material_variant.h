@@ -5,7 +5,7 @@
 // translated program itself is unchanged apart from its ambient constants (overrides) and one operand capture.
 //
 //   Gi              every read of g_AmbientLight / g_IndoorAmbientColor = the GI probes' irradiance (enh/gi)
-//   Gbuffer         + the thin G-buffer outputs (location 1 normal + id, 2 motion) and the reprojected AO (enh/gbuffer)
+//   Gbuffer         + the reprojected AO / screen probes and the thin G-buffer outputs the session reads (GbufferOutputs; enh/gbuffer)
 //   GbufferMotion   + per-object motion from the vertex capture's previous world position (location 15; only with the
 //                   capture vertex shader variant: it writes that varying)
 
@@ -20,8 +20,17 @@ namespace rvk::enh {
 
 enum class MaterialVariant : std::uint8_t { Gi, Gbuffer, GbufferMotion };
 
-// the variant's options for a pixel shader; false = not applicable (Gi: no ambient constants; all: no colour output 0)
-bool materialVariantOptions(const d3d9::Shader& s, MaterialVariant kind, shader::TranslateOptions& o);
+// The G-buffer targets a Gbuffer / GbufferMotion variant writes: only what a consumer of the session reads (no unread outputs):
+// None = AO / screen probes only (no attachments), Motion = FSR / frame generation (SV_Target1 motion), NormalMotion = traced material
+// reflections / debug views (SV_Target1 normal, SV_Target2 motion). Bit 1 = motion, bit 2 = normal.
+enum class GbufferOutputs : std::uint8_t { None = 0, Motion = 1, NormalMotion = 3 };
+inline bool writesNormal(GbufferOutputs o) { return (static_cast<unsigned>(o) & 2u) != 0; }
+inline bool writesMotion(GbufferOutputs o) { return (static_cast<unsigned>(o) & 1u) != 0; }
+
+// the variant's options for a pixel shader; false = not applicable (Gi: no ambient constants; all: no colour output 0; GbufferMotion
+// without motion output)
+bool materialVariantOptions(const d3d9::Shader& s, MaterialVariant kind, shader::TranslateOptions& o,
+                            GbufferOutputs outputs = GbufferOutputs::NormalMotion);
 
 // the SPIR-V cache tag of a variant: `base` + a hash of the embedded GLSL it pastes (an edit of rvk_gi.glsl /
 // rvk_material_variant.glsl never reuses a stale cached variant)

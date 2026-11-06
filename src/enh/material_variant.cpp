@@ -31,8 +31,11 @@ std::string materialVariantTag(std::string_view base) {
     return std::format("{}{}{}{:08x}", base, g_pbr ? "-pbr" : "", g_cluster ? "-cl" : "", static_cast<std::uint32_t>(h ^ (h >> 32)));
 }
 
-bool materialVariantOptions(const d3d9::Shader& s, MaterialVariant kind, shader::TranslateOptions& o) {
+bool materialVariantOptions(const d3d9::Shader& s, MaterialVariant kind, shader::TranslateOptions& o, GbufferOutputs outputs) {
     if (s.stage != shader::Stage::Pixel || (s.reflection.colorOutputs & 1u) == 0) return false;
+    if (kind == MaterialVariant::GbufferMotion && !writesMotion(outputs)) return false;  // (per-object motion has nothing to write)
+    const bool outNormal = kind != MaterialVariant::Gi && writesNormal(outputs);
+    const bool outMotion = kind != MaterialVariant::Gi && writesMotion(outputs);
     const auto& amb = s.semantics[Semantic::AmbientLight];
     const bool ambient = amb.present() && amb.count >= 7;
     const bool gbuffer = kind != MaterialVariant::Gi;
@@ -64,6 +67,8 @@ bool materialVariantOptions(const d3d9::Shader& s, MaterialVariant kind, shader:
                                shader::abi::kFrameParamLights);
     }
     if (gbuffer) defines += "#define RVK_MV_GBUFFER 1\n";
+    if (outNormal) defines += "#define RVK_MV_GB_NORMAL 1\n";
+    if (outMotion) defines += "#define RVK_MV_GB_MOTION 1\n";
     if (kind == MaterialVariant::GbufferMotion) defines += "#define RVK_MV_MOTION 1\n";
     defines += std::format("#define RVK_MV_KIND_SKINNED {}\n", static_cast<unsigned>(d3d9::draws::Kind::Skinned));
     // the interpolated world normal (TEXCOORD4 of the material vertex shader: vNormalAndAO)
@@ -86,10 +91,14 @@ bool materialVariantOptions(const d3d9::Shader& s, MaterialVariant kind, shader:
     }
     o.prologue += std::format("    rvkMvPrologue(rvk_fragCoord, {});", vertexNormal);
     o.epilogue = "    rvkMvEpilogue(oC0);";
-    if (gbuffer) {
-        // (no [[vk::location]] on pixel outputs: DXC rejects a partial explicit assignment next to oC0 : SV_Target0)
+    // the G-buffer targets the session reads, in attachment order (no [[vk::location]] on pixel outputs: DXC rejects a partial explicit
+    // assignment next to oC0 : SV_Target0)
+    if (outNormal && outMotion) {
         o.extraOutputs = "    float4 rvk_gbNormal : SV_Target1;\n    float2 rvk_gbMotion : SV_Target2;";
         o.epilogue += "\n    rvk_out.rvk_gbNormal = rvk_mvNormalOut;\n    rvk_out.rvk_gbMotion = rvk_mvMotionOut;";
+    } else if (outMotion) {
+        o.extraOutputs = "    float2 rvk_gbMotion : SV_Target1;";
+        o.epilogue += "\n    rvk_out.rvk_gbMotion = rvk_mvMotionOut;";
     }
     if (ambient) {
         for (int i = 0; i < 7; ++i) o.constOverrides[static_cast<std::uint32_t>(amb.reg + i)] = std::format("rvk_gi[{}]", 1 + i);

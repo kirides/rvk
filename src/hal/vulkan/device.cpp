@@ -891,14 +891,16 @@ void HalDevice::applyGbuffer() {
     s.aoRadius = frozen::kAoRadiusMetres * 100.0f;
     const std::string_view d = rs.gbufferDebug->asEnum();
     s.debug = d == "normals" ? 1 : d == "motion" ? 2 : d == "ao" ? 3 : d == "screen_gi" ? 4 : d == "material" ? 5 : 0;
-    // the screen probes (enh/gi) read the G-buffer
-    s.forced = rs.giEnabled != nullptr && rs.giEnabled->asBool() && rs.giScreen != nullptr && rs.giScreen->asEnum() != "off";
-    // FSR (enh/upscale) reads the motion vectors
-    s.forced = s.forced || (upscale_ && enh::usesFsr(upscale_->mode()));
-    // frame generation (enh/framegen) reads them too
-    s.forced = s.forced || (framegen_ && framegen_->wantsGbuffer());
-    // the traced material reflections read the normal and the pack's roughness / metalness
-    s.forced = s.forced || (materialRt_ && materialRt_->tier() > 0);
+    // who reads what (no unread outputs): the screen probes (enh/gi) and the AO take only the variants (their normals come from the
+    // depth); FSR (enh/upscale) and frame generation (enh/framegen) read the motion; the traced material reflections read the normal +
+    // the pack's roughness / metalness and the motion (their filter's reprojection)
+    const bool screenProbes = rs.giEnabled != nullptr && rs.giEnabled->asBool() && rs.giScreen != nullptr && rs.giScreen->asEnum() != "off";
+    const bool fsr = upscale_ && enh::usesFsr(upscale_->mode());
+    const bool fg = framegen_ && framegen_->wantsGbuffer();
+    const bool matRt = materialRt_ && materialRt_->tier() > 0;
+    s.forced = screenProbes || fsr || fg || matRt;
+    s.needMotion = fsr || fg || matRt;
+    s.needNormal = matRt;
     gbuffer_->apply(s);
 }
 

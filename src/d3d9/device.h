@@ -309,8 +309,8 @@ public:
     rhi::ShaderModule lodModule = rhi::ShaderModule::None;
     bool lodFailed = false;
     // variants of enhancements built in the background (Device::variant, VariantSlot): the module once ready
-    std::array<std::atomic<rhi::ShaderModule>, 5> variants{};
-    std::array<std::atomic<std::uint8_t>, 5> variantState{};  // 0 not requested, 1 queued, 2 ready, 3 failed / not applicable
+    std::array<std::atomic<rhi::ShaderModule>, 8> variants{};  // (VariantSlot::Count)
+    std::array<std::atomic<std::uint8_t>, 8> variantState{};  // 0 not requested, 1 queued, 2 ready, 3 failed / not applicable
 };
 
 // A non-owning reference to the device's current shader (setVertexShader / setPixelShader / a replacement's): switching
@@ -337,11 +337,15 @@ private:
 enum class VariantSlot : std::uint8_t {
     Gi = 0,       // pixel shaders: the ambient constants from the GI probe volume (enh/gi)
     Capture = 1,  // vertex shaders: world positions + TEXCOORD0 written to a buffer (skinned draws in the RT scene, enh/rt_scene)
-    Gbuffer = 2,  // pixel shaders: GI + the thin G-buffer outputs + AO (enh/gbuffer, enh/material_variant)
+    Gbuffer = 2,  // pixel shaders: GI + AO + the G-buffer outputs normal + motion (enh/gbuffer, enh/material_variant)
     GbufferMotion = 3,  // ... + per-object motion from the capture vertex shader's previous world position
     Base = 4,     // pixel shaders: the plain GLSL material shader (Device::setUbershader), no enhancement hooks
+    GbufferM = 5,        // as Gbuffer with the motion output only (FSR / frame generation read no normal)
+    GbufferMotionM = 6,  // as GbufferMotion with the motion output only
+    GbufferA = 7,        // GI + AO / screen probes, no G-buffer output (no consumer reads the targets)
     Count
 };
+static_assert(static_cast<std::size_t>(VariantSlot::Count) == 8, "Shader::variants / variantState sizes");
 struct VariantProvider {
     std::string tag;  // part of the SPIR-V cache name (bump it when the variant's GLSL changes)
     // the options of a shader's variant; false = not applicable (the draw keeps the engine's module). Any thread
@@ -1104,19 +1108,26 @@ public:
     void setPackBypass(bool on) { packBypass_ = on; }
     std::uint64_t giDrawsThisInterval() const { return giDrawCount_; }
     // ---- thin G-buffer (enh/gbuffer, docs/research/rtgi.md 10) ----
-    // Extra colour attachments of the first main view's solid pass (scene HDR target only): `normal` (A2B10G10R10: xy the
-    // octahedral world normal, w id / 3: 1 static material, 2 character, 0 nothing written) at index 1 and `motion` (RG16F:
-    // previous uv - this uv) at index 2, cleared at the frame's first use. The material pixel shaders' Gbuffer variants write them; every other draw
-    // of the scope keeps them (write mask 0). The pipelines of such a scope differ from the plain ones: the device first
-    // builds them in the background (prewarm, the frame's solid draws as the template) and arms the attachments once a
-    // frame's solid pass found all of them (or after 10 s). Render thread; normal == null = off.
+    // Extra colour attachments of the first main view's solid pass (scene HDR target only), only those a consumer reads (no unread
+    // outputs): `normal` (A2B10G10R10: xy the octahedral world normal, z material channel, w id / 3) and `motion` (RG16F: previous uv -
+    // this uv; cleared to kGbufferMotionUnwritten, the fill pass writes the camera's motion there), in that order after the engine's
+    // target, cleared at the frame's first use. Either may be null (`active` with none = the variants' AO / screen probes only, no
+    // attachment). The material pixel shaders' Gbuffer variants write them; every other draw of the scope keeps them (write mask 0).
+    // The pipelines of such a scope differ from the plain ones: the device first builds them in the background (prewarm, the frame's
+    // solid draws as the template) and arms the attachments once a frame's solid pass found all of them (or after 10 s). Render
+    // thread; active == false = off.
     struct GbufferTargets {
-        rhi::Texture* normal = nullptr;
+        rhi::Texture* normal = nullptr;  // (only together with motion)
         rhi::Texture* motion = nullptr;
         std::uint32_t width = 0, height = 0;
+        bool active = false;
+        float motionClear = 0.0f;  // the motion target's clear value (kGbufferMotionUnwritten once the fill pass can replace it)
+        std::uint32_t attachments() const { return (normal != nullptr ? 1u : 0u) + (motion != nullptr ? 1u : 0u); }
     };
+    static constexpr float kGbufferMotionUnwritten = 60000.0f;  // (exact in half precision; motion is a uv delta, |x| <= ~2; gtao.comp tests > 30000)
     void setGbuffer(const GbufferTargets& g);
     bool gbufferArmed() const { return gbufArmed_; }
+    bool gbufferActive() const { return gbuf_.active; }
     // the G-buffer was written in this frame's main view (its contents are this frame's)
     bool gbufferWritten() const { return gbufWrittenFrame_ == frameValue() && gbufWrittenFrame_ != 0; }
     // FrameBlock::ao (shader/abi.h): last frame's AO image for the material shaders' Gbuffer variants
@@ -1264,7 +1275,13 @@ private:
     std::uint32_t packWord(CachedDraw::Variant* note = nullptr);                                  // the material pack's word for the current tag (0 = none), uploads its map when needed
     // the G-buffer: whether the current targets / phase are its scope (first main view, solid pass, the scene HDR target)
     bool gbufferTargetsMatch() const;
-    bool gbufferScope() const { return gbuf_.normal != nullptr && gbufArmed_ && gbufferTargetsMatch(); }
+    bool gbufferScope() const { return gbuf_.active && gbufArmed_ && gbufferTargetsMatch(); }
+    // the pixel shader variant slot of a G-buffer material draw for the current targets (per-object motion: the capture VS's previous position)
+    VariantSlot gbufferSlot(bool perObjectMotion) const {
+        if (gbuf_.normal != nullptr) return perObjectMotion ? VariantSlot::GbufferMotion : VariantSlot::Gbuffer;
+        if (gbuf_.motion != nullptr) return perObjectMotion ? VariantSlot::GbufferMotionM : VariantSlot::GbufferM;
+        return VariantSlot::GbufferA;  // (no target: nothing to write, no per-object motion)
+    }
     // a G-buffer material draw: the material pixel shader's Gbuffer variant applies (opaque or alpha-over, depth tested)
     bool gbufferEligible(const scene::Phase& phase, draws::Kind kind) const;
     bool gbufferStaticEligible(const scene::Phase& phase, draws::Kind kind) const;  // ... without the ambient registers' test

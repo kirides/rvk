@@ -77,15 +77,18 @@ bool Device::beginRendering() {
         targetHeight_ = std::min(targetHeight_, s->height());
     }
     ri.colorCount = colorCount_;
-    // the thin G-buffer (enh/gbuffer): normal + motion after the engine's target, cleared at the frame's first use
+    // the thin G-buffer (enh/gbuffer): the targets a consumer reads (normal, motion) after the engine's target, cleared at the frame's
+    // first use (motion to kGbufferMotionUnwritten: the fill pass writes the camera's motion where no material did)
     engineColorCount_ = colorCount_;
     scopeGbuf_ = false;
     if (colorCount_ == 1 && gbufferScope()) {
         const bool first = gbufWrittenFrame_ != frameValue();
         for (rhi::Texture* img : {gbuf_.normal, gbuf_.motion}) {
+            if (img == nullptr) continue;
             rhi::RenderingInfo::Attachment& a = ri.color[colorCount_];
             a.texture = img;
             a.load = first ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+            if (img == gbuf_.motion) a.clear.float32[0] = a.clear.float32[1] = gbuf_.motionClear;
             colorFormats_[colorCount_] = img->desc().format;
             ++colorCount_;
         }
@@ -1037,13 +1040,14 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     if (!replaced && !captureRequest_.null() && geom.indexed && (notInstanced || captureInstances_) && vsModule == vs_->module) {
         vsVariant = variant(vs_, VariantSlot::Capture);
     }
-    cv.gbufGate = gbuf_.normal != nullptr;
+    cv.gbufGate = gbuf_.active;
     cv.gbufStatic = !replaced && tint == 0 && cv.gbufGate && gbufferStaticEligible(phase, kind);
     const bool gbufMaterial = cv.gbufStatic && gbufferLit();
     if (gbufMaterial && scopeGbuf_) {
         cv.gbufWanted = true;
-        fsPlain = variant(ps_, VariantSlot::Gbuffer);
-        const rhi::ShaderModule motion = vsVariant != rhi::ShaderModule::None ? variant(ps_, VariantSlot::GbufferMotion) : rhi::ShaderModule::None;
+        fsPlain = variant(ps_, gbufferSlot(false));
+        const rhi::ShaderModule motion =
+            vsVariant != rhi::ShaderModule::None && gbuf_.motion != nullptr ? variant(ps_, gbufferSlot(true)) : rhi::ShaderModule::None;
         fsVariant = motion != rhi::ShaderModule::None ? motion : fsPlain;
     } else if (!replaced && tint == 0 && cv.gate) {
         cv.staticOk = giStaticEligible(phase);
@@ -1121,15 +1125,16 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         }
     }
     // arming the G-buffer (Device::setGbuffer): this solid draw's pipeline with the attachments, built in the background
-    if (gbuf_.normal != nullptr && !gbufArmed_ && !scopeGbuf_ && colorCount_ == 1 && gbufferTargetsMatch()) {
+    if (gbuf_.active && gbuf_.attachments() > 0 && !gbufArmed_ && !scopeGbuf_ && colorCount_ == 1 && gbufferTargetsMatch()) {
         ++gbufSolid_;
         PipelineDesc md = pd;
-        md.colorCount = 3;
-        md.colorFormats[1] = gbuf_.normal->desc().format;
-        md.colorFormats[2] = gbuf_.motion->desc().format;
+        md.colorCount = 1;
+        for (rhi::Texture* img : {gbuf_.normal, gbuf_.motion}) {
+            if (img != nullptr) md.colorFormats[md.colorCount++] = img->desc().format;
+        }
         bool writes = false;
         if (gbufMaterial) {
-            const VariantSlot slot = captureDraw ? VariantSlot::GbufferMotion : VariantSlot::Gbuffer;
+            const VariantSlot slot = gbufferSlot(captureDraw);
             const rhi::ShaderModule m = variant(ps_, slot);
             if (m != rhi::ShaderModule::None) {
                 md.fs = m;
@@ -1139,7 +1144,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
             }
         }
         if (!eds3) {
-            for (std::uint32_t i = 1; i < 3; ++i) {
+            for (std::uint32_t i = 1; i < md.colorCount; ++i) {
                 md.blend[i] = BlendAttachment{};
                 md.blend[i].writeMask = writes ? 0xFu : 0u;
             }
@@ -1472,7 +1477,7 @@ void Device::fillCapture(const DrawPacket& p) {
 }
 
 bool Device::replayAllowed(const CachedDraw& c) const {
-    if (tint_ != draws::TintMode::Off || ubershader_.load(std::memory_order_relaxed) || (gbuf_.normal != nullptr && !gbufArmed_)) return false;  // (arming counts the solid draws in prepareDraw)
+    if (tint_ != draws::TintMode::Off || ubershader_.load(std::memory_order_relaxed) || (gbuf_.active && !gbufArmed_)) return false;  // (arming counts the solid draws in prepareDraw)
     if (stats_.totalDraws < options_.logDraws || wp0_.on || customVertices_ != 0 || up_.active) return false;
     // (the GI / material pack variant and the billboards' fade variant are part of the packet: its decision is re-derived by replayBuild)
     // observers (RT scene, GI, object motion) and opaque-observing replacers (water) are shown the cached query at replay (replayDraw)
@@ -1494,13 +1499,13 @@ bool Device::replayBuild(const CachedDraw& c, const ReplayInputs& in, DrawPacket
     // the enhancement variant decision (prepareDraw): its inputs are the settings, the ambient registers (the engine's lighting of this draw) and the
     // variants' build state; a change in any of them makes the draw take another pipeline / pixel window / pack word
     if (c.v.giOn != giDraws_.on || c.v.replaceLightmaps != giDraws_.replaceLightmaps || c.v.pack != (packProvider_ && !packBypass_)) return fail(10);
-    if (c.v.gbufGate != (gbuf_.normal != nullptr)) return fail(10);
+    if (c.v.gbufGate != gbuf_.active) return fail(10);
     bool gbufTaken = false;
     if (c.v.gbufGate) {
         // the G-buffer's material pass (its variant reads the ambient too): taken when eligible, lit and in the G-buffer's rendering scope
         gbufTaken = c.v.gbufStatic && scopeGbuf_ && gbufferLit();
         if (gbufTaken != c.v.gbufWanted) return fail(10);
-        if (gbufTaken && variant(ps_, VariantSlot::Gbuffer) != c.v.fsAsked) return fail(10);
+        if (gbufTaken && variant(ps_, gbufferSlot(false)) != c.v.fsAsked) return fail(10);
     }
     if (c.v.gate && !gbufTaken) {
         const bool wanted = c.v.staticOk && ambientLit();

@@ -7,9 +7,12 @@
 //                         g_IndoorAmbientColor at c[RVK_MV_IND_REG]: every read of them becomes rvk_gi[1..7] / rvk_gi[0]
 //                         (constant overrides), filled by the prologue: the GI probes (when the FrameBlock has a volume) and
 //                         the reprojected ambient occlusion (G-buffer variants, when the FrameBlock has one)
-//   RVK_MV_GBUFFER        writes the thin G-buffer: location 1 octahedral world normal + id, location 2 motion (enh/gbuffer);
-//                         reads this frame's AO and screen probe factor (computed after the z pre-pass) at its pixel
-//   RVK_MV_MOTION         + reads the vertex capture's previous world position (location 15): per-object motion (characters)
+//   RVK_MV_GBUFFER        the G-buffer family (enh/gbuffer): reads this frame's AO and screen probe factor (computed after the z
+//                         pre-pass) at its pixel; writes only the targets a consumer of this session reads (no unread outputs):
+//   RVK_MV_GB_NORMAL      + writes the octahedral world normal + material channel + id (SV_Target1)
+//   RVK_MV_GB_MOTION      + writes the screen motion (SV_Target2 after the normal, else SV_Target1)
+//   RVK_MV_MOTION         + reads the vertex capture's previous world position (location 15): per-object motion (characters;
+//                         only with RVK_MV_GB_MOTION)
 //   RVK_MV_VNORMAL        the prologue's argument is the interpolated world normal (TEXCOORD4), else float4(0, 0, 0, 0)
 //   RVK_MV_KIND_SKINNED   draws::Kind::Skinned (the G-buffer id of characters)
 //   RVK_MV_CLUSTER        the point-light registers c[RVK_MV_CL_REG .. + 4 RVK_MV_CL_COUNT) are per-pixel values: the engine's, with the lights the
@@ -19,8 +22,8 @@
 // Differences against the GLSL text, all because HLSL has no stage-interface globals:
 //  - the entry's pixel position is an argument: the entry point starts with rvkMvPrologue(rvk_fragCoord, <normal input or
 //    float4(0, 0, 0, 0)>) and ends with rvkMvEpilogue(oC0) (the C++ side requires colour output 0);
-//  - the outputs of RVK_MV_GBUFFER are the globals rvk_mvNormalOut (float4) / rvk_mvMotionOut (float2), set by rvkMvEpilogue;
-//    the entry's epilogue copies them into the output struct members rvk_gbNormal (SV_Target1) / rvk_gbMotion (SV_Target2);
+//  - the outputs are the globals rvk_mvNormalOut (float4, RVK_MV_GB_NORMAL) / rvk_mvMotionOut (float2, RVK_MV_GB_MOTION), set by
+//    rvkMvEpilogue; the entry's epilogue copies them into the output struct members rvk_gbNormal / rvk_gbMotion;
 //  - RVK_MV_MOTION: the input at location 15 is a member of the pixel input struct; the entry copies it into the global
 //    rvk_prevWorld (a static float4 declared below) before the prologue runs.
 // The normal-mapped world normal comes from GlslOptions::dotCaptures (the operand the shader dots with g_AmbientLight[0],
@@ -49,9 +52,11 @@ static float3 rvk_mvSgi = float3(1.0, 1.0, 1.0);  // the screen probes' factor a
 static float rvk_mvVao = 1.0;                   // the vertex ambient occlusion / indoor factor (TEXCOORD4.w): the engine's ambient = lerp(c14, SH, it)
 static float4 rvk_mvFrag = float4(0.0, 0.0, 0.0, 0.0);  // gl_FragCoord (SV_Position), set by the prologue
 
-#ifdef RVK_MV_GBUFFER
-static float4 rvk_mvNormalOut = float4(0.0, 0.0, 0.0, 0.0);  // -> SV_Target1, A2B10G10R10: xy octahedral world normal (rvkGiOctEncode), z 0, w id / 3
-static float2 rvk_mvMotionOut = float2(0.0, 0.0);            // -> SV_Target2, R16G16F: previous uv - this uv
+#ifdef RVK_MV_GB_NORMAL
+static float4 rvk_mvNormalOut = float4(0.0, 0.0, 0.0, 0.0);  // A2B10G10R10: xy octahedral world normal (rvkGiOctEncode), z material channel, w id / 3
+#endif
+#ifdef RVK_MV_GB_MOTION
+static float2 rvk_mvMotionOut = float2(0.0, 0.0);            // R16G16F: previous uv - this uv
 #endif
 #ifdef RVK_MV_MOTION
 static float4 rvk_prevWorld = float4(0.0, 0.0, 0.0, 0.0);  // enh::kPrevWorldLocation (15), copied from the pixel input by the entry
@@ -624,10 +629,12 @@ void rvkMvEpilogue(inout float4 c0) {
 #ifdef RVK_MV_PBR
     rvkMvPbr(f, c0);
 #endif
-#ifdef RVK_MV_GBUFFER
+#ifdef RVK_MV_GB_NORMAL
     float3 n = dot(rvk_gbN.xyz, rvk_gbN.xyz) > 1e-8 ? normalize(rvk_gbN.xyz) : rvk_giN;
     uint kind = pc.flags & RVK_DRAW_KIND_MASK;
     rvk_mvNormalOut = float4(rvkGiOctEncode(n), rvk_pbrGb, kind == uint(RVK_MV_KIND_SKINNED) ? 2.0 / 3.0 : 1.0 / 3.0);
+#endif
+#ifdef RVK_MV_GB_MOTION
     float3 prevP = rvk_mvP;
 #ifdef RVK_MV_MOTION
     if (rvk_prevWorld.w > 0.5) prevP = rvk_prevWorld.xyz;

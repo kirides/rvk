@@ -2,7 +2,7 @@
 // et al. 2016, "Practical realtime strategies for accurate indirect occlusion"; the slice formulation as in Intel's XeGTAO,
 // MIT, reimplemented) from the main view's hardware depth and the G-buffer normal, per pixel 2 slices x 6 steps on each side,
 // the slice angle and step offsets jittered per pixel and frame (the temporal filter integrates them). Pixels the material
-// passes did not reach (no G-buffer id: sky, unlit effects) also get the camera's motion here.
+// passes did not reach (motion still the "unwritten" clear value: sky, unlit effects) also get the camera's motion here.
 
 #include "gbuffer_common.hlsli"
 
@@ -30,9 +30,9 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     float2 uv = (float2(p) + 0.5) / size;
     float z = depthAt(p);
     if ((pc.flags & 2u) != 0u) {
-        // the camera's motion where no material pass wrote one (id 0)
-        float4 nrm = rvkFetch2D(pc.normalTex, p);
-        if (nrm.w < 0.16) motionImage[p] = gbCameraMotion(f, gbWorldPos(f, uv, z));
+        // the camera's motion where no material pass wrote one (the clear value d3d9::Device::kGbufferMotionUnwritten = 60000: no
+        // normal target needed for the test)
+        if (motionImage[p].x > 30000.0) motionImage[p] = gbCameraMotion(f, gbWorldPos(f, uv, z));
         return;
     }
     if (z >= 1.0) {

@@ -1157,7 +1157,7 @@ void Device::present() {
     capturedPrev_.swap(captured_);
     captured_.clear();
     // the G-buffer's attachments are armed once a frame's solid pass found every pipeline / variant they need
-    if (gbuf_.normal != nullptr && !gbufArmed_) {
+    if (gbuf_.active && !gbufArmed_) {
         const bool timeout = secondsSinceCreate() - gbufRequestedAt_ > 10.0;
         if ((gbufSolid_ > 0 && gbufMissing_ == 0) || (timeout && gbufSolid_ > 0)) {
             gbufArmed_ = true;
@@ -1696,17 +1696,22 @@ rhi::ShaderModule Device::variantModule(const Shader& s, const shader::Translate
 // ---- thin G-buffer (enh/gbuffer) ----
 
 void Device::setGbuffer(const GbufferTargets& g) {
-    const bool was = gbuf_.normal != nullptr;
+    const bool was = gbuf_.active;
+    const std::uint32_t wasAttachments = gbuf_.attachments();
+    const bool hadNormal = gbuf_.normal != nullptr;
     gbuf_ = g;
-    if (g.normal == nullptr) {
+    if (!g.active) {
         if (was) spdlog::info("d3d9: g-buffer off");
         gbufArmed_ = false;
         return;
     }
-    if (!was) {
+    if (!was || wasAttachments != g.attachments() || hadNormal != (g.normal != nullptr)) {
         gbufRequestedAt_ = secondsSinceCreate();
-        gbufArmed_ = false;
-        spdlog::info("d3d9: g-buffer requested ({}x{}): building the solid pass's pipelines with its attachments", g.width, g.height);
+        // without attachments the scope's pipelines are the plain ones (only the pixel shader variant differs, taken per draw once built)
+        gbufArmed_ = g.attachments() == 0;
+        spdlog::info("d3d9: g-buffer requested ({}x{}, targets: {}): {}", g.width, g.height,
+                     g.normal != nullptr ? "normal + motion" : g.motion != nullptr ? "motion" : "none (AO / screen probes only)",
+                     gbufArmed_ ? "armed" : "building the solid pass's pipelines with its attachments");
     }
 }
 
