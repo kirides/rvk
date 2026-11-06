@@ -82,6 +82,27 @@ class Census(unittest.TestCase):
             self.assertEqual(res["union"]["requests"], 3)
             self.assertEqual(res["union"]["distinct_graph"], 2)
 
+    def test_cpp_parity_vectors(self):
+        # the same vectors as tests/material_table_tests.cpp (src/gpuscene/material_graph.h is this tool's normalise / split_request in C++)
+        vectors = [
+            ("g_ShaderData[3].xy + g_vShaderData[ 12 ] * g_SamplerData[2]", "g_ShaderData[#].xy + g_vShaderData[#] * g_SamplerData[#]"),
+            ("x * 1.0f", "x * 1.0f"),
+            ("(tex2D( g_SamplerData[0], XFX_PS_TEX0 )) * g_ShaderData[0]", "(tex2D( g_SamplerData[#], XFX_PS_TEX0 )) * g_ShaderData[#]"),
+            ("xg_ShaderData[1] g_ShaderData [ 7 ] g_ShaderData[a] g_SamplerData[ 3]+g_ShaderData[11]",
+             "xg_ShaderData[1] g_ShaderData[#] g_ShaderData[a] g_SamplerData[#]+g_ShaderData[#]"),
+            ("g_vShaderData[0].x*g_vShaderData[10]", "g_vShaderData[#].x*g_vShaderData[#]"),
+        ]
+        for text, want in vectors:
+            self.assertEqual(mgc.normalise(text), want)
+        r = rec("tex2D(g_SamplerData[2],XFX_PS_TEX0)*g_ShaderData[5]", XFX_VS_TEX0="XFX_VS_INPUT_TEX0", XFX_DIRLIGHT="true",
+                XFX_SKINNED="true", XFX_DOUBLESIDED="true")
+        r["macros"] = [m for m in r["macros"]]
+        s = mgc.split_request(r)
+        self.assertEqual(s["graph"], "XFX_PS_DIFFUSE=tex2D(g_SamplerData[#],XFX_PS_TEX0)*g_ShaderData[#] ;; XFX_VS_TEX0=XFX_VS_INPUT_TEX0")
+        self.assertEqual(s["static"], (("XFX_DOUBLESIDED", "true"), ("XFX_QUALITY", "2"), ("XFX_SKINNED", "true")))
+        rv = rec("x", entry="VS_Default", stage="vs", XFX_VS_TEX0="XFX_VS_INPUT_TEX0")
+        self.assertEqual(mgc.split_request(rv)["graph"], "XFX_VS_TEX0=XFX_VS_INPUT_TEX0")
+
 
 if __name__ == "__main__":
     unittest.main()

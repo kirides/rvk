@@ -21,6 +21,7 @@
 #include "engine/symbols.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "native/static_ops.h"
+#include "gpuscene/material_table.h"
 
 namespace rvk::native {
 
@@ -219,6 +220,7 @@ StaticOps::Skip StaticOps::composeDecals(const std::uint8_t* admin, const std::u
                 const std::int32_t slot = get<std::int32_t>(sampler, 0x98, -1);
                 if (slot < 0 || slot >= 16) return Skip::Unreadable;
                 poolsOf(defaultShader)->slotImage[static_cast<std::size_t>(slot)] = r.image;
+                gpuscene::materialtable().noteSwitchWrite(defaultShader, 2, static_cast<std::uint32_t>(slot));
             } else {
                 leanTouch(r.material);  // O2a: every record's material is touched, also without a shader
                 shader = ptr(r.material, 0x70);
@@ -537,6 +539,7 @@ StaticOps::Skip StaticOps::composeBillboards(const std::uint8_t* admin) {
             const std::int32_t slot = get<std::int32_t>(sampler, 0x98, -1);
             if (slot < 0 || slot >= 16) return Skip::Unreadable;
             poolsOf(defaultShader)->slotImage[static_cast<std::size_t>(slot)] = r.keys.image;
+            gpuscene::materialtable().noteSwitchWrite(defaultShader, 2, static_cast<std::uint32_t>(slot));
         }
         if (shader == nullptr) continue;
         // SetGlobalAlpha(1, 0), SetWorldMatrix(identity, 0)
@@ -621,6 +624,7 @@ StaticOps::Skip StaticOps::composeBillboardAlpha(const Op& op) {
             const std::int32_t slot = get<std::int32_t>(sampler, 0x98, -1);
             if (slot < 0 || slot >= 16) return Skip::Unreadable;
             poolsOf(defaultShader)->slotImage[static_cast<std::size_t>(slot)] = image;
+            gpuscene::materialtable().noteSwitchWrite(defaultShader, 2, static_cast<std::uint32_t>(slot));
         }
     }
     Geom g;

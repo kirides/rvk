@@ -380,6 +380,45 @@ static GPU copy's address without the RT gate of `gpuAddress()`.
 * Cost (savegame, packet cache off, `-Perf`; the check does a mutex + 4 buffer-address lookups per draw): CPU ~6.8 ms vs ~6.7 ms per frame, interval p50 7.5 vs 7.2 ms: about
   +0.1 - 0.3 ms, a verification cost (a shipping path reads the tables only on the GPU). Upload ~0.1 record / 0.01 KiB per frame in steady state, ~0.3 records at cache-in.
 
+### 7.7 Material table (2026-11-06, `native.material_table`)
+
+`src/gpuscene/material_table.*` + `material_compose.h` (pure: record build from raw engine bytes + `diffMaterial`, tests `material_table_*`) +
+`material_graph.h` (graph normalisation / ids, parity vectors shared with `tools/tests/test_material_graph_census.py`) + `shaders/include/rvk_material_table.hlsli`
+(+ `shaders/test/material_fetch.comp.hlsl`, DXIL-checked, not run on the GPU). Debug setting (Bool, restart, default off, Full): off = nothing allocated.
+
+* Record (1104 B, key = the eCShaderDefault whose pools / slots the composition reads): uint4 info (live, version, pack word reserved 0, flags: opacity /
+  refracted / trade-alpha / z-fill / depth bias / double-sided from `XFX_DOUBLESIDED` / has switch / slots overflow), counts (vsFirst, vsCount, psFirst, psCount),
+  state (blend mode +0x50, mask ref +0x58, base stage | slots), graph (PS_Default id, PS_DefaultZPass id), switch masks; then VS pool 32 x float4 (c232..),
+  PS pool 16 x float4 (c6..c13), 8 sampler slots x 32 B (bindless slot of the image as `materialSamplers` resolves it: image data -> stage placeholder -> error
+  image; the 6 raw sampler-state words, 0xABABABAB = the gfx admin's default filter, a draw parameter; sRGB int8). Capacity 4096 (4.3 MiB).
+  The pack word is reserved: the pack keys by draw tag at issue time, not by material.
+* Textures: the composition gets the bindless index from `textureOfImageData` -> HAL texture -> `Texture::bindlessSlot()` (assigned at creation, `heapSampled`);
+  the record stores it, every draw compares its composed binding with it (`textures DIFFERING`, plus sampler states).
+* Updates: slot at first sight in `passDraw` / `specialPassDrawImpl`; every drawn record is re-read ONCE per frame at its first draw (poll; no engine hook:
+  the per-frame pool writers are SetTime + switches, and the illumination table showed hooks alone miss rewrites) and uploaded when the bytes changed.
+  **Native pool writes are not in the engine's memory**: SetSwitch elements (`applySwitch`), the sky's SetColor / SetImage, decal / FX sampler images write the
+  composition's mirror pools only (engine slot code is skipped). Those registers / slots are noted (`noteSwitchWrite`, sticky union in the record's switch
+  masks) and excluded from the comparison (counted `switch-skipped`); F1 needs the switch tables / sky colours as a table input. Without the sky's notes the
+  check showed 2-4 k DIFFERING draws per run (PS c6 / stage 9 of the sky material), i.e. the notes are necessary, not cosmetic.
+* Verification: `diffMaterial(record, draw)` over every static draw N5 composes (main z / solid, shadow z, overlays): VS pool registers >= c232 that are live,
+  PS c6..c13 that are live, texture slot + 7 sampler words per sampled material stage, blend mode and mask reference (not when an override is active). Read-back of
+  the whole table every 240th frame. Log: `native: material table (5 s)`, `native: material graphs` (every 30 s).
+* Results (rvk.log in `B:\DevDrive\rvk-work\scratch\material-table\`): Full, Vulkan, rvkcompare `harbour_docks,jungle,pub_interior`: 4.55 M draws checked, 4.60 M
+  registers, 8.66 M texture bindings + sampler states, 2.77 M blend / mask, 21 k switch-skipped registers: **registers DIFFERING 0, textures DIFFERING 0**,
+  read-back 23 x 0 differing. Savegame Risen_Save_0005 (lod 2x, packet cache off): 5.0 M draws, 0 / 0. D3D12: 6.8 M draws, 0 / 0. `-Validation`: 4.35 M, 0 / 0,
+  no validation message. (The first three configurations ran before the last graph-bookkeeping change, which does not touch the compared data; the Vulkan
+  spots run was repeated with the final build.) Records 105-167 live (peak 172) at the spots, 87-161 at the savegame; 0 unresolved textures, 0 overflow.
+* Upload rates: new 174 over a run; `poll` 27.5 k per 70 s (~7 records / frame, 7 KiB / frame): ~10 materials change per frame, all time-driven: the water
+  materials (`Special_Water_*`: VS c232 / c233, ~2 k uploads each per run), lava, a few more (`texture`: 18 per run = streaming swaps; `graph`: 315 at first sight).
+  Steady state without those: 0.
+* Graph ids (id = hash(file, entry, normalised graph text), as the census): 103 distinct ids seen in a spots run (80 PS_Default on 134 live records + z
+  passes), 63 at the savegame, 111 pipelines (graph x static macros, census estimate 196 over town + jungle); 56-80 distinct graphs per frame (avg ~70).
+  Materials sharing a graph (spots, color pass): 11, 8, 6, 4, 3, 2, 2, 2, 2, 2 (top 10: a long tail: 134 records on 80 graphs, no dominant one; the biggest
+  is diffuse + normal map). A material's z / special passes name other graph variants than the one the record keeps (the first seen): 14 k per run counted
+  (`other graph variants seen`), not uploaded.
+* Cost (checkDraw time only, debug setting, Full): 0.03-0.22 ms per frame (draw count dependent: 60-80 k checked draws per second-run frame x ~3 us incl. the
+  mutex, the hash lookup, the compare), flush negligible. Not a shipping cost: the table's draw check is the F0 gate; F1 reads the records on the GPU.
+
 ## 8. F1 / F2 design decision: windows onto persistent tables (2026-11-06, orchestrator)
 
 **Decision.** F1 does not start with new shaders. Translated shaders and the ported ubershader read every float register through 4 register windows per

@@ -26,6 +26,7 @@
 #include "engine/symbols.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "native/static_ops.h"
+#include "gpuscene/material_table.h"
 
 namespace rvk::native {
 
@@ -924,6 +925,7 @@ StaticOps::Skip StaticOps::composeParticle(const Op& op) {
             const std::int32_t slot = get<std::int32_t>(sampler, 0x98, -1);
             if (slot < 0 || slot >= 16) return Skip::Unreadable;
             poolsOf(shader)->slotImage[static_cast<std::size_t>(slot)] = image;
+            gpuscene::materialtable().noteSwitchWrite(shader, 2, static_cast<std::uint32_t>(slot));
         }
     }
     // BlendMode from PS +0x220 (0 / other: AlphaBlend below a fade of 0.9, else Normal), MaskReference, EnableFog = !PS +0x298

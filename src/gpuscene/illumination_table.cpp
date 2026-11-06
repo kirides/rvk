@@ -11,6 +11,7 @@
 #include "d3d9/device.h"
 #include "engine/memread.h"
 #include "gpuscene/mesh_layout.h"
+#include "gpuscene/material_compose.h"
 
 namespace rvk::gpuscene {
 
@@ -152,6 +153,7 @@ template class GpuTable<IllumRecord>;
 template class GpuTable<LightSetRecord>;
 template class GpuTable<PartRecord>;
 template class GpuTable<LayoutRecord>;
+template class GpuTable<MaterialRecord>;  // the material table (material_table.cpp)
 
 // ---- IllumTable ------------------------------------------------------------------------------------------------------------------
 

@@ -23,6 +23,7 @@
 #include "engine/symbols.h"
 #include "gpuscene/illumination_table.h"
 #include "gpuscene/mesh_parts.h"
+#include "gpuscene/material_table.h"
 #include "fx/effect_binary.h"
 #include "hal/vulkan/hal_vulkan.h"
 
@@ -814,6 +815,7 @@ void StaticOps::applySwitch(const std::uint8_t* shader, std::int32_t s, Skip& sk
             if (pool == nullptr || reg < 0) continue;
             if (pool == shader + 0xc8 && static_cast<std::uint32_t>(reg) >= pools->psFirst && static_cast<std::uint32_t>(reg) - pools->psFirst < 16) {
                 std::memcpy(pools->ps[reg - pools->psFirst], v, 16);
+                gpuscene::materialtable().noteSwitchWrite(shader, 1, static_cast<std::uint32_t>(reg) - pools->psFirst);
                 if (rec_ != nullptr) {
                     RetSwitchWrite w;
                     w.kind = 1;
@@ -823,6 +825,7 @@ void StaticOps::applySwitch(const std::uint8_t* shader, std::int32_t s, Skip& sk
                 }
             } else if (pool == shader + 0x98 && static_cast<std::uint32_t>(reg) >= pools->vsFirst && static_cast<std::uint32_t>(reg) - pools->vsFirst < 32) {
                 std::memcpy(pools->vs[reg - pools->vsFirst], v, 16);
+                gpuscene::materialtable().noteSwitchWrite(shader, 0, static_cast<std::uint32_t>(reg) - pools->vsFirst);
                 if (rec_ != nullptr) {
                     RetSwitchWrite w;
                     w.kind = 0;
@@ -849,6 +852,7 @@ void StaticOps::applySwitch(const std::uint8_t* shader, std::int32_t s, Skip& sk
                 return;
             }
             pools->slotImage[static_cast<std::size_t>(slot)] = image;
+            gpuscene::materialtable().noteSwitchWrite(shader, 2, static_cast<std::uint32_t>(slot));
             if (rec_ != nullptr) {
                 RetSwitchWrite w;
                 w.kind = 2;
@@ -1043,6 +1047,62 @@ StaticOps::Skip StaticOps::materialSamplers(sc::DrawDesc& d, const std::uint8_t*
     return Skip::None;
 }
 
+// frame-ownership.md F0: a sampler slot's image resolved as materialSamplers does (image data, the stage's placeholder, the error image) -> the bindless slot
+std::uint32_t StaticOps::materialTexture(void* self, std::uint32_t stage, const void* imageRes) {
+    auto* so = static_cast<StaticOps*>(self);
+    const SamplerSnap& sn = so->samplerSnap();
+    if (stage >= sc::kStages || sn.overrides[stage] != nullptr) return gpuscene::kMatNoTex;
+    U8* data = nullptr;
+    if (imageRes != nullptr) {
+        data = ptr(static_cast<const U8*>(imageRes), 0x70);
+        if (data == nullptr) {
+            U8* ph = ptr(so->placeholderTable_, 8 * stage);
+            if (ph != nullptr && ptr(ph, 0x60) != nullptr) data = ph;
+        }
+    }
+    if (data == nullptr) data = sn.at<U8*>(0x348);
+    RetEntry* saved = so->rec_;
+    so->rec_ = nullptr;  // (the recording of retained draws must not see these lookups)
+    bool ok = false;
+    const d3d9::Texture* t = so->textureOfImageData(data, ok);
+    so->rec_ = saved;
+    return ok && t != nullptr ? t->bindlessSlot() : gpuscene::kMatNoTex;
+}
+
+void StaticOps::checkMaterial(const sc::DrawDesc& d, const std::uint8_t* owner, const void* material, bool zPass, std::uint16_t psMask, std::int32_t blendMode,
+                              std::int32_t maskRef) {
+    gpuscene::MaterialTable& mt = gpuscene::materialtable();
+    if (!mt.active()) return;
+    gpuscene::MaterialTable::Draw md;
+    md.owner = owner;
+    md.material = material;
+    md.ps = static_cast<const d3d9::Shader*>(d.ps);
+    md.zPass = zPass;
+    md.tex = &StaticOps::materialTexture;
+    md.texCtx = this;
+    gpuscene::MaterialDraw& m = md.draw;
+    m.vsF = d.vsF;
+    m.psF = d.psF;
+    m.vsLive = &d.vsLive;
+    m.psLive = &d.psLive;
+    m.samplerMask = psMask;
+    m.defaultClass = true;
+    m.blendMode = static_cast<std::uint32_t>(blendMode);
+    m.maskRef = maskRef;
+    m.checkBlend = owner != blendOverrideShader_ && owner != maskRefShader_;
+    m.defFilter = samplerSnap().defFilter;
+    const std::uint32_t base = get<std::uint8_t>(owner, 0x219);
+    const std::uint32_t slots = std::min<std::uint32_t>(poolsOf(owner)->slots, sc::kStages);
+    for (std::uint32_t st = 0; st < sc::kStages; ++st) m.texSlot[st] = gpuscene::kMatNoTex;
+    for (std::uint32_t k = 0; k < slots && base + k < sc::kStages; ++k) {
+        const std::uint32_t st = base + k;
+        const auto* t = static_cast<const d3d9::Texture*>(d.samplers[st].texture);
+        if (t != nullptr && (d.inheritMask >> st & 1u) == 0) m.texSlot[st] = t->bindlessSlot();
+        for (std::uint32_t i = 0; i < 7; ++i) m.ss[st][i] = d.samplers[st].ss[i];
+    }
+    mt.checkDraw(md);
+}
+
 // ---- composition ------------------------------------------------------------------------------------------------------------
 
 std::uint8_t StaticOps::maskRefOf(const std::uint8_t* owner) const {
@@ -1101,6 +1161,8 @@ StaticOps::Skip StaticOps::specialPassDrawImpl(const std::uint8_t* shader, const
     const std::size_t im0 = rec_ != nullptr ? rec_->imgs.size() : 0;
     const Skip s = materialSamplers(d, shader, psElem);
     if (s != Skip::None) return s;
+    checkMaterial(d, shader, geometry.material, true, get<std::uint16_t>(psElem, 0x38), get<std::int32_t>(shader, 0x50),
+                  recMask ? static_cast<std::int32_t>(maskRefOf(shader)) : -1);
     if (rec_ != nullptr) {
         RetPass rp;
         rp.owner = shader;
@@ -1182,6 +1244,8 @@ StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8
     constantsInto(d, owner, shader);
     const std::size_t im0 = rec_ != nullptr ? rec_->imgs.size() : 0;
     if (const Skip s = materialSamplers(d, owner, psElem); s != Skip::None) return s;
+    checkMaterial(d, owner, owner == shader ? geometry.material : nullptr, false, get<std::uint16_t>(psElem, 0x38), b.mode,
+                  b.mode == 1 && recMask && rs.alphaRef == b.maskRef ? static_cast<std::int32_t>(b.maskRef) : -1);
     if (rec_ != nullptr) {
         RetPass rp;
         rp.owner = owner;

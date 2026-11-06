@@ -33,6 +33,7 @@
 #include "engine/load_accel.h"
 #include "engine/lod.h"
 #include "engine/illum_census.h"
+#include "gpuscene/material_table.h"
 #include "engine/scene_table.h"
 #include "engine/material_source.h"
 #include "engine/shadow_maps.h"
@@ -488,6 +489,10 @@ void onProcessAttach(void* module) {
         engine::lights::install();      // the illumination admin: all of the world's lights for the GI (rtgi.md 19)
         engine::scenetable::install();  // the GPU scene's signal-fed instance table (docs/research/gpu-scene.md)
         engine::illumcensus::install();  // RVK_ILLUM_CENSUS=1 or native.illum_table (frame-ownership.md F0)
+        if (const auto& rs = settings::renderer(); rs.nativeMaterialTable != nullptr && rs.nativeMaterialTable->asBool()) {
+            gpuscene::materialtable().setActive(true);  // frame-ownership.md F0: the material table (polled: no hooks)
+            spdlog::info("native: material table on (native.material_table)");
+        }
         // frame ownership F0 (docs/research/frame-ownership.md): the RequestRenderOps hooks, only when native.owned_observe is on at start
         if (const auto& rs = settings::renderer(); rs.nativeOwnedObserve != nullptr && rs.nativeOwnedObserve->asBool()) native::owned_observe::install();
         engine::lod::install();     // detail distances (docs/research/lod.md)

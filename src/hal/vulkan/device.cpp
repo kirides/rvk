@@ -30,6 +30,7 @@
 #include "gpuscene/instance_buffer.h"
 #include "gpuscene/illumination_table.h"
 #include "gpuscene/mesh_parts.h"
+#include "gpuscene/material_table.h"
 #include "engine/xinput_throttle.h"
 #include "engine/memread.h"
 #include "engine/material_source.h"
@@ -701,7 +702,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
             const bool uber = r.ubershader->asBool();
             // the requests are collected for the dump and for the GLSL material shaders; the file only for the dump
             engine::matsrc::setOutput(dump && !dir.empty() ? dir / "materials" / "sources.jsonl" : std::filesystem::path());
-            engine::matsrc::setEnabled(dump || uber);
+            engine::matsrc::setEnabled(dump || uber || gpuscene::materialtable().active());  // (the material table's graph ids)
             dev_.setUbershaderSkip(static_cast<std::uint32_t>(r.ubershaderSkip->asInt()));
             dev_.setUbershader(uber);
         };
@@ -1620,6 +1621,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
         gpuscene::instances().flush(dev_, frozen::kGpuScene >= 2 ? frozen::kGpuScene : 0);
         gpuscene::illumtable().flush(dev_, true);
         gpuscene::meshparts().flush(dev_, true);
+        gpuscene::materialtable().flush(dev_, true);
     }
     engine::lod::onPresent();  // a changed object draw distance: the world's cache-in spheres (engine thread)
     dev_.present();

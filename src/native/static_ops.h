@@ -297,6 +297,11 @@ private:
     void constantsInto(sc::DrawDesc& d, const std::uint8_t* shader, const std::uint8_t* biasShader = nullptr, bool defaultClass = true);
     Skip materialSamplers(sc::DrawDesc& d, const std::uint8_t* shader, const void* psElement);
     void applySwitch(const std::uint8_t* shader, std::int32_t switchValue, Skip& skip);
+    // frame-ownership.md F0 (native.material_table): the draw's material registers / texture bindings composed from the material's record and compared
+    // with `d` (after constantsInto + materialSamplers); owner = the shader object whose pools / slots were used, psMask = the PS element's sampler mask
+    void checkMaterial(const sc::DrawDesc& d, const std::uint8_t* owner, const void* material, bool zPass, std::uint16_t psMask, std::int32_t blendMode,
+                       std::int32_t maskRef);
+    static std::uint32_t materialTexture(void* self, std::uint32_t stage, const void* imageRes);  // the table's texture resolution (materialSamplers')
     void writeWorld(std::uint32_t slot, const float* m);
     void writeAlpha(std::uint32_t slot, float a);
     void writeTreeInstance(std::uint32_t slot, const float v[2]);  // SetSpeedTreeInstanceData 0x6c9eb0: c32 + 4 slot .xy

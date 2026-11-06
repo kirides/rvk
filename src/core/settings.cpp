@@ -2419,6 +2419,21 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::Restart | Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeMaterialTable = &reg.add({
+        .key = "native.material_table",
+        .label = "Native frame: material table",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode only (takes effect at the next start; frame-ownership.md F0, no picture change): a GPU table with one record per engine "
+                       "material as the native composition draws it (VS / PS pool registers, sampler slots -> bindless texture + sampler states, mask "
+                       "reference, blend mode, graph ids), re-read once per frame at the material's first draw, and a check that composes every static draw's "
+                       "material registers / texture bindings from the record and compares them with what the composition set. rvk.log `native: material "
+                       "table (5 s)`, DIFFERING must stay 0.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::Restart | Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeLean = &reg.add({
         .key = "native.lean",
         .label = "Native frame: lean ops",

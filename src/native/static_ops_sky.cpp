@@ -20,6 +20,7 @@
 #include "engine/symbols.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "native/static_ops.h"
+#include "gpuscene/material_table.h"
 
 namespace rvk::native {
 
@@ -371,6 +372,7 @@ StaticOps::Skip StaticOps::composeSkyDraws(const std::uint8_t* sky, const std::u
         const std::int32_t slot = get<std::int32_t>(sampler, 0x98, -1);
         if (slot < 0 || slot >= 16) return false;
         poolsOf(shader)->slotImage[static_cast<std::size_t>(slot)] = image;
+        gpuscene::materialtable().noteSwitchWrite(shader, 2, static_cast<std::uint32_t>(slot));
         return true;
     };
     // eCColorSrcConstant::SetColor(colour): r g b from the colour (+8), a = the element's +0x60, into its pool register
@@ -385,8 +387,10 @@ StaticOps::Skip StaticOps::composeSkyDraws(const std::uint8_t* sky, const std::u
         const auto r = static_cast<std::uint32_t>(reg);
         if (pool == shader + 0xc8 && r >= p->psFirst && r - p->psFirst < 16) {
             std::memcpy(p->ps[r - p->psFirst], v, 16);
+            gpuscene::materialtable().noteSwitchWrite(shader, 1, r - p->psFirst);
         } else if (pool == shader + 0x98 && r >= p->vsFirst && r - p->vsFirst < 32) {
             std::memcpy(p->vs[r - p->vsFirst], v, 16);
+            gpuscene::materialtable().noteSwitchWrite(shader, 0, r - p->vsFirst);
         } else {
             return false;
         }
