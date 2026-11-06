@@ -1137,3 +1137,65 @@ illumination (it draws a merged batch with its last instance's lighting; ours is
 | F4-4 | tree shadow views (cascades, z) | shadow-compare | -0.15..-0.3 |
 | F4-5 | persistent per-tree records (UpdateLoD post-hook), GPU compaction | compaction = CPU list | -0.05..-0.15 + GPU |
 | F4-6 | owned tree shaders (leaf PS wired: `uberSupportsFile`; vertex pulling; graph-shared pipelines) | equality gates | calls ~10-40 |
+
+## 11. F2c-4 design: the CPU no longer touches individual owned draws (2026-11-06, accepted by the orchestrator)
+
+Starting point (7.16): the owned path costs ~3.4 us per draw vs ~1.7 us for the packet-cache replay it replaced; F2c-4 must remove the whole
+owned path (281 us at the savegame, ~990 us at pub_interior) to pay. The section 9 F2c-4 row (-0.03..-0.05) is superseded.
+* **Persistent DrawRecords** (DrawRecordTable 128 B x 64K, slot reuse deferred by frames-in-flight + 1) + a persistent **DrawBlockTable** (208 B
+  slots). Per-frame inputs move out of the record: **ABI v2** (`TranslateOptions::sceneView`, own variant slots, default text unchanged):
+  `ref.y` = a fixed ViewBlock2 slot (640 B: VS c0..c11, PS c0..c4, VS c12..c30, posFix incl. jitter + depthRemap, PS c5.xyz, flags; fixed slots
+  0 main z, 1 main solid, 2-3 dbvp, 4-7 cascades, dynamic slots after); `rvkVsWin(0/1)` / `rvkPsWin(0)` computed from `pc.views + ref.y x
+  stride` (positive offsets only); `rvkLoadDraw()` takes posFix / c5.xyz from the view, c5.w = the record's mask bits; VARY14 = (viewSlot << 24)
+  | record. Lighting entries pinned by a per-frame `seen` mark + an entry generation in the record.
+* **Bulk validity**: a dep table (global env epoch per pass; per entity: overlay flags, illum ptr, object slot / generation; per ctx: LOD
+  resource, fade, switch; per resource: MeshPart generation, lightmaps; per material: structure version; per illumination / light set) polled
+  once per dep per frame; records are invalidated through reverse lists; per draw a 1-byte valid read. Check frames run the full stamp + read
+  log for every visible record (MISS counter, auto-off like DIFFERING) + a rolling scrub of 16 records per frame + a fault-injection debug knob.
+* **Compaction** (4c): one compute dispatch per present in the upload list (as the lighting compose), job per (view, list), per (job, bucket)
+  stable wave-prefix compaction of the visible id list into args / ref / count in a device-local per-frame arena; bucket = (scene pipeline, vi,
+  dyn, ib, frame block) with stable ids + caps; one `DrawIndexedIndirectCount` per hit bucket (new DrawPacket op; zero-filled tail fallback
+  without the cap). Order inside a bucket = engine order (stable); across buckets = bucket id (visible only for coincident EQUAL geometry:
+  re-run the picture A/B).
+* **Observers in bulk**: `DrawObserver::observeOwned(Device&, const OwnedFrame&)` once per frame (views with visible ids + `entered` / `left`
+  deltas, per-record immutable views: query, tag, textures, object rows + version, view blocks; default = the old per-id loop). **This is also
+  the F8 hand-over** (section 12): RtScene derives its table upserts / drops from entered / left.
+* **Side effects batched** per resource / material / primitive per frame (first visible record does the touch), after checking that
+  `RequestData(res, 1)` is idempotent per frame (disassemble first).
+
+| stage | content | gate | CPU (savegame / pub_interior, est.) |
+|---|---|---|---|
+| F2c-4-0 | ABI v2 + the F2c-3 owned path on v2; measurements (main views per frame, posFix / c5 per frame, the `submit` split derive / packet / observers, desc vs LOD, RequestData idempotence, buckets, sort share of compaction) | rvk_tests, d3d9test v2 cases, parity_scene v2 == v1, corpus / DXIL v2 | ~F2c-3 |
+| F2c-4a | persistent records + dep epochs + CPU-written args (one indirect per hit bucket, exact CPU count) | check frames DIFFERING 0 + MISS 0, A/B, validation, long tour | ~105 / ~400 us (from 281 / 990) |
+| F2c-4b | bulk observers (`observeOwned`) + batched side effects | TLAS set equal on check frames, rtwalk, water floor | ~25-30 / ~95-120 us: -0.11 / -0.9 ms vs the pre-F2c replay |
+| F2c-4c | GPU compaction + `DrawIndexedIndirectCount` (F5 prerequisite) | rhitest compaction case, read-back DIFFERING 0, sync validation, D3D12 GBV | -10..-15 us CPU; GPU 10-30 us (680M 50-100) |
+
+## 12. F8 design: the RT scene from the GPU scene tables (2026-11-06, accepted by the orchestrator)
+
+Findings: the tables hold no entity -> parts relation for never-drawn entities (parts are created on first sight; the link is the OpRecord), so
+"off-screen" coverage = every entity ever sighted and still cached in, dropped by signals (cache-out, delete, bufferChanged), not by age;
+never-sighted ones need an engine visual enumeration (F10, not now). The BLAS key is derivable from `PartCpu` + buffer generations (no strips:
+SpeedTree is never a part), so table-built and observed instances share `blasByKey_` (BLAS builds, proxies, budget unchanged). Rows come from
+`scenetable::slot(i).world` on the CPU (identity (slot, generation, part), moved = slot.version, no quantised keys). Materials at hits are per
+material record except the uv map (evaluated on record change from the record's pools + a representative VS / PS; the table needs a CPU
+`Texture*` per sampler slot + the last VS so RtScene keeps its layout / release checks).
+* Interface: persistent `RtStaticEntry` (objSlot / gen, opDesc, part / gen, matSlot / structVersion, entity, viewMask, rank) maintained by deltas
+  (from `OwnedFrame` entered / left once F2c-4b exists; before that learned from the first full observation); `DrawObserver::coversDraw` pre-filter
+  in the observer loops (prepareDraw, replayDraw, replayOwned) skips query building for covered (entity, opDesc); `record()` takes a merged list
+  (table entries + registry) through one shared `emitInstance`; no duplicates: covered draws skip observe, a `tableOwners_` guard in
+  `selectForTlas`, the observed instance removed on migration. Stays observed: characters (F6), SpeedTrees (F4), instanced batches, grass, glass,
+  water, blended layers, fade < 1, hierarchy meshes, everything in Wrapper.
+* Risks: parts idle-free after 1800 frames (pin parts with live entries), more BLAS alive (check `rt: scene: lod bands`, cap by radius), uv-map
+  animation (dirty only on uv-slice constants), stale addresses in persistent entries (rebuild the BLAS key per frame from buffer generations).
+* Verification: `debug.rt_table_compare` on check frames: table set vs observed set (missing = DIFFERING, extra = off-screen, per-pair material
+  fields), auto-off; `rt.debug=depth / instances` probes; lamp / RT shadow and water A/B; teleport soak with crash markers; GPU-safety steps.
+
+| stage | content | gain (est.) |
+|---|---|---|
+| F8-0 | persistent entries learned from observation, rows from the scene table, signal aging, `coversDraw` pre-filter, merged selection, owner guard (no F2c-4 dependency) | -0.15..-0.25 ms CPU |
+| F8-1 | materials from records (`RtMaterials::fromRecord`) | -0.02..-0.05 |
+| F8-2 | discovery from `OwnedFrame` entered / left (needs F2c-4b) | -0.05..-0.1 |
+| F8-3 | cascade coverage (after F3 shadow-view records) | the larger share of the 0.376 ms |
+| F8-4 | optional GPU instance assembly | only if profiled |
+Measure first: observer calls per view / pass / class, observe vs query-building ms, registry composition by class, the share of instances
+whose entity has an ownable OpRecord, the cascade-only (off-screen) share.
