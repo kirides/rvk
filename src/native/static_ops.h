@@ -570,6 +570,9 @@ private:
     float savedVs_[sc::kVsRegs][4]{}, savedPs_[sc::kPsRegs][4]{};
     // N5.8 coverage: the last op met (or the non-op unit) and why it was left to the engine
     void opEnterImpl(const Op& op);
+    // F2c-0 (frame-ownership.md 7.12; RVK_F2C_MEASURE=1): the owned-eligibility classification of a main-view static mesh op (counters only)
+    void f2cClassify(const Op& op);
+    const Op* f2cOp_ = nullptr;  // the op being measured
     enum : int { kLeftCompareOnly = 100, kLeftGroupOff, kLeftNotCovered, kLeftChecks };
     std::string_view leftName(Group g, int code);
     const Op* leftOp_ = nullptr;

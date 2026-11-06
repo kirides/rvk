@@ -19,6 +19,7 @@
 #include "engine/memread.h"
 #include "engine/scene_hooks.h"
 #include "engine/illum_census.h"
+#include "native/f2c_measure.h"
 #include "engine/scene_table.h"
 #include "engine/symbols.h"
 #include "gpuscene/illumination_table.h"
@@ -272,6 +273,8 @@ bool StaticOps::verify() {
 // ---- per view ---------------------------------------------------------------------------------------------------------------
 
 void StaticOps::viewBegin(void* db, void* desc, const FrameDesc& view) {
+    f2c::init();
+    if (f2c::on() && view.kind == ViewKind::Main) f2c::frameBegin();
     if (!hal::vulkan::logThisFrame()) frameLogged_ = 0;
     db_ = db;
     desc_ = desc;
@@ -531,7 +534,11 @@ StaticOps::Mirror::ShaderPools* StaticOps::poolsOf(const void* shader) {
         if ((p.vsCount != 0 && !rd(ptr(shader, 0xb0), 0, p.vs, p.vsCount * 16)) || (p.psCount != 0 && !rd(ptr(shader, 0xe0), 0, p.ps, p.psCount * 16))) {
             p.vsCount = p.psCount = 0;
         }
-        p.slots = std::min<std::uint32_t>(get<std::uint8_t>(shader, 0x21b), 16);
+        if (f2c::on() && f2c::opActive() && viewKind_ == ViewKind::Main) {
+            // F2c-0: the pools as the engine holds them at this main view's first use (compared with the previous frame's)
+            f2c::track(f2c::kMatBytes, shader, f2c::hashBytes(p.vs, p.vsCount * 16) * 31u + f2c::hashBytes(p.ps, p.psCount * 16));
+        }
+        p.slots =std::min<std::uint32_t>(get<std::uint8_t>(shader, 0x21b), 16);
         for (std::uint32_t k = 0; k < p.slots; ++k) p.slotImage[k] = ptr(shader, 0xf8 + 0x28 * k + 0x20);
     }
     return &p;
@@ -699,6 +706,29 @@ void StaticOps::writeLightingRegisters(const sc::Pass& pass, bool& holdsAll) {
     U8* illum = static_cast<U8*>(pass.illum);
     U8* list = ptr(illum, 0);
     if (illum == nullptr || list == nullptr) return;
+    if (f2c::on() && f2c::opActive()) {
+        // F2c-0: what a retained record would be stamped with: the illumination's bytes, the engine's dirty byte, the light set's sun bit, and the light
+        // table's verdict ("holdsAll": no dynamic light, every static light known) as writeLightingRegisters would compute it with lighting.trust_table
+        std::uint8_t raw[0x110];
+        if (rd(illum, 0, raw, sizeof(raw))) f2c::track(f2c::kIllumBytes, illum, f2c::hashBytes(raw, sizeof(raw)));
+        f2c::track(f2c::kIllumDirty, illum, get<std::uint8_t>(illum, 0x110) != 0 ? 1 : 0);
+        f2c::track(f2c::kSunBit, list, get<std::uint8_t>(list, 0));
+        if (pass.tableLit) {
+            std::uint32_t state = 2;  // dynamic lights
+            if (get<std::uint8_t>(list, 0x34) == 0) {
+                bool holds = enh::LightTable::registryComplete() || get<std::uint8_t>(illum, 0x0d) == 0;
+                const std::uint32_t nsKnown = std::min<std::uint32_t>(get<std::uint8_t>(illum, 0x0d), 4u);
+                for (std::uint32_t i = 0; i < nsKnown && holds; ++i) {
+                    float e[4]{};
+                    rd(illum + 0x10 + 0x40 * i, 0, &e[0], 16);
+                    holds = enh::LightTable::lightKnown(e);
+                }
+                state = holds ? 1 : 0;
+            }
+            f2c::track(f2c::kHoldsAll, illum, state);
+            f2c::track(f2c::kRegistry, &mirrorEpoch_, enh::LightTable::registryComplete() ? 1 : 0);
+        }
+    }
     engine::illumcensus::noteDraw(illum, list);
     float (*L)[4] = mirror_.lighting;  // L[r - 14]
     rd(list, 0x128, L[0], 12);
@@ -786,6 +816,24 @@ void StaticOps::noteListLights(const std::uint8_t* list) {
 std::uint32_t StaticOps::bindLightmaps(const std::uint8_t* res) {
     if (leanCollect_ && res != nullptr) leanLightmaps_.push_back(res);  // O2a: the engine's BindLightmaps(1) at the lean commit
     std::uint32_t combi = 0;
+    if (f2c::on() && f2c::opActive()) {
+        std::uint64_t h = 1469598103934665603ull;
+        for (std::uint32_t i = 0; i < 2; ++i) {
+            U8* lm = ptr(res, 0x90 + 8 * i);
+            h = (h ^ reinterpret_cast<std::uintptr_t>(lm)) * 1099511628211ull;
+            if (lm == nullptr) continue;
+            h = (h ^ static_cast<std::uint32_t>(get<std::int32_t>(lm, 0x38))) * 1099511628211ull;
+            h = (h ^ reinterpret_cast<std::uintptr_t>(ptr(lm, 0x70))) * 1099511628211ull;
+        }
+        f2c::track(f2c::kLightmap, res, h);
+        for (std::uint32_t i = 0; i < 2; ++i) {
+            U8* lm = ptr(res, 0x90 + 8 * i);
+            if (lm != nullptr && get<std::int32_t>(lm, 0x38) != 0) {
+                f2c::bit(f2c::kInfoLightmap);
+                break;
+            }
+        }
+    }
     for (std::uint32_t i = 0; i < 2; ++i) {
         U8* lm = ptr(res, 0x90 + 8 * i);
         if (lm == nullptr || get<std::int32_t>(lm, 0x38) == 0) continue;
@@ -1016,6 +1064,15 @@ StaticOps::Skip StaticOps::materialSamplers(sc::DrawDesc& d, const std::uint8_t*
     const Mirror::ShaderPools* pools = poolsOf(shader);
     const SamplerSnap& sn = samplerSnap();
     const std::uint32_t defFilter = sn.defFilter;
+    std::uint64_t f2cTexHash = 1469598103934665603ull;
+    const struct F2cTex {
+        const void* shader;
+        std::uint16_t mask;
+        const std::uint64_t& h;
+        ~F2cTex() {
+            if (f2c::on() && f2c::opActive()) f2c::track(f2c::kTexReady, reinterpret_cast<const void*>(reinterpret_cast<std::uintptr_t>(shader) ^ (static_cast<std::uintptr_t>(mask) << 48)), h);
+        }
+    } f2cTex{shader, mask, f2cTexHash};
     for (std::uint32_t k = 0; k < pools->slots; ++k) {
         const std::uint32_t stage = base + k;
         if (stage >= sc::kStages || (mask >> stage & 1u) == 0) continue;
@@ -1033,6 +1090,11 @@ StaticOps::Skip StaticOps::materialSamplers(sc::DrawDesc& d, const std::uint8_t*
         U8* data = nullptr;
         if (res != nullptr) {
             data = ptr(res, 0x70);
+            if (f2c::on() && f2c::opActive()) {
+                const void* video = nullptr;
+                if (data != nullptr && readAt(data, 0x70, video) && video != nullptr) f2c::bit(f2c::kVideo);
+                f2cTexHash = (f2cTexHash ^ (reinterpret_cast<std::uintptr_t>(res) * 31u + reinterpret_cast<std::uintptr_t>(data))) * 1099511628211ull;
+            }
             leanImage(res, data);  // O2a: ExecuteShaderConstants' touch of the slot's image (+ the video / placeholder checks)
             if (rec_ != nullptr) rec_->imgs.push_back({res, data});
             if (data == nullptr) {
@@ -1171,6 +1233,7 @@ StaticOps::Skip StaticOps::specialPassDrawImpl(const std::uint8_t* shader, const
     if (get<std::uint8_t>(version, 0x18 + idx) == 0) return Skip::None;
     U8* vsElem = ptr(version, 0x30 + 16 * idx);
     U8* psElem = ptr(version, 0xf0 + 16 * idx);
+    if ((vsElem == nullptr || psElem == nullptr) && f2c::on()) f2c::bit(f2c::kNoRetain);
     if (vsElem == nullptr || psElem == nullptr) {
         // O2c: ExecuteSpecialPass's on-demand compile, here at the slot's place (a failure clears the flag byte: no draw, as the engine)
         if (rec_ != nullptr) rec_->noRetain = true;
@@ -1233,6 +1296,7 @@ StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8
     const std::uint32_t vsIdx = sc::vsIndex(pass.flags), psIdx = sc::psIndex(pass.flags);
     U8* vsElem = ptr(version, 0x1b0 + 16 * vsIdx);
     U8* psElem = ptr(version, 0x210 + 16 * psIdx);
+    if ((vsElem == nullptr || psElem == nullptr) && f2c::on()) f2c::bit(f2c::kNoRetain);
     if ((vsElem == nullptr || psElem == nullptr) && (rec_ == nullptr || (rec_->noRetain = true)) && compilePass(shader, version, pass.flags)) {
         // O2c: the version Execute's on-demand compile, here at the slot's place; before the switch is applied to our copy of the
         // pools (the compile's graph re-walk refills the engine's pools, which our copy is then read from again)
@@ -1737,6 +1801,89 @@ bool StaticOps::opEnter(const Op& op) {
     return op_ == &op && slotSkipped_;
 }
 
+// F2c-0 (frame-ownership.md 7.12): why a main-view static z / solid op would not be owned (section 9's first cut), by reading the same engine
+// fields the composition reads; counters only
+void StaticOps::f2cClassify(const Op& op) {
+    const ret::NoLog noLog;
+    const bool solid = op.list == List::Solid;
+    f2c::opBegin(solid ? 1 : 0);
+    f2cOp_ = &op;
+    U8* ctx = static_cast<U8*>(op.raw.context);
+    U8* res = ptr(ctx, 0x28);
+    U8* entity = ptr(ctx, 0x10);
+    const std::uint32_t sub = op.raw.desc & 0xffu, node = op.raw.desc >> 8;
+    if (node == 0xffffffu && res != nullptr) {
+        // composeSolid's choice: hardware instancing (batches) only with res +0xa0, >= 2 instances and no lightmaps; else one draw per instance
+        const std::int32_t n = get<std::int32_t>(res, 0xb8);
+        bool lightmaps = false;
+        for (std::uint32_t i = 0; i < 2; ++i) {
+            U8* lm = ptr(res, 0x90 + 8 * i);
+            if (lm != nullptr && get<std::int32_t>(lm, 0x38) != 0 && ptr(lm, 0x70) != nullptr) lightmaps = true;
+        }
+        const bool batch = get<std::uint8_t>(res, 0xa0) != 0 && n >= 2 && !lightmaps;
+        f2c::bit(batch ? f2c::kInstanced : f2c::kInstanceList);
+        f2c::noteInstances(batch, static_cast<std::uint32_t>(std::max(n, 0)));
+    }
+    const std::uint32_t eflags = get<std::uint32_t>(entity, 0x28);
+    if ((eflags & 0xe00000u) != 0) f2c::bit(f2c::kOverlay);
+    if (!(op.raw.fade >= 1.0f)) f2c::bit(f2c::kFade);
+    if (get<std::int32_t>(ctx, 0x34) > 0) f2c::bit(f2c::kHierarchy);
+    if (node != 0 && node != 0xffffffu) f2c::bit(f2c::kNodeOp);
+    U8* illumPs = ptr(entity, 0xf8);
+    if (solid) {
+        U8* illum = illumPs != nullptr ? illumPs + 0x78 : nullptr;
+        if (illum == nullptr || ptr(illum, 0) == nullptr) f2c::bit(f2c::kNoList);
+        if (!tableLit_) f2c::bit(f2c::kNoTableLit);
+    }
+    if (res != nullptr) {
+        U8* subs = ptr(res, 0x58);
+        const std::int32_t count = get<std::int32_t>(res, 0x60);
+        const bool all = sub == 0xffu || node == 0xffffffu;
+        const std::int32_t first = all ? 0 : static_cast<std::int32_t>(sub);
+        const std::int32_t last = all ? count : std::min<std::int32_t>(static_cast<std::int32_t>(sub) + 1, count);
+        for (std::int32_t i = first; i < last && i < 64; ++i) {
+            U8* shader = ptr(ptr(subs + 0x48 * static_cast<std::size_t>(i), 0x38), 0x70);
+            if (shader == nullptr) continue;
+            if (!shaderClassOk(shader)) {
+                f2c::bit(f2c::kShaderClass);
+                continue;
+            }
+            if (get<std::uint8_t>(shader, 0x2b8) != 0) f2c::bit(f2c::kSortId);
+            if (get<std::int32_t>(shader, 0x50) == 1) f2c::bit(f2c::kInfoMasked);
+            if (get<std::uint8_t>(shader, 0x78) != 0) f2c::bit(f2c::kInfoDepthBias);
+            if (get<std::uint8_t>(shader, 0x79) != 0) f2c::bit(f2c::kInfoTradeAlpha);
+            const std::int32_t n = get<std::int32_t>(shader, 0x250);
+            U8* elements = ptr(shader, 0x248);
+            for (std::int32_t k = 0; k < n && k < 32; ++k) {
+                const void* fn = ptr(ptr(ptr(elements, 8 * static_cast<std::size_t>(k)), 0), 0xf0);
+                if (fn != nullptr && fn != engine_ + kElementSetSwitchNoop) {
+                    f2c::bit(f2c::kSwitch);
+                    break;
+                }
+            }
+        }
+    }
+    {
+        // which meshes are the hierarchy / instanced ops (a few distinct ones named once)
+        static std::vector<const void*> named;
+        const bool hier = get<std::int32_t>(ctx, 0x34) > 0, inst = node == 0xffffffu;
+        if ((hier || inst) && res != nullptr && named.size() < 24 && std::find(named.begin(), named.end(), res) == named.end()) {
+            named.push_back(res);
+            U8* mat = ptr(ptr(res, 0x58), 0x38);
+            spdlog::info("native: f2c measure: {} op: mesh '{}' (material '{}'), {} sub-meshes, ctx +0x34 = {}, desc {:#x}, {} render instances", hier ? "hierarchy" : "instanced",
+                         engine::readCString(const_cast<std::uint8_t*>(res) + 0x40), mat != nullptr ? engine::readCString(const_cast<std::uint8_t*>(mat) + 0x40) : std::string(),
+                         get<std::int32_t>(res, 0x60), get<std::int32_t>(ctx, 0x34), op.raw.desc, get<std::int32_t>(res, 0xb8));
+        }
+    }
+    // invalidation inputs, once per part / entity per frame (solid ops: the z op of a part sees the same values)
+    if (solid) {
+        f2c::track(f2c::kLod, reinterpret_cast<const void*>(reinterpret_cast<std::uintptr_t>(ctx) ^ (static_cast<std::uintptr_t>(op.raw.desc) << 40)),
+                   reinterpret_cast<std::uintptr_t>(res));
+        f2c::track(f2c::kOverlayFlags, entity, eflags & 0xe00000u);
+        f2c::track(f2c::kIllumPtr, entity, reinterpret_cast<std::uintptr_t>(illumPs));
+    }
+}
+
 void StaticOps::opEnterImpl(const Op& op) {
     finishOp();
     recycleTransient();
@@ -1888,7 +2035,9 @@ void StaticOps::opEnterImpl(const Op& op) {
     std::memcpy(entryPsI_, dev_.psIntConstants(), sizeof(entryPsI_));
     skipWhy_.clear();
     leanBegin(group);
+    if (f2c::on() && group == Group::Static && viewKind_ == ViewKind::Main) f2cClassify(op);
     const Skip s = composeOp(op);
+    if (f2c::on() && f2cOp_ == &op) f2c::opComposed(s == Skip::None, static_cast<int>(s), name(s));
     maskRefShader_ = nullptr;
     leftCode_ = static_cast<int>(s);
     if (s != Skip::None) {
@@ -1925,6 +2074,8 @@ void StaticOps::opEnterImpl(const Op& op) {
 }
 
 void StaticOps::finishOp() {
+    if (f2c::on() && f2c::opActive()) f2c::opEnd(static_cast<std::uint32_t>(drawCount_));
+    f2cOp_ = nullptr;
     ++opSerial_;
     tagOverride_ = false;
     const bool skipped = slotSkipped_;
@@ -2034,6 +2185,7 @@ void StaticOps::ownDraw(const d3d9::DrawTapInfo& t) {
 }
 
 bool StaticOps::engineDraw(const d3d9::DrawTapInfo& t, const Op* op) {
+    if (f2c::on() && op != nullptr && op == f2cOp_) f2c::engineDraw();
     if (op != nullptr && op == simulatedOp_ && !simulatedDrew_) {
         simulatedDrew_ = true;
         ++fxWindow_.simulatedDrew;
@@ -2174,6 +2326,17 @@ gpuscene::DrawGeometry partGeometryBound(const d3d9::Device& dev, const sc::Draw
 
 void StaticOps::issue() {
     if (drawCount_ == 0) return;
+    if (f2c::on() && f2c::opActive() && f2cOp_ != nullptr) {
+        // F2c-0: draw-level blockers of the op's draws (the op is the unit of eligibility) and the vertex shaders of the static draws
+        const bool lightImages = gpuscene::lightingimages().active();
+        for (std::size_t k = 0; k < drawCount_; ++k) {
+            const sc::DrawDesc& d = *draws_[k];
+            if (d.inheritMask != 0) f2c::bit(f2c::kDrawInherit);
+            if (!d.vertexBytes.empty() || d.cpuStream != 0 || !d.indexed) f2c::bit(f2c::kDrawCpuStream);
+            if (f2cOp_->list == List::Solid && lightImages && d.lightEntry == gpuscene::kNoEntry) f2c::bit(f2c::kDrawNoLight);
+            f2c::vsDraw(static_cast<const d3d9::Shader*>(d.vs), d.drawClass == sc::DrawClass::ZPass);
+        }
+    }
     using namespace d3d9;
     using PClock = std::chrono::steady_clock;
     const bool timed = dev_.perfEnabled();
@@ -2453,6 +2616,7 @@ void StaticOps::issue() {
 }
 
 void StaticOps::report() {
+    if (f2c::on()) f2c::report(dev_.stats().frames);
     if (verified_ < 0 && active()) {
         spdlog::info("native: static ops: idle (the engine checks failed)");
         return;

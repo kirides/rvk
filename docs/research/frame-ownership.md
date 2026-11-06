@@ -595,6 +595,116 @@ device creation), `GameCaps::maxVertexInputAttributes`, `VariantSlot::SceneVs / 
   indirect path adds the record / argument writes and the merge scan, and the calls it removes (pipeline bind + bindings + push + draw per run of ~6 draws) were already cheap on the
   record threads. The value of F2b-1 is the DrawRecord / indirect path proven on both backends; the CPU gain needs F2c (nothing composed per draw).
 
+### 7.12 F2c-0 measurements (2026-11-06, `RVK_F2C_MEASURE=1`; no behaviour change)
+
+Counters only (`src/native/f2c_measure.{h,cpp}`; hooks in `static_ops.cpp` `f2cClassify` / `opEnterImpl` / `finishOp` / `issue` / `poolsOf` / `bindLightmaps` /
+`materialSamplers` / `writeLightingRegisters` / `engineDraw`, and the observer / replacer loops of `d3d9/draw.cpp` `prepareDraw` + `replayDraw`). The environment variable is
+read once at the first view (`GetEnvironmentVariableA`; `run.ps1 -Environment 'RVK_F2C_MEASURE=1'`); off = one bool test per site. rvk.log `native: f2c measure (5 s): ...` (one line
+per 5 s: ops / draws by list and reason, invalidation changed/pairs, observers, replacers), `(run)` every 30 s (+ `CTAB` lines, + the first hierarchy / instanced meshes named once).
+Scope: the main view's mesh z + solid ops of the Static group (the ones `StaticOps` composes). Reasons are bits per op; "excl" = the first reason in the priority order of
+`f2c::Reason` (instanced, instance list, overlay flags, fade, switch, no list, not table-lit, hierarchy, node op, shader class, video, sort id, draw-level blockers, no retain),
+"any" = every bit. Draws of an op = the draws we composed (ops we left to the engine would count the engine's; none occurred: **0 ops not composed in every run**).
+Runs (Full, Vulkan, `RisenTest.exe`, own copy `risen-test-vk-f2c0`, logs `rvk-work/scratch/f2c0/{F,G}-*.log`, summed over the 5 s windows with a world frame count,
+loading windows left out; `summ.py` / `cumul.py` there): "PD" = `-PlayerDefaults` (rvk.log `native: table lighting on`), "lighting off" = the test baseline
+(`lighting.clustered` / `full_lit` pinned off), lod 2x where a savegame ran.
+
+**1. Owned-eligible share** (section 9's first cut: mesh ctx, static, not instanced, fade 1, no overlay flags, no switch material, table-lit, no hierarchy; the cut = "elig").
+
+| run | main views | z ops (/view) | z draws | solid ops (/view) | solid draws | z elig draws | solid elig draws | all elig | + hierarchy | + instance list | + hw batches |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 3 spots (PD; time frozen) | 4573 | 1.15 M (252) | 1.19 M | 646 k (141) | 846 k | 82.8 % | 21.2 % | **57.2 %** | 77.1 % | 83.4 % | 99.9 % |
+| savegame hold (PD, lod 2x) | 4935 | 2.24 M (453) | 2.38 M | 756 k (153) | 1.05 M | 93.0 % | 23.4 % | **71.7 %** | 81.4 % | 85.9 % | 100 % |
+| savegame walk 60 s (PD) | 7457 | 3.34 M (447) | 3.55 M | 1.14 M (153) | 1.57 M | 92.7 % | 23.1 % | **71.4 %** | 81.4 % | 85.4 % | 100 % |
+| new game, beach circle (PD) | 9774 | 1.59 M (163) | 1.63 M | 877 k (90) | 1.14 M | 79.8 % | 13.9 % | **52.7 %** | 76.0 % | 82.9 % | 99.7 % |
+| lightturn, monastery hall (PD) | 2044 | 364 k (178) | 385 k | 176 k (86) | 234 k | 85.2 % | 18.7 % | **60.1 %** | 76.0 % | 83.7 % | 98.8 % |
+| 3 spots, lighting off | 4661 | 611 k | 630 k | 458 k | 673 k | 68.7 % | 0 % | 33.2 % | 48.2 % | 56.5 % | 77.9 % |
+| savegame hold, lighting off | 6041 | 2.71 M | 2.88 M | 929 k | 3.07 M | 92.7 % | 0 % | 44.9 % | 48.4 % | 51.5 % | 91.4 % |
+
+(The three columns on the right are cumulative shares of ALL main-view static z + solid draws when the cut is widened by that class.) Exclusion reasons, share of the list's draws
+(PD runs: spots / savegame / walk / beach / lightturn):
+
+| reason | z draws | solid draws |
+|---|---|---|
+| **hierarchy** (ctx +0x34 > 0: Levelmesh_Landscape_01 [25000], Harbour_01_L02 [15000], Monastery_01_L03 [25000]; node ops, desc node != 0, are a subset: 2 - 6 % of z, 5 - 8 % of solid draws at the spots / savegame) | 17.0 / 7.0 / 7.3 / 19.8 / 12.8 % | 23.9 / 15.8 / 16.4 / 28.3 / 21.1 % |
+| **instanced (hw batch)**: a render-instance op drawn by hardware instancing (res +0xa0, >= 2 instances, no lightmaps; avg 5 - 10 instances per op) | - | 39.6 / 46.2 / 47.6 / 40.9 / 40.0 % |
+| **instance list (per instance)**: node 0xffffff but drawn one instance at a time; **always exactly 1 instance per op** (props: Obj_Dec_Barrel, Item_*, It_Plant, bones, fences ...) | - | 15.2 / 14.5 / 12.9 / 16.9 / 20.2 % |
+| switch material | 0.2 / 0.03 / 0.01 / 0.3 / 2.0 % | <= 0.1 % |
+| overlay flags | 0.1 % in the beach run only (the focus highlight) | 0 |
+| no light list (solid) | - | 0.00 % (14 ops in a run) |
+| no retain (on-demand compile of a pass at the slot's place) | 0.003 % | 0.003 % |
+| not table-lit | - | 100 % of the non-instanced ones with lighting off (the pass count then follows the dynamic light count: also 3x more solid draws, 3.07 M vs 1.05 M at the savegame) |
+| fade < 1, shader class, video image, +0x2b8 (sort id / transformation) non-zero, draw inherits a stage (texture not ready), CPU vertex stream / non-indexed | **0** in every run | **0** |
+
+Notes: the "instanced" op kind of section 9 is two things (the first measurement flagged both alike): `composeSolid` takes the hardware-batch path only with `res +0xa0`, n >= 2 and
+no lightmaps; the other node-0xffffff ops are plain per-instance draws whose world matrix / illumination / switch / flags come from the resource's own render-instance list
+(0x58-byte records: matrix, switch +0x40, illum +0x48, flags +0x50), **no entity** (so the scene-table / object-table slot of section 9 does not exist for them). Informational bits
+(never exclusions): masked materials (blend mode 1) 21 - 26 % of ops, UseDepthBias materials **0**, lightmaps bound by 55 % of solid ops, TradeAlphaAsSolid 42 - 58 % of ops
+(the flag is not rare). z draws are 58 - 70 % of the static main-view draws, so the z pass dominates what an owned cut saves.
+
+**2. Observers / replacers on static main-view z + solid draws** (counts per path; `typeid` names; PD runs, the totals of the last 5 s window of the savegame hold):
+
+| device | calls | what it reads from the draw (code reading; `enh/rt_scene.cpp observe`, `enh/water.cpp observeOpaque`, `enh/gi.cpp`, `enh/material_rt.cpp`, `enh/object_motion.cpp`) |
+|---|---|---|
+| `enh::RtScene` (DrawObserver; active whenever a consumer holds the RT scene: water RT, RT shadows, GI, material RT) | ~600 per main view = every static draw: 342,700 per 5 s, **99.8 % in `replayDraw`** (575 in `prepareDraw`) | the `ReplaceQuery` (kind, phase, tag {entity, opDesc, material, materialName, water}, vertex / index `Buffer`, offsets, stride, decl, `first / primitives / baseVertex / minIndex / primitiveType`, `engineVs / enginePs` hash + semantics, `textures[]` of the material slots (the signature), blend / alpha-test / depth-write / depth-bias state, instanced); **VS float registers c33..c35** (the world rows, `rowsAt(kInstanceDataBase + 1)`; instanced: c32 + 4i + 1); on a material memo miss only (`rt: scene: materials ...: 1 - 4 resolves per frame, 11 - 59 uv evaluations per 5 s`) `RtMaterials::uvMap` hashes + evaluates the VS / PS float registers (and int / bool files) the uv-map slice reads |
+| `enh::Water` as replacer (`wantsOpaque()` + `observeOpaque`: the FFT ocean's sea-floor learning) | 8 - 50 k per 5 s (static solid draws while `floorPending_` has room) | vertex / index bytes (`readCpu`), decl, range, **c33..c35** world rows; once per (mesh range, placement) key; `handles()` never true |
+| `enh::Gi`, `enh::MaterialRt` (observers), `ObjectMotion` (rigid: Debug only), `Gbuffer` / `Shadows` replacers, `MeshPartTable` | **0** calls at the player defaults (and with lighting off nothing at all is registered: the RT scene has no consumer) | Gi / MaterialRt tally per frame the PS registers named by semantics (ambient SH c15..c21 + indoor, DirLight, PointLights, FogColor / FogSettings = lighting c14..c37 and view c0..c4); ObjectMotion the vertex buffers + entity; the replacers `handles(kind, phase, tag)` |
+
+**Decision (what an owned draw hands the observers).** (a) the observers are called **once per visible record per frame, exactly as `replayDraw` does today** (RtScene's registry `see()`
+refreshes an instance every frame, it ages out otherwise: skipping the call would drop the object from the TLAS); (b) the query comes from the OpRecord (`CachedDraw.query` + tag +
+`textures` are already retained for the packet cache); (c) the three world rows move from "read the register file" to a new `ReplaceQuery::objectRows` (3 float4 from the object table /
+the entity matrix of the stamp), preferred by `RtScene::rowsAt` and `Water::worldRows`; (d) the register-dependent resolve (`RtMaterials::uvMap`, <= 12 per second) asks for a
+"materialize this draw's registers" callback, i.e. composes that one draw the old way (rare, no CPU cost worth optimising); (e) Gi / MaterialRt (off at the defaults) get per-frame
+snapshots instead of per-draw register reads: the view record's PS c0..c4 and the lighting entry's composed c14..c37 (`LightingImages` CPU twin, the owned path composes them anyway)
+through a new per-distinct-lighting-entry hook, written when one of them is enabled in Full; (f) `DrawReplacer::handles` is asked once per record at compaction (a settings epoch in the
+stamp); today none ever handles a static main-view draw. `replayAllowed` (observers shown the cached query) is the existing proof that (b) works.
+
+**3. Invalidation rates** (changed / pairs = a key seen in the previous main view whose value differs; "new" = not seen in the previous main view; per main view; lod / overlay / illum ptr
+are per solid op or entity, illum bytes per illumination drawn):
+
+| input | spots (PD, frozen) | savegame hold | walk 60 s | beach circle (new game, moving all frames) | lightturn (monastery) |
+|---|---|---|---|---|---|
+| LOD resource (ctx +0x28) of a visible solid part | 13 / 645 k | 11 / 756 k | 12 / 1.14 M | 24 / 869 k (new 8,527 = 0.87 per view entering) | 34 / 174 k (0.017 per view) |
+| entity overlay flags (+0x28 & 0xe00000) | 0 / 318 k | 0 / 382 k | 0 / 586 k | 0 / 443 k | 0 / 85 k |
+| illum pointer (entity +0xf8) | 0 / 318 k | 0 / 382 k | 0 / 586 k | 0 / 443 k | 0 / 85 k |
+| illumination record bytes [0, 0x110) | 1 / 502 k | 0 / 649 k | 0 / 970 k | 1 / 692 k | **218 / 138 k (0.107 per view)** |
+| engine dirty byte (illum +0x110) set when drawn | never | never | never | never | never |
+| light-set sun bit (list +0) | 0 / 4,570 | 2 / 4,931 | 2 / 7,454 | 0 / 9,773 | 0 / 2,042 |
+| `holdsAll` (hypothetical: no dynamic light, every static light known by the table; the shipped code keeps `fullLitSkipsReads` off) | 0 / 502 k (all true) | 0 / 649 k | 0 / 970 k | 69 / 692 k (the first frames) | 48 / 138 k (0.023 per view) |
+| `LightTable::registryComplete()` | 0 flips | 0 | 0 | 1 (startup) | 0 |
+| material pool bytes (VS + PS pools read at the main view's first use) | 8,593 / 262 k (**3.3 %, 1.9 per view**) | 9,394 / 317 k (3.0 %, 1.9) | 14,489 / 503 k (2.9 %, 1.9) | 13,855 / 450 k (3.1 %, 1.4) | 2,503 / 85 k (3.0 %, 1.2) |
+| material sampler images / ready state (per shader, per pass) | 11 / 510 k | 5 / 578 k | 5 / 907 k | 2 / 884 k | 4 / 162 k |
+| lightmap slots (res +0x90 / +0x98, flag, image data) | 3 / 318 k | 0 / 382 k | 0 / 586 k | 0 / 446 k | 0 / 85 k |
+
+Reading: every stamp the OpRecord needs is quiet (<= 0.02 changes per main view, most 0), **except the material pools**, which change for ~3 % of the drawn materials every frame
+(the time-driven ones: water, lava ...; 1 - 2 per view). That argues for a record stamp on the material's *structure* (graph id, texture slots / images, sampler states: 0.001 - 0.002
+changes per view) and NOT on the pool bytes, which the Material table re-uploads per frame anyway (7.7) and the windows read at draw time. The only place light stamps move is a camera
+turn / walk between lamps (lightturn: illumination bytes 0.1 per view, holdsAll 0.02 per view; a record rebuild per such change is cheap). Caveats: the spots freeze game time (lower
+bound); the savegame hold stands still; the walk run's hero walked only ~14 m in 60 s (one moving window) and the beach run circles ~10 m; no run crosses a town. Visible-set churn
+("new" keys) is the cost of walking: ~0.9 new part-keys per main view entering the view in the beach run, 0.08 at the savegame hold, i.e. record creation, not invalidation.
+
+**4. CTAB / reflection: float registers the static material vertex shaders read** (decoded bytecode, `def`'d constants excluded, relative reads flagged; every static z / solid draw's
+VS; the same 12 non-instanced VS (VS_Default / VS_DefaultZPass permutations) in every run, 1 distinct read set; 2 - 3 instanced VS apart):
+
+* non-instanced static VS read **c0..c3 and c11** (c0..c3 = view-projection, or the depth-bias one; c4..c10 are NOT read), **c32..c35** (g_vInstanceData: fade in c32.w, world rows c33..c35)
+  and **c232..c239** (the material's VS pool). **c12..c31 are read by none of them** (no relative addressing): VS window 1 (c12..c30) and c31 of window 2 never matter for them,
+  so the per-view record can be c0..c3 + c11 only (5 float4, no `dbvp` c0..c3 variant needed: no UseDepthBias material was drawn in any run) and window 1 may point at any valid address.
+* the instanced VS read c0..c3, c32..c39 and (relative, `c32 + 4 i`) c40..c255: its instance blocks (up to 50 x 4 float4) are an image of consecutive instance rows.
+
+**Recommendation: first-cut scope of the owned records.**
+1. **Include in cut 1:** z ops (all non-hierarchy, non-switch: 80 - 93 % of z draws) and solid non-instanced entity ops, table-lit, as section 9 says. Expected coverage 53 - 72 % of the
+   main-view static draws (57 % spots, 72 % savegame): expect that share of the section 9 estimate (-0.5 .. -0.7 ms) for the compose + packet path, not all of it. Keep the guards for
+   fade < 1, overlay flags, shader class, video, sort id, inherited stages, CPU streams, on-demand compile: they never fire in these runs, so they cost no coverage.
+2. **Widen next, in this order of payoff / cost:** (a) **hierarchy meshes** (+ 9 - 24 points of all static draws: 7 - 20 % of z, 16 - 28 % of solid draws = the level geometry: landscape,
+   harbour, monastery shells): the node's first index / count are static per mesh resource (`ptr(sub,0x40) + 0x28 * node`), so an OpRecord can hold them (stamp: MeshPart generation);
+   the 3 resources named above carry it all; (b) **instance-list ops** (+ 5 - 7 points: one instance per op, 13 - 20 % of solid draws) with an instance-record table keyed (resource, index)
+   instead of the entity object table; (c) the **hardware-batch** ops (40 - 48 % of the solid draws, 20 - 30 % of all static draws, avg 5 - 10 instances) last: they need the instance rows
+   as a c32 + 4 i image (a block per batch), and with lighting off they explode to 2.4 M draws; keep them on the old path in cut 1.
+3. **Exclude from the owned design (small or zero):** switch-element materials (0.1 - 0.7 % of ops, 2 % of z at the monastery), overlay-flag entities (0.1 % of z with the focus highlight),
+   no-light-list ops (14 per run).
+4. **Table lighting is a precondition, not an option:** with `lighting.clustered` / `full_lit` off no solid op is eligible (the pass count follows the dynamic light count; 3x more draws).
+5. Stamps: Material structure (not pool bytes), MeshPart generation, LOD (ctx +0x28), illumination record + light-set epoch, overlay flags, illum pointer, lightmap residency; all <= 0.02
+   changes per view in the measured scenes.
+
 ## 8. F1 / F2 design decision: windows onto persistent tables (2026-11-06, orchestrator)
 
 **Decision.** F1 does not start with new shaders. Translated shaders and the ported ubershader read every float register through 4 register windows per
@@ -654,7 +764,7 @@ no compaction, the old path runs, the record-derived draws are built and compare
 
 | stage | content | gate | CPU (Full, est.) |
 |---|---|---|---|
-| F2c-0 | measure: owned-eligible share by reason, observer reads, invalidation rates, CTAB-live c12..c31 of the static VS, occurrence of hierarchy / instanced ops | numbers | - |
+| F2c-0 | measure: owned-eligible share by reason, observer reads, invalidation rates, CTAB-live c12..c31 of the static VS, occurrence of hierarchy / instanced ops | numbers: done, 7.12 | - |
 | F2c-1 | object table, VS window 1 / 2 served, `LightingImages::entryFor`, `LightTable::registryGeneration` (`native.owned_objects`) | split_verify 0, read-backs 0, checkEntity 0 | ~0 |
 | F2c-2 | OpRecords + record-derived DrawRecords built and compared while composition runs; read-log signal audit (`native.owned_records`) | DIFFERING 0, audit disagreements 0 | +0.05..0.1 |
 | F2c-3 | viewBegin compaction + `Device::replayOwned` at BeforeDepthPrepass / BeforeSolid, engine sort order, side effects, check frames | check frames 0, refcompare Full, long tour (placeholderBinds -> 0), both backends, validation | **-0.5..-0.7** |

@@ -182,6 +182,8 @@ add_library(rvk_core STATIC
     src/native/effect_ops.h
     src/native/frame_desc.cpp
     src/native/frame_desc.h
+    src/native/f2c_measure.cpp
+    src/native/f2c_measure.h
     src/native/frame_tap.cpp
     src/native/frame_tap.h
     src/native/owned_observe.cpp

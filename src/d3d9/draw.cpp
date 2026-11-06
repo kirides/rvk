@@ -9,6 +9,7 @@
 #include <format>
 #include <fstream>
 #include <string>
+#include <typeinfo>
 #include <unordered_map>
 
 #include <spdlog/spdlog.h>
@@ -16,6 +17,7 @@
 #include "d3d9/convert.h"
 #include "d3d9/device.h"
 #include "d3d9/memeq.h"
+#include "native/f2c_measure.h"
 #include "shader/abi.h"
 
 namespace rvk::d3d9 {
@@ -958,8 +960,11 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         captureInstances_ = false;
     }
     if (!skipObs && !observers_.empty() && geom.indexed && !geom.userPointer) {
+        const bool f2cStatic = native::f2c::on() && kind == draws::Kind::StaticMesh && phase.view == scene::View::Main &&
+                               (phase.pass == scene::Pass::Solid || phase.pass == scene::Pass::DepthPrepass);
         for (DrawObserver* o : observers_) {
             if (!o->observes(kind, phase)) continue;
+            if (f2cStatic) native::f2c::noteObserver(typeid(*o).name(), 0);
             ReplaceQuery q;
             query(q);
             o->observe(*this, q);
@@ -969,6 +974,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         geom.indexed && !geom.userPointer) {
         for (DrawReplacer* r : replacers_) {
             if (!r->wantsOpaque()) continue;
+            if (native::f2c::on()) native::f2c::noteReplacer(typeid(*r).name(), 1);
             ReplaceQuery q;
             query(q);
             r->observeOpaque(*this, q);
@@ -977,6 +983,10 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     DrawReplacement rep;
     for (DrawReplacer* r : replacers_) {
         if (!r->handles(kind, phase, tag_)) continue;
+        if (native::f2c::on() && kind == draws::Kind::StaticMesh && phase.view == scene::View::Main &&
+            (phase.pass == scene::Pass::Solid || phase.pass == scene::Pass::DepthPrepass)) {
+            native::f2c::noteReplacer(typeid(*r).name(), 0);
+        }
         ReplaceQuery q;
         query(q);
         r->replace(*this, q, rep);
@@ -1751,12 +1761,18 @@ bool Device::replayDraw(const CachedDraw& c, const ReplayInputs& in) {
             captureRequest_ = {};
             captureRequestRw_ = {};
             captureInstances_ = false;
+            const bool f2cStatic = native::f2c::on() && c.kind == draws::Kind::StaticMesh && c.phase.view == scene::View::Main &&
+                                   (c.phase.pass == scene::Pass::Solid || c.phase.pass == scene::Pass::DepthPrepass);
             for (DrawObserver* o : observers_) {
-                if (o->observes(c.kind, c.phase)) o->observe(*this, q);
+                if (!o->observes(c.kind, c.phase)) continue;
+                if (f2cStatic) native::f2c::noteObserver(typeid(*o).name(), 1);
+                o->observe(*this, q);
             }
             if (opaqueObserver) {
                 for (DrawReplacer* r : replacers_) {
-                    if (r->wantsOpaque()) r->observeOpaque(*this, q);
+                    if (!r->wantsOpaque()) continue;
+                    if (native::f2c::on()) native::f2c::noteReplacer(typeid(*r).name(), 1);
+                    r->observeOpaque(*this, q);
                 }
             }
             if (!captureRequest_.null()) {
