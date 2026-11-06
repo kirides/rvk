@@ -803,3 +803,31 @@ no compaction, the old path runs, the record-derived draws are built and compare
 | F2c-2 | OpRecords + record-derived DrawRecords built and compared while composition runs; read-log signal audit (`native.owned_records`) | DIFFERING 0, audit disagreements 0 | +0.05..0.1 |
 | F2c-3 | viewBegin compaction + `Device::replayOwned` at BeforeDepthPrepass / BeforeSolid, engine sort order, side effects, check frames | check frames 0, refcompare Full, long tour (placeholderBinds -> 0), both backends, validation | **-0.5..-0.7** |
 | F2c-4 | persistent records, GPU compaction (ref.y = view slot), later cull (F5) | compaction = CPU list | -0.03..-0.05 CPU, GPU / low-end gain |
+
+## 10. F4 design: SpeedTrees + tree billboards GPU-driven (2026-11-06, accepted by the orchestrator)
+
+Same recipe as F2c (section 9): a retained per-(render buffer rb, type) record + a per-view per-tree snapshot (LOD fields tree +0x48 / +0x50 /
++0x58 / +0x5c / +0x60 / +0x64 / +0x6c, read once per tree per view at `viewBegin`: they are overwritten per db); tree ops compacted out of the z /
+solid lists; the CPU writes per frame the instance rows (64 B {c32..c35} per instance, in draw order, VS window 2 base = rows - 31 x 16), one
+DrawRecord per instance (template copy + vsWin2 + psWin3 = the instance's lighting image `entryFor(illum, params)`) and one 20 B indirect record per
+LOD bucket (indexCount = strip / leaf count, firstIndex = start, firstInstance = the bucket's first row); multi-draw runs through the F2a scene
+variant / F2b-1 `sceneFlushRun`. **Per-instance DrawRecords remove the illumination cut (88 % of today's solid tree batch cuts), the light-list /
+static-SH / own-lights cuts and the 50-instance limit** (under table lighting; the remaining per-instance permutation input is the sun bit).
+Remaining cuts: pipeline (type x z / solid / shadow x sun x material graph / states), the tree resource's vertex / index buffers, topology.
+The SpeedTree VS reads its rows as `g_vInstanceData(vInstance * 4 ...)` (TEXCOORD4 = stream 1, ramp 0..n-1 [I]): stage 1 replaces stream 1 by our
+own identity ramp (instance-rate, length >= row capacity; `firstInstance` offsets it), later the owned VS sets vInstance from ref.y. Wind c14..c29
+(+ c30 fog) in a tree view block (VS window 1), once per view. Billboards: per-(ctx, desc) retained constants images (c32..c36 + c37+j), the easiest
+stage. Side effects at compaction: queue stamp reset (rb +0xe0 / +0xe4) + sort (`leanTreeSort`), MaskReference 80 (`leanMaskRef`), material /
+resource touches, billboard lightmaps, RtScene observer calls; keep composition for trees while RtScene's animated-tree path (captures) is on
+(until F8 supplies the rows). Check frames compare rows / strips / alphas / pipeline exactly; lighting only where the engine's batch had one
+illumination (it draws a merged batch with its last instance's lighting; ours is exact per instance: an accepted Full picture change).
+
+| stage | content | gate | CPU (est.) |
+|---|---|---|---|
+| F4-0 | measure (`RVK_F4_MEASURE=1`): composeTree phase timers, census (trees / ops / buckets / calls under the new rule, two-bucket trees, no-entity share, sun values, illum classes, hw vs sw instancing), invalidation rates of the tree LOD fields / matrix / illum / rb tables / wind, CTAB of the tree VS / PS (c0..c31, PS c5), stream-1 freq / size / content, RtScene coupling | numbers | 0 |
+| F4-1 | billboards from retained records | DIFFERING 0 | -0.15..-0.25 |
+| F4-2 | tree records + per-view plans, compared | DIFFERING 0, audit 0 | +0.05..+0.1 |
+| F4-3 | CPU-owned tree execution main view (compaction, rows, records, args, side effects, check frames) | check frames 0, refcompare Full, jungle spots, rtwalk sway, lod.trees=3, both backends, validation | -1.0..-1.4 |
+| F4-4 | tree shadow views (cascades, z) | shadow-compare | -0.15..-0.3 |
+| F4-5 | persistent per-tree records (UpdateLoD post-hook), GPU compaction | compaction = CPU list | -0.05..-0.15 + GPU |
+| F4-6 | owned tree shaders (leaf PS wired: `uberSupportsFile`; vertex pulling; graph-shared pipelines) | equality gates | calls ~10-40 |
