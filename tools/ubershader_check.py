@@ -30,8 +30,10 @@ def run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, env=ENV, **kw)
 
 
-def defines(macros, entry):
+def defines(macros, entry, file='ge_default_phong.fx'):
     out = []
+    if file == 'ge_default_leafs.fx':
+        out += ['-D', 'RVK_LEAFS=1']
     for name, value in macros:
         value = {'true': '1', 'false': '0'}.get(value, value)
         value = ' '.join(value.split())  # a macro body on one line
@@ -44,7 +46,7 @@ def defines(macros, entry):
 def check(entry, tmp, corpus_dir, vs_spv, trials, keep=False):
     h = entry['corpus']
     res = {'hash': entry['hash'], 'corpus': h, 'entry': entry['entry'], 'file': entry['file']}
-    if entry['file'] != 'ge_default_phong.fx' or entry['entry'] not in ('PS_Default', 'PS_DefaultZPass'):
+    if entry['file'] not in ('ge_default_phong.fx', 'ge_default_leafs.fx') or entry['entry'] not in ('PS_Default', 'PS_DefaultZPass'):
         res['status'] = 'UNSUPPORTED'
         return res
     src = os.path.join(corpus_dir, 'ps30_%s.ps.hlsl' % h)
@@ -58,7 +60,7 @@ def check(entry, tmp, corpus_dir, vs_spv, trials, keep=False):
         res['status'] = 'TRANSLATED-ERR'
         res['log'] = (r.stdout + r.stderr).strip()[:400]
         return res
-    r = run([TOOL, 'hlsl', 'material/ge_default.frag', '-o', b_spv] + defines(entry['macros'], entry['entry']))
+    r = run([TOOL, 'hlsl', 'material/ge_default.frag', '-o', b_spv] + defines(entry['macros'], entry['entry'], entry['file']))
     if r.returncode:
         res['status'] = 'PORT-ERR'
         res['log'] = (r.stdout + r.stderr).strip()[:600]

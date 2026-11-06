@@ -6,7 +6,7 @@
                                     [--limit N] [--show 5]
 
 Input: the JSON lines of `-Setting debug.material_sources=true` runs (default out/matsrc/*.jsonl). For every request of
-ge_default_phong.fx (PS_Default / PS_DefaultZPass; with --vs also VS_Default / VS_DefaultZPass) the macros become -D defines (true /
+ge_default_phong.fx / ge_default_leafs.fx (PS_Default / PS_DefaultZPass; with --vs also VS_Default / VS_DefaultZPass) the macros become -D defines (true /
 false -> 1 / 0, a body on one line, XFX_PASS=1 for the ZPass entries; as shader/uber.cpp does) and
 `rvk_shadertool hlsl material/ge_default.<stage> -D ...` compiles shaders/material/ge_default.<stage>.hlsl from the disk
 (RVK_SHADER_DIR) with DXC to SPIR-V and validates it with spirv-val. No GPU involved.
@@ -45,6 +45,8 @@ def defines(macros, entry):
 def compile_one(req, stage, hooks):
     name = 'material/ge_default.' + stage
     cmd = [TOOL, 'hlsl', name] + defines(req['macros'], req['entry'])
+    if req['file'] == 'ge_default_leafs.fx':
+        cmd += ['-D', 'RVK_LEAFS=1']  # the SpeedTree leaf hooks (shader-permutations.md 11)
     for h in HOOKS[hooks]:
         cmd += ['-D', h]
     env = dict(os.environ, RVK_SHADER_DIR=os.path.join(ROOT, 'shaders'))
@@ -82,7 +84,7 @@ def main():
             if not line:
                 continue
             r = json.loads(line)
-            if r.get('file') != 'ge_default_phong.fx' or r['hash'] in seen:
+            if r.get('file') not in ('ge_default_phong.fx', 'ge_default_leafs.fx') or r['hash'] in seen:
                 continue
             if args.only and r['hash'] != args.only:
                 continue

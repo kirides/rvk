@@ -341,7 +341,7 @@ int cmdDxilUber(int argc, char** argv) {
         std::string line;
         while (std::getline(in, line)) {
             UberRequest r;
-            if (parseUberLine(line, r) && rvk::shader::uberSupports(r.file, r.entry)) reqs.push_back(std::move(r));
+            if (parseUberLine(line, r) && rvk::shader::uberSupportsFile(r.file, r.entry)) reqs.push_back(std::move(r));
         }
     }
     if (static_cast<int>(reqs.size()) > limit) reqs.resize(static_cast<std::size_t>(limit));
@@ -371,7 +371,7 @@ int cmdDxilUber(int argc, char** argv) {
         items[i].family = std::string("uber ") + v.name;
         rvk::shader::dxc::Request r;
         r.file = "uber.hlsl";
-        r.source = rvk::shader::uberPixelHlsl(q.entry, q.macros, v.defines, v.scene);
+        r.source = rvk::shader::uberPixelHlsl(q.file, q.entry, q.macros, v.defines, v.scene);
         if (r.source.empty()) {
             items[i].r.spirvMsg = "uber: invalid macro name";
             return;

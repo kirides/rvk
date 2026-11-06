@@ -247,6 +247,15 @@ float3 CalcAmbientLightComplex(float3 n) {
     return AmbientColor;
 }
 
+#if RVK_LEAFS
+// ge_default_leafs.fx CustumFragmentAmbient: always the complex SH ambient (no type / quality switch, no indoor blend)
+void CustumFragmentAmbient(inout sPassData PassData, inout float3 colAmbient) {
+#ifdef RVK_MV_GBUFFER
+    rvk_gbN = float4(PassData.m_vecWorldNormal, 0.0);
+#endif
+    colAmbient = CalcAmbientLightComplex(PassData.m_vecWorldNormal);
+}
+#else
 void CustumFragmentAmbient(inout sPassData PassData, inout float3 colAmbient) {
 #ifdef RVK_MV_GBUFFER
     rvk_gbN = float4(PassData.m_vecWorldNormal, 0.0);  // the normal-mapped world normal the ambient is evaluated with: the G-buffer's
@@ -267,6 +276,50 @@ void CustumFragmentAmbient(inout sPassData PassData, inout float3 colAmbient) {
     colAmbient = lerp(g_IndoorAmbientColor.rgb, colAmbient, PassData.m_fVertexAmbientOcclusion);
 }
 
+#endif  // RVK_LEAFS
+
+#if RVK_LEAFS
+// ---- leaf lighting (ge_default_leafs.fx): front lambert + phong, back lighting with a view dependent term -----------------------
+void LeafShadingFront(inout sPassData PassData, sPassLight PassLight, inout float3 a_colDiffuse, inout float3 a_colSpecular) {
+    float Lamb = saturate(dot(PassLight.m_vecLight, PassData.m_vecWorldNormal));
+
+#if XFX_SPECULAR && XFX_QUALITY > XFX_QUALITY_LOW
+    float Specular = PhongSpecular(PassData, PassLight.m_vecLight);
+    a_colSpecular = PassLight.m_colSpecular * Specular;
+#endif
+
+    a_colDiffuse = Lamb;
+}
+
+void LeafShadingBack(inout sPassData PassData, sPassLight PassLight, inout float3 a_colDiffuse) {
+    float EDotL = saturate(dot(-PassLight.m_vecLight, PassData.m_vecWorldEye));
+    float PowEDotL = EDotL * EDotL;
+    PowEDotL *= PowEDotL;
+
+    // back diffuse half lambert
+    float LDotNBack = saturate(dot(PassLight.m_vecLight, -PassData.m_vecWorldNormal) * 0.6 + 0.4);
+
+    float BackShading = lerp(PowEDotL, LDotNBack, g_ShaderData[0].w);
+    a_colDiffuse += BackShading * g_ShaderData[0].rgb;
+}
+
+void CustumFragmentLight(inout sPassData PassData, sPassLight PassLight) {
+    float3 colSpecular = float3(0.0, 0.0, 0.0);
+    float3 colDiffuse = float3(0.0, 0.0, 0.0);
+
+    LeafShadingFront(PassData, PassLight, colDiffuse, colSpecular);
+#if XFX_QUALITY > XFX_QUALITY_LOW
+    LeafShadingBack(PassData, PassLight, colDiffuse);
+#endif
+
+    float Shadow = PassLight.m_fShadow * PassLight.m_fFallOff;
+    colSpecular *= Shadow;
+    colDiffuse *= Shadow;
+
+    PassData.m_colAccSpecular += colSpecular;
+    PassData.m_colAccDiffuse += colDiffuse * PassLight.m_colDiffuse;
+}
+#else
 // ---- Phong lighting (ge_default_phong.fx) -------------------------------------------------------------------------------------
 void SimpleBrdfPhong(inout sPassData PassData, sPassLight PassLight) {
     float Lamb = saturate(dot(PassLight.m_vecLight, PassData.m_vecWorldNormal));
@@ -312,6 +365,8 @@ void CustumFragmentLight(inout sPassData PassData, sPassLight PassLight) {
     ComplexBrdfPhong(PassData, PassLight);
 #endif
 }
+
+#endif  // RVK_LEAFS
 
 void CustumFragmentInitPass(inout sPassData PassData) {
     GetNormalMap(PassData);

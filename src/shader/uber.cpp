@@ -22,8 +22,19 @@ bool uberSupports(std::string_view effectFile, std::string_view entry) {
     return effectFile == "ge_default_phong.fx" && (entry == "PS_Default" || entry == "PS_DefaultZPass");
 }
 
+bool uberSupportsFile(std::string_view effectFile, std::string_view entry) {
+    return uberSupports(effectFile, entry) ||
+           (effectFile == "ge_default_leafs.fx" && (entry == "PS_Default" || entry == "PS_DefaultZPass"));
+}
+
 std::string uberPixelHlsl(std::string_view entry, const MacroList& macros, std::string_view hookDefines, bool sceneRecord) {
+    return uberPixelHlsl("ge_default_phong.fx", entry, macros, hookDefines, sceneRecord);
+}
+
+std::string uberPixelHlsl(std::string_view effectFile, std::string_view entry, const MacroList& macros, std::string_view hookDefines,
+                          bool sceneRecord) {
     std::string out = "// HLSL material shader (shaders/material) built from the engine's macros\n";
+    if (effectFile == "ge_default_leafs.fx") out += "#define RVK_LEAFS 1\n";  // the SpeedTree leaf hooks (ge_default.frag.hlsl)
     for (const auto& [name, value] : macros) {
         if (!validName(name)) return {};
         std::string v;

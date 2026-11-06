@@ -16,10 +16,16 @@ using MacroList = std::vector<std::pair<std::string, std::string>>;
 
 // effect / entry the port covers (ge_default_phong.fx: PS_Default, PS_DefaultZPass)
 bool uberSupports(std::string_view effectFile, std::string_view entry);
+// uberSupports + ge_default_leafs.fx (PS_Default / PS_DefaultZPass: the SpeedTree leaves, shader-permutations.md 11). Build those with the
+// overload that takes the effect file; the run time (d3d9/device.cpp) still asks uberSupports and builds without it (leaves stay translated).
+bool uberSupportsFile(std::string_view effectFile, std::string_view entry);
 
 // One translation unit (shaders/material/ge_default.frag.hlsl, entry PSMain): the macros as #defines (true / false -> 1 / 0, a value on one line) (XFX_PASS = 1 for PS_DefaultZPass), the hook
 // defines, then `#include "material/ge_default.frag.hlsl"` (resolved from the embedded sources by shader::dxc). Empty on an invalid macro name.
 std::string uberPixelHlsl(std::string_view entry, const MacroList& macros, std::string_view hookDefines, bool sceneRecord = false);
+// the same for a request of `effectFile` (ge_default_phong.fx or ge_default_leafs.fx: adds `#define RVK_LEAFS 1`)
+std::string uberPixelHlsl(std::string_view effectFile, std::string_view entry, const MacroList& macros, std::string_view hookDefines,
+                          bool sceneRecord = false);
 // a hash of the HLSL texts of the ubershader (and what it includes): cache names of compiled variants change when they do
 std::uint64_t uberHlslHash();
 

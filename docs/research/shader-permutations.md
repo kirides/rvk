@@ -203,6 +203,35 @@ captured macros as `-D`, run by `rvk_shadereq` (16 trials, 8 jobs; 14 s for 194 
 
 ### Open
 
-* Not ported: `ge_default_leafs.fx`, particles, the sky dome pixel shader and all vertex shaders (the VS ubershader exists in
+* Not ported: (`ge_default_leafs.fx` is, section 11), particles, the sky dome pixel shader and all vertex shaders (the VS ubershader exists in
   `shaders/material/ge_default.vert` and is proven by `shader_equiv.py --vs`, but is not wired to the run time).
 * The ubershader stays off by default until it brings something (coverage + improvements).
+
+## 11. The leaf shader port: `ge_default_leafs.fx` [C]
+
+* **Structure** (the engine's 206-line file, `data\compiled\effects\shadermaterial\ge_default_leafs.fx`): a thin wrapper like
+  `ge_default_phong.fx`: the same `ge_default.fxh` + `ge_default_ps.fx` + `ge_default_vs.fx` includes, only the custom hooks differ. So the
+  **vertex shaders are `ge_default_vs.fx` unchanged** (the leaf VS requests are `VS_Default` / `VS_DefaultZPass` with `XFX_ST_LEAFMESH` /
+  `XFX_ST_LEAFCARDS`, already in `ge_default.vert.hlsl`), and the pixel shader differs from the phong one in three hooks:
+  * `CustumFragmentLight`: `LeafShadingFront` (lambert; Phong specular when `XFX_SPECULAR` and quality > low, assigned not
+    accumulated) + at quality > low `LeafShadingBack` (`lerp(pow4(saturate(dot(-L, eye))), saturate(dot(L, -N) * 0.6 + 0.4),
+    g_ShaderData[0].w) * g_ShaderData[0].rgb`: the leaf's back colour / view dependence in c6), both scaled by shadow x falloff; no
+    `SelfShadow`, no Fresnel divide, no lighting-type switch (`XFX_LIGHTINGTYPE` is ignored).
+  * `CustumFragmentAmbient`: always `CalcAmbientLightComplex` (no `XFX_AMBIENTLIGHTTYPE` / quality switch, **no indoor blend**).
+  * `CustumFragmentFinish` and `CustumFragmentInitPass` equal the phong ones.
+* **Port**: `RVK_LEAFS` (default 0, `ge_default.hlsli`) in `shaders/material/ge_default.frag.hlsl` selects the leaf `CustumFragmentLight` /
+  `CustumFragmentAmbient` (the phong BRDFs / ambient are compiled out); the macros are the engine's. `shader::uberSupportsFile(file, entry)`
+  and `shader::uberPixelHlsl(file, entry, macros, hooks[, scene])` (`file == ge_default_leafs.fx` adds `#define RVK_LEAFS 1`) build a request;
+  the old `uberSupports` / 3-argument `uberPixelHlsl` stay phong-only (the run time, `d3d9/device.cpp`, is not wired to leaves: F4 passes
+  the file when the leaf draws move to the ubershader). The variant hooks (`rvk_gbN`, GI ambient) apply to the leaf ambient the same way.
+* **Proof** (requests of `census_town.jsonl` + `census_jungle.jsonl`: 11 PS = 10 `PS_Default` + 1 `PS_DefaultZPass`, 6 VS):
+  * `python tools/leafs_match.py <hlsl_infer --make-fx copy> corpus out/matsrc/*.jsonl`: the engine's own `ge_default_leafs.fx` compiled with
+    d3dx9_29 and each request's macros is **instruction-identical to the corpus bytecode: 17 of 17** (11 PS, 6 VS); the 6 VS also
+    compile to the same bytes from `ge_default_phong.fx` with the same macros, so `ge_default.vert` (proven 17 of 17 by `shader_equiv --vs`)
+    covers them.
+  * `python tools/ubershader_check.py` (now also `ge_default_leafs.fx`): **11 of 11 leaf PS EQUAL** on the GPU (16 trials, worst relative
+    difference 4e-8; 0 for the z pass), the 248 phong ones still EQUAL. Negative control: the same leaf shader built without `RVK_LEAFS`
+    differs in 16 of 16 trials (6 %).
+  * `python tools/uber_hlsl_check.py --vs` (now includes leaf requests): 1340 compiles + `spirv-val`, 0 failed (PS x 4 hook sets, VS);
+    `rvk_shadertool dxil-check uber` (uses `uberSupportsFile`): 337 requests x 6 variants (plain, G-buffer, motion, GI, scene), 2022 of
+    2022 SPIR-V + DXIL OK; `dxil-check embedded` 74 of 74.

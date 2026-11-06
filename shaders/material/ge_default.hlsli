@@ -101,6 +101,10 @@
 #ifndef XFX_ST_BRANCH
 #define XFX_ST_BRANCH 0
 #endif
+// RVK_LEAFS = 1: the request is from ge_default_leafs.fx (SpeedTree leaves: its own ambient / light / back lighting hooks; the VS is the same file)
+#ifndef RVK_LEAFS
+#define RVK_LEAFS 0
+#endif
 #ifndef XFX_ST_LEAFMESH
 #define XFX_ST_LEAFMESH 0
 #endif

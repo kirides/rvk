@@ -113,7 +113,9 @@ Inserted at the existing points `BeforeDepthPrepass`, `BeforeSolid`, `AfterOpaqu
   set's <= 2 dynamic lights, then cluster lights the object lacks; one pass, no additive passes), `XFX_LIGHTMAP` (may stay a macro).
 * Vertex pulling from `vk::MeshArena` by address + the layout record; the only IA input is the per-instance ref stream (section 4).
   Pipeline key: (graph, pass, blend, cull, geometry class); no vertex declaration.
-* Not ported yet: `ge_default_leafs.fx` (7 corpus shaders, the leaf PS), particles, sky dome: translated until their stage.
+* `ge_default_leafs.fx` (the leaf PS; its VS is the shared `ge_default_vs.fx`) is **ported** (2026-11-06, shader-permutations.md 11: `RVK_LEAFS` in `ge_default.frag.hlsl`,
+  `uberPixelHlsl(file, ...)`; 11 of 11 PS EQUAL on the GPU, 17 of 17 requests instruction-exact against D3DX). Not wired to the run time
+  (`uberSupports` stays phong-only until F4 passes the file). Not ported yet: particles, sky dome: translated until their stage.
 * Look: `rvk_light_model.hlsli` (the engine's falloff, `pow(acc, 0.45)`, fog); `lighting.style` original / physical; D3D9 numerics stay
   (`powD3D`, `atan2D3D`, `normalize(0) = 0`).
 * Expected picture change (accepted in Full): one pass per object instead of `pow` per pass + additive passes changes objects with > 3
