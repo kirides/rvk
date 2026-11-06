@@ -397,6 +397,11 @@ public:
     // Up to `maxDraws` indexed draws from `args` (VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT; records of VkDrawIndexedIndirectCommand = D3D12_DRAW_INDEXED_ARGUMENTS:
     // indexCount, instanceCount, firstIndex, vertexOffset, firstInstance; `stride` bytes apart, >= 20, a multiple of 4); min(maxDraws, the uint32 at
     // countBuffer + countOffset) of them run. Needs DeviceCaps::drawIndirectCount.
+    // `drawCount` indexed draws from `args`, records as below (`stride` bytes apart); the CPU knows the count. Vulkan: vkCmdDrawIndexedIndirect (a loop of
+    // single-draw calls when drawCount > 1 and !DeviceCaps::multiDrawIndirect); DX12: ExecuteIndirect without a count buffer. A non-zero firstInstance in
+    // a record needs DeviceCaps::drawIndirectFirstInstance. firstInstance offsets the instance-rate vertex bindings on both backends (the per-draw index
+    // of docs/research/frame-ownership.md 4); SV_InstanceID is NOT a portable index (Vulkan InstanceIndex includes firstInstance, D3D12 does not).
+    virtual void drawIndexedIndirect(Buffer& args, std::uint64_t argsOffset, std::uint32_t drawCount, std::uint32_t stride) = 0;
     virtual void drawIndexedIndirectCount(Buffer& args, std::uint64_t argsOffset, Buffer& countBuffer, std::uint64_t countOffset, std::uint32_t maxDraws,
                                           std::uint32_t stride) = 0;
 
@@ -466,6 +471,8 @@ struct DeviceCaps {
     std::uint32_t maxPushBytes = 128;
     std::uint32_t heapSize = 0;     // entries of the texture / buffer heap
     bool drawIndirectCount = false;  // CommandList::drawIndexedIndirectCount (Vulkan 1.2 drawIndirectCount, always on DX12)
+    bool multiDrawIndirect = false;          // CommandList::drawIndexedIndirect with drawCount > 1 as one call (Vulkan multiDrawIndirect, always on DX12)
+    bool drawIndirectFirstInstance = false;  // indirect records may carry a non-zero firstInstance (Vulkan drawIndirectFirstInstance, always on DX12)
     bool textureBlit = false;        // CommandList::blitTexture (Vulkan only: the DX12 backend has no scaling copy)
     bool rayQuery = false;           // createBlas / createTlas + inline ray queries (Vulkan ray query with a bindless TLAS array, DXR tier 1.1); needs DeviceDesc::rayTracing
     std::uint32_t agilitySdkVersion = 0;  // DX12: the D3D12SDKVersion of the Agility SDK the device was created from (0 = the system runtime; always 0 on Vulkan)

@@ -354,6 +354,8 @@ bool Context::createDevice(bool withRayTracing) {
     features_.vertexStores = sup2.features.vertexPipelineStoresAndAtomics == VK_TRUE;
     f2.features.multiDrawIndirect = sup2.features.multiDrawIndirect;
     f2.features.drawIndirectFirstInstance = sup2.features.drawIndirectFirstInstance;
+    features_.multiDrawIndirect = sup2.features.multiDrawIndirect == VK_TRUE;
+    features_.drawIndirectFirstInstance = sup2.features.drawIndirectFirstInstance == VK_TRUE;
     features_.indirectDraws = sup2.features.multiDrawIndirect == VK_TRUE && sup2.features.drawIndirectFirstInstance == VK_TRUE;
     f2.features.shaderStorageImageExtendedFormats = sup2.features.shaderStorageImageExtendedFormats;
     features_.storageImageExtendedFormats = sup2.features.shaderStorageImageExtendedFormats == VK_TRUE;

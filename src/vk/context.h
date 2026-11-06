@@ -83,6 +83,8 @@ struct DeviceFeatures {
     bool shaderInt64 = false;         // shaderInt64 enabled (HLSL shaders: pointers from 64-bit addresses)
     bool shaderFloat16Int16 = false;  // shaderFloat16 + shaderInt16 enabled (the FidelityFX upscaler's fp16 shaders)
     bool storageImageExtendedFormats = false;  // RG16F / R16F ... storage images (the G-buffer's motion)
+    bool multiDrawIndirect = false;          // multiDrawIndirect enabled: vkCmdDrawIndexedIndirect with drawCount > 1
+    bool drawIndirectFirstInstance = false;  // drawIndirectFirstInstance enabled: firstInstance of an indirect record may be non-zero
     bool indirectDraws = false;   // multiDrawIndirect + drawIndirectFirstInstance: one vkCmdDrawIndexedIndirect for many draws, the item index as firstInstance (no user at the moment: the removed native opaque prototype used it, see git history)
     bool vertexStores = false;    // vertexPipelineStoresAndAtomics: vertex shaders write buffers (enh/gi: skinned positions)
     bool shaderDrawParameters = false;  // gl_DrawID / gl_BaseInstance in shaders (Vulkan 1.1 feature, optional in 1.3)

@@ -95,6 +95,7 @@ DXGI_FORMAT toDxgi(VkFormat f) {
     case VK_FORMAT_R16G16B16A16_SNORM: return DXGI_FORMAT_R16G16B16A16_SNORM;
     case VK_FORMAT_R32_SFLOAT: return DXGI_FORMAT_R32_FLOAT;
     case VK_FORMAT_R32_UINT: return DXGI_FORMAT_R32_UINT;
+    case VK_FORMAT_R32G32_UINT: return DXGI_FORMAT_R32G32_UINT;  // instance-rate refs (the GPU-driven draws' per-draw index)
     case VK_FORMAT_R32G32_SFLOAT: return DXGI_FORMAT_R32G32_FLOAT;
     case VK_FORMAT_R32G32B32_SFLOAT: return DXGI_FORMAT_R32G32B32_FLOAT;
     case VK_FORMAT_R32G32B32A32_SFLOAT: return DXGI_FORMAT_R32G32B32A32_FLOAT;
@@ -722,6 +723,8 @@ public:
         caps_.bindless = true;
         caps_.heapSize = kHeapSize;
         caps_.drawIndirectCount = true;  // ExecuteIndirect with a count buffer
+        caps_.multiDrawIndirect = true;  // ExecuteIndirect with any command count; StartInstanceLocation of the records is honoured
+        caps_.drawIndirectFirstInstance = true;
         caps_.textureBlit = false;       // no scaling copy (a mip chain would need a compute / graphics pass of the backend's own)
         surveyFeatures();
         return true;
@@ -1767,6 +1770,12 @@ public:
                      std::uint32_t firstInstance) override {
         flush();
         list_->DrawIndexedInstanced(indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+    }
+    void drawIndexedIndirect(Buffer& args, std::uint64_t argsOffset, std::uint32_t drawCount, std::uint32_t stride) override {
+        D3DBuffer& a = static_cast<D3DBuffer&>(args);
+        bufferState(a, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        flush();
+        list_->ExecuteIndirect(dev_.drawIndexedSignature(stride), drawCount, a.resource(), argsOffset, nullptr, 0);
     }
     // ExecuteIndirect with a DRAW_INDEXED signature: D3D12_DRAW_INDEXED_ARGUMENTS is byte-identical to VkDrawIndexedIndirectCommand
     void drawIndexedIndirectCount(Buffer& args, std::uint64_t argsOffset, Buffer& countBuffer, std::uint64_t countOffset, std::uint32_t maxDraws,

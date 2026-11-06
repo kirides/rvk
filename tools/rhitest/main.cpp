@@ -65,7 +65,7 @@ struct Blobs {
 // the shaders of all checks (compiled once, to SPIR-V and DXIL)
 struct Shaders {
     Blobs cs, vs, ps;                      // the basic check
-    Blobs tex, texStore, buf, vtxVs, vtxPs, rt, store8;  // the gap checks
+    Blobs tex, texStore, buf, vtxVs, vtxPs, rt, store8, indCs, indVs;  // the gap checks
 };
 
 bool compileBoth(const std::string& file, const char* entry, const char* profile, Blobs& out) {
@@ -528,6 +528,155 @@ void testVertex(rhi::Device& dev, const Shaders& sh) {
     probe(-0.9f, -0.9f, black, "background");
     report(dev, indirect ? "vertex / index / indirect draws" : "vertex / index / direct draws", before);
     if (!indirect) skip(dev, "indirect draws with a count", "no drawIndirectCount");
+}
+
+// GPU-driven indexed draws (docs/research/frame-ownership.md 4): a compute pass writes the draw records, the count and an instance-rate stream of uint2
+// refs; the vertex shader reads the ref from the stream (firstInstance offsets it) and pulls the positions by address with SV_VertexID. The same
+// records are drawn with drawIndexedIndirectCount (count word 6 of 7 records) and drawIndexedIndirect (6 records); both images must equal the CPU's.
+void testIndirectPull(rhi::Device& dev, const Shaders& sh) {
+    const int before = failures;
+    const char* name = "indirect draws: compute records, instance ref stream, vertex pulling";
+    if (!sh.indCs.ok || !sh.indVs.ok || !sh.vtxPs.ok) {
+        check(false, "indirect pull shaders did not compile");
+        report(dev, name, before);
+        return;
+    }
+    if (!dev.caps().drawIndirectFirstInstance || !dev.caps().drawIndirectCount) {
+        skip(dev, name, "no drawIndirectFirstInstance / drawIndirectCount");
+        return;
+    }
+    constexpr std::uint32_t kTarget = 64, kRecords = 7, kStride = 20, kArgsOffset = 40, kCountOffset = 16;
+    // template quads: v0 (-s,-s) v1 (s,-s) v2 (-s,s) v3 (s,s) for s = 0.9, 0.6, 0.3 (tile-local, 1 = half a tile)
+    const float sizes[3] = {0.9f, 0.6f, 0.3f};
+    float positions[3][4][2];
+    for (int t = 0; t < 3; ++t) {
+        const float s = sizes[t];
+        const float p[4][2] = {{-s, -s}, {s, -s}, {-s, s}, {s, s}};
+        std::memcpy(positions[t], p, sizeof(p));
+    }
+    // absolute indices (vertexOffset 0 in every record: SV_VertexID of D3D12 ignores the base vertex, Vulkan's VertexIndex includes it): per template t,
+    // 9 indices from 9 t: the quad (4 t + 0 1 2, 2 1 3), then its lower-left triangle (4 t + 0 1 2)
+    std::uint32_t indices[27];
+    for (std::uint32_t t = 0; t < 3; ++t) {
+        const std::uint32_t base[9] = {0, 1, 2, 2, 1, 3, 0, 1, 2};
+        for (std::uint32_t k = 0; k < 9; ++k) indices[t * 9 + k] = 4 * t + base[k];
+    }
+    constexpr VkBufferUsageFlags kRw = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    auto posBuf = dev.createBuffer({sizeof(positions), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi pull positions"});
+    auto ib = dev.createBuffer({sizeof(indices), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, rhi::Memory::Upload, "rhi pull indices"});
+    auto args = dev.createBuffer({kArgsOffset + kRecords * kStride, kRw | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, rhi::Memory::Device, "rhi pull args"});
+    auto count = dev.createBuffer({64, kRw | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, rhi::Memory::Device, "rhi pull count"});
+    auto refs = dev.createBuffer({10 * 8, kRw | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, rhi::Memory::Device, "rhi pull refs"});
+    const std::uint32_t pitch = rhi::bufferRowPitch(VK_FORMAT_R8G8B8A8_UNORM, kTarget);
+    std::unique_ptr<rhi::Texture> targets[2];
+    std::unique_ptr<rhi::Buffer> readbacks[2];
+    for (int k = 0; k < 2; ++k) {
+        targets[k] = dev.createTexture({VK_IMAGE_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, {kTarget, kTarget, 1}, 1, 1,
+                                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, "rhi pull target"});
+        readbacks[k] = dev.createBuffer({static_cast<std::uint64_t>(pitch) * kTarget, VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "rhi pull readback"});
+    }
+    auto computePipeline = dev.createComputePipeline({sh.indCs.shader(), "rhi indirect records"});
+    const VkVertexInputBindingDescription binding{0, 8, VK_VERTEX_INPUT_RATE_INSTANCE};
+    const VkVertexInputAttributeDescription attribute{0, 0, VK_FORMAT_R32G32_UINT, 0};
+    rhi::GraphicsPipelineDesc gd;
+    gd.vs = sh.indVs.shader();
+    gd.ps = sh.vtxPs.shader();
+    gd.colorFormats[0] = VK_FORMAT_R8G8B8A8_UNORM;
+    gd.vertexBindings = {&binding, 1};
+    gd.vertexAttributes = {&attribute, 1};
+    gd.name = "rhi indirect pull";
+    auto pipeline = dev.createGraphicsPipeline(gd);
+    if (!posBuf || !ib || !args || !count || !refs || !targets[0] || !targets[1] || !readbacks[0] || !readbacks[1] || !computePipeline || !pipeline) {
+        check(false, "indirect pull resource / pipeline creation");
+        report(dev, name, before);
+        return;
+    }
+    std::memcpy(posBuf->map(), positions, sizeof(positions));
+    std::memcpy(ib->map(), indices, sizeof(indices));
+    struct IndPush {
+        std::uint32_t args[2], count[2], refs[2], pad[2];
+    } cp{};
+    const auto a = args->shaderRefRw(kArgsOffset), c = count->shaderRefRw(kCountOffset), r = refs->shaderRefRw(0);
+    cp.args[0] = a[0], cp.args[1] = a[1], cp.count[0] = c[0], cp.count[1] = c[1], cp.refs[0] = r[0], cp.refs[1] = r[1];
+    struct PullPush {
+        std::uint32_t positions[2], pad[2];
+    } pp{};
+    const auto pr = posBuf->shaderRef(0);
+    pp.positions[0] = pr[0], pp.positions[1] = pr[1];
+    dev.submitAndWait([&](rhi::CommandList& cl) {
+        cl.bufferBarrier(*args, rhi::BufferAccess::ShaderWrite);
+        cl.bufferBarrier(*count, rhi::BufferAccess::ShaderWrite);
+        cl.bufferBarrier(*refs, rhi::BufferAccess::ShaderWrite);
+        cl.bindPipeline(*computePipeline);
+        cl.setPushConstants(&cp, sizeof(cp));
+        cl.dispatch(1, 1, 1);
+        cl.bufferBarrier(*args);  // writes -> indirect arguments / vertex data (DX12: UAV -> shader read, the draw moves them on)
+        cl.bufferBarrier(*count);
+        cl.bufferBarrier(*refs);
+        for (int k = 0; k < 2; ++k) {
+            cl.transition(*targets[k], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+            rhi::RenderingInfo ri;
+            ri.colorCount = 1;
+            ri.color[0].texture = targets[k].get();
+            ri.color[0].load = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            ri.color[0].clear.float32[3] = 1.0f;
+            ri.width = ri.height = kTarget;
+            cl.beginRendering(ri);
+            cl.bindPipeline(*pipeline);
+            cl.setPushConstants(&pp, sizeof(pp));
+            rhi::Buffer* buffers[1] = {refs.get()};
+            const std::uint64_t offsets[1] = {0};
+            const std::uint32_t strides[1] = {8};
+            cl.setVertexBuffers(0, buffers, offsets, strides);
+            cl.setIndexBuffer(*ib, 0, VK_INDEX_TYPE_UINT32);
+            if (k == 0) cl.drawIndexedIndirectCount(*args, kArgsOffset, *count, kCountOffset, kRecords, kStride);
+            else cl.drawIndexedIndirect(*args, kArgsOffset, 6, kStride);
+            cl.endRendering();
+            cl.transition(*targets[k], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            cl.copyTextureToBuffer(*readbacks[k], 0, *targets[k]);
+        }
+    });
+    // expected per tile (the tables of rhi_ind.comp.hlsl): colour id (slot + 1; 0 = nothing drawn), template, half
+    struct Tile {
+        std::uint32_t id = 0, tpl = 0;
+        bool half = false;
+    } tiles[16];
+    const std::uint32_t instances[6] = {1, 2, 0, 1, 3, 1}, first[6] = {0, 1, 3, 3, 4, 8}, tpl[6] = {0, 1, 2, 1, 0, 2}, tileOf[10] = {0, 1, 2, 3, 4, 5, 6, 3, 7, 8};
+    const bool half[6] = {false, false, false, true, true, false};
+    for (int rec = 0; rec < 6; ++rec) {
+        for (std::uint32_t k = 0; k < instances[rec]; ++k) {
+            const std::uint32_t slot = first[rec] + k;
+            tiles[tileOf[slot]] = {slot + 1, tpl[rec], half[rec]};
+        }
+    }
+    const auto colour = [](std::uint32_t id) {
+        return Rgba{static_cast<std::uint8_t>((id * 53) & 255), static_cast<std::uint8_t>((id * 97 + 50) & 255), static_cast<std::uint8_t>((id * 29 + 120) & 255), 255};
+    };
+    const char* variant[2] = {"count", "no count"};
+    for (int k = 0; k < 2; ++k) {
+        const auto* px = static_cast<const std::uint8_t*>(readbacks[k]->map());
+        for (int t = 0; t < 16; ++t) {
+            // probes in tile-local units (1 = 8 pixels, y up): inside every template and the half triangle / inside the quads but outside the half
+            // triangle / inside the largest template only
+            const float probes[3][2] = {{-0.12f, -0.12f}, {0.12f, 0.12f}, {0.75f, 0.75f}};
+            for (int pi = 0; pi < 3; ++pi) {
+                const Tile& tl = tiles[t];
+                Rgba want{0, 0, 0, 255};
+                if (tl.id != 0) {
+                    const bool inside = pi == 0 || (pi == 1 && !tl.half) || (pi == 2 && tl.tpl == 0 && !tl.half);
+                    if (inside) want = colour(tl.id);
+                }
+                const std::uint32_t x = static_cast<std::uint32_t>(static_cast<float>((t & 3) * 16 + 8) + probes[pi][0] * 8.0f);
+                const std::uint32_t y = static_cast<std::uint32_t>(static_cast<float>(kTarget - ((t >> 2) * 16 + 8)) - probes[pi][1] * 8.0f);
+                const std::uint8_t* p = px + y * pitch + x * 4;
+                check(p[0] == want[0] && p[1] == want[1] && p[2] == want[2] && p[3] == want[3],
+                      std::format("{}: tile {} probe {} at ({}, {}): ({}, {}, {}, {}) want ({}, {}, {}, {})", variant[k], t, pi, x, y, p[0], p[1], p[2], p[3],
+                                  want[0], want[1], want[2], want[3]));
+            }
+        }
+    }
+    check(std::memcmp(readbacks[0]->map(), readbacks[1]->map(), static_cast<std::size_t>(pitch) * kTarget) == 0, "count / no-count images differ");
+    report(dev, name, before);
 }
 
 // the pixel of src/vk/raytracing.cpp selfTest's scene (rt_query.comp's encoding); `ambiguous`: on a triangle edge (either result is valid)
@@ -1170,6 +1319,7 @@ bool runBackend(rhi::Backend backend, bool validation, const Shaders& sh) {
     testTextures(*dev, sh);
     testBuffers(*dev, sh);
     testVertex(*dev, sh);
+    testIndirectPull(*dev, sh);
     testRayQuery(*dev, sh);
     testAccelOps(*dev, sh);
     testTextureOps(*dev, sh);
@@ -1261,6 +1411,8 @@ int main(int argc, char** argv) {
     compileBoth("test/rhi_buf.comp.hlsl", "CSMain", "cs_6_6", sh.buf);
     compileBoth("test/rhi_vtx.vert.hlsl", "VSMain", "vs_6_6", sh.vtxVs);
     compileBoth("test/rhi_vtx.frag.hlsl", "PSMain", "ps_6_6", sh.vtxPs);
+    compileBoth("test/rhi_ind.comp.hlsl", "CSMain", "cs_6_6", sh.indCs);
+    compileBoth("test/rhi_ind.vert.hlsl", "VSMain", "vs_6_6", sh.indVs);
     compileBoth("test/rhi_rt.comp.hlsl", "CSMain", "cs_6_6", sh.rt);
     compileBoth("test/rhi_store8.comp.hlsl", "CSMain", "cs_6_6", sh.store8);
     if (vulkan) runBackend(rhi::Backend::Vulkan, validation, sh);

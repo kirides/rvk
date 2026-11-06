@@ -298,6 +298,7 @@ public:
         flush();
         vkCmdDrawIndexed(cmd_, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
     }
+    void drawIndexedIndirect(Buffer& args, std::uint64_t argsOffset, std::uint32_t drawCount, std::uint32_t stride) override;
     void drawIndexedIndirectCount(Buffer& args, std::uint64_t argsOffset, Buffer& countBuffer, std::uint64_t countOffset, std::uint32_t maxDraws,
                                   std::uint32_t stride) override {
         flush();
@@ -405,6 +406,8 @@ public:
         caps_.bindless = true;
         caps_.heapSize = vk::Bindless::kMax2D;
         caps_.drawIndirectCount = ctx_.features().drawIndirectCount;
+        caps_.multiDrawIndirect = ctx_.features().multiDrawIndirect;
+        caps_.drawIndirectFirstInstance = ctx_.features().drawIndirectFirstInstance;
         caps_.textureBlit = true;
         // ray queries need the acceleration structure array in the bindless set (descriptor binding update after bind)
         caps_.rayQuery = ctx_.features().rayTracing.enabled && ctx_.features().rayTracing.tlasDescriptors;
@@ -422,6 +425,8 @@ public:
         caps_.bindless = true;
         caps_.heapSize = vk::Bindless::kMax2D;
         caps_.drawIndirectCount = ctx_.features().drawIndirectCount;
+        caps_.multiDrawIndirect = ctx_.features().multiDrawIndirect;
+        caps_.drawIndirectFirstInstance = ctx_.features().drawIndirectFirstInstance;
         caps_.textureBlit = true;
         // acceleration structures of the wrapped device: TLAS slots from the renderer's bindless set (shared with the RT scene)
         caps_.rayQuery = ctx_.features().rayTracing.enabled && ctx_.features().rayTracing.tlasDescriptors;
@@ -447,6 +452,8 @@ public:
         caps_.bindless = true;
         caps_.heapSize = vk::Bindless::kMax2D;
         caps_.drawIndirectCount = ctx_.features().drawIndirectCount;
+        caps_.multiDrawIndirect = ctx_.features().multiDrawIndirect;
+        caps_.drawIndirectFirstInstance = ctx_.features().drawIndirectFirstInstance;
         caps_.textureBlit = true;
         caps_.rayQuery = ctx_.features().rayTracing.enabled && ctx_.features().rayTracing.tlasDescriptors;
         fillGameCaps();
@@ -1469,6 +1476,16 @@ void VkCommandListImpl::computeBarrier() {
 }
 
 // (one barrier for every access kind: it also covers the buffer as a vertex / index / indirect source, a copy source and acceleration structure build input)
+void VkCommandListImpl::drawIndexedIndirect(Buffer& args, std::uint64_t argsOffset, std::uint32_t drawCount, std::uint32_t stride) {
+    flush();
+    const VkBuffer b = static_cast<VkBufferImpl&>(args).buffer();
+    if (drawCount > 1 && !dev_.caps().multiDrawIndirect) {  // drawCount > 1 needs the feature: one call per record
+        for (std::uint32_t i = 0; i < drawCount; ++i) vkCmdDrawIndexedIndirect(cmd_, b, argsOffset + std::uint64_t(i) * stride, 1, stride);
+        return;
+    }
+    vkCmdDrawIndexedIndirect(cmd_, b, argsOffset, drawCount, stride);
+}
+
 void VkCommandListImpl::bufferBarrier(Buffer&, BufferAccess) {
     VkMemoryBarrier2 b{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
     b.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
