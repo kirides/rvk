@@ -187,7 +187,7 @@ std::size_t Registry::age(const float camera[3], std::uint64_t frame, double tim
     std::size_t dropped = 0;
     for (std::size_t i = 0; i < list_.size();) {
         Instance& in = list_[i];
-        const bool stale = frame > in.lastFrame + limits.unseenFrames && time > in.lastTime + limits.unseenSeconds;
+        const bool stale = !in.pinned && frame > in.lastFrame + limits.unseenFrames && time > in.lastTime + limits.unseenSeconds;
         bool tooFar = false;
         if (!stale && camera != nullptr && limits.radius > 0.0f) {
             if (!in.sphereValid) {

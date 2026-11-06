@@ -107,8 +107,17 @@ public:
     // the GLSL options of a vertex shader's capture variant (d3d9::VariantSlot::Capture); public for rvk_shadertool --capture
     static bool captureOptions(const d3d9::Shader& s, shader::TranslateOptions& o);
 
+    // F8-0 persistent entries (docs/research/frame-ownership.md 7.20; settings rt.table_entries / debug.rt_table_compare, Full only): the instance of a static,
+    // non-instanced, opaque mesh draw is learned from its first full observation and then held by a table entry keyed by (entity, opDesc, draw range): while
+    // its scene-table slot is live and unmoved the registry instance is pinned (never aged for being unseen) and the entry's draws skip observe()
+    // (coversDraw). Every kTableRelearn-th frame per entry the draw is observed again (materials, uv maps); `compare` runs a check frame every
+    // kTableCompare frames with the pre-filter off and diffs each observed draw against its entry.
+    void setTableEntries(bool on, bool compare);
+    bool tableEntries() const { return tableOn_; }
+
     // d3d9::DrawObserver
     bool observes(d3d9::draws::Kind kind, d3d9::scene::Phase phase) const override;
+    bool coversDraw(const d3d9::CoverQuery& draw) override;
     Registers registersRead() const override { return Registers::Material; }  // (world rows: ReplaceQuery::objectRows; the uv map's material constants)
     void observe(d3d9::Device& device, const d3d9::ReplaceQuery& query) override;
     void bufferChanged(std::uint64_t bufferId) override;
@@ -409,6 +418,46 @@ private:
     std::unordered_map<std::uint64_t, DynBlas> dynBlas_;
     std::uint32_t nextDynId_ = 1u << 30;
     std::uint64_t dynBuilt_ = 0, dynRefit_ = 0;  // interval counters
+
+    // ---- F8-0 persistent entries ----
+    struct TableEntry {
+        const void* entity = nullptr;
+        std::uint32_t opDesc = 0, first = 0, primitives = 0;
+        std::uint32_t slot = 0, slotGen = 0, slotVersion = 0;  // the scene-table slot of the entity at learn time
+        rt::BlasKey key;                                       // the draw's BLAS key (buffer ids + generations, range)
+        std::uint64_t blas = 0, instKey = 0;                   // the BLAS id and the registry instance key (BLAS + quantised rows)
+        rt::Rows rows{};
+        std::uint32_t flags = 0, data = 0, material = 0;       // the instance's, as learned (the compare's snapshot)
+        std::uint64_t matSig[3]{};                             // RtMaterials::signature of the draw (engine shaders + the sampled textures): a change = observe again
+        std::uint8_t classMask = 0;                            // draw classes fully observed since the learn: 1 main solid, 2 main z pre-pass, 4 cascades
+        std::uint8_t salt = 0;
+        std::uint64_t comparedFrame = 0;
+    };
+    static std::uint8_t tableClass(d3d9::scene::Phase p);
+    static std::uint64_t tableKey(const void* entity, std::uint32_t opDesc, std::uint32_t first, std::uint32_t primitives);
+    void tableObserved(const d3d9::ReplaceQuery& q, const Blas& b, rt::Registry::Instance& in, const rt::Rows& rows, bool fresh,
+                       const rt::Registry::Instance* pre);
+    void tableMaintain(std::uint64_t frame);
+    void tableErase(std::unordered_map<std::uint64_t, TableEntry, IdHash>::iterator it, bool unpin);
+    void tableInstanceRemoved(std::uint64_t instKey);
+    void tableClear();
+    void logTable(double frames);
+    bool tableCompareFrame(std::uint64_t frame) const { return tableCompare_ && frame % kTableCompare == 0; }
+    static constexpr std::uint64_t kTableRelearn = 32;  // frames: a covered draw is observed again (<= half of the materials' refresh period)
+    static constexpr std::uint64_t kTableCompare = 10;  // frames between check frames
+    bool tableOn_ = false, tableCompare_ = false, tableTripped_ = false, tableNoTrip_ = false;
+    std::unordered_map<std::uint64_t, TableEntry, IdHash> table_;
+    std::unordered_multimap<std::uint64_t, std::uint64_t> tableByInst_;      // registry instance key -> entry keys (z / solid / cascade entries of one range)
+    std::unordered_multimap<std::uint64_t, std::uint64_t> tableByOp_;        // hash(entity, opDesc) -> entry key (level-of-detail switches)
+    std::uint64_t tableCheckFrame_ = 0, tableExtraCounted_ = 0;
+    std::unordered_map<std::uint64_t, std::uint32_t, IdHash> tableMatPre_;  // check frame: instance key -> its material before the frame's first sighting
+    struct TableStats {
+        std::uint64_t asked[3]{}, covered[3]{}, observed[3]{};  // by class (main solid, main z, cascades)
+        std::uint64_t fallNone = 0, fallClass = 0, fallMoved = 0, fallIdent = 0, fallMaterial = 0, fallRelearn = 0, fallCompare = 0;
+        std::uint64_t learned = 0, relearned = 0, refusedNoSlot = 0, refusedRows = 0, refusedShared = 0, lodErased = 0, slotDropped = 0, instGone = 0;
+        std::uint64_t checkFrames = 0, matched = 0, missing = 0, extra = 0, differing = 0, diffKey = 0, diffRows = 0, diffFlags = 0, diffData = 0, diffMaterial = 0, materialIds = 0;
+        double coverMs = 0.0;
+    } ts_;
 
     d3d9::Device& dev_;
     rt::Limits limits_;

@@ -1045,6 +1045,48 @@ poll (`constantsInto` + `checkDraw` per draw: polling once per material per fram
 
 Both branches merged (F2c-3 first). `native.owned_check` is the check period of both (F4-1's `bbCheckFrame`; `RVK_BB_CHECK=<n>` still overrides). `Device::replayOwned` (register-file based, observers see the loaded windows) and `Device::submitOwned` (no register file, windows from the persistent images) were NOT merged: their guards differ by design. Game check (jungle + pub_interior, Full, all owned settings, Vulkan with GPU-assisted validation / Vulkan / D3D12): 0 validation errors, owned static 63-67 % of ops with 0 undrawn and check frames DIFFERING 0, billboards 100 % recordable and owned between check frames, DIFFERING 0 (records + billboards, total and 5 s).
 
+### 7.20 F8-0 persistent RT entries (2026-11-06, `rt.table_entries` + `debug.rt_table_compare`; Full only, Debug, default off)
+
+Files: `src/enh/rt_scene.{h,cpp}` (`TableEntry`, `coversDraw`, `tableObserved`, `tableMaintain`, `logTable`), `rt_registry.{h,cpp}` (`Instance::pinned`), `rt_material.{h,cpp}` (`signature` from its parts),
+`d3d9/device.h` (`CoverQuery`, `DrawObserver::coversDraw`) + one-line pre-filter calls in the three observer loops (`prepareDraw`, `replayDraw`, `replayOwned`), settings (133 now), tests `rt_registry_pinned_never_stale`.
+
+* **Design as built (differs from section 12 in one point: no second TLAS path).** The registry stays the one owner of TLAS instances, so `record()` / `emitInstance` are untouched and duplicates are impossible by
+  construction (the key-equality of the registry + owner replacement stay the guard; no `tableOwners_`). A **TableEntry** (key = hash(entity, opDesc, first, primitives)) holds: scene-table slot (index, generation,
+  version), the draw's `BlasKey`, the BLAS id and registry instance key, rows, class mask (1 main solid, 2 main z, 4 cascades: the classes fully observed since the learn), per-class material signature
+  (`RtMaterials::signature`: engine VS / PS hashes, tag material, sampled textures s9..s15). It is learned at the end of the full observation of a plain draw (kind StaticMesh, not instanced / blended / water / glass,
+  not SpeedTree) when the slot exists and **its rows equal the entity's own matrix** (`rows[r*4+j] = world[4j+r]`, 1e-5: a hierarchy node or carried matrix is refused; measured refusals 0). Learning **pins** the registry
+  instance (`pinned`: never aged for being unseen; the radius still drops it; counts as seen for the volatile-range rule).
+* **Pre-filter** `coversDraw(CoverQuery)` (kind, phase, tag entity / opDesc, buffers, offsets, range, blending, engine shaders, textures; no query is built): true = skip query building + `observe`. Falls through (counted by
+  reason): no entry, class not yet observed, slot gone / reallocated / **moved** (slot version), buffer id / generation / offset / range differs (LOD switch, new GPU copy), material inputs differ (shader / streamed-in texture),
+  **relearn** (every 32nd frame per *instance*: all entries over one instance are observed in the same frame, so the frame's last draw still decides its material), check frame. Per frame `tableMaintain` drops entries whose slot
+  changed (the instance unpins and ages as before); a registry removal of a pinned instance (distance, BLAS died, owner replaced, cap) erases its entries (`onRemoved`); entries of the same (entity, op) on another vertex /
+  index buffer are erased when a new one is learned (LOD switch). Off = `coversDraw` returns at once; nothing else exists.
+* **Compare** (`debug.rt_table_compare`, check frame every 10th, pre-filter off for it): each eligible full observation is compared with what the covered draw would have skipped: BLAS key / instance key, rows (1e-5, also vs the
+  slot), flags, data word (low 16 bits: alpha test; the kind in the high bits is the latest sighting's, diagnostics only), view bit, and the instance's final material of the frame against its pre-state (content, ignoring the
+  animated uv map). Hard differences (key / rows / flags / data) or material differences above 0.5 % of the compared pairs in a 5 s window turn the entries off (`rt: scene table: turned off`; `RVK_TABLE_NOTRIP=1` keeps
+  counting). `missing` = an old instance of an eligible draw without an entry, `extra` = entries not drawn on the check frame (per check frame). rvk.log `rt: scene table (5 s)`.
+* **Found while building it (each cost a compare round):** (1) several entries share one instance (z range = cascade range): the instance is pinned until the last entry goes; (2) the instance's material is "the last rank-4
+  draw", so an entry relearning alone flips it: the relearn phase is per instance; (3) material signature per class (z / solid / cascade shaders differ: one signature ping-ponged); (4) a streamed-in texture
+  (placeholder -> real) changes the bound `Texture*`: part of the pre-filter, else the old material lives up to 32 frames; (5) the draw kind (`data >> 16`) flips between a plain and an instanced sighting of one instance: not compared.
+* **Coverage (Vulkan, rvkcompare lake_jungle / harbour_docks / jungle / pub_interior, compare on; per frame):** ~676 eligible candidates asked, 603 covered (89 %: 10 % are the check frames, relearn 1.2 %, material inputs ~0,
+  no entry ~1 %), full observations of the class 56 (all draws of the RT scene observed: 600 -> ~350 per frame at the savegame). Savegame without compare: 200 of 221 covered (90 %), refused learns 0. Registry composition
+  (jungle): 2778 instances, 1111 pinned (main-only 1686 / cascade-only 562 / both 530 of all: **cascade-only share 20 - 30 %**); the rest are instanced batches, SpeedTrees, grass and other excluded classes.
+* **Compare results (pairs compared / key / rows / flags / data / material / missing):** Vulkan 4 spots 916,678 / 0 / 0 / 0 / 0 / 12 / 1; depth-probe run 865,709 / 0 / 0 / 0 / 0 / 47 / 3; instances-probe run 812,566 / 0 / 0 / 0 / 0 / 54 / 5; savegame
+  344,060 / all 0; teleport soak (10 spots) 850,351 / 0 / 0 / 0 / 0 / 30 / 8; D3D12 873,896 / 0 / 0 / 0 / 0 / 56 / 13. The material differences (1 in 15,000 - 70,000 pairs, same texture name, other sampler / untextured <->
+  textured variants) are instances several unlike draws land on in a frame (instanced + plain, or two passes with different materials on one range): the covered path keeps the last learned state. They are below the 0.5 %
+  trip rate and only shift which of those materials a hit shows; not chased further in F8-0.
+* **Probes** (`rt.debug=depth`, 4 spots, 25 probes x ~70 frames): table off 1138 match / 201 farther / 200 closer / 0 missed / 0 sky; on 1079 / 214 / 175 / 0 / 0 (the traced pixels are a sample: no new red or magenta); `rt.debug=instances` on:
+  1140 / 235 / 156 / 0 / 2 sky (no off arm).
+* **GPU safety:** first run pub_interior 120 s Vulkan `-Validation` + GPU-assisted validation with shadows.rt near + gi + compare: no validation message, no device loss (twice, before and after the signature changes); teleport soak with
+  `debug.crash_markers` (10 spots, 600 s): no loss (the markers warned "debug.regions is off": the soak ran without regions); D3D12 420 s: no loss, no `[error]`; every run's only `[error]` is the existing `native: mesh parts: fetch
+  DIFFERING ... uv (-nan)` NaN compare of the F0 self-test.
+* **CPU (savegame Risen_Save_0005, lod 2x, shared copy + lock, `-Perf`, 2 runs per arm, no compare):** RT scene observe 0.289 / 0.302 -> 0.207 / 0.208 ms per frame (-0.09 ms; observed draws 550 -> 352), the pre-filter costs 0.02 ms (perf-only
+  timers), **but the RT pass (`rt.scene` CPU) grows 0.378 / 0.398 -> 0.462 / 0.463 ms** because off-screen entries stay (TLAS 725 -> 906 instances, BLAS 346 -> 389, AS +2.6 MiB): engine + HAL CPU 7.71 / 7.26 -> 7.25 / 7.33 ms = **no net
+  gain (within noise)**; the estimate of -0.15 .. -0.25 ms did not hold: the observe cost was 0.3 ms to begin with and the remaining 352 observed draws per frame are the instanced / SpeedTree / skinned / excluded classes.
+  F8-1 (materials from records) was not started: F8-0 is not clean (rare material differences) and its own gain was estimated at -0.02 .. -0.05 ms.
+* **Next:** the saving needs the other classes (F4 trees / instanced batches, F6 characters) and the TLAS assembly per instance (instances cut by a radius that matches the consumers instead of the 300 m registry radius, or the
+  GPU assembly F8-4) before the entries pay. Kept as a Debug option, default off.
+
 ## 8. F1 / F2 design decision: windows onto persistent tables (2026-11-06, orchestrator)
 
 **Decision.** F1 does not start with new shaders. Translated shaders and the ported ubershader read every float register through 4 register windows per

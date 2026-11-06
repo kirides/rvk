@@ -509,6 +509,17 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         if (!rs.rtSceneViews->isDefault()) applyViews(*rs.rtSceneViews);
         reg.onChange(*rs.rtSceneViews, applyViews, this);
     }
+    // F8-0 persistent RT scene entries (frame-ownership.md 7.20): Full only, run time
+    if (rs.rtTableEntries != nullptr) {
+        const auto applyTable = [this](const settings::Setting&) {
+            const auto& r2 = settings::renderer();
+            rtScene_->setTableEntries(r2.rtTableEntries->asBool() && renderMode() == RenderMode::Full, r2.rtTableCompare != nullptr && r2.rtTableCompare->asBool());
+        };
+        applyTable(*rs.rtTableEntries);
+        reg.onChange(*rs.rtTableEntries, applyTable, this);
+        if (rs.rtTableCompare != nullptr) reg.onChange(*rs.rtTableCompare, applyTable, this);
+        if (rs.rendererMode != nullptr) reg.onChange(*rs.rendererMode, applyTable, this);
+    }
     // the RT scene's far level of detail + memory limit (docs/research/rt-lod.md) and the RT quality preset (rt.preset)
     if (rs.rtLodScale != nullptr && rs.rtMemoryBudget != nullptr) {
         const auto applyLod = [this](const settings::Setting&) {

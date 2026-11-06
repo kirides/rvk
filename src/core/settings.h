@@ -395,6 +395,8 @@ struct RendererSettings {
     Setting* rtMemoryBudget = nullptr; // rt.memory_budget (MB, 0 = none): the ladder tightens when the AS memory would exceed it
     Setting* rtPreset = nullptr;       // rt.preset: "low", "medium", "high", "custom" (rtPresets())
     Setting* rtSceneViews = nullptr; // rt.scene_views: "all", "main", "shadow": which views feed the RT scene (hidden, diagnostics)
+    Setting* rtTableEntries = nullptr; // rt.table_entries: F8-0 persistent RT scene entries for static opaque mesh draws (Full, Debug; frame-ownership.md 7.20)
+    Setting* rtTableCompare = nullptr; // debug.rt_table_compare: check frames diffing the entries against the full observation
     // enhanced water (enh/water.h, docs/research/water.md)
     Setting* waterEnabled = nullptr;      // water.enabled
     Setting* waterQuality = nullptr;      // water.quality: "low", "medium", "high"

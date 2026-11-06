@@ -1005,8 +1005,12 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     if (!skipObs && !observers_.empty() && geom.indexed && !geom.userPointer) {
         const bool f2cStatic = native::f2c::on() && kind == draws::Kind::StaticMesh && phase.view == scene::View::Main &&
                                (phase.pass == scene::Pass::Solid || phase.pass == scene::Pass::DepthPrepass);
+        const CoverQuery cq{kind, phase, &tag_, geom.userPointer ? nullptr : streams_[0].buffer, geom.indexed && !geom.userPointer ? indices_ : nullptr,
+                            streams_[0].offset, streams_[0].stride, primitiveType, geom.first, geom.primitives, geom.baseVertex,
+                            (streams_[0].freq & STREAMSOURCE_INDEXEDDATA) != 0, rs_[RS_ALPHABLENDENABLE] != 0, vs_.get(), ps_.get(), tex_.data()};
         for (DrawObserver* o : observers_) {
             if (!o->observes(kind, phase)) continue;
+            if (o->coversDraw(cq)) continue;  // F8-0: a persistent RT table entry holds what this draw would teach
             if (f2cStatic) native::f2c::noteObserver(typeid(*o).name(), 0);
             ReplaceQuery q;
             query(q);
@@ -1825,8 +1829,10 @@ bool Device::replayDraw(const CachedDraw& c, const ReplayInputs& in) {
             captureInstances_ = false;
             const bool f2cStatic = native::f2c::on() && c.kind == draws::Kind::StaticMesh && c.phase.view == scene::View::Main &&
                                    (c.phase.pass == scene::Pass::Solid || c.phase.pass == scene::Pass::DepthPrepass);
+            const CoverQuery cq = coverOf(q);
             for (DrawObserver* o : observers_) {
                 if (!o->observes(c.kind, c.phase)) continue;
+                if (o->coversDraw(cq)) continue;  // F8-0
                 if (f2cStatic) native::f2c::noteObserver(typeid(*o).name(), 1);
                 o->observe(*this, q);
             }
