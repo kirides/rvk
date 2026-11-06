@@ -111,17 +111,20 @@ bool collect(const float center[3], float radius, std::vector<WorldLight>& out, 
             while (child != -1 && stats.nodes < kMaxNodes) {
                 ++stats.nodes;
                 const char* n = nodes + child * kNodeSize;
-                std::uint8_t flags = 0;
-                float sphere[4]{};
-                std::int64_t next = -1, firstChild = -1;
-                const void* payload = nullptr;
-                if (!readAt(n, kNodeFlags, flags) || !readAt(n, kNodeSphere, sphere) || !readAt(n, kNodeSibling, next) ||
-                    !readAt(n, kNodeChild, firstChild)) {
-                    break;
-                }
+                // the node's 80 bytes in one guarded copy (one element of the node array: always whole)
+                alignas(8) std::uint8_t nb[kNodeSize];
+                if (!safeReadN<kNodeSize>(n, nb)) break;
+                const std::uint8_t flags = nb[kNodeFlags];
+                float sphere[4];
+                std::int64_t next, firstChild;
+                const void* payload;
+                std::memcpy(sphere, nb + kNodeSphere, sizeof(sphere));
+                std::memcpy(&next, nb + kNodeSibling, sizeof(next));
+                std::memcpy(&firstChild, nb + kNodeChild, sizeof(firstChild));
+                std::memcpy(&payload, nb + kNodePayload, sizeof(payload));
                 bool descend = true;
                 if ((flags & 4) != 0) {
-                    if (readAt(n, kNodePayload, payload) && payload != nullptr) {
+                    if (payload != nullptr) {
                         const void* vt = nullptr;
                         float pos[3]{}, rgb[3]{}, intensity = 0.0f, range = 0.0f;
                         if (readAt(payload, 0, vt) && (vt == ptfv || vt == ambfv) && readAt(payload, kLightRgb, rgb) &&

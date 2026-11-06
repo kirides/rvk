@@ -389,6 +389,7 @@ void MaterialPack::configure(bool enabled, std::vector<std::filesystem::path> ro
     if (!enabled || roots.empty()) {
         const std::lock_guard lock(mutex_);
         pending_ = std::make_shared<const Snapshot>();
+        hasPending_.store(true, std::memory_order_release);
         generation_.fetch_add(1, std::memory_order_release);
         return;
     }
@@ -479,6 +480,7 @@ void MaterialPack::load(std::vector<std::filesystem::path> roots, std::uint64_t 
                  snap->stats.loaded, snap->stats.failed, snap->stats.rules, snap->stats.ms);
     const std::lock_guard lock(mutex_);
     pending_ = std::move(snap);
+    hasPending_.store(true, std::memory_order_release);
     generation_.fetch_add(1, std::memory_order_release);
 }
 
@@ -581,16 +583,19 @@ MaterialPack::Hit MaterialPack::resolve(const Snapshot& s, std::string_view key)
 }
 
 bool MaterialPack::adopt() {
-    {
+    // per draw: no mutex unless the loader published a snapshot (cpuclean: the unlock was 0.8 % of the thread)
+    if (hasPending_.load(std::memory_order_acquire)) {
         const std::lock_guard lock(mutex_);
         if (pending_) {
             snap_ = std::move(pending_);
             pending_.reset();
         }
+        hasPending_.store(false, std::memory_order_relaxed);
     }
     if (!snap_) return false;
     const std::uint32_t gen = generation_.load(std::memory_order_acquire);
     if (gen != cacheGeneration_) {
+        byRaw_.clear();
         byName_.clear();
         byMaterial_.clear();
         byShader_.clear();
@@ -618,9 +623,12 @@ MaterialPack::Hit MaterialPack::finish(Hit h, std::string_view key) {
 MaterialPack::Hit MaterialPack::lookup(std::string_view diffuseName) {
     if (!adopt()) return {};
     ++counters_.lookups;
+    // the raw name seen before: no key normalisation, no string allocation (its key was noted at the first lookup)
+    if (const auto raw = byRaw_.find(diffuseName); raw != byRaw_.end()) return finish(raw->second, {});
     const std::string key = normalizeKey(diffuseName);
     auto it = byName_.find(key);
     if (it == byName_.end()) it = byName_.emplace(key, resolve(*snap_, key)).first;
+    byRaw_.emplace(std::string(diffuseName), it->second);
     return finish(it->second, key);
 }
 

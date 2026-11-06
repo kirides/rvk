@@ -10,15 +10,33 @@
 
 namespace rvk::engine {
 
+// Inline (header): x64 SEH costs nothing until a fault, so the guard is one load / copy at the call site; constant sizes expand to plain moves
+// instead of a vcruntime memcpy call, and no call per field (cpuclean: safeLoad8 / safeRead were 0.3 ms per frame of calls + memcpy)
 // copies `size` bytes; false when the source is not readable
-bool safeRead(const void* src, void* dst, std::size_t size);
+inline bool safeRead(const void* src, void* dst, std::size_t size) {
+    __try {
+        std::memcpy(dst, src, size);
+        return true;
+    } __except (1 /* EXCEPTION_EXECUTE_HANDLER */) {
+        return false;
+    }
+}
 // copies `size` bytes into engine memory; false when the destination is not writable (O2b: the lean path's pool / field stores)
-bool safeWrite(void* dst, const void* src, std::size_t size);
+inline bool safeWrite(void* dst, const void* src, std::size_t size) {
+    __try {
+        std::memcpy(dst, src, size);
+        return true;
+    } __except (1) {
+        return false;
+    }
+}
 // one guarded load of 1 / 2 / 4 / 8 bytes (no copy routine: the hot field reads of native/*; O1)
-bool safeLoad1(const void* src, std::uint8_t& out);
-bool safeLoad2(const void* src, std::uint16_t& out);
-bool safeLoad4(const void* src, std::uint32_t& out);
-bool safeLoad8(const void* src, std::uint64_t& out);
+#define RVK_SAFE_LOAD(NAME, T)                                        inline bool NAME(const void* src, T& out) {                           __try {                                                               out = *static_cast<const volatile T*>(src);                       return true;                                                  } __except (1) {                                                      return false;                                                 }                                                             }
+RVK_SAFE_LOAD(safeLoad1, std::uint8_t)
+RVK_SAFE_LOAD(safeLoad2, std::uint16_t)
+RVK_SAFE_LOAD(safeLoad4, std::uint32_t)
+RVK_SAFE_LOAD(safeLoad8, std::uint64_t)
+#undef RVK_SAFE_LOAD
 
 // a guarded copy of a fixed size (one SEH frame, the copy expanded inline; O1: an engine object's fields read at once)
 template <std::size_t N>

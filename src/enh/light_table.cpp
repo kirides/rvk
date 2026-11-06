@@ -58,7 +58,7 @@ void setFullLitOptions(bool skipReads, bool treeMerge) {
 namespace {
 // the last build's light positions in 16-unit cells (lightKnown)
 struct KnownGrid {
-    std::unordered_multimap<std::uint64_t, std::array<float, 3>> cells;
+    std::vector<std::pair<std::uint64_t, std::array<float, 3>>> cells;  // sorted by key (binary search; no node allocations)
 };
 std::atomic<std::shared_ptr<const KnownGrid>> g_known;
 std::uint64_t knownKey(std::int32_t x, std::int32_t y, std::int32_t z) {
@@ -75,8 +75,9 @@ bool LightTable::lightKnown(const float pos[3]) {
     for (std::int32_t dx = -1; dx <= 1; ++dx) {
         for (std::int32_t dy = -1; dy <= 1; ++dy) {
             for (std::int32_t dz = -1; dz <= 1; ++dz) {
-                const auto range = g->cells.equal_range(knownKey(cx + dx, cy + dy, cz + dz));
-                for (auto it = range.first; it != range.second; ++it) {
+                const std::uint64_t key = knownKey(cx + dx, cy + dy, cz + dz);
+                auto it = std::lower_bound(g->cells.begin(), g->cells.end(), key, [](const auto& c, std::uint64_t k) { return c.first < k; });
+                for (; it != g->cells.end() && it->first == key; ++it) {
                     if (std::abs(it->second[0] - pos[0]) < 8.0f && std::abs(it->second[1] - pos[1]) < 8.0f && std::abs(it->second[2] - pos[2]) < 8.0f) return true;
                 }
             }
@@ -343,14 +344,17 @@ void LightTable::record(d3d9::PassContext& ctx) {
         // the registry's lights in 16-unit cells: a drawn light is "the same" within 8 units. The static lights of the registry carry the colour the
         // engine's DRAWS give them: the registry's rgb x intensity x scale x 0.5 is a guess, the draws' register colour differs per light by 0.2 .. 2.0
         // (measured: gpu-scene.md 9.10; the engine weights each static light), so a matched light takes the colour of the draw that was seen last
-        std::unordered_multimap<std::uint64_t, std::uint32_t> cells;
+        // a sorted (cell key, light index) vector kept between builds (no node allocations); equal keys stay in index order = the multimap's insertion order
+        static std::vector<std::pair<std::uint64_t, std::uint32_t>> cells;  // under g_drawnMutex
+        cells.clear();
         cells.reserve(registry);
         for (std::uint32_t i = 0; i < registry; ++i) {
             const auto& w = scratch_[i];
-            cells.emplace(knownKey(static_cast<std::int32_t>(std::floor(w.pos[0] / 16.0f)), static_cast<std::int32_t>(std::floor(w.pos[1] / 16.0f)),
-                                   static_cast<std::int32_t>(std::floor(w.pos[2] / 16.0f))),
-                          i);
+            cells.emplace_back(knownKey(static_cast<std::int32_t>(std::floor(w.pos[0] / 16.0f)), static_cast<std::int32_t>(std::floor(w.pos[1] / 16.0f)),
+                                        static_cast<std::int32_t>(std::floor(w.pos[2] / 16.0f))),
+                               i);
         }
+        std::sort(cells.begin(), cells.end());
         for (const auto& dl : g_drawn) {
             const auto& d = dl.l;
             const std::int32_t cx = static_cast<std::int32_t>(std::floor(d.pos[0] / 16.0f)), cy = static_cast<std::int32_t>(std::floor(d.pos[1] / 16.0f)),
@@ -359,8 +363,9 @@ void LightTable::record(d3d9::PassContext& ctx) {
             for (std::int32_t dx = -1; dx <= 1 && !known; ++dx) {
                 for (std::int32_t dy = -1; dy <= 1 && !known; ++dy) {
                     for (std::int32_t dz = -1; dz <= 1 && !known; ++dz) {
-                        const auto range = cells.equal_range(knownKey(cx + dx, cy + dy, cz + dz));
-                        for (auto it = range.first; it != range.second && !known; ++it) {
+                        const std::uint64_t cellKey = knownKey(cx + dx, cy + dy, cz + dz);
+                        auto it = std::lower_bound(cells.begin(), cells.end(), std::pair<std::uint64_t, std::uint32_t>{cellKey, 0u});
+                        for (; it != cells.end() && it->first == cellKey && !known; ++it) {
                             auto& w = scratch_[it->second];
                             if (!(std::abs(w.pos[0] - d.pos[0]) < 8.0f && std::abs(w.pos[1] - d.pos[1]) < 8.0f && std::abs(w.pos[2] - d.pos[2]) < 8.0f)) continue;
                             known = true;
@@ -480,13 +485,15 @@ void LightTable::record(d3d9::PassContext& ctx) {
         auto known = std::make_shared<KnownGrid>();
         known->cells.reserve(count);
         for (const auto& g : prev_) {
-            known->cells.emplace(knownKey(static_cast<std::int32_t>(std::floor(g.posRcp[0] / 16.0f)), static_cast<std::int32_t>(std::floor(g.posRcp[1] / 16.0f)),
-                                          static_cast<std::int32_t>(std::floor(g.posRcp[2] / 16.0f))),
-                                 std::array<float, 3>{g.posRcp[0], g.posRcp[1], g.posRcp[2]});
+            known->cells.emplace_back(knownKey(static_cast<std::int32_t>(std::floor(g.posRcp[0] / 16.0f)), static_cast<std::int32_t>(std::floor(g.posRcp[1] / 16.0f)),
+                                               static_cast<std::int32_t>(std::floor(g.posRcp[2] / 16.0f))),
+                                      std::array<float, 3>{g.posRcp[0], g.posRcp[1], g.posRcp[2]});
         }
+        std::sort(known->cells.begin(), known->cells.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
         {
             // (the generation: a build whose light positions equal the last build's leaves it alone)
-            std::vector<std::array<float, 4>> pos;
+            static std::vector<std::array<float, 4>> pos;  // kept between builds (render thread)
+            pos.clear();
             pos.reserve(prev_.size());
             for (const auto& g : prev_) pos.push_back({g.posRcp[0], g.posRcp[1], g.posRcp[2], 0.0f});
             registryNoteKnown(registryPositionHash(reinterpret_cast<const float(*)[4]>(pos.data()), static_cast<std::uint32_t>(pos.size())));
