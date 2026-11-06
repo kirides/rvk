@@ -6,7 +6,7 @@ temporary perf regressions) are acceptable. Wrapper stays faithful; Full may cha
 eye adaptation, vivid colours). Low-end targets (AMD Radeon 680M iGPU, low VRAM) matter: the owned frame is GPU-driven and writes no output
 nobody reads.
 
-Status: **plan only, nothing built.** Labels: [C] confirmed in docs / code / measurement, [I] inferred, [?] open (RE or measurement
+Status: **F0 in progress (2026-11-06): session 1 done, section 7.** Labels: [C] confirmed in docs / code / measurement, [I] inferred, [?] open (RE or measurement
 needed). ms marked "est." are estimates from measured costs.
 
 Sources: CLAUDE.md; gpu-scene.md (incl. 9.1-9.11); engine-frame/README.md 1-5, 17; B-frustum-db.md; D-contexts.md; retained-signals.md 9-13;
@@ -35,7 +35,7 @@ What is new: **owned shaders + owned lighting + suppressed op creation.**
     0x579c70).
 
   So the GPU gets exact per-instance lighting from a per-instance illumination record (uploaded on the dirty signal) + a per-frame copy of
-  the light sets: O(#sets) per frame, not O(#instances) [? the number of light sets: measure first, 6.2].
+  the light sets: O(#sets) per frame, not O(#instances) [C, 7: exactly one eCLightSet is updated per frame].
 * The per-op CPU cost goes away only if **the engine stops creating ops for owned content**. Hook point: the contexts' `RequestRenderOps`
   (vtable +0x40), which receives `(db, fade, caps)` after `UpdateLoD` / `UpdateIllumination` [C, B-frustum-db 2.5]: the engine still chooses
   visibility and LOD; we only stop the op append.
@@ -72,7 +72,7 @@ every 240th frame a read-back verify against the CPU copy (as `instance_buffer.c
 | Layout | the declaration as pull offsets / formats (position, normal, tangent, colour, uv0..6) | once per declaration | < 100 |
 | Material | VS c232.. `g_vShaderData`, PS c6..c13 `g_ShaderData`, bindless indices of s9..s15 + lightmap slots, sampler state indices, mask reference, blend class, double-sided, pack word, graph id (= pipeline class), version | first use + timed-pool poll | ~1-2k x ~256 B |
 | Illumination | static lights 2 x 64 B, static SH 7 x 16 B, counts, f, light-set id | dirty signal | ~2-4k x 256 B |
-| LightSet | sun c22..c24, up to 2 dynamic lights, SH c15..c21 base, indoor c14 | every frame | [?] sets x 320 B |
+| LightSet | sun c22..c24, up to 2 dynamic lights, SH c15..c21 base, indoor c14 | every frame | one record per frame [C, 7] x 320 B |
 | Light + clusters (exists) | `RvkLight` 64 B, 16x9x24 near + 32x18x8 far grid | every frame | exists |
 | View blocks | per view (main, 4 cascades, terrain map, atlas cells, RT): view / viewProj, frustum planes, camera, LOD factors (`lod.*`), fog, HiZ reference, jitter | every frame | KB |
 | Draw templates | per (part, pipeline bucket): args template + instance-ref range (GD3D11's `CSBuildArgs` model) | when a part / LOD / material first appears | |
@@ -205,7 +205,7 @@ post, GUI stay on N5 (CPU-generated vertices; the sky cube stride of performance
 | indirect call | `drawIndexedIndirectCount` (RHI has it; optional `drawIndirectCount`, detected [C]); fallback `vkCmdDrawIndexedIndirect` with the CPU max count (add to the RHI; needs `multiDrawIndirect`), then a CPU loop | `ExecuteIndirect` with a `DRAW_INDEXED` signature + count buffer (exists, `drawIndexedSignature`) [C] |
 | per-draw index (**chosen, both**) | **per-instance-rate vertex stream = the compaction output** (`uint2 ref : INSTREF` = (instance slot, template id)); args `firstInstance` = prefix offset; needs `drawIndirectFirstInstance` (checked with `multiDrawIndirect` in `features_.indirectDraws` [C]) | the same stream; `StartInstanceLocation` offsets per-instance IA fetches; no root arguments, no SM 6.8 |
 | not used | `gl_DrawID` / `BaseInstance` (`shaderDrawParameters`, Vulkan-only); `SV_InstanceID` lookups (DXC maps it to `InstanceIndex` incl. firstInstance unless `-fvk-support-nonzero-base-instance`; D3D12 excludes it: semantics differ [I, verify]) | `D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT` (root constant per command: D3D12-only, root-signature-bound command signature); `SV_StartInstanceLocation` (SM 6.8) |
-| vertices | pulled by address from MeshArena / a u32 index arena (`native_index_arena.*` in `git show 23d60f2^`); args `vertexOffset = 0`, base vertex from the template (Risen's sub-mesh indices are absolute [C]) [? parity test anyway] | same |
+| vertices | pulled by address from MeshArena / a u32 index arena (`native_index_arena.*` in `git show 23d60f2^`); args `vertexOffset = 0`, base vertex from the template (Risen's sub-mesh indices are absolute [C]); parity test done: D3D12 `SV_VertexID` ignores the base vertex, Vulkan `VertexIndex` includes it, so pulling by `SV_VertexID` is portable only with `vertexOffset = 0` and absolute indices [C, 7] | same |
 | per-bucket data | push constants (view, table refs) before each indirect call | root constants b0 before each `ExecuteIndirect` |
 | buffer states | `bufferBarrier(.., VertexInput / Indirect)` after the compute | UAV writes, then transition to vertex buffer + indirect argument (RHI binding calls [C]) |
 
@@ -234,8 +234,9 @@ images), `rvk_d3d9test --validation` both backends, `-Validation` / GBV short ru
 2. Material macros / register map unavailable without an engine draw (3.1 F0): the engine creates the op for that part until a one-time
    compile captured the request (per-part fall-through).
 3. Bucket explosion: if distinct graph texts far exceed the ~400 estimated [I, shader-permutations 2], cap the bucket count; the long tail stays on N5.
-4. Too many light sets for a per-frame copy: copy only the sets visible instances reference (deduplicated), or keep the per-object reads for
-   trees with dynamic lights.
+   Measured: 196 pipelines (graph x static macros), well below ~400 [C, 7.3]; the risk is reduced, not gone (long tail of graphs).
+4. Too many light sets for a per-frame copy: measured not the case, one set per frame [C, 7.2]; the fallback (deduplicated visible sets, or
+   per-object reads for trees with dynamic lights) is not needed.
 5. Picture drift (single pass, weights): accepted in Full; gates `sbs_diff.py` (mean |d| vs noise floor, luma / saturation / p99 for the flare)
    against plain Full and Wrapper at pub_interior, monastery_hall, harbour_night, jungle, crystal_cave; visible loss of vividness / contrast /
    flare = failure (9.6 rule).
@@ -271,3 +272,60 @@ Critical files: `src/native/static_ops.cpp` (+ `static_ops.h`, `static_ops_lean.
 `src/vk/context.cpp`), `src/enh/light_table.cpp` (+ `rvk_light_model.hlsli`, `light_cluster.comp.hlsl`); supporting: `src/engine/scene_hooks.cpp`,
 `src/native/static_ops_trees.cpp` (F4), `src/native/static_ops_actors.cpp` + `shaders/rt/rt_skin.comp.hlsl` (F6), `src/enh/rt_scene.cpp` (F8),
 `src/hal/vulkan/device.cpp` (`frozen` constants, mode wiring).
+
+## 7. Status
+
+F0 session 1 (measured 2026-11-06; labels as above, [C] = measured).
+
+### 7.1 RHI indirect draw (commit 5046f4d)
+
+* `rhi::CommandList::drawIndexedIndirect(args, offset, drawCount, stride)`: Vulkan `vkCmdDrawIndexedIndirect` (a loop of single draws without
+  `multiDrawIndirect`); D3D12 `ExecuteIndirect` with the `DRAW_INDEXED` signature, no count buffer. `DeviceCaps` gained `multiDrawIndirect`,
+  `drawIndirectFirstInstance`; D3D12 `toDxgi` gained `R32G32_UINT` (the `uint2` ref stream).
+* Test `testIndirectPull` (`tools/rhitest/main.cpp`, `shaders/test/rhi_ind.{comp,vert}.hlsl`): compute-written indirect records + count,
+  instance-rate `uint2` ref stream, vertex pulling by address, drawn with both indirect calls; equal to a CPU expectation on Vulkan and D3D12,
+  also with validation.
+* [C] **D3D12 `SV_VertexID` ignores the base vertex (`vertexOffset`), Vulkan `VertexIndex` includes it**: vertex pulling by `SV_VertexID` is
+  portable only with `vertexOffset = 0` and absolute indices (section 4).
+* [C] `firstInstance` offsets instance-rate fetches on both backends; `SV_InstanceID` is not used.
+
+### 7.2 Illumination census (commit 920df7a)
+
+`src/engine/illum_census.*`, `RVK_ILLUM_CENSUS=1`; hooks by decorated name on `SetLightSet` 0x5972e0, `eCIlluminated_PS::UpdateIllumination`
+0x595300, `eCLightSet::UpdateIllumination` 0x579c70, `UpdateLightSets` 0x575130; draw-side counts in `StaticOps::writeLighting`. Full mode,
+rvkcompare `harbour_docks` / `pub_interior` / `monastery_hall` and savegame `Risen_Save_0005` (jungle, lod 2x, packet cache off).
+
+| measurement | result [C] |
+|---|---|
+| `eCLightSet` updated per frame | exactly 1 (town run: 1 distinct in total; jungle: 2, only during the load) |
+| light lists referenced by drawn ops | 1 distinct per frame (also trees, vegetation) |
+| distinct illuminations drawn per frame | ~300 harbour_docks (815 lit passes), 37 pub (130), 25-36 monastery, 111 jungle (314) |
+| SpeedTree illuminations | 147 town, 33 jungle |
+| `eCIlluminated_PS::UpdateIllumination` calls per frame | 349 town, 307 jungle |
+| dirty byte set on entry | ~0 per frame in steady state; bursts at cache-in / teleport up to 943 |
+| `SetLightSet` per frame | 0 in steady state; bursts at transitions |
+| f (`illum +0x08`) changed | 0 per frame while still (a lower bound: frozen spots / held savegame) |
+
+Consequence: the LightSet table is one record per frame; per-object lighting = illumination records uploaded on the dirty signal, so exact
+per-instance lighting for the GPU path is cheap. Resolves the light-set count [?] of sections 0 / 1.2 and risk 4 of 6.1. Still open: who eases
+`illum +0x08` and when (f changes were only measured while the view stood still).
+
+### 7.3 Material graph census (commit c0b8a23)
+
+`tools/material_graph_census.py` over `out/matsrc/census_town.jsonl` + `census_jungle.jsonl` (`debug.material_sources`; weights = requests,
+the records carry no draw counts).
+
+* 453 requests (230 town, 223 jungle, only 61 shared); 147 distinct normalised graphs (slot / register indices -> `#`; constants never split
+  graphs; alpha-renaming adds 3); 99 % of requests need 143 graphs: a long tail, no dominant set.
+* Static macros that split pipelines: ALPHABLEND, BILLBOARD, COMPRESSEDNORMALMAP, DISABLELIGHTING, DOUBLESIDED, FOG, FRESNEL, INSTANCED,
+  LIGHTINGTYPE, MASKED, MORPHED, QUALITY (always 2), SCENEDEPTH, SHADERMODEL_3, SHADOWMAPPASS, SKINNED, SPECULAR, ST_*, TANGENTSPACE(_EYE),
+  VARIANCESHADOWMAP, VEGETATION, ZPASS (112 combinations).
+* Dynamic (uniform branches in the owned shader): DIRLIGHT, DIRLIGHTSHADOWS, PNTLIGHTCOUNT 0-3, PNTLIGHTSHADOWS, LIGHTMAP, AMBIENTLIGHT(TYPE),
+  AMBIENTOCCLUSION (32 combinations).
+* **Pipeline estimate graph x static macros: 196** (union; PS_Default 116, VS_Default 32, VS_DefaultZPass 20, PS_DefaultZPass 11, leafs 10,
+  particle 5, skydome 2) against the ~400 assumed in 6.1 risk 3. VS_DefaultZPass: 4 graphs but 19 static combinations (skinned / instanced /
+  morphed split more than the graph).
+
+### 7.4 Running (not done)
+
+F0 observe hooks on the contexts' `RequestRenderOps`; F0 illumination + light-set GPU tables with register verification.
