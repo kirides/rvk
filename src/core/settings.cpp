@@ -2497,6 +2497,21 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .needs = {{"native.owned_windows", "true", false, true}, {"native.material_table", "true", false, true}},
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeOwnedRecords = &reg.add({
+        .key = "native.owned_records",
+        .label = "Native frame: owned op records",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode only, needs owned objects, lighting images and table lighting (frame-ownership.md F2c-2, no picture change): the static ops' main-view z / "
+                       "solid mesh ops are snapshotted into op records; on later frames the draws are derived again from the record + the per-frame inputs and compared "
+                       "with the composed ones (nothing derived is submitted), and the read log of each record is audited against the engine's memory. "
+                       "rvk.log `native: owned records (5 s)`.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"native.owned_objects", "true", false, true}, {"native.lighting_images", "true", false, true}},
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeSceneDraws = &reg.add({
         .key = "native.scene_draws",
         .label = "Native frame: scene draws",

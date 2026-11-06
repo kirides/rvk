@@ -375,6 +375,13 @@ struct DrawDesc {
     std::uint32_t matSlot = 0xffffffffu;
     // the lighting images entry of the draw's pass (gpuscene::LightingImages; 0xffffffff = none): the owned windows read it
     std::uint32_t lightEntry = 0xffffffffu;
+    // F2c-2 (op records): the key the lighting entry was made from (illumination slot + the pass's compose parameters), the alpha test of the pass as the engine's states
+    // give it (the device's ALPHAFUNC / ALPHAREF are never composed) and the mask reference the pass writes into PS c5.w
+    std::uint32_t illumSlot = 0xffffffffu, lightN = 0, lightFirst = 0;
+    bool lightTableLit = false, lightHoldsAll = false;
+    std::uint32_t alphaFunc = 8, alphaRef = 0;
+    bool maskSet = false;
+    float maskValue = 0.0f;
 };
 
 // the lowest set bit of a non-zero word (bsf: an intrinsic, inlined in every build configuration)

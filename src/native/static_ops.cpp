@@ -105,6 +105,17 @@ inline T get(const void* p, std::size_t off, T fallback = T{}) {
 }
 inline U8* ptr(const void* p, std::size_t off) { return get<U8*>(p, off, nullptr); }
 
+// F2c-2: reads that are not part of an op record's read log (view-level data, the object table's matrix): pauses only the op record's own log
+struct RecNoLog {
+    ret::ReadLog* saved;
+    explicit RecNoLog(const ret::ReadLog* mine) : saved(ret::gLog) {
+        if (ret::gLog != nullptr && ret::gLog == mine) ret::gLog = nullptr;
+    }
+    ~RecNoLog() { ret::gLog = saved; }
+    RecNoLog(const RecNoLog&) = delete;
+    RecNoLog& operator=(const RecNoLog&) = delete;
+};
+
 // a register k of FUN_180225e30 / FUN_180238390: column k of the row-vector matrix
 void column(const float m[16], std::uint32_t k, float out[4]) {
     out[0] = m[k];
@@ -275,6 +286,7 @@ bool StaticOps::verify() {
 
 void StaticOps::viewBegin(void* db, void* desc, const FrameDesc& view) {
     f2c::init();
+    ++recViewSerial_;
     if (f2c::on() && view.kind == ViewKind::Main) f2c::frameBegin();
     if (!hal::vulkan::logThisFrame()) frameLogged_ = 0;
     db_ = db;
@@ -311,6 +323,7 @@ void StaticOps::viewEnd() {
 }
 
 bool StaticOps::composeView(const std::uint8_t* admin, const std::uint8_t* camera) {
+    const RecNoLog recNoLog(recs_ ? &recs_->readLog : nullptr);
     view_ = {};
     view_.admin = admin;
     poolAdmin_ = admin;
@@ -515,6 +528,13 @@ sc::DrawDesc& StaticOps::newDraw() {
     d.biLive = 0;
     d.matSlot = gpuscene::MaterialTable::kNoSlot;
     d.lightEntry = gpuscene::kNoEntry;
+    d.illumSlot = gpuscene::kNoSlot;
+    d.lightN = d.lightFirst = 0;
+    d.lightTableLit = d.lightHoldsAll = false;
+    d.alphaFunc = 8;
+    d.alphaRef = 0;
+    d.maskSet = false;
+    d.maskValue = 0.0f;
     return d;
 }
 
@@ -588,6 +608,7 @@ bool StaticOps::syncEnginePools() {
 }
 
 void StaticOps::initMirror() {
+    const RecNoLog recNoLog(recs_ ? &recs_->readLog : nullptr);
     nativeVs_ = 0xfffu | 1u << 30;  // c0..c11, c30 (the camera, fog)
     U8* admin = view_.admin;
     if (mirrorMode_ == 2) ++mirrorEpoch_;  // N5.x: every engine pool re-read at every op
@@ -683,6 +704,7 @@ void StaticOps::writeTreeInstance(std::uint32_t slot, const float v[2]) {
 // FUN_1806cd1d0: the pass's lighting into the lighting pool (c14 .. c37)
 std::uint32_t StaticOps::writeLighting(const sc::Pass& pass) {
     gpuscene::IllumTable& table = gpuscene::illumtable();
+    lightKey_ = {};
     if (!table.active() || pass.illum == nullptr || ptr(static_cast<U8*>(pass.illum), 0) == nullptr) {
         bool holdsAll = false;
         writeLightingRegisters(pass, holdsAll);
@@ -699,6 +721,7 @@ std::uint32_t StaticOps::writeLighting(const sc::Pass& pass) {
     p.n = pass.tableLit ? 3u : sc::passLights(pass.flags);
     p.firstLight = pass.firstLight;
     const std::uint32_t illumSlot = table.checkDraw(pass.illum, p, prior, mirror_.lighting);
+    lightKey_ = {illumSlot, p.tableLit, p.holdsAll, p.n, p.firstLight};
     return gpuscene::lightingimages().note(illumSlot, p, mirror_.lighting);  // F1b: the lighting register image of (illumination, parameters)
 }
 
@@ -1274,6 +1297,7 @@ StaticOps::Skip StaticOps::specialPassDrawImpl(const std::uint8_t* shader, const
     U8* psElem = ptr(version, 0xf0 + 16 * idx);
     if ((vsElem == nullptr || psElem == nullptr) && f2c::on()) f2c::bit(f2c::kNoRetain);
     if (vsElem == nullptr || psElem == nullptr) {
+        recNoRetain_ = true;
         // O2c: ExecuteSpecialPass's on-demand compile, here at the slot's place (a failure clears the flag byte: no draw, as the engine)
         if (rec_ != nullptr) rec_->noRetain = true;
         bool failed = false;
@@ -1297,6 +1321,8 @@ StaticOps::Skip StaticOps::specialPassDrawImpl(const std::uint8_t* shader, const
     sc::DrawDesc& d = drawFrom(geometry);
     const sc::Visual& vis = geometry.visual;
     d.zPass = true;
+    d.maskSet = recMask;
+    d.maskValue = recMaskValue;
     d.drawClass = sc::DrawClass::ZPass;
     d.vs = vs;
     d.ps = ps;
@@ -1336,6 +1362,7 @@ StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8
     U8* vsElem = ptr(version, 0x1b0 + 16 * vsIdx);
     U8* psElem = ptr(version, 0x210 + 16 * psIdx);
     if ((vsElem == nullptr || psElem == nullptr) && f2c::on()) f2c::bit(f2c::kNoRetain);
+    if (vsElem == nullptr || psElem == nullptr) recNoRetain_ = true;
     if ((vsElem == nullptr || psElem == nullptr) && (rec_ == nullptr || (rec_->noRetain = true)) && compilePass(shader, version, pass.flags)) {
         // O2c: the version Execute's on-demand compile, here at the slot's place; before the switch is applied to our copy of the
         // pools (the compile's graph re-walk refills the engine's pools, which our copy is then read from again)
@@ -1371,6 +1398,15 @@ StaticOps::Skip StaticOps::passDraw(const std::uint8_t* shader, const std::uint8
     }
     sc::DrawDesc& d = drawFrom(geometry);
     d.lightEntry = lightEntry;
+    d.illumSlot = lightKey_.slot;
+    d.lightTableLit = lightKey_.tableLit;
+    d.lightHoldsAll = lightKey_.holdsAll;
+    d.lightN = lightKey_.n;
+    d.lightFirst = lightKey_.first;
+    d.alphaFunc = rs.alphaFunc;
+    d.alphaRef = rs.alphaRef;
+    d.maskSet = recMask;
+    d.maskValue = recMaskValue;
     const sc::Visual& vis = geometry.visual;
     d.passFlags = pass.flags;
     d.drawClass = sc::passClass(pass.flags, overlay);
@@ -1592,7 +1628,12 @@ StaticOps::Skip StaticOps::composeZ(const Op& op) {
     U8* entity = ptr(ctx, 0x10);
     if (res == nullptr) return Skip::None;
     float world[16];
-    if (!rd(entity, 0x60, world, 64)) return Skip::Unreadable;
+    bool worldOk;
+    {
+        const RecNoLog recNoLog(recs_ ? &recs_->readLog : nullptr);  // (the entity's matrix: the object table's)
+        worldOk = rd(entity, 0x60, world, 64);
+    }
+    if (!worldOk) return Skip::Unreadable;
     return meshZDraws(res, op.raw.desc & 0xffu, op.raw.desc >> 8, world, false);
 }
 
@@ -1741,14 +1782,23 @@ StaticOps::Skip StaticOps::composeSolid(const Op& op) {
     U8* entity = ptr(ctx, 0x10);
     U8* illumPs = ptr(entity, 0xf8);
     U8* illum = illumPs != nullptr ? illumPs + 0x78 : nullptr;
-    const std::uint32_t eflags = get<std::uint32_t>(entity, 0x28);
+    std::uint32_t eflags;
+    {
+        const RecNoLog recNoLog(recs_ ? &recs_->readLog : nullptr);  // (only the overlay bits are used: stamped, the other flag bits change freely)
+        eflags = get<std::uint32_t>(entity, 0x28);
+    }
     std::uint8_t flags = 0;
     if (eflags & 0x200000u) flags |= 2;
     if (eflags & 0x400000u) flags |= 1;
     if (eflags & 0x800000u) flags |= 4;
     const std::int32_t switchValue = get<std::int32_t>(ptr(ctx, 0x18), 0x20);
     float world[16];
-    if (!rd(entity, 0x60, world, 64)) return Skip::Unreadable;
+    bool worldOk;
+    {
+        const RecNoLog recNoLog(recs_ ? &recs_->readLog : nullptr);
+        worldOk = rd(entity, 0x60, world, 64);
+    }
+    if (!worldOk) return Skip::Unreadable;
     if (ptr(res, 0x88) == nullptr) return Skip::None;
     const std::uint32_t combi = bindLightmaps(res);
     if (sub == 0xff) {
@@ -2075,7 +2125,9 @@ void StaticOps::opEnterImpl(const Op& op) {
     skipWhy_.clear();
     leanBegin(group);
     if (f2c::on() && group == Group::Static && viewKind_ == ViewKind::Main) f2cClassify(op);
+    recEnter(op);
     const Skip s = composeOp(op);
+    recComposed(op, s);
     if (f2c::on() && f2cOp_ == &op) f2c::opComposed(s == Skip::None, static_cast<int>(s), name(s));
     maskRefShader_ = nullptr;
     leftCode_ = static_cast<int>(s);
@@ -2108,11 +2160,13 @@ void StaticOps::opEnterImpl(const Op& op) {
     if (g_->takeOver) {
         { const f4m::IssueScope f4i(op.kind == OpKind::SpeedTree ? 1 : op.kind == OpKind::SpeedTreeBB ? 2 : 0); issue(); }
         taken_ = true;
+        recEnd(op);
     }
     if (taken_) leanCommit();
 }
 
 void StaticOps::finishOp() {
+    if (recs_) recs_->active = false;
     if (f2c::on() && f2c::opActive()) f2c::opEnd(static_cast<std::uint32_t>(drawCount_));
     f2cOp_ = nullptr;
     ++opSerial_;
@@ -2457,8 +2511,11 @@ void StaticOps::issue() {
     // F2b-1: the main view's static draws (z pre-pass + solid ops) are recorded as scene draws by the device
     const bool sceneIssue = sceneDraws_ && viewKind_ == ViewKind::Main && g_ == &groups_[static_cast<std::size_t>(Group::Static)];
     dev_.setSceneIssue(sceneIssue);
+    const bool recOn = ownedRecords_ && recs_ && recs_->active && !inNonOp_ && op_ != nullptr && op_ == recs_->op && recs_->probes.size() == drawCount_;
+    if (recOn) dev_.setSceneProbe(&recs_->probe);
     for (std::size_t k = 0; k < drawCount_; ++k) {
         const sc::DrawDesc& d = *draws_[k];
+        if (recOn) recs_->probe = {};
         dev_.setVertexShaderRef(ShaderRef(const_cast<Shader*>(static_cast<const Shader*>(d.vs))));
         dev_.setPixelShaderRef(ShaderRef(const_cast<Shader*>(static_cast<const Shader*>(d.ps))));
         PacketEntry* pe = nullptr;
@@ -2488,6 +2545,7 @@ void StaticOps::issue() {
                 ++pktWindow_.replayed;
                 ++pktGroup_[cacheGroup][0];
                 if (meshParts.active()) meshParts.checkDraw(dev_, partGeometry(d), nullptr, static_cast<std::uint32_t>(d.drawClass));
+                if (recOn) recDraw(k, d, pkey);
                 continue;
             }
             ++pktWindow_.refused;
@@ -2611,7 +2669,9 @@ void StaticOps::issue() {
             const gpuscene::DrawGeometry actual = partGeometryBound(dev_, d);
             meshParts.checkDraw(dev_, partGeometry(d), &actual, static_cast<std::uint32_t>(d.drawClass));
         }
+        if (recOn) recDraw(k, d, cacheable ? pkey : 0);
     }
+    if (recOn) dev_.setSceneProbe(nullptr);
     issuing_ = false;
     dev_.setSceneIssue(false);
     if (owned) dev_.setOwnedWindows(nullptr);
@@ -2662,6 +2722,7 @@ void StaticOps::report() {
     }
     leanReport();
     retReport();
+    recReport();
     static constexpr const char* kListNames[] = {"z", "solid", "debug", "sky", "refracted", "alpha", "late", "non-op"};
     if (active()) {
         spdlog::info("native: register file: mode {} ({}), engine code left to the engine {} times, {} registers merged from it (total), {} shaders' pools held",

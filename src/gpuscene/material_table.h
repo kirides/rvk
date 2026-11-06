@@ -84,6 +84,8 @@ public:
     // composed with; see frame-ownership.md 7.8 for the ordering argument.
     void fillWindows(std::uint32_t slot, const std::uint64_t* vsSet, const std::uint64_t* psSet, d3d9::OwnedWindows& ow);
     std::uint64_t windowDraws() const { return windowDraws_; }
+    // F2c-2: the record's structure version (texture slots / sampler states, counts, state words, flags, graph ids; not the pool bytes); unique per change
+    std::uint32_t structVersion(std::uint32_t slot) const { return slot < structVer_.size() ? structVer_[slot] : 0; }
 
     // once per present: uploads, read-back verification, idle sweep, the 5 s log
     void flush(d3d9::Device& dev, bool verify);
@@ -117,6 +119,8 @@ private:
     std::vector<const void*> lastPs_[2];           // slot -> the last PS shader whose graph was applied (cache by the draw's zPass flag)
     std::vector<std::uint32_t> lastGraph_[2];      // ... and its graph id
     std::vector<std::string> name_;
+    std::vector<std::uint32_t> structVer_;
+    std::uint32_t structSerial_ = 0;
     std::vector<std::uint32_t> changes_;  // slot -> poll / texture re-uploads (not the first)
     std::vector<std::string> changeWhat_;  // slot -> what changed last ("PS c7", "texture", ...)
     std::vector<std::uint32_t> free_;

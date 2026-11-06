@@ -39,6 +39,7 @@ std::uint32_t MaterialTable::lookupOrCreate(const void* key, const void* materia
         lastGraph_[1].assign(kCapacity, 0);
         name_.assign(kCapacity, std::string());
         changes_.assign(kCapacity, 0);
+        structVer_.assign(kCapacity, 0);
         changeWhat_.assign(kCapacity, std::string());
         table_.init(kCapacity);
     }
@@ -61,6 +62,7 @@ std::uint32_t MaterialTable::lookupOrCreate(const void* key, const void* materia
     lastPs_[0][slot] = lastPs_[1][slot] = nullptr;
     lastGraph_[0][slot] = lastGraph_[1][slot] = 0;
     changes_[slot] = 0;
+    structVer_[slot] = ++structSerial_;
     changeWhat_[slot].clear();
     name_[slot] = material != nullptr ? engine::readCString(static_cast<const std::uint8_t*>(material) + 0x40) : std::string();
     if (const auto pend = pendingSw_.find(key); pend != pendingSw_.end()) {
@@ -149,6 +151,10 @@ bool MaterialTable::refresh(std::uint32_t slot, const void* key, const Draw& d) 
             changeWhat_[slot] = "counts / state / flags";
         }
     }
+    // the structure (texture slots / sampler states, counts, state words, flags): not the pool bytes (the time-driven ones change every frame)
+    if (isNew || slotsChanged || std::memcmp(n.counts, cur.counts, sizeof(n.counts)) != 0 || std::memcmp(n.state, cur.state, sizeof(n.state)) != 0 || n.info[3] != cur.info[3]) {
+        structVer_[slot] = ++structSerial_;
+    }
     n.info[0] = 1;
     n.info[1] = cur.info[1] + 1;
     cur = n;
@@ -208,6 +214,7 @@ void MaterialTable::applyGraph(std::uint32_t slot, const Draw& d) {
             }
             if (changed) {
                 ++r.info[1];
+                structVer_[slot] = ++structSerial_;
                 table_.mark(slot);
                 ++stats_.uploadGraph;
             }

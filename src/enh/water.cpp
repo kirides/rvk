@@ -210,6 +210,10 @@ void Water::updateRtReflections() {
 
 bool Water::worldRows(d3d9::Device& device, const d3d9::ReplaceQuery& q, float rows[3][4]) const {
     if (q.instanced) return false;
+    if (q.objectRows != nullptr) {  // F2c-2: from the object table
+        for (int r = 0; r < 3; ++r) copy4(rows[r], q.objectRows + 4 * r);
+        return true;
+    }
     for (int r = 0; r < 3; ++r) copy4(rows[r], device.vsConstant(33 + static_cast<std::uint32_t>(r)));
     return true;
 }

@@ -81,6 +81,15 @@ ObjectWhy ObjectTable::serve(const void* entity, const float composed[kObjectReg
     return ObjectWhy::Served;
 }
 
+bool ObjectTable::windowFor(std::uint32_t slot, d3d9::OwnedWindows::Win& out) const {
+    if (!active_ || !table_.ready() || table_.ref().null() || slot >= kCapacity) return false;
+    out = d3d9::OwnedWindows::Win{};
+    out.kind = d3d9::OwnedWindows::Kind::Object;
+    out.base = table_.ref().plus(static_cast<std::int64_t>(slot) * static_cast<std::int64_t>(sizeof(ObjectRecord)) - static_cast<std::int64_t>(kObjectFirstReg) * 16);
+    out.covered = kObjectRegs;
+    return true;
+}
+
 void ObjectTable::flush(d3d9::Device& dev) {
     if (!active_) {
         ++frame_;

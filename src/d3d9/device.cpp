@@ -197,6 +197,7 @@ void Device::beginMainView() {
 }
 
 void Device::setJitterSource(JitterSource source) {
+    ++variantEpoch_;
     jitterSource_ = std::move(source);
     if (!jitterSource_ && jitter_ != std::array<float, 4>{}) {
         jitter_ = {};
@@ -1572,6 +1573,7 @@ rhi::ShaderModule Device::lodModule(Shader& vs) {
 
 void Device::setBillboardFadeScale(float scale) {
     billboardFadeScale_ = scale;
+    ++variantEpoch_;
     setFrameParam(shader::abi::kFrameParamLod, {scale, 0.0f, 0.0f, 0.0f});
 }
 
@@ -1599,6 +1601,7 @@ bool uberBaseOptions(const Shader& s, shader::TranslateOptions& o) {
 void Device::setUbershaderSkip(std::uint32_t mask) { g_uberSkip.store(mask, std::memory_order_relaxed); }
 
 void Device::setUbershader(bool on) {
+    ++variantEpoch_;
     ubershader_.store(on, std::memory_order_relaxed);
     if (on) setVariantProvider(VariantSlot::Base, {std::format("base_t{}", kTranslatorVersion), &uberBaseOptions});
     spdlog::info("d3d9: GLSL material shaders {}", on ? "on" : "off");
@@ -1698,6 +1701,7 @@ rhi::ShaderModule Device::variantModule(const Shader& s, const shader::Translate
 // ---- thin G-buffer (enh/gbuffer) ----
 
 void Device::setGbuffer(const GbufferTargets& g) {
+    ++variantEpoch_;
     const bool was = gbuf_.active;
     const std::uint32_t wasAttachments = gbuf_.attachments();
     const bool hadNormal = gbuf_.normal != nullptr;

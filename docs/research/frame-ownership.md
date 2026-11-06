@@ -739,6 +739,98 @@ rows, window, tests `object_*`), `object_table.{h,cpp}`, `window_tables.*` (view
 * **Not measured:** CPU gain (none expected: the composition still runs; the point is the records F2c-2 builds DrawRecords from) and picture A/B (no per-draw difference is possible
   by construction + verify; the picture was not compared).
 
+### 7.14 F2c-2 op records (2026-11-06, `native.owned_records`; compare only, nothing derived is submitted)
+
+Debug setting (Bool, runtime, default off, Full, `needs` native.owned_objects + native.lighting_images; run.ps1 test runs additionally need `native.scene_draws` only for the scene-form
+comparison: without it both sides say "not a scene draw"). Files: `src/native/op_records.h` (pure: key, stamp + `firstDifference`, exclusion / field / audit names, statistics; test
+`op_record_stamp_first_difference`), `src/native/static_ops_records.cpp` (StaticOps members `recEnter / recComposed / recDraw / recEnd / recReport`), hooks in `static_ops.cpp`
+(`opEnterImpl`, `issue`, `finishOp`, `passDraw` / `specialPassDrawImpl` capture the alpha test, the mask and the lighting key into `sc::DrawDesc`), `d3d9/scene_draws.cpp`
+(`SceneView`, `Device::setSceneProbe`, `Device::deriveScene`), `Device::variantEpoch()`, `MaterialTable::structVersion`, `ObjectTable::windowFor`, `ReplaceQuery::objectRows`.
+
+* **OpRecord** (keyed ctx, desc, list, viewKey = 0 for the main view): `Stamp`, `draws[]`, the composition's read log (`ret::ReadRec`, finalised), 8 anchors (ctx, mesh resource, entity,
+  illumination, light set, sub-mesh table, material, shader: the audit's classes), the side-effect list (mesh resource for `BindLightmaps` on solid ops, stream 3 on z ops, the images the draws
+  sample: data only in this stage). Per draw (`DrawRec`): an own copy of the retained `CachedDraw` (the packet cache's entry: pipeline / scene pipeline, vertex input + dynamic state values,
+  index range, bindings, textures, variant decision, env), the buffers + strides, the sampled stages' textures and the seven sampler states the composition owns, the alpha test **as the
+  pass's states give it** (`alphaTestState` = `deviceStates()[StAlphaTest]`, `rs.alphaFunc / alphaRef`, `maskSet / maskValue` = what the pass writes into PS c5.w), `matSlot`, the lighting key
+  (`illumSlot` + `ComposeParams` {tableLit, holdsAll, n, firstLight}: `LightingImages::entryFor` makes the entry), `vsSet / psSet` (the composed registers: Material windows), the draw tag fields,
+  `vs1Offered`. ~1.4 KB per draw, ~1000 - 1100 records in the 3 spots, 960 at the savegame.
+* **Stamp** (read at the op's entry, 14 fields; `kStampNames`): LOD resource (ctx +0x28), entity, **geometry / material** (hash of the covered sub-meshes' ranges +0x28..+0x34, material, its cached
+  state, shader pointer + vtable, blend mode, mask ref, trade-alpha / opacity / refracted / z-fill / depth-bias / sort-id / invalid flags, version limit, admin pointer; the vertex / index
+  resource +0x88), **illumination** (illum + list pointers, sun bit, no-sun, static / dynamic light counts), lightmaps (res +0x90 / +0x98 images + residency), overlay flags, illum pointer
+  (+0xf8), fade, switch value, object slot + generation (scene table; the matrix itself is the object table's), `Device::variantEpoch()` (bumped by the setters of GI / G-buffer / pack / tint /
+  ubershader / jitter / LOD bias / alpha dither / cut-out thickening / render ratio / billboard fade / retain / scene draws), `registryGen` (`LightTable::registryGeneration()` **only while
+  `fullLitSkipsReads()`**: only the table's `holdsAll` verdict depends on the registry and the shipped code never skips the light reads: with the global stamp every lamp movement of the
+  light-turn scenario rebuilt every record, 85 -> 15 % valid; without it 99 %), and after the composition the **view** (admin pointer / version / type / z write / render mode, the global alpha,
+  depth-bias order, fog) and the draws' **material structure versions** (`MaterialTable::structVersion`: bumped by a texture slot / sampler state / count / state word / flag / graph change,
+  NOT by pool bytes; the materials are polled by the composition, so this stamp can only be compared after it). An op whose composition changes a stamp is rebuilt from this very composition.
+* **Cut 1** (`orec::Excl`, counted per op, first reason): hardware batch, instance list, overlay flags, fade < 1, hierarchy, node op, no light list, not table-lit, shader class, sort id, not
+  composed (left to the engine), switch material (the material table's `switchNotes` moved during the composition), draw level (inherited stage / CPU stream / not indexed / no lighting
+  entry), no retain (compile at the slot's place), draw not retainable (no packet cache entry). Video images: 0 in every run (not tested separately).
+* **Derive** (`Device::deriveScene(cd, DeriveIn, SceneView&)`): the record's own `CachedDraw` is validated like `replayBuild` against ITS shaders / modules, the phase, the consumers, the
+  variant decision (**the ambient test answered from the record's illumination**: `IllumTable::compose(illumSlot, params)` -> the ambient registers c15..c21, not from the device's registers;
+  the Gi variant the draw was offered, read from `Shader::variantState`: a module that exists now = another pixel shader and pipeline), the env (viewport, scissor, target formats, depth
+  reversal), jitter flags, the stream / index bindings (`Buffer::gpu`) and the textures (null / pending / layout / bindless slot); then the **DrawBlock is built natively**: `tex[]` from the
+  record's textures (bindless slot or the default slot), `smp[]` through `lookupSamplerStates` of the seven owned states + the device's setting of the stage's other states (ADDRESSW, border
+  colour, max anisotropy: a global setting; **not** left to the composition), `posFix` from the viewport + jitter + `depthRemap`, `alphaFunc` / `alphaRef` from the pass states (alpha func is
+  always ALWAYS: `SetMasterAlphaTesting(1)`), `psC5` = (view obstacle xy from the mirror, z, the pass's mask only when it sets one), pad[1] = `packWord()` (the pack's lookup by the draw tag) for
+  GI / pack draws; the packet: pipeline (the scene pipeline), the scene vertex input (`internSceneVi`), dynamic state, first / count / vertexOffset, index binding, flags. Windows by table slot
+  (`recDraw`): Material windows from `MaterialTable::fillWindows(matSlot, vsSet, psSet)`, VS window 2 from `ObjectTable::windowFor(slot)`, PS window 3 from `LightingImages::entryFor` + `windowBase`,
+  the view-level ones (VS 0 / 1, PS 0) from the first draw of the view and list (the view block slot is a per-view input).
+* **Compare** (`recDraw`, every issued draw of an op valid at entry): classes scene form, pipeline, vertex input / dynamic state, geometry, flags, tag, windows (kind, base, covered; view blocks
+  at another slot with the same registers count as equal: `view blocks at another slot ...`, the dedupe search window), block tex / smp / posFix / alpha / pad / c5. **Ignored carry-over**
+  (counted, nothing in the shader reads it): `alphaRef` when the test is off (the device keeps the last mask of an earlier pass), PS c5 when the pixel shader's live set does not hold c5
+  (and c5.w when the pass sets no mask). A derivation that is **refused** (module, variant decision, binding, texture) makes the record stale: it is rebuilt from this composition
+  (`derive refused`), a refusal for phase / consumers is not.
+* **Signal audit** (`recAudit`): at every op entry the record's read log (`ret::validate`, SEH-guarded reads) is checked against the engine's memory while the stamps call the record valid; the
+  composition runs with the log on only when the record is (re)built (`ret::gLog` = the store's log; view-level reads - `composeView`, `initMirror` - and the entity's matrix / whole flag word
+  are paused with `RecNoLog`: the matrix is the object table's, only the overlay bits of +0x28 are used and stamped). A change the stamps called valid is a disagreement unless the material /
+  view stamps (compared after the composition) catch it (`caught by the post stamps`); the first changed read is classified by the anchor it lies in and logged with its op.
+* **Observers (item 4)**: `ReplaceQuery::objectRows` (3 float4, c33..c35) = the object-table CPU twin of the draw's window (`Device::ownedObjectRows`: set for draws whose VS window 2 is an
+  object-table window, in `prepareDraw`'s query lambda and in `replayDraw`'s cached query), preferred by `RtScene::rowsAt` (non-instanced) and `Water::worldRows`; every handout is compared with
+  the register file c33..c35 (`ObjectRowStats`, in the 5 s line): 0 differing in every run (1.8 M handouts in the 3 spots, 2.5 M at the savegame, 3.5 M walking, 1.4 M on D3D12).
+  Nothing submitted changed (the rows are equal by the check). The register-dependent resolve (`RtMaterials::uvMap`, <= 12 per s) keeps using the composed registers; Gi / MaterialRt / ObjectMotion /
+  `DrawReplacer::handles` are not touched in this stage (design 7.12: snapshots / settings epoch are F2c-3 work).
+* **Findings that shaped the code** (all in the compare, found by it): the sampler state **beyond the seven owned ones** (max anisotropy etc.) is the device's, defaults give 25 % wrong sampler
+  indexes; PS c5 and `alphaRef` are carry-over where nothing reads them (above); the GI / pack variant decision is the common case at the player defaults (`gate` always true with the pack
+  provider), so the ambient test must come from the record's lighting; a cold variant cache (first run of a spot) makes `wanted` draws change shader and pipeline when the variant module
+  appears (derive refuses and the record is remade: 0 DIFFERING with the variant cache deleted, `rebuilt 18,378`); view blocks are deduplicated by a bounded search, so an equal view block can
+  sit at another slot; the registry generation is not an input of a draw that never skips the light reads.
+
+**Numbers** (Full, `-PlayerDefaults`, `native.material_table / illum_table / lighting_images / owned_windows / owned_objects / scene_draws / owned_records`; logs in `rvk-work/scratch/f2c2/`;
+"valid" = records valid at the op's entry; ops / draws summed over the run, loading frames included; DIFFERING = draws whose derived view differs from the composed draw in any class):
+
+| run | eligible ops (share of the Static group's main-view z / solid ops) | records valid at entry | built / rebuilt | derived / compared with a scene draw | DIFFERING | audit disagreements |
+|---|---|---|---|---|---|---|
+| Vulkan 3 spots (harbour_docks, jungle, pub_interior), 4 runs | 1.12 - 1.18 M (59 %) | 99.4 % | 1.1 k / 0.8 - 4 k | 1.21 M / 1.17 M | **0** | 0 - 3 (1 - 3, `other`; 2 of them caught later by the post stamps) |
+| Vulkan 3 spots, cold variant cache (scene / Gi variants deleted) | 1.11 M | 97.1 % (derive refused while variants build) | 1.2 k / 18.4 k | 1.13 M / 1.09 M | **0** | 3 (`other`) |
+| Vulkan 3 spots, cold pipeline cache | 1.14 M | 99.5 % | 1.1 k / 4.1 k | 1.18 M / 1.14 M | **0** | 0 |
+| savegame Risen_Save_0005 hold (lod 2x) | 1.96 M (75 %) | 99.4 % | 0.9 k / 0.9 k | 2.07 M / 2.00 M | **0** | 2 (`other`) |
+| savegame walk 60 s (`rvk_rtwalk mode=walk`) | 2.75 M (75.5 %) | 99.0 % | 1.0 k / 16.9 k (LOD resource, material structure, illumination) | 2.90 M / 2.80 M | **0** | 1 (`other`) |
+| `rvk_lightturn` (monastery hall) | 0.35 M (55 %) | 98.9 % (85 % with the registry generation as a global stamp: 15 % in the worst window) | 1.5 k / 1.0 k | 0.37 M / 0.36 M | **0** | 2 (`other`) |
+| D3D12 3 spots | 0.89 M (59 %) | 95.4 % | 1.1 k / 1.3 k | 0.92 M / 0.90 M | **0** | 4 (`other`; 2 more caught by the post stamps) |
+| Vulkan `-Validation`, 2 spots | 0.55 M | 98.8 % | 0.7 k / 0.8 k | 0.57 M / 0.54 M | **0** | 4 (`other`) |
+
+* **Audit disagreements** are the same four kinds of read, all `other` (or the entity flag word before it was paused): an 8-byte pointer that goes from 0 to a resource while a texture streams in
+  (the resolved texture / placeholder did not change, so the compare is clean: the read log is conservative) and a 4-byte count (`was 0x2, now 0x3`, D3D12 only). None came with a compare difference
+  (`of them with a compare difference` stays 0); none is a missed writer of a record input, but the streaming pointer is the writer to name if F2c-3 wants the log to be exact: the material's image
+  resource slot -> `textureOfImageData` (the material table's texture poll catches the change one op later: `material structure`).
+* **Not derived** (counted, never DIFFERING): ~0.3 - 1 % of the draws: `variant gate` (a lit draw whose variant decision changed since the record: the record is remade), `stream / index
+  binding` (6 - 38 per window while the mesh arena moves).
+* **Rebuild reasons** (walking / light turning): LOD resource 1 - 190 per 5 s, illumination 3 - 4, entity 1 - 4, material structure 1 - 280, geometry / material 2, derive refused (variants /
+  bindings) tens - 360 at a cold start, read log 1 - 4. `registry generation` rebuilds are gone with the `fullLitSkipsReads()` condition.
+* **CPU per frame** (Debug setting on, mean of the 5 s windows with > 1000 ops; engine thread; the main view's ops): **record build 1 - 5 us** (a few hundred builds per window; 8 - 52 us
+  while variants / the D3D12 backend churn), **derive + compare 370 us** at the 3 spots (the device's derivation alone 155 us), **575 us** at the savegame (248 us the derivation, 245 us stamps),
+  stamps 160 - 260 us, audit 30 - 60 us (the read-log validation of ~1000 records per frame; the D3D12 run's means are higher, derive + compare 430 us, stamps 1.3 ms: its windows include the long start-up frames). The compare computes the content hashes of the vertex input / dynamic state, the 20-slot block, the
+  windows and the tag of 150 k draws per second; F2c-3 needs the derivation only (no hashing, no per-draw window re-derivation): 0.15 - 0.25 ms per frame measured here is an upper bound for
+  the draw-record rebuild of the owned ops, against the ~1 ms the composition + packet path of those ops costs (7.12 estimate -0.5 .. -0.7 ms).
+* **Gates**: `rvk_tests` 288 / 288 (settings count 128), `rvk_d3d9test --validation` PASS on Vulkan and D3D12, `rvk_rhitest --validation` PASS on both backends (no GPU read is added: the records are
+  compared on the CPU), no device loss, no `[error]`, no validation message in the Vulkan `-Validation` run (2 spots) nor the D3D12 run; the timing counters of the last build were measured in the
+  last two runs (3 spots + savegame), the earlier runs predate only the extra timer.
+* **Handed to F2c-3**: the record layout above is the one `Device::replayOwned` reads (`DrawRec::cd` = the packet, `DeriveIn` = the per-draw inputs); what is still composed per op at entry is the
+  stamp (160 - 260 us per frame for ~1000 ops: batch it per entity / resource), the side effects (the record lists them, they are not replayed yet), the materials' poll (the stamp for the
+  material structure needs it: `MaterialTable` re-reads a record at its first draw of a frame; an owned op must poll without composing), and the ambient bit (`IllumTable::compose` per lit draw: cache
+  it per (illumination slot, params) once per frame).
+
 ### 7.15 F4-0 tree measurements (2026-11-06, `RVK_F4_MEASURE=1`; no behaviour change)
 
 Counters only (`src/native/f4_measure.{h,cpp}`; hooks in `static_ops_trees.cpp` `composeTree` / `composeTreeBillboard` + ONE line in `static_ops.cpp` (`f4m::IssueScope` around
@@ -893,7 +985,7 @@ no compaction, the old path runs, the record-derived draws are built and compare
 |---|---|---|---|
 | F2c-0 | measure: owned-eligible share by reason, observer reads, invalidation rates, CTAB-live c12..c31 of the static VS, occurrence of hierarchy / instanced ops | numbers: done, 7.12 | - |
 | F2c-1 | object table, VS window 1 / 2 served, `LightingImages::entryFor`, `LightTable::registryGeneration` (`native.owned_objects`) | split_verify 0, read-backs 0, checkEntity 0 | ~0 |
-| F2c-2 | OpRecords + record-derived DrawRecords built and compared while composition runs; read-log signal audit (`native.owned_records`) | DIFFERING 0, audit disagreements 0 | +0.05..0.1 |
+| F2c-2 | OpRecords + record-derived DrawRecords built and compared while composition runs; read-log signal audit (`native.owned_records`) | DIFFERING 0, audit disagreements 0 (done, 7.14: DIFFERING 0 in every run, 0 - 4 benign audit disagreements per run) | +0.05..0.1 (measured 0.37 - 0.58 ms with the compare, 0.15 - 0.25 ms the derivation) |
 | F2c-3 | viewBegin compaction + `Device::replayOwned` at BeforeDepthPrepass / BeforeSolid, engine sort order, side effects, check frames | check frames 0, refcompare Full, long tour (placeholderBinds -> 0), both backends, validation | **-0.5..-0.7** |
 | F2c-4 | persistent records, GPU compaction (ref.y = view slot), later cull (F5) | compaction = CPU list | -0.03..-0.05 CPU, GPU / low-end gain |
 

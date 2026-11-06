@@ -45,6 +45,9 @@ public:
     // c32 .w = the fade). Fills `out` (kind Object, base, covered, masks, CPU twin) and returns Served, else the reason (out untouched).
     ObjectWhy serve(const void* entity, const float composed[kObjectRegs][4], std::uint32_t composedBits, d3d9::OwnedWindows::Win& out);
 
+    // F2c-2: the window of slot `slot`'s record without serving anything (a pure function of the slot: kind Object, base, covered); false: not ready / out of range
+    bool windowFor(std::uint32_t slot, d3d9::OwnedWindows::Win& out) const;
+
     // once per present (engine thread, before the frame's draws are submitted): the scene table's drain, upload, read-back, 5 s log
     void flush(d3d9::Device& dev);
 

@@ -992,6 +992,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         q.alphaRef = rs_[RS_ALPHAREF] & 0xFF;
         q.depthWrite = rs_[RS_ZENABLE] != ZB_FALSE && rs_[RS_ZWRITEENABLE] != 0;
         q.depthBias = rs_[RS_DEPTHBIAS] != 0 || rs_[RS_SLOPESCALEDEPTHBIAS] != 0;
+        q.objectRows = ownedObjectRows();
     };
     // draw observers (enh/rt_scene, enh/gi): indexed draws from buffers of the kinds / phases they ask for
     const bool skipObs = skipObservers_;  // (a refused replay ran them already: their capture request stands)
@@ -1408,6 +1409,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
         block.pad[1] = static_cast<std::uint32_t>(geom.baseVertex + vertexShift_);
         captured_.push_back(captureRequest_);
     }
+    if (probe_ != nullptr) probeBlock_ = block;
     rhi::RingAlloc db = game_->allocRing(sizeof(block), 16);
     std::memcpy(db.ptr, &block, sizeof(block));
     if (capture_ != nullptr) {
@@ -1596,6 +1598,22 @@ void Device::fillCapture(const DrawPacket& p) {
     c.valid = replayAllowed(c);
     if (c.valid) ++replayStats.captured;
     else ++replayStats.notCaptured;
+}
+
+// F2c-2: the world rows (c33..c35) of the draw being prepared as the object table holds them (null: not an object-window draw); counted against the register file
+const float* Device::ownedObjectRows() {
+    if (owned_ == nullptr) return nullptr;
+    const OwnedWindows::Win& w = owned_->w[0][2];
+    if (w.kind != OwnedWindows::Kind::Object || w.image == nullptr) return nullptr;
+    const float* rows = w.image + 8;  // image = c31 (5 float4): c33 starts at the third
+    ++objectRowStats.given;
+    for (std::uint32_t r = 0; r < 3; ++r) {
+        if (std::memcmp(rows + 4 * r, vsF_[33 + r], 16) != 0) {
+            ++objectRowStats.differing;
+            break;
+        }
+    }
+    return rows;
 }
 
 bool Device::replayAllowed(const CachedDraw& c) const {
@@ -1800,6 +1818,7 @@ bool Device::replayDraw(const CachedDraw& c, const ReplayInputs& in) {
             q.tag = &tag_;
             q.textures = c.tex;
             q.mainView = firings_.mainViews();
+            q.objectRows = ownedObjectRows();
             captureRequest_ = {};
             captureRequestRw_ = {};
             captureInstances_ = false;
@@ -1846,6 +1865,7 @@ bool Device::replayDraw(const CachedDraw& c, const ReplayInputs& in) {
     phases_.countDraw();
     draws_.count(c.kind, c.phase.view);
     ++replayStats.replayed;
+    if (probe_ != nullptr) probeBlock_ = b;
     if (c.scenePipeline != GamePipeline::None && sceneActive() && p.batchable && rendering_ && ensureSceneRef()) {
         if (toScenePacket(p, c.scenePipeline)) ++sceneStats_.replayedSceneDraws;
         ++sceneStats_.candidates;

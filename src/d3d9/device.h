@@ -422,6 +422,8 @@ struct ReplaceQuery {
     std::uint32_t alphaRef = 0;               // its reference 0..255
     bool depthWrite = true;                   // z test + z write on (a depth target bound)
     bool depthBias = false;                   // a depth bias (constant or slope-scaled) is set
+    // F2c-2 (native.owned_records): the draw's world rows c33..c35 (3 float4) as the object table holds them; null = read the register file (c33..c35)
+    const float* objectRows = nullptr;
 };
 
 struct DrawReplacement {
@@ -991,10 +993,43 @@ public:
     bool replayMatches(const CachedDraw& cached, const CachedDraw& fresh, const ReplayInputs& in, bool& valid, std::string& why);
     // the consumers of prepareDraw's results are idle for this draw (observers, replacers, variants, tint, taps, logging)
     bool replayAllowed(const CachedDraw& c) const;
+    // ---- F2c-2 op records (docs/research/frame-ownership.md 7.14; scene_draws.cpp, native/static_ops_records.cpp): the scene packet of a draw as a plain value
+    // (what an indirect scene draw is made of, with the ring addresses left out), taken from the composed draw (setSceneProbe: toScenePacket fills it) or
+    // derived from a retained CachedDraw + the per-draw inputs of an op record (deriveScene). Compare only: nothing derived is submitted.
+    struct SceneView {
+        bool valid = false;  // the probe: toScenePacket ran for the draw; a derivation: it was produced
+        bool scene = false;  // the draw is (to be) a scene draw
+        GamePipeline pipeline = GamePipeline::None;
+        std::uint64_t viHash = 0, dynHash = 0, indexBuffer = 0, indexOffset = 0;
+        std::uint32_t first = 0, count = 0, flags = 0;
+        std::int32_t vertexOffset = 0;
+        bool index32 = false;
+        shader::abi::DrawBlock block{};
+    };
+    void setSceneProbe(SceneView* p) { probe_ = p; }
+    std::uint64_t variantEpoch() const { return variantEpoch_; }
+    // the inputs of a record's draw that the composition would otherwise leave in the device
+    struct DeriveIn {
+        Buffer* streams[4]{};
+        std::uint32_t strides[4]{};
+        Buffer* indices = nullptr;
+        Texture* tex[kSamplerCount]{};            // the composed textures of the pixel stages (null = none)
+        std::uint32_t ss[kSamplerCount][7]{};           // their sampler states (the seven the composition owns)
+        std::uint32_t alphaFunc = 8;                    // D3DCMP of the draw's alpha test (8 = always), derived from the pass's states
+        float alphaRef = 0.0f;
+        float psC5[4]{};                                // pixel window 1 (c5) as the draw's pass sets it (.w only when it sets the mask)
+        bool ambientLit = false;                        // the draw's ambient registers (c15..c21 of its lighting) are not all zero, composed from the record's illumination
+    };
+    // 0 = derived into `out`; else why not (1 stale module, 2 phase, 3 consumers, 4 variant, 5 env, 6 stream / index binding, 7 texture, 8 jitter flags, 9 scene form)
+    int deriveScene(const CachedDraw& c, const DeriveIn& in, SceneView& out);
+    // counters of the owned object rows handed to observers (ReplaceQuery::objectRows) against the register file
+    struct ObjectRowStats {
+        std::uint64_t given = 0, differing = 0;
+    } objectRowStats;
     // the last replayDraw was refused because the packet is out of date (shaders, variants, bindings, textures): remake it from a normal draw
     bool replayWasStale() const { return replayStale_; }
     // false = draws that took an enhancement variant (GI / material pack word / billboard fade module) are not retained (the behaviour before the variant packets; A/B)
-    void setRetainVariants(bool on) { retainVariants_ = on; }
+    void setRetainVariants(bool on) { retainVariants_ = on; ++variantEpoch_; }
     struct ReplayStats {
         std::uint64_t replayed = 0, refused = 0, captured = 0, notCaptured = 0;
         // why a replay was refused: shaders / modules, phase, consumers, env, jitter, stream binding, index binding, texture, observer capture, no scope, variant decision, sky cube
@@ -1040,7 +1075,7 @@ public:
     const draws::FrameDraws& drawRecords() const { return draws_; }
     void setDrawRecords(bool on) { draws_.setRecording(on); }
     // debug view: tint colour draws by kind / pass (draws::tintColor; the pixel shaders' tint variants are built on demand)
-    void setTintMode(draws::TintMode mode) { tint_ = mode; }
+    void setTintMode(draws::TintMode mode) { tint_ = mode; ++variantEpoch_; }
     draws::TintMode tintMode() const { return tint_; }
     // detail distances (engine/lod.h lod.trees): the SpeedTree billboards' fade-in distances times `scale` (1 = the engine's
     // vertex shader unchanged; else its fade variant, FrameBlock params[kFrameParamLod].x)
@@ -1087,16 +1122,16 @@ public:
     void regionEnd();
     // texture LOD bias added to the samplers of the draws the jitter applies to (FSR: log2(render / display) - 1, so the
     // temporal filter has the detail to accumulate); 0 = none
-    void setGeometryLodBias(float bias) { geometryLodBias_ = bias; }
+    void setGeometryLodBias(float bias) { geometryLodBias_ = bias; ++variantEpoch_; }
     // hashed alpha test on the jittered draws (upscale.alpha_dither: abi.h kAlphaHashed; docs/research/upscaling.md 17)
-    void setAlphaDither(bool on) { alphaDither_ = on; }
+    void setAlphaDither(bool on) { alphaDither_ = on; ++variantEpoch_; }
     // cut-out strands of the jittered draws kept about a render pixel wide (upscale.cutout_thicken: abi.h kAlphaThicken, 0 = off;
     // docs/research/upscaling.md 19)
-    void setCutoutThicken(float strength) { cutoutThicken_ = strength < 0.0f ? 0.0f : strength > 1.0f ? 1.0f : strength; }
+    void setCutoutThicken(float strength) { cutoutThicken_ = strength < 0.0f ? 0.0f : strength > 1.0f ? 1.0f : strength; ++variantEpoch_; }
     // Render scale (enh/upscale): while the engine renders the main view, engine/scene_hooks shrinks the main camera's screen
     // rect by this ratio (>= 1; 1 = off), so the scene target, depth map, viewports and masks are all that much smaller; the
     // rect's real size (the display / output size) is reported back through setDisplaySize
-    void setRenderRatio(float ratio) { renderRatio_ = ratio < 1.0f ? 1.0f : ratio; }
+    void setRenderRatio(float ratio) { renderRatio_ = ratio < 1.0f ? 1.0f : ratio; ++variantEpoch_; }
     float renderRatio() const { return renderRatio_; }
     void setDisplaySize(std::uint32_t width, std::uint32_t height) { displaySize_ = {width, height}; }
     std::array<std::uint32_t, 2> displaySize() const { return displaySize_; }
@@ -1151,7 +1186,7 @@ public:
         bool on = false;
         bool replaceLightmaps = false;
     };
-    void setGiDraws(const GiDraws& g) { giDraws_ = g; }
+    void setGiDraws(const GiDraws& g) { giDraws_ = g; ++variantEpoch_; }
     // ---- material pack (enh/material_pack, docs/research/material-pack.md) ----
     // With a provider set, the main view's lit material draws take the pixel shader's variant (like GI draws) and carry the provider's word for
     // their material in the DrawBlock (pad[1] = alpha.w; 0 = no entry: the variant leaves the pixels alone). `texture` (null: constants only)
@@ -1161,11 +1196,11 @@ public:
         Texture* texture = nullptr;
     };
     using PackProvider = std::function<PackHit(const draws::Tag&)>;
-    void setPackProvider(PackProvider p) { packProvider_ = std::move(p); }
+    void setPackProvider(PackProvider p) { packProvider_ = std::move(p); ++variantEpoch_; }
     // the pack's change stamp (any value change = a lookup may answer differently): a retained packet keeps its pack word while it and the map's slot are unchanged
     void setPackStamp(std::function<std::uint32_t()> f) { packStamp_ = std::move(f); }
     // test switch (materials.alternate): while set the pack's variants are not used at all (the engine's own shaders draw), as without a pack
-    void setPackBypass(bool on) { packBypass_ = on; }
+    void setPackBypass(bool on) { packBypass_ = on; ++variantEpoch_; }
     std::uint64_t giDrawsThisInterval() const { return giDrawCount_; }
     // ---- thin G-buffer (enh/gbuffer, docs/research/rtgi.md 10) ----
     // Extra colour attachments of the first main view's solid pass (scene HDR target only), only those a consumer reads (no unread
@@ -1624,6 +1659,7 @@ private:
     shader::abi::DrawBlock lastBlock_{};
     draws::Kind lastKind_ = draws::Kind::Unknown;
     bool replayBuild(const CachedDraw& c, const ReplayInputs& in, DrawPacket& p, shader::abi::DrawBlock& b);
+    const float* ownedObjectRows();
     void fillCapture(const DrawPacket& p);
     void submitInterned(DrawPacket& p);
     // F2b-1 (scene_draws.cpp)
@@ -1639,6 +1675,9 @@ private:
     bool sceneDrawsOn_ = false, sceneAvail_ = false, sceneIssue_ = false, sceneFaultInject_ = false;
     std::uint32_t sceneCheckEvery_ = 0;
     GamePipeline scenePipe_ = GamePipeline::None;  // prepareDraw's decision for the draw being submitted
+    SceneView* probe_ = nullptr;                      // F2c-2: filled by toScenePacket
+    shader::abi::DrawBlock probeBlock_{};              // the DrawBlock of the draw being prepared / replayed (a copy while the probe is set)
+    std::uint64_t variantEpoch_ = 1;                   // bumped by every setter that changes a draw's variant / scene decision
     std::vector<shader::abi::DrawRecord> sceneRecs_;  // the batch's records (DrawPacket::scene - 1)
     std::vector<std::uint32_t> sceneRun_, batchOrder_;
     struct SceneRefStream {

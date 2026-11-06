@@ -8,6 +8,7 @@
 // one of its VkDrawIndexedIndirectCommand arguments (firstInstance = the record's index in the block = ref.x of the instance-rate ref stream).
 
 #include <algorithm>
+#include <bit>
 #include <cstring>
 
 #include "d3d9/device.h"
@@ -35,9 +36,40 @@ bool dynEqual(const rhi::DynamicStateValues& a, const rhi::DynamicStateValues& b
 
 std::uint64_t alignUp16(std::uint64_t v) { return (v + 15) & ~std::uint64_t{15}; }
 
+// F2c-2: content hashes of the interned vertex input / dynamic state (the arena pointers differ between frames, the contents do not)
+std::uint64_t hashBytes(std::uint64_t h, const void* p, std::size_t n) {
+    const auto* b = static_cast<const std::uint8_t*>(p);
+    for (std::size_t i = 0; i < n; ++i) h = (h ^ b[i]) * 0x100000001B3ull;
+    return h;
+}
+
+std::uint64_t hashVi(const rhi::VertexInputValues& v) {
+    std::uint64_t h = 0xcbf29ce484222325ull;
+    h = hashBytes(h, &v.bufferCount, sizeof(v.bufferCount));
+    h = hashBytes(h, &v.dynamicLayout, sizeof(v.dynamicLayout));
+    h = hashBytes(h, &v.bindingCount, sizeof(v.bindingCount));
+    h = hashBytes(h, &v.attributeCount, sizeof(v.attributeCount));
+    h = hashBytes(h, &v.vertexShift, sizeof(v.vertexShift));
+    h = hashBytes(h, v.buffers, sizeof(v.buffers[0]) * v.bufferCount);
+    h = hashBytes(h, v.offsets, sizeof(v.offsets[0]) * v.bufferCount);
+    h = hashBytes(h, v.bindings, sizeof(v.bindings[0]) * v.bindingCount);
+    h = hashBytes(h, v.attributes, sizeof(v.attributes[0]) * v.attributeCount);
+    return h;
+}
+
+std::uint64_t hashDyn(const rhi::DynamicStateValues& d) {
+    constexpr std::size_t prefix = offsetof(rhi::DynamicStateValues, blendEnable);
+    std::uint64_t h = hashBytes(0xcbf29ce484222325ull, &d, prefix);
+    const std::uint32_t n = d.colorCount;
+    h = hashBytes(h, d.blendEnable, sizeof(VkBool32) * n);
+    h = hashBytes(h, d.blendEquation, sizeof(VkColorBlendEquationEXT) * n);
+    return hashBytes(h, d.writeMask, sizeof(VkColorComponentFlags) * n);
+}
+
 }  // namespace
 
 void Device::setSceneDraws(bool on, std::uint32_t checkEvery) {
+    ++variantEpoch_;
     sceneCheckEvery_ = checkEvery;
     if (!game_) return;
     bool avail = false;
@@ -190,11 +222,125 @@ bool Device::toScenePacket(DrawPacket& p, GamePipeline pipeline) {
     p.scene = static_cast<std::uint32_t>(sceneRecs_.size());
     p.pipeline = pipeline;
     p.vi = internSceneVi(*p.vi);
+    if (probe_ != nullptr) {
+        SceneView& v = *probe_;
+        v = {};
+        v.valid = v.scene = true;
+        v.pipeline = pipeline;
+        v.viHash = hashVi(*p.vi);
+        v.dynHash = p.dyn != nullptr ? hashDyn(*p.dyn) : 0;
+        v.indexBuffer = p.indexBuffer;
+        v.indexOffset = p.indexOffset;
+        v.index32 = p.index32;
+        v.first = p.first;
+        v.count = p.count;
+        v.vertexOffset = p.vertexOffset;
+        v.flags = p.push.flags;
+        v.block = probeBlock_;
+    }
     const std::uint64_t frame = p.push.frame;
     p.push = {};
     p.push.frame = frame;
     ++sceneStats_.sceneDraws;
     return true;
+}
+
+// F2c-2: a record's draw as a SceneView, without the composition's results of this frame: the retained packet (`c`: the record's own copy) is validated
+// like replayBuild does against the record's own shaders / buffers / textures, the DrawBlock is derived from the record's textures, sampler states,
+// alpha test and pass-set c5 plus the per-frame inputs (viewport, jitter, depth remap, LOD bias)
+int Device::deriveScene(const CachedDraw& c, const DeriveIn& in, SceneView& out) {
+    out = {};
+    if (!c.valid || c.vs == nullptr || c.ps == nullptr || c.vs->module != c.vsModule || c.ps->module != c.fsModule) return 1;
+    if (phases_.current() != c.phase) return 2;
+    if (!replayAllowed(c)) return 3;
+    // the enhancement variant decision (replayBuild's, with the ambient test answered from the record's lighting instead of the device's registers)
+    if (c.v.giOn != giDraws_.on || c.v.replaceLightmaps != giDraws_.replaceLightmaps || c.v.pack != (packProvider_ && !packBypass_) || c.v.gbufGate != gbuf_.active || gbuf_.active ||
+        !c.v.sceneActive || c.v.scenePending) {
+        return 4;
+    }
+    if (c.v.gate && ((c.v.staticOk && in.ambientLit) != c.v.wanted)) return 4;
+    if (c.v.gate && c.v.wanted) {
+        // the variant the draw was offered (None while it was still being built): a module that exists now makes the draw take another pixel shader and pipeline (variant(): read only)
+        const std::size_t vi = static_cast<std::size_t>(VariantSlot::Gi);
+        const rhi::ShaderModule now = c.ps->variantState[vi].load(std::memory_order_acquire) == 2 ? c.ps->variants[vi].load(std::memory_order_acquire) : rhi::ShaderModule::None;
+        if (now != c.v.fsAsked) return 4;
+    }
+    if (c.v.vsUsed != c.vs->module || c.v.biasFor != geometryLodBias_) return 4;
+    CachedDraw::Env env{};
+    env.vp = viewport_;
+    std::memcpy(env.scissor, scissor_, sizeof(scissor_));
+    env.colorCount = colorCount_;
+    for (std::uint32_t i = 0; i < colorCount_ && i < kRenderTargets; ++i) env.colorFormats[i] = colorFormats_[i];
+    env.depthFormat = depthFormat_;
+    env.stencilFormat = stencilFormat_;
+    env.depthReversed = boundDepthReversed() ? 1u : 0u;
+    if (std::memcmp(&env, &c.env, sizeof(env)) != 0) return 5;
+    float jx = 0.0f, jy = 0.0f;
+    geometryJitter(jx, jy);
+    const bool jit = jx != 0.0f || jy != 0.0f;
+    if (jit && (alphaDither_ || cutoutThicken_ * std::clamp(renderRatio_ - 1.0f, 0.0f, 1.0f) > 0.0f)) return 8;
+    for (std::uint32_t i = 0; i < 4; ++i) {
+        if (((c.streamMask >> i) & 1u) == 0) continue;
+        if (in.streams[i] == nullptr) return 6;
+        const Buffer::Binding g = in.streams[i]->gpu(in.strides[i]);
+        if (g.buffer != c.stream[i].buffer || g.offset != c.stream[i].offset) return 6;
+    }
+    if (in.indices == nullptr) return 6;
+    const Buffer::Binding ib = in.indices->gpu(in.indices->index32() ? 4 : 2);
+    if (ib.buffer != c.ib.buffer || ib.offset != c.ib.offset) return 6;
+    // the DrawBlock
+    shader::abi::DrawBlock& b = out.block;
+    b = {};
+    const float lodBias = jit ? geometryLodBias_ : 0.0f;
+    static constexpr std::uint32_t kSs[7] = {SAMP_ADDRESSU, SAMP_ADDRESSV, SAMP_MAGFILTER, SAMP_MINFILTER, SAMP_MIPFILTER, SAMP_MIPMAPLODBIAS, SAMP_SRGBTEXTURE};
+    for (std::uint32_t mask = c.ps->samplerMask & 0xFFFFu; mask != 0; mask &= mask - 1) {
+        const std::uint32_t slot = static_cast<std::uint32_t>(std::countr_zero(mask));
+        const shader::Reflection& r = c.ps->reflection;
+        Texture* t = in.tex[slot];
+        if (t != nullptr && (t->isNull() || t->pending_ || t->layout() != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL || t->bindlessSlot() != c.texSlot[slot])) return 7;
+        const bool kindMatches = t != nullptr && ((r.samplers[slot] == shader::TextureType::Cube) == (t->desc().type == TextureType::Cube)) &&
+                                 ((r.samplers[slot] == shader::TextureType::Volume) == (t->desc().type == TextureType::Volume));
+        if (t != nullptr && t == substituteFrom_) return 7;
+        b.tex[slot] = t != nullptr && kindMatches ? t->bindlessSlot() : game_->defaultTextureSlot(static_cast<std::uint32_t>(r.samplers[slot]));
+        std::uint32_t states[SAMP_COUNT];
+        // (the seven states the composition owns from the record; the others - ADDRESSW, border colour, max anisotropy, max mip level - are the device's settings of the stage)
+        std::memcpy(states, samp_[slot].data(), sizeof(states));
+        for (std::uint32_t i = 0; i < 7; ++i) states[kSs[i]] = in.ss[slot][i];
+        if (lodBias != 0.0f) states[SAMP_MIPMAPLODBIAS] = std::bit_cast<std::uint32_t>(asFloat(states[SAMP_MIPMAPLODBIAS]) + lodBias);
+        b.smp[slot] = lookupSamplerStates(states);
+    }
+    b.posFix[0] = 1.0f / static_cast<float>(std::max(1u, viewport_.width)) + jx;
+    b.posFix[1] = -1.0f / static_cast<float>(std::max(1u, viewport_.height)) + jy;
+    depthRemap(b.posFix[2], b.posFix[3]);
+    b.alphaFunc = in.alphaFunc;
+    b.alphaRef = in.alphaRef;
+    if (c.v.giDraw && giDraws_.on && giDraws_.replaceLightmaps) {
+        for (const Semantic sem : {Semantic::LightMap1, Semantic::LightMap2}) {
+            const auto& r = c.ps->semantics[sem];
+            if (r.present() && r.reg < 16) b.tex[r.reg] = 0;
+        }
+    }
+    if (c.v.drawn && c.v.pack) b.pad[1] = packWord();  // (the pack's word of the draw's material: the tag is the one the caller set)
+    std::memcpy(b.psC5, in.psC5, sizeof(b.psC5));
+    // the packet: the retained one, in its scene form
+    out.scene = c.scenePipeline != GamePipeline::None;
+    out.pipeline = c.scenePipeline;
+    if (out.scene) {
+        if (!ensureSceneRef()) return 9;
+        out.viHash = hashVi(*internSceneVi(c.vi));
+    } else {
+        out.viHash = hashVi(c.vi);
+    }
+    out.dynHash = hashDyn(c.dyn);
+    out.indexBuffer = c.packet.indexBuffer;
+    out.indexOffset = c.packet.indexOffset;
+    out.index32 = c.packet.index32;
+    out.first = c.packet.first;
+    out.count = c.packet.count;
+    out.vertexOffset = c.packet.vertexOffset;
+    out.flags = c.packet.push.flags;
+    out.valid = true;
+    return 0;
 }
 
 // -1: `b` can join the run of `a`; else the reason (SceneDrawStats::breaks), 5 = another pipeline (the end of a pipeline group: not a break)

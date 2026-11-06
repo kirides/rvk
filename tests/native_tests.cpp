@@ -9,6 +9,7 @@
 
 #include "native/coverage.h"
 #include "native/frame_desc.h"
+#include "native/op_records.h"
 #include "test.h"
 
 using namespace rvk;
@@ -1143,4 +1144,29 @@ TEST(native_pssm_pass_states_follow_the_mask_loop) {
     CHECK(d.rs[d3d9::RS_STENCILENABLE] == 1 && d.rs[d3d9::RS_STENCILPASS] == 8 && d.rs[d3d9::RS_STENCILFUNC] == 8 && d.rs[d3d9::RS_STENCILREF] == 0 &&
           d.rs[d3d9::RS_STENCILMASK] == 0xffffffffu && d.rs[d3d9::RS_STENCILWRITEMASK] == 0xffffffffu);
     CHECK(fxc::kPssmIndices[6] == 4 && fxc::kPssmIndices[17] == 3);
+}
+
+// F2c-2 (op_records.h): the stamp's field-wise comparison names the first differing field; the key hashes by all of its parts
+TEST(op_record_stamp_first_difference) {
+    native::orec::Stamp a;
+    native::orec::Stamp b = a;
+    CHECK(native::orec::firstDifference(a, b) == -1);
+    b.fadeBits = 7;
+    CHECK(native::orec::firstDifference(a, b) == 7);
+    b.geom = 3;
+    CHECK(native::orec::firstDifference(a, b) == 2);  // the earlier field wins
+    b = a;
+    b.objGen = 2;
+    CHECK(native::orec::firstDifference(a, b) == 9);
+    b = a;
+    b.materials = 1;
+    CHECK(native::orec::firstDifference(a, b) == 13);
+    CHECK(std::size(native::orec::kStampNames) == native::orec::kStampFields);
+    CHECK(std::size(native::orec::kExclNames) == native::orec::kExclCount);
+    CHECK(std::size(native::orec::kFieldNames) == native::orec::kFieldCount);
+    native::orec::Key k1{&a, 5, 1, 0}, k2 = k1;
+    native::orec::KeyHash h;
+    CHECK(k1 == k2 && h(k1) == h(k2));
+    k2.desc = 6;
+    CHECK(!(k1 == k2) && h(k1) != h(k2));
 }

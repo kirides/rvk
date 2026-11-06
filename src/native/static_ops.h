@@ -37,6 +37,7 @@
 #include "native/static_ops_retained.h"
 #include "native/frame_desc.h"
 #include "native/static_compose.h"
+#include "native/op_records.h"
 
 namespace rvk::hal::vulkan {
 class HalDevice;
@@ -121,6 +122,8 @@ public:
     void setOwnedWindows(bool on) { ownedWindows_ = on; }
     // native.owned_objects (frame-ownership.md 7.13): VS windows 1 / 2 of the non-instanced static mesh draws from the view block / the object table
     void setOwnedObjects(bool on) { ownedObjects_ = on; }
+    // native.owned_records (frame-ownership.md 7.14, F2c-2): op records built from the composition and compared (never submitted); needs the object table, the lighting images and table lighting
+    void setOwnedRecords(bool on);
     // native.scene_draws (frame-ownership.md 7.11): the main view's static draws are issued as scene draws (Device::setSceneIssue)
     void setSceneDraws(bool on) { sceneDraws_ = on; }
     // native.gpu_scene (docs/research/gpu-scene.md): >= 1 checks every mesh / tree / actor op's entity against the signal-fed instance table
@@ -725,6 +728,26 @@ private:
     bool sceneDraws_ = false;
     d3d9::OwnedWindows ownedWin_;
     void setOwnedFor(const sc::DrawDesc& d);
+
+    // F2c-2 (static_ops_records.cpp)
+    bool ownedRecords_ = false;
+    std::unique_ptr<orec::Store> recs_;
+    struct LightKey {
+        std::uint32_t slot = 0xffffffffu;
+        bool tableLit = false, holdsAll = false;
+        std::uint32_t n = 0, first = 0;
+    } lightKey_;
+    bool recNoRetain_ = false;
+    std::uint64_t recViewSerial_ = 0;
+    void recEnter(const Op& op);          // before the composition: eligibility, stamps, the record valid at entry, the read log
+    void recComposed(const Op& op, Skip s);  // after the composition
+    bool recStamp(const Op& op, orec::Stamp& st);
+    void recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey);  // after each issued draw: derive + compare (or collect for the build)
+    void recEnd(const Op& op);            // after issue(): build / refresh the record
+    void recReport();
+    bool recPost(const Op& op);           // at the first draw: stamps that need the composition (material versions, view)
+    void recAudit(const Op& op);
+    std::uint64_t recViewStamp();
 
     // packet retention: a composed draw's finished packet by (op, draw index), valid while the draw description equals the captured one
     int packetMode_ = 0;

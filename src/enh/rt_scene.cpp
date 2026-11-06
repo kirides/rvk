@@ -557,6 +557,11 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
     const std::uint32_t alphaWord = (q.alphaTest ? (q.alphaFunc | (q.alphaRef << 8)) : 0u) | (static_cast<std::uint32_t>(q.kind) << 16);
     const std::uint8_t view = viewBit(q.phase.view);
     const auto rowsAt = [&](std::uint32_t reg, rt::Rows& rows) {
+        // F2c-2: the world rows of a draw with an object-table window come from the table (3 float4: c33..c35), not the register file
+        if (q.objectRows != nullptr && !q.instanced && reg == kInstanceDataBase + 1) {
+            for (std::uint32_t r = 0; r < 3; ++r) std::memcpy(&rows[r * 4], q.objectRows + 4 * r, sizeof(float) * 4);
+            return rt::finite(rows);
+        }
         for (std::uint32_t r = 0; r < 3; ++r) std::memcpy(&rows[r * 4], dev.vsConstant(reg + r), sizeof(float) * 4);
         return rt::finite(rows);
     };
