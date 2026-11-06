@@ -2512,6 +2512,21 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .needs = {{"native.owned_objects", "true", false, true}, {"native.lighting_images", "true", false, true}},
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeOwnedBillboards = &reg.add({
+        .key = "native.owned_billboards",
+        .label = "Native frame: owned tree billboards",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode only, needs owned windows, lighting images and scene draws (frame-ownership.md F4-1): the main view's tree billboard ops (z / solid) are "
+                       "retained as op records (draws, constants image c32..c36 + c37+j, lighting, side effects); on frames where the stamps hold the draws are submitted "
+                       "from the record without composing them, every 10th frame composes and compares (DIFFERING must stay 0). Off = nothing changes. "
+                       "rvk.log `native: owned billboards (5 s)`.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"native.owned_windows", "true", false, true}, {"native.lighting_images", "true", false, true}, {"native.scene_draws", "true", false, true}},
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeSceneDraws = &reg.add({
         .key = "native.scene_draws",
         .label = "Native frame: scene draws",

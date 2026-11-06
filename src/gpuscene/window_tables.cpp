@@ -20,7 +20,7 @@ WindowTables& windowtables() {
     return t;
 }
 
-bool WindowTables::fillViews(d3d9::Device& dev, d3d9::OwnedWindows& ow, const float (*vs1)[4], std::uint32_t vs1Composed) {
+bool WindowTables::fillViews(d3d9::Device& dev, d3d9::OwnedWindows& ow, const float (*vs1)[4], std::uint32_t vs1Composed, const float (*vs0)[4], const float (*ps0)[4]) {
     using d3d9::OwnedWindows;
     ow.w[0][0] = OwnedWindows::Win{};
     ow.w[1][0] = OwnedWindows::Win{};
@@ -28,8 +28,8 @@ bool WindowTables::fillViews(d3d9::Device& dev, d3d9::OwnedWindows& ow, const fl
     if (!active_ || !views_.ready()) return false;
     ++viewLookups_;
     ViewRecord cand;
-    std::memcpy(cand.vs, dev.vsConstants(), sizeof(cand.vs));
-    std::memcpy(cand.ps, dev.psConstants(), sizeof(cand.ps));
+    std::memcpy(cand.vs, vs0 != nullptr ? vs0 : dev.vsConstants(), sizeof(cand.vs));
+    std::memcpy(cand.ps, ps0 != nullptr ? ps0 : dev.psConstants(), sizeof(cand.ps));
     if (vs1 != nullptr) std::memcpy(cand.vs1, vs1, sizeof(cand.vs1));
     else std::memset(cand.vs1, 0, sizeof(cand.vs1));
     auto& shadow = views_.shadow();

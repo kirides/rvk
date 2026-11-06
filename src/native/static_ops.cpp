@@ -1163,6 +1163,7 @@ std::uint32_t StaticOps::materialTexture(void* self, std::uint32_t stage, const 
 
 void StaticOps::checkMaterial(sc::DrawDesc& d, const std::uint8_t* owner, const void* material, bool zPass, std::uint16_t psMask, std::int32_t blendMode,
                               std::int32_t maskRef) {
+    if (ownedBb_) bbNoteMat(d, owner, material, zPass, psMask, blendMode, maskRef);
     gpuscene::MaterialTable& mt = gpuscene::materialtable();
     if (!mt.active()) return;
     gpuscene::MaterialTable::Draw md;
@@ -2125,9 +2126,12 @@ void StaticOps::opEnterImpl(const Op& op) {
     skipWhy_.clear();
     leanBegin(group);
     if (f2c::on() && group == Group::Static && viewKind_ == ViewKind::Main) f2cClassify(op);
+    if (ownedBb_ && bbReplay(op)) return;  // F4-1: an owned billboard op: drawn from its record
     recEnter(op);
+    bbEnter(op);
     const Skip s = composeOp(op);
     recComposed(op, s);
+    bbComposed(op, s);
     if (f2c::on() && f2cOp_ == &op) f2c::opComposed(s == Skip::None, static_cast<int>(s), name(s));
     maskRefShader_ = nullptr;
     leftCode_ = static_cast<int>(s);
@@ -2161,6 +2165,7 @@ void StaticOps::opEnterImpl(const Op& op) {
         { const f4m::IssueScope f4i(op.kind == OpKind::SpeedTree ? 1 : op.kind == OpKind::SpeedTreeBB ? 2 : 0); issue(); }
         taken_ = true;
         recEnd(op);
+        bbEnd(op);
     }
     if (taken_) leanCommit();
 }
@@ -2509,13 +2514,16 @@ void StaticOps::issue() {
     gpuscene::MeshPartTable& meshParts = gpuscene::meshparts();
     const bool owned = ownedWindows_ && gpuscene::windowtables().active();
     // F2b-1: the main view's static draws (z pre-pass + solid ops) are recorded as scene draws by the device
-    const bool sceneIssue = sceneDraws_ && viewKind_ == ViewKind::Main && g_ == &groups_[static_cast<std::size_t>(Group::Static)];
+    const bool sceneIssue = sceneDraws_ && viewKind_ == ViewKind::Main && (g_ == &groups_[static_cast<std::size_t>(Group::Static)] || bbSceneIssue());
     dev_.setSceneIssue(sceneIssue);
     const bool recOn = ownedRecords_ && recs_ && recs_->active && !inNonOp_ && op_ != nullptr && op_ == recs_->op && recs_->probes.size() == drawCount_;
     if (recOn) dev_.setSceneProbe(&recs_->probe);
+    const bool bbOn = ownedBb_ && bb_ && bb_->active && !inNonOp_ && op_ != nullptr && op_ == bb_->op && bb_->probes.size() == drawCount_;
+    if (bbOn) dev_.setSceneProbe(&bb_->probe);
     for (std::size_t k = 0; k < drawCount_; ++k) {
         const sc::DrawDesc& d = *draws_[k];
         if (recOn) recs_->probe = {};
+        if (bbOn) bb_->probe = {};
         dev_.setVertexShaderRef(ShaderRef(const_cast<Shader*>(static_cast<const Shader*>(d.vs))));
         dev_.setPixelShaderRef(ShaderRef(const_cast<Shader*>(static_cast<const Shader*>(d.ps))));
         PacketEntry* pe = nullptr;
@@ -2546,6 +2554,7 @@ void StaticOps::issue() {
                 ++pktGroup_[cacheGroup][0];
                 if (meshParts.active()) meshParts.checkDraw(dev_, partGeometry(d), nullptr, static_cast<std::uint32_t>(d.drawClass));
                 if (recOn) recDraw(k, d, pkey);
+                if (bbOn) bbDraw(k, d, pkey);
                 continue;
             }
             ++pktWindow_.refused;
@@ -2670,8 +2679,9 @@ void StaticOps::issue() {
             meshParts.checkDraw(dev_, partGeometry(d), &actual, static_cast<std::uint32_t>(d.drawClass));
         }
         if (recOn) recDraw(k, d, cacheable ? pkey : 0);
+        if (bbOn) bbDraw(k, d, cacheable ? pkey : 0);
     }
-    if (recOn) dev_.setSceneProbe(nullptr);
+    if (recOn || bbOn) dev_.setSceneProbe(nullptr);
     issuing_ = false;
     dev_.setSceneIssue(false);
     if (owned) dev_.setOwnedWindows(nullptr);
@@ -2723,6 +2733,7 @@ void StaticOps::report() {
     leanReport();
     retReport();
     recReport();
+    bbReport();
     static constexpr const char* kListNames[] = {"z", "solid", "debug", "sky", "refracted", "alpha", "late", "non-op"};
     if (active()) {
         spdlog::info("native: register file: mode {} ({}), engine code left to the engine {} times, {} registers merged from it (total), {} shaders' pools held",

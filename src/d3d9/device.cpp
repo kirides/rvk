@@ -1782,11 +1782,16 @@ void Device::variantWorker() {
                 const VariantSlot b = sceneBaseSlot(job.slot);
                 VariantProvider base;
                 if (b != VariantSlot::Count) base = variantProviders_[static_cast<std::size_t>(b)];
-                const bool pixel = job.slot != VariantSlot::SceneVs;
-                provider.tag = b != VariantSlot::Count ? base.tag + "_scene" : pixel ? "scene_ps" : "scene_vs";
-                provider.options = [base, hasBase = b != VariantSlot::Count, pixel](const Shader& sh, shader::TranslateOptions& o) {
+                const bool lodVs = job.slot == VariantSlot::SceneVsLod;
+                const bool pixel = job.slot != VariantSlot::SceneVs && !lodVs;
+                provider.tag = b != VariantSlot::Count ? base.tag + "_scene" : pixel ? "scene_ps" : lodVs ? std::format("scene_lod{}", kLodVariantVersion) : "scene_vs";
+                provider.options = [base, hasBase = b != VariantSlot::Count, pixel, lodVs](const Shader& sh, shader::TranslateOptions& o) {
                     if ((sh.stage == shader::Stage::Pixel) != pixel) return false;
                     if (hasBase && (!base.options || !base.options(sh, o))) return false;
+                    if (lodVs) {
+                        o.inputOverrides.push_back({shader::Usage::BlendWeight, 1,
+                                                    std::format("float4($v.xy * rvkPtr<RvkFrameData, 16>(pc.frame).Get().params[{}].x, $v.zw)", shader::abi::kFrameParamLod)});
+                    }
                     o.sceneRecord = true;
                     return true;
                 };

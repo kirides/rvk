@@ -112,6 +112,9 @@ public:
     // record / no light set.
     // `why` (optional): 1 = no live record for the slot, 2 = the record has no (live) light set
     bool compose(std::uint32_t slot, const ComposeParams& p, float L[24][4], int* why = nullptr);
+    // F4-1 (an owned op composed nothing): checkDraw's bookkeeping without the verification: true when `illum` still has slot `expectSlot` (not freed, not reused); marks it drawn
+    // and polls the object's bytes against the record once per frame (a change refreshes the record)
+    bool pollDraw(const void* illum, std::uint32_t expectSlot);
 
     // once per present (engine thread, before the frame's draws are submitted): uploads, verification, idle sweep, 5 s log. `verify` = read-back every 240th frame
     void flush(d3d9::Device& dev, bool verify);

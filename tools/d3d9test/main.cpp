@@ -1050,6 +1050,203 @@ mov o2, v2
     }
 }
 
+// F4-1 owned submit (frame-ownership.md 7.17) through the device's own path: four quads of a translated vertex shader that reads VS window 0 (c0) and window 2 (c32.w, c33)
+// are drawn normally (reference), captured as retained scene draws, and then submitted with Device::submitOwned from the retained packets alone: the register file holds
+// junk, the windows are persistent images of the caller's (a view-block-like c0 image, a billboard-constants-like c31.. image). The pictures must be identical, the four
+// draws must leave as one indirect run; refusals (a window image shorter than the shader reads, a null base, a dry run) must draw nothing, a changed image must change
+// the picture (the draw really reads it)
+void testOwnedSubmit(Fixture& f) {
+    Device& dev = f.dev;
+    dev.setSceneDraws(true, 0);
+    if (!dev.sceneDrawsActive()) {
+        std::printf("  SKIP owned submit: scene draws are not available on this device\n");
+        return;
+    }
+    static const char* kVsOwned2 = R"(
+vs_3_0
+dcl_position v0
+dcl_color v1
+dcl_texcoord v2
+dcl_position o0
+dcl_color o1
+dcl_texcoord o2
+mov o0, v0
+add r0, c0, c33
+mul o1, r0, c32.w
+mov o2, v2
+)";
+    const auto vsOwned = shaderFrom(dev, kVsOwned2);
+    if (!vsOwned) {
+        std::printf("  FAIL owned submit: shader\n");
+        ++g_failures;
+        return;
+    }
+    constexpr std::uint32_t kQuads = 4;
+    std::vector<Vertex> verts;
+    for (std::uint32_t k = 0; k < kQuads; ++k) {
+        const float x0 = -1.0f + 0.5f * static_cast<float>(k), x1 = x0 + 0.5f;
+        verts.push_back({x0, 0.5f, 0.5f, 1, 0xFFFFFFFFu, 0, 0});
+        verts.push_back({x1, 0.5f, 0.5f, 1, 0xFFFFFFFFu, 1, 0});
+        verts.push_back({x0, -0.5f, 0.5f, 1, 0xFFFFFFFFu, 0, 1});
+        verts.push_back({x1, -0.5f, 0.5f, 1, 0xFFFFFFFFu, 1, 1});
+    }
+    const std::uint16_t idx[6] = {0, 1, 2, 1, 3, 2};
+    auto vb = dev.createBuffer(static_cast<std::uint32_t>(verts.size() * sizeof(Vertex)), USAGE_WRITEONLY, POOL_MANAGED, false, false);
+    auto ib = dev.createBuffer(sizeof(idx), USAGE_WRITEONLY, POOL_MANAGED, true, false);
+    std::memcpy(vb->lock(0, 0, 0), verts.data(), verts.size() * sizeof(Vertex));
+    vb->unlock();
+    std::memcpy(ib->lock(0, 0, 0), idx, sizeof(idx));
+    ib->unlock();
+    rhi::Device* rd = dev.rhi();
+    constexpr std::uint64_t kPad = 4096, kViewOffset = kPad, kBbOffset = kPad + 1024, kBbBytes = 201 * 16;
+    auto buf = rd->createBuffer({kBbOffset + kBbBytes + 256, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "owned submit test"});
+    if (!buf) {
+        std::printf("  FAIL owned submit: buffer\n");
+        ++g_failures;
+        return;
+    }
+    auto* bytes = static_cast<std::uint8_t*>(buf->map());
+    std::memset(bytes, 0, static_cast<std::size_t>(kBbOffset + kBbBytes + 256));
+    const float c0[4] = {0.2f, 0.1f, 0.3f, 0.5f};
+    std::memcpy(bytes + kViewOffset, c0, sizeof(c0));
+    // the constants image from c31: c32.w = 0.5, c33 = (0.3, 0.4, 0.1, 0.5)
+    const float c32[4] = {0.0f, 0.0f, 0.0f, 0.5f}, c33[4] = {0.3f, 0.4f, 0.1f, 0.5f};
+    std::memcpy(bytes + kBbOffset + 16, c32, sizeof(c32));
+    std::memcpy(bytes + kBbOffset + 32, c33, sizeof(c33));
+    buf->flush();
+    const auto imageRef = [&](std::uint64_t offset) {
+        const auto w = buf->shaderRef(offset);
+        return rhi::GpuRef::fromWords(w[0], w[1]);
+    };
+    OwnedWindows win;
+    win.w[0][0].kind = OwnedWindows::Kind::View;
+    win.w[0][0].base = imageRef(kViewOffset);
+    win.w[0][0].covered = 12;
+    win.w[0][2].kind = OwnedWindows::Kind::Object;
+    win.w[0][2].base = imageRef(kBbOffset).plus(-31 * 16);
+    win.w[0][2].covered = 201;
+    const auto setup = [&](bool junk) {
+        f.reset();
+        dev.drawTag() = {};
+        dev.drawTag().source = draws::Source::Mesh;
+        dev.setVertexShader(vsOwned);
+        const float junk4[4] = {0.9f, 0.9f, 0.9f, 0.9f};
+        const float j32[4] = {0.9f, 0.0f, 0.0f, 0.9f};
+        dev.setVertexShaderConstantF(0, junk ? junk4 : c0, 1);
+        dev.setVertexShaderConstantF(32, junk ? j32 : c32, 1);
+        dev.setVertexShaderConstantF(33, junk ? junk4 : c33, 1);
+        dev.setStreamSource(0, vb.get(), 0, sizeof(Vertex));
+        dev.setIndices(ib.get());
+        dev.phases().push(scene::View::Main, scene::Pass::Solid);
+    };
+    const auto bindings = [&] {
+        Device::DeriveIn in;
+        in.streams[0] = vb.get();
+        in.strides[0] = sizeof(Vertex);
+        in.indices = ib.get();
+        return in;
+    };
+    // reference: normal draws, the register file true, scene draws off
+    setup(false);
+    for (std::uint32_t k = 0; k < kQuads; ++k) dev.drawIndexedPrimitive(PT_TRIANGLELIST, static_cast<std::int32_t>(4 * k), 0, 4, 0, 2);
+    dev.phases().pop();
+    const Pixels ref = capture(dev, "owned_submit_ref");
+    expect("owned submit reference", ref, 8, 32, 0xFF000000u | (64u << 16) | (64u << 8) | 51u, 3);  // ((0.2 + 0.3) x 0.5, (0.1 + 0.4) x 0.5, (0.3 + 0.1) x 0.5)
+    // retained scene draws of the four quads (the scene variants and the pipeline are built in the background: retried until the draws are scene draws)
+    Device::CachedDraw cd[kQuads];
+    bool ready = false;
+    for (int attempt = 0; attempt < 1200 && !ready; ++attempt) {
+        setup(false);
+        dev.setSceneIssue(true);
+        ready = true;
+        for (std::uint32_t k = 0; k < kQuads; ++k) {
+            dev.beginCapture(&cd[k]);
+            dev.drawIndexedPrimitive(PT_TRIANGLELIST, static_cast<std::int32_t>(4 * k), 0, 4, 0, 2);
+            ready = dev.endCapture() && cd[k].valid && cd[k].scenePipeline != GamePipeline::None && ready;
+        }
+        dev.setSceneIssue(false);
+        dev.phases().pop();
+        capture(dev, "owned_submit_capture");
+        if (!ready) Sleep(50);
+    }
+    if (!ready) {
+        std::printf("  FAIL owned submit: the draws were never retained as scene draws\n");
+        ++g_failures;
+        return;
+    }
+    const auto same = [&](const Pixels& p, const char* what) {
+        std::uint32_t bad = 0;
+        for (std::size_t i = 0; i < ref.bgra.size() && i < p.bgra.size(); ++i) bad += ref.bgra[i] != p.bgra[i];
+        if (bad != 0 || ref.bgra.size() != p.bgra.size()) {
+            std::printf("  FAIL owned submit (%s): %u bytes differ from the normal draws\n", what, bad);
+            ++g_failures;
+        }
+    };
+    const auto run = [&](const char* name, std::uint32_t quads, Device::OwnedWhy want, bool dry) {
+        setup(true);  // (junk in the register file: nothing may read it)
+        for (std::uint32_t k = 0; k < quads; ++k) {
+            const Device::OwnedWhy r = dev.submitOwned(cd[k], bindings(), win, dry);
+            if (r != want) {
+                std::printf("  FAIL owned submit (%s): quad %u answered %u, expected %u\n", name, k, static_cast<unsigned>(r), static_cast<unsigned>(want));
+                ++g_failures;
+            }
+        }
+        dev.phases().pop();
+        return capture(dev, name);
+    };
+    const auto s0 = dev.sceneStats();
+    const std::uint64_t o0 = dev.ownedSubmitted();
+    const Pixels owned = run("owned_submit", kQuads, Device::OwnedWhy::Submitted, false);
+    const auto s1 = dev.sceneStats();
+    same(owned, "owned");
+    if (dev.ownedSubmitted() - o0 != kQuads || s1.indirectCalls - s0.indirectCalls != 1 || s1.records - s0.records != kQuads) {
+        std::printf("  FAIL owned submit: %llu submitted / %llu indirect calls / %llu records for %u quads (expected one call over all)\n",
+                    static_cast<unsigned long long>(dev.ownedSubmitted() - o0), static_cast<unsigned long long>(s1.indirectCalls - s0.indirectCalls),
+                    static_cast<unsigned long long>(s1.records - s0.records), kQuads);
+        ++g_failures;
+    }
+    // a dry run draws nothing (a cleared back buffer: the quads' pixel is black)
+    const Pixels dry = run("owned_submit_dry", kQuads, Device::OwnedWhy::Submitted, true);
+    if ((dry.at(8, 32) & 0xFFFFFFu) != 0) {
+        std::printf("  FAIL owned submit: a dry run drew (pixel %06X)\n", dry.at(8, 32) & 0xFFFFFF);
+        ++g_failures;
+    }
+    // a constants image shorter than the shader reads: refused, nothing drawn
+    win.w[0][2].covered = 2;
+    const std::uint64_t o1 = dev.ownedSubmitted();
+    const Pixels shortImg = run("owned_submit_short", kQuads, Device::OwnedWhy::Window, false);
+    if (dev.ownedSubmitted() != o1 || (shortImg.at(8, 32) & 0xFFFFFFu) != 0) {
+        std::printf("  FAIL owned submit: a short window image was used (pixel %06X)\n", shortImg.at(8, 32) & 0xFFFFFF);
+        ++g_failures;
+    }
+    // a null base: refused
+    win.w[0][2].covered = 201;
+    const rhi::GpuRef goodBase = win.w[0][2].base;
+    win.w[0][2].base = rhi::GpuRef{};
+    run("owned_submit_null", kQuads, Device::OwnedWhy::Window, false);
+    win.w[0][2].base = goodBase;
+    // the null-address guard of the scene packets refuses the draw too (nothing drawn)
+    dev.setSceneFaultInject(true);
+    const std::uint64_t o2 = dev.ownedSubmitted();
+    run("owned_submit_guard", kQuads, Device::OwnedWhy::Packet, false);
+    dev.setSceneFaultInject(false);
+    if (dev.ownedSubmitted() != o2) {
+        std::printf("  FAIL owned submit: the null-address guard let %llu draws through\n", static_cast<unsigned long long>(dev.ownedSubmitted() - o2));
+        ++g_failures;
+    }
+    // and it works again afterwards
+    same(run("owned_submit_again", kQuads, Device::OwnedWhy::Submitted, false), "owned again");
+    // a changed image changes the picture (the draw really reads the window)
+    const float c33b[4] = {0.6f, 0.5f, 0.1f, 0.5f};
+    std::memcpy(bytes + kBbOffset + 32, c33b, sizeof(c33b));
+    buf->flush();
+    const Pixels changed = run("owned_submit_changed", kQuads, Device::OwnedWhy::Submitted, false);
+    expect("owned submit, changed image", changed, 8, 32, 0xFF000000u | (102u << 16) | (77u << 8) | 51u, 3);  // ((0.2 + 0.6) x 0.5, (0.1 + 0.5) x 0.5, (0.3 + 0.1) x 0.5)
+    dev.setSceneDraws(false, 0);
+    dev.release(std::move(vb));
+    dev.release(std::move(ib));
+}
+
 }  // namespace
 
 // --present-test [vsync 0/1]: a real window, clears + presents 300 frames, prints the frame rate (vsync pacing check)
@@ -1139,7 +1336,7 @@ int main(int argc, char** argv) {
         {"mip chain stretch rect", testMipChainStretchRect}, {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
         {"read-only lock of a fresh texture", testReadOnlyLockOfFreshTexture},
-        {"scene draws (indirect)", testSceneDraws}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
+        {"scene draws (indirect)", testSceneDraws}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
     };
     for (const auto& [name, fn] : cases) {
         const int before = g_failures;

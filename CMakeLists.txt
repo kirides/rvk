@@ -128,6 +128,9 @@ add_library(rvk_core STATIC
     src/d3d9/device.h
     src/d3d9/draw.cpp
     src/d3d9/scene_draws.cpp
+    src/d3d9/owned_submit.cpp
+    src/gpuscene/billboard_table.cpp
+    src/gpuscene/billboard_table.h
     src/d3d9/draws.cpp
     src/d3d9/record.cpp
     src/d3d9/draws.h
@@ -195,6 +198,8 @@ add_library(rvk_core STATIC
     src/native/static_ops_retained.cpp
     src/native/static_ops_records.cpp
     src/native/op_records.h
+    src/native/bb_records.h
+    src/native/static_ops_bb.cpp
     src/native/static_ops_nonop.cpp
     src/native/static_ops_fx.cpp
     src/native/static_ops_sky.cpp

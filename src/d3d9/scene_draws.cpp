@@ -115,7 +115,16 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
         lastVariant_.sceneActive = true;
         lastVariant_.scenePending = false;
     }
-    if (kind != draws::Kind::StaticMesh || phase.view != scene::View::Main || (phase.pass != scene::Pass::Solid && phase.pass != scene::Pass::DepthPrepass)) return;
+    if ((kind != draws::Kind::StaticMesh && !(sceneBb_ && kind == draws::Kind::SpeedTreeBillboard)) || phase.view != scene::View::Main ||
+        (phase.pass != scene::Pass::Solid && phase.pass != scene::Pass::DepthPrepass)) {
+        return;
+    }
+    // the billboards' vertex module: the plain one or the fade variant (lod.trees != 1: Device::lodModule), each with a scene form
+    const bool lodVs = kind == draws::Kind::SpeedTreeBillboard && pd.vs != vs_->module && pd.vs == vs_->lodModule;
+    if (kind == draws::Kind::SpeedTreeBillboard && pd.vs != vs_->module && !lodVs) {
+        ++sceneStats_.fbVariantKind;
+        return;
+    }
     ++sceneStats_.candidates;
     const auto pending = [&] {
         if (capture_ != nullptr) lastVariant_.scenePending = true;
@@ -138,7 +147,7 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
         ++sceneStats_.fbVariantKind;
         return;
     }
-    const rhi::ShaderModule vsM = variant(vs_, VariantSlot::SceneVs);
+    const rhi::ShaderModule vsM = variant(vs_, lodVs ? VariantSlot::SceneVsLod : VariantSlot::SceneVs);
     const rhi::ShaderModule fsM = variant(ps_, sceneFs);
     if (vsM == rhi::ShaderModule::None || fsM == rhi::ShaderModule::None) {
         const bool failed = vs_->variantState[static_cast<std::size_t>(VariantSlot::SceneVs)].load() == 3 || ps_->variantState[static_cast<std::size_t>(sceneFs)].load() == 3;
@@ -265,7 +274,12 @@ int Device::deriveScene(const CachedDraw& c, const DeriveIn& in, SceneView& out)
         const rhi::ShaderModule now = c.ps->variantState[vi].load(std::memory_order_acquire) == 2 ? c.ps->variants[vi].load(std::memory_order_acquire) : rhi::ShaderModule::None;
         if (now != c.v.fsAsked) return 4;
     }
-    if (c.v.vsUsed != c.vs->module || c.v.biasFor != geometryLodBias_) return 4;
+    {
+        // (replayBuild's vertex module choice: the billboards' fade variant while lod.trees != 1)
+        rhi::ShaderModule vsM = c.vs->module;
+        if (c.kind == draws::Kind::SpeedTreeBillboard && billboardFadeScale_ != 1.0f && c.vs->lodModule != rhi::ShaderModule::None) vsM = c.vs->lodModule;
+        if (c.v.vsUsed != vsM || c.v.biasFor != geometryLodBias_) return 4;
+    }
     CachedDraw::Env env{};
     env.vp = viewport_;
     std::memcpy(env.scissor, scissor_, sizeof(scissor_));

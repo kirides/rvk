@@ -278,7 +278,7 @@ private:
     bool texcoord4_ = false;
 };
 
-inline constexpr std::size_t kVariantSlots = 14;  // VariantSlot::Count
+inline constexpr std::size_t kVariantSlots = 15;  // VariantSlot::Count
 
 class Shader {
 public:
@@ -357,6 +357,7 @@ enum class VariantSlot : std::uint8_t {
     SceneGbuffer = 11,
     SceneGbufferM = 12,
     SceneGbufferA = 13,
+    SceneVsLod = 14,  // F4-1: the billboard fade variant of a vertex shader (Device::lodModule) as a scene form
     Count
 };
 static_assert(static_cast<std::size_t>(VariantSlot::Count) == kVariantSlots, "Shader::variants / variantState sizes");
@@ -843,6 +844,7 @@ public:
     };
     void setSceneDraws(bool on, std::uint32_t checkEvery);
     void setSceneIssue(bool on) { sceneIssue_ = on; }
+    void setSceneBillboards(bool on) { if (on != sceneBb_) ++variantEpoch_; sceneBb_ = on; }  // F4-1: the tree billboards' opaque draws are batchable scene draws too
     void setSceneFaultInject(bool on) { sceneFaultInject_ = on; }  // tests: every scene packet looks like it has a null address (the guard must refuse it)
     bool sceneDrawsActive() const { return sceneDrawsOn_ && sceneAvail_; }
     SceneDrawStats& sceneStats() { return sceneStats_; }
@@ -1022,6 +1024,13 @@ public:
     };
     // 0 = derived into `out`; else why not (1 stale module, 2 phase, 3 consumers, 4 variant, 5 env, 6 stream / index binding, 7 texture, 8 jitter flags, 9 scene form)
     int deriveScene(const CachedDraw& c, const DeriveIn& in, SceneView& out);
+    // F4-1 (owned_submit.cpp, docs/research/frame-ownership.md 7.17): a record's draw submitted with nothing composed: derived block + the caller's persistent windows, as a scene draw.
+    // `dryRun` = every check, nothing submitted (the caller checks a whole op before it submits any of its draws). Anything but Submitted: nothing was drawn.
+    enum class OwnedWhy : std::uint8_t { Submitted, NoScene, Split, Consumers, Window, Derive, Rendering, Packet, Count };
+    OwnedWhy submitOwned(const CachedDraw& c, const DeriveIn& in, const OwnedWindows& win, bool dryRun, int* deriveWhy = nullptr);
+    std::uint64_t ownedSubmitted() const { return ownedSubmitted_; }
+    bool ownedTextureLive(const void* texture);  // one Texture a record's poll reads is still alive
+    bool ownedBindingsLive(const DeriveIn& in);  // every Buffer / Texture a record's draw reads is still alive (a record outlives them; the composition would have re-resolved them)
     // counters of the owned object rows handed to observers (ReplaceQuery::objectRows) against the register file
     struct ObjectRowStats {
         std::uint64_t given = 0, differing = 0;
@@ -1672,7 +1681,8 @@ private:
     int sceneMergeBreak(const DrawPacket& a, const DrawPacket& b) const;  // -1 = mergeable, else the SceneDrawStats::breaks index
     void sceneBeginFrame();
     void sceneCollectCheck();
-    bool sceneDrawsOn_ = false, sceneAvail_ = false, sceneIssue_ = false, sceneFaultInject_ = false;
+    bool sceneDrawsOn_ = false, sceneAvail_ = false, sceneIssue_ = false, sceneFaultInject_ = false, sceneBb_ = false;
+    std::uint64_t ownedSubmitted_ = 0;  // F4-1: draws submitted by submitOwned
     std::uint32_t sceneCheckEvery_ = 0;
     GamePipeline scenePipe_ = GamePipeline::None;  // prepareDraw's decision for the draw being submitted
     SceneView* probe_ = nullptr;                      // F2c-2: filled by toScenePacket
