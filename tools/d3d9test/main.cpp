@@ -25,6 +25,7 @@
 #include "d3d9/convert.h"
 #include "d3d9/device.h"
 #include "d3d9/fvf.h"
+#include "gpuscene/view_table.h"
 #include "rhi/d3d_formats.h"
 
 using namespace rvk;
@@ -1081,6 +1082,300 @@ void testOwnedReplay(Fixture& f) {
     dev.release(std::move(other));
 }
 
+// F2c-4-0 owned replay on scene ABI v2 (frame-ownership.md 7.19): the same eight quads, drawn (a) normally with the registers set (the reference), (b) as owned draws
+// whose VIEW registers (VS c0 / c12, PS c0 / c5.xyz, posFix) come from ViewBlock2 slots of a view table the test owns (a host-visible buffer + its CPU twin: the
+// device's setSceneViewTable). Checked: 0 bytes differ, one indirect call over the eight records; two view slots (4 quads each, other registers) = two calls and
+// the reference's picture; a table slot whose bytes differ from the registers changes the picture (the draws read it); a stale posFix is refused (19), a window
+// that is not the slot's (18), a slot out of range (17), a missing table / no v2 pipeline (16); every refusal draws nothing and v2 works again afterwards
+void testOwnedReplayV2(Fixture& f) {
+    Device& dev = f.dev;
+    dev.setSceneDraws(true, 0);
+    if (!dev.sceneDrawsActive()) {
+        std::printf("  SKIP owned replay v2: scene draws are not available on this device\n");
+        return;
+    }
+    static const char* kVs = R"(
+vs_3_0
+dcl_position v0
+dcl_color v1
+dcl_position o0
+dcl_color o1
+mov o0, v0
+add o1, v1, c0
+add o1, o1, c12
+)";
+    static const char* kPs = R"(
+ps_3_0
+dcl_color v0
+add r0, v0, c0
+mul r0, r0, c5
+mov oC0, r0
+)";
+    const auto vsV = shaderFrom(dev, kVs);
+    const auto psV = shaderFrom(dev, kPs);
+    if (!vsV || !psV) {
+        std::printf("  FAIL owned replay v2: shaders\n");
+        ++g_failures;
+        return;
+    }
+    constexpr std::uint32_t kQuads = 8, kSlots = 16;
+    std::vector<Vertex> verts;
+    for (std::uint32_t k = 0; k < kQuads; ++k) {
+        const float x0 = -1.0f + 0.25f * static_cast<float>(k), x1 = x0 + 0.25f;
+        const std::uint32_t color = 0xFF000000u | (k * 6u + 10u) << 16 | (30u + k * 4u) << 8 | (k & 1u ? 40u : 20u);
+        verts.push_back({x0, 0.5f, 0.5f, 1, color, 0, 0});
+        verts.push_back({x1, 0.5f, 0.5f, 1, color, 1, 0});
+        verts.push_back({x0, -0.5f, 0.5f, 1, color, 0, 1});
+        verts.push_back({x1, -0.5f, 0.5f, 1, color, 1, 1});
+    }
+    const std::uint16_t idx[6] = {0, 1, 2, 1, 3, 2};
+    auto vb = dev.createBuffer(static_cast<std::uint32_t>(verts.size() * sizeof(Vertex)), USAGE_WRITEONLY, POOL_MANAGED, false, false);
+    auto ib = dev.createBuffer(sizeof(idx), USAGE_WRITEONLY, POOL_MANAGED, true, false);
+    std::memcpy(vb->lock(0, 0, 0), verts.data(), verts.size() * sizeof(Vertex));
+    vb->unlock();
+    std::memcpy(ib->lock(0, 0, 0), idx, sizeof(idx));
+    ib->unlock();
+    // the view table: kSlots ViewBlock2 in a host-visible buffer (+ the CPU twin the device compares posFix / c5 with)
+    rhi::Device* rd = dev.rhi();
+    auto tableBuf = rd->createBuffer({static_cast<std::uint64_t>(kSlots) * shader::abi::kViewBlock2Size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "owned replay v2 view table"});
+    if (!tableBuf) {
+        std::printf("  FAIL owned replay v2: view table buffer\n");
+        ++g_failures;
+        return;
+    }
+    const auto tw = tableBuf->shaderRef(0);
+    const rhi::GpuRef tableRef = rhi::GpuRef::fromWords(tw[0], tw[1]);
+    std::vector<shader::abi::ViewBlock2> twin(kSlots);
+    std::memset(twin.data(), 0, twin.size() * sizeof(shader::abi::ViewBlock2));
+    const auto upload = [&] { std::memcpy(tableBuf->map(), twin.data(), twin.size() * sizeof(shader::abi::ViewBlock2)); };
+    // the registers of view `v` (0 / 1): VS c0, c12; PS c0, c5 (xyz = the view's, w = the draw's own)
+    struct Regs {
+        float vs0[4], vs12[4], ps0[4], ps5[4];
+    };
+    const Regs regs[2] = {{{0.10f, 0.05f, 0.02f, 0.0f}, {0.02f, 0.10f, 0.05f, 0.0f}, {0.30f, 0.20f, 0.10f, 0.0f}, {0.9f, 0.8f, 0.7f, 0.5f}},
+                          {{0.02f, 0.12f, 0.06f, 0.0f}, {0.12f, 0.02f, 0.03f, 0.0f}, {0.05f, 0.25f, 0.30f, 0.0f}, {0.6f, 1.0f, 0.5f, 0.5f}}};
+    const auto setRegs = [&](const Regs& r) {
+        dev.setVertexShaderConstantF(0, r.vs0, 1);
+        dev.setVertexShaderConstantF(12, r.vs12, 1);
+        dev.setPixelShaderConstantF(0, r.ps0, 1);
+        dev.setPixelShaderConstantF(5, r.ps5, 1);
+    };
+    // slot `slot` of the table = view `v`'s registers + the device's current posFix
+    const auto fillSlot = [&](std::uint32_t slot, const Regs& r, bool stalePosFix) {
+        shader::abi::ViewBlock2& b = twin[slot];
+        std::memset(&b, 0, sizeof(b));
+        std::memcpy(b.vs0[0], r.vs0, 16);
+        std::memcpy(b.vs1[0], r.vs12, 16);
+        std::memcpy(b.ps0[0], r.ps0, 16);
+        dev.viewPosFix(b.posFix);
+        if (stalePosFix) b.posFix[0] += 0.001f;
+        std::memcpy(b.c5, r.ps5, 3 * sizeof(float));
+        upload();
+    };
+    const auto windowsOf = [&](std::uint32_t slot) {
+        OwnedWindows ow;
+        const auto set = [&](OwnedWindows::Win& w, bool vertex, std::uint32_t win, std::uint32_t covered) {
+            w.kind = OwnedWindows::Kind::View;
+            w.base = rhi::GpuRef{gpuscene::ViewTable::windowBase(tableRef, slot, vertex, win)};
+            w.covered = covered;
+        };
+        set(ow.w[0][0], true, 0, 12);
+        set(ow.w[0][1], true, 1, 19);
+        set(ow.w[1][0], false, 0, 5);
+        ow.viewSlot = slot;
+        return ow;
+    };
+    const auto begin = [&] {
+        f.reset();
+        dev.drawTag() = {};
+        dev.drawTag().source = draws::Source::Mesh;
+        dev.phases().push(scene::View::Main, scene::Pass::Solid);
+        dev.setVertexShader(vsV);
+        dev.setPixelShader(psV);
+        dev.setStreamSource(0, vb.get(), 0, sizeof(Vertex));
+        dev.setIndices(ib.get());
+    };
+    const auto end = [&](const char* name) {
+        dev.setSceneIssue(false);
+        dev.setSceneFaultInject(false);
+        dev.phases().pop();
+        return capture(dev, name);
+    };
+    const auto same = [&](const Pixels& ref, const Pixels& p, const char* what) {
+        std::uint32_t bad = 0;
+        for (std::size_t i = 0; i < ref.bgra.size() && i < p.bgra.size(); ++i) bad += ref.bgra[i] != p.bgra[i];
+        if (bad != 0 || ref.bgra.size() != p.bgra.size()) {
+            std::printf("  FAIL owned replay v2 (%s): %u bytes differ from the normal draws\n", what, bad);
+            ++g_failures;
+        }
+        return bad;
+    };
+    // references: all eight quads with view 0; four with view 0 then four with view 1
+    begin();
+    setRegs(regs[0]);
+    for (std::uint32_t k = 0; k < kQuads; ++k) dev.drawIndexedPrimitive(PT_TRIANGLELIST, static_cast<std::int32_t>(4 * k), 0, 4, 0, 2);
+    const Pixels ref1 = end("ownedv2_ref1");
+    begin();
+    for (std::uint32_t k = 0; k < kQuads; ++k) {
+        setRegs(regs[k < 4 ? 0 : 1]);
+        dev.drawIndexedPrimitive(PT_TRIANGLELIST, static_cast<std::int32_t>(4 * k), 0, 4, 0, 2);
+    }
+    const Pixels ref2 = end("ownedv2_ref2");
+    // the retained draws, with the v2 pipelines once they exist (the view table is announced first: the v2 form is decided only while it is on)
+    dev.setSceneViewTable(tableRef, twin.data(), kSlots);
+    dev.setSceneViews(true);
+    std::vector<Device::CachedDraw> cd(kQuads);
+    bool ready = false;
+    for (int i = 0; i < 1200 && !ready; ++i) {
+        begin();
+        setRegs(regs[0]);
+        dev.setSceneIssue(true);
+        for (std::uint32_t k = 0; k < kQuads; ++k) {
+            dev.beginCapture(&cd[k]);
+            dev.drawIndexedPrimitive(PT_TRIANGLELIST, static_cast<std::int32_t>(4 * k), 0, 4, 0, 2);
+            dev.endCapture();
+        }
+        end("ownedv2_capture");
+        ready = true;
+        for (const auto& c : cd) ready = ready && c.valid && c.scenePipeline != GamePipeline::None && c.scenePipeline2 != GamePipeline::None;
+        if (!ready) Sleep(50);
+    }
+    if (!ready) {
+        std::printf("  FAIL owned replay v2: the draws never got their v2 pipelines\n");
+        ++g_failures;
+        return;
+    }
+    const auto replay = [&](std::uint32_t k, const OwnedWindows& ow) {
+        Device::DeriveIn in;
+        in.streams[0] = vb.get();
+        in.strides[0] = sizeof(Vertex);
+        in.indices = ib.get();
+        (void)k;
+        const Regs& r = regs[ow.viewSlot == 9 ? 1 : 0];
+        std::memcpy(in.psC5, r.ps5, sizeof(in.psC5));  // (xyz = the view's, w = the draw's own)
+        return dev.replayOwned(cd[k], in, ow);
+    };
+    const auto run = [&](const char* name, std::uint32_t slotA, std::uint32_t slotB, int expectRc, const char* label) {
+        begin();
+        dev.setSceneIssue(true);
+        const OwnedWindows a = windowsOf(slotA), b = windowsOf(slotB);
+        int refused = 0;
+        for (std::uint32_t k = 0; k < kQuads; ++k) {
+            const int rc = replay(k, k < 4 ? a : b);
+            refused += rc == expectRc;
+            if (rc != expectRc) {
+                std::printf("  FAIL owned replay v2 (%s): quad %u returned %d, expected %d\n", label, k, rc, expectRc);
+                ++g_failures;
+            }
+        }
+        (void)refused;
+        return end(name);
+    };
+    fillSlot(3, regs[0], false);
+    fillSlot(9, regs[1], false);
+    // 1. all eight on view slot 3 (the registers of view 0): one indirect call over eight records
+    const auto s0 = dev.sceneStats();
+    const auto o0 = dev.ownedReplayStats;
+    same(ref1, run("ownedv2_one", 3, 3, 0, "one view slot"), "eight owned draws, one view slot");
+    const auto s1 = dev.sceneStats();
+    if (s1.indirectCalls - s0.indirectCalls != 1 || s1.records - s0.records != kQuads || dev.ownedReplayStats.drawnV2 - o0.drawnV2 != kQuads) {
+        std::printf("  FAIL owned replay v2: %llu indirect calls / %llu records / %llu v2 draws for %u quads (expected one call over all)\n", static_cast<unsigned long long>(s1.indirectCalls - s0.indirectCalls),
+                    static_cast<unsigned long long>(s1.records - s0.records), static_cast<unsigned long long>(dev.ownedReplayStats.drawnV2 - o0.drawnV2), kQuads);
+        ++g_failures;
+    }
+    // 2. two view slots: 3 for the first four quads, 9 for the last four: two calls, the second picture
+    {
+        const auto t0 = dev.sceneStats();
+        same(ref2, run("ownedv2_two", 3, 9, 0, "two view slots"), "two view slots");
+        const auto t1 = dev.sceneStats();
+        if (t1.indirectCalls - t0.indirectCalls != 2) {
+            std::printf("  FAIL owned replay v2: two view slots made %llu indirect calls (expected 2)\n", static_cast<unsigned long long>(t1.indirectCalls - t0.indirectCalls));
+            ++g_failures;
+        }
+    }
+    // 3. a table slot whose bytes are not the registers: the picture must change (the view is really read)
+    {
+        fillSlot(3, regs[1], false);
+        const Pixels p = run("ownedv2_wrongbytes", 3, 3, 19, "other bytes in the slot");  // (the c5.xyz guard refuses: the derived inputs say view 0)
+        fillSlot(3, regs[0], false);
+        (void)p;
+    }
+    // 4. a stale posFix (the jitter / viewport of the view changed after the slot was written): refused (19), nothing drawn; rewritten: drawn again
+    {
+        fillSlot(3, regs[0], true);
+        const Pixels p = run("ownedv2_stale", 3, 3, 19, "stale posFix");
+        if (p.bgra[(32 * p.w + 2) * 4 + 1] != 0) {
+            std::printf("  FAIL owned replay v2: a refused draw left something behind\n");
+            ++g_failures;
+        }
+        fillSlot(3, regs[0], false);
+        same(ref1, run("ownedv2_fresh", 3, 3, 0, "slot rewritten"), "slot rewritten");
+    }
+    // 5. windows that are not the slot's (the caller built them for another slot): refused (18)
+    {
+        begin();
+        dev.setSceneIssue(true);
+        OwnedWindows bad = windowsOf(3);
+        bad.viewSlot = 9;  // (the windows point at slot 3, the packet would read slot 9)
+        int refused = 0;
+        for (std::uint32_t k = 0; k < kQuads; ++k) refused += replay(k, bad) == 18;
+        end("ownedv2_windows");
+        if (refused != static_cast<int>(kQuads)) {
+            std::printf("  FAIL owned replay v2: windows of another slot refused %d of %u (code 18)\n", refused, kQuads);
+            ++g_failures;
+        }
+    }
+    // 6. a slot out of range: 17 (above the table / above the device's ref streams)
+    {
+        begin();
+        dev.setSceneIssue(true);
+        OwnedWindows over = windowsOf(40);
+        int refused = 0;
+        for (std::uint32_t k = 0; k < kQuads; ++k) refused += replay(k, over) == 17;
+        end("ownedv2_range");
+        if (refused != static_cast<int>(kQuads)) {
+            std::printf("  FAIL owned replay v2: a slot out of range refused %d of %u (code 17)\n", refused, kQuads);
+            ++g_failures;
+        }
+    }
+    // 7. the scene packet's guard (a null address): refused (15)
+    {
+        begin();
+        dev.setSceneIssue(true);
+        dev.setSceneFaultInject(true);
+        const OwnedWindows a = windowsOf(3);
+        int refused = 0;
+        for (std::uint32_t k = 0; k < kQuads; ++k) refused += replay(k, a) == 15;
+        end("ownedv2_guard");
+        if (refused != static_cast<int>(kQuads)) {
+            std::printf("  FAIL owned replay v2: the null address guard refused %d of %u\n", refused, kQuads);
+            ++g_failures;
+        }
+    }
+    // 8. a null view table (`views` = 0): refused (16), nothing drawn; announced again: owned v2 draws work
+    {
+        dev.setSceneViewTable(rhi::GpuRef{}, nullptr, 0);
+        const OwnedWindows a = windowsOf(3);
+        begin();
+        dev.setSceneIssue(true);
+        int refused = 0;
+        for (std::uint32_t k = 0; k < kQuads; ++k) refused += replay(k, a) == 16;
+        const Pixels p = end("ownedv2_noviews");
+        if (refused != static_cast<int>(kQuads) || p.bgra[(32 * p.w + 2) * 4 + 1] != 0) {
+            std::printf("  FAIL owned replay v2: a null view table refused %d of %u (code 16) and drew something\n", refused, kQuads);
+            ++g_failures;
+        }
+        dev.setSceneViewTable(tableRef, twin.data(), kSlots);
+        same(ref1, run("ownedv2_again", 3, 3, 0, "after the refusals"), "owned v2 draws after the refusals");
+    }
+    std::printf("  owned replay v2: %llu v2 draws drawn, %d refusals in all\n", static_cast<unsigned long long>(dev.ownedReplayStats.drawnV2),
+                static_cast<int>(dev.ownedReplayStats.attempts - dev.ownedReplayStats.drawn));
+    dev.setSceneViews(false);
+    dev.setSceneDraws(false, 0);
+    dev.release(std::move(vb));
+    dev.release(std::move(ib));
+}
+
 // F2c-1 owned windows through the device's own path (frame-ownership.md 7.13): a translated vertex shader that reads VS window 1 (c12) and window 2 (c32.w, c33)
 // is drawn (a) with the registers set the normal way and (b) with the register file holding junk and the windows served from persistent images
 // (a view block's c12..c30 + an object record's c31..c35 in one host-visible buffer behind a 4 KiB pad, window bases = image - first x 16, as the tables
@@ -1491,7 +1786,7 @@ int main(int argc, char** argv) {
         {"mip chain stretch rect", testMipChainStretchRect}, {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
         {"read-only lock of a fresh texture", testReadOnlyLockOfFreshTexture},
-        {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
+        {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
     };
     for (const auto& [name, fn] : cases) {
         const int before = g_failures;

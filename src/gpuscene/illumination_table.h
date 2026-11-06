@@ -48,6 +48,7 @@ public:
     rhi::GpuRef ref() const { return ref_; }
     std::uint32_t capacity() const { return capacity_; }
     std::vector<T>& shadow() { return shadow_; }
+    const std::vector<T>& shadow() const { return shadow_; }
     // marks a slot for the next flush (call with the CPU copy already updated)
     void mark(std::uint32_t i);
     void markAll(std::uint32_t used);

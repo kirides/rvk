@@ -102,6 +102,8 @@ add_library(rvk_core STATIC
     src/api/settings_api.cpp
     src/api/settings_api.h
     src/core/config.cpp
+    src/core/f2c4_measure.cpp
+    src/core/f2c4_measure.h
     src/core/crash_dump.cpp
     src/core/crash_dump.h
     src/core/config.h
@@ -266,6 +268,8 @@ add_library(rvk_core STATIC
     src/gpuscene/material_graph.h
     src/gpuscene/window_compose.h
     src/gpuscene/window_tables.cpp
+    src/gpuscene/view_table.cpp
+    src/gpuscene/view_table.h
     src/gpuscene/window_tables.h
     src/gpuscene/object_table.cpp
     src/gpuscene/object_table.h

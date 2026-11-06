@@ -26,7 +26,12 @@ struct OwnedWindows {
         const float* image = nullptr;     // CPU twin of the window's registers from its first one (debug.split_verify), `covered` float4s
     };
     Win w[2][shader::abi::kConstWindows];  // [stage 0 VS / 1 PS][window]
+    // scene ABI v2 (frame-ownership.md 7.19): the view table slot the view windows w[0][0], w[0][1], w[1][0] point into (gpuscene::ViewTable::fillWindows);
+    // kNoView = a v1 draw (the windows' bases go into the record)
+    static constexpr std::uint32_t kNoView = 0xffffffffu;
+    std::uint32_t viewSlot = kNoView;
     void clear() {
+        viewSlot = kNoView;
         for (auto& s : w) {
             for (auto& x : s) x = Win{};
         }

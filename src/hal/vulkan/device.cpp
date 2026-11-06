@@ -32,6 +32,7 @@
 #include "gpuscene/lighting_images.h"
 #include "gpuscene/mesh_parts.h"
 #include "gpuscene/window_tables.h"
+#include "gpuscene/view_table.h"
 #include "gpuscene/billboard_table.h"
 #include "gpuscene/object_table.h"
 #include "gpuscene/material_table.h"
@@ -259,8 +260,16 @@ void HalDevice::applyStaticOps() {
         dev_.setSceneDraws(scene, rs.nativeSceneDrawsCheck != nullptr ? static_cast<std::uint32_t>(std::max(0, rs.nativeSceneDrawsCheck->asInt())) : 0u);
         staticOps_->setSceneDraws(scene && dev_.sceneDrawsActive());
         // frame-ownership.md 7.16: F2c-3 owned static draws (needs the op records, scene draws and table lighting; Full)
-        staticOps_->setOwnedStatic(on(rs.nativeOwnedStatic) && renderMode() == RenderMode::Full && scene && dev_.sceneDrawsActive(),
-                                   rs.nativeOwnedCheck != nullptr ? rs.nativeOwnedCheck->asInt() : 10);
+        const bool ownedStatic = on(rs.nativeOwnedStatic) && renderMode() == RenderMode::Full && scene && dev_.sceneDrawsActive();
+        // frame-ownership.md 7.19: the owned static draws use scene ABI v2 (the view table; v2 pipelines are built for the retained draws only while it is on)
+        // (`-Environment 'RVK_OWNED_V1=1'` = the F2c-3 path on scene ABI v1, for A/B measurements)
+        static const bool forceV1 = [] {
+            char v[4] = {};
+            return GetEnvironmentVariableA("RVK_OWNED_V1", v, sizeof(v)) != 0 && v[0] == '1';
+        }();
+        gpuscene::viewtable().setActive(ownedStatic && !forceV1);
+        dev_.setSceneViews(ownedStatic && !forceV1);
+        staticOps_->setOwnedStatic(ownedStatic, rs.nativeOwnedCheck != nullptr ? rs.nativeOwnedCheck->asInt() : 10);
         staticOps_->setOwnedBillboards(on(rs.nativeOwnedBillboards) && scene && dev_.sceneDrawsActive() && gpuscene::lightingimages().active() && gpuscene::windowtables().active());
     }
     staticOps_->setRetained(frozen::kRetained, frozen::kRetainedGroups, frozen::kRetainedCheck);
@@ -1664,6 +1673,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
         gpuscene::meshparts().flush(dev_, true);
         gpuscene::materialtable().flush(dev_, true);
         gpuscene::windowtables().flush(dev_);
+        gpuscene::viewtable().flush(dev_);
         gpuscene::objecttable().flush(dev_);
         gpuscene::bbtable().flush(dev_);
     }

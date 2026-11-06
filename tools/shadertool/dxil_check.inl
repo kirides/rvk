@@ -176,7 +176,10 @@ int cmdDxilEmbedded(int argc, char** argv) {
         } else {
             jobList.push_back({name, {}, family});
             // the material shaders also as scene variants (the draw's data from a DrawRecord, frame-ownership.md 7.10)
-            if (name == "material/ge_default.vert" || name == "material/ge_default.frag") jobList.push_back({name, "RVK_SCENE_RECORD=1", family + " scene"});
+            if (name == "material/ge_default.vert" || name == "material/ge_default.frag") {
+                jobList.push_back({name, "RVK_SCENE_RECORD=1", family + " scene"});
+                jobList.push_back({name, "RVK_SCENE_VIEW=1", family + " scene view"});  // ABI v2 (frame-ownership.md 7.19)
+            }
         }
     }
     std::vector<Item> items(jobList.size());
@@ -351,6 +354,7 @@ int cmdDxilUber(int argc, char** argv) {
         const char* name;
         const char* defines;
         bool scene = false;
+        bool view = false;  // scene ABI v2 (RVK_SCENE_VIEW)
     };
     static const Variant kVariants[] = {
         {"plain", ""},
@@ -360,6 +364,9 @@ int cmdDxilUber(int argc, char** argv) {
         // scene variants (RVK_SCENE_RECORD: the draw's data from a DrawRecord, frame-ownership.md 7.10)
         {"plain+scene", "", true},
         {"gbuffer+motion+scene", "#define RVK_MV_AMBIENT 1\n#define RVK_MV_AMB_REG 14\n#define RVK_MV_HAS_IND 1\n#define RVK_MV_IND_REG 21\n#define RVK_MV_GBUFFER 1\n#define RVK_MV_MOTION 1\n#define RVK_MV_KIND_SKINNED 3\n#define RVK_MV_VNORMAL 1\n", true},
+        // scene ABI v2 (RVK_SCENE_VIEW: the view windows / posFix / c5.xyz from the view table, frame-ownership.md 7.19)
+        {"plain+sceneview", "", true, true},
+        {"gbuffer+motion+sceneview", "#define RVK_MV_AMBIENT 1\n#define RVK_MV_AMB_REG 14\n#define RVK_MV_HAS_IND 1\n#define RVK_MV_IND_REG 21\n#define RVK_MV_GBUFFER 1\n#define RVK_MV_MOTION 1\n#define RVK_MV_KIND_SKINNED 3\n#define RVK_MV_VNORMAL 1\n", true, true},
     };
     constexpr std::size_t kN = std::size(kVariants);
     std::vector<Item> items(reqs.size() * kN);
@@ -371,7 +378,7 @@ int cmdDxilUber(int argc, char** argv) {
         items[i].family = std::string("uber ") + v.name;
         rvk::shader::dxc::Request r;
         r.file = "uber.hlsl";
-        r.source = rvk::shader::uberPixelHlsl(q.file, q.entry, q.macros, v.defines, v.scene);
+        r.source = rvk::shader::uberPixelHlsl(q.file, q.entry, q.macros, v.defines, v.scene, v.view);
         if (r.source.empty()) {
             items[i].r.spirvMsg = "uber: invalid macro name";
             return;
@@ -403,6 +410,7 @@ int cmdDxilCheck(int argc, char** argv) {
             else if (a == "--capture") variant = &rvk::enh::RtScene::captureOptions;
             else if (a == "--tint") options.tintEpilogue = true;
             else if (a == "--scene") options.sceneRecord = true;
+            else if (a == "--scene2") options.sceneView = true;  // scene ABI v2 (ViewBlock2 view table, frame-ownership.md 7.19)
             else if (a == "--fillers") rvk::shader::setVaryingFillers(true);  // the D3D12 game device's dense signatures
             else if (a == "--jobs" && i + 1 < argc) jobs = std::atoi(argv[++i]);
             else if (a == "--max-errors" && i + 1 < argc) maxErrors = std::atoi(argv[++i]);

@@ -61,6 +61,10 @@ struct TranslateOptions {
     // the record index reaches the pixel shader as a nointerpolation varying (kSceneVaryingLocation). Both stages of a pipeline must be scene
     // variants. Refused for shaders that read i# / b# constants or use that varying location. Default text unchanged when false.
     bool sceneRecord = false;
+    // scene ABI v2 (docs/research/frame-ownership.md 7.19, abi.h ViewBlock2; HLSL RVK_SCENE_VIEW): a scene variant whose view windows (VS c0..c30, PS c0..c4),
+    // posFix and pixel c5.xyz come from a ViewBlock2 slot of the view table (the ref stream's y) instead of the DrawRecord's window bases / the DrawBlock;
+    // c5.w from DrawRecord::c5w. Implies sceneRecord (own variant slots: a pipeline's two stages must both be v1 or both v2). Default text unchanged when false.
+    bool sceneView = false;
 
     // ---- variant hooks for enhancements (docs/research/injection.md 4). All empty = the default translation, unchanged.
     // GLSL right after the ABI declarations, before the generated globals: declarations and functions that constOverrides /

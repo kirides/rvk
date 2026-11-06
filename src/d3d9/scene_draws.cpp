@@ -11,6 +11,7 @@
 #include <bit>
 #include <cstring>
 
+#include "core/f2c4_measure.h"
 #include "d3d9/device.h"
 
 namespace rvk::d3d9 {
@@ -108,6 +109,24 @@ static bool ensureRef(rhi::GameDevice& game, std::uint64_t& buffer, std::uint64_
 
 bool Device::ensureSceneRef() { return ensureRef(*game_, sceneRef_.buffer, sceneRef_.offset, sceneRef_.valid); }
 
+// scene ABI v2: the ref stream of one view slot: (i, slot) for i < kSceneRunMax (a draw's view slot is the ref's y)
+bool Device::ensureSceneRefV2(std::uint32_t slot) {
+    if (slot >= kSceneRefSlots) return false;
+    SceneRefStream& r = sceneRefV2_[slot];
+    if (r.valid) return true;
+    rhi::RingAlloc a = game_->allocRing(static_cast<std::uint64_t>(kSceneRunMax) * 8, 16);
+    if (a.ptr == nullptr) return false;
+    auto* w = static_cast<std::uint32_t*>(a.ptr);
+    for (std::uint32_t i = 0; i < kSceneRunMax; ++i) {
+        w[2 * i] = i;
+        w[2 * i + 1] = slot;
+    }
+    r.buffer = a.buffer;
+    r.offset = a.offset;
+    r.valid = true;
+    return true;
+}
+
 // what prepareDraw decides for an eligible draw (the main view's static mesh z / solid draws issued by the static ops): the pipeline of its scene form
 // when its scene shaders and that pipeline exist, else None (the draw goes the normal way; the missing pieces are requested in the background)
 void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, bool uberTaken, draws::Kind kind, const scene::Phase& phase, bool geomOk) {
@@ -187,17 +206,43 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
         return;
     }
     scenePipe_ = sp;
+    // F2c-4-0: the scene ABI v2 form of the same draw (retained draws that the owned path replays: the main view's static meshes); the v1 form stays what the composed
+    // path draws. Not ready yet = the draw is not retained as replayable (scenePending), the v1 form still draws it now
+    if (sceneV2_ && kind == draws::Kind::StaticMesh) {
+        const rhi::ShaderModule vs2 = variant(vs_, VariantSlot::SceneVs2);
+        const rhi::ShaderModule fs2 = variant(ps_, sceneView2Of(sceneFs));
+        if (vs2 == rhi::ShaderModule::None || fs2 == rhi::ShaderModule::None) {
+            const bool failed = vs_->variantState[static_cast<std::size_t>(VariantSlot::SceneVs2)].load() == 3 || ps_->variantState[static_cast<std::size_t>(sceneView2Of(sceneFs))].load() == 3;
+            if (!failed) {
+                ++sceneStats_.fbVariantPending;
+                pending();
+            }
+            return;
+        }
+        PipelineDesc sd2 = sd;
+        sd2.vs = vs2;
+        sd2.fs = fs2;
+        const GamePipeline sp2 = findPipeline(sd2);
+        if (sp2 == GamePipeline::None) {
+            game_->prewarmOncePipeline(sd2);
+            ++sceneStats_.fbPipelinePending;
+            pending();
+            return;
+        }
+        scenePipe2_ = sp2;
+    }
 }
 
 // the scene vertex input of a draw: its normal one + the ref stream (instance-rate binding after the draw's own, attribute 24). vertexShift is zeroed: the
 // per-draw vertexOffset of the indirect arguments already carries it
-const VertexInputValues* Device::internSceneVi(const VertexInputValues& n) {
+const VertexInputValues* Device::internSceneVi(const VertexInputValues& n, std::int32_t viewSlot) {
     VertexInputValues& v = sceneViWork_;
     v = n;
     v.vertexShift = 0;
     const std::uint32_t idx = v.bufferCount;
-    v.buffers[idx] = sceneRef_.buffer;
-    v.offsets[idx] = sceneRef_.offset;
+    const SceneRefStream& ref = viewSlot >= 0 ? sceneRefV2_[static_cast<std::uint32_t>(viewSlot) % kSceneRefSlots] : sceneRef_;
+    v.buffers[idx] = ref.buffer;
+    v.offsets[idx] = ref.offset;
     v.bufferCount = idx + 1;
     if (v.dynamicLayout) {
         v.bindings[idx] = {8, 1};
@@ -209,11 +254,15 @@ const VertexInputValues* Device::internSceneVi(const VertexInputValues& n) {
 }
 
 // a finished packet (pipeline, vertex input, dynamic state, push block set) becomes a scene packet: its push data goes into a DrawRecord
-bool Device::toScenePacket(DrawPacket& p, GamePipeline pipeline) {
+bool Device::toScenePacket(DrawPacket& p, GamePipeline pipeline, std::int32_t viewSlot, std::uint32_t c5w) {
     // guard: every address a scene shader can read (the eight window bases, the DrawBlock, the frame block) must be set; else the normal path draws it
+    // (scene ABI v2: the view windows come from the view table, whose base and slot are checked instead of the record's three view window bases)
+    const bool v2 = viewSlot >= 0;
     bool nullAddress = p.push.draw == 0 || p.push.frame == 0 || sceneFaultInject_;
     for (std::uint32_t w = 0; w < shader::abi::kConstWindows; ++w) nullAddress |= p.push.vsWin[w] == 0 || p.push.psWin[w] == 0;
-    if (nullAddress || !sceneRef_.valid || sceneRef_.buffer == 0 || p.vi == nullptr || p.pipeline == GamePipeline::None) {
+    if (v2) nullAddress |= !sceneViewsReady() || static_cast<std::uint32_t>(viewSlot) >= sceneViews_.slots || static_cast<std::uint32_t>(viewSlot) >= kSceneRefSlots;
+    const SceneRefStream& refStream = v2 && static_cast<std::uint32_t>(viewSlot) < kSceneRefSlots ? sceneRefV2_[viewSlot] : sceneRef_;
+    if (nullAddress || !refStream.valid || refStream.buffer == 0 || p.vi == nullptr || p.pipeline == GamePipeline::None) {
         ++sceneStats_.fbNullAddress;
         if (sceneStats_.fbNullAddress <= 4) spdlog::warn("d3d9: scene draw refused: a null address in the push block (draw {:#x}, frame {:#x}, vs windows {:#x} {:#x} {:#x} {:#x}, ps windows {:#x} {:#x} {:#x} {:#x})", p.push.draw, p.push.frame, p.push.vsWin[0], p.push.vsWin[1], p.push.vsWin[2], p.push.vsWin[3], p.push.psWin[0], p.push.psWin[1], p.push.psWin[2], p.push.psWin[3]);
         return false;
@@ -227,10 +276,17 @@ bool Device::toScenePacket(DrawPacket& p, GamePipeline pipeline) {
     r.prevVs = p.push.prevVsConsts;
     r.drawId = p.push.drawId;
     r.flags = p.push.flags;
+    if (v2) {
+        // ABI v2: the per-frame inputs live in the view block (the record keeps the material / lighting windows, the DrawBlock, the id and the mask bits of c5.w)
+        r.vsWin[0] = r.vsWin[1] = r.psWin[0] = r.psWin[1] = 0;
+        r.c5w = c5w;
+    }
     sceneRecs_.push_back(r);
+    sceneRecSlots_.resize(sceneRecs_.size(), 0);
+    sceneRecSlots_.back() = v2 ? static_cast<std::uint32_t>(viewSlot) + 1 : 0;
     p.scene = static_cast<std::uint32_t>(sceneRecs_.size());
     p.pipeline = pipeline;
-    p.vi = internSceneVi(*p.vi);
+    p.vi = internSceneVi(*p.vi, viewSlot);
     if (probe_ != nullptr) {
         SceneView& v = *probe_;
         v = {};
@@ -252,6 +308,14 @@ bool Device::toScenePacket(DrawPacket& p, GamePipeline pipeline) {
     p.push.frame = frame;
     ++sceneStats_.sceneDraws;
     return true;
+}
+
+// the DrawBlock's posFix of the view bound now: the half pixel, the camera jitter, the depth remap (a view block of scene ABI v2 holds exactly this)
+void Device::currentPosFix(float out[4], float& jx, float& jy) {
+    geometryJitter(jx, jy);
+    out[0] = 1.0f / static_cast<float>(std::max(1u, viewport_.width)) + jx;
+    out[1] = -1.0f / static_cast<float>(std::max(1u, viewport_.height)) + jy;
+    depthRemap(out[2], out[3]);
 }
 
 // F2c-2: a record's draw as a SceneView, without the composition's results of this frame: the retained packet (`c`: the record's own copy) is validated
@@ -331,9 +395,10 @@ int Device::deriveScene(const CachedDraw& c, const DeriveIn& in, SceneView& out)
         if (lodBias != 0.0f) states[SAMP_MIPMAPLODBIAS] = std::bit_cast<std::uint32_t>(asFloat(states[SAMP_MIPMAPLODBIAS]) + lodBias);
         b.smp[slot] = lookupSamplerStates(states);
     }
-    b.posFix[0] = 1.0f / static_cast<float>(std::max(1u, viewport_.width)) + jx;
-    b.posFix[1] = -1.0f / static_cast<float>(std::max(1u, viewport_.height)) + jy;
-    depthRemap(b.posFix[2], b.posFix[3]);
+    {
+        float jx2, jy2;
+        currentPosFix(b.posFix, jx2, jy2);
+    }
     b.alphaFunc = in.alphaFunc;
     b.alphaRef = in.alphaRef;
     if (c.v.giDraw && giDraws_.on && giDraws_.replaceLightmaps) {
@@ -410,9 +475,30 @@ void Device::loadOwnedRegisters(const OwnedWindows& ow) {
     }
 }
 
+std::uint64_t Device::f2c4BucketKey(const CachedDraw& c) const {
+    std::uint64_t h = hashVi(c.vi);
+    h = f2c4::mix64(h, hashDyn(c.dyn));
+    h = f2c4::mix64(h, static_cast<std::uint64_t>(c.scenePipeline2));
+    h = f2c4::mix64(h, c.packet.indexBuffer);
+    h = f2c4::mix64(h, c.packet.indexOffset);
+    return f2c4::mix64(h, c.packet.index32 ? 1u : 0u);
+}
+
 int Device::replayOwned(const CachedDraw& c, const DeriveIn& in, const OwnedWindows& ow) {
     OwnedReplayStats& st = ownedReplayStats;
     ++st.attempts;
+    // F2c-4-0 item 3 (RVK_F2C4_MEASURE): the time per piece of an owned draw's submit
+    using MClock = std::chrono::steady_clock;
+    const bool measure = f2c4::enabled();
+    f2c4::Counters& mc = f2c4::counters();
+    MClock::time_point mT = measure ? MClock::now() : MClock::time_point{};
+    const auto lap = [&](std::uint64_t& acc) {
+        if (!measure) return;
+        const MClock::time_point now = MClock::now();
+        acc += f2c4::nsBetween(mT, now);
+        mT = now;
+    };
+    if (measure) ++mc.replays;
     const auto refuse = [&](int why) {
         ++st.why[why];
         return why;
@@ -422,9 +508,31 @@ int Device::replayOwned(const CachedDraw& c, const DeriveIn& in, const OwnedWind
     syncPhaseRegions();
     if (rendering_ && (scopeGbuf_ != gbufferScope() || scopeSecondary_ != wantSecondaryScope())) endRendering();
     if (!beginRendering()) return refuse(12);
+    lap(mc.prepNs);
+    // scene ABI v2 (the caller's view windows point into a view table slot): the pipeline, the table, the slot and the slot's windows must all be the v2 ones
+    const bool v2 = ow.viewSlot != OwnedWindows::kNoView;
+    if (v2) {
+        if (c.scenePipeline2 == GamePipeline::None || !sceneViewsReady()) return refuse(16);
+        if (ow.viewSlot >= sceneViews_.slots || ow.viewSlot >= kSceneRefSlots) return refuse(17);
+        using VT = std::uint64_t;
+        const rhi::GpuRef t = sceneViews_.base;
+        const auto base = [&](std::int64_t off) { return static_cast<VT>(t.plus(static_cast<std::int64_t>(ow.viewSlot) * shader::abi::kViewBlock2Size + off).bits); };
+        if (ow.w[0][0].base.bits != base(shader::abi::kViewVs0Offset) ||
+            ow.w[0][1].base.bits != base(static_cast<std::int64_t>(shader::abi::kViewVs1Offset) - static_cast<std::int64_t>(shader::abi::kVsWindowFirst[1]) * 16) ||
+            ow.w[1][0].base.bits != base(shader::abi::kViewPs0Offset)) {
+            return refuse(18);
+        }
+    }
     SceneView sv;
-    if (const int why = deriveScene(c, in, sv); why != 0) return refuse(why);
-    if (!sv.scene || !c.packet.batchable) return refuse(9);
+    const int deriveWhy = deriveScene(c, in, sv);
+    lap(mc.deriveNs);
+    if (deriveWhy != 0) return refuse(deriveWhy);
+    if (!(v2 ? c.scenePipeline2 != GamePipeline::None : sv.scene) || !c.packet.batchable) return refuse(9);
+    if (v2) {
+        // the view block holds what the draw's own derivation would have put in the DrawBlock (posFix incl. jitter + depth remap, c5.xyz): a view changed since the slot was set refuses
+        const shader::abi::ViewBlock2& vb = sceneViews_.shadow[ow.viewSlot];
+        if (std::memcmp(vb.posFix, sv.block.posFix, sizeof(vb.posFix)) != 0 || std::memcmp(vb.c5, in.psC5, 3 * sizeof(float)) != 0) return refuse(19);
+    }
     DrawPacket p = c.packet;
     p.vi = internVi(c.vi);
     p.dyn = internDyn(c.dyn);
@@ -440,6 +548,7 @@ int Device::replayOwned(const CachedDraw& c, const DeriveIn& in, const OwnedWind
             d.ownedReplay_ = false;
         }
     } scope(*this, &ow);
+    lap(mc.prepNs);
     {
         bool opaqueObserver = false;
         if (c.kind == draws::Kind::StaticMesh && c.phase.view == scene::View::Main && c.phase.pass == scene::Pass::Solid) {
@@ -476,6 +585,7 @@ int Device::replayOwned(const CachedDraw& c, const DeriveIn& in, const OwnedWind
             if (!captureRequest_.null()) return refuse(13);
         }
     }
+    lap(mc.observerNs);
     uploadConstants(false, c.v.minEnd);
     {
         std::uint32_t stage = 0, window = 0, need = 0;
@@ -490,6 +600,7 @@ int Device::replayOwned(const CachedDraw& c, const DeriveIn& in, const OwnedWind
             return refuse(14);
         }
     }
+    lap(mc.windowNs);
     shader::abi::DrawBlock& b = sv.block;
     // the packet's guard (toScenePacket) refuses a null address: nothing may be queued then
     rhi::RingAlloc db = game_->allocRing(sizeof(b), 16);
@@ -502,7 +613,12 @@ int Device::replayOwned(const CachedDraw& c, const DeriveIn& in, const OwnedWind
         p.push.psWin[w] = drawWin_[1][w].bits;
     }
     p.push.psWin[1] = db.ref.plus(static_cast<std::int64_t>(offsetof(shader::abi::DrawBlock, psC5)) - 5 * 16).bits;
-    if (!ensureSceneRef() || !toScenePacket(p, c.scenePipeline)) return refuse(15);
+    if (v2) {
+        if (!ensureSceneRefV2(ow.viewSlot) || !toScenePacket(p, c.scenePipeline2, static_cast<std::int32_t>(ow.viewSlot), std::bit_cast<std::uint32_t>(b.psC5[3]))) return refuse(15);
+        ++st.drawnV2;
+    } else if (!ensureSceneRef() || !toScenePacket(p, c.scenePipeline)) {
+        return refuse(15);
+    }
     const std::uint64_t frame = frameValue();
     for (std::uint32_t mask = c.texMask; mask != 0; mask &= mask - 1) c.tex[std::countr_zero(mask)]->lastUseFrame_ = frame;
     if (c.v.giDraw) ++giDrawCount_;
@@ -516,6 +632,13 @@ int Device::replayOwned(const CachedDraw& c, const DeriveIn& in, const OwnedWind
     ++sceneStats_.candidates;
     submitInterned(p);
     ++st.drawn;
+    if (measure) {
+        lap(mc.packetNs);
+        // item 6: the distinct buckets of the frame's owned draws
+        f2c4::beginFrame(stats_.frames);
+        mc.frameBuckets.insert(f2c4BucketKey(c));
+        ++mc.bucketDraws;
+    }
     return 0;
 }
 
@@ -542,6 +665,15 @@ void Device::sceneFlushRun(const std::vector<std::uint32_t>& run, const std::fun
         }
     }
     const DrawPacket& first = batch_[run[0]];
+    // (scene ABI v2: a run holds records of ONE view slot, which is the ref stream's y: the vertex input of its packets carries that stream)
+    const std::uint32_t runSlot = sceneRecSlots_[first.scene - 1];
+    for (const std::uint32_t at : run) {
+        if (sceneRecSlots_[batch_[at].scene - 1] != runSlot || (runSlot != 0 && !sceneViewsReady())) {
+            ++sceneStats_.fbNullAddress;
+            spdlog::error("d3d9: scene run dropped: records of different ABI forms / view slots in one run");
+            return;
+        }
+    }
     rhi::RingAlloc ra = game_->allocRing(static_cast<std::uint64_t>(n) * sizeof(shader::abi::DrawRecord), 16);
     rhi::RingAlloc aa = game_->allocRing(static_cast<std::uint64_t>(n) * rhi::kIndirectStride, 16);
     if (ra.ptr == nullptr || aa.ptr == nullptr) {
@@ -575,6 +707,7 @@ void Device::sceneFlushRun(const std::vector<std::uint32_t>& run, const std::fun
     shader::abi::ScenePush sp{};
     sp.records = ra.ref.bits;
     sp.frame = first.push.frame;
+    if (runSlot != 0) sp.views = sceneViews_.base.bits;
     static_assert(sizeof(sp) == sizeof(m.push));
     std::memcpy(&m.push, &sp, sizeof(sp));
     record(m);
@@ -611,6 +744,8 @@ void Device::sceneBeginFrame() {
     sceneRef_.valid = false;
     lastSceneVi_ = nullptr;
     sceneRecs_.clear();
+    sceneRecSlots_.clear();
+    for (SceneRefStream& r : sceneRefV2_) r.valid = false;
     sceneCollectCheck();
     sceneCheckFrame_ = sceneActive() || (sceneDrawsOn_ && sceneAvail_);
     sceneCheckFrame_ = sceneCheckFrame_ && sceneCheckEvery_ > 0 && !sceneCheck_.busy && stats_.frames % sceneCheckEvery_ == 0;

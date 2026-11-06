@@ -27,12 +27,12 @@ bool uberSupportsFile(std::string_view effectFile, std::string_view entry) {
            (effectFile == "ge_default_leafs.fx" && (entry == "PS_Default" || entry == "PS_DefaultZPass"));
 }
 
-std::string uberPixelHlsl(std::string_view entry, const MacroList& macros, std::string_view hookDefines, bool sceneRecord) {
-    return uberPixelHlsl("ge_default_phong.fx", entry, macros, hookDefines, sceneRecord);
+std::string uberPixelHlsl(std::string_view entry, const MacroList& macros, std::string_view hookDefines, bool sceneRecord, bool sceneView) {
+    return uberPixelHlsl("ge_default_phong.fx", entry, macros, hookDefines, sceneRecord, sceneView);
 }
 
 std::string uberPixelHlsl(std::string_view effectFile, std::string_view entry, const MacroList& macros, std::string_view hookDefines,
-                          bool sceneRecord) {
+                          bool sceneRecord, bool sceneView) {
     std::string out = "// HLSL material shader (shaders/material) built from the engine's macros\n";
     if (effectFile == "ge_default_leafs.fx") out += "#define RVK_LEAFS 1\n";  // the SpeedTree leaf hooks (ge_default.frag.hlsl)
     for (const auto& [name, value] : macros) {
@@ -56,7 +56,8 @@ std::string uberPixelHlsl(std::string_view effectFile, std::string_view entry, c
         out += std::format("#define {} {}\n", name, v);
     }
     if (entry.ends_with("ZPass")) out += "#define XFX_PASS 1\n";
-    if (sceneRecord) out += "#define RVK_SCENE_RECORD 1\n";  // scene variant (abi.h DrawRecord): the draw's data from a record, not the push block
+    if (sceneView) out += "#define RVK_SCENE_VIEW 1\n";  // scene ABI v2 (abi.h ViewBlock2): the view's windows / posFix / c5.xyz from the view table
+    if (sceneRecord || sceneView) out += "#define RVK_SCENE_RECORD 1\n";  // scene variant (abi.h DrawRecord): the draw's data from a record, not the push block
     if (!hookDefines.empty()) {
         out += "#define RVK_UBER_HOOKS 1\n";
         out += hookDefines;

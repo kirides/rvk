@@ -45,6 +45,9 @@ struct RvkDrawPush {
     uint2 psw2;
     uint2 psw3;
 };
+#if defined(RVK_SCENE_VIEW) && !defined(RVK_SCENE_RECORD)
+#define RVK_SCENE_RECORD 1  // (ABI v2 is a scene variant: abi.h ViewBlock2 / kViewBlock2Size, frame-ownership.md 7.19)
+#endif
 #ifndef RVK_SCENE_RECORD
 RVK_PUSH(RvkDrawPush, pc);
 
@@ -67,7 +70,7 @@ struct RvkScenePush {
     uint2 frame;    // the FrameBlock (same offset as RvkDrawPush.frame)
     uint recordBase;
     uint pad2;
-    uint2 spare0;
+    uint2 views;    // ABI v2 (RVK_SCENE_VIEW): the view table (ViewBlock2 at + slot * 640); unused (0) in v1
     uint2 spare1;
     uint2 spare2;
     uint2 spare3;
@@ -90,13 +93,43 @@ struct RvkDrawRecord {
     uint4 psw23;
     uint4 drawPrev;  // xy the DrawBlock, zw the vertex capture
     uint4 ids;       // x drawId, y flags, z instance slot, w part
-    uint4 slots;     // x material slot, y illumination entry, zw reserved
+    uint4 slots;     // x material slot, y illumination entry, z ABI v2: the bits of pixel c5.w, w reserved
     uint4 reserved;
 };
 static RvkDrawRecord rvk_rec;
 static uint2 rvk_sceneRef;   // the vertex stage's ref stream value (ref.y is free for the consumers of later steps)
-static uint rvk_sceneIndex;  // the record's index (the pixel shader gets it as a varying)
+static uint rvk_sceneIndex;  // the record's index (the pixel shader gets it as a varying); ABI v2: (view slot << 24) | index
 
+#ifdef RVK_SCENE_VIEW
+// ABI v2 (abi.h ViewBlock2, 640 bytes per view slot; the slot is ref.y): the view's windows, posFix and c5.xyz come from the view table
+static const uint RVK_VIEW_STRIDE = 640u, RVK_VIEW_VS0 = 0u, RVK_VIEW_PS0 = 192u, RVK_VIEW_VS1 = 272u, RVK_VIEW_POSFIX = 576u, RVK_VIEW_C5 = 592u;
+// the block's layout (abi.h ViewBlock2); the shaders read it through the offsets above, rvk_tests compares this struct with the C++ one
+struct RvkViewBlock2 {
+    float4 vs0[12];
+    float4 ps0[5];
+    float4 vs1[19];
+    float4 posFix;
+    float4 c5;
+    uint4 flags;
+    uint4 reserved;
+};
+static uint rvk_viewSlot;
+uint2 rvkViewAt(uint offset) { return rvkPairAdd(pc.views, rvk_viewSlot * RVK_VIEW_STRIDE + offset); }
+void rvkSceneLoad(uint index) {
+    rvk_sceneIndex = (rvk_viewSlot << 24) | index;
+    rvk_rec = rvkPtr<RvkDrawRecord, 16>(rvkPairAdd(pc.records, index * 128u)).Get();
+}
+void rvkSceneBeginVs(uint2 ref) {
+    rvk_sceneRef = ref;
+    rvk_viewSlot = ref.y;
+    rvkSceneLoad(pc.recordBase + ref.x);
+}
+void rvkSceneBeginPs(uint index) {
+    rvk_viewSlot = index >> 24;
+    rvk_sceneRef = uint2((index & 0xffffffu) - pc.recordBase, rvk_viewSlot);
+    rvkSceneLoad(index & 0xffffffu);
+}
+#else
 void rvkSceneLoad(uint index) {
     rvk_sceneIndex = index;
     rvk_rec = rvkPtr<RvkDrawRecord, 16>(rvkPairAdd(pc.records, index * 128u)).Get();
@@ -109,13 +142,26 @@ void rvkSceneBeginPs(uint index) {
     rvk_sceneRef = uint2(index - pc.recordBase, 0u);
     rvkSceneLoad(index);
 }
+#endif
 
 uint2 rvkSceneWin(uint4 a, uint4 b, uint w) {
     const uint4 q = w < 2u ? a : b;
     return (w & 1u) == 0u ? q.xy : q.zw;
 }
+#ifdef RVK_SCENE_VIEW
+// windows 0 / 1 of the vertex stage and window 0 of the pixel stage are the view block's (bases biased by the window's first register x 16: c[n] = base + n * 16);
+// pixel window 1 (c5) is rvkSceneC5() (RVK_PSC folds register 5 to it; a register-relative read of c5 through the window sees xyz only)
+uint2 rvkVsWin(uint w) { return w == 0u ? rvkViewAt(RVK_VIEW_VS0) : w == 1u ? rvkViewAt(RVK_VIEW_VS1 - 12u * 16u) : rvkSceneWin(rvk_rec.vsw01, rvk_rec.vsw23, w); }
+uint2 rvkPsWin(uint w) { return w == 0u ? rvkViewAt(RVK_VIEW_PS0) : w == 1u ? rvkViewAt(RVK_VIEW_C5 - 5u * 16u) : rvkSceneWin(rvk_rec.psw01, rvk_rec.psw23, w); }
+float4 rvkSceneC5() {
+    float4 c = rvkRawLoad<float4, 16>(rvkAddr(rvkViewAt(RVK_VIEW_C5)));
+    c.w = asfloat(rvk_rec.slots.z);
+    return c;
+}
+#else
 uint2 rvkVsWin(uint w) { return rvkSceneWin(rvk_rec.vsw01, rvk_rec.vsw23, w); }
 uint2 rvkPsWin(uint w) { return rvkSceneWin(rvk_rec.psw01, rvk_rec.psw23, w); }
+#endif
 uint2 rvkDrawAddr() { return rvk_rec.drawPrev.xy; }
 uint rvkDrawFlags() { return rvk_rec.ids.y; }
 uint rvkDrawId() { return rvk_rec.ids.x; }
@@ -133,9 +179,21 @@ static const uint RVK_DRAW_TINTED = 0x10000u;
 #define RVK_PS_WIN(n) ((uint(n)) < 5u ? 0 : (uint(n)) < 6u ? 1 : (uint(n)) < 14u ? 2 : 3)
 // (offset of c[n] in StageConsts = n * 16: a float4 load from the window's block)
 #define RVK_VSC(n) rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvkVsWin(RVK_VS_WIN(n))), uint(n) * 16u))
+#ifdef RVK_SCENE_VIEW
+#define RVK_PSC(n) ((uint(n)) == 5u ? rvkSceneC5() : rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvkPsWin(RVK_PS_WIN(n))), uint(n) * 16u)))
+#else
 #define RVK_PSC(n) rvkRawLoad<float4, 16>(rvkAddrAdd(rvkAddr(rvkPsWin(RVK_PS_WIN(n))), uint(n) * 16u))
+#endif
 
 // the draw's DrawBlock (not for replacers that put their own block in pc.draw)
-RvkDrawData rvkLoadDraw() { return rvkPtr<RvkDrawData, 16>(rvkDrawAddr()).Get(); }
+RvkDrawData rvkLoadDraw() {
+    RvkDrawData d = rvkPtr<RvkDrawData, 16>(rvkDrawAddr()).Get();
+#ifdef RVK_SCENE_VIEW
+    // ABI v2: the per-frame members of the block come from the view (the DrawBlock's own posFix / psC5 are not read)
+    d.posFix = rvkRawLoad<float4, 16>(rvkAddr(rvkViewAt(RVK_VIEW_POSFIX)));
+    d.psC5 = rvkSceneC5();
+#endif
+    return d;
+}
 uint rvkDrawTex(RvkDrawData d, uint i) { return d.tex[i >> 2][i & 3u]; }
 uint rvkDrawSmp(RvkDrawData d, uint i) { return d.smp[i >> 2][i & 3u]; }

@@ -14,9 +14,11 @@
 #include <chrono>
 #include <cstring>
 #include <format>
+#include <unordered_set>
 
 #include <spdlog/spdlog.h>
 
+#include "core/f2c4_measure.h"
 #include "d3d9/defs.h"
 #include "engine/memread.h"
 #include "engine/scene_table.h"
@@ -25,6 +27,7 @@
 #include "gpuscene/lighting_images.h"
 #include "gpuscene/material_table.h"
 #include "gpuscene/object_table.h"
+#include "gpuscene/view_table.h"
 #include "gpuscene/window_tables.h"
 #include "hal/vulkan/hal_vulkan.h"
 #include "native/static_ops.h"
@@ -103,6 +106,11 @@ bool StaticOps::ownedViewBegin(void* /*db*/, void* desc) {
     ownedView_ = {};
     if (!ownedStatic_) return false;
     ++W.views;
+    if (f2c4::enabled()) {
+        f2c4::beginFrame(dev_.stats().frames);
+        ++f2c4::counters().views;
+        ++f2c4::counters().curViews;
+    }
     const bool ready = ownedRecords_ && recs_ && sceneDraws_ && dev_.sceneDrawsActive() && ownedWindows_ && gpuscene::windowtables().active() && ownedObjects_ &&
                        gpuscene::objecttable().ready() && gpuscene::lightingimages().active() && gpuscene::lightingimages().ready() && gpuscene::materialtable().active() &&
                        tableLit_ && dev_.ownedObserversOk() && verified_ > 0;
@@ -144,6 +152,13 @@ bool StaticOps::ownedListOk(void* db, List list) {
 bool StaticOps::ownedSelect(const Op& op) {
     OwnedStats& W = ownedW_;
     ++W.seen;
+    if (f2c4::enabled()) {
+        // F2c-4-0 item 4: the context's LOD resource (ctx + 0x28) and the set of its ops' descs of this frame
+        f2c4::Counters::Ctx& e = f2c4::counters().ctxCur[op.raw.context];
+        e.res = get<U8*>(op.raw.context, 0x28, nullptr);
+        e.descSet += f2c4::mix64(op.raw.desc, static_cast<std::uint64_t>(op.list) + 1);
+        ++e.ops;
+    }
     struct T {
         std::uint64_t& ns;
         Clock::time_point t0 = Clock::now();
@@ -436,10 +451,45 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
     const std::uint64_t viewStamp = viewOk ? recViewStamp() : 0;
     d3d9::OwnedWindows viewWin;
     bool viewWinOk = false;
+    const std::size_t opsInPass = ops.size();
     if (viewOk) {
         initMirror();
         std::memcpy(mirror_.adminVs[0], view_.vp, 64);  // (no depth-bias material is owned: c0..c3 = the view-projection)
-        viewWinOk = gpuscene::windowtables().fillViews(dev_, viewWin, mirror_.adminVs + 12, 0x7ffffu, mirror_.adminVs, mirror_.adminPs);
+        // scene ABI v2 (7.19): the view goes into the view table's fixed slot of the pass (0 z, 1 solid) and the draws read it from there; without the table (or when the
+        // slot was set otherwise this frame) the v1 view block of the window tables is used as before
+        gpuscene::ViewTable& vt = gpuscene::viewtable();
+        if (vt.active() && vt.ready() && dev_.sceneViewsReady()) {
+            float posFix[4];
+            dev_.viewPosFix(posFix);
+            if (f2c4::enabled()) {
+                // item 1: a view block that differs from the same pass's earlier one of this frame (a second main view with another camera / viewport)
+                f2c4::Counters& m = f2c4::counters();
+                std::uint64_t h = 0;
+                const auto add = [&](const float* f, std::size_t n) {
+                    for (std::size_t i = 0; i < n; ++i) h = f2c4::mix64(h, std::bit_cast<std::uint32_t>(f[i]));
+                };
+                add(mirror_.adminVs[0], 12 * 4);
+                add(mirror_.adminVs[12], 19 * 4);
+                add(mirror_.adminPs[0], 5 * 4);
+                add(posFix, 4);
+                add(mirror_.adminPs[5], 3);
+                const std::size_t k = solid ? 1 : 0;
+                ++m.passViews[k];
+                if (m.lastHashFrame[k] == dev_.stats().frames && m.lastHash[k] != h) ++m.viewDiffers[k];
+                m.lastHash[k] = h;
+                m.lastHashFrame[k] = dev_.stats().frames;
+            }
+            const std::uint32_t slot = solid ? shader::abi::kViewSlotMainSolid : shader::abi::kViewSlotMainZ;
+            gpuscene::ViewTable::Regs regs;
+            regs.vs0 = mirror_.adminVs;
+            regs.vs1 = mirror_.adminVs + 12;
+            regs.ps0 = mirror_.adminPs;
+            regs.posFix = posFix;
+            regs.c5 = mirror_.adminPs[5];
+            viewWinOk = vt.set(slot, regs) && vt.fillWindows(slot, viewWin);
+            if (!viewWinOk) viewWin.clear();
+        }
+        if (!viewWinOk) viewWinOk = gpuscene::windowtables().fillViews(dev_, viewWin, mirror_.adminVs + 12, 0x7ffffu, mirror_.adminVs, mirror_.adminPs);
     }
     // the device state to give back: shaders, tag, the register file (loaded for the observers that read material constants)
     static float savedVs[d3d9::kVsFloatConsts][4], savedPs[d3d9::kPsFloatConsts][4];
@@ -522,6 +572,12 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
     }
     finishOp();
     ops.clear();
+    if (f2c4::enabled()) {
+        f2c4::Counters& m = f2c4::counters();
+        const std::size_t k = solid ? 1 : 0;
+        m.maxDrawsPerPass[k] = std::max<std::uint64_t>(m.maxDrawsPerPass[k], drawn);
+        m.maxOpsPerPass[k] = std::max<std::uint64_t>(m.maxOpsPerPass[k], opsInPass);
+    }
     const std::uint64_t total = ns(t0, Clock::now());
     const std::uint64_t sub = (W.submitNs - submit0) + (W.sideNs - side0) + (W.matNs - mat0);
     W.buildNs += total > sub ? total - sub : 0;
@@ -529,6 +585,26 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
 }
 
 void StaticOps::ownedReport() {
+    if (f2c4::enabled() && ownedStatic_) {
+        // item 6: the distinct buckets of every live record (every 5 s: a walk over the record map)
+        f2c4::Counters& m = f2c4::counters();
+        std::unordered_set<std::uint64_t> keys;
+        std::uint64_t records = 0, draws = 0;
+        if (recs_) {
+            for (const auto& kv : recs_->map) {
+                ++records;
+                for (const orec::DrawRec& r : kv.second->draws) {
+                    if (r.cd == nullptr || !r.cd->valid) continue;
+                    ++draws;
+                    keys.insert(dev_.f2c4BucketKey(*r.cd));
+                }
+            }
+        }
+        m.liveRecords = records;
+        m.liveDraws = draws;
+        m.liveBuckets = keys.size();
+        f2c4::report();
+    }
     if (!ownedStatic_ && ownedW_.views == 0) return;
     OwnedStats& w = ownedW_;
     ownedT_.add(w);
@@ -543,7 +619,7 @@ void StaticOps::ownedReport() {
         return out.empty() ? std::string("none") : out;
     };
     std::string refused;
-    static constexpr const char* kWhy[] = {"-", "stale module", "phase", "consumers", "variant", "env", "binding", "texture", "jitter", "scene form", "scene off", "shaders", "no scope", "observer capture", "window not served", "guard"};
+    static constexpr const char* kWhy[] = {"-", "stale module", "phase", "consumers", "variant", "env", "binding", "texture", "jitter", "scene form", "scene off", "shaders", "no scope", "observer capture", "window not served", "guard", "no v2 pipeline / table", "view slot range", "view windows not the slot's", "view block differs"};
     for (std::size_t i = 1; i < std::size(kWhy); ++i) {
         if (d.why[i] != l.why[i]) refused += std::format("{}{} {}", refused.empty() ? "" : ", ", kWhy[i], d.why[i] - l.why[i]);
     }

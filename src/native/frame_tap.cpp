@@ -11,6 +11,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "core/f2c4_measure.h"
 #include "engine/fast_sort.h"
 #include "engine/memread.h"
 #include "engine/shadow_maps.h"
@@ -643,6 +644,7 @@ void FrameTap::beginView(void* db, void* desc, ViewKind kind, void* shadowMap, s
 // so the snapshot, the sort copy and the attribution describe exactly what Execute will run
 void FrameTap::compactOwned(void* db, List list, const std::uint8_t* data, std::int32_t& count) {
     const auto t0 = std::chrono::steady_clock::now();
+    const bool measure = f2c4::enabled();
     ownedMark_.assign(raw_.size(), 0);
     ownedOps_.clear();
     for (std::size_t i = 0; i < raw_.size(); ++i) {
@@ -658,6 +660,7 @@ void FrameTap::compactOwned(void* db, List list, const std::uint8_t* data, std::
         ownedMark_[i] = 1;
         ownedOps_.push_back(op);
     }
+    const auto tSelect = std::chrono::steady_clock::now();
     if (ownedOps_.empty()) return;
     ownedKept_.clear();
     for (std::size_t i = 0; i < raw_.size(); ++i) {
@@ -675,16 +678,29 @@ void FrameTap::compactOwned(void* db, List list, const std::uint8_t* data, std::
         ownedOps_.clear();
         return;
     }
+    const auto tRewrite = std::chrono::steady_clock::now();
     // the owned ops in the engine's sort order of their list
     const CompareFn cmp = compare_[static_cast<std::size_t>(list)];
     std::stable_sort(ownedOps_.begin(), ownedOps_.end(), [cmp](const Op& a, const Op& b) { return cmp(&a.raw, &b.raw) < 0; });
+    const auto tSort = std::chrono::steady_clock::now();
     for (Op& op : ownedOps_) {
         resolve(op);  // (the sub-mesh / material / shader the late composition of a refused op needs)
         op.index = 0;
     }
     raw_.swap(ownedKept_);
     count = kept;
-    statics_->ownedTake(list, std::move(ownedOps_), static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()));
+    const auto tEnd = std::chrono::steady_clock::now();
+    if (measure) {
+        // F2c-4-0 item 7: where the compaction's time goes (the select loop = the stamp / record checks + the vtable reads of every op of the list)
+        f2c4::Counters& m = f2c4::counters();
+        ++m.compactCalls;
+        m.compactSelectNs += f2c4::nsBetween(t0, tSelect);
+        m.compactRewriteNs += f2c4::nsBetween(tSelect, tRewrite);
+        m.compactSortNs += f2c4::nsBetween(tRewrite, tSort);
+        m.compactResolveNs += f2c4::nsBetween(tSort, tEnd);
+        m.compactTotalNs += f2c4::nsBetween(t0, tEnd);
+    }
+    statics_->ownedTake(list, std::move(ownedOps_), static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(tEnd - t0).count()));
     ownedOps_.clear();
 }
 

@@ -213,10 +213,10 @@ TEST(abi_hlsl_scene_layout_matches_cpp) {
     using SP = abi::ScenePush;
     checkHlsl(m.at("type.PushConstant.RvkScenePush"),
               {{"records", offsetof(SP, records)}, {"pad0", offsetof(SP, pad0)}, {"pad1", offsetof(SP, pad1)}, {"frame", offsetof(SP, frame)},
-               {"recordBase", offsetof(SP, recordBase)}, {"pad2", offsetof(SP, pad2)}, {"spare0", offsetof(SP, spare)}, {"spare1", offsetof(SP, spare) + 8},
-               {"spare2", offsetof(SP, spare) + 16}, {"spare3", offsetof(SP, spare) + 24}, {"spare4", offsetof(SP, spare) + 32},
-               {"spare5", offsetof(SP, spare) + 40}, {"spare6", offsetof(SP, spare) + 48}, {"spare7", offsetof(SP, spare) + 56},
-               {"spare8", offsetof(SP, spare) + 64}},
+               {"recordBase", offsetof(SP, recordBase)}, {"pad2", offsetof(SP, pad2)}, {"views", offsetof(SP, views)}, {"spare1", offsetof(SP, spare)},
+               {"spare2", offsetof(SP, spare) + 8}, {"spare3", offsetof(SP, spare) + 16}, {"spare4", offsetof(SP, spare) + 24},
+               {"spare5", offsetof(SP, spare) + 32}, {"spare6", offsetof(SP, spare) + 40}, {"spare7", offsetof(SP, spare) + 48},
+               {"spare8", offsetof(SP, spare) + 56}},
               "RvkScenePush");
     // the frame block sits where the plain push block has it (hooks read pc.frame in both)
     CHECK(offsetof(SP, frame) == offsetof(abi::PushConstants, frame));
@@ -228,6 +228,41 @@ TEST(abi_hlsl_scene_layout_matches_cpp) {
     // inside the rows: draw, prevVs / drawId, flags, instanceSlot, part / materialSlot, illumEntry
     CHECK(offsetof(DR, prevVs) == offsetof(DR, draw) + 8 && offsetof(DR, flags) == offsetof(DR, drawId) + 4 && offsetof(DR, instanceSlot) == offsetof(DR, drawId) + 8 &&
           offsetof(DR, part) == offsetof(DR, drawId) + 12 && offsetof(DR, illumEntry) == offsetof(DR, materialSlot) + 4);
+}
+
+// scene ABI v2 (frame-ownership.md 7.19): the view block, the push block's `views`, DrawRecord::c5w, and the offsets the shaders hard-code (rvk_draw.hlsli RVK_VIEW_*)
+TEST(abi_hlsl_sceneview_layout_matches_cpp) {
+    if (!dxc::available()) return;
+    const auto words = embedded::spirv("test/abi_sceneview_layout.comp");
+    CHECK(!words.empty());
+    if (words.empty()) return;
+    const auto m = rvk::test::memberOffsets(words);
+    CHECK(m.contains("type.PushConstant.RvkScenePush") && m.contains("RvkDrawRecord") && m.contains("RvkViewBlock2"));
+    if (!m.contains("type.PushConstant.RvkScenePush") || !m.contains("RvkDrawRecord") || !m.contains("RvkViewBlock2")) return;
+    using SP = abi::ScenePush;
+    using VB = abi::ViewBlock2;
+    checkHlsl(m.at("type.PushConstant.RvkScenePush"),
+              {{"records", offsetof(SP, records)}, {"pad0", offsetof(SP, pad0)}, {"pad1", offsetof(SP, pad1)}, {"frame", offsetof(SP, frame)}, {"recordBase", offsetof(SP, recordBase)},
+               {"pad2", offsetof(SP, pad2)}, {"views", offsetof(SP, views)}, {"spare1", offsetof(SP, spare)}, {"spare2", offsetof(SP, spare) + 8}, {"spare3", offsetof(SP, spare) + 16},
+               {"spare4", offsetof(SP, spare) + 24}, {"spare5", offsetof(SP, spare) + 32}, {"spare6", offsetof(SP, spare) + 40}, {"spare7", offsetof(SP, spare) + 48},
+               {"spare8", offsetof(SP, spare) + 56}},
+              "RvkScenePush");
+    CHECK(offsetof(SP, views) == 40);
+    checkHlsl(m.at("RvkViewBlock2"),
+              {{"vs0", offsetof(VB, vs0)}, {"ps0", offsetof(VB, ps0)}, {"vs1", offsetof(VB, vs1)}, {"posFix", offsetof(VB, posFix)}, {"c5", offsetof(VB, c5)}, {"flags", offsetof(VB, flags)},
+               {"reserved", offsetof(VB, reserved)}},
+              "RvkViewBlock2");
+    // the constants hard-coded in rvk_draw.hlsli
+    CHECK(abi::kViewBlock2Size == 640 && abi::kViewVs0Offset == 0 && abi::kViewPs0Offset == 192 && abi::kViewVs1Offset == 272 && abi::kViewPosFixOffset == 576 && abi::kViewC5Offset == 592);
+    CHECK(abi::kViewSlotShift == 24 && abi::kSceneRecordMask == 0xffffffu);
+    // (the slot constants of the ViewTable: 0 main z, 1 main solid, 2-3 depth-bias view-projection, 4-7 cascades, then dynamic)
+    CHECK(abi::kViewSlotMainZ == 0 && abi::kViewSlotMainSolid == 1 && abi::kViewSlotDbvp0 == 2 && abi::kViewSlotCascade0 == 4 && abi::kViewSlotDynamicFirst == 8);
+    using DR = abi::DrawRecord;
+    checkHlsl(m.at("RvkDrawRecord"),
+              {{"vsw01", offsetof(DR, vsWin)}, {"vsw23", offsetof(DR, vsWin) + 16}, {"psw01", offsetof(DR, psWin)}, {"psw23", offsetof(DR, psWin) + 16},
+               {"drawPrev", offsetof(DR, draw)}, {"ids", offsetof(DR, drawId)}, {"slots", offsetof(DR, materialSlot)}, {"reserved", offsetof(DR, reserved1)}},
+              "RvkDrawRecord");
+    CHECK(offsetof(DR, c5w) == 104 && offsetof(DR, c5w) == offsetof(DR, materialSlot) + 8);
 }
 
 // the RT scene's geometry record (shaders/include/rvk_rt.hlsli: seven uint4) and the RT debug view's push block

@@ -89,6 +89,8 @@ public:
     Generator(const Program& p, const TranslateOptions& o)
         : p_(p), opt_(o), vs_(p.version.stage == Stage::Vertex), major_(p.version.major), consts_(vs_ ? "pc.vs" : "pc.ps") {}
 
+    bool scene() const { return opt_.sceneRecord || opt_.sceneView; }
+
     HlslResult run() {
         HlslResult res;
         res.reflection.version = p_.version;
@@ -98,7 +100,7 @@ public:
             return res;
         }
         emitBody();
-        if (error_.empty() && opt_.sceneRecord) checkScene();
+        if (error_.empty() && scene()) checkScene();
         if (!error_.empty()) {
             res.error = error_;
             return res;
@@ -855,7 +857,8 @@ private:
         h += vs_ ? "vs" : "ps";
         h += std::format("_{}_{} by risen-enhanced-graphics\n\n", major_, p_.version.minor);
         // the ABI declarations (push constants, the pointers, the bindless heap): shaders/include/rvk_draw.hlsli
-        if (opt_.sceneRecord) h += "#define RVK_SCENE_RECORD 1\n";  // (the push block becomes a ScenePush, the draw's data comes from a DrawRecord)
+        if (scene()) h += "#define RVK_SCENE_RECORD 1\n";  // (the push block becomes a ScenePush, the draw's data comes from a DrawRecord)
+        if (opt_.sceneView) h += "#define RVK_SCENE_VIEW 1\n";    // (ABI v2: the view's windows / posFix / c5.xyz come from the view table)
         h += "#include \"rvk_draw.hlsli\"\n\n";
         return h;
     }
@@ -878,7 +881,7 @@ private:
                 }
             }
             g += "    uint rvk_vertexId : SV_VertexID;\n    uint rvk_instanceId : SV_InstanceID;\n";
-            if (opt_.sceneRecord) g += std::format("    [[vk::location({})]] uint2 rvk_sceneRef : ATTR{};\n", abi::kSceneRefLocation, abi::kSceneRefLocation);
+            if (scene()) g += std::format("    [[vk::location({})]] uint2 rvk_sceneRef : ATTR{};\n", abi::kSceneRefLocation, abi::kSceneRefLocation);
             g += opt_.extraInputs;
             if (!opt_.extraInputs.empty()) g += "\n";
             g += "};\n";
@@ -895,7 +898,7 @@ private:
                 if (rastOut_.contains(1)) locs.insert(abi::varyingLocation(Usage::Fog, 0));
                 if (rastOut_.contains(2) && !varyingFillers()) g += "    [[vk::builtin(\"PointSize\")]] float rvk_psize : PSIZE;\n";
             }
-            if (opt_.sceneRecord) locs.insert(abi::kSceneVaryingLocation);
+            if (scene()) locs.insert(abi::kSceneVaryingLocation);
             // D3D12 links the stages by register: the signature is dense (0..max) on both sides, so a pixel shader that reads fewer / other varyings
             // than the vertex shader writes still lands on the same registers (zero-initialised fillers)
             if (varyingFillers() && (!locs.empty() || extraVaryLocation(opt_.extraOutputs) > 0)) {
@@ -910,7 +913,7 @@ private:
                     extraDone = true;
                     continue;
                 }
-                if (opt_.sceneRecord && loc == abi::kSceneVaryingLocation) {
+                if (scene() && loc == abi::kSceneVaryingLocation) {
                     g += std::format("    [[vk::location({})]] nointerpolation uint rvk_sceneIdx : VARY{};\n", loc, loc);
                     continue;
                 }
@@ -930,7 +933,7 @@ private:
                 const std::string name = d.reg.type == RegType::Addr ? std::format("t{}", d.reg.index) : std::format("v{}", d.reg.index);
                 lines[loc] = std::format("    [[vk::location({})]] {}float4 {} : VARY{};\n", loc, d.centroid ? "centroid " : "", name, loc);
             }
-            if (opt_.sceneRecord) {
+            if (scene()) {
                 lines[abi::kSceneVaryingLocation] = std::format("    [[vk::location({})]] nointerpolation uint rvk_sceneIdx : VARY{};\n", abi::kSceneVaryingLocation, abi::kSceneVaryingLocation);
             }
             if (varyingFillers() && (!lines.empty() || extraVaryLocation(opt_.extraInputs) > 0)) {
@@ -1078,9 +1081,9 @@ private:
         std::string m;
         if (vs_) {
             m += "RvkVsOut VSMain(RvkVsIn rvk_in) {\n";
-            if (opt_.sceneRecord) m += "    rvkSceneBeginVs(rvk_in.rvk_sceneRef);\n";
+            if (scene()) m += "    rvkSceneBeginVs(rvk_in.rvk_sceneRef);\n";
             m += "    rvk_draw = rvkLoadDraw();\n    RvkVsOut rvk_out = (RvkVsOut)0;\n";
-            if (opt_.sceneRecord) m += "    rvk_out.rvk_sceneIdx = rvk_sceneIndex;\n";
+            if (scene()) m += "    rvk_out.rvk_sceneIdx = rvk_sceneIndex;\n";
             for (const auto& d : p_.inputs) {
                 if (d.reg.type != RegType::Input) continue;
                 if (const auto* o = inputOverride(d)) {
@@ -1088,7 +1091,7 @@ private:
                 } else {
                     if (varyingFillers() && d.reg.index < 15) {
                         // D3D12: a D3D9 UBYTE4 input is read as R8G8B8A8_UNORM (no scaled formats in DXGI) and scaled back by 255: draws flag such inputs in their push flags
-                        m += std::format("    v{} = (({} >> {}u) & 1u) != 0u ? round(rvk_in.v{} * 255.0) : rvk_in.v{};\n", d.reg.index, opt_.sceneRecord ? "rvkDrawFlags()" : "pc.flags", 17 + d.reg.index, d.reg.index, d.reg.index);
+                        m += std::format("    v{} = (({} >> {}u) & 1u) != 0u ? round(rvk_in.v{} * 255.0) : rvk_in.v{};\n", d.reg.index, scene() ? "rvkDrawFlags()" : "pc.flags", 17 + d.reg.index, d.reg.index, d.reg.index);
                     } else {
                         m += std::format("    v{} = rvk_in.v{};\n", d.reg.index, d.reg.index);
                     }
@@ -1096,7 +1099,7 @@ private:
             }
         } else {
             m += "RvkPsOut PSMain(RvkPsIn rvk_in) {\n";
-            if (opt_.sceneRecord) m += "    rvkSceneBeginPs(rvk_in.rvk_sceneIdx);\n";
+            if (scene()) m += "    rvkSceneBeginPs(rvk_in.rvk_sceneIdx);\n";
             m += "    rvk_draw = rvkLoadDraw();\n    RvkPsOut rvk_out = (RvkPsOut)0;\n";
             m += "    rvk_fragCoord = rvk_in.rvk_fragCoord;\n";
             if (usesFace_) m += "    rvk_front = rvk_in.rvk_front;\n";

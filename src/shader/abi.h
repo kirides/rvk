@@ -155,7 +155,8 @@ struct DrawRecord {
     std::uint32_t part;                  // 92: MeshPart table index
     std::uint32_t materialSlot;          // 96: Material table slot
     std::uint32_t illumEntry;            // 100: Illumination table entry
-    std::uint32_t reserved0[2];          // 104
+    std::uint32_t c5w;                   // 104: ABI v2 (sceneView): the bits of pixel c5.w (the mask reference of the draw), RVK_PSC(5).w; v1 records: 0
+    std::uint32_t reserved0;             // 108
     std::uint32_t reserved1[4];          // 112: rounded to kDrawRecordSize
 };
 static_assert(sizeof(DrawRecord) == kDrawRecordSize && alignof(DrawRecord) == 8);
@@ -167,9 +168,33 @@ struct ScenePush {
     std::uint64_t frame;       // 24: the FrameBlock, as in PushConstants
     std::uint32_t recordBase;  // 32: added to ref.x (a bucket of records that starts inside the buffer)
     std::uint32_t pad2;        // 36
-    std::uint64_t spare[9];    // 40: to 112 bytes
+    std::uint64_t views;       // 40: ABI v2 (sceneView): the view table (ViewBlock2 slot i at + i * kViewBlock2Size); 0 in v1 draws
+    std::uint64_t spare[8];    // 48: to 112 bytes
 };
 static_assert(sizeof(ScenePush) == sizeof(PushConstants) && offsetof(ScenePush, frame) == offsetof(PushConstants, frame));
+
+// ---- scene ABI v2 (docs/research/frame-ownership.md 7.19 / 11, TranslateOptions::sceneView, HLSL RVK_SCENE_VIEW) -------------------------------
+// The per-frame inputs of a draw leave its record: the view's registers and the pass-wide constants live once per view in a ViewBlock2 of the view table
+// (ScenePush::views + slot * kViewBlock2Size), the slot is the ref stream's `y` (ref.y). A v2 shader reads VS windows 0 / 1 and PS window 0 from the view
+// block (window base = block + offset - first register * 16: all offsets positive), posFix (half pixel + jitter + depth remap) and pixel c5.xyz from it,
+// pixel c5.w from DrawRecord::c5w; the DrawBlock's own posFix / psC5 are not read. The varying VARY14 carries (view slot << kViewSlotShift) | record index.
+inline constexpr std::uint32_t kViewBlock2Size = 640;
+inline constexpr std::uint32_t kViewSlotShift = 24;
+inline constexpr std::uint32_t kSceneRecordMask = (1u << kViewSlotShift) - 1u;
+inline constexpr std::uint32_t kViewSlotMainZ = 0, kViewSlotMainSolid = 1, kViewSlotDbvp0 = 2, kViewSlotDbvp1 = 3, kViewSlotCascade0 = 4, kViewSlotDynamicFirst = 8;
+struct ViewBlock2 {
+    float vs0[12][4];    // 0:   vertex c0..c11 (VS window 0: window base = block)
+    float ps0[5][4];     // 192: pixel c0..c4 (PS window 0: base = block + 192)
+    float vs1[19][4];    // 272: vertex c12..c30 (VS window 1: base = block + 272 - 12 * 16 = block + 80)
+    float posFix[4];     // 576: the DrawBlock's posFix of the view: 1/w + jitter.x, -1/h + jitter.y, depth remap (z, w)
+    float c5[4];         // 592: pixel c5.xyz of the pass (w unused: DrawRecord::c5w)
+    std::uint32_t flags[4];  // 608: x = the view's own flags (reserved), yzw 0
+    std::uint32_t reserved[4];  // 624
+};
+static_assert(sizeof(ViewBlock2) == kViewBlock2Size && alignof(ViewBlock2) == 4);
+inline constexpr std::uint32_t kViewVs0Offset = offsetof(ViewBlock2, vs0), kViewPs0Offset = offsetof(ViewBlock2, ps0), kViewVs1Offset = offsetof(ViewBlock2, vs1),
+                               kViewPosFixOffset = offsetof(ViewBlock2, posFix), kViewC5Offset = offsetof(ViewBlock2, c5);
+static_assert(kViewVs1Offset >= kVsWindowFirst[1] * 16, "the biased base of VS window 1 must not go below the block");
 
 // PushConstants::flags
 inline constexpr std::uint32_t kDrawKindMask = 0xffu;

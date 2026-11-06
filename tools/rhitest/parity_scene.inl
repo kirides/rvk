@@ -39,9 +39,29 @@ struct SceneCase {
     bool expectDistinct = false;                           // the draws are placed so that they do not overlap: the picture must show every one of them
 };
 
-// runs one case with `n` draws; prints PASS / FAIL
-void runSceneCase(Harness& h, SceneCase& c, std::uint32_t n) {
+// runs one case with `n` draws; prints PASS / FAIL. `mode` 1 = scene ABI v2 (frame-ownership.md 7.19): the scene shaders are the sceneView variants, the draws' view
+// registers (VS c0..c30, PS c0..c4, posFix, c5.xyz) come from a ViewBlock2 table slot chosen by the ref stream's y (draw i: slot 3 / 9 by i & 1; the plain reference
+// draws use the same registers), the records carry no view window bases; mode 2 = the same with every draw pointing at the OTHER slot (a mutation: the images
+// MUST differ, which proves the draws read their slot)
+void runSceneCase(Harness& h, SceneCase& c, std::uint32_t n, int mode = 0) {
     rhi::Device& dev = h.dev;
+    const bool v2 = mode != 0;
+    constexpr std::uint32_t kSlotOf[2] = {3, 9};
+    StageBlock slotVs[2], slotPs[2];
+    abi::DrawBlock slotDb[2]{};
+    std::vector<abi::ViewBlock2> views(16);
+    std::memset(views.data(), 0, views.size() * sizeof(abi::ViewBlock2));
+    if (v2) {
+        for (std::uint32_t j = 0; j < 2; ++j) {
+            c.fill(j, slotVs[j], slotPs[j], slotDb[j]);
+            abi::ViewBlock2& vb = views[kSlotOf[j]];
+            std::memcpy(vb.vs0, slotVs[j].bytes.data(), sizeof(vb.vs0));
+            std::memcpy(vb.vs1, slotVs[j].bytes.data() + 12 * 16, sizeof(vb.vs1));
+            std::memcpy(vb.ps0, slotPs[j].bytes.data(), sizeof(vb.ps0));
+            std::memcpy(vb.posFix, slotDb[j].posFix, sizeof(vb.posFix));
+            std::memcpy(vb.c5, slotPs[j].bytes.data() + 5 * 16, 3 * sizeof(float));
+        }
+    }
     const int before = failures;
     const char* backend = rhi::backendName(dev.caps().backend);
     if (!c.vs.ok || !c.ps.ok || !c.svs.ok || !c.sps.ok) {
@@ -65,6 +85,14 @@ void runSceneCase(Harness& h, SceneCase& c, std::uint32_t n) {
         StageBlock vsc, psc;
         abi::DrawBlock db{};
         c.fill(i, vsc, psc, db);
+        if (v2) {
+            // the plain reference draw sees the view registers of its slot (and its own c5.w: the record's c5w)
+            const std::uint32_t j = i & 1;
+            std::memcpy(vsc.bytes.data(), slotVs[j].bytes.data(), 31 * 16);
+            std::memcpy(psc.bytes.data(), slotPs[j].bytes.data(), 5 * 16);
+            std::memcpy(psc.bytes.data() + 5 * 16, slotPs[j].bytes.data() + 5 * 16, 3 * sizeof(float));
+            std::memcpy(db.posFix, slotDb[j].posFix, sizeof(db.posFix));
+        }
         auto* bVs = h.makeBuffer(vsc.bytes.data(), vsc.bytes.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, "scene vs consts");
         auto* bPs = h.makeBuffer(psc.bytes.data(), psc.bytes.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, "scene ps consts");
         auto* bDraw = h.makeBuffer(&db, sizeof(db), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, "scene draw block");
@@ -81,6 +109,10 @@ void runSceneCase(Harness& h, SceneCase& c, std::uint32_t n) {
             r.psWin[w] = pushes[i].psWin[w];
         }
         r.draw = pushes[i].draw;
+        if (v2) {
+            r.vsWin[0] = r.vsWin[1] = r.psWin[0] = r.psWin[1] = 0;  // (the view windows are the table slot's)
+            std::memcpy(&r.c5w, psc.bytes.data() + 5 * 16 + 12, 4);
+        }
         r.drawId = i;
         r.flags = pushes[i].flags;
         r.instanceSlot = 100 + i;
@@ -90,7 +122,7 @@ void runSceneCase(Harness& h, SceneCase& c, std::uint32_t n) {
         args[5 * i + 3] = 0;  // vertexOffset (0: D3D12's SV_VertexID ignores it)
         args[5 * i + 4] = i;  // firstInstance: the ref stream's element
         refs[2 * i + 0] = i;  // record index
-        refs[2 * i + 1] = 7 * i + 1;
+        refs[2 * i + 1] = v2 ? kSlotOf[mode == 2 ? 1 - (i & 1) : (i & 1)] : 7 * i + 1;
     }
     auto* bRecords = h.makeBuffer(records.data(), records.size() * sizeof(abi::DrawRecord), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, "scene draw records");
     auto* bArgs = h.makeBuffer(args.data(), args.size() * 4, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, "scene indirect args");
@@ -103,6 +135,14 @@ void runSceneCase(Harness& h, SceneCase& c, std::uint32_t n) {
     sp.records = refOf(*bRecords);
     sp.frame = refOf(*bFrame);
     sp.recordBase = 0;
+    if (v2) {
+        auto* bViews = h.makeBuffer(views.data(), views.size() * sizeof(abi::ViewBlock2), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, "scene view table");
+        if (bViews == nullptr) {
+            check(false, c.label + ": view table");
+            return;
+        }
+        sp.views = refOf(*bViews);
+    }
 
     const VkVertexInputBindingDescription bindings[2] = {{0, c.stride, VK_VERTEX_INPUT_RATE_VERTEX}, {1, 8, VK_VERTEX_INPUT_RATE_INSTANCE}};
     std::vector<VkVertexInputAttributeDescription> sceneAttrs = c.attrs;
@@ -176,6 +216,11 @@ void runSceneCase(Harness& h, SceneCase& c, std::uint32_t n) {
         if (a[i] != 0 || a[i + 1] != 0 || a[i + 2] != 0) ++lit;
         if (a[i] == 255 && a[i + 1] == 255 && a[i + 2] == 255) ++saturated;
     }
+    if (mode == 2) {
+        check(differ != 0, std::format("{}: the draws pointing at the wrong view slot drew the same picture (the view slot is not read)", c.label));
+        std::printf("[%s] %s: %s (wrong-view-slot mutation: %zu pixels differ, must be > 0)\n", backend, c.label.c_str(), failures == before ? "PASS" : "FAIL", differ);
+        return;
+    }
     check(differ == 0, std::format("{}: {} pixels differ between the per-draw push path and the scene path", c.label, differ));
     if (c.expectDistinct) {
         // the draws sit in separate quadrants with their own colours: every quadrant must be lit
@@ -200,19 +245,20 @@ void quadLayout(SceneCase& c) {
 }
 
 // the asm pair of testTranslatedDraw: four draws, one per quadrant (c3 offset, c4 colour, ps c0), two textures (DrawBlock tex[0])
-void testSceneAsm(Harness& h) {
+void testSceneAsm(Harness& h, bool v2 = false, bool mutate = false) {
     rhi::Device& dev = h.dev;
     if (!devtools::D3DX::get().available()) {
         std::printf("[%s] scene variant (asm pair): SKIP (d3dx9_39.dll not installed)\n", rhi::backendName(dev.caps().backend));
         return;
     }
     SceneCase c;
-    c.label = "scene variant (asm pair)";
+    c.label = std::string("scene variant (asm pair") + (v2 ? ", ABI v2" : "") + (mutate ? ", wrong view slot" : "") + ")";
     if (!selected(c.label.c_str())) return;
     shader::TranslateOptions plainOpt, sceneOpt;
     sceneOpt.sceneRecord = true;
+    sceneOpt.sceneView = v2;
     quadLayout(c);
-    c.expectDistinct = true;
+    c.expectDistinct = !v2;  // (ABI v2: the draws of a view slot share its registers, so only two placements exist)
     if (!translated(kVsAsm, true, plainOpt, c.vs, "scene_vs") || !translated(kPsAsm, false, plainOpt, c.ps, "scene_ps") || !translated(kVsAsm, true, sceneOpt, c.svs, "scene_vs_s") ||
         !translated(kPsAsm, false, sceneOpt, c.sps, "scene_ps_s")) {
         check(false, c.label + ": translation");
@@ -233,14 +279,14 @@ void testSceneAsm(Harness& h) {
         db.tex[0] = tex[i & 1];
         db.smp[0] = smp;
     };
-    runSceneCase(h, c, 4);
+    runSceneCase(h, c, 4, !v2 ? 0 : mutate ? 2 : 1);
 }
 
 // the ubershader (a captured request) with the translated vertex shader of the uber test: the pixel shader reads window 2 / 3 and the DrawBlock by record
-void testSceneUber(Harness& h, const char* name, const shader::MacroList& macros, const std::string& hooks, bool heavy) {
+void testSceneUber(Harness& h, const char* name, const shader::MacroList& macros, const std::string& hooks, bool heavy, bool v2 = false) {
     rhi::Device& dev = h.dev;
     SceneCase c;
-    c.label = std::string("scene variant (ubershader, ") + name + ")";
+    c.label = std::string("scene variant (ubershader, ") + name + (v2 ? ", ABI v2" : "") + ")";
     if (!selected(c.label.c_str())) return;
     if (!devtools::D3DX::get().available()) {
         std::printf("[%s] %s: SKIP (d3dx9_39.dll not installed)\n", rhi::backendName(dev.caps().backend), c.label.c_str());
@@ -248,10 +294,11 @@ void testSceneUber(Harness& h, const char* name, const shader::MacroList& macros
     }
     shader::TranslateOptions plainOpt, sceneOpt;
     sceneOpt.sceneRecord = true;
+    sceneOpt.sceneView = v2;
     quadLayout(c);
     if (!translated(kUberVsAsm, true, plainOpt, c.vs, "scene_uber_vs") || !translated(kUberVsAsm, true, sceneOpt, c.svs, "scene_uber_vs_s") ||
         !compileBoth("scene_uber.hlsl", shader::uberPixelHlsl("PS_Default", withExtra(macros), hooks), "PSMain", "ps_6_6", c.ps) ||
-        !compileBoth("scene_uber_s.hlsl", shader::uberPixelHlsl("PS_Default", withExtra(macros), hooks, true), "PSMain", "ps_6_6", c.sps)) {
+        !compileBoth("scene_uber_s.hlsl", shader::uberPixelHlsl("PS_Default", withExtra(macros), hooks, true, v2), "PSMain", "ps_6_6", c.sps)) {
         check(false, c.label + ": shaders");
         return;
     }
@@ -295,7 +342,7 @@ void testSceneUber(Harness& h, const char* name, const shader::MacroList& macros
             db.smp[slot] = texSets[i & 1][slot] != 0 ? linear : 0;
         }
     };
-    runSceneCase(h, c, 4);
+    runSceneCase(h, c, 4, v2 ? 1 : 0);
 }
 
 // ---- real corpus shaders: a lit material pair with textures and a skinned pair -----------------------------------------------------------------
@@ -325,7 +372,7 @@ struct CorpusShader {
 };
 
 // the first suitable vertex shaders and the pixel shader with the most textures whose varyings a vertex shader writes
-void testSceneCorpus(Harness& h) {
+void testSceneCorpus(Harness& h, bool v2 = false) {
     rhi::Device& dev = h.dev;
     const std::filesystem::path dir = findCorpus();
     if (dir.empty()) {
@@ -389,12 +436,13 @@ void testSceneCorpus(Harness& h) {
         }
         return best >= 0;
     };
+    const std::string suffix = v2 ? ", ABI v2)" : ")";
+    const std::string labels[2] = {"scene variant (corpus: rigid mesh + lit material" + suffix, "scene variant (corpus: skinned mesh + material" + suffix};
     const struct {
         const char* label;
         const Vs* vs;
         int minSamplers;
-    } cases[2] = {{"scene variant (corpus: rigid mesh + lit material)", rigid.empty() ? nullptr : &rigid[0], 4},
-                  {"scene variant (corpus: skinned mesh + material)", skinned.empty() ? nullptr : &skinned[0], 2}};
+    } cases[2] = {{labels[0].c_str(), rigid.empty() ? nullptr : &rigid[0], 4}, {labels[1].c_str(), skinned.empty() ? nullptr : &skinned[0], 2}};
     shader::Reflection ignored;
     for (const auto& k : cases) {
         if (k.vs == nullptr || !selected(k.label)) {
@@ -411,6 +459,7 @@ void testSceneCorpus(Harness& h) {
         c.label = k.label;
         shader::TranslateOptions plainOpt, sceneOpt;
         sceneOpt.sceneRecord = true;
+        sceneOpt.sceneView = v2;
         const std::vector<std::uint32_t> vsTokens = readTokensFile(k.vs->file), psTokens = readTokensFile(psFile);
         shader::Reflection vsRefl;
         if (!translatedTokens(vsTokens, plainOpt, c.vs, "scene_corpus_vs", &vsRefl) || !translatedTokens(psTokens, plainOpt, c.ps, "scene_corpus_ps") ||
@@ -477,7 +526,7 @@ void testSceneCorpus(Harness& h) {
                 db.smp[slot] = texSets[i & 1][slot] != 0 ? linear : 0;
             }
         };
-        runSceneCase(h, c, 4);
+        runSceneCase(h, c, 4, v2 ? 1 : 0);
     }
 }
 
@@ -488,4 +537,11 @@ void testScene(Harness& h) {
     // the hooks of the G-buffer + GI variants without the extra render targets: window 3 read through rvkPsWin
     testSceneUber(h, "gi hooks", heavyRequest(), "#define RVK_MV_AMBIENT 1\n#define RVK_MV_AMB_REG 15\n#define RVK_MV_HAS_IND 1\n#define RVK_MV_IND_REG 14\n#define RVK_MV_KIND_SKINNED 3\n", true);
     testSceneCorpus(h);
+    // scene ABI v2 (frame-ownership.md 7.19): the same draws with the view registers from a view table slot; the wrong-slot mutation must differ
+    testSceneAsm(h, true);
+    testSceneAsm(h, true, true);
+    testSceneUber(h, "diffuse * vertex colour", simpleRequest(), {}, false, true);
+    testSceneUber(h, "normal map, specular, lightmap, lights", heavyRequest(), {}, true, true);
+    testSceneUber(h, "gi hooks", heavyRequest(), "#define RVK_MV_AMBIENT 1\n#define RVK_MV_AMB_REG 15\n#define RVK_MV_HAS_IND 1\n#define RVK_MV_IND_REG 14\n#define RVK_MV_KIND_SKINNED 3\n", true, true);
+    testSceneCorpus(h, true);
 }

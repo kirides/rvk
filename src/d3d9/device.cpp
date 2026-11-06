@@ -1610,7 +1610,7 @@ void Device::setUbershader(bool on) {
 // A material pixel shader built from the GLSL material shader with its request's macros (+ the enhancement hooks of
 // options.uberDefines); null when it does not build (the draw keeps the translated shader)
 rhi::ShaderModule Device::uberModule(const Shader& s, const MaterialSource& src, const shader::TranslateOptions& options, std::string_view tag) {
-    const std::string glsl = shader::uberPixelHlsl(src.entry, src.macros, options.uberDefines, options.sceneRecord);
+    const std::string glsl = shader::uberPixelHlsl(src.entry, src.macros, options.uberDefines, options.sceneRecord, options.sceneView);
     if (glsl.empty()) return rhi::ShaderModule::None;
     std::vector<std::uint32_t> spirv;
     const auto cacheFile =
@@ -1782,10 +1782,13 @@ void Device::variantWorker() {
                 const VariantSlot b = sceneBaseSlot(job.slot);
                 VariantProvider base;
                 if (b != VariantSlot::Count) base = variantProviders_[static_cast<std::size_t>(b)];
-                const bool lodVs = job.slot == VariantSlot::SceneVsLod;
-                const bool pixel = job.slot != VariantSlot::SceneVs && !lodVs;
-                provider.tag = b != VariantSlot::Count ? base.tag + "_scene" : pixel ? "scene_ps" : lodVs ? std::format("scene_lod{}", kLodVariantVersion) : "scene_vs";
-                provider.options = [base, hasBase = b != VariantSlot::Count, pixel, lodVs](const Shader& sh, shader::TranslateOptions& o) {
+                // (scene ABI v2: the same forms with the view table, slot = v1 slot + 7: frame-ownership.md 7.19)
+                const bool view = isSceneView(job.slot);
+                const VariantSlot v1 = view ? static_cast<VariantSlot>(static_cast<std::uint8_t>(job.slot) - 7) : job.slot;
+                const bool lodVs = v1 == VariantSlot::SceneVsLod;
+                const bool pixel = v1 != VariantSlot::SceneVs && !lodVs;
+                provider.tag = (b != VariantSlot::Count ? base.tag + "_scene" : pixel ? "scene_ps" : lodVs ? std::format("scene_lod{}", kLodVariantVersion) : "scene_vs") + (view ? "2" : "");
+                provider.options = [base, hasBase = b != VariantSlot::Count, pixel, lodVs, view](const Shader& sh, shader::TranslateOptions& o) {
                     if ((sh.stage == shader::Stage::Pixel) != pixel) return false;
                     if (hasBase && (!base.options || !base.options(sh, o))) return false;
                     if (lodVs) {
@@ -1793,6 +1796,7 @@ void Device::variantWorker() {
                                                     std::format("float4($v.xy * rvkPtr<RvkFrameData, 16>(pc.frame).Get().params[{}].x, $v.zw)", shader::abi::kFrameParamLod)});
                     }
                     o.sceneRecord = true;
+                    o.sceneView = view;
                     return true;
                 };
             }

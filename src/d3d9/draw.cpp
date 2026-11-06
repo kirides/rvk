@@ -902,6 +902,7 @@ bool Device::prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom) {
     lastRecord_ = nullptr;
     customVertices_ = 0;
     scenePipe_ = GamePipeline::None;
+    scenePipe2_ = GamePipeline::None;
     packet_.scene = 0;  // (packet_ is reused: a scene draw's record index must not leak into the next draw's packet)
     if (drawTap_ != nullptr) {
         // the N5.0 op tap sees every draw, also the ones skipped below
@@ -1564,6 +1565,7 @@ void Device::fillCapture(const DrawPacket& p) {
     c.vs = vs_.get();
     c.ps = ps_.get();
     c.scenePipeline = scenePipe_;
+    c.scenePipeline2 = scenePipe2_;
     c.vsModule = vs_->module;
     c.fsModule = ps_->module;
     c.v = lastVariant_;
