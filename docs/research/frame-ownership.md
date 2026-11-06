@@ -1041,6 +1041,10 @@ by itself; its value is the proven path (record -> derive -> submit with nothing
 **Not done / handed on:** viewBegin compaction (slot-time replay instead); the shadow views and the trees themselves (F4-2..4); the per-frame cost of the replay is dominated by the material
 poll (`constantsInto` + `checkDraw` per draw: polling once per material per frame is the next saving) and `initMirror` per op; check-frame period / env knob should become `native.owned_check` when F2c-3 lands it.
 
+### 7.18 F2c-3 + F4-1 integration (2026-11-06)
+
+Both branches merged (F2c-3 first). `native.owned_check` is the check period of both (F4-1's `bbCheckFrame`; `RVK_BB_CHECK=<n>` still overrides). `Device::replayOwned` (register-file based, observers see the loaded windows) and `Device::submitOwned` (no register file, windows from the persistent images) were NOT merged: their guards differ by design. Game check (jungle + pub_interior, Full, all owned settings, Vulkan with GPU-assisted validation / Vulkan / D3D12): 0 validation errors, owned static 63-67 % of ops with 0 undrawn and check frames DIFFERING 0, billboards 100 % recordable and owned between check frames, DIFFERING 0 (records + billboards, total and 5 s).
+
 ## 8. F1 / F2 design decision: windows onto persistent tables (2026-11-06, orchestrator)
 
 **Decision.** F1 does not start with new shaders. Translated shaders and the ported ubershader read every float register through 4 register windows per
