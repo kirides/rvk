@@ -627,3 +627,35 @@ ring upload, and every existing shader reads identical values: picture identical
   pipeline bucket. Translated engine shaders stay valid: batches are still split by pipeline (the engine's permutations), but no longer by register
   values, and the CPU no longer touches the draw. The owned ubershader (graph-shared pipelines, dynamic light loop: 196 pipelines estimated, 7.3)
   is the later step that merges permutations.
+
+## 9. F2c design: DrawRecords from retained op records, no per-frame composition (2026-11-06, accepted by the orchestrator)
+
+**Hook point (changes 3.2 / F2's "suppress at RequestRenderOps"):** the engine runs `RequestRenderOps` unchanged, appends included (all request-time
+side effects stay bit-exact). At `viewBegin` (frame tap, before the sort) the owned ops are compacted out of the db's z / solid lists; an op without
+a valid retained record simply stays and takes today's path (composition + F2b-1 scene draw). No late composition.
+
+**OpRecord** keyed (ctx, desc, list, viewKey) = today's packet key minus the draw index, snapshotted from the last composition: draws[] (the
+`CachedDraw` packet + matSlot, partSlot, illum info, the shader quad sun x lightmap-combi, scene pipeline), side-effect list (images, lightmap res,
+stream 3), flags. Validity = stamp compares instead of `packetSameDesc`: Material version, MeshPart generation, object-table version, illum record
+version + light-set epoch (sun bit per set per frame), `variantEpoch` (every setter of GI / G-buffer / pack / tint gates), target-format epoch,
+`LightTable::registryGeneration()` (new) for `holdsAll`, a per-illum cached `ambientLit` bit (CPU compose of c15..c21 from the records), per-frame
+polls: lightmap residency (res+0x90/+0x98), entity overlay flags (+0x28 & 0xe00000), illum pointer (+0xf8), texture-ready per material.
+Owned in the first cut only: mesh ctx, static, main view z + solid, not instanced, fade 1, no overlay flags, no switch-element material, no video
+image, no hierarchy node, **table lighting on** (one pass per sub-mesh; without it the pass count follows the per-frame dynamic light count).
+Traps: alpha func / ref are not composed (device carry-over) and must be derived natively; observers (RT scene) need the draw: decide before F2c-3.
+
+**Object table** (`GpuTable<ObjectRecord>` by scene-table slot, image c31..c35: c32.w fade, c33..c35 world rows from entity +0x60, base = rec - 31 x 16;
+written in the scene-table drain on the matrix signal, fade from the visible list, `checkEntity` on check frames); VS window 1 (c12..c30) in the
+view record (+ a `dbvp` c0..c3 variant per view for depth-bias materials). Instanced VS (c32 + 4i) stays on the old path.
+
+**Side effects per visible record per frame** (from the lean path): image LRU touches per visible material, `BindLightmaps(res, 1)` per solid
+resource, stream 3 for leftover engine draws, texture `lastUseFrame_`, draw stats. Check frames (`native.owned_check=N`, the lean frame kinds):
+no compaction, the old path runs, the record-derived draws are built and compared (normalised fields), not submitted; any diff turns the group off.
+
+| stage | content | gate | CPU (Full, est.) |
+|---|---|---|---|
+| F2c-0 | measure: owned-eligible share by reason, observer reads, invalidation rates, CTAB-live c12..c31 of the static VS, occurrence of hierarchy / instanced ops | numbers | - |
+| F2c-1 | object table, VS window 1 / 2 served, `LightingImages::entryFor`, `LightTable::registryGeneration` (`native.owned_objects`) | split_verify 0, read-backs 0, checkEntity 0 | ~0 |
+| F2c-2 | OpRecords + record-derived DrawRecords built and compared while composition runs; read-log signal audit (`native.owned_records`) | DIFFERING 0, audit disagreements 0 | +0.05..0.1 |
+| F2c-3 | viewBegin compaction + `Device::replayOwned` at BeforeDepthPrepass / BeforeSolid, engine sort order, side effects, check frames | check frames 0, refcompare Full, long tour (placeholderBinds -> 0), both backends, validation | **-0.5..-0.7** |
+| F2c-4 | persistent records, GPU compaction (ref.y = view slot), later cull (F5) | compaction = CPU list | -0.03..-0.05 CPU, GPU / low-end gain |
