@@ -352,6 +352,7 @@ struct DrawDesc {
     // the op it belongs to
     const void* subMesh = nullptr;
     const void* material = nullptr;
+    const void* resource = nullptr;  // the mesh resource (eCMeshResource2) of a static mesh draw (gpuscene/mesh_parts)
     std::uint32_t passFlags = 0;  // the shader pass (0 for z draws)
     bool zPass = false;
     // the draw tag's sub-mesh fields as the engine's hooks set them (only eCSubMesh::Render sets them: solid non-instanced

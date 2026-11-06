@@ -234,6 +234,9 @@ public:
     // fetches of RT hit shaders; docs/research/rt-reflections.md 3); 0 for ring-copied buffers or without the tier. Valid
     // until the next generation (Device::notifyBufferChanged tells the observers)
     rhi::GpuAddr gpuAddress();
+    // the static GPU copy's address (shader reference + raw) without the ray tracing gate: null for ring-copied buffers, before the first draw uploaded it and where the
+    // arena has no device addresses (Vulkan without the RT tier). Render thread (gpuscene/mesh_parts)
+    rhi::GpuAddr arenaAddress();
 
 private:
     Device& dev_;

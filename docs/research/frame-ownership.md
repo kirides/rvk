@@ -342,3 +342,40 @@ validation, rvkcompare spots with and without table lighting, Risen_Save_0005); 
 were NOT enough (123,891 of 1.85 M draws differed): some illumination objects (0x118 stride, not eCIlluminated_PS + 0x78: batch copies) are
 rewritten in place without a hook, so the objects drawn are also polled once per frame against their record (`poll` uploads, 40-140 per minute at
 the spots, 0-1 at the savegame). Upload rate at the savegame ~1 record + 0.33 KiB per frame (set data dominates: the set changes nearly every frame).
+
+### 7.6 MeshPart + Layout tables (2026-11-06, `native.mesh_parts`)
+
+`src/gpuscene/mesh_layout.h` (pure: records, declaration -> slot words, D3D9 element decode; tests `mesh_layout_*`), `mesh_parts.{h,cpp}` (tables, check,
+GPU fetch test), `shaders/include/rvk_mesh.hlsli` (`rvkMeshLoadPart / LoadLayout / Fetch / FetchPosition / FetchNormal / FetchUv / FetchIndex`, DXIL-checked) +
+`shaders/test/mesh_fetch.comp.hlsl`. Debug setting `native.mesh_parts` (Bool, restart, default off; Full only because only StaticOps::issue feeds it; off = nothing
+allocated, no observer registered). `GpuTable<T>` (illumination_table.cpp) is reused (its log prefix is now `native: gpu table:`); `d3d9::Buffer::arenaAddress()` is the
+static GPU copy's address without the RT gate of `gpuAddress()`.
+
+* **MeshPart record, 128 B** (uint4 x 8): info {live, layout id, generation, flags (in arena, index32, streams 0..2 bound)}, index {index buffer address (byte 0 of the
+  buffer), first index, index count}, range {base vertex (int; 0 on the static path, kept so the shader adds it: D3D12 `SV_VertexID` ignores `vertexOffset`), min index,
+  vertex count, index size}, 3 x stream {address of the stream's data = buffer byte 0 + stream offset, stride, bound}, material {material pointer, sub-mesh pointer}, owner
+  {mesh resource pointer; local bounds: not available, the engine's sub-mesh carries none and a scan of the vertices is not "cheap"}. Addresses are `uint2` pairs (Vulkan
+  device address; D3D12 heap slot + offset: `GpuAddr::ref.plus(offset).pair()`). Key = (sub-mesh pointer, first index, primitive count): each LOD node / merged z range is its
+  own part; slot on first sight, after the draw (the buffers have their GPU copy then); freed by `DrawObserver::bufferChanged` (a buffer got a new GPU copy or was released)
+  or after 1800 frames unseen (shadow-only parts reappear).
+* **Layout record, 80 B**: info {live, content hash, elements, elements not expressible} + 16 semantic words (offset | (D3DDECLTYPE + 1) << 16 | stream << 24; 0 = absent):
+  position, blend weight / indices, normal, tangent, binormal, colour 0 / 1, texcoord 0..7. Deduplicated by the element list (exact compare behind the hash), id = index.
+  Measured in the game, 4 layouts in total: (a) FLOAT3 position, FLOAT3 normal, FLOAT3 tangent, D3DCOLOR colour 0 + 1, FLOAT2 uv0, FLOAT2 uv6 (the lightmap set); (b) the same
+  + FLOAT2 uv1; (c) (a) with the instance index (TEXCOORD4 FLOAT1) on **stream 3** in place of uv6; (d) FLOAT4 position, FLOAT2 uv5, FLOAT4 blend weight 0 (+ blend weight 1 / 2
+  FLOAT3: not expressible, counted). The part table holds streams 0..2 only: an element on stream 3 (instance data, per frame) fetches as 0. Types seen: FLOAT1/2/3/4 and
+  D3DCOLOR; the other types are covered by the unit tests (hand-computed D3D9 values) and the shader's decode only.
+* **Verification** (`rvk.log native: mesh parts (5 s)`): every composed static draw (z, solid, additive, shadow views' z; skipped: draws without an eCSubMesh = actors, trees,
+  vegetation, billboards, particles; unindexed; CPU-generated geometry) is compared with its record (index range, base vertex, min index / vertex count, every stream's
+  address / stride, layout id, material key) and, for a draw issued fresh, with the **device's own bindings** (`Device::vertexDecl / indexBuffer / streamSource`) read after the
+  draw; a replayed (packet-cache) draw only against its own description. A record whose addresses were unresolvable at creation and resolve later counts `late address`, not a
+  difference. Every 240th frame the tables are read back and compared with the CPU copy (`verify:`), and `mesh_fetch.comp` fetches the index at a random position of a random
+  part's range plus position / normal / uv0 / colour 0 of a random vertex through `rvk_mesh.hlsli` for 256 cases, compared with `decodeElement` over the buffers' CPU bytes
+  (`fetch test:`; tolerance 1e-5). Results (Full, 2026-11-06, all DIFFERING 0): Vulkan rvkcompare `harbour_docks,jungle,pub_interior` (463 parts peak, 4 layouts, 4.3 M
+  draws checked, 17 table read-backs, 17 x 256 fetch cases); Vulkan savegame `Risen_Save_0005` (packet cache off: 4.7 M draws, all compared with the device bindings, 448 slots,
+  4 layouts, 27 read-backs, 24 x 256 fetch cases, 1 late address); D3D12 spots (5.9 M draws, 24 x 256 fetch cases); `-Validation` spots `harbour_docks,jungle` (no VUIDs, 16 x 256 cases).
+* **Outside the arena: none** in any run (0 ring-copied, 0 without an address, 0 without a buffer). Static meshes are static buffers; a part with a ring-copied buffer (dynamic /
+  system-memory) or a null address (Vulkan **without the RT tier**: the arena only has `SHADER_DEVICE_ADDRESS` when ray tracing is on, so `arenaAddress()` is null) keeps its CPU
+  description with the `in arena` flag clear and is counted by reason in that line. Making the Vulkan arena addressable without RT is a follow-up for the owned frame (usage bits at
+  device creation).
+* Cost (savegame, packet cache off, `-Perf`; the check does a mutex + 4 buffer-address lookups per draw): CPU ~6.8 ms vs ~6.7 ms per frame, interval p50 7.5 vs 7.2 ms: about
+  +0.1 - 0.3 ms, a verification cost (a shipping path reads the tables only on the GPU). Upload ~0.1 record / 0.01 KiB per frame in steady state, ~0.3 records at cache-in.

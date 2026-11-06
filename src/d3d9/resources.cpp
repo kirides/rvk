@@ -521,6 +521,12 @@ rhi::GpuAddr Buffer::gpuAddress() {
     return static_.addr;
 }
 
+rhi::GpuAddr Buffer::arenaAddress() {
+    const std::lock_guard lock(mutex_);
+    if (!static_.valid() || dynamic() || pool_ == POOL_SYSTEMMEM) return {};
+    return static_.addr;
+}
+
 // ---- VertexDecl ------------------------------------------------------------------------------------------------------
 
 VertexDecl::VertexDecl(std::span<const VertexElement> elements) {

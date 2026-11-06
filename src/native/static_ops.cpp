@@ -22,6 +22,7 @@
 #include "engine/scene_table.h"
 #include "engine/symbols.h"
 #include "gpuscene/illumination_table.h"
+#include "gpuscene/mesh_parts.h"
 #include "fx/effect_binary.h"
 #include "hal/vulkan/hal_vulkan.h"
 
@@ -476,7 +477,7 @@ sc::DrawDesc& StaticOps::newDraw() {
     else draws_[drawCount_] = dp;
     ++drawCount_;
     sc::DrawDesc& d = *dp;
-    d.vs = d.ps = d.decl = d.indices = d.subMesh = d.material = nullptr;
+    d.vs = d.ps = d.decl = d.indices = d.subMesh = d.material = d.resource = nullptr;
     d.indexed = true;
     // plain data, all-zero defaults (Src::None = 0): block clears instead of member-wise default initialisation (V4)
     static_assert(std::is_trivially_copyable_v<sc::DrawDesc::Stream> && std::is_trivially_copyable_v<sc::DrawDesc::Sampler> && static_cast<int>(sc::Src::None) == 0);
@@ -868,6 +869,7 @@ bool StaticOps::geometryOf(const std::uint8_t* res, Geom& g, int stream3) {
     if (prim == nullptr) return false;
     g.decl = prim->vertexDecl();
     g.indices = prim->indexBuffer();
+    g.meshResource = res;
     for (std::uint32_t i = 0; i < 4; ++i) {
         const auto v = prim->streamView(i);
         // HalPrimitive::Execute binds enabled streams with data (and sets their frequency), unbinds the others; the op path
@@ -897,6 +899,7 @@ sc::DrawDesc& StaticOps::drawFrom(const Geom& g) {
     d.primCount = g.primCount;
     d.subMesh = g.subMesh;
     d.material = g.material;
+    d.resource = g.meshResource;
     d.tagSubMesh = d.tagMaterial = d.tagMeshResource = nullptr;
     return d;
 }
@@ -2025,6 +2028,43 @@ bool StaticOps::packetSameDesc(const sc::DrawDesc& a, const sc::DrawDesc& b) {
 }
 
 // our own draws of the op: the device state saved and restored around them
+namespace {
+// frame-ownership.md F0 (gpuscene/mesh_parts): a composed static draw's geometry as the part table sees it, from the composition or from the device's bindings
+gpuscene::DrawGeometry partGeometry(const sc::DrawDesc& d) {
+    gpuscene::DrawGeometry g;
+    g.decl = static_cast<const d3d9::VertexDecl*>(d.decl);
+    g.ib = const_cast<d3d9::Buffer*>(static_cast<const d3d9::Buffer*>(d.indices));
+    for (std::size_t i = 0; i < 3; ++i) {
+        g.vb[i] = const_cast<d3d9::Buffer*>(static_cast<const d3d9::Buffer*>(d.streams[i].buffer));
+        g.offset[i] = d.streams[i].offset;
+        g.stride[i] = d.streams[i].stride;
+    }
+    g.indexed = d.indexed && d.vertexBytes.empty() && d.cpuStream == 0;
+    g.minIndex = d.minIndex;
+    g.numVertices = d.numVertices;
+    g.startIndex = d.startIndex;
+    g.primCount = d.primCount;
+    g.baseVertex = d.baseVertex;
+    g.subMesh = d.subMesh;
+    g.material = d.material;
+    g.resource = d.resource;
+    return g;
+}
+
+gpuscene::DrawGeometry partGeometryBound(const d3d9::Device& dev, const sc::DrawDesc& d) {
+    gpuscene::DrawGeometry g = partGeometry(d);
+    g.decl = dev.vertexDecl();
+    g.ib = dev.indexBuffer();
+    for (std::uint32_t i = 0; i < 3; ++i) {
+        const auto s = dev.streamSource(i);
+        g.vb[i] = s.buffer;
+        g.offset[i] = s.offset;
+        g.stride[i] = s.stride;
+    }
+    return g;
+}
+}  // namespace
+
 void StaticOps::issue() {
     if (drawCount_ == 0) return;
     using namespace d3d9;
@@ -2103,6 +2143,7 @@ void StaticOps::issue() {
             tag.materialName = dd.tagMaterialName;
         }
     };
+    gpuscene::MeshPartTable& meshParts = gpuscene::meshparts();
     for (std::size_t k = 0; k < drawCount_; ++k) {
         const sc::DrawDesc& d = *draws_[k];
         dev_.setVertexShaderRef(ShaderRef(const_cast<Shader*>(static_cast<const Shader*>(d.vs))));
@@ -2132,6 +2173,7 @@ void StaticOps::issue() {
                 ++g_->issuedDraws;
                 ++pktWindow_.replayed;
                 ++pktGroup_[cacheGroup][0];
+                if (meshParts.active()) meshParts.checkDraw(dev_, partGeometry(d), nullptr, static_cast<std::uint32_t>(d.drawClass));
                 continue;
             }
             ++pktWindow_.refused;
@@ -2250,6 +2292,10 @@ void StaticOps::issue() {
         }
         if (timed) deviceNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(PClock::now() - dt0).count());
         ++g_->issuedDraws;
+        if (meshParts.active()) {
+            const gpuscene::DrawGeometry actual = partGeometryBound(dev_, d);
+            meshParts.checkDraw(dev_, partGeometry(d), &actual, static_cast<std::uint32_t>(d.drawClass));
+        }
     }
     issuing_ = false;
     ++g_->issuedOps;

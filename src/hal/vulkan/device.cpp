@@ -29,6 +29,7 @@
 #include "engine/scene_table.h"
 #include "gpuscene/instance_buffer.h"
 #include "gpuscene/illumination_table.h"
+#include "gpuscene/mesh_parts.h"
 #include "engine/xinput_throttle.h"
 #include "engine/memread.h"
 #include "engine/material_source.h"
@@ -547,6 +548,8 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
         reg.onChange(*rs.nativeOwnedObserve, applyObserve, this);
         applyObserve(*rs.nativeOwnedObserve);
     }
+    // frame ownership F0 (gpuscene/mesh_parts.h): the part + layout tables, fed by the static composition's draws (restart setting)
+    gpuscene::meshparts().setActive(rs.nativeMeshParts != nullptr && rs.nativeMeshParts->asBool());
     // N5.1 static ops (native/static_ops.h): driven by the frame tap
     staticOps_ = std::make_unique<native::StaticOps>(*this);
     frameTap_->setStaticOps(staticOps_.get());
@@ -1616,6 +1619,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
     {
         gpuscene::instances().flush(dev_, frozen::kGpuScene >= 2 ? frozen::kGpuScene : 0);
         gpuscene::illumtable().flush(dev_, true);
+        gpuscene::meshparts().flush(dev_, true);
     }
     engine::lod::onPresent();  // a changed object draw distance: the world's cache-in spheres (engine thread)
     dev_.present();

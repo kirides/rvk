@@ -10,6 +10,7 @@
 
 #include "d3d9/device.h"
 #include "engine/memread.h"
+#include "gpuscene/mesh_layout.h"
 
 namespace rvk::gpuscene {
 
@@ -33,7 +34,7 @@ bool GpuTable<T>::create(d3d9::Device& dev, std::uint32_t capacity, const char* 
     const auto w = buffer_->shaderRef(0);
     ref_ = rhi::GpuRef::fromWords(w[0], w[1]);
     init(capacity);
-    spdlog::info("native: illum table: {} buffer {} slots x {} B = {} KiB (ref {:#x})", name, capacity, sizeof(T), capacity * sizeof(T) / 1024, ref_.bits);
+    spdlog::info("native: gpu table: {} buffer {} slots x {} B = {} KiB (ref {:#x})", name, capacity, sizeof(T), capacity * sizeof(T) / 1024, ref_.bits);
     return true;
 }
 
@@ -113,7 +114,7 @@ void GpuTable<T>::startVerify(d3d9::Device& dev, std::uint32_t used) {
     used = std::max(used, 1u);
     const std::uint64_t bytes = static_cast<std::uint64_t>(used) * sizeof(T);
     if (!p.buffer || p.buffer->desc().size < bytes) {
-        p.buffer = dev.rhi()->createBuffer({static_cast<std::uint64_t>(capacity_) * sizeof(T), VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "illum table verify"});
+        p.buffer = dev.rhi()->createBuffer({static_cast<std::uint64_t>(capacity_) * sizeof(T), VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "gpu table verify"});
         if (!p.buffer) return;
     }
     rhi::CommandList& list = dev.uploadList();
@@ -136,7 +137,7 @@ void GpuTable<T>::collect(rhi::GameDevice& game, const char* name) {
         std::uint64_t bad = 0;
         for (std::size_t i = 0; i < p.expect.size(); ++i) {
             if (std::memcmp(&got[i], &p.expect[i], sizeof(T)) != 0) {
-                if (bad == 0) spdlog::error("native: illum table: {} slot {} differs between the GPU table and the uploaded copy", name, i);
+                if (bad == 0) spdlog::error("native: gpu table: {} slot {} differs between the GPU table and the uploaded copy", name, i);
                 ++bad;
             }
         }
@@ -149,6 +150,8 @@ void GpuTable<T>::collect(rhi::GameDevice& game, const char* name) {
 
 template class GpuTable<IllumRecord>;
 template class GpuTable<LightSetRecord>;
+template class GpuTable<PartRecord>;
+template class GpuTable<LayoutRecord>;
 
 // ---- IllumTable ------------------------------------------------------------------------------------------------------------------
 

@@ -2404,6 +2404,21 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::Restart | Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeMeshParts = &reg.add({
+        .key = "native.mesh_parts",
+        .label = "Native frame: mesh part + layout tables",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode only (takes effect at the next start; frame-ownership.md F0, no picture change): GPU tables of the static meshes' parts "
+                       "(sub-mesh index range, index / vertex stream addresses in the mesh arena, base vertex, layout, material key) and of the vertex "
+                       "layouts (per-semantic pull offsets / formats), and a check that compares every composed static draw with its record and, every "
+                       "240th frame, fetches indices / positions / normals / uvs of random vertices on the GPU through the tables and compares them with "
+                       "the CPU. rvk.log `native: mesh parts (5 s)`, DIFFERING must stay 0.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::Restart | Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeLean = &reg.add({
         .key = "native.lean",
         .label = "Native frame: lean ops",
