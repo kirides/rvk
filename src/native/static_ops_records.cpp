@@ -282,10 +282,15 @@ void StaticOps::recEnter(const Op& op) {
         const int d = orec::firstDifference(a, st);
         if (d < 0) {
             const int live = recLiveWhy(rec);
-            if (live < 0) R.cur = &rec;
-            else R.rebuildWhy = live;
+            if (live < 0) {
+                R.cur = &rec;
+                if (depEvents()) depVerified(rec);  // F2e-1: the full stamp holds: no mark left
+            } else {
+                R.rebuildWhy = live;
+            }
         } else {
             R.rebuildWhy = d;
+            depNoteCheckFrame(op, rec, d);  // F2e-1: a difference nobody announced = EVENT MISS
         }
     }
     w.stampNs += ns(t0, tnow());
@@ -762,6 +767,7 @@ void StaticOps::recEnd(const Op& op) {
         for (const LeanStream3& x : leanStream3_) rec->stream3Prims.push_back({x.primitive, x.on});
     }
     rec->builtFrame = dev_.stats().frames;
+    depRegister(*rec, op);  // F2e-1: the objects the stamp hangs on, the shaders' fingerprints
     rec->ownable = recCollect_ || leanCollect_;
     if (ret::gLog == nullptr && !R.readLog.v.empty()) {
         ret::finalize(R.readLog.v);
@@ -825,6 +831,7 @@ void StaticOps::recReport() {
                  w.alphaRefCarry, w.c5wCarry, w.viewDup, w.auditChecked, w.auditCaught, w.auditDisagree, list(w.auditBy, orec::kAuditNames, orec::kAuditCount), w.auditDisagreeDiff, static_cast<double>(w.buildNs) / frame / 1000.0, w.builds,
                  static_cast<double>(w.deriveNs) / frame / 1000.0, static_cast<double>(w.deriveCoreNs) / frame / 1000.0, w.derives, static_cast<double>(w.stampNs) / frame / 1000.0, static_cast<double>(w.auditNs) / frame / 1000.0,
                  dev_.objectRowStats.given, dev_.objectRowStats.differing);
+    depReport();
     if (orec::f2dMeasure()) {
         std::string t;
         for (std::size_t i = 0; i <= orec::kExclCount; ++i) {

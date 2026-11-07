@@ -284,6 +284,28 @@ TEST(static_passes_follow_get_passes) {
     CHECK(sc::psIndex(1u << 6 | 1u << 2) == 1 + 4);
 }
 
+TEST(dep_index_marks_dependents_and_forgets_destroyed_records) {
+    // F2e-1: an engine event on an object marks the records that registered it; a destroyed record no longer is marked (it unregisters itself)
+    using namespace rvk::native::orec;
+    int objA = 0, objB = 0;
+    auto a = std::make_unique<OpRecord>();
+    auto b = std::make_unique<OpRecord>();
+    for (const void* o : {static_cast<const void*>(&objA), static_cast<const void*>(&objB)}) {
+        a->deps.push_back(o);
+        DepIndex::get().add(o, a.get());
+    }
+    b->deps.push_back(&objB);
+    DepIndex::get().add(&objB, b.get());
+    CHECK(DepIndex::get().markDirty(&objA) == 1 && a->dirty && !b->dirty);
+    CHECK(DepIndex::get().markDirty(&objA) == 0);              // (already marked)
+    CHECK(DepIndex::get().markDirty(&objB) == 1 && b->dirty);  // (a was marked already)
+    a->dirty = b->dirty = false;
+    b.reset();
+    CHECK(DepIndex::get().markDirty(&objB) == 1 && a->dirty);  // (only a is left on objB)
+    a.reset();
+    CHECK(DepIndex::get().markDirty(&objA) == 0 && DepIndex::get().markDirty(&objB) == 0);
+}
+
 TEST(static_blend_prediction_matches_the_states) {
     // F2d: blendsAtFadeOne is what fillBlending does at fade 1 in a normal (non-additive) pass, for every mode and flag combination
     for (std::int32_t mode = 0; mode <= 10; ++mode) {

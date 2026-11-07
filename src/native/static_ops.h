@@ -875,6 +875,35 @@ private:
     int recLiveWhy(const orec::OpRecord& rec);  // what the stamps do not see: -1 = fine, else the rebuild reason index (kStampFields + 4: illumination slot gone, + 5: a load completed)
     std::uint64_t recViewStamp();
 
+    // F2e-1 step A (static_ops_deps.cpp, frame-ownership.md 7.30): event-driven validity of the op records
+    struct DepStats {
+        std::uint64_t objects = 0, marked = 0, fast = 0, slow = 0, slowClean = 0, scrubbed = 0, eventMiss = 0, shaderPolls = 0, shaderHits = 0, polledLeft = 0, epochs = 0, checkSeen = 0;
+        void add(const DepStats& o) {
+            objects += o.objects; marked += o.marked; fast += o.fast; slow += o.slow; slowClean += o.slowClean; scrubbed += o.scrubbed; eventMiss += o.eventMiss;
+            shaderPolls += o.shaderPolls; shaderHits += o.shaderHits; polledLeft += o.polledLeft; epochs += o.epochs; checkSeen += o.checkSeen;
+        }
+    } depW_, depT_;
+    struct ShaderMemo {
+        const void* p = nullptr;
+        std::uint64_t frame = ~0ull, fp = 0;
+    };
+    ShaderMemo shaderMemo_[256];
+    std::vector<const void*> depDrained_;
+    std::uint64_t depEpochSeen_ = 0, depEventMissLogged_ = 0;
+    bool depEvents() const;                                    // the dependency events are installed (and not switched off): the fast path may run
+    std::uint64_t shaderFp(const std::uint8_t* shader);        // a shader's property fields as the stamp reads them, memoised per frame
+    void depDrain();                                           // start of a main view: the queued engine events mark the records that registered the object
+    void depRegister(orec::OpRecord& rec, const Op& op);       // at the build: the engine objects the stamp hangs on, the covered shaders' fingerprints
+    int depFast(const Op& op, const orec::OpRecord& rec);      // the polled inputs of a record no event touched: -1 valid, -2 verify the full stamp, else the stamp field that differs
+    bool depShadersChanged(const orec::OpRecord& rec);         // a covered shader's fields differ from the fingerprints (a polled input, never an event miss)
+    void depEventMiss(const Op& op, const orec::OpRecord& rec, int field, const char* where);
+    void depReport();
+public:
+    bool depClean(const orec::OpRecord& rec) const;            // no engine event marked the record since its stamp was last verified
+    void depVerified(const orec::OpRecord& rec);               // the full stamp held: clear the mark
+    bool depNoteCheckFrame(const Op& op, const orec::OpRecord& rec, int field);  // recEnter: a stamp field differs on a full compare; true = it was an event miss (counted)
+private:
+
     // F4-1 (static_ops_bb.cpp)
     bool ownedBb_ = false;
     std::unique_ptr<bbrec::Store> bb_;

@@ -32,6 +32,7 @@
 #include "engine/fast_sort.h"
 #include "engine/load_accel.h"
 #include "engine/lod.h"
+#include "engine/dep_events.h"
 #include "engine/illum_census.h"
 #include "gpuscene/material_table.h"
 #include "engine/scene_table.h"
@@ -489,6 +490,13 @@ void onProcessAttach(void* module) {
         engine::lights::install();      // the illumination admin: all of the world's lights for the GI (rtgi.md 19)
         engine::scenetable::install();  // the GPU scene's signal-fed instance table (docs/research/gpu-scene.md)
         engine::illumcensus::install();  // RVK_ILLUM_CENSUS=1 or native.illum_table (frame-ownership.md F0)
+        {
+            // F2e-1: the owned op records' dependency events (frame-ownership.md 7.30), only when native.owned_static is on at start (RVK_F2E_NO_EVENTS=1: the polled path, the A/B arm)
+            char noEv[8]{};
+            if (const auto& rs = settings::renderer(); rs.nativeOwnedStatic != nullptr && rs.nativeOwnedStatic->asBool() && GetEnvironmentVariableA("RVK_F2E_NO_EVENTS", noEv, sizeof(noEv)) == 0) {
+                engine::depevents::install();
+            }
+        }
         if (const auto& rs = settings::renderer(); rs.nativeMaterialTable != nullptr && rs.nativeMaterialTable->asBool()) {
             gpuscene::materialtable().setActive(true);  // frame-ownership.md F0: the material table (polled: no hooks)
             spdlog::info("native: material table on (native.material_table)");
