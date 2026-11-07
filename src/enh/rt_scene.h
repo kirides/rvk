@@ -428,6 +428,7 @@ private:
         const void* entity = nullptr;
         std::uint32_t opDesc = 0, first = 0, primitives = 0;
         std::uint32_t slot = 0, slotGen = 0, slotVersion = 0;  // the scene-table slot of the entity at learn time
+        std::uint64_t slotStamp = 0;                           // scenetable::stamp(slot) then: differs when the slot was freed / reallocated / moved
         rt::BlasKey key;                                       // the draw's BLAS key (buffer ids + generations, range)
         std::uint64_t blas = 0, instKey = 0;                   // the BLAS id and the registry instance key (BLAS + quantised rows)
         rt::Rows rows{};
@@ -443,10 +444,11 @@ private:
         const void* cd = nullptr;
         const void* entity = nullptr;
         std::uint64_t sig = 0, epoch = 0;
-        const TableEntry* entry = nullptr;
-        std::uint32_t gen = 0, idx = 0;
+        const TableEntry* entry = nullptr;      // (identity only: the checks below read the copies, not the entry's heap node)
+        std::uint64_t slotStamp = 0;            // the entry's scenetable stamp, its slot and relearn salt
+        std::uint32_t gen = 0, idx = 0, slot = 0;
         std::uint32_t opDesc = 0;
-        std::uint8_t cls = 0;
+        std::uint8_t cls = 0, salt = 0;
     };
     std::vector<OwnedCover> ownedCover_;
     std::vector<std::uint32_t> entryGen_, entryFree_;

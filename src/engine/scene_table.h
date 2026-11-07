@@ -41,6 +41,9 @@ void onPresent();
 std::uint32_t liveSlots();
 std::uint32_t capacity();
 const Slot* slot(std::uint32_t index);
+// a compact change stamp of the slot (F2c-4b): 0 = free / unknown, else it differs whenever the slot was freed + reallocated (generation) or its matrix changed (version);
+// 8 bytes per slot in their own array, for per-record "still the same?" checks that must not touch the 200-byte slots
+std::uint64_t stamp(std::uint32_t index);
 std::uint32_t find(const void* entity);   // UINT32_MAX when unknown
 const Counters& counters();
 

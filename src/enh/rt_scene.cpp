@@ -783,8 +783,7 @@ bool RtScene::coversDraw(const d3d9::CoverQuery& d) {
             ++ts_.fallClass;
             break;
         }
-        const engine::scenetable::Slot* s = engine::scenetable::slot(e.slot);
-        if (s == nullptr || s->entity != e.entity || s->generation != e.slotGen || s->version != e.slotVersion) {
+        if (engine::scenetable::stamp(e.slot) != e.slotStamp) {  // (freed / reallocated / moved: the compact stamp of the slot)
             ++ts_.fallMoved;
             break;
         }
@@ -838,9 +837,7 @@ void RtScene::observeOwned(d3d9::Device& dev, const d3d9::OwnedFrame& f) {
         OwnedCover& oc = ownedCover_[r.id];
         if (!r.entered && !r.changed && !compare && oc.entry != nullptr && oc.cd == &cd && oc.sig == r.sig && oc.epoch == r.epoch && oc.entity == r.tag.entity &&
             oc.opDesc == r.tag.opDesc && oc.idx < entryGen_.size() && entryGen_[oc.idx] == oc.gen) {
-            const TableEntry& e = *oc.entry;
-            const engine::scenetable::Slot* s = engine::scenetable::slot(e.slot);
-            if (s != nullptr && s->entity == e.entity && s->generation == e.slotGen && s->version == e.slotVersion && (frame + e.salt) % kTableRelearn != 0) {
+            if (engine::scenetable::stamp(oc.slot) == oc.slotStamp && (frame + oc.salt) % kTableRelearn != 0) {
                 const int ci = oc.cls == 1 ? 0 : oc.cls == 2 ? 1 : 2;
                 ++ts_.asked[ci];
                 ++ts_.covered[ci];
@@ -862,6 +859,9 @@ void RtScene::observeOwned(d3d9::Device& dev, const d3d9::OwnedFrame& f) {
             oc.epoch = r.epoch;
             oc.entry = coveredEntry_;
             oc.idx = coveredEntry_->idx;
+            oc.slot = coveredEntry_->slot;
+            oc.slotStamp = coveredEntry_->slotStamp;
+            oc.salt = coveredEntry_->salt;
             oc.gen = entryGen_[oc.idx];
             oc.cls = tableClass(cd.phase);
             ++bs_.covered;
@@ -1003,6 +1003,7 @@ void RtScene::tableObserved(const d3d9::ReplaceQuery& q, const Blas& b, rt::Regi
     e.slot = slotIndex;
     e.slotGen = slot->generation;
     e.slotVersion = slot->version;
+    e.slotStamp = engine::scenetable::stamp(slotIndex);
     e.key = b.key;
     e.blas = b.id;
     e.instKey = in.key;
@@ -1062,8 +1063,7 @@ void RtScene::tableMaintain(std::uint64_t frame) {
     }
     for (auto it = table_.begin(); it != table_.end();) {
         const TableEntry& e = it->second;
-        const engine::scenetable::Slot* s = engine::scenetable::slot(e.slot);
-        if (s == nullptr || s->entity != e.entity || s->generation != e.slotGen || s->version != e.slotVersion) {
+        if (engine::scenetable::stamp(e.slot) != e.slotStamp) {
             const auto victim = it++;
             tableErase(victim, true);
             ++ts_.slotDropped;
