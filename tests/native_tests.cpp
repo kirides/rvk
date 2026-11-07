@@ -284,6 +284,22 @@ TEST(static_passes_follow_get_passes) {
     CHECK(sc::psIndex(1u << 6 | 1u << 2) == 1 + 4);
 }
 
+TEST(static_blend_prediction_matches_the_states) {
+    // F2d: blendsAtFadeOne is what fillBlending does at fade 1 in a normal (non-additive) pass, for every mode and flag combination
+    for (std::int32_t mode = 0; mode <= 10; ++mode) {
+        for (std::uint32_t bits = 0; bits < 8; ++bits) {
+            sc::BlendInputs b;
+            b.mode = mode;
+            b.maskRef = 100;
+            b.hasOpacity = (bits & 1u) != 0;
+            b.refracted = (bits & 2u) != 0;
+            b.tradeAlphaAsSolid = (bits & 4u) != 0;
+            const sc::RenderStates r = sc::passStates(1u << 9, b, 1.0f);
+            CHECK(r.blend == sc::blendsAtFadeOne(b));
+        }
+    }
+}
+
 TEST(static_blend_states_per_mode) {
     sc::BlendInputs b;
     // masked at fade 1: no blending, depth EQUAL, the alpha test word with the mask reference

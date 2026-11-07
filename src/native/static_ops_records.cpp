@@ -135,6 +135,13 @@ bool StaticOps::recStamp(const Op& op, orec::Stamp& st) {
                            (static_cast<std::uint64_t>(get<std::uint8_t>(sh, 0x2b8)) << 48) | (static_cast<std::uint64_t>(get<std::uint8_t>(sh, 0x2a8)) << 56));
             h = mixPtr(mix(h, static_cast<std::uint32_t>(get<std::int32_t>(sh, 0x68))), ptr(sh, 0x220));
         }
+        const std::uint32_t node = op.raw.desc >> 8;
+        if (node != 0 && node != kStaticOpNone && sub != 0xffu && static_cast<std::int32_t>(sub) < count) {
+            // F2d: a hierarchy node op draws the node's index range of its sub-mesh (subMeshDraws: sub +0x40 table of 0x28-byte nodes, +0x20 = first index, the
+            // node's pointer at +0 = the next one)
+            U8* h0 = ptr(subs + 0x48 * static_cast<std::size_t>(sub), 0x40) + 0x28 * static_cast<std::size_t>(node);
+            h = mix(mix(mixPtr(h, h0), static_cast<std::uint32_t>(get<std::int32_t>(h0, 0x20))), static_cast<std::uint32_t>(get<std::int32_t>(ptr(h0, 0), 0x20)));
+        }
         st.geom = h;
     }
     const std::uint32_t slot = engine::scenetable::find(entity);
@@ -183,8 +190,10 @@ orec::Excl StaticOps::recExclusion(const Op& op) {
     }
     if ((get<std::uint32_t>(entity, 0x28) & 0xe00000u) != 0) reason(orec::Excl::Overlay);
     if (!(op.raw.fade >= 1.0f)) reason(orec::Excl::Fade);
-    if (get<std::int32_t>(ctx, 0x34) > 0) reason(orec::Excl::Hierarchy);
-    if (node != 0 && node != kStaticOpNone) reason(orec::Excl::NodeOp);
+    if (!orec::hierarchyOwned()) {
+        if (get<std::int32_t>(ctx, 0x34) > 0) reason(orec::Excl::Hierarchy);
+        if (node != 0 && node != kStaticOpNone) reason(orec::Excl::NodeOp);
+    }
     if (solid) {
         U8* illumPs = ptr(entity, 0xf8);
         U8* illum = illumPs != nullptr ? illumPs + 0x78 : nullptr;
@@ -204,6 +213,17 @@ orec::Excl StaticOps::recExclusion(const Op& op) {
                 reason(orec::Excl::ShaderClass);
                 continue;
             }
+            if (solid && orec::hierarchyOwned()) {
+                // F2d: a blended solid-list shader (the landscape's terrain layers) is refused after its composition (recComposed: blended / no z write draw): ask before it,
+                // or every frame composes it with a read log and builds a record that is dropped again (the old Hierarchy reason used to hide this)
+                sc::BlendInputs b;
+                b.mode = get<std::int32_t>(shader, 0x50);
+                b.hasOpacity = get<std::uint8_t>(shader, 0x330) != 0;
+                b.refracted = get<std::uint8_t>(shader, 0x420) != 0;
+                b.tradeAlphaAsSolid = get<std::uint8_t>(shader, 0x79) != 0;
+                // (the terrain layers blend with TradeAlphaAsSolid set: isBlended is false for them, the states still blend)
+                if (sc::blendsAtFadeOne(b) || sc::isBlended(b)) reason(orec::Excl::Blended);
+            }
             if (get<std::uint8_t>(shader, 0x2b8) != 0) reason(orec::Excl::SortId);
             if (get<std::uint8_t>(shader, 0x78) != 0) reason(orec::Excl::DepthBias);  // (the owned view block holds the plain view-projection in c0..c3)
         }
@@ -217,6 +237,7 @@ void StaticOps::recEnter(const Op& op) {
     orec::Store& R = *recs_;
     R.active = R.building = R.auditBad = R.diffInOp = R.refused = R.wantOwnable = false;
     R.cur = nullptr;
+    R.f2dCls = -1;
     R.postDone = false;
     R.rebuildWhy = -1;
     R.probes.clear();
@@ -234,6 +255,10 @@ void StaticOps::recEnter(const Op& op) {
     U8* entity = ptr(ctx, 0x10);
     R.key = {ctx, op.raw.desc, static_cast<std::uint8_t>(op.list), 0};
     const orec::Excl ex = recExclusion(op);
+    if (orec::f2dMeasure()) {
+        R.f2dCls = static_cast<int>(ex);
+        R.f2dT0 = std::chrono::steady_clock::now();
+    }
     if (ex != orec::Excl::Count) {
         ++w.excluded[static_cast<std::size_t>(ex)];
         R.map.erase(R.key);
@@ -356,6 +381,12 @@ void StaticOps::recComposed(const Op& op, Skip s) {
         // (F2c-3: an owned op's draws are opaque and write depth: drawn before the engine's other ops, in any order among themselves)
         const sc::DrawDesc& d = *draws_[k];
         if (d.states[sc::StBlend] != 0 || d.states[sc::StZWrite] == 0) {
+            static int logged = 0;
+            if (logged < 12) {
+                ++logged;
+                spdlog::info("native: owned records: {} op refused after its composition: draw {} of {} blend {} z write {} src {} dst {} (F2d diagnostics)", describe(op), k, drawCount_,
+                             d.states[sc::StBlend], d.states[sc::StZWrite], d.states[sc::StSrc], d.states[sc::StDst]);
+            }
             exclude(orec::Excl::Blended);
             return;
         }
@@ -794,6 +825,16 @@ void StaticOps::recReport() {
                  w.alphaRefCarry, w.c5wCarry, w.viewDup, w.auditChecked, w.auditCaught, w.auditDisagree, list(w.auditBy, orec::kAuditNames, orec::kAuditCount), w.auditDisagreeDiff, static_cast<double>(w.buildNs) / frame / 1000.0, w.builds,
                  static_cast<double>(w.deriveNs) / frame / 1000.0, static_cast<double>(w.deriveCoreNs) / frame / 1000.0, w.derives, static_cast<double>(w.stampNs) / frame / 1000.0, static_cast<double>(w.auditNs) / frame / 1000.0,
                  dev_.objectRowStats.given, dev_.objectRowStats.differing);
+    if (orec::f2dMeasure()) {
+        std::string t;
+        for (std::size_t i = 0; i <= orec::kExclCount; ++i) {
+            if (R.f2dOps[i] == 0) continue;
+            t += std::format("{}{} {} ops {:.2f} us/op {:.3f} ms/frame", t.empty() ? "" : "; ", i < orec::kExclCount ? orec::kExclNames[i] : "eligible", R.f2dOps[i],
+                             static_cast<double>(R.f2dNs[i]) / 1000.0 / static_cast<double>(R.f2dOps[i]), static_cast<double>(R.f2dNs[i]) / 1.0e6 / frame);
+            R.f2dNs[i] = R.f2dOps[i] = 0;
+        }
+        spdlog::info("native: f2d measure (5 s): composed ops by class: {}", t);
+    }
     spdlog::info("native: owned records (total): {} eligible ops, {} draws, valid at entry {}, built {}, rebuilt {}, derived {}, compared {}, DIFFERING {} ({}), audit DISAGREEMENTS {} ({} more caught by the post stamps) of {} checks ({})",
                  R.total.ops, R.total.draws, R.total.validAtEntry, R.total.built, R.total.rebuilt, R.total.derived, R.total.compared, R.total.differing,
                  list(R.total.byField, orec::kFieldNames, orec::kFieldCount), R.total.auditDisagree, R.total.auditCaught, R.total.auditChecked, list(R.total.auditBy, orec::kAuditNames, orec::kAuditCount));

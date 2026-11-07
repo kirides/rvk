@@ -182,7 +182,7 @@ bool StaticOps::ownedSelect(const Op& op) {
         ++W.leftExcl[static_cast<std::size_t>(orec::Excl::NotTableLit)];
         return false;
     }
-    if (get<std::int32_t>(op.raw.context, 0x34) > 0) {
+    if (!orec::hierarchyOwned() && get<std::int32_t>(op.raw.context, 0x34) > 0) {
         ++W.leftExcl[static_cast<std::size_t>(orec::Excl::Hierarchy)];
         return false;
     }

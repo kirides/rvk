@@ -80,6 +80,12 @@ bool isBlended(const BlendInputs& b) {
     return b.mode != 1;
 }
 
+bool blendsAtFadeOne(const BlendInputs& b) {
+    if (b.mode == 1) return false;                   // masked: the alpha test, no blend (an additive pass would)
+    if (b.mode >= 2 && b.mode <= 8) return true;     // alpha, modulate, ...
+    return b.hasOpacity && !b.refracted;             // the default mode: opaque unless it has an opacity node (TradeAlphaAsSolid only keeps the depth write)
+}
+
 void fillBlending(RenderStates& rs, const BlendInputs& b, bool additive, float fade) {
     const auto tail = [&] {
         rs.alphaTest = 1;

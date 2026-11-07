@@ -8,7 +8,10 @@
 // Pure parts (this header): the key, the stamp and its field-wise comparison, the exclusion reasons, the statistics. The engine reads and the
 // compare are in static_ops_records.cpp (StaticOps members).
 
+#include <windows.h>
+
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -91,6 +94,23 @@ inline constexpr const char* kExclNames[] = {"hardware batch", "instance list", 
                                              "shader class", "sort id", "not composed (left to the engine)", "switch material", "draw level (inherited stage / CPU stream / not indexed)", "no retain (compile at the slot)",
                                              "draw not retainable (no packet)", "depth-bias material (F2c-3)", "blended / no z write draw (F2c-3)", "lean block (video / edge case)"};
 inline constexpr std::size_t kExclCount = static_cast<std::size_t>(Excl::Count);
+
+// F2d (frame-ownership.md 7.28): hierarchy meshes (ctx +0x34 > 0) and their node ops are owned like any other static op; `RVK_F2D_NO_HIERARCHY=1` (Win32
+// environment) restores the exclusion for the A/B arm
+inline bool f2dMeasure() {
+    static const bool on = [] {
+        char b[8];
+        return GetEnvironmentVariableA("RVK_F2D_MEASURE", b, sizeof(b)) != 0;
+    }();
+    return on;
+}
+inline bool hierarchyOwned() {
+    static const bool on = [] {
+        char b[8];
+        return GetEnvironmentVariableA("RVK_F2D_NO_HIERARCHY", b, sizeof(b)) == 0;
+    }();
+    return on;
+}
 
 // the compare's field classes
 enum class Field : std::uint8_t { Scene, Pipeline, VertexInput, Geometry, Flags, Tag, Windows, BlockTex, BlockSmp, BlockPos, BlockAlpha, BlockPad, BlockC5, Count };
@@ -257,6 +277,10 @@ struct Store {
     ret::ReadLog readLog;
     std::vector<d3d9::Device::SceneView> probes;
     std::vector<std::uint64_t> pkeys;
+    // F2d measurement (RVK_F2D_MEASURE=1): the wall time from an op's entry to the next op's entry (composition + issue), by exclusion class (kExclCount = eligible)
+    std::uint64_t f2dNs[kExclCount + 1] = {}, f2dOps[kExclCount + 1] = {};
+    int f2dCls = -1;
+    std::chrono::steady_clock::time_point f2dT0;
     std::string opName;
     // the per-view window cache (the view-level windows VS 0 / 1, PS 0: the view block's slot is a per-view input)
     std::uint64_t viewSerial = ~0ull;

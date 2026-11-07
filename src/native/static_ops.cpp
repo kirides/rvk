@@ -2212,6 +2212,12 @@ void StaticOps::opEnterImpl(const Op& op) {
 }
 
 void StaticOps::finishOp() {
+    if (recs_ && recs_->f2dCls >= 0) {
+        orec::Store& R = *recs_;
+        R.f2dNs[R.f2dCls] += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - R.f2dT0).count());
+        ++R.f2dOps[R.f2dCls];
+        R.f2dCls = -1;
+    }
     if (recs_) recs_->active = false;
     if (f2c::on() && f2c::opActive()) f2c::opEnd(static_cast<std::uint32_t>(drawCount_));
     f2cOp_ = nullptr;

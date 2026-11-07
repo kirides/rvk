@@ -83,6 +83,9 @@ struct BlendInputs {
 void fillBlending(RenderStates& rs, const BlendInputs& b, bool additive, float fade);
 // eCShaderBase::IsBlended 0x6d2ef0
 bool isBlended(const BlendInputs& b);
+// F2d: whether fillBlending blends the draw at fade 1 in a non-additive pass (a pure function of the shader's inputs: the owned static cut asks it before the
+// composition; kept equal to fillBlending by the test static_blend_prediction_matches_the_states)
+bool blendsAtFadeOne(const BlendInputs& b);
 // eCShaderVersionDefault_3_0::GetPasses 0x6cc970 for TransformationType 11 (SpeedTree billboards): every pass gets VS variant 1
 // (bits 10-11 = 1) and the array is appended again with variant 2
 void billboardPassPairs(std::vector<Pass>& passes);
