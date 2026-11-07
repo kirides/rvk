@@ -27,6 +27,7 @@
 #include "engine/load_accel.h"
 #include "engine/lod.h"
 #include "engine/scene_table.h"
+#include "native/f10_collect.h"
 #include "gpuscene/instance_buffer.h"
 #include "gpuscene/illumination_table.h"
 #include "gpuscene/lighting_images.h"
@@ -1689,6 +1690,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
     engine::xinput::onPresent();
     engine::loadaccel::onPresent();
     engine::scenetable::onPresent();
+    native::f10::onPresent();
     {
         gpuscene::instances().flush(dev_, frozen::kGpuScene >= 2 ? frozen::kGpuScene : 0);
         gpuscene::illumtable().flush(dev_, true);
