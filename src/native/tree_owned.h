@@ -87,7 +87,7 @@ struct Inst {
 };
 
 struct Stats {
-    std::uint64_t views = 0, ownedViews = 0, opsSeen = 0, opsTaken = 0, opsDrawn = 0, opsLate = 0, instances = 0, items = 0, flushes = 0;
+    std::uint64_t views = 0, ownedViews = 0, opsSeen = 0, opsTaken = 0, opsDrawn = 0, opsLate = 0, instances = 0, items = 0, records = 0, observed = 0, flushes = 0, compBatches = 0, compViews = 0, packets = 0;
     // why an op taken from the list was composed late
     std::uint64_t lateNoRec = 0, lateStamp = 0, lateView = 0, lateMaterial = 0, latePlan = 0, lateSpecial = 0, lateNoTemplate = 0, lateTemplate = 0, lateFlush = 0, lateRows = 0;
     std::uint64_t built = 0, replaced = 0, notRetained = 0, badOps = 0;
@@ -124,6 +124,8 @@ struct State {
     std::vector<std::uint32_t> instEntry;
     std::vector<std::uint32_t> opOfInst;
     std::vector<d3d9::Device::TreeItem> items;
+    std::vector<shader::abi::DrawRecord> recs;   // one per (template, lighting entry)
+    std::vector<std::uint32_t> posRec;           // the record of each list position
     std::vector<std::uint32_t> order;
     std::uint64_t scrubTick = 0;
     std::uint64_t differingSeen = 0;
