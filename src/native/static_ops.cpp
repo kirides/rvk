@@ -2237,7 +2237,14 @@ void StaticOps::opEnterImpl(const Op& op) {
     opDiffLogged_ = false;
     taken_ = false;
     if (g_->takeOver) {
-        { const f4m::IssueScope f4i(op.kind == OpKind::SpeedTree ? 1 : op.kind == OpKind::SpeedTreeBB ? 2 : 0); issue(); }
+        {
+            const auto ti = std::chrono::steady_clock::now();
+            { const f4m::IssueScope f4i(op.kind == OpKind::SpeedTree ? 1 : op.kind == OpKind::SpeedTreeBB ? 2 : 0); issue(); }
+            if (op.kind == OpKind::Vegetation) {
+                treeWindow_.vegIssueNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - ti).count());
+                ++treeWindow_.vegIssueOps;
+            }
+        }
         taken_ = true;
         recEnd(op);
         bbEnd(op);
@@ -2988,6 +2995,19 @@ void StaticOps::report() {
                 c += std::format("{}{} {:.1f} ms / {} ops", c.empty() ? "" : "; ", kCls[i], ms, w.compOps[i]);
             }
             spdlog::info("native: trees composition CPU (5 s, composed ops only): {}; total {:.1f} ms", c, total);
+            spdlog::info("native: vegetation CPU (5 s): node walk {:.1f} ms, instance read + convert {:.1f} ms, issue() {:.1f} ms over {} ops; {} nodes, {} instances, {} draws", static_cast<double>(w.vegNodesNs) / 1e6,
+                         static_cast<double>(w.vegConvNs) / 1e6, static_cast<double>(w.vegIssueNs) / 1e6, w.vegIssueOps, w.grassNodes, w.grassInstances, w.grassDraws);
+        }
+        if (ownedVeg_) {
+            const VegStats& v = vegStat_;
+            vegStatTotal_.ops += v.ops; vegStatTotal_.retained += v.retained; vegStatTotal_.reused += v.reused; vegStatTotal_.rebuilt += v.rebuilt;
+            vegStatTotal_.rebuiltBytes += v.rebuiltBytes; vegStatTotal_.fallback += v.fallback; vegStatTotal_.checks += v.checks; vegStatTotal_.differing += v.differing;
+            vegStatTotal_.drawsRetained += v.drawsRetained; vegStatTotal_.grown += v.grown;
+            spdlog::info("native: owned vegetation (5 s): {} ops, {} on a retained stream ({:.1f} %), {} reused, {} rebuilt ({} KiB converted + uploaded), {} buffers grown, {} fallbacks; "
+                         "{} draws from retained streams; check frames {} DIFFERING {} (total {} / {}); {} streams",
+                         v.ops, v.retained, v.ops != 0 ? 100.0 * static_cast<double>(v.retained) / static_cast<double>(v.ops) : 0.0, v.reused, v.rebuilt, v.rebuiltBytes / 1024, v.grown,
+                         v.fallback, v.drawsRetained, v.checks, v.differing, vegStatTotal_.checks, vegStatTotal_.differing, vegRet_.size());
+            vegStat_ = {};
         }
         spdlog::info("native: trees (total): {}", line(t));
         treeWindow_ = {};

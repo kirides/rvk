@@ -2659,6 +2659,20 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .needs = {{"native.owned_persistent", "true", false, true}},
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeOwnedVegetation = &reg.add({
+        .key = "native.owned_vegetation",
+        .label = "Native frame: owned vegetation",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode only, needs the packet cache (frame-ownership.md 7.40, F7-1): the main view's vegetation (grass) ops keep their converted instance stream in a "
+                       "persistent GPU buffer per op, rebuilt only when the engine's source instance bytes changed (an exact compare every frame; every 10th frame also "
+                       "re-converts and compares); the grass draws then carry no CPU bytes and are replayed from the packet cache. Off = nothing changes. "
+                       "rvk.log `native: owned vegetation (5 s)`.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeOwnedBillboards = &reg.add({
         .key = "native.owned_billboards",
         .label = "Native frame: owned tree billboards",

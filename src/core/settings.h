@@ -498,6 +498,7 @@ struct RendererSettings {
     Setting* nativeOwnedTrees = nullptr;  // native.owned_trees: the main view's SpeedTree ops owned (frame-ownership.md 7.25, F4-2 / F4-3)
     Setting* nativeClusterCullShadows = nullptr;  // native.cluster_cull_shadows: the cull of the owned draws of clustered meshes in the sun cascades (frame-ownership.md 7.37, F3-2)
     Setting* nativeOwnedShadows = nullptr;  // native.owned_shadows: the sun cascades' static mesh z ops owned (frame-ownership.md 7.36, F3-1)
+    Setting* nativeOwnedVegetation = nullptr;  // native.owned_vegetation: the vegetation ops' instance streams retained in persistent GPU buffers (frame-ownership.md 7.40, F7-1)
     Setting* nativeOwnedBillboards = nullptr;  // native.owned_billboards: the tree billboards' ops retained as records and drawn from them (frame-ownership.md 7.17, F4-1)
     Setting* nativeSceneDrawsCheck = nullptr;  // native.scene_draws_check: every N-th frame the record / argument buffers are read back and compared
     Setting* nativeLean = nullptr;             // native.lean: the engine's slot code not run for the composed mesh-like ops (O2a)

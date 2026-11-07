@@ -450,6 +450,57 @@ void testInstancing(Fixture& f) {
     f.dev.release(std::move(inst));
 }
 
+// F7-1 (frame-ownership.md 7.40): the vegetation's retained instance stream = one dynamic buffer holding many batches' instances, a batch drawn from a stream
+// OFFSET; the buffer stays untouched across frames (the GPU copy persists) and is rewritten (DISCARD, the whole range) only when the source changed
+void testRetainedInstanceStream(Fixture& f) {
+    f.reset();
+    auto inst = f.dev.createBuffer(4 * 16, USAGE_DYNAMIC | USAGE_WRITEONLY, POOL_DEFAULT, false, false);
+    const auto fill = [&](const float (&x)[4]) {
+        float data[16] = {};
+        for (int i = 0; i < 4; ++i) data[i * 4] = x[i];
+        void* p = inst->lock(0, 4 * 16, LOCK_DISCARD);
+        std::memcpy(p, data, sizeof(data));
+        inst->unlock();
+    };
+    const auto drawBatch = [&](std::uint32_t firstInstance, const char* name) {
+        f.reset();
+        f.dev.setVertexDecl(f.instDecl.get());
+        f.dev.setVertexShader(f.vsInst);
+        const auto v = quad(-1, -1, 0, 0, 0.5f, 0xFF00FF00);  // bottom-left quadrant
+        void* p = f.vb->lock(0, 0, LOCK_DISCARD);
+        std::memcpy(p, v.data(), v.size() * sizeof(Vertex));
+        f.vb->unlock();
+        f.dev.setStreamSource(0, f.vb.get(), 0, sizeof(Vertex));
+        f.dev.setStreamSource(1, inst.get(), firstInstance * 16, 16);
+        f.dev.setStreamSourceFreq(0, STREAMSOURCE_INDEXEDDATA | 2);
+        f.dev.setStreamSourceFreq(1, STREAMSOURCE_INSTANCEDATA | 1);
+        f.dev.drawPrimitive(PT_TRIANGLELIST, 0, 2);
+        f.dev.setStreamSourceFreq(0, 1);
+        f.dev.setStreamSourceFreq(1, 1);
+        f.dev.setStreamSource(1, nullptr, 0, 0);
+        return capture(f.dev, name);
+    };
+    // instances {0, 1, 1, 0}: the batch from instance 1 = two instances both one unit to the right
+    fill({0.0f, 1.0f, 1.0f, 0.0f});
+    Pixels px = drawBatch(1, "retained_inst_1");
+    expect("batch at offset 1: nothing at the left", px, 10, 50, 0x000000);
+    expect("batch at offset 1: right", px, 50, 50, 0x00FF00);
+    // the next frame, the buffer untouched
+    px = drawBatch(1, "retained_inst_2");
+    expect("untouched buffer, next frame: nothing at the left", px, 10, 50, 0x000000);
+    expect("untouched buffer, next frame: right", px, 50, 50, 0x00FF00);
+    // another batch of the same buffer: instances 0 and 1 = one left, one right
+    px = drawBatch(0, "retained_inst_3");
+    expect("batch at offset 0: left", px, 10, 50, 0x00FF00);
+    expect("batch at offset 0: right", px, 50, 50, 0x00FF00);
+    // the source changed: the whole range rewritten
+    fill({0.0f, 0.0f, 0.0f, 1.0f});
+    px = drawBatch(1, "retained_inst_4");
+    expect("rewritten: left", px, 10, 50, 0x00FF00);
+    expect("rewritten: right empty", px, 50, 50, 0x000000);
+    f.dev.release(std::move(inst));
+}
+
 void testUpAndScissor(Fixture& f) {
     f.reset();
     const auto v = quad(-1, -1, 1, 1, 0.5f, 0xFFFF8000);
@@ -3180,7 +3231,7 @@ int main(int argc, char** argv) {
         {"clear", testClear},         {"raster rules", testRasterRules}, {"cull", testCull},
         {"depth", testDepth},         {"blend", testBlend},              {"alpha test", testAlphaTest},
         {"stencil", testStencil}, {"scope clear", testScopeClear}, {"no-stencil depth", testNoStencilDepth},     {"render to texture", testRenderToTexture}, {"dxt1", testDxt1},
-        {"instancing", testInstancing}, {"UP + scissor", testUpAndScissor}, {"stretch rect", testStretchRect},
+        {"instancing", testInstancing}, {"retained instance stream (F7-1)", testRetainedInstanceStream}, {"UP + scissor", testUpAndScissor}, {"stretch rect", testStretchRect},
         {"mip chain stretch rect", testMipChainStretchRect}, {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
         {"read-only lock of a fresh texture", testReadOnlyLockOfFreshTexture},

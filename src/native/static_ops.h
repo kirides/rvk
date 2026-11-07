@@ -30,6 +30,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -152,6 +153,10 @@ public:
     std::uint32_t ownedPass(bool solid);
     // native.owned_billboards (frame-ownership.md 7.17, F4-1): the tree billboard ops retained as records, compared / drawn from them (needs owned windows, lighting images, scene draws)
     void setOwnedBillboards(bool on);
+    // native.owned_vegetation (frame-ownership.md 7.40, F7-1): the vegetation ops' instance streams are retained per op in a persistent GPU buffer (valid while the op's
+    // source instance bytes are unchanged: an exact compare), so the grass draws no longer carry CPU bytes, become packet-cache replayable and are not converted / uploaded again
+    void setOwnedVegetation(bool on);
+    bool ownedVegetationOn() const { return ownedVeg_; }
     // native.owned_trees (frame-ownership.md 7.25, F4-2 / F4-3; static_ops_trees_owned.cpp): the main view's SpeedTree z / solid ops are retained as templates per LOD bucket,
     // compared on the check frames, and on the other frames taken out of the lists at the view's beginning and drawn at the pass from the engine's tree objects (rows +
     // per-instance records, a few indirect calls). Needs owned_persistent (the DrawBlock slots), scene draws v2, lighting images, table lighting.
@@ -1005,6 +1010,7 @@ private:
         std::uint64_t knownLights = 0;  // tree instances whose static lights the table holds (their batch no longer ends on them)
         std::uint64_t leafLods = 0, wrongTransformation = 0, billboardOps = 0, billboardTexCoords = 0, shadowFrondsSkipped = 0;
         std::uint64_t grassOps = 0, grassZeroOps = 0, grassNodes = 0, grassInstances = 0, grassDraws = 0, grassWraps = 0, grassNotCached = 0, grassClockMoved = 0;
+        std::uint64_t vegNodesNs = 0, vegConvNs = 0, vegIssueNs = 0, vegIssueOps = 0;  // F7-1 measurement: node walk, read + convert, issue() of vegetation ops
         std::array<std::uint64_t, 6> compNs{}, compOps{};  // F4-4: composeTree (main z / main solid / cascades) / vegetation (z / solid) / tree billboards: CPU ns + ops composed
     } treeWindow_, treeTotal_;
     // F4-2 / F4-3 (static_ops_trees_owned.cpp)
@@ -1061,6 +1067,21 @@ private:
     // take-over: our own dynamic VB for CPU-generated geometry on stream 0 (decals, billboards, sky objects, particles, strips, rain)
     static constexpr std::uint32_t kOwnVbBytes = 4u << 20;
     std::unique_ptr<d3d9::Buffer> ownInstVb_;
+    // F7-1 retained vegetation instance streams (static_ops_trees.cpp): per (context, type, list)
+    struct VegRet {
+        std::vector<std::uint8_t> raw, conv;     // the flattened source entries of the last build, their converted bytes (check frames compare)
+        std::unique_ptr<d3d9::Buffer> buf;       // the converted instances (dynamic buffer, DISCARD-rewritten when the source changed)
+        std::uint32_t cap = 0;
+        bool wind = false, lift = false;
+        std::uint64_t lastFrame = 0;
+    };
+    struct VegStats {
+        std::uint64_t ops = 0, retained = 0, reused = 0, rebuilt = 0, rebuiltBytes = 0, fallback = 0, checks = 0, differing = 0, drawsRetained = 0, grown = 0;
+    } vegStat_, vegStatTotal_;
+    bool ownedVeg_ = false;
+    std::map<std::tuple<const void*, std::uint32_t, std::uint32_t>, VegRet> vegRet_;
+    std::vector<std::uint8_t> vegRaw_;
+    VegRet* vegRetain(const Op& op, std::uint32_t total, bool wind, bool lift);
     std::uint32_t ownInstCursor_ = 0;
     std::uint64_t ownInstFrame_ = ~0ull;
     std::vector<std::uint32_t> ownOffset_;  // per issued draw: its instance data's offset in ownInstVb_

@@ -9,11 +9,14 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <bit>
+#include <chrono>
 #include <cstring>
 #include <format>
 
 #include <spdlog/spdlog.h>
 
+#include "d3d9/defs.h"
 #include "engine/memread.h"
 #include "engine/illum_census.h"
 #include "engine/symbols.h"
@@ -650,6 +653,7 @@ StaticOps::Skip StaticOps::composeVegetation(const Op& op) {
     U8* mesh = ptr(typeObj, 0x58);
     U8* vd = ptr(vadmin, 0x38);
     U8* nodes = ptr(ps, 0x98);
+    const auto tN0 = std::chrono::steady_clock::now();
     // the nodes and the instance data in Render's order
     std::vector<sc::GrassNode>& plan = scr_.grassPlan;
     std::vector<U8*>& sources = scr_.grassSources;
@@ -669,6 +673,7 @@ StaticOps::Skip StaticOps::composeVegetation(const Op& op) {
             total += gn.count;
         }
     }
+    st.vegNodesNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - tN0).count());
     st.grassNodes += static_cast<std::uint32_t>(nodeCount);
     st.grassInstances += total;
     const std::uint32_t cursor = get<std::uint32_t>(vadmin, 0x40);
@@ -682,8 +687,24 @@ StaticOps::Skip StaticOps::composeVegetation(const Op& op) {
     const bool wind = get<float>(typeObj, 0x2c) != 0.0f;
     const bool lift = get<std::int32_t>(typeObj, 0x20) != 0;
     std::vector<std::uint8_t>& bytes = scr_.grassBytes;
-    bytes.assign(static_cast<std::size_t>(total) * sc::kGrassInstanceSize, 0);
-    {
+    const auto tC0 = std::chrono::steady_clock::now();
+    // F7-1: the op's source entries flattened (nodes in order) and handed to the retained stream of this op: the converted instances stay in a persistent GPU buffer
+    // while the source bytes are unchanged (an exact compare), so the draws carry no CPU bytes
+    VegRet* ret = nullptr;
+    if (ownedVeg_ && packetMode_ != 0 && viewKind_ == ViewKind::Main && g_ != nullptr && !g_->compare && total != 0) {
+        vegRaw_.resize(static_cast<std::size_t>(total) * sc::kGrassInstanceSize);
+        std::size_t at = 0;
+        for (std::int32_t i = 0; i < nodeCount; ++i) {
+            const sc::GrassNode& gn = plan[static_cast<std::size_t>(i)];
+            if (gn.count == 0) continue;
+            const std::size_t n = static_cast<std::size_t>(gn.count) * sc::kGrassInstanceSize;
+            if (!safeRead(sources[static_cast<std::size_t>(i)], vegRaw_.data() + at, n)) return Skip::Unreadable;
+            at += n;
+        }
+        ret = vegRetain(op, total, wind, lift);
+    }
+    if (ret == nullptr) {
+        bytes.assign(static_cast<std::size_t>(total) * sc::kGrassInstanceSize, 0);
         std::size_t at = 0;
         std::vector<std::uint8_t>& src = scr_.grassSrc;
         for (std::int32_t i = 0; i < nodeCount; ++i) {
@@ -696,6 +717,7 @@ StaticOps::Skip StaticOps::composeVegetation(const Op& op) {
             }
         }
     }
+    st.vegConvNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - tC0).count());
     for (const sc::GrassDraw& d : draws) {
         if (d.bufferOffset + d.count == sc::kGrassBufferInstances) ++st.grassWraps;
     }
@@ -745,6 +767,11 @@ StaticOps::Skip StaticOps::composeVegetation(const Op& op) {
     float ax = 0.0f, ay = 0.0f;
     sc::vegetationAlpha(get<float>(grid, 0x50), get<float>(grid, 0x54), maskRefOf(shader), ax, ay);
     const bool stream1 = record->streamView(1).enabled;
+    if (ret != nullptr && !stream1) {  // (no stream 1 in the record: the old CPU-bytes path; its bytes from the flattened source)
+        bytes.assign(vegRaw_.size(), 0);
+        for (std::size_t k = 0; k * sc::kGrassInstanceSize < vegRaw_.size(); ++k) sc::grassInstance(vegRaw_.data() + k * sc::kGrassInstanceSize, wind, lift, bytes.data() + k * sc::kGrassInstanceSize);
+        ret = nullptr;
+    }
     for (const sc::GrassDraw& d : draws) {
         mirror_.global[0][0] = ax;  // c31.xy
         mirror_.global[0][1] = ay;
@@ -753,13 +780,19 @@ StaticOps::Skip StaticOps::composeVegetation(const Op& op) {
         if (gg.streams[0].buffer != nullptr) gg.streams[0].freq = d.count | 0x40000000u;
         // AttachVertexData(1, the shared buffer): the record's stream 1 = its buffer with its stride, at the batch's byte offset,
         // INSTANCEDATA | 1
-        if (stream1) gg.streams[1] = sc::DrawDesc::Stream{data->buffer(), d.bufferOffset * sc::kGrassInstanceSize, data->stride(), 0x80000001u};
+        if (ret != nullptr) {
+            // the retained buffer holds the op's instances flattened: this batch starts at its first instance
+            gg.streams[1] = sc::DrawDesc::Stream{ret->buf.get(), d.firstInstance * sc::kGrassInstanceSize, sc::kGrassInstanceSize, 0x80000001u};
+            ++vegStat_.drawsRetained;
+        } else if (stream1) {
+            gg.streams[1] = sc::DrawDesc::Stream{data->buffer(), d.bufferOffset * sc::kGrassInstanceSize, data->stride(), 0x80000001u};
+        }
         U8* illum = d.illumNode >= 0 ? nodes + 0x118 * static_cast<std::size_t>(d.illumNode) + 0x10 : nullptr;
         const std::size_t before = drawCount_;
         const engine::illumcensus::KindScope census(2);
         const Skip s = zpass ? specialPassDraw(shader, gg, false) : materialDraws(shader, illum, 0, false, 0, 0, gg, nullptr);
         if (s != Skip::None) return s;
-        for (std::size_t k = before; k < drawCount_; ++k) {
+        for (std::size_t k = before; ret == nullptr && k < drawCount_; ++k) {
             sc::DrawDesc& dd = *draws_[k];
             dd.cpuStream = 1;
             dd.vertexStride = sc::kGrassInstanceSize;
@@ -769,6 +802,82 @@ StaticOps::Skip StaticOps::composeVegetation(const Op& op) {
         ++st.grassDraws;
     }
     return Skip::None;
+}
+
+// ---- F7-1 retained vegetation streams (frame-ownership.md 7.40) ----------------------------------------------------------------------
+
+void StaticOps::setOwnedVegetation(bool on) {
+    if (on == ownedVeg_) return;
+    ownedVeg_ = on;
+    if (!on) vegRet_.clear();
+    spdlog::info("native: owned vegetation {}", on ? "on (the vegetation ops' instance streams retained in persistent GPU buffers, compared exactly with the source entries)" : "off");
+}
+
+// the op's flattened source entries are in vegRaw_ (total instances): the retained stream of (context, type, list), rebuilt only when the source bytes (or the type's
+// wind / lift flags) changed. nullptr = not retainable (the caller converts and uploads as before).
+StaticOps::VegRet* StaticOps::vegRetain(const Op& op, std::uint32_t total, bool wind, bool lift) {
+    ++vegStat_.ops;
+    const std::size_t n = static_cast<std::size_t>(total) * sc::kGrassInstanceSize;
+    if (n == 0 || n > (8u << 20) || vegRaw_.size() != n) {
+        ++vegStat_.fallback;
+        return nullptr;
+    }
+    const std::uint64_t frame = dev_.stats().frames;
+    if (frame % 600 == 0) {  // forget the streams of contexts that left (a world change)
+        for (auto it = vegRet_.begin(); it != vegRet_.end();) it = frame - it->second.lastFrame > 1200 ? vegRet_.erase(it) : std::next(it);
+    }
+    VegRet& r = vegRet_[{op.raw.context, op.raw.desc, static_cast<std::uint32_t>(op.list)}];
+    r.lastFrame = frame;
+    const auto convert = [&](std::vector<std::uint8_t>& out) {
+        out.resize(n);
+        for (std::size_t k = 0; k < static_cast<std::size_t>(total); ++k) {
+            sc::grassInstance(vegRaw_.data() + k * sc::kGrassInstanceSize, wind, lift, out.data() + k * sc::kGrassInstanceSize);
+        }
+    };
+    bool same = r.buf != nullptr && r.raw.size() == n && r.wind == wind && r.lift == lift && std::memcmp(r.raw.data(), vegRaw_.data(), n) == 0;
+    if (same && frame % 10 == 0) {
+        // check frame: the converted bytes of this source must be the retained ones (the stream's content is a pure function of the source + the flags)
+        ++vegStat_.checks;
+        std::vector<std::uint8_t> fresh;
+        convert(fresh);
+        if (fresh != r.conv) {
+            ++vegStat_.differing;
+            same = false;
+            spdlog::warn("native: owned vegetation: retained stream differs from a fresh conversion ({} instances): rebuilt", total);
+        }
+    }
+    if (same) {
+        ++vegStat_.reused;
+        ++vegStat_.retained;
+        return &r;
+    }
+    const std::uint32_t need = std::max<std::uint32_t>(4096u, std::bit_ceil(static_cast<std::uint32_t>(n)));
+    if (!r.buf || r.cap < need) {
+        r.buf = dev_.createBuffer(need, d3d9::USAGE_DYNAMIC | d3d9::USAGE_WRITEONLY, d3d9::POOL_DEFAULT, false, false);
+        r.cap = r.buf ? need : 0;
+        r.raw.clear();
+        ++vegStat_.grown;
+    }
+    if (!r.buf) {
+        ++vegStat_.fallback;
+        return nullptr;
+    }
+    convert(r.conv);
+    void* p = r.buf->lock(0, static_cast<std::uint32_t>(n), d3d9::LOCK_DISCARD);
+    if (p == nullptr) {
+        r.raw.clear();
+        ++vegStat_.fallback;
+        return nullptr;
+    }
+    std::memcpy(p, r.conv.data(), n);
+    r.buf->unlock();
+    r.raw.assign(vegRaw_.begin(), vegRaw_.end());
+    r.wind = wind;
+    r.lift = lift;
+    ++vegStat_.rebuilt;
+    vegStat_.rebuiltBytes += n;
+    ++vegStat_.retained;
+    return &r;
 }
 
 }  // namespace rvk::native

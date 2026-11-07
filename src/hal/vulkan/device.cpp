@@ -292,6 +292,7 @@ void HalDevice::applyStaticOps() {
             dev_.setSceneShadows(shadows);  // (the cascades' z draws get their scene forms: the retained draws the owned path replays)
             staticOps_->setOwnedShadows(shadows);
         }
+        staticOps_->setOwnedVegetation(on(rs.nativeOwnedVegetation) && renderMode() == RenderMode::Full && staticOps_->active());
         staticOps_->setOwnedBillboards(on(rs.nativeOwnedBillboards) && scene && dev_.sceneDrawsActive() && gpuscene::lightingimages().active() && gpuscene::windowtables().active());
     }
     staticOps_->setRetained(frozen::kRetained, frozen::kRetainedGroups, frozen::kRetainedCheck);
@@ -643,7 +644,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     frameTap_->setEffectOps(effectOps_.get());
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups,
                                  rs.nativeCoverage, rs.nativeFrameTap, rs.nativeLean, rs.nativeLeanCheck,
-                                 rs.nativePacketCache, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedCheck}) {
+                                 rs.nativePacketCache, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeOwnedVegetation, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedCheck}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
     // renderer.mode (Wrapper / Full): like the native.* settings applied by the registry's dispatch before a present, i.e. at a
