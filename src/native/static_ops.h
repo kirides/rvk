@@ -40,6 +40,7 @@
 #include "native/static_compose.h"
 #include "native/bb_records.h"
 #include "native/tree_owned.h"
+#include "native/veg_owned.h"
 #include "native/op_records.h"
 
 namespace rvk::hal::vulkan {
@@ -161,6 +162,16 @@ public:
     // source instance bytes are unchanged: an exact compare), so the grass draws no longer carry CPU bytes, become packet-cache replayable and are not converted / uploaded again
     void setOwnedVegetation(bool on);
     bool ownedVegetationOn() const { return ownedVeg_; }
+    // native.owned_vegetation_ops (frame-ownership.md 7.42, F7-2; static_ops_veg_owned.cpp): the main view's vegetation z / solid ops retained as templates per (type, pass, sun) bucket,
+    // compared on the check frames, taken out of the lists on the other frames and drawn at the pass (one record per op x lighting entry, the converted instance bytes of all
+    // ops in one ring block, one indirect command per bucket). Needs owned_persistent, scene ABI v2, lighting images, table lighting.
+    void setOwnedVegetationOps(bool on);
+    bool ownedVegetationOpsOn() const { return ownedVegOps_; }
+    void vegViewBegin(bool ownedFrame, ViewKind kind);
+    bool vegKindOk(ViewKind kind) const { return ownedVegOps_ && kind == ViewKind::Main; }
+    bool vegSelect(const Op& op);
+    void vegTake(List list, std::vector<Op>&& ops, std::uint64_t ns);
+    std::uint32_t vegPass(bool solid);
     // native.owned_trees (frame-ownership.md 7.25, F4-2 / F4-3; static_ops_trees_owned.cpp): the main view's SpeedTree z / solid ops are retained as templates per LOD bucket,
     // compared on the check frames, and on the other frames taken out of the lists at the view's beginning and drawn at the pass from the engine's tree objects (rows +
     // per-instance records, a few indirect calls). Needs owned_persistent (the DrawBlock slots), scene draws v2, lighting images, table lighting.
@@ -1083,9 +1094,22 @@ private:
     void treeCompEnd(const Op& op);
     bool treePlan(bool zpass, std::uint32_t type, bool tableMerge, const std::uint8_t* rb, const std::uint8_t* wrapper, const std::uint8_t* queue, std::int32_t n, std::vector<tro::Inst>& out, int& why);
     bool treeStampOf(const Op& op, tro::Stamp& st, std::uint32_t& type, const std::uint8_t*& rb, const std::uint8_t*& wrapper, const std::uint8_t*& shader, bool& zpass);
-    int treeTemplate(tro::Tpl& t, const d3d9::OwnedWindows& viewWin, std::uint64_t epoch, bool solid, std::uint32_t scrubStride, std::uint32_t scrubPhase);
+    int treeTemplate(tro::Tpl& t, const d3d9::OwnedWindows& viewWin, std::uint64_t epoch, bool solid, std::uint32_t scrubStride, std::uint32_t scrubPhase, tro::Stats& W, std::uint64_t& scrubTick, const char* what);
     void treeMissCheck(tro::OpRec& rec, tro::Tpl& t, bool solid);
     void treeReport();
+    // F7-2 (static_ops_veg_owned.cpp)
+    bool ownedVegOps_ = false;
+    std::unique_ptr<vro::State> vro_;
+    bool vegSceneIssue() const { return ownedVegOps_ && g_ == &groups_[static_cast<std::size_t>(Group::Vegetation)]; }
+    bool vegStampOf(const Op& op, vro::Stamp& st, const std::uint8_t*& shader);
+    bool vegIllumSun(const std::uint8_t* illum, bool& sun);
+    bool vegEnsureStand();
+    void vegCompBegin(const Op& op);
+    void vegCompNote(const Op& op, const std::vector<sc::GrassDraw>& draws, const std::uint8_t* nodes, std::uint32_t total, bool wind, bool lift, float ax, float ay);
+    void vegCompDraw(std::size_t drawsBefore, std::size_t k);
+    void vegCompEnd(const Op& op);
+    void vegConvert(vro::OpRec& rec, const std::vector<std::uint8_t>& raw, bool wind, bool lift, bool check, vro::Stats& W);
+    void vegReport();
     void treeReportOne(tro::Stats& q, tro::Stats& total, const char* what, bool shadow);
     // the skinned actors (static_ops_actors.cpp): the frame admin getter eCAnimation_PS::Render calls first (frame id at +0x4c), the
     // affine product of UpdateRenderMatrices (FUN_1800a2710: a *= b)

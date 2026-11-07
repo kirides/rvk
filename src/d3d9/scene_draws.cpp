@@ -90,11 +90,14 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
         lastVariant_.sceneActive = true;
         lastVariant_.scenePending = false;
     }
+    // F7-2 (native.owned_vegetation_ops): the grass draws of the main view get the v2 form only, like the trees
+    const bool veg = sceneVeg_ && sceneV2_ && kind == draws::Kind::Vegetation;
     const bool tree = sceneTrees_ && sceneV2_ && kind == draws::Kind::SpeedTree;  // F4-3: the scene ABI v2 form only (scenePipe_ stays None: the composed draw is drawn as it was)
+    const bool v2only = tree || veg;
     // F6-1 (native.owned_actors): the skinned actors' draws get the scene forms like the static meshes' (v1 for the composed draws, v2 for the owned path)
     const bool actor = sceneActors_ && sceneV2_ && kind == draws::Kind::Skinned;
     const bool shadowPhase = sceneShadows_ && sceneV2_ && (kind == draws::Kind::StaticMesh || tree || actor) && phase.view == scene::View::Shadow && phase.pass == scene::Pass::ShadowDepth;
-    if (!shadowPhase && ((kind != draws::Kind::StaticMesh && !(sceneBb_ && kind == draws::Kind::SpeedTreeBillboard) && !tree && !actor) || phase.view != scene::View::Main ||
+    if (!shadowPhase && ((kind != draws::Kind::StaticMesh && !(sceneBb_ && kind == draws::Kind::SpeedTreeBillboard) && !v2only && !actor) || phase.view != scene::View::Main ||
                          (phase.pass != scene::Pass::Solid && phase.pass != scene::Pass::DepthPrepass))) {
         return;
     }
@@ -127,9 +130,9 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
         ++sceneStats_.fbVariantKind;
         return;
     }
-    const rhi::ShaderModule vsM = tree ? rhi::ShaderModule::None : variant(vs_, lodVs ? VariantSlot::SceneVsLod : VariantSlot::SceneVs);
-    const rhi::ShaderModule fsM = tree ? rhi::ShaderModule::None : variant(ps_, sceneFs);
-    if (!tree && (vsM == rhi::ShaderModule::None || fsM == rhi::ShaderModule::None)) {
+    const rhi::ShaderModule vsM = v2only ? rhi::ShaderModule::None : variant(vs_, lodVs ? VariantSlot::SceneVsLod : VariantSlot::SceneVs);
+    const rhi::ShaderModule fsM = v2only ? rhi::ShaderModule::None : variant(ps_, sceneFs);
+    if (!v2only && (vsM == rhi::ShaderModule::None || fsM == rhi::ShaderModule::None)) {
         const bool failed = vs_->variantState[static_cast<std::size_t>(VariantSlot::SceneVs)].load() == 3 || ps_->variantState[static_cast<std::size_t>(sceneFs)].load() == 3;
         if (failed) {
             ++sceneStats_.fbVariantFailed;
@@ -140,7 +143,7 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
         return;
     }
     PipelineDesc sd = pd;
-    if (!tree) {
+    if (!v2only) {
         sd.vs = vsM;
         sd.fs = fsM;
     }
@@ -157,7 +160,7 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
         ++sceneStats_.fbNoRoom;
         return;
     }
-    if (!tree) {
+    if (!v2only) {
         const GamePipeline sp = findPipeline(sd);
         if (sp == GamePipeline::None) {
             game_->prewarmOncePipeline(sd);
@@ -173,7 +176,7 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
     }
     // F2c-4-0: the scene ABI v2 form of the same draw (retained draws that the owned path replays: the main view's static meshes); the v1 form stays what the composed
     // path draws. Not ready yet = the draw is not retained as replayable (scenePending), the v1 form still draws it now
-    if (sceneV2_ && (kind == draws::Kind::StaticMesh || tree || actor)) {
+    if (sceneV2_ && (kind == draws::Kind::StaticMesh || v2only || actor)) {
         const rhi::ShaderModule vs2 = variant(vs_, VariantSlot::SceneVs2);
         const rhi::ShaderModule fs2 = variant(ps_, sceneView2Of(sceneFs));
         if (vs2 == rhi::ShaderModule::None || fs2 == rhi::ShaderModule::None) {

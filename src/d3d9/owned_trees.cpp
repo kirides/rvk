@@ -46,6 +46,13 @@ bool Device::ownedTreeObserversOk() const {
     return true;
 }
 
+bool Device::ownedVegObserversOk() const {
+    for (const DrawObserver* o : observers_) {
+        if (o->observes(draws::Kind::Vegetation, scene::Phase{scene::View::Main, scene::Pass::Solid}) || o->observes(draws::Kind::Vegetation, scene::Phase{scene::View::Main, scene::Pass::DepthPrepass})) return false;
+    }
+    return true;
+}
+
 bool Device::ownedTreeObserved(const CachedDraw& c) const {
     for (const DrawObserver* o : observers_) {
         if (o->observes(c.kind, c.phase)) return true;
@@ -104,7 +111,8 @@ std::uint32_t Device::ownedTreeObserve(const CachedDraw& c, const OwnedWindows& 
     return shown;
 }
 
-bool Device::ownedTreeFlush(const std::vector<TreeItem>& items, const std::vector<shader::abi::DrawRecord>& recs, const std::vector<std::uint32_t>& posRec, std::uint32_t viewSlot, std::uint32_t positions) {
+bool Device::ownedTreeFlush(const std::vector<TreeItem>& items, const std::vector<shader::abi::DrawRecord>& recs, const std::vector<std::uint32_t>& posRec, std::uint32_t viewSlot, std::uint32_t positions,
+                             const VegInstances* inst) {
     ++treeFlushStats.flushes;
     if (items.empty()) return true;
     const std::uint32_t n = static_cast<std::uint32_t>(items.size());
@@ -122,6 +130,32 @@ bool Device::ownedTreeFlush(const std::vector<TreeItem>& items, const std::vecto
     if (total != positions || posRec.size() != positions || recs.empty()) {
         ++treeFlushStats.refused;
         return false;
+    }
+    // vegetation: every item's template must name its stream-1 binding (the one this flush replaces), the instance bytes must be there
+    std::vector<std::uint32_t> instBinding;
+    if (inst != nullptr) {
+        if (inst->data == nullptr || inst->stride == 0 || static_cast<std::uint64_t>(positions) * inst->stride > (8u << 20)) {
+            ++treeFlushStats.refused;
+            return false;
+        }
+        instBinding.resize(items.size(), UINT32_MAX);
+        for (std::size_t i = 0; i < items.size(); ++i) {
+            const CachedDraw& c = *items[i].cd;
+            std::uint32_t found = UINT32_MAX, matches = 0;
+            if ((c.streamMask & 2u) != 0 && c.stream[1].buffer != 0) {
+                for (std::uint32_t b = 0; b < c.vi.bufferCount && b < rhi::kMaxVertexBindings; ++b) {
+                    if (c.vi.buffers[b] == c.stream[1].buffer && c.vi.offsets[b] == c.stream[1].offset) {  // (a static buffer's binding = arena buffer + block offset: the arena holds other streams too)
+                        found = b;
+                        ++matches;
+                    }
+                }
+            }
+            if (matches != 1) {
+                ++treeFlushStats.refused;
+                return false;
+            }
+            instBinding[i] = found;
+        }
     }
     for (const shader::abi::DrawRecord& r : recs) {
         if (r.draw == 0 || r.vsWin[2] == 0 || r.psWin[3] == 0) {
@@ -141,10 +175,13 @@ bool Device::ownedTreeFlush(const std::vector<TreeItem>& items, const std::vecto
     rhi::RingAlloc ra = game_->allocRing(static_cast<std::uint64_t>(recs.size()) * sizeof(shader::abi::DrawRecord), 16);
     rhi::RingAlloc la = game_->allocRing(static_cast<std::uint64_t>(positions) * 8, 16);
     rhi::RingAlloc aa = game_->allocRing(static_cast<std::uint64_t>(n) * rhi::kIndirectStride, 16);
-    if (ra.ptr == nullptr || la.ptr == nullptr || aa.ptr == nullptr) {
+    rhi::RingAlloc ia;
+    if (inst != nullptr) ia = game_->allocRing(static_cast<std::uint64_t>(positions) * inst->stride, 16);
+    if (ra.ptr == nullptr || la.ptr == nullptr || aa.ptr == nullptr || (inst != nullptr && ia.ptr == nullptr)) {
         ++sceneStats_.fbRingFull;
         return false;
     }
+    if (inst != nullptr) std::memcpy(ia.ptr, inst->data, static_cast<std::size_t>(positions) * inst->stride);
     auto* recs_ = static_cast<shader::abi::DrawRecord*>(ra.ptr);
     auto* list = static_cast<std::uint32_t*>(la.ptr);
     auto* args = static_cast<std::uint32_t*>(aa.ptr);
@@ -191,7 +228,16 @@ bool Device::ownedTreeFlush(const std::vector<TreeItem>& items, const std::vecto
             ++end;
         }
         DrawPacket m = c0.packet;
-        m.vi = internSceneViAt(c0.vi, la.buffer, la.offset);
+        if (inst != nullptr) {
+            // (the run's items share one vertex input apart from the stream-1 buffer, which is this frame's block for all of them)
+            VertexInputValues patched = c0.vi;
+            const std::uint32_t b = instBinding[start];
+            patched.buffers[b] = ia.buffer;
+            patched.offsets[b] = ia.offset;
+            m.vi = internSceneViAt(patched, la.buffer, la.offset);
+        } else {
+            m.vi = internSceneViAt(c0.vi, la.buffer, la.offset);
+        }
         m.dyn = internDyn(c0.dyn);
         m.pipeline = c0.scenePipeline2;
         m.op = DrawPacket::Op::DrawIndexedIndirect;

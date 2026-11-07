@@ -598,6 +598,7 @@ void FrameTap::beginView(void* db, void* desc, ViewKind kind, void* shadowMap, s
     // F3-1 (native.owned_shadows): a cascade's z list, the same machinery (op records keyed per cascade, view table slot 4 + cascade)
     if (kind == ViewKind::Cascade && statics_ != nullptr && staticsWanted_ && !observeWanted_) ownedFrame = statics_->ownedShadowViewBegin(db, kind, cascade);
     if (statics_ != nullptr && staticsWanted_) statics_->treeViewBegin(ownedFrame, kind, cascade);  // F4-3 / F4-4: the tree ops' own frame kind
+    if (statics_ != nullptr && staticsWanted_) statics_->vegViewBegin(ownedFrame, kind);  // F7-2: the vegetation ops' own frame kind
     for (std::size_t l = 0; l < kListCount; ++l) {
         const std::uint8_t* data = nullptr;
         std::int32_t count = 0;
@@ -657,10 +658,11 @@ void FrameTap::compactOwned(void* db, List list, const std::uint8_t* data, std::
         const void* vtable = nullptr;
         if (op.raw.context == nullptr || !readAt(op.raw.context, 0, vtable) || vtable == nullptr) continue;
         const OpKind vk = vtableInfo(vtable).kind;
-        if (vk != OpKind::Mesh && !(vk == OpKind::SpeedTree && statics_->treeKindOk(desc_.kind)) && !(vk == OpKind::Animation && statics_->ownedActorsOn())) continue;
+        if (vk != OpKind::Mesh && !(vk == OpKind::SpeedTree && statics_->treeKindOk(desc_.kind)) && !(vk == OpKind::Animation && statics_->ownedActorsOn()) &&
+            !(vk == OpKind::Vegetation && statics_->vegKindOk(desc_.kind))) continue;
         op.vtable = vtable;
         op.kind = vk;
-        if (vk == OpKind::Mesh || vk == OpKind::Animation ? !statics_->ownedSelect(op) : !statics_->treeSelect(op)) continue;
+        if (vk == OpKind::Mesh || vk == OpKind::Animation ? !statics_->ownedSelect(op) : vk == OpKind::Vegetation ? !statics_->vegSelect(op) : !statics_->treeSelect(op)) continue;
         ownedMark_[i] = 1;
         ownedOps_.push_back(op);
     }
@@ -700,6 +702,15 @@ void FrameTap::compactOwned(void* db, List list, const std::uint8_t* data, std::
             statics_->treeTake(list, std::move(trees), 0);
         }
     }
+    // F7-2: the vegetation ops go to theirs (StaticOps::vegPass)
+    {
+        const auto mid = std::stable_partition(ownedOps_.begin(), ownedOps_.end(), [](const Op& o) { return o.kind != OpKind::Vegetation; });
+        if (mid != ownedOps_.end()) {
+            std::vector<Op> veg(std::make_move_iterator(mid), std::make_move_iterator(ownedOps_.end()));
+            ownedOps_.erase(mid, ownedOps_.end());
+            statics_->vegTake(list, std::move(veg), 0);
+        }
+    }
     raw_.swap(ownedKept_);
     count = kept;
     const auto tEnd = std::chrono::steady_clock::now();
@@ -728,7 +739,7 @@ std::uint32_t FrameTap::passBegin(bool solid) {
         }
         return n + ntc;
     }
-    const std::uint32_t nt = statics_->treePass(solid);
+    const std::uint32_t nt = statics_->treePass(solid) + statics_->vegPass(solid);
     if ((n != 0 || nt != 0) && coverage_) {
         // N5.8 coverage: the draws from records are ours (the tap never sees them: they do not go through prepareDraw)
         const auto pass = solid ? d3d9::scene::Pass::Solid : d3d9::scene::Pass::DepthPrepass;

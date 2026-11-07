@@ -638,6 +638,9 @@ StaticOps::Skip StaticOps::composeVegetation(const Op& op) {
     ++st.grassOps;
     const bool zpass = op.list == List::ZPass;
     if (!zpass && op.list != List::Solid) return Skip::Kind;
+    // F7-2: the op's retained record is made / compared from this composition
+    const bool vroOn = ownedVegOps_ && viewKind_ == ViewKind::Main && packetMode_ != 0 && g_ != nullptr && !g_->compare && vro_ != nullptr && !vro_->tripped;
+    if (vroOn) vegCompBegin(op);
     U8* ps = ptr(op.raw.context, 0x18);
     U8* vadmin = static_cast<U8*>(vegAdmin_ != nullptr ? vegAdmin_() : nullptr);
     if (ps == nullptr || vadmin == nullptr) return Skip::Unreadable;
@@ -772,6 +775,8 @@ StaticOps::Skip StaticOps::composeVegetation(const Op& op) {
         for (std::size_t k = 0; k * sc::kGrassInstanceSize < vegRaw_.size(); ++k) sc::grassInstance(vegRaw_.data() + k * sc::kGrassInstanceSize, wind, lift, bytes.data() + k * sc::kGrassInstanceSize);
         ret = nullptr;
     }
+    if (vroOn) vegCompNote(op, draws, nodes, total, wind, lift, ax, ay);
+    std::size_t drawIndex = 0;
     for (const sc::GrassDraw& d : draws) {
         mirror_.global[0][0] = ax;  // c31.xy
         mirror_.global[0][1] = ay;
@@ -792,6 +797,8 @@ StaticOps::Skip StaticOps::composeVegetation(const Op& op) {
         const engine::illumcensus::KindScope census(2);
         const Skip s = zpass ? specialPassDraw(shader, gg, false) : materialDraws(shader, illum, 0, false, 0, 0, gg, nullptr);
         if (s != Skip::None) return s;
+        if (vroOn) vegCompDraw(before, drawIndex);
+        ++drawIndex;
         for (std::size_t k = before; ret == nullptr && k < drawCount_; ++k) {
             sc::DrawDesc& dd = *draws_[k];
             dd.cpuStream = 1;

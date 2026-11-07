@@ -919,6 +919,7 @@ public:
     void setSceneShadows(bool on) { if (on != sceneShadows_) ++variantEpoch_; sceneShadows_ = on; }
     // F6-1 (frame-ownership.md 7.40, native.owned_actors): the skinned actors' z / solid draws of the main view and z draws of the cascades get their scene forms too
     void setSceneActors(bool on) { if (on != sceneActors_) ++variantEpoch_; sceneActors_ = on; }
+    void setSceneVeg(bool on) { if (on != sceneVeg_) ++variantEpoch_; sceneVeg_ = on; }  // F7-2: the grass draws' scene ABI v2 form
     void setSceneBillboards(bool on) { if (on != sceneBb_) ++variantEpoch_; sceneBb_ = on; }  // F4-1: the tree billboards' opaque draws are batchable scene draws too
     void setSceneFaultInject(bool on) { sceneFaultInject_ = on; }  // tests: every scene packet looks like it has a null address (the guard must refuse it)
     bool sceneDrawsActive() const { return sceneDrawsOn_ && sceneAvail_; }
@@ -1234,7 +1235,16 @@ public:
         std::uint32_t instances = 0;  // the item's positions (consecutive): ONE indirect command, whatever records its instances use
     };
     // recs = the DrawRecords (one per template x lighting entry), posRec[p] = the record of list position p (positions = posRec.size() = the items' instance sum)
-    bool ownedTreeFlush(const std::vector<TreeItem>& items, const std::vector<shader::abi::DrawRecord>& recs, const std::vector<std::uint32_t>& posRec, std::uint32_t viewSlot, std::uint32_t positions);
+    // F7-2 (frame-ownership.md 7.42): `inst` = the vegetation's instance bytes of the pass (positions x stride, in list order): copied into a ring block of this frame, which stands in
+    // for each item's stream 1 (the binding whose buffer is the template's stream-1 buffer: at the block's start, instance-rate; an item's firstInstance = its first list position)
+    struct VegInstances {
+        const std::uint8_t* data = nullptr;
+        std::uint32_t stride = 0;
+    };
+    bool ownedTreeFlush(const std::vector<TreeItem>& items, const std::vector<shader::abi::DrawRecord>& recs, const std::vector<std::uint32_t>& posRec, std::uint32_t viewSlot, std::uint32_t positions,
+                        const VegInstances* inst = nullptr);
+    // no observer wants the main view's vegetation draws (the owned vegetation pass shows them nothing)
+    bool ownedVegObserversOk() const;
     std::uint64_t treeEnvEpoch(bool solid, std::uint32_t viewSlot, bool& ok);
     bool treeEnvSame(bool solid, std::uint32_t viewSlot, std::uint64_t epoch) const;
     struct TreeFlushStats {
@@ -1927,7 +1937,7 @@ private:
     int sceneMergeBreak(const DrawPacket& a, const DrawPacket& b) const;  // -1 = mergeable, else the SceneDrawStats::breaks index
     void sceneBeginFrame();
     void sceneCollectCheck();
-    bool sceneDrawsOn_ = false, sceneAvail_ = false, sceneIssue_ = false, sceneFaultInject_ = false, sceneBb_ = false, sceneTrees_ = false;
+    bool sceneDrawsOn_ = false, sceneAvail_ = false, sceneIssue_ = false, sceneFaultInject_ = false, sceneBb_ = false, sceneTrees_ = false, sceneVeg_ = false;
     std::uint64_t ownedSubmitted_ = 0;  // F4-1: draws submitted by submitOwned
     std::uint32_t sceneCheckEvery_ = 0;
     GamePipeline scenePipe_ = GamePipeline::None;  // prepareDraw's decision for the draw being submitted
@@ -1950,8 +1960,8 @@ private:
         bool valid = false;
     } sceneRef_;  // (i, 0) for i < kSceneRunMax: the instance-rate ref stream, a ring block of this frame
     SceneRefStream sceneRefV2_[kSceneRefSlots];  // scene ABI v2: (i, slot) per view slot, ring blocks of this frame
-    std::uint64_t treeEnvHash_[6] = {}, treeEnvEpoch_[6] = {}, treeEnvCounter_ = 0;  // F4-3 (per tree view slot: 14 / 15 main z / solid, 8..11 the cascades' z: treeEnvIndex)
-    static std::size_t treeEnvIndex(bool solid, std::uint32_t viewSlot) { return viewSlot >= 8 && viewSlot < 12 ? 2 + (viewSlot - 8) : (solid ? 1 : 0); }
+    std::uint64_t treeEnvHash_[8] = {}, treeEnvEpoch_[8] = {}, treeEnvCounter_ = 0;  // F4-3 (per tree view slot: 14 / 15 main z / solid, 8..11 the cascades' z: treeEnvIndex)
+    static std::size_t treeEnvIndex(bool solid, std::uint32_t viewSlot) { return viewSlot >= 8 && viewSlot < 12 ? 2 + (viewSlot - 8) : viewSlot == 12 || viewSlot == 13 ? 6 + (viewSlot - 12) : (solid ? 1 : 0); }
     static constexpr std::size_t kOwnedEnvSlots = 8;
     static std::size_t ownedEnvIndex(std::uint32_t viewSlot) { return viewSlot < kOwnedEnvSlots ? viewSlot : kOwnedEnvSlots - 1; }
     std::uint64_t ownedEnvHash_[kOwnedEnvSlots] = {}, ownedEnvEpoch_[kOwnedEnvSlots] = {}, ownedEnvCounter_ = 0;  // F2c-4a: ownedEnvEpoch per view slot (0 main z, 1 main solid, 4.. cascades; F3-1)

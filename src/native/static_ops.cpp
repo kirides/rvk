@@ -1148,6 +1148,13 @@ StaticOps::Skip StaticOps::materialSamplers(sc::DrawDesc& d, const std::uint8_t*
         bool ok = false;
         sc::DrawDesc::Sampler& s = d.samplers[stage];
         s.texture = textureOfImageData(data, ok);
+        if (vro_ && vro_->pend.rec) {
+            auto& tm = vro_->pend.rec->texMap;
+            const auto at = std::find_if(tm.begin(), tm.end(), [&](const tro::TexMap& x) { return x.res == res && x.stage == stage; });
+            const tro::TexMap e{res, stage, data, s.texture, ok};
+            if (at != tm.end()) *at = e;
+            else tm.push_back(e);
+        }
         if (tro_ && tro_->cur != nullptr) {
             auto& tm = tro_->cur->texMap;
             const auto at = std::find_if(tm.begin(), tm.end(), [&](const tro::TexMap& x) { return x.res == res && x.stage == stage; });
@@ -2270,6 +2277,7 @@ void StaticOps::opEnterImpl(const Op& op) {
         recEnd(op);
         bbEnd(op);
         treeCompEnd(op);
+        vegCompEnd(op);
     }
     if (taken_) leanCommit();
 }
@@ -2602,11 +2610,12 @@ void StaticOps::issue() {
     // (stage 4: the shadow views' z ops too; the same entity is drawn into several cascades / maps, so the key carries the view)
     const bool cacheOn = packetMode_ != 0 && op_ != nullptr && !inNonOp_ && !tagOverride_ &&
                          ((viewKind_ == ViewKind::Main && (g_ == &groups_[static_cast<std::size_t>(Group::Static)] || g_ == &groups_[static_cast<std::size_t>(Group::Trees)] ||
-                                           (ownedActorsOn() && g_ == &groups_[static_cast<std::size_t>(Group::Actors)]))) ||
+                                           (ownedActorsOn() && g_ == &groups_[static_cast<std::size_t>(Group::Actors)]) ||
+                                           (ownedVegOps_ && g_ == &groups_[static_cast<std::size_t>(Group::Vegetation)]))) ||
                           g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)]);
     const std::uint64_t viewKey = (static_cast<std::uint64_t>(viewKind_) << 32) ^ (static_cast<std::uint64_t>(static_cast<std::uint32_t>(cascade_)) << 36) ^
                                   (reinterpret_cast<std::uintptr_t>(shadowMap_) * 0xD6E8FEB86659FD93ull);
-    const std::size_t cacheGroup = g_ == &groups_[static_cast<std::size_t>(Group::Trees)] ? 1 : g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)] ? 2 : 0;
+    const std::size_t cacheGroup = g_ == &groups_[static_cast<std::size_t>(Group::Trees)] || g_ == &groups_[static_cast<std::size_t>(Group::Vegetation)] ? 1 : g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)] ? 2 : 0;
     const bool verifyFrame = cacheOn && packetMode_ >= 2 && (packetMode_ == 3 || dev_.stats().frames % 10 == 0);
     bool fullStates = false;  // a draw went the normal way: the device state beyond shaders / registers was set (and is restored)
     const auto setRegs = [&](const sc::DrawDesc& dd) {
@@ -2628,7 +2637,8 @@ void StaticOps::issue() {
     // F2b-1: the main view's static draws (z pre-pass + solid ops) are recorded as scene draws by the device
     // (F3-1: the cascades' ops too while native.owned_shadows is on: their retained draws are the ones the owned path replays)
     const bool sceneIssue = sceneDraws_ && ((viewKind_ == ViewKind::Main && (g_ == &groups_[static_cast<std::size_t>(Group::Static)] || bbSceneIssue() || treeSceneIssue() ||
-                                                                                    (ownedActorsOn() && g_ == &groups_[static_cast<std::size_t>(Group::Actors)]))) ||
+                                                                                    (ownedActorsOn() && g_ == &groups_[static_cast<std::size_t>(Group::Actors)]) ||
+                                           vegSceneIssue())) ||
                                             (ownedShadows_ && !ownedShadowsTripped_ && viewKind_ == ViewKind::Cascade && g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)]));
     dev_.setSceneIssue(sceneIssue);
     const bool recOn = ownedRecords_ && recs_ && recs_->active && !inNonOp_ && op_ != nullptr && op_ == recs_->op && recs_->probes.size() == drawCount_;
@@ -2851,6 +2861,7 @@ void StaticOps::report() {
     ownedReport();
     bbReport();
     treeReport();
+    vegReport();
     static constexpr const char* kListNames[] = {"z", "solid", "debug", "sky", "refracted", "alpha", "late", "non-op"};
     if (active()) {
         spdlog::info("native: register file: mode {} ({}), engine code left to the engine {} times, {} registers merged from it (total), {} shaders' pools held",

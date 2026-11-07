@@ -2819,6 +2819,350 @@ add oC0, v0, c14
     dev.release(std::move(ramp));
 }
 
+// F7-2 owned vegetation flush through the device's own path (frame-ownership.md 7.42): a grass-like hardware-instanced draw (one quad, six instances, stream 1 = per-instance
+// vertex data {offset float4, tint float4}, c12 from the view block, c14 = the lighting entry) is drawn (a) the normal way with the instance data in a vertex buffer and (b) as
+// ONE retained template whose stream 1 is a stand-in buffer (the scene ABI v2 form, its DrawBlock a persistent slot) with Device::ownedTreeFlush and the instance block
+// (Device::VegInstances: the bytes in list order, copied into a ring block that replaces the stand-in): one item of six positions, three items of two (one indirect call), the
+// instances in the reverse order (the picture follows the bytes: they are really read), a per-position record (two records, two lighting entries); guards: no instance data, a
+// template without a stream-1 binding, an instance count that is not the positions, a null window base: nothing drawn, drawn again right after. 0 bytes may differ.
+void testOwnedVegetation(Fixture& f) {
+    Device& dev = f.dev;
+    dev.setSceneShadows(false);
+    dev.setSceneDraws(true, 0);
+    if (!dev.sceneDrawsActive()) {
+        std::printf("  SKIP owned vegetation: scene draws are not available on this device\n");
+        return;
+    }
+    static const char* kVsVeg = R"(
+vs_3_0
+dcl_position v0
+dcl_color v1
+dcl_texcoord4 v3
+dcl_texcoord5 v4
+dcl_position o0
+dcl_color o1
+add o0, v0, v3
+mul r0, v1, v4
+add o1, r0, c12
+)";
+    static const char* kPsVeg = R"(
+ps_3_0
+dcl_color v0
+add oC0, v0, c14
+)";
+    const VertexElement kDecl[] = {
+        {0, 0, DECLTYPE_FLOAT4, 0, 0 /*POSITION*/, 0},
+        {0, 16, DECLTYPE_D3DCOLOR, 0, 10 /*COLOR*/, 0},
+        {0, 20, DECLTYPE_FLOAT2, 0, 5 /*TEXCOORD*/, 0},
+        {1, 0, DECLTYPE_FLOAT4, 0, 5 /*TEXCOORD*/, 4},
+        {1, 16, DECLTYPE_FLOAT4, 0, 5 /*TEXCOORD*/, 5},
+        {kDeclEndStream, 0, DECLTYPE_UNUSED, 0, 0, 0},
+    };
+    const auto vsT = shaderFrom(dev, kVsVeg);
+    const auto psT = shaderFrom(dev, kPsVeg);
+    auto decl = dev.createVertexDecl(kDecl);
+    if (!vsT || !psT || !decl) {
+        std::printf("  FAIL owned vegetation: shaders / declaration\n");
+        ++g_failures;
+        return;
+    }
+    constexpr std::uint32_t kInst = 6, kSlots = 16, kStride = 32, kViewSlot = 13;
+    std::vector<Vertex> verts = {{0.0f, 0.5f, 0.5f, 1, 0xFFFFFFFFu, 0, 0}, {0.25f, 0.5f, 0.5f, 1, 0xFFFFFFFFu, 1, 0}, {0.0f, -0.5f, 0.5f, 1, 0xFFFFFFFFu, 0, 1}, {0.25f, -0.5f, 0.5f, 1, 0xFFFFFFFFu, 1, 1}};
+    const std::uint16_t idx[6] = {0, 1, 2, 1, 3, 2};
+    auto vb = dev.createBuffer(static_cast<std::uint32_t>(verts.size() * sizeof(Vertex)), USAGE_WRITEONLY, POOL_MANAGED, false, false);
+    auto ib = dev.createBuffer(sizeof(idx), USAGE_WRITEONLY, POOL_MANAGED, true, false);
+    auto stand = dev.createBuffer(kStride * 16, USAGE_WRITEONLY, POOL_MANAGED, false, false);
+    auto instBuf = dev.createBuffer(kStride * kInst, USAGE_WRITEONLY, POOL_MANAGED, false, false);
+    auto instRev = dev.createBuffer(kStride * kInst, USAGE_WRITEONLY, POOL_MANAGED, false, false);
+    std::memcpy(vb->lock(0, 0, 0), verts.data(), verts.size() * sizeof(Vertex));
+    vb->unlock();
+    std::memcpy(ib->lock(0, 0, 0), idx, sizeof(idx));
+    ib->unlock();
+    {
+        std::vector<std::uint8_t> z(kStride * 16, 0);
+        std::memcpy(stand->lock(0, 0, 0), z.data(), z.size());
+        stand->unlock();
+    }
+    // the instances: offset (dx, 0, 0, 0), tint
+    float inst[kInst][8];
+    for (std::uint32_t i = 0; i < kInst; ++i) {
+        const float r[8] = {-1.0f + 0.3f * static_cast<float>(i), 0.0f, 0.0f, 0.0f, 0.2f + 0.14f * static_cast<float>(i), 0.9f - 0.12f * static_cast<float>(i), 0.3f, 1.0f};
+        std::memcpy(inst[i], r, sizeof(r));
+    }
+    float instR[kInst][8];
+    for (std::uint32_t i = 0; i < kInst; ++i) std::memcpy(instR[i], inst[kInst - 1 - i], sizeof(instR[i]));
+    std::memcpy(instBuf->lock(0, 0, 0), inst, sizeof(inst));
+    instBuf->unlock();
+    std::memcpy(instRev->lock(0, 0, 0), instR, sizeof(instR));
+    instRev->unlock();
+    rhi::Device* rd = dev.rhi();
+    auto tableBuf = rd->createBuffer({static_cast<std::uint64_t>(kSlots) * shader::abi::kViewBlock2Size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "owned vegetation view table"});
+    if (!tableBuf) {
+        std::printf("  FAIL owned vegetation: view table buffer\n");
+        ++g_failures;
+        return;
+    }
+    const auto tw = tableBuf->shaderRef(0);
+    const rhi::GpuRef tableRef = rhi::GpuRef::fromWords(tw[0], tw[1]);
+    std::vector<shader::abi::ViewBlock2> twin(kSlots);
+    std::memset(twin.data(), 0, twin.size() * sizeof(shader::abi::ViewBlock2));
+    const float c12[4] = {0.02f, 0.10f, 0.05f, 0.0f};
+    {
+        shader::abi::ViewBlock2& b = twin[kViewSlot];
+        std::memcpy(b.vs1[0], c12, 16);
+        dev.viewPosFix(b.posFix);
+        std::memcpy(tableBuf->map(), twin.data(), twin.size() * sizeof(shader::abi::ViewBlock2));
+    }
+    OwnedWindows vw;
+    {
+        const auto set = [&](OwnedWindows::Win& w, bool vertex, std::uint32_t win, std::uint32_t covered) {
+            w.kind = OwnedWindows::Kind::View;
+            w.base = rhi::GpuRef{gpuscene::ViewTable::windowBase(tableRef, kViewSlot, vertex, win)};
+            w.covered = covered;
+        };
+        set(vw.w[0][0], true, 0, 12);
+        set(vw.w[0][1], true, 1, 19);
+        set(vw.w[1][0], false, 0, 5);
+        vw.viewSlot = kViewSlot;
+    }
+    const auto begin = [&](Buffer* s1) {
+        f.reset();
+        dev.drawTag() = {};
+        dev.drawTag().source = draws::Source::Vegetation;
+        dev.phases().push(scene::View::Main, scene::Pass::Solid);
+        dev.setVertexDecl(decl.get());
+        dev.setVertexShader(vsT);
+        dev.setPixelShader(psT);
+        dev.setStreamSource(0, vb.get(), 0, sizeof(Vertex));
+        dev.setStreamSource(1, s1, 0, kStride);
+        {
+            const float zero[4] = {};
+            dev.setPixelShaderConstantF(14, zero, 1);
+        }
+        dev.setStreamSourceFreq(0, STREAMSOURCE_INDEXEDDATA | kInst);
+        dev.setStreamSourceFreq(1, STREAMSOURCE_INSTANCEDATA | 1);
+        dev.setIndices(ib.get());
+    };
+    gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
+    tab.setActive(true);
+    if (!tab.ensure(dev)) {
+        std::printf("  FAIL owned vegetation: the draw record tables\n");
+        ++g_failures;
+        return;
+    }
+    const auto end = [&](const char* name) {
+        tab.flush(dev);
+        dev.setSceneIssue(false);
+        dev.phases().pop();
+        dev.setStreamSourceFreq(0, 1);
+        dev.setStreamSourceFreq(1, 1);
+        return capture(dev, name);
+    };
+    const auto bad = [&](const Pixels& ref, const Pixels& p, const char* what) {
+        std::uint32_t n = 0;
+        for (std::size_t i = 0; i < ref.bgra.size() && i < p.bgra.size(); ++i) n += ref.bgra[i] != p.bgra[i];
+        if (n != 0 || ref.bgra.size() != p.bgra.size()) {
+            std::printf("  FAIL owned vegetation (%s): %u bytes differ from the normal draws\n", what, n);
+            ++g_failures;
+        }
+        return n;
+    };
+    const auto drawRef = [&](Buffer* s1, const char* name) {
+        begin(s1);
+        dev.setVertexShaderConstantF(12, c12, 1);
+        dev.drawIndexedPrimitive(PT_TRIANGLELIST, 0, 0, 4, 0, 2);
+        return end(name);
+    };
+    const Pixels ref = drawRef(instBuf.get(), "ownedv_ref");
+    const Pixels refRev = drawRef(instRev.get(), "ownedv_refrev");
+    dev.setSceneViewTable(tableRef, twin.data(), kSlots);
+    dev.setSceneViews(true);
+    dev.setSceneVeg(true);
+    Device::CachedDraw cd;
+    bool ready = false;
+    for (int i = 0; i < 1200 && !ready; ++i) {
+        begin(stand.get());
+        dev.setVertexShaderConstantF(12, c12, 1);
+        dev.setSceneIssue(true);
+        dev.beginCapture(&cd);
+        dev.drawIndexedPrimitive(PT_TRIANGLELIST, 0, 0, 4, 0, 2);
+        dev.endCapture();
+        end("ownedv_capture");
+        ready = cd.valid && cd.scenePipeline2 != GamePipeline::None;
+        if (!ready) Sleep(50);
+    }
+    if (!ready) {
+        std::printf("  FAIL owned vegetation: the draw never got its v2 pipeline\n");
+        ++g_failures;
+        return;
+    }
+    if (cd.scenePipeline != GamePipeline::None) {
+        std::printf("  FAIL owned vegetation: a grass draw got a scene ABI v1 pipeline (its composed packet would lose the instance count)\n");
+        ++g_failures;
+    }
+    constexpr std::uint64_t kPadL = 4096;
+    const float kLight[2][4] = {{0.0f, 0.0f, 0.0f, 0.0f}, {0.0f, 0.15f, 0.35f, 0.0f}};
+    auto lightBuf = rd->createBuffer({kPadL + 2 * 512, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "owned vegetation lighting"});
+    if (!lightBuf) {
+        std::printf("  FAIL owned vegetation: lighting buffer\n");
+        ++g_failures;
+        return;
+    }
+    {
+        auto* lb = static_cast<std::uint8_t*>(lightBuf->map());
+        std::memset(lb, 0, static_cast<std::size_t>(kPadL + 2 * 512));
+        for (std::uint32_t e = 0; e < 2; ++e) std::memcpy(lb + kPadL + 512u * e, kLight[e], 16);
+        lightBuf->flush();
+    }
+    const auto lightBase = [&](std::uint32_t e) {
+        const auto w = lightBuf->shaderRef(kPadL + 512u * e);
+        return rhi::GpuRef::fromWords(w[0], w[1]).plus(-14 * 16).bits;
+    };
+    const std::uint32_t slot = tab.alloc();
+    OwnedWindows ow = vw;
+    ow.w[1][3].kind = OwnedWindows::Kind::Lighting;
+    ow.w[1][3].base = rhi::GpuRef{lightBase(0)};
+    ow.w[1][3].covered = 24;
+    ow.w[0][2].kind = OwnedWindows::Kind::Object;
+    ow.w[0][2].base = tab.zeroRef().plus(-static_cast<std::int64_t>(shader::abi::kVsWindowFirst[2]) * 16);
+    ow.w[0][2].covered = shader::abi::kVsWindowFirst[3] - shader::abi::kVsWindowFirst[2];
+    {
+        begin(stand.get());
+        dev.setSceneIssue(true);
+        Device::DeriveIn in;
+        in.streams[0] = vb.get();
+        in.strides[0] = sizeof(Vertex);
+        in.streams[1] = stand.get();
+        in.strides[1] = kStride;
+        in.indices = ib.get();
+        in.alphaFunc = 8u;
+        Device::OwnedPersist out;
+        const int rc = dev.ownedDerive(cd, in, ow, tab.blockRef(slot), tab.zeroRef(), true, out);
+        if (rc != 0) {
+            std::printf("  FAIL owned vegetation: the template's derivation returned %d\n", rc);
+            ++g_failures;
+            end("ownedv_derive");
+            return;
+        }
+        tab.write(slot, out.rec, out.blk);
+        end("ownedv_derive");
+    }
+    // one frame: the runs of the items, the instance bytes in list order (optionally reversed), per position a record (lightOf: entry per position, empty = entry 0)
+    const auto frame = [&](const char* name, const std::vector<std::uint32_t>& runs, bool reverse, std::uint32_t breakWhat, std::uint64_t& calls, bool& flushed, const std::vector<std::uint32_t>& lightOf = {}) {
+        begin(stand.get());
+        dev.setSceneIssue(true);
+        std::vector<Device::TreeItem> items;
+        for (const std::uint32_t n : runs) {
+            Device::TreeItem it;
+            it.cd = &cd;
+            it.bucket = dev.ownedBucketKey(cd, kViewSlot);
+            it.instances = n;
+            items.push_back(it);
+        }
+        std::vector<shader::abi::DrawRecord> recs;
+        std::vector<std::uint32_t> posRec;
+        std::uint32_t recOfEntry[2] = {~0u, ~0u};
+        for (std::uint32_t p = 0; p < kInst; ++p) {
+            const std::uint32_t e = lightOf.empty() ? 0 : lightOf[p];
+            if (recOfEntry[e] == ~0u) {
+                recOfEntry[e] = static_cast<std::uint32_t>(recs.size());
+                shader::abi::DrawRecord r = tab.record(slot);
+                r.vsWin[2] = breakWhat == 1 ? 0 : tab.zeroRef().plus(-static_cast<std::int64_t>(shader::abi::kVsWindowFirst[2]) * 16).bits;
+                r.psWin[3] = lightBase(e);
+                recs.push_back(r);
+            }
+            posRec.push_back(recOfEntry[e]);
+        }
+        std::uint32_t positions = kInst;
+        if (breakWhat == 2) positions = kInst + 1;
+        const Device::VegInstances vi{reinterpret_cast<const std::uint8_t*>(reverse ? instR : inst), kStride};
+        const Device::VegInstances none{};
+        const auto s0 = dev.sceneStats();
+        flushed = dev.ownedTreeFlush(items, recs, posRec, kViewSlot, positions, breakWhat == 3 ? &none : &vi);
+        calls = dev.sceneStats().indirectCalls - s0.indirectCalls;
+        return end(name);
+    };
+    std::uint64_t calls = 0;
+    bool flushed = false;
+    bad(ref, frame("ownedv_one", {kInst}, false, 0, calls, flushed), "one run of six instances");
+    if (!flushed || calls != 1) {
+        std::printf("  FAIL owned vegetation: one run: flushed %d, %llu indirect calls (expected 1)\n", flushed, static_cast<unsigned long long>(calls));
+        ++g_failures;
+    }
+    bad(ref, frame("ownedv_three", {2, 2, 2}, false, 0, calls, flushed), "three runs of two instances");
+    if (!flushed || calls != 1) {
+        std::printf("  FAIL owned vegetation: three runs of one bucket: flushed %d, %llu indirect calls (expected 1)\n", flushed, static_cast<unsigned long long>(calls));
+        ++g_failures;
+    }
+    bad(refRev, frame("ownedv_rev", {kInst}, true, 0, calls, flushed), "the instance bytes in the reverse order");
+    {
+        const Pixels p = frame("ownedv_nullbase", {kInst}, false, 1, calls, flushed);
+        const Pixels q = frame("ownedv_count", {kInst}, false, 2, calls, flushed);
+        const bool count = !flushed;
+        const Pixels r = frame("ownedv_nodata", {kInst}, false, 3, calls, flushed);
+        const bool nodata = !flushed;
+        if (p.bgra[(32 * p.w + 2) * 4 + 1] != 0 || q.bgra[(32 * q.w + 2) * 4 + 1] != 0 || r.bgra[(32 * r.w + 2) * 4 + 1] != 0 || !count || !nodata) {
+            std::printf("  FAIL owned vegetation: guards: a null window base / an instance count that is not the positions / no instance data drew something or was accepted (count refused %d, no data refused %d)\n", count, nodata);
+            ++g_failures;
+        }
+    }
+    bad(ref, frame("ownedv_after_guards", {kInst}, false, 0, calls, flushed), "the draw after the refusals");
+    // per-position lighting records in one draw: the reference = one normal draw per instance (its own stream-1 offset, its own c14)
+    {
+        const std::vector<std::uint32_t> lightOf = {1, 0, 1, 1, 0, 0};
+        begin(instBuf.get());
+        for (std::uint32_t i = 0; i < kInst; ++i) {
+            dev.setVertexShaderConstantF(12, c12, 1);
+            dev.setPixelShaderConstantF(14, kLight[lightOf[i]], 1);
+            dev.setStreamSource(1, instBuf.get(), kStride * i, kStride);
+            dev.setStreamSourceFreq(0, STREAMSOURCE_INDEXEDDATA | 1);
+            dev.drawIndexedPrimitive(PT_TRIANGLELIST, 0, 0, 4, 0, 2);
+        }
+        const Pixels lref = end("ownedv_lref");
+        bad(lref, frame("ownedv_light", {kInst}, false, 0, calls, flushed, lightOf), "per-position lighting records in one draw");
+        if (!flushed || calls != 1) {
+            std::printf("  FAIL owned vegetation: per-position lighting: flushed %d, %llu indirect calls (expected 1)\n", flushed, static_cast<unsigned long long>(calls));
+            ++g_failures;
+        }
+    }
+    // a template whose packet has no stream-1 binding: refused
+    {
+        Device::CachedDraw nocd = cd;
+        nocd.streamMask &= ~2u;
+        std::vector<Device::TreeItem> items(1);
+        items[0].cd = &nocd;
+        items[0].bucket = dev.ownedBucketKey(nocd, kViewSlot);
+        items[0].instances = kInst;
+        std::vector<shader::abi::DrawRecord> recs{tab.record(slot)};
+        std::vector<std::uint32_t> posRec(kInst, 0u);
+        begin(stand.get());
+        dev.setSceneIssue(true);
+        const std::uint64_t r0 = dev.treeFlushStats.refused;
+        const Device::VegInstances vi{reinterpret_cast<const std::uint8_t*>(inst), kStride};
+        const bool ok = dev.ownedTreeFlush(items, recs, posRec, kViewSlot, kInst, &vi);
+        end("ownedv_nostream");
+        if (ok || dev.treeFlushStats.refused - r0 != 1) {
+            std::printf("  FAIL owned vegetation: a template without a stream-1 binding was accepted (%d, refused %llu)\n", ok, static_cast<unsigned long long>(dev.treeFlushStats.refused - r0));
+            ++g_failures;
+        }
+    }
+    bad(ref, frame("ownedv_final", {kInst}, false, 0, calls, flushed), "the draw after all refusals");
+    std::printf("  owned vegetation: %llu flushes, %llu items, %llu instances, %llu indirect packets, %llu refused\n", static_cast<unsigned long long>(dev.treeFlushStats.flushes),
+                static_cast<unsigned long long>(dev.treeFlushStats.items), static_cast<unsigned long long>(dev.treeFlushStats.instances), static_cast<unsigned long long>(dev.treeFlushStats.packets),
+                static_cast<unsigned long long>(dev.treeFlushStats.refused));
+    tab.release(slot);
+    tab.setActive(false);
+    tab.destroy();
+    dev.setSceneVeg(false);
+    dev.setSceneViews(false);
+    dev.setSceneDraws(false, 0);
+    dev.release(std::move(vb));
+    dev.release(std::move(ib));
+    dev.release(std::move(stand));
+    dev.release(std::move(instBuf));
+    dev.release(std::move(instRev));
+}
+
 void testOwnedTrees(Fixture& f) {
     testOwnedTreesIn(f, scene::View::Main, scene::Pass::Solid, 3, "the main view");
     testOwnedTreesIn(f, scene::View::Shadow, scene::Pass::ShadowDepth, 9, "a cascade");
@@ -3464,7 +3808,7 @@ int main(int argc, char** argv) {
         {"mip chain stretch rect", testMipChainStretchRect}, {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
         {"read-only lock of a fresh texture", testReadOnlyLockOfFreshTexture},
-        {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned persistent (F2c-4a)", testOwnedPersistent}, {"clusters (F5-1)", testClusters}, {"cluster cull (F5-2)", testClusterCull}, {"owned trees (F4-3)", testOwnedTrees}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"bone table (F6-1)", testBoneTable}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
+        {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned persistent (F2c-4a)", testOwnedPersistent}, {"clusters (F5-1)", testClusters}, {"cluster cull (F5-2)", testClusterCull}, {"owned trees (F4-3)", testOwnedTrees}, {"owned vegetation (F7-2)", testOwnedVegetation}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"bone table (F6-1)", testBoneTable}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
     };
     for (const auto& [name, fn] : cases) {
         const int before = g_failures;

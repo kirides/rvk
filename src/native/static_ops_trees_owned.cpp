@@ -709,7 +709,8 @@ bool StaticOps::treeStampOf(const Op& op, tro::Stamp& st, std::uint32_t& type, c
 }
 
 // a template made ready for the pass: its derivation is a persistent DrawBlock slot (rewritten only when an input moved: the owned_persistent recipe)
-int StaticOps::treeTemplate(tro::Tpl& t, const d3d9::OwnedWindows& viewWin, std::uint64_t epoch, bool solid, std::uint32_t scrubStride, std::uint32_t scrubPhase) {
+int StaticOps::treeTemplate(tro::Tpl& t, const d3d9::OwnedWindows& viewWin, std::uint64_t epoch, bool solid, std::uint32_t scrubStride, std::uint32_t scrubPhase, tro::Stats& W, std::uint64_t& scrubTick,
+                            const char* what) {
     gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
     const orec::DrawRec& r = t.r;
     orec::Persist& P = r.persist;
@@ -733,15 +734,15 @@ int StaticOps::treeTemplate(tro::Tpl& t, const d3d9::OwnedWindows& viewWin, std:
     const std::uint64_t sig = dev_.ownedDrawSig(cd, r.streams, r.strides, r.indices, r.tex, amb, P.ow, allowed);
     if (!allowed) return 1;
     const bool reuse = P.valid && P.handle.has() && tab.live(P.handle.slot) && P.epoch == epoch && P.sig == sig;
-    const bool scrub = reuse && scrubStride != 0 && (++tro_->scrubTick % scrubStride) == scrubPhase;
+    const bool scrub = reuse && scrubStride != 0 && (++scrubTick % scrubStride) == scrubPhase;
     if (reuse && !scrub) {
-        ++tro_->win().reused;
+        ++W.reused;
         return 0;
     }
     if (!P.handle.has()) {
         const std::uint32_t slot = tab.alloc();
         if (slot == gpuscene::kNoSlot) {
-            ++tro_->win().tableFull;
+            ++W.tableFull;
             return 2;
         }
         P.handle.slot = slot;
@@ -752,18 +753,18 @@ int StaticOps::treeTemplate(tro::Tpl& t, const d3d9::OwnedWindows& viewWin, std:
     const int rc = dev_.ownedDerive(cd, in, P.ow, tab.blockRef(P.handle.slot), tab.zeroRef(), true, out);
     if (rc != 0) {
         P.valid = false;
-        ++tro_->win().refused;
+        ++W.refused;
         if (rc == 1 || rc == 4 || rc == 6 || rc == 7) t.stale = true;
         return 3;
     }
     if (scrub) {
         if (std::memcmp(&tab.record(P.handle.slot), &out.rec, sizeof(out.rec)) != 0 || std::memcmp(&tab.block(P.handle.slot), &out.blk, sizeof(out.blk)) != 0) {
-            ++tro_->win().checkMiss;
-            spdlog::error("native: owned trees: MISS (rolling scrub): the persistent block of bucket {:#x} differs from a fresh derivation although nothing it was derived from moved", t.key);
+            ++W.checkMiss;
+            spdlog::error("native: {}: MISS (rolling scrub): the persistent block of bucket {:#x} differs from a fresh derivation although nothing it was derived from moved", what, t.key);
         }
-        ++tro_->win().checkMissCompared;
+        ++W.checkMissCompared;
     } else {
-        ++tro_->win().derived;
+        ++W.derived;
     }
     if (!scrub) tab.write(P.handle.slot, out.rec, out.blk);
     P.valid = true;
@@ -1045,7 +1046,7 @@ std::uint32_t StaticOps::treePass(bool solid) {
                 if (tpl->passSerial != serial) {
                     tpl->passSerial = serial;
                     tpl->passRun = 0;
-                    const int rc = treeTemplate(*tpl, viewWin, epoch, solid, scrubStride, scrubPhase);
+                    const int rc = treeTemplate(*tpl, viewWin, epoch, solid, scrubStride, scrubPhase, T.win(), T.scrubTick, "owned trees");
                     if (rc != 0) {
                         tpl->passSerial = 0;
                         failWhy = &W.lateTemplate;

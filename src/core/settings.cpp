@@ -2673,6 +2673,21 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeOwnedVegetationOps = &reg.add({
+        .key = "native.owned_vegetation_ops",
+        .label = "Native frame: owned vegetation draws",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode only, needs native.owned_vegetation and persistent owned draws (frame-ownership.md 7.42, F7-2): the main view's vegetation (grass) ops are retained as draw "
+                       "templates per (type, pass, sun) bucket; composed frames compare the plan and the templates with the composition (DIFFERING must stay 0, a difference turns it off); on the other "
+                       "frames the ops leave the lists at the view's beginning and the pass draws every batch from the engine's grid nodes: one DrawRecord per batch (lighting entry), the retained "
+                       "converted instance bytes of all ops in one ring block (stream 1), a few indirect calls. Needs table lighting. Off = nothing changes. rvk.log `native: owned vegetation draws (5 s)`.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"native.owned_persistent", "true", false, true}, {"native.owned_vegetation", "true", false, true}},
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeOwnedActors = &reg.add({
         .key = "native.owned_actors",
         .label = "Native frame: owned skinned actors",

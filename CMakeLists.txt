@@ -218,6 +218,7 @@ add_library(rvk_core STATIC
     src/native/bb_records.h
     src/native/static_ops_bb.cpp
     src/native/static_ops_trees_owned.cpp
+    src/native/static_ops_veg_owned.cpp
     src/native/static_ops_nonop.cpp
     src/native/static_ops_fx.cpp
     src/native/static_ops_sky.cpp
