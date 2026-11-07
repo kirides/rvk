@@ -505,7 +505,8 @@ StallSampler::StallSampler(std::string what, double thresholdMs, bool profile) :
     impl_->thresholdTicks = static_cast<std::uint64_t>(thresholdMs * impl_->freq / 1000.0);
     if (profile) {
         double spikeMs = 8.0;
-        if (const char* e = std::getenv("RVK_SPIKE_MS")) spikeMs = std::atof(e);
+        // (the Win32 environment: `-Environment` variables are set by the proxy with SetEnvironmentVariable, which the CRT's getenv does not see)
+        if (char e[32]; GetEnvironmentVariableA("RVK_SPIKE_MS", e, sizeof e) != 0) spikeMs = std::atof(e);
         impl_->spikeTicks = spikeMs > 0.0 ? static_cast<std::uint64_t>(spikeMs * impl_->freq / 1000.0) : 0;
     }
     HMODULE self = nullptr;

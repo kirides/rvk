@@ -1297,8 +1297,9 @@ void StaticOps::setOwnedFor(const sc::DrawDesc& d) {
     }
     // (developer bisect: RVK_OWNED_MASK bit 1 VS material, 2 PS material, 4 VS view, 8 PS view windows; default all)
     static const std::uint32_t mask = [] {
-        const char* e = std::getenv("RVK_OWNED_MASK");
-        return e != nullptr ? static_cast<std::uint32_t>(std::strtoul(e, nullptr, 0)) : 15u;
+        // (the Win32 environment: `-Environment` variables are set with SetEnvironmentVariable, which the CRT's getenv does not see)
+        char e[32];
+        return GetEnvironmentVariableA("RVK_OWNED_MASK", e, sizeof e) != 0 ? static_cast<std::uint32_t>(std::strtoul(e, nullptr, 0)) : 15u;
     }();
     if (mask != 15u) {
         if ((mask & 1u) == 0) ownedWin_.w[0][3].kind = d3d9::OwnedWindows::Kind::None;
