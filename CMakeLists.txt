@@ -203,6 +203,7 @@ add_library(rvk_core STATIC
     src/native/static_ops_retained.cpp
     src/native/static_ops_records.cpp
     src/native/static_ops_owned.cpp
+    src/native/static_ops_deps.cpp
     src/native/op_records.h
     src/native/bb_records.h
     src/native/static_ops_bb.cpp
@@ -291,6 +292,8 @@ add_library(rvk_core STATIC
     src/gpuscene/instance_buffer.h
     src/engine/scene_table.h
     src/engine/illum_census.h
+    src/engine/dep_events.h
+    src/engine/dep_events.cpp
     src/engine/lights.h
     src/engine/lod.h
     src/engine/menu_state.cpp

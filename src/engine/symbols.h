@@ -293,6 +293,12 @@
     X(particleOnProcess, L"Engine.dll", "?OnProcess@eCParticle_PS@@UEAAXXZ", false)                                             \
     X(stripCreateVertices, L"Engine.dll", "?CreateVertices@eCStrip_PS@@IEAA_NXZ", false)                                        \
     X(streaksCreateBuffers, L"Engine.dll", "?CreateBuffers@eCLightStreaks_PS@@IEAA_NXZ", false)                                 \
+    /* F2e-1 dependency events (engine/dep_events.*, frame-ownership.md 7.30): the resource cache's state transitions, the lightmap / shader pointer writers (unique exports) */ \
+    X(resCacheLoadData, L"Engine.dll", "?LoadData@eCResourceCache2@@AEAAXPEAVeCResource2@@AEAVCFXVirtualFile@@@Z", false)      \
+    X(resCacheQueueData, L"Engine.dll", "?QueueData@eCResourceCache2@@AEAAXPEAVeCResource2@@W4eEResourceLoadMode@@@Z", false)    \
+    X(resCacheFlushResource, L"Engine.dll", "?FlushResource@eCResourceCache2@@AEAAIPEAVeCResource2@@@Z", false)                \
+    X(meshOnLightmapChanged, L"Engine.dll", "?OnLightmapChanged@eCMeshResource2@@AEAAXXZ", false)                              \
+    X(materialSetShader, L"Engine.dll", "?SetShader@eCMaterialResource2@@QEAAXPEAVeCShaderBase@@@Z", false)                    \
     X(sharedEpsilon, L"SharedBase.dll", "g_fEpsilon", false)
 
 namespace rvk::engine {

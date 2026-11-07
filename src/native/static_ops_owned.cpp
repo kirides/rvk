@@ -101,6 +101,7 @@ void StaticOps::ownedAutoOff(std::uint64_t differing) {
 
 bool StaticOps::ownedViewBegin(void* /*db*/, void* desc) {
     OwnedStats& W = ownedW_;
+    depDrain();  // F2e-1: the engine's events since the last view mark their records (before any stamp is looked at)
     for (auto& v : ownedOps_) {
         W.undrawn += v.size();  // (ops of an earlier view whose pass never began: lost for that frame)
         v.clear();
@@ -190,16 +191,37 @@ bool StaticOps::ownedSelect(const Op& op) {
         ++W.leftNotOwnable;
         return false;
     }
-    orec::Stamp st;
-    if (!recStamp(op, st)) {
-        ++W.leftNoRecord;
+    // F2e-1 (7.30): a record no engine event touched is valid on its polled inputs alone (depFast); a marked one, or the 1 in 16 of the rolling scrub, runs the full stamp
+    const bool events = depEvents();
+    int fast = -2;
+    if (events) fast = depFast(op, rec);
+    if (fast >= 0) {
+        ++W.leftStamp[static_cast<std::size_t>(fast)];
         return false;
     }
-    orec::Stamp a = rec.stamp;
-    a.view = a.materials = 0;
-    if (const int d = orec::firstDifference(a, st); d >= 0) {
-        ++W.leftStamp[static_cast<std::size_t>(d)];
-        return false;
+    const bool scrub = events && fast == -1 && (W.seen & 15u) == 0;
+    if (events && fast == -1 && !scrub) {
+        ++depW_.fast;
+    } else {
+        if (scrub) ++depW_.scrubbed;
+        else if (events) ++depW_.slow;
+        orec::Stamp st;
+        if (!recStamp(op, st)) {
+            ++W.leftNoRecord;
+            return false;
+        }
+        orec::Stamp a = rec.stamp;
+        a.view = a.materials = 0;
+        if (const int d = orec::firstDifference(a, st); d >= 0) {
+            // (a scrub finding with no mark = nothing announced it: an EVENT MISS; the polled-class fields never get here from the fast path)
+            if (scrub) depEventMiss(op, rec, d, "rolling scrub");
+            ++W.leftStamp[static_cast<std::size_t>(d)];
+            return false;
+        }
+        if (events && !scrub) {
+            ++depW_.slowClean;
+            depVerified(rec);
+        }
     }
     if (const int live = recLiveWhy(rec); live >= 0) {
         ++W.leftStamp[live == static_cast<int>(orec::kStampFields) + 4 ? 3 : 2];  // (illumination slot gone / a pending load completed: the engine draws it, the composition rebuilds the record)

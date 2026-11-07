@@ -10,8 +10,10 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
+#include <utility>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -216,7 +218,61 @@ struct OpRecord {
     bool ownable = false;  // the touches / stream 3 lists were collected while this record was built (a record built on a frame that did not collect them is rebuilt once)
     std::string name;                              // diagnostics: mesh / material name
     std::uint64_t builtFrame = 0;
+    // F2e-1 (frame-ownership.md 7.30): event-driven validity. `deps` = the engine objects the stamp's engine reads hang on (the LOD resource, the covered sub-meshes' materials,
+    // the lightmap images, the illumination PS), registered in the DepIndex (object -> records); an engine event on one marks `dirty` and the next look re-verifies the full stamp
+    // (clean again when it still holds). `shaders` = the covered shaders with their field fingerprint (no event exists for a shader's property fields: polled once per shader and
+    // frame). `lightEpoch` = depevents::lightEpoch when the stamp was last verified (a changed light set re-verifies every record once).
+    mutable bool dirty = false;
+    std::uint64_t lightEpoch = 0;
+    std::vector<const void*> deps;
+    std::vector<std::pair<const void*, std::uint64_t>> shaders;
+    OpRecord() = default;
+    OpRecord(const OpRecord&) = delete;
+    OpRecord& operator=(const OpRecord&) = delete;
+    ~OpRecord();
 };
+
+// object -> the records that registered it (engine thread only; a record unregisters itself)
+class DepIndex {
+public:
+    static DepIndex& get() {
+        static DepIndex* p = new DepIndex;  // (leaked: records of a StaticOps destroyed at exit unregister into it)
+        return *p;
+    }
+    void add(const void* obj, OpRecord* r) { map_[obj].push_back(r); }
+    void remove(const void* obj, OpRecord* r) {
+        const auto it = map_.find(obj);
+        if (it == map_.end()) return;
+        auto& v = it->second;
+        const auto at = std::find(v.begin(), v.end(), r);
+        if (at != v.end()) {
+            *at = v.back();
+            v.pop_back();
+        }
+        if (v.empty()) map_.erase(it);
+    }
+    // marks the records that depend on `obj`; returns how many were clean before
+    std::uint32_t markDirty(const void* obj) {
+        std::uint32_t n = 0;
+        const auto it = map_.find(obj);
+        if (it == map_.end()) return 0;
+        for (OpRecord* r : it->second) {
+            if (!r->dirty) {
+                r->dirty = true;
+                ++n;
+            }
+        }
+        return n;
+    }
+    std::size_t objects() const { return map_.size(); }
+
+private:
+    std::unordered_map<const void*, std::vector<OpRecord*>> map_;
+};
+
+inline OpRecord::~OpRecord() {
+    for (const void* d : deps) DepIndex::get().remove(d, this);
+}
 
 // 5 s window (and run totals) of the log line
 struct Stats {
