@@ -461,7 +461,10 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
     gpuscene::OwnedCompact& compact = gpuscene::ownedcompact();
     bool gpu = compact.usable(*this);
     if (gpu) {
-        for (const OwnedItem& it : items) {
+        // (every item on a check frame, else every 8th: the args are in the signature, and the record line they sit on is a cache line more per item than the guard above reads)
+        const std::uint32_t step = compact.checkThisFrame(*this) ? 1u : 8u;
+        for (std::uint32_t i = static_cast<std::uint32_t>(frameValue() & 7u) % step; i < n; i += step) {
+            const OwnedItem& it = items[i];
             const shader::abi::DrawRecord& r = shadow[it.slot];
             if (r.args[0] != it.cd->packet.count || r.args[1] != it.cd->packet.first || r.args[2] != static_cast<std::uint32_t>(it.cd->packet.vertexOffset)) {
                 ++compact.stats().argsMismatch;
