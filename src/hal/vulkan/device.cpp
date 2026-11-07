@@ -35,6 +35,7 @@
 #include "gpuscene/window_tables.h"
 #include "gpuscene/draw_record_table.h"
 #include "gpuscene/owned_compact.h"
+#include "gpuscene/cluster_table.h"
 #include "gpuscene/view_table.h"
 #include "gpuscene/billboard_table.h"
 #include "gpuscene/object_table.h"
@@ -189,6 +190,7 @@ void HalDevice::applyStaticOps() {
                                        on(rs.nativeSceneOpsCompare),
                                        rs.nativeSceneOpsGroups != nullptr ? rs.nativeSceneOpsGroups->asInt() : static_cast<int>(kAllSceneOpGroups));
     engine::scene::setSkyCubeFullMode(renderMode() == RenderMode::Full);
+    dev_.setClusters(on(rs.nativeClusters));  // F5-1: static meshes clustered (any mode: the draws are the D3D9 model's)
     const bool takeOver = plan.staticTake;
     const bool compare = plan.staticCompare;
     staticOps_->setMode(native::StaticOps::Group::Static, takeOver, compare);
@@ -353,6 +355,7 @@ HalDevice::~HalDevice() {
         fvfDecls_.clear();
         depthBuffers_.clear();
     }
+    gpuscene::clusterstore().destroy(&dev_);  // (the worker, the arena copies, the table: before the device goes)
     gpuscene::ownedcompact().destroy();
     dev_.destroy();
 }
@@ -1703,6 +1706,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
         gpuscene::viewtable().flush(dev_);
         gpuscene::drawrecords().flush(dev_);
         gpuscene::ownedcompact().flush(dev_);  // F2c-4c: after the record table's upload (same list, barrier between)
+        gpuscene::clusterstore().flush(dev_);  // F5-1
         gpuscene::objecttable().flush(dev_);
         gpuscene::bbtable().flush(dev_);
     }

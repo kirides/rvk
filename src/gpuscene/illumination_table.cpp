@@ -1,5 +1,6 @@
 #include "gpuscene/illumination_table.h"
 #include "gpuscene/draw_record_table.h"
+#include "gpuscene/cluster_table.h"
 
 #include <algorithm>
 #include <chrono>
@@ -167,6 +168,7 @@ template class GpuTable<shader::abi::ViewBlock2>;  // the view table (view_table
 template class GpuTable<shader::abi::DrawRecord>;  // the persistent draw records / blocks (draw_record_table.cpp)
 template class GpuTable<shader::abi::DrawBlock>;
 template class GpuTable<ZeroBlock>;
+template class GpuTable<ClusterRow>;  // the cluster table (cluster_table.cpp, F5-1)
 
 // ---- IllumTable ------------------------------------------------------------------------------------------------------------------
 

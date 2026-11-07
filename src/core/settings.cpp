@@ -2571,6 +2571,20 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .needs = {{"native.owned_static", "true", false, true}},
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeClusters = &reg.add({
+        .key = "native.clusters",
+        .label = "Native frame: mesh clusters",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "F5-1 (frame-ownership.md 7.33; the cull of F5-2 will read it): static rigid opaque meshes of >= 1,024 triangles per draw (z pre-pass, solid, shadow maps) get ~128-triangle "
+                       "clusters built on a worker thread (meshoptimizer, cached in bin/rvk/cache/clusters), a copy of their indices in cluster order in the mesh arena (the engine's own copy stays; "
+                       "the same triangles with the same vertex order, so the solid pass's depth EQUAL holds) which the draw uses, and one bounding sphere per cluster in a GPU table. "
+                       "Nothing exists while off. rvk.log `native: clusters (5 s)`.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeOwnedCheck = &reg.add({
         .key = "native.owned_check",
         .label = "Native frame: owned static check interval",

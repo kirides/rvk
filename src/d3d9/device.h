@@ -870,6 +870,8 @@ public:
     void setMaxFps(double fps);
     // the opaque passes' draws grouped by pipeline (vulkan.batch_draws, docs/research/performance.md 12); applies from the next
     // draw (a pending batch is recorded first)
+    void setClusters(bool on);
+    bool clustersOn() const { return clusters_; }
     void setBatching(bool on);
     // the opaque passes' draws recorded on worker threads (debug.record_threads); applies from the next rendering scope
     void setRecordThreads(bool on) { recordThreadsWanted_ = on; }
@@ -1027,6 +1029,8 @@ public:
             rhi::ShaderModule vsUsed = rhi::ShaderModule::None;  // the vertex module drawn with (the billboards' fade variant while lod.trees != 1)
         } v;
         std::uint32_t streamMask = 0;
+        bool clusterUsing = false;      // ... or it drew with the entry's clustered copy (the draw is remade when the entry is gone)
+        std::uint64_t clusterWait = 0;  // F5-1: the draw was a cluster candidate whose build was pending at capture (the entry's id): remade once that entry has settled
         Buffer::Binding stream[4]{};
         Buffer::Binding ib{};
         std::uint32_t texMask = 0;
@@ -1595,6 +1599,12 @@ private:
     bool prepareDraw(std::uint32_t primitiveType, const DrawGeom& geom);
     // F5-0 measurements (RVK_F5_MEASURE=1; d3d9/f5_note.cpp, frame-ownership.md 7.22): the draw's triangles per view / size class, cluster + exact estimates
     void f5Note(std::uint32_t primitiveType, const DrawGeom& geom, draws::Kind kind, scene::Phase phase);
+    // ---- F5-1 clusters (native.clusters, frame-ownership.md 7.33; d3d9/cluster_draw.cpp). A static rigid opaque draw of >= 1,024 triangles whose range has a built cluster
+    // order is drawn from the arena copy of its indices in cluster order (same triangles, same vertex order of each): packet_.indexBuffer / first are pointed at it
+    void clusterApply(std::int32_t baseVertex, std::uint32_t minIndex, std::uint32_t numVertices, std::uint32_t startIndex, std::uint32_t primitives);
+    bool clusters_ = false;
+    std::uint64_t clusterWait_ = 0;
+    bool clusterUsing_ = false;
     // GI variant eligibility of the current draw (prepareDraw): the engine set its ambient constants (a first pass)
     bool giEligible(const scene::Phase& phase) const;
     bool giStaticEligible(const scene::Phase& phase) const;  // giEligible without the ambient registers' test

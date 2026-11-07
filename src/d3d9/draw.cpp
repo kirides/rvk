@@ -17,6 +17,7 @@
 #include "core/f5_measure.h"
 #include "d3d9/convert.h"
 #include "d3d9/device.h"
+#include "gpuscene/cluster_table.h"
 #include "d3d9/memeq.h"
 #include "native/f2c_measure.h"
 #include "shader/abi.h"
@@ -1562,6 +1563,8 @@ void Device::fillCapture(const DrawPacket& p) {
         return;
     }
     c.packet = p;
+    c.clusterWait = clusterWait_;
+    c.clusterUsing = clusterUsing_;
     c.vi = *p.vi;
     c.dyn = *p.dyn;
     c.block = lastBlock_;
@@ -1710,6 +1713,8 @@ bool Device::replayBuild(const CachedDraw& c, const ReplayInputs& in, DrawPacket
     if (in.indices == nullptr) return fail(6);
     const Buffer::Binding ib = in.indices->gpu(in.indices->index32() ? 4 : 2);
     if (ib.buffer != c.ib.buffer || ib.offset != c.ib.offset) return fail(6);
+    // F5-1: captured while the range's cluster build was pending, and that entry has settled since (built / failed): made again (it takes the clustered copy now)
+    if (c.clusterWait != 0 && gpuscene::clusterstore().stale(c.clusterWait, c.clusterUsing)) return fail(10);
     for (std::uint32_t mask = c.texMask; mask != 0; mask &= mask - 1) {
         const std::uint32_t slot = static_cast<std::uint32_t>(std::countr_zero(mask));
         Texture* t = c.tex[slot];
@@ -2002,6 +2007,9 @@ void Device::drawIndexedPrimitive(std::uint32_t type, std::int32_t baseVertex, s
     packet_.count = vertexCount(type, primitiveCount);
     packet_.instances = instanceCount_;
     packet_.vertexOffset = baseVertex + vertexShift_;
+    clusterWait_ = 0;
+    clusterUsing_ = false;
+    if (clusters_) clusterApply(baseVertex, minIndex, numVertices, startIndex, primitiveCount);  // F5-1: the clustered copy of a large static range (cluster_draw.cpp)
     submitPacket(packet_);
 }
 

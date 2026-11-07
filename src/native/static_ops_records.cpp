@@ -21,6 +21,7 @@
 #include "enh/light_table.h"
 #include "engine/memread.h"
 #include "engine/scene_table.h"
+#include "gpuscene/cluster_table.h"
 #include "gpuscene/illumination_table.h"
 #include "gpuscene/lighting_images.h"
 #include "gpuscene/material_table.h"
@@ -311,6 +312,13 @@ void StaticOps::recEnter(const Op& op) {
 int StaticOps::recLiveWhy(const orec::OpRecord& rec) {
     if (rec.illumSlot != gpuscene::kNoSlot && !gpuscene::illumtable().slotLive(rec.anchors[3], rec.illumSlot)) return static_cast<int>(orec::kStampFields) + 4;
     if (!rec.watch.empty() && !ret::validate(rec.watch.data(), rec.watch.size())) return static_cast<int>(orec::kStampFields) + 5;
+    // F5-1: a draw was composed while its range's cluster build was pending (the build has finished or failed since: composed again, it takes the clustered copy) or drew with a
+    // clustered copy that is gone (the index buffer's copy was replaced, the setting went off)
+    {
+        for (const orec::DrawRec& d : rec.draws) {
+            if (d.cd && d.cd->clusterWait != 0 && gpuscene::clusterstore().stale(d.cd->clusterWait, d.cd->clusterUsing)) return static_cast<int>(orec::kStampFields) + 5;
+        }
+    }
     return -1;
 }
 
@@ -816,7 +824,7 @@ void StaticOps::recReport() {
     std::string rebuilt;
     for (std::size_t i = 0; i < orec::kStampFields + 6; ++i) {
         if (w.rebuiltWhy[i] == 0) continue;
-        constexpr const char* kExtra[] = {"draw count", "read log", "derive refused", "other", "illumination slot gone", "resource load completed"};
+        constexpr const char* kExtra[] = {"draw count", "read log", "derive refused", "other", "illumination slot gone", "resource load completed / clusters ready"};
         const char* n = i < orec::kStampFields ? orec::kStampNames[i] : kExtra[i - orec::kStampFields];
         rebuilt += std::format("{}{} {}", rebuilt.empty() ? "" : ", ", n, w.rebuiltWhy[i]);
     }

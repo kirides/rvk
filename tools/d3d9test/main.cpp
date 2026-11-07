@@ -25,6 +25,7 @@
 #include "d3d9/convert.h"
 #include "d3d9/device.h"
 #include "d3d9/fvf.h"
+#include "gpuscene/cluster_table.h"
 #include "gpuscene/draw_record_table.h"
 #include "gpuscene/owned_compact.h"
 #include "gpuscene/view_table.h"
@@ -1837,6 +1838,158 @@ mov oC0, r0
     dev.release(std::move(ib));
 }
 
+// F5-1 clusters of large static meshes through the device's own path (frame-ownership.md 7.33, native.clusters): a 40 x 40 quad grid (3,200 triangles, 16-bit indices)
+// is drawn as a static mesh (a rigid material vertex shader: the semantics are set by hand, POSITION FLOAT3 at offset 0) (a) the normal way and (b) with the setting on: the
+// first draw asks the worker, a later one is drawn from the arena copy of the indices in cluster order. 0 bytes may differ from (a); the copy's read-back (Vulkan) and the
+// multiset check of the ordered triples pass; a rewritten index buffer makes a new range (a new copy, the old one freed); off = nothing left.
+void testClusters(Fixture& f) {
+    Device& dev = f.dev;
+    static const char* kVs = R"(
+vs_3_0
+dcl_position v0
+dcl_color v1
+dcl_position o0
+dcl_color o1
+mov o0, v0
+mov o1, v1
+)";
+    static const char* kPs = R"(
+ps_3_0
+dcl_color v0
+mov oC0, v0
+)";
+    const auto vsV = shaderFrom(dev, kVs);
+    const auto psV = shaderFrom(dev, kPs);
+    const VertexElement kDeclC[] = {
+        {0, 0, DECLTYPE_FLOAT3, 0, 0 /*POSITION*/, 0},
+        {0, 12, DECLTYPE_D3DCOLOR, 0, 10 /*COLOR*/, 0},
+        {kDeclEndStream, 0, DECLTYPE_UNUSED, 0, 0, 0},
+    };
+    auto decl = dev.createVertexDecl(kDeclC);
+    if (!vsV || !psV || !decl) {
+        std::printf("  FAIL clusters: shaders / declaration\n");
+        ++g_failures;
+        return;
+    }
+    vsV->semantics.flags |= ShaderSemantics::Material;
+    vsV->semantics.ranges[static_cast<std::size_t>(Semantic::InstanceData)] = {32, 1};
+    constexpr int kN = 40;
+    struct V {
+        float x, y, z;
+        std::uint32_t color;
+    };
+    std::vector<V> verts;
+    for (int y = 0; y <= kN; ++y) {
+        for (int x = 0; x <= kN; ++x) {
+            const std::uint32_t c = 0xFF000000u | (static_cast<std::uint32_t>(x * 6) & 255u) << 16 | (static_cast<std::uint32_t>(y * 6) & 255u) << 8 | static_cast<std::uint32_t>((x * y) & 255);
+            verts.push_back({-0.9f + 1.8f * static_cast<float>(x) / kN, -0.9f + 1.8f * static_cast<float>(y) / kN, 0.5f, c});
+        }
+    }
+    std::vector<std::uint16_t> idx;
+    for (int y = 0; y < kN; ++y) {
+        for (int x = 0; x < kN; ++x) {
+            const std::uint16_t a = static_cast<std::uint16_t>(y * (kN + 1) + x), b = a + 1, c = static_cast<std::uint16_t>(a + kN + 1), d = c + 1;
+            if ((x + y) & 1) idx.insert(idx.end(), {a, b, c, b, d, c});
+            else idx.insert(idx.end(), {a, d, c, a, b, d});
+        }
+    }
+    const std::uint32_t tris = static_cast<std::uint32_t>(idx.size() / 3);
+    auto vb = dev.createBuffer(static_cast<std::uint32_t>(verts.size() * sizeof(V)), USAGE_WRITEONLY, POOL_MANAGED, false, false);
+    auto ib = dev.createBuffer(static_cast<std::uint32_t>(idx.size() * 2), USAGE_WRITEONLY, POOL_MANAGED, true, false);
+    std::memcpy(vb->lock(0, 0, 0), verts.data(), verts.size() * sizeof(V));
+    vb->unlock();
+    const auto writeIndices = [&](const std::vector<std::uint16_t>& v) {
+        std::memcpy(ib->lock(0, 0, 0), v.data(), v.size() * 2);
+        ib->unlock();
+    };
+    writeIndices(idx);
+    gpuscene::ClusterStore& store = gpuscene::clusterstore();
+    const auto frame = [&](const char* name) {
+        f.reset();
+        dev.drawTag() = {};
+        dev.drawTag().source = draws::Source::Mesh;
+        dev.phases().push(scene::View::Main, scene::Pass::Solid);
+        dev.setVertexDecl(decl.get());
+        dev.setVertexShader(vsV);
+        dev.setPixelShader(psV);
+        dev.setStreamSource(0, vb.get(), 0, sizeof(V));
+        dev.setIndices(ib.get());
+        dev.drawIndexedPrimitive(PT_TRIANGLELIST, 0, 0, static_cast<std::uint32_t>(verts.size()), 0, tris);
+        store.flush(dev);
+        dev.phases().pop();
+        return capture(dev, name);
+    };
+    const auto differ = [&](const Pixels& a, const Pixels& b, const char* what) {
+        std::uint32_t n = 0;
+        for (std::size_t i = 0; i < a.bgra.size() && i < b.bgra.size(); ++i) n += a.bgra[i] != b.bgra[i];
+        if (n != 0 || a.bgra.size() != b.bgra.size()) {
+            std::printf("  FAIL clusters (%s): %u bytes differ from the normal draw\n", what, n);
+            ++g_failures;
+        }
+    };
+    // the variant B of the indices: one triangle with its vertices rotated (the same triangle, another ordered triple), for the rewrite step
+    std::vector<std::uint16_t> idxB = idx;
+    std::rotate(idxB.begin() + 30, idxB.begin() + 31, idxB.begin() + 33);
+    const Pixels refA = frame("clusters_ref_a");
+    writeIndices(idxB);
+    const Pixels refB = frame("clusters_ref_b");
+    writeIndices(idx);
+    const auto waitReady = [&](std::uint64_t uploaded, const char* what) {
+        for (int i = 0; i < 400; ++i) {
+            frame("clusters_wait");
+            if (store.stats().uploaded >= uploaded) return true;
+            Sleep(25);
+        }
+        std::printf("  FAIL clusters: %s never got its clustered copy (requested %llu built %llu failed build %llu)\n", what, static_cast<unsigned long long>(store.stats().requested),
+                    static_cast<unsigned long long>(store.stats().built), static_cast<unsigned long long>(store.stats().failedBuild));
+        ++g_failures;
+        return false;
+    };
+    dev.setClusters(true);
+    if (waitReady(1, "the grid")) {
+        const std::uint64_t used0 = store.stats().perDrawUsed;
+        differ(refA, frame("clusters_a1"), "range A, first clustered draw");
+        differ(refA, frame("clusters_a2"), "range A, again");
+        if (store.stats().perDrawUsed < used0 + 2) {
+            std::printf("  FAIL clusters: the draws did not take the clustered copy (%llu uses)\n", static_cast<unsigned long long>(store.stats().perDrawUsed));
+            ++g_failures;
+        }
+        // the rewrite: another generation of the index buffer = another range: a new copy, the old one freed at the next drain
+        writeIndices(idxB);
+        if (waitReady(2, "the rewritten grid")) {
+            differ(refB, frame("clusters_b1"), "range B");
+            frame("clusters_free");
+            if (store.stats().freed < 1) {
+                std::printf("  FAIL clusters: the copy of the replaced index buffer generation was not freed (%llu)\n", static_cast<unsigned long long>(store.stats().freed));
+                ++g_failures;
+            }
+        }
+        for (int i = 0; i < 4; ++i) frame("clusters_collect");  // (the read-backs complete)
+        const gpuscene::ClusterStore::Stats& st = store.stats();
+        std::printf("  clusters: %llu ranges requested, %llu uploaded (%llu clusters, %llu triangles, %.1f KiB), %llu draws on a copy, multiset checks %llu bad %llu, read-backs %llu DIFFERING %llu\n",
+                    static_cast<unsigned long long>(st.requested), static_cast<unsigned long long>(st.uploaded), static_cast<unsigned long long>(st.clusters), static_cast<unsigned long long>(st.triangles),
+                    static_cast<double>(st.arenaBytes) / 1024.0, static_cast<unsigned long long>(st.perDrawUsed), static_cast<unsigned long long>(st.multisetChecked),
+                    static_cast<unsigned long long>(st.multisetBad), static_cast<unsigned long long>(st.readbackChecked), static_cast<unsigned long long>(st.readbackBad));
+        const bool vulkan = dev.game().caps().backend == rhi::Backend::Vulkan;
+        if (st.multisetBad != 0 || st.readbackBad != 0 || st.multisetChecked < 2 || (vulkan && st.readbackChecked < 1) || st.clusters < 2 * (tris / 128) || st.failedBuild != 0 || st.failedData != 0) {
+            std::printf("  FAIL clusters: checks (multiset bad %llu, read-back bad %llu / checked %llu, clusters %llu, build failures %llu, data failures %llu)\n",
+                        static_cast<unsigned long long>(st.multisetBad), static_cast<unsigned long long>(st.readbackBad), static_cast<unsigned long long>(st.readbackChecked),
+                        static_cast<unsigned long long>(st.clusters), static_cast<unsigned long long>(st.failedBuild), static_cast<unsigned long long>(st.failedData));
+            ++g_failures;
+        }
+    }
+    // off: nothing left, the draws are the engine's again
+    dev.setClusters(false);
+    if (store.arenaBytes() != 0 || store.rowsUsed() != 0) {
+        std::printf("  FAIL clusters: switched off, but %llu arena bytes / %u rows are left\n", static_cast<unsigned long long>(store.arenaBytes()), store.rowsUsed());
+        ++g_failures;
+    }
+    differ(refB, frame("clusters_off"), "after switching off");
+    store.destroy(&dev);
+    dev.release(std::move(vb));
+    dev.release(std::move(ib));
+}
+
 // F4-3 owned SpeedTrees through the device's own path (frame-ownership.md 7.25): a tree-like hardware-instanced draw (one quad, six instances, stream 1 = the identity
 // ramp, a vertex shader that reads its row through c32[a0.x] with a0 = 4 x the ramp value, c12 from the view block) is drawn (a) the normal way with the rows in the
 // register file and (b) as ONE retained template (the scene ABI v2 form of the draw, its DrawBlock a persistent slot) with a ring block of rows (window 2 = c31 header +
@@ -2594,7 +2747,7 @@ int main(int argc, char** argv) {
         {"mip chain stretch rect", testMipChainStretchRect}, {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
         {"read-only lock of a fresh texture", testReadOnlyLockOfFreshTexture},
-        {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned persistent (F2c-4a)", testOwnedPersistent}, {"owned trees (F4-3)", testOwnedTrees}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
+        {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned persistent (F2c-4a)", testOwnedPersistent}, {"clusters (F5-1)", testClusters}, {"owned trees (F4-3)", testOwnedTrees}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
     };
     for (const auto& [name, fn] : cases) {
         const int before = g_failures;

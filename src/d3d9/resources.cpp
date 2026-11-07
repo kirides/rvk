@@ -8,6 +8,7 @@
 #include <spdlog/spdlog.h>
 
 #include "d3d9/device.h"
+#include "gpuscene/cluster_table.h"
 #include "rhi/names.h"
 
 namespace rvk::d3d9 {
@@ -424,7 +425,10 @@ Buffer::Buffer(Device& device, std::uint32_t size, std::uint32_t usage, std::uin
 
 Buffer::~Buffer() {
     if (!dev_.untrackLive(this)) return;  // orphaned by Device::destroy
-    if (static_.valid()) dev_.game().freeMesh(static_, true);
+    if (static_.valid()) {
+        dev_.game().freeMesh(static_, true);
+        gpuscene::clusterstore().bufferChanged(id_);
+    }
 }
 
 void Buffer::orphan() {
@@ -432,6 +436,7 @@ void Buffer::orphan() {
     if (static_.valid()) {
         dev_.game().freeMesh(static_, true);
         static_ = {};
+        gpuscene::clusterstore().bufferChanged(id_);
     }
     orphaned_ = true;
 }
@@ -509,7 +514,10 @@ Buffer::Binding Buffer::gpu(std::uint32_t strideHint) {
         binding_ = {na.native, na.offset};
         copies_.committed(plan, false, frame);
         // observers (enh/rt_scene) forget what they built from the old copy (its address dies with it)
-        if (renamed) dev_.notifyBufferChanged(id_);
+        if (renamed) {
+            dev_.notifyBufferChanged(id_);
+            gpuscene::clusterstore().bufferChanged(id_);  // F5-1: the cluster copies of ranges of the old static copy go
+        }
     }
     if (static_.valid() && !copies_.dirty()) cleanStatic_.store(true, std::memory_order_release);
     return binding_;
