@@ -64,7 +64,7 @@ public:
     bool failed() const { return failed_; }
     // run-time A/B (overlay command `debug compact cpu|gpu`): true = the flushes write the arguments on the CPU as before F2c-4c
     void setForceCpu(bool on) { forceCpu_ = on; }
-    // the check frames' period in frames (default 6; env RVK_F2C4C_CHECK=n, 0 = never, 1 = every frame; the test sets it): this frame's flushes carry the CPU's expected arguments
+    // the check frames' period in frames (default 30; env RVK_F2C4C_CHECK=n, 0 = never, 1 = every frame; the test sets it): this frame's flushes carry the CPU's expected arguments
     void setCheckEvery(std::uint32_t n) { checkEvery_ = n; checkEverySet_ = true; }
     bool checkThisFrame(d3d9::Device& dev);
     // the GPU memory held (diagnostics)
@@ -92,7 +92,7 @@ private:
     SlotState slots_[rhi::kFramesInFlight];
     bool forceCpu_ = false;
     bool envRead_ = false, cpuOnly_ = false, failed_ = false, checkEverySet_ = false;
-    std::uint32_t checkEvery_ = 6;
+    std::uint32_t checkEvery_ = 30;
     Stats stats_{}, last_{};
     double lastReport_ = 0.0;
     std::uint64_t differingLogged_ = 0;

@@ -583,7 +583,10 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
         job.range = range;
         const bool check = compact.checkThisFrame(*this);
         std::vector<std::uint32_t> recs;
-        if (check) job.expect.resize(2 * static_cast<std::size_t>(buckets));
+        if (check) {
+            job.expect.resize(2 * static_cast<std::size_t>(buckets));
+            recs.reserve(static_cast<std::size_t>(n) * 5);
+        }
         for (std::uint32_t b = 0; b < buckets; ++b) {
             jobs[4 * b + 0] = cursor[b];
             jobs[4 * b + 1] = cursor[b + 1] - cursor[b];
