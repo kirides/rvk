@@ -124,6 +124,9 @@ public:
     // draw, signature and env epoch are unchanged, whose entry is alive and whose slot has not moved is skipped without a lookup (the F8-2 hand-over)
     bool bulkOwned() const override { return tableOn_ && active_; }
     void observeOwned(d3d9::Device& device, const d3d9::OwnedFrame& frame) override;
+    // F4-3 (frame-ownership.md 7.25b): the owned SpeedTree runs are shown to observe() through Device::ownedTreeObserve (rows in c32 + 4 i, one batch of <= 50 instances per call) as the
+    // composed batches were; only the animated trees (their vertex capture needs the composed draw) keep them composed
+    bool ownedTreesOk() const override { return !animated_; }
     void bufferChanged(std::uint64_t bufferId) override;
     void textureReleased(const d3d9::Texture* texture) override;
 
@@ -418,6 +421,15 @@ private:
     std::vector<DynDraw> dynPrev_;  // the previous frame's
     std::vector<DynDraw> dynUse_;   // what buildDynamic took for this frame's TLAS (one per key, built = its BLAS is up to date)
     void rollDyn(std::uint64_t frame);
+    // the main view's SpeedTree sightings of one frame (count + order-independent hash of the instance keys), per frame class: frames whose trees were owned / composed (a
+    // still camera must give the same set in both: the check frames' compare of the owned hand-over)
+    struct TreeSet {
+        std::uint64_t frame = ~0ull, count = 0, hash = 0;
+        bool owned = false;
+    } treeSet_;
+    std::unordered_map<std::uint64_t, std::uint64_t> treeSets_[2];  // [owned] set id -> frames
+    void treeSetNote(const d3d9::Device& dev, const rt::Registry::Instance& in);
+    void treeSetClose(const d3d9::Device& dev);
     std::uint64_t dynFrame_ = 0;
     std::unordered_map<std::uint64_t, DynBlas> dynBlas_;
     std::uint32_t nextDynId_ = 1u << 30;

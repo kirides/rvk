@@ -590,6 +590,7 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         if (in != nullptr && materialId != 0) applyMaterial(*in, materialId, materialRank, overlay, frame);
         if (in != nullptr && tableOn_ && in->ambiguous) tableDropInstance(in->key);
         if (in != nullptr && tableOn_ && !speedTree) tableObserved(q, *b, *in, rows, sr.second, havePre ? &pre : nullptr);
+        if (in != nullptr && speedTree && q.phase.view == View::Main && q.phase.pass == Pass::Solid) treeSetNote(dev, *in);
         if (in != nullptr && speedTree && animated_ && q.phase.view == View::Main && q.phase.pass == Pass::Solid) {
             TreeBatch batch;
             observeTree(dev, q, *b, *in, rows, batch, 0, 1);
@@ -625,6 +626,7 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         if (sr.second) noteNewInstance(*b, frame);
         if (in != nullptr && materialId != 0) applyMaterial(*in, materialId, materialRank, overlay, frame);
         if (in != nullptr && tableOn_ && in->ambiguous) tableDropInstance(in->key);
+        if (in != nullptr && speedTree && q.phase.view == View::Main && q.phase.pass == Pass::Solid) treeSetNote(dev, *in);
         // the capture's instance k is the batch's k-th instance (the instance stream is 0, 1, 2, ...)
         if (in != nullptr && treeBatchOk && v == static_cast<float>(i)) observeTree(dev, q, *b, *in, rows, treeBatch, i, n);
     }
@@ -633,6 +635,28 @@ void RtScene::observe(d3d9::Device& dev, const d3d9::ReplaceQuery& q) {
         spdlog::info("rt: scene: instance stream check: {}", indexDeviations_ == 0 ? "TEXCOORD4 = 0, 1, 2, ... in every batch so far"
                                                                                    : std::format("{} instances deviate from 0, 1, 2, ...", indexDeviations_));
     }
+}
+
+void RtScene::treeSetNote(const d3d9::Device& dev, const rt::Registry::Instance& in) {
+    const std::uint64_t frame = dev.frameValue();
+    if (treeSet_.frame != frame) {
+        treeSetClose(dev);
+        treeSet_ = {frame, 0, 0, false};
+    }
+    if (dev.ownedTreeObservedFrame() == frame) treeSet_.owned = true;
+    ++treeSet_.count;
+    std::uint64_t h = in.key * 0x9E3779B97F4A7C15ull ^ (static_cast<std::uint64_t>(in.flags) * 0xC2B2AE3D27D4EB4Full) ^ (static_cast<std::uint64_t>(in.data) * 0x165667B19E3779F9ull);
+    h ^= h >> 29;
+    treeSet_.hash += h;
+}
+
+void RtScene::treeSetClose(const d3d9::Device& dev) {
+    if (treeSet_.frame == ~0ull || treeSet_.count == 0) return;
+    (void)dev;
+    const bool owned = treeSet_.owned;
+    const std::uint64_t id = treeSet_.hash * 31 + treeSet_.count;
+    ++treeSets_[owned ? 1 : 0][id];
+    treeSet_.count = 0;
 }
 
 // ---- F8-0 persistent table entries (docs/research/frame-ownership.md 7.20) ------------------------------------------------------
@@ -3235,6 +3259,20 @@ void RtScene::logStats(bool force) {
     if (iv_.holes > 0) {
         spdlog::info("rt: scene: TLAS built over fewer instances than counted in {} frames of the interval ({} dynamic instances dropped out: their registry instance or BLAS was gone)",
                      iv_.holeFrames, iv_.holes);
+    }
+    treeSetClose(dev_);
+    if (!treeSets_[0].empty() || !treeSets_[1].empty()) {
+        std::uint64_t frames[2] = {0, 0}, shared = 0;
+        for (int k = 0; k < 2; ++k) {
+            for (const auto& [id, n] : treeSets_[k]) {
+                frames[k] += n;
+                if (k == 1 && treeSets_[0].contains(id)) ++shared;
+            }
+        }
+        spdlog::info("rt: scene: SpeedTree sightings (main solid pass, per frame): composed frames {} ({} distinct sets), owned frames {} ({} distinct sets), sets seen in both {} (a still camera: 1 / 1 / 1)", frames[0],
+                     treeSets_[0].size(), frames[1], treeSets_[1].size(), shared);
+        treeSets_[0].clear();
+        treeSets_[1].clear();
     }
     iv_ = {};
     lastLog_ = now;

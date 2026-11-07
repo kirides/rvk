@@ -1841,7 +1841,7 @@ add o1, r3, c12
     static const char* kPsTree = R"(
 ps_3_0
 dcl_color v0
-mov oC0, v0
+add oC0, v0, c14
 )";
     const VertexElement kTreeDecl[] = {
         {0, 0, DECLTYPE_FLOAT4, 0, 0 /*POSITION*/, 0},
@@ -1989,8 +1989,30 @@ mov oC0, v0
         ++g_failures;
     }
     // the template: derived once, its DrawBlock a persistent slot
+    // lighting images (PS window 3, c14..): entry e = 24 registers at kPadL + 512 e, c14 = kLight[e]; the base is biased by 14 x 16 as the lighting images' are
+    constexpr std::uint64_t kPadL = 4096;
+    const float kLight[3][4] = {{0.0f, 0.0f, 0.0f, 0.0f}, {0.25f, 0.0f, 0.0f, 0.0f}, {0.0f, 0.15f, 0.35f, 0.0f}};
+    auto lightBuf = rd->createBuffer({kPadL + 3 * 512, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "owned trees lighting"});
+    if (!lightBuf) {
+        std::printf("  FAIL owned trees: lighting buffer\n");
+        ++g_failures;
+        return;
+    }
+    {
+        auto* lb = static_cast<std::uint8_t*>(lightBuf->map());
+        std::memset(lb, 0, static_cast<std::size_t>(kPadL + 3 * 512));
+        for (std::uint32_t e = 0; e < 3; ++e) std::memcpy(lb + kPadL + 512u * e, kLight[e], 16);
+        lightBuf->flush();
+    }
+    const auto lightBase = [&](std::uint32_t e) {
+        const auto w = lightBuf->shaderRef(kPadL + 512u * e);
+        return rhi::GpuRef::fromWords(w[0], w[1]).plus(-14 * 16).bits;
+    };
     const std::uint32_t slot = tab.alloc();
     OwnedWindows ow = vw;
+    ow.w[1][3].kind = OwnedWindows::Kind::Lighting;
+    ow.w[1][3].base = rhi::GpuRef{lightBase(0)};
+    ow.w[1][3].covered = 24;
     ow.w[0][2].kind = OwnedWindows::Kind::Object;
     ow.w[0][2].base = tab.zeroRef().plus(-static_cast<std::int64_t>(shader::abi::kVsWindowFirst[2]) * 16);
     ow.w[0][2].covered = shader::abi::kVsWindowFirst[3] - shader::abi::kVsWindowFirst[2];
@@ -2016,7 +2038,9 @@ mov oC0, v0
         end("ownedt_derive");
     }
     // one frame: the rows in a ring block (c31 header, then 64 bytes per position), the runs of the items, optionally the rows reversed / a guard broken
-    const auto frame = [&](const char* name, const std::vector<std::uint32_t>& runs, bool reverse, std::uint32_t breakWhat, std::uint64_t& calls, bool& flushed) {
+    // (lightOf: the lighting entry of every position, empty = all entry 0. One DrawRecord per distinct entry, as the game's pass lays them out; recBreak 1 = a record index out of range, 2 = a null lighting base)
+    const auto frame = [&](const char* name, const std::vector<std::uint32_t>& runs, bool reverse, std::uint32_t breakWhat, std::uint64_t& calls, bool& flushed, const std::vector<std::uint32_t>& lightOf = {},
+                           std::uint32_t recBreak = 0) {
         begin();
         dev.setSceneIssue(true);
         rhi::RingAlloc ra = dev.allocOwnedRing((32u + 4u * kInst) * 16u, 16);
@@ -2028,15 +2052,28 @@ mov oC0, v0
             Device::TreeItem it;
             it.cd = &cd;
             it.bucket = dev.ownedBucketKey(cd, viewSlot);
-            it.rec = tab.record(slot);
-            it.rec.vsWin[2] = breakWhat == 1 ? 0 : ra.ref.bits;
             it.instances = n;
             items.push_back(it);
         }
+        std::vector<shader::abi::DrawRecord> recs;
+        std::vector<std::uint32_t> posRec;
+        std::uint32_t recOfEntry[3] = {~0u, ~0u, ~0u};
+        for (std::uint32_t p = 0; p < kInst; ++p) {
+            const std::uint32_t e = lightOf.empty() ? 0 : lightOf[p];
+            if (recOfEntry[e] == ~0u) {
+                recOfEntry[e] = static_cast<std::uint32_t>(recs.size());
+                shader::abi::DrawRecord r = tab.record(slot);
+                r.vsWin[2] = breakWhat == 1 ? 0 : ra.ref.bits;
+                r.psWin[3] = recBreak == 2 ? 0 : lightBase(e);
+                recs.push_back(r);
+            }
+            posRec.push_back(recOfEntry[e]);
+        }
+        if (recBreak == 1) posRec[3] = static_cast<std::uint32_t>(recs.size());
         std::uint32_t positions = kInst;
         if (breakWhat == 2) positions = kInst + 1;
         const auto s0 = dev.sceneStats();
-        flushed = dev.ownedTreeFlush(items, viewSlot, positions);
+        flushed = dev.ownedTreeFlush(items, recs, posRec, viewSlot, positions);
         calls = dev.sceneStats().indirectCalls - s0.indirectCalls;
         return end(name);
     };
@@ -2063,6 +2100,46 @@ mov oC0, v0
         }
     }
     bad(ref, frame("ownedt_after_guards", {kInst}, false, 0, calls, flushed), "the draw after the refusals");
+    // per-instance lighting in ONE draw: the reference = one normal draw per instance (its own ramp offset = its row, its own c14); the owned draw = one item of six positions
+    // with up to three records (entries 0 / 1 / 2) and the ref list giving each position its record: ONE indirect command, 0 bytes may differ
+    for (const std::vector<std::uint32_t>& lightOf : {std::vector<std::uint32_t>{1, 2, 0, 1, 2, 0}, std::vector<std::uint32_t>{0, 0, 1, 1, 2, 2}, std::vector<std::uint32_t>{2, 2, 2, 2, 2, 2}}) {
+        begin();
+        for (std::uint32_t i = 0; i < kInst; ++i) {
+            setRegs(false);
+            dev.setPixelShaderConstantF(14, kLight[lightOf[i]], 1);
+            dev.setStreamSource(1, ramp.get(), 4 * i, 4);
+            dev.setStreamSourceFreq(0, STREAMSOURCE_INDEXEDDATA | 1);
+            dev.drawIndexedPrimitive(PT_TRIANGLELIST, 0, 0, 4, 0, 2);
+        }
+        const Pixels lref = end("ownedt_lref");
+        bad(lref, frame("ownedt_light", {kInst}, false, 0, calls, flushed, lightOf), "per-instance lighting in one draw");
+        if (!flushed || calls != 1) {
+            std::printf("  FAIL owned trees: per-instance lighting: flushed %d, %llu indirect calls (expected 1)\n", flushed, static_cast<unsigned long long>(calls));
+            ++g_failures;
+        }
+    }
+    {
+        // (the lighting really is read: entry 2 everywhere differs from entry 0 everywhere)
+        const Pixels l0 = frame("ownedt_light0", {kInst}, false, 0, calls, flushed, {0, 0, 0, 0, 0, 0});
+        const Pixels l2 = frame("ownedt_light2", {kInst}, false, 0, calls, flushed, {2, 2, 2, 2, 2, 2});
+        std::uint32_t nd = 0;
+        for (std::size_t i = 0; i < l0.bgra.size() && i < l2.bgra.size(); ++i) nd += l0.bgra[i] != l2.bgra[i];
+        if (nd == 0) {
+            std::printf("  FAIL owned trees: the lighting entries do not change the picture (not read)\n");
+            ++g_failures;
+        }
+        // guards: a record index out of range / a null lighting base: refused, nothing drawn, the next frame is right again
+        const std::uint64_t r0 = dev.treeFlushStats.refused;
+        frame("ownedt_badrec", {kInst}, false, 0, calls, flushed, {1, 2, 0, 1, 2, 0}, 1);
+        const bool f1 = flushed;
+        frame("ownedt_badlight", {kInst}, false, 0, calls, flushed, {1, 2, 0, 1, 2, 0}, 2);
+        if (f1 || flushed || dev.treeFlushStats.refused - r0 != 2) {
+            std::printf("  FAIL owned trees: guards: a record index out of range / a null lighting base was accepted (%d / %d, refused %llu)\n", f1, flushed,
+                        static_cast<unsigned long long>(dev.treeFlushStats.refused - r0));
+            ++g_failures;
+        }
+        bad(ref, frame("ownedt_after_light_guards", {kInst}, false, 0, calls, flushed), "the draw after the lighting refusals");
+    }
     std::printf("  owned trees: %llu flushes, %llu items, %llu instances, %llu indirect packets, %llu refused\n", static_cast<unsigned long long>(dev.treeFlushStats.flushes),
                 static_cast<unsigned long long>(dev.treeFlushStats.items), static_cast<unsigned long long>(dev.treeFlushStats.instances), static_cast<unsigned long long>(dev.treeFlushStats.packets),
                 static_cast<unsigned long long>(dev.treeFlushStats.refused));

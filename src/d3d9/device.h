@@ -550,6 +550,10 @@ public:
     // per-record state (OwnedRecordView::id) and skip what it already holds; it must not request captures for these draws (they are queued already). The default
     // implementation is the per-draw loop (observes / coversDraw / registers loaded / observe), so an observer that only opts in behaves as before.
     virtual bool bulkOwned() const { return false; }
+    // F4-3 (frame-ownership.md 7.25b): an observer of the main view's SpeedTree draws that can be served by Device::ownedTreeObserve (per run of instances: the template's
+    // query, the instance rows in the register file c32 + 4 i, the identity ramp as stream 1, the template's CPU window images loaded) instead of the engine-order draw
+    // calls. It must not need a vertex capture for these draws (they are queued already): false while it would (the RT scene's animated trees)
+    virtual bool ownedTreesOk() const { return false; }
     virtual void observeOwned(Device& device, const OwnedFrame& frame);
 };
 
@@ -1196,18 +1200,26 @@ public:
         sceneTrees_ = on;
     }
     bool ownedTreeObserversOk() const;
+    // at least one observer wants this template's draws (kind / phase), so ownedTreeObserve is to be called for its runs
+    bool ownedTreeObserved(const CachedDraw& c) const;
+    // the observers' turn for one run of owned tree instances (`rows` = 16 floats per instance = VS c32 + 4 i .. c35 + 4 i; chunks of the engine's batch size): returns the number of
+    // instances shown; the caller has set the draw tag and saves / restores the register file (this loads the template's window images and the rows into it)
+    std::uint32_t ownedTreeObserve(const CachedDraw& c, const OwnedWindows& ow, Buffer* ramp, const float* rows, std::uint32_t count);
+    std::uint64_t ownedTreeObservedFrame() const { return treeObservedFrame_; }
+    std::uint64_t treeObservedFrame_ = 0;
+    std::uint64_t treeObserveCaptures = 0;  // capture requests an observer made for an owned tree draw (refused: 0 expected)
     rhi::RingAlloc allocOwnedRing(std::uint64_t bytes, std::uint64_t align) { return game_->allocRing(bytes, align); }
     struct TreeItem {
         const CachedDraw* cd = nullptr;
         std::uint64_t bucket = 0;
-        shader::abi::DrawRecord rec{};
-        std::uint32_t instances = 0;
+        std::uint32_t instances = 0;  // the item's positions (consecutive): ONE indirect command, whatever records its instances use
     };
-    bool ownedTreeFlush(const std::vector<TreeItem>& items, std::uint32_t viewSlot, std::uint32_t positions);
+    // recs = the DrawRecords (one per template x lighting entry), posRec[p] = the record of list position p (positions = posRec.size() = the items' instance sum)
+    bool ownedTreeFlush(const std::vector<TreeItem>& items, const std::vector<shader::abi::DrawRecord>& recs, const std::vector<std::uint32_t>& posRec, std::uint32_t viewSlot, std::uint32_t positions);
     std::uint64_t treeEnvEpoch(bool solid, std::uint32_t viewSlot, bool& ok);
     bool treeEnvSame(bool solid, std::uint32_t viewSlot, std::uint64_t epoch) const;
     struct TreeFlushStats {
-        std::uint64_t flushes = 0, items = 0, instances = 0, packets = 0, refused = 0;
+        std::uint64_t flushes = 0, items = 0, instances = 0, packets = 0, refused = 0, commands = 0, records = 0;
     } treeFlushStats;
     // F4-1 (owned_submit.cpp, docs/research/frame-ownership.md 7.17): a record's draw submitted with nothing composed: derived block + the caller's persistent windows, as a scene draw.
     // `dryRun` = every check, nothing submitted (the caller checks a whole op before it submits any of its draws). Anything but Submitted: nothing was drawn.

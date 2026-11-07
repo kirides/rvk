@@ -31,19 +31,78 @@ bool Device::treeEnvSame(bool solid, std::uint32_t viewSlot, std::uint64_t epoch
     return h == treeEnvHash_[k] && epoch == treeEnvEpoch_[k] && epoch != 0;
 }
 
-// no observer wants the main view's tree draws (the RT scene takes them while a consumer holds it: then the trees stay composed)
+// every observer of the main view's tree draws can be served by ownedTreeObserve (the RT scene without captures: no animated trees) and reads no more than the
+// world rows + the material windows; anything else (a register reader, a capture wanter) keeps the trees composed
 bool Device::ownedTreeObserversOk() const {
     for (const DrawObserver* o : observers_) {
         if (o->registersRead() == DrawObserver::Registers::All) return false;
         if (o->observes(draws::Kind::SpeedTree, scene::Phase{scene::View::Main, scene::Pass::Solid}) ||
             o->observes(draws::Kind::SpeedTree, scene::Phase{scene::View::Main, scene::Pass::DepthPrepass})) {
-            return false;
+            if (!o->ownedTreesOk()) return false;
         }
     }
     return true;
 }
 
-bool Device::ownedTreeFlush(const std::vector<TreeItem>& items, std::uint32_t viewSlot, std::uint32_t positions) {
+bool Device::ownedTreeObserved(const CachedDraw& c) const {
+    for (const DrawObserver* o : observers_) {
+        if (o->observes(c.kind, c.phase)) return true;
+    }
+    return false;
+}
+
+std::uint32_t Device::ownedTreeObserve(const CachedDraw& c, const OwnedWindows& ow, Buffer* ramp, const float* rows, std::uint32_t count) {
+    if (ramp == nullptr || rows == nullptr || count == 0 || !c.valid || !c.query.instanced) return 0;
+    constexpr std::uint32_t kBatch = 50;  // (the engine's batch limit; the RT scene reads up to 64 instances of one draw)
+    struct Scope {
+        Device& d;
+        const OwnedWindows* savedOwned;
+        StreamSource savedStream;
+        Scope(Device& dev, const OwnedWindows* o) : d(dev), savedOwned(dev.owned_), savedStream(dev.streamSource(1)) {
+            d.owned_ = o;
+            d.ownedReplay_ = true;
+        }
+        ~Scope() {
+            d.owned_ = savedOwned;
+            d.ownedReplay_ = false;
+            d.setStreamSource(1, savedStream.buffer, savedStream.offset, savedStream.stride);
+        }
+    } scope(*this, &ow);
+    if (vertexShader() != c.vs) setVertexShaderRef(ShaderRef(const_cast<Shader*>(c.vs)));
+    if (pixelShader() != c.ps) setPixelShaderRef(ShaderRef(const_cast<Shader*>(c.ps)));
+    setStreamSource(1, ramp, 0, 4);
+    loadOwnedRegisters(ow);
+    treeObservedFrame_ = frameValue();
+    std::uint32_t shown = 0;
+    for (std::uint32_t at = 0; at < count; at += kBatch) {
+        const std::uint32_t n = std::min(kBatch, count - at);
+        for (std::uint32_t i = 0; i < n; ++i) setVertexShaderConstantF(32 + 4 * i, rows + static_cast<std::size_t>(at + i) * 16, 4);
+        ReplaceQuery q = c.query;
+        q.tag = &tag_;
+        q.textures = c.tex;
+        q.mainView = firings_.mainViews();
+        q.objectRows = nullptr;
+        q.instances = n;
+        captureRequest_ = {};
+        captureRequestRw_ = {};
+        captureInstances_ = false;
+        const CoverQuery cq = coverOf(q);
+        for (std::size_t i = 0; i < observers_.size(); ++i) {
+            DrawObserver* o = observers_[i];
+            if (!o->observes(c.kind, c.phase)) continue;
+            if (o->coversDraw(cq)) continue;
+            o->observe(*this, q);
+        }
+        if (!captureRequest_.null()) {
+            ++treeObserveCaptures;
+            captureRequest_ = {};
+        }
+        shown += n;
+    }
+    return shown;
+}
+
+bool Device::ownedTreeFlush(const std::vector<TreeItem>& items, const std::vector<shader::abi::DrawRecord>& recs, const std::vector<std::uint32_t>& posRec, std::uint32_t viewSlot, std::uint32_t positions) {
     ++treeFlushStats.flushes;
     if (items.empty()) return true;
     const std::uint32_t n = static_cast<std::uint32_t>(items.size());
@@ -52,39 +111,51 @@ bool Device::ownedTreeFlush(const std::vector<TreeItem>& items, std::uint32_t vi
     // (every address the shaders will read: refused before anything is written)
     std::uint64_t total = 0;
     for (const TreeItem& it : items) {
-        if (it.cd == nullptr || it.instances == 0 || it.cd->scenePipeline2 == GamePipeline::None || !it.cd->valid || it.rec.draw == 0 || it.rec.vsWin[2] == 0 || it.rec.psWin[3] == 0) {
+        if (it.cd == nullptr || it.instances == 0 || it.cd->scenePipeline2 == GamePipeline::None || !it.cd->valid) {
             ++treeFlushStats.refused;
             return false;
         }
         total += it.instances;
     }
-    if (total != positions) {
+    if (total != positions || posRec.size() != positions || recs.empty()) {
         ++treeFlushStats.refused;
         return false;
+    }
+    for (const shader::abi::DrawRecord& r : recs) {
+        if (r.draw == 0 || r.vsWin[2] == 0 || r.psWin[3] == 0) {
+            ++treeFlushStats.refused;
+            return false;
+        }
+    }
+    for (const std::uint32_t r : posRec) {
+        if (r >= recs.size()) {
+            ++treeFlushStats.refused;
+            return false;
+        }
     }
     syncPhaseRegions();
     if (rendering_ && (scopeGbuf_ != gbufferScope() || scopeSecondary_ != wantSecondaryScope())) endRendering();
     if (!beginRendering()) return false;
-    rhi::RingAlloc ra = game_->allocRing(static_cast<std::uint64_t>(n) * sizeof(shader::abi::DrawRecord), 16);
+    rhi::RingAlloc ra = game_->allocRing(static_cast<std::uint64_t>(recs.size()) * sizeof(shader::abi::DrawRecord), 16);
     rhi::RingAlloc la = game_->allocRing(static_cast<std::uint64_t>(positions) * 8, 16);
     rhi::RingAlloc aa = game_->allocRing(static_cast<std::uint64_t>(n) * rhi::kIndirectStride, 16);
     if (ra.ptr == nullptr || la.ptr == nullptr || aa.ptr == nullptr) {
         ++sceneStats_.fbRingFull;
         return false;
     }
-    auto* recs = static_cast<shader::abi::DrawRecord*>(ra.ptr);
+    auto* recs_ = static_cast<shader::abi::DrawRecord*>(ra.ptr);
     auto* list = static_cast<std::uint32_t*>(la.ptr);
     auto* args = static_cast<std::uint32_t*>(aa.ptr);
     const std::uint64_t frame = frameValue();
+    std::memcpy(recs_, recs.data(), recs.size() * sizeof(shader::abi::DrawRecord));
+    for (std::uint32_t p = 0; p < positions; ++p) {
+        list[2 * p] = posRec[p];
+        list[2 * p + 1] = viewSlot;
+    }
     std::uint32_t pos = 0;
     for (std::uint32_t i = 0; i < n; ++i) {
         const TreeItem& it = items[i];
         const CachedDraw& c = *it.cd;
-        recs[i] = it.rec;
-        for (std::uint32_t q = 0; q < it.instances; ++q) {
-            list[2 * (pos + q)] = i;
-            list[2 * (pos + q) + 1] = viewSlot;
-        }
         args[5 * i + 0] = c.packet.count;
         args[5 * i + 1] = it.instances;
         args[5 * i + 2] = c.packet.first;
@@ -138,10 +209,12 @@ bool Device::ownedTreeFlush(const std::vector<TreeItem>& items, std::uint32_t vi
         submitInterned(m);
         ++sceneStats_.indirectCalls;
         sceneStats_.records += end - start;
+        treeFlushStats.commands += end - start;
         ++treeFlushStats.packets;
         start = end;
     }
     treeFlushStats.items += n;
+    treeFlushStats.records += recs.size();
     treeFlushStats.instances += positions;
     return true;
 }
