@@ -1377,6 +1377,49 @@ Floor of the engine thread if every removable item went: game logic 0.65 + engin
 
 **Method limits.** The sampler lists only entries >= 1.5 % (inclusive) / ~1 % (self), so nesting and sums of children are read from named frames and are approximate; the mesh / tree Z slots include their shadow-view calls (main vs shadow split only via `ExecuteShadowMap`); Wrapper has 10 usable windows (its first run hit a slow load: 2 windows); pub_interior is a single run with 4 windows; profiler and `-Perf` timers cost ~0.4 ms (performance.md 21); run-to-run noise of `-Perf` CPU is +-0.3 ms, so the ablation differences are indicative only; the Owned arm includes check frames (every 10th); unnamed Engine.dll functions are named by COMDAT hints (the Ghidra project open in this session is Risen.exe, not Engine.dll: no new RE was done); GPU numbers were not examined.
 
+### 7.25 F4-2/F4-3 owned SpeedTrees (2026-11-07, `native.owned_trees`; correct, CPU -0.2 ms, GPU worse: NOT a win yet)
+
+Debug setting (Bool, Full, default off, `needs` native.owned_persistent so the whole F1 / F2c chain). Files: `src/native/tree_owned.h` (templates, stamps, plan, stats), `src/native/static_ops_trees_owned.cpp` (all of it), `src/d3d9/owned_trees.cpp`
+(`Device::ownedTreeFlush`, `treeEnvEpoch`, `ownedTreeObserversOk`), hooks: `static_ops_trees.cpp` composeTree (`treeCompBegin / Batch / Instance`, the ramp), `static_ops.cpp` (`treeCompEnd` after `bbEnd`, `treeSceneIssue`, `treeReport`),
+`frame_tap.cpp` (`treeViewBegin`, tree ops in `compactOwned` -> `treeTake`, `treePass` in `passBegin`), `scene_draws.cpp` `sceneDecide` (SpeedTree draws get their scene ABI v2 form ONLY: `scenePipe_` stays None, the composed packet is not a scene packet: its instance count would be lost),
+`IllumTable::ensureSlot`, `DrawDesc::treeKey`, test `rvk_d3d9test` "owned trees (F4-3)".
+
+* **F4-2 templates + plan.** Per (op ctx, desc, list) an `OpRec` with one TEMPLATE per bucket = (type, z / solid, LOD geometry (strip + start | leaf LOD + start + indices), sun bit): the composed draw of the bucket (retained packet from the packet cache,
+  `orec::DrawRec`, a copy of the `DrawDesc`), made on every composed frame of the op (kept while its stamp holds: render buffer, resource, material, shader, visual, transformation, variant epoch, registry generation, hardware / table-merge). Only
+  hardware-instanced ops with exactly one draw per batch qualify (that is every tree op seen: 77 ops / 129 draws; 0 software). `treePlan` plans every instance of the queue from the engine's tree objects (one `ObjSnap<0x70>` + the entity matrix + the
+  illumination snapshot per tree; LOD fields from one 0x138-byte snapshot of the render buffer; leaves LOD-major) = the row (c32 = tree +0x6c / rb +0xa0|0xa4 or wrapper +0x34, alpha 80 / ratio; c33..c35 = the world matrix columns) + the bucket key.
+  Composed frames compare the plan with the composition (instance order, tree, bucket key, row bits) and the new draws with the retained templates; `MISS` = a persistent template block differs from a fresh derivation although its signature / epoch held.
+  Result: **rows 0 differ, counts 0, MISS 0 over millions of instances** (savegame hold 52 k ops / 472 k instances per 5 s; jungle). Two known non-fatal differences, reported separately: (a) the engine draws a whole batch with its FIRST instance's start index
+  (batches cut on strip length only), the plan gives each instance its own LOD: 0.25 % of the instances at the frozen jungle spot (D3D12 run: 326 of 127,911) = a picture difference of the owned path (the instance is drawn with its own, correct LOD; the engine's
+  is a bug-compat quirk we do not reproduce); (b) a template whose draw changed (a texture streaming in: not in the stamps) is replaced and counted (2 per run).
+* **F4-3 owned execution (main view, z + solid).** `FrameTap::compactOwned` takes tree ops with a template record out of the lists at the view's beginning (check / warm-up / gated frames compose as before). `treePass` (at BeginZPass / DoBeginRenderSolid) per op: stamp +
+  view stamp + material poll (`pollOwned`, structure version), the engine slot's side effects (`leanTreeSort`, `leanMaskRef`, touches), the plan, per-instance lighting entry in the solid pass (`IllumTable::ensureSlot` + `LightingImages::entryFor`), templates made ready once
+  per pass (the owned_persistent recipe: `ownedBuildWindows` with a dummy object window, `ownedDrawSig`, `ownedDerive`, DrawBlock in a `drawrecords()` slot, rolling scrub 1 / 64); an op that cannot be drawn this way (no record, stamp, view, material, plan, instance with no
+  light list / static ambient / dynamic or unknown static lights = "special lighting", no template, template refused, flush refused) is composed right there (`composeLate`). Then ONE ring block of rows (c31 header + 64 B per position; VS window 2 base = the block, c32 = row 0)
+  and, per run, one `DrawRecord` (the template's slot record with `vsWin[2]` = the rows, `psWin[3]` = the instance's lighting entry): z = one record per template run, solid = one per run of equal lighting entry; `Device::ownedTreeFlush` writes the ref list (record index repeated over the run's
+  positions, view slot) + arguments `{indexCount, instanceCount = run, firstIndex, vertexOffset, firstInstance = first position}` and queues one indirect call per bucket. **The instance index of the tree VS is the engine's own mechanism:** stream 1 is an instance-rate identity
+  ramp, so `vInstance = firstInstance + i` = the row position; the composed tree draws use OUR ramp buffer (16,384 floats, `treeEnsureRamp`) instead of the engine's 256-float one (same values, so composed pictures are unchanged); passes with more than 16,384 instances compose.
+  View: fixed view table slots 14 (z) / 15 (solid) carry the tree view (c0..c3 = view-projection, c14..c29 wind from `treeWind`, c30 fog); trees are owned only when `Device::ownedTreeObserversOk` (no observer wants main-view SpeedTree draws).
+* **Gate that limits it: the RT scene.** `RtScene::observes(SpeedTree, Main)` is true whenever any consumer holds the RT scene (at the player defaults: water RT / material RT / ...). Then trees stay composed (`observers ok false`). Owned trees therefore act only with `-Setting 'rt.allow=false'` (or
+  no RT consumer) until F8 supplies the RT scene's tree rows (section 12). All measurements below use `rt.allow=false` (both arms).
+* **GPU safety.** CPU guards: ramp bound (16,384), ring allocations, every item's cd / record / window bases / instance sums checked before anything is written, every op decided before its rows are laid out; `rvk_d3d9test` "owned trees (F4-3)" on **Vulkan and D3D12 with `--validation`**: a tree-like
+  instanced draw (stream 1 ramp, `c32[a0.x]` rows, c12 from the view block) is 0 bytes different from the normal draws for one run of six, three runs of two (one call, three argument records), reversed rows (the picture follows the rows), and a null window base / a wrong position count
+  draw nothing; 0 validation errors. Game: savegame hold with `-Validation` + `VK_KHRONOS_VALIDATION_VALIDATE_GPU_BASED=GPU_BASED_GPU_ASSISTED` (owned trees on, 319 of 399 views owned, 49,126 ops drawn, 409 k instances): no VUID, no device loss; jungle likewise.
+  D3D12 jungle: runs, 216 of 270 views owned, no device removal.
+* **Numbers** (savegame Risen_Save_0005 hold 40 s, `-Perf`, `RisenTest.exe`, vsync off, lod 2x, `rt.allow=false`, shared copy, interleaved A = owned_trees off, B = on; mean of the last 8 `perf:` windows):
+
+| arm | engine + HAL CPU / frame | GPU / frame |
+|---|---|---|
+| A (off) | 6.17 / 6.16 / 6.17 ms | 1.57 / 1.56 / 1.58 ms |
+| B first build | 6.35 / 6.33 ms | 1.99 / 1.98 ms |
+| B + flat light memo, miss check 1 in 8 | **5.95 ms (-0.22)** | 2.55 ms (another agent's game shared the GPU in this run: read as +0.4 .. +1.0) |
+
+  Owned view cost (z + solid, 5 s means): side effects 41 us, plan 139, templates 208 (made ready + per-instance lookups + lighting entries), rows 63, flush 37 = ~0.5 ms against ~1.29 ms of composition + issue of the same ops; the composed frames (1 in 10 plus the warm-up frame: 20 % of the frames) still
+  pay composition + the plan + templates. **Target -0.8 .. -1.1 ms NOT reached (-0.2 ms).** **GPU is WORSE** (+0.4 ms or more): the solid pass has one indirect command per run of equal lighting entry (245,949 items for 408,958 instances = 0.6 per instance, ~385 per flush) instead of 129 hardware-instanced draws.
+* **Not done / open.** (1) GPU: merge runs by lighting-entry CONTENT (many illuminations have equal registers) or keep the engine's illumination cut as the batch key in the solid pass (one record per batch, last instance's lighting: the engine's own picture) before this can be turned on by anyone; (2) the composed frames' share (check every 10th
+  frame) and `treeCompEnd`'s `DrawDesc` copies; (3) D3D12 `lod.trees=3`, harbour_docks, `rvk_rtwalk` sway (needs the RT scene: trees are composed then), refcompare Full, picture A/B crops were NOT run; (4) shadow views (F4-4) and persistent per-tree records (F4-5) untouched; (5) software instancing, and ops with an instance whose
+  illumination has no list / static ambient / unknown static lights are composed as a whole op ("special lighting": 463 - 1,152 ops per 5 s at the jungle spots, ~4 % of the ops); (6) the RT scene gate above.
+
 ## 8. F1 / F2 design decision: windows onto persistent tables (2026-11-06, orchestrator)
 
 **Decision.** F1 does not start with new shaders. Translated shaders and the ported ubershader read every float register through 4 register windows per
@@ -1464,8 +1507,8 @@ illumination (it draws a merged batch with its last instance's lighting; ours is
 |---|---|---|---|
 | F4-0 | measure (`RVK_F4_MEASURE=1`): composeTree phase timers, census (trees / ops / buckets / calls under the new rule, two-bucket trees, no-entity share, sun values, illum classes, hw vs sw instancing), invalidation rates of the tree LOD fields / matrix / illum / rb tables / wind, CTAB of the tree VS / PS (c0..c31, PS c5), stream-1 freq / size / content, RtScene coupling | numbers | 0 |
 | F4-1 | billboards from retained records | DIFFERING 0 | -0.15..-0.25 |
-| F4-2 | tree records + per-view plans, compared | DIFFERING 0, audit 0 | +0.05..+0.1 |
-| F4-3 | CPU-owned tree execution main view (compaction, rows, records, args, side effects, check frames) | check frames 0, refcompare Full, jungle spots, rtwalk sway, lod.trees=3, both backends, validation | -1.0..-1.4 |
+| F4-2 | tree records + per-view plans, compared | DIFFERING 0, audit 0 | +0.05..+0.1 (built, 7.25: DIFFERING 0) |
+| F4-3 | CPU-owned tree execution main view (compaction, rows, records, args, side effects, check frames) | check frames 0, refcompare Full, jungle spots, rtwalk sway, lod.trees=3, both backends, validation | -1.0..-1.4 (built, 7.25: -0.2 ms CPU, GPU worse, gated off by the RT scene; open) |
 | F4-4 | tree shadow views (cascades, z) | shadow-compare | -0.15..-0.3 |
 | F4-5 | persistent per-tree records (UpdateLoD post-hook), GPU compaction | compaction = CPU list | -0.05..-0.15 + GPU |
 | F4-6 | owned tree shaders (leaf PS wired: `uberSupportsFile`; vertex pulling; graph-shared pipelines) | equality gates | calls ~10-40 |

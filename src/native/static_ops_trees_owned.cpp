@@ -90,6 +90,7 @@ void tro::Stats::add(const Stats& o) {
     items += o.items; flushes += o.flushes;
     lateNoRec += o.lateNoRec; lateStamp += o.lateStamp; lateView += o.lateView; lateMaterial += o.lateMaterial; latePlan += o.latePlan; lateSpecial += o.lateSpecial;
     lateNoTemplate += o.lateNoTemplate; lateTemplate += o.lateTemplate; lateFlush += o.lateFlush; lateRows += o.lateRows;
+    for (int i = 0; i < 8; ++i) badBy[i] += o.badBy[i];
     built += o.built; replaced += o.replaced; notRetained += o.notRetained; badOps += o.badOps;
     derived += o.derived; reused += o.reused; refused += o.refused; tableFull += o.tableFull;
     checkOps += o.checkOps; checkInst += o.checkInst; checkRowDiff += o.checkRowDiff; checkKeyDiff += o.checkKeyDiff; checkCountDiff += o.checkCountDiff; checkDraws += o.checkDraws;
@@ -164,7 +165,11 @@ void StaticOps::treeCompBegin(const Op& op, bool zpass, std::uint32_t type, cons
     leanTouches_.clear();
     recCollect_ = true;
     T.switchBefore = gpuscene::materialtable().stats().switchNotes;
-    if (get<std::uint8_t>(shader, 0x78) != 0) T.bad = true;  // (a depth-bias material draws with the other view-projection)
+    T.badWhy = 7;
+    if (get<std::uint8_t>(shader, 0x78) != 0) {
+        T.bad = true;
+        T.badWhy = 2;
+    }  // (a depth-bias material draws with the other view-projection)
     const auto t0 = Clock::now();
     int why = 0;
     if (!treePlan(zpass, type, tableMerge, rb, wrapper, queue, n, T.plan, why)) T.plan.clear(), T.checkOp = false;
@@ -177,13 +182,17 @@ void StaticOps::treeCompBatch(std::size_t drawsBefore, std::uint64_t key) {
     const std::size_t n = drawCount_ - drawsBefore;
     if (n != 1 || key == 0) {
         T.bad = true;
+        T.badWhy = 0;
         return;
     }
     sc::DrawDesc& d = *draws_[drawsBefore];
     d.treeKey = key;
     const bool solid = op_ != nullptr ? op_->list == List::Solid : false;
     (void)solid;
-    if (d.inheritMask != 0 || !d.vertexBytes.empty() || d.cpuStream != 0 || !d.indexed || d.states[sc::StBlend] != 0 || d.states[sc::StZWrite] == 0) T.bad = true;
+    if (d.inheritMask != 0 || !d.vertexBytes.empty() || d.cpuStream != 0 || !d.indexed || d.states[sc::StBlend] != 0 || d.states[sc::StZWrite] == 0) {
+        T.bad = true;
+        T.badWhy = 1;
+    }
 }
 
 void StaticOps::treeCompInstance(const std::uint8_t* tree, const std::uint8_t* illum, std::uint64_t key, bool sun, std::uint32_t slot) {
@@ -207,8 +216,13 @@ void StaticOps::treeCompEnd(const Op& op) {
     const auto t0 = Clock::now();
     const bool solid = op.list == List::Solid;
     const auto erase = [&] { T.ops.erase(pend->key); };
+    if (drawCount_ == 0 && !T.bad) {
+        erase();
+        return;  // (an op that draws nothing: no record)
+    }
     if (T.bad || leanBlock_ != 0 || drawCount_ == 0 || recNoRetain_ || gpuscene::materialtable().stats().switchNotes != T.switchBefore) {
         ++W.badOps;
+        ++W.badBy[T.bad ? T.badWhy : leanBlock_ != 0 || recNoRetain_ ? 3 : drawCount_ == 0 ? 6 : 4];
         erase();
         return;
     }
@@ -265,6 +279,7 @@ void StaticOps::treeCompEnd(const Op& op) {
     for (std::size_t k = 0; k < drawCount_; ++k) {
         if (draws_[k]->matSlot != matSlot || draws_[k]->treeKey == 0) {
             ++W.badOps;
+            ++W.badBy[5];
             erase();
             return;
         }
@@ -308,7 +323,17 @@ void StaticOps::treeCompEnd(const Op& op) {
                     ++W.checkTplDiff;
                     if (T.logged < 8) {
                         ++T.logged;
-                        spdlog::error("native: owned trees: DIFFERING: {} bucket {:#x}: the composed draw differs from the retained template", describe(op), d.treeKey);
+                        const sc::DrawDesc& o = *ot->second->desc;
+                        std::string what;
+                        const auto chk = [&](bool diff, const char* n) { if (diff) what += std::string(what.empty() ? "" : ", ") + n; };
+                        chk(d.vs != o.vs || d.ps != o.ps, "shaders"); chk(d.decl != o.decl, "decl"); chk(d.indices != o.indices, "indices");
+                        chk(d.baseVertex != o.baseVertex || d.minIndex != o.minIndex || d.numVertices != o.numVertices || d.startIndex != o.startIndex || d.primCount != o.primCount, "geometry");
+                        chk(d.samplerMask != o.samplerMask || d.inheritMask != o.inheritMask, "sampler mask"); chk(d.passFlags != o.passFlags, "pass flags"); chk(d.states != o.states, "states");
+                        for (int i = 0; i < 4; ++i) chk(!(d.streams[i] == o.streams[i]), "stream");
+                        for (std::uint32_t m = d.samplerMask; m != 0; m &= m - 1) { const auto st = sc::lowBit(m); chk(!(d.samplers[st] == o.samplers[st]), "sampler"); }
+                        chk(d.lightN != o.lightN || d.lightFirst != o.lightFirst || d.lightTableLit != o.lightTableLit, "light params"); chk(d.matSlot != o.matSlot, "mat slot");
+                        chk(d.tagSubMesh != o.tagSubMesh || d.tagMaterial != o.tagMaterial || d.tagMaterialName != o.tagMaterialName, "tag");
+                        spdlog::error("native: owned trees: DIFFERING: {} bucket {:#x}: the composed draw differs from the retained template ({})", describe(op), d.treeKey, what);
                     }
                 }
                 if (!same || ot->second->stale || ot->second->r.cd->v.scenePending) {
@@ -550,7 +575,15 @@ void StaticOps::treeViewBegin(bool ownedFrame) {
     gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
     const bool ready = ownedPersistent_ && !ownedTripped_ && ownedStatic_ && tableLit_ && T.ramp != nullptr && tab.ready() && gpuscene::viewtable().ready() && dev_.sceneViewsReady() &&
                        dev_.ownedTreeObserversOk() && treesVerified_ > 0 && lean_ && leanAnimVerified_ > 0 && qsort_ != nullptr;
-    if (!ready) return;
+    if (!ready) {
+        if (T.logged < 6) {
+            ++T.logged;
+            spdlog::info("native: owned trees: not this view (persistent {}, tripped {}, owned static {}, table lighting {}, ramp {}, record table {}, view table {} / {}, observers ok {}, trees verified {}, lean {} / {}, qsort {})", ownedPersistent_,
+                         ownedTripped_, ownedStatic_, tableLit_, T.ramp != nullptr, tab.ready(), gpuscene::viewtable().ready(), dev_.sceneViewsReady(), dev_.ownedTreeObserversOk(), treesVerified_, lean_, leanAnimVerified_,
+                         qsort_ != nullptr);
+        }
+        return;
+    }
     T.active = true;
     ++T.window.ownedViews;
 }
@@ -678,6 +711,7 @@ void StaticOps::treeMissCheck(tro::OpRec& rec, tro::Tpl& t, bool solid) {
     const orec::DrawRec& r = t.r;
     orec::Persist& P = r.persist;
     if (!P.valid || !P.handle.has()) return;
+    if ((++tro_->scrubTick & 7u) != 0) return;  // (one template in eight per composed frame: each check is a full derivation)
     gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
     gpuscene::ViewTable& vt = gpuscene::viewtable();
     const std::uint32_t viewSlot = solid ? kViewSlotTreeSolid : kViewSlotTreeZ;
@@ -814,7 +848,18 @@ std::uint32_t StaticOps::treePass(bool solid) {
     T.instEntry.clear();
     T.opOfInst.clear();
     std::vector<std::uint32_t> drawnOps;
-    std::unordered_map<std::uint64_t, std::uint32_t> lightMemo;
+    struct MemoSlot {
+        std::uint64_t key = 0;
+        std::uint32_t entry = 0, gen = 0;
+    };
+    static thread_local std::vector<MemoSlot> memo(8192);
+    static thread_local std::uint32_t memoGen = 0;
+    ++memoGen;
+    const auto memoFind = [&](std::uint64_t k) -> MemoSlot& {
+        std::size_t at = static_cast<std::size_t>((k * 0x9E3779B97F4A7C15ull) >> 40) & (memo.size() - 1);
+        while (memo[at].gen == memoGen && memo[at].key != k) at = (at + 1) & (memo.size() - 1);
+        return memo[at];
+    };
     const std::uint32_t scrubStride = 64;
     const std::uint32_t scrubPhase = static_cast<std::uint32_t>((++T.scrubTick * 7919u) % scrubStride);
     std::vector<std::uint8_t>& queueBytes = scr_.treeQueue;
@@ -929,13 +974,13 @@ std::uint32_t StaticOps::treePass(bool solid) {
                     break;
                 }
                 const std::uint64_t lk = mix(reinterpret_cast<std::uintptr_t>(x.illum), (static_cast<std::uint64_t>(p.n) << 8) | p.firstLight);
-                const auto m = lightMemo.find(lk);
-                if (m != lightMemo.end()) {
-                    entry = m->second;
+                MemoSlot& m = memoFind(lk);
+                if (m.gen == memoGen) {
+                    entry = m.entry;
                 } else {
                     const std::uint32_t slot = illum.ensureSlot(x.illum);
                     entry = slot == gpuscene::kNoSlot ? gpuscene::kNoEntry : li.entryFor(slot, p);
-                    lightMemo.emplace(lk, entry);
+                    if (memoGen != 0 && T.inst.size() < memo.size() / 2) m = {lk, entry, memoGen};
                 }
                 if (entry == gpuscene::kNoEntry || !li.ready()) {
                     failWhy = &W.lateSpecial;
@@ -1079,14 +1124,16 @@ void StaticOps::treeReport() {
     tro::Stats& q = T.window;
     T.total.add(q);
     const double nv = static_cast<double>(std::max<std::uint64_t>(1, q.ownedViews));
-    const std::uint64_t differing = q.checkRowDiff + q.checkKeyDiff + q.checkCountDiff + q.checkTplDiff + q.checkMiss;
+    // (checkKeyDiff is reported, not fatal: the engine draws a whole batch with its FIRST instance's start index, the plan gives each instance its own LOD: ~0.25 % of the instances, frame-ownership.md 7.25)
+    // (a template that differs from the next composition of its bucket is replaced and counted, not fatal: inputs outside the stamps move rarely, e.g. a texture streaming in)
+    const std::uint64_t differing = q.checkRowDiff + q.checkCountDiff + q.checkMiss;
     spdlog::info("native: owned trees (5 s): {} main views ({} owned), tree ops looked at {}, taken {}, drawn from templates {}, composed late {} (no record {}, stamp {}, view {}, material {}, plan {}, special lighting {}, "
-                 "no template {}, template refused {}, flush {}); {} instances in {} items over {} flushes; templates built {} replaced {} (not retained {}, bad ops {}); persistent blocks derived {} reused {} refused {} (table full {}); "
-                 "check frames: {} ops / {} instances compared, {} draws against templates: DIFFERING {} (rows {}, buckets {}, counts {}, templates {}), MISS {} of {} compared; "
+                 "no template {}, template refused {}, flush {}); {} instances in {} items over {} flushes; templates built {} replaced {} (not retained {}, bad ops {}: batch draws {} / draw level {} / depth bias {} / lean+retain {} / switch {} / material {} / none {}); persistent blocks derived {} reused {} refused {} (table full {}); "
+                 "check frames: {} ops / {} instances compared, {} draws against templates: DIFFERING {} (rows {}, counts {}, templates {}; per-instance LOD start differs from the engine batch's first instance {}), MISS {} of {} compared; "
                  "CPU per owned view: take {:.1f} us, side effects {:.1f} us, plan {:.1f} us, templates {:.1f} us, rows {:.1f} us, flush {:.1f} us",
                  q.views, q.ownedViews, q.opsSeen, q.opsTaken, q.opsDrawn, q.opsLate, q.lateNoRec, q.lateStamp, q.lateView, q.lateMaterial, q.latePlan, q.lateSpecial, q.lateNoTemplate, q.lateTemplate, q.lateFlush,
-                 q.instances, q.items, q.flushes, q.built, q.replaced, q.notRetained, q.badOps, q.derived, q.reused, q.refused, q.tableFull, q.checkOps, q.checkInst, q.checkDraws, differing, q.checkRowDiff, q.checkKeyDiff,
-                 q.checkCountDiff, q.checkTplDiff, q.checkMiss, q.checkMissCompared, static_cast<double>(q.takeNs) / nv / 1000.0, static_cast<double>(q.sideNs) / nv / 1000.0, static_cast<double>(q.planNs) / nv / 1000.0,
+                 q.instances, q.items, q.flushes, q.built, q.replaced, q.notRetained, q.badOps, q.badBy[0], q.badBy[1], q.badBy[2], q.badBy[3], q.badBy[4], q.badBy[5], q.badBy[6], q.derived, q.reused, q.refused, q.tableFull, q.checkOps, q.checkInst, q.checkDraws, differing, q.checkRowDiff,
+                 q.checkCountDiff, q.checkTplDiff, q.checkKeyDiff, q.checkMiss, q.checkMissCompared, static_cast<double>(q.takeNs) / nv / 1000.0, static_cast<double>(q.sideNs) / nv / 1000.0, static_cast<double>(q.planNs) / nv / 1000.0,
                  static_cast<double>(q.tplNs) / nv / 1000.0, static_cast<double>(q.rowNs) / nv / 1000.0, static_cast<double>(q.flushNs) / nv / 1000.0);
     q = {};
     if (differing != 0) {

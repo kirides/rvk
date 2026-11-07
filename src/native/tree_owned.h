@@ -91,6 +91,7 @@ struct Stats {
     // why an op taken from the list was composed late
     std::uint64_t lateNoRec = 0, lateStamp = 0, lateView = 0, lateMaterial = 0, latePlan = 0, lateSpecial = 0, lateNoTemplate = 0, lateTemplate = 0, lateFlush = 0, lateRows = 0;
     std::uint64_t built = 0, replaced = 0, notRetained = 0, badOps = 0;
+    std::uint64_t badBy[8] = {};  // bad ops by reason: draws per batch, draw level, depth bias, lean block / no retain, switch, material slots, no draws, other
     std::uint64_t derived = 0, reused = 0, refused = 0, tableFull = 0;
     // check frames: the composition against the plan and the templates
     std::uint64_t checkOps = 0, checkInst = 0, checkRowDiff = 0, checkKeyDiff = 0, checkCountDiff = 0, checkDraws = 0, checkTplDiff = 0, checkMiss = 0, checkMissCompared = 0;
@@ -110,6 +111,7 @@ struct State {
     OpRec* building = nullptr;
     std::unique_ptr<OpRec> pending;
     bool bad = false;
+    int badWhy = 0;
     std::uint64_t switchBefore = 0;
     std::vector<Inst> composed;         // check frames: the composed instances in order
     std::vector<Inst> plan;             // check frames: the plan made at the op's entry
