@@ -221,6 +221,12 @@ private:
     std::mutex mutex_;                      // pending_
     std::shared_ptr<const Snapshot> pending_;
     std::thread worker_;
+    struct RawHash {
+        using is_transparent = void;
+        std::size_t operator()(std::string_view s) const noexcept { return std::hash<std::string_view>{}(s); }
+    };
+    std::atomic<bool> hasPending_{false};                   // pending_ holds a snapshot (checked without the mutex)
+    std::unordered_map<std::string, Hit, RawHash, std::equal_to<>> byRaw_;  // lookup(name) cache by the raw name (this generation)
     std::unordered_map<std::string, Hit> byName_;           // lookup cache of this generation
     std::unordered_map<const void*, Hit> byShader_;         // shader pointer -> derived hit (draws without a material tag)
     std::unordered_map<const void*, Hit> byMaterial_;       // material pointer -> hit (cleared on a new generation)

@@ -862,3 +862,16 @@ build lies inside it (base2 vs new 0.32 / 2.85 / 1.18). **GPU** (`-PerfFrame 190
 GPU gain on the 7900 XTX at this size** (DCC / fast clears / cheap R8 stores); the changes remove allocations and traffic (R8 images: 3 B/pixel less each, stencil planes, one 1600x900 R32F
 dispatch) that other GPUs / sizes feel more; no cost either. Logs / pictures: `B:\DevDrive\rvk-work\scratch\bw`.
 
+
+## 33. Allocation / pack lookup / guarded-read cleanup (2026-11-07, frame-ownership.md 7.24 row 4)
+
+Plain engineering, no picture change (pack matches per 5 s unchanged: 55 % both arms; static ops compare, lean check, packet cache verify and `scene table DIFFERING` all clean in an rvkcompare Full run of 3 spots, 0 errors). Changes: `MaterialPack::adopt` takes its mutex only when the loader published a snapshot (atomic flag), `lookup(name)` has a raw-name cache (no key normalisation, no strings per call); `LightTable::record` / `lightKnown`: the cell multimaps (a heap node per light per build) are reused / sorted vectors, the position vector is kept; `lights::collect` reads each tree node as one 80-byte block (one guarded copy instead of four). **Tried and useless: inlining the `safeLoad*` / `safeRead` guards** (header definitions): MSVC does not inline a function containing `__try`, they stay calls; the `safeLoad8` self time (2.6 -> 2.4 %) is cache misses on the engine memory it reads, so only fewer reads help (block reads, `safeReadN`; candidates `static_ops.cpp:106`, `static_ops_trees.cpp:36`, `leanImage`, `materialSamplers`: not touched, other agents' files).
+
+Savegame `Risen_Save_0005`, recipe of 7.24, interleaved before (main de4e0a7) / after, 2 runs per arm x 14 steady 5 s windows, `-Perf` CPU engine + HAL:
+
+| arm | before | after | delta |
+|---|---|---|---|
+| Full (ms / frame) | 6.04 (6.33 / 5.74) | 5.83 (5.76 / 5.90) | -0.2 (within the +-0.3 run noise) |
+| Wrapper | 5.42 (5.13 / 5.70) | 4.93 (4.74 / 5.12) | -0.5 (same noise) |
+
+`-CpuProfile` Full (one run each, share of the thread): ntdll 5.13 -> 2.49 % (`RtlAllocateHeap` 1.68 + 0.18 -> 0.77, `RtlFreeHeap` 0.88 -> 0.19: about -0.17 ms), `MaterialPack::adopt` mutex unlock (0.8 %) and `lower` string work (0.36 %) gone from the sites, `lights::collect` 0.52 -> 0.36 %, `LightTable::record` 0.39 -> 0.48 % (sort), `lightKnown` 0.62 -> 0.92 % (binary search instead of hash: slightly worse, 27 searches per tree instance), `safeLoad8` 2.62 -> 2.36 %. Net measured by the profile ~ -0.2 ms; the larger Wrapper delta is mostly noise. Logs / scripts: `rvk-work/scratch/cpuclean/`.
