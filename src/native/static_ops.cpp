@@ -1889,9 +1889,15 @@ StaticOps::Skip StaticOps::composeOp(const Op& op) {
         return composeFx(op);
     }
     if (op.kind == OpKind::Animation) return composeActor(op);
-    if (op.kind == OpKind::SpeedTree) return composeTree(op);
-    if (op.kind == OpKind::SpeedTreeBB) return composeTreeBillboard(op);
-    if (op.kind == OpKind::Vegetation) return composeVegetation(op);
+    if (op.kind == OpKind::SpeedTree || op.kind == OpKind::SpeedTreeBB || op.kind == OpKind::Vegetation) {
+        // F4-4 measurement (7.39): the composition CPU of these ops by class (the draws' issue is not in it)
+        const auto t0 = std::chrono::steady_clock::now();
+        const Skip r = op.kind == OpKind::SpeedTree ? composeTree(op) : op.kind == OpKind::SpeedTreeBB ? composeTreeBillboard(op) : composeVegetation(op);
+        const std::size_t cls = op.kind == OpKind::SpeedTree ? (viewKind_ != ViewKind::Main ? 2u : op.list == List::Solid ? 1u : 0u) : op.kind == OpKind::SpeedTreeBB ? 5u : (op.list == List::Solid ? 4u : 3u);
+        treeWindow_.compNs[cls] += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+        ++treeWindow_.compOps[cls];
+        return r;
+    }
     if (op.kind == OpKind::Billboard && op.list == List::Alpha) {
         const Skip s = composeBillboardAlpha(op);
         blendOverrideShader_ = nullptr;
@@ -2972,6 +2978,17 @@ void StaticOps::report() {
         t.grassNotCached += w.grassNotCached;
         t.grassClockMoved += w.grassClockMoved;
         spdlog::info("native: trees (5 s): {}", line(w));
+        {
+            static constexpr const char* kCls[6] = {"trees main z", "trees main solid", "trees cascades z", "vegetation z", "vegetation solid", "tree billboards"};
+            std::string c;
+            double total = 0.0;
+            for (std::size_t i = 0; i < 6; ++i) {
+                const double ms = static_cast<double>(w.compNs[i]) / 1.0e6;
+                total += ms;
+                c += std::format("{}{} {:.1f} ms / {} ops", c.empty() ? "" : "; ", kCls[i], ms, w.compOps[i]);
+            }
+            spdlog::info("native: trees composition CPU (5 s, composed ops only): {}; total {:.1f} ms", c, total);
+        }
         spdlog::info("native: trees (total): {}", line(t));
         treeWindow_ = {};
     }

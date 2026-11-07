@@ -118,6 +118,10 @@ void StaticOps::setOwnedShadows(bool on) {
     if (on == ownedShadows_) return;
     ownedShadows_ = on;
     spdlog::info("native: owned shadows {}", on ? "on" : "off");
+    if (!on) {
+        treeDropShadow();
+        if (tro_) tro_->shadowTripped = false;
+    }
     if (!on && recs_) {
         // the cascades' records are dropped (their persistent slots go back); the main view's stay
         for (auto it = recs_->map.begin(); it != recs_->map.end();) {
@@ -131,6 +135,7 @@ void StaticOps::ownedShadowsOff(const char* why, std::uint64_t n) {
     if (!ownedShadows_) return;
     ownedShadows_ = false;
     ownedShadowsTripped_ = true;
+    treeDropShadow();
     if (ownedCur_ != ViewKind::Main) {
         ownedOps_[0].clear();
         ownedView_ = {};

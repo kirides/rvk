@@ -597,7 +597,7 @@ void FrameTap::beginView(void* db, void* desc, ViewKind kind, void* shadowMap, s
     bool ownedFrame = kind == ViewKind::Main && statics_ != nullptr && staticsWanted_ && !observeWanted_ && statics_->ownedViewBegin(db, desc);
     // F3-1 (native.owned_shadows): a cascade's z list, the same machinery (op records keyed per cascade, view table slot 4 + cascade)
     if (kind == ViewKind::Cascade && statics_ != nullptr && staticsWanted_ && !observeWanted_) ownedFrame = statics_->ownedShadowViewBegin(db, kind, cascade);
-    if (kind == ViewKind::Main && statics_ != nullptr && staticsWanted_) statics_->treeViewBegin(ownedFrame);  // F4-3: the tree ops' own frame kind
+    if (statics_ != nullptr && staticsWanted_) statics_->treeViewBegin(ownedFrame, kind, cascade);  // F4-3 / F4-4: the tree ops' own frame kind
     for (std::size_t l = 0; l < kListCount; ++l) {
         const std::uint8_t* data = nullptr;
         std::int32_t count = 0;
@@ -657,7 +657,7 @@ void FrameTap::compactOwned(void* db, List list, const std::uint8_t* data, std::
         const void* vtable = nullptr;
         if (op.raw.context == nullptr || !readAt(op.raw.context, 0, vtable) || vtable == nullptr) continue;
         const OpKind vk = vtableInfo(vtable).kind;
-        if (vk != OpKind::Mesh && !(vk == OpKind::SpeedTree && statics_->ownedTreesOn() && desc_.kind == ViewKind::Main)) continue;
+        if (vk != OpKind::Mesh && !(vk == OpKind::SpeedTree && statics_->treeKindOk(desc_.kind))) continue;
         op.vtable = vtable;
         op.kind = vk;
         if (vk == OpKind::Mesh ? !statics_->ownedSelect(op) : !statics_->treeSelect(op)) continue;
@@ -721,10 +721,12 @@ std::uint32_t FrameTap::passBegin(bool solid) {
     if (!executing_ || (desc_.kind != ViewKind::Main && desc_.kind != ViewKind::Cascade) || statics_ == nullptr || !staticsWanted_) return 0;
     const std::uint32_t n = statics_->ownedPass(solid);
     if (desc_.kind == ViewKind::Cascade) {
-        if (n != 0 && coverage_) {
+        const std::uint32_t ntc = statics_->treePass(solid);  // F4-4: the cascade's SpeedTree ops
+        if ((n != 0 || ntc != 0) && coverage_) {
             for (std::uint32_t i = 0; i < n; ++i) cov_.ours(d3d9::scene::View::Shadow, d3d9::scene::Pass::ShadowDepth, d3d9::draws::Kind::StaticMesh);
+            for (std::uint32_t i = 0; i < ntc; ++i) cov_.ours(d3d9::scene::View::Shadow, d3d9::scene::Pass::ShadowDepth, d3d9::draws::Kind::SpeedTree);
         }
-        return n;
+        return n + ntc;
     }
     const std::uint32_t nt = statics_->treePass(solid);
     if ((n != 0 || nt != 0) && coverage_) {

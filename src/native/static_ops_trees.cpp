@@ -280,7 +280,9 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
     g.subMesh = nullptr;  // no eCSubMesh::Render: the slot's tag only
     g.meshResource = nullptr;
     // F4-2 / F4-3: a main-view tree op is retained (templates per bucket) / planned for the check; our identity ramp replaces the engine's stream 1 (the same values)
-    const bool trOn = ownedTrees_ && tro_ != nullptr && viewKind_ == ViewKind::Main && !shadow && hardware;
+    // (F4-4: a sun cascade's z op too, while native.owned_shadows is on and the cascades' trees are not tripped)
+    const bool trOn = ownedTrees_ && tro_ != nullptr && hardware && ((viewKind_ == ViewKind::Main && !shadow) || (viewKind_ == ViewKind::Cascade && shadow)) &&
+                      tro_->viewKey == ownedKeyOf(viewKind_, cascade_);
     if (trOn && tro_->ramp != nullptr && g.streams[1].buffer != nullptr && g.streams[1].freq == 0x80000001u && g.streams[1].stride == 4u) {
         g.streams[1].buffer = tro_->ramp.get();
         g.streams[1].offset = 0;

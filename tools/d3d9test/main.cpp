@@ -2410,8 +2410,11 @@ mov oC0, v0
 // c32 + 4 p) and Device::ownedTreeFlush: one run of six instances, three runs of two (one indirect call, three argument records, the same picture), the rows in the
 // reverse order (the picture follows the rows: they are really read), and the guards (a null window base, an instance count that is not the rows', a draw without a
 // v2 pipeline): nothing drawn, drawn again right after. 0 bytes may differ from the normal draws.
-void testOwnedTrees(Fixture& f) {
+// (F4-4: once for the main view's solid pass in slot 3 and once for a cascade's shadow depth pass in view slot 9 = a tree cascade slot)
+void testOwnedTreesIn(Fixture& f, scene::View phaseView, scene::Pass phasePass, std::uint32_t viewSlot, const char* label) {
     Device& dev = f.dev;
+    std::printf("  owned trees in %s (view slot %u)\n", label, viewSlot);
+    dev.setSceneShadows(phaseView == scene::View::Shadow);
     dev.setSceneDraws(true, 0);
     if (!dev.sceneDrawsActive()) {
         std::printf("  SKIP owned trees: scene draws are not available on this device\n");
@@ -2481,7 +2484,6 @@ add oC0, v0, c14
     std::vector<shader::abi::ViewBlock2> twin(kSlots);
     std::memset(twin.data(), 0, twin.size() * sizeof(shader::abi::ViewBlock2));
     const float c12[4] = {0.02f, 0.10f, 0.05f, 0.0f};
-    const std::uint32_t viewSlot = 3;
     {
         shader::abi::ViewBlock2& b = twin[viewSlot];
         std::memcpy(b.vs1[0], c12, 16);
@@ -2510,12 +2512,16 @@ add oC0, v0, c14
         f.reset();
         dev.drawTag() = {};
         dev.drawTag().source = draws::Source::SpeedTree;
-        dev.phases().push(scene::View::Main, scene::Pass::Solid);
+        dev.phases().push(phaseView, phasePass);
         dev.setVertexDecl(decl.get());
         dev.setVertexShader(vsT);
         dev.setPixelShader(psT);
         dev.setStreamSource(0, vb.get(), 0, sizeof(Vertex));
         dev.setStreamSource(1, ramp.get(), 0, 4);
+        {
+            const float zero[4] = {};  // (PS c14 = the lighting entry 0: a second run of this test must not see the last run's value)
+            dev.setPixelShaderConstantF(14, zero, 1);
+        }
         dev.setStreamSourceFreq(0, STREAMSOURCE_INDEXEDDATA | kInst);
         dev.setStreamSourceFreq(1, STREAMSOURCE_INSTANCEDATA | 1);
         dev.setIndices(ib.get());
@@ -2549,14 +2555,25 @@ add oC0, v0, c14
         dev.setVertexShaderConstantF(12, c12, 1);
         for (std::uint32_t i = 0; i < kInst; ++i) dev.setVertexShaderConstantF(32 + 4 * i, rows[reverse ? kInst - 1 - i : i], 2);
     };
-    begin();
-    setRegs(false);
-    dev.drawIndexedPrimitive(PT_TRIANGLELIST, 0, 0, 4, 0, 2);
+    // (a cascade's reference = six single-instance draws, each at its own ramp offset: the shadow phase's instanced draw is not the reference of the instanced form)
+    const bool single = phaseView == scene::View::Shadow;
+    const auto drawRef = [&](bool reverse) {
+        begin();
+        setRegs(reverse);
+        if (!single) {
+            dev.drawIndexedPrimitive(PT_TRIANGLELIST, 0, 0, 4, 0, 2);
+            return;
+        }
+        for (std::uint32_t i = 0; i < kInst; ++i) {
+            dev.setStreamSource(1, ramp.get(), 4 * i, 4);
+            dev.setStreamSourceFreq(0, STREAMSOURCE_INDEXEDDATA | 1);
+            dev.drawIndexedPrimitive(PT_TRIANGLELIST, 0, 0, 4, 0, 2);
+        }
+    };
+    drawRef(false);
     const Pixels ref = end("ownedt_ref");
     // (the reversed rows: instance p draws row 5 - p; the picture differs from the reference)
-    begin();
-    setRegs(true);
-    dev.drawIndexedPrimitive(PT_TRIANGLELIST, 0, 0, 4, 0, 2);
+    drawRef(true);
     const Pixels refRev = end("ownedt_refrev");
     dev.setSceneViewTable(tableRef, twin.data(), kSlots);
     dev.setSceneViews(true);
@@ -2742,11 +2759,17 @@ add oC0, v0, c14
     tab.setActive(false);
     tab.destroy();
     dev.setSceneTrees(false);
+    dev.setSceneShadows(false);
     dev.setSceneViews(false);
     dev.setSceneDraws(false, 0);
     dev.release(std::move(vb));
     dev.release(std::move(ib));
     dev.release(std::move(ramp));
+}
+
+void testOwnedTrees(Fixture& f) {
+    testOwnedTreesIn(f, scene::View::Main, scene::Pass::Solid, 3, "the main view");
+    testOwnedTreesIn(f, scene::View::Shadow, scene::Pass::ShadowDepth, 9, "a cascade");
 }
 
 // F2c-1 owned windows through the device's own path (frame-ownership.md 7.13): a translated vertex shader that reads VS window 1 (c12) and window 2 (c32.w, c33)

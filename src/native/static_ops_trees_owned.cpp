@@ -73,6 +73,7 @@ inline void column(const float m[16], std::uint32_t k, float out[4]) {
 
 constexpr std::uint32_t kRampLen = 16384;           // instance positions per pass (the identity ramp's length)
 constexpr std::uint32_t kViewSlotTreeZ = 14, kViewSlotTreeSolid = 15;
+constexpr std::uint32_t kViewSlotTreeCascade0 = 8;  // F4-4: slots 8..11 (the view table's dynamic slots are not used by anything; every v2 slot must stay < 16)
 constexpr std::uint32_t kRowRegs = 4;               // c32 .. c35 per instance
 constexpr std::uint32_t kVsWindowFirstRows = 32;    // registers in front of row 0: c0 .. c30 (never read: window 2 starts at c31) and the c31 header
 
@@ -146,7 +147,7 @@ void StaticOps::treeCompBegin(const Op& op, bool zpass, std::uint32_t type, cons
     T.bad = false;
     T.pending = std::make_unique<tro::OpRec>();
     tro::OpRec& r = *T.pending;
-    r.key = {op.raw.context, op.raw.desc, static_cast<std::uint8_t>(op.list)};
+    r.key = {op.raw.context, op.raw.desc, static_cast<std::uint8_t>(op.list), treeViewKey()};
     r.type = type;
     U8* ps = ptr(op.raw.context, 0x18);
     r.stamp.res = ptr(ps, 0x38);
@@ -175,7 +176,7 @@ void StaticOps::treeCompBegin(const Op& op, bool zpass, std::uint32_t type, cons
     const auto t0 = tnow();
     int why = 0;
     if (!treePlan(zpass, type, tableMerge, rb, wrapper, queue, n, T.plan, why)) T.plan.clear(), T.checkOp = false;
-    T.window.planNs += ns(t0, tnow());
+    T.win().planNs += ns(t0, tnow());
 }
 
 void StaticOps::treeCompBatch(std::size_t drawsBefore, std::uint64_t key) {
@@ -189,7 +190,7 @@ void StaticOps::treeCompBatch(std::size_t drawsBefore, std::uint64_t key) {
     }
     sc::DrawDesc& d = *draws_[drawsBefore];
     d.treeKey = key;
-    if (!T.active) ++T.window.compBatches;
+    if (!T.active) ++T.win().compBatches;
     const bool solid = op_ != nullptr ? op_->list == List::Solid : false;
     (void)solid;
     if (d.inheritMask != 0 || !d.vertexBytes.empty() || d.cpuStream != 0 || !d.indexed || d.states[sc::StBlend] != 0 || d.states[sc::StZWrite] == 0) {
@@ -213,7 +214,7 @@ void StaticOps::treeCompInstance(const std::uint8_t* tree, const std::uint8_t* i
 void StaticOps::treeCompEnd(const Op& op) {
     if (!tro_ || !tro_->pending || tro_->cur == nullptr) return;
     tro::State& T = *tro_;
-    tro::Stats& W = T.window;
+    tro::Stats& W = T.win();
     std::unique_ptr<tro::OpRec> pend = std::move(T.pending);
     T.cur = nullptr;
     const auto t0 = tnow();
@@ -432,6 +433,7 @@ void StaticOps::treeCompEnd(const Op& op) {
 bool StaticOps::treePlan(bool zpass, std::uint32_t type, bool tableMerge, const std::uint8_t* rb, const std::uint8_t* wrapper, const std::uint8_t* queue, std::int32_t n, std::vector<tro::Inst>& out, int& why) {
     out.clear();
     why = 0;
+    const bool shadow = tro_ != nullptr && tro_->shadowView;  // (F4-4: a cascade's z op: leaves cast from one LOD coarser at alpha 1)
     if (n < 0 || n > 65536 || queue == nullptr || rb == nullptr || type > 3) {
         why = 1;
         return false;
@@ -567,9 +569,18 @@ bool StaticOps::treePlan(bool zpass, std::uint32_t type, bool tableMerge, const 
         if (indices == 0) break;
         for (const Snap& s : snaps) {
             float a;
-            if (s.l0 == lodi && s.l0 > -1) a = 80.0f / s.r0;
-            else if (s.l1 == lodi && s.l1 > -1) a = 80.0f / s.r1;
-            else continue;
+            if (shadow) {
+                // RenderLeafsZPass in a shadow map (composeTree): the one leaf LOD min(+0x58 + 1, LODs - 1), global alpha 1
+                const std::int32_t l = s.l0 < 0 ? -1 : std::min(s.l0 + 1, lods - 1);
+                if (l != lodi) continue;
+                a = 1.0f;
+            } else if (s.l0 == lodi && s.l0 > -1) {
+                a = 80.0f / s.r0;
+            } else if (s.l1 == lodi && s.l1 > -1) {
+                a = 80.0f / s.r1;
+            } else {
+                continue;
+            }
             tro::Inst x;
             x.tree = s.tree;
             x.illum = s.illum;
@@ -584,17 +595,49 @@ bool StaticOps::treePlan(bool zpass, std::uint32_t type, bool tableMerge, const 
 
 // ---- the frame tap's side ------------------------------------------------------------------------------------------------------------
 
-void StaticOps::treeViewBegin(bool ownedFrame) {
+// RVK_F4_NO_SHADOW_TREES=1 (A/B, GetEnvironmentVariableA once): the cascades' SpeedTree ops stay composed while the main view's are owned
+static bool treeShadowEnvOff() {
+    static const bool off = [] {
+        char b[8] = {};
+        return GetEnvironmentVariableA("RVK_F4_NO_SHADOW_TREES", b, sizeof(b)) != 0 && b[0] != '0';
+    }();
+    return off;
+}
+
+std::uint8_t StaticOps::treeViewKey() const { return tro_ ? tro_->viewKey : 255; }
+
+std::uint32_t StaticOps::treeSlot(bool solid) const {
+    if (tro_ && tro_->viewKey != 0 && tro_->viewKey != 255) return kViewSlotTreeCascade0 + static_cast<std::uint32_t>(tro_->viewKey - 1);
+    return solid ? kViewSlotTreeSolid : kViewSlotTreeZ;
+}
+
+void StaticOps::treeDropShadow() {
+    if (!tro_) return;
+    for (auto it = tro_->ops.begin(); it != tro_->ops.end();) {
+        if (it->first.view != 0) it = tro_->ops.erase(it);
+        else ++it;
+    }
+    if (tro_->shadowView) {
+        tro_->active = false;
+        for (auto& v : tro_->taken) v.clear();
+    }
+}
+
+void StaticOps::treeViewBegin(bool ownedFrame, ViewKind kind, std::int32_t cascade) {
     if (!ownedTrees_ || !tro_) return;
     tro::State& T = *tro_;
     for (auto& v : T.taken) {
-        T.window.opsLate += v.size();  // (ops of an earlier view whose pass never began: lost for that frame)
+        T.win().opsLate += v.size();  // (ops of an earlier view whose pass never began: lost for that frame)
         v.clear();
     }
-    ++T.window.views;
     T.active = false;
+    T.shadowView = kind != ViewKind::Main;
+    T.cascade = cascade;
+    T.viewKey = kind == ViewKind::Main ? 0 : (kind == ViewKind::Cascade && ownedKeyOf(kind, cascade) != 0 && ownedShadowsOn() && !T.shadowTripped && !treeShadowEnvOff()) ? static_cast<std::uint8_t>(ownedKeyOf(kind, cascade)) : 255;
+    if (T.viewKey == 255) return;  // (a view the trees are not owned in: the terrain map, point-light cells, cascades with owned_shadows off)
+    ++T.win().views;
     if (!ownedFrame) {
-        ++T.window.compViews;
+        ++T.win().compViews;
         return;
     }
     gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
@@ -610,21 +653,22 @@ void StaticOps::treeViewBegin(bool ownedFrame) {
         return;
     }
     T.active = true;
-    ++T.window.ownedViews;
+    ++T.win().ownedViews;
 }
 
 bool StaticOps::treeSelect(const Op& op) {
     if (!tro_ || !tro_->active || op.kind != OpKind::SpeedTree) return false;
     if (op.list != List::ZPass && op.list != List::Solid) return false;
     tro::State& T = *tro_;
-    ++T.window.opsSeen;
+    ++T.win().opsSeen;
     const bool zpass = op.list == List::ZPass;
-    if (zpass && ((op.raw.desc >> 16) & 0x10u) != 0) return false;  // (a shadow map's z op)
+    // a shadow map's z op (desc bit 0x10 << 16) belongs to the cascades' views, the others to the main view; the shadow views have no solid list
+    if ((zpass && ((op.raw.desc >> 16) & 0x10u) != 0) != T.shadowView || (T.shadowView && !zpass)) return false;
     const std::uint32_t type = zpass ? (op.raw.desc & 0xffffu) : op.raw.desc;
     if (type > 3) return false;
-    const auto it = T.ops.find(tro::OpKey{op.raw.context, op.raw.desc, static_cast<std::uint8_t>(op.list)});
+    const auto it = T.ops.find(tro::OpKey{op.raw.context, op.raw.desc, static_cast<std::uint8_t>(op.list), treeViewKey()});
     if (it == T.ops.end()) {
-        ++T.window.lateNoRec;
+        ++T.win().lateNoRec;
         return false;
     }
     return true;
@@ -632,8 +676,8 @@ bool StaticOps::treeSelect(const Op& op) {
 
 void StaticOps::treeTake(List list, std::vector<Op>&& ops, std::uint64_t nsTake) {
     if (!tro_) return;
-    tro_->window.opsTaken += ops.size();
-    tro_->window.takeNs += nsTake;
+    tro_->win().opsTaken += ops.size();
+    tro_->win().takeNs += nsTake;
     tro_->taken[list == List::Solid ? 1 : 0] = std::move(ops);
 }
 
@@ -691,13 +735,13 @@ int StaticOps::treeTemplate(tro::Tpl& t, const d3d9::OwnedWindows& viewWin, std:
     const bool reuse = P.valid && P.handle.has() && tab.live(P.handle.slot) && P.epoch == epoch && P.sig == sig;
     const bool scrub = reuse && scrubStride != 0 && (++tro_->scrubTick % scrubStride) == scrubPhase;
     if (reuse && !scrub) {
-        ++tro_->window.reused;
+        ++tro_->win().reused;
         return 0;
     }
     if (!P.handle.has()) {
         const std::uint32_t slot = tab.alloc();
         if (slot == gpuscene::kNoSlot) {
-            ++tro_->window.tableFull;
+            ++tro_->win().tableFull;
             return 2;
         }
         P.handle.slot = slot;
@@ -708,18 +752,18 @@ int StaticOps::treeTemplate(tro::Tpl& t, const d3d9::OwnedWindows& viewWin, std:
     const int rc = dev_.ownedDerive(cd, in, P.ow, tab.blockRef(P.handle.slot), tab.zeroRef(), true, out);
     if (rc != 0) {
         P.valid = false;
-        ++tro_->window.refused;
+        ++tro_->win().refused;
         if (rc == 1 || rc == 4 || rc == 6 || rc == 7) t.stale = true;
         return 3;
     }
     if (scrub) {
         if (std::memcmp(&tab.record(P.handle.slot), &out.rec, sizeof(out.rec)) != 0 || std::memcmp(&tab.block(P.handle.slot), &out.blk, sizeof(out.blk)) != 0) {
-            ++tro_->window.checkMiss;
+            ++tro_->win().checkMiss;
             spdlog::error("native: owned trees: MISS (rolling scrub): the persistent block of bucket {:#x} differs from a fresh derivation although nothing it was derived from moved", t.key);
         }
-        ++tro_->window.checkMissCompared;
+        ++tro_->win().checkMissCompared;
     } else {
-        ++tro_->window.derived;
+        ++tro_->win().derived;
     }
     if (!scrub) tab.write(P.handle.slot, out.rec, out.blk);
     P.valid = true;
@@ -739,7 +783,7 @@ void StaticOps::treeMissCheck(tro::OpRec& rec, tro::Tpl& t, bool solid) {
     if ((++tro_->scrubTick & 7u) != 0) return;  // (one template in eight per composed frame: each check is a full derivation)
     gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
     gpuscene::ViewTable& vt = gpuscene::viewtable();
-    const std::uint32_t viewSlot = solid ? kViewSlotTreeSolid : kViewSlotTreeZ;
+    const std::uint32_t viewSlot = treeSlot(solid);
     d3d9::OwnedWindows viewWin;
     if (!tab.ready() || !tab.live(P.handle.slot) || !vt.ready() || !vt.fillWindows(viewSlot, viewWin)) return;
     const gpuscene::ComposeParams p = paramsOfTpl(r);
@@ -763,9 +807,9 @@ void StaticOps::treeMissCheck(tro::OpRec& rec, tro::Tpl& t, bool solid) {
     if (dev_.deriveScene(*r.cd, in, sv) != 0) return;
     d3d9::Device::OwnedPersist fresh;
     if (dev_.ownedBuild(*r.cd, sv, dw, tab.blockRef(P.handle.slot), tab.zeroRef(), fresh) != 0) return;
-    ++tro_->window.checkMissCompared;
+    ++tro_->win().checkMissCompared;
     if (std::memcmp(&tab.record(P.handle.slot), &fresh.rec, sizeof(fresh.rec)) != 0 || std::memcmp(&tab.block(P.handle.slot), &fresh.blk, sizeof(fresh.blk)) != 0) {
-        ++tro_->window.checkMiss;
+        ++tro_->win().checkMiss;
         if (tro_->logged < 8) {
             ++tro_->logged;
             spdlog::error("native: owned trees: MISS (check frame): the persistent block of bucket {:#x} differs from a fresh derivation although nothing it was derived from moved", t.key);
@@ -780,8 +824,8 @@ std::uint32_t StaticOps::treePass(bool solid) {
     tro::State& T = *tro_;
     std::vector<Op>& ops = T.taken[solid ? 1 : 0];
     if (ops.empty()) return 0;
-    tro::Stats& W = T.window;
-    if (!inView_ || viewKind_ != ViewKind::Main || !T.active) {
+    tro::Stats& W = T.win();
+    if (!inView_ || viewKind_ != (T.shadowView ? ViewKind::Cascade : ViewKind::Main) || (T.shadowView && cascade_ != T.cascade) || !T.active) {
         W.opsLate += ops.size();
         ops.clear();
         return 0;
@@ -840,7 +884,7 @@ std::uint32_t StaticOps::treePass(bool solid) {
     const std::uint64_t viewStamp = viewOk ? recViewStamp() : 0;
     d3d9::OwnedWindows viewWin;
     bool viewWinOk = false;
-    const std::uint32_t viewSlot = solid ? kViewSlotTreeSolid : kViewSlotTreeZ;
+    const std::uint32_t viewSlot = treeSlot(solid);
     if (viewOk) {
         gpuscene::ViewTable& vt = gpuscene::viewtable();
         float posFix[4];
@@ -897,7 +941,7 @@ std::uint32_t StaticOps::treePass(bool solid) {
     std::vector<std::uint8_t>& queueBytes = scr_.treeQueue;
     for (std::size_t oi = 0; oi < ops.size(); ++oi) {
         Op& op = ops[oi];
-        const auto it = T.ops.find(tro::OpKey{op.raw.context, op.raw.desc, static_cast<std::uint8_t>(op.list)});
+        const auto it = T.ops.find(tro::OpKey{op.raw.context, op.raw.desc, static_cast<std::uint8_t>(op.list), treeViewKey()});
         if (it == T.ops.end()) {
             composeLate(op, W.lateNoRec);
             continue;
@@ -1217,24 +1261,37 @@ std::uint32_t StaticOps::treePass(bool solid) {
 void StaticOps::treeReport() {
     if (!ownedTrees_ || !tro_) return;
     tro::State& T = *tro_;
-    tro::Stats& q = T.window;
-    T.total.add(q);
+    treeReportOne(T.window, T.total, "main view", false);
+    if (T.shadowWindow.views != 0 || T.shadowWindow.opsSeen != 0 || T.shadowWindow.compBatches != 0) treeReportOne(T.shadowWindow, T.shadowTotal, "cascades", true);
+    else T.shadowWindow = {};
+}
+
+void StaticOps::treeReportOne(tro::Stats& q, tro::Stats& total, const char* what, bool shadow) {
+    tro::State& T = *tro_;
+    total.add(q);
     const double nv = static_cast<double>(std::max<std::uint64_t>(1, q.ownedViews));
     // (checkKeyDiff is reported, not fatal: the engine draws a whole batch with its FIRST instance's start index, the plan gives each instance its own LOD: ~0.25 % of the instances, frame-ownership.md 7.25)
     // (a template that differs from the next composition of its bucket is replaced and counted, not fatal: inputs outside the stamps move rarely, e.g. a texture streaming in)
     const std::uint64_t differing = q.checkRowDiff + q.checkCountDiff + q.checkMiss;
-    spdlog::info("native: owned trees (5 s): {} main views ({} owned), tree ops looked at {}, taken {}, drawn from templates {}, composed late {} (no record {}, stamp {}, view {}, material {}, plan {}, special lighting {}, "
+    spdlog::info("native: owned trees [{}] (5 s): {} views ({} owned), tree ops looked at {}, taken {}, drawn from templates {}, composed late {} (no record {}, stamp {}, view {}, material {}, plan {}, special lighting {}, "
                  "no template {}, template refused {}, flush {}); {} instances in {} items over {} flushes; templates built {} replaced {} (not retained {}, bad ops {}: batch draws {} / draw level {} / depth bias {} / lean+retain {} / switch {} / material {} / none {}); persistent blocks derived {} reused {} refused {} (table full {}); "
                  "check frames: {} ops / {} instances compared, {} draws against templates: DIFFERING {} (rows {}, counts {}, templates {}; per-instance LOD start differs from the engine batch's first instance {}), MISS {} of {} compared; "
                  "observers shown {} instances; GPU commands: {} commands ({} records, {} indirect calls) per {} flushes = {:.1f} / flush, the engine's composed batches {:.1f} / composed view ({} views); "
                  "CPU per owned view: take {:.1f} us, side effects {:.1f} us, plan {:.1f} us, templates {:.1f} us, rows {:.1f} us, flush {:.1f} us",
-                 q.views, q.ownedViews, q.opsSeen, q.opsTaken, q.opsDrawn, q.opsLate, q.lateNoRec, q.lateStamp, q.lateView, q.lateMaterial, q.latePlan, q.lateSpecial, q.lateNoTemplate, q.lateTemplate, q.lateFlush,
+                 what, q.views, q.ownedViews, q.opsSeen, q.opsTaken, q.opsDrawn, q.opsLate, q.lateNoRec, q.lateStamp, q.lateView, q.lateMaterial, q.latePlan, q.lateSpecial, q.lateNoTemplate, q.lateTemplate, q.lateFlush,
                  q.instances, q.items, q.flushes, q.built, q.replaced, q.notRetained, q.badOps, q.badBy[0], q.badBy[1], q.badBy[2], q.badBy[3], q.badBy[4], q.badBy[5], q.badBy[6], q.derived, q.reused, q.refused, q.tableFull, q.checkOps, q.checkInst, q.checkDraws, differing, q.checkRowDiff,
                  q.checkCountDiff, q.checkTplDiff, q.checkKeyDiff, q.checkMiss, q.checkMissCompared, q.observed, q.items, q.records, q.packets, q.flushes,
                  static_cast<double>(q.items) / static_cast<double>(std::max<std::uint64_t>(1, q.flushes)), static_cast<double>(q.compBatches) / static_cast<double>(std::max<std::uint64_t>(1, q.compViews)), q.compViews, static_cast<double>(q.takeNs) / nv / 1000.0, static_cast<double>(q.sideNs) / nv / 1000.0, static_cast<double>(q.planNs) / nv / 1000.0,
                  static_cast<double>(q.tplNs) / nv / 1000.0, static_cast<double>(q.rowNs) / nv / 1000.0, static_cast<double>(q.flushNs) / nv / 1000.0);
     q = {};
     if (differing != 0) {
+        if (shadow) {
+            // only the cascades' trees go back to the engine's path (the main view's stay)
+            T.shadowTripped = true;
+            treeDropShadow();
+            spdlog::error("native: owned trees [cascades] turned off: {} DIFFERING on the composed frames (the plan / template is not what the composition drew)", differing);
+            return;
+        }
         ownedTrees_ = false;
         T.active = false;
         for (auto& v : T.taken) v.clear();

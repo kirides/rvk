@@ -26,6 +26,7 @@ struct OpKey {
     const void* ctx = nullptr;
     std::uint32_t desc = 0;
     std::uint8_t list = 0;
+    std::uint8_t view = 0;              // 0 = the main view, 1 + c = sun cascade c (F4-4: a cascade's templates hold that cascade's view slot)
     bool operator==(const OpKey&) const = default;
 };
 struct OpKeyHash {
@@ -33,6 +34,7 @@ struct OpKeyHash {
         std::uint64_t h = (reinterpret_cast<std::uintptr_t>(k.ctx) >> 3) * 0x9E3779B97F4A7C15ull;
         h ^= static_cast<std::uint64_t>(k.desc) * 0xC2B2AE3D27D4EB4Full;
         h ^= static_cast<std::uint64_t>(k.list) << 56;
+        h ^= static_cast<std::uint64_t>(k.view) << 48;
         return static_cast<std::size_t>(h ^ (h >> 31));
     }
 };
@@ -112,6 +114,12 @@ struct Stats {
 struct State {
     std::unordered_map<OpKey, std::unique_ptr<OpRec>, OpKeyHash> ops;
     Stats window, total;
+    Stats shadowWindow, shadowTotal;    // F4-4: the same counters for the sun cascades' views
+    bool shadowTripped = false;         // a DIFFERING in the cascades: their trees stay the engine's
+    bool shadowView = false;            // the view in progress is a sun cascade (statistics + view slot)
+    std::int32_t cascade = -1;
+    std::uint8_t viewKey = 255;         // 0 main, 1 + c cascade c, 255 = a view the trees are not owned in
+    Stats& win() { return shadowView ? shadowWindow : window; }
     bool active = false;                // this view is an owned frame for trees
     std::array<std::vector<Op>, 2> taken;  // z / solid ops that left the lists
     std::unique_ptr<d3d9::Buffer> ramp;

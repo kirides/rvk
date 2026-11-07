@@ -16,7 +16,7 @@ namespace rvk::d3d9 {
 
 std::uint64_t Device::treeEnvEpoch(bool solid, std::uint32_t viewSlot, bool& ok) {
     const std::uint64_t h = ownedEnvHash(solid, viewSlot, ok);
-    const std::size_t k = solid ? 1 : 0;
+    const std::size_t k = treeEnvIndex(solid, viewSlot);
     if (treeEnvHash_[k] != h || treeEnvEpoch_[k] == 0) {
         treeEnvHash_[k] = h;
         treeEnvEpoch_[k] = ++treeEnvCounter_;
@@ -27,7 +27,7 @@ std::uint64_t Device::treeEnvEpoch(bool solid, std::uint32_t viewSlot, bool& ok)
 bool Device::treeEnvSame(bool solid, std::uint32_t viewSlot, std::uint64_t epoch) const {
     bool ok = false;
     const std::uint64_t h = ownedEnvHash(solid, viewSlot, ok);
-    const std::size_t k = solid ? 1 : 0;
+    const std::size_t k = treeEnvIndex(solid, viewSlot);
     return h == treeEnvHash_[k] && epoch == treeEnvEpoch_[k] && epoch != 0;
 }
 
@@ -36,8 +36,10 @@ bool Device::treeEnvSame(bool solid, std::uint32_t viewSlot, std::uint64_t epoch
 bool Device::ownedTreeObserversOk() const {
     for (const DrawObserver* o : observers_) {
         if (o->registersRead() == DrawObserver::Registers::All) return false;
+        // (F4-4: the cascades' tree draws are served the same way, so an observer of those must accept owned trees too)
         if (o->observes(draws::Kind::SpeedTree, scene::Phase{scene::View::Main, scene::Pass::Solid}) ||
-            o->observes(draws::Kind::SpeedTree, scene::Phase{scene::View::Main, scene::Pass::DepthPrepass})) {
+            o->observes(draws::Kind::SpeedTree, scene::Phase{scene::View::Main, scene::Pass::DepthPrepass}) ||
+            o->observes(draws::Kind::SpeedTree, scene::Phase{scene::View::Shadow, scene::Pass::ShadowDepth})) {
             if (!o->ownedTreesOk()) return false;
         }
     }

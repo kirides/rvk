@@ -157,7 +157,9 @@ public:
     // per-instance records, a few indirect calls). Needs owned_persistent (the DrawBlock slots), scene draws v2, lighting images, table lighting.
     void setOwnedTrees(bool on);
     bool ownedTreesOn() const { return ownedTrees_; }
-    void treeViewBegin(bool ownedFrame);      // the main view begins (frame tap): the frame kind, the prerequisites
+    // a view begins (frame tap; every kind): the frame kind, the prerequisites. F4-4: a sun cascade's z list takes its SpeedTree ops too while native.owned_shadows is on
+    void treeViewBegin(bool ownedFrame, ViewKind kind, std::int32_t cascade);
+    bool treeKindOk(ViewKind kind) const { return ownedTrees_ && (kind == ViewKind::Main || (kind == ViewKind::Cascade && ownedShadowsOn())); }
     bool treeSelect(const Op& op);            // compaction: this tree op leaves the list
     void treeTake(List list, std::vector<Op>&& ops, std::uint64_t ns);
     std::uint32_t treePass(bool solid);       // BeginZPass / DoBeginRenderSolid returned: the taken ops are drawn; returns the draws made
@@ -1003,10 +1005,14 @@ private:
         std::uint64_t knownLights = 0;  // tree instances whose static lights the table holds (their batch no longer ends on them)
         std::uint64_t leafLods = 0, wrongTransformation = 0, billboardOps = 0, billboardTexCoords = 0, shadowFrondsSkipped = 0;
         std::uint64_t grassOps = 0, grassZeroOps = 0, grassNodes = 0, grassInstances = 0, grassDraws = 0, grassWraps = 0, grassNotCached = 0, grassClockMoved = 0;
+        std::array<std::uint64_t, 6> compNs{}, compOps{};  // F4-4: composeTree (main z / main solid / cascades) / vegetation (z / solid) / tree billboards: CPU ns + ops composed
     } treeWindow_, treeTotal_;
     // F4-2 / F4-3 (static_ops_trees_owned.cpp)
     bool ownedTrees_ = false;
     std::unique_ptr<tro::State> tro_;
+    std::uint8_t treeViewKey() const;                  // the view in progress: 0 main, 1 + c a sun cascade, 255 none
+    std::uint32_t treeSlot(bool solid) const;          // its tree view table slot (main 14 / 15, cascade c: 8 + c)
+    void treeDropShadow();                             // the cascades' templates are dropped (native.owned_shadows went off)
     bool treeSceneIssue() const { return ownedTrees_ && g_ == &groups_[static_cast<std::size_t>(Group::Trees)]; }
     static std::uint64_t treeBucketKey(std::uint32_t type, bool zpass, bool sun, std::uint32_t a, std::uint32_t b, std::uint32_t c);
     bool treeEnsureRamp();
@@ -1019,6 +1025,7 @@ private:
     int treeTemplate(tro::Tpl& t, const d3d9::OwnedWindows& viewWin, std::uint64_t epoch, bool solid, std::uint32_t scrubStride, std::uint32_t scrubPhase);
     void treeMissCheck(tro::OpRec& rec, tro::Tpl& t, bool solid);
     void treeReport();
+    void treeReportOne(tro::Stats& q, tro::Stats& total, const char* what, bool shadow);
     // the skinned actors (static_ops_actors.cpp): the frame admin getter eCAnimation_PS::Render calls first (frame id at +0x4c), the
     // affine product of UpdateRenderMatrices (FUN_1800a2710: a *= b)
     void* (*frameAdmin_)() = nullptr;

@@ -91,7 +91,7 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
         lastVariant_.scenePending = false;
     }
     const bool tree = sceneTrees_ && sceneV2_ && kind == draws::Kind::SpeedTree;  // F4-3: the scene ABI v2 form only (scenePipe_ stays None: the composed draw is drawn as it was)
-    const bool shadowPhase = sceneShadows_ && sceneV2_ && kind == draws::Kind::StaticMesh && phase.view == scene::View::Shadow && phase.pass == scene::Pass::ShadowDepth;
+    const bool shadowPhase = sceneShadows_ && sceneV2_ && (kind == draws::Kind::StaticMesh || tree) && phase.view == scene::View::Shadow && phase.pass == scene::Pass::ShadowDepth;
     if (!shadowPhase && ((kind != draws::Kind::StaticMesh && !(sceneBb_ && kind == draws::Kind::SpeedTreeBillboard) && !tree) || phase.view != scene::View::Main ||
                          (phase.pass != scene::Pass::Solid && phase.pass != scene::Pass::DepthPrepass))) {
         return;

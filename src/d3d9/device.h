@@ -1946,7 +1946,8 @@ private:
         bool valid = false;
     } sceneRef_;  // (i, 0) for i < kSceneRunMax: the instance-rate ref stream, a ring block of this frame
     SceneRefStream sceneRefV2_[kSceneRefSlots];  // scene ABI v2: (i, slot) per view slot, ring blocks of this frame
-    std::uint64_t treeEnvHash_[2] = {}, treeEnvEpoch_[2] = {}, treeEnvCounter_ = 0;  // F4-3
+    std::uint64_t treeEnvHash_[6] = {}, treeEnvEpoch_[6] = {}, treeEnvCounter_ = 0;  // F4-3 (per tree view slot: 14 / 15 main z / solid, 8..11 the cascades' z: treeEnvIndex)
+    static std::size_t treeEnvIndex(bool solid, std::uint32_t viewSlot) { return viewSlot >= 8 && viewSlot < 12 ? 2 + (viewSlot - 8) : (solid ? 1 : 0); }
     static constexpr std::size_t kOwnedEnvSlots = 8;
     static std::size_t ownedEnvIndex(std::uint32_t viewSlot) { return viewSlot < kOwnedEnvSlots ? viewSlot : kOwnedEnvSlots - 1; }
     std::uint64_t ownedEnvHash_[kOwnedEnvSlots] = {}, ownedEnvEpoch_[kOwnedEnvSlots] = {}, ownedEnvCounter_ = 0;  // F2c-4a: ownedEnvEpoch per view slot (0 main z, 1 main solid, 4.. cascades; F3-1)
