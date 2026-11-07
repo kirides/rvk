@@ -223,7 +223,7 @@ TEST(abi_hlsl_scene_layout_matches_cpp) {
     using DR = abi::DrawRecord;
     checkHlsl(m.at("RvkDrawRecord"),
               {{"vsw01", offsetof(DR, vsWin)}, {"vsw23", offsetof(DR, vsWin) + 16}, {"psw01", offsetof(DR, psWin)}, {"psw23", offsetof(DR, psWin) + 16},
-               {"drawPrev", offsetof(DR, draw)}, {"ids", offsetof(DR, drawId)}, {"slots", offsetof(DR, materialSlot)}, {"reserved", offsetof(DR, reserved1)}},
+               {"drawPrev", offsetof(DR, draw)}, {"ids", offsetof(DR, drawId)}, {"slots", offsetof(DR, materialSlot)}, {"reserved", offsetof(DR, args)}},
               "RvkDrawRecord");
     // inside the rows: draw, prevVs / drawId, flags, instanceSlot, part / materialSlot, illumEntry
     CHECK(offsetof(DR, prevVs) == offsetof(DR, draw) + 8 && offsetof(DR, flags) == offsetof(DR, drawId) + 4 && offsetof(DR, instanceSlot) == offsetof(DR, drawId) + 8 &&
@@ -260,7 +260,7 @@ TEST(abi_hlsl_sceneview_layout_matches_cpp) {
     using DR = abi::DrawRecord;
     checkHlsl(m.at("RvkDrawRecord"),
               {{"vsw01", offsetof(DR, vsWin)}, {"vsw23", offsetof(DR, vsWin) + 16}, {"psw01", offsetof(DR, psWin)}, {"psw23", offsetof(DR, psWin) + 16},
-               {"drawPrev", offsetof(DR, draw)}, {"ids", offsetof(DR, drawId)}, {"slots", offsetof(DR, materialSlot)}, {"reserved", offsetof(DR, reserved1)}},
+               {"drawPrev", offsetof(DR, draw)}, {"ids", offsetof(DR, drawId)}, {"slots", offsetof(DR, materialSlot)}, {"reserved", offsetof(DR, args)}},
               "RvkDrawRecord");
     CHECK(offsetof(DR, c5w) == 104 && offsetof(DR, c5w) == offsetof(DR, materialSlot) + 8);
 }

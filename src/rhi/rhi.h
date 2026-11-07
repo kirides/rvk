@@ -326,6 +326,7 @@ struct RenderingInfo {
 enum class BufferAccess {
     ShaderRead,   // read through shaderRef / heapIndex (a ByteAddressBuffer), vertex / index / constant data
     ShaderWrite,  // read and write through shaderRefRw / heapIndexRw (a RWByteAddressBuffer, atomics)
+    IndirectRead, // the draws that follow read it as an indirect argument / count buffer (DrawPacket::Op::DrawIndexedIndirectCount); DX12: INDIRECT_ARGUMENT, Vulkan: the global barrier covers it
 };
 
 // A storage image binding: one mip level of one layer. The view is a 3D view for volumes (RWTexture3D), an array view of a single layer when the
@@ -456,6 +457,7 @@ public:
 struct DeviceDesc {
     Backend backend = Backend::Vulkan;
     bool validation = false;  // Vulkan validation layer / D3D12 debug layer (+ GPU based validation)
+    bool syncValidation = false;  // Vulkan: + the layer's synchronization validation (rvk_rhitest --sync-validation)
     int adapter = -1;         // -1 = the high performance adapter
     const char* name = "rvk";
     bool rayTracing = false;  // enable acceleration structures + ray queries when the device has them (DeviceCaps::rayQuery)

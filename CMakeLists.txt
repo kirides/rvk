@@ -280,6 +280,8 @@ add_library(rvk_core STATIC
     src/gpuscene/view_table.cpp
     src/gpuscene/draw_record_table.cpp
     src/gpuscene/draw_record_table.h
+    src/gpuscene/owned_compact.cpp
+    src/gpuscene/owned_compact.h
     src/d3d9/owned_persist.cpp
     src/d3d9/owned_trees.cpp
     src/gpuscene/view_table.h

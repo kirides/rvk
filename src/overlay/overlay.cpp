@@ -2,6 +2,7 @@
 // UI, A/B comparison, performance panel. docs/research/overlay.md. The ImGui setup follows GD3D11's ImGuiShim::InitVulkan
 // (D3D11Engine/ImGuiShim.cpp, same author as this repository): dynamic rendering, own descriptor pool, no ini file.
 
+#include "gpuscene/owned_compact.h"
 #include "overlay/overlay.h"
 #include "enh/material_pack.h"
 
@@ -372,6 +373,12 @@ bool Overlay::runCommand(std::string_view command, std::string* out) {
         else if (w[1] == "reset") reg.resetOther();
         else return fail("ab flip|a|b|copy|reset");
         return ok(std::format("side {} active, {} settings differ", sideName(reg.bActive()), reg.abDifferences().size()));
+    }
+    if (w[0] == "debug" && w.size() == 3 && w[1] == "compact") {
+        // F2c-4c A/B inside one run: the owned draws' indirect arguments written by the CPU ("cpu") or compacted by the GPU ("gpu", the default)
+        if (w[2] != "cpu" && w[2] != "gpu") return fail("debug compact cpu|gpu");
+        gpuscene::ownedcompact().setForceCpu(w[2] == "cpu");
+        return ok(std::format("owned draws: arguments by the {}", w[2]));
     }
     if (w[0] == "materials" && w.size() == 2 && w[1] == "reload") {
         // the material pack folders are read again (docs/research/material-pack.md)

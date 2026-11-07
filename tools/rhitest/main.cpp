@@ -1,6 +1,6 @@
 // rvk_rhitest: the slim RHI (src/rhi/rhi.h) on both backends with the same code and the same HLSL (docs/research/hlsl-rhi.md 5, 6).
 //
-//   rvk_rhitest [--vulkan] [--d3d12] [--validation]
+//   rvk_rhitest [--vulkan] [--d3d12] [--validation | --sync-validation]
 //   rvk_rhitest --fsr | --fg [loader dll] [--validation]   FidelityFX on the D3D12 backend (tools/rhitest/ffx.cpp), nothing else
 //
 // Per backend: a compute pass that reads a constant buffer (b8), a bindless texture + sampler (indices in the constant buffer), a RVK_REF block
@@ -65,7 +65,7 @@ struct Blobs {
 // the shaders of all checks (compiled once, to SPIR-V and DXIL)
 struct Shaders {
     Blobs cs, vs, ps;                      // the basic check
-    Blobs tex, texStore, buf, vtxVs, vtxPs, rt, store8, indCs, indVs;  // the gap checks
+    Blobs tex, texStore, buf, vtxVs, vtxPs, rt, store8, indCs, indVs, compact;  // the gap checks
 };
 
 bool compileBoth(const std::string& file, const char* entry, const char* profile, Blobs& out) {
@@ -679,6 +679,131 @@ void testIndirectPull(rhi::Device& dev, const Shaders& sh) {
     report(dev, name, before);
 }
 
+// F2c-4c (frame-ownership.md 7.32): shaders/gpuscene/owned_compact.comp.hlsl, the production compaction pass, on a record table + ref list + jobs the test builds: buckets of
+// 150 (several chunks, invalid entries in it: a record without a draw address, a record with indexCount 0, a slot beyond the table), 1, 64 (one full chunk) and 65 entries,
+// non-zero count / argument base offsets and argument indices. The counts and the argument records read back must equal the CPU's compaction (order kept, firstInstance =
+// the entry's position in the list); the buffer is then moved to the indirect-argument state (bufferBarrier IndirectRead) and copied out (DX12 state tracking).
+void testOwnedCompact(rhi::Device& dev, const Shaders& sh) {
+    const int before = failures;
+    const char* name = "owned draws compaction (F2c-4c)";
+    if (!sh.compact.ok) {
+        check(false, "compaction shader did not compile");
+        report(dev, name, before);
+        return;
+    }
+    constexpr std::uint32_t kSlots = 256, kRecordBytes = 128, kBuckets = 4, kCountsBase = 64, kArgsBase = 256, kFirstArg = 5, kFirstCount = 2;
+    const std::uint32_t sizes[kBuckets] = {150, 1, 64, 65};
+    std::uint32_t total = 0;
+    for (const std::uint32_t n : sizes) total += n;
+    constexpr VkBufferUsageFlags kRw = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    const std::uint64_t outBytes = kArgsBase + static_cast<std::uint64_t>(kFirstArg + total) * 20;
+    auto records = dev.createBuffer({static_cast<std::uint64_t>(kSlots) * kRecordBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi compact records"});
+    auto list = dev.createBuffer({static_cast<std::uint64_t>(total) * 8, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi compact list"});
+    auto jobs = dev.createBuffer({kBuckets * 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "rhi compact jobs"});
+    auto out = dev.createBuffer({outBytes, kRw, rhi::Memory::Device, "rhi compact out"});
+    auto fill = dev.createBuffer({outBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, rhi::Memory::Upload, "rhi compact poison"});
+    auto readback = dev.createBuffer({outBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, rhi::Memory::Readback, "rhi compact readback"});
+    auto pipeline = dev.createComputePipeline({sh.compact.shader(), "rhi owned compact"});
+    if (!records || !list || !jobs || !out || !fill || !readback || !pipeline) {
+        check(false, "compaction resource / pipeline creation");
+        report(dev, name, before);
+        return;
+    }
+    // records: slot s draws (1000 + s) indices from 77 s, base vertex -s; slot 7 has no draw address, slot 8 has indexCount 0
+    auto* rec = static_cast<std::uint32_t*>(records->map());
+    std::memset(rec, 0, static_cast<std::size_t>(kSlots) * kRecordBytes);
+    for (std::uint32_t slot = 0; slot < kSlots; ++slot) {
+        std::uint32_t* r = rec + static_cast<std::size_t>(slot) * (kRecordBytes / 4);
+        if (slot != 7) {
+            r[16] = 0x1000u + slot;  // draw address low
+            r[17] = 1;               // high
+        }
+        r[28] = slot == 8 ? 0u : 1000u + slot;
+        r[29] = 77u * slot;
+        r[30] = static_cast<std::uint32_t>(-static_cast<std::int32_t>(slot));
+    }
+    struct Entry {
+        std::uint32_t slot, view;
+    };
+    std::vector<Entry> entries;
+    std::uint32_t firstEntry[kBuckets];
+    std::uint32_t seed = 12345;
+    for (std::uint32_t b = 0; b < kBuckets; ++b) {
+        firstEntry[b] = static_cast<std::uint32_t>(entries.size());
+        for (std::uint32_t k = 0; k < sizes[b]; ++k) {
+            seed = seed * 1664525u + 1013904223u;
+            std::uint32_t slot = 20 + (seed >> 8) % 200;
+            if (b == 0 && (k == 3 || k == 70)) slot = 7;              // no draw address
+            else if (b == 0 && (k == 64 || k == 149)) slot = 8;       // indexCount 0
+            else if (b == 0 && k == 100) slot = 9999;                 // beyond the table
+            else if (b == 2 && k == 63) slot = 7;                     // the last entry of a full chunk
+            else if (b == 3 && k == 64) slot = 8;                     // the lone entry of the second chunk
+            entries.push_back({slot, b + 1});
+        }
+    }
+    std::memcpy(list->map(), entries.data(), entries.size() * sizeof(Entry));
+    auto* jb = static_cast<std::uint32_t*>(jobs->map());
+    for (std::uint32_t b = 0; b < kBuckets; ++b) {
+        jb[4 * b + 0] = firstEntry[b];
+        jb[4 * b + 1] = sizes[b];
+        jb[4 * b + 2] = kFirstArg + firstEntry[b];
+        jb[4 * b + 3] = kFirstCount + b;
+    }
+    std::memset(fill->map(), 0xAB, outBytes);  // (poison: what the pass leaves alone stays visible)
+    struct Push {
+        std::uint32_t records[2], list[2], jobs[2], out[2];
+        std::uint32_t countsBase, argsBase, slotCount, pad;
+    } push{};
+    const auto rr = records->shaderRef(0), lr = list->shaderRef(0), jr = jobs->shaderRef(0), wr = out->shaderRefRw(0);
+    push.records[0] = rr[0], push.records[1] = rr[1], push.list[0] = lr[0], push.list[1] = lr[1], push.jobs[0] = jr[0], push.jobs[1] = jr[1], push.out[0] = wr[0], push.out[1] = wr[1];
+    push.countsBase = kCountsBase;
+    push.argsBase = kArgsBase;
+    push.slotCount = kSlots;
+    dev.submitAndWait([&](rhi::CommandList& cl) {
+        cl.copyBuffer(*out, 0, *fill, 0, outBytes);
+        cl.bufferBarrier(*out, rhi::BufferAccess::ShaderWrite);
+        cl.bindPipeline(*pipeline);
+        cl.setPushConstants(&push, sizeof(push));
+        cl.dispatch(kBuckets, 1, 1);
+        cl.bufferBarrier(*out, rhi::BufferAccess::IndirectRead);
+        cl.copyBuffer(*readback, 0, *out, 0, outBytes);
+        cl.bufferBarrier(*out, rhi::BufferAccess::IndirectRead);
+    });
+    const auto* got = static_cast<const std::uint32_t*>(readback->map());
+    std::uint32_t wrongCounts = 0, wrongRecords = 0, comparedRecords = 0;
+    for (std::uint32_t b = 0; b < kBuckets; ++b) {
+        std::vector<std::uint32_t> want;  // 5 words per valid entry
+        for (std::uint32_t k = 0; k < sizes[b]; ++k) {
+            const std::uint32_t pos = firstEntry[b] + k, slot = entries[pos].slot;
+            if (slot >= kSlots || slot == 7 || slot == 8) continue;
+            want.insert(want.end(), {1000u + slot, 1u, 77u * slot, static_cast<std::uint32_t>(-static_cast<std::int32_t>(slot)), pos});
+        }
+        const std::uint32_t n = static_cast<std::uint32_t>(want.size() / 5);
+        const std::uint32_t haveCount = got[kCountsBase / 4 + kFirstCount + b];
+        if (haveCount != n) {
+            ++wrongCounts;
+            std::printf("    bucket %u: count %u (want %u)\n", b, haveCount, n);
+            continue;
+        }
+        for (std::uint32_t k = 0; k < n; ++k) {
+            ++comparedRecords;
+            const std::uint32_t* a = got + kArgsBase / 4 + static_cast<std::size_t>(kFirstArg + firstEntry[b] + k) * 5;
+            if (std::memcmp(a, &want[static_cast<std::size_t>(k) * 5], 20) != 0) {
+                if (wrongRecords++ < 4) std::printf("    bucket %u record %u: {%u, %u, %u, %d, %u} want {%u, %u, %u, %d, %u}\n", b, k, a[0], a[1], a[2], static_cast<std::int32_t>(a[3]), a[4], want[k * 5], want[k * 5 + 1], want[k * 5 + 2], static_cast<std::int32_t>(want[k * 5 + 3]), want[k * 5 + 4]);
+            }
+        }
+        // (one past the last record of the bucket is not ours: the next bucket's range starts after the bucket's own entries, so it still holds the poison)
+        if (n < sizes[b]) {
+            const std::uint32_t* a = got + kArgsBase / 4 + static_cast<std::size_t>(kFirstArg + firstEntry[b] + n) * 5;
+            check(a[0] == 0xABABABABu, std::format("bucket {}: the pass wrote beyond its count", b));
+        }
+    }
+    check(wrongCounts == 0, std::format("{} bucket count(s) differ", wrongCounts));
+    check(wrongRecords == 0, std::format("{} of {} argument record(s) differ", wrongRecords, comparedRecords));
+    check(got[0] == 0xABABABABu && got[kCountsBase / 4 - 1] == 0xABABABABu && got[kCountsBase / 4 + kFirstCount + kBuckets] == 0xABABABABu, "counts written outside the buckets' words");
+    report(dev, name, before);
+}
+
 // the pixel of src/vk/raytracing.cpp selfTest's scene (rt_query.comp's encoding); `ambiguous`: on a triangle edge (either result is valid)
 std::uint32_t expectedRay(std::uint32_t px, std::uint32_t py, std::uint32_t size, bool& ambiguous, float dz = 0.0f) {
     constexpr std::uint32_t kIndexA = 7, kIndexB = 9;
@@ -1134,10 +1259,13 @@ void testTextureOps(rhi::Device& dev, const Shaders& sh) {
     report(dev, "texture ops", before);
 }
 
+bool g_syncValidation = false;
+
 bool runBackend(rhi::Backend backend, bool validation, const Shaders& sh) {
     rhi::DeviceDesc dd;
     dd.backend = backend;
     dd.validation = validation;
+    dd.syncValidation = g_syncValidation;
     dd.name = "rvk_rhitest";
     dd.rayTracing = true;
     auto dev = backend == rhi::Backend::Vulkan ? rhi::createVulkanDevice(dd) : rhi::createD3D12Device(dd);
@@ -1320,6 +1448,7 @@ bool runBackend(rhi::Backend backend, bool validation, const Shaders& sh) {
     testBuffers(*dev, sh);
     testVertex(*dev, sh);
     testIndirectPull(*dev, sh);
+    testOwnedCompact(*dev, sh);
     testRayQuery(*dev, sh);
     testAccelOps(*dev, sh);
     testTextureOps(*dev, sh);
@@ -1387,6 +1516,7 @@ int main(int argc, char** argv) {
         } else if (a == "--vulkan") vulkan = true;
         else if (a == "--d3d12") d3d12 = true;
         else if (a == "--validation") validation = true;
+        else if (a == "--sync-validation") validation = g_syncValidation = true;
         else if (a == "--device-lost") deviceLost = true;
     }
     if (deviceLost) {
@@ -1413,6 +1543,7 @@ int main(int argc, char** argv) {
     compileBoth("test/rhi_vtx.frag.hlsl", "PSMain", "ps_6_6", sh.vtxPs);
     compileBoth("test/rhi_ind.comp.hlsl", "CSMain", "cs_6_6", sh.indCs);
     compileBoth("test/rhi_ind.vert.hlsl", "VSMain", "vs_6_6", sh.indVs);
+    compileBoth("gpuscene/owned_compact.comp.hlsl", "CSMain", "cs_6_6", sh.compact);
     compileBoth("test/rhi_rt.comp.hlsl", "CSMain", "cs_6_6", sh.rt);
     compileBoth("test/rhi_store8.comp.hlsl", "CSMain", "cs_6_6", sh.store8);
     if (vulkan) runBackend(rhi::Backend::Vulkan, validation, sh);

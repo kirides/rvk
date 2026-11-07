@@ -22,6 +22,7 @@
     // the pool moves to / stays in a read state before a build / a dispatch (`force`: even inside a compute pass that said it writes)
     void captureForRead(ID3D12GraphicsCommandList* list, bool force);
     Buffer& ringBuffer(const RingAlloc& alloc) override { return *reinterpret_cast<D3DBuffer*>(alloc.buffer); }
+    std::uint64_t packetHandle(Buffer& buffer) const override { return reinterpret_cast<std::uint64_t>(&static_cast<D3DBuffer&>(buffer)); }
     std::uint64_t completedFrame() const override { return frameFence_ ? frameFence_->GetCompletedValue() : 0; }
     void waitFrame(std::uint64_t value) override;
     void retire(std::function<void()> fn) override;

@@ -967,7 +967,7 @@ void D3D12DeviceImpl::applyPacket(RecState& rs, ID3D12GraphicsCommandList* cmd, 
         rs.viEntry = e;
     }
     cmd->SetGraphicsRoot32BitConstants(0, sizeof(p.push) / 4, &p.push, 0);
-    if (p.op == DrawPacket::Op::DrawIndexed || p.op == DrawPacket::Op::DrawIndexedIndirect) {
+    if (p.op == DrawPacket::Op::DrawIndexed || p.op == DrawPacket::Op::DrawIndexedIndirect || p.op == DrawPacket::Op::DrawIndexedIndirectCount) {
         if (!rs.ibValid || rs.ib != p.indexBuffer || rs.ibOffset != p.indexOffset || rs.ib32 != p.index32) {
             auto* b = reinterpret_cast<D3DBuffer*>(p.indexBuffer);
             D3D12_INDEX_BUFFER_VIEW v{b->gpuAddress() + p.indexOffset, static_cast<UINT>(std::min<std::uint64_t>(b->desc().size - p.indexOffset, 0xFFFFFFFFull)),
@@ -978,7 +978,11 @@ void D3D12DeviceImpl::applyPacket(RecState& rs, ID3D12GraphicsCommandList* cmd, 
             rs.ib32 = p.index32;
             rs.ibValid = true;
         }
-        if (p.op == DrawPacket::Op::DrawIndexedIndirect) {
+        if (p.op == DrawPacket::Op::DrawIndexedIndirectCount) {
+            // F2c-4c: GPU-compacted arguments + count (one device buffer in the INDIRECT_ARGUMENT state), the count at `first`
+            ID3D12Resource* res = reinterpret_cast<D3DBuffer*>(p.indirectBuffer)->resource();
+            if (sceneSig_ != nullptr) cmd->ExecuteIndirect(sceneSig_, p.count, res, p.indirectOffset, res, p.first);
+        } else if (p.op == DrawPacket::Op::DrawIndexedIndirect) {
             // F2b-1 scene draws: p.count records of VkDrawIndexedIndirectCommand layout in a ring block (an upload heap: readable as an indirect argument)
             if (sceneSig_ != nullptr) cmd->ExecuteIndirect(sceneSig_, p.count, reinterpret_cast<D3DBuffer*>(p.indirectBuffer)->resource(), p.indirectOffset, nullptr, 0);
         } else {

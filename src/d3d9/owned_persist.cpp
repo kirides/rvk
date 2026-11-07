@@ -11,6 +11,8 @@
 
 #include "d3d9/device.h"
 #include "d3d9/scene_hash.h"
+#include "gpuscene/owned_compact.h"
+#include "gpuscene/verify.h"
 
 namespace rvk::d3d9 {
 
@@ -140,6 +142,7 @@ std::uint64_t Device::ownedDrawSig(const CachedDraw& c, const void* const* strea
                           (t == nullptr || (!t->pending_ && t->layout() == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && t->bindlessSlot() == c.v.packTexSlot));
         h = hmix(h, same ? 0xfeedfaceull : (0x100000000ull | packWord()));
     }
+    h = hmix(hmix(h, c.packet.count | static_cast<std::uint64_t>(c.packet.first) << 32), static_cast<std::uint32_t>(c.packet.vertexOffset));  // (the record's args)
     static constexpr std::uint32_t kStage[4][2] = {{0, 2}, {0, 3}, {1, 2}, {1, 3}};
     for (const auto& sw : kStage) {
         const OwnedWindows::Win& w = ow.w[sw[0]][sw[1]];
@@ -190,6 +193,11 @@ int Device::ownedBuild(const CachedDraw& c, const SceneView& sv, const OwnedWind
     r.drawId = 0;  // (no shader of the corpus / the variants reads it)
     r.flags = c.packet.push.flags;
     r.c5w = std::bit_cast<std::uint32_t>(c5w);
+    // the indirect arguments the GPU compaction copies (F2c-4c; the CPU path writes the same numbers into the ring block)
+    r.args[0] = c.packet.count;
+    r.args[1] = c.packet.first;
+    r.args[2] = static_cast<std::uint32_t>(c.packet.vertexOffset);
+    r.args[3] = 0;
     out.bucketKey = ownedBucketKey(c, ow.viewSlot);
     return 0;
 }
@@ -426,9 +434,8 @@ bool Device::ownedBeginScope() {
 bool Device::ownedReserve(std::uint32_t maxDraws, OwnedArena& arena) {
     arena = {};
     if (maxDraws == 0) return true;
-    arena.list = game_->allocRing(static_cast<std::uint64_t>(maxDraws) * 8, 16);
-    arena.args = game_->allocRing(static_cast<std::uint64_t>(maxDraws) * rhi::kIndirectStride, 16);
-    if (arena.list.ptr == nullptr || arena.args.ptr == nullptr) {
+    arena.list = game_->allocRing(static_cast<std::uint64_t>(maxDraws) * 8, 16);  // (the argument block of the CPU path is taken in the flush that needs it)
+    if (arena.list.ptr == nullptr) {
         arena = {};
         ++sceneStats_.fbRingFull;
         return false;
@@ -448,6 +455,19 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
         if (it.cd == nullptr || it.slot >= slotCount || shadow[it.slot].draw == 0 || shadow[it.slot].vsWin[2] == 0 || shadow[it.slot].psWin[3] == 0 || it.cd->scenePipeline2 == GamePipeline::None) {
             ++ownedPersistStats.refused;
             return false;
+        }
+    }
+    // F2c-4c: the GPU compaction copies each record's own args: they must be the draw's (the signature covers them; this is the per-item tripwire)
+    gpuscene::OwnedCompact& compact = gpuscene::ownedcompact();
+    bool gpu = compact.usable(*this);
+    if (gpu) {
+        for (const OwnedItem& it : items) {
+            const shader::abi::DrawRecord& r = shadow[it.slot];
+            if (r.args[0] != it.cd->packet.count || r.args[1] != it.cd->packet.first || r.args[2] != static_cast<std::uint32_t>(it.cd->packet.vertexOffset)) {
+                ++compact.stats().argsMismatch;
+                ++ownedPersistStats.refused;
+                return false;
+            }
         }
     }
     syncPhaseRegions();
@@ -499,7 +519,31 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
     static thread_local std::vector<std::uint32_t> fill;
     fill.assign(cursor.begin(), cursor.end() - 1);
     auto* list = static_cast<std::uint32_t*>(arena.list.ptr);
-    auto* args = static_cast<std::uint32_t*>(arena.args.ptr);
+    std::uint32_t* args = nullptr;
+    gpuscene::OwnedCompact::Range range;
+    rhi::RingAlloc jobsBlock;
+    if (gpu) {
+        // (a refusal below = the CPU path for this flush: nothing was written yet)
+        gpu = compact.reserve(*this, n, buckets, range);
+        if (gpu) {
+            jobsBlock = game_->allocRing(static_cast<std::uint64_t>(buckets) * 16, 16);
+            if (jobsBlock.ptr == nullptr) {
+                gpu = false;
+                ++sceneStats_.fbRingFull;
+            }
+        }
+    }
+    static thread_local std::vector<std::uint32_t> posItem;  // (the item at each list position: the check frames' expectation)
+    if (!gpu) {
+        if (arena.args.ptr == nullptr) arena.args = game_->allocRing(static_cast<std::uint64_t>(n) * rhi::kIndirectStride, 16);
+        if (arena.args.ptr == nullptr) {
+            ++sceneStats_.fbRingFull;
+            return false;
+        }
+        args = static_cast<std::uint32_t*>(arena.args.ptr);
+    } else {
+        posItem.resize(n);
+    }
     const std::uint64_t frame = frameValue();
     for (std::uint32_t i = 0; i < n; ++i) {
         const OwnedItem& it = items[i];
@@ -507,11 +551,15 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
         const std::uint32_t j = fill[ownedBucketOf_[i]]++;
         list[2 * j] = it.slot;
         list[2 * j + 1] = viewSlot;
-        args[5 * j + 0] = c.packet.count;
-        args[5 * j + 1] = 1;
-        args[5 * j + 2] = c.packet.first;
-        args[5 * j + 3] = static_cast<std::uint32_t>(c.packet.vertexOffset);
-        args[5 * j + 4] = j;
+        if (!gpu) {
+            args[5 * j + 0] = c.packet.count;
+            args[5 * j + 1] = 1;
+            args[5 * j + 2] = c.packet.first;
+            args[5 * j + 3] = static_cast<std::uint32_t>(c.packet.vertexOffset);
+            args[5 * j + 4] = j;
+        } else {
+            posItem[j] = i;
+        }
         // the bookkeeping of a drawn draw (replayOwned's)
         for (std::uint32_t mask = c.texMask; mask != 0; mask &= mask - 1) c.tex[std::countr_zero(mask)]->lastUseFrame_ = frame;
         if (c.v.giDraw) ++giDrawCount_;
@@ -523,6 +571,37 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
         ++replayStats.replayed;
         ++sceneStats_.replayedSceneDraws;
         ++sceneStats_.candidates;
+    }
+    if (gpu) {
+        // the jobs (first entry, entries, first argument index, count index per bucket) + the check frames' expectation (what the CPU path would have written)
+        auto* jobs = static_cast<std::uint32_t*>(jobsBlock.ptr);
+        gpuscene::OwnedCompact::Job job;
+        job.list = arena.list.ref;
+        job.jobs = jobsBlock.ref;
+        job.items = n;
+        job.buckets = buckets;
+        job.range = range;
+        const bool check = compact.checkThisFrame(*this);
+        std::vector<std::uint32_t> recs;
+        if (check) job.expect.resize(2 * static_cast<std::size_t>(buckets));
+        for (std::uint32_t b = 0; b < buckets; ++b) {
+            jobs[4 * b + 0] = cursor[b];
+            jobs[4 * b + 1] = cursor[b + 1] - cursor[b];
+            jobs[4 * b + 2] = range.firstArg + cursor[b];
+            jobs[4 * b + 3] = range.firstCount + b;
+            if (!check) continue;
+            std::uint32_t want = 0;
+            for (std::uint32_t k = cursor[b]; k < cursor[b + 1]; ++k) {
+                const OwnedItem& it = items[posItem[k]];
+                if (it.cd->packet.count == 0) continue;
+                ++want;
+                recs.insert(recs.end(), {it.cd->packet.count, 1u, it.cd->packet.first, static_cast<std::uint32_t>(it.cd->packet.vertexOffset), k});
+            }
+            job.expect[2 * b] = cursor[b];
+            job.expect[2 * b + 1] = want;
+        }
+        if (check) job.expect.insert(job.expect.end(), recs.begin(), recs.end());
+        compact.queue(*this, std::move(job));
     }
     for (std::uint32_t b = 0; b < buckets; ++b) {
         const CachedDraw& c = *items[ownedBucketStart_[b]].cd;
@@ -537,8 +616,12 @@ bool Device::ownedFlush(const std::vector<OwnedItem>& items, OwnedArena& arena, 
         m.instances = 1;
         m.first = 0;
         m.vertexOffset = 0;
-        m.indirectBuffer = arena.args.buffer;
-        m.indirectOffset = arena.args.offset + static_cast<std::uint64_t>(cursor[b]) * rhi::kIndirectStride;
+        if (gpu) {
+            compact.fillPacket(*this, range, cursor[b], b, count, m);
+        } else {
+            m.indirectBuffer = arena.args.buffer;
+            m.indirectOffset = arena.args.offset + static_cast<std::uint64_t>(cursor[b]) * rhi::kIndirectStride;
+        }
         shader::abi::ScenePush sp{};
         sp.records = recordsRef.bits;
         sp.frame = frameBlock.bits;

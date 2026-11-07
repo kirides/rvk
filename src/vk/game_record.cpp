@@ -442,7 +442,12 @@ void GameRecord::applyPacket(GameRecordState& rs, VkCommandBuffer cmd, VkPipelin
         rs.lastDyn = p.dyn;
     }
     vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(p.push), &p.push);
-    if (p.op == rhi::DrawPacket::Op::DrawIndexedIndirect) {
+    if (p.op == rhi::DrawPacket::Op::DrawIndexedIndirectCount) {
+        // F2c-4c: GPU-compacted arguments, the count in the same buffer at `first` (frame-ownership.md 7.32)
+        bindIndexBuffer(rs, cmd, reinterpret_cast<VkBuffer>(p.indexBuffer), p.indexOffset, p.index32);
+        const VkBuffer ib = reinterpret_cast<VkBuffer>(p.indirectBuffer);
+        vkCmdDrawIndexedIndirectCount(cmd, ib, p.indirectOffset, ib, p.first, p.count, rhi::kIndirectStride);
+    } else if (p.op == rhi::DrawPacket::Op::DrawIndexedIndirect) {
         // F2b-1 scene draws: p.count records in a ring block (frame-ownership.md 7.11)
         bindIndexBuffer(rs, cmd, reinterpret_cast<VkBuffer>(p.indexBuffer), p.indexOffset, p.index32);
         vkCmdDrawIndexedIndirect(cmd, reinterpret_cast<VkBuffer>(p.indirectBuffer), p.indirectOffset, p.count, rhi::kIndirectStride);

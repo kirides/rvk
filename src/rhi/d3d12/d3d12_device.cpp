@@ -1594,7 +1594,9 @@ public:
     void bufferBarrier(Buffer& buffer, BufferAccess next) override {
         D3DBuffer& b = static_cast<D3DBuffer&>(buffer);
         if (b.desc().memory != Memory::Device) return;  // upload / readback heaps keep their one state
-        const D3D12_RESOURCE_STATES to = next == BufferAccess::ShaderWrite ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;
+        const D3D12_RESOURCE_STATES to = next == BufferAccess::ShaderWrite ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+                                         : next == BufferAccess::IndirectRead ? D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT
+                                                                              : D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;
         D3D12_RESOURCE_BARRIER rb{};
         if (b.state == to) {
             if (to != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) return;

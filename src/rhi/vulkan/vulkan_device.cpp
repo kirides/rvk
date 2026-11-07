@@ -393,7 +393,8 @@ public:
 
     bool create(const DeviceDesc& desc) {
         vk::ContextOptions o;
-        o.validation = desc.validation;
+        o.validation = desc.validation || desc.syncValidation;
+        o.syncValidation = desc.syncValidation;
         o.adapter = desc.adapter;
         o.appName = desc.name;
         o.allowRayTracing = desc.rayTracing;
@@ -618,6 +619,7 @@ public:
     }
     RingAlloc allocCapture(std::uint64_t size, std::uint64_t alignment) override { return frames_.allocate(size, alignment, 0); }
     Buffer& ringBuffer(const RingAlloc& alloc) override;
+    std::uint64_t packetHandle(Buffer& buffer) const override;
     std::uint64_t completedFrame() const override { return frames_.completedValue(); }
     void waitFrame(std::uint64_t value) override { frames_.waitFor(value); }
     void retire(std::function<void()> fn) override { frames_.retire(std::move(fn)); }
@@ -1776,6 +1778,8 @@ void VkCommandListImpl::compactBlas(AccelerationStructure& dst, AccelerationStru
 }
 
 void* VkDeviceImpl::nativeCommandBuffer(CommandList& list) { return static_cast<VkCommandListImpl&>(list).cmd(); }
+
+std::uint64_t VkDeviceImpl::packetHandle(Buffer& buffer) const { return reinterpret_cast<std::uint64_t>(static_cast<VkBufferImpl&>(buffer).buffer()); }
 
 Buffer& VkDeviceImpl::ringBuffer(const RingAlloc& alloc) {
     const std::lock_guard lock(wrapMutex_);

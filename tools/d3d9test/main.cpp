@@ -26,6 +26,7 @@
 #include "d3d9/device.h"
 #include "d3d9/fvf.h"
 #include "gpuscene/draw_record_table.h"
+#include "gpuscene/owned_compact.h"
 #include "gpuscene/view_table.h"
 #include "rhi/d3d_formats.h"
 
@@ -1518,9 +1519,19 @@ mov oC0, r0
         ++g_failures;
         return;
     }
-    // (every frame's table flush goes into the upload list that runs before the frame's draws)
+    // F2c-4c: the draws below go through the GPU compaction (the compute pass + DrawIndexedIndirectCount) when the device offers it; the pipeline is built in the background
+    gpuscene::OwnedCompact& compact = gpuscene::ownedcompact();
+    compact.setCheckEvery(1);
+    bool gpuCompact = false;
+    for (int i = 0; i < 1200 && !gpuCompact; ++i) {
+        gpuCompact = compact.usable(dev);
+        if (!gpuCompact) Sleep(50);
+    }
+    if (!gpuCompact) std::printf("  owned persistent: GPU compaction not available here (the CPU-written arguments are tested)\n");
+    // (every frame's table flush goes into the upload list that runs before the frame's draws; the compaction's dispatches follow it)
     const auto end = [&](const char* name) {
         tab.flush(dev);
+        compact.flush(dev);
         dev.setSceneIssue(false);
         dev.phases().pop();
         return capture(dev, name);
@@ -1793,6 +1804,22 @@ mov oC0, r0
         std::printf("  owned bulk observers: %llu flushes, %llu records, %llu entered, %llu left\n", static_cast<unsigned long long>(dev.ownedBulkStats.flushes), static_cast<unsigned long long>(dev.ownedBulkStats.records),
                     static_cast<unsigned long long>(dev.ownedBulkStats.entered), static_cast<unsigned long long>(dev.ownedBulkStats.left));
     }
+    // F2c-4c: the GPU compaction made the arguments of every flush above, and the check frames' read-backs (every frame here) found them equal to the CPU's
+    if (gpuCompact) {
+        for (int i = 0; i < 4; ++i) {
+            begin();
+            end("ownedp_collect");  // (frames with no draws: the earlier frames' read-backs are collected once they completed)
+        }
+        const gpuscene::OwnedCompact::Stats& cs = compact.stats();
+        std::printf("  owned compaction: %llu flushes / %llu items / %llu buckets / %llu dispatches, CPU fallbacks: full %llu, args differ %llu; checks %llu (%llu buckets, %llu records) DIFFERING %llu\n",
+                    static_cast<unsigned long long>(cs.flushes), static_cast<unsigned long long>(cs.items), static_cast<unsigned long long>(cs.buckets), static_cast<unsigned long long>(cs.dispatches),
+                    static_cast<unsigned long long>(cs.cpuFull), static_cast<unsigned long long>(cs.argsMismatch), static_cast<unsigned long long>(cs.checks), static_cast<unsigned long long>(cs.checkedBuckets),
+                    static_cast<unsigned long long>(cs.checkedRecords), static_cast<unsigned long long>(cs.differing));
+        if (cs.dispatches == 0 || cs.flushes == 0 || cs.checks == 0 || cs.checkedRecords == 0 || cs.differing != 0 || cs.countDiffering != 0) {
+            std::printf("  FAIL owned compaction: no dispatches / no verified records / the GPU's arguments differ from the CPU's\n");
+            ++g_failures;
+        }
+    }
     std::printf("  owned persistent: %llu derivations, %llu refused, %llu buckets / %llu indirect packets / %llu items; %llu slot writes, %llu unchanged, %llu allocated, %llu released, %llu reused\n",
                 static_cast<unsigned long long>(dev.ownedPersistStats.derived), static_cast<unsigned long long>(dev.ownedPersistStats.refused), static_cast<unsigned long long>(dev.ownedPersistStats.buckets),
                 static_cast<unsigned long long>(dev.ownedPersistStats.packets), static_cast<unsigned long long>(dev.ownedPersistStats.items), static_cast<unsigned long long>(tab.stats().writes),
@@ -1802,6 +1829,7 @@ mov oC0, r0
         if (s != gpuscene::kNoSlot) tab.release(s);
     }
     tab.setActive(false);
+    compact.destroy();
     tab.destroy();
     dev.setSceneViews(false);
     dev.setSceneDraws(false, 0);
@@ -2514,11 +2542,12 @@ int presentTest(bool vsync) {
 
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
-    bool validation = true;
+    bool validation = true, syncValidation = false;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--no-validation") validation = false;
         if (a == "--validation") validation = true;
+        if (a == "--sync-validation") validation = syncValidation = true;
         if (a == "--backend" && i + 1 < argc) {
             const std::string b = argv[++i];
             if (b == "vulkan") g_backend = rhi::Backend::Vulkan;
@@ -2541,6 +2570,7 @@ int main(int argc, char** argv) {
     o.width = o.height = kSize;
     o.depthFormat = rhi::d3dfmt::D24S8;
     o.validation = validation;
+    o.syncValidation = syncValidation;
     o.offscreen = true;
     if (!dev.create(o)) {
         return 2;

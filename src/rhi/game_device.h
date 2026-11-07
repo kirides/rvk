@@ -236,7 +236,9 @@ struct ClearOp {
 struct DrawPacket {
     // Clear: chunk-only (`first` = the chunk's ClearOp index). DrawIndexedIndirect (frame-ownership.md 7.11, F2b-1): `count` indexed draws from the
     // VkDrawIndexedIndirectCommand records at indirectBuffer + indirectOffset (stride kIndirectStride), index binding and push block as DrawIndexed
-    enum class Op : std::uint8_t { Draw, DrawIndexed, Clear, DrawIndexedIndirect };
+    // DrawIndexedIndirectCount (F2c-4c, frame-ownership.md 7.32): up to `count` records at indirectBuffer + indirectOffset, the number that run = the uint32 at
+    // indirectBuffer + `first` (a GPU-compacted block; the same buffer holds arguments and count; needs DeviceCaps::drawIndirectCount)
+    enum class Op : std::uint8_t { Draw, DrawIndexed, Clear, DrawIndexedIndirect, DrawIndexedIndirectCount };
     Op op = Op::Draw;
     bool batchable = false;
     bool index32 = false;
@@ -526,6 +528,9 @@ public:
     std::uint64_t ringBytes() const { return ring_.bytes; }
     // The ring block as an rhi::Buffer (copy source / destination, build input): the chunk it lies in, owned by the device (valid until the device is destroyed)
     virtual Buffer& ringBuffer(const RingAlloc& alloc) = 0;
+    // The handle of any rhi Buffer in a DrawPacket's indirectBuffer (what RingAlloc::buffer is for ring blocks): the buffer needs INDIRECT usage and, on DX12, to be in
+    // the INDIRECT_ARGUMENT state (bufferBarrier IndirectRead) when the packet is recorded
+    virtual std::uint64_t packetHandle(Buffer& buffer) const = 0;
     // Memory that vertex shaders write (the vertex captures: rt skin outputs, object motion, positions of the RT scene's characters) and later passes read.
     // Vulkan: the ring; D3D12: a device-local UAV pool reset per frame (the CPU pointer may then be null: only `ref` / `gpuVa` are valid).
     virtual RingAlloc allocCapture(std::uint64_t size, std::uint64_t alignment = 16) = 0;
