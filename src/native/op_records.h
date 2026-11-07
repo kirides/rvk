@@ -22,6 +22,7 @@
 
 #include "d3d9/device.h"
 #include "d3d9/owned_windows.h"
+#include "gpuscene/bone_table.h"
 #include "gpuscene/draw_record_table.h"
 #include "native/static_ops_retained.h"
 
@@ -215,6 +216,11 @@ struct OpRecord {
     // lighting entries key on it): stale once the table freed / reused the slot (idle sweep).
     std::vector<ret::ReadRec> watch;
     std::uint32_t illumSlot = 0xffffffffu;
+    // F6-1 (frame-ownership.md 7.40): a skinned actor part's record. `actorKey` = the bone table key of its image (wrapper, primitive, the fade the op's list uses), `actorBones` the
+    // primitive's bone count (the image holds 2 + 3 bones registers)
+    bool actor = false;
+    gpuscene::BoneKey actorKey;
+    std::uint32_t actorBones = 0;
     bool ownable = false;  // the touches / stream 3 lists were collected while this record was built (a record built on a frame that did not collect them is rebuilt once)
     std::string name;                              // diagnostics: mesh / material name
     std::uint64_t builtFrame = 0;
@@ -288,6 +294,7 @@ struct Stats {
     std::uint64_t byField[kFieldCount] = {};          // ... by class (a draw counts in every class that differs)
     std::uint64_t clean = 0;
     std::uint64_t alphaRefCarry = 0, c5wCarry = 0;    // ignored differences: the device's carry-over where the shader reads nothing
+    std::uint64_t captureSkipped = 0;                 // draws composed with a capture variant (not compared: no scene form by design)
     std::uint64_t viewDup = 0;                        // view-block windows at another slot with the same registers (the dedupe search window)
     std::uint64_t auditChecked = 0, auditDisagree = 0, auditDisagreeDiff = 0, auditCaught = 0;
     std::uint64_t auditBy[kAuditCount] = {};
@@ -300,7 +307,7 @@ struct Stats {
         derived += o.derived; compared += o.compared; differing += o.differing; clean += o.clean;
         for (std::size_t i = 0; i < kDeriveWhyCount; ++i) refused[i] += o.refused[i];
         for (std::size_t i = 0; i < kFieldCount; ++i) byField[i] += o.byField[i];
-        alphaRefCarry += o.alphaRefCarry; c5wCarry += o.c5wCarry; viewDup += o.viewDup;
+        alphaRefCarry += o.alphaRefCarry; c5wCarry += o.c5wCarry; viewDup += o.viewDup; captureSkipped += o.captureSkipped;
         auditChecked += o.auditChecked; auditDisagree += o.auditDisagree; auditDisagreeDiff += o.auditDisagreeDiff; auditCaught += o.auditCaught;
         for (std::size_t i = 0; i < kAuditCount; ++i) auditBy[i] += o.auditBy[i];
         buildNs += o.buildNs; deriveNs += o.deriveNs; deriveCoreNs += o.deriveCoreNs; stampNs += o.stampNs; auditNs += o.auditNs; builds += o.builds; derives += o.derives;

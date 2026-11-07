@@ -1274,9 +1274,30 @@ void StaticOps::setOwnedFor(const sc::DrawDesc& d) {
         const bool staticGroup = g_ == &groups_[static_cast<std::size_t>(Group::Static)] ||
                                  (ownedShadows_ && !ownedShadowsTripped_ && viewKind_ == ViewKind::Cascade && g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)]);
         const bool staticMesh = op_ != nullptr && staticGroup && op_->kind == OpKind::Mesh && op_->entity != nullptr && !inNonOp_;
+        // F6-1 (7.40): a skinned actor draw of the main view (the Actors group) or a cascade (with owned_shadows): VS window 1 from the view block, VS window 2 from the bone table
+        const bool actorDraw = ownedActorsOn() && op_ != nullptr && op_->kind == OpKind::Animation && !inNonOp_ &&
+                               (g_ == &groups_[static_cast<std::size_t>(Group::Actors)] ||
+                                (ownedShadowsOn() && viewKind_ == ViewKind::Cascade && g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)]));
         bool instanced = false;
         for (const auto& s : d.streams) instanced = instanced || (s.buffer != nullptr && s.freq != 1);
-        if (!staticMesh) {
+        if (actorDraw && !instanced) {
+            d3d9::OwnedWindows::Win bw;
+            bool served = false;
+            actorServeComposed(d, bw, served);
+            if (served) {
+                vs1 = true;
+                ++os.vs1Offered;
+                const bool verifyDraw = gpuscene::verifyFrame();
+                for (std::uint32_t r = 12; r < 31 && vs1 && verifyDraw; ++r) {
+                    if ((d.vsSet[0] >> r & 1u) != 0 && std::memcmp(d.vsF[r], mirror_.adminVs[r], 16) != 0) vs1 = false;
+                }
+                if (!vs1) ++os.vs1Differs;
+                vs1Composed = static_cast<std::uint32_t>((d.vsSet[0] >> 12) & ((1u << 19) - 1u));
+                ownedWin_.w[0][2] = bw;
+            } else {
+                ++os.notCandidate;
+            }
+        } else if (!staticMesh) {
             ++os.notCandidate;
             vs1Regs = mirror_.adminVs + 12;
         } else if (instanced) {
@@ -2580,7 +2601,8 @@ void StaticOps::issue() {
     // packet retention: static meshes and trees of the main view (the groups whose draws repeat every frame)
     // (stage 4: the shadow views' z ops too; the same entity is drawn into several cascades / maps, so the key carries the view)
     const bool cacheOn = packetMode_ != 0 && op_ != nullptr && !inNonOp_ && !tagOverride_ &&
-                         ((viewKind_ == ViewKind::Main && (g_ == &groups_[static_cast<std::size_t>(Group::Static)] || g_ == &groups_[static_cast<std::size_t>(Group::Trees)])) ||
+                         ((viewKind_ == ViewKind::Main && (g_ == &groups_[static_cast<std::size_t>(Group::Static)] || g_ == &groups_[static_cast<std::size_t>(Group::Trees)] ||
+                                           (ownedActorsOn() && g_ == &groups_[static_cast<std::size_t>(Group::Actors)]))) ||
                           g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)]);
     const std::uint64_t viewKey = (static_cast<std::uint64_t>(viewKind_) << 32) ^ (static_cast<std::uint64_t>(static_cast<std::uint32_t>(cascade_)) << 36) ^
                                   (reinterpret_cast<std::uintptr_t>(shadowMap_) * 0xD6E8FEB86659FD93ull);
@@ -2605,7 +2627,8 @@ void StaticOps::issue() {
     const bool owned = ownedWindows_ && gpuscene::windowtables().active();
     // F2b-1: the main view's static draws (z pre-pass + solid ops) are recorded as scene draws by the device
     // (F3-1: the cascades' ops too while native.owned_shadows is on: their retained draws are the ones the owned path replays)
-    const bool sceneIssue = sceneDraws_ && ((viewKind_ == ViewKind::Main && (g_ == &groups_[static_cast<std::size_t>(Group::Static)] || bbSceneIssue() || treeSceneIssue())) ||
+    const bool sceneIssue = sceneDraws_ && ((viewKind_ == ViewKind::Main && (g_ == &groups_[static_cast<std::size_t>(Group::Static)] || bbSceneIssue() || treeSceneIssue() ||
+                                                                                    (ownedActorsOn() && g_ == &groups_[static_cast<std::size_t>(Group::Actors)]))) ||
                                             (ownedShadows_ && !ownedShadowsTripped_ && viewKind_ == ViewKind::Cascade && g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)]));
     dev_.setSceneIssue(sceneIssue);
     const bool recOn = ownedRecords_ && recs_ && recs_->active && !inNonOp_ && op_ != nullptr && op_ == recs_->op && recs_->probes.size() == drawCount_;

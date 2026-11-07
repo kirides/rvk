@@ -12,7 +12,7 @@
 namespace rvk::d3d9 {
 
 struct OwnedWindows {
-    enum class Kind : std::uint8_t { None, Material, View, Lighting, Object };
+    enum class Kind : std::uint8_t { None, Material, View, Lighting, Object, Bones };
     // why a window the caller could have owned is not (device statistics): 0 owned / not asked, 1 switch material, 2 other
     enum Why : std::uint8_t { WhyNone = 0, WhySwitch = 1, WhyOther = 2 };
     struct Win {
@@ -47,6 +47,7 @@ struct OwnedStats {
     std::uint64_t view1 = 0;                      // VS window 1 (c12..c30) served from a view block (F2c-1, native.owned_objects)
     std::uint64_t shortVs1 = 0, shortVs2 = 0;     // of fallbackShort: VS window 1 / 2 images shorter than the shader reads (instanced draws: VS window 2)
     std::uint64_t object = 0;                     // VS window 2 (c31..c35) served from the object table (F2c-1)
+    std::uint64_t bones = 0;                      // VS window 2 (c31..c231) served from the bone table (F6-1, owned actors)
     std::uint64_t uploaded = 0, reused = 0;       // the other windows of those draws: written to the ring / the cached ring block reused
     std::uint64_t fallbackSwitch = 0, fallbackOther = 0, fallbackShort = 0;  // windows the caller offered no image for / an image too short for the shader
     std::uint64_t verified = 0, mismatches = 0, uncomposedDiffer = 0;   // windows compared with the register file (debug.split_verify), mismatching

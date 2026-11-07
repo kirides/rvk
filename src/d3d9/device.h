@@ -917,6 +917,8 @@ public:
     void setSceneIssue(bool on) { sceneIssue_ = on; }
     // F3-1 (frame-ownership.md 7.36, native.owned_shadows): the sun cascades' static mesh z draws (Shadow / ShadowDepth) get their scene forms too (v1 and the v2 form of the owned path)
     void setSceneShadows(bool on) { if (on != sceneShadows_) ++variantEpoch_; sceneShadows_ = on; }
+    // F6-1 (frame-ownership.md 7.40, native.owned_actors): the skinned actors' z / solid draws of the main view and z draws of the cascades get their scene forms too
+    void setSceneActors(bool on) { if (on != sceneActors_) ++variantEpoch_; sceneActors_ = on; }
     void setSceneBillboards(bool on) { if (on != sceneBb_) ++variantEpoch_; sceneBb_ = on; }  // F4-1: the tree billboards' opaque draws are batchable scene draws too
     void setSceneFaultInject(bool on) { sceneFaultInject_ = on; }  // tests: every scene packet looks like it has a null address (the guard must refuse it)
     bool sceneDrawsActive() const { return sceneDrawsOn_ && sceneAvail_; }
@@ -1077,6 +1079,7 @@ public:
     struct SceneView {
         bool valid = false;  // the probe: toScenePacket ran for the draw; a derivation: it was produced
         bool scene = false;  // the draw is (to be) a scene draw
+        bool capture = false;  // (probe) the draw went with a capture variant (an observer asked for the vertex shader's outputs): it is no scene draw by design
         GamePipeline pipeline = GamePipeline::None;
         std::uint64_t viHash = 0, dynHash = 0, indexBuffer = 0, indexOffset = 0;
         std::uint32_t first = 0, count = 0, flags = 0;
@@ -1910,6 +1913,7 @@ private:
     // F2b-1 (scene_draws.cpp)
     bool sceneActive() const { return sceneIssue_ && sceneDrawsOn_ && sceneAvail_; }
     bool sceneShadows_ = false;
+    bool sceneActors_ = false;
     void sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, bool uberTaken, draws::Kind kind, const scene::Phase& phase, bool geomOk);
     // false: an address the scene shader reads is null, the packet stays a normal one. `viewSlot` >= 0: a scene ABI v2 packet (the record carries no view windows, c5w =
     // the bits of the pixel c5.w; the packet's ref stream carries the slot)

@@ -91,6 +91,7 @@ void StaticOps::setOwnedRecords(bool on) {
 
 // the stamp of an op (everything but the view and the material structure, which need the composition)
 bool StaticOps::recStamp(const Op& op, orec::Stamp& st) {
+    if (op.kind == OpKind::Animation) return recStampActor(op, st);  // F6-1
     st = {};
     U8* ctx = static_cast<U8*>(op.raw.context);
     U8* res = ptr(ctx, 0x28);
@@ -170,6 +171,7 @@ std::uint64_t StaticOps::recViewStamp() { return viewStampOf(view_.admin, view_.
 
 // why an op is not in cut 1 (7.12 / 7.14), by reading the same engine fields the composition reads; Excl::Count = eligible
 orec::Excl StaticOps::recExclusion(const Op& op) {
+    if (op.kind == OpKind::Animation) return recExclusionActor(op);  // F6-1
     U8* ctx = static_cast<U8*>(op.raw.context);
     U8* res = ptr(ctx, 0x28);
     U8* entity = ptr(ctx, 0x10);
@@ -247,7 +249,9 @@ void StaticOps::recEnter(const Op& op) {
     // F3-1 (7.36): the cascades' static mesh z ops are recorded too (key.view = 1 + the cascade), while native.owned_shadows is on
     const bool shadowRec = ownedShadows_ && !ownedShadowsTripped_ && viewKind_ == ViewKind::Cascade && ownedKeyOf(viewKind_, cascade_) != 0 &&
                            g_ == &groups_[static_cast<std::size_t>(Group::ShadowViews)] && op.list == List::ZPass;
-    if ((viewKind_ == ViewKind::Main ? g_ != &groups_[static_cast<std::size_t>(Group::Static)] : !shadowRec) || op.kind != OpKind::Mesh || inNonOp_ ||
+    // F6-1 (native.owned_actors): the skinned actors' ops are recorded too (the Actors group in the main view; the cascades' z ops with owned_shadows)
+    const bool actorOp = op.kind == OpKind::Animation && ownedActorsOn();
+    if ((viewKind_ == ViewKind::Main ? g_ != &groups_[static_cast<std::size_t>(actorOp ? Group::Actors : Group::Static)] : !shadowRec) || (op.kind != OpKind::Mesh && !actorOp) || inNonOp_ ||
         (op.list != List::ZPass && op.list != List::Solid)) {
         return;
     }
@@ -295,7 +299,8 @@ void StaticOps::recEnter(const Op& op) {
             }
         } else {
             R.rebuildWhy = d;
-            depNoteCheckFrame(op, rec, d);  // F2e-1: a difference nobody announced = EVENT MISS
+            if (rec.actor) ++actorW_.stampRebuilds;
+            if (!rec.actor) depNoteCheckFrame(op, rec, d);  // F2e-1: a difference nobody announced = EVENT MISS (an actor record has no events: its full stamp is its validity)
         }
     }
     w.stampNs += ns(t0, tnow());
@@ -550,7 +555,11 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
     };
     const std::string cdv = std::format("[cd: gate {} staticOk {} wanted {} giDraw {} drawn {} scenePending {}, ambient from the record {}]", r.cd->v.gate, r.cd->v.staticOk, r.cd->v.wanted, r.cd->v.giDraw,
                                         r.cd->v.drawn, r.cd->v.scenePending, in.ambientLit);
-    if (dv.scene != pv.valid) {
+    if (dv.scene && !pv.valid && pv.capture) {
+        // (the composed draw went with a capture variant: an observer wanted the vertex outputs of this very draw: no scene draw by design, nothing to compare; the owned path refuses
+        // such a draw at its observers' turn and the op is composed)
+        ++w.captureSkipped;
+    } else if (dv.scene != pv.valid) {
         {
             const auto& ss = dev_.sceneStats();
             fail(orec::Field::Scene, std::format("derived {} vs composed {} {} (variant kind {}, failed {}, pending {}, pipeline pending {}, no room {}, ring full {}, null address {}, not batchable {})", dv.scene, pv.valid, cdv,
@@ -604,8 +613,8 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
     if (ownedWindows_ && gpuscene::windowtables().active()) {
         d3d9::OwnedWindows dw;
         gpuscene::materialtable().fillWindows(r.matSlot, r.vsSet.data(), r.psSet.data(), dw);
-        if (ownedObjects_ && gpuscene::objecttable().active() && r.vs1Offered) {
-            if (!gpuscene::objecttable().windowFor(rec.stamp.objSlot, dw.w[0][2])) dw.w[0][2] = d3d9::OwnedWindows::Win{};
+        if (r.vs1Offered && (rec.actor || (ownedObjects_ && gpuscene::objecttable().active()))) {
+            if (!ownedObjWindow(rec, dw.w[0][2])) dw.w[0][2] = d3d9::OwnedWindows::Win{};
         }
         gpuscene::LightingImages& li = gpuscene::lightingimages();
         if (li.active() && r.illumSlot != gpuscene::kNoSlot) {
@@ -655,6 +664,13 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
             }
         }
     }
+    if (rec.actor && k == 0 && op_ != nullptr) {
+        // F6-1: the bone image the composed draws wrote equals one built from the engine's palette now
+        bool differs = false;
+        std::string what;
+        actorVerify(*op_, rec, differs, what);
+        if (differs) fail(orec::Field::Windows, what);
+    }
     bool any = false;
     for (std::size_t f = 0; f < orec::kFieldCount; ++f) {
         if (diff[f]) {
@@ -689,10 +705,27 @@ void StaticOps::recEnd(const Op& op) {
     }
     if (R.auditBad && R.cur != nullptr && R.diffInOp) ++w.auditDisagreeDiff;
     const auto t0 = tnow();
+    // F6-1: an actor record needs every draw's window 2 served from the bone table (the owned draw reads it from there) and the op's inputs readable
+    ActorIn ain;
+    const bool actorRec = op.kind == OpKind::Animation;
+    if (actorRec && (actorCur_.draws != drawCount_ || actorCur_.offered != drawCount_ || actorRead(op, ain, true) != 0)) {
+        ++w.excluded[static_cast<std::size_t>(orec::Excl::NotRetained)];
+        ++actorW_.notOffered;
+        R.map.erase(R.key);
+        R.active = false;
+        w.buildNs += ns(t0, tnow());
+        return;
+    }
     // the packets the draws were issued with (the packet cache's entries: the record keeps its own copy)
     auto rec = std::make_unique<orec::OpRecord>();
     rec->key = R.key;
     rec->stamp = R.stamp;
+    if (actorRec) {
+        rec->actor = true;
+        rec->actorKey = actorKeyOf(op, ain);
+        rec->actorBones = ain.bones;
+        ++actorW_.recordsBuilt;
+    }
     rec->draws.reserve(drawCount_);
     for (std::size_t k = 0; k < drawCount_; ++k) {
         const sc::DrawDesc& d = *draws_[k];
@@ -731,7 +764,7 @@ void StaticOps::recEnd(const Op& op) {
         r.lightHoldsAll = d.lightHoldsAll;
         r.vsSet = d.vsSet;
         r.psSet = d.psSet;
-        r.vs1Offered = ownedObjects_ && op_ != nullptr && op_->entity != nullptr && !(d.streams[0].buffer != nullptr && d.streams[0].freq != 1);
+        r.vs1Offered = actorRec ? true : ownedObjects_ && op_ != nullptr && op_->entity != nullptr && !(d.streams[0].buffer != nullptr && d.streams[0].freq != 1);
         r.tagSubMesh = d.tagSubMesh;
         r.tagMaterial = d.tagMaterial;
         r.tagMeshResource = d.tagMeshResource;
@@ -740,6 +773,11 @@ void StaticOps::recEnd(const Op& op) {
         r.zPass = d.zPass;
         r.passFlags = d.passFlags;
         r.scene = k < R.probes.size() && R.probes[k].valid;
+        if (actorRec) {
+            ++actorW_.drawsBuilt;
+            if (!r.scene) ++actorW_.drawNoScene;
+            if (!r.cd->valid) ++actorW_.drawCdInvalid;
+        }
         rec->matSlots.push_back(d.matSlot);
         for (std::uint32_t m = r.texMask; m != 0; m &= m - 1) {
             const void* t = r.tex[std::countr_zero(m)];
@@ -749,7 +787,7 @@ void StaticOps::recEnd(const Op& op) {
     }
     {
         U8* ctx = static_cast<U8*>(op.raw.context);
-        U8* res = ptr(ctx, 0x28);
+        U8* res = actorRec ? nullptr : ptr(ctx, 0x28);  // (an actor context's +0x28 is no mesh resource: reading through it would fault)
         U8* entity = ptr(ctx, 0x10);
         U8* illumPs = ptr(entity, 0xf8);
         U8* illum = illumPs != nullptr ? illumPs + 0x78 : nullptr;
@@ -768,6 +806,17 @@ void StaticOps::recEnd(const Op& op) {
         rec->lightmapRes = res;
         rec->bindLightmaps = op.list == List::Solid;
         rec->stream3 = op.list == List::ZPass;
+        if (actorRec) {
+            // (an actor part: the anchors name its resource / entity / primitive / material / shader; no lightmaps, no stream 3 switches)
+            rec->anchors[1] = ain.res;
+            rec->anchors[2] = ain.entity;
+            rec->anchors[5] = ain.prim;
+            rec->anchors[6] = ain.material;
+            rec->anchors[7] = ain.shader;
+            rec->lightmapRes = nullptr;
+            rec->bindLightmaps = false;
+            rec->stream3 = false;
+        }
         // F2c-3: what the engine's slot code touches (collected by leanTouch / leanImage / leanStream3 while the record was built)
         rec->touches = leanTouches_;
         for (const orec::DrawRec& r : rec->draws) {
@@ -780,7 +829,7 @@ void StaticOps::recEnd(const Op& op) {
     }
     rec->builtFrame = dev_.stats().frames;
     rec->lastSeen = rec->builtFrame;
-    depRegister(*rec, op);  // F2e-1: the objects the stamp hangs on, the shaders' fingerprints
+    if (!rec->actor) depRegister(*rec, op);  // F2e-1: the objects the stamp hangs on, the shaders' fingerprints (an actor record is verified by its full stamp every frame)
     rec->ownable = recCollect_ || leanCollect_;
     if (ret::gLog == nullptr && !R.readLog.v.empty()) {
         ret::finalize(R.readLog.v);

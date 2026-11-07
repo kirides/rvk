@@ -293,6 +293,13 @@ void HalDevice::applyStaticOps() {
             staticOps_->setOwnedShadows(shadows);
         }
         staticOps_->setOwnedVegetation(on(rs.nativeOwnedVegetation) && renderMode() == RenderMode::Full && staticOps_->active());
+        {
+            // frame-ownership.md 7.41: F6-1 owned skinned actors (the persistent records + scene ABI v2, the bone table; the skinned draws' v2 scene forms are built while it is on)
+            const bool actors = on(rs.nativeOwnedActors) && ownedStatic && !forceV1 && on(rs.nativeOwnedPersistent) && on(rs.nativeOwnedObjects);
+            dev_.setSceneActors(actors);
+            gpuscene::bonetable().setActive(actors);
+            staticOps_->setOwnedActors(actors);
+        }
         staticOps_->setOwnedBillboards(on(rs.nativeOwnedBillboards) && scene && dev_.sceneDrawsActive() && gpuscene::lightingimages().active() && gpuscene::windowtables().active());
     }
     staticOps_->setRetained(frozen::kRetained, frozen::kRetainedGroups, frozen::kRetainedCheck);
@@ -644,7 +651,7 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     frameTap_->setEffectOps(effectOps_.get());
     for (settings::Setting* s : {rs.nativeStaticOps, rs.nativeStaticOpsCompare, rs.nativeSceneOps, rs.nativeSceneOpsCompare, rs.nativeSceneOpsGroups,
                                  rs.nativeCoverage, rs.nativeFrameTap, rs.nativeLean, rs.nativeLeanCheck,
-                                 rs.nativePacketCache, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeOwnedVegetation, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedCheck}) {
+                                 rs.nativePacketCache, rs.nativeOwnedWindows, rs.nativeOwnedObjects, rs.nativeOwnedRecords, rs.nativeOwnedBillboards, rs.nativeOwnedVegetation, rs.nativeSceneDraws, rs.nativeSceneDrawsCheck, rs.nativeOwnedStatic, rs.nativeOwnedPersistent, rs.nativeOwnedShadows, rs.nativeOwnedActors, rs.nativeOwnedCheck}) {
         if (s != nullptr) reg.onChange(*s, [this](const settings::Setting&) { applyStaticOps(); }, this);
     }
     // renderer.mode (Wrapper / Full): like the native.* settings applied by the registry's dispatch before a present, i.e. at a
@@ -1684,6 +1691,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
         gpuscene::drawrecords().flush(dev_);
         gpuscene::clusterstore().flush(dev_);  // F5-1 (before the compaction: F5-2's cull reads the cluster table and the object table's rows)
         gpuscene::objecttable().flush(dev_);
+        gpuscene::bonetable().flush(dev_);  // F6-1: the owned actors' bone images (before the frame's draws, with the other tables)
         gpuscene::ownedcompact().flush(dev_);  // F2c-4c: after the record table's upload (same list, barrier between)
         gpuscene::bbtable().flush(dev_);
     }

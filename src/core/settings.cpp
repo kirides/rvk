@@ -2673,6 +2673,23 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeOwnedActors = &reg.add({
+        .key = "native.owned_actors",
+        .label = "Native frame: owned skinned actors",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode only, needs persistent owned draws and owned objects (frame-ownership.md 7.41, F6-1): the skinned actors' z / solid ops of the main view and z ops of the sun "
+                       "cascades get op records (like the static meshes') and, on the frames where the stamps hold, leave the engine's lists at the view's start and are drawn from "
+                       "persistent DrawRecords by one indirect draw per bucket, without a composition. The per-frame part is one persistent register image per actor part in the bone "
+                       "table (c31 morph weights, c32.w fade, the primitive's bone rows from the engine's palette) that every view of the frame reads as VS window 2. Ops with an "
+                       "overlay flag (the highlighted focus NPC), a fade < 1 or a changed morph target stay composed. native.owned_check frames compare with the composition "
+                       "(DIFFERING / MISS must stay 0). Off = nothing changes. rvk.log `native: owned actors (5 s)`, `native: bone table (5 s)`.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"native.owned_persistent", "true", false, true}, {"native.owned_objects", "true", false, true}},
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeOwnedBillboards = &reg.add({
         .key = "native.owned_billboards",
         .label = "Native frame: owned tree billboards",

@@ -1,6 +1,7 @@
 #include "gpuscene/illumination_table.h"
 #include "gpuscene/draw_record_table.h"
 #include "gpuscene/cluster_table.h"
+#include "gpuscene/bone_table.h"
 
 #include <algorithm>
 #include <chrono>
@@ -156,6 +157,19 @@ void GpuTable<T>::collect(rhi::GameDevice& game, const char* name) {
     }
 }
 
+template <class T>
+void GpuTable<T>::release() {
+    buffer_.reset();
+    ref_ = {};
+    for (Pending& p : pending_) {
+        p.buffer.reset();
+        p.expect.clear();
+        p.busy = false;
+    }
+    dirty_.clear();
+    std::fill(isDirty_.begin(), isDirty_.end(), 0);
+}
+
 template class GpuTable<IllumRecord>;
 template class GpuTable<LightSetRecord>;
 template class GpuTable<PartRecord>;
@@ -165,6 +179,7 @@ template class GpuTable<MaterialRecord>;  // the material table (material_table.
 template class GpuTable<ViewRecord>;      // the view blocks (window_tables.cpp)
 template class GpuTable<ObjectRecord>;    // the object table (object_table.cpp)
 template class GpuTable<shader::abi::ViewBlock2>;  // the view table (view_table.cpp)
+template class GpuTable<BoneRecord>;  // the bone table (bone_table.cpp)
 template class GpuTable<shader::abi::DrawRecord>;  // the persistent draw records / blocks (draw_record_table.cpp)
 template class GpuTable<shader::abi::DrawBlock>;
 template class GpuTable<ZeroBlock>;

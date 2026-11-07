@@ -25,6 +25,7 @@
 #include "d3d9/convert.h"
 #include "d3d9/device.h"
 #include "d3d9/fvf.h"
+#include "gpuscene/bone_table.h"
 #include "gpuscene/cluster_table.h"
 #include "gpuscene/draw_record_table.h"
 #include "gpuscene/owned_compact.h"
@@ -2947,6 +2948,234 @@ mov o2, v2
     }
 }
 
+// F6-1 bone table (frame-ownership.md 7.40) through the device's own path: a vertex shader that skins its quad with the bone rows c33..c35, adds the morph weights c31 and scales
+// by the fade c32.w is drawn normally (reference, registers), then with VS window 2 served from the table's image (kind Bones: the register file holds junk). The pictures must be
+// identical; the same key served twice with the same content writes nothing, with another content in the same frame is refused (the GPU sees one value per frame) and the draw keeps
+// reading the first image, a new frame takes the new image (= the reference of the new registers); a slot released after the idle frames is not handed out again before the
+// frames in flight are done; guards (no wrapper / no image / no registers / too many) serve nothing; the GPU read-backs of the table's uploads must not differ
+void testBoneTable(Fixture& f) {
+    Device& dev = f.dev;
+    static const char* kVsBone = R"(
+vs_3_0
+dcl_position v0
+dcl_color v1
+dcl_texcoord v2
+dcl_position o0
+dcl_color o1
+dcl_texcoord o2
+dp4 o0.x, v0, c33
+dp4 o0.y, v0, c34
+dp4 o0.z, v0, c35
+mov o0.w, v0.w
+mul r0, v1, c32.w
+add o1, r0, c31
+mov o2, v2
+)";
+    const auto vsBone = shaderFrom(dev, kVsBone);
+    if (!vsBone) {
+        std::printf("  FAIL bone table: shader\n");
+        ++g_failures;
+        return;
+    }
+    gpuscene::BoneTable& bt = gpuscene::bonetable();
+    bt.destroy();
+    bt.setActive(true);
+    for (int i = 0; i < 3 && !bt.ready(); ++i) bt.flush(dev);  // (the first flush creates the buffer)
+    if (!bt.ready()) {
+        std::printf("  FAIL bone table: the buffer was not created\n");
+        ++g_failures;
+        bt.setActive(false);
+        return;
+    }
+    struct Img {
+        float weights[3];
+        float fade;
+        float rows[3][4];
+    };
+    const Img imgA = {{0.1f, 0.2f, 0.3f}, 0.5f, {{0.5f, 0, 0, 0}, {0, 0.5f, 0, 0}, {0, 0, 1, 0}}};
+    const Img imgB = {{0.0f, 0.0f, 0.1f}, 1.0f, {{0.25f, 0, 0, 0}, {0, 0.25f, 0, 0}, {0, 0, 1, 0}}};
+    const auto regsOf = [](const Img& i, float (*regs)[4]) {
+        std::memset(regs, 0, sizeof(float) * 4 * gpuscene::kBoneRegs);
+        std::memcpy(regs[0], i.weights, 12);
+        regs[1][3] = i.fade;
+        std::memcpy(regs[2], i.rows, sizeof(i.rows));
+    };
+    static float regsA[gpuscene::kBoneRegs][4], regsB[gpuscene::kBoneRegs][4];
+    regsOf(imgA, regsA);
+    regsOf(imgB, regsB);
+    int wrapperA = 0, wrapperB = 0;
+    const gpuscene::BoneKey keyA{&wrapperA, 0, 0x3f000000u}, keyB{&wrapperB, 3, 0x3f800000u};
+    const auto setRegisters = [&](const Img& i, bool junk) {
+        const float j4[4] = {0.9f, 0.9f, 0.9f, 0.9f};
+        const float c31[4] = {junk ? 0.9f : i.weights[0], junk ? 0.9f : i.weights[1], junk ? 0.9f : i.weights[2], 0.0f};
+        const float c32[4] = {0, 0, 0, junk ? 0.9f : i.fade};
+        dev.setVertexShaderConstantF(31, c31, 1);
+        dev.setVertexShaderConstantF(32, c32, 1);
+        for (std::uint32_t r = 0; r < 3; ++r) dev.setVertexShaderConstantF(33 + r, junk ? j4 : i.rows[r], 1);
+    };
+    const auto render = [&](const Img& i, const d3d9::OwnedWindows::Win* win, const char* name) {
+        f.reset();
+        dev.setVertexShader(vsBone);
+        setRegisters(i, win != nullptr);
+        OwnedWindows ow;
+        if (win != nullptr) {
+            ow.w[0][2] = *win;
+            dev.setOwnedWindows(&ow);
+        }
+        f.draw(quad(-1, -1, 1, 1, 0.5f, 0xFFFFFFFF));
+        dev.setOwnedWindows(nullptr);
+        bt.flush(dev);  // (the table's uploads go into the frame's upload list, which runs before the draws at the submit below)
+        return capture(dev, name);
+    };
+    const auto differ = [](const Pixels& a, const Pixels& b) {
+        std::uint32_t n = 0;
+        for (std::size_t i = 0; i < a.bgra.size() && i < b.bgra.size(); ++i) n += a.bgra[i] != b.bgra[i];
+        return a.bgra.size() != b.bgra.size() ? 0xffffffffu : n;
+    };
+    const Pixels refA = render(imgA, nullptr, "bone_ref_a");
+    const Pixels refB = render(imgB, nullptr, "bone_ref_b");
+    // (the quad's centre: white x 0.5 + the weights (0.1, 0.2, 0.3) = (0.6, 0.7, 0.8); the quad covers a quarter of the target)
+    expect("bone table reference A", refA, 32, 32, 0xFF000000u | (153u << 16) | (178u << 8) | 204u, 3);
+    expect("bone table reference A (outside the quad)", refA, 2, 2, 0xFF000000u, 3);
+    if (differ(refA, refB) == 0) {
+        std::printf("  FAIL bone table: the two images draw the same picture (the shader does not read them)\n");
+        ++g_failures;
+    }
+    // serve A, draw with junk registers: equal to the reference
+    d3d9::OwnedWindows::Win winA, winA2;
+    {
+        const OwnedStats s0 = dev.ownedStats();
+        if (bt.serve(keyA, regsA, 2 + 3, winA) != gpuscene::BoneWhy::Served || winA.kind != OwnedWindows::Kind::Bones || winA.covered != gpuscene::kBoneRegs || winA.base.null() || winA.image == nullptr) {
+            std::printf("  FAIL bone table: the first serve\n");
+            ++g_failures;
+            bt.setActive(false);
+            return;
+        }
+        const Pixels p = render(imgA, &winA, "bone_served_a");
+        const OwnedStats s1 = dev.ownedStats();
+        const std::uint32_t n = differ(refA, p);
+        if (n != 0) {
+            std::printf("  FAIL bone table: %u bytes differ between the register file and the served image\n", n);
+            ++g_failures;
+        }
+        if (s1.bones - s0.bones != 1) {
+            std::printf("  FAIL bone table: the device served %llu bone windows (expected 1)\n", static_cast<unsigned long long>(s1.bones - s0.bones));
+            ++g_failures;
+        }
+    }
+    // (a new frame: the table flushed in the render above) the same content again = nothing written
+    {
+        const gpuscene::BoneStats b0 = bt.stats();
+        const std::uint64_t slots0 = bt.tableStats().slotsUploaded;
+        const bool again = bt.serve(keyA, regsA, 5, winA2) == gpuscene::BoneWhy::Served && winA2.base.bits == winA.base.bits;
+        bt.flush(dev);
+        if (!again || bt.stats().unchanged != b0.unchanged + 1 || bt.stats().rewrites != b0.rewrites || bt.tableStats().slotsUploaded != slots0) {
+            std::printf("  FAIL bone table: the same content again: served %d, unchanged %llu -> %llu, rewrites %llu -> %llu, slots uploaded %llu -> %llu\n", again, static_cast<unsigned long long>(b0.unchanged),
+                        static_cast<unsigned long long>(bt.stats().unchanged), static_cast<unsigned long long>(b0.rewrites), static_cast<unsigned long long>(bt.stats().rewrites),
+                        static_cast<unsigned long long>(slots0), static_cast<unsigned long long>(bt.tableStats().slotsUploaded));
+            ++g_failures;
+        }
+    }
+    // another content in the same frame: refused, the window is left alone and the draw reads the first image
+    {
+        d3d9::OwnedWindows::Win w1, w2, untouched;
+        untouched.kind = OwnedWindows::Kind::Object;  // (a marker: serve must not write `out` on a refusal)
+        w2 = untouched;
+        if (bt.serve(keyA, regsB, 5, w1) != gpuscene::BoneWhy::Served) {
+            std::printf("  FAIL bone table: the new frame's first serve of A with another content\n");
+            ++g_failures;
+        }
+        const gpuscene::BoneStats b0 = bt.stats();
+        const gpuscene::BoneWhy again = bt.serve(keyA, regsA, 5, w2);
+        if (again != gpuscene::BoneWhy::Conflict || w2.kind != OwnedWindows::Kind::Object || bt.stats().why[static_cast<std::size_t>(gpuscene::BoneWhy::Conflict)] !=
+                                                                                                  b0.why[static_cast<std::size_t>(gpuscene::BoneWhy::Conflict)] + 1) {
+            std::printf("  FAIL bone table: another content in the same frame was not refused (%d)\n", static_cast<int>(again));
+            ++g_failures;
+        }
+        // the frame's image is B (the first serve of the frame): the draw with the window = the reference of B
+        const Pixels p = render(imgB, &w1, "bone_served_b");
+        if (const std::uint32_t n = differ(refB, p); n != 0) {
+            std::printf("  FAIL bone table: a new frame's content: %u bytes differ from the reference of the new registers\n", n);
+            ++g_failures;
+        }
+        d3d9::OwnedWindows::Win sw;
+        if (!bt.servedNow(keyA, sw) == false) {
+            // (flushed by the render above: a new frame has begun, nothing is served in it yet)
+            std::printf("  FAIL bone table: servedNow holds in a frame that has not served the key\n");
+            ++g_failures;
+        }
+        if (bt.serve(keyA, regsB, 5, w1) != gpuscene::BoneWhy::Served || !bt.servedNow(keyA, sw) || sw.base.bits != w1.base.bits) {
+            std::printf("  FAIL bone table: servedNow\n");
+            ++g_failures;
+        }
+    }
+    // guards: nothing is served, nothing is written
+    {
+        d3d9::OwnedWindows::Win w;
+        const gpuscene::BoneKey none{nullptr, 0, 0};
+        const bool ok = bt.serve(none, regsA, 5, w) == gpuscene::BoneWhy::NotReady && bt.serve(keyB, nullptr, 5, w) == gpuscene::BoneWhy::NotReady && bt.serve(keyB, regsA, 0, w) == gpuscene::BoneWhy::TooLong &&
+                        bt.serve(keyB, regsA, 1, w) == gpuscene::BoneWhy::TooLong && bt.serve(keyB, regsA, gpuscene::kBoneRegs + 1, w) == gpuscene::BoneWhy::TooLong && w.kind == OwnedWindows::Kind::None &&
+                        !bt.windowFor(keyB, w);
+        if (!ok) {
+            std::printf("  FAIL bone table: the guards (no wrapper / no registers / too few / too many) served something\n");
+            ++g_failures;
+        }
+    }
+    // idle release + deferred reuse: A idles for kIdleFrames, its slot is released, B (served every frame) never gets that slot before the frames in flight are done
+    {
+        d3d9::OwnedWindows::Win a0, b0, b1;
+        bt.windowFor(keyA, a0);
+        for (std::uint64_t i = 0; i < gpuscene::BoneTable::kIdleFrames + 2; ++i) {
+            bt.serve(keyB, regsB, 5, b0);
+            bt.flush(dev);
+        }
+        const bool released = !bt.windowFor(keyA, a0) && bt.stats().released >= 1 && b0.base.bits != 0;
+        if (!released) {
+            std::printf("  FAIL bone table: the idle slot was not released (live slots %zu)\n", bt.liveSlots());
+            ++g_failures;
+        }
+        d3d9::OwnedWindows::Win old;
+        old.base.bits = 0;
+        // (the released slot's base = the first slot's: keyA was the first key served after destroy())
+        const std::uint64_t firstBase = winA.base.bits;
+        const gpuscene::BoneKey keyC{&wrapperA, 7, 0x3f800000u}, keyD{&wrapperA, 8, 0x3f800000u};
+        d3d9::OwnedWindows::Win wc, wd;
+        bool reusedEarly = false;
+        if (bt.serve(keyC, regsA, 5, wc) == gpuscene::BoneWhy::Served) reusedEarly = wc.base.bits == firstBase;
+        if (reusedEarly) {
+            std::printf("  FAIL bone table: a released slot was handed out again before the frames in flight were done\n");
+            ++g_failures;
+        }
+        for (std::uint32_t i = 0; i < rhi::kFramesInFlight + 2; ++i) {
+            bt.serve(keyB, regsB, 5, b1);
+            bt.serve(keyC, regsA, 5, wc);
+            bt.flush(dev);
+        }
+        const bool back = bt.serve(keyD, regsA, 5, wd) == gpuscene::BoneWhy::Served && wd.base.bits == firstBase;
+        if (!back) {
+            std::printf("  FAIL bone table: the released slot never came back after the deferral\n");
+            ++g_failures;
+        }
+    }
+    // the GPU read-backs of everything uploaded (every 240th flush): none differs
+    render(imgB, nullptr, "bone_end");  // (a submit: the frames' read-back copies complete)
+    for (int i = 0; i < 40; ++i) {
+        bt.flush(dev);
+        Sleep(10);
+    }
+    if (bt.tableStats().verifyDone == 0 || bt.tableStats().verifyBad != 0) {
+        std::printf("  FAIL bone table: GPU read-backs %llu, differing slots %llu\n", static_cast<unsigned long long>(bt.tableStats().verifyDone), static_cast<unsigned long long>(bt.tableStats().verifyBad));
+        ++g_failures;
+    }
+    std::printf("  bone table: %llu requests, %llu served (%llu unchanged, %llu rewritten), %llu slots, %llu released, %llu refused, read-backs %llu\n", static_cast<unsigned long long>(bt.stats().requests),
+                static_cast<unsigned long long>(bt.stats().served), static_cast<unsigned long long>(bt.stats().unchanged), static_cast<unsigned long long>(bt.stats().rewrites),
+                static_cast<unsigned long long>(bt.stats().newSlots), static_cast<unsigned long long>(bt.stats().released), static_cast<unsigned long long>(bt.stats().requests - bt.stats().served),
+                static_cast<unsigned long long>(bt.tableStats().verifyDone));
+    bt.setActive(false);
+    dev.setOwnedWindows(nullptr);
+    bt.destroy();
+}
+
 // F4-1 owned submit (frame-ownership.md 7.17) through the device's own path: four quads of a translated vertex shader that reads VS window 0 (c0) and window 2 (c32.w, c33)
 // are drawn normally (reference), captured as retained scene draws, and then submitted with Device::submitOwned from the retained packets alone: the register file holds
 // junk, the windows are persistent images of the caller's (a view-block-like c0 image, a billboard-constants-like c31.. image). The pictures must be identical, the four
@@ -3235,7 +3464,7 @@ int main(int argc, char** argv) {
         {"mip chain stretch rect", testMipChainStretchRect}, {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
         {"read-only lock of a fresh texture", testReadOnlyLockOfFreshTexture},
-        {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned persistent (F2c-4a)", testOwnedPersistent}, {"clusters (F5-1)", testClusters}, {"cluster cull (F5-2)", testClusterCull}, {"owned trees (F4-3)", testOwnedTrees}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
+        {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned persistent (F2c-4a)", testOwnedPersistent}, {"clusters (F5-1)", testClusters}, {"cluster cull (F5-2)", testClusterCull}, {"owned trees (F4-3)", testOwnedTrees}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"bone table (F6-1)", testBoneTable}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
     };
     for (const auto& [name, fn] : cases) {
         const int before = g_failures;
