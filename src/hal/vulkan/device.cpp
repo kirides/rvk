@@ -1660,6 +1660,26 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
     } profileWindow;
     const std::uint64_t frame = dev_.stats().frames + 1;
     serviceSettings();
+    // The gpuscene tables record their uploads into this frame's upload list, which runs before the frame's draws in the same submission. They
+    // flush FIRST at the present: everything below may submit mid-frame (the captures' back-buffer read-back, frame generation's BeforePresent pass /
+    // context drop on a swapchain change, a window resize), and a table upload recorded after such a submission lands behind the draws that read it
+    // (stale rows / indirect args: GPU page fault, frame-ownership.md 7.35).
+    engine::scenetable::onPresent();
+    native::f10::onPresent();
+    {
+        gpuscene::instances().flush(dev_, frozen::kGpuScene >= 2 ? frozen::kGpuScene : 0);
+        gpuscene::illumtable().flush(dev_, true);
+        gpuscene::lightingimages().flush(dev_, true);  // after the illumination table's flush: the compose pass reads this frame's records (frame-ownership.md 7.9)
+        gpuscene::meshparts().flush(dev_, true);
+        gpuscene::materialtable().flush(dev_, true);
+        gpuscene::windowtables().flush(dev_);
+        gpuscene::viewtable().flush(dev_);
+        gpuscene::drawrecords().flush(dev_);
+        gpuscene::clusterstore().flush(dev_);  // F5-1 (before the compaction: F5-2's cull reads the cluster table and the object table's rows)
+        gpuscene::objecttable().flush(dev_);
+        gpuscene::ownedcompact().flush(dev_);  // F2c-4c: after the record table's upload (same list, barrier between)
+        gpuscene::bbtable().flush(dev_);
+    }
     if (overlay_) {
         overlay_->onPresent(frame);
         // [debug] overlay_in_screenshots: into the back buffer, before the captures read it
@@ -1684,25 +1704,6 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
     engine::matsrc::onPresent();
     engine::xinput::onPresent();
     engine::loadaccel::onPresent();
-    engine::scenetable::onPresent();
-    native::f10::onPresent();
-    {
-        gpuscene::instances().flush(dev_, frozen::kGpuScene >= 2 ? frozen::kGpuScene : 0);
-        gpuscene::illumtable().flush(dev_, true);
-        gpuscene::lightingimages().flush(dev_, true);  // after the illumination table's flush: the compose pass reads this frame's records (frame-ownership.md 7.9)
-        gpuscene::meshparts().flush(dev_, true);
-        gpuscene::materialtable().flush(dev_, true);
-        gpuscene::windowtables().flush(dev_);
-        gpuscene::viewtable().flush(dev_);
-        gpuscene::drawrecords().flush(dev_);
-        gpuscene::clusterstore().flush(dev_);  // F5-1 (before the compaction: F5-2's cull reads the cluster table and the object table's rows)
-        gpuscene::objecttable().flush(dev_);
-        gpuscene::ownedcompact().flush(dev_);  // F2c-4c: after the record table's upload (same list, barrier between)
-        gpuscene::bbtable().flush(dev_);
-    }
-    // The captures read the back buffer with a mid-frame flush (submit + wait): they run AFTER the tables' flushes above, which record into this
-    // frame's upload list (it runs before the frame's draws in the same submission). A flush after the capture's submission would land behind the
-    // draws that read those tables (a burst of pictures while the owned draws change every frame: GPU page fault; frame-ownership.md 7.35).
     auto& captures = api::captures();
     // [debug] screenshot_frames: a request of the tool API's queue, due at this present
     if (std::ranges::find(options_.screenshotFrames, static_cast<std::uint32_t>(frame)) != options_.screenshotFrames.end()) {

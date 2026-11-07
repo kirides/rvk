@@ -1909,6 +1909,8 @@ Stage F5-2 of section 13. Files: `shaders/gpuscene/owned_compact.comp.hlsl` (the
 
 **Evidence:** the faulting scenario (`rvk_rtwalk mode=walk turn=18 keys=TurnRight burst=10 interval=1 burst_at=20`, Full + `native.owned_persistent` chain + `shadows.rt=near`, lod 2x) with `-Validation` (0 validation errors, owned persistent 96.7 % reused) and 3 plain runs: no device loss, 10 of 10 pictures each. Full-game GPU-assisted validation was not usable (0.1 fps from the first loading frame: the run never reaches the walk).
 
+**Follow-up (orchestrator, main):** the tables' flush block (with `scenetable::onPresent` / `f10::onPresent`) now runs FIRST in `SwapScreen`, right after `serviceSettings`, before the overlay, the `BeforePresent` injection (frame generation), the window / exclusive-fullscreen handling and the captures: every one of them may submit mid-frame (frame generation's context drop on a swapchain change calls `flushFrameAndWait`). The rule: **the present's table uploads are recorded before anything at the present that can submit.** Re-check on main: the burst scenario with `-Validation` (0 errors, 0 SYNC), plain, and plain + `native.clusters` + `native.cluster_cull` (FALSE NEGATIVES 0): PASS, 10 of 10 pictures, no device loss, persistent MISS 0. The `readImageLevel` diagnostics (`RVK_NAN_BISECT`, `RVK_EXPOSURE_LOG`) submit during the frame's draws, not at the present: still a hazard while they are on (developer knobs, off by default).
+
 ## 8. F1 / F2 design decision: windows onto persistent tables (2026-11-06, orchestrator)
 
 **Decision.** F1 does not start with new shaders. Translated shaders and the ported ubershader read every float register through 4 register windows per
