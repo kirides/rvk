@@ -144,6 +144,13 @@ bool StaticOps::vegStampOf(const Op& op, vro::Stamp& st, const std::uint8_t*& sh
     st.ranges[2] = get<std::uint32_t>(sub0, 0x30);
     st.ranges[3] = get<std::uint32_t>(sub0, 0x34);
     st.baseVertex = static_cast<std::uint32_t>(record->drawDesc().baseVertexIndex);
+    {
+        Geom g;
+        if (!geometryOfVisual(visual, g)) return false;
+        st.vb = g.streams[0].buffer;
+        st.ib = g.indices;
+        st.decl = g.decl;
+    }
     st.twoSided = get<std::uint8_t>(typeObj, 0x30);
     st.depthBias = get<std::uint8_t>(sh, 0x78);
     st.variantEpoch = dev_.variantEpoch();
@@ -454,11 +461,34 @@ void StaticOps::vegCompEnd(const Op& op) {
                                   d.lightTableLit == ot->second->desc->lightTableLit && d.matSlot == ot->second->desc->matSlot;
                 d.streams[0].freq = f;
                 d.streams[1] = s1;
-                ++W.checkTplDiff;  // (counted down below when equal)
-                if (same || texMoved) --W.checkTplDiff;
-                if (!same && !texMoved && V.logged < 8) {
+                // a resource reloaded under the same object pointers (a teleport frees and re-creates a mesh's buffers / material records): the template is replaced, not an error
+                const bool movedOnly = !same && !texMoved && d.vs == ot->second->desc->vs && d.ps == ot->second->desc->ps && d.lightN == ot->second->desc->lightN && d.lightFirst == ot->second->desc->lightFirst &&
+                                       d.states == ot->second->desc->states && d.samplerMask == ot->second->desc->samplerMask;
+                if (movedOnly) ++W.moved;
+                else if (!same && !texMoved) ++W.checkTplDiff;
+                if (!same && !texMoved && !movedOnly && V.logged < 8) {
                     ++V.logged;
-                    spdlog::error("native: {}: DIFFERING: {} bucket {:#x}: the composed draw differs from the retained template", what, describe(op), d.treeKey);
+                    const sc::DrawDesc& o = *ot->second->desc;
+                    std::string why;
+                    const auto chk = [&](bool diff, const char* n) {
+                        if (diff) why += std::string(why.empty() ? "" : ", ") + n;
+                    };
+                    chk(d.vs != o.vs || d.ps != o.ps, "shaders");
+                    chk(d.decl != o.decl, "decl");
+                    chk(d.indices != o.indices, "indices");
+                    chk(d.baseVertex != o.baseVertex || d.minIndex != o.minIndex || d.numVertices != o.numVertices || d.startIndex != o.startIndex || d.primCount != o.primCount, "geometry");
+                    chk(d.samplerMask != o.samplerMask || d.inheritMask != o.inheritMask, "sampler mask");
+                    chk(d.passFlags != o.passFlags, "pass flags");
+                    chk(d.states != o.states, "states");
+                    for (int i = 0; i < 4; ++i) chk(!(d.streams[i] == o.streams[i]), "stream");
+                    for (std::uint32_t m = d.samplerMask; m != 0; m &= m - 1) {
+                        const auto st = sc::lowBit(m);
+                        chk(!(d.samplers[st] == o.samplers[st]), "sampler");
+                    }
+                    chk(d.lightN != o.lightN || d.lightFirst != o.lightFirst || d.lightTableLit != o.lightTableLit, "light params");
+                    chk(d.matSlot != o.matSlot, "mat slot");
+                    chk(d.tagSubMesh != o.tagSubMesh || d.tagMaterial != o.tagMaterial || d.tagMaterialName != o.tagMaterialName, "tag");
+                    spdlog::error("native: {}: DIFFERING: {} bucket {:#x}: the composed draw differs from the retained template ({})", what, describe(op), d.treeKey, why);
                 }
                 if (same && !texMoved && !ot->second->stale && !ot->second->r.cd->v.scenePending) {
                     pend->tpls[d.treeKey] = std::move(old->tpls[d.treeKey]);
@@ -847,6 +877,13 @@ std::uint32_t StaticOps::vegPass(bool solid) {
                 if (rc != 0) {
                     tpl->passSerial = 0;
                     lateWhy = &W.lateTemplate;
+                    ++W.rcBy[std::min(rc, 3)];
+                    if (V.logged < 12) {
+                        ++V.logged;
+                        const d3d9::Device::CachedDraw& c = *tpl->r.cd;
+                        spdlog::info("native: owned vegetation draws: template refused (rc {}): valid {}, vs module {}, ps module {}, scene pipeline {}, stale {}", rc, c.valid, c.vs != nullptr && c.vs->module == c.vsModule,
+                                     c.ps != nullptr && c.ps->module == c.fsModule, static_cast<int>(c.scenePipeline2), tpl->stale);
+                    }
                     break;
                 }
                 tpl->devBucket = dev_.ownedBucketKey(*tpl->r.cd, viewSlot);
@@ -1051,19 +1088,24 @@ std::uint32_t StaticOps::vegPass(bool solid) {
 void StaticOps::vegReport() {
     if (!ownedVegOps_ || !vro_) return;
     vro::State& V = *vro_;
+    {
+        // records of ops that left (a world change / chunks behind the player) give their record slots back
+        const std::uint64_t frame = dev_.stats().frames;
+        for (auto it = V.ops.begin(); it != V.ops.end();) it = frame - it->second->lastFrame > 1200 ? V.ops.erase(it) : std::next(it);
+    }
     vro::Stats& q = V.window;
     V.total.add(q);
     vro::Stats& t = V.total;
     tro::Stats& d = V.tw;
     V.tt.add(d);
     const double ms = 1e-6;
-    spdlog::info("native: owned vegetation draws (5 s): views {} ({} owned, {} composed); ops: {} seen, {} taken, {} drawn, {} late (no record {}, stamp {}, view {}, material {}, plan {}, read {}, special {}, no template {}, template {}, flush {}); "
+    spdlog::info("native: owned vegetation draws (5 s): views {} ({} owned, {} composed); ops: {} seen, {} taken, {} drawn, {} late (no record {}, stamp {}, view {}, material {}, plan {}, read {}, special {}, no template {}, template {} [rc 1 {} 2 {} 3 {}], flush {}); "
                  "{} batches / {} instances in {} flushes ({} commands, {} records); records built {} replaced {} not retained {} bad {} (by reason: {} {} {} {} {} {} {} {}); "
-                 "templates derived {} reused {} refused {}; converted instances reused {} rebuilt {}; check frames: {} ops {} batches, DIFFERING plan {} template {} registers {} converted {} count {}, MISS {} (of {}); "
+                 "templates derived {} reused {} refused {}; converted instances reused {} rebuilt {}; resources moved {}; check frames: {} ops {} batches, DIFFERING plan {} template {} registers {} converted {} count {}, MISS {} (of {}); "
                  "CPU ms: pass {:.2f} (nodes {:.2f} read {:.2f} plan {:.2f} flush {:.2f} side {:.2f}) record {:.2f}; total ops {} drawn {} late {}, DIFFERING {}",
-                 q.views, q.ownedViews, q.compViews, q.opsSeen, q.opsTaken, q.opsDrawn, q.opsLate, q.lateNoRec, q.lateStamp, q.lateView, q.lateMaterial, q.latePlan, q.lateRead, q.lateSpecial, q.lateNoTemplate, q.lateTemplate,
+                 q.views, q.ownedViews, q.compViews, q.opsSeen, q.opsTaken, q.opsDrawn, q.opsLate, q.lateNoRec, q.lateStamp, q.lateView, q.lateMaterial, q.latePlan, q.lateRead, q.lateSpecial, q.lateNoTemplate, q.lateTemplate, q.rcBy[1], q.rcBy[2], q.rcBy[3],
                  q.lateFlush, q.batches, q.instances, q.flushes, q.items, q.records, q.built, q.replaced, q.notRetained, q.badOps, q.badBy[0], q.badBy[1], q.badBy[2], q.badBy[3], q.badBy[4], q.badBy[5], q.badBy[6], q.badBy[7],
-                 d.derived, d.reused, d.refused, q.convReused, q.convRebuilt, q.checkOps, q.checkBatches, q.checkPlanDiff, q.checkTplDiff, q.checkRegDiff, q.checkConvDiff, q.checkCountDiff, d.checkMiss, d.checkMissCompared,
+                 d.derived, d.reused, d.refused, q.convReused, q.convRebuilt, q.moved, q.checkOps, q.checkBatches, q.checkPlanDiff, q.checkTplDiff, q.checkRegDiff, q.checkConvDiff, q.checkCountDiff, d.checkMiss, d.checkMissCompared,
                  static_cast<double>(q.passNs) * ms, static_cast<double>(q.nodeNs) * ms, static_cast<double>(q.readNs) * ms, static_cast<double>(q.planNs) * ms, static_cast<double>(q.flushNs) * ms, static_cast<double>(q.sideNs) * ms,
                  static_cast<double>(q.recNs) * ms, t.opsSeen, t.opsDrawn, t.opsLate,
                  t.checkPlanDiff + t.checkTplDiff + t.checkRegDiff + t.checkConvDiff + t.checkCountDiff);

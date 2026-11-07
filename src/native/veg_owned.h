@@ -33,6 +33,9 @@ struct Stamp {
     std::uint32_t meshState = 0;        // mesh +0x38 (3 = cached)
     std::uint32_t ranges[4] = {};       // sub0 +0x28 / +0x2c / +0x30 / +0x34
     std::uint32_t baseVertex = 0;
+    const void* vb = nullptr;           // the visual's vertex / index buffers and declaration (a reloaded mesh keeps its object pointers)
+    const void* ib = nullptr;
+    const void* decl = nullptr;
     std::uint8_t twoSided = 0;          // typeObj +0x30
     std::uint8_t depthBias = 0;         // shader +0x78
     std::uint64_t variantEpoch = 0;
@@ -87,7 +90,8 @@ struct Stats {
     std::uint64_t built = 0, replaced = 0, notRetained = 0, badOps = 0;
     std::uint64_t badBy[8] = {};  // bad ops by reason: draws per batch, draw level, depth bias, lean block / no retain, switch, material slots, draw count, other
     std::uint64_t checkOps = 0, checkBatches = 0, checkPlanDiff = 0, checkTplDiff = 0, checkRegDiff = 0, checkConvDiff = 0, checkCountDiff = 0;
-    std::uint64_t convReused = 0, convRebuilt = 0;
+    std::uint64_t convReused = 0, convRebuilt = 0, moved = 0;  // moved: the composed draw differs from the template only by a resource that was reloaded (the template is replaced)
+    std::uint64_t rcBy[4] = {};  // template refusals by treeTemplate's code (1 not allowed, 2 table full, 3 derivation refused)
     std::uint64_t nodeNs = 0, readNs = 0, planNs = 0, tplNs = 0, recNs = 0, flushNs = 0, sideNs = 0, takeNs = 0, passNs = 0;
     void add(const Stats& o) {
         views += o.views; ownedViews += o.ownedViews; opsSeen += o.opsSeen; opsTaken += o.opsTaken; opsDrawn += o.opsDrawn; opsLate += o.opsLate; batches += o.batches;
@@ -97,7 +101,8 @@ struct Stats {
         built += o.built; replaced += o.replaced; notRetained += o.notRetained; badOps += o.badOps;
         for (int i = 0; i < 8; ++i) badBy[i] += o.badBy[i];
         checkOps += o.checkOps; checkBatches += o.checkBatches; checkPlanDiff += o.checkPlanDiff; checkTplDiff += o.checkTplDiff; checkRegDiff += o.checkRegDiff;
-        checkConvDiff += o.checkConvDiff; checkCountDiff += o.checkCountDiff; convReused += o.convReused; convRebuilt += o.convRebuilt;
+        checkConvDiff += o.checkConvDiff; checkCountDiff += o.checkCountDiff; convReused += o.convReused; convRebuilt += o.convRebuilt; moved += o.moved;
+        for (int i = 0; i < 4; ++i) rcBy[i] += o.rcBy[i];
         nodeNs += o.nodeNs; readNs += o.readNs; planNs += o.planNs; tplNs += o.tplNs; recNs += o.recNs; flushNs += o.flushNs; sideNs += o.sideNs; takeNs += o.takeNs; passNs += o.passNs;
     }
 };
