@@ -657,10 +657,10 @@ void FrameTap::compactOwned(void* db, List list, const std::uint8_t* data, std::
         const void* vtable = nullptr;
         if (op.raw.context == nullptr || !readAt(op.raw.context, 0, vtable) || vtable == nullptr) continue;
         const OpKind vk = vtableInfo(vtable).kind;
-        if (vk != OpKind::Mesh && !(vk == OpKind::SpeedTree && statics_->ownedTreesOn() && desc_.kind == ViewKind::Main)) continue;
+        if (vk != OpKind::Mesh && !(vk == OpKind::SpeedTree && statics_->ownedTreesOn() && desc_.kind == ViewKind::Main) && !(vk == OpKind::Animation && statics_->ownedActorsOn())) continue;
         op.vtable = vtable;
         op.kind = vk;
-        if (vk == OpKind::Mesh ? !statics_->ownedSelect(op) : !statics_->treeSelect(op)) continue;
+        if (vk == OpKind::Mesh || vk == OpKind::Animation ? !statics_->ownedSelect(op) : !statics_->treeSelect(op)) continue;
         ownedMark_[i] = 1;
         ownedOps_.push_back(op);
     }

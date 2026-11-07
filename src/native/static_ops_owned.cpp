@@ -236,6 +236,11 @@ bool StaticOps::ownedSelect(const Op& op) {
     }
     const orec::OpRecord& rec = *it->second;
     rec.lastSeen = dev_.stats().frames;
+    if (rec.actor) {
+        // F6-1: an actor record is owned only while the setting is on (its draws need the persistent path); its stamp is read in full every frame
+        if (!ownedActorsOn()) return false;
+        ++actorW_.seenByView[ownedCur_ != ViewKind::Main ? 2 : op.list == List::Solid ? 1 : 0];
+    }
     // a record exists only for an eligible op; of recExclusion's reasons the stamps hold the overlay flags, the fade, the light list, the shader's class / sort id /
     // depth bias; what they do not: the hierarchy flag of the context and the table lighting
     if (op.list == List::Solid && !tableLit_) {
@@ -251,7 +256,7 @@ bool StaticOps::ownedSelect(const Op& op) {
         return false;
     }
     // F2e-1 (7.30): a record no engine event touched is valid on its polled inputs alone (depFast); a marked one, or the 1 in 16 of the rolling scrub, runs the full stamp
-    const bool events = depEvents();
+    const bool events = depEvents() && !rec.actor;
     int fast = -2;
     if (events) fast = depFast(op, rec);
     if (fast >= 0) {
@@ -297,6 +302,7 @@ bool StaticOps::ownedSelect(const Op& op) {
             return false;
         }
     }
+    if (rec.actor) ++actorW_.byView[ownedCur_ != ViewKind::Main ? 2 : op.list == List::Solid ? 1 : 0];
     return true;
 }
 
@@ -651,7 +657,7 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
         ++W.fallback[why];
         dev_.setSceneIssue(false);
         tag = savedTag;
-        tag.source = d3d9::draws::Source::Mesh;
+        tag.source = op.kind == OpKind::Animation ? d3d9::draws::Source::Skinned : d3d9::draws::Source::Mesh;
         tag.context = op.raw.context;
         tag.entity = op.entity != nullptr ? op.entity : ptr(op.raw.context, 0x10);
         tag.opDesc = op.raw.desc;
@@ -711,7 +717,7 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
         Op& op = ops[opIndex];
         const orec::OpRecord* recPtr = ownedRecPtrs_[opIndex];
         tag = savedTag;
-        tag.source = d3d9::draws::Source::Mesh;
+        tag.source = op.kind == OpKind::Animation ? d3d9::draws::Source::Skinned : d3d9::draws::Source::Mesh;
         tag.context = op.raw.context;
         tag.entity = op.entity != nullptr ? op.entity : ptr(op.raw.context, 0x10);
         tag.opDesc = op.raw.desc;
@@ -954,7 +960,14 @@ bool StaticOps::ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, c
         why = kFbObject;
         return false;
     }
-    if (gpuscene::verifyFrame() || !gpuscene::objecttable().serveFast(entity, 0x1eu, op.list == List::ZPass ? 1.0f : op.raw.fade, objWin)) {
+    if (rec.actor) {
+        // F6-1: the actor part's bone image (once per frame and key: written by the first view that draws the part)
+        if (!ownedActorWindow(op, rec, objWin, why)) {
+            ++actorW_.refusedWindow;
+            return false;
+        }
+        ++actorW_.drawn;
+    } else if (gpuscene::verifyFrame() || !gpuscene::objecttable().serveFast(entity, 0x1eu, op.list == List::ZPass ? 1.0f : op.raw.fade, objWin)) {
         float world[16];
         if (!engine::safeRead(entity + 0x60, world, sizeof(world))) {
             why = kFbObject;
@@ -1093,7 +1106,7 @@ void StaticOps::ownedMissCheck(const orec::OpRecord& rec, std::size_t k, const d
     const std::uint32_t viewSlot = ownedSlotOfKey(rec.key.view, solid);
     d3d9::OwnedWindows viewWin;
     d3d9::OwnedWindows::Win objWin;
-    if (!tab.ready() || !tab.live(P.handle.slot) || !vt.ready() || !vt.fillWindows(viewSlot, viewWin) || (r.vs1Offered && !gpuscene::objecttable().windowFor(rec.stamp.objSlot, objWin))) {
+    if (!tab.ready() || !tab.live(P.handle.slot) || !vt.ready() || !vt.fillWindows(viewSlot, viewWin) || (r.vs1Offered && !ownedObjWindow(rec, objWin))) {
         ++S.checkSkipped;
         return;
     }
@@ -1128,6 +1141,7 @@ void StaticOps::ownedAutoOffMiss(std::uint64_t miss) {
 }
 
 void StaticOps::ownedReport() {
+    actorReport();  // F6-1
     if (f2c4::enabled() && ownedStatic_) {
         // item 6: the distinct buckets of every live record (every 5 s: a walk over the record map)
         f2c4::Counters& m = f2c4::counters();

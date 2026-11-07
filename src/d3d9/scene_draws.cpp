@@ -91,8 +91,10 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
         lastVariant_.scenePending = false;
     }
     const bool tree = sceneTrees_ && sceneV2_ && kind == draws::Kind::SpeedTree;  // F4-3: the scene ABI v2 form only (scenePipe_ stays None: the composed draw is drawn as it was)
-    const bool shadowPhase = sceneShadows_ && sceneV2_ && kind == draws::Kind::StaticMesh && phase.view == scene::View::Shadow && phase.pass == scene::Pass::ShadowDepth;
-    if (!shadowPhase && ((kind != draws::Kind::StaticMesh && !(sceneBb_ && kind == draws::Kind::SpeedTreeBillboard) && !tree) || phase.view != scene::View::Main ||
+    // F6-1 (native.owned_actors): the skinned actors' draws get the scene forms like the static meshes' (v1 for the composed draws, v2 for the owned path)
+    const bool actor = sceneActors_ && sceneV2_ && kind == draws::Kind::Skinned;
+    const bool shadowPhase = sceneShadows_ && sceneV2_ && (kind == draws::Kind::StaticMesh || actor) && phase.view == scene::View::Shadow && phase.pass == scene::Pass::ShadowDepth;
+    if (!shadowPhase && ((kind != draws::Kind::StaticMesh && !(sceneBb_ && kind == draws::Kind::SpeedTreeBillboard) && !tree && !actor) || phase.view != scene::View::Main ||
                          (phase.pass != scene::Pass::Solid && phase.pass != scene::Pass::DepthPrepass))) {
         return;
     }
@@ -115,6 +117,7 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
     VariantSlot base = VariantSlot::Base;
     if (captureDraw || uberTaken || (!gbufWrite_ && !giDraw && pd.fs != ps_->module)) {
         ++sceneStats_.fbVariantKind;
+        if (captureDraw && probe_ != nullptr) probe_->capture = true;
         return;
     }
     if (gbufWrite_) base = gbufferSlot(false);
@@ -170,7 +173,7 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
     }
     // F2c-4-0: the scene ABI v2 form of the same draw (retained draws that the owned path replays: the main view's static meshes); the v1 form stays what the composed
     // path draws. Not ready yet = the draw is not retained as replayable (scenePending), the v1 form still draws it now
-    if (sceneV2_ && (kind == draws::Kind::StaticMesh || tree)) {
+    if (sceneV2_ && (kind == draws::Kind::StaticMesh || tree || actor)) {
         const rhi::ShaderModule vs2 = variant(vs_, VariantSlot::SceneVs2);
         const rhi::ShaderModule fs2 = variant(ps_, sceneView2Of(sceneFs));
         if (vs2 == rhi::ShaderModule::None || fs2 == rhi::ShaderModule::None) {

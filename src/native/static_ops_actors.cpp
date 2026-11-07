@@ -11,8 +11,10 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <format>
+#include <unordered_set>
 
 #include <spdlog/spdlog.h>
 
@@ -73,6 +75,82 @@ constexpr Site kSites[] = {
     {0x4dd35f, {0xff, 0x50, 0x30}, 3, 0},                              // ... the primitive's SetStreamOffset (slot 6)
     {0x4e006f, {0xe8}, 1, kAffineMul},                                 // UpdateRenderMatrices: palette[i] *= W[i]
 };
+
+// F6-0 measurement (RVK_F6_MEASURE=1; frame-ownership.md 7.40): per view class the actor ops, distinct parts / actors per frame, vertices, bones, morph ops and the
+// composition time. No behaviour change.
+namespace f6m {
+bool on() {
+    static const bool v = [] {
+        char b[8];
+        return GetEnvironmentVariableA("RVK_F6_MEASURE", b, sizeof(b)) != 0;
+    }();
+    return v;
+}
+struct Cls {
+    std::uint64_t ops = 0, verts = 0, tris = 0, bones = 0, morph = 0, morphActive = 0, ns = 0, parts = 0, actors = 0, frames = 0, bodyPart = 0, overlay = 0;
+    std::uint64_t maxVerts = 0;
+};
+enum { kMainZ, kMainSolid, kCascade, kOther, kN };
+const char* const kNames[kN] = {"main z", "main solid", "cascade z", "other"};
+Cls g_win[kN], g_tot[kN];
+std::unordered_set<std::uint64_t> g_parts[kN], g_actors[kN];
+std::uint64_t g_lastFrame = 0, g_report = 0;
+struct Cur {
+    std::uint32_t verts = 0, tris = 0, bones = 0;
+    bool morph = false, morphActive = false, bodyPart = false, overlay = false;
+    const void* wrapper = nullptr;
+    std::uint32_t prim = 0;
+} g_cur;
+std::chrono::steady_clock::time_point g_t0;
+int g_cls = 0;
+void begin(int cls) {
+    g_cur = {};
+    g_cls = cls;
+    g_t0 = std::chrono::steady_clock::now();
+}
+void end(std::uint64_t frame) {
+    Cls& c = g_win[g_cls];
+    ++c.ops;
+    c.ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - g_t0).count());
+    c.verts += g_cur.verts;
+    c.tris += g_cur.tris;
+    c.bones += g_cur.bones;
+    c.maxVerts = std::max<std::uint64_t>(c.maxVerts, g_cur.verts);
+    c.morph += g_cur.morph;
+    c.morphActive += g_cur.morphActive;
+    c.bodyPart += g_cur.bodyPart;
+    c.overlay += g_cur.overlay;
+    g_parts[g_cls].insert(reinterpret_cast<std::uintptr_t>(g_cur.wrapper) * 131u + g_cur.prim);
+    g_actors[g_cls].insert(reinterpret_cast<std::uintptr_t>(g_cur.wrapper));
+    if (frame != g_lastFrame) {
+        g_lastFrame = frame;
+        for (int k = 0; k < kN; ++k) {
+            g_win[k].parts += g_parts[k].size();
+            g_win[k].actors += g_actors[k].size();
+            ++g_win[k].frames;
+            g_parts[k].clear();
+            g_actors[k].clear();
+        }
+    }
+}
+void report(std::uint64_t frame) {
+    if (frame < g_report + 1200) return;
+    g_report = frame;
+    for (int k = 0; k < kN; ++k) {
+        Cls& c = g_win[k];
+        if (c.ops == 0) continue;
+        const double f = static_cast<double>(std::max<std::uint64_t>(1, c.frames));
+        spdlog::info("native: f6 measure (5 s) [{}]: {:.1f} ops / frame ({:.1f} parts, {:.1f} actors), {:.0f} vertices / frame (max {} per op, mean {:.0f}), {:.0f} triangles, {:.1f} bones / op, "
+                     "morph ops {:.1f} % (active {:.1f} %), overlay ops {}, body parts {:.1f} %; composition {:.2f} us / op = {:.1f} us / frame",
+                     kNames[k], static_cast<double>(c.ops) / f, static_cast<double>(c.parts) / f, static_cast<double>(c.actors) / f, static_cast<double>(c.verts) / f, c.maxVerts,
+                     static_cast<double>(c.verts) / static_cast<double>(c.ops), static_cast<double>(c.tris) / f, static_cast<double>(c.bones) / static_cast<double>(c.ops),
+                     100.0 * static_cast<double>(c.morph) / static_cast<double>(c.ops), 100.0 * static_cast<double>(c.morphActive) / static_cast<double>(c.ops), c.overlay,
+                     100.0 * static_cast<double>(c.bodyPart) / static_cast<double>(c.ops), static_cast<double>(c.ns) / 1000.0 / static_cast<double>(c.ops),
+                     static_cast<double>(c.ns) / 1000.0 / f);
+        c = {};
+    }
+}
+}  // namespace f6m
 
 }  // namespace
 
@@ -137,6 +215,17 @@ bool StaticOps::paletteMatrix(const std::uint8_t* wrapper, std::uint32_t bone, f
 }
 
 StaticOps::Skip StaticOps::composeActor(const Op& op) {
+    if (!f6m::on()) return composeActorImpl(op);
+    const int cls = viewKind_ == ViewKind::Main ? (op.list == List::Solid ? f6m::kMainSolid : f6m::kMainZ) : viewKind_ == ViewKind::Cascade ? f6m::kCascade : f6m::kOther;
+    f6m::begin(cls);
+    const Skip s = composeActorImpl(op);
+    f6m::end(dev_.stats().frames);
+    f6m::report(dev_.stats().frames);
+    return s;
+}
+
+StaticOps::Skip StaticOps::composeActorImpl(const Op& op) {
+    actorCur_ = {};
     ActorStats& st = actorWindow_;
     ++st.ops;
     // eCRenderContextAnimation2 has no RenderRefracted: Execute calls eCRenderContext's empty slot for a refracted actor primitive
@@ -173,6 +262,12 @@ StaticOps::Skip StaticOps::composeActor(const Op& op) {
         wrapper = part + 0x30;
         variant = get<std::int32_t>(part, 0x20);
         ++st.bodyParts;
+    }
+    if (f6m::on()) {
+        f6m::g_cur.wrapper = wrapper;
+        f6m::g_cur.prim = primIdx;
+        f6m::g_cur.bodyPart = actorIdx != 0;
+        f6m::g_cur.overlay = flags != 0;
     }
     // O2b lean: UpdateRenderMatrices + HardRenderActor2::Render's touches where the slot runs them (then the palette is the stored one)
     if (leanCollect_) leanActorPre(wrapper, primIdx);
@@ -227,6 +322,16 @@ StaticOps::Skip StaticOps::composeActor(const Op& op) {
         writeBone(i, m);
     }
     st.bones += bones;
+    if (f6m::on()) {
+        f6m::g_cur.bones = bones;
+        f6m::g_cur.verts = get<std::uint32_t>(prim, 0xc);
+        f6m::g_cur.tris = get<std::uint32_t>(prim, 4);
+    }
+    // F6-1: the bone state the draws' VS window 2 is served from (setOwnedFor -> actorServeComposed)
+    actorCur_.valid = bones <= 66;
+    actorCur_.wrapper = wrapper;
+    actorCur_.prim = primIdx;
+    actorCur_.bones = bones;
     // the actor's visual (HRA +0xa0): its record (our HalPrimitive) for the declaration, streams, indices, the draw description
     U8* visual = ptr(hra, 0xa0);
     const auto* record = hal::vulkan::HalPrimitive::fromApi(ptr(visual, 0x10));
@@ -254,10 +359,16 @@ StaticOps::Skip StaticOps::composeActor(const Op& op) {
             if (g.streams[i + 1].buffer != nullptr) g.streams[i + 1].offset = sc::morphStreamOffset(pick.target[i], lodVertices);
         }
         if (weights[0] != 0.0f || weights[1] != 0.0f || weights[2] != 0.0f) ++st.morphActive;
+        if (f6m::on()) {
+            f6m::g_cur.morph = true;
+            f6m::g_cur.morphActive = weights[0] != 0.0f || weights[1] != 0.0f || weights[2] != 0.0f;
+        }
     }
     // SetMorphTargetWeights (always: zeros without targets) -> c31.xyz; SetGlobalAlpha(fade, 0) -> c32.w
     std::memcpy(mirror_.global[0], weights, 12);
     writeAlpha(0, fade);
+    std::memcpy(actorCur_.weights, weights, 12);
+    actorCur_.fade = fade;
     // RenderPrimitive: start index +0, primitives +4, min vertex +8, vertices +0xc into the record (the rest as created)
     g.startIndex = get<std::uint32_t>(prim, 0);
     g.primCount = get<std::uint32_t>(prim, 4);

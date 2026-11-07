@@ -142,6 +142,10 @@ public:
     void setOwnedShadows(bool on);
     bool ownedShadowsOn() const { return ownedShadows_ && !ownedShadowsTripped_; }
     bool ownedShadowViewBegin(void* db, ViewKind kind, std::int32_t cascade);
+    // native.owned_actors (frame-ownership.md 7.40, F6-1; static_ops_actors_owned.cpp): the skinned actors' z / solid ops (main view) and z ops (cascades, with owned_shadows) get op
+    // records and are drawn from persistent DrawRecords; the per-frame part is the bone table's image of the part
+    void setOwnedActors(bool on);
+    bool ownedActorsOn() const { return ownedActors_ && !ownedActorsTripped_ && ownedPersistent_; }
     // may the list's ops leave it (the database's caps: the z list is executed, the solid pass is bracketed by DoBeginRenderSolid)
     bool ownedListOk(void* db, List list);
     // an op of the raw (unsorted) list: true = its record is valid, the op leaves the engine's list
@@ -413,6 +417,7 @@ private:
     // the skinned actors' ops (static_ops_actors.cpp)
     bool verifyActors();
     Skip composeActor(const Op& op);
+    Skip composeActorImpl(const Op& op);  // (composeActor = the F6-0 measurement wrapper)
     // the bone b's matrix as the shader gets it: the palette entry the engine reads (stored this frame) or composed as
     // UpdateRenderMatrices will (X[i] *= W[i] with the engine's own affine product)
     bool paletteMatrix(const std::uint8_t* wrapper, std::uint32_t bone, float out[16]);
@@ -798,6 +803,56 @@ private:
     // F3-1 (7.36): the owned view in progress (set at its begin): Main, or a Cascade whose op records carry `ownedViewKey_` = 1 + the cascade index (0 = the main view's) and whose
     // draws read view table slot kViewSlotCascade0 + index. Its statistics are kept apart from the main view's.
     bool ownedShadows_ = false, ownedShadowsTripped_ = false;
+    // F6-1 (static_ops_actors_owned.cpp)
+    bool ownedActors_ = false, ownedActorsTripped_ = false;
+    struct ActorIn {  // one actor op's engine inputs (composeActorImpl's reads)
+        const std::uint8_t *ps = nullptr, *entity = nullptr, *wrapper = nullptr, *res = nullptr, *hra = nullptr, *ai = nullptr, *prim = nullptr, *material = nullptr, *shader = nullptr,
+                           *remap = nullptr, *visual = nullptr;
+        std::uint32_t actorIdx = 0, primIdx = 0, lod = 0, primIndex = 0, boneStart = 0, bones = 0, targets = 0;
+        std::int32_t variant = 0;
+        std::uint8_t flags = 0;
+        float weights[3] = {0.0f, 0.0f, 0.0f};
+        std::uint32_t pick[3] = {0, 0, 0};
+    };
+    // the composition's state for the draws it is about to issue (setOwnedFor serves the bone window from it): set by composeActorImpl
+    struct ActorCur {
+        bool valid = false;
+        const void* wrapper = nullptr;
+        std::uint32_t prim = 0, bones = 0;
+        std::uint32_t draws = 0, offered = 0;  // the op's draws / those whose window 2 was served from the bone table
+        float weights[3] = {0.0f, 0.0f, 0.0f};  // c31.xyz as the composition wrote them
+        float fade = 1.0f;                      // c32.w
+    } actorCur_;
+    struct PickMemo {
+        std::uint32_t targets = 0;
+        float weights[3] = {};
+        std::uint32_t pick[3] = {};
+    };
+    std::unordered_map<const void*, PickMemo> pickMemo_;
+    std::uint64_t pickMemoFrame_ = ~0ull;
+    int actorRead(const Op& op, ActorIn& in, bool weights);  // 0 = ok, 1 = not composable, 2 = a template property set, 3 = the resource is not cached
+    orec::Excl recExclusionActor(const Op& op);
+    bool recStampActor(const Op& op, orec::Stamp& st);
+    // the bone image of an op from the engine's palette (frame id as the composition's): c31 weights, c32.w fade, the bone rows; false = a palette entry is unreadable
+    bool actorImage(const Op& op, const ActorIn& in, float (*regs)[4], std::uint32_t& count);
+    gpuscene::BoneKey actorKeyOf(const Op& op, const ActorIn& in) const;
+    // the bone window the owned draw reads (serves the image once per frame and key); false = refused (`why`: a Fallback code)
+    bool ownedActorWindow(const Op& op, const orec::OpRecord& rec, d3d9::OwnedWindows::Win& out, int& why);
+    // the object / bone window of a record's draws for the check frames' derivations
+    bool ownedObjWindow(const orec::OpRecord& rec, d3d9::OwnedWindows::Win& out) const;
+    void actorServeComposed(const sc::DrawDesc& d, d3d9::OwnedWindows::Win& out, bool& served);
+    // check frames (recDraw): the image the composed draw wrote into the bone table equals one built from the engine's palette now
+    void actorVerify(const Op& op, const orec::OpRecord& rec, bool& differs, std::string& detail);
+    void actorReport();
+    struct ActorOwnedStats {
+        std::uint64_t selected = 0, drawn = 0, refusedWindow = 0, recordsBuilt = 0, imageBuilds = 0, imageShared = 0, verified = 0, verifyDiffers = 0, offeredDraws = 0, composedDraws = 0;
+        std::uint64_t excl[orec::kExclCount] = {};
+        std::uint64_t notRetained = 0, notOffered = 0, notComposable = 0, template_ = 0, notCached = 0, rebuilds = 0;
+        std::uint64_t byView[3] = {};  // drawn ops: main z / main solid / cascades
+        std::uint64_t seenByView[3] = {};
+        std::uint64_t morphOps = 0, morphPickChanged = 0, imageNs = 0, stampNs = 0, drawsBuilt = 0, drawNoScene = 0, drawCdInvalid = 0, morphActive = 0, stampRebuilds = 0;
+        void add(const ActorOwnedStats& o);
+    } actorW_, actorT_;
     ViewKind ownedCur_ = ViewKind::Main;
     // F3-1: the cascades' check / warm-up frames count the frames a cascade was rendered in (debug.shadow_stride renders them every 2nd frame while the camera stands still: the
     // frame number's check frames (multiples of native.owned_check) would never meet a cascade view); `ownedShadowCheck_` = the cascade view in progress is a check view

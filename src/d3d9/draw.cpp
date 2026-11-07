@@ -693,6 +693,7 @@ void Device::splitStage(bool vertex, const Shader& sh, rhi::GpuRef (&windows)[sh
                     if (ow.kind == OwnedWindows::Kind::Material) ++ownedStats_.material[stage];
                     else if (ow.kind == OwnedWindows::Kind::Lighting) ++ownedStats_.lighting;
                     else if (ow.kind == OwnedWindows::Kind::Object) ++ownedStats_.object;
+                    else if (ow.kind == OwnedWindows::Kind::Bones) ++ownedStats_.bones;
                     else if (vertex && w == 1) ++ownedStats_.view1;
                     else ++ownedStats_.view[stage];
                     if (splitVerify_ && ow.image != nullptr && !ownedReplay_) verifyOwned(vertex, w, need, ow, regs, sh);

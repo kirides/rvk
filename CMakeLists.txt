@@ -140,6 +140,7 @@ add_library(rvk_core STATIC
     src/d3d9/scene_draws.cpp
     src/d3d9/owned_submit.cpp
     src/gpuscene/billboard_table.cpp
+    src/gpuscene/bone_table.cpp
     src/gpuscene/billboard_table.h
     src/d3d9/draws.cpp
     src/d3d9/record.cpp
@@ -221,6 +222,7 @@ add_library(rvk_core STATIC
     src/native/static_ops_fx.cpp
     src/native/static_ops_sky.cpp
     src/native/static_ops_actors.cpp
+    src/native/static_ops_actors_owned.cpp
     src/native/static_ops_trees.cpp
     src/native/static_compose.h
     src/native/static_ops.cpp

@@ -56,6 +56,8 @@ public:
     void flush(d3d9::Device& dev, bool verify, std::uint32_t used);
     // collects finished read-backs
     void collect(rhi::GameDevice& game, const char* name);
+    // drops the device buffer, the read-back buffers and the dirty list (tests; the CPU shadow stays)
+    void release();
     const TableStats& stats() const { return stats_; }
     std::size_t dirtyCount() const { return dirty_.size(); }
 
