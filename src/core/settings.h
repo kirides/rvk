@@ -493,6 +493,7 @@ struct RendererSettings {
     Setting* nativeOwnedPersistent = nullptr;  // native.owned_persistent: the owned draws' DrawRecords / DrawBlocks persistent on the GPU, one indirect draw per bucket (frame-ownership.md 7.21)
     Setting* nativeOwnedCheck = nullptr;       // native.owned_check: every N-th frame (and the one before it) runs the old path and compares
     Setting* nativeOwnedRecords = nullptr;     // native.owned_records: op records built from the static composition and compared with record-derived draws (frame-ownership.md 7.14)
+    Setting* nativeOwnedTrees = nullptr;  // native.owned_trees: the main view's SpeedTree ops owned (frame-ownership.md 7.25, F4-2 / F4-3)
     Setting* nativeOwnedBillboards = nullptr;  // native.owned_billboards: the tree billboards' ops retained as records and drawn from them (frame-ownership.md 7.17, F4-1)
     Setting* nativeSceneDrawsCheck = nullptr;  // native.scene_draws_check: every N-th frame the record / argument buffers are read back and compared
     Setting* nativeLean = nullptr;             // native.lean: the engine's slot code not run for the composed mesh-like ops (O2a)

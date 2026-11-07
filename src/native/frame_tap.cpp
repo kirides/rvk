@@ -595,6 +595,7 @@ void FrameTap::beginView(void* db, void* desc, ViewKind kind, void* shadowMap, s
     desc_.zPrepass = zPrepass != 0;
     // F2c-3: a main view with owned ops (not with the observe hooks: they check the lists against the requests)
     const bool ownedFrame = kind == ViewKind::Main && statics_ != nullptr && staticsWanted_ && !observeWanted_ && statics_->ownedViewBegin(db, desc);
+    if (kind == ViewKind::Main && statics_ != nullptr && staticsWanted_) statics_->treeViewBegin(ownedFrame);  // F4-3: the tree ops' own frame kind
     for (std::size_t l = 0; l < kListCount; ++l) {
         const std::uint8_t* data = nullptr;
         std::int32_t count = 0;
@@ -653,10 +654,11 @@ void FrameTap::compactOwned(void* db, List list, const std::uint8_t* data, std::
         op.list = list;
         const void* vtable = nullptr;
         if (op.raw.context == nullptr || !readAt(op.raw.context, 0, vtable) || vtable == nullptr) continue;
-        if (vtableInfo(vtable).kind != OpKind::Mesh) continue;
+        const OpKind vk = vtableInfo(vtable).kind;
+        if (vk != OpKind::Mesh && !(vk == OpKind::SpeedTree && statics_->ownedTreesOn())) continue;
         op.vtable = vtable;
-        op.kind = OpKind::Mesh;
-        if (!statics_->ownedSelect(op)) continue;
+        op.kind = vk;
+        if (vk == OpKind::Mesh ? !statics_->ownedSelect(op) : !statics_->treeSelect(op)) continue;
         ownedMark_[i] = 1;
         ownedOps_.push_back(op);
     }
@@ -687,6 +689,15 @@ void FrameTap::compactOwned(void* db, List list, const std::uint8_t* data, std::
         resolve(op);  // (the sub-mesh / material / shader the late composition of a refused op needs)
         op.index = 0;
     }
+    // F4-3: the tree ops go to their own pass (StaticOps::treePass)
+    {
+        const auto mid = std::stable_partition(ownedOps_.begin(), ownedOps_.end(), [](const Op& o) { return o.kind != OpKind::SpeedTree; });
+        if (mid != ownedOps_.end()) {
+            std::vector<Op> trees(std::make_move_iterator(mid), std::make_move_iterator(ownedOps_.end()));
+            ownedOps_.erase(mid, ownedOps_.end());
+            statics_->treeTake(list, std::move(trees), 0);
+        }
+    }
     raw_.swap(ownedKept_);
     count = kept;
     const auto tEnd = std::chrono::steady_clock::now();
@@ -707,12 +718,14 @@ void FrameTap::compactOwned(void* db, List list, const std::uint8_t* data, std::
 std::uint32_t FrameTap::passBegin(bool solid) {
     if (!executing_ || desc_.kind != ViewKind::Main || statics_ == nullptr || !staticsWanted_) return 0;
     const std::uint32_t n = statics_->ownedPass(solid);
-    if (n != 0 && coverage_) {
+    const std::uint32_t nt = statics_->treePass(solid);
+    if ((n != 0 || nt != 0) && coverage_) {
         // N5.8 coverage: the draws from records are ours (the tap never sees them: they do not go through prepareDraw)
         const auto pass = solid ? d3d9::scene::Pass::Solid : d3d9::scene::Pass::DepthPrepass;
         for (std::uint32_t i = 0; i < n; ++i) cov_.ours(d3d9::scene::View::Main, pass, d3d9::draws::Kind::StaticMesh);
+        for (std::uint32_t i = 0; i < nt; ++i) cov_.ours(d3d9::scene::View::Main, pass, d3d9::draws::Kind::SpeedTree);
     }
-    return n;
+    return n + nt;
 }
 
 bool FrameTap::opEnter(const void* op) {

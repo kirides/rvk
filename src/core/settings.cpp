@@ -2585,6 +2585,21 @@ RendererSettings registerRendererSettings(Registry& reg) {
         .flags = Flag::NoAB | Flag::Debug,
         .page = "Debug", .section = "Native frame",
     });
+    r.nativeOwnedTrees = &reg.add({
+        .key = "native.owned_trees",
+        .label = "Native frame: owned SpeedTrees",
+        .category = "Debug views",
+        .tab = kTabDebug,
+        .description = "Full mode only, needs owned_persistent (frame-ownership.md 7.25, F4-2 / F4-3): the main view's SpeedTree z / solid ops are retained as one draw template per LOD bucket "
+                       "(composed frames compare the plan and the templates with the composition: DIFFERING must stay 0, a difference turns it off); on the other frames the ops leave the lists at the "
+                       "view's beginning and the pass draws every instance from the engine's tree objects with one row + record per instance and a few indirect calls (needs table lighting; "
+                       "trees stay composed while the RT scene takes tree draws). Off = nothing changes. rvk.log `native: owned trees (5 s)`.",
+        .type = Type::Bool,
+        .defaultValue = 0,
+        .flags = Flag::NoAB | Flag::Debug,
+        .needs = {{"native.owned_persistent", "true", false, true}},
+        .page = "Debug", .section = "Native frame",
+    });
     r.nativeOwnedBillboards = &reg.add({
         .key = "native.owned_billboards",
         .label = "Native frame: owned tree billboards",

@@ -273,6 +273,12 @@ void HalDevice::applyStaticOps() {
         staticOps_->setOwnedStatic(ownedStatic, rs.nativeOwnedCheck != nullptr ? rs.nativeOwnedCheck->asInt() : 10);
         // frame-ownership.md 7.21: F2c-4a persistent owned draws (scene ABI v2 + the view table)
         staticOps_->setOwnedPersistent(ownedStatic && !forceV1 && on(rs.nativeOwnedPersistent));
+        {
+            // frame-ownership.md 7.25: F4-2 / F4-3 owned SpeedTrees (the persistent blocks + scene ABI v2; the trees' v2 scene forms are built while it is on)
+            const bool trees = on(rs.nativeOwnedTrees) && ownedStatic && !forceV1 && on(rs.nativeOwnedPersistent);
+            dev_.setSceneTrees(trees);
+            staticOps_->setOwnedTrees(trees);
+        }
         staticOps_->setOwnedBillboards(on(rs.nativeOwnedBillboards) && scene && dev_.sceneDrawsActive() && gpuscene::lightingimages().active() && gpuscene::windowtables().active());
     }
     staticOps_->setRetained(frozen::kRetained, frozen::kRetainedGroups, frozen::kRetainedCheck);

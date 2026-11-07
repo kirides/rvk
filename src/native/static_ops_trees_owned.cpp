@@ -1,0 +1,1100 @@
+// F4-2 / F4-3 owned SpeedTrees (docs/research/frame-ownership.md 7.25, setting native.owned_trees): see tree_owned.h.
+//
+// treeCompBegin / treeCompBatch / treeCompInstance / treeCompEnd   hooks of composeTree + opEnterImpl: the composition's draws are kept as templates per bucket; on the
+//                  composed frames the plan (treePlan) made at the op's entry is compared with the composition (rows, buckets, instance order) and the new draws with the
+//                  retained templates (F4-2: DIFFERING must stay 0)
+// treeViewBegin / treeSelect / treeTake   the main view begins (frame tap): the op records whose stamps are valid leave the engine's z / solid lists
+// treePass         BeginZPass / DoBeginRenderSolid returned: the taken ops are planned from the engine's tree objects, their templates made ready (a persistent DrawBlock each),
+//                  one row per instance and one DrawRecord per run written, the pass's trees drawn by a few indirect calls (F4-3); an op that cannot be drawn this way is composed
+//                  right there (the engine's slot never runs for a taken op)
+
+#include <windows.h>
+
+#include <algorithm>
+#include <bit>
+#include <chrono>
+#include <cstring>
+#include <format>
+
+#include <spdlog/spdlog.h>
+
+#include "d3d9/defs.h"
+#include "enh/light_table.h"
+#include "engine/memread.h"
+#include "gpuscene/illumination_table.h"
+#include "gpuscene/lighting_images.h"
+#include "gpuscene/material_table.h"
+#include "gpuscene/view_table.h"
+#include "native/static_ops.h"
+
+namespace rvk::native {
+
+namespace {
+
+using engine::readAt;
+using engine::safeRead;
+using U8 = const std::uint8_t;
+using Clock = std::chrono::steady_clock;
+
+template <class T>
+inline T get(const void* p, std::size_t off, T fallback = T{}) {
+    T v = fallback;
+    return readAt(p, off, v) ? v : fallback;
+}
+inline U8* ptr(const void* p, std::size_t off) { return get<U8*>(p, off, nullptr); }
+inline bool rd(const void* p, std::size_t off, void* out, std::size_t n) { return p != nullptr && safeRead(static_cast<U8*>(p) + off, out, n); }
+inline std::uint64_t mix(std::uint64_t h, std::uint64_t v) {
+    h ^= v + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+    return h * 0xff51afd7ed558ccdull;
+}
+inline std::uint64_t ns(Clock::time_point a, Clock::time_point b) { return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count()); }
+
+template <std::size_t N>
+struct ObjSnap {
+    alignas(8) std::uint8_t b[N];
+    bool ok = false;
+    void load(const void* p) { ok = p != nullptr && engine::safeReadN<N>(p, b); }
+    template <class T>
+    T at(std::size_t off) const {
+        T v;
+        std::memcpy(&v, b + off, sizeof(T));
+        return v;
+    }
+};
+
+inline void column(const float m[16], std::uint32_t k, float out[4]) {
+    out[0] = m[k];
+    out[1] = m[4 + k];
+    out[2] = m[8 + k];
+    out[3] = m[12 + k];
+}
+
+constexpr std::uint32_t kRampLen = 16384;           // instance positions per pass (the identity ramp's length)
+constexpr std::uint32_t kViewSlotTreeZ = 14, kViewSlotTreeSolid = 15;
+constexpr std::uint32_t kRowRegs = 4;               // c32 .. c35 per instance
+constexpr std::uint32_t kVsWindowFirstRows = 32;    // registers in front of row 0: c0 .. c30 (never read: window 2 starts at c31) and the c31 header
+
+inline gpuscene::ComposeParams paramsOfTpl(const orec::DrawRec& r) {
+    gpuscene::ComposeParams p;
+    p.tableLit = r.lightTableLit;
+    p.holdsAll = r.lightHoldsAll;
+    p.n = r.lightN;
+    p.firstLight = r.lightFirst;
+    return p;
+}
+
+}  // namespace
+
+void tro::Stats::add(const Stats& o) {
+    views += o.views; ownedViews += o.ownedViews; opsSeen += o.opsSeen; opsTaken += o.opsTaken; opsDrawn += o.opsDrawn; opsLate += o.opsLate; instances += o.instances;
+    items += o.items; flushes += o.flushes;
+    lateNoRec += o.lateNoRec; lateStamp += o.lateStamp; lateView += o.lateView; lateMaterial += o.lateMaterial; latePlan += o.latePlan; lateSpecial += o.lateSpecial;
+    lateNoTemplate += o.lateNoTemplate; lateTemplate += o.lateTemplate; lateFlush += o.lateFlush; lateRows += o.lateRows;
+    built += o.built; replaced += o.replaced; notRetained += o.notRetained; badOps += o.badOps;
+    derived += o.derived; reused += o.reused; refused += o.refused; tableFull += o.tableFull;
+    checkOps += o.checkOps; checkInst += o.checkInst; checkRowDiff += o.checkRowDiff; checkKeyDiff += o.checkKeyDiff; checkCountDiff += o.checkCountDiff; checkDraws += o.checkDraws;
+    checkTplDiff += o.checkTplDiff; checkMiss += o.checkMiss; checkMissCompared += o.checkMissCompared;
+    planNs += o.planNs; tplNs += o.tplNs; rowNs += o.rowNs; flushNs += o.flushNs; sideNs += o.sideNs; takeNs += o.takeNs;
+}
+
+std::uint64_t StaticOps::treeBucketKey(std::uint32_t type, bool zpass, bool sun, std::uint32_t a, std::uint32_t b, std::uint32_t c) {
+    std::uint64_t h = mix(0x7265655f6f776eull, type | (zpass ? 0x100u : 0u) | (sun ? 0x200u : 0u));
+    h = mix(mix(mix(h, a), b), c);
+    return h | 1u;
+}
+
+bool StaticOps::treeEnsureRamp() {
+    if (!tro_) tro_ = std::make_unique<tro::State>();
+    if (tro_->ramp) return true;
+    using namespace d3d9;
+    auto vb = dev_.createBuffer(kRampLen * 4, USAGE_WRITEONLY, POOL_DEFAULT, false, false);
+    if (!vb) return false;
+    void* p = vb->lock(0, kRampLen * 4, 0);
+    if (p == nullptr) return false;
+    auto* f = static_cast<float*>(p);
+    for (std::uint32_t i = 0; i < kRampLen; ++i) f[i] = static_cast<float>(i);
+    vb->unlock();
+    tro_->ramp = std::move(vb);
+    tro_->rampLen = kRampLen;
+    return true;
+}
+
+void StaticOps::setOwnedTrees(bool on) {
+    if (on == ownedTrees_) return;
+    ownedTrees_ = on;
+    if (on) {
+        treeEnsureRamp();
+    } else if (tro_) {
+        tro_->active = false;
+        for (auto& v : tro_->taken) v.clear();
+        tro_->pending.reset();
+        tro_->cur = nullptr;
+        tro_->ops.clear();
+    }
+    spdlog::info("native: owned trees {}", on ? "on (main view SpeedTree ops: templates per bucket, check frames compare, owned frames draw from the engine's tree objects)" : "off");
+}
+
+// ---- composition hooks ------------------------------------------------------------------------------------------------------------
+
+void StaticOps::treeCompBegin(const Op& op, bool zpass, std::uint32_t type, const std::uint8_t* rb, const std::uint8_t* material, const std::uint8_t* shader, bool hardware, bool tableMerge,
+                              const std::uint8_t* queue, std::int32_t n, const std::uint8_t* wrapper) {
+    tro::State& T = *tro_;
+    T.cur = nullptr;
+    T.bad = false;
+    T.pending = std::make_unique<tro::OpRec>();
+    tro::OpRec& r = *T.pending;
+    r.key = {op.raw.context, op.raw.desc, static_cast<std::uint8_t>(op.list)};
+    r.type = type;
+    U8* ps = ptr(op.raw.context, 0x18);
+    r.stamp.res = ptr(ps, 0x38);
+    r.stamp.rb = rb;
+    r.stamp.material = material;
+    r.stamp.shader = shader;
+    r.stamp.visual = ptr(rb, 0x18 + 8 * static_cast<std::size_t>(type));
+    r.stamp.transformation = get<std::int32_t>(shader, 0x2b8);
+    r.stamp.variantEpoch = dev_.variantEpoch();
+    r.stamp.registryGen = enh::fullLitSkipsReads() ? enh::LightTable::registryGeneration() : 0;
+    r.stamp.hardware = hardware;
+    r.stamp.tableMerge = tableMerge;
+    r.builtFrame = dev_.stats().frames;
+    T.cur = &r;
+    T.checkOp = true;
+    T.composed.clear();
+    T.plan.clear();
+    leanTouches_.clear();
+    recCollect_ = true;
+    T.switchBefore = gpuscene::materialtable().stats().switchNotes;
+    if (get<std::uint8_t>(shader, 0x78) != 0) T.bad = true;  // (a depth-bias material draws with the other view-projection)
+    const auto t0 = Clock::now();
+    int why = 0;
+    if (!treePlan(zpass, type, tableMerge, rb, wrapper, queue, n, T.plan, why)) T.plan.clear(), T.checkOp = false;
+    T.window.planNs += ns(t0, Clock::now());
+}
+
+void StaticOps::treeCompBatch(std::size_t drawsBefore, std::uint64_t key) {
+    tro::State& T = *tro_;
+    if (T.cur == nullptr) return;
+    const std::size_t n = drawCount_ - drawsBefore;
+    if (n != 1 || key == 0) {
+        T.bad = true;
+        return;
+    }
+    sc::DrawDesc& d = *draws_[drawsBefore];
+    d.treeKey = key;
+    const bool solid = op_ != nullptr ? op_->list == List::Solid : false;
+    (void)solid;
+    if (d.inheritMask != 0 || !d.vertexBytes.empty() || d.cpuStream != 0 || !d.indexed || d.states[sc::StBlend] != 0 || d.states[sc::StZWrite] == 0) T.bad = true;
+}
+
+void StaticOps::treeCompInstance(const std::uint8_t* tree, const std::uint8_t* illum, std::uint64_t key, bool sun, std::uint32_t slot) {
+    tro::State& T = *tro_;
+    if (T.cur == nullptr || !T.checkOp) return;
+    tro::Inst x;
+    x.tree = tree;
+    x.illum = illum;
+    x.key = key;
+    x.sun = sun;
+    for (std::uint32_t j = 0; j < kRowRegs; ++j) std::memcpy(x.row + 4 * j, mirror_.global[1 + kRowRegs * slot + j], 16);
+    T.composed.push_back(x);
+}
+
+void StaticOps::treeCompEnd(const Op& op) {
+    if (!tro_ || !tro_->pending || tro_->cur == nullptr) return;
+    tro::State& T = *tro_;
+    tro::Stats& W = T.window;
+    std::unique_ptr<tro::OpRec> pend = std::move(T.pending);
+    T.cur = nullptr;
+    const auto t0 = Clock::now();
+    const bool solid = op.list == List::Solid;
+    const auto erase = [&] { T.ops.erase(pend->key); };
+    if (T.bad || leanBlock_ != 0 || drawCount_ == 0 || recNoRetain_ || gpuscene::materialtable().stats().switchNotes != T.switchBefore) {
+        ++W.badOps;
+        erase();
+        return;
+    }
+    // ---- check: the plan made at the op's entry against the composed instances
+    if (T.checkOp && !T.plan.empty()) {
+        ++W.checkOps;
+        if (T.plan.size() != T.composed.size()) {
+            ++W.checkCountDiff;
+            if (T.logged < 8) {
+                ++T.logged;
+                spdlog::error("native: owned trees: DIFFERING: {} the plan has {} instances, the composition {}", describe(op), T.plan.size(), T.composed.size());
+            }
+        } else {
+            for (std::size_t i = 0; i < T.plan.size(); ++i) {
+                const tro::Inst& a = T.plan[i];
+                const tro::Inst& b = T.composed[i];
+                ++W.checkInst;
+                if (a.tree != b.tree || a.key != b.key) {
+                    ++W.checkKeyDiff;
+                    if (T.logged < 8) {
+                        ++T.logged;
+                        spdlog::error("native: owned trees: DIFFERING: {} instance {}: tree {} / {}, bucket {:#x} / {:#x}", describe(op), i, static_cast<const void*>(a.tree), static_cast<const void*>(b.tree), a.key, b.key);
+                    }
+                    continue;
+                }
+                // (c32.z is never written; branches / fronds: c32.w is the engine's global alpha of instance 0 only)
+                bool diff = a.row[0] != b.row[0] || a.row[1] != b.row[1] || (pend->type >= 2 && a.row[3] != b.row[3]);
+                for (std::size_t q = 4; q < 16 && !diff; ++q) diff = a.row[q] != b.row[q];
+                if (diff) {
+                    ++W.checkRowDiff;
+                    if (T.logged < 8) {
+                        ++T.logged;
+                        spdlog::error("native: owned trees: DIFFERING: {} instance {} row: plan ({:g} {:g} {:g} {:g} | {:g} {:g} {:g} {:g}) composed ({:g} {:g} {:g} {:g} | {:g} {:g} {:g} {:g})", describe(op), i, a.row[0], a.row[1],
+                                      a.row[2], a.row[3], a.row[4], a.row[5], a.row[6], a.row[7], b.row[0], b.row[1], b.row[2], b.row[3], b.row[4], b.row[5], b.row[6], b.row[7]);
+                    }
+                }
+            }
+        }
+    }
+    T.checkOp = false;
+    T.composed.clear();
+    T.plan.clear();
+    // ---- the templates: the composition's draws with their retained packets
+    std::vector<const void*> touches = leanTouches_;
+    pend->touches.clear();
+    for (const void* t : touches) {
+        if (t != nullptr && std::find(pend->touches.begin(), pend->touches.end(), t) == pend->touches.end()) pend->touches.push_back(t);
+    }
+    if (pend->stamp.material != nullptr && std::find(pend->touches.begin(), pend->touches.end(), static_cast<const void*>(pend->stamp.material)) == pend->touches.end()) {
+        pend->touches.push_back(pend->stamp.material);
+    }
+    gpuscene::MaterialTable& mt = gpuscene::materialtable();
+    const std::uint32_t matSlot = draws_[0]->matSlot;
+    for (std::size_t k = 0; k < drawCount_; ++k) {
+        if (draws_[k]->matSlot != matSlot || draws_[k]->treeKey == 0) {
+            ++W.badOps;
+            erase();
+            return;
+        }
+    }
+    if (matSlot >= gpuscene::MaterialTable::kCapacity) {
+        ++W.badOps;
+        erase();
+        return;
+    }
+    pend->matSlot = matSlot;
+    pend->matHash = mix(mix(0, matSlot), mt.structVersion(matSlot));
+    pend->viewStamp = recViewStamp();
+    const std::uint64_t viewKey = (static_cast<std::uint64_t>(viewKind_) << 32) ^ (static_cast<std::uint64_t>(static_cast<std::uint32_t>(cascade_)) << 36) ^
+                                  (reinterpret_cast<std::uintptr_t>(shadowMap_) * 0xD6E8FEB86659FD93ull);
+    const std::size_t cacheGroup = static_cast<std::size_t>(g_ - groups_.data());
+    tro::OpRec* old = nullptr;
+    if (const auto it = T.ops.find(pend->key); it != T.ops.end()) old = it->second.get();
+    const bool sameStamp = old != nullptr && old->stamp == pend->stamp;
+    for (std::size_t k = 0; k < drawCount_; ++k) {
+        sc::DrawDesc& d = *draws_[k];
+        const std::uint64_t pkey = (reinterpret_cast<std::uintptr_t>(op.raw.context) * 0x9E3779B97F4A7C15ull) ^ (static_cast<std::uint64_t>(op.raw.desc) * 0xC2B2AE3D27D4EB4Full) ^
+                                   (static_cast<std::uint64_t>(op.list) << 56) ^ (static_cast<std::uint64_t>(k) << 48) ^ (static_cast<std::uint64_t>(cacheGroup) << 40) ^ viewKey;
+        const auto pe = packets_.find(pkey);
+        if (pe == packets_.end() || !pe->second.cd.valid || pe->second.cd.scenePipeline2 == d3d9::GamePipeline::None) {
+            // (not retained yet: the variants / pipelines are still being built, or the packet cache refused the draw)
+            ++W.notRetained;
+            if (old != nullptr && sameStamp) continue;
+            continue;
+        }
+        if (pend->tpls.count(d.treeKey) != 0) continue;  // (a second batch of the same bucket: the same draw)
+        // the check: the retained template of this bucket against this composition (the instance count of stream 0 is the only part that moves)
+        if (sameStamp) {
+            if (const auto ot = old->tpls.find(d.treeKey); ot != old->tpls.end() && ot->second->desc != nullptr) {
+                ++W.checkDraws;
+                const auto f = d.streams[0].freq;
+                d.streams[0].freq = ot->second->desc->streams[0].freq;
+                const bool same = packetSameDesc(d, *ot->second->desc) && d.lightN == ot->second->desc->lightN && d.lightFirst == ot->second->desc->lightFirst &&
+                                  d.lightTableLit == ot->second->desc->lightTableLit && d.matSlot == ot->second->desc->matSlot;
+                d.streams[0].freq = f;
+                if (!same) {
+                    ++W.checkTplDiff;
+                    if (T.logged < 8) {
+                        ++T.logged;
+                        spdlog::error("native: owned trees: DIFFERING: {} bucket {:#x}: the composed draw differs from the retained template", describe(op), d.treeKey);
+                    }
+                }
+                if (!same || ot->second->stale || ot->second->r.cd->v.scenePending) {
+                    // replaced below
+                } else {
+                    treeMissCheck(*old, *ot->second, solid);
+                    pend->tpls[d.treeKey] = std::move(old->tpls[d.treeKey]);
+                    continue;
+                }
+            }
+        }
+        auto tpl = std::make_unique<tro::Tpl>();
+        orec::DrawRec& r = tpl->r;
+        r.cd = std::make_unique<d3d9::Device::CachedDraw>(pe->second.cd);
+        for (std::size_t i = 0; i < 4; ++i) {
+            r.streams[i] = d.streams[i].buffer;
+            r.strides[i] = d.streams[i].stride;
+        }
+        r.indices = d.indices;
+        for (std::uint32_t m = static_cast<std::uint32_t>(d.samplerMask & ~d.inheritMask) & 0xffffu; m != 0; m &= m - 1) {
+            const std::uint32_t st = static_cast<std::uint32_t>(std::countr_zero(m));
+            r.texMask |= static_cast<std::uint16_t>(1u << st);
+            r.tex[st] = d.samplers[st].texture;
+            for (std::uint32_t i = 0; i < 7; ++i) r.ss[st][i] = d.samplers[st].ss[i];
+        }
+        r.alphaTestState = d.states[sc::StAlphaTest];
+        r.alphaFunc = d.alphaFunc;
+        r.alphaRef = d.alphaRef;
+        r.maskSet = d.maskSet;
+        r.maskValue = d.maskValue;
+        r.matSlot = d.matSlot;
+        r.illumSlot = d.illumSlot;
+        r.lightN = d.lightN;
+        r.lightFirst = d.lightFirst;
+        r.lightTableLit = d.lightTableLit;
+        r.lightHoldsAll = d.lightHoldsAll;
+        r.vsSet = d.vsSet;
+        r.psSet = d.psSet;
+        r.vs1Offered = true;
+        r.tagSubMesh = d.tagSubMesh;
+        r.tagMaterial = d.tagMaterial;
+        r.tagMeshResource = d.tagMeshResource;
+        r.tagWater = d.tagWater;
+        r.tagMaterialName = d.tagMaterialName;
+        r.zPass = d.zPass;
+        r.passFlags = d.passFlags;
+        r.scene = true;
+        tpl->desc = std::make_unique<sc::DrawDesc>(d);
+        tpl->key = d.treeKey;
+        tpl->builtFrame = dev_.stats().frames;
+        if ((d.vsSet[0] >> 31 & 1u) != 0) std::memcpy(tpl->c31, d.vsF[31], 16);
+        pend->tpls[d.treeKey] = std::move(tpl);
+        if (old != nullptr && sameStamp && old->tpls.count(d.treeKey) != 0) ++W.replaced;
+        else ++W.built;
+    }
+    if (pend->tpls.empty()) {
+        erase();
+        return;
+    }
+    if (sameStamp) {
+        // (buckets of the op's earlier compositions that this one did not draw stay)
+        for (auto& kv : old->tpls) {
+            if (kv.second && pend->tpls.count(kv.first) == 0) pend->tpls[kv.first] = std::move(kv.second);
+        }
+    }
+    T.ops[pend->key] = std::move(pend);
+    W.tplNs += ns(t0, Clock::now());
+}
+
+// ---- the plan ------------------------------------------------------------------------------------------------------------------------
+
+// every instance of the op as the composition would draw it (queue order; leaves LOD-major), from the engine's tree objects. false = not plannable (why: 1 reads, 2 tree, 3 entity,
+// 4 no table merge, 5 an instance the owned path does not take (no light list, static ambient, dynamic or unknown static lights), 6 LOD out of range)
+bool StaticOps::treePlan(bool zpass, std::uint32_t type, bool tableMerge, const std::uint8_t* rb, const std::uint8_t* wrapper, const std::uint8_t* queue, std::int32_t n, std::vector<tro::Inst>& out, int& why) {
+    out.clear();
+    why = 0;
+    if (n < 0 || n > 65536 || queue == nullptr || rb == nullptr || type > 3) {
+        why = 1;
+        return false;
+    }
+    if (!zpass && !tableMerge) {
+        why = 4;
+        return false;
+    }
+    std::uint8_t rbb[0x138];
+    if (!rd(rb, 0, rbb, sizeof(rbb))) {
+        why = 1;
+        return false;
+    }
+    const auto rb16 = [&](std::size_t off) {
+        std::uint16_t v;
+        std::memcpy(&v, rbb + off, 2);
+        return v;
+    };
+    const auto rbf = [&](std::size_t off) {
+        float v;
+        std::memcpy(&v, rbb + off, 4);
+        return v;
+    };
+    struct Snap {
+        const U8* tree;
+        const U8* illum;
+        std::int32_t l0, l1;
+        float r0, r1, f6c;
+        float world[16];
+        bool sun;
+    };
+    static thread_local std::vector<Snap> snaps;
+    snaps.clear();
+    snaps.reserve(static_cast<std::size_t>(n));
+    const U8* sunList = nullptr;
+    bool sunListValue = false, dynListValue = false;
+    const std::uint32_t lodAt = type == 0 ? 0x48 : 0x50;
+    for (std::int32_t i = 0; i < n; ++i) {
+        Snap s{};
+        std::memcpy(&s.tree, queue + 0x18 * static_cast<std::size_t>(i), 8);
+        std::memcpy(&s.illum, queue + 0x18 * static_cast<std::size_t>(i) + 8, 8);
+        ObjSnap<0x70> ts;
+        ts.load(s.tree);
+        if (!ts.ok || ts.at<U8*>(0x40) == nullptr) {
+            why = 2;
+            return false;
+        }
+        s.l0 = type <= 1 ? ts.at<std::int32_t>(lodAt) : ts.at<std::int32_t>(0x58);
+        s.l1 = ts.at<std::int32_t>(0x5c);
+        s.r0 = ts.at<float>(0x60);
+        s.r1 = ts.at<float>(0x64);
+        s.f6c = ts.at<float>(0x6c);
+        const U8* entity = (ts.at<std::uint8_t>(0x18) & 0x10) == 0 ? ts.at<U8*>(0x10) : nullptr;
+        if (entity == nullptr || !rd(entity, 0x60, s.world, 64)) {
+            why = 3;
+            return false;
+        }
+        if (!zpass) {
+            ObjSnap<0x98> is;
+            is.load(s.illum);
+            const U8* list = is.ok ? is.at<U8*>(0) : nullptr;
+            const bool staticSh = is.ok && is.at<std::uint8_t>(0x90) != 0;
+            const bool noSun = is.ok && is.at<std::uint8_t>(0xc) != 0;
+            const std::uint32_t ns = is.ok ? is.at<std::uint8_t>(0xd) : 0;
+            if (!is.ok || list == nullptr || staticSh) {
+                why = 5;
+                return false;
+            }
+            if (list != sunList) {
+                sunList = list;
+                sunListValue = get<std::uint8_t>(list, 0) != 0;
+                dynListValue = get<std::uint8_t>(list, 0x34) != 0;
+            }
+            if (dynListValue) {
+                why = 5;
+                return false;
+            }
+            if (ns != 0) {
+                bool allKnown = ns >= 1 && ns <= 2 && enh::LightTable::registryComplete();
+                for (std::uint32_t e = 0; allKnown && e < ns; ++e) {
+                    float p[3];
+                    for (std::uint32_t j = 0; j < 3; ++j) p[j] = is.at<float>(0x10 + 0x40 * e + 4 * j);
+                    allKnown = enh::LightTable::lightKnown(p);
+                }
+                if (!allKnown) {
+                    why = 5;
+                    return false;
+                }
+            }
+            s.sun = sunListValue && !noSun;
+        }
+        snaps.push_back(s);
+    }
+    const auto fillRow = [&](tro::Inst& x, const Snap& s, float v0, float v1, float alpha) {
+        x.row[0] = v0;
+        x.row[1] = v1;
+        x.row[2] = 0.0f;
+        x.row[3] = alpha;
+        for (std::uint32_t k = 0; k < 3; ++k) column(s.world, k, x.row + 4 + 4 * k);
+    };
+    if (type <= 1) {
+        const std::size_t stripAt = type == 0 ? 0x40 : 0x50, startAt = type == 0 ? 0xe8 : 0xf8;
+        const float vy = rbf(type == 0 ? 0xa0 : 0xa4);
+        for (const Snap& s : snaps) {
+            if (s.l0 < 0) continue;
+            if (s.l0 > 7) {
+                why = 6;
+                return false;
+            }
+            tro::Inst x;
+            x.tree = s.tree;
+            x.illum = s.illum;
+            x.sun = s.sun;
+            x.strip = rb16(stripAt + 2 * static_cast<std::size_t>(s.l0));
+            const std::uint16_t start = rb16(startAt + 2 * static_cast<std::size_t>(s.l0));
+            x.key = treeBucketKey(type, zpass, x.sun, x.strip, start, 0);
+            fillRow(x, s, s.f6c, vy, 1.0f);
+            out.push_back(x);
+        }
+        return true;
+    }
+    const U8* rt = ptr(wrapper, 0);
+    const std::int32_t lods = get<std::int32_t>(ptr(rt, 8), 0xf4);
+    float v[2];
+    if (!rd(wrapper, 0x34, v, 8) || lods < 0 || lods > 8) {
+        why = 1;
+        return false;
+    }
+    for (std::int32_t lodi = 0; lodi < lods; ++lodi) {
+        const std::size_t at = 0x40 + 0x10 * static_cast<std::size_t>(type) + 2 * static_cast<std::size_t>(lodi);
+        const std::uint16_t indices = rb16(at);
+        const std::uint16_t start = rb16(at + 0xa8);
+        if (indices == 0) break;
+        for (const Snap& s : snaps) {
+            float a;
+            if (s.l0 == lodi && s.l0 > -1) a = 80.0f / s.r0;
+            else if (s.l1 == lodi && s.l1 > -1) a = 80.0f / s.r1;
+            else continue;
+            tro::Inst x;
+            x.tree = s.tree;
+            x.illum = s.illum;
+            x.sun = s.sun;
+            x.key = treeBucketKey(type, zpass, x.sun, static_cast<std::uint32_t>(lodi), start, indices);
+            fillRow(x, s, v[0], v[1], a);
+            out.push_back(x);
+        }
+    }
+    return true;
+}
+
+// ---- the frame tap's side ------------------------------------------------------------------------------------------------------------
+
+void StaticOps::treeViewBegin(bool ownedFrame) {
+    if (!ownedTrees_ || !tro_) return;
+    tro::State& T = *tro_;
+    for (auto& v : T.taken) {
+        T.window.opsLate += v.size();  // (ops of an earlier view whose pass never began: lost for that frame)
+        v.clear();
+    }
+    ++T.window.views;
+    T.active = false;
+    if (!ownedFrame) return;
+    gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
+    const bool ready = ownedPersistent_ && !ownedTripped_ && ownedStatic_ && tableLit_ && T.ramp != nullptr && tab.ready() && gpuscene::viewtable().ready() && dev_.sceneViewsReady() &&
+                       dev_.ownedTreeObserversOk() && treesVerified_ > 0 && lean_ && leanAnimVerified_ > 0 && qsort_ != nullptr;
+    if (!ready) return;
+    T.active = true;
+    ++T.window.ownedViews;
+}
+
+bool StaticOps::treeSelect(const Op& op) {
+    if (!tro_ || !tro_->active || op.kind != OpKind::SpeedTree) return false;
+    if (op.list != List::ZPass && op.list != List::Solid) return false;
+    tro::State& T = *tro_;
+    ++T.window.opsSeen;
+    const bool zpass = op.list == List::ZPass;
+    if (zpass && ((op.raw.desc >> 16) & 0x10u) != 0) return false;  // (a shadow map's z op)
+    const std::uint32_t type = zpass ? (op.raw.desc & 0xffffu) : op.raw.desc;
+    if (type > 3) return false;
+    const auto it = T.ops.find(tro::OpKey{op.raw.context, op.raw.desc, static_cast<std::uint8_t>(op.list)});
+    if (it == T.ops.end()) {
+        ++T.window.lateNoRec;
+        return false;
+    }
+    return true;
+}
+
+void StaticOps::treeTake(List list, std::vector<Op>&& ops, std::uint64_t nsTake) {
+    if (!tro_) return;
+    tro_->window.opsTaken += ops.size();
+    tro_->window.takeNs += nsTake;
+    tro_->taken[list == List::Solid ? 1 : 0] = std::move(ops);
+}
+
+bool StaticOps::treeStampOf(const Op& op, tro::Stamp& st, std::uint32_t& type, const std::uint8_t*& rb, const std::uint8_t*& wrapper, const std::uint8_t*& shader, bool& zpass) {
+    st = {};
+    zpass = op.list == List::ZPass;
+    type = zpass ? (op.raw.desc & 0xffffu) : op.raw.desc;
+    if (type > 3) return false;
+    U8* ps = ptr(op.raw.context, 0x18);
+    U8* res = ptr(ps, 0x38);
+    rb = ptr(res, 0x78);
+    if (rb == nullptr) return false;
+    wrapper = ptr(rb, 8);
+    U8* material = ptr(rb, 0x80 + 8 * static_cast<std::size_t>(type));
+    shader = ptr(material, 0x70);
+    if (wrapper == nullptr || shader == nullptr) return false;
+    U8* admin = ptr(shader, 0x220);
+    st.res = res;
+    st.rb = rb;
+    st.material = material;
+    st.shader = shader;
+    st.visual = ptr(rb, 0x18 + 8 * static_cast<std::size_t>(type));
+    st.transformation = get<std::int32_t>(shader, 0x2b8);
+    st.variantEpoch = dev_.variantEpoch();
+    st.registryGen = enh::fullLitSkipsReads() ? enh::LightTable::registryGeneration() : 0;
+    st.hardware = get<std::int32_t>(admin, 0x320) != 0;
+    st.tableMerge = tableLit_ && !zpass && enh::fullLitTreeMerge();
+    return true;
+}
+
+// a template made ready for the pass: its derivation is a persistent DrawBlock slot (rewritten only when an input moved: the owned_persistent recipe)
+int StaticOps::treeTemplate(tro::Tpl& t, const d3d9::OwnedWindows& viewWin, std::uint64_t epoch, bool solid, std::uint32_t scrubStride, std::uint32_t scrubPhase) {
+    gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
+    const orec::DrawRec& r = t.r;
+    orec::Persist& P = r.persist;
+    const d3d9::Device::CachedDraw& cd = *r.cd;
+    const gpuscene::ComposeParams p = paramsOfTpl(r);
+    const bool amb = ownedAmbientLit(r, p);
+    d3d9::OwnedWindows::Win objWin;
+    objWin.kind = d3d9::OwnedWindows::Kind::Object;
+    objWin.base = tab.zeroRef().plus(-static_cast<std::int64_t>(shader::abi::kVsWindowFirst[2]) * 16);
+    objWin.covered = shader::abi::kVsWindowFirst[3] - shader::abi::kVsWindowFirst[2];
+    ownedBuildWindows(r, viewWin, objWin, p, true, P.ow);
+    if (dev_.vertexShader() != cd.vs) dev_.setVertexShaderRef(d3d9::ShaderRef(const_cast<d3d9::Shader*>(cd.vs)));
+    if (dev_.pixelShader() != cd.ps) dev_.setPixelShaderRef(d3d9::ShaderRef(const_cast<d3d9::Shader*>(cd.ps)));
+    d3d9::draws::Tag& tag = dev_.drawTag();
+    tag.subMesh = r.tagSubMesh;
+    tag.material = r.tagMaterial;
+    tag.meshResource = r.tagMeshResource;
+    tag.water = static_cast<d3d9::draws::Water>(r.tagWater);
+    tag.materialName = r.tagMaterialName;
+    bool allowed = false;
+    const std::uint64_t sig = dev_.ownedDrawSig(cd, r.streams, r.strides, r.indices, r.tex, amb, P.ow, allowed);
+    if (!allowed) return 1;
+    const bool reuse = P.valid && P.handle.has() && tab.live(P.handle.slot) && P.epoch == epoch && P.sig == sig;
+    const bool scrub = reuse && scrubStride != 0 && (++tro_->scrubTick % scrubStride) == scrubPhase;
+    if (reuse && !scrub) {
+        ++tro_->window.reused;
+        return 0;
+    }
+    if (!P.handle.has()) {
+        const std::uint32_t slot = tab.alloc();
+        if (slot == gpuscene::kNoSlot) {
+            ++tro_->window.tableFull;
+            return 2;
+        }
+        P.handle.slot = slot;
+    }
+    d3d9::Device::DeriveIn in;
+    ownedMakeIn(r, amb, in);
+    d3d9::Device::OwnedPersist out;
+    const int rc = dev_.ownedDerive(cd, in, P.ow, tab.blockRef(P.handle.slot), tab.zeroRef(), true, out);
+    if (rc != 0) {
+        P.valid = false;
+        ++tro_->window.refused;
+        if (rc == 1 || rc == 4 || rc == 6 || rc == 7) t.stale = true;
+        return 3;
+    }
+    if (scrub) {
+        if (std::memcmp(&tab.record(P.handle.slot), &out.rec, sizeof(out.rec)) != 0 || std::memcmp(&tab.block(P.handle.slot), &out.blk, sizeof(out.blk)) != 0) {
+            ++tro_->window.checkMiss;
+            spdlog::error("native: owned trees: MISS (rolling scrub): the persistent block of bucket {:#x} differs from a fresh derivation although nothing it was derived from moved", t.key);
+        }
+        ++tro_->window.checkMissCompared;
+    } else {
+        ++tro_->window.derived;
+    }
+    if (!scrub) tab.write(P.handle.slot, out.rec, out.blk);
+    P.valid = true;
+    P.epoch = epoch;
+    P.sig = sig;
+    P.bucket = out.bucketKey;
+    (void)solid;
+    return 0;
+}
+
+// a composed frame: would the owned path reuse this template's slot now? then its content must be what a fresh derivation gives
+void StaticOps::treeMissCheck(tro::OpRec& rec, tro::Tpl& t, bool solid) {
+    (void)rec;
+    const orec::DrawRec& r = t.r;
+    orec::Persist& P = r.persist;
+    if (!P.valid || !P.handle.has()) return;
+    gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
+    gpuscene::ViewTable& vt = gpuscene::viewtable();
+    const std::uint32_t viewSlot = solid ? kViewSlotTreeSolid : kViewSlotTreeZ;
+    d3d9::OwnedWindows viewWin;
+    if (!tab.ready() || !tab.live(P.handle.slot) || !vt.ready() || !vt.fillWindows(viewSlot, viewWin)) return;
+    const gpuscene::ComposeParams p = paramsOfTpl(r);
+    bool amb = false;
+    {
+        const d3d9::Device::CachedDraw& cd = *r.cd;
+        if (cd.v.gate && cd.v.staticOk && r.illumSlot != gpuscene::kNoSlot) amb = ownedAmbientLit(r, p);
+    }
+    d3d9::OwnedWindows::Win objWin;
+    objWin.kind = d3d9::OwnedWindows::Kind::Object;
+    objWin.base = tab.zeroRef().plus(-static_cast<std::int64_t>(shader::abi::kVsWindowFirst[2]) * 16);
+    objWin.covered = shader::abi::kVsWindowFirst[3] - shader::abi::kVsWindowFirst[2];
+    d3d9::OwnedWindows dw;
+    ownedBuildWindows(r, viewWin, objWin, p, false, dw);
+    bool allowed = false;
+    const std::uint64_t sig = dev_.ownedDrawSig(*r.cd, r.streams, r.strides, r.indices, r.tex, amb, dw, allowed);
+    if (!allowed || P.sig != sig || !dev_.treeEnvSame(solid, viewSlot, P.epoch)) return;  // (the owned path would derive it again)
+    d3d9::Device::DeriveIn in;
+    ownedMakeIn(r, amb, in);
+    d3d9::Device::SceneView sv;
+    if (dev_.deriveScene(*r.cd, in, sv) != 0) return;
+    d3d9::Device::OwnedPersist fresh;
+    if (dev_.ownedBuild(*r.cd, sv, dw, tab.blockRef(P.handle.slot), tab.zeroRef(), fresh) != 0) return;
+    ++tro_->window.checkMissCompared;
+    if (std::memcmp(&tab.record(P.handle.slot), &fresh.rec, sizeof(fresh.rec)) != 0 || std::memcmp(&tab.block(P.handle.slot), &fresh.blk, sizeof(fresh.blk)) != 0) {
+        ++tro_->window.checkMiss;
+        if (tro_->logged < 8) {
+            ++tro_->logged;
+            spdlog::error("native: owned trees: MISS (check frame): the persistent block of bucket {:#x} differs from a fresh derivation although nothing it was derived from moved", t.key);
+        }
+    }
+}
+
+// ---- the pass ------------------------------------------------------------------------------------------------------------------------
+
+std::uint32_t StaticOps::treePass(bool solid) {
+    if (!tro_) return 0;
+    tro::State& T = *tro_;
+    std::vector<Op>& ops = T.taken[solid ? 1 : 0];
+    if (ops.empty()) return 0;
+    tro::Stats& W = T.window;
+    if (!inView_ || viewKind_ != ViewKind::Main || !T.active) {
+        W.opsLate += ops.size();
+        ops.clear();
+        return 0;
+    }
+    const auto t0 = Clock::now();
+    ret::gLog = nullptr;
+    finishOp();
+    leanAbort();
+    d3d9::draws::Tag& tag = dev_.drawTag();
+    const d3d9::draws::Tag savedTag = tag;
+    const d3d9::ShaderRef vsSaved = dev_.vertexShaderRef(), psSaved = dev_.pixelShaderRef();
+    // an op composed where the engine's slot would have run it (a taken op's slot never runs)
+    std::uint32_t drawn = 0;
+    const auto composeLate = [&](Op& op, std::uint64_t& counter) {
+        ++counter;
+        ++W.opsLate;
+        dev_.setSceneIssue(false);
+        tag = savedTag;
+        tag.source = d3d9::draws::Source::SpeedTree;
+        tag.context = op.raw.context;
+        tag.entity = op.entity != nullptr ? op.entity : ptr(op.raw.context, 0x10);
+        tag.opDesc = op.raw.desc;
+        tag.subMesh = tag.material = tag.meshResource = nullptr;
+        tag.water = d3d9::draws::Water::None;
+        tag.materialName = nullptr;
+        opEnter(op);
+        if (op_ == &op) drawn += static_cast<std::uint32_t>(drawCount_);
+        finishOp();
+        dev_.setSceneIssue(true);
+    };
+    const auto restore = [&] {
+        dev_.setSceneIssue(false);
+        tag = savedTag;
+        dev_.setVertexShaderRef(vsSaved);
+        dev_.setPixelShaderRef(psSaved);
+        finishOp();
+        ops.clear();
+    };
+    // the view as the first op's composition would make it
+    tro::Stamp st0;
+    std::uint32_t type0 = 0;
+    const std::uint8_t *rb0 = nullptr, *wr0 = nullptr, *sh0 = nullptr;
+    bool z0 = false;
+    bool viewOk = false;
+    if (treeStampOf(ops[0], st0, type0, rb0, wr0, sh0, z0)) viewOk = viewAndMirror(sh0);
+    if (viewOk) std::memcpy(mirror_.adminVs[0], view_.vp, 64);  // (no depth-bias material is owned)
+    if (viewOk) treeWind();
+    ++opSerial_;
+    const std::uint64_t viewStamp = viewOk ? recViewStamp() : 0;
+    d3d9::OwnedWindows viewWin;
+    bool viewWinOk = false;
+    const std::uint32_t viewSlot = solid ? kViewSlotTreeSolid : kViewSlotTreeZ;
+    if (viewOk) {
+        gpuscene::ViewTable& vt = gpuscene::viewtable();
+        float posFix[4];
+        dev_.viewPosFix(posFix);
+        gpuscene::ViewTable::Regs regs;
+        regs.vs0 = mirror_.adminVs;
+        regs.vs1 = mirror_.adminVs + 12;
+        regs.ps0 = mirror_.adminPs;
+        regs.posFix = posFix;
+        regs.c5 = mirror_.adminPs[5];
+        viewWinOk = vt.set(viewSlot, regs) && vt.fillWindows(viewSlot, viewWin);
+    }
+    dev_.setSceneIssue(true);
+    bool scopeOk = false;
+    std::uint64_t epoch = 0;
+    if (viewWinOk) {
+        scopeOk = dev_.ownedBeginScope();
+        if (scopeOk) epoch = dev_.treeEnvEpoch(solid, viewSlot, scopeOk);
+    }
+    if (!viewWinOk || !scopeOk) {
+        for (Op& op : ops) composeLate(op, W.lateView);
+        restore();
+        return drawn;
+    }
+    ownedAmbient_.clear();
+    ownedCache_.mat.clear();
+    ownedCache_.light.clear();
+    ++ownedPassSerial_;
+    const std::uint64_t serial = ownedPassSerial_;
+    gpuscene::MaterialTable& mt = gpuscene::materialtable();
+    gpuscene::LightingImages& li = gpuscene::lightingimages();
+    gpuscene::IllumTable& illum = gpuscene::illumtable();
+    gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
+    const std::uint64_t pollFrame = dev_.stats().frames + 1;
+    T.inst.clear();
+    T.instTpl.clear();
+    T.instEntry.clear();
+    T.opOfInst.clear();
+    std::vector<std::uint32_t> drawnOps;
+    std::unordered_map<std::uint64_t, std::uint32_t> lightMemo;
+    const std::uint32_t scrubStride = 64;
+    const std::uint32_t scrubPhase = static_cast<std::uint32_t>((++T.scrubTick * 7919u) % scrubStride);
+    std::vector<std::uint8_t>& queueBytes = scr_.treeQueue;
+    for (std::size_t oi = 0; oi < ops.size(); ++oi) {
+        Op& op = ops[oi];
+        const auto it = T.ops.find(tro::OpKey{op.raw.context, op.raw.desc, static_cast<std::uint8_t>(op.list)});
+        if (it == T.ops.end()) {
+            composeLate(op, W.lateNoRec);
+            continue;
+        }
+        tro::OpRec& rec = *it->second;
+        tro::Stamp st;
+        std::uint32_t type = 0;
+        const std::uint8_t *rb = nullptr, *wrapper = nullptr, *shader = nullptr;
+        bool zpass = false;
+        if (!treeStampOf(op, st, type, rb, wrapper, shader, zpass) || zpass == solid || !(st == rec.stamp) || !shaderClassOk(shader)) {
+            composeLate(op, W.lateStamp);
+            continue;
+        }
+        if (rec.viewStamp != viewStamp) {
+            composeLate(op, W.lateView);
+            continue;
+        }
+        // the material's record polled (once per frame) and its structure as the templates saw it
+        {
+            std::uint64_t h = 0;
+            bool ok = rec.matSlot < gpuscene::MaterialTable::kCapacity;
+            if (ok) {
+                if (rec.matSlot >= ownedPolled_.size()) ownedPolled_.resize(gpuscene::MaterialTable::kCapacity, 0);
+                if (ownedPolled_[rec.matSlot] != pollFrame) {
+                    ok = mt.pollOwned(rec.matSlot, &StaticOps::materialTexture, this);
+                    if (ok) ownedPolled_[rec.matSlot] = pollFrame;
+                }
+                h = mix(mix(0, rec.matSlot), mt.structVersion(rec.matSlot));
+            }
+            if (!ok || h != rec.matHash) {
+                composeLate(op, W.lateMaterial);
+                continue;
+            }
+        }
+        // the engine slot's side effects (they run first in the slot's code): the queue sorted in place, MaskReference 80, the resources touched
+        const auto tSide = Clock::now();
+        leanTreeSort(rb, zpass);
+        leanMaskRef(shader);
+        for (const void* r : rec.touches) touchNow(r);
+        W.sideNs += ns(tSide, Clock::now());
+        // the queue as the engine sorted it, then the plan
+        const std::int32_t n = get<std::int32_t>(rb, zpass ? 0xd8 : 0xc0);
+        U8* qp = ptr(rb, zpass ? 0xd0 : 0xb8);
+        if (n <= 0) {
+            drawnOps.push_back(static_cast<std::uint32_t>(oi));
+            continue;  // (nothing queued: the slot draws nothing)
+        }
+        if (n > 65536 || qp == nullptr) {
+            composeLate(op, W.latePlan);
+            continue;
+        }
+        queueBytes.resize(static_cast<std::size_t>(n) * 0x18);
+        if (!rd(qp, 0, queueBytes.data(), queueBytes.size())) {
+            composeLate(op, W.latePlan);
+            continue;
+        }
+        const auto tPlan = Clock::now();
+        const std::size_t first = T.inst.size();
+        static thread_local std::vector<tro::Inst> plan;
+        int why = 0;
+        const bool planned = treePlan(zpass, type, st.tableMerge, rb, wrapper, queueBytes.data(), n, plan, why);
+        W.planNs += ns(tPlan, Clock::now());
+        if (!planned) {
+            composeLate(op, why == 5 ? W.lateSpecial : W.latePlan);
+            continue;
+        }
+        // the templates (made ready once per pass) and, in the solid pass, each instance's lighting entry
+        bool fail = false;
+        std::uint64_t failCounter = 0;
+        std::uint64_t* failWhy = &failCounter;
+        tro::Tpl* lastTpl = nullptr;
+        std::uint64_t lastKey = 0;
+        const auto tTpl = Clock::now();
+        for (const tro::Inst& x : plan) {
+            if (type == 1 && x.strip == 0) continue;  // (RenderFronds: a batch whose strip length is 0 is not drawn)
+            tro::Tpl* tpl = lastTpl;
+            if (tpl == nullptr || x.key != lastKey) {
+                const auto f = rec.tpls.find(x.key);
+                if (f == rec.tpls.end()) {
+                    failWhy = &W.lateNoTemplate;
+                    fail = true;
+                    break;
+                }
+                tpl = f->second.get();
+                lastTpl = tpl;
+                lastKey = x.key;
+                if (tpl->passSerial != serial) {
+                    tpl->passSerial = serial;
+                    tpl->passRun = 0;
+                    const int rc = treeTemplate(*tpl, viewWin, epoch, solid, scrubStride, scrubPhase);
+                    if (rc != 0) {
+                        tpl->passSerial = 0;
+                        failWhy = &W.lateTemplate;
+                        fail = true;
+                        break;
+                    }
+                    tpl->devBucket = dev_.ownedBucketKey(*tpl->r.cd, viewSlot);
+                }
+            }
+            std::uint32_t entry = gpuscene::kNoEntry;
+            if (solid) {
+                const gpuscene::ComposeParams p = paramsOfTpl(tpl->r);
+                if (!p.tableLit || p.holdsAll) {
+                    failWhy = &W.lateSpecial;
+                    fail = true;
+                    break;
+                }
+                const std::uint64_t lk = mix(reinterpret_cast<std::uintptr_t>(x.illum), (static_cast<std::uint64_t>(p.n) << 8) | p.firstLight);
+                const auto m = lightMemo.find(lk);
+                if (m != lightMemo.end()) {
+                    entry = m->second;
+                } else {
+                    const std::uint32_t slot = illum.ensureSlot(x.illum);
+                    entry = slot == gpuscene::kNoSlot ? gpuscene::kNoEntry : li.entryFor(slot, p);
+                    lightMemo.emplace(lk, entry);
+                }
+                if (entry == gpuscene::kNoEntry || !li.ready()) {
+                    failWhy = &W.lateSpecial;
+                    fail = true;
+                    break;
+                }
+            }
+            T.inst.push_back(x);
+            T.instTpl.push_back(tpl);
+            T.instEntry.push_back(entry);
+            T.opOfInst.push_back(static_cast<std::uint32_t>(oi));
+        }
+        W.tplNs += ns(tTpl, Clock::now());
+        if (fail) {
+            T.inst.resize(first);
+            T.instTpl.resize(first);
+            T.instEntry.resize(first);
+            T.opOfInst.resize(first);
+            composeLate(op, *failWhy);
+            continue;
+        }
+        drawnOps.push_back(static_cast<std::uint32_t>(oi));
+    }
+    // ---- rows and records, then the indirect calls
+    const std::uint32_t P = static_cast<std::uint32_t>(T.inst.size());
+    bool flushed = true;
+    std::uint32_t items = 0;
+    if (P != 0) {
+        const auto tRows = Clock::now();
+        flushed = false;
+        if (P <= T.rampLen) {
+            // runs: the instances of each template, templates ordered by their device bucket (consecutive templates of one bucket become one indirect call)
+            struct Run {
+                tro::Tpl* tpl;
+                std::vector<std::uint32_t> idx;
+            };
+            static thread_local std::vector<Run> runs;
+            runs.clear();
+            for (std::uint32_t i = 0; i < P; ++i) {
+                tro::Tpl* tpl = T.instTpl[i];
+                if (tpl->passRun == 0) {
+                    tpl->passRun = static_cast<std::uint32_t>(runs.size()) + 1;
+                    runs.push_back({tpl, {}});
+                }
+                runs[tpl->passRun - 1].idx.push_back(i);
+            }
+            std::vector<std::uint32_t>& order = T.order;
+            order.resize(runs.size());
+            for (std::uint32_t i = 0; i < order.size(); ++i) order[i] = i;
+            std::stable_sort(order.begin(), order.end(), [&](std::uint32_t a, std::uint32_t b) { return runs[a].tpl->devBucket < runs[b].tpl->devBucket; });
+            rhi::RingAlloc rows = dev_.allocOwnedRing((static_cast<std::uint64_t>(kVsWindowFirstRows) + static_cast<std::uint64_t>(kRowRegs) * P) * 16, 16);
+            if (rows.ptr != nullptr) {
+                auto* base = static_cast<std::uint8_t*>(rows.ptr);
+                std::memset(base, 0, static_cast<std::size_t>(kVsWindowFirstRows) * 16);
+                // c31: the header (the composed value of the first template that has one)
+                std::memcpy(base + 31 * 16, runs[order[0]].tpl->c31, 16);
+                std::uint32_t pos = 0;
+                T.items.clear();
+                bool ok = true;
+                for (const std::uint32_t ri : order) {
+                    Run& run = runs[ri];
+                    tro::Tpl& tpl = *run.tpl;
+                    const std::uint32_t slot = tpl.r.persist.handle.slot;
+                    if (!tab.live(slot)) {
+                        ok = false;
+                        break;
+                    }
+                    d3d9::Device::TreeItem item;
+                    item.cd = tpl.r.cd.get();
+                    item.bucket = tpl.devBucket;
+                    item.rec = tab.record(slot);
+                    item.rec.vsWin[2] = rows.ref.bits;  // c[n] = base + 16 n: c32 = row 0 (the header holds c31)
+                    std::uint32_t runStart = 0;
+                    const auto close = [&](std::uint32_t endIdx, std::uint32_t entry) {
+                        item.instances = endIdx - runStart;
+                        if (solid) item.rec.psWin[3] = li.windowBase(entry).bits;
+                        T.items.push_back(item);
+                        runStart = endIdx;
+                    };
+                    std::uint32_t curEntry = gpuscene::kNoEntry;
+                    for (std::uint32_t q = 0; q < run.idx.size(); ++q) {
+                        const std::uint32_t i = run.idx[q];
+                        std::memcpy(base + (static_cast<std::size_t>(kVsWindowFirstRows) + static_cast<std::size_t>(kRowRegs) * pos) * 16, T.inst[i].row, 64);
+                        ++pos;
+                        if (solid) {
+                            if (q != 0 && T.instEntry[i] != curEntry) close(q, curEntry);
+                            curEntry = T.instEntry[i];
+                        }
+                    }
+                    close(static_cast<std::uint32_t>(run.idx.size()), curEntry);
+                    run.idx.clear();
+                    tpl.passRun = 0;
+                }
+                W.rowNs += ns(tRows, Clock::now());
+                if (ok && pos == P) {
+                    items = static_cast<std::uint32_t>(T.items.size());
+                    const auto tf = Clock::now();
+                    flushed = dev_.ownedTreeFlush(T.items, viewSlot, P);
+                    W.flushNs += ns(tf, Clock::now());
+                }
+            }
+            for (Run& run : runs) {
+                run.tpl->passRun = 0;
+                run.idx.clear();
+            }
+        }
+        if (!flushed) {
+            // nothing was queued: the ops that contributed are composed instead
+            std::uint32_t last = ~0u;
+            std::vector<std::uint32_t> lateOps;
+            for (const std::uint32_t oi : T.opOfInst) {
+                if (oi == last) continue;
+                last = oi;
+                lateOps.push_back(oi);
+            }
+            for (const std::uint32_t oi : lateOps) {
+                std::erase(drawnOps, oi);
+                composeLate(ops[oi], W.lateFlush);
+            }
+        }
+    }
+    for (const std::uint32_t oi : drawnOps) {
+        (void)oi;
+        ++W.opsDrawn;
+    }
+    if (flushed) {
+        W.instances += P;
+        W.items += items;
+        ++W.flushes;
+        drawn += items;
+    }
+    restore();
+    W.tplNs += 0;
+    (void)t0;
+    return drawn;
+}
+
+void StaticOps::treeReport() {
+    if (!ownedTrees_ || !tro_) return;
+    tro::State& T = *tro_;
+    tro::Stats& q = T.window;
+    T.total.add(q);
+    const double nv = static_cast<double>(std::max<std::uint64_t>(1, q.ownedViews));
+    const std::uint64_t differing = q.checkRowDiff + q.checkKeyDiff + q.checkCountDiff + q.checkTplDiff + q.checkMiss;
+    spdlog::info("native: owned trees (5 s): {} main views ({} owned), tree ops looked at {}, taken {}, drawn from templates {}, composed late {} (no record {}, stamp {}, view {}, material {}, plan {}, special lighting {}, "
+                 "no template {}, template refused {}, flush {}); {} instances in {} items over {} flushes; templates built {} replaced {} (not retained {}, bad ops {}); persistent blocks derived {} reused {} refused {} (table full {}); "
+                 "check frames: {} ops / {} instances compared, {} draws against templates: DIFFERING {} (rows {}, buckets {}, counts {}, templates {}), MISS {} of {} compared; "
+                 "CPU per owned view: take {:.1f} us, side effects {:.1f} us, plan {:.1f} us, templates {:.1f} us, rows {:.1f} us, flush {:.1f} us",
+                 q.views, q.ownedViews, q.opsSeen, q.opsTaken, q.opsDrawn, q.opsLate, q.lateNoRec, q.lateStamp, q.lateView, q.lateMaterial, q.latePlan, q.lateSpecial, q.lateNoTemplate, q.lateTemplate, q.lateFlush,
+                 q.instances, q.items, q.flushes, q.built, q.replaced, q.notRetained, q.badOps, q.derived, q.reused, q.refused, q.tableFull, q.checkOps, q.checkInst, q.checkDraws, differing, q.checkRowDiff, q.checkKeyDiff,
+                 q.checkCountDiff, q.checkTplDiff, q.checkMiss, q.checkMissCompared, static_cast<double>(q.takeNs) / nv / 1000.0, static_cast<double>(q.sideNs) / nv / 1000.0, static_cast<double>(q.planNs) / nv / 1000.0,
+                 static_cast<double>(q.tplNs) / nv / 1000.0, static_cast<double>(q.rowNs) / nv / 1000.0, static_cast<double>(q.flushNs) / nv / 1000.0);
+    q = {};
+    if (differing != 0) {
+        ownedTrees_ = false;
+        T.active = false;
+        for (auto& v : T.taken) v.clear();
+        spdlog::error("native: owned trees turned off: {} DIFFERING on the composed frames (the plan / template is not what the composition drew)", differing);
+    }
+}
+
+}  // namespace rvk::native

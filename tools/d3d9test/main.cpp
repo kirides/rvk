@@ -1732,6 +1732,274 @@ mov oC0, r0
     dev.release(std::move(ib));
 }
 
+// F4-3 owned SpeedTrees through the device's own path (frame-ownership.md 7.25): a tree-like hardware-instanced draw (one quad, six instances, stream 1 = the identity
+// ramp, a vertex shader that reads its row through c32[a0.x] with a0 = 4 x the ramp value, c12 from the view block) is drawn (a) the normal way with the rows in the
+// register file and (b) as ONE retained template (the scene ABI v2 form of the draw, its DrawBlock a persistent slot) with a ring block of rows (window 2 = c31 header +
+// c32 + 4 p) and Device::ownedTreeFlush: one run of six instances, three runs of two (one indirect call, three argument records, the same picture), the rows in the
+// reverse order (the picture follows the rows: they are really read), and the guards (a null window base, an instance count that is not the rows', a draw without a
+// v2 pipeline): nothing drawn, drawn again right after. 0 bytes may differ from the normal draws.
+void testOwnedTrees(Fixture& f) {
+    Device& dev = f.dev;
+    dev.setSceneDraws(true, 0);
+    if (!dev.sceneDrawsActive()) {
+        std::printf("  SKIP owned trees: scene draws are not available on this device\n");
+        return;
+    }
+    static const char* kVsTree = R"(
+vs_3_0
+dcl_position v0
+dcl_color v1
+dcl_texcoord4 v3
+dcl_position o0
+dcl_color o1
+add r0.x, v3.x, v3.x
+add r0.x, r0.x, r0.x
+mova a0.x, r0.x
+mov r1, c32[a0.x]
+mov r2, c33[a0.x]
+add o0, v0, r1
+mul r3, v1, r2
+add o1, r3, c12
+)";
+    static const char* kPsTree = R"(
+ps_3_0
+dcl_color v0
+mov oC0, v0
+)";
+    const VertexElement kTreeDecl[] = {
+        {0, 0, DECLTYPE_FLOAT4, 0, 0 /*POSITION*/, 0},
+        {0, 16, DECLTYPE_D3DCOLOR, 0, 10 /*COLOR*/, 0},
+        {0, 20, DECLTYPE_FLOAT2, 0, 5 /*TEXCOORD*/, 0},
+        {1, 0, DECLTYPE_FLOAT1, 0, 5 /*TEXCOORD*/, 4},
+        {kDeclEndStream, 0, DECLTYPE_UNUSED, 0, 0, 0},
+    };
+    const auto vsT = shaderFrom(dev, kVsTree);
+    const auto psT = shaderFrom(dev, kPsTree);
+    auto decl = dev.createVertexDecl(kTreeDecl);
+    if (!vsT || !psT || !decl) {
+        std::printf("  FAIL owned trees: shaders / declaration\n");
+        ++g_failures;
+        return;
+    }
+    constexpr std::uint32_t kInst = 6, kSlots = 16, kRamp = 64;
+    std::vector<Vertex> verts = {{0.0f, 0.5f, 0.5f, 1, 0xFFFFFFFFu, 0, 0}, {0.25f, 0.5f, 0.5f, 1, 0xFFFFFFFFu, 1, 0}, {0.0f, -0.5f, 0.5f, 1, 0xFFFFFFFFu, 0, 1}, {0.25f, -0.5f, 0.5f, 1, 0xFFFFFFFFu, 1, 1}};
+    const std::uint16_t idx[6] = {0, 1, 2, 1, 3, 2};
+    auto vb = dev.createBuffer(static_cast<std::uint32_t>(verts.size() * sizeof(Vertex)), USAGE_WRITEONLY, POOL_MANAGED, false, false);
+    auto ib = dev.createBuffer(sizeof(idx), USAGE_WRITEONLY, POOL_MANAGED, true, false);
+    auto ramp = dev.createBuffer(kRamp * 4, USAGE_WRITEONLY, POOL_MANAGED, false, false);
+    std::memcpy(vb->lock(0, 0, 0), verts.data(), verts.size() * sizeof(Vertex));
+    vb->unlock();
+    std::memcpy(ib->lock(0, 0, 0), idx, sizeof(idx));
+    ib->unlock();
+    {
+        float r[kRamp];
+        for (std::uint32_t i = 0; i < kRamp; ++i) r[i] = static_cast<float>(i);
+        std::memcpy(ramp->lock(0, 0, 0), r, sizeof(r));
+        ramp->unlock();
+    }
+    rhi::Device* rd = dev.rhi();
+    auto tableBuf = rd->createBuffer({static_cast<std::uint64_t>(kSlots) * shader::abi::kViewBlock2Size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, rhi::Memory::Upload, "owned trees view table"});
+    if (!tableBuf) {
+        std::printf("  FAIL owned trees: view table buffer\n");
+        ++g_failures;
+        return;
+    }
+    const auto tw = tableBuf->shaderRef(0);
+    const rhi::GpuRef tableRef = rhi::GpuRef::fromWords(tw[0], tw[1]);
+    std::vector<shader::abi::ViewBlock2> twin(kSlots);
+    std::memset(twin.data(), 0, twin.size() * sizeof(shader::abi::ViewBlock2));
+    const float c12[4] = {0.02f, 0.10f, 0.05f, 0.0f};
+    const std::uint32_t viewSlot = 3;
+    {
+        shader::abi::ViewBlock2& b = twin[viewSlot];
+        std::memcpy(b.vs1[0], c12, 16);
+        dev.viewPosFix(b.posFix);
+        std::memcpy(tableBuf->map(), twin.data(), twin.size() * sizeof(shader::abi::ViewBlock2));
+    }
+    OwnedWindows vw;
+    {
+        const auto set = [&](OwnedWindows::Win& w, bool vertex, std::uint32_t win, std::uint32_t covered) {
+            w.kind = OwnedWindows::Kind::View;
+            w.base = rhi::GpuRef{gpuscene::ViewTable::windowBase(tableRef, viewSlot, vertex, win)};
+            w.covered = covered;
+        };
+        set(vw.w[0][0], true, 0, 12);
+        set(vw.w[0][1], true, 1, 19);
+        set(vw.w[1][0], false, 0, 5);
+        vw.viewSlot = viewSlot;
+    }
+    // the rows: c32 = (dx, 0, 0, 0), c33 = the tint
+    float rows[kInst][8];
+    for (std::uint32_t i = 0; i < kInst; ++i) {
+        const float r[8] = {-1.0f + 0.3f * static_cast<float>(i), 0.0f, 0.0f, 0.0f, 0.2f + 0.14f * static_cast<float>(i), 0.9f - 0.12f * static_cast<float>(i), 0.3f, 1.0f};
+        std::memcpy(rows[i], r, sizeof(r));
+    }
+    const auto begin = [&] {
+        f.reset();
+        dev.drawTag() = {};
+        dev.drawTag().source = draws::Source::SpeedTree;
+        dev.phases().push(scene::View::Main, scene::Pass::Solid);
+        dev.setVertexDecl(decl.get());
+        dev.setVertexShader(vsT);
+        dev.setPixelShader(psT);
+        dev.setStreamSource(0, vb.get(), 0, sizeof(Vertex));
+        dev.setStreamSource(1, ramp.get(), 0, 4);
+        dev.setStreamSourceFreq(0, STREAMSOURCE_INDEXEDDATA | kInst);
+        dev.setStreamSourceFreq(1, STREAMSOURCE_INSTANCEDATA | 1);
+        dev.setIndices(ib.get());
+    };
+    gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
+    tab.setActive(true);
+    if (!tab.ensure(dev)) {
+        std::printf("  FAIL owned trees: the draw record tables\n");
+        ++g_failures;
+        return;
+    }
+    const auto end = [&](const char* name) {
+        tab.flush(dev);
+        dev.setSceneIssue(false);
+        dev.phases().pop();
+        dev.setStreamSourceFreq(0, 1);
+        dev.setStreamSourceFreq(1, 1);
+        return capture(dev, name);
+    };
+    const auto bad = [&](const Pixels& ref, const Pixels& p, const char* what) {
+        std::uint32_t n = 0;
+        for (std::size_t i = 0; i < ref.bgra.size() && i < p.bgra.size(); ++i) n += ref.bgra[i] != p.bgra[i];
+        if (n != 0 || ref.bgra.size() != p.bgra.size()) {
+            std::printf("  FAIL owned trees (%s): %u bytes differ from the normal draws\n", what, n);
+            ++g_failures;
+        }
+        return n;
+    };
+    // reference: the normal instanced draw, rows in the register file
+    const auto setRegs = [&](bool reverse) {
+        dev.setVertexShaderConstantF(12, c12, 1);
+        for (std::uint32_t i = 0; i < kInst; ++i) dev.setVertexShaderConstantF(32 + 4 * i, rows[reverse ? kInst - 1 - i : i], 2);
+    };
+    begin();
+    setRegs(false);
+    dev.drawIndexedPrimitive(PT_TRIANGLELIST, 0, 0, 4, 0, 2);
+    const Pixels ref = end("ownedt_ref");
+    // (the reversed rows: instance p draws row 5 - p; the picture differs from the reference)
+    begin();
+    setRegs(true);
+    dev.drawIndexedPrimitive(PT_TRIANGLELIST, 0, 0, 4, 0, 2);
+    const Pixels refRev = end("ownedt_refrev");
+    dev.setSceneViewTable(tableRef, twin.data(), kSlots);
+    dev.setSceneViews(true);
+    dev.setSceneTrees(true);
+    Device::CachedDraw cd;
+    bool ready = false;
+    for (int i = 0; i < 1200 && !ready; ++i) {
+        begin();
+        setRegs(false);
+        dev.setSceneIssue(true);
+        dev.beginCapture(&cd);
+        dev.drawIndexedPrimitive(PT_TRIANGLELIST, 0, 0, 4, 0, 2);
+        dev.endCapture();
+        end("ownedt_capture");
+        ready = cd.valid && cd.scenePipeline2 != GamePipeline::None;
+        if (!ready) Sleep(50);
+    }
+    if (!ready) {
+        std::printf("  FAIL owned trees: the draw never got its v2 pipeline\n");
+        ++g_failures;
+        return;
+    }
+    if (cd.scenePipeline != GamePipeline::None) {
+        std::printf("  FAIL owned trees: a tree draw got a scene ABI v1 pipeline (its composed packet would lose the instance count)\n");
+        ++g_failures;
+    }
+    // the template: derived once, its DrawBlock a persistent slot
+    const std::uint32_t slot = tab.alloc();
+    OwnedWindows ow = vw;
+    ow.w[0][2].kind = OwnedWindows::Kind::Object;
+    ow.w[0][2].base = tab.zeroRef().plus(-static_cast<std::int64_t>(shader::abi::kVsWindowFirst[2]) * 16);
+    ow.w[0][2].covered = shader::abi::kVsWindowFirst[3] - shader::abi::kVsWindowFirst[2];
+    {
+        begin();
+        dev.setSceneIssue(true);
+        Device::DeriveIn in;
+        in.streams[0] = vb.get();
+        in.strides[0] = sizeof(Vertex);
+        in.streams[1] = ramp.get();
+        in.strides[1] = 4;
+        in.indices = ib.get();
+        in.alphaFunc = 8u;
+        Device::OwnedPersist out;
+        const int rc = dev.ownedDerive(cd, in, ow, tab.blockRef(slot), tab.zeroRef(), true, out);
+        if (rc != 0) {
+            std::printf("  FAIL owned trees: the template's derivation returned %d\n", rc);
+            ++g_failures;
+            end("ownedt_derive");
+            return;
+        }
+        tab.write(slot, out.rec, out.blk);
+        end("ownedt_derive");
+    }
+    // one frame: the rows in a ring block (c31 header, then 64 bytes per position), the runs of the items, optionally the rows reversed / a guard broken
+    const auto frame = [&](const char* name, const std::vector<std::uint32_t>& runs, bool reverse, std::uint32_t breakWhat, std::uint64_t& calls, bool& flushed) {
+        begin();
+        dev.setSceneIssue(true);
+        rhi::RingAlloc ra = dev.allocOwnedRing((32u + 4u * kInst) * 16u, 16);
+        auto* base = static_cast<std::uint8_t*>(ra.ptr);
+        std::memset(base, 0, 32u * 16u);
+        for (std::uint32_t p = 0; p < kInst; ++p) std::memcpy(base + (32u + 4u * p) * 16u, rows[reverse ? kInst - 1 - p : p], sizeof(rows[0]));
+        std::vector<Device::TreeItem> items;
+        for (const std::uint32_t n : runs) {
+            Device::TreeItem it;
+            it.cd = &cd;
+            it.bucket = dev.ownedBucketKey(cd, viewSlot);
+            it.rec = tab.record(slot);
+            it.rec.vsWin[2] = breakWhat == 1 ? 0 : ra.ref.bits;
+            it.instances = n;
+            items.push_back(it);
+        }
+        std::uint32_t positions = kInst;
+        if (breakWhat == 2) positions = kInst + 1;
+        const auto s0 = dev.sceneStats();
+        flushed = dev.ownedTreeFlush(items, viewSlot, positions);
+        calls = dev.sceneStats().indirectCalls - s0.indirectCalls;
+        return end(name);
+    };
+    std::uint64_t calls = 0;
+    bool flushed = false;
+    bad(ref, frame("ownedt_one", {kInst}, false, 0, calls, flushed), "one run of six instances");
+    if (!flushed || calls != 1) {
+        std::printf("  FAIL owned trees: one run: flushed %d, %llu indirect calls (expected 1)\n", flushed, static_cast<unsigned long long>(calls));
+        ++g_failures;
+    }
+    bad(ref, frame("ownedt_three", {2, 2, 2}, false, 0, calls, flushed), "three runs of two instances");
+    if (!flushed || calls != 1) {
+        std::printf("  FAIL owned trees: three runs of one bucket: flushed %d, %llu indirect calls (expected 1)\n", flushed, static_cast<unsigned long long>(calls));
+        ++g_failures;
+    }
+    bad(refRev, frame("ownedt_rev", {kInst}, true, 0, calls, flushed), "the rows in the reverse order");
+    {
+        const Pixels p = frame("ownedt_nullbase", {kInst}, false, 1, calls, flushed);
+        const Pixels q = frame("ownedt_count", {kInst}, false, 2, calls, flushed);
+        const bool count = !flushed;
+        if (p.bgra[(32 * p.w + 2) * 4 + 1] != 0 || q.bgra[(32 * q.w + 2) * 4 + 1] != 0 || !count) {
+            std::printf("  FAIL owned trees: guards: a null window base / an instance count that is not the positions drew something or was accepted (count refused %d)\n", count);
+            ++g_failures;
+        }
+    }
+    bad(ref, frame("ownedt_after_guards", {kInst}, false, 0, calls, flushed), "the draw after the refusals");
+    std::printf("  owned trees: %llu flushes, %llu items, %llu instances, %llu indirect packets, %llu refused\n", static_cast<unsigned long long>(dev.treeFlushStats.flushes),
+                static_cast<unsigned long long>(dev.treeFlushStats.items), static_cast<unsigned long long>(dev.treeFlushStats.instances), static_cast<unsigned long long>(dev.treeFlushStats.packets),
+                static_cast<unsigned long long>(dev.treeFlushStats.refused));
+    tab.release(slot);
+    tab.setActive(false);
+    tab.destroy();
+    dev.setSceneTrees(false);
+    dev.setSceneViews(false);
+    dev.setSceneDraws(false, 0);
+    dev.release(std::move(vb));
+    dev.release(std::move(ib));
+    dev.release(std::move(ramp));
+}
+
 // F2c-1 owned windows through the device's own path (frame-ownership.md 7.13): a translated vertex shader that reads VS window 1 (c12) and window 2 (c32.w, c33)
 // is drawn (a) with the registers set the normal way and (b) with the register file holding junk and the windows served from persistent images
 // (a view block's c12..c30 + an object record's c31..c35 in one host-visible buffer behind a 4 KiB pad, window bases = image - first x 16, as the tables
@@ -2142,7 +2410,7 @@ int main(int argc, char** argv) {
         {"mip chain stretch rect", testMipChainStretchRect}, {"dynamic buffer", testDynamicBuffer}, {"dynamic buffer across frames", testDynamicBufferAcrossFrames},
         {"partial texture lock", testPartialLock}, {"lock after upload", testLockAfterUpload},
         {"read-only lock of a fresh texture", testReadOnlyLockOfFreshTexture},
-        {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned persistent (F2c-4a)", testOwnedPersistent}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
+        {"scene draws (indirect)", testSceneDraws}, {"owned replay (records)", testOwnedReplay}, {"owned replay v2 (view table)", testOwnedReplayV2}, {"owned persistent (F2c-4a)", testOwnedPersistent}, {"owned trees (F4-3)", testOwnedTrees}, {"owned windows (VS 1 / 2)", testOwnedWindows}, {"owned submit (F4-1)", testOwnedSubmit}, {"fvf vertex buffer", testFvf}, {"cube map face lock", testCubeLock}, {"load surface from surface", testLoadSurfaceFromSurface},
     };
     for (const auto& [name, fn] : cases) {
         const int before = g_failures;

@@ -90,7 +90,8 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
         lastVariant_.sceneActive = true;
         lastVariant_.scenePending = false;
     }
-    if ((kind != draws::Kind::StaticMesh && !(sceneBb_ && kind == draws::Kind::SpeedTreeBillboard)) || phase.view != scene::View::Main ||
+    const bool tree = sceneTrees_ && sceneV2_ && kind == draws::Kind::SpeedTree;  // F4-3: the scene ABI v2 form only (scenePipe_ stays None: the composed draw is drawn as it was)
+    if ((kind != draws::Kind::StaticMesh && !(sceneBb_ && kind == draws::Kind::SpeedTreeBillboard) && !tree) || phase.view != scene::View::Main ||
         (phase.pass != scene::Pass::Solid && phase.pass != scene::Pass::DepthPrepass)) {
         return;
     }
@@ -122,9 +123,9 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
         ++sceneStats_.fbVariantKind;
         return;
     }
-    const rhi::ShaderModule vsM = variant(vs_, lodVs ? VariantSlot::SceneVsLod : VariantSlot::SceneVs);
-    const rhi::ShaderModule fsM = variant(ps_, sceneFs);
-    if (vsM == rhi::ShaderModule::None || fsM == rhi::ShaderModule::None) {
+    const rhi::ShaderModule vsM = tree ? rhi::ShaderModule::None : variant(vs_, lodVs ? VariantSlot::SceneVsLod : VariantSlot::SceneVs);
+    const rhi::ShaderModule fsM = tree ? rhi::ShaderModule::None : variant(ps_, sceneFs);
+    if (!tree && (vsM == rhi::ShaderModule::None || fsM == rhi::ShaderModule::None)) {
         const bool failed = vs_->variantState[static_cast<std::size_t>(VariantSlot::SceneVs)].load() == 3 || ps_->variantState[static_cast<std::size_t>(sceneFs)].load() == 3;
         if (failed) {
             ++sceneStats_.fbVariantFailed;
@@ -135,8 +136,10 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
         return;
     }
     PipelineDesc sd = pd;
-    sd.vs = vsM;
-    sd.fs = fsM;
+    if (!tree) {
+        sd.vs = vsM;
+        sd.fs = fsM;
+    }
     if (!workVi_.dynamicLayout) {
         // the vertex layout is part of the pipeline: one more binding (the ref stream, per instance) + attribute 24
         if (pd.bindingCount >= rhi::kMaxVertexBindings || pd.attributeCount >= rhi::kMaxVertexAttributes) {
@@ -150,21 +153,23 @@ void Device::sceneDecide(const PipelineDesc& pd, bool giDraw, bool captureDraw, 
         ++sceneStats_.fbNoRoom;
         return;
     }
-    const GamePipeline sp = findPipeline(sd);
-    if (sp == GamePipeline::None) {
-        game_->prewarmOncePipeline(sd);
-        ++sceneStats_.fbPipelinePending;
-        pending();
-        return;
+    if (!tree) {
+        const GamePipeline sp = findPipeline(sd);
+        if (sp == GamePipeline::None) {
+            game_->prewarmOncePipeline(sd);
+            ++sceneStats_.fbPipelinePending;
+            pending();
+            return;
+        }
+        if (!ensureSceneRef()) {
+            ++sceneStats_.fbRingFull;
+            return;
+        }
+        scenePipe_ = sp;
     }
-    if (!ensureSceneRef()) {
-        ++sceneStats_.fbRingFull;
-        return;
-    }
-    scenePipe_ = sp;
     // F2c-4-0: the scene ABI v2 form of the same draw (retained draws that the owned path replays: the main view's static meshes); the v1 form stays what the composed
     // path draws. Not ready yet = the draw is not retained as replayable (scenePending), the v1 form still draws it now
-    if (sceneV2_ && kind == draws::Kind::StaticMesh) {
+    if (sceneV2_ && (kind == draws::Kind::StaticMesh || tree)) {
         const rhi::ShaderModule vs2 = variant(vs_, VariantSlot::SceneVs2);
         const rhi::ShaderModule fs2 = variant(ps_, sceneView2Of(sceneFs));
         if (vs2 == rhi::ShaderModule::None || fs2 == rhi::ShaderModule::None) {

@@ -2166,6 +2166,7 @@ void StaticOps::opEnterImpl(const Op& op) {
         taken_ = true;
         recEnd(op);
         bbEnd(op);
+        treeCompEnd(op);
     }
     if (taken_) leanCommit();
 }
@@ -2515,7 +2516,7 @@ void StaticOps::issue() {
     gpuscene::MeshPartTable& meshParts = gpuscene::meshparts();
     const bool owned = ownedWindows_ && gpuscene::windowtables().active();
     // F2b-1: the main view's static draws (z pre-pass + solid ops) are recorded as scene draws by the device
-    const bool sceneIssue = sceneDraws_ && viewKind_ == ViewKind::Main && (g_ == &groups_[static_cast<std::size_t>(Group::Static)] || bbSceneIssue());
+    const bool sceneIssue = sceneDraws_ && viewKind_ == ViewKind::Main && (g_ == &groups_[static_cast<std::size_t>(Group::Static)] || bbSceneIssue() || treeSceneIssue());
     dev_.setSceneIssue(sceneIssue);
     const bool recOn = ownedRecords_ && recs_ && recs_->active && !inNonOp_ && op_ != nullptr && op_ == recs_->op && recs_->probes.size() == drawCount_;
     if (recOn) dev_.setSceneProbe(&recs_->probe);
@@ -2736,6 +2737,7 @@ void StaticOps::report() {
     recReport();
     ownedReport();
     bbReport();
+    treeReport();
     static constexpr const char* kListNames[] = {"z", "solid", "debug", "sky", "refracted", "alpha", "late", "non-op"};
     if (active()) {
         spdlog::info("native: register file: mode {} ({}), engine code left to the engine {} times, {} registers merged from it (total), {} shaders' pools held",

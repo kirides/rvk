@@ -206,6 +206,7 @@ add_library(rvk_core STATIC
     src/native/op_records.h
     src/native/bb_records.h
     src/native/static_ops_bb.cpp
+    src/native/static_ops_trees_owned.cpp
     src/native/static_ops_nonop.cpp
     src/native/static_ops_fx.cpp
     src/native/static_ops_sky.cpp
@@ -275,6 +276,7 @@ add_library(rvk_core STATIC
     src/gpuscene/draw_record_table.cpp
     src/gpuscene/draw_record_table.h
     src/d3d9/owned_persist.cpp
+    src/d3d9/owned_trees.cpp
     src/gpuscene/view_table.h
     src/gpuscene/window_tables.h
     src/gpuscene/object_table.cpp
