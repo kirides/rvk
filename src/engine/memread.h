@@ -10,8 +10,9 @@
 
 namespace rvk::engine {
 
-// Inline (header): x64 SEH costs nothing until a fault, so the guard is one load / copy at the call site; constant sizes expand to plain moves
-// instead of a vcruntime memcpy call, and no call per field (cpuclean: safeLoad8 / safeRead were 0.3 ms per frame of calls + memcpy)
+// Header definitions (x64 SEH costs nothing until a fault). NOTE (cpuclean, measured): MSVC does not inline a function that holds a __try, so these
+// stay calls and the profile's safeLoad8 self time (cache misses on the engine memory it reads) did not move; the gain has to come from fewer
+// reads (one block per object: safeReadN, lights.cpp), not from inlining
 // copies `size` bytes; false when the source is not readable
 inline bool safeRead(const void* src, void* dst, std::size_t size) {
     __try {
