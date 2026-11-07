@@ -1486,6 +1486,48 @@ Files: `src/d3d9/owned_trees.cpp` / `device.h` (`ownedTreeFlush(items, recs, pos
 * **Per-instance LOD start (problem 4, decision).** Kept per instance (the engine draws a batch with its first instance's start index, 0.25 % of the instances here: 520 / 610 per 5 s of ~130 k compared): an accepted Full picture change, reported as `per-instance LOD start differs`, not counted as DIFFERING. `lod.trees=3` ran on D3D12 (above) with no refusal. **Not done:** harbour_docks D3D12 (the first attempt with GBV timed out), refcompare Full, `rvk_rtwalk` (composed by design with wind), picture A/B crops toggling `native.owned_trees` inside one hold (tree lighting may differ only where the engine merged a batch under one illumination).
 * **Open.** (1) GPU +0.04 ms: fetch of the record per position; merging records by lighting content would shrink the record table only. (2) Animated RT trees from owned runs (capture variant). (3) The list above; (4) shadow views (F4-4) and persistent per-tree records (F4-5) untouched.
 
+### 7.26 Owned chain tally (2026-11-07, main 37a4564: F2c-4a / F2c-4b / F4-3 trees / performance.md 33; measurement only, no code change)
+
+Question: is the whole owned chain a net CPU gain in Full yet, and what does each layer cost / save? **Answer: no. Full defaults 5.90 ms, the whole chain (arm A) 6.77 ms = +0.88 ms (+15 %); the loss is the table / records layer (+1.07), the owned draws win back -0.32, trees + billboards add +0.12 (noise-level).** Recipe: savegame `Risen_Save_0005`, `RisenTest.exe`, vsync off, `-Perf`, `-PlayerDefaults`, `lod.view / trees / meshes = 2`, `hold=60`, shared copy + default lock (the copy still lives at the old `B:\DevDrive\risen-test-vk`), 2 rounds interleaved W F T S A, mean of the steady 5 s `perf:` windows of each run (world windows with GPU > 1 ms, the first one dropped: 11 - 13 per run); logs + `ana.py` / `drive.ps1` in `rvk-work/scratch/tally/`. `-Setting` does not apply `needs`, so every prerequisite is set explicitly:
+
+* **W** `-Mode wrapper`. **F** `-Mode full`, defaults (table lighting on, packet cache, lean).
+* **T** F + the table chain without owned_static: `native.illum_table, material_table, lighting_images, owned_windows, owned_objects, owned_records, scene_draws`.
+* **S** T + `native.owned_static, owned_persistent` + `rt.table_entries`. **A** S + `native.owned_trees, owned_billboards`.
+
+**Verified acting** (last 5 s window of each run): T: owned windows draws 545 k per 5 s (786 / frame), owned objects served VS2 132 k, lighting images 114 entries / 9,217 compose passes, owned records 54,054 eligible ops derived and compared **every frame** (no owned_static: nothing submitted from them), no `owned static` lines (stage off, as intended). S: `owned static` 718 main views (574 compacted, 72 check frames, **0 gated off**), owned 44.8 k of 114 k ops (39.2 %), `owned persistent` reused 92.6 %, MISS 0, DIFFERING 0; `rt: scene table` entries 548, covered draws skipped 90 %, `observeOwned` 1,175 calls (66 records / frame). A: additionally `owned trees` 719 main views (575 owned), 53.9 k tree ops taken, 54 k drawn from templates, composed late 0, 73.0 commands / flush, DIFFERING 0, MISS 0; `owned billboards` 4,176 of 4,176 recordable ops (100 %), DIFFERING 0. Nothing was gated off or refused in any arm (the only refusals: 573 `replay refusals: texture` per 5 s in S / A, composed late as designed). RT stays on in every arm (`rt.allow` default): in A the RT scene is served by `ownedTreeObserve` and trees are owned.
+
+**Per arm** (mean of the two runs; run 1 / run 2 in brackets; engine + HAL CPU per frame; GPU = `perf:` GPU per frame, see the noise note):
+
+| arm | CPU ms / frame | GPU ms / frame | fps | injected-pass CPU (ms) |
+|---|---|---|---|---|
+| W | 4.96 (5.05 / 4.86) | 2.21 / 2.55 | 190 | 0.21 |
+| F | 5.90 (5.93 / 5.86) | 2.11 / 2.74 | 161 | 0.54 |
+| T | 6.97 (7.04 / 6.90) | 2.16 / 2.33 | 138 | 0.55 |
+| S | 6.65 (6.66 / 6.64) | 2.18 / 3.08 | 145 | 0.59 |
+| A | 6.77 (6.70 / 6.84) | 2.11 / 3.04 | 142 | 0.58 |
+
+**Deltas** (CPU, ms / frame; mean, per-round range):
+
+| delta | what it adds | CPU | GPU (round 1 only) | fps |
+|---|---|---|---|---|
+| F - W | the native frame (Full vs Wrapper) | **+0.94** (+0.88 .. +1.00) | -0.10 | -28 |
+| T - F | tables: material / illum / lighting images, windows, objects, records (all derived + compared every frame) | **+1.07** (+1.03 .. +1.11) | +0.04 | -23 |
+| S - T | owned_static + owned_persistent + rt.table_entries | **-0.32** (-0.26 .. -0.38) | +0.03 | +6 |
+| A - S | owned trees + billboards | **+0.12** (+0.04 .. +0.20) | -0.07 | -3 |
+| A - F | the whole chain | **+0.88** (+0.77 .. +0.98) | 0.00 | -19 |
+
+Run-to-run noise of the CPU mean: 0.03 .. 0.15 ms between the two runs of an arm, window sd 0.02 - 0.24. **GPU: round 2 was contended by another agent's game** (F 2.74 / S 3.08 / A 3.04 against 2.11 / 2.18 / 2.11 in round 1; T 2.33, W 2.55 less so): use round 1; there the GPU of all arms is within +-0.1 ms (2.11 - 2.21), so no layer costs GPU at this scene (trees' per-position record fetch +0.03 .. 0.05 of 7.25b is inside that). The CPU runs are not affected by the GPU contention (vsync off, CPU-bound, per-arm sd small), but fps follows the CPU numbers.
+
+**What each layer costs / saves** (owned lines of the last windows, per main view; ~1 main view per frame):
+
+* **Tables + records (T - F = +1.07):** the largest item. T derives and compares every eligible op of the main view each frame (54 k ops per 5 s = ~75 per frame) and submits nothing derived, plus the windows (material / view / object / lighting windows served from tables, 786 draws per frame, with `uploaded` still 365 k / 5 s for the other windows), the object table, the lighting image compose passes (9.2 k per 5 s = 64 per frame, 114 entries each) and the per-frame material polls (779 k per 5 s). Without owned_static this is pure overhead by construction (`owned_records` derives and compares; nothing derived is submitted); S shows the same tables paying back.
+* **owned_static + persistent + rt.table_entries (S - T = -0.32):** owned static per main view (S run 1): compaction 51.6 us (of it stamp / record checks), view + windows setup 2.6, material polls + stamps 7.4, build 102.7, side effects 4.1 = **~168 us ~ 0.17 ms / frame** (A: 177 us), `owned persistent` flush 8 us; it draws 39.2 % of the ops from records (the rest: hardware batch 7.5 k, instance list 14.9 k, hierarchy 47 k per 5 s), 92.6 % of the persistent records reused. The saving it buys is the composition + issue of those ops (~-0.5 .. -0.7 with the records no longer compared) and the RT entries' observation (`rt.scene @AfterDepthPrepass` 0.15 -> 0.18 .. 0.19 ms: the record pass costs +0.04, the per-draw observation it replaces is not timed separately; covered draws skipped 90 %, `observeOwned` 66 records / frame). The two layers cannot be split here (S sets them together; 7.24's ablation put static + persistent at ~ -0.5 and billboards + RT entries at ~ +0.6).
+* **Trees + billboards (A - S = +0.12, inside the noise):** owned trees per owned view (575 of 719 views = 80 %; the rest are check / warm-up frames that compose): side effects 41 us, plan 142, templates 215, rows 177 (observers included), flush 25 = **~600 us per owned view ~ 0.48 ms / frame**, against the ~1.3 ms the composition + issue of these ops cost (7.24): the saving lands at ~ -0.4 .. -0.6, eaten by the 20 % composed frames (compose + plan + templates) and by the billboard record (`owned billboards` is 100 % valid, no composition on owned frames). 54 k tree ops / 779 k instances per 5 s become 73 commands per flush against 150 composed batches per view (GPU neutral, above). 7.25b's A/B on trees alone (RT on: -0.0 .. -0.25) agrees.
+* **F - W = +0.94** (7.24: +0.75): Full still costs about a millisecond more than Wrapper at this savegame even before the tables (light table 0.33 + 0.15 RT scene pass in `injected pass CPU` 0.54 against Wrapper's 0.21; the rest the native composition).
+
+**Verdict.** The owned chain is **not** a net CPU gain: **+0.88 ms (+15 %, 161 -> 142 fps) over Full's defaults**, +1.83 ms over Wrapper (4.96 -> 6.77), GPU unchanged. The tables' fixed cost (+1.07) is not yet repaid: owned_static (-0.32 incl. RT entries) and trees / billboards (+0.12 .. ~ -0.2) recover about a third of it. Every layer is correct (DIFFERING / MISS 0, nothing gated off). What it needs to pay off: (1) make the records check-only on check frames (derive + compare every frame without owned_static is the T arm's +1 ms, and that is also what `owned_check` frames in S / A pay: 10 % of the frames); (2) the table maintenance per frame (material polls 780 k / 5 s, lighting image passes, object table) must become dirty-driven; (3) the stages that remove composition (hardware batches, instance lists, hierarchy = 60 % of the static ops; shadow views F3; vegetation F7) before the tables are worth their cost. Until then the chain stays Debug / off by default (it is), Full defaults are the best arm.
+**Method limits.** One scene (the savegame), 2 runs per arm, CPU noise +-0.1 .. 0.15 ms between runs, GPU of round 2 unusable (other agent's game); S - T mixes owned_static / persistent with rt.table_entries; the A arm keeps `native.owned_check` 10; the per-layer microsecond lines are the engine thread's own timers (fine timers off, `RVK_F2C4_MEASURE` not set).
+
 ## 8. F1 / F2 design decision: windows onto persistent tables (2026-11-06, orchestrator)
 
 **Decision.** F1 does not start with new shaders. Translated shaders and the ported ubershader read every float register through 4 register windows per
