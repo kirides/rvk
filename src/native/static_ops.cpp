@@ -1148,12 +1148,37 @@ StaticOps::Skip StaticOps::materialSamplers(sc::DrawDesc& d, const std::uint8_t*
         bool ok = false;
         sc::DrawDesc::Sampler& s = d.samplers[stage];
         s.texture = textureOfImageData(data, ok);
+        if (tro_ && tro_->cur != nullptr) {
+            auto& tm = tro_->cur->texMap;
+            const auto at = std::find_if(tm.begin(), tm.end(), [&](const tro::TexMap& x) { return x.res == res && x.stage == stage; });
+            const tro::TexMap e{res, stage, data, s.texture, ok};
+            if (at != tm.end()) *at = e;
+            else tm.push_back(e);
+        }
         if (!ok) d.inheritMask |= static_cast<std::uint16_t>(1u << stage);
         const std::uint32_t raw[6] = {field(0), field(4), field(0xc), field(8), field(0x10), field(0x18)};
         for (std::uint32_t i = 0; i < 6; ++i) s.ss[i] = raw[i] == kNoState ? defFilter : raw[i];
         s.ss[6] = static_cast<std::uint32_t>(static_cast<std::int32_t>(static_cast<std::int8_t>(slot[0x14])));
     }
     return Skip::None;
+}
+
+// 7.25b: a tree op's recorded image resolution still what the engine / the HAL registry give now (the image's data streamed in or out, the api texture re-created)
+bool StaticOps::treeTexUnchanged(const tro::TexMap& x) {
+    const SamplerSnap& sn = samplerSnap();
+    const U8* data = nullptr;
+    if (x.res != nullptr) {
+        data = ptr(static_cast<const U8*>(x.res), 0x70);
+        if (data == nullptr) {
+            const U8* ph = ptr(placeholderTable_, 8 * x.stage);
+            if (ph != nullptr && ptr(ph, 0x60) != nullptr) data = ph;
+        }
+    }
+    if (data == nullptr) data = sn.at<U8*>(0x348);
+    if (data != x.imageData) return false;
+    bool ok = false;
+    const d3d9::Texture* t = textureOfImageData(data, ok);
+    return t == x.texture && ok == x.ok;
 }
 
 // frame-ownership.md F0: a sampler slot's image resolved as materialSamplers does (image data, the stage's placeholder, the error image) -> the bindless slot

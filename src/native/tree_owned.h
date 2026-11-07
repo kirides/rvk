@@ -64,8 +64,18 @@ struct Stamp {
     bool operator==(const Stamp&) const = default;
 };
 
+// an engine image's d3d9 texture as the composition resolved it (the HAL's registry maps the api texture; a re-created texture is another object)
+struct TexMap {
+    const void* res = nullptr;          // the slot's image resource (pool slotImage)
+    std::uint32_t stage = 0;
+    const void* imageData = nullptr;    // what the composition resolved it to (the image's data, the stage's placeholder or the error image)
+    const void* texture = nullptr;
+    bool ok = false;
+};
+
 struct OpRec {
     OpKey key;
+    std::vector<TexMap> texMap;                   // every sampler image the composition resolved (the templates' textures follow it)
     Stamp stamp;
     std::uint32_t type = 0;
     std::uint32_t matSlot = 0xffffffffu;

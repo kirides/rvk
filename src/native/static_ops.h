@@ -330,6 +330,7 @@ private:
     } snap_;
     std::uint64_t opSerial_ = 0;  // bumped per op / unit (finishOp)
     const SamplerSnap& samplerSnap();
+    bool treeTexUnchanged(const tro::TexMap& x);
     std::uint64_t snapHash();
     bool geometryOf(const std::uint8_t* res, Geom& g, int stream3);  // stream3: 0 off, 1 on, -1 as the record has it
     sc::DrawDesc& drawFrom(const Geom& g);
