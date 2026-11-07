@@ -854,6 +854,7 @@ private:
     void recReport();
     bool recPost(const Op& op);           // at the first draw: stamps that need the composition (material versions, view)
     void recAudit(const Op& op);
+    int recLiveWhy(const orec::OpRecord& rec);  // what the stamps do not see: -1 = fine, else the rebuild reason index (kStampFields + 4: illumination slot gone, + 5: a load completed)
     std::uint64_t recViewStamp();
 
     // F4-1 (static_ops_bb.cpp)

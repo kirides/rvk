@@ -116,6 +116,13 @@ public:
     // F4-1 (an owned op composed nothing): checkDraw's bookkeeping without the verification: true when `illum` still has slot `expectSlot` (not freed, not reused); marks it drawn
     // and polls the object's bytes against the record once per frame (a change refreshes the record)
     bool pollDraw(const void* illum, std::uint32_t expectSlot);
+    // frame-ownership.md 7.21 addendum: the owned static records' per-op check, no lock and no byte poll (engine thread only, where the slots are freed): true when `illum` still
+    // has slot `expectSlot` (not freed by the idle sweep / Destroy, not reused); marks the slot drawn so that an op drawn without being composed is never idle-freed
+    bool slotLive(const void* illum, std::uint32_t expectSlot) {
+        if (!active_ || illum == nullptr || expectSlot >= illumKey_.size() || illumKey_[expectSlot] != illum) return false;
+        illumSeen_[expectSlot] = frame_;
+        return true;
+    }
     // F4-3 (owned trees: an instance's own illumination, which the engine's batch never lit): the illumination's slot (created on first use), marked drawn and polled like
     // pollDraw (kNoSlot: not active / table full)
     std::uint32_t ensureSlot(const void* illum);

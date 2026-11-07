@@ -1162,6 +1162,10 @@ TEST(op_record_stamp_first_difference) {
     b.materials = 1;
     CHECK(native::orec::firstDifference(a, b) == 13);
     CHECK(std::size(native::orec::kStampNames) == native::orec::kStampFields);
+    // 7.21 addendum: only reads of a resource that was still loading are watched
+    CHECK(native::orec::loadingRead(4, 2, true, false, 0) && native::orec::loadingRead(4, 1, true, false, 0));
+    CHECK(!native::orec::loadingRead(4, 3, true, false, 0) && !native::orec::loadingRead(4, 2, false, false, 0));
+    CHECK(native::orec::loadingRead(8, 0, false, true, 2) && !native::orec::loadingRead(8, 0, false, true, 3) && !native::orec::loadingRead(8, 0, false, false, 2));
     CHECK(std::size(native::orec::kExclNames) == native::orec::kExclCount);
     CHECK(std::size(native::orec::kFieldNames) == native::orec::kFieldCount);
     native::orec::Key k1{&a, 5, 1, 0}, k2 = k1;
