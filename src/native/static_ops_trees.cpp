@@ -279,6 +279,12 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
     g.material = material;
     g.subMesh = nullptr;  // no eCSubMesh::Render: the slot's tag only
     g.meshResource = nullptr;
+    // F4-2 / F4-3: a main-view tree op is retained (templates per bucket) / planned for the check; our identity ramp replaces the engine's stream 1 (the same values)
+    const bool trOn = ownedTrees_ && tro_ != nullptr && viewKind_ == ViewKind::Main && !shadow && hardware;
+    if (trOn && tro_->ramp != nullptr && g.streams[1].buffer != nullptr && g.streams[1].freq == 0x80000001u && g.streams[1].stride == 4u) {
+        g.streams[1].buffer = tro_->ramp.get();
+        g.streams[1].offset = 0;
+    }
     if (f4m::on()) {
         f4m::OpInfo oi;
         oi.type = type;
@@ -301,7 +307,7 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
         U8* entity = (get<std::uint8_t>(tree, 0x18) & 0x10) == 0 ? ptr(tree, 0x10) : nullptr;
         return entity != nullptr && rd(entity, 0x60, out, 64);
     };
-    const auto drawBatch = [&](const sc::TreeRange& r, U8* illum) -> Skip {
+    const auto drawBatch = [&](const sc::TreeRange& r, U8* illum, std::uint64_t treeKey) -> Skip {
         Geom gg = g;
         gg.numVertices = r.numVertices;
         gg.startIndex = r.startIndex;
@@ -323,10 +329,12 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
                 f4m::draw(dd.vs, dd.ps, dd.streams[1].buffer, dd.streams[1].offset, dd.streams[1].stride, dd.streams[1].freq, dd.streams[0].freq);
             }
         }
+        if (trOn) treeCompBatch(f4before, treeKey);
         return res;
     };
     // the batch rules' light inputs of an instance (its illumination: list, per-object flags; with table lighting also the sun bit of the pass)
     const bool tableMerge = tableLit_ && !zpass && enh::fullLitTreeMerge();
+    if (trOn) treeCompBegin(op, zpass, type, rb, material, shader, hardware, tableMerge, queue.data(), n, wrapper);
     const U8* sunList = nullptr;
     bool sunListValue = false, dynListValue = false;
     const auto readLight = [&](sc::TreeInstance& x, U8* il) {
@@ -443,6 +451,7 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
             f4m::batches(static_cast<std::uint32_t>(batches.size()), static_cast<std::uint32_t>(inst.size()));
         }
         for (const sc::TreeBatch& b : batches) {
+            const std::uint64_t bkey = trOn ? treeBucketKey(type, zpass, tableMerge && inst[b.first].sun, b.strip, b.start, 0) : 0;
             {
             const f4m::PhaseScope f4r(f4m::kRows);
             for (std::uint32_t k = 0; k < b.count; ++k) {
@@ -452,6 +461,7 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
                 writeWorld(k, world);
                 const float v[2] = {get<float>(tree, 0x6c), vy};
                 writeTreeInstance(k, v);
+                if (trOn && tro_->checkOp) treeCompInstance(tree, illumOf(inst[b.first + k].queueIndex), bkey, tableMerge && inst[b.first + k].sun, k);
             }
             }
             st.instances += b.count;
@@ -462,7 +472,7 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
                 continue;
             }
             const sc::TreeRange r = sc::treeRange(type == 0 ? sc::TreeGeometry::Branches : sc::TreeGeometry::Fronds, hardware, b.count, b.strip, b.start, verts, 0);
-            if (const Skip s = drawBatch(r, zpass ? nullptr : illumOf(inst[b.first + b.count - 1].queueIndex)); s != Skip::None) return s;
+            if (const Skip s = drawBatch(r, zpass ? nullptr : illumOf(inst[b.first + b.count - 1].queueIndex), bkey); s != Skip::None) return s;
         }
     } else {
         // leaves: per leaf LOD of the tree (FUN_1802afb00 = CSpeedTreeRT +0xf4 count) the trees showing it (+0x58 alpha +0x60, else
@@ -529,6 +539,7 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
                 f4m::batches(static_cast<std::uint32_t>(batches.size()), static_cast<std::uint32_t>(inst.size()));
             }
             for (const sc::TreeBatch& b : batches) {
+                const std::uint64_t bkey = trOn ? treeBucketKey(type, zpass, tableMerge && inst[b.first].sun, static_cast<std::uint32_t>(lodi), start, indices) : 0;
                 {
                 const f4m::PhaseScope f4r(f4m::kRows);
                 for (std::uint32_t k = 0; k < b.count; ++k) {
@@ -538,12 +549,13 @@ StaticOps::Skip StaticOps::composeTree(const Op& op) {
                     writeWorld(k, world);
                     writeAlpha(k, alpha[b.first + k]);
                     writeTreeInstance(k, v);
+                    if (trOn && tro_->checkOp) treeCompInstance(tree, illumOf(inst[b.first + k].queueIndex), bkey, tableMerge && inst[b.first + k].sun, k);
                 }
                 }
                 st.instances += b.count;
                 ++st.batches;
                 const sc::TreeRange r = sc::treeRange(sc::TreeGeometry::Leaves, hardware, b.count, 0, start, verts, indices);
-                if (const Skip s = drawBatch(r, zpass ? nullptr : illumOf(inst[b.first + b.count - 1].queueIndex)); s != Skip::None) return s;
+                if (const Skip s = drawBatch(r, zpass ? nullptr : illumOf(inst[b.first + b.count - 1].queueIndex), bkey); s != Skip::None) return s;
             }
         }
     }

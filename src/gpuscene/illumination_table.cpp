@@ -441,6 +441,37 @@ bool IllumTable::pollDraw(const void* illum, std::uint32_t expectSlot) {
     return true;
 }
 
+std::uint32_t IllumTable::ensureSlot(const void* illum) {
+    if (!active_ || illum == nullptr) return kNoSlot;
+    std::lock_guard lock(mutex_);
+    const std::uint32_t slot = lookupOrCreate(illum);
+    if (slot == kNone) {
+        ++stats_.unchecked;
+        return kNoSlot;
+    }
+    illumSeen_[slot] = frame_;
+    if (illumFChecked_[slot] != frame_ + 1) {
+        illumFChecked_[slot] = frame_ + 1;
+        const IllumRecord& rec = illums_.shadow()[slot];
+        std::uint8_t raw[kIllumRawBytes];
+        if (engine::safeRead(illum, raw, sizeof(raw))) {
+            bool onlyF = true, differs = false;
+            for (std::uint32_t o = 8; o < kIllumRawBytes; ++o) {
+                if (raw[o] != rec.raw[o]) {
+                    differs = true;
+                    if (o < 8 || o >= 12) onlyF = false;
+                }
+            }
+            if (differs) {
+                refresh(slot, illum);
+                if (onlyF) ++stats_.uploadF;
+                else ++stats_.uploadPoll;
+            }
+        }
+    }
+    return slot;
+}
+
 bool IllumTable::compose(std::uint32_t slot, const ComposeParams& p, float L[24][4], int* why) {
     std::lock_guard lock(mutex_);
     if (!active_ || slot >= illumUsed_ || illumKey_.empty() || illumKey_[slot] == nullptr) {

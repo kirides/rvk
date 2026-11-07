@@ -382,6 +382,8 @@ struct DrawDesc {
     std::uint32_t alphaFunc = 8, alphaRef = 0;
     bool maskSet = false;
     float maskValue = 0.0f;
+    // F4-3 (native.owned_trees): the bucket key of a SpeedTree batch's draw (StaticOps::treeBucketKey; 0 = not a tree draw / not retainable)
+    std::uint64_t treeKey = 0;
 };
 
 // the lowest set bit of a non-zero word (bsf: an intrinsic, inlined in every build configuration)

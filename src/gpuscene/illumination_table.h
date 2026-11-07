@@ -116,6 +116,9 @@ public:
     // F4-1 (an owned op composed nothing): checkDraw's bookkeeping without the verification: true when `illum` still has slot `expectSlot` (not freed, not reused); marks it drawn
     // and polls the object's bytes against the record once per frame (a change refreshes the record)
     bool pollDraw(const void* illum, std::uint32_t expectSlot);
+    // F4-3 (owned trees: an instance's own illumination, which the engine's batch never lit): the illumination's slot (created on first use), marked drawn and polled like
+    // pollDraw (kNoSlot: not active / table full)
+    std::uint32_t ensureSlot(const void* illum);
 
     // once per present (engine thread, before the frame's draws are submitted): uploads, verification, idle sweep, 5 s log. `verify` = read-back every 240th frame
     void flush(d3d9::Device& dev, bool verify);

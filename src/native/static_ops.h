@@ -38,6 +38,7 @@
 #include "native/frame_desc.h"
 #include "native/static_compose.h"
 #include "native/bb_records.h"
+#include "native/tree_owned.h"
 #include "native/op_records.h"
 
 namespace rvk::hal::vulkan {
@@ -146,6 +147,15 @@ public:
     std::uint32_t ownedPass(bool solid);
     // native.owned_billboards (frame-ownership.md 7.17, F4-1): the tree billboard ops retained as records, compared / drawn from them (needs owned windows, lighting images, scene draws)
     void setOwnedBillboards(bool on);
+    // native.owned_trees (frame-ownership.md 7.25, F4-2 / F4-3; static_ops_trees_owned.cpp): the main view's SpeedTree z / solid ops are retained as templates per LOD bucket,
+    // compared on the check frames, and on the other frames taken out of the lists at the view's beginning and drawn at the pass from the engine's tree objects (rows +
+    // per-instance records, a few indirect calls). Needs owned_persistent (the DrawBlock slots), scene draws v2, lighting images, table lighting.
+    void setOwnedTrees(bool on);
+    bool ownedTreesOn() const { return ownedTrees_; }
+    void treeViewBegin(bool ownedFrame);      // the main view begins (frame tap): the frame kind, the prerequisites
+    bool treeSelect(const Op& op);            // compaction: this tree op leaves the list
+    void treeTake(List list, std::vector<Op>&& ops, std::uint64_t ns);
+    std::uint32_t treePass(bool solid);       // BeginZPass / DoBeginRenderSolid returned: the taken ops are drawn; returns the draws made
     // native.scene_draws (frame-ownership.md 7.11): the main view's static draws are issued as scene draws (Device::setSceneIssue)
     void setSceneDraws(bool on) { sceneDraws_ = on; }
     // native.gpu_scene (docs/research/gpu-scene.md): >= 1 checks every mesh / tree / actor op's entity against the signal-fed instance table
@@ -924,6 +934,21 @@ private:
         std::uint64_t leafLods = 0, wrongTransformation = 0, billboardOps = 0, billboardTexCoords = 0, shadowFrondsSkipped = 0;
         std::uint64_t grassOps = 0, grassZeroOps = 0, grassNodes = 0, grassInstances = 0, grassDraws = 0, grassWraps = 0, grassNotCached = 0, grassClockMoved = 0;
     } treeWindow_, treeTotal_;
+    // F4-2 / F4-3 (static_ops_trees_owned.cpp)
+    bool ownedTrees_ = false;
+    std::unique_ptr<tro::State> tro_;
+    bool treeSceneIssue() const { return ownedTrees_ && g_ == &groups_[static_cast<std::size_t>(Group::Trees)]; }
+    static std::uint64_t treeBucketKey(std::uint32_t type, bool zpass, bool sun, std::uint32_t a, std::uint32_t b, std::uint32_t c);
+    bool treeEnsureRamp();
+    void treeCompBegin(const Op& op, bool zpass, std::uint32_t type, const std::uint8_t* rb, const std::uint8_t* material, const std::uint8_t* shader, bool hardware, bool tableMerge, const std::uint8_t* queue, std::int32_t n, const std::uint8_t* wrapper);
+    void treeCompBatch(std::size_t drawsBefore, std::uint64_t key);
+    void treeCompInstance(const std::uint8_t* tree, const std::uint8_t* illum, std::uint64_t key, bool sun, std::uint32_t slot);
+    void treeCompEnd(const Op& op);
+    bool treePlan(bool zpass, std::uint32_t type, bool tableMerge, const std::uint8_t* rb, const std::uint8_t* wrapper, const std::uint8_t* queue, std::int32_t n, std::vector<tro::Inst>& out, int& why);
+    bool treeStampOf(const Op& op, tro::Stamp& st, std::uint32_t& type, const std::uint8_t*& rb, const std::uint8_t*& wrapper, const std::uint8_t*& shader, bool& zpass);
+    int treeTemplate(tro::Tpl& t, const d3d9::OwnedWindows& viewWin, std::uint64_t epoch, bool solid, std::uint32_t scrubStride, std::uint32_t scrubPhase);
+    void treeMissCheck(tro::OpRec& rec, tro::Tpl& t, bool solid);
+    void treeReport();
     // the skinned actors (static_ops_actors.cpp): the frame admin getter eCAnimation_PS::Render calls first (frame id at +0x4c), the
     // affine product of UpdateRenderMatrices (FUN_1800a2710: a *= b)
     void* (*frameAdmin_)() = nullptr;

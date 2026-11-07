@@ -1133,6 +1133,29 @@ public:
     // every registered observer reads no more than an owned draw provides (DrawObserver::Registers)
     bool ownedObserversOk() const;
     bool ownedReplayActive() const { return ownedReplay_; }
+    // F4-3 (owned_trees.cpp, docs/research/frame-ownership.md 7.25): the SpeedTree draws of the main view as scene draws. `setSceneTrees`: a SpeedTree draw issued while a scene issue is
+    // on gets its scene ABI v2 form (pipeline only; the composed draw itself is NOT turned into a scene packet: its instance count would be lost).
+    // ownedTreeObserversOk: no observer wants the main view's tree draws. allocOwnedRing: a ring block of this frame (the caller's rows). ownedTreeFlush: the frame's per-instance
+    // records / ref list / arguments written for `items` (consecutive items with one bucket key = one indirect call; `instances` list positions each, in item order: the caller
+    // laid its rows out the same way) and queued; false = nothing queued. treeEnvEpoch = ownedEnvEpoch with the tree passes' own arrays.
+    void setSceneTrees(bool on) {
+        if (on != sceneTrees_) ++variantEpoch_;
+        sceneTrees_ = on;
+    }
+    bool ownedTreeObserversOk() const;
+    rhi::RingAlloc allocOwnedRing(std::uint64_t bytes, std::uint64_t align) { return game_->allocRing(bytes, align); }
+    struct TreeItem {
+        const CachedDraw* cd = nullptr;
+        std::uint64_t bucket = 0;
+        shader::abi::DrawRecord rec{};
+        std::uint32_t instances = 0;
+    };
+    bool ownedTreeFlush(const std::vector<TreeItem>& items, std::uint32_t viewSlot, std::uint32_t positions);
+    std::uint64_t treeEnvEpoch(bool solid, std::uint32_t viewSlot, bool& ok);
+    bool treeEnvSame(bool solid, std::uint32_t viewSlot, std::uint64_t epoch) const;
+    struct TreeFlushStats {
+        std::uint64_t flushes = 0, items = 0, instances = 0, packets = 0, refused = 0;
+    } treeFlushStats;
     // F4-1 (owned_submit.cpp, docs/research/frame-ownership.md 7.17): a record's draw submitted with nothing composed: derived block + the caller's persistent windows, as a scene draw.
     // `dryRun` = every check, nothing submitted (the caller checks a whole op before it submits any of its draws). Anything but Submitted: nothing was drawn.
     enum class OwnedWhy : std::uint8_t { Submitted, NoScene, Split, Consumers, Window, Derive, Rendering, Packet, Count };
@@ -1800,7 +1823,7 @@ private:
     int sceneMergeBreak(const DrawPacket& a, const DrawPacket& b) const;  // -1 = mergeable, else the SceneDrawStats::breaks index
     void sceneBeginFrame();
     void sceneCollectCheck();
-    bool sceneDrawsOn_ = false, sceneAvail_ = false, sceneIssue_ = false, sceneFaultInject_ = false, sceneBb_ = false;
+    bool sceneDrawsOn_ = false, sceneAvail_ = false, sceneIssue_ = false, sceneFaultInject_ = false, sceneBb_ = false, sceneTrees_ = false;
     std::uint64_t ownedSubmitted_ = 0;  // F4-1: draws submitted by submitOwned
     std::uint32_t sceneCheckEvery_ = 0;
     GamePipeline scenePipe_ = GamePipeline::None;  // prepareDraw's decision for the draw being submitted
@@ -1823,6 +1846,7 @@ private:
         bool valid = false;
     } sceneRef_;  // (i, 0) for i < kSceneRunMax: the instance-rate ref stream, a ring block of this frame
     SceneRefStream sceneRefV2_[kSceneRefSlots];  // scene ABI v2: (i, slot) per view slot, ring blocks of this frame
+    std::uint64_t treeEnvHash_[2] = {}, treeEnvEpoch_[2] = {}, treeEnvCounter_ = 0;  // F4-3
     std::uint64_t ownedEnvHash_[2] = {}, ownedEnvEpoch_[2] = {}, ownedEnvCounter_ = 0;  // F2c-4a: ownedEnvEpoch per pass kind (z / solid)
     std::vector<std::uint32_t> ownedBucketOf_, ownedBucketStart_, ownedBucketCursor_;   // ownedFlush's scratch
     std::vector<std::uint64_t> ownedBucketKeys_;
