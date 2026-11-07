@@ -25,6 +25,7 @@
 #include "gpuscene/illumination_table.h"
 #include "gpuscene/lighting_images.h"
 #include "gpuscene/mesh_parts.h"
+#include "gpuscene/verify.h"
 #include "gpuscene/material_table.h"
 #include "gpuscene/window_tables.h"
 #include "gpuscene/object_table.h"
@@ -710,9 +711,10 @@ std::uint32_t StaticOps::writeLighting(const sc::Pass& pass) {
         writeLightingRegisters(pass, holdsAll);
         return gpuscene::kNoEntry;
     }
-    // frame-ownership.md F0: what this function writes must equal the composition from the illumination table's records
+    // frame-ownership.md F0: what this function writes must equal the composition from the illumination table's records (7.27: compared on the check frames only)
+    const bool verify = gpuscene::verifyFrame();
     float prior[24][4];
-    std::memcpy(prior, mirror_.lighting, sizeof(prior));
+    if (verify) std::memcpy(prior, mirror_.lighting, sizeof(prior));
     bool holdsAll = false;
     writeLightingRegisters(pass, holdsAll);
     gpuscene::ComposeParams p;
@@ -720,9 +722,24 @@ std::uint32_t StaticOps::writeLighting(const sc::Pass& pass) {
     p.holdsAll = holdsAll;
     p.n = pass.tableLit ? 3u : sc::passLights(pass.flags);
     p.firstLight = pass.firstLight;
-    const std::uint32_t illumSlot = table.checkDraw(pass.illum, p, prior, mirror_.lighting);
+    if (!verify) {
+        // 7.27: the slot and the lighting entry of (illumination, parameters) once per frame (the poll, the keep-alive and the entry's idle clock run at the first sight)
+        const std::uint64_t frame = dev_.stats().frames;
+        LightMemo& m = lightMemo_[((reinterpret_cast<std::uintptr_t>(pass.illum) >> 4) ^ (static_cast<std::uint64_t>(p.n) * 7u) ^ (p.firstLight * 13u) ^ (p.tableLit ? 0x31u : 0u) ^ (p.holdsAll ? 0x57u : 0u)) & (lightMemo_.size() - 1)];
+        if (m.frame == frame && m.illum == pass.illum && m.n == p.n && m.first == p.firstLight && m.tableLit == p.tableLit && m.holdsAll == p.holdsAll) {
+            lightKey_ = {m.slot, p.tableLit, p.holdsAll, p.n, p.firstLight};
+            return m.entry;
+        }
+        const std::uint32_t slot = table.checkDraw(pass.illum, p, nullptr, nullptr, false);
+        lightKey_ = {slot, p.tableLit, p.holdsAll, p.n, p.firstLight};
+        const std::uint32_t entry = gpuscene::lightingimages().entryFor(slot, p);
+        if (slot != gpuscene::kNoSlot) m = {pass.illum, frame, slot, entry, p.n, p.firstLight, p.tableLit, p.holdsAll};
+        return entry;
+    }
+    const std::uint32_t illumSlot = table.checkDraw(pass.illum, p, prior, mirror_.lighting, true);
     lightKey_ = {illumSlot, p.tableLit, p.holdsAll, p.n, p.firstLight};
-    return gpuscene::lightingimages().note(illumSlot, p, mirror_.lighting);  // F1b: the lighting register image of (illumination, parameters)
+    // F1b: the lighting register image of (illumination, parameters); the drawn registers are kept for the read-back compare on the check frames
+    return gpuscene::lightingimages().note(illumSlot, p, mirror_.lighting);
 }
 
 void StaticOps::writeLightingRegisters(const sc::Pass& pass, bool& holdsAll) {
@@ -1166,6 +1183,18 @@ void StaticOps::checkMaterial(sc::DrawDesc& d, const std::uint8_t* owner, const 
     if (ownedBb_) bbNoteMat(d, owner, material, zPass, psMask, blendMode, maskRef);
     gpuscene::MaterialTable& mt = gpuscene::materialtable();
     if (!mt.active()) return;
+    const bool verify = gpuscene::verifyFrame();
+    MatMemo* memo = nullptr;
+    if (!verify) {
+        // 7.27: not a check frame: the slot, once per (owner, pixel shader, pass) and frame; the table's once-per-frame poll and graph note run at its first draw, the
+        // compare of the composed registers / textures with the record is left to the check frames
+        const std::uint64_t frame = dev_.stats().frames;
+        memo = &matMemo_[((reinterpret_cast<std::uintptr_t>(owner) >> 4) ^ (reinterpret_cast<std::uintptr_t>(d.ps) >> 5) ^ (zPass ? 0x55u : 0u)) & (matMemo_.size() - 1)];
+        if (memo->frame == frame && memo->owner == owner && memo->ps == d.ps && memo->zPass == zPass) {
+            d.matSlot = memo->slot;
+            return;
+        }
+    }
     gpuscene::MaterialTable::Draw md;
     md.owner = owner;
     md.material = material;
@@ -1173,6 +1202,11 @@ void StaticOps::checkMaterial(sc::DrawDesc& d, const std::uint8_t* owner, const 
     md.zPass = zPass;
     md.tex = &StaticOps::materialTexture;
     md.texCtx = this;
+    if (!verify) {
+        d.matSlot = mt.checkDraw(md, false);
+        if (d.matSlot != gpuscene::MaterialTable::kNoSlot) *memo = {owner, md.ps, dev_.stats().frames, d.matSlot, zPass};
+        return;
+    }
     gpuscene::MaterialDraw& m = md.draw;
     m.vsF = d.vsF;
     m.psF = d.psF;
@@ -1193,7 +1227,7 @@ void StaticOps::checkMaterial(sc::DrawDesc& d, const std::uint8_t* owner, const 
         if (t != nullptr && (d.inheritMask >> st & 1u) == 0) m.texSlot[st] = t->bindlessSlot();
         for (std::uint32_t i = 0; i < 7; ++i) m.ss[st][i] = d.samplers[st].ss[i];
     }
-    d.matSlot = mt.checkDraw(md);
+    d.matSlot = mt.checkDraw(md, true);
 }
 
 // frame-ownership.md 7.8: the override of the draw about to be issued (its registers are already in the device): Material windows from the draw's record,
@@ -1222,19 +1256,25 @@ void StaticOps::setOwnedFor(const sc::DrawDesc& d) {
         } else {
             vs1 = true;
             ++os.vs1Offered;
-            // VS window 1: the composed registers must equal the mirror's (they do by construction; a register that came from elsewhere keeps the upload)
-            for (std::uint32_t r = 12; r < 31 && vs1; ++r) {
+            // VS window 1: the composed registers must equal the mirror's (they do by construction; a register that came from elsewhere keeps the upload;
+            // 7.27: compared on the check frames, by construction otherwise)
+            const bool verifyDraw = gpuscene::verifyFrame();
+            for (std::uint32_t r = 12; r < 31 && vs1 && verifyDraw; ++r) {
                 if ((d.vsSet[0] >> r & 1u) != 0 && std::memcmp(d.vsF[r], mirror_.adminVs[r], 16) != 0) vs1 = false;
             }
             if (!vs1) ++os.vs1Differs;
             vs1Composed = static_cast<std::uint32_t>((d.vsSet[0] >> 12) & ((1u << 19) - 1u));
-            // VS window 2: the object table
-            const float composed[gpuscene::kObjectRegs][4] = {
-                {d.vsF[31][0], d.vsF[31][1], d.vsF[31][2], d.vsF[31][3]}, {d.vsF[32][0], d.vsF[32][1], d.vsF[32][2], d.vsF[32][3]},
-                {d.vsF[33][0], d.vsF[33][1], d.vsF[33][2], d.vsF[33][3]}, {d.vsF[34][0], d.vsF[34][1], d.vsF[34][2], d.vsF[34][3]},
-                {d.vsF[35][0], d.vsF[35][1], d.vsF[35][2], d.vsF[35][3]}};
+            // VS window 2: the object table (7.27: off the check frames the record current by the scene table's signals is served without the matrix check)
             d3d9::OwnedWindows::Win ow;
-            if (objects.serve(op_->entity, composed, gpuscene::objectComposedBits(d.vsSet.data()), ow) == gpuscene::ObjectWhy::Served) ownedWin_.w[0][2] = ow;
+            if (!verifyDraw && objects.serveFast(op_->entity, gpuscene::objectComposedBits(d.vsSet.data()), d.vsF[32][3], ow)) {
+                ownedWin_.w[0][2] = ow;
+            } else {
+                const float composed[gpuscene::kObjectRegs][4] = {
+                    {d.vsF[31][0], d.vsF[31][1], d.vsF[31][2], d.vsF[31][3]}, {d.vsF[32][0], d.vsF[32][1], d.vsF[32][2], d.vsF[32][3]},
+                    {d.vsF[33][0], d.vsF[33][1], d.vsF[33][2], d.vsF[33][3]}, {d.vsF[34][0], d.vsF[34][1], d.vsF[34][2], d.vsF[34][3]},
+                    {d.vsF[35][0], d.vsF[35][1], d.vsF[35][2], d.vsF[35][3]}};
+                if (objects.serve(op_->entity, composed, gpuscene::objectComposedBits(d.vsSet.data()), ow) == gpuscene::ObjectWhy::Served) ownedWin_.w[0][2] = ow;
+            }
         }
     }
     gpuscene::windowtables().fillViews(dev_, ownedWin_, vs1Regs, vs1Composed);

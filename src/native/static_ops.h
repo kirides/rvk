@@ -343,6 +343,24 @@ private:
     void checkMaterial(sc::DrawDesc& d, const std::uint8_t* owner, const void* material, bool zPass, std::uint16_t psMask, std::int32_t blendMode,
                        std::int32_t maskRef);
     static std::uint32_t materialTexture(void* self, std::uint32_t stage, const void* imageRes);  // the table's texture resolution (materialSamplers')
+    // 7.27: off the check frames the material table's slot of (owner, pixel shader, z pass) is looked up once per frame (the table's poll, graph note and lookup
+    // run at the first draw; the register / texture compare only on check frames)
+    struct MatMemo {
+        const void* owner = nullptr;
+        const void* ps = nullptr;
+        std::uint64_t frame = ~0ull;
+        std::uint32_t slot = 0xffffffffu;
+        bool zPass = false;
+    };
+    std::array<MatMemo, 256> matMemo_{};
+    // 7.27: off the check frames the illumination slot + lighting image entry of (illumination, pass parameters) is looked up once per frame
+    struct LightMemo {
+        const void* illum = nullptr;
+        std::uint64_t frame = ~0ull;
+        std::uint32_t slot = 0xffffffffu, entry = 0xffffffffu, n = 0, first = 0;
+        bool tableLit = false, holdsAll = false;
+    };
+    std::array<LightMemo, 256> lightMemo_{};
     void writeWorld(std::uint32_t slot, const float* m);
     void writeAlpha(std::uint32_t slot, float a);
     void writeTreeInstance(std::uint32_t slot, const float v[2]);  // SetSpeedTreeInstanceData 0x6c9eb0: c32 + 4 slot .xy

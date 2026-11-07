@@ -12,6 +12,7 @@
 #include <spdlog/spdlog.h>
 
 #include "d3d9/device.h"
+#include "gpuscene/verify.h"
 #include "shader/embedded.h"
 
 namespace rvk::gpuscene {
@@ -189,7 +190,9 @@ void LightingImages::flushLocked(d3d9::Device& dev, bool verify) {
             ++stats_.entriesFreed;
         }
     }
-    const bool verifyNow = verify && frame_ % kVerifyEvery == 0;
+    // 7.27: the read-back compare against the drawn registers needs this frame's draws to have noted them: a check frame, every 6th of them
+    static std::uint64_t verifyTick = 0;
+    const bool verifyNow = verify && verifyFrame() && verifyTick++ % 6 == 0;
     jobs_.flush(dev, verifyNow, used_);
     jobs_.collect(dev.game(), "lighting jobs");
     collect(dev);

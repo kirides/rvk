@@ -75,7 +75,8 @@ public:
     // after the draw's constants and samplers are composed (engine thread)
     // returns the record's slot (kNoSlot: none: not active / overflow / unreadable)
     static constexpr std::uint32_t kNoSlot = 0xffffffffu;
-    std::uint32_t checkDraw(const Draw& d);
+    // `verify` false (7.27, off the check frames): the lookup, the once-per-frame poll and the graph note only; `d.draw` is not read
+    std::uint32_t checkDraw(const Draw& d, bool verify = true);
 
     // Window override (frame-ownership.md 7.8, F1a): the Material windows of a draw of record `slot` (VS window 3, PS window 2) as register images of the GPU
     // record, into `ow` (windows left as they are when the record cannot serve them: `why` set). `vsSet` / `psSet` = the registers the composition wrote

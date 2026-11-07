@@ -28,7 +28,7 @@ class Device;
 namespace rvk::gpuscene {
 
 struct ObjectStats {
-    std::uint64_t requests = 0, served = 0, fadeRewrites = 0, matrixRewrites = 0, newRecords = 0;
+    std::uint64_t requests = 0, served = 0, fadeRewrites = 0, matrixRewrites = 0, newRecords = 0, fast = 0;
     std::uint64_t why[static_cast<std::size_t>(ObjectWhy::Count)] = {};
     std::uint64_t matrixChecks = 0, matrixBad = 0, changedAfterServe = 0, drained = 0;
     std::uint64_t instanced = 0, vs1Offered = 0, vs1Differs = 0, notCandidate = 0;  // StaticOps::setOwnedFor's own counts
@@ -44,6 +44,10 @@ public:
     // One draw: the entity's record for the draw whose VS registers c31..c35 were composed as `composed[5][4]` (bit i of `composedBits` = c(31 + i) was composed;
     // c32 .w = the fade). Fills `out` (kind Object, base, covered, masks, CPU twin) and returns Served, else the reason (out untouched).
     ObjectWhy serve(const void* entity, const float composed[kObjectRegs][4], std::uint32_t composedBits, d3d9::OwnedWindows::Win& out);
+    // 7.27, off the check frames: the slot's record is served WITHOUT the per-draw matrix check / record rebuild when it is current by the scene table's own
+    // signals (generation, matrix version, flags equal the record's) and the fade (`fade`, used when c32 is composed: bit 1 of composedBits) is the record's;
+    // false = not applicable, the caller runs `serve`. The check frames run `serve` for every draw, which compares the signal-fed matrix with the entity's.
+    bool serveFast(const void* entity, std::uint32_t composedBits, float fade, d3d9::OwnedWindows::Win& out);
 
     // F2c-2: the window of slot `slot`'s record without serving anything (a pure function of the slot: kind Object, base, covered); false: not ready / out of range
     bool windowFor(std::uint32_t slot, d3d9::OwnedWindows::Win& out) const;

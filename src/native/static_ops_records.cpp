@@ -25,7 +25,9 @@
 #include "gpuscene/lighting_images.h"
 #include "gpuscene/material_table.h"
 #include "gpuscene/object_table.h"
+#include "gpuscene/verify.h"
 #include "gpuscene/window_tables.h"
+#include "native/owned_timers.h"
 #include "native/static_ops.h"
 
 namespace rvk::native {
@@ -224,7 +226,7 @@ void StaticOps::recEnter(const Op& op) {
         (op.list != List::ZPass && op.list != List::Solid)) {
         return;
     }
-    const auto t0 = Clock::now();
+    const auto t0 = tnow();
     orec::Stats& w = R.window;
     ++w.opsAll;
     U8* ctx = static_cast<U8*>(op.raw.context);
@@ -235,7 +237,7 @@ void StaticOps::recEnter(const Op& op) {
     if (ex != orec::Excl::Count) {
         ++w.excluded[static_cast<std::size_t>(ex)];
         R.map.erase(R.key);
-        w.stampNs += ns(t0, Clock::now());
+        w.stampNs += ns(t0, tnow());
         return;
     }
     orec::Stamp st;
@@ -261,7 +263,7 @@ void StaticOps::recEnter(const Op& op) {
             R.rebuildWhy = d;
         }
     }
-    w.stampNs += ns(t0, Clock::now());
+    w.stampNs += ns(t0, tnow());
     if (R.cur != nullptr) {
         recAudit(op);
     }
@@ -287,7 +289,7 @@ void StaticOps::recAudit(const Op& op) {
     orec::Store& R = *recs_;
     const orec::OpRecord& rec = *R.cur;
     if (rec.reads.empty()) return;
-    const auto t0 = Clock::now();
+    const auto t0 = tnow();
     orec::Stats& w = R.window;
     ++w.auditChecked;
     if (!ret::validate(rec.reads.data(), rec.reads.size())) {
@@ -321,7 +323,7 @@ void StaticOps::recAudit(const Op& op) {
                          }());
         }
     }
-    w.auditNs += ns(t0, Clock::now());
+    w.auditNs += ns(t0, tnow());
 }
 
 // after the composition: draw-level exclusions, the stamps that need it
@@ -330,7 +332,7 @@ void StaticOps::recComposed(const Op& op, Skip s) {
     if (!recs_ || !recs_->active) return;
     orec::Store& R = *recs_;
     orec::Stats& w = R.window;
-    const auto t0 = Clock::now();
+    const auto t0 = tnow();
     const auto exclude = [&](orec::Excl e) {
         ++w.excluded[static_cast<std::size_t>(e)];
         R.map.erase(R.key);
@@ -404,7 +406,7 @@ void StaticOps::recComposed(const Op& op, Skip s) {
     }
     R.probes.assign(drawCount_, {});
     R.pkeys.assign(drawCount_, 0);
-    w.stampNs += ns(t0, Clock::now());
+    w.stampNs += ns(t0, tnow());
 }
 
 namespace {
@@ -436,7 +438,10 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
     R.probes[k] = R.probe;
     R.pkeys[k] = pkey;
     if (R.cur == nullptr || k >= R.cur->draws.size()) return;
-    const auto t0 = Clock::now();
+    // 7.27: the derivation + compare of a valid record is verification: check frames only (the record's validity is the stamps' job, the audit's net and the
+    // owned path's own derivation; a refused derive on another frame remakes the record at the next check frame)
+    if (!gpuscene::verifyFrame()) return;
+    const auto t0 = tnow();
     orec::Stats& w = R.window;
     const orec::OpRecord& rec = *R.cur;
     const orec::DrawRec& r = rec.draws[k];
@@ -475,15 +480,15 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
         }
     }
     d3d9::Device::SceneView dv;
-    const auto tc = Clock::now();
+    const auto tc = tnow();
     const int why = dev_.deriveScene(*r.cd, in, dv);
-    w.deriveCoreNs += ns(tc, Clock::now());
+    w.deriveCoreNs += ns(tc, tnow());
     ++w.derives;
     ++w.refused[static_cast<std::size_t>(why)];
     if (why != 0) {
         // (a module / variant / binding / texture the record was made for is gone: the record is remade from this composition)
         if (why == 1 || why == 4 || why == 6 || why == 7) R.refused = true;
-        w.deriveNs += ns(t0, Clock::now());
+        w.deriveNs += ns(t0, tnow());
         return;
     }
     ++w.derived;
@@ -623,7 +628,7 @@ void StaticOps::recDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey
     } else {
         ++w.clean;
     }
-    w.deriveNs += ns(t0, Clock::now());
+    w.deriveNs += ns(t0, tnow());
 }
 
 void StaticOps::recEnd(const Op& op) {
@@ -635,7 +640,7 @@ void StaticOps::recEnd(const Op& op) {
         return;
     }
     if (R.auditBad && R.cur != nullptr && R.diffInOp) ++w.auditDisagreeDiff;
-    const auto t0 = Clock::now();
+    const auto t0 = tnow();
     // the packets the draws were issued with (the packet cache's entries: the record keeps its own copy)
     auto rec = std::make_unique<orec::OpRecord>();
     rec->key = R.key;
@@ -649,7 +654,7 @@ void StaticOps::recEnd(const Op& op) {
             ++w.excluded[static_cast<std::size_t>(orec::Excl::NotRetained)];
             R.map.erase(R.key);
             R.active = false;
-            w.buildNs += ns(t0, Clock::now());
+            w.buildNs += ns(t0, tnow());
             return;
         }
         orec::DrawRec r;
@@ -751,7 +756,7 @@ void StaticOps::recEnd(const Op& op) {
     if (R.map.size() > 30000) R.map.clear();
     R.map[R.key] = std::move(rec);
     ++w.builds;
-    w.buildNs += ns(t0, Clock::now());
+    w.buildNs += ns(t0, tnow());
 }
 
 void StaticOps::recReport() {

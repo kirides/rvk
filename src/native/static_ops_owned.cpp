@@ -30,6 +30,8 @@
 #include "gpuscene/view_table.h"
 #include "gpuscene/window_tables.h"
 #include "hal/vulkan/hal_vulkan.h"
+#include "gpuscene/verify.h"
+#include "native/owned_timers.h"
 #include "native/static_ops.h"
 
 namespace rvk::native {
@@ -161,8 +163,8 @@ bool StaticOps::ownedSelect(const Op& op) {
     }
     struct T {
         std::uint64_t& ns;
-        Clock::time_point t0 = Clock::now();
-        ~T() { ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count()); }
+        Clock::time_point t0 = tnow();
+        ~T() { ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(tnow() - t0).count()); }
     } selTimer{W.selectNs};
     const orec::Key key{op.raw.context, op.raw.desc, static_cast<std::uint8_t>(op.list), 0};
     const auto it = recs_->map.find(key);
@@ -254,11 +256,11 @@ bool StaticOps::ownedMaterialsOk(const orec::OpRecord& rec) {
     gpuscene::MaterialTable& mt = gpuscene::materialtable();
     const std::uint64_t frame = dev_.stats().frames + 1;
     std::uint64_t h = 0;
-    const auto tm = Clock::now();
+    const auto tm = tnow();
     struct Guard {
         std::uint64_t& ns;
         Clock::time_point t0;
-        ~Guard() { ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count()); }
+        ~Guard() { ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(tnow() - t0).count()); }
     } guard{ownedW_.matNs, tm};
     for (const std::uint32_t slot : rec.matSlots) {
         if (slot >= gpuscene::MaterialTable::kCapacity) return false;
@@ -277,8 +279,8 @@ void StaticOps::ownedSideEffects(const orec::OpRecord& rec) {
     OwnedStats& W = ownedW_;
     struct Guard {
         std::uint64_t& ns;
-        Clock::time_point t0 = Clock::now();
-        ~Guard() { ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count()); }
+        Clock::time_point t0 = tnow();
+        ~Guard() { ns += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(tnow() - t0).count()); }
     } guard{W.sideNs};
     if (rec.bindLightmaps && rec.lightmapRes != nullptr) {
         bindLightmaps(static_cast<U8*>(rec.lightmapRes));  // (our copy of the admin's lightmap slots)
@@ -308,23 +310,30 @@ bool StaticOps::ownedDrawOp(const Op& op, const orec::OpRecord& rec, const d3d9:
     }
     U8* ctx = static_cast<U8*>(op.raw.context);
     U8* entity = ptr(ctx, 0x10);
-    float world[16];
-    if (entity == nullptr || !engine::safeRead(entity + 0x60, world, sizeof(world))) {
-        why = kFbObject;
-        return false;
-    }
     // the object record: the entity's matrix as the signals hold it (the draw's composed rows would be these), the fade 1 of a z draw / the op's
-    float composed[gpuscene::kObjectRegs][4] = {};
-    composed[1][3] = op.list == List::ZPass ? 1.0f : op.raw.fade;
-    {
-        float rows[3][4];
-        gpuscene::objectWorldRows(world, rows);
-        std::memcpy(composed[2], rows, sizeof(rows));
-    }
+    // (7.27: off the check frames a record current by the scene table's signals is served without reading the entity's matrix)
     d3d9::OwnedWindows::Win objWin;
-    if (gpuscene::objecttable().serve(entity, composed, 0x1eu, objWin) != gpuscene::ObjectWhy::Served) {
+    if (entity == nullptr) {
         why = kFbObject;
         return false;
+    }
+    if (gpuscene::verifyFrame() || !gpuscene::objecttable().serveFast(entity, 0x1eu, op.list == List::ZPass ? 1.0f : op.raw.fade, objWin)) {
+        float world[16];
+        if (!engine::safeRead(entity + 0x60, world, sizeof(world))) {
+            why = kFbObject;
+            return false;
+        }
+        float composed[gpuscene::kObjectRegs][4] = {};
+        composed[1][3] = op.list == List::ZPass ? 1.0f : op.raw.fade;
+        {
+            float rows[3][4];
+            gpuscene::objectWorldRows(world, rows);
+            std::memcpy(composed[2], rows, sizeof(rows));
+        }
+        if (gpuscene::objecttable().serve(entity, composed, 0x1eu, objWin) != gpuscene::ObjectWhy::Served) {
+            why = kFbObject;
+            return false;
+        }
     }
     gpuscene::LightingImages& li = gpuscene::lightingimages();
     gpuscene::IllumTable& illum = gpuscene::illumtable();
@@ -419,9 +428,9 @@ bool StaticOps::ownedDrawOp(const Op& op, const orec::OpRecord& rec, const d3d9:
         tag.meshResource = r.tagMeshResource;
         tag.water = static_cast<d3d9::draws::Water>(r.tagWater);
         tag.materialName = r.tagMaterialName;
-        const auto ts = Clock::now();
+        const auto ts = tnow();
         const int rc = dev_.replayOwned(cd, in, dw);
-        W.submitNs += ns(ts, Clock::now());
+        W.submitNs += ns(ts, tnow());
         if (rc != 0) {
             why = kFbRefused;
             tag = baseTag;
@@ -441,7 +450,7 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
         ops.clear();
         return 0;
     }
-    const auto t0 = Clock::now();
+    const auto t0 = tnow();
     const std::uint64_t submit0 = W.submitNs, side0 = W.sideNs, mat0 = W.matNs;
     ret::gLog = nullptr;
     finishOp();
@@ -449,7 +458,7 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
     // the view as the first op's composition would have made it
     bool viewOk = view_.valid;
     if (!viewOk && ownedView_.admin != nullptr) viewOk = composeView(ownedView_.admin);
-    const auto tPrep = Clock::now();
+    const auto tPrep = tnow();
     ++opSerial_;  // (the sampler snapshot of the polls is read afresh)
     // the view's stamp as the admin is now (the pass's state: the admin's type / mode bytes differ between the z and the solid pass)
     const std::uint64_t viewStamp = viewOk ? recViewStamp() : 0;
@@ -503,7 +512,7 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
     const d3d9::ShaderRef vsSaved = dev_.vertexShaderRef(), psSaved = dev_.pixelShaderRef();
     d3d9::draws::Tag& tag = dev_.drawTag();
     const d3d9::draws::Tag savedTag = tag;
-    W.prepNs += ns(tPrep, Clock::now());
+    W.prepNs += ns(tPrep, tnow());
     ownedAmbient_.clear();
     ownedCache_.mat.clear();
     ownedCache_.light.clear();
@@ -584,14 +593,14 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
     const auto flushItems = [&] {
         if (persistent) {
             // F2c-4b: the bulk observers see the draws collected so far (before an op is composed late: its record may be dropped)
-            const auto tb = Clock::now();
+            const auto tb = tnow();
             dev_.ownedBulkFlush(false);
-            persistW_.bulkNs += ns(tb, Clock::now());
+            persistW_.bulkNs += ns(tb, tnow());
         }
         if (!persistent || ownedItems_.empty()) return;
-        const auto tf = Clock::now();
+        const auto tf = tnow();
         const bool ok = dev_.ownedFlush(ownedItems_, ownedArena_, viewSlotP, gpuscene::drawrecords().recordsRef(), gpuscene::drawrecords().recordsShadow(), gpuscene::DrawRecordTable::kCapacity);
-        persistW_.flushNs += ns(tf, Clock::now());
+        persistW_.flushNs += ns(tf, tnow());
         persistW_.items += ownedItems_.size();
         flushedDraws += static_cast<std::uint32_t>(ownedItems_.size());
         std::vector<std::uint32_t> failed;
@@ -658,9 +667,9 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
     }
     flushItems();
     if (persistent) {
-        const auto tb = Clock::now();
+        const auto tb = tnow();
         dev_.ownedBulkFlush(true);  // F2c-4b: the end of the pass (the left list)
-        persistW_.bulkNs += ns(tb, Clock::now());
+        persistW_.bulkNs += ns(tb, tnow());
     }
     ownedItems_.clear();
     ownedItemOp_.clear();
@@ -680,7 +689,7 @@ std::uint32_t StaticOps::ownedPass(bool solid) {
         m.maxDrawsPerPass[k] = std::max<std::uint64_t>(m.maxDrawsPerPass[k], drawn);
         m.maxOpsPerPass[k] = std::max<std::uint64_t>(m.maxOpsPerPass[k], opsInPass);
     }
-    const std::uint64_t total = ns(t0, Clock::now());
+    const std::uint64_t total = ns(t0, tnow());
     const std::uint64_t sub = (W.submitNs - submit0) + (W.sideNs - side0) + (W.matNs - mat0);
     W.buildNs += total > sub ? total - sub : 0;
     return drawn;
@@ -855,22 +864,30 @@ bool StaticOps::ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, c
     ++S.ops;
     U8* ctx = static_cast<U8*>(op.raw.context);
     U8* entity = ptr(ctx, 0x10);
-    float world[16];
-    if (entity == nullptr || !engine::safeRead(entity + 0x60, world, sizeof(world))) {
-        why = kFbObject;
-        return false;
-    }
-    float composed[gpuscene::kObjectRegs][4] = {};
-    composed[1][3] = op.list == List::ZPass ? 1.0f : op.raw.fade;
-    {
-        float rows[3][4];
-        gpuscene::objectWorldRows(world, rows);
-        std::memcpy(composed[2], rows, sizeof(rows));
-    }
+    // the object record: the entity's matrix as the signals hold it (the draw's composed rows would be these), the fade 1 of a z draw / the op's
+    // (7.27: off the check frames a record current by the scene table's signals is served without reading the entity's matrix)
     d3d9::OwnedWindows::Win objWin;
-    if (gpuscene::objecttable().serve(entity, composed, 0x1eu, objWin) != gpuscene::ObjectWhy::Served) {
+    if (entity == nullptr) {
         why = kFbObject;
         return false;
+    }
+    if (gpuscene::verifyFrame() || !gpuscene::objecttable().serveFast(entity, 0x1eu, op.list == List::ZPass ? 1.0f : op.raw.fade, objWin)) {
+        float world[16];
+        if (!engine::safeRead(entity + 0x60, world, sizeof(world))) {
+            why = kFbObject;
+            return false;
+        }
+        float composed[gpuscene::kObjectRegs][4] = {};
+        composed[1][3] = op.list == List::ZPass ? 1.0f : op.raw.fade;
+        {
+            float rows[3][4];
+            gpuscene::objectWorldRows(world, rows);
+            std::memcpy(composed[2], rows, sizeof(rows));
+        }
+        if (gpuscene::objecttable().serve(entity, composed, 0x1eu, objWin) != gpuscene::ObjectWhy::Served) {
+            why = kFbObject;
+            return false;
+        }
     }
     (void)viewSlot;
     gpuscene::DrawRecordTable& tab = gpuscene::drawrecords();
@@ -882,10 +899,10 @@ bool StaticOps::ownedDrawOpPersistent(const Op& op, const orec::OpRecord& rec, c
         const d3d9::Device::CachedDraw& cd = *r.cd;
         orec::Persist& P = r.persist;
         ++S.draws;
-        auto t0 = timers ? Clock::now() : Clock::time_point{};
+        auto t0 = timers ? tnow() : Clock::time_point{};
         const auto lap = [&](std::uint64_t& acc) {
             if (!timers) return;
-            const auto now = Clock::now();
+            const auto now = tnow();
             acc += ns(t0, now);
             t0 = now;
         };

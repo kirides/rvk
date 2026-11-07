@@ -25,6 +25,7 @@
 #include "gpuscene/lighting_images.h"
 #include "gpuscene/material_table.h"
 #include "gpuscene/view_table.h"
+#include "native/owned_timers.h"
 #include "native/static_ops.h"
 
 namespace rvk::native {
@@ -170,10 +171,10 @@ void StaticOps::treeCompBegin(const Op& op, bool zpass, std::uint32_t type, cons
         T.bad = true;
         T.badWhy = 2;
     }  // (a depth-bias material draws with the other view-projection)
-    const auto t0 = Clock::now();
+    const auto t0 = tnow();
     int why = 0;
     if (!treePlan(zpass, type, tableMerge, rb, wrapper, queue, n, T.plan, why)) T.plan.clear(), T.checkOp = false;
-    T.window.planNs += ns(t0, Clock::now());
+    T.window.planNs += ns(t0, tnow());
 }
 
 void StaticOps::treeCompBatch(std::size_t drawsBefore, std::uint64_t key) {
@@ -214,7 +215,7 @@ void StaticOps::treeCompEnd(const Op& op) {
     tro::Stats& W = T.window;
     std::unique_ptr<tro::OpRec> pend = std::move(T.pending);
     T.cur = nullptr;
-    const auto t0 = Clock::now();
+    const auto t0 = tnow();
     const bool solid = op.list == List::Solid;
     const auto erase = [&] { T.ops.erase(pend->key); };
     if (drawCount_ == 0 && !T.bad) {
@@ -404,7 +405,7 @@ void StaticOps::treeCompEnd(const Op& op) {
         }
     }
     T.ops[pend->key] = std::move(pend);
-    W.tplNs += ns(t0, Clock::now());
+    W.tplNs += ns(t0, tnow());
 }
 
 // ---- the plan ------------------------------------------------------------------------------------------------------------------------
@@ -768,7 +769,7 @@ std::uint32_t StaticOps::treePass(bool solid) {
         ops.clear();
         return 0;
     }
-    const auto t0 = Clock::now();
+    const auto t0 = tnow();
     ret::gLog = nullptr;
     finishOp();
     leanAbort();
@@ -915,11 +916,11 @@ std::uint32_t StaticOps::treePass(bool solid) {
             }
         }
         // the engine slot's side effects (they run first in the slot's code): the queue sorted in place, MaskReference 80, the resources touched
-        const auto tSide = Clock::now();
+        const auto tSide = tnow();
         leanTreeSort(rb, zpass);
         leanMaskRef(shader);
         for (const void* r : rec.touches) touchNow(r);
-        W.sideNs += ns(tSide, Clock::now());
+        W.sideNs += ns(tSide, tnow());
         // the queue as the engine sorted it, then the plan
         const std::int32_t n = get<std::int32_t>(rb, zpass ? 0xd8 : 0xc0);
         U8* qp = ptr(rb, zpass ? 0xd0 : 0xb8);
@@ -936,12 +937,12 @@ std::uint32_t StaticOps::treePass(bool solid) {
             composeLate(op, W.latePlan);
             continue;
         }
-        const auto tPlan = Clock::now();
+        const auto tPlan = tnow();
         const std::size_t first = T.inst.size();
         static thread_local std::vector<tro::Inst> plan;
         int why = 0;
         const bool planned = treePlan(zpass, type, st.tableMerge, rb, wrapper, queueBytes.data(), n, plan, why);
-        W.planNs += ns(tPlan, Clock::now());
+        W.planNs += ns(tPlan, tnow());
         if (!planned) {
             composeLate(op, why == 5 ? W.lateSpecial : W.latePlan);
             continue;
@@ -952,7 +953,7 @@ std::uint32_t StaticOps::treePass(bool solid) {
         std::uint64_t* failWhy = &failCounter;
         tro::Tpl* lastTpl = nullptr;
         std::uint64_t lastKey = 0;
-        const auto tTpl = Clock::now();
+        const auto tTpl = tnow();
         for (const tro::Inst& x : plan) {
             if (type == 1 && x.strip == 0) continue;  // (RenderFronds: a batch whose strip length is 0 is not drawn)
             tro::Tpl* tpl = lastTpl;
@@ -1007,7 +1008,7 @@ std::uint32_t StaticOps::treePass(bool solid) {
             T.instEntry.push_back(entry);
             T.opOfInst.push_back(static_cast<std::uint32_t>(oi));
         }
-        W.tplNs += ns(tTpl, Clock::now());
+        W.tplNs += ns(tTpl, tnow());
         if (fail) {
             T.inst.resize(first);
             T.instTpl.resize(first);
@@ -1023,7 +1024,7 @@ std::uint32_t StaticOps::treePass(bool solid) {
     bool flushed = true;
     std::uint32_t items = 0;
     if (P != 0) {
-        const auto tRows = Clock::now();
+        const auto tRows = tnow();
         flushed = false;
         if (P <= T.rampLen) {
             // runs: the instances of each template, templates ordered by their device bucket (consecutive templates of one bucket become one indirect call)
@@ -1135,15 +1136,15 @@ std::uint32_t StaticOps::treePass(bool solid) {
                     run.idx.clear();
                     tpl.passRun = 0;
                 }
-                W.rowNs += ns(tRows, Clock::now());
+                W.rowNs += ns(tRows, tnow());
                 if (ok && pos == P) {
                     items = static_cast<std::uint32_t>(T.items.size());
-                    const auto tf = Clock::now();
+                    const auto tf = tnow();
                     const std::uint64_t pk0 = dev_.treeFlushStats.packets;
                     flushed = dev_.ownedTreeFlush(T.items, T.recs, T.posRec, viewSlot, P);
                     W.records += T.recs.size();
                     W.packets += dev_.treeFlushStats.packets - pk0;
-                    W.flushNs += ns(tf, Clock::now());
+                    W.flushNs += ns(tf, tnow());
                 }
             }
             for (Run& run : runs) {

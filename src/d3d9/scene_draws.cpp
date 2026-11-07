@@ -652,11 +652,10 @@ void Device::sceneFlushRun(const std::vector<std::uint32_t>& run, const std::fun
     auto* args = static_cast<std::uint32_t*>(aa.ptr);
     for (std::uint32_t k = 0; k < n; ++k) {
         const DrawPacket& p = batch_[run[k]];
-        rec[k] = sceneRecs_[p.scene - 1];
-        if (rec[k].draw == 0) {
-            rec[k].draw = 0;  // (checked in toScenePacket; kept as a tripwire for the check mode)
-            ++sceneStats_.fbNullAddress;
-        }
+        // (7.27: the ring memory may be write-combined: the record is written, never read back; the tripwire reads the source)
+        const shader::abi::DrawRecord& src = sceneRecs_[p.scene - 1];
+        std::memcpy(&rec[k], &src, sizeof(src));
+        if (src.draw == 0) ++sceneStats_.fbNullAddress;  // (checked in toScenePacket; kept as a tripwire for the check mode)
         args[5 * k + 0] = p.count;
         args[5 * k + 1] = 1;
         args[5 * k + 2] = p.first;

@@ -81,6 +81,32 @@ ObjectWhy ObjectTable::serve(const void* entity, const float composed[kObjectReg
     return ObjectWhy::Served;
 }
 
+bool ObjectTable::serveFast(const void* entity, std::uint32_t composedBits, float fade, d3d9::OwnedWindows::Win& out) {
+    if (!active_ || !table_.ready() || table_.ref().null() || (composedBits & 1u) != 0) return false;
+    const std::uint32_t slot = engine::scenetable::find(entity);
+    if (slot == UINT32_MAX || slot >= kCapacity) return false;
+    const engine::scenetable::Slot* s = engine::scenetable::slot(slot);
+    if (s == nullptr) return false;
+    const ObjectRecord& rec = table_.shadow()[slot];
+    if (rec.info[3] == 0 || rec.info[0] != s->generation || rec.info[1] != s->version || rec.info[2] != s->flags) return false;
+    if ((composedBits & 2u) != 0 && std::memcmp(&rec.regs[1][3], &fade, sizeof(float)) != 0) return false;
+    ++stats_.requests;
+    ++stats_.fast;
+    servedFrame_[slot] = frame_ + 1;
+    servedVersion_[slot] = s->version;
+    out = d3d9::OwnedWindows::Win{};
+    out.kind = d3d9::OwnedWindows::Kind::Object;
+    out.base = table_.ref().plus(static_cast<std::int64_t>(slot) * static_cast<std::int64_t>(sizeof(ObjectRecord)) - static_cast<std::int64_t>(kObjectFirstReg) * 16);
+    out.covered = kObjectRegs;
+    out.verifyMask = composedBits & ~1u;
+    out.wOnlyMask = 2u;
+    out.ignoreMask = ((~composedBits) & ((1u << kObjectRegs) - 1u)) | 1u;
+    out.image = const_cast<float*>(rec.regs[0]);
+    ++stats_.served;
+    ++stats_.why[static_cast<std::size_t>(ObjectWhy::Served)];
+    return true;
+}
+
 bool ObjectTable::windowFor(std::uint32_t slot, d3d9::OwnedWindows::Win& out) const {
     if (!active_ || !table_.ready() || table_.ref().null() || slot >= kCapacity) return false;
     out = d3d9::OwnedWindows::Win{};

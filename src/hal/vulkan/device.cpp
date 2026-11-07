@@ -37,6 +37,7 @@
 #include "gpuscene/billboard_table.h"
 #include "gpuscene/object_table.h"
 #include "gpuscene/material_table.h"
+#include "gpuscene/verify.h"
 #include "engine/xinput_throttle.h"
 #include "engine/memread.h"
 #include "engine/material_source.h"
@@ -271,6 +272,7 @@ void HalDevice::applyStaticOps() {
         gpuscene::viewtable().setActive(ownedStatic && !forceV1);
         dev_.setSceneViews(ownedStatic && !forceV1);
         staticOps_->setOwnedStatic(ownedStatic, rs.nativeOwnedCheck != nullptr ? rs.nativeOwnedCheck->asInt() : 10);
+        gpuscene::setVerifyInterval(rs.nativeOwnedCheck != nullptr ? rs.nativeOwnedCheck->asInt() : 10);  // 7.27: the tables' per-draw verification runs on the check frames
         // frame-ownership.md 7.21: F2c-4a persistent owned draws (scene ABI v2 + the view table)
         staticOps_->setOwnedPersistent(ownedStatic && !forceV1 && on(rs.nativeOwnedPersistent));
         {
@@ -495,7 +497,8 @@ bool HalDevice::create(const Options& options, const eCAPIDevice::eSAPIStartPara
     }
     if (rs.splitVerify != nullptr) {
         dev_.setSplitVerify(rs.splitVerify->asBool());
-        reg.onChange(*rs.splitVerify, [this](const settings::Setting& s) { dev_.setSplitVerify(s.asBool()); }, this);
+        gpuscene::setWindowMasksWanted(rs.splitVerify->asBool());
+        reg.onChange(*rs.splitVerify, [this](const settings::Setting& s) { dev_.setSplitVerify(s.asBool()); gpuscene::setWindowMasksWanted(s.asBool()); }, this);
     }
     // enhancements (docs/research/injection.md): the debug injection view
     debugView_ = std::make_unique<enh::DebugView>(dev_);
@@ -1701,6 +1704,7 @@ bEResult HalDevice::SwapScreen(HWND__*, bCRect const*, bCRect const*) {
     engine::lod::onPresent();  // a changed object draw distance: the world's cache-in spheres (engine thread)
     dev_.present();
     const auto& s = dev_.stats();
+    gpuscene::setVerifyFrame(s.frames);  // 7.27: the next frame's number (the owned path's check frames: frame % native.owned_check == 0)
     api::publishPresent(s.frames, api::FrameNumbers{
                                       .drawsLastFrame = s.lastFrameDraws,
                                       .unimplementedSlots = static_cast<std::uint32_t>(unimplementedCount()),

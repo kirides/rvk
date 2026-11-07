@@ -27,15 +27,28 @@ bool WindowTables::fillViews(d3d9::Device& dev, d3d9::OwnedWindows& ow, const fl
     ow.w[0][1] = OwnedWindows::Win{};
     if (!active_ || !views_.ready()) return false;
     ++viewLookups_;
-    ViewRecord cand;
-    std::memcpy(cand.vs, vs0 != nullptr ? vs0 : dev.vsConstants(), sizeof(cand.vs));
-    std::memcpy(cand.ps, ps0 != nullptr ? ps0 : dev.psConstants(), sizeof(cand.ps));
-    if (vs1 != nullptr) std::memcpy(cand.vs1, vs1, sizeof(cand.vs1));
-    else std::memset(cand.vs1, 0, sizeof(cand.vs1));
     auto& shadow = views_.shadow();
+    const float(*src0)[4] = vs0 != nullptr ? vs0 : dev.vsConstants();
+    const float(*srcP)[4] = ps0 != nullptr ? ps0 : dev.psConstants();
     std::uint32_t slot = kViewCapacity;
+    // 7.27: the block just used (consecutive draws of one view: nearly always) is compared with the sources directly, no candidate is built
+    if (cursor_ > 0) {
+        static const float kZero[kViewVs1Regs][4] = {};
+        const ViewRecord& last = shadow[lastSlot_];
+        if (std::memcmp(last.vs, src0, sizeof(last.vs)) == 0 && std::memcmp(last.ps, srcP, sizeof(last.ps)) == 0 &&
+            std::memcmp(last.vs1, vs1 != nullptr ? vs1 : &kZero[0], sizeof(last.vs1)) == 0) {
+            slot = lastSlot_;
+        }
+    }
+    ViewRecord cand;
+    if (slot == kViewCapacity) {
+        std::memcpy(cand.vs, src0, sizeof(cand.vs));
+        std::memcpy(cand.ps, srcP, sizeof(cand.ps));
+        if (vs1 != nullptr) std::memcpy(cand.vs1, vs1, sizeof(cand.vs1));
+        else std::memset(cand.vs1, 0, sizeof(cand.vs1));
+    }
     // the block just used first (consecutive draws of one view), then the few before it
-    for (std::uint32_t k = 0; k < kSearch && k < cursor_; ++k) {
+    for (std::uint32_t k = 0; k < kSearch && k < cursor_ && slot == kViewCapacity; ++k) {
         const std::uint32_t s = k == 0 ? lastSlot_ : (lastSlot_ + cursor_ - k) % cursor_;
         if (std::memcmp(&shadow[s], &cand, sizeof(cand)) == 0) {
             slot = s;

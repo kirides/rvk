@@ -354,7 +354,7 @@ void IllumTable::onPsDestroy(const void* ps) {
     ++stats_.freed;
 }
 
-std::uint32_t IllumTable::checkDraw(const void* illum, const ComposeParams& p, const float prior[24][4], const float now[24][4]) {
+std::uint32_t IllumTable::checkDraw(const void* illum, const ComposeParams& p, const float prior[24][4], const float now[24][4], bool verify) {
     if (!active_ || illum == nullptr) return kNoSlot;
     std::lock_guard lock(mutex_);
     const std::uint32_t slot = lookupOrCreate(illum);
@@ -389,6 +389,7 @@ std::uint32_t IllumTable::checkDraw(const void* illum, const ComposeParams& p, c
         ++stats_.unchecked;
         return slot;
     }
+    if (!verify) return slot;
     float exp[24][4];
     std::memcpy(exp, prior, sizeof(exp));
     if (!composeLighting(rec, sets_.shadow()[setSlot], p, exp)) {

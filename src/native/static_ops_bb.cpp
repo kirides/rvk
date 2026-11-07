@@ -27,6 +27,7 @@
 #include "gpuscene/lighting_images.h"
 #include "gpuscene/material_table.h"
 #include "gpuscene/window_tables.h"
+#include "native/owned_timers.h"
 #include "native/static_ops.h"
 
 namespace rvk::native {
@@ -145,7 +146,7 @@ void StaticOps::bbEnter(const Op& op) {
         (op.list != List::ZPass && op.list != List::Solid)) {
         return;
     }
-    const auto t0 = Clock::now();
+    const auto t0 = tnow();
     bbrec::Stats& w = B.window;
     ++w.opsAll;
     U8* ctx = static_cast<U8*>(op.raw.context);
@@ -172,7 +173,7 @@ void StaticOps::bbEnter(const Op& op) {
     if (ex != bbrec::Excl::Count) {
         ++w.excluded[static_cast<std::size_t>(ex)];
         B.map.erase(B.key);
-        w.stampNs += ns(t0, Clock::now());
+        w.stampNs += ns(t0, tnow());
         return;
     }
     orec::Stamp st;
@@ -208,7 +209,7 @@ void StaticOps::bbEnter(const Op& op) {
         if (d < 0) B.cur = &rec;
         else B.rebuildWhy = d;
     }
-    w.stampNs += ns(t0, Clock::now());
+    w.stampNs += ns(t0, tnow());
     if (B.cur != nullptr) bbAudit(op);
     B.building = B.cur == nullptr || B.auditBad;
     if (B.building) {
@@ -221,7 +222,7 @@ void StaticOps::bbAudit(const Op& op) {
     bbrec::Store& B = *bb_;
     const bbrec::Record& rec = *B.cur;
     if (rec.reads.empty()) return;
-    const auto t0 = Clock::now();
+    const auto t0 = tnow();
     bbrec::Stats& w = B.window;
     ++w.auditChecked;
     if (!ret::validate(rec.reads.data(), rec.reads.size())) {
@@ -249,7 +250,7 @@ void StaticOps::bbAudit(const Op& op) {
                          bad->kind == 1 ? "block" : "word", bad->size, static_cast<const void*>(bad->addr), reinterpret_cast<std::uintptr_t>(bad->addr) - base, orec::kAuditNames[cls], bad->value);
         }
     }
-    w.auditNs += ns(t0, Clock::now());
+    w.auditNs += ns(t0, tnow());
 }
 
 void StaticOps::bbComposed(const Op& op, Skip s) {
@@ -257,7 +258,7 @@ void StaticOps::bbComposed(const Op& op, Skip s) {
     if (!bb_ || !bb_->active) return;
     bbrec::Store& B = *bb_;
     bbrec::Stats& w = B.window;
-    const auto t0 = Clock::now();
+    const auto t0 = tnow();
     const auto exclude = [&](bbrec::Excl e) {
         ++w.excluded[static_cast<std::size_t>(e)];
         B.map.erase(B.key);
@@ -321,7 +322,7 @@ void StaticOps::bbComposed(const Op& op, Skip s) {
     }
     B.probes.assign(drawCount_, {});
     B.pkeys.assign(drawCount_, 0);
-    w.stampNs += ns(t0, Clock::now());
+    w.stampNs += ns(t0, tnow());
 }
 
 namespace {
@@ -388,7 +389,7 @@ void StaticOps::bbDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey)
     B.probes[k] = B.probe;
     B.pkeys[k] = pkey;
     if (B.cur == nullptr || k >= B.cur->draws.size()) return;
-    const auto t0 = Clock::now();
+    const auto t0 = tnow();
     bbrec::Stats& w = B.window;
     const bbrec::Record& rec = *B.cur;
     const orec::DrawRec& r = rec.draws[k];
@@ -400,7 +401,7 @@ void StaticOps::bbDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey)
     ++w.refused[static_cast<std::size_t>(why)];
     if (why != 0) {
         if (why == 1 || why == 4 || why == 6 || why == 7) B.refused = true;
-        w.deriveNs += ns(t0, Clock::now());
+        w.deriveNs += ns(t0, tnow());
         return;
     }
     ++w.derived;
@@ -537,7 +538,7 @@ void StaticOps::bbDraw(std::size_t k, const sc::DrawDesc& d, std::uint64_t pkey)
     } else {
         ++w.clean;
     }
-    w.deriveNs += ns(t0, Clock::now());
+    w.deriveNs += ns(t0, tnow());
 }
 
 void StaticOps::bbEnd(const Op& op) {
@@ -548,7 +549,7 @@ void StaticOps::bbEnd(const Op& op) {
         ++w.validAtEntry;
         return;
     }
-    const auto t0 = Clock::now();
+    const auto t0 = tnow();
     if (!leanCollect_ || leanBlock_ != 0) {
         // (the side effects of the engine's slot are collected on lean frames only: no record is made from a frame that runs the engine's code; an existing one stays for the compare)
         if (B.cur == nullptr) {
@@ -574,7 +575,7 @@ void StaticOps::bbEnd(const Op& op) {
             ++w.excluded[static_cast<std::size_t>(bbrec::Excl::NotRetained)];
             B.map.erase(B.key);
             B.active = false;
-            w.buildNs += ns(t0, Clock::now());
+            w.buildNs += ns(t0, tnow());
             return;
         }
         orec::DrawRec r;
@@ -629,7 +630,7 @@ void StaticOps::bbEnd(const Op& op) {
                 ++w.excluded[static_cast<std::size_t>(bbrec::Excl::OtherOwner)];
                 B.map.erase(B.key);
                 B.active = false;
-                w.buildNs += ns(t0, Clock::now());
+                w.buildNs += ns(t0, tnow());
                 return;
             }
         }
@@ -680,7 +681,7 @@ void StaticOps::bbEnd(const Op& op) {
             ++w.excluded[static_cast<std::size_t>(bbrec::Excl::NotComposed)];
             B.map.erase(B.key);
             B.active = false;
-            w.buildNs += ns(t0, Clock::now());
+            w.buildNs += ns(t0, tnow());
             return;
         }
         rec->nConst = static_cast<std::uint32_t>(rec->consts.size() / 4);
@@ -724,7 +725,7 @@ void StaticOps::bbEnd(const Op& op) {
     if (B.map.size() > 4096) B.map.clear();
     B.map[B.key] = std::move(rec);
     ++w.builds;
-    w.buildNs += ns(t0, Clock::now());
+    w.buildNs += ns(t0, tnow());
 }
 
 // ---- owned frames (B) ----------------------------------------------------------------------------------------------------------
@@ -870,10 +871,10 @@ bool StaticOps::bbReplay(const Op& op) {
     bbrec::Store& B = *bb_;
     B.active = false;
     bbrec::Stats& w = B.window;
-    const auto t0 = Clock::now();
+    const auto t0 = tnow();
     const auto refuse = [&](bbrec::Refuse r) {
         ++w.refuse[static_cast<std::size_t>(r)];
-        w.replayNs += ns(t0, Clock::now());
+        w.replayNs += ns(t0, tnow());
         return false;
     };
     if (bbCheckFrame()) return refuse(bbrec::Refuse::CheckFrame);
@@ -983,7 +984,7 @@ bool StaticOps::bbReplay(const Op& op) {
     maskRefShader_ = nullptr;
     ++w.ownedOps;
     w.ownedDraws += made;
-    w.replayNs += ns(t0, Clock::now());
+    w.replayNs += ns(t0, tnow());
     leanCommit();
     return true;
 }

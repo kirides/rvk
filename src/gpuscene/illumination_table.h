@@ -108,7 +108,8 @@ public:
     // ---- StaticOps::writeLighting ----
     // `prior` = the lighting registers (24 x float4) before writeLighting wrote them, `now` = after. Composes from the records and compares.
     // Returns the illumination's slot (kNoSlot: not active / table full).
-    std::uint32_t checkDraw(const void* illum, const ComposeParams& p, const float prior[24][4], const float now[24][4]);
+    // `verify` false (7.27, off the check frames): lookup, the once-per-frame poll and the keep-alive only; prior / now are not read
+    std::uint32_t checkDraw(const void* illum, const ComposeParams& p, const float prior[24][4], const float now[24][4], bool verify = true);
     // The CPU composition of slot `slot` from the CURRENT shadow records (the lighting images' check); L must be initialised by the caller. False: no live
     // record / no light set.
     // `why` (optional): 1 = no live record for the slot, 2 = the record has no (live) light set
